@@ -17,7 +17,6 @@ module Morloc.CodeGenerator.Grammars.Translator.Cpp
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial ( isSerializable
-                                   , prettySerialOne
                                    , serialAstToType
                                    , shallowType
                                    )
@@ -29,7 +28,6 @@ import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Language as ML
 import qualified Control.Monad.State as CMS
@@ -60,10 +58,6 @@ data CppTranslatorState = CppTranslatorState
   , translatorManifoldSet :: Set.Set Int
   , translatorCurrentManifold :: Int
   }
-
-setManifoldIndex :: Int -> CppTranslatorState -> CppTranslatorState
-setManifoldIndex i s = s { translatorCurrentManifold = i }
-
 
 instance Defaultable CppTranslatorState where
   defaultValue = CppTranslatorState
@@ -148,21 +142,14 @@ makeTheMaker srcs = do
 
   return [cmd]
 
-helperNamer :: Int -> MDoc
-helperNamer i = "helper" <> viaShow i
-
 serialType :: MDoc
 serialType = pretty $ ML.serialType CppLang 
 
 makeSignature :: SerialManifold -> CppTranslator [MDoc]
 makeSignature = foldSerialManifoldM fm where
-  fm = FoldManifoldM
+  fm = defaultValue
     { opSerialManifoldM = serialManifold
     , opNativeManifoldM = nativeManifold
-    , opSerialExprM = return . foldlSE (<>) []
-    , opNativeExprM = return . foldlNE (<>) []
-    , opSerialArgM = return . foldlSA (<>) []
-    , opNativeArgM = return . foldlNA (<>) []
     }
 
   serialManifold (SerialManifold_ i _ form _) = manifoldSignature i serialType form
@@ -254,29 +241,30 @@ serialize nativeExpr s0 = do
       serialize' [idoc|#{unpacker}(#{v})|] s
 
     construct v lst@(SerialList _ s) = do
-      idx <- fmap pretty getCounter
+      idx <- getCounter
       typestr <- showTypeF $ serialAstToType lst
-      let v' = "s" <> idx
+      let v' = helperNamer idx
+          idxStr = pretty idx
           decl = [idoc|#{typestr} #{v'};|]
-      (x, before) <- serialize' [idoc|#{v}[i#{idx}]|] s
+      (x, before) <- serialize' [idoc|#{v}[i#{idxStr}]|] s
       let push = [idoc|#{v'}.push_back(#{x});|]
-          loop  = block 4 [idoc|for(size_t i#{idx} = 0; i#{idx} < #{v}.size(); i#{idx}++)|]
+          loop  = block 4 [idoc|for(size_t i#{idxStr} = 0; i#{idxStr} < #{v}.size(); i#{idxStr}++)|]
                          (vsep (before ++ [push]))
       return (v', [decl, loop])
 
     construct v tup@(SerialTuple _ ss) = do
       (ss', befores) <- unzip <$> zipWithM (\i s -> serialize' (tupleKey i v) s) [0..] ss
-      idx <- fmap pretty getCounter
+      idx <- getCounter
       typestr <- showTypeF $ serialAstToType tup
-      let v' = "s" <> idx
+      let v' = helperNamer idx
           x = [idoc|#{typestr} #{v'} = std::make_tuple#{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
     construct v rec@(SerialObject NamRecord _ _ rs) = do
       (ss', befores) <- unzip <$> mapM (\(FV _ k,s) -> serialize' (recordAccess v (pretty k)) s) rs
-      idx <- fmap pretty getCounter
+      idx <- getCounter
       t <- showTypeF (serialAstToType rec)
-      let v' = "s" <> idx
+      let v' = helperNamer idx
           decl = encloseSep "{" "}" "," ss'
           x = [idoc|#{t} #{v'} = #{decl};|]
       return (v', concat befores ++ [x]);
@@ -302,10 +290,9 @@ deserialize varname0 typestr0 s0
       return (term, [schema])
   | otherwise = do
       schemaVar <- helperNamer <$> getCounter
-      idx <- getCounter
       rawtype <- showTypeF $ serialAstToType s0
+      rawvar <- helperNamer <$> getCounter
       let schemaName = [idoc|#{schemaVar}_schema|]
-          rawvar = helperNamer idx
           schema = [idoc|#{rawtype} #{schemaName};|]
           deserializing = [idoc|#{rawtype} #{rawvar} = deserialize(#{varname0}, #{schemaName});|]
       (x, before) <- construct rawvar s0
@@ -326,65 +313,41 @@ deserialize varname0 typestr0 s0
       return (deserialized, before)
 
     construct v lst@(SerialList _ s) = do
-      idx <- fmap pretty getCounter
       t <- showTypeF $ shallowType lst
-      let v' = "s" <> idx
+      idx <- getCounter
+      let v' = helperNamer idx
+          idxStr = pretty idx
           decl = [idoc|#{t} #{v'};|]
-      (x, before) <- check [idoc|#{v}[i#{idx}]|] s
+      (x, before) <- check [idoc|#{v}[i#{idxStr}]|] s
       let push = [idoc|#{v'}.push_back(#{x});|]
-          loop = block 4 [idoc|for(size_t i#{idx} = 0; i#{idx} < #{v}.size(); i#{idx}++)|]
+          loop = block 4 [idoc|for(size_t i#{idxStr} = 0; i#{idxStr} < #{v}.size(); i#{idxStr}++)|]
                          (vsep (before ++ [push]))
       return (v', [decl, loop])
 
     construct v tup@(SerialTuple _ ss) = do
-      idx <- fmap pretty getCounter
       (ss', befores) <- unzip <$> zipWithM (\i s -> check (tupleKey i v) s) [0..] ss
       typestr <- showTypeF $ shallowType tup
-      let v' = "s" <> idx
-          x = [idoc|#{typestr} #{v'} = std::make_tuple#{tupled ss'};|]
+      v' <- helperNamer <$> getCounter
+      let x = [idoc|#{typestr} #{v'} = std::make_tuple#{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
     construct v rec@(SerialObject NamRecord _ _ rs) = do
-      idx <- fmap pretty getCounter
       (ss', befores) <- mapAndUnzipM (\(FV _ k,s) -> check (recordAccess v (pretty k)) s) rs
       t <- showTypeF (shallowType rec)
-      let v' = "s" <> idx
-          decl = encloseSep "{" "}" "," ss'
+      v' <- helperNamer <$> getCounter
+      let decl = encloseSep "{" "}" "," ss'
           x = [idoc|#{t} #{v'} = #{decl};|]
       return (v', concat befores ++ [x]);
 
     construct _ _ = undefined -- TODO add support for deserialization of remaining types (e.g. other records)
 
 
--- translateManifold :: RecMap -> Set.Set Int -> SerialManifold -> MorlocMonad (Set.Set Int, MDoc)
 translateSegment :: SerialManifold -> CppTranslator MDoc
 translateSegment m0 = do
   resetCounter
-  e <- surroundFoldSerialManifoldM surroundRules foldRules m0
+  e <- surroundFoldSerialManifoldM manifoldIndexer foldRules m0
   return $ vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
   where
-
-  -- The surround rules control the setting of manifold ids across the recursion
-  surroundRules = defaultValue
-    { surroundSerialManifoldM = surroundSM
-    , surroundNativeManifoldM = surroundNM
-    }
-
-  -- | Run a computation in a child manifold, manage manifold indices
-  descend :: Int -> a -> (a -> CppTranslator b) -> CppTranslator b
-  descend childManifoldIndex x f = do
-    originalManifoldIndex <- CMS.gets translatorCurrentManifold
-    s <- CMS.get
-    CMS.put $ s {translatorCurrentManifold = childManifoldIndex}
-    x' <- f x
-    CMS.put $ s {translatorCurrentManifold = originalManifoldIndex}
-    return x'
-
-  surroundSM :: (SerialManifold -> CppTranslator a) -> SerialManifold -> CppTranslator a
-  surroundSM f sm@(SerialManifold i _ _ _) = descend i sm f 
-
-  surroundNM :: (NativeManifold -> CppTranslator a) -> NativeManifold -> CppTranslator a
-  surroundNM f nm@(NativeManifold i _ _ _) = descend i nm f
 
   foldRules = FoldManifoldM
     { opSerialManifoldM = makeSerialManifold
@@ -394,6 +357,9 @@ translateSegment m0 = do
     , opSerialArgM = makeSerialArg
     , opNativeArgM = makeNativeArg
     }
+
+  manifoldIndexer = makeManifoldIndexer (CMS.gets translatorCurrentManifold)
+                                        (\i -> CMS.modify (\s -> s { translatorCurrentManifold = i}))
 
   makeSerialManifold :: SerialManifold_ PoolDocs -> CppTranslator PoolDocs
   makeSerialManifold sm@(SerialManifold_ i _ form e) = makeManifold i form (typeFof sm) e
@@ -606,39 +572,39 @@ showTypeF (AppF t ts) = do
   t' <- showTypeF t
   ts' <- mapM showTypeF ts
   return . pretty $ expandMacro (render t') (map render ts')
-showTypeF (NamF _ (FV gc "struct") _ rs) = do
+showTypeF t@(NamF _ (FV gc "struct") _ rs) = do
   recmap <- CMS.gets translatorRecmap
   -- handle autogenerated structs
   case lookup (FV gc "struct", map fst rs) recmap of
     (Just rec) -> do
       params <- typeParams (zip (map snd (recFields rec)) (map snd rs))
       return $ recName rec <> params
-    Nothing -> error "Should not happen"
+    Nothing -> error $ "Record missing from recmap: " <> show t <> " from map: " <> show recmap
 showTypeF (NamF _ (FV _ s) ps _) = do
   ps' <- mapM showTypeF ps
   return $ pretty s <> encloseSep "<" ">" "," ps'
 
 
 collectRecords :: SerialManifold -> [(FVar, GIndex, [(FVar, TypeF)])]
-collectRecords e0@(SerialManifold i0 _ _ _) = CMS.evalState (foldSerialManifoldM fm e0) i0 where
-  fm = FoldManifoldM
-    { opSerialManifoldM = serialManifold
-    , opNativeManifoldM = nativeManifold
-    , opSerialExprM = return . foldlSE (<>) []
-    , opNativeExprM = nativeExpr
-    , opSerialArgM = return . foldlSA (<>) []
-    , opNativeArgM = return . foldlNA (<>) []
-    }
+collectRecords e0@(SerialManifold i0 _ _ _)
+  = unique $ CMS.evalState (surroundFoldSerialManifoldM manifoldIndexer fm e0) i0
+  where
+    fm = defaultValue { opNativeExprM = nativeExpr }
 
-  serialManifold (SerialManifold_ i _ _ x) = CMS.put i >> return x
+    manifoldIndexer = makeManifoldIndexer CMS.get CMS.put
 
-  nativeManifold (NativeManifold_ i _ _ (_, x)) = CMS.put i >> return x
+    nativeExpr e = do
+      manifoldIndex <- CMS.get
+      let newRecs = seekRecs manifoldIndex (typeFof e)
+      return $ foldlNE (<>) newRecs e
 
-  nativeExpr e@(RecordN_ _ v _ rs) = do
-    m <- CMS.get
-    let entry = (v, m, [(key, valType) | (key, (valType, _)) <- rs])
-    return $ entry : foldlNE (<>) [] e
-  nativeExpr x = return . foldlNE (<>) [] $ x
+    seekRecs :: Int -> TypeF -> [(FVar, GIndex, [(FVar, TypeF)])]
+    seekRecs m (NamF _ v _ rs) = [(v, m, rs)] <> concatMap (seekRecs m . snd) rs
+    seekRecs m (FunF ts t) = concatMap (seekRecs m) (t:ts)
+    seekRecs m (AppF t ts) = concatMap (seekRecs m) (t:ts)
+    seekRecs _ (UnkF _) = []
+    seekRecs _ (VarF _) = []
+
 
 -- unify records with the same name/keys
 unifyRecords
@@ -715,13 +681,9 @@ generateSourcedSerializers es0 = do
   return $ foldl groupQuad ([],[]) . Map.elems . Map.mapMaybeWithKey makeSerial $ typemap
   where
 
-    fm = FoldManifoldM
+    fm = defaultValue
       { opSerialManifoldM = \(SerialManifold_ i _ _     e ) -> Map.union <$> MM.metaTypedefs i <*> pure e
       , opNativeManifoldM = \(NativeManifold_ i _ _ (_, e)) -> Map.union <$> MM.metaTypedefs i <*> pure e
-      , opSerialExprM = return . foldlSE Map.union Map.empty
-      , opNativeExprM = return . foldlNE Map.union Map.empty
-      , opSerialArgM = return . foldlSA Map.union Map.empty
-      , opNativeArgM = return . foldlNA Map.union Map.empty
       }
 
     groupQuad :: ([a],[a]) -> (a, a, a, a) -> ([a],[a])

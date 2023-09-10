@@ -16,8 +16,11 @@ module Morloc.CodeGenerator.Grammars.Common
   -- * Naming conventions
   , svarNamer
   , nvarNamer
+  , helperNamer
   , argNamer
   , manNamer
+  -- * Utilities
+  , makeManifoldIndexer
   ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -55,6 +58,9 @@ svarNamer i = "s" <> viaShow i
 nvarNamer :: Int -> MDoc
 nvarNamer i = "n" <> viaShow i
 
+helperNamer :: Int -> MDoc
+helperNamer i = "helper" <> viaShow i
+
 argNamer :: Arg TypeM -> MDoc
 argNamer (Arg i (Native _)) = nvarNamer i
 argNamer (Arg i (Function _ _)) = nvarNamer i
@@ -63,6 +69,28 @@ argNamer (Arg i _) = svarNamer i
 -- create a name for a manifold based on a unique id
 manNamer :: Int -> MDoc
 manNamer i = "m" <> viaShow i
+
+
+-- The surround rules control the setting of manifold ids across the recursion
+makeManifoldIndexer :: Monad m => m Int -> (Int -> m ()) -> SurroundManifoldM m sm nm se ne sr nr
+makeManifoldIndexer getId putId = defaultValue
+  { surroundSerialManifoldM = surroundSM
+  , surroundNativeManifoldM = surroundNM
+  }
+  where
+
+  -- | Run a computation in a child manifold, manage manifold indices
+  descend childManifoldIndex x f = do
+    originalManifoldIndex <- getId
+    putId childManifoldIndex
+    x' <- f x
+    putId originalManifoldIndex
+    return x'
+
+  surroundSM f sm@(SerialManifold i _ _ _) = descend i sm f 
+
+  surroundNM f nm@(NativeManifold i _ _ _) = descend i nm f
+
 
 -- Represents the dependency of a on previously bound expressions
 data D a = D a [(Int, Either SerialExpr NativeExpr)]

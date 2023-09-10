@@ -87,24 +87,23 @@ serialize v0 s0 = do
       serialize' [idoc|#{unpacker}(#{v})|] s
 
     construct v (SerialList _ s) = do
-      idx <- fmap pretty newIndex 
-      let v' = "s" <> idx
-      (before, x) <- serialize' [idoc|i#{idx}|] s
-      let lst = block 4 [idoc|#{v'} <- lapply(#{v}, function(i#{idx})|] (vsep (before ++ [x])) <> ")"
+      idx <- newIndex 
+      let v' = helperNamer idx
+          idxStr = pretty idx
+      (before, x) <- serialize' [idoc|i#{idxStr}|] s
+      let lst = block 4 [idoc|#{v'} <- lapply(#{v}, function(i#{idxStr})|] (vsep (before ++ [x])) <> ")"
       return ([lst], v')
 
     construct v (SerialTuple _ ss) = do
       (befores, ss') <- unzip <$> zipWithM (\i s -> construct (tupleKey i v) s) [1..] ss
-      idx <- fmap pretty newIndex
-      let v' = "s" <> idx
-          x = [idoc|#{v'} <- list#{tupled ss'}|]
+      v' <- helperNamer <$> newIndex
+      let x = [idoc|#{v'} <- list#{tupled ss'}|]
       return (concat befores ++ [x], v')
 
     construct v (SerialObject _ _ _ rs) = do
       (befores, ss') <- mapAndUnzipM (\(FV _ k, s) -> serialize' (recordAccess v (pretty k)) s) rs
-      idx <- fmap pretty newIndex
-      let v' = "s" <> idx
-          entries = zipWith (\(FV _ key) val -> pretty key <> "=" <> val) (map fst rs) ss'
+      v' <- helperNamer <$> newIndex
+      let entries = zipWith (\(FV _ key) val -> pretty key <> "=" <> val) (map fst rs) ss'
           decl = [idoc|#{v'} <- list#{tupled entries}|]
       return (concat befores ++ [decl], v')
     construct _ _ = undefined
@@ -117,9 +116,8 @@ deserialize v0 s0
           deserializing = [idoc|rmorlocinternals::mlc_deserialize(#{v0}, #{schema})|]
       in return (deserializing, [])
   | otherwise = do
-      idx <- fmap pretty newIndex 
+      rawvar <- helperNamer <$> newIndex
       let schema = typeSchema s0
-          rawvar = "s" <> idx
           deserializing = [idoc|#{rawvar} <- rmorlocinternals::mlc_deserialize(#{v0}, #{schema})|]
       (x, befores) <- check rawvar s0
       return (x, deserializing:befores)
@@ -137,25 +135,23 @@ deserialize v0 s0
       return (deserialized, before)
 
     construct v (SerialList _ s) = do
-      idx <- fmap pretty newIndex
-      let v' = "s" <> idx
-      (x, before) <- check [idoc|i#{idx}|] s
-      let lst = block 4 [idoc|#{v'} <- lapply(#{v}, function(i#{idx})|] (vsep (before ++ [x])) <> ")"
+      idx <- newIndex
+      let v' = helperNamer idx
+          idxStr = pretty idx
+      (x, before) <- check [idoc|i#{idxStr}|] s
+      let lst = block 4 [idoc|#{v'} <- lapply(#{v}, function(i#{idxStr})|] (vsep (before ++ [x])) <> ")"
       return (v', [lst])
 
     construct v (SerialTuple _ ss) = do
       (ss', befores) <- unzip <$> zipWithM (\i s -> check (tupleKey i v) s) [1..] ss
-      idx <- fmap pretty newIndex
-      let v' = "s" <> idx
-          x = [idoc|#{v'} <- list#{tupled ss'}|]
+      v' <- helperNamer <$> newIndex
+      let x = [idoc|#{v'} <- list#{tupled ss'}|]
       return (v', concat befores ++ [x])
 
     construct v (SerialObject _ (FV _ constructor) _ rs) = do
-      idx <- fmap pretty newIndex
-
       (ss', befores) <- mapAndUnzipM (\(FV _ k,s) -> check (recordAccess v (pretty k)) s) rs
-      let v' = "s" <> idx
-          entries = zipWith (\(FV _ key) val -> pretty key <> "=" <> val) (map fst rs) ss'
+      v' <- helperNamer <$> newIndex
+      let entries = zipWith (\(FV _ key) val -> pretty key <> "=" <> val) (map fst rs) ss'
           decl = [idoc|#{v'} <- #{pretty constructor}#{tupled entries}|]
       return (v', concat befores ++ [decl])
 

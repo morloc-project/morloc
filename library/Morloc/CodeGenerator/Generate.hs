@@ -1762,13 +1762,9 @@ encode lang xs = do
 findSources :: [SerialManifold] -> [Source]
 findSources ms = unique $ concatMap (MI.runIdentity . foldSerialManifoldM fm) ms
   where
-  fm = FoldManifoldM
-    { opSerialManifoldM = return . foldl (<>) []
-    , opNativeManifoldM = return . foldl (<>) []
-    , opSerialExprM = serialExprSrcs
+  fm = defaultValue
+    { opSerialExprM = serialExprSrcs
     , opNativeExprM = nativeExprSrcs
-    , opSerialArgM = return . foldlSA (<>) []
-    , opNativeArgM = return . foldlNA (<>) []
     }
   
   nativeExprSrcs (AppSrcN_ _ src xss) = return (src : concat xss)

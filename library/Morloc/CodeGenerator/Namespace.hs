@@ -3,6 +3,7 @@
 {-# LANGUAGE DeriveFoldable #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TypeFamilies #-}
 
 {-|
 Module      : Morloc.CodeGenerator.Namespace
@@ -544,6 +545,16 @@ data FoldManifoldM m sm nm se ne sr nr = FoldManifoldM
   , opSerialArgM  :: SerialArg_ sm se -> m sr
   , opNativeArgM  :: NativeArg_ nm ne -> m nr
   }
+
+instance (Monoid a, Monad m, a ~ b, a ~ c, a ~ d, a ~ e, a ~ f) => Defaultable (FoldManifoldM m a b c d e f) where
+  defaultValue = FoldManifoldM
+    { opSerialManifoldM = return . foldl mappend mempty
+    , opNativeManifoldM = return . foldl mappend mempty
+    , opSerialExprM = return . foldlSE mappend mempty
+    , opNativeExprM = return . foldlNE mappend mempty
+    , opSerialArgM = return . foldlSA mappend mempty
+    , opNativeArgM = return . foldlNA mappend mempty
+    }
 
 data SurroundManifoldM m sm nm se ne sr nr = SurroundManifoldM
   { surroundSerialManifoldM :: ( SerialManifold -> m sm ) -> SerialManifold -> m sm
