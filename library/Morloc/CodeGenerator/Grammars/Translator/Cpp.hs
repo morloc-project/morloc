@@ -58,10 +58,6 @@ data CppTranslatorState = CppTranslatorState
   , translatorRecmap :: RecMap
   , translatorSignatureSet :: Set.Set Int
   , translatorManifoldSet :: Set.Set Int
-  , translatorPartials :: Set.Set (Int, Int)
-  -- ^ This set contains all partial functions that have been generated. The
-  -- index is a pair of the calling manifold index and the called manifold
-  -- index.
   , translatorCurrentManifold :: Int
   }
 
@@ -75,7 +71,6 @@ instance Defaultable CppTranslatorState where
     , translatorRecmap = []
     , translatorSignatureSet = Set.empty
     , translatorManifoldSet = Set.empty
-    , translatorPartials = Set.empty
     , translatorCurrentManifold = -1 -- -1 indicates we are not inside a manifold
     }
 
@@ -516,19 +511,40 @@ makeManifold
   -> CppTranslator PoolDocs
 makeManifold callIndex form manifoldType e = do
   completeManifold <- makeManifoldBody (poolExpr e)
-  partialApplicationBoilerplate <- makeManifoldPartial form
-  return $ e { poolExpr = makeManifoldCall form
+  call <- makeManifoldCall form
+  return $ e { poolExpr = call
              , poolCompleteManifolds = poolCompleteManifolds e <> maybeToList completeManifold
-             , poolPriorLines = poolPriorLines e <> maybeToList partialApplicationBoilerplate
+             , poolPriorLines = poolPriorLines e
              }
   where
 
   mname = manNamer callIndex
 
-  makeManifoldCall :: ManifoldForm TypeM -> MDoc 
-  makeManifoldCall (ManifoldFull rs) = mname <> tupled (map (bndNamer . argId) rs)
-  makeManifoldCall (ManifoldPass _) = mname
-  makeManifoldCall (ManifoldPart _ _) = mname <> "_fun"
+  makeManifoldCall :: ManifoldForm TypeM -> CppTranslator MDoc 
+  makeManifoldCall (ManifoldFull rs) = return $ mname <> tupled (map (bndNamer . argId) rs)
+  makeManifoldCall (ManifoldPass args) = do
+    typestr <- stdFunction (returnType manifoldType) args
+    return $ typestr <> parens mname
+  makeManifoldCall (ManifoldPart rs vs) = do
+    -- Partial application is fucking ugly in C++.
+    -- Probably there is a prettier way to do this.
+    -- In Haskell:
+    --   mul :: Num -> Num -> Num
+    --   multiplyByFive = map (mul 5) xs
+    --
+    -- In C++, (mul 5) becomes:
+    --   std::function<double(double)>(std::bind(static_cast<double(*)(double, double)>(&mul), 5, std::placeholders::_1))
+    --
+    -- TODO: find some magic to make this suck less
+    appliedTypeStr <- stdFunction (returnType manifoldType) vs
+    castFunction <- staticCast (returnType manifoldType) (rs <> vs) mname
+    let vs' = take
+              (length vs)
+              (map (\j -> "std::placeholders::_" <> viaShow j) ([1..] :: [Int]))
+        rs' = map (bndNamer . argId) rs
+        bindStr = stdBind $ castFunction : (rs' ++ vs')
+    return $ appliedTypeStr <+> parens bindStr
+
 
   makeManifoldBody :: MDoc -> CppTranslator (Maybe MDoc)
   makeManifoldBody body = do
@@ -544,24 +560,6 @@ makeManifold callIndex form manifoldType e = do
   returnType :: TypeF -> TypeF
   returnType (FunF _ t) = t
   returnType t = t
-
-  makeManifoldPartial :: ManifoldForm TypeM -> CppTranslator (Maybe MDoc)
-  makeManifoldPartial (ManifoldPart rs vs) = do
-    currentIndex <- CMS.gets translatorCurrentManifold
-    partialHasBeenGenerated <- CMS.gets (Set.member (currentIndex, callIndex) . translatorPartials)
-    if partialHasBeenGenerated
-      then return Nothing
-      else do
-        let v = mname <> "_fun"
-        lhs <- stdFunction manifoldType vs |>> (<+> v)
-        castFunction <- staticCast manifoldType (manifoldArgs form) mname
-        let vs' = take
-                  (length vs)
-                  (map (\j -> "std::placeholders::_" <> viaShow j) ([1..] :: [Int]))
-            rs' = map (bndNamer . argId) rs
-            rhs = stdBind $ castFunction : (rs' ++ vs')
-        return . Just $ nest 4 (vsep [lhs <+> "=", rhs]) <> ";"
-  makeManifoldPartial _ = return Nothing
 
 
 stdFunction :: TypeF -> [Arg TypeM] -> CppTranslator MDoc
