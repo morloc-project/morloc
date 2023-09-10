@@ -20,6 +20,8 @@ module Morloc.Namespace
   , None(..)
   , One(..)
   , Many(..)
+  -- ** Other classes
+  , Defaultable(..)
   -- ** Indexed
   , Indexed(..)
   , unindex
@@ -61,7 +63,6 @@ module Morloc.Namespace
   , MorlocReturn
   -- ** Package metadata
   , PackageMeta(..)
-  , defaultPackageMeta
   -- * Types
   , NamType(..)
   , Type(..)
@@ -131,6 +132,9 @@ data GMapRet c
   | GMapNoSnd -- ^ Failure on the internal key (possible bug)
   | GMapJust c
   deriving(Show, Ord, Eq)
+
+class Defaultable a where
+  defaultValue :: a
 
 type MorlocMonadGen c e l s a
    = ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
@@ -493,9 +497,8 @@ data PackageMeta =
     }
   deriving (Show, Ord, Eq)
 
-defaultPackageMeta :: PackageMeta
-defaultPackageMeta =
-  PackageMeta
+instance Defaultable PackageMeta where
+  defaultValue = PackageMeta
     { packageName = ""
     , packageVersion = ""
     , packageHomepage = ""

@@ -43,9 +43,7 @@ module Morloc.CodeGenerator.Namespace
 
   , MFunctor(..)
   , GateMap(..)
-  , alwaysGate
   , ManifoldMap(..)
-  , defaultManifoldMap
   , NativeManifold(..)
   , SerialManifold(..)
   , SerialArg(..)
@@ -54,6 +52,7 @@ module Morloc.CodeGenerator.Namespace
   , NativeExpr(..)
   -- unrecursive types
   , FoldManifoldM(..)
+  , SurroundManifoldM(..)
   , NativeManifold_(..)
   , SerialManifold_(..)
   , SerialArg_(..)
@@ -76,12 +75,20 @@ module Morloc.CodeGenerator.Namespace
   , prettyGenTypeP
   -- ** weird folds
   , mapTo
+  -- ** Simple fold over expressions
   , foldSerialManifoldM
   , foldNativeManifoldM
   , foldSerialExprM
   , foldNativeExprM
   , foldNativeArgM
   , foldSerialArgM
+  -- ** Contextual fold over expressions
+  , surroundFoldSerialManifoldM
+  , surroundFoldNativeManifoldM
+  , surroundFoldSerialExprM
+  , surroundFoldNativeExprM
+  , surroundFoldNativeArgM
+  , surroundFoldSerialArgM
   ) where
 
 import Morloc.Namespace
@@ -351,13 +358,13 @@ instance Foldable ManifoldForm where
   foldr f b (ManifoldPart xs ys) = foldr f b [x | Arg _ x <- xs <> ys]
 
 instance Pretty t => Pretty (ManifoldForm t) where
-    pretty (ManifoldPass args) = "ManifoldPass" <> tupled (map pretty args)
-    pretty (ManifoldFull args) = "ManifoldFull"  <> tupled (map pretty args)
-    pretty (ManifoldPart contextArgs boundArgs)
-        = "ManifoldPart" <> tupled
-            [ "context:" <+> list (map pretty contextArgs)
-            , "bound:"   <+> list (map pretty boundArgs)
-            ]
+  pretty (ManifoldPass args) = "ManifoldPass" <> tupled (map pretty args)
+  pretty (ManifoldFull args) = "ManifoldFull"  <> tupled (map pretty args)
+  pretty (ManifoldPart contextArgs boundArgs)
+      = "ManifoldPart" <> tupled
+          [ "context:" <+> list (map pretty contextArgs)
+          , "bound:"   <+> list (map pretty boundArgs)
+          ]
 
 instance Pretty FVar where
     pretty (FV _ c) = pretty c
@@ -436,10 +443,10 @@ data MonoExpr
   | MonoNull   FVar
 
 data PoolCall = PoolCall
-    Int -- foreign manifold id
-    [MDoc]
-    [Arg TypeM] -- contextual argument that are passed to the foreign function
-                -- (not the main arguments to the foreign function)
+  Int -- foreign manifold id
+  [MDoc]
+  [Arg TypeM] -- contextual argument that are passed to the foreign function
+              -- (not the main arguments to the foreign function)
 
 data NativeManifold = NativeManifold Int Lang (ManifoldForm TypeM) (TypeF, NativeExpr)
 data SerialManifold = SerialManifold Int Lang (ManifoldForm TypeM) SerialExpr
@@ -524,13 +531,32 @@ foldlNE _ b (NullN_        _) = b
 --  * sr - SerialArg
 --  * nr - NativeArg
 data FoldManifoldM m sm nm se ne sr nr = FoldManifoldM
- { opSerialManifoldM :: SerialManifold_ se -> m sm
- , opNativeManifoldM :: NativeManifold_ ne -> m nm
- , opSerialExprM :: SerialExpr_ sm se ne sr nr -> m se
- , opNativeExprM :: NativeExpr_ nm se ne sr nr -> m ne
- , opSerialArgM :: SerialArg_ sm se -> m sr
- , opNativeArgM :: NativeArg_ nm ne -> m nr
- }
+  { opSerialManifoldM :: SerialManifold_ se -> m sm
+  , opNativeManifoldM :: NativeManifold_ ne -> m nm
+  , opSerialExprM :: SerialExpr_ sm se ne sr nr -> m se
+  , opNativeExprM :: NativeExpr_ nm se ne sr nr -> m ne
+  , opSerialArgM  :: SerialArg_ sm se -> m sr
+  , opNativeArgM  :: NativeArg_ nm ne -> m nr
+  }
+
+data SurroundManifoldM m sm nm se ne sr nr = SurroundManifoldM
+  { surroundSerialManifoldM :: ( SerialManifold -> m sm ) -> SerialManifold -> m sm
+  , surroundNativeManifoldM :: ( NativeManifold -> m nm ) -> NativeManifold -> m nm
+  , surroundSerialExprM     :: ( SerialExpr -> m se )     -> SerialExpr     -> m se
+  , surroundNativeExprM     :: ( NativeExpr -> m ne )     -> NativeExpr     -> m ne
+  , surroundSerialArgM      :: ( SerialArg -> m sr )      -> SerialArg      -> m sr
+  , surroundNativeArgM      :: ( NativeArg -> m nr )      -> NativeArg      -> m nr
+  }
+
+instance Defaultable (SurroundManifoldM m sm nm se ne sr nr) where
+  defaultValue = SurroundManifoldM
+    { surroundSerialManifoldM = \ f x -> f x
+    , surroundNativeManifoldM = \ f x -> f x
+    , surroundSerialExprM     = \ f x -> f x
+    , surroundNativeExprM     = \ f x -> f x
+    , surroundSerialArgM      = \ f x -> f x
+    , surroundNativeArgM      = \ f x -> f x
+    }
 
 data NativeManifold_ ne = NativeManifold_ Int Lang (ManifoldForm TypeM) (TypeF, ne)
   deriving(Functor, Foldable)
@@ -573,108 +599,137 @@ data NativeExpr_ nm se ne sr nr
   | StrN_         FVar Text
   | NullN_        FVar
 
-
 foldSerialManifoldM :: Monad m => FoldManifoldM m sm nm se ne sr nr -> SerialManifold -> m sm
-foldSerialManifoldM fm (SerialManifold m lang form e) = do
-  e' <- foldSerialExprM fm e
-  opSerialManifoldM fm $ SerialManifold_ m lang form e'
+foldSerialManifoldM = surroundFoldSerialManifoldM defaultValue
 
 foldNativeManifoldM :: Monad m => FoldManifoldM m sm nm se ne sr nr -> NativeManifold -> m nm
-foldNativeManifoldM fm (NativeManifold m lang form (t, e)) = do
-  e' <- foldNativeExprM fm e
-  opNativeManifoldM fm $ NativeManifold_ m lang form (t, e')
+foldNativeManifoldM = surroundFoldNativeManifoldM defaultValue
 
 foldSerialArgM :: Monad m => FoldManifoldM m sm nm se ne sr nr -> SerialArg -> m sr
-foldSerialArgM fm (SerialArgManifold sm) = do
-  sm' <- foldSerialManifoldM fm sm 
-  opSerialArgM fm $ SerialArgManifold_ sm'
-foldSerialArgM fm (SerialArgExpr se) = do
-  se' <- foldSerialExprM fm se 
-  opSerialArgM fm $ SerialArgExpr_ se'
+foldSerialArgM = surroundFoldSerialArgM defaultValue
 
 foldNativeArgM :: Monad m => FoldManifoldM m sm nm se ne sr nr -> NativeArg -> m nr
-foldNativeArgM fm (NativeArgManifold nm) = do
-  nm' <- foldNativeManifoldM fm nm 
-  opNativeArgM fm $ NativeArgManifold_ nm'
-foldNativeArgM fm (NativeArgExpr ne) = do
-  ne' <- foldNativeExprM fm ne 
-  opNativeArgM fm $ NativeArgExpr_ ne'
+foldNativeArgM = surroundFoldNativeArgM defaultValue
 
 foldSerialExprM :: Monad m => FoldManifoldM m sm nm se ne sr nr -> SerialExpr -> m se
-foldSerialExprM fm (AppManS e es) = do
-    e' <- foldSerialManifoldM fm e
-    es' <- mapM (mapEitherM (foldSerialArgM fm) (foldNativeArgM fm)) es
-    opSerialExprM fm $ AppManS_ e' es'
-foldSerialExprM fm (AppPoolS pool es) = do
-    es' <- mapM (foldSerialArgM fm) es
-    opSerialExprM fm $ AppPoolS_ pool es'
-foldSerialExprM fm (ReturnS e) = do
-    e' <- foldSerialExprM fm e
-    opSerialExprM fm $ ReturnS_ e'
-foldSerialExprM fm (SerialLetS i sa sb) = do
-    sa' <- foldSerialExprM fm sa
-    sb' <- foldSerialExprM fm sb
-    opSerialExprM fm $ SerialLetS_ i sa' sb'
-foldSerialExprM fm (NativeLetS i (t, na) sb) = do
-    sa' <- foldNativeExprM fm na
-    nb' <- foldSerialExprM fm sb
-    opSerialExprM fm $ NativeLetS_ i (t, sa') nb'
-foldSerialExprM fm (LetVarS i) = opSerialExprM fm (LetVarS_ i)
-foldSerialExprM fm (BndVarS i) = opSerialExprM fm (BndVarS_ i)
-foldSerialExprM fm (SerializeS s e) = do
-    e' <- foldNativeExprM fm e
-    opSerialExprM fm $ SerializeS_ s e'
+foldSerialExprM = surroundFoldSerialExprM defaultValue
 
 foldNativeExprM :: Monad m => FoldManifoldM m sm nm se ne sr nr -> NativeExpr -> m ne
-foldNativeExprM fm (AppSrcN t src nativeArgs) = do
-    nativeArgs' <- mapM (foldNativeArgM fm) nativeArgs
-    opNativeExprM fm $ AppSrcN_ t src nativeArgs'
-foldNativeExprM fm (AppManN t nativeManifold eargs) = do
-    nativeManifold' <- foldNativeManifoldM fm nativeManifold 
-    eargs' <- mapM (mapEitherM (foldSerialArgM fm) (foldNativeArgM fm)) eargs
-    opNativeExprM fm $ AppManN_ t nativeManifold' eargs'
-foldNativeExprM fm (ReturnN t ne) = do
-    ne' <- foldNativeExprM fm ne
-    opNativeExprM fm $ ReturnN_ t ne'
-foldNativeExprM fm (SerialLetN i se1 (t, ne2)) = do
-    se1' <- foldSerialExprM fm se1
-    ne2' <- foldNativeExprM fm ne2
-    opNativeExprM fm (SerialLetN_ i se1' (t, ne2'))
-foldNativeExprM fm (NativeLetN i (t1, ne1) (t2, ne2)) = do
-    ne1' <- foldNativeExprM fm ne1
-    ne2' <- foldNativeExprM fm ne2
-    opNativeExprM fm (NativeLetN_ i (t1, ne1') (t2, ne2'))
-foldNativeExprM fm (LetVarN t i) = opNativeExprM fm (LetVarN_ t i)
-foldNativeExprM fm (BndVarN t i) = opNativeExprM fm (BndVarN_ t i)
-foldNativeExprM fm (DeserializeN t s se) = do
-    se' <- foldSerialExprM fm se
-    opNativeExprM fm (DeserializeN_ t s se')
-foldNativeExprM fm (AccN t n v ne key) = do
-    ne' <- foldNativeExprM fm ne
-    opNativeExprM fm (AccN_ t n v ne' key)
-foldNativeExprM fm (SrcN t src) = opNativeExprM fm (SrcN_ t src)
-foldNativeExprM fm (ListN v t nes) = do
-    nes' <- mapM (foldNativeExprM fm) nes
-    opNativeExprM fm (ListN_ v t nes')
-foldNativeExprM fm (TupleN t nes) = do
-    nes' <- mapM (onSndM (foldNativeExprM fm)) nes
-    opNativeExprM fm (TupleN_ t nes')
-    where
-    onSndM :: Monad m => (b -> m b') -> (a, b) -> m (a, b')
-    onSndM f (a, b) = (,) a <$> f b 
-foldNativeExprM fm (RecordN o n ps rs) = do
-    rs' <- mapM (onValM (foldNativeExprM fm)) rs
-    opNativeExprM fm (RecordN_ o n ps rs')
-    where
-    onValM :: Monad m => (c -> m c') -> (a, (b, c)) -> m (a, (b, c')) 
-    onValM f (a, (b, c)) = do
-        c' <- f c
-        return (a, (b, c'))
-foldNativeExprM fm (LogN t x)  = opNativeExprM fm (LogN_ t x)
-foldNativeExprM fm (RealN t x) = opNativeExprM fm (RealN_ t x)
-foldNativeExprM fm (IntN t x)  = opNativeExprM fm (IntN_ t x)
-foldNativeExprM fm (StrN t x)  = opNativeExprM fm (StrN_ t x)
-foldNativeExprM fm (NullN t)   = opNativeExprM fm (NullN_ t)
+foldNativeExprM = surroundFoldNativeExprM defaultValue
+
+surroundFoldSerialManifoldM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldManifoldM m sm nm se ne sr nr -> SerialManifold -> m sm
+surroundFoldSerialManifoldM sfm fm = surroundSerialManifoldM sfm f
+  where
+  f (SerialManifold m lang form e) = do
+    e' <- surroundFoldSerialExprM sfm fm e
+    opSerialManifoldM fm $ SerialManifold_ m lang form e'
+
+surroundFoldNativeManifoldM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldManifoldM m sm nm se ne sr nr -> NativeManifold -> m nm
+surroundFoldNativeManifoldM sfm fm = surroundNativeManifoldM sfm f
+  where
+  f (NativeManifold m lang form (t, e)) = do
+    e' <- surroundFoldNativeExprM sfm fm e
+    opNativeManifoldM fm $ NativeManifold_ m lang form (t, e')
+
+surroundFoldSerialArgM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldManifoldM m sm nm se ne sr nr -> SerialArg -> m sr
+surroundFoldSerialArgM sfm fm = surroundSerialArgM sfm f
+  where
+  f (SerialArgManifold sm) = do
+    sm' <- surroundFoldSerialManifoldM sfm fm sm 
+    opSerialArgM fm $ SerialArgManifold_ sm'
+  f (SerialArgExpr se) = do
+    se' <- surroundFoldSerialExprM sfm fm se 
+    opSerialArgM fm $ SerialArgExpr_ se'
+
+surroundFoldNativeArgM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldManifoldM m sm nm se ne sr nr -> NativeArg -> m nr
+surroundFoldNativeArgM sfm fm = surroundNativeArgM sfm f
+  where
+  f (NativeArgManifold nm) = do
+      nm' <- surroundFoldNativeManifoldM sfm fm nm 
+      opNativeArgM fm $ NativeArgManifold_ nm'
+  f (NativeArgExpr ne) = do
+      ne' <- surroundFoldNativeExprM sfm fm ne 
+      opNativeArgM fm $ NativeArgExpr_ ne'
+
+surroundFoldSerialExprM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldManifoldM m sm nm se ne sr nr -> SerialExpr -> m se
+surroundFoldSerialExprM sfm fm = surroundSerialExprM sfm f
+  where
+  f (AppManS e es) = do
+    e' <- surroundFoldSerialManifoldM sfm fm e
+    es' <- mapM (mapEitherM (surroundFoldSerialArgM sfm fm) (surroundFoldNativeArgM sfm fm)) es
+    opSerialExprM fm $ AppManS_ e' es'
+  f (AppPoolS pool es) = do
+    es' <- mapM (surroundFoldSerialArgM sfm fm) es
+    opSerialExprM fm $ AppPoolS_ pool es'
+  f (ReturnS e) = do
+    e' <- surroundFoldSerialExprM sfm fm e
+    opSerialExprM fm $ ReturnS_ e'
+  f (SerialLetS i sa sb) = do
+    sa' <- surroundFoldSerialExprM sfm fm sa
+    sb' <- surroundFoldSerialExprM sfm fm sb
+    opSerialExprM fm $ SerialLetS_ i sa' sb'
+  f (NativeLetS i (t, na) sb) = do
+    sa' <- surroundFoldNativeExprM sfm fm na
+    nb' <- surroundFoldSerialExprM sfm fm sb
+    opSerialExprM fm $ NativeLetS_ i (t, sa') nb'
+  f (LetVarS i) = opSerialExprM fm (LetVarS_ i)
+  f (BndVarS i) = opSerialExprM fm (BndVarS_ i)
+  f (SerializeS s e) = do
+    e' <- surroundFoldNativeExprM sfm fm e
+    opSerialExprM fm $ SerializeS_ s e'
+
+surroundFoldNativeExprM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldManifoldM m sm nm se ne sr nr -> NativeExpr -> m ne
+surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
+  where
+  f (AppSrcN t src nativeArgs) = do
+      nativeArgs' <- mapM (surroundFoldNativeArgM sfm fm) nativeArgs
+      opNativeExprM fm $ AppSrcN_ t src nativeArgs'
+  f (AppManN t nativeManifold eargs) = do
+      nativeManifold' <- surroundFoldNativeManifoldM sfm fm nativeManifold 
+      eargs' <- mapM (mapEitherM (surroundFoldSerialArgM sfm fm) (surroundFoldNativeArgM sfm fm)) eargs
+      opNativeExprM fm $ AppManN_ t nativeManifold' eargs'
+  f (ReturnN t ne) = do
+      ne' <- surroundFoldNativeExprM sfm fm ne
+      opNativeExprM fm $ ReturnN_ t ne'
+  f (SerialLetN i se1 (t, ne2)) = do
+      se1' <- surroundFoldSerialExprM sfm fm se1
+      ne2' <- surroundFoldNativeExprM sfm fm ne2
+      opNativeExprM fm (SerialLetN_ i se1' (t, ne2'))
+  f (NativeLetN i (t1, ne1) (t2, ne2)) = do
+      ne1' <- surroundFoldNativeExprM sfm fm ne1
+      ne2' <- surroundFoldNativeExprM sfm fm ne2
+      opNativeExprM fm (NativeLetN_ i (t1, ne1') (t2, ne2'))
+  f (LetVarN t i) = opNativeExprM fm (LetVarN_ t i)
+  f (BndVarN t i) = opNativeExprM fm (BndVarN_ t i)
+  f (DeserializeN t s se) = do
+      se' <- surroundFoldSerialExprM sfm fm se
+      opNativeExprM fm (DeserializeN_ t s se')
+  f (AccN t n v ne key) = do
+      ne' <- surroundFoldNativeExprM sfm fm ne
+      opNativeExprM fm (AccN_ t n v ne' key)
+  f (SrcN t src) = opNativeExprM fm (SrcN_ t src)
+  f (ListN v t nes) = do
+      nes' <- mapM (surroundFoldNativeExprM sfm fm) nes
+      opNativeExprM fm (ListN_ v t nes')
+  f (TupleN t nes) = do
+      nes' <- mapM (onSndM (surroundFoldNativeExprM sfm fm)) nes
+      opNativeExprM fm (TupleN_ t nes')
+      where
+        onSndM :: Monad m => (b -> m b') -> (a, b) -> m (a, b')
+        onSndM g (a, b) = (,) a <$> g b 
+  f (RecordN o n ps rs) = do
+      rs' <- mapM (onValM (surroundFoldNativeExprM sfm fm)) rs
+      opNativeExprM fm (RecordN_ o n ps rs')
+      where
+        onValM :: Monad m => (c -> m c') -> (a, (b, c)) -> m (a, (b, c')) 
+        onValM g (a, (b, c)) = do
+          c' <- g c
+          return (a, (b, c'))
+  f (LogN t x)  = opNativeExprM fm (LogN_ t x)
+  f (RealN t x) = opNativeExprM fm (RealN_ t x)
+  f (IntN t x)  = opNativeExprM fm (IntN_ t x)
+  f (StrN t x)  = opNativeExprM fm (StrN_ t x)
+  f (NullN t)   = opNativeExprM fm (NullN_ t)
 
 
 
@@ -763,14 +818,15 @@ data ManifoldMap = ManifoldMap
  , mapNativeArg :: NativeArg -> NativeArg
  }
 
-defaultManifoldMap = ManifoldMap
- { mapSerialManifold = id
- , mapNativeManifold = id
- , mapSerialExpr = id
- , mapNativeExpr = id
- , mapSerialArg = id
- , mapNativeArg = id
- }
+instance Defaultable ManifoldMap where
+  defaultValue = ManifoldMap
+    { mapSerialManifold = id
+    , mapNativeManifold = id
+    , mapSerialExpr = id
+    , mapNativeExpr = id
+    , mapSerialArg = id
+    , mapNativeArg = id
+    }
 
 data GateMap = GateMap
  { gateSerialManifold :: SerialManifold -> Bool
@@ -781,20 +837,21 @@ data GateMap = GateMap
  , gateNativeArg :: NativeArg -> Bool
  }
 
-alwaysGate = GateMap
-  { gateSerialManifold = const True
-  , gateNativeManifold = const True
-  , gateSerialExpr = const True
-  , gateNativeExpr = const True
-  , gateSerialArg = const True
-  , gateNativeArg = const True
-  }
+instance Defaultable GateMap where
+  defaultValue = GateMap
+    { gateSerialManifold = const True
+    , gateNativeManifold = const True
+    , gateSerialExpr = const True
+    , gateNativeExpr = const True
+    , gateSerialArg = const True
+    , gateNativeArg = const True
+    }
 
 class MFunctor a where
     mgatedMap :: GateMap -> ManifoldMap -> a -> a
 
     mmap :: ManifoldMap -> a -> a
-    mmap = mgatedMap alwaysGate
+    mmap = mgatedMap defaultValue
 
 instance MFunctor NativeManifold where
     mgatedMap g f nm@(NativeManifold m l form (t, ne))

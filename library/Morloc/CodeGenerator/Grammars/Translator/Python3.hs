@@ -74,6 +74,7 @@ nvarNamer i = "n" <> viaShow i
 
 argName :: Arg TypeM -> MDoc
 argName (Arg i (Native _)) = nvarNamer i
+argName (Arg i (Function _ _)) = nvarNamer i
 argName (Arg i _) = svarNamer i
 
 -- create a name for a manifold based on a unique id

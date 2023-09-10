@@ -88,7 +88,7 @@ loadModuleMetadata main = do
   meta <-
     case maybef of
       (Just f) -> liftIO $ YC.loadYamlSettings [f] [] YC.ignoreEnv
-      Nothing -> return defaultPackageMeta
+      Nothing -> return defaultValue
   state <- MM.get
   MM.put (appendMeta meta state)
   where

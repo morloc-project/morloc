@@ -1710,10 +1710,10 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
 -- | recursively replace BndVarS term with a LetVarS term, do not recurse across manifold borders
 letSwapS :: MFunctor a => Int -> a -> a
 letSwapS i = mgatedMap gates mm where
-    gates = alwaysGate { gateSerialManifold = const False
-                       , gateNativeManifold = const False
-                       }
-    mm = defaultManifoldMap { mapSerialExpr = swapLet }
+    gates = defaultValue { gateSerialManifold = const False
+                         , gateNativeManifold = const False
+                         }
+    mm = defaultValue { mapSerialExpr = swapLet }
     swapLet (BndVarS i')
         | i' == i = LetVarS i
         | otherwise = BndVarS i
@@ -1722,10 +1722,10 @@ letSwapS i = mgatedMap gates mm where
 -- | recursively replace BndVarN term with a LetVarN term, do not recurse across manifold borders
 letSwapN :: MFunctor a => Int -> a -> a 
 letSwapN i = mgatedMap gates mm where
-    gates = alwaysGate { gateSerialManifold = const False
-                       , gateNativeManifold = const False
-                       }
-    mm = defaultManifoldMap { mapNativeExpr = swapLet }
+    gates = defaultValue { gateSerialManifold = const False
+                         , gateNativeManifold = const False
+                         }
+    mm = defaultValue { mapNativeExpr = swapLet }
     swapLet (BndVarN t i')
         | i' == i = LetVarN t i
         | otherwise = BndVarN t i

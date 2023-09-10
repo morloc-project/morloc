@@ -85,21 +85,27 @@ runMorlocMonad ::
 runMorlocMonad outfile v config ev =
   runStateT (runWriterT (runExceptT (runReaderT ev config))) (emptyState outfile v)
 
+instance Defaultable MorlocState where
+  defaultValue = MorlocState {
+      statePackageMeta = []
+    , stateVerbosity = 0
+    , stateCounter = -1
+    , stateDepth = 0
+    , stateSignatures = GMap.empty
+    , stateTypedefs = GMap.empty
+    , stateSources = GMap.empty
+    , stateAnnotations = Map.empty
+    , stateOutfile = Nothing
+    , statePackers = GMap.empty
+    , stateName = Map.empty
+    , stateExports = []
+  }
+
 emptyState :: Maybe Path -> Int -> MorlocState
-emptyState path v = MorlocState {
-    statePackageMeta = []
-  , stateVerbosity = v
-  , stateCounter = -1
-  , stateDepth = 0
-  , stateSignatures = GMap.empty
-  , stateTypedefs = GMap.empty
-  , stateSources = GMap.empty
-  , stateAnnotations = Map.empty
+emptyState path v = defaultValue
+  { stateVerbosity = v
   , stateOutfile = path
-  , statePackers = GMap.empty
-  , stateName = Map.empty
-  , stateExports = []
-}
+  }
 
 startCounter :: MorlocMonad ()
 startCounter = do
