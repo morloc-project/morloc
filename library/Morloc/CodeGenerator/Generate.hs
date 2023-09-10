@@ -1599,8 +1599,7 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
 
   nativeExpr (MonoManifold m form e) = do
     let form' = mapManifoldArgs (\ (Arg i _) -> Arg i Nothing) form
-    (rs, nm) <- nativeManifold m form' e
-    let t = undefined
+    (rs, nm@(NativeManifold _ _ _ (t, _))) <- nativeManifold m form' e
     return (rs, AppManN t nm [])
 
   nativeExpr MonoPoolCall{} = error "MonoPoolCall does not map to NativeExpr"

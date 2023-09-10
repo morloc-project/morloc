@@ -437,8 +437,9 @@ translateSegment m0 = do
   makeNativeExpr :: NativeExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> CppTranslator PoolDocs
   makeNativeExpr (AppSrcN_      _ src es) =
     return $ mergePoolDocs ((<>) (pretty $ srcName src) . tupled) es
-  makeNativeExpr (AppManN_      _ call (map catEither -> xs)) =
-    return $ mergePoolDocs ((<>) (poolExpr call) . tupled) (call : xs)
+  makeNativeExpr (AppManN_      _ call _) = return call
+  -- makeNativeExpr (AppManN_      _ call (map catEither -> xs)) =
+  --   return $ mergePoolDocs ((<>) (poolExpr call) . tupled) (call : xs)
   makeNativeExpr (ReturnN_      _ e) =
     return $ e {poolExpr = "return" <> parens (poolExpr e) <> ";"} 
   makeNativeExpr (SerialLetN_   i sa (_, nb)) = return $ makeLet svarNamer i serialType sa nb

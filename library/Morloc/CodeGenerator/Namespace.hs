@@ -27,6 +27,7 @@ module Morloc.CodeGenerator.Namespace
   , typeP2typeF
   , typeF2typeP
   , typeF2typeM
+  , typeP2typeM
   -- ** 
   , Arg(..), argId, unArg
   , JsonType(..)
@@ -159,6 +160,11 @@ typeP2typeF (VarP v) = VarF (pvar2fvar v)
 typeP2typeF (FunP ts t) = FunF (map typeP2typeF ts) (typeP2typeF t)
 typeP2typeF (AppP t ts) = AppF (typeP2typeF t) (map typeP2typeF ts)
 typeP2typeF (NamP o v ds rs) = NamF o (pvar2fvar v) (map typeP2typeF ds) (map (bimap pvar2fvar typeP2typeF) rs)
+
+typeP2typeM :: TypeP -> TypeM
+typeP2typeM (UnkP _) = Passthrough
+typeP2typeM (FunP ts t) = Function (map typeP2typeM ts) (typeP2typeM t)
+typeP2typeM t = Native (typeP2typeF t)
 
 typeF2typeP :: Lang -> TypeF -> TypeP
 typeF2typeP l (UnkF v) = UnkP (fvar2pvar l v)
@@ -336,7 +342,6 @@ data TypeM
   | Native TypeF -- ^ an unserialized native data type
   | Function [TypeM] TypeM -- ^ a function of n inputs and one output (cannot be serialized)
   deriving(Show, Eq, Ord)
-
 
 data (ManifoldForm a)
   = ManifoldPass [Arg a]
