@@ -13,9 +13,15 @@ module Morloc.CodeGenerator.Grammars.Common
   ( invertSerialManifold
   , PoolDocs(..)
   , mergePoolDocs
+  -- * Naming conventions
+  , svarNamer
+  , nvarNamer
+  , argNamer
+  , manNamer
   ) where
 
 import Morloc.CodeGenerator.Namespace
+import Morloc.Data.Doc
 import Morloc.Monad (Index, runIndex, newIndex, runIdentity)
 
 -- Stores pieces of code made while building a pool
@@ -43,6 +49,20 @@ mergePoolDocs f ms = PoolDocs
     }
 
 
+svarNamer :: Int -> MDoc
+svarNamer i = "s" <> viaShow i
+
+nvarNamer :: Int -> MDoc
+nvarNamer i = "n" <> viaShow i
+
+argNamer :: Arg TypeM -> MDoc
+argNamer (Arg i (Native _)) = nvarNamer i
+argNamer (Arg i (Function _ _)) = nvarNamer i
+argNamer (Arg i _) = svarNamer i
+
+-- create a name for a manifold based on a unique id
+manNamer :: Int -> MDoc
+manNamer i = "m" <> viaShow i
 
 -- Represents the dependency of a on previously bound expressions
 data D a = D a [(Int, Either SerialExpr NativeExpr)]

@@ -66,21 +66,6 @@ debugLog d = do
   verbosity <- gets stateVerbosity
   when (verbosity > 0) $ (liftIO . putDoc) d
 
-svarNamer :: Int -> MDoc
-svarNamer i = "s" <> viaShow i
-
-nvarNamer :: Int -> MDoc
-nvarNamer i = "n" <> viaShow i
-
-argName :: Arg TypeM -> MDoc
-argName (Arg i (Native _)) = nvarNamer i
-argName (Arg i (Function _ _)) = nvarNamer i
-argName (Arg i _) = svarNamer i
-
--- create a name for a manifold based on a unique id
-manNamer :: Int -> MDoc
-manNamer i = "m" <> viaShow i
-
 -- FIXME: should definitely use namespaces here, not `import *`
 translateSource :: Path -> MorlocMonad MDoc
 translateSource s = do
@@ -294,12 +279,12 @@ translateSegment m0 =
     translateManifold m form (PoolDocs completeManifolds body priorLines priorExprs) = do
       let args = manifoldArgs form
       let mname = manNamer m
-          def = "def" <+> mname <> tupled (map argName args) <> ":"
+          def = "def" <+> mname <> tupled (map argNamer args) <> ":"
           newManifold = nest 4 (vsep $ def:priorLines <> [body])
           call = case form of
-            (ManifoldFull rs) -> mname <> tupled (map argName rs) -- covers #1, #2 and #4
+            (ManifoldFull rs) -> mname <> tupled (map argNamer rs) -- covers #1, #2 and #4
             (ManifoldPass _) -> mname
-            (ManifoldPart rs vs) -> makeLambda vs (mname <> tupled (map argName (rs ++ vs))) -- covers #5
+            (ManifoldPart rs vs) -> makeLambda vs (mname <> tupled (map argNamer (rs ++ vs))) -- covers #5
       return $ PoolDocs
           { poolCompleteManifolds = newManifold : completeManifolds
           , poolExpr = call
@@ -313,7 +298,7 @@ translateSegment m0 =
       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
 makeLambda :: [Arg TypeM] -> MDoc -> MDoc
-makeLambda args body = "lambda" <+> hsep (punctuate "," (map argName args)) <> ":" <+> body
+makeLambda args body = "lambda" <+> hsep (punctuate "," (map argNamer args)) <> ":" <+> body
 
 makeDispatch :: [SerialManifold] -> MDoc
 makeDispatch ms = align . vsep $

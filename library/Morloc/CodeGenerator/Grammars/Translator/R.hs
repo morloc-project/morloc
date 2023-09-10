@@ -58,21 +58,6 @@ debugLog d = do
   verbosity <- gets stateVerbosity
   when (verbosity > 0) $ (liftIO . putDoc) d
 
-svarNamer :: Int -> MDoc
-svarNamer i = "s" <> viaShow i
-
-nvarNamer :: Int -> MDoc
-nvarNamer i = "n" <> viaShow i
-
-argName :: Arg TypeM -> MDoc
-argName (Arg i (Native _)) = nvarNamer i
-argName (Arg i (Function _ _)) = nvarNamer i
-argName (Arg i _) = svarNamer i
-
--- create a name for a manifold based on a unique id
-manNamer :: Int -> MDoc
-manNamer i = "m" <> viaShow i
-
 translateSource :: Path -> MorlocMonad MDoc
 translateSource p = do
   let p' = MT.stripPrefixIfPresent "./" (MT.pack p)
@@ -267,12 +252,12 @@ translateSegment m0 =
     translateManifold m form (PoolDocs completeManifolds body priorLines priorExprs) = do
       let args = manifoldArgs form
       let mname = manNamer m
-          def = mname <+> "<-" <+> "function" <> tupled (map argName args)
+          def = mname <+> "<-" <+> "function" <> tupled (map argNamer args)
           newManifold = block 4 def (vsep $ priorLines <> [body])
           call = case form of
-            (ManifoldFull rs) -> mname <> tupled (map argName rs) -- covers #1, #2 and #4
+            (ManifoldFull rs) -> mname <> tupled (map argNamer rs) -- covers #1, #2 and #4
             (ManifoldPass _) -> mname
-            (ManifoldPart rs vs) -> makeLambda vs (mname <> tupled (map argName (rs ++ vs))) -- covers #5
+            (ManifoldPart rs vs) -> makeLambda vs (mname <> tupled (map argNamer (rs ++ vs))) -- covers #5
       return $ PoolDocs
           { poolCompleteManifolds = newManifold : completeManifolds
           , poolExpr = call
@@ -286,7 +271,7 @@ translateSegment m0 =
       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
 makeLambda :: [Arg TypeM] -> MDoc -> MDoc
-makeLambda args body = "function" <+> tupled (map argName args) <> "{" <> body <> "}"
+makeLambda args body = "function" <+> tupled (map argNamer args) <> "{" <> body <> "}"
 
 -- For R, the type schema is the JSON representation of the type
 typeSchema :: SerialAST -> MDoc

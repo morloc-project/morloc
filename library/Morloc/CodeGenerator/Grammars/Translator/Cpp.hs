@@ -148,17 +148,8 @@ makeTheMaker srcs = do
 
   return [cmd]
 
-letNamer :: Int -> MDoc
-letNamer i = "a" <> viaShow i
-
 helperNamer :: Int -> MDoc
 helperNamer i = "helper" <> viaShow i
-
-manNamer :: Int -> MDoc
-manNamer i = "m" <> viaShow i
-
-bndNamer :: Int -> MDoc
-bndNamer i = "x" <> viaShow i
 
 serialType :: MDoc
 serialType = pretty $ ML.serialType CppLang 
@@ -192,15 +183,12 @@ makeSignature = foldSerialManifoldM fm where
 
 
 makeArg :: Arg TypeM -> CppTranslator MDoc
-makeArg (Arg i (Serial _)) = return $ serialType <+> bndNamer i
+makeArg (Arg i (Serial _)) = return $ serialType <+> svarNamer i
 makeArg (Arg i (Native c)) = do
     typestr <- showTypeF c
-    return $ typestr <+> bndNamer i
-makeArg (Arg i Passthrough) = return $ serialType <+> bndNamer i
+    return $ typestr <+> nvarNamer i
+makeArg (Arg i Passthrough) = return $ serialType <+> svarNamer i
 makeArg (Arg _ (Function _ _)) = error "Function support not implemented?"
-
-argName :: Arg TypeM -> MDoc
-argName (argId -> i) = bndNamer i
 
 tupleKey :: Int -> MDoc -> MDoc
 tupleKey i v = [idoc|std::get<#{pretty i}>(#{v})|]
@@ -426,7 +414,7 @@ translateSegment m0 = do
     return $ mergePoolDocs ((<>) (poolExpr e) . tupled) (e:es)
   makeSerialExpr (AppPoolS_ (PoolCall _ cmds args) es) = do
     let bufDef = "std::ostringstream s;"
-        callArgs = map dquotes cmds ++ map argName args
+        callArgs = map dquotes cmds ++ map argNamer args
         cmd = "s << " <> cat (punctuate " << \" \" << " (callArgs <> map poolExpr es)) <> ";"
         call = [idoc|foreign_call(s.str())|]
     return $ PoolDocs
@@ -436,12 +424,12 @@ translateSegment m0 = do
       , poolPriorExprs = []
       }
   makeSerialExpr (ReturnS_ e) = return $ e {poolExpr = "return(" <> poolExpr e <> ");"}
-  makeSerialExpr (SerialLetS_ letIndex sa sb) = return $ makeLet letIndex serialType sa sb
+  makeSerialExpr (SerialLetS_ letIndex sa sb) = return $ makeLet svarNamer letIndex serialType sa sb
   makeSerialExpr (NativeLetS_ letIndex (t, na) sb) = do
     typestr <- showTypeF t
-    return $ makeLet letIndex typestr na sb
-  makeSerialExpr (LetVarS_ i) = return $ PoolDocs [] (letNamer i) [] []
-  makeSerialExpr (BndVarS_ i) = return $ PoolDocs [] (bndNamer i) [] []
+    return $ makeLet nvarNamer letIndex typestr na sb
+  makeSerialExpr (LetVarS_ i) = return $ PoolDocs [] (svarNamer i) [] []
+  makeSerialExpr (BndVarS_ i) = return $ PoolDocs [] (svarNamer i) [] []
   makeSerialExpr (SerializeS_ s e) = do
     se <- serialize (poolExpr e) s 
     return $ mergePoolDocs (\_ -> poolExpr se) [e, se]
@@ -453,10 +441,10 @@ translateSegment m0 = do
     return $ mergePoolDocs ((<>) (poolExpr call) . tupled) (call : xs)
   makeNativeExpr (ReturnN_      _ e) =
     return $ e {poolExpr = "return" <> parens (poolExpr e) <> ";"} 
-  makeNativeExpr (SerialLetN_   i sa (_, nb)) = return $ makeLet i serialType sa nb
-  makeNativeExpr (NativeLetN_   i (t1, na) (_, nb)) = makeLet i <$> showTypeF t1 <*> pure na <*> pure nb
-  makeNativeExpr (LetVarN_      _ i) = return $ PoolDocs [] (letNamer i) [] []
-  makeNativeExpr (BndVarN_      _ i) = return $ PoolDocs [] (bndNamer i) [] []
+  makeNativeExpr (SerialLetN_   i sa (_, nb)) = return $ makeLet svarNamer i serialType sa nb
+  makeNativeExpr (NativeLetN_   i (t1, na) (_, nb)) = makeLet nvarNamer i <$> showTypeF t1 <*> pure na <*> pure nb
+  makeNativeExpr (LetVarN_      _ i) = return $ PoolDocs [] (nvarNamer i) [] []
+  makeNativeExpr (BndVarN_      _ i) = return $ PoolDocs [] (nvarNamer i) [] []
   makeNativeExpr (DeserializeN_ t s e) = do
     typestr <- showTypeF t
     (deserialized, assignments) <- deserialize (poolExpr e) typestr s
@@ -491,9 +479,9 @@ translateSegment m0 = do
   makeNativeExpr (NullN_        _  ) = return (PoolDocs [] "null" [] [])
 
 
-  makeLet :: Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
-  makeLet letIndex typestr (PoolDocs ms1 e1 rs1 pes1) (PoolDocs ms2 e2 rs2 pes2) =
-    let letAssignment = [idoc|#{typestr} #{letNamer letIndex} = #{e1};|]
+  makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
+  makeLet namer letIndex typestr (PoolDocs ms1 e1 rs1 pes1) (PoolDocs ms2 e2 rs2 pes2) =
+    let letAssignment = [idoc|#{typestr} #{namer letIndex} = #{e1};|]
         rs = rs1 <> [ letAssignment ] <> rs2 <> [e2]
     in PoolDocs
       { poolCompleteManifolds = ms1 <> ms2
@@ -521,7 +509,7 @@ makeManifold callIndex form manifoldType e = do
   mname = manNamer callIndex
 
   makeManifoldCall :: ManifoldForm TypeM -> CppTranslator MDoc 
-  makeManifoldCall (ManifoldFull rs) = return $ mname <> tupled (map (bndNamer . argId) rs)
+  makeManifoldCall (ManifoldFull rs) = return $ mname <> tupled (map argNamer rs)
   makeManifoldCall (ManifoldPass args) = do
     typestr <- stdFunction (returnType manifoldType) args
     return $ typestr <> parens mname
@@ -541,7 +529,7 @@ makeManifold callIndex form manifoldType e = do
     let vs' = take
               (length vs)
               (map (\j -> "std::placeholders::_" <> viaShow j) ([1..] :: [Int]))
-        rs' = map (bndNamer . argId) rs
+        rs' = map argNamer rs
         bindStr = stdBind $ castFunction : (rs' ++ vs')
     return $ appliedTypeStr <+> parens bindStr
 
