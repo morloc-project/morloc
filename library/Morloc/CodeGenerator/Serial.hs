@@ -21,13 +21,11 @@ module Morloc.CodeGenerator.Serial
 
 import Morloc.CodeGenerator.Internal
 import Morloc.CodeGenerator.Namespace
-import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
 import qualified Morloc.Frontend.Lang.DefaultTypes as Def
-import Morloc.Pretty (prettyPackMap)
 import Morloc.Data.Doc
 import Morloc.Typecheck.Internal (subtype, apply, unqualify, substitute)
-import Control.Monad.Except (Except, runExcept, throwError)
+import Control.Monad.Except (Except, throwError)
 import qualified Morloc.Data.Text as MT
 
 defaultSerialConcreteType :: Lang -> MT.Text
@@ -177,7 +175,7 @@ resolvePacker lang packedType@(AppF _ ts1) p@(unqualify . resolvedPackedType -> 
             , typePackerForward = resolvedPackerForward p
             , typePackerReverse = resolvedPackerReverse p
             }
-    | otherwise = return Nothing
+    | otherwise = return Nothing -- this packer has the wrong cardinality, don't worry about it
     where
         -- Both sides of the packer function are guaranteed to have the same
         -- generic values, this is guaranteed by the implementation of
@@ -209,7 +207,7 @@ resolvePacker lang packedType@(AppF _ ts1) p@(unqualify . resolvedPackedType -> 
             -> Maybe (TypeU, TypeU) -- The general unresolved packed and unpacked types
             -> Except MDoc TypeF -- the resolved unpacked types
         resolveP a b c generalTypes = do
-            let (ca, ga) = unweaveTypeF lang a
+            let (ga, ca) = unweaveTypeF lang a
             unpackedConcreteType <- case subtype b ca (Gamma 0 []) of
                 (Left typeErr) -> throwError
                     $  "There was an error raised in subtyping while resolving serialization"

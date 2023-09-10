@@ -303,6 +303,7 @@ data TypePacker = TypePacker
   , typePackerForward :: Source
   , typePackerReverse :: Source
   }
+  deriving (Show, Ord, Eq)
 
 instance Pretty TypePacker where
   pretty p = "TypePacker" <+> encloseSep "{" "}" ","

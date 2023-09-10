@@ -1351,6 +1351,7 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
     (Right x) -> return x
   where
 
+  -- map of argument indices to native types
   typemap = makeTypemap e0
 
   typeArg :: SerializationState -> Int -> Arg TypeM
