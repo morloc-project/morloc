@@ -40,6 +40,14 @@ data PoolDocs = PoolDocs
     -- functions or imports
   }
 
+instance Defaultable PoolDocs where
+  defaultValue = PoolDocs
+    { poolCompleteManifolds = []
+    , poolExpr = ""
+    , poolPriorLines = []
+    , poolPriorExprs = []
+    }
+
 -- | Merge a series of pools, keeping prior lines, expression and manifolds, but
 -- merging bodies with a function. For example, merge all elements in a list and
 -- process the poolExpr variales into list syntax in the given language.

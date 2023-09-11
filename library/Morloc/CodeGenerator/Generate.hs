@@ -722,7 +722,7 @@ expressPolyExpr pc
                   )
              ) _)
       xs
-                , (Idx _ _, appArgs)
+                , (Idx _ appType, appArgs)
                 )
            ) _)
               , (Idx _ lamType@(FunP lamInputTypes lamOutType), lamArgs))
@@ -799,7 +799,7 @@ expressPolyExpr pc
         . PolyManifold m (ManifoldPass (map unvalue appArgs))
         . PolyReturn
         . PolyApp
-          ( PolyForeignInterface (langOf' pc) (map argId appArgs)
+          ( PolyForeignInterface appType (langOf' pc) (map argId appArgs)
           . PolyManifold m (ManifoldFull (map unvalue appArgs))
           . PolyReturn
           $ PolyApp call xs'
@@ -881,7 +881,7 @@ expressPolyExpr pc
         . chain lets
         . PolyReturn
         . PolyApp
-            ( PolyForeignInterface (langOf' pc) passedParentArgs
+            ( PolyForeignInterface appType (langOf' pc) passedParentArgs
             . PolyManifold m (ManifoldFull (map unvalue appArgs))
             . PolyReturn
             $ PolyApp call xs'
@@ -958,7 +958,7 @@ expressPolyExpr _ (SAnno (One (LamS vs body, (Idx _ lambdaType, manifoldArgument
 --   connections will be snapped apart in the segment step.
 -- * These applications will be fully applied, the case of partially applied
 --   functions will have been handled previously by LamM
-expressPolyExpr pc (SAnno (One (AppS (SAnno (One (CallS src, (Idx _ fc@(FunP inputs _), _))) _) xs, (_, args))) m)
+expressPolyExpr pc (SAnno (One (AppS (SAnno (One (CallS src, (Idx _ fc@(FunP inputs _), _))) _) xs, (Idx _ appType, args))) m)
 
   ----------------------------------------------------------------------------------------
   -- #1 cis applied                                            | contextArgs | boundArgs |
@@ -1007,7 +1007,7 @@ expressPolyExpr pc (SAnno (One (AppS (SAnno (One (CallS src, (Idx _ fc@(FunP inp
           . PolyManifold m (ManifoldFull (map unvalue args))
           . PolyReturn
           . PolyApp
-              ( PolyForeignInterface (langOf' pc) [] -- no args are passed, so empty
+              ( PolyForeignInterface appType (langOf' pc) [] -- no args are passed, so empty
               . PolyManifold m (ManifoldFull (map unvalue args))
               . PolyReturn
               $ PolyApp f xs'
@@ -1021,7 +1021,7 @@ expressPolyExpr pc (SAnno (One (AppS (SAnno (One (CallS src, (Idx _ fc@(FunP inp
     f = PolySrc fc src
 
 -- An un-applied source call
-expressPolyExpr pc@(FunP pinputs _) (SAnno (One (CallS src, (Idx _ c@(FunP callInputs _), _))) m)
+expressPolyExpr pc@(FunP pinputs poutput) (SAnno (One (CallS src, (Idx _ c@(FunP callInputs _), _))) m)
   ----------------------------------------------------------------------------------------
   -- #2 cis passed                                             | contextArgs | boundArgs |
   ----------------------------------------------------------------------------------------
@@ -1069,7 +1069,7 @@ expressPolyExpr pc@(FunP pinputs _) (SAnno (One (CallS src, (Idx _ c@(FunP callI
        . PolyManifold m (ManifoldPass lambdaArgs)
        . PolyReturn
        . PolyApp
-           ( PolyForeignInterface (langOf' pc) (map argId lambdaArgs)
+           ( PolyForeignInterface poutput (langOf' pc) (map argId lambdaArgs)
            . PolyManifold m (ManifoldFull lambdaArgs)
            . PolyReturn
            $ PolyApp (PolySrc c src) callVals
@@ -1161,25 +1161,27 @@ segmentExpr
   -> MorlocMonad ([MonoHead], (Lang, MonoExpr))
 
 -- This is where segmentation happens, every other match is just traversal
-segmentExpr _ args (PolyForeignInterface lang _ e@(PolyManifold m (ManifoldFull foreignArgs) _)) = do
+segmentExpr _ args (PolyForeignInterface callingType lang _ e@(PolyManifold m (ManifoldFull foreignArgs) _)) = do
   -- MM.sayVVV $ "segmenting foreign interface" <+> pretty m
   (ms, (foreignLang, e')) <- segmentExpr m (map argId foreignArgs) e
   let foreignHead = MonoHead foreignLang m foreignArgs e'
   config <- MM.ask
+  callingTypeF <- typeP2typeFSafe callingType
   case MC.buildPoolCallBase config (Just foreignLang) m of
-    (Just cmds) -> return (foreignHead:ms, (lang, MonoPoolCall m cmds [Arg i None | i <- args]))
+    (Just cmds) -> return (foreignHead:ms, (lang, MonoPoolCall callingTypeF m cmds [Arg i None | i <- args]))
     Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' foreignLang
 
-segmentExpr m _ (PolyForeignInterface lang args e) = do
+segmentExpr m _ (PolyForeignInterface callingType lang args e) = do
   (ms, (foreignLang, e')) <- segmentExpr m args e
   -- create the foreign manifold, make sure all arugments are packed
   let foreignHead = MonoHead foreignLang m [Arg i None | i <- args] (MonoReturn e')
       -- pack the arguments that will be passed to the foreign manifold
       es' = map (MonoBndVar Nothing) args
   config <- MM.ask
+  callingTypeF <- typeP2typeFSafe callingType
   -- create the body of the local helper function
   localFun <- case MC.buildPoolCallBase config (Just foreignLang) m of
-    (Just cmds) -> return $ MonoApp (MonoPoolCall m cmds [Arg i None | i <- args]) es'
+    (Just cmds) -> return $ MonoApp (MonoPoolCall callingTypeF m cmds [Arg i None | i <- args]) es'
     Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' foreignLang
   return (foreignHead:ms, (lang, localFun))
 
@@ -1525,7 +1527,7 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
     se <- serializeS ne
     return (requests, se)
 
-  serialExpr (MonoApp (MonoPoolCall m docs contextArgs) es) = do
+  serialExpr (MonoApp (MonoPoolCall _ m docs contextArgs) es) = do
     let contextArgs' = map (typeArg Serialized . argId) contextArgs
         poolCall' = PoolCall m docs contextArgs'
     (states', es') <- mapM serialArg es |>> unzip
@@ -1573,7 +1575,7 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
     (r, sm) <- serialManifold m form' e
     return (r, SerialArgManifold sm)
   -- Pool and source calls should have previously been wrapped in manifolds
-  serialArg (MonoPoolCall _ _ _) = error "This step should be unreachable"
+  serialArg (MonoPoolCall _ _ _ _) = error "This step should be unreachable"
   serialArg (MonoSrc    _ _) = error "This step should be unreachable"
   serialArg (MonoReturn _) = error "Return should not happen hear (really I should remove this term completely)"
   serialArg e = do
@@ -1587,9 +1589,9 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
     (r, sm) <- nativeManifold m form' e
     return (r, NativeArgManifold sm)
   -- Pool and source calls should have previously been wrapped in manifolds
-  nativeArg (MonoPoolCall _ _ _) = error "This step should be unreachable"
+  nativeArg (MonoPoolCall _ _ _ _) = error "This step should be unreachable"
   nativeArg (MonoSrc    _ _) = error "This step should be unreachable"
-  nativeArg (MonoReturn _) = error "Return should not happen hear (really I should remove this term completely)"
+  nativeArg (MonoReturn _) = error "Return should not happen here (really I should remove this term completely)"
   nativeArg e = do
     (r, e') <- nativeExpr e
     return (r, NativeArgExpr e')
@@ -1656,7 +1658,10 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
         remaining -> return $ FunF remaining outputType
     return (Map.unionsWith (<>) argRequests, AppSrcN appType src args)
 
-  nativeExpr (MonoApp MonoPoolCall{} _) = error "This should be wrapped in a manifold"
+  nativeExpr e@(MonoApp (MonoPoolCall t _ _ _) _) = do
+    (requests, se) <- serialExpr e
+    ne <- naturalizeN t se
+    return (requests, ne)
 
   nativeExpr (MonoApp _ _) = error "Illegal application"
 

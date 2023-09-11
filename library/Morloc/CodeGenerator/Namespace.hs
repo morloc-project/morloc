@@ -398,6 +398,7 @@ data PolyExpr
   -- organizational terms that may have undefined types
   = PolyManifold Int (ManifoldForm None) PolyExpr
   | PolyForeignInterface
+      TypeP    -- return type in calling language
       Lang     -- calling lang
       [Int]    -- argument ids
       PolyExpr -- foreign expression
@@ -428,6 +429,7 @@ data MonoExpr
   -- organizational terms that may have undefined types
   = MonoManifold Int (ManifoldForm None) MonoExpr
   | MonoPoolCall
+      TypeF     -- return type in calling language
       Int       -- foreign manifold id
       [MDoc]    -- shell command components that preceed the passed data
       [Arg None] -- arguments
@@ -975,7 +977,7 @@ instance Pretty PolyExpr where
 
 instance Pretty MonoExpr where
     pretty (MonoManifold i form e) = block 4 ("m" <> pretty i <> parens (pretty form)) (pretty e)
-    pretty (MonoPoolCall i _ _) =  "PoolCall" <> parens (pretty i)
+    pretty (MonoPoolCall t i _ _) =  "PoolCall" <> parens (pretty i) <> parens (pretty t)
     pretty (MonoLet i e1 e2) = vsep ["let" <+> "x" <> pretty i <+> "=" <+> pretty e1, pretty e2]
     pretty (MonoLetVar t i) = parens $ "x" <> pretty i <> " :: " <> pretty t
     pretty (MonoReturn e) = "return" <> parens (pretty e)

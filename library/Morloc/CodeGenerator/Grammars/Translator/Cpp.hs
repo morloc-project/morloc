@@ -378,10 +378,10 @@ translateSegment m0 = do
   makeSerialExpr :: SerialExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> CppTranslator PoolDocs
   makeSerialExpr (AppManS_ e (map catEither -> es)) =
     return $ mergePoolDocs ((<>) (poolExpr e) . tupled) (e:es)
-  makeSerialExpr (AppPoolS_ (PoolCall _ cmds args) es) = do
+  makeSerialExpr (AppPoolS_ (PoolCall _ cmds args) _) = do
     let bufDef = "std::ostringstream s;"
         callArgs = map dquotes cmds ++ map argNamer args
-        cmd = "s << " <> cat (punctuate " << \" \" << " (callArgs <> map poolExpr es)) <> ";"
+        cmd = "s << " <> cat (punctuate " << \" \" << " callArgs) <> ";"
         call = [idoc|foreign_call(s.str())|]
     return $ PoolDocs
       { poolCompleteManifolds = []
