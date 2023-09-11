@@ -609,7 +609,8 @@ collectRecords e0@(SerialManifold i0 _ _ _)
     serialExpr e = return $ foldlSE (<>) [] e
 
     seekRecs :: Int -> TypeF -> [(FVar, GIndex, [(FVar, TypeF)])]
-    seekRecs m (NamF _ v _ rs) = [(v, m, rs)] <> concatMap (seekRecs m . snd) rs
+    seekRecs m (NamF _ v@(FV _ "struct") _ rs) = [(v, m, rs)] <> concatMap (seekRecs m . snd) rs
+    seekRecs m (NamF _ _ _ rs) = concatMap (seekRecs m . snd) rs
     seekRecs m (FunF ts t) = concatMap (seekRecs m) (t:ts)
     seekRecs m (AppF t ts) = concatMap (seekRecs m) (t:ts)
     seekRecs _ (UnkF _) = []
@@ -624,9 +625,7 @@ unifyRecords
      ] -> RecMap
 unifyRecords xs
   = zipWith (\i ((v,ks),es) -> ((v,ks), RecEntry (structName i v) es)) [1..]
-  . map (\((v,m,ks), rss) -> ((v,ks), [unifyField m fs | fs <- transpose rss]))
-  . map (\((v,ks), rss) -> ((v, fst (head rss),ks), map snd rss))
-  -- [((record_name, record_keys), [(GIndex, [(key,type)])])]
+  . map (\((v, ks), rss) -> ((v, ks), map unifyField (transpose (map snd rss))))
   -- associate unique pairs of record name and keys with their edge types
   . groupSort
   . unique
@@ -636,9 +635,9 @@ structName :: Int -> FVar -> MDoc
 structName i (FV v "struct") = "mlc_" <> pretty v <> "_" <> pretty i
 structName _ (FV _ v) = pretty v
 
-unifyField :: GIndex -> [(FVar, TypeF)] -> (FVar, Maybe TypeF)
-unifyField _ [] = error "Empty field"
-unifyField _ rs@((v,_):_)
+unifyField :: [(FVar, TypeF)] -> (FVar, Maybe TypeF)
+unifyField [] = error "Empty field"
+unifyField rs@((v,_):_)
   | not (all ((== v) . fst) rs)
       = error $ "Bad record - unequal fields: " <> show (unique rs)
   | otherwise = case unique (map snd rs) of
