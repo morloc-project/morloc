@@ -589,14 +589,24 @@ collectRecords :: SerialManifold -> [(FVar, GIndex, [(FVar, TypeF)])]
 collectRecords e0@(SerialManifold i0 _ _ _)
   = unique $ CMS.evalState (surroundFoldSerialManifoldM manifoldIndexer fm e0) i0
   where
-    fm = defaultValue { opNativeExprM = nativeExpr }
+    fm = defaultValue { opNativeExprM = nativeExpr, opSerialExprM = serialExpr }
 
     manifoldIndexer = makeManifoldIndexer CMS.get CMS.put
 
+    nativeExpr (DeserializeN_ t s xs) = do
+      manifoldIndex <- CMS.get
+      let tRecs = seekRecs manifoldIndex t
+          sRecs = seekRecs manifoldIndex (serialAstToType s)
+      return $ xs <> tRecs <> sRecs
     nativeExpr e = do
       manifoldIndex <- CMS.get
       let newRecs = seekRecs manifoldIndex (typeFof e)
       return $ foldlNE (<>) newRecs e
+
+    serialExpr (SerializeS_ s xs) = do
+      manifoldIndex <- CMS.get
+      return $ seekRecs manifoldIndex (serialAstToType s) <> xs
+    serialExpr e = return $ foldlSE (<>) [] e
 
     seekRecs :: Int -> TypeF -> [(FVar, GIndex, [(FVar, TypeF)])]
     seekRecs m (NamF _ v _ rs) = [(v, m, rs)] <> concatMap (seekRecs m . snd) rs
