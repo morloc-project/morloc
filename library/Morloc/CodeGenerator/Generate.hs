@@ -1759,17 +1759,19 @@ encode
   -- language into multiple pools (e.g., to resolve version conflicts).
   -> MorlocMonad Script
 encode lang xs = do
-  let srcs' = findSources xs
+  srcs' <- findSources xs
   xs' <- mapM (preprocess lang) xs
   -- translate each node in the AST to code
   translate lang srcs' xs'
 
-findSources :: [SerialManifold] -> [Source]
-findSources ms = unique $ concatMap (MI.runIdentity . foldSerialManifoldM fm) ms
+findSources :: [SerialManifold] -> MorlocMonad [Source]
+findSources ms = unique <$> concatMapM (foldSerialManifoldM fm) ms
   where
   fm = defaultValue
     { opSerialExprM = serialExprSrcs
     , opNativeExprM = nativeExprSrcs
+    , opNativeManifoldM = nativeManifoldSrcs
+    , opSerialManifoldM = nativeSerialSrcs
     }
   
   nativeExprSrcs (AppSrcN_ _ src xss) = return (src : concat xss)
@@ -1780,12 +1782,25 @@ findSources ms = unique $ concatMap (MI.runIdentity . foldSerialManifoldM fm) ms
   serialExprSrcs (SerializeS_ s xs) = return $ serialASTsources s <> xs
   serialExprSrcs e = return $ foldlSE (<>) [] e
 
+  -- Collect sources for all type (un)packers that are used in serialization
   serialASTsources :: SerialAST -> [Source]
   serialASTsources (SerialPack _ (p, s)) = [ typePackerForward p, typePackerReverse p ] <> serialASTsources s
   serialASTsources (SerialList _ s) = serialASTsources s
   serialASTsources (SerialTuple _ ss) = concatMap serialASTsources ss
   serialASTsources (SerialObject _ _ _ (map snd -> ss)) = concatMap serialASTsources ss
   serialASTsources _ = []
+
+  nativeManifoldSrcs (NativeManifold_ m lang _ (_, e)) = (<>) e <$> lookupConstructors lang m
+  nativeSerialSrcs (SerialManifold_ m lang _ e) = (<>) e <$> lookupConstructors lang m
+
+  -- Find object constructors that are NOT defined (un)pack functions
+  -- These are object constructors imported from the concrete sources that are
+  -- used as concrete types. For example:
+  --   source py from "person.py" ("PersonObj")
+  --   table (Person a) = Person {name :: Str, info :: a}
+  --   table py (Person a) = "PersonObj" {name :: "str", info :: a}
+  lookupConstructors :: Lang -> Int -> MorlocMonad [Source]
+  lookupConstructors lang i = MM.metaSources i |>> filter ((==) lang . srcLang)
 
 
 translate :: Lang -> [Source] -> [SerialManifold] -> MorlocMonad Script
