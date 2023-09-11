@@ -1093,10 +1093,10 @@ expressPolyExpr _ (SAnno (One (StrS x, (Idx _ (VarP v), _))) _)  = return $ Poly
 expressPolyExpr _ (SAnno (One (UniS, (Idx _ (VarP v), _))) _)    = return $ PolyNull v
 
 -- record access
-expressPolyExpr pc (SAnno (One (AccS x key, (Idx _ (NamP o v _ rs), _))) _) = do
-  x' <- expressPolyExpr pc x
+expressPolyExpr pc (SAnno (One (AccS record@(SAnno (One (_, (Idx _ (NamP o v _ rs), _))) _) key, _)) _) = do
+  record' <- expressPolyExpr pc record
   case lookup key [(ckey, ct) | (PV _ _ ckey, ct) <- rs] of
-    (Just valType) -> return $ PolyAcc valType o v x' key
+    (Just valType) -> return $ PolyAcc valType o v record' key
     Nothing -> error "invalid key access"
 
 -- lists
@@ -1131,7 +1131,7 @@ expressPolyExpr _ (SAnno (One (e, (Idx _ t, _))) m) = do
   name' <- MM.metaName m
   case name' of
       (Just v) -> MM.throwError . ConcreteTypeError $ MissingConcreteSignature v (langOf' t)
-      Nothing ->  error "But I thought, I thought I fixed that?"
+      Nothing ->  error "Bug in expressPolyExpr - this should be unreachable"
 
 
 unvalue :: Arg a -> Arg None
