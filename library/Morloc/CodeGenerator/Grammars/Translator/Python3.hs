@@ -218,7 +218,7 @@ translateSegment m0 =
     makeSerialExpr (AppManS_ f _) = return f
     makeSerialExpr (AppPoolS_ (PoolCall _ cmds args) _) = do
       let call = "_morloc_foreign_call(" <> list(map dquotes cmds ++ map argNamer args) <> ")"
-      return $ defaultValue { poolExpr = cal }
+      return $ defaultValue { poolExpr = call }
     makeSerialExpr (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
     makeSerialExpr (SerialLetS_ i e1 e2) = return $ makeLet svarNamer i e1 e2
     makeSerialExpr (NativeLetS_ i (_, e1) e2) = return $ makeLet nvarNamer i e1 e2
