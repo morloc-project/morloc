@@ -1407,24 +1407,25 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
     let requiredState = Map.fromList [(i, typeM2request t') | (Arg i t') <- manifoldArgs form']
     return (requiredState, NativeManifold m lang form' (typeFof ne2, ne2))
 
-  foldMapForm :: Monad m => (([Arg b], e) -> Arg a -> m ([Arg b], e)) -> ManifoldForm a -> e -> m (ManifoldForm b, e)
+  foldMapForm :: Monad m => (Bool -> ([Arg b], e) -> Arg a -> m ([Arg b], e)) -> ManifoldForm a -> e -> m (ManifoldForm b, e)
   foldMapForm f (ManifoldPass rs) e = do
-    (rs', e') <- foldlM f ([], e) rs
+    (rs', e') <- foldlM (f True) ([], e) rs
     return (ManifoldPass (reverse rs'), e')
   foldMapForm f (ManifoldFull rs) e = do
-    (rs', e') <- foldlM f ([], e) rs
+    (rs', e') <- foldlM (f False) ([], e) rs
     return (ManifoldFull (reverse rs'), e')
   foldMapForm f (ManifoldPart rs1 rs2) e = do
-    (rs1', e') <- foldlM f ([], e) rs1
-    (rs2', e'') <- foldlM f ([], e') rs2
+    (rs1', e') <- foldlM (f False) ([], e) rs1
+    (rs2', e'') <- foldlM (f True) ([], e') rs2
     return (ManifoldPart (reverse rs1') (reverse rs2'), e'')
 
   synthesizeArg :: (e -> Arg (SerializationState, TypeF) -> Except MDoc e)
                 -> Map.Map Int Request
+                -> Bool -- is the current argument bound?
                 -> ([Arg TypeM], e)
                 -> Arg (Maybe SerializationState)
                 -> Except MDoc ([Arg TypeM], e)
-  synthesizeArg letWrap requests (args, e) (Arg i requirement) = case Map.lookup i typemap of
+  synthesizeArg letWrap requests isBound (args, e) (Arg i requirement) = case Map.lookup i typemap of
     (Just t) ->
       case (requirement, Map.lookup i requests) of
         -- no constraint placed on the argument serialization form (i.e., both forms are
@@ -1435,7 +1436,10 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
           -- since it doesn't matter what type is used, since both are
           -- available, we arbitrarily pick Native
           return (Arg i (Native t) : args, e)
-        (Nothing, Nothing) -> return (Arg i Passthrough : args, e)
+        (Nothing, Nothing) ->
+          if isBound
+             then return (Arg i (Native t) : args , e)
+             else return (Arg i (Serial t) : args, e)
         -- the input argument is serialized, if the internally required argument is
         -- native, then it must be let-serialized
         (Just Serialized, Just NativeContent          ) -> do
@@ -1524,7 +1528,7 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
     requestsAndArgs <- mapM eitherArg es
     let args = map (bimap snd snd) requestsAndArgs
         rsUnions = Map.unionsWith (<>) (map (either fst fst) requestsAndArgs)
-        form' = mapManifoldArgs (\(Arg i _) -> Arg i . maybeReqestToSerializationType $ Map.lookup i rsUnions) form
+        form' = informedManifoldForm rsUnions form
     (rm, sm) <- serialManifold m form' e
     return (Map.unionWith (<>) rm rsUnions, AppManS sm args)
 
@@ -1554,10 +1558,19 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
     se <- serializeS ne
     return (r, se)
 
-  maybeReqestToSerializationType :: Maybe Request -> Maybe SerializationState
-  maybeReqestToSerializationType (Just SerialContent) = Just Serialized
-  maybeReqestToSerializationType (Just NativeContent) = Just NonSerialized
-  maybeReqestToSerializationType _ = Nothing
+  informedManifoldForm :: Map.Map Int Request -> ManifoldForm None -> ManifoldForm (Maybe SerializationState)
+  informedManifoldForm _ (ManifoldPass xs) = ManifoldPass [Arg i (Just NonSerialized) | (Arg i _) <- xs]
+  informedManifoldForm requests (ManifoldFull xs) = ManifoldFull $ map (lookupRequest requests) xs
+  informedManifoldForm requests (ManifoldPart context bound ) =
+    ManifoldPart (map (lookupRequest requests) context)
+                 [Arg i (Just NonSerialized) | (Arg i _) <- bound]
+
+  lookupRequest :: Map.Map Int Request -> Arg None -> Arg (Maybe SerializationState)
+  lookupRequest requests (Arg i _) = case Map.lookup i requests of
+    (Just SerialContent) -> Arg i (Just Serialized)
+    (Just NativeContent) -> Arg i (Just NonSerialized)
+    _ -> Arg i Nothing
+
 
   -- make (SerialAST One) then convert to serializeMany
   serializeS :: NativeExpr -> Except MDoc SerialExpr
@@ -1574,10 +1587,9 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
     Serialized    -> Left <$> serialArg e
     NonSerialized -> Right <$> nativeArg e
 
--- data SerialArg = SerialArgManifold SerialManifold | SerialArgExpr SerialExpr
   serialArg :: MonoExpr -> Except MDoc (Map.Map Int Request, SerialArg)
   serialArg (MonoManifold m form e) = do
-    let form' = mapManifoldArgs (\ (Arg i _) -> Arg i Nothing) form
+    let form' = uninformedManifoldForm form
     (r, sm) <- serialManifold m form' e
     return (r, SerialArgManifold sm)
   -- Pool and source calls should have previously been wrapped in manifolds
@@ -1591,7 +1603,7 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
 -- data NativeArg = NativeArgManifold NativeManifold | NativeArgExpr NativeExpr
   nativeArg :: MonoExpr -> Except MDoc (Map.Map Int Request, NativeArg)
   nativeArg (MonoManifold m form e) = do
-    let form' = mapManifoldArgs (\ (Arg i _) -> Arg i Nothing) form
+    let form' = uninformedManifoldForm form
     (r, sm) <- nativeManifold m form' e
     return (r, NativeArgManifold sm)
   -- Pool and source calls should have previously been wrapped in manifolds
@@ -1607,7 +1619,7 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
     -> Except MDoc (Map.Map Int Request, NativeExpr)
 
   nativeExpr (MonoManifold m form e) = do
-    let form' = mapManifoldArgs (\ (Arg i _) -> Arg i Nothing) form
+    let form' = uninformedManifoldForm form
     (rs, nm@(NativeManifold _ _ _ (t, _))) <- nativeManifold m form' e
     return (rs, AppManN t nm [])
 
@@ -1645,7 +1657,7 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
     return (rs, ReturnN (typeFof e') e')
 
   nativeExpr (MonoApp (MonoManifold m form e) es) = do
-    let form' = mapManifoldArgs (\ (Arg i _) -> Arg i Nothing) form
+    let form' = uninformedManifoldForm form
     (bodyRequests, nm) <- nativeManifold m form' e 
     t <- case typeFof nm of
       (FunF inputTypes outputType) -> case drop (length es) inputTypes of
@@ -1716,6 +1728,13 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
   inferState MonoPoolCall{} = NonSerialized
   inferState MonoBndVar{} = error "Ambiguous bound term"
   inferState _ = NonSerialized
+
+  uninformedManifoldForm :: ManifoldForm a -> ManifoldForm (Maybe SerializationState) 
+  uninformedManifoldForm (ManifoldPass xs) = ManifoldPass [Arg i (Just NonSerialized) | (Arg i _) <- xs] 
+  uninformedManifoldForm (ManifoldFull xs) = ManifoldFull [Arg i Nothing | (Arg i _) <- xs ] 
+  uninformedManifoldForm (ManifoldPart context bound ) =
+    ManifoldPart [Arg i Nothing | (Arg i _) <- context ]
+                 [Arg i (Just NonSerialized) | (Arg i _) <- bound]
 
 
 -- | recursively replace BndVarS term with a LetVarS term, do not recurse across manifold borders
