@@ -399,7 +399,6 @@ data PolyExpr
   = PolyManifold Int (ManifoldForm None) PolyExpr
   | PolyForeignInterface
       TypeP    -- return type in calling language
-      Lang     -- calling lang
       [Int]    -- argument ids
       PolyExpr -- foreign expression
   | PolyLet Int PolyExpr PolyExpr
