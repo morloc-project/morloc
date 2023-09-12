@@ -11,6 +11,6 @@ f :: (a -> Bool) -> [a] -> [a]
 f Py :: (a -> Bool) -> [a] -> [a]
 
 foo = g h1 4.2 where
-  h1 a1 as1 = h2 as1
-  h2 as2 = f h3 as2
-  h3 x3 = True
+  h1 x xs = h2 xs
+  h2 xs = f h3 xs
+  h3 x = True

@@ -1428,7 +1428,10 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
         -- available in context)
         (Nothing, Just SerialContent) -> return (Arg i (Serial t) : args, e)
         (Nothing, Just NativeContent) -> return (Arg i (Native t) : args, e)
-        (Nothing, Just NativeAndSerialContent) -> error "no serialization decision is possible - what to do?"
+        (Nothing, Just NativeAndSerialContent) -> 
+          -- since it doesn't matter what type is used, since both are
+          -- available, we arbitrarily pick Native
+          return (Arg i (Native t) : args, e)
         (Nothing, Nothing) -> return (Arg i Passthrough : args, e)
         -- the input argument is serialized, if the internally required argument is
         -- native, then it must be let-serialized
