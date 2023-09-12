@@ -610,6 +610,7 @@ parameterize (SAnno (One (CallS src, c@(Idx _ (FunP inputs _)))) m) = do
 parameterize x = do
   MM.sayVVV "Entering parameterize Other"
   parameterize' [] x
+
 parameterize'
   :: [Arg EVar] -- arguments in parental scope (child needn't retain them)
   -> SAnno Int One (Indexed TypeP)
@@ -627,37 +628,39 @@ parameterize' _ (SAnno (One (CallS src, c)) m) = do
   return $ SAnno (One (CallS src, (c, []))) m
 parameterize' args (SAnno (One (AccS x k, c)) m) = do
   x' <- parameterize' args x
-  return $ SAnno (One (AccS x' k, (c, args))) m
+  let args' = pruneArgs args [x']
+  return $ SAnno (One (AccS x' k, (c, args'))) m
 parameterize' args (SAnno (One (LstS xs, c)) m) = do
   xs' <- mapM (parameterize' args) xs
-  let usedArgs = [i | Arg i _ <- unique . concatMap sannoSnd $ xs']
-      args' = [r | r@(Arg i _) <- args, i `elem` usedArgs]
+  let args' = pruneArgs args xs'
   return $ SAnno (One (LstS xs', (c, args'))) m
 parameterize' args (SAnno (One (TupS xs, c)) m) = do
   xs' <- mapM (parameterize' args) xs
-  let usedArgs = [i | Arg i _ <- unique . concatMap sannoSnd $ xs']
-      args' = [r | r@(Arg i _) <- args, i `elem` usedArgs]
+  let args' = pruneArgs args xs'
   return $ SAnno (One (TupS xs', (c, args'))) m
 parameterize' args (SAnno (One (NamS entries, c)) m) = do
-  vs' <- mapM (parameterize' args . snd) entries
-  let usedArgs = [i | Arg i _ <- unique . concatMap sannoSnd $ vs']
-      args' = [r | r@(Arg i _) <- args, i `elem` usedArgs]
-  return $ SAnno (One (NamS (zip (map fst entries) vs'), (c, args'))) m
+  xs' <- mapM (parameterize' args . snd) entries
+  let args' = pruneArgs args xs'
+  return $ SAnno (One (NamS (zip (map fst entries) xs'), (c, args'))) m
 parameterize' args (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
   ids <- MM.takeFromCounter (length inputs)
   let contextArgs = [r | r@(Arg _ v) <- args, v `notElem` vs] -- remove shadowed arguments
       boundArgs = zipWith Arg ids vs
-  x' <- parameterize' (contextArgs ++ boundArgs) x
-  return $ SAnno (One (LamS vs x', (c, contextArgs ++ boundArgs))) m
+  x' <- parameterize' (contextArgs <> boundArgs) x
+  let contextArgs' = pruneArgs contextArgs [x']
+  return $ SAnno (One (LamS vs x', (c, contextArgs' <> boundArgs))) m
 -- LamS MUST have a functional type, deviations would have been caught by the typechecker
 parameterize' _ (SAnno (One (LamS _ _, _)) _) = error "impossible"
 parameterize' args (SAnno (One (AppS x xs, c)) m) = do
   x' <- parameterize' args x
   xs' <- mapM (parameterize' args) xs
-  let usedArgs = [v | (Arg _ v) <- sannoSnd x' <> (unique . concatMap sannoSnd $ xs')]
-      args' = [r | r@(Arg _ v) <- args, v `elem` usedArgs]
+  let args' = pruneArgs args (x':xs')
   return $ SAnno (One (AppS x' xs', (c, args'))) m
 
+pruneArgs :: [Arg a] -> [SAnno c One (g, [Arg a])] -> [Arg a]
+pruneArgs args xs = 
+  let usedArgs = unique $ concatMap (map argId . sannoSnd) xs
+  in [r | r@(Arg i _) <- args, i `elem` usedArgs]
 
 express :: SAnno Int One (Indexed TypeP, [Arg EVar]) -> MorlocMonad PolyHead
 -- CallS - direct export of a sourced function, e.g.:
