@@ -22,17 +22,19 @@ module Morloc.Internal
   , module Control.Monad
   , module Control.Monad.IO.Class
   , module Data.Monoid
-  , module Data.Bifunctor
   , module Data.Traversable
-  -- Data.Char characters
-  , isUpper
+  , module Morloc.Data.Bifoldable
+  , module Morloc.Data.Bifunctor
+  , module Morloc.Data.Annotated
   , isLower
+  , isUpper
   -- ** selected functions from Data.Foldable
   , foldlM
   , foldrM
   -- ** extra Map functions
   , mapKeysM
   -- ** selected functions from Data.Tuple.Extra
+  , return2
   , uncurry3
   , curry3
   , third
@@ -49,8 +51,6 @@ module Morloc.Internal
   , mapSum
   , mapSumWith
   , catEither
-  , eitherM
-  , eitherBimapM
   -- ** safe versions of errant functions
   , module Safe
   , maximumOnMay
@@ -82,14 +82,18 @@ import Data.List.Extra hiding (list) -- 'list' conflicts with Doc
 import Data.Tuple.Extra ((***), (&&&))
 import Data.Maybe
 import Data.Monoid
-import Data.Bifunctor
 import Data.Traversable
 import Data.Char (isUpper, isLower)
 import Safe hiding (at, headDef, lastDef)
 import System.FilePath
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+import Morloc.Data.Bifoldable
+import Morloc.Data.Bifunctor
+import Morloc.Data.Annotated
 
+return2 :: Monad m => (a -> b -> c) -> (a -> b -> m c)
+return2 f x y = return $ f x y
 
 maximumOnMay :: Ord b => (a -> b) -> [a] -> Maybe a
 maximumOnMay _ [] = Nothing
@@ -202,14 +206,6 @@ mapKeysM f x = do
 catEither :: Either a a -> a
 catEither (Left x) = x
 catEither (Right x) = x
-
-eitherBimapM :: Monad m => (a -> m a') -> (b -> m b') -> Either a b -> m (Either a' b')
-eitherBimapM f _ (Left a) = Left <$> f a
-eitherBimapM _ g (Right a) = Right <$> g a
-
-eitherM :: (a -> m c) -> (b -> m c) -> Either a b -> m c
-eitherM f _ (Left a) = f a
-eitherM _ g (Right a) = g a
 
 -- | pipe the lhs functor into the rhs function
 infixl 1 |>>

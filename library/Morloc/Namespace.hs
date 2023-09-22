@@ -1,4 +1,4 @@
-{-# LANGUAGE ViewPatterns, OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns, OverloadedStrings, TypeFamilies #-}
 
 {-|
 Module      : Morloc.Namespace
@@ -11,7 +11,7 @@ Stability   : experimental
 
 module Morloc.Namespace
   (
-  -- ** re-export supplements to Prelude
+  -- ** re-exports
     module Morloc.Internal
   -- ** Synonyms
   , MDoc
@@ -20,11 +20,12 @@ module Morloc.Namespace
   , None(..)
   , One(..)
   , Many(..)
+  , Or(..)
   -- ** Other classes
   , Defaultable(..)
   -- ** Indexed
-  , Indexed(..)
-  , unindex
+  , IndexedGeneral(..)
+  , Indexed
   , GIndex
   -- ** Newtypes
   , CType(..)
@@ -114,6 +115,7 @@ import System.Directory.Tree (DirTree(..), AnchoredDirTree(..))
 import Morloc.Language (Lang(..))
 
 import qualified Data.Set as Set
+import qualified Data.Map as Map
 import qualified Data.Text as DT
 
 -- | no annotations for now
@@ -168,6 +170,20 @@ data MorlocState = MorlocState
   , stateName :: Map Int EVar
   -- ^ store the names of morloc compositions
   }
+
+data Or a b = L a | R b | LR a b
+  deriving(Ord, Eq, Show)
+
+instance Bifunctor Or where
+  bimap f _ (L a) = L (f a)
+  bimap _ g (R b) = R (g b)
+  bimap f g (LR a b) = LR (f a) (g b)
+
+instance Bifoldable Or where
+  bilist f _ (L a) = [f a]
+  bilist _ g (R b) = [g b]
+  bilist f g (LR a b) = [f a, g b]
+  
 
 {-
        A           - There can be only one general signature for a term within a scope
@@ -625,16 +641,20 @@ mapSExpr fg fc = fe where
   fe (CallS src) = CallS src
    
 
-data Indexed a = Idx Int a
+type Indexed = IndexedGeneral Int
+
+data IndexedGeneral k a = Idx k a
   deriving (Show, Ord, Eq)
 
-unindex :: Indexed a -> a
-unindex (Idx _ x) = x
+instance Annotated IndexedGeneral where
+  val (Idx _ x) = x
+  ann (Idx i _) = i
+  annotate i x = Idx i x
 
 -- TODO: This should probably be a newtype, I want to avoid ambiguous Int's in signatures
 type GIndex = Int
 
-instance Functor Indexed where
+instance Functor (IndexedGeneral k) where
   fmap f (Idx i x) = Idx i (f x)
 
 newtype CType = CType { unCType :: Type }

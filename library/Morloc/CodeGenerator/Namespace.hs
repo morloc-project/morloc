@@ -1,7 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE DeriveFoldable #-}
-{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE TypeFamilies #-}
 
@@ -22,20 +20,23 @@ module Morloc.CodeGenerator.Namespace
   , TypeM(..)
   , FVar(..)
   , TypeF(..)
-  , typeFof
+  , TypeS(..)
   , pvar2fvar
   , fvar2pvar
-  , typeP2typeF
-  , typeF2typeP
-  , typeF2typeM
-  , typeP2typeM
+  -- ** Typeclasses
+  , HasTypeF(..)
+  , HasTypeS(..)
+  , HasTypeM(..)
   -- ** 
-  , Arg(..), argId, unArg
+  , Arg
+  , ArgGeneral(..)
   , JsonType(..)
   , JsonPath
   , JsonAccessor(..)
   , NexusCommand(..)
   , ManifoldForm(..)
+  , ArgTypes(..)
+  , argTypesToTypeM
   -- ** Manifold data types
   , PolyHead(..)
   , PolyExpr(..)
@@ -61,6 +62,8 @@ module Morloc.CodeGenerator.Namespace
   , NativeArg_(..)
   , SerialExpr_(..)
   , NativeExpr_(..)
+  , foldlSM
+  , foldlNM
   , foldlSE
   , foldlNE
   , foldlSA
@@ -70,13 +73,8 @@ module Morloc.CodeGenerator.Namespace
   , TypePacker(..)
   , ResolvedPacker(..)
   -- ** Other
-  , manifoldArgs
-  , mapManifoldArgs
-  , mapManifoldArgsM
   , generalTypeOf
   , prettyGenTypeP
-  -- ** weird folds
-  , mapTo
   -- ** Simple fold over expressions
   , foldSerialManifoldM
   , foldNativeManifoldM
@@ -91,6 +89,17 @@ module Morloc.CodeGenerator.Namespace
   , surroundFoldNativeExprM
   , surroundFoldNativeArgM
   , surroundFoldSerialArgM
+  -- ** arg magic
+  , abimapM
+  , abilistM
+  , afirstM
+  , asecondM
+  , abilist
+  , abimap
+  , afirst
+  , asecond
+  , abiappendM
+  , abiappend
   ) where
 
 import Morloc.Namespace
@@ -100,8 +109,7 @@ import qualified Data.Set as Set
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import Morloc.Pretty ()
-import qualified Data.Foldable as DF
-import qualified Morloc.Language as ML
+import Control.Monad.Identity (runIdentity)
 
 -- | Stores the language, general name and concrete name for a type expression
 data PVar
@@ -137,15 +145,13 @@ data TypeF
   | NamF NamType FVar [TypeF] [(FVar, TypeF)]
   deriving (Show, Ord, Eq)
 
--- The concrete only type, the only problem is that I do not ever want this.
--- Even in the pool generators, I still want to be able to generate docs strings
--- with the general types. Though currently I am not doing so.
+-- Represents types that may contain serialized elements.
 data TypeC
-  = UnkC Text
-  | VarC Text
+  = SerC (Maybe TypeF)
+  | VarC FVar
   | FunC [TypeC] TypeC
-  | AppC TypeC [TypeC]
-  | NamC NamType Text [TypeC] [(Text, TypeC)]
+  | AppC TypeF [TypeF]
+  | NamC NamType FVar [TypeF] [(FVar, TypeF)]
   deriving (Show, Ord, Eq)
 
 pvar2fvar :: PVar -> FVar
@@ -154,30 +160,6 @@ pvar2fvar (PV _ Nothing c) = FV "<undefined>" c
 
 fvar2pvar :: Lang -> FVar -> PVar
 fvar2pvar l (FV g c) = PV l (Just g) c
-
-typeP2typeF :: TypeP -> TypeF
-typeP2typeF (UnkP v) = UnkF (pvar2fvar v)
-typeP2typeF (VarP v) = VarF (pvar2fvar v)
-typeP2typeF (FunP ts t) = FunF (map typeP2typeF ts) (typeP2typeF t)
-typeP2typeF (AppP t ts) = AppF (typeP2typeF t) (map typeP2typeF ts)
-typeP2typeF (NamP o v ds rs) = NamF o (pvar2fvar v) (map typeP2typeF ds) (map (bimap pvar2fvar typeP2typeF) rs)
-
-typeP2typeM :: TypeP -> TypeM
-typeP2typeM (UnkP _) = Passthrough
-typeP2typeM (FunP ts t) = Function (map typeP2typeM ts) (typeP2typeM t)
-typeP2typeM t = Native (typeP2typeF t)
-
-typeF2typeP :: Lang -> TypeF -> TypeP
-typeF2typeP l (UnkF v) = UnkP (fvar2pvar l v)
-typeF2typeP l (VarF v) = VarP (fvar2pvar l v)
-typeF2typeP l (FunF ts t) = FunP (map (typeF2typeP l) ts) (typeF2typeP l t)
-typeF2typeP l (AppF t ts) = AppP (typeF2typeP l t) (map (typeF2typeP l) ts)
-typeF2typeP l (NamF o v ds rs) = NamP o (fvar2pvar l v) (map (typeF2typeP l) ds) (map (bimap (fvar2pvar l) (typeF2typeP l)) rs)
-
-typeF2typeM :: TypeF -> TypeM
-typeF2typeM (FunF ts t) = Function (map typeF2typeM ts) (typeF2typeM t)
-typeF2typeM (UnkF _) = Passthrough
-typeF2typeM t = Native t
 
 type JsonPath = [JsonAccessor]
 data JsonAccessor
@@ -325,18 +307,21 @@ data JsonType
   -- ^ {"Foo":{"bar":"A","baz":"B"}}
   deriving (Show, Ord, Eq)
 
+type Arg = ArgGeneral Int
 
-data Arg a = Arg Int a
+data ArgGeneral k a = Arg k a
     deriving(Show, Eq, Ord)
 
-instance Functor Arg where
-    fmap f (Arg i x) = Arg i (f x)
+instance Annotated ArgGeneral where
+  val (Arg _ x) = x
+  ann (Arg i _) = i
+  annotate i x = Arg i x
 
-unArg :: Arg a -> a
-unArg (Arg _ x) = x
+instance Functor (ArgGeneral k) where
+  fmap f (Arg i x) = Arg i (f x)
 
-argId :: Arg a -> Int
-argId (Arg i _) = i
+instance Bifunctor ArgGeneral where
+  bimapM f g (Arg k x) = Arg <$> f k <*> g x
 
 data TypeM
   = Passthrough -- ^ serialized data that is not deserialized (and may not be representable) in this segment
@@ -345,58 +330,109 @@ data TypeM
   | Function [TypeM] TypeM -- ^ a function of n inputs and one output (cannot be serialized)
   deriving(Show, Eq, Ord)
 
-data (ManifoldForm a)
-  = ManifoldPass [Arg a]
-  -- ^ Unapplied function passed as argument
-  | ManifoldFull [Arg a]
-  -- ^ Fully applied function
-  | ManifoldPart [Arg a] [Arg a]
+-- | TypeS is a subset of TypeM that does not allow native types
+data TypeS
+  = PassthroughS
+  | SerialS TypeF
+  | FunctionS [TypeM] TypeS -- This is the type of a manifold
+  deriving(Show, Eq, Ord)
+
+instance HasTypeM TypeS where
+  typeMof PassthroughS = Passthrough
+  typeMof (SerialS t) = Serial t
+  typeMof (FunctionS ts t) = Function (map typeMof ts) (typeMof t)
+
+class HasTypeS a where
+  typeSof :: a -> TypeS
+
+-- | This type stores
+--
+-- Examples:
+--
+-- #1: ManifoldFull [x1 = (runif 0 1), x2 = var "x"]
+--   source py "foo.py" ("add", "runif")
+--   foo x = add (runif 0 1) x
+--
+-- Add and runif are both fully applied and their arguments are associated with
+-- expressions.
+--
+-- #2: for `add`:  ManifoldPass [x1 : "float", x2 : "float"]
+--   source py "foo.py" ("add")
+--   foo xs = zipWith add xs
+--
+-- x1 and x2 are supplied by the source function
+-- 
+-- #3: ManifoldPart [x1 = (runif 0 1), x2 = var "x"] [x2 : "float"]
+--   source py "foo.py" ("add", "runif")
+--   foo xs = map (add (runif 0 1)) xs
+--
+-- add takes one expression and one bound argument.
+data (ManifoldForm context bound)
+  = ManifoldFull [Arg context]
+  -- ^ Fully applied function.
+  | ManifoldPass [Arg bound]
+  -- ^ Unapplied function passed as argument.
+  | ManifoldPart [Arg context] [Arg bound]
   -- ^ Partially applied function
   deriving(Show, Eq, Ord)
 
-instance Functor ManifoldForm where
-  fmap f (ManifoldPass xs) = ManifoldPass (map (fmap f) xs)
-  fmap f (ManifoldFull xs) = ManifoldFull (map (fmap f) xs)
-  fmap f (ManifoldPart xs ys) = ManifoldPart (map (fmap f) xs) (map (fmap f) ys)
+instance Bifunctor ManifoldForm where
+  bimapM f _ (ManifoldFull xs) = ManifoldFull <$> mapM (\(Arg i x) -> Arg i <$> f x) xs
+  bimapM _ g (ManifoldPass xs) = ManifoldPass <$> mapM (\(Arg i x) -> Arg i <$> g x) xs
+  bimapM f g (ManifoldPart xs ys) = ManifoldPart <$> mapM (\(Arg i x) -> Arg i <$> f x) xs
+                                                 <*> mapM (\(Arg i x) -> Arg i <$> g x) ys
 
-instance Foldable ManifoldForm where
-  foldr f b (ManifoldPass xs) = foldr f b [x | Arg _ x <- xs]
-  foldr f b (ManifoldFull xs) = foldr f b [x | Arg _ x <- xs]
-  foldr f b (ManifoldPart xs ys) = foldr f b [x | Arg _ x <- xs <> ys]
+instance Bifoldable ManifoldForm where
+  bilistM f _ (ManifoldFull xs) = mapM (f . val) xs
+  bilistM _ g (ManifoldPass xs) = mapM (g . val) xs
+  bilistM f g (ManifoldPart xs ys) = (<>) <$> mapM (f . val) xs <*> mapM (g . val) ys
 
-instance Pretty t => Pretty (ManifoldForm t) where
-  pretty (ManifoldPass args) = "ManifoldPass" <> tupled (map pretty args)
-  pretty (ManifoldFull args) = "ManifoldFull"  <> tupled (map pretty args)
-  pretty (ManifoldPart contextArgs boundArgs)
-      = "ManifoldPart" <> tupled
-          [ "context:" <+> list (map pretty contextArgs)
-          , "bound:"   <+> list (map pretty boundArgs)
-          ]
+
+abimapM :: (Monad m) => (Int -> a -> m a') -> (Int -> b -> m b') -> ManifoldForm a b -> m (ManifoldForm a' b')
+abimapM f _ (ManifoldFull xs) = ManifoldFull <$> mapM (\t -> annotate (ann t) <$> f (ann t) (val t)) xs
+abimapM _ g (ManifoldPass xs) = ManifoldPass <$> mapM (\t -> annotate (ann t) <$> g (ann t) (val t)) xs
+abimapM f g (ManifoldPart xs ys)
+  = ManifoldPart <$> mapM (\t -> annotate (ann t) <$> f (ann t) (val t)) xs
+                 <*> mapM (\t -> annotate (ann t) <$> g (ann t) (val t)) ys
+
+afirstM :: (Monad m) => (Int -> a -> m a') -> ManifoldForm a b -> m (ManifoldForm a' b)
+afirstM f = abimapM f (return2 seq)
+
+asecondM :: (Monad m) => (Int -> b -> m b') -> ManifoldForm a b -> m (ManifoldForm a b')
+asecondM = abimapM (return2 seq)
+
+abimap :: (Int -> a -> a') -> (Int -> b -> b') -> ManifoldForm a b -> ManifoldForm a' b'
+abimap f g = runIdentity . abimapM (return2 f) (return2 g)
+
+afirst :: (Int -> a -> a') -> ManifoldForm a b -> ManifoldForm a' b
+afirst f = runIdentity . afirstM (return2 f)
+
+asecond :: (Int -> b -> b') -> ManifoldForm a b -> ManifoldForm a b'
+asecond f = runIdentity . asecondM (return2 f)
+
+abilistM :: Monad m => (Int -> a -> m c) -> (Int -> b -> m c) -> ManifoldForm a b -> m [c]
+abilistM f _ (ManifoldFull xs) = mapM (annappM f) xs
+abilistM _ g (ManifoldPass xs) = mapM (annappM g) xs
+abilistM f g (ManifoldPart xs ys) = (<>) <$> mapM (annappM f) xs <*> mapM (annappM g) ys
+
+abilist :: (Int -> a -> c) -> (Int -> b -> c) -> ManifoldForm a b -> [c] 
+abilist f g = runIdentity . abilistM (return2 f) (return2 g)
+
+abiappendM :: (Monad m, Monoid c) => (Int -> a -> m c) -> (Int -> b -> m c) -> ManifoldForm a b -> m c
+abiappendM f g = fmap mconcat . abilistM f g
+
+abiappend :: (Monoid c) => (Int -> a -> c) -> (Int -> b -> c) -> ManifoldForm a b -> c
+abiappend f g = runIdentity . abiappendM (return2 f) (return2 g) 
 
 instance Pretty FVar where
     pretty (FV _ c) = pretty c
-
-manifoldArgs :: ManifoldForm t -> [Arg t]
-manifoldArgs (ManifoldPass args) = args
-manifoldArgs (ManifoldFull args) = args
-manifoldArgs (ManifoldPart contextArgs boundArgs) = contextArgs <> boundArgs
-
-mapManifoldArgs :: (Arg a -> Arg b) -> ManifoldForm a -> ManifoldForm b
-mapManifoldArgs f (ManifoldPass args) = ManifoldPass (map f args)
-mapManifoldArgs f (ManifoldFull args) = ManifoldFull (map f args)
-mapManifoldArgs f (ManifoldPart contextArgs boundArgs) = ManifoldPart (map f contextArgs) (map f boundArgs)
-
-mapManifoldArgsM :: Monad m => (Arg a -> m (Arg b)) -> ManifoldForm a -> m (ManifoldForm b)
-mapManifoldArgsM f (ManifoldPass args) = ManifoldPass <$> mapM f args
-mapManifoldArgsM f (ManifoldFull args) = ManifoldFull <$> mapM f args
-mapManifoldArgsM f (ManifoldPart contextArgs boundArgs) = ManifoldPart <$> mapM f contextArgs <*> mapM f boundArgs
 
 data PolyHead = PolyHead Int [Arg None] PolyExpr
 
 -- no serialization and no argument types
 data PolyExpr
   -- organizational terms that may have undefined types
-  = PolyManifold Int (ManifoldForm None) PolyExpr
+  = PolyManifold Int (ManifoldForm None None) PolyExpr
   | PolyForeignInterface
       TypeP    -- return type in calling language
       [Int]    -- argument ids
@@ -426,7 +462,7 @@ data MonoHead = MonoHead Lang Int [Arg None] MonoExpr
 
 data MonoExpr
   -- organizational terms that may have undefined types
-  = MonoManifold Int (ManifoldForm None) MonoExpr
+  = MonoManifold Int (ManifoldForm None None) MonoExpr
   | MonoPoolCall
       TypeF     -- return type in calling language
       Int       -- foreign manifold id
@@ -456,24 +492,33 @@ data PoolCall = PoolCall
   [Arg TypeM] -- contextual argument that are passed to the foreign function
               -- (not the main arguments to the foreign function)
 
-data NativeManifold = NativeManifold Int Lang (ManifoldForm TypeM) (TypeF, NativeExpr)
-data SerialManifold = SerialManifold Int Lang (ManifoldForm TypeM) SerialExpr
+-- | Represents a single data value that may be passed as an argument through a
+-- pool. It may be serialized, native, or both. If it is serialized only, then
+-- it may be a passthrough type, in whch case its type is not known.
+data ArgTypes
+  = SerialOnly TypeS
+  | NativeOnly TypeF
+  | SerialAndNative TypeF
+  deriving(Eq, Ord, Show)
+
+data NativeManifold = NativeManifold Int Lang (ManifoldForm NativeArg ArgTypes) (TypeF, NativeExpr)
+data SerialManifold = SerialManifold Int Lang (ManifoldForm SerialArg ArgTypes) (TypeS, SerialExpr)
 data SerialArg = SerialArgManifold SerialManifold | SerialArgExpr SerialExpr
 data NativeArg = NativeArgManifold NativeManifold | NativeArgExpr NativeExpr
 
 data SerialExpr
-  = AppManS SerialManifold [Either SerialArg NativeArg]
-  | AppPoolS PoolCall [SerialArg]
+  = ManS SerialManifold
+  | AppPoolS TypeF PoolCall [SerialArg]
   | ReturnS SerialExpr
   | SerialLetS Int SerialExpr SerialExpr
   | NativeLetS Int (TypeF, NativeExpr) SerialExpr
-  | LetVarS Int
-  | BndVarS Int
+  | LetVarS (Maybe TypeF) Int
+  | BndVarS (Maybe TypeF) Int
   | SerializeS SerialAST NativeExpr
 
 data NativeExpr
-  = AppSrcN      TypeF Source [NativeArg]
-  | AppManN      TypeF NativeManifold [Either SerialArg NativeArg]
+  = ManN         TypeF NativeManifold
+  | AppSrcN      TypeF Source [NativeArg]
   | ReturnN      TypeF NativeExpr
   | SerialLetN   Int SerialExpr (TypeF, NativeExpr)
   | NativeLetN   Int (TypeF, NativeExpr) (TypeF, NativeExpr)
@@ -492,6 +537,14 @@ data NativeExpr
   | StrN         FVar Text
   | NullN        FVar
 
+foldlSM :: (b -> a -> b) -> b -> SerialManifold_ a a -> b
+foldlSM f b (SerialManifold_ _ _ form (_, se)) =
+  foldl f b (catMaybes (bilist (Just . snd) (const Nothing) form) <> [se])
+
+foldlNM :: (b -> a -> b) -> b -> NativeManifold_ a a -> b
+foldlNM f b (NativeManifold_ _ _ form (_, ne)) =
+  foldl f b (catMaybes (bilist (Just . snd) (const Nothing) form) <> [ne])
+
 foldlSA :: (b -> a -> b) -> b -> SerialArg_ a a -> b
 foldlSA f b (SerialArgManifold_ sm) = f b sm
 foldlSA f b (SerialArgExpr_ se) = f b se
@@ -501,18 +554,18 @@ foldlNA f b (NativeArgManifold_ nm) = f b nm
 foldlNA f b (NativeArgExpr_ ne) = f b ne
 
 foldlSE :: (b -> a -> b) -> b -> SerialExpr_ a a a a a -> b
-foldlSE f b (AppManS_ x eitherXs) = foldl f b (x: map catEither eitherXs)
-foldlSE f b (AppPoolS_ _ xs) = foldl f b xs
+foldlSE f b (ManS_ x) = f b x
+foldlSE f b (AppPoolS_ _ _ xs) = foldl f b xs
 foldlSE f b (ReturnS_ x) = f b x
 foldlSE f b (SerialLetS_ _ x1 x2) = foldl f b [x1, x2]
 foldlSE f b (NativeLetS_ _ (_, x1) x2) = foldl f b [x1, x2]
-foldlSE _ b (LetVarS_ _) = b
-foldlSE _ b (BndVarS_ _) = b
+foldlSE _ b (LetVarS_ _ _) = b
+foldlSE _ b (BndVarS_ _ _) = b
 foldlSE f b (SerializeS_ _ x) = f b x
 
 foldlNE :: (b -> a -> b) -> b -> NativeExpr_ a a a a a -> b
 foldlNE f b (AppSrcN_      _ _ xs) = foldl f b xs
-foldlNE f b (AppManN_      _ x eitherXs) = foldl f b (x : map catEither eitherXs)
+foldlNE f b (ManN_      _ x) = f b x
 foldlNE f b (ReturnN_      _ x ) = f b x
 foldlNE f b (SerialLetN_   _ x1 (_, x2)) = foldl f b [x1, x2]
 foldlNE f b (NativeLetN_   _ (_, x1) (_, x2)) = foldl f b [x1, x2]
@@ -539,8 +592,8 @@ foldlNE _ b (NullN_        _) = b
 --  * sr - SerialArg
 --  * nr - NativeArg
 data FoldManifoldM m sm nm se ne sr nr = FoldManifoldM
-  { opSerialManifoldM :: SerialManifold_ se -> m sm
-  , opNativeManifoldM :: NativeManifold_ ne -> m nm
+  { opSerialManifoldM :: SerialManifold_ sr se -> m sm
+  , opNativeManifoldM :: NativeManifold_ nr ne -> m nm
   , opSerialExprM :: SerialExpr_ sm se ne sr nr -> m se
   , opNativeExprM :: NativeExpr_ nm se ne sr nr -> m ne
   , opSerialArgM  :: SerialArg_ sm se -> m sr
@@ -549,8 +602,8 @@ data FoldManifoldM m sm nm se ne sr nr = FoldManifoldM
 
 instance (Monoid a, Monad m, a ~ b, a ~ c, a ~ d, a ~ e, a ~ f) => Defaultable (FoldManifoldM m a b c d e f) where
   defaultValue = FoldManifoldM
-    { opSerialManifoldM = return . foldl mappend mempty
-    , opNativeManifoldM = return . foldl mappend mempty
+    { opSerialManifoldM = return . foldlSM mappend mempty
+    , opNativeManifoldM = return . foldlNM mappend mempty
     , opSerialExprM = return . foldlSE mappend mempty
     , opNativeExprM = return . foldlNE mappend mempty
     , opSerialArgM = return . foldlSA mappend mempty
@@ -576,29 +629,29 @@ instance Defaultable (SurroundManifoldM m sm nm se ne sr nr) where
     , surroundNativeArgM      = \ f x -> f x
     }
 
-data NativeManifold_ ne = NativeManifold_ Int Lang (ManifoldForm TypeM) (TypeF, ne)
-  deriving(Functor, Foldable)
+instance HasTypeF a => HasTypeM (Maybe a) where
+  typeMof (Just x) = Serial (typeFof x)
+  typeMof Nothing = Passthrough
 
-data SerialManifold_ se = SerialManifold_ Int Lang (ManifoldForm TypeM) se
-  deriving(Functor, Foldable)
 
+data NativeManifold_ nr ne = NativeManifold_ Int Lang (ManifoldForm (TypeM, nr) ArgTypes) (TypeF, ne)
+data SerialManifold_ sr se = SerialManifold_ Int Lang (ManifoldForm (TypeS, sr) ArgTypes) (TypeS, se)
 data SerialArg_ sm se = SerialArgManifold_ sm | SerialArgExpr_ se
-
 data NativeArg_ nm ne = NativeArgManifold_ nm | NativeArgExpr_ ne
 
 data SerialExpr_ sm se ne sr nr
-  = AppManS_ sm [Either sr nr]
-  | AppPoolS_ PoolCall [sr]
+  = ManS_ sm
+  | AppPoolS_ TypeF PoolCall [sr]
   | ReturnS_ se
   | SerialLetS_ Int se se
   | NativeLetS_ Int (TypeF, ne) se
-  | LetVarS_ Int
-  | BndVarS_ Int
+  | LetVarS_ (Maybe TypeF) Int
+  | BndVarS_ (Maybe TypeF) Int
   | SerializeS_ SerialAST ne
 
 data NativeExpr_ nm se ne sr nr
   = AppSrcN_      TypeF Source [nr]
-  | AppManN_      TypeF nm [Either sr nr]
+  | ManN_         TypeF nm
   | ReturnN_      TypeF ne 
   | SerialLetN_   Int se (TypeF, ne)
   | NativeLetN_   Int (TypeF, ne) (TypeF, ne)
@@ -638,16 +691,18 @@ foldNativeExprM = surroundFoldNativeExprM defaultValue
 surroundFoldSerialManifoldM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldManifoldM m sm nm se ne sr nr -> SerialManifold -> m sm
 surroundFoldSerialManifoldM sfm fm = surroundSerialManifoldM sfm f
   where
-  f (SerialManifold m lang form e) = do
+  f (SerialManifold m lang form (t, e)) = do
+    form' <- firstM (\x -> (,) (typeSof x) <$> surroundFoldSerialArgM sfm fm x) form
     e' <- surroundFoldSerialExprM sfm fm e
-    opSerialManifoldM fm $ SerialManifold_ m lang form e'
+    opSerialManifoldM fm $ SerialManifold_ m lang form' (t, e')
 
 surroundFoldNativeManifoldM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldManifoldM m sm nm se ne sr nr -> NativeManifold -> m nm
 surroundFoldNativeManifoldM sfm fm = surroundNativeManifoldM sfm f
   where
   f (NativeManifold m lang form (t, e)) = do
     e' <- surroundFoldNativeExprM sfm fm e
-    opNativeManifoldM fm $ NativeManifold_ m lang form (t, e')
+    form' <- firstM (\x -> (,) (typeMof x) <$> surroundFoldNativeArgM sfm fm x) form
+    opNativeManifoldM fm $ NativeManifold_ m lang form' (t, e')
 
 surroundFoldSerialArgM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldManifoldM m sm nm se ne sr nr -> SerialArg -> m sr
 surroundFoldSerialArgM sfm fm = surroundSerialArgM sfm f
@@ -672,13 +727,12 @@ surroundFoldNativeArgM sfm fm = surroundNativeArgM sfm f
 surroundFoldSerialExprM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldManifoldM m sm nm se ne sr nr -> SerialExpr -> m se
 surroundFoldSerialExprM sfm fm = surroundSerialExprM sfm f
   where
-  f (AppManS e es) = do
+  f (ManS e) = do
     e' <- surroundFoldSerialManifoldM sfm fm e
-    es' <- mapM (mapEitherM (surroundFoldSerialArgM sfm fm) (surroundFoldNativeArgM sfm fm)) es
-    opSerialExprM fm $ AppManS_ e' es'
-  f (AppPoolS pool es) = do
+    opSerialExprM fm $ ManS_ e'
+  f (AppPoolS t pool es) = do
     es' <- mapM (surroundFoldSerialArgM sfm fm) es
-    opSerialExprM fm $ AppPoolS_ pool es'
+    opSerialExprM fm $ AppPoolS_ t pool es'
   f (ReturnS e) = do
     e' <- surroundFoldSerialExprM sfm fm e
     opSerialExprM fm $ ReturnS_ e'
@@ -690,8 +744,8 @@ surroundFoldSerialExprM sfm fm = surroundSerialExprM sfm f
     sa' <- surroundFoldNativeExprM sfm fm na
     nb' <- surroundFoldSerialExprM sfm fm sb
     opSerialExprM fm $ NativeLetS_ i (t, sa') nb'
-  f (LetVarS i) = opSerialExprM fm (LetVarS_ i)
-  f (BndVarS i) = opSerialExprM fm (BndVarS_ i)
+  f (LetVarS t i) = opSerialExprM fm (LetVarS_ t i)
+  f (BndVarS t i) = opSerialExprM fm (BndVarS_ t i)
   f (SerializeS s e) = do
     e' <- surroundFoldNativeExprM sfm fm e
     opSerialExprM fm $ SerializeS_ s e'
@@ -702,10 +756,9 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
   f (AppSrcN t src nativeArgs) = do
       nativeArgs' <- mapM (surroundFoldNativeArgM sfm fm) nativeArgs
       opNativeExprM fm $ AppSrcN_ t src nativeArgs'
-  f (AppManN t nativeManifold eargs) = do
+  f (ManN t nativeManifold) = do
       nativeManifold' <- surroundFoldNativeManifoldM sfm fm nativeManifold 
-      eargs' <- mapM (mapEitherM (surroundFoldSerialArgM sfm fm) (surroundFoldNativeArgM sfm fm)) eargs
-      opNativeExprM fm $ AppManN_ t nativeManifold' eargs'
+      opNativeExprM fm $ ManN_ t nativeManifold'
   f (ReturnN t ne) = do
       ne' <- surroundFoldNativeExprM sfm fm ne
       opNativeExprM fm $ ReturnN_ t ne'
@@ -754,33 +807,12 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
 class HasTypeF a where
   typeFof :: a -> TypeF
 
-instance HasTypeF (NativeManifold_ a) where
-  typeFof (NativeManifold_ _ lang form (outputType, _)) = typeOfNativeManifold lang form outputType 
-
-instance HasTypeF (SerialManifold_ a) where
-  typeFof (SerialManifold_ _ lang form _) =
-    let outputType = VarF (FV ML.generalSerialType (ML.serialType lang))
-    in typeOfNativeManifold lang form outputType 
-
-instance HasTypeF NativeManifold where
-  typeFof (NativeManifold _ lang form (outputType, _)) = typeOfNativeManifold lang form outputType
-
-typeOfNativeManifold :: Lang -> ManifoldForm TypeM -> TypeF -> TypeF
-typeOfNativeManifold lang form outputType =
-    let inputTypes = [typeOfTypeM t | Arg _ t <- manifoldArgs form]
-    in case inputTypes of
-        [] -> outputType
-        _ -> FunF inputTypes outputType
-    where
-        typeOfTypeM :: TypeM -> TypeF
-        typeOfTypeM Passthrough = VarF (FV ML.generalSerialType (ML.serialType lang))
-        typeOfTypeM (Serial _) = VarF (FV ML.generalSerialType (ML.serialType lang))
-        typeOfTypeM (Native t) = t
-        typeOfTypeM (Function ts t) = FunF (map typeOfTypeM ts) (typeOfTypeM t)
+instance HasTypeF TypeF where
+  typeFof = id
 
 instance HasTypeF NativeExpr where
+  typeFof (ManN         t _) = t
   typeFof (AppSrcN      t _ _) = t
-  typeFof (AppManN      t _ _) = t
   typeFof (ReturnN      t _) = t
   typeFof (SerialLetN   _ _ (t, _)) = t
   typeFof (NativeLetN   _ _ (t, _)) = t
@@ -800,7 +832,7 @@ instance HasTypeF NativeExpr where
 
 instance HasTypeF (NativeExpr_ a b c d e) where
   typeFof (AppSrcN_      t _ _) = t
-  typeFof (AppManN_      t _ _) = t
+  typeFof (ManN_         t _) = t
   typeFof (ReturnN_      t _) = t
   typeFof (SerialLetN_   _ _ (t, _)) = t
   typeFof (NativeLetN_   _ _ (t, _)) = t
@@ -818,14 +850,100 @@ instance HasTypeF (NativeExpr_ a b c d e) where
   typeFof (StrN_         v _) = VarF v
   typeFof (NullN_        v  ) = VarF v
 
-mapEitherM :: Monad m => (a -> m a') -> (b -> m b') -> Either a b -> m (Either a' b') 
-mapEitherM f _ (Left x) = Left <$> f x
-mapEitherM _ f (Right x) = Right <$> f x
+instance HasTypeF TypeP where
+  typeFof (UnkP v) = UnkF (pvar2fvar v)
+  typeFof (VarP v) = VarF (pvar2fvar v)
+  typeFof (FunP ts t) = FunF (map typeFof ts) (typeFof t)
+  typeFof (AppP t ts) = AppF (typeFof t) (map typeFof ts)
+  typeFof (NamP o v ds rs) = NamF o (pvar2fvar v) (map typeFof ds) (map (bimap pvar2fvar typeFof) rs)
 
-mapTo :: (a -> c) -> (b -> c) -> Either a b -> c
-mapTo f _ (Left  x) = f x
-mapTo _ f (Right x) = f x
+class HasTypeM e where
+  typeMof :: e -> TypeM
 
+instance HasTypeM TypeM where
+  typeMof = id
+
+instance HasTypeM TypeP where
+  typeMof (UnkP _) = Passthrough
+  typeMof (FunP ts t) = Function (map typeMof ts) (typeMof t)
+  typeMof t = Native (typeFof t)
+
+instance HasTypeM TypeF where
+  typeMof (FunF ts t) = Function (map typeMof ts) (typeMof t)
+  typeMof (UnkF _) = Passthrough
+  typeMof t = Native t
+
+instance HasTypeM NativeExpr where
+  typeMof = typeMof . typeFof
+
+instance HasTypeS TypeF where
+  typeSof (FunF ts t) = FunctionS (map typeMof ts) (typeSof t)
+  typeSof t = SerialS t
+
+-- TODO: fix this - the type of a native manifold should be the full function
+-- type, but the manifold function type may not be entirely native
+instance HasTypeF NativeManifold where
+  typeFof (NativeManifold _ _ _ (t, _)) = t
+
+instance HasTypeS SerialExpr where
+  typeSof (ManS sm) = typeSof sm
+  typeSof (AppPoolS t _ sargs) = FunctionS (map typeMof sargs) (SerialS t) 
+  typeSof (ReturnS e) = typeSof e
+  typeSof (SerialLetS _ _ e) = typeSof e
+  typeSof (NativeLetS _ _ e) = typeSof e
+  typeSof (LetVarS t _) = maybe PassthroughS SerialS t
+  typeSof (BndVarS t _) = maybe PassthroughS SerialS t
+  typeSof (SerializeS _ e) = SerialS (typeFof e)
+
+instance HasTypeM SerialExpr where
+  typeMof = typeMof . typeSof
+
+instance HasTypeM NativeManifold where
+  typeMof (NativeManifold _ _ form (t, _)) = typeOfManifold form (typeMof t)
+
+instance HasTypeM SerialManifold where
+  typeMof (SerialManifold _ _ form (t, _)) = typeOfManifold form (typeMof t)
+
+instance HasTypeS SerialManifold where
+  typeSof (SerialManifold _ _ form (t, _)) =
+    let inputTypes = concat $ bilist (return . typeMof) argTypesToTypeM form
+    in case inputTypes of
+        [] -> t
+        _ -> FunctionS inputTypes t
+
+instance HasTypeS SerialArg where
+  typeSof (SerialArgManifold x) = typeSof x
+  typeSof (SerialArgExpr x) = typeSof x
+
+instance HasTypeM (NativeManifold_ nr nm) where
+  typeMof (NativeManifold_ _ _ form (t, _)) = typeOfManifold (first fst form) (typeMof t)
+
+instance HasTypeM (SerialManifold_ sr se) where
+  typeMof (SerialManifold_ _ _ form (t, _)) = typeOfManifold (first fst form) (typeMof t)
+
+typeOfManifold :: (HasTypeM e) => ManifoldForm e ArgTypes -> TypeM -> TypeM
+typeOfManifold form outputType =
+    let inputTypes = concat $ bilist (return . typeMof) argTypesToTypeM form
+    in case inputTypes of
+        [] -> outputType
+        _ -> Function inputTypes outputType
+
+instance HasTypeM SerialArg where 
+  typeMof (SerialArgManifold sm) = typeMof sm
+  typeMof (SerialArgExpr e) = typeMof e
+
+instance HasTypeM NativeArg where 
+  typeMof (NativeArgManifold sm) = typeMof sm
+  typeMof (NativeArgExpr e) = typeMof e
+
+-- | Generate one or two types from an ArgType. These types may be native,
+-- serial, or (serial, native) (in that order). The serial types are rendered in
+-- the serial form, currently strings. Note that this operation erases the type
+-- annotation for the serial type, if it exists.
+argTypesToTypeM :: ArgTypes -> [TypeM]
+argTypesToTypeM (SerialOnly (typeMof -> t)) = [t]
+argTypesToTypeM (NativeOnly (typeMof -> t)) = [t]
+argTypesToTypeM (SerialAndNative t) = argTypesToTypeM (SerialOnly (SerialS t)) <> argTypesToTypeM (NativeOnly t)
 
 data ManifoldMap = ManifoldMap
  { mapSerialManifold :: SerialManifold -> SerialManifold
@@ -878,8 +996,8 @@ instance MFunctor NativeManifold where
         
 
 instance MFunctor SerialManifold where
-    mgatedMap g f sm@(SerialManifold m l form se)
-      | gateSerialManifold g sm = mapSerialManifold f $ SerialManifold m l form (mgatedMap g f se)
+    mgatedMap g f sm@(SerialManifold m l form (mayT, se))
+      | gateSerialManifold g sm = mapSerialManifold f $ SerialManifold m l form (mayT, mgatedMap g f se)
       | otherwise = mapSerialManifold f sm
         
 
@@ -900,16 +1018,13 @@ instance MFunctor NativeArg where
 instance MFunctor SerialExpr where
   mgatedMap g f se0
     | gateSerialExpr g se0 = case se0 of
-        (AppManS sm eitherArgs)
-            -> mapSerialExpr f
-            . AppManS (mgatedMap g f sm)
-            $ map (bimap (mgatedMap g f) (mgatedMap g f)) eitherArgs
-        (AppPoolS p serialArgs) -> mapSerialExpr f $ AppPoolS p (map (mgatedMap g f) serialArgs)
+        (ManS sm) -> mapSerialExpr f $ ManS (mgatedMap g f sm)
+        (AppPoolS t p serialArgs) -> mapSerialExpr f $ AppPoolS t p (map (mgatedMap g f) serialArgs)
         (ReturnS se) -> mapSerialExpr f $ ReturnS (mgatedMap g f se)
         (SerialLetS i se1 se2) -> mapSerialExpr f $ SerialLetS i (mgatedMap g f se1) (mgatedMap g f se2)
         (NativeLetS i (t, ne1) se2) -> mapSerialExpr f $ NativeLetS i (t, mgatedMap g f ne1) (mgatedMap g f se2)
-        e@(LetVarS _) -> mapSerialExpr f e
-        e@(BndVarS _) -> mapSerialExpr f e
+        e@(LetVarS _ _) -> mapSerialExpr f e
+        e@(BndVarS _ _) -> mapSerialExpr f e
         (SerializeS s ne) -> mapSerialExpr f $ SerializeS s (mgatedMap g f ne)
     | otherwise = mapSerialExpr f se0
 
@@ -918,7 +1033,7 @@ instance MFunctor NativeExpr where
   mgatedMap g f ne0
     | gateNativeExpr g ne0 = case ne0 of
         (AppSrcN t src nativeArgs) -> mapNativeExpr f $ AppSrcN t src (map (mgatedMap g f) nativeArgs)
-        (AppManN t nm eitherArgs) -> mapNativeExpr f . AppManN t (mgatedMap g f nm) $ map (bimap (mgatedMap g f) (mgatedMap g f)) eitherArgs
+        (ManN t nm) -> mapNativeExpr f $ ManN t (mgatedMap g f nm)
         (ReturnN t ne) -> mapNativeExpr f $ ReturnN t (mgatedMap g f ne)
         (SerialLetN i se (t, ne)) -> mapNativeExpr f $ SerialLetN i (mgatedMap g f se) (t, mgatedMap g f ne)
         (NativeLetN i (t1, ne1) (t2, ne2)) -> mapNativeExpr f $ NativeLetN i (t1, mgatedMap g f ne1) (t2, mgatedMap g f ne2)
@@ -975,7 +1090,10 @@ instance Pretty PolyExpr where
     pretty _ = "PolyExpr stub"
 
 instance Pretty MonoExpr where
-    pretty (MonoManifold i form e) = block 4 ("m" <> pretty i <> parens (pretty form)) (pretty e)
+    pretty (MonoManifold i form e)
+      = block 4 ("m" <> pretty i <> tupled (abilist contextArg boundArg form)) (pretty e) where
+        contextArg j _ = "c" <> pretty j
+        boundArg j _ = "b" <> pretty j
     pretty (MonoPoolCall t i _ _) =  "PoolCall" <> parens (pretty i) <> parens (pretty t)
     pretty (MonoLet i e1 e2) = vsep ["let" <+> "x" <> pretty i <+> "=" <+> pretty e1, pretty e2]
     pretty (MonoLetVar t i) = parens $ "x" <> pretty i <> " :: " <> pretty t

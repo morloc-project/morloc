@@ -123,8 +123,8 @@ makeSerialAST packmap lang = makeSerialAST'
             packedType <- weaveTypes (typeOf . fst <$> resolvedPackerGeneralTypes u) (typeOf (resolvedPackedType u))
             unpackedType <- weaveTypes (typeOf . snd <$> resolvedPackerGeneralTypes u) (typeOf (resolvedUnpackedType u))
             return $ TypePacker
-              { typePackerPacked   = typeP2typeF packedType
-              , typePackerUnpacked = typeP2typeF unpackedType
+              { typePackerPacked   = typeFof packedType
+              , typePackerUnpacked = typeFof unpackedType
               , typePackerForward  = resolvedPackerForward u
               , typePackerReverse  = resolvedPackerReverse u
               }

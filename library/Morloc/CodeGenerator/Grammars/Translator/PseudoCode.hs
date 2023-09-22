@@ -32,30 +32,32 @@ prettyFoldManifold = FoldManifoldM
  , opNativeArgM      = makeNativeArg
  } where
 
-    makeSerialManifold :: Monad m => SerialManifold_ PoolDocs -> m PoolDocs
-    makeSerialManifold (SerialManifold_ m _ form x) = translateManifold "SerialManifold" m form x
+    makeSerialManifold :: Monad m => SerialManifold_ PoolDocs PoolDocs -> m PoolDocs
+    makeSerialManifold (SerialManifold_ m _ form (_, x))
+      = return
+      $ translateManifold (makeFunction "SerialManifold") makeLambda m form x
 
-    makeNativeManifold :: Monad m => NativeManifold_ PoolDocs -> m PoolDocs
-    makeNativeManifold (NativeManifold_ m _ form (_, x)) = translateManifold "NativeManifold" m form x
+    makeNativeManifold :: Monad m => NativeManifold_ PoolDocs PoolDocs -> m PoolDocs
+    makeNativeManifold (NativeManifold_ m _ form (_, x)) = return $ translateManifold (makeFunction "NativeManifold") makeLambda m (first (first typeMof) form) x
 
     makeSerialExpr :: Monad m => SerialExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs
-    makeSerialExpr (AppManS_ f _) = return f
-    -- makeSerialExpr (AppManS_ f (map catEither -> rs)) = return $ mergePoolDocs ((<>) (poolExpr f) . tupled) (f : rs)
-    makeSerialExpr (AppPoolS_ (PoolCall _ cmds _) args) = return $ mergePoolDocs makePoolCall args
+    makeSerialExpr (ManS_ m) = return m
+    -- makeSerialExpr (AppManS_ f (ubicat -> rs)) = return $ mergePoolDocs ((<>) (poolExpr f) . tupled) (f : rs)
+    makeSerialExpr (AppPoolS_ t (PoolCall _ cmds _) args) = return $ mergePoolDocs makePoolCall args
         where
-        makePoolCall xs' = "__foreign_call__(" <> list(map dquotes cmds ++ xs') <> ")"
+        makePoolCall xs' = parens (pretty t) <+> "__foreign_call__(" <> list(map dquotes cmds ++ xs') <> ")"
     makeSerialExpr (ReturnS_ x) = return $ x {poolExpr = "ReturnS(" <> poolExpr x <> ")"}
     makeSerialExpr (SerialLetS_ i e1 e2) = return $ makeLet letNamerS "SerialLetS" i e1 e2
     makeSerialExpr (NativeLetS_ i (_, e1) e2) = return $ makeLet letNamerN "NativeLetS" i e1 e2
-    makeSerialExpr (LetVarS_ i) = return $ PoolDocs [] (letNamerS i) [] []
-    makeSerialExpr (BndVarS_ i) = return $ PoolDocs [] (bndNamerS i) [] []
+    makeSerialExpr (LetVarS_ _ i) = return $ PoolDocs [] (letNamerS i) [] []
+    makeSerialExpr (BndVarS_ _ i) = return $ PoolDocs [] (bndNamerS i) [] []
     makeSerialExpr (SerializeS_ _ e) = return $ e {poolExpr = "SerializeS" <> parens (poolExpr e)}
 
     makeNativeExpr :: Monad m => NativeExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs
     makeNativeExpr (AppSrcN_      _ (pretty . srcName -> functionName) xs) =
         return $ mergePoolDocs ((<>) functionName . tupled) xs
-    makeNativeExpr (AppManN_      _ call _) = return call 
-    -- makeNativeExpr (AppManN_      _ call (map catEither -> xs)) =
+    makeNativeExpr (ManN_      _ call) = return call 
+    -- makeNativeExpr (AppManN_      _ call (ubicat -> xs)) =
     --     return $ mergePoolDocs ((<>) (poolExpr call) . tupled) (call : xs)
     makeNativeExpr (ReturnN_      _ x) =
         return $ x { poolExpr = "ReturnN(" <> poolExpr x <> ")" }
@@ -88,22 +90,13 @@ prettyFoldManifold = FoldManifoldM
     makeNativeArg (NativeArgManifold_ x) = return x
     makeNativeArg (NativeArgExpr_ x) = return x
 
-    translateManifold :: Monad m => MDoc -> Int -> ManifoldForm TypeM -> PoolDocs -> m PoolDocs
-    translateManifold manStr m form (PoolDocs completeManifolds body priorLines priorExprs) = do
-      let args = manifoldArgs form
-      let mname = manNamer m
-          def = manStr <+> mname <> tupled [argName r <+> ":" <+> pretty t | r@(Arg _ t) <- args] <> ":"
-          newManifold = block 4 def (vsep $ priorLines <> [body])
-          call = case form of
-            (ManifoldFull rs) -> mname <> tupled (map argName rs) -- covers #1, #2 and #4
-            (ManifoldPass _) -> mname
-            (ManifoldPart rs vs) -> makeLambda vs (mname <> tupled (map argName (rs ++ vs))) -- covers #5
-      return $ PoolDocs
-          { poolCompleteManifolds = newManifold : completeManifolds
-          , poolExpr = call
-          , poolPriorLines = []
-          , poolPriorExprs = priorExprs
-          }
+    makeFunction :: MDoc -> MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> MDoc
+    makeFunction manStr mname args priorLines body =
+      let def = manStr <+> mname <> tupled [argName r <+> ":" <+> pretty t | r@(Arg _ t) <- args] <> ":"
+      in block 4 def (vsep $ priorLines <> [body])
+
+    makeLambda :: [Arg TypeM] -> MDoc -> MDoc
+    makeLambda args body = "lambda" <+> hsep (punctuate "," (map argName args)) <> ":" <+> body
 
     makeLet :: (Int -> MDoc) -> MDoc -> Int -> PoolDocs -> PoolDocs -> PoolDocs
     makeLet letNamer letStr i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
@@ -116,9 +109,6 @@ prettyFoldManifold = FoldManifoldM
     letNamerN :: Int -> MDoc
     letNamerN i = "letNvar_" <> pretty i
 
-    manNamer :: Int -> MDoc
-    manNamer i = "m" <> pretty i
-
     bndNamerS :: Int -> MDoc
     bndNamerS i = "bndSvar" <> pretty i
 
@@ -128,9 +118,6 @@ prettyFoldManifold = FoldManifoldM
     argName :: Arg TypeM -> MDoc
     argName (Arg i (Native _)) = bndNamerN i
     argName (Arg i _) = bndNamerS i
-
-    makeLambda :: [Arg TypeM] -> MDoc -> MDoc
-    makeLambda args body = "lambda" <+> hsep (punctuate "," (map argName args)) <> ":" <+> body
 
 
 prettyThing :: (FoldManifoldM MI.Identity PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> a -> MI.Identity PoolDocs) -> a -> MDoc

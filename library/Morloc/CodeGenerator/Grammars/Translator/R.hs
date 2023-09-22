@@ -16,12 +16,11 @@ module Morloc.CodeGenerator.Grammars.Translator.R
   ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (isSerializable, prettySerialOne, serialAstToType)
+import Morloc.CodeGenerator.Serial (isSerializable)
 import Morloc.CodeGenerator.Grammars.Common
-import Morloc.Frontend.Lang.DefaultTypes as Def
 import Morloc.Data.Doc
 import Morloc.Quasi
-import Morloc.Monad (asks, gets, Index, newIndex, runIndex)
+import Morloc.Monad (gets, Index, newIndex, runIndex)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
@@ -171,15 +170,17 @@ translateSegment m0 =
       , opNativeArgM = makeNativeArg
       }
 
-    makeSerialManifold :: SerialManifold_ PoolDocs -> Index PoolDocs
-    makeSerialManifold (SerialManifold_ m _ form x) = translateManifold m form x
+    makeSerialManifold :: SerialManifold_ PoolDocs PoolDocs -> Index PoolDocs
+    makeSerialManifold (SerialManifold_ m _ form (_, x))
+      = return $ translateManifold makeFunction makeLambda m form x
 
-    makeNativeManifold :: NativeManifold_ PoolDocs -> Index PoolDocs
-    makeNativeManifold (NativeManifold_ m _ form (_, x)) = translateManifold m form x
+    makeNativeManifold :: NativeManifold_ PoolDocs PoolDocs -> Index PoolDocs
+    makeNativeManifold (NativeManifold_ m _ form (_, x))
+      = return $ translateManifold makeFunction makeLambda m (first (first typeMof) form) x
 
     makeSerialExpr :: SerialExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> Index PoolDocs
-    makeSerialExpr (AppManS_ f _) = return f
-    makeSerialExpr (AppPoolS_ (PoolCall _ cmds args) _) = do
+    makeSerialExpr (ManS_ f) = return f
+    makeSerialExpr (AppPoolS_ _ (PoolCall _ cmds args) _) = do
       let quotedCmds = map dquotes cmds
           callArgs = "list(" <> hsep (punctuate "," (drop 1 quotedCmds ++ map argNamer args)) <> ")"
           call = ".morloc_foreign_call" <> tupled [head quotedCmds, callArgs, dquotes "_", dquotes "_"]
@@ -192,22 +193,22 @@ translateSegment m0 =
     makeSerialExpr (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
     makeSerialExpr (SerialLetS_ i e1 e2) = return $ makeLet svarNamer i e1 e2
     makeSerialExpr (NativeLetS_ i (_, e1) e2) = return $ makeLet nvarNamer i e1 e2
-    makeSerialExpr (LetVarS_ i) = return $ PoolDocs [] (svarNamer i) [] []
-    makeSerialExpr (BndVarS_ i) = return $ PoolDocs [] (svarNamer i) [] []
+    makeSerialExpr (LetVarS_ _ i) = return $ PoolDocs [] (svarNamer i) [] []
+    makeSerialExpr (BndVarS_ _ i) = return $ PoolDocs [] (svarNamer i) [] []
     makeSerialExpr (SerializeS_ s e) = do
       (serialized, assignments) <- serialize (poolExpr e) s
       return $ e {poolExpr = serialized, poolPriorLines = poolPriorLines e <> assignments}
 
     makeNativeExpr :: NativeExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> Index PoolDocs
-    makeNativeExpr (AppSrcN_      _ (pretty . srcName -> functionName) xs) =
+    makeNativeExpr (AppSrcN_ _ (pretty . srcName -> functionName) xs) =
         return $ mergePoolDocs ((<>) functionName . tupled) xs
-    makeNativeExpr (AppManN_      _ call _) = return call
-    makeNativeExpr (ReturnN_      _ x) =
+    makeNativeExpr (ManN_ _ call) = return call
+    makeNativeExpr (ReturnN_ _ x) =
         return $ x { poolExpr = "return(" <> poolExpr x <> ")" }
-    makeNativeExpr (SerialLetN_     i x1 (_, x2)) = return $ makeLet svarNamer i x1 x2
-    makeNativeExpr (NativeLetN_     i (_, x1) (_, x2)) = return $ makeLet nvarNamer i x1 x2
-    makeNativeExpr (LetVarN_      _ i) = return $ PoolDocs [] (nvarNamer i) [] []
-    makeNativeExpr (BndVarN_      _ i) = return $ PoolDocs [] (nvarNamer i) [] []
+    makeNativeExpr (SerialLetN_ i x1 (_, x2)) = return $ makeLet svarNamer i x1 x2
+    makeNativeExpr (NativeLetN_ i (_, x1) (_, x2)) = return $ makeLet nvarNamer i x1 x2
+    makeNativeExpr (LetVarN_ _ i) = return $ PoolDocs [] (nvarNamer i) [] []
+    makeNativeExpr (BndVarN_ _ i) = return $ PoolDocs [] (nvarNamer i) [] []
     makeNativeExpr (DeserializeN_ _ s x) = do
         (deserialized, assignments) <- deserialize (poolExpr x) s
         return $ x
@@ -247,30 +248,18 @@ translateSegment m0 =
     makeNativeArg (NativeArgManifold_ x) = return x
     makeNativeArg (NativeArgExpr_ x) = return x
 
-    translateManifold :: Int -> ManifoldForm TypeM -> PoolDocs -> Index PoolDocs
-    translateManifold m form (PoolDocs completeManifolds body priorLines priorExprs) = do
-      let args = manifoldArgs form
-      let mname = manNamer m
-          def = mname <+> "<-" <+> "function" <> tupled (map argNamer args)
-          newManifold = block 4 def (vsep $ priorLines <> [body])
-          call = case form of
-            (ManifoldFull rs) -> mname <> tupled (map argNamer rs) -- covers #1, #2 and #4
-            (ManifoldPass _) -> mname
-            (ManifoldPart rs vs) -> makeLambda vs (mname <> tupled (map argNamer (rs ++ vs))) -- covers #5
-      return $ PoolDocs
-          { poolCompleteManifolds = newManifold : completeManifolds
-          , poolExpr = call
-          , poolPriorLines = []
-          , poolPriorExprs = priorExprs
-          }
+    makeFunction :: MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> MDoc
+    makeFunction mname args priorLines body =
+      let def = mname <+> "<-" <+> "function" <> tupled (map argNamer args)
+      in block 4 def (vsep $ priorLines <> [body])
+
+    makeLambda :: [Arg TypeM] -> MDoc -> MDoc
+    makeLambda args body = "function" <+> tupled (map argNamer args) <> "{" <> body <> "}"
 
     makeLet :: (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
     makeLet namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
       let rs = rs1 ++ [ namer i <+> "<-" <+> e1' ] ++ rs2
       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
-
-makeLambda :: [Arg TypeM] -> MDoc -> MDoc
-makeLambda args body = "function" <+> tupled (map argNamer args) <> "{" <> body <> "}"
 
 -- For R, the type schema is the JSON representation of the type
 typeSchema :: SerialAST -> MDoc

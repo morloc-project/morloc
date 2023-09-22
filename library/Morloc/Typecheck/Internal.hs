@@ -26,7 +26,7 @@ module Morloc.Typecheck.Internal
   , unqualify
   -- * Typeclasses
   , Applicable(..)
-  , Indexable(..)
+  , GammaIndexLike(..)
   -- * manipulating context
   , access1
   , access2
@@ -100,24 +100,24 @@ instance Applicable Gamma where
     f (SerialConstraint t1 t2) = SerialConstraint (apply g1 t1) (apply g1 t2)
     f x = x 
 
-class Indexable a where
+class GammaIndexLike a where
   index :: a -> GammaIndex
 
-instance Indexable GammaIndex where
+instance GammaIndexLike GammaIndex where
   index = id
 
-instance Indexable TypeU where
+instance GammaIndexLike TypeU where
   index (ExistU t ts ds rs) = ExistG t ts ds rs
   index t = error $ "Can only index ExistT, found: " <> show t
 
-instance Indexable TVar where
+instance GammaIndexLike TVar where
   index v = ExistG v [] [] []
 
-(+>) :: Indexable a => Gamma -> a -> Gamma
+(+>) :: GammaIndexLike a => Gamma -> a -> Gamma
 (+>) g x = g {gammaContext = index x : gammaContext g}
 
 
-(++>) :: Indexable a => Gamma -> [a] -> Gamma
+(++>) :: GammaIndexLike a => Gamma -> [a] -> Gamma
 (++>) g xs = g {gammaContext = map index (reverse xs) <> gammaContext g }
 
 

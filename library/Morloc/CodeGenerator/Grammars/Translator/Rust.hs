@@ -174,7 +174,7 @@ makeArgument = undefined
 -- makeArgument (Arg i Passthrough) = bndNamer i <> ":" <+> inSerialType
 
 argName :: Arg TypeM -> MDoc
-argName (argId -> i) = bndNamer i
+argName (ann -> i) = bndNamer i
 
 showTypeP :: TypeP -> MDoc
 showTypeP (UnkP (PV _ _ v)) = pretty v

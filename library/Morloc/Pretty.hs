@@ -192,8 +192,8 @@ prettySExpr fc fg x0 = case x0 of
   (StrS x) -> "StrS<" <> viaShow x <> ">"
   (CallS src) -> "CallS<" <> pretty (srcName src) <> "@" <> pretty (srcLang src) <> ">"
 
-instance Pretty a => Pretty (Indexed a) where
-  pretty (Idx i x) = parens (viaShow i <> ":" <+> pretty x) 
+instance (Pretty k, Pretty a) => Pretty (IndexedGeneral k a) where
+  pretty (Idx i x) = parens (pretty i <> ":" <+> pretty x) 
 
 instance Pretty GammaIndex where
   pretty (VarG tv) = "VarG:" <+> pretty tv
