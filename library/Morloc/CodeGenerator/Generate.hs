@@ -53,7 +53,7 @@ import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import qualified Data.Set as Set
-import qualified Control.Monad.Identity as MI
+import Morloc.Monad (runIdentity)
 import Control.Monad.Except (Except, runExcept, throwError)
 
 import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
@@ -1271,56 +1271,6 @@ typeP2typeFSafe (NamP o v ds rs) = do
     return $ NamF o v' ds' (zip keys' vals')
 
 
-data Request = SerialContent | NativeContent | NativeAndSerialContent
-
-class HasRequest a where
-  requestOf :: a -> Request
-
-instance HasRequest TypeM where
-  requestOf Passthrough = SerialContent
-  requestOf (Serial _) = SerialContent
-  requestOf (Native _) = NativeContent
-  requestOf (Function _ _) = NativeContent
-
-instance HasRequest SerialExpr where
-  requestOf _ = SerialContent
-
-instance HasRequest NativeExpr where
-  requestOf _ = NativeContent
-
-instance HasRequest SerialArg where
-  requestOf _ = SerialContent
-
-instance HasRequest NativeArg where
-  requestOf _ = NativeContent
-
-instance HasRequest ArgTypes where
-  requestOf (SerialOnly _) = SerialContent
-  requestOf (NativeOnly _) = NativeContent
-  requestOf (SerialAndNative _) = NativeAndSerialContent
-
-instance Semigroup Request where
- SerialContent <> SerialContent = SerialContent
- NativeContent <> NativeContent = NativeContent
- _ <> _ = NativeAndSerialContent
-
-data SerializationState = Serialized | NonSerialized
-
-class HasSerializationState a where
-  isSerialized :: a -> SerializationState
-
-instance HasSerializationState SerialExpr where
-  isSerialized _ = Serialized
-
-instance HasSerializationState SerialManifold where
-  isSerialized _ = Serialized
-
-instance HasSerializationState NativeExpr where
-  isSerialized _ = NonSerialized
-
-instance HasSerializationState NativeManifold where
-  isSerialized _ = NonSerialized
-
 serialize :: [MonoHead] -> MorlocMonad [SerialManifold]
 serialize heads = do
     packerSets <- makePackerSets heads
@@ -1380,21 +1330,150 @@ collectUnresolvedPackers mheads = do
     f _ = return Map.empty
 
 
-
 -- | This step is performed after segmentation, so all terms are in the same
 -- language. Here we need to determine where inputs are (de)serialized and the
 -- serialization states of arguments and variables.
 serializeOne :: Map.Map MT.Text [ResolvedPacker] -> MonoHead -> MorlocMonad SerialManifold
 serializeOne packmap (MonoHead lang m0 args0 e0)  = do
   let form0 = ManifoldFull args0
-  case snd <$> runExcept (serialManifold m0 form0 e0 (map arg2ser args0)) of
+  case runExcept (serialManifold m0 form0 e0 (map arg2ser args0)) of
     (Left serr) -> MM.throwError . GeneratorError . render $ serr
-    (Right x) -> return x
+    (Right x) -> return $ wireSerial packmap typemap x
   where
+
+  serialManifold
+    :: Int
+    -> ManifoldForm None None
+    -> MonoExpr
+    -> [SerialArg]
+    -> Except MDoc SerialManifold
+  serialManifold m form se0 es = do
+    se1 <- serialExpr se0
+    let form' = setSerialForm es form 
+    return (SerialManifold m lang form' (typeSof se1, se1))
+
+  setSerialForm :: [a] -> ManifoldForm None None -> ManifoldForm a ArgTypes
+  setSerialForm es = abimap (\i _ -> es !! i) (\i _ -> maybe (SerialOnly PassthroughS) SerialAndNative (Map.lookup i typemap))
+
+  nativeManifold
+    :: Int
+    -> ManifoldForm None None
+    -> MonoExpr
+    -> [NativeArg]
+    -> Except MDoc NativeManifold
+  nativeManifold m form ne0 es = do
+    ne1 <- nativeExpr ne0
+    let form' = setSerialForm es form
+    return $ NativeManifold m lang form' (typeFof ne1, ne1)
+
+  serialExpr
+    :: MonoExpr
+    -> Except MDoc SerialExpr
+  serialExpr (MonoManifold _ _ e) = serialExpr e
+  serialExpr (MonoLet i e1 e2) = case inferState e1 of
+    Serialized -> SerialLetS i <$> serialExpr e1 <*> serialExpr e2
+    Unserialized -> do
+      ne1 <- nativeExpr e1
+      NativeLetS i (typeFof ne1, ne1) <$> serialExpr e2
+  serialExpr (MonoLetVar t i) = return (LetVarS (Just t) i)
+  serialExpr (MonoReturn e) = ReturnS <$> serialExpr e
+  serialExpr (MonoApp (MonoManifold m form e) rs) = do
+    rs' <- mapM serialArg rs
+    ManS <$> serialManifold m form e rs'
+  serialExpr (MonoApp (MonoPoolCall t m docs contextArgs) es) = do
+    let contextArgs' = map (typeArg Serialized . ann) contextArgs
+        poolCall' = PoolCall m docs contextArgs'
+    es' <- mapM serialArg es
+    return $ AppPoolS t poolCall' es'
+  serialExpr (MonoBndVar t i) = return (BndVarS t i)
+  -- failing cases that should be unreachable
+  serialExpr (MonoSrc _ _) = error "Can represent MonoSrc as SerialExpr"
+  -- = MonoManifold Int (ManifoldForm None) MonoExpr
+  serialExpr MonoPoolCall{} = error "MonoPoolCall does not map to a SerialExpr"
+  -- the following are all native types that need to be directly serialized
+  serialExpr e = nativeExpr e >>= serializeS
+
+  serialArg :: MonoExpr -> Except MDoc SerialArg
+  serialArg (MonoManifold m form e) = SerialArgManifold <$> serialManifold m form e []
+  -- Pool and source calls should have previously been wrapped in manifolds
+  serialArg MonoPoolCall{} = error "This step should be unreachable"
+  serialArg (MonoSrc    _ _) = error "This step should be unreachable"
+  serialArg (MonoReturn _) = error "Return should not happen hear (really I should remove this term completely)"
+  serialArg e = SerialArgExpr <$> serialExpr e
+
+  nativeArg :: MonoExpr -> Except MDoc NativeArg
+  -- This case may occur, for example, with `(add 1.0 2.0)`. Here `add` has two
+  -- native arguments, but the manifold that wraps it will have no
+  -- arguments. This is because `1.0` and `2.0` are primitive and will be
+  -- generated in place rather than passed as arguments.
+  nativeArg (MonoManifold m form e) = NativeArgManifold <$> nativeManifold m form e []
+  -- Pool and source calls should have previously been wrapped in manifolds
+  nativeArg MonoPoolCall{} = error "This step should be unreachable"
+  nativeArg (MonoSrc    _ _) = error "This step should be unreachable"
+  nativeArg (MonoReturn _) = error "Return should not happen here (really I should remove this term completely)"
+  nativeArg e = NativeArgExpr <$> nativeExpr e
+
+  nativeExpr
+    :: MonoExpr
+    -> Except MDoc NativeExpr
+  nativeExpr (MonoManifold m form e) = do
+    nm@(NativeManifold _ _ _ (t, _)) <- nativeManifold m form e []
+    return (ManN t nm)
+  nativeExpr MonoPoolCall{} = error "MonoPoolCall does not map to NativeExpr"
+  nativeExpr (MonoLet i e1 e2) = case inferState e1 of
+    Serialized -> do
+      ne2 <- nativeExpr e2
+      SerialLetN i <$> serialExpr e1 <*> pure (typeFof ne2, ne2)
+    Unserialized -> do
+      ne1 <- nativeExpr e1
+      ne2 <- nativeExpr e2
+      return $ NativeLetN i (typeFof ne1, ne1) (typeFof ne2, ne2)
+  nativeExpr (MonoLetVar t i) = return (LetVarN t i)
+  nativeExpr (MonoReturn e) = do
+    ne <- nativeExpr e
+    return (ReturnN (typeFof ne) ne)
+  nativeExpr (MonoApp (MonoManifold m form e) es) = do
+    args <- mapM nativeArg es
+    nm <- nativeManifold m form e args
+    t <- case typeFof nm of
+      (FunF inputTypes outputType) -> case drop (length es) inputTypes of
+        [] -> return outputType
+        remainingInputs -> return $ FunF remainingInputs outputType
+      badType -> throwError $ "Cannot apply type" <+> parens (pretty badType)
+    return $ ManN t nm
+  nativeExpr (MonoApp (MonoSrc (FunF inputTypes outputType) src) es) = do
+    args <- mapM nativeArg es
+    appType <- case drop (length es) inputTypes of
+        [] -> return outputType
+        remaining -> return $ FunF remaining outputType
+    return $ AppSrcN appType src args
+  nativeExpr e@(MonoApp (MonoPoolCall t _ _ _) _) = serialExpr e >>= naturalizeN t
+  nativeExpr (MonoApp _ _) = error "Illegal application"
+  nativeExpr (MonoSrc t src) = return (SrcN t src)
+  nativeExpr (MonoBndVar (Just t) i) = return (BndVarN t i)
+  nativeExpr (MonoBndVar Nothing _) = error "MonoBndVar must have a type if used in native context"
+  -- simple native types
+  nativeExpr (MonoAcc t o v e k) = AccN t o v <$> nativeExpr e <*> pure k
+  nativeExpr (MonoList v t es) = ListN v t <$> mapM nativeExpr es
+  nativeExpr (MonoTuple v rs) = do
+    let ts = map fst rs
+    es' <- mapM (nativeExpr . snd) rs
+    return $ TupleN v (zip ts es')
+  nativeExpr (MonoRecord o v ps rs) = do
+    let keys = map fst rs
+        types = map (fst . snd) rs
+    vals <- mapM (nativeExpr . snd . snd) rs
+    let rs' = zip keys (zip types vals)
+    return $ RecordN o v ps rs'
+  -- primitives
+  nativeExpr (MonoLog    v x) = return (LogN v x)
+  nativeExpr (MonoReal   v x) = return (RealN v x)
+  nativeExpr (MonoInt    v x) = return (IntN v x)
+  nativeExpr (MonoStr    v x) = return (StrN v x)
+  nativeExpr (MonoNull   v) = return (NullN v)
 
   arg2ser :: Arg None -> SerialArg
   arg2ser (Arg i _) = SerialArgExpr (BndVarS Nothing i)
-
 
   -- map of argument indices to native types
   typemap = makeTypemap e0
@@ -1403,8 +1482,8 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
   typeArg s i = case (s, Map.lookup i typemap) of
     (Serialized, Just t) -> Arg i (Serial t)
     (Serialized, Nothing) -> Arg i Passthrough
-    (NonSerialized, Just t) -> Arg i (Native t)
-    (NonSerialized, Nothing) -> error "Bug: untyped non-passthrough value"
+    (Unserialized, Just t) -> Arg i (Native t)
+    (Unserialized, Nothing) -> error "Bug: untyped non-passthrough value"
 
   makeTypemap :: MonoExpr -> Map.Map Int TypeF
   -- map variables used in this segment to their types
@@ -1412,192 +1491,14 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
   makeTypemap (MonoBndVar (Just t) i) = Map.singleton i t
   -- recursive calls
   makeTypemap (MonoManifold _ _ e) = makeTypemap e
-  makeTypemap MonoPoolCall{} = Map.empty
   makeTypemap (MonoLet _ e1 e2) = Map.union (makeTypemap e1) (makeTypemap e2)
   makeTypemap (MonoReturn e) = makeTypemap e
   makeTypemap (MonoApp e es) = Map.unions (map makeTypemap (e:es))
-  makeTypemap (MonoSrc _ _) = Map.empty
-  makeTypemap (MonoBndVar Nothing _) = Map.empty
   makeTypemap (MonoAcc _ _ _ e _) = makeTypemap e
   makeTypemap (MonoList _ _ es) = Map.unions (map makeTypemap es)
   makeTypemap (MonoTuple _ (map snd -> es)) = Map.unions (map makeTypemap es)
   makeTypemap (MonoRecord _ _ _ (map (snd . snd) -> es)) = Map.unions (map makeTypemap es)
-  makeTypemap (MonoLog _ _ ) = Map.empty
-  makeTypemap (MonoReal _ _) = Map.empty
-  makeTypemap (MonoInt _ _) = Map.empty
-  makeTypemap (MonoStr _ _) = Map.empty
-  makeTypemap (MonoNull _ ) = Map.empty
-
-  serialManifold
-    :: Int
-    -> ManifoldForm None None
-    -> MonoExpr
-    -> [SerialArg]
-    -> Except MDoc (Map.Map Int Request, SerialManifold)
-  serialManifold m form se0 es = do
-    (requestedState, se1) <- serialExpr se0
-    (form', se2) <- foldMapForm (synthesizeArgBound letWrapS requestedState) se1 (applyEs Serialized es form)
-    let requiredState = Map.fromList $ abilist (\i e -> (i, requestOf e)) (\i t -> (i, requestOf t)) form'
-    return (requiredState, SerialManifold m lang form' (typeSof se2, se2))
-
-  nativeManifold
-    :: Int
-    -> ManifoldForm None None
-    -> MonoExpr
-    -> [NativeArg]
-    -> Except MDoc (Map.Map Int Request, NativeManifold)
-  nativeManifold m form ne0 es = do
-    (requestedState, ne1) <- nativeExpr ne0
-    (form', ne2) <- foldMapForm (synthesizeArgBound letWrapN requestedState) ne1 (applyEs NonSerialized es form)
-    let requiredState = Map.fromList $ abilist (\i e -> (i, requestOf e)) (\i t -> (i, requestOf t)) form'
-    return (requiredState, NativeManifold m lang form' (typeFof ne2, ne2))
-
-  applyEs :: SerializationState -> [e] -> ManifoldForm None a -> ManifoldForm e (Maybe SerializationState)
-  applyEs _ es (ManifoldFull xs) = ManifoldFull $ equalZipWith (\(Arg i _) e -> Arg i e) xs es
-  applyEs r _ (ManifoldPass xs) = ManifoldPass $ [Arg i (Just r) | (Arg i _) <- xs]
-  applyEs r es (ManifoldPart xs ys) = ManifoldPart (equalZipWith (\(Arg i _) e -> Arg i e) xs es) [Arg i (Just r) | (Arg i _) <- ys]
-
-  synthesizeArgBound
-    :: (e -> Arg (SerializationState, TypeF) -> Except MDoc e)
-    -> Map.Map Int Request
-    -> ([Arg ArgTypes], e)
-    -> Arg (Maybe SerializationState)
-    -> Except MDoc ([Arg ArgTypes], e)
-  synthesizeArgBound letWrap requests (args, e) (Arg i requirement) = case Map.lookup i typemap of
-    (Just t) ->
-      case (requirement, Map.lookup i requests) of
-        -- no constraint placed on the argument serialization form (i.e., both forms are
-        -- available in context)
-        (Nothing, Just SerialContent) -> return (Arg i (SerialOnly (typeSof t)) : args, e)
-        (Nothing, Just NativeContent) -> return (Arg i (NativeOnly t) : args, e)
-        (Nothing, Just NativeAndSerialContent) -> return (Arg i (SerialAndNative t) : args, e)
-
-        (Just Serialized, Just NativeContent          ) -> do
-            e' <- letWrap e (Arg i (NonSerialized, t))
-            return (Arg i (SerialOnly (typeSof t)) : args, e')
-        (Just Serialized, Just NativeAndSerialContent ) -> do
-            e' <- letWrap e (Arg i (NonSerialized, t))
-            return (Arg i (SerialAndNative t) : args, e')
-        (Just Serialized, Just SerialContent ) -> return (Arg i (SerialOnly (typeSof t)) : args, e)
-        (Just Serialized, Nothing            ) -> return (Arg i (SerialOnly (typeSof t)) : args, e)
-
-        -- the input argument is native, if the internaly required argument is
-        -- serialized, then it must be let-deserialized
-        (Just NonSerialized, Just SerialContent         ) -> do
-            e' <- letWrap e (Arg i (Serialized, t))
-            return (Arg i (NativeOnly t) : args, e')
-        (Just NonSerialized, Just NativeAndSerialContent) -> do
-            e' <- letWrap e (Arg i (Serialized, t))
-            return (Arg i (SerialAndNative t) : args, e')
-        (Just NonSerialized, Just NativeContent) -> return (Arg i (NativeOnly t) : args, e)
-        (Just NonSerialized, Nothing) -> return (Arg i (NativeOnly t) : args, e)
-
-        -- I don't think this cas should happen
-        (Nothing, Nothing) -> error "What the what?"
-    -- the argument is a passthrough variable - it must be serialized
-    Nothing -> return (Arg i (SerialOnly PassthroughS) : args, e)
-
-  foldMapForm
-    :: Monad m
-    => (([Arg b'], e) -> Arg b -> m ([Arg b'], e)) -- bound
-    -> e
-    -> ManifoldForm a b
-    -> m (ManifoldForm a b', e)
-  foldMapForm _ e (ManifoldFull rs) = return (ManifoldFull rs, e)
-  foldMapForm f e (ManifoldPass rs) = do
-    (rs', e') <- foldlM f ([], e) rs
-    return (ManifoldPass (reverse rs'), e')
-  foldMapForm f e (ManifoldPart rs1 rs2) = do
-    (rs2', e') <- foldlM f ([], e) rs2
-    return (ManifoldPart rs1 (reverse rs2'), e')
-
-  letWrapS :: SerialExpr -> Arg (SerializationState, TypeF) -> Except MDoc SerialExpr
-  letWrapS e (Arg i (Serialized, t)) = SerialLetS i <$> serializeS (BndVarN t i) <*> pure (letSwapS i e)
-  letWrapS e (Arg i (NonSerialized, t)) = do
-    ne1 <- naturalizeN t (BndVarS (Just t) i)
-    return $ NativeLetS i (t, ne1) (letSwapN i e)
-
-  letWrapN :: NativeExpr -> Arg (SerializationState, TypeF) -> Except MDoc NativeExpr
-  letWrapN e (Arg i (Serialized, t)) = do
-    se1 <- serializeS (BndVarN t i)
-    return $ SerialLetN i se1 (typeFof e, letSwapS i e)
-  letWrapN e (Arg i (NonSerialized, t)) = do
-    ne1 <- naturalizeN t (BndVarS (Just t) i)
-    return $ NativeLetN i (t, ne1) (typeFof e, letSwapN i e)
-
-
-  serialExpr
-    :: MonoExpr
-    -> Except MDoc (Map.Map Int Request, SerialExpr)
-
-  -- TODO - fix this - I don't think a manifold should even be here
-  serialExpr (MonoManifold m form e) = serialExpr e
-
-  serialExpr (MonoLet i e1 e2) = do 
-    (requests2, se2) <- serialExpr e2
-    (requests1, letStatement) <- case Map.lookup i requests2 of
-       -- an innocuous bug, I could just not generate the let statement,
-       -- but the presence of the let implies confusion above
-       Nothing -> error "Unnecessary let term - defined term is never used, this is a bug"
-       -- the e1 requires a serialized e2 let-bound term
-       (Just SerialContent) -> do
-         (r1, se1) <- serialExpr e1
-         return (r1, SerialLetS i se1 (letSwapS i se2))
-       -- the e1 requires a native e2 let-bound term
-       (Just NativeContent) -> do
-         (r1, ne1) <- nativeExpr e1
-         return (r1, NativeLetS i (typeFof ne1, ne1) (letSwapN i se2))
-       -- the e1 requires both native and serialized e2 let-bound terms
-       (Just NativeAndSerialContent) -> case (Map.lookup i typemap, inferState e1) of
-         (Just t, Serialized) -> do
-           (r1, se1) <- serialExpr e1
-           ne1 <- naturalizeN t se1
-           return (r1, NativeLetS i (t, ne1) (SerialLetS i se1 (letSwapN i . letSwapS i $ se2)))
-         (_, NonSerialized) -> do
-           (r1, ne1) <- nativeExpr e1
-           se1 <- serializeS ne1
-           return (r1, SerialLetS i se1 (NativeLetS i (typeFof ne1, ne1) (letSwapN i . letSwapS i $ se2)))
-         (Nothing, _) -> error "This case should be unreachable, if i is used in e1, then it should have an associated type in typemap."
-    return (Map.delete i $ Map.unionWith (<>) requests1 requests2, letStatement)
-
-  serialExpr (MonoLetVar t i) = return (Map.singleton i SerialContent, LetVarS (Just t) i)
-
-  serialExpr (MonoReturn e) = do
-    (requests, e') <- serialExpr e
-    return (requests, ReturnS e')
-
-  serialExpr (MonoApp (MonoManifold m form e) es) = do
-    requestsAndArgs <- mapM serialArg es
-    let args = map snd requestsAndArgs
-        rsUnions = Map.unionsWith (<>) (map fst requestsAndArgs)
-    (rm, sm) <- serialManifold m form e args
-    return (rm <> rsUnions, ManS sm)
-
-  serialExpr e@(MonoApp (MonoSrc _ _) _) = do
-    (requests, ne) <- nativeExpr e
-    se <- serializeS ne
-    return (requests, se)
-
-  serialExpr (MonoApp (MonoPoolCall t m docs contextArgs) es) = do
-    let contextArgs' = map (typeArg Serialized . ann) contextArgs
-        poolCall' = PoolCall m docs contextArgs'
-    (states', es') <- mapM serialArg es |>> unzip
-    let args = Map.unionsWith (<>) (Map.fromList [(ann r, SerialContent) | r <- contextArgs] : states')
-    return (args, AppPoolS t poolCall' es')
-
-  serialExpr (MonoBndVar t i) = return (Map.singleton i SerialContent, BndVarS t i)
-
-  -- failing cases that should be unreachable
-  serialExpr (MonoApp _ _) = error "Illegal application"
-  serialExpr (MonoSrc _ _) = error "Can represent MonoSrc as SerialExpr"
-  -- = MonoManifold Int (ManifoldForm None) MonoExpr
-  serialExpr MonoPoolCall{} = error "MonoPoolCall does not map to a SerialExpr"
-
-  -- the following are all native types that need to be directly serialized
-  serialExpr e = do
-    (r, ne) <- nativeExpr e
-    se <- serializeS ne
-    return (r, se)
+  makeTypemap _ = Map.empty
 
   -- make (SerialAST One) then convert to serializeMany
   serializeS :: NativeExpr -> Except MDoc SerialExpr
@@ -1606,168 +1507,152 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
   naturalizeN :: TypeF -> SerialExpr -> Except MDoc NativeExpr
   naturalizeN t se = DeserializeN t <$> Serial.makeSerialAST packmap lang t <*> pure se
 
-  serialArg :: MonoExpr -> Except MDoc (Map.Map Int Request, SerialArg)
-  serialArg (MonoManifold m form e) = do
-    (r, sm) <- serialManifold m form e []
-    return (r, SerialArgManifold sm)
-
-  -- Pool and source calls should have previously been wrapped in manifolds
-  serialArg MonoPoolCall{} = error "This step should be unreachable"
-  serialArg (MonoSrc    _ _) = error "This step should be unreachable"
-  serialArg (MonoReturn _) = error "Return should not happen hear (really I should remove this term completely)"
-  serialArg e = do
-    (r, e') <- serialExpr e
-    return (r, SerialArgExpr e')
-
--- data NativeArg = NativeArgManifold NativeManifold | NativeArgExpr NativeExpr
-  nativeArg :: MonoExpr -> Except MDoc (Map.Map Int Request, NativeArg)
-  nativeArg (MonoManifold m form e) = do
-    (r, sm) <- nativeManifold m form e []
-    return (r, NativeArgManifold sm)
-  -- Pool and source calls should have previously been wrapped in manifolds
-  nativeArg MonoPoolCall{} = error "This step should be unreachable"
-  nativeArg (MonoSrc    _ _) = error "This step should be unreachable"
-  nativeArg (MonoReturn _) = error "Return should not happen here (really I should remove this term completely)"
-  nativeArg e = do
-    (r, e') <- nativeExpr e
-    return (r, NativeArgExpr e')
-
-  nativeExpr
-    :: MonoExpr
-    -> Except MDoc (Map.Map Int Request, NativeExpr)
-
-  nativeExpr (MonoManifold m form e) = do
-    (rs, nm@(NativeManifold _ _ _ (t, _))) <- nativeManifold m form e []
-    return (rs, ManN t nm)
-
-  nativeExpr MonoPoolCall{} = error "MonoPoolCall does not map to NativeExpr"
-
-  nativeExpr (MonoLet i e1 e2) = do
-    (r2, ne2) <- nativeExpr e2
-    (r1, letStatement) <- case Map.lookup i r2 of
-       Nothing -> error "Unnecessary let term - defined term is never used, this is a bug"
-       -- the e1 requires a serialized e2 let-bound term
-       (Just SerialContent) -> do
-         (r1, se1) <- serialExpr e1
-         return (r1, SerialLetN i se1 (typeFof ne2, letSwapS i ne2))
-       -- the e1 requires a native e2 let-bound term
-       (Just NativeContent) -> do
-         (r1, ne1) <- nativeExpr e1
-         return (r1, NativeLetN i (typeFof ne1, ne1) (typeFof ne2, letSwapN i ne2))
-       -- the e1 requires both native and serialized e2 let-bound terms
-       (Just NativeAndSerialContent) -> case (Map.lookup i typemap, inferState e1) of
-         (Just t, Serialized) -> do
-           (r1, se1) <- serialExpr e1
-           ne1 <- naturalizeN t se1
-           return (r1, SerialLetN i se1 (typeFof ne2, NativeLetN i (typeFof ne1, ne1) (typeFof ne2, letSwapN i . letSwapS i $ ne2)))
-         (_, NonSerialized) -> do
-           (r1, ne1) <- nativeExpr e1
-           se1 <- serializeS ne1
-           return (r1, SerialLetN i se1 (typeFof ne2, NativeLetN i (typeFof ne1, ne1) (typeFof ne2, letSwapN i . letSwapS i $ ne2)))
-         (Nothing, _) -> error "This should be unreachable"
-    return (Map.delete i $ Map.unionWith (<>) r1 r2, letStatement)
-
-  nativeExpr (MonoLetVar t i) = return (Map.singleton i NativeContent, LetVarN t i)
-
-  nativeExpr (MonoReturn e) = do
-    (rs, e') <- nativeExpr e
-    return (rs, ReturnN (typeFof e') e')
-
-  nativeExpr (MonoApp (MonoManifold m form e) es) = do
-    (argRequests, args) <- mapM nativeArg es |>> unzip
-    (bodyRequests, nm) <- nativeManifold m form e args
-    t <- case typeFof nm of
-      (FunF inputTypes outputType) -> case drop (length es) inputTypes of
-        [] -> return outputType 
-        remainingInputs -> return $ FunF remainingInputs outputType
-      badType -> throwError $ "Cannot apply type" <+> parens (pretty badType) 
-    return (Map.unionsWith (<>) (bodyRequests : argRequests), ManN t nm)
-
-  nativeExpr (MonoApp (MonoSrc (FunF inputTypes outputType) src) es) = do
-    (argRequests, args) <- mapM nativeArg es |>> unzip
-    appType <- case drop (length es) inputTypes of
-        [] -> return outputType
-        remaining -> return $ FunF remaining outputType
-    return (Map.unionsWith (<>) argRequests, AppSrcN appType src args)
-
-  nativeExpr e@(MonoApp (MonoPoolCall t _ _ _) _) = do
-    (requests, se) <- serialExpr e
-    ne <- naturalizeN t se
-    return (requests, ne)
-
-  nativeExpr (MonoApp _ _) = error "Illegal application"
-
-  nativeExpr (MonoSrc t src) = return (Map.empty, SrcN t src)
-
-  nativeExpr (MonoBndVar (Just t) i) = return (Map.singleton i NativeContent, BndVarN t i)
-
-  nativeExpr (MonoBndVar Nothing _) = error "MonoBndVar must have a type if used in native context"
-
-  -- simple native types
-  nativeExpr (MonoAcc t o v e k) = do
-    (requests, e') <- nativeExpr e
-    return (requests, AccN t o v e' k)
-
-  nativeExpr (MonoList v t es) = do
-    (requestss, es') <- mapM nativeExpr es |>> unzip
-    return (Map.unionsWith (<>) requestss, ListN v t es')
-
-  nativeExpr (MonoTuple v rs) = do
-    let ts = map fst rs
-    (requestss, es') <- mapM (nativeExpr . snd) rs |>> unzip
-    return (Map.unionsWith (<>) requestss, TupleN v (zip ts es'))
-
-  nativeExpr (MonoRecord o v ps rs) = do
-    let keys = map fst rs
-        types = map (fst . snd) rs
-    (requestss, vals) <- mapM (nativeExpr . snd . snd) rs |>> unzip
-    let rs' = zip keys (zip types vals)
-    return (Map.unionsWith (<>) requestss, RecordN o v ps rs')
-
-  -- primitives
-  nativeExpr (MonoLog    v x) = return (Map.empty, LogN v x)
-  nativeExpr (MonoReal   v x) = return (Map.empty, RealN v x)
-  nativeExpr (MonoInt    v x) = return (Map.empty, IntN v x)
-  nativeExpr (MonoStr    v x) = return (Map.empty, StrN v x)
-  nativeExpr (MonoNull   v) = return (Map.empty, NullN v)
-
   -- infer the preferred serialization state for an expression.
   inferState :: MonoExpr -> SerializationState
   inferState (MonoApp MonoPoolCall{} _) = Serialized
-  inferState (MonoApp MonoSrc{} _) = NonSerialized
+  inferState (MonoApp MonoSrc{} _) = Unserialized
   inferState (MonoApp (MonoManifold _ _ e) _) = inferState e
   inferState (MonoLet _ _ e) = inferState e
   inferState (MonoReturn e) = inferState e
   inferState (MonoManifold _ _ e) = inferState e
-  inferState MonoPoolCall{} = NonSerialized
+  inferState MonoPoolCall{} = Unserialized
   inferState MonoBndVar{} = error "Ambiguous bound term"
-  inferState _ = NonSerialized
+  inferState _ = Unserialized
 
 
--- | recursively replace BndVarS term with a LetVarS term, do not recurse across manifold borders
-letSwapS :: MFunctor a => Int -> a -> a
-letSwapS i = mgatedMap gates mm where
-    gates = defaultValue { gateSerialManifold = const False
-                         , gateNativeManifold = const False
-                         }
-    mm = defaultValue { mapSerialExpr = swapLet }
+type (D a) = (Map.Map Int Request, a)
 
-    swapLet (BndVarS t i')
-        | i' == i = LetVarS t i
-        | otherwise = BndVarS t i
-    swapLet e = e
+wireSerial :: Map.Map MT.Text [ResolvedPacker] -> Map.Map Int TypeF -> SerialManifold -> SerialManifold
+wireSerial packmap typemap = uncurry topDeserial . runIdentity . foldSerialManifoldM fm
+  where 
+  defs = makeMonoidFoldDefault Map.empty (Map.unionWith (<>))
 
--- | recursively replace BndVarN term with a LetVarN term, do not recurse across manifold borders
-letSwapN :: MFunctor a => Int -> a -> a 
-letSwapN i = mgatedMap gates mm where
-    gates = defaultValue { gateSerialManifold = const False
-                         , gateNativeManifold = const False
-                         }
-    mm = defaultValue { mapNativeExpr = swapLet }
-    swapLet (BndVarN t i')
-        | i' == i = LetVarN t i
-        | otherwise = BndVarN t i
-    swapLet e = e
+  fm = FoldManifoldM
+    { opSerialManifoldM = wireSerialManifold
+    , opNativeManifoldM = wireNativeManifold
+    , opSerialExprM = wireSerialExpr
+    , opNativeExprM = wireNativeExpr
+    , opSerialArgM = monoidSerialArg defs
+    , opNativeArgM = monoidNativeArg defs
+    }
+
+  wireSerialManifold :: SerialManifold_ (D SerialArg) (D SerialExpr) -> MM.Identity (D SerialManifold)
+  wireSerialManifold (SerialManifold_ m lang form x) = wireManifold SerialManifold m lang form x
+
+  wireNativeManifold :: NativeManifold_ (D NativeArg) (D NativeExpr) -> MM.Identity (D NativeManifold)
+  wireNativeManifold (NativeManifold_ m lang form x) = wireManifold NativeManifold m lang form x
+
+  wireManifold constructor m lang form (t, (req, ne)) = do
+    let formReq = Map.unionsWith (<>) . catMaybes . bilist (Just . fst . snd) (const Nothing) $ form
+        reqFinal = Map.unionWith (<>) req formReq
+        form' = first (snd . snd) form
+        form'' = asecond (specialize reqFinal) form'
+    return (reqFinal, constructor m lang form'' (t, ne))
+
+  wireSerialExpr (LetVarS_ t i) = return (Map.singleton i SerialContent, LetVarS t i)
+  wireSerialExpr (BndVarS_ t i) = return (Map.singleton i SerialContent, BndVarS t i)
+  wireSerialExpr e = monoidSerialExpr defs e
+
+  wireNativeExpr :: NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) -> MM.Identity (D NativeExpr)
+  wireNativeExpr (LetVarN_ t i) = return (Map.singleton i NativeContent, LetVarN t i)
+  wireNativeExpr (BndVarN_ t i) = return (Map.singleton i NativeContent, BndVarN t i)
+  wireNativeExpr e = monoidNativeExpr defs e
+
+  specialize :: Map.Map Int Request -> Int -> ArgTypes -> ArgTypes 
+  specialize req i r = case (Map.lookup i req, r) of 
+    (Nothing, _) -> error "This should not happen, was something mis-wired?"
+    (Just SerialContent, SerialAndNative t) -> SerialOnly (typeSof t)
+    (Just NativeContent, SerialAndNative t) -> NativeOnly t
+    _ -> r
+
+  topDeserial :: Map.Map Int Request -> SerialManifold -> SerialManifold
+  topDeserial topRequests (SerialManifold m lang form@(ManifoldFull xs) (t, se)) = 
+    let lets = mapMaybe (makeSerialLet topRequests . ann) xs
+        se' = foldl (wrapLet lang) se lets
+    in SerialManifold m lang form (t, se')
+  topDeserial _ _ = error "Bad local" 
+
+  makeSerialLet :: Map.Map Int Request -> Int -> Maybe Int
+  makeSerialLet reqs i = case Map.lookup i reqs of
+    (Just SerialContent) -> Nothing
+    _ -> Just i
+
+  wrapLet :: Lang -> SerialExpr -> Int -> SerialExpr
+  wrapLet lang ne i = case Map.lookup i typemap of
+    (Just t) -> case runExcept (naturalizeN lang t (BndVarS (Just t) i)) of
+      (Left serr) -> error $ "Could not deserialize: " <> show serr 
+      (Right x) -> NativeLetS i (t, x) ne
+    Nothing -> error "Bad serialization"
+
+  naturalizeN :: Lang -> TypeF -> SerialExpr -> Except MDoc NativeExpr
+  naturalizeN lang t se = DeserializeN t <$> Serial.makeSerialAST packmap lang t <*> pure se
+
+  -- -- | recursively replace BndVarS term with a LetVarS term, do not recurse across manifold borders
+  -- letSwapS :: MFunctor a => Int -> a -> a
+  -- letSwapS i = mgatedMap gates mm where
+  --     gates = defaultValue { gateSerialManifold = const False
+  --                          , gateNativeManifold = const False
+  --                          }
+  --     mm = defaultValue { mapSerialExpr = swapLet }
+  --
+  --     swapLet (BndVarS t i')
+  --         | i' == i = LetVarS t i
+  --         | otherwise = BndVarS t i
+  --     swapLet e = e
+
+
+data Request = SerialContent | NativeContent | NativeAndSerialContent
+  deriving(Ord, Eq, Show)
+
+class HasRequest a where
+  requestOf :: a -> Request
+
+instance HasRequest TypeM where
+  requestOf Passthrough = SerialContent
+  requestOf (Serial _) = SerialContent
+  requestOf (Native _) = NativeContent
+  requestOf (Function _ _) = NativeContent
+
+instance HasRequest SerialExpr where
+  requestOf _ = SerialContent
+
+instance HasRequest NativeExpr where
+  requestOf _ = NativeContent
+
+instance HasRequest SerialArg where
+  requestOf _ = SerialContent
+
+instance HasRequest NativeArg where
+  requestOf _ = NativeContent
+
+instance HasRequest ArgTypes where
+  requestOf (SerialOnly _) = SerialContent
+  requestOf (NativeOnly _) = NativeContent
+  requestOf (SerialAndNative _) = NativeAndSerialContent
+
+instance Semigroup Request where
+ SerialContent <> SerialContent = SerialContent
+ NativeContent <> NativeContent = NativeContent
+ _ <> _ = NativeAndSerialContent
+
+data SerializationState = Serialized | Unserialized
+  deriving(Show, Eq, Ord)
+
+class HasSerializationState a where
+  isSerialized :: a -> SerializationState
+
+instance HasSerializationState SerialExpr where
+  isSerialized _ = Serialized
+
+instance HasSerializationState SerialManifold where
+  isSerialized _ = Serialized
+
+instance HasSerializationState NativeExpr where
+  isSerialized _ = Unserialized
+
+instance HasSerializationState NativeManifold where
+  isSerialized _ = Unserialized
+
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
 pool :: [SerialManifold] -> [(Lang, [SerialManifold])]

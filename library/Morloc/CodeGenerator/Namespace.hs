@@ -100,6 +100,9 @@ module Morloc.CodeGenerator.Namespace
   , asecond
   , abiappendM
   , abiappend
+  -- ** weird baby schemes
+  , MonoidFold(..)
+  , makeMonoidFoldDefault
   ) where
 
 import Morloc.Namespace
@@ -251,6 +254,7 @@ data SerialAST
   -- ^ depending on the language, this may or may not raise an error down the
   -- line, the parameter contains the variable name, which is useful only for
   -- source code comments.
+  deriving(Ord, Eq, Show)
 
 
 instance Pretty SerialAST where
@@ -491,6 +495,7 @@ data PoolCall = PoolCall
   [MDoc]
   [Arg TypeM] -- contextual argument that are passed to the foreign function
               -- (not the main arguments to the foreign function)
+  deriving(Show)
 
 -- | Represents a single data value that may be passed as an argument through a
 -- pool. It may be serialized, native, or both. If it is serialized only, then
@@ -499,12 +504,19 @@ data ArgTypes
   = SerialOnly TypeS
   | NativeOnly TypeF
   | SerialAndNative TypeF
-  deriving(Eq, Ord, Show)
+  deriving(Show)
 
 data NativeManifold = NativeManifold Int Lang (ManifoldForm NativeArg ArgTypes) (TypeF, NativeExpr)
+  deriving(Show)
+
 data SerialManifold = SerialManifold Int Lang (ManifoldForm SerialArg ArgTypes) (TypeS, SerialExpr)
+  deriving(Show)
+
 data SerialArg = SerialArgManifold SerialManifold | SerialArgExpr SerialExpr
+  deriving(Show)
+
 data NativeArg = NativeArgManifold NativeManifold | NativeArgExpr NativeExpr
+  deriving(Show)
 
 data SerialExpr
   = ManS SerialManifold
@@ -515,6 +527,7 @@ data SerialExpr
   | LetVarS (Maybe TypeF) Int
   | BndVarS (Maybe TypeF) Int
   | SerializeS SerialAST NativeExpr
+  deriving(Show)
 
 data NativeExpr
   = ManN         TypeF NativeManifold
@@ -536,6 +549,7 @@ data NativeExpr
   | IntN         FVar Integer
   | StrN         FVar Text
   | NullN        FVar
+  deriving(Show)
 
 foldlSM :: (b -> a -> b) -> b -> SerialManifold_ a a -> b
 foldlSM f b (SerialManifold_ _ _ form (_, se)) =
@@ -582,6 +596,76 @@ foldlNE _ b (RealN_        _ _) = b
 foldlNE _ b (IntN_         _ _) = b
 foldlNE _ b (StrN_         _ _) = b
 foldlNE _ b (NullN_        _) = b
+
+
+data (MonoidFold m a) = MonoidFold
+  { monoidSerialManifold :: SerialManifold_ (a, SerialArg) (a, SerialExpr) -> m (a, SerialManifold)
+  , monoidNativeManifold :: NativeManifold_ (a, NativeArg) (a, NativeExpr) -> m (a, NativeManifold)
+  , monoidSerialArg :: SerialArg_ (a, SerialManifold) (a, SerialExpr) -> m (a, SerialArg)
+  , monoidNativeArg :: NativeArg_ (a, NativeManifold) (a, NativeExpr) -> m (a, NativeArg)
+  , monoidSerialExpr :: SerialExpr_ (a, SerialManifold) (a, SerialExpr) (a, NativeExpr) (a, SerialArg) (a, NativeArg) -> m (a, SerialExpr)
+  , monoidNativeExpr :: NativeExpr_ (a, NativeManifold) (a, SerialExpr) (a, NativeExpr) (a, SerialArg) (a, NativeArg) -> m (a, NativeExpr)
+  }
+
+makeMonoidFoldDefault :: (Monad m) => a -> (a -> a -> a) -> MonoidFold m a
+makeMonoidFoldDefault mempty' mappend' =
+  MonoidFold
+    { monoidSerialManifold = monoidSerialManifold'
+    , monoidNativeManifold = monoidNativeManifold'
+    , monoidSerialArg      = monoidSerialArg'
+    , monoidNativeArg      = monoidNativeArg'
+    , monoidSerialExpr     = monoidSerialExpr'
+    , monoidNativeExpr     = monoidNativeExpr'
+    }
+  where
+
+  monoidSerialManifold' (SerialManifold_ m lang form (t, (req, ne))) = do
+    let formReq = foldl mappend' mempty' . catMaybes . bilist (Just . fst . snd) (const Nothing) $ form
+        form' = first (snd . snd) form
+    return (mappend' req formReq, SerialManifold m lang form' (t, ne))
+
+  monoidNativeManifold' (NativeManifold_ m lang form (t, (req, ne))) = do
+    let formReq = foldl mappend' mempty' . catMaybes . bilist (Just . fst . snd) (const Nothing) $ form
+        form' = first (snd . snd) form
+    return (mappend' req formReq, NativeManifold m lang form' (t, ne))
+
+  monoidSerialArg' (SerialArgManifold_ (req, sm)) = return (req, SerialArgManifold sm)
+  monoidSerialArg' (SerialArgExpr_ (req, se)) = return (req, SerialArgExpr se)
+
+  monoidNativeArg' (NativeArgManifold_ (req, nm)) = return (req, NativeArgManifold nm)
+  monoidNativeArg' (NativeArgExpr_ (req, ne)) = return (req, NativeArgExpr ne)
+
+  monoidSerialExpr' (ManS_ (req, sm)) = return (req, ManS sm)
+  monoidSerialExpr' (AppPoolS_ t p (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppPoolS t p es)
+  monoidSerialExpr' (ReturnS_ (req, se)) = return (req, ReturnS se)
+  monoidSerialExpr' (SerialLetS_ i (req1, se1) (req2, se2)) = return (mappend' req1 req2, SerialLetS i se1 se2)
+  monoidSerialExpr' (NativeLetS_ i (t, (req1, ne)) (req2, se)) = return (mappend' req1 req2, NativeLetS i (t, ne) se)
+  monoidSerialExpr' (LetVarS_ mayT i) = return (mempty', LetVarS mayT i)
+  monoidSerialExpr' (BndVarS_ mayT i) = return (mempty', BndVarS mayT i)
+  monoidSerialExpr' (SerializeS_ s (req, ne)) = return (req, SerializeS s ne)
+
+  monoidNativeExpr' (ManN_ t (req, nm)) = return (req, ManN t nm)
+  monoidNativeExpr' (AppSrcN_ t src (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppSrcN t src es)
+  monoidNativeExpr' (ReturnN_ t (req, ne)) = return (req, ReturnN t ne)
+  monoidNativeExpr' (SerialLetN_ i (req1, se) (t, (req2, ne))) = return (mappend' req1 req2, SerialLetN i se (t, ne))
+  monoidNativeExpr' (NativeLetN_ i (t1, (req1, ne1)) (t2, (req2, ne2))) = return (mappend' req1 req2, NativeLetN i (t1, ne1) (t2, ne2))
+  monoidNativeExpr' (LetVarN_ t i) = return (mempty', LetVarN t i)
+  monoidNativeExpr' (BndVarN_ t i) = return (mempty', BndVarN t i)
+  monoidNativeExpr' (DeserializeN_ t s (req, e)) = return (req, DeserializeN t s e)
+  monoidNativeExpr' (AccN_ t o v (req, e) k) = return (req, AccN t o v e k)
+  monoidNativeExpr' (SrcN_ t src) = return (mempty', SrcN t src)
+  monoidNativeExpr' (ListN_ v t xs) = return (foldl mappend' mempty' (map fst xs), ListN v t (map snd xs))
+  monoidNativeExpr' (TupleN_ v xs) = return (foldl mappend' mempty' (map (fst . snd) xs), TupleN v $ map (second snd) xs) 
+  monoidNativeExpr' (RecordN_ o v ps rs) = return (foldl mappend' mempty' $ map (fst . snd . snd) rs, RecordN o v ps (map (second (second snd)) rs))
+  monoidNativeExpr' (LogN_ v x) = return (mempty', LogN v x)
+  monoidNativeExpr' (RealN_ v x) = return (mempty', RealN v x)
+  monoidNativeExpr' (IntN_ v x) = return (mempty', IntN v x)
+  monoidNativeExpr' (StrN_ v x) = return (mempty', StrN v x)
+  monoidNativeExpr' (NullN_ v) = return (mempty', NullN v)
+
+
+
+
 
 -- where
 --  * m - monad

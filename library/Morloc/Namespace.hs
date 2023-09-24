@@ -20,7 +20,6 @@ module Morloc.Namespace
   , None(..)
   , One(..)
   , Many(..)
-  , Or(..)
   -- ** Other classes
   , Defaultable(..)
   -- ** Indexed
@@ -170,20 +169,6 @@ data MorlocState = MorlocState
   , stateName :: Map Int EVar
   -- ^ store the names of morloc compositions
   }
-
-data Or a b = L a | R b | LR a b
-  deriving(Ord, Eq, Show)
-
-instance Bifunctor Or where
-  bimap f _ (L a) = L (f a)
-  bimap _ g (R b) = R (g b)
-  bimap f g (LR a b) = LR (f a) (g b)
-
-instance Bifoldable Or where
-  bilist f _ (L a) = [f a]
-  bilist _ g (R b) = [g b]
-  bilist f g (LR a b) = [f a, g b]
-  
 
 {-
        A           - There can be only one general signature for a term within a scope
