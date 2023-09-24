@@ -1353,7 +1353,14 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
     return (SerialManifold m lang form' (typeSof se1, se1))
 
   setSerialForm :: [a] -> ManifoldForm None None -> ManifoldForm a ArgTypes
-  setSerialForm es = abimap (\i _ -> es !! i) (\i _ -> maybe (SerialOnly PassthroughS) SerialAndNative (Map.lookup i typemap))
+  setSerialForm es (ManifoldFull xs) = ManifoldFull [Arg i e | (Arg i _, e) <- equalZip xs es]
+  setSerialForm _  (ManifoldPass ys) = ManifoldPass [typeArgTypes i | (Arg i _) <- ys]
+  setSerialForm es (ManifoldPart xs ys) = ManifoldPart
+    [Arg i e | (Arg i _, e) <- zip xs es]
+    [typeArgTypes i | (Arg i _) <- ys]
+
+  typeArgTypes :: Int -> Arg ArgTypes
+  typeArgTypes i = Arg i $ maybe (SerialOnly PassthroughS) SerialAndNative (Map.lookup i typemap)
 
   nativeManifold
     :: Int
