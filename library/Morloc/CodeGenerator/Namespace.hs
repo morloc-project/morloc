@@ -35,6 +35,8 @@ module Morloc.CodeGenerator.Namespace
   , JsonAccessor(..)
   , NexusCommand(..)
   , ManifoldForm(..)
+  , manifoldContext
+  , manifoldBound
   , ArgTypes(..)
   , argTypesToTypeM
   -- ** Manifold data types
@@ -379,6 +381,16 @@ data (ManifoldForm context bound)
   | ManifoldPart [Arg context] [Arg bound]
   -- ^ Partially applied function
   deriving(Show, Eq, Ord)
+
+manifoldContext :: ManifoldForm a b -> [Arg a]
+manifoldContext (ManifoldFull xs) = xs
+manifoldContext (ManifoldPass _) = []
+manifoldContext (ManifoldPart xs _) = xs
+
+manifoldBound :: ManifoldForm a b -> [Arg b]
+manifoldBound (ManifoldFull _) = []
+manifoldBound (ManifoldPass xs) = xs
+manifoldBound (ManifoldPart _ ys) = ys
 
 instance Bifunctor ManifoldForm where
   bimapM f _ (ManifoldFull xs) = ManifoldFull <$> mapM (\(Arg i x) -> Arg i <$> f x) xs
