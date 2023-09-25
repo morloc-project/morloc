@@ -149,7 +149,8 @@ instance Dependable SerialExpr where
       t <- case typeMof e of
         Passthrough -> return Nothing
         (Serial ft) -> return $ Just ft
-        _ -> error "This type must be serialized"
+        _ -> return Nothing
+        -- _ -> error "This type must be serialized"
       return $ D (LetVarS t i) ((i, Left e) : deps)
 
   isAtomic (LetVarS _ _) = True 
