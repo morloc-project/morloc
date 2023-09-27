@@ -19,6 +19,7 @@ module Morloc.Namespace
   -- ** Other functors
   , None(..)
   , One(..)
+  , Or(..)
   , Many(..)
   -- ** Other classes
   , Defaultable(..)
@@ -389,7 +390,6 @@ data Gamma = Gamma
   , gammaContext :: [GammaIndex]
   }
 
-
 data TypeError
   = SubtypeError TypeU TypeU Text
   | InstantiationError TypeU TypeU Text
@@ -572,6 +572,8 @@ newtype One a = One { unOne :: a }
 newtype Many a = Many { unMany :: [a] }
   deriving (Show)
 
+data Or a b = L a | R b | LR a b
+  deriving(Ord, Eq, Show)
 
 instance Functor One where
   fmap f (One x) = One (f x)
@@ -584,6 +586,19 @@ instance Foldable One where
 
 instance Foldable Many where
   foldr f b (Many xs) = foldr f b xs
+
+instance Bifunctor Or where
+  bimapM f _ (L a) = L <$> f a
+  bimapM _ g (R a) = R <$> g a
+  bimapM f g (LR a b) = LR <$> f a <*> g b
+
+instance Bifoldable Or where
+  bilistM f _ (L a) = f a |>> return
+  bilistM _ g (R b) = g b |>> return
+  bilistM f g (LR a b) = do
+    c1 <- f a
+    c2 <- g b
+    return [c1, c2]
 
 
 data SExpr g f c

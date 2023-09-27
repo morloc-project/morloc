@@ -22,7 +22,6 @@ module Morloc.CodeGenerator.Grammars.Common
   -- * Utilities
   , makeManifoldIndexer
   , translateManifold
-  , expandManifoldForm
   ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -117,8 +116,8 @@ class Dependable a where
   isAtomic :: a -> Bool
 
 instance Dependable NativeExpr where
-  weave (D x ((i, Left se) : deps)) = weave $ D (SerialLetN i se (typeFof x, x)) deps
-  weave (D x ((i, Right ne) : deps)) = weave $ D (NativeLetN i (typeFof ne, ne) (typeFof x, x)) deps
+  weave (D x ((i, Left se) : deps)) = weave $ D (SerialLetN i se x) deps
+  weave (D x ((i, Right ne) : deps)) = weave $ D (NativeLetN i ne x) deps
   weave (D x []) = x
 
   atomize e deps
@@ -139,7 +138,7 @@ instance Dependable NativeExpr where
 
 instance Dependable SerialExpr where
   weave (D x ((i, Left se) : deps)) = weave $ D (SerialLetS i se x) deps
-  weave (D x ((i, Right ne) : deps)) = weave $ D (NativeLetS i (typeFof ne, ne) x) deps
+  weave (D x ((i, Right ne) : deps)) = weave $ D (NativeLetS i ne x) deps
   weave (D x []) = x
 
   atomize e deps
@@ -173,17 +172,13 @@ invertSerialManifold sm0 =
     , opNativeArgM = invertNativeArgM
     }
 
-  invertSerialManifoldM :: SerialManifold_ (D SerialArg) (D SerialExpr) -> Index (D SerialManifold)
-  invertSerialManifoldM (SerialManifold_ m lang form (mayT, se)) = do
-    let form' = first (unD . snd) form
-        deps = biappend (getDeps . snd) (const []) form
-    return (D (SerialManifold m lang form' (mayT, weave se)) deps)
+  invertSerialManifoldM :: SerialManifold_ (D SerialArg) (D NativeArg) (D SerialExpr) -> Index (D SerialManifold)
+  invertSerialManifoldM (SerialManifold_ m lang form se) = do
+    return (D (SerialManifold m lang form (weave se)) [])
 
-  invertNativeManifoldM :: NativeManifold_ (D NativeArg) (D NativeExpr) -> Index (D NativeManifold)
-  invertNativeManifoldM (NativeManifold_ m lang form (t, weave -> ne)) = do
-    let form' = first (unD . snd) form
-        deps = biappend (getDeps . snd) (const []) form
-    return (D (NativeManifold m lang form' (t, ne)) deps)
+  invertNativeManifoldM :: NativeManifold_ (D SerialArg) (D NativeArg) (D NativeExpr) -> Index (D NativeManifold)
+  invertNativeManifoldM (NativeManifold_ m lang form (weave -> ne)) = do
+    return (D (NativeManifold m lang form ne) [])
 
   invertSerialExprM
     :: SerialExpr_ (D SerialManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg)
@@ -196,7 +191,7 @@ invertSerialManifold sm0 =
   invertSerialExprM (ReturnS_ (D se lets)) = return $ D (ReturnS se) lets
   invertSerialExprM (SerialLetS_ i (D se1 lets1) (D se2 lets2)) =
     return $ D se2 (lets2 <> ((i, Left  se1) : lets1))
-  invertSerialExprM (NativeLetS_ i (_, D ne1 lets1) (D se2 lets2)) =
+  invertSerialExprM (NativeLetS_ i (D ne1 lets1) (D se2 lets2)) =
     return $ D se2 (lets2 <> ((i, Right ne1) : lets1))
   invertSerialExprM (LetVarS_ t i) = atomize (LetVarS t i) []
   invertSerialExprM (BndVarS_ t i) = atomize (BndVarS t i) []
@@ -207,20 +202,20 @@ invertSerialManifold sm0 =
     let nativeArgs' = map unD nativeArgs
         deps = concatMap getDeps nativeArgs
     atomize (AppSrcN t src nativeArgs') deps
-  invertNativeExprM (ManN_ t (D nm lets)) = atomize (ManN t nm) lets
-  invertNativeExprM (ReturnN_ t (D ne lets)) = atomize (ReturnN t ne) lets
-  invertNativeExprM (SerialLetN_ i (D se1 lets1) (_, D ne2 lets2)) =
+  invertNativeExprM (ManN_ (D nm lets)) = atomize (ManN nm) lets
+  invertNativeExprM (ReturnN_ (D ne lets)) = atomize (ReturnN ne) lets
+  invertNativeExprM (SerialLetN_ i (D se1 lets1) (D ne2 lets2)) =
     return $ D ne2 (lets2 <> ((i, Left  se1) : lets1))
-  invertNativeExprM (NativeLetN_ i (_, D ne1 lets1) (_, D se2 lets2)) =
+  invertNativeExprM (NativeLetN_ i (D ne1 lets1) (D se2 lets2)) =
     return $ D se2 (lets2 <> ((i, Right ne1) : lets1))
   invertNativeExprM (LetVarN_ t i) = atomize (LetVarN t i) []
   invertNativeExprM (BndVarN_ t i) = atomize (BndVarN t i) []
   invertNativeExprM (DeserializeN_ t s (D se lets)) = atomize (DeserializeN t s se) lets
-  invertNativeExprM (AccN_ t o v (D ne deps) key) = atomize (AccN t o v ne key) deps
+  invertNativeExprM (AccN_ o v (D ne deps) key) = atomize (AccN o v ne key) deps
   invertNativeExprM (SrcN_ t src) = atomize (SrcN t src) []
   invertNativeExprM (ListN_ v t nes) = atomize (ListN v t (map unD nes)) (concatMap getDeps nes)
-  invertNativeExprM (TupleN_ v xs) = atomize (TupleN v (map (second unD) xs)) (concatMap (getDeps . snd) xs)
-  invertNativeExprM (RecordN_ o v ps rs) = atomize (RecordN o v ps (map (second (second unD)) rs)) (concatMap (getDeps . snd . snd) rs)
+  invertNativeExprM (TupleN_ v xs) = atomize (TupleN v (map unD xs)) (concatMap getDeps xs)
+  invertNativeExprM (RecordN_ o v ps rs) = atomize (RecordN o v ps (map (second unD) rs)) (concatMap (getDeps . snd) rs)
   invertNativeExprM (LogN_ v x) = atomize (LogN v x) []
   invertNativeExprM (RealN_ v x) = atomize (RealN v x) []
   invertNativeExprM (IntN_ v x) = atomize (IntN v x) []
@@ -258,24 +253,25 @@ maxIndex = (+1) . runIdentity . foldSerialManifoldM fm
   findNativeIndices (BndVarN_ _ i) = return i
   findNativeIndices e = return $ foldlNE max 0 e
 
-
 translateManifold
   :: HasTypeM t
   => (MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> MDoc) -- make function
   -> ([Arg TypeM] -> MDoc -> MDoc)
-  -> Int -> ManifoldForm (t, PoolDocs) ArgTypes -> PoolDocs -> PoolDocs
+  -> Int -> ManifoldForm (Or TypeS TypeF) t -> PoolDocs -> PoolDocs
 translateManifold makeFunction makeLambda m form (PoolDocs completeManifolds body priorLines priorExprs) =
-  let args = abiappend (\i (t,_) -> [Arg i (typeMof t)])
-                       (\i r -> [Arg i t | t <- argTypesToTypeM r]) form
+  let args = abiappend (\i r -> [Arg i t | t <- bilist typeMof typeMof r])
+                       (\i t -> [Arg i (typeMof t)]) form
       mname = manNamer m
       newManifold = makeFunction mname args priorLines body
       call = case form of
         (ManifoldPass _) -> mname
-        (ManifoldFull rs) -> mname <> tupled (map (argNamer . second fst) rs)
+        (ManifoldFull rs) -> mname <> tupled (map argNamer (asArgs rs))
         (ManifoldPart rs vs) ->
-          let variableNames = unArgTypes vs
-              functionCall = (mname <> tupled (map argNamer (map (second (typeMof . fst)) rs <> unArgTypes vs)))
+          let variableNames = [Arg i (typeMof t) | (Arg i t) <- vs]
+              functionCall = mname <> tupled
+                (map argNamer $ asArgs rs <> variableNames)
           in makeLambda variableNames functionCall
+
   in PoolDocs
       { poolCompleteManifolds = newManifold : completeManifolds
       , poolExpr = call
@@ -283,10 +279,5 @@ translateManifold makeFunction makeLambda m form (PoolDocs completeManifolds bod
       , poolPriorExprs = priorExprs
       }
   where
-    unArgTypes :: [Arg ArgTypes] -> [Arg TypeM]
-    unArgTypes xs = concat [[Arg i y | y <- ys] | (Arg i ys) <- map (second argTypesToTypeM) xs]
-
-expandManifoldForm :: (a -> b) -> (TypeM -> b) -> ManifoldForm a ArgTypes -> [Arg b]
-expandManifoldForm f g = concat . abilist
-  (\i a -> [Arg i (f a)])
-  (\i b -> [Arg i (g x) | x <- argTypesToTypeM b])
+    asArgs :: [Arg (Or TypeS TypeF)] -> [Arg TypeM]
+    asArgs rs = concat [[Arg i t | t <- bilist typeMof typeMof orT] | (Arg i orT) <- rs] 

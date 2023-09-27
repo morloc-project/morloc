@@ -69,10 +69,6 @@ instance HasCppType NativeManifold where
   cppTypeOf = cppTypeOf . typeMof
   cppArgOf r = cppArgOf $ fmap typeMof r
 
-instance HasCppType (NativeManifold_ nr nm) where
-  cppTypeOf = cppTypeOf . typeMof
-  cppArgOf r = cppArgOf $ fmap typeMof r
-
 instance {-# OVERLAPPABLE #-} HasTypeF e => HasCppType e where
   cppTypeOf = f . typeFof where
     f (UnkF (FV _ x)) = return $ pretty x 
@@ -214,25 +210,26 @@ serialType :: MDoc
 serialType = pretty $ ML.serialType CppLang 
 
 makeSignature :: SerialManifold -> CppTranslator [MDoc]
-makeSignature = foldSerialManifoldM fm where
+makeSignature = foldWithSerialManifoldM fm where
   fm = defaultValue
-    { opSerialManifoldM = serialManifold
-    , opNativeManifoldM = nativeManifold
+    { opFoldWithSerialManifoldM = serialManifold
+    , opFoldWithNativeManifoldM = nativeManifold
     }
 
-  serialManifold (SerialManifold_ i _ form _) = manifoldSignature i serialType form
+  serialManifold (SerialManifold m _ form _) _ = manifoldSignature m serialType form
 
-  nativeManifold e@(NativeManifold_ i _ form _) = do
+  nativeManifold e@(NativeManifold m _ form _) _ = do
     typestr <- cppTypeOf e
-    manifoldSignature i typestr form 
+    manifoldSignature m typestr form
 
-  manifoldSignature :: HasTypeM t => Int -> MDoc -> ManifoldForm (t, se) ArgTypes -> CppTranslator [MDoc]
+  manifoldSignature :: HasTypeM t => Int -> MDoc -> ManifoldForm (Or TypeS TypeF) t -> CppTranslator [MDoc]
   manifoldSignature i typestr form = do
     s <- CMS.get
     if Set.member i (translatorSignatureSet s)
       then return []
       else do
-        args <- mapM cppArgOf (expandManifoldForm (typeMof . fst) id form)
+        let formArgs = typeMofForm form
+        args <- mapM cppArgOf formArgs
         CMS.put (s {translatorSignatureSet = Set.insert i (translatorSignatureSet s)})
         return [typestr <+> manNamer i <> tupled args <> ";"]
 
@@ -408,35 +405,36 @@ translateSegment m0 = do
   return $ vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
   where
 
-  foldRules = FoldManifoldM
-    { opSerialManifoldM = makeSerialManifold
-    , opNativeManifoldM = makeNativeManifold
-    , opSerialExprM = makeSerialExpr
-    , opNativeExprM = makeNativeExpr
-    , opSerialArgM = makeSerialArg
-    , opNativeArgM = makeNativeArg
+  foldRules = FoldWithManifoldM
+    { opFoldWithSerialManifoldM = makeSerialManifold
+    , opFoldWithNativeManifoldM = makeNativeManifold
+    , opFoldWithSerialExprM = makeSerialExpr
+    , opFoldWithNativeExprM = makeNativeExpr
+    , opFoldWithSerialArgM = makeSerialArg
+    , opFoldWithNativeArgM = makeNativeArg
     }
+
 
   manifoldIndexer = makeManifoldIndexer (CMS.gets translatorCurrentManifold)
                                         (\i -> CMS.modify (\s -> s { translatorCurrentManifold = i}))
 
-  makeSerialManifold :: SerialManifold_ PoolDocs PoolDocs -> CppTranslator PoolDocs
-  makeSerialManifold sm@(SerialManifold_ i _ form (_, e)) = makeManifold i form (typeMof sm) e
+  makeSerialManifold :: SerialManifold -> SerialManifold_ (TypeS, PoolDocs) (TypeM, PoolDocs) PoolDocs -> CppTranslator PoolDocs
+  makeSerialManifold sm (SerialManifold_ i _ form e) = makeManifold i form (typeMof sm) e
 
-  makeNativeManifold :: NativeManifold_ PoolDocs PoolDocs -> CppTranslator PoolDocs
-  makeNativeManifold nm@(NativeManifold_ i _ form (_, e)) = makeManifold i form (typeMof nm) e
+  makeNativeManifold :: NativeManifold -> NativeManifold_ (TypeS, PoolDocs) (TypeM, PoolDocs) PoolDocs -> CppTranslator PoolDocs
+  makeNativeManifold nm (NativeManifold_ i _ form e) = makeManifold i form (typeMof nm) e
 
-  makeSerialArg :: SerialArg_ PoolDocs PoolDocs -> CppTranslator PoolDocs
-  makeSerialArg (SerialArgManifold_ x) = return x
-  makeSerialArg (SerialArgExpr_ x) = return x
+  makeSerialArg :: SerialArg -> SerialArg_ PoolDocs PoolDocs -> CppTranslator (TypeS, PoolDocs)
+  makeSerialArg sr (SerialArgManifold_ x) = return (typeSof sr, x)
+  makeSerialArg sr (SerialArgExpr_ x) = return (typeSof sr, x)
 
-  makeNativeArg :: NativeArg_ PoolDocs PoolDocs -> CppTranslator PoolDocs
-  makeNativeArg (NativeArgManifold_ x) = return x
-  makeNativeArg (NativeArgExpr_ x) = return x
+  makeNativeArg :: NativeArg -> NativeArg_ PoolDocs PoolDocs -> CppTranslator (TypeM, PoolDocs)
+  makeNativeArg nr (NativeArgManifold_ x) = return (typeMof nr, x)
+  makeNativeArg nr (NativeArgExpr_ x) = return (typeMof nr, x)
 
-  makeSerialExpr :: SerialExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> CppTranslator PoolDocs
-  makeSerialExpr (ManS_ e) = return e
-  makeSerialExpr (AppPoolS_ _ (PoolCall _ cmds args) _) = do
+  makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> CppTranslator PoolDocs
+  makeSerialExpr _ (ManS_ e) = return e
+  makeSerialExpr _ (AppPoolS_ _ (PoolCall _ cmds args) _) = do
     let bufDef = "std::ostringstream s;"
         callArgs = map dquotes cmds ++ map argNamer args
         cmd = "s << " <> cat (punctuate " << \" \" << " callArgs) <> ";"
@@ -447,28 +445,29 @@ translateSegment m0 = do
       , poolPriorLines = [bufDef, cmd]
       , poolPriorExprs = []
       }
-  makeSerialExpr (ReturnS_ e) = return $ e {poolExpr = "return(" <> poolExpr e <> ");"}
-  makeSerialExpr (SerialLetS_ letIndex sa sb) = return $ makeLet svarNamer letIndex serialType sa sb
-  makeSerialExpr (NativeLetS_ letIndex (t, na) sb) = do
+  makeSerialExpr _ (ReturnS_ e) = return $ e {poolExpr = "return(" <> poolExpr e <> ");"}
+  makeSerialExpr _ (SerialLetS_ letIndex sa sb) = return $ makeLet svarNamer letIndex serialType sa sb
+  makeSerialExpr (NativeLetS _ (typeFof -> t) _) (NativeLetS_ letIndex na sb) = do
     typestr <- cppTypeOf t
     return $ makeLet nvarNamer letIndex typestr na sb
-  makeSerialExpr (LetVarS_ _ i) = return $ PoolDocs [] (svarNamer i) [] []
-  makeSerialExpr (BndVarS_ _ i) = return $ PoolDocs [] (svarNamer i) [] []
-  makeSerialExpr (SerializeS_ s e) = do
+  makeSerialExpr _ (LetVarS_ _ i) = return $ PoolDocs [] (svarNamer i) [] []
+  makeSerialExpr _ (BndVarS_ _ i) = return $ PoolDocs [] (svarNamer i) [] []
+  makeSerialExpr _ (SerializeS_ s e) = do
     se <- serialize (poolExpr e) s 
     return $ mergePoolDocs (\_ -> poolExpr se) [e, se]
+  makeSerialExpr _ _ = error "Unreachable"
 
-  makeNativeExpr :: NativeExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> CppTranslator PoolDocs
-  makeNativeExpr (AppSrcN_ _ src es) =
+  makeNativeExpr :: NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> CppTranslator PoolDocs
+  makeNativeExpr _ (AppSrcN_ _ src (map snd -> es)) =
     return $ mergePoolDocs ((<>) (pretty $ srcName src) . tupled) es
-  makeNativeExpr (ManN_ _ call) = return call
-  makeNativeExpr (ReturnN_ _ e) =
+  makeNativeExpr _ (ManN_ call) = return call
+  makeNativeExpr _ (ReturnN_ e) =
     return $ e {poolExpr = "return" <> parens (poolExpr e) <> ";"} 
-  makeNativeExpr (SerialLetN_ i sa (_, nb)) = return $ makeLet svarNamer i serialType sa nb
-  makeNativeExpr (NativeLetN_ i (t1, na) (_, nb)) = makeLet nvarNamer i <$> cppTypeOf t1 <*> pure na <*> pure nb
-  makeNativeExpr (LetVarN_ _ i) = return $ PoolDocs [] (nvarNamer i) [] []
-  makeNativeExpr (BndVarN_ _ i) = return $ PoolDocs [] (nvarNamer i) [] []
-  makeNativeExpr (DeserializeN_ t s e) = do
+  makeNativeExpr _ (SerialLetN_ i sa nb) = return $ makeLet svarNamer i serialType sa nb
+  makeNativeExpr (NativeLetN _ (typeFof -> t1) _) (NativeLetN_ i na nb) = makeLet nvarNamer i <$> cppTypeOf t1 <*> pure na <*> pure nb
+  makeNativeExpr _ (LetVarN_ _ i) = return $ PoolDocs [] (nvarNamer i) [] []
+  makeNativeExpr _ (BndVarN_ _ i) = return $ PoolDocs [] (nvarNamer i) [] []
+  makeNativeExpr _ (DeserializeN_ t s e) = do
     typestr <- cppTypeOf t
     (deserialized, assignments) <- deserialize (poolExpr e) typestr s
     return $ e
@@ -476,30 +475,31 @@ translateSegment m0 = do
       , poolPriorLines = poolPriorLines e <> assignments
       }
 
-  makeNativeExpr (AccN_ _ _ _ e k) =
+  makeNativeExpr _ (AccN_ _ _ e k) =
     return (e {poolExpr = poolExpr e <> "." <> pretty k})
 
-  makeNativeExpr (SrcN_ _ _) = undefined
+  makeNativeExpr _ (SrcN_ _ _) = undefined
 
-  makeNativeExpr (ListN_ _ _ es) =
+  makeNativeExpr _ (ListN_ _ _ es) =
     return $ mergePoolDocs (encloseSep "{" "}" ",") es
 
-  makeNativeExpr (TupleN_ _ es) =
-    return $ mergePoolDocs ((<>) "std::make_tuple" . tupled) (map snd es)
+  makeNativeExpr _ (TupleN_ _ es) =
+    return $ mergePoolDocs ((<>) "std::make_tuple" . tupled) es
 
-  makeNativeExpr e@(RecordN_ _ _ _ rs) = do
+  makeNativeExpr e (RecordN_ _ _ _ rs) = do
     t <- cppTypeOf e
     idx <- getCounter
     let v' = "a" <> pretty idx
-        decl = t <+> v' <+> encloseSep "{" "}" "," (map (poolExpr . snd . snd) rs) <> ";"
-    let p = mergePoolDocs (const v') (map (snd . snd) rs)
+        decl = t <+> v' <+> encloseSep "{" "}" "," (map (poolExpr . snd) rs) <> ";"
+    let p = mergePoolDocs (const v') (map snd rs)
     return (p {poolPriorLines = poolPriorLines p <> [decl]})
 
-  makeNativeExpr (LogN_         _ x) = return (PoolDocs [] (if x then "true" else "false") [] [])
-  makeNativeExpr (RealN_        _ x) = return (PoolDocs [] (viaShow x) [] [])
-  makeNativeExpr (IntN_         _ x) = return (PoolDocs [] (viaShow x) [] [])
-  makeNativeExpr (StrN_         _ x) = return (PoolDocs [] (dquotes $ pretty x) [] [])
-  makeNativeExpr (NullN_        _  ) = return (PoolDocs [] "null" [] [])
+  makeNativeExpr _ (LogN_         _ x) = return (PoolDocs [] (if x then "true" else "false") [] [])
+  makeNativeExpr _ (RealN_        _ x) = return (PoolDocs [] (viaShow x) [] [])
+  makeNativeExpr _ (IntN_         _ x) = return (PoolDocs [] (viaShow x) [] [])
+  makeNativeExpr _ (StrN_         _ x) = return (PoolDocs [] (dquotes $ pretty x) [] [])
+  makeNativeExpr _ (NullN_        _  ) = return (PoolDocs [] "null" [] [])
+  makeNativeExpr _ _ = error "Unreachable"
 
 
   makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
@@ -515,9 +515,9 @@ translateSegment m0 = do
 
 
 makeManifold
-  :: HasTypeM t
+  :: (HasTypeM t)
   => Int -- ^ The index of the manifold that is being created
-  -> ManifoldForm (t, PoolDocs) ArgTypes
+  -> ManifoldForm (Or TypeS TypeF) t
   -> TypeM -- ^ The type of the manifold (usually a function, serialized terms are of general type "Str" and C++ type "std::string"
   -> PoolDocs -- ^ Generated content for the manifold body
   -> CppTranslator PoolDocs
@@ -534,10 +534,12 @@ makeManifold callIndex form manifoldType e = do
 
   makeManifoldCall
     :: HasTypeM t
-    => ManifoldForm (t, PoolDocs) ArgTypes -> CppTranslator MDoc 
-  makeManifoldCall (ManifoldFull rs) = return $ mname <> tupled (map (argNamer . second fst) rs)
+    => ManifoldForm (Or TypeS TypeF) t -> CppTranslator MDoc 
+  makeManifoldCall (ManifoldFull rs) = do
+    let args = map argNamer (typeMofRs rs)
+    return $ mname <> tupled args 
   makeManifoldCall (ManifoldPass vs) = do
-    typestr <- stdFunction (returnType manifoldType) (argTypes vs)
+    typestr <- stdFunction (returnType manifoldType) (map (fmap typeMof) vs)
     return $ typestr <> parens mname
   makeManifoldCall (ManifoldPart rs vs) = do
     -- Partial application is fucking ugly in C++.
@@ -550,17 +552,16 @@ makeManifold callIndex form manifoldType e = do
     --   std::function<double(double)>(std::bind(static_cast<double(*)(double, double)>(&mul), 5, std::placeholders::_1))
     --
     -- TODO: find some magic to make this suck less
-    appliedTypeStr <- stdFunction (returnType manifoldType) (argTypes vs)
-    castFunction <- staticCast (returnType manifoldType) (map (second (typeMof . fst)) rs <> argTypes vs) mname
+    appliedTypeStr <- stdFunction (returnType manifoldType) (map (fmap typeMof) vs)
+    let rsTypes = typeMofRs rs
+        vsTypes = map (fmap typeMof) vs
+    castFunction <- staticCast (returnType manifoldType) (rsTypes <> vsTypes) mname
     let vs' = take
               (length vs)
               (map (\j -> "std::placeholders::_" <> viaShow j) ([1..] :: [Int]))
-        rs' = map (argNamer . second fst) rs
+        rs' = map argNamer (typeMofRs rs)
         bindStr = stdBind $ castFunction : (rs' ++ vs')
     return $ appliedTypeStr <+> parens bindStr
-
-  argTypes :: [Arg ArgTypes] -> [Arg TypeM]
-  argTypes args = concat [map (annotate i) (argTypesToTypeM x) | (Arg i x) <- args]
 
   makeManifoldBody :: MDoc -> CppTranslator (Maybe MDoc)
   makeManifoldBody body = do
@@ -569,7 +570,8 @@ makeManifold callIndex form manifoldType e = do
       then return Nothing
       else do
         typestr <- cppTypeOf (returnType manifoldType)
-        args <- mapM cppArgOf (expandManifoldForm (typeMof . fst) id form)
+        let argList = typeMofForm form
+        args <- mapM cppArgOf argList
         let decl = typestr <+> mname <> tupled args
         return . Just $ block 4 decl body
 
@@ -577,6 +579,11 @@ makeManifold callIndex form manifoldType e = do
   returnType (Function _ t) = t
   returnType t = t
 
+typeMofRs :: [Arg (Or TypeS TypeF)] -> [Arg TypeM]
+typeMofRs rs = concat [[Arg i t | t <- bilist typeMof typeMof orT] | (Arg i orT) <- rs]
+
+typeMofForm :: HasTypeM t => ManifoldForm (Or TypeS TypeF) t -> [Arg TypeM]
+typeMofForm = concat . abilist (\i r -> [Arg i t | t <- bilist typeMof typeMof r]) (\i r -> [Arg i (typeMof r)])
 
 stdFunction :: (HasCppType ta, HasCppType tb) => ta -> [Arg tb] -> CppTranslator MDoc
 stdFunction t args = do
@@ -601,7 +608,9 @@ makeDispatch ms = block 4 "switch(std::stoi(argv[1]))" (vsep (map makeCase ms))
   where
     makeCase :: SerialManifold -> MDoc
     makeCase (SerialManifold i _ form _) =
-      let size = sum $ abilist (\_ _ -> 1) (\_ x -> (length . argTypesToTypeM) x) form
+      -- this made more sense when I was using ArgTypes
+      -- it may make sense yet again when I switch to Or
+      let size = sum $ abilist (\_ _ -> 1) (\_ _ -> 1) form
           args' = take size $ map (\j -> "argv[" <> viaShow j <> "]") ([2..] :: [Int])
       in
         (nest 4 . vsep)
@@ -622,24 +631,24 @@ collectRecords :: SerialManifold -> [(FVar, GIndex, [(FVar, TypeF)])]
 collectRecords e0@(SerialManifold i0 _ _ _)
   = unique $ CMS.evalState (surroundFoldSerialManifoldM manifoldIndexer fm e0) i0
   where
-    fm = defaultValue { opNativeExprM = nativeExpr, opSerialExprM = serialExpr }
+    fm = defaultValue { opFoldWithNativeExprM = nativeExpr, opFoldWithSerialExprM = serialExpr }
 
     manifoldIndexer = makeManifoldIndexer CMS.get CMS.put
 
-    nativeExpr (DeserializeN_ t s xs) = do
+    nativeExpr _ (DeserializeN_ t s xs) = do
       manifoldIndex <- CMS.get
       let tRecs = seekRecs manifoldIndex t
           sRecs = seekRecs manifoldIndex (serialAstToType s)
       return $ xs <> tRecs <> sRecs
-    nativeExpr e = do
+    nativeExpr efull e = do
       manifoldIndex <- CMS.get
-      let newRecs = seekRecs manifoldIndex (typeFof e)
+      let newRecs = seekRecs manifoldIndex (typeFof efull)
       return $ foldlNE (<>) newRecs e
 
-    serialExpr (SerializeS_ s xs) = do
+    serialExpr _ (SerializeS_ s xs) = do
       manifoldIndex <- CMS.get
       return $ seekRecs manifoldIndex (serialAstToType s) <> xs
-    serialExpr e = return $ foldlSE (<>) [] e
+    serialExpr _ e = return $ foldlSE (<>) [] e
 
     seekRecs :: Int -> TypeF -> [(FVar, GIndex, [(FVar, TypeF)])]
     seekRecs m (NamF _ v@(FV _ "struct") _ rs) = [(v, m, rs)] <> concatMap (seekRecs m . snd) rs
@@ -724,8 +733,8 @@ generateSourcedSerializers es0 = do
   where
 
     fm = defaultValue
-      { opSerialManifoldM = \(SerialManifold_ i _ _ (_, e)) -> Map.union <$> MM.metaTypedefs i <*> pure e
-      , opNativeManifoldM = \(NativeManifold_ i _ _ (_, e)) -> Map.union <$> MM.metaTypedefs i <*> pure e
+      { opSerialManifoldM = \(SerialManifold_ i _ _ e) -> Map.union <$> MM.metaTypedefs i <*> pure e
+      , opNativeManifoldM = \(NativeManifold_ i _ _ e) -> Map.union <$> MM.metaTypedefs i <*> pure e
       }
 
     groupQuad :: ([a],[a]) -> (a, a, a, a) -> ([a],[a])
