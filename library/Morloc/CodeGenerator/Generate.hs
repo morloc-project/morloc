@@ -738,7 +738,7 @@ expressPolyExpr pc
   --      g_L (\x y z -> f_L y z x) xs                         |             |           |
   --      ----------------------------                         |             |           |
   --      def m1(xs):                                          |             |           |
-  --          return g (lambda x, y, z: m2(y, z, x), xs)       |             |           |
+  --          return g (lambda x, y, z: f(y, z, x), xs)        |             |           |
   --                                                           |             |           |
   ----------------------------------------------------------------------------------------
   | sameLanguage && length appArgs == length vs = do
@@ -746,7 +746,7 @@ expressPolyExpr pc
       MM.sayVVV $ "appArgs:" <+> list (map pretty appArgs)
       MM.sayVVV $ "callInputTypes:" <+> list (map viaShow callInputTypes)
 
-      let args = map unvalue appArgs
+      let args =  zipWith (\(Arg i _) t -> Arg i (Just (typeFof t))) appArgs callInputTypes
       xs' <- zipWithM expressPolyExpr callInputTypes xs
       return
           . PolyManifold m (ManifoldPass args)
@@ -766,10 +766,11 @@ expressPolyExpr pc
       MM.sayVVV "case #4"
       let nContextArgs = length appArgs - length vs
           contextArgs = map unvalue (take nContextArgs appArgs)
-          lambdaArgs = map unvalue (drop nContextArgs appArgs)
+          typedLambdaArgs = zipWith (\(Arg i _) t -> Arg i (Just (typeFof t))) (drop nContextArgs appArgs) lamInputTypes
+
       xs' <- zipWithM expressPolyExpr callInputTypes xs
       return
-        . PolyManifold m (ManifoldPart contextArgs lambdaArgs)
+        . PolyManifold m (ManifoldPart contextArgs typedLambdaArgs)
         . PolyReturn
         $ PolyApp call xs'
 
@@ -798,8 +799,10 @@ expressPolyExpr pc
       let xsPassed = bindVar appArgs (drop n callInputTypes)
           xs' = xsLocal <> xsPassed
 
+      let typedBoundArgs = zipWith (\(Arg i _) t -> Arg i (Just (typeFof t))) (drop n lamArgs) lamInputTypes
+
       return
-        . PolyManifold m (ManifoldPass (map unvalue appArgs))
+        . PolyManifold m (ManifoldPass typedBoundArgs)
         . PolyReturn
         . PolyApp
           ( PolyForeignInterface appType (map ann appArgs)
@@ -872,10 +875,12 @@ expressPolyExpr pc
           boundVars = [ PolyBndVar (maybe (Left (langOf' pc)) Right (lookup v lambdaTypeMap)) i
                       | Arg i v <- appArgs
                       ]
+          untypedContextArgs = map unvalue $ take nContextArgs appArgs
+          typedPassedArgs = zipWith (\(Arg i _) t -> Arg i (Just (typeFof t))) (drop nContextArgs lamArgs) lamInputTypes
 
       return
-        . PolyManifold m (ManifoldPart (map unvalue $ take nContextArgs appArgs)
-                                       (map unvalue $ drop nContextArgs appArgs))
+        . PolyManifold m (ManifoldPart untypedContextArgs
+                                       typedPassedArgs)
         . chain lets
         . PolyReturn
         . PolyApp
@@ -936,18 +941,23 @@ expressPolyExpr pc
 expressPolyExpr _ (SAnno (One (LamS vs body, (Idx _ lambdaType, manifoldArguments))) m) = do
     body' <- expressPolyExpr lambdaType body
 
+    inputTypes <- case lambdaType of
+      (FunP ts _) -> return $ map typeFof ts
+      _ -> return []
+
     let contextArguments = map unvalue $ take (length manifoldArguments - length vs) manifoldArguments
         boundArguments = map unvalue $ drop (length contextArguments) manifoldArguments
+        typeBoundArguments = zipWith (\t (Arg i _) -> Arg i (Just t)) inputTypes boundArguments
 
     MM.sayVVV $ "Express lambda:"
               <> "\n  vs:" <+> pretty vs
               <> "\n  lambdaType:" <+> pretty lambdaType
               <> "\n  manifoldArguments:" <+> list (map pretty manifoldArguments)
               <> "\n  contextArguments:" <+> list (map pretty contextArguments)
-              <> "\n  boundArguments" <+> list (map pretty boundArguments)
+              <> "\n  boundArguments" <+> list (map pretty typeBoundArguments)
 
     return
-      . PolyManifold m (ManifoldPart contextArguments boundArguments)
+      . PolyManifold m (ManifoldPart contextArguments typeBoundArguments)
       . PolyReturn
       $ body'
 
@@ -1032,10 +1042,10 @@ expressPolyExpr pc@(FunP pinputs poutput) (SAnno (One (CallS src, (Idx _ c@(FunP
   | langOf pc == langOf c = do
       MM.sayVVV $ "case #2 - un-applied cis source call:" <+> pretty (srcName src)
       ids <- MM.takeFromCounter (length callInputs)
-      let lambdaArgs = [Arg i None | i <- ids]
-          lambdaVals = bindVarIds ids callInputs
+      let lambdaVals = bindVarIds ids callInputs
+          lambdaTypedArgs = zipWith annotate ids (map (Just . typeFof) callInputs)
       return
-        . PolyManifold m (ManifoldPass lambdaArgs)
+        . PolyManifold m (ManifoldPass lambdaTypedArgs)
         . PolyReturn
         $ PolyApp (PolySrc c src) lambdaVals
 
@@ -1058,13 +1068,14 @@ expressPolyExpr pc@(FunP pinputs poutput) (SAnno (One (CallS src, (Idx _ c@(FunP
       MM.sayVVV $ "Un-applied trans source call:" <+> pretty (srcName src)
       ids <- MM.takeFromCounter (length callInputs)
       let lambdaArgs = [Arg i None | i <- ids]
+          lambdaTypedArgs = zipWith annotate ids (map (Just . typeFof) callInputs)
           callVals = bindVarIds ids callInputs
 
       MM.sayVVV $ "src:" <+> pretty src
       MM.sayVVV $ "lambdaArgs:" <+> list (map pretty lambdaArgs)
 
       return
-       . PolyManifold m (ManifoldPass lambdaArgs)
+       . PolyManifold m (ManifoldPass lambdaTypedArgs)
        . PolyReturn
        . PolyApp
            ( PolyForeignInterface poutput (map ann lambdaArgs)
@@ -1341,6 +1352,9 @@ serializeOne packmap (MonoHead lang m0 args0 e0) = do
   wireSerial lang packmap sm
   where
 
+  -- map of argument indices to native types
+  typemap = makeTypemap e0
+
   contextArg :: Int -> Or TypeS TypeF
   contextArg i = case Map.lookup i typemap of
     (Just t) -> LR (typeSof t) t
@@ -1453,9 +1467,6 @@ serializeOne packmap (MonoHead lang m0 args0 e0) = do
   nativeExpr (MonoStr    v x) = return (StrN v x)
   nativeExpr (MonoNull   v) = return (NullN v)
 
-  -- map of argument indices to native types
-  typemap = makeTypemap e0
-
   typeArg :: SerializationState -> Int -> Arg TypeM
   typeArg s i = case (s, Map.lookup i typemap) of
     (Serialized, Just t) -> Arg i (Serial t)
@@ -1468,7 +1479,10 @@ serializeOne packmap (MonoHead lang m0 args0 e0) = do
   makeTypemap (MonoLetVar t i) = Map.singleton i t
   makeTypemap (MonoBndVar (Just t) i) = Map.singleton i t
   -- recursive calls
-  makeTypemap (MonoManifold _ _ e) = makeTypemap e
+  makeTypemap (MonoManifold _ (manifoldBound -> ys) e) =
+    -- bound arguments may not be used, but they where passed in from the
+    -- source function, so they cannot be removed.
+    Map.union (Map.fromList [(i, t) | (Arg i (Just t)) <- ys]) (makeTypemap e)
   makeTypemap (MonoLet _ e1 e2) = Map.union (makeTypemap e1) (makeTypemap e2)
   makeTypemap (MonoReturn e) = makeTypemap e
   makeTypemap (MonoApp e es) = Map.unions (map makeTypemap (e:es))
@@ -1553,11 +1567,11 @@ wireSerial lang packmap sm0 = foldSerialManifoldM fm sm0 |>> snd
     formMap = manifoldToMap form0
 
     wrapAsNeeded :: NativeExpr -> (Int, Request) -> NativeExpr
-    wrapAsNeeded ne (i, req) = case (req, fromJust $ Map.lookup i formMap) of
-      (SerialContent, (NativeContent, Just t)) -> SerialLetN i (serializeS t (BndVarN t i)) ne
-      (NativeAndSerialContent, (NativeContent, Just t)) -> SerialLetN i (serializeS t (BndVarN t i)) ne
-      (NativeContent, (SerialContent, Just t)) -> NativeLetN i (naturalizeN t (BndVarS (Just t) i)) ne
-      (NativeAndSerialContent, (SerialContent, Just t)) -> NativeLetN i (naturalizeN t (BndVarS (Just t) i)) ne
+    wrapAsNeeded ne (i, req) = case (req, Map.lookup i formMap) of
+      (SerialContent, Just (NativeContent, Just t)) -> SerialLetN i (serializeS t (BndVarN t i)) ne
+      (NativeAndSerialContent, Just (NativeContent, Just t)) -> SerialLetN i (serializeS t (BndVarN t i)) ne
+      (NativeContent, Just (SerialContent, Just t)) -> NativeLetN i (naturalizeN t (BndVarS (Just t) i)) ne
+      (NativeAndSerialContent, Just (SerialContent, Just t)) -> NativeLetN i (naturalizeN t (BndVarS (Just t) i)) ne
       _ -> ne
 
   letWrapS :: ManifoldForm (Or TypeS TypeF) TypeS -> Map.Map Int Request -> SerialExpr -> SerialExpr
@@ -1589,109 +1603,8 @@ wireSerial lang packmap sm0 = foldSerialManifoldM fm sm0 |>> snd
 
   serializeS :: TypeF -> NativeExpr -> SerialExpr
   serializeS t se = case runExcept (SerializeS <$> Serial.makeSerialAST packmap lang t <*> pure se) of
-    (Left serr) -> error $ show serr
+    (Left serr) -> error $ "for language " <> show lang <> " and type " <> show t <> " found error:" <> show serr
     (Right x) -> x
-
-
-
--- wireSerial :: Lang -> Map.Map MT.Text [ResolvedPacker] -> Map.Map Int TypeF -> SerialManifold -> SerialManifold
--- wireSerial lang packmap typemap = snd . runIdentity . foldSerialManifoldM fm
---   where
---   defs = makeMonoidFoldDefault Map.empty (Map.unionWith (<>))
---
---   fm = FoldManifoldM
---     { opSerialManifoldM = wireSerialManifold
---     , opNativeManifoldM = wireNativeManifold
---     , opSerialExprM = wireSerialExpr
---     , opNativeExprM = wireNativeExpr
---     , opSerialArgM = monoidSerialArg defs
---     , opNativeArgM = monoidNativeArg defs
---     }
---
---   wireSerialManifold :: SerialManifold_ (D SerialArg) (D SerialExpr) -> MM.Identity (D SerialManifold)
---   wireSerialManifold (SerialManifold_ m _ form (t, (req, e))) = do
---     let formReq = Map.unionsWith (<>) . catMaybes . bilist (Just . fst . snd) (const Nothing) $ form
---         form' = first (snd . snd) form
---         form'' = asecond (specialize req) form'
---         e' = letWrapS form'' req e
---     return (formReq, SerialManifold m lang form'' (t, e'))
---
---   wireNativeManifold :: NativeManifold_ (D NativeArg) (D NativeExpr) -> MM.Identity (D NativeManifold)
---   wireNativeManifold (NativeManifold_ m _ form (t, (req, e))) = do
---     let formReq = Map.unionsWith (<>) . catMaybes . bilist (Just . fst . snd) (const Nothing) $ form
---         form' = first (snd . snd) form
---         form'' = asecond (specialize req) form'
---         e' = letWrapN form'' req e
---     return (formReq, NativeManifold m lang form'' (t, e'))
---
---   wireSerialExpr (LetVarS_ t i) = return (Map.singleton i SerialContent, LetVarS t i)
---   wireSerialExpr (BndVarS_ t i) = return (Map.singleton i SerialContent, BndVarS t i)
---   wireSerialExpr e = monoidSerialExpr defs e
---
---   wireNativeExpr :: NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) -> MM.Identity (D NativeExpr)
---   wireNativeExpr (LetVarN_ t i) = return (Map.singleton i NativeContent, LetVarN t i)
---   wireNativeExpr (BndVarN_ t i) = return (Map.singleton i NativeContent, BndVarN t i)
---   wireNativeExpr e = monoidNativeExpr defs e
---
---   specialize :: Map.Map Int Request -> Int -> ArgTypes -> ArgTypes
---   specialize req i r = case (Map.lookup i req, r) of
---     (Nothing, _) -> SerialOnly PassthroughS
---     (Just SerialContent, SerialAndNative t) -> SerialOnly (typeSof t)
---     (Just NativeContent, SerialAndNative t) -> NativeOnly t
---     _ -> r
---
---   letWrapN :: ManifoldForm NativeArg ArgTypes -> Map.Map Int Request -> NativeExpr -> NativeExpr
---   letWrapN form0 req0 ne0 = foldl wrapAsNeeded ne0 (Map.toList req0) where
---
---     formMap = manifoldToMap form0
---
---     wrapAsNeeded :: NativeExpr -> (Int, Request) -> NativeExpr
---     wrapAsNeeded ne (i, req) = case (req, fromJust $ Map.lookup i formMap) of
---       (SerialContent, (NativeContent, Just t)) -> SerialLetN i (serializeS t (BndVarN t i)) ne
---       (NativeAndSerialContent, (NativeContent, Just t)) -> SerialLetN i (serializeS t (BndVarN t i)) ne
---       (NativeContent, (SerialContent, Just t)) -> NativeLetN i (naturalizeN t (BndVarS (Just t) i)) ne
---       (NativeAndSerialContent, (SerialContent, Just t)) -> NativeLetN i (naturalizeN t (BndVarS (Just t) i)) ne
---       _ -> ne
---
---   letWrapS :: ManifoldForm SerialArg ArgTypes -> Map.Map Int Request -> SerialExpr -> SerialExpr
---   letWrapS form0 req0 se0 = foldl wrapAsNeeded se0 (Map.toList req0) where
---
---     formMap = manifoldToMap form0
---
---     wrapAsNeeded :: SerialExpr -> (Int, Request) -> SerialExpr
---     wrapAsNeeded se (i, req) = case (req, fromJust $ Map.lookup i formMap) of
---       (SerialContent, (NativeContent, Just t)) -> SerialLetS i (serializeS t (BndVarN t i)) se
---       (NativeAndSerialContent, (NativeContent, Just t)) -> SerialLetS i (serializeS t (BndVarN t i)) se
---       (NativeContent, (SerialContent, Just t)) -> NativeLetS i (t, naturalizeN t (BndVarS (Just t) i)) se
---       (NativeAndSerialContent, (SerialContent, Just t)) -> NativeLetS i (t, naturalizeN t (BndVarS (Just t) i)) se
---       _ -> se
---
---   manifoldToMap :: HasRequest a => ManifoldForm a ArgTypes -> Map.Map Int (Request, Maybe TypeF)
---   manifoldToMap = Map.fromList . abilist (\i x -> (i, (requestOf x, Map.lookup i typemap))) (\i x -> (i, (requestOf x, Map.lookup i typemap)))
---
---   naturalizeN :: TypeF -> SerialExpr -> NativeExpr
---   naturalizeN t se = case runExcept (DeserializeN t <$> Serial.makeSerialAST packmap lang t <*> pure se) of
---     (Left serr) -> error $ show serr
---     (Right x) -> x
---
---   serializeS :: TypeF -> NativeExpr -> SerialExpr
---   serializeS t se = case runExcept (SerializeS <$> Serial.makeSerialAST packmap lang t <*> pure se) of
---     (Left serr) -> error $ show serr
---     (Right x) -> x
-
-
-  -- -- | recursively replace BndVarS term with a LetVarS term, do not recurse across manifold borders
-  -- letSwapS :: MFunctor a => Int -> a -> a
-  -- letSwapS i = mgatedMap gates mm where
-  --     gates = defaultValue { gateSerialManifold = const False
-  --                          , gateNativeManifold = const False
-  --                          }
-  --     mm = defaultValue { mapSerialExpr = swapLet }
-  --
-  --     swapLet (BndVarS t i')
-  --         | i' == i = LetVarS t i
-  --         | otherwise = BndVarS t i
-  --     swapLet e = e
 
 
 data Request = SerialContent | NativeContent | NativeAndSerialContent

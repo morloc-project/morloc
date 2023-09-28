@@ -461,7 +461,7 @@ data PolyHead = PolyHead Int [Arg None] PolyExpr
 -- no serialization and no argument types
 data PolyExpr
   -- organizational terms that may have undefined types
-  = PolyManifold Int (ManifoldForm None None) PolyExpr
+  = PolyManifold Int (ManifoldForm None (Maybe TypeF)) PolyExpr
   | PolyForeignInterface
       TypeP    -- return type in calling language
       [Int]    -- argument ids
@@ -491,7 +491,7 @@ data MonoHead = MonoHead Lang Int [Arg None] MonoExpr
 
 data MonoExpr
   -- organizational terms that may have undefined types
-  = MonoManifold Int (ManifoldForm None None) MonoExpr
+  = MonoManifold Int (ManifoldForm None (Maybe TypeF)) MonoExpr
   | MonoPoolCall
       TypeF     -- return type in calling language
       Int       -- foreign manifold id
