@@ -1334,10 +1334,11 @@ collectUnresolvedPackers mheads = do
 -- language. Here we need to determine where inputs are (de)serialized and the
 -- serialization states of arguments and variables.
 serializeOne :: Map.Map MT.Text [ResolvedPacker] -> MonoHead -> MorlocMonad SerialManifold
-serializeOne packmap (MonoHead lang m0 args0 e0)  = do
+serializeOne packmap (MonoHead lang m0 args0 e0) = do
   let form0 = ManifoldFull [Arg i (L . typeSof $ Map.lookup i typemap) | (Arg i _) <- args0]
   se1 <- serialExpr e0
-  return (SerialManifold m0 lang form0 se1)
+  let sm = SerialManifold m0 lang form0 se1
+  wireSerial lang packmap sm
   where
 
   contextArg :: Int -> Or TypeS TypeF
@@ -1500,9 +1501,99 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
   inferState MonoBndVar{} = error "Ambiguous bound term"
   inferState _ = Unserialized
 
+type (D a) = (Map.Map Int Request, a)
 
--- type (D a) = (Map.Map Int Request, a)
---
+wireSerial :: Lang -> Map.Map MT.Text [ResolvedPacker] -> SerialManifold -> MorlocMonad SerialManifold
+wireSerial lang packmap sm0 = foldSerialManifoldM fm sm0 |>> snd
+  where
+  defs = makeMonoidFoldDefault Map.empty (Map.unionWith (<>))
+
+  fm = FoldManifoldM
+    { opSerialManifoldM = wireSerialManifold
+    , opNativeManifoldM = wireNativeManifold
+    , opSerialExprM = wireSerialExpr
+    , opNativeExprM = wireNativeExpr
+    , opSerialArgM = monoidSerialArg defs
+    , opNativeArgM = monoidNativeArg defs
+    }
+
+  wireSerialManifold :: SerialManifold_ (D SerialExpr) -> MorlocMonad (D SerialManifold)
+  wireSerialManifold (SerialManifold_ m _ form (req, e)) = do
+    let e' = letWrapS form req e
+        form' = afirst (specialize req) form
+        req' = Map.map fst (manifoldToMap form')
+    return (req', SerialManifold m lang form' e')
+
+  wireNativeManifold :: NativeManifold_ (D NativeExpr) -> MorlocMonad (D NativeManifold)
+  wireNativeManifold (NativeManifold_ m _ form (req, e)) = do
+    let e' = letWrapN form req e
+        form' = afirst (specialize req) form
+        req' = Map.map fst (manifoldToMap form')
+    return (req', NativeManifold m lang form' e')
+
+  wireSerialExpr (LetVarS_ t i) = return (Map.singleton i SerialContent, LetVarS t i)
+  wireSerialExpr (BndVarS_ t i) = return (Map.singleton i SerialContent, BndVarS t i)
+  wireSerialExpr e = monoidSerialExpr defs e
+
+  wireNativeExpr :: NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) -> MorlocMonad (D NativeExpr)
+  wireNativeExpr (LetVarN_ t i) = return (Map.singleton i NativeContent, LetVarN t i)
+  wireNativeExpr (BndVarN_ t i) = return (Map.singleton i NativeContent, BndVarN t i)
+  wireNativeExpr e = monoidNativeExpr defs e
+
+  specialize :: Map.Map Int Request -> Int -> Or TypeS TypeF -> Or TypeS TypeF
+  specialize req i r = case (Map.lookup i req, r) of
+    (Nothing, _) -> L PassthroughS
+    (Just SerialContent, LR t _) -> L t
+    (Just NativeContent, LR _ t) -> R t
+    _ -> r
+
+  letWrapN :: ManifoldForm (Or TypeS TypeF) TypeF -> Map.Map Int Request -> NativeExpr -> NativeExpr
+  letWrapN form0 req0 ne0 = foldl wrapAsNeeded ne0 (Map.toList req0) where
+
+    formMap = manifoldToMap form0
+
+    wrapAsNeeded :: NativeExpr -> (Int, Request) -> NativeExpr
+    wrapAsNeeded ne (i, req) = case (req, fromJust $ Map.lookup i formMap) of
+      (SerialContent, (NativeContent, Just t)) -> SerialLetN i (serializeS t (BndVarN t i)) ne
+      (NativeAndSerialContent, (NativeContent, Just t)) -> SerialLetN i (serializeS t (BndVarN t i)) ne
+      (NativeContent, (SerialContent, Just t)) -> NativeLetN i (naturalizeN t (BndVarS (Just t) i)) ne
+      (NativeAndSerialContent, (SerialContent, Just t)) -> NativeLetN i (naturalizeN t (BndVarS (Just t) i)) ne
+      _ -> ne
+
+  letWrapS :: ManifoldForm (Or TypeS TypeF) TypeS -> Map.Map Int Request -> SerialExpr -> SerialExpr
+  letWrapS form0 req0 se0 = foldl wrapAsNeeded se0 (Map.toList req0) where
+
+    formMap = manifoldToMap form0
+
+    wrapAsNeeded :: SerialExpr -> (Int, Request) -> SerialExpr
+    wrapAsNeeded se (i, req) = case (req, Map.lookup i formMap) of
+      (SerialContent, Just (NativeContent, Just t)) -> SerialLetS i (serializeS t (BndVarN t i)) se
+      (NativeAndSerialContent, Just (NativeContent, Just t)) -> SerialLetS i (serializeS t (BndVarN t i)) se
+      (NativeContent, Just (SerialContent, Just t)) -> NativeLetS i (naturalizeN t (BndVarS (Just t) i)) se
+      (NativeAndSerialContent, Just (SerialContent, Just t)) -> NativeLetS i (naturalizeN t (BndVarS (Just t) i)) se
+      _ -> se
+
+  manifoldToMap :: (HasRequest t, MayHaveTypeF t) => ManifoldForm (Or TypeS TypeF) t -> Map.Map Int (Request, Maybe TypeF)
+  manifoldToMap form = f form where
+    mapRequestFromXs xs = Map.fromList [(i, (requestOf t, mayHaveTypeF t)) | (Arg i t) <- typeMofRs xs]
+    mapRequestFromYs ys = Map.fromList [(i, (requestOf t, mayHaveTypeF t)) | (Arg i t) <- ys]
+
+    f (ManifoldFull xs) = mapRequestFromXs xs
+    f (ManifoldPass ys) = mapRequestFromYs ys
+    f (ManifoldPart xs ys) = Map.union (mapRequestFromXs xs) (mapRequestFromYs ys)
+
+  naturalizeN :: TypeF -> SerialExpr -> NativeExpr
+  naturalizeN t se = case runExcept (DeserializeN t <$> Serial.makeSerialAST packmap lang t <*> pure se) of
+    (Left serr) -> error $ show serr
+    (Right x) -> x
+
+  serializeS :: TypeF -> NativeExpr -> SerialExpr
+  serializeS t se = case runExcept (SerializeS <$> Serial.makeSerialAST packmap lang t <*> pure se) of
+    (Left serr) -> error $ show serr
+    (Right x) -> x
+
+
+
 -- wireSerial :: Lang -> Map.Map MT.Text [ResolvedPacker] -> Map.Map Int TypeF -> SerialManifold -> SerialManifold
 -- wireSerial lang packmap typemap = snd . runIdentity . foldSerialManifoldM fm
 --   where
@@ -1588,6 +1679,7 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
 --     (Left serr) -> error $ show serr
 --     (Right x) -> x
 
+
   -- -- | recursively replace BndVarS term with a LetVarS term, do not recurse across manifold borders
   -- letSwapS :: MFunctor a => Int -> a -> a
   -- letSwapS i = mgatedMap gates mm where
@@ -1626,10 +1718,12 @@ instance HasRequest SerialArg where
 instance HasRequest NativeArg where
   requestOf _ = NativeContent
 
-instance HasRequest ArgTypes where
-  requestOf (SerialOnly _) = SerialContent
-  requestOf (NativeOnly _) = NativeContent
-  requestOf (SerialAndNative _) = NativeAndSerialContent
+instance HasRequest TypeS where
+  requestOf _ = SerialContent
+
+instance HasRequest TypeF where
+  requestOf _ = NativeContent
+
 
 instance Semigroup Request where
  SerialContent <> SerialContent = SerialContent

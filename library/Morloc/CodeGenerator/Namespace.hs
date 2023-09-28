@@ -26,8 +26,11 @@ module Morloc.CodeGenerator.Namespace
   , fvar2pvar
   -- ** Typeclasses
   , HasTypeF(..)
+  , MayHaveTypeF(..)
   , HasTypeS(..)
   , HasTypeM(..)
+  , typeMofRs
+  , typeMofForm
   -- ** 
   , Arg
   , ArgGeneral(..)
@@ -46,7 +49,6 @@ module Morloc.CodeGenerator.Namespace
   , MonoHead(..)
   , MonoExpr(..)
   , PoolCall(..)
-
   , MFunctor(..)
   , GateMap(..)
   , ManifoldMap(..)
@@ -574,10 +576,10 @@ data NativeExpr
   | NullN        FVar
   deriving(Show)
 
-foldlSM :: (b -> a -> b) -> b -> SerialManifold_ a a a -> b
+foldlSM :: (b -> a -> b) -> b -> SerialManifold_ a -> b
 foldlSM f b (SerialManifold_ _ _ _ se) = f b se
 
-foldlNM :: (b -> a -> b) -> b -> NativeManifold_ a a a -> b
+foldlNM :: (b -> a -> b) -> b -> NativeManifold_ a -> b
 foldlNM f b (NativeManifold_ _ _ _ ne) = f b ne
 
 foldlSA :: (b -> a -> b) -> b -> SerialArg_ a a -> b
@@ -620,8 +622,8 @@ foldlNE _ b (NullN_        _) = b
 
 
 data (MonoidFold m a) = MonoidFold
-  { monoidSerialManifold :: SerialManifold_ (a, SerialArg) (a, NativeArg) (a, SerialExpr) -> m (a, SerialManifold)
-  , monoidNativeManifold :: NativeManifold_ (a, SerialArg) (a, NativeArg) (a, NativeExpr) -> m (a, NativeManifold)
+  { monoidSerialManifold :: SerialManifold_ (a, SerialExpr) -> m (a, SerialManifold)
+  , monoidNativeManifold :: NativeManifold_ (a, NativeExpr) -> m (a, NativeManifold)
   , monoidSerialArg :: SerialArg_ (a, SerialManifold) (a, SerialExpr) -> m (a, SerialArg)
   , monoidNativeArg :: NativeArg_ (a, NativeManifold) (a, NativeExpr) -> m (a, NativeArg)
   , monoidSerialExpr :: SerialExpr_ (a, SerialManifold) (a, SerialExpr) (a, NativeExpr) (a, SerialArg) (a, NativeArg) -> m (a, SerialExpr)
@@ -693,8 +695,8 @@ makeMonoidFoldDefault mempty' mappend' =
 --  * sr - SerialArg
 --  * nr - NativeArg
 data FoldManifoldM m sm nm se ne sr nr = FoldManifoldM
-  { opSerialManifoldM :: SerialManifold_ sr nr se -> m sm
-  , opNativeManifoldM :: NativeManifold_ sr nr ne -> m nm
+  { opSerialManifoldM :: SerialManifold_ se -> m sm
+  , opNativeManifoldM :: NativeManifold_ ne -> m nm
   , opSerialExprM :: SerialExpr_ sm se ne sr nr -> m se
   , opNativeExprM :: NativeExpr_ nm se ne sr nr -> m ne
   , opSerialArgM  :: SerialArg_ sm se -> m sr
@@ -722,8 +724,8 @@ instance (Monoid a, Monad m, a ~ b, a ~ c, a ~ d, a ~ e, a ~ f) => Defaultable (
     }
 
 data FoldWithManifoldM m sm nm se ne sr nr = FoldWithManifoldM
-  { opFoldWithSerialManifoldM :: SerialManifold -> SerialManifold_ sr nr se -> m sm
-  , opFoldWithNativeManifoldM :: NativeManifold -> NativeManifold_ sr nr ne -> m nm
+  { opFoldWithSerialManifoldM :: SerialManifold -> SerialManifold_ se -> m sm
+  , opFoldWithNativeManifoldM :: NativeManifold -> NativeManifold_ ne -> m nm
   , opFoldWithSerialExprM :: SerialExpr -> SerialExpr_ sm se ne sr nr -> m se
   , opFoldWithNativeExprM :: NativeExpr -> NativeExpr_ nm se ne sr nr -> m ne
   , opFoldWithSerialArgM  :: SerialArg -> SerialArg_ sm se -> m sr
@@ -753,11 +755,33 @@ instance HasTypeF a => HasTypeM (Maybe a) where
   typeMof (Just x) = Serial (typeFof x)
   typeMof Nothing = Passthrough
 
+class MayHaveTypeF a where
+  mayHaveTypeF :: a -> Maybe TypeF
 
-data NativeManifold_ sr nr ne = NativeManifold_ Int Lang (ManifoldForm (Or TypeS TypeF) TypeF) ne
-data SerialManifold_ sr nr se = SerialManifold_ Int Lang (ManifoldForm (Or TypeS TypeF) TypeS) se
+instance MayHaveTypeF TypeF where
+  mayHaveTypeF = Just
+
+instance MayHaveTypeF TypeS where
+  mayHaveTypeF PassthroughS = Nothing
+  mayHaveTypeF (SerialS t) = Just t
+  mayHaveTypeF (FunctionS ts t) = FunF <$> mapM mayHaveTypeF ts <*> mayHaveTypeF t
+
+instance MayHaveTypeF TypeM where
+  mayHaveTypeF Passthrough = Nothing
+  mayHaveTypeF (Serial t) = Just t
+  mayHaveTypeF (Native t) = Just t
+  mayHaveTypeF (Function ts t) = FunF <$> mapM mayHaveTypeF ts <*> mayHaveTypeF t
+
+data NativeManifold_ ne = NativeManifold_ Int Lang (ManifoldForm (Or TypeS TypeF) TypeF) ne
+data SerialManifold_ se = SerialManifold_ Int Lang (ManifoldForm (Or TypeS TypeF) TypeS) se
 data SerialArg_ sm se = SerialArgManifold_ sm | SerialArgExpr_ se
 data NativeArg_ nm ne = NativeArgManifold_ nm | NativeArgExpr_ ne
+
+typeMofRs :: [Arg (Or TypeS TypeF)] -> [Arg TypeM]
+typeMofRs rs = concat [[Arg i t | t <- bilist typeMof typeMof orT] | (Arg i orT) <- rs]
+
+typeMofForm :: HasTypeM t => ManifoldForm (Or TypeS TypeF) t -> [Arg TypeM]
+typeMofForm = concat . abilist (\i r -> [Arg i t | t <- bilist typeMof typeMof r]) (\i r -> [Arg i (typeMof r)])
 
 data SerialExpr_ sm se ne sr nr
   = ManS_ sm

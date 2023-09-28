@@ -172,11 +172,11 @@ invertSerialManifold sm0 =
     , opNativeArgM = invertNativeArgM
     }
 
-  invertSerialManifoldM :: SerialManifold_ (D SerialArg) (D NativeArg) (D SerialExpr) -> Index (D SerialManifold)
+  invertSerialManifoldM :: SerialManifold_ (D SerialExpr) -> Index (D SerialManifold)
   invertSerialManifoldM (SerialManifold_ m lang form se) = do
     return (D (SerialManifold m lang form (weave se)) [])
 
-  invertNativeManifoldM :: NativeManifold_ (D SerialArg) (D NativeArg) (D NativeExpr) -> Index (D NativeManifold)
+  invertNativeManifoldM :: NativeManifold_ (D NativeExpr) -> Index (D NativeManifold)
   invertNativeManifoldM (NativeManifold_ m lang form (weave -> ne)) = do
     return (D (NativeManifold m lang form ne) [])
 

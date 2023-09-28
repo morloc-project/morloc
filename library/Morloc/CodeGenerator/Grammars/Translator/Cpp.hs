@@ -418,10 +418,10 @@ translateSegment m0 = do
   manifoldIndexer = makeManifoldIndexer (CMS.gets translatorCurrentManifold)
                                         (\i -> CMS.modify (\s -> s { translatorCurrentManifold = i}))
 
-  makeSerialManifold :: SerialManifold -> SerialManifold_ (TypeS, PoolDocs) (TypeM, PoolDocs) PoolDocs -> CppTranslator PoolDocs
+  makeSerialManifold :: SerialManifold -> SerialManifold_ PoolDocs -> CppTranslator PoolDocs
   makeSerialManifold sm (SerialManifold_ i _ form e) = makeManifold i form (typeMof sm) e
 
-  makeNativeManifold :: NativeManifold -> NativeManifold_ (TypeS, PoolDocs) (TypeM, PoolDocs) PoolDocs -> CppTranslator PoolDocs
+  makeNativeManifold :: NativeManifold -> NativeManifold_ PoolDocs -> CppTranslator PoolDocs
   makeNativeManifold nm (NativeManifold_ i _ form e) = makeManifold i form (typeMof nm) e
 
   makeSerialArg :: SerialArg -> SerialArg_ PoolDocs PoolDocs -> CppTranslator (TypeS, PoolDocs)
@@ -578,12 +578,6 @@ makeManifold callIndex form manifoldType e = do
   returnType :: TypeM -> TypeM
   returnType (Function _ t) = t
   returnType t = t
-
-typeMofRs :: [Arg (Or TypeS TypeF)] -> [Arg TypeM]
-typeMofRs rs = concat [[Arg i t | t <- bilist typeMof typeMof orT] | (Arg i orT) <- rs]
-
-typeMofForm :: HasTypeM t => ManifoldForm (Or TypeS TypeF) t -> [Arg TypeM]
-typeMofForm = concat . abilist (\i r -> [Arg i t | t <- bilist typeMof typeMof r]) (\i r -> [Arg i (typeMof r)])
 
 stdFunction :: (HasCppType ta, HasCppType tb) => ta -> [Arg tb] -> CppTranslator MDoc
 stdFunction t args = do

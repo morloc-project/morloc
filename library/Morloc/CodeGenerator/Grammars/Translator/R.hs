@@ -170,11 +170,11 @@ translateSegment m0 =
       , opFoldWithNativeArgM = makeNativeArg
       }
 
-    makeSerialManifold :: SerialManifold -> SerialManifold_ (TypeS, PoolDocs) (TypeM, PoolDocs) PoolDocs -> Index PoolDocs
+    makeSerialManifold :: SerialManifold -> SerialManifold_ PoolDocs -> Index PoolDocs
     makeSerialManifold _ (SerialManifold_ m _ form x)
       = return $ translateManifold makeFunction makeLambda m form x
 
-    makeNativeManifold :: NativeManifold -> NativeManifold_ (TypeS, PoolDocs) (TypeM, PoolDocs) PoolDocs -> Index PoolDocs
+    makeNativeManifold :: NativeManifold -> NativeManifold_ PoolDocs -> Index PoolDocs
     makeNativeManifold _ (NativeManifold_ m _ form x)
       = return $ translateManifold makeFunction makeLambda m form x
 

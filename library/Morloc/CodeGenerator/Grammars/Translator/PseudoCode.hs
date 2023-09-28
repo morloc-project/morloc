@@ -33,11 +33,11 @@ prettyFoldManifold = FoldWithManifoldM
  , opFoldWithNativeArgM      = makeNativeArg
  } where
 
-    makeSerialManifold :: Monad m => SerialManifold -> SerialManifold_ PoolDocs PoolDocs PoolDocs -> m PoolDocs
+    makeSerialManifold :: Monad m => SerialManifold -> SerialManifold_ PoolDocs -> m PoolDocs
     makeSerialManifold _ (SerialManifold_ m _ form x) = return
       $ translateManifold (makeFunction "SerialManifold") makeLambda m form x
 
-    makeNativeManifold :: Monad m => NativeManifold -> NativeManifold_ PoolDocs PoolDocs PoolDocs -> m PoolDocs
+    makeNativeManifold :: Monad m => NativeManifold -> NativeManifold_ PoolDocs -> m PoolDocs
     makeNativeManifold _ (NativeManifold_ m _ form x) = return
       $ translateManifold (makeFunction "NativeManifold") makeLambda m form x
 
