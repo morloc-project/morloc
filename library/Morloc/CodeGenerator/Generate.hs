@@ -1524,6 +1524,18 @@ serializeOne packmap (MonoHead lang m0 args0 e0) = do
 
 type (D a) = (Map.Map Int Request, a)
 
+class IsSerializable a where
+  serialLet :: Int -> SerialExpr -> a -> a
+  nativeLet :: Int -> NativeExpr -> a -> a
+
+instance IsSerializable SerialExpr where
+  serialLet = SerialLetS
+  nativeLet = NativeLetS
+  
+instance IsSerializable NativeExpr where
+  serialLet = SerialLetN
+  nativeLet = NativeLetN
+
 wireSerial :: Lang -> Map.Map MT.Text [ResolvedPacker] -> SerialManifold -> MorlocMonad SerialManifold
 wireSerial lang packmap sm0 = foldSerialManifoldM fm sm0 |>> snd
   where
@@ -1540,15 +1552,15 @@ wireSerial lang packmap sm0 = foldSerialManifoldM fm sm0 |>> snd
 
   wireSerialManifold :: SerialManifold_ (D SerialExpr) -> MorlocMonad (D SerialManifold)
   wireSerialManifold (SerialManifold_ m _ form (req, e)) = do
-    let e' = letWrapS form req e
-        form' = afirst (specialize req) form
+    let form' = afirst (specialize req) form
+        e' = letWrap form' req e
         req' = Map.map fst (manifoldToMap form')
     return (req', SerialManifold m lang form' e')
 
   wireNativeManifold :: NativeManifold_ (D NativeExpr) -> MorlocMonad (D NativeManifold)
   wireNativeManifold (NativeManifold_ m _ form (req, e)) = do
-    let e' = letWrapN form req e
-        form' = afirst (specialize req) form
+    let form' = afirst (specialize req) form
+        e' = letWrap form' req e
         req' = Map.map fst (manifoldToMap form')
     return (req', NativeManifold m lang form' e')
 
@@ -1568,31 +1580,19 @@ wireSerial lang packmap sm0 = foldSerialManifoldM fm sm0 |>> snd
     (Just NativeContent, LR _ t) -> R t
     _ -> r
 
-  letWrapN :: ManifoldForm (Or TypeS TypeF) TypeF -> Map.Map Int Request -> NativeExpr -> NativeExpr
-  letWrapN form0 req0 ne0 = foldl wrapAsNeeded ne0 (Map.toList req0) where
+  letWrap :: (IsSerializable e, HasRequest t, MayHaveTypeF t)
+          => ManifoldForm (Or TypeS TypeF) t -> Map.Map Int Request -> e -> e
+  letWrap form0 req0 e0 = foldl wrapAsNeeded e0 (Map.toList req0) where
 
     formMap = manifoldToMap form0
 
-    wrapAsNeeded :: NativeExpr -> (Int, Request) -> NativeExpr
-    wrapAsNeeded ne (i, req) = case (req, Map.lookup i formMap) of
-      (SerialContent, Just (NativeContent, Just t)) -> SerialLetN i (serializeS t (BndVarN t i)) ne
-      (NativeAndSerialContent, Just (NativeContent, Just t)) -> SerialLetN i (serializeS t (BndVarN t i)) ne
-      (NativeContent, Just (SerialContent, Just t)) -> NativeLetN i (naturalizeN t (BndVarS (Just t) i)) ne
-      (NativeAndSerialContent, Just (SerialContent, Just t)) -> NativeLetN i (naturalizeN t (BndVarS (Just t) i)) ne
-      _ -> ne
-
-  letWrapS :: ManifoldForm (Or TypeS TypeF) TypeS -> Map.Map Int Request -> SerialExpr -> SerialExpr
-  letWrapS form0 req0 se0 = foldl wrapAsNeeded se0 (Map.toList req0) where
-
-    formMap = manifoldToMap form0
-
-    wrapAsNeeded :: SerialExpr -> (Int, Request) -> SerialExpr
-    wrapAsNeeded se (i, req) = case (req, Map.lookup i formMap) of
-      (SerialContent, Just (NativeContent, Just t)) -> SerialLetS i (serializeS t (BndVarN t i)) se
-      (NativeAndSerialContent, Just (NativeContent, Just t)) -> SerialLetS i (serializeS t (BndVarN t i)) se
-      (NativeContent, Just (SerialContent, Just t)) -> NativeLetS i (naturalizeN t (BndVarS (Just t) i)) se
-      (NativeAndSerialContent, Just (SerialContent, Just t)) -> NativeLetS i (naturalizeN t (BndVarS (Just t) i)) se
-      _ -> se
+    wrapAsNeeded :: IsSerializable e => e -> (Int, Request) -> e
+    wrapAsNeeded e (i, req) = case (req, Map.lookup i formMap) of
+      (SerialContent,          Just (NativeContent, Just t)) -> serialLet i (serializeS t (BndVarN t i)) e
+      (NativeAndSerialContent, Just (NativeContent, Just t)) -> serialLet i (serializeS t (BndVarN t i)) e
+      (NativeContent,          Just (SerialContent, Just t)) -> nativeLet i (naturalizeN t (BndVarS (Just t) i)) e
+      (NativeAndSerialContent, Just (SerialContent, Just t)) -> nativeLet i (naturalizeN t (BndVarS (Just t) i)) e
+      _ -> e
 
   manifoldToMap :: (HasRequest t, MayHaveTypeF t) => ManifoldForm (Or TypeS TypeF) t -> Map.Map Int (Request, Maybe TypeF)
   manifoldToMap form = f form where
