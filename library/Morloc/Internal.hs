@@ -64,9 +64,9 @@ module Morloc.Internal
   -- ** Zip functions that fail on inputs of unequal length. These should be
   -- used when unequal lengths implies a compiler bug. In a better world, the
   -- typechecker would catch these issues before failing here.
-  , equalZip
-  , equalZipWith
-  , equalZipWithM
+  , safeZip
+  , safeZipWith
+  , safeZipWithM
   ) where
 
 -- Don't import anything from Morloc here. This module should be VERY lowest
@@ -182,20 +182,20 @@ filterApart f (x:xs)
   | otherwise = case filterApart f xs of 
     (r, xs') -> (r, x:xs') 
 
-equalZip :: [a] -> [b] -> [(a, b)]
-equalZip (x:xs) (y:ys) = (x,y) : equalZip xs ys
-equalZip [] [] = []
-equalZip xs ys = error $ "Unequal lengths in equalZip: xs=" <> show (length xs) <> " ys=" <> show (length ys)
+safeZip :: [a] -> [b] -> Maybe [(a, b)]
+safeZip (x:xs) (y:ys) = (:) (x,y) <$> safeZip xs ys
+safeZip [] [] = Just []
+safeZip _ _ = Nothing
 
-equalZipWith :: (a -> b -> c) -> [a] -> [b] -> [c] 
-equalZipWith f xs ys
-    | length xs == length ys = zipWith f xs ys
-    | otherwise = error $ "Unequal lengths in equalZipWith: xs=" <> show (length xs) <> " ys=" <> show (length ys)
+safeZipWith :: (a -> b -> c) -> [a] -> [b] -> Maybe [c] 
+safeZipWith f xs ys
+    | length xs == length ys = Just $ zipWith f xs ys
+    | otherwise = Nothing
 
-equalZipWithM :: Monad m => (a -> b -> m c) -> [a] -> [b] -> m [c] 
-equalZipWithM f xs ys
-    | length xs == length ys = zipWithM f xs ys
-    | otherwise = error $ "Unequal lengths in equalZipWith: xs=" <> show (length xs) <> " ys=" <> show (length ys)
+safeZipWithM :: Monad m => (a -> b -> m c) -> [a] -> [b] -> m (Maybe [c]) 
+safeZipWithM f xs ys
+    | length xs == length ys = zipWithM f xs ys |>> Just
+    | otherwise = return Nothing
 
 mapKeysM :: (Ord k', Monad m) => (k -> m k') -> Map.Map k v -> m (Map.Map k' v)
 mapKeysM f x = do

@@ -403,23 +403,23 @@ generalSerial x0@(SAnno _ (Idx i t)) = do
     generalSerial' _ _ (SAnno (One (AccS (SAnno _ (Idx _ t')) _, _)) _) =
         MM.throwError . OtherError . render $ "Non-record access of type:" <+> pretty t'
     generalSerial' base ps (SAnno (One (LstS xs, _)) _) = do
-      ncmds <- zipWithM (generalSerial' base)
-                        [ps ++ [JsonIndex j] | j <- [0..]] xs
+      ncmds <- zipWithM (generalSerial' base) [ps ++ [JsonIndex j] | j <- [0..]] xs
       return $ base
         { commandJson = list (map commandJson ncmds)
         , commandSubs = concatMap commandSubs ncmds
         }
     generalSerial' base ps (SAnno (One (TupS xs, _)) _) = do
-      ncmds <- zipWithM (generalSerial' base)
-                        [ps ++ [JsonIndex j] | j <- [0..]] xs
+      ncmds <- zipWithM (generalSerial' base) [ps ++ [JsonIndex j] | j <- [0..]] xs
       return $ base
         { commandJson = list (map commandJson ncmds)
         , commandSubs = concatMap commandSubs ncmds
         }
     generalSerial' base ps (SAnno (One (NamS es, _)) _) = do
-      ncmds <- zipWithM (generalSerial' base)
-                        [ps ++ [JsonKey k] | k <- map fst es]
-                        (map snd es)
+      ncmds <- fromJust <$>
+        safeZipWithM
+          (generalSerial' base)
+          [ps ++ [JsonKey k] | k <- map fst es]
+          (map snd es)
       let entries = zip (map fst es) (map commandJson ncmds)
           obj = encloseSep "{" "}" ","
                 (map (\(k, v) -> dquotes (pretty k) <> ":" <> v) entries)
@@ -598,14 +598,14 @@ parameterize
 parameterize (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
   MM.sayVVV "Entering parameterize LamS"
   ids <- MM.takeFromCounter (length inputs)
-  let args0 = zipWith Arg ids vs
+  let args0 = fromJust $ safeZipWith Arg ids vs
   x' <- parameterize' args0 x
   return $ SAnno (One (LamS vs x', (c, args0))) m
 parameterize (SAnno (One (CallS src, c@(Idx _ (FunP inputs _)))) m) = do
   MM.sayVVV $ "Entering parameterize CallS - " <> pretty (srcName src) <> "@" <> pretty (srcLang src)
   ids <- MM.takeFromCounter (length inputs)
   let vs = map EV (freshVarsAZ [])
-      args0 = zipWith Arg ids vs
+      args0 = fromJust $ safeZipWith Arg ids vs
   return $ SAnno (One (CallS src, (c, args0))) m
 parameterize x = do
   MM.sayVVV "Entering parameterize Other"
@@ -645,7 +645,7 @@ parameterize' args (SAnno (One (NamS entries, c)) m) = do
 parameterize' args (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
   ids <- MM.takeFromCounter (length inputs)
   let contextArgs = [r | r@(Arg _ v) <- args, v `notElem` vs] -- remove shadowed arguments
-      boundArgs = zipWith Arg ids vs
+      boundArgs = fromJust $ safeZipWith Arg ids vs
   x' <- parameterize' (contextArgs <> boundArgs) x
   let contextArgs' = pruneArgs contextArgs [x']
   return $ SAnno (One (LamS vs x', (c, contextArgs' <> boundArgs))) m
@@ -667,7 +667,7 @@ express :: SAnno Int One (Indexed TypeP, [Arg EVar]) -> MorlocMonad PolyHead
 express (SAnno (One (CallS src, (Idx _ c@(FunP inputs _), _))) m) = do
   MM.sayVVV $ "express CallS - direct export:" <+> parens (pretty $ srcName src) <+> "::" <+> pretty c
   ids <- MM.takeFromCounter (length inputs)
-  let lambdaVals = equalZipWith PolyBndVar (map Right inputs) ids
+  let lambdaVals = fromJust $ safeZipWith PolyBndVar (map Right inputs) ids
   return
     . PolyHead m [Arg i None | i <- ids]
     . PolyReturn
@@ -698,14 +698,14 @@ express (SAnno (One (LstS xs, (Idx _ (AppP (VarP v) [t]), args))) m) = do
 express (SAnno (One (LstS _, _)) _) = error "Invalid list form"
 
 express (SAnno (One (TupS xs, (Idx _ (AppP (VarP v) ts), args))) m) = do
-  xs' <- zipWithM expressPolyExpr ts xs
-  let x = PolyTuple v (equalZip ts xs')
+  xs' <- fromJust <$> safeZipWithM expressPolyExpr ts xs
+  let x = PolyTuple v (fromJust $ safeZip ts xs')
   return $ PolyHead m [Arg i None | Arg i _ <- args] (PolyReturn x)
 express (SAnno (One (TupS _, _)) _) = error "Invalid tuple form"
 
 -- records
 express (SAnno (One (NamS entries, (Idx _ (NamP o v ps rs), args))) m) = do
-  xs' <- zipWithM expressPolyExpr (map snd rs) (map snd entries)
+  xs' <- fromJust <$> safeZipWithM expressPolyExpr (map snd rs) (map snd entries)
   let x = PolyRecord o v ps (zip (map fst rs) (zip (map snd rs) xs'))
   return $ PolyHead m [Arg i None | Arg i _ <- args] (PolyReturn x)
 
@@ -746,8 +746,8 @@ expressPolyExpr pc
       MM.sayVVV $ "appArgs:" <+> list (map pretty appArgs)
       MM.sayVVV $ "callInputTypes:" <+> list (map viaShow callInputTypes)
 
-      let args =  zipWith (\(Arg i _) t -> Arg i (Just (typeFof t))) appArgs callInputTypes
-      xs' <- zipWithM expressPolyExpr callInputTypes xs
+      let args = fromJust $ safeZipWith (\(Arg i _) t -> Arg i (Just (typeFof t))) lamArgs lamInputTypes
+      xs' <- fromJust <$> safeZipWithM expressPolyExpr callInputTypes xs
       return
           . PolyManifold m (ManifoldPass args)
           . PolyReturn
@@ -766,13 +766,17 @@ expressPolyExpr pc
       MM.sayVVV "case #4"
       let nContextArgs = length appArgs - length vs
           contextArgs = map unvalue (take nContextArgs appArgs)
-          typedLambdaArgs = zipWith (\(Arg i _) t -> Arg i (Just (typeFof t))) (drop nContextArgs appArgs) lamInputTypes
 
-      xs' <- zipWithM expressPolyExpr callInputTypes xs
+          typedLambdaArgs = fromJust $ safeZipWith (\(Arg i _) t -> Arg i (Just (typeFof t)))
+            (drop nContextArgs lamArgs)
+            lamInputTypes
+
+      xs' <- fromJust <$> safeZipWithM expressPolyExpr callInputTypes xs
       return
         . PolyManifold m (ManifoldPart contextArgs typedLambdaArgs)
         . PolyReturn
         $ PolyApp call xs'
+
 
   ----------------------------------------------------------------------------------------
   -- #7 trans full lambda                                      | contextArgs | boundArgs |
@@ -799,7 +803,10 @@ expressPolyExpr pc
       let xsPassed = bindVar appArgs (drop n callInputTypes)
           xs' = xsLocal <> xsPassed
 
-      let typedBoundArgs = zipWith (\(Arg i _) t -> Arg i (Just (typeFof t))) (drop n lamArgs) lamInputTypes
+      let typedBoundArgs = fromJust $ safeZipWith
+            (\(Arg i _) t -> Arg i (Just (typeFof t)))
+            (drop (length appArgs - length lamInputTypes) lamArgs)
+            lamInputTypes
 
       return
         . PolyManifold m (ManifoldPass typedBoundArgs)
@@ -853,7 +860,7 @@ expressPolyExpr pc
       -- 6. Fold let statements over local manifold
 
       -- evaluate arguments and derive any required let bindings
-      xsInfo <- equalZipWithM (partialExpress pc) callInputTypes xs
+      xsInfo <- fromJust <$> safeZipWithM (partialExpress pc) callInputTypes xs
 
       let xs' = map (\(_, _, e) -> e) xsInfo
           -- rs: the list of arguments (by index) required by a single expression
@@ -876,7 +883,7 @@ expressPolyExpr pc
                       | Arg i v <- appArgs
                       ]
           untypedContextArgs = map unvalue $ take nContextArgs appArgs
-          typedPassedArgs = zipWith (\(Arg i _) t -> Arg i (Just (typeFof t))) (drop nContextArgs lamArgs) lamInputTypes
+          typedPassedArgs = fromJust $ safeZipWith (\(Arg i _) t -> Arg i (Just (typeFof t))) (drop nContextArgs lamArgs) lamInputTypes
 
       return
         . PolyManifold m (ManifoldPart untypedContextArgs
@@ -947,7 +954,7 @@ expressPolyExpr _ (SAnno (One (LamS vs body, (Idx _ lambdaType, manifoldArgument
 
     let contextArguments = map unvalue $ take (length manifoldArguments - length vs) manifoldArguments
         boundArguments = map unvalue $ drop (length contextArguments) manifoldArguments
-        typeBoundArguments = zipWith (\t (Arg i _) -> Arg i (Just t)) inputTypes boundArguments
+        typeBoundArguments = fromJust $ safeZipWith (\t (Arg i _) -> Arg i (Just t)) inputTypes boundArguments
 
     MM.sayVVV $ "Express lambda:"
               <> "\n  vs:" <+> pretty vs
@@ -982,7 +989,7 @@ expressPolyExpr pc (SAnno (One (AppS (SAnno (One (CallS src, (Idx _ fc@(FunP inp
       -- There should be an equal number of input types and input arguments
       -- That is, the function should be fully applied. If it were partially
       -- applied, the lambda case would have been entered previously instead.
-      xs' <- zipWithM expressPolyExpr inputs xs
+      xs' <- fromJust <$> safeZipWithM expressPolyExpr inputs xs
 
       MM.sayVVV "  leaving case #1"
       return
@@ -1010,7 +1017,7 @@ expressPolyExpr pc (SAnno (One (AppS (SAnno (One (CallS src, (Idx _ fc@(FunP inp
         MM.sayVVV $ "case #5 - " <> parens (pretty (srcName src)) <> ":"
         MM.sayVVV $ "args:" <+> list (map pretty args)
 
-        xs' <- zipWithM expressPolyExpr inputs xs
+        xs' <- fromJust <$> safeZipWithM expressPolyExpr inputs xs
         return
           . PolyManifold m (ManifoldFull (map unvalue args))
           . PolyReturn
@@ -1043,7 +1050,7 @@ expressPolyExpr pc@(FunP pinputs poutput) (SAnno (One (CallS src, (Idx _ c@(FunP
       MM.sayVVV $ "case #2 - un-applied cis source call:" <+> pretty (srcName src)
       ids <- MM.takeFromCounter (length callInputs)
       let lambdaVals = bindVarIds ids callInputs
-          lambdaTypedArgs = zipWith annotate ids (map (Just . typeFof) callInputs)
+          lambdaTypedArgs = fromJust $ safeZipWith annotate ids (map (Just . typeFof) callInputs)
       return
         . PolyManifold m (ManifoldPass lambdaTypedArgs)
         . PolyReturn
@@ -1064,11 +1071,11 @@ expressPolyExpr pc@(FunP pinputs poutput) (SAnno (One (CallS src, (Idx _ c@(FunP
   --          return g(m2, xs)                                 |             |           |
   ----------------------------------------------------------------------------------------
   | otherwise = do
-      MM.sayVVV $ "case #6"
+      MM.sayVVV $ "case #6 - " <> pretty m
       MM.sayVVV $ "Un-applied trans source call:" <+> pretty (srcName src)
       ids <- MM.takeFromCounter (length callInputs)
       let lambdaArgs = [Arg i None | i <- ids]
-          lambdaTypedArgs = zipWith annotate ids (map (Just . typeFof) callInputs)
+          lambdaTypedArgs = map (`Arg` Nothing) ids
           callVals = bindVarIds ids callInputs
 
       MM.sayVVV $ "src:" <+> pretty src
@@ -1083,7 +1090,7 @@ expressPolyExpr pc@(FunP pinputs poutput) (SAnno (One (CallS src, (Idx _ c@(FunP
            . PolyReturn
            $ PolyApp (PolySrc c src) callVals
            )
-       $ zipWith (PolyBndVar . Right) pinputs (map ann lambdaArgs)
+       $ fromJust $ safeZipWith (PolyBndVar . Right) pinputs (map ann lambdaArgs)
 
 -- bound variables
 expressPolyExpr _ (SAnno (One (VarS v, (Idx _ c, rs))) _) = do
@@ -1115,13 +1122,13 @@ expressPolyExpr _ (SAnno (One (LstS _, _)) _) = error "LstS can only be (AppP (V
 
 -- tuples
 expressPolyExpr _ (SAnno (One (TupS xs, (Idx _ (AppP (VarP v) ts), _))) _) = do
-  xs' <- equalZipWithM expressPolyExpr ts xs
-  return $ PolyTuple v (equalZip ts xs')
+  xs' <- fromJust <$> safeZipWithM expressPolyExpr ts xs
+  return $ PolyTuple v (fromJust $ safeZip ts xs')
 expressPolyExpr _ (SAnno (One (TupS _, _)) _) = error "TupS can only be (TupP (TupP _) ts) type"
 
 -- records
 expressPolyExpr _ (SAnno (One (NamS entries, (Idx _ (NamP o v ps rs), _))) _) = do
-  xs' <- zipWithM expressPolyExpr (map snd rs) (map snd entries)
+  xs' <- fromJust <$> safeZipWithM expressPolyExpr (map snd rs) (map snd entries)
   return $ PolyRecord o v ps (zip (map fst rs) (zip (map snd rs) xs'))
 
 -- Unapplied and unexported source
