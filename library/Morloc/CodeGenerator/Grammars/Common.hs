@@ -235,13 +235,23 @@ maxIndex :: SerialManifold -> Int
 maxIndex = (+1) . runIdentity . foldSerialManifoldM fm
   where
   fm = FoldManifoldM
-    { opSerialManifoldM = return . foldlSM max 0
-    , opNativeManifoldM = return . foldlNM max 0
+    { opSerialManifoldM = findSerialManifoldIndices
+    , opNativeManifoldM = findNativeManifoldIndices
     , opSerialExprM = findSerialIndices
     , opNativeExprM = findNativeIndices
     , opSerialArgM = return . foldlSA max 0
     , opNativeArgM = return . foldlNA max 0
     }
+
+  findSerialManifoldIndices :: Monad m => SerialManifold_ Int -> m Int 
+  findSerialManifoldIndices (SerialManifold_ _ _ form bodyMax) = do
+    let formIndices = abilist const const form
+    return $ foldl max bodyMax formIndices
+
+  findNativeManifoldIndices :: Monad m => NativeManifold_ Int -> m Int 
+  findNativeManifoldIndices (NativeManifold_ _ _ form bodyMax) = do
+    let formIndices = abilist const const form
+    return $ foldl max bodyMax formIndices
 
   findSerialIndices :: Monad m => SerialExpr_ Int Int Int Int Int -> m Int
   findSerialIndices (LetVarS_ _ i) = return i
