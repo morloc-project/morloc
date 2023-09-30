@@ -128,6 +128,7 @@ main = do
       , golden "interop-8-r-to-py" "interop-8-r-to-py"
       , golden "interop-8-py-to-r" "interop-8-py-to-r"
       , golden "interop-9" "interop-9"
+      , golden "interop-10" "interop-10"
 
       , golden "manifold-form-0" "manifold-form-0"
       , golden "manifold-form-0x" "manifold-form-0x"
