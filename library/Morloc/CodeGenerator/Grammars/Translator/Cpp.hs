@@ -498,7 +498,7 @@ translateSegment m0 = do
   makeNativeExpr _ (LogN_         _ x) = return (PoolDocs [] (if x then "true" else "false") [] [])
   makeNativeExpr _ (RealN_        _ x) = return (PoolDocs [] (viaShow x) [] [])
   makeNativeExpr _ (IntN_         _ x) = return (PoolDocs [] (viaShow x) [] [])
-  makeNativeExpr _ (StrN_         _ x) = return (PoolDocs [] (dquotes $ pretty x) [] [])
+  makeNativeExpr _ (StrN_         _ x) = return (PoolDocs [] [idoc|std::string("#{pretty x}")|] [] [])
   makeNativeExpr _ (NullN_        _  ) = return (PoolDocs [] "null" [] [])
   makeNativeExpr _ _ = error "Unreachable"
 
