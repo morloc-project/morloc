@@ -182,7 +182,8 @@ translateSegment m0 =
     makeSerialExpr _ (ManS_ f) = return f
     makeSerialExpr _ (AppPoolS_ _ (PoolCall _ cmds args) _) = do
       let quotedCmds = map dquotes cmds
-          callArgs = "list(" <> hsep (punctuate "," (drop 1 quotedCmds ++ map argNamer args)) <> ")"
+          quotedArgs = [ [idoc|paste0("'", #{r}, "'")|] | r <- map argNamer args]
+          callArgs = "list(" <> hsep (punctuate "," (drop 1 quotedCmds <> quotedArgs)) <> ")"
           call = ".morloc_foreign_call" <> tupled [head quotedCmds, callArgs, dquotes "_", dquotes "_"]
       return $ PoolDocs
         { poolCompleteManifolds = []

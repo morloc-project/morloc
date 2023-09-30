@@ -436,7 +436,8 @@ translateSegment m0 = do
   makeSerialExpr _ (ManS_ e) = return e
   makeSerialExpr _ (AppPoolS_ _ (PoolCall _ cmds args) _) = do
     let bufDef = "std::ostringstream s;"
-        callArgs = map dquotes cmds ++ map argNamer args
+        quotedArgs = [ [idoc|"'" << #{r} << "'"|] | r <- map argNamer args]
+        callArgs = map dquotes cmds ++ quotedArgs
         cmd = "s << " <> cat (punctuate " << \" \" << " callArgs) <> ";"
         call = [idoc|foreign_call(s.str())|]
     return $ PoolDocs
