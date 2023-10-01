@@ -5,7 +5,7 @@ source Cpp from "foo.hpp" ("f", "g")
 source Py from "foo.py" ("h")
 
 f :: (a -> b) -> a -> b
-g :: Str -> Int
-h :: (Str, Int) -> Str
+g :: Bool -> Int
+h :: (Str, Real) -> Bool
 
 foo x y = f g (h (x, y))

@@ -453,12 +453,12 @@ lookupU v (gammaContext -> gs0) = f gs0 where
 
 
 -- | Look up a solved existential type variable
-lookupE :: EVar -> Gamma -> Maybe TypeU
-lookupE v (gammaContext -> gs0) = f gs0 where
+lookupE :: Maybe Lang -> EVar -> Gamma -> Maybe TypeU
+lookupE mayLang v (gammaContext -> gs0) = f gs0 where
   f :: [GammaIndex] -> Maybe TypeU
   f [] = Nothing
   f ((AnnG v' t):gs)
-    | v == v' = Just t
+    | v == v' && langOf t == mayLang = Just t
     | otherwise = f gs
   f (_:gs) = f gs
 

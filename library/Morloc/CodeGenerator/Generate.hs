@@ -235,9 +235,19 @@ realize s0 = do
             (Just generalName) -> MM.throwError . GeneratorError . render $
                 "No implementation found for" <+> squotes (pretty generalName)
             Nothing -> undefined
-      (Just x@(_, Idx _ ss)) -> collapseExpr (fmap fst (minBy snd ss)) x
+      (Just x@(_, Idx _ ss)) -> do
+        let newLang = fmap fst (minBy (biasedCost l1) ss)
+        collapseExpr newLang x
     return (SAnno (One e) t)
 
+  -- The biased cost adds a slight penalty to changing language.
+  -- This penalty is unrelated to the often large penalty of foreign calls.
+  -- Rather, the purpose is just to distinguish VarS terms. It is totally
+  -- kludgy, a better recursion scheme is needed here.
+  biasedCost :: Maybe Lang -> (Lang, Int) -> Int
+  biasedCost l1 (l2, s)
+    | l1 == Just l2 = cost l1 l2 s
+    | otherwise = 1 + cost l1 l2 s
 
   cost
     :: Maybe Lang -- parent language (if given)
@@ -1605,13 +1615,16 @@ wireSerial lang packmap sm0 = foldSerialManifoldM fm sm0 |>> snd
 
   naturalizeN :: TypeF -> SerialExpr -> NativeExpr
   naturalizeN t se = case runExcept (DeserializeN t <$> Serial.makeSerialAST packmap lang t <*> pure se) of
-    (Left serr) -> error $ show serr
     (Right x) -> x
+    (Left serr) -> error $ "for language " <> show lang
+                         <> " and deserializer for type (" <> show t
+                         <> ") and serialExpr typeS (" <> show (typeSof se)
+                         <> ") found error:" <> show serr
 
   serializeS :: TypeF -> NativeExpr -> SerialExpr
   serializeS t se = case runExcept (SerializeS <$> Serial.makeSerialAST packmap lang t <*> pure se) of
-    (Left serr) -> error $ "for language " <> show lang <> " and type " <> show t <> " found error:" <> show serr
     (Right x) -> x
+    (Left serr) -> error $ "for language " <> show lang <> " and serializer for type " <> show t <> " found error:" <> show serr
 
 
 data Request = SerialContent | NativeContent | NativeAndSerialContent

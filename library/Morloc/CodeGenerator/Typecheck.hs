@@ -495,7 +495,7 @@ synthE _ lang g (CallS src) = do
 -- variables should be checked against. I think (this needs formalization).
 synthE _ lang g (VarS v) = do
   -- is this a bound variable that has already been solved
-  (g', t') <- case lookupE v g of
+  (g', t') <- case lookupE (Just lang) v g of
     -- yes, return the solved type
     (Just t) -> return (g, t)
     Nothing -> return $ newvar (unEVar v <> "_u") (Just lang) g
