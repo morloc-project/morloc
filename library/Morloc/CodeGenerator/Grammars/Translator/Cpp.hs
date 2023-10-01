@@ -566,10 +566,12 @@ makeManifold callIndex form manifoldType e = do
 
   makeManifoldBody :: MDoc -> CppTranslator (Maybe MDoc)
   makeManifoldBody body = do
-    manifoldHasBeenGenerated <- CMS.gets (Set.member callIndex . translatorManifoldSet)
+    state <- CMS.get
+    let manifoldHasBeenGenerated = Set.member callIndex (translatorManifoldSet state)
     if manifoldHasBeenGenerated
       then return Nothing
       else do
+        CMS.put $ state {translatorManifoldSet = Set.insert callIndex (translatorManifoldSet state)}
         typestr <- cppTypeOf (returnType manifoldType)
         let argList = typeMofForm form
         args <- mapM cppArgOf argList
