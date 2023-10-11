@@ -9,4 +9,4 @@ run:
 
 .PHONY: clean
 clean:
-	rm -f pool* nexus*
+	rm -rf pool* nexus* __pycache__

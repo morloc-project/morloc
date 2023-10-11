@@ -576,8 +576,18 @@ makeManifold callIndex form manifoldType e = do
         let argList = typeMofForm form
         args <- mapM cppArgOf argList
         let decl = typestr <+> mname <> tupled args
-        return . Just $ block 4 decl body
-
+        let tryBody = block 4 "try" body
+            throwStatement = vsep
+              [ [idoc|std::string error_message = "Error in m#{pretty callIndex} " + std::string(e.what());|]
+              , [idoc|std::cerr << error_message << std::endl;|] 
+              , [idoc|throw std::runtime_error(error_message);|]
+              ]
+            catchBody = block 4 "catch (const std::exception& e)" throwStatement 
+            tryCatchBody = tryBody <+> catchBody
+        return . Just . block 4 decl . vsep $
+          [ [idoc|std::cerr << "Entering m" << #{pretty callIndex} << std::endl;|]
+          , tryCatchBody
+          ]
   returnType :: TypeM -> TypeM
   returnType (Function _ t) = t
   returnType t = t

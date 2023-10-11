@@ -1,6 +1,6 @@
 module flucase (analysis)
 
-import conventions (Str, Filename, Real, Unit, Map, Tuple2)
+import conventions (Str, Int, Filename, Real, Unit, Map, Tuple2)
 
 type Accession = Str
 type Clade = Str 
@@ -116,7 +116,7 @@ source R from "plot-tree.R" ("plotTree")
 plotTree :: Filename -> RootedTree n Real Str -> ()
 
 
--- analysis :: Date -> Date -> Filename -> Filename -> ()
+analysis :: Date -> Date -> Filename -> Filename -> ()
 analysis mindate maxdate reffile treefile
   = ( plotTree treefile
     . mapLeaf (\x -> x@accession)
@@ -135,7 +135,7 @@ analysis mindate maxdate reffile treefile
     refmap = readMap reffile
 
 
--- search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
+search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
 search config refs query =
   ( map (onFst (labelRef refs))
   . concat
