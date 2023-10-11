@@ -11,188 +11,171 @@ Stability   : experimental
 
 module Morloc.CodeGenerator.Serial
   ( makeSerialAST 
-  , findSerializationCycles 
   , chooseSerializationCycle
   , isSerializable
   , prettySerialOne
   , serialAstToType
-  , serialAstToType'
+  , serialAstToJsonType
   , shallowType
   ) where
 
 import Morloc.CodeGenerator.Internal
 import Morloc.CodeGenerator.Namespace
-import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
 import qualified Morloc.Frontend.Lang.DefaultTypes as Def
-import Morloc.Pretty (prettyPackMap)
 import Morloc.Data.Doc
-import Morloc.Typecheck.Internal (subtype, apply, unqualify, seeGamma, substitute)
--- import qualified Morloc.Data.Text as MT
+import Morloc.Typecheck.Internal (subtype, apply, unqualify, substitute)
+import Control.Monad.Except (Except, throwError)
+import qualified Morloc.Data.Text as MT
 
-defaultSerialType :: Lang -> TypeP
-defaultSerialType Python3Lang = VarP (PV Python3Lang (Just "Str") "str")
-defaultSerialType RLang = VarP (PV RLang (Just "Str") "character")
-defaultSerialType CppLang = VarP (PV CppLang (Just "Str") "std::string")
-defaultSerialType _ = error "Ah hell, you know I don't know that language"
+defaultSerialConcreteType :: Lang -> MT.Text
+defaultSerialConcreteType Python3Lang = "str"
+defaultSerialConcreteType RLang = "character"
+defaultSerialConcreteType CppLang = "std::string"
+defaultSerialConcreteType _ = error "Ah hell, you know I don't know that language"
 
--- extracts the language specific term from the paired term
-pv2tv :: PVar -> TVar
-pv2tv (PV lang _ v) = TV (Just lang) v
-
-defaultListFirst :: TypeP -> TypeP
-defaultListFirst t = head $ defaultListAll t
-
-defaultTupleFirst :: [TypeP] -> TypeP
-defaultTupleFirst ts = head $ defaultTupleAll ts
-
--- | An infinite line of dummies ...
-dummies :: Maybe Lang -> [TypeU]
-dummies lang = repeat $ VarU (TV lang "dummy")
-
-defaultListAll :: TypeP -> [TypeP]
-defaultListAll t@(langOf' -> lang)
-  = [AppP (VarP $ PV lang (Just Def.listG) v) [t] | v <- Def.listC lang]
-
-isList (AppP (VarP (PV lang _ v)) [_]) =
-  let ds = Def.defaultList (Just lang) (head (dummies (Just lang)))
-  in not . null $ [v' | (AppU (VarU (TV _ v')) _) <- ds, v == v']
-isList _ = False
-
-defaultTupleAll :: [TypeP] -> [TypeP]
-defaultTupleAll [] = error "Tuples may not be empty. An empty tuple is isomorphic to the empty null type, which we already support. No need for two representations."
-defaultTupleAll ts@(t:_) =
-  let lang = langOf' t
-      gt = Just $ Def.tupleG (length ts)
-      cts = Def.tupleC (length ts) lang
-  in [AppP (VarP (PV lang gt ct)) ts | ct <- cts]
-
-
-isTuple :: TypeP -> Bool
-isTuple (AppP (VarP (PV lang _ v)) (length -> i)) = v `elem` Def.tupleC i lang
-isTuple _ = False
-
-isPrimitiveType :: (Maybe Lang -> [TypeU]) -> TypeP -> Bool
-isPrimitiveType lookupDefault t =
-  let xs = filter (typeEqual t)
-         $ [ VarP (PV lang generalType v)
-           | (VarU (TV (Just lang) v)) <- lookupDefault (langOf t)]
-  in not (null xs)
-  where
-    generalType = case lookupDefault Nothing of
-      ((VarU (TV _ g)):_) -> Just g
-      _ -> Nothing
+isPrimitiveType :: (Maybe Lang -> [TypeU]) -> Lang -> MT.Text -> Bool
+isPrimitiveType lookupDefault lang concreteName
+  = elem concreteName
+  $ [ v | (VarU (TV (Just _) v)) <- lookupDefault (Just lang)]
 
 -- | recurse all the way to a serializable type
-serialAstToType :: SerialAST One -> MorlocMonad TypeP
-serialAstToType (SerialPack _ (One (_, s))) = serialAstToType s
-serialAstToType (SerialList s) = serialAstToType s |>> defaultListFirst
-serialAstToType (SerialTuple ss) = mapM serialAstToType ss |>> defaultTupleFirst
-serialAstToType (SerialObject o n ps rs) = do
-  ts <- mapM (serialAstToType . snd) rs
-  return $ NamP o n ps (zip (map fst rs) ts)
-serialAstToType (SerialReal   x) = return $ VarP x
-serialAstToType (SerialInt    x) = return $ VarP x
-serialAstToType (SerialBool   x) = return $ VarP x
-serialAstToType (SerialString x) = return $ VarP x
-serialAstToType (SerialNull   x) = return $ VarP x
-serialAstToType (SerialUnknown (PV lang _ _)) = return $ defaultSerialType lang
+serialAstToType :: SerialAST -> TypeF
+serialAstToType (SerialPack _ (_, s)) = serialAstToType s
+serialAstToType (SerialList v s) = AppF (VarF v) [serialAstToType s]
+serialAstToType (SerialTuple v ss) = AppF (VarF v) (map serialAstToType ss)
+serialAstToType (SerialObject o n ps rs) =
+  let ts = map (serialAstToType . snd) rs
+  in NamF o n ps (zip (map fst rs) ts)
+serialAstToType (SerialReal   x) = VarF x
+serialAstToType (SerialInt    x) = VarF x
+serialAstToType (SerialBool   x) = VarF x
+serialAstToType (SerialString x) = VarF x
+serialAstToType (SerialNull   x) = VarF x
+-- passthrough type, it cannot be deserialized or serialized, only passed in from a different language
+serialAstToType (SerialUnknown v) = UnkF v
 
--- | recurse all the way to a serializable type, unsafe
-serialAstToType' :: SerialAST One -> TypeP
-serialAstToType' (SerialPack _ (One (_, s))) = serialAstToType' s
-serialAstToType' (SerialList s) = defaultListFirst $ serialAstToType' s
-serialAstToType' (SerialTuple ss) = defaultTupleFirst $ map serialAstToType' ss
-serialAstToType' (SerialObject o n ps rs)
-  = NamP o n ps (zip (map fst rs) (map (serialAstToType' . snd) rs))
-serialAstToType' (SerialReal   x) = VarP x
-serialAstToType' (SerialInt    x) = VarP x
-serialAstToType' (SerialBool   x) = VarP x
-serialAstToType' (SerialString x) = VarP x
-serialAstToType' (SerialNull   x) = VarP x
-serialAstToType' (SerialUnknown (PV lang _ _)) = defaultSerialType lang
-
+serialAstToJsonType :: SerialAST -> JsonType
+serialAstToJsonType (SerialPack _ (_, s)) = serialAstToJsonType s
+serialAstToJsonType (SerialList (FV _ v) s) = ArrJ v [serialAstToJsonType s]
+serialAstToJsonType (SerialTuple (FV _ v) ss) = ArrJ v (map serialAstToJsonType ss)
+serialAstToJsonType (SerialObject _ (FV _ n) _ rs) = NamJ n (map (bimap (\(FV _ x) -> x) serialAstToJsonType) rs)
+serialAstToJsonType (SerialReal    (FV _ v)) = VarJ v
+serialAstToJsonType (SerialInt     (FV _ v)) = VarJ v
+serialAstToJsonType (SerialBool    (FV _ v)) = VarJ v
+serialAstToJsonType (SerialString  (FV _ v)) = VarJ v
+serialAstToJsonType (SerialNull    (FV _ v)) = VarJ v
+serialAstToJsonType (SerialUnknown (FV _ v)) = VarJ v -- the unknown type is the serialization type
 
 -- | get only the toplevel type
-shallowType :: SerialAST One -> MorlocMonad TypeP
-shallowType (SerialPack _ (One (p, _))) = return (typePackerPacked p)
-shallowType (SerialList s) = shallowType s |>> defaultListFirst
-shallowType (SerialTuple ss) = mapM shallowType ss |>> defaultTupleFirst
-shallowType (SerialObject o n ps rs) = do
-  ts <- mapM (shallowType . snd) rs
-  return $ NamP o n ps (zip (map fst rs) ts)
-shallowType (SerialReal   x) = return $ VarP x
-shallowType (SerialInt    x) = return $ VarP x
-shallowType (SerialBool   x) = return $ VarP x
-shallowType (SerialString x) = return $ VarP x
-shallowType (SerialNull   x) = return $ VarP x
-shallowType (SerialUnknown (PV lang _ _)) = return $ defaultSerialType lang
+shallowType :: SerialAST -> TypeF
+shallowType (SerialPack _ (p, _)) = typePackerPacked p
+shallowType (SerialList v s) = AppF (VarF v) [shallowType s]
+shallowType (SerialTuple v ss) = AppF (VarF v) $ map shallowType ss
+shallowType (SerialObject o n ps rs) =
+  let ts = map (shallowType . snd) rs
+  in NamF o n ps (zip (map fst rs) ts)
+shallowType (SerialReal   x) = VarF x
+shallowType (SerialInt    x) = VarF x
+shallowType (SerialBool   x) = VarF x
+shallowType (SerialString x) = VarF x
+shallowType (SerialNull   x) = VarF x
+shallowType (SerialUnknown v) = UnkF v
 
+-- Takes a map of packers with concrete type names as keys. A single concrete
+-- type name may map to many single types. For example, the python type "dict"
+-- might represent a Map with homogenous keys and values or many things that
+-- might be objects in other languages. Similarly, the python "tuple" type maps
+-- to tuples of all sizes -- each of which is a different type in both the
+-- morloc general type system and many other languages. So the map contains a
+-- list of possible packers. Matching the concrete type name to the right packer
+-- will be done through subtyping.
 makeSerialAST
-  :: PackMap -- type PackMap = Map (TVar, Int) [UnresolvedPacker]
-  -> TypeP
-  -> MorlocMonad (SerialAST Many)
-makeSerialAST _ (UnkP v) = return $ SerialUnknown v
-makeSerialAST m t@(VarP v@(PV _ _ _))
-  | isPrimitiveType Def.defaultNull   t = return $ SerialNull   v
-  | isPrimitiveType Def.defaultBool   t = return $ SerialBool   v
-  | isPrimitiveType Def.defaultString t = return $ SerialString v
-  | isPrimitiveType Def.defaultReal   t = return $ SerialReal   v
-  | isPrimitiveType Def.defaultInt    t = return $ SerialInt    v
-  | otherwise = case Map.lookup (pv2tv v) m of
-  -- = SerialPack PVar (f (TypePacker, SerialAST f)) -- ^ use an (un)pack function to simplify an object
-        (Just ps) -> do
-            packers <- mapM makeTypePacker ps
-            unpacked <- mapM (makeSerialAST m . typePackerUnpacked) packers
-            return $ SerialPack v (Many (zip packers unpacked))
-        Nothing -> MM.throwError . SerializationError . render
-            $ "Cannot find constructor" <+> dquotes (pretty v)
-            <+> "in packmap:\n" <> prettyPackMap m
+  :: Map.Map MT.Text [ResolvedPacker]
+  -> Lang
+  -> TypeF
+  -> Except MDoc SerialAST
+makeSerialAST packmap lang = makeSerialAST'
   where
-    makeTypePacker :: UnresolvedPacker -> MorlocMonad TypePacker
-    makeTypePacker u = do
-        packedType <- weaveTypes (typeOf . fst <$> unresolvedPackerGeneralTypes u) (typeOf (unresolvedPackedType u))
-        unpackedType <- weaveTypes (typeOf . snd <$> unresolvedPackerGeneralTypes u) (typeOf (unresolvedUnpackedType u))
-        return $ TypePacker
-          { typePackerPacked   = packedType
-          , typePackerUnpacked = unpackedType -- TypeP
-          , typePackerForward  = unresolvedPackerForward u -- [Source]
-          , typePackerReverse  = unresolvedPackerReverse u -- [Source]
-          }
-makeSerialAST _ (FunP _ _)
-  = MM.throwError . SerializationError
-  $ "Cannot serialize functions"
-makeSerialAST m t@(AppP (VarP v) ts@(t0:_))
-  | isList t = SerialList <$> makeSerialAST m t0
-  | isTuple t = SerialTuple <$> mapM (makeSerialAST m) ts
-  | otherwise = case Map.lookup (pv2tv v) m of
-      (Just ps) -> do
-        let t = AppP (VarP v) ts
-        ps' <- catMaybes <$> mapM (resolvePacker t) ps
-        unpacked <- mapM (makeSerialAST m . typePackerUnpacked) ps'  -- recurse into the unpacked type
-        return $ SerialPack v (Many (zip ps' unpacked))
-      Nothing -> MM.throwError . SerializationError . render
-        $ "Cannot find constructor" <+> dquotes (pretty v)
-        <> "<" <> pretty (length ts) <> ">"
-        <+> "in packmap:\n" <> prettyPackMap m
-makeSerialAST m (NamP o n ps rs) = do
-  ts <- mapM (makeSerialAST m . snd) rs
-  return $ SerialObject o n ps (zip (map fst rs) ts)
-makeSerialAST _ _ = undefined
+    makeSerialAST' :: TypeF -> Except MDoc SerialAST
+    -- If the type is unknown in this language, then it must be a passthrough
+    -- type. So it will only be represented in the serialization form. As a
+    -- string, for now.
+    makeSerialAST' (UnkF (FV gv _)) = return $ SerialUnknown (FV gv (defaultSerialConcreteType lang))
+    makeSerialAST' (VarF v@(FV _ cv))
+      | isPrimitiveType Def.defaultNull   lang cv = return $ SerialNull   v
+      | isPrimitiveType Def.defaultBool   lang cv = return $ SerialBool   v
+      | isPrimitiveType Def.defaultString lang cv = return $ SerialString v
+      | isPrimitiveType Def.defaultReal   lang cv = return $ SerialReal   v
+      | isPrimitiveType Def.defaultInt    lang cv = return $ SerialInt    v
+      | otherwise = case Map.lookup cv packmap of
+          (Just ps) -> do
+            packers <- mapM makeTypePacker ps
+            unpacked <- mapM (makeSerialAST' . typePackerUnpacked) packers
+            selection <- selectPacker (zip packers unpacked)
+            return $ SerialPack v selection
+          Nothing -> throwError
+            $ "Cannot find constructor" <+> dquotes (pretty v)
+            <+> "in packmap:\n" <> prettyMap packmap
+      where
+        makeTypePacker :: ResolvedPacker -> Except MDoc TypePacker
+        makeTypePacker u = do
+            packedType <- weaveTypes (typeOf . fst <$> resolvedPackerGeneralTypes u) (typeOf (resolvedPackedType u))
+            unpackedType <- weaveTypes (typeOf . snd <$> resolvedPackerGeneralTypes u) (typeOf (resolvedUnpackedType u))
+            return $ TypePacker
+              { typePackerPacked   = typeFof packedType
+              , typePackerUnpacked = typeFof unpackedType
+              , typePackerForward  = resolvedPackerForward u
+              , typePackerReverse  = resolvedPackerReverse u
+              }
+
+        -- Select the first packer we happen across. This is a very key step and
+        -- eventually this function should be replaced with one more carefully
+        -- considered. But for now, I don't have any great criterion for
+        -- choosing.
+        selectPacker :: [(TypePacker, SerialAST)] -> Except MDoc (TypePacker, SerialAST)
+        selectPacker [] = throwError $ "Cannot find constructor for" <+> pretty cv
+        selectPacker (x:_) = return x
 
 
-resolvePacker :: TypeP -> UnresolvedPacker -> MorlocMonad (Maybe TypePacker)
-resolvePacker packedType@(AppP _ ts1) p@(unqualify . unresolvedPackedType -> (_, AppU _ ts2))
+    makeSerialAST' (FunF _ _)
+      = throwError "Cannot serialize functions"
+    makeSerialAST' t@(AppF (VarF v@(FV generalTypeName concreteTypeName)) ts@(firstType:_))
+      | generalTypeName == Def.listG = SerialList v <$> makeSerialAST' firstType
+      | generalTypeName == Def.tupleG (length ts) = SerialTuple v <$> mapM makeSerialAST' ts
+      | otherwise = case Map.lookup concreteTypeName packmap of
+          (Just ps) -> do
+            packers <- catMaybes <$> mapM (resolvePacker lang t) ps
+            unpacked <- mapM (makeSerialAST' . typePackerUnpacked) packers
+            selection <- selectPacker (zip packers unpacked)
+            return $ SerialPack v selection
+          Nothing -> throwError
+            $ "Cannot find constructor" <+> dquotes (pretty v)
+            <> "<" <> pretty (length ts) <> ">"
+            <+> "in packmap:\n" <> prettyMap packmap
+      where
+         selectPacker :: [(TypePacker, SerialAST)] -> Except MDoc (TypePacker, SerialAST)
+         selectPacker [] = throwError $ "Cannot find constructor for" <+> pretty t
+         selectPacker (x:_) = return x
+
+    makeSerialAST' (NamF o n ps rs) = do
+      ts <- mapM (makeSerialAST' . snd) rs
+      return $ SerialObject o n ps (zip (map fst rs) ts)
+    makeSerialAST' t = throwError $ "makeSerialAST' error on type:" <+> pretty t
+
+resolvePacker :: Lang -> TypeF -> ResolvedPacker -> Except MDoc (Maybe TypePacker)
+resolvePacker lang packedType@(AppF _ ts1) p@(unqualify . resolvedPackedType -> (_, AppU _ ts2))
     | length ts1 == length ts2 = do
-        -- genericPackFunction <- regeneric (unresolvedPackedType p) (unresolvedUnpackedType p)
-        resolvedUnpackedType <- resolveP packedType (unresolvedPackedType p) (unresolvedUnpackedType p) (unresolvedPackerGeneralTypes p)
+        unpackedType <- resolveP packedType (resolvedPackedType p)
+                                            (resolvedUnpackedType p)
+                                            (resolvedPackerGeneralTypes p)
         return . Just $ TypePacker
             { typePackerPacked = packedType
-            , typePackerUnpacked = resolvedUnpackedType
-            , typePackerForward = unresolvedPackerForward p
-            , typePackerReverse = unresolvedPackerReverse p
+            , typePackerUnpacked = unpackedType
+            , typePackerForward = resolvedPackerForward p
+            , typePackerReverse = resolvedPackerReverse p
             }
-    | otherwise = return Nothing
+    | otherwise = return Nothing -- this packer has the wrong cardinality, don't worry about it
     where
         -- Both sides of the packer function are guaranteed to have the same
         -- generic values, this is guaranteed by the implementation of
@@ -218,128 +201,124 @@ resolvePacker packedType@(AppP _ ts1) p@(unqualify . unresolvedPackedType -> (_,
         -- the types for each generic variable. The context can be applied to
         -- y_u to get the final desired y_r.
         resolveP
-            :: TypeP -- resolved packed type (e.g., "dict" "str" "int")
+            :: TypeF -- resolved packed type (e.g., "dict" "str" "int")
             -> TypeU -- unresolved packed type (e.g., "dict" a b)
             -> TypeU -- unresolved unpacked type (e.g., "list" ("list" a b))
             -> Maybe (TypeU, TypeU) -- The general unresolved packed and unpacked types
-            -> MorlocMonad TypeP -- the resolved unpacked types
+            -> Except MDoc TypeF -- the resolved unpacked types
         resolveP a b c generalTypes = do
-            let ca = type2typeu (typeOf a)
-                gaMay = type2typeu <$> generalTypeOf a
+            let (ga, ca) = unweaveTypeF lang a
             unpackedConcreteType <- case subtype b ca (Gamma 0 []) of
-                (Left typeErr) -> MM.throwError . SerializationError . render $ pretty typeErr
+                (Left typeErr) -> throwError
+                    $  "There was an error raised in subtyping while resolving serialization"
+                    <> "\nThe packer involved maps the type:"
+                    <> "\n  " <> maybe "<missing type>" (pretty . fst) generalTypes
+                    <> "\n\nTo the serialized form:"
+                    <> "\n  " <> maybe "<missing type>" (pretty . snd) generalTypes
+                    <> "\n\nHere the unresolved concrete packed type:"
+                    <> "\n  b:" <+> pretty b
+                    <> "\n\nShould be the subtype of the resolved packed type:"
+                    <> "\n  a:" <+> pretty a
+                    <> "\n\nThe generic terms in b should be resolved through subtyping and used to resolve the unpacked type:"
+                    <> "\n  c:" <+> pretty c
+                    <> "\n\nHowever, the b <: a step failed:\n"
+                    <> pretty typeErr
+                    <> "\n\nThe packer function may not be generic enough to pack the type you specify, if this is the case, you may need to simplify the datatype"
                 (Right g) -> do
                     return (apply g (existential c))
 
-            unpackedGeneralType <- case (gaMay, generalTypes) of
-                (Just r, Just (u, gc)) ->
+            unpackedGeneralType <- case generalTypes of
+                (Just (u, gc)) ->
                     -- where r  is the resolved general type (no generics)
                     --       u  is the unresolved general packed type that was stored in Desugar.hs
                     --       gc is the unresolved general unpacked type
-                    case subtype u r (Gamma 0 []) of
-                        (Left typeErr) -> MM.throwError . SerializationError . render $ pretty typeErr
+                    case subtype u ga (Gamma 0 []) of
+                        (Left typeErr) -> throwError $ pretty typeErr
                         (Right g) -> do
                             return . Just $ apply g (existential gc)
                 _ -> return Nothing
 
-            weaveTypes (typeOf <$> unpackedGeneralType) (typeOf unpackedConcreteType)
+            weaveTypeF unpackedGeneralType unpackedConcreteType
+
+        unweaveTypeF :: Lang -> TypeF -> (TypeU, TypeU)
+        unweaveTypeF l (UnkF (FV gv cv)) = (VarU (TV Nothing gv), VarU (TV (Just l) cv))
+        unweaveTypeF l (VarF (FV gv cv)) = (VarU (TV Nothing gv), VarU (TV (Just l) cv))
+        unweaveTypeF l (FunF ts t) =
+            let (gt, ct) = unweaveTypeF l t
+                (gts, cts) = unzip $ map (unweaveTypeF l) ts
+            in (FunU gts gt, FunU cts ct)
+        unweaveTypeF l (AppF t ts) =
+            let (gt, ct) = unweaveTypeF l t
+                (gts, cts) = unzip $ map (unweaveTypeF l) ts
+            in (AppU gt gts, AppU ct cts)
+        unweaveTypeF l (NamF n (FV gv cv) ps rs) =
+            let (psg, psc) = unzip $ map (unweaveTypeF l) ps
+                (ksg, ksc) = unzip $ map (\(FV gk ck, _) -> (gk, ck)) rs
+                (vsg, vsc) = unzip $ map (unweaveTypeF l . snd) rs
+            in (NamU n (TV Nothing gv) psg (zip ksg vsg), NamU n (TV (Just l) cv) psc (zip ksc vsc))
+
+        weaveTypeF :: Maybe TypeU -> TypeU -> Except MDoc TypeF
+        weaveTypeF Nothing t = throwError
+            $  "No general type found for serializable concrete type:" <+> pretty t
+            <> "\n  All serializable types must have general types"
+        weaveTypeF (Just (VarU (TV Nothing gv))) (VarU (TV _ cv)) = return $ VarF (FV gv cv)
+        weaveTypeF (Just (FunU tsg tg)) (FunU tsc tc) = FunF <$> zipWithM weaveTypeF (map Just tsg) tsc <*> weaveTypeF (Just tg) tc
+        weaveTypeF (Just (AppU tg tsg)) (AppU tc tsc) = AppF <$> weaveTypeF (Just tg) tc <*> zipWithM weaveTypeF (map Just tsg) tsc
+        weaveTypeF (Just (NamU n (TV Nothing gv) psg rsg)) (NamU _ (TV _ cv) psc rsc) =
+            NamF n (FV gv cv) <$> zipWithM weaveTypeF (map Just psg) psc <*> (
+              zip (zipWith FV (map fst rsg) (map fst rsc)) <$>
+              zipWithM weaveTypeF (map (Just . snd) rsg) (map snd rsc)
+            )
+        weaveTypeF (Just (ExistU (TV _ gv) _ _ _)) (ExistU (TV _ cv) _ _ _) = return $ UnkF (FV gv cv)
+        weaveTypeF gt ct = error . show $ (gt, ct)
 
         -- Replaces each generic term with an existential term of the same name
         existential :: TypeU -> TypeU
         existential (ForallU v t0) = substitute v (existential t0)
         existential t0 = t0
-resolvePacker _ _ = return Nothing
+resolvePacker _ _ _ = throwError "No packer found for this type"
 
 
-pvarEqual :: PVar -> PVar -> Bool
-pvarEqual (PV lang1 _ v1) (PV lang2 _ v2) = lang1 == lang2 && v1 == v2 
+prettyMap :: Map.Map MT.Text [ResolvedPacker] -> MDoc
+prettyMap p =
+    "----- pacmaps -----\n" <>
+    vsep (map (uncurry prettyMapEntry) (Map.toList p)) <> "\n" <>
+    "-------------------\n"
 
-typeEqual :: TypeP -> TypeP -> Bool
-typeEqual (VarP v1) (VarP v2) = pvarEqual v1 v2
-typeEqual (FunP [] t1) (FunP [] t2) = typeEqual t1 t2
-typeEqual (FunP (t11:rs1) t12) (FunP (t21:rs2) t22)
- = typeEqual t11 t21 && typeEqual (FunP rs1 t12) (FunP rs2 t22)
-typeEqual (AppP v1 []) (AppP v2 []) = typeEqual v1 v2
-typeEqual (AppP v1 (t1:rs1)) (AppP v2 (t2:rs2))
- = typeEqual t1 t2 && typeEqual (AppP v1 rs1) (AppP v2 rs2)
-typeEqual (NamP o1 n1 ps1 []) (NamP o2 n2 ps2 [])
-  = o1 == o2 && n1 == n2 && length ps1 == length ps2
+prettyMapEntry :: MT.Text -> [ResolvedPacker] -> MDoc
+prettyMapEntry fv ps
+    = pretty fv <> "\n  "
+    <> vsep (map prettyMapPacker ps)
 
--- ps1 and ps2 don't need to be tested, since the typechecker will have
--- ensured they are equivalent IF the main records are equivalent.
-typeEqual (NamP o1 n1 ps1 ((k1,t1):rs1)) (NamP o2 n2 ps2 es2) =
-  -- equality does not depend on order
-  case filterApart (\(k2, _) -> k1 == k2) es2 of 
-    -- if the key was found
-    (Just (_, t2), rs2) ->
-         -- then ensure the values are the same
-         typeEqual t1 t2
-         -- and check the (n-1) records
-      && typeEqual (NamP o1 n1 ps1 rs1) (NamP o2 n2 ps2 rs2)
-    (Nothing, _) -> False
-typeEqual _ _ = False
-
--- | Given serialization trees for two languages, where each serialization tree
--- may contain, try to find
-findSerializationCycles
-  :: ([(SerialAST One, SerialAST One)] -> Maybe (SerialAST One, SerialAST One))
-  -- ^ pruning function
-  -> SerialAST Many
-  -> SerialAST Many
-  -> Maybe (SerialAST One, SerialAST One)
-findSerializationCycles choose = f where
-  f :: SerialAST Many -> SerialAST Many -> Maybe (SerialAST One, SerialAST One) 
-  -- reduce constructs until we get down to something that has general meaning
-  f (SerialPack v (Many ss1)) s2
-    = choose
-    . catMaybes
-    $ [ fmap (\(x,y)->(SerialPack v (One (p1,x)),y)) (f s1 s2)
-      | (p1,s1) <- ss1]
-  -- same as above, just swap the arguments
-  f s1 s2@(SerialPack _ _) = case f s2 s1 of 
-    (Just (x,y)) -> Just (y,x)
-    Nothing -> Nothing
-  f (SerialList s1) (SerialList s2) = case f s1 s2 of 
-      (Just (s1', s2')) -> Just (SerialList s1', SerialList s2')
-      Nothing -> Nothing
-  f (SerialTuple ts1) (SerialTuple ts2)
-    | length ts1 /= length ts1 = Nothing
-    | otherwise = case unzip <$> zipWithM f ts1 ts2 of
-        (Just (xs,ys)) -> Just (SerialTuple xs, SerialTuple ys)
-        Nothing -> Nothing
-  f (SerialObject r1 v1 ps1 rs1) (SerialObject r2 v2 ps2 rs2)
-    | map fst rs1 /= map fst rs2 = Nothing 
-    | otherwise = case unzip <$> zipWithM f ts1 ts2 of
-        Nothing -> Nothing
-        Just (rs1', rs2') -> Just ( SerialObject r1 v1 ps1 (zip (map fst rs1) rs1')
-                                  , SerialObject r2 v2 ps2 (zip (map fst rs2) rs2'))
-      where
-        ts1 = map snd rs1
-        ts2 = map snd rs1
-  f (SerialReal   x1) (SerialReal   x2) = Just (SerialReal   x1, SerialReal   x2)
-  f (SerialInt    x1) (SerialInt    x2) = Just (SerialInt    x1, SerialInt    x2)
-  f (SerialBool   x1) (SerialBool   x2) = Just (SerialBool   x1, SerialBool   x2)
-  f (SerialString x1) (SerialString x2) = Just (SerialString x1, SerialString x2)
-  f (SerialNull   x1) (SerialNull   x2) = Just (SerialNull   x1, SerialNull   x2)
-  f (SerialUnknown v1) (SerialUnknown v2) = Just (SerialUnknown v1, SerialUnknown v2)
-  f _ _ = Nothing
+prettyMapPacker :: ResolvedPacker -> MDoc 
+prettyMapPacker p
+    = braces $ vsep
+      [ "resolvedPackerTerm:" <+> pretty (resolvedPackerTerm p)
+      , "resolvedPackedType:" <+> pretty (resolvedPackedType p)
+      , "resolvedUnpackedType:" <+> pretty (resolvedUnpackedType p)
+      , "resolvedPackerForward:" <+> pretty (resolvedPackerForward p)
+      , "resolvedPackerReverse:" <+> pretty (resolvedPackerReverse p)
+      , "resolvedPackerGeneralTypes:" <+> case resolvedPackerGeneralTypes p of
+           Nothing -> "Nothing"
+           (Just (t1, t2)) -> tupled [pretty t1, pretty t2]
+      ]
 
 -- | Given a list of possible ways to (de)serialize data between two languages,
 -- choose one (or none if the list is empty). Currently I just take the first
 -- in the list, but different cycles may have very different performance, so
 -- this will be an important optimization step later on.
 chooseSerializationCycle
-  :: [(SerialAST One, SerialAST One)]
-  -> Maybe (SerialAST One, SerialAST One)
+  :: [(SerialAST, SerialAST)]
+  -> Maybe (SerialAST, SerialAST)
 chooseSerializationCycle [] = Nothing
 chooseSerializationCycle (x:_) = Just x
 
 -- | Determine if a SerialAST can be directly translated to JSON, if not it
 -- will need to be further reduced.
-isSerializable :: Functor f => SerialAST f -> Bool
+isSerializable :: SerialAST -> Bool
 isSerializable (SerialPack _ _) = False
-isSerializable (SerialList x) = isSerializable x
-isSerializable (SerialTuple xs) = all isSerializable xs 
+isSerializable (SerialList _ x) = isSerializable x
+isSerializable (SerialTuple _ xs) = all isSerializable xs 
 isSerializable (SerialObject _ _ _ rs) = all (isSerializable . snd) rs 
 isSerializable (SerialReal   _) = True
 isSerializable (SerialInt    _) = True
@@ -348,10 +327,10 @@ isSerializable (SerialString _) = True
 isSerializable (SerialNull   _) = True
 isSerializable (SerialUnknown _) = True -- are you feeling lucky?
 
-prettySerialOne :: SerialAST One -> MDoc
+prettySerialOne :: SerialAST -> MDoc
 prettySerialOne (SerialPack _ _) = "SerialPack"
-prettySerialOne (SerialList x) = "SerialList" <> parens (prettySerialOne x)
-prettySerialOne (SerialTuple xs) = "SerialTuple" <> tupled (map prettySerialOne xs)
+prettySerialOne (SerialList v x) = "SerialList" <> angles (pretty v) <> parens (prettySerialOne x)
+prettySerialOne (SerialTuple v xs) = "SerialTuple" <> angles (pretty v) <> tupled (map prettySerialOne xs)
 prettySerialOne (SerialObject r _ _ rs)
   = block 4 ("SerialObject@" <> viaShow r)
   $ vsep (map (\(k,v) -> parens (viaShow k) <> "=" <> prettySerialOne v) rs)

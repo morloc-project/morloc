@@ -18,12 +18,16 @@ main = do
       , typeAliasTests
       , concreteTypeSynthesisTests
       , propertyTests
-      , jsontype2jsonTests
       , whereTests
       , orderInvarianceTests
       , whitespaceTests
       , substituteTVarTests
       , subtypeTests
+
+      -- tests the bug solved involving the lambdaScope function in
+      -- Generate.hs:reserialize. See that commit message.
+      , golden "edge-cases-1" "edge-cases-1"
+      , golden "edge-cases-2" "edge-cases-2"
 
       , golden "type-synthesis" "type-synthesis"
 
@@ -41,6 +45,8 @@ main = do
       , golden "argument-form-3-r" "argument-form-3-r"
 
       , golden "composition" "composition"
+      , golden "generic-hofs-1" "generic-hofs-1"
+      , golden "generic-hofs-2" "generic-hofs-2"
       , golden "eta-reduction-1" "eta-reduction-1"
       , golden "eta-reduction-2" "eta-reduction-2"
       , golden "eta-reduction-3" "eta-reduction-3"
@@ -48,6 +54,12 @@ main = do
       , golden "eta-reduction-5" "eta-reduction-5"
       , golden "eta-reduction-6" "eta-reduction-6"
       , golden "eta-reduction-7" "eta-reduction-7"
+      , golden "eta-reduction-8-py" "eta-reduction-8-py"
+      , golden "eta-reduction-8-cpp" "eta-reduction-8-cpp"
+
+      , golden "path-shadowing-c" "path-shadowing-c"
+      , golden "path-shadowing-py" "path-shadowing-py"
+      , golden "path-shadowing-r" "path-shadowing-r"
 
       , golden "argument-form-4-c" "argument-form-4-c"
       , golden "argument-form-4-py" "argument-form-4-py"
@@ -103,10 +115,20 @@ main = do
       , golden "interop-3e-pr" "interop-3e-pr"
       , golden "interop-3e-rc" "interop-3e-rc"
       , golden "interop-3e-pp" "interop-3e-pp"
+
+      -- 3f - test serialization type bug
+      , golden "interop-3f" "interop-3f"
+
       -- other random interop tests (I should kill them)
       , golden "interop-4" "interop-4"
       , golden "interop-5" "interop-5"
       , golden "interop-6" "interop-6"
+      , golden "interop-7" "interop-7"
+      , golden "interop-8-r-to-c" "interop-8-r-to-c"
+      , golden "interop-8-r-to-py" "interop-8-r-to-py"
+      , golden "interop-8-py-to-r" "interop-8-py-to-r"
+      , golden "interop-9" "interop-9"
+      , golden "interop-10" "interop-10"
 
       , golden "manifold-form-0" "manifold-form-0"
       , golden "manifold-form-0x" "manifold-form-0x"
@@ -212,16 +234,16 @@ main = do
       , golden "R(R) serial-form-12-py" "serial-form-12-py"
       , golden "R(R) serial-form-12-r" "serial-form-12-r"
       -- table handling
-      , golden "C++ table default" "table-1-c"
-      , golden "py3 table default" "table-1-py"
-      , golden "R table default" "table-1-r"
-      , golden "C++ table object" "table-2-c"
-      , golden "py3 table object" "table-2-py"
-      , golden "R table object" "table-2-r"
+      , golden "table-1-c"  "table-1-c"
+      , golden "table-1-py" "table-1-py"
+      , golden "table-1-r"  "table-1-r"
+      , golden "table-2-c"  "table-2-c"
+      , golden "table-2-py" "table-2-py"
+      , golden "table-2-r"  "table-2-r"
       -- object handling
-      , golden "C++ object handling" "object-1-c"
-      , golden "py3 object handling" "object-1-py"
-      , golden "R object handling" "object-1-r"
+      , golden "object-1-c"  "object-1-c"
+      , golden "object-1-py" "object-1-py"
+      , golden "object-1-r"  "object-1-r"
       -- record access
       , golden "record-access-gen" "record-access-gen"
       , golden "record-access-c" "record-access-c"

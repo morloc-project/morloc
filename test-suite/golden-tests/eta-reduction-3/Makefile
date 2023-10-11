@@ -6,4 +6,4 @@ all:
 	./nexus.py foo2 2 >> obs.txt
 
 clean:
-	rm -rf nexus* pool*
+	rm -f nexus* pool*

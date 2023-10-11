@@ -58,28 +58,40 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Bring back the cut operation to the bidirectional typechecker
        The current approach depends on renaming every term, which is ugly and
        also clutters the diagnostics (gamma gets huge)
+ - [ ] Fix infinite loop raised from `type Cpp Unit = "Unit"` - see case study bug in nj code.
+       This problem goes away when I add the namespace (i.e., "mlc:Unit"), but
+       still infinite loops are bad.
+ - [ ] Add error if undefined functions are used in a composition
+       [ ] When typechecking, raise error if they have no type signature
+       [ ] When building, additionally raise error if they have no source (this is already done somewhere down the line)
+ - [ ] Fix the performance bug (8 million lines of log is way too much)
+       This is probably related to removal of the cut step in the typechecker
 
 0.42.0 [2023.06.xx]
 -------------------
 
- New features:
- - [ ] add typeclasses
- - [ ] add effects
- - [ ] add record keyword aliases
+ * Infer concrete types from inferred general types when necessary and possible
+ * More informative error messages 
+ * Fix template resolution in generated C++ code
+ * Fix include name shadowing conflict in generated C++ code
+ * Partially fix naming conflict in Python and R pools caused by use of "f". My
+   solution was name mangling, though we need a more permanent solution to our
+   problem.
+ * Let user write correct "list" R types for lists, tuples, and records
+ * Fix bug in code generation of lets
 
- Type system bug fixes:
- - [ ] fix typechecking bug in flu demo
+## Internal
+ * For `ForeignInterfaceM` constructor of ExprM, store the full call type, not
+   just the return type
+ * Parameterize `ExprM` with the type type (e.g., `Maybe TypeP` or `TypeM`)
+ * Replace `Argument` and `PreArgument` with a parameterized `Arg` type.
+ * Fix broken `ForeignInterfaceM` and `PoolCallM` cases in `typeOfExprM`
+ * Refactor backend
 
  Testing and documentation:
- - [ ] Complete flu demo
- - [ ] systematically test records, tables, and objects
-       - [ ] source functions that take each (this is easier, since C++ can use templates)
-       - [ ] source functions that return each
-       - [ ] cases where the same type is an object in one language and a
-             record in another 
- - [ ] demo practical tables in Python (e.g., numpy), R, and C++ 
- - [ ] Improve the error messages, add line numbers to errors
- - [ ] Haddock documentation
+ * Complete flu demo - it builds now, just need to implement the library code
+   for align and other functions.
+
 
 0.41.1 [2023.05.26]
 -------------------

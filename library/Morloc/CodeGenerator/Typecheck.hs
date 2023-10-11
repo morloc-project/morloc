@@ -21,7 +21,10 @@ import Morloc.CodeGenerator.Internal
 import Morloc.Typecheck.Internal
 import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
+import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
+import qualified Data.Map as Map
+import Morloc.Pretty
 import Morloc.Frontend.PartialOrder ()
 -- import Morloc.Pretty
 -- import qualified Morloc.Data.Text as MT
@@ -59,10 +62,144 @@ typecheck e0 = do
   seeGamma g2
   insetSay $ pretty t
   insetSay "---------------^-----------------"
+
+  insetSay "--- substituting general aliases ---"
+  g3 <- substituteGeneralAliases g2 e2
+  seeGamma g3
+
   insetSay "--- weaving ---"
-  w <- weaveAndResolve (applyCon g2 (mapSAnno id (fmap normalizeType) e2))
+  w <- weaveAndResolve (applyCon g3 (mapSAnno id (fmap normalizeType) e2))
   insetSay "--- weaving done ---"
   return w
+
+substituteGeneralAliases :: Gamma -> SAnno (Indexed Type) One (Indexed TypeU) -> MorlocMonad Gamma
+substituteGeneralAliases g0 e0@(SAnno (One (_, Idx _ t0)) (Idx i0 _)) = do
+    -- [(TVar, Type)]
+    -- The TVar is the existential name (something wonky and computer generated)
+    -- and Type is the general type
+    let existentials = unique (s e0)
+
+    MM.sayVVV $ "existentials:" <+> viaShow existentials
+
+    -- typedefs :: Map Text [TypeU]
+    -- This is a map from alias (e.g., "Map") to concrete type (e.g., "dict a b")
+    typedefs <- MM.get |>>
+                stateTypedefs |>>
+                (\ (GMap a b) -> fromJust . fromJust $ Map.lookup <$> Map.lookup i0 a <*> pure b) |>>
+                Map.map (map snd)
+
+    MM.sayVVV $ "typedefs:" <+> viaShow typedefs
+
+    -- substitute all the existentials that have definitions
+    mapM (synthesizeTypeFromExistential typedefs) existentials |>> foldl solve g0 
+
+    where
+
+    s (SAnno (One (e, Idx _ concreteType)) (Idx _ generalType)) = findExistentials concreteType generalType <> c e
+
+    findExistentials
+        :: TypeU -- concrete type
+        -> Type -- general type
+        -> [(( TVar -- the existential name, e.g., "n_e0_x3", it will match a term in Gamma that should be replaced
+             , [TypeU] -- any parameters of the existential
+             )
+            , Type -- the general type corresponding to the existential 
+            )]
+    findExistentials _ (UnkT _) = []
+    findExistentials (ExistU v [] _ _) t = [((v, []), t)]
+    findExistentials (ExistU v ts1 _ _) t@(AppT _ ts2) = ((v, ts1), t) : concat (zipWith findExistentials ts1 ts2)
+    findExistentials t1@(ForallU _ _) t2 = error . MT.unpack . render $ "Did not expect a qualified term down here:" <+> pretty t1 <+> pretty t2
+    findExistentials (FunU ts1 t1) (FunT ts2 t2) = concat (zipWith findExistentials ts1 ts2) <> findExistentials t1 t2
+    findExistentials (AppU t1 ts1) (AppT t2 ts2) = concat (zipWith findExistentials ts1 ts2) <> findExistentials t1 t2
+    findExistentials (NamU _ _ _ rs1) (NamT _ _ _ rs2) = concat (zipWith findExistentials (map snd rs1) (map snd rs2))
+    findExistentials (VarU _) (VarT _) = []
+    findExistentials t1 t2 = error . MT.unpack . render $ "Disagreement between concrete and general types:" <> "\n  " <> pretty t1 <> "\n  " <> pretty t2
+
+    synthesizeTypeFromExistential :: Map.Map TVar [TypeU] -> ((TVar, [TypeU]), Type) -> MorlocMonad (TVar, Maybe Type)
+    synthesizeTypeFromExistential typedefs ((v, ts), alias) = do
+        unaliasedType <- synthesizeType (langOf v) typedefs alias
+
+        MM.sayVVV $ "synthesizeTypeFromExistential - v:" <+> pretty v
+        MM.sayVVV $ "synthesizeTypeFromExistential - ts:" <+> list (map pretty ts)
+        MM.sayVVV $ "synthesizeTypeFromExistential - alias:" <+> pretty alias
+        MM.sayVVV $ "synthesizeTypeFromExistential - unaliasedType:" <+> pretty unaliasedType
+
+        case unaliasedType of
+            Just x@(AppT t gts) -> 
+                if length gts == length ts
+                then return (v, Just $ AppT t (map typeOf ts))
+                else return (v, Just x) -- MM.throwError $ IncompatibleGeneralType (AppU (VarU v) ts) (type2typeu gt)
+            Just x -> return (v, Just x) 
+            Nothing -> return (v, Nothing)
+
+    c (AccS e _) = s e
+    c (AppS e es) = s e ++ concatMap s es
+    c (LamS _ e) = s e
+    c (LstS es) = concatMap s es
+    c (TupS es) = concatMap s es
+    c (NamS rs) = concatMap (s . snd) rs
+    c _ = []
+
+    solve :: Gamma -> (TVar, Maybe Type) -> Gamma
+    solve g (_, Nothing) = g
+    solve g (v, Just t) = case access1 v (gammaContext g) of
+        (Just (lhs, _, rhs)) -> g { gammaContext = lhs <> (SolvedG v t' : rhs) } where
+            t' = case t of 
+                (AppT t2 ts) -> AppU (type2typeu t2) (map type2typeu ts)
+                _ -> type2typeu t
+        Nothing -> g
+
+
+{-
+typedefs: fromList [
+    (TV (Just Python3Lang) "List",[AppU (VarU (TV (Just Python3Lang) "list")) [VarU (TV (Just Python3Lang) "a")]]),
+    (TV (Just Python3Lang) "Real",[VarU (TV (Just Python3Lang) "float")]),
+    (TV (Just CppLang) "List",[AppU (VarU (TV (Just CppLang) "std::vector<$1>")) [VarU (TV (Just CppLang) "a")]]),
+    (TV (Just CppLang) "Real",[VarU (TV (Just CppLang) "double")])
+]
+-}
+-- Synthesize a type for a given language given an alias map and a general type
+synthesizeType :: Maybe Lang -> Map.Map TVar [TypeU] -> Type -> MorlocMonad (Maybe Type)
+synthesizeType _ _ (UnkT _) = return Nothing
+synthesizeType lang typedef t0@(VarT (TV _ v)) = do
+    x <- case Map.lookup (TV lang v) typedef of
+        (Just []) -> return Nothing
+        (Just [t]) -> return $ Just (typeOf t)
+        (Just ts) -> error $ "Expected just one alias, found: " <> show ts
+        _ -> return Nothing
+    MM.sayVVV $ "synthesizeType" <+> parens (viaShow t0) <+> "to" <+> parens (pretty x)
+    return x
+synthesizeType lang typedef t0@(FunT xs o) = do
+    xs' <- mapM (synthesizeType lang typedef) xs |>> sequence
+    o' <- synthesizeType lang typedef o
+    let x = FunT <$> xs' <*> o'
+    MM.sayVVV $ "synthesizeType" <+> parens (viaShow t0) <+> "to" <+> parens (pretty x)
+    return x
+synthesizeType lang typedef t0@(AppT (VarT (TV _ v)) ps) = do
+    x <- case Map.lookup (TV lang v) typedef of
+        (Just [AppU x ps0]) ->
+            if length ps0 == length ps then do
+                ps' <- mapM (synthesizeType lang typedef) ps |>> sequence
+                return $ AppT (typeOf x) <$> ps'
+            else error "Incompatible general types"
+        _ -> return Nothing
+    MM.sayVVV $ "synthesizeType" <+> parens (viaShow t0) <+> "to" <+> parens (pretty x)
+    return x
+synthesizeType _ _ (AppT _ _) = error "AppT should have a VarT as the first element -- I really need to make this bug unwrittable"
+synthesizeType lang typedef (NamT o v ts rs) = do
+    x' <- synthesizeType lang typedef (VarT v)
+    ts' <- mapM (synthesizeType lang typedef) ts |>> sequence
+    xs' <- mapM (synthesizeType lang typedef . snd) rs |>> sequence
+
+    MM.sayVVV $ "x':" <+> pretty x'
+    MM.sayVVV $ "ts':" <+> pretty ts'
+    MM.sayVVV $ "xs':" <+> pretty xs'
+
+    case x' of 
+        (Just (NamT _ v' _ _)) -> return $ NamT o v' <$> ts' <*> (zip (map fst rs) <$> xs')
+        _ -> return Nothing
+
+
 
 -- | Load the known concrete types into the tree. This is all the information
 -- necessary for concrete type checking.
@@ -128,7 +265,9 @@ weaveAndResolve (SAnno (One (x0, Idx i ct)) (Idx j gt)) = do
   insetSay $ pretty i
   insetSay $ " ct: " <+> pretty ct
   insetSay $ " gt: " <+> pretty gt
-  pt <- weaveResolvedTypes gt (typeOf ct)
+  pt <- case weaveResolvedTypes gt (typeOf ct) of
+    (Right x) -> return x
+    (Left weaveErr) -> MM.throwError . CallTheMonkeys $ weaveErr
   insetSay $ " pt: " <+> pretty pt
   x1 <- case x0 of
     UniS -> return UniS
@@ -356,7 +495,7 @@ synthE _ lang g (CallS src) = do
 -- variables should be checked against. I think (this needs formalization).
 synthE _ lang g (VarS v) = do
   -- is this a bound variable that has already been solved
-  (g', t') <- case lookupE v g of
+  (g', t') <- case lookupE (Just lang) v g of
     -- yes, return the solved type
     (Just t) -> return (g, t)
     Nothing -> return $ newvar (unEVar v <> "_u") (Just lang) g

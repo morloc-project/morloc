@@ -43,8 +43,6 @@ typecheck = mapM run where
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g2:"
       seeGamma g2
-      insetSay "e2:"
-      -- peakGen e2
       insetSay "========================================================"
       return $ mapSAnno (fmap normalizeType) id . applyGen g2 $ e2
 
@@ -307,7 +305,7 @@ synthE i g (CallS src) = do
 -- variables should be checked against. I think (this needs formalization).
 synthE i g (VarS v) = do
   -- is this a bound variable that has already been solved
-  (g', t') <- case lookupE v g of 
+  (g', t') <- case lookupE Nothing v g of 
     -- yes, return the solved type
     (Just t) -> return (g, t)
     Nothing -> do

@@ -1,0 +1,18 @@
+module m (foo)
+
+type R Bool = "logical"
+type R (List a) = "list" a
+
+type Cpp Bool = "bool"
+type Cpp (List a) = "std::vector<$1>" a
+
+source R from "foo.R" ("f")
+source Cpp from "foo.hpp" ("g")
+
+f :: Bool -> Bool
+
+g :: (n -> a -> a) -> a -> n -> a
+
+bar = g (\n a -> [n]) []
+
+foo = bar . f

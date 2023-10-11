@@ -24,7 +24,8 @@ jobs:
 
       - name: Set up C++ environment
         run: |
-          echo "nothing so far"
+          # clone the morloc C++ headers for shared type definitions
+          git clone https://github.com/morloclib/mlccpptypes $HOME/.morloc/mlccpptypes
 
       - uses: r-lib/actions/setup-r@v2
 

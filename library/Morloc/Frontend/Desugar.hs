@@ -211,26 +211,31 @@ desugarType
   :: Map.Map TVar [([TVar], TypeU)]
   -> TypeU
   -> Either MorlocError TypeU
-desugarType h = f
+desugarType h = f Set.empty
   where
 
-  f :: TypeU -> Either MorlocError TypeU
+  f :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
 
   --   (Just []) -> return (t0, [])
   --   (Just ts'@(t':_)) -> do
   --     (_, t) <- foldlM (mergeAliases v 0) t' ts'
   --     f t
   --   Nothing -> MM.throwError . CallTheMonkeys $ "Type term in VarU missing from type map"
-  f (ExistU v ps ds rs) = do
-    ps' <- mapM f ps
-    ds' <- mapM f ds
-    rs' <- mapM (\(k,v) -> (,) k <$> f v) rs
+  f bnd (ExistU v ps ds rs) = do
+    ps' <- mapM (f bnd) ps
+    ds' <- mapM (f bnd) ds
+    rs' <- mapM (\(k,v) -> (,) k <$> f bnd v) rs
     return $ ExistU v ps' ds' rs'
-  f (FunU ts t) = FunU <$> mapM f ts <*> f t
-  f (NamU o n ps rs) = do
-    ts <- mapM (f . snd) rs
-    ps' <- mapM f ps
-    return $ NamU o n ps' (zip (map fst rs) ts)
+  f bnd (FunU ts t) = FunU <$> mapM (f bnd) ts <*> f bnd t
+  f bnd (NamU o n ps rs) = do
+    (n', o') <- case Map.lookup n h of
+        -- If the record type itself is aliased, substitute the name and record form
+        (Just [(_, NamU o'' n'' _ _)]) -> return (n'', o'')
+        -- Otherwise, keep the record name and form and recurse only into children
+        _ -> return (n, o)
+    ts <- mapM (f bnd . snd) rs
+    ps' <- mapM (f bnd) ps
+    return $ NamU o' n' ps' (zip (map fst rs) ts)
 
   -- type Cpp (A a b) = "map<$1,$2>" a b
   -- foo Cpp :: A D [B] -> X
@@ -242,33 +247,49 @@ desugarType h = f
   -- -----------------
   -- f :: (Int, A) -> B
   --
-  f (AppU (VarU v) ts) =
-    case Map.lookup v h of
-      (Just (t':ts')) -> do
-        (vs, t) <- foldlM (mergeAliases v (length ts)) t' ts'
-        if length ts == length vs
-          -- substitute parameters into alias
-          then f (foldr parsub (chooseExistential t) (zip vs (map chooseExistential ts)))
-          else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
-      -- default types like "Int" or "Tuple2" won't be in the map
-      _ -> AppU (VarU v) <$> mapM f ts
+  f bnd (AppU (VarU v) ts)
+    | Set.member v bnd = AppU (VarU v) <$> mapM (f bnd) ts
+    | otherwise =
+        case Map.lookup v h of
+          (Just (t':ts')) -> do
+            (vs, t) <- foldlM (mergeAliases v (length ts)) t' ts' |>> renameTypedefs bnd
+            if length ts == length vs
+              -- substitute parameters into alias
+              then f bnd (foldr parsub (chooseExistential t) (zip vs (map chooseExistential ts)))
+              else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
+          -- default types like "Int" or "Tuple2" won't be in the map
+          _ -> AppU (VarU v) <$> mapM (f bnd) ts
 
   -- Can only apply VarU? Will need to fix this when we get lambdas.
-  f (AppU _ _) = undefined
+  f _ (AppU _ _) = undefined
 
   -- type Foo = A
   -- f :: Foo -> B
   -- -----------------
   -- f :: A -> B
-  f t0@(VarU v) =
+  f bnd t0@(VarU v)
+    | Set.member v bnd = return t0
+    | otherwise =
      case Map.lookup v h of
       (Just []) -> return t0
       (Just ts1@(t1:_)) -> do
         (_, t2) <- foldlM (mergeAliases v 0) t1 ts1
-        f t2
+        f bnd t2
       Nothing -> return t0
 
-  f (ForallU v t) = ForallU v <$> f t
+  f bnd (ForallU v t) = ForallU v <$> f (Set.insert v bnd) t
+
+  renameTypedefs :: Set.Set TVar -> ([TVar], TypeU) -> ([TVar], TypeU)
+  renameTypedefs _ ([], t) = ([], t)
+  renameTypedefs bnd (v@(TV lang x) : vs, t)
+    | Set.member v bnd =
+        let (vs', t') = renameTypedefs bnd (vs, t)
+            v' = head [x' | x' <- [TV lang (MT.show' i <> x) | i <- [0..]], not (Set.member x' bnd), not (elem x' vs')]  
+            t'' = substituteTVar v (VarU v') t'
+        in (v':vs', t'')
+    | otherwise = 
+        let (vs', t') = renameTypedefs bnd (vs, t)
+        in (v:vs', t')
 
   parsub :: (TVar, TypeU) -> TypeU -> TypeU
   parsub (v, t2) t1@(VarU v0)
@@ -295,8 +316,8 @@ desugarType h = f
       && length ts1 == length ts2 = return t
     | otherwise = MM.throwError (ConflictingTypeAliases (unresolvedType2type t1) (unresolvedType2type t2))
     where
-      t1' = foldl (\t' v' -> ForallU v' t') t1 ts1
-      t2' = foldl (\t' v' -> ForallU v' t') t2 ts2
+      t1' = foldl (flip ForallU) t1 ts1
+      t2' = foldl (flip ForallU) t2 ts2
 
 -- | Resolve existentials by choosing the first default type (if it exists)
 -- FIXME: How this is done (and why) is of deep relevance to understanding morloc, the decision should not be arbitrary

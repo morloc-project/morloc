@@ -102,6 +102,15 @@ instance Pretty TypeU where
   pretty (ForallU _ t) = pretty t
   pretty t = prettyTypeU t
 
+instance Pretty None where
+  pretty None = "()"
+
+instance Pretty a => Pretty (One a) where
+  pretty (One x) = pretty x
+
+instance Pretty a => Pretty (Many a) where
+  pretty (Many xs) = list $ map pretty xs
+
 prettyTypeU (ExistU v [] [] []) = angles $ pretty v
 prettyTypeU (ExistU v ts ds rs)
   = angles $ pretty v
@@ -183,8 +192,8 @@ prettySExpr fc fg x0 = case x0 of
   (StrS x) -> "StrS<" <> viaShow x <> ">"
   (CallS src) -> "CallS<" <> pretty (srcName src) <> "@" <> pretty (srcLang src) <> ">"
 
-instance Pretty a => Pretty (Indexed a) where
-  pretty (Idx i x) = parens (viaShow i <> ":" <+> pretty x) 
+instance (Pretty k, Pretty a) => Pretty (IndexedGeneral k a) where
+  pretty (Idx i x) = parens (pretty i <> ":" <+> pretty x) 
 
 instance Pretty GammaIndex where
   pretty (VarG tv) = "VarG:" <+> pretty tv
@@ -198,5 +207,5 @@ instance Pretty GammaIndex where
   pretty (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> pretty t
   pretty (MarkG tv) = "MarkG:" <+> pretty tv
   pretty (SrcG (Source ev1 lang _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
-  pretty (SerialConstraint t1 t2) = "UnsolvedConstraint:" <+> pretty t1 <+> pretty t2
+  pretty (SerialConstraint t1 t2) = "UnsolvedConstraint:" <> "\n  " <> pretty t1 <> "\n  " <> pretty t2
   pretty (AnnG v t) = pretty v <+> "::" <+> pretty t

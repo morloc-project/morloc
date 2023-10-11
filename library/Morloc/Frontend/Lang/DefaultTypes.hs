@@ -42,6 +42,8 @@ module Morloc.Frontend.Lang.DefaultTypes
   , recordGC
   -- * functions for concrete synthesis
   , generalDefaultToConcrete
+  -- * determin if a type name is a tuple
+  , isTuple
   ) where
 
 import Morloc.Frontend.Namespace
@@ -73,14 +75,15 @@ defaultList :: Maybe Lang -> TypeU -> [TypeU]
 defaultList Nothing t = [AppU (VarU (TV Nothing listG)) [t]]
 defaultList lang@(Just l) t = [AppU (VarU (TV lang v)) [t] | v <- listC l] 
 
-
-
 tupleG :: Int -> MT.Text
-tupleG i = MT.pack $ "Tuple" ++ show i
+tupleG i = "Tuple" <> MT.show' i
+
+isTuple :: MT.Text -> Int -> Bool
+isTuple generalName size = generalName == "Tuple" <> MT.show' size
 
 tupleC :: Int -> Lang -> [MT.Text]
 tupleC _ Python3Lang = ["tuple"]
-tupleC _ RLang = ["tuple"]
+tupleC _ RLang = ["list"]
 tupleC _ CLang = []
 tupleC i CppLang =
   let vars = ["$" <> MT.show' i' | i' <- [1..i]]
@@ -135,8 +138,8 @@ defaultNull :: Maybe Lang -> [TypeU]
 defaultNull lang@Nothing = [VarU (TV lang "Unit")]
 defaultNull lang@(Just Python3Lang) = [VarU (TV lang "None")]
 defaultNull lang@(Just RLang) = [VarU (TV lang "NULL")]
-defaultNull lang@(Just CLang) = [VarU (TV lang "null")]
-defaultNull lang@(Just CppLang) = [VarU (TV lang "null")]
+defaultNull lang@(Just CLang) = [VarU (TV lang "void")] -- need to add Unit
+defaultNull lang@(Just CppLang) = [VarU (TV lang "Unit")] -- the Unit enum is from mlccpptypes/prelude.hpp
 defaultNull lang@(Just RustLang) = [VarU (TV lang "<VOID>")] -- Rust doesn't have an explicit NULL
 defaultNull lang@(Just PerlLang) = [VarU (TV lang "NULL")]
 

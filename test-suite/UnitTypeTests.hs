@@ -6,7 +6,6 @@ module UnitTypeTests
   , unitTypeTests
   , typeOrderTests
   , typeAliasTests
-  , jsontype2jsonTests
   , packerTests
   , recordAccessTests
   , whereTests
@@ -18,7 +17,6 @@ module UnitTypeTests
 import Morloc.Frontend.Namespace
 import Morloc.CodeGenerator.Namespace
 import Text.RawString.QQ
-import Morloc.CodeGenerator.Grammars.Common (jsontype2json)
 import qualified Morloc.Data.Doc as Doc
 import Morloc (typecheck, typecheckFrontend)
 import qualified Morloc.Monad as MM
@@ -182,6 +180,8 @@ record' n rs = NamU NamRecord (TV Nothing n) [] rs
 unkp lang gv cv = UnkP (PV lang gv cv) 
 
 varp lang gv cv = VarP (PV lang gv cv)
+
+appp lang gv cv ps = AppP (VarP (PV lang (Just gv) cv)) ps 
 
 funp [] = error "Cannot infer type of empty list"
 funp ts = FunP (init ts) (last ts)
@@ -390,37 +390,6 @@ packerTests =
 --             ]
 --         )
 --     ]
-
-jsontype2jsonTests =
-  testGroup
-    "Test conversion of JsonType's to JSON text"
-    [ jsontest "value"
-        (VarJ "int")
-        [r|"int"|]
-    , jsontest "array(value)"
-        (ArrJ "list" [VarJ "int"])
-        [r|{"list":["int"]}|]
-    , jsontest "object(value)"
-        (NamJ "Person" [("name", VarJ "Str"), ("age", VarJ "Int")])
-        [r|{"Person":{"name":"Str","age":"Int"}}|]
-    , jsontest "array(array)"
-        (ArrJ "list" [ArrJ "matrix" [VarJ "int"]])
-        [r|{"list":[{"matrix":["int"]}]}|]
-    , jsontest "array(object)"
-        (ArrJ "list" [(NamJ "Person" [("name", VarJ "Str"), ("age", VarJ "Int")])])
-        [r|{"list":[{"Person":{"name":"Str","age":"Int"}}]}|]
-    , jsontest "object(array)"
-        (NamJ "Person" [("name", VarJ "Str"), ("friends", ArrJ "list" [VarJ "Str"])])
-        [r|{"Person":{"name":"Str","friends":{"list":["Str"]}}}|]
-    , jsontest "object(object)"
-        (NamJ "Person"
-          [ ("name", VarJ "Str")
-          , ("pet", NamJ "Animal" [("name", VarJ "Str"), ("species", VarJ "Str")])
-          ])
-        [r|{"Person":{"name":"Str","pet":{"Animal":{"name":"Str","species":"Str"}}}}|]
-    ]
-  where
-    jsontest msg t j = testEqual msg (Doc.render $ jsontype2json t) j
 
 typeAliasTests =
   testGroup
@@ -773,9 +742,78 @@ concreteTypeSynthesisTests =
       |]
       (FunP [varp Python3Lang (Just "Int") "int"] (varp Python3Lang (Just "Int") "int"))
 
+  , assertConcreteType
+      -- This tests the desugar bug fixed in #a50c75
+      "test: foo :: Real -> (Real, a)"
+      [r|
+      module m (foo)
+     
+      type Cpp Real = "double"
+      type Cpp (Tuple2 a b) = "std::tuple" a b
+     
+      source Cpp from "foo.hpp" ("foo")
+     
+      foo :: Real -> (Real, a)
+      |]
+      (FunP [varp CppLang (Just "Real") "double"] ( appp CppLang "Tuple2" "std::tuple" [ varp CppLang (Just "Real") "double", UnkP (PV CppLang (Just "a_q0") "a_q0") ]))
+
+  , assertConcreteType
+      "test: (asCpp . asPy) [1.0]"
+      [r|
+      module m (foo)
+      type Cpp Real = "double"
+      type Py Real = "float"
+      type Cpp (List a) = "std::vector<$1>" a
+      type Py (List a) = "list" a
+      asPy :: a -> a
+      source Py from "foo.py" ("id" as asPy)
+      asCpp :: a -> a
+      source Cpp from "foo.cpp" ("id" as asCpp)
+      foo = (asCpp . asPy) [1.0]
+      |]
+      (appp CppLang "List" "std::vector<$1>" [varp CppLang (Just "Real") "double"])
+
+  , assertConcreteType
+      "test mixed language inference"
+      [r|
+      module foo (fluffle)
+
+      type Py Str = "str" 
+      type Py Int = "int"
+      type Py (List a) = "list" a
+      type Py (Tuple2 a b) = "tuple" a b
+
+      type Cpp Str = "std::string" 
+      type Cpp Int = "int"
+      type Cpp (List a) = "std::vector<$1>" a
+      type Cpp (Tuple2 a b) = "std::tuple<$1,$2>" a b
+  
+      source Py from "foo.py" ("foo")
+      foo :: Str -> [Str]
+  
+      source Py from "foo.py" ("shard", "join", "keys")
+      source Cpp from "foo.hpp" ("shard", "join", "keys")
+  
+      shard :: Int -> [d] -> [[d]]
+      join :: [c] -> [c] -> [c]
+      keys :: [(a, b)] -> [a]
+  
+      fluffle :: [(Str, Str)] -> Str -> [[Str]]
+      fluffle refs query =
+        ( shard 100
+        . join (keys refs)
+        . foo
+        ) query
+
+      module test (out)
+      import foo (fluffle)
+      out = fluffle [("asdf","er")] "qwer"
+      |]
+      (appp Python3Lang "List" "list" [appp Python3Lang "List" "list" [varp Python3Lang (Just "Str") "str"]])
+
   , expectError
       "Synth error raised if no type alias given"
-      (CannotSynthesizeConcreteType (Source (Name "foo") Python3Lang (Just "_") (EV "foo") Nothing) (fun [int, int]))
+      (CannotSynthesizeConcreteType (MV "m") (Source (Name "foo") Python3Lang (Just "_") (EV "foo") Nothing) (fun [int, int]) ["Int"])
       [r|
       module m (foo)
       source Py from "_" ("foo")

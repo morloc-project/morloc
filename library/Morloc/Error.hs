@@ -97,10 +97,16 @@ instance Pretty MorlocError where
   pretty IllegalConcreteAnnotation = "IllegalConcreteAnnotation"
   pretty (DagMissingKey msg) = "DagMissingKey: " <> pretty msg
   pretty TooManyRealizations = "TooManyRealizations"
-  pretty (CannotSynthesizeConcreteType src t)
+  pretty (CannotSynthesizeConcreteType m src t [])
     = "Cannot synthesize" <+> pretty (srcLang src) <+>
       "type for" <+> squotes (pretty (srcAlias src)) <+>
+      "in module" <+> pretty m <+>
       "from general type:" <+> parens (pretty t)
+  pretty (CannotSynthesizeConcreteType m src t vs)
+    = pretty (CannotSynthesizeConcreteType m src t []) <> "\n" <>
+      "  Cannot resolve concrete types for these general types:" <+> list (map pretty vs) <> "\n" <>
+      "  Are you missing type alias imports?"
+
 
 instance Pretty TypeError where
   pretty (SubtypeError t1 t2 msg)
@@ -124,3 +130,4 @@ instance Pretty TypeError where
   pretty (MissingFeature msg) = "MissingFeature: " <> pretty msg
   pretty (EmptyExpression e) = "EmptyExpression:" <+> squotes (pretty e) <+> "has no bound signature or expression"
   pretty InfiniteRecursion = "InfiniteRecursion"
+  pretty (FunctionSerialization v) = "Undefined function" <+> dquotes (pretty v) <> ", did you forget an import?"

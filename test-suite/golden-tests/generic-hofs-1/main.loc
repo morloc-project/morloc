@@ -1,0 +1,13 @@
+module m (foo)
+
+type Cpp (List a) = "std::vector<$1>" a
+type Cpp Str = "std::string"
+type Cpp Real = "double"
+type Cpp (Tuple2 a b) = "std::tuple<$1,$2>" a b
+
+source Cpp from "foo.hpp" ("map" as cppmap, "snd" as cppsnd)
+
+cppmap :: (a -> b) -> [a] -> [b]
+cppsnd :: (a, b) -> b
+
+foo x = cppmap cppsnd [("hi", 1.0), ("bi", x)]

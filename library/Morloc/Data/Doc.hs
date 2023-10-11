@@ -25,7 +25,7 @@ module Morloc.Data.Doc
   ) where
 
 import qualified Data.Text as DT
-import Prettyprinter hiding ((<>))
+import Prettyprinter hiding ((<>), annotate)
 import Prettyprinter.Render.Text
 
 render :: Doc ann -> DT.Text

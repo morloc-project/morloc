@@ -25,6 +25,8 @@ module Morloc.Language
   , standardizeLangName
   , pairwiseCost
   , languageCost
+  , serialType
+  , generalSerialType
   ) where
 
 import Data.Text (Text, toLower)
@@ -41,6 +43,17 @@ data Lang
   | RustLang
   | PerlLang
   deriving (Ord, Eq, Show)
+
+serialType :: Lang -> Text
+serialType CppLang = "std::string"
+serialType RLang = "character"
+serialType Python3Lang = "str"
+serialType CLang = error "C is not yet supported"
+serialType RustLang = error "Rust is not yet supported"
+serialType PerlLang = error "Perl is not yet supported"
+
+generalSerialType :: Text
+generalSerialType = "Str"
 
 -- | Map a function over each supported language
 mapLang :: (Lang -> a) -> [a]
@@ -65,13 +78,13 @@ pairwiseCost RLang       RLang       = 100
 -- pairs of languages for which foreign calls are optimized
 pairwiseCost CppLang CLang = 1
 -- cost of naive foreign function calls
-pairwiseCost _ CLang       = 500 -- the cost of a system call
-pairwiseCost _ CppLang     = 500
-pairwiseCost _ RustLang    = 500
-pairwiseCost _ Python3Lang = 50000 -- the cost of opening the python interpreter and loading modules
-pairwiseCost _ PerlLang    = 50000
+pairwiseCost _ CLang       = 5000 -- the cost of a system call
+pairwiseCost _ CppLang     = 5000
+pairwiseCost _ RustLang    = 5000
+pairwiseCost _ Python3Lang = 500000 -- the cost of opening the python interpreter and loading modules
+pairwiseCost _ PerlLang    = 500000
 -- this could be optimized by running R server
-pairwiseCost _ RLang       = 5000000 -- an arm and a leg
+pairwiseCost _ RLang       = 50000000 -- an arm and a leg
 
 
 -- | hello flame wars - these costs are mostly intended to break ties

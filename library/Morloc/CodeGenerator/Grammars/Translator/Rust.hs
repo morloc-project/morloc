@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, QuasiQuotes, OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell, QuasiQuotes, OverloadedStrings, ViewPatterns #-}
 
 {-|
 Module      : Morloc.CodeGenerator.Grammars.Translator.Rust
@@ -26,152 +26,155 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
 import qualified Morloc.Data.Text as MT
 
-preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
-preprocess = invertExprM
+preprocess :: SerialManifold -> MorlocMonad SerialManifold
+preprocess = return . invertSerialManifold
 
-translate :: [Source] -> [ExprM One] -> MorlocMonad Script
-translate srcs es = do
-  deps <- getDependencies srcs
-  let imports = map (makeImport . pretty . fst) deps
-  funcmap <- mapM getFunction srcs
-  cargo <- makeCargo deps
-  manifolds <- mapM (translateManifold funcmap) es
-  code <- makePool manifolds imports es
-  maker <- makeTheMaker srcs 
-  return $ Script
-    { scriptBase = "pool"
-    , scriptLang = RustLang 
-    , scriptCode = "." :/ pkg cargo code
-    , scriptMake = maker
-    }
-  where
-    pkg cargo code = Dir "pool-rust"
-      [ File "Cargo.toml" cargo
-      , Dir "src"
-        [ File "main.rs" code
-        ]
-      ]
+translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
+translate = undefined
+-- translate srcs es = do
+--   deps <- getDependencies srcs
+--   let imports = map (makeImport . pretty . fst) deps
+--   funcmap <- mapM getFunction srcs
+--   cargo <- makeCargo deps
+--   manifolds <- mapM (translateManifold funcmap) es
+--   code <- makePool manifolds imports es
+--   maker <- makeTheMaker srcs
+--   return $ Script
+--     { scriptBase = "pool"
+--     , scriptLang = RustLang
+--     , scriptCode = "." :/ pkg cargo code
+--     , scriptMake = maker
+--     }
+--   where
+--     pkg cargo code = Dir "pool-rust"
+--       [ File "Cargo.toml" cargo
+--       , Dir "src"
+--         [ File "main.rs" code
+--         ]
+--       ]
 
 data Three = In | Out | NoOneCares
 
 makeImport :: MDoc -> MDoc
 makeImport n = "use" <+> n <> ";"
 
-translateManifold :: [(Name, MDoc)] -> ExprM One -> MorlocMonad MDoc
-translateManifold funmap m0@(ManifoldM _ form0 _) = do
-  MM.startCounter
-  (vsep . punctuate line . (\(x,_,_)->x)) <$> f (manifoldArgs form0) m0
-  where
+translateManifold :: [(Name, MDoc)] -> SerialManifold -> MorlocMonad MDoc
+translateManifold = undefined
+-- translateManifold :: [(Name, MDoc)] -> ExprM One -> MorlocMonad MDoc
+-- translateManifold funmap m0@(ManifoldM _ form0 _) = do
+--   MM.startCounter
+--   (vsep . punctuate line . (\(x,_,_)->x)) <$> f (manifoldArgs form0) m0
+--   where
+--
+--   f :: [Arg TypeM]
+--     -> ExprM One
+--     -> MorlocMonad
+--         ( [MDoc] -- completely generated manifolds
+--         , MDoc   -- a tag for the returned expression
+--         , [MDoc] -- lines to precede the returned expression
+--         )
+--   f = undefined
+--   -- f pargs m@(ManifoldM i form e) = do
+--   --   let args = manifoldArgs form
+--   --   (ms', e', rs') <- f args e
+--   --   let mname = manNamer i
+--   --       def = "fn" <+> mname <> tupled (map makeArgument args) <+> "->" <+> showTypeM Out (typeOfExprM e)
+--   --       body = vsep $ rs' ++ [e']
+--   --       mdoc = block 4 def body
+--   --   call <- return $ case form of
+--   --     (ManifoldFull rs) -> mname <> tupled (map argName rs) -- covers #1, #2 and #4
+--   --     (ManifoldPass _) -> mname
+--   --     (ManifoldPart rs vs) -> makeLambda vs (mname <> tupled (map argName (rs ++ vs))) -- covers #5
+--   --   return (mdoc : ms', call, [])
+--   --
+--   -- f _ (PoolCallM _ _ cmds args) = do
+--   --   let call = "foreign_call(" <> list(map dquotes cmds ++ map argName args) <> ")"
+--   --   return ([], call, [])
+--   --
+--   -- f _ (ForeignInterfaceM _ _ _) = MM.throwError . CallTheMonkeys $
+--   --   "Foreign interfaces should have been resolved before passed to the translators"
+--   --
+--   -- f args (LetM i (DeserializeM s e1) e2) = do
+--   --   (ms1, e1', ps1) <- f args e1
+--   --   (ms2, e2', ps2) <- f args e2
+--   --   deserialized <- deserialize e1' s
+--   --   t <- showTypeP <$> (Serial.serialAstToType s)
+--   --   let def = [idoc|let #{letNamer i}: #{t} = #{deserialized};|]
+--   --   return (ms1 ++ ms2, vsep $ ps1 ++ [def] ++ ps2 ++ [e2'], [])
+--   --
+--   -- f args (LetM i e1 e2) = do
+--   --   (ms1', e1', rs1) <- (f args) e1
+--   --   (ms2', e2', rs2) <- (f args) e2
+--   --   let rs = rs1 ++ [ "let" <+> letNamer i <+> "=" <+> e1' <> ";" ] ++ rs2
+--   --   return (ms1' ++ ms2', e2', rs)
+--   --
+--   -- f args (AppM (SrcM _ src) xs) = do
+--   --   (mss', xs', rss') <- mapM (f args) xs |>> unzip3
+--   --   fullname <- case lookup (srcName src) funmap of
+--   --     Nothing -> MM.throwError (OtherError "Fuck shit and die")
+--   --     (Just n) -> return n
+--   --   return (concat mss', fullname <> tupled xs', concat rss')
+--   --
+--   -- f _ (AppM _ _) = error "Can only apply functions"
+--   --
+--   -- f _ (SrcM _ src) = return ([], pretty (srcName src), [])
+--   --
+--   -- f _ (LamM _ _ _) = undefined -- FIXME: this is defined in R
+--   --
+--   -- f _ (BndVarM _ i) = return ([], bndNamer i, [])
+--   --
+--   -- f _ (LetVarM _ i) = return ([], letNamer i, [])
+--   --
+--   -- f args (AccM e k) = do
+--   --   (ms, e', ps) <- f args e
+--   --   return (ms, e' <> "." <> pretty k, ps)
+--   --
+--   -- f args (ListM _ es) = do
+--   --   (mss', es', rss') <- mapM (f args) es |>> unzip3
+--   --   return (concat mss', list es', concat rss')
+--   --
+--   -- f args (TupleM _ es) = do
+--   --   (mss', es', rss') <- mapM (f args) es |>> unzip3
+--   --   return (concat mss', tupled es', concat rss')
+--   --
+--   -- f args (RecordM _ entries) = do
+--   --   (mss', es', rss') <- mapM (f args . snd) entries |>> unzip3
+--   --   let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
+--   --   return (concat mss', "RECORD" <> tupled entries', concat rss')
+--   --
+--   -- f _ (LogM _ x) = return ([], if x then "true" else "false", [])
+--   --
+--   -- f _ (RealM _ x) = return ([], viaShow x, [])
+--   --
+--   -- f _ (IntM _ x) = return ([], viaShow x, [])
+--   --
+--   -- f _ (StrM _ x) = return ([], dquotes $ pretty x, [])
+--   --
+--   -- f _ (NullM _) = undefined -- Rust doesn't technically have a NULL
+--   --
+--   -- f args (SerializeM s e) = do
+--   --   (ms, e', rs1) <- f args e
+--   --   serialized <- serialize e' s
+--   --   return (ms, serialized, rs1)
+--   --
+--   -- f args (DeserializeM s e) = do
+--   --   (ms, e', rs1) <- f args e
+--   --   deserialized <- deserialize e' s
+--   --   return (ms, deserialized, rs1)
+--   --
+--   -- f args (ReturnM e) = do
+--   --   (ms, e', rs) <- f args e
+--   --   return (ms, "return" <+> e' <> ";", rs) -- returned things are wrapped in nothin'
+-- translateManifold _ _ = error "Every ExprM object must start with a Manifold term"
 
-  f :: [Argument]
-    -> ExprM One
-    -> MorlocMonad
-        ( [MDoc] -- completely generated manifolds
-        , MDoc   -- a tag for the returned expression
-        , [MDoc] -- lines to precede the returned expression
-        )
-  f pargs m@(ManifoldM i form e) = do
-    let args = manifoldArgs form
-    (ms', e', rs') <- f args e
-    let mname = manNamer i
-        def = "fn" <+> mname <> tupled (map makeArgument args) <+> "->" <+> showTypeM Out (typeOfExprM e)
-        body = vsep $ rs' ++ [e']
-        mdoc = block 4 def body
-    call <- return $ case form of
-      (ManifoldFull rs) -> mname <> tupled (map argName rs) -- covers #1, #2 and #4
-      (ManifoldPass _) -> mname
-      (ManifoldPart rs vs) -> makeLambda vs (mname <> tupled (map argName (rs ++ vs))) -- covers #5
-    return (mdoc : ms', call, [])
+makeArgument :: Arg TypeM -> MDoc
+makeArgument = undefined
+-- makeArgument (Arg i (Serial _)) = bndNamer i <> ":" <+> inSerialType
+-- makeArgument (Arg i (Native t)) = bndNamer i <> ":" <+> showTypeP t
+-- makeArgument (Arg i Passthrough) = bndNamer i <> ":" <+> inSerialType
 
-  f _ (PoolCallM _ _ cmds args) = do
-    let call = "foreign_call(" <> list(map dquotes cmds ++ map argName args) <> ")"
-    return ([], call, [])
-
-  f _ (ForeignInterfaceM _ _ _) = MM.throwError . CallTheMonkeys $
-    "Foreign interfaces should have been resolved before passed to the translators"
-
-  f args (LetM i (DeserializeM s e1) e2) = do
-    (ms1, e1', ps1) <- f args e1
-    (ms2, e2', ps2) <- f args e2
-    deserialized <- deserialize e1' s
-    t <- showTypeP <$> (Serial.serialAstToType s)
-    let def = [idoc|let #{letNamer i}: #{t} = #{deserialized};|]
-    return (ms1 ++ ms2, vsep $ ps1 ++ [def] ++ ps2 ++ [e2'], [])
-
-  f args (LetM i e1 e2) = do
-    (ms1', e1', rs1) <- (f args) e1
-    (ms2', e2', rs2) <- (f args) e2
-    let rs = rs1 ++ [ "let" <+> letNamer i <+> "=" <+> e1' <> ";" ] ++ rs2
-    return (ms1' ++ ms2', e2', rs)
-
-  f args (AppM (SrcM _ src) xs) = do
-    (mss', xs', rss') <- mapM (f args) xs |>> unzip3
-    fullname <- case lookup (srcName src) funmap of
-      Nothing -> MM.throwError (OtherError "Fuck shit and die")
-      (Just n) -> return n
-    return (concat mss', fullname <> tupled xs', concat rss')
-
-  f _ (AppM _ _) = error "Can only apply functions"
-
-  f _ (SrcM _ src) = return ([], pretty (srcName src), [])
-
-  f _ (LamM _ _ _) = undefined -- FIXME: this is defined in R
-
-  f _ (BndVarM _ i) = return ([], bndNamer i, [])
-
-  f _ (LetVarM _ i) = return ([], letNamer i, [])
-
-  f args (AccM e k) = do
-    (ms, e', ps) <- f args e
-    return (ms, e' <> "." <> pretty k, ps)
-
-  f args (ListM _ es) = do
-    (mss', es', rss') <- mapM (f args) es |>> unzip3
-    return (concat mss', list es', concat rss')
-
-  f args (TupleM _ es) = do
-    (mss', es', rss') <- mapM (f args) es |>> unzip3
-    return (concat mss', tupled es', concat rss')
-
-  f args (RecordM _ entries) = do
-    (mss', es', rss') <- mapM (f args . snd) entries |>> unzip3
-    let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
-    return (concat mss', "RECORD" <> tupled entries', concat rss')
-
-  f _ (LogM _ x) = return ([], if x then "true" else "false", [])
-
-  f _ (RealM _ x) = return ([], viaShow x, [])
-
-  f _ (IntM _ x) = return ([], viaShow x, [])
-
-  f _ (StrM _ x) = return ([], dquotes $ pretty x, [])
-
-  f _ (NullM _) = undefined -- Rust doesn't technically have a NULL
-
-  f args (SerializeM s e) = do
-    (ms, e', rs1) <- f args e
-    serialized <- serialize e' s
-    return (ms, serialized, rs1)
-
-  f args (DeserializeM s e) = do
-    (ms, e', rs1) <- f args e
-    deserialized <- deserialize e' s
-    return (ms, deserialized, rs1)
-
-  f args (ReturnM e) = do
-    (ms, e', rs) <- f args e
-    return (ms, "return" <+> e' <> ";", rs) -- returned things are wrapped in nothin'
-translateManifold _ _ = error "Every ExprM object must start with a Manifold term"
-
-makeArgument :: Argument -> MDoc
-makeArgument (SerialArgument i _) = bndNamer i <> ":" <+> inSerialType
-makeArgument (NativeArgument i t) = bndNamer i <> ":" <+> showTypeP t
-makeArgument (PassThroughArgument i) = bndNamer i <> ":" <+> inSerialType
-
-argName :: Argument -> MDoc
-argName (SerialArgument i _) = bndNamer i
-argName (NativeArgument i _) = bndNamer i
-argName (PassThroughArgument i) = bndNamer i
+argName :: Arg TypeM -> MDoc
+argName (ann -> i) = bndNamer i
 
 showTypeP :: TypeP -> MDoc
 showTypeP (UnkP (PV _ _ v)) = pretty v
@@ -183,14 +186,15 @@ showTypeP (AppP _ _) = undefined
 
 
 showTypeM :: Three -> TypeM -> MDoc
-showTypeM _ Passthrough = inSerialType
-showTypeM In (Serial _) = inSerialType
-showTypeM Out (Serial _) = outSerialType
-showTypeM NoOneCares (Serial _) = error "But we do care!"
-showTypeM _ (Native t) = showTypeP t
-showTypeM _ (Function ts t)
-  = "std::function<" <> showTypeM NoOneCares t
-  <> "(" <> cat (punctuate "," (map (showTypeM NoOneCares) ts)) <> ")>"
+showTypeM = undefined
+-- showTypeM _ Passthrough = inSerialType
+-- showTypeM In (Serial _) = inSerialType
+-- showTypeM Out (Serial _) = outSerialType
+-- showTypeM NoOneCares (Serial _) = error "But we do care!"
+-- showTypeM _ (Native t) = showTypeP t
+-- showTypeM _ (Function ts t)
+--   = "std::function<" <> showTypeM NoOneCares t
+--   <> "(" <> cat (punctuate "," (map (showTypeM NoOneCares) ts)) <> ")>"
 
 inSerialType :: MDoc
 inSerialType = "&str"
@@ -198,7 +202,7 @@ inSerialType = "&str"
 outSerialType :: MDoc
 outSerialType = "String"
 
-makeLambda :: [Argument] -> MDoc -> MDoc
+makeLambda :: [Arg TypeM] -> MDoc -> MDoc
 makeLambda _ _ = "LAMBDA"
 
 -- create an internal variable based on a unique id
@@ -213,10 +217,10 @@ bndNamer i = "x" <> viaShow i
 manNamer :: Int -> MDoc
 manNamer i = "m" <> viaShow i
 
-serialize :: MDoc -> SerialAST One -> MorlocMonad MDoc
+serialize :: MDoc -> SerialAST -> MorlocMonad MDoc
 serialize x _ = return $ [idoc|serial::serialize(&#{x})|]
 
-deserialize :: MDoc -> SerialAST One -> MorlocMonad MDoc
+deserialize :: MDoc -> SerialAST -> MorlocMonad MDoc
 deserialize x _ = return $ [idoc|serial::deserialize(#{x}).into()|]
 
 makeCargo :: [(String, Path)] -> MorlocMonad Code 
@@ -285,19 +289,20 @@ makeTheMaker _ = return
   , SysRun (Code "cp pool-rust/target/debug/pool-rs pool-rust.out")
   ]
 
-makeDispatch :: MDoc -> MDoc -> [ExprM One] -> MDoc
-makeDispatch varin varout ms
-  = block 4 ("match" <+> varin) (vsep (map makeCase ms ++ [defaultCase]))
-  where
-    makeCase :: ExprM One -> MDoc
-    makeCase (ManifoldM i form _) =
-        let args = replicate (length (manifoldArgs form)) "&args.next().unwrap()"
-        in [idoc|#{viaShow i} => #{varout} = #{manNamer i}#{tupled args},|]
-    makeCase _ = error "Every ExprM must start with a manifold object"
+makeDispatch :: MDoc -> MDoc -> [SerialManifold] -> MDoc
+makeDispatch = undefined
+-- makeDispatch varin varout ms
+--   = block 4 ("match" <+> varin) (vsep (map makeCase ms ++ [defaultCase]))
+--   where
+--     makeCase :: ExprM One -> MDoc
+--     makeCase (ManifoldM i form _) =
+--         let args = replicate (length (manifoldArgs form)) "&args.next().unwrap()"
+--         in [idoc|#{viaShow i} => #{varout} = #{manNamer i}#{tupled args},|]
+--     makeCase _ = error "Every ExprM must start with a manifold object"
+--
+--     defaultCase = [idoc|_ => panic!("invalid function!")|]
 
-    defaultCase = [idoc|_ => panic!("invalid function!")|]
-
-makePool :: [MDoc] -> [MDoc] -> [ExprM One] -> MorlocMonad Code
+makePool :: [MDoc] -> [MDoc] -> [SerialManifold] -> MorlocMonad Code
 makePool manifolds imports es = return . Code . render $ [idoc|// Rust template
 use rustmorlocinternals::serial;
 #{vsep imports}

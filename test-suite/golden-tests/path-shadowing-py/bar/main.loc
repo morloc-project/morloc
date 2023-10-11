@@ -1,0 +1,6 @@
+module bar (*)
+
+source Py from "main.py" ("add")
+
+add :: Real -> Real -> Real
+add Py :: "float" -> "float" -> "float"

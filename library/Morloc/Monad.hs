@@ -28,6 +28,7 @@ module Morloc.Monad
   , module Control.Monad.Reader
   , module Control.Monad.State
   , module Control.Monad.Writer
+  , module Control.Monad.Identity
   -- * reusable counter
   , startCounter
   , getCounter
@@ -52,6 +53,12 @@ module Morloc.Monad
   , sayV
   , sayVV
   , sayVVV
+  -- * Indexing monad
+  , Index
+  , runIndex
+  , newIndex
+  , getIndex
+  , setIndex
   ) where
 
 import Control.Monad.Except
@@ -59,6 +66,7 @@ import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Trans
 import Control.Monad.Writer
+import Control.Monad.Identity
 import Morloc.Error () -- for MorlocError Show instance
 import Morloc.Namespace
 import Morloc.Data.Doc
@@ -77,21 +85,27 @@ runMorlocMonad ::
 runMorlocMonad outfile v config ev =
   runStateT (runWriterT (runExceptT (runReaderT ev config))) (emptyState outfile v)
 
+instance Defaultable MorlocState where
+  defaultValue = MorlocState {
+      statePackageMeta = []
+    , stateVerbosity = 0
+    , stateCounter = -1
+    , stateDepth = 0
+    , stateSignatures = GMap.empty
+    , stateTypedefs = GMap.empty
+    , stateSources = GMap.empty
+    , stateAnnotations = Map.empty
+    , stateOutfile = Nothing
+    , statePackers = GMap.empty
+    , stateName = Map.empty
+    , stateExports = []
+  }
+
 emptyState :: Maybe Path -> Int -> MorlocState
-emptyState path v = MorlocState {
-    statePackageMeta = []
-  , stateVerbosity = v
-  , stateCounter = -1
-  , stateDepth = 0
-  , stateSignatures = GMap.empty
-  , stateTypedefs = GMap.empty
-  , stateSources = GMap.empty
-  , stateAnnotations = Map.empty
+emptyState path v = defaultValue
+  { stateVerbosity = v
   , stateOutfile = path
-  , statePackers = GMap.empty
-  , stateName = Map.empty
-  , stateExports = []
-}
+  }
 
 startCounter :: MorlocMonad ()
 startCounter = do
@@ -324,3 +338,27 @@ metaTypedefs i = do
       (GMapJust termmap) -> Map.map (\(vs, t) -> (typeOf t, vs))
           (Map.map head (Map.filter (not . null) termmap))
       _ -> Map.empty
+
+
+
+newtype IndexState = IndexState { index :: Int }
+type Index a = StateT IndexState Identity a
+
+runIndex :: Int -> Index a -> a
+runIndex i x = evalState x (IndexState i)
+
+newIndex :: Index Int
+newIndex = do
+    s <- get
+    let i = index s
+    put $ s {index = index s + 1}
+    return i
+
+getIndex :: Index Int
+getIndex = gets index
+
+setIndex :: Int -> Index ()
+setIndex i = do
+  s <- get
+  put $ s {index = i}
+  return ()

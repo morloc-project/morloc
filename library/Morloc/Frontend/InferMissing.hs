@@ -32,29 +32,30 @@ infer s = do
     sigs <- GMap.mapValsM (processTermType (stateTypedefs s)) (stateSignatures s)
     return $ s {stateSignatures = sigs}
 
-
 processTermType :: GMap Int MVar (Map.Map TVar [([TVar], TypeU)]) -> TermTypes -> MorlocMonad TermTypes
 processTermType (GMap _ typedefs) (TermTypes (Just g) cs ds) = do
-    case mapM (\(mv, es, maySrc) -> processTypes (Map.lookup mv typedefs) g es maySrc) cs of
+    case mapM (\(mv, es, maySrc) -> processTypes mv (Map.lookup mv typedefs) g es maySrc) cs of
         (Left e) -> MM.throwError e
         (Right ess') -> return $ TermTypes (Just g) (zipWith (\e (m, _, s) -> (m, e, s)) ess' cs) ds 
 processTermType _ t = return t 
 
 
-processTypes :: Maybe (Map.Map TVar [([TVar], TypeU)]) -> EType -> [EType] -> Maybe (Indexed Source) -> Either MorlocError [EType]
-processTypes Nothing g [] (Just (Idx _ src)) = Left (CannotSynthesizeConcreteType src (etype g))
+processTypes :: MVar -> Maybe (Map.Map TVar [([TVar], TypeU)]) -> EType -> [EType] -> Maybe (Indexed Source) -> Either MorlocError [EType]
+processTypes m Nothing g [] (Just (Idx _ src)) = Left (CannotSynthesizeConcreteType m src (etype g) [])
 -- if there are no given concrete types, try to synthesize one from the general type
-processTypes (Just typedefs) g [] (Just (Idx _ src)) = return <$> synthesizeEType src typedefs g
-processTypes _ _ es _ = return es
+processTypes m (Just typedefs) g [] (Just (Idx _ src)) = return <$> synthesizeEType m src typedefs g
+processTypes _ _ _ es _ = return es
 
 
-synthesizeEType :: Source -> Map.Map TVar [([TVar], TypeU)] -> EType -> Either MorlocError EType
-synthesizeEType src@(srcLang -> lang) typedefs (EType t0 ps cs)
-  | canSynth = EType <$> desugarType typedefs (switchLang t0) <*> pure ps <*> pure cs
-  | otherwise = Left (CannotSynthesizeConcreteType src t0)
+synthesizeEType :: MVar -> Source -> Map.Map TVar [([TVar], TypeU)] -> EType -> Either MorlocError EType
+synthesizeEType m src@(srcLang -> lang) typedefs (EType t0 ps cs)
+  | null unaliasedTerms = EType <$> desugarType typedefs (switchLang t0) <*> pure ps <*> pure cs
+  | otherwise = Left (CannotSynthesizeConcreteType m src t0 unaliasedTerms)
   where
-    -- true if all free general variables in the type have aliases in the concrete language
-    canSynth = all isJust [Map.lookup (TV (Just lang) v) typedefs | VarU (TV _ v) <- Set.toList (free t0)]
+    -- list of general variables in the type that do not have concrete type aliases
+    unaliasedTerms = filter (\v -> not $ Map.member (TV (Just lang) v) typedefs) [v | VarU (TV _ v) <- Set.toList (free t0)]
+
+
 
     switchLang :: TypeU -> TypeU
     switchLang (VarU (TV _ v)) = VarU (TV (Just lang) v)

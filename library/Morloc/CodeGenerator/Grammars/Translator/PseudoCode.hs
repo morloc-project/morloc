@@ -1,0 +1,140 @@
+{-# LANGUAGE OverloadedStrings, ViewPatterns #-}
+
+{-|
+Module      : Morloc.CodeGenerator.Grammars.Translator.PseudoCode
+Description : Python3 translator
+Copyright   : (c) Zebulun Arendsee, 2021
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+-}
+
+module Morloc.CodeGenerator.Grammars.Translator.PseudoCode
+  ( pseudocodeNativeManifold
+  , pseudocodeSerialManifold
+  , pseudocodeSerialArg
+  , pseudocodeNativeArg
+  , pseudocodeSerialExpr
+  , pseudocodeNativeExpr
+  ) where
+
+import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Grammars.Common
+import Morloc.Data.Doc
+import qualified Control.Monad.Identity as MI
+
+prettyFoldManifold :: (Monad m) => FoldWithManifoldM m PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs
+prettyFoldManifold = FoldWithManifoldM
+ { opFoldWithSerialManifoldM = makeSerialManifold
+ , opFoldWithNativeManifoldM = makeNativeManifold
+ , opFoldWithSerialExprM     = makeSerialExpr
+ , opFoldWithNativeExprM     = makeNativeExpr
+ , opFoldWithSerialArgM      = makeSerialArg
+ , opFoldWithNativeArgM      = makeNativeArg
+ } where
+
+    makeSerialManifold :: Monad m => SerialManifold -> SerialManifold_ PoolDocs -> m PoolDocs
+    makeSerialManifold _ (SerialManifold_ m _ form x) = return
+      $ translateManifold (makeFunction "SerialManifold") makeLambda m form x
+
+    makeNativeManifold :: Monad m => NativeManifold -> NativeManifold_ PoolDocs -> m PoolDocs
+    makeNativeManifold _ (NativeManifold_ m _ form x) = return
+      $ translateManifold (makeFunction "NativeManifold") makeLambda m form x
+
+    makeSerialExpr :: Monad m => SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs
+    makeSerialExpr _ (ManS_ m) = return m
+    makeSerialExpr _ (AppPoolS_ t (PoolCall _ cmds _) args) = return $ mergePoolDocs makePoolCall args
+        where
+        makePoolCall xs' = parens (pretty t) <+> "__foreign_call__(" <> list(map dquotes cmds ++ xs') <> ")"
+    makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "ReturnS(" <> poolExpr x <> ")"}
+    makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet letNamerS "SerialLetS" i e1 e2
+    makeSerialExpr _ (NativeLetS_ i e1 e2) = return $ makeLet letNamerN "NativeLetS" i e1 e2
+    makeSerialExpr _ (LetVarS_ _ i) = return $ PoolDocs [] (letNamerS i) [] []
+    makeSerialExpr _ (BndVarS_ _ i) = return $ PoolDocs [] (bndNamerS i) [] []
+    makeSerialExpr _ (SerializeS_ _ e) = return $ e {poolExpr = "SerializeS" <> parens (poolExpr e)}
+
+    makeNativeExpr :: Monad m => NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs
+    makeNativeExpr _ (AppSrcN_ _ (pretty . srcName -> functionName) xs) =
+      return $ mergePoolDocs ((<>) functionName . tupled) xs
+    makeNativeExpr _ (ManN_ call) = return call 
+    makeNativeExpr _ (ReturnN_ x) =
+      return $ x { poolExpr = "ReturnN(" <> poolExpr x <> ")" }
+    makeNativeExpr _ (SerialLetN_ i x1 x2) = return $ makeLet letNamerS "SerialLetN" i x1 x2
+    makeNativeExpr _ (NativeLetN_ i x1 x2) = return $ makeLet letNamerN "NativeLetN" i x1 x2
+    makeNativeExpr _ (LetVarN_ _ i) = return $ PoolDocs [] (letNamerN i) [] []
+    makeNativeExpr _ (BndVarN_ _ i) = return $ PoolDocs [] (bndNamerN i) [] []
+    makeNativeExpr _ (DeserializeN_ _ _ e) = return $ e {poolExpr = "DeserializeN" <> parens (poolExpr e)}
+    makeNativeExpr _ (AccN_ _ _ e k) = return $ e {poolExpr = poolExpr e <> "[" <> dquotes (pretty k) <> "]"}
+    makeNativeExpr _ (SrcN_ _ src) = return $ PoolDocs [] (pretty (srcName src)) [] []
+    makeNativeExpr _ (ListN_ _ _ xs) = return $ mergePoolDocs list xs
+    makeNativeExpr _ (TupleN_ _ xs) = return $ mergePoolDocs tupled xs
+    makeNativeExpr _ (RecordN_ _ _ _ rs) =
+      return $ mergePoolDocs pyDict (map snd rs) where
+        pyDict es' =
+          let entries' = zipWith (\(FV _ k) v -> pretty k <> "=" <> v) (map fst rs) es'
+          in "OrderedDict" <> tupled entries'
+    makeNativeExpr _ (LogN_ _ v) = return $ PoolDocs [] (if v then "True" else "False") [] []
+    makeNativeExpr _ (RealN_ _ v) = return $ PoolDocs [] (viaShow v) [] []
+    makeNativeExpr _ (IntN_ _ v) = return $ PoolDocs [] (viaShow v) [] []
+    makeNativeExpr _ (StrN_ _ v) = return $ PoolDocs [] (dquotes $ pretty v) [] []
+    makeNativeExpr _ (NullN_ _ ) = return $ PoolDocs [] "None" [] []
+
+    makeSerialArg :: Monad m => SerialArg -> SerialArg_ PoolDocs PoolDocs -> m PoolDocs
+    makeSerialArg _ (SerialArgManifold_ x) = return x
+    makeSerialArg _ (SerialArgExpr_ x) = return x
+
+    makeNativeArg :: Monad m => NativeArg -> NativeArg_ PoolDocs PoolDocs -> m PoolDocs
+    makeNativeArg _ (NativeArgManifold_ x) = return x
+    makeNativeArg _ (NativeArgExpr_ x) = return x
+
+    makeFunction :: MDoc -> MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> MDoc
+    makeFunction manStr mname args priorLines body =
+      let def = manStr <+> mname <> tupled [argName r <+> ":" <+> pretty t | r@(Arg _ t) <- args] <> ":"
+      in block 4 def (vsep $ priorLines <> [body])
+
+    makeLambda :: [Arg TypeM] -> MDoc -> MDoc
+    makeLambda args body = "lambda" <+> hsep (punctuate "," (map argName args)) <> ":" <+> body
+
+    makeLet :: (Int -> MDoc) -> MDoc -> Int -> PoolDocs -> PoolDocs -> PoolDocs
+    makeLet letNamer letStr i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
+      let rs = rs1 ++ [ letStr <+> letNamer i <+> "=" <+> e1' ] ++ rs2
+      in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
+
+    letNamerS :: Int -> MDoc
+    letNamerS i = "letSvar_" <> pretty i
+
+    letNamerN :: Int -> MDoc
+    letNamerN i = "letNvar_" <> pretty i
+
+    bndNamerS :: Int -> MDoc
+    bndNamerS i = "bndSvar" <> pretty i
+
+    bndNamerN :: Int -> MDoc
+    bndNamerN i = "bndNvar" <> pretty i
+
+    argName :: Arg TypeM -> MDoc
+    argName (Arg i (Native _)) = bndNamerN i
+    argName (Arg i _) = bndNamerS i
+
+
+prettyThing f a =
+  let e = MI.runIdentity $ f a
+  in vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
+
+pseudocodeNativeManifold :: NativeManifold -> MDoc
+pseudocodeNativeManifold = prettyThing (foldWithNativeManifoldM prettyFoldManifold)
+
+pseudocodeSerialManifold :: SerialManifold -> MDoc
+pseudocodeSerialManifold = prettyThing (foldWithSerialManifoldM prettyFoldManifold)
+
+pseudocodeSerialArg :: SerialArg -> MDoc
+pseudocodeSerialArg = prettyThing (foldWithSerialArgM prettyFoldManifold)
+
+pseudocodeNativeArg :: NativeArg -> MDoc
+pseudocodeNativeArg = prettyThing (foldWithNativeArgM prettyFoldManifold)
+
+pseudocodeSerialExpr :: SerialExpr -> MDoc
+pseudocodeSerialExpr = prettyThing (foldWithSerialExprM prettyFoldManifold)
+
+pseudocodeNativeExpr :: NativeExpr -> MDoc
+pseudocodeNativeExpr = prettyThing (foldWithNativeExprM prettyFoldManifold)

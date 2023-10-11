@@ -1,6 +1,7 @@
-module flucase (search, classify, analysis)
+module flucase (analysis)
 
-type Filename = Str 
+import conventions (Str, Int, Filename, Real, Unit, Map, Tuple2)
+
 type Accession = Str
 type Clade = Str 
 type StrainName = Str
@@ -10,7 +11,6 @@ type Label = Str
 type Date = Str
 type Query = Str
 
-type Py Filename = "str"
 type Py Accession = "str"
 type Py Clade = "str"
 type Py StrainName = "str"
@@ -20,7 +20,6 @@ type Py Label = "str"
 type Py Date = "str"
 type Py Query = "str"
 
-type Cpp Filename = "std::string" 
 type Cpp Accession = "std::string"
 type Cpp Clade = "std::string" 
 type Cpp StrainName = "std::string"
@@ -29,6 +28,15 @@ type Cpp EntrezQuery = "std::string"
 type Cpp Label = "std::string"
 type Cpp Date = "std::string"
 type Cpp Query = "std::string"
+
+type R Accession = "character"
+type R Clade = "character" 
+type R StrainName = "character"
+type R Sequence = "character"
+type R EntrezQuery = "character"
+type R Label = "character"
+type R Date = "character"
+type R Query = "character"
 
 record Meta = Meta
   { accession :: Accession
@@ -54,15 +62,14 @@ record EntrezSearchConfig = EntrezSearchConfig
   , retmax :: Int
   }
 
-import bio.algo
-  ( align    -- align :: [Sequence] -> [Sequence]
-  , nj as treeify  -- treeify :: [Sequence] -> Tree Int Real Int
-  )
+import bio.algo (upgma)
 
 import bio.tree
-  ( treeBy             -- treeBy :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
+  ( RootedTree
+  , treeBy             -- treeBy :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
   , pullNode           -- pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
   , mapChildWithParent -- mapChildWithParent :: (n -> n') -> (n' -> n -> n') -> Tree n e l -> Tree n' e l
+  , mapLeaf
   )
 
 import bio.db
@@ -71,7 +78,8 @@ import bio.db
   )
 
 import base
-  ( at        -- at :: [a] -> Int -> a
+  ( id
+  , at        -- at :: [a] -> Int -> a
   , map
   , ne
   , concat
@@ -92,33 +100,28 @@ import base
   , readMap   -- readMap :: Filename -> Map key val
   )
 
-import cppbase (id)
 
-
-source Py from "analysis-functions.py"
+source Py from "utilities.py"
   ( "parseRecord"
   , "labelRef"
   )
 
 parseRecord :: Str -> (Meta, Sequence)
-parseRecord Py :: Str -> (Meta, Sequence)
 
 labelRef :: Map Accession Clade -> Meta -> Meta
-labelRef Py :: Map Accession Clade -> Meta -> Meta
 
 
 source R from "plot-tree.R" ("plotTree")
 
-plotTree :: Filename -> Tree n Real Meta -> ()
-plotTree R :: Filename -> "phylo" n e l -> ()
+plotTree :: Filename -> RootedTree n Real Str -> ()
 
 
--- analysis :: Date -> Date -> Filename -> Filename -> ()
+analysis :: Date -> Date -> Filename -> Filename -> ()
 analysis mindate maxdate reffile treefile
   = ( plotTree treefile
-    . classify
-    . treeBy treeify
-    . withSnds align  -- TODO: rethink this ... this is rather particular
+    . mapLeaf (\x -> x@accession)
+    . classify -- Tree string double meta
+    . treeBy upgma
     . search config refmap
     ) query
   where
@@ -132,7 +135,7 @@ analysis mindate maxdate reffile treefile
     refmap = readMap reffile
 
 
--- search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
+search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
 search config refs query =
   ( map (onFst (labelRef refs))
   . concat
@@ -146,7 +149,7 @@ search config refs query =
   ) query
 
 
-classify :: Tree () e Meta -> Tree Str e Meta
+classify :: RootedTree n e Meta -> RootedTree Str e Meta
 classify = push . pullNode pullLeaf pullClade where
 
   pullLeaf leaf = leaf@clade
@@ -158,4 +161,4 @@ classify = push . pullNode pullLeaf pullClade where
       seenClades = ( unique
                    . filter (ne 0 . lengthS)
                    ) xs
-  push = mapChildWithParent id (ifelse (eq 0 (lengthS c)))
+  push = mapChildWithParent id (\ parent child -> ifelse (eq 0 (lengthS child)) parent child)

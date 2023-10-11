@@ -1,4 +1,4 @@
-{-# LANGUAGE ViewPatterns, OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns, OverloadedStrings, TypeFamilies #-}
 
 {-|
 Module      : Morloc.Namespace
@@ -11,7 +11,7 @@ Stability   : experimental
 
 module Morloc.Namespace
   (
-  -- ** re-export supplements to Prelude
+  -- ** re-exports
     module Morloc.Internal
   -- ** Synonyms
   , MDoc
@@ -19,10 +19,13 @@ module Morloc.Namespace
   -- ** Other functors
   , None(..)
   , One(..)
+  , Or(..)
   , Many(..)
+  -- ** Other classes
+  , Defaultable(..)
   -- ** Indexed
-  , Indexed(..)
-  , unindex
+  , IndexedGeneral(..)
+  , Indexed
   , GIndex
   -- ** Newtypes
   , CType(..)
@@ -61,7 +64,6 @@ module Morloc.Namespace
   , MorlocReturn
   -- ** Package metadata
   , PackageMeta(..)
-  , defaultPackageMeta
   -- * Types
   , NamType(..)
   , Type(..)
@@ -113,6 +115,7 @@ import System.Directory.Tree (DirTree(..), AnchoredDirTree(..))
 import Morloc.Language (Lang(..))
 
 import qualified Data.Set as Set
+import qualified Data.Map as Map
 import qualified Data.Text as DT
 
 -- | no annotations for now
@@ -131,6 +134,9 @@ data GMapRet c
   | GMapNoSnd -- ^ Failure on the internal key (possible bug)
   | GMapJust c
   deriving(Show, Ord, Eq)
+
+class Defaultable a where
+  defaultValue :: a
 
 type MorlocMonadGen c e l s a
    = ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
@@ -384,7 +390,6 @@ data Gamma = Gamma
   , gammaContext :: [GammaIndex]
   }
 
-
 data TypeError
   = SubtypeError TypeU TypeU Text
   | InstantiationError TypeU TypeU Text
@@ -401,6 +406,7 @@ data TypeError
   | EmptyExpression EVar
   | MissingFeature Text
   | InfiniteRecursion
+  | FunctionSerialization EVar
 
 data MorlocError
   -- | An error that is associated with an expression index
@@ -473,7 +479,7 @@ data MorlocError
   | CompositionsMustBeGeneral
   | IllegalConcreteAnnotation
   -- type synthesis errors
-  | CannotSynthesizeConcreteType Source TypeU
+  | CannotSynthesizeConcreteType MVar Source TypeU [Text]
 
 data PackageMeta =
   PackageMeta
@@ -492,9 +498,8 @@ data PackageMeta =
     }
   deriving (Show, Ord, Eq)
 
-defaultPackageMeta :: PackageMeta
-defaultPackageMeta =
-  PackageMeta
+instance Defaultable PackageMeta where
+  defaultValue = PackageMeta
     { packageName = ""
     , packageVersion = ""
     , packageHomepage = ""
@@ -561,12 +566,14 @@ data SAnno g f c = SAnno (f (SExpr g f c, c)) g
 data None = None
   deriving (Show)
 
-newtype One a = One a
+newtype One a = One { unOne :: a }
   deriving (Show)
 
-newtype Many a = Many [a]
+newtype Many a = Many { unMany :: [a] }
   deriving (Show)
 
+data Or a b = L a | R b | LR a b
+  deriving(Ord, Eq, Show)
 
 instance Functor One where
   fmap f (One x) = One (f x)
@@ -579,6 +586,19 @@ instance Foldable One where
 
 instance Foldable Many where
   foldr f b (Many xs) = foldr f b xs
+
+instance Bifunctor Or where
+  bimapM f _ (L a) = L <$> f a
+  bimapM _ g (R a) = R <$> g a
+  bimapM f g (LR a b) = LR <$> f a <*> g b
+
+instance Bifoldable Or where
+  bilistM f _ (L a) = f a |>> return
+  bilistM _ g (R b) = g b |>> return
+  bilistM f g (LR a b) = do
+    c1 <- f a
+    c2 <- g b
+    return [c1, c2]
 
 
 data SExpr g f c
@@ -621,16 +641,20 @@ mapSExpr fg fc = fe where
   fe (CallS src) = CallS src
    
 
-data Indexed a = Idx Int a
+type Indexed = IndexedGeneral Int
+
+data IndexedGeneral k a = Idx k a
   deriving (Show, Ord, Eq)
 
-unindex :: Indexed a -> a
-unindex (Idx _ x) = x
+instance Annotated IndexedGeneral where
+  val (Idx _ x) = x
+  ann (Idx i _) = i
+  annotate i x = Idx i x
 
 -- TODO: This should probably be a newtype, I want to avoid ambiguous Int's in signatures
 type GIndex = Int
 
-instance Functor Indexed where
+instance Functor (IndexedGeneral k) where
   fmap f (Idx i x) = Idx i (f x)
 
 newtype CType = CType { unCType :: Type }

@@ -10,35 +10,23 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 module Morloc.CodeGenerator.Grammars.Common
-  ( argType
-  , packArgument
-  , unpackArgument
-  , replaceArgumentType
-  , typeOfExprM
-  , gmetaOf
-  , typeOfTypeM
-  , invertExprM
-  , packTypeM
-  , packExprM
-  , unpackExprMByType
-  , unpackExprM
-  , unpackTypeM
-  , nargsTypeM
-  , argsOf
-  , arg2typeM
-  , type2jsontype
-  , jsontype2json
+  ( invertSerialManifold
   , PoolDocs(..)
   , mergePoolDocs
+  -- * Naming conventions
+  , svarNamer
+  , nvarNamer
+  , helperNamer
+  , argNamer
+  , manNamer
+  -- * Utilities
+  , makeManifoldIndexer
+  , translateManifold
   ) where
 
-import Morloc.Data.Doc
 import Morloc.CodeGenerator.Namespace
-import qualified Morloc.Data.Text as MT
-import qualified Morloc.Monad as MM
-import qualified Morloc.CodeGenerator.Serial as MCS
-
-import qualified Data.Set as Set
+import Morloc.Data.Doc
+import Morloc.Monad (Index, runIndex, newIndex, runIdentity)
 
 -- Stores pieces of code made while building a pool
 data PoolDocs = PoolDocs
@@ -53,6 +41,14 @@ data PoolDocs = PoolDocs
     -- functions or imports
   }
 
+instance Defaultable PoolDocs where
+  defaultValue = PoolDocs
+    { poolCompleteManifolds = []
+    , poolExpr = ""
+    , poolPriorLines = []
+    , poolPriorExprs = []
+    }
+
 -- | Merge a series of pools, keeping prior lines, expression and manifolds, but
 -- merging bodies with a function. For example, merge all elements in a list and
 -- process the poolExpr variales into list syntax in the given language.
@@ -64,254 +60,234 @@ mergePoolDocs f ms = PoolDocs
     , poolPriorExprs = concatMap poolPriorExprs ms
     }
 
-argType :: Argument -> Maybe TypeP
-argType (SerialArgument _ t) = Just t
-argType (NativeArgument _ t) = Just t
-argType (PassThroughArgument _) = Nothing
 
-unpackArgument :: Argument -> Argument
-unpackArgument (SerialArgument i t) = NativeArgument i t
-unpackArgument x = x
+svarNamer :: Int -> MDoc
+svarNamer i = "s" <> viaShow i
 
-packArgument :: Argument -> Argument
-packArgument (NativeArgument i t) = SerialArgument i t
-packArgument x = x
+nvarNamer :: Int -> MDoc
+nvarNamer i = "n" <> viaShow i
 
-nargsTypeM :: TypeM -> Int
-nargsTypeM (Function ts _) = length ts
-nargsTypeM _ = 0
+helperNamer :: Int -> MDoc
+helperNamer i = "helper" <> viaShow i
 
-argsOf :: ExprM f -> Set.Set Argument
-argsOf (ManifoldM _ form x) = Set.fromList (manifoldArgs form) `Set.union` argsOf x
-argsOf (ForeignInterfaceM _ _ x) = argsOf x
-argsOf (PoolCallM _ _ _ args) = Set.fromList args
-argsOf (LetM _ _ x) = argsOf x
-argsOf (AppM x xs) = Set.unions (map argsOf (x:xs))
-argsOf (LamM contextArgs boundArgs x) = (argsOf x `Set.union` Set.fromList contextArgs) `Set.difference` Set.fromList boundArgs
-argsOf (AccM x _) = argsOf x
-argsOf (ListM _ xs) = Set.unions (map argsOf xs)
-argsOf (TupleM _ xs) = Set.unions (map argsOf xs)
-argsOf (RecordM _ ks) = Set.unions (map (argsOf . snd) ks)
-argsOf (SerializeM _ x) = argsOf x
-argsOf (DeserializeM _ x) = argsOf x
-argsOf (ReturnM x) = argsOf x
-argsOf _ = Set.empty
+argNamer :: HasTypeM t => Arg t -> MDoc
+argNamer (Arg i (typeMof -> Native _)) = nvarNamer i
+argNamer (Arg i (typeMof -> Function _ _)) = nvarNamer i
+argNamer (Arg i _) = svarNamer i
 
--- recordPVar :: TypeP -> MDoc
--- recordPVar (VarP (PV _ _ v)) = pretty v
--- recordPVar (UnkP (PV _ _ v)) = pretty v
--- recordPVar (FunP _ _) = "<FunP>" -- illegal value
--- recordPVar (AppP _ _) = "<AppP>" -- illegal value
--- recordPVar (NamP _ (PV _ _ v) _ _) = pretty v
+-- create a name for a manifold based on a unique id
+manNamer :: Int -> MDoc
+manNamer i = "m" <> viaShow i
 
--- see page 112 of my super-secret notes ...
--- example:
--- > f [g x, 42] (h 1 [1,2])
--- converts to:
--- > let a0 = g x
--- > in let a1 = [a0, 42]
--- >    in let a2 = [1,2]
--- >       in let a3 = h 1 a2
--- >          in f a1 a3
--- expression inversion will not alter expression type
-invertExprM :: ExprM f -> MorlocMonad (ExprM f)
-invertExprM (ManifoldM m form e) = do
-  MM.startCounter
-  e' <- invertExprM e
-  return $ ManifoldM m form e'
-invertExprM (LetM v e1 e2) = do
-  e2' <- invertExprM e2
-  return $ LetM v e1 e2'
-invertExprM (AppM c@(PoolCallM _ _ _ _) es) = do
-  es' <- mapM invertExprM es
-  return $ foldl dependsOn (AppM c (map terminalOf es')) es'
-invertExprM (PoolCallM t i cmds args) = do
-  v <- MM.getCounter
-  return $ LetM v (PoolCallM t i cmds args) (LetVarM t v)
-invertExprM e@(AppM f es) = do
-  f' <- invertExprM f
-  es' <- mapM invertExprM es
-  v <- MM.getCounter
-  let t = typeOfExprM e
-      appM' = LetM v (AppM (terminalOf f') (map terminalOf es')) (LetVarM t v)
-  return $ foldl dependsOn appM' (f':es') 
--- A LamM will generate a new function declaration in the output code. This
--- function will be like a manifold, but lighter, since at the moment the only
--- thing it is used for is wrapping higher order functions that call external manifolds.
-invertExprM (LamM contextArgs boundArgs body) = do
-  -- restart the counter, this is NOT a lambda expression so variables are NOT
-  -- in the parent scope, the body will be in a fresh function declaration and
-  -- this function will be called with
-  -- arguments `vs`
-  MM.startCounter
-  LamM contextArgs boundArgs <$> invertExprM body
-invertExprM (AccM e k) = do
-  e' <- invertExprM e
-  return $ dependsOn (AccM (terminalOf e') k) e'
-invertExprM (ListM c es) = do
-  es' <- mapM invertExprM es
-  v <- MM.getCounter
-  let e = LetM v (ListM c (map terminalOf es')) (LetVarM c v)
-      e' = foldl dependsOn e es'
-  return e'
-invertExprM (TupleM c es) = do
-  es' <- mapM invertExprM es
-  v <- MM.getCounter
-  let e = LetM v (TupleM c (map terminalOf es')) (LetVarM c v)
-      e' = foldl dependsOn e es'
-  return e'
-invertExprM (RecordM c entries) = do
-  es' <- mapM (invertExprM . snd) entries
-  v <- MM.getCounter
-  let entries' = zip (map fst entries) (map terminalOf es')
-      e = LetM v (RecordM c entries') (LetVarM c v)
-      e' = foldl dependsOn e es'
-  return e'
-invertExprM (SerializeM p e) = do
-  e' <- invertExprM e
-  v <- MM.getCounter
-  let t' = packTypeM $ typeOfExprM e
-  return $ dependsOn (LetM v (SerializeM p (terminalOf e')) (LetVarM t' v)) e'
-invertExprM (DeserializeM p e) = do
-  e' <- invertExprM e
-  v <- MM.getCounter
-  let t' = unpackTypeM $ typeOfExprM e
-  return $ dependsOn (LetM v (DeserializeM p (terminalOf e')) (LetVarM t' v)) e'
-invertExprM (ReturnM e) = do
-  e' <- invertExprM e
-  return $ dependsOn (ReturnM (terminalOf e')) e'
-invertExprM e = return e
 
--- transfer all let-dependencies from y to x
---
--- Technically, I should check for variable reuse in the let-chain and
--- resolve conflicts be substituting in fresh variable names. However, for
--- now, I will trust that my name generator created names that are unique
--- within the manifold.
-dependsOn :: ExprM f -> ExprM f -> ExprM f
-dependsOn x (LetM v e y) = LetM v e (dependsOn x y)
-dependsOn x _ = x
+-- The surround rules control the setting of manifold ids across the recursion
+makeManifoldIndexer :: Monad m => m Int -> (Int -> m ()) -> SurroundManifoldM m sm nm se ne sr nr
+makeManifoldIndexer getId putId = defaultValue
+  { surroundSerialManifoldM = surroundSM
+  , surroundNativeManifoldM = surroundNM
+  }
+  where
 
--- get the rightmost expression in a let-tree
-terminalOf :: ExprM f -> ExprM f
-terminalOf (LetM _ _ e) = terminalOf e
-terminalOf e = e
+  -- | Run a computation in a child manifold, manage manifold indices
+  descend childManifoldIndex x f = do
+    originalManifoldIndex <- getId
+    putId childManifoldIndex
+    x' <- f x
+    putId originalManifoldIndex
+    return x'
 
-typeOfTypeM :: TypeM -> Maybe TypeP 
-typeOfTypeM Passthrough = Nothing
-typeOfTypeM (Serial c) = Just c
-typeOfTypeM (Native c) = Just c
-typeOfTypeM (Function ins out) = FunP <$> mapM typeOfTypeM ins <*> typeOfTypeM out
+  surroundSM f sm@(SerialManifold i _ _ _) = descend i sm f 
 
-arg2typeM :: Argument -> TypeM
-arg2typeM (SerialArgument _ c) = Serial c
-arg2typeM (NativeArgument _ c) = Native c
-arg2typeM (PassThroughArgument _) = Passthrough
+  surroundNM f nm@(NativeManifold i _ _ _) = descend i nm f
 
-replaceArgumentType :: TypeP -> Argument -> Argument
-replaceArgumentType t (SerialArgument i _) = SerialArgument i t
-replaceArgumentType t (NativeArgument i _) = NativeArgument i t
-replaceArgumentType _ (PassThroughArgument i) = PassThroughArgument i
 
--- | Get the manifold type of an expression
---
--- The ExprM must have exactly enough type information to infer the type of any
--- element without reference to the element's parent.
-typeOfExprM :: ExprM f -> TypeM
-typeOfExprM (ManifoldM _ form e) = Function (map arg2typeM (manifoldArgs form)) (typeOfExprM e)
-typeOfExprM (PoolCallM t _ _ _) = t
-typeOfExprM (LetM _ _ e2) = typeOfExprM e2
+-- Represents the dependency of a on previously bound expressions
+data D a = D a [(Int, Either SerialExpr NativeExpr)]
 
--- ------------------------------------------
--- FIXME: I clearly need to store more type info foreign calls
-typeOfExprM (ForeignInterfaceM t _ _) = t          -- FIXME, this is just the return type, should be a function
-typeOfExprM (AppM (PoolCallM t _ _ _) _) = t     -- FIXME, only correct when fully applied
-typeOfExprM (AppM (ForeignInterfaceM t _ _) _) = t -- FIXME, only correct when fully applied
--- ------------------------------------------
+unD :: D a -> a
+unD (D a _) = a
 
-typeOfExprM (AppM f xs) = case typeOfExprM f of
-  (Function inputs output) -> case drop (length xs) inputs of
-    [] -> output
-    inputs' -> Function inputs' output
-  _ -> error . MT.unpack . render $ "COMPILER BUG: application of non-function" <+> parens (pretty $ typeOfExprM f)
-typeOfExprM (SrcM t _) = t
--- The lambda function will pass scoped arguments to its children, but only the
--- bound arguments are part of the type signature
-typeOfExprM (LamM _ boundArgs x) = Function (map arg2typeM boundArgs) (typeOfExprM x)
-typeOfExprM (BndVarM t _) = t
-typeOfExprM (LetVarM t _) = t
-typeOfExprM (AccM e _) = typeOfExprM e
-typeOfExprM (ListM t _) = t
-typeOfExprM (TupleM t _) = t
-typeOfExprM (RecordM t _) = t
-typeOfExprM (LogM t _) = t
-typeOfExprM (RealM t _) = t
-typeOfExprM (IntM t _) = t
-typeOfExprM (StrM t _) = t
-typeOfExprM (NullM t) = t
-typeOfExprM (SerializeM _ e) = packTypeM (typeOfExprM e)
-typeOfExprM (DeserializeM _ e) = unpackTypeM (typeOfExprM e)
-typeOfExprM (ReturnM e) = typeOfExprM e
+getDeps :: D a -> [(Int, Either SerialExpr NativeExpr)]
+getDeps (D _ d) = d
 
--- | Serialize a type if possible, otherwise return the original value
-packTypeM :: TypeM -> TypeM
-packTypeM (Native t) = Serial t
-packTypeM t@(Function _ _) = t -- functions cannot be serialized
-packTypeM t = t
+class Dependable a where
+  weave :: D a -> a
+  atomize :: a -> [(Int, Either SerialExpr NativeExpr)] -> Index (D a)
+  isAtomic :: a -> Bool
 
-unpackTypeM :: TypeM -> TypeM
-unpackTypeM (Serial t) = Native t
-unpackTypeM Passthrough = error "BUG: Cannot unpack a passthrough type"
-unpackTypeM t = t 
+instance Dependable NativeExpr where
+  weave (D x ((i, Left se) : deps)) = weave $ D (SerialLetN i se x) deps
+  weave (D x ((i, Right ne) : deps)) = weave $ D (NativeLetN i ne x) deps
+  weave (D x []) = x
 
--- Deserializes anything that is not already Native
--- FIXME needing both of these functions is fucked up
-unpackExprM :: GIndex -> TypeP -> ExprM Many -> MorlocMonad (ExprM Many) 
-unpackExprM m p e = do
-  packers <- MM.metaPackMap m
-  case typeOfExprM e of
-    (Serial t)  -> DeserializeM <$> MCS.makeSerialAST packers t <*> pure e
-    Passthrough -> DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
-    _ -> return e
+  atomize e deps
+    | isAtomic e = return $ D e deps
+    | otherwise = do
+      i <- newIndex
+      return $ D (LetVarN (typeFof e) i) ((i, Right e) : deps)
 
--- Deserializes anything that is not already Native
-unpackExprMByType :: GIndex -> TypeP -> ExprM Many -> MorlocMonad (ExprM Many) 
-unpackExprMByType m p e = do
-  packers <- MM.metaPackMap m
-  case typeOfExprM e of
-    (Serial _)  -> DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
-    Passthrough -> DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
-    _ -> return e
+  isAtomic AppSrcN{} = False
+  isAtomic ManN{} = False
+  isAtomic SerialLetN{} = False
+  isAtomic NativeLetN{} = False
+  isAtomic DeserializeN{} = False
+  isAtomic AccN{} = False
+  isAtomic ListN{} = False
+  isAtomic TupleN{} = False
+  isAtomic _ = True
 
-packExprM :: GIndex -> ExprM Many -> MorlocMonad (ExprM Many)
-packExprM m e = do
-  packers <- MM.metaPackMap m
-  case typeOfExprM e of
-    (Native t) -> SerializeM <$> MCS.makeSerialAST packers t <*> pure e
-    -- (Function _ _) -> error "Cannot pack a function"
-    _ -> return e
+instance Dependable SerialExpr where
+  weave (D x ((i, Left se) : deps)) = weave $ D (SerialLetS i se x) deps
+  weave (D x ((i, Right ne) : deps)) = weave $ D (NativeLetS i ne x) deps
+  weave (D x []) = x
 
-type2jsontype :: TypeP -> MorlocMonad JsonType
-type2jsontype (VarP (PV _ _ v)) = return $ VarJ v
-type2jsontype (AppP (VarP (PV _ _ v)) ts) = ArrJ v <$> mapM type2jsontype ts
-type2jsontype (AppP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: complex AppP"
-type2jsontype (NamP _ (PV _ _ v) _ rs) = do
-  ts <- mapM (type2jsontype . snd) rs
-  return $ NamJ v (zip [k | (PV _ _ k, _) <- rs] ts) 
-type2jsontype (UnkP _) = MM.throwError . SerializationError $ "Invalid JSON type: UnkT"
-type2jsontype (FunP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: cannot serialize function"
+  atomize e deps
+    | isAtomic e = return $ D e deps
+    | otherwise = do
+      i <- newIndex
+      t <- case typeMof e of
+        Passthrough -> return Nothing
+        (Serial ft) -> return $ Just ft
+        _ -> return Nothing
+        -- _ -> error "This type must be serialized"
+      return $ D (LetVarS t i) ((i, Left e) : deps)
 
-jsontype2json :: JsonType -> MDoc
-jsontype2json (VarJ v) = dquotes (pretty v)
-jsontype2json (ArrJ v ts) = "{" <> key <> ":" <> val <> "}" where
-  key = dquotes (pretty v)
-  val = encloseSep "[" "]" "," (map jsontype2json ts)
-jsontype2json (NamJ v rs) = "{" <> dquotes (pretty v) <> ":" <> encloseSep "{" "}" "," rs' <> "}" where
-  keys = map (dquotes . pretty) (map fst rs) 
-  vals = map jsontype2json (map snd rs)
-  rs' = zipWith (\key val -> key <> ":" <> val) keys vals
+  isAtomic (LetVarS _ _) = True 
+  isAtomic (BndVarS _ _) = True 
+  isAtomic (ReturnS _) = True 
+  isAtomic _ = False
 
-gmetaOf :: ExprM f -> GIndex
-gmetaOf (ManifoldM m _ _) = m
-gmetaOf (LamM _ _ e) = gmetaOf e
-gmetaOf _ = error "Malformed top-expression"
+
+invertSerialManifold :: SerialManifold -> SerialManifold
+invertSerialManifold sm0 =
+  runIndex (maxIndex sm0) (unD <$> foldSerialManifoldM fm sm0)
+  where
+
+  fm = FoldManifoldM
+    { opSerialManifoldM = invertSerialManifoldM
+    , opNativeManifoldM = invertNativeManifoldM
+    , opSerialExprM = invertSerialExprM
+    , opNativeExprM = invertNativeExprM
+    , opSerialArgM = invertSerialArgM
+    , opNativeArgM = invertNativeArgM
+    }
+
+  invertSerialManifoldM :: SerialManifold_ (D SerialExpr) -> Index (D SerialManifold)
+  invertSerialManifoldM (SerialManifold_ m lang form se) = do
+    return (D (SerialManifold m lang form (weave se)) [])
+
+  invertNativeManifoldM :: NativeManifold_ (D NativeExpr) -> Index (D NativeManifold)
+  invertNativeManifoldM (NativeManifold_ m lang form (weave -> ne)) = do
+    return (D (NativeManifold m lang form ne) [])
+
+  invertSerialExprM
+    :: SerialExpr_ (D SerialManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg)
+    -> Index (D SerialExpr)
+  invertSerialExprM (ManS_ (D sm lets)) = return $ D (ManS sm) lets
+  invertSerialExprM (AppPoolS_ t pool serialArgs) = do
+    let serialArgs' = map unD serialArgs
+        deps = concatMap getDeps serialArgs
+    atomize (AppPoolS t pool serialArgs') deps
+  invertSerialExprM (ReturnS_ (D se lets)) = return $ D (ReturnS se) lets
+  invertSerialExprM (SerialLetS_ i (D se1 lets1) (D se2 lets2)) =
+    return $ D se2 (lets2 <> ((i, Left  se1) : lets1))
+  invertSerialExprM (NativeLetS_ i (D ne1 lets1) (D se2 lets2)) =
+    return $ D se2 (lets2 <> ((i, Right ne1) : lets1))
+  invertSerialExprM (LetVarS_ t i) = atomize (LetVarS t i) []
+  invertSerialExprM (BndVarS_ t i) = atomize (BndVarS t i) []
+  invertSerialExprM (SerializeS_ s (D ne lets)) = atomize (SerializeS s ne) lets
+
+  invertNativeExprM :: NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) -> Index (D NativeExpr)
+  invertNativeExprM (AppSrcN_ t src nativeArgs) = do
+    let nativeArgs' = map unD nativeArgs
+        deps = concatMap getDeps nativeArgs
+    atomize (AppSrcN t src nativeArgs') deps
+  invertNativeExprM (ManN_ (D nm lets)) = atomize (ManN nm) lets
+  invertNativeExprM (ReturnN_ (D ne lets)) = atomize (ReturnN ne) lets
+  invertNativeExprM (SerialLetN_ i (D se1 lets1) (D ne2 lets2)) =
+    return $ D ne2 (lets2 <> ((i, Left  se1) : lets1))
+  invertNativeExprM (NativeLetN_ i (D ne1 lets1) (D se2 lets2)) =
+    return $ D se2 (lets2 <> ((i, Right ne1) : lets1))
+  invertNativeExprM (LetVarN_ t i) = atomize (LetVarN t i) []
+  invertNativeExprM (BndVarN_ t i) = atomize (BndVarN t i) []
+  invertNativeExprM (DeserializeN_ t s (D se lets)) = atomize (DeserializeN t s se) lets
+  invertNativeExprM (AccN_ o v (D ne deps) key) = atomize (AccN o v ne key) deps
+  invertNativeExprM (SrcN_ t src) = atomize (SrcN t src) []
+  invertNativeExprM (ListN_ v t nes) = atomize (ListN v t (map unD nes)) (concatMap getDeps nes)
+  invertNativeExprM (TupleN_ v xs) = atomize (TupleN v (map unD xs)) (concatMap getDeps xs)
+  invertNativeExprM (RecordN_ o v ps rs) = atomize (RecordN o v ps (map (second unD) rs)) (concatMap (getDeps . snd) rs)
+  invertNativeExprM (LogN_ v x) = atomize (LogN v x) []
+  invertNativeExprM (RealN_ v x) = atomize (RealN v x) []
+  invertNativeExprM (IntN_ v x) = atomize (IntN v x) []
+  invertNativeExprM (StrN_ v x) = atomize (StrN v x) []
+  invertNativeExprM (NullN_ v) = atomize (NullN v) []
+
+  invertSerialArgM :: SerialArg_ (D SerialManifold) (D SerialExpr) -> Index (D SerialArg)
+  invertSerialArgM (SerialArgManifold_ (D sm deps)) = return $ D (SerialArgManifold sm) deps
+  invertSerialArgM (SerialArgExpr_ (D se deps)) = return $ D (SerialArgExpr se) deps
+
+  invertNativeArgM :: NativeArg_ (D NativeManifold) (D NativeExpr) -> Index (D NativeArg)
+  invertNativeArgM (NativeArgManifold_ (D nm deps)) = return $ D (NativeArgManifold nm) deps
+  invertNativeArgM (NativeArgExpr_ (D ne deps)) = return $ D (NativeArgExpr ne) deps
+
+
+maxIndex :: SerialManifold -> Int
+maxIndex = (+1) . runIdentity . foldSerialManifoldM fm
+  where
+  fm = FoldManifoldM
+    { opSerialManifoldM = findSerialManifoldIndices
+    , opNativeManifoldM = findNativeManifoldIndices
+    , opSerialExprM = findSerialIndices
+    , opNativeExprM = findNativeIndices
+    , opSerialArgM = return . foldlSA max 0
+    , opNativeArgM = return . foldlNA max 0
+    }
+
+  findSerialManifoldIndices :: Monad m => SerialManifold_ Int -> m Int 
+  findSerialManifoldIndices (SerialManifold_ _ _ form bodyMax) = do
+    let formIndices = abilist const const form
+    return $ foldl max bodyMax formIndices
+
+  findNativeManifoldIndices :: Monad m => NativeManifold_ Int -> m Int 
+  findNativeManifoldIndices (NativeManifold_ _ _ form bodyMax) = do
+    let formIndices = abilist const const form
+    return $ foldl max bodyMax formIndices
+
+  findSerialIndices :: Monad m => SerialExpr_ Int Int Int Int Int -> m Int
+  findSerialIndices (LetVarS_ _ i) = return i
+  findSerialIndices (BndVarS_ _ i) = return i
+  findSerialIndices e = return $ foldlSE max 0 e
+
+  findNativeIndices :: Monad m => NativeExpr_ Int Int Int Int Int -> m Int
+  findNativeIndices (LetVarN_ _ i) = return i
+  findNativeIndices (BndVarN_ _ i) = return i
+  findNativeIndices e = return $ foldlNE max 0 e
+
+translateManifold
+  :: HasTypeM t
+  => (MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> MDoc) -- make function
+  -> ([Arg TypeM] -> MDoc -> MDoc)
+  -> Int -> ManifoldForm (Or TypeS TypeF) t -> PoolDocs -> PoolDocs
+translateManifold makeFunction makeLambda m form (PoolDocs completeManifolds body priorLines priorExprs) =
+  let args = abiappend (\i r -> [Arg i t | t <- bilist typeMof typeMof r])
+                       (\i t -> [Arg i (typeMof t)]) form
+      mname = manNamer m
+      newManifold = makeFunction mname args priorLines body
+      call = case form of
+        (ManifoldPass _) -> mname
+        (ManifoldFull rs) -> mname <> tupled (map argNamer (asArgs rs))
+        (ManifoldPart rs vs) ->
+          let variableNames = [Arg i (typeMof t) | (Arg i t) <- vs]
+              functionCall = mname <> tupled
+                (map argNamer $ asArgs rs <> variableNames)
+          in makeLambda variableNames functionCall
+
+  in PoolDocs
+      { poolCompleteManifolds = newManifold : completeManifolds
+      , poolExpr = call
+      , poolPriorLines = []
+      , poolPriorExprs = priorExprs
+      }
+  where
+    asArgs :: [Arg (Or TypeS TypeF)] -> [Arg TypeM]
+    asArgs rs = concat [[Arg i t | t <- bilist typeMof typeMof orT] | (Arg i orT) <- rs] 
