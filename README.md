@@ -236,10 +236,10 @@ morloc typecheck examples/rmsWithTypes.loc
 
 ```
 add :: Num -> Num -> Num
-add Cpp :: double -> double -> double
+add Cpp :: "double" -> "double" -> "double"
 
 mul :: Num -> Num -> Num
-mul Cpp :: double -> double -> double
+mul Cpp :: "double" -> "double" -> "double"
 
 fold     :: (b -> a -> b) -> b -> [a] -> b
 fold Cpp :: (b -> a -> b) -> b -> "std::vector<$1>" a -> b
