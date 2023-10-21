@@ -67,7 +67,7 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Fix the performance bug (8 million lines of log is way too much)
        This is probably related to removal of the cut step in the typechecker
 
-0.42.0 [2023.06.xx]
+0.42.0 [2023.10.11]
 -------------------
 
  * Infer concrete types from inferred general types when necessary and possible
