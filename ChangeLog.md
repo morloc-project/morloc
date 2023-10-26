@@ -56,7 +56,7 @@ handling for several very different languages (proofs-of-concept).
 0.43.0 [2023.xx.xx]
 -------------------
 
- [ ] Add an option to generate a REST endpoint rather than a standalone
+ [ ] Replace JSON serialization
  [ ] Address all compiler warnings
  [ ] Update Hackage release
  [ ] Ensure github actions passes
