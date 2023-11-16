@@ -101,14 +101,42 @@ pModule expModuleName = do
     findSymbols :: ExprI -> Set.Set Symbol
     findSymbols (ExprI _ (TypE (TV _ v) _ _)) = Set.singleton $ TypeSymbol v
     findSymbols (ExprI _ (AssE (EV e) _ _)) = Set.singleton $ TermSymbol e
-    findSymbols (ExprI _ (SigE (EV e) _ _)) = Set.singleton $ TermSymbol e
+    findSymbols (ExprI _ (SigE (EV e) _ t)) = Set.union (Set.singleton $ TermSymbol e) (packedType t)
     findSymbols (ExprI _ (ImpE (Import _ (Just imps) _ _)))
         = Set.fromList $ [TermSymbol alias | (AliasedTerm _ alias) <- imps] <>
                          [TypeSymbol alias | (AliasedType _ alias) <- imps]
     findSymbols (ExprI _ (SrcE src)) = Set.singleton $ TermSymbol (unEVar $ srcAlias src)
     findSymbols _ = Set.empty
 
--- exprI (ExpE s)
+    -- When (un)packers are defined, the type that is being (un)packed is not
+    -- declared. But some modules may export only their (un)packed type. When
+    -- this is the case, importing nothing from the module causes the module to
+    -- be removed and the packers are never found. To remedy this, I am adding
+    -- the (un)packed type to the export list.
+    packedType :: EType -> Set.Set Symbol
+    packedType e
+      | Set.member Pack (eprop e) = packType (etype e)
+      | Set.member Unpack (eprop e) = unpackType (etype e)
+      | otherwise = Set.empty
+
+    unpackType :: TypeU -> Set.Set Symbol
+    unpackType (ForallU _ t) = unpackType t
+    unpackType (FunU [t] _) = symbolOfTypeU t
+    unpackType _ = error "Invalid unpacker"
+
+    packType :: TypeU -> Set.Set Symbol
+    packType (ForallU _ t) = packType t
+    packType (FunU _ t) = symbolOfTypeU t
+    packType _ = error "Invalid packer"
+
+    symbolOfTypeU :: TypeU -> Set.Set Symbol
+    symbolOfTypeU (VarU (TV _ v)) = Set.singleton $ TypeSymbol v
+    symbolOfTypeU (ExistU (TV _ v) _ _ _) = Set.singleton $ TypeSymbol v
+    symbolOfTypeU (ForallU _ t) = symbolOfTypeU t
+    symbolOfTypeU (AppU t _) = symbolOfTypeU t
+    symbolOfTypeU (FunU _ _) = error "So, you want to pack a function? I'm accepting PRs."
+    symbolOfTypeU NamU{} = error "You don't need a packer for a record type of thing."
+
 
 -- | match an implicit Main module
 pMain :: Parser ExprI
