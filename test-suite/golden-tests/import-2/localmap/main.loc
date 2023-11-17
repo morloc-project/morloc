@@ -1,0 +1,20 @@
+module localmap (Map, person)
+
+source py from "main.py"
+ ( "morloc_packMap" as packMap
+ , "morloc_unpackMap" as unpackMap
+ , "morloc_person" as person
+ )
+
+type py Str = "str"
+type py Int = "int"
+type py (Map key val) = "dict" key val
+
+-- These do not need to be exported (and indeed should not be)
+packMap :: pack => ([key],[val]) -> Map key val
+packMap py :: pack => ([key],[val]) -> "dict" key val
+
+unpackMap :: unpack => Map key val -> ([key],[val])
+unpackMap py :: unpack => "dict" key val -> ([key],[val])
+
+person :: Str -> Map Str Int

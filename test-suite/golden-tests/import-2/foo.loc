@@ -1,0 +1,4 @@
+-- test for gitub issue #16
+
+module foo (person)
+import localmap (person)

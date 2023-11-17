@@ -24,6 +24,9 @@ main = do
       , substituteTVarTests
       , subtypeTests
 
+      , golden "import-1" "import-1"
+      , golden "import-2" "import-2"
+
       -- tests the bug solved involving the lambdaScope function in
       -- Generate.hs:reserialize. See that commit message.
       , golden "edge-cases-1" "edge-cases-1"
