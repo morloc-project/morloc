@@ -70,6 +70,7 @@ realityCheck
                  , [SAnno Int One (Indexed TypeP)]
                  )
 realityCheck es = do
+
   -- translate modules into bitrees
   (gASTs, rASTs)
     -- select a single instance at each node in the tree
@@ -1341,21 +1342,26 @@ collectUnresolvedPackers mheads = do
   return $ Map.map Set.toList packmap
   where
     unresolvedPackers :: MonoHead -> MorlocMonad (Map.Map MT.Text (Set.Set UnresolvedPacker))
-    unresolvedPackers (MonoHead _ _ _ e0) = f e0
+    unresolvedPackers (MonoHead _ m0 _ e0) = do
+      let manifoldIndices = unique (m0 : f e0)
+      packmaps <- mapM MM.metaPackMap manifoldIndices
+      return
+        . Map.unionsWith Set.union
+        . map ( Map.map Set.fromList
+              . Map.mapKeys unTVar
+              )
+        $ packmaps
 
-    f :: MonoExpr -> MorlocMonad (Map.Map MT.Text (Set.Set UnresolvedPacker))
-    f (MonoManifold m _ e) = do
-      packmap <- MM.metaPackMap m |>> Map.mapKeys (\(TV _ v) -> v) |>> Map.map Set.fromList
-      childPackmap <- f e
-      return (Map.unionWith Set.union packmap childPackmap)
-    f (MonoLet _ e1 e2) = Map.unionWith Set.union <$> f e1 <*> f e2
+    f :: MonoExpr -> [Int]
+    f (MonoManifold m _ e) = m : f e
+    f (MonoLet _ e1 e2) = f e1 <> f e2
     f (MonoReturn e) = f e
-    f (MonoApp e es) = Map.unionsWith Set.union <$> mapM f (e:es)
+    f (MonoApp e es) = concatMap f (e:es)
     f (MonoAcc _ _ _ e _) = f e
-    f (MonoList _ _ es) = Map.unionsWith Set.union <$> mapM f es
-    f (MonoTuple _ rs) = Map.unionsWith Set.union <$> mapM (f . snd) rs
-    f (MonoRecord _ _ _ rs) = Map.unionsWith Set.union <$> mapM (f . snd . snd) rs
-    f _ = return Map.empty
+    f (MonoList _ _ es) = concatMap f es
+    f (MonoTuple _ rs) = concatMap (f . snd) rs
+    f (MonoRecord _ _ _ rs) = concatMap (f . snd . snd) rs
+    f _ = []
 
 
 -- | This step is performed after segmentation, so all terms are in the same
