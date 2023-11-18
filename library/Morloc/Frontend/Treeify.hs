@@ -90,7 +90,8 @@ treeify d
                 ])
          -}
 
-         -- set counter for reindexing expressions in collect
+         -- set counter for reindexing expressions in collect.
+         -- since d is the entire tree, the initizalized counter will start at global maximum.
          MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes d)) + 1
 
          -- find all term exports (do not include type exports)
@@ -389,6 +390,10 @@ collectSAnno e@(ExprI i (VarE v)) = do
       -- pool all the calls and compositions with this name
       return (calls <> declarations)
   case es of
+    -- TODO: will this case every actually be reached?
+    -- Should all attributes of i be mapped to j, as done with newIndex?
+    -- Should the general type be the j instead?
+    -- Need to dig into this.
     [] -> do
       j <- MM.getCounter
       return $ SAnno (Many [(VarS v, j)]) i

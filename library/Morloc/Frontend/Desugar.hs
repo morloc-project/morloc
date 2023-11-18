@@ -393,12 +393,12 @@ removeTypeImports d = case MDD.roots d of
 -- is the number of type parameters. So the "phylo" type, if it is an instance
 -- of Tree, will be represented as ("phylo" "character" "numeric"
 -- "character"). Like Tree, it takes 3 parameters, but unlike Tree, they are not
--- generic. If any use of an R function of "phylo" with different type
+-- generic. So any use of an R function of "phylo" with different type
 -- parameters will fail at compile time, since there is no path to synthesizing
 -- such a type.
 addPackerMap
-  :: DAG MVar [(EVar, EVar)] ExprI
-  -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
+  :: DAG MVar edge ExprI
+  -> MorlocMonad (DAG MVar edge ExprI)
 addPackerMap d = do
   maybeDAG <- MDD.synthesizeDAG gatherPackers d
   case maybeDAG of
@@ -410,7 +410,7 @@ gatherPackers
   :: MVar -- the importing module name (currently unused)
   -> ExprI -- data about the importing module
   -> [( MVar -- the name of an imported module
-      , [(EVar , EVar)]
+      , edge
       , (ExprI, Map.Map TVar [UnresolvedPacker]) -- data about the imported module
      )]
   -> MorlocMonad (ExprI, Map.Map TVar [UnresolvedPacker])
