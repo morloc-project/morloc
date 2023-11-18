@@ -1429,8 +1429,6 @@ serializeOne packmap (MonoHead lang m0 args0 e0) = do
   -- arguments. This is because `1.0` and `2.0` are primitive and will be
   -- generated in place rather than passed as arguments.
   nativeArg e@(MonoManifold m form _) = do
-    MM.say $ "nativeArg MonoManifold" <+> pretty m
-    MM.say $ "  form:" <+> viaShow form
     ne <- nativeExpr e
     case ne of
       (ManN nm) -> return $ NativeArgManifold nm
@@ -1463,7 +1461,6 @@ serializeOne packmap (MonoHead lang m0 args0 e0) = do
     ne <- nativeExpr e
     return (ReturnN ne)
   nativeExpr (MonoApp (MonoSrc (FunF inputTypes outputType) src) es) = do
-    MM.say $ "nativeExpr MonoApp" <+> pretty (srcName src)
     args <- mapM nativeArg es
     appType <- case drop (length es) inputTypes of
         [] -> return outputType
