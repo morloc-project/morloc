@@ -1,9 +1,8 @@
-import sys
-
-#  parseRecord :: Str -> (Meta, Sequence)
-def parseRecord(xmlstr):
-    # STUB
-    return (dict(accession = "x24601", clade=""), "GATTACA")
+#  parseRecord :: JsonObj -> (Meta, Sequence)
+def parseRecord(jsonObj):
+    meta = dict(accession = jsonObj["GBSeq_primary-accession"], clade="")
+    sequence = jsonObj["GBSeq_sequence"].upper() 
+    return (meta, sequence)
 
 #  labelRef :: Map Accession Clade -> Meta -> Meta
 def labelRef(cladeMap, meta):

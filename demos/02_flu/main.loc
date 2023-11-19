@@ -1,6 +1,7 @@
-module flucase (analysis)
+module flucase (analysis, search)
 
 import conventions (Str, Int, Filename, Real, Unit, Map, Tuple2)
+import json (JsonObj)
 
 type Accession = Str
 type Clade = Str 
@@ -53,15 +54,6 @@ record Cpp Meta = "struct"
   , clade :: "std::string"
   }
 
-
-record EntrezSearchConfig = EntrezSearchConfig
-  { email :: Str
-  , db :: Str
-  , mindate :: Str
-  , maxdate :: Str
-  , retmax :: Int
-  }
-
 import bio.algo (upgma)
 
 import bio.tree
@@ -74,7 +66,9 @@ import bio.tree
 
 import bio.db
   ( searchEntrez as fetchIds                    -- fetchIds :: EntrezSearchConfig -> Query -> [Str]
-  , nucleotideAccessionToXml as fetchRecords  -- fetchIdRecords :: [Str] -> [Str]
+  , nucleotideAccessionToJson as fetchRecords  -- fetchIdRecords :: [Str] -> [Str]
+  , EntrezSearchConfig
+  , EntrezFetchConfig
   )
 
 import base
@@ -88,6 +82,7 @@ import base
   , gt        -- gt :: Int -> Int -> Bool
   , eq        -- eq :: Int -> Int -> Bool
   , head      -- head :: [a] -> a
+  , take
   , ifelse    -- ifelse :: Bool -> a -> a -> a
   , join      -- join :: [a] -> [a] -> [a]
   , keys      -- keys :: Map a b -> [a]
@@ -106,7 +101,7 @@ source Py from "utilities.py"
   , "labelRef"
   )
 
-parseRecord :: Str -> (Meta, Sequence)
+parseRecord :: JsonObj -> (Meta, Sequence)
 
 labelRef :: Map Accession Clade -> Meta -> Meta
 
@@ -116,49 +111,59 @@ source R from "plot-tree.R" ("plotTree")
 plotTree :: Filename -> RootedTree n Real Str -> ()
 
 
-analysis :: Date -> Date -> Filename -> Filename -> ()
+-- analysis :: Date -> Date -> Filename -> Filename -> ()
 analysis mindate maxdate reffile treefile
   = ( plotTree treefile
     . mapLeaf (\x -> x@accession)
     . classify -- Tree string double meta
     . treeBy upgma
-    . search config refmap
+    . search fetchConfig searchConfig refmap
     ) query
   where
     query = "Influenza+A+Virus[Organism]+H3N2[ALL]+HA[ALL]"
-    config = { email = "weena@mlang.com"
-             , db = "nuccore"
-             , mindate = mindate
-             , maxdate = maxdate
-             , retmax = 1000
-             }
+    email = "zbwrnz@gmail.com"
+    searchConfig =
+      { email = email
+      , db = "nuccore"
+      , mindate = mindate
+      , maxdate = maxdate
+      , retmax = 1000
+      }
+    fetchConfig = { email = email }
     refmap = readMap reffile
 
 
-search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
-search config refs query =
+search :: EntrezFetchConfig -> EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
+search fetchConfig searchConfig refs query =
   ( map (onFst (labelRef refs))
   . concat
   . map ( map parseRecord
         . sleep 1.0
-        . fetchRecords
+        . fetchRecords fetchConfig
         )
-  . shard 100
+  . shard 30
   . join (keys refs)
-  . fetchIds config
+  . take 50 -- putting this head hear causes an infinite loop in the typechecker
+  . fetchIds searchConfig
   ) query
 
 
 classify :: RootedTree n e Meta -> RootedTree Str e Meta
 classify = push . pullNode pullLeaf pullClade where
+  pullLeaf leaf = "leaf"
+  pullClade xs = ifelse (True) "alice" "never"
+  push = mapChildWithParent id (\ parent child -> "bob")
 
-  pullLeaf leaf = leaf@clade
-
-  pullClade xs
-    = ifelse (eq (length seenClades) 1)
-             (head seenClades) ""
-    where
-      seenClades = ( unique
-                   . filter (ne 0 . lengthS)
-                   ) xs
-  push = mapChildWithParent id (\ parent child -> ifelse (eq 0 (lengthS child)) parent child)
+-- classify :: RootedTree n e Meta -> RootedTree Str e Meta
+-- classify = push . pullNode pullLeaf pullClade where
+--
+--   pullLeaf leaf = leaf@clade
+--
+--   pullClade xs
+--     = ifelse (eq (length seenClades) 1)
+--              (head seenClades) ""
+--     where
+--       seenClades = ( unique
+--                    . filter (ne 0 . lengthS)
+--                    ) xs
+--   push = mapChildWithParent id (\ parent child -> ifelse (eq 0 (lengthS child)) parent child)

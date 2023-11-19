@@ -1,7 +1,7 @@
 library(ape)
 
-plotTree <- function(tree, outputpdffilename) {
+plotTree <- function(outputpdffilename, tree) {
   pdf(outputpdffilename)
-  plot(tree, use.edge.length = TRUE)
+  plot(tree)
   dev.off()
 }
