@@ -73,6 +73,7 @@ import bio.db
 
 import base
   ( id
+  , const
   , at        -- at :: [a] -> Int -> a
   , map
   , ne
@@ -84,7 +85,9 @@ import base
   , head      -- head :: [a] -> a
   , take
   , ifelse    -- ifelse :: Bool -> a -> a -> a
+  , branch    -- branch :: (a -> Bool) -> (a -> b) -> (a -> b) -> b
   , join      -- join :: [a] -> [a] -> [a]
+  , paste     -- paste :: Str -> [Str] -> Str
   , keys      -- keys :: Map a b -> [a]
   , length    -- length :: [a] -> Int
   , lengthS   -- lengthS :: Str -> Int
@@ -114,7 +117,7 @@ plotTree :: Filename -> RootedTree n Real Str -> ()
 -- analysis :: Date -> Date -> Filename -> Filename -> ()
 analysis mindate maxdate reffile treefile
   = ( plotTree treefile
-    . mapLeaf (\x -> x@accession)
+    . mapLeaf (\x -> paste "|" [x@clade, x@accession])
     . classify -- Tree string double meta
     . treeBy upgma
     . search fetchConfig searchConfig refmap
@@ -147,23 +150,15 @@ search fetchConfig searchConfig refs query =
   . fetchIds searchConfig
   ) query
 
-
 classify :: RootedTree n e Meta -> RootedTree Str e Meta
 classify = push . pullNode pullLeaf pullClade where
-  pullLeaf leaf = "leaf"
-  pullClade xs = ifelse (True) "alice" "never"
-  push = mapChildWithParent id (\ parent child -> "bob")
 
--- classify :: RootedTree n e Meta -> RootedTree Str e Meta
--- classify = push . pullNode pullLeaf pullClade where
---
---   pullLeaf leaf = leaf@clade
---
---   pullClade xs
---     = ifelse (eq (length seenClades) 1)
---              (head seenClades) ""
---     where
---       seenClades = ( unique
---                    . filter (ne 0 . lengthS)
---                    ) xs
---   push = mapChildWithParent id (\ parent child -> ifelse (eq 0 (lengthS child)) parent child)
+  pullLeaf leaf = leaf@clade
+
+  pullClade xs
+    = branch (eq 1 . length) head (const "") seenClades
+    where
+      seenClades = ( unique
+                   . filter (ne 0 . lengthS)
+                   ) xs
+  push = mapChildWithParent id (\ parent child -> ifelse (eq 0 (lengthS child)) parent child)
