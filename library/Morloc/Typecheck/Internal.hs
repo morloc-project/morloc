@@ -206,6 +206,7 @@ subtype t1@(NamU o1 v1 p1 ((k1,x1):rs1)) t2@(NamU o2 v2 p2 es2) g0
           return g2
   | otherwise = return g0 -- incomparable
 
+
 --  Ea not in FV(a)
 --  g1[Ea] |- A <=: Ea -| g2
 -- ----------------------------------------- <:InstantiateR
@@ -301,6 +302,37 @@ instantiate ta@(FunU as b) tb@(ExistU v@(TV lang _) [] _ _) g1 = do
     Nothing -> Left $ InstantiationError ta tb "Error in InstRApp"
   g5 <- foldlM (\g (e, t) -> instantiate t e g) g4 (zip eas as)
   instantiate eb (apply g5 b) g5
+
+
+
+-- This is terrible kludge, I am not close to having considered all the edge
+-- cases. I need to completely rewrite my type system. Argh. I also need to get
+-- rid of all default types. Defaults should be set explicitly in morloc code.
+instantiate ta@(ExistU _ _ _ (_:_)) tb@(ExistU v [] [] []) g1
+  | langOf ta /= langOf tb = return g1
+  | otherwise =
+      case access1 v (gammaContext g1) of
+        (Just (ls, _, rs)) -> do
+            solved <- solve v ta
+            return $ g1 { gammaContext = ls ++ solved : rs }
+        Nothing ->
+          case lookupU v g1 of
+            (Just _) -> return g1
+            Nothing -> Left . InstantiationError ta tb . render
+              $ "Error in recordInstRSolve with gamma:\n" <> tupled (map pretty (gammaContext g1))
+instantiate ta@(ExistU v [] [] []) tb@(ExistU _ _ _ (_:_)) g1
+  | langOf ta /= langOf tb = return g1
+  | otherwise =
+      case access1 v (gammaContext g1) of
+        (Just (ls, _, rs)) -> do
+            solved <- solve v tb
+            return $ g1 { gammaContext = ls ++ solved : rs }
+        Nothing ->
+          case lookupU v g1 of
+            (Just _) -> return g1
+            Nothing -> Left . InstantiationError ta tb . render
+              $ "Error in recordInstLSolve:" <+> tupled (map pretty (gammaContext g1))
+
 
 --
 -- ----------------------------------------- InstLAllR
@@ -476,19 +508,20 @@ cut i g = do
 
 
 newvar :: MT.Text -> Maybe Lang -> Gamma -> (Gamma, TypeU)
-newvar = newvarRich [] []
+newvar = newvarRich [] [] []
 
 
 newvarRich
   :: [TypeU] -- ^ type parameters
   -> [TypeU] -- ^ type defaults
+  -> [(MT.Text, TypeU)] -- ^ key-value pairs
   -> MT.Text -- ^ prefix, just for readability
   -> Maybe Lang
   -> Gamma
   -> (Gamma, TypeU)
-newvarRich ps ds prefix lang g =
+newvarRich ps ds rs prefix lang g =
   let (g', v) = tvarname g prefix lang
-  in (g' +> ExistG v ps ds [], ExistU v ps ds [])
+  in (g' +> ExistG v ps ds rs, ExistU v ps ds rs)
 
 -- | standardize quantifier names, for example, replace `a -> b` with `v0 -> v1`.
 rename :: Gamma -> TypeU -> (Gamma, TypeU)

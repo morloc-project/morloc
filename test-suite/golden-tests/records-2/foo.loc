@@ -1,0 +1,22 @@
+module foo (Map, push, makeMap)
+
+type py Str = "str"
+type py Int = "int"
+type py (Map a b) = "dict" a b
+type py (Tuple2 a b) = "tuple" a b
+
+packMap      :: pack   => [(a,b)] -> Map a b
+unpackMap    :: unpack => Map a b -> [(a,b)]
+
+packMap   Py :: pack   => [(a,b)] -> Map a b
+unpackMap Py :: unpack => Map a b -> [(a,b)]
+
+source Py from "foo.py" ("packMap", "unpackMap", "push", "makeMap")
+
+push :: (n -> n')
+     -> (n' -> e -> n -> (e', n'))
+     -> (n' -> e -> l -> (e', l'))
+     -> Map n (e, l)
+     -> Map n' (e', l')
+
+makeMap :: Str -> Int -> Map Str (Int, Str)

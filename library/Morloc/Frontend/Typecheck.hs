@@ -158,9 +158,6 @@ synthE _ g (StrS x) = return (g, MLD.defaultGeneralType (StrS x), StrS x)
 
 synthE i g0 (AccS e k) = do
   (g1, t1, e1) <- synthG' g0 e
-  insetSay "accs"
-  insetSay $ "t1:" <+> pretty t1
-  seeGamma g1
   (g2, valType) <- case t1 of
     (NamU _ _ _ rs) -> case lookup k rs of
       Nothing -> gerr i (KeyError k t1)
@@ -263,33 +260,13 @@ synthE i g (TupS (e:es)) = do
 
   return (g2, t3, TupS (itemExpr:xs'))
 
---   Records
-synthE _ g (NamS []) = return (g, head $ MLD.defaultRecord Nothing [], NamS [])
-synthE i g0 (NamS ((k,x):rs)) = do
-  insetSay $ "Entering synthE NamS (k=" <> pretty k <> ")"
-  seeGamma g0
-  insetSay "-------- syn"
-  -- type the head
-  (g1, headType, headExpr) <- synthG' g0 x
-
-  -- type the tail
-  (g2, tailType, tailExpr) <- synthE' i g1 (NamS rs)
-
-  insetSay $ "Exiting synthE NamS (k=" <> pretty k <> ")"
-  insetSay $ "  k type:" <+> pretty headType
-  seeGamma g2
-  insetSay "-------- syn"
-
-  -- merge the head with tail
-  t <- case tailType of
-    (NamU o1 n1 ps1 rs1) -> return $ NamU o1 n1 ps1 ((k, apply g2 headType):rs1)
-    _ -> error "impossible" -- the synthE on NamS will always return NamU type
-
-  tailExprs <- case tailExpr of
-    (NamS xs') -> return xs'
-    _ -> error "impossible" -- synth does not change data constructors
-
-  return (g2, t, NamS ((k, headExpr):tailExprs))
+synthE _ g0 (NamS rs) = do
+  (g1, xs) <- statefulMapM (\s v -> synthG s v |>> (\(a,b,c) -> (a,(b,c)))) g0 (map snd rs)
+  let (ts, es) = unzip xs
+      ks = map fst rs
+      (g2, t) = newvarRich [] [] (zip ks ts) "record_" Nothing g1
+      e = NamS (zip ks es)
+  return (g2, t, e) 
 
 -- Sources are axiomatic. They are they type they are said to be.
 synthE i g (CallS src) = do

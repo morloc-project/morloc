@@ -33,17 +33,13 @@ module Morloc.Frontend.Lang.DefaultTypes
   -- * dictionaries of base collection names
   , listG
   , listC
-  , listGC
   , tupleG
   , tupleC
-  , tupleGC
   , recordG
   , recordC
   , recordGC
   -- * functions for concrete synthesis
   , generalDefaultToConcrete
-  -- * determin if a type name is a tuple
-  , isTuple
   ) where
 
 import Morloc.Frontend.Namespace
@@ -67,19 +63,12 @@ listC CppLang = ["std::vector<$1>"]
 listC RustLang = ["Vec<$1>"]
 listC PerlLang = ["array"]
 
-listGC :: Maybe Lang -> [MT.Text]
-listGC Nothing = [listG]
-listGC (Just lang) = listC lang
-
 defaultList :: Maybe Lang -> TypeU -> [TypeU]
 defaultList Nothing t = [AppU (VarU (TV Nothing listG)) [t]]
 defaultList lang@(Just l) t = [AppU (VarU (TV lang v)) [t] | v <- listC l] 
 
 tupleG :: Int -> MT.Text
 tupleG i = "Tuple" <> MT.show' i
-
-isTuple :: MT.Text -> Int -> Bool
-isTuple generalName size = generalName == "Tuple" <> MT.show' size
 
 tupleC :: Int -> Lang -> [MT.Text]
 tupleC _ Python3Lang = ["tuple"]
@@ -92,10 +81,6 @@ tupleC i RustLang =
   let vars = ["$" <> MT.show' i' | i' <- [1..i]]
   in ["(" <> MT.intercalate "," vars <> ")"]
 tupleC _ PerlLang = ["array"]
-
-tupleGC :: Maybe Lang -> Int -> [MT.Text]
-tupleGC Nothing i = [tupleG i]
-tupleGC (Just lang) i = tupleC i lang
 
 defaultTuple :: Maybe Lang -> [TypeU] -> [TypeU]
 defaultTuple Nothing ts = [AppU (VarU (TV Nothing (tupleG (length ts)))) ts]

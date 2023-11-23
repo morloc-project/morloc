@@ -160,6 +160,8 @@ main = do
       -- see github issue #8
       , golden "records-1-c" "records-1-c"
 
+      , golden "records-2" "records-2"
+
       , golden "record-promotion-1" "record-promotion-1"
       , golden "record-promotion-2" "record-promotion-2"
 

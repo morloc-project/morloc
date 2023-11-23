@@ -59,13 +59,13 @@ typecheck e0 = do
 
   -- show the final gamma and type if verbose
   insetSay "------ exiting typechecker ------"
-  seeGamma g2
+  -- seeGamma g2
   insetSay $ pretty t
   insetSay "---------------^-----------------"
 
   insetSay "--- substituting general aliases ---"
   g3 <- substituteGeneralAliases g2 e2
-  seeGamma g3
+  -- seeGamma g3
 
   insetSay "--- weaving ---"
   w <- weaveAndResolve (applyCon g3 (mapSAnno id (fmap normalizeType) e2))
@@ -354,31 +354,31 @@ synthE
 -- Uni=>
 synthE _ lang g UniS = do
   let ts = MLD.defaultNull (Just lang)
-      (g', t) = newvarRich [] ts "uni_" (Just lang) g
+      (g', t) = newvarRich [] ts [] "uni_" (Just lang) g
   return (g' +> t, t, UniS)
 
 -- Real=>
 synthE _ lang g (RealS x) = do
   let ts = MLD.defaultReal (Just lang)
-      (g', t) = newvarRich [] ts "real_" (Just lang) g
+      (g', t) = newvarRich [] ts [] "real_" (Just lang) g
   return (g' +> t, t, RealS x)
 
 -- Int=>
 synthE _ lang g (IntS x) = do
   let ts = MLD.defaultInt (Just lang)
-      (g', t) = newvarRich [] ts "int_" (Just lang) g
+      (g', t) = newvarRich [] ts [] "int_" (Just lang) g
   return (g' +> t, t, IntS x)
 
 -- Str=>
 synthE _ lang g (StrS x) = do
   let ts = MLD.defaultString (Just lang)
-      (g', t) = newvarRich [] ts "str_" (Just lang) g
+      (g', t) = newvarRich [] ts [] "str_" (Just lang) g
   return (g' +> t, t, StrS x)
 
 -- Log=>
 synthE _ lang g (LogS x) = do
   let ts = MLD.defaultBool (Just lang)
-      (g', t) = newvarRich [] ts "log_" (Just lang) g
+      (g', t) = newvarRich [] ts [] "log_" (Just lang) g
   return (g' +> t, t, LogS x)
 
 synthE i _ g0 (AccS e k) = do
@@ -467,7 +467,9 @@ synthE i lang g (TupS (e:es)) = do
   return (g2, t3, TupS (itemExpr:xs'))
 
 --   Records
-synthE _ lang g (NamS []) = return (g, head $ MLD.defaultRecord (Just lang) [], NamS [])
+synthE _ lang g (NamS []) = do
+  let (g', t) = newvar "record_" (Just lang) g
+  return (g', t, NamS [])
 synthE i lang g0 (NamS ((k,x):rs)) = do
   -- type the head
   (g1, headType, headExpr) <- synthG' g0 x
@@ -477,8 +479,8 @@ synthE i lang g0 (NamS ((k,x):rs)) = do
 
   -- merge the head with tail
   t <- case tailType of
-    (NamU o1 n1 ps1 rs1) -> return $ NamU o1 n1 ps1 ((k, apply g2 headType):rs1)
-    _ -> error "impossible" -- the synthE on NamS will always return NamU type
+    (ExistU v ps ds rs1) -> return $ ExistU v ps ds ((k, apply g2 headType):rs1)
+    _ -> error "unreachable"
 
   tailExprs <- case tailExpr of
     (NamS xs') -> return xs'

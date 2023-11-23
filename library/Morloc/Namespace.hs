@@ -808,8 +808,21 @@ instance Typelike TypeU where
   --  * all existentials are replaced with default values if a possible
   --    FIXME: should I really just take the first in the list???
   typeOf (VarU v) = VarT v
-  typeOf (ExistU v _ [] _) = typeOf (ForallU v (VarU v)) -- whatever
+
+  typeOf (ExistU (TV lang _) ps _ rs@(_:_)) = NamT NamRecord (TV lang genericRecord) (map typeOf ps) (map (second typeOf) rs) where
+    genericRecord = case lang of
+      Nothing -> "Record"
+      (Just Python3Lang) -> "dict" 
+      (Just RLang) -> "list"
+      (Just CLang) -> "struct"
+      (Just CppLang) -> "struct"
+      (Just RustLang) -> "struct"
+      (Just PerlLang) -> "hash"
+
+  -- use default
   typeOf (ExistU _ _ (t:_) _) = typeOf t
+  typeOf (ExistU v _ _ _) = typeOf (ForallU v (VarU v)) -- this will cause problems eventually
+
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
   typeOf (FunU ts t) = FunT (map typeOf ts) (typeOf t)
   typeOf (AppU t ts) = AppT (typeOf t) (map typeOf ts)

@@ -989,7 +989,7 @@ unitTypeTests =
         [r|
         {x=42, y="yolo"}
         |]
-        (record [("x", int), ("y", str)])
+        (ExistU (TV Nothing "e0") [] [] [("x", int), ("y", str)])
     , assertGeneralType
         "primitive record signature"
         [r|
@@ -1004,21 +1004,21 @@ unitTypeTests =
         foo = {x = 42, y = "yolo"}
         foo
         |]
-        (record [("x", int), ("y", str)])
+        (ExistU (TV Nothing "e0") [] [] [("x", int), ("y", str)])
     , assertGeneralType
         "nested records"
         [r|
         {x = 42, y = {bob = 24601, tod = "listen now closely and hear how I've planned it"}}
         |]
-        (record [("x", int), ("y", record [("bob", int), ("tod", str)])])
+        (ExistU (TV Nothing "e0") [] [] [("x", int),("y",ExistU (TV Nothing "e1") [] [] [("bob",int),("tod",str)])])
+
     , assertGeneralType
         "records with bound variables"
         [r|
         foo a = {x=a, y="yolo"}
         foo 42
         |]
-        (record [("x", int), ("y", str)])
-
+        (ExistU (TV Nothing "e0") [] [] [("x", int),("y", str)])
 
     -- language-specific containers and primitives
     , assertConcreteType
