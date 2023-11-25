@@ -1,0 +1,15 @@
+module m (foo)
+
+source Py from "foo.py"
+  ( "foo"
+  , "packJsonObj" as packJsonObj
+  , "unpackJsonObj" as unpackJsonObj
+  )
+
+foo :: Str -> JsonObj
+
+type Py Str = "str"
+type Py JsonObj = "dict"
+
+packJsonObj   :: pack   => Str -> JsonObj
+unpackJsonObj :: unpack => JsonObj -> Str

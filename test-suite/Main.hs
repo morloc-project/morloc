@@ -155,6 +155,8 @@ main = do
       , golden "manifold-form-7_py" "manifold-form-7_py"
       , golden "manifold-form-7_r" "manifold-form-7_r"
 
+      , golden "packer-definitions" "packer-definitions"
+
       , golden "records-1-py" "records-1-py"
       , golden "records-1-r" "records-1-r"
       -- see github issue #8
