@@ -163,13 +163,15 @@ data MorlocState = MorlocState
   , stateAnnotations :: Map Int [TypeU]
   -- ^ Stores non-top-level annotations.
   , stateOutfile :: Maybe Path
-  -- ^ The nexus filename ("nexus.pl" by default, though I should ditch perl)
+  -- ^ The nexus filename ("nexus.py" by default)
   , statePackers :: GMap Int MVar PackMap
   , stateExports :: [Int]
   -- ^ The indices of each exported term
   , stateName :: Map Int EVar
   -- ^ store the names of morloc compositions
+  , stateGeneralPackers :: Map MVar (Map Text (TypeU, TypeU))
   }
+  deriving(Show)
 
 {-
        A           - There can be only one general signature for a term within a scope
@@ -467,7 +469,8 @@ data MorlocError
   | AmbiguousUnpacker TVar
   | AmbiguousCast TVar TVar
   | IllegalPacker TypeU
-  | CyclicPacker TypeU
+  | CyclicPacker TypeU TypeU
+  | ConflictingPackers TypeU TypeU
   | IncompatibleRealization MVar
   | MissingAbstractType
   | ExpectedAbstractType

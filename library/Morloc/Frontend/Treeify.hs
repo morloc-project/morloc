@@ -13,7 +13,6 @@ module Morloc.Frontend.Treeify (treeify) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
-import qualified Morloc.Frontend.PartialOrder as PO
 import Morloc.Pretty ()
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Frontend.AST as AST
@@ -106,13 +105,6 @@ treeify d
 
          -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
          mapM (collect . fst) exports
-
-
-
-
--- storeExports :: DAG MVar [(EVar, EVar)] ExprI -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
--- storeExports d = do
---     s <- MM.get
 
    -- There is no currently supported use case that exposes multiple roots in
    -- one compilation process. The compiler executable takes a single morloc

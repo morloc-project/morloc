@@ -9,7 +9,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Frontend.Desugar (desugar, desugarType, desugarEType) where
+module Morloc.Frontend.Desugar (desugar, desugarType, desugarEType, switchLang) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Pretty ()
@@ -20,7 +20,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
-import qualified Data.Map as Map
+import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Frontend.PartialOrder as MTP
 import Morloc.Typecheck.Internal (qualify, unqualify)
@@ -33,9 +33,9 @@ desugar s
   = checkForSelfRecursion s -- modules should not import themselves
   >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
   >>= desugarDag -- substitute type aliases
-  |>> nullify
-  >>= removeTypeImports -- Remove type imports and exports
   >>= addPackerMap -- add the packers to state
+  >>= removeTypeImports -- Remove type imports and exports
+  |>> nullify -- TODO: unsus and document
 
 -- | Check for infinitely expanding self-recursive types
 --
@@ -332,6 +332,7 @@ chooseExistential (FunU ts t) = FunU (map chooseExistential ts) (chooseExistenti
 chooseExistential (AppU t ts) = AppU (chooseExistential t) (map chooseExistential ts)
 chooseExistential (NamU o n ps rs) = NamU o n (map chooseExistential ps) [(k, chooseExistential t) | (k,t) <- rs]
 
+-- TODO: document
 nullify :: DAG m e ExprI -> DAG m e ExprI
 nullify = MDD.mapNode f where
     f :: ExprI -> ExprI
@@ -414,10 +415,14 @@ gatherPackers
       , (ExprI, Map.Map TVar [UnresolvedPacker]) -- data about the imported module
      )]
   -> MorlocMonad (ExprI, Map.Map TVar [UnresolvedPacker])
-gatherPackers mv e xs =
-  case findPackers e of
+gatherPackers mv e xs = do
+  (GMap _ mvmap) <- MM.gets stateTypedefs
+  let typedefs = fromMaybe Map.empty (Map.lookup mv mvmap) 
+  MM.sayVVV $ "typedefs: " <> viaShow typedefs
+  case findPackers typedefs e of
     (Left err') -> MM.throwError err'
     (Right m0) -> do
+      MM.sayVVV $ "found packers in module" <+> pretty mv <> ":" <+> viaShow m0
       let m2 = Map.unionsWith (<>) (m0 : [m1 | (_, _, (_, m1)) <- xs])
       attachPackers mv e m2
       return (e, m2)
@@ -428,82 +433,27 @@ attachPackers mv e m = do
   let p = GMap.insertMany (AST.getIndices e) mv m (statePackers s)
   MM.put (s {statePackers = p})
 
--- | This function should 1) couple matching pack/unpack functions, 2) find the
--- general types for the packed and unpacked forms, and 3) tie all this info
--- together
-findPackers :: ExprI -> Either MorlocError (Map.Map TVar [UnresolvedPacker])
-findPackers expr
-  = Map.fromList
-  . groupSort
-  . map (second toPackerPair)
-  . groupSort
-  <$> mapM toPair
-    [ (alias1, src, t)
-    | (alias1, t) <- packers
-    , src@(Source _ lang2 _ alias2 _) <- sources
-    , alias1 == alias2
-    , langOf t == Just lang2
-    ]
+
+-- | This function should:
+--   1) couple matching pack/unpack functions
+--   2) find the general types for the packed and unpacked forms
+--   3) infer concrete types from general types when needed (and possible)
+--   4) tie all this info together
+findPackers :: Map.Map TVar [([TVar], TypeU)] -> ExprI -> Either MorlocError (Map.Map TVar [UnresolvedPacker])
+findPackers typedefs expr =
+  mapM (linkTypes types) (AST.findSources expr)
+  |>> catMaybes
+  |>> Map.fromListWith (<>)
+  >>= Map.mapM mergePackers
 
   where
 
-  sources :: [Source]
-  sources = AST.findSources expr
-
-  generalMap
-    = Map.fromList
-    . mapMaybe (\(l, ts) -> (,) l <$> unifyGeneralTypes ts)
-    . groupSort
-    $ [ (v, t)
-      | (v, t) <- packers
-      , isNothing (langOf t)
-      ]
-
-  unifyGeneralTypes :: [EType] -> Maybe (TypeU, TypeU) -- (packed type, unpacked type)
-  unifyGeneralTypes (x@(unqualify . etype -> (vs, FunU [a] b)):_)
-      | isPacker x   = Just (qualify vs b, qualify vs a)
-      | isUnpacker x = Just (qualify vs a, qualify vs b)
-  unifyGeneralTypes _ = Nothing
-
-  -- pulls out the packed type name, this key is used to group together all the
-  -- packers for that language-specific type
-  toPair :: (EVar, Source, EType) -> Either MorlocError (TVar, (EVar, Property, TypeU, TypeU, Source))
-  toPair (fname, src, e) = case packerKeyVal e of
-    (Right (Just (key, packedType, unpackedType, p))) -> return (key, (fname, p, packedType, unpackedType, src))
-    (Right Nothing) -> error "impossible" -- this is called after filtering away general types
-    Left err' -> Left err'
-
-  packerKeyVal :: EType -> Either MorlocError (Maybe (TVar, TypeU, TypeU, Property))
-  packerKeyVal e@(EType t0 _ _) = case unqualify t0 of
-    (vs, t@(FunU [a] b)) ->  case (isPacker e, isUnpacker e) of
-      (True, True) -> Left $ CyclicPacker (qualify vs t)
-      (True, False) -> Right (Just (packerKey b, qualify vs b, qualify vs a, Pack))
-      (False, True) -> Right (Just (packerKey a, qualify vs a, qualify vs b, Unpack))
-      (False, False) -> Right Nothing
-    (vs, t) -> Left $ IllegalPacker (qualify vs t)
-
-  packerKey :: TypeU -> TVar
-  packerKey (VarU v)   = v
-  packerKey (AppU (VarU v) _) = v
-  packerKey (NamU _ v _ _) = v
-  packerKey t = error $ "bad packer: " <> show t
-
-  toPackerPair :: [(EVar, Property, TypeU, TypeU, Source)] -> UnresolvedPacker
-  toPackerPair xs =
-    let (genMay, packedType, unpackedType) = unifyTypes [(f, t, u) | (f, _, t, u, _) <- xs]
-    in UnresolvedPacker
-         { unresolvedPackerTerm = Nothing
-         , unresolvedPackedType = packedType
-         , unresolvedUnpackedType = unpackedType
-         , unresolvedPackerForward = [src | (_, Pack, _, _, src) <- xs]
-         , unresolvedPackerReverse = [src | (_, Unpack, _, _, src) <- xs]
-         , unresolvedPackerGeneralTypes = genMay
-         }
-
-  packers :: [(EVar, EType)]
-  packers = [ (v, e)
+  -- find all packer and unpacker signatures, general and concrete
+  types :: Map.Map (EVar, Bool, Maybe Lang) EType
+  types = Map.fromList
+            [ ((v, isPacker e, langOf e), e)
             | (v, _, e) <- AST.findSignatures expr
-            ,  isPacker e || isUnpacker e
+            , isPacker e || isUnpacker e
             ]
 
   isPacker :: EType -> Bool
@@ -512,10 +462,126 @@ findPackers expr
   isUnpacker :: EType -> Bool
   isUnpacker e = Set.member Unpack (eprop e)
 
-  -- FIXME: this is a place where real user errors will be caught, so needs good error reporting
-  unifyTypes :: [(EVar, TypeU, TypeU)] -> (Maybe (TypeU, TypeU), TypeU, TypeU)
-  unifyTypes [] = error "impossible" -- This cannot occur since the right hand list accumulated in groupSort is never empty
-  unifyTypes [(_, p, u)] = (Nothing, p, u)
-  unifyTypes ((f, p, u):xs) = case Map.lookup f generalMap of
-    Nothing -> unifyTypes xs
-    mayGen -> (mayGen, p, u)
+  linkTypes :: Map.Map (EVar, Bool, Maybe Lang) EType
+            -> Source
+            -> Either MorlocError (Maybe (TVar, [UnresolvedPacker]))
+  linkTypes typemap src = do
+    let generalPacker = Map.lookup (srcAlias src, True, Nothing) typemap
+        generalUnpacker = Map.lookup (srcAlias src, False, Nothing) typemap
+        concretePacker = Map.lookup (srcAlias src, True, Just (srcLang src)) typemap
+        concreteUnpacker = Map.lookup (srcAlias src, False, Just (srcLang src)) typemap
+    case (generalPacker, generalUnpacker, concretePacker, concreteUnpacker) of
+      -- this is not a packer or unpacker
+      (Nothing, Nothing, Nothing, Nothing) -> Right Nothing
+      -- illegal cyclical cases
+      (Just p, Just u, _, _) -> Left $ CyclicPacker (etype p) (etype u)
+      (_, _, Just p, Just u) -> Left $ CyclicPacker (etype p) (etype u)
+      (Just gp, _, _, Just cu) -> Left $ ConflictingPackers (etype gp) (etype cu)
+      (_, Just gu, Just cp, _) -> Left $ ConflictingPackers (etype gu) (etype cp)
+      -- both general and concrete types are provided
+      (Just gp, Nothing, Just cp, Nothing) -> Just <$> makePacker True src (Just $ etype gp) (Just $ etype cp)
+      (Nothing, Just gu, Nothing, Just cu) -> Just <$> makePacker False src (Just $ etype gu) (Just $ etype cu)
+      -- only the concrete type is found (this may lead to problems later)
+      (Nothing, Nothing, Just cp, Nothing) -> Just <$> makePacker True src Nothing (Just $ etype cp)
+      (Nothing, Nothing, Nothing, Just cu) -> Just <$> makePacker False src Nothing (Just $ etype cu)
+      -- only general type is found, so we generate the concrete type
+      (Just gp, Nothing, Nothing, Nothing) -> Just <$> makePacker True src (Just $ etype gp) Nothing
+      (Nothing, Just gu, Nothing, Nothing) -> Just <$> makePacker False src (Just $ etype gu) Nothing
+
+  makePacker :: Bool -> Source -> Maybe TypeU -> Maybe TypeU -> Either MorlocError (TVar, [UnresolvedPacker])
+  makePacker ispacker src maygt mayct = do
+    gpair <- makeGeneralPair ispacker maygt
+    packerTerm <- case gpair of
+      (Just (pt, _)) -> generalKey pt
+      Nothing -> return Nothing
+    (packedType, unpackedType) <- case (maygt, mayct) of
+      (_, Just ct) -> makeConcretePair ispacker ct
+      (Just gt, _) -> desugarType typedefs (switchLang (srcLang src) gt) >>= makeConcretePair ispacker
+      (Nothing, Nothing) -> error "This case should be unreachable"
+    key <- packerKey packedType
+    let (packerForward, packerReverse) = makeSources ispacker src
+    return (key, [UnresolvedPacker
+        { unresolvedPackerTerm = packerTerm
+        , unresolvedPackedType = packedType
+        , unresolvedUnpackedType = unpackedType
+        , unresolvedPackerForward = packerForward
+        , unresolvedPackerReverse = packerReverse
+        , unresolvedPackerGeneralTypes = gpair
+        }]
+      )
+
+  makeGeneralPair :: Bool -> Maybe TypeU -> Either MorlocError (Maybe (TypeU, TypeU))
+  makeGeneralPair ispacker (fmap unqualify -> Just (vs, FunU [a] b))
+    | ispacker = Right $ Just (qualify vs b, qualify vs a)
+    | otherwise = Right $ Just (qualify vs a, qualify vs b)
+  makeGeneralPair _ Nothing = Right Nothing
+  makeGeneralPair _ (Just t) = error $ show t
+
+  -- make the forward and reverse sources
+  -- e.g.: ([Source "packMap" ...], [])   -- for True
+  -- e.g.: ([], [Source "unpackMap" ...]) -- for False
+  makeSources :: Bool -> Source -> ([Source], [Source])
+  makeSources True src = ([src], [])
+  makeSources False src = ([], [src])
+
+  -- make concrete pair with packed and unpacked forms, respectively
+  -- e.g.: ("dict", ([a],[b]))
+  makeConcretePair :: Bool -> TypeU -> Either MorlocError (TypeU, TypeU)
+  makeConcretePair ispacker (unqualify -> (vs, FunU [a] b))
+    | ispacker = return (qualify vs b, qualify vs a)
+    | otherwise = return (qualify vs a, qualify vs b)
+  makeConcretePair _ t = error $ show t
+
+  -- make the concrete packer key
+  -- e.g.: "dict", the Python form of "Map"
+  packerKey :: TypeU -> Either MorlocError TVar
+  packerKey (unqualify -> (_, t0)) = f t0 where
+    f (VarU v)   = return v
+    f (AppU (VarU v) _) = return v
+    f (NamU _ v _ _) = return v
+    f t = error $ show t
+
+  -- make the general key
+  -- e.g.: "Map"
+  generalKey :: TypeU -> Either MorlocError (Maybe EVar)
+  generalKey (unqualify -> (_, t0)) = f t0 where
+    f (VarU (TV Nothing v))   = return (Just (EV v))
+    f (AppU (VarU (TV Nothing v)) _) = return (Just (EV v))
+    f (NamU _ (TV Nothing v) _ _) = return (Just (EV v))
+    f t = error $ show t
+
+  -- associate packers with unpackers to make final UnresolvedPacker objects
+  mergePackers :: [UnresolvedPacker] -> Either MorlocError [UnresolvedPacker]
+  mergePackers ps
+    = mapM (foldl1M mergeUnresolvedPackers . snd)
+    . groupSort
+    $ [(unresolvedPackerTerm p, p) | p <- ps]
+
+  -- Here we merge partial UnresolvedPackers. These will all be for the same
+  -- general type (e.g., Map) and the same concrete type (e.g. "dict"). Ideally,
+  -- there should be exactly two elements in the list, a packer and an unpacker.
+  mergeUnresolvedPackers :: UnresolvedPacker -> UnresolvedPacker -> Either MorlocError UnresolvedPacker
+  mergeUnresolvedPackers p1 p2 =
+      return $ p1
+        { unresolvedPackerForward = unresolvedPackerForward p1 <> unresolvedPackerForward p2
+        , unresolvedPackerReverse = unresolvedPackerReverse p1 <> unresolvedPackerReverse p2
+        }
+
+
+-- TODO: document
+switchLang :: Lang -> TypeU -> TypeU
+switchLang lang = f where
+  f (VarU (TV _ v)) = VarU (TV (Just lang) v)
+  f (ForallU (TV _ v) t) = ForallU (TV (Just lang) v) (f t)
+  f (FunU ts t) = FunU (map f ts) (f t)
+  f (AppU t ts) = AppU (f t) (map f ts)
+  f (ExistU (TV _ v) ts ds rs) =
+      let rs' = map (f . snd) rs
+          ts' = map f ts
+          ds' = map f ds
+          v' = MLD.generalDefaultToConcrete v (length ts) lang
+      in ExistU (TV (Just lang) v') ts' ds' (zip (map fst rs) rs')
+  f (NamU n (TV _ v) ts rs) =
+      let ts' = map f ts
+          rs' = map (f . snd) rs
+      in NamU n (TV (Just lang) v) ts' (zip (map fst rs) rs') 

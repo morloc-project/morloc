@@ -79,7 +79,9 @@ instance Pretty MorlocError where
   pretty (MissingUnpacker place t)
     = "SerializationError: no unpacker found for type ("
     <> pretty t <> ") at " <> pretty place
-  pretty (CyclicPacker _) = "CyclicPacker"
+  pretty (CyclicPacker t1 t2)
+    = "Error ConflictingPackers - a term is described as both a packer and an unpacker:\n  "
+    <> pretty t1 <> "\n  " <> pretty t2
   -- type extension errors
   pretty (AmbiguousPacker _) = "AmbiguousPacker"
   pretty (AmbiguousUnpacker _) = "AmbiguousUnpacker"

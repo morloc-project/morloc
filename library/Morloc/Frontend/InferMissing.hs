@@ -14,18 +14,15 @@ module Morloc.Frontend.InferMissing (inferMissingTypes) where
 
 import Morloc.Frontend.Namespace
 import qualified Data.Map as Map
-import qualified Morloc.Frontend.Lang.DefaultTypes as Def
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.GMap as GMap
 import qualified Data.Set as Set
-import Morloc.Frontend.Desugar (desugarType)
+import Morloc.Frontend.Desugar (desugarType, switchLang)
 
 inferMissingTypes :: a -> MorlocMonad a
 inferMissingTypes x = do
     MM.get >>= infer >>= MM.put
     return x
-
--- TODO: I also need to synthesize stateAnnotations
 
 infer :: MorlocState -> MorlocMonad MorlocState
 infer s = do
@@ -49,26 +46,8 @@ processTypes _ _ _ es _ = return es
 
 synthesizeEType :: MVar -> Source -> Map.Map TVar [([TVar], TypeU)] -> EType -> Either MorlocError EType
 synthesizeEType m src@(srcLang -> lang) typedefs (EType t0 ps cs)
-  | null unaliasedTerms = EType <$> desugarType typedefs (switchLang t0) <*> pure ps <*> pure cs
+  | null unaliasedTerms = EType <$> desugarType typedefs (switchLang lang t0) <*> pure ps <*> pure cs
   | otherwise = Left (CannotSynthesizeConcreteType m src t0 unaliasedTerms)
   where
     -- list of general variables in the type that do not have concrete type aliases
     unaliasedTerms = filter (\v -> not $ Map.member (TV (Just lang) v) typedefs) [v | VarU (TV _ v) <- Set.toList (free t0)]
-
-
-
-    switchLang :: TypeU -> TypeU
-    switchLang (VarU (TV _ v)) = VarU (TV (Just lang) v)
-    switchLang (ForallU (TV _ v) t) = ForallU (TV (Just lang) v) (switchLang t)
-    switchLang (FunU ts t) = FunU (map switchLang ts) (switchLang t)
-    switchLang (AppU t ts) = AppU (switchLang t) (map switchLang ts)
-    switchLang (ExistU (TV _ v) ts ds rs) =
-        let rs' = map (switchLang . snd) rs
-            ts' = map switchLang ts
-            ds' = map switchLang ds
-            v' = Def.generalDefaultToConcrete v (length ts) lang
-        in ExistU (TV (Just lang) v') ts' ds' (zip (map fst rs) rs')
-    switchLang (NamU n (TV _ v) ts rs) =
-        let ts' = map switchLang ts
-            rs' = map (switchLang . snd) rs
-        in NamU n (TV (Just lang) v) ts' (zip (map fst rs) rs') 

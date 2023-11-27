@@ -24,6 +24,9 @@ main = do
       , substituteTVarTests
       , subtypeTests
 
+      , golden "packer-definitions-1" "packer-definitions-1"
+      , golden "packer-definitions-2" "packer-definitions-2"
+
       , golden "import-1" "import-1"
       , golden "import-2" "import-2"
 
@@ -154,8 +157,6 @@ main = do
       , golden "manifold-form-7_c" "manifold-form-7_c"
       , golden "manifold-form-7_py" "manifold-form-7_py"
       , golden "manifold-form-7_r" "manifold-form-7_r"
-
-      , golden "packer-definitions" "packer-definitions"
 
       , golden "records-1-py" "records-1-py"
       , golden "records-1-r" "records-1-r"
