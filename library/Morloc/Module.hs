@@ -68,7 +68,11 @@ findModule currentModuleM importModule = do
   existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
   case existingPaths of
     [x] -> return x
-    (x:_) -> return x -- should shadowing raise a warning?
+    xs@(x:_) -> do
+      MM.say $ "WARNING: module path shadowing, for" <+> pretty importModule <+> "found paths:"
+             <+> "\n  " <> pretty xs
+             <> "\n  selecting path:" <+> pretty x
+      return x
     [] ->
       MM.throwError . CannotLoadModule . render $
         "module" <+> squotes (pretty importModule) <+> "not found among the paths:" <+> list (map pretty allPaths) <> "\n" <>
