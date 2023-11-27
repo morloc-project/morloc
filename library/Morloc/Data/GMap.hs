@@ -20,6 +20,7 @@ module Morloc.Data.GMap
   , mapKeys
   , mapVals
   , mapValsM
+  , mapValsWithKeyM
   , yIsX
   ) where
 
@@ -35,6 +36,12 @@ mapValsM :: (Ord b, Monad m) => (c -> m c') -> GMap a b c -> m (GMap a b c')
 mapValsM f (GMap m1 m2) = do
     let m2list = Map.toList m2
     xs2 <- mapM (f . snd) m2list
+    return $ GMap m1 (Map.fromList (zip (map fst m2list) xs2))
+
+mapValsWithKeyM :: (Ord b, Monad m) => (b -> c -> m c') -> GMap a b c -> m (GMap a b c')
+mapValsWithKeyM f (GMap m1 m2) = do
+    let m2list = Map.toList m2
+    xs2 <- mapM (uncurry f) m2list
     return $ GMap m1 (Map.fromList (zip (map fst m2list) xs2))
 
 mapKeys :: (Ord a') => (a -> a') -> GMap a b c -> GMap a' b c
