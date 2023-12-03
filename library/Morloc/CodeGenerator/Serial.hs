@@ -135,7 +135,8 @@ makeSerialAST packmap lang = makeSerialAST'
         -- choosing.
         selectPacker :: [(TypePacker, SerialAST)] -> Except MDoc (TypePacker, SerialAST)
         selectPacker [] = throwError $ "Cannot find constructor for" <+> pretty cv
-        selectPacker (x:_) = return x
+        selectPacker [x] = return x
+        selectPacker _ = throwError "Two you say, oh, get out of here"
 
 
     makeSerialAST' (FunF _ _)
@@ -166,15 +167,20 @@ makeSerialAST packmap lang = makeSerialAST'
 resolvePacker :: Lang -> TypeF -> ResolvedPacker -> Except MDoc (Maybe TypePacker)
 resolvePacker lang packedType@(AppF _ ts1) p@(unqualify . resolvedPackedType -> (_, AppU _ ts2))
     | length ts1 == length ts2 = do
-        unpackedType <- resolveP packedType (resolvedPackedType p)
-                                            (resolvedUnpackedType p)
-                                            (resolvedPackerGeneralTypes p)
-        return . Just $ TypePacker
-            { typePackerPacked = packedType
-            , typePackerUnpacked = unpackedType
-            , typePackerForward = resolvedPackerForward p
-            , typePackerReverse = resolvedPackerReverse p
-            }
+        maybeUnpackedType <- resolveP
+          packedType
+          (resolvedPackedType p)
+          (resolvedUnpackedType p)
+          (resolvedPackerGeneralTypes p)
+        case maybeUnpackedType of
+          (Just unpackedType) ->
+            return . Just $ TypePacker
+                { typePackerPacked = packedType
+                , typePackerUnpacked = unpackedType
+                , typePackerForward = resolvedPackerForward p
+                , typePackerReverse = resolvedPackerReverse p
+                }
+          Nothing -> return Nothing
     | otherwise = return Nothing -- this packer has the wrong cardinality, don't worry about it
     where
         -- Both sides of the packer function are guaranteed to have the same
@@ -205,7 +211,7 @@ resolvePacker lang packedType@(AppF _ ts1) p@(unqualify . resolvedPackedType -> 
             -> TypeU -- unresolved packed type (e.g., "dict" a b)
             -> TypeU -- unresolved unpacked type (e.g., "list" ("list" a b))
             -> Maybe (TypeU, TypeU) -- The general unresolved packed and unpacked types
-            -> Except MDoc TypeF -- the resolved unpacked types
+            -> Except MDoc (Maybe TypeF) -- the resolved unpacked types
         resolveP a b c generalTypes = do
             let (ga, ca) = unweaveTypeF lang a
             unpackedConcreteType <- case subtype b ca (Gamma 0 []) of
@@ -227,18 +233,19 @@ resolvePacker lang packedType@(AppF _ ts1) p@(unqualify . resolvedPackedType -> 
                 (Right g) -> do
                     return (apply g (existential c))
 
-            unpackedGeneralType <- case generalTypes of
+            maybeUnpackedGeneralType <- case generalTypes of
                 (Just (u, gc)) ->
-                    -- where r  is the resolved general type (no generics)
-                    --       u  is the unresolved general packed type that was stored in Desugar.hs
+                    -- where u  is the unresolved general packed type that was stored in Desugar.hs
                     --       gc is the unresolved general unpacked type
                     case subtype u ga (Gamma 0 []) of
-                        (Left typeErr) -> throwError $ pretty typeErr
+                        (Left _) -> return Nothing
                         (Right g) -> do
                             return . Just $ apply g (existential gc)
                 _ -> return Nothing
 
-            weaveTypeF unpackedGeneralType unpackedConcreteType
+            return $ case maybeUnpackedGeneralType of 
+              (Just unpackedGeneralType) -> Just $ weaveTypeF unpackedGeneralType unpackedConcreteType
+              Nothing -> Nothing
 
         unweaveTypeF :: Lang -> TypeF -> (TypeU, TypeU)
         unweaveTypeF l (UnkF (FV gv cv)) = (VarU (TV Nothing gv), VarU (TV (Just l) cv))
@@ -257,19 +264,16 @@ resolvePacker lang packedType@(AppF _ ts1) p@(unqualify . resolvedPackedType -> 
                 (vsg, vsc) = unzip $ map (unweaveTypeF l . snd) rs
             in (NamU n (TV Nothing gv) psg (zip ksg vsg), NamU n (TV (Just l) cv) psc (zip ksc vsc))
 
-        weaveTypeF :: Maybe TypeU -> TypeU -> Except MDoc TypeF
-        weaveTypeF Nothing t = throwError
-            $  "No general type found for serializable concrete type:" <+> pretty t
-            <> "\n  All serializable types must have general types"
-        weaveTypeF (Just (VarU (TV Nothing gv))) (VarU (TV _ cv)) = return $ VarF (FV gv cv)
-        weaveTypeF (Just (FunU tsg tg)) (FunU tsc tc) = FunF <$> zipWithM weaveTypeF (map Just tsg) tsc <*> weaveTypeF (Just tg) tc
-        weaveTypeF (Just (AppU tg tsg)) (AppU tc tsc) = AppF <$> weaveTypeF (Just tg) tc <*> zipWithM weaveTypeF (map Just tsg) tsc
-        weaveTypeF (Just (NamU n (TV Nothing gv) psg rsg)) (NamU _ (TV _ cv) psc rsc) =
-            NamF n (FV gv cv) <$> zipWithM weaveTypeF (map Just psg) psc <*> (
-              zip (zipWith FV (map fst rsg) (map fst rsc)) <$>
-              zipWithM weaveTypeF (map (Just . snd) rsg) (map snd rsc)
+        weaveTypeF :: TypeU -> TypeU -> TypeF
+        weaveTypeF (VarU (TV Nothing gv)) (VarU (TV _ cv)) = VarF (FV gv cv)
+        weaveTypeF (FunU tsg tg) (FunU tsc tc) = FunF (zipWith weaveTypeF tsg tsc) (weaveTypeF tg tc)
+        weaveTypeF (AppU tg tsg) (AppU tc tsc) = AppF (weaveTypeF tg tc) (zipWith weaveTypeF tsg tsc)
+        weaveTypeF (NamU n (TV Nothing gv) psg rsg) (NamU _ (TV _ cv) psc rsc) =
+            NamF n (FV gv cv) (zipWith weaveTypeF psg psc) (
+              zip (zipWith FV (map fst rsg) (map fst rsc)) 
+                  (zipWith weaveTypeF (map snd rsg) (map snd rsc))
             )
-        weaveTypeF (Just (ExistU (TV _ gv) _ _ _)) (ExistU (TV _ cv) _ _ _) = return $ UnkF (FV gv cv)
+        weaveTypeF ((ExistU (TV _ gv) _ _ _)) (ExistU (TV _ cv) _ _ _) = UnkF (FV gv cv)
         weaveTypeF gt ct = error . show $ (gt, ct)
 
         -- Replaces each generic term with an existential term of the same name
@@ -287,12 +291,11 @@ prettyMap p =
 
 prettyMapEntry :: MT.Text -> [ResolvedPacker] -> MDoc
 prettyMapEntry fv ps
-    = pretty fv <> "\n  "
-    <> vsep (map prettyMapPacker ps)
+    = vsep (map (\p -> align . vsep $ [pretty fv, indent 2 (prettyMapPacker p)]) ps)
 
 prettyMapPacker :: ResolvedPacker -> MDoc 
 prettyMapPacker p
-    = braces $ vsep
+    = encloseSep "{ " "}" ", " 
       [ "resolvedPackerTerm:" <+> pretty (resolvedPackerTerm p)
       , "resolvedPackedType:" <+> pretty (resolvedPackedType p)
       , "resolvedUnpackedType:" <+> pretty (resolvedUnpackedType p)

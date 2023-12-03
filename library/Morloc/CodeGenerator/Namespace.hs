@@ -1258,7 +1258,7 @@ instance Pretty MonoExpr where
     pretty (MonoBndVar (Just t) i) = parens $ "x" <> pretty i <+> ":" <+> pretty t
     pretty (MonoAcc    t n v e k) = parens (pretty e) <> "@" <> pretty k
     pretty (MonoList   _ _ es) = list (map pretty es)
-    pretty (MonoTuple  v (map fst -> es)) = tupled (map pretty es)
+    pretty (MonoTuple  v es) = pretty v <+> tupled (map pretty es)
     pretty (MonoRecord o v fs rs)
         = block 4 (pretty o <+> pretty v <> encloseSep "<" ">" "," (map pretty fs)) "manifold record stub"
     pretty (MonoLog    _ x) = viaShow x
@@ -1267,6 +1267,13 @@ instance Pretty MonoExpr where
     pretty (MonoStr    _ x) = viaShow x
     pretty (MonoNull   _) = "NULL"
 
+instance Pretty MonoHead where
+  pretty (MonoHead lang i args e) = block 4 "MonoHead" $ encloseSep "{" "}" ","
+    [ "lang:" <+> pretty lang
+    , "index:" <+> pretty i
+    , "args:" <+> list (map pretty args)
+    , "expr:" <+> pretty e
+    ]
 
 instance Pretty PoolCall where
     pretty _ = "PoolCall stub"

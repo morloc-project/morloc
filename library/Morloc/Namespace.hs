@@ -734,6 +734,20 @@ data EType =
 instance HasOneLanguage EType where
   langOf e = langOf (etype e) 
 
+instance HasOneLanguage UnresolvedPacker where
+  -- Finds languages of a packer, dies if there are internal conflicts
+  -- I need to find a way of making such conflicts un-representable
+  langOf p =
+    case unique ([ langOf (unresolvedPackedType p)
+                 , langOf (unresolvedUnpackedType p)
+                 ] <> map (Just . srcLang) (unresolvedPackerForward p <> unresolvedPackerReverse p)) of
+      [x] -> x
+      xs -> error
+        $ "Malformed UnresolvedPacker - this is a compiler bug in:"
+        <> "\n  " <> show p
+        <> "\nFound languages:"
+        <> "\n  " <> show xs
+
 instance HasOneLanguage Source where
   langOf s = Just (srcLang s)
   langOf' s = srcLang s

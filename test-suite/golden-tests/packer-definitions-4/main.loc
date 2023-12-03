@@ -1,0 +1,16 @@
+-- This fails
+module m (foo)
+
+type Cpp Real = "double"
+type Cpp (Tuple2 a b) = "std::tuple<$1,$2>" a b
+
+type Py Real = "float"
+type Py  (Tuple2 a b) = "tuple" a b
+
+source Cpp from "dumby.hpp" ("fcpp")
+fcpp :: Real -> Real
+
+source Py from "dumby.py" ("fpy")
+fpy :: Real -> Real
+
+foo x = (fcpp x, fpy x)

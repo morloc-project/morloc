@@ -53,8 +53,7 @@ import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import qualified Data.Set as Set
-import Morloc.Monad (runIdentity)
-import Control.Monad.Except (Except, runExcept, throwError)
+import Control.Monad.Except (runExcept)
 
 import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
 import qualified Morloc.CodeGenerator.Grammars.Translator.Rust as Rust
@@ -130,7 +129,7 @@ generate gASTs rASTs = do
 
 
 -- | Choose a single concrete implementation. In the future, this component
--- may be one of te more complex components of the morloc compiler. It will
+-- may be one of the more complex components of the morloc compiler. It will
 -- probably need to be implemented using an optimizing SMT solver. It will
 -- also need benchmarking data from all the implementations and possibly
 -- statistical info describing inputs.
@@ -634,6 +633,9 @@ parameterize' _ (SAnno (One (LogS x, c)) m) = return $ SAnno (One (LogS x, (c, [
 parameterize' _ (SAnno (One (StrS x, c)) m) = return $ SAnno (One (StrS x, (c, []))) m
 parameterize' args (SAnno (One (VarS v, c)) m) = do
   let args' = [r | r@(Arg _ v') <- args, v' == v]
+  MM.sayVVV $ "In parameterize' for m" <> pretty m
+  MM.sayVVV $ "  v:" <+> pretty v
+  MM.sayVVV $ "  c:" <+> pretty c
   return $ SAnno (One (VarS v, (c, args'))) m
 parameterize' _ (SAnno (One (CallS src, c)) m) = do
   return $ SAnno (One (CallS src, (c, []))) m
@@ -1179,6 +1181,10 @@ bindVarIds _ [] = error "bindVarIds: too few types"
 segment :: PolyHead -> MorlocMonad [MonoHead]
 segment (PolyHead m0 args0 e0) = do
   (heads, (lang, topExpr)) <- segmentExpr m0 (map ann args0) e0
+  MM.sayVVV $ "segmentation complete"
+  MM.sayVVV $ "topExpr language:" <+> pretty lang
+  MM.sayVVV $ "topExpr: " <+> pretty topExpr
+  MM.sayVVV $ "heads:" <+> list (map pretty heads)
   return (MonoHead lang m0 args0 topExpr : heads)
 
 segmentExpr
@@ -1222,9 +1228,12 @@ segmentExpr m args (PolyApp e es) = do
   return (ms ++ concat mss, (lang, MonoApp e' (map snd es')))
 
 segmentExpr m args (PolyLet i e1 e2) = do
-  (ms1, (_, e1')) <- segmentExpr m args e1
-  (ms2, (lang, e2')) <- segmentExpr m args e2
-  return (ms1 ++ ms2, (lang, MonoLet i e1' e2'))
+  MM.sayVVV "segmentExpr PolyLet"
+  (ms1, (lang1, e1')) <- segmentExpr m args e1
+  (ms2, (lang2, e2')) <- segmentExpr m args e2
+  if lang1 == lang2
+    then return (ms1 ++ ms2, (lang1, MonoLet i e1' e2'))
+    else MM.throwError . OtherError $ "Unequal languages in PolyLet"
 
 segmentExpr m args (PolyAcc t o v e k) = do
   t' <- typeP2typeFSafe t
@@ -1239,6 +1248,9 @@ segmentExpr m args (PolyList v t es) = do
   return (concat mss, (langOf' v, MonoList v' t' (map snd es')))
 
 segmentExpr m args (PolyTuple v es) = do
+  MM.sayVVV "segmentExpr PolyTuple"
+  MM.sayVVV $ " v:" <+> viaShow v
+  MM.sayVVV $ " map snd es:" <+> viaShow (map fst es) 
   v' <- pvar2fvarSafe v
   ts' <- mapM (typeP2typeFSafe . fst) es
   (mss, es') <- mapM (segmentExpr m args . snd) es |>> unzip
@@ -1308,16 +1320,16 @@ serialize heads = do
 makePackerSets :: [MonoHead] -> MorlocMonad [([MonoHead], Map.Map MT.Text [ResolvedPacker])]
 makePackerSets mheads = do
   let groupedHeads = groupSort $ [(lang, mhead) | mhead@(MonoHead lang _ _ _) <- mheads]
-  packers <- mapM (resolvePackers . snd) groupedHeads
+  packers <- mapM (uncurry resolvePackers) groupedHeads
   return (zip (map snd groupedHeads) packers)
 
 -- | This is a very naive solution to choosing a source function for a given
 -- (un)packer. It will only work reliable when there is only one source to
 -- choose from. In other cases, the selection will arbitrarily be the first in
 -- the source list.
-resolvePackers :: [MonoHead] -> MorlocMonad (Map.Map MT.Text [ResolvedPacker])
-resolvePackers mheads =
-  collectUnresolvedPackers mheads >>= mapM (mapM resolvePacker)
+resolvePackers :: Lang -> [MonoHead] -> MorlocMonad (Map.Map MT.Text [ResolvedPacker])
+resolvePackers lang mheads =
+  collectUnresolvedPackers lang mheads >>= mapM (mapM resolvePacker)
   where
     resolvePacker :: UnresolvedPacker -> MorlocMonad ResolvedPacker
     resolvePacker up = do
@@ -1336,8 +1348,8 @@ resolvePackers mheads =
           , resolvedPackerGeneralTypes = unresolvedPackerGeneralTypes up
           }
 
-collectUnresolvedPackers :: [MonoHead] -> MorlocMonad (Map.Map MT.Text [UnresolvedPacker])
-collectUnresolvedPackers mheads = do
+collectUnresolvedPackers :: Lang -> [MonoHead] -> MorlocMonad (Map.Map MT.Text [UnresolvedPacker])
+collectUnresolvedPackers lang mheads = do
   packmap <- mapM unresolvedPackers mheads |>> Map.unionsWith Set.union
   return $ Map.map Set.toList packmap
   where
@@ -1345,6 +1357,7 @@ collectUnresolvedPackers mheads = do
     unresolvedPackers (MonoHead _ m0 _ e0) = do
       let manifoldIndices = unique (m0 : f e0)
       packmaps <- mapM MM.metaPackMap manifoldIndices
+               |>> map (Map.filter (all ((==) (Just lang) . langOf)))
       return
         . Map.unionsWith Set.union
         . map ( Map.map Set.fromList
@@ -1370,6 +1383,11 @@ collectUnresolvedPackers mheads = do
 serializeOne :: Map.Map MT.Text [ResolvedPacker] -> MonoHead -> MorlocMonad SerialManifold
 serializeOne packmap (MonoHead lang m0 args0 e0) = do
   let form0 = ManifoldFull [Arg i (L . typeSof $ Map.lookup i typemap) | (Arg i _) <- args0]
+
+  MM.sayVVV $ "In serializeOne for" <+> "m" <> pretty m0 <+> pretty lang <+> "segment"
+  MM.sayVVV $ "  typemap:" <+> viaShow typemap
+  MM.sayVVV $ "  This map we made from the expression:\n  " <> pretty e0
+
   se1 <- serialExpr e0
   let sm = SerialManifold m0 lang form0 se1
   wireSerial lang packmap sm
@@ -1466,7 +1484,7 @@ serializeOne packmap (MonoHead lang m0 args0 e0) = do
         [] -> return outputType
         remaining -> return $ FunF remaining outputType
     return $ AppSrcN appType src args
-  nativeExpr e@(MonoApp (MonoPoolCall t _ _ _) _) = serialExpr e >>= naturalizeN t
+  nativeExpr e@(MonoApp (MonoPoolCall t _ _ _) _) = serialExpr e |>> naturalizeN "a" lang packmap t
   nativeExpr (MonoApp _ _) = error "Illegal application"
   nativeExpr (MonoSrc t src) = return (SrcN t src)
   nativeExpr (MonoBndVar (Just t) i) = return (BndVarN t i)
@@ -1518,11 +1536,6 @@ serializeOne packmap (MonoHead lang m0 args0 e0) = do
     (Left serr) -> MM.throwError . SerializationError . render $ serr
     (Right ne) -> return ne
 
-  naturalizeN :: TypeF -> SerialExpr -> MorlocMonad NativeExpr
-  naturalizeN t se = case runExcept (DeserializeN t <$> Serial.makeSerialAST packmap lang t <*> pure se) of
-    (Left serr) -> MM.throwError . SerializationError . render $ serr
-    (Right ne) -> return ne
-
   -- infer the preferred serialization state for an expression.
   inferState :: MonoExpr -> SerializationState
   inferState (MonoApp MonoPoolCall{} _) = Serialized
@@ -1549,6 +1562,7 @@ instance IsSerializable NativeExpr where
   serialLet = SerialLetN
   nativeLet = NativeLetN
 
+--
 wireSerial :: Lang -> Map.Map MT.Text [ResolvedPacker] -> SerialManifold -> MorlocMonad SerialManifold
 wireSerial lang packmap sm0 = foldSerialManifoldM fm sm0 |>> snd
   where
@@ -1603,8 +1617,8 @@ wireSerial lang packmap sm0 = foldSerialManifoldM fm sm0 |>> snd
     wrapAsNeeded e (i, req) = case (req, Map.lookup i formMap) of
       (SerialContent,          Just (NativeContent, Just t)) -> serialLet i (serializeS t (BndVarN t i)) e
       (NativeAndSerialContent, Just (NativeContent, Just t)) -> serialLet i (serializeS t (BndVarN t i)) e
-      (NativeContent,          Just (SerialContent, Just t)) -> nativeLet i (naturalizeN t (BndVarS (Just t) i)) e
-      (NativeAndSerialContent, Just (SerialContent, Just t)) -> nativeLet i (naturalizeN t (BndVarS (Just t) i)) e
+      (NativeContent,          Just (SerialContent, Just t)) -> nativeLet i (naturalizeN "b" lang packmap t (BndVarS (Just t) i)) e
+      (NativeAndSerialContent, Just (SerialContent, Just t)) -> nativeLet i (naturalizeN "c" lang packmap t (BndVarS (Just t) i)) e
       _ -> e
 
   manifoldToMap :: (HasRequest t, MayHaveTypeF t) => ManifoldForm (Or TypeS TypeF) t -> Map.Map Int (Request, Maybe TypeF)
@@ -1616,19 +1630,24 @@ wireSerial lang packmap sm0 = foldSerialManifoldM fm sm0 |>> snd
     f (ManifoldPass ys) = mapRequestFromYs ys
     f (ManifoldPart xs ys) = Map.union (mapRequestFromXs xs) (mapRequestFromYs ys)
 
-  naturalizeN :: TypeF -> SerialExpr -> NativeExpr
-  naturalizeN t se = case runExcept (DeserializeN t <$> Serial.makeSerialAST packmap lang t <*> pure se) of
-    (Right x) -> x
-    (Left serr) -> error $ "for language " <> show lang
-                         <> " and deserializer for type (" <> show t
-                         <> ") and serialExpr typeS (" <> show (typeSof se)
-                         <> ") found error:" <> show serr
-
   serializeS :: TypeF -> NativeExpr -> SerialExpr
   serializeS t se = case runExcept (SerializeS <$> Serial.makeSerialAST packmap lang t <*> pure se) of
     (Right x) -> x
     (Left serr) -> error $ "for language " <> show lang <> " and serializer for type " <> show t <> " found error:" <> show serr
 
+
+
+naturalizeN :: MDoc -> Lang -> Map.Map MT.Text [ResolvedPacker] -> TypeF -> SerialExpr -> NativeExpr
+naturalizeN place lang packmap t se = case runExcept (DeserializeN t <$> Serial.makeSerialAST packmap lang t <*> pure se) of
+  (Right x) -> x
+  (Left serr) -> error . MT.unpack . render
+    $ "from " <> place <> " for language " <> pretty lang
+    <> "\n  and deserializer for type:"
+    <> "\n    " <> pretty t
+    <> "\n  and serialExpr typeS:"
+    <> "\n    " <> viaShow (typeSof se)
+    <> "\n  found error:"
+    <> "\n    " <> viaShow serr
 
 data Request = SerialContent | NativeContent | NativeAndSerialContent
   deriving(Ord, Eq, Show)
