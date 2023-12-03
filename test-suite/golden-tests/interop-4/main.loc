@@ -1,7 +1,8 @@
 module main (foo)
 
+import conventions (Real)
 import pybase (id)
 import cppbase (add)
 
-foo py :: "float" -> "float"
+foo :: Real -> Real
 foo x = id (add 1.0 x)

@@ -1,10 +1,10 @@
 module main (foo)
 
+import conventions (Str, Real)
 import rbase (sum)
 
 table (Person a) = Person {name :: Str, info :: a}
-table R (Person a) = "data.frame" {name :: "character", info :: a}
+table R (Person a) = "data.frame" {name :: Str, info :: a}
 
 foo :: Person Real -> Real
-foo R :: Person "numeric" -> "numeric"
 foo x = sum (x@info)

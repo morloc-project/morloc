@@ -2,5 +2,6 @@ module bar (*)
 
 source R from "main.R" ("add")
 
+type R Real = "numeric"
+
 add :: Real -> Real -> Real
-add R :: "numeric" -> "numeric" -> "numeric"

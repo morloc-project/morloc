@@ -1,6 +1,0 @@
-module main (foo)
-
-import rustbase (map, mul)
-
--- literal function with constant application
-foo xs = map (mul 2.0) xs

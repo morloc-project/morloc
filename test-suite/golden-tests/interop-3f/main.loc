@@ -1,9 +1,6 @@
 module main (foo)
 
-type Py Real = "float"
-type R Real = "numeric"
-type Cpp Real = "double"
-
+import conventions (Real)
 import pybase (div)
 import rbase (mul)
 import cppbase (add)

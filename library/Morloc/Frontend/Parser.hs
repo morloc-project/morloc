@@ -369,13 +369,10 @@ pSigE :: Parser ExprI
 pSigE = do
   label' <- tag freename
   v <- freenameL
-  lang <- optional (try pLang)
-  setLang lang
   _ <- op "::"
   props <- option [] (try pPropertyList)
   t <- pTypeGen
   constraints <- option [] pConstraints
-  setLang Nothing
   exprI $
     SigE
       (EV v)

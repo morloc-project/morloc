@@ -9,12 +9,11 @@ source py from "main.py"
 type py Str = "str"
 type py Int = "int"
 type py (Map key val) = "dict" key val
+type py (Tuple2 a b) = "tuple" a b
+type py (List a) = "list" a
 
 -- These do not need to be exported (and indeed should not be)
 packMap :: pack => ([key],[val]) -> Map key val
-packMap py :: pack => ([key],[val]) -> "dict" key val
-
 unpackMap :: unpack => Map key val -> ([key],[val])
-unpackMap py :: unpack => "dict" key val -> ([key],[val])
 
 person :: Str -> Map Str Int

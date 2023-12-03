@@ -1,10 +1,11 @@
 module main (foo)
 
+import conventions (List, Real)
 import pybase (map, add)
 import rbase (fold)
 
 -- yes, this is an odd definition of `sum`
-sum R :: ["numeric"] -> "numeric" -> "numeric"
+sum :: [Real] -> Real -> Real
 sum xs b = fold add b xs
 
 foo xs = sum (map (add 1.0) xs) 0.0

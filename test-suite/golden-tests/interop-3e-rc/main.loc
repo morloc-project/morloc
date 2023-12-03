@@ -1,9 +1,10 @@
 module main (foo)
 
+import conventions (List, Real)
 import rbase (zipWith, mul)
 import cppbase (add)
 
 add3 x y z = add x (add y z)
 
-foo R :: "numeric" -> ["numeric"] -> ["numeric"] -> ["numeric"]
+foo :: Real -> [Real] -> [Real] -> [Real]
 foo x = zipWith (\y -> add3 (mul x y) y)

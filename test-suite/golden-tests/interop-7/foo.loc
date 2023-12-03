@@ -1,15 +1,6 @@
 module m (foo)
 
-type R Str = "character"
-type R Real = "numeric"
-type R Int = "integer"
-type R (Tuple3 a b c) = "list" a b c
-
-type Cpp Str = "std::string"
-type Cpp Int = "int"
-type Cpp Real = "double"
-type Cpp Bool = "bool"
-type Cpp (Tuple3 a b c) = "std::tuple<$1,$2,$3>" a b c
+import conventions (Str, Int, Real, Bool, Tuple3)
 
 source R from "foo.R" ("f")
 source Cpp from "foo.hpp" ("g")

@@ -52,15 +52,19 @@ handling for several very different languages (proofs-of-concept).
        [ ] When building, additionally raise error if they have no source (this is already done somewhere down the line)
  - [ ] Fix the performance bug (8 million lines of log is way too much)
        This is probably related to removal of the cut step in the typechecker
+ - [ ] Replace JSON serialization
+ - [ ] Address all compiler warnings
+ - [ ] Update Hackage release
+ - [ ] Ensure github actions passes
 
 0.43.0 [2023.xx.xx]
 -------------------
 
- [ ] Replace JSON serialization
- [ ] Address all compiler warnings
- [ ] Update Hackage release
- [ ] Ensure github actions passes
+ * Fix record type inference 
+ * Fix bug in collecting packers (missed packers required by root manifold)
+ * Allow a module to explicitly export packers
 
+ [ ] Remove concrete type signatures - always infer
 
 0.42.0 [2023.10.11]
 -------------------

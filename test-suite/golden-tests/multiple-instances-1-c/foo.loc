@@ -1,5 +1,6 @@
 module main (rms)
 
+import conventions (List, Real)
 import cppbase
 
 source cpp from "rms.h"
@@ -7,5 +8,4 @@ source cpp from "rms.h"
   , "rms2" as rms
   )
 
-rms cpp :: ["double"] -> "double"
 rms :: [Real] -> Real

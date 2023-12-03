@@ -3,12 +3,11 @@ module m (foo)
 source Py from "foo.py" ("g", "f")
 
 type Py Real = "float"
+type Py Bool = "bool"
+type Py (List a) = "list" a
 
 g :: (a -> [a] -> [a]) -> a -> a
-g Py :: (a -> [a] -> [a]) -> a -> a
-
 f :: (a -> Bool) -> [a] -> [a]
-f Py :: (a -> Bool) -> [a] -> [a]
 
 foo = g h1 4.2 where
   h1 x xs = h2 xs

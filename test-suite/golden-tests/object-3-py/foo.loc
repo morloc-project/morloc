@@ -1,14 +1,14 @@
 module main (hello)
 
+import conventions (Int, Str)
 import pybase (id)
 
 source py from "person.py" ("PersonObj" as Person, Person.hello as hello)
 
 object (Person a) = Person {name :: Str, info :: a}
-object py (Person a) = PersoPersonn {name :: "str", info :: a}
+object py (Person a) = PersoPersonn {name :: Str, info :: a}
 
 personWithAge :: Str -> Int -> Person Int
 personWithAge name age = Person {name = name, info = age}
 
 hello :: Person a -> Str
-hello py :: Person a -> "str"

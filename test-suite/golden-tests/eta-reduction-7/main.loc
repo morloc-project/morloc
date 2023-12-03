@@ -2,6 +2,8 @@ module main (foo)
 
 import pybase (map, id)
 
+type Py Real = "float"
+type Py (List a) = "list" a
+
 foo :: Real -> [Real] -> [Real]
-foo Py :: "float" -> ["float"] -> ["float"]
 foo x = map id

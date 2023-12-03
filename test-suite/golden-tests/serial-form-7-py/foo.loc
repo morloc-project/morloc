@@ -1,9 +1,9 @@
 module main (foo)
 
+import conventions (Str, List, Int)
 import pybase (id, Map)
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
 foo :: Map Str [Int] -> Map Str [Int]
-foo py :: Map "str" ["int"] -> Map "str" ["int"]
 foo xs = id xs

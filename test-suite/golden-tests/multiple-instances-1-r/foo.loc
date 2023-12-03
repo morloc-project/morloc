@@ -1,5 +1,6 @@
 module main (rms)
 
+import conventions (List, Real)
 import rbase
 
 source r from "rms.R"
@@ -7,5 +8,4 @@ source r from "rms.R"
   , "rms2" as rms
   )
 
-rms r :: ["numeric"] -> "numeric"
 rms :: [Real] -> Real

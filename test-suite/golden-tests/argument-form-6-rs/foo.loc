@@ -1,6 +1,0 @@
-module main (foo)
-
-import rustbase (zip_with, mul)
-
--- literal function with no application
-foo xs ys = zip_with mul xs ys

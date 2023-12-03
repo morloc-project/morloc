@@ -1,12 +1,11 @@
 module m (foo)
 
+import conventions (Int)
+
 source R from "foo.R" ("add")
 source py from "foo.py" ("sub")
 
 sub :: Int -> Int -> Int
 add :: Int -> Int -> Int
-
-type R Int = "integer"
-type Py Int = "int"
 
 foo x = (sub (sub (add 1 x) x) x)

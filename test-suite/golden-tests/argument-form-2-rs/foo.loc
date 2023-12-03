@@ -1,7 +1,0 @@
-module main (foo)
-
-import rustbase (add, mul)
-
--- full application with variable passing
--- cannot optimize out this manifold
-foo x = add x (mul 20.0 x)

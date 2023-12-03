@@ -2,6 +2,7 @@ module main (sub)
 
 -- n10 - source n, import n
 
+import conventions (Real)
 import cppbase (sub)
 import pybase (sub)
 import rbase (sub)
@@ -10,5 +11,3 @@ source py from "foo.py" ("sub_loc" as sub)
 source r from "foo.R" ("sub_loc" as sub)
 
 sub :: Real -> Real -> Real
-sub py :: "float" -> "float" -> "float"
-sub r :: "numeric" -> "numeric" -> "numeric"
