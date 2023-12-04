@@ -28,7 +28,7 @@ import qualified Data.List as DL
 -- As far as serialization is concerned, properties and constraints do not matter.
 instance P.PartialOrd TypeU where
   (<=) (VarU v1) (VarU v2) = v1 == v2
-  (<=) (ExistU v1 ts1 _ rs1) (ExistU v2 ts2 _ rs2)
+  (<=) (ExistU v1 ts1 rs1) (ExistU v2 ts2 rs2)
     =  v1 == v2
     && length ts1 == length ts2
     && and (zipWith (P.<=) ts1 ts2)

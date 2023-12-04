@@ -21,8 +21,8 @@ module Morloc.CodeGenerator.Serial
 
 import Morloc.CodeGenerator.Internal
 import Morloc.CodeGenerator.Namespace
+import qualified Morloc.BaseTypes as BT
 import qualified Data.Map as Map
-import qualified Morloc.Frontend.Lang.DefaultTypes as Def
 import Morloc.Data.Doc
 import Morloc.Typecheck.Internal (subtype, apply, unqualify, substitute)
 import Control.Monad.Except (Except, throwError)
@@ -102,12 +102,12 @@ makeSerialAST packmap lang = makeSerialAST'
     -- type. So it will only be represented in the serialization form. As a
     -- string, for now.
     makeSerialAST' (UnkF (FV gv _)) = return $ SerialUnknown (FV gv (defaultSerialConcreteType lang))
-    makeSerialAST' (VarF v@(FV _ cv))
-      | isPrimitiveType Def.defaultNull   lang cv = return $ SerialNull   v
-      | isPrimitiveType Def.defaultBool   lang cv = return $ SerialBool   v
-      | isPrimitiveType Def.defaultString lang cv = return $ SerialString v
-      | isPrimitiveType Def.defaultReal   lang cv = return $ SerialReal   v
-      | isPrimitiveType Def.defaultInt    lang cv = return $ SerialInt    v
+    makeSerialAST' (VarF v@(FV gv cv))
+      | gv == BT.unit = return $ SerialNull v
+      | gv == BT.bool = return $ SerialBool v
+      | gv == BT.str = return $ SerialString v
+      | gv == BT.real = return $ SerialReal v
+      | gv == BT.int = return $ SerialInt v
       | otherwise = case Map.lookup cv packmap of
           (Just ps) -> do
             packers <- mapM makeTypePacker ps
@@ -142,8 +142,8 @@ makeSerialAST packmap lang = makeSerialAST'
     makeSerialAST' (FunF _ _)
       = throwError "Cannot serialize functions"
     makeSerialAST' t@(AppF (VarF v@(FV generalTypeName concreteTypeName)) ts@(firstType:_))
-      | generalTypeName == Def.listG = SerialList v <$> makeSerialAST' firstType
-      | generalTypeName == Def.tupleG (length ts) = SerialTuple v <$> mapM makeSerialAST' ts
+      | generalTypeName == BT.list = SerialList v <$> makeSerialAST' firstType
+      | generalTypeName == BT.tuple (length ts) = SerialTuple v <$> mapM makeSerialAST' ts
       | otherwise = case Map.lookup concreteTypeName packmap of
           (Just ps) -> do
             packers <- catMaybes <$> mapM (resolvePacker lang t) ps
@@ -273,7 +273,7 @@ resolvePacker lang packedType@(AppF _ ts1) p@(unqualify . resolvedPackedType -> 
               zip (zipWith FV (map fst rsg) (map fst rsc)) 
                   (zipWith weaveTypeF (map snd rsg) (map snd rsc))
             )
-        weaveTypeF ((ExistU (TV _ gv) _ _ _)) (ExistU (TV _ cv) _ _ _) = UnkF (FV gv cv)
+        weaveTypeF ((ExistU (TV _ gv) _ _)) (ExistU (TV _ cv) _ _) = UnkF (FV gv cv)
         weaveTypeF gt ct = error . show $ (gt, ct)
 
         -- Replaces each generic term with an existential term of the same name

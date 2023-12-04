@@ -26,10 +26,10 @@ import qualified Morloc.Monad as MM
 type FData =
   ( [MDoc] -- pool call command arguments, (e.g., ["RScript", "pool.R", "4", "--"])
   , MDoc -- subcommand name
-  , TypeP -- argument type
+  , Type -- argument type
   )
 
-generate :: [NexusCommand] -> [(TypeP, Int)] -> MorlocMonad Script
+generate :: [NexusCommand] -> [(Type, Int)] -> MorlocMonad Script
 generate cs xs = do
   config <- MM.ask
 
@@ -46,7 +46,7 @@ generate cs xs = do
       , scriptMake = [SysExe outfile]
       }
 
-getFData :: (TypeP, Int) -> MorlocMonad FData
+getFData :: (Type, Int) -> MorlocMonad FData
 getFData (t, i) = do
   mayName <- MM.metaName i
   case mayName of
@@ -105,19 +105,8 @@ def usage():
 usageLineT :: FData -> MDoc
 usageLineT (_, name', t) = vsep
   ( [idoc|print("  #{name'}")|]
-  : writeTypes (gtypeOf t)
+  : writeTypes t
   )
-
-gtypeOf (UnkP (PV _ (Just v) _)) = UnkT (TV Nothing v)
-gtypeOf (VarP (PV _ (Just v) _)) = VarT (TV Nothing v)
-gtypeOf (FunP ts t) = FunT (map gtypeOf ts) (gtypeOf t)
-gtypeOf (AppP t ts) = AppT (gtypeOf t) (map gtypeOf ts)
-gtypeOf (NamP o (PV _ (Just n) _) ps rs)
-  = NamT o (TV Nothing n)
-    (map gtypeOf ps)
-    [(k, gtypeOf t) | (PV _ (Just k) _, t) <- rs]
-gtypeOf _ = UnkT (TV Nothing "?") -- this shouldn't happen
-
 
 usageLineConst :: NexusCommand -> MDoc
 usageLineConst cmd = vsep

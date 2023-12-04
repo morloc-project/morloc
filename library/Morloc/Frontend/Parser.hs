@@ -19,7 +19,7 @@ import Data.Void (Void)
 import Morloc.Frontend.Namespace
 import Text.Megaparsec
 import Text.Megaparsec.Char hiding (eol)
-import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
+import qualified Morloc.BaseTypes as BT
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -131,7 +131,7 @@ pModule expModuleName = do
 
     symbolOfTypeU :: TypeU -> Set.Set Symbol
     symbolOfTypeU (VarU (TV _ v)) = Set.singleton $ TypeSymbol v
-    symbolOfTypeU (ExistU (TV _ v) _ _ _) = Set.singleton $ TypeSymbol v
+    symbolOfTypeU (ExistU (TV _ v) _ _) = Set.singleton $ TypeSymbol v
     symbolOfTypeU (ForallU _ t) = symbolOfTypeU t
     symbolOfTypeU (AppU t _) = symbolOfTypeU t
     symbolOfTypeU (FunU _ _) = error "So, you want to pack a function? I'm accepting PRs."
@@ -298,7 +298,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
   desugarTableEntries lang NamTable (k0, t0) = (,) k0 <$> f t0 where
     f :: TypeU -> Parser TypeU
     f (ForallU v t) = ForallU v <$> f t
-    f t = return $ head (MLD.defaultList lang t)
+    f t = return $ BT.listU t
 
   pNamType :: Parser NamType
   pNamType = choice [pNamObject, pNamTable, pNamRecord] 
@@ -562,7 +562,6 @@ pType =
       pExistential
   <|> try pFunU
   <|> try pUniU
-  <|> try pNamU
   <|> try pAppU
   <|> try parensType
   <|> pListU
@@ -573,34 +572,16 @@ pUniU :: Parser TypeU
 pUniU = do
   _ <- symbol "("
   _ <- symbol ")"
-  lang <- CMS.gets stateLang
-  v <- newvar lang
-  case (lang, MLD.defaultNull lang) of
-    (Nothing, [t]) -> return t -- there is a unique general unit type
-    (_, []) -> fancyFailure . Set.singleton . ErrorFail
-      $ "No NULL type is defined for language" <> maybe "Morloc" show lang
-    (_, ts) -> return $ ExistU v [] ts [] -- other languages maybe have multiple definitions
+  return BT.unitU
 
 parensType :: Parser TypeU
 parensType = tag (symbol "(") >> parens pType
 
 pTupleU :: Parser TypeU
 pTupleU = do
-  lang <- CMS.gets stateLang
   _ <- tag (symbol "(")
   ts <- parens (sepBy1 pType (symbol ","))
-  return $ head (MLD.defaultTuple lang ts)
-
--- A naked record with default constructor.  Currently this is legal in a
--- signature, but it probably shouldn't be (it isn't in haskell), instead it
--- should only be used in type definitions (pTypeDef).
-pNamU :: Parser TypeU
-pNamU = do
-  _ <- tag (symbol "{")
-  entries <- braces (sepBy1 pNamEntryU (symbol ","))
-  lang <- CMS.gets stateLang
-  return $ head (MLD.defaultRecord lang entries)
-
+  return $ BT.tupleU ts
 
 
 pNamEntryU :: Parser (MT.Text, TypeU)
@@ -613,7 +594,7 @@ pNamEntryU = do
 pExistential :: Parser TypeU
 pExistential = do
   v <- angles freenameL
-  return (ExistU (TV Nothing v) [] [] [])
+  return (ExistU (TV Nothing v) [] [])
 
 pAppU :: Parser TypeU
 pAppU = do
@@ -621,7 +602,7 @@ pAppU = do
   args <- many1 pType'
   return $ AppU (VarU t) args
   where
-    pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU <|> pNamU
+    pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU
 
 pFunU :: Parser TypeU
 pFunU = do
@@ -629,14 +610,13 @@ pFunU = do
   case (init ts, last ts) of
     (inputs, output) -> return $ FunU inputs output
   where
-    pType' = try pUniU <|> try parensType <|> try pAppU <|> pVarU <|> pListU <|> pTupleU <|> pNamU
+    pType' = try pUniU <|> try parensType <|> try pAppU <|> pVarU <|> pListU <|> pTupleU
 
 pListU :: Parser TypeU
 pListU = do
   _ <- tag (symbol "[")
   t <- brackets pType
-  lang <- CMS.gets stateLang
-  return $ head (MLD.defaultList lang t)
+  return $ BT.listU t
 
 pVarU :: Parser TypeU
 pVarU = VarU <$> pTerm

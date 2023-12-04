@@ -62,7 +62,7 @@ findTypeTerms :: TypeU -> [TVar]
 findTypeTerms (VarU v)
   | isGeneric v = [ ]
   | otherwise   = [v]
-findTypeTerms (ExistU _ ps1 ds2 rs2) = concatMap findTypeTerms (ps1 ++ ds2 ++ map snd rs2)
+findTypeTerms (ExistU _ ps1 rs2) = concatMap findTypeTerms (ps1 ++ map snd rs2)
 findTypeTerms (ForallU _ e) = findTypeTerms e
 findTypeTerms (FunU ts t) = concatMap findTypeTerms ts <> findTypeTerms t
 findTypeTerms (AppU t ts) = findTypeTerms t <> concatMap findTypeTerms ts

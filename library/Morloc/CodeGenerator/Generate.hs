@@ -43,7 +43,7 @@ module Morloc.CodeGenerator.Generate
 ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Typecheck (typecheck, peak)
+import Morloc.CodeGenerator.Infer (inferConcreteTypes)
 import Morloc.Data.Doc
 import Morloc.Pretty ()
 import qualified Data.Map as Map
@@ -78,7 +78,7 @@ realityCheck es = do
     |>> partitionEithers
 
   -- concrete typecheck fully realized tree
-  rASTs' <- mapM typecheck rASTs
+  rASTs' <- mapM inferConcreteTypes rASTs
 
   return (gASTs, rASTs')
 
@@ -98,7 +98,7 @@ generate gASTs rASTs = do
   -- The call passes the pool an index for the function (manifold) that will be called.
   nexus <- Nexus.generate
     gSerial
-    [(t, i) | (SAnno (One (_, Idx _ t)) i) <- rASTs]
+    [(gtypeOf t, i) | (SAnno (One (_, Idx _ t)) i) <- rASTs]
 
 
   -- initialize counter for use in express
@@ -126,6 +126,16 @@ generate gASTs rASTs = do
     >>= mapM (uncurry encode)    -- Script
 
   return (nexus, pools)
+
+gtypeOf (UnkP (PV _ (Just v) _)) = UnkT (TV Nothing v)
+gtypeOf (VarP (PV _ (Just v) _)) = VarT (TV Nothing v)
+gtypeOf (FunP ts t) = FunT (map gtypeOf ts) (gtypeOf t)
+gtypeOf (AppP t ts) = AppT (gtypeOf t) (map gtypeOf ts)
+gtypeOf (NamP o (PV _ (Just n) _) ps rs)
+  = NamT o (TV Nothing n)
+    (map gtypeOf ps)
+    [(k, gtypeOf t) | (PV _ (Just k) _, t) <- rs]
+gtypeOf _ = UnkT (TV Nothing "?") -- this shouldn't happen
 
 
 -- | Choose a single concrete implementation. In the future, this component
@@ -1156,7 +1166,6 @@ expressPolyExpr _ (SAnno (One (AppS (SAnno (One (VarS f, _)) _) _, _)) _)
 expressPolyExpr _ (SAnno (One (e, (Idx _ t, _))) m) = do
   MM.sayVVV "Bad case"
   MM.sayVVV $ "  t :: " <> pretty t
-  peak e
   name' <- MM.metaName m
   case name' of
       (Just v) -> MM.throwError . ConcreteTypeError $ MissingConcreteSignature v (langOf' t)

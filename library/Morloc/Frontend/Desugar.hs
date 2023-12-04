@@ -19,7 +19,7 @@ import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.GMap as GMap
-import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
+import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Frontend.PartialOrder as MTP
@@ -78,7 +78,7 @@ checkForSelfRecursion d = do
     hasTerm v (NamU o n (p:ps) []) = hasTerm v p || hasTerm v (NamU o n ps [])
     hasTerm _ (NamU _ _ [] []) = False
 
-    hasTerm _ (ExistU _ _ _ _) = error "There should not be existentionals in typedefs"
+    hasTerm _ (ExistU _ _ _) = error "There should not be existentionals in typedefs"
 
 
 -- | Consider export/import information to determine which terms are imported
@@ -221,11 +221,10 @@ desugarType h = f Set.empty
   --     (_, t) <- foldlM (mergeAliases v 0) t' ts'
   --     f t
   --   Nothing -> MM.throwError . CallTheMonkeys $ "Type term in VarU missing from type map"
-  f bnd (ExistU v ps ds rs) = do
+  f bnd (ExistU v ps rs) = do
     ps' <- mapM (f bnd) ps
-    ds' <- mapM (f bnd) ds
     rs' <- mapM (\(k,v) -> (,) k <$> f bnd v) rs
-    return $ ExistU v ps' ds' rs'
+    return $ ExistU v ps' rs'
   f bnd (FunU ts t) = FunU <$> mapM (f bnd) ts <*> f bnd t
   f bnd (NamU o n ps rs) = do
     (n', o') <- case Map.lookup n h of
@@ -255,7 +254,7 @@ desugarType h = f Set.empty
             (vs, t) <- foldlM (mergeAliases v (length ts)) t' ts' |>> renameTypedefs bnd
             if length ts == length vs
               -- substitute parameters into alias
-              then f bnd (foldr parsub (chooseExistential t) (zip vs (map chooseExistential ts)))
+              then f bnd (foldr parsub t (zip vs ts))
               else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
           -- default types like "Int" or "Tuple2" won't be in the map
           _ -> AppU (VarU v) <$> mapM (f bnd) ts
@@ -295,7 +294,7 @@ desugarType h = f Set.empty
   parsub (v, t2) t1@(VarU v0)
     | v0 == v = t2 -- substitute
     | otherwise = t1 -- keep the original
-  parsub _ (ExistU _ _ _ _) = error "What the bloody hell is an existential doing down here?"
+  parsub _ (ExistU _ _ _) = error "What the bloody hell is an existential doing down here?"
   parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
   parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
   parsub pair (AppU t ts) = AppU (parsub pair t) (map (parsub pair) ts)
@@ -319,19 +318,6 @@ desugarType h = f Set.empty
       t1' = foldl (flip ForallU) t1 ts1
       t2' = foldl (flip ForallU) t2 ts2
 
--- | Resolve existentials by choosing the first default type (if it exists)
--- FIXME: How this is done (and why) is of deep relevance to understanding morloc, the decision should not be arbitrary
--- FIXME: And why is it done? Resloving existentials before typechecking seems sketch
-chooseExistential :: TypeU -> TypeU
-chooseExistential (VarU v) = VarU v
-chooseExistential (ExistU _ _ _ (_:_)) = error "Existentials with keys cannot be resolved yet"
-chooseExistential (ExistU _ _ (t:_) _) = chooseExistential t
-chooseExistential (ExistU _ _ [] _) = error "Existential with no default value"
-chooseExistential (ForallU v t) = ForallU v (chooseExistential t)
-chooseExistential (FunU ts t) = FunU (map chooseExistential ts) (chooseExistential t)
-chooseExistential (AppU t ts) = AppU (chooseExistential t) (map chooseExistential ts)
-chooseExistential (NamU o n ps rs) = NamU o n (map chooseExistential ps) [(k, chooseExistential t) | (k,t) <- rs]
-
 -- TODO: document
 nullify :: DAG m e ExprI -> DAG m e ExprI
 nullify = MDD.mapNode f where
@@ -343,7 +329,7 @@ nullify = MDD.mapNode f where
 
     nullifyT :: TypeU -> TypeU
     nullifyT (FunU ts t) = FunU (filter (not . isNull) (map nullifyT ts)) (nullifyT t)
-    nullifyT (ExistU v ts ds rs) = ExistU v (map nullifyT ts) (map nullifyT ds) (map (second nullifyT) rs)
+    nullifyT (ExistU v ts rs) = ExistU v (map nullifyT ts) (map (second nullifyT) rs)
     nullifyT (ForallU v t) = ForallU v (nullifyT t)
     nullifyT (AppU t ts) = AppU (nullifyT t) (map nullifyT ts)
     nullifyT (NamU o v ds rs) = NamU o v (map nullifyT ds) (map (second nullifyT) rs)
@@ -351,8 +337,7 @@ nullify = MDD.mapNode f where
 
 
     isNull :: TypeU -> Bool
-    isNull (ExistU _ _ (t:_) _) = t `elem` MLD.defaultNull (langOf t)
-    isNull t = t `elem` MLD.defaultNull (langOf t)
+    isNull t = t == BT.unitU
 
 
 removeTypeImports :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
@@ -575,12 +560,10 @@ switchLang lang = f where
   f (ForallU (TV _ v) t) = ForallU (TV (Just lang) v) (f t)
   f (FunU ts t) = FunU (map f ts) (f t)
   f (AppU t ts) = AppU (f t) (map f ts)
-  f (ExistU (TV _ v) ts ds rs) =
+  f (ExistU (TV _ v) ts rs) =
       let rs' = map (f . snd) rs
           ts' = map f ts
-          ds' = map f ds
-          v' = MLD.generalDefaultToConcrete v (length ts) lang
-      in ExistU (TV (Just lang) v') ts' ds' (zip (map fst rs) rs')
+      in ExistU (TV (Just lang) v) ts' (zip (map fst rs) rs')
   f (NamU n (TV _ v) ts rs) =
       let ts' = map f ts
           rs' = map (f . snd) rs

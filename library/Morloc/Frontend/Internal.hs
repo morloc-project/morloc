@@ -22,20 +22,10 @@ import qualified Morloc.Data.Text as MT
 -- type, then that type can be used to replace the existential. Otherwise, the
 -- existential can be cast as generic (ForallU).
 generalize :: TypeU -> TypeU
-generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
+generalize t0 = generalize' (existentialMap t0) t0 where
   generalize' :: [(TVar, Name)] -> TypeU -> TypeU
   generalize' [] t = t
   generalize' ((e, r):xs) t = generalize' xs (generalizeOne e r t)
-
-  setDefaults :: TypeU -> TypeU
-  setDefaults (ExistU v ps [] rs) = ExistU v (map setDefaults ps) [] (map (second setDefaults) rs)
-  setDefaults (ExistU _ _ (d:_) _) = setDefaults d
-  setDefaults t@(VarU _) = t
-  setDefaults (ForallU v t) = ForallU v (setDefaults t)
-  setDefaults (FunU ts t) = FunU (map setDefaults ts) (setDefaults t)
-  setDefaults (AppU t ts) = AppU (setDefaults t) (map setDefaults ts)
-  setDefaults (NamU o n ps rs) = NamU o n (map setDefaults ps) [(k, setDefaults t) | (k, t) <- rs]
-
 
   variables = [1 ..] >>= flip replicateM ['a' .. 'z']
 
@@ -44,11 +34,10 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 
   findExistentials :: TypeU -> Set.Set TVar
   findExistentials (VarU _) = Set.empty
-  findExistentials (ExistU v ts ds rs) =
+  findExistentials (ExistU v ts rs) =
     Set.unions
       $ [Set.singleton v]
       ++ map findExistentials ts
-      ++ map findExistentials ds
       ++ map (findExistentials . snd) rs
   findExistentials (ForallU v t) = Set.delete v (findExistentials t)
   findExistentials (FunU ts t) = Set.unions (findExistentials t : map findExistentials ts)
@@ -62,13 +51,13 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
       replacementTerm = TV lang0 (unName r0)
 
       f :: TVar -> TypeU -> TypeU
-      f v t1@(ExistU v' [] _ _)
+      f v t1@(ExistU v' [] _)
         | v == v' = VarU replacementTerm -- substitute
         | otherwise = t1
-      f v (ExistU v' ts _ [])
+      f v (ExistU v' ts [])
         | v == v' = AppU (VarU replacementTerm) (map (f v) ts) -- substitute
         | otherwise = AppU (VarU v) (map (f v) ts)
-      f _ (ExistU _ _ _ _) = error "Bad thing happen"
+      f _ (ExistU _ _ _) = error "Bad thing happen"
 
       f v t1@(ForallU x t2)
         | v /= x = ForallU x (f v t2)

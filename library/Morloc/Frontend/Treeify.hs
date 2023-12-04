@@ -236,30 +236,30 @@ unifyTermTypes mv xs m0
   srcs = Map.fromListWith (<>) [((srcAlias s, srcLabel s, langOf s), [(s, i)]) | (ExprI i (SrcE s)) <- xs]
   decs = Map.map (TermTypes Nothing []) $ Map.fromListWith (<>) [(v, [e]) | (ExprI _ (AssE v e _)) <- xs]
 
+  -- generate a TermType object from only signatures
   fb :: [EType] -> MorlocMonad TermTypes
   fb [] = MM.throwError . CallTheMonkeys $ "This case should not appear given the construction of the map"
   fb (e0:es) = do
     e' <- foldlM mergeEType e0 es
     case langOf e' of
-      (Just _) -> return $ TermTypes Nothing [(mv, [e'], Nothing)] []
+      (Just _) -> error "Concrete signature found - these should not be present yet"
       _ -> return $ TermTypes (Just e') [] []
 
   -- Should we even allow concrete terms with no type signatures?
   -- Yes, their types may be inferrable by usage or (eventually) static analysis
   -- of the source code.
   fc :: [(Source, Int)] -> MorlocMonad TermTypes
-  fc srcs' = return $ TermTypes Nothing [(mv, [], Just (Idx i src)) | (src, i) <- srcs'] []
+  fc srcs' = return $ TermTypes Nothing [(mv, Idx i src) | (src, i) <- srcs'] []
 
   fbc :: [EType] -> [(Source, Int)] -> MorlocMonad TermTypes
   fbc sigs' srcs' = do
-    let csigs = [t | t <- sigs', isJust (langOf t)]
     let gsigs = [t | t <- sigs', isNothing (langOf t)]
     gt <- case gsigs of
       [e] -> return (Just e)
       [] -> return Nothing
-      -- TODO: don't call the monkeys
-      _ -> MM.throwError . CallTheMonkeys $ "Expected a single general type"
-    return $ TermTypes gt [(mv, csigs, Just (Idx i src)) | (src, i) <- srcs'] []
+      -- TODO: merging general types may be possible sometimes
+      _ -> MM.throwError . CallTheMonkeys $ "Expected a single general type - I don't know how to merge them"
+    return $ TermTypes gt [(mv, Idx i src) | (src, i) <- srcs'] []
 
 
 combineTermTypes :: TermTypes -> TermTypes -> MorlocMonad TermTypes
@@ -290,11 +290,10 @@ mergeTypeUs :: TypeU -> TypeU -> MorlocMonad TypeU
 mergeTypeUs t1@(VarU v1) t2@(VarU v2)
   | v1 == v2 = return (VarU v1)
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
-mergeTypeUs t1@(ExistU v@(TV l1 _) ps1 ds1 rs1) t2@(ExistU (TV l2 _) ps2 _ rs2)
+mergeTypeUs t1@(ExistU v@(TV l1 _) ps1 rs1) t2@(ExistU (TV l2 _) ps2 rs2)
   | l1 == l2
     = ExistU v
     <$> zipWithM mergeTypeUs ps1 ps2
-    <*> pure ds1
     <*> mapM (\(k, x:xs) -> (,) k <$> foldM mergeTypeUs x xs) (groupSort (rs1 ++ rs2))
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
 mergeTypeUs ExistU {} t = return t
@@ -360,7 +359,7 @@ collect i = do
     Nothing -> return (SAnno (Many []) i)
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t1) -> do
-      let calls = [(CallS src, i') | (_, _, Just (Idx i' src)) <- termConcrete t1]
+      let calls = [(CallS src, i') | (_, Idx i' src) <- termConcrete t1]
       declarations <- mapM (replaceExpr i) (termDecl t1) |>> concat
       return $ SAnno (Many (calls <> declarations)) i
 
@@ -373,7 +372,7 @@ collectSAnno e@(ExprI i (VarE v)) = do
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t1) -> do
       -- collect all the concrete calls with this name
-      let calls = [(CallS src, i') | (_, _, Just (Idx i' src)) <- termConcrete t1]
+      let calls = [(CallS src, i') | (_, Idx i' src) <- termConcrete t1]
       -- collect all the morloc compositions with this name
       declarations <- mapM reindexExprI (termDecl t1) >>= mapM (replaceExpr i) |>> concat
       -- link this index to the name that is removed

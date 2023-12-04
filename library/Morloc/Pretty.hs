@@ -111,11 +111,10 @@ instance Pretty a => Pretty (One a) where
 instance Pretty a => Pretty (Many a) where
   pretty (Many xs) = list $ map pretty xs
 
-prettyTypeU (ExistU v [] [] []) = angles $ pretty v
-prettyTypeU (ExistU v ts ds rs)
+prettyTypeU (ExistU v [] []) = angles $ pretty v
+prettyTypeU (ExistU v ts rs)
   = angles $ pretty v
   <+> list (map prettyTypeU ts)
-  <+> list (map prettyTypeU ds)
   <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty prettyTypeU) rs)
 prettyTypeU (ForallU _ t) = prettyTypeU t
 prettyTypeU (VarU (TV _ "Unit")) = "Unit"
@@ -197,12 +196,11 @@ instance (Pretty k, Pretty a) => Pretty (IndexedGeneral k a) where
 
 instance Pretty GammaIndex where
   pretty (VarG tv) = "VarG:" <+> pretty tv
-  pretty (ExistG tv [] [] []) = angles (pretty tv)
-  pretty (ExistG tv ts ds rs)
+  pretty (ExistG tv [] []) = angles (pretty tv)
+  pretty (ExistG tv ts rs)
     = "ExistG:"
     <+> pretty tv
     <+> list (map (parens . pretty) ts)
-    <+> list (map (parens . pretty) ds)
     <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty prettyTypeU) rs)
   pretty (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> pretty t
   pretty (MarkG tv) = "MarkG:" <+> pretty tv

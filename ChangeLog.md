@@ -65,6 +65,16 @@ handling for several very different languages (proofs-of-concept).
  * Allow a module to explicitly export packers
 
  [ ] Remove concrete type signatures - always infer
+ [ ] Make fields in language-specific table decs optional
+     Rather than this:
+       table (Person a) = Person {name :: Str, info :: a}
+       table R (Person a) = "data.frame" {name :: Str, info :: a}
+     Allow this:
+       table (Person a) = Person {name :: Str, info :: a}
+       table R (Person a) = "data.frame"
+     Really, I need to totally redo the table/record/object handling.
+ [ ] Remove support for anonymous records in type signatures
+
 
 0.42.0 [2023.10.11]
 -------------------

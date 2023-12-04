@@ -15,7 +15,7 @@ import Morloc.Frontend.Namespace
 import Morloc.Typecheck.Internal
 import Morloc.Pretty
 import Morloc.Data.Doc
-import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
+import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
 -- import qualified Morloc.Data.Text as MT
@@ -150,11 +150,11 @@ synthE
        , SExpr (Indexed TypeU) Many Int
        )
 
-synthE _ g UniS = return (g, MLD.defaultGeneralType UniS, UniS)
-synthE _ g (RealS x) = return (g, MLD.defaultGeneralType (RealS x), RealS x)
-synthE _ g (IntS x) = return (g, MLD.defaultGeneralType (IntS x), IntS x)
-synthE _ g (LogS x) = return (g, MLD.defaultGeneralType (LogS x), LogS x)
-synthE _ g (StrS x) = return (g, MLD.defaultGeneralType (StrS x), StrS x)
+synthE _ g UniS = return (g, BT.unitU, UniS)
+synthE _ g (RealS x) = return (g, BT.realU, RealS x)
+synthE _ g (IntS x) = return (g, BT.intU, IntS x)
+synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
+synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 
 synthE i g0 (AccS e k) = do
   (g1, t1, e1) <- synthG' g0 e
@@ -162,11 +162,11 @@ synthE i g0 (AccS e k) = do
     (NamU _ _ _ rs) -> case lookup k rs of
       Nothing -> gerr i (KeyError k t1)
       (Just val) -> return (g1, val)
-    (ExistU v ps ds rs) -> case lookup k rs of
+    (ExistU v ps rs) -> case lookup k rs of
       Nothing -> do
         let (g12, val) = newvar (unTVar v <> "_" <> k) Nothing g1
         case access1 v (gammaContext g12) of
-          (Just (rhs, _, lhs)) -> return (g12 { gammaContext = rhs <> [ExistG v ps ds ((k, val):rs)] <> lhs }, val)
+          (Just (rhs, _, lhs)) -> return (g12 { gammaContext = rhs <> [ExistG v ps ((k, val):rs)] <> lhs }, val)
           Nothing -> gerr i (KeyError k t1)
       (Just val) -> return (g1, val)
     _ -> gerr i (KeyError k t1)
@@ -229,18 +229,18 @@ synthE i g0 f@(LamS vs x) = do
 --   List
 synthE _ g (LstS []) =
   let (g1, itemType) = newvar "itemType_" Nothing g
-      listType = head $ MLD.defaultList Nothing itemType
+      listType = BT.listU itemType
   in return (g1, listType, LstS [])
 synthE i g (LstS (e:es)) = do
   (g1, itemType, itemExpr) <- synthG' g e 
-  (g2, listType, listExpr) <- checkE' i g1 (LstS es) (head $ MLD.defaultList Nothing itemType)
+  (g2, listType, listExpr) <- checkE' i g1 (LstS es) (BT.listU itemType)
   case listExpr of
     (LstS es') -> return (g2, listType, LstS (itemExpr:es'))
     _ -> error "impossible"
 
 --   Tuple
 synthE _ g (TupS []) =
-  let t = head $ MLD.defaultTuple Nothing []
+  let t = BT.tupleU []
   in return (g, t, TupS [])
 synthE i g (TupS (e:es)) = do
   -- synthesize head
@@ -251,7 +251,7 @@ synthE i g (TupS (e:es)) = do
 
   -- merge the head and tail
   t3 <- case tupleType of
-    (AppU _ ts) -> return . head $ MLD.defaultTuple Nothing (apply g2 itemType : ts)
+    (AppU _ ts) -> return $ BT.tupleU (apply g2 itemType : ts)
     _ -> error "impossible" -- the general tuple will always be (AppU _ _)
 
   xs' <- case tupleExpr of
@@ -372,14 +372,14 @@ application i g0 es (ForallU v s) = application' i (g0 +> v) es (substitute v s)
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-application i g0 es (ExistU v@(TV _ s) [] _ _) =
+application i g0 es (ExistU v@(TV _ s) [] _) =
   case access1 v (gammaContext g0) of
     -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
       let (g1, veas) = statefulMap (\g _ -> tvarname g "a_" Nothing) g0 es
           (g2, vea) = tvarname g1 (s <> "o_") Nothing
-          eas = [ExistU v' [] [] [] | v' <- veas]
-          ea = ExistU vea [] [] []
+          eas = [ExistU v' [] [] | v' <- veas]
+          ea = ExistU vea [] []
           f = FunU eas ea
           g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
       (g4, _, es', _) <- zipCheck i g3 es eas

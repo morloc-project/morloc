@@ -228,7 +228,7 @@ data MorlocState = MorlocState
 data TermTypes = TermTypes {
     termGeneral :: Maybe EType
   -- ^ A term may have many general types (up to one in each scope)
-  , termConcrete :: [(MVar, [EType], Maybe (Indexed Source))]
+  , termConcrete :: [(MVar, Indexed Source)]
   -- ^ The module name (MVar) is needed to lookup package metadata (if needed).
   -- The source is optional, since language-specific types may specified
   -- without sources as interfaces.
@@ -371,7 +371,6 @@ data GammaIndex
   -- ^ store a bound variable
   | ExistG TVar
     [TypeU] -- type parameters
-    [TypeU] -- type defaults
     [(Text, TypeU)] -- keys
   -- ^ (G,a^) unsolved existential variable
   | SolvedG TVar TypeU
@@ -704,7 +703,6 @@ data TypeU
   -- ^ (a)
   | ExistU TVar
     [TypeU] -- type parameters
-    [TypeU] -- default types
     [(Text, TypeU)] -- key accesses into this type
   -- ^ (a^) will be solved into one of the other types
   | ForallU TVar TypeU
@@ -826,7 +824,7 @@ instance Typelike TypeU where
   --    FIXME: should I really just take the first in the list???
   typeOf (VarU v) = VarT v
 
-  typeOf (ExistU (TV lang _) ps _ rs@(_:_)) = NamT NamRecord (TV lang genericRecord) (map typeOf ps) (map (second typeOf) rs) where
+  typeOf (ExistU (TV lang _) ps rs@(_:_)) = NamT NamRecord (TV lang genericRecord) (map typeOf ps) (map (second typeOf) rs) where
     genericRecord = case lang of
       Nothing -> "Record"
       (Just Python3Lang) -> "dict" 
@@ -836,9 +834,7 @@ instance Typelike TypeU where
       (Just RustLang) -> "struct"
       (Just PerlLang) -> "hash"
 
-  -- use default
-  typeOf (ExistU _ _ (t:_) _) = typeOf t
-  typeOf (ExistU v _ _ _) = typeOf (ForallU v (VarU v)) -- this will cause problems eventually
+  typeOf (ExistU v _ _) = typeOf (ForallU v (VarU v)) -- this will cause problems eventually
 
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
   typeOf (FunU ts t) = FunT (map typeOf ts) (typeOf t)
@@ -846,9 +842,9 @@ instance Typelike TypeU where
   typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
 
   free v@(VarU _) = Set.singleton v
-  free v@(ExistU _ [] _ rs) = Set.unions $ Set.singleton v : map (free . snd) rs
+  free v@(ExistU _ [] rs) = Set.unions $ Set.singleton v : map (free . snd) rs
   -- Why exactly do you turn ExistU into AppU? Not judging, but it seems weird ...
-  free (ExistU v ts _ _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
+  free (ExistU v ts _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
   free (ForallU v t) = Set.delete (VarU v) (free t)
   free (FunU ts t) = Set.unions $ map free (t:ts)
   free (AppU t ts) = Set.unions $ map free (t:ts)
@@ -869,7 +865,7 @@ instance Typelike TypeU where
       sub t@(VarU v)
         | v0 == v = r0 -- replace v with the new type
         | otherwise = t
-      sub (ExistU v (map sub -> ps) (map sub -> ts) (map (second sub) -> rs)) = ExistU v ps ts rs
+      sub (ExistU v (map sub -> ps) (map (second sub) -> rs)) = ExistU v ps rs
       sub (ForallU v t)
         | v0 == v = ForallU v t -- stop looking if we hit a bound variable of the same name
         | otherwise = ForallU v (sub t)
@@ -881,7 +877,7 @@ instance Typelike TypeU where
   normalizeType (AppU t ts) = AppU (normalizeType t) (map normalizeType ts)
   normalizeType (NamU n v ds ks) = NamU n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
   normalizeType (ForallU v t) = ForallU v (normalizeType t)
-  normalizeType (ExistU v (map normalizeType -> ps) (map normalizeType -> ds) (map (second normalizeType) -> rs)) = ExistU v ps ds rs
+  normalizeType (ExistU v (map normalizeType -> ps) (map (second normalizeType) -> rs)) = ExistU v ps rs
   normalizeType t = t
 
 -- | get a fresh variable name that is not used in t1 or t2, it reside in the same namespace as the first type
@@ -928,7 +924,7 @@ instance HasOneLanguage TVar where
 
 instance HasOneLanguage TypeU where
   langOf (VarU (TV lang _)) = lang
-  langOf (ExistU (TV lang _) _ _ _) = lang
+  langOf (ExistU (TV lang _) _ _) = lang
   langOf (ForallU (TV lang _) _) = lang
   langOf (FunU _ t) = langOf t
   langOf (AppU t _) = langOf t
