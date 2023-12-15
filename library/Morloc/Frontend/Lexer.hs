@@ -26,8 +26,6 @@ module Morloc.Frontend.Lexer
   , freename
   , freenameU
   , freenameL
-  , tvar
-  , newvar
   , number
   , op
   , parens
@@ -35,7 +33,6 @@ module Morloc.Frontend.Lexer
   , reservedWords
   , resetGenerics
   , sc
-  , setLang
   , setMinPos
   , stringLiteral
   , surround
@@ -60,38 +57,24 @@ import qualified Morloc.Language as ML
 type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
 
 data ParserState = ParserState {
-    stateLang :: Maybe Lang
-  , stateModulePath :: Maybe Path
+    stateModulePath :: Maybe Path
   , stateVarIndex :: Int
   , stateExpIndex :: Int
   , stateGenerics :: [TVar] -- store the observed generic variables in the current type
-                            -- you should reset the field before parsing a new type 
+                               -- you should reset the field before parsing a new type 
   , stateMinPos :: Pos
   , stateAccepting :: Bool
 } deriving(Show)
 
 emptyState :: ParserState
 emptyState = ParserState {
-    stateLang = Nothing
-  , stateModulePath = Nothing
+    stateModulePath = Nothing
   , stateVarIndex = 1
   , stateExpIndex = 1
   , stateGenerics = []
   , stateMinPos = mkPos 1
   , stateAccepting = False
 }
-
-tvar :: MT.Text -> Parser TVar
-tvar v = do
-  lang <- CMS.gets stateLang
-  return $ TV lang v
-
-newvar :: Maybe Lang -> Parser TVar
-newvar lang = do
-  s <- CMS.get
-  let i = stateVarIndex s 
-  CMS.put (s {stateVarIndex = i + 1}) 
-  return (TV lang ("p" <> MT.show' i))
 
 exprId :: Parser Int
 exprId = do
@@ -102,12 +85,6 @@ exprId = do
 
 exprI :: Expr -> Parser ExprI
 exprI e = ExprI <$> exprId <*> pure e
-
-setLang :: Maybe Lang -> Parser ()
-setLang lang = do
-  s <- CMS.get
-  CMS.put (s { stateLang = lang })
-
 
 setMinPos :: Parser ()
 setMinPos = do
@@ -183,7 +160,7 @@ appendGenerics :: TVar -> Parser ()
 appendGenerics v = do
   s <- CMS.get
   let gs = stateGenerics s
-      gs' = if isGeneric v then v : gs else gs
+      gs' = if isGeneric (unTVar v) then v : gs else gs
   CMS.put (s {stateGenerics = gs'})
 
 many1 :: Parser a -> Parser [a]

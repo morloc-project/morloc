@@ -24,7 +24,9 @@ instance Pretty Symbol where
   pretty (TermSymbol x) = viaShow x
 
 instance Pretty AliasedSymbol where
-  pretty (AliasedType x alias) = pretty (AliasedTerm x alias)
+  pretty (AliasedType x alias)
+    | x == alias = pretty x
+    | otherwise = pretty x <+> "as" <+> pretty alias
   pretty (AliasedTerm x alias)
     | x == alias = pretty x
     | otherwise = pretty x <+> "as" <+> pretty alias
@@ -35,15 +37,20 @@ instance Pretty MVar where
 instance Pretty EVar where
   pretty (EV v) = pretty v
 
+instance Pretty TVar where
+  pretty (TV v) = pretty v
+
+instance Pretty Key where
+  pretty (Key v) = pretty v
+
+instance Pretty Label where
+  pretty (Label v) = pretty v
+
 instance Pretty Code where
   pretty = pretty . unCode
 
-instance Pretty Name where
-  pretty = pretty . unName
-
-instance Pretty TVar where
-  pretty (TV Nothing t) = pretty t
-  pretty (TV (Just lang) t) = pretty t <> "@" <> pretty (show lang)
+instance Pretty SrcName where
+  pretty = pretty . unSrcName
 
 instance Pretty Lang where
   pretty = viaShow
@@ -59,8 +66,7 @@ instance Pretty Source where
     <+> "as" <+> pretty (srcAlias s) <> maybe "" (\t -> ":" <> pretty t) (srcLabel s)
 
 instance Pretty Type where
-  pretty (UnkT (TV lang v)) = pretty lang <> "@*" <> pretty v
-  pretty (VarT (TV _ "Unit")) = "Unit"
+  pretty (UnkT v) = pretty v
   pretty (VarT v) = pretty v
   pretty (FunT [] t) = "() -> " <> pretty t
   pretty (FunT ts t) = encloseSep "(" ")" " -> " (map pretty (ts <> [t]))
@@ -68,12 +74,6 @@ instance Pretty Type where
   pretty (NamT o n ps rs)
     = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
               (vsep [pretty k <+> "::" <+> pretty x | (k, x) <- rs])
-
-instance Pretty GType where
-  pretty = pretty . unGType
-
-instance Pretty CType where
-  pretty = pretty . unCType
 
 instance Pretty EType where
   pretty (EType t (Set.toList -> ps) (Set.toList -> cs)) = case (ps, cs) of 
@@ -117,7 +117,6 @@ prettyTypeU (ExistU v ts rs)
   <+> list (map prettyTypeU ts)
   <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty prettyTypeU) rs)
 prettyTypeU (ForallU _ t) = prettyTypeU t
-prettyTypeU (VarU (TV _ "Unit")) = "Unit"
 prettyTypeU (VarU v) = pretty v
 prettyTypeU (FunU [] t) = parens $ "() -> " <> prettyTypeU t
 prettyTypeU (FunU ts t) = encloseSep "(" ")" " -> " (map prettyTypeU (ts <> [t]))
@@ -144,8 +143,8 @@ prettyPackMap :: PackMap -> Doc ann
 prettyPackMap m =  "----- pacmaps ----\n"
                 <> vsep (map f (Map.toList m))
                 <> "\n------------------" where
-  f :: (TVar, [UnresolvedPacker]) -> Doc ann
-  f (v, ps) =
+  f :: (CVar, [UnresolvedPacker]) -> Doc ann
+  f (CV _ v, ps) =
     block 4
       ("packmap" <+> pretty v)
       (vsep $ map pretty ps)
@@ -205,5 +204,4 @@ instance Pretty GammaIndex where
   pretty (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> pretty t
   pretty (MarkG tv) = "MarkG:" <+> pretty tv
   pretty (SrcG (Source ev1 lang _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
-  pretty (SerialConstraint t1 t2) = "UnsolvedConstraint:" <> "\n  " <> pretty t1 <> "\n  " <> pretty t2
   pretty (AnnG v t) = pretty v <+> "::" <+> pretty t

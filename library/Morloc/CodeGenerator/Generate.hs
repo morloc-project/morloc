@@ -56,7 +56,6 @@ import qualified Data.Set as Set
 import Control.Monad.Except (runExcept)
 
 import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
-import qualified Morloc.CodeGenerator.Grammars.Translator.Rust as Rust
 import qualified Morloc.CodeGenerator.Grammars.Translator.R as R
 import qualified Morloc.CodeGenerator.Grammars.Translator.Python3 as Python3
 import qualified Morloc.CodeGenerator.Serial as Serial
@@ -98,7 +97,7 @@ generate gASTs rASTs = do
   -- The call passes the pool an index for the function (manifold) that will be called.
   nexus <- Nexus.generate
     gSerial
-    [(gtypeOf t, i) | (SAnno (One (_, Idx _ t)) i) <- rASTs]
+    [(t, i) | (SAnno (One (_, Idx _ t)) i) <- rASTs]
 
 
   -- initialize counter for use in express
@@ -126,17 +125,6 @@ generate gASTs rASTs = do
     >>= mapM (uncurry encode)    -- Script
 
   return (nexus, pools)
-
-gtypeOf (UnkP (PV _ (Just v) _)) = UnkT (TV Nothing v)
-gtypeOf (VarP (PV _ (Just v) _)) = VarT (TV Nothing v)
-gtypeOf (FunP ts t) = FunT (map gtypeOf ts) (gtypeOf t)
-gtypeOf (AppP t ts) = AppT (gtypeOf t) (map gtypeOf ts)
-gtypeOf (NamP o (PV _ (Just n) _) ps rs)
-  = NamT o (TV Nothing n)
-    (map gtypeOf ps)
-    [(k, gtypeOf t) | (PV _ (Just k) _, t) <- rs]
-gtypeOf _ = UnkT (TV Nothing "?") -- this shouldn't happen
-
 
 -- | Choose a single concrete implementation. In the future, this component
 -- may be one of the more complex components of the morloc compiler. It will
@@ -1134,7 +1122,7 @@ expressPolyExpr _ (SAnno (One (UniS, (Idx _ (VarP v), _))) _)    = return $ Poly
 -- record access
 expressPolyExpr pc (SAnno (One (AccS record@(SAnno (One (_, (Idx _ (NamP o v _ rs), _))) _) key, _)) _) = do
   record' <- expressPolyExpr pc record
-  case lookup key [(ckey, ct) | (PV _ _ ckey, ct) <- rs] of
+  case lookup key rs of
     (Just valType) -> return $ PolyAcc valType o v record' key
     Nothing -> error "invalid key access"
 
@@ -1270,7 +1258,7 @@ segmentExpr m args (PolyRecord o v ps entries) = do
   ps' <- mapM typeP2typeFSafe ps
   entryTypes <- mapM (typeP2typeFSafe . fst . snd) entries
   (mss, es') <- mapM (segmentExpr m args . snd . snd) entries |>> unzip
-  keys <- mapM (pvar2fvarSafe . fst) entries
+  let keys = map fst entries
   return (concat mss, (langOf' v, MonoRecord o v' ps' (zip keys (zip entryTypes (map snd es')))))
 
 segmentExpr m args (PolyReturn e) = do
@@ -1305,8 +1293,7 @@ segmentExpr _ _ (PolyNull v) = do
 
 
 pvar2fvarSafe :: PVar -> MorlocMonad FVar
-pvar2fvarSafe (PV _ (Just g) c) = return $ FV g c
-pvar2fvarSafe (PV _ Nothing _) = MM.throwError . OtherError $ "Missing general type"
+pvar2fvarSafe (PV g (CV _ c)) = return $ FV g c
 
 typeP2typeFSafe :: TypeP -> MorlocMonad TypeF
 typeP2typeFSafe (UnkP v) = UnkF <$> pvar2fvarSafe v
@@ -1314,7 +1301,7 @@ typeP2typeFSafe (VarP v) = VarF <$> pvar2fvarSafe v
 typeP2typeFSafe (FunP ts t) = FunF <$> mapM typeP2typeFSafe ts <*> typeP2typeFSafe t
 typeP2typeFSafe (AppP t ts) = AppF <$> typeP2typeFSafe t <*> mapM typeP2typeFSafe ts
 typeP2typeFSafe (NamP o v ds rs) = do
-    keys' <- mapM (pvar2fvarSafe . fst) rs
+    let keys' = map fst rs
     vals' <- mapM (typeP2typeFSafe . snd) rs
     ds' <- mapM typeP2typeFSafe ds
     v' <- pvar2fvarSafe v
@@ -1326,7 +1313,7 @@ serialize heads = do
     packerSets <- makePackerSets heads
     concat <$> mapM (\(xs, p) -> mapM (serializeOne p) xs) packerSets
 
-makePackerSets :: [MonoHead] -> MorlocMonad [([MonoHead], Map.Map MT.Text [ResolvedPacker])]
+makePackerSets :: [MonoHead] -> MorlocMonad [([MonoHead], Map.Map TVar [ResolvedPacker])]
 makePackerSets mheads = do
   let groupedHeads = groupSort $ [(lang, mhead) | mhead@(MonoHead lang _ _ _) <- mheads]
   packers <- mapM (uncurry resolvePackers) groupedHeads
@@ -1336,7 +1323,7 @@ makePackerSets mheads = do
 -- (un)packer. It will only work reliable when there is only one source to
 -- choose from. In other cases, the selection will arbitrarily be the first in
 -- the source list.
-resolvePackers :: Lang -> [MonoHead] -> MorlocMonad (Map.Map MT.Text [ResolvedPacker])
+resolvePackers :: Lang -> [MonoHead] -> MorlocMonad (Map.Map TVar [ResolvedPacker])
 resolvePackers lang mheads =
   collectUnresolvedPackers lang mheads >>= mapM (mapM resolvePacker)
   where
@@ -1357,12 +1344,12 @@ resolvePackers lang mheads =
           , resolvedPackerGeneralTypes = unresolvedPackerGeneralTypes up
           }
 
-collectUnresolvedPackers :: Lang -> [MonoHead] -> MorlocMonad (Map.Map MT.Text [UnresolvedPacker])
+collectUnresolvedPackers :: Lang -> [MonoHead] -> MorlocMonad (Map.Map TVar [UnresolvedPacker])
 collectUnresolvedPackers lang mheads = do
   packmap <- mapM unresolvedPackers mheads |>> Map.unionsWith Set.union
   return $ Map.map Set.toList packmap
   where
-    unresolvedPackers :: MonoHead -> MorlocMonad (Map.Map MT.Text (Set.Set UnresolvedPacker))
+    unresolvedPackers :: MonoHead -> MorlocMonad (Map.Map TVar (Set.Set UnresolvedPacker))
     unresolvedPackers (MonoHead _ m0 _ e0) = do
       let manifoldIndices = unique (m0 : f e0)
       packmaps <- mapM MM.metaPackMap manifoldIndices
@@ -1370,7 +1357,7 @@ collectUnresolvedPackers lang mheads = do
       return
         . Map.unionsWith Set.union
         . map ( Map.map Set.fromList
-              . Map.mapKeys unTVar
+              . Map.mapKeys unCVar
               )
         $ packmaps
 
@@ -1389,7 +1376,7 @@ collectUnresolvedPackers lang mheads = do
 -- | This step is performed after segmentation, so all terms are in the same
 -- language. Here we need to determine where inputs are (de)serialized and the
 -- serialization states of arguments and variables.
-serializeOne :: Map.Map MT.Text [ResolvedPacker] -> MonoHead -> MorlocMonad SerialManifold
+serializeOne :: Map.Map TVar [ResolvedPacker] -> MonoHead -> MorlocMonad SerialManifold
 serializeOne packmap (MonoHead lang m0 args0 e0) = do
   let form0 = ManifoldFull [Arg i (L . typeSof $ Map.lookup i typemap) | (Arg i _) <- args0]
 
@@ -1572,7 +1559,7 @@ instance IsSerializable NativeExpr where
   nativeLet = NativeLetN
 
 --
-wireSerial :: Lang -> Map.Map MT.Text [ResolvedPacker] -> SerialManifold -> MorlocMonad SerialManifold
+wireSerial :: Lang -> Map.Map TVar [ResolvedPacker] -> SerialManifold -> MorlocMonad SerialManifold
 wireSerial lang packmap sm0 = foldSerialManifoldM fm sm0 |>> snd
   where
   defs = makeMonoidFoldDefault Map.empty (Map.unionWith (<>))
@@ -1646,7 +1633,7 @@ wireSerial lang packmap sm0 = foldSerialManifoldM fm sm0 |>> snd
 
 
 
-naturalizeN :: MDoc -> Lang -> Map.Map MT.Text [ResolvedPacker] -> TypeF -> SerialExpr -> NativeExpr
+naturalizeN :: MDoc -> Lang -> Map.Map TVar [ResolvedPacker] -> TypeF -> SerialExpr -> NativeExpr
 naturalizeN place lang packmap t se = case runExcept (DeserializeN t <$> Serial.makeSerialAST packmap lang t <*> pure se) of
   (Right x) -> x
   (Left serr) -> error . MT.unpack . render
@@ -1784,7 +1771,6 @@ translate :: Lang -> [Source] -> [SerialManifold] -> MorlocMonad Script
 translate lang srcs es = do
   case lang of
     CppLang -> Cpp.translate srcs es
-    RustLang -> Rust.translate srcs es
     RLang -> R.translate srcs es
     Python3Lang -> Python3.translate srcs es
     x -> MM.throwError . PoolBuildError . render
@@ -1792,7 +1778,6 @@ translate lang srcs es = do
 
 preprocess :: Lang -> SerialManifold -> MorlocMonad SerialManifold
 preprocess CppLang es = Cpp.preprocess es
-preprocess RustLang es = Rust.preprocess es
 preprocess RLang es = R.preprocess es
 preprocess Python3Lang es = Python3.preprocess es
 preprocess l _ = MM.throwError . PoolBuildError . render

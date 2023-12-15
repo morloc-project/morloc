@@ -121,18 +121,15 @@ module Morloc.CodeGenerator.Namespace
 import Morloc.Namespace
 import Data.Scientific (Scientific)
 import Data.Text (Text)
-import qualified Data.Set as Set
 import Morloc.Data.Doc
-import qualified Morloc.Data.Text as MT
 import Morloc.Pretty ()
 import Control.Monad.Identity (runIdentity)
 
 -- | Stores the language, general name and concrete name for a type expression
 data PVar
   = PV
-    Lang
-    (Maybe Text) -- ^ general name of the type variable (if known)
-    Text -- ^ concrete name of type variable
+    TVar -- ^ general name of the type variable
+    CVar -- ^ concrete name of type variable
   deriving (Show, Eq, Ord)
 
 -- | A solved type coupling a language specific form to an optional general form
@@ -141,15 +138,15 @@ data TypeP
   | VarP PVar
   | FunP [TypeP] TypeP
   | AppP TypeP [TypeP] -- FIXME: this allows representation of things that cannot be applied
-  | NamP NamType PVar [TypeP] [(PVar, TypeP)]
+  | NamP NamType PVar [TypeP] [(Key, TypeP)]
   deriving (Show, Ord, Eq)
 
 -- The final types used in code generation. The language annotation is removed,
 -- since the language for all types within a pool are the same.
 --
 -- The general type annotation will be used for documentation only
-data FVar = FV Text -- general type
-               Text -- concrete type
+data FVar = FV TVar -- general type
+               TVar -- concrete type
   deriving (Show, Ord, Eq)
 
 -- The most minimal type that contains both general and concrete types
@@ -158,7 +155,7 @@ data TypeF
   | VarF FVar
   | FunF [TypeF] TypeF
   | AppF TypeF [TypeF]
-  | NamF NamType FVar [TypeF] [(FVar, TypeF)]
+  | NamF NamType FVar [TypeF] [(Key, TypeF)]
   deriving (Show, Ord, Eq)
 
 -- Represents types that may contain serialized elements.
@@ -167,20 +164,19 @@ data TypeC
   | VarC FVar
   | FunC [TypeC] TypeC
   | AppC TypeF [TypeF]
-  | NamC NamType FVar [TypeF] [(FVar, TypeF)]
+  | NamC NamType FVar [TypeF] [(Key, TypeF)]
   deriving (Show, Ord, Eq)
 
 pvar2fvar :: PVar -> FVar
-pvar2fvar (PV _ (Just g) c) = FV g c
-pvar2fvar (PV _ Nothing c) = FV "<undefined>" c
+pvar2fvar (PV g (CV _ c)) = FV g c
 
 fvar2pvar :: Lang -> FVar -> PVar
-fvar2pvar l (FV g c) = PV l (Just g) c
+fvar2pvar lang (FV g c) = PV g (CV lang c)
 
 type JsonPath = [JsonAccessor]
 data JsonAccessor
   = JsonIndex Int
-  | JsonKey Text
+  | JsonKey Key
 
 data NexusCommand = NexusCommand
   { commandName :: EVar -- ^ user-exposed subcommand name in the nexus
@@ -193,66 +189,20 @@ data NexusCommand = NexusCommand
   -- path to the replacement value
   }
 
-instance Typelike TypeP where
-  typeOf (UnkP v) = UnkT (pvar2tvar v)
-  typeOf (VarP v) = VarT (pvar2tvar v)
-  typeOf (FunP ts t) = FunT (map typeOf ts) (typeOf t)
-  typeOf (AppP v ts) = AppT (typeOf v) (map typeOf ts)
-  typeOf (NamP o n ps es) =
-    let n' = pvar2tvar n
-        ps' = map typeOf ps
-        es' = [(v, typeOf t) | (PV _ _ v, t) <- es]
-    in NamT o n' ps' es'
-
-  -- | substitute all appearances of a given variable with a given new type
-  substituteTVar v0 r0 t0 = sub t0
-    where
-      sub :: TypeP -> TypeP
-      sub t@(UnkP _) = t
-      sub t@(VarP (PV lang _ v))
-        | v0 == TV (Just lang) v = r0
-        | otherwise = t
-      sub (FunP ts t) = FunP (map sub ts) (sub t)
-      sub (AppP v ts) = AppP (sub v) (map sub ts)
-      sub (NamP o n ps es) = NamP o n (map sub ps) [(k, sub t) | (k, t) <- es]
-
-  free v@(VarP _) = Set.singleton v
-  free (FunP ts t) = Set.unions (map free (t:ts))
-  free (AppP t ts) = Set.unions (map free (t:ts))
-  free (NamP _ _ ps es) = Set.unions (map free (map snd es <> ps))
-  free (UnkP _) = Set.empty -- are UnkP free?
-
-  normalizeType (FunP ts1 (FunP ts2 t)) = normalizeType $ FunP (ts1 <> ts2) t
-  normalizeType (AppP t ts) = AppP (normalizeType t) (map normalizeType ts)
-  normalizeType (NamP t v ds rs) = NamP t v (map normalizeType ds) (map (second normalizeType) rs)
-  normalizeType t = t
-
-pvar2tvar :: PVar -> TVar
-pvar2tvar (PV lang _ v) = TV (Just lang) v
-
-generalTypeOf :: TypeP -> Maybe Type
-generalTypeOf (UnkP v) = UnkT <$> pvar2genTVar v
-generalTypeOf (VarP v) = VarT <$> pvar2genTVar v
-generalTypeOf (FunP ts t) = FunT <$> mapM generalTypeOf ts <*> generalTypeOf t
-generalTypeOf (AppP v ts) = AppT <$> generalTypeOf v <*> mapM generalTypeOf ts
-generalTypeOf (NamP o n ps es)
-    = NamT o
-    <$> pvar2genTVar n
-    <*> mapM generalTypeOf ps
-    <*> mapM typeOfEntry es
-    where
-        typeOfEntry :: (PVar, TypeP) -> Maybe (MT.Text, Type)
-        typeOfEntry (PV _ v _, t) = (,) <$> v <*> generalTypeOf t
-
-pvar2genTVar :: PVar -> Maybe TVar
-pvar2genTVar (PV _ v _) = TV Nothing <$> v
+generalTypeOf :: TypeP -> Type
+generalTypeOf (UnkP (PV v _)) = UnkT v
+generalTypeOf (VarP (PV v _)) = VarT v
+generalTypeOf (FunP ts t) = FunT (map generalTypeOf ts) (generalTypeOf t)
+generalTypeOf (AppP v ts) = AppT (generalTypeOf v) (map generalTypeOf ts)
+generalTypeOf (NamP o (PV n _) ps es)
+    = NamT o n (map generalTypeOf ps) (map (second generalTypeOf) es)
 
 -- | A tree describing how to (de)serialize an object
 data SerialAST
   = SerialPack FVar (TypePacker, SerialAST) -- ^ use an (un)pack function to simplify an object
   | SerialList FVar SerialAST
   | SerialTuple FVar [SerialAST]
-  | SerialObject NamType FVar [TypeF] [(FVar, SerialAST)]
+  | SerialObject NamType FVar [TypeF] [(Key, SerialAST)]
   -- ^ Make a record, table, or object. The parameters indicate
   --   1) NamType - record/table/object
   --   2) FVar - telling the name of the object (e.g., "Person")
@@ -316,11 +266,11 @@ instance Pretty TypePacker where
 -- | A simplified subset of the Type record where functions, existentials,
 -- universals and language-specific info are removed
 data JsonType
-  = VarJ Text
+  = VarJ TVar
   -- ^ {"int"}
-  | ArrJ Text [JsonType]
+  | ArrJ TVar [JsonType]
   -- ^ {"list":["int"]}
-  | NamJ Text [(Text, JsonType)]
+  | NamJ TVar [(Key, JsonType)]
   -- ^ {"Foo":{"bar":"A","baz":"B"}}
   deriving (Show, Ord, Eq)
 
@@ -476,11 +426,11 @@ data PolyExpr
   | PolyLetVar TypeP Int
   -- terms that map 1:1 versus SAnno; have defined types in one language
   | PolySrc    TypeP Source
-  | PolyAcc    TypeP NamType PVar PolyExpr Text
+  | PolyAcc    TypeP NamType PVar PolyExpr Key
   -- data types
   | PolyList   PVar TypeP [PolyExpr]
   | PolyTuple  PVar [(TypeP, PolyExpr)]
-  | PolyRecord NamType PVar [TypeP] [(PVar, (TypeP, PolyExpr))]
+  | PolyRecord NamType PVar [TypeP] [(Key, (TypeP, PolyExpr))]
   | PolyLog    PVar Bool
   | PolyReal   PVar Scientific
   | PolyInt    PVar Integer
@@ -504,11 +454,11 @@ data MonoExpr
   -- terms that map 1:1 versus SAnno; have defined types in one language
   | MonoSrc    TypeF Source
   | MonoBndVar (Maybe TypeF) Int
-  | MonoAcc    TypeF NamType FVar MonoExpr Text
+  | MonoAcc    TypeF NamType FVar MonoExpr Key
   -- data types
   | MonoList   FVar TypeF [MonoExpr]
   | MonoTuple  FVar [(TypeF, MonoExpr)]
-  | MonoRecord NamType FVar [TypeF] [(FVar, (TypeF, MonoExpr))]
+  | MonoRecord NamType FVar [TypeF] [(Key, (TypeF, MonoExpr))]
   | MonoLog    FVar Bool
   | MonoReal   FVar Scientific
   | MonoInt    FVar Integer
@@ -563,12 +513,12 @@ data NativeExpr
   | LetVarN      TypeF Int
   | BndVarN      TypeF Int
   | DeserializeN TypeF SerialAST SerialExpr
-  | AccN         NamType FVar NativeExpr Text
+  | AccN         NamType FVar NativeExpr Key
   | SrcN         TypeF Source
   -- data types
   | ListN        FVar TypeF [NativeExpr]
   | TupleN       FVar [NativeExpr]
-  | RecordN      NamType FVar [TypeF] [(FVar, NativeExpr)]
+  | RecordN      NamType FVar [TypeF] [(Key, NativeExpr)]
   | LogN         FVar Bool
   | RealN        FVar Scientific
   | IntN         FVar Integer
@@ -802,12 +752,12 @@ data NativeExpr_ nm se ne sr nr
   | LetVarN_      TypeF Int
   | BndVarN_      TypeF Int
   | DeserializeN_ TypeF SerialAST se
-  | AccN_         NamType FVar ne Text
+  | AccN_         NamType FVar ne Key
   | SrcN_         TypeF Source
   -- data types
   | ListN_        FVar TypeF [ne]
   | TupleN_       FVar [ne]
-  | RecordN_      NamType FVar [TypeF] [(FVar, ne)]
+  | RecordN_      NamType FVar [TypeF] [(Key, ne)]
   | LogN_         FVar Bool
   | RealN_        FVar Scientific
   | IntN_         FVar Integer
@@ -994,7 +944,7 @@ instance HasTypeF NativeExpr where
     -- NOTE: This will fail if the key does not exist. However, non-existence of
     -- a key should have been caught by the typechecker. So such non-existence
     -- here indicates a but in the compiler and should die immediately.
-    fromJust . listToMaybe $ [t | (FV _ key', t) <- rs, key' == key]
+    fromJust . listToMaybe $ [t | (key', t) <- rs, key' == key]
   typeFof AccN{} = error "Bug - illegal key access should have been caught in the typechecker"
   typeFof (SrcN         t _) = t
   typeFof (ListN        v p _) = AppF (VarF v) [p]
@@ -1011,7 +961,7 @@ instance HasTypeF TypeP where
   typeFof (VarP v) = VarF (pvar2fvar v)
   typeFof (FunP ts t) = FunF (map typeFof ts) (typeFof t)
   typeFof (AppP t ts) = AppF (typeFof t) (map typeFof ts)
-  typeFof (NamP o v ds rs) = NamF o (pvar2fvar v) (map typeFof ds) (map (bimap pvar2fvar typeFof) rs)
+  typeFof (NamP o v ds rs) = NamF o (pvar2fvar v) (map typeFof ds) (map (second typeFof) rs)
 
 class HasTypeM e where
   typeMof :: e -> TypeM
@@ -1208,24 +1158,23 @@ instance MFunctor NativeExpr where
 
 
 instance HasOneLanguage PVar where
-  langOf' (PV lang _ _) = lang
+  langOf' (PV _ (CV lang _)) = lang
 
 instance HasOneLanguage TypeP where
-  langOf' (UnkP (PV lang _ _)) = lang
-  langOf' (VarP (PV lang _ _)) = lang
+  langOf' (UnkP v) = langOf' v
+  langOf' (VarP v) = langOf' v
   langOf' (FunP _ t) = langOf' t 
   langOf' (AppP t _) = langOf' t
-  langOf' (NamP _ (PV lang _ _) _ _) = lang
+  langOf' (NamP _ v _ _) = langOf' v
 
 instance (Pretty a) => Pretty (Arg a) where
   pretty (Arg i x) = "x" <> pretty i <> braces (pretty x)
 
 instance Pretty PVar where
-  pretty (PV lang (Just g) t) = parens (pretty g <+> "|" <+> pretty t <> "@" <> pretty lang)
-  pretty (PV lang Nothing t) = parens ("*" <+> "|" <+> pretty t <> "@" <> pretty lang)
+  pretty (PV g (CV lang t)) = parens (pretty g <+> "|" <+> pretty t <> "@" <> pretty lang)
 
 instance Pretty TypeP where
-  pretty = pretty . typeOf
+  pretty = viaShow
 
 instance Pretty TypeF where
   pretty = viaShow

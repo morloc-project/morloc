@@ -40,7 +40,6 @@ module Morloc.Monad
   , metaSources
   , metaName
   , metaProperties
-  , metaType
   , metaTypedefs
   , metaPackMap
   -- * handling tree depth
@@ -92,7 +91,7 @@ instance Defaultable MorlocState where
     , stateCounter = -1
     , stateDepth = 0
     , stateSignatures = GMap.empty
-    , stateTypedefs = GMap.empty
+    , stateConcreteTypedefs = GMap.empty
     , stateSources = GMap.empty
     , stateAnnotations = Map.empty
     , stateOutfile = Nothing
@@ -289,18 +288,6 @@ metaProperties i = do
     (GMapJust (TermTypes (Just e) _ _)) -> Set.toList (eprop e)
     _ -> []
 
--- | Store type annotations for an expression. These are the original user
--- provided types NOT the types checked or inferred by the typechecker.
-metaType :: Int -> MorlocMonad (Maybe TypeU)
-metaType i = do
-  s <- gets stateSignatures 
-  return $ case GMap.lookup i s of
-    (GMapJust (TermTypes (Just e) _ _)) ->
-      if isNothing (langOf e)
-        then Just (etype e) 
-        else Nothing
-    _ -> Nothing
-
 -- | The name of a morloc composition. These names are stored in the monad
 -- after they are resolved away. For example in:
 --   import math
@@ -330,13 +317,12 @@ metaPackMap i = do
 
 -- | This is currently only used in the C++ translator.
 -- FIXME: should a term be allowed to have multiple type definitions within a language?
-metaTypedefs :: Int -> MorlocMonad (Map.Map TVar (Type, [TVar]))
+metaTypedefs :: Int -> MorlocMonad (Map.Map CVar ([TVar], TypeU))
 metaTypedefs i = do
-    p <- gets stateTypedefs
+    p <- gets stateConcreteTypedefs
 
     return $ case GMap.lookup i p of
-      (GMapJust termmap) -> Map.map (\(vs, t) -> (typeOf t, vs))
-          (Map.map head (Map.filter (not . null) termmap))
+      (GMapJust termmap) -> Map.map head (Map.filter (not . null) termmap)
       _ -> Map.empty
 
 

@@ -100,9 +100,9 @@ serialize v0 s0 = do
       return (concat befores ++ [x], v')
 
     construct v (SerialObject _ _ _ rs) = do
-      (befores, ss') <- mapAndUnzipM (\(FV _ k, s) -> serialize' (recordAccess v (pretty k)) s) rs
+      (befores, ss') <- mapAndUnzipM (\(key, s) -> serialize' (recordAccess v (pretty key)) s) rs
       v' <- helperNamer <$> newIndex
-      let entries = zipWith (\(FV _ key) val -> pretty key <> "=" <> val) (map fst rs) ss'
+      let entries = zipWith (\key val -> pretty key <> "=" <> val) (map fst rs) ss'
           decl = [idoc|#{v'} <- list#{tupled entries}|]
       return (concat befores ++ [decl], v')
     construct _ _ = undefined
@@ -148,9 +148,9 @@ deserialize v0 s0
       return (v', concat befores ++ [x])
 
     construct v (SerialObject _ (FV _ constructor) _ rs) = do
-      (ss', befores) <- mapAndUnzipM (\(FV _ k,s) -> check (recordAccess v (pretty k)) s) rs
+      (ss', befores) <- mapAndUnzipM (\(k, s) -> check (recordAccess v (pretty k)) s) rs
       v' <- helperNamer <$> newIndex
-      let entries = zipWith (\(FV _ key) val -> pretty key <> "=" <> val) (map fst rs) ss'
+      let entries = zipWith (\key val -> pretty key <> "=" <> val) (map fst rs) ss'
           decl = [idoc|#{v'} <- #{pretty constructor}#{tupled entries}|]
       return (v', concat befores ++ [decl])
 
@@ -221,10 +221,10 @@ translateSegment m0 =
     makeNativeExpr _ (SrcN_ _ src) = return $ PoolDocs [] (pretty (srcName src)) [] []
     makeNativeExpr _ (ListN_ v _ xs) = return $ mergePoolDocs rlist xs where
        rlist es' = case v of
-         (FV _ "numeric") -> "c" <> tupled es'
-         (FV _ "double") -> "c" <> tupled es'
-         (FV _ "logical") -> "c" <> tupled es'
-         (FV _ "character") -> "c" <> tupled es'
+         (FV _ (TV "numeric")) -> "c" <> tupled es'
+         (FV _ (TV "double")) -> "c" <> tupled es'
+         (FV _ (TV "logical")) -> "c" <> tupled es'
+         (FV _ (TV "character")) -> "c" <> tupled es'
          _ -> "list" <> tupled es'
 
     makeNativeExpr _ (TupleN_ _ xs) = return $ mergePoolDocs ((<>) "list" . tupled) xs
@@ -232,7 +232,7 @@ translateSegment m0 =
         = return $ mergePoolDocs rlist (map snd rs)
         where
             rlist es' =
-                let entries' = zipWith (\(FV _ k) v -> pretty k <> "=" <> v) (map fst rs) es'
+                let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) es'
                 in "list" <> tupled entries'
 
     makeNativeExpr _ (LogN_ _ v) = return $ PoolDocs [] (if v then "TRUE" else "FALSE") [] []
@@ -267,9 +267,9 @@ typeSchema :: SerialAST -> MDoc
 typeSchema s0 = squotes $ jsontype2rjson (serialAstToJsonType s0) where
   serialAstToJsonType :: SerialAST -> JsonType
   serialAstToJsonType (SerialPack _ (_, s)) = serialAstToJsonType s
-  serialAstToJsonType (SerialList _ s) = ArrJ "list" [serialAstToJsonType s]
-  serialAstToJsonType (SerialTuple _ ss) = ArrJ "tuple" (map serialAstToJsonType ss)
-  serialAstToJsonType (SerialObject _ (FV _ n) _ rs) = NamJ n (map (bimap (\(FV _ x) -> x) serialAstToJsonType) rs)
+  serialAstToJsonType (SerialList _ s) = ArrJ (TV "list") [serialAstToJsonType s]
+  serialAstToJsonType (SerialTuple _ ss) = ArrJ (TV "tuple") (map serialAstToJsonType ss)
+  serialAstToJsonType (SerialObject _ (FV _ n) _ rs) = NamJ n (map (second serialAstToJsonType) rs)
   serialAstToJsonType (SerialReal    (FV _ v)) = VarJ v
   serialAstToJsonType (SerialInt     (FV _ v)) = VarJ v
   serialAstToJsonType (SerialBool    (FV _ v)) = VarJ v
@@ -284,8 +284,8 @@ jsontype2rjson (ArrJ v ts) = "{" <> key <> ":" <> val <> "}" where
   val = encloseSep "[" "]" "," (map jsontype2rjson ts)
 jsontype2rjson (NamJ objType rs) =
   case objType of
-    "data.frame" -> "{" <> dquotes "data.frame" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
-    "record" -> "{" <> dquotes "record" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
+    (TV "data.frame") -> "{" <> dquotes "data.frame" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
+    (TV "record") -> "{" <> dquotes "record" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
     _ -> encloseSep "{" "}" "," rs'
   where
   keys = map (dquotes . pretty . fst) rs

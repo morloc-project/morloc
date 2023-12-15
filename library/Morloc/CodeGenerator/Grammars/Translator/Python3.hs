@@ -83,8 +83,8 @@ translateSource s = do
 tupleKey :: Int -> MDoc -> MDoc
 tupleKey i v = [idoc|#{v}[#{pretty i}]|]
 
-selectAccessor :: NamType -> MT.Text -> (MDoc -> MDoc -> MDoc)
-selectAccessor NamTable  "dict" = recordAccess
+selectAccessor :: NamType -> TVar -> (MDoc -> MDoc -> MDoc)
+selectAccessor NamTable  (TV "dict") = recordAccess
 selectAccessor NamRecord _      = recordAccess
 selectAccessor NamTable  _      = objectAccess
 selectAccessor NamObject _      = objectAccess
@@ -131,9 +131,9 @@ serialize v0 s0 = do
 
     construct v (SerialObject namType (FV _ constructor) _ rs) = do
       let accessField = selectAccessor namType constructor
-      (befores, ss') <- mapAndUnzipM (\(FV _ k,s) -> serialize' (accessField v (pretty k)) s) rs
+      (befores, ss') <- mapAndUnzipM (\(key, s) -> serialize' (accessField v (pretty key)) s) rs
       v' <- helperNamer <$> newIndex
-      let entries = zipWith (\(FV _ key) val -> pretty key <> "=" <> val)
+      let entries = zipWith (\key val -> pretty key <> "=" <> val)
                             (map fst rs) ss'
           decl = [idoc|#{v'} = dict#{tupled (entries)}|]
       return (concat befores ++ [decl], v')
@@ -184,9 +184,9 @@ deserialize v0 s0
 
     construct v (SerialObject namType (FV _ constructor) _ rs) = do
       let accessField = selectAccessor namType constructor
-      (ss', befores) <- mapAndUnzipM (\(FV _ k,s) -> check (accessField v (pretty k)) s) rs
+      (ss', befores) <- mapAndUnzipM (\(k, s) -> check (accessField v (pretty k)) s) rs
       v' <- helperNamer <$> newIndex
-      let entries = zipWith (\(FV _ key) val -> pretty key <> "=" <> val)
+      let entries = zipWith (\key val -> pretty key <> "=" <> val)
                             (map fst rs) ss'
           decl = [idoc|#{v'} = #{pretty constructor}#{tupled entries}|]
       return (v', concat befores ++ [decl])
@@ -257,7 +257,7 @@ translateSegment m0 =
         = return $ mergePoolDocs pyDict (map snd rs)
         where
             pyDict es' =
-                let entries' = zipWith (\(FV _ k) v -> pretty k <> "=" <> v) (map fst rs) es'
+                let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) es'
                 in "OrderedDict" <> tupled entries'
     makeNativeExpr _ (LogN_ _ v) = return $ PoolDocs [] (if v then "True" else "False") [] []
     makeNativeExpr _ (RealN_ _ v) = return $ PoolDocs [] (viaShow v) [] []
@@ -302,11 +302,11 @@ typeSchema = f . serialAstToJsonType
     f :: JsonType -> MDoc
     f (VarJ v) = lst [var v, "None"]
     f (ArrJ v ts) = lst [var v, lst (map f ts)]
-    f (NamJ "dict" es) = lst [dquotes "dict", dict (map entry es)]
-    f (NamJ "record" es) = lst [dquotes "record", dict (map entry es)]
+    f (NamJ (TV "dict") es) = lst [dquotes "dict", dict (map entry es)]
+    f (NamJ (TV "record") es) = lst [dquotes "record", dict (map entry es)]
     f (NamJ v es) = lst [pretty v, dict (map entry es)]
 
-    entry :: (MT.Text, JsonType) -> MDoc
+    entry :: (Key, JsonType) -> MDoc
     entry (v, t) = pretty v <> "=" <> f t
 
     dict :: [MDoc] -> MDoc
@@ -315,7 +315,7 @@ typeSchema = f . serialAstToJsonType
     lst :: [MDoc] -> MDoc
     lst xs = encloseSep "(" ")" "," xs
 
-    var :: MT.Text -> MDoc
+    var :: TVar -> MDoc
     var v = dquotes (pretty v)
 
 makePool :: MDoc -> [MDoc] -> [MDoc] -> MDoc -> MDoc

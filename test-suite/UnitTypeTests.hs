@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, QuasiQuotes, OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell, QuasiQuotes, OverloadedStrings, ViewPatterns #-}
 
 module UnitTypeTests
   ( subtypeTests
@@ -75,11 +75,11 @@ assertConcreteType msg code t = testCase msg $ do
 renameExistentials :: TypeU -> TypeU
 renameExistentials = snd . f (0, Map.empty) where
  f s (VarU v) = (s, VarU v)
- f (i,m) (ExistU v@(TV lang _) ps rs) =
+ f (i,m) (ExistU v ps rs) =
   case Map.lookup v m of
     (Just v') -> ((i, m), ExistU v' ps rs)
     Nothing ->
-      let v' = TV lang ("e" <> MT.pack (show i))
+      let v' = TV ("e" <> MT.pack (show i))
           i' = i+1
           m' = Map.insert v v' m
           (s', ps') = statefulMap f (i', m') ps 
@@ -138,49 +138,32 @@ testFalse :: String -> Bool -> TestTree
 testFalse msg x =
   testCase msg $ assertEqual "" x False
 
-bool = VarU (TV Nothing "Bool")
-
-real = VarU (TV Nothing "Real")
-
-int = VarU (TV Nothing "Int")
-
-str = VarU (TV Nothing "Str")
+bool = VarU (TV "Bool")
+real = VarU (TV "Real")
+int = VarU (TV "Int")
+str = VarU (TV "Str")
 
 fun [] = error "Cannot infer type of empty list"
 fun [t] = FunU [] t
 fun ts = FunU (init ts) (last ts)
 
 forall [] t = t
-forall (s:ss) t = ForallU (TV Nothing s) (forall ss t)
+forall (s:ss) t = ForallU (TV s) (forall ss t)
 
-exist v = ExistU (TV Nothing v) [] []
+exist v = ExistU (TV v) [] []
 
-forallc _ [] t = t
-forallc lang (s:ss) t = ForallU (TV (Just lang) s) (forallc lang ss t)
-
-v s = TV Nothing s 
-var s = VarU (TV Nothing s)
-varc l s = VarU (TV (Just l) s)
-
-arrc l s ts = AppU (VarU (TV (Just l) s)) ts
-
-arr s ts = AppU (VarU (TV Nothing s)) ts
-
+v s = TV s 
+var s = VarU (TV s)
+arr s ts = AppU (VarU (TV s)) ts
 lst t = arr "List" [t]
-
 tuple ts = AppU v ts
   where
-    v = VarU . TV Nothing . MT.pack $ "Tuple" ++ show (length ts)
-
-record rs = NamU NamRecord (TV Nothing "Record") [] rs
-
-record' n rs = NamU NamRecord (TV Nothing n) [] rs
-
-unkp lang gv cv = UnkP (PV lang gv cv) 
-
-varp lang gv cv = VarP (PV lang gv cv)
-
-appp lang gv cv ps = AppP (VarP (PV lang (Just gv) cv)) ps 
+    v = VarU . TV . MT.pack $ "Tuple" ++ show (length ts)
+record rs = NamU NamRecord (TV "Record") [] rs
+record' n rs = NamU NamRecord (TV n) [] rs
+unkp lang (TV -> gv) (TV -> cv) = UnkP (PV gv (CV lang cv)) 
+varp lang (TV -> gv) (TV -> cv) = VarP (PV gv (CV lang cv))
+appp lang (TV -> gv) (TV -> cv) ps = AppP (VarP (PV gv (CV lang cv))) ps 
 
 funp [] = error "Cannot infer type of empty list"
 funp ts = FunP (init ts) (last ts)
@@ -195,8 +178,8 @@ subtypeTests =
     , assertSubtypeGamma "G -| (A -> B) <: (A -> B) |- G" [] (fun [a, b]) (fun [a, b]) []
     , assertSubtypeGamma "G -| [A] <: [A] |- G" [] (lst a) (lst a) []
     , assertSubtypeGamma "G -| {K :: a, L :: b} <: {K :: a, L :: b}" []
-        (record' "Foo" [("K", a), ("L", b)]) 
-        (record' "Foo" [("K", a), ("L", b)]) []
+        (record' "Foo" [(Key "K", a), (Key "L", b)]) 
+        (record' "Foo" [(Key "K", a), (Key "L", b)]) []
     , assertSubtypeGamma "<a> -| <a> <: A |- <a>:A" [eag] ea a [solvedA a]
     , assertSubtypeGamma "<a> -| A <: <a> |- <a>:A" [eag] a ea [solvedA a]
     , assertSubtypeGamma "<b> -| [A] <: <b> |- <b>:[A]" [ebg] (lst a) (eb) [solvedB (lst a)]
@@ -317,78 +300,12 @@ recordAccessTests =
          ((bar 5)@a, (bar 6)@b)
       |]
       (tuple [int, str])
-    -- , assertGeneralType
-    --   "Access multiple languages"
-    --   [r|
-    --       record Person = Person {a :: Int, b :: Str}
-    --       record R Person = Person {a :: "numeric", b :: "character"}
-    --       bar :: Person
-    --       bar R :: Person
-    --       bar@b
-    --   |]
-    --   [str, varc RLang "character"]
     ]
 
 packerTests =
   testGroup
     "Test building of packer maps"
     [ testEqual "packer test" 1 1 ]
---     [ assertPacker "no import packer"
---         [r|
---             source Cpp from "map.h" ( "mlc_packMap" as packMap
---                                     , "mlc_unpackMap" as unpackMap)
---             packMap :: pack => ([a],[b]) -> Map a b
---             unpackMap :: unpack => Map a b -> ([a],[b])
---             packMap Cpp :: pack => ([a],[b]) -> "std::map<$1,$2>" a b
---             unpackMap Cpp :: unpack => "std::map<$1,$2>" a b -> ([a],[b])
---             export Map
---         |]
---         ( Map.singleton
---             (TV (Just CppLang) "std::map<$1,$2>", 2)
---             [ UnresolvedPacker {
---                 unresolvedPackerTerm = (Just (EV [] "Map"))
---               , unresolvedPackerCType
---                 = forallc CppLang ["a","b"]
---                   ( arrc CppLang "std::tuple<$1,$2>" [ arrc CppLang "std::vector<$1>" [varc CppLang "a"]
---                                                      , arrc CppLang "std::vector<$1>" [varc CppLang "b"]])
---               , unresolvedPackerForward
---                 = [Source (Name "mlc_packMap") CppLang (Just "map.h") (EV [] ("packMap"))]
---               , unresolvedPackerReverse
---                 = [Source (Name "mlc_unpackMap") CppLang (Just "map.h") (EV [] ("unpackMap"))]
---               }
---             ]
---         )
---
---     , assertPacker "with importing and aliases"
---         [r|
--- module A
--- source Cpp from "map.h" ( "mlc_packMap" as packMap
---                         , "mlc_unpackMap" as unpackMap)
--- packMap :: pack => ([a],[b]) -> Map a b
--- unpackMap :: unpack => Map a b -> ([a],[b])
--- packMap Cpp :: pack => ([a],[b]) -> "std::map<$1,$2>" a b
--- unpackMap Cpp :: unpack => "std::map<$1,$2>" a b -> ([a],[b])
--- export Map
---
--- module Main
--- import A (Map as Hash)
---         |]
---         ( Map.singleton
---             (TV (Just CppLang) "std::map<$1,$2>", 2)
---             [ UnresolvedPacker {
---                 unresolvedPackerTerm = (Just (EV [] "Hash"))
---               , unresolvedPackerCType
---                 = forallc CppLang ["a","b"]
---                   ( arrc CppLang "std::tuple<$1,$2>" [ arrc CppLang "std::vector<$1>" [varc CppLang "a"]
---                                                      , arrc CppLang "std::vector<$1>" [varc CppLang "b"]])
---               , unresolvedPackerForward
---                 = [Source (Name "mlc_packMap") CppLang (Just "map.h") (EV [] ("packMap"))]
---               , unresolvedPackerReverse
---                 = [Source (Name "mlc_unpackMap") CppLang (Just "map.h") (EV [] ("unpackMap"))]
---               }
---             ]
---         )
---     ]
 
 typeAliasTests =
   testGroup
@@ -439,7 +356,7 @@ typeAliasTests =
         type Foo = A
         f :: [Foo] -> { a :: Foo }
         |]
-        (fun [lst (var "A"), record [("a", var "A")]])
+        (fun [lst (var "A"), record [(Key "a", var "A")]])
     , assertGeneralType
         "parametric alias, general type alias"
         [r|
@@ -475,62 +392,10 @@ typeAliasTests =
            f = g  {- yes, g isn't defined -}
         |]
         (fun [var "A", var "Int"])
-    -- , assertGeneralType
-    --     "non-parametric alias, concrete type alias"
-    --     [r|
-    --        type C Num = double
-    --        f C :: Num -> "int"
-    --        f
-    --     |]
-    --     (fun [varc CLang "double", varc CLang "int"])
-    -- , assertGeneralType
-    --     "language-specific types are be nested"
-    --     [r|
-    --        type R Num = "numeric"
-    --        f R :: [Num] -> "integer"
-    --        f
-    --     |]
-    --     [fun [arrc RLang "list" [varc RLang "numeric"], varc RLang "integer"]]
-    -- , assertGeneralType
-    --     "no substitution is across languages"
-    --     [r|
-    --        type Num = "numeric"
-    --        f R :: [Num] -> "integer"
-    --        f
-    --     |]
-    --     [fun [arrc RLang "list" [varc RLang "Num"], varc RLang "integer"]]
-    -- , assertGeneralType
-    --     "parametric alias, concrete type alias"
-    --     [r|
-    --        type Cpp (Map a b) = "std::map<$1,$2>" a b
-    --        f Cpp :: Map "int" "double" -> "int"
-    --        f
-    --     |]
-    --     [ fun [arrc CppLang "std::map<$1,$2>" [varc CppLang "int", varc CppLang "double"]
-    --           , varc CppLang "int"]]
-    -- , assertGeneralType
-    --     "nested in signature"
-    --     [r|
-    --        type Cpp (Map a b) = "std::map<$1,$2>" a b
-    --        f Cpp :: Map "string" (Map "double" "int") -> "int"
-    --        f
-    --     |]
-    --     [ fun [arrc CppLang "std::map<$1,$2>" [varc CppLang "string"
-    --           , arrc CppLang "std::map<$1,$2>" [varc CppLang "double", varc CppLang "int"]]
-    --           , varc CppLang "int"]]
 
-    -- , assertGeneralType
-    --     "existentials are resolved"
-    --     [r|
-    --        type Cpp (A a b) = "map<$1,$2>" a b
-    --        foo Cpp :: A D [B] -> X
-    --        foo
-    --     |]
-    --     [fun [ arrc CppLang "map<$1,$2>" [varc CppLang "D", arrc CppLang "std::vector<$1>" [varc CppLang "B"]]
-    --          , varc CppLang "X"]]
     , expectError
         "fail neatly for self-recursive type aliases"
-        (SelfRecursiveTypeAlias (TV Nothing "A"))
+        (SelfRecursiveTypeAlias (TV "A"))
         [r|
            type A = (A,A)
            foo :: A -> B -> C
@@ -539,7 +404,7 @@ typeAliasTests =
     -- -- TODO: find a way to catch mutually recursive type aliases
     -- , expectError
     --     "fail neatly for mutually-recursive type aliases"
-    --     (MutuallyRecursiveTypeAlias [TV Nothing "A", TV Nothing "B"])
+    --     (MutuallyRecursiveTypeAlias [TV "A", TV "B"])
     --     (MT.unlines
     --       [ "type A = B"
     --       , "type B = A"
@@ -549,7 +414,7 @@ typeAliasTests =
     --     )
     , expectError
         "fail on too many type aliases parameters"
-        (BadTypeAliasParameters (TV Nothing "A") 0 1)
+        (BadTypeAliasParameters (TV "A") 0 1)
         [r|
            type A = B
            foo :: A Int -> C
@@ -557,7 +422,7 @@ typeAliasTests =
         |]
     , expectError
         "fail on too few type aliases parameters"
-        (BadTypeAliasParameters (TV Nothing "A") 1 0)
+        (BadTypeAliasParameters (TV "A") 1 0)
         [r|
            type (A a) = (a,a)
            foo :: A -> C
@@ -697,7 +562,7 @@ concreteTypeSynthesisTests =
       type Py Int = "int"
       foo :: Int -> Int
       |]
-      (FunP [varp Python3Lang (Just "Int") "int"] (varp Python3Lang (Just "Int") "int"))
+      (FunP [varp Python3Lang "Int" "int"] (varp Python3Lang "Int" "int"))
 
   , assertConcreteType
       -- This tests the desugar bug fixed in #a50c75
@@ -712,7 +577,7 @@ concreteTypeSynthesisTests =
      
       foo :: Real -> (Real, a)
       |]
-      (FunP [varp CppLang (Just "Real") "double"] ( appp CppLang "Tuple2" "std::tuple" [ varp CppLang (Just "Real") "double", UnkP (PV CppLang (Just "a_q0") "a_q0") ]))
+      (FunP [varp CppLang "Real" "double"] ( appp CppLang "Tuple2" "std::tuple" [ varp CppLang "Real" "double", unkp CppLang "a_q0" "a_q0" ]))
 
   , assertConcreteType
       "test: (asCpp . asPy) [1.0]"
@@ -728,7 +593,7 @@ concreteTypeSynthesisTests =
       source Cpp from "foo.cpp" ("id" as asCpp)
       foo = (asCpp . asPy) [1.0]
       |]
-      (appp CppLang "List" "std::vector<$1>" [varp CppLang (Just "Real") "double"])
+      (appp CppLang "List" "std::vector<$1>" [varp CppLang "Real" "double"])
 
   , assertConcreteType
       "test mixed language inference"
@@ -766,11 +631,11 @@ concreteTypeSynthesisTests =
       import foo (fluffle)
       out = fluffle [("asdf","er")] "qwer"
       |]
-      (appp Python3Lang "List" "list" [appp Python3Lang "List" "list" [varp Python3Lang (Just "Str") "str"]])
+      (appp Python3Lang "List" "list" [appp Python3Lang "List" "list" [varp Python3Lang "Str" "str"]])
 
   , expectError
       "Synth error raised if no type alias given"
-      (CannotSynthesizeConcreteType (MV "m") (Source (Name "foo") Python3Lang (Just "_") (EV "foo") Nothing) (fun [int, int]) ["Int"])
+      (CannotSynthesizeConcreteType (MV "m") (Source (SrcName "foo") Python3Lang (Just "_") (EV "foo") Nothing) (fun [int, int]) ["Int"])
       [r|
       module m (foo)
       source Py from "_" ("foo")
@@ -866,12 +731,6 @@ typeOrderTests =
         (MP.mostSpecificSubtypes int [forall ["a"] (var "a")])
         [forall ["a"] (var "a")]
 
-    -- test mostSpecificSubtypes different languages
-    , testEqual
-        "mostSpecificSubtypes: different languages"
-        (MP.mostSpecificSubtypes (varc RLang "numeric") [forallc CLang ["a"] (var "a")])
-        []
-
     -- test mostSpecificSubtypes for tuples
     , testEqual
         "mostSpecificSubtypes: tuples"
@@ -946,7 +805,7 @@ unitTypeTests =
         [r|
         {x=42, y="yolo"}
         |]
-        (ExistU (TV Nothing "e0") [] [("x", int), ("y", str)])
+        (ExistU (TV "e0") [] [(Key "x", int), (Key "y", str)])
     , assertGeneralType
         "primitive record signature"
         [r|
@@ -954,20 +813,20 @@ unitTypeTests =
         f :: Int -> Foo
         f 42
         |]
-        (record' "Foo" [("x", int), ("y", str)])
+        (record' "Foo" [(Key "x", int), (Key "y", str)])
     , assertGeneralType
         "primitive record declaration"
         [r|
         foo = {x = 42, y = "yolo"}
         foo
         |]
-        (ExistU (TV Nothing "e0") [] [("x", int), ("y", str)])
+        (ExistU (TV "e0") [] [(Key "x", int), (Key "y", str)])
     , assertGeneralType
         "nested records"
         [r|
         {x = 42, y = {bob = 24601, tod = "listen now closely and hear how I've planned it"}}
         |]
-        (ExistU (TV Nothing "e0") [] [("x", int),("y",ExistU (TV Nothing "e1") [] [("bob",int),("tod",str)])])
+        (ExistU (TV "e0") [] [(Key "x", int),(Key "y",ExistU (TV "e1") [] [(Key "bob",int),(Key "tod",str)])])
 
     , assertGeneralType
         "records with bound variables"
@@ -975,7 +834,7 @@ unitTypeTests =
         foo a = {x=a, y="yolo"}
         foo 42
         |]
-        (ExistU (TV Nothing "e0") [] [("x", int),("y", str)])
+        (ExistU (TV "e0") [] [(Key "x", int),(Key "y", str)])
 
     -- functions
     , assertGeneralType
@@ -1396,25 +1255,6 @@ unitTypeTests =
         xs :: Foo (Bar A) [B]
         |]
         (arr "Foo" [arr "Bar" [var "A"], arr "List" [var "B"]])
-    -- , assertTerminalType
-    --     "language inference in lists #1"
-    --     [r|
-    --        bar Cpp :: "float" -> "std::vector<$1>" "float"
-    --        bar x = [x]
-    --        bar 5
-    --     |]
-    --     [arrc CppLang "std::vector<$1>" [varc CppLang "float"], lst (var "Num")]
-    -- , assertTerminalType
-    --     "language inference in lists #2"
-    --     [r|
-    --        mul :: Num -> Num -> Num
-    --        mul Cpp :: "int" -> "int" -> "int"
-    --        foo = mul 2
-    --        bar Cpp :: "int" -> "std::vector<$1>" "int"
-    --        bar x = [foo x, 42]
-    --        bar 5
-    --     |]
-    --     [lst (var "Num"), arrc CppLang "std::vector<$1>" [varc CppLang "int"]]
 
     -- type signatures and higher-order functions
     , assertGeneralType
@@ -1448,11 +1288,6 @@ unitTypeTests =
         map f [5,2]
         |]
         (lst bool)
-    -- , assertGeneralType
-    --     "type signature: sqrt with realizations"
-    --     "sqrt :: Num -> Num\nsqrt R :: \"numeric\" -> \"numeric\"\nsqrt"
-    --     [ fun [num, num]
-    --     , fun [varc RLang "numeric", varc RLang "numeric"]]
 
     -- shadowing
     , assertGeneralType
@@ -1558,7 +1393,7 @@ unitTypeTests =
         module main (f)
         f :: Bool -> ()
         |]
-        (fun [bool, VarU (TV Nothing "Unit")])
+        (fun [bool, VarU (TV "Unit")])
 
     -- FIXME - I really don't like "Unit" being a normal var ...
     -- I am inclined to cast it as the unit type

@@ -97,7 +97,7 @@ synthG g (SAnno (Many []) i) = do
         case maybeName of
             -- This branch is entered for exported type definitions
             -- FIXME: return all definitions and their parameters, check parameter count
-            (Just (EV v)) -> return (g, VarU (TV Nothing v), SAnno (Many []) (Idx i (VarU (TV Nothing v))))
+            (Just (EV v)) -> return (g, VarU (TV v), SAnno (Many []) (Idx i (VarU (TV v))))
             Nothing -> error "Indexing error, this should not occur, please message the maintainer"
 
 synthG g0 (SAnno (Many ((e0, j):es)) i) = do
@@ -164,7 +164,7 @@ synthE i g0 (AccS e k) = do
       (Just val) -> return (g1, val)
     (ExistU v ps rs) -> case lookup k rs of
       Nothing -> do
-        let (g12, val) = newvar (unTVar v <> "_" <> k) Nothing g1
+        let (g12, val) = newvar (unTVar v <> "_" <> unKey k) g1
         case access1 v (gammaContext g12) of
           (Just (rhs, _, lhs)) -> return (g12 { gammaContext = rhs <> [ExistG v ps ((k, val):rs)] <> lhs }, val)
           Nothing -> gerr i (KeyError k t1)
@@ -216,8 +216,8 @@ synthE i g0 f@(LamS vs x) = do
       synthE i g2 f2
     else do
       -- create existentials for everything and pass it off to check
-      let (g2, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") Nothing g') g1 vs
-          (g3, ft) = newvar "o_" Nothing g2
+      let (g2, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") g') g1 vs
+          (g3, ft) = newvar "o_" g2
           finalType = FunU ts ft
       checkE' i g3 f finalType
   where
@@ -228,7 +228,7 @@ synthE i g0 f@(LamS vs x) = do
 
 --   List
 synthE _ g (LstS []) =
-  let (g1, itemType) = newvar "itemType_" Nothing g
+  let (g1, itemType) = newvar "itemType_" g
       listType = BT.listU itemType
   in return (g1, listType, LstS [])
 synthE i g (LstS (e:es)) = do
@@ -264,7 +264,7 @@ synthE _ g0 (NamS rs) = do
   (g1, xs) <- statefulMapM (\s v -> synthG s v |>> (\(a,b,c) -> (a,(b,c)))) g0 (map snd rs)
   let (ts, es) = unzip xs
       ks = map fst rs
-      (g2, t) = newvarRich [] [] (zip ks ts) "record_" Nothing g1
+      (g2, t) = newvarRich [] (zip ks ts) "record_" g1
       e = NamS (zip ks es)
   return (g2, t, e) 
 
@@ -275,14 +275,14 @@ synthE i g (CallS src) = do
     Just x -> return x
     -- no, then I don't know what it is and will return an existential
     -- if this existential is never solved, then it will become universal later 
-    Nothing -> return $ newvar "src_"  Nothing g
+    Nothing -> return $ newvar "src_" g
   return (g', t, CallS src)
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
 synthE i g (VarS v) = do
   -- is this a bound variable that has already been solved
-  (g', t') <- case lookupE Nothing v g of 
+  (g', t') <- case lookupE v g of 
     -- yes, return the solved type
     (Just t) -> return (g, t)
     Nothing -> do
@@ -292,7 +292,7 @@ synthE i g (VarS v) = do
         Just x -> return x 
         -- no, then I don't know what it is and will return an existential
         -- if this existential is never solved, then it will become universal later 
-        Nothing -> return $ newvar (unEVar v <> "_u")  Nothing g
+        Nothing -> return $ newvar (unEVar v <> "_u") g
   return (g', t', VarS v)
 
 
@@ -372,12 +372,12 @@ application i g0 es (ForallU v s) = application' i (g0 +> v) es (substitute v s)
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-application i g0 es (ExistU v@(TV _ s) [] _) =
+application i g0 es (ExistU v@(TV s) [] _) =
   case access1 v (gammaContext g0) of
     -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
-      let (g1, veas) = statefulMap (\g _ -> tvarname g "a_" Nothing) g0 es
-          (g2, vea) = tvarname g1 (s <> "o_") Nothing
+      let (g1, veas) = statefulMap (\g _ -> tvarname g "a_") g0 es
+          (g2, vea) = tvarname g1 (s <> "o_")
           eas = [ExistU v' [] [] | v' <- veas]
           ea = ExistU vea [] []
           f = FunU eas ea

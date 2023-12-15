@@ -25,54 +25,62 @@ module Morloc.BaseTypes
   , strU
   , tupleU
   , listU
+  , serialType
   ) where
 
 import Prelude hiding(log)
 import Morloc.Namespace
-import Morloc.Data.Text (pretty, Text)
+import Morloc.Data.Text (pretty)
 
-unit :: Text
-unit = "Unit"
+unit :: TVar
+unit = TV "Unit"
 
-real :: Text
-real = "Real"
+real :: TVar
+real = TV "Real"
 
-int :: Text
-int = "Int"
+int :: TVar
+int = TV "Int"
 
-bool :: Text
-bool = "Bool"
+bool :: TVar
+bool = TV "Bool"
 
-str :: Text
-str = "Str"
+str :: TVar
+str = TV "Str"
 
-list :: Text
-list = "List"
+list :: TVar
+list = TV "List"
 
-tuple :: Int -> Text
-tuple k = "Tuple" <> pretty k
+tuple :: Int -> TVar
+tuple k = TV $ "Tuple" <> pretty k
 
-record :: Text
-record = "Record"
+record :: TVar
+record = TV "Record"
 
 
 unitU :: TypeU
-unitU = VarU . TV Nothing $ unit
+unitU = VarU unit
 
 realU :: TypeU
-realU = VarU . TV Nothing $ real
+realU = VarU real
 
 intU :: TypeU
-intU = VarU . TV Nothing $ int
+intU = VarU int
 
 boolU :: TypeU
-boolU = VarU . TV Nothing $ bool
+boolU = VarU bool
 
 strU :: TypeU
-strU = VarU . TV Nothing $ str
+strU = VarU str
 
 listU :: TypeU -> TypeU
-listU t = AppU (VarU . TV Nothing $ list) [t]
+listU t = AppU (VarU list) [t]
 
 tupleU :: [TypeU] -> TypeU
-tupleU ts = AppU (VarU . TV Nothing $ tuple (length ts)) ts
+tupleU ts = AppU (VarU $ tuple (length ts)) ts
+
+serialType :: Lang -> TVar
+serialType Python3Lang = TV "str"
+serialType RLang = TV "character"
+serialType CppLang = TV "std::string"
+serialType _ = error "Ah hell, you know I don't know that language"
+

@@ -9,7 +9,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Frontend.Desugar (desugar, desugarType, desugarEType, switchLang) where
+module Morloc.Frontend.Desugar (desugar, desugarType, desugarEType) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Pretty ()
@@ -58,7 +58,7 @@ checkForSelfRecursion d = do
   where
     -- A typedef is self-recursive if its name appears in its definition
     isExprSelfRecursive :: ExprI -> MorlocMonad ()
-    isExprSelfRecursive (ExprI _ (TypE v@(TV Nothing _) _ t))
+    isExprSelfRecursive (ExprI _ (TypE _ v _ t))
       | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v
       | otherwise = return ()
     isExprSelfRecursive _ = return ()
@@ -138,11 +138,16 @@ desugarExpr
 desugarExpr d k e0 = do
   s <- MM.get
 
+  -- , stateTypedefs :: GMap Int MVar (Map CVar [([CVar], Type)])
+  -- , stateTypedefs :: GMap Int MVar (Map TVar [([TVar], TypeU)])
+
   -- Here we are creating links from every indexed term in the module to the module
   -- sources and aliases. When the module abstractions are factored out later,
   -- this will be the only way to access module-specific info.
+ 
   MM.put (s { stateSources = GMap.insertMany indices k objSources (stateSources s)
-            , stateTypedefs = GMap.insertMany indices k typedefs (stateTypedefs s) } )
+            , stateConcreteTypedefs = GMap.insertMany indices k concreteTypedefs (stateConcreteTypedefs s)
+            } )
 
   case mapExprM f e0 of
     (Right x) -> return x
@@ -156,10 +161,10 @@ desugarExpr d k e0 = do
 
   objSources = [src | src <- AST.findSources e0]
 
-  -- Find all type terms used in this module
+  -- Find all type type terms used in signatures in this module
   -- These are the terms that may need alias expansion
   terms :: [TVar]
-  terms = AST.findSignatureTypeTerms e0
+  terms = AST.findSignatureTypeTerms e0 
 
   -- Map of type variables to their definitions/aliases (TypE terms)
   -- This includes simple aliases, such as:
@@ -169,17 +174,18 @@ desugarExpr d k e0 = do
   termmap :: Map.Map TVar [([TVar], TypeU)]
   termmap = Map.fromList $ zip terms (map lookupTypedefs terms)
 
+  -- find all general type functions that are used in sigutures in this module
   lookupTypedefs
-    :: TVar
+    :: TVar -- name of the term for which a type signature is sought
     -> [([TVar], TypeU)]
-  lookupTypedefs (TV lang v)
+  lookupTypedefs v 
     = catMaybes
     -- Maybe ([TVar], TypeU)
     . MDD.nodes
     -- DAG MVar None (Maybe ([TVar], TypeU))
-    . MDD.mapNode (\(v', typemap) -> Map.lookup (TV lang v') typemap)
+    . MDD.mapNode (uncurry Map.lookup)
     -- DAG MVar None (Text, Map.Map TVar ([TVar], TypeU))
-    . MDD.lookupAliasedTerm v k AST.findTypedefs
+    . MDD.lookupAliasedTerm v k AST.findGeneralTypedefs
     -- DAG MVar [(Text,Text)] ExprI
     . MDD.mapEdge (\xs -> [(x,y) | AliasedType x y <- xs])
     -- DAG MVar [AliasedSymbol] ExprI
@@ -187,21 +193,26 @@ desugarExpr d k e0 = do
 
   indices = AST.getIndices e0
 
-  typedefs :: Map.Map TVar [([TVar], TypeU)]
-  typedefs 
+
+  -- find all concrete type definitions that are in scope in this module
+  concreteTypedefs :: Map.Map CVar [([TVar], TypeU)]
+  concreteTypedefs
     = Map.fromList
     . groupSort
-    . (<>) (Map.toList $ AST.findTypedefs e0)
+    . (<>) (Map.toList $ AST.findConcreteTypedefs e0)
     . concatMap
-      ( (\(v, es) -> [(TV (langOf t) v, (vs, t)) | (vs, t) <- es])
+      ( (\(v, es) -> [(CV lang v, (vs, t)) | (CV lang _, (vs, t)) <- es])
+      -- [(TVar, [(CVar, ([TVar], TypeU))])]
       . second (concatMap (uncurry lookupName) . MDD.nodes)
       )
-    . MDD.inherit k AST.findTypedefs
+    -- [(TVar, DAG MVar None (TVar, Map CVar ([TVar], TypeU)))]
+    . MDD.inherit k AST.findConcreteTypedefs
+    -- just import types
     . MDD.mapEdge (\es -> [(a, b) | AliasedType a b <- es])
     $ d
 
-  lookupName :: MT.Text -> Map.Map TVar a -> [a] 
-  lookupName k1 m = [x | (TV _ k2, x) <- Map.toList m, k1 == k2]
+  lookupName :: TVar -> Map.Map CVar a -> [(CVar, a)]
+  lookupName v1 m = [(key, x) | (key@(CV _ v2), x) <- Map.toList m, v1 == v2]
 
 
 desugarEType :: Map.Map TVar [([TVar], TypeU)] -> EType -> Either MorlocError EType
@@ -280,10 +291,10 @@ desugarType h = f Set.empty
 
   renameTypedefs :: Set.Set TVar -> ([TVar], TypeU) -> ([TVar], TypeU)
   renameTypedefs _ ([], t) = ([], t)
-  renameTypedefs bnd (v@(TV lang x) : vs, t)
+  renameTypedefs bnd (v@(TV x) : vs, t)
     | Set.member v bnd =
         let (vs', t') = renameTypedefs bnd (vs, t)
-            v' = head [x' | x' <- [TV lang (MT.show' i <> x) | i <- [0..]], not (Set.member x' bnd), not (elem x' vs')]  
+            v' = head [x' | x' <- [TV (MT.show' i <> x) | i <- [0..]], not (Set.member x' bnd), not (elem x' vs')]  
             t'' = substituteTVar v (VarU v') t'
         in (v':vs', t'')
     | otherwise = 
@@ -350,7 +361,7 @@ removeTypeImports d = case MDD.roots d of
   roots -> MM.throwError $ NonSingularRoot roots
   where 
     maybeEVar :: AliasedSymbol -> Maybe (EVar, EVar)
-    maybeEVar (AliasedTerm x y) = Just (EV x, EV y)
+    maybeEVar (AliasedTerm x y) = Just (x, y)
     maybeEVar (AliasedType _ _) = Nothing -- remove type symbols, they have already been used
 
     filterEmpty :: k -> n -> k -> [a] -> Bool
@@ -397,11 +408,11 @@ gatherPackers
   -> ExprI -- data about the importing module
   -> [( MVar -- the name of an imported module
       , edge
-      , (ExprI, Map.Map TVar [UnresolvedPacker]) -- data about the imported module
+      , (ExprI, Map.Map CVar [UnresolvedPacker]) -- data about the imported module
      )]
-  -> MorlocMonad (ExprI, Map.Map TVar [UnresolvedPacker])
+  -> MorlocMonad (ExprI, Map.Map CVar [UnresolvedPacker])
 gatherPackers mv e xs = do
-  (GMap _ mvmap) <- MM.gets stateTypedefs
+  (GMap _ mvmap) <- MM.gets stateConcreteTypedefs
   let typedefs = fromMaybe Map.empty (Map.lookup mv mvmap) 
   MM.sayVVV $ "typedefs: " <> viaShow typedefs
   case findPackers typedefs e of
@@ -412,7 +423,7 @@ gatherPackers mv e xs = do
       attachPackers mv e m2
       return (e, m2)
 
-attachPackers :: MVar -> ExprI -> Map.Map TVar [UnresolvedPacker] -> MorlocMonad ()
+attachPackers :: MVar -> ExprI -> Map.Map CVar [UnresolvedPacker] -> MorlocMonad ()
 attachPackers mv e m = do
   s <- MM.get
   let p = GMap.insertMany (AST.getIndices e) mv m (statePackers s)
@@ -424,7 +435,7 @@ attachPackers mv e m = do
 --   2) find the general types for the packed and unpacked forms
 --   3) infer concrete types from general types when needed (and possible)
 --   4) tie all this info together
-findPackers :: Map.Map TVar [([TVar], TypeU)] -> ExprI -> Either MorlocError (Map.Map TVar [UnresolvedPacker])
+findPackers :: Map.Map CVar [([TVar], TypeU)] -> ExprI -> Either MorlocError (Map.Map CVar [UnresolvedPacker])
 findPackers typedefs expr =
   mapM (linkTypes types) (AST.findSources expr)
   |>> catMaybes
@@ -433,10 +444,10 @@ findPackers typedefs expr =
 
   where
 
-  -- find all packer and unpacker signatures, general and concrete
-  types :: Map.Map (EVar, Bool, Maybe Lang) EType
+  -- find all packer and unpacker signatures
+  types :: Map.Map (EVar, Bool) EType
   types = Map.fromList
-            [ ((v, isPacker e, langOf e), e)
+            [ ((v, isPacker e), e)
             | (v, _, e) <- AST.findSignatures expr
             , isPacker e || isUnpacker e
             ]
@@ -447,33 +458,22 @@ findPackers typedefs expr =
   isUnpacker :: EType -> Bool
   isUnpacker e = Set.member Unpack (eprop e)
 
-  linkTypes :: Map.Map (EVar, Bool, Maybe Lang) EType
+  linkTypes :: Map.Map (EVar, Bool) EType
             -> Source
-            -> Either MorlocError (Maybe (TVar, [UnresolvedPacker]))
+            -> Either MorlocError (Maybe (CVar, [UnresolvedPacker]))
   linkTypes typemap src = do
-    let generalPacker = Map.lookup (srcAlias src, True, Nothing) typemap
-        generalUnpacker = Map.lookup (srcAlias src, False, Nothing) typemap
-        concretePacker = Map.lookup (srcAlias src, True, Just (srcLang src)) typemap
-        concreteUnpacker = Map.lookup (srcAlias src, False, Just (srcLang src)) typemap
-    case (generalPacker, generalUnpacker, concretePacker, concreteUnpacker) of
+    let generalPacker = Map.lookup (srcAlias src, True) typemap
+        generalUnpacker = Map.lookup (srcAlias src, False) typemap
+    case (generalPacker, generalUnpacker) of
       -- this is not a packer or unpacker
-      (Nothing, Nothing, Nothing, Nothing) -> Right Nothing
-      -- illegal cyclical cases
-      (Just p, Just u, _, _) -> Left $ CyclicPacker (etype p) (etype u)
-      (_, _, Just p, Just u) -> Left $ CyclicPacker (etype p) (etype u)
-      (Just gp, _, _, Just cu) -> Left $ ConflictingPackers (etype gp) (etype cu)
-      (_, Just gu, Just cp, _) -> Left $ ConflictingPackers (etype gu) (etype cp)
-      -- both general and concrete types are provided
-      (Just gp, Nothing, Just cp, Nothing) -> Just <$> makePacker True src (Just $ etype gp) (Just $ etype cp)
-      (Nothing, Just gu, Nothing, Just cu) -> Just <$> makePacker False src (Just $ etype gu) (Just $ etype cu)
-      -- only the concrete type is found (this may lead to problems later)
-      (Nothing, Nothing, Just cp, Nothing) -> Just <$> makePacker True src Nothing (Just $ etype cp)
-      (Nothing, Nothing, Nothing, Just cu) -> Just <$> makePacker False src Nothing (Just $ etype cu)
-      -- only general type is found, so we generate the concrete type
-      (Just gp, Nothing, Nothing, Nothing) -> Just <$> makePacker True src (Just $ etype gp) Nothing
-      (Nothing, Just gu, Nothing, Nothing) -> Just <$> makePacker False src (Just $ etype gu) Nothing
+      (Nothing, Nothing) -> Right Nothing
+      -- the term is either a packer or an unpacker
+      (Just gp, Nothing) -> Just <$> makePacker True src (Just $ etype gp) Nothing
+      (Nothing, Just gu) -> Just <$> makePacker False src (Just $ etype gu) Nothing
+      -- illegal cyclical cases where a term is both
+      (Just p, Just u) -> Left $ CyclicPacker (etype p) (etype u)
 
-  makePacker :: Bool -> Source -> Maybe TypeU -> Maybe TypeU -> Either MorlocError (TVar, [UnresolvedPacker])
+  makePacker :: Bool -> Source -> Maybe TypeU -> Maybe TypeU -> Either MorlocError (CVar, [UnresolvedPacker])
   makePacker ispacker src maygt mayct = do
     gpair <- makeGeneralPair ispacker maygt
     packerTerm <- case gpair of
@@ -481,12 +481,15 @@ findPackers typedefs expr =
       Nothing -> return Nothing
     (packedType, unpackedType) <- case (maygt, mayct) of
       (_, Just ct) -> makeConcretePair ispacker ct
-      (Just gt, _) -> desugarType typedefs (switchLang (srcLang src) gt) >>= makeConcretePair ispacker
+      (Just _, _) -> error "TODO: expand aliases"
+      -- (Just gt, _) -> desugarType typedefs (switchLang (srcLang src) gt) >>= makeConcretePair ispacker
       (Nothing, Nothing) -> error "This case should be unreachable"
     key <- packerKey packedType
     let (packerForward, packerReverse) = makeSources ispacker src
-    return (key, [UnresolvedPacker
-        { unresolvedPackerTerm = packerTerm
+        lang = srcLang src
+    return (CV lang key, [UnresolvedPacker
+        { unresolvedPackerLang = lang
+        , unresolvedPackerTerm = packerTerm
         , unresolvedPackedType = packedType
         , unresolvedUnpackedType = unpackedType
         , unresolvedPackerForward = packerForward
@@ -530,9 +533,9 @@ findPackers typedefs expr =
   -- e.g.: "Map"
   generalKey :: TypeU -> Either MorlocError (Maybe EVar)
   generalKey (unqualify -> (_, t0)) = f t0 where
-    f (VarU (TV Nothing v))   = return (Just (EV v))
-    f (AppU (VarU (TV Nothing v)) _) = return (Just (EV v))
-    f (NamU _ (TV Nothing v) _ _) = return (Just (EV v))
+    f (VarU (TV v))   = return (Just (EV v))
+    f (AppU (VarU (TV v)) _) = return (Just (EV v))
+    f (NamU _ (TV v) _ _) = return (Just (EV v))
     f t = error $ show t
 
   -- associate packers with unpackers to make final UnresolvedPacker objects
@@ -551,20 +554,3 @@ findPackers typedefs expr =
         { unresolvedPackerForward = unresolvedPackerForward p1 <> unresolvedPackerForward p2
         , unresolvedPackerReverse = unresolvedPackerReverse p1 <> unresolvedPackerReverse p2
         }
-
-
--- TODO: document
-switchLang :: Lang -> TypeU -> TypeU
-switchLang lang = f where
-  f (VarU (TV _ v)) = VarU (TV (Just lang) v)
-  f (ForallU (TV _ v) t) = ForallU (TV (Just lang) v) (f t)
-  f (FunU ts t) = FunU (map f ts) (f t)
-  f (AppU t ts) = AppU (f t) (map f ts)
-  f (ExistU (TV _ v) ts rs) =
-      let rs' = map (f . snd) rs
-          ts' = map f ts
-      in ExistU (TV (Just lang) v) ts' (zip (map fst rs) rs')
-  f (NamU n (TV _ v) ts rs) =
-      let ts' = map f ts
-          rs' = map (f . snd) rs
-      in NamU n (TV (Just lang) v) ts' (zip (map fst rs) rs') 

@@ -22,7 +22,9 @@ instance Pretty ExprI where
 instance Pretty Expr where
   pretty UniE = "()"
   pretty (ModE v es) = align . vsep $ ("module" <+> pretty v) : map pretty es
-  pretty (TypE v vs t) = "type" <+> pretty v <+> sep [pretty v' | TV _ v' <- vs] <+> "=" <+> pretty t
+  pretty (TypE lang v vs t)
+    = "type" <+> pretty lang <> "@" <> pretty v
+    <+> sep (map pretty vs) <+> "=" <+> pretty t
   pretty (ImpE (Import m Nothing _ _)) = "import" <+> pretty m 
   pretty (ImpE (Import m (Just xs) _ _)) = "import" <+> pretty m <+> tupled (map pretty xs)
   pretty (ExpE v) = "export" <+> pretty v
@@ -50,10 +52,8 @@ instance Pretty Expr where
     <> dquotes (pretty name) <+> "as" <+>  pretty alias <> maybe "" (\s -> ":" <> pretty s) label
     <> ")"
   pretty (SigE v _ e) =
-    pretty v <+> elang' <> "::" <+> eprop' <> etype' <> econs'
+    pretty v <+> "::" <+> eprop' <> etype' <> econs'
     where
-      elang' :: Doc ann
-      elang' = maybe "" (\lang -> viaShow lang <> " ") (langOf . etype $ e)
       eprop' :: Doc ann
       eprop' =
         case Set.toList (eprop e) of

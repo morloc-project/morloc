@@ -29,7 +29,7 @@ type FData =
   , Type -- argument type
   )
 
-generate :: [NexusCommand] -> [(Type, Int)] -> MorlocMonad Script
+generate :: [NexusCommand] -> [(TypeP, Int)] -> MorlocMonad Script
 generate cs xs = do
   config <- MM.ask
 
@@ -46,7 +46,7 @@ generate cs xs = do
       , scriptMake = [SysExe outfile]
       }
 
-getFData :: (Type, Int) -> MorlocMonad FData
+getFData :: (TypeP, Int) -> MorlocMonad FData
 getFData (t, i) = do
   mayName <- MM.metaName i
   case mayName of
@@ -54,11 +54,13 @@ getFData (t, i) = do
       config <- MM.ask
       let lang = langOf t
       case MC.buildPoolCallBase config lang i of
-        (Just cmds) -> return (cmds, pretty name', t)
+        (Just cmds) -> return (cmds, pretty name', generalTypeOf t)
         Nothing ->
           MM.throwError . GeneratorError $
           "No execution method found for language: " <> ML.showLangName (fromJust lang)
     Nothing -> MM.throwError . GeneratorError $ "No name in FData"
+
+
 
 main :: [MDoc] -> [FData] -> MDoc -> [NexusCommand] -> MDoc
 main names fdata pythonExe cdata =

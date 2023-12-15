@@ -94,7 +94,7 @@ treeify d
          MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes d)) + 1
 
          -- find all term exports (do not include type exports)
-         let exports = [(i, EV v) | (i, TermSymbol v) <- AST.findExports e]
+         let exports = [(i, v) | (i, TermSymbol v) <- AST.findExports e]
 
          -- - store all exported indices in state
          -- - Add the export name to state. Failing to do so here, will lose
@@ -187,7 +187,7 @@ linkVariablesToTermTypes mv m0 = mapM_ (link m0) where
   link :: Map.Map EVar (Int, TermTypes) -> ExprI -> MorlocMonad ()
   -- The following have terms associated with them:
   -- 1. exported terms (but not exported types)
-  link m (ExprI i (ExpE (TermSymbol v))) = setType m i (EV v)
+  link m (ExprI i (ExpE (TermSymbol v))) = setType m i v
   -- 2. variables
   link m (ExprI i (VarE v)) = setType m i v
   -- 3. assignments
@@ -232,7 +232,7 @@ unifyTermTypes mv xs m0
   >>= Map.unionWithM combineTermTypes m0
   >>= Map.unionWithM combineTermTypes decs
   where
-  sigs = Map.fromListWith (<>) [((v, l, langOf t), [t]) | (ExprI _ (SigE v l t)) <- xs]
+  sigs = Map.fromListWith (<>) [((v, l, Nothing), [t]) | (ExprI _ (SigE v l t)) <- xs]
   srcs = Map.fromListWith (<>) [((srcAlias s, srcLabel s, langOf s), [(s, i)]) | (ExprI i (SrcE s)) <- xs]
   decs = Map.map (TermTypes Nothing []) $ Map.fromListWith (<>) [(v, [e]) | (ExprI _ (AssE v e _)) <- xs]
 
@@ -241,9 +241,7 @@ unifyTermTypes mv xs m0
   fb [] = MM.throwError . CallTheMonkeys $ "This case should not appear given the construction of the map"
   fb (e0:es) = do
     e' <- foldlM mergeEType e0 es
-    case langOf e' of
-      (Just _) -> error "Concrete signature found - these should not be present yet"
-      _ -> return $ TermTypes (Just e') [] []
+    return $ TermTypes (Just e') [] []
 
   -- Should we even allow concrete terms with no type signatures?
   -- Yes, their types may be inferrable by usage or (eventually) static analysis
@@ -253,11 +251,9 @@ unifyTermTypes mv xs m0
 
   fbc :: [EType] -> [(Source, Int)] -> MorlocMonad TermTypes
   fbc sigs' srcs' = do
-    let gsigs = [t | t <- sigs', isNothing (langOf t)]
-    gt <- case gsigs of
+    gt <- case sigs' of
       [e] -> return (Just e)
       [] -> return Nothing
-      -- TODO: merging general types may be possible sometimes
       _ -> MM.throwError . CallTheMonkeys $ "Expected a single general type - I don't know how to merge them"
     return $ TermTypes gt [(mv, Idx i src) | (src, i) <- srcs'] []
 
@@ -290,14 +286,13 @@ mergeTypeUs :: TypeU -> TypeU -> MorlocMonad TypeU
 mergeTypeUs t1@(VarU v1) t2@(VarU v2)
   | v1 == v2 = return (VarU v1)
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
-mergeTypeUs t1@(ExistU v@(TV l1 _) ps1 rs1) t2@(ExistU (TV l2 _) ps2 rs2)
-  | l1 == l2
+mergeTypeUs (ExistU v ps1 rs1) (ExistU _ ps2 rs2)
     = ExistU v
     <$> zipWithM mergeTypeUs ps1 ps2
-    <*> mapM (\(k, x:xs) -> (,) k <$> foldM mergeTypeUs x xs) (groupSort (rs1 ++ rs2))
-  | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
-mergeTypeUs ExistU {} t = return t
-mergeTypeUs t ExistU {} = return t
+    <*> mergeRecords rs1 rs2
+
+mergeTypeUs ExistU{} t = return t
+mergeTypeUs t ExistU{} = return t
 
 -- Two universally qualified types may be merged if they are the same up to
 -- named of bound variables, for example:
@@ -317,6 +312,20 @@ mergeTypeUs t1 t2 = MM.throwError $ IncompatibleGeneralType t1 t2
 --   | t1 `PO.isSubtypeOf` t2 = return t2
 --   | t2 `PO.isSubtypeOf` t1 = return t1
 --   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
+
+-- merge record entries by taking the union of entries
+mergeRecords :: [(Key, TypeU)] -> [(Key, TypeU)] -> MorlocMonad [(Key, TypeU)]
+mergeRecords rs1 rs2 = do
+  -- all record entries common to both types in the order of rs1
+  commonEntries <- mapM mergeRecord rs1
+  -- records that are unique to rs2
+  let missingRecords = [(k, t2) | (k, t2) <- rs2, isNothing (lookup k rs1)]
+  return $ commonEntries <> missingRecords
+  where
+  mergeRecord :: (Key, TypeU) -> MorlocMonad (Key, TypeU)
+  mergeRecord (k, t1) = case lookup k rs2 of
+    (Just t2) -> (,) k <$> mergeTypeUs t1 t2
+    Nothing -> return (k, t1)
 
 
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI

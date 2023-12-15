@@ -12,7 +12,8 @@ module Morloc.Frontend.AST
   , findExports
   , findExportSet
   , findSignatures
-  , findTypedefs
+  , findConcreteTypedefs
+  , findGeneralTypedefs
   , findSignatureTypeTerms
   , checkExprI
   , findSources
@@ -23,7 +24,6 @@ module Morloc.Frontend.AST
 import Morloc.Frontend.Namespace
 import qualified Data.Set as Set
 import qualified Data.Map as Map
-import qualified Morloc.Data.Text as MT
 
 
 -- | In the DAG, the two MVar are the two keys, Import is the edge data, Expr is the node data
@@ -44,10 +44,18 @@ findSources (ExprI _ (SrcE ss)) = [ss]
 findSources (ExprI _ (ModE _ es)) = concatMap findSources es
 findSources _ = []
 
-findTypedefs :: ExprI -> Map.Map TVar ([TVar], TypeU)
-findTypedefs (ExprI _ (TypE v vs t)) = Map.singleton v (vs, t)
-findTypedefs (ExprI _ (ModE _ es)) = Map.unions (map findTypedefs es)
-findTypedefs _ = Map.empty
+
+-- find all top-level concrete type functions in a module
+findConcreteTypedefs :: ExprI -> Map.Map CVar ([TVar], TypeU)
+findConcreteTypedefs (ExprI _ (TypE (Just lang) v vs t)) = Map.singleton (CV lang v) (vs, t)
+findConcreteTypedefs (ExprI _ (ModE _ es)) = Map.unions (map findConcreteTypedefs es)
+findConcreteTypedefs _ = Map.empty
+
+-- find all top-level general type functions in a module
+findGeneralTypedefs :: ExprI -> Map.Map TVar ([TVar], TypeU)
+findGeneralTypedefs (ExprI _ (TypE Nothing v vs t)) = Map.singleton v (vs, t)
+findGeneralTypedefs (ExprI _ (ModE _ es)) = Map.unions (map findGeneralTypedefs es)
+findGeneralTypedefs _ = Map.empty
 
 findSignatureTypeTerms :: ExprI -> [TVar]
 findSignatureTypeTerms = unique . f where
@@ -59,8 +67,8 @@ findSignatureTypeTerms = unique . f where
 
 -- | find all the non-generic terms in an unresolved type
 findTypeTerms :: TypeU -> [TVar]
-findTypeTerms (VarU v)
-  | isGeneric v = [ ]
+findTypeTerms (VarU v@(TV x))
+  | isGeneric x = [ ]
   | otherwise   = [v]
 findTypeTerms (ExistU _ ps1 rs2) = concatMap findTypeTerms (ps1 ++ map snd rs2)
 findTypeTerms (ForallU _ e) = findTypeTerms e
@@ -71,7 +79,7 @@ findTypeTerms (NamU _ _ ps rs) = concatMap findTypeTerms (map snd rs <> ps)
 -- | Find type signatures that are in the scope of the input expression. Do not
 -- descend recursively into declaration where statements except if the input
 -- expression is a declaration.
-findSignatures :: ExprI -> [(EVar, Maybe MT.Text, EType)]
+findSignatures :: ExprI -> [(EVar, Maybe Label, EType)]
 -- v is the name of the type
 -- l is the optional label for the signature
 -- t is the type

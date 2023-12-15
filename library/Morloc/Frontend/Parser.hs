@@ -17,7 +17,7 @@ import Morloc.Frontend.Lexer
 import qualified Morloc.Frontend.AST as AST
 import Data.Void (Void)
 import Morloc.Frontend.Namespace
-import Text.Megaparsec
+import Text.Megaparsec hiding (Label)
 import Text.Megaparsec.Char hiding (eol)
 import qualified Morloc.BaseTypes as BT
 import qualified Control.Monad.State as CMS
@@ -91,7 +91,9 @@ pModule expModuleName = do
   case Set.toList (exports `Set.difference` allSymbols) of
     [] -> return ()
     missing -> fancyFailure . Set.singleton . ErrorFail
-            $ "Module " <> show moduleName <> " does not export the following terms or types: [" <>  (intercalate ", " . map (show . symbolName) $ missing) <> "]"
+            $ "Module " <> show moduleName
+            <> " does not export the following terms or types: ["
+            <>  (intercalate ", " . map show $ missing) <> "]"
 
   exportExpr <- mapM (exprI . ExpE) (Set.toList exports)
 
@@ -99,13 +101,13 @@ pModule expModuleName = do
 
   where
     findSymbols :: ExprI -> Set.Set Symbol
-    findSymbols (ExprI _ (TypE (TV _ v) _ _)) = Set.singleton $ TypeSymbol v
-    findSymbols (ExprI _ (AssE (EV e) _ _)) = Set.singleton $ TermSymbol e
-    findSymbols (ExprI _ (SigE (EV e) _ t)) = Set.union (Set.singleton $ TermSymbol e) (packedType t)
+    findSymbols (ExprI _ (TypE _ v _ _)) = Set.singleton $ TypeSymbol v
+    findSymbols (ExprI _ (AssE e _ _)) = Set.singleton $ TermSymbol e
+    findSymbols (ExprI _ (SigE e _ t)) = Set.union (Set.singleton $ TermSymbol e) (packedType t)
     findSymbols (ExprI _ (ImpE (Import _ (Just imps) _ _)))
         = Set.fromList $ [TermSymbol alias | (AliasedTerm _ alias) <- imps] <>
                          [TypeSymbol alias | (AliasedType _ alias) <- imps]
-    findSymbols (ExprI _ (SrcE src)) = Set.singleton $ TermSymbol (unEVar $ srcAlias src)
+    findSymbols (ExprI _ (SrcE src)) = Set.singleton $ TermSymbol (srcAlias src)
     findSymbols _ = Set.empty
 
     -- When (un)packers are defined, the type that is being (un)packed is not
@@ -130,8 +132,8 @@ pModule expModuleName = do
     packType _ = error "Invalid packer"
 
     symbolOfTypeU :: TypeU -> Set.Set Symbol
-    symbolOfTypeU (VarU (TV _ v)) = Set.singleton $ TypeSymbol v
-    symbolOfTypeU (ExistU (TV _ v) _ _) = Set.singleton $ TypeSymbol v
+    symbolOfTypeU (VarU v) = Set.singleton $ TypeSymbol v
+    symbolOfTypeU (ExistU v _ _) = Set.singleton $ TypeSymbol v
     symbolOfTypeU (ForallU _ t) = symbolOfTypeU t
     symbolOfTypeU (AppU t _) = symbolOfTypeU t
     symbolOfTypeU (FunU _ _) = error "So, you want to pack a function? I'm accepting PRs."
@@ -151,14 +153,14 @@ plural = fmap return
 createMainFunction :: [ExprI] -> Parser [ExprI]
 createMainFunction es = case (init es, last es) of
     (_, ExprI _ (ModE _ _))   -> return es
-    (_, ExprI _ (TypE _ _ _)) -> return es
+    (_, ExprI _ TypE{}) -> return es
     (_, ExprI _ (ImpE _))     -> return es
     (_, ExprI _ (SrcE _))     -> return es
-    (_, ExprI _ (SigE _ _ _)) -> return es
-    (_, ExprI _ (AssE _ _ _)) -> return es
+    (_, ExprI _ SigE{}) -> return es
+    (_, ExprI _ AssE{}) -> return es
     (_, ExprI _ (ExpE _))     -> return es
     (rs, terminalExpr) -> do
-      expMain <- exprI $ ExpE (TermSymbol "__main__")
+      expMain <- exprI $ ExpE (TermSymbol (EV "__main__"))
       assMain <- exprI $ AssE (EV "__main__") terminalExpr []
       return $ expMain : (assMain : rs)
 
@@ -226,7 +228,7 @@ pComposition = do
 
 -- Either a lowercase term name or an uppercase type name
 pSymbol :: Parser Symbol
-pSymbol = (TermSymbol <$> freenameL) <|> (TypeSymbol <$> freenameU)
+pSymbol = (TermSymbol . EV <$> freenameL) <|> (TypeSymbol . TV <$> freenameU)
 
 pImport :: Parser ExprI
 pImport = do
@@ -252,13 +254,13 @@ pImport = do
   pImportTerm = do
     n <- freenameL
     a <- option n (reserved "as" >> freenameL)
-    return (AliasedTerm n a)
+    return (AliasedTerm (EV n) (EV a))
 
   pImportType :: Parser AliasedSymbol
   pImportType = do
     n <- freenameU
     a <- option n (reserved "as" >> freenameU)
-    return (AliasedType n a)
+    return (AliasedType (TV n) (TV a))
 
 
 pTypedef :: Parser ExprI
@@ -268,25 +270,21 @@ pTypedef = try pTypedefType <|> pTypedefObject where
   pTypedefType = do
     _ <- reserved "type"
     lang <- optional (try pLang)
-    setLang lang
     (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
     _ <- symbol "="
     t <- pType
-    setLang Nothing
-    exprI (TypE v vs t)
+    exprI (TypE lang v vs t)
 
   pTypedefObject :: Parser ExprI
   pTypedefObject = do
     o <- pNamType
     lang <- optional (try pLang)
-    setLang lang
     (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
     _ <- symbol "="
     constructor <- freename <|> stringLiteral
     entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries lang o)
-    let t = NamU o (TV lang constructor) (map VarU vs) entries
-    setLang Nothing
-    exprI (TypE v vs t)
+    let t = NamU o (TV constructor) (map VarU vs) (map (first Key) entries)
+    exprI (TypE lang v vs t)
 
   desugarTableEntries
     :: Maybe Lang
@@ -321,15 +319,12 @@ pTypedef = try pTypedefType <|> pTypedefObject where
   pTypedefTermUnpar :: Parser (TVar, [TVar])
   pTypedefTermUnpar = do
     v <- freenameU
-    t <- tvar v
-    return (t, [])
+    return (TV v, [])
 
   pTypedefTermPar :: Parser (TVar, [TVar])
   pTypedefTermPar = do
-    vs <- parens ((:) <$> freenameU <*> many freenameL)
-    t <- tvar (head vs)
-    ts <- mapM tvar (tail vs)
-    return (t, ts)
+    (t:ts) <- parens ((:) <$> freenameU <*> many freenameL)
+    return (TV t, map TV ts)
 
 
 pAssE :: Parser ExprI
@@ -376,7 +371,7 @@ pSigE = do
   exprI $
     SigE
       (EV v)
-      label'
+      (Label <$> label')
       (EType
          { etype = t
          , eprop = Set.fromList props
@@ -432,16 +427,16 @@ pSrcE = do
                             , srcLang = language
                             , srcPath = srcFile
                             , srcAlias = aliasVar
-                            , srcLabel = label'
+                            , srcLabel = Label <$> label'
                             } | (srcVar, aliasVar, label') <- rs]
   where
 
-  pImportSourceTerm :: Parser (Name, EVar, Maybe MT.Text)
+  pImportSourceTerm :: Parser (SrcName, EVar, Maybe MT.Text)
   pImportSourceTerm = do
     t <- tag stringLiteral
     n <- stringLiteral
     a <- option n (reserved "as" >> freename)
-    return (Name n, EV a, t)
+    return (SrcName n, EV a, t)
 
 
 pLstE :: Parser ExprI
@@ -465,7 +460,7 @@ pNamE = do
   -- allowed (and heavily tested) and I will leave it for the moment. But
   -- eventually the syntax should be `Person {Age = 5, Name = "Juicebox"}` or
   -- whatever.
-  exprI $ NamE rs
+  exprI $ NamE (map (first Key) rs)
 
 pNamEntryE :: Parser (MT.Text, ExprI)
 pNamEntryE = do
@@ -484,7 +479,7 @@ pAcc = do
   e <- parens pExpr <|> pNamE <|> pVar
   _ <- symbol "@"
   f <- freenameL
-  exprI $ AccE e f
+  exprI $ AccE e (Key f)
 
 
 pAnn :: Parser ExprI
@@ -594,7 +589,7 @@ pNamEntryU = do
 pExistential :: Parser TypeU
 pExistential = do
   v <- angles freenameL
-  return (ExistU (TV Nothing v) [] [])
+  return (ExistU (TV v) [] [])
 
 pAppU :: Parser TypeU
 pAppU = do
@@ -626,13 +621,11 @@ pTerm = try pVarConU <|> pVarGenU where
   pVarConU :: Parser TVar
   pVarConU = do
     _ <- tag stringLiteral
-    n <- stringLiteral
-    tvar n
+    TV <$> stringLiteral
 
   pVarGenU :: Parser TVar
   pVarGenU = do
     _ <- tag freename
-    n <- freename
-    t <- tvar n
+    t <- TV <$> freename
     appendGenerics t  -- add the term to the generic list IF generic
     return t

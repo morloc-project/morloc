@@ -26,18 +26,6 @@ import qualified Data.Map as Map
 import Morloc.Data.Doc
 import Morloc.Typecheck.Internal (subtype, apply, unqualify, substitute)
 import Control.Monad.Except (Except, throwError)
-import qualified Morloc.Data.Text as MT
-
-defaultSerialConcreteType :: Lang -> MT.Text
-defaultSerialConcreteType Python3Lang = "str"
-defaultSerialConcreteType RLang = "character"
-defaultSerialConcreteType CppLang = "std::string"
-defaultSerialConcreteType _ = error "Ah hell, you know I don't know that language"
-
-isPrimitiveType :: (Maybe Lang -> [TypeU]) -> Lang -> MT.Text -> Bool
-isPrimitiveType lookupDefault lang concreteName
-  = elem concreteName
-  $ [ v | (VarU (TV (Just _) v)) <- lookupDefault (Just lang)]
 
 -- | recurse all the way to a serializable type
 serialAstToType :: SerialAST -> TypeF
@@ -59,7 +47,7 @@ serialAstToJsonType :: SerialAST -> JsonType
 serialAstToJsonType (SerialPack _ (_, s)) = serialAstToJsonType s
 serialAstToJsonType (SerialList (FV _ v) s) = ArrJ v [serialAstToJsonType s]
 serialAstToJsonType (SerialTuple (FV _ v) ss) = ArrJ v (map serialAstToJsonType ss)
-serialAstToJsonType (SerialObject _ (FV _ n) _ rs) = NamJ n (map (bimap (\(FV _ x) -> x) serialAstToJsonType) rs)
+serialAstToJsonType (SerialObject _ (FV _ n) _ rs) = NamJ n (map (second serialAstToJsonType) rs)
 serialAstToJsonType (SerialReal    (FV _ v)) = VarJ v
 serialAstToJsonType (SerialInt     (FV _ v)) = VarJ v
 serialAstToJsonType (SerialBool    (FV _ v)) = VarJ v
@@ -91,7 +79,7 @@ shallowType (SerialUnknown v) = UnkF v
 -- list of possible packers. Matching the concrete type name to the right packer
 -- will be done through subtyping.
 makeSerialAST
-  :: Map.Map MT.Text [ResolvedPacker]
+  :: Map.Map TVar [ResolvedPacker]
   -> Lang
   -> TypeF
   -> Except MDoc SerialAST
@@ -101,7 +89,7 @@ makeSerialAST packmap lang = makeSerialAST'
     -- If the type is unknown in this language, then it must be a passthrough
     -- type. So it will only be represented in the serialization form. As a
     -- string, for now.
-    makeSerialAST' (UnkF (FV gv _)) = return $ SerialUnknown (FV gv (defaultSerialConcreteType lang))
+    makeSerialAST' (UnkF (FV gv _)) = return $ SerialUnknown (FV gv (BT.serialType lang))
     makeSerialAST' (VarF v@(FV gv cv))
       | gv == BT.unit = return $ SerialNull v
       | gv == BT.bool = return $ SerialBool v
@@ -213,7 +201,7 @@ resolvePacker lang packedType@(AppF _ ts1) p@(unqualify . resolvedPackedType -> 
             -> Maybe (TypeU, TypeU) -- The general unresolved packed and unpacked types
             -> Except MDoc (Maybe TypeF) -- the resolved unpacked types
         resolveP a b c generalTypes = do
-            let (ga, ca) = unweaveTypeF lang a
+            let (ga, ca) = unweaveTypeF a
             unpackedConcreteType <- case subtype b ca (Gamma 0 []) of
                 (Left typeErr) -> throwError
                     $  "There was an error raised in subtyping while resolving serialization"
@@ -247,33 +235,33 @@ resolvePacker lang packedType@(AppF _ ts1) p@(unqualify . resolvedPackedType -> 
               (Just unpackedGeneralType) -> Just $ weaveTypeF unpackedGeneralType unpackedConcreteType
               Nothing -> Nothing
 
-        unweaveTypeF :: Lang -> TypeF -> (TypeU, TypeU)
-        unweaveTypeF l (UnkF (FV gv cv)) = (VarU (TV Nothing gv), VarU (TV (Just l) cv))
-        unweaveTypeF l (VarF (FV gv cv)) = (VarU (TV Nothing gv), VarU (TV (Just l) cv))
-        unweaveTypeF l (FunF ts t) =
-            let (gt, ct) = unweaveTypeF l t
-                (gts, cts) = unzip $ map (unweaveTypeF l) ts
+        unweaveTypeF :: TypeF -> (TypeU, TypeU)
+        unweaveTypeF (UnkF (FV gv cv)) = (VarU gv, VarU cv)
+        unweaveTypeF (VarF (FV gv cv)) = (VarU gv, VarU cv)
+        unweaveTypeF (FunF ts t) =
+            let (gt, ct) = unweaveTypeF t
+                (gts, cts) = unzip $ map unweaveTypeF ts
             in (FunU gts gt, FunU cts ct)
-        unweaveTypeF l (AppF t ts) =
-            let (gt, ct) = unweaveTypeF l t
-                (gts, cts) = unzip $ map (unweaveTypeF l) ts
+        unweaveTypeF (AppF t ts) =
+            let (gt, ct) = unweaveTypeF t
+                (gts, cts) = unzip $ map unweaveTypeF ts
             in (AppU gt gts, AppU ct cts)
-        unweaveTypeF l (NamF n (FV gv cv) ps rs) =
-            let (psg, psc) = unzip $ map (unweaveTypeF l) ps
-                (ksg, ksc) = unzip $ map (\(FV gk ck, _) -> (gk, ck)) rs
-                (vsg, vsc) = unzip $ map (unweaveTypeF l . snd) rs
-            in (NamU n (TV Nothing gv) psg (zip ksg vsg), NamU n (TV (Just l) cv) psc (zip ksc vsc))
+        unweaveTypeF (NamF n (FV gv cv) ps rs) =
+            let (psg, psc) = unzip $ map unweaveTypeF ps
+                keys = map fst rs
+                (vsg, vsc) = unzip $ map (unweaveTypeF . snd) rs
+            in (NamU n gv psg (zip keys vsg), NamU n cv psc (zip keys vsc))
 
         weaveTypeF :: TypeU -> TypeU -> TypeF
-        weaveTypeF (VarU (TV Nothing gv)) (VarU (TV _ cv)) = VarF (FV gv cv)
+        weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv cv)
         weaveTypeF (FunU tsg tg) (FunU tsc tc) = FunF (zipWith weaveTypeF tsg tsc) (weaveTypeF tg tc)
         weaveTypeF (AppU tg tsg) (AppU tc tsc) = AppF (weaveTypeF tg tc) (zipWith weaveTypeF tsg tsc)
-        weaveTypeF (NamU n (TV Nothing gv) psg rsg) (NamU _ (TV _ cv) psc rsc) =
+        weaveTypeF (NamU n gv psg rsg) (NamU _ cv psc rsc) =
             NamF n (FV gv cv) (zipWith weaveTypeF psg psc) (
-              zip (zipWith FV (map fst rsg) (map fst rsc)) 
+              zip (map fst rsg)
                   (zipWith weaveTypeF (map snd rsg) (map snd rsc))
             )
-        weaveTypeF ((ExistU (TV _ gv) _ _)) (ExistU (TV _ cv) _ _) = UnkF (FV gv cv)
+        weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv cv)
         weaveTypeF gt ct = error . show $ (gt, ct)
 
         -- Replaces each generic term with an existential term of the same name
@@ -283,13 +271,13 @@ resolvePacker lang packedType@(AppF _ ts1) p@(unqualify . resolvedPackedType -> 
 resolvePacker _ _ _ = throwError "No packer found for this type"
 
 
-prettyMap :: Map.Map MT.Text [ResolvedPacker] -> MDoc
+prettyMap :: Map.Map TVar [ResolvedPacker] -> MDoc
 prettyMap p =
     "----- pacmaps -----\n" <>
     vsep (map (uncurry prettyMapEntry) (Map.toList p)) <> "\n" <>
     "-------------------\n"
 
-prettyMapEntry :: MT.Text -> [ResolvedPacker] -> MDoc
+prettyMapEntry :: TVar -> [ResolvedPacker] -> MDoc
 prettyMapEntry fv ps
     = vsep (map (\p -> align . vsep $ [pretty fv, indent 2 (prettyMapPacker p)]) ps)
 
