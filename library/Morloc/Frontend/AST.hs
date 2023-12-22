@@ -12,8 +12,7 @@ module Morloc.Frontend.AST
   , findExports
   , findExportSet
   , findSignatures
-  , findConcreteTypedefs
-  , findGeneralTypedefs
+  , findTypedefs
   , findSignatureTypeTerms
   , checkExprI
   , findSources
@@ -45,17 +44,20 @@ findSources (ExprI _ (ModE _ es)) = concatMap findSources es
 findSources _ = []
 
 
--- find all top-level concrete type functions in a module
-findConcreteTypedefs :: ExprI -> Map.Map CVar ([TVar], TypeU)
-findConcreteTypedefs (ExprI _ (TypE (Just lang) v vs t)) = Map.singleton (CV lang v) (vs, t)
-findConcreteTypedefs (ExprI _ (ModE _ es)) = Map.unions (map findConcreteTypedefs es)
-findConcreteTypedefs _ = Map.empty
-
--- find all top-level general type functions in a module
-findGeneralTypedefs :: ExprI -> Map.Map TVar ([TVar], TypeU)
-findGeneralTypedefs (ExprI _ (TypE Nothing v vs t)) = Map.singleton v (vs, t)
-findGeneralTypedefs (ExprI _ (ModE _ es)) = Map.unions (map findGeneralTypedefs es)
-findGeneralTypedefs _ = Map.empty
+-- find all top-level concrete and general type functions in a module
+findTypedefs
+  :: ExprI
+  -> (               Map.Map TVar [([TVar], TypeU)]
+     , Map.Map Lang (Map.Map TVar [([TVar], TypeU)])
+     )
+findTypedefs (ExprI _ (TypE Nothing v vs t)) = (Map.singleton v [(vs, t)], Map.empty) 
+findTypedefs (ExprI _ (TypE (Just lang) v vs t)) = (Map.empty, Map.singleton lang (Map.singleton v [(vs, t)]))
+findTypedefs (ExprI _ (ModE _ es)) = foldl combine (Map.empty, Map.empty) (map findTypedefs es) where
+  combine (g1, c1) (g2, c2)
+    = ( Map.unionWith (<>) g1 g2
+      , Map.unionWith (Map.unionWith (<>)) c1 c2
+      )
+findTypedefs _ = (Map.empty, Map.empty)
 
 findSignatureTypeTerms :: ExprI -> [TVar]
 findSignatureTypeTerms = unique . f where

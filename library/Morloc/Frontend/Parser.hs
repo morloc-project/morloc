@@ -269,7 +269,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
   pTypedefType :: Parser ExprI
   pTypedefType = do
     _ <- reserved "type"
-    lang <- optional (try pLang)
+    lang <- optional (try pLangNamespace)
     (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
     _ <- symbol "="
     t <- pType
@@ -278,22 +278,22 @@ pTypedef = try pTypedefType <|> pTypedefObject where
   pTypedefObject :: Parser ExprI
   pTypedefObject = do
     o <- pNamType
-    lang <- optional (try pLang)
+    lang <- optional (try pLangNamespace)
     (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
     _ <- symbol "="
     constructor <- freename <|> stringLiteral
-    entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries lang o)
+    entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries o)
     let t = NamU o (TV constructor) (map VarU vs) (map (first Key) entries)
     exprI (TypE lang v vs t)
 
+  -- TODO: is this really the right place to be doing this?
   desugarTableEntries
-    :: Maybe Lang
-    -> NamType
+    :: NamType
     -> (MT.Text, TypeU)
     -> Parser (MT.Text, TypeU)
-  desugarTableEntries _ NamRecord entry = return entry
-  desugarTableEntries _ NamObject entry = return entry
-  desugarTableEntries lang NamTable (k0, t0) = (,) k0 <$> f t0 where
+  desugarTableEntries NamRecord entry = return entry
+  desugarTableEntries NamObject entry = return entry
+  desugarTableEntries NamTable (k0, t0) = (,) k0 <$> f t0 where
     f :: TypeU -> Parser TypeU
     f (ForallU v t) = ForallU v <$> f t
     f t = return $ BT.listU t
@@ -325,6 +325,12 @@ pTypedef = try pTypedefType <|> pTypedefObject where
   pTypedefTermPar = do
     (t:ts) <- parens ((:) <$> freenameU <*> many freenameL)
     return (TV t, map TV ts)
+
+  pLangNamespace :: Parser Lang
+  pLangNamespace = do
+    lang <- pLang
+    _ <- symbol "=>"
+    return lang
 
 
 pAssE :: Parser ExprI

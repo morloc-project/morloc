@@ -262,7 +262,12 @@ inherit
   => k
   -> (n -> a)
   -> DAG k [(v,v)] n
-  -> [(v, DAG k None (v,a))]
+  -> [(v  -- the local alias for an imported value
+      , DAG k None -- the tree showing imports for this alias
+        ( v -- the descendent's name for the value
+        , a -- the data extracted with f from the child n
+        )
+      )]
 inherit k f d = case local k d of
     -- if k has no children, return empty list
     Nothing -> []

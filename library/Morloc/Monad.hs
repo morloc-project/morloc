@@ -318,12 +318,13 @@ metaPackMap i = do
 -- | This is currently only used in the C++ translator.
 -- FIXME: should a term be allowed to have multiple type definitions within a language?
 metaTypedefs :: Int -> MorlocMonad (Map.Map CVar ([TVar], TypeU))
-metaTypedefs i = do
-    p <- gets stateConcreteTypedefs
-
-    return $ case GMap.lookup i p of
-      (GMapJust termmap) -> Map.map head (Map.filter (not . null) termmap)
-      _ -> Map.empty
+metaTypedefs = undefined
+-- metaTypedefs i = do
+--     p <- gets stateConcreteTypedefs
+--
+--     return $ case GMap.lookup i p of
+--       (GMapJust termmap) -> Map.map head (Map.filter (not . null) termmap)
+--       _ -> Map.empty
 
 
 

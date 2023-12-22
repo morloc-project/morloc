@@ -151,8 +151,10 @@ data MorlocState = MorlocState
   , stateDepth :: Int
   -- ^ store depth in the SAnno tree in the frontend and backend typecheckers
   , stateSignatures :: GMap Int Int TermTypes
-  , stateConcreteTypedefs :: GMap Int MVar (Map CVar [([TVar], TypeU)])
-  -- ^ Stores all type definitions available to an index e.g.:
+  , stateConcreteTypedefs :: GMap Int MVar (Map Lang (Map TVar [([TVar], TypeU)]))
+  -- ^ stores type functions that are in scope for a given module and language
+  , stateGeneralTypedefs  :: GMap Int MVar           (Map TVar [([TVar], TypeU)])
+  -- ^ Stores all concrete type definitions available to an index e.g.:
   --   `type Cpp (Map k v) = "std::map<$1,$2>" k v`
   --   Where `TVar` is `Map`
   --         `Type` is `"std::map<$1,$2>" k v`
