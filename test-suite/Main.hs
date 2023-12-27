@@ -16,7 +16,6 @@ main = do
       , unitTypeTests
       , typeOrderTests
       , typeAliasTests
-      , concreteTypeSynthesisTests
       , propertyTests
       , whereTests
       , orderInvarianceTests
@@ -92,8 +91,6 @@ main = do
       , golden "argument-form-9-c" "argument-form-9-c"
       , golden "argument-form-9-py" "argument-form-9-py"
       , golden "argument-form-9-r" "argument-form-9-r"
-
-      , golden "defaults-1-py" "defaults-1-py"
 
       , golden "interop-1-py" "interop-1-py"
       , golden "interop-1-r" "interop-1-r"

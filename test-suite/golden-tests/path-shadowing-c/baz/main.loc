@@ -2,6 +2,6 @@ module baz (*)
 
 source Cpp from "main.hpp" ("mul")
 
-type Cpp Real = "double"
+type Cpp => Real = "double"
 
 mul :: Real -> Real -> Real

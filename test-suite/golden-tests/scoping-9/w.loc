@@ -1,6 +1,7 @@
 module main (f)
 
 import pybase (add)
+import conventions (Real)
 
 -- functions with or without signatures may be defined in the where-scope
 f = bar (bif 2.0) where

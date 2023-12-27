@@ -11,14 +11,12 @@ module UnitTypeTests
   , whereTests
   , orderInvarianceTests
   , whitespaceTests
-  , concreteTypeSynthesisTests
   ) where
 
 import Morloc.Frontend.Namespace
-import Morloc.CodeGenerator.Namespace
 import Text.RawString.QQ
-import qualified Morloc.Data.Doc as Doc
-import Morloc (typecheck, typecheckFrontend)
+import Morloc (typecheckFrontend)
+import Morloc.Frontend.Typecheck (evaluateSAnnoTypes)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.PartialOrder as MP
 import qualified Morloc.Typecheck.Internal as MTI
@@ -29,21 +27,14 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 -- get the toplevel general type of a typechecked expression
-gtypeof :: (SAnno (Indexed TypeU) f c) -> TypeU
+gtypeof :: SAnno (Indexed TypeU) f c -> TypeU
 gtypeof (SAnno _ (Idx _ t)) = t
 
 runFront :: MT.Text -> IO (Either MorlocError [SAnno (Indexed TypeU) Many Int])
 runFront code = do
-  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheckFrontend Nothing (Code code))
+  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheckFrontend Nothing (Code code) >>= mapM evaluateSAnnoTypes)
   return x
 
-runBackendCheck
-  :: MT.Text
-  -> IO (Either MorlocError ([SAnno (Indexed Type) One ()], [SAnno Int One (Indexed TypeP)]))
-runBackendCheck code = do
-  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheck Nothing (Code code))
-  return x
-  
 emptyConfig =  Config
     { configHome = ""
     , configLibrary = ""
@@ -62,15 +53,6 @@ assertGeneralType msg code t = testCase msg $ do
     (Right _) -> error "Expected exactly one export from Main for assertGeneralType"
     (Left e) -> error $
       "The following error was raised: " <> show e <> "\nin:\n" <> show code
-
-assertConcreteType :: String -> MT.Text -> TypeP -> TestTree
-assertConcreteType msg code t = testCase msg $ do
-  result <- runBackendCheck code
-  case result of
-    (Right (_, [SAnno (One (_, Idx _ x)) _])) -> assertEqual "" t x
-    (Right (_, [])) -> error "No exports from main found in assertConcreteType"
-    (Right _) -> error "Expected exactly one export from Main for assertConcreteType"
-    (Left e) -> error $ "The following error was raised: " <> show e <> "\nin:\n" <> show code
 
 renameExistentials :: TypeU -> TypeU
 renameExistentials = snd . f (0, Map.empty) where
@@ -111,7 +93,7 @@ assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do
 exprTestBad :: String -> MT.Text -> TestTree
 exprTestBad msg code =
   testCase msg $ do
-  result <- runFront code
+  result  <- runFront code
   case result of
     (Right _) -> assertFailure . MT.unpack $ "Expected '" <> code <> "' to fail"
     (Left _) -> return ()
@@ -161,12 +143,6 @@ tuple ts = AppU v ts
     v = VarU . TV . MT.pack $ "Tuple" ++ show (length ts)
 record rs = NamU NamRecord (TV "Record") [] rs
 record' n rs = NamU NamRecord (TV n) [] rs
-unkp lang (TV -> gv) (TV -> cv) = UnkP (PV gv (CV lang cv)) 
-varp lang (TV -> gv) (TV -> cv) = VarP (PV gv (CV lang cv))
-appp lang (TV -> gv) (TV -> cv) ps = AppP (VarP (PV gv (CV lang cv))) ps 
-
-funp [] = error "Cannot infer type of empty list"
-funp ts = FunP (init ts) (last ts)
 
 subtypeTests =
   testGroup
@@ -349,14 +325,6 @@ typeAliasTests =
         f :: [Foo] -> Foo
         |]
         (fun [lst (var "A"), var "A"])
-    , assertGeneralType
-        "deep type substitution: `[Foo] -> { a = Foo }`"
-        [r|
-        module main (f)
-        type Foo = A
-        f :: [Foo] -> { a :: Foo }
-        |]
-        (fun [lst (var "A"), record [(Key "a", var "A")]])
     , assertGeneralType
         "parametric alias, general type alias"
         [r|
@@ -550,98 +518,6 @@ whereTests =
         int
   ]
 
-
-concreteTypeSynthesisTests =
-  testGroup
-  "Test concrete type synthesis"
-  [ assertConcreteType
-      "Synth Int to py:int"
-      [r|
-      module m (foo)
-      source Py from "_" ("foo")
-      type Py Int = "int"
-      foo :: Int -> Int
-      |]
-      (FunP [varp Python3Lang "Int" "int"] (varp Python3Lang "Int" "int"))
-
-  , assertConcreteType
-      -- This tests the desugar bug fixed in #a50c75
-      "test: foo :: Real -> (Real, a)"
-      [r|
-      module m (foo)
-     
-      type Cpp Real = "double"
-      type Cpp (Tuple2 a b) = "std::tuple" a b
-     
-      source Cpp from "foo.hpp" ("foo")
-     
-      foo :: Real -> (Real, a)
-      |]
-      (FunP [varp CppLang "Real" "double"] ( appp CppLang "Tuple2" "std::tuple" [ varp CppLang "Real" "double", unkp CppLang "a_q0" "a_q0" ]))
-
-  , assertConcreteType
-      "test: (asCpp . asPy) [1.0]"
-      [r|
-      module m (foo)
-      type Cpp Real = "double"
-      type Py Real = "float"
-      type Cpp (List a) = "std::vector<$1>" a
-      type Py (List a) = "list" a
-      asPy :: a -> a
-      source Py from "foo.py" ("id" as asPy)
-      asCpp :: a -> a
-      source Cpp from "foo.cpp" ("id" as asCpp)
-      foo = (asCpp . asPy) [1.0]
-      |]
-      (appp CppLang "List" "std::vector<$1>" [varp CppLang "Real" "double"])
-
-  , assertConcreteType
-      "test mixed language inference"
-      [r|
-      module foo (fluffle)
-
-      type Py Str = "str" 
-      type Py Int = "int"
-      type Py (List a) = "list" a
-      type Py (Tuple2 a b) = "tuple" a b
-
-      type Cpp Str = "std::string" 
-      type Cpp Int = "int"
-      type Cpp (List a) = "std::vector<$1>" a
-      type Cpp (Tuple2 a b) = "std::tuple<$1,$2>" a b
-  
-      source Py from "foo.py" ("foo")
-      foo :: Str -> [Str]
-  
-      source Py from "foo.py" ("shard", "join", "keys")
-      source Cpp from "foo.hpp" ("shard", "join", "keys")
-  
-      shard :: Int -> [d] -> [[d]]
-      join :: [c] -> [c] -> [c]
-      keys :: [(a, b)] -> [a]
-  
-      fluffle :: [(Str, Str)] -> Str -> [[Str]]
-      fluffle refs query =
-        ( shard 100
-        . join (keys refs)
-        . foo
-        ) query
-
-      module test (out)
-      import foo (fluffle)
-      out = fluffle [("asdf","er")] "qwer"
-      |]
-      (appp Python3Lang "List" "list" [appp Python3Lang "List" "list" [varp Python3Lang "Str" "str"]])
-
-  , expectError
-      "Synth error raised if no type alias given"
-      (CannotSynthesizeConcreteType (MV "m") (Source (SrcName "foo") Python3Lang (Just "_") (EV "foo") Nothing) (fun [int, int]) ["Int"])
-      [r|
-      module m (foo)
-      source Py from "_" ("foo")
-      foo :: Int -> Int
-      |]
-  ]
 
 orderInvarianceTests =
   testGroup

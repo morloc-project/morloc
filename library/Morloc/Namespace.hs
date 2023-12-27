@@ -16,6 +16,7 @@ module Morloc.Namespace
   -- ** Synonyms
   , MDoc
   , DAG
+  , Scope
   -- ** Other functors
   , None(..)
   , One(..)
@@ -26,15 +27,12 @@ module Morloc.Namespace
   -- ** Indexed
   , IndexedGeneral(..)
   , Indexed
-  , GIndex
   -- ** Newtypes
   , MVar(..)
   , EVar(..)
   , TVar(..)
   , Key(..)
   , Label(..)
-  , CVar(..)
-  , unCVar
   , SrcName(..)
   , Path
   , Code(..)
@@ -47,9 +45,6 @@ module Morloc.Namespace
   , SysCommand(..)
   , GMap(..)
   , GMapRet(..)
-  -- ** Serialization
-  , UnresolvedPacker(..)
-  , PackMap
   --------------------
   -- ** Error handling
   , MorlocError(..)
@@ -67,6 +62,7 @@ module Morloc.Namespace
   , NamType(..)
   , Type(..)
   , TypeU(..)
+  , extractKey
   , type2typeu
   , EType(..)
   , unresolvedType2type
@@ -89,6 +85,8 @@ module Morloc.Namespace
   , SExpr(..)
   , mapSAnno
   , mapSExpr
+  , mapSAnnoM
+  , mapSExprM
   -- ** Typeclasses
   , HasOneLanguage(..)
   , Typelike(..)
@@ -101,6 +99,7 @@ import Control.Monad.Except (ExceptT)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
+import Control.Monad.Identity (runIdentity)
 import Data.Map.Strict (Map)
 import Data.Monoid
 import Data.Scientific (Scientific)
@@ -111,7 +110,6 @@ import Morloc.Internal
 import Text.Megaparsec (ParseErrorBundle)
 import System.Directory.Tree (DirTree(..), AnchoredDirTree(..))
 import Morloc.Language (Lang(..))
-import Data.String
 
 import qualified Data.Set as Set
 import qualified Data.Text as DT
@@ -123,6 +121,8 @@ type MDoc = Doc ()
 -- needn't be acyclic. You can use `findCycle` to check whether a given stucture
 -- has cycles.
 type DAG key edge node = Map key (node, [(key, edge)])
+
+type Scope = Map TVar [([TVar], TypeU)]
 
 data GMap a b c = GMap (Map a b) (Map b c)
   deriving(Show, Ord, Eq)
@@ -151,20 +151,20 @@ data MorlocState = MorlocState
   , stateDepth :: Int
   -- ^ store depth in the SAnno tree in the frontend and backend typecheckers
   , stateSignatures :: GMap Int Int TermTypes
-  , stateConcreteTypedefs :: GMap Int MVar (Map Lang (Map TVar [([TVar], TypeU)]))
+  , stateConcreteTypedefs :: GMap Int MVar (Map Lang Scope)
   -- ^ stores type functions that are in scope for a given module and language
-  , stateGeneralTypedefs  :: GMap Int MVar           (Map TVar [([TVar], TypeU)])
+  , stateGeneralTypedefs  :: GMap Int MVar           Scope
   -- ^ Stores all concrete type definitions available to an index e.g.:
   --   `type Cpp (Map k v) = "std::map<$1,$2>" k v`
   --   Where `TVar` is `Map`
   --         `Type` is `"std::map<$1,$2>" k v`
   --         `[TVar]` is `[k,v]`
+  , stateInnerMogrifiers :: GMap Int MVar (Map Property [(TypeU, Source)])
   , stateSources :: GMap Int MVar [Source]
   , stateAnnotations :: Map Int [TypeU]
   -- ^ Stores non-top-level annotations.
   , stateOutfile :: Maybe Path
   -- ^ The nexus filename ("nexus.py" by default)
-  , statePackers :: GMap Int MVar PackMap
   , stateExports :: [Int]
   -- ^ The indices of each exported term
   , stateName :: Map Int EVar
@@ -332,30 +332,6 @@ data Script =
     , scriptMake :: ![SysCommand] -- ^ Bash code to build the script 
     }
   deriving (Show, Ord, Eq)
-
-data UnresolvedPacker =
-  UnresolvedPacker
-    { unresolvedPackerLang :: Lang
-    , unresolvedPackerTerm :: Maybe EVar
-    -- ^ The general import term used for this type. For example, the 'Map'
-    -- type may have language-specific realizations such as 'dict' or 'hash',
-    -- but it is imported as 'import xxx (Map)'.
-    , unresolvedPackedType :: TypeU
-    -- ^ The packed type (e.g., Map key val)
-    , unresolvedUnpackedType :: TypeU
-    -- ^ The decomposed (unpacked) type (e.g., [(key,val)])
-    , unresolvedPackerForward :: [Source]
-    -- ^ The unpack function, there may be more than one, the compiler will
-    -- try to find the best one. It is called "Forward" since it moves one
-    -- step towards serialization.
-    , unresolvedPackerReverse :: [Source]
-    , unresolvedPackerGeneralTypes :: Maybe (TypeU, TypeU)
-    -- ^ The general packed and unpacked types, if available
-    }
-  deriving (Show, Ord, Eq)
-
-type PackMap = Map CVar [UnresolvedPacker]
-
 
 -- | A context, see Dunfield Figure 6
 data GammaIndex
@@ -531,8 +507,6 @@ newtype EVar = EV { unEVar :: Text } deriving (Show, Eq, Ord)
 -- A type name
 newtype TVar = TV { unTVar :: Text } deriving (Show, Eq, Ord)
 
-data CVar = CV Lang TVar deriving(Show, Eq, Ord)
-
 newtype Key = Key { unKey :: Text } deriving (Show, Eq, Ord)
 
 newtype Label = Label { unLabel :: Text } deriving (Show, Eq, Ord)
@@ -545,10 +519,6 @@ newtype Code = Code {unCode :: Text} deriving (Show, Eq, Ord)
 
 -- this is a string because the path libraries want strings
 type Path = String
-
--- | Let the CVar type behave like the MVar newtype
-unCVar :: CVar -> TVar
-unCVar (CV _ t) = t
 
 data Source =
   Source
@@ -589,6 +559,12 @@ instance Functor One where
 instance Functor Many where
   fmap f (Many x) = Many (map f x)
 
+instance Traversable Many where
+  traverse f (Many xs) = Many <$> traverse f xs
+
+instance Traversable One where
+  traverse f (One x) = One <$> f x
+
 instance Foldable One where
   foldr f b (One a) = f a b
 
@@ -626,28 +602,41 @@ data SExpr g f c
   | StrS Text
   | CallS Source
 
-mapSAnno :: Functor f => (g -> g') -> (c -> c') -> SAnno g f c -> SAnno g' f c'
-mapSAnno fg fc (SAnno e g) = SAnno (fmap (mapSExpr' fg fc) e) (fg g) where
-  mapSExpr' :: Functor f => (g -> g') -> (c -> c') -> (SExpr g f c, c) -> (SExpr g' f c', c')
-  mapSExpr' fg' fc' (e', c) = (mapSExpr fg' fc' e', fc' c)
+mapSAnno :: Traversable f => (g -> g') -> (c -> c') -> SAnno g f c -> SAnno g' f c'
+mapSAnno fg fc = runIdentity . mapSAnnoM (return . fg) (return . fc)
 
-mapSExpr :: Functor f => (g -> g') -> (c -> c') -> SExpr g f c -> SExpr g' f c'
-mapSExpr fg fc = fe where 
-  m = mapSAnno fg fc
-  fe UniS = UniS
-  fe (VarS v) = VarS v
-  fe (AccS x k) = AccS (m x) k
-  fe (AppS x xs) = AppS (m x) (map m xs)
-  fe (LamS vs x) = LamS vs (m x)
-  fe (LstS xs) = LstS (map m xs)
-  fe (TupS xs) = TupS (map m xs)
-  fe (NamS rs) = NamS (zip (map fst rs) (map (m . snd) rs))
-  fe (RealS x) = RealS x
-  fe (IntS x) = IntS x
-  fe (LogS x) = LogS x
-  fe (StrS x) = StrS x
-  fe (CallS src) = CallS src
-   
+mapSExpr :: Traversable f => (g -> g') -> (c -> c') -> SExpr g f c -> SExpr g' f c'
+mapSExpr fg fc = runIdentity . mapSExprM (return . fg) (return . fc)
+
+mapSAnnoM :: (Traversable f, Monad m) => (g -> m g') -> (c -> m c') -> SAnno g f c -> m (SAnno g' f c')
+mapSAnnoM fg fc (SAnno e g) = do
+  g' <- fg g
+  e' <- traverse mapSExprM' e
+  return $ SAnno e' g'
+  where
+    mapSExprM' (x, c) = do
+      c' <- fc c
+      x' <- mapSExprM fg fc x
+      return (x', c')
+
+mapSExprM :: (Traversable f, Monad m) => (g -> m g') -> (c -> m c') -> SExpr g f c -> m (SExpr g' f c')
+mapSExprM fg fc = fe where 
+  m = mapSAnnoM fg fc
+  fe UniS = return UniS
+  fe (VarS v) = return $ VarS v
+  fe (AccS x k) = AccS <$> m x <*> pure k
+  fe (AppS x xs) = AppS <$> m x <*> mapM m xs
+  fe (LamS vs x) = LamS vs <$> m x
+  fe (LstS xs) = LstS <$> mapM m xs
+  fe (TupS xs) = TupS <$> mapM m xs
+  fe (NamS rs) = do
+    es' <- mapM (m. snd) rs
+    return $ NamS (zip (map fst rs) es')
+  fe (RealS x) = return $ RealS x
+  fe (IntS x) = return $ IntS x
+  fe (LogS x) = return $ LogS x
+  fe (StrS x) = return $ StrS x
+  fe (CallS src) = return $ CallS src
 
 type Indexed = IndexedGeneral Int
 
@@ -658,9 +647,6 @@ instance Annotated IndexedGeneral where
   val (Idx _ x) = x
   ann (Idx i _) = i
   annotate i x = Idx i x
-
--- TODO: This should probably be a newtype, I want to avoid ambiguous Int's in signatures
-type GIndex = Int
 
 instance Functor (IndexedGeneral k) where
   fmap f (Idx i x) = Idx i (f x)
@@ -679,7 +665,6 @@ data Type
   -- environment where they can be deserialized. Alternatively, terms that are
   -- used within dynamic languages may need no type annotation.
   | VarT TVar
-  -- ^ (a)
   | FunT [Type] Type
   | AppT Type [Type]
   | NamT NamType TVar [Type] [(Key, Type)]
@@ -688,7 +673,6 @@ data Type
 -- | A type with existentials and universals
 data TypeU
   = VarU TVar 
-  -- ^ (a)
   | ExistU TVar 
     [TypeU] -- type parameters
     [(Key, TypeU)] -- key accesses into this type
@@ -699,6 +683,15 @@ data TypeU
   | AppU TypeU [TypeU] -- type application
   | NamU NamType TVar [TypeU] [(Key, TypeU)] -- record / object / table
   deriving (Show, Ord, Eq)
+
+extractKey :: TypeU -> TVar
+extractKey (VarU v) = v
+extractKey (ForallU _ t) = extractKey t
+extractKey (AppU t _) = extractKey t
+extractKey (NamU _ v _ _) = v
+extractKey (ExistU v _ _) = v
+extractKey _ = error "Cannot currently handle functional type imports"
+
 
 type2typeu :: Type -> TypeU
 type2typeu (VarT v) = VarU v
@@ -716,18 +709,6 @@ data EType =
     , econs :: Set.Set Constraint
     }
   deriving (Show, Eq, Ord)
-
-instance HasOneLanguage UnresolvedPacker where
-  -- Finds languages of a packer, dies if there are internal conflicts
-  -- I need to find a way of making such conflicts un-representable
-  langOf p =
-    case unique (unresolvedPackerLang p :  map srcLang (unresolvedPackerForward p <> unresolvedPackerReverse p)) of
-      [x] -> Just x
-      xs -> error
-        $ "Malformed UnresolvedPacker - this is a compiler bug in:"
-        <> "\n  " <> show p
-        <> "\nFound languages:"
-        <> "\n  " <> show xs
 
 instance HasOneLanguage Source where
   langOf s = Just (srcLang s)

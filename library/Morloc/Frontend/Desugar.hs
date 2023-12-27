@@ -32,8 +32,8 @@ desugar
 desugar s
   = checkForSelfRecursion s -- modules should not import themselves
   >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
-  >>= doM collectTypeFunctions
-  >>= addPackerMap -- add the packers to state
+  >>= doM collectTypes
+  >>= doM collectMogrifiers
   >>= removeTypeImports -- Remove type imports and exports
   |>> nullify -- TODO: unsus and document
 
@@ -134,8 +134,8 @@ type GCMap = (               Map.Map TVar [([TVar], TypeU)]  -- child general ma
              , Map.Map Lang (Map.Map TVar [([TVar], TypeU)]) -- child concrete ap
              )
 
-collectTypeFunctions :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
-collectTypeFunctions fullDag = do
+collectTypes :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
+collectTypes fullDag = do
   let typeDAG = MDD.mapEdge (\xs -> [(x,y) | AliasedType x y <- xs]) fullDag
   _ <- MDD.synthesizeDAG formTypes typeDAG
   return ()
@@ -153,17 +153,13 @@ collectTypeFunctions fullDag = do
 
     let (generalTypemap, concreteTypemaps) = foldl inherit (AST.findTypedefs e0) childImports
 
-    -- collect and store sources (should this be done here?)
-    let objSources = [src | src <- AST.findSources e0]
-
     -- Here we are creating links from every indexed term in the module to the module
     -- sources and aliases. When the module abstractions are factored out later,
     -- this will be the only way to access module-specific info.
     let indices = AST.getIndices e0
 
     s <- MM.get
-    MM.put (s { stateSources = GMap.insertMany indices m objSources (stateSources s)
-              , stateGeneralTypedefs = GMap.insertMany indices m generalTypemap (stateGeneralTypedefs s)
+    MM.put (s { stateGeneralTypedefs = GMap.insertMany indices m generalTypemap (stateGeneralTypedefs s)
               , stateConcreteTypedefs = GMap.insertMany indices m concreteTypemaps (stateConcreteTypedefs s)
               } )
 
@@ -208,6 +204,80 @@ filterAndSubstitute links typemap =
       (Just xs) -> Map.insert localAlias (map (second (rename sourceName localAlias)) xs) (Map.delete sourceName typedefs)
       Nothing -> typedefs
 
+
+collectMogrifiers :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
+collectMogrifiers fullDag = do
+  let typeDag = MDD.mapEdge (\xs -> [(x,y) | AliasedType x y <- xs]) fullDag
+  _ <- MDD.synthesizeDAG formMogrifiers typeDag
+  return ()
+  where
+
+  formMogrifiers
+    :: MVar
+    -> ExprI
+    -> [( MVar -- child module name
+        , [(TVar, TVar)] -- alias map
+        , Map.Map Property [(TypeU, Source)]
+        )]
+    -> MorlocMonad (Map.Map Property [(TypeU, Source)])
+  formMogrifiers m e0 childImports = do
+
+    -- collect and store sources (should this be done here?)
+    let objSources = AST.findSources e0
+
+    let localMogs = prepareMogrifier objSources (AST.findSignatures e0)
+
+    let inheritedMogs = [inherit aliasMap mogMap | (_, aliasMap, mogMap) <- childImports]
+      -- loop over childImports
+      -- rename as needed first
+      -- then keep the mogrifiers that varmatch the alias
+      --
+
+    let mogrifiers = Map.unionsWith mergeMogs (localMogs : inheritedMogs)
+
+    -- Here we are creating links from every indexed term in the module to the module
+    -- sources and aliases. When the module abstractions are factored out later,
+    -- this will be the only way to access module-specific info.
+    let indices = AST.getIndices e0
+
+    s <- MM.get
+    MM.put (s { stateSources = GMap.insertMany indices m objSources (stateSources s)
+              , stateInnerMogrifiers = GMap.insertMany indices m mogrifiers (stateInnerMogrifiers s)
+              } )
+
+    return mogrifiers
+
+    where
+      prepareMogrifier :: [Source] -> [(EVar, Maybe Label, EType)] -> Map.Map Property [(TypeU, Source)]
+      prepareMogrifier srcs es = mogrifiers
+        where
+          srcMap = Map.fromList [(srcAlias src, src) | src <- srcs]
+          mogMaybe = concat [[(p, (etype e, Map.lookup v srcMap)) | p <- Set.toList (eprop e)] | (v, _, e) <- es]
+          mogrifiers = Map.fromListWith (<>) [(p, [(t, src)]) | (p, (t, Just src)) <- mogMaybe]
+
+      inherit :: [(TVar, TVar)] -> Map.Map Property [(TypeU, Source)] -> Map.Map Property [(TypeU, Source)]
+      inherit aliasMap mogMap
+        = Map.map
+          ( filter (\(t, _) -> extractKey t `elem` map snd aliasMap)
+          . map (first (renameMog aliasMap))
+          ) mogMap 
+
+      -- update type names in the inherited signatures
+      renameMog :: [(TVar, TVar)] -> TypeU -> TypeU
+      renameMog aliasMap t0 = foldl (\t (s,a) -> rename s a t) t0 aliasMap
+
+      mergeMogs :: [(TypeU, Source)] -> [(TypeU, Source)] -> [(TypeU, Source)]
+      mergeMogs xs0 ys0 = filter (isNovel ys0) xs0 <> ys0 where
+        isNovel :: [(TypeU, Source)] -> (TypeU, Source) -> Bool
+        isNovel [] _ = True
+        isNovel ((t1, src1):ys) x@(t2, src2)
+          | srcPath src1 == srcPath src2 &&
+            srcName src1 == srcName src2 &&
+            MTP.isSubtypeOf t1 t2 &&
+            MTP.isSubtypeOf t2 t1 = False
+          | otherwise = isNovel ys x
+
+
 -- Rename a variable. For example:
 --   import maps (Map as HashMap, foo, bar)
 --
@@ -216,19 +286,17 @@ filterAndSubstitute links typemap =
 --   rename (TV "Map") (TV "HashMap") x
 -- where `x` is any term
 rename :: TVar -> TVar -> TypeU -> TypeU
-rename sourceName localAlias t0
-  | sourceName == localAlias = t0
-  | otherwise = f t0 where
-      f (VarU v)
-        | v == sourceName = VarU localAlias
-        | otherwise = VarU v
-      f (ExistU v ts rs)
-        | v == sourceName = ExistU localAlias ts rs
-        | otherwise = ExistU v ts rs
-      f (ForallU v t) = ForallU v (f t)
-      f (FunU ts t) = FunU (map f ts) (f t)
-      f (AppU t ts) = AppU (f t) (map f ts)
-      f (NamU o v ts rs) = NamU o v (map f ts) (map (second f) rs)
+rename sourceName localAlias = f where
+  f (VarU v)
+    | v == sourceName = VarU localAlias
+    | otherwise = VarU v
+  f (ExistU v ts rs)
+    | v == sourceName = ExistU localAlias ts rs
+    | otherwise = ExistU v ts rs
+  f (ForallU v t) = ForallU v (f t)
+  f (FunU ts t) = FunU (map f ts) (f t)
+  f (AppU t ts) = AppU (f t) (map f ts)
+  f (NamU o v ts rs) = NamU o v (map f ts) (map (second f) rs)
 
 
 evaluateEType :: Map.Map TVar [([TVar], TypeU)] -> EType -> Either MorlocError EType
@@ -379,190 +447,3 @@ removeTypeImports d = case MDD.roots d of
     filterEmpty :: k -> n -> k -> [a] -> Bool
     filterEmpty _ _ _ [] = False
     filterEmpty _ _ _ _ = True
-
--- | Packers need to be passed along with the types they pack, they are imported
--- explicitly with the type they pack. Should packers be universal? The
--- packers describe how a term may be simplified. But often there are multiple
--- reasonable ways to simplify a term, for example `Map a b` could simplify to
--- `[(a,b)]` or `([a],[b])`. The former is semantically more precise (since it
--- naturally maintains the one-to-one variant), but the latter may be more
--- efficient or natural in some languages. For any interface, both sides must
--- adopt the same forms. The easiest way to enforce this is to require one
--- global packer, but ultimately it would be better to resolve packers
--- case-by-base as yet another optimization degree of freedom.
---
--- There is another case where multiple packers may make sense. Some types, such
--- as the generic "Tree node edge leaf" type may not be so generic in idiomatic
--- representations in some languages. For the phylogenetics case study in the
--- ICFL2023 paper, the C++ Tree type is fully generic, but the R type is a
--- "phylo", where edges are branch lengths (numeric) and nodes and leafs are
--- text labels. Thus the "phylo" type in R is a specialized Tree. This should be
--- supported. There may be multiple concrete types representing a given general
--- types. So we should also not unify to a single packer. What will be constant
--- is the number of type parameters. So the "phylo" type, if it is an instance
--- of Tree, will be represented as ("phylo" "character" "numeric"
--- "character"). Like Tree, it takes 3 parameters, but unlike Tree, they are not
--- generic. So any use of an R function of "phylo" with different type
--- parameters will fail at compile time, since there is no path to synthesizing
--- such a type.
-addPackerMap
-  :: DAG MVar edge ExprI
-  -> MorlocMonad (DAG MVar edge ExprI)
-addPackerMap = undefined
--- addPackerMap d = do
---   maybeDAG <- MDD.synthesizeDAG gatherPackers d
---   case maybeDAG of
---     Nothing -> MM.throwError CyclicDependency
---     (Just d') -> return $ MDD.mapNode fst d'
---
---
--- gatherPackers
---   :: MVar -- the importing module name (currently unused)
---   -> ExprI -- data about the importing module
---   -> [( MVar -- the name of an imported module
---       , edge
---       , (ExprI, Map.Map CVar [UnresolvedPacker]) -- data about the imported module
---      )]
---   -> MorlocMonad (ExprI, Map.Map CVar [UnresolvedPacker])
--- gatherPackers mv e xs = do
---   (GMap _ mvmap) <- MM.gets stateConcreteTypedefs
---   let typedefs = fromMaybe Map.empty (Map.lookup mv mvmap)
---   MM.sayVVV $ "typedefs: " <> viaShow typedefs
---   case findPackers typedefs e of
---     (Left err') -> MM.throwError err'
---     (Right m0) -> do
---       MM.sayVVV $ "found packers in module" <+> pretty mv <> ":" <+> viaShow m0
---       let m2 = Map.unionsWith (<>) (m0 : [m1 | (_, _, (_, m1)) <- xs])
---       attachPackers mv e m2
---       return (e, m2)
---
--- attachPackers :: MVar -> ExprI -> Map.Map CVar [UnresolvedPacker] -> MorlocMonad ()
--- attachPackers mv e m = do
---   s <- MM.get
---   let p = GMap.insertMany (AST.getIndices e) mv m (statePackers s)
---   MM.put (s {statePackers = p})
---
---
--- -- | This function should:
--- --   1) couple matching pack/unpack functions
--- --   2) find the general types for the packed and unpacked forms
--- --   3) infer concrete types from general types when needed (and possible)
--- --   4) tie all this info together
--- findPackers :: Map.Map CVar [([TVar], TypeU)] -> ExprI -> Either MorlocError (Map.Map CVar [UnresolvedPacker])
--- findPackers typedefs expr =
---   mapM (linkTypes types) (AST.findSources expr)
---   |>> catMaybes
---   |>> Map.fromListWith (<>)
---   >>= Map.mapM mergePackers
---
---   where
---
---   -- find all packer and unpacker signatures
---   types :: Map.Map (EVar, Bool) EType
---   types = Map.fromList
---             [ ((v, isPacker e), e)
---             | (v, _, e) <- AST.findSignatures expr
---             , isPacker e || isUnpacker e
---             ]
---
---   isPacker :: EType -> Bool
---   isPacker e = Set.member Pack (eprop e)
---
---   isUnpacker :: EType -> Bool
---   isUnpacker e = Set.member Unpack (eprop e)
---
---   linkTypes :: Map.Map (EVar, Bool) EType
---             -> Source
---             -> Either MorlocError (Maybe (CVar, [UnresolvedPacker]))
---   linkTypes typemap src = do
---     let generalPacker = Map.lookup (srcAlias src, True) typemap
---         generalUnpacker = Map.lookup (srcAlias src, False) typemap
---     case (generalPacker, generalUnpacker) of
---       -- this is not a packer or unpacker
---       (Nothing, Nothing) -> Right Nothing
---       -- the term is either a packer or an unpacker
---       (Just gp, Nothing) -> Just <$> makePacker True src (Just $ etype gp) Nothing
---       (Nothing, Just gu) -> Just <$> makePacker False src (Just $ etype gu) Nothing
---       -- illegal cyclical cases where a term is both
---       (Just p, Just u) -> Left $ CyclicPacker (etype p) (etype u)
---
---   makePacker :: Bool -> Source -> Maybe TypeU -> Maybe TypeU -> Either MorlocError (CVar, [UnresolvedPacker])
---   makePacker ispacker src maygt mayct = do
---     gpair <- makeGeneralPair ispacker maygt
---     packerTerm <- case gpair of
---       (Just (pt, _)) -> generalKey pt
---       Nothing -> return Nothing
---     (packedType, unpackedType) <- case (maygt, mayct) of
---       (_, Just ct) -> makeConcretePair ispacker ct
---       (Just _, _) -> evaluateType typedefs gt >>= makeConcretePair ispacker
---       (Nothing, Nothing) -> error "This case should be unreachable"
---     key <- packerKey packedType
---     let (packerForward, packerReverse) = makeSources ispacker src
---         lang = srcLang src
---     return (CV lang key, [UnresolvedPacker
---         { unresolvedPackerLang = lang
---         , unresolvedPackerTerm = packerTerm
---         , unresolvedPackedType = packedType
---         , unresolvedUnpackedType = unpackedType
---         , unresolvedPackerForward = packerForward
---         , unresolvedPackerReverse = packerReverse
---         , unresolvedPackerGeneralTypes = gpair
---         }]
---       )
---
---   makeGeneralPair :: Bool -> Maybe TypeU -> Either MorlocError (Maybe (TypeU, TypeU))
---   makeGeneralPair ispacker (fmap unqualify -> Just (vs, FunU [a] b))
---     | ispacker = Right $ Just (qualify vs b, qualify vs a)
---     | otherwise = Right $ Just (qualify vs a, qualify vs b)
---   makeGeneralPair _ Nothing = Right Nothing
---   makeGeneralPair _ (Just t) = error $ show t
---
---   -- make the forward and reverse sources
---   -- e.g.: ([Source "packMap" ...], [])   -- for True
---   -- e.g.: ([], [Source "unpackMap" ...]) -- for False
---   makeSources :: Bool -> Source -> ([Source], [Source])
---   makeSources True src = ([src], [])
---   makeSources False src = ([], [src])
---
---   -- make concrete pair with packed and unpacked forms, respectively
---   -- e.g.: ("dict", ([a],[b]))
---   makeConcretePair :: Bool -> TypeU -> Either MorlocError (TypeU, TypeU)
---   makeConcretePair ispacker (unqualify -> (vs, FunU [a] b))
---     | ispacker = return (qualify vs b, qualify vs a)
---     | otherwise = return (qualify vs a, qualify vs b)
---   makeConcretePair _ t = error $ show t
---
---   -- make the concrete packer key
---   -- e.g.: "dict", the Python form of "Map"
---   packerKey :: TypeU -> Either MorlocError TVar
---   packerKey (unqualify -> (_, t0)) = f t0 where
---     f (VarU v)   = return v
---     f (AppU (VarU v) _) = return v
---     f (NamU _ v _ _) = return v
---     f t = error $ show t
---
---   -- make the general key
---   -- e.g.: "Map"
---   generalKey :: TypeU -> Either MorlocError (Maybe EVar)
---   generalKey (unqualify -> (_, t0)) = f t0 where
---     f (VarU (TV v))   = return (Just (EV v))
---     f (AppU (VarU (TV v)) _) = return (Just (EV v))
---     f (NamU _ (TV v) _ _) = return (Just (EV v))
---     f t = error $ show t
---
---   -- associate packers with unpackers to make final UnresolvedPacker objects
---   mergePackers :: [UnresolvedPacker] -> Either MorlocError [UnresolvedPacker]
---   mergePackers ps
---     = mapM (foldl1M mergeUnresolvedPackers . snd)
---     . groupSort
---     $ [(unresolvedPackerTerm p, p) | p <- ps]
---
---   -- Here we merge partial UnresolvedPackers. These will all be for the same
---   -- general type (e.g., Map) and the same concrete type (e.g. "dict"). Ideally,
---   -- there should be exactly two elements in the list, a packer and an unpacker.
---   mergeUnresolvedPackers :: UnresolvedPacker -> UnresolvedPacker -> Either MorlocError UnresolvedPacker
---   mergeUnresolvedPackers p1 p2 =
---       return $ p1
---         { unresolvedPackerForward = unresolvedPackerForward p1 <> unresolvedPackerForward p2
---         , unresolvedPackerReverse = unresolvedPackerReverse p1 <> unresolvedPackerReverse p2
---         }

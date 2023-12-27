@@ -9,14 +9,12 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 module Morloc.Pretty
-  ( prettyPackMap
-  , prettySAnno
+  ( prettySAnno
   , prettySExpr
   ) where
 
 import Morloc.Data.Doc
 import Morloc.Namespace
-import qualified Data.Map as Map
 import qualified Data.Set as Set
 
 instance Pretty Symbol where
@@ -127,28 +125,6 @@ prettyTypeU (NamU o n ps rs)
     = parens
     $ block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
               (vsep [pretty k <+> "::" <+> prettyTypeU x | (k, x) <- rs])
-
-instance Pretty UnresolvedPacker where
-  pretty p = vsep
-    [ "packerTerm:" <+> pretty (unresolvedPackerTerm p)
-    , "packedType:" <+> pretty (unresolvedPackedType p)
-    , "unpackedType:" <+> pretty (unresolvedUnpackedType p)
-    , "forward:" <+> pretty (unresolvedPackerForward p)
-    , "reverse:" <+> pretty (unresolvedPackerReverse p)
-    ]
-
-
-
-prettyPackMap :: PackMap -> Doc ann
-prettyPackMap m =  "----- pacmaps ----\n"
-                <> vsep (map f (Map.toList m))
-                <> "\n------------------" where
-  f :: (CVar, [UnresolvedPacker]) -> Doc ann
-  f (CV _ v, ps) =
-    block 4
-      ("packmap" <+> pretty v)
-      (vsep $ map pretty ps)
-
 
 -- For example @prettySAnnoMany id Nothing@ for the most simple printer
 prettySAnno

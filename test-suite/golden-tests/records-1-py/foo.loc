@@ -1,5 +1,6 @@
 module main (foo)
 
 import pybase
+import conventions (Real, Str, List)
 
 foo x = {a = add x 5.0, b = {c = [add x 2.0], d = "yolo"}}

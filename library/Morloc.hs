@@ -7,9 +7,8 @@ module Morloc
 import Morloc.Namespace
 
 import qualified Morloc.Frontend.API as F
-import Morloc.CodeGenerator.Namespace (TypeP)
 import Morloc.Frontend.Desugar (desugar)
-import Morloc.CodeGenerator.Generate (realityCheck, generate)
+import Morloc.CodeGenerator.Generate (generate, realityCheck)
 import Morloc.ProgramBuilder.Build (buildProgram)
 import Morloc.Frontend.Treeify (treeify)
 
@@ -32,7 +31,7 @@ typecheck
   :: Maybe Path
   -> Code
   -> MorlocMonad ( [SAnno (Indexed Type) One ()]
-                 , [SAnno Int One (Indexed TypeP)]
+                 , [SAnno (Indexed Type) One (Indexed Lang)]
                  )
 typecheck path code
   = typecheckFrontend path code

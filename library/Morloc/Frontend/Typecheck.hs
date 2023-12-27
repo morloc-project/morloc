@@ -9,7 +9,7 @@ License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
-module Morloc.Frontend.Typecheck (typecheck, resolveTypes) where
+module Morloc.Frontend.Typecheck (typecheck, resolveTypes, evaluateSAnnoTypes) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Typecheck.Internal
@@ -18,7 +18,7 @@ import Morloc.Data.Doc
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
--- import qualified Morloc.Data.Text as MT
+import qualified Morloc.Frontend.Desugar as MFD
 
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
@@ -470,11 +470,11 @@ subtype' i a b g = do
 -- helpers
 
 -- apply context to a SAnno
-applyGen :: (Functor gf, Functor f, Applicable g)
+applyGen :: (Functor gf, Traversable f, Applicable g)
          => Gamma -> SAnno (gf g) f c -> SAnno (gf g) f c
 applyGen g = mapSAnno (fmap (apply g)) id
 
-applyCon :: (Functor gf, Functor f, Applicable g)
+applyCon :: (Functor gf, Traversable f, Applicable g)
          => Gamma -> SExpr (gf g) f c -> SExpr (gf g) f c
 applyCon g = mapSExpr (fmap (apply g)) id
 
@@ -539,3 +539,21 @@ peakSExpr (IntS x) = "IntS" <+> pretty x
 peakSExpr (LogS x) = "LogS" <+> pretty  x
 peakSExpr (StrS x) = "StrS" <+> pretty x
 peakSExpr (CallS src) = "CallS" <+> pretty src
+
+
+evaluateSAnnoTypes :: SAnno (Indexed TypeU) Many Int -> MorlocMonad (SAnno (Indexed TypeU) Many Int)
+evaluateSAnnoTypes = mapSAnnoM resolve return where
+  resolve :: Indexed TypeU -> MorlocMonad (Indexed TypeU)
+  resolve (Idx m t) = do
+    scope <- getScope m
+    case MFD.evaluateType scope t of
+      (Left e) -> MM.throwError e
+      (Right tu) -> return (Idx m tu)
+
+  getScope :: Int -> MorlocMonad Scope
+  getScope i= do
+    globalMap <- CMS.gets stateGeneralTypedefs
+    case GMap.lookup i globalMap of
+      GMapNoFst -> return Map.empty
+      GMapNoSnd -> return Map.empty
+      GMapJust scope -> return scope

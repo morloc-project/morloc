@@ -2,6 +2,6 @@ module baz (*)
 
 source R from "main.R" ("mul")
 
-type R Real = "numeric"
+type R => Real = "numeric"
 
 mul :: Real -> Real -> Real

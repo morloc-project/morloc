@@ -83,8 +83,8 @@ translateSource s = do
 tupleKey :: Int -> MDoc -> MDoc
 tupleKey i v = [idoc|#{v}[#{pretty i}]|]
 
-selectAccessor :: NamType -> TVar -> (MDoc -> MDoc -> MDoc)
-selectAccessor NamTable  (TV "dict") = recordAccess
+selectAccessor :: NamType -> CVar -> (MDoc -> MDoc -> MDoc)
+selectAccessor NamTable  (CV "dict") = recordAccess
 selectAccessor NamRecord _      = recordAccess
 selectAccessor NamTable  _      = objectAccess
 selectAccessor NamObject _      = objectAccess
@@ -302,8 +302,8 @@ typeSchema = f . serialAstToJsonType
     f :: JsonType -> MDoc
     f (VarJ v) = lst [var v, "None"]
     f (ArrJ v ts) = lst [var v, lst (map f ts)]
-    f (NamJ (TV "dict") es) = lst [dquotes "dict", dict (map entry es)]
-    f (NamJ (TV "record") es) = lst [dquotes "record", dict (map entry es)]
+    f (NamJ (CV "dict") es) = lst [dquotes "dict", dict (map entry es)]
+    f (NamJ (CV "record") es) = lst [dquotes "record", dict (map entry es)]
     f (NamJ v es) = lst [pretty v, dict (map entry es)]
 
     entry :: (Key, JsonType) -> MDoc
@@ -315,7 +315,7 @@ typeSchema = f . serialAstToJsonType
     lst :: [MDoc] -> MDoc
     lst xs = encloseSep "(" ")" "," xs
 
-    var :: TVar -> MDoc
+    var :: CVar -> MDoc
     var v = dquotes (pretty v)
 
 makePool :: MDoc -> [MDoc] -> [MDoc] -> MDoc -> MDoc

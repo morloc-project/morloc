@@ -1,6 +1,7 @@
 module main (foo)
 
 import cppbase (zipWith, mul)
+import conventions (List, Real)
 
 -- literal function with no application
 foo xs ys = zipWith mul xs ys

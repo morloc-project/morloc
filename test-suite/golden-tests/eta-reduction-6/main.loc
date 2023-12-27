@@ -1,6 +1,7 @@
 module main (foo)
 
 import base (add, mul)
+import conventions(Real, List)
 
 bar = add (mul 4.2 2.0)
 foo x = bar (add 1.0 x)

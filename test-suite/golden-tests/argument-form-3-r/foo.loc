@@ -4,6 +4,8 @@ import rbase (add)
 
 y = 40.0
 
+type R => Real = "numeric"
+
 -- external constant
 -- y will be turned into a manifold, making this the same as the f2 case
 -- can optimize out the manifold

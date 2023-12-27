@@ -41,7 +41,7 @@ module Morloc.Monad
   , metaName
   , metaProperties
   , metaTypedefs
-  , metaPackMap
+  , metaMogrifiers
   -- * handling tree depth
   , incDepth
   , getDepth
@@ -92,12 +92,13 @@ instance Defaultable MorlocState where
     , stateDepth = 0
     , stateSignatures = GMap.empty
     , stateConcreteTypedefs = GMap.empty
+    , stateGeneralTypedefs = GMap.empty
+    , stateInnerMogrifiers = GMap.empty
     , stateSources = GMap.empty
     , stateAnnotations = Map.empty
     , stateOutfile = Nothing
-    , statePackers = GMap.empty
-    , stateName = Map.empty
     , stateExports = []
+    , stateName = Map.empty
   }
 
 emptyState :: Maybe Path -> Int -> MorlocState
@@ -307,25 +308,25 @@ metaProperties i = do
 metaName :: Int -> MorlocMonad (Maybe EVar)
 metaName i = gets (Map.lookup i . stateName)
 
-metaPackMap :: Int -> MorlocMonad PackMap
-metaPackMap i = do
-    p <- gets statePackers
-    case GMap.lookup i p of
-      (GMapJust p') -> return p'
-      _ -> return Map.empty
+metaMogrifiers :: Int -> Lang -> MorlocMonad (Map.Map Property [(TypeU, Source)])
+metaMogrifiers i lang = do
+  p <- gets stateInnerMogrifiers
+  return $ case GMap.lookup i p of
+    (GMapJust p') -> Map.map (filter (\(_, src) -> srcLang src == lang)) p'
+    _ -> Map.empty
 
 
 -- | This is currently only used in the C++ translator.
 -- FIXME: should a term be allowed to have multiple type definitions within a language?
-metaTypedefs :: Int -> MorlocMonad (Map.Map CVar ([TVar], TypeU))
-metaTypedefs = undefined
--- metaTypedefs i = do
---     p <- gets stateConcreteTypedefs
---
---     return $ case GMap.lookup i p of
---       (GMapJust termmap) -> Map.map head (Map.filter (not . null) termmap)
---       _ -> Map.empty
+metaTypedefs :: Int -> Lang -> MorlocMonad (Map.Map TVar ([TVar], TypeU))
+metaTypedefs i lang = do
+    p <- gets stateConcreteTypedefs
 
+    return $ case GMap.lookup i p of
+      (GMapJust langmap) -> case Map.lookup lang langmap of
+        (Just typemap) -> Map.map head (Map.filter (not . null) typemap)
+        Nothing -> Map.empty
+      _ -> Map.empty
 
 
 newtype IndexState = IndexState { index :: Int }

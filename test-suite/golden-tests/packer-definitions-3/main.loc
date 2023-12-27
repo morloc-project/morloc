@@ -1,12 +1,12 @@
 module m (foo)
 
-type Cpp Real = "double"
-type Cpp Str = "std::string"
-type Cpp (Tuple2 a b) = "std::tuple<$1,$2>" a b
+type Cpp => Real = "double"
+type Cpp => Str = "std::string"
+type Cpp => (Tuple2 a b) = "std::tuple<$1,$2>" a b
 
-type Py Real = "float"
-type Py Str = "str"
-type Py  (Tuple2 a b) = "tuple" a b
+type Py => Real = "float"
+type Py => Str = "str"
+type Py => (Tuple2 a b) = "tuple" a b
 
 source Cpp from "dumby.hpp" ("h")
 h :: (Real -> (Str, Real)) -> Str -> Real

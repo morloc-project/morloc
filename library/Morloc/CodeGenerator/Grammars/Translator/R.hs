@@ -221,10 +221,10 @@ translateSegment m0 =
     makeNativeExpr _ (SrcN_ _ src) = return $ PoolDocs [] (pretty (srcName src)) [] []
     makeNativeExpr _ (ListN_ v _ xs) = return $ mergePoolDocs rlist xs where
        rlist es' = case v of
-         (FV _ (TV "numeric")) -> "c" <> tupled es'
-         (FV _ (TV "double")) -> "c" <> tupled es'
-         (FV _ (TV "logical")) -> "c" <> tupled es'
-         (FV _ (TV "character")) -> "c" <> tupled es'
+         (FV _ (CV "numeric")) -> "c" <> tupled es'
+         (FV _ (CV "double")) -> "c" <> tupled es'
+         (FV _ (CV "logical")) -> "c" <> tupled es'
+         (FV _ (CV "character")) -> "c" <> tupled es'
          _ -> "list" <> tupled es'
 
     makeNativeExpr _ (TupleN_ _ xs) = return $ mergePoolDocs ((<>) "list" . tupled) xs
@@ -267,8 +267,8 @@ typeSchema :: SerialAST -> MDoc
 typeSchema s0 = squotes $ jsontype2rjson (serialAstToJsonType s0) where
   serialAstToJsonType :: SerialAST -> JsonType
   serialAstToJsonType (SerialPack _ (_, s)) = serialAstToJsonType s
-  serialAstToJsonType (SerialList _ s) = ArrJ (TV "list") [serialAstToJsonType s]
-  serialAstToJsonType (SerialTuple _ ss) = ArrJ (TV "tuple") (map serialAstToJsonType ss)
+  serialAstToJsonType (SerialList _ s) = ArrJ (CV "list") [serialAstToJsonType s]
+  serialAstToJsonType (SerialTuple _ ss) = ArrJ (CV "tuple") (map serialAstToJsonType ss)
   serialAstToJsonType (SerialObject _ (FV _ n) _ rs) = NamJ n (map (second serialAstToJsonType) rs)
   serialAstToJsonType (SerialReal    (FV _ v)) = VarJ v
   serialAstToJsonType (SerialInt     (FV _ v)) = VarJ v
@@ -284,8 +284,8 @@ jsontype2rjson (ArrJ v ts) = "{" <> key <> ":" <> val <> "}" where
   val = encloseSep "[" "]" "," (map jsontype2rjson ts)
 jsontype2rjson (NamJ objType rs) =
   case objType of
-    (TV "data.frame") -> "{" <> dquotes "data.frame" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
-    (TV "record") -> "{" <> dquotes "record" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
+    (CV "data.frame") -> "{" <> dquotes "data.frame" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
+    (CV "record") -> "{" <> dquotes "record" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
     _ -> encloseSep "{" "}" "," rs'
   where
   keys = map (dquotes . pretty . fst) rs

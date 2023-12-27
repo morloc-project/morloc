@@ -2,11 +2,11 @@ module main (siblings)
 
 import pybase (map, fst, snd)
 
-type Py Str = "str"
-type Py Int = "int"
+type Py => Str = "str"
+type Py => Int = "int"
 
 record Person = Person { name :: Str, age :: Int, parent :: Str }
-record Py Person = "dict" { name :: "str", age :: "int", parent :: "str" }
+record Py => Person = "dict" { name :: "str", age :: "int", parent :: "str" }
 
 siblings :: Str -> [(Str, Int)] -> [Person]
 siblings parent xs = map (\child -> { name = fst child, age = snd child, parent = parent }) xs

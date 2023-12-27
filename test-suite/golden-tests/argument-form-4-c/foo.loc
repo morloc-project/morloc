@@ -4,6 +4,8 @@ import cppbase (add, mul)
 
 f = mul 20.0 2.0
 
+type Cpp => Real = "double"
+
 -- external 0 input argument
 -- cannot optimize out the manifold
 -- a better example would be a random number generator

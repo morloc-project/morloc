@@ -4,11 +4,9 @@ module main (sub)
 
 import pybase (add)
 import rbase (add)
+import conventions (Real)
 
 source py from "foo.py" ("sub_loc" as sub)
 source r from "foo.R" ("sub_loc" as sub)
-
-type py Real = "float"
-type R Real = "numeric" 
 
 sub :: Real -> Real -> Real

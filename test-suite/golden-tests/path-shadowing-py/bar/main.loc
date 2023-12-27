@@ -2,6 +2,6 @@ module bar (*)
 
 source Py from "main.py" ("add")
 
-type Py Real = "float"
+type Py => Real = "float"
 
 add :: Real -> Real -> Real

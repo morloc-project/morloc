@@ -1,6 +1,7 @@
 module main (bar)
 
 import base (add)
+import conventions (Real)
 
 -- foo0       = add
 -- foo1 x     = add x

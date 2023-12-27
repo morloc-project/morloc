@@ -2,9 +2,9 @@ module foosy (foo, foos, sfoos, bar)
 
 source Py from "foo.py" ("foo", "foos", "sfoos", "toPair", "swapPair")
 
-type Py Int = "int"
-type Py (List a) = "list" a
-type Py (Tuple2 a b) = "tuple" a b
+type Py => Int = "int"
+type Py => (List a) = "list" a
+type Py => (Tuple2 a b) = "tuple" a b
 
 foo :: Int -> Int
 foos :: Int -> [Int]

@@ -25,7 +25,6 @@ module Morloc.BaseTypes
   , strU
   , tupleU
   , listU
-  , serialType
   ) where
 
 import Prelude hiding(log)
@@ -77,10 +76,3 @@ listU t = AppU (VarU list) [t]
 
 tupleU :: [TypeU] -> TypeU
 tupleU ts = AppU (VarU $ tuple (length ts)) ts
-
-serialType :: Lang -> TVar
-serialType Python3Lang = TV "str"
-serialType RLang = TV "character"
-serialType CppLang = TV "std::string"
-serialType _ = error "Ah hell, you know I don't know that language"
-

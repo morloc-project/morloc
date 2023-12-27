@@ -2,5 +2,8 @@ module main (foo)
 
 import cppbase (map, mul)
 
+type Cpp => Real = "double"
+type Cpp => (List a) = "std::vector<$1>" a
+
 -- literal function with constant application
 foo xs = map (mul 2.0) xs

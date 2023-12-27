@@ -372,17 +372,6 @@ instantiate ta@(ExistU v [] []) tb g1 =
         Nothing -> Left . InstantiationError ta tb . render
           $ "Error in InstLSolve:" <+> tupled (map pretty (gammaContext g1))
 
--- if defaults are involved, no solving is done, but the subtypes of parameters
--- and defaults needs to be checked. 
---
------ FIXME: how should defaults be handled?
--- certainly NOT this:
--- g3 <- foldM (\g d1 -> foldM (\g' d2 -> subtype d1 d2 g') g ds2) g2 ds1
--- return g3
-instantiate (ExistU _ ps1 rs1) (ExistU _ ps2 rs2) g1 = do
-    g2 <- foldM (\g (t1, t2) -> subtype t1 t2 g) g1 (zip ps1 ps2)
-    foldM (\g' (t1, t2) -> subtype t1 t2 g') g2 [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
-
 -- bad
 instantiate _ _ g = return g
 

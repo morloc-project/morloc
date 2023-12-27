@@ -3,10 +3,10 @@ module main (hello)
 import conventions (Int, Str)
 import pybase (id)
 
-source py from "person.py" ("PersonObj" as Person, Person.hello as hello)
+source Py from "person.py" ("PersonObj" as Person, Person.hello as hello)
 
 object (Person a) = Person {name :: Str, info :: a}
-object py (Person a) = PersoPersonn {name :: Str, info :: a}
+object Py => (Person a) = PersoPersonn {name :: Str, info :: a}
 
 personWithAge :: Str -> Int -> Person Int
 personWithAge name age = Person {name = name, info = age}

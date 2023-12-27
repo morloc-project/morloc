@@ -2,9 +2,9 @@ module m (foo)
 
 source Py from "foo.py" ("g", "f")
 
-type Py Real = "float"
-type Py Bool = "bool"
-type Py (List a) = "list" a
+type Py => Real = "float"
+type Py => Bool = "bool"
+type Py => (List a) = "list" a
 
 g :: (a -> [a] -> [a]) -> a -> a
 f :: (a -> Bool) -> [a] -> [a]
