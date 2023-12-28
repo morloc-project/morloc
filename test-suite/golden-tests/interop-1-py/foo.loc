@@ -3,5 +3,7 @@ module main (py2c, c2py)
 import pybase (add)
 import cppbase (mul)
 
+import conventions (Real)
+
 py2c x y = add (mul x y) 100.0
 c2py x y = mul (add x y) 100.0

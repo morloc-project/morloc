@@ -536,9 +536,9 @@ applyLambdas (SAnno (One (AppS ( SAnno (One (LamS [] (SAnno e _), _)) _) [], _))
 applyLambdas (SAnno (One (AppS (SAnno e _) [], _)) i) = applyLambdas $ SAnno e i
 
 -- substitute applied lambdas
-applyLambdas (SAnno (One (AppS (SAnno (One (LamS (v:vs) e2, Idx j2 lang)) i2) (e1:es), tb1)) (Idx i1 (FunT (_:tas) tb2))) = do
+applyLambdas (SAnno (One (AppS (SAnno (One (LamS (v:vs) e2, Idx j2 lang)) (Idx i2 (FunT (_:tas) tb2))) (e1:es), tb1)) i1) = do
   let e2' = substituteSAnno v e1 e2
-  applyLambdas (SAnno (One (AppS (SAnno (One (LamS vs e2', Idx j2 lang)) i2) es, tb1)) (Idx i1 (FunT tas tb2)))
+  applyLambdas (SAnno (One (AppS (SAnno (One (LamS vs e2', Idx j2 lang)) (Idx i2 (FunT tas tb2))) es, tb1)) i1)
 
 -- propagate the changes
 applyLambdas (SAnno (One (AppS f es, c)) g) = do
@@ -1140,12 +1140,13 @@ expressPolyExpr _ _ (SAnno (One (AppS (SAnno (One (VarS f, _)) _) _, _)) _)
   = MM.throwError . ConcreteTypeError $ FunctionSerialization f
 
 -- catch all exception case - not very classy
-expressPolyExpr _ _ (SAnno (One (_, (Idx _ lang, _))) (Idx m t)) = do
+expressPolyExpr _ _ (SAnno (One (AppS (SAnno (One (LamS vs _, _)) _) _, _)) _) = error $ "All applications of lambdas should have been eliminated of length " <> show (length vs)
+expressPolyExpr _ parentType (SAnno (One (_, (Idx _ lang, _))) (Idx m t)) = do
   MM.sayVVV "Bad case"
   MM.sayVVV $ "  t :: " <> pretty t
   name' <- MM.metaName m
   case name' of
-      (Just v) -> MM.throwError . ConcreteTypeError $ MissingConcreteSignature v lang
+      (Just v) -> MM.throwError . OtherError . render $ "Missing concrete:" <+> "t=" <> pretty t <+> "v=" <> pretty v <+> "parentType=" <> pretty parentType
       Nothing ->  error "Bug in expressPolyExpr - this should be unreachable"
 
 

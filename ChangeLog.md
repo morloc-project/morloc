@@ -74,6 +74,7 @@ handling for several very different languages (proofs-of-concept).
        table R (Person a) = "data.frame"
      Really, I need to totally redo the table/record/object handling.
  [ ] Remove support for anonymous records in type signatures
+ [ ] Raise an error if any general type cannot be translated to a concrete type
 
 
 0.42.0 [2023.10.11]
