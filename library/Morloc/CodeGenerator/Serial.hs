@@ -129,7 +129,7 @@ makeSerialAST m lang t0 = do
             unpacked <- mapM (makeSerialAST' typepackers . typePackerUnpacked) packers
             selection <- selectPacker (zip packers unpacked)
             return $ SerialPack v selection
-          Nothing ->  serializerError $ "Cannot find constructor" <+> dquotes (pretty v)
+          Nothing ->  serializerError $ "Cannot find constructor in VarF" <+> dquotes (pretty v)
       where
         makeTypePacker :: ([TVar], TypeU, TypeU, Source, Source) -> MorlocMonad TypePacker
         makeTypePacker ([], generalPackedType, generalUnpackedType, forwardSource, reverseSource) = do
@@ -149,7 +149,7 @@ makeSerialAST m lang t0 = do
         -- considered. But for now, I don't have any great criterion for
         -- choosing.
         selectPacker :: [(TypePacker, SerialAST)] -> MorlocMonad (TypePacker, SerialAST)
-        selectPacker [] = serializerError $ "Cannot find constructor for" <+> pretty cv
+        selectPacker [] = serializerError $ "Cannot find constructor for" <+> pretty cv <+> "in selectPacker"
         selectPacker [x] = return x
         selectPacker _ = serializerError "Two you say, oh, get out of here"
 
@@ -166,11 +166,11 @@ makeSerialAST m lang t0 = do
             selection <- selectPacker (zip packers unpacked)
             return $ SerialPack v selection
           Nothing -> serializerError
-            $ "Cannot find constructor" <+> dquotes (pretty v)
-            <> "<" <> pretty (length ts) <> ">"
+            $ "Cannot find constructor in AppF" <+> dquotes (pretty v)
+            <> "<" <> pretty (length ts) <> ">" <+> viaShow typepackers
       where
          selectPacker :: [(TypePacker, SerialAST)] -> MorlocMonad (TypePacker, SerialAST)
-         selectPacker [] = serializerError $ "Cannot find constructor for" <+> pretty t
+         selectPacker [] = serializerError $ "Cannot find constructor in selectPacker for" <+> pretty t
          selectPacker (x:_) = return x
 
     makeSerialAST' typepackers (NamF o n ps rs) = do

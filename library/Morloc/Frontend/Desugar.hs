@@ -257,10 +257,19 @@ collectMogrifiers fullDag = do
 
       inherit :: [(TVar, TVar)] -> Map.Map Property [(TypeU, Source)] -> Map.Map Property [(TypeU, Source)]
       inherit aliasMap mogMap
-        = Map.map
-          ( filter (\(t, _) -> extractKey t `elem` map snd aliasMap)
-          . map (first (renameMog aliasMap))
-          ) mogMap 
+        = Map.mapWithKey (selectInherited (map snd aliasMap))
+        . Map.map ( map (first (renameMog aliasMap)) )
+        $  mogMap 
+
+      -- determine whether a given mogrifier is inherited given the import list
+      selectInherited :: [TVar] -> Property -> [(TypeU, Source)] -> [(TypeU, Source)]
+      selectInherited aliases Unpack ((unqualify -> (vs, t@(FunU [a] _)), src):xs)
+        | extractKey a `elem` aliases = (qualify vs t, src) : selectInherited aliases Pack xs
+        | otherwise = selectInherited aliases Pack xs
+      selectInherited aliases Pack ((unqualify -> (vs, t@(FunU [_] b)), src):xs)
+        | extractKey b `elem` aliases = (qualify vs t, src) : selectInherited aliases Pack xs
+        | otherwise = selectInherited aliases Pack xs
+      selectInherited _ _ xs = xs -- currently keep all functions for other mogrifiers (none of these are currently used)
 
       -- update type names in the inherited signatures
       renameMog :: [(TVar, TVar)] -> TypeU -> TypeU

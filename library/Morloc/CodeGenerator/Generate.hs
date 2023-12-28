@@ -1411,26 +1411,26 @@ serialize (MonoHead lang m0 args0 e0) = do
   nativeExpr _ _ (MonoBndVar Nothing _) = error "MonoBndVar must have a type if used in native context"
   -- simple native types
   nativeExpr m scope (MonoAcc _ o v e k) = do
-    v' <- inferConcreteVar scope v
+    let v' = inferConcreteVar scope v
     e' <- nativeExpr m scope e
     return $ AccN o v' e' k
   nativeExpr m scope (MonoList v t es) =
-    ListN <$> inferConcreteVar scope v
-          <*> inferConcreteType scope t
-          <*> mapM (nativeExpr m scope) es
+    ListN (inferConcreteVar scope v)
+      <$> inferConcreteType scope t
+      <*> mapM (nativeExpr m scope) es
   nativeExpr m scope (MonoTuple v rs) =
-    TupleN <$> inferConcreteVar scope v
-           <*> mapM (nativeExpr m scope . snd) rs
+    TupleN (inferConcreteVar scope v)
+      <$> mapM (nativeExpr m scope . snd) rs
   nativeExpr m scope (MonoRecord o v ps rs) =
-    RecordN o <$> inferConcreteVar scope v
-              <*> mapM (inferConcreteType scope) ps
-              <*> mapM (secondM (nativeExpr m scope . snd)) rs
+    RecordN o (inferConcreteVar scope v)
+      <$> mapM (inferConcreteType scope) ps
+      <*> mapM (secondM (nativeExpr m scope . snd)) rs
   -- primitives
-  nativeExpr _ scope (MonoLog    v x) = LogN <$> inferConcreteVar scope v <*> pure x
-  nativeExpr _ scope (MonoReal   v x) = RealN <$> inferConcreteVar scope v <*> pure x
-  nativeExpr _ scope (MonoInt    v x) = IntN <$> inferConcreteVar scope v <*> pure x
-  nativeExpr _ scope (MonoStr    v x) = StrN <$> inferConcreteVar scope v <*> pure x
-  nativeExpr _ scope (MonoNull   v  ) = NullN <$> inferConcreteVar scope v
+  nativeExpr _ scope (MonoLog    v x) = return $ LogN  (inferConcreteVar scope v) x
+  nativeExpr _ scope (MonoReal   v x) = return $ RealN (inferConcreteVar scope v) x
+  nativeExpr _ scope (MonoInt    v x) = return $ IntN  (inferConcreteVar scope v) x
+  nativeExpr _ scope (MonoStr    v x) = return $ StrN  (inferConcreteVar scope v) x
+  nativeExpr _ scope (MonoNull   v  ) = return $ NullN (inferConcreteVar scope v)
 
   typeArg
     :: Scope

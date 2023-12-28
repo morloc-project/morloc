@@ -690,7 +690,7 @@ extractKey (ForallU _ t) = extractKey t
 extractKey (AppU t _) = extractKey t
 extractKey (NamU _ v _ _) = v
 extractKey (ExistU v _ _) = v
-extractKey _ = error "Cannot currently handle functional type imports"
+extractKey t = error $ "Cannot currently handle functional type imports: " <> show t
 
 
 type2typeu :: Type -> TypeU

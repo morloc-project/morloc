@@ -49,7 +49,7 @@ weave (NamU o1 v1 ts1 rs1) (NamU o2 v2 ts2 rs2)
   | otherwise = undefined
 weave _ _ = undefined
 
-inferConcreteVar :: Scope -> TVar -> MorlocMonad FVar
+inferConcreteVar :: Scope -> TVar -> FVar
 inferConcreteVar scope gv = case Map.lookup gv scope of
-  (Just (([], VarU (TV v)):_)) -> return $ FV gv (CV v)
-  _ -> error $ show gv
+  (Just ((_, t):_)) -> FV gv (CV . unTVar $ extractKey t)
+  _ -> error $ "Concrete type var inference error for " <> show gv <> " in scope " <> show scope
