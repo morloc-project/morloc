@@ -19,6 +19,8 @@ import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.API as F
 import qualified Morloc.Data.GMap as GMap
+import Morloc.CodeGenerator.Namespace (SerialManifold(..))
+import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.Pretty ()
 import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
@@ -115,50 +117,14 @@ writeTerm s i typeDoc =
     case ( Map.lookup i (stateName s)
          , GMap.lookup i (stateSignatures s))
     of
-        (Just v, GMapJust (TermTypes {termGeneral = Just t'})) -> pretty v <+> "::" <+> pretty t'
+        (Just v, GMapJust TermTypes{termGeneral = Just t'}) -> pretty v <+> "::" <+> pretty t'
         (Just v, _) -> pretty v <+> "|-" <+> typeDoc
         _ -> "MISSING"
 
 
-writeTypecheckOutput :: Int -> ((Either MorlocError ([SAnno (Indexed Type) One ()], [SAnno (Indexed Type) One (Indexed Lang)]), [MT.Text]), MorlocState) -> MDoc
-writeTypecheckOutput = undefined
--- writeTypecheckOutput :: Int -> ((Either MorlocError ([SAnno (Indexed Type) One ()], [SAnno Int One (Indexed TypeP)]), [MT.Text]), MorlocState) -> MDoc
--- writeTypecheckOutput _ ((Left e, _), _) = pretty e
--- writeTypecheckOutput 0   ((Right (_, rasts), _), s) = vsep (map (writeRealizedType s) rasts)
--- writeTypecheckOutput 1 x@((Right (_, rasts), _), s) = "Types:\n" <> writeTypecheckOutput 0 x <> "\n\nExports:\n" <> vsep (map (writeRast 1 s) rasts)
--- writeTypecheckOutput _ _ = "I don't know how to be that verbose"
---
--- writeRealizedType :: MorlocState -> SAnno Int One (Indexed TypeP) -> MDoc
--- writeRealizedType state (SAnno (One (_, Idx _ p)) m) =
---     let c = fname <+> maybe "_" pretty (langOf p) <+> "::" <+> pretty p
---         g = fname <+> "::" <+> pretty (generalTypeOf p)
---     in c <> "\n" <> g
---     where
---         fname = maybe "_" pretty (Map.lookup m (stateName state))
---
---
--- -- data SAnno g f c = SAnno (f (SExpr g f c, c)) g
--- writeRast :: Int -> MorlocState -> SAnno Int One (Indexed TypeP) -> MDoc
--- writeRast _ s (SAnno (One (e, Idx _ t)) gidx) = msg where
---
---   msg = generalSignatures <> "\n  " <> writeRealizedTermC e
---
---   generalSignatures = writeTerm s gidx (prettyGenTypeP t)
---
---   writeRealizedTermC :: SExpr Int One (Indexed TypeP) -> MDoc
---   writeRealizedTermC UniS = "Unit"
---   writeRealizedTermC (VarS v) = pretty v
---   writeRealizedTermC (AccS x k) = parens (writeRealizedTermG x) <> "@" <> pretty k
---   writeRealizedTermC (AppS x xs) = parens $ hsep (map writeRealizedTermG (x:xs))
---   writeRealizedTermC (LamS vs x) = parens $ "\\" <+> hsep (map pretty vs) <+> "->" <+> writeRealizedTermG x
---   writeRealizedTermC (LstS xs) = list $ map writeRealizedTermG xs
---   writeRealizedTermC (TupS xs) = tupled $ map writeRealizedTermG xs
---   writeRealizedTermC (NamS ks) = encloseSep "{" "}" "," [pretty k <+> "=" <+> writeRealizedTermG x | (k,x) <- ks]
---   writeRealizedTermC (RealS v) = viaShow v
---   writeRealizedTermC (IntS v) = pretty v
---   writeRealizedTermC (LogS v) = pretty v
---   writeRealizedTermC (StrS v) = dquotes (pretty v)
---   writeRealizedTermC (CallS src) = pretty src
---
---   writeRealizedTermG :: SAnno Int One (Indexed TypeP) -> MDoc
---   writeRealizedTermG (SAnno (One (e', t')) _) = parens (writeRealizedTermC e') <+> "::" <+> parens (pretty t')
+writeTypecheckOutput :: Int -> ((Either MorlocError [(Lang, [SerialManifold])], [MT.Text]), MorlocState) -> MDoc
+writeTypecheckOutput _ ((Left e, _), _) = pretty e
+writeTypecheckOutput _ ((Right pools, _), _) = vsep $ map (uncurry writePool) pools 
+
+writePool :: Lang -> [SerialManifold] -> MDoc
+writePool lang manifolds = pretty lang <+> "pool:" <> "\n" <> vsep (map pseudocodeSerialManifold manifolds) <> "\n"

@@ -40,6 +40,7 @@ module Morloc.CodeGenerator.Generate
 (
     realityCheck
   , generate
+  , generatePools
 ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -99,8 +100,15 @@ generate gASTs rASTs = do
   MM.startCounter
 
   -- for each language, collect all functions into one "pool"
-  pools
-    <- mapM applyLambdas rASTs   -- SAnno Int One (Indexed TypeP)
+  pools <- generatePools rASTs >>= mapM (uncurry encode)
+
+  return (nexus, pools)
+
+-- | Do everything except language specific code generation.
+generatePools :: [SAnno (Indexed Type) One (Indexed Lang)] -> MorlocMonad [(Lang, [SerialManifold])]
+generatePools rASTs = do
+  -- for each language, collect all functions into one "pool"
+  mapM applyLambdas rASTs
     -- thread arguments across the tree
     >>= mapM parameterize
     -- convert from AST to manifold tree
@@ -115,11 +123,8 @@ generate gASTs rASTs = do
     -- Gather segments into pools, currently this entails gathering all
     -- segments from a given language into one pool. Later it may be more
     -- nuanced.
-    |>> pool -- [SerialManifold]
-    -- Generate the code for each pool
-    >>= mapM (uncurry encode)    -- Script
+    |>> pool
 
-  return (nexus, pools)
 
 -- | Choose a single concrete implementation. In the future, this component
 -- may be one of the more complex components of the morloc compiler. It will

@@ -8,7 +8,8 @@ import Morloc.Namespace
 
 import qualified Morloc.Frontend.API as F
 import Morloc.Frontend.Desugar (desugar)
-import Morloc.CodeGenerator.Generate (generate, realityCheck)
+import Morloc.CodeGenerator.Generate (generate, generatePools, realityCheck)
+import Morloc.CodeGenerator.Namespace (SerialManifold)
 import Morloc.ProgramBuilder.Build (buildProgram)
 import Morloc.Frontend.Treeify (treeify)
 
@@ -30,15 +31,15 @@ typecheckFrontend path code
 typecheck
   :: Maybe Path
   -> Code
-  -> MorlocMonad ( [SAnno (Indexed Type) One ()]
-                 , [SAnno (Indexed Type) One (Indexed Lang)]
-                 )
+  -> MorlocMonad [(Lang, [SerialManifold])]
 typecheck path code
   = typecheckFrontend path code
   -- resolve all TypeU types to Type
   |>> map F.resolveTypes
   -- resolve all TypeU types to Type
   >>= realityCheck
+  -- generate the language specific pools
+  >>= (generatePools . snd)
 
 -- | Build a program as a local executable
 writeProgram ::
@@ -46,7 +47,11 @@ writeProgram ::
   -> Code       -- ^ source code text
   -> MorlocMonad ()
 writeProgram path code
-  = typecheck path code
+  = typecheckFrontend path code
+  -- resolve all TypeU types to Type
+  |>> map F.resolveTypes
+  -- resolve all TypeU types to Type
+  >>= realityCheck
   -- prepare scripts
   >>= uncurry generate
   -- (Script, [Script]) -> IO ()
