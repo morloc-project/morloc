@@ -31,6 +31,7 @@ module Morloc.Namespace
   , MVar(..)
   , EVar(..)
   , TVar(..)
+  , CVar(..)
   , Key(..)
   , Label(..)
   , SrcName(..)
@@ -122,7 +123,7 @@ type MDoc = Doc ()
 -- has cycles.
 type DAG key edge node = Map key (node, [(key, edge)])
 
-type Scope = Map TVar [([TVar], TypeU)]
+type Scope = Map TVar [([TVar], TypeU, Bool)]
 
 data GMap a b c = GMap (Map a b) (Map b c)
   deriving(Show, Ord, Eq)
@@ -258,9 +259,10 @@ data ExprI = ExprI Int Expr
 data Expr
   = ModE MVar [ExprI]
   -- ^ the toplevel expression in a module
-  | TypE (Maybe Lang) TVar [TVar] TypeU
+  | TypE (Maybe (Lang, Bool)) TVar [TVar] TypeU
   -- ^ a type definition
   --   1. the language, Nothing is general
+  --      If Just, the Bool specifies whether the definition is terminal
   --   2. type name
   --   3. parameters
   --   4. type
@@ -427,6 +429,7 @@ data MorlocError
   | TooManyRealizations
   | MissingSource
   -- type extension errors
+  | UndefinedType TVar
   | AmbiguousPacker Text
   | AmbiguousUnpacker Text
   | AmbiguousCast Text Text
@@ -504,8 +507,11 @@ newtype MVar = MV { unMVar :: Text } deriving (Show, Eq, Ord)
 -- A term name
 newtype EVar = EV { unEVar :: Text } deriving (Show, Eq, Ord)
 
--- A type name
+-- A type general name
 newtype TVar = TV { unTVar :: Text } deriving (Show, Eq, Ord)
+
+-- A concrete type name
+newtype CVar = CV { unCVar :: Text } deriving (Show, Eq, Ord)
 
 newtype Key = Key { unKey :: Text } deriving (Show, Eq, Ord)
 

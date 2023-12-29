@@ -1,4 +1,5 @@
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {-|
 Module      : Morloc.CodeGenerator.Infer
@@ -19,6 +20,7 @@ import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Frontend.Desugar as MFD
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
+import Morloc.Data.Doc
 import qualified Data.Map as Map
 import qualified Control.Monad.State as CMS
 
@@ -33,9 +35,12 @@ getConcreteMap i lang = do
 
 inferConcreteType :: Scope -> Type -> MorlocMonad TypeF
 inferConcreteType scope (type2typeu -> t) =
-  case MFD.evaluateType scope t of
+  case MFD.transformType scope t of
     (Left e) -> MM.throwError e
-    (Right tu) -> weave t tu
+    (Right tu) -> do
+      ft <- weave t tu
+      MM.sayVVV $ "weaving" <+> pretty t <+> "and" <+> pretty tu <+> "into" <+> pretty ft <+> "in scope" <+> pretty (show scope)
+      return ft
 
 weave :: TypeU -> TypeU -> MorlocMonad TypeF
 weave (VarU v1) (VarU (TV v2)) = return $ VarF (FV v1 (CV v2))
@@ -51,5 +56,6 @@ weave _ _ = undefined
 
 inferConcreteVar :: Scope -> TVar -> FVar
 inferConcreteVar scope gv = case Map.lookup gv scope of
-  (Just ((_, t):_)) -> FV gv (CV . unTVar $ extractKey t)
+  (Just ((_, t, True):_)) -> FV gv (CV . unTVar $ extractKey t)
+  (Just ((_, t, False):_)) -> error $ "Substituting the non-terminal " <> show (extractKey t) <> " into type " <> show t
   _ -> error $ "Concrete type var inference error for " <> show gv <> " in scope " <> show scope

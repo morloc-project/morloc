@@ -318,7 +318,7 @@ metaMogrifiers i lang = do
 
 -- | This is currently only used in the C++ translator.
 -- FIXME: should a term be allowed to have multiple type definitions within a language?
-metaTypedefs :: Int -> Lang -> MorlocMonad (Map.Map TVar ([TVar], TypeU))
+metaTypedefs :: Int -> Lang -> MorlocMonad (Map.Map TVar ([TVar], TypeU, Bool))
 metaTypedefs i lang = do
     p <- gets stateConcreteTypedefs
 

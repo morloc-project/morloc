@@ -82,6 +82,9 @@ instance Pretty MorlocError where
     = "Error ConflictingPackers:"
     <> "\n  t1:" <+> pretty t1
     <> "\n  t2:" <+> pretty t2
+  pretty (UndefinedType v)
+    =  "UndefinedType: could not resolve type" <+> squotes (pretty v)
+    <> ". You may be missing a language-specific type definition."
   pretty (AmbiguousPacker _) = "AmbiguousPacker"
   pretty (AmbiguousUnpacker _) = "AmbiguousUnpacker"
   pretty (AmbiguousCast _ _) = "AmbiguousCast"

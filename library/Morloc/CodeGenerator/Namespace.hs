@@ -20,7 +20,6 @@ module Morloc.CodeGenerator.Namespace
   , TypeF(..)
   , TypeS(..)
   , FVar(..)
-  , CVar(..)
   -- ** Typeclasses
   , HasTypeF(..)
   , MayHaveTypeF(..)
@@ -116,10 +115,7 @@ import Data.Scientific (Scientific)
 import Data.Text (Text)
 import Morloc.Data.Doc
 import Morloc.Pretty ()
-import Data.Map (Map)
 import Control.Monad.Identity (runIdentity)
-
-newtype CVar = CV { unCVar :: Text } deriving (Show, Eq, Ord)
 
 -- The final types used in code generation. The language annotation is removed,
 -- since the language for all types within a pool are the same.

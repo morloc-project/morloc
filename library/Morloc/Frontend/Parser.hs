@@ -266,25 +266,52 @@ pImport = do
 pTypedef :: Parser ExprI
 pTypedef = try pTypedefType <|> pTypedefObject where
 
+  pConcreteType = do
+    t <- pTypeCon
+    return (t, True)
+
+  pConcreteVar = do
+    v <- stringLiteral
+    return (v, True)
+
+  pGeneralType = do
+    t <- pType 
+    return (t, False)
+
+  pGeneralVar = do
+    v <- freename
+    return (v, False)
+
   pTypedefType :: Parser ExprI
   pTypedefType = do
     _ <- reserved "type"
-    lang <- optional (try pLangNamespace)
+    mayLang <- optional (try pLangNamespace)
     (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
     _ <- symbol "="
-    t <- pType
-    exprI (TypE lang v vs t)
+    case mayLang of
+      (Just lang) -> do
+        (t, isTerminal) <- pConcreteType <|> pGeneralType
+        exprI (TypE (Just (lang, isTerminal)) v vs t)
+      Nothing -> do
+        t <- pType
+        exprI (TypE Nothing v vs t)
 
   pTypedefObject :: Parser ExprI
   pTypedefObject = do
     o <- pNamType
-    lang <- optional (try pLangNamespace)
+    mayLang <- optional (try pLangNamespace)
     (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
     _ <- symbol "="
-    constructor <- freename <|> stringLiteral
+    (con, k) <- case mayLang of
+      (Just lang) -> do
+        (constructor, isTerminal) <- pConcreteVar <|> pGeneralVar
+        return (constructor, Just (lang, isTerminal))
+      Nothing -> do
+        constructor <- freename
+        return (constructor, Nothing)
     entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries o)
-    let t = NamU o (TV constructor) (map VarU vs) (map (first Key) entries)
-    exprI (TypE lang v vs t)
+    let t = NamU o (TV con) (map VarU vs) (map (first Key) entries)
+    exprI (TypE k v vs t)
 
   -- TODO: is this really the right place to be doing this?
   desugarTableEntries
@@ -557,6 +584,24 @@ pTypeGen = do
     forallWrap [] t = t
     forallWrap (v:vs) t = ForallU v (forallWrap vs t)
 
+pTypeCon :: Parser TypeU
+pTypeCon = try pAppUCon <|> pVarUCon
+
+pAppUCon :: Parser TypeU
+pAppUCon = do
+  t <- pVarUCon
+  args <- many1 pType'
+  return $ AppU t args
+  where
+    pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU
+
+pVarUCon :: Parser TypeU
+pVarUCon = VarU <$> pTermCon
+
+pTermCon :: Parser TVar
+pTermCon = do
+  _ <- tag stringLiteral
+  TV <$> stringLiteral
 
 pType :: Parser TypeU
 pType =
@@ -623,15 +668,8 @@ pVarU :: Parser TypeU
 pVarU = VarU <$> pTerm
 
 pTerm :: Parser TVar
-pTerm = try pVarConU <|> pVarGenU where
-  pVarConU :: Parser TVar
-  pVarConU = do
-    _ <- tag stringLiteral
-    TV <$> stringLiteral
-
-  pVarGenU :: Parser TVar
-  pVarGenU = do
-    _ <- tag freename
-    t <- TV <$> freename
-    appendGenerics t  -- add the term to the generic list IF generic
-    return t
+pTerm = do
+  _ <- tag freename
+  t <- TV <$> freename
+  appendGenerics t  -- add the term to the generic list IF generic
+  return t

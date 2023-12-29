@@ -9,7 +9,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Frontend.Desugar (desugar, evaluateType, evaluateEType) where
+module Morloc.Frontend.Desugar (desugar, evaluateType, evaluateEType, transformType) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Pretty ()
@@ -130,9 +130,7 @@ resolveImports = MDD.mapEdgeWithNodeAndKeyM resolveImport where
   toAliasedSymbol (TermSymbol x) = AliasedTerm x x
 
 
-type GCMap = (               Map.Map TVar [([TVar], TypeU)]  -- child general map
-             , Map.Map Lang (Map.Map TVar [([TVar], TypeU)]) -- child concrete ap
-             )
+type GCMap = (Scope, Map.Map Lang Scope)
 
 collectTypes :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTypes fullDag = do
@@ -174,34 +172,32 @@ collectTypes fullDag = do
        )
 
 -- merge type functions, names of generics do not matter
-mergeEntries :: [([TVar], TypeU)] -> [([TVar], TypeU)] -> [([TVar], TypeU)]
+mergeEntries :: [([TVar], TypeU, Bool)] -> [([TVar], TypeU, Bool)] -> [([TVar], TypeU, Bool)]
 mergeEntries xs0 ys0 = filter (isNovel ys0) xs0 <> ys0
   where
-  isNovel :: [([TVar], TypeU)] -> ([TVar], TypeU) -> Bool
+  isNovel :: [([TVar], TypeU, Bool)] -> ([TVar], TypeU, Bool) -> Bool
   isNovel [] _ =  True
-  isNovel ((vs2, t2):ys) x@(vs1, t1)
+  isNovel ((vs2, t2, isTerminal1):ys) x@(vs1, t1, isTerminal2)
     | length vs1 == length vs2 &&
-      t1 == foldl (\t (v1, v2) -> rename v2 v1 t) t2 (zip vs1 vs2) = False
+      t1 == foldl (\t (v1, v2) -> rename v2 v1 t) t2 (zip vs1 vs2) &&
+      isTerminal1 == isTerminal2 = False
     | otherwise = isNovel ys x
 
 -- clean imports
 --   * only keep the exports of a module that are explicitly imported
 --   * resolve any aliases
-filterAndSubstitute
-  :: [(TVar, TVar)]
-  -> Map.Map TVar [([TVar], TypeU)]
-  -> Map.Map TVar [([TVar], TypeU)]
+filterAndSubstitute :: [(TVar, TVar)] -> Scope -> Scope
 filterAndSubstitute links typemap =
   let importedTypes = Map.filterWithKey (\k _ -> k `elem` map fst links) typemap
   in foldl typeSubstitute importedTypes links
   where
   typeSubstitute
-    :: Map.Map TVar [([TVar], TypeU)] -- imported map
+    :: Scope -- imported map
     -> (TVar, TVar) -- source name and local alias
-    -> Map.Map TVar [([TVar], TypeU)] -- renamed map
+    -> Scope -- renamed map
   typeSubstitute typedefs (sourceName, localAlias)
     = case Map.lookup sourceName typedefs of
-      (Just xs) -> Map.insert localAlias (map (second (rename sourceName localAlias)) xs) (Map.delete sourceName typedefs)
+      (Just xs) -> Map.insert localAlias (map (\(a,b,c) -> (a, rename sourceName localAlias b, c)) xs) (Map.delete sourceName typedefs)
       Nothing -> typedefs
 
 
@@ -308,27 +304,29 @@ rename sourceName localAlias = f where
   f (NamU o v ts rs) = NamU o v (map f ts) (map (second f) rs)
 
 
-evaluateEType :: Map.Map TVar [([TVar], TypeU)] -> EType -> Either MorlocError EType
+evaluateEType :: Scope -> EType -> Either MorlocError EType
 evaluateEType h (EType t ps cs) = EType <$> evaluateType h t <*> pure ps <*> pure cs
 
+transformType :: Scope -> TypeU -> Either MorlocError TypeU
+transformType = evaluateOrTransformType True
 
-evaluateType
-  :: Map.Map TVar [([TVar], TypeU)]
-  -> TypeU
-  -> Either MorlocError TypeU
-evaluateType h = f Set.empty
+evaluateType :: Scope -> TypeU -> Either MorlocError TypeU
+evaluateType = evaluateOrTransformType False
+
+evaluateOrTransformType :: Bool -> Scope -> TypeU -> Either MorlocError TypeU
+evaluateOrTransformType forceEval h = f Set.empty
   where
 
   f :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
   f bnd (ExistU v ps rs) = do
     ps' <- mapM (f bnd) ps
-    rs' <- mapM (\(k,v) -> (,) k <$> f bnd v) rs
+    rs' <- mapM (\(k, v') -> (,) k <$> f bnd v') rs
     return $ ExistU v ps' rs'
   f bnd (FunU ts t) = FunU <$> mapM (f bnd) ts <*> f bnd t
   f bnd (NamU o n ps rs) = do
     (n', o') <- case Map.lookup n h of
         -- If the record type itself is aliased, substitute the name and record form
-        (Just [(_, NamU o'' n'' _ _)]) -> return (n'', o'')
+        (Just [(_, NamU o'' n'' _ _, _)]) -> return (n'', o'')
         -- Otherwise, keep the record name and form and recurse only into children
         _ -> return (n, o)
     ts <- mapM (f bnd . snd) rs
@@ -344,19 +342,22 @@ evaluateType h = f Set.empty
   -- f :: Foo Int -> B
   -- -----------------
   -- f :: (Int, A) -> B
-  --
   f bnd (AppU (VarU v) ts)
     | Set.member v bnd = AppU (VarU v) <$> mapM (f bnd) ts
     | otherwise =
         case Map.lookup v h of
           (Just (t':ts')) -> do
-            (vs, t) <- foldlM (mergeAliases v (length ts)) t' ts' |>> renameTypedefs bnd
-            if length ts == length vs
-              -- substitute parameters into alias
-              then f bnd (foldr parsub t (zip vs ts))
-              else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
-          -- default types like "Int" or "Tuple2" won't be in the map
-          _ -> AppU (VarU v) <$> mapM (f bnd) ts
+            (vs, t, isTerminal) <- foldlM (mergeAliases v (length ts)) t' ts' |>> renameTypedefs bnd
+            case (length ts == length vs, isTerminal && forceEval) of
+              -- non-equal number of type parameters
+              (False, _) -> MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
+              -- reached a terminal type (e.g. `"vector<$1,$2>" a b`)
+              (_, True ) -> foldr parsub t . zip vs <$> mapM (f bnd) ts
+              -- substitute the head term and re-evaluate
+              (_, False) -> f bnd (foldr parsub t (zip vs ts))
+          _ -> if forceEval
+                 then MM.throwError $ UndefinedType v
+                 else AppU (VarU v) <$> mapM (f bnd) ts
 
   -- Can only apply VarU? Will need to fix this when we get lambdas.
   f _ (AppU _ _) = undefined
@@ -371,29 +372,34 @@ evaluateType h = f Set.empty
      case Map.lookup v h of
       (Just []) -> return t0
       (Just ts1@(t1:_)) -> do
-        (_, t2) <- foldlM (mergeAliases v 0) t1 ts1
-        f bnd t2
-      Nothing -> return t0
+        (_, t2, isTerminal) <- foldlM (mergeAliases v 0) t1 ts1
+        if forceEval && isTerminal
+          then return t2
+          else f bnd t2
+      Nothing ->
+        if forceEval
+          then MM.throwError $ UndefinedType v
+          else return t0
 
   f bnd (ForallU v t) = ForallU v <$> f (Set.insert v bnd) t
 
-  renameTypedefs :: Set.Set TVar -> ([TVar], TypeU) -> ([TVar], TypeU)
-  renameTypedefs _ ([], t) = ([], t)
-  renameTypedefs bnd (v@(TV x) : vs, t)
+  renameTypedefs :: Set.Set TVar -> ([TVar], TypeU, Bool) -> ([TVar], TypeU, Bool)
+  renameTypedefs _ ([], t, isTerminal) = ([], t, isTerminal)
+  renameTypedefs bnd (v@(TV x) : vs, t, isTerminal)
     | Set.member v bnd =
-        let (vs', t') = renameTypedefs bnd (vs, t)
-            v' = head [x' | x' <- [TV (MT.show' i <> x) | i <- [0..]], not (Set.member x' bnd), not (elem x' vs')]  
+        let (vs', t', isTerminal') = renameTypedefs bnd (vs, t, isTerminal)
+            v' = head [x' | x' <- [TV (MT.show' i <> x) | i <- [0..]], not (Set.member x' bnd), x' `notElem` vs']  
             t'' = substituteTVar v (VarU v') t'
-        in (v':vs', t'')
-    | otherwise = 
-        let (vs', t') = renameTypedefs bnd (vs, t)
-        in (v:vs', t')
+        in (v':vs', t'', isTerminal')
+    | otherwise =
+        let (vs', t', isTerminal') = renameTypedefs bnd (vs, t, isTerminal)
+        in (v:vs', t', isTerminal')
 
   parsub :: (TVar, TypeU) -> TypeU -> TypeU
   parsub (v, t2) t1@(VarU v0)
     | v0 == v = t2 -- substitute
     | otherwise = t1 -- keep the original
-  parsub _ (ExistU _ _ _) = error "What the bloody hell is an existential doing down here?"
+  parsub _ ExistU{} = error "What the bloody hell is an existential doing down here?"
   parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
   parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
   parsub pair (AppU t ts) = AppU (parsub pair t) (map (parsub pair) ts)
@@ -404,14 +410,15 @@ evaluateType h = f Set.empty
   mergeAliases
     :: TVar
     -> Int
-    -> ([TVar], TypeU)
-    -> ([TVar], TypeU)
-    -> Either MorlocError ([TVar], TypeU)
-  mergeAliases v i t@(ts1, t1) (ts2, t2)
+    -> ([TVar], TypeU, Bool)
+    -> ([TVar], TypeU, Bool)
+    -> Either MorlocError ([TVar], TypeU, Bool)
+  mergeAliases v i t@(ts1, t1, isTerminal1) (ts2, t2, isTerminal2)
     | i /= length ts1 = MM.throwError $ BadTypeAliasParameters v i (length ts1)
     |    MTP.isSubtypeOf t1' t2'
       && MTP.isSubtypeOf t2' t1'
-      && length ts1 == length ts2 = return t
+      && length ts1 == length ts2
+      && isTerminal1 == isTerminal2 = return t
     | otherwise = MM.throwError (ConflictingTypeAliases (unresolvedType2type t1) (unresolvedType2type t2))
     where
       t1' = foldl (flip ForallU) t1 ts1

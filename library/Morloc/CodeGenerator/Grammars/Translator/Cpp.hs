@@ -750,9 +750,9 @@ generateSourcedSerializers es0 = do
     groupQuad :: ([a],[a]) -> (a, a, a, a) -> ([a],[a])
     groupQuad (xs,ys) (x1, y1, x2, y2) = (x1:x2:xs, y1:y2:ys)
 
-    makeSerial :: TVar -> ([TVar], TypeU) -> Maybe (MDoc, MDoc, MDoc, MDoc)
-    makeSerial _ (_, NamU _ (TV "struct") _ _) = Nothing
-    makeSerial _ (ps, NamU r (TV v) _ rs)
+    makeSerial :: TVar -> ([TVar], TypeU, Bool) -> Maybe (MDoc, MDoc, MDoc, MDoc)
+    makeSerial _ (_, NamU _ (TV "struct") _ _, _) = Nothing
+    makeSerial _ (ps, NamU r (TV v) _ rs, _)
       = Just (serialDecl, serializer, deserialDecl, deserializer) where
 
         templateTerms = ["T" <> pretty p | p <- ps]
