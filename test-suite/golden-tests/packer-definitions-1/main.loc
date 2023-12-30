@@ -2,8 +2,8 @@ module m (foo)
 
 source Py from "foo.py"
   ( "foo"
-  , "packJsonObj" as packJsonObj
-  , "unpackJsonObj" as unpackJsonObj
+  , "packJsonObj"
+  , "unpackJsonObj"
   )
 
 foo :: Str -> JsonObj

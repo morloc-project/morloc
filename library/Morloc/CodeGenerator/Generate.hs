@@ -1172,17 +1172,14 @@ bindVarIds _ [] = error "bindVarIds: too few types"
 
 segment :: PolyHead -> MorlocMonad [MonoHead]
 segment (PolyHead lang m0 args0 e0) = do
-  (heads, (Just lang', topExpr)) <- segmentExpr m0 (map ann args0) e0
+  (heads, (_, topExpr)) <- segmentExpr m0 (map ann args0) e0
 
   MM.sayVVV $ "segmentation complete"
   MM.sayVVV $ "topExpr language:" <+> pretty lang
   MM.sayVVV $ "topExpr: " <+> pretty topExpr
   MM.sayVVV $ "heads:" <+> list (map pretty heads)
-
   
-  if lang' == lang
-    then return (MonoHead lang m0 args0 topExpr : heads)
-    else error "Bad langs"
+  return (MonoHead lang m0 args0 topExpr : heads)
 
 segmentExpr
   :: Int -- manifold index

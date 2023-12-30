@@ -132,7 +132,7 @@ makeSerialAST m lang t0 = do
           Nothing ->  serializerError $ "Cannot find constructor in VarF" <+> dquotes (pretty v)
       where
         makeTypePacker :: ([TVar], TypeU, TypeU, Source, Source) -> MorlocMonad TypePacker
-        makeTypePacker ([], generalPackedType, generalUnpackedType, forwardSource, reverseSource) = do
+        makeTypePacker ([], generalUnpackedType, generalPackedType, forwardSource, reverseSource) = do
           scope <- getConcreteMap m lang
           packedType <- inferConcreteType scope (typeOf generalPackedType)
           unpackedType <- inferConcreteType scope (typeOf generalUnpackedType)
