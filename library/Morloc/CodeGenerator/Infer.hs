@@ -29,9 +29,15 @@ getConcreteMap i lang = do
   globalMap <- CMS.gets stateConcreteTypedefs
   case GMap.lookup i globalMap of
     GMapJust langmap -> case Map.lookup lang langmap of
-      (Just typemap) -> return typemap
-      Nothing -> return Map.empty
-    _ -> return Map.empty
+      (Just typemap) -> do
+        MM.sayVVV $ "looking up concrete map for index" <+> pretty i <+> "and found scope:" <+> viaShow typemap
+        return typemap
+      Nothing -> do
+        MM.sayVVV $ "looking up concrete map for index" <+> pretty i <+> "and found nothing"
+        return Map.empty
+    _ -> do
+      MM.sayVVV $ "Could not find a typedef map for index" <+> pretty i
+      return Map.empty
 
 inferConcreteType :: Scope -> Type -> MorlocMonad TypeF
 inferConcreteType scope (type2typeu -> t) =

@@ -80,8 +80,8 @@ insertMany ks k2 x (GMap m1 m2) = GMap m1' m2' where
 -- | Given `yIsX gmap x y`, the value `y` points to will be replaced with the
 -- value `x` points to. If `x` is not in `gmap`, then Nothing is returned. If
 -- `y` is in `gmap`, its previous link is silently lost.
-yIsX :: (Ord a) => GMap a b c -> a -> a -> Maybe (GMap a b c)
-yIsX (GMap m x) oldKey newKey = do
+yIsX :: (Ord a) => a -> a -> GMap a b c -> Maybe (GMap a b c)
+yIsX  oldKey newKey (GMap m x) = do
   i <- Map.lookup oldKey m
   return (GMap (Map.insert newKey i m) x)
 

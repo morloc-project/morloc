@@ -427,13 +427,15 @@ replaceExpr i e@(ExprI j (VarE _)) = do
     (Just m) -> MM.modify (\s -> s {stateSignatures = m})
     _ -> error "impossible"
 
-  case GMap.yIsX (stateSignatures st) j i of
+  case GMap.yIsX j i (stateSignatures st) of
     (Just m) -> MM.put (st {stateSignatures = m})
     Nothing -> return ()
 
   -- pass on just the children
   case x of
     (SAnno (Many es) _) -> return es
+
+
 -- -- two terms may also be equivalent when applied, for example:
 -- --   foo x = bar x
 -- -- this would be rewritten in the parse as `foo = \x -> bar x`
