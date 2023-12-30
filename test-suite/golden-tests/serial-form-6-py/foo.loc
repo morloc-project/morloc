@@ -1,10 +1,10 @@
 module main (foo)
 
-import conventions (Int,Str)
+import conventions (Int, Str, List)
 import pybase (id)
 
 record (Person a) = Person {name :: Str, info :: a}
-record py (Person a) = "dict" {name :: Str, info :: a}
+record py => (Person a) = "dict" {name :: Str, info :: a}
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.

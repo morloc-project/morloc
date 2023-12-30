@@ -13,6 +13,7 @@ Stability   : experimental
 module Morloc.CodeGenerator.Infer
   ( getConcreteMap
   , inferConcreteType
+  , inferConcreteTypeU
   , inferConcreteVar
   ) where
 
@@ -39,14 +40,16 @@ getConcreteMap i lang = do
       MM.sayVVV $ "Could not find a typedef map for index" <+> pretty i
       return Map.empty
 
-inferConcreteType :: Scope -> Type -> MorlocMonad TypeF
-inferConcreteType scope (type2typeu -> t) =
+inferConcreteTypeU :: Scope -> TypeU -> MorlocMonad TypeU
+inferConcreteTypeU scope t =
   case MFD.transformType scope t of
     (Left e) -> MM.throwError e
-    (Right tu) -> do
-      ft <- weave t tu
-      MM.sayVVV $ "weaving" <+> pretty t <+> "and" <+> pretty tu <+> "into" <+> pretty ft <+> "in scope" <+> pretty (show scope)
-      return ft
+    (Right tu) -> return tu
+
+inferConcreteType :: Scope -> Type -> MorlocMonad TypeF
+inferConcreteType scope (type2typeu -> t) = do
+  tu <- inferConcreteTypeU scope t
+  weave t tu
 
 weave :: TypeU -> TypeU -> MorlocMonad TypeF
 weave (VarU v1) (VarU (TV v2)) = return $ VarF (FV v1 (CV v2))
