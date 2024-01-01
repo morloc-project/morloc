@@ -870,7 +870,7 @@ expressPolyExpr parentLang pc
       -- 6. Fold let statements over local manifold
 
       -- evaluate arguments and derive any required let bindings
-      xsInfo <- mapM (partialExpress parentLang) xs
+      xsInfo <- mapM (partialExpress callLang) xs
 
       let xs' = map (\(_, _, e) -> e) xsInfo
           -- rs: the list of arguments (by index) required by a single expression
