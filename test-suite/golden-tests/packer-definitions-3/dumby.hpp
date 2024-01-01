@@ -6,7 +6,7 @@
 
 // h :: (l -> (Str, l')) -> Str -> Real
 template <class L1, class L2>
-double h(std::function<> f, std::string x){
+double h(std::function<L2(L1)> f, std::string x){
   return 4.2;
 }
 

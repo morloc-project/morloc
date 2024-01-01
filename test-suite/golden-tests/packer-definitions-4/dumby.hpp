@@ -3,7 +3,7 @@
 
 // fcpp :: Real -> Real
 double fcpp(double x){
-  return (2*x)
+  return (2*x);
 }
 
 #endif

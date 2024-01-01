@@ -697,21 +697,22 @@ express (SAnno (One (CallS src, (Idx _ lang, _))) (Idx m c@(FunT inputs _))) = d
 -- application.
 -- ----
 -- lambda
-express (SAnno (One (LamS _ (SAnno (One (x, (c, _))) _), (_, lambdaArgs))) lambdaType) = do
-  MM.sayVVV "express LamS"
-  express (SAnno (One (x, (c, lambdaArgs))) lambdaType)
+express (SAnno (One (LamS _ (SAnno (One (x, (c, _))) (Idx _ applicationType)), (_, lambdaArgs))) (Idx lambdaIndex _)) = do
+  MM.sayVVV "express LamS:"
+  express (SAnno (One (x, (c, lambdaArgs))) (Idx lambdaIndex applicationType))
 
 express (SAnno (One (LstS xs, (Idx _ lang, args))) (Idx m (AppT (VarT v) [t]))) = do
   xs' <- mapM (expressPolyExpr lang t) xs
   let x = PolyList v t xs'
   return $ PolyHead lang m [Arg i None | Arg i _ <- args] (PolyReturn x)
-express (SAnno (One (LstS _, _)) _) = error "Invalid list form"
+express (SAnno (One (LstS _, _)) (Idx _ t)) = error $ "Invalid list form: " <> show t
 
-express (SAnno (One (TupS xs, (Idx _ lang, args))) (Idx m (AppT (VarT v) ts))) = do
+express (SAnno (One (TupS xs, (Idx _ lang, args))) t@(Idx m (AppT (VarT v) ts))) = do
+  MM.sayVVV $ "express TupS:" <+> pretty t
   xs' <- fromJust <$> safeZipWithM (expressPolyExpr lang) ts xs
   let x = PolyTuple v (fromJust $ safeZip ts xs')
   return $ PolyHead lang m [Arg i None | Arg i _ <- args] (PolyReturn x)
-express (SAnno (One (TupS _, _)) _) = error "Invalid tuple form"
+express (SAnno (One (TupS _, _)) g) = error $ "Invalid tuple form: " <> show g
 
 -- records
 express (SAnno (One (NamS entries, (Idx _ lang, args))) (Idx m (NamT o v ps rs))) = do
@@ -952,6 +953,8 @@ expressPolyExpr parentLang pc
 
 
 expressPolyExpr _ _ (SAnno (One (LamS vs body, (Idx _ lang, manifoldArguments))) (Idx m lambdaType)) = do
+    MM.sayVVV $ "expressPolyExpr LamS:" <+> pretty lambdaType
+
     body' <- expressPolyExpr lang lambdaType body
 
     inputTypes <- case lambdaType of
