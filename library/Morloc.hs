@@ -7,7 +7,7 @@ module Morloc
 import Morloc.Namespace
 
 import qualified Morloc.Frontend.API as F
-import Morloc.Frontend.Desugar (desugar)
+import Morloc.Frontend.Restructure (restructure)
 import Morloc.CodeGenerator.Generate (generate, generatePools, realityCheck)
 import Morloc.CodeGenerator.Namespace (SerialManifold)
 import Morloc.ProgramBuilder.Build (buildProgram)
@@ -22,7 +22,7 @@ typecheckFrontend path code
   -- parse code into unannotated modules
   = F.parse path code
   -- resolve type aliases and such
-  >>= desugar
+  >>= restructure
   -- convert to Sanno
   >>= treeify
   -- add type annotations to sub-expressions and raise type errors

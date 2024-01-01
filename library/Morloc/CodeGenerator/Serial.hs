@@ -98,6 +98,9 @@ makeSerialAST m lang t0 = do
   packs   <- MM.metaMogrifiers m lang |>> Map.lookup Pack   |>> fromMaybe [] |>> map (first unqualify)
   unpacks <- MM.metaMogrifiers m lang |>> Map.lookup Unpack |>> fromMaybe [] |>> map (first unqualify)
 
+  MM.sayVVV $ "packs:" <+> viaShow packs
+  MM.sayVVV $ "unpacks:" <+> viaShow unpacks
+
   -- Map TVar ((TypeU, Source), (TypeU, Source))
   let typepackers = Map.fromListWith (<>) [ (extractKey b1, [(length vs1, qualify vs1 a1, qualify vs1 b1, src1, src2)])
                                           | ((vs1, FunU [a1] b1), src1) <- packs
@@ -208,7 +211,7 @@ resolvePacker scope resolvedType@(AppF _ xs) (nparam, unpackedGeneralType, packe
   where
     -- Both sides of the packer function are guaranteed to have the same
     -- generic values, this is guaranteed by the implementation of
-    -- Desugar.hs. So it is sufficient to resolve the generics in the packed
+    -- Restructure.hs. So it is sufficient to resolve the generics in the packed
     -- type and map them to the unpacked type.
     --
     -- Example:
@@ -224,7 +227,7 @@ resolvePacker scope resolvedType@(AppF _ xs) (nparam, unpackedGeneralType, packe
     --
     -- y_u is the unresolved unpacked type that is extracted with x_u
     --
-    -- y_u and y_r are both processed by Desugar.hs and are both guaranteed
+    -- y_u and y_r are both processed by Restructure.hs and are both guaranteed
     -- to share the same set of generics. We can find the identity of these
     -- generics by subtyping x_u against x_y. The produced context contains
     -- the types for each generic variable. The context can be applied to

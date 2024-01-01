@@ -18,7 +18,7 @@ import Morloc.Data.Doc
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
-import qualified Morloc.Frontend.Desugar as MFD
+import qualified Morloc.TypeEval as T
 
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
@@ -546,7 +546,7 @@ evaluateSAnnoTypes = mapSAnnoM resolve return where
   resolve :: Indexed TypeU -> MorlocMonad (Indexed TypeU)
   resolve (Idx m t) = do
     scope <- getScope m
-    case MFD.evaluateType scope t of
+    case T.evaluateType scope t of
       (Left e) -> MM.throwError e
       (Right tu) -> return (Idx m tu)
 

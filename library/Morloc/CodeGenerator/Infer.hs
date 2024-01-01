@@ -18,7 +18,7 @@ module Morloc.CodeGenerator.Infer
   ) where
 
 import Morloc.CodeGenerator.Namespace
-import qualified Morloc.Frontend.Desugar as MFD
+import qualified Morloc.TypeEval as T
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
 import Morloc.Data.Doc
@@ -57,7 +57,7 @@ inferConcreteTypeU :: (Scope, Scope) -> TypeU -> MorlocMonad TypeU
 inferConcreteTypeU (cscope, gscope) t = do
   MM.sayVVV $ "cscope:" <+> viaShow cscope
   MM.sayVVV $ "gscope:" <+> viaShow gscope
-  case MFD.pairEval cscope gscope t of
+  case T.pairEval cscope gscope t of
     (Left e) -> MM.throwError e
     (Right tu) -> return tu
 
@@ -79,7 +79,7 @@ weave gscope = w where
         <$> zipWithM w ts1 ts2
         <*> zipWithM (\ (_, t1) (k2, t2) -> (,) k2 <$> w t1 t2) rs1 rs2
     | otherwise = error $ "failed to weave: " <> "\n  t1: " <> show t1 <> "\n  t2: " <> show t2
-  w t1 t2 = case MFD.evaluateStep gscope t1 of
+  w t1 t2 = case T.evaluateStep gscope t1 of
     Nothing -> error $ "failed to weave: " <> "\n  t1: " <> show t1 <> "\n  t2: " <> show t2
     (Just t1') -> if t1 == t1'
       then error "failed to weave"
