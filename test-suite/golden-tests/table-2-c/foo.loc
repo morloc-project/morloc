@@ -1,6 +1,6 @@
 module main (foo)
 
-import conventions (Str, Int)
+import conventions (Str, Int, List)
 import cppbase (id)
 
 source Cpp from "person.h" ("PersonYay")

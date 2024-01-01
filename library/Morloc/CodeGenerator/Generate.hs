@@ -1262,7 +1262,7 @@ segmentExpr _ _ (PolyNull v)    = return ([], (Nothing, MonoNull v))
 -- serialization states of arguments and variables.
 serialize :: MonoHead -> MorlocMonad SerialManifold
 serialize (MonoHead lang m0 args0 e0) = do
-  scope <- getConcreteMap m0 lang
+  scope <- getScope m0 lang
 
   form0 <- ManifoldFull <$> mapM (prepareArg scope) args0
 
@@ -1279,7 +1279,7 @@ serialize (MonoHead lang m0 args0 e0) = do
   typemap = makeTypemap e0
 
   prepareArg
-    :: Scope
+    :: (Scope, Scope)
     -> Arg None
     -> MorlocMonad (Arg (Or TypeS TypeF))
   prepareArg scope (Arg i _) = case Map.lookup i typemap of
@@ -1289,7 +1289,7 @@ serialize (MonoHead lang m0 args0 e0) = do
       return $ Arg i (L (typeSof t'))
 
   contextArg
-    :: Scope
+    :: (Scope, Scope)
     -> Int
     -> MorlocMonad (Or TypeS TypeF)
   contextArg scope i = case Map.lookup i typemap of
@@ -1299,7 +1299,7 @@ serialize (MonoHead lang m0 args0 e0) = do
     Nothing -> return $ L PassthroughS
 
   boundArg
-    :: Scope
+    :: (Scope, Scope)
     -> Int
     -> MorlocMonad TypeF
   boundArg scope i = case Map.lookup i typemap of
@@ -1308,11 +1308,11 @@ serialize (MonoHead lang m0 args0 e0) = do
 
   serialExpr
     :: Int
-    -> Scope
+    -> (Scope, Scope)
     -> MonoExpr
     -> MorlocMonad SerialExpr
   serialExpr _ _ (MonoManifold m _ e) = do
-    scope <- getConcreteMap m lang
+    scope <- getScope m lang
     serialExpr m scope e
   serialExpr m scope (MonoLet i e1 e2) = case inferState e1 of
     Serialized -> SerialLetS i <$> serialExpr m scope e1 <*> serialExpr m scope e2
@@ -1340,11 +1340,11 @@ serialize (MonoHead lang m0 args0 e0) = do
 
   serialArg
     :: Int
-    -> Scope
+    -> (Scope, Scope)
     -> MonoExpr
     -> MorlocMonad SerialArg
   serialArg _ _ e@(MonoManifold m _ _) = do
-    scope <- getConcreteMap m lang
+    scope <- getScope m lang
     se <- serialExpr m scope e
     case se of
       (ManS sm) -> return $ SerialArgManifold sm
@@ -1357,7 +1357,7 @@ serialize (MonoHead lang m0 args0 e0) = do
 
   nativeArg
     :: Int
-    -> Scope
+    -> (Scope, Scope)
     -> MonoExpr
     -> MorlocMonad NativeArg
   -- This case may occur, for example, with `(add 1.0 2.0)`. Here `add` has two
@@ -1365,7 +1365,7 @@ serialize (MonoHead lang m0 args0 e0) = do
   -- arguments. This is because `1.0` and `2.0` are primitive and will be
   -- generated in place rather than passed as arguments.
   nativeArg _ _ e@(MonoManifold m _ _) = do
-    scope <- getConcreteMap m lang
+    scope <- getScope m lang
     ne <- nativeExpr m scope e
     case ne of
       (ManN nm) -> return $ NativeArgManifold nm
@@ -1378,11 +1378,11 @@ serialize (MonoHead lang m0 args0 e0) = do
 
   nativeExpr
     :: Int
-    -> Scope
+    -> (Scope, Scope)
     -> MonoExpr
     -> MorlocMonad NativeExpr
   nativeExpr _ _ (MonoManifold m form e) = do
-    scope <- getConcreteMap m lang
+    scope <- getScope m lang
     ne <- nativeExpr m scope e
     form' <- abimapM (\i _ -> contextArg scope i) (\i _ -> boundArg scope i) form
     return . ManN $ NativeManifold m lang form' ne
@@ -1414,29 +1414,29 @@ serialize (MonoHead lang m0 args0 e0) = do
   nativeExpr _ _ (MonoBndVar Nothing _) = error "MonoBndVar must have a type if used in native context"
   -- simple native types
   nativeExpr m scope (MonoAcc _ o v e k) = do
-    let v' = inferConcreteVar scope v
+    let v' = inferConcreteVar (fst scope) v
     e' <- nativeExpr m scope e
     return $ AccN o v' e' k
   nativeExpr m scope (MonoList v t es) =
-    ListN (inferConcreteVar scope v)
+    ListN (inferConcreteVar (fst scope) v)
       <$> inferConcreteType scope t
       <*> mapM (nativeExpr m scope) es
   nativeExpr m scope (MonoTuple v rs) =
-    TupleN (inferConcreteVar scope v)
+    TupleN (inferConcreteVar (fst scope) v)
       <$> mapM (nativeExpr m scope . snd) rs
   nativeExpr m scope (MonoRecord o v ps rs) =
-    RecordN o (inferConcreteVar scope v)
+    RecordN o (inferConcreteVar (fst scope) v)
       <$> mapM (inferConcreteType scope) ps
       <*> mapM (secondM (nativeExpr m scope . snd)) rs
   -- primitives
-  nativeExpr _ scope (MonoLog    v x) = return $ LogN  (inferConcreteVar scope v) x
-  nativeExpr _ scope (MonoReal   v x) = return $ RealN (inferConcreteVar scope v) x
-  nativeExpr _ scope (MonoInt    v x) = return $ IntN  (inferConcreteVar scope v) x
-  nativeExpr _ scope (MonoStr    v x) = return $ StrN  (inferConcreteVar scope v) x
-  nativeExpr _ scope (MonoNull   v  ) = return $ NullN (inferConcreteVar scope v)
+  nativeExpr _ scope (MonoLog    v x) = return $ LogN  (inferConcreteVar (fst scope) v) x
+  nativeExpr _ scope (MonoReal   v x) = return $ RealN (inferConcreteVar (fst scope) v) x
+  nativeExpr _ scope (MonoInt    v x) = return $ IntN  (inferConcreteVar (fst scope) v) x
+  nativeExpr _ scope (MonoStr    v x) = return $ StrN  (inferConcreteVar (fst scope) v) x
+  nativeExpr _ scope (MonoNull   v  ) = return $ NullN (inferConcreteVar (fst scope) v)
 
   typeArg
-    :: Scope
+    :: (Scope, Scope)
     -> SerializationState
     -> Int
     -> MorlocMonad (Arg TypeM)

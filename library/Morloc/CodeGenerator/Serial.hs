@@ -133,7 +133,7 @@ makeSerialAST m lang t0 = do
       where
         makeTypePacker :: (Int, TypeU, TypeU, Source, Source) -> MorlocMonad TypePacker
         makeTypePacker (0, generalUnpackedType, generalPackedType, forwardSource, reverseSource) = do
-          scope <- getConcreteMap m lang
+          scope <- getScope m lang
           packedType <- inferConcreteType scope (typeOf generalPackedType)
           unpackedType <- inferConcreteType scope (typeOf generalUnpackedType)
           return $ TypePacker
@@ -161,7 +161,7 @@ makeSerialAST m lang t0 = do
       | generalTypeName == BT.tuple (length ts) = SerialTuple v <$> mapM (makeSerialAST' typepackers) ts
       | otherwise = case Map.lookup generalTypeName typepackers of
           (Just ps) -> do
-            scope <- getConcreteMap m lang
+            scope <- getScope m lang
             packers <- catMaybes <$> mapM (resolvePacker scope t) ps
             unpacked <- mapM (makeSerialAST' typepackers . typePackerUnpacked) packers
             selection <- selectPacker (zip packers unpacked)
@@ -181,7 +181,7 @@ makeSerialAST m lang t0 = do
 
 
 resolvePacker
-  :: Scope
+  :: (Scope, Scope)
   -> TypeF
   -> (Int, TypeU, TypeU, Source, Source)
   -> MorlocMonad (Maybe TypePacker)
