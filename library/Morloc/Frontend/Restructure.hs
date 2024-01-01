@@ -236,9 +236,11 @@ collectMogrifiers fullDag = do
     let indices = AST.getIndices e0
 
     s <- MM.get
-    MM.put (s { stateSources = GMap.insertMany indices m objSources (stateSources s)
-              , stateInnerMogrifiers = GMap.insertMany indices m mogrifiers (stateInnerMogrifiers s)
+    MM.put (s { stateSources = GMap.insertManyWith (<>) indices m objSources (stateSources s)
+              , stateInnerMogrifiers = GMap.insertManyWith (<>) indices m mogrifiers (stateInnerMogrifiers s)
               } )
+
+    MM.sayVVV $ "mogrifiers for" <+> pretty m <> ":" <+> viaShow mogrifiers
 
     return mogrifiers
 
@@ -246,9 +248,9 @@ collectMogrifiers fullDag = do
       prepareMogrifier :: [Source] -> [(EVar, Maybe Label, EType)] -> Map.Map Property [(TypeU, Source)]
       prepareMogrifier srcs es = mogrifiers
         where
-          srcMap = Map.fromList [(srcAlias src, src) | src <- srcs]
+          srcMap = Map.fromListWith (<>) [(srcAlias src, [src]) | src <- srcs]
           mogMaybe = concat [[(p, (etype e, Map.lookup v srcMap)) | p <- Set.toList (eprop e)] | (v, _, e) <- es]
-          mogrifiers = Map.fromListWith (<>) [(p, [(t, src)]) | (p, (t, Just src)) <- mogMaybe]
+          mogrifiers = Map.fromListWith (<>) [(p, [(t, src) | src <- srcs]) | (p, (t, Just srcs)) <- mogMaybe]
 
       inherit :: [(TVar, TVar)] -> Map.Map Property [(TypeU, Source)] -> Map.Map Property [(TypeU, Source)]
       inherit aliasMap mogMap
@@ -259,8 +261,8 @@ collectMogrifiers fullDag = do
       -- determine whether a given mogrifier is inherited given the import list
       selectInherited :: [TVar] -> Property -> [(TypeU, Source)] -> [(TypeU, Source)]
       selectInherited aliases Unpack ((unqualify -> (vs, t@(FunU [a] _)), src):xs)
-        | extractKey a `elem` aliases = (qualify vs t, src) : selectInherited aliases Pack xs
-        | otherwise = selectInherited aliases Pack xs
+        | extractKey a `elem` aliases = (qualify vs t, src) : selectInherited aliases Unpack xs
+        | otherwise = selectInherited aliases Unpack xs
       selectInherited aliases Pack ((unqualify -> (vs, t@(FunU [_] b)), src):xs)
         | extractKey b `elem` aliases = (qualify vs t, src) : selectInherited aliases Pack xs
         | otherwise = selectInherited aliases Pack xs
