@@ -17,7 +17,7 @@ import Morloc.Data.Doc hiding (putDoc)
 import Morloc.Pretty
 
 instance Pretty ExprI where
-  pretty (ExprI _ e) = pretty e
+  pretty (ExprI i e) = parens (pretty e) <> ":" <> pretty i
 
 instance Pretty Expr where
   pretty UniE = "()"

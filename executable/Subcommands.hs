@@ -22,6 +22,7 @@ import qualified Morloc.Data.GMap as GMap
 import Morloc.CodeGenerator.Namespace (SerialManifold(..))
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.Pretty ()
+import Morloc.Frontend.Pretty ()
 import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.Map as Map
@@ -35,6 +36,7 @@ runMorloc args = do
     (CmdMake g) -> cmdMake g verbose config
     (CmdInstall g) -> cmdInstall g verbose config
     (CmdTypecheck g) -> cmdTypecheck g verbose config
+    (CmdDump g) -> cmdDump g verbose config
 
 
 -- | read the global morloc config file or return a default one
@@ -42,6 +44,7 @@ getConfig :: CliCommand -> IO Config.Config
 getConfig (CmdMake g) = getConfig' (makeConfig g) (makeVanilla g)
 getConfig (CmdInstall g) = getConfig' (installConfig g) (installVanilla g)
 getConfig (CmdTypecheck g) = getConfig' (typecheckConfig g) (typecheckVanilla g)
+getConfig (CmdDump g) = getConfig' (dumpConfig g) (dumpVanilla g)
 
 getConfig' :: String -> Bool -> IO Config.Config
 getConfig' _ True = Config.loadMorlocConfig Nothing
@@ -52,6 +55,7 @@ getVerbosity :: CliCommand -> Int
 getVerbosity (CmdMake      g) = makeVerbose      g
 getVerbosity (CmdInstall   g) = installVerbose   g
 getVerbosity (CmdTypecheck g) = typecheckVerbose g
+getVerbosity (CmdDump      g) = dumpVerbose g
 
 readScript :: Bool -> String -> IO (Maybe Path, Code)
 readScript True code = return (Nothing, Code (MT.pack code))
@@ -128,3 +132,18 @@ writeTypecheckOutput _ ((Right pools, _), _) = vsep $ map (uncurry writePool) po
 
 writePool :: Lang -> [SerialManifold] -> MDoc
 writePool lang manifolds = pretty lang <+> "pool:" <> "\n" <> vsep (map pseudocodeSerialManifold manifolds) <> "\n"
+
+
+cmdDump :: DumpCommand -> Int -> Config.Config -> IO ()
+cmdDump args _ config = do
+  (path, code) <- readScript (dumpExpression args) (dumpScript args)
+  let verbosity = dumpVerbose args
+  ((x, _), _) <- MM.runMorlocMonad Nothing verbosity config (F.parse path code)
+  case x of
+    (Left e) -> putDoc $ pretty e
+    (Right e) -> putDoc $ prettyDAG e
+
+prettyDAG :: DAG MVar e ExprI -> MDoc
+prettyDAG m0 = vsep (map prettyEntry (Map.toList m0)) where
+  prettyEntry :: (MVar, (ExprI, [(MVar, e)])) -> MDoc
+  prettyEntry (k, (n, _)) = block 4 (pretty k) (vsep [pretty n]) 
