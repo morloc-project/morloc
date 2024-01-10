@@ -2,5 +2,9 @@ module main (foo)
 
 record (Person a) = Person {name :: Str, info :: a}
 
-foo :: Person Int -> {y :: Int, z :: {a :: [Str], b :: [Int]}}
+record Subdata = Subdata {a :: [Str], b :: [Int]}
+
+record Data = Data {y :: Int, z :: Subdata}
+
+foo :: Person Int -> Data
 foo x = {y = x@info, z = {a = [x@name, "bob"], b = [1,2,3]}}

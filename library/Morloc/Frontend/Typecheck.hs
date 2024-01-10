@@ -18,7 +18,7 @@ import Morloc.Data.Doc
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
-import qualified Morloc.TypeEval as T
+import qualified Morloc.TypeEval as TE
 
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
@@ -158,19 +158,28 @@ synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 
 synthE i g0 (AccS e k) = do
   (g1, t1, e1) <- synthG' g0 e
-  (g2, valType) <- case t1 of
-    (NamU _ _ _ rs) -> case lookup k rs of
-      Nothing -> gerr i (KeyError k t1)
-      (Just val) -> return (g1, val)
-    (ExistU v ps rs) -> case lookup k rs of
-      Nothing -> do
-        let (g12, val) = newvar (unTVar v <> "_" <> unKey k) g1
-        case access1 v (gammaContext g12) of
-          (Just (rhs, _, lhs)) -> return (g12 { gammaContext = rhs <> [ExistG v ps ((k, val):rs)] <> lhs }, val)
-          Nothing -> gerr i (KeyError k t1)
-      (Just val) -> return (g1, val)
-    _ -> gerr i (KeyError k t1)
+  (g2, valType) <- accessRecord g1 t1
   return (g2, valType, AccS e1 k)
+  where
+    accessRecord :: Gamma -> TypeU -> MorlocMonad (Gamma, TypeU)
+    accessRecord g t@(NamU _ _ _ rs) = case lookup k rs of
+      Nothing -> gerr i (KeyError k t)
+      (Just val) -> return (g, val)
+    accessRecord g t@(ExistU v ps rs) = case lookup k rs of
+      Nothing -> do
+        let (g', val) = newvar (unTVar v <> "_" <> unKey k) g
+        case access1 v (gammaContext g') of
+          (Just (rhs, _, lhs)) -> return (g' { gammaContext = rhs <> [ExistG v ps ((k, val):rs)] <> lhs }, val)
+          Nothing -> gerr i (KeyError k t)
+      (Just val) -> return (g, val)
+    accessRecord g t = do
+      globalMap <- MM.gets stateGeneralTypedefs
+      gscope <- case GMap.lookup i globalMap of
+        GMapJust scope -> return scope
+        _ -> return Map.empty
+      case TE.evaluateStep gscope t of
+        (Just t') -> accessRecord g t'
+        Nothing -> gerr i (KeyError k t)
 
 --   -->E0
 synthE _ g (AppS f []) = do
@@ -546,7 +555,7 @@ evaluateSAnnoTypes = mapSAnnoM resolve return where
   resolve :: Indexed TypeU -> MorlocMonad (Indexed TypeU)
   resolve (Idx m t) = do
     scope <- getScope m
-    case T.evaluateType scope t of
+    case TE.evaluateType scope t of
       (Left e) -> MM.throwError e
       (Right tu) -> return (Idx m tu)
 

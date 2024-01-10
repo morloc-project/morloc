@@ -2,4 +2,8 @@ module main (foo)
 
 import cppbase (div)
 
+type Cpp => Tuple3 a b c = "std::tuple<$1,$2,$3>" a b c
+type Cpp => Bool = "bool"
+type Cpp => Real = "double"
+
 foo x = (True, x, div 4.0 x)

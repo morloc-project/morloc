@@ -407,9 +407,13 @@ generalSerial x0@(SAnno _ (Idx i t)) = do
     -- will be set in the nexus
     generalSerial' base ps (SAnno (One (AccS (SAnno (One (VarS v, _)) (Idx _ NamT {})) k, _)) _) =
       return $ base { commandSubs = [(ps, unEVar v, [JsonKey k])] }
-    -- If the accessed type is not a record, then die
-    generalSerial' _ _ (SAnno (One (AccS (SAnno _ (Idx _ t')) _, _)) _) =
-        MM.throwError . OtherError . render $ "Non-record access of type:" <+> pretty t'
+    -- If the accessed type is not a record, try to simplify the type
+    generalSerial' base ps (SAnno (One (AccS (SAnno x1 (Idx m t')) x2, x3)) x4) = do
+      mayT <- evalGeneralStep i (type2typeu t')
+      case mayT of
+        (Just t'') -> generalSerial' base ps (SAnno (One (AccS (SAnno x1 (Idx m (typeOf t''))) x2, x3)) x4)
+        Nothing -> MM.throwError . OtherError . render $ "Non-record access of type:" <+> pretty t'
+
     generalSerial' base ps (SAnno (One (LstS xs, _)) _) = do
       ncmds <- zipWithM (generalSerial' base) [ps ++ [JsonIndex j] | j <- [0..]] xs
       return $ base
@@ -673,15 +677,26 @@ pruneArgs args xs =
   let usedArgs = unique $ concatMap (map ann . sannoSnd) xs
   in [r | r@(Arg i _) <- args, i `elem` usedArgs]
 
+mkIdx :: SAnno g One (Indexed c, d) -> Type -> Indexed Type
+mkIdx (SAnno (One (_, (Idx i _, _))) _) = Idx i
+
+-- Conventions:
+--   midx: The general index, used for identifying manifolds since this index is
+--         common across languages.
+--   cidx: The concrete index, will be associated with types that in the given
+--         language and is required later for evaluating them into concrete
+--         types. The language of the type cidx is coupled to in `express` must
+--         be the same as the language cidx is coupled to in the SAnno
+--         expression.
 express :: SAnno (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
 -- CallS - direct export of a sourced function, e.g.:
-express (SAnno (One (CallS src, (Idx _ lang, _))) (Idx m c@(FunT inputs _))) = do
+express (SAnno (One (CallS src, (Idx cidx lang, _))) (Idx midx c@(FunT inputs _))) = do
   ids <- MM.takeFromCounter (length inputs)
-  let lambdaVals = fromJust $ safeZipWith PolyBndVar (map Right inputs) ids
+  let lambdaVals = fromJust $ safeZipWith PolyBndVar (map (C . Idx cidx) inputs) ids
   return
-    . PolyHead lang m [Arg i None | i <- ids]
+    . PolyHead lang midx [Arg i None | i <- ids]
     . PolyReturn
-    $ PolyApp (PolySrc c src) lambdaVals
+    $ PolyApp (PolySrc (Idx midx c) src) lambdaVals
 
 -- *****************  EVIL INDEX REWRITE HACK WARNING ************************
 -- Move the index from the lambda to the application.
@@ -697,34 +712,45 @@ express (SAnno (One (CallS src, (Idx _ lang, _))) (Idx m c@(FunT inputs _))) = d
 -- application.
 -- ----
 -- lambda
-express (SAnno (One (LamS _ (SAnno (One (x, (c, _))) (Idx _ applicationType)), (_, lambdaArgs))) (Idx lambdaIndex _)) = do
+express (SAnno (One (LamS _ (SAnno (One (x, (c, _))) (Idx _ applicationType)), (_, lambdaArgs))) (Idx midx _)) = do
   MM.sayVVV "express LamS:"
-  express (SAnno (One (x, (c, lambdaArgs))) (Idx lambdaIndex applicationType))
+  express (SAnno (One (x, (c, lambdaArgs))) (Idx midx applicationType))
 
-express (SAnno (One (LstS xs, (Idx _ lang, args))) (Idx m (AppT (VarT v) [t]))) = do
-  xs' <- mapM (expressPolyExpr lang t) xs
-  let x = PolyList v t xs'
-  return $ PolyHead lang m [Arg i None | Arg i _ <- args] (PolyReturn x)
+express (SAnno (One (LstS xs, (Idx cidx lang, args))) (Idx midx (AppT (VarT v) [t]))) = do
+  xs' <- mapM (\x -> expressPolyExpr lang (mkIdx x t) x) xs
+  let x = PolyList (Idx cidx v) (Idx cidx t) xs'
+  return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
 express (SAnno (One (LstS _, _)) (Idx _ t)) = error $ "Invalid list form: " <> show t
 
-express (SAnno (One (TupS xs, (Idx _ lang, args))) t@(Idx m (AppT (VarT v) ts))) = do
+express (SAnno (One (TupS xs, (Idx cidx lang, args))) t@(Idx midx (AppT (VarT v) ts))) = do
   MM.sayVVV $ "express TupS:" <+> pretty t
-  xs' <- fromJust <$> safeZipWithM (expressPolyExpr lang) ts xs
-  let x = PolyTuple v (fromJust $ safeZip ts xs')
-  return $ PolyHead lang m [Arg i None | Arg i _ <- args] (PolyReturn x)
+  let idxTs = zipWith mkIdx xs ts
+  xs' <- fromJust <$> safeZipWithM (expressPolyExpr lang) idxTs xs
+  let x = PolyTuple (Idx cidx v) (fromJust $ safeZip idxTs xs')
+  return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
 express (SAnno (One (TupS _, _)) g) = error $ "Invalid tuple form: " <> show g
 
 -- records
-express (SAnno (One (NamS entries, (Idx _ lang, args))) (Idx m (NamT o v ps rs))) = do
-  xs' <- fromJust <$> safeZipWithM (expressPolyExpr lang) (map snd rs) (map snd entries)
-  let x = PolyRecord o v ps (zip (map fst rs) (zip (map snd rs) xs'))
-  return $ PolyHead lang m [Arg i None | Arg i _ <- args] (PolyReturn x)
+express (SAnno (One (NamS entries, (Idx cidx lang, args))) (Idx midx (NamT o v ps rs))) = do
+  let idxTypes = zipWith mkIdx (map snd entries) (map snd rs)
+  xs' <- fromJust <$> safeZipWithM (expressPolyExpr lang) idxTypes (map snd entries)
+  let x = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip idxTypes xs'))
+  return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
+
+-- expand the record type if possible, otherwise die
+express (SAnno (One (NamS entries, (Idx cidx lang, args))) (Idx midx t)) = do
+  mayT <- evalGeneralStep midx (type2typeu t)
+  case mayT of
+    (Just t') -> express (SAnno (One (NamS entries, (Idx cidx lang, args))) (Idx midx (typeOf t')))
+    Nothing -> MM.throwError . OtherError . render $ "Missing concrete:" <+> "t=" <> pretty t
 
 -- In other cases, it doesn't matter whether we are at the top of the call
-express e@(SAnno (One (_, (Idx _ lang, args))) (Idx m t))
-  = PolyHead lang m [Arg i None | Arg i _ <- args] <$> expressPolyExpr lang t e
+express e@(SAnno (One (_, (Idx cidx lang, args))) (Idx midx t))
+  = PolyHead lang midx [Arg i None | Arg i _ <- args] <$> expressPolyExpr lang (Idx cidx t) e
 
-expressPolyExpr :: Lang -> Type -> SAnno (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyExpr
+
+
+expressPolyExpr :: Lang -> Indexed Type -> SAnno (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyExpr
 
 -- these cases will include partially applied functions and explicit lambdas
 -- the former is transformed into the latter in the frontend typechecker
@@ -732,15 +758,15 @@ expressPolyExpr parentLang pc
   (SAnno (One (LamS vs
     (SAnno (One (AppS
       (SAnno (One (CallS src
-                  , (Idx _ callLang, _)
+                  , (Idx cidxCall callLang, _)
                   )
-             ) (Idx _ callType@(FunT callInputTypes callOutputType)))
+             ) callTypeI@(Idx _ callType@(FunT callInputTypes _)))
       xs
-                , (Idx _ appLang, appArgs)
+                , (Idx cidxApp appLang, appArgs)
                 )
            ) (Idx _ appType))
-              , (Idx _ lamLang, lamArgs))
-         ) (Idx m lamType@(FunT lamInputTypes lamOutType)))
+              , (Idx cidxLam _, lamArgs))
+         ) (Idx midx lamType@(FunT lamInputTypes lamOutType)))
 
   ----------------------------------------------------------------------------------------
   -- #3 cis full lambda                                        | contextArgs | boundArgs |
@@ -756,13 +782,15 @@ expressPolyExpr parentLang pc
       MM.sayVVV "case #3"
       MM.sayVVV $ "appArgs:" <+> list (map pretty appArgs)
       MM.sayVVV $ "callInputTypes:" <+> list (map viaShow callInputTypes)
+      MM.sayVVV $ "appArgs:" <+> list (map pretty appArgs)
 
-      let args = fromJust $ safeZipWith (\(Arg i _) t -> Arg i (Just t)) lamArgs lamInputTypes
-      xs' <- fromJust <$> safeZipWithM (expressPolyExpr appLang) callInputTypes xs
+      let lamIdxTypes = zipWith mkIdx xs lamInputTypes
+      let args = fromJust $ safeZipWith (\(Arg i _) t -> Arg i (Just (val t))) lamArgs lamIdxTypes
+      xs' <- fromJust <$> safeZipWithM (expressPolyExpr appLang) (zipWith mkIdx xs callInputTypes) xs 
       return
-          . PolyManifold parentLang m (ManifoldPass args)
+          . PolyManifold parentLang midx (ManifoldPass args)
           . PolyReturn
-          $ PolyApp (PolySrc callType src) xs'
+          $ PolyApp (PolySrc callTypeI src) xs'
 
   ----------------------------------------------------------------------------------------
   -- #4 cis partial lambda                                     | contextArgs | boundArgs |
@@ -782,9 +810,9 @@ expressPolyExpr parentLang pc
             (drop nContextArgs lamArgs)
             lamInputTypes
 
-      xs' <- fromJust <$> safeZipWithM (expressPolyExpr appLang) callInputTypes xs
+      xs' <- fromJust <$> safeZipWithM (expressPolyExpr appLang) (zipWith mkIdx xs callInputTypes) xs
       return
-        . PolyManifold parentLang m (ManifoldPart contextArgs typedLambdaArgs)
+        . PolyManifold parentLang midx (ManifoldPart contextArgs typedLambdaArgs)
         . PolyReturn
         $ PolyApp call xs'
 
@@ -809,9 +837,9 @@ expressPolyExpr parentLang pc
   | not sameLanguage && length appArgs == length vs = do
       MM.sayVVV "case #7"
       let n = length xs - length vs
-      xsLocal <- zipWithM (expressPolyExpr appLang) callInputTypes (take n xs)
+      xsLocal <- zipWithM (expressPolyExpr appLang) (zipWith mkIdx (take n xs) callInputTypes) (take n xs)
 
-      let xsPassed = bindVar appArgs (drop n callInputTypes)
+      let xsPassed = bindVar appArgs (map B $ drop n callInputTypes)
           xs' = xsLocal <> xsPassed
 
       let typedBoundArgs = fromJust $ safeZipWith
@@ -819,12 +847,14 @@ expressPolyExpr parentLang pc
             (drop (length appArgs - length lamInputTypes) lamArgs)
             lamInputTypes
 
+      MM.sayVVV $ "Making foreign interface 7 of type:" <+> pretty (Idx cidxApp appType)
+
       return
-        . PolyManifold parentLang m (ManifoldPass typedBoundArgs)
+        . PolyManifold parentLang midx (ManifoldPass typedBoundArgs)
         . PolyReturn
         . PolyApp
-          ( PolyForeignInterface callLang appType (map ann appArgs)
-          . PolyManifold callLang m (ManifoldFull (map unvalue appArgs))
+          ( PolyForeignInterface callLang (Idx cidxApp appType) (map ann appArgs)
+          . PolyManifold callLang midx (ManifoldFull (map unvalue appArgs))
           . PolyReturn
           $ PolyApp call xs'
           )
@@ -832,7 +862,7 @@ expressPolyExpr parentLang pc
         -- called by a local function which means they must be native and
         -- their types must be known. Leaving these terms as passthrough types
         -- was the cause of the cadf62 bug.
-        $ bindVar appArgs lamInputTypes
+        $ bindVar appArgs (map B lamInputTypes)
 
 
   ----------------------------------------------------------------------------------------
@@ -851,7 +881,11 @@ expressPolyExpr parentLang pc
   --          return g(lambda z, x: m2(x, y, z))               |             |           |
   ----------------------------------------------------------------------------------------
   | not sameLanguage = do
-      MM.sayVVV "case #8"
+      MM.sayVVV $ "case #8 m" <> pretty midx
+                <> "\n  lamType = " <+> pretty lamType
+                <> "\n  len(xs) = " <+> pretty (length xs)
+                <> "\n  src = " <+> pretty src
+                <> "\n  appArgs:" <+> list (map pretty appArgs)
       -- 1. express all xs under the foreign type if they are in the foreign language or
       --    the parent type (pc) if they are in the parent language
       --
@@ -871,7 +905,9 @@ expressPolyExpr parentLang pc
       -- 6. Fold let statements over local manifold
 
       -- evaluate arguments and derive any required let bindings
-      xsInfo <- mapM (partialExpress callLang) xs
+      xsInfo <- mapM partialExpress xs
+
+      MM.sayVVV $ "  xsInfo:" <+> pretty xsInfo
 
       let xs' = map (\(_, _, e) -> e) xsInfo
           -- rs: the list of arguments (by index) required by a single expression
@@ -887,22 +923,43 @@ expressPolyExpr parentLang pc
           nContextArgs = length appArgs - length vs
 
           -- the types of the terms passed through the lambda
-          lambdaTypeMap = zip vs lamInputTypes
+          lambdaTypeMap = zip vs (map (Idx cidxLam) lamInputTypes)
           -- variables passed to the manifold, those bound by the lambda will
           -- have known local types
-          boundVars = [ PolyBndVar (maybe (Left parentLang) Right (lookup v lambdaTypeMap)) i
+          boundVars = [ PolyBndVar (maybe (A parentLang) C (lookup v lambdaTypeMap)) i
                       | Arg i v <- appArgs
                       ]
           untypedContextArgs = map unvalue $ take nContextArgs appArgs
           typedPassedArgs = fromJust $ safeZipWith (\(Arg i _) t -> Arg i (Just t)) (drop nContextArgs lamArgs) lamInputTypes
 
+          localForm = ManifoldPart untypedContextArgs typedPassedArgs
+
+          -- contextArgs
+          -- boundArgs = map unvalue (drop () appArgs)
+          foreignForm = ManifoldFull [Arg i None | i <- passedParentArgs]
+
+      MM.sayVVV $ "Making foreign interface 8 of type:" <+> pretty (Idx cidxLam lamOutType)
+        <> "\n  appArgs" <+> pretty appArgs
+        <> "\n  src" <+> pretty src
+        <> "\n  vs:" <+> pretty vs
+        <> "\n  callArgs:" <+> pretty callArgs
+        <> "\n  args:" <+> pretty args
+        <> "\n  allParentArgs:" <+> pretty allParentArgs
+        <> "\n  passedParentArgs:" <+> pretty passedParentArgs
+        <> "\n  nContextArgs:" <+> pretty nContextArgs
+        <> "\n  boundVars:" <+> pretty boundVars
+        <> "\n  untypedContextArgs:" <+> pretty untypedContextArgs
+        <> "\n  typedPassedArgs:" <+> pretty typedPassedArgs
+        <> "\n  local manifold form args:" <+> pretty localForm
+        <> "\n  foreign manifold form args:" <+> pretty (foreignForm :: ManifoldForm None (Maybe Type))
+
       return
-        . PolyManifold parentLang m (ManifoldPart untypedContextArgs typedPassedArgs)
+        . PolyManifold parentLang midx localForm
         . chain lets
         . PolyReturn
         . PolyApp
-            ( PolyForeignInterface callLang lamOutType passedParentArgs
-            . PolyManifold callLang m (ManifoldFull (map unvalue appArgs))
+            ( PolyForeignInterface callLang (Idx cidxLam lamOutType) passedParentArgs
+            . PolyManifold callLang midx foreignForm
             . PolyReturn
             $ PolyApp call xs'
             )
@@ -911,7 +968,7 @@ expressPolyExpr parentLang pc
   where
     sameLanguage = parentLang == callLang
 
-    call = PolySrc callType src
+    call = PolySrc callTypeI src
 
     chain :: [a -> a] -> a -> a
     chain [] x = x
@@ -922,8 +979,7 @@ expressPolyExpr parentLang pc
     -- Partitions evaluation of expressions applied to a foreign pool between the
     -- local and foreign contexts
     partialExpress
-        :: Lang -- parent language of the manifold (not this expression)
-        -> SAnno (Indexed Type) One (Indexed Lang, [Arg EVar]) -- expression
+        :: SAnno (Indexed Type) One (Indexed Lang, [Arg EVar]) -- expression
         -> MorlocMonad
             ( [Int] -- ordered foreign arguments, should include ids bound by let (next arg)
             , Maybe (Int, PolyExpr) -- parent let statement if not in child language and eval is needed
@@ -931,33 +987,53 @@ expressPolyExpr parentLang pc
             )
     -- If the argument is a variable, link the argument id to the variable id and
     -- assign it the foreign call type
-    partialExpress _ (SAnno (One (VarS _, (_, [Arg idx _]))) (Idx _ t)) = do
-      let x' = PolyBndVar (Right t) idx
+    partialExpress (SAnno (One (VarS v, (Idx cidx argLang, args@[Arg idx _]))) (Idx _ t)) = do
+      MM.sayVVV $ "partialExpress case #0:" <+> "x=" <> pretty v <+> "cidx=" <> pretty cidx <+> "t =" <+> pretty t
+                <> "\n  parentLang:" <> pretty parentLang
+                <> "\n  callLang:" <> pretty callLang
+                <> "\n  argLang:" <> pretty argLang
+                <> "\n  args:" <> pretty args
+      let x' = PolyBndVar (C (Idx cidx t)) idx
       return ([idx], Nothing, x')
     -- Otherwise
-    partialExpress localLang x@(SAnno (One (_, (Idx _ foreignLang, args))) (Idx _ t))
+    partialExpress x@(SAnno (One (_, (Idx cidx argLang, args))) (Idx _ t))
       -- if this expression is implemented on the foreign side,
       --   translate to ExprM and record
-      | localLang == foreignLang = do
-          x' <- expressPolyExpr localLang t x
+      | argLang == callLang = do
+          MM.sayVVV $ "partialExpress case #2:" <+> "cidx=" <> pretty cidx <+> "t =" <+> pretty t
+                    <> "\n  parentLang:" <> pretty parentLang
+                    <> "\n  callLang:" <> pretty callLang
+                    <> "\n  argLang:" <> pretty argLang
+                    <> "\n  args:" <> pretty args
+          let argParentType = Idx cidx t
+          x' <- expressPolyExpr argLang argParentType x
           return ([i | Arg i _ <- args], Nothing, x')
       -- if this expression is implemented on the calling side,
       --   let-bind the expression on the calling side and use the let-index as an
       --   argument index
       | otherwise = do
-          letVal <- expressPolyExpr foreignLang t x
+          MM.sayVVV $ "partialExpress case #1:" <+> "cidx=" <> pretty cidx <+> "t =" <+> pretty t
+                    <> "\n  parentLang:" <> pretty parentLang
+                    <> "\n  callLang:" <> pretty callLang
+                    <> "\n  argLang:" <> pretty argLang
+                    <> "\n  args:" <> pretty args
+          let argparentType = Idx cidx t
+          letVal <- expressPolyExpr argLang argparentType x
           idx <- MM.getCounter
-          let x' = PolyLetVar t idx
+          MM.sayVVV $ "making index in partialExpress #1:" <+> pretty idx
+
+          -- This let variable is used in the foreign side, so the cidx from the
+          -- argument is correct
+          let x' = PolyLetVar (Idx cidx t) idx
           -- Only the let-bound argument is used on the foreign side
           return ([idx], Just (idx, letVal), x')
 
-
-expressPolyExpr _ _ (SAnno (One (LamS vs body, (Idx _ lang, manifoldArguments))) (Idx m lambdaType)) = do
+expressPolyExpr _ _ (SAnno (One (LamS vs body, (Idx _ lang, manifoldArguments))) lambdaType@(Idx midx _)) = do
     MM.sayVVV $ "expressPolyExpr LamS:" <+> pretty lambdaType
 
     body' <- expressPolyExpr lang lambdaType body
 
-    inputTypes <- case lambdaType of
+    inputTypes <- case val lambdaType of
       (FunT ts _) -> return ts
       _ -> return []
 
@@ -973,7 +1049,7 @@ expressPolyExpr _ _ (SAnno (One (LamS vs body, (Idx _ lang, manifoldArguments)))
               <> "\n  boundArguments" <+> list (map pretty typeBoundArguments)
 
     return
-      . PolyManifold lang m (ManifoldPart contextArguments typeBoundArguments)
+      . PolyManifold lang midx (ManifoldPart contextArguments typeBoundArguments)
       . PolyReturn
       $ body'
 
@@ -982,7 +1058,7 @@ expressPolyExpr _ _ (SAnno (One (LamS vs body, (Idx _ lang, manifoldArguments)))
 --   connections will be snapped apart in the segment step.
 -- * These applications will be fully applied, the case of partially applied
 --   functions will have been handled previously by LamM
-expressPolyExpr parentLang pc (SAnno (One (AppS (SAnno (One (CallS src, (Idx _ lang, _))) (Idx _ fc@(FunT inputs _))) xs, (_, args))) (Idx m _))
+expressPolyExpr parentLang pc (SAnno (One (AppS (SAnno (One (CallS src, (Idx cidxCall callLang, _))) (Idx _ fc@(FunT inputs _))) xs, (_, args))) (Idx midx _))
   ----------------------------------------------------------------------------------------
   -- #1 cis applied                                            | contextArgs | boundArgs |
   ----------------------------------------------------------------------------------------
@@ -993,15 +1069,17 @@ expressPolyExpr parentLang pc (SAnno (One (AppS (SAnno (One (CallS src, (Idx _ l
   --          g m2(x, y, z)                                    |             |           |
   ----------------------------------------------------------------------------------------
   | sameLanguage = do
-      MM.sayVVV $ "case #1 - " <> parens (pretty (srcName src)) <> ":"
+      MM.sayVVV $ "case #1 - m" <> pretty midx <> parens (pretty (srcName src)) <> ":" <+> pretty fc
+                <> "\n  " <> list (map pretty args)
+
       -- There should be an equal number of input types and input arguments
       -- That is, the function should be fully applied. If it were partially
       -- applied, the lambda case would have been entered previously instead.
-      xs' <- fromJust <$> safeZipWithM (expressPolyExpr lang) inputs xs
+      xs' <- fromJust <$> safeZipWithM (expressPolyExpr callLang) (map (Idx cidxCall) inputs) xs
 
       MM.sayVVV "  leaving case #1"
       return
-          . PolyManifold lang m (ManifoldFull (map unvalue args))
+          . PolyManifold callLang midx (ManifoldFull (map unvalue args))
           . PolyReturn
           $ PolyApp f xs'
 
@@ -1022,29 +1100,35 @@ expressPolyExpr parentLang pc (SAnno (One (AppS (SAnno (One (CallS src, (Idx _ l
   --                                                           |             |           |
   ----------------------------------------------------------------------------------------
   | not sameLanguage = do
-        MM.sayVVV $ "case #5 - " <> parens (pretty (srcName src)) <> ":"
+        MM.sayVVV $ "case #5 - m" <> pretty midx <+> parens (pretty (srcName src)) <> ":"
         MM.sayVVV $ "args:" <+> list (map pretty args)
+        MM.sayVVV $ "callLang:" <+> pretty callLang
+        MM.sayVVV $ "parentLang:" <+> pretty parentLang
 
-        xs' <- fromJust <$> safeZipWithM (expressPolyExpr lang) inputs xs
+        let idxInputTypes = zipWith mkIdx xs inputs
+        xs' <- fromJust <$> safeZipWithM (expressPolyExpr callLang) idxInputTypes xs
+
+        MM.sayVVV $ "Making foreign interface 5 of type:" <+> pretty pc
+
         return
-          . PolyManifold parentLang m (ManifoldFull (map unvalue args))
+          . PolyManifold parentLang midx (ManifoldFull (map unvalue args))
           . PolyReturn
           . PolyApp
-              ( PolyForeignInterface lang pc [] -- no args are passed, so empty
-              . PolyManifold lang m (ManifoldFull (map unvalue args))
+              ( PolyForeignInterface callLang pc [] -- no args are passed, so empty
+              . PolyManifold callLang midx (ManifoldFull (map unvalue args))
               . PolyReturn
               $ PolyApp f xs'
               )
           -- non-native use, leave as passthrough
           -- the contextual language, though, is the same as the parent
-          $ [PolyBndVar (Left parentLang) i | Arg i _ <- args]
+          $ [PolyBndVar (A parentLang) i | Arg i _ <- args]
 
   where
-    sameLanguage = parentLang == lang
-    f = PolySrc fc src
+    sameLanguage = parentLang == callLang
+    f = PolySrc (Idx cidxCall fc) src
 
 -- An un-applied source call
-expressPolyExpr parentLang (FunT pinputs poutput) (SAnno (One (CallS src, (Idx _ lang, _))) (Idx m c@(FunT callInputs _)))
+expressPolyExpr parentLang (val -> FunT pinputs poutput) (SAnno (One (CallS src, (Idx cidx callLang, _))) (Idx midx c@(FunT callInputs _)))
   ----------------------------------------------------------------------------------------
   -- #2 cis passed                                             | contextArgs | boundArgs |
   ----------------------------------------------------------------------------------------
@@ -1054,15 +1138,15 @@ expressPolyExpr parentLang (FunT pinputs poutput) (SAnno (One (CallS src, (Idx _
   --      def m1(xs):                                          |             |           |
   --          g(m2, xs)                                        |             |           |
   ----------------------------------------------------------------------------------------
-  | parentLang == lang = do
+  | parentLang == callLang = do
       MM.sayVVV $ "case #2 - un-applied cis source call:" <+> pretty (srcName src)
       ids <- MM.takeFromCounter (length callInputs)
-      let lambdaVals = bindVarIds ids callInputs
+      let lambdaVals = bindVarIds ids (map (C . Idx cidx) callInputs)
           lambdaTypedArgs = fromJust $ safeZipWith annotate ids (map Just callInputs)
       return
-        . PolyManifold lang m (ManifoldPass lambdaTypedArgs)
+        . PolyManifold callLang midx (ManifoldPass lambdaTypedArgs)
         . PolyReturn
-        $ PolyApp (PolySrc c src) lambdaVals
+        $ PolyApp (PolySrc (Idx cidx c) src) lambdaVals
 
   ----------------------------------------------------------------------------------------
   -- #6 trans passed                                           | contextArgs | boundArgs |
@@ -1079,65 +1163,69 @@ expressPolyExpr parentLang (FunT pinputs poutput) (SAnno (One (CallS src, (Idx _
   --          return g(m2, xs)                                 |             |           |
   ----------------------------------------------------------------------------------------
   | otherwise = do
-      MM.sayVVV $ "case #6 - " <> pretty m
+      MM.sayVVV $ "case #6 - " <> pretty midx
       MM.sayVVV $ "Un-applied trans source call:" <+> pretty (srcName src)
       ids <- MM.takeFromCounter (length callInputs)
       let lambdaArgs = [Arg i None | i <- ids]
           lambdaTypedArgs = map (`Arg` Nothing) ids
-          callVals = bindVarIds ids callInputs
+          callVals = bindVarIds ids (map (C . Idx cidx) callInputs)
 
       MM.sayVVV $ "src:" <+> pretty src
       MM.sayVVV $ "lambdaArgs:" <+> list (map pretty lambdaArgs)
 
+      MM.sayVVV $ "Making foreign interface 6 of type:" <+> pretty (Idx cidx poutput)
+
       return
-       . PolyManifold parentLang m (ManifoldPass lambdaTypedArgs)
+       . PolyManifold parentLang midx (ManifoldPass lambdaTypedArgs)
        . PolyReturn
        . PolyApp
-           ( PolyForeignInterface lang poutput (map ann lambdaArgs)
-           . PolyManifold lang m (ManifoldFull lambdaArgs)
+           ( PolyForeignInterface callLang (Idx cidx poutput) (map ann lambdaArgs)
+           . PolyManifold callLang midx (ManifoldFull lambdaArgs)
            . PolyReturn
-           $ PolyApp (PolySrc c src) callVals
+           $ PolyApp (PolySrc (Idx cidx c) src) callVals
            )
-       $ fromJust $ safeZipWith (PolyBndVar . Right) pinputs (map ann lambdaArgs)
+       $ fromJust $ safeZipWith (PolyBndVar . C) (map (Idx cidx) pinputs) (map ann lambdaArgs)
 
 -- bound variables
-expressPolyExpr _ _ (SAnno (One (VarS v, (_, rs))) (Idx _ c)) = do
+expressPolyExpr _ _ (SAnno (One (VarS v, (Idx cidx _, rs))) (Idx _ c)) = do
   MM.sayVVV $ "express' VarS" <+> parens (pretty v) <+> "::" <+> pretty c
   case [i | (Arg i v') <- rs, v == v'] of
-    [r] -> return $ PolyBndVar (Right c) r
+    [r] -> return $ PolyBndVar (C (Idx cidx c)) r
     rs' -> MM.throwError . OtherError . render
         $ "Expected VarS" <+> dquotes (pretty v) <+>
           "of type" <+> parens (pretty c) <+> "to match exactly one argument, found:" <+> list (map pretty rs')
 
 -- primitives
-expressPolyExpr _ _ (SAnno (One (RealS x, _)) (Idx _ (VarT v))) = return $ PolyReal v x
-expressPolyExpr _ _ (SAnno (One (IntS x,  _)) (Idx _ (VarT v))) = return $ PolyInt v x
-expressPolyExpr _ _ (SAnno (One (LogS x,  _)) (Idx _ (VarT v))) = return $ PolyLog v x
-expressPolyExpr _ _ (SAnno (One (StrS x,  _)) (Idx _ (VarT v))) = return $ PolyStr v x
-expressPolyExpr _ _ (SAnno (One (UniS,    _)) (Idx _ (VarT v))) = return $ PolyNull v
+expressPolyExpr _ _ (SAnno (One (RealS x, (Idx cidx _, _))) (Idx _ (VarT v))) = return $ PolyReal (Idx cidx v) x
+expressPolyExpr _ _ (SAnno (One (IntS x,  (Idx cidx _, _))) (Idx _ (VarT v))) = return $ PolyInt  (Idx cidx v) x
+expressPolyExpr _ _ (SAnno (One (LogS x,  (Idx cidx _, _))) (Idx _ (VarT v))) = return $ PolyLog  (Idx cidx v) x
+expressPolyExpr _ _ (SAnno (One (StrS x,  (Idx cidx _, _))) (Idx _ (VarT v))) = return $ PolyStr  (Idx cidx v) x
+expressPolyExpr _ _ (SAnno (One (UniS,    (Idx cidx _, _))) (Idx _ (VarT v))) = return $ PolyNull (Idx cidx v) 
 
 -- record access
-expressPolyExpr _ pc (SAnno (One (AccS record@(SAnno (One (_, (Idx _ lang, _))) (Idx _ (NamT o v _ rs))) key, _)) _) = do
+expressPolyExpr _ pc (SAnno (One (AccS record@(SAnno (One (_, (Idx cidx lang, _))) (Idx _ (NamT o v _ rs))) key, _)) _) = do
   record' <- expressPolyExpr lang pc record
   case lookup key rs of
-    (Just valType) -> return $ PolyAcc valType o v record' key
+    (Just valType) -> return $ PolyAcc (Idx cidx valType) o (Idx cidx v) record' key
     Nothing -> error "invalid key access"
 
 -- lists
-expressPolyExpr _ _ (SAnno (One (LstS xs, (Idx _ lang, _))) (Idx _ (AppT (VarT v) [t])))
-  = PolyList v t <$> mapM (expressPolyExpr lang t) xs
+expressPolyExpr _ _ (SAnno (One (LstS xs, (Idx cidx lang, _))) (Idx _ (AppT (VarT v) [t])))
+  = PolyList (Idx cidx v) (Idx cidx t) <$> mapM (\x -> expressPolyExpr lang (mkIdx x t) x) xs
 expressPolyExpr _ _ (SAnno (One (LstS _, _)) _) = error "LstS can only be (AppP (VarP _) [_]) type"
 
 -- tuples
-expressPolyExpr _ _ (SAnno (One (TupS xs, (Idx _ lang, _))) (Idx _ (AppT (VarT v) ts))) = do
-  xs' <- fromJust <$> safeZipWithM (expressPolyExpr lang) ts xs
-  return $ PolyTuple v (fromJust $ safeZip ts xs')
+expressPolyExpr _ _ (SAnno (One (TupS xs, (Idx cidx lang, _))) (Idx _ (AppT (VarT v) ts))) = do
+  let idxTs = zipWith mkIdx xs ts
+  xs' <- fromJust <$> safeZipWithM (expressPolyExpr lang) idxTs xs
+  return $ PolyTuple (Idx cidx v) (fromJust $ safeZip idxTs xs')
 expressPolyExpr _ _ (SAnno (One (TupS _, _)) _) = error "TupS can only be (TupP (TupP _) ts) type"
 
 -- records
-expressPolyExpr _ _ (SAnno (One (NamS entries, (Idx _ lang, _))) (Idx _ (NamT o v ps rs))) = do
-  xs' <- fromJust <$> safeZipWithM (expressPolyExpr lang) (map snd rs) (map snd entries)
-  return $ PolyRecord o v ps (zip (map fst rs) (zip (map snd rs) xs'))
+expressPolyExpr _ _ (SAnno (One (NamS entries, (Idx cidx lang, _))) (Idx _ (NamT o v ps rs))) = do
+  let tsIdx = zipWith mkIdx (map snd entries) (map snd rs) 
+  xs' <- fromJust <$> safeZipWithM (expressPolyExpr lang) tsIdx (map snd entries)
+  return $ PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip tsIdx xs'))
 
 -- Unapplied and unexported source
 expressPolyExpr _ _ (SAnno (One (CallS src, _)) _)
@@ -1149,7 +1237,7 @@ expressPolyExpr _ _ (SAnno (One (AppS (SAnno (One (VarS f, _)) _) _, _)) _)
 
 -- catch all exception case - not very classy
 expressPolyExpr _ _ (SAnno (One (AppS (SAnno (One (LamS vs _, _)) _) _, _)) _) = error $ "All applications of lambdas should have been eliminated of length " <> show (length vs)
-expressPolyExpr _ parentType (SAnno (One (_, (Idx _ lang, _))) (Idx m t)) = do
+expressPolyExpr _ parentType (SAnno _ (Idx m t)) = do
   MM.sayVVV "Bad case"
   MM.sayVVV $ "  t :: " <> pretty t
   name' <- MM.metaName m
@@ -1161,12 +1249,12 @@ expressPolyExpr _ parentType (SAnno (One (_, (Idx _ lang, _))) (Idx m t)) = do
 unvalue :: Arg a -> Arg None
 unvalue (Arg i _) = Arg i None
 
-bindVar :: [Arg a] -> [Type] -> [PolyExpr]
+bindVar :: [Arg a] -> [Three Lang Type (Indexed Type)] -> [PolyExpr]
 bindVar args = bindVarIds (map ann args)
 
-bindVarIds :: [Int] -> [Type] -> [PolyExpr]
+bindVarIds :: [Int] -> [Three Lang Type (Indexed Type)] -> [PolyExpr]
 bindVarIds [] [] = []
-bindVarIds (i : args) (t : types) = PolyBndVar (Right t) i : bindVarIds args types
+bindVarIds (i : args) (t   : types) = PolyBndVar t i : bindVarIds args types
 -- These error states indicate a bug in the compiler, not the user code, so no mercy
 bindVarIds [] ts = error $ "bindVarIds: too few arguments: " <> show ts
 bindVarIds _ [] = error "bindVarIds: too few types"
@@ -1178,9 +1266,9 @@ segment (PolyHead lang m0 args0 e0) = do
   (heads, (_, topExpr)) <- segmentExpr m0 (map ann args0) e0
 
   MM.sayVVV $ "segmentation complete"
-  MM.sayVVV $ "topExpr language:" <+> pretty lang
-  MM.sayVVV $ "topExpr: " <+> pretty topExpr
-  MM.sayVVV $ "heads:" <+> list (map pretty heads)
+            <> "\n  topExpr language:" <+> pretty lang
+            <> "\n  topExpr: " <+> pretty topExpr
+            <> "\n  heads:" <+> list (map pretty heads)
   
   return (MonoHead lang m0 args0 topExpr : heads)
 
@@ -1190,26 +1278,35 @@ segmentExpr
   -> PolyExpr
   -> MorlocMonad ([MonoHead], (Maybe Lang, MonoExpr))
 -- This is where segmentation happens, every other match is just traversal
-segmentExpr _ args (PolyForeignInterface lang callingType _ e@(PolyManifold _ m (ManifoldFull foreignArgs) _)) = do
+segmentExpr _ args (PolyForeignInterface lang callingType cargs e@(PolyManifold _ m (ManifoldFull foreignArgs) _)) = do
+  MM.sayVVV $ "segmentExpr PolyForeignInterface PolyManifold m" <> pretty m
+            <> "\n  forced ManifoldFull" <+> pretty foreignArgs
+            <> "\n  lang" <+> pretty lang
+            <> "\n  args" <+> pretty args
+            <> "\n  cargs" <+> pretty cargs
+            <> "\n  foreignArgs" <+> pretty (map ann foreignArgs)
   (ms, (_, e')) <- segmentExpr m (map ann foreignArgs) e
   let foreignHead = MonoHead lang m foreignArgs e'
   config <- MM.ask
   case MC.buildPoolCallBase config (Just lang) m of
-    (Just cmds) -> return (foreignHead:ms, (Just lang, MonoPoolCall callingType m cmds [Arg i None | i <- args]))
+    (Just cmds) -> return (foreignHead:ms, (Nothing, MonoPoolCall callingType m cmds foreignArgs))
     Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' lang
 
 segmentExpr m _ (PolyForeignInterface lang callingType args e) = do
+  MM.sayVVV $ "segmentExpr PolyForeignInterface m" <> pretty m
+            <> "\n  args" <+> pretty args
+            <> "\n  lang" <+> pretty lang
   (ms, (_, e')) <- segmentExpr m args e
   -- create the foreign manifold, make sure all arugments are packed
   let foreignHead = MonoHead lang m [Arg i None | i <- args] (MonoReturn e')
       -- pack the arguments that will be passed to the foreign manifold
-      es' = map (MonoBndVar Nothing) args
+      es' = map (MonoBndVar (A None)) args
   config <- MM.ask
   -- create the body of the local helper function
   localFun <- case MC.buildPoolCallBase config (Just lang) m of
     (Just cmds) -> return $ MonoApp (MonoPoolCall callingType m cmds [Arg i None | i <- args]) es'
     Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' lang
-  return (foreignHead:ms, (Just lang, localFun))
+  return (foreignHead:ms, (Nothing, localFun))
 
 segmentExpr _ _ (PolyManifold lang m form e) = do
   (ms, (_, e')) <- segmentExpr m (abilist const const form) e
@@ -1222,11 +1319,9 @@ segmentExpr m args (PolyApp e es) = do
 
 segmentExpr m args (PolyLet i e1 e2) = do
   MM.sayVVV "segmentExpr PolyLet"
-  (ms1, (lang1, e1')) <- segmentExpr m args e1
+  (ms1, (_, e1')) <- segmentExpr m args e1
   (ms2, (lang2, e2')) <- segmentExpr m args e2
-  if lang1 == lang2
-    then return (ms1 ++ ms2, (lang1, MonoLet i e1' e2'))
-    else MM.throwError . OtherError $ "Unequal languages in PolyLet"
+  return (ms1 ++ ms2, (lang2, MonoLet i e1' e2'))
 
 segmentExpr m args (PolyAcc t o v e k) = do
   (ms, (_, e')) <- segmentExpr m args e
@@ -1251,8 +1346,9 @@ segmentExpr m args (PolyReturn e) = do
   return (ms, (lang, MonoReturn e'))
 
 segmentExpr _ _ (PolyLetVar t x) = return ([], (Nothing, MonoLetVar t x))
-segmentExpr _ _ (PolyBndVar (Right t) i) = return ([], (Nothing, MonoBndVar (Just t) i))
-segmentExpr _ _ (PolyBndVar (Left lang) i) = return ([], (Just lang, MonoBndVar Nothing i))
+segmentExpr _ _ (PolyBndVar (A lang) i) = return ([], (Just lang, MonoBndVar (A None) i))
+segmentExpr _ _ (PolyBndVar (B t) i) = return ([], (Nothing, MonoBndVar (B t) i))
+segmentExpr _ _ (PolyBndVar (C t) i) = return ([], (Nothing, MonoBndVar (C t) i))
 segmentExpr _ _ (PolySrc t src) = return ([], (Nothing, MonoSrc t src))
 segmentExpr _ _ (PolyLog v x)   = return ([], (Nothing, MonoLog v x))
 segmentExpr _ _ (PolyReal v x)  = return ([], (Nothing, MonoReal v x))
@@ -1260,220 +1356,255 @@ segmentExpr _ _ (PolyInt v x)   = return ([], (Nothing, MonoInt v x))
 segmentExpr _ _ (PolyStr v x)   = return ([], (Nothing, MonoStr v x))
 segmentExpr _ _ (PolyNull v)    = return ([], (Nothing, MonoNull v))
 
+
 -- | This step is performed after segmentation, so all terms are in the same
 -- language. Here we need to determine where inputs are (de)serialized and the
 -- serialization states of arguments and variables.
 serialize :: MonoHead -> MorlocMonad SerialManifold
 serialize (MonoHead lang m0 args0 e0) = do
-  scope <- getScope m0 lang
 
-  form0 <- ManifoldFull <$> mapM (prepareArg scope) args0
+  form0 <- ManifoldFull <$> mapM prepareArg args0
 
-  MM.sayVVV $ "In serializeOne for" <+> "m" <> pretty m0 <+> pretty lang <+> "segment"
-  MM.sayVVV $ "  typemap:" <+> viaShow typemap
-  MM.sayVVV $ "  This map we made from the expression:\n  " <> pretty e0
+  MM.sayVVV $ "In serialize for" <+> "m" <> pretty m0 <+> pretty lang <+> "segment"
+            <>  "\n  form0:" <+> pretty form0
+            <>  "\n  typemap:" <+> viaShow typemap
+            <>  "\n  This map we made from the expression:\n  " <> pretty e0
 
-  se1 <- serialExpr m0 scope e0
+  se1 <- serialExpr m0 e0
   let sm = SerialManifold m0 lang form0 se1
   wireSerial lang sm
   where
 
+  inferType = inferConcreteType lang
+  inferTypeUniversal = inferConcreteTypeUniversal lang
+  inferVar = inferConcreteVar lang
+
   -- map of argument indices to native types
-  typemap = makeTypemap e0
+  typemap = makeTypemap m0 e0
 
   prepareArg
-    :: (Scope, Scope)
-    -> Arg None
+    :: Arg None
     -> MorlocMonad (Arg (Or TypeS TypeF))
-  prepareArg scope (Arg i _) = case Map.lookup i typemap of
+  prepareArg (Arg i _) = case Map.lookup i typemap of
     Nothing -> return $ Arg i (L PassthroughS)
-    (Just t) -> do
-      t' <- inferConcreteType scope t
+    (Just (Right t)) -> do
+      t' <- inferType t
+      return $ Arg i (L (typeSof t'))
+    (Just (Left t)) -> do
+      MM.sayVVV "Warning: using universal inference at prepareArg"
+      t' <- inferTypeUniversal t
       return $ Arg i (L (typeSof t'))
 
   contextArg
-    :: (Scope, Scope)
-    -> Int
+    :: Int
     -> MorlocMonad (Or TypeS TypeF)
-  contextArg scope i = case Map.lookup i typemap of
-    (Just t) -> do
-      t' <- inferConcreteType scope t
+  contextArg i = case Map.lookup i typemap of
+    (Just (Right t)) -> do
+      t' <- inferType t
       return $ LR (typeSof t') t'
     Nothing -> return $ L PassthroughS
+    (Just (Left t)) -> do
+      MM.sayVVV "Warning: using universal inference at contextArg"
+      t' <- inferTypeUniversal t
+      return $ LR (typeSof t') t'
 
-  boundArg
-    :: (Scope, Scope)
-    -> Int
-    -> MorlocMonad TypeF
-  boundArg scope i = case Map.lookup i typemap of
-    (Just t) -> inferConcreteType scope t
+  boundArg :: Int -> MorlocMonad TypeF
+  boundArg i = case Map.lookup i typemap of
+    (Just (Right t)) -> inferType t
     Nothing -> error "Untyped native arg"
+    (Just (Left t)) -> do
+      MM.sayVVV "Warning: using universal inference at boundArg"
+      inferTypeUniversal t
 
   serialExpr
     :: Int
-    -> (Scope, Scope)
     -> MonoExpr
     -> MorlocMonad SerialExpr
-  serialExpr _ _ (MonoManifold m _ e) = do
-    scope <- getScope m lang
-    serialExpr m scope e
-  serialExpr m scope (MonoLet i e1 e2) = case inferState e1 of
-    Serialized -> SerialLetS i <$> serialExpr m scope e1 <*> serialExpr m scope e2
+  serialExpr _ (MonoManifold m form e) = do
+    MM.sayVVV $ "serialExpr MonoManifold m" <> pretty m <> parens (pretty form)
+    serialExpr m e
+  serialExpr m (MonoLet i e1 e2) = case inferState e1 of
+    Serialized -> SerialLetS i <$> serialExpr m e1 <*> serialExpr m e2
     Unserialized -> do
-      ne1 <- nativeExpr m scope e1
-      NativeLetS i ne1 <$> serialExpr m scope e2
-  serialExpr _ scope (MonoLetVar t i) = do
-    t' <- inferConcreteType scope t 
+      ne1 <- nativeExpr m e1
+      NativeLetS i ne1 <$> serialExpr m e2
+  serialExpr _ (MonoLetVar t i) = do
+    t' <- inferType t 
     return $ LetVarS (Just t') i
-  serialExpr m scope (MonoReturn e) = ReturnS <$> serialExpr m scope e
-  serialExpr _ scope (MonoApp (MonoPoolCall t m docs contextArgs) es) = do
-    contextArgs' <- mapM (typeArg scope Serialized . ann) contextArgs
+  serialExpr m (MonoReturn e) = ReturnS <$> serialExpr m e
+  serialExpr _ (MonoApp (MonoPoolCall t m docs contextArgs) es) = do
+    contextArgs' <- mapM (typeArg Serialized . ann) contextArgs
     let poolCall' = PoolCall m docs contextArgs'
-    es' <- mapM (serialArg m scope) es
-    t' <- inferConcreteType scope t
+    es' <- mapM (serialArg m) es
+    t' <- inferType t
     return $ AppPoolS t' poolCall' es'
-  serialExpr _ scope (MonoBndVar (Just t) i) = BndVarS <$> fmap Just (inferConcreteType scope t) <*> pure i
-  serialExpr _ _ (MonoBndVar Nothing i) = return $ BndVarS Nothing i
+  serialExpr _ (MonoBndVar (A _) i) = return $ BndVarS Nothing i
+  serialExpr _ (MonoBndVar (B _) i) =
+    case Map.lookup i typemap of
+      (Just (Right t)) -> BndVarS <$> fmap Just (inferType t) <*> pure i
+      _ -> return $ BndVarS Nothing i
+  serialExpr _ (MonoBndVar (C t) i) = BndVarS <$> fmap Just (inferType t) <*> pure i
   -- failing cases that should be unreachable
-  serialExpr _ _ (MonoSrc _ _) = error "Can represent MonoSrc as SerialExpr"
-  serialExpr _ _ MonoPoolCall{} = error "MonoPoolCall does not map to a SerialExpr"
-  serialExpr _ _ (MonoApp MonoManifold{} _) = error "Illegal?"
+  serialExpr _ (MonoSrc _ _) = error "Can represent MonoSrc as SerialExpr"
+  serialExpr _ MonoPoolCall{} = error "MonoPoolCall does not map to a SerialExpr"
+  serialExpr _ (MonoApp MonoManifold{} _) = error "Illegal?"
   -- the following are all native types that need to be directly serialized
-  serialExpr m scope e = nativeExpr m scope e >>= serializeS m
+  serialExpr m e = nativeExpr m e >>= serializeS "serialE e" m
 
   serialArg
     :: Int
-    -> (Scope, Scope)
     -> MonoExpr
     -> MorlocMonad SerialArg
-  serialArg _ _ e@(MonoManifold m _ _) = do
-    scope <- getScope m lang
-    se <- serialExpr m scope e
+  serialArg _ e@(MonoManifold m form _) = do
+    MM.sayVVV $ "serialArg MonoManifold m" <> pretty m <> parens (pretty form)
+    se <- serialExpr m e
     case se of
       (ManS sm) -> return $ SerialArgManifold sm
       _ -> error "Unreachable?"
   -- Pool and source calls should have previously been wrapped in manifolds
-  serialArg _ _ MonoPoolCall{} = error "This step should be unreachable"
-  serialArg _ _ (MonoSrc    _ _) = error "This step should be unreachable"
-  serialArg _ _ (MonoReturn _) = error "Return should not happen hear (really I should remove this term completely)"
-  serialArg m scope e = SerialArgExpr <$> serialExpr m scope e
+  serialArg _ MonoPoolCall{} = error "This step should be unreachable"
+  serialArg _ (MonoSrc    _ _) = error "This step should be unreachable"
+  serialArg _ (MonoReturn _) = error "Return should not happen hear (really I should remove this term completely)"
+  serialArg m e = SerialArgExpr <$> serialExpr m e
 
   nativeArg
     :: Int
-    -> (Scope, Scope)
     -> MonoExpr
     -> MorlocMonad NativeArg
   -- This case may occur, for example, with `(add 1.0 2.0)`. Here `add` has two
   -- native arguments, but the manifold that wraps it will have no
   -- arguments. This is because `1.0` and `2.0` are primitive and will be
   -- generated in place rather than passed as arguments.
-  nativeArg _ _ e@(MonoManifold m _ _) = do
-    scope <- getScope m lang
-    ne <- nativeExpr m scope e
+  nativeArg _ e@(MonoManifold m form _) = do
+    MM.sayVVV $ "nativeArg MonoManifold m" <> pretty m <> parens (pretty form)
+    ne <- nativeExpr m e
     case ne of
       (ManN nm) -> return $ NativeArgManifold nm
       _ -> error "Unreachable?"
   -- Pool and source calls should have previously been wrapped in manifolds
-  nativeArg _ _ MonoPoolCall{} = error "This step should be unreachable"
-  nativeArg _ _ (MonoSrc    _ _) = error "This step should be unreachable"
-  nativeArg _ _ (MonoReturn _) = error "Return should not happen here (really I should remove this term completely)"
-  nativeArg m scope e = NativeArgExpr <$> nativeExpr m scope e
+  nativeArg _ MonoPoolCall{} = error "This step should be unreachable"
+  nativeArg _ (MonoSrc    _ _) = error "This step should be unreachable"
+  nativeArg _ (MonoReturn _) = error "Return should not happen here (really I should remove this term completely)"
+  nativeArg m e = NativeArgExpr <$> nativeExpr m e
 
   nativeExpr
     :: Int
-    -> (Scope, Scope)
     -> MonoExpr
     -> MorlocMonad NativeExpr
-  nativeExpr _ _ (MonoManifold m form e) = do
-    scope <- getScope m lang
-    ne <- nativeExpr m scope e
-    form' <- abimapM (\i _ -> contextArg scope i) (\i _ -> boundArg scope i) form
+  nativeExpr _ (MonoManifold m form e) = do
+    MM.sayVVV $ "nativeExpr MonoManifold m" <> pretty m <> parens (pretty form)
+    ne <- nativeExpr m e
+    form' <- abimapM (\i _ -> contextArg i) (\i _ -> boundArg i) form
     return . ManN $ NativeManifold m lang form' ne
 
-  nativeExpr _ _ MonoPoolCall{} = error "MonoPoolCall does not map to NativeExpr"
-  nativeExpr m scope (MonoLet i e1 e2) = case inferState e1 of
+  nativeExpr _ MonoPoolCall{} = error "MonoPoolCall does not map to NativeExpr"
+  nativeExpr m (MonoLet i e1 e2) = case inferState e1 of
     Serialized -> do
-      ne2 <- nativeExpr m scope e2
-      SerialLetN i <$> serialExpr m scope e1 <*> pure ne2
+      ne2 <- nativeExpr m e2
+      SerialLetN i <$> serialExpr m e1 <*> pure ne2
     Unserialized -> do
-      ne1 <- nativeExpr m scope e1
-      ne2 <- nativeExpr m scope e2
+      ne1 <- nativeExpr m e1
+      ne2 <- nativeExpr m e2
       return $ NativeLetN i ne1 ne2
-  nativeExpr _ scope (MonoLetVar t i) = LetVarN <$> inferConcreteType scope t <*> pure i
-  nativeExpr m scope (MonoReturn e) = ReturnN <$> nativeExpr m scope e
-  nativeExpr m scope (MonoApp (MonoSrc (FunT inputTypes outputType) src) es) = do
-    args <- mapM (nativeArg m scope) es
+  nativeExpr _ (MonoLetVar t i) = LetVarN <$> inferType t <*> pure i
+  nativeExpr m (MonoReturn e) = ReturnN <$> nativeExpr m e
+  nativeExpr m (MonoApp (MonoSrc (Idx idx (FunT inputTypes outputType)) src) es) = do
+    args <- mapM (nativeArg m) es
     appType <- case drop (length es) inputTypes of
-        [] -> inferConcreteType scope outputType
-        remaining -> inferConcreteType scope $ FunT remaining outputType
+        [] -> inferType (Idx idx outputType)
+        remaining -> inferType $ Idx idx (FunT remaining outputType)
     return $ AppSrcN appType src args
-  nativeExpr m scope e@(MonoApp (MonoPoolCall t _ _ _) _) = do
-    e' <- serialExpr m scope e
-    t' <- inferConcreteType scope t
-    naturalizeN m lang t' e'
-  nativeExpr _ _ (MonoApp _ _) = error "Illegal application"
-  nativeExpr _ scope (MonoSrc t src) = SrcN <$> inferConcreteType scope t <*> pure src
-  nativeExpr _ scope (MonoBndVar (Just t) i) = BndVarN <$> inferConcreteType scope t <*> pure i
-  nativeExpr _ _ (MonoBndVar Nothing _) = error "MonoBndVar must have a type if used in native context"
+  nativeExpr m e@(MonoApp (MonoPoolCall t _ _ _) _) = do
+    e' <- serialExpr m e
+    t' <- inferType t
+    MM.sayVVV $ "nativeExpr MonoApp:" <+> pretty t'
+    naturalizeN "nativeE MonoApp" m lang t' e'
+  nativeExpr _ (MonoApp _ _) = error "Illegal application"
+  nativeExpr _ (MonoSrc t src) = SrcN <$> inferType t <*> pure src
+  nativeExpr _ (MonoBndVar (A _) _) = error "MonoBndVar must have a type if used in native context"
+  nativeExpr _ (MonoBndVar (B _) i) =
+    case Map.lookup i typemap of
+      (Just (Right t)) -> BndVarN <$> inferType t <*> pure i
+      _ -> error "No type found"
+  nativeExpr _ (MonoBndVar (C t) i) = BndVarN <$> inferType t <*> pure i
   -- simple native types
-  nativeExpr m scope (MonoAcc _ o v e k) = do
-    let v' = inferConcreteVar (fst scope) v
-    e' <- nativeExpr m scope e
+  nativeExpr m (MonoAcc _ o v e k) = do
+    v' <- inferVar v
+    e' <- nativeExpr m e
     return $ AccN o v' e' k
-  nativeExpr m scope (MonoList v t es) =
-    ListN (inferConcreteVar (fst scope) v)
-      <$> inferConcreteType scope t
-      <*> mapM (nativeExpr m scope) es
-  nativeExpr m scope (MonoTuple v rs) =
-    TupleN (inferConcreteVar (fst scope) v)
-      <$> mapM (nativeExpr m scope . snd) rs
-  nativeExpr m scope (MonoRecord o v ps rs) =
-    RecordN o (inferConcreteVar (fst scope) v)
-      <$> mapM (inferConcreteType scope) ps
-      <*> mapM (secondM (nativeExpr m scope . snd)) rs
+  nativeExpr m (MonoList v t es) =
+    ListN
+      <$> inferVar v
+      <*> inferType t
+      <*> mapM (nativeExpr m) es
+  nativeExpr m (MonoTuple v rs) =
+    TupleN
+      <$> inferVar v
+      <*> mapM (nativeExpr m . snd) rs
+  nativeExpr m (MonoRecord o v ps rs) =
+    RecordN o
+      <$> inferVar v
+      <*> mapM inferType ps
+      <*> mapM (secondM (nativeExpr m . snd)) rs
   -- primitives
-  nativeExpr _ scope (MonoLog    v x) = return $ LogN  (inferConcreteVar (fst scope) v) x
-  nativeExpr _ scope (MonoReal   v x) = return $ RealN (inferConcreteVar (fst scope) v) x
-  nativeExpr _ scope (MonoInt    v x) = return $ IntN  (inferConcreteVar (fst scope) v) x
-  nativeExpr _ scope (MonoStr    v x) = return $ StrN  (inferConcreteVar (fst scope) v) x
-  nativeExpr _ scope (MonoNull   v  ) = return $ NullN (inferConcreteVar (fst scope) v)
+  nativeExpr _ (MonoLog    v x) = LogN  <$> inferVar v <*> pure x
+  nativeExpr _ (MonoReal   v x) = RealN <$> inferVar v <*> pure x
+  nativeExpr _ (MonoInt    v x) = IntN  <$> inferVar v <*> pure x
+  nativeExpr _ (MonoStr    v x) = StrN  <$> inferVar v <*> pure x
+  nativeExpr _ (MonoNull   v  ) = NullN <$> inferVar v
 
   typeArg
-    :: (Scope, Scope)
-    -> SerializationState
+    :: SerializationState
     -> Int
     -> MorlocMonad (Arg TypeM)
-  typeArg scope s i = case (s, Map.lookup i typemap) of
-    (Serialized, Just t) -> do
-      t' <- inferConcreteType scope t
+  typeArg s i = case (s, Map.lookup i typemap) of
+    (Serialized, Just (Right t)) -> do
+      t' <- inferType t
       return $ Arg i (Serial t')
     (Serialized, Nothing) -> return $ Arg i Passthrough
-    (Unserialized, Just t) -> do
-      t' <- inferConcreteType scope t
+    (Serialized, Just (Left t)) -> do
+      MM.sayVVV $ "typeArg universal inference of unindexed type " <> pretty t
+      t' <- inferTypeUniversal t
+      return $ Arg i (Serial t')
+    (Unserialized, Just (Right t)) -> do
+      t' <- inferType t
       return $ Arg i (Native t')
     (Unserialized, Nothing) -> error "Bug: untyped non-passthrough value"
+    (Unserialized, Just (Left t)) -> do
+      MM.sayVVV $ "typeArg universal inference of unindexed type " <> pretty t
+      t' <- inferTypeUniversal t
+      return $ Arg i (Native t')
 
-  makeTypemap :: MonoExpr -> Map.Map Int Type
+  makeTypemap :: Int -> MonoExpr -> Map.Map Int (Either Type (Indexed Type))
   -- map variables used in this segment to their types
-  makeTypemap (MonoLetVar t i) = Map.singleton i t
-  makeTypemap (MonoBndVar (Just t) i) = Map.singleton i t
+  makeTypemap _ (MonoLetVar t i) = Map.singleton i (Right t)
+  makeTypemap parentIndex (MonoBndVar (B t) i) = Map.singleton i (Right (Idx parentIndex t))
+  makeTypemap _ (MonoBndVar (C t) i) = Map.singleton i (Right t)
   -- recursive calls
-  makeTypemap (MonoManifold _ (manifoldBound -> ys) e) =
+  makeTypemap _ (MonoManifold midx (manifoldBound -> ys) e) =
     -- bound arguments may not be used, but they where passed in from the
     -- source function, so they cannot be removed.
-    Map.union (Map.fromList [(i, t) | (Arg i (Just t)) <- ys]) (makeTypemap e)
-  makeTypemap (MonoLet _ e1 e2) = Map.union (makeTypemap e1) (makeTypemap e2)
-  makeTypemap (MonoReturn e) = makeTypemap e
-  makeTypemap (MonoApp e es) = Map.unions (map makeTypemap (e:es))
-  makeTypemap (MonoAcc _ _ _ e _) = makeTypemap e
-  makeTypemap (MonoList _ _ es) = Map.unions (map makeTypemap es)
-  makeTypemap (MonoTuple _ (map snd -> es)) = Map.unions (map makeTypemap es)
-  makeTypemap (MonoRecord _ _ _ (map (snd . snd) -> es)) = Map.unions (map makeTypemap es)
-  makeTypemap _ = Map.empty
+    Map.union (Map.fromList [(i, Left t) | (Arg i (Just t)) <- ys]) (makeTypemap midx e)
+  makeTypemap parentIdx (MonoLet _ e1 e2) = Map.union (makeTypemap parentIdx e1) (makeTypemap parentIdx e2)
+  makeTypemap parentIdx (MonoReturn e) = makeTypemap parentIdx e
+  makeTypemap _ (MonoApp (MonoSrc (ann -> idx) _) es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
+  makeTypemap parentIdx (MonoApp e es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) (e:es))
+  makeTypemap parentIdx (MonoAcc _ _ _ e _) = makeTypemap parentIdx e
+  makeTypemap _ (MonoList (ann -> idx) _ es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
+  makeTypemap _ (MonoTuple (ann -> idx) (map snd -> es)) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
+  makeTypemap _ (MonoRecord _ (ann -> idx) _ (map (snd . snd) -> es)) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
+  makeTypemap _ _ = Map.empty
+
+  mergeTypes :: Either Type (Indexed Type) -> Either Type (Indexed Type) -> Either Type (Indexed Type)
+  mergeTypes (Right t) _ = Right t
+  mergeTypes _ (Right t) = Right t
+  mergeTypes x _ = x
 
   -- make (SerialAST One) then convert to serializeMany
-  serializeS :: Int -> NativeExpr -> MorlocMonad SerialExpr
-  serializeS m se = SerializeS <$> Serial.makeSerialAST m lang (typeFof se) <*> pure se
+  serializeS :: MDoc -> Int -> NativeExpr -> MorlocMonad SerialExpr
+  serializeS msg m se = do
+    MM.sayVVV $ "serializeS" <+> pretty m <> ":" <+> msg
+    SerializeS <$> Serial.makeSerialAST m lang (typeFof se) <*> pure se
 
   -- infer the preferred serialization state for an expression.
   inferState :: MonoExpr -> SerializationState
@@ -1487,8 +1618,6 @@ serialize (MonoHead lang m0 args0 e0) = do
   inferState MonoBndVar{} = error "Ambiguous bound term"
   inferState _ = Unserialized
 
-type (D a) = (Map.Map Int Request, a)
-
 class IsSerializable a where
   serialLet :: Int -> SerialExpr -> a -> a
   nativeLet :: Int -> NativeExpr -> a -> a
@@ -1501,8 +1630,12 @@ instance IsSerializable NativeExpr where
   serialLet = SerialLetN
   nativeLet = NativeLetN
 
+type (D a) = (Map.Map Int Request, a)
+
+-- (de)serialize arguments as needed
+-- determines whether arguments are passed as serialized, native, or both
 wireSerial :: Lang -> SerialManifold -> MorlocMonad SerialManifold
-wireSerial lang sm0 = foldSerialManifoldM fm sm0 |>> snd
+wireSerial lang sm0@(SerialManifold m0 _ _ _) = foldSerialManifoldM fm sm0 |>> snd
   where
   defs = makeMonoidFoldDefault Map.empty (Map.unionWith (<>))
 
@@ -1531,11 +1664,54 @@ wireSerial lang sm0 = foldSerialManifoldM fm sm0 |>> snd
 
   wireSerialExpr (LetVarS_ t i) = return (Map.singleton i SerialContent, LetVarS t i)
   wireSerialExpr (BndVarS_ t i) = return (Map.singleton i SerialContent, BndVarS t i)
+  wireSerialExpr (AppPoolS_ t p@(PoolCall _ _ pargs) args) = do
+    let req1 = Map.unionsWith (<>) (map fst args)
+        req2 = Map.fromList [(i, requestOf tm) | Arg i tm <- pargs]
+        req3 = Map.unionWith (<>) req1 req2
+    return (req3, AppPoolS t p (map snd args))
+
+  -- for let expressions, I need to determine how the bound expression is used
+  -- downstream and then (un)serialize accordingly
+  wireSerialExpr (SerialLetS_ i (req1, se1) (req2, se2)) = do
+    let req' = Map.unionWith (<>) req1 req2
+    e' <- case Map.lookup i req2 of
+      (Just NativeContent) -> case typeSof se1 of
+        (SerialS tf) -> NativeLetS i <$> naturalizeN "a" m0 lang tf se1 <*> pure se2
+        _ -> error "Unuseable let definition"
+      (Just NativeAndSerialContent) -> error "Unsupported dual use let definition"
+      _ -> return $ SerialLetS i se1 se2
+    return (req', e')
+  wireSerialExpr (NativeLetS_ i (req1, ne1) (req2, se2)) = do
+    let req' = Map.unionWith (<>) req1 req2
+    e' <- case Map.lookup i req2 of
+      (Just SerialContent) -> SerialLetS i <$> serializeS "b" m0 (typeFof ne1) ne1 <*> pure se2
+      (Just NativeAndSerialContent) -> error "Unsupported dual use let definition"
+      _ -> return $ NativeLetS i ne1 se2
+    return (req', e')
+
   wireSerialExpr e = monoidSerialExpr defs e
 
   wireNativeExpr :: NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) -> MorlocMonad (D NativeExpr)
   wireNativeExpr (LetVarN_ t i) = return (Map.singleton i NativeContent, LetVarN t i)
   wireNativeExpr (BndVarN_ t i) = return (Map.singleton i NativeContent, BndVarN t i)
+
+  wireNativeExpr (SerialLetN_ i (req1, se1) (req2, ne2)) = do
+    let req' = Map.unionWith (<>) req1 req2
+    e' <- case Map.lookup i req2 of
+      (Just NativeContent) -> case typeSof se1 of
+        (SerialS tf) -> NativeLetN i <$> naturalizeN "a" m0 lang tf se1 <*> pure ne2
+        _ -> error "Unuseable let definition"
+      (Just NativeAndSerialContent) -> error "Unsupported dual use let definition"
+      _ -> return $ SerialLetN i se1 ne2
+    return (req', e')
+  wireNativeExpr (NativeLetN_ i (req1, ne1) (req2, ne2)) = do
+    let req' = Map.unionWith (<>) req1 req2
+    e' <- case Map.lookup i req2 of
+      (Just SerialContent) -> SerialLetN i <$> serializeS "b" m0 (typeFof ne1) ne1 <*> pure ne2
+      (Just NativeAndSerialContent) -> error "Unsupported dual use let definition"
+      _ -> return $ NativeLetN i ne1 ne2
+    return (req', e')
+
   wireNativeExpr e = monoidNativeExpr defs e
 
   specialize :: Map.Map Int Request -> Int -> Or TypeS TypeF -> Or TypeS TypeF
@@ -1553,10 +1729,10 @@ wireSerial lang sm0 = foldSerialManifoldM fm sm0 |>> snd
 
     wrapAsNeeded :: IsSerializable e => e -> (Int, Request) -> MorlocMonad e
     wrapAsNeeded e (i, req) = case (req, Map.lookup i formMap) of
-      (SerialContent,          Just (NativeContent, Just t)) -> serialLet i <$> serializeS m0 t (BndVarN t i) <*> pure e
-      (NativeAndSerialContent, Just (NativeContent, Just t)) -> serialLet i <$> serializeS m0 t (BndVarN t i) <*> pure e
-      (NativeContent,          Just (SerialContent, Just t)) -> nativeLet i <$> naturalizeN m0 lang t (BndVarS (Just t) i) <*> pure e
-      (NativeAndSerialContent, Just (SerialContent, Just t)) -> nativeLet i <$> naturalizeN m0 lang t (BndVarS (Just t) i) <*> pure e
+      (SerialContent,          Just (NativeContent, Just t)) -> serialLet i <$> serializeS "wan 1" m0 t (BndVarN t i) <*> pure e
+      (NativeAndSerialContent, Just (NativeContent, Just t)) -> serialLet i <$> serializeS "wan 2" m0 t (BndVarN t i) <*> pure e
+      (NativeContent,          Just (SerialContent, Just t)) -> nativeLet i <$> naturalizeN "wan 3" m0 lang t (BndVarS (Just t) i) <*> pure e
+      (NativeAndSerialContent, Just (SerialContent, Just t)) -> nativeLet i <$> naturalizeN "wan 4" m0 lang t (BndVarS (Just t) i) <*> pure e
       _ -> return e
 
   manifoldToMap :: (HasRequest t, MayHaveTypeF t) => ManifoldForm (Or TypeS TypeF) t -> Map.Map Int (Request, Maybe TypeF)
@@ -1568,13 +1744,17 @@ wireSerial lang sm0 = foldSerialManifoldM fm sm0 |>> snd
     f (ManifoldPass ys) = mapRequestFromYs ys
     f (ManifoldPart xs ys) = Map.union (mapRequestFromXs xs) (mapRequestFromYs ys)
 
-  serializeS :: Int -> TypeF -> NativeExpr -> MorlocMonad SerialExpr
-  serializeS m t se = SerializeS <$> Serial.makeSerialAST m lang t <*> pure se
+  serializeS :: MDoc -> Int -> TypeF -> NativeExpr -> MorlocMonad SerialExpr
+  serializeS msg m t se = do
+    MM.sayVVV $ "serializeS" <+> pretty m <> ":" <+> msg
+    SerializeS <$> Serial.makeSerialAST m lang t <*> pure se
 
 
+naturalizeN :: MDoc -> Int -> Lang -> TypeF -> SerialExpr -> MorlocMonad NativeExpr
+naturalizeN msg m lang t se = do
+  MM.sayVVV $ "naturalizeN at" <+> msg
+  DeserializeN t <$> Serial.makeSerialAST m lang t <*> pure se
 
-naturalizeN :: Int -> Lang -> TypeF -> SerialExpr -> MorlocMonad NativeExpr
-naturalizeN m lang t se = DeserializeN t <$> Serial.makeSerialAST m lang t <*> pure se
 
 data Request = SerialContent | NativeContent | NativeAndSerialContent
   deriving(Ord, Eq, Show)

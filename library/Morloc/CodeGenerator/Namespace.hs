@@ -357,30 +357,34 @@ data PolyExpr
   -- organizational terms that may have undefined types
   = PolyManifold Lang Int (ManifoldForm None (Maybe Type)) PolyExpr
   | PolyForeignInterface
-      Lang     -- foreign language
-      Type     -- return type in calling language
-      [Int]    -- argument ids
-      PolyExpr -- foreign expression
+      Lang           -- foreign language
+      (Indexed Type) -- return type in calling language
+      [Int]          -- argument ids
+      PolyExpr       -- foreign expression
   | PolyLet Int PolyExpr PolyExpr
   | PolyReturn PolyExpr
   | PolyApp PolyExpr [PolyExpr]
   -- variables in the original tree will all be typed
   -- but I also may need to generate passthrough terms
-  | PolyBndVar (Either Lang Type) Int
+  | PolyBndVar (Three
+        Lang -- no type information is known
+        Type -- the general type is known, but this is a passing variable without an locally identifiable concrete index
+        (Indexed Type)
+      ) Int
   -- The Let variables are generated only in partialExpress, where the type is known
-  | PolyLetVar Type Int
+  | PolyLetVar (Indexed Type) Int
   -- terms that map 1:1 versus SAnno; have defined types in one language
-  | PolySrc    Type Source
-  | PolyAcc    Type NamType TVar PolyExpr Key
+  | PolySrc    (Indexed Type) Source
+  | PolyAcc    (Indexed Type) NamType (Indexed TVar) PolyExpr Key
   -- data types
-  | PolyList   TVar Type [PolyExpr]
-  | PolyTuple  TVar [(Type, PolyExpr)]
-  | PolyRecord NamType TVar [Type] [(Key, (Type, PolyExpr))]
-  | PolyLog    TVar Bool
-  | PolyReal   TVar Scientific
-  | PolyInt    TVar Integer
-  | PolyStr    TVar Text
-  | PolyNull   TVar
+  | PolyList   (Indexed TVar) (Indexed Type) [PolyExpr]
+  | PolyTuple  (Indexed TVar) [(Indexed Type, PolyExpr)]
+  | PolyRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, PolyExpr))]
+  | PolyLog    (Indexed TVar) Bool
+  | PolyReal   (Indexed TVar) Scientific
+  | PolyInt    (Indexed TVar) Integer
+  | PolyStr    (Indexed TVar) Text
+  | PolyNull   (Indexed TVar)
 
 data MonoHead = MonoHead Lang Int [Arg None] MonoExpr
 
@@ -388,27 +392,27 @@ data MonoExpr
   -- organizational terms that may have undefined types
   = MonoManifold Int (ManifoldForm None (Maybe Type)) MonoExpr
   | MonoPoolCall
-      Type       -- return type in calling language
+      (Indexed Type)       -- return type in calling language
       Int        -- foreign manifold id
       [MDoc]     -- shell command components that preceed the passed data
       [Arg None] -- arguments
   | MonoLet Int MonoExpr MonoExpr
-  | MonoLetVar Type Int
+  | MonoLetVar (Indexed Type) Int
   | MonoReturn MonoExpr
   | MonoApp MonoExpr [MonoExpr]
   -- terms that map 1:1 versus SAnno; have defined types in one language
-  | MonoSrc    Type Source
-  | MonoBndVar (Maybe Type) Int
-  | MonoAcc    Type NamType TVar MonoExpr Key
+  | MonoSrc    (Indexed Type) Source
+  | MonoBndVar (Three None Type (Indexed Type)) Int -- (Three Lang Type (Indexed Type)) Int  -- (Maybe (Indexed Type))
+  | MonoAcc    (Indexed Type) NamType (Indexed TVar) MonoExpr Key
   -- data types
-  | MonoList   TVar Type [MonoExpr]
-  | MonoTuple  TVar [(Type, MonoExpr)]
-  | MonoRecord NamType TVar [Type] [(Key, (Type, MonoExpr))]
-  | MonoLog    TVar Bool
-  | MonoReal   TVar Scientific
-  | MonoInt    TVar Integer
-  | MonoStr    TVar Text
-  | MonoNull   TVar
+  | MonoRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, MonoExpr))]
+  | MonoList   (Indexed TVar) (Indexed Type) [MonoExpr]
+  | MonoTuple  (Indexed TVar) [(Indexed Type, MonoExpr)]
+  | MonoLog    (Indexed TVar) Bool
+  | MonoReal   (Indexed TVar) Scientific
+  | MonoInt    (Indexed TVar) Integer
+  | MonoStr    (Indexed TVar) Text
+  | MonoNull   (Indexed TVar)
 
 data PoolCall = PoolCall
   Int -- foreign manifold id
@@ -1103,6 +1107,12 @@ instance Pretty TypeM where
   pretty (Function ts t) =
     nest 4 (vsep $ ["Function{"] <> map (\x -> pretty x <+> "->") ts <> [pretty t <> "}"] )
 
+instance Pretty TypeS where
+  pretty PassthroughS = "PassthroughS" 
+  pretty (SerialS t) = "SeralS{" <> pretty t <> "}"
+  pretty (FunctionS ts t) =
+    nest 4 (vsep $ ["Function{"] <> map (\x -> pretty x <+> "->") ts <> [pretty t <> "}"] )
+
 instance Pretty PolyHead where
     pretty _ = "PolyHead stub"
 
@@ -1120,8 +1130,9 @@ instance Pretty MonoExpr where
     pretty (MonoReturn e) = "return" <> parens (pretty e)
     pretty (MonoApp e es) = parens (pretty e) <+> hsep (map (parens . pretty) es)
     pretty (MonoSrc    _ src) = pretty src
-    pretty (MonoBndVar Nothing i) = parens $ "x" <> pretty i <+> ":" <+> "<unknown>"
-    pretty (MonoBndVar (Just t) i) = parens $ "x" <> pretty i <+> ":" <+> pretty t
+    pretty (MonoBndVar (A _) i) = parens $ "x" <> pretty i <+> ":" <+> "<unknown>"
+    pretty (MonoBndVar (B t) i) = parens $ "x" <> pretty i <+> ":" <+> pretty t
+    pretty (MonoBndVar (C t) i) = parens $ "x" <> pretty i <+> ":" <+> pretty t
     pretty (MonoAcc    t n v e k) = parens (pretty e) <> "@" <> pretty k
     pretty (MonoList   _ _ es) = list (map pretty es)
     pretty (MonoTuple  v es) = pretty v <+> tupled (map pretty es)
@@ -1143,3 +1154,10 @@ instance Pretty MonoHead where
 
 instance Pretty PoolCall where
     pretty _ = "PoolCall stub"
+
+instance (Pretty context, Pretty bound) => Pretty (ManifoldForm context bound) where
+  pretty (ManifoldPass args) = "ManifoldPass" <+> list (map pretty args)
+  pretty (ManifoldFull args) = "ManifoldFull" <+> list (map pretty args)
+  pretty (ManifoldPart cargs bargs) = "ManifoldFull"
+    <+> "{context:" <+> list (map pretty cargs) <> ","
+    <+> "bound:" <+> list (map pretty bargs) <> "}"

@@ -2,4 +2,8 @@ module main (foo)
 
 import rbase (div)
 
+type R => Tuple3 a b c = "list" a b c
+type R => Bool = "logical"
+type R => Real = "numeric"
+
 foo x = (True, x, div 4.0 x)

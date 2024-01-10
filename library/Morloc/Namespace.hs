@@ -23,6 +23,7 @@ module Morloc.Namespace
   , Or(..)
   , Many(..)
   -- ** Other classes
+  , Three(..)
   , Defaultable(..)
   -- ** Indexed
   , IndexedGeneral(..)
@@ -160,7 +161,12 @@ data MorlocState = MorlocState
   --   Where `TVar` is `Map`
   --         `Type` is `"std::map<$1,$2>" k v`
   --         `[TVar]` is `[k,v]`
+  , stateUniversalGeneralTypedefs :: Scope
+  -- ^ store the general typedefs pooled across all modules -- for the truly desparate
+  , stateUniversalConcreteTypedefs :: Map Lang Scope
+  -- ^ store the concrete typedefs pooled across all modules -- for the truly desparate
   , stateInnerMogrifiers :: GMap Int MVar (Map Property [(TypeU, Source)])
+  , stateUniversalInnerMogrifiers :: Map Property [(TypeU, Source)]
   , stateSources :: GMap Int MVar [Source]
   , stateAnnotations :: Map Int [TypeU]
   -- ^ Stores non-top-level annotations.
@@ -547,6 +553,9 @@ data Source =
 -- c: an annotation for the specific child tree
 data SAnno g f c = SAnno (f (SExpr g f c, c)) g
 
+data Three a b c = A a | B b | C c
+  deriving (Ord, Eq, Show)
+
 data None = None
   deriving (Show)
 
@@ -793,7 +802,7 @@ instance Typelike TypeU where
   --  * all existentials are replaced with default values if a possible
   typeOf (VarU v) = VarT v
   typeOf (ExistU _ ps rs@(_:_)) = NamT NamRecord (TV "Record") (map typeOf ps) (map (second typeOf) rs) where
-  typeOf (ExistU v _ _) = error "For now, this is illegal" -- typeOf (ForallU v (VarU v)) -- this will cause problems eventually
+  typeOf (ExistU v _ _) = typeOf (ForallU v (VarU v)) -- this will cause problems eventually
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
   typeOf (FunU ts t) = FunT (map typeOf ts) (typeOf t)
   typeOf (AppU t ts) = AppT (typeOf t) (map typeOf ts)

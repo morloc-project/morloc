@@ -56,6 +56,11 @@ instance Pretty Lang where
 instance Pretty NamType where
   pretty = viaShow
 
+instance (Pretty a, Pretty b) => Pretty (Or a b) where
+  pretty (L x) = parens ("L" <+> pretty x)
+  pretty (R x) = parens ("R" <+> pretty x)
+  pretty (LR x y) = parens ("LR" <+> pretty x <> "," <+> pretty y)
+
 instance Pretty Source where
   pretty s
     = "source" <+> pretty (srcLang s)

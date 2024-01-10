@@ -286,7 +286,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
   pTypedefType = do
     _ <- reserved "type"
     mayLang <- optional (try pLangNamespace)
-    (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
+    (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
     _ <- symbol "="
     case mayLang of
       (Just lang) -> do
@@ -300,7 +300,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
   pTypedefObject = do
     o <- pNamType
     mayLang <- optional (try pLangNamespace)
-    (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
+    (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
     _ <- symbol "="
     (con, k) <- case mayLang of
       (Just lang) -> do
@@ -312,6 +312,12 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries o)
     let t = NamU o (TV con) (map VarU vs) (map (first Key) entries)
     exprI (TypE k v vs t)
+
+  pTypedefTerm :: Parser (TVar, [TVar])
+  pTypedefTerm = do
+    t <- freenameU
+    ts <- many freenameL
+    return (TV t, map TV ts)
 
   -- TODO: is this really the right place to be doing this?
   desugarTableEntries
@@ -342,16 +348,6 @@ pTypedef = try pTypedefType <|> pTypedefObject where
   pNamRecord = do
     _ <- reserved "record" 
     return NamRecord
-
-  pTypedefTermUnpar :: Parser (TVar, [TVar])
-  pTypedefTermUnpar = do
-    v <- freenameU
-    return (TV v, [])
-
-  pTypedefTermPar :: Parser (TVar, [TVar])
-  pTypedefTermPar = do
-    (t:ts) <- parens ((:) <$> freenameU <*> many freenameL)
-    return (TV t, map TV ts)
 
   pLangNamespace :: Parser Lang
   pLangNamespace = do

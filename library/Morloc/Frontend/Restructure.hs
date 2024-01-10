@@ -135,6 +135,15 @@ collectTypes :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTypes fullDag = do
   let typeDAG = MDD.mapEdge (\xs -> [(x,y) | AliasedType x y <- xs]) fullDag
   _ <- MDD.synthesizeDAG formTypes typeDAG
+
+  universalConcreteScope <- getUniversalConcreteScope
+  universalGeneralScope <- getUniversalGeneralScope
+
+  s <- MM.get
+  MM.put (s { stateUniversalGeneralTypedefs = universalGeneralScope
+            , stateUniversalConcreteTypedefs = universalConcreteScope
+            } )
+
   return ()
   where
 
@@ -170,6 +179,24 @@ collectTypes fullDag = do
        , Map.unionWith (Map.unionWith mergeEntries) cmap' thisCmap
        )
 
+  getUniversalConcreteScope :: MorlocMonad (Map.Map Lang Scope)
+  getUniversalConcreteScope = do
+    (GMap _ modMaps) <- MM.gets stateConcreteTypedefs
+    let langs = concatMap Map.keys . Map.elems $ modMaps
+    scopes <- mapM getLangScope langs
+    return . Map.fromList $ zip langs scopes
+    where
+      getLangScope :: Lang -> MorlocMonad Scope
+      getLangScope lang = do
+        (GMap _ (Map.elems -> langMaps)) <- MM.gets stateConcreteTypedefs
+        return . Map.unionsWith mergeEntries . mapMaybe (Map.lookup lang) $ langMaps
+
+  getUniversalGeneralScope :: MorlocMonad Scope
+  getUniversalGeneralScope = do
+    (GMap _ (Map.elems -> scopes)) <- MM.gets stateGeneralTypedefs
+    return $ Map.unionsWith mergeEntries scopes
+
+
 -- merge type functions, names of generics do not matter
 mergeEntries :: [([TVar], TypeU, Bool)] -> [([TVar], TypeU, Bool)] -> [([TVar], TypeU, Bool)]
 mergeEntries xs0 ys0 = filter (isNovel ys0) xs0 <> ys0
@@ -204,8 +231,24 @@ collectMogrifiers :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectMogrifiers fullDag = do
   let typeDag = MDD.mapEdge (\xs -> [(x,y) | AliasedType x y <- xs]) fullDag
   _ <- MDD.synthesizeDAG formMogrifiers typeDag
+
+  s <- MM.get
+  let (GMap _ (Map.elems -> propMap)) = stateInnerMogrifiers s
+  MM.put (s {stateUniversalInnerMogrifiers = Map.unionsWith mergeMogs propMap })
+
   return ()
   where
+
+  mergeMogs :: [(TypeU, Source)] -> [(TypeU, Source)] -> [(TypeU, Source)]
+  mergeMogs xs0 ys0 = filter (isNovel ys0) xs0 <> ys0 where
+    isNovel :: [(TypeU, Source)] -> (TypeU, Source) -> Bool
+    isNovel [] _ = True
+    isNovel ((t1, src1):ys) x@(t2, src2)
+      | srcPath src1 == srcPath src2 &&
+        srcName src1 == srcName src2 &&
+        MTP.isSubtypeOf t1 t2 &&
+        MTP.isSubtypeOf t2 t1 = False
+      | otherwise = isNovel ys x
 
   formMogrifiers
     :: MVar
@@ -256,7 +299,7 @@ collectMogrifiers fullDag = do
       inherit aliasMap mogMap
         = Map.mapWithKey (selectInherited (map snd aliasMap))
         . Map.map ( map (first (renameMog aliasMap)) )
-        $  mogMap 
+        $  mogMap
 
       -- determine whether a given mogrifier is inherited given the import list
       selectInherited :: [TVar] -> Property -> [(TypeU, Source)] -> [(TypeU, Source)]
@@ -272,22 +315,11 @@ collectMogrifiers fullDag = do
       renameMog :: [(TVar, TVar)] -> TypeU -> TypeU
       renameMog aliasMap t0 = foldl (\t (s,a) -> rename s a t) t0 aliasMap
 
-      mergeMogs :: [(TypeU, Source)] -> [(TypeU, Source)] -> [(TypeU, Source)]
-      mergeMogs xs0 ys0 = filter (isNovel ys0) xs0 <> ys0 where
-        isNovel :: [(TypeU, Source)] -> (TypeU, Source) -> Bool
-        isNovel [] _ = True
-        isNovel ((t1, src1):ys) x@(t2, src2)
-          | srcPath src1 == srcPath src2 &&
-            srcName src1 == srcName src2 &&
-            MTP.isSubtypeOf t1 t2 &&
-            MTP.isSubtypeOf t2 t1 = False
-          | otherwise = isNovel ys x
-
 
 -- Rename a variable. For example:
 --   import maps (Map as HashMap, foo, bar)
 --
--- Here all uses `Map` in anything imported from `maps` needs to 
+-- Here all uses `Map` in anything imported from `maps` needs to
 -- be renamed to `HashMap`. So we call:
 --   rename (TV "Map") (TV "HashMap") x
 -- where `x` is any term
@@ -328,13 +360,13 @@ nullify = MDD.mapNode f where
 
 removeTypeImports :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
 removeTypeImports d = case MDD.roots d of
-  [root] -> return 
+  [root] -> return
           . MDD.shake root
           . MDD.filterEdge filterEmpty
           . MDD.mapEdge (mapMaybe maybeEVar)
           $ d
   roots -> MM.throwError $ NonSingularRoot roots
-  where 
+  where
     maybeEVar :: AliasedSymbol -> Maybe (EVar, EVar)
     maybeEVar (AliasedTerm x y) = Just (x, y)
     maybeEVar (AliasedType _ _) = Nothing -- remove type symbols, they have already been used

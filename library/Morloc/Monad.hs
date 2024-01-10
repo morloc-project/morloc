@@ -42,6 +42,7 @@ module Morloc.Monad
   , metaProperties
   , metaTypedefs
   , metaMogrifiers
+  , metaUniversalMogrifiers
   -- * handling tree depth
   , incDepth
   , getDepth
@@ -93,7 +94,10 @@ instance Defaultable MorlocState where
     , stateSignatures = GMap.empty
     , stateConcreteTypedefs = GMap.empty
     , stateGeneralTypedefs = GMap.empty
+    , stateUniversalConcreteTypedefs = Map.empty
+    , stateUniversalGeneralTypedefs = Map.empty
     , stateInnerMogrifiers = GMap.empty
+    , stateUniversalInnerMogrifiers = Map.empty
     , stateSources = GMap.empty
     , stateAnnotations = Map.empty
     , stateOutfile = Nothing
@@ -315,6 +319,10 @@ metaMogrifiers i lang = do
     (GMapJust p') -> Map.map (filter (\(_, src) -> srcLang src == lang)) p'
     _ -> Map.empty
 
+metaUniversalMogrifiers :: Lang -> MorlocMonad (Map.Map Property [(TypeU, Source)])
+metaUniversalMogrifiers lang = do
+  p <- gets stateUniversalInnerMogrifiers
+  return $ Map.map (filter (\(_, src) -> srcLang src == lang)) p
 
 -- | This is currently only used in the C++ translator.
 -- FIXME: should a term be allowed to have multiple type definitions within a language?

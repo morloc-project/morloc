@@ -8,19 +8,21 @@ type Py => Str = "str"
 type Py => Int = "int"
 type Py => (Tuple2 a b) = "tuple" a b
 
+-- So this is really obvious code duplication now, but I'll fix it later
+
 record Person = Person
   { name :: Str
   , age :: Int
   }
 
 record Py => Person = "dict"
-  { name :: "str"
-  , age :: "int"
+  { name :: Str
+  , age :: Int
   }
 
 record R => Person = "list"
-  { name :: "std::string"
-  , age :: "int"
+  { name :: Str
+  , age :: Int
   }
 
 source Py from "foo.py" ("foo")

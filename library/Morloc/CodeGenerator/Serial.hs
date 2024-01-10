@@ -25,9 +25,6 @@ import qualified Data.Map as Map
 import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
 import Morloc.Typecheck.Internal (subtype, apply, unqualify, qualify, substitute)
-import Control.Monad.Except (runExcept, Except)
-import qualified Control.Monad.State as CMS
-import qualified Morloc.Data.GMap as GMap
 import Morloc.CodeGenerator.Infer
 
 
@@ -95,8 +92,8 @@ shallowType (SerialUnknown v) = UnkF v
 makeSerialAST :: Int -> Lang -> TypeF -> MorlocMonad SerialAST
 makeSerialAST m lang t0 = do
   -- [(([TVar], TypeU), Source)]
-  packs   <- MM.metaMogrifiers m lang |>> Map.lookup Pack   |>> fromMaybe [] |>> map (first unqualify)
-  unpacks <- MM.metaMogrifiers m lang |>> Map.lookup Unpack |>> fromMaybe [] |>> map (first unqualify)
+  packs   <- MM.metaUniversalMogrifiers lang |>> Map.lookup Pack   |>> fromMaybe [] |>> map (first unqualify)
+  unpacks <- MM.metaUniversalMogrifiers lang |>> Map.lookup Unpack |>> fromMaybe [] |>> map (first unqualify)
 
   MM.sayVVV $ "packs:" <+> viaShow packs
   MM.sayVVV $ "unpacks:" <+> viaShow unpacks
@@ -136,9 +133,8 @@ makeSerialAST m lang t0 = do
       where
         makeTypePacker :: (Int, TypeU, TypeU, Source, Source) -> MorlocMonad TypePacker
         makeTypePacker (0, generalUnpackedType, generalPackedType, forwardSource, reverseSource) = do
-          scope <- getScope m lang
-          packedType <- inferConcreteType scope (typeOf generalPackedType)
-          unpackedType <- inferConcreteType scope (typeOf generalUnpackedType)
+          packedType <- inferConcreteType lang (Idx m (typeOf generalPackedType))
+          unpackedType <- inferConcreteType lang (Idx m (typeOf generalUnpackedType))
           return $ TypePacker
             { typePackerPacked   = packedType
             , typePackerUnpacked = unpackedType
@@ -157,15 +153,14 @@ makeSerialAST m lang t0 = do
         selectPacker _ = serializerError "Two you say, oh, get out of here"
 
 
-    makeSerialAST' _ (FunF _ _)
-      = serializerError "Cannot serialize functions"
+    makeSerialAST' _ t@(FunF _ _)
+      = serializerError $ "Cannot serialize functions at" <+> pretty m <> ":" <+> pretty t
     makeSerialAST' typepackers t@(AppF (VarF v@(FV generalTypeName _)) ts@(firstType:_))
       | generalTypeName == BT.list = SerialList v <$> makeSerialAST' typepackers firstType
       | generalTypeName == BT.tuple (length ts) = SerialTuple v <$> mapM (makeSerialAST' typepackers) ts
       | otherwise = case Map.lookup generalTypeName typepackers of
           (Just ps) -> do
-            scope <- getScope m lang
-            packers <- catMaybes <$> mapM (resolvePacker scope t) ps
+            packers <- catMaybes <$> mapM (resolvePacker lang m t) ps
             unpacked <- mapM (makeSerialAST' typepackers . typePackerUnpacked) packers
             selection <- selectPacker (zip packers unpacked)
             return $ SerialPack v selection
@@ -184,14 +179,15 @@ makeSerialAST m lang t0 = do
 
 
 resolvePacker
-  :: (Scope, Scope)
+  :: Lang
+  -> Int
   -> TypeF
   -> (Int, TypeU, TypeU, Source, Source)
   -> MorlocMonad (Maybe TypePacker)
-resolvePacker scope resolvedType@(AppF _ xs) (nparam, unpackedGeneralType, packedGeneralType, srcPacked, srcUnpacked)
+resolvePacker lang m0 resolvedType@(AppF _ xs) (nparam, unpackedGeneralType, packedGeneralType, srcPacked, srcUnpacked)
   | length xs == nparam = do
-      packedConcreteType <- inferConcreteTypeU scope packedGeneralType
-      unpackedConcreteType <- inferConcreteTypeU scope unpackedGeneralType
+      packedConcreteType <- inferConcreteTypeU lang (Idx m0 packedGeneralType)
+      unpackedConcreteType <- inferConcreteTypeU lang (Idx m0 unpackedGeneralType)
       maybeUnpackedType <- resolveP
         resolvedType
         packedConcreteType
@@ -288,7 +284,7 @@ resolvePacker scope resolvedType@(AppF _ xs) (nparam, unpackedGeneralType, packe
             keys = map fst rs
             (vsg, vsc) = unzip $ map (unweaveTypeF . snd) rs
         in (NamU n gv psg (zip keys vsg), NamU n (cv2tv cv) psc (zip keys vsc))
-
+ 
     weaveTypeF :: TypeU -> TypeU -> TypeF
     weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv (tv2cv cv))
     weaveTypeF (FunU tsg tg) (FunU tsc tc) = FunF (zipWith weaveTypeF tsg tsc) (weaveTypeF tg tc)
@@ -305,7 +301,7 @@ resolvePacker scope resolvedType@(AppF _ xs) (nparam, unpackedGeneralType, packe
     existential :: TypeU -> TypeU
     existential (ForallU v t0) = substitute v (existential t0)
     existential t0 = t0
-resolvePacker _ _ _ = serializerError "No packer found for this type"
+resolvePacker _ _ _ _ = serializerError "No packer found for this type"
 
 cv2tv :: CVar -> TVar
 cv2tv (CV x) = TV x
