@@ -134,7 +134,6 @@ forall (s:ss) t = ForallU (TV s) (forall ss t)
 
 exist v = ExistU (TV v) [] []
 
-v s = TV s 
 var s = VarU (TV s)
 arr s ts = AppU (VarU (TV s)) ts
 lst t = arr "List" [t]
@@ -161,11 +160,11 @@ subtypeTests =
     , assertSubtypeGamma "<b> -| [A] <: <b> |- <b>:[A]" [ebg] (lst a) (eb) [solvedB (lst a)]
     , assertSubtypeGamma "<a> -| <a> <: [B] |- <a>:[B]" [eag] (lst b) (ea) [solvedA (lst b)]
     , assertSubtypeGamma "<a>, <b> -| <a> <b> <: [C] |- <a>:[C], <b>:C" [eag, ebg]
-        (ExistU (v "x1") [eb] []) (lst c) [solvedA (lst c), solvedB c]
+        (ExistU (TV "x1") [eb] []) (lst c) [solvedA (lst c), solvedB c]
     , assertSubtypeGamma "<a>, <b> -|[C] <: <a> <b> |- <a>:[C], <b>:C" [eag, ebg]
-        (lst c) (ExistU (v "x1") [eb] []) [solvedA (lst c), solvedB c]
-    , assertSubtypeGamma "[] -| forall a . a <: A -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (v "a") a]
-    , assertSubtypeGamma "[] -| A <: forall a . a -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (v "a") a]
+        (lst c) (ExistU (TV "x1") [eb] []) [solvedA (lst c), solvedB c]
+    , assertSubtypeGamma "[] -| forall a . a <: A -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (TV "a") a]
+    , assertSubtypeGamma "[] -| A <: forall a . a -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (TV "a") a]
       -- nested types
     , assertSubtypeGamma "<b> -| [A] <: [<b>] |- <b>:A" [ebg] (lst a) (lst eb) [solvedB a]
     , assertSubtypeGamma "<a> -| [<a>] <: [B] |- <a>:B" [eag] (lst b) (lst ea) [solvedA b]
@@ -180,24 +179,24 @@ subtypeTests =
     a = var "A"
     b = var "B"
     c = var "C"
-    ea = ExistU (v "x1") [] []
-    eb = ExistU (v "x2") [] []
-    ec = ExistU (v "x3") [] []
-    ed = ExistU (v "x4") [] []
-    eag = ExistG (v "x1") [] []
-    ebg = ExistG (v "x2") [] []
-    ecg = ExistG (v "x3") [] []
-    edg = ExistG (v "x4") [] []
-    solvedA t = SolvedG (v "x1") t
-    solvedB t = SolvedG (v "x2") t
-    solvedC t = SolvedG (v "x3") t
-    solvedD t = SolvedG (v "x4") t
+    ea = ExistU (TV "x1") [] []
+    eb = ExistU (TV "x2") [] []
+    ec = ExistU (TV "x3") [] []
+    ed = ExistU (TV "x4") [] []
+    eag = ExistG (TV "x1") [] []
+    ebg = ExistG (TV "x2") [] []
+    ecg = ExistG (TV "x3") [] []
+    edg = ExistG (TV "x4") [] []
+    solvedA t = SolvedG (TV "x1") t
+    solvedB t = SolvedG (TV "x2") t
+    solvedC t = SolvedG (TV "x3") t
+    solvedD t = SolvedG (TV "x4") t
 
 substituteTVarTests =
   testGroup
     "test variable substitution"
-    [ testEqual "[x/y]Int" (substituteTVar (v "x") (var "y") int) int
-    , testEqual "[y/x]([x] -> x)" (substituteTVar (v "x") (var "y") (fun [lst (var "x"), var "x"]))
+    [ testEqual "[x/y]Int" (substituteTVar (TV "x") (var "y") int) int
+    , testEqual "[y/x]([x] -> x)" (substituteTVar (TV "x") (var "y") (fun [lst (var "x"), var "x"]))
         (fun [lst (var "y"), var "y"]) 
     ]
 
@@ -395,6 +394,38 @@ typeAliasTests =
            type (A a) = (a,a)
            foo :: A -> C
            foo
+        |]
+    , expectError
+        "fail on conflicting types (Int vs Str)"
+        (ConflictingTypeAliases int str)
+        [r|
+           type A = Int
+         
+           module b (A)
+           type A = Str
+         
+           module main (foo)
+           import a (A)
+           import b (A)
+         
+           foo :: A -> A -> A
+        |]
+    , expectError
+        "fail on conflicting types (Map vs List)"
+        (ConflictingTypeAliases (forall ["a", "b"] $ lst (tuple [var "a", var "b"]))
+                                (forall ["a", "b"] $ arr "Map" [var "a", var "b"]))
+        [r|
+           module a (A)
+           type A a b = Map a b
+           
+           module b (A)
+           type A a b = List (Tuple2 a b)
+           
+           module main (foo)
+           import a (A)
+           import b (A)
+           
+           foo :: A a b -> A a b -> A a b
         |]
 
     -- import tests ---------------------------------------

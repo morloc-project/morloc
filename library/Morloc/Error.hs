@@ -48,7 +48,9 @@ instance Pretty MorlocError where
     <> " expected " <> pretty exp'
     <> " parameters but found " <> pretty obs
   pretty (ConflictingTypeAliases t1 t2)
-    = "ConflictingTypeAliases: (" <> pretty t1 <> ", " <> pretty t2 <> ")" 
+    = "ConflictingTypeAliases:"
+    <> "\n  t1:" <+> pretty t1
+    <> "\n  t2:" <+> pretty t2
   pretty (CallTheMonkeys msg) =
     "There is a bug in the code, send this message to the maintainer: " <> pretty msg
   pretty (GeneratorError msg) = "GeneratorError: " <> pretty msg

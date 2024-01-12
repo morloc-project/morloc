@@ -186,7 +186,7 @@ generalTransformType bnd0 recurse' resolve' h = f bnd0
       && MTP.isSubtypeOf t2' t1'
       && length ts1 == length ts2
       && isTerminal1 == isTerminal2 = return t
-    | otherwise = MM.throwError (ConflictingTypeAliases (unresolvedType2type t1) (unresolvedType2type t2))
+    | otherwise = MM.throwError (ConflictingTypeAliases t1 t2)
     where
       t1' = foldl (flip ForallU) t1 ts1
       t2' = foldl (flip ForallU) t2 ts2
