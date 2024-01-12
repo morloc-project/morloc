@@ -41,6 +41,7 @@ module Morloc.Monad
   , metaName
   , metaProperties
   , metaTypedefs
+  , metaGeneralTypedefs
   , metaMogrifiers
   , metaUniversalMogrifiers
   -- * handling tree depth
@@ -336,6 +337,13 @@ metaTypedefs i lang = do
         Nothing -> Map.empty
       _ -> Map.empty
 
+metaGeneralTypedefs :: Int -> MorlocMonad Scope
+metaGeneralTypedefs i = do
+  p <- gets stateGeneralTypedefs
+
+  return $ case GMap.lookup i p of
+    (GMapJust langmap) -> langmap
+    _ -> Map.empty
 
 newtype IndexState = IndexState { index :: Int }
 type Index a = StateT IndexState Identity a

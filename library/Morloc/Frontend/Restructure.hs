@@ -20,6 +20,7 @@ import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.Map as Map
+import qualified Morloc.TypeEval as TE
 import qualified Data.Set as Set
 import qualified Morloc.Frontend.PartialOrder as MTP
 import Morloc.Typecheck.Internal (qualify, unqualify)
@@ -32,6 +33,7 @@ restructure s
   = checkForSelfRecursion s -- modules should not import themselves
   >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
   >>= doM collectTypes
+  >>= evaluateAllTypes
   >>= doM collectMogrifiers
   >>= removeTypeImports -- Remove type imports and exports
   |>> nullify -- TODO: unsus and document
@@ -225,6 +227,63 @@ filterAndSubstitute links typemap =
     = case Map.lookup sourceName typedefs of
       (Just xs) -> Map.insert localAlias (map (\(a,b,c) -> (a, rename sourceName localAlias b, c)) xs) (Map.delete sourceName typedefs)
       Nothing -> typedefs
+
+evaluateAllTypes :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
+evaluateAllTypes = MDD.mapNodeM f where
+  f :: ExprI -> MorlocMonad ExprI
+  f e0 = do
+    g e0 where
+      g :: ExprI -> MorlocMonad ExprI
+      g (ExprI i (SigE v l e)) = do
+        gscope <- MM.metaGeneralTypedefs i
+        e' <- evaluateEType gscope e
+        MM.sayVVV $ "evaluateEType"
+          <> "\n  e:" <+> pretty (etype e)
+          <> "\n  e':" <+> pretty (etype e')
+        return $ ExprI i (SigE v l e')
+      g (ExprI i (AnnE e ts)) = do
+        gscope <- MM.metaGeneralTypedefs i
+        ts' <- mapM (evaluateTypeU gscope) ts
+        MM.sayVVV $ "evaluateTypeU"
+          <> "\n  ts:" <+> pretty ts
+          <> "\n  ts':" <+> pretty ts'
+        e' <- g e
+        return (ExprI i (AnnE e' ts'))
+      g (ExprI i (ModE m es)) = do
+        es' <- mapM g es
+        return $ ExprI i (ModE m es')
+      g (ExprI i (AssE v e es)) = do
+        e' <- g e
+        es' <- mapM g es
+        return $ ExprI i (AssE v e' es')
+      g (ExprI i (AccE e k)) = do
+        e' <- g e
+        return $ ExprI i (AccE e' k)
+      g (ExprI i (LstE es)) = do
+        es' <- mapM g es
+        return $ ExprI i (LstE es')
+      g (ExprI i (TupE es)) = do
+        es' <- mapM g es
+        return $ ExprI i (TupE es')
+      g (ExprI i (NamE rs)) = do
+        rs' <- mapM (secondM g) rs
+        return $ ExprI i (NamE rs')
+      g (ExprI i (AppE e es)) = do
+        e' <- g e
+        es' <- mapM g es
+        return $ ExprI i (AppE e' es')
+      g (ExprI i (LamE vs e)) = do
+        e' <- g e
+        return $ ExprI i (LamE vs e')
+      g e = return e
+
+      evaluateEType :: Scope -> EType -> MorlocMonad EType
+      evaluateEType gscope et =
+        either MM.throwError (\t' -> return $ et {etype = t'}) $ TE.evaluateType gscope (etype et)
+
+      evaluateTypeU :: Scope -> TypeU -> MorlocMonad TypeU
+      evaluateTypeU gscope t =
+        either MM.throwError return $ TE.evaluateType gscope t
 
 
 collectMogrifiers :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()

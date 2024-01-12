@@ -2,6 +2,22 @@ module main (foo)
 
 import cppbase (id)
 
-foo :: (Int, Int) -> (Int, Int)
-foo Cpp :: ("size_t", "long") -> ("size_t", "long")
+source Cpp from "types.h"
+  ( "packSizeT"
+  , "unpackSizeT"
+  , "packLong"
+  , "unpackLong"
+  )
+
+type Cpp => SizeT = "size_t" 
+type Cpp => Long = "int64_t" 
+type Cpp => Int = "int"
+
+packSizeT   :: pack   => Int -> SizeT
+unpackSizeT :: unpack => SizeT -> Int
+
+packLong   :: pack   => Int -> Long
+unpackLong :: unpack => Long -> Int
+
+foo :: (SizeT, Long) -> (SizeT, Long)
 foo x = id x

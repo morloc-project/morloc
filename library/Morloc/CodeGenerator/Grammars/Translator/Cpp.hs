@@ -38,6 +38,7 @@ import qualified Data.Set as Set
 import qualified Morloc.Module as Mod
 import qualified Morloc.Language as ML
 import qualified Control.Monad.State as CMS
+import qualified Morloc.TypeEval as TE
 import Control.Monad.Identity (Identity)
 
 class HasCppType a where
@@ -724,6 +725,7 @@ generateAnonymousStructs = do
         serializer = serializerTemplate params rtype fields
         deserializer = deserializerTemplate False params rtype fields
     
+
     return ([structDecl, serialDecl, deserialDecl], [serializer, deserializer])
 
   -- monadic form of `maybe` function
@@ -738,8 +740,17 @@ generateSourcedSerializers
                  , [MDoc]
                  )
 generateSourcedSerializers es0 = do
-  typemap <- Map.unions <$> mapM (foldSerialManifoldM fm) es0
-  return $ foldl groupQuad ([],[]) . Map.elems . Map.mapMaybeWithKey makeSerial $ typemap
+  typedef <- Map.unions <$> mapM (foldSerialManifoldM fm) es0
+
+  scopeMap <- MM.gets stateUniversalConcreteTypedefs
+  scope <- case Map.lookup CppLang scopeMap of
+    (Just scope) -> return scope
+    Nothing -> return Map.empty
+
+
+  MM.sayVVV $ "typedef:" <+> viaShow typedef
+
+  return $ foldl groupQuad ([],[]) . Map.elems . Map.mapMaybeWithKey (makeSerial scope) $ typedef
   where
 
     fm = defaultValue
@@ -750,16 +761,19 @@ generateSourcedSerializers es0 = do
     groupQuad :: ([a],[a]) -> (a, a, a, a) -> ([a],[a])
     groupQuad (xs,ys) (x1, y1, x2, y2) = (x1:x2:xs, y1:y2:ys)
 
-    makeSerial :: TVar -> ([TVar], TypeU, Bool) -> Maybe (MDoc, MDoc, MDoc, MDoc)
-    makeSerial _ (_, NamU _ (TV "struct") _ _, _) = Nothing
-    makeSerial _ (ps, NamU r (TV v) _ rs, _)
+    makeSerial :: Scope -> TVar -> ([TVar], TypeU, Bool) -> Maybe (MDoc, MDoc, MDoc, MDoc)
+    makeSerial _ _ (_, NamU _ (TV "struct") _ _, _) = Nothing
+    makeSerial scope _ (ps, NamU r (TV v) _ rs, _)
       = Just (serialDecl, serializer, deserialDecl, deserializer) where
 
         templateTerms = ["T" <> pretty p | p <- ps]
 
         params = map (\p -> "T" <> pretty (unTVar p)) ps
         rtype = pretty v <> recordTemplate templateTerms
-        fields = [(pretty k, showDefType ps (typeOf t)) | (k, t) <- rs]
+
+        rs' = map (second (evaluateTypeU scope)) rs
+
+        fields = [(pretty k, showDefType ps (typeOf t)) | (k, t) <- rs']
 
         serialDecl = serialHeaderTemplate params rtype
         deserialDecl = deserialHeaderTemplate params rtype
@@ -767,7 +781,12 @@ generateSourcedSerializers es0 = do
         serializer = serializerTemplate params rtype fields
 
         deserializer = deserializerTemplate (r == NamObject) params rtype fields
-    makeSerial _ _ = Nothing
+    makeSerial _ _ _ = Nothing
+
+    evaluateTypeU :: Scope -> TypeU -> TypeU
+    evaluateTypeU scope t = case TE.evaluateType scope t of
+      (Left e) -> error $ show e
+      (Right t') -> t'
 
     showDefType :: [TVar] -> Type -> MDoc
     showDefType ps (UnkT v)

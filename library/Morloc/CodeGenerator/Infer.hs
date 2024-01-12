@@ -42,26 +42,14 @@ evalGeneralStep i t = do
   return $ T.evaluateStep gscope t
 
 getConcreteScope :: Int -> Lang -> MorlocMonad Scope
-getConcreteScope i lang = do
-  globalMap <- CMS.gets stateConcreteTypedefs
-  case GMap.lookup i globalMap of
-    GMapJust langmap -> case Map.lookup lang langmap of
-      (Just typemap) -> do
-        MM.sayVVV $ "looking up concrete map for index" <+> pretty i <+> "and found scope:" <+> viaShow typemap
-        return typemap
-      Nothing -> do
-        MM.sayVVV $ "looking up concrete map for index" <+> pretty i <+> "and found nothing"
-        return Map.empty
-    _ -> do
-      MM.sayVVV $ "Could not find a typedef map for index" <+> pretty i
-      return Map.empty
+getConcreteScope _ lang = do
+  scopeMap <- MM.gets stateUniversalConcreteTypedefs
+  case Map.lookup lang scopeMap of
+    (Just scope) -> return scope
+    Nothing -> return Map.empty
 
 getGeneralScope :: Int -> MorlocMonad Scope
-getGeneralScope i = do
-  globalMap <- CMS.gets stateGeneralTypedefs
-  case GMap.lookup i globalMap of
-    GMapJust scope -> return scope
-    _ -> return Map.empty
+getGeneralScope _ = MM.gets stateUniversalGeneralTypedefs
 
 
 inferConcreteTypeU :: Lang -> Indexed TypeU -> MorlocMonad TypeU
@@ -69,7 +57,7 @@ inferConcreteTypeU lang t@(Idx i t0) = do
   MM.sayVVV $ "inferConcreteTypeU" <+> pretty lang <+> pretty t
   attemptT <- getScope i lang >>= inferConcreteTypeU' t0
   case attemptT of
-    (Right t) -> return t
+    (Right t') -> return t'
     (Left e1) -> do
       MM.sayVVV $ "Warning: failed to infer concrete type" <+> pretty t0 <+> "for index" <+> pretty i
                 <> "\n  Observed error:" <> pretty e1
@@ -78,14 +66,12 @@ inferConcreteTypeU lang t@(Idx i t0) = do
       cscopeUni <- CMS.gets stateUniversalConcreteTypedefs |>> fromMaybe Map.empty . Map.lookup lang
       attemptUni <- inferConcreteTypeU' t0 (cscopeUni, gscopeUni)
       case attemptUni of
-        (Right t) -> return t
+        (Right t') -> return t'
         (Left e2) -> MM.throwError e2
 
 inferConcreteTypeU' :: TypeU -> (Scope, Scope)-> MorlocMonad (Either MorlocError TypeU)
-inferConcreteTypeU' t (cscope, gscope) = do
-  MM.sayVVV $ "cscope:" <+> viaShow cscope
-  MM.sayVVV $ "gscope:" <+> viaShow gscope
-  return $ T.pairEval cscope gscope t
+inferConcreteTypeU' generalType (cscope, gscope) = do
+  return $ T.pairEval cscope gscope generalType
 
 inferConcreteType :: Lang -> Indexed Type -> MorlocMonad TypeF
 inferConcreteType lang (Idx i (type2typeu -> generalType)) = do

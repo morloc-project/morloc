@@ -1,10 +1,10 @@
 module foo (Map, push, makeMap)
 
-type py Str = "str"
-type py Int = "int"
-type py (List a) = "list" a
-type py (Map a b) = "dict" a b
-type py (Tuple2 a b) = "tuple" a b
+type Py => Str = "str"
+type Py => Int = "int"
+type Py => (List a) = "list" a
+type Py => (Map a b) = "dict" a b
+type Py => (Tuple2 a b) = "tuple" a b
 
 packMap      :: pack   => [(a,b)] -> Map a b
 unpackMap    :: unpack => Map a b -> [(a,b)]
