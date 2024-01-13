@@ -94,7 +94,7 @@ serialize v0 s0 = do
       return ([lst], v')
 
     construct v (SerialTuple _ ss) = do
-      (befores, ss') <- unzip <$> zipWithM (\i s -> construct (tupleKey i v) s) [1..] ss
+      (befores, ss') <- unzip <$> zipWithM (\i s -> serialize' (tupleKey i v) s) [1..] ss
       v' <- helperNamer <$> newIndex
       let x = [idoc|#{v'} <- list#{tupled ss'}|]
       return (concat befores ++ [x], v')
@@ -105,7 +105,8 @@ serialize v0 s0 = do
       let entries = zipWith (\key val -> pretty key <> "=" <> val) (map fst rs) ss'
           decl = [idoc|#{v'} <- list#{tupled entries}|]
       return (concat befores ++ [decl], v')
-    construct _ _ = undefined
+
+    construct _ _ = error "Unreachable" 
 
 
 deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])

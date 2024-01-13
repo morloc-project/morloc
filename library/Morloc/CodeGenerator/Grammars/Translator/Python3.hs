@@ -124,7 +124,7 @@ serialize v0 s0 = do
       return ([lst], v')
 
     construct v (SerialTuple _ ss) = do
-      (befores, ss') <- unzip <$> zipWithM (\i s -> construct (tupleKey i v) s) [0..] ss
+      (befores, ss') <- unzip <$> zipWithM (\i s -> serialize' (tupleKey i v) s) [0..] ss
       v' <- helperNamer <$> newIndex
       let x = [idoc|#{v'} = #{tupled ss'}|]
       return (concat befores ++ [x], v')
@@ -138,7 +138,9 @@ serialize v0 s0 = do
           decl = [idoc|#{v'} = dict#{tupled (entries)}|]
       return (concat befores ++ [decl], v')
 
-    construct _ _ = error "Told you that branch was reachable"
+    construct _ _ = error "Unreachable" 
+
+
 
 deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 deserialize v0 s0

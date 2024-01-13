@@ -328,12 +328,7 @@ serialize nativeExpr s0 = do
     construct _ (SerialObject NamObject _ _ _) = error "C++ object serialization not yet implemented"
     construct _ (SerialObject NamTable _ _ _) = error "C++ table serialization not yet implemented"
 
-    construct v (SerialReal    _) = return (v, [])
-    construct v (SerialInt     _) = return (v, [])
-    construct v (SerialBool    _) = return (v, [])
-    construct v (SerialString  _) = return (v, [])
-    construct v (SerialNull    _) = return (v, [])
-    construct v (SerialUnknown _) = return (v, [])
+    construct _ _ = error "Unreachable" 
 
 -- reverse of serialize, parameters are the same
 deserialize :: MDoc -> MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])
