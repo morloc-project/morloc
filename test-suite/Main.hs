@@ -27,6 +27,7 @@ main = do
       , golden "packer-definitions-2" "packer-definitions-2"
       , golden "packer-definitions-3" "packer-definitions-3"
       , golden "packer-definitions-4" "packer-definitions-4"
+      , golden "packer-definitions-5" "packer-definitions-5"
 
       , golden "import-1" "import-1"
       , golden "import-2" "import-2"

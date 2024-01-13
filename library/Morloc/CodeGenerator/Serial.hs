@@ -166,10 +166,15 @@ makeSerialAST m lang t0 = do
             return $ SerialPack v selection
           Nothing -> serializerError
             $ "Cannot find constructor in AppF" <+> dquotes (pretty v)
-            <> "<" <> pretty (length ts) <> ">" <+> viaShow typepackers
+            <> "\n  t:" <+> pretty t
+            <> "\n  typepackers:" <+> viaShow typepackers
       where
          selectPacker :: [(TypePacker, SerialAST)] -> MorlocMonad (TypePacker, SerialAST)
          selectPacker [] = serializerError $ "Cannot find constructor in selectPacker for" <+> pretty t
+          <> "\n  t:" <+> pretty t
+          <> "\n  generalTypeName (key):" <+> pretty generalTypeName
+          <> "\n  typepackers:" <+> viaShow typepackers
+          <> "\n  Map.lookup generalTypeName typepackers:" <+> viaShow (Map.lookup generalTypeName typepackers)
          selectPacker (x:_) = return x
 
     makeSerialAST' typepackers (NamF o n ps rs) = do
@@ -184,26 +189,24 @@ resolvePacker
   -> TypeF
   -> (Int, TypeU, TypeU, Source, Source)
   -> MorlocMonad (Maybe TypePacker)
-resolvePacker lang m0 resolvedType@(AppF _ xs) (nparam, unpackedGeneralType, packedGeneralType, srcPacked, srcUnpacked)
-  | length xs == nparam = do
-      packedConcreteType <- inferConcreteTypeU lang (Idx m0 packedGeneralType)
-      unpackedConcreteType <- inferConcreteTypeU lang (Idx m0 unpackedGeneralType)
-      maybeUnpackedType <- resolveP
-        resolvedType
-        packedConcreteType
-        unpackedConcreteType
-        (packedGeneralType, unpackedGeneralType)
+resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGeneralType, srcPacked, srcUnpacked) = do
+  packedConcreteType <- inferConcreteTypeU lang (Idx m0 packedGeneralType)
+  unpackedConcreteType <- inferConcreteTypeU lang (Idx m0 unpackedGeneralType)
+  maybeUnpackedType <- resolveP
+    resolvedType
+    packedConcreteType
+    unpackedConcreteType
+    (packedGeneralType, unpackedGeneralType)
 
-      case maybeUnpackedType of
-        (Just unpackedType) ->
-          return . Just $ TypePacker
-              { typePackerPacked = resolvedType
-              , typePackerUnpacked = unpackedType
-              , typePackerForward = srcPacked
-              , typePackerReverse = srcUnpacked
-              }
-        Nothing -> return Nothing
-  | otherwise = return Nothing -- this packer has the wrong cardinality, don't worry about it
+  case maybeUnpackedType of
+    (Just unpackedType) ->
+      return . Just $ TypePacker
+          { typePackerPacked = resolvedType
+          , typePackerUnpacked = unpackedType
+          , typePackerForward = srcPacked
+          , typePackerReverse = srcUnpacked
+          }
+    Nothing -> return Nothing
   where
     -- Both sides of the packer function are guaranteed to have the same
     -- generic values, this is guaranteed by the implementation of
