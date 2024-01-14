@@ -23,6 +23,8 @@ main = do
       , substituteTVarTests
       , subtypeTests
 
+      , golden "string-encoding" "string-encoding"
+
       , golden "file-input-py" "file-input-py"
       , golden "file-input-c" "file-input-c"
       , golden "file-input-r" "file-input-r"

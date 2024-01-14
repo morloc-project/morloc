@@ -142,9 +142,44 @@ std::string serialize(float x, float schema){
     return(s.str());
 }
 
+std::string escape(const std::string& input) {
+    std::string result;
+    for (char c : input) {
+        switch (c) {
+            case '"':
+                result += "\\\"";
+                break;
+            case '\\':
+                result += "\\\\";
+                break;
+            case '\b':
+                result += "\\b";
+                break;
+            case '\f':
+                result += "\\f";
+                break;
+            case '\n':
+                result += "\\n";
+                break;
+            case '\r':
+                result += "\\r";
+                break;
+            case '\t':
+                result += "\\t";
+                break;
+            // TODO fill in other special characters
+
+            default:
+                result += c;
+        }
+    }
+    return result;
+}
+
+
 std::string serialize(std::string x, std::string schema){
     std::ostringstream s;
-    s << '"' << x << '"';
+    s << '"' << escape(x) << '"';
     return(s.str());
 }
 
@@ -327,6 +362,7 @@ bool deserialize(const std::string json, size_t &i, float &x){
     }
 }
 
+
 // combinator parser for double-quoted strings
 bool deserialize(const std::string json, size_t &i, std::string &x){
     try {
@@ -334,13 +370,52 @@ bool deserialize(const std::string json, size_t &i, std::string &x){
         if(! match(json, "\"", i)){
             throw 1;
         }
-        // TODO: add full JSON specification support (escapes, magic chars, etc)
-        while(i < json.size() && json[i] != '"'){
-            x += json[i];
-            i++;
-        }
-        if(! match(json, "\"", i)){
-            throw 1;
+        bool escape = false;
+        bool done = false;
+        for(; i < json.size() && !done; i++){
+            char c = json[i];
+            if (escape) {
+                switch (c) {
+                    case '"':
+                        x += '\"';
+                        break;
+                    case '\\':
+                        x += '\\';
+                        break;
+                    case '/':
+                        x += '/';
+                        break;
+                    case 'b':
+                        x += '\b';
+                        break;
+                    case 'f':
+                        x += '\f';
+                        break;
+                    case 'n':
+                        x += '\n';
+                        break;
+                    case 'r':
+                        x += '\r';
+                        break;
+                    case 't':
+                        x += '\t';
+                        break;
+                    // TODO: add other escaped patterns
+
+                    default:
+                        x += '\\'; // Keep the backslash if it's not part of an escape sequence
+                        x += c;
+                }
+                escape = false;
+            } else {
+                if (c == '\\') {
+                    escape = true;
+                } else if (c == '"'){
+                    done = true;
+                } else {
+                    x += c;
+                }
+            }
         }
     } catch (int e) {
         return false;
