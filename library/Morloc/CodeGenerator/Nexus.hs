@@ -68,6 +68,7 @@ main names fdata pythonExe cdata =
 import json
 import subprocess
 import sys
+import os
 
 #{usageT fdata cdata}
 
@@ -81,13 +82,25 @@ def dispatch(cmd, *args):
     else:
         command_table[cmd](*args)
 
+def as_string(input_str):
+    if os.path.exists(input_str):
+        with open(input_str, "r") as fh:
+            return "\n".join(fh.readlines())
+    else:
+        try:
+            input_json = json.loads(input_str)
+            return json.dumps(input_json)
+        except json.JSONDecodeError:
+            print("Invalid input '%s'" % input_str, file=sys.stderr)
+            sys.exit(1)
+
 if __name__ == '__main__':
     if len(sys.argv) == 1:
         usage()
     else:
         cmd = sys.argv[1]
         args = sys.argv[2:]
-        dispatch(cmd, *args)
+        dispatch(cmd, *[as_string(arg) for arg in args])
 |]
 
 mapT names = [idoc|command_table = #{dict}|] where

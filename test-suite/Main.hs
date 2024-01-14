@@ -23,6 +23,10 @@ main = do
       , substituteTVarTests
       , subtypeTests
 
+      , golden "file-input-py" "file-input-py"
+      , golden "file-input-c" "file-input-c"
+      , golden "file-input-r" "file-input-r"
+
       , golden "packer-definitions-1" "packer-definitions-1"
       , golden "packer-definitions-2" "packer-definitions-2"
       , golden "packer-definitions-3" "packer-definitions-3"

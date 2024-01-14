@@ -1,0 +1,13 @@
+module main (foo)
+
+source Cpp from "foo.hpp" ("cat", "len")
+
+type Cpp => Str = "std::string"
+type Cpp => Int = "int"
+type Cpp => Tuple2 a b = "std::tuple<$1,$2>" a b
+cat :: Str -> Str -> Str
+len :: Str -> Int
+
+foo x y = (v, l) where
+  v = cat x y
+  l = len v

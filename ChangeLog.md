@@ -64,6 +64,7 @@ handling for several very different languages (proofs-of-concept).
  * Fix bug in collecting packers (missed packers required by root manifold)
  * Allow a module to explicitly export packers
  * Show pool pseudocode for `typecheck -r` 
+ * Allow nexus inputs to files
 
  [ ] Remove concrete type signatures - always infer
  [ ] Make fields in language-specific table decs optional
