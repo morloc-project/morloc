@@ -223,7 +223,7 @@ translateSegment m0 =
     makeSerialExpr _ (AppPoolS_ _ (PoolCall _ cmds args) _) = do
       -- I don't need to explicitly add single quoes to the arguments here as I
       -- do in C++ and R because the subprocess module bypasses Bash dequoting.
-      let call = "_morloc_foreign_call(" <> list(map dquotes cmds ++ map argNamer args) <> ")"
+      let call = "_morloc_foreign_call(" <> list (map dquotes cmds) <> "," <+> list (map argNamer args) <> ")"
       return $ defaultValue { poolExpr = call }
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
     makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet svarNamer i e1 e2
@@ -326,6 +326,8 @@ makePool lib includeDocs manifolds dispatch = [idoc|#!/usr/bin/env python
 import sys
 import subprocess
 import json
+import tempfile
+import os
 from pymorlocinternals import (mlc_serialize, mlc_deserialize)
 from collections import OrderedDict
 
@@ -333,19 +335,42 @@ sys.path = ["#{lib}"] + sys.path
 
 #{vsep includeDocs}
 
-def _morloc_foreign_call(args):
+class MorlocForeignCallError(Exception):
+    pass
+
+def _morloc_foreign_call(cmds, args):
+    arg_filenames = []
+    for (i, arg) in enumerate(args):
+        temp = tempfile.NamedTemporaryFile(prefix="morloc_py_", delete=False)
+        with open(temp.name, "w") as fh:
+            print(arg, file=fh)
+            arg_filenames.append(temp.name)
     try:
         sysObj = subprocess.run(
-            args,
+            cmds + arg_filenames,
             stdout=subprocess.PIPE,
             check=True
         )
     except subprocess.CalledProcessError as e:
-        sys.exit(str(e))
+        raise MorlocForeignCallError(str(e))
+    finally:
+        for arg_filename in arg_filenames:
+            try:
+                os.unlink(arg_filename)
+            except:
+                pass
 
     return(sysObj.stdout.decode("ascii"))
 
+
 #{vsep manifolds}
+
+def read(filename):
+    xs = []
+    with open(filename, "r") as fh:
+        for line in fh.readlines():
+            xs.append(line)
+    return "\n".join(xs)
 
 if __name__ == '__main__':
     try:
@@ -359,7 +384,7 @@ if __name__ == '__main__':
     except KeyError:
         sys.exit("Internal error in {}: no manifold found with id={}".format(sys.argv[0], cmdID))
 
-    __mlc_result__ = __mlc_function__(*sys.argv[2:])
+    __mlc_result__ = __mlc_function__(*[read(x) for x in sys.argv[2:]])
 
     if __mlc_result__ != "null":
         print(__mlc_result__)

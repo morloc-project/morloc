@@ -183,9 +183,9 @@ translateSegment m0 =
     makeSerialExpr _ (ManS_ f) = return f
     makeSerialExpr _ (AppPoolS_ _ (PoolCall _ cmds args) _) = do
       let quotedCmds = map dquotes cmds
-          quotedArgs = [ [idoc|paste0("'", #{r}, "'")|] | r <- map argNamer args]
-          callArgs = "list(" <> hsep (punctuate "," (drop 1 quotedCmds <> quotedArgs)) <> ")"
-          call = ".morloc_foreign_call" <> tupled [head quotedCmds, callArgs, dquotes "_", dquotes "_"]
+          cmdArgs = "list" <> tupled (tail quotedCmds)
+          positionalArgs = "list" <> tupled (map argNamer args)
+          call = ".morloc_foreign_call" <> tupled [head quotedCmds, cmdArgs, positionalArgs, dquotes "_", dquotes "_"]
       return $ PoolDocs
         { poolCompleteManifolds = []
         , poolExpr = call
@@ -357,11 +357,32 @@ makePool sources manifolds = [idoc|#!/usr/bin/env Rscript
   return(x)
 }
 
-.morloc_foreign_call <- function(cmd, args, .pool, .name){
-  .morloc_try(f=system2, args=list(cmd, args=args, stdout=TRUE), .pool=.pool, .name=.name)
+.make_temporary_file <- function(x) {
+  temp_filename <- tempfile(pattern = "morloc_r_", tmpdir = "/tmp", fileext = "")
+  writeLines(x, temp_filename)
+  return(temp_filename)
 }
 
+.morloc_foreign_call <- function(cmd, cmd_args, args, .pool, .name){
+  # write the input arguments to temporary files
+  arg_files <- lapply(args, .make_temporary_file)
+
+  # try to run the foreign pool, passing the serialized arguments as tmp files
+  result <- .morloc_try(f=system2, args=list(cmd, args=c(cmd_args, arg_files), stdout=TRUE), .pool=.pool, .name=.name)
+
+  # clean up temp files
+  on.exit(unlink(arg_files))
+
+  return(result)
+}
+
+
 #{vsep manifolds}
+
+read <- function(file)
+{
+  paste(readLines(file), collapse="\n") 
+}
 
 args <- as.list(commandArgs(trailingOnly=TRUE))
 if(length(args) == 0){
@@ -371,7 +392,7 @@ if(length(args) == 0){
   mlc_pool_function_name <- paste0("m", mlc_pool_cmdID)
   if(exists(mlc_pool_function_name)){
     mlc_pool_function <- eval(parse(text=paste0("m", mlc_pool_cmdID)))
-    result <- do.call(mlc_pool_function, args[-1])
+    result <- do.call(mlc_pool_function, lapply(args[-1], read))
     if(result != "null"){
         cat(result, "\n")
     }

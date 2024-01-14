@@ -69,6 +69,7 @@ import json
 import subprocess
 import sys
 import os
+import tempfile
 
 #{usageT fdata cdata}
 
@@ -76,23 +77,29 @@ import os
 
 #{mapT names}
 
-def dispatch(cmd, *args):
+def dispatch(cmd, args):
     if(cmd in ["-h", "--help", "-?", "?"]):
         usage()
     else:
-        command_table[cmd](*args)
+        command_table[cmd](args)
 
-def as_string(input_str):
-    if os.path.exists(input_str):
-        with open(input_str, "r") as fh:
-            return "\n".join(fh.readlines())
+def as_file(input_str):
+    if os.path.isfile(input_str):
+        return (False, input_str)
     else:
-        try:
-            input_json = json.loads(input_str)
-            return json.dumps(input_json)
-        except json.JSONDecodeError:
-            print("Invalid input '%s'" % input_str, file=sys.stderr)
-            sys.exit(1)
+        x = tempfile.NamedTemporaryFile(prefix="morloc_nexus_", delete=False)
+        with open(x.name, "w") as fh_temp:
+            if os.path.exists(input_str):
+                with open(input_str, "r") as fh_sub:
+                    print(fh_sub.read().strip(), file=fh_temp)
+            else:
+                try:
+                    input_json = json.loads(input_str)
+                    print(json.dumps(input_json), file=fh_temp)
+                except json.JSONDecodeError:
+                    print("Invalid input '{input_str}'", file=sys.stderr)
+                    sys.exit(1)
+        return (True, x.name)
 
 if __name__ == '__main__':
     if len(sys.argv) == 1:
@@ -100,7 +107,7 @@ if __name__ == '__main__':
     else:
         cmd = sys.argv[1]
         args = sys.argv[2:]
-        dispatch(cmd, *[as_string(arg) for arg in args])
+        dispatch(cmd, args)
 |]
 
 mapT names = [idoc|command_table = #{dict}|] where
@@ -142,22 +149,25 @@ writeType Nothing  t = [idoc|print('''    return: #{pretty t}''')|]
 functionT :: FData -> MDoc
 functionT (cmd, subcommand, t) =
   [idoc|
-def call_#{subcommand}(*args):
-    if len([*args]) != #{pretty n}:
-        sys.exit("Expected #{pretty n} arguments to '#{subcommand}', given " + str(len([*args])))
+def call_#{subcommand}(args):
+    if len(args) != #{pretty (nargs t)}:
+        sys.exit("Expected #{pretty (nargs t)} arguments to '#{subcommand}', given " + str(len(args)))
     else:
-        subprocess.run(#{poolcallArgs})
+        arg_files = [as_file(arg) for arg in args]
+        try:
+          subprocess.run(#{list $ map dquotes cmd} + [x[1] for x in arg_files])
+        finally:
+            for (is_temp, file) in arg_files:
+                if is_temp:
+                    os.unlink(file)
 |]
-  where
-    n = nargs t
-    poolcallArgs = list $ map dquotes cmd <> ["*args"]
 
 functionCT :: NexusCommand -> MDoc
 functionCT (NexusCommand cmd _ json_str args subs) =
   [idoc|
-def call_#{pretty cmd}(*args): 
-    if len([*args]) != #{pretty $ length args}:
-        sys.exit("Expected #{pretty $ length args} arguments to '#{pretty cmd}', given " + str(len([*args])))
+def call_#{pretty cmd}(args): 
+    if len(args) != #{pretty $ length args}:
+        sys.exit("Expected #{pretty $ length args} arguments to '#{pretty cmd}', given " + str(len(args)))
     else:
         json_obj = json.loads('''#{json_str}''')
         #{align . vsep $ readArguments ++ replacements}

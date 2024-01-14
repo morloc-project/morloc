@@ -431,14 +431,14 @@ translateSegment m0 = do
   makeSerialExpr _ (ManS_ e) = return e
   makeSerialExpr _ (AppPoolS_ _ (PoolCall _ cmds args) _) = do
     let bufDef = "std::ostringstream s;"
-        quotedArgs = [ [idoc|"'" << #{r} << "'"|] | r <- map argNamer args]
-        callArgs = map dquotes cmds ++ quotedArgs
-        cmd = "s << " <> cat (punctuate " << \" \" << " callArgs) <> ";"
-        call = [idoc|foreign_call(s.str())|]
+        argList = encloseSep "{" "}" ", " (map argNamer args)
+        argsDef = [idoc|std::vector<std::string> args = #{argList};|]
+        cmd = "s << " <> cat (punctuate " << \" \" << " (map dquotes cmds)) <> ";"
+        call = [idoc|foreign_call(s.str(), args)|]
     return $ PoolDocs
       { poolCompleteManifolds = []
       , poolExpr = call
-      , poolPriorLines = [bufDef, cmd]
+      , poolPriorLines = [bufDef, argsDef, cmd]
       , poolPriorExprs = []
       }
   makeSerialExpr _ (ReturnS_ e) = return $ e {poolExpr = "return(" <> poolExpr e <> ");"}
@@ -613,7 +613,7 @@ makeDispatch ms = block 4 "switch(std::stoi(argv[1]))" (vsep (map makeCase ms))
       -- this made more sense when I was using ArgTypes
       -- it may make sense yet again when I switch to Or
       let size = sum $ abilist (\_ _ -> 1) (\_ _ -> 1) form
-          args' = take size $ map (\j -> "argv[" <> viaShow j <> "]") ([2..] :: [Int])
+          args' = take size $ map (\j -> "read(argv[" <> viaShow j <> "])") ([2..] :: [Int])
       in
         (nest 4 . vsep)
           [ "case" <+> viaShow i <> ":"
@@ -928,7 +928,31 @@ makeMain includes signatures serialization manifolds dispatch = [idoc|#include <
 #include <vector>
 #include <string>
 #include <algorithm> // for std::transform
+#include <stdexcept>
+#include <fstream>
+
+// needed for foreign interface
+#include <cstdlib>
+#include <cstring>
+#include <cstdio>
+#include <unistd.h>
+
 using namespace std;
+
+std::string read(const std::string& file) {
+    std::ifstream input_file(file);
+
+    if (!input_file.is_open()) {
+        throw std::runtime_error("Error opening file: " + file);
+    }
+
+    std::stringstream buffer;
+    buffer << input_file.rdbuf();
+
+    std::string content = buffer.str();
+
+    return content;
+}
 
 #{Src.foreignCallFunction}
 
