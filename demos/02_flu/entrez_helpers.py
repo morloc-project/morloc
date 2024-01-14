@@ -12,7 +12,7 @@ def labelRef(cladeMap, jsonObj):
     else:
         return (jsonObj, "")
 
-# setLeafNames :: (JsonObj, Clade) -> Str
-def setLeafNames(meta):
+# setLeafName :: (JsonObj, Clade) -> Str
+def setLeafName(meta):
     (jsonObj, clade) = meta
     return (clade + "|" + jsonObj["GBSeq_primary-accession"])
