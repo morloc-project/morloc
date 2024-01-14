@@ -352,7 +352,7 @@ def _morloc_foreign_call(cmds, args):
             check=True
         )
     except subprocess.CalledProcessError as e:
-        raise MorlocForeignCallError(str(e))
+        raise MorlocForeignCallError(f"python foreign call error: {str(e)}")
     finally:
         for arg_filename in arg_filenames:
             try:

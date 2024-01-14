@@ -12,7 +12,7 @@ search:
 
 .PHONY:
 run:
-	./nexus.py analysis '"2021/01/01"' '"2021/01/31"' '"refs.txt"' '"tree.pdf"'
+	./nexus.py analysis '"2021/01/01"' '"2021/01/21"' '"refs.txt"' '"tree.pdf"'
 
 .PHONY:
 makec:

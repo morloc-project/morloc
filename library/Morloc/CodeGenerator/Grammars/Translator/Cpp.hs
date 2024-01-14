@@ -580,8 +580,8 @@ makeManifold callIndex form manifoldType e = do
             catchBody = block 4 "catch (const std::exception& e)" throwStatement 
             tryCatchBody = tryBody <+> catchBody
         return . Just . block 4 decl . vsep $
-          [ [idoc|std::cerr << "Entering m" << #{pretty callIndex} << std::endl;|]
-          , tryCatchBody
+          [ {- can add diagnostic statements here -}
+            tryCatchBody
           ]
   returnType :: TypeM -> TypeM
   returnType (Function _ t) = t
