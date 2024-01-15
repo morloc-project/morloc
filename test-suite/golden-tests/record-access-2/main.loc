@@ -7,11 +7,7 @@ record Person = Person
   { name :: Str
   , age :: Int
   }
-
 record Py => Person = "dict"
-  { name :: Str
-  , age :: Int
-  }
 
 foo :: [Person] -> [Int]
 foo = map getAge where

@@ -6,7 +6,7 @@ import rbase (id)
 source R from "person.R" ("PersonObj")
 
 object (Person a) = Person {name :: Str, info :: a}
-object R => (Person a) = "PersonObj" {name :: Str, info :: a}
+object R => (Person a) = "PersonObj"
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.

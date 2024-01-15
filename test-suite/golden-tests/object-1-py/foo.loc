@@ -6,7 +6,7 @@ import pybase (id)
 source Py from "person.py" ("PersonObj" as Person)
 
 object (Person a) = Person {name :: Str, info :: a}
-object Py => (Person a) = "PersonObj" {name :: Str, info :: a}
+object Py => (Person a) = "PersonObj"
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.

@@ -4,7 +4,7 @@ import conventions (Str, Real)
 import cppbase (fold, add)
 
 table (Person a) = Person {name :: Str, info :: a}
-table Cpp => (Person a) = "struct" {name :: Str, info :: a}
+table Cpp => (Person a) = "struct"
 
 foo :: Person Real -> Real
 foo x = fold add 0.0 (x@info)

@@ -738,6 +738,7 @@ generateSourcedSerializers es0 = do
   typedef <- Map.unions <$> mapM (foldSerialManifoldM fm) es0
 
   scopeMap <- MM.gets stateUniversalConcreteTypedefs
+
   scope <- case Map.lookup CppLang scopeMap of
     (Just scope) -> return scope
     Nothing -> return Map.empty

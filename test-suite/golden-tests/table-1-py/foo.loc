@@ -4,7 +4,7 @@ import conventions (Str, Int, List)
 import pybase (id)
 
 table (Person a) = Person {name :: Str, info :: a}
-table Py => (Person a) = "dict" {name :: Str, info :: a}
+table Py => (Person a) = "dict"
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.

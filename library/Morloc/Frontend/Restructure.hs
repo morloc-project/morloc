@@ -138,8 +138,8 @@ collectTypes fullDag = do
   let typeDAG = MDD.mapEdge (\xs -> [(x,y) | AliasedType x y <- xs]) fullDag
   _ <- MDD.synthesizeDAG formTypes typeDAG
 
-  universalConcreteScope <- getUniversalConcreteScope
   universalGeneralScope <- getUniversalGeneralScope
+  universalConcreteScope <- getUniversalConcreteScope universalGeneralScope
 
   s <- MM.get
   MM.put (s { stateUniversalGeneralTypedefs = universalGeneralScope
@@ -159,12 +159,19 @@ collectTypes fullDag = do
     -> MorlocMonad GCMap
   formTypes m e0 childImports = do
 
-    let (generalTypemap, concreteTypemaps) = foldl inherit (AST.findTypedefs e0) childImports
+    let (generalTypemap, concreteTypemapsIncomplete) = foldl inherit (AST.findTypedefs e0) childImports
 
     -- Here we are creating links from every indexed term in the module to the module
     -- sources and aliases. When the module abstractions are factored out later,
     -- this will be the only way to access module-specific info.
     let indices = AST.getIndices e0
+
+    -- This step links the general entries from records to their abbreviated
+    -- concrete cousins. For example:
+    --   record (Person a) = Person {name :: Str, info a}
+    --   record Py => Person a = "dict"
+    -- This syntax avoids the need to duplicate the entire entry
+    let concreteTypemaps = Map.map (completeRecords generalTypemap) concreteTypemapsIncomplete
 
     s <- MM.get
     MM.put (s { stateGeneralTypedefs = GMap.insertMany indices m generalTypemap (stateGeneralTypedefs s)
@@ -181,8 +188,8 @@ collectTypes fullDag = do
        , Map.unionWith (Map.unionWith mergeEntries) cmap' thisCmap
        )
 
-  getUniversalConcreteScope :: MorlocMonad (Map.Map Lang Scope)
-  getUniversalConcreteScope = do
+  getUniversalConcreteScope :: Scope -> MorlocMonad (Map.Map Lang Scope)
+  getUniversalConcreteScope gscope = do
     (GMap _ modMaps) <- MM.gets stateConcreteTypedefs
     let langs = concatMap Map.keys . Map.elems $ modMaps
     scopes <- mapM getLangScope langs
@@ -191,7 +198,22 @@ collectTypes fullDag = do
       getLangScope :: Lang -> MorlocMonad Scope
       getLangScope lang = do
         (GMap _ (Map.elems -> langMaps)) <- MM.gets stateConcreteTypedefs
-        return . Map.unionsWith mergeEntries . mapMaybe (Map.lookup lang) $ langMaps
+        -- See note above, here we are completing any incomplete concrete
+        -- record/table/object types
+        let langMaps' = map (Map.map (completeRecords gscope)) langMaps
+        return . Map.unionsWith mergeEntries . mapMaybe (Map.lookup lang) $ langMaps'
+
+  completeRecords :: Scope -> Scope -> Scope
+  completeRecords gscope cscope = Map.mapWithKey (completeRecord gscope) cscope
+
+  completeRecord :: Scope -> TVar -> [([TVar], TypeU, Bool)] -> [([TVar], TypeU, Bool)]
+  completeRecord gscope v xs = case Map.lookup v gscope of
+    (Just ys) -> map (completeValue [t | (_, t, _) <- ys]) xs 
+    Nothing -> xs
+
+  completeValue :: [TypeU] -> ([TVar], TypeU, Bool) -> ([TVar], TypeU, Bool)
+  completeValue (NamU _ _ _ rs:_) (vs, NamU o v ps [], terminal) = (vs, NamU o v ps rs, terminal)
+  completeValue _ x = x
 
   getUniversalGeneralScope :: MorlocMonad Scope
   getUniversalGeneralScope = do

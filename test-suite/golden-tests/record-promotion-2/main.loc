@@ -6,7 +6,7 @@ type Py => Str = "str"
 type Py => Int = "int"
 
 record Person = Person { name :: Str, age :: Int, parent :: Str }
-record Py => Person = "dict" { name :: Str, age :: Int, parent :: Str }
+record Py => Person = "dict"
 
 siblings :: Str -> [(Str, Int)] -> [Person]
 siblings parent xs = map (\child -> { name = fst child, age = snd child, parent = parent }) xs

@@ -309,7 +309,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
       Nothing -> do
         constructor <- freename
         return (constructor, Nothing)
-    entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries o)
+    entries <- option [] $ braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries o)
     let t = NamU o (TV con) (map VarU vs) (map (first Key) entries)
     exprI (TypE k v vs t)
 

@@ -6,7 +6,7 @@ import pybase (id)
 source Py from "person.py" ("PersonObj" as Person, "newPerson", "birthday")
 
 object (Person a) = Person {name :: Str, info :: a}
-object Py => (Person a) = "PersonObj" {name :: Str, info :: a}
+object Py => (Person a) = "PersonObj"
 
 newPerson :: Str -> Int -> Person Int
 birthday :: Person Int -> Person Int

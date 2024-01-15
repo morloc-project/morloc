@@ -4,7 +4,7 @@ type Py => Str = "str"
 type Py => Int = "str"
 
 record Person = Person { name :: Str, age :: Int, parent :: Str }
-record Py => Person = "dict" { name :: Str, age :: Int, parent :: Str }
+record Py => Person = "dict"
 
 siblings :: Str -> (Person, Person)
 siblings parent =

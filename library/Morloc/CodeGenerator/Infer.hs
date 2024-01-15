@@ -31,6 +31,7 @@ getScope :: Int -> Lang -> MorlocMonad (Scope, Scope)
 getScope i lang = do
   cscope <- getConcreteScope i lang
   gscope <- getGeneralScope i
+  MM.sayVVV $ "cscope:" <+> viaShow cscope
   return (cscope, gscope)
 
 evalGeneralStep :: Int -> TypeU -> MorlocMonad (Maybe TypeU)
