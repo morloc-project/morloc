@@ -1,0 +1,15 @@
+module main (foo)
+
+source R from "foo.R" ("concat" as cat, "nchar" as len)
+
+type R => Str = "character"
+type R => Int = "integer"
+type R => Tuple2 a b = "list" a b
+type R => List a = "list" a
+
+cat :: [Str] -> Str
+len :: Str -> Int
+
+foo x y = (v, l) where
+  v = cat ["<", x, y, ">"]
+  l = len v

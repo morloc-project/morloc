@@ -1,0 +1,13 @@
+module main (foo)
+
+source Py from "foo.py" ("cat", "len")
+
+type Py => Str = "str"
+type Py => Int = "int"
+type Py => Tuple2 a b = "tuple" a b
+cat :: [Str] -> Str
+len :: Str -> Int
+
+foo x y = (v, l) where
+  v = cat ["<", x, y, ">"]
+  l = len v

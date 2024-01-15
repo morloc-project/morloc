@@ -5,6 +5,7 @@ module main (foo)
 import pybase  (sub, add, mul)
 import cppbase (sub, add, mul)
 import rbase   (sub, add, mul)
+import conventions (Real)
 
 source py from "foo.py" ("foo_loc" as foo)
 

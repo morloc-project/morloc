@@ -1,6 +1,7 @@
 module main (foo)
 
 import pybase (map, mul)
+import conventions (List, Real)
 
 -- literal function with constant application
 foo xs = map (mul 2.0) xs

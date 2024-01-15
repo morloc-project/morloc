@@ -4,6 +4,7 @@ module UI (
   , MakeCommand(..)
   , InstallCommand(..)
   , TypecheckCommand(..)
+  , DumpCommand(..)
 ) where
 
 import Options.Applicative
@@ -12,7 +13,7 @@ opts :: ParserInfo CliCommand
 opts = info (cliParser <**> helper)
   (    fullDesc
     <> progDesc "call 'morloc make -h', 'morloc install -h', etc for details"
-    <> header "morloc v0.42.0"  -- FIXME: HARDCODED VERSION NUMBER!!!
+    <> header "morloc v0.43.0"  -- FIXME: HARDCODED VERSION NUMBER!!!
   )
 
 
@@ -20,12 +21,14 @@ data CliCommand
   = CmdMake MakeCommand
   | CmdInstall InstallCommand
   | CmdTypecheck TypecheckCommand
+  | CmdDump DumpCommand
 
 cliParser :: Parser CliCommand
 cliParser = hsubparser
   ( makeSubcommand
   <> installSubcommand
   <> typecheckSubcommand
+  <> dumpSubcommand
   )
 
 
@@ -96,6 +99,28 @@ makeTypecheckParser = TypecheckCommand
 typecheckSubcommand :: Mod CommandFields CliCommand 
 typecheckSubcommand =
   command "typecheck" (info (CmdTypecheck <$> makeTypecheckParser) (progDesc "typecheck a morloc program"))
+
+
+dumpSubcommand :: Mod CommandFields CliCommand 
+dumpSubcommand =
+  command "dump" (info (CmdDump <$> makeDumpParser) (progDesc "dump parsed code"))
+
+data DumpCommand = DumpCommand
+  { dumpConfig :: String
+  , dumpVanilla :: Bool
+  , dumpVerbose :: Int
+  , dumpExpression :: Bool
+  , dumpScript :: String
+  }
+
+makeDumpParser :: Parser DumpCommand
+makeDumpParser = DumpCommand
+  <$> optConfig
+  <*> optVanilla
+  <*> optVerbose
+  <*> optExpression
+  <*> optScript
+
 
 
 optExpression :: Parser Bool

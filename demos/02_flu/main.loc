@@ -1,115 +1,71 @@
 module flucase (analysis)
 
 import conventions (Str, Int, Filename, Real, Unit, Map, Tuple2)
+import json (JsonObj)
 
 type Accession = Str
 type Clade = Str 
-type StrainName = Str
 type Sequence = Str
 type EntrezQuery = Str
-type Label = Str
 type Date = Str
 type Query = Str
-
-type Py Accession = "str"
-type Py Clade = "str"
-type Py StrainName = "str"
-type Py Sequence = "str"
-type Py EntrezQuery = "str"
-type Py Label = "str"
-type Py Date = "str"
-type Py Query = "str"
-
-type Cpp Accession = "std::string"
-type Cpp Clade = "std::string" 
-type Cpp StrainName = "std::string"
-type Cpp Sequence = "std::string"
-type Cpp EntrezQuery = "std::string"
-type Cpp Label = "std::string"
-type Cpp Date = "std::string"
-type Cpp Query = "std::string"
-
-type R Accession = "character"
-type R Clade = "character" 
-type R StrainName = "character"
-type R Sequence = "character"
-type R EntrezQuery = "character"
-type R Label = "character"
-type R Date = "character"
-type R Query = "character"
-
-record Meta = Meta
-  { accession :: Accession
-  , clade :: Clade
-  }
-
-record Py Meta = "dict"
-  { accession :: "str"
-  , clade :: "str"
-  }
-
-record Cpp Meta = "struct"
-  { accession :: "std::string"
-  , clade :: "std::string"
-  }
-
-
-record EntrezSearchConfig = EntrezSearchConfig
-  { email :: Str
-  , db :: Str
-  , mindate :: Str
-  , maxdate :: Str
-  , retmax :: Int
-  }
 
 import bio.algo (upgma)
 
 import bio.tree
   ( RootedTree
-  , treeBy             -- treeBy :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
-  , pullNode           -- pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
-  , mapChildWithParent -- mapChildWithParent :: (n -> n') -> (n' -> n -> n') -> Tree n e l -> Tree n' e l
+  , treeBy   -- treeBy :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
+  , pullNode -- pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
+  , push
   , mapLeaf
   )
 
 import bio.db
-  ( searchEntrez as fetchIds                    -- fetchIds :: EntrezSearchConfig -> Query -> [Str]
-  , nucleotideAccessionToXml as fetchRecords  -- fetchIdRecords :: [Str] -> [Str]
+  ( searchEntrez as fetchIds                   -- fetchIds :: EntrezSearchConfig -> Query -> [Str]
+  , nucleotideAccessionToJson as fetchRecords  -- fetchIdRecords :: [Str] -> [Str]
+  , EntrezSearchConfig
+  , EntrezFetchConfig
   )
 
 import base
   ( id
-  , at        -- at :: [a] -> Int -> a
+  , const
+  , at
   , map
   , ne
+  , fst
+  , snd
   , concat
   , filter
-  , shard     -- shard :: Int -> [a] -> [[a]]
-  , gt        -- gt :: Int -> Int -> Bool
-  , eq        -- eq :: Int -> Int -> Bool
-  , head      -- head :: [a] -> a
-  , ifelse    -- ifelse :: Bool -> a -> a -> a
-  , join      -- join :: [a] -> [a] -> [a]
-  , keys      -- keys :: Map a b -> [a]
-  , length    -- length :: [a] -> Int
-  , lengthS   -- lengthS :: Str -> Int
-  , onFst     -- onFst :: (a -> a') -> (a, b) -> (a', b)
-  , sleep     -- sleep :: Real -> a -> a
-  , unique    -- unique :: [a] -> [a]
-  , withSnds  -- withVals :: ([a] -> [b]) -> [(c, a)] -> [(c, b)]
-  , readMap   -- readMap :: Filename -> Map key val
+  , shard
+  , gt
+  , eq
+  , head
+  , take
+  , ifelse
+  , branch
+  , join
+  , paste
+  , keys
+  , length
+  , lengthS
+  , onFst
+  , sleep
+  , unique
+  , withSnds
+  , readMap
   )
 
 
-source Py from "utilities.py"
+source Py from "entrez_helpers.py"
   ( "parseRecord"
   , "labelRef"
+  , "setLeafName"
   )
 
-parseRecord :: Str -> (Meta, Sequence)
-
-labelRef :: Map Accession Clade -> Meta -> Meta
-
+parseRecord :: JsonObj -> (JsonObj, Sequence)
+labelRef :: Map Accession Clade -> JsonObj -> (JsonObj, Clade)
+setLeafName :: (JsonObj, Sequence) -> Str
 
 source R from "plot-tree.R" ("plotTree")
 
@@ -119,46 +75,54 @@ plotTree :: Filename -> RootedTree n Real Str -> ()
 analysis :: Date -> Date -> Filename -> Filename -> ()
 analysis mindate maxdate reffile treefile
   = ( plotTree treefile
-    . mapLeaf (\x -> x@accession)
+    . mapLeaf setLeafName
     . classify -- Tree string double meta
     . treeBy upgma
-    . search config refmap
+    . search fetchConfig searchConfig refmap
     ) query
   where
     query = "Influenza+A+Virus[Organism]+H3N2[ALL]+HA[ALL]"
-    config = { email = "weena@mlang.com"
-             , db = "nuccore"
-             , mindate = mindate
-             , maxdate = maxdate
-             , retmax = 1000
-             }
+    email = "zbwrnz@gmail.com"
+    searchConfig =
+      { email = email
+      , db = "nuccore"
+      , mindate = mindate
+      , maxdate = maxdate
+      , retmax = 1000
+      }
+    fetchConfig = { email = email }
     refmap = readMap reffile
 
 
-search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
-search config refs query =
+search :: EntrezFetchConfig -> EntrezSearchConfig -> Map Accession Clade -> Query
+       -> [((JsonObj, Clade), Sequence)]
+search fetchConfig searchConfig refs query =
   ( map (onFst (labelRef refs))
   . concat
   . map ( map parseRecord
         . sleep 1.0
-        . fetchRecords
+        . fetchRecords fetchConfig
         )
-  . shard 100
+  . shard 30
   . join (keys refs)
-  . fetchIds config
+  . take 50
+  . fetchIds searchConfig
   ) query
 
 
-classify :: RootedTree n e Meta -> RootedTree Str e Meta
-classify = push . pullNode pullLeaf pullClade where
+-- classify :: RootedTree n e (a, Clade) -> RootedTree Str e (a, Clade)
+classify
+  = push id passClade setLeaf
+  . pullNode snd pullClade where
 
-  pullLeaf leaf = leaf@clade
+  passClade parent edge child = (edge, ifelse (eq 0 (lengthS child)) parent child)
+
+  -- setLeaf parent edge leaf = (edge, { accession = leaf@accession, clade = parent })
+  setLeaf parent edge leaf = (edge, (fst leaf, parent))
 
   pullClade xs
-    = ifelse (eq (length seenClades) 1)
-             (head seenClades) ""
+    = branch (eq 1 . length) head (const "") seenClades
     where
       seenClades = ( unique
                    . filter (ne 0 . lengthS)
                    ) xs
-  push = mapChildWithParent id (\ parent child -> ifelse (eq 0 (lengthS child)) parent child)

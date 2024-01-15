@@ -8,8 +8,9 @@ source py from "paste.py" (
 
 source py ("abs")
 
-type Py Real = "float"
-type Py Str = "str"
+type Py => Real = "float"
+type Py => Str = "str"
+type Py => (List a) = "list" a
 
 abs :: Real -> Real
 

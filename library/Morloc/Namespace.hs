@@ -16,27 +16,26 @@ module Morloc.Namespace
   -- ** Synonyms
   , MDoc
   , DAG
+  , Scope
   -- ** Other functors
   , None(..)
   , One(..)
   , Or(..)
   , Many(..)
   -- ** Other classes
+  , Three(..)
   , Defaultable(..)
   -- ** Indexed
   , IndexedGeneral(..)
   , Indexed
-  , GIndex
   -- ** Newtypes
-  , CType(..)
-  , ctype
-  , GType(..)
-  , gtype
+  , MVar(..)
   , EVar(..)
   , TVar(..)
-  , unTVar
-  , MVar(..)
-  , Name(..)
+  , CVar(..)
+  , Key(..)
+  , Label(..)
+  , SrcName(..)
   , Path
   , Code(..)
   , DirTree(..)
@@ -48,9 +47,6 @@ module Morloc.Namespace
   , SysCommand(..)
   , GMap(..)
   , GMapRet(..)
-  -- ** Serialization
-  , UnresolvedPacker(..)
-  , PackMap
   --------------------
   -- ** Error handling
   , MorlocError(..)
@@ -68,6 +64,7 @@ module Morloc.Namespace
   , NamType(..)
   , Type(..)
   , TypeU(..)
+  , extractKey
   , type2typeu
   , EType(..)
   , unresolvedType2type
@@ -77,7 +74,6 @@ module Morloc.Namespace
   , GammaIndex(..)
   -- * Mostly frontend expressions
   , Symbol(..)
-  , symbolName
   , AliasedSymbol(..)
   , Expr(..)
   , ExprI(..)
@@ -91,6 +87,8 @@ module Morloc.Namespace
   , SExpr(..)
   , mapSAnno
   , mapSExpr
+  , mapSAnnoM
+  , mapSExprM
   -- ** Typeclasses
   , HasOneLanguage(..)
   , Typelike(..)
@@ -103,6 +101,7 @@ import Control.Monad.Except (ExceptT)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
+import Control.Monad.Identity (runIdentity)
 import Data.Map.Strict (Map)
 import Data.Monoid
 import Data.Scientific (Scientific)
@@ -115,7 +114,6 @@ import System.Directory.Tree (DirTree(..), AnchoredDirTree(..))
 import Morloc.Language (Lang(..))
 
 import qualified Data.Set as Set
-import qualified Data.Map as Map
 import qualified Data.Text as DT
 
 -- | no annotations for now
@@ -125,6 +123,8 @@ type MDoc = Doc ()
 -- needn't be acyclic. You can use `findCycle` to check whether a given stucture
 -- has cycles.
 type DAG key edge node = Map key (node, [(key, edge)])
+
+type Scope = Map TVar [([TVar], TypeU, Bool)]
 
 data GMap a b c = GMap (Map a b) (Map b c)
   deriving(Show, Ord, Eq)
@@ -153,23 +153,31 @@ data MorlocState = MorlocState
   , stateDepth :: Int
   -- ^ store depth in the SAnno tree in the frontend and backend typecheckers
   , stateSignatures :: GMap Int Int TermTypes
-  , stateTypedefs :: GMap Int MVar (Map TVar [([TVar], TypeU)])
-  -- ^ Stores all type definitions available to an index e.g.:
+  , stateConcreteTypedefs :: GMap Int MVar (Map Lang Scope)
+  -- ^ stores type functions that are in scope for a given module and language
+  , stateGeneralTypedefs  :: GMap Int MVar           Scope
+  -- ^ Stores all concrete type definitions available to an index e.g.:
   --   `type Cpp (Map k v) = "std::map<$1,$2>" k v`
   --   Where `TVar` is `Map`
   --         `Type` is `"std::map<$1,$2>" k v`
   --         `[TVar]` is `[k,v]`
+  , stateUniversalGeneralTypedefs :: Scope
+  -- ^ store the general typedefs pooled across all modules -- for the truly desparate
+  , stateUniversalConcreteTypedefs :: Map Lang Scope
+  -- ^ store the concrete typedefs pooled across all modules -- for the truly desparate
+  , stateInnerMogrifiers :: GMap Int MVar (Map Property [(TypeU, Source)])
+  , stateUniversalInnerMogrifiers :: Map Property [(TypeU, Source)]
   , stateSources :: GMap Int MVar [Source]
   , stateAnnotations :: Map Int [TypeU]
   -- ^ Stores non-top-level annotations.
   , stateOutfile :: Maybe Path
-  -- ^ The nexus filename ("nexus.pl" by default, though I should ditch perl)
-  , statePackers :: GMap Int MVar PackMap
+  -- ^ The nexus filename ("nexus.py" by default)
   , stateExports :: [Int]
   -- ^ The indices of each exported term
   , stateName :: Map Int EVar
   -- ^ store the names of morloc compositions
   }
+  deriving(Show)
 
 {-
        A           - There can be only one general signature for a term within a scope
@@ -226,7 +234,7 @@ data MorlocState = MorlocState
 data TermTypes = TermTypes {
     termGeneral :: Maybe EType
   -- ^ A term may have many general types (up to one in each scope)
-  , termConcrete :: [(MVar, [EType], Maybe (Indexed Source))]
+  , termConcrete :: [(MVar, Indexed Source)]
   -- ^ The module name (MVar) is needed to lookup package metadata (if needed).
   -- The source is optional, since language-specific types may specified
   -- without sources as interfaces.
@@ -241,16 +249,13 @@ data TermTypes = TermTypes {
 
 -- | Distinguishes between term and type symbols in import/export expression
 -- before they are separated in Treeify.
-data Symbol = TypeSymbol DT.Text | TermSymbol DT.Text
+data Symbol = TypeSymbol TVar | TermSymbol EVar
   deriving (Show, Ord, Eq)
-
-symbolName (TypeSymbol x) = x
-symbolName (TermSymbol x) = x
 
 data Exports = ExportMany (Set.Set Symbol) | ExportAll
   deriving (Show, Ord, Eq)
 
-data AliasedSymbol = AliasedTerm DT.Text DT.Text | AliasedType DT.Text DT.Text
+data AliasedSymbol = AliasedType TVar TVar | AliasedTerm EVar EVar
   deriving (Show, Ord, Eq)
 
 data ExprI = ExprI Int Expr
@@ -260,18 +265,20 @@ data ExprI = ExprI Int Expr
 data Expr
   = ModE MVar [ExprI]
   -- ^ the toplevel expression in a module
-  | TypE TVar [TVar] TypeU
+  | TypE (Maybe (Lang, Bool)) TVar [TVar] TypeU
   -- ^ a type definition
-  --   1. type name
-  --   2. parameters
-  --   3. type
+  --   1. the language, Nothing is general
+  --      If Just, the Bool specifies whether the definition is terminal
+  --   2. type name
+  --   3. parameters
+  --   4. type
   | ImpE Import
   -- ^ a morloc module import
   | ExpE Symbol
   -- ^ a term that is exported from a module (should only exist at the toplevel)
   | SrcE Source
   -- ^ import "c" from "foo.c" ("f" as yolo).
-  | SigE EVar (Maybe Text) EType
+  | SigE EVar (Maybe Label) EType
   -- ^ A type signature, the three parameters correspond to the term name, the
   -- optional label, and the type
   | AssE EVar ExprI [ExprI]
@@ -283,11 +290,11 @@ data Expr
   -- ^ (())
   | VarE EVar
   -- ^ (x)
-  | AccE ExprI Text
+  | AccE ExprI Key
   -- ^ person@age - access a field in a record
   | LstE [ExprI]
   | TupE [ExprI]
-  | NamE [(Text, ExprI)]
+  | NamE [(Key, ExprI)]
   | AppE ExprI [ExprI]
   -- ^ Function application
   | LamE [EVar] ExprI
@@ -316,10 +323,6 @@ data Import =
 
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
-newtype Name = Name {unName :: Text} deriving (Show, Eq, Ord)
-type Path = String
-newtype Code = Code {unCode :: Text} deriving (Show, Eq, Ord)
-
 data SysCommand
   = SysExe Path
   | SysMove Path Path
@@ -338,29 +341,6 @@ data Script =
     }
   deriving (Show, Ord, Eq)
 
-data UnresolvedPacker =
-  UnresolvedPacker
-    { unresolvedPackerTerm :: Maybe EVar
-    -- ^ The general import term used for this type. For example, the 'Map'
-    -- type may have language-specific realizations such as 'dict' or 'hash',
-    -- but it is imported as 'import xxx (Map)'.
-    , unresolvedPackedType :: TypeU
-    -- ^ The packed type (e.g., Map key val)
-    , unresolvedUnpackedType :: TypeU
-    -- ^ The decomposed (unpacked) type (e.g., [(key,val)])
-    , unresolvedPackerForward :: [Source]
-    -- ^ The unpack function, there may be more than one, the compiler will
-    -- try to find the best one. It is called "Forward" since it moves one
-    -- step towards serialization.
-    , unresolvedPackerReverse :: [Source]
-    , unresolvedPackerGeneralTypes :: Maybe (TypeU, TypeU)
-    -- ^ The general packed and unpacked types, if available
-    }
-  deriving (Show, Ord, Eq)
-
-type PackMap = Map TVar [UnresolvedPacker]
-
-
 -- | A context, see Dunfield Figure 6
 data GammaIndex
   = VarG TVar
@@ -369,8 +349,7 @@ data GammaIndex
   -- ^ store a bound variable
   | ExistG TVar
     [TypeU] -- type parameters
-    [TypeU] -- type defaults
-    [(Text, TypeU)] -- keys
+    [(Key, TypeU)] -- keys
   -- ^ (G,a^) unsolved existential variable
   | SolvedG TVar TypeU
   -- ^ (G,a^=t) Store a solved existential variable
@@ -378,10 +357,6 @@ data GammaIndex
   -- ^ (G,>a^) Store a type variable marker bound under a forall
   | SrcG Source
   -- ^ source
-  | SerialConstraint TypeU TypeU
-  -- ^ Store an unsolved serialization constraint containing one or more
-  -- existential variables. When the existential variables are solved, the
-  -- constraint will be written into the Stack state.
   deriving (Ord, Eq, Show)
 
 
@@ -398,7 +373,7 @@ data TypeError
     -- ^ the msg should an identifier for the place where the occurs check failed
   | Mismatch TypeU TypeU Text
   | UnboundVariable EVar
-  | KeyError Text TypeU
+  | KeyError Key TypeU
   | MissingConcreteSignature EVar Lang
   | MissingGeneralSignature EVar
   | ApplicationOfNonFunction
@@ -431,9 +406,9 @@ data MorlocError
   | PoolBuildError Text
   -- | Raise when a type alias substitution fails
   | SelfRecursiveTypeAlias TVar
-  | MutuallyRecursiveTypeAlias [TVar]
+  | MutuallyRecursiveTypeAlias [Text]
   | BadTypeAliasParameters TVar Int Int 
-  | ConflictingTypeAliases Type Type
+  | ConflictingTypeAliases TypeU TypeU
   -- | Problems with the directed acyclic graph datastructures
   | DagMissingKey Text
   -- | Raised when a branch is reached that should not be possible
@@ -459,15 +434,14 @@ data MorlocError
   | BadRealization
   | TooManyRealizations
   | MissingSource
-  -- serialization errors
-  | MissingPacker Text CType
-  | MissingUnpacker Text CType
   -- type extension errors
-  | AmbiguousPacker TVar
-  | AmbiguousUnpacker TVar
-  | AmbiguousCast TVar TVar
+  | UndefinedType TVar
+  | AmbiguousPacker Text
+  | AmbiguousUnpacker Text
+  | AmbiguousCast Text Text
   | IllegalPacker TypeU
-  | CyclicPacker TypeU
+  | CyclicPacker TypeU TypeU
+  | ConflictingPackers TypeU TypeU
   | IncompatibleRealization MVar
   | MissingAbstractType
   | ExpectedAbstractType
@@ -533,26 +507,42 @@ data Config =
 
 -- ================ T Y P E C H E C K I N G  =================================
 
+-- A module name
 newtype MVar = MV { unMVar :: Text } deriving (Show, Eq, Ord)
 
+-- A term name
 newtype EVar = EV { unEVar :: Text } deriving (Show, Eq, Ord)
 
-data TVar = TV (Maybe Lang) Text deriving(Show, Eq, Ord)
+-- A type general name
+newtype TVar = TV { unTVar :: Text } deriving (Show, Eq, Ord)
 
--- | Let the TVar type behave like the MVar newtype
-unTVar :: TVar -> Text
-unTVar (TV _ t) = t
+-- A concrete type name
+newtype CVar = CV { unCVar :: Text } deriving (Show, Eq, Ord)
+
+newtype Key = Key { unKey :: Text } deriving (Show, Eq, Ord)
+
+newtype Label = Label { unLabel :: Text } deriving (Show, Eq, Ord)
+
+-- The name of a source function, this is text which may be illegal in morloc
+-- (such as the R function "file.exists")
+newtype SrcName = SrcName {unSrcName :: Text} deriving (Show, Eq, Ord)
+
+newtype Code = Code {unCode :: Text} deriving (Show, Eq, Ord)
+
+-- this is a string because the path libraries want strings
+type Path = String
 
 data Source =
   Source
-    { srcName :: Name
+    { srcName :: SrcName
       -- ^ the name of the function in the source language
     , srcLang :: Lang
     , srcPath :: Maybe Path
+      -- ^ "Maybe" since the path does not exist when we import a builtin
     , srcAlias :: EVar
       -- ^ the morloc alias for the function (if no alias is explicitly given,
       -- this will be equal to the name
-    , srcLabel :: Maybe Text
+    , srcLabel :: Maybe Label 
       -- ^ an additional label for distinguishing this term from its synonyms
     }
   deriving (Ord, Eq, Show)
@@ -562,6 +552,9 @@ data Source =
 --                 - after realization it will be One
 -- c: an annotation for the specific child tree
 data SAnno g f c = SAnno (f (SExpr g f c, c)) g
+
+data Three a b c = A a | B b | C c
+  deriving (Ord, Eq, Show)
 
 data None = None
   deriving (Show)
@@ -580,6 +573,12 @@ instance Functor One where
 
 instance Functor Many where
   fmap f (Many x) = Many (map f x)
+
+instance Traversable Many where
+  traverse f (Many xs) = Many <$> traverse f xs
+
+instance Traversable One where
+  traverse f (One x) = One <$> f x
 
 instance Foldable One where
   foldr f b (One a) = f a b
@@ -604,13 +603,13 @@ instance Bifoldable Or where
 data SExpr g f c
   = UniS
   | VarS EVar
-  | AccS (SAnno g f c) Text
+  | AccS (SAnno g f c) Key
   | AppS (SAnno g f c) [SAnno g f c]
   | LamS [EVar] (SAnno g f c)
   -- containers
   | LstS [SAnno g f c]
   | TupS [SAnno g f c]
-  | NamS [(Text, SAnno g f c)]
+  | NamS [(Key, SAnno g f c)]
   -- primitives
   | RealS Scientific
   | IntS Integer
@@ -618,28 +617,41 @@ data SExpr g f c
   | StrS Text
   | CallS Source
 
-mapSAnno :: Functor f => (g -> g') -> (c -> c') -> SAnno g f c -> SAnno g' f c'
-mapSAnno fg fc (SAnno e g) = SAnno (fmap (mapSExpr' fg fc) e) (fg g) where
-  mapSExpr' :: Functor f => (g -> g') -> (c -> c') -> (SExpr g f c, c) -> (SExpr g' f c', c')
-  mapSExpr' fg' fc' (e', c) = (mapSExpr fg' fc' e', fc' c)
+mapSAnno :: Traversable f => (g -> g') -> (c -> c') -> SAnno g f c -> SAnno g' f c'
+mapSAnno fg fc = runIdentity . mapSAnnoM (return . fg) (return . fc)
 
-mapSExpr :: Functor f => (g -> g') -> (c -> c') -> SExpr g f c -> SExpr g' f c'
-mapSExpr fg fc = fe where 
-  m = mapSAnno fg fc
-  fe UniS = UniS
-  fe (VarS v) = VarS v
-  fe (AccS x k) = AccS (m x) k
-  fe (AppS x xs) = AppS (m x) (map m xs)
-  fe (LamS vs x) = LamS vs (m x)
-  fe (LstS xs) = LstS (map m xs)
-  fe (TupS xs) = TupS (map m xs)
-  fe (NamS rs) = NamS (zip (map fst rs) (map (m . snd) rs))
-  fe (RealS x) = RealS x
-  fe (IntS x) = IntS x
-  fe (LogS x) = LogS x
-  fe (StrS x) = StrS x
-  fe (CallS src) = CallS src
-   
+mapSExpr :: Traversable f => (g -> g') -> (c -> c') -> SExpr g f c -> SExpr g' f c'
+mapSExpr fg fc = runIdentity . mapSExprM (return . fg) (return . fc)
+
+mapSAnnoM :: (Traversable f, Monad m) => (g -> m g') -> (c -> m c') -> SAnno g f c -> m (SAnno g' f c')
+mapSAnnoM fg fc (SAnno e g) = do
+  g' <- fg g
+  e' <- traverse mapSExprM' e
+  return $ SAnno e' g'
+  where
+    mapSExprM' (x, c) = do
+      c' <- fc c
+      x' <- mapSExprM fg fc x
+      return (x', c')
+
+mapSExprM :: (Traversable f, Monad m) => (g -> m g') -> (c -> m c') -> SExpr g f c -> m (SExpr g' f c')
+mapSExprM fg fc = fe where 
+  m = mapSAnnoM fg fc
+  fe UniS = return UniS
+  fe (VarS v) = return $ VarS v
+  fe (AccS x k) = AccS <$> m x <*> pure k
+  fe (AppS x xs) = AppS <$> m x <*> mapM m xs
+  fe (LamS vs x) = LamS vs <$> m x
+  fe (LstS xs) = LstS <$> mapM m xs
+  fe (TupS xs) = TupS <$> mapM m xs
+  fe (NamS rs) = do
+    es' <- mapM (m. snd) rs
+    return $ NamS (zip (map fst rs) es')
+  fe (RealS x) = return $ RealS x
+  fe (IntS x) = return $ IntS x
+  fe (LogS x) = return $ LogS x
+  fe (StrS x) = return $ StrS x
+  fe (CallS src) = return $ CallS src
 
 type Indexed = IndexedGeneral Int
 
@@ -651,29 +663,8 @@ instance Annotated IndexedGeneral where
   ann (Idx i _) = i
   annotate i x = Idx i x
 
--- TODO: This should probably be a newtype, I want to avoid ambiguous Int's in signatures
-type GIndex = Int
-
 instance Functor (IndexedGeneral k) where
   fmap f (Idx i x) = Idx i (f x)
-
-newtype CType = CType { unCType :: Type }
-  deriving (Show, Ord, Eq)
-
-newtype GType = GType { unGType :: Type }
-  deriving (Show, Ord, Eq)
-
--- a safe alternative to the CType constructor
-ctype :: Type -> CType
-ctype t
-  | isJust (langOf t) = CType t
-  | otherwise = error "COMPILER BUG - incorrect assignment to concrete type"
-
--- a safe alternative to the GType constructor
-gtype :: Type -> GType
-gtype t
-  | isNothing (langOf t) = GType t
-  | otherwise = error "COMPILER BUG - incorrect assignment to general type"
 
 data NamType
   = NamRecord
@@ -689,27 +680,33 @@ data Type
   -- environment where they can be deserialized. Alternatively, terms that are
   -- used within dynamic languages may need no type annotation.
   | VarT TVar
-  -- ^ (a)
   | FunT [Type] Type
   | AppT Type [Type]
-  | NamT NamType TVar [Type] [(Text, Type)]
+  | NamT NamType TVar [Type] [(Key, Type)]
   deriving (Show, Ord, Eq)
 
 -- | A type with existentials and universals
 data TypeU
-  = VarU TVar
-  -- ^ (a)
-  | ExistU TVar
+  = VarU TVar 
+  | ExistU TVar 
     [TypeU] -- type parameters
-    [TypeU] -- default types
-    [(Text, TypeU)] -- key accesses into this type
+    [(Key, TypeU)] -- key accesses into this type
   -- ^ (a^) will be solved into one of the other types
   | ForallU TVar TypeU
   -- ^ (Forall a . A)
   | FunU [TypeU] TypeU -- function
   | AppU TypeU [TypeU] -- type application
-  | NamU NamType TVar [TypeU] [(Text, TypeU)] -- record / object / table
+  | NamU NamType TVar [TypeU] [(Key, TypeU)] -- record / object / table
   deriving (Show, Ord, Eq)
+
+extractKey :: TypeU -> TVar
+extractKey (VarU v) = v
+extractKey (ForallU _ t) = extractKey t
+extractKey (AppU t _) = extractKey t
+extractKey (NamU _ v _ _) = v
+extractKey (ExistU v _ _) = v
+extractKey t = error $ "Cannot currently handle functional type imports: " <> show t
+
 
 type2typeu :: Type -> TypeU
 type2typeu (VarT v) = VarU v
@@ -727,9 +724,6 @@ data EType =
     , econs :: Set.Set Constraint
     }
   deriving (Show, Eq, Ord)
-
-instance HasOneLanguage EType where
-  langOf e = langOf (etype e) 
 
 instance HasOneLanguage Source where
   langOf s = Just (srcLang s)
@@ -806,26 +800,25 @@ instance Typelike TypeU where
   -- This functions removes qualified and existential types.
   --  * all qualified terms are replaced with UnkT
   --  * all existentials are replaced with default values if a possible
-  --    FIXME: should I really just take the first in the list???
   typeOf (VarU v) = VarT v
-  typeOf (ExistU v _ [] _) = typeOf (ForallU v (VarU v)) -- whatever
-  typeOf (ExistU _ _ (t:_) _) = typeOf t
+  typeOf (ExistU _ ps rs@(_:_)) = NamT NamRecord (TV "Record") (map typeOf ps) (map (second typeOf) rs) where
+  typeOf (ExistU v _ _) = typeOf (ForallU v (VarU v)) -- this will cause problems eventually
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
   typeOf (FunU ts t) = FunT (map typeOf ts) (typeOf t)
   typeOf (AppU t ts) = AppT (typeOf t) (map typeOf ts)
   typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
 
   free v@(VarU _) = Set.singleton v
-  free v@(ExistU _ [] _ rs) = Set.unions $ Set.singleton v : map (free . snd) rs
+  free v@(ExistU _ [] rs) = Set.unions $ Set.singleton v : map (free . snd) rs
   -- Why exactly do you turn ExistU into AppU? Not judging, but it seems weird ...
-  free (ExistU v ts _ _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
+  free (ExistU v ts _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
   free (ForallU v t) = Set.delete (VarU v) (free t)
   free (FunU ts t) = Set.unions $ map free (t:ts)
   free (AppU t ts) = Set.unions $ map free (t:ts)
   free (NamU _ _ ps rs) = Set.unions $ map free (map snd rs <> ps)
   
 
-  substituteTVar v@(TV _ _) (ForallU q r) t = 
+  substituteTVar v (ForallU q r) t = 
     if Set.member (VarU q) (free t)
     then
       let q' = newVariable r t -- get unused variable name from [a, ..., z, aa, ...]
@@ -839,7 +832,7 @@ instance Typelike TypeU where
       sub t@(VarU v)
         | v0 == v = r0 -- replace v with the new type
         | otherwise = t
-      sub (ExistU v (map sub -> ps) (map sub -> ts) (map (second sub) -> rs)) = ExistU v ps ts rs
+      sub (ExistU v (map sub -> ps) (map (second sub) -> rs)) = ExistU v ps rs
       sub (ForallU v t)
         | v0 == v = ForallU v t -- stop looking if we hit a bound variable of the same name
         | otherwise = ForallU v (sub t)
@@ -851,11 +844,11 @@ instance Typelike TypeU where
   normalizeType (AppU t ts) = AppU (normalizeType t) (map normalizeType ts)
   normalizeType (NamU n v ds ks) = NamU n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
   normalizeType (ForallU v t) = ForallU v (normalizeType t)
-  normalizeType (ExistU v (map normalizeType -> ps) (map normalizeType -> ds) (map (second normalizeType) -> rs)) = ExistU v ps ds rs
+  normalizeType (ExistU v (map normalizeType -> ps) (map (second normalizeType) -> rs)) = ExistU v ps rs
   normalizeType t = t
 
 -- | get a fresh variable name that is not used in t1 or t2, it reside in the same namespace as the first type
-newVariable :: TypeU -> TypeU -> TVar
+newVariable :: TypeU -> TypeU -> TVar 
 newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
   where 
     variables = [1 ..] >>= flip replicateM ['a' .. 'z']
@@ -866,7 +859,7 @@ newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
       | Set.member (VarU v) ts = findNew xs ts 
       | otherwise = v
       where
-        v = TV (langOf t1) (DT.pack x)
+        v = TV $ DT.pack x
 
     allVars :: TypeU -> Set.Set TypeU
     allVars (ForallU v t) = Set.union (Set.singleton (VarU v)) (allVars t)
@@ -879,27 +872,3 @@ class HasOneLanguage a where
 
   langOf x = Just (langOf' x) 
   langOf' x = fromJust (langOf x)
-
-instance HasOneLanguage CType where
-  langOf (CType t) = langOf t
-
--- | Determine the language from a type, fail if the language is inconsistent.
--- Inconsistency in language should be impossible at the syntactic level, thus
--- an error in this function indicates a logical bug in the typechecker.
-instance HasOneLanguage Type where
-  langOf (UnkT (TV lang _)) = lang
-  langOf (VarT (TV lang _)) = lang
-  langOf (FunT _ t) = langOf t
-  langOf (AppT t _) = langOf t
-  langOf (NamT _ (TV lang _) _ _) = lang
-
-instance HasOneLanguage TVar where
-  langOf (TV lang _) = lang
-
-instance HasOneLanguage TypeU where
-  langOf (VarU (TV lang _)) = lang
-  langOf (ExistU (TV lang _) _ _ _) = lang
-  langOf (ForallU (TV lang _) _) = lang
-  langOf (FunU _ t) = langOf t
-  langOf (AppU t _) = langOf t
-  langOf (NamU _ (TV lang _) _ _) = lang

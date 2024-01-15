@@ -55,7 +55,7 @@ import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import Morloc.Data.Doc
 import Morloc.Pretty (prettySExpr, prettySAnno)
-import Morloc.Frontend.Lang.DefaultTypes (recordGC)
+import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Monad as MM
 
 import qualified Data.Set as Set
@@ -81,11 +81,11 @@ instance Applicable TypeU where
   -- [G]ForallU a.a = forall a. [G]a
   apply g (ForallU x a) = ForallU x (apply g a)
   -- [G[a=t]]a = [G[a=t]]t
-  apply g (ExistU v ts ds rs) =
+  apply g (ExistU v ts rs) =
     case lookupU v g of
       -- FIXME: this seems problematic - do I keep the previous parameters or the new ones?
       (Just t') -> apply g t' -- reduce an existential; strictly smaller term
-      Nothing -> ExistU v (map (apply g) ts) (map (apply g) ds) (map (second (apply g)) rs)
+      Nothing -> ExistU v (map (apply g) ts) (map (second (apply g)) rs)
   apply g (NamU o n ps rs) = NamU o n ps [(k, apply g t) | (k, t) <- rs]
 
 instance Applicable EType where
@@ -95,9 +95,8 @@ instance Applicable Gamma where
   apply g1 g2 = g2 {gammaContext = map f (gammaContext g2)} where 
     f :: GammaIndex -> GammaIndex
     f (AnnG v t) = AnnG v (apply g1 t)
-    f (ExistG v ps ds rs) = ExistG v (map (apply g1) ps) (map (apply g1) ds) (map (second (apply g1)) rs)
+    f (ExistG v ps rs) = ExistG v (map (apply g1) ps) (map (second (apply g1)) rs)
     f (SolvedG v t) = SolvedG v (apply g1 t)
-    f (SerialConstraint t1 t2) = SerialConstraint (apply g1 t1) (apply g1 t2)
     f x = x 
 
 class GammaIndexLike a where
@@ -107,11 +106,11 @@ instance GammaIndexLike GammaIndex where
   index = id
 
 instance GammaIndexLike TypeU where
-  index (ExistU t ts ds rs) = ExistG t ts ds rs
+  index (ExistU t ts rs) = ExistG t ts rs
   index t = error $ "Can only index ExistT, found: " <> show t
 
 instance GammaIndexLike TVar where
-  index v = ExistG v [] [] []
+  index v = ExistG v [] []
 
 (+>) :: GammaIndexLike a => Gamma -> a -> Gamma
 (+>) g x = g {gammaContext = index x : gammaContext g}
@@ -125,31 +124,21 @@ instance GammaIndexLike TVar where
 subtype :: TypeU -> TypeU -> Gamma -> Either TypeError Gamma
 
 -- VarU vs VarT
-subtype t1@(VarU (TV lang1 a1)) t2@(VarU (TV lang2 a2)) g
+subtype t1@(VarU a1) t2@(VarU a2) g
   -- If everything is the same, do nothing
   --
   -- ----------------------------------------- <:Var
   --  G[a] |- a_l <: a_l -| G[a]
-  | lang1 == lang2 && a1 == a2 = return g
-  -- If languages are different, do nothing
-  --  l1 != l2    b_l2 ~~> a_l1
-  -- ----------------------------------------- <:Var
-  --  G[a] |- a_l1 <: b_l2 -| G[a]
-  | lang1 /= lang2 = return $ g +> SerialConstraint t1 t2
+  | a1 == a2 = return g
 
-  -- If languages are same, but types are different, raise error
-  | lang1 == lang2 && a1 /= a2 = Left $ Mismatch t1 t2 "Unequal types with no conversion rule"
+  -- Else, raise an error
+  | a1 /= a2 = Left $ Mismatch t1 t2 "Unequal types with no conversion rule"
 
-subtype a@(ExistU (TV l1 _) _ _ _) b@(ExistU (TV l2 _) _ _ _) g
+subtype a@(ExistU l1 _ _) b@(ExistU l2 _ _) g
   --
   -- ----------------------------------------- <:Exvar
   --  G[E.a] |- E.a <: E.a -| G[E.a]
   | a == b = return g
-  --  l1 == l2
-  -- ----------------------------------------- <:AlienExvar
-  --  G[E.a,E.b] |- E.a <: E.b -| G[E.a,E.b], E.a ~~> E.b
-  | l1 /= l2 = return $ g +> SerialConstraint a b
-  --
   -- ----------------------------------------- <:InstantiateL/<:InstantiateR
   --  G[E.a] |- Ea <: Ea -| G[E.a]
   | otherwise = instantiate a b g
@@ -175,7 +164,6 @@ subtype (FunU (a1:rs1) a2) (FunU (b1:rs2) b2) g1 = do
 --  unparameterized types are the same as VarT, so subtype on that instead
 subtype t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
   | length vs1 /= length vs2 = Left $ SubtypeError t1 t2 "<:App - Cannot subtype types with unequal parameter count"
-  | langOf v1 /= langOf v2 = return $ g +> SerialConstraint t1 t2
   | otherwise = compareApp (v1:vs1) (v2:vs2) g
   where
     compareApp :: [TypeU] -> [TypeU] -> Gamma -> Either TypeError Gamma
@@ -186,9 +174,9 @@ subtype t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
     compareApp _ _ _ = Left $ SubtypeError t1 t2 "<:App - Type mismatch in AppU"
 
 -- subtype unordered records
-subtype (NamU _ v1@(TV lang1 n1) _ []) (NamU _ v2@(TV lang2 n2) _ []) g
+subtype (NamU _ v1 _ []) (NamU _ v2 _ []) g
     -- If one of the records is generic, allow promotion
-    | lang1 == lang2 && (elem n1 (recordGC lang1) || elem n2 (recordGC lang2))  = return g
+    | v1 == BT.record || v2 == BT.record  = return g
     -- Otherwise subtype the variable names
     | otherwise = subtype (VarU v1) (VarU v2) g
 
@@ -196,37 +184,28 @@ subtype t1@(NamU _ _ _ []) t2@(NamU _ _ _ _) _ =
   Left $ SubtypeError t1 t2 "NamU - Unequal number of fields"
 subtype t1@(NamU _ _ _ _ ) t2@(NamU _ _ _ []) _ =
   Left $ SubtypeError t1 t2 "NamU - Unequal number of fields"
-subtype t1@(NamU o1 v1 p1 ((k1,x1):rs1)) t2@(NamU o2 v2 p2 es2) g0
-  | langOf v1 == langOf v2 =
+subtype t1@(NamU o1 v1 p1 ((k1,x1):rs1)) t2@(NamU o2 v2 p2 es2) g0 =
     case filterApart (\(k2, _) -> k2 == k1) es2 of
       (Nothing, _) -> Left $ SubtypeError t1 t2 "NamU - Unequal fields"
-      (Just (_, x2), rs2) -> do
-          g1 <- subtype x1 x2 g0
-          g2 <- subtype (NamU o1 v1 p1 rs1) (NamU o2 v2 p2 rs2) g1
-          return g2
-  | otherwise = return g0 -- incomparable
+      (Just (_, x2), rs2)
+        ->  subtype x1 x2 g0
+        >>= subtype (NamU o1 v1 p1 rs1) (NamU o2 v2 p2 rs2)
+
 
 --  Ea not in FV(a)
 --  g1[Ea] |- A <=: Ea -| g2
 -- ----------------------------------------- <:InstantiateR
 --  g1[Ea] |- A <: Ea -| g2
-subtype a b@(ExistU _ [] _ _) g
-  | langOf a /= langOf b = return g -- incomparable
-  | otherwise = occursCheck b a "InstantiateR" >> instantiate a b g
+subtype a b@(ExistU _ [] _) g = occursCheck b a "InstantiateR" >> instantiate a b g
 --  Ea not in FV(a)
 --  g1[Ea] |- Ea <=: A -| g2
 -- ----------------------------------------- <:InstantiateL
 --  g1[Ea] |- Ea <: A -| g2
-subtype a@(ExistU _ [] _ _) b g
-  | langOf a /= langOf b = return g -- incomparable
-  | otherwise = occursCheck a b "InstantiateL" >> instantiate a b g
+subtype a@(ExistU _ [] _) b g = occursCheck a b "InstantiateL" >> instantiate a b g
 
-subtype a@(AppU _ _) b@(ExistU _ _ _ _) g
-  | langOf a /= langOf b = return g -- incomparable
-  | otherwise = subtype b a g
+subtype a@(AppU _ _) b@(ExistU _ _ _) g = subtype b a g
 
-subtype t1@(ExistU v1 ps1 _ []) t2@(AppU v2 ps2) g1
-  | langOf v1 /= langOf v2 = return g1 -- incomparable
+subtype t1@(ExistU v1 ps1 []) t2@(AppU _ ps2) g1
   | length ps1 /= length ps2 = Left $ SubtypeError t1 t2 "InstantiateL - Expected equal number of type parameters"
   | otherwise = do
     g2 <- foldM (\g (p1, p2) -> subtype p1 p2 g) g1 (zip ps1 ps2)
@@ -240,9 +219,7 @@ subtype t1@(ExistU v1 ps1 _ []) t2@(AppU v2 ps2) g1
 -- ----------------------------------------- <:ForallL
 --  g1 |- Forall x . A <: B -| g2
 --
-subtype (ForallU v@(TV lang _) a) b g0
-  | lang /= langOf b = return g0
-  | otherwise = subtype (substitute v a) b (g0 +> v)
+subtype (ForallU v a) b g0 = subtype (substitute v a) b (g0 +> v)
   -- NOTE: I am deviating from the rules here by not cutting. It is not
   -- necessary to do so since I rewrote all qualifiers to be globally unique.
   -- Also, when I cut here I lose my only link to v, and that caused `map fst`
@@ -251,9 +228,7 @@ subtype (ForallU v@(TV lang _) a) b g0
 --  g1,a |- A <: B -| g2,a,g3
 -- ----------------------------------------- <:ForallR
 --  g1 |- A <: Forall a. B -| g2
-subtype a (ForallU v@(TV lang _) b) g
-  | lang /= langOf a = return g
-  | otherwise = subtype a b (g +> VarG v) >>= cut (VarG v)
+subtype a (ForallU v b) g = subtype a b (g +> VarG v) >>= cut (VarG v)
 
 -- fall through
 subtype a b _ = Left $ SubtypeError a b "Type mismatch"
@@ -263,8 +238,8 @@ subtype a b _ = Left $ SubtypeError a b "Type mismatch"
 -- | Dunfield Figure 10 -- type-level structural recursion
 instantiate :: TypeU -> TypeU -> Gamma -> Either TypeError Gamma
 
-instantiate ta@(ExistU _ _ _ (_:_)) tb@(NamU _ _ _ _) g1 = instantiate tb ta g1
-instantiate ta@(NamU _ _ _ rs1) tb@(ExistU v _ _ rs2@(_:_)) g1 = do
+instantiate ta@(ExistU _ _ (_:_)) tb@(NamU _ _ _ _) g1 = instantiate tb ta g1
+instantiate ta@(NamU _ _ _ rs1) tb@(ExistU v _ rs2@(_:_)) g1 = do
   g2 <- foldM (\g' (t1, t2) -> subtype t1 t2 g') g1 [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
   case access1 v (gammaContext g2) of 
     (Just (rhs, _, lhs)) -> do
@@ -272,11 +247,11 @@ instantiate ta@(NamU _ _ _ rs1) tb@(ExistU v _ _ rs2@(_:_)) g1 = do
         return $ g2 {gammaContext = rhs ++ [solved] ++ lhs}
     Nothing -> Left $ InstantiationError ta tb "Error in NamU with existential keys"
 
-instantiate ta@(ExistU v@(TV lang _) [] _ _) tb@(FunU as b) g1 = do
-  let (g2, veas) = statefulMap (\g _ -> tvarname g "ta" lang) g1 as
-      (g3, veb) = tvarname g2 "to" lang
-      eas = [ExistU v' [] [] [] | v' <- veas]
-      eb = ExistU veb [] [] []
+instantiate ta@(ExistU v [] _) tb@(FunU as b) g1 = do
+  let (g2, veas) = statefulMap (\g _ -> tvarname g "ta") g1 as
+      (g3, veb) = tvarname g2 "to"
+      eas = [ExistU v' [] [] | v' <- veas]
+      eb = ExistU veb [] []
   g4 <- case access1 v (gammaContext g3) of
       Just (rs, _, ls) -> do
         solved <- solve v (FunU eas eb)
@@ -289,11 +264,11 @@ instantiate ta@(ExistU v@(TV lang _) [] _ _) tb@(FunU as b) g1 = do
 --  g2 |- [g2]A2 <=: Ea2 -| g3
 -- ----------------------------------------- InstRApp
 --  g1[Ea] |- A1 -> A2 <=: Ea -| g3
-instantiate ta@(FunU as b) tb@(ExistU v@(TV lang _) [] _ _) g1 = do
-  let (g2, veas) = statefulMap (\g _ -> tvarname g "ta" lang) g1 as
-      (g3, veb) = tvarname g2 "to" lang
-      eas = [ExistU v' [] [] [] | v' <- veas]
-      eb = ExistU veb [] [] []
+instantiate ta@(FunU as b) tb@(ExistU v [] _) g1 = do
+  let (g2, veas) = statefulMap (\g _ -> tvarname g "ta") g1 as
+      (g3, veb) = tvarname g2 "to"
+      eas = [ExistU v' [] [] | v' <- veas]
+      eb = ExistU veb [] []
   g4 <- case access1 v (gammaContext g3) of
     Just (rs, _, ls) -> do
         solved <- solve v (FunU eas eb)
@@ -302,23 +277,50 @@ instantiate ta@(FunU as b) tb@(ExistU v@(TV lang _) [] _ _) g1 = do
   g5 <- foldlM (\g (e, t) -> instantiate t e g) g4 (zip eas as)
   instantiate eb (apply g5 b) g5
 
+
+
+-- This is terrible kludge, I am not close to having considered all the edge
+-- cases. I need to completely rewrite my type system. Argh. I also need to get
+-- rid of all default types. Defaults should be set explicitly in morloc code.
+instantiate ta@(ExistU _ _ (_:_)) tb@(ExistU v [] []) g1 =
+  case access1 v (gammaContext g1) of
+    (Just (ls, _, rs)) -> do
+        solved <- solve v ta
+        return $ g1 { gammaContext = ls ++ solved : rs }
+    Nothing ->
+      case lookupU v g1 of
+        (Just _) -> return g1
+        Nothing -> Left . InstantiationError ta tb . render
+          $ "Error in recordInstRSolve with gamma:\n" <> tupled (map pretty (gammaContext g1))
+instantiate ta@(ExistU v [] []) tb@(ExistU _ _ (_:_)) g1 =
+  case access1 v (gammaContext g1) of
+    (Just (ls, _, rs)) -> do
+        solved <- solve v tb
+        return $ g1 { gammaContext = ls ++ solved : rs }
+    Nothing ->
+      case lookupU v g1 of
+        (Just _) -> return g1
+        Nothing -> Left . InstantiationError ta tb . render
+          $ "Error in recordInstLSolve:" <+> tupled (map pretty (gammaContext g1))
+
+
 --
 -- ----------------------------------------- InstLAllR
 --
-instantiate ta@(ExistU _ _ _ _) tb@(ForallU v2 t2) g1
-  | langOf ta /= langOf tb = return g1
-  | otherwise = instantiate ta t2 (g1 +> VarG v2) >>= cut (VarG v2)
+instantiate ta@(ExistU _ _ _) (ForallU v2 t2) g1
+  = instantiate ta t2 (g1 +> VarG v2)
+  >>= cut (VarG v2)
 -- InstLReach or instRReach -- each rule eliminates an existential
 -- Replace the rightmost with leftmost (G[a][b] --> L,a,M,b=a,R)
 -- WARNING: be careful here, since the implementation adds to the front and the
 -- formal syntax adds to the back. Don't change anything in the function unless
 -- you really know what you are doing and have tests to confirm it.
-instantiate (ExistU v1 ps1 [] rs1) (ExistU v2 ps2 [] rs2) g1 = do
+instantiate (ExistU v1 ps1 rs1) (ExistU v2 ps2 rs2) g1 = do
   g2 <- foldM (\g (t1, t2) -> subtype t1 t2 g) g1 (zip ps1 ps2)
   g3 <- foldM (\g' (t1, t2) -> subtype t1 t2 g') g2 [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
   let rs3 = rs1 <> [x | x <- rs2, fst x `notElem` map fst rs1]
-      ta = ExistU v1 ps1 [] rs3
-      tb = ExistU v2 ps2 [] rs3
+      ta = ExistU v1 ps1 rs3
+      tb = ExistU v2 ps2 rs3
   case access2 v1 v2 (gammaContext g3) of
     -- InstLReach
     (Just (ls, _, ms, x, rs)) -> do
@@ -335,57 +337,40 @@ instantiate (ExistU v1 ps1 [] rs1) (ExistU v2 ps2 [] rs2) g1 = do
 --  g1[Ea],>Eb,Eb |- [Eb/x]B <=: Ea -| g2,>Eb,g3
 -- ----------------------------------------- InstRAllL
 --  g1[Ea] |- Forall x. B <=: Ea -| g2
-instantiate ta@(ForallU x b) tb@(ExistU _ [] _ _) g1
-  | langOf ta /= langOf tb = return g1
-  | otherwise =
-      instantiate
-        (substitute x b) -- [Eb/x]B
-        tb -- Ea
-        (g1 +> MarkG x +> ExistG x [] [] []) -- g1[Ea],>Eb,Eb
-      >>= cut (MarkG x)
+instantiate (ForallU x b) tb@(ExistU _ [] _) g1
+  = instantiate
+      (substitute x b) -- [Eb/x]B
+      tb -- Ea
+      (g1 +> MarkG x +> ExistG x [] []) -- g1[Ea],>Eb,Eb
+  >>= cut (MarkG x)
 --  g1 |- t
 -- ----------------------------------------- InstRSolve
 --  g1,Ea,g2 |- t <=: Ea -| g1,Ea=t,g2
-instantiate ta tb@(ExistU v [] [] []) g1
-  | langOf ta /= langOf tb = return g1
-  | otherwise =
-      case access1 v (gammaContext g1) of
-        (Just (ls, _, rs)) -> do
-            solved <- solve v ta
-            return $ g1 { gammaContext = ls ++ solved : rs }
-        Nothing ->
-          case lookupU v g1 of
-            (Just _) -> return g1
-            Nothing -> Left . InstantiationError ta tb . render
-              $ "Error in InstRSolve with gamma:\n" <> tupled (map pretty (gammaContext g1))
+instantiate ta tb@(ExistU v [] []) g1 =
+  case access1 v (gammaContext g1) of
+    (Just (ls, _, rs)) -> do
+        solved <- solve v ta
+        return $ g1 { gammaContext = ls ++ solved : rs }
+    Nothing ->
+      case lookupU v g1 of
+        (Just _) -> return g1
+        Nothing -> Left . InstantiationError ta tb . render
+          $ "Error in InstRSolve with gamma:\n" <> tupled (map pretty (gammaContext g1))
 
 
 --  g1 |- t
 -- ----------------------------------------- instLSolve
 --  g1,Ea,g2 |- Ea <=: t -| g1,Ea=t,g2
-instantiate ta@(ExistU v [] [] []) tb g1
-  | langOf ta /= langOf tb = return g1
-  | otherwise =
-      case access1 v (gammaContext g1) of
-        (Just (ls, _, rs)) -> do
-            solved <- solve v tb
-            return $ g1 { gammaContext = ls ++ solved : rs }
-        Nothing ->
-          case lookupU v g1 of
-            (Just _) -> return g1
-            Nothing -> Left . InstantiationError ta tb . render
-              $ "Error in InstLSolve:" <+> tupled (map pretty (gammaContext g1))
-
--- if defaults are involved, no solving is done, but the subtypes of parameters
--- and defaults needs to be checked. 
---
------ FIXME: how should defaults be handled?
--- certainly NOT this:
--- g3 <- foldM (\g d1 -> foldM (\g' d2 -> subtype d1 d2 g') g ds2) g2 ds1
--- return g3
-instantiate (ExistU _ ps1 _ rs1) (ExistU _ ps2 _ rs2) g1 = do
-    g2 <- foldM (\g (t1, t2) -> subtype t1 t2 g) g1 (zip ps1 ps2)
-    foldM (\g' (t1, t2) -> subtype t1 t2 g') g2 [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
+instantiate ta@(ExistU v [] []) tb g1 =
+  case access1 v (gammaContext g1) of
+    (Just (ls, _, rs)) -> do
+        solved <- solve v tb
+        return $ g1 { gammaContext = ls ++ solved : rs }
+    Nothing ->
+      case lookupU v g1 of
+        (Just _) -> return g1
+        Nothing -> Left . InstantiationError ta tb . render
+          $ "Error in InstLSolve:" <+> tupled (map pretty (gammaContext g1))
 
 -- bad
 instantiate _ _ g = return g
@@ -397,7 +382,7 @@ solve v t
     | otherwise = Right (SolvedG v t)
     where
         toTVar :: TypeU -> Maybe TVar
-        toTVar (ExistU v' _ _ _) = Just v'
+        toTVar (ExistU v' _ _) = Just v'
         toTVar (VarU v') = Just v'
         toTVar _ = Nothing
     
@@ -414,7 +399,7 @@ occursCheck t1 t2 place =
 -- | substitute all appearances of a given variable with an existential
 -- [t/v]A
 substitute :: TVar -> TypeU -> TypeU
-substitute v = substituteTVar v (ExistU v [] [] [])
+substitute v = substituteTVar v (ExistU v [] [])
 
 access1 :: TVar -> [GammaIndex] -> Maybe ([GammaIndex], GammaIndex, [GammaIndex])
 access1 v gs =
@@ -424,7 +409,7 @@ access1 v gs =
     _ -> Nothing
   where
     exists :: TVar -> GammaIndex -> Bool
-    exists v1 (ExistG v2 _ _ _) = v1 == v2
+    exists v1 (ExistG v2 _ _) = v1 == v2
     exists _ _ = False
 
 
@@ -453,12 +438,12 @@ lookupU v (gammaContext -> gs0) = f gs0 where
 
 
 -- | Look up a solved existential type variable
-lookupE :: Maybe Lang -> EVar -> Gamma -> Maybe TypeU
-lookupE mayLang v (gammaContext -> gs0) = f gs0 where
+lookupE :: EVar -> Gamma -> Maybe TypeU
+lookupE v (gammaContext -> gs0) = f gs0 where
   f :: [GammaIndex] -> Maybe TypeU
   f [] = Nothing
   f ((AnnG v' t):gs)
-    | v == v' && langOf t == mayLang = Just t
+    | v == v' = Just t
     | otherwise = f gs
   f (_:gs) = f gs
 
@@ -475,25 +460,24 @@ cut i g = do
     | otherwise = f xs
 
 
-newvar :: MT.Text -> Maybe Lang -> Gamma -> (Gamma, TypeU)
+newvar :: MT.Text -> Gamma -> (Gamma, TypeU)
 newvar = newvarRich [] []
 
 
 newvarRich
   :: [TypeU] -- ^ type parameters
-  -> [TypeU] -- ^ type defaults
+  -> [(Key, TypeU)] -- ^ key-value pairs
   -> MT.Text -- ^ prefix, just for readability
-  -> Maybe Lang
   -> Gamma
   -> (Gamma, TypeU)
-newvarRich ps ds prefix lang g =
-  let (g', v) = tvarname g prefix lang
-  in (g' +> ExistG v ps ds [], ExistU v ps ds [])
+newvarRich ps rs prefix g =
+  let (g', v) = tvarname g prefix
+  in (g' +> ExistG v ps rs, ExistU v ps rs)
 
 -- | standardize quantifier names, for example, replace `a -> b` with `v0 -> v1`.
 rename :: Gamma -> TypeU -> (Gamma, TypeU)
-rename g0 (ForallU v@(TV lang s) t0) = 
-  let (g1, v') = tvarname g0 (s <> "_q") lang
+rename g0 (ForallU v@(TV s) t0) = 
+  let (g1, v') = tvarname g0 (s <> "_q")
       (g2, t1) = rename g1 t0
       t2 = substituteTVar v (VarU v') t1
   in (g2, ForallU v' t2)
@@ -533,10 +517,10 @@ renameSExpr c0@(m, g) e0 = case e0 of
     in (c1, NamS (zip (map fst rs) es'))
   e -> (c0, e)
 
-tvarname :: Gamma -> MT.Text -> Maybe Lang -> (Gamma, TVar)
-tvarname g prefix lang =
+tvarname :: Gamma -> MT.Text -> (Gamma, TVar)
+tvarname g prefix =
   let i = gammaCounter g
-  in (g {gammaCounter = i + 1}, TV lang (prefix <> MT.pack (show i)))
+  in (g {gammaCounter = i + 1}, TV (prefix <> MT.pack (show i)))
 
 evarname :: Gamma -> MT.Text -> (Gamma, EVar)
 evarname g prefix =

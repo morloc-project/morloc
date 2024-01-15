@@ -1,6 +1,7 @@
 module main (f)
 
 import pybase (add)
+import conventions (Real)
 
 -- cousins do not interfere with one another
 f = x where

@@ -13,7 +13,6 @@ module Morloc.Frontend.Treeify (treeify) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
-import qualified Morloc.Frontend.PartialOrder as PO
 import Morloc.Pretty ()
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Frontend.AST as AST
@@ -90,11 +89,12 @@ treeify d
                 ])
          -}
 
-         -- set counter for reindexing expressions in collect
+         -- set counter for reindexing expressions in collect.
+         -- since d is the entire tree, the initizalized counter will start at global maximum.
          MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes d)) + 1
 
          -- find all term exports (do not include type exports)
-         let exports = [(i, EV v) | (i, TermSymbol v) <- AST.findExports e]
+         let exports = [(i, v) | (i, TermSymbol v) <- AST.findExports e]
 
          -- - store all exported indices in state
          -- - Add the export name to state. Failing to do so here, will lose
@@ -105,13 +105,6 @@ treeify d
 
          -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
          mapM (collect . fst) exports
-
-
-
-
--- storeExports :: DAG MVar [(EVar, EVar)] ExprI -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
--- storeExports d = do
---     s <- MM.get
 
    -- There is no currently supported use case that exposes multiple roots in
    -- one compilation process. The compiler executable takes a single morloc
@@ -194,7 +187,7 @@ linkVariablesToTermTypes mv m0 = mapM_ (link m0) where
   link :: Map.Map EVar (Int, TermTypes) -> ExprI -> MorlocMonad ()
   -- The following have terms associated with them:
   -- 1. exported terms (but not exported types)
-  link m (ExprI i (ExpE (TermSymbol v))) = setType m i (EV v)
+  link m (ExprI i (ExpE (TermSymbol v))) = setType m i v
   -- 2. variables
   link m (ExprI i (VarE v)) = setType m i v
   -- 3. assignments
@@ -239,34 +232,30 @@ unifyTermTypes mv xs m0
   >>= Map.unionWithM combineTermTypes m0
   >>= Map.unionWithM combineTermTypes decs
   where
-  sigs = Map.fromListWith (<>) [((v, l, langOf t), [t]) | (ExprI _ (SigE v l t)) <- xs]
+  sigs = Map.fromListWith (<>) [((v, l, Nothing), [t]) | (ExprI _ (SigE v l t)) <- xs]
   srcs = Map.fromListWith (<>) [((srcAlias s, srcLabel s, langOf s), [(s, i)]) | (ExprI i (SrcE s)) <- xs]
   decs = Map.map (TermTypes Nothing []) $ Map.fromListWith (<>) [(v, [e]) | (ExprI _ (AssE v e _)) <- xs]
 
+  -- generate a TermType object from only signatures
   fb :: [EType] -> MorlocMonad TermTypes
   fb [] = MM.throwError . CallTheMonkeys $ "This case should not appear given the construction of the map"
   fb (e0:es) = do
     e' <- foldlM mergeEType e0 es
-    case langOf e' of
-      (Just _) -> return $ TermTypes Nothing [(mv, [e'], Nothing)] []
-      _ -> return $ TermTypes (Just e') [] []
+    return $ TermTypes (Just e') [] []
 
   -- Should we even allow concrete terms with no type signatures?
   -- Yes, their types may be inferrable by usage or (eventually) static analysis
   -- of the source code.
   fc :: [(Source, Int)] -> MorlocMonad TermTypes
-  fc srcs' = return $ TermTypes Nothing [(mv, [], Just (Idx i src)) | (src, i) <- srcs'] []
+  fc srcs' = return $ TermTypes Nothing [(mv, Idx i src) | (src, i) <- srcs'] []
 
   fbc :: [EType] -> [(Source, Int)] -> MorlocMonad TermTypes
   fbc sigs' srcs' = do
-    let csigs = [t | t <- sigs', isJust (langOf t)]
-    let gsigs = [t | t <- sigs', isNothing (langOf t)]
-    gt <- case gsigs of
+    gt <- case sigs' of
       [e] -> return (Just e)
       [] -> return Nothing
-      -- TODO: don't call the monkeys
-      _ -> MM.throwError . CallTheMonkeys $ "Expected a single general type"
-    return $ TermTypes gt [(mv, csigs, Just (Idx i src)) | (src, i) <- srcs'] []
+      _ -> MM.throwError . CallTheMonkeys $ "Expected a single general type - I don't know how to merge them"
+    return $ TermTypes gt [(mv, Idx i src) | (src, i) <- srcs'] []
 
 
 combineTermTypes :: TermTypes -> TermTypes -> MorlocMonad TermTypes
@@ -297,15 +286,13 @@ mergeTypeUs :: TypeU -> TypeU -> MorlocMonad TypeU
 mergeTypeUs t1@(VarU v1) t2@(VarU v2)
   | v1 == v2 = return (VarU v1)
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
-mergeTypeUs t1@(ExistU v@(TV l1 _) ps1 ds1 rs1) t2@(ExistU (TV l2 _) ps2 _ rs2)
-  | l1 == l2
+mergeTypeUs (ExistU v ps1 rs1) (ExistU _ ps2 rs2)
     = ExistU v
     <$> zipWithM mergeTypeUs ps1 ps2
-    <*> pure ds1
-    <*> mapM (\(k, x:xs) -> (,) k <$> foldM mergeTypeUs x xs) (groupSort (rs1 ++ rs2))
-  | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
-mergeTypeUs ExistU {} t = return t
-mergeTypeUs t ExistU {} = return t
+    <*> mergeRecords rs1 rs2
+
+mergeTypeUs ExistU{} t = return t
+mergeTypeUs t ExistU{} = return t
 
 -- Two universally qualified types may be merged if they are the same up to
 -- named of bound variables, for example:
@@ -325,6 +312,20 @@ mergeTypeUs t1 t2 = MM.throwError $ IncompatibleGeneralType t1 t2
 --   | t1 `PO.isSubtypeOf` t2 = return t2
 --   | t2 `PO.isSubtypeOf` t1 = return t1
 --   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
+
+-- merge record entries by taking the union of entries
+mergeRecords :: [(Key, TypeU)] -> [(Key, TypeU)] -> MorlocMonad [(Key, TypeU)]
+mergeRecords rs1 rs2 = do
+  -- all record entries common to both types in the order of rs1
+  commonEntries <- mapM mergeRecord rs1
+  -- records that are unique to rs2
+  let missingRecords = [(k, t2) | (k, t2) <- rs2, isNothing (lookup k rs1)]
+  return $ commonEntries <> missingRecords
+  where
+  mergeRecord :: (Key, TypeU) -> MorlocMonad (Key, TypeU)
+  mergeRecord (k, t1) = case lookup k rs2 of
+    (Just t2) -> (,) k <$> mergeTypeUs t1 t2
+    Nothing -> return (k, t1)
 
 
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
@@ -367,7 +368,7 @@ collect i = do
     Nothing -> return (SAnno (Many []) i)
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t1) -> do
-      let calls = [(CallS src, i') | (_, _, Just (Idx i' src)) <- termConcrete t1]
+      let calls = [(CallS src, i') | (_, Idx i' src) <- termConcrete t1]
       declarations <- mapM (replaceExpr i) (termDecl t1) |>> concat
       return $ SAnno (Many (calls <> declarations)) i
 
@@ -380,7 +381,7 @@ collectSAnno e@(ExprI i (VarE v)) = do
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t1) -> do
       -- collect all the concrete calls with this name
-      let calls = [(CallS src, i') | (_, _, Just (Idx i' src)) <- termConcrete t1]
+      let calls = [(CallS src, i') | (_, Idx i' src) <- termConcrete t1]
       -- collect all the morloc compositions with this name
       declarations <- mapM reindexExprI (termDecl t1) >>= mapM (replaceExpr i) |>> concat
       -- link this index to the name that is removed
@@ -389,6 +390,10 @@ collectSAnno e@(ExprI i (VarE v)) = do
       -- pool all the calls and compositions with this name
       return (calls <> declarations)
   case es of
+    -- TODO: will this case every actually be reached?
+    -- Should all attributes of i be mapped to j, as done with newIndex?
+    -- Should the general type be the j instead?
+    -- Need to dig into this.
     [] -> do
       j <- MM.getCounter
       return $ SAnno (Many [(VarS v, j)]) i
@@ -422,13 +427,15 @@ replaceExpr i e@(ExprI j (VarE _)) = do
     (Just m) -> MM.modify (\s -> s {stateSignatures = m})
     _ -> error "impossible"
 
-  case GMap.yIsX (stateSignatures st) j i of
+  case GMap.yIsX j i (stateSignatures st) of
     (Just m) -> MM.put (st {stateSignatures = m})
     Nothing -> return ()
 
   -- pass on just the children
   case x of
     (SAnno (Many es) _) -> return es
+
+
 -- -- two terms may also be equivalent when applied, for example:
 -- --   foo x = bar x
 -- -- this would be rewritten in the parse as `foo = \x -> bar x`

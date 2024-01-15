@@ -8,5 +8,6 @@ module main (foo)
 
 import pybase (add)
 import cppbase (add)
+import conventions (Real)
 
 foo x y = add x (add y 42.0)

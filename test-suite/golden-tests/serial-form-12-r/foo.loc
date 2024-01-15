@@ -1,12 +1,12 @@
 module main (foo)
 
+import conventions (Int, Str)
 import rbase (id)
 
 record (Person a) = Person {name :: Str, info :: a}
-record R (Person a) = "list" {name :: "character", info :: a}
+record R => (Person a) = "list" {name :: Str, info :: a}
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
 foo :: Person (Person Int) -> Person (Person Int)
-foo r :: Person (Person "integer") -> Person (Person "integer")
 foo xs = id xs

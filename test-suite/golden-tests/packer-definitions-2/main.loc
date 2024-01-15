@@ -1,0 +1,7 @@
+module m (foo)
+
+import lib.json (JsonObj, Str)
+
+source Py from "foo.py" ("foo")
+
+foo :: Str -> JsonObj

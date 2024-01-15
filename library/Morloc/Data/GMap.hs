@@ -14,12 +14,14 @@ module Morloc.Data.GMap
   , insert
   , change
   , insertMany
+  , insertManyWith
   , keys
   , lookup
   , mapInnerKeys
   , mapKeys
   , mapVals
   , mapValsM
+  , mapValsWithKeyM
   , yIsX
   ) where
 
@@ -35,6 +37,12 @@ mapValsM :: (Ord b, Monad m) => (c -> m c') -> GMap a b c -> m (GMap a b c')
 mapValsM f (GMap m1 m2) = do
     let m2list = Map.toList m2
     xs2 <- mapM (f . snd) m2list
+    return $ GMap m1 (Map.fromList (zip (map fst m2list) xs2))
+
+mapValsWithKeyM :: (Ord b, Monad m) => (b -> c -> m c') -> GMap a b c -> m (GMap a b c')
+mapValsWithKeyM f (GMap m1 m2) = do
+    let m2list = Map.toList m2
+    xs2 <- mapM (uncurry f) m2list
     return $ GMap m1 (Map.fromList (zip (map fst m2list) xs2))
 
 mapKeys :: (Ord a') => (a -> a') -> GMap a b c -> GMap a' b c
@@ -70,11 +78,16 @@ insertMany ks k2 x (GMap m1 m2) = GMap m1' m2' where
   m1' = Map.union (Map.fromList (zip ks (repeat k2))) m1
   m2' = Map.insert k2 x m2
 
+insertManyWith :: (Ord a, Ord b) => (c -> c -> c) -> [a] -> b -> c -> GMap a b c -> GMap a b c
+insertManyWith f ks k2 x (GMap m1 m2) = GMap m1' m2' where
+  m1' = Map.union (Map.fromList (zip ks (repeat k2))) m1
+  m2' = Map.insertWith f k2 x m2
+
 -- | Given `yIsX gmap x y`, the value `y` points to will be replaced with the
 -- value `x` points to. If `x` is not in `gmap`, then Nothing is returned. If
 -- `y` is in `gmap`, its previous link is silently lost.
-yIsX :: (Ord a) => GMap a b c -> a -> a -> Maybe (GMap a b c)
-yIsX (GMap m x) oldKey newKey = do
+yIsX :: (Ord a) => a -> a -> GMap a b c -> Maybe (GMap a b c)
+yIsX  oldKey newKey (GMap m x) = do
   i <- Map.lookup oldKey m
   return (GMap (Map.insert newKey i m) x)
 

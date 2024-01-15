@@ -19,14 +19,15 @@ module Morloc.Frontend.Namespace
 
 import Morloc.Namespace hiding (name)
 import qualified Morloc.Data.GMap as GMap
+import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Data.Char as DC
 import qualified Data.Text as DT
-
+import qualified Data.Map as Map
 
 -- | Determine if a type term is generic (i.e., is the first letter lowercase?)
-isGeneric :: TVar -> Bool
-isGeneric (TV _ typeStr) = maybe False (DC.isLower . fst) (DT.uncons typeStr)
+isGeneric :: MT.Text -> Bool
+isGeneric typeStr = maybe False (DC.isLower . fst) (DT.uncons typeStr)
 
 mapExpr :: (Expr -> Expr) -> ExprI -> ExprI
 mapExpr f = g where
@@ -60,7 +61,24 @@ mapExprM f = g where
 -- WARNING: silent bad things happen if this function does not copy all indices
 copyState :: Int -> Int -> MorlocMonad ()
 copyState oldIndex newIndex = do
-  s <- MM.get
-  case GMap.yIsX (stateSignatures s) oldIndex newIndex of
-    (Just x) -> MM.put $ s {stateSignatures = x}
-    Nothing -> return ()
+  s <- MM.get 
+  MM.put $ s
+    { stateSignatures = updateGMap (stateSignatures s)
+    , stateConcreteTypedefs = updateGMap (stateConcreteTypedefs s)
+    , stateGeneralTypedefs = updateGMap (stateGeneralTypedefs s)
+    , stateInnerMogrifiers = updateGMap (stateInnerMogrifiers s)
+    , stateSources = updateGMap (stateSources s)
+    , stateAnnotations = updateMap (stateAnnotations s)
+    , stateExports = updateList (stateExports s)
+    , stateName = updateMap (stateName s)
+    }
+  where
+    updateGMap g = case GMap.yIsX oldIndex newIndex g of
+      (Just g') -> g'
+      Nothing -> g
+
+    updateMap m = case Map.lookup oldIndex m of 
+      (Just x) -> Map.insert newIndex x m
+      Nothing -> m
+
+    updateList xs = if oldIndex `elem` xs then newIndex : xs else xs 

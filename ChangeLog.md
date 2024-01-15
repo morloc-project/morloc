@@ -30,9 +30,6 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Move exports to the module definition (as in Haskell)
  - [ ] Allow module namespaces (e.g., `alice:math.complex`)
 
-0.43.0 [2023.10.xx]
--------------------
-
  Styles
 
  - [ ] add styles
@@ -46,26 +43,48 @@ handling for several very different languages (proofs-of-concept).
 
  And a bit of cleaning
 
- - [ ] simplify the serialization schema in C++ (I think the `schema` empty
-       expression can be removed)
  - [ ] generate commented type expressions in the pool code 
-
-
-0.43.0 [2023.xx.xx]
--------------------
- - [ ] resolve issue from 2023/05/09 commit
- - [ ] resolve issue from 2023/05/19 commit
  - [ ] Bring back the cut operation to the bidirectional typechecker
        The current approach depends on renaming every term, which is ugly and
        also clutters the diagnostics (gamma gets huge)
- - [ ] Fix infinite loop raised from `type Cpp Unit = "Unit"` - see case study bug in nj code.
-       This problem goes away when I add the namespace (i.e., "mlc:Unit"), but
-       still infinite loops are bad.
  - [ ] Add error if undefined functions are used in a composition
        [ ] When typechecking, raise error if they have no type signature
        [ ] When building, additionally raise error if they have no source (this is already done somewhere down the line)
  - [ ] Fix the performance bug (8 million lines of log is way too much)
        This is probably related to removal of the cut step in the typechecker
+ - [ ] Replace JSON serialization
+ - [ ] Address all compiler warnings
+ - [ ] Update Hackage release
+ - [ ] Ensure github actions passes
+
+0.43.0 [2024.01.14]
+-------------------
+
+New features
+ * Allow a module to explicitly export packers
+ * Show pool pseudocode for `typecheck -r` 
+ * Add `typecheck dump` subcommand to show expressions and indices
+ * Allow nexus inputs to be files
+ * Remove concrete type signatures - always infer
+ * Make fields in language-specific table decs optional
+     Rather than this:
+       table (Person a) = Person {name :: Str, info :: a}
+       table R (Person a) = "data.frame" {name :: Str, info :: a}
+     Allow this:
+       table (Person a) = Person {name :: Str, info :: a}
+       table R (Person a) = "data.frame"
+     Really, I need to totally redo the table/record/object handling.
+ * Remove support for anonymous records in type signatures
+     I will re-add this possibly at a future time when I refactor
+
+Infrastructure changes
+ * Pass all data between pools as files rather than string arguments
+ * Raise an error if any general type cannot be translated to a concrete type
+
+Fixes
+ * Fix record type inference 
+ * Fix bug in collecting packers (missed packers required by root manifold)
+ * Fix C++ handling of quotes and special characters in JSON strings
 
 0.42.0 [2023.10.11]
 -------------------

@@ -1,5 +1,13 @@
 module main (foo)
 
 import cppbase
+import conventions (Real, Str, List)
 
+record DataA = DataA {a :: Real, b :: DataB}
+record DataB = DataB {c :: [Real], d :: Str}
+
+record Cpp => DataA = "struct"
+record Cpp => DataB = "struct"
+
+foo :: Real -> DataA
 foo x = {a = add x 5.0, b = {c = [add x 2.0], d = "yolo"}}

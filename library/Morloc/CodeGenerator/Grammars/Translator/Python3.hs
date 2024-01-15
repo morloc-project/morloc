@@ -83,8 +83,8 @@ translateSource s = do
 tupleKey :: Int -> MDoc -> MDoc
 tupleKey i v = [idoc|#{v}[#{pretty i}]|]
 
-selectAccessor :: NamType -> MT.Text -> (MDoc -> MDoc -> MDoc)
-selectAccessor NamTable  "dict" = recordAccess
+selectAccessor :: NamType -> CVar -> (MDoc -> MDoc -> MDoc)
+selectAccessor NamTable  (CV "dict") = recordAccess
 selectAccessor NamRecord _      = recordAccess
 selectAccessor NamTable  _      = objectAccess
 selectAccessor NamObject _      = objectAccess
@@ -124,21 +124,23 @@ serialize v0 s0 = do
       return ([lst], v')
 
     construct v (SerialTuple _ ss) = do
-      (befores, ss') <- unzip <$> zipWithM (\i s -> construct (tupleKey i v) s) [0..] ss
+      (befores, ss') <- unzip <$> zipWithM (\i s -> serialize' (tupleKey i v) s) [0..] ss
       v' <- helperNamer <$> newIndex
       let x = [idoc|#{v'} = #{tupled ss'}|]
       return (concat befores ++ [x], v')
 
     construct v (SerialObject namType (FV _ constructor) _ rs) = do
       let accessField = selectAccessor namType constructor
-      (befores, ss') <- mapAndUnzipM (\(FV _ k,s) -> serialize' (accessField v (pretty k)) s) rs
+      (befores, ss') <- mapAndUnzipM (\(key, s) -> serialize' (accessField v (pretty key)) s) rs
       v' <- helperNamer <$> newIndex
-      let entries = zipWith (\(FV _ key) val -> pretty key <> "=" <> val)
+      let entries = zipWith (\key val -> pretty key <> "=" <> val)
                             (map fst rs) ss'
           decl = [idoc|#{v'} = dict#{tupled (entries)}|]
       return (concat befores ++ [decl], v')
 
-    construct _ _ = error "Told you that branch was reachable"
+    construct _ _ = error "Unreachable" 
+
+
 
 deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 deserialize v0 s0
@@ -184,9 +186,9 @@ deserialize v0 s0
 
     construct v (SerialObject namType (FV _ constructor) _ rs) = do
       let accessField = selectAccessor namType constructor
-      (ss', befores) <- mapAndUnzipM (\(FV _ k,s) -> check (accessField v (pretty k)) s) rs
+      (ss', befores) <- mapAndUnzipM (\(k, s) -> check (accessField v (pretty k)) s) rs
       v' <- helperNamer <$> newIndex
-      let entries = zipWith (\(FV _ key) val -> pretty key <> "=" <> val)
+      let entries = zipWith (\key val -> pretty key <> "=" <> val)
                             (map fst rs) ss'
           decl = [idoc|#{v'} = #{pretty constructor}#{tupled entries}|]
       return (v', concat befores ++ [decl])
@@ -221,7 +223,7 @@ translateSegment m0 =
     makeSerialExpr _ (AppPoolS_ _ (PoolCall _ cmds args) _) = do
       -- I don't need to explicitly add single quoes to the arguments here as I
       -- do in C++ and R because the subprocess module bypasses Bash dequoting.
-      let call = "_morloc_foreign_call(" <> list(map dquotes cmds ++ map argNamer args) <> ")"
+      let call = "_morloc_foreign_call(" <> list (map dquotes cmds) <> "," <+> list (map argNamer args) <> ")"
       return $ defaultValue { poolExpr = call }
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
     makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet svarNamer i e1 e2
@@ -257,7 +259,7 @@ translateSegment m0 =
         = return $ mergePoolDocs pyDict (map snd rs)
         where
             pyDict es' =
-                let entries' = zipWith (\(FV _ k) v -> pretty k <> "=" <> v) (map fst rs) es'
+                let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) es'
                 in "OrderedDict" <> tupled entries'
     makeNativeExpr _ (LogN_ _ v) = return $ PoolDocs [] (if v then "True" else "False") [] []
     makeNativeExpr _ (RealN_ _ v) = return $ PoolDocs [] (viaShow v) [] []
@@ -302,11 +304,11 @@ typeSchema = f . serialAstToJsonType
     f :: JsonType -> MDoc
     f (VarJ v) = lst [var v, "None"]
     f (ArrJ v ts) = lst [var v, lst (map f ts)]
-    f (NamJ "dict" es) = lst [dquotes "dict", dict (map entry es)]
-    f (NamJ "record" es) = lst [dquotes "record", dict (map entry es)]
+    f (NamJ (CV "dict") es) = lst [dquotes "dict", dict (map entry es)]
+    f (NamJ (CV "record") es) = lst [dquotes "record", dict (map entry es)]
     f (NamJ v es) = lst [pretty v, dict (map entry es)]
 
-    entry :: (MT.Text, JsonType) -> MDoc
+    entry :: (Key, JsonType) -> MDoc
     entry (v, t) = pretty v <> "=" <> f t
 
     dict :: [MDoc] -> MDoc
@@ -315,7 +317,7 @@ typeSchema = f . serialAstToJsonType
     lst :: [MDoc] -> MDoc
     lst xs = encloseSep "(" ")" "," xs
 
-    var :: MT.Text -> MDoc
+    var :: CVar -> MDoc
     var v = dquotes (pretty v)
 
 makePool :: MDoc -> [MDoc] -> [MDoc] -> MDoc -> MDoc
@@ -324,6 +326,8 @@ makePool lib includeDocs manifolds dispatch = [idoc|#!/usr/bin/env python
 import sys
 import subprocess
 import json
+import tempfile
+import os
 from pymorlocinternals import (mlc_serialize, mlc_deserialize)
 from collections import OrderedDict
 
@@ -331,19 +335,42 @@ sys.path = ["#{lib}"] + sys.path
 
 #{vsep includeDocs}
 
-def _morloc_foreign_call(args):
+class MorlocForeignCallError(Exception):
+    pass
+
+def _morloc_foreign_call(cmds, args):
+    arg_filenames = []
+    for (i, arg) in enumerate(args):
+        temp = tempfile.NamedTemporaryFile(prefix="morloc_py_", delete=False)
+        with open(temp.name, "w") as fh:
+            print(arg, file=fh)
+            arg_filenames.append(temp.name)
     try:
         sysObj = subprocess.run(
-            args,
+            cmds + arg_filenames,
             stdout=subprocess.PIPE,
             check=True
         )
     except subprocess.CalledProcessError as e:
-        sys.exit(str(e))
+        raise MorlocForeignCallError(f"python foreign call error: {str(e)}")
+    finally:
+        for arg_filename in arg_filenames:
+            try:
+                os.unlink(arg_filename)
+            except:
+                pass
 
     return(sysObj.stdout.decode("ascii"))
 
+
 #{vsep manifolds}
+
+def read(filename):
+    xs = []
+    with open(filename, "r") as fh:
+        for line in fh.readlines():
+            xs.append(line)
+    return "\n".join(xs)
 
 if __name__ == '__main__':
     try:
@@ -357,7 +384,7 @@ if __name__ == '__main__':
     except KeyError:
         sys.exit("Internal error in {}: no manifold found with id={}".format(sys.argv[0], cmdID))
 
-    __mlc_result__ = __mlc_function__(*sys.argv[2:])
+    __mlc_result__ = __mlc_function__(*[read(x) for x in sys.argv[2:]])
 
     if __mlc_result__ != "null":
         print(__mlc_result__)

@@ -40,9 +40,10 @@ module Morloc.Monad
   , metaSources
   , metaName
   , metaProperties
-  , metaType
   , metaTypedefs
-  , metaPackMap
+  , metaGeneralTypedefs
+  , metaMogrifiers
+  , metaUniversalMogrifiers
   -- * handling tree depth
   , incDepth
   , getDepth
@@ -92,13 +93,17 @@ instance Defaultable MorlocState where
     , stateCounter = -1
     , stateDepth = 0
     , stateSignatures = GMap.empty
-    , stateTypedefs = GMap.empty
+    , stateConcreteTypedefs = GMap.empty
+    , stateGeneralTypedefs = GMap.empty
+    , stateUniversalConcreteTypedefs = Map.empty
+    , stateUniversalGeneralTypedefs = Map.empty
+    , stateInnerMogrifiers = GMap.empty
+    , stateUniversalInnerMogrifiers = Map.empty
     , stateSources = GMap.empty
     , stateAnnotations = Map.empty
     , stateOutfile = Nothing
-    , statePackers = GMap.empty
-    , stateName = Map.empty
     , stateExports = []
+    , stateName = Map.empty
   }
 
 emptyState :: Maybe Path -> Int -> MorlocState
@@ -289,18 +294,6 @@ metaProperties i = do
     (GMapJust (TermTypes (Just e) _ _)) -> Set.toList (eprop e)
     _ -> []
 
--- | Store type annotations for an expression. These are the original user
--- provided types NOT the types checked or inferred by the typechecker.
-metaType :: Int -> MorlocMonad (Maybe TypeU)
-metaType i = do
-  s <- gets stateSignatures 
-  return $ case GMap.lookup i s of
-    (GMapJust (TermTypes (Just e) _ _)) ->
-      if isNothing (langOf e)
-        then Just (etype e) 
-        else Nothing
-    _ -> Nothing
-
 -- | The name of a morloc composition. These names are stored in the monad
 -- after they are resolved away. For example in:
 --   import math
@@ -320,26 +313,37 @@ metaType i = do
 metaName :: Int -> MorlocMonad (Maybe EVar)
 metaName i = gets (Map.lookup i . stateName)
 
-metaPackMap :: Int -> MorlocMonad PackMap
-metaPackMap i = do
-    p <- gets statePackers
-    case GMap.lookup i p of
-      (GMapJust p') -> return p'
-      _ -> return Map.empty
+metaMogrifiers :: Int -> Lang -> MorlocMonad (Map.Map Property [(TypeU, Source)])
+metaMogrifiers i lang = do
+  p <- gets stateInnerMogrifiers
+  return $ case GMap.lookup i p of
+    (GMapJust p') -> Map.map (filter (\(_, src) -> srcLang src == lang)) p'
+    _ -> Map.empty
 
+metaUniversalMogrifiers :: Lang -> MorlocMonad (Map.Map Property [(TypeU, Source)])
+metaUniversalMogrifiers lang = do
+  p <- gets stateUniversalInnerMogrifiers
+  return $ Map.map (filter (\(_, src) -> srcLang src == lang)) p
 
 -- | This is currently only used in the C++ translator.
 -- FIXME: should a term be allowed to have multiple type definitions within a language?
-metaTypedefs :: Int -> MorlocMonad (Map.Map TVar (Type, [TVar]))
-metaTypedefs i = do
-    p <- gets stateTypedefs
+metaTypedefs :: Int -> Lang -> MorlocMonad (Map.Map TVar ([TVar], TypeU, Bool))
+metaTypedefs i lang = do
+    p <- gets stateConcreteTypedefs
 
     return $ case GMap.lookup i p of
-      (GMapJust termmap) -> Map.map (\(vs, t) -> (typeOf t, vs))
-          (Map.map head (Map.filter (not . null) termmap))
+      (GMapJust langmap) -> case Map.lookup lang langmap of
+        (Just typemap) -> Map.map head (Map.filter (not . null) typemap)
+        Nothing -> Map.empty
       _ -> Map.empty
 
+metaGeneralTypedefs :: Int -> MorlocMonad Scope
+metaGeneralTypedefs i = do
+  p <- gets stateGeneralTypedefs
 
+  return $ case GMap.lookup i p of
+    (GMapJust langmap) -> langmap
+    _ -> Map.empty
 
 newtype IndexState = IndexState { index :: Int }
 type Index a = StateT IndexState Identity a

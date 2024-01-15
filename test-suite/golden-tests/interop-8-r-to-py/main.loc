@@ -1,10 +1,6 @@
 module m (foo)
 
-type R Bool = "logical"
-type R (List a) = "list" a
-
-type Py Bool = "bool"
-type Py (List a) = "list" a
+import conventions (Bool, List)
 
 source R from "foo.R" ("f")
 source Py from "foo.py" ("g")

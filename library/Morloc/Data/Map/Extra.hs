@@ -13,6 +13,7 @@ module Morloc.Data.Map.Extra (
   , mergeMapsM
   , mapKeysWithM
   , mapM
+  , mapWithKeyM
   , unionWithM
   , unionsWithM
 ) where
@@ -60,13 +61,19 @@ mapKeysWithM f g m
     foldValues (k, v:vs) = (,) k <$> foldM f v vs
     foldValues _ = undefined -- there will never be empty values
 
--- | monadic version of Data.Map mapKeysWith
+-- | monadic version of Data.Map.map
 mapM :: (Ord k, Monad m) => (a -> m b) -> Map.Map k a -> m (Map.Map k b)
 mapM f m = do
   let xs = Map.toList m
   xs' <- Prelude.mapM (\(k,x) -> (,) k <$> f x) xs
   return $ Map.fromList xs'
 
+-- | monadic version of Data.Map mapWithKey
+mapWithKeyM :: (Ord k, Monad m) => (k -> a -> m b) -> Map.Map k a -> m (Map.Map k b)
+mapWithKeyM f m = do
+  let xs = Map.toList m
+  xs' <- Prelude.mapM (\(k,x) -> (,) k <$> f k x) xs
+  return $ Map.fromList xs'
 
 mergeMaps
   :: Ord a

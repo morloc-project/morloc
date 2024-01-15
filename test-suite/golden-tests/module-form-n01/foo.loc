@@ -2,6 +2,7 @@ module main (sub)
 
 -- n01 - source n, declare 1
 
+import conventions (Real)
 import pybase (add, mul)
 import rbase (add, mul)
 import cppbase (add, mul)
@@ -10,7 +11,4 @@ source py from "foo.py" ("sub_loc" as sub)
 source r from "foo.R" ("sub_loc" as sub)
 
 sub :: Real -> Real -> Real
-sub py :: "float" -> "float" -> "float"
-sub r :: "numeric" -> "numeric" -> "numeric"
-
 sub x y = add x (mul -1.0 y)  

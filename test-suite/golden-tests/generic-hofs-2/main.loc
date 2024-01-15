@@ -1,9 +1,9 @@
 module m (foo)
 
-type Cpp (List a) = "std::vector<$1>" a
-type Cpp Str = "std::string"
-type Cpp Real = "double"
-type Cpp (Tuple2 a b) = "std::tuple<$1,$2>" a b
+type Cpp => (List a) = "std::vector<$1>" a
+type Cpp => Str = "std::string"
+type Cpp => Real = "double"
+type Cpp => (Tuple2 a b) = "std::tuple<$1,$2>" a b
 
 source Cpp from "foo.hpp" ("map", "bar")
 

@@ -2,10 +2,10 @@ module main (sum)
 
 -- 110 - source 1, import 1
 
+import conventions (Real, List)
 import pybase (add, fold)
 
 source py from "foo.py" ("sum_loc" as sum)
 sum :: [Real] -> Real
-sum py :: ["float"] -> "float"
 
 sum xs = fold add 0.0 xs

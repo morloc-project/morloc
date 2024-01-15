@@ -68,7 +68,11 @@ findModule currentModuleM importModule = do
   existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
   case existingPaths of
     [x] -> return x
-    (x:_) -> return x -- should shadowing raise a warning?
+    xs@(x:_) -> do
+      MM.say $ "WARNING: module path shadowing, for" <+> pretty importModule <+> "found paths:"
+             <+> "\n  " <> pretty xs
+             <> "\n  selecting path:" <+> pretty x
+      return x
     [] ->
       MM.throwError . CannotLoadModule . render $
         "module" <+> squotes (pretty importModule) <+> "not found among the paths:" <+> list (map pretty allPaths) <> "\n" <>
@@ -277,7 +281,6 @@ handleFlagsAndPaths CppLang srcs = do
          -- paths to files to include
          , unique (catMaybes paths) 
          )
-handleFlagsAndPaths RustLang srcs = return (srcs, [], []) -- FIXME
 handleFlagsAndPaths _ srcs = return (srcs, [], [])
 
 flagAndPath :: Source -> MorlocMonad (Source, [String], Maybe Path)
@@ -320,7 +323,6 @@ flagAndPath src@(Source _ CppLang (Just p) _ _)
             ]
         [] -> return []
 flagAndPath src@(Source _ CppLang Nothing _ _) = return (src, [], Nothing)
-flagAndPath (Source _ RustLang _ _ _) = MM.throwError . OtherError $ "FIXME: add Rust support in Module:flagAndPath"
 flagAndPath _ = MM.throwError . OtherError $ "flagAndPath should only be called for C++ functions"
 
 

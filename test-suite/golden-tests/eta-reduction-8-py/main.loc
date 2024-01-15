@@ -1,6 +1,6 @@
 module m (foo)
 
-import conventions (Tuple3, Int, Str, Bool)
+import conventions (Tuple2, Tuple3, Int, Str, Bool)
 
 source Py from "foo.py" ("onThree" as onThree, "inc")
 

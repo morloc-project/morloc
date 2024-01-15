@@ -1,9 +1,9 @@
 module main (foo)
 
+import conventions (Int, Str, Tuple2, List)
 import rbase (id, Map)
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
 foo :: Map Str Int -> Map Str Int
-foo r :: Map "character" "integer" -> Map "character" "integer"
 foo xs = id xs

@@ -16,14 +16,10 @@ Stability   : experimental
 module Morloc.CodeGenerator.Namespace
   ( module Morloc.Namespace
   -- ** Types used in final translations
-  , PVar(..)
-  , TypeP(..)
   , TypeM(..)
-  , FVar(..)
   , TypeF(..)
   , TypeS(..)
-  , pvar2fvar
-  , fvar2pvar
+  , FVar(..)
   -- ** Typeclasses
   , HasTypeF(..)
   , MayHaveTypeF(..)
@@ -76,10 +72,6 @@ module Morloc.CodeGenerator.Namespace
   -- ** Serialization AST
   , SerialAST(..)
   , TypePacker(..)
-  , ResolvedPacker(..)
-  -- ** Other
-  , generalTypeOf
-  , prettyGenTypeP
   -- ** Simple fold over expressions
   , foldSerialManifoldM
   , foldNativeManifoldM
@@ -121,66 +113,44 @@ module Morloc.CodeGenerator.Namespace
 import Morloc.Namespace
 import Data.Scientific (Scientific)
 import Data.Text (Text)
-import qualified Data.Set as Set
 import Morloc.Data.Doc
-import qualified Morloc.Data.Text as MT
 import Morloc.Pretty ()
 import Control.Monad.Identity (runIdentity)
-
--- | Stores the language, general name and concrete name for a type expression
-data PVar
-  = PV
-    Lang
-    (Maybe Text) -- ^ general name of the type variable (if known)
-    Text -- ^ concrete name of type variable
-  deriving (Show, Eq, Ord)
-
--- | A solved type coupling a language specific form to an optional general form
-data TypeP
-  = UnkP PVar
-  | VarP PVar
-  | FunP [TypeP] TypeP
-  | AppP TypeP [TypeP] -- FIXME: this allows representation of things that cannot be applied
-  | NamP NamType PVar [TypeP] [(PVar, TypeP)]
-  deriving (Show, Ord, Eq)
 
 -- The final types used in code generation. The language annotation is removed,
 -- since the language for all types within a pool are the same.
 --
 -- The general type annotation will be used for documentation only
-data FVar = FV Text -- general type
-               Text -- concrete type
+data FVar = FV TVar CVar
   deriving (Show, Ord, Eq)
 
 -- The most minimal type that contains both general and concrete types
 data TypeF
-  = UnkF FVar
+  = UnkF FVar -- this should be parameterized by `Type`, since the general type should be known
   | VarF FVar
   | FunF [TypeF] TypeF
   | AppF TypeF [TypeF]
-  | NamF NamType FVar [TypeF] [(FVar, TypeF)]
+  | NamF NamType FVar [TypeF] [(Key, TypeF)]
   deriving (Show, Ord, Eq)
 
--- Represents types that may contain serialized elements.
-data TypeC
-  = SerC (Maybe TypeF)
-  | VarC FVar
-  | FunC [TypeC] TypeC
-  | AppC TypeF [TypeF]
-  | NamC NamType FVar [TypeF] [(FVar, TypeF)]
-  deriving (Show, Ord, Eq)
+data TypeM
+  = Passthrough -- ^ serialized data that is not deserialized (and may not be representable) in this segment
+  | Serial TypeF -- ^ serialized data that may be deserialized in this language
+  | Native TypeF -- ^ an unserialized native data type
+  | Function [TypeM] TypeM -- ^ a function of n inputs and one output (cannot be serialized)
+  deriving(Show, Eq, Ord)
 
-pvar2fvar :: PVar -> FVar
-pvar2fvar (PV _ (Just g) c) = FV g c
-pvar2fvar (PV _ Nothing c) = FV "<undefined>" c
-
-fvar2pvar :: Lang -> FVar -> PVar
-fvar2pvar l (FV g c) = PV l (Just g) c
+-- | TypeS is a subset of TypeM that does not allow native types
+data TypeS
+  = PassthroughS
+  | SerialS TypeF
+  | FunctionS [TypeM] TypeS -- This is the type of a manifold
+  deriving(Show, Eq, Ord)
 
 type JsonPath = [JsonAccessor]
 data JsonAccessor
   = JsonIndex Int
-  | JsonKey Text
+  | JsonKey Key
 
 data NexusCommand = NexusCommand
   { commandName :: EVar -- ^ user-exposed subcommand name in the nexus
@@ -193,66 +163,12 @@ data NexusCommand = NexusCommand
   -- path to the replacement value
   }
 
-instance Typelike TypeP where
-  typeOf (UnkP v) = UnkT (pvar2tvar v)
-  typeOf (VarP v) = VarT (pvar2tvar v)
-  typeOf (FunP ts t) = FunT (map typeOf ts) (typeOf t)
-  typeOf (AppP v ts) = AppT (typeOf v) (map typeOf ts)
-  typeOf (NamP o n ps es) =
-    let n' = pvar2tvar n
-        ps' = map typeOf ps
-        es' = [(v, typeOf t) | (PV _ _ v, t) <- es]
-    in NamT o n' ps' es'
-
-  -- | substitute all appearances of a given variable with a given new type
-  substituteTVar v0 r0 t0 = sub t0
-    where
-      sub :: TypeP -> TypeP
-      sub t@(UnkP _) = t
-      sub t@(VarP (PV lang _ v))
-        | v0 == TV (Just lang) v = r0
-        | otherwise = t
-      sub (FunP ts t) = FunP (map sub ts) (sub t)
-      sub (AppP v ts) = AppP (sub v) (map sub ts)
-      sub (NamP o n ps es) = NamP o n (map sub ps) [(k, sub t) | (k, t) <- es]
-
-  free v@(VarP _) = Set.singleton v
-  free (FunP ts t) = Set.unions (map free (t:ts))
-  free (AppP t ts) = Set.unions (map free (t:ts))
-  free (NamP _ _ ps es) = Set.unions (map free (map snd es <> ps))
-  free (UnkP _) = Set.empty -- are UnkP free?
-
-  normalizeType (FunP ts1 (FunP ts2 t)) = normalizeType $ FunP (ts1 <> ts2) t
-  normalizeType (AppP t ts) = AppP (normalizeType t) (map normalizeType ts)
-  normalizeType (NamP t v ds rs) = NamP t v (map normalizeType ds) (map (second normalizeType) rs)
-  normalizeType t = t
-
-pvar2tvar :: PVar -> TVar
-pvar2tvar (PV lang _ v) = TV (Just lang) v
-
-generalTypeOf :: TypeP -> Maybe Type
-generalTypeOf (UnkP v) = UnkT <$> pvar2genTVar v
-generalTypeOf (VarP v) = VarT <$> pvar2genTVar v
-generalTypeOf (FunP ts t) = FunT <$> mapM generalTypeOf ts <*> generalTypeOf t
-generalTypeOf (AppP v ts) = AppT <$> generalTypeOf v <*> mapM generalTypeOf ts
-generalTypeOf (NamP o n ps es)
-    = NamT o
-    <$> pvar2genTVar n
-    <*> mapM generalTypeOf ps
-    <*> mapM typeOfEntry es
-    where
-        typeOfEntry :: (PVar, TypeP) -> Maybe (MT.Text, Type)
-        typeOfEntry (PV _ v _, t) = (,) <$> v <*> generalTypeOf t
-
-pvar2genTVar :: PVar -> Maybe TVar
-pvar2genTVar (PV _ v _) = TV Nothing <$> v
-
 -- | A tree describing how to (de)serialize an object
 data SerialAST
   = SerialPack FVar (TypePacker, SerialAST) -- ^ use an (un)pack function to simplify an object
   | SerialList FVar SerialAST
   | SerialTuple FVar [SerialAST]
-  | SerialObject NamType FVar [TypeF] [(FVar, SerialAST)]
+  | SerialObject NamType FVar [TypeF] [(Key, SerialAST)]
   -- ^ Make a record, table, or object. The parameters indicate
   --   1) NamType - record/table/object
   --   2) FVar - telling the name of the object (e.g., "Person")
@@ -269,6 +185,8 @@ data SerialAST
   -- source code comments.
   deriving(Ord, Eq, Show)
 
+instance Pretty CVar where
+  pretty v = pretty (unCVar v)
 
 instance Pretty SerialAST where
   pretty (SerialPack v (packer, s)) = parens
@@ -286,16 +204,6 @@ instance Pretty SerialAST where
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
   pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 
-data ResolvedPacker =
-  ResolvedPacker
-    { resolvedPackerTerm :: Maybe EVar
-    , resolvedPackedType :: TypeU
-    , resolvedUnpackedType :: TypeU
-    , resolvedPackerForward :: Source
-    , resolvedPackerReverse :: Source
-    , resolvedPackerGeneralTypes :: Maybe (TypeU, TypeU)
-    }
-  deriving (Show, Ord, Eq)
 
 data TypePacker = TypePacker
   { typePackerPacked    :: TypeF
@@ -316,11 +224,11 @@ instance Pretty TypePacker where
 -- | A simplified subset of the Type record where functions, existentials,
 -- universals and language-specific info are removed
 data JsonType
-  = VarJ Text
+  = VarJ CVar
   -- ^ {"int"}
-  | ArrJ Text [JsonType]
+  | ArrJ CVar [JsonType]
   -- ^ {"list":["int"]}
-  | NamJ Text [(Text, JsonType)]
+  | NamJ CVar [(Key, JsonType)]
   -- ^ {"Foo":{"bar":"A","baz":"B"}}
   deriving (Show, Ord, Eq)
 
@@ -339,20 +247,6 @@ instance Functor (ArgGeneral k) where
 
 instance Bifunctor ArgGeneral where
   bimapM f g (Arg k x) = Arg <$> f k <*> g x
-
-data TypeM
-  = Passthrough -- ^ serialized data that is not deserialized (and may not be representable) in this segment
-  | Serial TypeF -- ^ serialized data that may be deserialized in this language
-  | Native TypeF -- ^ an unserialized native data type
-  | Function [TypeM] TypeM -- ^ a function of n inputs and one output (cannot be serialized)
-  deriving(Show, Eq, Ord)
-
--- | TypeS is a subset of TypeM that does not allow native types
-data TypeS
-  = PassthroughS
-  | SerialS TypeF
-  | FunctionS [TypeM] TypeS -- This is the type of a manifold
-  deriving(Show, Eq, Ord)
 
 instance HasTypeM TypeS where
   typeMof PassthroughS = Passthrough
@@ -456,64 +350,69 @@ abiappend f g = runIdentity . abiappendM (return2 f) (return2 g)
 instance Pretty FVar where
     pretty (FV _ c) = pretty c
 
-data PolyHead = PolyHead Int [Arg None] PolyExpr
+data PolyHead = PolyHead Lang Int [Arg None] PolyExpr
 
 -- no serialization and no argument types
 data PolyExpr
   -- organizational terms that may have undefined types
-  = PolyManifold Int (ManifoldForm None (Maybe TypeF)) PolyExpr
+  = PolyManifold Lang Int (ManifoldForm None (Maybe Type)) PolyExpr
   | PolyForeignInterface
-      TypeP    -- return type in calling language
-      [Int]    -- argument ids
-      PolyExpr -- foreign expression
+      Lang           -- foreign language
+      (Indexed Type) -- return type in calling language
+      [Int]          -- argument ids
+      PolyExpr       -- foreign expression
   | PolyLet Int PolyExpr PolyExpr
   | PolyReturn PolyExpr
   | PolyApp PolyExpr [PolyExpr]
   -- variables in the original tree will all be typed
   -- but I also may need to generate passthrough terms
-  | PolyBndVar (Either Lang TypeP) Int
+  | PolyBndVar (Three
+        Lang -- no type information is known
+        Type -- the general type is known, but this is a passing variable without an locally identifiable concrete index
+        (Indexed Type)
+      ) Int
   -- The Let variables are generated only in partialExpress, where the type is known
-  | PolyLetVar TypeP Int
+  | PolyLetVar (Indexed Type) Int
   -- terms that map 1:1 versus SAnno; have defined types in one language
-  | PolySrc    TypeP Source
-  | PolyAcc    TypeP NamType PVar PolyExpr Text
+  | PolySrc    (Indexed Type) Source
+  | PolyAcc    (Indexed Type) NamType (Indexed TVar) PolyExpr Key
   -- data types
-  | PolyList   PVar TypeP [PolyExpr]
-  | PolyTuple  PVar [(TypeP, PolyExpr)]
-  | PolyRecord NamType PVar [TypeP] [(PVar, (TypeP, PolyExpr))]
-  | PolyLog    PVar Bool
-  | PolyReal   PVar Scientific
-  | PolyInt    PVar Integer
-  | PolyStr    PVar Text
-  | PolyNull   PVar
+  | PolyList   (Indexed TVar) (Indexed Type) [PolyExpr]
+  | PolyTuple  (Indexed TVar) [(Indexed Type, PolyExpr)]
+  | PolyRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, PolyExpr))]
+  | PolyLog    (Indexed TVar) Bool
+  | PolyReal   (Indexed TVar) Scientific
+  | PolyInt    (Indexed TVar) Integer
+  | PolyStr    (Indexed TVar) Text
+  | PolyNull   (Indexed TVar)
 
 data MonoHead = MonoHead Lang Int [Arg None] MonoExpr
 
 data MonoExpr
   -- organizational terms that may have undefined types
-  = MonoManifold Int (ManifoldForm None (Maybe TypeF)) MonoExpr
+  = MonoManifold Int (ManifoldForm None (Maybe Type)) MonoExpr
   | MonoPoolCall
-      TypeF     -- return type in calling language
-      Int       -- foreign manifold id
-      [MDoc]    -- shell command components that preceed the passed data
+      (Indexed Type)       -- return type in calling language
+      Int        -- foreign manifold id
+      [MDoc]     -- shell command components that preceed the passed data
       [Arg None] -- arguments
   | MonoLet Int MonoExpr MonoExpr
-  | MonoLetVar TypeF Int
+  | MonoLetVar (Indexed Type) Int
   | MonoReturn MonoExpr
   | MonoApp MonoExpr [MonoExpr]
   -- terms that map 1:1 versus SAnno; have defined types in one language
-  | MonoSrc    TypeF Source
-  | MonoBndVar (Maybe TypeF) Int
-  | MonoAcc    TypeF NamType FVar MonoExpr Text
+  | MonoSrc    (Indexed Type) Source
+  | MonoBndVar (Three None Type (Indexed Type)) Int -- (Three Lang Type (Indexed Type)) Int  -- (Maybe (Indexed Type))
+  | MonoAcc    (Indexed Type) NamType (Indexed TVar) MonoExpr Key
   -- data types
-  | MonoList   FVar TypeF [MonoExpr]
-  | MonoTuple  FVar [(TypeF, MonoExpr)]
-  | MonoRecord NamType FVar [TypeF] [(FVar, (TypeF, MonoExpr))]
-  | MonoLog    FVar Bool
-  | MonoReal   FVar Scientific
-  | MonoInt    FVar Integer
-  | MonoStr    FVar Text
-  | MonoNull   FVar
+  | MonoRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, MonoExpr))]
+  | MonoList   (Indexed TVar) (Indexed Type) [MonoExpr]
+  | MonoTuple  (Indexed TVar) [(Indexed Type, MonoExpr)]
+  | MonoLog    (Indexed TVar) Bool
+  | MonoReal   (Indexed TVar) Scientific
+  | MonoInt    (Indexed TVar) Integer
+  | MonoStr    (Indexed TVar) Text
+  | MonoNull   (Indexed TVar)
 
 data PoolCall = PoolCall
   Int -- foreign manifold id
@@ -563,12 +462,12 @@ data NativeExpr
   | LetVarN      TypeF Int
   | BndVarN      TypeF Int
   | DeserializeN TypeF SerialAST SerialExpr
-  | AccN         NamType FVar NativeExpr Text
+  | AccN         NamType FVar NativeExpr Key
   | SrcN         TypeF Source
   -- data types
   | ListN        FVar TypeF [NativeExpr]
   | TupleN       FVar [NativeExpr]
-  | RecordN      NamType FVar [TypeF] [(FVar, NativeExpr)]
+  | RecordN      NamType FVar [TypeF] [(Key, NativeExpr)]
   | LogN         FVar Bool
   | RealN        FVar Scientific
   | IntN         FVar Integer
@@ -802,12 +701,12 @@ data NativeExpr_ nm se ne sr nr
   | LetVarN_      TypeF Int
   | BndVarN_      TypeF Int
   | DeserializeN_ TypeF SerialAST se
-  | AccN_         NamType FVar ne Text
+  | AccN_         NamType FVar ne Key
   | SrcN_         TypeF Source
   -- data types
   | ListN_        FVar TypeF [ne]
   | TupleN_       FVar [ne]
-  | RecordN_      NamType FVar [TypeF] [(FVar, ne)]
+  | RecordN_      NamType FVar [TypeF] [(Key, ne)]
   | LogN_         FVar Bool
   | RealN_        FVar Scientific
   | IntN_         FVar Integer
@@ -994,7 +893,7 @@ instance HasTypeF NativeExpr where
     -- NOTE: This will fail if the key does not exist. However, non-existence of
     -- a key should have been caught by the typechecker. So such non-existence
     -- here indicates a but in the compiler and should die immediately.
-    fromJust . listToMaybe $ [t | (FV _ key', t) <- rs, key' == key]
+    fromJust . listToMaybe $ [t | (key', t) <- rs, key' == key]
   typeFof AccN{} = error "Bug - illegal key access should have been caught in the typechecker"
   typeFof (SrcN         t _) = t
   typeFof (ListN        v p _) = AppF (VarF v) [p]
@@ -1006,23 +905,11 @@ instance HasTypeF NativeExpr where
   typeFof (StrN         v _) = VarF v
   typeFof (NullN        v  ) = VarF v
 
-instance HasTypeF TypeP where
-  typeFof (UnkP v) = UnkF (pvar2fvar v)
-  typeFof (VarP v) = VarF (pvar2fvar v)
-  typeFof (FunP ts t) = FunF (map typeFof ts) (typeFof t)
-  typeFof (AppP t ts) = AppF (typeFof t) (map typeFof ts)
-  typeFof (NamP o v ds rs) = NamF o (pvar2fvar v) (map typeFof ds) (map (bimap pvar2fvar typeFof) rs)
-
 class HasTypeM e where
   typeMof :: e -> TypeM
 
 instance HasTypeM TypeM where
   typeMof = id
-
-instance HasTypeM TypeP where
-  typeMof (UnkP _) = Passthrough
-  typeMof (FunP ts t) = Function (map typeMof ts) (typeMof t)
-  typeMof t = Native (typeFof t)
 
 instance HasTypeM TypeF where
   typeMof (FunF ts t) = Function (map typeMof ts) (typeMof t)
@@ -1207,25 +1094,8 @@ instance MFunctor NativeExpr where
     | otherwise = mapNativeExpr f ne0
 
 
-instance HasOneLanguage PVar where
-  langOf' (PV lang _ _) = lang
-
-instance HasOneLanguage TypeP where
-  langOf' (UnkP (PV lang _ _)) = lang
-  langOf' (VarP (PV lang _ _)) = lang
-  langOf' (FunP _ t) = langOf' t 
-  langOf' (AppP t _) = langOf' t
-  langOf' (NamP _ (PV lang _ _) _ _) = lang
-
 instance (Pretty a) => Pretty (Arg a) where
   pretty (Arg i x) = "x" <> pretty i <> braces (pretty x)
-
-instance Pretty PVar where
-  pretty (PV lang (Just g) t) = parens (pretty g <+> "|" <+> pretty t <> "@" <> pretty lang)
-  pretty (PV lang Nothing t) = parens ("*" <+> "|" <+> pretty t <> "@" <> pretty lang)
-
-instance Pretty TypeP where
-  pretty = pretty . typeOf
 
 instance Pretty TypeF where
   pretty = viaShow
@@ -1235,6 +1105,12 @@ instance Pretty TypeM where
   pretty (Serial c) = "Serial{" <> pretty c <> "}"
   pretty (Native c) = "Native{" <> pretty c <> "}"
   pretty (Function ts t) =
+    nest 4 (vsep $ ["Function{"] <> map (\x -> pretty x <+> "->") ts <> [pretty t <> "}"] )
+
+instance Pretty TypeS where
+  pretty PassthroughS = "PassthroughS" 
+  pretty (SerialS t) = "SeralS{" <> pretty t <> "}"
+  pretty (FunctionS ts t) =
     nest 4 (vsep $ ["Function{"] <> map (\x -> pretty x <+> "->") ts <> [pretty t <> "}"] )
 
 instance Pretty PolyHead where
@@ -1254,11 +1130,12 @@ instance Pretty MonoExpr where
     pretty (MonoReturn e) = "return" <> parens (pretty e)
     pretty (MonoApp e es) = parens (pretty e) <+> hsep (map (parens . pretty) es)
     pretty (MonoSrc    _ src) = pretty src
-    pretty (MonoBndVar Nothing i) = parens $ "x" <> pretty i <+> ":" <+> "<unknown>"
-    pretty (MonoBndVar (Just t) i) = parens $ "x" <> pretty i <+> ":" <+> pretty t
+    pretty (MonoBndVar (A _) i) = parens $ "x" <> pretty i <+> ":" <+> "<unknown>"
+    pretty (MonoBndVar (B t) i) = parens $ "x" <> pretty i <+> ":" <+> pretty t
+    pretty (MonoBndVar (C t) i) = parens $ "x" <> pretty i <+> ":" <+> pretty t
     pretty (MonoAcc    t n v e k) = parens (pretty e) <> "@" <> pretty k
     pretty (MonoList   _ _ es) = list (map pretty es)
-    pretty (MonoTuple  v (map fst -> es)) = tupled (map pretty es)
+    pretty (MonoTuple  v es) = pretty v <+> tupled (map pretty es)
     pretty (MonoRecord o v fs rs)
         = block 4 (pretty o <+> pretty v <> encloseSep "<" ">" "," (map pretty fs)) "manifold record stub"
     pretty (MonoLog    _ x) = viaShow x
@@ -1267,10 +1144,20 @@ instance Pretty MonoExpr where
     pretty (MonoStr    _ x) = viaShow x
     pretty (MonoNull   _) = "NULL"
 
+instance Pretty MonoHead where
+  pretty (MonoHead lang i args e) = block 4 "MonoHead" $ encloseSep "{" "}" ","
+    [ "lang:" <+> pretty lang
+    , "index:" <+> pretty i
+    , "args:" <+> list (map pretty args)
+    , "expr:" <+> pretty e
+    ]
 
 instance Pretty PoolCall where
     pretty _ = "PoolCall stub"
 
-
-prettyGenTypeP :: TypeP -> MDoc
-prettyGenTypeP _ = "prettyGenTypeP stub" 
+instance (Pretty context, Pretty bound) => Pretty (ManifoldForm context bound) where
+  pretty (ManifoldPass args) = "ManifoldPass" <+> list (map pretty args)
+  pretty (ManifoldFull args) = "ManifoldFull" <+> list (map pretty args)
+  pretty (ManifoldPart cargs bargs) = "ManifoldFull"
+    <+> "{context:" <+> list (map pretty cargs) <> ","
+    <+> "bound:" <+> list (map pretty bargs) <> "}"

@@ -2,6 +2,8 @@ module main (foo)
 
 import cppbase (add, mul)
 
+type Cpp => Real = "double"
+
 -- full application with variable passing
 -- cannot optimize out this manifold
 foo x = add x (mul 20.0 x)

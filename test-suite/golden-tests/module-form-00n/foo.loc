@@ -5,6 +5,7 @@ module main (foo)
 import pybase
 import cppbase
 import rbase
+import conventions (Real)
 
 foo x y = mul 2.0 (add x y)
 foo x y = add 0.0 (mul 2.0 (add x y))

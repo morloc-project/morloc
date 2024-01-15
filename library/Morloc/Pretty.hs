@@ -9,14 +9,12 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 module Morloc.Pretty
-  ( prettyPackMap
-  , prettySAnno
+  ( prettySAnno
   , prettySExpr
   ) where
 
 import Morloc.Data.Doc
 import Morloc.Namespace
-import qualified Data.Map as Map
 import qualified Data.Set as Set
 
 instance Pretty Symbol where
@@ -24,7 +22,9 @@ instance Pretty Symbol where
   pretty (TermSymbol x) = viaShow x
 
 instance Pretty AliasedSymbol where
-  pretty (AliasedType x alias) = pretty (AliasedTerm x alias)
+  pretty (AliasedType x alias)
+    | x == alias = pretty x
+    | otherwise = pretty x <+> "as" <+> pretty alias
   pretty (AliasedTerm x alias)
     | x == alias = pretty x
     | otherwise = pretty x <+> "as" <+> pretty alias
@@ -35,21 +35,31 @@ instance Pretty MVar where
 instance Pretty EVar where
   pretty (EV v) = pretty v
 
+instance Pretty TVar where
+  pretty (TV v) = pretty v
+
+instance Pretty Key where
+  pretty (Key v) = pretty v
+
+instance Pretty Label where
+  pretty (Label v) = pretty v
+
 instance Pretty Code where
   pretty = pretty . unCode
 
-instance Pretty Name where
-  pretty = pretty . unName
-
-instance Pretty TVar where
-  pretty (TV Nothing t) = pretty t
-  pretty (TV (Just lang) t) = pretty t <> "@" <> pretty (show lang)
+instance Pretty SrcName where
+  pretty = pretty . unSrcName
 
 instance Pretty Lang where
   pretty = viaShow
 
 instance Pretty NamType where
   pretty = viaShow
+
+instance (Pretty a, Pretty b) => Pretty (Or a b) where
+  pretty (L x) = parens ("L" <+> pretty x)
+  pretty (R x) = parens ("R" <+> pretty x)
+  pretty (LR x y) = parens ("LR" <+> pretty x <> "," <+> pretty y)
 
 instance Pretty Source where
   pretty s
@@ -59,8 +69,7 @@ instance Pretty Source where
     <+> "as" <+> pretty (srcAlias s) <> maybe "" (\t -> ":" <> pretty t) (srcLabel s)
 
 instance Pretty Type where
-  pretty (UnkT (TV lang v)) = pretty lang <> "@*" <> pretty v
-  pretty (VarT (TV _ "Unit")) = "Unit"
+  pretty (UnkT v) = pretty v
   pretty (VarT v) = pretty v
   pretty (FunT [] t) = "() -> " <> pretty t
   pretty (FunT ts t) = encloseSep "(" ")" " -> " (map pretty (ts <> [t]))
@@ -68,12 +77,6 @@ instance Pretty Type where
   pretty (NamT o n ps rs)
     = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
               (vsep [pretty k <+> "::" <+> pretty x | (k, x) <- rs])
-
-instance Pretty GType where
-  pretty = pretty . unGType
-
-instance Pretty CType where
-  pretty = pretty . unCType
 
 instance Pretty EType where
   pretty (EType t (Set.toList -> ps) (Set.toList -> cs)) = case (ps, cs) of 
@@ -111,14 +114,12 @@ instance Pretty a => Pretty (One a) where
 instance Pretty a => Pretty (Many a) where
   pretty (Many xs) = list $ map pretty xs
 
-prettyTypeU (ExistU v [] [] []) = angles $ pretty v
-prettyTypeU (ExistU v ts ds rs)
+prettyTypeU (ExistU v [] []) = angles $ pretty v
+prettyTypeU (ExistU v ts rs)
   = angles $ pretty v
   <+> list (map prettyTypeU ts)
-  <+> list (map prettyTypeU ds)
   <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty prettyTypeU) rs)
 prettyTypeU (ForallU _ t) = prettyTypeU t
-prettyTypeU (VarU (TV _ "Unit")) = "Unit"
 prettyTypeU (VarU v) = pretty v
 prettyTypeU (FunU [] t) = parens $ "() -> " <> prettyTypeU t
 prettyTypeU (FunU ts t) = encloseSep "(" ")" " -> " (map prettyTypeU (ts <> [t]))
@@ -129,28 +130,6 @@ prettyTypeU (NamU o n ps rs)
     = parens
     $ block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
               (vsep [pretty k <+> "::" <+> prettyTypeU x | (k, x) <- rs])
-
-instance Pretty UnresolvedPacker where
-  pretty p = vsep
-    [ "packerTerm:" <+> pretty (unresolvedPackerTerm p)
-    , "packedType:" <+> pretty (unresolvedPackedType p)
-    , "unpackedType:" <+> pretty (unresolvedUnpackedType p)
-    , "forward:" <+> pretty (unresolvedPackerForward p)
-    , "reverse:" <+> pretty (unresolvedPackerReverse p)
-    ]
-
-
-
-prettyPackMap :: PackMap -> Doc ann
-prettyPackMap m =  "----- pacmaps ----\n"
-                <> vsep (map f (Map.toList m))
-                <> "\n------------------" where
-  f :: (TVar, [UnresolvedPacker]) -> Doc ann
-  f (v, ps) =
-    block 4
-      ("packmap" <+> pretty v)
-      (vsep $ map pretty ps)
-
 
 -- For example @prettySAnnoMany id Nothing@ for the most simple printer
 prettySAnno
@@ -197,15 +176,13 @@ instance (Pretty k, Pretty a) => Pretty (IndexedGeneral k a) where
 
 instance Pretty GammaIndex where
   pretty (VarG tv) = "VarG:" <+> pretty tv
-  pretty (ExistG tv [] [] []) = angles (pretty tv)
-  pretty (ExistG tv ts ds rs)
+  pretty (ExistG tv [] []) = angles (pretty tv)
+  pretty (ExistG tv ts rs)
     = "ExistG:"
     <+> pretty tv
     <+> list (map (parens . pretty) ts)
-    <+> list (map (parens . pretty) ds)
     <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty prettyTypeU) rs)
   pretty (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> pretty t
   pretty (MarkG tv) = "MarkG:" <+> pretty tv
   pretty (SrcG (Source ev1 lang _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
-  pretty (SerialConstraint t1 t2) = "UnsolvedConstraint:" <> "\n  " <> pretty t1 <> "\n  " <> pretty t2
   pretty (AnnG v t) = pretty v <+> "::" <+> pretty t

@@ -24,17 +24,60 @@ module Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals
 import Morloc.Quasi
 
 foreignCallFunction = [idoc|
-// Handle foreign calls. This function is used inside of C++ manifolds. Any
-// changes in the name will require a mirrored change in the morloc code. 
-std::string foreign_call(std::string cmd){
-    char buffer[256];
+std::string generateTempFilename() {
+    char template_file[] = "/tmp/morloc_cpp_XXXXXX";
+    int fd = mkstemp(template_file);
+
+    if (fd == -1) {
+        perror("Error generating temporary filename");
+        exit(EXIT_FAILURE);
+    }
+
+    // Close the file descriptor
+    close(fd);
+
+    return std::string(template_file);
+}
+
+void deleteTempFile(const std::string& filename) {
+    if (remove(filename.c_str()) != 0) {
+        perror("Error deleting temporary file");
+    }
+}
+
+std::string foreign_call(
+    const std::string& cmd,
+    const std::vector<std::string>& args
+) {
+    // Vector to store temporary filenames
+    std::vector<std::string> tempFiles;
+
+    // Create temporary files for arguments
+    std::string full_cmd = cmd;
+    for (const auto& arg : args) {
+        std::string tempFilename = generateTempFilename();
+        std::ofstream tempFile(tempFilename);
+        tempFile << arg;
+        tempFile.close();
+        tempFiles.push_back(tempFilename);
+        full_cmd += " " + tempFilename;
+    }
+
+    // Execute the command and capture the output
+    char buffer[1024];
     std::string result = "";
-    FILE* pipe = popen(cmd.c_str(), "r");
+    FILE* pipe = popen(full_cmd.c_str(), "r");
     while (fgets(buffer, sizeof buffer, pipe) != NULL) {
         result += buffer;
     }
     pclose(pipe);
-    return(result);
+
+    // Delete temporary files
+    for (const auto& tempFile : tempFiles) {
+        deleteTempFile(tempFile);
+    }
+
+    return result;
 }
 |]
 
@@ -142,9 +185,44 @@ std::string serialize(float x, float schema){
     return(s.str());
 }
 
+std::string escape(const std::string& input) {
+    std::string result;
+    for (char c : input) {
+        switch (c) {
+            case '"':
+                result += "\\\"";
+                break;
+            case '\\':
+                result += "\\\\";
+                break;
+            case '\b':
+                result += "\\b";
+                break;
+            case '\f':
+                result += "\\f";
+                break;
+            case '\n':
+                result += "\\n";
+                break;
+            case '\r':
+                result += "\\r";
+                break;
+            case '\t':
+                result += "\\t";
+                break;
+            // TODO fill in other special characters
+
+            default:
+                result += c;
+        }
+    }
+    return result;
+}
+
+
 std::string serialize(std::string x, std::string schema){
     std::ostringstream s;
-    s << '"' << x << '"';
+    s << '"' << escape(x) << '"';
     return(s.str());
 }
 
@@ -327,6 +405,7 @@ bool deserialize(const std::string json, size_t &i, float &x){
     }
 }
 
+
 // combinator parser for double-quoted strings
 bool deserialize(const std::string json, size_t &i, std::string &x){
     try {
@@ -334,13 +413,52 @@ bool deserialize(const std::string json, size_t &i, std::string &x){
         if(! match(json, "\"", i)){
             throw 1;
         }
-        // TODO: add full JSON specification support (escapes, magic chars, etc)
-        while(i < json.size() && json[i] != '"'){
-            x += json[i];
-            i++;
-        }
-        if(! match(json, "\"", i)){
-            throw 1;
+        bool escape = false;
+        bool done = false;
+        for(; i < json.size() && !done; i++){
+            char c = json[i];
+            if (escape) {
+                switch (c) {
+                    case '"':
+                        x += '\"';
+                        break;
+                    case '\\':
+                        x += '\\';
+                        break;
+                    case '/':
+                        x += '/';
+                        break;
+                    case 'b':
+                        x += '\b';
+                        break;
+                    case 'f':
+                        x += '\f';
+                        break;
+                    case 'n':
+                        x += '\n';
+                        break;
+                    case 'r':
+                        x += '\r';
+                        break;
+                    case 't':
+                        x += '\t';
+                        break;
+                    // TODO: add other escaped patterns
+
+                    default:
+                        x += '\\'; // Keep the backslash if it's not part of an escape sequence
+                        x += c;
+                }
+                escape = false;
+            } else {
+                if (c == '\\') {
+                    escape = true;
+                } else if (c == '"'){
+                    done = true;
+                } else {
+                    x += c;
+                }
+            }
         }
     } catch (int e) {
         return false;

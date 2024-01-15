@@ -9,16 +9,16 @@ License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
-module Morloc.Frontend.Typecheck (typecheck, resolveTypes) where
+module Morloc.Frontend.Typecheck (typecheck, resolveTypes, evaluateSAnnoTypes) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Typecheck.Internal
 import Morloc.Pretty
 import Morloc.Data.Doc
-import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
+import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
--- import qualified Morloc.Data.Text as MT
+import qualified Morloc.TypeEval as TE
 
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
@@ -97,7 +97,7 @@ synthG g (SAnno (Many []) i) = do
         case maybeName of
             -- This branch is entered for exported type definitions
             -- FIXME: return all definitions and their parameters, check parameter count
-            (Just (EV v)) -> return (g, VarU (TV Nothing v), SAnno (Many []) (Idx i (VarU (TV Nothing v))))
+            (Just (EV v)) -> return (g, VarU (TV v), SAnno (Many []) (Idx i (VarU (TV v))))
             Nothing -> error "Indexing error, this should not occur, please message the maintainer"
 
 synthG g0 (SAnno (Many ((e0, j):es)) i) = do
@@ -150,30 +150,36 @@ synthE
        , SExpr (Indexed TypeU) Many Int
        )
 
-synthE _ g UniS = return (g, MLD.defaultGeneralType UniS, UniS)
-synthE _ g (RealS x) = return (g, MLD.defaultGeneralType (RealS x), RealS x)
-synthE _ g (IntS x) = return (g, MLD.defaultGeneralType (IntS x), IntS x)
-synthE _ g (LogS x) = return (g, MLD.defaultGeneralType (LogS x), LogS x)
-synthE _ g (StrS x) = return (g, MLD.defaultGeneralType (StrS x), StrS x)
+synthE _ g UniS = return (g, BT.unitU, UniS)
+synthE _ g (RealS x) = return (g, BT.realU, RealS x)
+synthE _ g (IntS x) = return (g, BT.intU, IntS x)
+synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
+synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 
 synthE i g0 (AccS e k) = do
   (g1, t1, e1) <- synthG' g0 e
-  insetSay "accs"
-  insetSay $ "t1:" <+> pretty t1
-  seeGamma g1
-  (g2, valType) <- case t1 of
-    (NamU _ _ _ rs) -> case lookup k rs of
-      Nothing -> gerr i (KeyError k t1)
-      (Just val) -> return (g1, val)
-    (ExistU v ps ds rs) -> case lookup k rs of
-      Nothing -> do
-        let (g12, val) = newvar (unTVar v <> "_" <> k) Nothing g1
-        case access1 v (gammaContext g12) of
-          (Just (rhs, _, lhs)) -> return (g12 { gammaContext = rhs <> [ExistG v ps ds ((k, val):rs)] <> lhs }, val)
-          Nothing -> gerr i (KeyError k t1)
-      (Just val) -> return (g1, val)
-    _ -> gerr i (KeyError k t1)
+  (g2, valType) <- accessRecord g1 t1
   return (g2, valType, AccS e1 k)
+  where
+    accessRecord :: Gamma -> TypeU -> MorlocMonad (Gamma, TypeU)
+    accessRecord g t@(NamU _ _ _ rs) = case lookup k rs of
+      Nothing -> gerr i (KeyError k t)
+      (Just val) -> return (g, val)
+    accessRecord g t@(ExistU v ps rs) = case lookup k rs of
+      Nothing -> do
+        let (g', val) = newvar (unTVar v <> "_" <> unKey k) g
+        case access1 v (gammaContext g') of
+          (Just (rhs, _, lhs)) -> return (g' { gammaContext = rhs <> [ExistG v ps ((k, val):rs)] <> lhs }, val)
+          Nothing -> gerr i (KeyError k t)
+      (Just val) -> return (g, val)
+    accessRecord g t = do
+      globalMap <- MM.gets stateGeneralTypedefs
+      gscope <- case GMap.lookup i globalMap of
+        GMapJust scope -> return scope
+        _ -> return Map.empty
+      case TE.evaluateStep gscope t of
+        (Just t') -> accessRecord g t'
+        Nothing -> gerr i (KeyError k t)
 
 --   -->E0
 synthE _ g (AppS f []) = do
@@ -219,8 +225,8 @@ synthE i g0 f@(LamS vs x) = do
       synthE i g2 f2
     else do
       -- create existentials for everything and pass it off to check
-      let (g2, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") Nothing g') g1 vs
-          (g3, ft) = newvar "o_" Nothing g2
+      let (g2, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") g') g1 vs
+          (g3, ft) = newvar "o_" g2
           finalType = FunU ts ft
       checkE' i g3 f finalType
   where
@@ -231,19 +237,19 @@ synthE i g0 f@(LamS vs x) = do
 
 --   List
 synthE _ g (LstS []) =
-  let (g1, itemType) = newvar "itemType_" Nothing g
-      listType = head $ MLD.defaultList Nothing itemType
+  let (g1, itemType) = newvar "itemType_" g
+      listType = BT.listU itemType
   in return (g1, listType, LstS [])
 synthE i g (LstS (e:es)) = do
   (g1, itemType, itemExpr) <- synthG' g e 
-  (g2, listType, listExpr) <- checkE' i g1 (LstS es) (head $ MLD.defaultList Nothing itemType)
+  (g2, listType, listExpr) <- checkE' i g1 (LstS es) (BT.listU itemType)
   case listExpr of
     (LstS es') -> return (g2, listType, LstS (itemExpr:es'))
     _ -> error "impossible"
 
 --   Tuple
 synthE _ g (TupS []) =
-  let t = head $ MLD.defaultTuple Nothing []
+  let t = BT.tupleU []
   in return (g, t, TupS [])
 synthE i g (TupS (e:es)) = do
   -- synthesize head
@@ -254,7 +260,7 @@ synthE i g (TupS (e:es)) = do
 
   -- merge the head and tail
   t3 <- case tupleType of
-    (AppU _ ts) -> return . head $ MLD.defaultTuple Nothing (apply g2 itemType : ts)
+    (AppU _ ts) -> return $ BT.tupleU (apply g2 itemType : ts)
     _ -> error "impossible" -- the general tuple will always be (AppU _ _)
 
   xs' <- case tupleExpr of
@@ -263,33 +269,13 @@ synthE i g (TupS (e:es)) = do
 
   return (g2, t3, TupS (itemExpr:xs'))
 
---   Records
-synthE _ g (NamS []) = return (g, head $ MLD.defaultRecord Nothing [], NamS [])
-synthE i g0 (NamS ((k,x):rs)) = do
-  insetSay $ "Entering synthE NamS (k=" <> pretty k <> ")"
-  seeGamma g0
-  insetSay "-------- syn"
-  -- type the head
-  (g1, headType, headExpr) <- synthG' g0 x
-
-  -- type the tail
-  (g2, tailType, tailExpr) <- synthE' i g1 (NamS rs)
-
-  insetSay $ "Exiting synthE NamS (k=" <> pretty k <> ")"
-  insetSay $ "  k type:" <+> pretty headType
-  seeGamma g2
-  insetSay "-------- syn"
-
-  -- merge the head with tail
-  t <- case tailType of
-    (NamU o1 n1 ps1 rs1) -> return $ NamU o1 n1 ps1 ((k, apply g2 headType):rs1)
-    _ -> error "impossible" -- the synthE on NamS will always return NamU type
-
-  tailExprs <- case tailExpr of
-    (NamS xs') -> return xs'
-    _ -> error "impossible" -- synth does not change data constructors
-
-  return (g2, t, NamS ((k, headExpr):tailExprs))
+synthE _ g0 (NamS rs) = do
+  (g1, xs) <- statefulMapM (\s v -> synthG s v |>> (\(a,b,c) -> (a,(b,c)))) g0 (map snd rs)
+  let (ts, es) = unzip xs
+      ks = map fst rs
+      (g2, t) = newvarRich [] (zip ks ts) "record_" g1
+      e = NamS (zip ks es)
+  return (g2, t, e) 
 
 -- Sources are axiomatic. They are they type they are said to be.
 synthE i g (CallS src) = do
@@ -298,14 +284,14 @@ synthE i g (CallS src) = do
     Just x -> return x
     -- no, then I don't know what it is and will return an existential
     -- if this existential is never solved, then it will become universal later 
-    Nothing -> return $ newvar "src_"  Nothing g
+    Nothing -> return $ newvar "src_" g
   return (g', t, CallS src)
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
 synthE i g (VarS v) = do
   -- is this a bound variable that has already been solved
-  (g', t') <- case lookupE Nothing v g of 
+  (g', t') <- case lookupE v g of 
     -- yes, return the solved type
     (Just t) -> return (g, t)
     Nothing -> do
@@ -315,7 +301,7 @@ synthE i g (VarS v) = do
         Just x -> return x 
         -- no, then I don't know what it is and will return an existential
         -- if this existential is never solved, then it will become universal later 
-        Nothing -> return $ newvar (unEVar v <> "_u")  Nothing g
+        Nothing -> return $ newvar (unEVar v <> "_u") g
   return (g', t', VarS v)
 
 
@@ -395,14 +381,14 @@ application i g0 es (ForallU v s) = application' i (g0 +> v) es (substitute v s)
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-application i g0 es (ExistU v@(TV _ s) [] _ _) =
+application i g0 es (ExistU v@(TV s) [] _) =
   case access1 v (gammaContext g0) of
     -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
-      let (g1, veas) = statefulMap (\g _ -> tvarname g "a_" Nothing) g0 es
-          (g2, vea) = tvarname g1 (s <> "o_") Nothing
-          eas = [ExistU v' [] [] [] | v' <- veas]
-          ea = ExistU vea [] [] []
+      let (g1, veas) = statefulMap (\g _ -> tvarname g "a_") g0 es
+          (g2, vea) = tvarname g1 (s <> "o_")
+          eas = [ExistU v' [] [] | v' <- veas]
+          ea = ExistU vea [] []
           f = FunU eas ea
           g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
       (g4, _, es', _) <- zipCheck i g3 es eas
@@ -493,11 +479,11 @@ subtype' i a b g = do
 -- helpers
 
 -- apply context to a SAnno
-applyGen :: (Functor gf, Functor f, Applicable g)
+applyGen :: (Functor gf, Traversable f, Applicable g)
          => Gamma -> SAnno (gf g) f c -> SAnno (gf g) f c
 applyGen g = mapSAnno (fmap (apply g)) id
 
-applyCon :: (Functor gf, Functor f, Applicable g)
+applyCon :: (Functor gf, Traversable f, Applicable g)
          => Gamma -> SExpr (gf g) f c -> SExpr (gf g) f c
 applyCon g = mapSExpr (fmap (apply g)) id
 
@@ -562,3 +548,21 @@ peakSExpr (IntS x) = "IntS" <+> pretty x
 peakSExpr (LogS x) = "LogS" <+> pretty  x
 peakSExpr (StrS x) = "StrS" <+> pretty x
 peakSExpr (CallS src) = "CallS" <+> pretty src
+
+
+evaluateSAnnoTypes :: SAnno (Indexed TypeU) Many Int -> MorlocMonad (SAnno (Indexed TypeU) Many Int)
+evaluateSAnnoTypes = mapSAnnoM resolve return where
+  resolve :: Indexed TypeU -> MorlocMonad (Indexed TypeU)
+  resolve (Idx m t) = do
+    scope <- getScope m
+    case TE.evaluateType scope t of
+      (Left e) -> MM.throwError e
+      (Right tu) -> return (Idx m tu)
+
+  getScope :: Int -> MorlocMonad Scope
+  getScope i= do
+    globalMap <- CMS.gets stateGeneralTypedefs
+    case GMap.lookup i globalMap of
+      GMapNoFst -> return Map.empty
+      GMapNoSnd -> return Map.empty
+      GMapJust scope -> return scope

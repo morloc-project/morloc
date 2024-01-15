@@ -17,6 +17,7 @@ module Morloc.Frontend.PartialOrder (
 ) where
 
 import Morloc.Frontend.Namespace
+import Morloc.Data.Text (Text)
 import qualified Data.Set as Set
 import qualified Data.PartialOrd as P
 import qualified Data.List as DL
@@ -28,7 +29,7 @@ import qualified Data.List as DL
 -- As far as serialization is concerned, properties and constraints do not matter.
 instance P.PartialOrd TypeU where
   (<=) (VarU v1) (VarU v2) = v1 == v2
-  (<=) (ExistU v1 ts1 _ rs1) (ExistU v2 ts2 _ rs2)
+  (<=) (ExistU v1 ts1 rs1) (ExistU v2 ts2 rs2)
     =  v1 == v2
     && length ts1 == length ts2
     && and (zipWith (P.<=) ts1 ts2)
@@ -50,7 +51,7 @@ instance P.PartialOrd TypeU where
     = o1 == o2 && n1 == n2 && length ps1 == length ps2
   (<=) _ _ = False
 
-  (==) (ForallU v1@(TV _ _) t1) (ForallU v2 t2) =
+  (==) (ForallU v1 t1) (ForallU v2 t2) =
     if Set.member (VarU v1) (free t2)
     then
       let v = newVariable t1 t2

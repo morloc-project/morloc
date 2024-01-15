@@ -5,6 +5,7 @@ module main (sub)
 import pybase (sub)
 import cppbase (sub)
 import rbase (sub)
+import conventions (Real)
 
 source py from "foo.py" ("sub_loc" as sub)
-sub Py :: "float" -> "float" -> "float"
+sub :: Real -> Real -> Real

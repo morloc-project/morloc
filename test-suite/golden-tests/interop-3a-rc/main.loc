@@ -1,5 +1,6 @@
 module main (foo)
 
+import conventions (List, Real)
 import rbase (map)
 import cppbase (neg)
 
@@ -7,6 +8,6 @@ import cppbase (neg)
 -- single module is highly sus. Should I really support it? It does show up
 -- through if someone adds signatures in multiple modules for largely documentation
 -- purposes.
-foo R :: ["numeric"] -> ["numeric"]
-foo R :: ["numeric"] -> ["numeric"]
+foo :: [Real] -> [Real]
+foo :: [Real] -> [Real]
 foo xs = map neg xs

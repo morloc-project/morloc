@@ -1,7 +1,8 @@
 module main (foo)
 
+import conventions (List, Real)
 import pybase (add)
 import rbase (map)
 
-foo R :: ["numeric"] -> ["numeric"]
+foo :: [Real] -> [Real]
 foo xs = map (\x -> add 1.0 x) xs

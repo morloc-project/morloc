@@ -1,6 +1,7 @@
 module main (f)
 
 import pybase (add)
+import conventions (Real)
 
 -- terms in the function's where-scope are unordered and share scope
 f = x where

@@ -2,4 +2,7 @@ module main (foo)
 
 import rbase (fold, mul, add)
 
+type R => List a = "list" a
+type R => Real = "numeric"
+
 foo = fold add 0.0 [1.0, 2.0, 3.0, mul 1.0 4.0]

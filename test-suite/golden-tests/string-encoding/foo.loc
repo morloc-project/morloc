@@ -1,0 +1,22 @@
+module main (foor, fooc, foop)
+
+source Py from "foo.py" ("mlc_foo" as pfoo)
+source Cpp from "foo.hpp" ("mlc_foo" as cfoo)
+source R from "foo.R" ("mlc_foo" as rfoo)
+
+pfoo :: a -> a
+cfoo :: a -> a
+rfoo :: a -> a
+
+type Py => Str = "str"
+type Cpp => Str = "std::string"
+type R => Str = "character"
+
+foor :: Str -> Str
+foor = rfoo . rfoo
+
+fooc :: Str -> Str
+fooc = cfoo . cfoo
+
+foop :: Str -> Str
+foop = pfoo . pfoo

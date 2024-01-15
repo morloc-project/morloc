@@ -1,0 +1,35 @@
+module m (foo)
+
+type Cpp => Map a b = "std::map<$1,$2>" a b
+type Cpp => List a = "std::vector<$1>" a
+type Cpp => Tuple2 a b = "std::tuple<$1,$2>" a b
+type Cpp => Str = "std::string"
+type Cpp => Int = "int"
+
+type Py => Map a b = "dict" a b
+type Py => List a = "list" a
+type Py => Tuple2 a b = "tuple" a b
+type Py => Str = "str"
+type Py => Int = "int"
+
+source Cpp from "map.hpp"
+  ( "morloc_packMap" as packMapCpp
+  , "morloc_unpackMap" as unpackMapCpp
+  , "insert"
+  )
+packMapCpp :: pack => ([key],[val]) -> Map key val
+unpackMapCpp :: unpack => Map key val -> ([key],[val])
+
+insert :: Map Str b -> Str -> b -> Map Str b
+
+source Py from "map.py"
+  ( "packMap" as packMapPy
+  , "unpackMap" as unpackMapPy
+  , "singleton"
+  )
+packMapPy   :: pack   => ([Str],[b]) -> Map Str b
+unpackMapPy :: unpack => Map Str b -> ([Str],[b])
+singleton :: Str -> a -> Map Str a
+
+foo :: Int -> Int -> Map Str Int
+foo x y = insert (singleton "x" x) "y" y

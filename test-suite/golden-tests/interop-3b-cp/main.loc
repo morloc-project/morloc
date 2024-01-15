@@ -1,7 +1,8 @@
 module main (foo)
 
+import conventions (List, Real)
 import cppbase (map)
 import pybase (add)
 
-foo Cpp :: ["double"] -> ["double"]
+foo :: [Real] -> [Real]
 foo xs = map (add 1.0) xs

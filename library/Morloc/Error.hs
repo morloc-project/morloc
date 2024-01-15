@@ -43,12 +43,14 @@ instance Pretty MorlocError where
   pretty (PoolBuildError msg) = "PoolBuildError: " <> pretty msg
   pretty (SelfRecursiveTypeAlias v) = "SelfRecursiveTypeAlias: " <> pretty v
   pretty (MutuallyRecursiveTypeAlias vs) = "MutuallyRecursiveTypeAlias: " <> tupled (map pretty vs)
-  pretty (BadTypeAliasParameters (TV _ v) exp' obs)
+  pretty (BadTypeAliasParameters v exp' obs)
     =  "BadTypeAliasParameters: for type alias " <> pretty v
     <> " expected " <> pretty exp'
     <> " parameters but found " <> pretty obs
   pretty (ConflictingTypeAliases t1 t2)
-    = "ConflictingTypeAliases: (" <> pretty t1 <> ", " <> pretty t2 <> ")" 
+    = "ConflictingTypeAliases:"
+    <> "\n  t1:" <+> pretty t1
+    <> "\n  t2:" <+> pretty t2
   pretty (CallTheMonkeys msg) =
     "There is a bug in the code, send this message to the maintainer: " <> pretty msg
   pretty (GeneratorError msg) = "GeneratorError: " <> pretty msg
@@ -57,7 +59,8 @@ instance Pretty MorlocError where
   pretty ToplevelRedefinition = "ToplevelRedefinition"
   pretty (OtherError msg) = "OtherError: " <> pretty msg
   -- TODO: this will be a common class of errors and needs an informative message
-  pretty (IncompatibleGeneralType a b) = "Incompatible general types:" <+> parens (pretty a) <+> "vs" <+> parens (pretty b)
+  pretty (IncompatibleGeneralType a b)
+    = "Incompatible general types:" <+> parens (pretty a) <+> "vs" <+> parens (pretty b)
   -- container errors
   pretty EmptyTuple = "EmptyTuple"
   pretty TupleSingleton = "TupleSingleton"
@@ -73,14 +76,17 @@ instance Pretty MorlocError where
   pretty BadRealization = "BadRealization"
   pretty MissingSource = "MissingSource"
   -- serialization errors
-  pretty (MissingPacker place t)
-    = "SerializationError: no packer found for type ("
-    <> pretty t <> ") at " <> pretty place 
-  pretty (MissingUnpacker place t)
-    = "SerializationError: no unpacker found for type ("
-    <> pretty t <> ") at " <> pretty place
-  pretty (CyclicPacker _) = "CyclicPacker"
+  pretty (CyclicPacker t1 t2)
+    = "Error CyclicPacker - a term is described as both a packer and an unpacker:\n  "
+    <> pretty t1 <> "\n  " <> pretty t2
   -- type extension errors
+  pretty (ConflictingPackers t1 t2)
+    = "Error ConflictingPackers:"
+    <> "\n  t1:" <+> pretty t1
+    <> "\n  t2:" <+> pretty t2
+  pretty (UndefinedType v)
+    =  "UndefinedType: could not resolve type" <+> squotes (pretty v)
+    <> ". You may be missing a language-specific type definition."
   pretty (AmbiguousPacker _) = "AmbiguousPacker"
   pretty (AmbiguousUnpacker _) = "AmbiguousUnpacker"
   pretty (AmbiguousCast _ _) = "AmbiguousCast"

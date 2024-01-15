@@ -2,5 +2,6 @@ module main (foo)
 
 import bar (add)
 import baz (mul)
+import conventions (Real)
 
 foo x = add x (mul 2.0 20.0)

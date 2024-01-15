@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, QuasiQuotes, OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell, QuasiQuotes, OverloadedStrings, ViewPatterns #-}
 
 module UnitTypeTests
   ( subtypeTests
@@ -11,14 +11,12 @@ module UnitTypeTests
   , whereTests
   , orderInvarianceTests
   , whitespaceTests
-  , concreteTypeSynthesisTests
   ) where
 
 import Morloc.Frontend.Namespace
-import Morloc.CodeGenerator.Namespace
 import Text.RawString.QQ
-import qualified Morloc.Data.Doc as Doc
-import Morloc (typecheck, typecheckFrontend)
+import Morloc (typecheckFrontend)
+import Morloc.Frontend.Typecheck (evaluateSAnnoTypes)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.PartialOrder as MP
 import qualified Morloc.Typecheck.Internal as MTI
@@ -29,21 +27,14 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 -- get the toplevel general type of a typechecked expression
-gtypeof :: (SAnno (Indexed TypeU) f c) -> TypeU
+gtypeof :: SAnno (Indexed TypeU) f c -> TypeU
 gtypeof (SAnno _ (Idx _ t)) = t
 
 runFront :: MT.Text -> IO (Either MorlocError [SAnno (Indexed TypeU) Many Int])
 runFront code = do
-  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheckFrontend Nothing (Code code))
+  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheckFrontend Nothing (Code code) >>= mapM evaluateSAnnoTypes)
   return x
 
-runBackendCheck
-  :: MT.Text
-  -> IO (Either MorlocError ([SAnno (Indexed Type) One ()], [SAnno Int One (Indexed TypeP)]))
-runBackendCheck code = do
-  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheck Nothing (Code code))
-  return x
-  
 emptyConfig =  Config
     { configHome = ""
     , configLibrary = ""
@@ -63,29 +54,19 @@ assertGeneralType msg code t = testCase msg $ do
     (Left e) -> error $
       "The following error was raised: " <> show e <> "\nin:\n" <> show code
 
-assertConcreteType :: String -> MT.Text -> TypeP -> TestTree
-assertConcreteType msg code t = testCase msg $ do
-  result <- runBackendCheck code
-  case result of
-    (Right (_, [SAnno (One (_, Idx _ x)) _])) -> assertEqual "" t x
-    (Right (_, [])) -> error "No exports from main found in assertConcreteType"
-    (Right _) -> error "Expected exactly one export from Main for assertConcreteType"
-    (Left e) -> error $ "The following error was raised: " <> show e <> "\nin:\n" <> show code
-
 renameExistentials :: TypeU -> TypeU
 renameExistentials = snd . f (0, Map.empty) where
  f s (VarU v) = (s, VarU v)
- f (i,m) (ExistU v@(TV lang _) ps ds rs) =
+ f (i,m) (ExistU v ps rs) =
   case Map.lookup v m of
-    (Just v') -> ((i, m), ExistU v' ps ds rs)
+    (Just v') -> ((i, m), ExistU v' ps rs)
     Nothing ->
-      let v' = TV lang ("e" <> MT.pack (show i))
+      let v' = TV ("e" <> MT.pack (show i))
           i' = i+1
           m' = Map.insert v v' m
           (s', ps') = statefulMap f (i', m') ps 
-          (s'', ds') = statefulMap f s' ds
-          (s''', vs') = statefulMap f s'' (map snd rs)
-      in (s''', ExistU v' ps' ds' (zip (map fst rs) vs'))
+          (s'', vs') = statefulMap f s' (map snd rs)
+      in (s'', ExistU v' ps' (zip (map fst rs) vs'))
  f s (ForallU v t) =
   let (s', t') = f s t
   in (s', ForallU v t') 
@@ -112,7 +93,7 @@ assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do
 exprTestBad :: String -> MT.Text -> TestTree
 exprTestBad msg code =
   testCase msg $ do
-  result <- runFront code
+  result  <- runFront code
   case result of
     (Right _) -> assertFailure . MT.unpack $ "Expected '" <> code <> "' to fail"
     (Left _) -> return ()
@@ -139,52 +120,28 @@ testFalse :: String -> Bool -> TestTree
 testFalse msg x =
   testCase msg $ assertEqual "" x False
 
-bool = VarU (TV Nothing "Bool")
-
-real = VarU (TV Nothing "Real")
-
-int = VarU (TV Nothing "Int")
-
-str = VarU (TV Nothing "Str")
+bool = VarU (TV "Bool")
+real = VarU (TV "Real")
+int = VarU (TV "Int")
+str = VarU (TV "Str")
 
 fun [] = error "Cannot infer type of empty list"
 fun [t] = FunU [] t
 fun ts = FunU (init ts) (last ts)
 
 forall [] t = t
-forall (s:ss) t = ForallU (TV Nothing s) (forall ss t)
+forall (s:ss) t = ForallU (TV s) (forall ss t)
 
-exist v = ExistU (TV Nothing v) [] [] []
+exist v = ExistU (TV v) [] []
 
-forallc _ [] t = t
-forallc lang (s:ss) t = ForallU (TV (Just lang) s) (forallc lang ss t)
-
-v s = TV Nothing s 
-var s = VarU (TV Nothing s)
-varc l s = VarU (TV (Just l) s)
-
-arrc l s ts = AppU (VarU (TV (Just l) s)) ts
-
-arr s ts = AppU (VarU (TV Nothing s)) ts
-
+var s = VarU (TV s)
+arr s ts = AppU (VarU (TV s)) ts
 lst t = arr "List" [t]
-
 tuple ts = AppU v ts
   where
-    v = VarU . TV Nothing . MT.pack $ "Tuple" ++ show (length ts)
-
-record rs = NamU NamRecord (TV Nothing "Record") [] rs
-
-record' n rs = NamU NamRecord (TV Nothing n) [] rs
-
-unkp lang gv cv = UnkP (PV lang gv cv) 
-
-varp lang gv cv = VarP (PV lang gv cv)
-
-appp lang gv cv ps = AppP (VarP (PV lang (Just gv) cv)) ps 
-
-funp [] = error "Cannot infer type of empty list"
-funp ts = FunP (init ts) (last ts)
+    v = VarU . TV . MT.pack $ "Tuple" ++ show (length ts)
+record rs = NamU NamRecord (TV "Record") [] rs
+record' n rs = NamU NamRecord (TV n) [] rs
 
 subtypeTests =
   testGroup
@@ -196,18 +153,18 @@ subtypeTests =
     , assertSubtypeGamma "G -| (A -> B) <: (A -> B) |- G" [] (fun [a, b]) (fun [a, b]) []
     , assertSubtypeGamma "G -| [A] <: [A] |- G" [] (lst a) (lst a) []
     , assertSubtypeGamma "G -| {K :: a, L :: b} <: {K :: a, L :: b}" []
-        (record' "Foo" [("K", a), ("L", b)]) 
-        (record' "Foo" [("K", a), ("L", b)]) []
+        (record' "Foo" [(Key "K", a), (Key "L", b)]) 
+        (record' "Foo" [(Key "K", a), (Key "L", b)]) []
     , assertSubtypeGamma "<a> -| <a> <: A |- <a>:A" [eag] ea a [solvedA a]
     , assertSubtypeGamma "<a> -| A <: <a> |- <a>:A" [eag] a ea [solvedA a]
     , assertSubtypeGamma "<b> -| [A] <: <b> |- <b>:[A]" [ebg] (lst a) (eb) [solvedB (lst a)]
     , assertSubtypeGamma "<a> -| <a> <: [B] |- <a>:[B]" [eag] (lst b) (ea) [solvedA (lst b)]
     , assertSubtypeGamma "<a>, <b> -| <a> <b> <: [C] |- <a>:[C], <b>:C" [eag, ebg]
-        (ExistU (v "x1") [eb] [] []) (lst c) [solvedA (lst c), solvedB c]
+        (ExistU (TV "x1") [eb] []) (lst c) [solvedA (lst c), solvedB c]
     , assertSubtypeGamma "<a>, <b> -|[C] <: <a> <b> |- <a>:[C], <b>:C" [eag, ebg]
-        (lst c) (ExistU (v "x1") [eb] [] []) [solvedA (lst c), solvedB c]
-    , assertSubtypeGamma "[] -| forall a . a <: A -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (v "a") a]
-    , assertSubtypeGamma "[] -| A <: forall a . a -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (v "a") a]
+        (lst c) (ExistU (TV "x1") [eb] []) [solvedA (lst c), solvedB c]
+    , assertSubtypeGamma "[] -| forall a . a <: A -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (TV "a") a]
+    , assertSubtypeGamma "[] -| A <: forall a . a -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (TV "a") a]
       -- nested types
     , assertSubtypeGamma "<b> -| [A] <: [<b>] |- <b>:A" [ebg] (lst a) (lst eb) [solvedB a]
     , assertSubtypeGamma "<a> -| [<a>] <: [B] |- <a>:B" [eag] (lst b) (lst ea) [solvedA b]
@@ -222,24 +179,24 @@ subtypeTests =
     a = var "A"
     b = var "B"
     c = var "C"
-    ea = ExistU (v "x1") [] [] []
-    eb = ExistU (v "x2") [] [] []
-    ec = ExistU (v "x3") [] [] []
-    ed = ExistU (v "x4") [] [] []
-    eag = ExistG (v "x1") [] [] []
-    ebg = ExistG (v "x2") [] [] []
-    ecg = ExistG (v "x3") [] [] []
-    edg = ExistG (v "x4") [] [] []
-    solvedA t = SolvedG (v "x1") t
-    solvedB t = SolvedG (v "x2") t
-    solvedC t = SolvedG (v "x3") t
-    solvedD t = SolvedG (v "x4") t
+    ea = ExistU (TV "x1") [] []
+    eb = ExistU (TV "x2") [] []
+    ec = ExistU (TV "x3") [] []
+    ed = ExistU (TV "x4") [] []
+    eag = ExistG (TV "x1") [] []
+    ebg = ExistG (TV "x2") [] []
+    ecg = ExistG (TV "x3") [] []
+    edg = ExistG (TV "x4") [] []
+    solvedA t = SolvedG (TV "x1") t
+    solvedB t = SolvedG (TV "x2") t
+    solvedC t = SolvedG (TV "x3") t
+    solvedD t = SolvedG (TV "x4") t
 
 substituteTVarTests =
   testGroup
     "test variable substitution"
-    [ testEqual "[x/y]Int" (substituteTVar (v "x") (var "y") int) int
-    , testEqual "[y/x]([x] -> x)" (substituteTVar (v "x") (var "y") (fun [lst (var "x"), var "x"]))
+    [ testEqual "[x/y]Int" (substituteTVar (TV "x") (var "y") int) int
+    , testEqual "[y/x]([x] -> x)" (substituteTVar (TV "x") (var "y") (fun [lst (var "x"), var "x"]))
         (fun [lst (var "y"), var "y"]) 
     ]
 
@@ -318,78 +275,12 @@ recordAccessTests =
          ((bar 5)@a, (bar 6)@b)
       |]
       (tuple [int, str])
-    -- , assertGeneralType
-    --   "Access multiple languages"
-    --   [r|
-    --       record Person = Person {a :: Int, b :: Str}
-    --       record R Person = Person {a :: "numeric", b :: "character"}
-    --       bar :: Person
-    --       bar R :: Person
-    --       bar@b
-    --   |]
-    --   [str, varc RLang "character"]
     ]
 
 packerTests =
   testGroup
     "Test building of packer maps"
     [ testEqual "packer test" 1 1 ]
---     [ assertPacker "no import packer"
---         [r|
---             source Cpp from "map.h" ( "mlc_packMap" as packMap
---                                     , "mlc_unpackMap" as unpackMap)
---             packMap :: pack => ([a],[b]) -> Map a b
---             unpackMap :: unpack => Map a b -> ([a],[b])
---             packMap Cpp :: pack => ([a],[b]) -> "std::map<$1,$2>" a b
---             unpackMap Cpp :: unpack => "std::map<$1,$2>" a b -> ([a],[b])
---             export Map
---         |]
---         ( Map.singleton
---             (TV (Just CppLang) "std::map<$1,$2>", 2)
---             [ UnresolvedPacker {
---                 unresolvedPackerTerm = (Just (EV [] "Map"))
---               , unresolvedPackerCType
---                 = forallc CppLang ["a","b"]
---                   ( arrc CppLang "std::tuple<$1,$2>" [ arrc CppLang "std::vector<$1>" [varc CppLang "a"]
---                                                      , arrc CppLang "std::vector<$1>" [varc CppLang "b"]])
---               , unresolvedPackerForward
---                 = [Source (Name "mlc_packMap") CppLang (Just "map.h") (EV [] ("packMap"))]
---               , unresolvedPackerReverse
---                 = [Source (Name "mlc_unpackMap") CppLang (Just "map.h") (EV [] ("unpackMap"))]
---               }
---             ]
---         )
---
---     , assertPacker "with importing and aliases"
---         [r|
--- module A
--- source Cpp from "map.h" ( "mlc_packMap" as packMap
---                         , "mlc_unpackMap" as unpackMap)
--- packMap :: pack => ([a],[b]) -> Map a b
--- unpackMap :: unpack => Map a b -> ([a],[b])
--- packMap Cpp :: pack => ([a],[b]) -> "std::map<$1,$2>" a b
--- unpackMap Cpp :: unpack => "std::map<$1,$2>" a b -> ([a],[b])
--- export Map
---
--- module Main
--- import A (Map as Hash)
---         |]
---         ( Map.singleton
---             (TV (Just CppLang) "std::map<$1,$2>", 2)
---             [ UnresolvedPacker {
---                 unresolvedPackerTerm = (Just (EV [] "Hash"))
---               , unresolvedPackerCType
---                 = forallc CppLang ["a","b"]
---                   ( arrc CppLang "std::tuple<$1,$2>" [ arrc CppLang "std::vector<$1>" [varc CppLang "a"]
---                                                      , arrc CppLang "std::vector<$1>" [varc CppLang "b"]])
---               , unresolvedPackerForward
---                 = [Source (Name "mlc_packMap") CppLang (Just "map.h") (EV [] ("packMap"))]
---               , unresolvedPackerReverse
---                 = [Source (Name "mlc_unpackMap") CppLang (Just "map.h") (EV [] ("unpackMap"))]
---               }
---             ]
---         )
---     ]
 
 typeAliasTests =
   testGroup
@@ -434,14 +325,6 @@ typeAliasTests =
         |]
         (fun [lst (var "A"), var "A"])
     , assertGeneralType
-        "deep type substitution: `[Foo] -> { a = Foo }`"
-        [r|
-        module main (f)
-        type Foo = A
-        f :: [Foo] -> { a :: Foo }
-        |]
-        (fun [lst (var "A"), record [("a", var "A")]])
-    , assertGeneralType
         "parametric alias, general type alias"
         [r|
         module main (f)
@@ -476,62 +359,10 @@ typeAliasTests =
            f = g  {- yes, g isn't defined -}
         |]
         (fun [var "A", var "Int"])
-    -- , assertGeneralType
-    --     "non-parametric alias, concrete type alias"
-    --     [r|
-    --        type C Num = double
-    --        f C :: Num -> "int"
-    --        f
-    --     |]
-    --     (fun [varc CLang "double", varc CLang "int"])
-    -- , assertGeneralType
-    --     "language-specific types are be nested"
-    --     [r|
-    --        type R Num = "numeric"
-    --        f R :: [Num] -> "integer"
-    --        f
-    --     |]
-    --     [fun [arrc RLang "list" [varc RLang "numeric"], varc RLang "integer"]]
-    -- , assertGeneralType
-    --     "no substitution is across languages"
-    --     [r|
-    --        type Num = "numeric"
-    --        f R :: [Num] -> "integer"
-    --        f
-    --     |]
-    --     [fun [arrc RLang "list" [varc RLang "Num"], varc RLang "integer"]]
-    -- , assertGeneralType
-    --     "parametric alias, concrete type alias"
-    --     [r|
-    --        type Cpp (Map a b) = "std::map<$1,$2>" a b
-    --        f Cpp :: Map "int" "double" -> "int"
-    --        f
-    --     |]
-    --     [ fun [arrc CppLang "std::map<$1,$2>" [varc CppLang "int", varc CppLang "double"]
-    --           , varc CppLang "int"]]
-    -- , assertGeneralType
-    --     "nested in signature"
-    --     [r|
-    --        type Cpp (Map a b) = "std::map<$1,$2>" a b
-    --        f Cpp :: Map "string" (Map "double" "int") -> "int"
-    --        f
-    --     |]
-    --     [ fun [arrc CppLang "std::map<$1,$2>" [varc CppLang "string"
-    --           , arrc CppLang "std::map<$1,$2>" [varc CppLang "double", varc CppLang "int"]]
-    --           , varc CppLang "int"]]
 
-    -- , assertGeneralType
-    --     "existentials are resolved"
-    --     [r|
-    --        type Cpp (A a b) = "map<$1,$2>" a b
-    --        foo Cpp :: A D [B] -> X
-    --        foo
-    --     |]
-    --     [fun [ arrc CppLang "map<$1,$2>" [varc CppLang "D", arrc CppLang "std::vector<$1>" [varc CppLang "B"]]
-    --          , varc CppLang "X"]]
     , expectError
         "fail neatly for self-recursive type aliases"
-        (SelfRecursiveTypeAlias (TV Nothing "A"))
+        (SelfRecursiveTypeAlias (TV "A"))
         [r|
            type A = (A,A)
            foo :: A -> B -> C
@@ -540,7 +371,7 @@ typeAliasTests =
     -- -- TODO: find a way to catch mutually recursive type aliases
     -- , expectError
     --     "fail neatly for mutually-recursive type aliases"
-    --     (MutuallyRecursiveTypeAlias [TV Nothing "A", TV Nothing "B"])
+    --     (MutuallyRecursiveTypeAlias [TV "A", TV "B"])
     --     (MT.unlines
     --       [ "type A = B"
     --       , "type B = A"
@@ -550,7 +381,7 @@ typeAliasTests =
     --     )
     , expectError
         "fail on too many type aliases parameters"
-        (BadTypeAliasParameters (TV Nothing "A") 0 1)
+        (BadTypeAliasParameters (TV "A") 0 1)
         [r|
            type A = B
            foo :: A Int -> C
@@ -558,11 +389,43 @@ typeAliasTests =
         |]
     , expectError
         "fail on too few type aliases parameters"
-        (BadTypeAliasParameters (TV Nothing "A") 1 0)
+        (BadTypeAliasParameters (TV "A") 1 0)
         [r|
            type (A a) = (a,a)
            foo :: A -> C
            foo
+        |]
+    , expectError
+        "fail on conflicting types (Int vs Str)"
+        (ConflictingTypeAliases int str)
+        [r|
+           type A = Int
+         
+           module b (A)
+           type A = Str
+         
+           module main (foo)
+           import a (A)
+           import b (A)
+         
+           foo :: A -> A -> A
+        |]
+    , expectError
+        "fail on conflicting types (Map vs List)"
+        (ConflictingTypeAliases (forall ["a", "b"] $ lst (tuple [var "a", var "b"]))
+                                (forall ["a", "b"] $ arr "Map" [var "a", var "b"]))
+        [r|
+           module a (A)
+           type A a b = Map a b
+           
+           module b (A)
+           type A a b = List (Tuple2 a b)
+           
+           module main (foo)
+           import a (A)
+           import b (A)
+           
+           foo :: A a b -> A a b -> A a b
         |]
 
     -- import tests ---------------------------------------
@@ -618,48 +481,6 @@ typeAliasTests =
         |]
         (fun [var "A", var "B"])
 
-    -- , assertConcreteType
-    --     "realization of ambiguous types"
-    --     [r|
-    --       source Cpp from "foo.hpp" ("g")
-    --
-    --       g :: a -> a
-    --       g Py :: a -> a
-    --       g Cpp :: a -> a
-    --
-    --       f :: Int -> Int
-    --       f Py :: "int" -> "int"
-    --
-    --       foo x = bar (f x)
-    --       bar x = g x
-    --
-    --       foo 42
-    --     |]
-    --     (varp Python3Lang Nothing "int")
-
-    -- , assertConcreteType
-    --     "non-parametric, concrete type alias, reimported aliased"
-    --     [r|
-    --        module M3
-    --        type Cpp Foo1 = "int"
-    --        type R Foo1 = "integer"
-    --        export Foo1
-    --
-    --        module M2
-    --        import M3 (Foo1 as Foo2)
-    --        export Foo2
-    --
-    --        module M1
-    --        import M2 (Foo2 as Foo3)
-    --        export Foo3
-    --
-    --        module Main
-    --        import M1 (Foo3 as Foo4)
-    --        source cpp from "_" ("f")
-    --        f Cpp :: Foo4 -> "double"
-    --        export f
-    --     |]
-    --     ( funp [varp CppLang Nothing "int", varp CppLang Nothing "double"] )
     , assertGeneralType
         "non-parametric, general type alias, duplicate import"
         [r|
@@ -728,98 +549,6 @@ whereTests =
         int
   ]
 
-
-concreteTypeSynthesisTests =
-  testGroup
-  "Test concrete type synthesis"
-  [ assertConcreteType
-      "Synth Int to py:int"
-      [r|
-      module m (foo)
-      source Py from "_" ("foo")
-      type Py Int = "int"
-      foo :: Int -> Int
-      |]
-      (FunP [varp Python3Lang (Just "Int") "int"] (varp Python3Lang (Just "Int") "int"))
-
-  , assertConcreteType
-      -- This tests the desugar bug fixed in #a50c75
-      "test: foo :: Real -> (Real, a)"
-      [r|
-      module m (foo)
-     
-      type Cpp Real = "double"
-      type Cpp (Tuple2 a b) = "std::tuple" a b
-     
-      source Cpp from "foo.hpp" ("foo")
-     
-      foo :: Real -> (Real, a)
-      |]
-      (FunP [varp CppLang (Just "Real") "double"] ( appp CppLang "Tuple2" "std::tuple" [ varp CppLang (Just "Real") "double", UnkP (PV CppLang (Just "a_q0") "a_q0") ]))
-
-  , assertConcreteType
-      "test: (asCpp . asPy) [1.0]"
-      [r|
-      module m (foo)
-      type Cpp Real = "double"
-      type Py Real = "float"
-      type Cpp (List a) = "std::vector<$1>" a
-      type Py (List a) = "list" a
-      asPy :: a -> a
-      source Py from "foo.py" ("id" as asPy)
-      asCpp :: a -> a
-      source Cpp from "foo.cpp" ("id" as asCpp)
-      foo = (asCpp . asPy) [1.0]
-      |]
-      (appp CppLang "List" "std::vector<$1>" [varp CppLang (Just "Real") "double"])
-
-  , assertConcreteType
-      "test mixed language inference"
-      [r|
-      module foo (fluffle)
-
-      type Py Str = "str" 
-      type Py Int = "int"
-      type Py (List a) = "list" a
-      type Py (Tuple2 a b) = "tuple" a b
-
-      type Cpp Str = "std::string" 
-      type Cpp Int = "int"
-      type Cpp (List a) = "std::vector<$1>" a
-      type Cpp (Tuple2 a b) = "std::tuple<$1,$2>" a b
-  
-      source Py from "foo.py" ("foo")
-      foo :: Str -> [Str]
-  
-      source Py from "foo.py" ("shard", "join", "keys")
-      source Cpp from "foo.hpp" ("shard", "join", "keys")
-  
-      shard :: Int -> [d] -> [[d]]
-      join :: [c] -> [c] -> [c]
-      keys :: [(a, b)] -> [a]
-  
-      fluffle :: [(Str, Str)] -> Str -> [[Str]]
-      fluffle refs query =
-        ( shard 100
-        . join (keys refs)
-        . foo
-        ) query
-
-      module test (out)
-      import foo (fluffle)
-      out = fluffle [("asdf","er")] "qwer"
-      |]
-      (appp Python3Lang "List" "list" [appp Python3Lang "List" "list" [varp Python3Lang (Just "Str") "str"]])
-
-  , expectError
-      "Synth error raised if no type alias given"
-      (CannotSynthesizeConcreteType (MV "m") (Source (Name "foo") Python3Lang (Just "_") (EV "foo") Nothing) (fun [int, int]) ["Int"])
-      [r|
-      module m (foo)
-      source Py from "_" ("foo")
-      foo :: Int -> Int
-      |]
-  ]
 
 orderInvarianceTests =
   testGroup
@@ -909,12 +638,6 @@ typeOrderTests =
         (MP.mostSpecificSubtypes int [forall ["a"] (var "a")])
         [forall ["a"] (var "a")]
 
-    -- test mostSpecificSubtypes different languages
-    , testEqual
-        "mostSpecificSubtypes: different languages"
-        (MP.mostSpecificSubtypes (varc RLang "numeric") [forallc CLang ["a"] (var "a")])
-        []
-
     -- test mostSpecificSubtypes for tuples
     , testEqual
         "mostSpecificSubtypes: tuples"
@@ -989,7 +712,7 @@ unitTypeTests =
         [r|
         {x=42, y="yolo"}
         |]
-        (record [("x", int), ("y", str)])
+        (ExistU (TV "e0") [] [(Key "x", int), (Key "y", str)])
     , assertGeneralType
         "primitive record signature"
         [r|
@@ -997,193 +720,28 @@ unitTypeTests =
         f :: Int -> Foo
         f 42
         |]
-        (record' "Foo" [("x", int), ("y", str)])
+        (record' "Foo" [(Key "x", int), (Key "y", str)])
     , assertGeneralType
         "primitive record declaration"
         [r|
         foo = {x = 42, y = "yolo"}
         foo
         |]
-        (record [("x", int), ("y", str)])
+        (ExistU (TV "e0") [] [(Key "x", int), (Key "y", str)])
     , assertGeneralType
         "nested records"
         [r|
         {x = 42, y = {bob = 24601, tod = "listen now closely and hear how I've planned it"}}
         |]
-        (record [("x", int), ("y", record [("bob", int), ("tod", str)])])
+        (ExistU (TV "e0") [] [(Key "x", int),(Key "y",ExistU (TV "e1") [] [(Key "bob",int),(Key "tod",str)])])
+
     , assertGeneralType
         "records with bound variables"
         [r|
         foo a = {x=a, y="yolo"}
         foo 42
         |]
-        (record [("x", int), ("y", str)])
-
-
-    -- language-specific containers and primitives
-    , assertConcreteType
-        "py: id [1, 2]"
-        [r|
-        module main (foo)
-        source py from "_" ("id")
-        id :: a -> a
-        id py :: a -> a
-        foo = id [1, 2]
-        |]
-        (AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Int") "int"])
-
-    , assertConcreteType
-        "py: [id 1, 2]"
-        [r|
-        module main (foo)
-        source py from "_" ("id")
-        id :: a -> a
-        id py :: a -> a
-        foo = [id 1, 2]
-        |]
-        (AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Int") "int"])
-
-    , assertConcreteType
-        "py: [id 1, id 2]"
-        [r|
-        module main (foo)
-        source py from "_" ("id")
-        id :: a -> a
-        id py :: a -> a
-        foo = [id 1, id 2]
-        |]
-        (AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Int") "int"])
-
-    , assertConcreteType
-        "py: id (1, True)"
-        [r|
-        module main (foo)
-        source py from "_" ("id")
-        id :: a -> a
-        id py :: a -> a
-        foo = id (1, True)
-        |]
-        (AppP (varp Python3Lang (Just "Tuple2") "tuple")
-              [varp Python3Lang (Just "Int") "int", varp Python3Lang (Just "Bool") "bool"])
-
-    , assertConcreteType
-        "py: (id 1, True)"
-        [r|
-        module main (foo)
-        source py from "_" ("id")
-        id :: a -> a
-        id py :: a -> a
-        foo = (id 1, True)
-        |]
-        (AppP (varp Python3Lang (Just "Tuple2") "tuple")
-              [varp Python3Lang (Just "Int") "int", varp Python3Lang (Just "Bool") "bool"])
-
-    , assertConcreteType
-        "py: id (id 1, id True)"
-        [r|
-        module main (foo)
-        source py from "_" ("id")
-        id :: a -> a
-        id py :: a -> a
-        foo = id (id 1, id True)
-        |]
-        (AppP (varp Python3Lang (Just "Tuple2") "tuple")
-              [varp Python3Lang (Just "Int") "int", varp Python3Lang (Just "Bool") "bool"])
-
-    -- concrete functions
-    , assertConcreteType
-        "py - add"
-        [r|
-        module main (add)
-        source py from "_" ("add")
-        add py :: "float" -> "float" -> "float" 
-        add :: Int -> Int -> Int
-        |]
-        (FunP [ varp Python3Lang (Just "Int") "float"
-              , varp Python3Lang (Just "Int") "float" ]
-              ( varp Python3Lang (Just "Int") "float" ))
-
-    , assertConcreteType
-        "py - foo x = add 5 x"
-        [r|
-        module main (foo)
-        source py from "_" ("add")
-        add py :: "float" -> "float" -> "float" 
-        add :: Int -> Int -> Int
-        foo x = add 5 x
-        |]
-        (FunP [ varp Python3Lang (Just "Int") "float" ]
-              ( varp Python3Lang (Just "Int") "float" ))
-
-    , assertConcreteType
-        "py: foo x = [x, id 1]"
-        [r|
-        module main (foo)
-        source py from "_" ("id")
-        id py :: a -> a
-        id :: a -> a
-        foo x = [x, id 1]
-        |]
-        (FunP [varp Python3Lang (Just "Int") "int"]
-              ( AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Int") "int"] ))
-
-    , assertConcreteType
-        "py: foo x = [id 1, x]"
-        [r|
-        module main (foo)
-        source py from "_" ("id")
-        id py :: a -> a
-        id :: a -> a
-        foo x = [id 1, x]
-        |]
-        (FunP [varp Python3Lang (Just "Int") "int"]
-              ( AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Int") "int"] ))
-
-    -- polyglot concrete
-
-    -- , assertConcreteType
-    --     "py+r: foo = [dec@py 1, inc@r x]"
-    --     [r|
-    --     source py from "_" ("dec")
-    --     source r from "_" ("inc")
-    --     dec py :: "int" -> "int"
-    --     dec :: Num -> Num
-    --     inc r :: "integer" -> "integer"
-    --     inc :: Num -> Num
-    --     foo x = [inc 1, dec x]
-    --     export foo
-    --     |]
-    --     (FunP [varp Python3Lang (Just "Num") "int"]
-    --           ( AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Num") "int"] ))
-    --
-    --
-    -- , assertConcreteType
-    --     "py+r: foo = dec@py (inc@r x)"
-    --     [r|
-    --     source py from "_" ("dec")
-    --     source r from "_" ("inc")
-    --     dec py :: "int" -> "int"
-    --     dec :: Num -> Num
-    --     inc r :: "integer" -> "integer"
-    --     inc :: Num -> Num
-    --     foo x = dec (inc x)
-    --     export foo
-    --     |]
-    --     (FunP [varp Python3Lang (Just "Num") "int"]
-    --           ( AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Num") "int"] ))
-
-    , assertConcreteType
-        "py+r: foo = inc@{py,r} x  - selection"
-        [r|
-        module main (foo)
-        source r from "_" ("inc")
-        source py from "_" ("inc")
-        inc :: Int -> Int
-        inc r :: "integer" -> "integer"
-        inc py :: "int" -> "int"
-        foo x = inc x
-        |]
-        (FunP [varp Python3Lang (Just "Int") "int"] (varp Python3Lang (Just "Int") "int"))
+        (ExistU (TV "e0") [] [(Key "x", int),(Key "y", str)])
 
     -- functions
     , assertGeneralType
@@ -1445,22 +1003,6 @@ unitTypeTests =
         |]
         (var "Foo")
 
-    -- concrete functions
-    , assertConcreteType
-        "py - id over add"
-        [r|
-        module main (f)
-        source py from "_" ("id", "add")
-        add :: Real -> Real -> Real 
-        add py :: "float" -> "float" -> "float"
-        id :: a -> a
-        id py :: a -> a
-        f x y = id (add x y)
-        |]
-        (funp [ varp Python3Lang (Just "Real") "float"
-              , varp Python3Lang (Just "Real") "float"
-              , varp Python3Lang (Just "Real") "float"])
-
     -- lambdas
     , assertGeneralType
         "function with parameterized types"
@@ -1620,25 +1162,6 @@ unitTypeTests =
         xs :: Foo (Bar A) [B]
         |]
         (arr "Foo" [arr "Bar" [var "A"], arr "List" [var "B"]])
-    -- , assertTerminalType
-    --     "language inference in lists #1"
-    --     [r|
-    --        bar Cpp :: "float" -> "std::vector<$1>" "float"
-    --        bar x = [x]
-    --        bar 5
-    --     |]
-    --     [arrc CppLang "std::vector<$1>" [varc CppLang "float"], lst (var "Num")]
-    -- , assertTerminalType
-    --     "language inference in lists #2"
-    --     [r|
-    --        mul :: Num -> Num -> Num
-    --        mul Cpp :: "int" -> "int" -> "int"
-    --        foo = mul 2
-    --        bar Cpp :: "int" -> "std::vector<$1>" "int"
-    --        bar x = [foo x, 42]
-    --        bar 5
-    --     |]
-    --     [lst (var "Num"), arrc CppLang "std::vector<$1>" [varc CppLang "int"]]
 
     -- type signatures and higher-order functions
     , assertGeneralType
@@ -1672,11 +1195,6 @@ unitTypeTests =
         map f [5,2]
         |]
         (lst bool)
-    -- , assertGeneralType
-    --     "type signature: sqrt with realizations"
-    --     "sqrt :: Num -> Num\nsqrt R :: \"numeric\" -> \"numeric\"\nsqrt"
-    --     [ fun [num, num]
-    --     , fun [varc RLang "numeric", varc RLang "numeric"]]
 
     -- shadowing
     , assertGeneralType
@@ -1782,7 +1300,7 @@ unitTypeTests =
         module main (f)
         f :: Bool -> ()
         |]
-        (fun [bool, VarU (TV Nothing "Unit")])
+        (fun [bool, VarU (TV "Unit")])
 
     -- FIXME - I really don't like "Unit" being a normal var ...
     -- I am inclined to cast it as the unit type

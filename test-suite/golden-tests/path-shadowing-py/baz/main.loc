@@ -2,5 +2,6 @@ module baz (*)
 
 source Py from "main.py" ("mul")
 
+type Py => Real = "float"
+
 mul :: Real -> Real -> Real
-mul Py :: "float" -> "float" -> "float"

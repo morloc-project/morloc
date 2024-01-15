@@ -1,17 +1,13 @@
 module main (foo, newPerson, birthday)
 
+import conventions (Int, Str)
 import pybase (id)
 
-source py from "person.py" ("PersonObj" as Person, "newPerson", "birthday")
+source Py from "person.py" ("PersonObj" as Person, "newPerson", "birthday")
 
 object (Person a) = Person {name :: Str, info :: a}
-object py (Person a) = "PersonObj" {name :: "str", info :: a}
+object Py => (Person a) = "PersonObj"
 
 newPerson :: Str -> Int -> Person Int
-newPerson Py :: "str" -> "int" -> Person "int"
-
 birthday :: Person Int -> Person Int
-birthday Py :: Person "int" -> Person "int"
-
 foo name = birthday (birthday (newPerson name 5))
-

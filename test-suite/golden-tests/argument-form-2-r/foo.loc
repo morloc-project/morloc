@@ -2,6 +2,8 @@ module main (foo)
 
 import rbase (add, mul)
 
+type R => Real = "numeric"
+
 -- full application with variable passing
 -- cannot optimize out this manifold
 foo x = add x (mul 20.0 x)

@@ -1,5 +1,0 @@
-module main (foo)
-
-import rustbase (mul)
-
-foo = ((True, 42.0), mul 1.0 4.0)

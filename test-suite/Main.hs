@@ -16,13 +16,27 @@ main = do
       , unitTypeTests
       , typeOrderTests
       , typeAliasTests
-      , concreteTypeSynthesisTests
       , propertyTests
       , whereTests
       , orderInvarianceTests
       , whitespaceTests
       , substituteTVarTests
       , subtypeTests
+
+      , golden "string-encoding" "string-encoding"
+
+      , golden "file-input-py" "file-input-py"
+      , golden "file-input-c" "file-input-c"
+      , golden "file-input-r" "file-input-r"
+
+      , golden "packer-definitions-1" "packer-definitions-1"
+      , golden "packer-definitions-2" "packer-definitions-2"
+      , golden "packer-definitions-3" "packer-definitions-3"
+      , golden "packer-definitions-4" "packer-definitions-4"
+      , golden "packer-definitions-5" "packer-definitions-5"
+
+      , golden "import-1" "import-1"
+      , golden "import-2" "import-2"
 
       -- tests the bug solved involving the lambdaScope function in
       -- Generate.hs:reserialize. See that commit message.
@@ -84,8 +98,6 @@ main = do
       , golden "argument-form-9-c" "argument-form-9-c"
       , golden "argument-form-9-py" "argument-form-9-py"
       , golden "argument-form-9-r" "argument-form-9-r"
-
-      , golden "defaults-1-py" "defaults-1-py"
 
       , golden "interop-1-py" "interop-1-py"
       , golden "interop-1-r" "interop-1-r"
@@ -156,6 +168,8 @@ main = do
       , golden "records-1-r" "records-1-r"
       -- see github issue #8
       , golden "records-1-c" "records-1-c"
+
+      , golden "records-2" "records-2"
 
       , golden "record-promotion-1" "record-promotion-1"
       , golden "record-promotion-2" "record-promotion-2"

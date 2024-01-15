@@ -40,7 +40,6 @@ data Lang
   | RLang
   | CLang
   | CppLang
-  | RustLang
   | PerlLang
   deriving (Ord, Eq, Show)
 
@@ -49,7 +48,6 @@ serialType CppLang = "std::string"
 serialType RLang = "character"
 serialType Python3Lang = "str"
 serialType CLang = error "C is not yet supported"
-serialType RustLang = error "Rust is not yet supported"
 serialType PerlLang = error "Perl is not yet supported"
 
 generalSerialType :: Text
@@ -62,7 +60,6 @@ mapLang f =
   , f RLang
   , f CLang
   , f CppLang
-  , f RustLang
   , f PerlLang
   ]
 
@@ -71,7 +68,6 @@ pairwiseCost :: Lang -> Lang -> Int
 -- functional overhead in each language
 pairwiseCost CLang       CLang       = 1
 pairwiseCost CppLang     CppLang     = 1
-pairwiseCost RustLang    RustLang    = 1
 pairwiseCost PerlLang    PerlLang    = 10
 pairwiseCost Python3Lang Python3Lang = 10
 pairwiseCost RLang       RLang       = 100
@@ -80,7 +76,6 @@ pairwiseCost CppLang CLang = 1
 -- cost of naive foreign function calls
 pairwiseCost _ CLang       = 5000 -- the cost of a system call
 pairwiseCost _ CppLang     = 5000
-pairwiseCost _ RustLang    = 5000
 pairwiseCost _ Python3Lang = 500000 -- the cost of opening the python interpreter and loading modules
 pairwiseCost _ PerlLang    = 500000
 -- this could be optimized by running R server
@@ -91,7 +86,6 @@ pairwiseCost _ RLang       = 50000000 -- an arm and a leg
 languageCost :: Lang -> Int
 languageCost CppLang = 0
 languageCost CLang = 1
-languageCost RustLang = 2
 languageCost Python3Lang = 3
 languageCost RLang = 4
 languageCost PerlLang = 5
@@ -105,7 +99,6 @@ parseExtension "c" = Just CLang
 parseExtension "h" = Just CLang
 parseExtension "cpp" = Just CppLang
 parseExtension "hpp" = Just CppLang
-parseExtension "rs" = Just RustLang
 parseExtension "pl" = Just PerlLang
 parseExtension _ = Nothing
 
@@ -115,7 +108,6 @@ makeExtension Python3Lang = "py"
 makeExtension RLang = "R"
 makeExtension CLang = "c"
 makeExtension CppLang = "cpp"
-makeExtension RustLang = "rs"
 makeExtension PerlLang = "pl"
 
 -- | Create the name of a given language. This is the internal standard name
@@ -125,7 +117,6 @@ showLangName Python3Lang = "python3"
 showLangName RLang = "R"
 showLangName CLang = "C"
 showLangName CppLang = "Cpp"
-showLangName RustLang = "Rust"
 showLangName PerlLang = "Perl"
 
 -- | Read the name of a given language and try to translate it
@@ -138,7 +129,6 @@ readLangName name = case toLower name of
   "c" -> Just CLang
   "cpp" -> Just CppLang
   "c++" -> Just CppLang
-  "rust" -> Just RustLang
   "perl" -> Just PerlLang
   _ -> Nothing
 
@@ -158,7 +148,6 @@ makeExecutableName ::
   -> String -- ^ executable file basename
 makeExecutableName CLang base = base <> "-c.out"
 makeExecutableName CppLang base = base <> "-cpp.out"
-makeExecutableName RustLang base = base <> "-rust.out" 
 makeExecutableName lang base = makeSourceName lang base -- For interpreted languages
 
 -- TODO: Use this function at the parsing stage to standardize names

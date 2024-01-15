@@ -1,4 +1,4 @@
-{-# LANGUAGE ViewPatterns, OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {-|
 Module      : Morloc.Internal
@@ -31,6 +31,7 @@ module Morloc.Internal
   -- ** selected functions from Data.Foldable
   , foldlM
   , foldrM
+  , foldl1M
   -- ** extra Map functions
   , mapKeysM
   -- ** selected functions from Data.Tuple.Extra
@@ -212,3 +213,7 @@ infixl 1 |>>
 
 (|>>) :: Functor f => f a -> (a -> b) -> f b
 (|>>) = flip fmap
+
+foldl1M :: (Monad m) => (a -> a -> m a) -> [a] -> m a
+foldl1M _ [] = error "foldl1M applied to empty list"
+foldl1M f (x:xs) = foldlM f x xs

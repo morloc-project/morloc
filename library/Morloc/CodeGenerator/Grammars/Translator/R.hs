@@ -94,18 +94,19 @@ serialize v0 s0 = do
       return ([lst], v')
 
     construct v (SerialTuple _ ss) = do
-      (befores, ss') <- unzip <$> zipWithM (\i s -> construct (tupleKey i v) s) [1..] ss
+      (befores, ss') <- unzip <$> zipWithM (\i s -> serialize' (tupleKey i v) s) [1..] ss
       v' <- helperNamer <$> newIndex
       let x = [idoc|#{v'} <- list#{tupled ss'}|]
       return (concat befores ++ [x], v')
 
     construct v (SerialObject _ _ _ rs) = do
-      (befores, ss') <- mapAndUnzipM (\(FV _ k, s) -> serialize' (recordAccess v (pretty k)) s) rs
+      (befores, ss') <- mapAndUnzipM (\(key, s) -> serialize' (recordAccess v (pretty key)) s) rs
       v' <- helperNamer <$> newIndex
-      let entries = zipWith (\(FV _ key) val -> pretty key <> "=" <> val) (map fst rs) ss'
+      let entries = zipWith (\key val -> pretty key <> "=" <> val) (map fst rs) ss'
           decl = [idoc|#{v'} <- list#{tupled entries}|]
       return (concat befores ++ [decl], v')
-    construct _ _ = undefined
+
+    construct _ _ = error "Unreachable" 
 
 
 deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
@@ -148,9 +149,9 @@ deserialize v0 s0
       return (v', concat befores ++ [x])
 
     construct v (SerialObject _ (FV _ constructor) _ rs) = do
-      (ss', befores) <- mapAndUnzipM (\(FV _ k,s) -> check (recordAccess v (pretty k)) s) rs
+      (ss', befores) <- mapAndUnzipM (\(k, s) -> check (recordAccess v (pretty k)) s) rs
       v' <- helperNamer <$> newIndex
-      let entries = zipWith (\(FV _ key) val -> pretty key <> "=" <> val) (map fst rs) ss'
+      let entries = zipWith (\key val -> pretty key <> "=" <> val) (map fst rs) ss'
           decl = [idoc|#{v'} <- #{pretty constructor}#{tupled entries}|]
       return (v', concat befores ++ [decl])
 
@@ -182,9 +183,9 @@ translateSegment m0 =
     makeSerialExpr _ (ManS_ f) = return f
     makeSerialExpr _ (AppPoolS_ _ (PoolCall _ cmds args) _) = do
       let quotedCmds = map dquotes cmds
-          quotedArgs = [ [idoc|paste0("'", #{r}, "'")|] | r <- map argNamer args]
-          callArgs = "list(" <> hsep (punctuate "," (drop 1 quotedCmds <> quotedArgs)) <> ")"
-          call = ".morloc_foreign_call" <> tupled [head quotedCmds, callArgs, dquotes "_", dquotes "_"]
+          cmdArgs = "list" <> tupled (tail quotedCmds)
+          positionalArgs = "list" <> tupled (map argNamer args)
+          call = ".morloc_foreign_call" <> tupled [head quotedCmds, cmdArgs, positionalArgs, dquotes "_", dquotes "_"]
       return $ PoolDocs
         { poolCompleteManifolds = []
         , poolExpr = call
@@ -221,10 +222,10 @@ translateSegment m0 =
     makeNativeExpr _ (SrcN_ _ src) = return $ PoolDocs [] (pretty (srcName src)) [] []
     makeNativeExpr _ (ListN_ v _ xs) = return $ mergePoolDocs rlist xs where
        rlist es' = case v of
-         (FV _ "numeric") -> "c" <> tupled es'
-         (FV _ "double") -> "c" <> tupled es'
-         (FV _ "logical") -> "c" <> tupled es'
-         (FV _ "character") -> "c" <> tupled es'
+         (FV _ (CV "numeric")) -> "c" <> tupled es'
+         (FV _ (CV "double")) -> "c" <> tupled es'
+         (FV _ (CV "logical")) -> "c" <> tupled es'
+         (FV _ (CV "character")) -> "c" <> tupled es'
          _ -> "list" <> tupled es'
 
     makeNativeExpr _ (TupleN_ _ xs) = return $ mergePoolDocs ((<>) "list" . tupled) xs
@@ -232,7 +233,7 @@ translateSegment m0 =
         = return $ mergePoolDocs rlist (map snd rs)
         where
             rlist es' =
-                let entries' = zipWith (\(FV _ k) v -> pretty k <> "=" <> v) (map fst rs) es'
+                let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) es'
                 in "list" <> tupled entries'
 
     makeNativeExpr _ (LogN_ _ v) = return $ PoolDocs [] (if v then "TRUE" else "FALSE") [] []
@@ -267,9 +268,9 @@ typeSchema :: SerialAST -> MDoc
 typeSchema s0 = squotes $ jsontype2rjson (serialAstToJsonType s0) where
   serialAstToJsonType :: SerialAST -> JsonType
   serialAstToJsonType (SerialPack _ (_, s)) = serialAstToJsonType s
-  serialAstToJsonType (SerialList _ s) = ArrJ "list" [serialAstToJsonType s]
-  serialAstToJsonType (SerialTuple _ ss) = ArrJ "tuple" (map serialAstToJsonType ss)
-  serialAstToJsonType (SerialObject _ (FV _ n) _ rs) = NamJ n (map (bimap (\(FV _ x) -> x) serialAstToJsonType) rs)
+  serialAstToJsonType (SerialList _ s) = ArrJ (CV "list") [serialAstToJsonType s]
+  serialAstToJsonType (SerialTuple _ ss) = ArrJ (CV "tuple") (map serialAstToJsonType ss)
+  serialAstToJsonType (SerialObject _ (FV _ n) _ rs) = NamJ n (map (second serialAstToJsonType) rs)
   serialAstToJsonType (SerialReal    (FV _ v)) = VarJ v
   serialAstToJsonType (SerialInt     (FV _ v)) = VarJ v
   serialAstToJsonType (SerialBool    (FV _ v)) = VarJ v
@@ -284,8 +285,8 @@ jsontype2rjson (ArrJ v ts) = "{" <> key <> ":" <> val <> "}" where
   val = encloseSep "[" "]" "," (map jsontype2rjson ts)
 jsontype2rjson (NamJ objType rs) =
   case objType of
-    "data.frame" -> "{" <> dquotes "data.frame" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
-    "record" -> "{" <> dquotes "record" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
+    (CV "data.frame") -> "{" <> dquotes "data.frame" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
+    (CV "record") -> "{" <> dquotes "record" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
     _ -> encloseSep "{" "}" "," rs'
   where
   keys = map (dquotes . pretty . fst) rs
@@ -356,11 +357,32 @@ makePool sources manifolds = [idoc|#!/usr/bin/env Rscript
   return(x)
 }
 
-.morloc_foreign_call <- function(cmd, args, .pool, .name){
-  .morloc_try(f=system2, args=list(cmd, args=args, stdout=TRUE), .pool=.pool, .name=.name)
+.make_temporary_file <- function(x) {
+  temp_filename <- tempfile(pattern = "morloc_r_", tmpdir = "/tmp", fileext = "")
+  writeLines(x, temp_filename)
+  return(temp_filename)
 }
 
+.morloc_foreign_call <- function(cmd, cmd_args, args, .pool, .name){
+  # write the input arguments to temporary files
+  arg_files <- lapply(args, .make_temporary_file)
+
+  # try to run the foreign pool, passing the serialized arguments as tmp files
+  result <- .morloc_try(f=system2, args=list(cmd, args=c(cmd_args, arg_files), stdout=TRUE), .pool=.pool, .name=.name)
+
+  # clean up temp files
+  on.exit(unlink(arg_files))
+
+  return(result)
+}
+
+
 #{vsep manifolds}
+
+read <- function(file)
+{
+  paste(readLines(file), collapse="\n") 
+}
 
 args <- as.list(commandArgs(trailingOnly=TRUE))
 if(length(args) == 0){
@@ -370,7 +392,7 @@ if(length(args) == 0){
   mlc_pool_function_name <- paste0("m", mlc_pool_cmdID)
   if(exists(mlc_pool_function_name)){
     mlc_pool_function <- eval(parse(text=paste0("m", mlc_pool_cmdID)))
-    result <- do.call(mlc_pool_function, args[-1])
+    result <- do.call(mlc_pool_function, lapply(args[-1], read))
     if(result != "null"){
         cat(result, "\n")
     }

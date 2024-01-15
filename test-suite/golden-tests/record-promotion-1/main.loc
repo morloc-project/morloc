@@ -1,10 +1,12 @@
 module main (siblings)
 
+type Py => Str = "str"
+type Py => Int = "str"
+
 record Person = Person { name :: Str, age :: Int, parent :: Str }
-record Py Person = "dict" { name :: "str", age :: "int", parent :: "str" }
+record Py => Person = "dict"
 
 siblings :: Str -> (Person, Person)
-siblings Py :: "str" -> (Person, Person)
 siblings parent =
     ( {name = "Bob", age = 26, parent = parent}
     , {name = "Alice", age = 28, parent = parent}

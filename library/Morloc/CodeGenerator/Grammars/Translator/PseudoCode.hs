@@ -71,7 +71,7 @@ prettyFoldManifold = FoldWithManifoldM
     makeNativeExpr _ (RecordN_ _ _ _ rs) =
       return $ mergePoolDocs pyDict (map snd rs) where
         pyDict es' =
-          let entries' = zipWith (\(FV _ k) v -> pretty k <> "=" <> v) (map fst rs) es'
+          let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) es'
           in "OrderedDict" <> tupled entries'
     makeNativeExpr _ (LogN_ _ v) = return $ PoolDocs [] (if v then "True" else "False") [] []
     makeNativeExpr _ (RealN_ _ v) = return $ PoolDocs [] (viaShow v) [] []

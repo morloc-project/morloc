@@ -1,7 +1,0 @@
-module main (foo)
-
-import rustbase (id)
-
-foo :: (Int, Int) -> (Int, Int)
-foo Rust :: ("usize", "i128") -> ("usize", "i128")
-foo x = id x

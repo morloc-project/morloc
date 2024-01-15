@@ -3,5 +3,7 @@ module main (r2c, c2r)
 import rbase (add)
 import cppbase (mul)
 
+import conventions (Real)
+
 r2c x y = add (mul x y) 100.0
 c2r x y = mul (add x y) 100.0

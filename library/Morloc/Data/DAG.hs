@@ -79,11 +79,19 @@ lookupEdgeTriple k1 k2 d = do
   (n2, _) <- Map.lookup k2 d
   return (n1, e, n2)
 
-local :: Ord k => k -> DAG k e n -> Maybe (n, [(k, e, n)])
+local
+  :: Ord k
+  => k
+  -> DAG k e n
+  -> Maybe (n, [(k, e, n)])
 local k d = do
-  (n1, xs) <- Map.lookup k d
-  ns <- mapM ((`lookupNode` d) . fst) xs
-  return (n1, [(k',e,n2) | (n2, (k', e)) <- zip ns xs])
+  (pareNode, children) <- Map.lookup k d
+  childNodes <- mapM ((`lookupNode` d) . fst) children
+  return
+    ( pareNode
+    , [ (childKey, childEdge, childNode)
+      | (childNode, (childKey, childEdge)) <- zip childNodes children]
+    )
 
 -- | Get all roots
 roots :: Ord k => DAG k e n -> [k]
@@ -115,7 +123,7 @@ findCycle d = case mapMaybe (findCycle' []) (roots d) of
 
 -- | Map function over nodes independent of the edge data
 mapNode :: (n1 -> n2) -> DAG k e n1 -> DAG k e n2
-mapNode f d = Map.map (\(n, xs) -> (f n, xs)) d
+mapNode f = Map.map (first f)
 
 mapNodeWithKey :: (k -> n1 -> n2) -> DAG k e n1 -> DAG k e n2
 mapNodeWithKey f = Map.mapWithKey (\k (n, xs) -> (f k n, xs))
@@ -249,9 +257,22 @@ synthesizeDAG f d0 = synthesizeDAG' (Just Map.empty) where
           return $ Map.insert k1 (n2, xs) dn
 
 -- Inherit all imported values and their terminal aliases
-inherit :: (Ord k, Eq v) => k -> (n -> a) -> DAG k [(v,v)] n -> [(v, DAG k None (v,a))]
+inherit
+  :: (Ord k, Eq v)
+  => k
+  -> (n -> a)
+  -> DAG k [(v,v)] n
+  -> [(v  -- the local alias for an imported value
+      , DAG k None -- the tree showing imports for this alias
+        ( v -- the descendent's name for the value
+        , a -- the data extracted with f from the child n
+        )
+      )]
 inherit k f d = case local k d of
+    -- if k has no children, return empty list
     Nothing -> []
+    -- else if k has children
+    -- then 
     (Just (_, xs)) -> concat [[(v, lookupAliasedTerm v k' f d) | (v,_) <- vs] | (k', vs, _) <- xs]
 
 lookupAliasedTerm

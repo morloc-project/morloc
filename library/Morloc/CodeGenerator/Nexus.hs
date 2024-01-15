@@ -26,14 +26,14 @@ import qualified Morloc.Monad as MM
 type FData =
   ( [MDoc] -- pool call command arguments, (e.g., ["RScript", "pool.R", "4", "--"])
   , MDoc -- subcommand name
-  , TypeP -- argument type
+  , Type -- argument type
   )
 
-generate :: [NexusCommand] -> [(TypeP, Int)] -> MorlocMonad Script
+generate :: [NexusCommand] -> [(Type, Int, Lang)] -> MorlocMonad Script
 generate cs xs = do
   config <- MM.ask
 
-  callNames <- mapM (MM.metaName . snd) xs |>> catMaybes |>> map pretty
+  callNames <- mapM (MM.metaName . (\(_, i, _) -> i)) xs |>> catMaybes |>> map pretty
   let gastNames = map (pretty . commandName) cs
       names = callNames <> gastNames 
   fdata <- CM.mapM getFData xs -- [FData]
@@ -46,19 +46,20 @@ generate cs xs = do
       , scriptMake = [SysExe outfile]
       }
 
-getFData :: (TypeP, Int) -> MorlocMonad FData
-getFData (t, i) = do
+getFData :: (Type, Int, Lang) -> MorlocMonad FData
+getFData (t, i, lang) = do
   mayName <- MM.metaName i
   case mayName of
     (Just name') -> do
       config <- MM.ask
-      let lang = langOf t
-      case MC.buildPoolCallBase config lang i of
+      case MC.buildPoolCallBase config (Just lang) i of
         (Just cmds) -> return (cmds, pretty name', t)
         Nothing ->
           MM.throwError . GeneratorError $
-          "No execution method found for language: " <> ML.showLangName (fromJust lang)
+          "No execution method found for language: " <> ML.showLangName lang
     Nothing -> MM.throwError . GeneratorError $ "No name in FData"
+
+
 
 main :: [MDoc] -> [FData] -> MDoc -> [NexusCommand] -> MDoc
 main names fdata pythonExe cdata =
@@ -67,6 +68,8 @@ main names fdata pythonExe cdata =
 import json
 import subprocess
 import sys
+import os
+import tempfile
 
 #{usageT fdata cdata}
 
@@ -74,11 +77,29 @@ import sys
 
 #{mapT names}
 
-def dispatch(cmd, *args):
+def dispatch(cmd, args):
     if(cmd in ["-h", "--help", "-?", "?"]):
         usage()
     else:
-        command_table[cmd](*args)
+        command_table[cmd](args)
+
+def as_file(input_str):
+    if os.path.isfile(input_str):
+        return (False, input_str)
+    else:
+        x = tempfile.NamedTemporaryFile(prefix="morloc_nexus_", delete=False)
+        with open(x.name, "w") as fh_temp:
+            if os.path.exists(input_str):
+                with open(input_str, "r") as fh_sub:
+                    print(fh_sub.read().strip(), file=fh_temp)
+            else:
+                try:
+                    input_json = json.loads(input_str)
+                    print(json.dumps(input_json), file=fh_temp)
+                except json.JSONDecodeError:
+                    print("Invalid input '{input_str}'", file=sys.stderr)
+                    sys.exit(1)
+        return (True, x.name)
 
 if __name__ == '__main__':
     if len(sys.argv) == 1:
@@ -86,7 +107,7 @@ if __name__ == '__main__':
     else:
         cmd = sys.argv[1]
         args = sys.argv[2:]
-        dispatch(cmd, *args)
+        dispatch(cmd, args)
 |]
 
 mapT names = [idoc|command_table = #{dict}|] where
@@ -105,19 +126,8 @@ def usage():
 usageLineT :: FData -> MDoc
 usageLineT (_, name', t) = vsep
   ( [idoc|print("  #{name'}")|]
-  : writeTypes (gtypeOf t)
+  : writeTypes t
   )
-
-gtypeOf (UnkP (PV _ (Just v) _)) = UnkT (TV Nothing v)
-gtypeOf (VarP (PV _ (Just v) _)) = VarT (TV Nothing v)
-gtypeOf (FunP ts t) = FunT (map gtypeOf ts) (gtypeOf t)
-gtypeOf (AppP t ts) = AppT (gtypeOf t) (map gtypeOf ts)
-gtypeOf (NamP o (PV _ (Just n) _) ps rs)
-  = NamT o (TV Nothing n)
-    (map gtypeOf ps)
-    [(k, gtypeOf t) | (PV _ (Just k) _, t) <- rs]
-gtypeOf _ = UnkT (TV Nothing "?") -- this shouldn't happen
-
 
 usageLineConst :: NexusCommand -> MDoc
 usageLineConst cmd = vsep
@@ -139,22 +149,25 @@ writeType Nothing  t = [idoc|print('''    return: #{pretty t}''')|]
 functionT :: FData -> MDoc
 functionT (cmd, subcommand, t) =
   [idoc|
-def call_#{subcommand}(*args):
-    if len([*args]) != #{pretty n}:
-        sys.exit("Expected #{pretty n} arguments to '#{subcommand}', given " + str(len([*args])))
+def call_#{subcommand}(args):
+    if len(args) != #{pretty (nargs t)}:
+        sys.exit("Expected #{pretty (nargs t)} arguments to '#{subcommand}', given " + str(len(args)))
     else:
-        subprocess.run(#{poolcallArgs})
+        arg_files = [as_file(arg) for arg in args]
+        try:
+          subprocess.run(#{list $ map dquotes cmd} + [x[1] for x in arg_files])
+        finally:
+            for (is_temp, file) in arg_files:
+                if is_temp:
+                    os.unlink(file)
 |]
-  where
-    n = nargs t
-    poolcallArgs = list $ map dquotes cmd <> ["*args"]
 
 functionCT :: NexusCommand -> MDoc
 functionCT (NexusCommand cmd _ json_str args subs) =
   [idoc|
-def call_#{pretty cmd}(*args): 
-    if len([*args]) != #{pretty $ length args}:
-        sys.exit("Expected #{pretty $ length args} arguments to '#{pretty cmd}', given " + str(len([*args])))
+def call_#{pretty cmd}(args): 
+    if len(args) != #{pretty $ length args}:
+        sys.exit("Expected #{pretty $ length args} arguments to '#{pretty cmd}', given " + str(len(args)))
     else:
         json_obj = json.loads('''#{json_str}''')
         #{align . vsep $ readArguments ++ replacements}

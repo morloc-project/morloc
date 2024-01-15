@@ -1,11 +1,7 @@
 module main (foo)
 
+import conventions (Real, List)
 import pybase (zipWith, mul)
-import rbase (add)
+import rbase (add, div)
 
-add3 x y z = add x (add y z)
-
-foo Py :: "float" -> ["float"] -> ["float"] -> ["float"]
-foo x = zipWith (\y -> add3 (mul x y) y)
-
--- foo x ys zs = zipWith (\w y z -> add w (add (mul x y) z)) ys zs
+foo x ys zs = zipWith (\y z -> add (mul x y) (div y z)) ys zs

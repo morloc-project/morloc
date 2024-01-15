@@ -1,11 +1,12 @@
 module main (foo)
 
+import conventions (Real, List)
 import cppbase (zipWith, mul)
 import pybase (add)
 
 add3 x y z = add x (add y z)
 
-foo Cpp :: "double" -> ["double"] -> ["double"] -> ["double"]
+foo :: Real -> [Real] -> [Real] -> [Real]
 foo x = zipWith (\y -> add3 (mul x y) y)
 
 --                          |-> z <-|

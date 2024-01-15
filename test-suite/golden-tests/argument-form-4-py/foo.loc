@@ -4,6 +4,8 @@ import pybase (add, mul)
 
 f = mul 20.0 2.0
 
+type Py => Real = "float"
+
 -- external 0 input argument
 -- cannot optimize out the manifold
 -- a better example would be a random number generator
