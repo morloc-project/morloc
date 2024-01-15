@@ -57,17 +57,16 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Update Hackage release
  - [ ] Ensure github actions passes
 
-0.43.0 [2023.xx.xx]
+0.43.0 [2024.01.14]
 -------------------
 
- * Fix record type inference 
- * Fix bug in collecting packers (missed packers required by root manifold)
+New features
  * Allow a module to explicitly export packers
  * Show pool pseudocode for `typecheck -r` 
- * Allow nexus inputs to files
-
- [ ] Remove concrete type signatures - always infer
- [ ] Make fields in language-specific table decs optional
+ * Add `typecheck dump` subcommand to show expressions and indices
+ * Allow nexus inputs to be files
+ * Remove concrete type signatures - always infer
+ * Make fields in language-specific table decs optional
      Rather than this:
        table (Person a) = Person {name :: Str, info :: a}
        table R (Person a) = "data.frame" {name :: Str, info :: a}
@@ -75,9 +74,17 @@ handling for several very different languages (proofs-of-concept).
        table (Person a) = Person {name :: Str, info :: a}
        table R (Person a) = "data.frame"
      Really, I need to totally redo the table/record/object handling.
- [ ] Remove support for anonymous records in type signatures
- [ ] Raise an error if any general type cannot be translated to a concrete type
+ * Remove support for anonymous records in type signatures
+     I will re-add this possibly at a future time when I refactor
 
+Infrastructure changes
+ * Pass all data between pools as files rather than string arguments
+ * Raise an error if any general type cannot be translated to a concrete type
+
+Fixes
+ * Fix record type inference 
+ * Fix bug in collecting packers (missed packers required by root manifold)
+ * Fix C++ handling of quotes and special characters in JSON strings
 
 0.42.0 [2023.10.11]
 -------------------
