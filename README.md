@@ -3,18 +3,14 @@
 [![license: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![DOI](https://zenodo.org/badge/75355860.svg)](https://zenodo.org/badge/latestdoi/75355860)
 
-`morloc` is a functional programming language where functions are imported from
-foreign languages and unified under a common type system. The compiler
-generates the code needed to compose functions across languages and also to
-direct automation of mundane tasks such as data validation, type/format
-conversions, data caching, distributed computing, and file reading/writing. The
-endgame is to develop `morloc` into a query language that returns optimized
-programs from an infinite library of functions and compositions of functions.
+`morloc` is a strongly-typed functional programming language where functions are
+imported from foreign languages and unified under a common type system.
 
 See [the manual](https://morloc-project.github.io/docs) for more information.
 
 If you want to get straight to playing with code, go through the steps in the
 installation section and then go to the project in `demo/01_sequence_analysis`.
+Or, if you are feeling ambitious, you may read the `demo/02_flu` code.
 
 ## Status
 
@@ -64,9 +60,11 @@ morloc install math
 The `morloc install` commands will install the modules in the
 `$HOME/.morloc/lib` folder.
 
-`morloc install conventions` can be used to install the `conventions` module, which is a dependency for most programs importing modules.
+`morloc install conventions` can be used to install the `conventions` module,
+which is a dependency for most programs importing modules.
 
-Last of all, if you are working in vim, you can install `morloc` syntax highlighting as follows:
+Last of all, if you are working in vim, you can install `morloc` syntax
+highlighting as follows:
 
 ``` sh
 mkdir -p ~/.vim/syntax/
