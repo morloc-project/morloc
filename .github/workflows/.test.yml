@@ -2,7 +2,7 @@ name: Test Morloc
 on: [push]
 jobs:
   linux-test:
-    runs-on: ubuntu-latest      
+    runs-on: ubuntu-latest
     env:
       DEBIAN_FRONTEND: noninteractive
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
@@ -44,7 +44,7 @@ jobs:
 
       - name: "Build Morloc"
         run: |
-          curl -sSL https://get.haskellstack.org/ | sh
+          curl -sSL https://get.haskellstack.org/ | sh || echo "already installed"
           stack upgrade
           stack install --fast
 
