@@ -1,5 +1,6 @@
-[![experimental](http://badges.github.io/stability-badges/dist/experimental.svg)](http://github.com/badges/stability-badges)
+[![build status](https://github.com/morloc-project/morloc/actions/workflows/.test.yml/badge.svg)](https://github.com/morloc-project/morloc/actions/workflows/.test.yml)
 [![github release](https://img.shields.io/github/release/morloc-project/morloc.svg?label=current+release)](https://github.com/morloc-project/morloc/releases)
+[![experimental](http://badges.github.io/stability-badges/dist/experimental.svg)](http://github.com/badges/stability-badges)
 [![license: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![DOI](https://zenodo.org/badge/75355860.svg)](https://zenodo.org/badge/latestdoi/75355860)
 
@@ -9,8 +10,8 @@ imported from foreign languages and unified under a common type system.
 See [the manual](https://morloc-project.github.io/docs) for more information.
 
 If you want to get straight to playing with code, go through the steps in the
-installation section and then go to the project in `demo/01_sequence_analysis`.
-Or, if you are feeling ambitious, you may read the `demo/02_flu` code.
+installation section and then visit the project `demo/01_sequence_analysis`
+or the less documented `demo/02_flu`.
 
 ## Status
 
@@ -146,11 +147,11 @@ You can see typed usage information for the exported functions with the `-h` fla
 $ ./nexus -h
 The following commands are exported:
   square
-    param 1: Num
-    return: Num
+    param 1: Real
+    return: Real
   sumOfSquares
-    param 1: [Num]
-    return: Num
+    param 1: [Real]
+    return: Real
 ```
 
 Then you can call the exported functions (arguments are in JSON format):
@@ -196,27 +197,39 @@ The first level of the `morloc` type system is basically System F extended
 across languages. A given function will have a general type as well as a
 specialized type for each language it is implemented in.
 
-The map function has the types
+The map function has the general type
 
 ```
-map :: (a -> b) -> [a] -> [b]
-map Cpp :: (a -> b) -> "std::vector<$1>" a -> "std::vector<$1>" b
-map Python3 :: (a -> b) -> list a -> list b
+map :: (a -> b) -> List a -> List b
 ```
 
-The general signature looks almost the same as the Haskell equivalent (except
-that `morloc` universal quantification is currently explicit). The list type
-constructors for C++ are very literally "type constructors" in that they are
-used to create syntactically correct C++ type strings. If the type variable `a`
-is inferred to be `int`, for example, then the C++ type `std::vector<int>` will
-be used in the generated code. The same occurs in the python type constructors
-`list`, except here the same Python type is generated regardless of the type of
-`a`.
+The general signature looks the same as the Haskell equivalent. The characters
+`a` and `b` are generic type variables. As in Haskell, lowercase variables
+always represent generic variables in `morloc`. The `->` patterns represent
+functions. So `a -> b` represents a function that takes a value of type `a` and
+returns `b`. `List a` is a parameterized type, specifically a container of
+elements of type `a`.
 
-The following example is available in `examples/rmsWithTypes.loc`:
+`morloc` can derive the language-specific type signatures from the general one
+if it knows the language-specific instances of `List`. We can tell the compiler
+these mappings by defining language-specific type relations:
 
 ```
-module sos (*) -- '*' means export every term
+type Py => List a => "list" a
+type Cpp => List a => "std::vector<$1>" a
+```
+
+The list type constructor for C++ is very literally a "type constructor" in that
+it is used to create a syntactically correct C++ type string. If the type
+variable `a` is inferred to be `int`, for example, then the C++ type
+`std::vector<int>` will be used in the generated C++ signature. The same occurs
+in the python type constructors `list`, except here the same Python type,
+`list`, is generated regardless of the type of `a`.
+
+
+
+```
+module sos (*)  -- '*' means export every term
 
 import cppbase (fold, map, add, mul)
 
@@ -233,18 +246,13 @@ morloc typecheck examples/rmsWithTypes.loc
 ```
 
 ```
-add :: Num -> Num -> Num
-add Cpp :: "double" -> "double" -> "double"
+type Cpp => Real = "double"
+type Cpo => List a = "std::vector<$1>" a
 
-mul :: Num -> Num -> Num
-mul Cpp :: "double" -> "double" -> "double"
-
-fold     :: (b -> a -> b) -> b -> [a] -> b
-fold Cpp :: (b -> a -> b) -> b -> "std::vector<$1>" a -> b
-
+add :: Real -> Real -> Real
+mul :: Real -> Real -> Real
+fold :: (b -> a -> b) -> b -> [a] -> b
 map :: (a -> b) -> [a] -> [b]
-map Cpp :: (a -> b) -> "std::vector<$1>" a
-                    -> "std::vector<$1>" b
 
 square x = mul x x
 sumOfSquares xs = fold add 0 (map square xs)
@@ -256,16 +264,16 @@ types for every other C++ function in the program. The inferred C++ type of
 `sumOfSquares` is
 
 ```
-"std::vector<$1>" double -> double
+"std::vector<$1>" "double" -> "double"
 ```
 
 The general type for this expression is also inferred as:
 
 ```
-List Num -> Num
+List Real -> Real
 ```
 
 The concrete type of `mul` is currently written as a binary function of
 doubles. Ideally this function should accept any numbers (e.g., an `int` and a
-`double`). I intend to add this functionallity eventually, perhaps with a
-Haskell-style typeclass system.
+`double`). Eventually I will add typeclasses which will allow more useful
+definitions.
