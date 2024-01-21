@@ -246,6 +246,8 @@ reservedWords =
   , "True"
   , "False"
   , "type"
+  , "instance"
+  , "class"
   ]
 
 operatorChars :: String

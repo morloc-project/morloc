@@ -63,6 +63,9 @@ treeify d
      -- - the map won't be used until the type inference step in Typecheck.hs
      _ <- DAG.synthesizeDAG linkSignaturesModule d'
 
+     -- build typeclasses and instance map
+     _ <- DAG.synthesizeDAG linkTypeclasses d'
+
      {- example d' for
       -  x = 42
       -  x
@@ -121,6 +124,27 @@ term --<i>--.--<
               `------------------------n--> General Signature
 -}
 
+linkTypeclasses
+  :: MVar
+  -> ExprI
+  -> [(m, e, Map.Map EVar (Typeclass, EType, [TermTypes]))]
+  -> MorlocMonad (Map.Map EVar (Typeclass, EType, [TermTypes]))
+linkTypeclasses _ e es = do
+  cls <- findTypeclasses e
+  Map.unionsWithM mergeTypeclasses (cls : [x | (_,_,x) <- es])
+
+findTypeclasses :: ExprI -> MorlocMonad (Map.Map EVar (Typeclass, EType, [TermTypes]))
+findTypeclasses _ = return Map.empty
+
+mergeTypeclasses
+  :: (Typeclass, EType, [TermTypes])
+  -> (Typeclass, EType, [TermTypes])
+  -> MorlocMonad (Typeclass, EType, [TermTypes])
+mergeTypeclasses (cls1, t1, ts1) (cls2, t2, ts2)
+  | cls1 /= cls2 = error "Conflicting typeclasses"
+  | t1 /= t2 = error "Conflicting typeclass term general type"
+    -- here I should do reciprocal subtyping
+  | otherwise = return (cls1, t1, ts1 <> ts2)
 
 
 -- in each scope (top of a module or after descending into a where statement) 
@@ -232,7 +256,7 @@ unifyTermTypes mv xs m0
   >>= Map.unionWithM combineTermTypes m0
   >>= Map.unionWithM combineTermTypes decs
   where
-  sigs = Map.fromListWith (<>) [((v, l, Nothing), [t]) | (ExprI _ (SigE v l t)) <- xs]
+  sigs = Map.fromListWith (<>) [((v, l, Nothing), [t]) | (ExprI _ (SigE (Signature v l t))) <- xs]
   srcs = Map.fromListWith (<>) [((srcAlias s, srcLabel s, langOf s), [(s, i)]) | (ExprI i (SrcE s)) <- xs]
   decs = Map.map (TermTypes Nothing []) $ Map.fromListWith (<>) [(v, [e]) | (ExprI _ (AssE v e _)) <- xs]
 
@@ -471,7 +495,7 @@ collectSExpr (ExprI i e0) = (,) <$> f e0 <*> pure i
   f (ImpE _) = error "impossible"
   f (ExpE _) = error "impossible"
   f (SrcE _) = error "impossible"
-  f SigE {} = error "impossible"
+  f (SigE _) = error "impossible"
   f AssE {} = error "impossible"
 
 reindexExprI :: ExprI -> MorlocMonad ExprI

@@ -256,13 +256,13 @@ evaluateAllTypes = MDD.mapNodeM f where
   f e0 = do
     g e0 where
       g :: ExprI -> MorlocMonad ExprI
-      g (ExprI i (SigE v l e)) = do
+      g (ExprI i (SigE (Signature v l e))) = do
         gscope <- MM.metaGeneralTypedefs i
         e' <- evaluateEType gscope e
         MM.sayVVV $ "evaluateEType"
           <> "\n  e:" <+> pretty (etype e)
           <> "\n  e':" <+> pretty (etype e')
-        return $ ExprI i (SigE v l e')
+        return $ ExprI i (SigE (Signature v l e'))
       g (ExprI i (AnnE e ts)) = do
         gscope <- MM.metaGeneralTypedefs i
         ts' <- mapM (evaluateTypeU gscope) ts
@@ -421,7 +421,7 @@ rename sourceName localAlias = f where
 nullify :: DAG m e ExprI -> DAG m e ExprI
 nullify = MDD.mapNode f where
     f :: ExprI -> ExprI
-    f (ExprI i (SigE v n (EType t ps cs))) = ExprI i (SigE v n (EType (nullifyT t) ps cs))
+    f (ExprI i (SigE (Signature v n (EType t ps cs)))) = ExprI i (SigE (Signature v n (EType (nullifyT t) ps cs)))
     f (ExprI i (ModE m es)) = ExprI i (ModE m (map f es))
     f (ExprI i (AssE v e es)) = ExprI i (AssE v (f e) (map f es))
     f e = e

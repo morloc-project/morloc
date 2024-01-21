@@ -32,6 +32,7 @@ module Morloc.Namespace
   , MVar(..)
   , EVar(..)
   , TVar(..)
+  , Typeclass(..)
   , CVar(..)
   , Key(..)
   , Label(..)
@@ -75,6 +76,7 @@ module Morloc.Namespace
   -- * Mostly frontend expressions
   , Symbol(..)
   , AliasedSymbol(..)
+  , Signature(..)
   , Expr(..)
   , ExprI(..)
   , Import(..)
@@ -153,6 +155,7 @@ data MorlocState = MorlocState
   , stateDepth :: Int
   -- ^ store depth in the SAnno tree in the frontend and backend typecheckers
   , stateSignatures :: GMap Int Int TermTypes
+  , stateTypeclassTerms :: GMap Int Int (Typeclass, EType, [TermTypes])
   , stateConcreteTypedefs :: GMap Int MVar (Map Lang Scope)
   -- ^ stores type functions that are in scope for a given module and language
   , stateGeneralTypedefs  :: GMap Int MVar           Scope
@@ -258,6 +261,9 @@ data Exports = ExportMany (Set.Set Symbol) | ExportAll
 data AliasedSymbol = AliasedType TVar TVar | AliasedTerm EVar EVar
   deriving (Show, Ord, Eq)
 
+data Signature = Signature EVar (Maybe Label) EType
+  deriving (Show, Ord, Eq)
+
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)
 
@@ -265,6 +271,8 @@ data ExprI = ExprI Int Expr
 data Expr
   = ModE MVar [ExprI]
   -- ^ the toplevel expression in a module
+  | ClsE Typeclass [TVar] [Signature]
+  | IstE Typeclass [TypeU] [ExprI]
   | TypE (Maybe (Lang, Bool)) TVar [TVar] TypeU
   -- ^ a type definition
   --   1. the language, Nothing is general
@@ -278,7 +286,7 @@ data Expr
   -- ^ a term that is exported from a module (should only exist at the toplevel)
   | SrcE Source
   -- ^ import "c" from "foo.c" ("f" as yolo).
-  | SigE EVar (Maybe Label) EType
+  | SigE Signature
   -- ^ A type signature, the three parameters correspond to the term name, the
   -- optional label, and the type
   | AssE EVar ExprI [ExprI]
@@ -515,6 +523,8 @@ newtype EVar = EV { unEVar :: Text } deriving (Show, Eq, Ord)
 
 -- A type general name
 newtype TVar = TV { unTVar :: Text } deriving (Show, Eq, Ord)
+
+newtype Typeclass = Typeclass { unTypeclass :: Text } deriving (Show, Eq, Ord)
 
 -- A concrete type name
 newtype CVar = CV { unCVar :: Text } deriving (Show, Eq, Ord)

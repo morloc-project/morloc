@@ -63,7 +63,7 @@ findSignatureTypeTerms :: ExprI -> [TVar]
 findSignatureTypeTerms = unique . f where
   f :: ExprI -> [TVar]
   f (ExprI _ (ModE _ es)) = concatMap f es
-  f (ExprI _ (SigE _ _ (EType t _ _))) = findTypeTerms t
+  f (ExprI _ (SigE (Signature _ _ (EType t _ _)))) = findTypeTerms t
   f (ExprI _ (AssE _ _ es)) = concatMap f es
   f _ = []
 
@@ -85,9 +85,9 @@ findSignatures :: ExprI -> [(EVar, Maybe Label, EType)]
 -- v is the name of the type
 -- l is the optional label for the signature
 -- t is the type
-findSignatures (ExprI _ (ModE _ es)) = [(v, l, t) | (ExprI _ (SigE v l t)) <- es]
-findSignatures (ExprI _ (AssE _ _ es)) = [(v, l, t) | (ExprI _ (SigE v l t)) <- es]
-findSignatures (ExprI _ (SigE v l t)) = [(v, l, t)]
+findSignatures (ExprI _ (ModE _ es)) = [(v, l, t) | (ExprI _ (SigE (Signature v l t))) <- es]
+findSignatures (ExprI _ (AssE _ _ es)) = [(v, l, t) | (ExprI _ (SigE (Signature v l t))) <- es]
+findSignatures (ExprI _ (SigE (Signature v l t))) = [(v, l, t)]
 findSignatures _ = []
 
 checkExprI :: Monad m => (ExprI -> m ()) -> ExprI -> m ()

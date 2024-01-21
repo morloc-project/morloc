@@ -51,7 +51,7 @@ instance Pretty Expr where
     <+> "("
     <> dquotes (pretty name) <+> "as" <+>  pretty alias <> maybe "" (\s -> ":" <> pretty s) label
     <> ")"
-  pretty (SigE v _ e) =
+  pretty (SigE (Signature v _ e)) =
     pretty v <+> "::" <+> eprop' <> etype' <> econs'
     where
       eprop' :: Doc ann

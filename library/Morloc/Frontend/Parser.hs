@@ -103,7 +103,7 @@ pModule expModuleName = do
     findSymbols :: ExprI -> Set.Set Symbol
     findSymbols (ExprI _ (TypE _ v _ _)) = Set.singleton $ TypeSymbol v
     findSymbols (ExprI _ (AssE e _ _)) = Set.singleton $ TermSymbol e
-    findSymbols (ExprI _ (SigE e _ t)) = Set.union (Set.singleton $ TermSymbol e) (packedType t)
+    findSymbols (ExprI _ (SigE (Signature e _ t))) = Set.union (Set.singleton $ TermSymbol e) (packedType t)
     findSymbols (ExprI _ (ImpE (Import _ (Just imps) _ _)))
         = Set.fromList $ [TermSymbol alias | (AliasedTerm _ alias) <- imps] <>
                          [TypeSymbol alias | (AliasedType _ alias) <- imps]
@@ -156,7 +156,7 @@ createMainFunction es = case (init es, last es) of
     (_, ExprI _ TypE{}) -> return es
     (_, ExprI _ (ImpE _))     -> return es
     (_, ExprI _ (SrcE _))     -> return es
-    (_, ExprI _ SigE{}) -> return es
+    (_, ExprI _ (SigE _)) -> return es
     (_, ExprI _ AssE{}) -> return es
     (_, ExprI _ (ExpE _))     -> return es
     (rs, terminalExpr) -> do
@@ -170,6 +170,8 @@ pTopExpr :: Parser [ExprI]
 pTopExpr = 
       try (plural pImport)
   <|> try (plural pTypedef)
+  <|> try (plural pTypeclass)
+  <|> try (plural pInstance)
   <|> try (plural pAssE)
   <|> try (plural pSigE)
   <|> try pSrcE
@@ -262,6 +264,21 @@ pImport = do
     a <- option n (reserved "as" >> freenameU)
     return (AliasedType (TV n) (TV a))
 
+pTypeclass :: Parser ExprI
+pTypeclass = do
+  _ <- reserved "class"
+  (TV v, vs) <- pTypedefTerm <|> parens pTypedefTerm
+  sigs <- option [] (reserved "where" >> alignInset pSignature)
+  exprI $ ClsE (Typeclass v) vs sigs
+
+pInstance :: Parser ExprI
+pInstance = do
+  _ <- reserved "instance"
+  v <- freenameU
+  ts <- many1 pType
+  srcs <- option [] (reserved "where" >> alignInset pSource) |>> concat
+  srcEs <- mapM (exprI . SrcE) srcs
+  exprI $ IstE (Typeclass v) ts srcEs
 
 pTypedef :: Parser ExprI
 pTypedef = try pTypedefType <|> pTypedefObject where
@@ -313,12 +330,6 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     let t = NamU o (TV con) (map VarU vs) (map (first Key) entries)
     exprI (TypE k v vs t)
 
-  pTypedefTerm :: Parser (TVar, [TVar])
-  pTypedefTerm = do
-    t <- freenameU
-    ts <- many freenameL
-    return (TV t, map TV ts)
-
   -- TODO: is this really the right place to be doing this?
   desugarTableEntries
     :: NamType
@@ -354,6 +365,12 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     lang <- pLang
     _ <- symbol "=>"
     return lang
+
+pTypedefTerm :: Parser (TVar, [TVar])
+pTypedefTerm = do
+  t <- freenameU
+  ts <- many freenameL
+  return (TV t, map TV ts)
 
 
 pAssE :: Parser ExprI
@@ -391,21 +408,25 @@ pAssE = try pFunctionAssE <|> pDataAssE
 
 pSigE :: Parser ExprI
 pSigE = do
+  signature <- pSignature
+  exprI . SigE $ signature
+
+pSignature :: Parser Signature
+pSignature = do
   label' <- tag freename
   v <- freenameL
   _ <- op "::"
   props <- option [] (try pPropertyList)
   t <- pTypeGen
   constraints <- option [] pConstraints
-  exprI $
-    SigE
-      (EV v)
-      (Label <$> label')
-      (EType
-         { etype = t
-         , eprop = Set.fromList props
-         , econs = Set.fromList constraints
-         })
+  return $ Signature
+    (EV v)
+    (Label <$> label')
+    (EType
+       { etype = t
+       , eprop = Set.fromList props
+       , econs = Set.fromList constraints
+       })
   where
 
   pPropertyList :: Parser [Property]
@@ -437,6 +458,11 @@ pSigE = do
 
 pSrcE :: Parser [ExprI]
 pSrcE = do
+  srcs <- pSource
+  mapM (exprI . SrcE) srcs
+
+pSource :: Parser [Source]
+pSource = do
   reserved "source"
   modulePath <- CMS.gets stateModulePath
   language <- pLang
@@ -452,12 +478,14 @@ pSrcE = do
     -- this case SHOULD only occur in testing where the source file does not exist
     -- file non-existence will be caught later
     (Nothing, s) -> return s 
-  mapM exprI [SrcE $ Source { srcName = srcVar
-                            , srcLang = language
-                            , srcPath = srcFile
-                            , srcAlias = aliasVar
-                            , srcLabel = Label <$> label'
-                            } | (srcVar, aliasVar, label') <- rs]
+  return [
+    Source
+      { srcName = srcVar
+      , srcLang = language
+      , srcPath = srcFile
+      , srcAlias = aliasVar
+      , srcLabel = Label <$> label'
+      } | (srcVar, aliasVar, label') <- rs]
   where
 
   pImportSourceTerm :: Parser (SrcName, EVar, Maybe MT.Text)
