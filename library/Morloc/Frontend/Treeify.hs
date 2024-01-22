@@ -14,6 +14,7 @@ module Morloc.Frontend.Treeify (treeify) where
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
 import Morloc.Pretty ()
+import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Monad as MM
@@ -123,29 +124,6 @@ term --<i>--.--<
              \  `--m-> Declaration
               `------------------------n--> General Signature
 -}
-
-linkTypeclasses
-  :: MVar
-  -> ExprI
-  -> [(m, e, Map.Map EVar (Typeclass, EType, [TermTypes]))]
-  -> MorlocMonad (Map.Map EVar (Typeclass, EType, [TermTypes]))
-linkTypeclasses _ e es = do
-  cls <- findTypeclasses e
-  Map.unionsWithM mergeTypeclasses (cls : [x | (_,_,x) <- es])
-
-findTypeclasses :: ExprI -> MorlocMonad (Map.Map EVar (Typeclass, EType, [TermTypes]))
-findTypeclasses _ = return Map.empty
-
-mergeTypeclasses
-  :: (Typeclass, EType, [TermTypes])
-  -> (Typeclass, EType, [TermTypes])
-  -> MorlocMonad (Typeclass, EType, [TermTypes])
-mergeTypeclasses (cls1, t1, ts1) (cls2, t2, ts2)
-  | cls1 /= cls2 = error "Conflicting typeclasses"
-  | t1 /= t2 = error "Conflicting typeclass term general type"
-    -- here I should do reciprocal subtyping
-  | otherwise = return (cls1, t1, ts1 <> ts2)
-
 
 -- in each scope (top of a module or after descending into a where statement) 
 --  1 collect all type signatures (Map EVar [EType])
@@ -487,16 +465,17 @@ collectSExpr (ExprI i e0) = (,) <$> f e0 <*> pure i
   f (IntE x) = return (IntS x)
   f (LogE x) = return (LogS x)
   f (StrE x) = return (StrS x)
-
   -- none of the following cases should ever occur
-  f (AnnE _ _) = error "impossible"
-  f (ModE _ _) = error "impossible"
-  f TypE {} = error "impossible"
-  f (ImpE _) = error "impossible"
-  f (ExpE _) = error "impossible"
-  f (SrcE _) = error "impossible"
-  f (SigE _) = error "impossible"
-  f AssE {} = error "impossible"
+  f ClsE{} = undefined
+  f IstE{} = undefined
+  f AnnE{} = undefined
+  f ModE{} = undefined
+  f TypE{} = undefined
+  f ImpE{} = undefined
+  f ExpE{} = undefined
+  f SrcE{} = undefined
+  f SigE{} = undefined
+  f AssE{} = undefined
 
 reindexExprI :: ExprI -> MorlocMonad ExprI
 reindexExprI (ExprI i e) = ExprI <$> newIndex i <*> reindexExpr e
@@ -521,3 +500,117 @@ newIndex i = do
   i' <- MM.getCounter
   copyState i i'
   return i'
+
+
+linkTypeclasses
+  :: MVar
+  -> ExprI
+  -> [(m, e, Map.Map EVar (Typeclass, [TVar], EType, [TermTypes]))]
+  -> MorlocMonad (Map.Map EVar (Typeclass, [TVar], EType, [TermTypes]))
+linkTypeclasses _ e es
+  -- Merge the typeclasses and instances from all imported modules
+  -- These are inherited implicitly, so import terms are ignored
+  = Map.unionsWithM mergeTypeclasses [x | (_,_,x) <- es]
+  -- Augment the inherited map with the typeclasses and instances in this module
+  >>= findTypeclasses e
+
+findTypeclasses
+  :: ExprI
+  -> Map.Map EVar (Typeclass, [TVar], EType, [TermTypes])
+  -> MorlocMonad (Map.Map EVar (Typeclass, [TVar], EType, [TermTypes]))
+findTypeclasses (ExprI moduleIndex (ModE moduleName es0)) priorClasses = do
+  -- typeclass definitions live only at the top-level, so need to recursively
+  -- descend into the expressions in a module
+  
+  -- first we collect all typeclass definitions in this module
+  localClasses <- Map.unionsWithM mergeTypeclasses 
+                . map makeClass
+                $ [(cls, vs, sigs) | (ExprI _ (ClsE cls vs sigs)) <- es0]
+  -- then merge them with all prior typeclasses and instances
+  allClasses <- Map.unionWithM mergeTypeclasses priorClasses localClasses
+  -- find instances in this module
+  let instances = [(cls, ts, es) | (ExprI _ (IstE cls ts es)) <- es0]
+  -- fold the instances into the current typeclass map and return
+  moduleClasses <- foldlM addInstance allClasses instances
+
+  mapM_ (linkVariablesToTypeclasses moduleClasses) es0
+
+  return moduleClasses
+
+  where
+    -- make a map of all terms that are defined in a typeclass (these will all
+    -- be general term)
+    makeClass :: (Typeclass, [TVar], [Signature]) -> Map.Map EVar (Typeclass, [TVar], EType, [TermTypes])
+    makeClass (cls, vs, sigs) = Map.fromList $ map makeClassTerm sigs where
+      makeClassTerm :: Signature -> (EVar, (Typeclass, [TVar], EType, [TermTypes]))
+      makeClassTerm (Signature v _ t) = (v, (cls, vs, t, []))
+
+    addInstance
+      :: Map.Map EVar (Typeclass, [TVar], EType, [TermTypes])
+      -> (Typeclass, [TypeU], [ExprI])
+      -> MorlocMonad (Map.Map EVar (Typeclass, [TVar], EType, [TermTypes])) 
+    addInstance clsmap (_, _, []) = return clsmap 
+    addInstance clsmap (cls0, ts0, es) = mapM f es |>> Map.fromList where
+      f :: ExprI -> MorlocMonad (EVar, (Typeclass, [TVar], EType, [TermTypes]))
+      f (ExprI srcIndex (SrcE src)) =
+        case Map.lookup (srcAlias src) clsmap of 
+          (Just (cls1, vs, generalType, otherInstances)) -> do
+            when (cls1 /= cls0) (error "Conflicting instances")
+            when (length vs /= length ts0) (error "Conflicting class and instance parameter count")
+            let instanceType = generalType { etype = foldl (\t (v,r) -> substituteTVar v r t) (etype generalType) (zip vs ts0) }
+            let newTerm = TermTypes (Just instanceType) [(moduleName, Idx srcIndex src)] []
+            let typeterms = newTerm : filter (noInstanceInLang (srcLang src)) otherInstances
+            return (srcAlias src, (cls0, vs, instanceType, typeterms))
+          Nothing -> error "No typeclass found for instance"
+      f _ = error "Only source statements are currently allowed in instances (generalization is in development)"
+
+      noInstanceInLang :: Lang -> TermTypes -> Bool
+      noInstanceInLang lang otherTerm = lang `notElem` (map (srcLang . val . snd) . termConcrete $ otherTerm)
+
+    linkVariablesToTypeclasses
+      :: Map.Map EVar (Typeclass, [TVar], EType, [TermTypes])
+      -> ExprI
+      -> MorlocMonad ()
+    linkVariablesToTypeclasses = link where
+      link :: Map.Map EVar (Typeclass, [TVar], EType, [TermTypes]) -> ExprI -> MorlocMonad ()
+      -- The following may have terms from typeclasses
+      -- 1. variables
+      link m (ExprI i (VarE v)) = setClass m i v
+      -- recurse into assignments, allow shadowing of typeclass functions (TODO: warn)
+      link m (ExprI _ (AssE _ (ExprI _ (LamE ks e)) es)) = do
+        -- shadow all terms bound under the lambda
+        let m' = foldr Map.delete m ks
+        mapM_ (link m') (e:es)
+      -- modules currently cannot be nested (should this be allowed?)
+      link _ (ExprI _ (ModE v _)) = MM.throwError $ NestedModule v
+      -- everything below boilerplate
+      link m (ExprI _ (AccE e _)) = link m e
+      link m (ExprI _ (LstE xs)) = mapM_ (link m) xs
+      link m (ExprI _ (TupE xs)) = mapM_ (link m) xs
+      link m (ExprI _ (LamE vs e)) = link (foldr Map.delete m vs) e
+      link m (ExprI _ (AppE f es)) = link m f >> mapM_ (link m) es
+      link m (ExprI _ (AnnE e _)) = link m e
+      link m (ExprI _ (NamE rs)) = mapM_ (link m . snd) rs
+      link _ _ = return ()
+
+      setClass :: Map.Map EVar (Typeclass, [TVar], EType, [TermTypes]) -> Int -> EVar -> MorlocMonad ()
+      setClass m termIndex v = case Map.lookup v m of
+        (Just (cls, _, t, ts)) -> do
+          s <- CMS.get
+          let newMap = GMap.insert termIndex moduleIndex (cls, t, ts) (stateTypeclassTerms s)
+          CMS.put (s { stateTypeclassTerms = newMap } )
+          return ()
+        Nothing -> return ()
+findTypeclasses _ _ = undefined 
+
+
+mergeTypeclasses
+  :: (Typeclass, [TVar], EType, [TermTypes])
+  -> (Typeclass, [TVar], EType, [TermTypes])
+  -> MorlocMonad (Typeclass, [TVar], EType, [TermTypes])
+mergeTypeclasses (cls1, vs1, t1, ts1) (cls2, vs2, t2, ts2)
+  | cls1 /= cls2 = error "Conflicting typeclasses"
+  | t1 /= t2 = error "Conflicting typeclass term general type"
+  | length vs1 /= length vs2 = error "Conflicting typeclass parameter count"
+  -- here I should do reciprocal subtyping
+  | otherwise = return (cls1, vs1, t1, ts1 <> ts2)
