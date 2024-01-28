@@ -21,6 +21,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.GMap as GMap
+import qualified Morloc.Frontend.PartialOrder as PO
 
 -- | Every term must either be sourced or declared.
 data TermOrigin = Declared ExprI | Sourced Source
@@ -125,14 +126,14 @@ term --<i>--.--<
               `------------------------n--> General Signature
 -}
 
--- in each scope (top of a module or after descending into a where statement) 
+-- in each scope (top of a module or after descending into a where statement)
 --  1 collect all type signatures (Map EVar [EType])
 --  2 find all equivalent appearences of a given term across modules (including across aliases)
 linkSignaturesModule
   :: MVar
   -> ExprI
   -> [(MVar, [(EVar, EVar)], Map.Map EVar TermTypes)]
-  -- ^ This is a list of 
+  -- ^ This is a list of
   -> MorlocMonad (Map.Map EVar TermTypes)
 linkSignaturesModule _ (ExprI _ (ModE v es)) edges
   -- a map from alias to all signatures associated with the alias
@@ -148,13 +149,13 @@ linkSignaturesModule _ (ExprI _ (ModE v es)) edges
   unalias es0 m =
     let aliases = Map.fromList . groupSort $ [(alias, srcname) | (srcname, alias) <- es0]
     in Map.map (mapMaybe (`Map.lookup` m)) aliases
-linkSignaturesModule _ _ _ = MM.throwError . CallTheMonkeys $ "Expected a module at the top level" 
+linkSignaturesModule _ _ _ = MM.throwError . CallTheMonkeys $ "Expected a module at the top level"
 
 
 linkSignatures
   :: MVar -- ^ the current module name
   -> [ExprI] -- ^ all expressions in the module
-  -> Map.Map EVar TermTypes -- ^ the inherited termtypes form imported modules 
+  -> Map.Map EVar TermTypes -- ^ the inherited termtypes form imported modules
   -> MorlocMonad (Map.Map EVar TermTypes)
 linkSignatures v es m = do
   -- find all top-level terms in this module
@@ -185,16 +186,16 @@ linkVariablesToTermTypes
   -> Map.Map EVar (Int, TermTypes) -- ^ a map term terms to types, Int is the inner GMAp key
   -> [ExprI] -- ^ list of expressions in the module
   -> MorlocMonad ()
-linkVariablesToTermTypes mv m0 = mapM_ (link m0) where 
+linkVariablesToTermTypes mv m0 = mapM_ (link m0) where
   link :: Map.Map EVar (Int, TermTypes) -> ExprI -> MorlocMonad ()
   -- The following have terms associated with them:
   -- 1. exported terms (but not exported types)
-  link m (ExprI i (ExpE (TermSymbol v))) = setType m i v
+  link m (ExprI i (ExpE (TermSymbol v))) = setMonomorphicType m i v
   -- 2. variables
-  link m (ExprI i (VarE v)) = setType m i v
+  link m (ExprI i (VarE v)) = setMonomorphicType m i v
   -- 3. assignments
   link m (ExprI i (AssE v (ExprI _ (LamE ks e)) es)) = do
-    setType m i v
+    setMonomorphicType m i v
     -- shadow all terms bound under the lambda
     let m' = foldr Map.delete m ks
     -- then link the assignment term and all local "where" statements (es)
@@ -202,7 +203,7 @@ linkVariablesToTermTypes mv m0 = mapM_ (link m0) where
     return ()
   -- 4. assignments that have no parameters
   link m (ExprI i (AssE v e es)) = do
-    setType m i v
+    setMonomorphicType m i v
     -- then link the assignment term and all local "where" statements (es)
     linkSignatures mv (e:es) (Map.map snd m)
     return ()
@@ -218,11 +219,11 @@ linkVariablesToTermTypes mv m0 = mapM_ (link m0) where
   link m (ExprI _ (NamE rs)) = mapM_ (link m . snd) rs
   link _ _ = return ()
 
-  setType :: Map.Map EVar (Int, TermTypes) -> Int -> EVar -> MorlocMonad ()
-  setType m i v = case Map.lookup v m of 
+  setMonomorphicType :: Map.Map EVar (Int, TermTypes) -> Int -> EVar -> MorlocMonad ()
+  setMonomorphicType m i v = case Map.lookup v m of
     (Just (j, t)) -> do
       s <- CMS.get
-      CMS.put (s { stateSignatures = GMap.insert i j t (stateSignatures s)
+      CMS.put (s { stateSignatures = GMap.insert i j (Monomorphic t) (stateSignatures s)
                  , stateName = Map.insert i v (stateName s) } )
       return ()
     Nothing -> return ()
@@ -272,7 +273,7 @@ combineTermTypes (TermTypes g1 cs1 es1) (TermTypes g2 cs2 es2)
   maybeCombine f (Just a) (Just b) = Just <$> f a b
   maybeCombine _ (Just a) _ = return $ Just a
   maybeCombine _ _ (Just b) = return $ Just b
-  maybeCombine _ _ _ = return Nothing 
+  maybeCombine _ _ _ = return Nothing
 
 -- | This function defines how general types are merged. There are decisions
 -- encoded in this function that should be vary carefully considered.
@@ -285,49 +286,9 @@ mergeEType (EType t1 ps1 cs1) (EType t2 ps2 cs2)
 
 -- merge two general types
 mergeTypeUs :: TypeU -> TypeU -> MorlocMonad TypeU
-mergeTypeUs t1@(VarU v1) t2@(VarU v2)
-  | v1 == v2 = return (VarU v1)
-  | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
-mergeTypeUs (ExistU v ps1 rs1) (ExistU _ ps2 rs2)
-    = ExistU v
-    <$> zipWithM mergeTypeUs ps1 ps2
-    <*> mergeRecords rs1 rs2
-
-mergeTypeUs ExistU{} t = return t
-mergeTypeUs t ExistU{} = return t
-
--- Two universally qualified types may be merged if they are the same up to
--- named of bound variables, for example:
---  mergeTypeUs (forall a . a) (forall b . b) --> forall b . b
-mergeTypeUs (ForallU v1 t1) (ForallU v2 t2)
-  = ForallU v1 <$> mergeTypeUs (substituteTVar v2 (VarU v1) t2) t1
-mergeTypeUs (FunU ts1 t1) (FunU ts2 t2) = FunU <$> zipWithM mergeTypeUs ts1 ts2 <*> mergeTypeUs t1 t2 
-mergeTypeUs (AppU t1 ps1) (AppU t2 ps2) = AppU <$> mergeTypeUs t1 t2 <*> zipWithM mergeTypeUs ps1 ps2
-mergeTypeUs t1@(NamU o1 n1 ps1 ks1) t2@(NamU o2 n2 ps2 ks2)
-  | o1 == o2 && n1 == n2 && length ps1 == length ps2 = do
-      ts1 <- zipWithM mergeTypeUs (map snd ks1) (map snd ks2)
-      ps' <- zipWithM mergeTypeUs ps1 ps2 
-      return $ NamU o1 n1 ps' (zip (map fst ks1) ts1)
+mergeTypeUs t1 t2
+  | PO.equivalent t1 t2 = return t1
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
-mergeTypeUs t1 t2 = MM.throwError $ IncompatibleGeneralType t1 t2
--- mergeTypeUs t1 t2
---   | t1 `PO.isSubtypeOf` t2 = return t2
---   | t2 `PO.isSubtypeOf` t1 = return t1
---   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
-
--- merge record entries by taking the union of entries
-mergeRecords :: [(Key, TypeU)] -> [(Key, TypeU)] -> MorlocMonad [(Key, TypeU)]
-mergeRecords rs1 rs2 = do
-  -- all record entries common to both types in the order of rs1
-  commonEntries <- mapM mergeRecord rs1
-  -- records that are unique to rs2
-  let missingRecords = [(k, t2) | (k, t2) <- rs2, isNothing (lookup k rs1)]
-  return $ commonEntries <> missingRecords
-  where
-  mergeRecord :: (Key, TypeU) -> MorlocMonad (Key, TypeU)
-  mergeRecord (k, t1) = case lookup k rs2 of
-    (Just t2) -> (,) k <$> mergeTypeUs t1 t2
-    Nothing -> return (k, t1)
 
 
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
@@ -358,13 +319,13 @@ linkAndRemoveAnnotations = f where
 --
 -- Recursion
 --   [ ] handle recursion and mutual recursion
---       - to detect recursion, I need to remember every term that has been expanded, 
+--       - to detect recursion, I need to remember every term that has been expanded,
 -- collect v declarations or sources
 collect
   :: Int -- ^ the index for the export term
   -> MorlocMonad (SAnno Int Many Int)
 collect i = do
-  t0 <- MM.metaTermTypes i
+  t0 <- MM.metaMonomorphicTermTypes i
   case t0 of
     -- if Nothing, then the term is a bound variable
     Nothing -> return (SAnno (Many []) i)
@@ -376,16 +337,18 @@ collect i = do
 
 collectSAnno :: ExprI -> MorlocMonad (SAnno Int Many Int)
 collectSAnno e@(ExprI i (VarE v)) = do
-  t0 <- MM.metaTermTypes i
-  es <- case t0 of
+  maybeTermTypes <- MM.metaTermTypes i
+
+  es <- case maybeTermTypes of
     -- if Nothing, then the term is a bound variable
     Nothing -> return <$> collectSExpr e
+    (Just []) -> error "No instances"
     -- otherwise is an alias that should be replaced with its value(s)
-    (Just t1) -> do
-      -- collect all the concrete calls with this name
-      let calls = [(CallS src, i') | (_, Idx i' src) <- termConcrete t1]
-      -- collect all the morloc compositions with this name
-      declarations <- mapM reindexExprI (termDecl t1) >>= mapM (replaceExpr i) |>> concat
+    (Just ts) -> do
+      -- collect all the concrete calls across all instances
+      let calls = [(CallS src, i') | (_, Idx i' src) <- concatMap termConcrete ts]
+      -- collect all the morloc compositions with this name across all instances
+      declarations <- mapM reindexExprI (concatMap termDecl ts) >>= mapM (replaceExpr i) |>> concat
       -- link this index to the name that is removed
       s <- CMS.get
       CMS.put (s { stateName = Map.insert i v (stateName s) })
@@ -404,7 +367,7 @@ collectSAnno e@(ExprI i (VarE v)) = do
 -- expression type annotations should have already been accounted for, so ignore
 collectSAnno (ExprI _ (AnnE e _)) = collectSAnno e
 collectSAnno e@(ExprI i _) = do
-  e' <- collectSExpr e 
+  e' <- collectSExpr e
   return $ SAnno (Many [e']) i
 
 -- | This function will handle terms that have been set to be equal
@@ -415,17 +378,17 @@ replaceExpr :: Int -> ExprI -> MorlocMonad [(SExpr Int Many Int, Int)]
 replaceExpr i e@(ExprI j (VarE _)) = do
   x <- collectSAnno e
   -- unify the data between the equated terms
-  tiMay <- MM.metaTermTypes i
-  tjMay <- MM.metaTermTypes j
+  tiMay <- MM.metaMonomorphicTermTypes i
+  tjMay <- MM.metaMonomorphicTermTypes j
   t <- case (tiMay, tjMay) of
-    (Just ti, Just tj) -> combineTermTypes ti tj 
+    (Just ti, Just tj) -> combineTermTypes ti tj
     (Just ti, _) -> return ti
     (_, Just tj) -> return tj
     _ -> error "You shouldn't have done that"
 
   st <- MM.get
 
-  case GMap.change i t (stateSignatures st) of
+  case GMap.change i (Monomorphic t) (stateSignatures st) of
     (Just m) -> MM.modify (\s -> s {stateSignatures = m})
     _ -> error "impossible"
 
@@ -518,18 +481,25 @@ findTypeclasses
   :: ExprI
   -> Map.Map EVar (Typeclass, [TVar], EType, [TermTypes])
   -> MorlocMonad (Map.Map EVar (Typeclass, [TVar], EType, [TermTypes]))
-findTypeclasses (ExprI moduleIndex (ModE moduleName es0)) priorClasses = do
-  -- typeclass definitions live only at the top-level, so need to recursively
-  -- descend into the expressions in a module
-  
+findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
+
   -- first we collect all typeclass definitions in this module
-  localClasses <- Map.unionsWithM mergeTypeclasses 
+  -- typeclasses are defined only at the top-level, so no descent into sub-expressions
+  localClasses <- Map.unionsWithM mergeTypeclasses
                 . map makeClass
                 $ [(cls, vs, sigs) | (ExprI _ (ClsE cls vs sigs)) <- es0]
+
   -- then merge them with all prior typeclasses and instances
   allClasses <- Map.unionWithM mergeTypeclasses priorClasses localClasses
+
   -- find instances in this module
+  -- The (IstE cls ts es) terms refer to
+  --   cls: typeclass, such as "Packable"
+  --   ts: types, such as ["Map a b", "[(a,b)]"]
+  --   es: instance definitions, such as source statements (the only ones
+  --       allowed at the moment)
   let instances = [(cls, ts, es) | (ExprI _ (IstE cls ts es)) <- es0]
+
   -- fold the instances into the current typeclass map and return
   moduleClasses <- foldlM addInstance allClasses instances
 
@@ -548,24 +518,47 @@ findTypeclasses (ExprI moduleIndex (ModE moduleName es0)) priorClasses = do
     addInstance
       :: Map.Map EVar (Typeclass, [TVar], EType, [TermTypes])
       -> (Typeclass, [TypeU], [ExprI])
-      -> MorlocMonad (Map.Map EVar (Typeclass, [TVar], EType, [TermTypes])) 
-    addInstance clsmap (_, _, []) = return clsmap 
-    addInstance clsmap (cls0, ts0, es) = mapM f es |>> Map.fromList where
+      -> MorlocMonad (Map.Map EVar (Typeclass, [TVar], EType, [TermTypes]))
+    addInstance clsmap (_, _, []) = return clsmap
+    addInstance clsmap (cls0, ts0, es) = mapM f es |>> Map.fromListWith mergeInstances where
       f :: ExprI -> MorlocMonad (EVar, (Typeclass, [TVar], EType, [TermTypes]))
       f (ExprI srcIndex (SrcE src)) =
-        case Map.lookup (srcAlias src) clsmap of 
+        case Map.lookup (srcAlias src) clsmap of
           (Just (cls1, vs, generalType, otherInstances)) -> do
             when (cls1 /= cls0) (error "Conflicting instances")
             when (length vs /= length ts0) (error "Conflicting class and instance parameter count")
-            let instanceType = generalType { etype = foldl (\t (v,r) -> substituteTVar v r t) (etype generalType) (zip vs ts0) }
+            let instanceType = generalType { etype = foldl (\t (v,r) -> substituteTVar v r t) (requalify vs (etype generalType)) (zip vs ts0) }
             let newTerm = TermTypes (Just instanceType) [(moduleName, Idx srcIndex src)] []
-            let typeterms = newTerm : filter (noInstanceInLang (srcLang src)) otherInstances
-            return (srcAlias src, (cls0, vs, instanceType, typeterms))
+            let typeterms = mergeTermTypes newTerm otherInstances
+            return (srcAlias src, (cls0, vs, generalType, typeterms))
           Nothing -> error "No typeclass found for instance"
       f _ = error "Only source statements are currently allowed in instances (generalization is in development)"
 
-      noInstanceInLang :: Lang -> TermTypes -> Bool
-      noInstanceInLang lang otherTerm = lang `notElem` (map (srcLang . val . snd) . termConcrete $ otherTerm)
+      mergeInstances
+        :: (Typeclass, [TVar], EType, [TermTypes])
+        -> (Typeclass, [TVar], EType, [TermTypes])
+        -> (Typeclass, [TVar], EType, [TermTypes])
+      mergeInstances (cls1, vs1, e1, ts1) (cls2, vs2, e2, ts2)
+        | cls1 == cls2, length vs1 == length vs2, PO.equivalent (etype e1) (etype e2) = (cls1, vs1, e1, unionTermTypes ts1 ts2)
+        | otherwise = error "failed to merge"
+
+      requalify :: [TVar] -> TypeU -> TypeU
+      requalify (v:vs) (ForallU v' t)
+        | v == v' = requalify vs t
+        | otherwise = ForallU v' (requalify vs t)
+      requalify _ t = t
+
+      unionTermTypes :: [TermTypes] -> [TermTypes] -> [TermTypes]
+      unionTermTypes ts1 ts2 = foldr mergeTermTypes ts2 ts1
+
+      mergeTermTypes :: TermTypes -> [TermTypes] -> [TermTypes]
+      mergeTermTypes t1@(TermTypes (Just gt1) srcs1 es1) (t2@(TermTypes (Just gt2) srcs2 es2):ts)
+        | PO.equivalent (etype gt1) (etype gt2) = TermTypes (Just gt1) (unique (srcs1 <> srcs2)) (es1 <> es2) : ts
+        | otherwise = t2 : mergeTermTypes t1 ts
+      mergeTermTypes (TermTypes Nothing srcs1 es1) ((TermTypes e2 srcs2 es2):ts2) =
+        mergeTermTypes (TermTypes e2 (srcs1 <> srcs2) (es1 <> es2)) ts2
+      mergeTermTypes TermTypes{} (TermTypes{}:_) = error "what the why?"
+      mergeTermTypes t1 [] = [t1]
 
     linkVariablesToTypeclasses
       :: Map.Map EVar (Typeclass, [TVar], EType, [TermTypes])
@@ -596,12 +589,38 @@ findTypeclasses (ExprI moduleIndex (ModE moduleName es0)) priorClasses = do
       setClass :: Map.Map EVar (Typeclass, [TVar], EType, [TermTypes]) -> Int -> EVar -> MorlocMonad ()
       setClass m termIndex v = case Map.lookup v m of
         (Just (cls, _, t, ts)) -> do
+
+          MM.sayVVV $ "setClass map:" <+> viaShow m
+
+          mapM_ mapSources ts
           s <- CMS.get
-          let newMap = GMap.insert termIndex moduleIndex (cls, t, ts) (stateTypeclassTerms s)
-          CMS.put (s { stateTypeclassTerms = newMap } )
+          -- Yes, both indices are termIndex. After typechecking, the
+          -- polymorphic type will resolve to monomorphic. Each may resolve
+          -- differently, so instances must not all point to the same signature.
+          newMap <- GMap.insertWithM mergeSignatureSet termIndex termIndex (Polymorphic cls v t ts) (stateSignatures s)
+          CMS.put (s { stateSignatures = newMap
+                     , stateName = Map.insert termIndex v (stateName s)})
           return ()
         Nothing -> return ()
-findTypeclasses _ _ = undefined 
+
+      mapSources :: TermTypes -> MorlocMonad ()
+      mapSources t = mapM_ (mapSource . snd) (termConcrete t) where
+        mapSource :: Indexed Source -> MorlocMonad ()
+        mapSource (Idx i src) = do
+          MM.sayVVV $ "mapSource" <+> pretty i <+> pretty src
+          s <- CMS.get
+          newMap <- GMap.insertWithM mergeSignatureSet i i (Monomorphic t) (stateSignatures s)
+          CMS.put (s { stateSignatures = newMap })
+          return ()
+
+      mergeSignatureSet :: SignatureSet -> SignatureSet -> MorlocMonad SignatureSet
+      mergeSignatureSet (Polymorphic cls1 v1 t1 ts1) (Polymorphic cls2 v2 t2 ts2)
+        | cls1 == cls2 && t1 == t2 && v1 == v2 = return $ Polymorphic cls1 v1 t1 (ts1 <> ts2)
+        | otherwise = error "Invalid SignatureSet merge"
+      mergeSignatureSet (Monomorphic ts1) (Monomorphic ts2) = Monomorphic <$> combineTermTypes ts1 ts2
+      mergeSignatureSet _ _ = undefined
+-- data SignatureSet = Monomorphic TermTypes | Polymorphic Typeclass EType [TermTypes]
+findTypeclasses _ _ = undefined
 
 
 mergeTypeclasses

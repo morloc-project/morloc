@@ -74,12 +74,22 @@ class Applicable a where
 -- | Apply a context to a type (See Dunfield Figure 8).
 instance Applicable TypeU where
   -- [G]a = a
-  apply _ a@(VarU _) = a
+  apply g (VarU v) =
+    -- FIXME: very wrong - only works because of my renaming scheme
+    case lookupU v g of
+      (Just t') -> t'
+      Nothing -> VarU v
+
   -- [G](A->B) = ([G]A -> [G]B)
   apply g (FunU ts t) = FunU (map (apply g) ts) (apply g t)
   apply g (AppU t ts) = AppU (apply g t) (map (apply g) ts)
   -- [G]ForallU a.a = forall a. [G]a
-  apply g (ForallU x a) = ForallU x (apply g a)
+  apply g (ForallU v a) =
+    -- FIXME: VERY WRONG
+    case lookupU v g of 
+      (Just _) -> apply g a
+      Nothing -> ForallU v (apply g a)
+
   -- [G[a=t]]a = [G[a=t]]t
   apply g (ExistU v ts rs) =
     case lookupU v g of

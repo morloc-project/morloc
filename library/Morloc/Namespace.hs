@@ -57,6 +57,7 @@ module Morloc.Namespace
   -- ** Morloc monad
   , MorlocMonad
   , MorlocState(..)
+  , SignatureSet(..)
   , TermTypes(..)
   , MorlocReturn
   -- ** Package metadata
@@ -145,6 +146,9 @@ type MorlocMonadGen c e l s a
 
 type MorlocReturn a = ((Either MorlocError a, [Text]), MorlocState)
 
+data SignatureSet = Monomorphic TermTypes | Polymorphic Typeclass EVar EType [TermTypes]  
+  deriving(Show)
+
 data MorlocState = MorlocState
   { statePackageMeta :: [PackageMeta]
   -- ^ The parsed contents of a package.yaml file
@@ -154,8 +158,7 @@ data MorlocState = MorlocState
   -- Also used (after resetting to 0) in each of the backend generators.
   , stateDepth :: Int
   -- ^ store depth in the SAnno tree in the frontend and backend typecheckers
-  , stateSignatures :: GMap Int Int TermTypes
-  , stateTypeclassTerms :: GMap Int Int (Typeclass, EType, [TermTypes])
+  , stateSignatures :: GMap Int Int SignatureSet
   , stateConcreteTypedefs :: GMap Int MVar (Map Lang Scope)
   -- ^ stores type functions that are in scope for a given module and language
   , stateGeneralTypedefs  :: GMap Int MVar           Scope

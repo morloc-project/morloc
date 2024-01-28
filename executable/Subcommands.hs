@@ -22,7 +22,6 @@ import qualified Morloc.Data.GMap as GMap
 import Morloc.CodeGenerator.Namespace (SerialManifold(..))
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.Pretty ()
-import Morloc.Frontend.Pretty ()
 import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.Map as Map
@@ -121,7 +120,8 @@ writeTerm s i typeDoc =
     case ( Map.lookup i (stateName s)
          , GMap.lookup i (stateSignatures s))
     of
-        (Just v, GMapJust TermTypes{termGeneral = Just t'}) -> pretty v <+> "::" <+> pretty t'
+        (Just v, GMapJust (Monomorphic TermTypes{termGeneral = Just t'})) -> pretty v <+> "::" <+> pretty t'
+        (Just _, GMapJust (Polymorphic cls v t _)) -> "class" <+> pretty cls <+> pretty v <+> "::" <+> pretty (etype t)
         (Just v, _) -> pretty v <+> "|-" <+> typeDoc
         _ -> "MISSING"
 

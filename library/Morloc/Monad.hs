@@ -35,6 +35,7 @@ module Morloc.Monad
   , setCounter
   , takeFromCounter
   -- * metadata accessors
+  , metaMonomorphicTermTypes
   , metaTermTypes
   , metaConstraints
   , metaSources
@@ -256,15 +257,26 @@ readLang langStr =
     Nothing -> throwError $ UnknownLanguage langStr
 
 
-metaTermTypes :: Int -> MorlocMonad (Maybe TermTypes)
+metaMonomorphicTermTypes :: Int -> MorlocMonad (Maybe TermTypes)
+metaMonomorphicTermTypes i = do
+  s <- get
+  return $ case GMap.lookup i (stateSignatures s) of
+    (GMapJust (Monomorphic t)) -> Just t
+    _ -> Nothing
+
+
+metaTermTypes :: Int -> MorlocMonad (Maybe [TermTypes])
 metaTermTypes i = do
   s <- get
-  case GMap.lookup i (stateSignatures s) of
-    GMapNoFst -> return Nothing
-    GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
-    (GMapJust t) -> return (Just t)
+  return $ case GMap.lookup i (stateSignatures s) of
+    (GMapJust (Monomorphic t)) -> Just [t]
+    (GMapJust (Polymorphic _ _ _ ts)) -> Just ts
+    _ -> Nothing
 
--- | Return sources for constructing an object. These are used by `NamE NamObject` expressions.
+-- | Return sources for constructing an object. These are used by `NamE NamObject`
+-- expressions. Sources here includes some that are not linked to signatures, such
+-- as language-specific imports of object constructors. So this supersets the
+-- stateSignatures field's sources.
 metaSources :: Int -> MorlocMonad [Source]
 metaSources i = do
   s <- gets stateSources
@@ -281,7 +293,8 @@ metaConstraints :: Int -> MorlocMonad [Constraint]
 metaConstraints i = do
   s <- gets stateSignatures 
   return $ case GMap.lookup i s of
-    (GMapJust (TermTypes (Just e) _ _)) -> Set.toList (econs e)
+    (GMapJust (Monomorphic (TermTypes (Just e) _ _))) -> Set.toList (econs e)
+    (GMapJust (Polymorphic _ _ e _)) -> Set.toList (econs e)
     _ -> []
 
 -- | Properties are cunrrently not used after Sanno types are created. The only
@@ -291,7 +304,8 @@ metaProperties :: Int -> MorlocMonad [Property]
 metaProperties i = do
   s <- gets stateSignatures 
   return $ case GMap.lookup i s of
-    (GMapJust (TermTypes (Just e) _ _)) -> Set.toList (eprop e)
+    (GMapJust (Monomorphic (TermTypes (Just e) _ _))) -> Set.toList (eprop e)
+    (GMapJust (Polymorphic _ _ e _)) -> Set.toList (eprop e)
     _ -> []
 
 -- | The name of a morloc composition. These names are stored in the monad

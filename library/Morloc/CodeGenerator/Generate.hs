@@ -444,9 +444,9 @@ generalSerial x0@(SAnno _ (Idx i t)) = do
       return $ ncmd { commandArgs = vs }
     generalSerial' base ps (SAnno (One (VarS (EV v), _)) _) =
       return $ base { commandSubs = [(ps, v, [])] }
-    generalSerial' _ _ (SAnno (One _) (Idx _ gt)) = do
-      MM.throwError . OtherError . render $
-        "Cannot serialize general type:" <+> pretty gt
+    -- bad states
+    generalSerial' NexusCommand{} _ (SAnno (One (AppS _ _, ())) _) = error "Functions should not occur here, observed AppS"
+    generalSerial' NexusCommand{} _ (SAnno (One (CallS _, ())) _) = error "Functions should not occur here, observed CallS"
 
 
 {- | Remove lambdas introduced through substitution

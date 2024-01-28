@@ -1,4 +1,4 @@
-module main (foo)
+module main (foo, bar)
 
 type Cpp => Int = "int"
 type Cpp => Real = "double"

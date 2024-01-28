@@ -16,6 +16,7 @@ module Morloc.Pretty
 import Morloc.Data.Doc
 import Morloc.Namespace
 import qualified Data.Set as Set
+import qualified Data.Map as Map
 
 instance Pretty Symbol where
   pretty (TypeSymbol x) = viaShow x
@@ -37,6 +38,22 @@ instance Pretty EVar where
 
 instance Pretty TVar where
   pretty (TV v) = pretty v
+
+instance Pretty Typeclass where
+  pretty = pretty . unTypeclass
+
+instance (Pretty k1, Pretty k2, Pretty v) => Pretty (GMap k1 k2 v) where
+  pretty (GMap m1 m2) = "GMap" <+> (align . vsep $ [pretty (Map.toList m1), pretty (Map.toList m2)])
+
+instance Pretty SignatureSet where
+  pretty (Monomorphic t) = pretty t
+  pretty (Polymorphic cls v t ts)
+    = "class" <+> pretty cls
+    <+> (align . vsep $ (pretty v <+> "::" <+> parens (pretty t)) : map pretty ts)
+
+instance Pretty TermTypes where
+  pretty (TermTypes (Just t) cs es) = "TermTypes" <+> (align . vsep $ (parens (pretty t) : map pretty cs <> map pretty es))
+  pretty (TermTypes Nothing cs es) = "TermTypes" <+> "?" <> (align . vsep $ (map pretty cs <> map pretty es))
 
 instance Pretty Key where
   pretty (Key v) = pretty v
@@ -79,7 +96,7 @@ instance Pretty Type where
               (vsep [pretty k <+> "::" <+> pretty x | (k, x) <- rs])
 
 instance Pretty EType where
-  pretty (EType t (Set.toList -> ps) (Set.toList -> cs)) = case (ps, cs) of 
+  pretty (EType t (Set.toList -> ps) (Set.toList -> cs)) = case (ps, cs) of
     ([], []) -> pretty t
     _ -> parens (psStr ps <> pretty t <> csStr cs)
     where
@@ -100,7 +117,7 @@ instance Pretty Constraint where
   pretty (Con x) = pretty x
 
 instance Pretty TypeU where
-  pretty (FunU [] t) = "() -> " <> prettyTypeU t 
+  pretty (FunU [] t) = "() -> " <> prettyTypeU t
   pretty (FunU ts t) = hsep $ punctuate " ->" (map prettyTypeU (ts <> [t]))
   pretty (ForallU _ t) = pretty t
   pretty t = prettyTypeU t
@@ -172,7 +189,7 @@ prettySExpr fc fg x0 = case x0 of
   (CallS src) -> "CallS<" <> pretty (srcName src) <> "@" <> pretty (srcLang src) <> ">"
 
 instance (Pretty k, Pretty a) => Pretty (IndexedGeneral k a) where
-  pretty (Idx i x) = parens (pretty i <> ":" <+> pretty x) 
+  pretty (Idx i x) = parens (pretty i <> ":" <+> pretty x)
 
 instance Pretty GammaIndex where
   pretty (VarG tv) = "VarG:" <+> pretty tv
@@ -186,3 +203,59 @@ instance Pretty GammaIndex where
   pretty (MarkG tv) = "MarkG:" <+> pretty tv
   pretty (SrcG (Source ev1 lang _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
   pretty (AnnG v t) = pretty v <+> "::" <+> pretty t
+
+instance Pretty ExprI where
+  pretty (ExprI i e) = parens (pretty e) <> ":" <> pretty i
+
+instance Pretty Expr where
+  pretty UniE = "()"
+  pretty (ModE v es) = align . vsep $ ("module" <+> pretty v) : map pretty es
+  pretty (ClsE cls vs sigs) = "class" <+> pretty cls <+> hsep (map pretty vs) <> (align . vsep . map pretty) sigs
+  pretty (IstE cls ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
+  pretty (TypE lang v vs t)
+    = "type" <+> pretty lang <> "@" <> pretty v
+    <+> sep (map pretty vs) <+> "=" <+> pretty t
+  pretty (ImpE (Import m Nothing _ _)) = "import" <+> pretty m
+  pretty (ImpE (Import m (Just xs) _ _)) = "import" <+> pretty m <+> tupled (map pretty xs)
+  pretty (ExpE v) = "export" <+> pretty v
+  pretty (VarE s) = pretty s
+  pretty (AccE e k) = parens (pretty e) <> "@" <> pretty k
+  pretty (LamE v e) = "\\" <+> pretty v <+> "->" <+> pretty e
+  pretty (AnnE e ts) = parens
+    $   pretty e
+    <+> "::"
+    <+> encloseSep "(" ")" "; " (map pretty ts)
+  pretty (LstE es) = encloseSep "[" "]" "," (map pretty es)
+  pretty (TupE es) = encloseSep "[" "]" "," (map pretty es)
+  pretty (AppE f es) = vsep (map pretty (f:es))
+  pretty (NamE rs) = block 4 "<RECORD>" (vsep [pretty k <+> "::" <+> pretty x | (k, x) <- rs])
+  pretty (RealE x) = pretty (show x)
+  pretty (IntE x) = pretty (show x)
+  pretty (StrE x) = dquotes (pretty x)
+  pretty (LogE x) = pretty x
+  pretty (AssE v e es) = pretty v <+> "=" <+> pretty e <+> "where" <+> (align . vsep . map pretty) es
+  pretty (SrcE (Source name lang file' alias label))
+    = "source"
+    <+> viaShow lang
+    <> maybe "" (\f -> "from" <+> pretty f) file'
+    <+> "("
+    <> dquotes (pretty name) <+> "as" <+>  pretty alias <> maybe "" (\s -> ":" <> pretty s) label
+    <> ")"
+  pretty (SigE (Signature v _ e)) =
+    pretty v <+> "::" <+> eprop' <> etype' <> econs'
+    where
+      eprop' :: Doc ann
+      eprop' =
+        case Set.toList (eprop e) of
+          [] -> ""
+          xs -> tupled (map pretty xs) <+> "=> "
+      etype' :: Doc ann
+      etype' = pretty (etype e)
+      econs' :: Doc ann
+      econs' =
+        case Set.toList (econs e) of
+          [] -> ""
+          xs -> " where" <+> tupled (map (\(Con x) -> pretty x) xs)
+
+instance Pretty Signature where
+  pretty (Signature v _ e) = pretty v <+> "::" <+> pretty (etype e)

@@ -12,6 +12,8 @@ module Morloc.Data.GMap
   , empty
   , innerKeys
   , insert
+  , insertWith
+  , insertWithM
   , change
   , insertMany
   , insertManyWith
@@ -48,7 +50,7 @@ mapValsWithKeyM f (GMap m1 m2) = do
 mapKeys :: (Ord a') => (a -> a') -> GMap a b c -> GMap a' b c
 mapKeys f (GMap x y) = GMap (Map.mapKeys f x) y
 
-mapInnerKeys :: (Ord b') => (b -> b') -> GMap a b c -> GMap a b' c 
+mapInnerKeys :: (Ord b') => (b -> b') -> GMap a b c -> GMap a b' c
 mapInnerKeys f (GMap x y) = GMap (Map.map f x) (Map.mapKeys f y)
 
 keys :: GMap a b c -> [a]
@@ -64,7 +66,18 @@ empty :: GMap a b c
 empty = GMap Map.empty Map.empty
 
 insert :: (Ord a, Ord b) => a -> b -> c -> GMap a b c -> GMap a b c
-insert k1 k2 x (GMap m1 m2) = GMap (Map.insert k1 k2 m1) (Map.insert k2 x m2) 
+insert k1 k2 x (GMap m1 m2) = GMap (Map.insert k1 k2 m1) (Map.insert k2 x m2)
+
+insertWith :: (Ord a, Ord b) => (c -> c -> c) -> a -> b -> c -> GMap a b c -> GMap a b c
+insertWith f k1 k2 x (GMap m1 m2) = GMap (Map.insert k1 k2 m1) (Map.insertWith f k2 x m2)
+
+insertWithM :: (Monad m, Ord a, Ord b) => (c -> c -> m c) -> a -> b -> c -> GMap a b c -> m (GMap a b c)
+insertWithM f k1 k2 x1 (GMap m1 m2) = do
+  let map1 = Map.insert k1 k2 m1
+  x3 <- case Map.lookup k2 m2 of
+    (Just x2) -> f x1 x2
+    Nothing -> return x1
+  return $ GMap map1 (Map.insert k2 x3 m2)
 
 -- | Given an outer key, change the inner value. This may change the values
 -- associated with many other outer keys.
@@ -95,6 +108,6 @@ lookup :: (Ord a, Ord b) => a -> GMap a b c -> GMapRet c
 lookup k1 (GMap m1 m2) =
   case Map.lookup k1 m1 of
     Nothing -> GMapNoFst
-    (Just k2) -> case Map.lookup k2 m2 of 
+    (Just k2) -> case Map.lookup k2 m2 of
       Nothing -> GMapNoSnd
       (Just x) -> GMapJust x
