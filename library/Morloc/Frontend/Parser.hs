@@ -276,9 +276,13 @@ pInstance = do
   _ <- reserved "instance"
   v <- freenameU
   ts <- many1 pType
-  srcs <- option [] (reserved "where" >> alignInset pSource) |>> concat
-  srcEs <- mapM (exprI . SrcE) srcs
-  exprI $ IstE (Typeclass v) ts srcEs
+  es <- option [] (reserved "where" >> alignInset pInstanceExpr) |>> concat
+  exprI $ IstE (Typeclass v) ts es
+  where
+    pInstanceExpr :: Parser [ExprI]
+    pInstanceExpr
+      = try (pSource >>= mapM (exprI . SrcE))
+      <|> (pAssE |>> return)
 
 pTypedef :: Parser ExprI
 pTypedef = try pTypedefType <|> pTypedefObject where

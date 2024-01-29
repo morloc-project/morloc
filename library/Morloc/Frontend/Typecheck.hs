@@ -119,13 +119,17 @@ resolveInstances (SAnno (Many es0) (Idx gidx gtype)) = do
     s <- MM.get
     case GMap.lookup i (stateSignatures s) of
       (GMapJust (Polymorphic cls v gt ts)) -> do
-        MM.sayVVV $ "  polymorphic type found:" <+> pretty i <+> pretty cls <+> pretty v <+> parens (pretty gt)
         let xs = [(etype t, map (second val) srcs) | (TermTypes (Just t) srcs _) <- ts]
         let mostSpecificTypes = MTP.mostSpecificSubtypes gtype (map fst xs)
         let ts' = [t | t@(TermTypes (Just et) _ _) <- ts, etype et `elem` mostSpecificTypes]
-        MM.put (s {
-          stateSignatures = GMap.insert i i (Polymorphic cls v gt ts') (stateSignatures s)
-        })
+
+        MM.sayVVV $ "  polymorphic type found:" <+> pretty i <+> pretty cls <+> pretty v <+> parens (pretty gt)
+                  <> "\n  length ts:" <+> pretty (length ts)
+                  <> "\n  gtype:" <+> pretty gtype
+                  <> "\n  (map fst xs):" <+> list (map (pretty . fst) xs)
+                  <> "\n  mostSpecificSubtypes gtype (map fst xs):" <+> list (map pretty (MTP.mostSpecificSubtypes gtype (map fst xs)))
+                  <> "\n  length ts':" <+> pretty (length ts')
+
         return $ if not (null ts')
           then Just x
           else Nothing
@@ -145,10 +149,16 @@ resolveInstances (SAnno (Many es0) (Idx gidx gtype)) = do
 lookupType :: Int -> Gamma -> MorlocMonad (Maybe (Gamma, TypeU))
 lookupType i g = do
   m <- CMS.gets stateSignatures
-  return $ case GMap.lookup i m of
-    GMapJust (Monomorphic (TermTypes (Just (EType t _ _)) _ _)) -> Just $ rename g t
-    GMapJust (Polymorphic _ _ (EType t _ _) _) -> Just $ rename g t
-    _ -> Nothing
+  case GMap.lookup i m of
+    GMapJust (Monomorphic (TermTypes (Just (EType t _ _)) _ _)) -> do
+      MM.sayVVV $ "lookupType monomorphic:" <+> pretty i <+> "found" <+> parens (pretty t)
+      return . Just $ rename g t
+    GMapJust (Polymorphic cls v (EType t _ _) _) -> do
+      MM.sayVVV $ "lookupType polymorphic:"  <+> pretty i <+> "found" <+> pretty cls <+> pretty v <+> parens (pretty t)
+      return . Just $ rename g t
+    _ -> do
+      MM.sayVVV $ "lookupType failed to find:"  <+> pretty i
+      return Nothing
 
 -- prepare a general, indexed typechecking error
 gerr :: Int -> TypeError -> MorlocMonad a
@@ -366,6 +376,8 @@ synthE i g (CallS src) = do
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
 synthE i g (VarS v) = do
+  MM.sayVVV $ "synthE VarS:" <+> tupled [pretty i, pretty v]
+
   -- is this a bound variable that has already been solved
   (g', t') <- case lookupE v g of
     -- yes, return the solved type
@@ -378,6 +390,9 @@ synthE i g (VarS v) = do
         -- no, then I don't know what it is and will return an existential
         -- if this existential is never solved, then it will become universal later
         Nothing -> return $ newvar (unEVar v <> "_u") g
+
+  MM.sayVVV $ "synthE VarS found type:" <+> pretty t'
+
   return (g', t', VarS v)
 
 

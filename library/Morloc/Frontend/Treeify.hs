@@ -337,7 +337,9 @@ collect i = do
 
 collectSAnno :: ExprI -> MorlocMonad (SAnno Int Many Int)
 collectSAnno e@(ExprI i (VarE v)) = do
+  MM.sayVVV $ "collectSAnno VarE:" <+> pretty v
   maybeTermTypes <- MM.metaTermTypes i
+  MM.sayVVV $ "maybeTermTypes:" <+> pretty maybeTermTypes
 
   es <- case maybeTermTypes of
     -- if Nothing, then the term is a bound variable
@@ -438,7 +440,7 @@ collectSExpr (ExprI i e0) = (,) <$> f e0 <*> pure i
   f ExpE{} = undefined
   f SrcE{} = undefined
   f SigE{} = undefined
-  f AssE{} = undefined
+  f (AssE v _ _) = error $ "Found AssE in collectSExpr: " <> show v 
 
 reindexExprI :: ExprI -> MorlocMonad ExprI
 reindexExprI (ExprI i e) = ExprI <$> newIndex i <*> reindexExpr e
@@ -503,6 +505,17 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
   -- fold the instances into the current typeclass map and return
   moduleClasses <- foldlM addInstance allClasses instances
 
+  MM.sayVVV $ "moduleClasses:"
+         <+> list (
+           map ( \ (v, (cls,vs,et,ts))
+                 -> pretty v <+> "="
+                 <+> pretty cls
+                 <+> pretty vs
+                 <+> parens (pretty (etype et))
+                 <+> list (map pretty ts)
+              ) (Map.toList moduleClasses)
+         )
+
   mapM_ (linkVariablesToTypeclasses moduleClasses) es0
 
   return moduleClasses
@@ -525,6 +538,7 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
       f (ExprI srcIndex (SrcE src)) =
         case Map.lookup (srcAlias src) clsmap of
           (Just (cls1, vs, generalType, otherInstances)) -> do
+            MM.sayVVV $ "Adding SrcE instance:" <+> pretty (srcAlias src) <+> pretty srcIndex
             when (cls1 /= cls0) (error "Conflicting instances")
             when (length vs /= length ts0) (error "Conflicting class and instance parameter count")
             let instanceType = generalType { etype = foldl (\t (v,r) -> substituteTVar v r t) (requalify vs (etype generalType)) (zip vs ts0) }
@@ -532,6 +546,19 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
             let typeterms = mergeTermTypes newTerm otherInstances
             return (srcAlias src, (cls0, vs, generalType, typeterms))
           Nothing -> error "No typeclass found for instance"
+
+      f (ExprI assIdx (AssE v e _)) =
+        case Map.lookup v clsmap of
+          (Just (cls1, vs, generalType, otherInstances)) -> do
+            MM.sayVVV $ "Adding AssE instance:" <+> pretty v <+> pretty assIdx
+            when (cls1 /= cls0) (error "Conflicting instances")
+            when (length vs /= length ts0) (error "Conflicting class and instance parameter count")
+            let instanceType = generalType { etype = foldl (\t (v',r) -> substituteTVar v' r t) (requalify vs (etype generalType)) (zip vs ts0) }
+            let newTerm = TermTypes (Just instanceType) [] [e]
+            let typeterms = mergeTermTypes newTerm otherInstances
+            return (v, (cls0, vs, generalType, typeterms))
+          Nothing -> error "No typeclass found for instance"
+
       f _ = error "Only source statements are currently allowed in instances (generalization is in development)"
 
       mergeInstances
@@ -548,18 +575,6 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
         | otherwise = ForallU v' (requalify vs t)
       requalify _ t = t
 
-      unionTermTypes :: [TermTypes] -> [TermTypes] -> [TermTypes]
-      unionTermTypes ts1 ts2 = foldr mergeTermTypes ts2 ts1
-
-      mergeTermTypes :: TermTypes -> [TermTypes] -> [TermTypes]
-      mergeTermTypes t1@(TermTypes (Just gt1) srcs1 es1) (t2@(TermTypes (Just gt2) srcs2 es2):ts)
-        | PO.equivalent (etype gt1) (etype gt2) = TermTypes (Just gt1) (unique (srcs1 <> srcs2)) (es1 <> es2) : ts
-        | otherwise = t2 : mergeTermTypes t1 ts
-      mergeTermTypes (TermTypes Nothing srcs1 es1) ((TermTypes e2 srcs2 es2):ts2) =
-        mergeTermTypes (TermTypes e2 (srcs1 <> srcs2) (es1 <> es2)) ts2
-      mergeTermTypes TermTypes{} (TermTypes{}:_) = error "what the why?"
-      mergeTermTypes t1 [] = [t1]
-
     linkVariablesToTypeclasses
       :: Map.Map EVar (Typeclass, [TVar], EType, [TermTypes])
       -> ExprI
@@ -574,6 +589,7 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
         -- shadow all terms bound under the lambda
         let m' = foldr Map.delete m ks
         mapM_ (link m') (e:es)
+      link m (ExprI _ (AssE _ e es)) = mapM_ (link m) (e:es)
       -- modules currently cannot be nested (should this be allowed?)
       link _ (ExprI _ (ModE v _)) = MM.throwError $ NestedModule v
       -- everything below boilerplate
@@ -592,7 +608,9 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
 
           MM.sayVVV $ "setClass map:" <+> viaShow m
 
-          mapM_ mapSources ts
+          mapM_ (mapSources cls v t) ts
+          mapM_ (mapExpressions cls v t) ts
+
           s <- CMS.get
           -- Yes, both indices are termIndex. After typechecking, the
           -- polymorphic type will resolve to monomorphic. Each may resolve
@@ -603,24 +621,52 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
           return ()
         Nothing -> return ()
 
-      mapSources :: TermTypes -> MorlocMonad ()
-      mapSources t = mapM_ (mapSource . snd) (termConcrete t) where
+      mapSources :: Typeclass -> EVar -> EType -> TermTypes -> MorlocMonad ()
+      mapSources cls v gt t = mapM_ (mapSource . snd) (termConcrete t) where
         mapSource :: Indexed Source -> MorlocMonad ()
         mapSource (Idx i src) = do
+          let t' = TermTypes (termGeneral t) [(mv, srcidx) | (mv, srcidx) <- termConcrete t, val srcidx == src] []
           MM.sayVVV $ "mapSource" <+> pretty i <+> pretty src
+                    <> "\n  termGeneral t:" <+> pretty (termGeneral t)
+                    <> "\n  termGeneral t':" <+> pretty (termGeneral t')
+                    <> "\n  length (termConcrete t):" <+> pretty (length (termConcrete t))
+                    <> "\n  length (termConcrete t'):" <+> pretty (length (termConcrete t'))
           s <- CMS.get
-          newMap <- GMap.insertWithM mergeSignatureSet i i (Monomorphic t) (stateSignatures s)
+          newMap <- GMap.insertWithM mergeSignatureSet i i (Polymorphic cls v gt [t']) (stateSignatures s)
+          CMS.put (s { stateSignatures = newMap })
+          return ()
+
+      mapExpressions :: Typeclass -> EVar -> EType -> TermTypes -> MorlocMonad ()
+      mapExpressions cls v gt t = mapM_ mapExpression (termDecl t) where
+        mapExpression :: ExprI -> MorlocMonad ()
+        mapExpression (ExprI i _) = do
+          MM.sayVVV $ "mapExpression" <+> pretty i
+          s <- CMS.get
+          let t' = TermTypes (termGeneral t) [] [e | e@(ExprI i' _) <- termDecl t, i' == i]
+          newMap <- GMap.insertWithM mergeSignatureSet i i (Polymorphic cls v gt [t']) (stateSignatures s)
           CMS.put (s { stateSignatures = newMap })
           return ()
 
       mergeSignatureSet :: SignatureSet -> SignatureSet -> MorlocMonad SignatureSet
       mergeSignatureSet (Polymorphic cls1 v1 t1 ts1) (Polymorphic cls2 v2 t2 ts2)
-        | cls1 == cls2 && t1 == t2 && v1 == v2 = return $ Polymorphic cls1 v1 t1 (ts1 <> ts2)
+        | cls1 == cls2 && PO.equivalent (etype t1) (etype t2) && v1 == v2 = return $ Polymorphic cls1 v1 t1 (unionTermTypes ts1 ts2)
         | otherwise = error "Invalid SignatureSet merge"
       mergeSignatureSet (Monomorphic ts1) (Monomorphic ts2) = Monomorphic <$> combineTermTypes ts1 ts2
       mergeSignatureSet _ _ = undefined
--- data SignatureSet = Monomorphic TermTypes | Polymorphic Typeclass EType [TermTypes]
 findTypeclasses _ _ = undefined
+
+unionTermTypes :: [TermTypes] -> [TermTypes] -> [TermTypes]
+unionTermTypes ts1 ts2 = foldr mergeTermTypes ts2 ts1
+
+mergeTermTypes :: TermTypes -> [TermTypes] -> [TermTypes]
+mergeTermTypes t1@(TermTypes (Just gt1) srcs1 es1) (t2@(TermTypes (Just gt2) srcs2 es2):ts)
+  | PO.equivalent (etype gt1) (etype gt2) = TermTypes (Just gt1) (unique (srcs1 <> srcs2)) (es1 <> es2) : ts
+  | otherwise = t2 : mergeTermTypes t1 ts
+mergeTermTypes (TermTypes Nothing srcs1 es1) ((TermTypes e2 srcs2 es2):ts2) =
+  mergeTermTypes (TermTypes e2 (srcs1 <> srcs2) (es1 <> es2)) ts2
+mergeTermTypes TermTypes{} (TermTypes{}:_) = error "what the why?"
+mergeTermTypes t1 [] = [t1]
+
 
 
 mergeTypeclasses
@@ -629,7 +675,7 @@ mergeTypeclasses
   -> MorlocMonad (Typeclass, [TVar], EType, [TermTypes])
 mergeTypeclasses (cls1, vs1, t1, ts1) (cls2, vs2, t2, ts2)
   | cls1 /= cls2 = error "Conflicting typeclasses"
-  | t1 /= t2 = error "Conflicting typeclass term general type"
+  | not (PO.equivalent (etype t1) (etype t2)) = error "Conflicting typeclass term general type"
   | length vs1 /= length vs2 = error "Conflicting typeclass parameter count"
   -- here I should do reciprocal subtyping
-  | otherwise = return (cls1, vs1, t1, ts1 <> ts2)
+  | otherwise = return (cls1, vs1, t1, unionTermTypes ts1 ts2)

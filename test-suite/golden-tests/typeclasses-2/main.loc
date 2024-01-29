@@ -1,0 +1,40 @@
+module main (paste, sum)
+
+type Cpp => Int = "int"
+type Cpp => Real = "double"
+type Cpp => Str = "std::string"
+type Cpp => List a = "std::vector<$1>" a
+
+type Py => Int = "int"
+type Py => Real = "float"
+type Py => Str = "str"
+type Py => List a = "list" a
+
+class Monoid a where
+  empty :: a
+  op :: a -> a -> a
+
+instance Monoid Int where
+  source Cpp from "foo.hpp" ("addInt" as op)
+  source Py from "foo.py" ("addInt" as op)
+  empty = 0
+
+instance Monoid Real where
+  source Cpp from "foo.hpp" ("addReal" as op)
+  source Py from "foo.py" ("addReal" as op)
+  empty = 0.0
+
+instance Monoid Str where
+  source Cpp from "foo.hpp" ("addStr" as op)
+  source Py from "foo.py" ("addStr" as op)
+  empty = ""
+
+source Cpp from "foo.hpp" ("fold")
+source Py from "foo.py" ("fold")
+fold :: (b -> a -> b) -> b -> [a] -> b
+
+sum :: [Real] -> Real
+sum = fold op empty
+
+paste :: [String] -> String
+paste = fold op empty
