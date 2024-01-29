@@ -37,15 +37,15 @@ instance P.PartialOrd TypeU where
   (<=) (ForallU v t1) t2
     | (P.==) (ForallU v t1) t2 = True
     | otherwise = (P.<=) (substituteFirst v t1 t2) t2
-  (<=) (FunU (t11:rs1) t12) (FunU (t21:rs2) t22) = t11 <= t21 && FunU rs1 t12 <= FunU rs2 t22
-  (<=) (FunU [] t12) (FunU [] t22) = t12 <= t22 
-  (<=) (AppU t1 (t11:rs1)) (AppU t2 (t21:rs2)) = t11 <= t21 && AppU t1 rs1 <= AppU t2 rs2
-  (<=) (AppU t1 []) (AppU t2 []) = t1 <= t2
+  (<=) (FunU (t11:rs1) t12) (FunU (t21:rs2) t22) = t11 P.<= t21 && FunU rs1 t12 P.<= FunU rs2 t22
+  (<=) (FunU [] t12) (FunU [] t22) = t12 P.<= t22
+  (<=) (AppU t1 (t11:rs1)) (AppU t2 (t21:rs2)) = t11 P.<= t21 && AppU t1 rs1 P.<= AppU t2 rs2
+  (<=) (AppU t1 []) (AppU t2 []) = t1 P.<= t2
   -- the records do not need to be in the same order to be equivalent
   -- ---- do I need to sort on ps1/ps2 as well?
   (<=) (NamU o1 n1 ps1 ((k1,e1):rs1)) (NamU o2 n2 ps2 es2)
     = case DL.partition ((== k1) . fst) es2 of
-       ([(_,e2)], rs2) -> e1 <= e2 && NamU o1 n1 ps1 rs1 <= NamU o2 n2 ps2 rs2
+       ([(_,e2)], rs2) -> e1 P.<= e2 && NamU o1 n1 ps1 rs1 P.<= NamU o2 n2 ps2 rs2
        _ -> False
   (<=) (NamU o1 n1 ps1 []) (NamU o2 n2 ps2 [])
     = o1 == o2 && n1 == n2 && length ps1 == length ps2

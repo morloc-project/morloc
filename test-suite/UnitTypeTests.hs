@@ -570,7 +570,28 @@ orderInvarianceTests =
 typeOrderTests =
   testGroup
     "Tests of type partial ordering (subtype)"
-    [ testTrue
+    [ testFalse
+        "Str !< Real"
+        (MP.isSubtypeOf str real)
+    , testFalse
+        "Real !< Str"
+        (MP.isSubtypeOf real str)
+    , testFalse
+        "[Real] !< [Str]"
+        (MP.isSubtypeOf (lst real) (lst str))
+    , testFalse
+        "[Str] !< [Real]"
+        (MP.isSubtypeOf (lst str) (lst real))
+    , testFalse
+        "Str -> Str -> Str !< Real -> Real -> Real"
+        (MP.isSubtypeOf (fun [str, str, str]) (fun [real, real, real]))
+    , testFalse
+        "Real -> Real -> Real !< Str -> Str -> Str"
+        (MP.isSubtypeOf (fun [real, real, real]) (fun [str, str, str]))
+    , testFalse
+        "Str -> Str !< Int -> Int -> Int"
+        (MP.isSubtypeOf (fun [str, str]) (fun [int, int, int]))
+    , testTrue
         "a <: Int"
         (MP.isSubtypeOf (forall ["a"] (var "a")) int)
     , testFalse
@@ -637,6 +658,14 @@ typeOrderTests =
         "mostSpecificSubtypes: Int against [forall a . a]"
         (MP.mostSpecificSubtypes int [forall ["a"] (var "a")])
         [forall ["a"] (var "a")]
+    , testEqual
+        "mostSpecificSubtypes: (Int -> Int)"
+        (MP.mostSpecificSubtypes (fun [int, int]) [fun [str,str], fun [int, int], forall ["a"] (fun [var "a", var "a"])])
+        [fun [int, int]]
+    , testEqual
+        "mostSpecificSubtypes: empty"
+        (MP.mostSpecificSubtypes (fun [str, str, str]) [fun [real, real, real]])
+        []
 
     -- test mostSpecificSubtypes for tuples
     , testEqual
