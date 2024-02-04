@@ -33,8 +33,8 @@ source Cpp from "foo.hpp" ("fold")
 source Py from "foo.py" ("fold")
 fold :: (b -> a -> b) -> b -> [a] -> b
 
-sum :: [Real] -> Real
+sum :: [Int] -> Int
 sum = fold op empty
 
-paste :: [String] -> String
+paste :: [Str] -> Str
 paste = fold op empty
