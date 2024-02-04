@@ -16,7 +16,7 @@ import Morloc.Frontend.Treeify (treeify)
 typecheckFrontend
   :: Maybe Path
   -> Code
-  -> MorlocMonad [SAnno (Indexed TypeU) Many Int]
+  -> MorlocMonad [AnnoS (Indexed TypeU) Many Int]
 typecheckFrontend path code
   -- Maybe Path -> Text -> [Module]
   -- parse code into unannotated modules

@@ -540,7 +540,7 @@ pAcc = do
   e <- parens pExpr <|> pNamE <|> pVar
   _ <- symbol "@"
   f <- freenameL
-  exprI $ AccE e (Key f)
+  exprI $ AccE (Key f) e
 
 
 pAnn :: Parser ExprI

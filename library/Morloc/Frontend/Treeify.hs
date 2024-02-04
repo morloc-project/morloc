@@ -2,7 +2,7 @@
 
 {-|
 Module      : Morloc.Frontend.Treeify
-Description : Translate from the frontend DAG to the backend SAnno AST forest
+Description : Translate from the frontend DAG to the backend AnnoS AST forest
 Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
@@ -14,7 +14,6 @@ module Morloc.Frontend.Treeify (treeify) where
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
 import Morloc.Pretty ()
-import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Monad as MM
@@ -42,7 +41,7 @@ data TermOrigin = Declared ExprI | Sourced Source
 -- and locations in source code.
 treeify
   :: DAG MVar [(EVar, EVar)] ExprI
-  -> MorlocMonad [SAnno Int Many Int]
+  -> MorlocMonad [AnnoS Int ManyPoly Int]
 treeify d
  | Map.size d == 0 = return []
  | otherwise = case DAG.roots d of
@@ -109,7 +108,7 @@ treeify d
                             , stateName = Map.union (stateName s) (Map.fromList exports)})
 
          -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
-         mapM (collect . fst) exports
+         mapM (uncurry collect) exports
 
    -- There is no currently supported use case that exposes multiple roots in
    -- one compilation process. The compiler executable takes a single morloc
@@ -210,7 +209,7 @@ linkVariablesToTermTypes mv m0 = mapM_ (link m0) where
   -- modules currently cannot be nested (should this be allowed?)
   link _ (ExprI _ (ModE v _)) = MM.throwError $ NestedModule v
   -- everything below boilerplate
-  link m (ExprI _ (AccE e _)) = link m e
+  link m (ExprI _ (AccE _ e)) = link m e
   link m (ExprI _ (LstE xs)) = mapM_ (link m) xs
   link m (ExprI _ (TupE xs)) = mapM_ (link m) xs
   link m (ExprI _ (LamE vs e)) = link (foldr Map.delete m vs) e
@@ -303,7 +302,7 @@ linkAndRemoveAnnotations = f where
   -- everything below is boilerplate (this is why I need recursion schemes)
   f (ExprI i (ModE v es)) = ExprI i <$> (ModE v <$> mapM f es)
   f (ExprI i (AssE v e es)) = ExprI i <$> (AssE v <$> f e <*> mapM f es)
-  f (ExprI i (AccE e k)) = ExprI i <$> (AccE <$> f e <*> pure k)
+  f (ExprI i (AccE k e)) = ExprI i <$> (AccE k <$> f e)
   f (ExprI i (LstE es)) = ExprI i <$> (LstE <$> mapM f es)
   f (ExprI i (TupE es)) = ExprI i <$> (TupE <$> mapM f es)
   f (ExprI i (NamE rs)) = do
@@ -322,115 +321,109 @@ linkAndRemoveAnnotations = f where
 --       - to detect recursion, I need to remember every term that has been expanded,
 -- collect v declarations or sources
 collect
-  :: Int -- ^ the index for the export term
-  -> MorlocMonad (SAnno Int Many Int)
-collect i = do
-  t0 <- MM.metaMonomorphicTermTypes i
-  case t0 of
-    -- if Nothing, then the term is a bound variable
-    Nothing -> return (SAnno (Many []) i)
-    -- otherwise is an alias that should be replaced with its value(s)
-    (Just t1) -> do
-      let calls = [(CallS src, i') | (_, Idx i' src) <- termConcrete t1]
-      declarations <- mapM (replaceExpr i) (termDecl t1) |>> concat
-      return $ SAnno (Many (calls <> declarations)) i
-
-collectSAnno :: ExprI -> MorlocMonad (SAnno Int Many Int)
-collectSAnno e@(ExprI i (VarE v)) = do
-  MM.sayVVV $ "collectSAnno VarE:" <+> pretty v
-  maybeTermTypes <- MM.metaTermTypes i
-  MM.sayVVV $ "maybeTermTypes:" <+> pretty maybeTermTypes
-
-  es <- case maybeTermTypes of
-    -- if Nothing, then the term is a bound variable
-    Nothing -> return <$> collectSExpr e
-    (Just []) -> error "No instances"
-    -- otherwise is an alias that should be replaced with its value(s)
-    (Just ts) -> do
-      -- collect all the concrete calls across all instances
-      let calls = [(CallS src, i') | (_, Idx i' src) <- concatMap termConcrete ts]
-      -- collect all the morloc compositions with this name across all instances
-      declarations <- mapM reindexExprI (concatMap termDecl ts) >>= mapM (replaceExpr i) |>> concat
-      -- link this index to the name that is removed
-      s <- CMS.get
-      CMS.put (s { stateName = Map.insert i v (stateName s) })
-      -- pool all the calls and compositions with this name
-      return (calls <> declarations)
-  case es of
-    -- TODO: will this case every actually be reached?
-    -- Should all attributes of i be mapped to j, as done with newIndex?
-    -- Should the general type be the j instead?
-    -- Need to dig into this.
-    [] -> do
-      j <- MM.getCounter
-      return $ SAnno (Many [(VarS v, j)]) i
-    es' -> return $ SAnno (Many es') i
-
--- expression type annotations should have already been accounted for, so ignore
-collectSAnno (ExprI _ (AnnE e _)) = collectSAnno e
-collectSAnno e@(ExprI i _) = do
-  e' <- collectSExpr e
-  return $ SAnno (Many [e']) i
-
--- | This function will handle terms that have been set to be equal
-replaceExpr :: Int -> ExprI -> MorlocMonad [(SExpr Int Many Int, Int)]
--- this will be a nested variable
--- e.g.:
---   foo = bar
-replaceExpr i e@(ExprI j (VarE _)) = do
-  x <- collectSAnno e
-  -- unify the data between the equated terms
-  tiMay <- MM.metaMonomorphicTermTypes i
-  tjMay <- MM.metaMonomorphicTermTypes j
-  t <- case (tiMay, tjMay) of
-    (Just ti, Just tj) -> combineTermTypes ti tj
-    (Just ti, _) -> return ti
-    (_, Just tj) -> return tj
-    _ -> error "You shouldn't have done that"
-
-  st <- MM.get
-
-  case GMap.change i (Monomorphic t) (stateSignatures st) of
-    (Just m) -> MM.modify (\s -> s {stateSignatures = m})
-    _ -> error "impossible"
-
-  case GMap.yIsX j i (stateSignatures st) of
-    (Just m) -> MM.put (st {stateSignatures = m})
-    Nothing -> return ()
-
-  -- pass on just the children
-  case x of
-    (SAnno (Many es) _) -> return es
+  :: Int -- ^ the general index for the term
+  -> EVar
+  -> MorlocMonad (AnnoS Int ManyPoly Int)
+collect gi v = do
+  MM.sayVVV $ "collect"
+            <> "\n  gi:" <+> pretty gi
+            <> "\n  v:" <+> pretty v
+  AnnoS gi gi <$> collectExprS (ExprI gi (VarE v))
 
 
--- -- two terms may also be equivalent when applied, for example:
--- --   foo x = bar x
--- -- this would be rewritten in the parse as `foo = \x -> bar x`
--- -- meaning foo and bar are equivalent after eta-reduction
--- replaceExpr i e@(ExprI _ (LamE vs (ExprI _ (AppE e2@(ExprI _ (VarE _)) xs))))
---     | map VarE vs == [v | (ExprI _ v) <- xs] = replaceExpr i e2
---     | otherwise = return <$> collectSExpr e
-replaceExpr _ e = return <$> collectSExpr e
+collectAnnoS :: ExprI -> MorlocMonad (AnnoS Int ManyPoly Int)
+collectAnnoS e@(ExprI gi _) = AnnoS gi gi <$> collectExprS e
 
--- | Translate ExprI to SExpr tree
-collectSExpr :: ExprI -> MorlocMonad (SExpr Int Many Int, Int)
-collectSExpr (ExprI i e0) = (,) <$> f e0 <*> pure i
-  where
-  f (VarE v) = return (VarS v) -- this must be a bound variable
-  f (AccE e x) = AccS <$> collectSAnno e <*> pure x
-  f (LstE es) = LstS <$> mapM collectSAnno es
-  f (TupE es) = TupS <$> mapM collectSAnno es
+-- -- | This function will handle terms that have been set to be equal
+-- replaceExpr :: Int -> ExprI -> MorlocMonad [(ExprS Int ManyPoly Int, Int)]
+-- -- this will be a nested variable
+-- -- e.g.:
+-- --   foo = bar
+-- replaceExpr i e@(ExprI j (VarE _)) = do
+--   x <- collectAnnoS e
+--   -- unify the data between the equated terms
+--   tiMay <- MM.metaMonomorphicTermTypes i
+--   tjMay <- MM.metaMonomorphicTermTypes j
+--   t <- case (tiMay, tjMay) of
+--     (Just ti, Just tj) -> combineTermTypes ti tj
+--     (Just ti, _) -> return ti
+--     (_, Just tj) -> return tj
+--     _ -> error "You shouldn't have done that"
+--
+--   st <- MM.get
+--
+--   case GMap.change i (Monomorphic t) (stateSignatures st) of
+--     (Just m) -> MM.modify (\s -> s {stateSignatures = m})
+--     _ -> error "impossible"
+--
+--   case GMap.yIsX j i (stateSignatures st) of
+--     (Just m) -> MM.put (st {stateSignatures = m})
+--     Nothing -> return ()
+--
+--   -- pass on just the children
+--   case x of
+--     (AnnoS (Many es) _) -> return es
+--
+--
+-- -- -- two terms may also be equivalent when applied, for example:
+-- -- --   foo x = bar x
+-- -- -- this would be rewritten in the parse as `foo = \x -> bar x`
+-- -- -- meaning foo and bar are equivalent after eta-reduction
+-- -- replaceExpr i e@(ExprI _ (LamE vs (ExprI _ (AppE e2@(ExprI _ (VarE _)) xs))))
+-- --     | map VarE vs == [v | (ExprI _ v) <- xs] = replaceExpr i e2
+-- --     | otherwise = return <$> collectSExpr e
+-- replaceExpr _ e = return <$> collectExprS e
+
+-- | Translate ExprI to ExprS tree
+collectExprS :: ExprI -> MorlocMonad (ExprS Int ManyPoly Int)
+collectExprS (ExprI gi e0) = f e0 where
+  f (VarE v) = do
+    MM.sayVVV $ "collectExprS VarE"
+              <> "\n  gi:" <+> pretty gi
+              <> "\n  v:" <+> pretty v
+    sigs <- MM.gets stateSignatures
+    case GMap.lookup gi sigs of
+
+      -- A monomorphic term will have a type if it is linked to any source
+      -- since sources require signatures. But if it associated only with a
+      -- declaration, then it will have no type.
+      (GMapJust (Monomorphic t)) -> do
+        MM.sayVVV $ "  monomorphic:" <+> maybe "?" pretty (termGeneral t)
+        es <- termtypesToAnnoS t
+        return $ VarS v (MonomorphicExpr (termGeneral t) es)
+
+      -- A polymorphic term should always have a type.
+      (GMapJust (Polymorphic cls clsName t ts)) -> do
+        MM.sayVVV $ "  polymorphic:" <+> list (map (maybe "?" pretty . termGeneral) ts) 
+        ess <- mapM termtypesToAnnoS ts
+        let etypes = map (fromJust . termGeneral) ts
+        return $ VarS v (PolymorphicExpr cls clsName t (zip etypes ess))
+
+      -- Terms not associated with TermTypes objects must be lambda-bound
+      _ -> do
+        MM.sayVVV "bound term"
+        return $ BndS v
+    where
+      termtypesToAnnoS :: TermTypes -> MorlocMonad [AnnoS Int ManyPoly Int]
+      termtypesToAnnoS t = do
+        let calls = [AnnoS gi ci (CallS src) | (_, Idx ci src) <- termConcrete t]
+        declarations <- mapM (\ e@(ExprI ci _) -> reindexExprI e >>= collectExprS |>> AnnoS gi ci) (termDecl t)
+        return (calls <> declarations)
+
+  f (AccE k e) = AccS k <$> collectAnnoS e
+  f (LstE es) = LstS <$> mapM collectAnnoS es
+  f (TupE es) = TupS <$> mapM collectAnnoS es
   f (NamE rs) = do
-    xs <- mapM (collectSAnno . snd) rs
+    xs <- mapM (collectAnnoS . snd) rs
     return $ NamS (zip (map fst rs) xs)
-  f (LamE v e) = LamS v <$> collectSAnno e
-  f (AppE e es) = AppS <$> collectSAnno e <*> mapM collectSAnno es
+  f (LamE v e) = LamS v <$> collectAnnoS e
+  f (AppE e es) = AppS <$> collectAnnoS e <*> mapM collectAnnoS es
   f UniE = return UniS
   f (RealE x) = return (RealS x)
   f (IntE x) = return (IntS x)
   f (LogE x) = return (LogS x)
   f (StrE x) = return (StrS x)
-  -- none of the following cases should ever occur
+-- none of the following cases should ever occur
   f ClsE{} = undefined
   f IstE{} = undefined
   f AnnE{} = undefined
@@ -440,14 +433,14 @@ collectSExpr (ExprI i e0) = (,) <$> f e0 <*> pure i
   f ExpE{} = undefined
   f SrcE{} = undefined
   f SigE{} = undefined
-  f (AssE v _ _) = error $ "Found AssE in collectSExpr: " <> show v 
+  f (AssE v _ _) = error $ "Found an unexpected ass in collectExprS: " <> show v 
 
 reindexExprI :: ExprI -> MorlocMonad ExprI
 reindexExprI (ExprI i e) = ExprI <$> newIndex i <*> reindexExpr e
 
 reindexExpr :: Expr -> MorlocMonad Expr
 reindexExpr (ModE m es) = ModE m <$> mapM reindexExprI es
-reindexExpr (AccE e x) = AccE <$> reindexExprI e <*> pure x
+reindexExpr (AccE k e) = AccE k <$> reindexExprI e
 reindexExpr (AnnE e ts) = AnnE <$> reindexExprI e <*> pure ts
 reindexExpr (AppE e es) = AppE <$> reindexExprI e <*> mapM reindexExprI es
 reindexExpr (AssE v e es) = AssE v <$> reindexExprI e <*> mapM reindexExprI es
@@ -478,6 +471,7 @@ linkTypeclasses _ e es
   = Map.unionsWithM mergeTypeclasses [x | (_,_,x) <- es]
   -- Augment the inherited map with the typeclasses and instances in this module
   >>= findTypeclasses e
+
 
 findTypeclasses
   :: ExprI
@@ -593,7 +587,7 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
       -- modules currently cannot be nested (should this be allowed?)
       link _ (ExprI _ (ModE v _)) = MM.throwError $ NestedModule v
       -- everything below boilerplate
-      link m (ExprI _ (AccE e _)) = link m e
+      link m (ExprI _ (AccE _ e)) = link m e
       link m (ExprI _ (LstE xs)) = mapM_ (link m) xs
       link m (ExprI _ (TupE xs)) = mapM_ (link m) xs
       link m (ExprI _ (LamE vs e)) = link (foldr Map.delete m vs) e

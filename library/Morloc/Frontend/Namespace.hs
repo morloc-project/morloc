@@ -33,7 +33,7 @@ mapExpr :: (Expr -> Expr) -> ExprI -> ExprI
 mapExpr f = g where
   g (ExprI i (ModE v xs)) = ExprI i . f $ ModE v (map g xs)
   g (ExprI i (AssE v e es)) = ExprI i . f $ AssE v (g e) (map g es)
-  g (ExprI i (AccE e k)) = ExprI i . f $ AccE (g e) k
+  g (ExprI i (AccE k e)) = ExprI i . f $ AccE k (g e)
   g (ExprI i (LstE es)) = ExprI i . f $ LstE (map g es)
   g (ExprI i (TupE es)) = ExprI i . f $ TupE (map g es)
   g (ExprI i (AppE e es)) = ExprI i . f $ AppE (g e) (map g es)
@@ -46,7 +46,7 @@ mapExprM :: Monad m => (Expr -> m Expr) -> ExprI -> m ExprI
 mapExprM f = g where
   g (ExprI i (ModE v xs)) = ExprI i <$> (mapM g xs >>= f . ModE v)
   g (ExprI i (AssE v e es)) = ExprI i <$> ((AssE v <$> g e <*> mapM g es) >>= f)
-  g (ExprI i (AccE e k)) = ExprI i <$> ((AccE <$> g e <*> pure k) >>= f)
+  g (ExprI i (AccE k e)) = ExprI i <$> ((AccE k <$> g e) >>= f)
   g (ExprI i (LstE es)) = ExprI i <$> (mapM g es >>= f . LstE)
   g (ExprI i (TupE es)) = ExprI i <$> (mapM g es >>= f . TupE)
   g (ExprI i (AppE e es)) = ExprI i <$> ((AppE <$> g e <*> mapM g es) >>= f)

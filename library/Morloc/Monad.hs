@@ -308,6 +308,7 @@ metaProperties i = do
     (GMapJust (Polymorphic _ _ e _)) -> Set.toList (eprop e)
     _ -> []
 
+----- TODO: metaName should no longer be required - remove
 -- | The name of a morloc composition. These names are stored in the monad
 -- after they are resolved away. For example in:
 --   import math

@@ -16,7 +16,7 @@ module UnitTypeTests
 import Morloc.Frontend.Namespace
 import Text.RawString.QQ
 import Morloc (typecheckFrontend)
-import Morloc.Frontend.Typecheck (evaluateSAnnoTypes)
+import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.PartialOrder as MP
 import qualified Morloc.Typecheck.Internal as MTI
@@ -27,12 +27,12 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 -- get the toplevel general type of a typechecked expression
-gtypeof :: SAnno (Indexed TypeU) f c -> TypeU
-gtypeof (SAnno _ (Idx _ t)) = t
+gtypeof :: AnnoS (Indexed TypeU) f c -> TypeU
+gtypeof (AnnoS (Idx _ t) _ _) = t
 
-runFront :: MT.Text -> IO (Either MorlocError [SAnno (Indexed TypeU) Many Int])
+runFront :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
 runFront code = do
-  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheckFrontend Nothing (Code code) >>= mapM evaluateSAnnoTypes)
+  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
   return x
 
 emptyConfig =  Config

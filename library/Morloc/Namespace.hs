@@ -22,6 +22,7 @@ module Morloc.Namespace
   , One(..)
   , Or(..)
   , Many(..)
+  , ManyPoly(..)
   -- ** Other classes
   , Three(..)
   , Defaultable(..)
@@ -86,12 +87,20 @@ module Morloc.Namespace
   , Constraint(..)
   , Property(..)
   -- ** Types used in post-typechecking tree
-  , SAnno(..)
-  , SExpr(..)
-  , mapSAnno
-  , mapSExpr
-  , mapSAnnoM
-  , mapSExprM
+  , AnnoS(..)
+  , ExprS(..)
+  , mapAnnoSM
+  , mapExprSM
+  , mapAnnoS
+  , mapExprS
+  , mapAnnoSC
+  , mapAnnoSCM
+  , mapAnnoSG
+  , mapAnnoSGM
+  , mapExprSC
+  , mapExprSCM
+  , mapExprSG
+  , mapExprSGM
   -- ** Typeclasses
   , HasOneLanguage(..)
   , Typelike(..)
@@ -157,7 +166,7 @@ data MorlocState = MorlocState
   -- ^ Used in Treeify generate new indices (starting from max parser index).
   -- Also used (after resetting to 0) in each of the backend generators.
   , stateDepth :: Int
-  -- ^ store depth in the SAnno tree in the frontend and backend typecheckers
+  -- ^ store depth in the AnnoS tree in the frontend and backend typecheckers
   , stateSignatures :: GMap Int Int SignatureSet
   , stateConcreteTypedefs :: GMap Int MVar (Map Lang Scope)
   -- ^ stores type functions that are in scope for a given module and language
@@ -301,7 +310,7 @@ data Expr
   -- ^ (())
   | VarE EVar
   -- ^ (x)
-  | AccE ExprI Key
+  | AccE Key ExprI
   -- ^ person@age - access a field in a record
   | LstE [ExprI]
   | TupE [ExprI]
@@ -560,11 +569,84 @@ data Source =
     }
   deriving (Ord, Eq, Show)
 
--- g: an annotation for the group of child trees (what they have in common)
--- f: a collection - before realization this will be Many
---                 - after realization it will be One
--- c: an annotation for the specific child tree
-data SAnno g f c = SAnno (f (SExpr g f c, c)) g
+
+data AnnoS g f c = AnnoS g c (ExprS g f c)
+
+data ExprS g f c
+  = UniS
+  | BndS EVar
+  | VarS EVar (f (AnnoS g f c))
+  | AccS Key (AnnoS g f c)
+  | AppS (AnnoS g f c) [AnnoS g f c]
+  | LamS [EVar] (AnnoS g f c)
+  | LstS [AnnoS g f c]
+  | TupS [AnnoS g f c]
+  | NamS [(Key, AnnoS g f c)]
+  | RealS Scientific
+  | IntS Integer
+  | LogS Bool
+  | StrS Text
+  | CallS Source
+
+
+mapExprSM :: (Traversable f, Monad m) => (AnnoS g f c -> m (AnnoS g' f c')) -> ExprS g f c -> m (ExprS g' f c')
+mapExprSM f (VarS v xs) = VarS v <$> traverse f xs
+mapExprSM f (AccS k x) = AccS k <$> f x
+mapExprSM f (AppS x xs) = AppS <$> f x <*> mapM f xs
+mapExprSM f (LamS vs x) = LamS vs <$> f x
+mapExprSM f (LstS xs) = LstS <$> mapM f xs
+mapExprSM f (TupS xs) = TupS <$> mapM f xs
+mapExprSM f (NamS rs) = NamS <$> mapM (secondM f) rs
+mapExprSM _ UniS = return UniS
+mapExprSM _ (BndS v) = return $ BndS v
+mapExprSM _ (RealS x) = return $ RealS x
+mapExprSM _ (IntS x) = return $ IntS x
+mapExprSM _ (LogS x) = return $ LogS x
+mapExprSM _ (StrS x) = return $ StrS x
+mapExprSM _ (CallS x) = return $ CallS x
+
+mapAnnoSM :: (Traversable f, Monad m) => (ExprS g f c -> g -> c -> m (g', c')) -> AnnoS g f c -> m (AnnoS g' f c')
+mapAnnoSM fun (AnnoS g c e) = do
+  e' <- mapExprSM (mapAnnoSM fun) e
+  (g', c') <- fun e g c
+  return (AnnoS g' c' e')
+
+mapAnnoS :: (Traversable f) => (ExprS g f c -> g -> c -> (g', c')) -> AnnoS g f c -> AnnoS g' f c'
+mapAnnoS fun = runIdentity . mapAnnoSM (\x g c -> return (fun x g c))
+
+mapExprS :: (Traversable f) => (AnnoS g f c -> AnnoS g' f c') -> ExprS g f c -> ExprS g' f c'
+mapExprS fun = runIdentity . mapExprSM (return . fun)
+
+mapAnnoSGM :: (Traversable f, Monad m) => (g -> m g') -> AnnoS g f c -> m (AnnoS g' f c)
+mapAnnoSGM f = mapAnnoSM (\_ gi ci -> (,) <$> f gi <*> pure ci)
+
+mapAnnoSCM :: (Traversable f, Monad m) => (c -> m c') -> AnnoS g f c -> m (AnnoS g f c')
+mapAnnoSCM f = mapAnnoSM (\_ gi ci -> (,) gi <$> f ci)
+
+mapAnnoSG :: (Traversable f) => (g -> g') -> AnnoS g f c -> AnnoS g' f c
+mapAnnoSG f = mapAnnoS (\_ gi ci -> (f gi, ci))
+
+mapAnnoSC :: (Traversable f) => (c -> c') -> AnnoS g f c -> AnnoS g f c'
+mapAnnoSC f = mapAnnoS (\_ gi ci -> (gi, f ci))
+
+mapExprSGM :: (Traversable f, Monad m) => (g -> m g') -> ExprS g f c -> m (ExprS g' f c)
+mapExprSGM f = mapExprSM (\(AnnoS gi ci e) -> AnnoS <$> f gi <*> pure ci <*> mapExprSGM f e)
+
+mapExprSCM :: (Traversable f, Monad m) => (c -> m c') -> ExprS g f c -> m (ExprS g f c')
+mapExprSCM f = mapExprSM (\(AnnoS gi ci e) -> AnnoS gi <$> f ci <*> mapExprSCM f e)
+
+mapExprSG :: (Traversable f) => (g -> g') -> ExprS g f c -> ExprS g' f c
+mapExprSG f = mapExprS (\(AnnoS gi ci e) -> AnnoS (f gi) ci (mapExprSG f e))
+
+mapExprSC :: (Traversable f) => (c -> c') -> ExprS g f c -> ExprS g f c'
+mapExprSC f = mapExprS (\(AnnoS gi ci e) -> AnnoS gi (f ci) (mapExprSC f e))
+
+
+-- -- g: an annotation for the group of child trees (what they have in common)
+-- -- f: a collection - before realization this will be Many
+-- --                 - after realization it will be One
+-- -- c: an annotation for the specific child tree
+-- data SAnno g f c = SAnno (f (SExpr g f c, c)) g
 
 data Three a b c = A a | B b | C c
   deriving (Ord, Eq, Show)
@@ -578,6 +660,9 @@ newtype One a = One { unOne :: a }
 newtype Many a = Many { unMany :: [a] }
   deriving (Show)
 
+data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr Typeclass EVar EType [(EType, [a])]
+  deriving(Show, Eq, Ord)
+
 data Or a b = L a | R b | LR a b
   deriving(Ord, Eq, Show)
 
@@ -587,17 +672,30 @@ instance Functor One where
 instance Functor Many where
   fmap f (Many x) = Many (map f x)
 
-instance Traversable Many where
-  traverse f (Many xs) = Many <$> traverse f xs
+instance Functor ManyPoly where
+  fmap f (MonomorphicExpr t xs) = MonomorphicExpr t (map f xs)
+  fmap f (PolymorphicExpr cls v t xs) = PolymorphicExpr cls v t (map (second (map f)) xs)
 
 instance Traversable One where
   traverse f (One x) = One <$> f x
+
+instance Traversable Many where
+  traverse f (Many xs) = Many <$> traverse f xs
+
+instance Traversable ManyPoly where
+  traverse f (MonomorphicExpr t xs) = MonomorphicExpr t <$> traverse f xs
+  traverse f (PolymorphicExpr cls v t xs) = PolymorphicExpr cls v t <$> traverse f2 xs where
+    f2 (t', x) = (,) t' <$> traverse f x
 
 instance Foldable One where
   foldr f b (One a) = f a b
 
 instance Foldable Many where
   foldr f b (Many xs) = foldr f b xs
+
+instance Foldable ManyPoly where
+  foldr f b (MonomorphicExpr _ xs) = foldr f b xs
+  foldr f b (PolymorphicExpr _ _ _ (concatMap snd -> xs)) = foldr f b xs
 
 instance Bifunctor Or where
   bimapM f _ (L a) = L <$> f a
@@ -612,59 +710,6 @@ instance Bifoldable Or where
     c2 <- g b
     return [c1, c2]
 
-
-data SExpr g f c
-  = UniS
-  | VarS EVar
-  | AccS (SAnno g f c) Key
-  | AppS (SAnno g f c) [SAnno g f c]
-  | LamS [EVar] (SAnno g f c)
-  -- containers
-  | LstS [SAnno g f c]
-  | TupS [SAnno g f c]
-  | NamS [(Key, SAnno g f c)]
-  -- primitives
-  | RealS Scientific
-  | IntS Integer
-  | LogS Bool
-  | StrS Text
-  | CallS Source
-
-mapSAnno :: Traversable f => (g -> g') -> (c -> c') -> SAnno g f c -> SAnno g' f c'
-mapSAnno fg fc = runIdentity . mapSAnnoM (return . fg) (return . fc)
-
-mapSExpr :: Traversable f => (g -> g') -> (c -> c') -> SExpr g f c -> SExpr g' f c'
-mapSExpr fg fc = runIdentity . mapSExprM (return . fg) (return . fc)
-
-mapSAnnoM :: (Traversable f, Monad m) => (g -> m g') -> (c -> m c') -> SAnno g f c -> m (SAnno g' f c')
-mapSAnnoM fg fc (SAnno e g) = do
-  g' <- fg g
-  e' <- traverse mapSExprM' e
-  return $ SAnno e' g'
-  where
-    mapSExprM' (x, c) = do
-      c' <- fc c
-      x' <- mapSExprM fg fc x
-      return (x', c')
-
-mapSExprM :: (Traversable f, Monad m) => (g -> m g') -> (c -> m c') -> SExpr g f c -> m (SExpr g' f c')
-mapSExprM fg fc = fe where 
-  m = mapSAnnoM fg fc
-  fe UniS = return UniS
-  fe (VarS v) = return $ VarS v
-  fe (AccS x k) = AccS <$> m x <*> pure k
-  fe (AppS x xs) = AppS <$> m x <*> mapM m xs
-  fe (LamS vs x) = LamS vs <$> m x
-  fe (LstS xs) = LstS <$> mapM m xs
-  fe (TupS xs) = TupS <$> mapM m xs
-  fe (NamS rs) = do
-    es' <- mapM (m. snd) rs
-    return $ NamS (zip (map fst rs) es')
-  fe (RealS x) = return $ RealS x
-  fe (IntS x) = return $ IntS x
-  fe (LogS x) = return $ LogS x
-  fe (StrS x) = return $ StrS x
-  fe (CallS src) = return $ CallS src
 
 type Indexed = IndexedGeneral Int
 

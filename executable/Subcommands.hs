@@ -106,14 +106,14 @@ cmdTypecheck args _ config = do
                config
                (M.typecheckFrontend path code) |>> writeFrontendTypecheckOutput verbosity >>= (\s -> putDoc (s <> "\n"))
 
-writeFrontendTypecheckOutput :: Int -> ((Either MorlocError [SAnno (Indexed TypeU) Many Int], [MT.Text]), MorlocState) -> MDoc
+writeFrontendTypecheckOutput :: Int -> ((Either MorlocError [AnnoS (Indexed TypeU) Many Int], [MT.Text]), MorlocState) -> MDoc
 writeFrontendTypecheckOutput _ ((Left e, _), _) = pretty e
 writeFrontendTypecheckOutput 0 ((Right xs, _), s) = vsep (map (writeFrontendTypes s) xs)
 writeFrontendTypecheckOutput 1 ((Right xs, _), s) = "\nExports:\n\n" <> vsep (map (writeFrontendTypes s) xs)
 writeFrontendTypecheckOutput _ _ = "I don't know how to be that verbose"
 
-writeFrontendTypes :: MorlocState -> SAnno (Indexed TypeU) Many Int -> MDoc
-writeFrontendTypes  s (SAnno _ (Idx gidx t)) = writeTerm s gidx (pretty t)
+writeFrontendTypes :: MorlocState -> AnnoS (Indexed TypeU) Many Int -> MDoc
+writeFrontendTypes  s (AnnoS (Idx gidx t) _ _) = writeTerm s gidx (pretty t)
 
 writeTerm :: MorlocState -> Int -> MDoc -> MDoc
 writeTerm s i typeDoc =

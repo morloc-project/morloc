@@ -92,7 +92,7 @@ findSignatures _ = []
 
 checkExprI :: Monad m => (ExprI -> m ()) -> ExprI -> m ()
 checkExprI f e@(ExprI _ (ModE _ es)) = f e >> mapM_ (checkExprI f) es
-checkExprI f e@(ExprI _ (AccE e' _)) = f e >> checkExprI f e'
+checkExprI f e@(ExprI _ (AccE _ e')) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (AnnE e' _)) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (AssE _ e' es')) = f e >> checkExprI f e' >> mapM_ f es'
 checkExprI f e@(ExprI _ (LamE _ e')) = f e >> checkExprI f e'
@@ -104,7 +104,7 @@ checkExprI f e = f e
 
 maxIndex :: ExprI -> Int
 maxIndex (ExprI i (ModE _ es)) = maximum (i : map maxIndex es)
-maxIndex (ExprI i (AccE e _)) = max i (maxIndex e)
+maxIndex (ExprI i (AccE _ e)) = max i (maxIndex e)
 maxIndex (ExprI i (AnnE e _)) = max i (maxIndex e)
 maxIndex (ExprI i (AssE _ e es)) = maximum (i : map maxIndex (e:es))
 maxIndex (ExprI i (LamE _ e)) = max i (maxIndex e)
@@ -116,7 +116,7 @@ maxIndex (ExprI i _) = i
 
 getIndices :: ExprI -> [Int]
 getIndices (ExprI i (ModE _ es)) = i : concatMap getIndices es
-getIndices (ExprI i (AccE e _)) = i : getIndices e
+getIndices (ExprI i (AccE _ e)) = i : getIndices e
 getIndices (ExprI i (AnnE e _)) = i : getIndices e
 getIndices (ExprI i (AssE _ e es)) = i : concatMap getIndices (e:es)
 getIndices (ExprI i (LamE _ e)) = i : getIndices e

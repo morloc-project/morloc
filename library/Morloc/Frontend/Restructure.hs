@@ -253,59 +253,34 @@ filterAndSubstitute links typemap =
 evaluateAllTypes :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
 evaluateAllTypes = MDD.mapNodeM f where
   f :: ExprI -> MorlocMonad ExprI
-  f e0 = do
-    g e0 where
-      g :: ExprI -> MorlocMonad ExprI
-      g (ExprI i (SigE (Signature v l e))) = do
-        gscope <- MM.metaGeneralTypedefs i
-        e' <- evaluateEType gscope e
-        MM.sayVVV $ "evaluateEType"
-          <> "\n  e:" <+> pretty (etype e)
-          <> "\n  e':" <+> pretty (etype e')
-        return $ ExprI i (SigE (Signature v l e'))
-      g (ExprI i (AnnE e ts)) = do
-        gscope <- MM.metaGeneralTypedefs i
-        ts' <- mapM (evaluateTypeU gscope) ts
-        MM.sayVVV $ "evaluateTypeU"
-          <> "\n  ts:" <+> pretty ts
-          <> "\n  ts':" <+> pretty ts'
-        e' <- g e
-        return (ExprI i (AnnE e' ts'))
-      g (ExprI i (ModE m es)) = do
-        es' <- mapM g es
-        return $ ExprI i (ModE m es')
-      g (ExprI i (AssE v e es)) = do
-        e' <- g e
-        es' <- mapM g es
-        return $ ExprI i (AssE v e' es')
-      g (ExprI i (AccE e k)) = do
-        e' <- g e
-        return $ ExprI i (AccE e' k)
-      g (ExprI i (LstE es)) = do
-        es' <- mapM g es
-        return $ ExprI i (LstE es')
-      g (ExprI i (TupE es)) = do
-        es' <- mapM g es
-        return $ ExprI i (TupE es')
-      g (ExprI i (NamE rs)) = do
-        rs' <- mapM (secondM g) rs
-        return $ ExprI i (NamE rs')
-      g (ExprI i (AppE e es)) = do
-        e' <- g e
-        es' <- mapM g es
-        return $ ExprI i (AppE e' es')
-      g (ExprI i (LamE vs e)) = do
-        e' <- g e
-        return $ ExprI i (LamE vs e')
-      g e = return e
+  f (ExprI i e0) = ExprI i <$> g e0 where
+    g :: Expr -> MorlocMonad Expr
+    g (SigE (Signature v l e)) = do
+      gscope <- MM.metaGeneralTypedefs i
+      e' <- evaluateEType gscope e
+      return $ SigE (Signature v l e')
+    g (AnnE e ts) = do
+      gscope <- MM.metaGeneralTypedefs i
+      ts' <- mapM (evaluateTypeU gscope) ts
+      e' <- f e
+      return (AnnE e' ts')
+    g (ModE m es) = ModE m <$> mapM f es
+    g (AssE v e es) = AssE v <$> f e <*> mapM f es
+    g (AccE k e) = AccE k <$> f e
+    g (LstE es) = LstE <$> mapM f es
+    g (TupE es) = TupE <$> mapM f es
+    g (NamE rs) = NamE <$> mapM (secondM f) rs
+    g (AppE e es) = AppE <$> f e <*> mapM f es
+    g (LamE vs e) = LamE vs <$> f e
+    g e = return e
 
-      evaluateEType :: Scope -> EType -> MorlocMonad EType
-      evaluateEType gscope et =
-        either MM.throwError (\t' -> return $ et {etype = t'}) $ TE.evaluateType gscope (etype et)
+    evaluateEType :: Scope -> EType -> MorlocMonad EType
+    evaluateEType gscope et =
+      either MM.throwError (\t' -> return $ et {etype = t'}) $ TE.evaluateType gscope (etype et)
 
-      evaluateTypeU :: Scope -> TypeU -> MorlocMonad TypeU
-      evaluateTypeU gscope t =
-        either MM.throwError return $ TE.evaluateType gscope t
+    evaluateTypeU :: Scope -> TypeU -> MorlocMonad TypeU
+    evaluateTypeU gscope t =
+      either MM.throwError return $ TE.evaluateType gscope t
 
 
 collectMogrifiers :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()

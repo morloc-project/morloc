@@ -35,8 +35,9 @@ module Morloc.Typecheck.Internal
   , cut
   , substitute
   , rename
-  , renameSAnno
+  , renameAnnoS
   , occursCheck
+  , toExistential
   -- * subtyping
   , subtype
   -- * debugging
@@ -48,13 +49,12 @@ module Morloc.Typecheck.Internal
   , peak
   , peakGen
   , seeType
-  , showGen
   ) where
 
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import Morloc.Data.Doc
-import Morloc.Pretty (prettySExpr, prettySAnno)
+import Morloc.Pretty ()
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Monad as MM
 
@@ -67,6 +67,12 @@ qualify vs t = foldr ForallU t vs
 unqualify :: TypeU -> ([TVar], TypeU)
 unqualify (ForallU v (unqualify -> (vs, t))) = (v:vs, t)
 unqualify t = ([], t)
+
+toExistential :: Gamma -> TypeU -> (Gamma, TypeU)
+toExistential g0 (unqualify -> (vs0, t0)) = f g0 vs0 t0 where
+  f g [] t = (g, t)
+  f g (v:vs) t = let (g', newVar) = newvar ("cls_" <> unTVar v) g
+                 in f g' vs (substituteTVar v newVar t)
 
 class Applicable a where
   apply :: Gamma -> a -> a
@@ -494,36 +500,44 @@ rename g0 (ForallU v@(TV s) t0) =
 -- Unless I add N-rank types, foralls can only be on top, so no need to recurse.
 rename g t = (g, t)
 
-renameSAnno :: (Map.Map EVar EVar, Gamma) -> SAnno g Many c -> ((Map.Map EVar EVar, Gamma), SAnno g Many c)
-renameSAnno context (SAnno (Many xs) gt) =
-  let (context', es) = statefulMap renameSExpr context (map fst xs)
-  in (context', SAnno (Many (zip es (map snd xs))) gt)
+renameAnnoS :: (Map.Map EVar EVar, Gamma) -> AnnoS g ManyPoly c -> ((Map.Map EVar EVar, Gamma), AnnoS g ManyPoly c)
+renameAnnoS context (AnnoS gt ct e) =
+  let (context', e') = renameSExpr context e
+  in (context', AnnoS gt ct e')
 
-renameSExpr :: (Map.Map EVar EVar, Gamma) -> SExpr g Many c -> ((Map.Map EVar EVar, Gamma), SExpr g Many c)
+renameSExpr :: (Map.Map EVar EVar, Gamma) -> ExprS g ManyPoly c -> ((Map.Map EVar EVar, Gamma), ExprS g ManyPoly c)
 renameSExpr c0@(m, g) e0 = case e0 of
-  (VarS v) -> case Map.lookup v m of
-    (Just v') -> (c0, VarS v')
-    Nothing -> (c0, VarS v)
+  (BndS v) -> case Map.lookup v m of
+    (Just v') -> (c0, BndS v')
+    Nothing -> (c0, BndS v)
+  (VarS v (MonomorphicExpr t xs)) ->
+    let (context', xs') = statefulMap renameAnnoS c0 xs
+    in (context', VarS v (MonomorphicExpr t xs'))
+  (VarS v (PolymorphicExpr cls className t rs)) ->
+    let (ts, ass) = unzip rs
+        (context', ass') = statefulMap (statefulMap renameAnnoS) c0 ass
+        rs' = zip ts ass'
+    in (context', VarS v $ PolymorphicExpr cls className t rs')
   (LamS vs x) ->
     let (g', vs') = statefulMap (\g'' (EV v) -> evarname g'' (v <> "_e")) g vs
         m' = foldr (uncurry Map.insert) m (zip vs vs')
-        (c1, x') = renameSAnno (m', g') x
+        (c1, x') = renameAnnoS (m', g') x
     in (c1, LamS vs' x')
-  (AccS e k) ->
-    let (c1, e') = renameSAnno c0 e
-    in (c1, AccS e' k)
+  (AccS k e) ->
+    let (c1, e') = renameAnnoS c0 e
+    in (c1, AccS k e')
   (AppS e es) ->
-    let (c1, es') = statefulMap renameSAnno c0 es
-        (c2, e') = renameSAnno c1 e -- order matters here, the arguments are bound under the PARENT
+    let (c1, es') = statefulMap renameAnnoS c0 es
+        (c2, e') = renameAnnoS c1 e -- order matters here, the arguments are bound under the PARENT
     in (c2, AppS e' es')
   (LstS es) ->
-    let (c1, es') = statefulMap renameSAnno c0 es
+    let (c1, es') = statefulMap renameAnnoS c0 es
     in (c1, LstS es')
   (TupS es) ->
-    let (c1, es') = statefulMap renameSAnno c0 es
+    let (c1, es') = statefulMap renameAnnoS c0 es
     in (c1, TupS es')
   (NamS rs) ->
-    let (c1, es') = statefulMap renameSAnno c0 (map snd rs)
+    let (c1, es') = statefulMap renameAnnoS c0 (map snd rs)
     in (c1, NamS (zip (map fst rs) es'))
   e -> (c0, e)
 
@@ -560,11 +574,9 @@ leave d = do
 seeGamma :: Gamma -> MorlocMonad ()
 seeGamma g = MM.sayVVV $ nest 4 $ "Gamma:" <> line <> vsep (map pretty (gammaContext g))
 
-peak :: (Pretty c, Pretty g) => SExpr g One c -> MorlocMonad ()
-peak = insetSay . prettySExpr pretty showGen
+peak :: (Pretty c, Pretty g) => ExprS g f c -> MorlocMonad ()
+peak = insetSay . pretty
 
-peakGen :: (Pretty c, Pretty g) => SAnno g One c -> MorlocMonad ()
-peakGen = insetSay . prettySAnno pretty showGen
+peakGen :: (Pretty c, Pretty g) => AnnoS g f c -> MorlocMonad ()
+peakGen = insetSay . pretty
 
-showGen :: Pretty g => g -> MDoc
-showGen g = parens (pretty g)

@@ -8,10 +8,7 @@ License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
-module Morloc.Pretty
-  ( prettySAnno
-  , prettySExpr
-  ) where
+module Morloc.Pretty () where
 
 import Morloc.Data.Doc
 import Morloc.Namespace
@@ -148,45 +145,11 @@ prettyTypeU (NamU o n ps rs)
     $ block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
               (vsep [pretty k <+> "::" <+> prettyTypeU x | (k, x) <- rs])
 
--- For example @prettySAnnoMany id Nothing@ for the most simple printer
-prettySAnno
-  :: Foldable f
-  => (c -> Doc ann)
-  -> (g -> Doc ann)
-  -> SAnno g f c
-  -> Doc ann
-prettySAnno writeCon writeGen (SAnno e g)
-  = foldr (prettyCon writeCon writeGen) (writeGen g) e
-  where
-  prettyCon
-    :: Foldable f
-    => (c -> Doc ann)
-    -> (g -> Doc ann)
-    -> (SExpr g f c, c)
-    -> Doc ann
-    -> Doc ann
-  prettyCon fc fg (s, c) p = vsep [p, fc c, prettySExpr fc fg s]
+instance Pretty (AnnoS g f c) where
+  pretty (AnnoS e g c) = "AnnoS"
 
-prettySExpr
-  :: Foldable f
-  => (c -> Doc ann)
-  -> (g -> Doc ann)
-  -> SExpr g f c
-  -> Doc ann
-prettySExpr fc fg x0 = case x0 of
-  UniS -> "UniS"
-  (VarS v) -> "VarS<" <> pretty v <> ">"
-  (AccS x k ) -> "AccS" <+> pretty k <+> parens (prettySAnno fc fg x)
-  (AppS x xs) -> "AppS" <+> parens (prettySAnno fc fg x) <+> tupled (map (prettySAnno fc fg) xs)
-  (LamS vs x) -> "LamS" <+> tupled (map pretty vs) <+> braces (prettySAnno fc fg x)
-  (LstS xs) -> "LstS" <+> tupled (map (prettySAnno fc fg) xs)
-  (TupS xs) -> "TupS" <+> tupled (map (prettySAnno fc fg) xs)
-  (NamS rs) -> "NamS" <+> tupled (map (\(k,x) -> pretty k <+> "=" <+> prettySAnno fc fg x) rs)
-  (RealS x) -> "RealS<" <> viaShow x <> ">"
-  (IntS x) -> "IntS<" <> viaShow x <> ">"
-  (LogS x) -> "LogS<" <> viaShow x <> ">"
-  (StrS x) -> "StrS<" <> viaShow x <> ">"
-  (CallS src) -> "CallS<" <> pretty (srcName src) <> "@" <> pretty (srcLang src) <> ">"
+instance Pretty (ExprS g f c) where
+  pretty _ = "ExprS"
 
 instance (Pretty k, Pretty a) => Pretty (IndexedGeneral k a) where
   pretty (Idx i x) = parens (pretty i <> ":" <+> pretty x)
@@ -219,7 +182,7 @@ instance Pretty Expr where
   pretty (ImpE (Import m (Just xs) _ _)) = "import" <+> pretty m <+> tupled (map pretty xs)
   pretty (ExpE v) = "export" <+> pretty v
   pretty (VarE s) = pretty s
-  pretty (AccE e k) = parens (pretty e) <> "@" <> pretty k
+  pretty (AccE k e) = parens (pretty e) <> "@" <> pretty k
   pretty (LamE v e) = "\\" <+> pretty v <+> "->" <+> pretty e
   pretty (AnnE e ts) = parens
     $   pretty e
