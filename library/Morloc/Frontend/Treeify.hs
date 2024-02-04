@@ -13,14 +13,12 @@ module Morloc.Frontend.Treeify (treeify) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
-import Morloc.Pretty ()
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.GMap as GMap
-import qualified Morloc.Frontend.PartialOrder as PO
 
 -- | Every term must either be sourced or declared.
 data TermOrigin = Declared ExprI | Sourced Source
@@ -198,13 +196,13 @@ linkVariablesToTermTypes mv m0 = mapM_ (link m0) where
     -- shadow all terms bound under the lambda
     let m' = foldr Map.delete m ks
     -- then link the assignment term and all local "where" statements (es)
-    linkSignatures mv (e:es) (Map.map snd m')
+    _ <- linkSignatures mv (e:es) (Map.map snd m')
     return ()
   -- 4. assignments that have no parameters
   link m (ExprI i (AssE v e es)) = do
-    setMonomorphicType m i v
+    _ <- setMonomorphicType m i v
     -- then link the assignment term and all local "where" statements (es)
-    linkSignatures mv (e:es) (Map.map snd m)
+    _ <- linkSignatures mv (e:es) (Map.map snd m)
     return ()
   -- modules currently cannot be nested (should this be allowed?)
   link _ (ExprI _ (ModE v _)) = MM.throwError $ NestedModule v
@@ -286,7 +284,7 @@ mergeEType (EType t1 ps1 cs1) (EType t2 ps2 cs2)
 -- merge two general types
 mergeTypeUs :: TypeU -> TypeU -> MorlocMonad TypeU
 mergeTypeUs t1 t2
-  | PO.equivalent t1 t2 = return t1
+  | equivalent t1 t2 = return t1
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
 
 
@@ -334,45 +332,6 @@ collect gi v = do
 collectAnnoS :: ExprI -> MorlocMonad (AnnoS Int ManyPoly Int)
 collectAnnoS e@(ExprI gi _) = AnnoS gi gi <$> collectExprS e
 
--- -- | This function will handle terms that have been set to be equal
--- replaceExpr :: Int -> ExprI -> MorlocMonad [(ExprS Int ManyPoly Int, Int)]
--- -- this will be a nested variable
--- -- e.g.:
--- --   foo = bar
--- replaceExpr i e@(ExprI j (VarE _)) = do
---   x <- collectAnnoS e
---   -- unify the data between the equated terms
---   tiMay <- MM.metaMonomorphicTermTypes i
---   tjMay <- MM.metaMonomorphicTermTypes j
---   t <- case (tiMay, tjMay) of
---     (Just ti, Just tj) -> combineTermTypes ti tj
---     (Just ti, _) -> return ti
---     (_, Just tj) -> return tj
---     _ -> error "You shouldn't have done that"
---
---   st <- MM.get
---
---   case GMap.change i (Monomorphic t) (stateSignatures st) of
---     (Just m) -> MM.modify (\s -> s {stateSignatures = m})
---     _ -> error "impossible"
---
---   case GMap.yIsX j i (stateSignatures st) of
---     (Just m) -> MM.put (st {stateSignatures = m})
---     Nothing -> return ()
---
---   -- pass on just the children
---   case x of
---     (AnnoS (Many es) _) -> return es
---
---
--- -- -- two terms may also be equivalent when applied, for example:
--- -- --   foo x = bar x
--- -- -- this would be rewritten in the parse as `foo = \x -> bar x`
--- -- -- meaning foo and bar are equivalent after eta-reduction
--- -- replaceExpr i e@(ExprI _ (LamE vs (ExprI _ (AppE e2@(ExprI _ (VarE _)) xs))))
--- --     | map VarE vs == [v | (ExprI _ v) <- xs] = replaceExpr i e2
--- --     | otherwise = return <$> collectSExpr e
--- replaceExpr _ e = return <$> collectExprS e
 
 -- | Translate ExprI to ExprS tree
 collectExprS :: ExprI -> MorlocMonad (ExprS Int ManyPoly Int)
@@ -394,7 +353,7 @@ collectExprS (ExprI gi e0) = f e0 where
 
       -- A polymorphic term should always have a type.
       (GMapJust (Polymorphic cls clsName t ts)) -> do
-        MM.sayVVV $ "  polymorphic:" <+> list (map (maybe "?" pretty . termGeneral) ts) 
+        MM.sayVVV $ "  polymorphic:" <+> list (map (maybe "?" pretty . termGeneral) ts)
         ess <- mapM termtypesToAnnoS ts
         let etypes = map (fromJust . termGeneral) ts
         return $ VarS v (PolymorphicExpr cls clsName t (zip etypes ess))
@@ -433,7 +392,7 @@ collectExprS (ExprI gi e0) = f e0 where
   f ExpE{} = undefined
   f SrcE{} = undefined
   f SigE{} = undefined
-  f (AssE v _ _) = error $ "Found an unexpected ass in collectExprS: " <> show v 
+  f (AssE v _ _) = error $ "Found an unexpected ass in collectExprS: " <> show v
 
 reindexExprI :: ExprI -> MorlocMonad ExprI
 reindexExprI (ExprI i e) = ExprI <$> newIndex i <*> reindexExpr e
@@ -560,7 +519,7 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
         -> (Typeclass, [TVar], EType, [TermTypes])
         -> (Typeclass, [TVar], EType, [TermTypes])
       mergeInstances (cls1, vs1, e1, ts1) (cls2, vs2, e2, ts2)
-        | cls1 == cls2, length vs1 == length vs2, PO.equivalent (etype e1) (etype e2) = (cls1, vs1, e1, unionTermTypes ts1 ts2)
+        | cls1 == cls2, length vs1 == length vs2, equivalent (etype e1) (etype e2) = (cls1, vs1, e1, unionTermTypes ts1 ts2)
         | otherwise = error "failed to merge"
 
       requalify :: [TVar] -> TypeU -> TypeU
@@ -643,7 +602,7 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
 
       mergeSignatureSet :: SignatureSet -> SignatureSet -> MorlocMonad SignatureSet
       mergeSignatureSet (Polymorphic cls1 v1 t1 ts1) (Polymorphic cls2 v2 t2 ts2)
-        | cls1 == cls2 && PO.equivalent (etype t1) (etype t2) && v1 == v2 = return $ Polymorphic cls1 v1 t1 (unionTermTypes ts1 ts2)
+        | cls1 == cls2 && equivalent (etype t1) (etype t2) && v1 == v2 = return $ Polymorphic cls1 v1 t1 (unionTermTypes ts1 ts2)
         | otherwise = error "Invalid SignatureSet merge"
       mergeSignatureSet (Monomorphic ts1) (Monomorphic ts2) = Monomorphic <$> combineTermTypes ts1 ts2
       mergeSignatureSet _ _ = undefined
@@ -654,7 +613,7 @@ unionTermTypes ts1 ts2 = foldr mergeTermTypes ts2 ts1
 
 mergeTermTypes :: TermTypes -> [TermTypes] -> [TermTypes]
 mergeTermTypes t1@(TermTypes (Just gt1) srcs1 es1) (t2@(TermTypes (Just gt2) srcs2 es2):ts)
-  | PO.equivalent (etype gt1) (etype gt2) = TermTypes (Just gt1) (unique (srcs1 <> srcs2)) (es1 <> es2) : ts
+  | equivalent (etype gt1) (etype gt2) = TermTypes (Just gt1) (unique (srcs1 <> srcs2)) (es1 <> es2) : ts
   | otherwise = t2 : mergeTermTypes t1 ts
 mergeTermTypes (TermTypes Nothing srcs1 es1) ((TermTypes e2 srcs2 es2):ts2) =
   mergeTermTypes (TermTypes e2 (srcs1 <> srcs2) (es1 <> es2)) ts2
@@ -669,7 +628,7 @@ mergeTypeclasses
   -> MorlocMonad (Typeclass, [TVar], EType, [TermTypes])
 mergeTypeclasses (cls1, vs1, t1, ts1) (cls2, vs2, t2, ts2)
   | cls1 /= cls2 = error "Conflicting typeclasses"
-  | not (PO.equivalent (etype t1) (etype t2)) = error "Conflicting typeclass term general type"
+  | not (equivalent (etype t1) (etype t2)) = error "Conflicting typeclass term general type"
   | length vs1 /= length vs2 = error "Conflicting typeclass parameter count"
   -- here I should do reciprocal subtyping
   | otherwise = return (cls1, vs1, t1, unionTermTypes ts1 ts2)

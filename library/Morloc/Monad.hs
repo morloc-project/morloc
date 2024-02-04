@@ -69,7 +69,6 @@ import Control.Monad.State
 import Control.Monad.Trans
 import Control.Monad.Writer
 import Control.Monad.Identity
-import Morloc.Error () -- for MorlocError Show instance
 import Morloc.Namespace
 import Morloc.Data.Doc
 import System.IO (stderr)
@@ -86,26 +85,6 @@ runMorlocMonad ::
      Maybe Path -> Int -> Config -> MorlocMonad a -> IO (MorlocReturn a)
 runMorlocMonad outfile v config ev =
   runStateT (runWriterT (runExceptT (runReaderT ev config))) (emptyState outfile v)
-
-instance Defaultable MorlocState where
-  defaultValue = MorlocState {
-      statePackageMeta = []
-    , stateVerbosity = 0
-    , stateCounter = -1
-    , stateDepth = 0
-    , stateSignatures = GMap.empty
-    , stateConcreteTypedefs = GMap.empty
-    , stateGeneralTypedefs = GMap.empty
-    , stateUniversalConcreteTypedefs = Map.empty
-    , stateUniversalGeneralTypedefs = Map.empty
-    , stateInnerMogrifiers = GMap.empty
-    , stateUniversalInnerMogrifiers = Map.empty
-    , stateSources = GMap.empty
-    , stateAnnotations = Map.empty
-    , stateOutfile = Nothing
-    , stateExports = []
-    , stateName = Map.empty
-  }
 
 emptyState :: Maybe Path -> Int -> MorlocState
 emptyState path v = defaultValue
@@ -198,7 +177,7 @@ sayV = sayIf 1
 -- print for verbose level 2
 -- messages for the programmer
 sayVV :: MDoc -> MorlocMonad ()
-sayVV = sayIf 2 
+sayVV = sayIf 2
 
 -- print for verbose level 3
 -- really boring shit that probably no one wants to ever hear, but we spent a
@@ -291,7 +270,7 @@ metaSources i = do
 -- are not used anywhere yet.
 metaConstraints :: Int -> MorlocMonad [Constraint]
 metaConstraints i = do
-  s <- gets stateSignatures 
+  s <- gets stateSignatures
   return $ case GMap.lookup i s of
     (GMapJust (Monomorphic (TermTypes (Just e) _ _))) -> Set.toList (econs e)
     (GMapJust (Polymorphic _ _ e _)) -> Set.toList (econs e)
@@ -302,7 +281,7 @@ metaConstraints i = do
 -- properties will be part of the typeclass system.
 metaProperties :: Int -> MorlocMonad [Property]
 metaProperties i = do
-  s <- gets stateSignatures 
+  s <- gets stateSignatures
   return $ case GMap.lookup i s of
     (GMapJust (Monomorphic (TermTypes (Just e) _ _))) -> Set.toList (eprop e)
     (GMapJust (Polymorphic _ _ e _)) -> Set.toList (eprop e)

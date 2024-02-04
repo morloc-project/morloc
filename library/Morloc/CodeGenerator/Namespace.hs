@@ -27,7 +27,7 @@ module Morloc.CodeGenerator.Namespace
   , HasTypeM(..)
   , typeMofRs
   , typeMofForm
-  -- ** 
+  -- **
   , Arg
   , ArgGeneral(..)
   , JsonType(..)
@@ -114,7 +114,6 @@ import Morloc.Namespace
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 import Morloc.Data.Doc
-import Morloc.Pretty ()
 import Control.Monad.Identity (runIdentity)
 
 -- The final types used in code generation. The language annotation is removed,
@@ -185,14 +184,11 @@ data SerialAST
   -- source code comments.
   deriving(Ord, Eq, Show)
 
-instance Pretty CVar where
-  pretty v = pretty (unCVar v)
-
 instance Pretty SerialAST where
   pretty (SerialPack v (packer, s)) = parens
     $ "SerialPack" <+> pretty v
     <+> braces (vsep [pretty packer, pretty s])
-  pretty (SerialList _ ef) = parens $ "SerialList" <+> pretty ef 
+  pretty (SerialList _ ef) = parens $ "SerialList" <+> pretty ef
   pretty (SerialTuple _ efs) = parens $ "SerialTuple" <+> tupled (map pretty efs)
   pretty (SerialObject o _ vs rs) = parens
     $ "SerialObject" <+> pretty o <+> tupled (map pretty vs)
@@ -272,7 +268,7 @@ class HasTypeS a where
 --   foo xs = zipWith add xs
 --
 -- x1 and x2 are supplied by the source function
--- 
+--
 -- #3: ManifoldPart [x1 = (runif 0 1), x2 = var "x"] [x2 : "float"]
 --   source py "foo.py" ("add", "runif")
 --   foo xs = map (add (runif 0 1)) xs
@@ -338,14 +334,14 @@ abilistM f _ (ManifoldFull xs) = mapM (annappM f) xs
 abilistM _ g (ManifoldPass xs) = mapM (annappM g) xs
 abilistM f g (ManifoldPart xs ys) = (<>) <$> mapM (annappM f) xs <*> mapM (annappM g) ys
 
-abilist :: (Int -> a -> c) -> (Int -> b -> c) -> ManifoldForm a b -> [c] 
+abilist :: (Int -> a -> c) -> (Int -> b -> c) -> ManifoldForm a b -> [c]
 abilist f g = runIdentity . abilistM (return2 f) (return2 g)
 
 abiappendM :: (Monad m, Monoid c) => (Int -> a -> m c) -> (Int -> b -> m c) -> ManifoldForm a b -> m c
 abiappendM f g = fmap mconcat . abilistM f g
 
 abiappend :: (Monoid c) => (Int -> a -> c) -> (Int -> b -> c) -> ManifoldForm a b -> c
-abiappend f g = runIdentity . abiappendM (return2 f) (return2 g) 
+abiappend f g = runIdentity . abiappendM (return2 f) (return2 g)
 
 instance Pretty FVar where
     pretty (FV _ c) = pretty c
@@ -507,7 +503,7 @@ foldlNE f b (SerialLetN_   _ x1 x2) = foldl f b [x1, x2]
 foldlNE f b (NativeLetN_   _ x1 x2) = foldl f b [x1, x2]
 foldlNE _ b (LetVarN_      _ _) = b
 foldlNE _ b (BndVarN_      _ _) = b
-foldlNE f b (DeserializeN_ _ _ x) = f b x 
+foldlNE f b (DeserializeN_ _ _ x) = f b x
 foldlNE f b (AccN_         _ _ x _) =  f b x
 foldlNE _ b (SrcN_         _ _) = b
 foldlNE f b (ListN_        _ _ xs) = foldl f b xs
@@ -573,7 +569,7 @@ makeMonoidFoldDefault mempty' mappend' =
   monoidNativeExpr' (AccN_ o v (req, e) k) = return (req, AccN o v e k)
   monoidNativeExpr' (SrcN_ t src) = return (mempty', SrcN t src)
   monoidNativeExpr' (ListN_ v t xs) = return (foldl mappend' mempty' (map fst xs), ListN v t (map snd xs))
-  monoidNativeExpr' (TupleN_ v xs) = return (foldl mappend' mempty' (map fst xs), TupleN v $ map snd xs) 
+  monoidNativeExpr' (TupleN_ v xs) = return (foldl mappend' mempty' (map fst xs), TupleN v $ map snd xs)
   monoidNativeExpr' (RecordN_ o v ps rs)
     = return (foldl mappend' mempty' $ map (fst . snd) rs
              , RecordN o v ps (map (second snd) rs) )
@@ -695,7 +691,7 @@ data SerialExpr_ sm se ne sr nr
 data NativeExpr_ nm se ne sr nr
   = AppSrcN_      TypeF Source [nr]
   | ManN_         nm
-  | ReturnN_      ne 
+  | ReturnN_      ne
   | SerialLetN_   Int se ne
   | NativeLetN_   Int ne ne
   | LetVarN_      TypeF Int
@@ -779,20 +775,20 @@ surroundFoldSerialArgM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> Fo
 surroundFoldSerialArgM sfm fm = surroundSerialArgM sfm f
   where
   f full@(SerialArgManifold sm) = do
-    sm' <- surroundFoldSerialManifoldM sfm fm sm 
+    sm' <- surroundFoldSerialManifoldM sfm fm sm
     opFoldWithSerialArgM fm full $ SerialArgManifold_ sm'
   f full@(SerialArgExpr se) = do
-    se' <- surroundFoldSerialExprM sfm fm se 
+    se' <- surroundFoldSerialExprM sfm fm se
     opFoldWithSerialArgM fm full $ SerialArgExpr_ se'
 
 surroundFoldNativeArgM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldWithManifoldM m sm nm se ne sr nr -> NativeArg -> m nr
 surroundFoldNativeArgM sfm fm = surroundNativeArgM sfm f
   where
   f full@(NativeArgManifold nm) = do
-      nm' <- surroundFoldNativeManifoldM sfm fm nm 
+      nm' <- surroundFoldNativeManifoldM sfm fm nm
       opFoldWithNativeArgM fm full $ NativeArgManifold_ nm'
   f full@(NativeArgExpr ne) = do
-      ne' <- surroundFoldNativeExprM sfm fm ne 
+      ne' <- surroundFoldNativeExprM sfm fm ne
       opFoldWithNativeArgM fm full $ NativeArgExpr_ ne'
 
 surroundFoldSerialExprM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldWithManifoldM m sm nm se ne sr nr -> SerialExpr -> m se
@@ -833,7 +829,7 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
       nativeArgs' <- mapM (surroundFoldNativeArgM sfm fm) nativeArgs
       opFoldWithNativeExprM fm full $ AppSrcN_ t src nativeArgs'
   f full@(ManN nativeManifold) = do
-      nativeManifold' <- surroundFoldNativeManifoldM sfm fm nativeManifold 
+      nativeManifold' <- surroundFoldNativeManifoldM sfm fm nativeManifold
       opFoldWithNativeExprM fm full $ ManN_ nativeManifold'
   f full@(ReturnN ne) = do
       ne' <- surroundFoldNativeExprM sfm fm ne
@@ -866,7 +862,7 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
       opFoldWithNativeExprM fm full (RecordN_ o n ps rs')
       where
         onSndM :: Monad m => (b -> m b') -> (a, b) -> m (a, b')
-        onSndM g (a, b) = (,) a <$> g b 
+        onSndM g (a, b) = (,) a <$> g b
   f full@(LogN t x)  = opFoldWithNativeExprM fm full (LogN_ t x)
   f full@(RealN t x) = opFoldWithNativeExprM fm full (RealN_ t x)
   f full@(IntN t x)  = opFoldWithNativeExprM fm full (IntN_ t x)
@@ -934,7 +930,7 @@ instance HasTypeF NativeManifold where
 
 instance HasTypeS SerialExpr where
   typeSof (ManS sm) = typeSof sm
-  typeSof (AppPoolS t _ sargs) = FunctionS (map typeMof sargs) (SerialS t) 
+  typeSof (AppPoolS t _ sargs) = FunctionS (map typeMof sargs) (SerialS t)
   typeSof (ReturnS e) = typeSof e
   typeSof (SerialLetS _ _ e) = typeSof e
   typeSof (NativeLetS _ _ e) = typeSof e
@@ -969,11 +965,11 @@ typeOfManifold form outputType =
         [] -> outputType
         _ -> Function inputTypes outputType
 
-instance HasTypeM SerialArg where 
+instance HasTypeM SerialArg where
   typeMof (SerialArgManifold sm) = typeMof sm
   typeMof (SerialArgExpr e) = typeMof e
 
-instance HasTypeM NativeArg where 
+instance HasTypeM NativeArg where
   typeMof (NativeArgManifold sm) = typeMof sm
   typeMof (NativeArgExpr e) = typeMof e
 
@@ -1034,13 +1030,13 @@ instance MFunctor NativeManifold where
     mgatedMap g f nm@(NativeManifold m l form ne)
       | gateNativeManifold g nm = mapNativeManifold f $ NativeManifold m l form (mgatedMap g f ne)
       | otherwise = mapNativeManifold f nm
-        
+
 
 instance MFunctor SerialManifold where
     mgatedMap g f sm@(SerialManifold m l form se)
       | gateSerialManifold g sm = mapSerialManifold f $ SerialManifold m l form (mgatedMap g f se)
       | otherwise = mapSerialManifold f sm
-        
+
 
 instance MFunctor SerialArg where
   mgatedMap g f sr
@@ -1108,7 +1104,7 @@ instance Pretty TypeM where
     nest 4 (vsep $ ["Function{"] <> map (\x -> pretty x <+> "->") ts <> [pretty t <> "}"] )
 
 instance Pretty TypeS where
-  pretty PassthroughS = "PassthroughS" 
+  pretty PassthroughS = "PassthroughS"
   pretty (SerialS t) = "SeralS{" <> pretty t <> "}"
   pretty (FunctionS ts t) =
     nest 4 (vsep $ ["Function{"] <> map (\x -> pretty x <+> "->") ts <> [pretty t <> "}"] )
@@ -1133,10 +1129,10 @@ instance Pretty MonoExpr where
     pretty (MonoBndVar (A _) i) = parens $ "x" <> pretty i <+> ":" <+> "<unknown>"
     pretty (MonoBndVar (B t) i) = parens $ "x" <> pretty i <+> ":" <+> pretty t
     pretty (MonoBndVar (C t) i) = parens $ "x" <> pretty i <+> ":" <+> pretty t
-    pretty (MonoAcc    t n v e k) = parens (pretty e) <> "@" <> pretty k
+    pretty (MonoAcc    _ _ _ e k) = parens (pretty e) <> "@" <> pretty k
     pretty (MonoList   _ _ es) = list (map pretty es)
     pretty (MonoTuple  v es) = pretty v <+> tupled (map pretty es)
-    pretty (MonoRecord o v fs rs)
+    pretty (MonoRecord o v fs _)
         = block 4 (pretty o <+> pretty v <> encloseSep "<" ">" "," (map pretty fs)) "manifold record stub"
     pretty (MonoLog    _ x) = viaShow x
     pretty (MonoReal   _ x) = viaShow x

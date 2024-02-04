@@ -22,10 +22,10 @@ return2 f x y = return $ f x y
 class (Bifunctor f) => Bifoldable f where
   bilistM :: Monad m => (a -> m c) -> (b -> m c) -> f a b -> m [c]
 
-  bilistsndM :: Monad m => (b -> m c) -> f a b -> m [c] 
+  bilistsndM :: Monad m => (b -> m c) -> f a b -> m [c]
   bilistsndM f = fmap catMaybes . bilistM (return . const Nothing) (fmap Just . f)
 
-  bilistfstM :: Monad m => (a -> m c) -> f a b -> m [c] 
+  bilistfstM :: Monad m => (a -> m c) -> f a b -> m [c]
   bilistfstM f = fmap catMaybes . bilistM (fmap Just . f) (return . const Nothing)
 
   biappendM :: (Monad m, Monoid c) => (a -> m c) -> (b -> m c) -> f a b -> m c
@@ -76,17 +76,17 @@ class (Bifunctor f) => Bifoldable f where
   ubifoldl1M :: (Monoid c, Foldable t, a ~ b, Monad m) => (c -> a -> m c) -> t (f a b) -> m c
   ubifoldl1M f = bifoldl1M f f
 
-  bilist :: (a -> c) -> (b -> c) -> f a b -> [c] 
+  bilist :: (a -> c) -> (b -> c) -> f a b -> [c]
   bilist f g = runIdentity . bilistM (return . f) (return . g)
 
-  bilistsnd :: (b -> c) -> f a b -> [c] 
+  bilistsnd :: (b -> c) -> f a b -> [c]
   bilistsnd f = runIdentity . bilistsndM (return . f)
 
-  bilistfst :: (a -> c) -> f a b -> [c] 
+  bilistfst :: (a -> c) -> f a b -> [c]
   bilistfst f = runIdentity . bilistfstM (return . f)
 
   biappend :: (Monoid c) => (a -> c) -> (b -> c) -> f a b -> c
-  biappend f g = runIdentity . biappendM (return . f) (return . g) 
+  biappend f g = runIdentity . biappendM (return . f) (return . g)
 
   bicat :: (Foldable t) => (a -> c) -> (b -> c) -> t (f a b) -> [c]
   bicat f g = runIdentity . bicatM (return . f) (return . g)

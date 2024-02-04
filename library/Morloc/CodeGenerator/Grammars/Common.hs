@@ -96,7 +96,7 @@ makeManifoldIndexer getId putId = defaultValue
     putId originalManifoldIndex
     return x'
 
-  surroundSM f sm@(SerialManifold i _ _ _) = descend i sm f 
+  surroundSM f sm@(SerialManifold i _ _ _) = descend i sm f
 
   surroundNM f nm@(NativeManifold i _ _ _) = descend i nm f
 
@@ -152,9 +152,9 @@ instance Dependable SerialExpr where
         -- _ -> error "This type must be serialized"
       return $ D (LetVarS t i) ((i, Left e) : deps)
 
-  isAtomic (LetVarS _ _) = True 
-  isAtomic (BndVarS _ _) = True 
-  isAtomic (ReturnS _) = True 
+  isAtomic (LetVarS _ _) = True
+  isAtomic (BndVarS _ _) = True
+  isAtomic (ReturnS _) = True
   isAtomic _ = False
 
 
@@ -243,12 +243,12 @@ maxIndex = (+1) . runIdentity . foldSerialManifoldM fm
     , opNativeArgM = return . foldlNA max 0
     }
 
-  findSerialManifoldIndices :: Monad m => SerialManifold_ Int -> m Int 
+  findSerialManifoldIndices :: Monad m => SerialManifold_ Int -> m Int
   findSerialManifoldIndices (SerialManifold_ _ _ form bodyMax) = do
     let formIndices = abilist const const form
     return $ foldl max bodyMax formIndices
 
-  findNativeManifoldIndices :: Monad m => NativeManifold_ Int -> m Int 
+  findNativeManifoldIndices :: Monad m => NativeManifold_ Int -> m Int
   findNativeManifoldIndices (NativeManifold_ _ _ form bodyMax) = do
     let formIndices = abilist const const form
     return $ foldl max bodyMax formIndices
@@ -290,4 +290,4 @@ translateManifold makeFunction makeLambda m form (PoolDocs completeManifolds bod
       }
   where
     asArgs :: [Arg (Or TypeS TypeF)] -> [Arg TypeM]
-    asArgs rs = concat [[Arg i t | t <- bilist typeMof typeMof orT] | (Arg i orT) <- rs] 
+    asArgs rs = concat [[Arg i t | t <- bilist typeMof typeMof orT] | (Arg i orT) <- rs]

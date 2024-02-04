@@ -30,7 +30,7 @@ import qualified Morloc.System as MS
 -- module is written written into the DAG of previously observed modules.
 readProgram
   :: Maybe MVar
-  -- ^ The expected module name, 
+  -- ^ The expected module name,
   -> Maybe Path
   -- ^ An optional path to the file the source code was read from. If no path
   -- is given, then the source code was provided as a string.
@@ -41,11 +41,11 @@ readProgram
 readProgram moduleName modulePath sourceCode pstate p =
   case runParser
          (CMS.runStateT (sc >> pProgram moduleName <* eof) (reenter modulePath pstate))
-         (maybe "<expr>" id modulePath)
+         (fromMaybe "<expr>" modulePath)
          sourceCode of
     (Left err') -> Left err'
     -- all will be ModE expressions, since pTopLevel can return only these
-    (Right (es, s)) -> 
+    (Right (es, s)) ->
       let dag = foldl (\d (k,xs,n) -> Map.insert k (n,xs) d) p (map AST.findEdges es)
       in Right (dag, s)
 
@@ -73,7 +73,7 @@ pModule
     :: Maybe MVar -- ^ The expected module path
     -> Parser ExprI
 pModule expModuleName = do
-  reserved "module"
+  _ <- reserved "module"
 
   moduleName <- case expModuleName of
     Nothing -> MT.intercalate "." <$> sepBy freename (symbol ".")
@@ -148,7 +148,7 @@ pMain = do
   exprI $ ModE (MV "Main") es
 
 plural :: Functor m => m a -> m [a]
-plural = fmap return 
+plural = fmap return
 
 createMainFunction :: [ExprI] -> Parser [ExprI]
 createMainFunction es = case (init es, last es) of
@@ -167,7 +167,7 @@ createMainFunction es = case (init es, last es) of
 
 -- | Expressions including ones that are allowed only at the top-level of a scope
 pTopExpr :: Parser [ExprI]
-pTopExpr = 
+pTopExpr =
       try (plural pImport)
   <|> try (plural pTypedef)
   <|> try (plural pTypeclass)
@@ -211,14 +211,14 @@ pComposition = do
             let v = EV ("x" <> MT.show' (stateExpIndex s + 1))
 
             v' <- exprI (VarE v)
-            
+
             inner <- case last fs of
                 (ExprI i (AppE x xs)) -> return $ ExprI i (AppE x (xs <> [v']))
                 e -> exprI $ AppE e [v']
-            
+
             composition <- foldM compose inner (reverse (init fs))
 
-            exprI $ LamE [v] composition 
+            exprI $ LamE [v] composition
 
     where
 
@@ -296,7 +296,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     return (v, True)
 
   pGeneralType = do
-    t <- pType 
+    t <- pType
     return (t, False)
 
   pGeneralVar = do
@@ -347,21 +347,21 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     f t = return $ BT.listU t
 
   pNamType :: Parser NamType
-  pNamType = choice [pNamObject, pNamTable, pNamRecord] 
+  pNamType = choice [pNamObject, pNamTable, pNamRecord]
 
   pNamObject :: Parser NamType
   pNamObject = do
-    _ <- reserved "object" 
+    _ <- reserved "object"
     return NamObject
 
   pNamTable :: Parser NamType
   pNamTable = do
-    _ <- reserved "table" 
+    _ <- reserved "table"
     return NamTable
 
   pNamRecord :: Parser NamType
   pNamRecord = do
-    _ <- reserved "record" 
+    _ <- reserved "record"
     return NamRecord
 
   pLangNamespace :: Parser Lang
@@ -467,7 +467,7 @@ pSrcE = do
 
 pSource :: Parser [Source]
 pSource = do
-  reserved "source"
+  _ <- reserved "source"
   modulePath <- CMS.gets stateModulePath
   language <- pLang
   srcfile <- optional (reserved "from" >> stringLiteral |>> MT.unpack)
@@ -481,7 +481,7 @@ pSource = do
     (Just _, Nothing) -> return Nothing
     -- this case SHOULD only occur in testing where the source file does not exist
     -- file non-existence will be caught later
-    (Nothing, s) -> return s 
+    (Nothing, s) -> return s
   return [
     Source
       { srcName = srcVar

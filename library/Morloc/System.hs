@@ -13,7 +13,7 @@ module Morloc.System
   , loadYamlConfig
   ) where
 
-import Morloc.Namespace 
+import Morloc.Namespace
 
 import Data.Aeson (FromJSON(..))
 import qualified Data.Yaml.Config as YC
@@ -23,7 +23,7 @@ import System.Directory.Tree
 
 loadYamlConfig ::
      FromJSON a
-  => Maybe [String] -- ^ possible locations of the config file 
+  => Maybe [String] -- ^ possible locations of the config file
   -> YC.EnvUsage -- ^ default values taken from the environment (or a hashmap)
   -> IO a -- ^ default configuration
   -> IO a

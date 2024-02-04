@@ -19,12 +19,12 @@ import qualified Morloc.System as MS
 import qualified System.Directory as SD
 
 buildProgram :: (Script, [Script]) -> MorlocMonad ()
-buildProgram (nexus, pools) = mapM_ build (nexus:pools) 
+buildProgram (nexus, pools) = mapM_ build (nexus:pools)
 
 build :: Script -> MorlocMonad ()
 build s = do
   -- write the required file structure
-  liftIO $ MS.writeDirectoryWith (\f c -> MT.writeFile f (unCode c)) (scriptCode s)
+  _ <- liftIO $ MS.writeDirectoryWith (\f c -> MT.writeFile f (unCode c)) (scriptCode s)
   -- execute all make commands
   mapM_ runSysCommand (scriptMake s)
 

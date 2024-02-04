@@ -57,6 +57,12 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Update Hackage release
  - [ ] Ensure github actions passes
 
+
+0.44.0 [2024.02.xx]
+-------------------
+
+Ad hoc polymorphism with type-classes
+
 0.43.0 [2024.01.14]
 -------------------
 

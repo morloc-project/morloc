@@ -30,6 +30,7 @@ module Morloc.Language
   ) where
 
 import Data.Text (Text, toLower)
+import Morloc.Data.Doc
 
 -- | Programming languages in the Morloc ecosystem. This is the type that
 -- should be used to refer to a language (don't use raw strings). Some of these
@@ -42,6 +43,9 @@ data Lang
   | CppLang
   | PerlLang
   deriving (Ord, Eq, Show)
+
+instance Pretty Lang where
+  pretty = viaShow
 
 serialType :: Lang -> Text
 serialType CppLang = "std::string"

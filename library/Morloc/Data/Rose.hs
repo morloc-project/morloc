@@ -31,7 +31,7 @@ search f = filter f . flatten
 -- | Make list of values
 flatten :: Rose a -> [a]
 flatten Nil = []
-flatten (Rose x xs) = x : concatMap flatten xs 
+flatten (Rose x xs) = x : concatMap flatten xs
 
 
 -- | Remove branches where the value of the predicate returns true
@@ -48,7 +48,7 @@ mapScope
   => (b -> a -> b) -- fold an element into scope context
   -> (a -> b -> c) -- update a value given scope context
   -> b  -- ^ initial element
-  -> Rose a -- ^ input tree 
+  -> Rose a -- ^ input tree
   -> Rose c
 mapScope _ _ _ Nil = Nil
 mapScope f g b (Rose x kids) =

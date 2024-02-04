@@ -56,7 +56,7 @@ prettyFoldManifold = FoldWithManifoldM
     makeNativeExpr :: Monad m => NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs
     makeNativeExpr _ (AppSrcN_ _ (pretty . srcName -> functionName) xs) =
       return $ mergePoolDocs ((<>) functionName . tupled) xs
-    makeNativeExpr _ (ManN_ call) = return call 
+    makeNativeExpr _ (ManN_ call) = return call
     makeNativeExpr _ (ReturnN_ x) =
       return $ x { poolExpr = "ReturnN(" <> poolExpr x <> ")" }
     makeNativeExpr _ (SerialLetN_ i x1 x2) = return $ makeLet letNamerS "SerialLetN" i x1 x2
@@ -117,6 +117,7 @@ prettyFoldManifold = FoldWithManifoldM
     argName (Arg i _) = bndNamerS i
 
 
+prettyThing :: (p -> MI.Identity PoolDocs) -> p -> Doc ()
 prettyThing f a =
   let e = MI.runIdentity $ f a
   in vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e

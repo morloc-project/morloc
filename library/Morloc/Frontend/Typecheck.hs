@@ -13,13 +13,11 @@ module Morloc.Frontend.Typecheck (typecheck, resolveTypes, evaluateAnnoSTypes, p
 
 import Morloc.Frontend.Namespace
 import Morloc.Typecheck.Internal
-import Morloc.Pretty
 import Morloc.Data.Doc
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-import qualified Morloc.Frontend.PartialOrder as MTP
 
 import qualified Data.Map as Map
 
@@ -78,17 +76,17 @@ resolveTypes (AnnoS (Idx i t) ci e)
 
 resolveInstances :: Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
 resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = AnnoS gi ci <$> f e0 where
-  f :: ExprS (Indexed TypeU) ManyPoly Int -> MorlocMonad (ExprS (Indexed TypeU) Many Int) 
+  f :: ExprS (Indexed TypeU) ManyPoly Int -> MorlocMonad (ExprS (Indexed TypeU) Many Int)
 
   -- resolve instances
   f (VarS v (PolymorphicExpr _ _ _ rss)) = do
         -- collect all implementations and apply context
     let es = [AnnoS (Idx i (apply g t)) c e | (AnnoS (Idx i t) c e) <- concatMap snd rss]
         -- find the types of the most specific instances that are subtypes of the inferred type
-        mostSpecificTypes = MTP.mostSpecificSubtypes gt [t | (AnnoS (Idx _ t) _ _) <- es]
+        mostSpecificTypes = mostSpecificSubtypes gt [t | (AnnoS (Idx _ t) _ _) <- es]
         -- filter out the most specific subtype expressions
         es' = [AnnoS (Idx i t) c e | (AnnoS (Idx i t) c e) <- es, t `elem` mostSpecificTypes]
-    VarS v . Many <$> mapM (resolveInstances g) es' 
+    VarS v . Many <$> mapM (resolveInstances g) es'
 
   f (VarS v (MonomorphicExpr _ xs)) = VarS v . Many <$> mapM (resolveInstances g) xs
 
@@ -108,7 +106,7 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = AnnoS gi ci <$> f e0 where
   f (LogS x) = return $ LogS x
   f (StrS x) = return $ StrS x
   f (CallS x) = return $ CallS x
-  
+
 
 -- prepare a general, indexed typechecking error
 gerr :: Int -> TypeError -> MorlocMonad a
@@ -164,18 +162,18 @@ synthE i g0 (AccS k e) = do
     accessRecord :: Gamma -> TypeU -> MorlocMonad (Gamma, TypeU)
     accessRecord g t@(NamU _ _ _ rs) = case lookup k rs of
       Nothing -> gerr i (KeyError k t)
-      (Just val) -> return (g, val)
+      (Just value) -> return (g, value)
     accessRecord g t@(ExistU v ps rs) = case lookup k rs of
       Nothing -> do
-        let (g', val) = newvar (unTVar v <> "_" <> unKey k) g
+        let (g', value) = newvar (unTVar v <> "_" <> unKey k) g
         case access1 v (gammaContext g') of
-          (Just (rhs, _, lhs)) -> return (g' { gammaContext = rhs <> [ExistG v ps ((k, val):rs)] <> lhs }, val)
+          (Just (rhs, _, lhs)) -> return (g' { gammaContext = rhs <> [ExistG v ps ((k, value):rs)] <> lhs }, value)
           Nothing -> do
             MM.sayVVV $ "Case b"
                       <> "\n  rs:" <+> pretty rs
                       <> "\n  v:" <+> pretty v
             gerr i (KeyError k t)
-      (Just val) -> return (g, val)
+      (Just value) -> return (g, value)
     accessRecord g t = do
       globalMap <- MM.gets stateGeneralTypedefs
       gscope <- case GMap.lookup i globalMap of
@@ -287,7 +285,7 @@ synthE _ g0 (NamS rs) = do
 -- variables should be checked against. I think (this needs formalization).
 synthE _ g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
   let (g1, t1) = rename g0 (etype t0)
-  (g2, t2, xs1) <- foldCheck g1 xs0 t1 
+  (g2, t2, xs1) <- foldCheck g1 xs0 t1
   let xs2 = applyCon g2 $ VarS v (MonomorphicExpr (Just t0) xs1)
   return (g2, t2, xs2)
 
@@ -300,7 +298,7 @@ synthE _ g (VarS v (MonomorphicExpr Nothing (x:xs))) = do
 synthE _ g (VarS v (MonomorphicExpr Nothing [])) = do
   let (g', t) = newvar (unEVar v <> "_u") g
   return (g', t, VarS v (MonomorphicExpr Nothing []))
-  
+
 synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
   let (g1, t1) = toExistential g0 (etype t0)
   rs' <- checkInstances g1 t1 rs0
@@ -337,16 +335,16 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
 
 -- This case will only be encountered in check, the existential generated here
 -- will be subtyped against the type known from the VarS case.
-synthE _ g (CallS src) = do 
+synthE _ g (CallS src) = do
   let (g', t) = newvar "call_" g
   return (g', t, CallS src)
 
 synthE _ g (BndS v) = do
-  (g', t') <- case lookupE v g of 
+  (g', t') <- case lookupE v g of
     -- yes, return the solved type
     (Just t) -> return (g, t)
     -- no, then I don't know what it is and will return an existential
-    -- if this existential is never solved, then it will become universal later 
+    -- if this existential is never solved, then it will become universal later
     Nothing -> return $ newvar (unEVar v <> "_u") g
   return (g', t', BndS v)
 
@@ -481,7 +479,7 @@ foldCheck
   -> MorlocMonad (Gamma, TypeU, [AnnoS (Indexed TypeU) ManyPoly Int])
 foldCheck g [] t = return (g, t, [])
 foldCheck g (x:xs) t = do
-  (g', t', x') <- checkG g x t  
+  (g', t', x') <- checkG g x t
   (g'', t'', xs') <- foldCheck g' xs t'
   return (g'', t'', x':xs')
 
@@ -565,6 +563,16 @@ evaluateAnnoSTypes = mapAnnoSGM resolve where
 
 ---- debugging
 
+
+synthE'
+  :: Int
+  -> Gamma
+  -> ExprS Int ManyPoly Int
+  -> MorlocMonad
+       ( Gamma
+       , TypeU
+       , ExprS (Indexed TypeU) ManyPoly Int
+       )
 synthE' i g x = do
   enter "synthE"
   insetSay $ "synthesize type for: " <> peakSExpr x
@@ -574,6 +582,17 @@ synthE' i g x = do
   insetSay $ "synthesized type = " <> pretty t
   return r
 
+
+checkE'
+  :: Int
+  -> Gamma
+  -> ExprS Int ManyPoly Int
+  -> TypeU
+  -> MorlocMonad
+       ( Gamma
+       , TypeU
+       , ExprS (Indexed TypeU) ManyPoly Int
+       )
 checkE' i g x t = do
   enter "checkE"
   insetSay $ "check if expr: " <> peakSExpr x
@@ -584,6 +603,17 @@ checkE' i g x t = do
   seeType t'
   return r
 
+
+application'
+  :: Int
+  -> Gamma
+  -> [AnnoS Int ManyPoly Int]
+  -> TypeU
+  -> MorlocMonad
+      ( Gamma
+      , TypeU
+      , [AnnoS (Indexed TypeU) ManyPoly Int]
+      )
 application' i g es t = do
   enter "application"
   seeType t

@@ -18,7 +18,6 @@ module Morloc.CodeGenerator.Generate
 ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.Pretty ()
 import Morloc.Data.Doc
 import qualified Data.Map as Map
 import qualified Morloc.Config as MC
@@ -26,7 +25,6 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Nexus as Nexus
-import Morloc.Frontend.Typecheck (peakSExpr)
 import Morloc.CodeGenerator.Infer
 
 import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
@@ -111,12 +109,12 @@ realize
   :: AnnoS (Indexed Type) Many Int
   -> MorlocMonad (Either (AnnoS (Indexed Type) One ())
                          (AnnoS (Indexed Type) One (Indexed Lang)))
-realize s0@(AnnoS (Idx i0 t0) _ _) = do
+realize s0 = do
   e@(AnnoS _ li _) <- scoreAnnoS [] s0 >>= collapseAnnoS Nothing |>> removeVarS
   case li of
     (Idx _ Nothing) -> makeGAST e |>> Left
     (Idx _ _) -> Right <$> propagateDown e
-  where 
+  where
 
   -- | Depth first pass calculating scores for each language. Alternates with
   -- scoresSExpr.
@@ -162,10 +160,10 @@ realize s0@(AnnoS (Idx i0 t0) _ _) = do
     xs' <- mapM (scoreAnnoS (unique $ map fst scores)) xs
 
     -- [[(Lang, Int)]] : where Lang is unique within each list and Int is minimized
-    let pairss = [minPairs xs' | AnnoS _ (Idx _ xs') _ <- xs']
+    let pairss = [minPairs pairs | AnnoS _ (Idx _ pairs) _ <- xs']
 
         {- find the best score for each language supported by function f
-          
+
            Below is the cost function where
             l1: the language of the ith calling function implementation
             s1: the score of the ith implementation
@@ -467,7 +465,7 @@ generalSerial x0@(AnnoS (Idx i t) _ _) = do
     generalSerial' base ps (AnnoS _ _(BndS (EV v))) =
       return $ base { commandSubs = [(ps, v, [])] }
     -- bad states
-    generalSerial' _ _ (AnnoS _ _ (VarS v _)) = error $ "VarS should have been removed in the prior step, found: " <> show v 
+    generalSerial' _ _ (AnnoS _ _ (VarS v _)) = error $ "VarS should have been removed in the prior step, found: " <> show v
     generalSerial' NexusCommand{} _ (AnnoS _ _ (CallS _)) = error "Functions should not occur here, observed AppS"
     generalSerial' NexusCommand{} _ (AnnoS _ _ (AppS _ _)) = error "Functions should not occur here, observed AppS"
 
@@ -568,7 +566,7 @@ applyLambdas (AnnoS g1 _ (AppS (AnnoS _ _ (LamS [] (AnnoS _ c2 e))) [])) = apply
 applyLambdas (AnnoS g1 _ (AppS (AnnoS _ c2 e) [])) = applyLambdas $ AnnoS g1 c2 e
 
 -- substitute applied lambdas
-applyLambdas 
+applyLambdas
   (AnnoS i1 tb1
     ( AppS
       ( AnnoS
@@ -664,9 +662,9 @@ parameterize'
 -- primitives, no arguments are required for a primitive, so empty lists
 parameterize' _ (AnnoS g c UniS) = return $ AnnoS g (c, []) UniS
 parameterize' _ (AnnoS g c (RealS x)) = return (AnnoS g (c, []) (RealS x))
-parameterize' _ (AnnoS g c (IntS x))  = return (AnnoS g (c, []) (IntS x)) 
-parameterize' _ (AnnoS g c (LogS x))  = return (AnnoS g (c, []) (LogS x)) 
-parameterize' _ (AnnoS g c (StrS x))  = return (AnnoS g (c, []) (StrS x)) 
+parameterize' _ (AnnoS g c (IntS x))  = return (AnnoS g (c, []) (IntS x))
+parameterize' _ (AnnoS g c (LogS x))  = return (AnnoS g (c, []) (LogS x))
+parameterize' _ (AnnoS g c (StrS x))  = return (AnnoS g (c, []) (StrS x))
 parameterize' args (AnnoS g c (BndS v)) = do
   let args' = [r | r@(Arg _ v') <- args, v' == v]
   return $ AnnoS g (c, args') (BndS v)
@@ -789,12 +787,12 @@ expressDefault e@(AnnoS (Idx midx t) (Idx cidx lang, args) _)
 expressPolyExpr :: Lang -> Indexed Type -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyExpr
 -- these cases will include partially applied functions and explicit lambdas
 -- the former is transformed into the latter in the frontend typechecker
-expressPolyExpr parentLang pc
+expressPolyExpr parentLang _
   (AnnoS (Idx midx lamType@(FunT lamInputTypes lamOutType)) (Idx cidxLam _, lamArgs)
     (LamS vs
       (AnnoS (Idx _ appType) (Idx cidxApp appLang, appArgs)
         (AppS
-          (AnnoS callTypeI@(Idx _ callType@(FunT callInputTypes _)) (Idx cidxCall callLang, _)
+          (AnnoS callTypeI@(Idx _ (FunT callInputTypes _)) (Idx _ callLang, _)
             (CallS src)) xs))))
 
   ----------------------------------------------------------------------------------------
@@ -1235,7 +1233,7 @@ expressPolyExpr _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (RealS x )) = return
 expressPolyExpr _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (IntS x  )) = return $ PolyInt  (Idx cidx v) x
 expressPolyExpr _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (LogS x  )) = return $ PolyLog  (Idx cidx v) x
 expressPolyExpr _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (StrS x  )) = return $ PolyStr  (Idx cidx v) x
-expressPolyExpr _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (UniS    )) = return $ PolyNull (Idx cidx v)
+expressPolyExpr _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _)  UniS     ) = return $ PolyNull (Idx cidx v)
 
 -- record access
 expressPolyExpr _ pc (AnnoS _ _ (AccS key record@(AnnoS (Idx _ (NamT o v _ rs)) (Idx cidx lang, _) _))) = do
@@ -1303,7 +1301,7 @@ segment (PolyHead lang m0 args0 e0) = do
             <> "\n  topExpr language:" <+> pretty lang
             <> "\n  topExpr: " <+> pretty topExpr
             <> "\n  heads:" <+> list (map pretty heads)
-  
+
   return (MonoHead lang m0 args0 topExpr : heads)
 
 segmentExpr
@@ -1463,7 +1461,7 @@ serialize (MonoHead lang m0 args0 e0) = do
       ne1 <- nativeExpr m e1
       NativeLetS i ne1 <$> serialExpr m e2
   serialExpr _ (MonoLetVar t i) = do
-    t' <- inferType t 
+    t' <- inferType t
     return $ LetVarS (Just t') i
   serialExpr m (MonoReturn e) = ReturnS <$> serialExpr m e
   serialExpr _ (MonoApp (MonoPoolCall t m docs contextArgs) es) = do
@@ -1659,7 +1657,7 @@ class IsSerializable a where
 instance IsSerializable SerialExpr where
   serialLet = SerialLetS
   nativeLet = NativeLetS
-  
+
 instance IsSerializable NativeExpr where
   serialLet = SerialLetN
   nativeLet = NativeLetN
@@ -1757,16 +1755,16 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _) = foldSerialManifoldM fm sm0 |>> s
 
   letWrap :: (IsSerializable e, HasRequest t, MayHaveTypeF t)
           => Int -> ManifoldForm (Or TypeS TypeF) t -> Map.Map Int Request -> e -> MorlocMonad e
-  letWrap m0 form0 req0 e0 = foldlM wrapAsNeeded e0 (Map.toList req0) where
+  letWrap m form0 req0 e0 = foldlM wrapAsNeeded e0 (Map.toList req0) where
 
     formMap = manifoldToMap form0
 
     wrapAsNeeded :: IsSerializable e => e -> (Int, Request) -> MorlocMonad e
     wrapAsNeeded e (i, req) = case (req, Map.lookup i formMap) of
-      (SerialContent,          Just (NativeContent, Just t)) -> serialLet i <$> serializeS "wan 1" m0 t (BndVarN t i) <*> pure e
-      (NativeAndSerialContent, Just (NativeContent, Just t)) -> serialLet i <$> serializeS "wan 2" m0 t (BndVarN t i) <*> pure e
-      (NativeContent,          Just (SerialContent, Just t)) -> nativeLet i <$> naturalizeN "wan 3" m0 lang t (BndVarS (Just t) i) <*> pure e
-      (NativeAndSerialContent, Just (SerialContent, Just t)) -> nativeLet i <$> naturalizeN "wan 4" m0 lang t (BndVarS (Just t) i) <*> pure e
+      (SerialContent,          Just (NativeContent, Just t)) -> serialLet i <$> serializeS "wan 1" m t (BndVarN t i) <*> pure e
+      (NativeAndSerialContent, Just (NativeContent, Just t)) -> serialLet i <$> serializeS "wan 2" m t (BndVarN t i) <*> pure e
+      (NativeContent,          Just (SerialContent, Just t)) -> nativeLet i <$> naturalizeN "wan 3" m lang t (BndVarS (Just t) i) <*> pure e
+      (NativeAndSerialContent, Just (SerialContent, Just t)) -> nativeLet i <$> naturalizeN "wan 4" m lang t (BndVarS (Just t) i) <*> pure e
       _ -> return e
 
   manifoldToMap :: (HasRequest t, MayHaveTypeF t) => ManifoldForm (Or TypeS TypeF) t -> Map.Map Int (Request, Maybe TypeF)
@@ -1829,27 +1827,12 @@ instance Semigroup Request where
 data SerializationState = Serialized | Unserialized
   deriving(Show, Eq, Ord)
 
-class HasSerializationState a where
-  isSerialized :: a -> SerializationState
-
-instance HasSerializationState SerialExpr where
-  isSerialized _ = Serialized
-
-instance HasSerializationState SerialManifold where
-  isSerialized _ = Serialized
-
-instance HasSerializationState NativeExpr where
-  isSerialized _ = Unserialized
-
-instance HasSerializationState NativeManifold where
-  isSerialized _ = Unserialized
-
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
 pool :: [SerialManifold] -> [(Lang, [SerialManifold])]
 pool es =
     -- [SerialManifold] --> [(Lang, [(Int, SerialManifold)])]
-    let (langs, indexedSegments) = unzip . groupSort . map (\x@(SerialManifold i lang _ _) -> (lang, (i, x))) $ es 
+    let (langs, indexedSegments) = unzip . groupSort . map (\x@(SerialManifold i lang _ _) -> (lang, (i, x))) $ es
         {-
         Each of the `SerialManifold` values is represents a single subtree of the
         program and may thus contain many nested manifolds. Each is thus the root
@@ -1882,7 +1865,7 @@ findSources ms = unique <$> concatMapM (foldSerialManifoldM fm) ms
     , opNativeManifoldM = nativeManifoldSrcs
     , opSerialManifoldM = nativeSerialSrcs
     }
-  
+
   nativeExprSrcs (AppSrcN_ _ src xss) = return (src : concat xss)
   nativeExprSrcs (SrcN_ _ src) = return [src]
   nativeExprSrcs (DeserializeN_ _ s xs) = return $ serialASTsources s <> xs

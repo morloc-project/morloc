@@ -43,7 +43,7 @@ data MakeCommand = MakeCommand
 
 makeCommandParser :: Parser MakeCommand
 makeCommandParser = MakeCommand
-  <$> optExpression 
+  <$> optExpression
   <*> optConfig
   <*> optVerbose
   <*> optVanilla
@@ -70,7 +70,7 @@ makeInstallParser = InstallCommand
   <*> optVanilla
   <*> optModuleName
 
-installSubcommand :: Mod CommandFields CliCommand 
+installSubcommand :: Mod CommandFields CliCommand
 installSubcommand = command "install" (info (CmdInstall <$> makeInstallParser) (progDesc "install a morloc module"))
 
 
@@ -96,12 +96,12 @@ makeTypecheckParser = TypecheckCommand
   <*> optRealize
   <*> optScript
 
-typecheckSubcommand :: Mod CommandFields CliCommand 
+typecheckSubcommand :: Mod CommandFields CliCommand
 typecheckSubcommand =
   command "typecheck" (info (CmdTypecheck <$> makeTypecheckParser) (progDesc "typecheck a morloc program"))
 
 
-dumpSubcommand :: Mod CommandFields CliCommand 
+dumpSubcommand :: Mod CommandFields CliCommand
 dumpSubcommand =
   command "dump" (info (CmdDump <$> makeDumpParser) (progDesc "dump parsed code"))
 

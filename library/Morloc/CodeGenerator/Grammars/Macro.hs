@@ -23,9 +23,7 @@ import qualified Text.Megaparsec.Char.Lexer as L
 
 type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
 
-data ParserState = ParserState {
-    stateParameters :: [MT.Text]
-}
+newtype ParserState = ParserState { stateParameters :: [MT.Text] }
 
 expandMacro :: MT.Text -> [MT.Text] -> MT.Text
 expandMacro t [] = t

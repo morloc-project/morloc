@@ -54,7 +54,6 @@ module Morloc.Typecheck.Internal
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import Morloc.Data.Doc
-import Morloc.Pretty ()
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Monad as MM
 
@@ -92,7 +91,7 @@ instance Applicable TypeU where
   -- [G]ForallU a.a = forall a. [G]a
   apply g (ForallU v a) =
     -- FIXME: VERY WRONG
-    case lookupU v g of 
+    case lookupU v g of
       (Just _) -> apply g a
       Nothing -> ForallU v (apply g a)
 
@@ -108,12 +107,12 @@ instance Applicable EType where
   apply g e = e { etype = apply g (etype e) }
 
 instance Applicable Gamma where
-  apply g1 g2 = g2 {gammaContext = map f (gammaContext g2)} where 
+  apply g1 g2 = g2 {gammaContext = map f (gammaContext g2)} where
     f :: GammaIndex -> GammaIndex
     f (AnnG v t) = AnnG v (apply g1 t)
     f (ExistG v ps rs) = ExistG v (map (apply g1) ps) (map (second (apply g1)) rs)
     f (SolvedG v t) = SolvedG v (apply g1 t)
-    f x = x 
+    f x = x
 
 class GammaIndexLike a where
   index :: a -> GammaIndex
@@ -150,7 +149,7 @@ subtype t1@(VarU a1) t2@(VarU a2) g
   -- Else, raise an error
   | a1 /= a2 = Left $ Mismatch t1 t2 "Unequal types with no conversion rule"
 
-subtype a@(ExistU l1 _ _) b@(ExistU l2 _ _) g
+subtype a@ExistU{} b@ExistU{} g
   --
   -- ----------------------------------------- <:Exvar
   --  G[E.a] |- E.a <: E.a -| G[E.a]
@@ -166,7 +165,7 @@ subtype a@(ExistU l1 _ _) b@(ExistU l2 _ _) g
 --  g2 |- [g2]A2 <: [g2]B2 -| g3
 -- ----------------------------------------- <:-->
 --  g1 |- A1 -> A2 <: B1 -> B2 -| g3
--- 
+--
 -- function subtypes are *contravariant* with respect to the input, that is,
 -- the subtypes are reversed so we have b1<:a1 instead of a1<:b1.
 subtype (FunU [] a2) (FunU [] b2) g = subtype a2 b2 g
@@ -257,7 +256,7 @@ instantiate :: TypeU -> TypeU -> Gamma -> Either TypeError Gamma
 instantiate ta@(ExistU _ _ (_:_)) tb@(NamU _ _ _ _) g1 = instantiate tb ta g1
 instantiate ta@(NamU _ _ _ rs1) tb@(ExistU v _ rs2@(_:_)) g1 = do
   g2 <- foldM (\g' (t1, t2) -> subtype t1 t2 g') g1 [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
-  case access1 v (gammaContext g2) of 
+  case access1 v (gammaContext g2) of
     (Just (rhs, _, lhs)) -> do
         solved <- solve v ta
         return $ g2 {gammaContext = rhs ++ [solved] ++ lhs}
@@ -401,7 +400,7 @@ solve v t
         toTVar (ExistU v' _ _) = Just v'
         toTVar (VarU v') = Just v'
         toTVar _ = Nothing
-    
+
 
 
 occursCheck :: TypeU -> TypeU -> MT.Text -> Either TypeError ()
@@ -492,7 +491,7 @@ newvarRich ps rs prefix g =
 
 -- | standardize quantifier names, for example, replace `a -> b` with `v0 -> v1`.
 rename :: Gamma -> TypeU -> (Gamma, TypeU)
-rename g0 (ForallU v@(TV s) t0) = 
+rename g0 (ForallU v@(TV s) t0) =
   let (g1, v') = tvarname g0 (s <> "_q")
       (g2, t1) = rename g1 t0
       t2 = substituteTVar v (VarU v') t1
@@ -574,9 +573,9 @@ leave d = do
 seeGamma :: Gamma -> MorlocMonad ()
 seeGamma g = MM.sayVVV $ nest 4 $ "Gamma:" <> line <> vsep (map pretty (gammaContext g))
 
-peak :: (Pretty c, Pretty g) => ExprS g f c -> MorlocMonad ()
+peak :: ExprS g f c -> MorlocMonad ()
 peak = insetSay . pretty
 
-peakGen :: (Pretty c, Pretty g) => AnnoS g f c -> MorlocMonad ()
+peakGen :: AnnoS g f c -> MorlocMonad ()
 peakGen = insetSay . pretty
 

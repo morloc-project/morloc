@@ -28,7 +28,7 @@ class Annotated f where
   annappM :: (Monad m ) => (a -> b -> m c) -> f a b -> m c
   annappM f x = f (ann x) (val x)
 
-  revalM :: Monad m => (a -> b -> m b') -> f a b -> m (f a b') 
+  revalM :: Monad m => (a -> b -> m b') -> f a b -> m (f a b')
   revalM f x = annotate (ann x) <$> f (ann x) (val x)
 
   reannM :: Monad m => (a -> b -> m a') -> f a b -> m (f a' b)

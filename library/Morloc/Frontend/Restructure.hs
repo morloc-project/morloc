@@ -12,7 +12,6 @@ Stability   : experimental
 module Morloc.Frontend.Restructure (restructure) where
 
 import Morloc.Frontend.Namespace
-import Morloc.Pretty ()
 import Morloc.Data.Doc
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Monad as MM
@@ -22,7 +21,6 @@ import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.TypeEval as TE
 import qualified Data.Set as Set
-import qualified Morloc.Frontend.PartialOrder as MTP
 import Morloc.Typecheck.Internal (qualify, unqualify)
 
 -- | Resolve type aliases, term aliases and import/exports
@@ -58,7 +56,7 @@ doM f x = f x >> return x
 -- is why I need to raise an explicit error to avoid infinite loops.
 checkForSelfRecursion :: Ord k => DAG k e ExprI -> MorlocMonad (DAG k e ExprI)
 checkForSelfRecursion d = do
-  MDD.mapNodeM (AST.checkExprI isExprSelfRecursive) d
+  _ <- MDD.mapNodeM (AST.checkExprI isExprSelfRecursive) d
   return d
   where
     -- A typedef is self-recursive if its name appears in its definition
@@ -83,7 +81,7 @@ checkForSelfRecursion d = do
     hasTerm v (NamU o n (p:ps) []) = hasTerm v p || hasTerm v (NamU o n ps [])
     hasTerm _ (NamU _ _ [] []) = False
 
-    hasTerm _ (ExistU _ _ _) = error "There should not be existentionals in typedefs"
+    hasTerm _ ExistU{} = error "There should not be existentionals in typedefs"
 
 
 -- | Consider export/import information to determine which terms are imported
@@ -208,7 +206,7 @@ collectTypes fullDag = do
 
   completeRecord :: Scope -> TVar -> [([TVar], TypeU, Bool)] -> [([TVar], TypeU, Bool)]
   completeRecord gscope v xs = case Map.lookup v gscope of
-    (Just ys) -> map (completeValue [t | (_, t, _) <- ys]) xs 
+    (Just ys) -> map (completeValue [t | (_, t, _) <- ys]) xs
     Nothing -> xs
 
   completeValue :: [TypeU] -> ([TVar], TypeU, Bool) -> ([TVar], TypeU, Bool)
@@ -302,8 +300,8 @@ collectMogrifiers fullDag = do
     isNovel ((t1, src1):ys) x@(t2, src2)
       | srcPath src1 == srcPath src2 &&
         srcName src1 == srcName src2 &&
-        MTP.isSubtypeOf t1 t2 &&
-        MTP.isSubtypeOf t2 t1 = False
+        isSubtypeOf t1 t2 &&
+        isSubtypeOf t2 t1 = False
       | otherwise = isNovel ys x
 
   formMogrifiers
@@ -349,7 +347,7 @@ collectMogrifiers fullDag = do
         where
           srcMap = Map.fromListWith (<>) [(srcAlias src, [src]) | src <- srcs]
           mogMaybe = concat [[(p, (etype e, Map.lookup v srcMap)) | p <- Set.toList (eprop e)] | (v, _, e) <- es]
-          mogrifiers = Map.fromListWith (<>) [(p, [(t, src) | src <- srcs]) | (p, (t, Just srcs)) <- mogMaybe]
+          mogrifiers = Map.fromListWith (<>) [(p, [(t, src) | src <- srcs']) | (p, (t, Just srcs')) <- mogMaybe]
 
       inherit :: [(TVar, TVar)] -> Map.Map Property [(TypeU, Source)] -> Map.Map Property [(TypeU, Source)]
       inherit aliasMap mogMap

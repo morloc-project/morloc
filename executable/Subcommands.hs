@@ -21,7 +21,6 @@ import qualified Morloc.Frontend.API as F
 import qualified Morloc.Data.GMap as GMap
 import Morloc.CodeGenerator.Namespace (SerialManifold(..))
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
-import Morloc.Pretty ()
 import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.Map as Map
@@ -128,7 +127,7 @@ writeTerm s i typeDoc =
 
 writeTypecheckOutput :: Int -> ((Either MorlocError [(Lang, [SerialManifold])], [MT.Text]), MorlocState) -> MDoc
 writeTypecheckOutput _ ((Left e, _), _) = pretty e
-writeTypecheckOutput _ ((Right pools, _), _) = vsep $ map (uncurry writePool) pools 
+writeTypecheckOutput _ ((Right pools, _), _) = vsep $ map (uncurry writePool) pools
 
 writePool :: Lang -> [SerialManifold] -> MDoc
 writePool lang manifolds = pretty lang <+> "pool:" <> "\n" <> vsep (map pseudocodeSerialManifold manifolds) <> "\n"
@@ -146,4 +145,4 @@ cmdDump args _ config = do
 prettyDAG :: DAG MVar e ExprI -> MDoc
 prettyDAG m0 = vsep (map prettyEntry (Map.toList m0)) where
   prettyEntry :: (MVar, (ExprI, [(MVar, e)])) -> MDoc
-  prettyEntry (k, (n, _)) = block 4 (pretty k) (vsep [pretty n]) 
+  prettyEntry (k, (n, _)) = block 4 (pretty k) (vsep [pretty n])

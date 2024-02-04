@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, ViewPatterns #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {-|
 Module      : Morloc.CodeGenerator.Serial
@@ -10,7 +10,7 @@ Stability   : experimental
 -}
 
 module Morloc.CodeGenerator.Serial
-  ( makeSerialAST 
+  ( makeSerialAST
   , chooseSerializationCycle
   , isSerializable
   , prettySerialOne
@@ -141,7 +141,7 @@ makeSerialAST m lang t0 = do
             , typePackerForward  = forwardSource
             , typePackerReverse  = reverseSource
             }
-        makeTypePacker (nparam, _, _, _, _) = serializerError $ "Unexpected parameters for atomic variable:" <+> pretty nparam 
+        makeTypePacker (nparam, _, _, _, _) = serializerError $ "Unexpected parameters for atomic variable:" <+> pretty nparam
 
         -- Select the first packer we happen across. This is a very key step and
         -- eventually this function should be replaced with one more carefully
@@ -268,7 +268,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
                         return . Just $ apply g (existential gc)
 
         return $ case maybeUnpackedGeneralType of
-          (Just unpackedGeneralType) -> Just $ weaveTypeF unpackedGeneralType unpackedConcreteType
+          (Just resolvedUnpackedGeneralType) -> Just $ weaveTypeF resolvedUnpackedGeneralType unpackedConcreteType
           Nothing -> Nothing
 
     unweaveTypeF :: TypeF -> (TypeU, TypeU)
@@ -287,7 +287,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
             keys = map fst rs
             (vsg, vsc) = unzip $ map (unweaveTypeF . snd) rs
         in (NamU n gv psg (zip keys vsg), NamU n (cv2tv cv) psc (zip keys vsc))
- 
+
     weaveTypeF :: TypeU -> TypeU -> TypeF
     weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv (tv2cv cv))
     weaveTypeF (FunU tsg tg) (FunU tsc tc) = FunF (zipWith weaveTypeF tsg tsc) (weaveTypeF tg tc)
@@ -328,8 +328,8 @@ chooseSerializationCycle (x:_) = Just x
 isSerializable :: SerialAST -> Bool
 isSerializable (SerialPack _ _) = False
 isSerializable (SerialList _ x) = isSerializable x
-isSerializable (SerialTuple _ xs) = all isSerializable xs 
-isSerializable (SerialObject _ _ _ rs) = all (isSerializable . snd) rs 
+isSerializable (SerialTuple _ xs) = all isSerializable xs
+isSerializable (SerialObject _ _ _ rs) = all (isSerializable . snd) rs
 isSerializable (SerialReal   _) = True
 isSerializable (SerialInt    _) = True
 isSerializable (SerialBool   _) = True

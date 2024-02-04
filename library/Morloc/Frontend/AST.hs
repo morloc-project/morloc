@@ -50,7 +50,7 @@ findTypedefs
   -> (               Map.Map TVar [([TVar], TypeU, Bool)]
      , Map.Map Lang (Map.Map TVar [([TVar], TypeU, Bool)])
      )
-findTypedefs (ExprI _ (TypE Nothing v vs t)) = (Map.singleton v [(vs, t, False)], Map.empty) 
+findTypedefs (ExprI _ (TypE Nothing v vs t)) = (Map.singleton v [(vs, t, False)], Map.empty)
 findTypedefs (ExprI _ (TypE (Just (lang, isTerminal)) v vs t)) = (Map.empty, Map.singleton lang (Map.singleton v [(vs, t, isTerminal)]))
 findTypedefs (ExprI _ (ModE _ es)) = foldl combine (Map.empty, Map.empty) (map findTypedefs es) where
   combine (g1, c1) (g2, c2)

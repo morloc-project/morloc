@@ -16,7 +16,6 @@ import qualified Control.Monad.State as CMS
 import Morloc.Data.Doc
 import Morloc.CodeGenerator.Namespace
 import Morloc.Quasi
-import Morloc.Pretty ()
 import qualified Morloc.Data.Text as MT
 import qualified Control.Monad as CM
 import qualified Morloc.Config as MC
@@ -35,7 +34,7 @@ generate cs xs = do
 
   callNames <- mapM (MM.metaName . (\(_, i, _) -> i)) xs |>> catMaybes |>> map pretty
   let gastNames = map (pretty . commandName) cs
-      names = callNames <> gastNames 
+      names = callNames <> gastNames
   fdata <- CM.mapM getFData xs -- [FData]
   outfile <- CMS.gets (fromMaybe "nexus.py" . stateOutfile)
   return $
@@ -110,9 +109,11 @@ if __name__ == '__main__':
         dispatch(cmd, args)
 |]
 
+mapT :: [Doc ann] -> Doc ann
 mapT names = [idoc|command_table = #{dict}|] where
     dict = encloseSep "{" "}" "," (map mapEntryT names)
 
+mapEntryT :: Doc ann -> Doc ann
 mapEntryT n = [idoc|"#{n}" : call_#{n}|]
 
 usageT :: [FData] -> [NexusCommand] -> MDoc
@@ -132,7 +133,7 @@ usageLineT (_, name', t) = vsep
 usageLineConst :: NexusCommand -> MDoc
 usageLineConst cmd = vsep
   ( [idoc|print("  #{pretty (commandName cmd)}")|]
-  : writeTypes (commandType cmd) 
+  : writeTypes (commandType cmd)
   )
 
 writeTypes :: Type -> [MDoc]
@@ -165,7 +166,7 @@ def call_#{subcommand}(args):
 functionCT :: NexusCommand -> MDoc
 functionCT (NexusCommand cmd _ json_str args subs) =
   [idoc|
-def call_#{pretty cmd}(args): 
+def call_#{pretty cmd}(args):
     if len(args) != #{pretty $ length args}:
         sys.exit("Expected #{pretty $ length args} arguments to '#{pretty cmd}', given " + str(len(args)))
     else:

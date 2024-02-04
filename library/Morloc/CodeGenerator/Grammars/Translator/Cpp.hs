@@ -17,7 +17,7 @@ Stability   : experimental
 -}
 
 module Morloc.CodeGenerator.Grammars.Translator.Cpp
-  ( 
+  (
     translate
   , preprocess
   ) where
@@ -72,7 +72,7 @@ instance HasCppType NativeManifold where
 
 instance {-# OVERLAPPABLE #-} HasTypeF e => HasCppType e where
   cppTypeOf = f . typeFof where
-    f (UnkF (FV _ x)) = return $ pretty x 
+    f (UnkF (FV _ x)) = return $ pretty x
     f (VarF (FV _ x)) = return $ pretty x
     f (FunF ts t) = do
       t' <- f t
@@ -152,9 +152,6 @@ preprocess = return . invertSerialManifold
 
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate srcs es = do
-  -- -- diagnostics
-  -- liftIO . putDoc . vsep $ "-- C++ translation --" : map pretty es
-
   -- generate code for serialization
   serializationBoilerplate <- generateSourcedSerializers es
 
@@ -207,7 +204,7 @@ makeTheMaker srcs = do
   return [cmd]
 
 serialType :: MDoc
-serialType = pretty $ ML.serialType CppLang 
+serialType = pretty $ ML.serialType CppLang
 
 makeSignature :: SerialManifold -> CppTranslator [MDoc]
 makeSignature = foldWithSerialManifoldM fm where
@@ -328,7 +325,7 @@ serialize nativeExpr s0 = do
     construct _ (SerialObject NamObject _ _ _) = error "C++ object serialization not yet implemented"
     construct _ (SerialObject NamTable _ _ _) = error "C++ table serialization not yet implemented"
 
-    construct _ _ = error "Unreachable" 
+    construct _ _ = error "Unreachable"
 
 -- reverse of serialize, parameters are the same
 deserialize :: MDoc -> MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])
@@ -449,7 +446,7 @@ translateSegment m0 = do
   makeSerialExpr _ (LetVarS_ _ i) = return $ PoolDocs [] (svarNamer i) [] []
   makeSerialExpr _ (BndVarS_ _ i) = return $ PoolDocs [] (svarNamer i) [] []
   makeSerialExpr _ (SerializeS_ s e) = do
-    se <- serialize (poolExpr e) s 
+    se <- serialize (poolExpr e) s
     return $ mergePoolDocs (\_ -> poolExpr se) [e, se]
   makeSerialExpr _ _ = error "Unreachable"
 
@@ -458,7 +455,7 @@ translateSegment m0 = do
     return $ mergePoolDocs ((<>) (pretty $ srcName src) . tupled) es
   makeNativeExpr _ (ManN_ call) = return call
   makeNativeExpr _ (ReturnN_ e) =
-    return $ e {poolExpr = "return" <> parens (poolExpr e) <> ";"} 
+    return $ e {poolExpr = "return" <> parens (poolExpr e) <> ";"}
   makeNativeExpr _ (SerialLetN_ i sa nb) = return $ makeLet svarNamer i serialType sa nb
   makeNativeExpr (NativeLetN _ (typeFof -> t1) _) (NativeLetN_ i na nb) = makeLet nvarNamer i <$> cppTypeOf t1 <*> pure na <*> pure nb
   makeNativeExpr _ (LetVarN_ _ i) = return $ PoolDocs [] (nvarNamer i) [] []
@@ -530,10 +527,10 @@ makeManifold callIndex form manifoldType e = do
 
   makeManifoldCall
     :: HasTypeM t
-    => ManifoldForm (Or TypeS TypeF) t -> CppTranslator MDoc 
+    => ManifoldForm (Or TypeS TypeF) t -> CppTranslator MDoc
   makeManifoldCall (ManifoldFull rs) = do
     let args = map argNamer (typeMofRs rs)
-    return $ mname <> tupled args 
+    return $ mname <> tupled args
   makeManifoldCall (ManifoldPass vs) = do
     typestr <- stdFunction (returnType manifoldType) (map (fmap typeMof) vs)
     return $ typestr <> parens mname
@@ -574,10 +571,10 @@ makeManifold callIndex form manifoldType e = do
         let tryBody = block 4 "try" body
             throwStatement = vsep
               [ [idoc|std::string error_message = "Error in m#{pretty callIndex} " + std::string(e.what());|]
-              , [idoc|std::cerr << error_message << std::endl;|] 
+              , [idoc|std::cerr << error_message << std::endl;|]
               , [idoc|throw std::runtime_error(error_message);|]
               ]
-            catchBody = block 4 "catch (const std::exception& e)" throwStatement 
+            catchBody = block 4 "catch (const std::exception& e)" throwStatement
             tryCatchBody = tryBody <+> catchBody
         return . Just . block 4 decl . vsep $
           [ {- can add diagnostic statements here -}
@@ -623,7 +620,7 @@ makeDispatch ms = block 4 "switch(std::stoi(argv[1]))" (vsep (map makeCase ms))
 
 typeParams :: [(Maybe TypeF, TypeF)] -> CppTranslator MDoc
 typeParams ts = do
-  ds <- mapM cppTypeOf [t | (Nothing, t) <- ts] 
+  ds <- mapM cppTypeOf [t | (Nothing, t) <- ts]
   return $
     if null ds
       then ""
@@ -708,7 +705,7 @@ generateAnonymousStructs = do
         rname = recName rec
         rtype = rname <> recordTemplate [v | (v, (_, Nothing)) <- rs']
 
-    let fieldNames = [k | (_, (k, _)) <- rs'] 
+    let fieldNames = [k | (_, (k, _)) <- rs']
 
     fieldTypes <- mapM (\(t, v) -> maybeM t cppTypeOf v) [(t', v') | (t', (_, v')) <- rs']
 
@@ -719,7 +716,7 @@ generateAnonymousStructs = do
         deserialDecl = deserialHeaderTemplate params rtype
         serializer = serializerTemplate params rtype fields
         deserializer = deserializerTemplate False params rtype fields
-    
+
 
     return ([structDecl, serialDecl, deserialDecl], [serializer, deserializer])
 
@@ -903,6 +900,7 @@ bool deserialize(const std::string json, size_t &i, #{rtype} &x){
            else let obj = encloseSep "{" "}" "," values
                 in [idoc|#{rtype} y = #{obj}; x = y;|]
 
+parseComma :: Doc ann
 parseComma = [idoc|
 if(! match(json, ",", i))
     throw 800;

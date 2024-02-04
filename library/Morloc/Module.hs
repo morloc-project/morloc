@@ -3,7 +3,7 @@
 
 {-|
 Module      : Module
-Description : Morloc module imports and paths 
+Description : Morloc module imports and paths
 Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
@@ -30,26 +30,9 @@ import qualified Morloc.Config as Config
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
-
-import Data.Aeson (FromJSON(..), (.!=), (.:?), withObject)
 import qualified Data.Yaml.Config as YC
 
-instance FromJSON PackageMeta where
-  parseJSON = withObject "object" $ \o ->
-    PackageMeta <$> o .:? "name"        .!= ""
-                <*> o .:? "version"     .!= ""
-                <*> o .:? "homepage"    .!= ""
-                <*> o .:? "synopsis"    .!= ""
-                <*> o .:? "description" .!= ""
-                <*> o .:? "category"    .!= ""
-                <*> o .:? "license"     .!= ""
-                <*> o .:? "author"      .!= ""
-                <*> o .:? "maintainer"  .!= ""
-                <*> o .:? "github"      .!= ""
-                <*> o .:? "bug-reports" .!= ""
-                <*> o .:? "gcc-flags"   .!= ""
-
--- | Specify where a module is located 
+-- | Specify where a module is located
 data ModuleSource
   = LocalModule (Maybe String)
   -- ^ A module in the working directory
@@ -81,7 +64,7 @@ findModule currentModuleM importModule = do
 
 -- | Give a module path (e.g. "/your/path/foo.loc") find the package metadata.
 -- It currently only looks for a file named "package.yaml" in the same folder
--- as the main "*.loc" file. 
+-- as the main "*.loc" file.
 findModuleMetadata :: Path -> IO (Maybe Path)
 findModuleMetadata mainFile =
   getFile $ MS.combine (MS.takeDirectory mainFile) "package.yaml"
@@ -111,7 +94,7 @@ commonPrefix _ _ = []
 removePathSuffix :: [String] -> [String] -> [String]
 removePathSuffix [] ys = ys
 removePathSuffix _ [] = []
-removePathSuffix xs ys 
+removePathSuffix xs ys
     | stringPath (last xs) == stringPath (last ys) = removePathSuffix (init xs) (init ys)
     | otherwise = ys
     where
@@ -232,10 +215,10 @@ getHeaderPaths lib base exts = [path <> ext | path <- paths, ext <- exts]
   where
     paths = map MS.joinPath
             [ [base]
-            , ["include", base] 
+            , ["include", base]
             , [base, base]
             , [lib, "include", base]
-            , [lib, "src", base, base] 
+            , [lib, "src", base, base]
             , ["/usr/include", base]
             , ["/usr/local/include", base]
             ]
@@ -261,7 +244,7 @@ handleFlagsAndPaths :: Lang -> [Source] -> MorlocMonad ([Source], [MT.Text], [Pa
 handleFlagsAndPaths CppLang srcs = do
   state <- MM.get
   let gccflags = filter (/= "") . map packageGccFlags $ statePackageMeta state
-  
+
   (srcs', libflags, paths) <-
       fmap unzip3
     . mapM flagAndPath
@@ -279,7 +262,7 @@ handleFlagsAndPaths CppLang srcs = do
          -- compiler flags and shared libraries
          , gccflags ++ (map MT.pack . concat) (mlcInclude : libflags)
          -- paths to files to include
-         , unique (catMaybes paths) 
+         , unique (catMaybes paths)
          )
 handleFlagsAndPaths _ srcs = return (srcs, [], [])
 
