@@ -19,7 +19,6 @@ handling for several very different languages (proofs-of-concept).
 -------------------
  - [ ] add Haskell support
 
- - [ ] typeclasses
  - [ ] algebraic types
  - [ ] pattern matching
  - [ ] constraint checking
@@ -58,10 +57,19 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Ensure github actions passes
 
 
-0.44.0 [2024.02.xx]
+0.44.0 [2024.02.08]
 -------------------
 
-Ad hoc polymorphism with type-classes
+Add support for ad hoc polymorphism.
+  * Support sources and declarations in classes 
+  * Support multiple parameters
+  * Support overlapping instances
+  * Packers are now implemented through the `Packable` typeclass
+
+Some missing features:
+  * No support typeclass constraints in the type signatures.
+  * No support for parameterized class variables
+  * No support for polymorphic recursion (does anyone want that?)
 
 0.43.0 [2024.01.14]
 -------------------
