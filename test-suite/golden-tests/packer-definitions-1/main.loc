@@ -11,5 +11,13 @@ foo :: Str -> JsonObj
 type Py => Str = "str"
 type Py => JsonObj = "dict"
 
-packJsonObj   :: pack   => Str -> JsonObj
-unpackJsonObj :: unpack => JsonObj -> Str
+
+class Packable a b where
+  pack :: a -> b
+  unpack :: b -> a
+
+instance Packable (Str) JsonObj where
+  source Py from "foo.py"
+    ( "packJsonObj" as pack
+    , "unpackJsonObj" as unpack
+    )

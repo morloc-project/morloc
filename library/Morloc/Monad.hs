@@ -37,14 +37,10 @@ module Morloc.Monad
   -- * metadata accessors
   , metaMonomorphicTermTypes
   , metaTermTypes
-  , metaConstraints
   , metaSources
   , metaName
-  , metaProperties
   , metaTypedefs
   , metaGeneralTypedefs
-  , metaMogrifiers
-  , metaUniversalMogrifiers
   -- * handling tree depth
   , incDepth
   , getDepth
@@ -79,7 +75,6 @@ import qualified System.Exit as SE
 import qualified System.Process as SP
 import qualified Morloc.System as MS
 import qualified Data.Map as Map
-import qualified Data.Set as Set
 
 runMorlocMonad ::
      Maybe Path -> Int -> Config -> MorlocMonad a -> IO (MorlocReturn a)
@@ -264,28 +259,6 @@ metaSources i = do
     GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
     (GMapJust srcs) -> return srcs
 
--- TODO: rename the meta* functions
-
--- | The general constraints as defined in the general type signature. These
--- are not used anywhere yet.
-metaConstraints :: Int -> MorlocMonad [Constraint]
-metaConstraints i = do
-  s <- gets stateSignatures
-  return $ case GMap.lookup i s of
-    (GMapJust (Monomorphic (TermTypes (Just e) _ _))) -> Set.toList (econs e)
-    (GMapJust (Polymorphic _ _ e _)) -> Set.toList (econs e)
-    _ -> []
-
--- | Properties are cunrrently not used after Sanno types are created. The only
--- properties that are considered are the pack/unpack properties. Eventually
--- properties will be part of the typeclass system.
-metaProperties :: Int -> MorlocMonad [Property]
-metaProperties i = do
-  s <- gets stateSignatures
-  return $ case GMap.lookup i s of
-    (GMapJust (Monomorphic (TermTypes (Just e) _ _))) -> Set.toList (eprop e)
-    (GMapJust (Polymorphic _ _ e _)) -> Set.toList (eprop e)
-    _ -> []
 
 ----- TODO: metaName should no longer be required - remove
 -- | The name of a morloc composition. These names are stored in the monad
@@ -306,18 +279,6 @@ metaProperties i = do
 -- The name is linked to the SAnno general data structure.
 metaName :: Int -> MorlocMonad (Maybe EVar)
 metaName i = gets (Map.lookup i . stateName)
-
-metaMogrifiers :: Int -> Lang -> MorlocMonad (Map.Map Property [(TypeU, Source)])
-metaMogrifiers i lang = do
-  p <- gets stateInnerMogrifiers
-  return $ case GMap.lookup i p of
-    (GMapJust p') -> Map.map (filter (\(_, src) -> srcLang src == lang)) p'
-    _ -> Map.empty
-
-metaUniversalMogrifiers :: Lang -> MorlocMonad (Map.Map Property [(TypeU, Source)])
-metaUniversalMogrifiers lang = do
-  p <- gets stateUniversalInnerMogrifiers
-  return $ Map.map (filter (\(_, src) -> srcLang src == lang)) p
 
 -- | This is currently only used in the C++ translator.
 -- FIXME: should a term be allowed to have multiple type definitions within a language?

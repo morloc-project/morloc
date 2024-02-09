@@ -76,9 +76,9 @@ mergeTypeUs t1 t2
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
 
 mergeTypeclasses
-  :: (Typeclass, [TVar], EType, [TermTypes])
-  -> (Typeclass, [TVar], EType, [TermTypes])
-  -> MorlocMonad (Typeclass, [TVar], EType, [TermTypes])
+  :: (ClassName, [TVar], EType, [TermTypes])
+  -> (ClassName, [TVar], EType, [TermTypes])
+  -> MorlocMonad (ClassName, [TVar], EType, [TermTypes])
 mergeTypeclasses (cls1, vs1, t1, ts1) (cls2, vs2, t2, ts2)
   | cls1 /= cls2 = error "Conflicting typeclasses"
   | not (equivalent (etype t1) (etype t2)) = error "Conflicting typeclass term general type"

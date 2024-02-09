@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, ViewPatterns #-}
 
 {-|
 Module      : Morloc.CodeGenerator.Serial
@@ -81,6 +81,32 @@ shallowType (SerialString x) = VarF x
 shallowType (SerialNull   x) = VarF x
 shallowType (SerialUnknown v) = UnkF v
 
+findPackers :: Lang -> MorlocMonad
+  ( [(([TVar], TypeU), Source)]
+  , [(([TVar], TypeU), Source)]
+  )
+findPackers lang = do
+  sigmap <- MM.gets stateTypeclasses
+
+  MM.sayVVV $ "findPackers"
+            <> "\n  sigmap:" <+> viaShow sigmap
+
+  packers <- case Map.lookup (EV "pack") sigmap of
+    (Just (_, _, _, ts)) -> return $ concatMap f ts
+    Nothing -> return []
+
+  unpackers <- case Map.lookup (EV "unpack") sigmap of
+    (Just (_, _, _, ts)) -> return $ concatMap f ts
+    Nothing -> return []
+
+  return (packers, unpackers)
+  where
+    f :: TermTypes -> [(([TVar], TypeU), Source)]
+    f (TermTypes (Just et) (map (val . snd) -> srcs) _) =
+      let (vs, t) = unqualify $ etype et
+      in [((vs, t), src) | src <- srcs, srcLang src == lang]
+    f (TermTypes Nothing _ _) = []
+
 -- Takes a map of packers with concrete type names as keys. A single concrete
 -- type name may map to many single types. For example, the python type "dict"
 -- might represent a Map with homogenous keys and values or many things that
@@ -91,9 +117,8 @@ shallowType (SerialUnknown v) = UnkF v
 -- will be done through subtyping.
 makeSerialAST :: Int -> Lang -> TypeF -> MorlocMonad SerialAST
 makeSerialAST m lang t0 = do
-  -- [(([TVar], TypeU), Source)]
-  packs   <- MM.metaUniversalMogrifiers lang |>> Map.lookup Pack   |>> fromMaybe [] |>> map (first unqualify)
-  unpacks <- MM.metaUniversalMogrifiers lang |>> Map.lookup Unpack |>> fromMaybe [] |>> map (first unqualify)
+  -- ([(([TVar], TypeU), Source)], ...)
+  (packs, unpacks) <- findPackers lang
 
   MM.sayVVV $ "packs:" <+> viaShow packs
   MM.sayVVV $ "unpacks:" <+> viaShow unpacks
@@ -165,7 +190,7 @@ makeSerialAST m lang t0 = do
             selection <- selectPacker (zip packers unpacked)
             return $ SerialPack v selection
           Nothing -> serializerError
-            $ "Cannot find constructor in AppF" <+> dquotes (pretty v)
+            $ "Could not find" <+> pretty generalTypeName <+> "from" <+> dquotes (pretty v)
             <> "\n  t:" <+> pretty t
             <> "\n  typepackers:" <+> viaShow typepackers
       where

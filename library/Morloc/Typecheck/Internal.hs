@@ -40,6 +40,8 @@ module Morloc.Typecheck.Internal
   , toExistential
   -- * subtyping
   , subtype
+  , isSubtypeOf2
+  , equivalent2
   -- * debugging
   , seeGamma
   -- debugging
@@ -134,6 +136,14 @@ instance GammaIndexLike TVar where
 (++>) :: GammaIndexLike a => Gamma -> [a] -> Gamma
 (++>) g xs = g {gammaContext = map index (reverse xs) <> gammaContext g }
 
+
+isSubtypeOf2 :: TypeU -> TypeU -> Bool
+isSubtypeOf2 a b = case subtype a b (Gamma 0 []) of
+  (Left _) -> False
+  (Right _) -> True
+
+equivalent2 :: TypeU -> TypeU -> Bool
+equivalent2 t1 t2 = isSubtypeOf2 t1 t2 && isSubtypeOf2 t2 t1
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: TypeU -> TypeU -> Gamma -> Either TypeError Gamma

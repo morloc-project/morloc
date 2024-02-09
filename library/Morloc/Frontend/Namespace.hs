@@ -66,7 +66,6 @@ copyState oldIndex newIndex = do
     { stateSignatures = updateGMap (stateSignatures s)
     , stateConcreteTypedefs = updateGMap (stateConcreteTypedefs s)
     , stateGeneralTypedefs = updateGMap (stateGeneralTypedefs s)
-    , stateInnerMogrifiers = updateGMap (stateInnerMogrifiers s)
     , stateSources = updateGMap (stateSources s)
     , stateAnnotations = updateMap (stateAnnotations s)
     , stateExports = updateList (stateExports s)

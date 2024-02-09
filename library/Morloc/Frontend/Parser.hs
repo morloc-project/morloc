@@ -103,41 +103,12 @@ pModule expModuleName = do
     findSymbols :: ExprI -> Set.Set Symbol
     findSymbols (ExprI _ (TypE _ v _ _)) = Set.singleton $ TypeSymbol v
     findSymbols (ExprI _ (AssE e _ _)) = Set.singleton $ TermSymbol e
-    findSymbols (ExprI _ (SigE (Signature e _ t))) = Set.union (Set.singleton $ TermSymbol e) (packedType t)
+    findSymbols (ExprI _ (SigE (Signature e _ _))) = Set.singleton $ TermSymbol e
     findSymbols (ExprI _ (ImpE (Import _ (Just imps) _ _)))
         = Set.fromList $ [TermSymbol alias | (AliasedTerm _ alias) <- imps] <>
                          [TypeSymbol alias | (AliasedType _ alias) <- imps]
     findSymbols (ExprI _ (SrcE src)) = Set.singleton $ TermSymbol (srcAlias src)
     findSymbols _ = Set.empty
-
-    -- When (un)packers are defined, the type that is being (un)packed is not
-    -- declared. But some modules may export only their (un)packed type. When
-    -- this is the case, importing nothing from the module causes the module to
-    -- be removed and the packers are never found. To remedy this, I am adding
-    -- the (un)packed type to the export list.
-    packedType :: EType -> Set.Set Symbol
-    packedType e
-      | Set.member Pack (eprop e) = packType (etype e)
-      | Set.member Unpack (eprop e) = unpackType (etype e)
-      | otherwise = Set.empty
-
-    unpackType :: TypeU -> Set.Set Symbol
-    unpackType (ForallU _ t) = unpackType t
-    unpackType (FunU [t] _) = symbolOfTypeU t
-    unpackType _ = error "Invalid unpacker"
-
-    packType :: TypeU -> Set.Set Symbol
-    packType (ForallU _ t) = packType t
-    packType (FunU _ t) = symbolOfTypeU t
-    packType _ = error "Invalid packer"
-
-    symbolOfTypeU :: TypeU -> Set.Set Symbol
-    symbolOfTypeU (VarU v) = Set.singleton $ TypeSymbol v
-    symbolOfTypeU (ExistU v _ _) = Set.singleton $ TypeSymbol v
-    symbolOfTypeU (ForallU _ t) = symbolOfTypeU t
-    symbolOfTypeU (AppU t _) = symbolOfTypeU t
-    symbolOfTypeU (FunU _ _) = error "So, you want to pack a function? I'm accepting PRs."
-    symbolOfTypeU NamU{} = error "You don't need a packer for a record type of thing."
 
 
 -- | match an implicit Main module
@@ -269,15 +240,15 @@ pTypeclass = do
   _ <- reserved "class"
   (TV v, vs) <- pTypedefTerm <|> parens pTypedefTerm
   sigs <- option [] (reserved "where" >> alignInset pSignature)
-  exprI $ ClsE (Typeclass v) vs sigs
+  exprI $ ClsE (ClassName v) vs sigs
 
 pInstance :: Parser ExprI
 pInstance = do
   _ <- reserved "instance"
   v <- freenameU
-  ts <- many1 pType
+  ts <- many1 pTypeGen
   es <- option [] (reserved "where" >> alignInset pInstanceExpr) |>> concat
-  exprI $ IstE (Typeclass v) ts es
+  exprI $ IstE (ClassName v) ts es
   where
     pInstanceExpr :: Parser [ExprI]
     pInstanceExpr
@@ -441,13 +412,7 @@ pSignature = do
     return ps
 
   pProperty :: Parser Property
-  pProperty = do
-    ps <- many1 freename
-    case ps of
-      ["pack"] -> return Pack
-      ["unpack"] -> return Unpack
-      ["cast"] -> return Cast
-      _ -> return (GeneralProperty ps)
+  pProperty = Property <$> many1 freename
 
   pConstraints :: Parser [Constraint]
   pConstraints = reserved "where" >> alignInset pConstraint where

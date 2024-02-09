@@ -17,14 +17,16 @@ import qualified Control.Monad.State as CMS
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.GMap as GMap
+import qualified Morloc.Data.Text as DT
+import Morloc.Typecheck.Internal (unqualify, qualify)
 import Morloc.Frontend.Merge (mergeTermTypes, weaveTermTypes, mergeTypeclasses, unionTermTypes)
 
 
 linkTypeclasses
   :: MVar
   -> ExprI
-  -> [(m, e, Map.Map EVar (Typeclass, [TVar], EType, [TermTypes]))]
-  -> MorlocMonad (Map.Map EVar (Typeclass, [TVar], EType, [TermTypes]))
+  -> [(m, e, Map.Map EVar (ClassName, [TVar], EType, [TermTypes]))]
+  -> MorlocMonad (Map.Map EVar (ClassName, [TVar], EType, [TermTypes]))
 linkTypeclasses _ e es
   -- Merge the typeclasses and instances from all imported modules
   -- These are inherited implicitly, so import terms are ignored
@@ -32,12 +34,12 @@ linkTypeclasses _ e es
   -- Augment the inherited map with the typeclasses and instances in this module
   >>= findTypeclasses e
 
-
 findTypeclasses
   :: ExprI
-  -> Map.Map EVar (Typeclass, [TVar], EType, [TermTypes])
-  -> MorlocMonad (Map.Map EVar (Typeclass, [TVar], EType, [TermTypes]))
+  -> Map.Map EVar (ClassName, [TVar], EType, [TermTypes])
+  -> MorlocMonad (Map.Map EVar (ClassName, [TVar], EType, [TermTypes]))
 findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
+
 
   -- first we collect all typeclass definitions in this module
   -- typeclasses are defined only at the top-level, so no descent into sub-expressions
@@ -70,6 +72,8 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
               ) (Map.toList moduleClasses)
          )
 
+  _ <- updateTypeclasses moduleClasses
+
   mapM_ (linkVariablesToTypeclasses moduleClasses) es0
 
   return moduleClasses
@@ -77,64 +81,74 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
   where
     -- make a map of all terms that are defined in a typeclass (these will all
     -- be general term)
-    makeClass :: (Typeclass, [TVar], [Signature]) -> Map.Map EVar (Typeclass, [TVar], EType, [TermTypes])
+    makeClass :: (ClassName, [TVar], [Signature]) -> Map.Map EVar (ClassName, [TVar], EType, [TermTypes])
     makeClass (cls, vs, sigs) = Map.fromList $ map makeClassTerm sigs where
-      makeClassTerm :: Signature -> (EVar, (Typeclass, [TVar], EType, [TermTypes]))
+      makeClassTerm :: Signature -> (EVar, (ClassName, [TVar], EType, [TermTypes]))
       makeClassTerm (Signature v _ t) = (v, (cls, vs, t, []))
 
     addInstance
-      :: Map.Map EVar (Typeclass, [TVar], EType, [TermTypes])
-      -> (Typeclass, [TypeU], [ExprI])
-      -> MorlocMonad (Map.Map EVar (Typeclass, [TVar], EType, [TermTypes]))
+      :: Map.Map EVar (ClassName, [TVar], EType, [TermTypes])
+      -> (ClassName, [TypeU], [ExprI])
+      -> MorlocMonad (Map.Map EVar (ClassName, [TVar], EType, [TermTypes]))
     addInstance clsmap (_, _, []) = return clsmap
     addInstance clsmap (cls0, ts0, es) = mapM f es |>> Map.fromListWith mergeInstances where
-      f :: ExprI -> MorlocMonad (EVar, (Typeclass, [TVar], EType, [TermTypes]))
+      f :: ExprI -> MorlocMonad (EVar, (ClassName, [TVar], EType, [TermTypes]))
       f (ExprI srcIndex (SrcE src)) =
         case Map.lookup (srcAlias src) clsmap of
           (Just (cls1, vs, generalType, otherInstances)) -> do
-            MM.sayVVV $ "Adding SrcE instance:" <+> pretty (srcAlias src) <+> pretty srcIndex
-            when (cls1 /= cls0) (error "Conflicting instances")
-            when (length vs /= length ts0) (error "Conflicting class and instance parameter count")
-            let instanceType = generalType { etype = foldl (\t (v,r) -> substituteTVar v r t) (requalify vs (etype generalType)) (zip vs ts0) }
-            let newTerm = TermTypes (Just instanceType) [(moduleName, Idx srcIndex src)] []
-            let typeterms = weaveTermTypes newTerm otherInstances
-            return (srcAlias src, (cls0, vs, generalType, typeterms))
-          Nothing -> error "No typeclass found for instance"
+            when (cls1 /= cls0) (MM.throwError $ ConflictingClasses cls1 cls0 (srcAlias src))
+            when (length vs /= length ts0) (MM.throwError $ InstanceSizeMismatch cls1 vs ts0)
+            instanceType <- substituteInstanceTypes vs (etype generalType) ts0
+            let newTerm = TermTypes (Just $ generalType {etype = instanceType}) [(moduleName, Idx srcIndex src)] []
+                typeterms = weaveTermTypes newTerm otherInstances
 
-      f (ExprI assIdx (AssE v e _)) =
+            MM.sayVVV $ "addInstance src:"
+                      <> "\n    v:" <+> pretty (srcAlias src)
+                      <> "\n  cls:" <+> pretty cls1
+                      <> "\n  generalType:" <+> pretty generalType
+                      <> "\n  ts0:" <+> encloseSep "{" "}" ";" (map pretty ts0)
+                      <> "\n  instanceType:" <+> pretty instanceType
+                      <> "\n  newTerm:" <+> pretty newTerm
+
+            return (srcAlias src, (cls0, vs, generalType, typeterms))
+          Nothing ->  MM.throwError $ MissingTypeclassDefinition cls0 (srcAlias src)
+
+      f (ExprI _ (AssE v e _)) =
         case Map.lookup v clsmap of
           (Just (cls1, vs, generalType, otherInstances)) -> do
-            MM.sayVVV $ "Adding AssE instance:" <+> pretty v <+> pretty assIdx
-            when (cls1 /= cls0) (error "Conflicting instances")
-            when (length vs /= length ts0) (error "Conflicting class and instance parameter count")
-            let instanceType = generalType { etype = foldl (\t (v',r) -> substituteTVar v' r t) (requalify vs (etype generalType)) (zip vs ts0) }
-            let newTerm = TermTypes (Just instanceType) [] [e]
-            let typeterms = weaveTermTypes newTerm otherInstances
-            return (v, (cls0, vs, generalType, typeterms))
-          Nothing -> error "No typeclass found for instance"
+            when (cls1 /= cls0) (MM.throwError $ ConflictingClasses cls1 cls0 v)
+            when (length vs /= length ts0) (MM.throwError $ InstanceSizeMismatch cls1 vs ts0)
+            instanceType <- substituteInstanceTypes vs (etype generalType) ts0
+            let newTerm = TermTypes (Just $ generalType {etype = instanceType}) [] [e]
+                typeterms = weaveTermTypes newTerm otherInstances
 
-      f _ = error "Only source statements are currently allowed in instances (generalization is in development)"
+            MM.sayVVV $ "addInstance decl:"
+                      <> "\n    v:" <+> pretty v
+                      <> "\n  cls:" <+> pretty cls1
+                      <> "\n  generalType:" <+> pretty generalType
+                      <> "\n  ts0:" <+> encloseSep "{" "}" ";" (map pretty ts0)
+                      <> "\n  instanceType:" <+> pretty instanceType
+                      <> "\n  newTerm:" <+> pretty newTerm
+
+            return (v, (cls0, vs, generalType, typeterms))
+          Nothing -> MM.throwError $ MissingTypeclassDefinition cls0 v
+
+      f (ExprI _ e) = MM.throwError $ IllegalExpressionInInstance cls0 ts0 e
 
       mergeInstances
-        :: (Typeclass, [TVar], EType, [TermTypes])
-        -> (Typeclass, [TVar], EType, [TermTypes])
-        -> (Typeclass, [TVar], EType, [TermTypes])
+        :: (ClassName, [TVar], EType, [TermTypes])
+        -> (ClassName, [TVar], EType, [TermTypes])
+        -> (ClassName, [TVar], EType, [TermTypes])
       mergeInstances (cls1, vs1, e1, ts1) (cls2, vs2, e2, ts2)
         | cls1 == cls2, length vs1 == length vs2, equivalent (etype e1) (etype e2) = (cls1, vs1, e1, unionTermTypes ts1 ts2)
         | otherwise = error "failed to merge"
 
-      requalify :: [TVar] -> TypeU -> TypeU
-      requalify (v:vs) (ForallU v' t)
-        | v == v' = requalify vs t
-        | otherwise = ForallU v' (requalify vs t)
-      requalify _ t = t
-
     linkVariablesToTypeclasses
-      :: Map.Map EVar (Typeclass, [TVar], EType, [TermTypes])
+      :: Map.Map EVar (ClassName, [TVar], EType, [TermTypes])
       -> ExprI
       -> MorlocMonad ()
     linkVariablesToTypeclasses = link where
-      link :: Map.Map EVar (Typeclass, [TVar], EType, [TermTypes]) -> ExprI -> MorlocMonad ()
+      link :: Map.Map EVar (ClassName, [TVar], EType, [TermTypes]) -> ExprI -> MorlocMonad ()
       -- The following may have terms from typeclasses
       -- 1. variables
       link m (ExprI i (VarE v)) = setClass m i v
@@ -156,7 +170,7 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
       link m (ExprI _ (NamE rs)) = mapM_ (link m . snd) rs
       link _ _ = return ()
 
-      setClass :: Map.Map EVar (Typeclass, [TVar], EType, [TermTypes]) -> Int -> EVar -> MorlocMonad ()
+      setClass :: Map.Map EVar (ClassName, [TVar], EType, [TermTypes]) -> Int -> EVar -> MorlocMonad ()
       setClass m termIndex v = case Map.lookup v m of
         (Just (cls, _, t, ts)) -> do
 
@@ -175,7 +189,7 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
           return ()
         Nothing -> return ()
 
-      mapSources :: Typeclass -> EVar -> EType -> TermTypes -> MorlocMonad ()
+      mapSources :: ClassName -> EVar -> EType -> TermTypes -> MorlocMonad ()
       mapSources cls v gt t = mapM_ (mapSource . snd) (termConcrete t) where
         mapSource :: Indexed Source -> MorlocMonad ()
         mapSource (Idx i src) = do
@@ -190,7 +204,7 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
           CMS.put (s { stateSignatures = newMap })
           return ()
 
-      mapExpressions :: Typeclass -> EVar -> EType -> TermTypes -> MorlocMonad ()
+      mapExpressions :: ClassName -> EVar -> EType -> TermTypes -> MorlocMonad ()
       mapExpressions cls v gt t = mapM_ mapExpression (termDecl t) where
         mapExpression :: ExprI -> MorlocMonad ()
         mapExpression (ExprI i _) = do
@@ -207,4 +221,89 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
         | otherwise = error "Invalid SignatureSet merge"
       mergeSignatureSet (Monomorphic ts1) (Monomorphic ts2) = Monomorphic <$> mergeTermTypes ts1 ts2
       mergeSignatureSet _ _ = undefined
+
+    updateTypeclasses :: Map.Map EVar (ClassName, [TVar], EType, [TermTypes]) -> MorlocMonad ()
+    updateTypeclasses m = do
+      s <- MM.get
+      newMap <- Map.unionWithM mergeTypeclasses m (stateTypeclasses s)
+      MM.put (s {stateTypeclasses = newMap})
+
 findTypeclasses _ _ = undefined
+
+
+{- Substitute the instance types into the class function definition
+
+Suppose we have the following class and instances:
+
+class Reversible a b where
+  forward :: a -> b
+  backward :: b -> a
+
+instance Reversible ([a],[b]) [(a,b)] where
+  ...
+
+If we are handling the single instance above for the `forward` function:
+
+  classVars: [a, b]
+  classType: forall a b . a -> b
+  instanceParameters: forall a b . ([a], [b])
+                      forall a b . [(a, b)]
+
+and the return type should be
+
+  forall a b . ([a],[b]) -> [(a,b)]
+
+A problem here is that the instance parameters *share* qualifiers. The `a` and `b`
+in the first instance parameter are the same as those in the second. But not the
+same as the `a` and `b` in the class.
+
+
+-}
+substituteInstanceTypes :: [TVar] -> TypeU -> [TypeU] -> MorlocMonad TypeU
+substituteInstanceTypes classVars classType instanceParameters = do
+
+      -- find all qualifiers in the instance parameter list
+  let instanceQualifiers = unique $ concatMap (fst . unqualify) instanceParameters
+
+      -- rewrite the class type such that the class qualifiers appear first and
+      -- do not conflict with parameter qualifiers
+      cleanClassType = replaceQualifiers instanceQualifiers (putClassVarsFirst classType)
+
+      -- substitute in the parameter types
+      finalType = qualify instanceQualifiers
+                $ substituteQualifiers cleanClassType (map (snd . unqualify) instanceParameters)
+
+  MM.sayVVV $ "substituteInstanceTypes"
+            <> "\n  classVars:" <+> pretty classVars
+            <> "\n  classType:" <+> pretty classType
+            <> "\n  instanceParameters:" <+> pretty instanceParameters
+            <> "\n  -------------------"
+            <> "\n  instanceQualifiers:" <+> pretty instanceQualifiers
+            <> "\n  cleanClassType:" <+> pretty cleanClassType
+            <> "\n  finalType:" <+> pretty finalType
+
+  return finalType
+
+  where
+    putClassVarsFirst :: TypeU -> TypeU
+    putClassVarsFirst t =
+      let (vs, t') = unqualify t
+      in qualify (classVars <> filter (`notElem` classVars) vs) t'
+
+    replaceQualifiers :: [TVar] -> TypeU -> TypeU
+    replaceQualifiers vs0 t0 = f vs0 [r | r <- freshVariables, r `notElem` doNotUse] t0
+      where
+
+      -- qualifiers to avoid when replacing
+      doNotUse = vs0 <> (fst . unqualify) t0
+
+      f (v:vs) (r:rs) (ForallU v' t)
+        | v == v' = ForallU r . f vs rs $ substituteTVar v' (VarU r) t
+        | otherwise = ForallU v' (f (v:vs) (r:rs) t)
+      f _ _ t = t
+
+      freshVariables = [1 ..] >>= flip replicateM ['a' .. 'z'] |>> TV . DT.pack
+
+    substituteQualifiers :: TypeU -> [TypeU] -> TypeU
+    substituteQualifiers (ForallU v t) (r:rs) = substituteQualifiers (substituteTVar v r t) rs
+    substituteQualifiers t _ = t

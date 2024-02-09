@@ -1,0 +1,22 @@
+module main (foo)
+
+type Py => Int = "int"
+type Py => Str = "str"
+type Py => (List a) = "list" a
+type Py => Tuple2 a b = "tuple" a b
+
+
+class Reversible a b where
+  forward :: a -> b
+  backward :: b -> a
+
+instance Reversible ([a],[b]) [(a,b)] where
+  source Py from "foo.py" ("forward", "backward")
+
+
+source Py from "foo.py" ("addLen", "map")
+addLen :: Str -> (Str, Int)
+map :: (a -> b) -> [a] -> [b]
+
+foo :: [Str] -> ([Str],[Int])
+foo = backward . map addLen

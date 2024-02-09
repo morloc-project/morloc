@@ -33,7 +33,7 @@ module Morloc.Namespace
   , MVar(..)
   , EVar(..)
   , TVar(..)
-  , Typeclass(..)
+  , ClassName(..)
   , CVar(..)
   , Key(..)
   , Label(..)
@@ -199,7 +199,7 @@ type MorlocMonadGen c e l s a
 
 type MorlocReturn a = ((Either MorlocError a, [Text]), MorlocState)
 
-data SignatureSet = Monomorphic TermTypes | Polymorphic Typeclass EVar EType [TermTypes]
+data SignatureSet = Monomorphic TermTypes | Polymorphic ClassName EVar EType [TermTypes]
   deriving(Show)
 
 
@@ -213,6 +213,7 @@ data MorlocState = MorlocState
   , stateDepth :: Int
   -- ^ store depth in the AnnoS tree in the frontend and backend typecheckers
   , stateSignatures :: GMap Int Int SignatureSet
+  , stateTypeclasses :: Map.Map EVar (ClassName, [TVar], EType, [TermTypes])
   , stateConcreteTypedefs :: GMap Int MVar (Map Lang Scope)
   -- ^ stores type functions that are in scope for a given module and language
   , stateGeneralTypedefs  :: GMap Int MVar           Scope
@@ -225,8 +226,6 @@ data MorlocState = MorlocState
   -- ^ store the general typedefs pooled across all modules -- for the truly desparate
   , stateUniversalConcreteTypedefs :: Map Lang Scope
   -- ^ store the concrete typedefs pooled across all modules -- for the truly desparate
-  , stateInnerMogrifiers :: GMap Int MVar (Map Property [(TypeU, Source)])
-  , stateUniversalInnerMogrifiers :: Map Property [(TypeU, Source)]
   , stateSources :: GMap Int MVar [Source]
   , stateAnnotations :: Map Int [TypeU]
   -- ^ Stores non-top-level annotations.
@@ -329,8 +328,8 @@ data ExprI = ExprI Int Expr
 data Expr
   = ModE MVar [ExprI]
   -- ^ the toplevel expression in a module
-  | ClsE Typeclass [TVar] [Signature]
-  | IstE Typeclass [TypeU] [ExprI]
+  | ClsE ClassName [TVar] [Signature]
+  | IstE ClassName [TypeU] [ExprI]
   | TypE (Maybe (Lang, Bool)) TVar [TVar] TypeU
   -- ^ a type definition
   --   1. the language, Nothing is general
@@ -477,7 +476,7 @@ newtype EVar = EV { unEVar :: Text } deriving (Show, Eq, Ord)
 -- A type general name
 newtype TVar = TV { unTVar :: Text } deriving (Show, Eq, Ord)
 
-newtype Typeclass = Typeclass { unTypeclass :: Text } deriving (Show, Eq, Ord)
+newtype ClassName = ClassName { unClassName :: Text } deriving (Show, Eq, Ord)
 
 -- A concrete type name
 newtype CVar = CV { unCVar :: Text } deriving (Show, Eq, Ord)
@@ -540,7 +539,7 @@ newtype One a = One { unOne :: a }
 newtype Many a = Many { unMany :: [a] }
   deriving (Show)
 
-data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr Typeclass EVar EType [(EType, [a])]
+data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr ClassName EVar EType [(EType, [a])]
   deriving(Show, Eq, Ord)
 
 data Or a b = L a | R b | LR a b
@@ -595,12 +594,7 @@ data EType =
     }
   deriving (Show, Eq, Ord)
 
-
-data Property
-  = Pack -- data structure to JSON
-  | Unpack -- JSON to data structure
-  | Cast -- casts from type A to B
-  | GeneralProperty [Text]
+newtype Property = Property [Text]
   deriving (Show, Eq, Ord)
 
 -- | Eventually, Constraint should be a richer type, but for they are left as
@@ -698,6 +692,11 @@ data MorlocError
   | IllegalConcreteAnnotation
   -- type synthesis errors
   | CannotSynthesizeConcreteType MVar Source TypeU [Text]
+  -- typeclass errors
+  | MissingTypeclassDefinition ClassName EVar
+  | ConflictingClasses ClassName ClassName EVar
+  | InstanceSizeMismatch ClassName [TVar] [TypeU]
+  | IllegalExpressionInInstance ClassName [TypeU] Expr
 
 
 
@@ -804,12 +803,11 @@ instance Defaultable MorlocState where
     , stateCounter = -1
     , stateDepth = 0
     , stateSignatures = GMap Map.empty Map.empty
+    , stateTypeclasses = Map.empty
     , stateConcreteTypedefs = GMap Map.empty Map.empty
     , stateGeneralTypedefs = GMap Map.empty Map.empty
     , stateUniversalConcreteTypedefs = Map.empty
     , stateUniversalGeneralTypedefs = Map.empty
-    , stateInnerMogrifiers = GMap Map.empty Map.empty
-    , stateUniversalInnerMogrifiers = Map.empty
     , stateSources = GMap Map.empty Map.empty
     , stateAnnotations = Map.empty
     , stateOutfile = Nothing
@@ -984,6 +982,10 @@ isSubtypeOf t1 t2 = case P.compare t1 t2 of
 equivalent :: TypeU -> TypeU -> Bool
 equivalent t1 t2 = isSubtypeOf t1 t2 && isSubtypeOf t2 t1
 
+-- | find the most specific subtypes
+mostSpecificSubtypes :: TypeU -> [TypeU] -> [TypeU]
+mostSpecificSubtypes t ts = mostSpecific $ filter (`isSubtypeOf` t) ts
+
 -- | find all types that are not greater than any other type
 mostGeneral :: [TypeU] -> [TypeU]
 mostGeneral = P.minima
@@ -991,10 +993,6 @@ mostGeneral = P.minima
 -- | find all types that are not less than any other type
 mostSpecific :: [TypeU] -> [TypeU]
 mostSpecific = P.maxima
-
--- | find the most specific subtypes
-mostSpecificSubtypes :: TypeU -> [TypeU] -> [TypeU]
-mostSpecificSubtypes t ts = mostSpecific $ filter (`isSubtypeOf` t) ts
 
 
 ----- Pretty instances -------------------------------------------------------
@@ -1020,7 +1018,7 @@ instance Pretty Type where
 instance Pretty TypeU where
   pretty (FunU [] t) = "() -> " <> prettyTypeU t
   pretty (FunU ts t) = hsep $ punctuate " ->" (map prettyTypeU (ts <> [t]))
-  pretty (ForallU _ t) = pretty t
+  pretty (ForallU v t) = "forall" <+> pretty v <+> "." <+> pretty t
   pretty t = prettyTypeU t
 
 prettyTypeU :: TypeU -> Doc ann
@@ -1029,7 +1027,7 @@ prettyTypeU (ExistU v ts rs)
   = angles $ pretty v
   <+> list (map prettyTypeU ts)
   <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty prettyTypeU) rs)
-prettyTypeU (ForallU _ t) = prettyTypeU t
+prettyTypeU (ForallU v t) = "forall" <+> pretty v <+> "." <+> prettyTypeU t
 prettyTypeU (VarU v) = pretty v
 prettyTypeU (FunU [] t) = parens $ "() -> " <> prettyTypeU t
 prettyTypeU (FunU ts t) = encloseSep "(" ")" " -> " (map prettyTypeU (ts <> [t]))
@@ -1054,10 +1052,7 @@ instance Pretty EType where
       csStr xs = " |" <+> hsep (punctuate semi (map pretty xs))
 
 instance Pretty Property where
-  pretty Pack = "pack"
-  pretty Unpack = "unpack"
-  pretty Cast = "cast"
-  pretty (GeneralProperty ts) = hsep (map pretty ts)
+  pretty (Property ts) = hsep (map pretty ts)
 
 instance Pretty Constraint where
   pretty (Con x) = pretty x
@@ -1072,8 +1067,8 @@ instance Pretty MVar where
 instance Pretty TVar where
   pretty (TV v) = pretty v
 
-instance Pretty Typeclass where
-  pretty = pretty . unTypeclass
+instance Pretty ClassName where
+  pretty = pretty . unClassName
 
 instance Pretty Key where
   pretty (Key v) = pretty v
@@ -1312,6 +1307,12 @@ instance Pretty MorlocError where
     = pretty (CannotSynthesizeConcreteType m src t []) <> "\n" <>
       "  Cannot resolve concrete types for these general types:" <+> list (map pretty vs) <> "\n" <>
       "  Are you missing type alias imports?"
+  pretty (MissingTypeclassDefinition cls v) = "No definition found in typeclass" <+> dquotes (pretty cls) <+> "for term" <+> dquotes (pretty v) 
+  pretty (ConflictingClasses cls1 cls2 v) = "Conflicting typeclasses for" <+> pretty v <+> "found definitions in both" <+> pretty cls1 <+> "and" <+> pretty cls2
+  pretty (InstanceSizeMismatch cls vs ts) = "For class" <+> pretty cls <+> "expected" <+> pretty (length vs) <+> "parameters" <+> tupled (map pretty vs)
+    <+> "but found" <+> pretty (length ts) <+> tupled (map pretty ts)
+  pretty (IllegalExpressionInInstance cls ts e) = "Illegal expression found in" <+> pretty cls <+> "instance for" <> "\n   " <> align (hsep (map pretty ts)) <> "\n   " <> pretty e
+  
 
 instance Pretty TypeError where
   pretty (SubtypeError t1 t2 msg)

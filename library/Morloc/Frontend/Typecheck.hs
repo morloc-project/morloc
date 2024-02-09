@@ -47,12 +47,8 @@ typecheck = mapM run where
       insetSay "========================================================"
       let e3 = mapAnnoSG (fmap normalizeType) . applyGen g2 $ e2
 
-      resolveInstances g2 (applyGen g2 e3)
-
-      -- s2 <- MM.gets stateSignatures
-      -- MM.sayVVV $ "resolved stateSignatures:\n  " <> pretty s2
-      --
-      -- return e4
+      (g3, e4) <- resolveInstances g2 e3
+      return (applyGen g3 e4)
 
 -- TypeU --> Type
 resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int
@@ -74,38 +70,82 @@ resolveTypes (AnnoS (Idx i t) ci e)
   f (StrS x) = StrS x
   f UniS = UniS
 
-resolveInstances :: Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
-resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = AnnoS gi ci <$> f e0 where
-  f :: ExprS (Indexed TypeU) ManyPoly Int -> MorlocMonad (ExprS (Indexed TypeU) Many Int)
+resolveInstances :: Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
+resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
+    (g', e1) <- f g e0
+    return (g', AnnoS gi ci e1)
+  where
+  f :: Gamma -> ExprS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, ExprS (Indexed TypeU) Many Int)
 
   -- resolve instances
-  f (VarS v (PolymorphicExpr _ _ _ rss)) = do
-        -- collect all implementations and apply context
-    let es = [AnnoS (Idx i (apply g t)) c e | (AnnoS (Idx i t) c e) <- concatMap snd rss]
-        -- find the types of the most specific instances that are subtypes of the inferred type
-        mostSpecificTypes = mostSpecificSubtypes gt [t | (AnnoS (Idx _ t) _ _) <- es]
-        -- filter out the most specific subtype expressions
-        es' = [AnnoS (Idx i t) c e | (AnnoS (Idx i t) c e) <- es, t `elem` mostSpecificTypes]
-    VarS v . Many <$> mapM (resolveInstances g) es'
+  f g0 (VarS v (PolymorphicExpr clsName _ _ rss)) = do
 
-  f (VarS v (MonomorphicExpr _ xs)) = VarS v . Many <$> mapM (resolveInstances g) xs
+    -- find all instances that are a subtype of the inferred type
+    let rssSubtypes = [x | x@(EType t _ _, _) <- rss, isSubtypeOf2 t gt]
 
+    -- find the most specific instance
+    (g2, es1) <- case mostSpecific [t | (EType t _ _, _) <- rssSubtypes] of
+      -- if there is exactly one most specific instance, go forward
+      [mostSpecificType] -> do
+        -- filter out the instances with the most specific type
+        let es0 = concat [rs | (t, rs) <- rssSubtypes, etype t == mostSpecificType]
+
+        MM.sayVVV $ "resolveInstances:"
+                  <> "\n  es0:" <+> encloseSep "{" "}" "," (map pretty es0)
+                  <> "\n  mostSpecificType:" <+> pretty mostSpecificType
+                  <> "\n  gt:" <+> pretty gt
+
+        g1 <- connectInstance g0 es0
+        return (g1, es0)
+      -- if there are no suitable instances, die
+      [] -> do
+        MM.sayVVV $ "resolveInstance empty"
+                  <> "\n  rss:" <+> pretty rss
+                  <> "\n  gt:" <+> pretty gt
+        return undefined
+      -- if there are many suitable instances, still die (maybe add handling for
+      -- less conherent cases later)
+      manyTypes -> do
+        MM.sayVVV $ "resolveInstance too many"
+                  <> "\n  manyTypes:" <+> encloseSep "{" "}" "," (map pretty manyTypes)
+                  <> "\n  rssSubtypes:" <+> pretty rssSubtypes
+                  <> "\n  gt:" <+> pretty gt
+        return undefined
+
+    (g3, es2) <- statefulMapM resolveInstances g2 es1
+
+    return (g3, VarS v (Many es2))
+
+  f g0 (VarS v (MonomorphicExpr _ xs)) = statefulMapM resolveInstances g0 xs |>> second (VarS v . Many)
   -- propagate
-  f (AccS k e) = AccS k <$> resolveInstances g e
-  f (AppS e es) = AppS <$> resolveInstances g e <*> mapM (resolveInstances g) es
-  f (LamS vs e) = LamS vs <$> resolveInstances g e
-  f (LstS es) = LstS <$> mapM (resolveInstances g) es
-  f (TupS es) = TupS <$> mapM (resolveInstances g) es
-  f (NamS rs) = NamS <$> mapM (secondM (resolveInstances g)) rs
+  f g0 (AccS k e) = resolveInstances g0 e |>> second (AccS k)
+  f g0 (AppS e es) = do
+    (g1, e') <- resolveInstances g0 e
+    (g2, es') <- statefulMapM resolveInstances g1 es
+    return (g2, AppS e' es')
+  f g0 (LamS vs e) = resolveInstances g0 e |>> second (LamS vs)
+  f g0 (LstS es) = statefulMapM resolveInstances g0 es |>> second LstS
+  f g0 (TupS es) = statefulMapM resolveInstances g0 es |>> second TupS
+  f g0 (NamS rs) = do
+    (g1, es') <- statefulMapM resolveInstances g0 (map snd rs)
+    return (g1, NamS (zip (map fst rs) es'))
 
   -- primitives
-  f UniS = return UniS
-  f (BndS v) = return $ BndS v
-  f (RealS x) = return $ RealS x
-  f (IntS x) = return $ IntS x
-  f (LogS x) = return $ LogS x
-  f (StrS x) = return $ StrS x
-  f (CallS x) = return $ CallS x
+  f g0 UniS = return (g0, UniS)
+  f g0 (BndS v) = return (g0, BndS v)
+  f g0 (RealS x) = return (g0, RealS x)
+  f g0 (IntS x) = return (g0, IntS x)
+  f g0 (LogS x) = return (g0, LogS x)
+  f g0 (StrS x) = return (g0, StrS x)
+  f g0 (CallS x) = return (g0, CallS x)
+
+  connectInstance :: Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
+  connectInstance g0 [] = return g0
+  connectInstance g0 (AnnoS (Idx _ t) _ _ : es) =
+    case subtype gt t g0 of
+      (Left e) -> MM.throwError $ GeneralTypeError e
+      (Right g1) -> connectInstance g1 es
+
 
 
 -- prepare a general, indexed typechecking error
@@ -300,25 +340,37 @@ synthE _ g (VarS v (MonomorphicExpr Nothing [])) = do
   return (g', t, VarS v (MonomorphicExpr Nothing []))
 
 synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
-  let (g1, t1) = toExistential g0 (etype t0)
-  rs' <- checkInstances g1 t1 rs0
-  return (g1, t1, VarS v (PolymorphicExpr cls clsName t0 rs'))
-
+  (g1, rs') <- checkInstances g0 (etype t0) rs0
+  let (g2, t1) = rename g1 (etype t0)
+  return (g2, t1, VarS v (PolymorphicExpr cls clsName t0 rs'))
   where
-
     -- check each instance
     -- do not return modified Gamma state
     checkInstances
       :: Gamma
       -> TypeU
       -> [(EType, [AnnoS Int ManyPoly Int])]
-      -> MorlocMonad [(EType, [AnnoS (Indexed TypeU) ManyPoly Int])]
-    checkInstances _ _ [] = return []
+      -> MorlocMonad (Gamma, [(EType, [AnnoS (Indexed TypeU) ManyPoly Int])])
+    checkInstances g _ [] = return (g, [])
     checkInstances g10 genType ((instType, es):rs) = do
-      rs' <- checkInstances g10 genType rs
-      g11 <- subtype' i (etype instType) genType g10
-      es' <- checkImplementations g11 genType es
-      return ((instType, es'):rs')
+
+      -- check this first instance
+      -- convert qualified terms in the general type to existentials
+      let (g11, genType') = toExistential g10 genType
+      -- rename the instance type
+      let (g12, instType') = rename g11 (etype instType)
+      -- subtype the renamed instance type against the existential general
+      g13 <- subtype' i instType' genType' g12
+      -- check all implementations for this instance
+      (g14, es') <- checkImplementations g13 genType' es
+
+      -- check all remaining instances
+      -- Use the ORIGINAL general type, not the existntialized one above.
+      -- this means each existential can be solved independently for each
+      -- instance.
+      (g15, rs') <- checkInstances g14 genType rs
+
+      return (g15, (instType, es'):rs')
 
     -- check each implementation within each instance
     -- do not return modified Gamma state
@@ -326,12 +378,19 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
       :: Gamma
       -> TypeU
       -> [AnnoS Int ManyPoly Int]
-      -> MorlocMonad [AnnoS (Indexed TypeU) ManyPoly Int]
-    checkImplementations _ _ [] = return []
-    checkImplementations g t (e:es) = do
-      es' <- checkImplementations g t es
-      (_, _, e') <- checkG g e t
-      return (e':es')
+      -> MorlocMonad (Gamma, [AnnoS (Indexed TypeU) ManyPoly Int])
+    checkImplementations g _ [] = return (g, [])
+    checkImplementations g10 t (e:es) = do
+
+      -- check this instance
+      (g11, _, e') <- checkG g10 e t
+
+      -- check all the remaining implementations
+      (g12, es') <- checkImplementations g11 t es
+
+      -- return the final context and the applied expressions
+      return (g12, applyGen g12 e':es')
+
 
 -- This case will only be encountered in check, the existential generated here
 -- will be subtyped against the type known from the VarS case.
