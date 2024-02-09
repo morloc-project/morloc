@@ -4,7 +4,7 @@
 {-|
 Module      : Morloc.Data.DAG
 Description : Functions for working with directed acyclic graphs
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -31,6 +31,7 @@ module Morloc.Data.DAG
   , mapEdge
   , filterEdge
   , mapEdgeWithNode
+  , mapEdgeWithNodeM
   , mapEdgeWithNodeAndKey
   , mapNodeWithEdge
   , mapEdgeWithNodeAndKeyM
@@ -41,15 +42,15 @@ module Morloc.Data.DAG
 
 import Morloc.Namespace
 import qualified Morloc.Monad as MM
-import qualified Data.Map as Map 
-import qualified Data.Set as Set 
+import qualified Data.Map as Map
+import qualified Data.Set as Set
 
 edgelist :: DAG k e n -> [(k,k)]
 edgelist d = concat [[(k,j) | (j,_) <- xs] | (k, (_, xs)) <- Map.toList d ]
 
 insertEdge :: Ord k => k -> k -> e -> DAG k e n -> DAG k e n
 insertEdge k1 k2 e = Map.alter f k1
-  where  
+  where
     -- f :: Maybe [(k, e)] -> Maybe [(k, e)]
     f Nothing = error "Cannot add edge to non-existant node"
     f (Just (n,xs)) = Just (n,(k2,e):xs)
@@ -108,7 +109,7 @@ leafs d = [k | (k, (_, [])) <- Map.toList d]
 -- | Searches a DAG for a cycle, stops on the first observed cycle and returns
 -- the path.
 findCycle :: Ord k => DAG k e n -> Maybe [k]
-findCycle d = case mapMaybe (findCycle' []) (roots d) of 
+findCycle d = case mapMaybe (findCycle' []) (roots d) of
   [] -> Nothing
   (x:_) -> Just x
   where
@@ -154,7 +155,7 @@ shake rootKey d =
     let children = rootChildren rootKey
     in Map.filterWithKey (\k _ -> Set.member k children) d
     where
-        rootChildren localRootKey = case Map.lookup localRootKey d of 
+        rootChildren localRootKey = case Map.lookup localRootKey d of
             Nothing -> Set.singleton localRootKey
             (Just (_, map fst -> children)) -> Set.insert localRootKey $ Set.unions (map rootChildren children)
 
@@ -198,7 +199,7 @@ mapEdgeWithNodeM
   -> DAG k e1 n -> MorlocMonad (DAG k e2 n)
 mapEdgeWithNodeM f d = mapM runit (Map.toList d) |>> Map.fromList
   where
-    runit (k, _) = case local k d of 
+    runit (k, _) = case local k d of
       (Just (n1, xs)) -> do
         e2s <- mapM (\(_, e, n2) -> f n1 e n2) xs
         return (k, (n1, zip (map (\(x,_,_)->x) xs) e2s))
@@ -211,7 +212,7 @@ mapEdgeWithNodeAndKeyM
   -> DAG k e1 n -> MorlocMonad (DAG k e2 n)
 mapEdgeWithNodeAndKeyM f d = mapM runit (Map.toList d) |>> Map.fromList
   where
-    runit (k, _) = case local k d of 
+    runit (k, _) = case local k d of
       (Just (n1, xs)) -> do
         e2s <- mapM (\(_, e, n2) -> f k n1 e n2) xs
         return (k, (n1, zip (map (\(x,_,_)->x) xs) e2s))
@@ -230,7 +231,7 @@ synthesizeDAG f d0 = synthesizeDAG' (Just Map.empty) where
   synthesizeDAG' Nothing = return Nothing
   synthesizeDAG' (Just dn)
     -- stop, we have completed the mapping. Jubilation.
-    | Map.size d0 == Map.size dn = return (Just dn) 
+    | Map.size d0 == Map.size dn = return (Just dn)
     | otherwise = do
         -- traverse the original making any nodes that now have met dependencies
         dn' <- foldlM addIfPossible dn (Map.toList d0)
@@ -272,7 +273,7 @@ inherit k f d = case local k d of
     -- if k has no children, return empty list
     Nothing -> []
     -- else if k has children
-    -- then 
+    -- then
     (Just (_, xs)) -> concat [[(v, lookupAliasedTerm v k' f d) | (v,_) <- vs] | (k', vs, _) <- xs]
 
 lookupAliasedTerm

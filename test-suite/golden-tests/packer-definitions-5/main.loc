@@ -12,23 +12,25 @@ type Py => Tuple2 a b = "tuple" a b
 type Py => Str = "str"
 type Py => Int = "int"
 
-source Cpp from "map.hpp"
-  ( "morloc_packMap" as packMapCpp
-  , "morloc_unpackMap" as unpackMapCpp
-  , "insert"
-  )
-packMapCpp :: pack => ([key],[val]) -> Map key val
-unpackMapCpp :: unpack => Map key val -> ([key],[val])
+class Packable a b where
+  pack :: a -> b
+  unpack :: b -> a
 
+instance Packable ([key],[val]) (Map key val) where
+  source Py from "map.py"
+    ( "packMap" as pack
+    , "unpackMap" as unpack
+    )
+
+  source Cpp from "map.hpp"
+    ( "morloc_packMap" as pack
+    , "morloc_unpackMap" as unpack
+    )
+
+source Cpp from "map.hpp" ("insert")
 insert :: Map Str b -> Str -> b -> Map Str b
 
-source Py from "map.py"
-  ( "packMap" as packMapPy
-  , "unpackMap" as unpackMapPy
-  , "singleton"
-  )
-packMapPy   :: pack   => ([Str],[b]) -> Map Str b
-unpackMapPy :: unpack => Map Str b -> ([Str],[b])
+source Py from "map.py" ("singleton")
 singleton :: Str -> a -> Map Str a
 
 foo :: Int -> Int -> Map Str Int

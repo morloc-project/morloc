@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Frontend.Restructure
 Description : Write Module objects to resolve type aliases and such
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -12,7 +12,6 @@ Stability   : experimental
 module Morloc.Frontend.Restructure (restructure) where
 
 import Morloc.Frontend.Namespace
-import Morloc.Pretty ()
 import Morloc.Data.Doc
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Monad as MM
@@ -22,8 +21,6 @@ import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.TypeEval as TE
 import qualified Data.Set as Set
-import qualified Morloc.Frontend.PartialOrder as MTP
-import Morloc.Typecheck.Internal (qualify, unqualify)
 
 -- | Resolve type aliases, term aliases and import/exports
 restructure
@@ -33,8 +30,8 @@ restructure s
   = checkForSelfRecursion s -- modules should not import themselves
   >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
   >>= doM collectTypes
+  >>= doM collectSources
   >>= evaluateAllTypes
-  >>= doM collectMogrifiers
   >>= removeTypeImports -- Remove type imports and exports
   |>> nullify -- TODO: unsus and document
 
@@ -58,7 +55,7 @@ doM f x = f x >> return x
 -- is why I need to raise an explicit error to avoid infinite loops.
 checkForSelfRecursion :: Ord k => DAG k e ExprI -> MorlocMonad (DAG k e ExprI)
 checkForSelfRecursion d = do
-  MDD.mapNodeM (AST.checkExprI isExprSelfRecursive) d
+  _ <- MDD.mapNodeM (AST.checkExprI isExprSelfRecursive) d
   return d
   where
     -- A typedef is self-recursive if its name appears in its definition
@@ -83,7 +80,7 @@ checkForSelfRecursion d = do
     hasTerm v (NamU o n (p:ps) []) = hasTerm v p || hasTerm v (NamU o n ps [])
     hasTerm _ (NamU _ _ [] []) = False
 
-    hasTerm _ (ExistU _ _ _) = error "There should not be existentionals in typedefs"
+    hasTerm _ ExistU{} = error "There should not be existentionals in typedefs"
 
 
 -- | Consider export/import information to determine which terms are imported
@@ -208,7 +205,7 @@ collectTypes fullDag = do
 
   completeRecord :: Scope -> TVar -> [([TVar], TypeU, Bool)] -> [([TVar], TypeU, Bool)]
   completeRecord gscope v xs = case Map.lookup v gscope of
-    (Just ys) -> map (completeValue [t | (_, t, _) <- ys]) xs 
+    (Just ys) -> map (completeValue [t | (_, t, _) <- ys]) xs
     Nothing -> xs
 
   completeValue :: [TypeU] -> ([TVar], TypeU, Bool) -> ([TVar], TypeU, Bool)
@@ -253,106 +250,49 @@ filterAndSubstitute links typemap =
 evaluateAllTypes :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
 evaluateAllTypes = MDD.mapNodeM f where
   f :: ExprI -> MorlocMonad ExprI
-  f e0 = do
-    g e0 where
-      g :: ExprI -> MorlocMonad ExprI
-      g (ExprI i (SigE v l e)) = do
-        gscope <- MM.metaGeneralTypedefs i
-        e' <- evaluateEType gscope e
-        MM.sayVVV $ "evaluateEType"
-          <> "\n  e:" <+> pretty (etype e)
-          <> "\n  e':" <+> pretty (etype e')
-        return $ ExprI i (SigE v l e')
-      g (ExprI i (AnnE e ts)) = do
-        gscope <- MM.metaGeneralTypedefs i
-        ts' <- mapM (evaluateTypeU gscope) ts
-        MM.sayVVV $ "evaluateTypeU"
-          <> "\n  ts:" <+> pretty ts
-          <> "\n  ts':" <+> pretty ts'
-        e' <- g e
-        return (ExprI i (AnnE e' ts'))
-      g (ExprI i (ModE m es)) = do
-        es' <- mapM g es
-        return $ ExprI i (ModE m es')
-      g (ExprI i (AssE v e es)) = do
-        e' <- g e
-        es' <- mapM g es
-        return $ ExprI i (AssE v e' es')
-      g (ExprI i (AccE e k)) = do
-        e' <- g e
-        return $ ExprI i (AccE e' k)
-      g (ExprI i (LstE es)) = do
-        es' <- mapM g es
-        return $ ExprI i (LstE es')
-      g (ExprI i (TupE es)) = do
-        es' <- mapM g es
-        return $ ExprI i (TupE es')
-      g (ExprI i (NamE rs)) = do
-        rs' <- mapM (secondM g) rs
-        return $ ExprI i (NamE rs')
-      g (ExprI i (AppE e es)) = do
-        e' <- g e
-        es' <- mapM g es
-        return $ ExprI i (AppE e' es')
-      g (ExprI i (LamE vs e)) = do
-        e' <- g e
-        return $ ExprI i (LamE vs e')
-      g e = return e
+  f (ExprI i e0) = ExprI i <$> g e0 where
+    g :: Expr -> MorlocMonad Expr
+    g (SigE (Signature v l e)) = do
+      gscope <- MM.metaGeneralTypedefs i
+      e' <- evaluateEType gscope e
+      return $ SigE (Signature v l e')
+    g (AnnE e ts) = do
+      gscope <- MM.metaGeneralTypedefs i
+      ts' <- mapM (evaluateTypeU gscope) ts
+      e' <- f e
+      return (AnnE e' ts')
+    g (ModE m es) = ModE m <$> mapM f es
+    g (AssE v e es) = AssE v <$> f e <*> mapM f es
+    g (AccE k e) = AccE k <$> f e
+    g (LstE es) = LstE <$> mapM f es
+    g (TupE es) = TupE <$> mapM f es
+    g (NamE rs) = NamE <$> mapM (secondM f) rs
+    g (AppE e es) = AppE <$> f e <*> mapM f es
+    g (LamE vs e) = LamE vs <$> f e
+    g e = return e
 
-      evaluateEType :: Scope -> EType -> MorlocMonad EType
-      evaluateEType gscope et =
-        either MM.throwError (\t' -> return $ et {etype = t'}) $ TE.evaluateType gscope (etype et)
+    evaluateEType :: Scope -> EType -> MorlocMonad EType
+    evaluateEType gscope et =
+      either MM.throwError (\t' -> return $ et {etype = t'}) $ TE.evaluateType gscope (etype et)
 
-      evaluateTypeU :: Scope -> TypeU -> MorlocMonad TypeU
-      evaluateTypeU gscope t =
-        either MM.throwError return $ TE.evaluateType gscope t
+    evaluateTypeU :: Scope -> TypeU -> MorlocMonad TypeU
+    evaluateTypeU gscope t =
+      either MM.throwError return $ TE.evaluateType gscope t
 
 
-collectMogrifiers :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
-collectMogrifiers fullDag = do
+
+collectSources :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
+collectSources fullDag = do
   let typeDag = MDD.mapEdge (\xs -> [(x,y) | AliasedType x y <- xs]) fullDag
-  _ <- MDD.synthesizeDAG formMogrifiers typeDag
-
-  s <- MM.get
-  let (GMap _ (Map.elems -> propMap)) = stateInnerMogrifiers s
-  MM.put (s {stateUniversalInnerMogrifiers = Map.unionsWith mergeMogs propMap })
-
+  _ <- MDD.synthesizeDAG linkSources typeDag
   return ()
   where
 
-  mergeMogs :: [(TypeU, Source)] -> [(TypeU, Source)] -> [(TypeU, Source)]
-  mergeMogs xs0 ys0 = filter (isNovel ys0) xs0 <> ys0 where
-    isNovel :: [(TypeU, Source)] -> (TypeU, Source) -> Bool
-    isNovel [] _ = True
-    isNovel ((t1, src1):ys) x@(t2, src2)
-      | srcPath src1 == srcPath src2 &&
-        srcName src1 == srcName src2 &&
-        MTP.isSubtypeOf t1 t2 &&
-        MTP.isSubtypeOf t2 t1 = False
-      | otherwise = isNovel ys x
-
-  formMogrifiers
-    :: MVar
-    -> ExprI
-    -> [( MVar -- child module name
-        , [(TVar, TVar)] -- alias map
-        , Map.Map Property [(TypeU, Source)]
-        )]
-    -> MorlocMonad (Map.Map Property [(TypeU, Source)])
-  formMogrifiers m e0 childImports = do
+  linkSources :: MVar -> ExprI -> a -> MorlocMonad ()
+  linkSources m e0 _ = do
 
     -- collect and store sources (should this be done here?)
     let objSources = AST.findSources e0
-
-    let localMogs = prepareMogrifier objSources (AST.findSignatures e0)
-
-    let inheritedMogs = [inherit aliasMap mogMap | (_, aliasMap, mogMap) <- childImports]
-      -- loop over childImports
-      -- rename as needed first
-      -- then keep the mogrifiers that varmatch the alias
-      --
-
-    let mogrifiers = Map.unionsWith mergeMogs (localMogs : inheritedMogs)
 
     -- Here we are creating links from every indexed term in the module to the module
     -- sources and aliases. When the module abstractions are factored out later,
@@ -360,41 +300,10 @@ collectMogrifiers fullDag = do
     let indices = AST.getIndices e0
 
     s <- MM.get
-    MM.put (s { stateSources = GMap.insertManyWith (<>) indices m objSources (stateSources s)
-              , stateInnerMogrifiers = GMap.insertManyWith (<>) indices m mogrifiers (stateInnerMogrifiers s)
-              } )
+    MM.put (s { stateSources = GMap.insertManyWith (<>) indices m objSources (stateSources s) } )
 
-    MM.sayVVV $ "mogrifiers for" <+> pretty m <> ":" <+> viaShow mogrifiers
+    return ()
 
-    return mogrifiers
-
-    where
-      prepareMogrifier :: [Source] -> [(EVar, Maybe Label, EType)] -> Map.Map Property [(TypeU, Source)]
-      prepareMogrifier srcs es = mogrifiers
-        where
-          srcMap = Map.fromListWith (<>) [(srcAlias src, [src]) | src <- srcs]
-          mogMaybe = concat [[(p, (etype e, Map.lookup v srcMap)) | p <- Set.toList (eprop e)] | (v, _, e) <- es]
-          mogrifiers = Map.fromListWith (<>) [(p, [(t, src) | src <- srcs]) | (p, (t, Just srcs)) <- mogMaybe]
-
-      inherit :: [(TVar, TVar)] -> Map.Map Property [(TypeU, Source)] -> Map.Map Property [(TypeU, Source)]
-      inherit aliasMap mogMap
-        = Map.mapWithKey (selectInherited (map snd aliasMap))
-        . Map.map ( map (first (renameMog aliasMap)) )
-        $  mogMap
-
-      -- determine whether a given mogrifier is inherited given the import list
-      selectInherited :: [TVar] -> Property -> [(TypeU, Source)] -> [(TypeU, Source)]
-      selectInherited aliases Unpack ((unqualify -> (vs, t@(FunU [a] _)), src):xs)
-        | extractKey a `elem` aliases = (qualify vs t, src) : selectInherited aliases Unpack xs
-        | otherwise = selectInherited aliases Unpack xs
-      selectInherited aliases Pack ((unqualify -> (vs, t@(FunU [_] b)), src):xs)
-        | extractKey b `elem` aliases = (qualify vs t, src) : selectInherited aliases Pack xs
-        | otherwise = selectInherited aliases Pack xs
-      selectInherited _ _ xs = xs -- currently keep all functions for other mogrifiers (none of these are currently used)
-
-      -- update type names in the inherited signatures
-      renameMog :: [(TVar, TVar)] -> TypeU -> TypeU
-      renameMog aliasMap t0 = foldl (\t (s,a) -> rename s a t) t0 aliasMap
 
 
 -- Rename a variable. For example:
@@ -421,7 +330,7 @@ rename sourceName localAlias = f where
 nullify :: DAG m e ExprI -> DAG m e ExprI
 nullify = MDD.mapNode f where
     f :: ExprI -> ExprI
-    f (ExprI i (SigE v n (EType t ps cs))) = ExprI i (SigE v n (EType (nullifyT t) ps cs))
+    f (ExprI i (SigE (Signature v n (EType t ps cs)))) = ExprI i (SigE (Signature v n (EType (nullifyT t) ps cs)))
     f (ExprI i (ModE m es)) = ExprI i (ModE m (map f es))
     f (ExprI i (AssE v e es)) = ExprI i (AssE v (f e) (map f es))
     f e = e
@@ -434,7 +343,6 @@ nullify = MDD.mapNode f where
     nullifyT (NamU o v ds rs) = NamU o v (map nullifyT ds) (map (second nullifyT) rs)
     nullifyT t = t
 
-
     isNull :: TypeU -> Bool
     isNull t = t == BT.unitU
 
@@ -443,7 +351,6 @@ removeTypeImports :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [(E
 removeTypeImports d = case MDD.roots d of
   [root] -> return
           . MDD.shake root
-          . MDD.filterEdge filterEmpty
           . MDD.mapEdge (mapMaybe maybeEVar)
           $ d
   roots -> MM.throwError $ NonSingularRoot roots
@@ -451,7 +358,3 @@ removeTypeImports d = case MDD.roots d of
     maybeEVar :: AliasedSymbol -> Maybe (EVar, EVar)
     maybeEVar (AliasedTerm x y) = Just (x, y)
     maybeEVar (AliasedType _ _) = Nothing -- remove type symbols, they have already been used
-
-    filterEmpty :: k -> n -> k -> [a] -> Bool
-    filterEmpty _ _ _ [] = False
-    filterEmpty _ _ _ _ = True

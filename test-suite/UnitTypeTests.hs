@@ -16,9 +16,8 @@ module UnitTypeTests
 import Morloc.Frontend.Namespace
 import Text.RawString.QQ
 import Morloc (typecheckFrontend)
-import Morloc.Frontend.Typecheck (evaluateSAnnoTypes)
+import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
 import qualified Morloc.Monad as MM
-import qualified Morloc.Frontend.PartialOrder as MP
 import qualified Morloc.Typecheck.Internal as MTI
 
 import qualified Data.Text as MT
@@ -27,12 +26,12 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 -- get the toplevel general type of a typechecked expression
-gtypeof :: SAnno (Indexed TypeU) f c -> TypeU
-gtypeof (SAnno _ (Idx _ t)) = t
+gtypeof :: AnnoS (Indexed TypeU) f c -> TypeU
+gtypeof (AnnoS (Idx _ t) _ _) = t
 
-runFront :: MT.Text -> IO (Either MorlocError [SAnno (Indexed TypeU) Many Int])
+runFront :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
 runFront code = do
-  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheckFrontend Nothing (Code code) >>= mapM evaluateSAnnoTypes)
+  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
   return x
 
 emptyConfig =  Config
@@ -570,78 +569,107 @@ orderInvarianceTests =
 typeOrderTests =
   testGroup
     "Tests of type partial ordering (subtype)"
-    [ testTrue
+    [ testFalse
+        "Str !< Real"
+        (isSubtypeOf str real)
+    , testFalse
+        "Real !< Str"
+        (isSubtypeOf real str)
+    , testFalse
+        "[Real] !< [Str]"
+        (isSubtypeOf (lst real) (lst str))
+    , testFalse
+        "[Str] !< [Real]"
+        (isSubtypeOf (lst str) (lst real))
+    , testFalse
+        "Str -> Str -> Str !< Real -> Real -> Real"
+        (isSubtypeOf (fun [str, str, str]) (fun [real, real, real]))
+    , testFalse
+        "Real -> Real -> Real !< Str -> Str -> Str"
+        (isSubtypeOf (fun [real, real, real]) (fun [str, str, str]))
+    , testFalse
+        "Str -> Str !< Int -> Int -> Int"
+        (isSubtypeOf (fun [str, str]) (fun [int, int, int]))
+    , testTrue
         "a <: Int"
-        (MP.isSubtypeOf (forall ["a"] (var "a")) int)
+        (isSubtypeOf (forall ["a"] (var "a")) int)
     , testFalse
         "Int !< forall a . a"
-        (MP.isSubtypeOf int (forall ["a"] (var "a")))
+        (isSubtypeOf int (forall ["a"] (var "a")))
     , testTrue
         "forall a . (Int, a) <: (Int, Str)"
-        (MP.isSubtypeOf (forall ["a"] (tuple [int, var "a"])) (tuple [int, str]))
+        (isSubtypeOf (forall ["a"] (tuple [int, var "a"])) (tuple [int, str]))
     , testTrue
         "forall a b . (a, b) <: (Int, Str)"
-        (MP.isSubtypeOf (forall ["a", "b"] (tuple [var "a", var "b"])) (tuple [int, str]))
+        (isSubtypeOf (forall ["a", "b"] (tuple [var "a", var "b"])) (tuple [int, str]))
     , testTrue
         "forall a . (Int, a) <: forall b . (Int, b)"
-        (MP.isSubtypeOf
+        (isSubtypeOf
           (forall ["a"] (tuple [int, var "a"]))
           (forall ["b"] (tuple [int, var "b"])))
     , testTrue
         "forall a . a <: (Int, Str)"
-        (MP.isSubtypeOf (forall ["a"] (var "a")) (tuple [int, str]))
+        (isSubtypeOf (forall ["a"] (var "a")) (tuple [int, str]))
     , testTrue
         "forall a . a <: forall a b . (a, b)"
-        (MP.isSubtypeOf (forall ["a"] (var "a")) (forall ["a", "b"] (tuple [var "a", var "b"])))
+        (isSubtypeOf (forall ["a"] (var "a")) (forall ["a", "b"] (tuple [var "a", var "b"])))
     -- cannot compare
     , testFalse
         "[Int] !< Int"
-        (MP.isSubtypeOf (lst int) int)
+        (isSubtypeOf (lst int) int)
     , testFalse
         "Int !< [Int]"
-        (MP.isSubtypeOf int (lst int))
+        (isSubtypeOf int (lst int))
     -- partial order of types
     , testTrue
         "forall a . [a] <= [Int]"
-        ((forall ["a"] (lst (var "a"))) MP.<= (lst (var "a")))
+        ((forall ["a"] (lst (var "a"))) <= (lst (var "a")))
     , testFalse
         "[Int] !< forall a . [a]"
-        ((lst (var "a")) MP.<= (forall ["a"] (lst (var "a"))))
+        ((lst (var "a")) <= (forall ["a"] (lst (var "a"))))
     , testTrue
         "forall a . (Int, a) <= (Int, Bool)"
-        ((forall ["a"] (tuple [int, var "a"])) MP.<= (tuple [int, bool]))
+        ((forall ["a"] (tuple [int, var "a"])) <= (tuple [int, bool]))
     , testFalse
         "(Int, Bool) !<= forall a . (Int, a)"
-        ((tuple [int, bool]) MP.<= (forall ["a"] (tuple [int, var "a"])))
+        ((tuple [int, bool]) <= (forall ["a"] (tuple [int, var "a"])))
     , testTrue
         "forall a b . (a, b) <= forall c . (Int, c)"
-        ((forall ["a", "b"] (tuple [var "a", var "b"])) MP.<= (forall ["c"] (tuple [int, var "c"])))
+        ((forall ["a", "b"] (tuple [var "a", var "b"])) <= (forall ["c"] (tuple [int, var "c"])))
     , testFalse
         "forall c . (Int, c) !<= forall a b . (a, b)"
-        ((forall ["c"] (tuple [int, var "c"])) MP.<= (forall ["a", "b"] (tuple [var "a", var "b"])))
+        ((forall ["c"] (tuple [int, var "c"])) <= (forall ["a", "b"] (tuple [var "a", var "b"])))
     , testTrue
         "forall a . a <= forall a b . (a, b)"
-        ((forall ["a"] (var "a")) MP.<= (forall ["a", "b"] (tuple [var "a", var "b"])))
+        ((forall ["a"] (var "a")) <= (forall ["a", "b"] (tuple [var "a", var "b"])))
     -- test "mostSpecific"
     , testEqual
         "mostSpecific [Int, Str, forall a . a] = [Int, Str]"
-        (MP.mostSpecific [int, str, forall ["a"] (var "a")])
+        (mostSpecific [int, str, forall ["a"] (var "a")])
         [int, str]
     -- test "mostGeneral"
     , testEqual
         "mostGeneral [Int, Str, forall a . a] = forall a . a"
-        (MP.mostGeneral [int, str, forall ["a"] (var "a")])
+        (mostGeneral [int, str, forall ["a"] (var "a")])
         [forall ["a"] (var "a")]
     -- test mostSpecificSubtypes
     , testEqual
         "mostSpecificSubtypes: Int against [forall a . a]"
-        (MP.mostSpecificSubtypes int [forall ["a"] (var "a")])
+        (mostSpecificSubtypes int [forall ["a"] (var "a")])
         [forall ["a"] (var "a")]
+    , testEqual
+        "mostSpecificSubtypes: (Int -> Int)"
+        (mostSpecificSubtypes (fun [int, int]) [fun [str,str], fun [int, int], forall ["a"] (fun [var "a", var "a"])])
+        [fun [int, int]]
+    , testEqual
+        "mostSpecificSubtypes: empty"
+        (mostSpecificSubtypes (fun [str, str, str]) [fun [real, real, real]])
+        []
 
     -- test mostSpecificSubtypes for tuples
     , testEqual
         "mostSpecificSubtypes: tuples"
-        (MP.mostSpecificSubtypes
+        (mostSpecificSubtypes
           (tuple [int, int])
           [ forall ["a"] (var "a")
           , forall ["a", "b"] (tuple [var "a", var "b"])
@@ -653,7 +681,7 @@ typeOrderTests =
     -- test mostSpecificSubtypes for tuples
     , testEqual
         "mostSpecificSubtypes: with partially generic tuples"
-        (MP.mostSpecificSubtypes
+        (mostSpecificSubtypes
           (forall ["a"] (tuple [int, var "a"]))
           [ forall ["a"] (var "a")
           , forall ["a", "b"] (tuple [var "a", var "b"])

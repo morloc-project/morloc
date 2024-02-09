@@ -4,7 +4,7 @@
 {-|
 Module      : Morloc.CodeGenerator.Infer
 Description : Infer concrete types
-Copyright   : (c) Zebulun Arendsee, 2023
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -35,7 +35,7 @@ getScope i lang = do
   return (cscope, gscope)
 
 evalGeneralStep :: Int -> TypeU -> MorlocMonad (Maybe TypeU)
-evalGeneralStep i t = do 
+evalGeneralStep i t = do
   globalMap <- MM.gets stateGeneralTypedefs
   gscope <- case GMap.lookup i globalMap of
     GMapJust scope -> return scope
@@ -109,13 +109,13 @@ inferConcreteTypeUUniversal lang generalType = do
 weave :: Scope -> TypeU -> TypeU -> Either MDoc TypeF
 weave gscope = w where
   w (VarU v1) (VarU (TV v2)) = return $ VarF (FV v1 (CV v2))
-  w (FunU ts1 t1) (FunU ts2 t2) = FunF <$> zipWithM w ts1 ts2 <*> w t1 t2 
+  w (FunU ts1 t1) (FunU ts2 t2) = FunF <$> zipWithM w ts1 ts2 <*> w t1 t2
   w (AppU t1 ts1) (AppU t2 ts2) = AppF <$> w t1 t2 <*> zipWithM w ts1 ts2
   w t1@(NamU o1 v1 ts1 rs1) t2@(NamU o2 v2 ts2 rs2)
     | o1 == o2 && length ts1 == length ts2 && length rs1 == length rs2
         = NamF o1 (FV v1 (CV (unTVar v2)))
         <$> zipWithM w ts1 ts2
-        <*> zipWithM (\ (_, t1) (k2, t2) -> (,) k2 <$> w t1 t2) rs1 rs2
+        <*> zipWithM (\ (_, t1') (k2', t2') -> (,) k2' <$> w t1' t2') rs1 rs2
     | otherwise = Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <+> "\n  t2:" <+> pretty t2
   w t1 t2 = case T.evaluateStep gscope t1 of
     Nothing -> Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <> "\n  t2:" <> pretty t2

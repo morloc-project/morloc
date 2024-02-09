@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Monad
 Description : A great big stack of monads
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -35,15 +35,12 @@ module Morloc.Monad
   , setCounter
   , takeFromCounter
   -- * metadata accessors
+  , metaMonomorphicTermTypes
   , metaTermTypes
-  , metaConstraints
   , metaSources
   , metaName
-  , metaProperties
   , metaTypedefs
   , metaGeneralTypedefs
-  , metaMogrifiers
-  , metaUniversalMogrifiers
   -- * handling tree depth
   , incDepth
   , getDepth
@@ -68,7 +65,6 @@ import Control.Monad.State
 import Control.Monad.Trans
 import Control.Monad.Writer
 import Control.Monad.Identity
-import Morloc.Error () -- for MorlocError Show instance
 import Morloc.Namespace
 import Morloc.Data.Doc
 import System.IO (stderr)
@@ -79,32 +75,11 @@ import qualified System.Exit as SE
 import qualified System.Process as SP
 import qualified Morloc.System as MS
 import qualified Data.Map as Map
-import qualified Data.Set as Set
 
 runMorlocMonad ::
      Maybe Path -> Int -> Config -> MorlocMonad a -> IO (MorlocReturn a)
 runMorlocMonad outfile v config ev =
   runStateT (runWriterT (runExceptT (runReaderT ev config))) (emptyState outfile v)
-
-instance Defaultable MorlocState where
-  defaultValue = MorlocState {
-      statePackageMeta = []
-    , stateVerbosity = 0
-    , stateCounter = -1
-    , stateDepth = 0
-    , stateSignatures = GMap.empty
-    , stateConcreteTypedefs = GMap.empty
-    , stateGeneralTypedefs = GMap.empty
-    , stateUniversalConcreteTypedefs = Map.empty
-    , stateUniversalGeneralTypedefs = Map.empty
-    , stateInnerMogrifiers = GMap.empty
-    , stateUniversalInnerMogrifiers = Map.empty
-    , stateSources = GMap.empty
-    , stateAnnotations = Map.empty
-    , stateOutfile = Nothing
-    , stateExports = []
-    , stateName = Map.empty
-  }
 
 emptyState :: Maybe Path -> Int -> MorlocState
 emptyState path v = defaultValue
@@ -197,7 +172,7 @@ sayV = sayIf 1
 -- print for verbose level 2
 -- messages for the programmer
 sayVV :: MDoc -> MorlocMonad ()
-sayVV = sayIf 2 
+sayVV = sayIf 2
 
 -- print for verbose level 3
 -- really boring shit that probably no one wants to ever hear, but we spent a
@@ -256,15 +231,26 @@ readLang langStr =
     Nothing -> throwError $ UnknownLanguage langStr
 
 
-metaTermTypes :: Int -> MorlocMonad (Maybe TermTypes)
+metaMonomorphicTermTypes :: Int -> MorlocMonad (Maybe TermTypes)
+metaMonomorphicTermTypes i = do
+  s <- get
+  return $ case GMap.lookup i (stateSignatures s) of
+    (GMapJust (Monomorphic t)) -> Just t
+    _ -> Nothing
+
+
+metaTermTypes :: Int -> MorlocMonad (Maybe [TermTypes])
 metaTermTypes i = do
   s <- get
-  case GMap.lookup i (stateSignatures s) of
-    GMapNoFst -> return Nothing
-    GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
-    (GMapJust t) -> return (Just t)
+  return $ case GMap.lookup i (stateSignatures s) of
+    (GMapJust (Monomorphic t)) -> Just [t]
+    (GMapJust (Polymorphic _ _ _ ts)) -> Just ts
+    _ -> Nothing
 
--- | Return sources for constructing an object. These are used by `NamE NamObject` expressions.
+-- | Return sources for constructing an object. These are used by `NamE NamObject`
+-- expressions. Sources here includes some that are not linked to signatures, such
+-- as language-specific imports of object constructors. So this supersets the
+-- stateSignatures field's sources.
 metaSources :: Int -> MorlocMonad [Source]
 metaSources i = do
   s <- gets stateSources
@@ -273,27 +259,8 @@ metaSources i = do
     GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
     (GMapJust srcs) -> return srcs
 
--- TODO: rename the meta* functions
 
--- | The general constraints as defined in the general type signature. These
--- are not used anywhere yet.
-metaConstraints :: Int -> MorlocMonad [Constraint]
-metaConstraints i = do
-  s <- gets stateSignatures 
-  return $ case GMap.lookup i s of
-    (GMapJust (TermTypes (Just e) _ _)) -> Set.toList (econs e)
-    _ -> []
-
--- | Properties are cunrrently not used after Sanno types are created. The only
--- properties that are considered are the pack/unpack properties. Eventually
--- properties will be part of the typeclass system.
-metaProperties :: Int -> MorlocMonad [Property]
-metaProperties i = do
-  s <- gets stateSignatures 
-  return $ case GMap.lookup i s of
-    (GMapJust (TermTypes (Just e) _ _)) -> Set.toList (eprop e)
-    _ -> []
-
+----- TODO: metaName should no longer be required - remove
 -- | The name of a morloc composition. These names are stored in the monad
 -- after they are resolved away. For example in:
 --   import math
@@ -312,18 +279,6 @@ metaProperties i = do
 -- The name is linked to the SAnno general data structure.
 metaName :: Int -> MorlocMonad (Maybe EVar)
 metaName i = gets (Map.lookup i . stateName)
-
-metaMogrifiers :: Int -> Lang -> MorlocMonad (Map.Map Property [(TypeU, Source)])
-metaMogrifiers i lang = do
-  p <- gets stateInnerMogrifiers
-  return $ case GMap.lookup i p of
-    (GMapJust p') -> Map.map (filter (\(_, src) -> srcLang src == lang)) p'
-    _ -> Map.empty
-
-metaUniversalMogrifiers :: Lang -> MorlocMonad (Map.Map Property [(TypeU, Source)])
-metaUniversalMogrifiers lang = do
-  p <- gets stateUniversalInnerMogrifiers
-  return $ Map.map (filter (\(_, src) -> srcLang src == lang)) p
 
 -- | This is currently only used in the C++ translator.
 -- FIXME: should a term be allowed to have multiple type definitions within a language?

@@ -2,8 +2,8 @@
 
 {-|
 Module      : Morloc.Frontend.Treeify
-Description : Translate from the frontend DAG to the backend SAnno AST forest
-Copyright   : (c) Zebulun Arendsee, 2021
+Description : Translate from the frontend DAG to the backend AnnoS AST forest
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -13,13 +13,15 @@ module Morloc.Frontend.Treeify (treeify) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
-import Morloc.Pretty ()
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.GMap as GMap
+import Morloc.Frontend.Classify (linkTypeclasses)
+import Morloc.Frontend.Merge (mergeTermTypes, mergeEType)
+  
 
 -- | Every term must either be sourced or declared.
 data TermOrigin = Declared ExprI | Sourced Source
@@ -40,7 +42,7 @@ data TermOrigin = Declared ExprI | Sourced Source
 -- and locations in source code.
 treeify
   :: DAG MVar [(EVar, EVar)] ExprI
-  -> MorlocMonad [SAnno Int Many Int]
+  -> MorlocMonad [AnnoS Int ManyPoly Int]
 treeify d
  | Map.size d == 0 = return []
  | otherwise = case DAG.roots d of
@@ -62,6 +64,9 @@ treeify d
      -- - after this step, all signatures and type annotation expressions are redundant
      -- - the map won't be used until the type inference step in Typecheck.hs
      _ <- DAG.synthesizeDAG linkSignaturesModule d'
+
+     -- build typeclasses and instance map
+     _ <- DAG.synthesizeDAG linkTypeclasses d'
 
      {- example d' for
       -  x = 42
@@ -104,7 +109,7 @@ treeify d
                             , stateName = Map.union (stateName s) (Map.fromList exports)})
 
          -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
-         mapM (collect . fst) exports
+         mapM (uncurry collect) exports
 
    -- There is no currently supported use case that exposes multiple roots in
    -- one compilation process. The compiler executable takes a single morloc
@@ -121,20 +126,18 @@ term --<i>--.--<
               `------------------------n--> General Signature
 -}
 
-
-
--- in each scope (top of a module or after descending into a where statement) 
+-- in each scope (top of a module or after descending into a where statement)
 --  1 collect all type signatures (Map EVar [EType])
 --  2 find all equivalent appearences of a given term across modules (including across aliases)
 linkSignaturesModule
   :: MVar
   -> ExprI
   -> [(MVar, [(EVar, EVar)], Map.Map EVar TermTypes)]
-  -- ^ This is a list of 
+  -- ^ This is a list of
   -> MorlocMonad (Map.Map EVar TermTypes)
 linkSignaturesModule _ (ExprI _ (ModE v es)) edges
   -- a map from alias to all signatures associated with the alias
-  = Map.mapM (foldlM combineTermTypes (TermTypes Nothing [] []))
+  = Map.mapM (foldlM mergeTermTypes (TermTypes Nothing [] []))
               (Map.unionsWith (<>) [unalias es' m' | (_, es', m') <- edges]) >>=
     linkSignatures v es
   where
@@ -146,13 +149,13 @@ linkSignaturesModule _ (ExprI _ (ModE v es)) edges
   unalias es0 m =
     let aliases = Map.fromList . groupSort $ [(alias, srcname) | (srcname, alias) <- es0]
     in Map.map (mapMaybe (`Map.lookup` m)) aliases
-linkSignaturesModule _ _ _ = MM.throwError . CallTheMonkeys $ "Expected a module at the top level" 
+linkSignaturesModule _ _ _ = MM.throwError . CallTheMonkeys $ "Expected a module at the top level"
 
 
 linkSignatures
   :: MVar -- ^ the current module name
   -> [ExprI] -- ^ all expressions in the module
-  -> Map.Map EVar TermTypes -- ^ the inherited termtypes form imported modules 
+  -> Map.Map EVar TermTypes -- ^ the inherited termtypes form imported modules
   -> MorlocMonad (Map.Map EVar TermTypes)
 linkSignatures v es m = do
   -- find all top-level terms in this module
@@ -183,31 +186,31 @@ linkVariablesToTermTypes
   -> Map.Map EVar (Int, TermTypes) -- ^ a map term terms to types, Int is the inner GMAp key
   -> [ExprI] -- ^ list of expressions in the module
   -> MorlocMonad ()
-linkVariablesToTermTypes mv m0 = mapM_ (link m0) where 
+linkVariablesToTermTypes mv m0 = mapM_ (link m0) where
   link :: Map.Map EVar (Int, TermTypes) -> ExprI -> MorlocMonad ()
   -- The following have terms associated with them:
   -- 1. exported terms (but not exported types)
-  link m (ExprI i (ExpE (TermSymbol v))) = setType m i v
+  link m (ExprI i (ExpE (TermSymbol v))) = setMonomorphicType m i v
   -- 2. variables
-  link m (ExprI i (VarE v)) = setType m i v
+  link m (ExprI i (VarE v)) = setMonomorphicType m i v
   -- 3. assignments
   link m (ExprI i (AssE v (ExprI _ (LamE ks e)) es)) = do
-    setType m i v
+    setMonomorphicType m i v
     -- shadow all terms bound under the lambda
     let m' = foldr Map.delete m ks
     -- then link the assignment term and all local "where" statements (es)
-    linkSignatures mv (e:es) (Map.map snd m')
+    _ <- linkSignatures mv (e:es) (Map.map snd m')
     return ()
   -- 4. assignments that have no parameters
   link m (ExprI i (AssE v e es)) = do
-    setType m i v
+    _ <- setMonomorphicType m i v
     -- then link the assignment term and all local "where" statements (es)
-    linkSignatures mv (e:es) (Map.map snd m)
+    _ <- linkSignatures mv (e:es) (Map.map snd m)
     return ()
   -- modules currently cannot be nested (should this be allowed?)
   link _ (ExprI _ (ModE v _)) = MM.throwError $ NestedModule v
   -- everything below boilerplate
-  link m (ExprI _ (AccE e _)) = link m e
+  link m (ExprI _ (AccE _ e)) = link m e
   link m (ExprI _ (LstE xs)) = mapM_ (link m) xs
   link m (ExprI _ (TupE xs)) = mapM_ (link m) xs
   link m (ExprI _ (LamE vs e)) = link (foldr Map.delete m vs) e
@@ -216,11 +219,11 @@ linkVariablesToTermTypes mv m0 = mapM_ (link m0) where
   link m (ExprI _ (NamE rs)) = mapM_ (link m . snd) rs
   link _ _ = return ()
 
-  setType :: Map.Map EVar (Int, TermTypes) -> Int -> EVar -> MorlocMonad ()
-  setType m i v = case Map.lookup v m of 
+  setMonomorphicType :: Map.Map EVar (Int, TermTypes) -> Int -> EVar -> MorlocMonad ()
+  setMonomorphicType m i v = case Map.lookup v m of
     (Just (j, t)) -> do
       s <- CMS.get
-      CMS.put (s { stateSignatures = GMap.insert i j t (stateSignatures s)
+      CMS.put (s { stateSignatures = GMap.insert i j (Monomorphic t) (stateSignatures s)
                  , stateName = Map.insert i v (stateName s) } )
       return ()
     Nothing -> return ()
@@ -228,11 +231,11 @@ linkVariablesToTermTypes mv m0 = mapM_ (link m0) where
 unifyTermTypes :: MVar -> [ExprI] -> Map.Map EVar TermTypes -> MorlocMonad (Map.Map EVar TermTypes)
 unifyTermTypes mv xs m0
   = Map.mergeMapsM fb fc fbc sigs srcs
-  >>= Map.mapKeysWithM combineTermTypes (\(v,_,_) -> v)
-  >>= Map.unionWithM combineTermTypes m0
-  >>= Map.unionWithM combineTermTypes decs
+  >>= Map.mapKeysWithM mergeTermTypes (\(v,_,_) -> v)
+  >>= Map.unionWithM mergeTermTypes m0
+  >>= Map.unionWithM mergeTermTypes decs
   where
-  sigs = Map.fromListWith (<>) [((v, l, Nothing), [t]) | (ExprI _ (SigE v l t)) <- xs]
+  sigs = Map.fromListWith (<>) [((v, l, Nothing), [t]) | (ExprI _ (SigE (Signature v l t))) <- xs]
   srcs = Map.fromListWith (<>) [((srcAlias s, srcLabel s, langOf s), [(s, i)]) | (ExprI i (SrcE s)) <- xs]
   decs = Map.map (TermTypes Nothing []) $ Map.fromListWith (<>) [(v, [e]) | (ExprI _ (AssE v e _)) <- xs]
 
@@ -258,76 +261,6 @@ unifyTermTypes mv xs m0
     return $ TermTypes gt [(mv, Idx i src) | (src, i) <- srcs'] []
 
 
-combineTermTypes :: TermTypes -> TermTypes -> MorlocMonad TermTypes
-combineTermTypes (TermTypes g1 cs1 es1) (TermTypes g2 cs2 es2)
-  = TermTypes
-  <$> maybeCombine mergeEType g1 g2
-  <*> pure (unique (cs1 <> cs2))
-  <*> pure (unique (es1 <> es2))
-  where
-  -- either combine terms or take the first on that is defined, or whatever
-  maybeCombine :: Monad m => (a -> a -> m a) -> Maybe a -> Maybe a -> m (Maybe a)
-  maybeCombine f (Just a) (Just b) = Just <$> f a b
-  maybeCombine _ (Just a) _ = return $ Just a
-  maybeCombine _ _ (Just b) = return $ Just b
-  maybeCombine _ _ _ = return Nothing 
-
--- | This function defines how general types are merged. There are decisions
--- encoded in this function that should be vary carefully considered.
---  * Can properties simply be concatenated?
---  * What if constraints are contradictory?
-mergeEType :: EType -> EType -> MorlocMonad EType
-mergeEType (EType t1 ps1 cs1) (EType t2 ps2 cs2)
-  = EType <$> mergeTypeUs t1 t2 <*> pure (ps1 <> ps2) <*> pure (cs1 <> cs2)
-
-
--- merge two general types
-mergeTypeUs :: TypeU -> TypeU -> MorlocMonad TypeU
-mergeTypeUs t1@(VarU v1) t2@(VarU v2)
-  | v1 == v2 = return (VarU v1)
-  | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
-mergeTypeUs (ExistU v ps1 rs1) (ExistU _ ps2 rs2)
-    = ExistU v
-    <$> zipWithM mergeTypeUs ps1 ps2
-    <*> mergeRecords rs1 rs2
-
-mergeTypeUs ExistU{} t = return t
-mergeTypeUs t ExistU{} = return t
-
--- Two universally qualified types may be merged if they are the same up to
--- named of bound variables, for example:
---  mergeTypeUs (forall a . a) (forall b . b) --> forall b . b
-mergeTypeUs (ForallU v1 t1) (ForallU v2 t2)
-  = ForallU v1 <$> mergeTypeUs (substituteTVar v2 (VarU v1) t2) t1
-mergeTypeUs (FunU ts1 t1) (FunU ts2 t2) = FunU <$> zipWithM mergeTypeUs ts1 ts2 <*> mergeTypeUs t1 t2 
-mergeTypeUs (AppU t1 ps1) (AppU t2 ps2) = AppU <$> mergeTypeUs t1 t2 <*> zipWithM mergeTypeUs ps1 ps2
-mergeTypeUs t1@(NamU o1 n1 ps1 ks1) t2@(NamU o2 n2 ps2 ks2)
-  | o1 == o2 && n1 == n2 && length ps1 == length ps2 = do
-      ts1 <- zipWithM mergeTypeUs (map snd ks1) (map snd ks2)
-      ps' <- zipWithM mergeTypeUs ps1 ps2 
-      return $ NamU o1 n1 ps' (zip (map fst ks1) ts1)
-  | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
-mergeTypeUs t1 t2 = MM.throwError $ IncompatibleGeneralType t1 t2
--- mergeTypeUs t1 t2
---   | t1 `PO.isSubtypeOf` t2 = return t2
---   | t2 `PO.isSubtypeOf` t1 = return t1
---   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
-
--- merge record entries by taking the union of entries
-mergeRecords :: [(Key, TypeU)] -> [(Key, TypeU)] -> MorlocMonad [(Key, TypeU)]
-mergeRecords rs1 rs2 = do
-  -- all record entries common to both types in the order of rs1
-  commonEntries <- mapM mergeRecord rs1
-  -- records that are unique to rs2
-  let missingRecords = [(k, t2) | (k, t2) <- rs2, isNothing (lookup k rs1)]
-  return $ commonEntries <> missingRecords
-  where
-  mergeRecord :: (Key, TypeU) -> MorlocMonad (Key, TypeU)
-  mergeRecord (k, t1) = case lookup k rs2 of
-    (Just t2) -> (,) k <$> mergeTypeUs t1 t2
-    Nothing -> return (k, t1)
-
-
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
 linkAndRemoveAnnotations = f where
   f :: ExprI -> MorlocMonad ExprI
@@ -340,7 +273,7 @@ linkAndRemoveAnnotations = f where
   -- everything below is boilerplate (this is why I need recursion schemes)
   f (ExprI i (ModE v es)) = ExprI i <$> (ModE v <$> mapM f es)
   f (ExprI i (AssE v e es)) = ExprI i <$> (AssE v <$> f e <*> mapM f es)
-  f (ExprI i (AccE e k)) = ExprI i <$> (AccE <$> f e <*> pure k)
+  f (ExprI i (AccE k e)) = ExprI i <$> (AccE k <$> f e)
   f (ExprI i (LstE es)) = ExprI i <$> (LstE <$> mapM f es)
   f (ExprI i (TupE es)) = ExprI i <$> (TupE <$> mapM f es)
   f (ExprI i (NamE rs)) = do
@@ -356,130 +289,90 @@ linkAndRemoveAnnotations = f where
 --
 -- Recursion
 --   [ ] handle recursion and mutual recursion
---       - to detect recursion, I need to remember every term that has been expanded, 
+--       - to detect recursion, I need to remember every term that has been expanded,
 -- collect v declarations or sources
 collect
-  :: Int -- ^ the index for the export term
-  -> MorlocMonad (SAnno Int Many Int)
-collect i = do
-  t0 <- MM.metaTermTypes i
-  case t0 of
-    -- if Nothing, then the term is a bound variable
-    Nothing -> return (SAnno (Many []) i)
-    -- otherwise is an alias that should be replaced with its value(s)
-    (Just t1) -> do
-      let calls = [(CallS src, i') | (_, Idx i' src) <- termConcrete t1]
-      declarations <- mapM (replaceExpr i) (termDecl t1) |>> concat
-      return $ SAnno (Many (calls <> declarations)) i
-
-collectSAnno :: ExprI -> MorlocMonad (SAnno Int Many Int)
-collectSAnno e@(ExprI i (VarE v)) = do
-  t0 <- MM.metaTermTypes i
-  es <- case t0 of
-    -- if Nothing, then the term is a bound variable
-    Nothing -> return <$> collectSExpr e
-    -- otherwise is an alias that should be replaced with its value(s)
-    (Just t1) -> do
-      -- collect all the concrete calls with this name
-      let calls = [(CallS src, i') | (_, Idx i' src) <- termConcrete t1]
-      -- collect all the morloc compositions with this name
-      declarations <- mapM reindexExprI (termDecl t1) >>= mapM (replaceExpr i) |>> concat
-      -- link this index to the name that is removed
-      s <- CMS.get
-      CMS.put (s { stateName = Map.insert i v (stateName s) })
-      -- pool all the calls and compositions with this name
-      return (calls <> declarations)
-  case es of
-    -- TODO: will this case every actually be reached?
-    -- Should all attributes of i be mapped to j, as done with newIndex?
-    -- Should the general type be the j instead?
-    -- Need to dig into this.
-    [] -> do
-      j <- MM.getCounter
-      return $ SAnno (Many [(VarS v, j)]) i
-    es' -> return $ SAnno (Many es') i
-
--- expression type annotations should have already been accounted for, so ignore
-collectSAnno (ExprI _ (AnnE e _)) = collectSAnno e
-collectSAnno e@(ExprI i _) = do
-  e' <- collectSExpr e 
-  return $ SAnno (Many [e']) i
-
--- | This function will handle terms that have been set to be equal
-replaceExpr :: Int -> ExprI -> MorlocMonad [(SExpr Int Many Int, Int)]
--- this will be a nested variable
--- e.g.:
---   foo = bar
-replaceExpr i e@(ExprI j (VarE _)) = do
-  x <- collectSAnno e
-  -- unify the data between the equated terms
-  tiMay <- MM.metaTermTypes i
-  tjMay <- MM.metaTermTypes j
-  t <- case (tiMay, tjMay) of
-    (Just ti, Just tj) -> combineTermTypes ti tj 
-    (Just ti, _) -> return ti
-    (_, Just tj) -> return tj
-    _ -> error "You shouldn't have done that"
-
-  st <- MM.get
-
-  case GMap.change i t (stateSignatures st) of
-    (Just m) -> MM.modify (\s -> s {stateSignatures = m})
-    _ -> error "impossible"
-
-  case GMap.yIsX j i (stateSignatures st) of
-    (Just m) -> MM.put (st {stateSignatures = m})
-    Nothing -> return ()
-
-  -- pass on just the children
-  case x of
-    (SAnno (Many es) _) -> return es
+  :: Int -- ^ the general index for the term
+  -> EVar
+  -> MorlocMonad (AnnoS Int ManyPoly Int)
+collect gi v = do
+  MM.sayVVV $ "collect"
+            <> "\n  gi:" <+> pretty gi
+            <> "\n  v:" <+> pretty v
+  AnnoS gi gi <$> collectExprS (ExprI gi (VarE v))
 
 
--- -- two terms may also be equivalent when applied, for example:
--- --   foo x = bar x
--- -- this would be rewritten in the parse as `foo = \x -> bar x`
--- -- meaning foo and bar are equivalent after eta-reduction
--- replaceExpr i e@(ExprI _ (LamE vs (ExprI _ (AppE e2@(ExprI _ (VarE _)) xs))))
---     | map VarE vs == [v | (ExprI _ v) <- xs] = replaceExpr i e2
---     | otherwise = return <$> collectSExpr e
-replaceExpr _ e = return <$> collectSExpr e
+collectAnnoS :: ExprI -> MorlocMonad (AnnoS Int ManyPoly Int)
+collectAnnoS e@(ExprI gi _) = AnnoS gi gi <$> collectExprS e
 
--- | Translate ExprI to SExpr tree
-collectSExpr :: ExprI -> MorlocMonad (SExpr Int Many Int, Int)
-collectSExpr (ExprI i e0) = (,) <$> f e0 <*> pure i
-  where
-  f (VarE v) = return (VarS v) -- this must be a bound variable
-  f (AccE e x) = AccS <$> collectSAnno e <*> pure x
-  f (LstE es) = LstS <$> mapM collectSAnno es
-  f (TupE es) = TupS <$> mapM collectSAnno es
+
+-- | Translate ExprI to ExprS tree
+collectExprS :: ExprI -> MorlocMonad (ExprS Int ManyPoly Int)
+collectExprS (ExprI gi e0) = f e0 where
+  f (VarE v) = do
+    MM.sayVVV $ "collectExprS VarE"
+              <> "\n  gi:" <+> pretty gi
+              <> "\n  v:" <+> pretty v
+    sigs <- MM.gets stateSignatures
+    case GMap.lookup gi sigs of
+
+      -- A monomorphic term will have a type if it is linked to any source
+      -- since sources require signatures. But if it associated only with a
+      -- declaration, then it will have no type.
+      (GMapJust (Monomorphic t)) -> do
+        MM.sayVVV $ "  monomorphic:" <+> maybe "?" pretty (termGeneral t)
+        es <- termtypesToAnnoS t
+        return $ VarS v (MonomorphicExpr (termGeneral t) es)
+
+      -- A polymorphic term should always have a type.
+      (GMapJust (Polymorphic cls clsName t ts)) -> do
+        MM.sayVVV $ "  polymorphic:" <+> list (map (maybe "?" pretty . termGeneral) ts)
+        ess <- mapM termtypesToAnnoS ts
+        let etypes = map (fromJust . termGeneral) ts
+        return $ VarS v (PolymorphicExpr cls clsName t (zip etypes ess))
+
+      -- Terms not associated with TermTypes objects must be lambda-bound
+      _ -> do
+        MM.sayVVV "bound term"
+        return $ BndS v
+    where
+      termtypesToAnnoS :: TermTypes -> MorlocMonad [AnnoS Int ManyPoly Int]
+      termtypesToAnnoS t = do
+        let calls = [AnnoS gi ci (CallS src) | (_, Idx ci src) <- termConcrete t]
+        declarations <- mapM (\ e@(ExprI ci _) -> reindexExprI e >>= collectExprS |>> AnnoS gi ci) (termDecl t)
+        return (calls <> declarations)
+
+  f (AccE k e) = AccS k <$> collectAnnoS e
+  f (LstE es) = LstS <$> mapM collectAnnoS es
+  f (TupE es) = TupS <$> mapM collectAnnoS es
   f (NamE rs) = do
-    xs <- mapM (collectSAnno . snd) rs
+    xs <- mapM (collectAnnoS . snd) rs
     return $ NamS (zip (map fst rs) xs)
-  f (LamE v e) = LamS v <$> collectSAnno e
-  f (AppE e es) = AppS <$> collectSAnno e <*> mapM collectSAnno es
+  f (LamE v e) = LamS v <$> collectAnnoS e
+  f (AppE e es) = AppS <$> collectAnnoS e <*> mapM collectAnnoS es
   f UniE = return UniS
   f (RealE x) = return (RealS x)
   f (IntE x) = return (IntS x)
   f (LogE x) = return (LogS x)
   f (StrE x) = return (StrS x)
-
-  -- none of the following cases should ever occur
-  f (AnnE _ _) = error "impossible"
-  f (ModE _ _) = error "impossible"
-  f TypE {} = error "impossible"
-  f (ImpE _) = error "impossible"
-  f (ExpE _) = error "impossible"
-  f (SrcE _) = error "impossible"
-  f SigE {} = error "impossible"
-  f AssE {} = error "impossible"
+-- none of the following cases should ever occur
+  f ClsE{} = undefined
+  f IstE{} = undefined
+  f AnnE{} = undefined
+  f ModE{} = undefined
+  f TypE{} = undefined
+  f ImpE{} = undefined
+  f ExpE{} = undefined
+  f SrcE{} = undefined
+  f SigE{} = undefined
+  f (AssE v _ _) = error $ "Found an unexpected ass in collectExprS: " <> show v
 
 reindexExprI :: ExprI -> MorlocMonad ExprI
 reindexExprI (ExprI i e) = ExprI <$> newIndex i <*> reindexExpr e
 
 reindexExpr :: Expr -> MorlocMonad Expr
 reindexExpr (ModE m es) = ModE m <$> mapM reindexExprI es
-reindexExpr (AccE e x) = AccE <$> reindexExprI e <*> pure x
+reindexExpr (AccE k e) = AccE k <$> reindexExprI e
 reindexExpr (AnnE e ts) = AnnE <$> reindexExprI e <*> pure ts
 reindexExpr (AppE e es) = AppE <$> reindexExprI e <*> mapM reindexExprI es
 reindexExpr (AssE v e es) = AssE v <$> reindexExprI e <*> mapM reindexExprI es

@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Frontend.Parser
 Description : Full parser for Morloc
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -30,7 +30,7 @@ import qualified Morloc.System as MS
 -- module is written written into the DAG of previously observed modules.
 readProgram
   :: Maybe MVar
-  -- ^ The expected module name, 
+  -- ^ The expected module name,
   -> Maybe Path
   -- ^ An optional path to the file the source code was read from. If no path
   -- is given, then the source code was provided as a string.
@@ -41,11 +41,11 @@ readProgram
 readProgram moduleName modulePath sourceCode pstate p =
   case runParser
          (CMS.runStateT (sc >> pProgram moduleName <* eof) (reenter modulePath pstate))
-         (maybe "<expr>" id modulePath)
+         (fromMaybe "<expr>" modulePath)
          sourceCode of
     (Left err') -> Left err'
     -- all will be ModE expressions, since pTopLevel can return only these
-    (Right (es, s)) -> 
+    (Right (es, s)) ->
       let dag = foldl (\d (k,xs,n) -> Map.insert k (n,xs) d) p (map AST.findEdges es)
       in Right (dag, s)
 
@@ -73,7 +73,7 @@ pModule
     :: Maybe MVar -- ^ The expected module path
     -> Parser ExprI
 pModule expModuleName = do
-  reserved "module"
+  _ <- reserved "module"
 
   moduleName <- case expModuleName of
     Nothing -> MT.intercalate "." <$> sepBy freename (symbol ".")
@@ -103,41 +103,12 @@ pModule expModuleName = do
     findSymbols :: ExprI -> Set.Set Symbol
     findSymbols (ExprI _ (TypE _ v _ _)) = Set.singleton $ TypeSymbol v
     findSymbols (ExprI _ (AssE e _ _)) = Set.singleton $ TermSymbol e
-    findSymbols (ExprI _ (SigE e _ t)) = Set.union (Set.singleton $ TermSymbol e) (packedType t)
+    findSymbols (ExprI _ (SigE (Signature e _ _))) = Set.singleton $ TermSymbol e
     findSymbols (ExprI _ (ImpE (Import _ (Just imps) _ _)))
         = Set.fromList $ [TermSymbol alias | (AliasedTerm _ alias) <- imps] <>
                          [TypeSymbol alias | (AliasedType _ alias) <- imps]
     findSymbols (ExprI _ (SrcE src)) = Set.singleton $ TermSymbol (srcAlias src)
     findSymbols _ = Set.empty
-
-    -- When (un)packers are defined, the type that is being (un)packed is not
-    -- declared. But some modules may export only their (un)packed type. When
-    -- this is the case, importing nothing from the module causes the module to
-    -- be removed and the packers are never found. To remedy this, I am adding
-    -- the (un)packed type to the export list.
-    packedType :: EType -> Set.Set Symbol
-    packedType e
-      | Set.member Pack (eprop e) = packType (etype e)
-      | Set.member Unpack (eprop e) = unpackType (etype e)
-      | otherwise = Set.empty
-
-    unpackType :: TypeU -> Set.Set Symbol
-    unpackType (ForallU _ t) = unpackType t
-    unpackType (FunU [t] _) = symbolOfTypeU t
-    unpackType _ = error "Invalid unpacker"
-
-    packType :: TypeU -> Set.Set Symbol
-    packType (ForallU _ t) = packType t
-    packType (FunU _ t) = symbolOfTypeU t
-    packType _ = error "Invalid packer"
-
-    symbolOfTypeU :: TypeU -> Set.Set Symbol
-    symbolOfTypeU (VarU v) = Set.singleton $ TypeSymbol v
-    symbolOfTypeU (ExistU v _ _) = Set.singleton $ TypeSymbol v
-    symbolOfTypeU (ForallU _ t) = symbolOfTypeU t
-    symbolOfTypeU (AppU t _) = symbolOfTypeU t
-    symbolOfTypeU (FunU _ _) = error "So, you want to pack a function? I'm accepting PRs."
-    symbolOfTypeU NamU{} = error "You don't need a packer for a record type of thing."
 
 
 -- | match an implicit Main module
@@ -148,7 +119,7 @@ pMain = do
   exprI $ ModE (MV "Main") es
 
 plural :: Functor m => m a -> m [a]
-plural = fmap return 
+plural = fmap return
 
 createMainFunction :: [ExprI] -> Parser [ExprI]
 createMainFunction es = case (init es, last es) of
@@ -156,7 +127,7 @@ createMainFunction es = case (init es, last es) of
     (_, ExprI _ TypE{}) -> return es
     (_, ExprI _ (ImpE _))     -> return es
     (_, ExprI _ (SrcE _))     -> return es
-    (_, ExprI _ SigE{}) -> return es
+    (_, ExprI _ (SigE _)) -> return es
     (_, ExprI _ AssE{}) -> return es
     (_, ExprI _ (ExpE _))     -> return es
     (rs, terminalExpr) -> do
@@ -167,9 +138,11 @@ createMainFunction es = case (init es, last es) of
 
 -- | Expressions including ones that are allowed only at the top-level of a scope
 pTopExpr :: Parser [ExprI]
-pTopExpr = 
+pTopExpr =
       try (plural pImport)
   <|> try (plural pTypedef)
+  <|> try (plural pTypeclass)
+  <|> try (plural pInstance)
   <|> try (plural pAssE)
   <|> try (plural pSigE)
   <|> try pSrcE
@@ -209,14 +182,14 @@ pComposition = do
             let v = EV ("x" <> MT.show' (stateExpIndex s + 1))
 
             v' <- exprI (VarE v)
-            
+
             inner <- case last fs of
                 (ExprI i (AppE x xs)) -> return $ ExprI i (AppE x (xs <> [v']))
                 e -> exprI $ AppE e [v']
-            
+
             composition <- foldM compose inner (reverse (init fs))
 
-            exprI $ LamE [v] composition 
+            exprI $ LamE [v] composition
 
     where
 
@@ -262,6 +235,25 @@ pImport = do
     a <- option n (reserved "as" >> freenameU)
     return (AliasedType (TV n) (TV a))
 
+pTypeclass :: Parser ExprI
+pTypeclass = do
+  _ <- reserved "class"
+  (TV v, vs) <- pTypedefTerm <|> parens pTypedefTerm
+  sigs <- option [] (reserved "where" >> alignInset pSignature)
+  exprI $ ClsE (ClassName v) vs sigs
+
+pInstance :: Parser ExprI
+pInstance = do
+  _ <- reserved "instance"
+  v <- freenameU
+  ts <- many1 pTypeGen
+  es <- option [] (reserved "where" >> alignInset pInstanceExpr) |>> concat
+  exprI $ IstE (ClassName v) ts es
+  where
+    pInstanceExpr :: Parser [ExprI]
+    pInstanceExpr
+      = try (pSource >>= mapM (exprI . SrcE))
+      <|> (pAssE |>> return)
 
 pTypedef :: Parser ExprI
 pTypedef = try pTypedefType <|> pTypedefObject where
@@ -275,7 +267,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     return (v, True)
 
   pGeneralType = do
-    t <- pType 
+    t <- pType
     return (t, False)
 
   pGeneralVar = do
@@ -313,12 +305,6 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     let t = NamU o (TV con) (map VarU vs) (map (first Key) entries)
     exprI (TypE k v vs t)
 
-  pTypedefTerm :: Parser (TVar, [TVar])
-  pTypedefTerm = do
-    t <- freenameU
-    ts <- many freenameL
-    return (TV t, map TV ts)
-
   -- TODO: is this really the right place to be doing this?
   desugarTableEntries
     :: NamType
@@ -332,21 +318,21 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     f t = return $ BT.listU t
 
   pNamType :: Parser NamType
-  pNamType = choice [pNamObject, pNamTable, pNamRecord] 
+  pNamType = choice [pNamObject, pNamTable, pNamRecord]
 
   pNamObject :: Parser NamType
   pNamObject = do
-    _ <- reserved "object" 
+    _ <- reserved "object"
     return NamObject
 
   pNamTable :: Parser NamType
   pNamTable = do
-    _ <- reserved "table" 
+    _ <- reserved "table"
     return NamTable
 
   pNamRecord :: Parser NamType
   pNamRecord = do
-    _ <- reserved "record" 
+    _ <- reserved "record"
     return NamRecord
 
   pLangNamespace :: Parser Lang
@@ -354,6 +340,12 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     lang <- pLang
     _ <- symbol "=>"
     return lang
+
+pTypedefTerm :: Parser (TVar, [TVar])
+pTypedefTerm = do
+  t <- freenameU
+  ts <- many freenameL
+  return (TV t, map TV ts)
 
 
 pAssE :: Parser ExprI
@@ -391,21 +383,25 @@ pAssE = try pFunctionAssE <|> pDataAssE
 
 pSigE :: Parser ExprI
 pSigE = do
+  signature <- pSignature
+  exprI . SigE $ signature
+
+pSignature :: Parser Signature
+pSignature = do
   label' <- tag freename
   v <- freenameL
   _ <- op "::"
   props <- option [] (try pPropertyList)
   t <- pTypeGen
   constraints <- option [] pConstraints
-  exprI $
-    SigE
-      (EV v)
-      (Label <$> label')
-      (EType
-         { etype = t
-         , eprop = Set.fromList props
-         , econs = Set.fromList constraints
-         })
+  return $ Signature
+    (EV v)
+    (Label <$> label')
+    (EType
+       { etype = t
+       , eprop = Set.fromList props
+       , econs = Set.fromList constraints
+       })
   where
 
   pPropertyList :: Parser [Property]
@@ -416,13 +412,7 @@ pSigE = do
     return ps
 
   pProperty :: Parser Property
-  pProperty = do
-    ps <- many1 freename
-    case ps of
-      ["pack"] -> return Pack
-      ["unpack"] -> return Unpack
-      ["cast"] -> return Cast
-      _ -> return (GeneralProperty ps)
+  pProperty = Property <$> many1 freename
 
   pConstraints :: Parser [Constraint]
   pConstraints = reserved "where" >> alignInset pConstraint where
@@ -437,7 +427,12 @@ pSigE = do
 
 pSrcE :: Parser [ExprI]
 pSrcE = do
-  reserved "source"
+  srcs <- pSource
+  mapM (exprI . SrcE) srcs
+
+pSource :: Parser [Source]
+pSource = do
+  _ <- reserved "source"
   modulePath <- CMS.gets stateModulePath
   language <- pLang
   srcfile <- optional (reserved "from" >> stringLiteral |>> MT.unpack)
@@ -451,13 +446,15 @@ pSrcE = do
     (Just _, Nothing) -> return Nothing
     -- this case SHOULD only occur in testing where the source file does not exist
     -- file non-existence will be caught later
-    (Nothing, s) -> return s 
-  mapM exprI [SrcE $ Source { srcName = srcVar
-                            , srcLang = language
-                            , srcPath = srcFile
-                            , srcAlias = aliasVar
-                            , srcLabel = Label <$> label'
-                            } | (srcVar, aliasVar, label') <- rs]
+    (Nothing, s) -> return s
+  return [
+    Source
+      { srcName = srcVar
+      , srcLang = language
+      , srcPath = srcFile
+      , srcAlias = aliasVar
+      , srcLabel = Label <$> label'
+      } | (srcVar, aliasVar, label') <- rs]
   where
 
   pImportSourceTerm :: Parser (SrcName, EVar, Maybe MT.Text)
@@ -508,7 +505,7 @@ pAcc = do
   e <- parens pExpr <|> pNamE <|> pVar
   _ <- symbol "@"
   f <- freenameL
-  exprI $ AccE e (Key f)
+  exprI $ AccE (Key f) e
 
 
 pAnn :: Parser ExprI

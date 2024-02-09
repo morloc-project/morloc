@@ -3,14 +3,14 @@
 {-|
 Module      : Morloc.CodeGenerator.Grammars.Translator.R
 Description : R translator
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
 module Morloc.CodeGenerator.Grammars.Translator.R
-  ( 
+  (
     translate
   , preprocess
   ) where
@@ -86,7 +86,7 @@ serialize v0 s0 = do
       serialize' [idoc|#{unpacker}(#{v})|] s
 
     construct v (SerialList _ s) = do
-      idx <- newIndex 
+      idx <- newIndex
       let v' = helperNamer idx
           idxStr = pretty idx
       (before, x) <- serialize' [idoc|i#{idxStr}|] s
@@ -102,11 +102,11 @@ serialize v0 s0 = do
     construct v (SerialObject _ _ _ rs) = do
       (befores, ss') <- mapAndUnzipM (\(key, s) -> serialize' (recordAccess v (pretty key)) s) rs
       v' <- helperNamer <$> newIndex
-      let entries = zipWith (\key val -> pretty key <> "=" <> val) (map fst rs) ss'
+      let entries = zipWith (\key value -> pretty key <> "=" <> value) (map fst rs) ss'
           decl = [idoc|#{v'} <- list#{tupled entries}|]
       return (concat befores ++ [decl], v')
 
-    construct _ _ = error "Unreachable" 
+    construct _ _ = error "Unreachable"
 
 
 deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
@@ -151,7 +151,7 @@ deserialize v0 s0
     construct v (SerialObject _ (FV _ constructor) _ rs) = do
       (ss', befores) <- mapAndUnzipM (\(k, s) -> check (recordAccess v (pretty k)) s) rs
       v' <- helperNamer <$> newIndex
-      let entries = zipWith (\key val -> pretty key <> "=" <> val) (map fst rs) ss'
+      let entries = zipWith (\key value -> pretty key <> "=" <> value) (map fst rs) ss'
           decl = [idoc|#{v'} <- #{pretty constructor}#{tupled entries}|]
       return (v', concat befores ++ [decl])
 
@@ -280,9 +280,9 @@ typeSchema s0 = squotes $ jsontype2rjson (serialAstToJsonType s0) where
 
 jsontype2rjson :: JsonType -> MDoc
 jsontype2rjson (VarJ v) = dquotes (pretty v)
-jsontype2rjson (ArrJ v ts) = "{" <> key <> ":" <> val <> "}" where
+jsontype2rjson (ArrJ v ts) = "{" <> key <> ":" <> value <> "}" where
   key = dquotes (pretty v)
-  val = encloseSep "[" "]" "," (map jsontype2rjson ts)
+  value = encloseSep "[" "]" "," (map jsontype2rjson ts)
 jsontype2rjson (NamJ objType rs) =
   case objType of
     (CV "data.frame") -> "{" <> dquotes "data.frame" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
@@ -290,8 +290,8 @@ jsontype2rjson (NamJ objType rs) =
     _ -> encloseSep "{" "}" "," rs'
   where
   keys = map (dquotes . pretty . fst) rs
-  vals = map (jsontype2rjson . snd) rs
-  rs' = zipWith (\key val -> key <> ":" <> val) keys vals
+  values = map (jsontype2rjson . snd) rs
+  rs' = zipWith (\key value -> key <> ":" <> value) keys values
 
 makePool :: [MDoc] -> [MDoc] -> MDoc
 makePool sources manifolds = [idoc|#!/usr/bin/env Rscript
@@ -381,7 +381,7 @@ makePool sources manifolds = [idoc|#!/usr/bin/env Rscript
 
 read <- function(file)
 {
-  paste(readLines(file), collapse="\n") 
+  paste(readLines(file), collapse="\n")
 }
 
 args <- as.list(commandArgs(trailingOnly=TRUE))

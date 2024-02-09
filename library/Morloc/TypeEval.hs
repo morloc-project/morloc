@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.TypeEval
 Description : Functions for evaluating type expressions
-Copyright   : (c) Zebulun Arendsee, 2024
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -13,7 +13,7 @@ module Morloc.TypeEval (
   evaluateType,
   transformType,
   evaluateStep,
-  pairEval 
+  pairEval
 ) where
 
 import Morloc.Namespace
@@ -21,7 +21,6 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
-import qualified Morloc.Frontend.PartialOrder as MTP
 
 -- Evaluate an expression with both the concrete and general scopes.
 --
@@ -35,7 +34,7 @@ pairEval
 pairEval cscope gscope
   -- transform the concrete type until an unresolvable node is reached
   = generalTransformType Set.empty id resolveGen cscope
-  where 
+  where
     -- resolve by attempting to evaluate one step as in the general scope
     resolveGen f bnd t
       = case generalTransformType bnd (\_ _ -> return) resolveFail gscope t of
@@ -166,7 +165,7 @@ generalTransformType bnd0 recurse' resolve' h = f bnd0
   renameTypedefs bnd (v@(TV x) : vs, t, isTerminal)
     | Set.member v bnd =
         let (vs', t', isTerminal') = renameTypedefs bnd (vs, t, isTerminal)
-            v' = head [x' | x' <- [TV (MT.show' i <> x) | i <- [0..]], not (Set.member x' bnd), x' `notElem` vs']  
+            v' = head [x' | x' <- [TV (MT.show' i <> x) | i <- [(0 :: Int) ..]], not (Set.member x' bnd), x' `notElem` vs']
             t'' = substituteTVar v (VarU v') t'
         in (v':vs', t'', isTerminal')
     | otherwise =
@@ -182,8 +181,8 @@ generalTransformType bnd0 recurse' resolve' h = f bnd0
     -> Either MorlocError ([TVar], TypeU, Bool)
   mergeAliases v i t@(ts1, t1, isTerminal1) (ts2, t2, isTerminal2)
     | i /= length ts1 = MM.throwError $ BadTypeAliasParameters v i (length ts1)
-    |    MTP.isSubtypeOf t1' t2'
-      && MTP.isSubtypeOf t2' t1'
+    |    isSubtypeOf t1' t2'
+      && isSubtypeOf t2' t1'
       && length ts1 == length ts2
       && isTerminal1 == isTerminal2 = return t
     | otherwise = MM.throwError (ConflictingTypeAliases t1 t2)

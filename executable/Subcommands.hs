@@ -3,7 +3,7 @@
 {-|
 Module      : Subcommands
 Description : Morloc executable subcommands
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -21,8 +21,6 @@ import qualified Morloc.Frontend.API as F
 import qualified Morloc.Data.GMap as GMap
 import Morloc.CodeGenerator.Namespace (SerialManifold(..))
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
-import Morloc.Pretty ()
-import Morloc.Frontend.Pretty ()
 import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.Map as Map
@@ -107,28 +105,29 @@ cmdTypecheck args _ config = do
                config
                (M.typecheckFrontend path code) |>> writeFrontendTypecheckOutput verbosity >>= (\s -> putDoc (s <> "\n"))
 
-writeFrontendTypecheckOutput :: Int -> ((Either MorlocError [SAnno (Indexed TypeU) Many Int], [MT.Text]), MorlocState) -> MDoc
+writeFrontendTypecheckOutput :: Int -> ((Either MorlocError [AnnoS (Indexed TypeU) Many Int], [MT.Text]), MorlocState) -> MDoc
 writeFrontendTypecheckOutput _ ((Left e, _), _) = pretty e
 writeFrontendTypecheckOutput 0 ((Right xs, _), s) = vsep (map (writeFrontendTypes s) xs)
 writeFrontendTypecheckOutput 1 ((Right xs, _), s) = "\nExports:\n\n" <> vsep (map (writeFrontendTypes s) xs)
 writeFrontendTypecheckOutput _ _ = "I don't know how to be that verbose"
 
-writeFrontendTypes :: MorlocState -> SAnno (Indexed TypeU) Many Int -> MDoc
-writeFrontendTypes  s (SAnno _ (Idx gidx t)) = writeTerm s gidx (pretty t)
+writeFrontendTypes :: MorlocState -> AnnoS (Indexed TypeU) Many Int -> MDoc
+writeFrontendTypes  s (AnnoS (Idx gidx t) _ _) = writeTerm s gidx (pretty t)
 
 writeTerm :: MorlocState -> Int -> MDoc -> MDoc
 writeTerm s i typeDoc =
     case ( Map.lookup i (stateName s)
          , GMap.lookup i (stateSignatures s))
     of
-        (Just v, GMapJust TermTypes{termGeneral = Just t'}) -> pretty v <+> "::" <+> pretty t'
+        (Just v, GMapJust (Monomorphic TermTypes{termGeneral = Just t'})) -> pretty v <+> "::" <+> pretty t'
+        (Just _, GMapJust (Polymorphic cls v t _)) -> "class" <+> pretty cls <+> pretty v <+> "::" <+> pretty (etype t)
         (Just v, _) -> pretty v <+> "|-" <+> typeDoc
         _ -> "MISSING"
 
 
 writeTypecheckOutput :: Int -> ((Either MorlocError [(Lang, [SerialManifold])], [MT.Text]), MorlocState) -> MDoc
 writeTypecheckOutput _ ((Left e, _), _) = pretty e
-writeTypecheckOutput _ ((Right pools, _), _) = vsep $ map (uncurry writePool) pools 
+writeTypecheckOutput _ ((Right pools, _), _) = vsep $ map (uncurry writePool) pools
 
 writePool :: Lang -> [SerialManifold] -> MDoc
 writePool lang manifolds = pretty lang <+> "pool:" <> "\n" <> vsep (map pseudocodeSerialManifold manifolds) <> "\n"
@@ -146,4 +145,4 @@ cmdDump args _ config = do
 prettyDAG :: DAG MVar e ExprI -> MDoc
 prettyDAG m0 = vsep (map prettyEntry (Map.toList m0)) where
   prettyEntry :: (MVar, (ExprI, [(MVar, e)])) -> MDoc
-  prettyEntry (k, (n, _)) = block 4 (pretty k) (vsep [pretty n]) 
+  prettyEntry (k, (n, _)) = block 4 (pretty k) (vsep [pretty n])

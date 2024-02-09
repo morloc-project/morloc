@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.CodeGenerator.Grammars.Translator.Python3
 Description : Python3 translator
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -133,12 +133,12 @@ serialize v0 s0 = do
       let accessField = selectAccessor namType constructor
       (befores, ss') <- mapAndUnzipM (\(key, s) -> serialize' (accessField v (pretty key)) s) rs
       v' <- helperNamer <$> newIndex
-      let entries = zipWith (\key val -> pretty key <> "=" <> val)
+      let entries = zipWith (\key value -> pretty key <> "=" <> value)
                             (map fst rs) ss'
           decl = [idoc|#{v'} = dict#{tupled (entries)}|]
       return (concat befores ++ [decl], v')
 
-    construct _ _ = error "Unreachable" 
+    construct _ _ = error "Unreachable"
 
 
 
@@ -188,7 +188,7 @@ deserialize v0 s0
       let accessField = selectAccessor namType constructor
       (ss', befores) <- mapAndUnzipM (\(k, s) -> check (accessField v (pretty k)) s) rs
       v' <- helperNamer <$> newIndex
-      let entries = zipWith (\key val -> pretty key <> "=" <> val)
+      let entries = zipWith (\key value -> pretty key <> "=" <> value)
                             (map fst rs) ss'
           decl = [idoc|#{v'} = #{pretty constructor}#{tupled entries}|]
       return (v', concat befores ++ [decl])

@@ -2,22 +2,25 @@ module main (foo)
 
 import cppbase (id)
 
-source Cpp from "types.h"
-  ( "packSizeT"
-  , "unpackSizeT"
-  , "packLong"
-  , "unpackLong"
-  )
+class Packable a b where
+  pack :: a -> b
+  unpack :: b -> a
+
+instance Packable (Int) SizeT where
+  source Cpp from "types.h"
+    ( "packSizeT" as pack
+    , "unpackSizeT" as unpack
+    )
+
+instance Packable (Int) Long where
+  source Cpp from "types.h"
+    ( "packLong" as pack
+    , "unpackLong" as unpack
+    )
 
 type Cpp => SizeT = "size_t" 
 type Cpp => Long = "int64_t" 
 type Cpp => Int = "int"
-
-packSizeT   :: pack   => Int -> SizeT
-unpackSizeT :: unpack => SizeT -> Int
-
-packLong   :: pack   => Int -> Long
-unpackLong :: unpack => Long -> Int
 
 foo :: (SizeT, Long) -> (SizeT, Long)
 foo x = id x

@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Frontend.Lexer
 Description : Lexing functions used in the parser Morloc
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -61,7 +61,7 @@ data ParserState = ParserState {
   , stateVarIndex :: Int
   , stateExpIndex :: Int
   , stateGenerics :: [TVar] -- store the observed generic variables in the current type
-                               -- you should reset the field before parsing a new type 
+                               -- you should reset the field before parsing a new type
   , stateMinPos :: Pos
   , stateAccepting :: Bool
 } deriving(Show)
@@ -94,10 +94,10 @@ setMinPos = do
 
 -- | Require elements all start on the same line as the first element. At least
 -- one expression must match.
-align :: Parser a -> Parser [a] 
+align :: Parser a -> Parser [a]
 align p = do
   s <- CMS.get
-  let minPos0 = stateMinPos s 
+  let minPos0 = stateMinPos s
       accept0 = stateAccepting s
   curPos <- L.indentLevel
   xs <- many1 (resetPos curPos True >> p)
@@ -117,14 +117,12 @@ isInset :: Parser ()
 isInset = do
   minPos <- CMS.gets stateMinPos
   curPos <- L.indentLevel
-  if curPos <= minPos
-    then
-      L.incorrectIndent GT minPos curPos
-    else
-      return ()
+  when (curPos <= minPos) (L.incorrectIndent GT minPos curPos)
 
+sc :: Parser ()
 sc = L.space space1 comments empty
 
+symbol :: MT.Text -> Parser MT.Text
 symbol = lexeme . L.symbol sc
 
 lexemeBase :: Parser a -> Parser a
@@ -147,7 +145,7 @@ lexeme p = do
       if minPos < curPos
         then
           lexemeBase p
-        else 
+        else
           L.incorrectIndent LT minPos curPos
 
 
@@ -175,7 +173,7 @@ sepBy2 p s = do
   _ <- s
   xs <- sepBy1 p s
   return (x:xs)
-  
+
 
 comments :: Parser ()
 comments =  L.skipLineComment "--"
@@ -185,11 +183,11 @@ comments =  L.skipLineComment "--"
 data Sign = Pos | Neg
 
 number :: Parser (Either Integer DS.Scientific)
-number = lexeme $ number_
+number = lexeme number_
 
 number_ :: Parser (Either Integer DS.Scientific)
 number_ = do
-  x  <- try (fmap (Right . DS.fromFloatDigits) (L.signed sc L.float)) <|> (fmap Left (L.signed sc L.decimal))
+  x  <- try (fmap (Right . DS.fromFloatDigits) signedFloat) <|> fmap Left signedDecimal
   e <- optional _exp
   return $ case (x, e) of
     (Left i,  Nothing) -> Left i
@@ -215,11 +213,17 @@ number_ = do
       (Just '-') -> return Neg
       _ -> return Pos
 
+  signedFloat :: Parser Double
+  signedFloat = L.signed sc L.float
+
+  signedDecimal :: Parser Integer
+  signedDecimal = L.signed sc L.decimal
+
 surround :: Parser l -> Parser r -> Parser a -> Parser a
 surround l r v = do
-  l
+  _ <- l
   v' <- v
-  r
+  _ <- r
   return v'
 
 brackets :: Parser a -> Parser a
@@ -246,6 +250,8 @@ reservedWords =
   , "True"
   , "False"
   , "type"
+  , "instance"
+  , "class"
   ]
 
 operatorChars :: String
@@ -269,7 +275,7 @@ mkFreename firstLetter = (lexeme . try) (p >>= check)
   where
     p = fmap MT.pack $ (:) <$> firstLetter <*> many (alphaNumChar <|> char '\'')
     check x =
-      if elem x reservedWords
+      if x `elem` reservedWords
         then failure Nothing Set.empty -- TODO: error message
         else return x
 

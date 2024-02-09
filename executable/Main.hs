@@ -1,7 +1,7 @@
 module Main where
 
 import Subcommands (runMorloc)
-import UI 
+import UI
 import Options.Applicative
 
 main :: IO ()

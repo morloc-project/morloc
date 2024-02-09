@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Config
 Description : Handle local configuration
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -17,7 +17,6 @@ module Morloc.Config
   , getDefaultMorlocLibrary
   ) where
 
-import Data.Aeson (FromJSON(..), (.!=), (.:?), withObject)
 import Morloc.Data.Doc
 import Morloc.Namespace
 import qualified Morloc.Language as ML
@@ -25,24 +24,10 @@ import qualified Data.HashMap.Strict as H
 import qualified Data.Yaml.Config as YC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
-import Morloc.Pretty ()
 
 
 getDefaultConfigFilepath :: IO Path
 getDefaultConfigFilepath = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/config"
-
--- FIXME: remove this chronic multiplication
-instance FromJSON Config where
-  parseJSON =
-    withObject "object" $ \o ->
-      Config
-        <$> o .:? "home" .!= "$HOME/.morloc"
-        <*> o .:? "source" .!= "$HOME/.morloc/src/morloc"
-        <*> o .:? "plain" .!= "morloclib"
-        <*> o .:? "tmpdir" .!= "$HOME/.morloc/tmp" 
-        <*> o .:? "lang_python3" .!= "python3"
-        <*> o .:? "lang_R" .!= "Rscript"
-        <*> o .:? "lang_perl" .!= "perl"
 
 -- | Load the default Morloc configuration, ignoring any local configurations.
 loadDefaultMorlocConfig :: IO Config
@@ -64,7 +49,7 @@ loadMorlocConfig :: Maybe Path -> IO Config
 loadMorlocConfig Nothing = do
   defaults <- defaultFields
   MS.loadYamlConfig
-    Nothing 
+    Nothing
     (YC.useCustomEnv defaults)
     loadDefaultMorlocConfig
 loadMorlocConfig (Just configFile) = do
@@ -77,7 +62,7 @@ loadMorlocConfig (Just configFile) = do
         (YC.useCustomEnv defaults)
         loadDefaultMorlocConfig
     else
-      loadMorlocConfig Nothing 
+      loadMorlocConfig Nothing
 
 -- | Create the base call to a pool (without arguments)
 -- For example:
@@ -118,7 +103,7 @@ getDefaultMorlocHome = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc"
 getDefaultMorlocSource :: IO Path
 getDefaultMorlocSource = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/src/morloc"
 
--- | Get the path to the morloc shared libraries folder 
+-- | Get the path to the morloc shared libraries folder
 getDefaultMorlocLibrary :: IO Path
 getDefaultMorlocLibrary = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/lib"
 

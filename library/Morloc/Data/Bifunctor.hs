@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Data.Bifunctor
 Description : The Bifunctor typeclass, with monadic instances
-Copyright   : (c) Zebulun Arendsee, 2023
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -26,10 +26,10 @@ class Bifunctor f where
   bimap f g = runIdentity . bimapM (return . f) (return . g)
 
   first :: (a -> a') -> f a b -> f a' b
-  first f = runIdentity . firstM (return . f) 
+  first f = runIdentity . firstM (return . f)
 
   second :: (b -> b') -> f a b -> f a b'
-  second f = runIdentity . secondM (return . f) 
+  second f = runIdentity . secondM (return . f)
 
 
 instance Bifunctor Either where

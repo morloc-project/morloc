@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Typecheck.Internal
 Description : Functions for type checking and type manipulation
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -35,10 +35,13 @@ module Morloc.Typecheck.Internal
   , cut
   , substitute
   , rename
-  , renameSAnno
+  , renameAnnoS
   , occursCheck
+  , toExistential
   -- * subtyping
   , subtype
+  , isSubtypeOf2
+  , equivalent2
   -- * debugging
   , seeGamma
   -- debugging
@@ -48,13 +51,11 @@ module Morloc.Typecheck.Internal
   , peak
   , peakGen
   , seeType
-  , showGen
   ) where
 
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import Morloc.Data.Doc
-import Morloc.Pretty (prettySExpr, prettySAnno)
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Monad as MM
 
@@ -68,18 +69,34 @@ unqualify :: TypeU -> ([TVar], TypeU)
 unqualify (ForallU v (unqualify -> (vs, t))) = (v:vs, t)
 unqualify t = ([], t)
 
+toExistential :: Gamma -> TypeU -> (Gamma, TypeU)
+toExistential g0 (unqualify -> (vs0, t0)) = f g0 vs0 t0 where
+  f g [] t = (g, t)
+  f g (v:vs) t = let (g', newVar) = newvar ("cls_" <> unTVar v) g
+                 in f g' vs (substituteTVar v newVar t)
+
 class Applicable a where
   apply :: Gamma -> a -> a
 
 -- | Apply a context to a type (See Dunfield Figure 8).
 instance Applicable TypeU where
   -- [G]a = a
-  apply _ a@(VarU _) = a
+  apply g (VarU v) =
+    -- FIXME: very wrong - only works because of my renaming scheme
+    case lookupU v g of
+      (Just t') -> t'
+      Nothing -> VarU v
+
   -- [G](A->B) = ([G]A -> [G]B)
   apply g (FunU ts t) = FunU (map (apply g) ts) (apply g t)
   apply g (AppU t ts) = AppU (apply g t) (map (apply g) ts)
   -- [G]ForallU a.a = forall a. [G]a
-  apply g (ForallU x a) = ForallU x (apply g a)
+  apply g (ForallU v a) =
+    -- FIXME: VERY WRONG
+    case lookupU v g of
+      (Just _) -> apply g a
+      Nothing -> ForallU v (apply g a)
+
   -- [G[a=t]]a = [G[a=t]]t
   apply g (ExistU v ts rs) =
     case lookupU v g of
@@ -92,12 +109,12 @@ instance Applicable EType where
   apply g e = e { etype = apply g (etype e) }
 
 instance Applicable Gamma where
-  apply g1 g2 = g2 {gammaContext = map f (gammaContext g2)} where 
+  apply g1 g2 = g2 {gammaContext = map f (gammaContext g2)} where
     f :: GammaIndex -> GammaIndex
     f (AnnG v t) = AnnG v (apply g1 t)
     f (ExistG v ps rs) = ExistG v (map (apply g1) ps) (map (second (apply g1)) rs)
     f (SolvedG v t) = SolvedG v (apply g1 t)
-    f x = x 
+    f x = x
 
 class GammaIndexLike a where
   index :: a -> GammaIndex
@@ -120,6 +137,14 @@ instance GammaIndexLike TVar where
 (++>) g xs = g {gammaContext = map index (reverse xs) <> gammaContext g }
 
 
+isSubtypeOf2 :: TypeU -> TypeU -> Bool
+isSubtypeOf2 a b = case subtype a b (Gamma 0 []) of
+  (Left _) -> False
+  (Right _) -> True
+
+equivalent2 :: TypeU -> TypeU -> Bool
+equivalent2 t1 t2 = isSubtypeOf2 t1 t2 && isSubtypeOf2 t2 t1
+
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: TypeU -> TypeU -> Gamma -> Either TypeError Gamma
 
@@ -134,7 +159,7 @@ subtype t1@(VarU a1) t2@(VarU a2) g
   -- Else, raise an error
   | a1 /= a2 = Left $ Mismatch t1 t2 "Unequal types with no conversion rule"
 
-subtype a@(ExistU l1 _ _) b@(ExistU l2 _ _) g
+subtype a@ExistU{} b@ExistU{} g
   --
   -- ----------------------------------------- <:Exvar
   --  G[E.a] |- E.a <: E.a -| G[E.a]
@@ -150,7 +175,7 @@ subtype a@(ExistU l1 _ _) b@(ExistU l2 _ _) g
 --  g2 |- [g2]A2 <: [g2]B2 -| g3
 -- ----------------------------------------- <:-->
 --  g1 |- A1 -> A2 <: B1 -> B2 -| g3
--- 
+--
 -- function subtypes are *contravariant* with respect to the input, that is,
 -- the subtypes are reversed so we have b1<:a1 instead of a1<:b1.
 subtype (FunU [] a2) (FunU [] b2) g = subtype a2 b2 g
@@ -241,7 +266,7 @@ instantiate :: TypeU -> TypeU -> Gamma -> Either TypeError Gamma
 instantiate ta@(ExistU _ _ (_:_)) tb@(NamU _ _ _ _) g1 = instantiate tb ta g1
 instantiate ta@(NamU _ _ _ rs1) tb@(ExistU v _ rs2@(_:_)) g1 = do
   g2 <- foldM (\g' (t1, t2) -> subtype t1 t2 g') g1 [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
-  case access1 v (gammaContext g2) of 
+  case access1 v (gammaContext g2) of
     (Just (rhs, _, lhs)) -> do
         solved <- solve v ta
         return $ g2 {gammaContext = rhs ++ [solved] ++ lhs}
@@ -385,7 +410,7 @@ solve v t
         toTVar (ExistU v' _ _) = Just v'
         toTVar (VarU v') = Just v'
         toTVar _ = Nothing
-    
+
 
 
 occursCheck :: TypeU -> TypeU -> MT.Text -> Either TypeError ()
@@ -476,7 +501,7 @@ newvarRich ps rs prefix g =
 
 -- | standardize quantifier names, for example, replace `a -> b` with `v0 -> v1`.
 rename :: Gamma -> TypeU -> (Gamma, TypeU)
-rename g0 (ForallU v@(TV s) t0) = 
+rename g0 (ForallU v@(TV s) t0) =
   let (g1, v') = tvarname g0 (s <> "_q")
       (g2, t1) = rename g1 t0
       t2 = substituteTVar v (VarU v') t1
@@ -484,36 +509,44 @@ rename g0 (ForallU v@(TV s) t0) =
 -- Unless I add N-rank types, foralls can only be on top, so no need to recurse.
 rename g t = (g, t)
 
-renameSAnno :: (Map.Map EVar EVar, Gamma) -> SAnno g Many c -> ((Map.Map EVar EVar, Gamma), SAnno g Many c)
-renameSAnno context (SAnno (Many xs) gt) =
-  let (context', es) = statefulMap renameSExpr context (map fst xs)
-  in (context', SAnno (Many (zip es (map snd xs))) gt)
+renameAnnoS :: (Map.Map EVar EVar, Gamma) -> AnnoS g ManyPoly c -> ((Map.Map EVar EVar, Gamma), AnnoS g ManyPoly c)
+renameAnnoS context (AnnoS gt ct e) =
+  let (context', e') = renameSExpr context e
+  in (context', AnnoS gt ct e')
 
-renameSExpr :: (Map.Map EVar EVar, Gamma) -> SExpr g Many c -> ((Map.Map EVar EVar, Gamma), SExpr g Many c)
+renameSExpr :: (Map.Map EVar EVar, Gamma) -> ExprS g ManyPoly c -> ((Map.Map EVar EVar, Gamma), ExprS g ManyPoly c)
 renameSExpr c0@(m, g) e0 = case e0 of
-  (VarS v) -> case Map.lookup v m of
-    (Just v') -> (c0, VarS v')
-    Nothing -> (c0, VarS v)
+  (BndS v) -> case Map.lookup v m of
+    (Just v') -> (c0, BndS v')
+    Nothing -> (c0, BndS v)
+  (VarS v (MonomorphicExpr t xs)) ->
+    let (context', xs') = statefulMap renameAnnoS c0 xs
+    in (context', VarS v (MonomorphicExpr t xs'))
+  (VarS v (PolymorphicExpr cls className t rs)) ->
+    let (ts, ass) = unzip rs
+        (context', ass') = statefulMap (statefulMap renameAnnoS) c0 ass
+        rs' = zip ts ass'
+    in (context', VarS v $ PolymorphicExpr cls className t rs')
   (LamS vs x) ->
     let (g', vs') = statefulMap (\g'' (EV v) -> evarname g'' (v <> "_e")) g vs
         m' = foldr (uncurry Map.insert) m (zip vs vs')
-        (c1, x') = renameSAnno (m', g') x
+        (c1, x') = renameAnnoS (m', g') x
     in (c1, LamS vs' x')
-  (AccS e k) ->
-    let (c1, e') = renameSAnno c0 e
-    in (c1, AccS e' k)
+  (AccS k e) ->
+    let (c1, e') = renameAnnoS c0 e
+    in (c1, AccS k e')
   (AppS e es) ->
-    let (c1, es') = statefulMap renameSAnno c0 es
-        (c2, e') = renameSAnno c1 e -- order matters here, the arguments are bound under the PARENT
+    let (c1, es') = statefulMap renameAnnoS c0 es
+        (c2, e') = renameAnnoS c1 e -- order matters here, the arguments are bound under the PARENT
     in (c2, AppS e' es')
   (LstS es) ->
-    let (c1, es') = statefulMap renameSAnno c0 es
+    let (c1, es') = statefulMap renameAnnoS c0 es
     in (c1, LstS es')
   (TupS es) ->
-    let (c1, es') = statefulMap renameSAnno c0 es
+    let (c1, es') = statefulMap renameAnnoS c0 es
     in (c1, TupS es')
   (NamS rs) ->
-    let (c1, es') = statefulMap renameSAnno c0 (map snd rs)
+    let (c1, es') = statefulMap renameAnnoS c0 (map snd rs)
     in (c1, NamS (zip (map fst rs) es'))
   e -> (c0, e)
 
@@ -550,11 +583,9 @@ leave d = do
 seeGamma :: Gamma -> MorlocMonad ()
 seeGamma g = MM.sayVVV $ nest 4 $ "Gamma:" <> line <> vsep (map pretty (gammaContext g))
 
-peak :: (Pretty c, Pretty g) => SExpr g One c -> MorlocMonad ()
-peak = insetSay . prettySExpr pretty showGen
+peak :: ExprS g f c -> MorlocMonad ()
+peak = insetSay . pretty
 
-peakGen :: (Pretty c, Pretty g) => SAnno g One c -> MorlocMonad ()
-peakGen = insetSay . prettySAnno pretty showGen
+peakGen :: AnnoS g f c -> MorlocMonad ()
+peakGen = insetSay . pretty
 
-showGen :: Pretty g => g -> MDoc
-showGen g = parens (pretty g)

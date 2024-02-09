@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Frontend.Namespace
 Description : All frontend types and datastructures
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -33,7 +33,7 @@ mapExpr :: (Expr -> Expr) -> ExprI -> ExprI
 mapExpr f = g where
   g (ExprI i (ModE v xs)) = ExprI i . f $ ModE v (map g xs)
   g (ExprI i (AssE v e es)) = ExprI i . f $ AssE v (g e) (map g es)
-  g (ExprI i (AccE e k)) = ExprI i . f $ AccE (g e) k
+  g (ExprI i (AccE k e)) = ExprI i . f $ AccE k (g e)
   g (ExprI i (LstE es)) = ExprI i . f $ LstE (map g es)
   g (ExprI i (TupE es)) = ExprI i . f $ TupE (map g es)
   g (ExprI i (AppE e es)) = ExprI i . f $ AppE (g e) (map g es)
@@ -46,7 +46,7 @@ mapExprM :: Monad m => (Expr -> m Expr) -> ExprI -> m ExprI
 mapExprM f = g where
   g (ExprI i (ModE v xs)) = ExprI i <$> (mapM g xs >>= f . ModE v)
   g (ExprI i (AssE v e es)) = ExprI i <$> ((AssE v <$> g e <*> mapM g es) >>= f)
-  g (ExprI i (AccE e k)) = ExprI i <$> ((AccE <$> g e <*> pure k) >>= f)
+  g (ExprI i (AccE k e)) = ExprI i <$> (g e >>= f . AccE k)
   g (ExprI i (LstE es)) = ExprI i <$> (mapM g es >>= f . LstE)
   g (ExprI i (TupE es)) = ExprI i <$> (mapM g es >>= f . TupE)
   g (ExprI i (AppE e es)) = ExprI i <$> ((AppE <$> g e <*> mapM g es) >>= f)
@@ -61,12 +61,11 @@ mapExprM f = g where
 -- WARNING: silent bad things happen if this function does not copy all indices
 copyState :: Int -> Int -> MorlocMonad ()
 copyState oldIndex newIndex = do
-  s <- MM.get 
+  s <- MM.get
   MM.put $ s
     { stateSignatures = updateGMap (stateSignatures s)
     , stateConcreteTypedefs = updateGMap (stateConcreteTypedefs s)
     , stateGeneralTypedefs = updateGMap (stateGeneralTypedefs s)
-    , stateInnerMogrifiers = updateGMap (stateInnerMogrifiers s)
     , stateSources = updateGMap (stateSources s)
     , stateAnnotations = updateMap (stateAnnotations s)
     , stateExports = updateList (stateExports s)
@@ -77,8 +76,8 @@ copyState oldIndex newIndex = do
       (Just g') -> g'
       Nothing -> g
 
-    updateMap m = case Map.lookup oldIndex m of 
+    updateMap m = case Map.lookup oldIndex m of
       (Just x) -> Map.insert newIndex x m
       Nothing -> m
 
-    updateList xs = if oldIndex `elem` xs then newIndex : xs else xs 
+    updateList xs = if oldIndex `elem` xs then newIndex : xs else xs

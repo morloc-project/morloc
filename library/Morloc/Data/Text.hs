@@ -1,9 +1,9 @@
-{-# LANGUAGE OverloadedStrings #-} 
+{-# LANGUAGE OverloadedStrings #-}
 
 {-|
 Module      : Morloc.Data.Text
 Description : All things text
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -35,6 +35,7 @@ import qualified Data.Text.Lazy as DL
 import Prelude hiding (concat, length, lines, unlines)
 import qualified Safe
 import qualified Text.Pretty.Simple as Pretty
+import Data.Maybe (fromMaybe)
 
 show' :: Show a => a -> Text
 show' = pack . show
@@ -57,9 +58,7 @@ pretty = DL.toStrict . Pretty.pShowNoColor
 -- | Parse a TSV, ignore first line (header). Cells are also unquoted and
 -- wrapping angles are removed.
 parseTSV :: Text -> [[Maybe Text]]
-parseTSV =
-  map (map (nonZero . undquote . unangle)) .
-  map (split ((==) '\t')) . Prelude.tail . lines
+parseTSV = map (map (nonZero . undquote . unangle) . split ('\t' ==)) . Prelude.tail . lines
 
 liftToText :: (String -> String) -> Text -> Text
 liftToText f = pack . f . unpack
@@ -71,7 +70,7 @@ unparseTSV = unlines . map renderRow
     renderRow :: [Maybe Text] -> Text
     renderRow = intercalate "\t" . map renderCell
     renderCell :: Maybe Text -> Text
-    renderCell (Nothing) = "-"
+    renderCell Nothing = "-"
     renderCell (Just x) = x
 
 nonZero :: Text -> Maybe Text
@@ -81,7 +80,7 @@ nonZero s =
     else Just s
 
 unenclose :: Text -> Text -> Text -> Text
-unenclose a b x = maybe x id (stripPrefix a x >>= stripSuffix b)
+unenclose a b x = fromMaybe x (stripPrefix a x >>= stripSuffix b)
 
 unangle :: Text -> Text
 unangle = unenclose "<" ">"

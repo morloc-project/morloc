@@ -23,6 +23,11 @@ main = do
       , substituteTVarTests
       , subtypeTests
 
+      , golden "typeclasses-1" "typeclasses-1"
+      , golden "typeclasses-2" "typeclasses-2"
+      , golden "typeclasses-3" "typeclasses-3"
+      , golden "typeclasses-4" "typeclasses-4"
+
       , golden "string-encoding" "string-encoding"
 
       , golden "file-input-py" "file-input-py"

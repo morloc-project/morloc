@@ -6,10 +6,15 @@ type Py => (List a) = "list" a
 type Py => (Map a b) = "dict" a b
 type Py => (Tuple2 a b) = "tuple" a b
 
-packMap      :: pack   => [(a,b)] -> Map a b
-unpackMap    :: unpack => Map a b -> [(a,b)]
 
-source Py from "foo.py" ("packMap", "unpackMap", "push", "makeMap")
+class Packable a b where
+  pack :: a -> b
+  unpack :: b -> a
+
+instance Packable [(key,val)] (Map key val) where
+  source Py from "foo.py" ("packMap" as pack, "unpackMap" as unpack)
+
+source Py from "foo.py" ("push", "makeMap")
 
 push :: (n -> n')
      -> (n' -> e -> n -> (e', n'))

@@ -3,14 +3,14 @@
 {-|
 Module      : Morloc.CodeGenerator.Serial
 Description : Process serialization trees
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
 module Morloc.CodeGenerator.Serial
-  ( makeSerialAST 
+  ( makeSerialAST
   , chooseSerializationCycle
   , isSerializable
   , prettySerialOne
@@ -81,6 +81,32 @@ shallowType (SerialString x) = VarF x
 shallowType (SerialNull   x) = VarF x
 shallowType (SerialUnknown v) = UnkF v
 
+findPackers :: Lang -> MorlocMonad
+  ( [(([TVar], TypeU), Source)]
+  , [(([TVar], TypeU), Source)]
+  )
+findPackers lang = do
+  sigmap <- MM.gets stateTypeclasses
+
+  MM.sayVVV $ "findPackers"
+            <> "\n  sigmap:" <+> viaShow sigmap
+
+  packers <- case Map.lookup (EV "pack") sigmap of
+    (Just (_, _, _, ts)) -> return $ concatMap f ts
+    Nothing -> return []
+
+  unpackers <- case Map.lookup (EV "unpack") sigmap of
+    (Just (_, _, _, ts)) -> return $ concatMap f ts
+    Nothing -> return []
+
+  return (packers, unpackers)
+  where
+    f :: TermTypes -> [(([TVar], TypeU), Source)]
+    f (TermTypes (Just et) (map (val . snd) -> srcs) _) =
+      let (vs, t) = unqualify $ etype et
+      in [((vs, t), src) | src <- srcs, srcLang src == lang]
+    f (TermTypes Nothing _ _) = []
+
 -- Takes a map of packers with concrete type names as keys. A single concrete
 -- type name may map to many single types. For example, the python type "dict"
 -- might represent a Map with homogenous keys and values or many things that
@@ -91,9 +117,8 @@ shallowType (SerialUnknown v) = UnkF v
 -- will be done through subtyping.
 makeSerialAST :: Int -> Lang -> TypeF -> MorlocMonad SerialAST
 makeSerialAST m lang t0 = do
-  -- [(([TVar], TypeU), Source)]
-  packs   <- MM.metaUniversalMogrifiers lang |>> Map.lookup Pack   |>> fromMaybe [] |>> map (first unqualify)
-  unpacks <- MM.metaUniversalMogrifiers lang |>> Map.lookup Unpack |>> fromMaybe [] |>> map (first unqualify)
+  -- ([(([TVar], TypeU), Source)], ...)
+  (packs, unpacks) <- findPackers lang
 
   MM.sayVVV $ "packs:" <+> viaShow packs
   MM.sayVVV $ "unpacks:" <+> viaShow unpacks
@@ -141,7 +166,7 @@ makeSerialAST m lang t0 = do
             , typePackerForward  = forwardSource
             , typePackerReverse  = reverseSource
             }
-        makeTypePacker (nparam, _, _, _, _) = serializerError $ "Unexpected parameters for atomic variable:" <+> pretty nparam 
+        makeTypePacker (nparam, _, _, _, _) = serializerError $ "Unexpected parameters for atomic variable:" <+> pretty nparam
 
         -- Select the first packer we happen across. This is a very key step and
         -- eventually this function should be replaced with one more carefully
@@ -165,7 +190,7 @@ makeSerialAST m lang t0 = do
             selection <- selectPacker (zip packers unpacked)
             return $ SerialPack v selection
           Nothing -> serializerError
-            $ "Cannot find constructor in AppF" <+> dquotes (pretty v)
+            $ "Could not find" <+> pretty generalTypeName <+> "from" <+> dquotes (pretty v)
             <> "\n  t:" <+> pretty t
             <> "\n  typepackers:" <+> viaShow typepackers
       where
@@ -268,7 +293,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
                         return . Just $ apply g (existential gc)
 
         return $ case maybeUnpackedGeneralType of
-          (Just unpackedGeneralType) -> Just $ weaveTypeF unpackedGeneralType unpackedConcreteType
+          (Just resolvedUnpackedGeneralType) -> Just $ weaveTypeF resolvedUnpackedGeneralType unpackedConcreteType
           Nothing -> Nothing
 
     unweaveTypeF :: TypeF -> (TypeU, TypeU)
@@ -287,7 +312,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
             keys = map fst rs
             (vsg, vsc) = unzip $ map (unweaveTypeF . snd) rs
         in (NamU n gv psg (zip keys vsg), NamU n (cv2tv cv) psc (zip keys vsc))
- 
+
     weaveTypeF :: TypeU -> TypeU -> TypeF
     weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv (tv2cv cv))
     weaveTypeF (FunU tsg tg) (FunU tsc tc) = FunF (zipWith weaveTypeF tsg tsc) (weaveTypeF tg tc)
@@ -328,8 +353,8 @@ chooseSerializationCycle (x:_) = Just x
 isSerializable :: SerialAST -> Bool
 isSerializable (SerialPack _ _) = False
 isSerializable (SerialList _ x) = isSerializable x
-isSerializable (SerialTuple _ xs) = all isSerializable xs 
-isSerializable (SerialObject _ _ _ rs) = all (isSerializable . snd) rs 
+isSerializable (SerialTuple _ xs) = all isSerializable xs
+isSerializable (SerialObject _ _ _ rs) = all (isSerializable . snd) rs
 isSerializable (SerialReal   _) = True
 isSerializable (SerialInt    _) = True
 isSerializable (SerialBool   _) = True

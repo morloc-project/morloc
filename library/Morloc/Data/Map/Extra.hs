@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Data.Map.Extra
 Description : Additional functions for the Map class
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -19,10 +19,11 @@ module Morloc.Data.Map.Extra (
 ) where
 
 import Prelude hiding (mapM)
-import qualified Prelude 
+import qualified Prelude
 import qualified Data.Map as Map
 import Control.Monad (foldM)
 import Data.List.Extra (groupSort)
+import Data.Bifunctor (first)
 
 -- A local utility function
 onSndM :: Monad m => (b -> m c) -> (a, b) -> m (a, c)
@@ -56,7 +57,7 @@ mapKeysWithM
 mapKeysWithM f g m
   = Map.fromList
   <$> Prelude.mapM foldValues
-      (groupSort $ map (\(k,x) -> (g k, x)) (Map.toList m))
+      (groupSort $ map (first g) (Map.toList m))
   where
     foldValues (k, v:vs) = (,) k <$> foldM f v vs
     foldValues _ = undefined -- there will never be empty values

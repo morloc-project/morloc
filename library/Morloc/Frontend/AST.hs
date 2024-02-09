@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Frontend.AST
 Description : Functions for parsing the Expr abstract syntax trees
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -50,7 +50,7 @@ findTypedefs
   -> (               Map.Map TVar [([TVar], TypeU, Bool)]
      , Map.Map Lang (Map.Map TVar [([TVar], TypeU, Bool)])
      )
-findTypedefs (ExprI _ (TypE Nothing v vs t)) = (Map.singleton v [(vs, t, False)], Map.empty) 
+findTypedefs (ExprI _ (TypE Nothing v vs t)) = (Map.singleton v [(vs, t, False)], Map.empty)
 findTypedefs (ExprI _ (TypE (Just (lang, isTerminal)) v vs t)) = (Map.empty, Map.singleton lang (Map.singleton v [(vs, t, isTerminal)]))
 findTypedefs (ExprI _ (ModE _ es)) = foldl combine (Map.empty, Map.empty) (map findTypedefs es) where
   combine (g1, c1) (g2, c2)
@@ -63,7 +63,7 @@ findSignatureTypeTerms :: ExprI -> [TVar]
 findSignatureTypeTerms = unique . f where
   f :: ExprI -> [TVar]
   f (ExprI _ (ModE _ es)) = concatMap f es
-  f (ExprI _ (SigE _ _ (EType t _ _))) = findTypeTerms t
+  f (ExprI _ (SigE (Signature _ _ (EType t _ _)))) = findTypeTerms t
   f (ExprI _ (AssE _ _ es)) = concatMap f es
   f _ = []
 
@@ -85,14 +85,14 @@ findSignatures :: ExprI -> [(EVar, Maybe Label, EType)]
 -- v is the name of the type
 -- l is the optional label for the signature
 -- t is the type
-findSignatures (ExprI _ (ModE _ es)) = [(v, l, t) | (ExprI _ (SigE v l t)) <- es]
-findSignatures (ExprI _ (AssE _ _ es)) = [(v, l, t) | (ExprI _ (SigE v l t)) <- es]
-findSignatures (ExprI _ (SigE v l t)) = [(v, l, t)]
+findSignatures (ExprI _ (ModE _ es)) = [(v, l, t) | (ExprI _ (SigE (Signature v l t))) <- es]
+findSignatures (ExprI _ (AssE _ _ es)) = [(v, l, t) | (ExprI _ (SigE (Signature v l t))) <- es]
+findSignatures (ExprI _ (SigE (Signature v l t))) = [(v, l, t)]
 findSignatures _ = []
 
 checkExprI :: Monad m => (ExprI -> m ()) -> ExprI -> m ()
 checkExprI f e@(ExprI _ (ModE _ es)) = f e >> mapM_ (checkExprI f) es
-checkExprI f e@(ExprI _ (AccE e' _)) = f e >> checkExprI f e'
+checkExprI f e@(ExprI _ (AccE _ e')) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (AnnE e' _)) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (AssE _ e' es')) = f e >> checkExprI f e' >> mapM_ f es'
 checkExprI f e@(ExprI _ (LamE _ e')) = f e >> checkExprI f e'
@@ -104,7 +104,7 @@ checkExprI f e = f e
 
 maxIndex :: ExprI -> Int
 maxIndex (ExprI i (ModE _ es)) = maximum (i : map maxIndex es)
-maxIndex (ExprI i (AccE e _)) = max i (maxIndex e)
+maxIndex (ExprI i (AccE _ e)) = max i (maxIndex e)
 maxIndex (ExprI i (AnnE e _)) = max i (maxIndex e)
 maxIndex (ExprI i (AssE _ e es)) = maximum (i : map maxIndex (e:es))
 maxIndex (ExprI i (LamE _ e)) = max i (maxIndex e)
@@ -116,7 +116,7 @@ maxIndex (ExprI i _) = i
 
 getIndices :: ExprI -> [Int]
 getIndices (ExprI i (ModE _ es)) = i : concatMap getIndices es
-getIndices (ExprI i (AccE e _)) = i : getIndices e
+getIndices (ExprI i (AccE _ e)) = i : getIndices e
 getIndices (ExprI i (AnnE e _)) = i : getIndices e
 getIndices (ExprI i (AssE _ e es)) = i : concatMap getIndices (e:es)
 getIndices (ExprI i (LamE _ e)) = i : getIndices e

@@ -12,8 +12,14 @@ type py => (Map key val) = "dict" key val
 type py => (Tuple2 a b) = "tuple" a b
 type py => (List a) = "list" a
 
--- These do not need to be exported (and indeed should not be)
-packMap :: pack => ([key],[val]) -> Map key val
-unpackMap :: unpack => Map key val -> ([key],[val])
+class Packable a b where
+  pack :: a -> b
+  unpack :: b -> a
+
+instance Packable ([key],[val]) (Map key val) where
+  source py from "main.py"
+   ( "morloc_packMap" as pack
+   , "morloc_unpackMap" as unpack
+   )
 
 person :: Str -> Map Str Int

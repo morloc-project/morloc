@@ -22,7 +22,9 @@ module Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals
   ) where
 
 import Morloc.Quasi
+import Morloc.Data.Doc
 
+foreignCallFunction :: Doc ann
 foreignCallFunction = [idoc|
 std::string generateTempFilename() {
     char template_file[] = "/tmp/morloc_cpp_XXXXXX";
@@ -81,6 +83,8 @@ std::string foreign_call(
 }
 |]
 
+
+serializationHandling :: Doc ann
 serializationHandling = [idoc|
 #include <iostream>
 #include <sstream>
@@ -91,7 +95,7 @@ serializationHandling = [idoc|
 #include <iomanip>
 #include <limits>
 #include <tuple>
-#include <utility> 
+#include <utility>
 
 
 std::string serialize(bool x, bool schema);
@@ -357,7 +361,7 @@ bool deserialize(const std::string json, size_t &i, double &x){
     std::string lhs = "";
     std::string rhs = "";
     char sign = '+';
-    
+
     if(json[i] == '-'){
         sign = '-';
         i++;
@@ -371,7 +375,7 @@ bool deserialize(const std::string json, size_t &i, double &x){
     }
 
     if(lhs.size() > 0){
-        x = read_double(sign + lhs + '.' + rhs);  
+        x = read_double(sign + lhs + '.' + rhs);
         return true;
     } else {
         return false;
@@ -384,7 +388,7 @@ bool deserialize(const std::string json, size_t &i, float &x){
     std::string lhs = "";
     std::string rhs = "";
     char sign = '+';
-    
+
     if(json[i] == '-'){
         sign = '-';
         i++;
@@ -398,7 +402,7 @@ bool deserialize(const std::string json, size_t &i, float &x){
     }
 
     if(lhs.size() > 0){
-        x = read_float(sign + lhs + '.' + rhs);  
+        x = read_float(sign + lhs + '.' + rhs);
         return true;
     } else {
         return false;
@@ -479,7 +483,7 @@ bool integer_deserialize(const std::string json, size_t &i, A &x){
         sstream >> x;
         return true;
     }
-    return false; 
+    return false;
 }
 bool deserialize(const std::string json, size_t &i, int &x){
     return integer_deserialize(json, i, x);

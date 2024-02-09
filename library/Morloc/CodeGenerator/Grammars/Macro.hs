@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.CodeGenerator.Grammars.Macro
 Description : Expand parameters in concrete types
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -23,9 +23,7 @@ import qualified Text.Megaparsec.Char.Lexer as L
 
 type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
 
-data ParserState = ParserState {
-    stateParameters :: [MT.Text]
-}
+newtype ParserState = ParserState { stateParameters :: [MT.Text] }
 
 expandMacro :: MT.Text -> [MT.Text] -> MT.Text
 expandMacro t [] = t

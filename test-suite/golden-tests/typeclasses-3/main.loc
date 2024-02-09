@@ -1,0 +1,23 @@
+module main (foo, bar)
+
+type Py => Int = "int"
+type Py => Real = "float"
+type Py => Str = "str"
+type Py => (List a) = "list" a
+
+
+class Summarizable a b where
+  summarize :: a -> b
+
+instance Summarizable [a] Str where
+  source Py ("str" as summarize)
+
+instance Summarizable [a] Int where
+  source Py ("len" as summarize)
+
+
+foo :: [Int] -> Str
+foo x = summarize x
+
+bar :: [Int] -> Int
+bar x = summarize x

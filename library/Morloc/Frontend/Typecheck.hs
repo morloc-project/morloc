@@ -4,23 +4,21 @@
 {-|
 Module      : Morloc.Frontend.Typecheck
 Description : Core inference module
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
-module Morloc.Frontend.Typecheck (typecheck, resolveTypes, evaluateSAnnoTypes) where
+module Morloc.Frontend.Typecheck (typecheck, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Typecheck.Internal
-import Morloc.Pretty
 import Morloc.Data.Doc
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 
-import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
 
 -- | Each SAnno object in the input list represents one exported function.
@@ -30,29 +28,38 @@ import qualified Data.Map as Map
 -- solved after segregation. Later the concrete types will need to be checked
 -- for type consistency and correctness of packers.
 typecheck
-  :: [SAnno Int Many Int]
-  -> MorlocMonad [SAnno (Indexed TypeU) Many Int]
--- typecheck = error . MT.unpack . render . vsep . map (prettySAnno (const "") (const ""))
+  :: [AnnoS Int ManyPoly Int]
+  -> MorlocMonad [AnnoS (Indexed TypeU) Many Int]
 typecheck = mapM run where
-    run :: SAnno Int Many Int -> MorlocMonad (SAnno (Indexed TypeU) Many Int)
+    run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
+
+      -- s <- MM.gets stateSignatures
+      -- MM.sayVVV $ "stateSignatures:\n  " <> pretty s
+
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
       let g0 = Gamma {gammaCounter = 0, gammaContext = []}
-          ((_, g1), e1) = renameSAnno (Map.empty, g0) e0
-      (g2, _, e2) <- synthG' g1 e1
+          ((_, g1), e1) = renameAnnoS (Map.empty, g0) e0
+      (g2, _, e2) <- synthG g1 e1
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g2:"
       seeGamma g2
       insetSay "========================================================"
-      return $ mapSAnno (fmap normalizeType) id . applyGen g2 $ e2
+      let e3 = mapAnnoSG (fmap normalizeType) . applyGen g2 $ e2
+
+      (g3, e4) <- resolveInstances g2 e3
+      return (applyGen g3 e4)
 
 -- TypeU --> Type
-resolveTypes :: SAnno (Indexed TypeU) Many Int -> SAnno (Indexed Type) Many Int
-resolveTypes (SAnno (Many es) (Idx i t))
-  = SAnno (Many (map (first f) es)) (Idx i (typeOf t)) where
-  f :: SExpr (Indexed TypeU) Many Int -> SExpr (Indexed Type) Many Int
-  f (AccS x k) = AccS (resolveTypes x) k
-  f (AppS x xs) = AppS (resolveTypes x) (map resolveTypes xs) 
+resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int
+resolveTypes (AnnoS (Idx i t) ci e)
+  = AnnoS (Idx i (typeOf t)) ci (f e) where
+  f :: ExprS (Indexed TypeU) Many Int -> ExprS (Indexed Type) Many Int
+  f (BndS x) = BndS x
+  f (VarS v xs) = VarS v (fmap resolveTypes xs)
+  f (CallS src) = CallS src
+  f (AccS k x) = AccS k (resolveTypes x)
+  f (AppS x xs) = AppS (resolveTypes x) (map resolveTypes xs)
   f (LamS vs x) = LamS vs (resolveTypes x)
   f (LstS xs) = LstS (map resolveTypes xs)
   f (TupS xs) = TupS (map resolveTypes xs)
@@ -61,93 +68,124 @@ resolveTypes (SAnno (Many es) (Idx i t))
   f (IntS x) = IntS x
   f (LogS x) = LogS x
   f (StrS x) = StrS x
-  f (CallS x) = CallS x
   f UniS = UniS
-  f (VarS x) = VarS x
 
--- lookup a general type associated with an index
--- standardize naming of qualifiers
-lookupType :: Int -> Gamma -> MorlocMonad (Maybe (Gamma, TypeU))
-lookupType i g = do
-  m <- CMS.gets stateSignatures
-  return $ case GMap.lookup i m of
-    GMapJust (TermTypes (Just (EType t _ _)) _ _) -> Just $ rename g t
-    _ -> Nothing
+resolveInstances :: Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
+resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
+    (g', e1) <- f g e0
+    return (g', AnnoS gi ci e1)
+  where
+  f :: Gamma -> ExprS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, ExprS (Indexed TypeU) Many Int)
+
+  -- resolve instances
+  f g0 (VarS v (PolymorphicExpr clsName _ _ rss)) = do
+
+    -- find all instances that are a subtype of the inferred type
+    let rssSubtypes = [x | x@(EType t _ _, _) <- rss, isSubtypeOf2 t gt]
+
+    -- find the most specific instance
+    (g2, es1) <- case mostSpecific [t | (EType t _ _, _) <- rssSubtypes] of
+      -- if there is exactly one most specific instance, go forward
+      [mostSpecificType] -> do
+        -- filter out the instances with the most specific type
+        let es0 = concat [rs | (t, rs) <- rssSubtypes, etype t == mostSpecificType]
+
+        MM.sayVVV $ "resolveInstances:"
+                  <> "\n  es0:" <+> encloseSep "{" "}" "," (map pretty es0)
+                  <> "\n  mostSpecificType:" <+> pretty mostSpecificType
+                  <> "\n  gt:" <+> pretty gt
+
+        g1 <- connectInstance g0 es0
+        return (g1, es0)
+      -- if there are no suitable instances, die
+      [] -> do
+        MM.sayVVV $ "resolveInstance empty"
+                  <> "\n  rss:" <+> pretty rss
+                  <> "\n  gt:" <+> pretty gt
+        return undefined
+      -- if there are many suitable instances, still die (maybe add handling for
+      -- less conherent cases later)
+      manyTypes -> do
+        MM.sayVVV $ "resolveInstance too many"
+                  <> "\n  manyTypes:" <+> encloseSep "{" "}" "," (map pretty manyTypes)
+                  <> "\n  rssSubtypes:" <+> pretty rssSubtypes
+                  <> "\n  gt:" <+> pretty gt
+        return undefined
+
+    (g3, es2) <- statefulMapM resolveInstances g2 es1
+
+    return (g3, VarS v (Many es2))
+
+  f g0 (VarS v (MonomorphicExpr _ xs)) = statefulMapM resolveInstances g0 xs |>> second (VarS v . Many)
+  -- propagate
+  f g0 (AccS k e) = resolveInstances g0 e |>> second (AccS k)
+  f g0 (AppS e es) = do
+    (g1, e') <- resolveInstances g0 e
+    (g2, es') <- statefulMapM resolveInstances g1 es
+    return (g2, AppS e' es')
+  f g0 (LamS vs e) = resolveInstances g0 e |>> second (LamS vs)
+  f g0 (LstS es) = statefulMapM resolveInstances g0 es |>> second LstS
+  f g0 (TupS es) = statefulMapM resolveInstances g0 es |>> second TupS
+  f g0 (NamS rs) = do
+    (g1, es') <- statefulMapM resolveInstances g0 (map snd rs)
+    return (g1, NamS (zip (map fst rs) es'))
+
+  -- primitives
+  f g0 UniS = return (g0, UniS)
+  f g0 (BndS v) = return (g0, BndS v)
+  f g0 (RealS x) = return (g0, RealS x)
+  f g0 (IntS x) = return (g0, IntS x)
+  f g0 (LogS x) = return (g0, LogS x)
+  f g0 (StrS x) = return (g0, StrS x)
+  f g0 (CallS x) = return (g0, CallS x)
+
+  connectInstance :: Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
+  connectInstance g0 [] = return g0
+  connectInstance g0 (AnnoS (Idx _ t) _ _ : es) =
+    case subtype gt t g0 of
+      (Left e) -> MM.throwError $ GeneralTypeError e
+      (Right g1) -> connectInstance g1 es
+
+
 
 -- prepare a general, indexed typechecking error
 gerr :: Int -> TypeError -> MorlocMonad a
 gerr i e = MM.throwError $ IndexedError i (GeneralTypeError e)
 
-synthG
-  :: Gamma
-  -> SAnno Int Many Int
-  -> MorlocMonad
-       ( Gamma
-       , TypeU
-       , SAnno (Indexed TypeU) Many Int
-       )
--- it is possible to export just a type signature
-synthG g (SAnno (Many []) i) = do
-  maybeType <- lookupType i g
-  case maybeType of
-    (Just (g', t)) -> return (g', t, SAnno (Many []) (Idx i t))
-    -- if a term is associated with no expression or type
-    Nothing -> do
-        maybeName <- CMS.gets (Map.lookup i . stateName)
-        case maybeName of
-            -- This branch is entered for exported type definitions
-            -- FIXME: return all definitions and their parameters, check parameter count
-            (Just (EV v)) -> return (g, VarU (TV v), SAnno (Many []) (Idx i (VarU (TV v))))
-            Nothing -> error "Indexing error, this should not occur, please message the maintainer"
-
-synthG g0 (SAnno (Many ((e0, j):es)) i) = do
-
-  -- Check for any existing type signature annotations
-  maybeType <- lookupType i g0
-  (g1, t1, e1) <- case maybeType of
-    -- If there are no annotations, synthesize
-    Nothing  -> synthE' i g0 e0
-    -- If there are annotations ...
-    (Just (g', t)) -> case e0 of
-      -- If the annotation is of a variable name, return the annotation. Calling
-      -- check would just re-synthesize the same type and check that it was
-      -- equal to itself.
-      (VarS v) -> return (g', t, VarS v)
-      -- Otherwise check the annotation type
-      _ -> checkE' i g' e0 t
-
-  -- Check all other implementations against the first one
-  (g2, t2, SAnno (Many es') _) <- checkG' g1 (SAnno (Many es) i) t1
-
-  -- finally cons the head element back and apply everything we learned
-  let finalExpr = applyGen g2 $ SAnno (Many ((e1, j):es')) (Idx i t2)
-
-  return (g2, t2, finalExpr)
 
 checkG
   :: Gamma
-  -> SAnno Int Many Int
+  -> AnnoS Int ManyPoly Int
   -> TypeU
   -> MorlocMonad
        ( Gamma
        , TypeU
-       , SAnno (Indexed TypeU) Many Int
+       , AnnoS (Indexed TypeU) ManyPoly Int
        )
-checkG g (SAnno (Many []) i) t = return (g, t, SAnno (Many []) (Idx i t)) 
-checkG g0 (SAnno (Many ((e, j):es)) i) t0 = do 
-  (g1, t1, e') <- checkE' i g0 e t0
-  (g2, t2, SAnno (Many es') idType) <- checkG' g1 (SAnno (Many es) i) t1
-  return (g2, t2, SAnno (Many ((e', j):es')) idType)
+checkG g (AnnoS i j e) t = do
+  (g', t', e') <- checkE' i g e t
+  return (g', t', AnnoS (Idx i t') j e')
 
+synthG
+  :: Gamma
+  -> AnnoS Int ManyPoly Int
+  -> MorlocMonad
+       ( Gamma
+       , TypeU
+       , AnnoS (Indexed TypeU) ManyPoly Int
+       )
+synthG g (AnnoS gi ci e) = do
+  (g', t, e') <- synthE' gi g e
+  return (g', t, AnnoS (Idx gi t) ci e')
 
 synthE
   :: Int
   -> Gamma
-  -> SExpr Int Many Int
+  -> ExprS Int ManyPoly Int
   -> MorlocMonad
        ( Gamma
        , TypeU
-       , SExpr (Indexed TypeU) Many Int
+       , ExprS (Indexed TypeU) ManyPoly Int
        )
 
 synthE _ g UniS = return (g, BT.unitU, UniS)
@@ -156,22 +194,26 @@ synthE _ g (IntS x) = return (g, BT.intU, IntS x)
 synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
 synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 
-synthE i g0 (AccS e k) = do
-  (g1, t1, e1) <- synthG' g0 e
+synthE i g0 (AccS k e) = do
+  (g1, t1, e1) <- synthG g0 e
   (g2, valType) <- accessRecord g1 t1
-  return (g2, valType, AccS e1 k)
+  return (g2, valType, AccS k e1)
   where
     accessRecord :: Gamma -> TypeU -> MorlocMonad (Gamma, TypeU)
     accessRecord g t@(NamU _ _ _ rs) = case lookup k rs of
       Nothing -> gerr i (KeyError k t)
-      (Just val) -> return (g, val)
+      (Just value) -> return (g, value)
     accessRecord g t@(ExistU v ps rs) = case lookup k rs of
       Nothing -> do
-        let (g', val) = newvar (unTVar v <> "_" <> unKey k) g
+        let (g', value) = newvar (unTVar v <> "_" <> unKey k) g
         case access1 v (gammaContext g') of
-          (Just (rhs, _, lhs)) -> return (g' { gammaContext = rhs <> [ExistG v ps ((k, val):rs)] <> lhs }, val)
-          Nothing -> gerr i (KeyError k t)
-      (Just val) -> return (g, val)
+          (Just (rhs, _, lhs)) -> return (g' { gammaContext = rhs <> [ExistG v ps ((k, value):rs)] <> lhs }, value)
+          Nothing -> do
+            MM.sayVVV $ "Case b"
+                      <> "\n  rs:" <+> pretty rs
+                      <> "\n  v:" <+> pretty v
+            gerr i (KeyError k t)
+      (Just value) -> return (g, value)
     accessRecord g t = do
       globalMap <- MM.gets stateGeneralTypedefs
       gscope <- case GMap.lookup i globalMap of
@@ -183,7 +225,7 @@ synthE i g0 (AccS e k) = do
 
 --   -->E0
 synthE _ g (AppS f []) = do
-  (g1, t1, f1) <- synthG' g f
+  (g1, t1, f1) <- synthG g f
   return (g1, t1, AppS f1 [])
 
 --   -->E
@@ -196,44 +238,46 @@ synthE i g0 (AppS f xs0) = do
 
   case mayExpanded of
     -- If the term was eta-expanded, retypecheck it
-    (Just (g', x')) -> synthE i g' x'
+    (Just (g', x')) -> synthE' i g' x'
     -- Otherwise proceed
     Nothing -> do
 
       -- extend the function type with the type of the expressions it is applied to
       (g2, funType1, inputExprs) <- application' i g1 xs0 (normalizeType funType0)
-      
+
       -- determine the type after application
       appliedType <- case funType1 of
-        (FunU ts t) -> case drop (length inputExprs) ts of 
+        (FunU ts t) -> case drop (length inputExprs) ts of
           [] -> return t -- full application
           rs -> return $ FunU rs t -- partial application
         _ -> error "impossible"
-      
+
       -- put the AppS back together with the synthesized function and input expressions
       return (g2, apply g2 appliedType, AppS (applyGen g2 funExpr0) inputExprs)
 
---   -->I==>
+-- -->I==>
 synthE i g0 f@(LamS vs x) = do
-  (g1, bodyType, _) <- synthG g0 x
+  (_, bodyType, _) <- synthG g0 x
 
+  -- FIXME: Repeated inference here may lead to exponential runtime
+  -- There must be a better way to handle eta reduction ...
   let n = nfargs bodyType
   if n > 0
     then do
-      (g2, f2) <- expand n g1 f
-      insetSay $ "Expanded in -->I==>:" <+> prettySExpr (const "") (const "") f2
-      synthE i g2 f2
+      (g1, f2) <- expand n g0 f
+      synthE' i g1 f2   -- <----- repeat inference -----------------------------
     else do
       -- create existentials for everything and pass it off to check
-      let (g2, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") g') g1 vs
-          (g3, ft) = newvar "o_" g2
+      let (g1, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") g') g0 vs
+          (g2, ft) = newvar "o_" g1
           finalType = FunU ts ft
-      checkE' i g3 f finalType
+      checkE' i g2 f finalType   -- <----- repeat inference --------------------
   where
     nfargs :: TypeU -> Int
     nfargs (FunU ts _) = length ts
     nfargs (ForallU _ f') = nfargs f'
     nfargs _ = 0
+
 
 --   List
 synthE _ g (LstS []) =
@@ -241,7 +285,7 @@ synthE _ g (LstS []) =
       listType = BT.listU itemType
   in return (g1, listType, LstS [])
 synthE i g (LstS (e:es)) = do
-  (g1, itemType, itemExpr) <- synthG' g e 
+  (g1, itemType, itemExpr) <- synthG g e
   (g2, listType, listExpr) <- checkE' i g1 (LstS es) (BT.listU itemType)
   case listExpr of
     (LstS es') -> return (g2, listType, LstS (itemExpr:es'))
@@ -253,7 +297,7 @@ synthE _ g (TupS []) =
   in return (g, t, TupS [])
 synthE i g (TupS (e:es)) = do
   -- synthesize head
-  (g1, itemType, itemExpr) <- synthG' g e
+  (g1, itemType, itemExpr) <- synthG g e
 
   -- synthesize tail
   (g2, tupleType, tupleExpr) <- synthE' i g1 (TupS es)
@@ -275,43 +319,102 @@ synthE _ g0 (NamS rs) = do
       ks = map fst rs
       (g2, t) = newvarRich [] (zip ks ts) "record_" g1
       e = NamS (zip ks es)
-  return (g2, t, e) 
-
--- Sources are axiomatic. They are they type they are said to be.
-synthE i g (CallS src) = do
-  maybeType <- lookupType i g 
-  (g', t) <- case maybeType of
-    Just x -> return x
-    -- no, then I don't know what it is and will return an existential
-    -- if this existential is never solved, then it will become universal later 
-    Nothing -> return $ newvar "src_" g
-  return (g', t, CallS src)
+  return (g2, t, e)
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
-synthE i g (VarS v) = do
-  -- is this a bound variable that has already been solved
-  (g', t') <- case lookupE v g of 
+synthE _ g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
+  let (g1, t1) = rename g0 (etype t0)
+  (g2, t2, xs1) <- foldCheck g1 xs0 t1
+  let xs2 = applyCon g2 $ VarS v (MonomorphicExpr (Just t0) xs1)
+  return (g2, t2, xs2)
+
+synthE _ g (VarS v (MonomorphicExpr Nothing (x:xs))) = do
+  (g', t', x') <- synthG g x
+  (g'', t'', xs') <- foldCheck g' xs t'
+  let xs'' = applyCon g'' $ VarS v (MonomorphicExpr Nothing (x':xs'))
+  return (g'', t'', xs'')
+
+synthE _ g (VarS v (MonomorphicExpr Nothing [])) = do
+  let (g', t) = newvar (unEVar v <> "_u") g
+  return (g', t, VarS v (MonomorphicExpr Nothing []))
+
+synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
+  (g1, rs') <- checkInstances g0 (etype t0) rs0
+  let (g2, t1) = rename g1 (etype t0)
+  return (g2, t1, VarS v (PolymorphicExpr cls clsName t0 rs'))
+  where
+    -- check each instance
+    -- do not return modified Gamma state
+    checkInstances
+      :: Gamma
+      -> TypeU
+      -> [(EType, [AnnoS Int ManyPoly Int])]
+      -> MorlocMonad (Gamma, [(EType, [AnnoS (Indexed TypeU) ManyPoly Int])])
+    checkInstances g _ [] = return (g, [])
+    checkInstances g10 genType ((instType, es):rs) = do
+
+      -- check this first instance
+      -- convert qualified terms in the general type to existentials
+      let (g11, genType') = toExistential g10 genType
+      -- rename the instance type
+      let (g12, instType') = rename g11 (etype instType)
+      -- subtype the renamed instance type against the existential general
+      g13 <- subtype' i instType' genType' g12
+      -- check all implementations for this instance
+      (g14, es') <- checkImplementations g13 genType' es
+
+      -- check all remaining instances
+      -- Use the ORIGINAL general type, not the existntialized one above.
+      -- this means each existential can be solved independently for each
+      -- instance.
+      (g15, rs') <- checkInstances g14 genType rs
+
+      return (g15, (instType, es'):rs')
+
+    -- check each implementation within each instance
+    -- do not return modified Gamma state
+    checkImplementations
+      :: Gamma
+      -> TypeU
+      -> [AnnoS Int ManyPoly Int]
+      -> MorlocMonad (Gamma, [AnnoS (Indexed TypeU) ManyPoly Int])
+    checkImplementations g _ [] = return (g, [])
+    checkImplementations g10 t (e:es) = do
+
+      -- check this instance
+      (g11, _, e') <- checkG g10 e t
+
+      -- check all the remaining implementations
+      (g12, es') <- checkImplementations g11 t es
+
+      -- return the final context and the applied expressions
+      return (g12, applyGen g12 e':es')
+
+
+-- This case will only be encountered in check, the existential generated here
+-- will be subtyped against the type known from the VarS case.
+synthE _ g (CallS src) = do
+  let (g', t) = newvar "call_" g
+  return (g', t, CallS src)
+
+synthE _ g (BndS v) = do
+  (g', t') <- case lookupE v g of
     -- yes, return the solved type
     (Just t) -> return (g, t)
-    Nothing -> do
-    -- no, so is it a variable that has a type annotation?
-      maybeType <- lookupType i g 
-      case maybeType of
-        Just x -> return x 
-        -- no, then I don't know what it is and will return an existential
-        -- if this existential is never solved, then it will become universal later 
-        Nothing -> return $ newvar (unEVar v <> "_u") g
-  return (g', t', VarS v)
+    -- no, then I don't know what it is and will return an existential
+    -- if this existential is never solved, then it will become universal later
+    Nothing -> return $ newvar (unEVar v <> "_u") g
+  return (g', t', BndS v)
 
 
-etaExpand :: Gamma -> SAnno Int Many Int -> [SAnno Int Many Int] -> TypeU -> MorlocMonad (Maybe (Gamma, SExpr Int Many Int))
+etaExpand :: Gamma -> AnnoS Int f Int -> [AnnoS Int f Int] -> TypeU -> MorlocMonad (Maybe (Gamma, ExprS Int f Int))
 etaExpand g0 f0 xs0@(length -> termSize) (normalizeType -> FunU (length -> typeSize) _)
-    | termSize == typeSize = return Nothing 
+    | termSize == typeSize = return Nothing
     | otherwise = Just <$> etaExpandE g0 (AppS f0 xs0)
     where
 
-    etaExpandE :: Gamma -> SExpr Int Many Int -> MorlocMonad (Gamma, SExpr Int Many Int)
+    etaExpandE :: Gamma -> ExprS Int f Int -> MorlocMonad (Gamma, ExprS Int f Int)
     etaExpandE g e@(AppS _ _) = tryExpand (typeSize - termSize) g e
     etaExpandE g e@(LamS vs _) = tryExpand (typeSize - termSize - length vs) g e
     etaExpandE g e = return (g, e)
@@ -325,42 +428,42 @@ etaExpand g0 f0 xs0@(length -> termSize) (normalizeType -> FunU (length -> typeS
 etaExpand _ _ _ _ = return Nothing
 
 
-expand :: Int -> Gamma -> SExpr Int Many Int -> MorlocMonad (Gamma, SExpr Int Many Int)
+expand :: Int -> Gamma -> ExprS Int f Int -> MorlocMonad (Gamma, ExprS Int f Int)
 expand 0 g x = return (g, x)
 expand n g e@(AppS _ _) = do
     newIndex <- MM.getCounter
     let (g', v') = evarname g "v"
     e' <- applyExistential v' e
-    let x' = LamS [v'] (SAnno (Many [(e', newIndex)]) newIndex)
+    let x' = LamS [v'] (AnnoS newIndex newIndex e')
     expand (n-1) g' x'
-expand n g (LamS vs' (SAnno (Many es0') t)) = do
+expand n g (LamS vs' (AnnoS t ci e)) = do
     let (g', v') = evarname g "v"
-    es1' <- mapM (applyExistential v' . fst) es0'
-    expand (n-1) g' (LamS (vs' <> [v']) (SAnno (Many (zip es1' (map snd es0'))) t))
+    e' <- applyExistential v' e
+    expand (n-1) g' (LamS (vs' <> [v']) (AnnoS t ci e'))
 expand _ g x = return (g, x)
 
 
-applyExistential :: EVar -> SExpr Int Many Int -> MorlocMonad (SExpr Int Many Int)
+applyExistential :: EVar -> ExprS Int f Int -> MorlocMonad (ExprS Int f Int)
 applyExistential v' (AppS f xs') = do
-    newIndex <- MM.getCounter  
-    return $ AppS f (xs' <> [SAnno (Many [(VarS v', newIndex)]) newIndex])
+    newIndex <- MM.getCounter
+    return $ AppS f (xs' <> [AnnoS newIndex newIndex (BndS v')])
 -- possibly illegal application, will type check after expansion
 applyExistential v' e = do
     appIndex <- MM.getCounter
     varIndex <- MM.getCounter
-    return $ AppS (SAnno (Many [(e, appIndex)]) appIndex) [SAnno (Many [(VarS v', varIndex)]) varIndex]
+    return $ AppS (AnnoS appIndex appIndex e) [AnnoS varIndex varIndex (BndS v')]
 
 
 
 application
   :: Int
   -> Gamma
-  -> [SAnno Int Many Int] -- the expressions that are passed to the function
+  -> [AnnoS Int ManyPoly Int] -- the expressions that are passed to the function
   -> TypeU -- the function type
   -> MorlocMonad
       ( Gamma
       , TypeU -- output function type
-      , [SAnno (Indexed TypeU) Many Int] -- @e@, with type annotation
+      , [AnnoS (Indexed TypeU) ManyPoly Int] -- @e@, with type annotation
       )
 
 --  g1 |- e <= A -| g2
@@ -368,7 +471,7 @@ application
 --  g1 |- A->C o e =>> C -| g2
 application i g0 es0 (FunU as0 b0) = do
   (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
-  let es2 = map (applyGen g1) es1 
+  let es2 = map (applyGen g1) es1
       funType = apply g1 $ FunU (as1 <> remainder) b0
   insetSay $ "remainder:" <+> vsep (map pretty remainder)
   return (g1, funType, es2)
@@ -409,17 +512,17 @@ application i _ _ _ = do
 zipCheck
   :: Int
   -> Gamma
-  -> [SAnno Int Many Int]
+  -> [AnnoS Int ManyPoly Int]
   -> [TypeU]
   -> MorlocMonad
     ( Gamma
     , [TypeU]
-    , [SAnno (Indexed TypeU) Many Int]
+    , [AnnoS (Indexed TypeU) ManyPoly Int]
     , [TypeU] -- remainder
     )
 -- check the first elements, cdr down the remaining values
 zipCheck i g0 (x0:xs0) (t0:ts0) = do
-  (g1, t1, x1) <- checkG' g0 x0 t0
+  (g1, t1, x1) <- checkG g0 x0 t0
   (g2, ts1, xs1, remainder) <- zipCheck i g1 xs0 ts0
   return (g2, t1:ts1, x1:xs1, remainder)
 -- If there are fewer arguments than types, this may be OK, just partial application
@@ -428,35 +531,47 @@ zipCheck _ g0 [] ts = return (g0, [], [], ts)
 zipCheck i _ _ [] = gerr i TooManyArguments
 
 
+foldCheck
+  :: Gamma
+  -> [AnnoS Int ManyPoly Int]
+  -> TypeU
+  -> MorlocMonad (Gamma, TypeU, [AnnoS (Indexed TypeU) ManyPoly Int])
+foldCheck g [] t = return (g, t, [])
+foldCheck g (x:xs) t = do
+  (g', t', x') <- checkG g x t
+  (g'', t'', xs') <- foldCheck g' xs t'
+  return (g'', t'', x':xs')
+
+
 checkE
   :: Int
   -> Gamma
-  -> SExpr Int Many Int
+  -> ExprS Int ManyPoly Int
   -> TypeU
   -> MorlocMonad
        ( Gamma
        , TypeU
-       , SExpr (Indexed TypeU) Many Int
+       , ExprS (Indexed TypeU) ManyPoly Int
        )
 checkE i g1 (LstS (e:es)) (AppU v [t]) = do
-  (g2, t2, e') <- checkG' g1 e t 
+  (g2, t2, e') <- checkG g1 e t
   -- LstS [] will go to the normal Sub case
-  (g3, t3, LstS es') <- checkE i g2 (LstS es) (AppU v [t2])
+  (g3, t3, LstS es') <- checkE' i g2 (LstS es) (AppU v [t2])
   return (g3, t3, LstS (map (applyGen g3) (e':es')))
 
 checkE i g0 e0@(LamS vs body) t@(FunU as b)
     | length vs == length as = do
         let g1 = g0 ++> zipWith AnnG vs as
-        (g2, t2, e2) <- checkG' g1 body b 
+        (g2, t2, e2) <- checkG g1 body b
 
         let t3 = apply g2 (FunU as t2)
             e3 = applyCon g2 (LamS vs e2)
 
         return (g2, t3, e3)
 
-    | otherwise = do 
+    | otherwise = do
         (g', e') <- expand (length as - length vs) g0 e0
-        checkE i g' e' t
+        checkE' i g' e' t
 
 checkE i g1 e1 (ForallU v a) = checkE' i (g1 +> v) e1 (substitute v a)
 
@@ -478,66 +593,102 @@ subtype' i a b g = do
 
 -- helpers
 
--- apply context to a SAnno
+-- apply context to a AnnoS
 applyGen :: (Functor gf, Traversable f, Applicable g)
-         => Gamma -> SAnno (gf g) f c -> SAnno (gf g) f c
-applyGen g = mapSAnno (fmap (apply g)) id
+         => Gamma -> AnnoS (gf g) f c -> AnnoS (gf g) f c
+applyGen g = mapAnnoSG (fmap (apply g))
 
 applyCon :: (Functor gf, Traversable f, Applicable g)
-         => Gamma -> SExpr (gf g) f c -> SExpr (gf g) f c
-applyCon g = mapSExpr (fmap (apply g)) id
+         => Gamma -> ExprS (gf g) f c -> ExprS (gf g) f c
+applyCon g = mapExprSG (fmap (apply g))
+
+evaluateAnnoSTypes :: Traversable f => AnnoS (Indexed TypeU) f Int -> MorlocMonad (AnnoS (Indexed TypeU) f Int)
+evaluateAnnoSTypes = mapAnnoSGM resolve where
+  resolve :: Indexed TypeU -> MorlocMonad (Indexed TypeU)
+  resolve (Idx m t) = do
+    scope <- getScope m
+    case TE.evaluateType scope t of
+      (Left e) -> MM.throwError e
+      (Right tu) -> return (Idx m tu)
+
+  getScope :: Int -> MorlocMonad Scope
+  getScope i= do
+    globalMap <- MM.gets stateGeneralTypedefs
+    case GMap.lookup i globalMap of
+      GMapNoFst -> return Map.empty
+      GMapNoSnd -> return Map.empty
+      GMapJust scope -> return scope
 
 
 ---- debugging
 
-synthG' g x = do
-  enter "synthG"
-  r <- synthG g x
-  leave "synthG"
-  return r
 
-checkG' g x t = do
-  enter "checkG"
-  r <- checkG g x t
-  leave "checkG"
-  return r
-
+synthE'
+  :: Int
+  -> Gamma
+  -> ExprS Int ManyPoly Int
+  -> MorlocMonad
+       ( Gamma
+       , TypeU
+       , ExprS (Indexed TypeU) ManyPoly Int
+       )
 synthE' i g x = do
   enter "synthE"
   insetSay $ "synthesize type for: " <> peakSExpr x
-  seeGamma g
-  r@(g', t, _) <- synthE i g x 
+  r@(g', t, _) <- synthE i g x
   leave "synthE"
   seeGamma g'
   insetSay $ "synthesized type = " <> pretty t
   return r
 
+
+checkE'
+  :: Int
+  -> Gamma
+  -> ExprS Int ManyPoly Int
+  -> TypeU
+  -> MorlocMonad
+       ( Gamma
+       , TypeU
+       , ExprS (Indexed TypeU) ManyPoly Int
+       )
 checkE' i g x t = do
   enter "checkE"
   insetSay $ "check if expr: " <> peakSExpr x
   insetSay $ "matches type: " <> pretty t
-  seeGamma g
-  r@(g', t', _) <- checkE i g x t 
+  r@(g', t', _) <- checkE i g x t
   leave "checkE"
   seeGamma g'
   seeType t'
   return r
 
+
+application'
+  :: Int
+  -> Gamma
+  -> [AnnoS Int ManyPoly Int]
+  -> TypeU
+  -> MorlocMonad
+      ( Gamma
+      , TypeU
+      , [AnnoS (Indexed TypeU) ManyPoly Int]
+      )
 application' i g es t = do
   enter "application"
-  seeGamma g
   seeType t
+  insetSay $ "es:" <+> list [peakSExpr e | (AnnoS _ _ e) <- es]
   r@(g',t',_) <- application i g es t
   leave "application"
   seeGamma g'
   seeType t'
-  -- mapM_ peakGen es'
   return r
 
-peakSExpr :: SExpr Int Many Int -> MDoc
+peakSExpr :: ExprS Int ManyPoly Int -> MDoc
 peakSExpr UniS = "UniS"
-peakSExpr (VarS v) = "VarS" <+> pretty v
-peakSExpr (AccS _ k) = "AccS" <> brackets (pretty k)
+peakSExpr (VarS v (MonomorphicExpr mayT _)) = "VarS" <+> pretty v <+> "::" <+> maybe "?" pretty mayT
+peakSExpr (VarS v (PolymorphicExpr cls _ t _)) = "VarS" <+> pretty cls <+> " => " <+> pretty v <+> "::" <+> pretty t
+peakSExpr (BndS v) = "BndS" <+> pretty v
+peakSExpr (AccS k _) = "AccS" <> brackets (pretty k)
 peakSExpr (AppS _ xs) = "AppS" <+> "nargs=" <> pretty (length xs)
 peakSExpr (LamS vs _) = "LamS" <> tupled (map pretty vs)
 peakSExpr (LstS xs) = "LstS" <> "n=" <> pretty (length xs)
@@ -548,21 +699,3 @@ peakSExpr (IntS x) = "IntS" <+> pretty x
 peakSExpr (LogS x) = "LogS" <+> pretty  x
 peakSExpr (StrS x) = "StrS" <+> pretty x
 peakSExpr (CallS src) = "CallS" <+> pretty src
-
-
-evaluateSAnnoTypes :: SAnno (Indexed TypeU) Many Int -> MorlocMonad (SAnno (Indexed TypeU) Many Int)
-evaluateSAnnoTypes = mapSAnnoM resolve return where
-  resolve :: Indexed TypeU -> MorlocMonad (Indexed TypeU)
-  resolve (Idx m t) = do
-    scope <- getScope m
-    case TE.evaluateType scope t of
-      (Left e) -> MM.throwError e
-      (Right tu) -> return (Idx m tu)
-
-  getScope :: Int -> MorlocMonad Scope
-  getScope i= do
-    globalMap <- CMS.gets stateGeneralTypedefs
-    case GMap.lookup i globalMap of
-      GMapNoFst -> return Map.empty
-      GMapNoSnd -> return Map.empty
-      GMapJust scope -> return scope

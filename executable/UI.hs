@@ -13,7 +13,7 @@ opts :: ParserInfo CliCommand
 opts = info (cliParser <**> helper)
   (    fullDesc
     <> progDesc "call 'morloc make -h', 'morloc install -h', etc for details"
-    <> header "morloc v0.43.0"  -- FIXME: HARDCODED VERSION NUMBER!!!
+    <> header "morloc v0.44.0"  -- FIXME: HARDCODED VERSION NUMBER!!!
   )
 
 
@@ -43,7 +43,7 @@ data MakeCommand = MakeCommand
 
 makeCommandParser :: Parser MakeCommand
 makeCommandParser = MakeCommand
-  <$> optExpression 
+  <$> optExpression
   <*> optConfig
   <*> optVerbose
   <*> optVanilla
@@ -70,7 +70,7 @@ makeInstallParser = InstallCommand
   <*> optVanilla
   <*> optModuleName
 
-installSubcommand :: Mod CommandFields CliCommand 
+installSubcommand :: Mod CommandFields CliCommand
 installSubcommand = command "install" (info (CmdInstall <$> makeInstallParser) (progDesc "install a morloc module"))
 
 
@@ -96,12 +96,12 @@ makeTypecheckParser = TypecheckCommand
   <*> optRealize
   <*> optScript
 
-typecheckSubcommand :: Mod CommandFields CliCommand 
+typecheckSubcommand :: Mod CommandFields CliCommand
 typecheckSubcommand =
   command "typecheck" (info (CmdTypecheck <$> makeTypecheckParser) (progDesc "typecheck a morloc program"))
 
 
-dumpSubcommand :: Mod CommandFields CliCommand 
+dumpSubcommand :: Mod CommandFields CliCommand
 dumpSubcommand =
   command "dump" (info (CmdDump <$> makeDumpParser) (progDesc "dump parsed code"))
 

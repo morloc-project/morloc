@@ -1,0 +1,29 @@
+module main (foo, bar)
+
+type Cpp => Int = "int"
+type Cpp => Real = "double"
+type Cpp => Str = "std::string"
+
+type Py => Int = "int"
+type Py => Real = "float"
+type Py => Str = "str"
+
+class Add a where
+  add :: a -> a -> a
+
+instance Add Int where
+  source Cpp from "foo.hpp" ("addInt" as add)
+  source Py from "foo.py" ("addInt" as add)
+
+instance Add Real where
+  source Cpp from "foo.hpp" ("addReal" as add)
+  source Py from "foo.py" ("addReal" as add)
+
+instance Add Str where
+  source Cpp from "foo.hpp" ("addStr" as add)
+  source Py from "foo.py" ("addStr" as add)
+
+bar :: Real -> Real -> Real
+bar x y = add x (add y x)
+
+foo x y = add x (add y "yolo")

@@ -1,12 +1,14 @@
 module lib.json (JsonObj, Str)
 
-source Py from "json.py"
-  ( "packJsonObj" as packJsonObj
-  , "unpackJsonObj" as unpackJsonObj
-  )
-
 type Py => Str = "str"
 type Py => JsonObj = "dict"
 
-packJsonObj   :: pack   => Str -> JsonObj
-unpackJsonObj :: unpack => JsonObj -> Str
+class Packable a b where
+  pack :: a -> b
+  unpack :: b -> a
+
+instance Packable (Str) JsonObj where
+  source Py from "json.py"
+    ( "packJsonObj" as pack
+    , "unpackJsonObj" as unpack
+    )

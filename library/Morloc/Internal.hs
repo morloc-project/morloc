@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Internal
 Description : Internal utility functions
-Copyright   : (c) Zebulun Arendsee, 2021
+Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -44,7 +44,7 @@ module Morloc.Internal
   , (</>) -- Filesystem utility operators from System.FilePath
   , (<|>) -- alternative operator
   , (&&&) -- (a -> a') -> (b -> b') -> (a, b) -> (a', b')
-  , (***) -- (a -> b) -> (a -> c) -> a -> (b, c) 
+  , (***) -- (a -> b) -> (a -> c) -> a -> (b, c)
   -- ** map and set helper functions
   , keyset
   , valset
@@ -112,7 +112,7 @@ minimumOnDef :: Ord b => a -> (a -> b) -> [a] -> a
 minimumOnDef x _ [] = x
 minimumOnDef _ f xs = minimumOn f xs
 
-uncurry3 :: (a -> b -> c -> d) -> (a, b, c) -> d 
+uncurry3 :: (a -> b -> c -> d) -> (a, b, c) -> d
 uncurry3 f (x, y, z) = f x y z
 
 curry3 :: ((a, b, c) -> d) -> a -> b -> c -> d
@@ -145,14 +145,14 @@ concatMapM f = fmap concat . mapM f
 
 -- | remove duplicated elements in a list while preserving order
 unique :: Ord a => [a] -> [a]
-unique = unique' Set.empty where 
+unique = unique' Set.empty where
   unique' _   [] = []
   unique' set (x:xs)
     | Set.member x set = unique' set xs
     | otherwise = x : unique' (Set.insert x set) xs
 
 -- | Build an ordered list of duplicated elements
-duplicates :: Ord a => [a] -> [a] 
+duplicates :: Ord a => [a] -> [a]
 duplicates xs = unique $ filter isDuplicated xs where
   -- countMap :: Ord a => Map.Map a Int
   countMap = Map.fromList . map (\ks -> (head ks, length ks)) . group . sort $ xs
@@ -179,21 +179,21 @@ statefulMapM f s (x:xs) = do
 filterApart :: (a -> Bool) -> [a] -> (Maybe a, [a])
 filterApart _ [] = (Nothing, [])
 filterApart f (x:xs)
-  | f x = (Just x, xs)  
-  | otherwise = case filterApart f xs of 
-    (r, xs') -> (r, x:xs') 
+  | f x = (Just x, xs)
+  | otherwise = case filterApart f xs of
+    (r, xs') -> (r, x:xs')
 
 safeZip :: [a] -> [b] -> Maybe [(a, b)]
 safeZip (x:xs) (y:ys) = (:) (x,y) <$> safeZip xs ys
 safeZip [] [] = Just []
 safeZip _ _ = Nothing
 
-safeZipWith :: (a -> b -> c) -> [a] -> [b] -> Maybe [c] 
+safeZipWith :: (a -> b -> c) -> [a] -> [b] -> Maybe [c]
 safeZipWith f xs ys
     | length xs == length ys = Just $ zipWith f xs ys
     | otherwise = Nothing
 
-safeZipWithM :: Monad m => (a -> b -> m c) -> [a] -> [b] -> m (Maybe [c]) 
+safeZipWithM :: Monad m => (a -> b -> m c) -> [a] -> [b] -> m (Maybe [c])
 safeZipWithM f xs ys
     | length xs == length ys = zipWithM f xs ys |>> Just
     | otherwise = return Nothing
