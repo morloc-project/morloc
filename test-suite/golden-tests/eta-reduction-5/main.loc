@@ -3,6 +3,11 @@ module main (foo0, foo1, foo2)
 import base (zipWith, add)
 import conventions(Real, List)
 
+foo0 :: [Real] -> [Real] -> [Real]
 foo0 = zipWith add
+
+foo1 :: [Real] -> [Real] -> [Real]
 foo1 xs = zipWith add xs
+
+foo2 :: [Real] -> [Real] -> [Real]
 foo2 xs ys = zipWith add xs ys

@@ -3,4 +3,5 @@ module main (foo)
 import conventions (List, Real)
 import pybase (map, add)
 
+foo :: Real -> [Real] -> [Real]
 foo x xs = map (add x) xs

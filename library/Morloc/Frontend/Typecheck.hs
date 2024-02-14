@@ -34,9 +34,6 @@ typecheck = mapM run where
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
 
-      -- s <- MM.gets stateSignatures
-      -- MM.sayVVV $ "stateSignatures:\n  " <> pretty s
-
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
       let g0 = Gamma {gammaCounter = 0, gammaContext = []}
           ((_, g1), e1) = renameAnnoS (Map.empty, g0) e0
@@ -102,7 +99,7 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
         MM.sayVVV $ "resolveInstance empty"
                   <> "\n  rss:" <+> pretty rss
                   <> "\n  gt:" <+> pretty gt
-        return undefined
+        MM.throwError $ NoInstanceFound clsName v
       -- if there are many suitable instances, still die (maybe add handling for
       -- less conherent cases later)
       manyTypes -> do
@@ -110,7 +107,7 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
                   <> "\n  manyTypes:" <+> encloseSep "{" "}" "," (map pretty manyTypes)
                   <> "\n  rssSubtypes:" <+> pretty rssSubtypes
                   <> "\n  gt:" <+> pretty gt
-        return undefined
+        MM.throwError $ AmbiguousInstances clsName v
 
     (g3, es2) <- statefulMapM resolveInstances g2 es1
 
@@ -233,6 +230,12 @@ synthE i g0 (AppS f xs0) = do
   -- synthesize the type of the function
   (g1, funType0, funExpr0) <- synthG g0 f
 
+  MM.sayVVV $ "synthE AppS"
+            <> "\n  f:" <+> pretty f
+            <> "\n  xs0:" <+> list (map pretty xs0)
+            <> "\n  funType0:" <+> pretty funType0
+            <> "\n  funExpr0:" <+> pretty funExpr0
+
   -- eta expand
   mayExpanded <- etaExpand g1 f xs0 funType0
 
@@ -244,6 +247,9 @@ synthE i g0 (AppS f xs0) = do
 
       -- extend the function type with the type of the expressions it is applied to
       (g2, funType1, inputExprs) <- application' i g1 xs0 (normalizeType funType0)
+
+      MM.sayVVV $ "  funType1:" <+> pretty funType1
+                <> "\n  inputExprs:" <+> list (map pretty inputExprs)
 
       -- determine the type after application
       appliedType <- case funType1 of
@@ -408,24 +414,37 @@ synthE _ g (BndS v) = do
   return (g', t', BndS v)
 
 
-etaExpand :: Gamma -> AnnoS Int f Int -> [AnnoS Int f Int] -> TypeU -> MorlocMonad (Maybe (Gamma, ExprS Int f Int))
-etaExpand g0 f0 xs0@(length -> termSize) (normalizeType -> FunU (length -> typeSize) _)
-    | termSize == typeSize = return Nothing
-    | otherwise = Just <$> etaExpandE g0 (AppS f0 xs0)
-    where
+etaExpand
+  :: Gamma
+  -> AnnoS Int ManyPoly Int
+  -> [AnnoS Int ManyPoly Int]
+  -> TypeU
+  -> MorlocMonad (Maybe (Gamma, ExprS Int ManyPoly Int))
+etaExpand g0 f0 xs0 t0 = etaExpand' g0 f0 xs0 t0 where
+    -- ignore qualification
+    etaExpand' g f xs (ForallU _ t) = etaExpand' g f xs t
+    -- find the number of applied terms for the term and the type
+    etaExpand' g f@(AnnoS gidx _ _) xs@(length -> termSize) (normalizeType -> FunU (length -> typeSize) _)
+        -- if they are equal, then the function is fully applied, do nothing
+        | termSize == typeSize = return Nothing
+        -- if there are fewer terms, then eta expand
+        | termSize < typeSize = Just <$> etaExpandE (AppS f xs)
+        -- if there are more terms than the type permits, then raise an error
+        | otherwise = gerr gidx $ InvalidApplication f xs t0
+        where
+        etaExpandE :: ExprS Int ManyPoly Int -> MorlocMonad (Gamma, ExprS Int ManyPoly Int)
+        etaExpandE e@(AppS _ _) = tryExpand (typeSize - termSize) e
+        etaExpandE e@(LamS vs _) = tryExpand (typeSize - termSize - length vs) e
+        etaExpandE e = return (g, e)
 
-    etaExpandE :: Gamma -> ExprS Int f Int -> MorlocMonad (Gamma, ExprS Int f Int)
-    etaExpandE g e@(AppS _ _) = tryExpand (typeSize - termSize) g e
-    etaExpandE g e@(LamS vs _) = tryExpand (typeSize - termSize - length vs) g e
-    etaExpandE g e = return (g, e)
-
-    tryExpand n g e
-        -- A partially applied term intended to return a function (e.g., `(\x y -> add x y) x |- Real -> Real`)
-        -- A fully applied term
-        | n <= 0 = return (g, e)
-        | otherwise = expand n g e
-
-etaExpand _ _ _ _ = return Nothing
+        tryExpand n e
+            -- A partially applied term intended to return a function (e.g., `(\x y -> add x y) x |- Real -> Real`)
+            -- A fully applied term
+            | n <= 0 = return (g, e)
+            | otherwise = expand n g e
+    -- If term that is applied is not a function, do nothing. The application is
+    -- not correct, but the error will be caught later.
+    etaExpand' _ _ _ _ = return Nothing
 
 
 expand :: Int -> Gamma -> ExprS Int f Int -> MorlocMonad (Gamma, ExprS Int f Int)

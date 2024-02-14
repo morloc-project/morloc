@@ -9,6 +9,7 @@ import conventions (Real)
 --
 -- bar x y z = foo0 x . foo1 y . foo2 z
 
+bar :: Real -> Real -> Real -> Real -> Real
 bar x y z = add x . add y . add z
 
 -- bar x1 x2 x3 x4 = add x1 (add x2 (add x3 x4))

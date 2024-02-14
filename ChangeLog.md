@@ -57,6 +57,13 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Ensure github actions passes
 
 
+0.45.0 [2024.02.14]
+-------------------
+
+ * Allow explicit import of polymorphic terms
+ * Fix infinite loop bug when two many arguments are applied to a function
+ * Synchronise tests with new core libraries type classes
+
 0.44.0 [2024.02.08]
 -------------------
 

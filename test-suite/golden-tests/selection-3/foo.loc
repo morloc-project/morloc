@@ -1,8 +1,10 @@
 module main (foo)
 
-import conventions (List, Real)
-source R from "rms.R" ("rms1" as rms, "rms2" as rms, "add") 
+type R => Real = "numeric"
+type R => List a = "list" a
 
+source R from "rms.R" ("rms1" as rms, "rms2" as rms, "add") 
 rms :: [Real] -> Real
 add :: Real -> Real -> Real
+
 foo xs ys = add (rms xs) (rms ys)

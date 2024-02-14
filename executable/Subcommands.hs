@@ -107,23 +107,12 @@ cmdTypecheck args _ config = do
 
 writeFrontendTypecheckOutput :: Int -> ((Either MorlocError [AnnoS (Indexed TypeU) Many Int], [MT.Text]), MorlocState) -> MDoc
 writeFrontendTypecheckOutput _ ((Left e, _), _) = pretty e
-writeFrontendTypecheckOutput 0 ((Right xs, _), s) = vsep (map (writeFrontendTypes s) xs)
-writeFrontendTypecheckOutput 1 ((Right xs, _), s) = "\nExports:\n\n" <> vsep (map (writeFrontendTypes s) xs)
+writeFrontendTypecheckOutput 0 ((Right xs, _), _) = vsep (map writeFrontendTypes xs)
+writeFrontendTypecheckOutput 1 x = writeFrontendTypecheckOutput 0 x -- no difference in verbosity
 writeFrontendTypecheckOutput _ _ = "I don't know how to be that verbose"
 
-writeFrontendTypes :: MorlocState -> AnnoS (Indexed TypeU) Many Int -> MDoc
-writeFrontendTypes  s (AnnoS (Idx gidx t) _ _) = writeTerm s gidx (pretty t)
-
-writeTerm :: MorlocState -> Int -> MDoc -> MDoc
-writeTerm s i typeDoc =
-    case ( Map.lookup i (stateName s)
-         , GMap.lookup i (stateSignatures s))
-    of
-        (Just v, GMapJust (Monomorphic TermTypes{termGeneral = Just t'})) -> pretty v <+> "::" <+> pretty t'
-        (Just _, GMapJust (Polymorphic cls v t _)) -> "class" <+> pretty cls <+> pretty v <+> "::" <+> pretty (etype t)
-        (Just v, _) -> pretty v <+> "|-" <+> typeDoc
-        _ -> "MISSING"
-
+writeFrontendTypes :: AnnoS (Indexed TypeU) Many Int -> MDoc
+writeFrontendTypes  (AnnoS (Idx _ t) _ e) = pretty e <+> "::" <+> pretty t 
 
 writeTypecheckOutput :: Int -> ((Either MorlocError [(Lang, [SerialManifold])], [MT.Text]), MorlocState) -> MDoc
 writeTypecheckOutput _ ((Left e, _), _) = pretty e

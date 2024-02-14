@@ -1,6 +1,7 @@
 module main (foo)
 
-import conventions (Real)
+type Cpp => Real = "double"
+
 import bar (add)
 import baz (mul)
 

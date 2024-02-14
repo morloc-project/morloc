@@ -35,8 +35,6 @@ module Morloc.Monad
   , setCounter
   , takeFromCounter
   -- * metadata accessors
-  , metaMonomorphicTermTypes
-  , metaTermTypes
   , metaSources
   , metaName
   , metaTypedefs
@@ -230,22 +228,6 @@ readLang langStr =
     (Just x) -> return x
     Nothing -> throwError $ UnknownLanguage langStr
 
-
-metaMonomorphicTermTypes :: Int -> MorlocMonad (Maybe TermTypes)
-metaMonomorphicTermTypes i = do
-  s <- get
-  return $ case GMap.lookup i (stateSignatures s) of
-    (GMapJust (Monomorphic t)) -> Just t
-    _ -> Nothing
-
-
-metaTermTypes :: Int -> MorlocMonad (Maybe [TermTypes])
-metaTermTypes i = do
-  s <- get
-  return $ case GMap.lookup i (stateSignatures s) of
-    (GMapJust (Monomorphic t)) -> Just [t]
-    (GMapJust (Polymorphic _ _ _ ts)) -> Just ts
-    _ -> Nothing
 
 -- | Return sources for constructing an object. These are used by `NamE NamObject`
 -- expressions. Sources here includes some that are not linked to signatures, such

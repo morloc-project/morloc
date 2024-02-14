@@ -4,4 +4,5 @@ import pybase (zipWith, mul)
 import conventions (List, Real)
 
 -- literal function with no application
+foo :: [Real] -> [Real] -> [Real]
 foo xs ys = zipWith mul xs ys

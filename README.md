@@ -275,5 +275,5 @@ List Real -> Real
 
 The concrete type of `mul` is currently written as a binary function of
 doubles. Ideally this function should accept any numbers (e.g., an `int` and a
-`double`). Eventually I will add typeclasses which will allow more useful
-definitions.
+`double`). This can be accomplished with typeclasses. These are now supported
+but still a tad experimental.

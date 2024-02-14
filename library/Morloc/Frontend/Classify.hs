@@ -13,42 +13,68 @@ module Morloc.Frontend.Classify (linkTypeclasses) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
-import qualified Control.Monad.State as CMS
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Text as DT
 import Morloc.Typecheck.Internal (unqualify, qualify)
-import Morloc.Frontend.Merge (mergeTermTypes, weaveTermTypes, mergeTypeclasses, unionTermTypes)
+import Morloc.Frontend.Merge (weaveTermTypes, mergeTypeclasses, mergeSignatureSet, mergeFirstIndexM)
 
 
+-- Merge two indexed instances keeping the left index
+mergeIndexedInstances = mergeFirstIndexM mergeTypeclasses
+
+-- Handle typeclasses
+--
+--  * Write all global typeclasses into state, this is needed currently just for
+--    serialization
+--
+--  * Associate each variable with polymorphic
 linkTypeclasses
   :: MVar
   -> ExprI
-  -> [(m, e, Map.Map EVar (ClassName, [TVar], EType, [TermTypes]))]
-  -> MorlocMonad (Map.Map EVar (ClassName, [TVar], EType, [TermTypes]))
-linkTypeclasses _ e es
+  -> [(m, [(EVar, EVar)], Map.Map EVar (Indexed Instance))]
+  -> MorlocMonad (Map.Map EVar (Indexed Instance))
+linkTypeclasses mv e es = do
+
+  -- remove any instance implementations that are not imported
+  let instances = [pruneInstances imports maps | (_, imports, maps) <- es]
+
+  MM.sayVVV $ "linkTypeclasses" <+> pretty mv
+
   -- Merge the typeclasses and instances from all imported modules
   -- These are inherited implicitly, so import terms are ignored
-  = Map.unionsWithM mergeTypeclasses [x | (_,_,x) <- es]
+  kids <- Map.unionsWithM mergeIndexedInstances instances
+
   -- Augment the inherited map with the typeclasses and instances in this module
-  >>= findTypeclasses e
+  findTypeclasses e kids
+
+pruneInstances :: [(EVar, EVar)] -> Map.Map EVar (Indexed Instance) -> Map.Map EVar (Indexed Instance) 
+pruneInstances imports = Map.mapWithKey checkInstance where
+  checkInstance :: EVar -> Indexed Instance -> Indexed Instance
+  checkInstance v inst@(Idx i t) = case lookup v imports of
+    (Just v') -> if v == v'
+                 then inst
+                 else error "Cannot alias polymorphic terms"
+    Nothing -> Idx i $ t {instanceTerms = []}
 
 findTypeclasses
   :: ExprI
-  -> Map.Map EVar (ClassName, [TVar], EType, [TermTypes])
-  -> MorlocMonad (Map.Map EVar (ClassName, [TVar], EType, [TermTypes]))
+  -> Map.Map EVar (Indexed Instance)
+  -> MorlocMonad (Map.Map EVar (Indexed Instance))
 findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
 
 
   -- first we collect all typeclass definitions in this module
   -- typeclasses are defined only at the top-level, so no descent into sub-expressions
-  localClasses <- Map.unionsWithM mergeTypeclasses
-                . map makeClass
-                $ [(cls, vs, sigs) | (ExprI _ (ClsE cls vs sigs)) <- es0]
+  localClasses <- mapM makeClass [(cls, vs, sigs) | (ExprI _ (ClsE cls vs sigs)) <- es0]
+               >>= Map.unionsWithM mergeIndexedInstances
 
   -- then merge them with all prior typeclasses and instances
-  allClasses <- Map.unionWithM mergeTypeclasses priorClasses localClasses
+  allClasses <- Map.unionWithM mergeIndexedInstances priorClasses localClasses
+
+  MM.sayVVV $ "findTypeclasses"
+            <> "\n  allClasses keys:" <+> pretty (Map.keys allClasses)
 
   -- find instances in this module
   -- The (IstE cls ts es) terms refer to
@@ -61,16 +87,7 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
   -- fold the instances into the current typeclass map and return
   moduleClasses <- foldlM addInstance allClasses instances
 
-  MM.sayVVV $ "moduleClasses:"
-         <+> list (
-           map ( \ (v, (cls,vs,et,ts))
-                 -> pretty v <+> "="
-                 <+> pretty cls
-                 <+> pretty vs
-                 <+> parens (pretty (etype et))
-                 <+> list (map pretty ts)
-              ) (Map.toList moduleClasses)
-         )
+  MM.sayVVV $ "moduleClasses:" <+> prettyClsmap moduleClasses
 
   _ <- updateTypeclasses moduleClasses
 
@@ -81,21 +98,32 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
   where
     -- make a map of all terms that are defined in a typeclass (these will all
     -- be general term)
-    makeClass :: (ClassName, [TVar], [Signature]) -> Map.Map EVar (ClassName, [TVar], EType, [TermTypes])
-    makeClass (cls, vs, sigs) = Map.fromList $ map makeClassTerm sigs where
-      makeClassTerm :: Signature -> (EVar, (ClassName, [TVar], EType, [TermTypes]))
-      makeClassTerm (Signature v _ t) = (v, (cls, vs, t, []))
+    makeClass :: (ClassName, [TVar], [Signature]) -> MorlocMonad (Map.Map EVar (Indexed Instance))
+    makeClass (cls, vs, sigs) = mapM makeClassTerm sigs >>= fromListWithM mergeIndexedInstances where
+      makeClassTerm :: Signature -> MorlocMonad (EVar, Indexed Instance)
+      makeClassTerm (Signature v _ t) = do
+        i <- MM.getCounter
+        return (v, Idx i (Instance cls vs t []))
 
     addInstance
-      :: Map.Map EVar (ClassName, [TVar], EType, [TermTypes])
+      :: Map.Map EVar (Indexed Instance)
       -> (ClassName, [TypeU], [ExprI])
-      -> MorlocMonad (Map.Map EVar (ClassName, [TVar], EType, [TermTypes]))
-    addInstance clsmap (_, _, []) = return clsmap
-    addInstance clsmap (cls0, ts0, es) = mapM f es |>> Map.fromListWith mergeInstances where
-      f :: ExprI -> MorlocMonad (EVar, (ClassName, [TVar], EType, [TermTypes]))
-      f (ExprI srcIndex (SrcE src)) =
+      -> MorlocMonad (Map.Map EVar (Indexed Instance))
+    addInstance clsmap (cls0 , ts0, []) = do
+      MM.sayVVV $ "addInstance: in module" <+> pretty moduleName <+> "empty instance" <+> pretty cls0 <+> hsep (map (parens . pretty) ts0)
+      return clsmap
+    addInstance clsmap (cls0, ts0, es) = do
+      MM.sayVVV $ "addInstance: in module" <+> pretty moduleName <+> "adding instance" <+> pretty cls0 <+> hsep (map (parens . pretty) ts0)
+      newinst <- mapM f es >>= fromListWithM mergeIndexedInstances
+      Map.unionWithM mergeIndexedInstances newinst clsmap
+      where
+      f :: ExprI -> MorlocMonad (EVar, Indexed Instance)
+      f (ExprI srcIndex (SrcE src)) = do
+        MM.sayVVV $ "  src:" <+> pretty src
+                  <> "\n  clsmap:" <+> prettyClsmap clsmap
+
         case Map.lookup (srcAlias src) clsmap of
-          (Just (cls1, vs, generalType, otherInstances)) -> do
+          (Just (Idx instIdx (Instance cls1 vs generalType otherInstances))) -> do
             when (cls1 /= cls0) (MM.throwError $ ConflictingClasses cls1 cls0 (srcAlias src))
             when (length vs /= length ts0) (MM.throwError $ InstanceSizeMismatch cls1 vs ts0)
             instanceType <- substituteInstanceTypes vs (etype generalType) ts0
@@ -110,12 +138,12 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
                       <> "\n  instanceType:" <+> pretty instanceType
                       <> "\n  newTerm:" <+> pretty newTerm
 
-            return (srcAlias src, (cls0, vs, generalType, typeterms))
+            return (srcAlias src, Idx instIdx (Instance cls0 vs generalType typeterms))
           Nothing ->  MM.throwError $ MissingTypeclassDefinition cls0 (srcAlias src)
 
       f (ExprI _ (AssE v e _)) =
         case Map.lookup v clsmap of
-          (Just (cls1, vs, generalType, otherInstances)) -> do
+          (Just (Idx instIdx (Instance cls1 vs generalType otherInstances))) -> do
             when (cls1 /= cls0) (MM.throwError $ ConflictingClasses cls1 cls0 v)
             when (length vs /= length ts0) (MM.throwError $ InstanceSizeMismatch cls1 vs ts0)
             instanceType <- substituteInstanceTypes vs (etype generalType) ts0
@@ -130,25 +158,20 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
                       <> "\n  instanceType:" <+> pretty instanceType
                       <> "\n  newTerm:" <+> pretty newTerm
 
-            return (v, (cls0, vs, generalType, typeterms))
+            return (v, Idx instIdx (Instance cls0 vs generalType typeterms))
           Nothing -> MM.throwError $ MissingTypeclassDefinition cls0 v
 
       f (ExprI _ e) = MM.throwError $ IllegalExpressionInInstance cls0 ts0 e
 
-      mergeInstances
-        :: (ClassName, [TVar], EType, [TermTypes])
-        -> (ClassName, [TVar], EType, [TermTypes])
-        -> (ClassName, [TVar], EType, [TermTypes])
-      mergeInstances (cls1, vs1, e1, ts1) (cls2, vs2, e2, ts2)
-        | cls1 == cls2, length vs1 == length vs2, equivalent (etype e1) (etype e2) = (cls1, vs1, e1, unionTermTypes ts1 ts2)
-        | otherwise = error "failed to merge"
+    fromListWithM :: (Monad m, Ord k) => (v -> v -> m v) -> [(k,v)] -> m (Map.Map k v) 
+    fromListWithM f xs = Map.unionsWithM f $ map (Map.fromList . return) xs
 
     linkVariablesToTypeclasses
-      :: Map.Map EVar (ClassName, [TVar], EType, [TermTypes])
+      :: Map.Map EVar (Indexed Instance) 
       -> ExprI
       -> MorlocMonad ()
     linkVariablesToTypeclasses = link where
-      link :: Map.Map EVar (ClassName, [TVar], EType, [TermTypes]) -> ExprI -> MorlocMonad ()
+      link :: Map.Map EVar (Indexed Instance) -> ExprI -> MorlocMonad ()
       -- The following may have terms from typeclasses
       -- 1. variables
       link m (ExprI i (VarE v)) = setClass m i v
@@ -170,27 +193,34 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
       link m (ExprI _ (NamE rs)) = mapM_ (link m . snd) rs
       link _ _ = return ()
 
-      setClass :: Map.Map EVar (ClassName, [TVar], EType, [TermTypes]) -> Int -> EVar -> MorlocMonad ()
+      setClass :: Map.Map EVar (Indexed Instance) -> Int -> EVar -> MorlocMonad ()
       setClass m termIndex v = case Map.lookup v m of
-        (Just (cls, _, t, ts)) -> do
+        (Just (Idx typeIndex (Instance cls _ t ts))) -> do
 
           MM.sayVVV $ "setClass map:" <+> viaShow m
 
-          mapM_ (mapSources cls v t) ts
-          mapM_ (mapExpressions cls v t) ts
+          mapM_ (mapSources typeIndex cls v t) ts
+          mapM_ (mapExpressions typeIndex  cls v t) ts
 
-          s <- CMS.get
+          s <- MM.get
           -- Yes, both indices are termIndex. After typechecking, the
           -- polymorphic type will resolve to monomorphic. Each may resolve
           -- differently, so instances must not all point to the same signature.
-          newMap <- GMap.insertWithM mergeSignatureSet termIndex termIndex (Polymorphic cls v t ts) (stateSignatures s)
-          CMS.put (s { stateSignatures = newMap
+          MM.sayVVV $ "mergeSignatureSet in setClass for"
+                    <> "\n i:" <+> pretty termIndex
+                    <> "\n j:" <+> pretty typeIndex
+                    <> "\n cls:" <+> pretty cls
+                    <> "\n v:" <+> pretty v
+                    <> "\n t:" <+> pretty t
+                    <> "\n ts:" <+> pretty ts
+          newMap <- GMap.insertWithM mergeSignatureSet termIndex typeIndex (Polymorphic cls v t ts) (stateSignatures s)
+          MM.put (s { stateSignatures = newMap
                      , stateName = Map.insert termIndex v (stateName s)})
           return ()
         Nothing -> return ()
 
-      mapSources :: ClassName -> EVar -> EType -> TermTypes -> MorlocMonad ()
-      mapSources cls v gt t = mapM_ (mapSource . snd) (termConcrete t) where
+      mapSources :: Int -> ClassName -> EVar -> EType -> TermTypes -> MorlocMonad ()
+      mapSources typeIndex cls v gt t = mapM_ (mapSource . snd) (termConcrete t) where
         mapSource :: Indexed Source -> MorlocMonad ()
         mapSource (Idx i src) = do
           let t' = TermTypes (termGeneral t) [(mv, srcidx) | (mv, srcidx) <- termConcrete t, val srcidx == src] []
@@ -199,37 +229,55 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
                     <> "\n  termGeneral t':" <+> pretty (termGeneral t')
                     <> "\n  length (termConcrete t):" <+> pretty (length (termConcrete t))
                     <> "\n  length (termConcrete t'):" <+> pretty (length (termConcrete t'))
-          s <- CMS.get
-          newMap <- GMap.insertWithM mergeSignatureSet i i (Polymorphic cls v gt [t']) (stateSignatures s)
-          CMS.put (s { stateSignatures = newMap })
+          s <- MM.get
+          MM.sayVVV $ "mergeSignatureSet src for"
+                    <> "\n i:" <+> pretty i
+                    <> "\n j:" <+> pretty typeIndex
+                    <> "\n cls:" <+> pretty cls
+                    <> "\n v:" <+> pretty v
+                    <> "\n t:" <+> pretty gt
+                    <> "\n ts:" <+> pretty [t']
+                    <> "\n statesignatures:" <+> pretty (stateSignatures s)
+          newMap <- GMap.insertWithM mergeSignatureSet i typeIndex (Polymorphic cls v gt [t']) (stateSignatures s)
+          MM.put (s { stateSignatures = newMap })
           return ()
 
-      mapExpressions :: ClassName -> EVar -> EType -> TermTypes -> MorlocMonad ()
-      mapExpressions cls v gt t = mapM_ mapExpression (termDecl t) where
+      mapExpressions :: Int -> ClassName -> EVar -> EType -> TermTypes -> MorlocMonad ()
+      mapExpressions typeIndex cls v gt t = mapM_ mapExpression (termDecl t) where
         mapExpression :: ExprI -> MorlocMonad ()
-        mapExpression (ExprI i _) = do
+        mapExpression (ExprI i e) = do
           MM.sayVVV $ "mapExpression" <+> pretty i
-          s <- CMS.get
-          let t' = TermTypes (termGeneral t) [] [e | e@(ExprI i' _) <- termDecl t, i' == i]
-          newMap <- GMap.insertWithM mergeSignatureSet i i (Polymorphic cls v gt [t']) (stateSignatures s)
-          CMS.put (s { stateSignatures = newMap })
+                    <> "\n  e:" <+> pretty e
+          s <- MM.get
+          let t' = TermTypes (termGeneral t) [] [e' | e'@(ExprI i' _) <- termDecl t, i' == i]
+          MM.sayVVV $ "mergeSignatureSet src for"
+                    <> "\n  mergeSignatureSet mapExpression for"
+                    <> "\n    i:" <+> pretty i
+                    <> "\n    j:" <+> pretty typeIndex
+                    <> "\n    cls:" <+> pretty cls
+                    <> "\n    v:" <+> pretty v
+                    <> "\n    t:" <+> pretty gt
+                    <> "\n    ts:" <+> pretty [t']
+          newMap <- GMap.insertWithM mergeSignatureSet i typeIndex (Polymorphic cls v gt [t']) (stateSignatures s)
+          MM.put (s { stateSignatures = newMap })
           return ()
 
-      mergeSignatureSet :: SignatureSet -> SignatureSet -> MorlocMonad SignatureSet
-      mergeSignatureSet (Polymorphic cls1 v1 t1 ts1) (Polymorphic cls2 v2 t2 ts2)
-        | cls1 == cls2 && equivalent (etype t1) (etype t2) && v1 == v2 = return $ Polymorphic cls1 v1 t1 (unionTermTypes ts1 ts2)
-        | otherwise = error "Invalid SignatureSet merge"
-      mergeSignatureSet (Monomorphic ts1) (Monomorphic ts2) = Monomorphic <$> mergeTermTypes ts1 ts2
-      mergeSignatureSet _ _ = undefined
-
-    updateTypeclasses :: Map.Map EVar (ClassName, [TVar], EType, [TermTypes]) -> MorlocMonad ()
+    updateTypeclasses :: Map.Map EVar (Indexed Instance) -> MorlocMonad ()
     updateTypeclasses m = do
       s <- MM.get
-      newMap <- Map.unionWithM mergeTypeclasses m (stateTypeclasses s)
+      newMap <- Map.unionWithM mergeTypeclasses (Map.map val m) (stateTypeclasses s)
       MM.put (s {stateTypeclasses = newMap})
 
 findTypeclasses _ _ = undefined
+ 
 
+prettyClsmap :: Map.Map EVar (Indexed Instance) -> Doc ann
+prettyClsmap clsmap
+  = list (
+           map ( \ (v, inst)
+                 -> pretty v <+> "=" <+> pretty inst
+              ) (Map.toList clsmap)
+         )
 
 {- Substitute the instance types into the class function definition
 

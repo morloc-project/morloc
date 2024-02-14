@@ -108,6 +108,7 @@ pModule expModuleName = do
         = Set.fromList $ [TermSymbol alias | (AliasedTerm _ alias) <- imps] <>
                          [TypeSymbol alias | (AliasedType _ alias) <- imps]
     findSymbols (ExprI _ (SrcE src)) = Set.singleton $ TermSymbol (srcAlias src)
+    findSymbols (ExprI _ (IstE _ _ es)) = Set.unions (map findSymbols es)
     findSymbols _ = Set.empty
 
 

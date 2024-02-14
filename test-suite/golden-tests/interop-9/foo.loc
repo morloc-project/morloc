@@ -1,6 +1,7 @@
 module m (foo)
 
-import conventions (Int)
+type R => Int = "integer"
+type Py => Int = "int"
 
 source R from "foo.R" ("add")
 source py from "foo.py" ("sub")

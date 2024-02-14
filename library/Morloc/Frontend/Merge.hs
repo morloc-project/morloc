@@ -21,6 +21,8 @@ module Morloc.Frontend.Merge
   , mergeTypeUs
   , mergeTypeclasses
   , unionTermTypes
+  , mergeSignatureSet
+  , mergeFirstIndexM
   ) where
 
 
@@ -34,6 +36,9 @@ module Morloc.Frontend.Merge
 
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
+
+mergeFirstIndexM :: Monad m => (a -> a -> m a) -> Indexed a -> Indexed a -> m (Indexed a) 
+mergeFirstIndexM f (Idx i x) (Idx _ y) = Idx i <$> f x y
 
 mergeTermTypes :: TermTypes -> TermTypes -> MorlocMonad TermTypes
 mergeTermTypes (TermTypes g1 cs1 es1) (TermTypes g2 cs2 es2)
@@ -75,16 +80,21 @@ mergeTypeUs t1 t2
   | equivalent t1 t2 = return t1
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
 
-mergeTypeclasses
-  :: (ClassName, [TVar], EType, [TermTypes])
-  -> (ClassName, [TVar], EType, [TermTypes])
-  -> MorlocMonad (ClassName, [TVar], EType, [TermTypes])
-mergeTypeclasses (cls1, vs1, t1, ts1) (cls2, vs2, t2, ts2)
+mergeTypeclasses :: Instance -> Instance -> MorlocMonad Instance
+mergeTypeclasses (Instance cls1 vs1 t1 ts1) (Instance cls2 vs2 t2 ts2)
   | cls1 /= cls2 = error "Conflicting typeclasses"
   | not (equivalent (etype t1) (etype t2)) = error "Conflicting typeclass term general type"
   | length vs1 /= length vs2 = error "Conflicting typeclass parameter count"
   -- here I should do reciprocal subtyping
-  | otherwise = return (cls1, vs1, t1, unionTermTypes ts1 ts2)
+  | otherwise = return $ Instance cls1 vs1 t1 (unionTermTypes ts1 ts2)
+
+
+mergeSignatureSet :: SignatureSet -> SignatureSet -> MorlocMonad SignatureSet
+mergeSignatureSet s1@(Polymorphic cls1 v1 t1 ts1) s2@(Polymorphic cls2 v2 t2 ts2)
+  | cls1 == cls2 && equivalent (etype t1) (etype t2) && v1 == v2 = return $ Polymorphic cls1 v1 t1 (unionTermTypes ts1 ts2)
+  | otherwise = MM.throwError $ CannotUnifySignatures s1 s2
+mergeSignatureSet (Monomorphic ts1) (Monomorphic ts2) = Monomorphic <$> mergeTermTypes ts1 ts2
+mergeSignatureSet s1 s2 = MM.throwError $ CannotUnifySignatures s1 s2
 
 
 unionTermTypes :: [TermTypes] -> [TermTypes] -> [TermTypes]

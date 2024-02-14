@@ -5,4 +5,5 @@ import pybase (zipWith, mul, add)
 
 add3 x y z = add x (add y z)
 
+foo :: Real -> [Real] -> [Real] -> [Real]
 foo x = zipWith (\y -> add3 (mul x y) y)

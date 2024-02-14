@@ -59,6 +59,7 @@ module Morloc.Namespace
   , MorlocMonad
   , MorlocState(..)
   , SignatureSet(..)
+  , Instance(..)
   , TermTypes(..)
   , MorlocReturn
   -- ** Package metadata
@@ -203,6 +204,14 @@ data SignatureSet = Monomorphic TermTypes | Polymorphic ClassName EVar EType [Te
   deriving(Show)
 
 
+data Instance = Instance
+  { className :: ClassName
+  , classVars :: [TVar]
+  , classType :: EType
+  , instanceTerms :: [TermTypes]
+  }
+  deriving(Show, Ord, Eq)
+
 data MorlocState = MorlocState
   { statePackageMeta :: [PackageMeta]
   -- ^ The parsed contents of a package.yaml file
@@ -213,7 +222,7 @@ data MorlocState = MorlocState
   , stateDepth :: Int
   -- ^ store depth in the AnnoS tree in the frontend and backend typecheckers
   , stateSignatures :: GMap Int Int SignatureSet
-  , stateTypeclasses :: Map.Map EVar (ClassName, [TVar], EType, [TermTypes])
+  , stateTypeclasses :: Map.Map EVar Instance
   , stateConcreteTypedefs :: GMap Int MVar (Map Lang Scope)
   -- ^ stores type functions that are in scope for a given module and language
   , stateGeneralTypedefs  :: GMap Int MVar           Scope
@@ -303,7 +312,7 @@ data TermTypes = TermTypes {
   --            ^     ^      ^----- TermType knows nothing about this
   --            '      '--- each ExprI in [ExprI] is one of these
   --            '--- this will match the term name
-} deriving (Show)
+} deriving (Show, Ord, Eq)
 
 
 
@@ -615,6 +624,7 @@ data TypeError
   | MissingConcreteSignature EVar Lang
   | MissingGeneralSignature EVar
   | ApplicationOfNonFunction
+  | InvalidApplication (AnnoS Int ManyPoly Int) [AnnoS Int ManyPoly Int] TypeU 
   | TooManyArguments
   | EmptyExpression EVar
   | MissingFeature Text
@@ -697,7 +707,9 @@ data MorlocError
   | ConflictingClasses ClassName ClassName EVar
   | InstanceSizeMismatch ClassName [TVar] [TypeU]
   | IllegalExpressionInInstance ClassName [TypeU] Expr
-
+  | CannotUnifySignatures SignatureSet SignatureSet
+  | NoInstanceFound ClassName EVar
+  | AmbiguousInstances ClassName EVar
 
 
 
@@ -996,6 +1008,14 @@ mostSpecific = P.maxima
 
 
 ----- Pretty instances -------------------------------------------------------
+
+instance Pretty Instance where
+  pretty (Instance cls vs et ts) =
+      "Instance" <+> pretty cls
+                 <+> pretty vs
+                 <+> parens (pretty (etype et))
+                 <+> list (map pretty ts)
+
 
 instance (Pretty a, Pretty b) => Pretty (Or a b) where
   pretty (L x) = parens ("L" <+> pretty x)
@@ -1312,6 +1332,13 @@ instance Pretty MorlocError where
   pretty (InstanceSizeMismatch cls vs ts) = "For class" <+> pretty cls <+> "expected" <+> pretty (length vs) <+> "parameters" <+> tupled (map pretty vs)
     <+> "but found" <+> pretty (length ts) <+> tupled (map pretty ts)
   pretty (IllegalExpressionInInstance cls ts e) = "Illegal expression found in" <+> pretty cls <+> "instance for" <> "\n   " <> align (hsep (map pretty ts)) <> "\n   " <> pretty e
+  pretty (CannotUnifySignatures s1 s2) = "CannotUnifySignatures: cannot unify the polymorphic signature sets below:"
+    <> "\n  s1:" <+> pretty s1
+    <> "\n  s2:" <+> pretty s2
+  pretty (NoInstanceFound cls v) = "No instance found for" <+> pretty cls <> "::" <> pretty v
+                                 <> "\n  Are you missing a top-level type signature?"
+  pretty (AmbiguousInstances cls v) = "Ambiguous instances found for" <+> pretty cls <> "::" <> pretty v
+ 
   
 
 instance Pretty TypeError where
@@ -1337,6 +1364,11 @@ instance Pretty TypeError where
   pretty (EmptyExpression e) = "EmptyExpression:" <+> squotes (pretty e) <+> "has no bound signature or expression"
   pretty InfiniteRecursion = "InfiniteRecursion"
   pretty (FunctionSerialization v) = "Undefined function" <+> dquotes (pretty v) <> ", did you forget an import?"
+  pretty (InvalidApplication f xs t)
+    = "InvalidFunctionApplication:"
+    <> "\n  application:" <+> pretty f <+> hsep (map (parens . pretty) xs)
+    <> "\n  where" <+> pretty f <+> "::" <+> pretty t
+    
 
 
 

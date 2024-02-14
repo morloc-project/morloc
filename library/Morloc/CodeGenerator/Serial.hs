@@ -92,11 +92,11 @@ findPackers lang = do
             <> "\n  sigmap:" <+> viaShow sigmap
 
   packers <- case Map.lookup (EV "pack") sigmap of
-    (Just (_, _, _, ts)) -> return $ concatMap f ts
+    (Just (Instance _ _ _ ts)) -> return $ concatMap f ts
     Nothing -> return []
 
   unpackers <- case Map.lookup (EV "unpack") sigmap of
-    (Just (_, _, _, ts)) -> return $ concatMap f ts
+    (Just (Instance _ _ _ ts)) -> return $ concatMap f ts
     Nothing -> return []
 
   return (packers, unpackers)

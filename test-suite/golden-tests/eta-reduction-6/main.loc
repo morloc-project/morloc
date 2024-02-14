@@ -1,7 +1,10 @@
 module main (foo)
 
-import base (add, mul)
 import conventions(Real, List)
+import base (add, mul)
 
+bar :: Real -> Real
 bar = add (mul 4.2 2.0)
+
+foo :: Real -> Real
 foo x = bar (add 1.0 x)

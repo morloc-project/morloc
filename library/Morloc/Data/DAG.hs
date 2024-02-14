@@ -38,6 +38,7 @@ module Morloc.Data.DAG
   , lookupAliasedTerm
   , lookupAliasedTermM
   , synthesizeDAG
+  , foldDAG
   ) where
 
 import Morloc.Namespace
@@ -256,6 +257,24 @@ synthesizeDAG f d0 = synthesizeDAG' (Just Map.empty) where
           let augmented = [(k,e,n2) | ((k, e), (n2, _)) <- zip xs children]
           n2 <- f k1 n1 augmented
           return $ Map.insert k1 (n2, xs) dn
+
+foldDAG
+  :: (Ord k, Monad m)
+  => k -- initial key
+  -> Maybe e -- the edge to this node if not root
+  -> (k -> Maybe e -> n -> a -> m a) -- aggregation function
+  -> a -- initial accumulator
+  -> DAG k e n -- DAG folded over
+  -> m a
+foldDAG k e f b d =
+  case Map.lookup k d of
+    (Just (n, es)) -> do 
+      a <- foldlM (\b' (k', e') -> foldDAG k' (Just e') f b' d) b es
+      f k e n a
+    Nothing -> undefined
+      
+
+-- type DAG key edge node = Map key (node, [(key, edge)])
 
 -- Inherit all imported values and their terminal aliases
 inherit

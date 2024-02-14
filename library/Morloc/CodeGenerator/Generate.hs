@@ -1098,18 +1098,22 @@ expressPolyExpr parentLang pc (AnnoS (Idx midx _) (_, args) (AppS (AnnoS (Idx _ 
   ----------------------------------------------------------------------------------------
   | sameLanguage = do
       MM.sayVVV $ "case #1 - m" <> pretty midx <> parens (pretty (srcName src)) <> ":" <+> pretty fc
-                <> "\n  " <> list (map pretty args)
+                <> "\n  (map (Idx cidxCall) inputs):" <+> list (map (pretty . Idx cidxCall) inputs)
+                <> "\n  xs:" <+> list (map pretty xs)
+                <> "\n  args:" <+> list (map pretty args)
+                <> "\n  fc:" <+> pretty fc
+                <> "\n  src:" <+> pretty src
 
       -- There should be an equal number of input types and input arguments
       -- That is, the function should be fully applied. If it were partially
       -- applied, the lambda case would have been entered previously instead.
-      xs' <- fromJust <$> safeZipWithM (expressPolyExpr callLang) (map (Idx cidxCall) inputs) xs
+      mayxs <- safeZipWithM (expressPolyExpr callLang) (map (Idx cidxCall) inputs) xs
 
       MM.sayVVV "  leaving case #1"
       return
           . PolyManifold callLang midx (ManifoldFull (map unvalue args))
           . PolyReturn
-          $ PolyApp f xs'
+          $ PolyApp f (fromJust mayxs)
 
   ----------------------------------------------------------------------------------------
   -- #5 trans applied                                          | contextArgs | boundArgs |

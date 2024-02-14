@@ -47,8 +47,7 @@ import base
   , join
   , paste
   , keys
-  , length
-  , lengthS
+  , size
   , onFst
   , sleep
   , unique
@@ -115,14 +114,14 @@ classify
   = push id passClade setLeaf
   . pullNode snd pullClade where
 
-  passClade parent edge child = (edge, ifelse (eq 0 (lengthS child)) parent child)
+  passClade parent edge child = (edge, ifelse (eq 0 (size child)) parent child)
 
   -- setLeaf parent edge leaf = (edge, { accession = leaf@accession, clade = parent })
   setLeaf parent edge leaf = (edge, (fst leaf, parent))
 
   pullClade xs
-    = branch (eq 1 . length) head (const "") seenClades
+    = branch (eq 1 . size) head (const "") seenClades
     where
       seenClades = ( unique
-                   . filter (ne 0 . lengthS)
+                   . filter (ne 0 . size)
                    ) xs

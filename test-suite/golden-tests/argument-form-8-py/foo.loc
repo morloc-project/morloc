@@ -4,4 +4,5 @@ import pybase (map, mul)
 import conventions (List, Real)
 
 -- variable partially-applied function passed as argument
+foo :: Real -> [Real] -> [Real]
 foo x xs = map (mul x) xs
