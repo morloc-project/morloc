@@ -59,6 +59,7 @@ jobs:
           echo "tmpdir : $HOME/.morloc/tmp" >> $HOME/.morloc/config
           echo "lang_python3 : python3" >> $HOME/.morloc/config
           sudo apt-get install git # required for installations below
+          morloc install prelude
           morloc install base
           morloc install conventions
           morloc install rbase
