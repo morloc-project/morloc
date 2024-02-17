@@ -124,13 +124,13 @@ syn region s_comment start="{-" end="-}" contains=s_todo,s_tag
 " -----------------------------------------------------------------------------
 syn match s_error '^#'
 
-syn match reserved '^table'
-syn match reserved '^import'
-syn match reserved '^type'
-syn match reserved '^instance'
-syn match reserved '^class'
-syn match reserved '^object'
-syn match reserved '^record'
+syn match reserved '\<table\>'
+syn match reserved '\<import\>'
+syn match reserved '\<type\>'
+syn match reserved '\<instance\>'
+syn match reserved '\<class\>'
+syn match reserved '\<object\>'
+syn match reserved '\<record\>'
 
 " -----------------------------------------------------------------------------
 hi def link s_comment  Comment
