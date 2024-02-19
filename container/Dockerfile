@@ -31,7 +31,7 @@ RUN Rscript -e 'remotes::install_github("morloc-project/rmorlocinternals", depen
 # Build morloc
 RUN apt-get update
 RUN curl -SL https://get.haskellstack.org/ | sh
-RUN git clone https://github.com/morloc-project/morloc && cd morloc && stack install --fast
+RUN git clone https://github.com/morloc-project/morloc && cd morloc && stack install
 
 # Make yourself at home
 RUN mkdir -p $HOME/.morloc/lib
@@ -43,8 +43,9 @@ RUN echo "home : $HOME/.morloc" > ~/.morloc/config &&\
 
 # Install the morloc modules that are required for testing
 RUN morloc install prelude
-RUN morloc install base
+RUN morloc install types
 RUN morloc install conventions
+RUN morloc install base
 RUN morloc install rbase
 RUN morloc install pybase
 RUN morloc install cppbase
@@ -52,6 +53,10 @@ RUN morloc install math
 
 # # Run the standard morloc tests
 RUN cd morloc && stack test --fast
+
+
+# pip3 install requests
+# conda install -c conda-forge biopython
 
 # Specify the default command to run when the container starts
 CMD ["bash"]

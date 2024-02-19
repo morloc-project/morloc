@@ -4,7 +4,7 @@ module main (foo)
 -- The only difference is that it uses an extra module, Arithmetic, to abstract
 -- away the concrete language imports, this is likely to be a common pattern.
 
+import types (Real)
 import Arithmetic (add)
-import conventions (Real)
 
 foo x y = add x (add y 42.0)

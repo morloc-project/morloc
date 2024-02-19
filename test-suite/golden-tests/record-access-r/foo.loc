@@ -1,6 +1,6 @@
 module main (foo)
 
-import conventions (Str, Real)
+import types (Str, Real)
 import rbase (sum)
 
 table (Person a) = Person {name :: Str, info :: a}

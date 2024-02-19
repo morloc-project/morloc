@@ -1,7 +1,7 @@
 module main (foo)
 
+import types (Real, Str, List)
 import cppbase
-import conventions (Real, Str, List)
 
 record DataA = DataA {a :: Real, b :: DataB}
 record DataB = DataB {c :: [Real], d :: Str}

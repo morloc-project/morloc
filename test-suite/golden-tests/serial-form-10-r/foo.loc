@@ -1,6 +1,6 @@
 module main (foo)
 
-import conventions (Str)
+import types (Str)
 import rbase (id)
 
 record (Person a) = Person {name :: Str, info :: a}

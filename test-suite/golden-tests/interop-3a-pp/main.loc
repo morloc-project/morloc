@@ -1,6 +1,6 @@
 module main (foo)
 
-import conventions (Real, List)
+import types (Real, List)
 import pybase (map, neg)
 
 foo :: [Real] -> [Real]

@@ -2,9 +2,9 @@ module main (sub)
 
 -- n00 - source n
 
+import types (Real)
 import pybase (add)
 import rbase (add)
-import conventions (Real)
 
 source py from "foo.py" ("sub_loc" as sub)
 source r from "foo.R" ("sub_loc" as sub)

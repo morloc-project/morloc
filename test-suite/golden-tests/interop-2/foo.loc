@@ -3,7 +3,7 @@ module main (foo)
 import pybase (map, add)
 import rbase (fold, add)
 
-import conventions (List, Real)
+import types (List, Real)
 
 sum xs b = fold add b xs
 

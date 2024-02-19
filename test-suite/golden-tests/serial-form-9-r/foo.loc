@@ -1,6 +1,6 @@
 module main (foo)
 
-import conventions (Int, Str, List, Tuple2)
+import types (Int, Str, List, Tuple2)
 import rbase (id, Map)
 
 record (Person a) = Person {name :: Str, info :: a}

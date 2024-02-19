@@ -1,6 +1,6 @@
 module m (foo)
 
-import conventions (Str, Int, Real, Bool, Tuple2)
+import types (Str, Int, Real, Bool, Tuple2)
 source Cpp from "foo.hpp" ("f", "g")
 source Py from "foo.py" ("h")
 

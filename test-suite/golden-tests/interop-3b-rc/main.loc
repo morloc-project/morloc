@@ -1,6 +1,6 @@
 module main (foo)
 
-import conventions (Real, List)
+import types (Real, List)
 import rbase (map)
 import cppbase (add)
 

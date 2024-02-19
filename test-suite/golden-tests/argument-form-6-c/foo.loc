@@ -1,7 +1,7 @@
 module main (foo)
 
+import types (List, Real)
 import cppbase (zipWith, mul)
-import conventions (List, Real)
 
 -- literal function with no application
 foo :: [Real] -> [Real] -> [Real]

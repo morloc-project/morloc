@@ -6,8 +6,8 @@ module main (foo)
 -- In the case below, C++ should be selected for both `add` instances, since
 -- C++ is the faster language.
 
+import types (Real)
 import pybase (add)
 import cppbase (add)
-import conventions (Real)
 
 foo x y = add x (add y 42.0)

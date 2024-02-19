@@ -1,6 +1,6 @@
 module m (foo)
 
-import conventions (Str, Int, Real, Bool, Tuple3)
+import types (Str, Int, Real, Bool, Tuple3)
 
 source R from "foo.R" ("f")
 source Cpp from "foo.hpp" ("g")

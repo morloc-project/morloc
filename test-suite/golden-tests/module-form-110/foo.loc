@@ -2,7 +2,7 @@ module main (sum)
 
 -- 110 - source 1, import 1
 
-import conventions (Real, List)
+import types (Real, List)
 import pybase (add, fold)
 
 source py from "foo.py" ("sum_loc" as sum)

@@ -1,7 +1,7 @@
 module main (foo)
 
+import types (List, Real)
 import rbase (map, mul)
-import conventions (List, Real)
 
 -- literal partially-applied function passed as argument
 foo xs = map (mul 2.0) xs

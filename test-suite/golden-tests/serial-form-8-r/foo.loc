@@ -1,6 +1,6 @@
 module main (foo)
 
-import conventions (Str, Real, Tuple2, List)
+import types (Str, Real, Tuple2, List)
 import rbase (id, Map)
 
 -- This function returns the input, but passes it though a language-specific id

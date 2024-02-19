@@ -1,6 +1,6 @@
 module main (foo)
 
-import conventions (Int, Str, Tuple2, List)
+import types (Int, Str, Tuple2, List)
 import pybase (Map, id)
 
 -- This function returns the input, but passes it though a language-specific id

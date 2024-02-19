@@ -1,6 +1,6 @@
 module main (foo)
 
-import conventions (Int, Str)
+import types (Int, Str)
 import pybase (id)
 
 record (Person a) = Person {name :: Str, info :: a}

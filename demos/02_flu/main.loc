@@ -1,6 +1,6 @@
 module flucase (analysis)
 
-import conventions (Str, Int, Filename, Real, Unit, Map, Tuple2)
+import types (Str, Int, Filename, Real, Unit, Map, Tuple2)
 import json (JsonObj)
 
 type Accession = Str
@@ -104,12 +104,11 @@ search fetchConfig searchConfig refs query =
         )
   . shard 30
   . join (keys refs)
-  . take 50
   . fetchIds searchConfig
   ) query
 
 
--- classify :: RootedTree n e (a, Clade) -> RootedTree Str e (a, Clade)
+classify :: RootedTree n e (a, Clade) -> RootedTree Str e (a, Clade)
 classify
   = push id passClade setLeaf
   . pullNode snd pullClade where

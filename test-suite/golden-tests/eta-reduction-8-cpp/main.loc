@@ -1,6 +1,6 @@
 module m (foo)
 
-import conventions (Tuple2, Tuple3, Int, Str, Bool)
+import types (Tuple2, Tuple3, Int, Str, Bool)
 
 source Cpp from "foo.hpp" ("onThree", "inc")
 

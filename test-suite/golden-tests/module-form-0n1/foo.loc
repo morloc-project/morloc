@@ -2,9 +2,9 @@ module main (sub)
 
 -- 0n1 - import n, declare 1
 
+import types (Real)
 import pybase  (sub, add, mul)
 import cppbase (sub, add, mul)
 import rbase   (sub, add, mul)
-import conventions (Real)
 
 sub x y = add x (mul -1.0 y)

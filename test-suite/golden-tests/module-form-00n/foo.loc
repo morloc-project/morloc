@@ -2,7 +2,7 @@ module main (foo)
 
 -- 00n - declare n
 
-import conventions (Real)
+import types (Real)
 import pybase
 import cppbase
 import rbase

@@ -2,7 +2,7 @@ module main (sub)
 
 -- 111 - source 1, import 1, declare 1
 
-import conventions (Real)
+import types (Real)
 import pybase (add, mul)
 import rbase (add, mul)
 import cppbase (add, mul, sub) -- import sub

@@ -1,6 +1,6 @@
 module m (foo)
 
-import conventions (Bool, List)
+import types (Bool, List)
 
 source R from "foo.R" ("f")
 source Py from "foo.py" ("g")
