@@ -70,10 +70,18 @@ source R from "plot-tree.R" ("plotTree")
 
 plotTree :: Filename -> RootedTree n Real Str -> ()
 
+record AnalysisConfig = AnalysisConfig
+  { mindate :: Date
+  , maxdate :: Date
+  , reffile :: Filename
+  , treefile :: Filename
+  }
+record Py => AnalysisConfig = "dict"
+record R => AnalysisConfig = "list"
 
-analysis :: Date -> Date -> Filename -> Filename -> ()
-analysis mindate maxdate reffile treefile
-  = ( plotTree treefile
+analysis :: AnalysisConfig -> ()
+analysis config
+  = ( plotTree (config@treefile)
     . mapLeaf setLeafName
     . classify -- Tree string double meta
     . treeBy upgma
@@ -85,12 +93,12 @@ analysis mindate maxdate reffile treefile
     searchConfig =
       { email = email
       , db = "nuccore"
-      , mindate = mindate
-      , maxdate = maxdate
+      , mindate = config@mindate
+      , maxdate = config@maxdate
       , retmax = 1000
       }
     fetchConfig = { email = email }
-    refmap = readMap reffile
+    refmap = readMap (config@reffile)
 
 
 search :: EntrezFetchConfig -> EntrezSearchConfig -> Map Accession Clade -> Query

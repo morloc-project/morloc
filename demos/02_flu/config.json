@@ -1,0 +1,5 @@
+{ "mindate" : "2021/01/01"
+, "maxdate" : "2021/01/14"
+, "reffile" : "refs.txt"
+, "treefile" : "tree.pdf"
+}
