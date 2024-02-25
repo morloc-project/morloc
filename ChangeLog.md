@@ -57,6 +57,12 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Ensure github actions passes
 
 
+0.46.0 [2024.02.xx]
+-------------------
+
+ * Fix precedence of '@' operator - it binds tightest
+ * Update flu demo
+
 0.45.0 [2024.02.14]
 -------------------
 
