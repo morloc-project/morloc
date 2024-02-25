@@ -12,7 +12,7 @@ search:
 
 .PHONY:
 run:
-	./nexus.py analysis config.json
+	./nexus.py plotClasses config.json
 
 .PHONY:
 makec:

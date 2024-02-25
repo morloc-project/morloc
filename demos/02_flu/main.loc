@@ -1,4 +1,4 @@
-module flucase (analysis)
+module flucase (plotClasses, classifyByDate, plotCladeTree)
 
 import types (Str, Int, Filename, Real, Unit, Map, Tuple2)
 import json (JsonObj)
@@ -70,20 +70,27 @@ source R from "plot-tree.R" ("plotTree")
 
 plotTree :: Filename -> RootedTree n Real Str -> ()
 
-record AnalysisConfig = AnalysisConfig
+record FluConfig = FluConfig
   { mindate :: Date
   , maxdate :: Date
   , reffile :: Filename
   , treefile :: Filename
   }
-record Py => AnalysisConfig = "dict"
-record R => AnalysisConfig = "list"
+record Py => FluConfig = "dict"
+record R => FluConfig = "list"
 
-analysis :: AnalysisConfig -> ()
-analysis config
-  = ( plotTree (config@treefile)
-    . mapLeaf setLeafName
-    . classify -- Tree string double meta
+plotClasses :: FluConfig -> ()
+plotClasses config
+  = plotCladeTree config (classifyByDate config)
+
+plotCladeTree :: FluConfig -> RootedTree Str e (a, Clade) -> ()
+plotCladeTree config
+  = plotTree (config@treefile)
+  . mapLeaf setLeafName 
+
+classifyByDate :: FluConfig -> RootedTree Str e (a, Clade)
+classifyByDate config
+  = ( classify
     . treeBy upgma
     . search fetchConfig searchConfig refmap
     ) query
