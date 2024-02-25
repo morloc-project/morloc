@@ -75,52 +75,48 @@ record FluConfig = FluConfig
   , maxdate :: Date
   , reffile :: Filename
   , treefile :: Filename
+  , query :: Str
+  , email :: Str
   }
 record Py => FluConfig = "dict"
 record R => FluConfig = "list"
 
+
 plotClasses :: FluConfig -> ()
-plotClasses config
-  = plotCladeTree config (classifyByDate config)
+plotClasses config = plotCladeTree config (classifyByDate config)
+
 
 plotCladeTree :: FluConfig -> RootedTree Str e (a, Clade) -> ()
-plotCladeTree config
-  = plotTree (config@treefile)
-  . mapLeaf setLeafName 
+plotCladeTree config = plotTree config@treefile . mapLeaf setLeafName 
+
 
 classifyByDate :: FluConfig -> RootedTree Str e (a, Clade)
-classifyByDate config
-  = ( classify
-    . treeBy upgma
-    . search fetchConfig searchConfig refmap
-    ) query
-  where
-    query = "Influenza+A+Virus[Organism]+H3N2[ALL]+HA[ALL]"
-    email = "zbwrnz@gmail.com"
-    searchConfig =
-      { email = email
-      , db = "nuccore"
-      , mindate = config@mindate
-      , maxdate = config@maxdate
-      , retmax = 1000
-      }
-    fetchConfig = { email = email }
-    refmap = readMap (config@reffile)
+classifyByDate = classify . treeBy upgma . searchEntrez
 
 
-search :: EntrezFetchConfig -> EntrezSearchConfig -> Map Accession Clade -> Query
-       -> [((JsonObj, Clade), Sequence)]
-search fetchConfig searchConfig refs query =
-  ( map (onFst (labelRef refs))
+searchEntrez :: FluConfig -> [((JsonObj, Clade), Sequence)]
+searchEntrez config =
+  ( map (onFst (labelRef refmap))
   . concat
   . map ( map parseRecord
         . sleep 1.0
         . fetchRecords fetchConfig
         )
   . shard 30
-  . join (keys refs)
+  . join (keys refmap)
   . fetchIds searchConfig
-  ) query
+  ) config@query
+  where
+    searchConfig =
+      { email = config@email
+      , db = "nuccore"
+      , mindate = config@mindate
+      , maxdate = config@maxdate
+      , retmax = 1000
+      }
+    fetchConfig = { email = config@email }
+    refmap = readMap config@reffile
+    query = config@query
 
 
 classify :: RootedTree n e (a, Clade) -> RootedTree Str e (a, Clade)

@@ -12,7 +12,8 @@ search:
 
 .PHONY:
 run:
-	./nexus.py plotClasses config.json
+	./nexus.py classifyByDate config.json > tree.json
+	./nexus.py plotCladeTree config.json tree.json
 
 .PHONY:
 makec:
