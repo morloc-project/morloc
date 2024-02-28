@@ -17,7 +17,7 @@ run:
 
 .PHONY:
 makec:
-	g++ --std=c++17 -o pool-cpp.out pool.cpp -I/home/z/.morloc/include -I/home/z/.morloc/src/morloc/plain/morloclib/bio/tree -I/home/z/.morloc/src/morloc/plain/morloclib/cppbase -I/home/z/.morloc/src/morloc/plain/morloclib/bio/algo -I/home/z/.morloc/src/morloc/plain/morloclib/matrix/eigen
+	g++ --std=c++17 -o pool-cpp.out pool.cpp -I/home/z/.morloc/include -I/home/z/.morloc/src/morloc/plane/morloclib/bio/tree -I/home/z/.morloc/src/morloc/plane/morloclib/cppbase -I/home/z/.morloc/src/morloc/plane/morloclib/bio/algo -I/home/z/.morloc/src/morloc/plane/morloclib/matrix/eigen
 
 .PHONY: clean
 clean:

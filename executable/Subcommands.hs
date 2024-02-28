@@ -71,7 +71,7 @@ cmdInstall args verbosity conf =
       let name' = installModuleName args
       if installGithub args
         then Mod.installModule (Mod.GithubRepo name') Nothing
-        else Mod.installModule (Mod.CoreGithubRepo name') (Just $ configPlain conf)
+        else Mod.installModule (Mod.CoreGithubRepo name') (Just $ configPlane conf)
 
 -- | build a Morloc program, generating the nexus and pool files
 cmdMake :: MakeCommand -> Int -> Config.Config -> IO ()

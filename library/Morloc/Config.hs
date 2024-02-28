@@ -37,7 +37,7 @@ loadDefaultMorlocConfig = do
     Config
       (MT.unpack $ defaults H.! "home")
       (MT.unpack $ defaults H.! "source")
-      (MT.unpack $ defaults H.! "plain")
+      (MT.unpack $ defaults H.! "plane")
       (MT.unpack $ defaults H.! "tmpdir")
       "python3" -- lang_python3
       "Rscript" -- lang_R
@@ -91,7 +91,7 @@ defaultFields = do
   home <- MT.pack <$> getDefaultMorlocHome
   lib <- MT.pack <$> getDefaultMorlocSource
   tmp <- MT.pack <$> getDefaultMorlocTmpDir
-  return $ H.fromList [("home", home), ("source", lib), ("plain", "morloclib"), ("tmpdir", tmp)]
+  return $ H.fromList [("home", home), ("source", lib), ("plane", "morloclib"), ("tmpdir", tmp)]
 
 -- | Get the Morloc home directory (absolute path)
 getDefaultMorlocHome :: IO Path

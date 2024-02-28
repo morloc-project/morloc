@@ -46,8 +46,8 @@ findModule :: Maybe (Path, MVar) -> MVar -> MorlocMonad Path
 findModule currentModuleM importModule = do
   config <- MM.ask
   let lib = Config.configLibrary config
-      plain = Config.configPlain config
-      allPaths = getModulePaths lib plain currentModuleM importModule
+      plane = Config.configPlane config
+      allPaths = getModulePaths lib plane currentModuleM importModule
   existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
   case existingPaths of
     [x] -> return x
@@ -107,7 +107,7 @@ removePathSuffix xs ys
 -- | Find an ordered list of possible locations to search for a module
 getModulePaths
     :: Path -- ^ morloc default library path (e.g., "~/.morloc/src/morloc")
-    -> Path -- ^ morloc plain (e.g., "morloclib")
+    -> Path -- ^ morloc plane (e.g., "morloclib")
     -> Maybe (Path, MVar) -- ^ the path and name of the current module (e.g., `Just ("foo.loc", MVar "bar")`)
     -> MVar -- ^ the name of the module that is being imported
     -> [Path]
@@ -123,7 +123,7 @@ getModulePaths
 -- `bif.buf` may be imported locally or from the system
 -- --  1. /../src/foo/bar/baz/bif/buf/main.loc
 -- --  2. $MORLOC_LIB/src/bif/buf/main.loc
-getModulePaths lib plain Nothing (splitModuleName -> namePath) = map MS.joinPath paths where
+getModulePaths lib plane Nothing (splitModuleName -> namePath) = map MS.joinPath paths where
 
     -- either search the working directory for a life like "math.loc" or look
     -- for a folder named after the module with with a "main.loc" script
@@ -141,14 +141,14 @@ getModulePaths lib plain Nothing (splitModuleName -> namePath) = map MS.joinPath
           , lib : namePath <> ["main.loc"]
         ]
 
-    plainPaths = [
-            [lib, "plain", plain] <> init namePath <> [last namePath <> ".loc"]
-          , [lib, "plain", plain] <> namePath <> ["main.loc"]
+    planePaths = [
+            [lib, "plane", plane] <> init namePath <> [last namePath <> ".loc"]
+          , [lib, "plane", plane] <> namePath <> ["main.loc"]
         ]
 
-    paths = localPaths <> plainPaths <> systemPaths
+    paths = localPaths <> planePaths <> systemPaths
 
-getModulePaths lib plain (Just (MS.splitPath -> modulePath, splitModuleName -> moduleName)) (splitModuleName -> importName) =
+getModulePaths lib plane (Just (MS.splitPath -> modulePath, splitModuleName -> moduleName)) (splitModuleName -> importName) =
     case commonPrefix moduleName importName of
     -- CASE #2
     --   If we are in a module, and if the module name path and the import name
@@ -167,9 +167,9 @@ getModulePaths lib plain (Just (MS.splitPath -> modulePath, splitModuleName -> m
                 -- system paths
                   lib : init importName <> [last importName <> ".loc"]
                 , lib : importName <> ["main.loc"]
-                -- plain paths
-                , [lib, "plain", plain] <> init importName <> [last importName <> ".loc"]
-                , [lib, "plain", plain] <> importName <> ["main.loc"]
+                -- plane paths
+                , [lib, "plane", plane] <> init importName <> [last importName <> ".loc"]
+                , [lib, "plane", plane] <> importName <> ["main.loc"]
                 -- local path
                 , init importName <> [last importName <> ".loc"]
                 , importName <> ["main.loc"]
@@ -320,7 +320,7 @@ getFile x = do
 -- | Attempt to clone a package from github
 installGithubRepo ::
      String -- ^ the repo path ("<username>/<reponame>")
-  -> [String] -- ^ directory path (e.g., ["github"], or ["plain", "rbase"] for core)
+  -> [String] -- ^ directory path (e.g., ["github"], or ["plane", "rbase"] for core)
   -> String -- ^ the url for github (e.g., "https://github.com/")
   -> MorlocMonad ()
 installGithubRepo repo dirPath url = do
@@ -332,13 +332,13 @@ installGithubRepo repo dirPath url = do
 -- | Install a morloc module
 installModule
     :: ModuleSource
-    -> Maybe Path -- plain path
+    -> Maybe Path -- plane path
     -> MorlocMonad ()
 installModule (GithubRepo repo) _ =
   installGithubRepo repo ["github"] ("https://github.com/" <> repo) -- repo has form "user/reponame"
-installModule (CoreGithubRepo name') (Just plain) = do
-  plainDir <- MM.asks configPlain
-  installGithubRepo name' ["plain", plain] ("https://github.com/" <> plainDir <> "/" <> name')
+installModule (CoreGithubRepo name') (Just plane) = do
+  planeDir <- MM.asks configPlane
+  installGithubRepo name' ["plane", plane] ("https://github.com/" <> planeDir <> "/" <> name')
 installModule (LocalModule Nothing) _ =
   MM.throwError (NotImplemented "module installation from working directory")
 installModule (LocalModule (Just _)) _ =

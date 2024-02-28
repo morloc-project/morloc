@@ -461,7 +461,7 @@ data Config =
   Config
     { configHome :: !Path
     , configLibrary :: !Path
-    , configPlain :: !Path
+    , configPlane :: !Path
     , configTmpDir :: !Path
     , configLangPython3 :: !Path
     -- ^ path to python interpreter
@@ -771,7 +771,7 @@ instance FromJSON Config where
       Config
         <$> o .:? "home" .!= "$HOME/.morloc"
         <*> o .:? "source" .!= "$HOME/.morloc/src/morloc"
-        <*> o .:? "plain" .!= "morloclib"
+        <*> o .:? "plane" .!= "morloclib"
         <*> o .:? "tmpdir" .!= "$HOME/.morloc/tmp"
         <*> o .:? "lang_python3" .!= "python3"
         <*> o .:? "lang_R" .!= "Rscript"
