@@ -4,14 +4,11 @@ module PropertyTests
 
 import Morloc.Namespace
 
-import qualified Control.Monad as CM
 import qualified Data.Set as Set
-import qualified Data.Text as T
-import qualified Test.QuickCheck as QC
-import Safe (headMay)
 import Test.Tasty
 import Test.Tasty.QuickCheck as TQC
 
+propertyTests :: TestTree
 propertyTests =
   testGroup
     "internal list function properties"

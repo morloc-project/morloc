@@ -34,6 +34,7 @@ runFront code = do
   ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
   return x
 
+emptyConfig :: Config
 emptyConfig =  Config
     { configHome = ""
     , configLibrary = ""
@@ -54,7 +55,7 @@ assertGeneralType msg code t = testCase msg $ do
       "The following error was raised: " <> show e <> "\nin:\n" <> show code
 
 renameExistentials :: TypeU -> TypeU
-renameExistentials = snd . f (0, Map.empty) where
+renameExistentials = snd . f (0 :: Int, Map.empty) where
  f s (VarU v) = (s, VarU v)
  f (i,m) (ExistU v ps rs) =
   case Map.lookup v m of
@@ -86,7 +87,7 @@ assertSubtypeGamma :: String -> [GammaIndex] -> TypeU -> TypeU -> [GammaIndex] -
 assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do
   let g0 = Gamma {gammaCounter = 0, gammaContext = gs1}
   case MTI.subtype a b g0 of
-    Left err -> error $ show err
+    Left e -> error $ show e
     Right (Gamma _ gs2') -> assertEqual "" gs2 gs2'
 
 exprTestBad :: String -> MT.Text -> TestTree
@@ -119,29 +120,47 @@ testFalse :: String -> Bool -> TestTree
 testFalse msg x =
   testCase msg $ assertEqual "" x False
 
+bool :: TypeU
 bool = VarU (TV "Bool")
+
+real :: TypeU
 real = VarU (TV "Real")
+
+int :: TypeU
 int = VarU (TV "Int")
+
+str :: TypeU
 str = VarU (TV "Str")
 
+fun :: [TypeU] -> TypeU
 fun [] = error "Cannot infer type of empty list"
 fun [t] = FunU [] t
 fun ts = FunU (init ts) (last ts)
 
-forall [] t = t
-forall (s:ss) t = ForallU (TV s) (forall ss t)
+forall :: [MT.Text] -> TypeU -> TypeU
+forall ss t = foldr (ForallU . TV) t ss
 
+exist :: MT.Text -> TypeU
 exist v = ExistU (TV v) [] []
 
+var :: MT.Text -> TypeU
 var s = VarU (TV s)
-arr s ts = AppU (VarU (TV s)) ts
+
+arr :: MT.Text -> [TypeU] -> TypeU
+arr s = AppU (VarU (TV s))
+
+lst :: TypeU -> TypeU
 lst t = arr "List" [t]
+
+tuple :: [TypeU] -> TypeU
 tuple ts = AppU v ts
   where
     v = VarU . TV . MT.pack $ "Tuple" ++ show (length ts)
-record rs = NamU NamRecord (TV "Record") [] rs
-record' n rs = NamU NamRecord (TV n) [] rs
 
+record' :: MT.Text -> [(Key, TypeU)] -> TypeU
+record' n = NamU NamRecord (TV n) []
+
+subtypeTests :: TestTree
 subtypeTests =
   testGroup
     "Test subtype within context"
@@ -188,9 +207,8 @@ subtypeTests =
     edg = ExistG (TV "x4") [] []
     solvedA t = SolvedG (TV "x1") t
     solvedB t = SolvedG (TV "x2") t
-    solvedC t = SolvedG (TV "x3") t
-    solvedD t = SolvedG (TV "x4") t
 
+substituteTVarTests :: TestTree
 substituteTVarTests =
   testGroup
     "test variable substitution"
@@ -199,6 +217,7 @@ substituteTVarTests =
         (fun [lst (var "y"), var "y"]) 
     ]
 
+whitespaceTests :: TestTree
 whitespaceTests =
   testGroup
     "Tests whitespace handling for modules"
@@ -243,6 +262,7 @@ module Main (z)
       int
     ]
 
+recordAccessTests :: TestTree
 recordAccessTests =
   testGroup
     "Test record access"
@@ -276,11 +296,13 @@ recordAccessTests =
       (tuple [int, str])
     ]
 
+packerTests :: TestTree
 packerTests =
   testGroup
     "Test building of packer maps"
-    [ testEqual "packer test" 1 1 ]
+    [ testEqual "packer test" (1 :: Int) 1 ]
 
+typeAliasTests :: TestTree
 typeAliasTests =
   testGroup
     "Test type alias substitutions"
@@ -513,6 +535,7 @@ typeAliasTests =
     ]
 
 
+whereTests :: TestTree
 whereTests =
   testGroup
   "Test of where statements"
@@ -549,6 +572,7 @@ whereTests =
   ]
 
 
+orderInvarianceTests :: TestTree
 orderInvarianceTests =
   testGroup
   "Test order invariance"
@@ -566,6 +590,7 @@ orderInvarianceTests =
       int
   ]
 
+typeOrderTests :: TestTree
 typeOrderTests =
   testGroup
     "Tests of type partial ordering (subtype)"
@@ -693,6 +718,7 @@ typeOrderTests =
         [forall ["a"] (tuple [int, var "a"])]
     ]
 
+unitTypeTests :: TestTree
 unitTypeTests =
   testGroup
     "Typechecker unit tests"

@@ -22,6 +22,10 @@ import Morloc.Frontend.Merge (weaveTermTypes, mergeTypeclasses, mergeSignatureSe
 
 
 -- Merge two indexed instances keeping the left index
+mergeIndexedInstances
+  :: Indexed Instance
+  -> Indexed Instance
+  -> MorlocMonad (Indexed Instance) 
 mergeIndexedInstances = mergeFirstIndexM mergeTypeclasses
 
 -- Handle typeclasses
@@ -308,22 +312,22 @@ same as the `a` and `b` in the class.
 
 -}
 substituteInstanceTypes :: [TVar] -> TypeU -> [TypeU] -> MorlocMonad TypeU
-substituteInstanceTypes classVars classType instanceParameters = do
+substituteInstanceTypes clsVars clsType instanceParameters = do
 
       -- find all qualifiers in the instance parameter list
   let instanceQualifiers = unique $ concatMap (fst . unqualify) instanceParameters
 
       -- rewrite the class type such that the class qualifiers appear first and
       -- do not conflict with parameter qualifiers
-      cleanClassType = replaceQualifiers instanceQualifiers (putClassVarsFirst classType)
+      cleanClassType = replaceQualifiers instanceQualifiers (putClassVarsFirst clsType)
 
       -- substitute in the parameter types
       finalType = qualify instanceQualifiers
                 $ substituteQualifiers cleanClassType (map (snd . unqualify) instanceParameters)
 
   MM.sayVVV $ "substituteInstanceTypes"
-            <> "\n  classVars:" <+> pretty classVars
-            <> "\n  classType:" <+> pretty classType
+            <> "\n  classVars:" <+> pretty clsVars
+            <> "\n  classType:" <+> pretty clsType
             <> "\n  instanceParameters:" <+> pretty instanceParameters
             <> "\n  -------------------"
             <> "\n  instanceQualifiers:" <+> pretty instanceQualifiers
@@ -336,7 +340,7 @@ substituteInstanceTypes classVars classType instanceParameters = do
     putClassVarsFirst :: TypeU -> TypeU
     putClassVarsFirst t =
       let (vs, t') = unqualify t
-      in qualify (classVars <> filter (`notElem` classVars) vs) t'
+      in qualify (clsVars <> filter (`notElem` clsVars) vs) t'
 
     replaceQualifiers :: [TVar] -> TypeU -> TypeU
     replaceQualifiers vs0 t0 = f vs0 [r | r <- freshVariables, r `notElem` doNotUse] t0

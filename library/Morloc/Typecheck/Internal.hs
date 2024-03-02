@@ -522,11 +522,11 @@ renameSExpr c0@(m, g) e0 = case e0 of
   (VarS v (MonomorphicExpr t xs)) ->
     let (context', xs') = statefulMap renameAnnoS c0 xs
     in (context', VarS v (MonomorphicExpr t xs'))
-  (VarS v (PolymorphicExpr cls className t rs)) ->
+  (VarS v (PolymorphicExpr cls clsName t rs)) ->
     let (ts, ass) = unzip rs
         (context', ass') = statefulMap (statefulMap renameAnnoS) c0 ass
         rs' = zip ts ass'
-    in (context', VarS v $ PolymorphicExpr cls className t rs')
+    in (context', VarS v $ PolymorphicExpr cls clsName t rs')
   (LamS vs x) ->
     let (g', vs') = statefulMap (\g'' (EV v) -> evarname g'' (v <> "_e")) g vs
         m' = foldr (uncurry Map.insert) m (zip vs vs')

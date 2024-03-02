@@ -18,7 +18,6 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.API as F
-import qualified Morloc.Data.GMap as GMap
 import Morloc.CodeGenerator.Namespace (SerialManifold(..))
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.Data.Doc

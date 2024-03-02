@@ -24,7 +24,7 @@ makeManifoldFile :: String -> IO ()
 makeManifoldFile path = do
   abspath <- SD.makeAbsolute path
   devnull <- SI.openFile "/dev/null" SI.WriteMode
-  SP.runProcess
+  _ <- SP.runProcess
     "make" -- command
     ["-C", abspath, "--quiet"] -- arguments
     Nothing -- optional path to working diretory

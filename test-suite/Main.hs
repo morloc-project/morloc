@@ -5,6 +5,7 @@ import PropertyTests (propertyTests)
 import UnitTypeTests
 import GoldenMakefileTests (goldenMakefileTest)
 
+main :: IO ()
 main = do
   wd <- SD.getCurrentDirectory >>= SD.makeAbsolute
   let golden = \msg f -> goldenMakefileTest msg (wd ++ "/test-suite/golden-tests/" ++ f)
