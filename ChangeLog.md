@@ -17,31 +17,59 @@ handling for several very different languages (proofs-of-concept).
 
 0.4x.0 [2024.xx.xx]
 -------------------
- - [ ] add Haskell support
 
+ Ecosystem
+ - [ ] `morloc uninstall <module>`
+ - [ ] `morloc lint`
+ - [ ] `morloc test`
+ - [ ] `morloc benchmark`
+ - [ ] `morloc check`
+          * check package setup
+          * check morloc version
+          * check existence of all modules
+          * check existence of required files 
+ - [ ] `morloc format` - automatically format all morloc files (like `black` for python)
+ - [ ] `morloc make`
+          - [ ] `--dag` - Generate function DAG, entrance counts, and benchmarks
+          - [ ] `--cache` - Generate caching code
+          - [ ] `--check-constraints` - Toggle whether to perform runtime constraint checks
+          - [ ] `--debug` - Generate debugging code in manifolds
+          - [ ] `--docs` - Generate doxygen style documentation (maybe using LLMs)
+ - [ ] `morloc ai`
+          - [ ] `--make-src` - Given a morloc file, generate source code where needed
+          - [ ] `--make-sig` - Given a source file and export list, generate signatures
+          - [ ] `--make-loc` - Given a prompt, generate a morloc program
+          - [ ] `--make-doc` - Given a morloc program, generate/update documentation
+          - [ ] `--make-com` - Given a morloc program, generate internal comments 
+          - [ ] `--check` - Given a morloc package, comment on general issues
+          - [ ] `--config` - Configure your AI
+ - [ ] `morloc init` - create a new morloc repo, optionally from a prompt
+ - [ ] `morloc list` - list modules, optionally with exports and signatures
+
+ Typesystem
  - [ ] algebraic types
  - [ ] pattern matching
- - [ ] constraint checking
+ - [ ] runtime constraint checking
  - [ ] effect checking
- - [ ] limited inference of concrete type from general type
- - [ ] Rust support
- - [ ] Add `uninstall` function to uninstall a module
- - [ ] Move exports to the module definition (as in Haskell)
- - [ ] Allow module namespaces (e.g., `alice:math.complex`)
+ - [ ] extensible records
+
+ Language support
+ - [ ] add Haskell support
+ - [ ] add Futhark support
+ - [ ] add Rust support
+ - [ ] allow ABI (required for Futhark)
 
  Styles
-
  - [ ] add styles
  - [ ] test C++ functions with `const` and pass-by-reference
  - [ ] test mutation in python and C++ functions 
  - [ ] test keyword and argument reordering in python and R
 
  Module sugar
-
  - [ ] Add `import Foo hiding (...)` syntax
+ - [ ] Allow module namespaces (e.g., `alice:math.complex`)
 
  And a bit of cleaning
-
  - [ ] generate commented type expressions in the pool code 
  - [ ] Bring back the cut operation to the bidirectional typechecker
        The current approach depends on renaming every term, which is ugly and
@@ -52,16 +80,16 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Fix the performance bug (8 million lines of log is way too much)
        This is probably related to removal of the cut step in the typechecker
  - [ ] Replace JSON serialization
- - [ ] Address all compiler warnings
  - [ ] Update Hackage release
- - [ ] Ensure github actions passes
 
-
-0.46.0 [2024.02.xx]
+0.46.0 [2024.03.06]
 -------------------
 
  * Fix precedence of '@' operator - it binds tightest
  * Update flu demo
+ * Fix github actions
+ * Fix Dockerfile
+ * Address all compiler warnings
 
 0.45.0 [2024.02.14]
 -------------------
