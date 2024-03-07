@@ -1,15 +1,15 @@
 module flucase (classifyByDate, plotCladeTree)
 
+-- Import standard type definitions
 import types (Str, Int, Filename, Real, Unit, Map, Tuple2)
+
+-- Import the type for representing arbitrary nested data
 import json (JsonObj)
 
-type Accession = Str
-type Clade = Str 
-type Sequence = Str
-type Date = Str
-
+-- Import the phylogenetic tree builder
 import bio.algo (upgma)
 
+-- Import the tree type and generic functions for operating on it
 import bio.tree
   ( RootedTree
   , treeBy
@@ -18,6 +18,7 @@ import bio.tree
   , mapLeaf
   )
 
+-- Import functions for accessing public sequence records
 import bio.db
   ( searchEntrez as fetchIds
   , nucleotideAccessionToJson as fetchRecords
@@ -25,51 +26,40 @@ import bio.db
   , EntrezFetchConfig
   )
 
-import base
-  ( id
-  , const
-  , at
-  , map
-  , ne
-  , fst
-  , snd
-  , concat
-  , filter
-  , shard
-  , gt
-  , eq
-  , head
-  , take
-  , ifelse
-  , branch
-  , join
-  , paste
-  , keys
-  , size
-  , onFst
-  , sleep
-  , unique
-  , withSnds
-  , readMap
-  )
+-- Import generic functions
+import base (id, const, at, map, ne, fst, snd, concat, filter, shard, gt,
+             eq, head, take, ifelse, branch, join, paste, keys, size, onFst,
+             sleep, unique, withSnds, readMap)
 
 
+-- Type aliases
+type Accession = Str
+type Clade = Str
+type Sequence = Str
+type Date = Str
+
+
+-- Source python functions for dealing with Entrez records
 source Py from "entrez_helpers.py"
   ( "parseRecord"
   , "labelRef"
   , "setLeafName"
   )
 
+-- Source C++ alternative for one of these functions
 source Cpp from "entrez_helpers.hpp" ("setLeafName")
 
+-- Define the general type of each function
 parseRecord :: JsonObj -> (JsonObj, Sequence)
 labelRef :: Map Accession Clade -> JsonObj -> (JsonObj, Clade)
 setLeafName :: (JsonObj, Sequence) -> Str
 
+-- Source R plotting function and define its type
 source R from "plot-tree.R" ("plotTree")
-
 plotTree :: Filename -> RootedTree n Real Str -> ()
 
+
+-- Define the configuration record
 record FluConfig = FluConfig
   { mindate :: Date
   , maxdate :: Date
@@ -78,18 +68,24 @@ record FluConfig = FluConfig
   , query :: Str
   , email :: Str
   }
+
+-- Specify the representation of this record in Python and R
 record Py => FluConfig = "dict"
 record R => FluConfig = "list"
 
 
+-- Define the morloc composition for plotting tree with clade labels
 plotCladeTree :: FluConfig -> RootedTree Str Real (JsonObj, Clade) -> ()
-plotCladeTree config = plotTree config@treefile . mapLeaf setLeafName 
+plotCladeTree config = plotTree config@treefile . mapLeaf setLeafName
 
-
+-- Define the main classification pipeline
+--  * searchEntrez - prep the data
+--  * treeBy upgma - make the phylogenetic tree
+--  * classify - infer a clade for every leaf
 classifyByDate :: FluConfig -> RootedTree Str Real (JsonObj, Clade)
 classifyByDate = classify . treeBy upgma . searchEntrez
 
-
+-- Retrieve sequence data from Entrez and tag reference strains
 searchEntrez :: FluConfig -> [((JsonObj, Clade), Sequence)]
 searchEntrez config =
   ( map (onFst (labelRef refmap))
@@ -113,7 +109,7 @@ searchEntrez config =
     fetchConfig = { email = config@email }
     refmap = readMap config@reffile
 
-
+-- Traverse the phylogenetic tree setting clade labels
 classify :: RootedTree n e (a, Clade) -> RootedTree Str e (a, Clade)
 classify
   = push id passClade setLeaf
