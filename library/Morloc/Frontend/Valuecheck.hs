@@ -8,7 +8,7 @@ License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
-module Morloc.Frontend.Valuecheck (valuecheck) where
+module Morloc.Frontend.Valuecheck (valuecheck, checkPair) where
 
 
 import Morloc.Frontend.Namespace
@@ -195,8 +195,8 @@ checkPair e1@(AccP _ k1 r1) e2@(AccP _ k2 r2)
   | otherwise = checkPair r1 r2
 
 -- Primitives must be equal
-checkPair e1@(LitP _ _) e2@(LitP _ _)
-  | e1 == e2 = return ()
+checkPair e1@(LitP _ x) e2@(LitP _ y)
+  | x == y = return ()
   | otherwise = valueError e1 e2
 
 -- All other cases should fail.

@@ -15,6 +15,7 @@ main = do
       [ packerTests
       , recordAccessTests
       , unitTypeTests
+      , unitValuecheckTests
       , typeOrderTests
       , typeAliasTests
       , propertyTests

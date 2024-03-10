@@ -4,6 +4,7 @@ module UnitTypeTests
   ( subtypeTests
   , substituteTVarTests
   , unitTypeTests
+  , unitValuecheckTests
   , typeOrderTests
   , typeAliasTests
   , packerTests
@@ -15,7 +16,7 @@ module UnitTypeTests
 
 import Morloc.Frontend.Namespace
 import Text.RawString.QQ
-import Morloc (typecheckFrontend)
+import Morloc (typecheckFrontend, typecheck)
 import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Typecheck.Internal as MTI
@@ -33,6 +34,18 @@ runFront :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
 runFront code = do
   ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
   return x
+
+runMiddle
+  :: MT.Text
+  -> IO (Either MorlocError
+          ( [AnnoS (Indexed Type) One ()]
+          , [AnnoS (Indexed Type) One (Indexed Lang)]
+          )
+        )
+runMiddle code = do
+  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheck Nothing (Code code))
+  return x
+
 
 emptyConfig :: Config
 emptyConfig =  Config
@@ -97,6 +110,23 @@ exprTestBad msg code =
   case result of
     (Right _) -> assertFailure . MT.unpack $ "Expected '" <> code <> "' to fail"
     (Left _) -> return ()
+
+valuecheckFail :: String -> MT.Text -> TestTree
+valuecheckFail msg code =
+  testCase msg $ do
+  result  <- runMiddle code
+  case result of
+    (Right _) -> assertFailure . MT.unpack $ "Expected '" <> code <> "' to fail"
+    (Left _) -> return ()
+
+valuecheckPass :: String -> MT.Text -> TestTree
+valuecheckPass msg code =
+  testCase msg $ do
+  result  <- runMiddle code
+  case result of
+    (Right _) -> return ()
+    (Left _) -> assertFailure . MT.unpack $ "Expected '" <> code <> "' to pass"
+
 
 -- FIXME: check that the correct error type is raised, but don't check message
 -- (tweaking messages shouldn't break tests)
@@ -1508,5 +1538,79 @@ unitTypeTests =
              y = add b z where
                b = 42
            z = 19
+      |]
+    ]
+
+unitValuecheckTests :: TestTree
+unitValuecheckTests =
+  testGroup
+    "Valuechecker unit tests"
+    [ valuecheckFail "unequal primitives fail"
+    -- primitives
+      [r|
+         module foo (x)
+           x = 1
+           x = 2
+      |]
+    , valuecheckPass "equal primitives pass"
+      [r|
+         module foo (x)
+           x = 1
+           x = 1
+      |]
+    -- containers
+    ,  valuecheckFail "lists with unequal values fail"
+      [r|
+         module foo (x)
+           x = [1,3]
+           x = [1,2]
+      |]
+    ,  valuecheckFail "lists of unequal length fail"
+      [r|
+         module foo (x)
+           x = [1]
+           x = [1,2]
+      |]
+    ,  valuecheckPass "identical lists pass"
+      [r|
+         module foo (x)
+           x = [1,2]
+           x = [1,2]
+      |]
+    -- bound terms in simple expressions
+    ,  valuecheckFail "argument constraints"
+      [r|
+         module foo (f)
+           f x y = x
+           f a b = b
+      |]
+    ,  valuecheckFail "lambda var mismatches"
+      [r|
+         module foo (f)
+           f x y = [x,y]
+           f a b = [b,a]
+      |]
+    ,  valuecheckPass "identical lambda passes"
+      [r|
+         module foo (f)
+           f x y = [x,y]
+           f a b = [a,b]
+      |]
+    -- comparisons of simple and non-simple
+    ,  valuecheckFail "constrained values fail"
+      [r|
+         module foo (x)
+           source Py ("sum")
+           sum :: [Int] -> Int
+           x = sum [1, 2]
+           x = 3
+      |]
+    ,  valuecheckFail "unequal types"
+      [r|
+         module foo (f)
+           source Py ("sum")
+           sum :: [Int] -> Int
+           f xs = [1, sum xs]
+           f xs = [2, sum xs]
       |]
     ]
