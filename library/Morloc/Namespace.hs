@@ -82,6 +82,8 @@ module Morloc.Namespace
   , Signature(..)
   , Expr(..)
   , ExprI(..)
+  , E(..)
+  , Lit(..)
   , Import(..)
   , Exports(..)
   -- ** Type extensions
@@ -518,6 +520,40 @@ data Source =
     }
   deriving (Ord, Eq, Show)
 
+
+data Lit
+  = MNum Scientific
+  | MInt Integer
+  | MLog Bool
+  | MStr Text
+  | MUni
+  deriving (Ord, Eq, Show)
+
+
+data E
+  = BndP (Indexed Type) EVar
+  | VarP (Indexed Type) EVar [E]
+  | AccP (Indexed Type) Key E
+  | AppP (Indexed Type) E [E]
+  | LamP (Indexed Type) [EVar] E
+  | LstP (Indexed Type) [E]
+  | TupP (Indexed Type) [E]
+  | NamP (Indexed Type) [(Key, E)]
+  | LitP (Indexed Type) Lit
+  | SrcP (Indexed Type) Source
+  deriving (Ord, Eq, Show)
+
+
+-- The AnnoS ExprS cycle is annoying, it requires mutually recursive
+-- operations. But please think very carefully before replacing it with
+-- something "better".
+--
+-- While annoying, it does allow the annotations to be separated from the
+-- expressions. In the typechecker, we use general annotation is an indexed
+-- type. The index for the given expression must be invariant (among other
+-- things, it links back to the line of code where it was defined). The mutual
+-- recursion allows all the index book-keeping to be handled in one function
+-- of AnnoS and the logic to be handled in the functions of ExprS.
 data AnnoS g f c = AnnoS g c (ExprS g f c)
 
 data ExprS g f c
@@ -624,7 +660,7 @@ data TypeError
   | MissingConcreteSignature EVar Lang
   | MissingGeneralSignature EVar
   | ApplicationOfNonFunction
-  | InvalidApplication (AnnoS Int ManyPoly Int) [AnnoS Int ManyPoly Int] TypeU 
+  | InvalidApplication (AnnoS Int ManyPoly Int) [AnnoS Int ManyPoly Int] TypeU
   | TooManyArguments
   | EmptyExpression EVar
   | MissingFeature Text
@@ -710,6 +746,9 @@ data MorlocError
   | CannotUnifySignatures SignatureSet SignatureSet
   | NoInstanceFound ClassName EVar
   | AmbiguousInstances ClassName EVar
+  -- valuecheck errors
+  | ValueContradiction E E
+  | InseperableDefinitions Text
 
 
 
@@ -1009,6 +1048,31 @@ mostSpecific = P.maxima
 
 ----- Pretty instances -------------------------------------------------------
 
+
+instance Pretty Lit where
+  pretty (MNum x) = viaShow x
+  pretty (MInt x) = pretty x
+  pretty (MLog x) = pretty x
+  pretty (MStr x) = pretty x
+  pretty MUni = "Unit"
+
+instance Pretty E where
+  pretty (BndP _ v) = pretty v
+  pretty (VarP _ v _) = pretty v
+  pretty (AccP _ k e) = parens (pretty e) <> "[" <> pretty k <> "]"
+  pretty (AppP _ e es) = pretty e <+> hsep (map f es) where
+    f x@AppP{} = parens (pretty x)
+    f x@LamP{} = parens (pretty x)
+    f x@SrcP{} = parens (pretty x)
+    f x = pretty x
+  pretty (LamP _ vs e) = "\\" <+> hsep (map pretty vs) <+> "->" <+> pretty e
+  pretty (LstP _ es) = list (map pretty es)
+  pretty (TupP _ es) = tupled (map pretty es)
+  pretty (NamP _ rs) = encloseSep "{" "}" "," [pretty k <+> "=" <+> pretty e | (k,e) <- rs]
+  pretty (LitP _ l) = pretty l
+  pretty (SrcP _ src) = pretty src
+
+
 instance Pretty Instance where
   pretty (Instance cls vs et ts) =
       "Instance" <+> pretty cls
@@ -1154,7 +1218,7 @@ instance Pretty (ExprS g f c) where
   pretty (BndS v) = pretty v
   pretty (VarS v _) = pretty v
   pretty (AccS k e) = parens (pretty e) <> "[" <> pretty k <> "]"
-  pretty (AppS e es) = pretty e <> vsep (map pretty es)
+  pretty (AppS e es) = "App" <+> pretty e <> vsep (map pretty es)
   pretty (LamS vs e) = parens ("\\" <+> hsep (map pretty vs) <+> "->" <+> pretty e)
   pretty (LstS es) = list (map pretty es)
   pretty (TupS es) = tupled (map pretty es)
@@ -1162,7 +1226,7 @@ instance Pretty (ExprS g f c) where
   pretty (RealS x) = viaShow x
   pretty (IntS x) = pretty x
   pretty (LogS x) = pretty x
-  pretty (StrS x) = pretty x
+  pretty (StrS x) = dquotes (pretty x)
   pretty (CallS src) = pretty src
 
 instance (Pretty k, Pretty a) => Pretty (IndexedGeneral k a) where
@@ -1327,7 +1391,7 @@ instance Pretty MorlocError where
     = pretty (CannotSynthesizeConcreteType m src t []) <> "\n" <>
       "  Cannot resolve concrete types for these general types:" <+> list (map pretty vs) <> "\n" <>
       "  Are you missing type alias imports?"
-  pretty (MissingTypeclassDefinition cls v) = "No definition found in typeclass" <+> dquotes (pretty cls) <+> "for term" <+> dquotes (pretty v) 
+  pretty (MissingTypeclassDefinition cls v) = "No definition found in typeclass" <+> dquotes (pretty cls) <+> "for term" <+> dquotes (pretty v)
   pretty (ConflictingClasses cls1 cls2 v) = "Conflicting typeclasses for" <+> pretty v <+> "found definitions in both" <+> pretty cls1 <+> "and" <+> pretty cls2
   pretty (InstanceSizeMismatch cls vs ts) = "For class" <+> pretty cls <+> "expected" <+> pretty (length vs) <+> "parameters" <+> tupled (map pretty vs)
     <+> "but found" <+> pretty (length ts) <+> tupled (map pretty ts)
@@ -1338,8 +1402,10 @@ instance Pretty MorlocError where
   pretty (NoInstanceFound cls v) = "No instance found for" <+> pretty cls <> "::" <> pretty v
                                  <> "\n  Are you missing a top-level type signature?"
   pretty (AmbiguousInstances cls v) = "Ambiguous instances found for" <+> pretty cls <> "::" <> pretty v
- 
-  
+  pretty (ValueContradiction x y) = "ValueContradiction" <+> pretty x <+> "!=" <+> pretty y
+  pretty (InseperableDefinitions msg) = "InseperableDefinitions" <+> pretty msg
+
+
 
 instance Pretty TypeError where
   pretty (SubtypeError t1 t2 msg)
@@ -1368,8 +1434,6 @@ instance Pretty TypeError where
     = "InvalidFunctionApplication:"
     <> "\n  application:" <+> pretty f <+> hsep (map (parens . pretty) xs)
     <> "\n  where" <+> pretty f <+> "::" <+> pretty t
-    
-
 
 
 

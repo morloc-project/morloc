@@ -3,7 +3,9 @@ module main (foo)
 type R => Real = "numeric"
 type R => List a = "list" a
 
-source R from "rms.R" ("rms1" as rms, "rms2" as rms, "add") 
+-- NOTE: previously I also included the rms2 function, however, the compiler
+-- does not yet have a way to choose which to use.
+source R from "rms.R" ("rms1" as rms, "add") 
 rms :: [Real] -> Real
 add :: Real -> Real -> Real
 

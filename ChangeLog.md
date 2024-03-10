@@ -82,6 +82,11 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Replace JSON serialization
  - [ ] Update Hackage release
 
+0.47.0 [2024.03.10]
+-------------------
+ * Add value checker
+ * Raise error when implementations have equal score (no arbitrary choice)
+
 0.46.0 [2024.03.06]
 -------------------
 

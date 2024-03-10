@@ -1,3 +1,5 @@
+-- NOTE: currently not used, the compiler cannot yet distinguish between sourced functions
+
 module main (rms)
 
 import types (List, Real)
