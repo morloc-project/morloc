@@ -13,6 +13,7 @@ module Morloc.Frontend.API
   , Parser.readType
   , Typecheck.typecheck
   , Typecheck.resolveTypes
+  , Valuecheck.valuecheck
   ) where
 
 import Morloc.Frontend.Namespace
@@ -25,6 +26,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.Parser as Parser
 import qualified Morloc.Frontend.Lexer as Lexer
 import qualified Morloc.Frontend.Typecheck as Typecheck
+import qualified Morloc.Frontend.Valuecheck as Valuecheck
 
 parse ::
      Maybe Path -- ^ path to the current module (if we are reading from a file)

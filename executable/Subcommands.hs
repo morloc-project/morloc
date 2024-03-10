@@ -23,6 +23,8 @@ import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialMani
 import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.Map as Map
+import Morloc.CodeGenerator.Generate (generatePools)
+
 
 
 runMorloc :: CliCommand -> IO ()
@@ -96,7 +98,9 @@ cmdTypecheck args _ config = do
                Nothing
                verbosity
                config
-               (M.typecheck path code) |>> writeTypecheckOutput verbosity >>= (\s -> putDoc (s <> "\n"))
+               (M.typecheck path code >>= (generatePools . snd) )
+               |>> writeTypecheckOutput verbosity
+               >>= (\s -> putDoc (s <> "\n"))
         else
             MM.runMorlocMonad
                Nothing
