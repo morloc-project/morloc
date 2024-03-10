@@ -6,7 +6,7 @@ import cppbase (map)
 
 source cpp from "rms.h"
  ( "rms1" as rms
- , "rms2" as rms
+ -- , "rms2" as rms
  )
 
 square x = mul x x

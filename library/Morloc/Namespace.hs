@@ -1218,7 +1218,7 @@ instance Pretty (ExprS g f c) where
   pretty (BndS v) = pretty v
   pretty (VarS v _) = pretty v
   pretty (AccS k e) = parens (pretty e) <> "[" <> pretty k <> "]"
-  pretty (AppS e es) = pretty e <> vsep (map pretty es)
+  pretty (AppS e es) = "App" <+> pretty e <> vsep (map pretty es)
   pretty (LamS vs e) = parens ("\\" <+> hsep (map pretty vs) <+> "->" <+> pretty e)
   pretty (LstS es) = list (map pretty es)
   pretty (TupS es) = tupled (map pretty es)
@@ -1226,7 +1226,7 @@ instance Pretty (ExprS g f c) where
   pretty (RealS x) = viaShow x
   pretty (IntS x) = pretty x
   pretty (LogS x) = pretty x
-  pretty (StrS x) = pretty x
+  pretty (StrS x) = dquotes (pretty x)
   pretty (CallS src) = pretty src
 
 instance (Pretty k, Pretty a) => Pretty (IndexedGeneral k a) where

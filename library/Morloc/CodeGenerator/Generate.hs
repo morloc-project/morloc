@@ -263,15 +263,26 @@ realize s0 = do
 
   -- Select one implementation for the given term
   collapseExpr l1 (VarS v (Many xs), Idx i _) = do
-    let mayX = minBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) xs
-    (x, lang) <- case mayX of
-      Nothing -> MM.throwError . GeneratorError . render $
-                 "No implementation found for" <+> squotes (pretty v)
-      (Just x@(AnnoS _ (Idx _ ss) _)) -> do
+    let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) xs
+    (x, lang) <- case minXs of
+      [] -> MM.throwError . GeneratorError . render $
+             "No implementation found for" <+> squotes (pretty v)
+      [x] -> handleOne x
+      choices@(x:_) -> case x of
+        (AnnoS _ _ (CallS _)) ->
+          MM.throwError . InseperableDefinitions . render
+            $ "no rule to separate the following sourced functions:\n"
+            <> indent 2 (vsep (map (\y -> "* " <> pretty y) choices))
+        _ -> handleOne x
+    return (VarS v (One x), Idx i lang)
+    where
+      handleOne
+        :: AnnoS (Indexed Type) Many (Indexed [(Lang, Int)])
+        -> MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
+      handleOne x@(AnnoS _ (Idx _ ss) _) = do
         let newLang = fmap fst (minBy (biasedCost l1) ss)
         x' <- collapseAnnoS newLang x
         return (x', newLang)
-    return (VarS v (One x), Idx i lang)
 
   -- Propagate downwards
   collapseExpr l1 (AccS k x, Idx i ss) = do
@@ -320,6 +331,18 @@ realize s0 = do
   minBy f (x1:rs) = case minBy f rs of
     Nothing -> Just x1
     (Just x2) -> if f x1 <= f x2 then Just x1 else Just x2
+
+  minsBy :: Ord b => (a -> b) -> [a] -> [a]
+  minsBy _ [] = []
+  minsBy f (x:xs) = snd $ minsBy' (f x, [x]) xs where
+    minsBy' (best, grp) [] = (best, grp)
+    minsBy' (best, grp) (y:ys) = minsBy' (newSet (f y)) ys
+      where
+        newSet newScore
+          | newScore == best = (best, y:grp)
+          | newScore < best = (newScore, [y])
+          | otherwise = (best, grp)
+        
 
   -- find the lowest cost function for each key
   -- the groupSort function will never yield an empty value for vs, so `minimum` is safe
