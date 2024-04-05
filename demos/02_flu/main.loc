@@ -27,9 +27,9 @@ import bio.db
   )
 
 -- Import generic functions
-import base (id, const, at, map, ne, fst, snd, concat, filter, shard, gt,
-             eq, head, take, ifelse, branch, join, paste, keys, size, onFst,
-             sleep, unique, withSnds, readMap)
+import base (id, const, map, ne, fst, snd, concat, filter, shard,
+             eq, head, ifelse, branch, join, keys, size, onFst,
+             sleep, unique, readMap)
 
 
 -- Type aliases
@@ -40,14 +40,14 @@ type Date = Str
 
 
 -- Source python functions for dealing with Entrez records
-source Py from "entrez_helpers.py"
+source Py from "entrez.py"
   ( "parseRecord"
   , "labelRef"
   , "setLeafName"
   )
 
 -- Source C++ alternative for one of these functions
-source Cpp from "entrez_helpers.hpp" ("setLeafName")
+source Cpp from "entrez.hpp" ("setLeafName")
 
 -- Define the general type of each function
 parseRecord :: JsonObj -> (JsonObj, Sequence)
