@@ -68,7 +68,13 @@ executables:
       - -threaded
       - -rtsopts
       - -with-rtsopts=-N
+      - -O2
+      - -static
       - -haddock
+    cc-options:
+      - -static
+    ld-options:
+      - -static
     dependencies:
       - morloc 
       - base
