@@ -16,6 +16,9 @@ extra-source-files:
   - README.md
   - ChangeLog.md
 
+default-extensions:
+  - TypeOperators
+
 dependencies:
   - base
   - aeson
