@@ -82,6 +82,22 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Replace JSON serialization
  - [ ] Update Hackage release
 
+0.47.2 [2024-04-28]
+-------------------
+
+Second PeerJ submission - addressing missing workflow comparisons
+
+ * made the build static
+ * fixed the dockerfile
+ * exported the vim-syntax file out to its own repo
+ * added a --version option
+ * upgraded to LTS 22.18
+
+0.47.2 [2024-04-28]
+-------------------
+
+First PeerJ submission
+
 0.47.0 [2024.03.10]
 -------------------
  * Add value checker

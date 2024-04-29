@@ -1,0 +1,5 @@
+This container has a full morloc installation and language support for R, Python3, and C++.
+
+The ~/tests folder contains a set of tests from the morloc test suite. These may
+serve as simplistic examples of morloc scripts. Though they are designed for
+testing the language not pedagogy.

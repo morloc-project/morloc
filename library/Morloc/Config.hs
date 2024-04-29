@@ -20,10 +20,10 @@ module Morloc.Config
 import Morloc.Data.Doc
 import Morloc.Namespace
 import qualified Morloc.Language as ML
-import qualified Data.HashMap.Strict as H
 import qualified Data.Yaml.Config as YC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
+import qualified Data.Aeson.KeyMap as K
 
 
 getDefaultConfigFilepath :: IO Path
@@ -35,10 +35,10 @@ loadDefaultMorlocConfig = do
   defaults <- defaultFields
   return $
     Config
-      (MT.unpack $ defaults H.! "home")
-      (MT.unpack $ defaults H.! "source")
-      (MT.unpack $ defaults H.! "plane")
-      (MT.unpack $ defaults H.! "tmpdir")
+      (MT.unpack . fromJust $ defaults K.!? "home")
+      (MT.unpack . fromJust $ defaults K.!? "source")
+      (MT.unpack . fromJust $ defaults K.!? "plane")
+      (MT.unpack . fromJust $ defaults K.!? "tmpdir")
       "python3" -- lang_python3
       "Rscript" -- lang_R
       "perl" -- lang_perl
@@ -86,12 +86,12 @@ buildPoolCallBase c (Just Python3Lang) i =
 buildPoolCallBase _ _ _ = Nothing -- FIXME: add error handling
 
 -- A key value map
-defaultFields :: IO (H.HashMap MT.Text MT.Text)
+defaultFields :: IO (K.KeyMap MT.Text)
 defaultFields = do
   home <- MT.pack <$> getDefaultMorlocHome
   lib <- MT.pack <$> getDefaultMorlocSource
   tmp <- MT.pack <$> getDefaultMorlocTmpDir
-  return $ H.fromList [("home", home), ("source", lib), ("plane", "morloclib"), ("tmpdir", tmp)]
+  return $ K.fromList [("home", home), ("source", lib), ("plane", "morloclib"), ("tmpdir", tmp)]
 
 -- | Get the Morloc home directory (absolute path)
 getDefaultMorlocHome :: IO Path

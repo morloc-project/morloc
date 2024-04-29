@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.47.1
+version:          0.47.2
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
@@ -15,6 +15,9 @@ copyright:        "2020 Zebulun Arendsee"
 extra-source-files:
   - README.md
   - ChangeLog.md
+
+default-extensions:
+  - TypeOperators
 
 dependencies:
   - base
@@ -68,7 +71,16 @@ executables:
       - -threaded
       - -rtsopts
       - -with-rtsopts=-N
+      - -O2
+      # The static build requires a static `libgmp.a` file
+      # On arch, this requires libgmp-static from AUR
+      # On debian systems, libgmp-dev should cover it
+      - -static
       - -haddock
+    cc-options:
+      - -static
+    ld-options:
+      - -static
     dependencies:
       - morloc 
       - base
