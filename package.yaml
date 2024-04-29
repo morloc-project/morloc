@@ -72,6 +72,9 @@ executables:
       - -rtsopts
       - -with-rtsopts=-N
       - -O2
+      # The static build requires a static `libgmp.a` file
+      # On arch, this requires libgmp-static from AUR
+      # On debian systems, libgmp-dev should cover it
       - -static
       - -haddock
     cc-options:
