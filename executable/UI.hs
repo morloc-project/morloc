@@ -11,13 +11,13 @@ import Options.Applicative
 import qualified Options.Applicative.Extra as OAE
 
 version :: String
-version = "0.47.1"   -- FIXME: HARDCODED VERSION NUMBER!!!
+version = "v0.47.1"   -- FIXME: HARDCODED VERSION NUMBER!!!
 
 opts :: ParserInfo CliCommand
 opts = info (cliParser <**> helper <**> OAE.simpleVersioner version)
   (    fullDesc
     <> progDesc "call 'morloc make -h', 'morloc install -h', etc for details"
-    <> header ("morloc v" <> version)
+    <> header ("morloc " <> version)
   )
 
 
