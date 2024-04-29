@@ -20,7 +20,7 @@ RUN cd morloc && stack install
 
 ###############################################################################
 # Stage 2: Copy just the compiler binary
-FROM ubuntu:22.04 AS morloc-base
+FROM ubuntu:22.04
 COPY --from=morloc-build /root/.local/bin/morloc /bin/morloc
 
 WORKDIR $HOME
