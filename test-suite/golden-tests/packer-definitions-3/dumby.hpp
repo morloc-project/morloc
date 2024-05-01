@@ -4,7 +4,7 @@
 #include <string>
 #include <functional>
 
-// h :: (l -> (Str, l')) -> Str -> Real
+// h :: (a -> b) -> Str -> Real
 template <class L1, class L2>
 double h(std::function<L2(L1)> f, std::string x){
   return 4.2;
