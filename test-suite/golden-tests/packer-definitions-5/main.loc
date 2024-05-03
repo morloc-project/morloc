@@ -16,7 +16,7 @@ class Packable a b where
   pack :: a -> b
   unpack :: b -> a
 
-instance Packable ([key],[val]) (Map key val) where
+instance Packable ([Str],[val]) (Map Str val) where
   source Py from "map.py"
     ( "packMap" as pack
     , "unpackMap" as unpack
@@ -28,7 +28,7 @@ instance Packable ([key],[val]) (Map key val) where
     )
 
 source Cpp from "map.hpp" ("insert")
-insert :: Map Str b -> Str -> b -> Map Str b
+insert :: Map a b -> a -> b -> Map a b
 
 source Py from "map.py" ("singleton")
 singleton :: Str -> a -> Map Str a
