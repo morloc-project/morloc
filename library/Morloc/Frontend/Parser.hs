@@ -573,15 +573,29 @@ pEVar :: Parser EVar
 pEVar = fmap EV freenameL
 
 pTypeGen :: Parser TypeU
-pTypeGen = do
+pTypeGen = pExplicitGenericsType <|> pImplicitGenericsType
+
+pImplicitGenericsType :: Parser TypeU
+pImplicitGenericsType = do
   resetGenerics
   t <- pType
   s <- CMS.get
   return $ forallWrap (unique (reverse (stateGenerics s))) t
-  where
-    forallWrap :: [TVar] -> TypeU -> TypeU
-    forallWrap [] t = t
-    forallWrap (v:vs) t = ForallU v (forallWrap vs t)
+
+pExplicitGenericsType :: Parser TypeU
+pExplicitGenericsType = do
+  resetGenerics
+  _ <- reserved "forall"
+  vs <- many1 freenameL |>> map TV
+  _ <- symbol "."
+  t <- pType
+  mapM_ appendGenerics vs
+  return $ forallWrap vs t
+
+forallWrap :: [TVar] -> TypeU -> TypeU
+forallWrap [] t = t
+forallWrap (v:vs) t = ForallU v (forallWrap vs t)
+
 
 pTypeCon :: Parser TypeU
 pTypeCon = try pAppUCon <|> pVarUCon

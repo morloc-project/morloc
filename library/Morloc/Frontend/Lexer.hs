@@ -252,6 +252,7 @@ reservedWords =
   , "type"
   , "instance"
   , "class"
+  , "forall"
   ]
 
 operatorChars :: String
