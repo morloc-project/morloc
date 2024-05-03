@@ -39,6 +39,7 @@ import qualified Morloc.Module as Mod
 import qualified Morloc.Language as ML
 import qualified Control.Monad.State as CMS
 import qualified Morloc.TypeEval as TE
+import qualified Morloc.Data.Text as MT
 import Control.Monad.Identity (Identity)
 
 data CallSemantics = Copy | Reference
@@ -460,8 +461,9 @@ translateSegment m0 = do
   makeSerialExpr _ _ = error "Unreachable"
 
   makeNativeExpr :: NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> CppTranslator PoolDocs
-  makeNativeExpr _ (AppSrcN_ _ src (map snd -> es)) =
-    return $ mergePoolDocs ((<>) (pretty $ srcName src) . tupled) es
+  makeNativeExpr _ (AppSrcN_ _ src qs (map snd -> es)) = do
+    templateStr <- templateArguments qs
+    return $ mergePoolDocs ((<>) (pretty (srcName src) <> templateStr) . tupled) es
   makeNativeExpr _ (ManN_ call) = return call
   makeNativeExpr _ (ReturnN_ e) =
     return $ e {poolExpr = "return" <> parens (poolExpr e) <> ";"}
@@ -502,6 +504,12 @@ translateSegment m0 = do
   makeNativeExpr _ (StrN_         _ x) = return (PoolDocs [] [idoc|std::string("#{pretty x}")|] [] [])
   makeNativeExpr _ (NullN_        _  ) = return (PoolDocs [] "null" [] [])
   makeNativeExpr _ _ = error "Unreachable"
+
+  templateArguments :: [(MT.Text, TypeF)] -> CppTranslator MDoc
+  templateArguments [] = return ""
+  templateArguments qs = do
+    ts <- mapM (cppTypeOf . snd) qs
+    return $ encloseSep "<" ">" "," ts
 
 
   makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs

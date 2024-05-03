@@ -246,6 +246,9 @@ data MorlocState = MorlocState
   -- ^ The indices of each exported term
   , stateName :: Map Int EVar
   -- ^ store the names of morloc compositions
+  , stateTypeQualifier :: Map Int [(TVar, TypeU)]
+  -- ^ Store the ordered parameters of a type. This is required in C++ for
+  -- specifying template parameter types.
   }
   deriving(Show)
 
@@ -864,6 +867,7 @@ instance Defaultable MorlocState where
     , stateOutfile = Nothing
     , stateExports = []
     , stateName = Map.empty
+    , stateTypeQualifier = Map.empty
   }
 
 instance Annotated IndexedGeneral where

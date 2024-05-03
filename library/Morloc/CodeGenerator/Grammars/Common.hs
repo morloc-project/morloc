@@ -198,10 +198,10 @@ invertSerialManifold sm0 =
   invertSerialExprM (SerializeS_ s (D ne lets)) = atomize (SerializeS s ne) lets
 
   invertNativeExprM :: NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) -> Index (D NativeExpr)
-  invertNativeExprM (AppSrcN_ t src nativeArgs) = do
+  invertNativeExprM (AppSrcN_ t src qs nativeArgs) = do
     let nativeArgs' = map unD nativeArgs
         deps = concatMap getDeps nativeArgs
-    atomize (AppSrcN t src nativeArgs') deps
+    atomize (AppSrcN t src qs nativeArgs') deps
   invertNativeExprM (ManN_ (D nm lets)) = atomize (ManN nm) lets
   invertNativeExprM (ReturnN_ (D ne lets)) = atomize (ReturnN ne) lets
   invertNativeExprM (SerialLetN_ i (D se1 lets1) (D ne2 lets2)) =

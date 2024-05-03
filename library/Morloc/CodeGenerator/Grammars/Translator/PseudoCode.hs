@@ -54,7 +54,7 @@ prettyFoldManifold = FoldWithManifoldM
     makeSerialExpr _ (SerializeS_ _ e) = return $ e {poolExpr = "SerializeS" <> parens (poolExpr e)}
 
     makeNativeExpr :: Monad m => NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs
-    makeNativeExpr _ (AppSrcN_ _ (pretty . srcName -> functionName) xs) =
+    makeNativeExpr _ (AppSrcN_ _ (pretty . srcName -> functionName) _ xs) =
       return $ mergePoolDocs ((<>) functionName . tupled) xs
     makeNativeExpr _ (ManN_ call) = return call
     makeNativeExpr _ (ReturnN_ x) =

@@ -303,6 +303,10 @@ pTypedef = try pTypedefType <|> pTypedefObject where
         constructor <- freename
         return (constructor, Nothing)
     entries <- option [] $ braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries o)
+
+    -- The vs are the parameters of the object. In C++ they are the required
+    -- template parameters (e.g., A and B in Obj<A,B>). I have to maintain them
+    -- as an ordered list all the way to code generation.
     let t = NamU o (TV con) (map VarU vs) (map (first Key) entries)
     exprI (TypE k v vs t)
 

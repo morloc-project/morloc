@@ -45,7 +45,42 @@ typecheck = mapM run where
       let e3 = mapAnnoSG (fmap normalizeType) . applyGen g2 $ e2
 
       (g3, e4) <- resolveInstances g2 e3
+
+      -- apply inferred type information to the extracted type qualifiers
+      -- this information was uploaded by the `recordParameter` function
+      s <- MM.get
+      let qmap = Map.map (prepareQualifierMap g3) (stateTypeQualifier s)
+      MM.put (s {stateTypeQualifier = qmap})
+
+      insetSay $ "Qualifier Map:" <+> viaShow qmap
+
+      -- perform a final application of gamma the final expression and return
+      -- (is this necessary?)
       return (applyGen g3 e4)
+
+-- The typechecker goes through two passes assigning two different var names
+-- to the qualifiers. The first is never resolved, and is left as
+-- existential. So here I remove them. This is hacky as hell. Need a cleaner
+-- solution.
+--
+-- I'm making a list, I'm checking it twice. Why am I checking it twice? Why do
+-- I generate two qualifiers for each term? When I first made this typechecker,
+-- it was doing both general and concrete typechecking at the same time. Then I
+-- recanted this witchcraft and began inferring all concrete types. But some
+-- witchy kinks remain. I should just rewrite the whole thing.
+prepareQualifierMap :: Gamma -> [(TVar, TypeU)] -> [(TVar, TypeU)]
+prepareQualifierMap g = filter notExistential . map f where
+  f (v, t) = (v, apply g t)
+
+  notExistential (_, ExistU{}) = False
+  notExistential _ = True
+
+-- Upload a solved universal qualifier to the stateTypeQualifier list
+recordParameter :: Int -> TVar -> MorlocMonad ()
+recordParameter i v = do
+  s <- MM.get
+  let updatedMap = Map.insertWith (\xs ys -> ys <> xs) i [(v, (ExistU v [] []))] (stateTypeQualifier s)
+  MM.put $ s { stateTypeQualifier = updatedMap }
 
 -- TypeU --> Type
 resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int
@@ -592,7 +627,9 @@ checkE i g0 e0@(LamS vs body) t@(FunU as b)
         (g', e') <- expand (length as - length vs) g0 e0
         checkE' i g' e' t
 
-checkE i g1 e1 (ForallU v a) = checkE' i (g1 +> v) e1 (substitute v a)
+checkE i g1 e1 (ForallU v a) = do
+  recordParameter i v
+  checkE' i (g1 +> v) e1 (substitute v a)
 
 --   Sub
 checkE i g1 e1 b = do
