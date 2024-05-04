@@ -1,4 +1,4 @@
-module flucase (classifyByDate, plotCladeTree)
+module flucase (classifyByDate, plotCladeTree, searchEntrez, makeTreeAndClassify)
 
 -- Import standard type definitions
 import types (Str, Int, Filename, Real, Unit, Map, Tuple2)
@@ -77,6 +77,9 @@ record R => FluConfig = "list"
 -- Define the morloc composition for plotting tree with clade labels
 plotCladeTree :: FluConfig -> RootedTree Str Real (JsonObj, Clade) -> ()
 plotCladeTree config = plotTree config@treefile . mapLeaf setLeafName
+
+makeTreeAndClassify :: [((JsonObj, Clade), Sequence)] -> RootedTree Str Real (JsonObj, Clade)
+makeTreeAndClassify = classify . treeBy upgma
 
 -- Define the main classification pipeline
 --  * searchEntrez - prep the data
