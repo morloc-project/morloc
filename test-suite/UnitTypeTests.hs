@@ -350,7 +350,7 @@ typeAliasTests =
         module main (f)
         f :: m (a -> b)
         |]
-        (forall ["m_q0", "a_q1", "b_q2"] (arr "m_q0" [fun [var "a_q1", var "b_q2"]]))
+        (forall ["m___q0", "a___q1", "b___q2"] (arr "m___q0" [fun [var "a___q1", var "b___q2"]]))
     , assertGeneralType
         "non-parametric, general type alias"
         [r|

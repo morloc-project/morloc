@@ -16,6 +16,7 @@ import Morloc.Typecheck.Internal
 import Morloc.Data.Doc
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.GMap as GMap
+import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 
@@ -69,11 +70,21 @@ typecheck = mapM run where
 -- recanted this witchcraft and began inferring all concrete types. But some
 -- witchy kinks remain. I should just rewrite the whole thing.
 prepareQualifierMap :: Gamma -> [(TVar, TypeU)] -> [(TVar, TypeU)]
-prepareQualifierMap g = filter notExistential . map f where
-  f (v, t) = (v, apply g t)
+prepareQualifierMap g = takeLast . filter notExistential . map f where
+  f ( TV . head . MT.splitOn "___" . unTVar -> v
+    , apply g -> t
+    ) = (v, t)
 
   notExistential (_, ExistU{}) = False
   notExistential _ = True
+
+  takeLast :: [(TVar, TypeU)] -> [(TVar, TypeU)]
+  takeLast = reverse . f [] . reverse where
+    f :: [TVar] -> [(TVar, TypeU)] -> [(TVar, TypeU)]
+    f _ [] = []
+    f observed ((v, t):rs)
+      | elem v observed = []
+      | otherwise = (v, t) : f (v:observed) rs
 
 -- Upload a solved universal qualifier to the stateTypeQualifier list
 recordParameter :: Int -> TVar -> MorlocMonad ()
