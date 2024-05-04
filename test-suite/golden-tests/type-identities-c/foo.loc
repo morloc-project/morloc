@@ -2,10 +2,6 @@ module main (foo)
 
 import cppbase (id)
 
-class Packable a b where
-  pack :: a -> b
-  unpack :: b -> a
-
 instance Packable (Int) SizeT where
   source Cpp from "types.h"
     ( "packSizeT" as pack

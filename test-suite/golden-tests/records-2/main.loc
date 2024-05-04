@@ -2,13 +2,13 @@ module m (foo)
 
 import foo (Map, push, makeMap)
 
-id :: a -> a
+id a :: a -> a
 id x = x
 
-const :: a -> b -> a
+const a b :: a -> b -> a
 const x y = x
 
-bar :: Map n (e, Str) -> Map Str (e, Str)
+bar n e :: Map n (e, Str) -> Map Str (e, Str)
 bar = push id passClade setLeaf where
 
   passClade parent edge child = (edge, child)

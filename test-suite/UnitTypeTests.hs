@@ -348,7 +348,7 @@ typeAliasTests =
         "parameterized generic"
         [r|
         module main (f)
-        f :: m (a -> b)
+        f m a b :: m (a -> b)
         |]
         (forall ["m___q0", "a___q1", "b___q2"] (arr "m___q0" [fun [var "a___q1", var "b___q2"]]))
     , assertGeneralType
@@ -476,7 +476,7 @@ typeAliasTests =
            import a (A)
            import b (A)
            
-           foo :: A a b -> A a b -> A a b
+           foo a b :: A a b -> A a b -> A a b
         |]
 
     -- import tests ---------------------------------------
@@ -591,7 +591,7 @@ whereTests =
     , assertGeneralType
         "calling deeper where"
         [r|
-            id :: a -> a
+            id a :: a -> a
             inc :: Int -> Int
             f = id z where
                 z = inc y where
@@ -880,35 +880,35 @@ unitTypeTests =
     , assertGeneralType
         "identity signature function"
         [r|
-        id :: a -> a
+        id a :: a -> a
         id 42
         |]
         int
     , assertGeneralType
         "const signature function"
         [r|
-        const :: a -> b -> a
+        const a b :: a -> b -> a
         const 42 True
         |]
         int
     , assertGeneralType
         "fst signature function"
         [r|
-        fst :: (a,b) -> a
+        fst a b :: (a,b) -> a
         fst (42,True)
         |]
         int
     , assertGeneralType
         "value to list function"
         [r|
-        single :: a -> [a]
+        single a :: a -> [a]
         single 42
         |]
         (lst int)
     , assertGeneralType
         "head function"
         [r|
-        head :: [a] -> a
+        head a :: [a] -> a
         head [1,2,3]
         |]
         int
@@ -916,7 +916,7 @@ unitTypeTests =
     , assertGeneralType
         "make list function"
         [r|
-        f :: a -> [a]
+        f a :: a -> [a]
         f 1
         |]
         (lst int)
@@ -924,7 +924,7 @@ unitTypeTests =
     , assertGeneralType
         "make list function"
         [r|
-        single :: a -> [a]
+        single a :: a -> [a]
         single 1
         |]
         (lst int)
@@ -945,8 +945,8 @@ unitTypeTests =
     , assertGeneralType
         "app single function"
         [r|
-        app :: (a -> b) -> a -> b
-        f :: a -> [a]
+        app a b :: (a -> b) -> a -> b
+        f a :: a -> [a]
         app f 42
         |]
         (lst int)
@@ -954,8 +954,8 @@ unitTypeTests =
     , assertGeneralType
         "app head function"
         [r|
-        app :: (a -> b) -> a -> b
-        f :: [a] -> a
+        app a b :: (a -> b) -> a -> b
+        f a :: [a] -> a
         app f [42]
         |]
         int
@@ -982,7 +982,7 @@ unitTypeTests =
       "zip pair"
       [r|
       pair x y = (x, y)
-      zip :: (x -> y -> z) -> [x] -> [y] -> [z]
+      zip x y z :: (x -> y -> z) -> [x] -> [y] -> [z]
       zip pair [1,2] [True, False]
       |]
       (lst (tuple [int, bool]))
@@ -990,7 +990,7 @@ unitTypeTests =
     , assertGeneralType
       "nested identity"
       [r|
-      id :: a -> a
+      id a :: a -> a
       id (id (id 1))
       |]
       int
@@ -998,7 +998,7 @@ unitTypeTests =
     , assertGeneralType
       "head (head [[1]])"
       [r|
-      head :: [a] -> a
+      head a :: [a] -> a
       head (head [[42]])
       |]
       int
@@ -1006,7 +1006,7 @@ unitTypeTests =
     , assertGeneralType
       "snd (snd (1,(1,True)))"
       [r|
-      snd :: (a, b) -> b
+      snd a b :: (a, b) -> b
       snd (snd (1, (1, True)))
       |]
       bool
@@ -1022,8 +1022,8 @@ unitTypeTests =
     , assertGeneralType
         "map head function"
         [r|
-        map :: (a -> b) -> [a] -> [b]
-        head :: [a] -> a
+        map a b :: (a -> b) -> [a] -> [b]
+        head a :: [a] -> a
         map head [[1],[1,2,3]]
         |]
         (lst int)
@@ -1031,50 +1031,50 @@ unitTypeTests =
     , assertGeneralType
         "t a -> a"
         [r|
-        gify :: a -> G a
-        out :: f a -> a
+        gify a :: a -> G a
+        out f a :: f a -> a
         out (gify 1)
         |]
         int
     , assertGeneralType
         "f a b -> b"
         [r|
-        gify :: a -> b -> G a b
-        snd :: f a b -> b
+        gify a b :: a -> b -> G a b
+        snd f a b :: f a b -> b
         snd (gify 1 True)
         |]
         bool 
     , assertGeneralType
         "map id over number list"
         [r|
-        map :: (a -> b) -> [a] -> [b]
-        id :: a -> a
+        map a b :: (a -> b) -> [a] -> [b]
+        id a :: a -> a
         map id [1,2,3]
         |]
         (lst int)
     , assertGeneralType
         "map fst over tuple list"
         [r|
-        map :: (a -> b) -> [a] -> [b]
-        fst :: (a,b) -> a
+        map a b :: (a -> b) -> [a] -> [b]
+        fst a b :: (a,b) -> a
         map fst [(1,True),(2,False)]
         |]
         (lst int)
     , assertGeneralType
         "map fstG over (G a b) list"
         [r|
-        gify :: a -> b -> G a b
-        map :: (a -> b) -> [a] -> [b]
-        fstF :: f a b -> a
+        gify a b :: a -> b -> G a b
+        map a b :: (a -> b) -> [a] -> [b]
+        fstF f a b :: f a b -> a
         map fstF [gify 1 True, gify 2 False]
         |]
         (lst int)
     , assertGeneralType
         "fmap generic fst over functor"
         [r|
-        gify :: a -> G a
-        fmap :: (a -> b) -> f a -> f b
-        out :: f a -> a
+        gify a :: a -> G a
+        fmap f a b :: (a -> b) -> f a -> f b
+        out f a :: f a -> a
         fmap out (gify [1])
         |]
         (arr "G" [int])
@@ -1146,7 +1146,7 @@ unitTypeTests =
     , exprTestBad
         "applications with too many arguments fail"
         [r|
-        f :: a -> a
+        f a :: a -> a
         f True 12
         |]
     , exprTestBad
@@ -1184,14 +1184,14 @@ unitTypeTests =
         "arguments to a function are monotypes"
         (GeneralTypeError (SubtypeError int bool "Expect monotype"))
         [r|
-        f :: a -> a
+        f a :: a -> a
         g = \h -> (h 42, h True)
         g f
         |]
     , assertGeneralType
         "polymorphism under lambdas (203f8c) (1)"
         [r|
-        f :: a -> a
+        f a :: a -> a
         g = \h -> (h 42, h 1234)
         g f
         |]
@@ -1199,7 +1199,7 @@ unitTypeTests =
     , assertGeneralType
         "polymorphism under lambdas (203f8c) (2)"
         [r|
-        f :: a -> a
+        f a :: a -> a
         g = \h -> [h 42, h 1234]
         g f
         |]
@@ -1251,7 +1251,7 @@ unitTypeTests =
     , assertGeneralType
         "type signature: identity function"
         [r|
-        f :: a -> a
+        f a :: a -> a
         f 42
         |]
         int
@@ -1266,7 +1266,7 @@ unitTypeTests =
     , assertGeneralType
         "type signature: generic apply function"
         [r|
-        apply :: (a->b) -> a -> b
+        apply a b :: (a->b) -> a -> b
         f :: Int -> Bool
         apply f 42
         |]
@@ -1274,7 +1274,7 @@ unitTypeTests =
     , assertGeneralType
         "type signature: map"
         [r|
-        map :: (a->b) -> [a] -> [b]
+        map a b :: (a->b) -> [a] -> [b]
         f :: Int -> Bool
         map f [5,2]
         |]
@@ -1300,16 +1300,16 @@ unitTypeTests =
     , assertGeneralType
         "shadowed qualified type variables (7ffd52a)"
         [r|
-        f :: a -> a
-        g :: a -> Int
+        f a :: a -> a
+        g a :: a -> Int
         g f
         |]
         int
     , assertGeneralType
         "non-shadowed qualified type variables (7ffd52a)"
         [r|
-        f :: a -> a
-        g :: b -> Int
+        f a :: a -> a
+        g b :: b -> Int
         g f
         |]
         int
@@ -1319,7 +1319,7 @@ unitTypeTests =
     , assertGeneralType
         "list containing an applied variable"
         [r|
-        f :: a -> a
+        f a :: a -> a
         [53, f 34]
         |]
         (lst int)
@@ -1348,7 +1348,7 @@ unitTypeTests =
     , assertGeneralType
         "tuple containing an applied variable"
         [r|
-        f :: a -> a
+        f a :: a -> a
         (f 53, True)
         |]
         (tuple [int, bool])
@@ -1398,7 +1398,7 @@ unitTypeTests =
     , assertGeneralType
         "declaration with a signature (1)"
         [r|
-        f :: a -> a
+        f a :: a -> a
         f x = x
         f 42
         |]
@@ -1433,8 +1433,8 @@ unitTypeTests =
         (GeneralTypeError InfiniteRecursion)
         [r|
         module main (f)
-        g :: [a] -> a
-        f :: a -> a
+        g a :: [a] -> a
+        f a :: a -> a
         f x = g x
         |]
     , expectError
@@ -1442,8 +1442,8 @@ unitTypeTests =
         (GeneralTypeError InfiniteRecursion)
         [r|
         module main (f)
-        g :: (a, b) -> a
-        f :: a -> a
+        g a b :: (a, b) -> a
+        f a :: a -> a
         f x = g x
         |]
     , expectError
@@ -1451,8 +1451,8 @@ unitTypeTests =
         (GeneralTypeError InfiniteRecursion)
         [r|
         module main (f)
-        g :: (a -> b) -> a
-        f :: a -> a
+        g a b :: (a -> b) -> a
+        f a :: a -> a
         f x = g x
         |]
 
@@ -1523,7 +1523,7 @@ unitTypeTests =
           module Foo (x)
             x = 42
           module Bar (f)
-            f :: a -> [a]
+            f a :: a -> [a]
           module Main (z)
             import Foo (x)
             import Bar (f)

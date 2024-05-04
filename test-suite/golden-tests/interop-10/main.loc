@@ -4,7 +4,7 @@ import types (Str, Int, Real, Bool, Tuple2)
 source Cpp from "foo.hpp" ("f", "g")
 source Py from "foo.py" ("h")
 
-f :: (a -> b) -> a -> b
+f a b :: (a -> b) -> a -> b
 g :: Bool -> Int
 h :: (Str, Real) -> Bool
 

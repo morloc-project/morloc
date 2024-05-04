@@ -395,9 +395,10 @@ pSignature :: Parser Signature
 pSignature = do
   label' <- tag freename
   v <- freenameL
+  vs <- many freenameL |>> map TV
   _ <- op "::"
   props <- option [] (try pPropertyList)
-  t <- pTypeGen
+  t <- pType |>> forallWrap vs
   constraints <- option [] pConstraints
   return $ Signature
     (EV v)
@@ -408,6 +409,7 @@ pSignature = do
        , econs = Set.fromList constraints
        })
   where
+
 
   pPropertyList :: Parser [Property]
   pPropertyList = do
@@ -573,24 +575,11 @@ pEVar :: Parser EVar
 pEVar = fmap EV freenameL
 
 pTypeGen :: Parser TypeU
-pTypeGen = pExplicitGenericsType <|> pImplicitGenericsType
-
-pImplicitGenericsType :: Parser TypeU
-pImplicitGenericsType = do
+pTypeGen = do
   resetGenerics
   t <- pType
   s <- CMS.get
   return $ forallWrap (unique (reverse (stateGenerics s))) t
-
-pExplicitGenericsType :: Parser TypeU
-pExplicitGenericsType = do
-  resetGenerics
-  _ <- reserved "forall"
-  vs <- many1 freenameL |>> map TV
-  _ <- symbol "."
-  t <- pType
-  mapM_ appendGenerics vs
-  return $ forallWrap vs t
 
 forallWrap :: [TVar] -> TypeU -> TypeU
 forallWrap [] t = t

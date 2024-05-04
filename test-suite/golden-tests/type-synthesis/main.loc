@@ -9,7 +9,7 @@ type Py => (Tuple2 a b) = "tuple" a b
 foo :: Int -> Int
 foos :: Int -> [Int]
 sfoos :: [Int] -> [Int]
-toPair :: a -> (a, a)
-swapPair :: (a, b) -> (b, a)
+toPair a :: a -> (a, a)
+swapPair a b :: (a, b) -> (b, a)
 
 bar x = toPair (swapPair ((foo x), x))

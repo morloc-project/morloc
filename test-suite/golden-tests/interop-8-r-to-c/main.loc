@@ -7,7 +7,7 @@ source Cpp from "foo.hpp" ("g")
 
 f :: Bool -> Bool
 
-g :: (n -> a -> a) -> a -> n -> a
+g n a :: (n -> a -> a) -> a -> n -> a
 
 bar = g (\n a -> [n]) []
 

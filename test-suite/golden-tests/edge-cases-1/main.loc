@@ -6,8 +6,8 @@ type Py => Real = "float"
 type Py => Bool = "bool"
 type Py => (List a) = "list" a
 
-g :: (a -> [a] -> [a]) -> a -> a
-f :: (a -> Bool) -> [a] -> [a]
+g a :: (a -> [a] -> [a]) -> a -> a
+f a :: (a -> Bool) -> [a] -> [a]
 
 foo = g h1 4.2 where
   h1 x xs = h2 xs

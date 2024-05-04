@@ -9,7 +9,7 @@ type Py => Str = "str"
 type Py => (Tuple2 a b) = "tuple" a b
 
 source Cpp from "dumby.hpp" ("h")
-h :: (a -> b) -> Str -> Real
+h a b :: (a -> b) -> Str -> Real
 
 source Py from "dumby.py" ("f")
 f :: Real -> Real

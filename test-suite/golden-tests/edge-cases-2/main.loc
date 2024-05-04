@@ -28,7 +28,7 @@ record R => Person = "list"
 source Py from "foo.py" ("foo")
 source R from "foo.R" ("id")
 
-id :: a -> a
+id a :: a -> a
 foo :: Str -> Person
 
 bar = id . foo

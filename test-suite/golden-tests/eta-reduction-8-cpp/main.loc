@@ -4,7 +4,7 @@ import types (Tuple2, Tuple3, Int, Str, Bool)
 
 source Cpp from "foo.hpp" ("onThree", "inc")
 
-onThree :: (a -> b -> c -> d) -> (a, b, c) -> d
+onThree a b c d :: (a -> b -> c -> d) -> (a, b, c) -> d
 
 inc :: Int -> Int
 

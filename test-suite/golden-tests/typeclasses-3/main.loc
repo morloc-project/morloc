@@ -7,7 +7,7 @@ type Py => (List a) = "list" a
 
 
 class Summarizable a b where
-  summarize :: a -> b
+  summarize a b :: a -> b
 
 instance Summarizable [a] Str where
   source Py ("str" as summarize)
