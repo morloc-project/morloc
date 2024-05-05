@@ -451,7 +451,9 @@ data SerialExpr
 
 data NativeExpr
   = ManN         NativeManifold
-  | AppSrcN      TypeF Source [NativeArg]
+  -- The [TypeF] term stores solved generic terms. These map to the required
+  -- template variables for C++ functions.
+  | AppSrcN      TypeF Source [(Text, TypeF)] [NativeArg]
   | ReturnN      NativeExpr
   | SerialLetN   Int SerialExpr NativeExpr
   | NativeLetN   Int NativeExpr NativeExpr
@@ -496,7 +498,7 @@ foldlSE _ b (BndVarS_ _ _) = b
 foldlSE f b (SerializeS_ _ x) = f b x
 
 foldlNE :: (b -> a -> b) -> b -> NativeExpr_ a a a a a -> b
-foldlNE f b (AppSrcN_    _ _ xs) = foldl f b xs
+foldlNE f b (AppSrcN_    _ _ _ xs) = foldl f b xs
 foldlNE f b (ManN_            x) = f b x
 foldlNE f b (ReturnN_       x) = f b x
 foldlNE f b (SerialLetN_   _ x1 x2) = foldl f b [x1, x2]
@@ -559,7 +561,7 @@ makeMonoidFoldDefault mempty' mappend' =
   monoidSerialExpr' (SerializeS_ s (req, ne)) = return (req, SerializeS s ne)
 
   monoidNativeExpr' (ManN_ (req, nm)) = return (req, ManN nm)
-  monoidNativeExpr' (AppSrcN_ t src (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppSrcN t src es)
+  monoidNativeExpr' (AppSrcN_ t src qs (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppSrcN t src qs es)
   monoidNativeExpr' (ReturnN_ (req, ne)) = return (req, ReturnN ne)
   monoidNativeExpr' (SerialLetN_ i (req1, se) (req2, ne)) = return (mappend' req1 req2, SerialLetN i se ne)
   monoidNativeExpr' (NativeLetN_ i (req1, ne1) (req2, ne2)) = return (mappend' req1 req2, NativeLetN i ne1 ne2)
@@ -689,7 +691,7 @@ data SerialExpr_ sm se ne sr nr
   | SerializeS_ SerialAST ne
 
 data NativeExpr_ nm se ne sr nr
-  = AppSrcN_      TypeF Source [nr]
+  = AppSrcN_      TypeF Source [(Text, TypeF)] [nr]
   | ManN_         nm
   | ReturnN_      ne
   | SerialLetN_   Int se ne
@@ -825,9 +827,9 @@ surroundFoldNativeExprM
   -> m ne
 surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
   where
-  f full@(AppSrcN t src nativeArgs) = do
+  f full@(AppSrcN t src qs nativeArgs) = do
       nativeArgs' <- mapM (surroundFoldNativeArgM sfm fm) nativeArgs
-      opFoldWithNativeExprM fm full $ AppSrcN_ t src nativeArgs'
+      opFoldWithNativeExprM fm full $ AppSrcN_ t src qs nativeArgs'
   f full@(ManN nativeManifold) = do
       nativeManifold' <- surroundFoldNativeManifoldM sfm fm nativeManifold
       opFoldWithNativeExprM fm full $ ManN_ nativeManifold'
@@ -878,7 +880,7 @@ instance HasTypeF TypeF where
 
 instance HasTypeF NativeExpr where
   typeFof (ManN nm) = typeFof nm
-  typeFof (AppSrcN      t _ _) = t
+  typeFof (AppSrcN      t _ _ _) = t
   typeFof (ReturnN      e) = typeFof e
   typeFof (SerialLetN   _ _ e) = typeFof e
   typeFof (NativeLetN   _ _ e) = typeFof e
@@ -1069,7 +1071,7 @@ instance MFunctor SerialExpr where
 instance MFunctor NativeExpr where
   mgatedMap g f ne0
     | gateNativeExpr g ne0 = case ne0 of
-        (AppSrcN t src nativeArgs) -> mapNativeExpr f $ AppSrcN t src (map (mgatedMap g f) nativeArgs)
+        (AppSrcN t src qs nativeArgs) -> mapNativeExpr f $ AppSrcN t src qs (map (mgatedMap g f) nativeArgs)
         (ManN nm) -> mapNativeExpr f $ ManN (mgatedMap g f nm)
         (ReturnN ne) -> mapNativeExpr f $ ReturnN (mgatedMap g f ne)
         (SerialLetN i se ne) -> mapNativeExpr f $ SerialLetN i (mgatedMap g f se) (mgatedMap g f ne)

@@ -82,10 +82,24 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Replace JSON serialization
  - [ ] Update Hackage release
 
-0.47.2 [2024-04-28]
+
+0.48.0 [2024-04-03]
 -------------------
 
-Second PeerJ submission - addressing missing workflow comparisons
+Second PeerJ submission
+
+ * Made type parameters explicit as type arguments:
+    `id a :: a -> a`
+    rather than either of
+   `id :: a -> a`
+   `id :: forall a . a -> a`.
+ * Pass-by-reference in generated C++ code
+ * Simplify generated C++ code by using function template arguments rather
+   than type casting.
+
+
+0.47.2 [2024-04-28]
+-------------------
 
  * made the build static
  * fixed the dockerfile

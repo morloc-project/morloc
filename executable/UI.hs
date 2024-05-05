@@ -11,7 +11,7 @@ import Options.Applicative
 import qualified Options.Applicative.Extra as OAE
 
 version :: String
-version = "v0.47.2"   -- FIXME: HARDCODED VERSION NUMBER!!!
+version = "v0.48.0"   -- FIXME: HARDCODED VERSION NUMBER!!!
 
 opts :: ParserInfo CliCommand
 opts = info (cliParser <**> helper <**> OAE.simpleVersioner version)

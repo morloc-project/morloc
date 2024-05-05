@@ -13,10 +13,10 @@ type Py => Str = "str"
 type Py => Int = "int"
 
 class Packable a b where
-  pack :: a -> b
-  unpack :: b -> a
+  pack a b :: a -> b
+  unpack a b :: b -> a
 
-instance Packable ([key],[val]) (Map key val) where
+instance Packable ([Str],[val]) (Map Str val) where
   source Py from "map.py"
     ( "packMap" as pack
     , "unpackMap" as unpack
@@ -28,10 +28,10 @@ instance Packable ([key],[val]) (Map key val) where
     )
 
 source Cpp from "map.hpp" ("insert")
-insert :: Map Str b -> Str -> b -> Map Str b
+insert a b :: Map a b -> a -> b -> Map a b
 
 source Py from "map.py" ("singleton")
-singleton :: Str -> a -> Map Str a
+singleton a :: Str -> a -> Map Str a
 
 foo :: Int -> Int -> Map Str Int
 foo x y = insert (singleton "x" x) "y" y

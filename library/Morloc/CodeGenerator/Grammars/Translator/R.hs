@@ -202,7 +202,7 @@ translateSegment m0 =
       return $ e {poolExpr = serialized, poolPriorLines = poolPriorLines e <> assignments}
 
     makeNativeExpr :: NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
-    makeNativeExpr _ (AppSrcN_ _ (pretty . srcName -> functionName) xs) =
+    makeNativeExpr _ (AppSrcN_ _ (pretty . srcName -> functionName) _ xs) =
         return $ mergePoolDocs ((<>) functionName . tupled) (map snd xs)
     makeNativeExpr _ (ManN_ call) = return call
     makeNativeExpr _ (ReturnN_ x) =

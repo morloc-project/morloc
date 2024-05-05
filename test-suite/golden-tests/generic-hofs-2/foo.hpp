@@ -14,7 +14,7 @@ std::vector<B> map(std::function<B(A)> f, const std::vector<A> &xs){
 }
 
 template <class A, class B>
-B bar(double dummy, const std::tuple<A,B> &x){
+B bar(B dummy, const std::tuple<A,B> &x){
     return(std::get<1>(x));
 }
 

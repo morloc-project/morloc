@@ -4,9 +4,9 @@ source Py from "foo.py" ("mlc_foo" as pfoo)
 source Cpp from "foo.hpp" ("mlc_foo" as cfoo)
 source R from "foo.R" ("mlc_foo" as rfoo)
 
-pfoo :: a -> a
-cfoo :: a -> a
-rfoo :: a -> a
+pfoo a :: a -> a
+cfoo a :: a -> a
+rfoo a :: a -> a
 
 type Py => Str = "str"
 type Cpp => Str = "std::string"

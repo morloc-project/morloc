@@ -56,7 +56,7 @@ setLeafName :: (JsonObj, Sequence) -> Str
 
 -- Source R plotting function and define its type
 source R from "plot-tree.R" ("plotTree")
-plotTree :: Filename -> RootedTree n Real Str -> ()
+plotTree n :: Filename -> RootedTree n Real Str -> ()
 
 
 -- Define the configuration record
@@ -110,7 +110,7 @@ searchEntrez config =
     refmap = readMap config@reffile
 
 -- Traverse the phylogenetic tree setting clade labels
-classify :: RootedTree n e (a, Clade) -> RootedTree Str e (a, Clade)
+classify n e a :: RootedTree n e (a, Clade) -> RootedTree Str e (a, Clade)
 classify
   = push id passClade setLeaf
   . pullNode snd pullClade

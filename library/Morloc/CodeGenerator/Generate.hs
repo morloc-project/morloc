@@ -744,6 +744,8 @@ mkIdx (AnnoS _ (Idx i _, _) _) = Idx i
 express :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
 -- CallS - direct export of a sourced function, e.g.:
 express (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (CallS src)) = do
+  MM.sayVVV $ "Case #who the hell cares"
+  MM.sayVVV $ "cidx:" <+> pretty cidx
   ids <- MM.takeFromCounter (length inputs)
   let lambdaVals = fromJust $ safeZipWith PolyBndVar (map (C . Idx cidx) inputs) ids
   return
@@ -840,7 +842,7 @@ expressPolyExpr parentLang _
       return
           . PolyManifold parentLang midx (ManifoldPass args)
           . PolyReturn
-          $ PolyApp (PolySrc callTypeI src) xs'
+          $ PolyApp call xs'
 
   ----------------------------------------------------------------------------------------
   -- #4 cis partial lambda                                     | contextArgs | boundArgs |
@@ -1108,7 +1110,7 @@ expressPolyExpr _ _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manifoldArgument
 --   connections will be snapped apart in the segment step.
 -- * These applications will be fully applied, the case of partially applied
 --   functions will have been handled previously by LamM
-expressPolyExpr parentLang pc (AnnoS (Idx midx _) (_, args) (AppS (AnnoS (Idx _ fc@(FunT inputs _)) (Idx cidxCall callLang, _) (CallS src)) xs))
+expressPolyExpr parentLang pc (AnnoS (Idx midx _) (_, args) (AppS (AnnoS (Idx gidxCall fc@(FunT inputs _)) (Idx cidxCall callLang, _) (CallS src)) xs))
 
   ----------------------------------------------------------------------------------------
   -- #1 cis applied                                            | contextArgs | boundArgs |
@@ -1180,7 +1182,7 @@ expressPolyExpr parentLang pc (AnnoS (Idx midx _) (_, args) (AppS (AnnoS (Idx _ 
 
   where
     sameLanguage = parentLang == callLang
-    f = PolySrc (Idx cidxCall fc) src
+    f = PolySrc (Idx gidxCall fc) src
 
 -- An un-applied source call
 expressPolyExpr parentLang (val -> FunT pinputs poutput) (AnnoS (Idx midx c@(FunT callInputs _)) (Idx cidx callLang, _) (CallS src))
@@ -1196,13 +1198,15 @@ expressPolyExpr parentLang (val -> FunT pinputs poutput) (AnnoS (Idx midx c@(Fun
   ----------------------------------------------------------------------------------------
   | parentLang == callLang = do
       MM.sayVVV $ "case #2 - un-applied cis source call:" <+> pretty (srcName src)
+      MM.sayVVV $ "cidx:" <+> pretty cidx
+      MM.sayVVV $ "midx:" <+> pretty midx
       ids <- MM.takeFromCounter (length callInputs)
       let lambdaVals = bindVarIds ids (map (C . Idx cidx) callInputs)
           lambdaTypedArgs = fromJust $ safeZipWith annotate ids (map Just callInputs)
       return
         . PolyManifold callLang midx (ManifoldPass lambdaTypedArgs)
         . PolyReturn
-        $ PolyApp (PolySrc (Idx cidx c) src) lambdaVals
+        $ PolyApp (PolySrc (Idx midx c) src) lambdaVals
 
   ----------------------------------------------------------------------------------------
   -- #6 trans passed                                           | contextArgs | boundArgs |
@@ -1220,6 +1224,7 @@ expressPolyExpr parentLang (val -> FunT pinputs poutput) (AnnoS (Idx midx c@(Fun
   ----------------------------------------------------------------------------------------
   | otherwise = do
       MM.sayVVV $ "case #6 - " <> pretty midx
+      MM.sayVVV $ "cidx:" <+> pretty cidx
       MM.sayVVV $ "Un-applied trans source call:" <+> pretty (srcName src)
       ids <- MM.takeFromCounter (length callInputs)
       let lambdaArgs = [Arg i None | i <- ids]
@@ -1238,7 +1243,7 @@ expressPolyExpr parentLang (val -> FunT pinputs poutput) (AnnoS (Idx midx c@(Fun
            ( PolyForeignInterface callLang (Idx cidx poutput) (map ann lambdaArgs)
            . PolyManifold callLang midx (ManifoldFull lambdaArgs)
            . PolyReturn
-           $ PolyApp (PolySrc (Idx cidx c) src) callVals
+           $ PolyApp (PolySrc (Idx midx c) src) callVals
            )
        $ fromJust $ safeZipWith (PolyBndVar . C) (map (Idx cidx) pinputs) (map ann lambdaArgs)
 
@@ -1572,7 +1577,19 @@ serialize (MonoHead lang m0 args0 e0) = do
     appType <- case drop (length es) inputTypes of
         [] -> inferType (Idx idx outputType)
         remaining -> inferType $ Idx idx (FunT remaining outputType)
-    return $ AppSrcN appType src args
+
+    MM.sayVVV $ "loading qualifier" <+> pretty idx <+> "for" <+> pretty src
+
+    -- Pull the parameter types that were solved in the frontend typechecker
+    qualifiers <- MM.gets stateTypeQualifier
+    let qs = maybe [] id (Map.lookup idx qualifiers)
+    -- Infer concrete types for all
+    ftypes <- mapM (\t -> inferConcreteType lang (Idx idx (typeOf t))) (map snd qs)
+    -- Clean up and zip together
+    let vs = map (unTVar . fst) qs
+        qs' = zip vs ftypes
+
+    return $ AppSrcN appType src qs' args
   nativeExpr m e@(MonoApp (MonoPoolCall t _ _ _) _) = do
     e' <- serialExpr m e
     t' <- inferType t
@@ -1893,7 +1910,7 @@ findSources ms = unique <$> concatMapM (foldSerialManifoldM fm) ms
     , opSerialManifoldM = nativeSerialSrcs
     }
 
-  nativeExprSrcs (AppSrcN_ _ src xss) = return (src : concat xss)
+  nativeExprSrcs (AppSrcN_ _ src _ xss) = return (src : concat xss)
   nativeExprSrcs (SrcN_ _ src) = return [src]
   nativeExprSrcs (DeserializeN_ _ s xs) = return $ serialASTsources s <> xs
   nativeExprSrcs e = return $ foldlNE (<>) [] e

@@ -39,12 +39,20 @@ import qualified Morloc.Module as Mod
 import qualified Morloc.Language as ML
 import qualified Control.Monad.State as CMS
 import qualified Morloc.TypeEval as TE
+import qualified Morloc.Data.Text as MT
 import Control.Monad.Identity (Identity)
+
+data CallSemantics = Copy | Reference
 
 class HasCppType a where
   cppTypeOf :: a -> CppTranslator MDoc
 
-  cppArgOf :: Arg a -> CppTranslator MDoc
+  cppArgOf :: CallSemantics -> Arg a -> CppTranslator MDoc
+
+
+setCallSemantics :: CallSemantics -> MDoc -> MDoc
+setCallSemantics Copy typestr = typestr
+setCallSemantics Reference typestr = "const" <+> typestr <> "&"
 
 instance HasCppType TypeM where
   cppTypeOf (Serial _) = return serialType
@@ -55,20 +63,21 @@ instance HasCppType TypeM where
     ts' <- mapM cppTypeOf ts
     return $ "std::function<" <> t' <> tupled ts' <> ">"
 
-  cppArgOf (Arg i t@(Serial _)) = do
-    t' <- cppTypeOf t
-    return $ t' <+> svarNamer i
-  cppArgOf (Arg i t@(Native _)) = do
-    t' <- cppTypeOf t
-    return $ t' <+> nvarNamer i
-  cppArgOf (Arg i Passthrough) = return $ serialType <+> svarNamer i
-  cppArgOf (Arg i t@(Function _ _)) = do
-    t' <- cppTypeOf t
-    return $ t' <+> nvarNamer i
+  cppArgOf (setCallSemantics -> setCall) = f where
+    f (Arg i t@(Serial _)) = do
+      t' <- cppTypeOf t
+      return $ setCall t' <+> svarNamer i
+    f (Arg i t@(Native _)) = do
+      t' <- cppTypeOf t
+      return $ setCall t' <+> nvarNamer i
+    f (Arg i Passthrough) = return $ setCall serialType <+> svarNamer i
+    f (Arg i t@(Function _ _)) = do
+      t' <- cppTypeOf t
+      return $ t' <+> nvarNamer i
 
 instance HasCppType NativeManifold where
   cppTypeOf = cppTypeOf . typeMof
-  cppArgOf r = cppArgOf $ fmap typeMof r
+  cppArgOf s r = cppArgOf s $ fmap typeMof r
 
 instance {-# OVERLAPPABLE #-} HasTypeF e => HasCppType e where
   cppTypeOf = f . typeFof where
@@ -94,9 +103,10 @@ instance {-# OVERLAPPABLE #-} HasTypeF e => HasCppType e where
       ps' <- mapM f ps
       return $ pretty s <> encloseSep "<" ">" "," ps'
 
-  cppArgOf (Arg i t) = do
+  cppArgOf s (Arg i t) = do
     t' <- cppTypeOf (typeFof t)
-    return $ t' <+> nvarNamer i
+    return $ setCallSemantics s t' <+> nvarNamer i
+
 
 -- | @RecEntry@ stores the common name, keys, and types of records that are not
 -- imported from C++ source. These records are generated as structs in the C++
@@ -226,7 +236,7 @@ makeSignature = foldWithSerialManifoldM fm where
       then return []
       else do
         let formArgs = typeMofForm form
-        args <- mapM cppArgOf formArgs
+        args <- mapM (cppArgOf Reference) formArgs
         CMS.put (s {translatorSignatureSet = Set.insert i (translatorSignatureSet s)})
         return [typestr <+> manNamer i <> tupled args <> ";"]
 
@@ -451,8 +461,9 @@ translateSegment m0 = do
   makeSerialExpr _ _ = error "Unreachable"
 
   makeNativeExpr :: NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> CppTranslator PoolDocs
-  makeNativeExpr _ (AppSrcN_ _ src (map snd -> es)) =
-    return $ mergePoolDocs ((<>) (pretty $ srcName src) . tupled) es
+  makeNativeExpr _ (AppSrcN_ _ src qs (map snd -> es)) = do
+    templateStr <- templateArguments qs
+    return $ mergePoolDocs ((<>) (pretty (srcName src) <> templateStr) . tupled) es
   makeNativeExpr _ (ManN_ call) = return call
   makeNativeExpr _ (ReturnN_ e) =
     return $ e {poolExpr = "return" <> parens (poolExpr e) <> ";"}
@@ -494,6 +505,12 @@ translateSegment m0 = do
   makeNativeExpr _ (NullN_        _  ) = return (PoolDocs [] "null" [] [])
   makeNativeExpr _ _ = error "Unreachable"
 
+  templateArguments :: [(MT.Text, TypeF)] -> CppTranslator MDoc
+  templateArguments [] = return ""
+  templateArguments qs = do
+    ts <- mapM (cppTypeOf . snd) qs
+    return $ encloseSep "<" ">" "," ts
+
 
   makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
   makeLet namer letIndex typestr (PoolDocs ms1 e1 rs1 pes1) (PoolDocs ms2 e2 rs2 pes2) =
@@ -525,36 +542,18 @@ makeManifold callIndex form manifoldType e = do
 
   mname = manNamer callIndex
 
-  makeManifoldCall
-    :: HasTypeM t
-    => ManifoldForm (Or TypeS TypeF) t -> CppTranslator MDoc
+  makeManifoldCall :: ManifoldForm (Or TypeS TypeF) t -> CppTranslator MDoc
   makeManifoldCall (ManifoldFull rs) = do
     let args = map argNamer (typeMofRs rs)
     return $ mname <> tupled args
-  makeManifoldCall (ManifoldPass vs) = do
-    typestr <- stdFunction (returnType manifoldType) (map (fmap typeMof) vs)
-    return $ typestr <> parens mname
+  makeManifoldCall (ManifoldPass _) = return mname
   makeManifoldCall (ManifoldPart rs vs) = do
-    -- Partial application is fucking ugly in C++.
-    -- Probably there is a prettier way to do this.
-    -- In Haskell:
-    --   mul :: Num -> Num -> Num
-    --   multiplyByFive = map (mul 5) xs
-    --
-    -- In C++, (mul 5) becomes:
-    --   std::function<double(double)>(std::bind(static_cast<double(*)(double, double)>(&mul), 5, std::placeholders::_1))
-    --
-    -- TODO: find some magic to make this suck less
-    appliedTypeStr <- stdFunction (returnType manifoldType) (map (fmap typeMof) vs)
-    let rsTypes = typeMofRs rs
-        vsTypes = map (fmap typeMof) vs
-    castFunction <- staticCast (returnType manifoldType) (rsTypes <> vsTypes) mname
     let vs' = take
               (length vs)
               (map (\j -> "std::placeholders::_" <> viaShow j) ([1..] :: [Int]))
         rs' = map argNamer (typeMofRs rs)
-        bindStr = stdBind $ castFunction : (rs' ++ vs')
-    return $ appliedTypeStr <+> parens bindStr
+        bindStr = stdBind $ mname : (rs' ++ vs')
+    return bindStr
 
   makeManifoldBody :: MDoc -> CppTranslator (Maybe MDoc)
   makeManifoldBody body = do
@@ -564,10 +563,10 @@ makeManifold callIndex form manifoldType e = do
       then return Nothing
       else do
         CMS.put $ state {translatorManifoldSet = Set.insert callIndex (translatorManifoldSet state)}
-        typestr <- cppTypeOf (returnType manifoldType)
+        returnTypeStr <- returnType manifoldType
         let argList = typeMofForm form
-        args <- mapM cppArgOf argList
-        let decl = typestr <+> mname <> tupled args
+        args <- mapM (cppArgOf Reference) argList
+        let decl = returnTypeStr <+> mname <> tupled args
         let tryBody = block 4 "try" body
             throwStatement = vsep
               [ [idoc|std::string error_message = "Error in m#{pretty callIndex} " + std::string(e.what());|]
@@ -580,27 +579,13 @@ makeManifold callIndex form manifoldType e = do
           [ {- can add diagnostic statements here -}
             tryCatchBody
           ]
-  returnType :: TypeM -> TypeM
-  returnType (Function _ t) = t
-  returnType t = t
-
-stdFunction :: (HasCppType ta, HasCppType tb) => ta -> [Arg tb] -> CppTranslator MDoc
-stdFunction t args = do
-  args' <- mapM cppArgOf args
-  let argList = cat (punctuate "," args')
-  typestr <- cppTypeOf t
-  return [idoc|std::function<#{typestr}(#{argList})>|]
+  returnType :: TypeM -> CppTranslator MDoc
+  returnType (Function _ t) = cppTypeOf t
+  returnType t = cppTypeOf t
 
 stdBind :: [MDoc] -> MDoc
 stdBind xs = [idoc|std::bind(#{args})|] where
   args = cat (punctuate "," xs)
-
-staticCast :: (HasCppType ta, HasCppType tb) => ta -> [Arg tb] -> MDoc -> CppTranslator MDoc
-staticCast t args name' = do
-  output <- cppTypeOf t
-  inputs <- mapM cppArgOf args
-  let argList = cat (punctuate "," inputs)
-  return [idoc|static_cast<#{output}(*)(#{argList})>(&#{name'})|]
 
 makeDispatch :: [SerialManifold] -> MDoc
 makeDispatch ms = block 4 "switch(std::stoi(argv[1]))" (vsep (map makeCase ms))

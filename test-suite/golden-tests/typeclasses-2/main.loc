@@ -11,8 +11,8 @@ type Py => Str = "str"
 type Py => List a = "list" a
 
 class Monoid a where
-  empty :: a
-  op :: a -> a -> a
+  empty a :: a
+  op a :: a -> a -> a
 
 instance Monoid Int where
   source Cpp from "foo.hpp" ("addInt" as op)
@@ -31,7 +31,7 @@ instance Monoid Str where
 
 source Cpp from "foo.hpp" ("fold")
 source Py from "foo.py" ("fold")
-fold :: (b -> a -> b) -> b -> [a] -> b
+fold a b :: (b -> a -> b) -> b -> [a] -> b
 
 sum :: [Int] -> Int
 sum = fold op empty

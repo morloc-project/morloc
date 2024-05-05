@@ -5,10 +5,7 @@ all:
 
 .PHONY:
 search:
-	./nexus.py search '{"email":"zbwrnz@gmail.com"}' \
-		                '{"email":"zbwrnz@gmail.com","db":"nuccore","mindate":"2023/01/01","maxdate":"2023/01/31","retmax":1000}' \
-										'[["KU976624","MG917052"],["1A.3.1","2010-human_like"]]' \
-										'"Influenza+A+Virus[Organism]+H3N2[ALL]+HA[ALL]"'
+	./nexus.py searchEntrez config.json > searchResult.json
 
 .PHONY:
 run:

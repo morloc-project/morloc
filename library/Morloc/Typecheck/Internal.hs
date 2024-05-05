@@ -502,7 +502,7 @@ newvarRich ps rs prefix g =
 -- | standardize quantifier names, for example, replace `a -> b` with `v0 -> v1`.
 rename :: Gamma -> TypeU -> (Gamma, TypeU)
 rename g0 (ForallU v@(TV s) t0) =
-  let (g1, v') = tvarname g0 (s <> "_q")
+  let (g1, v') = tvarname g0 (s <> "___q")
       (g2, t1) = rename g1 t0
       t2 = substituteTVar v (VarU v') t1
   in (g2, ForallU v' t2)
@@ -528,7 +528,7 @@ renameSExpr c0@(m, g) e0 = case e0 of
         rs' = zip ts ass'
     in (context', VarS v $ PolymorphicExpr cls clsName t rs')
   (LamS vs x) ->
-    let (g', vs') = statefulMap (\g'' (EV v) -> evarname g'' (v <> "_e")) g vs
+    let (g', vs') = statefulMap (\g'' (EV v) -> evarname g'' (v <> "___e")) g vs
         m' = foldr (uncurry Map.insert) m (zip vs vs')
         (c1, x') = renameAnnoS (m', g') x
     in (c1, LamS vs' x')

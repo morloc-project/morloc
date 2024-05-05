@@ -9,7 +9,7 @@ type Py => Real = "float"
 type Py => Str = "str"
 
 class Add a where
-  add :: a -> a -> a
+  add a :: a -> a -> a
 
 instance Add Int where
   source Cpp from "foo.hpp" ("addInt" as add)

@@ -1,5 +1,5 @@
 log
 *pdf
 *rda
-tree.json
+*.json
 __pycache__/

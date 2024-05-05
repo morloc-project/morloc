@@ -7,8 +7,10 @@ type Cpp => (Tuple2 a b) = "std::tuple<$1,$2>" a b
 
 source Cpp from "foo.hpp" ("map", "bar")
 
-map :: (a -> b) -> [a] -> [b]
+map a b :: (a -> b) -> [a] -> [b]
 
-bar :: b -> (a, b) -> b
+-- the `forall a b` sets the order of qualifiers and ensures that the C++
+-- template arguments are generated in the right order.
+bar a b :: b -> (a, b) -> b
 
 foo x = map (bar x) [("hi", 1.0), ("bi", 2.0)]

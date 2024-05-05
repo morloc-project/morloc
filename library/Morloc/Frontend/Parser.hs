@@ -303,6 +303,10 @@ pTypedef = try pTypedefType <|> pTypedefObject where
         constructor <- freename
         return (constructor, Nothing)
     entries <- option [] $ braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries o)
+
+    -- The vs are the parameters of the object. In C++ they are the required
+    -- template parameters (e.g., A and B in Obj<A,B>). I have to maintain them
+    -- as an ordered list all the way to code generation.
     let t = NamU o (TV con) (map VarU vs) (map (first Key) entries)
     exprI (TypE k v vs t)
 
@@ -391,9 +395,10 @@ pSignature :: Parser Signature
 pSignature = do
   label' <- tag freename
   v <- freenameL
+  vs <- many freenameL |>> map TV
   _ <- op "::"
   props <- option [] (try pPropertyList)
-  t <- pTypeGen
+  t <- pType |>> forallWrap vs
   constraints <- option [] pConstraints
   return $ Signature
     (EV v)
@@ -404,6 +409,7 @@ pSignature = do
        , econs = Set.fromList constraints
        })
   where
+
 
   pPropertyList :: Parser [Property]
   pPropertyList = do
@@ -574,10 +580,11 @@ pTypeGen = do
   t <- pType
   s <- CMS.get
   return $ forallWrap (unique (reverse (stateGenerics s))) t
-  where
-    forallWrap :: [TVar] -> TypeU -> TypeU
-    forallWrap [] t = t
-    forallWrap (v:vs) t = ForallU v (forallWrap vs t)
+
+forallWrap :: [TVar] -> TypeU -> TypeU
+forallWrap [] t = t
+forallWrap (v:vs) t = ForallU v (forallWrap vs t)
+
 
 pTypeCon :: Parser TypeU
 pTypeCon = try pAppUCon <|> pVarUCon
