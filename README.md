@@ -200,23 +200,25 @@ specialized type for each language it is implemented in.
 The map function has the general type
 
 ```
-map :: (a -> b) -> List a -> List b
+map a b :: (a -> b) -> List a -> List b
 ```
 
 The general signature looks the same as the Haskell equivalent. The characters
-`a` and `b` are generic type variables. As in Haskell, lowercase variables
-always represent generic variables in `morloc`. The `->` patterns represent
-functions. So `a -> b` represents a function that takes a value of type `a` and
-returns `b`. `List a` is a parameterized type, specifically a container of
-elements of type `a`.
+`a` and `b` are generic type variables. Lowercase variables represent generic
+variables. The `->` patterns represent functions. So `a -> b` represents a
+function that takes a value of type `a` and returns `b`. `List a` is a
+parameterized type, specifically a container of elements of type `a`. Unlike in
+Haskell, the generic variables are explicitly stated in `morloc` as ordered
+arguments (e.g., the `map a b` expression above). The order of parameters is
+required later for C++ code generation.
 
 `morloc` can derive the language-specific type signatures from the general one
 if it knows the language-specific instances of `List`. We can tell the compiler
 these mappings by defining language-specific type relations:
 
 ```
-type Py => List a => "list" a
-type Cpp => List a => "std::vector<$1>" a
+type Py => List a = "list" a
+type Cpp => List a = "std::vector<$1>" a
 ```
 
 The list type constructor for C++ is very literally a "type constructor" in that
@@ -251,8 +253,8 @@ type Cpo => List a = "std::vector<$1>" a
 
 add :: Real -> Real -> Real
 mul :: Real -> Real -> Real
-fold :: (b -> a -> b) -> b -> [a] -> b
-map :: (a -> b) -> [a] -> [b]
+fold a b :: (b -> a -> b) -> b -> [a] -> b
+map a b :: (a -> b) -> [a] -> [b]
 
 square x = mul x x
 sumOfSquares xs = fold add 0 (map square xs)
