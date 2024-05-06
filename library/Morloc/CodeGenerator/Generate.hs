@@ -1308,7 +1308,10 @@ expressPolyExpr _ parentType (AnnoS (Idx m t) _ _) = do
                <> "\n  t:" <+> pretty t
                <> "\n  v:" <+> pretty v
                <> "\n parentType:" <+> pretty parentType
-      Nothing ->  error "Bug in expressPolyExpr - this should be unreachable"
+      Nothing ->  MM.throwError . OtherError . render
+               $ "Missing concrete in unnamed function:"
+               <> "\n  t:" <+> pretty t
+               <> "\n parentType:" <+> pretty parentType
 
 unvalue :: Arg a -> Arg None
 unvalue (Arg i _) = Arg i None
