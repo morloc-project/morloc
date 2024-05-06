@@ -1,0 +1,9 @@
+module lib.flutypes (*)
+
+import types(Str)
+
+-- Type aliases
+type Accession = Str
+type Clade = Str
+type Sequence = Str
+type Date = Str

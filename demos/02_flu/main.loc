@@ -1,125 +1,17 @@
-module flucase (classifyByDate, plotCladeTree)
+module flucase (plot, makeTree)
 
--- Import standard type definitions
-import types (Str, Int, Filename, Real, Unit, Map, Tuple2)
+import types (Filename)
 
--- Import the type for representing arbitrary nested data
-import json (JsonObj)
+import lib.retrieve (retrieve, setLeafName, FluConfig)
+import lib.classify (classify)
+import lib.treeplot (plotTree)
+import lib.flutypes (Date, Clade)
 
--- Import the phylogenetic tree builder
 import bio.algo (upgma)
+import bio.tree (treeBy, mapLeaf, RootedTree)
 
--- Import the tree type and generic functions for operating on it
-import bio.tree
-  ( RootedTree
-  , treeBy
-  , pullNode
-  , push
-  , mapLeaf
-  )
+plot :: FluConfig -> RootedTree Clade Real (JsonObj, Clade) -> ()
+plot config = plotTree config@treefile . mapLeaf setLeafName
 
--- Import functions for accessing public sequence records
-import bio.db
-  ( searchEntrez as fetchIds
-  , nucleotideAccessionToJson as fetchRecords
-  , EntrezSearchConfig
-  , EntrezFetchConfig
-  )
-
--- Import generic functions
-import base (id, const, map, ne, fst, snd, concat, filter, shard,
-             eq, head, ifelse, branch, join, keys, size, onFst,
-             sleep, unique, readMap)
-
-
--- Type aliases
-type Accession = Str
-type Clade = Str
-type Sequence = Str
-type Date = Str
-
-
--- Source python functions for dealing with Entrez records
-source Py from "entrez.py"
-  ( "parseRecord"
-  , "labelRef"
-  , "setLeafName"
-  )
-
--- Source C++ alternative for one of these functions
-source Cpp from "entrez.hpp" ("setLeafName")
-
--- Define the general type of each function
-parseRecord :: JsonObj -> (JsonObj, Sequence)
-labelRef :: Map Accession Clade -> JsonObj -> (JsonObj, Clade)
-setLeafName :: (JsonObj, Sequence) -> Str
-
--- Source R plotting function and define its type
-source R from "plot-tree.R" ("plotTree")
-plotTree n :: Filename -> RootedTree n Real Str -> ()
-
-
--- Define the configuration record
-record FluConfig = FluConfig
-  { mindate :: Date
-  , maxdate :: Date
-  , reffile :: Filename
-  , treefile :: Filename
-  , query :: Str
-  , email :: Str
-  }
-
--- Specify the representation of this record in Python and R
-record Py => FluConfig = "dict"
-record R => FluConfig = "list"
-
-
--- Define the morloc composition for plotting tree with clade labels
-plotCladeTree :: FluConfig -> RootedTree Str Real (JsonObj, Clade) -> ()
-plotCladeTree config = plotTree config@treefile . mapLeaf setLeafName
-
--- Define the main classification pipeline
---  * searchEntrez - prep the data
---  * treeBy upgma - make the phylogenetic tree
---  * classify - infer a clade for every leaf
-classifyByDate :: FluConfig -> RootedTree Str Real (JsonObj, Clade)
-classifyByDate = classify . treeBy upgma . searchEntrez
-
--- Retrieve sequence data from Entrez and tag reference strains
-searchEntrez :: FluConfig -> [((JsonObj, Clade), Sequence)]
-searchEntrez config =
-  ( map (onFst (labelRef refmap))
-  . concat
-  . map ( map parseRecord
-        . sleep 1.0
-        . fetchRecords fetchConfig
-        )
-  . shard 30
-  . join (keys refmap)
-  . fetchIds searchConfig
-  ) config@query
-  where
-    searchConfig =
-      { email = config@email
-      , db = "nuccore"
-      , mindate = config@mindate
-      , maxdate = config@maxdate
-      , retmax = 1000
-      }
-    fetchConfig = { email = config@email }
-    refmap = readMap config@reffile
-
--- Traverse the phylogenetic tree setting clade labels
-classify n e a :: RootedTree n e (a, Clade) -> RootedTree Str e (a, Clade)
-classify
-  = push id passClade setLeaf
-  . pullNode snd pullClade
-  where
-    passClade parent edge child = (edge, ifelse (eq 0 (size child)) parent child)
-    setLeaf parent edge leaf = (edge, (fst leaf, parent))
-    pullClade xs
-      = branch (eq 1 . size) head (const "") seenClades
-      where
-        seenClades = ( unique
-                     . filter (ne 0 . size)
-                     ) xs
+makeTree :: FluConfig -> RootedTree Str Real (JsonObj, Clade)
+makeTree = classify . treeBy upgma . retrieve
