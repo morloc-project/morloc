@@ -457,7 +457,8 @@ data PackageMeta =
     , packageMaintainer :: !Text
     , packageGithub :: !Text
     , packageBugReports :: !Text
-    , packageGccFlags :: !Text
+    , packageCppVersion :: !Int
+    , packageDependencies :: [Text]
     }
   deriving (Show, Ord, Eq)
 
@@ -832,7 +833,8 @@ instance FromJSON PackageMeta where
                 <*> o .:? "maintainer"  .!= ""
                 <*> o .:? "github"      .!= ""
                 <*> o .:? "bug-reports" .!= ""
-                <*> o .:? "gcc-flags"   .!= ""
+                <*> o .:? "cpp-version" .!= 0
+                <*> o .:? "dependencies" .!= []
 
 instance Defaultable PackageMeta where
   defaultValue = PackageMeta
@@ -847,7 +849,8 @@ instance Defaultable PackageMeta where
     , packageMaintainer = ""
     , packageGithub = ""
     , packageBugReports = ""
-    , packageGccFlags = ""
+    , packageCppVersion = 17
+    , packageDependencies = []
     }
 
 instance Defaultable MorlocState where
