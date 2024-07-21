@@ -101,7 +101,8 @@ instance {-# OVERLAPPABLE #-} HasTypeF e => HasCppType e where
         Nothing -> error $ "Record missing from recmap: " <> show t <> " from map: " <> show recmap
     f (NamF _ (FV _ s) ps _) = do
       ps' <- mapM f ps
-      return $ pretty s <> encloseSep "<" ">" "," ps'
+      return $ pretty s <> recordTemplate ps'
+
 
   cppArgOf s (Arg i t) = do
     t' <- cppTypeOf (typeFof t)
@@ -509,7 +510,7 @@ translateSegment m0 = do
   templateArguments [] = return ""
   templateArguments qs = do
     ts <- mapM (cppTypeOf . snd) qs
-    return $ encloseSep "<" ">" "," ts
+    return $ recordTemplate ts
 
 
   makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
@@ -522,7 +523,6 @@ translateSegment m0 = do
       , poolPriorLines = []
       , poolPriorExprs = pes1 <> pes2
       }
-
 
 makeManifold
   :: (HasTypeM t)
@@ -604,12 +604,7 @@ makeDispatch ms = block 4 "switch(std::stoi(argv[1]))" (vsep (map makeCase ms))
           ]
 
 typeParams :: [(Maybe TypeF, TypeF)] -> CppTranslator MDoc
-typeParams ts = do
-  ds <- mapM cppTypeOf [t | (Nothing, t) <- ts]
-  return $
-    if null ds
-      then ""
-      else encloseSep "<" ">" "," ds
+typeParams ts = recordTemplate <$> mapM cppTypeOf [t | (Nothing, t) <- ts]
 
 collectRecords :: SerialManifold -> [(FVar, Int, [(Key, TypeF)])]
 collectRecords e0@(SerialManifold i0 _ _ _)
