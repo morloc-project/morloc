@@ -19,39 +19,75 @@ This project is under active development with no stability guarantees until the
 v1.0 release. Pull requests, issue reports, and private messages are very
 welcome.
 
-## Installation
+## Running morloc
 
-Compile and install the package (requires the Haskell utility `stack`):
+`morloc` should run on Linux and macOS. Windows may be supported eventually, but
+for now, I recommend using the [Windows Subsystem for
+Linux](https://learn.microsoft.com/en-us/windows/wsl/install).
 
-```sh
-git clone https://github.com/morloc-project/morloc
-cd morloc
-stack install --fast
+The easiest way to use `morloc` is through Docker.
+
+### Docker Installation on Linux
+
+On a Linux system, install Docker using your preferred package manager. Then start the Docker daemon with:
+
+```bash
+$ sudo systemctl start docker
 ```
 
-For Python support, you need to download the `pymorlocinternals` library from
-PyPi:
+This command should work for Linux distributions that use the `systemd` service
+manager (most popular Linux distros do).
 
-```sh
-pip install pymorlocinternals
-# or on Mac:
-pip3 install pymorlocinternals
+### Docker Installation on macOS
+
+Instructions coming soon.
+
+### Running `morloc` with Docker
+
+After installing Docker, you can pull the Docker image for the desired `morloc` version:
+
+```bash
+$ docker pull arendsee/morloc:v0.48.0
 ```
 
-For R support, you need to install the `rmorlocinternals` library from github,
-in an R session, run:
+Now you can enter a shell with a full working installation of `morloc`:
 
-```sh
-R> install.packages("devtools")
-R> devtools::install_github("morloc-project/rmorlocinternals")
+```bash
+$ docker run -v $PWD:/home -it arendsee/morloc:v0.48.0 /bin/bash
 ```
 
-C++ support currently requires a GNU compiler that supports C++11.
+The `v0.48.0` may be replaced with the desired `morloc` version.
+
+Alternatively, you can set up a script to emulate a local `morloc` installation:
+
+```bash
+#!/bin/bash
+docker run --rm -v $HOME/.morloc:/root/.morloc -v $PWD:/root -w /root arendsee/morloc:v0.48.0 morloc "$@"
+```
+
+Name this script `morloc`, make it executable, and place it in your `PATH`. The
+script will mount your current working directory and your `morloc` home
+directory, allowing you to install and use modules.
+
+## Installing from source
+
+Unless you know what you are doing, I don't recommend building from
+source. Doing so will require a working Haskell environment. Running examples
+may also require installing Python, R, and suitable C++ compilers. If you still
+want to build from source, I recommend you read the `morloc`
+[Dockerfile](https://github.com/morloc-project/morloc/blob/master/container/ubuntu/base/Dockerfile). It
+contains instructions for Alpine and will at least point you in the right
+direction.
+
+## Installing `morloc` modules
 
 `morloc` modules can be installed from the `morloc`
 [library](https://github.com/morloclib) with the commands such as:
 
 ```sh
+morloc install types
+morloc install conventions
+morloc install base
 morloc install cppbase
 morloc install pybase
 morloc install rbase
@@ -228,16 +264,16 @@ variable `a` is inferred to be `int`, for example, then the C++ type
 in the python type constructors `list`, except here the same Python type,
 `list`, is generated regardless of the type of `a`.
 
-
-
 ```
 module sos (*)  -- '*' means export every term
 
-import cppbase (fold, map, add, mul)
+import cppbase (fold)
 
+square :: Real -> Real
 square x = mul x x
 
-sumOfSquares xs = fold add 0 (map square xs)
+sumOfSquares :: [Real] -> Real
+sumOfSquares xs = fold add 0.0 (map square xs)
 ```
 
 This example cannot be compiled since none of the functions are imported or
