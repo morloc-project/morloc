@@ -156,12 +156,15 @@ Hello World
 The following code uses only C++ functions (`fold`, `map`, `add` and `mul`). 
 
 ```
-module sos (*)
+module sos (*)  -- '*' means export every term
 
-import cppbase (fold, map, add, mul)
+import cppbase (fold)
 
+square :: Real -> Real
 square x = mul x x
-sumOfSquares xs = fold add 0 (map square xs)
+
+sumOfSquares :: [Real] -> Real
+sumOfSquares xs = fold add 0.0 (map square xs)
 ```
 
 If this script is pasted into the file "example-1.loc", it can be compiled as
@@ -239,14 +242,11 @@ The map function has the general type
 map a b :: (a -> b) -> List a -> List b
 ```
 
-The general signature looks the same as the Haskell equivalent. The characters
-`a` and `b` are generic type variables. Lowercase variables represent generic
-variables. The `->` patterns represent functions. So `a -> b` represents a
-function that takes a value of type `a` and returns `b`. `List a` is a
-parameterized type, specifically a container of elements of type `a`. Unlike in
-Haskell, the generic variables are explicitly stated in `morloc` as ordered
-arguments (e.g., the `map a b` expression above). The order of parameters is
-required later for C++ code generation.
+Lowercase terms, such as `a` and `b`, represent generic variables. The `->`
+delimited patterns represent functions. So `a -> b` represents a function that
+takes a value of type `a` and returns `b`. `List a` is a parameterized type, in
+this case a container of elements of type `a`. The generic variables need to be
+explicitly declared (in the `map a b` expression).
 
 `morloc` can derive the language-specific type signatures from the general one
 if it knows the language-specific instances of `List`. We can tell the compiler
@@ -254,34 +254,21 @@ these mappings by defining language-specific type relations:
 
 ```
 type Py => List a = "list" a
+type Py => Int = "int"
+
 type Cpp => List a = "std::vector<$1>" a
+type Cpp => Int = "int"
 ```
 
-The list type constructor for C++ is very literally a "type constructor" in that
-it is used to create a syntactically correct C++ type string. If the type
-variable `a` is inferred to be `int`, for example, then the C++ type
-`std::vector<int>` will be used in the generated C++ signature. The same occurs
-in the python type constructors `list`, except here the same Python type,
-`list`, is generated regardless of the type of `a`.
+The list type constructor for C++ is literally a "type constructor" in that it
+is used to create a syntactically correct C++ type string. If the type variable
+`a` is inferred to be `Int`, for example, then the C++ type `std::vector<int>`
+will be used in the generated C++ signature. The same occurs in the python type
+constructors `list`, except here the same Python type, `list`, is generated
+regardless of the type of `a`.
 
-```
-module sos (*)  -- '*' means export every term
-
-import cppbase (fold)
-
-square :: Real -> Real
-square x = mul x x
-
-sumOfSquares :: [Real] -> Real
-sumOfSquares xs = fold add 0.0 (map square xs)
-```
-
-This example cannot be compiled since none of the functions are imported or
-sourced, but it can be typechecked:
-
-```
-morloc typecheck examples/rmsWithTypes.loc
-```
+This following example cannot be compiled since none of the functions are
+imported or sourced:
 
 ```
 type Cpp => Real = "double"
@@ -296,6 +283,12 @@ square x = mul x x
 sumOfSquares xs = fold add 0 (map square xs)
 ```
 
+But it can be typechecked:
+
+```
+$ morloc typecheck examples/rmsWithTypes.loc
+```
+
 The typechecker associates each sub-expression of the program with a set of
 types. The specific type information in `mul` is sufficient to infer concrete
 types for every other C++ function in the program. The inferred C++ type of
@@ -305,13 +298,8 @@ types for every other C++ function in the program. The inferred C++ type of
 "std::vector<$1>" "double" -> "double"
 ```
 
-The general type for this expression is also inferred as:
+The general type for this expression is inferred as:
 
 ```
 List Real -> Real
 ```
-
-The concrete type of `mul` is currently written as a binary function of
-doubles. Ideally this function should accept any numbers (e.g., an `int` and a
-`double`). This can be accomplished with typeclasses. These are now supported
-but still a tad experimental.
