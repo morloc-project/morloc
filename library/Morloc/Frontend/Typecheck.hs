@@ -79,12 +79,12 @@ prepareQualifierMap g = takeLast . filter notExistential . map f where
   notExistential _ = True
 
   takeLast :: [(TVar, TypeU)] -> [(TVar, TypeU)]
-  takeLast = reverse . f [] . reverse where
-    f :: [TVar] -> [(TVar, TypeU)] -> [(TVar, TypeU)]
-    f _ [] = []
-    f observed ((v, t):rs)
+  takeLast = reverse . findFirsts [] . reverse where
+    findFirsts :: [TVar] -> [(TVar, TypeU)] -> [(TVar, TypeU)]
+    findFirsts _ [] = []
+    findFirsts observed ((v, t):rs)
       | elem v observed = []
-      | otherwise = (v, t) : f (v:observed) rs
+      | otherwise = (v, t) : findFirsts (v:observed) rs
 
 -- Upload a solved universal qualifier to the stateTypeQualifier list
 recordParameter :: Int -> TVar -> MorlocMonad ()

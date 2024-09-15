@@ -19,6 +19,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial (isSerializable)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
+import Morloc.DataFiles as DF
 import Morloc.Quasi
 import Morloc.Monad (gets, Index, newIndex, runIndex)
 import qualified Morloc.Data.Text as MT
@@ -357,25 +358,7 @@ makePool sources manifolds = [idoc|#!/usr/bin/env Rscript
   return(x)
 }
 
-.make_temporary_file <- function(x) {
-  temp_filename <- tempfile(pattern = "morloc_r_", tmpdir = "/tmp", fileext = "")
-  writeLines(x, temp_filename)
-  return(temp_filename)
-}
-
-.morloc_foreign_call <- function(cmd, cmd_args, args, .pool, .name){
-  # write the input arguments to temporary files
-  arg_files <- lapply(args, .make_temporary_file)
-
-  # try to run the foreign pool, passing the serialized arguments as tmp files
-  result <- .morloc_try(f=system2, args=list(cmd, args=c(cmd_args, arg_files), stdout=TRUE), .pool=.pool, .name=.name)
-
-  # clean up temp files
-  on.exit(unlink(arg_files))
-
-  return(result)
-}
-
+#{srcInterop langSrc}
 
 #{vsep manifolds}
 
@@ -401,3 +384,5 @@ if(length(args) == 0){
   }
 }
 |]
+  where
+    langSrc = DF.languageFiles RLang

@@ -1,10 +1,20 @@
+0.49.0 [2024-09-xx]
+-------------------
+
+Improved performance
+
+ [ ] move to gRPC for transport layer
+ [ ] add benchmarking with hyperfine
+
+ * Embed source files needed for compilation in the compiler binary
+
 0.48.0 [2024-05-10]
 -------------------
 
-Second PeerJ submission
+Second PeerJ submission (after return by editor for technical reasons)
 
  * Made type parameters explicit as type arguments:
-    `id a :: a -> a`
+   `id a :: a -> a`
     rather than either of
    `id :: a -> a`
    `id :: forall a . a -> a`.

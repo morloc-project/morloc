@@ -28,7 +28,7 @@ import Morloc.CodeGenerator.Serial ( isSerializable
                                    , shallowType
                                    )
 import Morloc.CodeGenerator.Grammars.Common
-import qualified Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals as Src
+import Morloc.DataFiles as DF
 import Morloc.Data.Doc
 import Morloc.Quasi
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
@@ -933,11 +933,11 @@ std::string read(const std::string& file) {
     return content;
 }
 
-#{Src.foreignCallFunction}
+#{srcInterop langSrc}
 
 #{vsep includes}
 
-#{Src.serializationHandling}
+#{srcSerialization langSrc}
 
 #{vsep serialization}
 
@@ -955,3 +955,5 @@ int main(int argc, char * argv[])
     return 0;
 }
 |]
+  where
+    langSrc = DF.languageFiles CppLang

@@ -15,6 +15,13 @@ copyright:        "2020 Zebulun Arendsee"
 extra-source-files:
   - README.md
   - ChangeLog.md
+  # language source files
+  - data/interop.cpp
+  - data/serialization.cpp
+  - data/interop.py
+  - data/serialization.py
+  - data/interop.R
+  - data/serialization.R
 
 default-extensions:
   - TypeOperators
@@ -28,6 +35,7 @@ dependencies:
   - directory-tree
   - extra
   - filepath
+  - file-embed
   - haskell-src-meta
   - megaparsec
   - mtl
@@ -43,7 +51,6 @@ dependencies:
   - text
   - unordered-containers
   - yaml
-
 
 ghc-options:
   - -Wall

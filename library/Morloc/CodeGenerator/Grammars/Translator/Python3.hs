@@ -19,6 +19,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial (isSerializable, serialAstToJsonType)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
+import Morloc.DataFiles as DF
 import Morloc.Quasi
 import qualified Morloc.Config as MC
 import Morloc.Monad (asks, gets, Index, newIndex, runIndex)
@@ -338,32 +339,7 @@ sys.path = ["#{lib}"] + sys.path
 class MorlocForeignCallError(Exception):
     pass
 
-def _morloc_foreign_call(cmds, args):
-    arg_filenames = []
-    for (i, arg) in enumerate(args):
-        temp = tempfile.NamedTemporaryFile(prefix="morloc_py_", delete=False)
-        with open(temp.name, "w") as fh:
-            print(arg, file=fh)
-            arg_filenames.append(temp.name)
-    try:
-        sysObj = subprocess.run(
-            cmds + arg_filenames,
-            stdout=subprocess.PIPE,
-            check=True
-        )
-    except subprocess.CalledProcessError as e:
-        raise MorlocForeignCallError(f"python foreign call error: {str(e)}")
-    finally:
-        for arg_filename in arg_filenames:
-            try:
-                os.unlink(arg_filename)
-            except:
-                pass
-
-    return(sysObj.stdout.decode("ascii"))
-
-
-#{vsep manifolds}
+#{srcInterop langSrc}
 
 def read(filename):
     xs = []
@@ -371,6 +347,8 @@ def read(filename):
         for line in fh.readlines():
             xs.append(line)
     return "\n".join(xs)
+
+#{vsep manifolds}
 
 if __name__ == '__main__':
     try:
@@ -389,3 +367,5 @@ if __name__ == '__main__':
     if __mlc_result__ != "null":
         print(__mlc_result__)
 |]
+  where
+    langSrc = DF.languageFiles Python3Lang

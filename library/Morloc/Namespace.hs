@@ -116,6 +116,8 @@ module Morloc.Namespace
   , mostGeneral
   , mostSpecific
   , mostSpecificSubtypes
+  -- data files
+  , LanguageSource(..)
   ) where
 
 import Morloc.Language (Lang(..))
@@ -399,6 +401,12 @@ data Import =
     }
   deriving (Ord, Eq, Show)
 
+
+-- | Stores source that is inserted into language generation
+data LanguageSource = LanguageSource
+  { srcInterop :: MDoc
+  , srcSerialization :: MDoc
+  }
 
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
