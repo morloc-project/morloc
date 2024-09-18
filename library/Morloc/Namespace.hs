@@ -118,6 +118,7 @@ module Morloc.Namespace
   , mostSpecificSubtypes
   -- data files
   , LanguageSource(..)
+  , NexusSource(..)
   ) where
 
 import Morloc.Language (Lang(..))
@@ -404,8 +405,16 @@ data Import =
 
 -- | Stores source that is inserted into language generation
 data LanguageSource = LanguageSource
-  { srcInterop :: MDoc
+  { srcPreamble :: MDoc
+  , srcInterop :: MDoc
   , srcSerialization :: MDoc
+  , srcUtility :: MDoc
+  , srcMain :: MDoc
+  }
+
+data NexusSource = NexusSource
+  { nexusSourceUtility :: MDoc
+  , nexusSourceMain :: MDoc
   }
 
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a

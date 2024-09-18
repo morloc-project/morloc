@@ -283,7 +283,7 @@ serialize nativeExpr s0 = do
   schemaIndex <- getCounter
   let schemaName = [idoc|#{helperNamer schemaIndex}_schema|]
       schema = [idoc|#{typestr} #{schemaName};|]
-      final = [idoc|serialize(#{x}, #{schemaName})|]
+      final = [idoc|_put_value(serialize(#{x}, #{schemaName}))|]
   return $ PoolDocs
       { poolCompleteManifolds = []
       , poolExpr = final
@@ -345,7 +345,7 @@ deserialize varname0 typestr0 s0
       schemaVar <- helperNamer <$> getCounter
       let schemaName = [idoc|#{schemaVar}_schema|]
           schema = [idoc|#{typestr0} #{schemaName};|]
-          term = [idoc|deserialize(#{varname0}, #{schemaName})|]
+          term = [idoc|deserialize(_get_value(#{varname0}), #{schemaName})|]
       return (term, [schema])
   | otherwise = do
       schemaVar <- helperNamer <$> getCounter
@@ -353,7 +353,7 @@ deserialize varname0 typestr0 s0
       rawvar <- helperNamer <$> getCounter
       let schemaName = [idoc|#{schemaVar}_schema|]
           schema = [idoc|#{rawtype} #{schemaName};|]
-          deserializing = [idoc|#{rawtype} #{rawvar} = deserialize(#{varname0}, #{schemaName});|]
+          deserializing = [idoc|#{rawtype} #{rawvar} = deserialize(_get_value(#{varname0}), #{schemaName});|]
       (x, before) <- construct rawvar s0
       let final = [idoc|#{typestr0} #{schemaVar} = #{x};|]
       return (schemaVar , [schema, deserializing] ++ before ++ [final])
@@ -437,16 +437,15 @@ translateSegment m0 = do
 
   makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> CppTranslator PoolDocs
   makeSerialExpr _ (ManS_ e) = return e
-  makeSerialExpr _ (AppPoolS_ _ (PoolCall _ cmds args) _) = do
+  makeSerialExpr _ (AppPoolS_ _ (PoolCall mid _ args) _) = do
     let bufDef = "std::ostringstream s;"
         argList = encloseSep "{" "}" ", " (map argNamer args)
         argsDef = [idoc|std::vector<std::string> args = #{argList};|]
-        cmd = "s << " <> cat (punctuate " << \" \" << " (map dquotes cmds)) <> ";"
-        call = [idoc|foreign_call(s.str(), args)|]
+        call = [idoc|foreign_call("cpp-pipe", "#{manNamer mid}", args)|]
     return $ PoolDocs
       { poolCompleteManifolds = []
       , poolExpr = call
-      , poolPriorLines = [bufDef, argsDef, cmd]
+      , poolPriorLines = [bufDef, argsDef]
       , poolPriorExprs = []
       }
   makeSerialExpr _ (ReturnS_ e) = return $ e {poolExpr = "return(" <> poolExpr e <> ");"}
@@ -588,7 +587,7 @@ stdBind xs = [idoc|std::bind(#{args})|] where
   args = cat (punctuate "," xs)
 
 makeDispatch :: [SerialManifold] -> MDoc
-makeDispatch ms = block 4 "switch(std::stoi(argv[1]))" (vsep (map makeCase ms))
+makeDispatch ms = block 4 "switch(std::stoi(args[0]))" (vsep (map makeCase ms))
   where
     makeCase :: SerialManifold -> MDoc
     makeCase (SerialManifold i _ form _) =
@@ -599,7 +598,7 @@ makeDispatch ms = block 4 "switch(std::stoi(argv[1]))" (vsep (map makeCase ms))
       in
         (nest 4 . vsep)
           [ "case" <+> viaShow i <> ":"
-          , "__mlc_result__ = " <> manNamer i <> tupled args' <> ";"
+          , "result = " <> manNamer i <> tupled args' <> ";"
           , "break;"
           ]
 
@@ -901,39 +900,7 @@ whitespace(json, i);|]
 
 makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
 makeMain includes signatures serialization manifolds dispatch = [idoc|#include <string>
-#include <iostream>
-#include <sstream>
-#include <functional>
-#include <vector>
-#include <string>
-#include <algorithm> // for std::transform
-#include <stdexcept>
-#include <fstream>
-
-// needed for foreign interface
-#include <cstdlib>
-#include <cstring>
-#include <cstdio>
-#include <unistd.h>
-
-using namespace std;
-
-std::string read(const std::string& file) {
-    std::ifstream input_file(file);
-
-    if (!input_file.is_open()) {
-        throw std::runtime_error("Error opening file: " + file);
-    }
-
-    std::stringstream buffer;
-    buffer << input_file.rdbuf();
-
-    std::string content = buffer.str();
-
-    return content;
-}
-
-#{srcInterop langSrc}
+#{srcPreamble langSrc}
 
 #{vsep includes}
 
@@ -941,19 +908,35 @@ std::string read(const std::string& file) {
 
 #{vsep serialization}
 
+#{srcInterop langSrc}
+
 #{vsep signatures}
 
 #{vsep manifolds}
 
-int main(int argc, char * argv[])
-{
-    #{serialType} __mlc_result__;
-    #{dispatch}
-    if(__mlc_result__ != "null"){
-        std::cout << __mlc_result__ << std::endl;
+std::string dispatch(const Message& msg){
+
+    std::string msg_str(msg.data, msg.length);
+
+    std::vector<std::string> args;
+    std::istringstream iss(msg_str);
+    std::string token;
+
+    while (iss >> token) {
+        args.push_back(token);
     }
-    return 0;
+
+    std::string result = "";
+
+    log_message("dispatch on:");
+    log_message(args[0]);
+    
+    #{dispatch}
+
+    return result;
 }
+
+#{srcMain langSrc}
 |]
   where
     langSrc = DF.languageFiles CppLang

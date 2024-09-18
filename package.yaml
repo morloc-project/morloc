@@ -16,12 +16,24 @@ extra-source-files:
   - README.md
   - ChangeLog.md
   # language source files
+  # cpp
+  - data/preamble.cpp
   - data/interop.cpp
   - data/serialization.cpp
-  - data/interop.py
-  - data/serialization.py
+  - data/serialization.cpp
+  - data/main.cpp
+  # R
+  - data/preamble.R
   - data/interop.R
   - data/serialization.R
+  - data/serialization.R
+  - data/main.R
+  # py
+  - data/preamble.py
+  - data/interop.py
+  - data/serialization.py
+  - data/serialization.py
+  - data/main.py
 
 default-extensions:
   - TypeOperators

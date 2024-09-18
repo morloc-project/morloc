@@ -100,7 +100,7 @@ serialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 serialize v0 s0 = do
   (ms, v1) <- serialize' v0 s0
   let schema = typeSchema s0
-      v2 = "mlc_serialize" <> tupled [v1, schema]
+      v2 = "_put_value(mlc_serialize" <> tupled [v1, schema] <> ")"
   return (v2, ms)
   where
     serialize' :: MDoc -> SerialAST -> Index ([MDoc], MDoc)
@@ -147,12 +147,12 @@ deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 deserialize v0 s0
   | isSerializable s0 = do
       let schema = typeSchema s0
-          deserializing = [idoc|mlc_deserialize(#{v0}, #{schema})|]
+          deserializing = [idoc|mlc_deserialize(_get_value(#{v0}), #{schema})|]
       return (deserializing, [])
   | otherwise = do
       rawvar <- helperNamer <$> newIndex
       let schema = typeSchema s0
-          deserializing = [idoc|#{rawvar} = mlc_deserialize(#{v0}, #{schema})|]
+          deserializing = [idoc|#{rawvar} = mlc_deserialize(_get_value(#{v0}), #{schema})|]
       (x, befores) <- check rawvar s0
       return (x, deserializing:befores)
   where
@@ -221,10 +221,10 @@ translateSegment m0 =
 
     makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
     makeSerialExpr _ (ManS_ f) = return f
-    makeSerialExpr _ (AppPoolS_ _ (PoolCall _ cmds args) _) = do
+    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid _ args) _) = do
       -- I don't need to explicitly add single quoes to the arguments here as I
       -- do in C++ and R because the subprocess module bypasses Bash dequoting.
-      let call = "_morloc_foreign_call(" <> list (map dquotes cmds) <> "," <+> list (map argNamer args) <> ")"
+      let call = "_morloc_foreign_call(" <> dquotes "python3-pipe" <> "," <+> dquotes (manNamer mid) <> "," <+> list (map argNamer args) <> ")"
       return $ defaultValue { poolExpr = call }
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
     makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet svarNamer i e1 e2
@@ -290,10 +290,7 @@ translateSegment m0 =
     makeLambda args body = "lambda" <+> hsep (punctuate "," (map argNamer args)) <> ":" <+> body
 
 makeDispatch :: [SerialManifold] -> MDoc
-makeDispatch ms = align . vsep $
-  [ align . vsep $ ["dispatch = {", indent 4 (vsep $ map entry ms), "}"]
-  , "__mlc_function__ = dispatch[cmdID]"
-  ]
+makeDispatch ms = align . vsep $ ["dispatch = {", indent 4 (vsep $ map entry ms), "}"]
   where
     entry :: SerialManifold -> MDoc
     entry (SerialManifold i _ _ _)
@@ -324,48 +321,23 @@ typeSchema = f . serialAstToJsonType
 makePool :: MDoc -> [MDoc] -> [MDoc] -> MDoc -> MDoc
 makePool lib includeDocs manifolds dispatch = [idoc|#!/usr/bin/env python
 
-import sys
-import subprocess
-import json
-import tempfile
-import os
-from pymorlocinternals import (mlc_serialize, mlc_deserialize)
-from collections import OrderedDict
+#{srcPreamble langSrc}
 
 sys.path = ["#{lib}"] + sys.path
 
 #{vsep includeDocs}
 
-class MorlocForeignCallError(Exception):
-    pass
+#{srcUtility langSrc}
 
-#{srcInterop langSrc}
-
-def read(filename):
-    xs = []
-    with open(filename, "r") as fh:
-        for line in fh.readlines():
-            xs.append(line)
-    return "\n".join(xs)
+# Manifolds
 
 #{vsep manifolds}
 
-if __name__ == '__main__':
-    try:
-        cmdID = int(sys.argv[1])
-    except IndexError:
-        sys.exit("Internal error in {}: no manifold id found".format(sys.argv[0]))
-    except ValueError:
-        sys.exit("Internal error in {}: expected integer manifold id".format(sys.argv[0]))
-    try:
-        #{dispatch}
-    except KeyError:
-        sys.exit("Internal error in {}: no manifold found with id={}".format(sys.argv[0], cmdID))
+# Dispatch
 
-    __mlc_result__ = __mlc_function__(*[read(x) for x in sys.argv[2:]])
+#{dispatch}
 
-    if __mlc_result__ != "null":
-        print(__mlc_result__)
+#{srcMain langSrc}
 |]
   where
     langSrc = DF.languageFiles Python3Lang

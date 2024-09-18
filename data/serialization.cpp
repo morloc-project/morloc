@@ -1,15 +1,3 @@
-#include <iostream>
-#include <sstream>
-#include <string>
-#include <stdexcept>
-#include <stdio.h>
-#include <vector>
-#include <iomanip>
-#include <limits>
-#include <tuple>
-#include <utility>
-
-
 std::string serialize(bool x, bool schema);
 std::string serialize(int x, int schema);
 std::string serialize(int x, size_t schema);

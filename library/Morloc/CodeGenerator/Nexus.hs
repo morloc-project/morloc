@@ -14,6 +14,7 @@ module Morloc.CodeGenerator.Nexus
 
 import qualified Control.Monad.State as CMS
 import Morloc.Data.Doc
+import Morloc.DataFiles as DF
 import Morloc.CodeGenerator.Namespace
 import Morloc.Quasi
 import qualified Morloc.Data.Text as MT
@@ -62,13 +63,7 @@ getFData (t, i, lang) = do
 
 main :: [MDoc] -> [FData] -> MDoc -> [NexusCommand] -> MDoc
 main names fdata pythonExe cdata =
-  [idoc|#!/usr/bin/env #{pythonExe}
-
-import json
-import subprocess
-import sys
-import os
-import tempfile
+  [idoc|#{nexusSourceUtility langSrc}
 
 #{usageT fdata cdata}
 
@@ -76,38 +71,10 @@ import tempfile
 
 #{mapT names}
 
-def dispatch(cmd, args):
-    if(cmd in ["-h", "--help", "-?", "?"]):
-        usage()
-    else:
-        command_table[cmd](args)
-
-def as_file(input_str):
-    if os.path.isfile(input_str):
-        return (False, input_str)
-    else:
-        x = tempfile.NamedTemporaryFile(prefix="morloc_nexus_", delete=False)
-        with open(x.name, "w") as fh_temp:
-            if os.path.exists(input_str):
-                with open(input_str, "r") as fh_sub:
-                    print(fh_sub.read().strip(), file=fh_temp)
-            else:
-                try:
-                    input_json = json.loads(input_str)
-                    print(json.dumps(input_json), file=fh_temp)
-                except json.JSONDecodeError:
-                    print("Invalid input '{input_str}'", file=sys.stderr)
-                    sys.exit(1)
-        return (True, x.name)
-
-if __name__ == '__main__':
-    if len(sys.argv) == 1:
-        usage()
-    else:
-        cmd = sys.argv[1]
-        args = sys.argv[2:]
-        dispatch(cmd, args)
+#{nexusSourceMain langSrc}
 |]
+  where
+    langSrc = DF.nexusFiles
 
 mapT :: [Doc ann] -> Doc ann
 mapT names = [idoc|command_table = #{dict}|] where
@@ -152,15 +119,11 @@ functionT (cmd, subcommand, t) =
   [idoc|
 def call_#{subcommand}(args):
     if len(args) != #{pretty (nargs t)}:
-        sys.exit("Expected #{pretty (nargs t)} arguments to '#{subcommand}', given " + str(len(args)))
+        clean_exit("Expected #{pretty (nargs t)} arguments to '#{subcommand}', given " + str(len(args)))
     else:
-        arg_files = [as_file(arg) for arg in args]
-        try:
-          subprocess.run(#{list $ map dquotes cmd} + [x[1] for x in arg_files])
-        finally:
-            for (is_temp, file) in arg_files:
-                if is_temp:
-                    os.unlink(file)
+        run_command(
+            mid="34", args=args, pool_lang="python3", all_pool_langs=["python3", "cpp"]
+        )
 |]
 
 functionCT :: NexusCommand -> MDoc
