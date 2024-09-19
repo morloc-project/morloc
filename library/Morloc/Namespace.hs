@@ -119,6 +119,8 @@ module Morloc.Namespace
   -- data files
   , LanguageSource(..)
   , NexusSource(..)
+  -- sockets
+  , Socket(..)
   ) where
 
 import Morloc.Language (Lang(..))
@@ -416,6 +418,13 @@ data NexusSource = NexusSource
   { nexusSourceUtility :: MDoc
   , nexusSourceMain :: MDoc
   }
+
+data Socket = Socket
+  { socketLang :: Lang
+  , socketServerInit :: [MDoc]
+  , socketPath :: MDoc
+  }
+  deriving (Show)
 
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
@@ -1071,7 +1080,6 @@ mostSpecific = P.maxima
 
 
 ----- Pretty instances -------------------------------------------------------
-
 
 instance Pretty Lit where
   pretty (MNum x) = viaShow x

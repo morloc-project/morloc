@@ -24,15 +24,14 @@ import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 
 type FData =
-  ( [MDoc] -- pool call command arguments, (e.g., ["RScript", "pool.R", "4", "--"])
+  ( Socket
   , MDoc -- subcommand name
+  , Int -- manifold ID
   , Type -- argument type
   )
 
-generate :: [NexusCommand] -> [(Type, Int, Lang)] -> MorlocMonad Script
-generate cs xs = do
-  config <- MM.ask
-
+generate :: [Socket] -> [NexusCommand] -> [(Type, Int, Lang)] -> MorlocMonad Script
+generate sockets cs xs = do
   callNames <- mapM (MM.metaName . (\(_, i, _) -> i)) xs |>> catMaybes |>> map pretty
   let gastNames = map (pretty . commandName) cs
       names = callNames <> gastNames
@@ -42,7 +41,7 @@ generate cs xs = do
     Script
       { scriptBase = outfile
       , scriptLang = ML.Python3Lang
-      , scriptCode = "." :/ File outfile (Code . render $ main names fdata (pretty $ configLangPython3 config) cs)
+      , scriptCode = "." :/ File outfile (Code . render $ main sockets names fdata cs)
       , scriptMake = [SysExe outfile]
       }
 
@@ -52,22 +51,19 @@ getFData (t, i, lang) = do
   case mayName of
     (Just name') -> do
       config <- MM.ask
-      case MC.buildPoolCallBase config (Just lang) i of
-        (Just cmds) -> return (cmds, pretty name', t)
-        Nothing ->
-          MM.throwError . GeneratorError $
-          "No execution method found for language: " <> ML.showLangName lang
+      let socket = MC.setupServerAndSocket config lang 
+      return (socket, pretty name', i, t)
     Nothing -> MM.throwError . GeneratorError $ "No name in FData"
 
 
 
-main :: [MDoc] -> [FData] -> MDoc -> [NexusCommand] -> MDoc
-main names fdata pythonExe cdata =
+main :: [Socket] -> [MDoc] -> [FData] -> [NexusCommand] -> MDoc
+main sockets names fdata cdata =
   [idoc|#{nexusSourceUtility langSrc}
 
 #{usageT fdata cdata}
 
-#{vsep (map functionCT cdata ++ map functionT fdata)}
+#{vsep (map functionCT cdata ++ map (functionT sockets) fdata)}
 
 #{mapT names}
 
@@ -92,7 +88,7 @@ def usage():
 |]
 
 usageLineT :: FData -> MDoc
-usageLineT (_, name', t) = vsep
+usageLineT (_, name', _, t) = vsep
   ( [idoc|print("  #{name'}")|]
   : writeTypes t
   )
@@ -114,17 +110,26 @@ writeType (Just i) t = [idoc|print('''    param #{pretty i}: #{pretty t}''')|]
 writeType Nothing  t = [idoc|print('''    return: #{pretty t}''')|]
 
 
-functionT :: FData -> MDoc
-functionT (cmd, subcommand, t) =
+functionT :: [Socket] -> FData -> MDoc
+functionT sockets (Socket lang _ _, subcommand, mid, t) =
   [idoc|
 def call_#{subcommand}(args):
     if len(args) != #{pretty (nargs t)}:
         clean_exit("Expected #{pretty (nargs t)} arguments to '#{subcommand}', given " + str(len(args)))
     else:
         run_command(
-            mid="34", args=args, pool_lang="python3", all_pool_langs=["python3", "cpp"]
+            mid = "#{pretty mid}",
+            args = args,
+            pool_lang = #{poolLangDoc},
+            sockets = #{socketsDoc}
         )
 |]
+  where
+    poolLangDoc = dquotes . pretty $ ML.showLangName lang
+    socketsDoc = list [align . vsep $ map (\x -> makeSocketDoc x <> ",") sockets]
+
+    makeSocketDoc :: Socket -> MDoc
+    makeSocketDoc (Socket lang' cmdDocs pipeDoc) = tupled [dquotes . pretty $ ML.showLangName lang', list (map dquotes cmdDocs), dquotes pipeDoc]
 
 functionCT :: NexusCommand -> MDoc
 functionCT (NexusCommand cmd _ json_str args subs) =

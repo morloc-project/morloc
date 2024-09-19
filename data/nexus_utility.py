@@ -86,22 +86,7 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 
 
-def start_language_server(lang):
-    if lang == "python3":
-        pool = "pool.py"
-        pipe = PYTHON_PIPE
-        cmd = ["python3", pool, pipe]
-    elif lang == "R":
-        pool = "pool.R"
-        pipe = R_PIPE
-        cmd = ["Rscript", pool, pipe]
-    elif lang == "cpp":
-        pool = "pool-cpp.out"
-        pipe = CPP_PIPE
-        cmd = ["./" + pool, pipe]
-    else:
-        clean_exit(1, f"Language {lang} not supported")
-
+def start_language_server(lang, cmd, pipe):
     # Create a queue to store stderr output
     stderr_queue = queue.Queue()
 
@@ -206,7 +191,7 @@ def as_file(input_str):
         return (True, x.name)
 
 
-def run_command(mid, args, pool_lang, all_pool_langs):
+def run_command(mid, args, pool_lang, sockets):
     if len(args) != 0:
         clean_exit("Expected 0 arguments to 'pfoo', given " + str(len(args)))
 
@@ -216,9 +201,9 @@ def run_command(mid, args, pool_lang, all_pool_langs):
 
     try:
         # Start language servers
-        for lang in all_pool_langs:
+        for (lang, cmd, pipe) in sockets:
             try:
-                start_language_server(lang)
+                start_language_server(lang, cmd, pipe)
             except Exception as e:
                 _log(f"Failed to start {lang} language server: {str(e)}")
                 raise  # Re-raise the exception to be caught in the outer try block
@@ -256,6 +241,3 @@ def run_command(mid, args, pool_lang, all_pool_langs):
         clean_exit(0)
     else:
         clean_exit(1, error)
-
-
-### Everything below is added by the translator

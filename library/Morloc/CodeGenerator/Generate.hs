@@ -60,11 +60,14 @@ generate gASTs rASTs = do
   -- Collect all call-free data
   gSerial <- mapM generalSerial gASTs
 
+  sockets <- findAllSockets rASTs
+
   -- build nexus
   -- -----------
   -- Each nexus subcommand calls one function from one one pool.
   -- The call passes the pool an index for the function (manifold) that will be called.
   nexus <- Nexus.generate
+    sockets
     gSerial
     [(t, i, lang) | (AnnoS (Idx i t) (Idx _ lang) _) <- rASTs]
 
@@ -77,6 +80,22 @@ generate gASTs rASTs = do
 
   return (nexus, pools)
 
+findAllSockets :: [AnnoS e One (Indexed Lang)] -> MorlocMonad [Socket]
+findAllSockets rASTs = do
+  config <- MM.ask
+  return . map (MC.setupServerAndSocket config) . unique $ concatMap findAllLangsSAnno rASTs 
+
+
+findAllLangsSAnno :: AnnoS e One (Indexed Lang) -> [Lang]
+findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e where
+  findAllLangsExpr (VarS _ (One x)) = findAllLangsSAnno x
+  findAllLangsExpr (AccS _ x) = findAllLangsSAnno x
+  findAllLangsExpr (AppS x xs) = concatMap findAllLangsSAnno (x:xs)
+  findAllLangsExpr (LamS _ x) = findAllLangsSAnno x
+  findAllLangsExpr (LstS xs) = concatMap findAllLangsSAnno xs
+  findAllLangsExpr (TupS xs) = concatMap findAllLangsSAnno xs
+  findAllLangsExpr (NamS rs) = concatMap (findAllLangsSAnno . snd) rs
+  findAllLangsExpr _ = []
 
 -- | Do everything except language specific code generation.
 generatePools :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [(Lang, [SerialManifold])]
@@ -1355,9 +1374,8 @@ segmentExpr _ args (PolyForeignInterface lang callingType cargs e@(PolyManifold 
   (ms, (_, e')) <- segmentExpr m (map ann foreignArgs) e
   let foreignHead = MonoHead lang m foreignArgs e'
   config <- MM.ask
-  case MC.buildPoolCallBase config (Just lang) m of
-    (Just cmds) -> return (foreignHead:ms, (Nothing, MonoPoolCall callingType m cmds foreignArgs))
-    Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' lang
+  let socket = MC.setupServerAndSocket config lang 
+  return (foreignHead:ms, (Nothing, MonoPoolCall callingType m socket foreignArgs))
 
 segmentExpr m _ (PolyForeignInterface lang callingType args e) = do
   MM.sayVVV $ "segmentExpr PolyForeignInterface m" <> pretty m
@@ -1368,11 +1386,11 @@ segmentExpr m _ (PolyForeignInterface lang callingType args e) = do
   let foreignHead = MonoHead lang m [Arg i None | i <- args] (MonoReturn e')
       -- pack the arguments that will be passed to the foreign manifold
       es' = map (MonoBndVar (A None)) args
+
   config <- MM.ask
-  -- create the body of the local helper function
-  localFun <- case MC.buildPoolCallBase config (Just lang) m of
-    (Just cmds) -> return $ MonoApp (MonoPoolCall callingType m cmds [Arg i None | i <- args]) es'
-    Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' lang
+  let socket = MC.setupServerAndSocket config lang 
+      localFun = MonoApp (MonoPoolCall callingType m socket [Arg i None | i <- args]) es'
+
   return (foreignHead:ms, (Nothing, localFun))
 
 segmentExpr _ _ (PolyManifold lang m form e) = do

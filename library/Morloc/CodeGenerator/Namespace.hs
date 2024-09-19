@@ -390,7 +390,7 @@ data MonoExpr
   | MonoPoolCall
       (Indexed Type)       -- return type in calling language
       Int        -- foreign manifold id
-      [MDoc]     -- shell command components that preceed the passed data
+      Socket     -- shell command components that preceed the passed data
       [Arg None] -- arguments
   | MonoLet Int MonoExpr MonoExpr
   | MonoLetVar (Indexed Type) Int
@@ -412,7 +412,7 @@ data MonoExpr
 
 data PoolCall = PoolCall
   Int -- foreign manifold id
-  [MDoc]
+  Socket 
   [Arg TypeM] -- contextual argument that are passed to the foreign function
               -- (not the main arguments to the foreign function)
   deriving(Show)

@@ -221,10 +221,10 @@ translateSegment m0 =
 
     makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
     makeSerialExpr _ (ManS_ f) = return f
-    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid _ args) _) = do
+    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) args) _) = do
       -- I don't need to explicitly add single quoes to the arguments here as I
       -- do in C++ and R because the subprocess module bypasses Bash dequoting.
-      let call = "_morloc_foreign_call(" <> dquotes "python3-pipe" <> "," <+> dquotes (manNamer mid) <> "," <+> list (map argNamer args) <> ")"
+      let call = "_morloc_foreign_call" <> tupled [dquotes socketFile, dquotes (pretty mid), list (map argNamer args)]
       return $ defaultValue { poolExpr = call }
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
     makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet svarNamer i e1 e2

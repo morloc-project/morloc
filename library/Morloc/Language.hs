@@ -118,10 +118,10 @@ makeExtension PerlLang = "pl"
 -- for the language and the string language name used in the RDF.
 showLangName :: Lang -> Text
 showLangName Python3Lang = "python3"
-showLangName RLang = "R"
-showLangName CLang = "C"
-showLangName CppLang = "Cpp"
-showLangName PerlLang = "Perl"
+showLangName RLang = "r"
+showLangName CLang = "c"
+showLangName CppLang = "cpp"
+showLangName PerlLang = "perl"
 
 -- | Read the name of a given language and try to translate it
 readLangName :: Text -> Maybe Lang
