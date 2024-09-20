@@ -15,6 +15,8 @@ copyright:        "2020 Zebulun Arendsee"
 extra-source-files:
   - README.md
   - ChangeLog.md
+  # libraries
+  - data/socket.c # socket library for R
   # language source files
   # cpp
   - data/preamble.cpp

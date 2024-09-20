@@ -182,18 +182,14 @@ translateSegment m0 =
 
     makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
     makeSerialExpr _ (ManS_ f) = return f
-    makeSerialExpr _ (AppPoolS_ _ _ _) = undefined
-    -- makeSerialExpr _ (AppPoolS_ _ (PoolCall _ cmds args) _) = do
-    --   let quotedCmds = map dquotes cmds
-    --       cmdArgs = "list" <> tupled (tail quotedCmds)
-    --       positionalArgs = "list" <> tupled (map argNamer args)
-    --       call = ".morloc_foreign_call" <> tupled [head quotedCmds, cmdArgs, positionalArgs, dquotes "_", dquotes "_"]
-    --   return $ PoolDocs
-    --     { poolCompleteManifolds = []
-    --     , poolExpr = call
-    --     , poolPriorLines = []
-    --     , poolPriorExprs = []
-    --     }
+    makeSerialExpr _ (AppPoolS_ _ (PoolCall _ socket args) _) = do
+      let call = ".morloc_foreign_call(STUB)"
+      return $ PoolDocs
+        { poolCompleteManifolds = []
+        , poolExpr = call
+        , poolPriorLines = []
+        , poolPriorExprs = []
+        }
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
     makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet svarNamer i e1 e2
     makeSerialExpr _ (NativeLetS_ i e1 e2) = return $ makeLet nvarNamer i e1 e2

@@ -13,6 +13,7 @@ Stability   : experimental
 module Morloc.DataFiles
   ( languageFiles
   , nexusFiles
+  , rSocketLib
   ) where
 
 import Morloc.Namespace
@@ -46,3 +47,5 @@ languageFiles _ = LanguageSource "" "" "" "" ""
 nexusFiles = NexusSource
   (pretty . decodeUtf8 $ $(embedFileRelative "data/nexus_utility.py"))
   (pretty . decodeUtf8 $ $(embedFileRelative "data/nexus_main.py"))
+
+rSocketLib = (pretty . decodeUtf8 $ $(embedFileRelative "data/socket.c"))

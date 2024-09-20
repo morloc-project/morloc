@@ -25,6 +25,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Nexus as Nexus
+import qualified Morloc.CodeGenerator.SystemConfig as MCS
 import Morloc.CodeGenerator.Infer
 
 import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
@@ -48,6 +49,10 @@ realityCheck es = do
     -- separate unrealized (general) ASTs (uASTs) from realized ASTs (rASTs)
     |>> partitionEithers
 
+  -- check and configure the system
+  -- in the future, the results of this step may be used to winnow the build
+  MCS.configure rASTs
+
   return (gASTs, rASTs)
 
 -- | Translate typed, abstract syntax forests into compilable code
@@ -60,6 +65,7 @@ generate gASTs rASTs = do
   -- Collect all call-free data
   gSerial <- mapM generalSerial gASTs
 
+  -- configure sockets
   sockets <- findAllSockets rASTs
 
   -- build nexus
