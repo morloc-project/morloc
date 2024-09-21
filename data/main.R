@@ -11,8 +11,7 @@ processMessage <- function(msg){
   # break apart a message
   args <- strsplit(data_str, " ")[[1]]
   manifold_id <- args[1]
-  socket_path <- args[2]
-  manifold_arguments <- as.list(args[-c(1,2)])
+  manifold_arguments <- as.list(args[-1])
   .log(paste("Start processing", paste0("'", data_str, "'"), "with manifold arguments:", paste(manifold_arguments, collapse=", ")))
 
   mlc_pool_function_name <- paste0("m", manifold_id)
