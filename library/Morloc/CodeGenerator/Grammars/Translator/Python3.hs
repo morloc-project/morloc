@@ -290,11 +290,13 @@ translateSegment m0 =
     makeLambda args body = "lambda" <+> hsep (punctuate "," (map argNamer args)) <> ":" <+> body
 
 makeDispatch :: [SerialManifold] -> MDoc
-makeDispatch ms = align . vsep $ ["dispatch = {", indent 4 (vsep $ map entry ms), "}"]
+makeDispatch ms = align . vsep $ ["dispatch = {", indent 4 (vsep $ map entry ms <> [pingCase]), "}"]
   where
     entry :: SerialManifold -> MDoc
     entry (SerialManifold i _ _ _)
       = pretty i <> ":" <+> manNamer i <> ","
+
+    pingCase = "0" <> ":" <+> [idoc|m0|]
 
 typeSchema :: SerialAST -> MDoc
 typeSchema = f . serialAstToJsonType
@@ -334,6 +336,9 @@ sys.path = ["#{lib}"] + sys.path
 #{vsep manifolds}
 
 # Dispatch
+
+def m0():
+  return("__pong__")
 
 #{dispatch}
 

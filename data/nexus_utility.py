@@ -66,7 +66,7 @@ def cleanup():
 
     # clean up temporary files and sockets
     for is_temp, file in files:
-        if is_temp:
+        if is_temp and os.path.exists(file):
             os.unlink(file)
 
 
@@ -84,6 +84,51 @@ def signal_handler(sig, frame):
 # Register signal handler for ctrl-c
 # This avoids dumping a trace when a user kills a job
 signal.signal(signal.SIGINT, signal_handler)
+
+
+def client(pool, message):
+
+    _log("entering nexus client")
+
+    data = b""
+
+    # it may take awhile for the pool to initialize and create the socket
+    delay_time = INITIAL_RETRY_DELAY
+    _log(f"contacting {pool.lang} pool ...")
+    for attempt in range(MAX_RETRIES):
+        # check to see if the pool has died
+        if not pool.exit_status_queue.empty():
+            exit_status = pool.exit_status_queue.get()
+            print(
+                f"{pool.lang} pool ended early with exit status {exit_status} and the error message:",
+                file=sys.stderr,
+            )
+            while not pool.stderr_queue.empty():
+                print(pool.stderr_queue.get(), file=sys.stderr, end="")
+            clean_exit(1, "")
+        # try to connect to the pool server
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.connect(pool.pipe)
+                _log(f"connected to {pool.lang} pool ...")
+                _log(f"sending message: {message}")
+                s.sendall(message)
+                _log(f"waiting for response")
+                data = s.recv(BUFFER_SIZE)
+                _log(f"response received: {data}")
+            break
+        # try try again
+        except (FileNotFoundError, ConnectionRefusedError) as e:
+            if attempt == MAX_RETRIES - 1:
+                _log(f"Timeout while waiting for {pool.lang} pool")
+                raise e
+            else:
+                time.sleep(delay_time)
+                delay_time *= RETRY_MULTIPLIER
+
+    _log("exiting nexus client")
+
+    return data.decode()
 
 
 def start_language_server(lang, cmd, pipe):
@@ -127,50 +172,12 @@ def start_language_server(lang, cmd, pipe):
 
     resources["pools"][lang] = pool
 
+    # ping the server, make sure it is up and going
+    _log(f"Pinging the {lang} server ...")
+    pong = client(pool, b"0")
+    _log(f"Pong from {lang} - server is good ({pong})")
+
     return pool
-
-
-def client(pool, message):
-
-    _log("entering nexus client")
-
-    # it may take awhile for the pool to initialize and create the socket
-    delay_time = INITIAL_RETRY_DELAY
-    for attempt in range(MAX_RETRIES):
-        # check to see if the pool has died
-        if not pool.exit_status_queue.empty():
-            exit_status = pool.exit_status_queue.get()
-            print(
-                f"{pool.lang} pool ended early with exit status {exit_status} and the error message:",
-                file=sys.stderr,
-            )
-            while not pool.stderr_queue.empty():
-                print(pool.stderr_queue.get(), file=sys.stderr, end="")
-            clean_exit(1, "")
-        # try to connect to the pool server
-        try:
-            _log("contacting pool ...")
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                _log("connecting to pool ...")
-                s.connect(pool.pipe)
-                _log(f"sending message: {message}")
-                s.sendall(message)
-                _log(f"waiting for response")
-                data = s.recv(BUFFER_SIZE)
-                _log(f"response received: {data}")
-            break
-        # try try again
-        except (FileNotFoundError, ConnectionRefusedError) as e:
-            _log("waiting for pool")
-            if attempt == MAX_RETRIES - 1:
-                raise e
-            else:
-                time.sleep(delay_time)
-                delay_time *= RETRY_MULTIPLIER
-
-    _log("exiting nexus client")
-
-    return data.decode()
 
 
 def as_file(input_str):
@@ -192,9 +199,6 @@ def as_file(input_str):
 
 
 def run_command(mid, args, pool_lang, sockets):
-    if len(args) != 0:
-        clean_exit("Expected 0 arguments to 'pfoo', given " + str(len(args)))
-
     arg_files = []
     result = None
     error = ""

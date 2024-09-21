@@ -49,7 +49,7 @@ std::string generateTempFilename() {
 std::string _put_value(std::string value){
     std::string tempfilename = generateTempFilename();
     std::ofstream tempFile(tempfilename);
-    tempFile << value;
+    tempFile << value << std::endl;
     tempFile.close();
     return tempfilename;
 }
@@ -208,12 +208,12 @@ std::string foreign_call(
 
     // Execute the command and capture the output
     struct Message message;
-    message.length = cmd.size();
-    memcpy(message.data, cmd.c_str(), BUFFER_SIZE);
+    message.length = full_cmd.size();
+    memcpy(message.data, full_cmd.c_str(), BUFFER_SIZE);
 
-    log_message("Send request to '" + socket_path + "' with cmd: " + cmd);
+    log_message("Send request to '" + socket_path + "' with cmd: " + full_cmd);
     struct Message result_msg = ask(socket_path.c_str(), message);
-    log_message("Receive data from cmd: " + cmd);
+    log_message("Receive data from cmd: " + full_cmd);
 
     std::string result_str(result_msg.data, result_msg.length);
 

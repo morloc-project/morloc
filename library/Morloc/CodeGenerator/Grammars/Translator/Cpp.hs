@@ -569,14 +569,15 @@ makeManifold callIndex form manifoldType e = do
         let tryBody = block 4 "try" body
             throwStatement = vsep
               [ [idoc|std::string error_message = "Error in m#{pretty callIndex} " + std::string(e.what());|]
-              , [idoc|std::cerr << error_message << std::endl;|]
+              , [idoc|log_message(error_message);|]
               , [idoc|throw std::runtime_error(error_message);|]
               ]
             catchBody = block 4 "catch (const std::exception& e)" throwStatement
             tryCatchBody = tryBody <+> catchBody
         return . Just . block 4 decl . vsep $
           [ {- can add diagnostic statements here -}
-            tryCatchBody
+            [idoc|log_message("Entering #{pretty callIndex}");|]
+          , tryCatchBody
           ]
   returnType :: TypeM -> CppTranslator MDoc
   returnType (Function _ t) = cppTypeOf t
@@ -587,18 +588,32 @@ stdBind xs = [idoc|std::bind(#{args})|] where
   args = cat (punctuate "," xs)
 
 makeDispatch :: [SerialManifold] -> MDoc
-makeDispatch ms = block 4 "switch(std::stoi(args[0]))" (vsep (map makeCase ms))
+makeDispatch ms = block 4 "switch(std::stoi(args[0]))" (vsep (map makeCase ms <> [pingCase, defaultCase]))
   where
     makeCase :: SerialManifold -> MDoc
     makeCase (SerialManifold i _ form _) =
       -- this made more sense when I was using ArgTypes
       -- it may make sense yet again when I switch to Or
       let size = sum $ abilist (\_ _ -> 1) (\_ _ -> 1) form
-          args' = take size $ map (\j -> "read(argv[" <> viaShow j <> "])") ([2..] :: [Int])
+          args' = take size $ map (\j -> "args[" <> viaShow j <> "]") ([1..] :: [Int])
       in
         (nest 4 . vsep)
           [ "case" <+> viaShow i <> ":"
           , "result = " <> manNamer i <> tupled args' <> ";"
+          , "break;"
+          ]
+
+    pingCase =
+        (nest 4 . vsep)
+          [ "case 0:"
+          , "result = " <> dquotes "__pong__" <>";"
+          , "break;"
+          ]
+
+    defaultCase =
+        (nest 4 . vsep)
+          [ "default:"
+          , [idoc|log_message("Manifold id not found");|]
           , "break;"
           ]
 
@@ -930,7 +945,7 @@ std::string dispatch(const Message& msg){
 
     log_message("dispatch on:");
     log_message(args[0]);
-    
+
     #{dispatch}
 
     return result;
