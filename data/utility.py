@@ -20,10 +20,15 @@ def _get_value(key):
     Use a key to retrieve a value
     """
 
-    with open(key, "r") as fh:
-        value = fh.read()
+    try:
+        with open(key, "r") as fh:
+            value = fh.read()
+    except Exception as e:
+        _log(f"Failed to read key {key} with error: {str(e)}")
+        raise e
 
     return value
+
 
 
 def _log(msg, logfile="log"):

@@ -46,7 +46,7 @@ compileCCodeIfNeeded :: MT.Text -> Path -> Path -> Path -> IO ()
 compileCCodeIfNeeded codeText srcPath libPath objPath = do
     alreadyExists <- doesFileExist libPath
     if alreadyExists
-        then error (show libPath) -- return ()
+        then return ()
         else do
             -- Write the code to the temporary file
             withFile srcPath WriteMode $ \tempHandle -> do

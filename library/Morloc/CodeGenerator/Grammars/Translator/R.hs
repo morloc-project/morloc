@@ -73,7 +73,7 @@ serialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 serialize v0 s0 = do
   (ms, v1) <- serialize' v0 s0
   let schema = typeSchema s0
-  let v2 = "rmorlocinternals::mlc_serialize" <> tupled [v1, schema]
+  let v2 = ".put_value(" <> "rmorlocinternals::mlc_serialize" <> tupled [v1, schema] <> ")"
   return (v2, ms)
   where
     serialize' :: MDoc -> SerialAST -> Index ([MDoc], MDoc)
@@ -114,12 +114,12 @@ deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 deserialize v0 s0
   | isSerializable s0 =
       let schema = typeSchema s0
-          deserializing = [idoc|rmorlocinternals::mlc_deserialize(#{v0}, #{schema})|]
+          deserializing = [idoc|rmorlocinternals::mlc_deserialize(.get_value(#{v0}), #{schema})|]
       in return (deserializing, [])
   | otherwise = do
       rawvar <- helperNamer <$> newIndex
       let schema = typeSchema s0
-          deserializing = [idoc|#{rawvar} <- rmorlocinternals::mlc_deserialize(#{v0}, #{schema})|]
+          deserializing = [idoc|#{rawvar} <- rmorlocinternals::mlc_deserialize(.get_value(#{v0}), #{schema})|]
       (x, befores) <- check rawvar s0
       return (x, deserializing:befores)
   where
@@ -182,8 +182,8 @@ translateSegment m0 =
 
     makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
     makeSerialExpr _ (ManS_ f) = return f
-    makeSerialExpr _ (AppPoolS_ _ (PoolCall _ socket args) _) = do
-      let call = ".morloc_foreign_call(STUB)"
+    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) args) _) = do
+      let call = [idoc|.morloc_foreign_call(#{dquotes socketFile}, #{pretty mid}, c#{tupled (map argNamer args)})|]
       return $ PoolDocs
         { poolCompleteManifolds = []
         , poolExpr = call
@@ -294,92 +294,21 @@ jsontype2rjson (NamJ objType rs) =
 makePool :: [MDoc] -> [MDoc] -> MDoc
 makePool sources manifolds = [idoc|#!/usr/bin/env Rscript
 
+# TODO: get the path from config
+dyn.load("~/.morloc/lib/socketr.so")
+
 #{vsep sources}
 
-.morloc_run <- function(f, args){
-  fails <- ""
-  isOK <- TRUE
-  warns <- list()
-  notes <- capture.output(
-    {
-      value <- withCallingHandlers(
-        tryCatch(
-          do.call(f, args),
-          error = function(e) {
-            fails <<- e$message
-            isOK <<- FALSE
-          }
-        ),
-        warning = function(w){
-          warns <<- append(warns, w$message)
-          invokeRestart("muffleWarning")
-        }
-      )
-    },
-    type="message"
-  )
-  list(
-    value = value,
-    isOK  = isOK,
-    fails = fails,
-    warns = warns,
-    notes = notes
-  )
-}
+#{srcPreamble langSrc}
 
-# dies on error, ignores warnings and messages
-.morloc_try <- function(f, args, .log=stderr(), .pool="_", .name="_"){
-  x <- .morloc_run(f=f, args=args)
-  location <- sprintf("%s::%s", .pool, .name)
-  if(! x$isOK){
-    cat("** R errors in ", location, "\n", file=stderr())
-    cat(x$fails, "\n", file=stderr())
-    stop(1)
-  }
-  if(! is.null(.log)){
-    lines = c()
-    if(length(x$warns) > 0){
-      cat("** R warnings in ", location, "\n", file=stderr())
-      cat(paste(unlist(x$warns), sep="\n"), file=stderr())
-    }
-    if(length(x$notes) > 0){
-      cat("** R messages in ", location, "\n", file=stderr())
-      cat(paste(unlist(x$notes), sep="\n"), file=stderr())
-    }
-  }
-  x$value
-}
-
-.morloc_unpack <- function(unpacker, x, .pool, .name){
-  x <- .morloc_try(f=unpacker, args=list(as.character(x)), .pool=.pool, .name=.name)
-  return(x)
-}
+#{srcSerialization langSrc}
 
 #{srcInterop langSrc}
 
+m0 <- function(){ "__pong__" }
+
 #{vsep manifolds}
 
-read <- function(file)
-{
-  paste(readLines(file), collapse="\n")
-}
-
-args <- as.list(commandArgs(trailingOnly=TRUE))
-if(length(args) == 0){
-  stop("Expected 1 or more arguments")
-} else {
-  mlc_pool_cmdID <- args[[1]]
-  mlc_pool_function_name <- paste0("m", mlc_pool_cmdID)
-  if(exists(mlc_pool_function_name)){
-    mlc_pool_function <- eval(parse(text=paste0("m", mlc_pool_cmdID)))
-    result <- do.call(mlc_pool_function, lapply(args[-1], read))
-    if(result != "null"){
-        cat(result, "\n")
-    }
-  } else {
-    cat("Could not find manifold '", mlc_pool_cmdID, "'\n", file=stderr())
-  }
-}
-|]
+#{srcMain langSrc}|]
   where
     langSrc = DF.languageFiles RLang
