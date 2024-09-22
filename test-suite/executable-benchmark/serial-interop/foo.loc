@@ -21,7 +21,12 @@ module foo
   , pMarginalCost2
   , pMarginalCost3
   , pMarginalCost4
+  , mapManyPC
   )
+
+import types (Real, List)
+import cppbase (map)
+import pybase (add)
 
 source py from "foo.py" ("nmb" as pnmb, "pid", "len" as plen)
 source R from "foo.R" ("nmb" as rnmb, "rid", "nchar" as rlen)
@@ -88,3 +93,6 @@ pMarginalCost1 = pnmb 0
 pMarginalCost2 = (pid . cid . pnmb) 0 
 pMarginalCost3 = (pid . cid . pid . cid . pnmb) 0 
 pMarginalCost4 = (pid . cid . pid . cid . pid . cid . pnmb) 0 
+
+mapManyPC :: Real -> [Real] -> [Real]
+mapManyPC x xs = map (add x) xs

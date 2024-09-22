@@ -194,7 +194,7 @@ def as_file(input_str):
                     input_json = json.loads(input_str)
                     print(json.dumps(input_json), file=fh_temp)
                 except json.JSONDecodeError:
-                    clean_exit(1, "Invalid input '{input_str}'")
+                    clean_exit(1, f"Invalid input '{input_str}'")
         return (True, x.name)
 
 

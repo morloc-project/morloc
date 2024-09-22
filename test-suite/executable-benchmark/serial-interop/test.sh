@@ -10,3 +10,5 @@ hyperfine \
   --export-markdown stats.markdown \
   --export-csv stats.csv \
   "./nexus.py {test}"
+
+hyperfine -w 5 "./nexus.py mapManyPC 5 long-list"
