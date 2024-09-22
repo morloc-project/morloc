@@ -1,5 +1,6 @@
 def message_response(data):
-    args = data.split(" ")
+    data_str = data.decode()
+    args = data_str.split(" ")
     cmdID = int(args[0])
     arg_files = args[1:]
 
@@ -21,8 +22,8 @@ def message_response(data):
 
 def worker(data, result_queue):
     try:
-        _log(f"Worker started with data {_max_string(data)}")
-        result = message_response(data.decode())
+        _log(f"Worker started with data {_max_string(data.decode())}")
+        result = message_response(data)
         _log(f"Worker ended with result '{result}'")
         _log("Worker putting result in queue")
         result_queue.put(
@@ -64,7 +65,7 @@ def server(socket_path):
                 data = conn.recv(BUFFER_SIZE)
 
                 if data:
-                    _log(f"Job {str(conn)} starting with data '{_max_string(data)}'")
+                    _log(f"Job {str(conn)} starting with data '{_max_string(data.decode())}'")
                     result_queue = multiprocessing.Queue()
                     p = multiprocessing.Process(
                         target=worker, args=(data, result_queue)
