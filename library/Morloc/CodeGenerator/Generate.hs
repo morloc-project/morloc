@@ -65,18 +65,12 @@ generate gASTs rASTs = do
   -- Collect all call-free data
   gSerial <- mapM generalSerial gASTs
 
-  -- configure sockets
-  sockets <- findAllSockets rASTs
-
   -- build nexus
   -- -----------
   -- Each nexus subcommand calls one function from one one pool.
   -- The call passes the pool an index for the function (manifold) that will be called.
-  nexus <- Nexus.generate
-    sockets
-    gSerial
-    [(t, i, lang) | (AnnoS (Idx i t) (Idx _ lang) _) <- rASTs]
 
+  nexus <- mapM makeFData rASTs >>= Nexus.generate gSerial
 
   -- initialize counter for use in express
   MM.startCounter
@@ -86,10 +80,16 @@ generate gASTs rASTs = do
 
   return (nexus, pools)
 
-findAllSockets :: [AnnoS e One (Indexed Lang)] -> MorlocMonad [Socket]
-findAllSockets rASTs = do
+-- Prep the data needed for each subcommand in the nexus
+makeFData :: AnnoS (Indexed Type) One (Indexed Lang) -> MorlocMonad (Type, Int, Lang, [Socket])
+makeFData e@(AnnoS (Idx i t) (Idx _ lang) _) = do
+  sockets <- findSockets e
+  return (t, i, lang, sockets)
+
+findSockets :: AnnoS e One (Indexed Lang) -> MorlocMonad [Socket]
+findSockets rAST = do
   config <- MM.ask
-  return . map (MC.setupServerAndSocket config) . unique $ concatMap findAllLangsSAnno rASTs 
+  return . map (MC.setupServerAndSocket config) . unique $ findAllLangsSAnno rAST
 
 
 findAllLangsSAnno :: AnnoS e One (Indexed Lang) -> [Lang]

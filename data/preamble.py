@@ -1,5 +1,4 @@
 import sys
-import subprocess
 import tempfile
 import os
 from pymorlocinternals import mlc_serialize, mlc_deserialize
@@ -12,7 +11,6 @@ import socket
 import time
 import multiprocessing
 import select
-import queue
 
 BUFFER_SIZE = 1024
 

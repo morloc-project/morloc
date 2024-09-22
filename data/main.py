@@ -113,8 +113,6 @@ def server(socket_path):
                 except Exception as e:
                     _log(f"failed to cleanup properly: {str(e)}")
 
-            time.sleep(0.001)
-
 
 if __name__ == "__main__":
     socket_path = sys.argv[1]

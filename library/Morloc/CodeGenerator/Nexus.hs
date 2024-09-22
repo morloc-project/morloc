@@ -28,11 +28,12 @@ type FData =
   , MDoc -- subcommand name
   , Int -- manifold ID
   , Type -- argument type
+  , [Socket] -- list of sockets needed for this command
   )
 
-generate :: [Socket] -> [NexusCommand] -> [(Type, Int, Lang)] -> MorlocMonad Script
-generate sockets cs xs = do
-  callNames <- mapM (MM.metaName . (\(_, i, _) -> i)) xs |>> catMaybes |>> map pretty
+generate :: [NexusCommand] -> [(Type, Int, Lang, [Socket])] -> MorlocMonad Script
+generate cs xs = do
+  callNames <- mapM (MM.metaName . (\(_, i, _, _) -> i)) xs |>> catMaybes |>> map pretty
   let gastNames = map (pretty . commandName) cs
       names = callNames <> gastNames
   fdata <- CM.mapM getFData xs -- [FData]
@@ -41,29 +42,29 @@ generate sockets cs xs = do
     Script
       { scriptBase = outfile
       , scriptLang = ML.Python3Lang
-      , scriptCode = "." :/ File outfile (Code . render $ main sockets names fdata cs)
+      , scriptCode = "." :/ File outfile (Code . render $ main names fdata cs)
       , scriptMake = [SysExe outfile]
       }
 
-getFData :: (Type, Int, Lang) -> MorlocMonad FData
-getFData (t, i, lang) = do
+getFData :: (Type, Int, Lang, [Socket]) -> MorlocMonad FData
+getFData (t, i, lang, sockets) = do
   mayName <- MM.metaName i
   case mayName of
     (Just name') -> do
       config <- MM.ask
       let socket = MC.setupServerAndSocket config lang 
-      return (socket, pretty name', i, t)
+      return (socket, pretty name', i, t, sockets)
     Nothing -> MM.throwError . GeneratorError $ "No name in FData"
 
 
 
-main :: [Socket] -> [MDoc] -> [FData] -> [NexusCommand] -> MDoc
-main sockets names fdata cdata =
+main :: [MDoc] -> [FData] -> [NexusCommand] -> MDoc
+main names fdata cdata =
   [idoc|#{nexusSourceUtility langSrc}
 
 #{usageT fdata cdata}
 
-#{vsep (map functionCT cdata ++ map (functionT sockets) fdata)}
+#{vsep (map functionCT cdata ++ map functionT fdata)}
 
 #{mapT names}
 
@@ -88,7 +89,7 @@ def usage():
 |]
 
 usageLineT :: FData -> MDoc
-usageLineT (_, name', _, t) = vsep
+usageLineT (_, name', _, t, _) = vsep
   ( [idoc|print("  #{name'}")|]
   : writeTypes t
   )
@@ -110,8 +111,8 @@ writeType (Just i) t = [idoc|print('''    param #{pretty i}: #{pretty t}''')|]
 writeType Nothing  t = [idoc|print('''    return: #{pretty t}''')|]
 
 
-functionT :: [Socket] -> FData -> MDoc
-functionT sockets (Socket lang _ _, subcommand, mid, t) =
+functionT :: FData -> MDoc
+functionT (Socket lang _ _, subcommand, mid, t, sockets) =
   [idoc|
 def call_#{subcommand}(args):
     if len(args) != #{pretty (nargs t)}:
