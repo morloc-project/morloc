@@ -1,7 +1,8 @@
 import sys
 import tempfile
 import os
-from pymorlocinternals import mlc_serialize, mlc_deserialize
+import json
+import struct
 
 # import only used if dictionaries are passed
 from collections import OrderedDict
@@ -12,7 +13,7 @@ import time
 import multiprocessing
 import select
 
-BUFFER_SIZE = 1024
+BUFFER_SIZE = 4096
 
 from contextlib import closing
 
@@ -22,3 +23,7 @@ from contextlib import closing
 INITIAL_RETRY_DELAY = 0.001
 RETRY_MULTIPLIER = 1.25
 MAX_RETRIES = 30
+
+def _log(msg, logfile="log"):
+    with open(logfile, "a+") as fh:
+        print(f"Python3: {msg}", flush=True, file=fh)

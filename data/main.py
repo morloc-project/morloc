@@ -1,28 +1,71 @@
 def message_response(data):
-    data_str = data.decode()
-    args = data_str.split(" ")
-    cmdID = int(args[0])
-    arg_files = args[1:]
+    (msg_cmd, msg_offset, msg_length) = _read_header(data) 
 
-    _log(f"dispatching on {str(cmdID)}")
+    _log(f"msg_cmd = {str(msg_cmd)}")
 
-    try:
-        mlc_function = dispatch[cmdID]
-    except KeyError:
-        sys.exit(
-            "Internal error in python pool: no manifold found with id={}".format(cmdID)
+    data_start = 32 + msg_offset
+
+    msg_cmd_type = msg_cmd[0]
+
+    if(msg_cmd_type == PACKET_TYPE_PING):
+        result = _make_header(
+          length = 0,
+          command = _pack("Bxxxxxxx", PACKET_TYPE_PING)
         )
+    elif(msg_cmd_type == PACKET_TYPE_CALL):
 
-    result = mlc_function(*arg_files)
+        cmdID = _unpack("I", msg_cmd[1:5])[0]
 
-    _log(f"from cmdID {str(cmdID)} pool returning message '{_max_string(str(result))}'")
+        args = []
+        while(data_start < msg_length):
+            _log(f"Parsing arg header from index {data_start}")
+            (_, arg_offset, arg_length) = _read_header(data[data_start:data_start+32])
+            _log(f"Parsing arg with offset {str(arg_offset)} and length {str(arg_length)}")
+            args.append(data[data_start:(data_start + 32 + arg_offset + arg_length)])
+            data_start += 32 + arg_offset + arg_length
+
+        _log(f"dispatching on {str(cmdID)}")
+
+        if cmdID not in dispatch:
+            sys.exit(
+                "Internal error in python pool: no manifold found with id={}".format(cmdID)
+            )
+
+        mlc_function = dispatch[cmdID]
+
+        try:
+            passing_result = mlc_function(*args)
+            result = _pack(
+                "32s{}s".format(len(passing_result)),
+                _make_header(
+                    length = len(passing_result),
+                    command = _pack("Bxxxxxxx", PACKET_RETURN_PASS)
+                ),
+                passing_result
+            )
+        except Exception as e:
+            failing_result = str(e).encode("utf8")
+            result = _pack(
+                "32s{}s".format(len(failing_result)),
+                _make_header(
+                    length = len(failing_result),
+                    command = _pack("Bxxxxxxx", PACKET_RETURN_FAIL)
+                ),
+                failing_result
+            )
+
+        _log(f"from cmdID {str(cmdID)} pool returning message '{len(result)}'")
+    else:
+        errmsg = "Expected a call packet, found {str(msg_cmd_type)}"
+        _log(errmsg)
+        raise ValueError(errmsg)
 
     return result
 
 
 def worker(data, result_queue):
     try:
-        _log(f"Worker started with data {_max_string(data.decode())}")
+        _log(f"Worker started")
         result = message_response(data)
         _log(f"Worker ended with result '{result}'")
         _log("Worker putting result in queue")
@@ -65,7 +108,7 @@ def server(socket_path):
                 data = conn.recv(BUFFER_SIZE)
 
                 if data:
-                    _log(f"Job {str(conn)} starting with data '{_max_string(data.decode())}'")
+                    _log(f"Job {str(conn)} starting")
                     result_queue = multiprocessing.Queue()
                     p = multiprocessing.Process(
                         target=worker, args=(data, result_queue)
@@ -84,14 +127,14 @@ def server(socket_path):
 
                         if result is not None:
                             _log(f"Sending result")
-                            conn.send(result.encode())
+                            conn.send(result)
                             _log(f"Sent result for process {p.pid}")
                     except Exception as e:
                         _log(f"failed to get result from queue: {str(e)}")
                 elif not p.is_alive():
                     _log(f"Process {p.pid} not alive and no result available")
                     # Send an empty message signaling failure
-                    conn.send("".encode())
+                    conn.send(b'fuck')
                 else:
                     # the process is still alive and no data has been reveived
                     # so we continue to wait
@@ -117,3 +160,4 @@ def server(socket_path):
 if __name__ == "__main__":
     socket_path = sys.argv[1]
     server(socket_path)
+

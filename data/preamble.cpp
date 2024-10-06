@@ -10,6 +10,7 @@
 // needed for foreign interface
 #include <cstdlib>
 #include <cstdio>
+#include <cstdint>
 #include <unistd.h>
 
 // needed for interop
@@ -27,6 +28,44 @@
 #include <utility>
 #include <limits>
 
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 4096
+
+#define PACKET_HEAD 'M'
+#define PACKET_VERSION 0x01
+
+#define PACKET_ACTION_CALL     0x00
+#define PACKET_ACTION_CALLRET  0x01
+#define PACKET_ACTION_GET      0x02
+#define PACKET_ACTION_GETRET   0x03
+#define PACKET_ACTION_GETS     0x04
+#define PACKET_ACTION_GETSRET  0x05
+#define PACKET_ACTION_PUT      0x06
+#define PACKET_ACTION_PUTRET   0x07
+#define PACKET_ACTION_PUTS     0x08
+#define PACKET_ACTION_PUTSRET  0x09
+#define PACKET_ACTION_PING     0x0a
+#define PACKET_ACTION_PINGRET  0x0b
+
+#define PACKET_SOURCE_MESG     0x00 // the message contains the data
+#define PACKET_SOURCE_FILE     0x01 // the message is a path to a file of data
+#define PACKET_SOURCE_NXDB     0x02 // the message is a key to a nexus database
+
+#define PACKET_FORMAT_JSON     0x00
+
+#define PACKET_RETURN_FAIL     0x00
+#define PACKET_RETURN_PASS     0x01
+#define PACKET_RETURN_WAIT     0x02 // e.g., when get is waiting for a put to finish
 
 using namespace std;
+
+struct Message {
+    char data[BUFFER_SIZE];
+    size_t length;
+};
+
+// Function to log messages
+template <class M> 
+void log_message(M message) {
+    std::ofstream log_file("log", std::ios_base::app);
+    log_file << "C: " << message << std::endl;
+}

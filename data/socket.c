@@ -9,7 +9,7 @@
 #include <errno.h>
 
 
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 4096
 
 // Create a Unix domain socket
 SEXP R_new_socket() {

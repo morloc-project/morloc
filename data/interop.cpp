@@ -1,17 +1,3 @@
-struct Message {
-    char data[BUFFER_SIZE];
-    size_t length;
-};
-
-
-// Function to log messages
-template <class M> 
-void log_message(M message) {
-    std::ofstream log_file("log", std::ios_base::app);
-    log_file << "C: " << message << std::endl;
-}
-
-
 std::string read(const std::string& file) {
     std::ifstream input_file(file);
 
@@ -45,22 +31,86 @@ std::string generateTempFilename() {
     return std::string(template_file);
 }
 
-// Store a value in a persistant manner and return a key by which it can be retrieved
-std::string _put_value(std::string value){
-    std::string tempfilename = generateTempFilename();
-    std::ofstream tempFile(tempfilename);
-    tempFile << value << std::endl;
-    tempFile.close();
-    return tempfilename;
+// Transforms a serialized value into a message ready for the socket
+std::string _put_value(const std::string& value) {
+    std::string packet(8, '\0');
+    packet[0] = PACKET_HEAD;
+    packet[1] = PACKET_VERSION;
+    uint32_t length;
+
+    if (value.size() <= 65536 - 8) {
+        // for small data, send directly over the socket
+        packet[2] = PACKET_SOURCE_MESG;
+        packet[3] = PACKET_FORMAT_JSON;
+
+        packet += value;
+        length = static_cast<uint32_t>(value.size());
+    } else {
+        // for large data, write a temporary file
+        packet[2] = PACKET_SOURCE_FILE;
+        packet[3] = PACKET_FORMAT_JSON;
+
+        std::string tmpfilename = generateTempFilename();
+        std::ofstream tempFile(tmpfilename);
+        tempFile << value;
+        tempFile.close();
+        packet += tmpfilename;
+        length = static_cast<uint32_t>(tmpfilename.size());
+    }
+
+    // encode the length of the data
+    packet[4] = (length >> 24) & 0xFF;
+    packet[5] = (length >> 16) & 0xFF;
+    packet[6] = (length >>  8) & 0xFF;
+    packet[7] =  length        & 0xFF;
+
+    return packet;
+}
+
+
+// Read 4 bytes as package length an int32
+int readInt32(const std::string& bytes, size_t idx){
+    size_t x = 0;
+    x = (x << 8) + bytes[2];
+    x = (x << 8) + bytes[3];
+    x = (x << 8) + bytes[4];
+    x = (x << 8) + bytes[5];
+    return x;
 }
 
 // Use a key to retrieve a value
-std::string _get_value(std::string key){
-    return read(key);
+std::string _get_value(const std::string& data){
+    char source = data[0];
+    char format = data[1];
+    int size = readInt32(data, 2);
+
+    switch(source){
+      case PACKET_SOURCE_MESG:
+        switch(format){
+          case PACKET_FORMAT_JSON:
+            return data.substr(6);
+          default:
+            log_message("Invalid format");
+        }
+        break;
+      case PACKET_SOURCE_FILE:
+        switch(format){
+          case PACKET_FORMAT_JSON:
+            return read(data.substr(6));
+          default:
+            log_message("Invalid format");
+        }
+        break;
+      case PACKET_SOURCE_NXDB:
+        log_message("Not yet supported");
+        break;
+      default:
+        log_message("Invalid source");
+        break;
+    }
+
+    return ""; // fail
 }
-
-
-
 
 // Create a Unix domain socket
 int new_socket(){

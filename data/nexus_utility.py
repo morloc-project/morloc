@@ -1,15 +1,38 @@
 #!/usr/bin/env python3
 
-import json
 import socket
 import subprocess
 import sys
 import os
-import tempfile
 import signal
 import time
 import threading
 import queue
+import struct
+
+PACKET_TYPE_DATA    = 0x00
+PACKET_TYPE_CALL    = 0x01
+PACKET_TYPE_CALLRET = 0x02
+PACKET_TYPE_GET     = 0x03
+PACKET_TYPE_GETRET  = 0x04
+PACKET_TYPE_PUT     = 0x05
+PACKET_TYPE_PUTRET  = 0x06
+PACKET_TYPE_PING    = 0x07
+PACKET_TYPE_PINGRET = 0x08
+
+PACKET_SOURCE_MESG = 0x00 # the message contains the data
+PACKET_SOURCE_FILE = 0x01 # the message is a path to a file of data
+PACKET_SOURCE_NXDB = 0x02 # the message is a key to the nexus uses to access the data
+
+PACKET_FORMAT_JSON = 0x00
+
+PACKET_COMPRESSION_NONE = 0x00 # uncompressed
+
+PACKET_ENCRYPTION_NONE  = 0x00 # unencrypted
+
+PACKET_RETURN_PASS = 0x00
+PACKET_RETURN_FAIL = 0x01
+
 
 # These three parameters describe the retru times for a pool connection to
 # open. The default parameters sum to a 4s max wait, which is well beyond what
@@ -128,7 +151,7 @@ def client(pool, message):
 
     _log("exiting nexus client")
 
-    return data.decode()
+    return data
 
 
 def start_language_server(lang, cmd, pipe):
@@ -174,29 +197,188 @@ def start_language_server(lang, cmd, pipe):
 
     # ping the server, make sure it is up and going
     _log(f"Pinging the {lang} server ...")
-    pong = client(pool, b"0")
-    _log(f"Pong from {lang} - server is good ({pong})")
+    pong = client(pool, _make_ping_packet())
+    _log(f"Pong from {lang} - server is good (len(pong) == {len(pong)})")
 
     return pool
 
+def _unpack(fmt, *args):
+    fmt = ">" + fmt
+    try:
+        values = struct.unpack(fmt, *args) 
+    except Exception as e:
+        _log(f"Unpack failed on format '{fmt}'")
+        raise e
 
-def as_file(input_str):
-    if os.path.isfile(input_str):
-        return (False, input_str)
+    return values
+
+def _pack(fmt, *args):
+    fmt = ">" + fmt
+    try:
+        data = struct.pack(fmt, *args) 
+    except Exception as e:
+        _log(f"Pack failed on format '{fmt}'")
+        raise e
+
+    return data
+
+def _read_header(data : bytes) -> tuple[bytes, int, int]:
+    if len(data) < 32:
+        _log(f"packet is too small '{str(data)}'")
+        sys.exit(1)
+
+    fields = _unpack("4B4H8sIQ", data[0:32])  
+
+    observed_magic = fields[0:4]
+    expected_magic = (0x6D, 0xf8, 0x07,0x07)
+    if observed_magic != expected_magic:
+        _log(f"bad magic: observed {observed_magic}, expected {expected_magic}")
+
+    if len(data) != 32 + fields[10]:
+        _log("packet is of unexpected length")
+        sys.exit(1)
+
+    command = fields[8]
+    offset = fields[9]
+    length = fields[10]
+
+    # return the offset and length
+    return (command, offset, length)
+
+def print_return(ret_data):
+    # Parse the call return packet
+    (ret_cmd, ret_offset, _) = _read_header(ret_data)
+
+    ret_start = 32 + ret_offset
+
+    ret_cmd_type = ret_cmd[0]
+
+    if ret_cmd_type == PACKET_RETURN_PASS:
+        exit_code = 0
+        outfile = sys.stdout
+    elif ret_cmd_type == PACKET_RETURN_FAIL:
+        exit_code = 1
+        outfile = sys.stderr
     else:
-        x = tempfile.NamedTemporaryFile(prefix="morloc_nexus_", delete=False)
-        with open(x.name, "w") as fh_temp:
-            if os.path.exists(input_str):
-                with open(input_str, "r") as fh_sub:
-                    print(fh_sub.read().strip(), file=fh_temp)
-            else:
-                try:
-                    input_json = json.loads(input_str)
-                    print(json.dumps(input_json), file=fh_temp)
-                except json.JSONDecodeError:
-                    clean_exit(1, f"Invalid input '{input_str}'")
-        return (True, x.name)
+        clean_exit(1, "Implementation bug: expected pass or fail packet")
 
+    # Parse the data packet
+    # If the call failed, the data packet will be the error message
+    # Otherwise, the data packet will represent the final output data
+    data = ret_data[ret_start:]
+
+    (command, offset, _) = _read_header(data)
+
+    data_start = 32 + offset
+
+    cmd_source = command[1]
+    cmd_format = command[2]
+
+    isgood = False
+    error = ""
+
+    if cmd_source == PACKET_SOURCE_MESG:
+        if cmd_format == PACKET_FORMAT_JSON:
+            print(data[data_start:].decode(), file=outfile)
+            isgood = True
+        else:
+            _log("Invalid format")
+    elif cmd_source == PACKET_SOURCE_FILE:
+        if cmd_format == PACKET_FORMAT_JSON:
+            filename = data[data_start:].decode()
+            with open(filename, 'r') as file:
+                content = file.read()
+            os.unlink(filename)  # Delete the temporary file
+            print(content, file=outfile)
+            isgood = True
+        else:
+            error = "Invalid format"
+    else:
+        error = "Not yet supported"
+
+    # Exit with the proper error code
+    if isgood:
+        clean_exit(exit_code)
+    else:
+        clean_exit(1, error)
+
+
+def _make_header(
+    length: int,
+    command: bytes,
+    plain: int = 0,
+    version: int = 0,
+    version_flavor: int = 0,
+    mode: int = 0,
+    offset: int = 0
+) -> bytes:
+    if len(command) != 8:
+        _log("Bad command")
+    return _pack(
+        "4B4H8sIQ",
+        0x6D, # m
+        0xf8, # o
+        0x07, # ding
+        0x07, # ding
+        plain,
+        version,
+        version_flavor,
+        mode,
+        command,
+        offset,
+        length
+    )
+
+def _make_ping_packet():
+    return _make_header(
+      length = 0,
+      command = _pack("Bxxxxxxx", PACKET_TYPE_PING)
+    )
+
+def prepare_call_packet(mid, args):
+    arg_msgs = []
+    for arg in args:
+        arg = arg.encode("utf8")
+        if os.path.isfile(arg):
+            header = _make_header(
+              length = len(arg),
+              command = _pack(
+                "BBBBBxxx",
+                PACKET_TYPE_DATA,
+                PACKET_SOURCE_FILE,
+                PACKET_FORMAT_JSON,
+                PACKET_COMPRESSION_NONE,
+                PACKET_ENCRYPTION_NONE
+              )
+            )
+        else:
+            header = _make_header(
+              length = len(arg),
+              command = _pack(
+                "BBBBBxxx",
+                PACKET_TYPE_DATA,
+                PACKET_SOURCE_MESG,
+                PACKET_FORMAT_JSON,
+                PACKET_COMPRESSION_NONE,
+                PACKET_ENCRYPTION_NONE
+              )
+            )
+        arg_msgs.append(_pack("32s{}s".format(len(arg)), header, arg))
+
+    call_data_length = sum([len(arg_msg) for arg_msg in arg_msgs])
+
+    call_header = _make_header(
+      call_data_length,
+      command = _pack("BIxxx", PACKET_TYPE_CALL, mid)
+    )
+
+    # find the lengths of all the arguments
+    call_format = "32s" + "".join(str(len(n)) + "s" for n in arg_msgs)
+
+    _log(f"Creating call packet with data length of {str(call_data_length)} and format {call_format}")
+
+    return _pack(call_format, call_header, *arg_msgs)
+    
 
 def run_command(mid, args, pool_lang, sockets):
     arg_files = []
@@ -212,21 +394,10 @@ def run_command(mid, args, pool_lang, sockets):
                 _log(f"Failed to start {lang} language server: {str(e)}")
                 raise  # Re-raise the exception to be caught in the outer try block
 
-        # Store all inputs as files
-        for arg in args:
-            new_file = as_file(arg)
-            arg_files.append(new_file)
-            resources["files"].append(new_file)
-
-        # Prepare pool message
-        message = (" ".join([mid] + [x[1] for x in arg_files])).encode("utf8")
+        message = prepare_call_packet(mid, args)
 
         # Send arguments over the socket
-        try:
-            result = client(resources["pools"][pool_lang], message)
-        except Exception as e:
-            _log(f"Error in client call: {str(e)}")
-            raise  # Re-raise the exception to be caught in the outer try block
+        result = client(resources["pools"][pool_lang], message)
 
     except Exception as e:
         _log(f"An error occurred: {str(e)}")
@@ -238,10 +409,7 @@ def run_command(mid, args, pool_lang, sockets):
     finally:
         cleanup()
 
-    # Print the JSON representation of the final value
-    if result is not None:
-        with open(result, "r") as fh:
-            print(fh.read(), end="")
-        clean_exit(0)
-    else:
+    if error:
         clean_exit(1, error)
+    else:
+        print_return(result)

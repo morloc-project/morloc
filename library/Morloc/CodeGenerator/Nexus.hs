@@ -119,7 +119,7 @@ def call_#{subcommand}(args):
         clean_exit("Expected #{pretty (nargs t)} arguments to '#{subcommand}', given " + str(len(args)))
     else:
         run_command(
-            mid = "#{pretty mid}",
+            mid = #{pretty mid},
             args = args,
             pool_lang = #{poolLangDoc},
             sockets = #{socketsDoc}
