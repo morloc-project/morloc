@@ -305,8 +305,6 @@ dyn.load("~/.morloc/lib/socketr.so")
 
 #{srcInterop langSrc}
 
-m0 <- function(){ "__pong__" }
-
 #{vsep manifolds}
 
 #{srcMain langSrc}|]

@@ -1,38 +1,58 @@
 processMessage <- function(msg){
 
-  # extract the data from the message
-  # the data is in a set sized buffer stored in the first list element.
-  data_raw <- msg[[1]]
-  # the second list element is the data length
-  data_length <- msg[[2]]
-  # extract message and convert to a string
-  data_str <- rawToChar(data_raw[1:data_length])
+  data <- msg[[1]]
 
-  # break apart a message
-  args <- strsplit(data_str, " ")[[1]]
-  manifold_id <- args[1]
-  manifold_arguments <- as.list(args[-1])
-  .log(paste("Start processing", paste0("'", data_str, "'"), "with manifold arguments:", paste(manifold_arguments, collapse=", ")))
+  header <- read_header(data)
 
-  mlc_pool_function_name <- paste0("m", manifold_id)
-  if(exists(mlc_pool_function_name)){
-    .log(paste("Calling function:", mlc_pool_function_name))
+  if(header$cmd[1] == PACKET_TYPE_PING){
+    .log("Processing ping")
+    cmd = c(PACKET_TYPE_PINGRET, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+    return(
+      make_header(cmd, offset = 0, length = 0)
+    )
+  } else if(header$cmd[1] == PACKET_TYPE_CALL) {
+    .log("Processing call")
+    manifold_id <- read_int(header$cmd, 2, 5)
+    .log(paste("Manifold id =", manifold_id))
+    args <- list()
+    arg_start <- header$offset + 33
+    .log("Building args")
+    while(arg_start < (header$length + header$offset + 32)){
+      .log("Adding arg")
+      arg_header <- read_header(data[arg_start:(arg_start + 31)])
+      arg_data <- data[arg_start:(arg_start + 32 + arg_header$offset + arg_header$length - 1)]
+      args[[length(args)+1]] <- arg_data
+      arg_start <- arg_start + 32 + arg_header$offset + arg_header$length + 1
+      .log(paste("New start", arg_start))
+    }
+    .log("Args built")
 
-    tryCatch({
-      mlc_pool_function <- eval(parse(text=mlc_pool_function_name))
-      result <- do.call(mlc_pool_function, manifold_arguments)
-    }, error = function(e) {
-          .log(paste("Call to function", mlc_pool_function_name, "failed with message:",  e$message))
-    })
+    mlc_pool_function_name <- paste0("m", manifold_id)
 
-    .log(paste("Got result:", result))
+    if(exists(mlc_pool_function_name)){
+      .log(paste("Calling function:", mlc_pool_function_name))
+
+      tryCatch({
+        mlc_pool_function <- eval(parse(text=mlc_pool_function_name))
+        result <- do.call(mlc_pool_function, args)
+        .log(paste("Successfully ran mid", manifold_id))
+      }, error = function(e) {
+        .log(paste("Call to function", mlc_pool_function_name, "failed with message:",  e$message))
+      })
+
+      .log(paste("Got result:", result))
+    } else {
+      stop(paste("Could not find function", mlc_pool_function))
+    }
+
+    cmd = c(PACKET_TYPE_CALLRET, PACKET_RETURN_PASS, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+    callret_header <- make_header(cmd, offset = 0, length = length(result))
+    callret_packet <- c(callret_header, result)
+
+    return(callret_packet)
   } else {
-    result <- ""
-    .log(paste0("Could not find manifold '", mlc_pool_function_name, "'"))
+    stop("Unexpected packet type")
   }
-
-  .log(paste("Start processing:", data_str))
-  result
 }
 
 
@@ -77,9 +97,9 @@ job_has_finished <- function(job){
 
 handle_finished_client <- function(job){
   # get the result of the calculation
-  data_str <- future::value(job$work)
-
-  data <- charToRaw(data_str)
+  data <- future::value(job$work)
+  .log(paste("type(data) =", typeof(data)))
+  .log(paste("length(data) =", length(data)))
 
   # Return the result to the client
   .Call("R_send_data", job$client_fd, list(data, length(data)))
