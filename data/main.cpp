@@ -13,11 +13,7 @@ void run_job(int client_fd) {
     log_message("Starting new job for client_fd: " + std::to_string(client_fd));
 
     // Pull data from the client
-    struct Message data;
-    data.length = recv(client_fd, data.data, BUFFER_SIZE, 0);
-
-    std::string received_command(data.data, data.length);
-    log_message("Command from client: " + received_command);
+    struct Message data = stream_recv(client_fd);
 
     // Store the job info
     Job new_job(client_fd, data);
@@ -28,14 +24,14 @@ void run_job(int client_fd) {
         if (pid == 0) {
             // Entered by the child process
             log_message("Child process started for job");
-            
+
             // Run the job
-            std::string result_key = dispatch(new_job.message);
-            log_message("Job dispatched, result_key: " + result_key);
+            Message result = dispatch(new_job.message);
+            log_message("Job dispatched");
 
             // return the result to the client
-            send(new_job.client_fd, result_key.c_str(), result_key.size(), 0);
-            
+            send(new_job.client_fd, result.data, result.length, 0);
+
             // close the current client
             close(new_job.client_fd);
 
@@ -71,7 +67,7 @@ int main(int argc, char* argv[]) {
 
     // Setup a new server that uses a given path for the socket address
     int server_fd = new_server(SOCKET_PATH);
-    
+
     // Set the server socket to non-blocking mode
     fcntl(server_fd, F_SETFL, O_NONBLOCK);
 

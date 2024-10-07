@@ -1,4 +1,5 @@
 #include <string>
+#include <string>
 #include <iostream>
 #include <sstream>
 #include <functional>
@@ -30,21 +31,15 @@
 
 #define BUFFER_SIZE 4096
 
-#define PACKET_HEAD 'M'
-#define PACKET_VERSION 0x01
-
-#define PACKET_ACTION_CALL     0x00
-#define PACKET_ACTION_CALLRET  0x01
-#define PACKET_ACTION_GET      0x02
-#define PACKET_ACTION_GETRET   0x03
-#define PACKET_ACTION_GETS     0x04
-#define PACKET_ACTION_GETSRET  0x05
-#define PACKET_ACTION_PUT      0x06
-#define PACKET_ACTION_PUTRET   0x07
-#define PACKET_ACTION_PUTS     0x08
-#define PACKET_ACTION_PUTSRET  0x09
-#define PACKET_ACTION_PING     0x0a
-#define PACKET_ACTION_PINGRET  0x0b
+#define PACKET_ACTION_DATA     0x00
+#define PACKET_ACTION_CALL     0x01
+#define PACKET_ACTION_CALLRET  0x02
+#define PACKET_ACTION_GET      0x03
+#define PACKET_ACTION_GETRET   0x04
+#define PACKET_ACTION_PUT      0x05
+#define PACKET_ACTION_PUTRET   0x06
+#define PACKET_ACTION_PING     0x07
+#define PACKET_ACTION_PINGRET  0x08
 
 #define PACKET_SOURCE_MESG     0x00 // the message contains the data
 #define PACKET_SOURCE_FILE     0x01 // the message is a path to a file of data
@@ -52,15 +47,20 @@
 
 #define PACKET_FORMAT_JSON     0x00
 
-#define PACKET_RETURN_FAIL     0x00
-#define PACKET_RETURN_PASS     0x01
-#define PACKET_RETURN_WAIT     0x02 // e.g., when get is waiting for a put to finish
+#define PACKET_RETURN_PASS     0x00
+#define PACKET_RETURN_FAIL     0x01
 
 using namespace std;
 
 struct Message {
-    char data[BUFFER_SIZE];
-    size_t length;
+  char* data;
+  size_t length;
+};
+
+struct Header {
+    char command[8];
+    int offset; // this is a 4 byte int, so I should use a short
+    int length;
 };
 
 // Function to log messages

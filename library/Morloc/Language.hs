@@ -48,7 +48,7 @@ instance Pretty Lang where
   pretty = viaShow
 
 serialType :: Lang -> Text
-serialType CppLang = "std::string"
+serialType CppLang = "Message"
 serialType RLang = "character"
 serialType Python3Lang = "str"
 serialType CLang = error "C is not yet supported"

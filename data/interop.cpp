@@ -1,3 +1,92 @@
+// Interop /////////////
+
+// Read n bytes as an int starting from position offset in a char array
+int read_int(const char* bytes, size_t offset, size_t size){
+    size_t x = 0;
+
+    for(size_t i = 0; i < size; i++){
+      x = (x << 8) + bytes[offset + i];
+    }
+
+    return x;
+}
+
+void write_int(char* data, size_t size, int value){
+    for(size_t i = 0; i < size; i++){
+        data[i] = (value >> ((size - i - 1)*8)) & 0xFF;
+    }
+}
+
+
+Header read_header(const char* msg){
+    if( !( msg[0] == 0x6D && msg[1] == 0xF8 && msg[2] == 0x07 && msg[3] == 0x07 )){
+      throw std::runtime_error("Bad magic");
+    }
+    Header header;
+
+    for(size_t offset = 0; offset < 8; offset++){
+      header.command[offset] = msg[12+offset];
+    }
+
+    header.offset = read_int(msg, 20, 4);
+    header.length = read_int(msg, 24, 8);
+
+    return header;
+}
+
+// char command[8];
+// int offset; // this is a 4 byte int, so I should use a short
+// int length;
+void make_header(char* data, char cmd[8], int offset, int length){
+    data[ 0] = 0x6d;
+    data[ 1] = 0xF8;
+    data[ 2] = 0x07;
+    data[ 3] = 0x07;
+    data[ 4] = 0x00; // plain
+    data[ 5] = 0x00;
+    data[ 6] = 0x00; // version
+    data[ 7] = 0x00;
+    data[ 8] = 0x00; // version_flavor
+    data[ 9] = 0x00;
+    data[10] = 0x00; // mode
+    data[11] = 0x00;
+    for(size_t i = 0; i < 8; i++){
+      data[12 + i] = cmd[i];
+    }
+    write_int(data + 20, 4, offset);
+    write_int(data + 24, 8, length);
+}
+
+Message make_callret(const char* data, int length, bool passing){
+  Message callret;
+  callret.length = 32 + length;
+  callret.data = (char*)malloc(callret.length * sizeof(char));
+
+  char ret_status;
+  if (passing){
+    ret_status = PACKET_RETURN_PASS;
+  } else {
+    ret_status = PACKET_RETURN_FAIL;
+  }
+
+  char cmd[8];
+  cmd[0] = PACKET_ACTION_CALLRET; 
+  cmd[1] = ret_status;
+  cmd[2] = 0x00;
+  cmd[3] = 0x00;
+  cmd[4] = 0x00;
+  cmd[5] = 0x00;
+  cmd[6] = 0x00;
+  cmd[7] = 0x00;
+  // generate the header
+  make_header(callret.data, cmd, 0, callret.length);
+  // directly copy the value data
+  memcpy(callret.data + 32, data, length);
+
+  return callret;
+}
+
+
 std::string read(const std::string& file) {
     std::ifstream input_file(file);
 
@@ -32,74 +121,87 @@ std::string generateTempFilename() {
 }
 
 // Transforms a serialized value into a message ready for the socket
-std::string _put_value(const std::string& value) {
-    std::string packet(8, '\0');
-    packet[0] = PACKET_HEAD;
-    packet[1] = PACKET_VERSION;
-    uint32_t length;
+Message _put_value(const std::string& value) {
 
-    if (value.size() <= 65536 - 8) {
+    int length;
+
+    Message packet;
+
+    if (value.size() <= 65536 - 32) {
         // for small data, send directly over the socket
-        packet[2] = PACKET_SOURCE_MESG;
-        packet[3] = PACKET_FORMAT_JSON;
 
-        packet += value;
-        length = static_cast<uint32_t>(value.size());
+        length = static_cast<int>(value.size());
+
+        packet.data = (char*)malloc(length + 32 * sizeof(char));
+        packet.length = length + 32;
+
+        char cmd[8];
+        cmd[0] = PACKET_ACTION_DATA; 
+        cmd[1] = PACKET_SOURCE_MESG;
+        cmd[2] = PACKET_FORMAT_JSON;
+        cmd[3] = 0x00;
+        cmd[4] = 0x00;
+        cmd[5] = 0x00;
+        cmd[6] = 0x00;
+        cmd[7] = 0x00;
+        // generate the header
+        make_header(packet.data, cmd, 0, length);
+        // directly copy the value data
+        memcpy(packet.data + 32, value.c_str(), length);
     } else {
         // for large data, write a temporary file
-        packet[2] = PACKET_SOURCE_FILE;
-        packet[3] = PACKET_FORMAT_JSON;
 
         std::string tmpfilename = generateTempFilename();
         std::ofstream tempFile(tmpfilename);
         tempFile << value;
         tempFile.close();
-        packet += tmpfilename;
-        length = static_cast<uint32_t>(tmpfilename.size());
-    }
+        length = static_cast<int>(tmpfilename.size());
 
-    // encode the length of the data
-    packet[4] = (length >> 24) & 0xFF;
-    packet[5] = (length >> 16) & 0xFF;
-    packet[6] = (length >>  8) & 0xFF;
-    packet[7] =  length        & 0xFF;
+        packet.data = (char*)malloc(length + 32 * sizeof(char));
+        packet.length = length + 32;
+
+        char cmd[8];
+        cmd[0] = PACKET_ACTION_DATA; 
+        cmd[1] = PACKET_SOURCE_FILE;
+        cmd[2] = PACKET_FORMAT_JSON;
+        cmd[3] = 0x00;
+        cmd[4] = 0x00;
+        cmd[5] = 0x00;
+        cmd[6] = 0x00;
+        cmd[7] = 0x00;
+        // generate the header
+        make_header(packet.data, cmd, 0, length);
+        // directly copy the value data
+        memcpy(packet.data + 32, tmpfilename.c_str(), length);
+    }
 
     return packet;
 }
 
 
-// Read 4 bytes as package length an int32
-int readInt32(const std::string& bytes, size_t idx){
-    size_t x = 0;
-    x = (x << 8) + bytes[2];
-    x = (x << 8) + bytes[3];
-    x = (x << 8) + bytes[4];
-    x = (x << 8) + bytes[5];
-    return x;
-}
-
 // Use a key to retrieve a value
-std::string _get_value(const std::string& data){
-    char source = data[0];
-    char format = data[1];
-    int size = readInt32(data, 2);
+std::string _get_value(const Message& packet){
+    Header header = read_header(packet.data);
+
+    char source = header.command[1];
+    char format = header.command[2];
 
     switch(source){
       case PACKET_SOURCE_MESG:
         switch(format){
           case PACKET_FORMAT_JSON:
-            return data.substr(6);
-          default:
-            log_message("Invalid format");
+            std::string msg(packet.data + 32);
+            return msg;
         }
+        log_message("Invalid format");
         break;
       case PACKET_SOURCE_FILE:
         switch(format){
           case PACKET_FORMAT_JSON:
-            return read(data.substr(6));
-          default:
-            log_message("Invalid format");
+            std::string filename(packet.data + 32);
+            return read(filename);
         }
+        log_message("Invalid format");
         break;
       case PACKET_SOURCE_NXDB:
         log_message("Not yet supported");
@@ -109,7 +211,7 @@ std::string _get_value(const std::string& data){
         break;
     }
 
-    return ""; // fail
+    return "fucky the fuck fuck";
 }
 
 // Create a Unix domain socket
@@ -128,7 +230,7 @@ int new_socket(){
     //  * SOCK_DGRAM: For datagram (connectionless) sockets
     //  * SOCK_RAW: For raw network protocol access
     //  * SOCK_SEQPACKET: For sequential, reliable, connection-based packet streams
-    
+
     // The 3rd argument, 0, is the protocol. For domain sockets there is only
     // one protocol, so this is always 0.
 
@@ -218,25 +320,78 @@ int accept_client(int server_fd, double timeout_seconds) {
     return -1;
 }
 
-Message ask(const char* socket_path, const Message& message){
+Message stream_recv(int client_fd){
     struct Message result;
     result.length = 0;
 
+    char* buffer = (char*)malloc(BUFFER_SIZE * sizeof(char));
+    size_t recv_length;
+
+    // Receive the first part of the response, this will include the header
+    recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);
+
+    // Parse the header, from this we learn the expected size of the packet
+    Header header = read_header(buffer);
+    result.length = 32 + header.offset + header.length;
+
+    // Allocate enough memory to store the entire packet
+    result.data = (char*)malloc(result.length * sizeof(char));
+
+    // Create a pointer the current writing index
+    char* data_ptr = result.data;
+
+    // copy data from the buffer to the message
+    memcpy(data_ptr, buffer, recv_length);
+    data_ptr += recv_length;
+
+    // we don't need to buffer anymore, we'll write directly into the msg
+    free(buffer);
+
+    // read in buffers of data until all data is recieved
+    while(data_ptr - result.data < result.length){
+        recv_length = recv(client_fd, data_ptr, BUFFER_SIZE, 0);
+        data_ptr += recv_length;
+    }
+
+    return result;
+}
+
+Message ask(const char* socket_path, const Message& message){
     int client_fd = new_socket();
 
     struct sockaddr_un server_addr = new_server_addr(socket_path);
 
+    Message result;
+
     // Connect to the server
-    if (connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
-        close(client_fd);
-        return result;
+    int retcode = connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr));
+
+    // If the connection succeeded, request data
+    if (retcode != -1) {
+        // Send a message and wait for a reply from the nexus
+        send(client_fd, message.data, message.length, 0);
+        result = stream_recv(client_fd);
     }
+    // otherwise, create a GETRET FAIL packet on failure
+    else {
+        std::string errmsg = "Failed to access client";
 
-    // Send a message
-    send(client_fd, message.data, message.length, 0);
+        result.length = 32 + errmsg.size();
+        result.data = (char*)malloc(result.length * sizeof(char));
 
-    // Receive response
-    result.length = recv(client_fd, result.data, BUFFER_SIZE, 0);
+        char cmd[8];
+        cmd[0] = PACKET_ACTION_GETRET; 
+        cmd[1] = PACKET_RETURN_FAIL;
+        cmd[2] = 0x00;
+        cmd[3] = 0x00;
+        cmd[4] = 0x00;
+        cmd[5] = 0x00;
+        cmd[6] = 0x00;
+        cmd[7] = 0x00;
+
+        make_header(result.data, cmd, 0, errmsg.size());
+        memcpy(result.data, errmsg.c_str(), errmsg.size());
+    }
 
     close(client_fd);
 
@@ -249,23 +404,23 @@ std::string foreign_call(
     const std::vector<std::string>& arg_keys
 ) {
 
-    log_message("Starting foreign call");
+    // log_message("Starting foreign call");
+    //
+    // std::string full_cmd = cmd;
+    // for (const auto& arg : arg_keys) {
+    //     full_cmd += " " + arg;
+    // }
+    //
+    // // Execute the command and capture the output
+    // struct Message message;
+    // message.length = full_cmd.size();
+    // memcpy(message.data, full_cmd.c_str(), BUFFER_SIZE);
+    //
+    // log_message("Send request to '" + socket_path + "' with cmd: " + full_cmd);
+    // struct Message result_msg = ask(socket_path.c_str(), message);
+    // log_message("Receive data from cmd: " + full_cmd);
+    //
+    // std::string result_str(result_msg.data, result_msg.length);
 
-    std::string full_cmd = cmd;
-    for (const auto& arg : arg_keys) {
-        full_cmd += " " + arg;
-    }
-
-    // Execute the command and capture the output
-    struct Message message;
-    message.length = full_cmd.size();
-    memcpy(message.data, full_cmd.c_str(), BUFFER_SIZE);
-
-    log_message("Send request to '" + socket_path + "' with cmd: " + full_cmd);
-    struct Message result_msg = ask(socket_path.c_str(), message);
-    log_message("Receive data from cmd: " + full_cmd);
-
-    std::string result_str(result_msg.data, result_msg.length);
-
-    return result_str;
+    return "bull shit";
 }

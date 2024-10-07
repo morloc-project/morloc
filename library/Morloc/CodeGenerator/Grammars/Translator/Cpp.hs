@@ -588,7 +588,7 @@ stdBind xs = [idoc|std::bind(#{args})|] where
   args = cat (punctuate "," xs)
 
 makeDispatch :: [SerialManifold] -> MDoc
-makeDispatch ms = block 4 "switch(std::stoi(args[0]))" (vsep (map makeCase ms <> [pingCase, defaultCase]))
+makeDispatch ms = block 4 "switch(std::stoi(args[0]))" (vsep (map makeCase ms <> [defaultCase]))
   where
     makeCase :: SerialManifold -> MDoc
     makeCase (SerialManifold i _ form _) =
@@ -600,13 +600,6 @@ makeDispatch ms = block 4 "switch(std::stoi(args[0]))" (vsep (map makeCase ms <>
         (nest 4 . vsep)
           [ "case" <+> viaShow i <> ":"
           , "result = " <> manNamer i <> tupled args' <> ";"
-          , "break;"
-          ]
-
-    pingCase =
-        (nest 4 . vsep)
-          [ "case 0:"
-          , "result = " <> dquotes "__pong__" <>";"
           , "break;"
           ]
 
@@ -929,27 +922,33 @@ makeMain includes signatures serialization manifolds dispatch = [idoc|#include <
 
 #{vsep manifolds}
 
-std::string dispatch(const Message& msg){
+Message dispatch(const Message& msg){
 
-    std::string msg_str(msg.data, msg.length);
+    Header header = read_header(msg.data);
 
-    std::vector<std::string> args;
-    std::istringstream iss(msg_str);
-    std::string token;
+    int mid = read_int(header.command, 1, 4);
 
-    while (iss >> token) {
-        args.push_back(token);
+    std::vector<Message> args;
+
+    char* data_ptr = msg.data + 32 + header.offset;
+
+    Header arg_header;
+
+    while(data_ptr - msg.data < msg.length){
+        arg_header = read_header(data_ptr);
+        Message arg;
+        arg.data = data_ptr;
+        arg.length = 32 + arg_header.offset + arg_header.length;
+        args.push_back(arg);
     }
-
-    std::string result = "";
-
-    log_message("dispatch on:");
-    log_message(args[0]);
 
     #{dispatch}
 
-    return result;
+    std::string errmsg = "Call failed";
+    return make_callret(errmsg.c_str(), errmsg.size(), false);
 }
+
+
 
 #{srcMain langSrc}
 |]
