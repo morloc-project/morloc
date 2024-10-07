@@ -27,7 +27,8 @@ void run_job(int client_fd) {
 
             // Run the job
             Message result = dispatch(new_job.message);
-            log_message("Job dispatched");
+
+            log_message("Job dispatched, result length:" + std::to_string(result.length));
 
             // return the result to the client
             send(new_job.client_fd, result.data, result.length, 0);

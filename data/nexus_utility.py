@@ -251,12 +251,13 @@ def print_return(ret_data):
 
     ret_start = 32 + ret_offset
 
-    ret_cmd_type = ret_cmd[0]
+    cmd_type = ret_cmd[0]
+    ret_cmd_type = ret_cmd[1]
 
-    if ret_cmd_type == PACKET_RETURN_PASS:
+    if cmd_type == PACKET_TYPE_CALLRET and ret_cmd_type == PACKET_RETURN_PASS:
         exit_code = 0
         outfile = sys.stdout
-    elif ret_cmd_type == PACKET_RETURN_FAIL:
+    elif cmd_type == PACKET_TYPE_CALLRET and ret_cmd_type == PACKET_RETURN_FAIL:
         exit_code = 1
         outfile = sys.stderr
     else:

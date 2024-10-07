@@ -588,7 +588,7 @@ stdBind xs = [idoc|std::bind(#{args})|] where
   args = cat (punctuate "," xs)
 
 makeDispatch :: [SerialManifold] -> MDoc
-makeDispatch ms = block 4 "switch(std::stoi(args[0]))" (vsep (map makeCase ms <> [defaultCase]))
+makeDispatch ms = block 4 "switch(mid)" (vsep (map makeCase ms))
   where
     makeCase :: SerialManifold -> MDoc
     makeCase (SerialManifold i _ form _) =
@@ -599,15 +599,9 @@ makeDispatch ms = block 4 "switch(std::stoi(args[0]))" (vsep (map makeCase ms <>
       in
         (nest 4 . vsep)
           [ "case" <+> viaShow i <> ":"
-          , "result = " <> manNamer i <> tupled args' <> ";"
-          , "break;"
-          ]
-
-    defaultCase =
-        (nest 4 . vsep)
-          [ "default:"
-          , [idoc|log_message("Manifold id not found");|]
-          , "break;"
+          , "Message result = " <> manNamer i <> tupled args' <> ";"
+          , "Message callret = make_callret(result.data, result.length, true);"
+          , "return callret;"
           ]
 
 typeParams :: [(Maybe TypeF, TypeF)] -> CppTranslator MDoc
@@ -926,28 +920,58 @@ Message dispatch(const Message& msg){
 
     Header header = read_header(msg.data);
 
-    int mid = read_int(header.command, 1, 4);
+    if (header.command[0] == PACKET_ACTION_PING){
 
-    std::vector<Message> args;
+        Message packet;
+        packet.length = 32;
+        packet.data = (char*)malloc(32 * sizeof(char));
+        
+        char cmd[8];
+        cmd[0] = PACKET_ACTION_PINGRET; 
+        cmd[1] = 0x00;
+        cmd[2] = 0x00;
+        cmd[3] = 0x00;
+        cmd[4] = 0x00;
+        cmd[5] = 0x00;
+        cmd[6] = 0x00;
+        cmd[7] = 0x00;
+        // generate the header
+        make_header(packet.data, cmd, 0, packet.length);
 
-    char* data_ptr = msg.data + 32 + header.offset;
+        return packet;
 
-    Header arg_header;
+    } else if (header.command[0] == PACKET_ACTION_CALL) {
 
-    while(data_ptr - msg.data < msg.length){
-        arg_header = read_header(data_ptr);
-        Message arg;
-        arg.data = data_ptr;
-        arg.length = 32 + arg_header.offset + arg_header.length;
-        args.push_back(arg);
-    }
+      int mid = read_int(header.command, 1, 4);
+
+      log_message("dispatching to mid " + std::to_string(mid));
+
+      std::vector<Message> args;
+
+      char* data_ptr = msg.data + 32 + header.offset;
+
+      Header arg_header;
+
+      while(data_ptr - msg.data < msg.length){
+          arg_header = read_header(data_ptr);
+          Message arg;
+          arg.data = data_ptr;
+          data_ptr += arg.length;
+          arg.length = 32 + arg_header.offset + arg_header.length;
+          args.push_back(arg);
+          log_message("added arg of length " + std::to_string(arg.length));
+      }
 
     #{dispatch}
 
-    std::string errmsg = "Call failed";
-    return make_callret(errmsg.c_str(), errmsg.size(), false);
-}
+      std::string errmsg = "Call failed on mid " + std::to_string(mid);
+      return make_callret(errmsg.c_str(), errmsg.size(), false);
 
+    } else {
+      std::string errmsg = "Unexpected command sent to pool";
+      throw std::runtime_error(errmsg);
+    }
+}
 
 
 #{srcMain langSrc}

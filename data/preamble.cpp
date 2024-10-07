@@ -1,5 +1,6 @@
 #include <string>
 #include <string>
+#include <string>
 #include <iostream>
 #include <sstream>
 #include <functional>
@@ -69,3 +70,18 @@ void log_message(M message) {
     std::ofstream log_file("log", std::ios_base::app);
     log_file << "C: " << message << std::endl;
 }
+
+std::string show_hex(const char* input, int length) {
+    std::stringstream ss;
+
+    for(int i = 0; i < length; i++) {
+        ss << std::hex << std::setw(2) << std::setfill('0') << (int)(unsigned char)input[i];
+        if (i < length - 1) {
+            ss << " ";
+        }
+
+    }
+
+    return ss.str();
+}
+

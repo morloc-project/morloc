@@ -11,16 +11,39 @@ int read_int(const char* bytes, size_t offset, size_t size){
     return x;
 }
 
-void write_int(char* data, size_t size, int value){
-    for(size_t i = 0; i < size; i++){
-        data[i] = (value >> ((size - i - 1)*8)) & 0xFF;
-    }
+void write_int32(char* data, int value){
+    uint32_t v32 = static_cast<uint32_t>(value);
+
+    data[0] = (v32 >> 24) & 0xFF;
+    data[1] = (v32 >> 16) & 0xFF;
+    data[2] = (v32 >>  8) & 0xFF;
+    data[3] = v32 & 0xFF;
+
+    log_message("write_int32 convert " + std::to_string(value) + "(" + std::to_string(sizeof(value)) + ") -> " + show_hex(data, 4));
 }
 
+void write_int64(char* data, int value){
+    uint64_t v64 = static_cast<uint64_t>(value);
+
+    data[0] = (v64 >> 56) & 0xFF;
+    data[1] = (v64 >> 48) & 0xFF;
+    data[2] = (v64 >> 40) & 0xFF;
+    data[3] = (v64 >> 32) & 0xFF;
+    data[4] = (v64 >> 24) & 0xFF;
+    data[5] = (v64 >> 16) & 0xFF;
+    data[6] = (v64 >>  8) & 0xFF;
+    data[7] = v64 & 0xFF;
+
+    log_message("write_int64 convert " + std::to_string(value) + "(" + std::to_string(sizeof(value)) + ") -> " + show_hex(data, 8));
+}
 
 Header read_header(const char* msg){
-    if( !( msg[0] == 0x6D && msg[1] == 0xF8 && msg[2] == 0x07 && msg[3] == 0x07 )){
-      throw std::runtime_error("Bad magic");
+    std::string magic = show_hex(msg, 4);
+
+    if( magic != "6d f8 07 07"){
+      std::string errmsg = "Bad magic: " + magic;
+      log_message(errmsg);
+      throw std::runtime_error(errmsg);
     }
     Header header;
 
@@ -53,14 +76,18 @@ void make_header(char* data, char cmd[8], int offset, int length){
     for(size_t i = 0; i < 8; i++){
       data[12 + i] = cmd[i];
     }
-    write_int(data + 20, 4, offset);
-    write_int(data + 24, 8, length);
+    write_int32(data + 20, offset);
+    write_int64(data + 24, length);
 }
 
 Message make_callret(const char* data, int length, bool passing){
   Message callret;
   callret.length = 32 + length;
   callret.data = (char*)malloc(callret.length * sizeof(char));
+
+  log_message("Creating callret with pass=" +
+              std::to_string(passing) + " and length " +
+              std::to_string(callret.length));
 
   char ret_status;
   if (passing){
@@ -79,7 +106,7 @@ Message make_callret(const char* data, int length, bool passing){
   cmd[6] = 0x00;
   cmd[7] = 0x00;
   // generate the header
-  make_header(callret.data, cmd, 0, callret.length);
+  make_header(callret.data, cmd, 0, length);
   // directly copy the value data
   memcpy(callret.data + 32, data, length);
 
@@ -174,6 +201,8 @@ Message _put_value(const std::string& value) {
         // directly copy the value data
         memcpy(packet.data + 32, tmpfilename.c_str(), length);
     }
+
+    log_message("Putting packet of length " + std::to_string(packet.length));
 
     return packet;
 }
