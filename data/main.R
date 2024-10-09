@@ -5,11 +5,9 @@ processMessage <- function(msg){
   header <- read_header(data)
 
   if(header$cmd[1] == PACKET_TYPE_PING){
-    .log("Processing ping")
-    cmd = c(PACKET_TYPE_PINGRET, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
-    return(
-      make_header(cmd, offset = 0, length = 0)
-    )
+    # reflect the ping
+    return(data)
+
   } else if(header$cmd[1] == PACKET_TYPE_CALL) {
     .log("Processing call")
     manifold_id <- read_int(header$cmd, 2, 5)
@@ -37,7 +35,14 @@ processMessage <- function(msg){
         result <- do.call(mlc_pool_function, args)
         .log(paste("Successfully ran mid", manifold_id))
       }, error = function(e) {
-        .log(paste("Call to function", mlc_pool_function_name, "failed with message:",  e$message))
+        errmsg = paste(
+          "Call to function",
+          mlc_pool_function_name,
+          "failed with message:",
+          e$message
+        )
+        .log(errmsg)
+        return(make_data(errmsg, status = PACKET_STATUS_FAIL))
       })
 
       .log(paste("Got result:", result))
@@ -45,11 +50,7 @@ processMessage <- function(msg){
       stop(paste("Could not find function", mlc_pool_function))
     }
 
-    cmd = c(PACKET_TYPE_CALLRET, PACKET_RETURN_PASS, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
-    callret_header <- make_header(cmd, offset = 0, length = length(result))
-    callret_packet <- c(callret_header, result)
-
-    return(callret_packet)
+    return(result)
   } else {
     stop("Unexpected packet type")
   }

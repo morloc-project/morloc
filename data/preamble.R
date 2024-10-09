@@ -1,25 +1,21 @@
-PACKET_TYPE_DATA    = 0x00
-PACKET_TYPE_CALL    = 0x01
-PACKET_TYPE_CALLRET = 0x02
-PACKET_TYPE_GET     = 0x03
-PACKET_TYPE_GETRET  = 0x04
-PACKET_TYPE_PUT     = 0x05
-PACKET_TYPE_PUTRET  = 0x06
-PACKET_TYPE_PING    = 0x07
-PACKET_TYPE_PINGRET = 0x08
+PACKET_TYPE_DATA <- 0x00
+PACKET_TYPE_CALL <- 0x01
+PACKET_TYPE_GET  <- 0x02
+PACKET_TYPE_PUT  <- 0x03
+PACKET_TYPE_PING <- 0x04
 
-PACKET_SOURCE_MESG = 0x00 # the message contains the data
-PACKET_SOURCE_FILE = 0x01 # the message is a path to a file of data
-PACKET_SOURCE_NXDB = 0x02 # the message is a key to the nexus uses to access the data
+PACKET_SOURCE_MESG <- 0x00 # the message contains the data
+PACKET_SOURCE_FILE <- 0x01 # the message is a path to a file of data
+PACKET_SOURCE_NXDB <- 0x02 # the message is a key to the nexus uses to access the data
 
-PACKET_FORMAT_JSON = 0x00
+PACKET_FORMAT_JSON <- 0x00
 
-PACKET_COMPRESSION_NONE = 0x00 # uncompressed
+PACKET_COMPRESSION_NONE <- 0x00 # uncompressed
 
-PACKET_ENCRYPTION_NONE  = 0x00 # unencrypted
+PACKET_STATUS_PASS <- 0x00
+PACKET_STATUS_FAIL <- 0x01
 
-PACKET_RETURN_PASS = 0x00
-PACKET_RETURN_FAIL = 0x01
+PACKET_ENCRYPTION_NONE  <- 0x00 # unencrypted
 
 MAGIC = c(0x6D, 0xF8, 0x07, 0x07)
 
@@ -62,6 +58,28 @@ make_header <- function(cmd, offset, length){
     int32(offset),
     int64(length)
   ))
+}
+
+make_data <- function(
+  value,
+  src = PACKET_SOURCE_MESG,
+  fmt = PACKET_FORMAT_JSON,
+  cmpr = PACKET_COMPRESSION_NONE,
+  encr = PACKET_ENCRYPTION_NONE,
+  status = PACKET_STATUS_PASS
+){
+    cmd = c(
+      PACKET_TYPE_DATA,
+      src,
+      fmt,
+      cmpr,
+      encr,
+      status,
+      0x00,
+      0x00
+    )
+    header <- make_header(cmd, offset = 0, length = length(value))
+    return(c(header, value))
 }
 
 
@@ -134,4 +152,3 @@ future::plan(future::multicore)
   }
   x$value
 }
-

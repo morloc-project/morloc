@@ -14,8 +14,8 @@
       }
     } else if (header$cmd[2] == PACKET_SOURCE_FILE) {
       if(header$cmd[3] == PACKET_FORMAT_JSON) {
-        filename <- key[data_start:length(key)]
-        json_data <- readChar(filename, file.info(key)$size, useBytes=TRUE)
+        filename <- rawToChar(key[data_start:length(key)])
+        json_data <- readChar(filename, file.info(filename)$size, useBytes=TRUE)
         return(json_data)
       } else {
         stop("Unsupported data format")
@@ -30,21 +30,12 @@
 
 # takes serialized data and creates a data packet representing it
 .put_value <- function(value){
+  stopifnot(typeof(value) == "character")
   value_raw <- charToRaw(value)
 
   if (length(value_raw) <= 65536 - 32) {
-    cmd = c(
-      PACKET_TYPE_DATA,
-      PACKET_SOURCE_MESG,
-      PACKET_FORMAT_JSON,
-      PACKET_COMPRESSION_NONE,
-      PACKET_ENCRYPTION_NONE,
-      0x00,
-      0x00,
-      0x00
-    )
-    header <- make_header(cmd, offset = 0, length = length(value_raw))
-    return(c(header, value_raw))
+    return(make_data(value_raw))
+
   } else {
     key <- paste0("/tmp/morloc_r_", sub("0.", "", as.character(runif(1))))
 
@@ -54,39 +45,26 @@
 
     .log(paste("Wrote data to:", key))
 
-    key_raw = charToRaw(key)
+    key_raw <- charToRaw(key)
 
-    cmd = c(
-      PACKET_TYPE_DATA,
-      PACKET_SOURCE_FILE,
-      PACKET_FORMAT_JSON,
-      PACKET_COMPRESSION_NONE,
-      PACKET_ENCRYPTION_NONE,
-      0x00,
-      0x00,
-      0x00
-    )
-    header <- make_header(cmd, offset = 0, length = length(key_raw))
-    return(c(header, key_raw))
+    return(make_data(key_raw, src = PACKET_SOURCE_FILE))
   }
 }
 
 
 .morloc_foreign_call <- function(pool_pipe, manifold_id, arg_keys){
-  # msg_str <- paste(c(manifold_id, arg_keys), collapse=" ")
-  # msg_raw <- charToRaw(msg_str)
-  #
-  # .log(paste0("Sending message: '", msg_str, "'"))
-  #
-  # response <- .Call("R_ask", pool_pipe, list(msg_raw, length(msg_raw)))
-  #
-  # data_raw <- response[[1]]
-  # data_length <- response[[2]]
-  #
-  # response = rawToChar(data_raw[1:data_length])
-  #
-  # .log(paste0("From this message: '", msg_str, "' received the message '", response, "'"))
-  #
-  # response
-  "ladida"
+
+  packet_length <- sum(sapply(arg_keys, length))
+
+  cmd = c(PACKET_TYPE_CALL, int32(manifold_id), 0x00, 0x00, 0x00)
+  header <- make_header(cmd, offset = 0, length = packet_length)
+
+  call_packet <- c(header, unlist(arg_keys))
+
+  response <- .Call("R_ask", pool_pipe, list(call_packet, length(call_packet)))
+
+  data_raw <- response[[1]]
+  data_length <- response[[2]]
+
+  data_raw[1:data_length]
 }
