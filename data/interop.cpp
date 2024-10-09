@@ -187,11 +187,13 @@ std::string _get_value(const Message& packet){
     char source = header.command[1];
     char format = header.command[2];
 
+    std::string errmsg = "";
+
     switch(source){
       case PACKET_SOURCE_MESG:
         switch(format){
           case PACKET_FORMAT_JSON:
-            std::string msg(packet.data + 32);
+            std::string msg(packet.data + 32, packet.data + packet.length);
             return msg;
         }
         log_message("Invalid format");
@@ -199,20 +201,21 @@ std::string _get_value(const Message& packet){
       case PACKET_SOURCE_FILE:
         switch(format){
           case PACKET_FORMAT_JSON:
-            std::string filename(packet.data + 32);
+            std::string filename(packet.data + 32, packet.data + packet.length);
+            log_message("Reading filename " + filename + " of length " + std::to_string(packet.length));
             return read(filename);
         }
-        log_message("Invalid format");
+        errmsg = "Invalid format";
         break;
       case PACKET_SOURCE_NXDB:
-        log_message("Not yet supported");
+        errmsg = "Not yet supported";
         break;
       default:
-        log_message("Invalid source");
+        errmsg = "Invalid source";
         break;
     }
 
-    return "fucky the fuck fuck";
+    throw std::runtime_error(errmsg);
 }
 
 // Create a Unix domain socket
