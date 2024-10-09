@@ -595,7 +595,7 @@ makeDispatch ms = block 4 "switch(mid)" (vsep (map makeCase ms))
       -- this made more sense when I was using ArgTypes
       -- it may make sense yet again when I switch to Or
       let size = sum $ abilist (\_ _ -> 1) (\_ _ -> 1) form
-          args' = take size $ map (\j -> "args[" <> viaShow j <> "]") ([1..] :: [Int])
+          args' = take size $ map (\j -> "args[" <> viaShow j <> "]") ([0..] :: [Int])
       in
         (nest 4 . vsep)
           [ "case" <+> viaShow i <> ":"
@@ -928,20 +928,24 @@ Message dispatch(const Message& msg){
 
       log_message("dispatching to mid " + std::to_string(mid));
 
-      std::vector<Message> args;
-
-      char* data_ptr = msg.data + 32 + header.offset;
-
       Header arg_header;
+      size_t pos = 32 + header.offset;
+      size_t n = 0;
+      while(pos < msg.length){
+          arg_header = read_header(msg.data + pos);
+          pos += 32 + arg_header.offset + arg_header.length;
+          n++;
+      }
 
-      while(data_ptr - msg.data < msg.length){
-          arg_header = read_header(data_ptr);
-          Message arg;
-          arg.data = data_ptr;
-          data_ptr += arg.length;
-          arg.length = 32 + arg_header.offset + arg_header.length;
-          args.push_back(arg);
-          log_message("added arg of length " + std::to_string(arg.length));
+      std::vector<Message> args(n);
+      pos = 32 + header.offset;
+      for(size_t i = 0; i < args.size(); i++){
+          arg_header = read_header(msg.data + pos);
+          args[i].length = 32 + arg_header.offset + arg_header.length;
+          args[i].data = (char*)malloc(args[i].length * sizeof(char));
+          memcpy(args[i].data, msg.data + pos, args[i].length);
+          pos += 32 + arg_header.offset + arg_header.length;
+          log_message("arg[" + std::to_string(i) + "] = " + show_hex(args[i].data, args[i].length));
       }
 
       #{dispatch}
