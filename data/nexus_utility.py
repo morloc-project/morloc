@@ -342,6 +342,13 @@ def prepare_call_packet(mid, args):
               )
             )
         else:
+            try:
+                # if it isn't a file but is readable anyway
+                # e.g., the product of file substitution
+                with open(arg, "rb") as fh: 
+                    arg = fh.read().strip()
+            except:
+                pass
             header = _make_header(
               length = len(arg),
               command = _pack(
@@ -371,7 +378,6 @@ def prepare_call_packet(mid, args):
     
 
 def run_command(mid, args, pool_lang, sockets):
-    arg_files = []
     result = None
     error = ""
 
