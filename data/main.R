@@ -6,22 +6,23 @@ processMessage <- function(msg){
 
   if(header$cmd[1] == PACKET_TYPE_PING){
     # reflect the ping
-    return(data)
+    return(data[1:msg[[2]]])
 
   } else if(header$cmd[1] == PACKET_TYPE_CALL) {
     .log("Processing call")
     manifold_id <- read_int(header$cmd, 2, 5)
     .log(paste("Manifold id =", manifold_id))
-    args <- list()
-    arg_start <- header$offset + 33
+
     .log("Building args")
-    while(arg_start < (header$length + header$offset + 32)){
-      .log("Adding arg")
-      arg_header <- read_header(data[arg_start:(arg_start + 31)])
-      arg_data <- data[arg_start:(arg_start + 32 + arg_header$offset + arg_header$length - 1)]
+    packet_length <- 32 + header$length + header$offset
+    args <- list()
+    arg_start <- 32 + header$offset + 1
+    while(arg_start < packet_length){
+      arg_header <- read_header(data[arg_start:(arg_start + 32 - 1)])
+      arg_end = arg_start + 32 + arg_header$offset + arg_header$length - 1
+      arg_data <- data[arg_start:arg_end]
       args[[length(args)+1]] <- arg_data
-      arg_start <- arg_start + 32 + arg_header$offset + arg_header$length + 1
-      .log(paste("New start", arg_start))
+      arg_start <- arg_end + 1
     }
     .log("Args built")
 
