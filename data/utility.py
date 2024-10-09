@@ -1,7 +1,3 @@
-sys.path = ["/home/z/.morloc/src/morloc"] + sys.path
-
-from foo import *
-
 # Serialization section ####
 
 def mlc_list(arg):
@@ -55,14 +51,14 @@ mlc_bool = ("bool", None)
 mlc_null = ("null", None)
 
 def serialize_list(x, schema):
-    f = dispatch[schema[0]]
+    f = dispatch_serialize[schema[0]]
     return "[{}]".format(",".join([f(y, schema[1]) for y in x]))
 
 
 def serialize_tuple(x, schema):
     elements = []
     for (t, e) in zip(schema, x):
-        f = dispatch[t[0]]
+        f = dispatch_serialize[t[0]]
         elements.append(f(e, t[1]))
     return "[{}]".format(",".join(elements))
 
@@ -71,7 +67,7 @@ def serialize_record(x, schema):
     entries = []
     for (k, t) in schema.items():
         try:
-            f = dispatch[t[0]]
+            f = dispatch_serialize[t[0]]
             entries.append('"{}":{}'.format(k, f(x[k], t[1])))
         except:
             print(f"Mismatch found between serial specification and actual serialized data.", file = sys.stderr)

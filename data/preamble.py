@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 import sys
 import tempfile
 import os
@@ -11,7 +9,6 @@ from collections import OrderedDict
 
 # imports for ICP
 import socket
-import time
 import multiprocessing
 import select
 from contextlib import closing

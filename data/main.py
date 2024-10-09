@@ -37,7 +37,7 @@ def message_response(data):
             result = mlc_function(*args)
 
         except Exception as e:
-            errmsg = str(e).encode("utf8")
+            errmsg = f"Error in m{str(cmdID)}: {str(e)}".encode("utf8")
             result = _make_data(errmsg, status = PACKET_STATUS_FAIL)
 
         _log(f"from cmdID {str(cmdID)} pool returning message '{len(result)}'")
