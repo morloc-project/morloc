@@ -10,15 +10,11 @@ import threading
 import queue
 import struct
 
-PACKET_TYPE_DATA    = 0x00
-PACKET_TYPE_CALL    = 0x01
-PACKET_TYPE_CALLRET = 0x02
-PACKET_TYPE_GET     = 0x03
-PACKET_TYPE_GETRET  = 0x04
-PACKET_TYPE_PUT     = 0x05
-PACKET_TYPE_PUTRET  = 0x06
-PACKET_TYPE_PING    = 0x07
-PACKET_TYPE_PINGRET = 0x08
+PACKET_TYPE_DATA = 0x00
+PACKET_TYPE_CALL = 0x01
+PACKET_TYPE_GET  = 0x02
+PACKET_TYPE_PUT  = 0x03
+PACKET_TYPE_PING = 0x04
 
 PACKET_SOURCE_MESG = 0x00 # the message contains the data
 PACKET_SOURCE_FILE = 0x01 # the message is a path to a file of data
@@ -28,10 +24,10 @@ PACKET_FORMAT_JSON = 0x00
 
 PACKET_COMPRESSION_NONE = 0x00 # uncompressed
 
-PACKET_ENCRYPTION_NONE  = 0x00 # unencrypted
+PACKET_STATUS_PASS = 0x00
+PACKET_STATUS_FAIL = 0x01
 
-PACKET_RETURN_PASS = 0x00
-PACKET_RETURN_FAIL = 0x01
+PACKET_ENCRYPTION_NONE  = 0x00 # unencrypted
 
 
 # These three parameters describe the retru times for a pool connection to
@@ -245,35 +241,28 @@ def _read_header(data : bytes) -> tuple[bytes, int, int]:
     # return the offset and length
     return (command, offset, length)
 
-def print_return(ret_data):
+def print_return(data):
     # Parse the call return packet
-    (ret_cmd, ret_offset, _) = _read_header(ret_data)
+    (cmd, offset, _) = _read_header(data)
 
-    ret_start = 32 + ret_offset
+    start = 32 + offset
 
-    cmd_type = ret_cmd[0]
-    ret_cmd_type = ret_cmd[1]
+    cmd_type = cmd[0]
+    status = cmd[5]
 
-    if cmd_type == PACKET_TYPE_CALLRET and ret_cmd_type == PACKET_RETURN_PASS:
+    if cmd_type == PACKET_TYPE_DATA and status == PACKET_STATUS_PASS:
         exit_code = 0
         outfile = sys.stdout
-    elif cmd_type == PACKET_TYPE_CALLRET and ret_cmd_type == PACKET_RETURN_FAIL:
+    elif cmd_type == PACKET_TYPE_DATA and status == PACKET_STATUS_FAIL:
         exit_code = 1
         outfile = sys.stderr
     else:
-        clean_exit(1, "Implementation bug: expected pass or fail packet")
-
-    # Parse the data packet
-    # If the call failed, the data packet will be the error message
-    # Otherwise, the data packet will represent the final output data
-    data = ret_data[ret_start:]
-
-    (command, offset, _) = _read_header(data)
+        clean_exit(1, f"Implementation bug: expected data packet: {str(data)}")
 
     data_start = 32 + offset
 
-    cmd_source = command[1]
-    cmd_format = command[2]
+    cmd_source = cmd[1]
+    cmd_format = cmd[2]
 
     isgood = False
     error = ""

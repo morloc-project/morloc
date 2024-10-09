@@ -80,39 +80,29 @@ void make_header(char* data, char cmd[8], int offset, int length){
     write_int64(data + 24, length);
 }
 
-Message make_callret(const char* data, int length, bool passing){
-  Message callret;
-  callret.length = 32 + length;
-  callret.data = (char*)malloc(callret.length * sizeof(char));
-
-  log_message("Creating callret with pass=" +
-              std::to_string(passing) + " and length " +
-              std::to_string(callret.length));
-
-  char ret_status;
-  if (passing){
-    ret_status = PACKET_RETURN_PASS;
-  } else {
-    ret_status = PACKET_RETURN_FAIL;
-  }
+Message make_data(const char* data, size_t length, char src, char fmt, char cmpr, char encr, char status){
+  Message packet;
+  packet.length = 32 + length;
+  packet.data = (char*)malloc(packet.length * sizeof(char));
 
   char cmd[8];
-  cmd[0] = PACKET_ACTION_CALLRET; 
-  cmd[1] = ret_status;
-  cmd[2] = 0x00;
-  cmd[3] = 0x00;
-  cmd[4] = 0x00;
-  cmd[5] = 0x00;
+  cmd[0] = PACKET_TYPE_DATA; 
+  cmd[1] = src;
+  cmd[2] = fmt;
+  cmd[3] = cmpr;
+  cmd[4] = encr;
+  cmd[5] = status;
   cmd[6] = 0x00;
   cmd[7] = 0x00;
+
   // generate the header
-  make_header(callret.data, cmd, 0, length);
+  make_header(packet.data, cmd, 0, length);
+
   // directly copy the value data
-  memcpy(callret.data + 32, data, length);
+  memcpy(packet.data + 32, data, length);
 
-  return callret;
+  return packet;
 }
-
 
 std::string read(const std::string& file) {
     std::ifstream input_file(file);
@@ -156,25 +146,15 @@ Message _put_value(const std::string& value) {
 
     if (value.size() <= 65536 - 32) {
         // for small data, send directly over the socket
-
-        length = static_cast<int>(value.size());
-
-        packet.data = (char*)malloc(length + 32 * sizeof(char));
-        packet.length = length + 32;
-
-        char cmd[8];
-        cmd[0] = PACKET_ACTION_DATA; 
-        cmd[1] = PACKET_SOURCE_MESG;
-        cmd[2] = PACKET_FORMAT_JSON;
-        cmd[3] = 0x00;
-        cmd[4] = 0x00;
-        cmd[5] = 0x00;
-        cmd[6] = 0x00;
-        cmd[7] = 0x00;
-        // generate the header
-        make_header(packet.data, cmd, 0, length);
-        // directly copy the value data
-        memcpy(packet.data + 32, value.c_str(), length);
+        packet = make_data(
+          value.c_str(),
+          value.size(),
+          PACKET_SOURCE_MESG,
+          PACKET_FORMAT_JSON,
+          PACKET_COMPRESSION_NONE,
+          PACKET_ENCRYPTION_NONE,
+          PACKET_STATUS_PASS
+        );
     } else {
         // for large data, write a temporary file
 
@@ -182,24 +162,16 @@ Message _put_value(const std::string& value) {
         std::ofstream tempFile(tmpfilename);
         tempFile << value;
         tempFile.close();
-        length = static_cast<int>(tmpfilename.size());
 
-        packet.data = (char*)malloc(length + 32 * sizeof(char));
-        packet.length = length + 32;
-
-        char cmd[8];
-        cmd[0] = PACKET_ACTION_DATA; 
-        cmd[1] = PACKET_SOURCE_FILE;
-        cmd[2] = PACKET_FORMAT_JSON;
-        cmd[3] = 0x00;
-        cmd[4] = 0x00;
-        cmd[5] = 0x00;
-        cmd[6] = 0x00;
-        cmd[7] = 0x00;
-        // generate the header
-        make_header(packet.data, cmd, 0, length);
-        // directly copy the value data
-        memcpy(packet.data + 32, tmpfilename.c_str(), length);
+        packet = make_data(
+          tmpfilename.c_str(),
+          tmpfilename.size(),
+          PACKET_SOURCE_FILE,
+          PACKET_FORMAT_JSON,
+          PACKET_COMPRESSION_NONE,
+          PACKET_ENCRYPTION_NONE,
+          PACKET_STATUS_PASS
+        );
     }
 
     log_message("Putting packet of length " + std::to_string(packet.length));
@@ -401,25 +373,18 @@ Message ask(const char* socket_path, const Message& message){
         send(client_fd, message.data, message.length, 0);
         result = stream_recv(client_fd);
     }
-    // otherwise, create a GETRET FAIL packet on failure
+    // otherwise, create a DATA FAIL packet on failure
     else {
         std::string errmsg = "Failed to access client";
-
-        result.length = 32 + errmsg.size();
-        result.data = (char*)malloc(result.length * sizeof(char));
-
-        char cmd[8];
-        cmd[0] = PACKET_ACTION_GETRET; 
-        cmd[1] = PACKET_RETURN_FAIL;
-        cmd[2] = 0x00;
-        cmd[3] = 0x00;
-        cmd[4] = 0x00;
-        cmd[5] = 0x00;
-        cmd[6] = 0x00;
-        cmd[7] = 0x00;
-
-        make_header(result.data, cmd, 0, errmsg.size());
-        memcpy(result.data, errmsg.c_str(), errmsg.size());
+        result = make_data(
+          errmsg.c_str(),
+          errmsg.size(),
+          PACKET_SOURCE_MESG,
+          PACKET_FORMAT_JSON,
+          PACKET_COMPRESSION_NONE,
+          PACKET_ENCRYPTION_NONE,
+          PACKET_STATUS_FAIL
+        );
     }
 
     close(client_fd);
@@ -427,29 +392,41 @@ Message ask(const char* socket_path, const Message& message){
     return result;
 }
 
-std::string foreign_call(
+Message foreign_call(
     const std::string& socket_path,
-    const std::string& cmd,
-    const std::vector<std::string>& arg_keys
+    size_t mid,
+    const std::vector<Message>& arg_keys
 ) {
 
-    // log_message("Starting foreign call");
-    //
-    // std::string full_cmd = cmd;
-    // for (const auto& arg : arg_keys) {
-    //     full_cmd += " " + arg;
-    // }
-    //
-    // // Execute the command and capture the output
-    // struct Message message;
-    // message.length = full_cmd.size();
-    // memcpy(message.data, full_cmd.c_str(), BUFFER_SIZE);
-    //
-    // log_message("Send request to '" + socket_path + "' with cmd: " + full_cmd);
-    // struct Message result_msg = ask(socket_path.c_str(), message);
-    // log_message("Receive data from cmd: " + full_cmd);
-    //
-    // std::string result_str(result_msg.data, result_msg.length);
+    log_message("Starting foreign call");
 
-    return "bull shit";
+    Message call_packet;
+    call_packet.length = 32;
+
+    for(size_t i = 0; i < arg_keys.size(); i++){
+      call_packet.length += arg_keys[i].length;
+    }
+
+    call_packet.data = (char*)malloc(call_packet.length * sizeof(char));
+    
+    char cmd[8];
+    cmd[0] = PACKET_TYPE_CALL; 
+    write_int32(cmd + 1, mid);
+    cmd[5] = 0x00;
+    cmd[6] = 0x00;
+    cmd[7] = 0x00;
+    make_header(call_packet.data, cmd, 0, call_packet.length - 32);
+
+    size_t arg_start = 32;
+    for(size_t i = 0; i < arg_keys.size(); i++){
+      Message arg = arg_keys[i];
+      memcpy(call_packet.data + arg_start, arg.data, arg.length);
+      arg_start += arg.length; 
+    }
+
+    log_message("Send request to " + socket_path);
+    struct Message result_msg = ask(socket_path.c_str(), call_packet);
+    log_message("Receive data from cmd: " + socket_path);
+
+    return result_msg;
 }

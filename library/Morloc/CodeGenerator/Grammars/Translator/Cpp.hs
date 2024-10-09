@@ -440,8 +440,8 @@ translateSegment m0 = do
   makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) args) _) = do
     let bufDef = "std::ostringstream s;"
         argList = encloseSep "{" "}" ", " (map argNamer args)
-        argsDef = [idoc|std::vector<std::string> args = #{argList};|]
-        call = [idoc|foreign_call("#{socketFile}", "#{pretty mid}", args)|]
+        argsDef = [idoc|std::vector<Message> args = #{argList};|]
+        call = [idoc|foreign_call("#{socketFile}", #{pretty mid}, args)|]
     return $ PoolDocs
       { poolCompleteManifolds = []
       , poolExpr = call
@@ -599,9 +599,7 @@ makeDispatch ms = block 4 "switch(mid)" (vsep (map makeCase ms))
       in
         (nest 4 . vsep)
           [ "case" <+> viaShow i <> ":"
-          , "Message result = " <> manNamer i <> tupled args' <> ";"
-          , "Message callret = make_callret(result.data, result.length, true);"
-          , "return callret;"
+          , "return" <+> manNamer i <> tupled args' <> ";"
           ]
 
 typeParams :: [(Maybe TypeF, TypeF)] -> CppTranslator MDoc
@@ -919,28 +917,12 @@ makeMain includes signatures serialization manifolds dispatch = [idoc|#include <
 Message dispatch(const Message& msg){
 
     Header header = read_header(msg.data);
+    std::string errmsg;
 
-    if (header.command[0] == PACKET_ACTION_PING){
+    if (header.command[0] == PACKET_TYPE_PING){
+        return msg;
 
-        Message packet;
-        packet.length = 32;
-        packet.data = (char*)malloc(32 * sizeof(char));
-        
-        char cmd[8];
-        cmd[0] = PACKET_ACTION_PINGRET; 
-        cmd[1] = 0x00;
-        cmd[2] = 0x00;
-        cmd[3] = 0x00;
-        cmd[4] = 0x00;
-        cmd[5] = 0x00;
-        cmd[6] = 0x00;
-        cmd[7] = 0x00;
-        // generate the header
-        make_header(packet.data, cmd, 0, packet.length);
-
-        return packet;
-
-    } else if (header.command[0] == PACKET_ACTION_CALL) {
+    } else if (header.command[0] == PACKET_TYPE_CALL) {
 
       int mid = read_int(header.command, 1, 4);
 
@@ -962,15 +944,22 @@ Message dispatch(const Message& msg){
           log_message("added arg of length " + std::to_string(arg.length));
       }
 
-    #{dispatch}
-
-      std::string errmsg = "Call failed on mid " + std::to_string(mid);
-      return make_callret(errmsg.c_str(), errmsg.size(), false);
-
-    } else {
-      std::string errmsg = "Unexpected command sent to pool";
-      throw std::runtime_error(errmsg);
+      #{dispatch}
     }
+
+    errmsg = "In C++ pool, call failed";
+
+    Message error_packet = make_data(
+      errmsg.c_str(),
+      errmsg.size(),
+      PACKET_SOURCE_MESG,
+      PACKET_FORMAT_JSON,
+      PACKET_COMPRESSION_NONE,
+      PACKET_ENCRYPTION_NONE,
+      PACKET_STATUS_FAIL
+    );
+
+    return error_packet;
 }
 
 

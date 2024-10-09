@@ -1,6 +1,7 @@
 #include <string>
 #include <string>
 #include <string>
+#include <string>
 #include <iostream>
 #include <sstream>
 #include <functional>
@@ -32,24 +33,25 @@
 
 #define BUFFER_SIZE 4096
 
-#define PACKET_ACTION_DATA     0x00
-#define PACKET_ACTION_CALL     0x01
-#define PACKET_ACTION_CALLRET  0x02
-#define PACKET_ACTION_GET      0x03
-#define PACKET_ACTION_GETRET   0x04
-#define PACKET_ACTION_PUT      0x05
-#define PACKET_ACTION_PUTRET   0x06
-#define PACKET_ACTION_PING     0x07
-#define PACKET_ACTION_PINGRET  0x08
+#define PACKET_TYPE_DATA  0x00
+#define PACKET_TYPE_CALL  0x01
+#define PACKET_TYPE_GET   0x02
+#define PACKET_TYPE_PUT   0x03
+#define PACKET_TYPE_PING  0x04
 
-#define PACKET_SOURCE_MESG     0x00 // the message contains the data
-#define PACKET_SOURCE_FILE     0x01 // the message is a path to a file of data
-#define PACKET_SOURCE_NXDB     0x02 // the message is a key to a nexus database
+#define PACKET_SOURCE_MESG  0x00 // the message contains the data
+#define PACKET_SOURCE_FILE  0x01 // the message is a path to a file of data
+#define PACKET_SOURCE_NXDB  0x02 // the message is a key to the nexus uses to access the data
 
-#define PACKET_FORMAT_JSON     0x00
+#define PACKET_FORMAT_JSON  0x00
 
-#define PACKET_RETURN_PASS     0x00
-#define PACKET_RETURN_FAIL     0x01
+#define PACKET_COMPRESSION_NONE  0x00 // uncompressed
+#define PACKET_ENCRYPTION_NONE   0x00 // unencrypted
+
+#define PACKET_STATUS_PASS  0x00
+#define PACKET_STATUS_FAIL  0x01
+
+
 
 using namespace std;
 
@@ -84,4 +86,3 @@ std::string show_hex(const char* input, int length) {
 
     return ss.str();
 }
-

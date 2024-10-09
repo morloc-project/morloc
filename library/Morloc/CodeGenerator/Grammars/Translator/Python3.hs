@@ -100,7 +100,7 @@ serialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 serialize v0 s0 = do
   (ms, v1) <- serialize' v0 s0
   let schema = typeSchema s0
-      v2 = "_put_value(mlc_serialize" <> tupled [v1, schema] <> ")"
+      v2 = [idoc|_put_value(mlc_serialize#{tupled [v1, schema]}.encode("utf8"))|]
   return (v2, ms)
   where
     serialize' :: MDoc -> SerialAST -> Index ([MDoc], MDoc)
@@ -224,7 +224,7 @@ translateSegment m0 =
     makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) args) _) = do
       -- I don't need to explicitly add single quoes to the arguments here as I
       -- do in C++ and R because the subprocess module bypasses Bash dequoting.
-      let call = "_morloc_foreign_call" <> tupled [dquotes socketFile, dquotes (pretty mid), list (map argNamer args)]
+      let call = "_morloc_foreign_call" <> tupled [dquotes socketFile, pretty mid, list (map argNamer args)]
       return $ defaultValue { poolExpr = call }
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
     makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet svarNamer i e1 e2
@@ -326,10 +326,6 @@ makePool lib includeDocs manifolds dispatch = [idoc|#!/usr/bin/env python
 sys.path = ["#{lib}"] + sys.path
 
 #{vsep includeDocs}
-
-#{srcSerialization langSrc}
-
-#{srcInterop langSrc}
 
 #{srcUtility langSrc}
 

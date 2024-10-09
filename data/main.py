@@ -34,25 +34,11 @@ def message_response(data):
         mlc_function = dispatch[cmdID]
 
         try:
-            passing_result = mlc_function(*args)
-            result = _pack(
-                "32s{}s".format(len(passing_result)),
-                _make_header(
-                    length = len(passing_result),
-                    command = _pack("Bxxxxxxx", PACKET_RETURN_PASS)
-                ),
-                passing_result
-            )
+            result = mlc_function(*args)
+
         except Exception as e:
-            failing_result = str(e).encode("utf8")
-            result = _pack(
-                "32s{}s".format(len(failing_result)),
-                _make_header(
-                    length = len(failing_result),
-                    command = _pack("Bxxxxxxx", PACKET_RETURN_FAIL)
-                ),
-                failing_result
-            )
+            errmsg = str(e).encode("utf8")
+            result = _make_data(errmsg, status = PACKET_STATUS_FAIL)
 
         _log(f"from cmdID {str(cmdID)} pool returning message '{len(result)}'")
     else:
@@ -160,4 +146,3 @@ def server(socket_path):
 if __name__ == "__main__":
     socket_path = sys.argv[1]
     server(socket_path)
-
