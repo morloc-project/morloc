@@ -39,7 +39,7 @@ RETRY_MULTIPLIER = 1.25
 MAX_RETRIES = 30
 
 # buffer size for socket IPC
-BUFFER_SIZE = 1024
+BUFFER_SIZE = 4096
 
 # default pipe names, must match the signal naming conventions of the pools
 PYTHON_PIPE = "python3-pipe"
