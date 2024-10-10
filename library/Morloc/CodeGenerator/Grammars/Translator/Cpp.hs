@@ -924,7 +924,7 @@ Message dispatch(const Message& msg){
 
     } else if (header.command[0] == PACKET_TYPE_CALL) {
 
-      int mid = read_int(header.command, 1, 4);
+      uint32_t mid = read_uint32(header.command, 1);
 
       log_message("dispatching to mid " + std::to_string(mid));
 

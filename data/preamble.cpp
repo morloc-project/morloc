@@ -1,7 +1,4 @@
 #include <string>
-#include <string>
-#include <string>
-#include <string>
 #include <iostream>
 #include <sstream>
 #include <functional>
@@ -57,13 +54,13 @@ using namespace std;
 
 struct Message {
   char* data;
-  size_t length;
+  uint64_t length;
 };
 
 struct Header {
     char command[8];
-    int offset; // this is a 4 byte int, so I should use a short
-    int length;
+    uint32_t offset; // this is a 4 byte int, so I should use a short
+    uint64_t length;
 };
 
 // Function to log messages

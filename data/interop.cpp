@@ -1,43 +1,58 @@
 // Interop /////////////
 
 // Read n bytes as an int starting from position offset in a char array
-int read_int(const char* bytes, size_t offset, size_t size){
-    size_t x = 0;
+uint64_t read_uint64(const char* bytes, size_t offset){
+  uint64_t x = 0;
+  for(size_t i = 0; i < 8; i++){
+    uint64_t multiplier = 1;
+    multiplier = multiplier << (8 * (8 - i - 1));
+    x += static_cast<unsigned char>(bytes[i + offset]) * multiplier;
+  }
 
-    for(size_t i = 0; i < size; i++){
-      x = (x << 8) + bytes[offset + i];
-    }
+  log_message("read uint64 " + std::to_string(x) + " from bytes " + show_hex(bytes + offset, 8));
 
-    return x;
+  return x;
 }
 
-void write_int32(char* data, int value){
-    uint32_t v32 = static_cast<uint32_t>(value);
+uint32_t read_uint32(const char* bytes, size_t offset){
+  uint32_t x = 0;
+  for(size_t i = 0; i < 4; i++){
+    uint32_t multiplier = 1;
+    multiplier = multiplier << (8 * (4 - i - 1));
+    x += static_cast<unsigned char>(bytes[i + offset]) * multiplier;
+  }
 
-    data[0] = (v32 >> 24) & 0xFF;
-    data[1] = (v32 >> 16) & 0xFF;
-    data[2] = (v32 >>  8) & 0xFF;
-    data[3] = v32 & 0xFF;
+  log_message("read uint32 " + std::to_string(x) + " from bytes " + show_hex(bytes + offset, 4));
+
+  return x;
+}
+
+void write_int32(char* data, uint32_t value){
+
+    data[0] = (value >> 24) & 0xFF;
+    data[1] = (value >> 16) & 0xFF;
+    data[2] = (value >>  8) & 0xFF;
+    data[3] = value & 0xFF;
 
     log_message("write_int32 convert " + std::to_string(value) + "(" + std::to_string(sizeof(value)) + ") -> " + show_hex(data, 4));
 }
 
-void write_int64(char* data, int value){
-    uint64_t v64 = static_cast<uint64_t>(value);
+void write_int64(char* data, uint64_t value){
 
-    data[0] = (v64 >> 56) & 0xFF;
-    data[1] = (v64 >> 48) & 0xFF;
-    data[2] = (v64 >> 40) & 0xFF;
-    data[3] = (v64 >> 32) & 0xFF;
-    data[4] = (v64 >> 24) & 0xFF;
-    data[5] = (v64 >> 16) & 0xFF;
-    data[6] = (v64 >>  8) & 0xFF;
-    data[7] = v64 & 0xFF;
+    data[0] = (value >> 56) & 0xFF;
+    data[1] = (value >> 48) & 0xFF;
+    data[2] = (value >> 40) & 0xFF;
+    data[3] = (value >> 32) & 0xFF;
+    data[4] = (value >> 24) & 0xFF;
+    data[5] = (value >> 16) & 0xFF;
+    data[6] = (value >>  8) & 0xFF;
+    data[7] = value & 0xFF;
 
     log_message("write_int64 convert " + std::to_string(value) + "(" + std::to_string(sizeof(value)) + ") -> " + show_hex(data, 8));
 }
 
 Header read_header(const char* msg){
+
     std::string magic = show_hex(msg, 4);
 
     if( magic != "6d f8 07 07"){
@@ -45,14 +60,20 @@ Header read_header(const char* msg){
       log_message(errmsg);
       throw std::runtime_error(errmsg);
     }
+
+    log_message("reading header: " + show_hex(msg, 32));
+
     Header header;
 
     for(size_t offset = 0; offset < 8; offset++){
       header.command[offset] = msg[12+offset];
     }
 
-    header.offset = read_int(msg, 20, 4);
-    header.length = read_int(msg, 24, 8);
+    header.offset = read_uint32(msg, 20);
+    header.length = read_uint64(msg, 24);
+
+    log_message("header.offset: " + std::to_string(header.offset));
+    log_message("header.length: " + std::to_string(header.length));
 
     return header;
 }
@@ -86,7 +107,7 @@ Message make_data(const char* data, size_t length, char src, char fmt, char cmpr
   packet.data = (char*)malloc(packet.length * sizeof(char));
 
   char cmd[8];
-  cmd[0] = PACKET_TYPE_DATA; 
+  cmd[0] = PACKET_TYPE_DATA;
   cmd[1] = src;
   cmd[2] = fmt;
   cmd[3] = cmpr;
@@ -333,13 +354,18 @@ Message stream_recv(int client_fd){
 
     // Receive the first part of the response, this will include the header
     recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);
+    log_message("recv_length " + std::to_string(recv_length));
 
     // Parse the header, from this we learn the expected size of the packet
     Header header = read_header(buffer);
+    log_message("header.length " + std::to_string(header.length));
+    log_message("header.offset " + std::to_string(header.offset));
     result.length = 32 + header.offset + header.length;
 
     // Allocate enough memory to store the entire packet
     result.data = (char*)malloc(result.length * sizeof(char));
+
+    log_message("result.length " + std::to_string(result.length));
 
     // Create a pointer the current writing index
     char* data_ptr = result.data;
@@ -411,9 +437,9 @@ Message foreign_call(
     }
 
     call_packet.data = (char*)malloc(call_packet.length * sizeof(char));
-    
+
     char cmd[8];
-    cmd[0] = PACKET_TYPE_CALL; 
+    cmd[0] = PACKET_TYPE_CALL;
     write_int32(cmd + 1, mid);
     cmd[5] = 0x00;
     cmd[6] = 0x00;
@@ -424,7 +450,7 @@ Message foreign_call(
     for(size_t i = 0; i < arg_keys.size(); i++){
       Message arg = arg_keys[i];
       memcpy(call_packet.data + arg_start, arg.data, arg.length);
-      arg_start += arg.length; 
+      arg_start += arg.length;
     }
 
     log_message("Send request to " + socket_path);
