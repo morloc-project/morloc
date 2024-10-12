@@ -41,7 +41,7 @@
 
     .log(paste("Creating temporary file:", key))
 
-    write(value, key)
+    cat(value, file=key)
 
     .log(paste("Wrote data to:", key))
 
