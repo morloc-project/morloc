@@ -312,7 +312,7 @@ def _put_value(value: bytes) -> bytes:
         with tempfile.NamedTemporaryFile(delete=False, mode='wb') as temp_file:
             temp_file.write(value)
             tmpfilename = temp_file.name
-        return _make_data(tmpfilename, src=PACKET_SOURCE_FILE)
+        return _make_data(tmpfilename.encode("utf8"), src=PACKET_SOURCE_FILE)
 
 def _get_value(data: bytes) -> bytes:
 
