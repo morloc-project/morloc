@@ -134,7 +134,25 @@ def client(pool, message):
                 _log(f"sending message: {message}")
                 s.sendall(message)
                 _log(f"waiting for response")
+
                 data = s.recv(BUFFER_SIZE)
+
+                (_, offset, length) = _read_header(data)
+
+                expected_size = 32 + offset + length
+                current_size = len(data) 
+
+                if current_size > expected_size:
+                    _log("Too much data bitch")
+                    sys.exit(1)
+                elif current_size < expected_size:
+                    datas = [data]
+                    while current_size < expected_size:
+                        data = s.recv(BUFFER_SIZE)
+                        datas.append(data)
+                        current_size += len(data)
+                    data = b"".join(datas)
+
                 _log(f"response received: {data}")
             break
         # try try again
@@ -230,10 +248,6 @@ def _read_header(data : bytes) -> tuple[bytes, int, int]:
     expected_magic = (0x6D, 0xf8, 0x07,0x07)
     if observed_magic != expected_magic:
         _log(f"bad magic: observed {observed_magic}, expected {expected_magic}")
-
-    if len(data) != 32 + fields[10]:
-        _log("packet is of unexpected length")
-        sys.exit(1)
 
     command = fields[8]
     offset = fields[9]
