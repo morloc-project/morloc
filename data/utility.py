@@ -205,8 +205,7 @@ def _unpack(fmt, *args):
     try:
         values = struct.unpack(fmt, *args) 
     except Exception as e:
-        _log(f"Unpack failed on format '{fmt}'")
-        raise e
+        raise FailingPacket(f"Unpack failed on format '{fmt}' with error: {str(e)}")
 
     return values
 
@@ -215,8 +214,7 @@ def _pack(fmt, *args):
     try:
         data = struct.pack(fmt, *args) 
     except Exception as e:
-        _log(f"Pack failed on format '{fmt}'")
-        raise e
+        raise FailingPacket(f"Pack failed on format '{fmt}' with error: {str(e)}")
 
     return data
 
@@ -284,16 +282,26 @@ def _read_header(data : bytes) -> tuple[bytes, int, int]:
     # return the offset and length
     return (command, offset, length)
 
-def _write_call_packet(mid: int, args: list[bytes]) -> bytes:
-    header = _make_header(
-      sum([len(arg) for arg in args]),
-      command = _pack("BIxxx", PACKET_TYPE_CALL, mid)
-    )
 
-    # find the lenghts of all the arguments
-    args_format = "".join(str(len(n)) + "s" for n in args)
+class FailingPacket(Exception):
+    """An exception that passes up a Fail packet"""
 
-    return _pack("32s" + args_format, header, *args)
+    def __init__(self, errmsg, error_code=None):
+        try:
+            errmsg = errmsg.encode("utf8")
+        except:
+            pass
+        self.packet = _make_data(errmsg, status = PACKET_STATUS_FAIL)
+        self.error_code = error_code
+        super().__init__(self.packet)
+
+    def __str__(self):
+        errmsg = self.packet[31:].decode()
+        if self.error_code:
+            return f"FailingPacket ({self.error_code}): {errmsg}"
+        return f"FailingPacket: {errmsg}"
+
+
 
 def _put_value(value: bytes) -> bytes:
     """
@@ -333,7 +341,7 @@ def _get_value(data: bytes) -> bytes:
             if cmd_format == PACKET_FORMAT_JSON:
                 return data[data_start:]
             else:
-                _log("Invalid format")
+                raise FailingPacket("Invalid format")
         elif cmd_source == PACKET_SOURCE_FILE:
             if cmd_format == PACKET_FORMAT_JSON:
                 filename = data[data_start:]
@@ -341,28 +349,51 @@ def _get_value(data: bytes) -> bytes:
                     value = file.read()
             else:
                 errmsg = "Invalid format" 
-                _log(errmsg)
-                raise ValueError(errmsg)
+                raise FailingPacket(errmsg)
         else:
             errmsg = "Invalid source" 
-            _log(errmsg)
-            raise ValueError(errmsg)
+            raise FailingPacket(errmsg)
     else:
         errmsg = "Expected a data packet"
-        _log(errmsg)
-        raise ValueError(errmsg)
+        raise FailingPacket(errmsg)
 
     return value
 
+def _stream_data(conn):
+    first_packet = conn.recv(BUFFER_SIZE)
+    try:
+        (_, msg_offset, msg_length) = _read_header(first_packet) 
+        packet_size = 32 + msg_offset + msg_length
+    except Exception as e:
+        raise FailingPacket(f"Could not process header: {str(e)}")
+
+    if(len(first_packet) == packet_size):
+        return first_packet
+    elif(len(first_packet) > packet_size):
+        raise FailingPacket(f"Packet is longer than expected")
+    else:
+        packets = [first_packet]
+        total_length = len(first_packet)
+
+        while(total_length < packet_size):
+            new_packet = conn.recv(BUFFER_SIZE)
+            packets.append(new_packet)
+            total_length += len(new_packet)
+
+        return b''.join(packets)
+
 def _request_from_socket(socket_path, message):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-        _log(f"connecting to {socket_path}")
-        s.connect(socket_path)
-        _log(f"sending message '{message}' to {socket_path}")
-        s.send(message)
-        _log("requesting data")
-        data = s.recv(BUFFER_SIZE)
-        _log(f"data {data} received from {socket_path}")
+        try:
+            _log(f"connecting to {socket_path}")
+            s.connect(socket_path)
+            _log(f"sending message '{message}' to {socket_path}")
+            s.send(message)
+            _log("requesting data")
+            data = _stream_data(s)
+            _log(f"data {data} received from {socket_path}")
+        except Exception as e:
+            raise FailingPacket(f"Failed socket connection: {str(e)}")
     return data
 
 

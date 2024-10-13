@@ -36,6 +36,10 @@ def message_response(data):
         try:
             result = mlc_function(*args)
 
+        except FailingPacket as e:
+            _log("returning error packet from run of manifold {str(cmdID)}")
+            result = e.packet
+
         except Exception as e:
             errmsg = f"Error in m{str(cmdID)}: {str(e)}".encode("utf8")
             result = _make_data(errmsg, status = PACKET_STATUS_FAIL)
@@ -43,8 +47,7 @@ def message_response(data):
         _log(f"from cmdID {str(cmdID)} pool returning message '{len(result)}'")
     else:
         errmsg = "Expected a call packet, found {str(msg_cmd_type)}"
-        _log(errmsg)
-        raise ValueError(errmsg)
+        raise FailingPacket(errmsg)
 
     return result
 
@@ -91,7 +94,7 @@ def server(socket_path):
             if ready:
                 conn, addr = s.accept()
                 _log(f"Connected by {addr}")
-                data = conn.recv(BUFFER_SIZE)
+                data = _stream_data(conn)
 
                 if data:
                     _log(f"Job {str(conn)} starting")
@@ -118,9 +121,10 @@ def server(socket_path):
                     except Exception as e:
                         _log(f"failed to get result from queue: {str(e)}")
                 elif not p.is_alive():
-                    _log(f"Process {p.pid} not alive and no result available")
                     # Send an empty message signaling failure
-                    conn.send(b'fuck')
+                    errmsg = f"Process {p.pid} not alive and no result available"
+                    error_packet = _make_data(errmsg, status = PACKET_STATUS_FAIL)
+                    conn.send(error_packet)
                 else:
                     # the process is still alive and no data has been reveived
                     # so we continue to wait
@@ -146,3 +150,4 @@ def server(socket_path):
 if __name__ == "__main__":
     socket_path = sys.argv[1]
     server(socket_path)
+
