@@ -25,6 +25,7 @@ main = do
       , substituteTVarTests
       , subtypeTests
 
+      , golden "packets-large" "packets-large"
       -- , golden "packets-medium" "packets-medium"
 
       , golden "typeclasses-1" "typeclasses-1"

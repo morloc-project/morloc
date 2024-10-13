@@ -73,7 +73,16 @@ check_for_new_client <- function(queue, server_fd){
   .log(paste("Accepted new client", client_fd))
 
   # Pull data from the client
-  msg <- .Call("R_get", client_fd)
+  tryCatch({
+    msg <- .Call("R_get", client_fd)
+  }, error = function(e) {
+    errmsg = paste(
+      "Failed to read from socket with error message:",
+      e$message
+    )
+    .log(errmsg)
+    return(NULL)
+  })
 
   .log(paste("Message received from client", client_fd, "with length", msg[[2]]))
 
