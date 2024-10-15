@@ -20,6 +20,8 @@
 #include <sys/select.h>
 #include <cmath>
 #include <iomanip>
+#include <poll.h>
+#include <errno.h>
 
 #include <fcntl.h>
 

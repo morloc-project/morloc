@@ -31,19 +31,12 @@ processMessage <- function(msg){
     if(exists(mlc_pool_function_name)){
       .log(paste("Calling function:", mlc_pool_function_name))
 
-      tryCatch(
+      result <- tryCatch(
         {
           mlc_pool_function <- eval(parse(text=mlc_pool_function_name))
-          result <- do.call(mlc_pool_function, args)
-          .log(paste("Successfully ran mid", manifold_id))
+          do.call(mlc_pool_function, args)
         }, error = function(e) {
-           errmsg = paste(
-             "Call to function",
-             mlc_pool_function_name,
-             "failed with message:",
-             e$message
-           )
-           return(make_data(errmsg, status = PACKET_STATUS_FAIL))
+          fail_packet(errmsg, e)
         }
       )
 
@@ -52,13 +45,13 @@ processMessage <- function(msg){
       .log(paste("result length:", length(result)))
     } else {
       errmsg = paste("Could not find function", mlc_pool_function)
-      return(make_data(errmsg, status = PACKET_STATUS_FAIL))
+      result <- fail_packet(errmsg)
     }
 
     return(result)
   } else {
     errmsg = "Unexpected packet type"
-    return(make_data(errmsg, status = PACKET_STATUS_FAIL))
+    return(fail_packet(errmsg))
   }
 }
 
@@ -112,6 +105,7 @@ job_has_finished <- function(job){
 }
 
 handle_finished_client <- function(job){
+  .log(paste("finishing client_fd = ", job$client_fd))
   # get the result of the calculation
   data <- future::value(job$work)
   .log(paste("type(data) =", typeof(data)))

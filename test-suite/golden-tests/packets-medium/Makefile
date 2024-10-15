@@ -1,7 +1,7 @@
 all:
 	rm -f obs.txt
 	morloc make -v foo.loc > log
-	# below buffer
+	# # below buffer
 	./nexus.py pid 4065bit.json | wc -c >> obs.txt
 	./nexus.py cid 4065bit.json | wc -c >> obs.txt
 	./nexus.py rid 4065bit.json | wc -c >> obs.txt

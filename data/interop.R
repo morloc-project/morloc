@@ -2,6 +2,10 @@
 .get_value <- function(key){
   header <- read_header(key)
 
+  if (header$cmd[6] == PACKET_STATUS_FAIL){
+    abort("Forwarding from .git_value", fail_packet = key)
+  }
+
   data_start <- 32 + header$offset + 1
 
   if (header$cmd[1] == PACKET_TYPE_DATA) {
@@ -10,7 +14,7 @@
         json_data <- rawToChar(key[data_start:length(key)])
         return(json_data)
       } else {
-        stop("Unsupported data format")
+        abort("Unsupported data format")
       }
     } else if (header$cmd[2] == PACKET_SOURCE_FILE) {
       if(header$cmd[3] == PACKET_FORMAT_JSON) {
@@ -18,19 +22,21 @@
         json_data <- readChar(filename, file.info(filename)$size, useBytes=TRUE)
         return(json_data)
       } else {
-        stop("Unsupported data format")
+        abort("Unsupported data format")
       }
     } else {
-      stop("Unsupported data source")
+      abort("Unsupported data source")
     }
   } else {
-    stop("Expected data packet")
+    abort("Expected data packet")
   }
 }
 
 # takes serialized data and creates a data packet representing it
 .put_value <- function(value){
-  stopifnot(typeof(value) == "character")
+  if(typeof(value) != "character"){
+    abort("In put_value, expected input to be a character")
+  }
   value_raw <- charToRaw(value)
 
   if (length(value_raw) <= 65536 - 32) {
@@ -62,12 +68,12 @@
 
   response <- tryCatch(
     {
-      .log(paste("R_ask send with packet of length", length(call_packet)))
+      .log(paste("R_ask send with packet of length", length(call_packet), "to the pipe", pool_pipe))
+      .log(paste("Packet: ", paste(call_packet, collapse=" ")))
       .Call("R_ask", pool_pipe, list(call_packet, length(call_packet)))
     },
     error = function(e) {
-      errmsg <- paste("R_ask failed:", e$message)
-      return(make_data(errmsg, status = PACKET_STATUS_FAIL))
+      abort(paste("R_ask failed:", e$message))
     }
   )
 
@@ -78,8 +84,7 @@
       data_raw[1:data_length]
     },
     error = function(e) {
-      errmsg <- paste("Malformed response from foreign call:", e$message)
-      make_data(errmsg, status = PACKET_STATUS_FAIL)
+      abort(paste("Malformed response from foreign call:", e$message))
     }
   )
 }

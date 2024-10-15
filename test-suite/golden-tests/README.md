@@ -139,3 +139,49 @@ typeclass, and add other manifold functions such as debuggers (at various
 places) and cachers, diagnostics etc. That is, in the next paper, I would loop
 back to the original ideas of morloc. Also I'd extend the prelude library and
 reach a rough useable version.
+
+# Data packet tests
+
+The purpose of these tests are to ensure that data is passed correctly between
+the nexus and the pool and between pools at each of the different size
+categories.
+
+Currently, the nexus can read data as either raw JSON or files of JSON. These
+are passed as MESG and FILE packets, respectively. MESG packets are limited
+(currently) in size to 2^16 characters. This reduces the amount of memory stored
+potentially in multiple pools. When pools transmit data, either to each other or
+back to the nexus, they pack data into MESG packets if they are small or FILE
+packets if they are large.
+
+Another consideration is buffer size. Data is transferred over the sockets in
+buffers of (currently) 4096 characters. Packets larger than this need to be
+streamed. This streaming needs to be tested across all languages.
+
+So there are three size partitions. 0-4096, 4097-65536, and 65537+. Special
+sizes of data are 0, 1, 4096, 4097, 65536, 65537.
+
+For CALL packets, multiple DATA packets may be stored after the header. I need
+to test cases where the sum of packets passes size partition.
+
+From a pool's perspective, a call directly from the nexus is no different from a
+call from another pool. However, a return is different from a foreign call. So
+we need to ensure that every language is tested for foreign calls. 
+
+So the dimensions for the nexus-to-pool call are:
+
+ 1. file/mesg nexus input [file,mesg]
+ 2. size [0,1,4096,4097,65536, 65537]
+ 3. number of arguments [0,1,n]
+
+And the dimensions for the pool-to-pool call are
+
+ 1. size [0,1,4096,4097,65536, 65537]
+ 2. number of arguments [0,1,n]
+ 3. direction [receive, foreign call, return]
+
+
+nexus file -> pool file -> pool file -> nexus file
+
+nexus mesg -> pool mesg -> pool mesg -> nexus mesg
+
+nexus () -> pool () -> nexus ()

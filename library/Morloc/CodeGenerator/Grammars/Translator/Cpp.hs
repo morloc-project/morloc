@@ -899,7 +899,7 @@ whitespace(json, i);|]
 
 
 makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
-makeMain includes signatures serialization manifolds dispatch = [idoc|#include <string>
+makeMain includes signatures serialization manifolds dispatch = [idoc|
 #{srcPreamble langSrc}
 
 #{vsep includes}

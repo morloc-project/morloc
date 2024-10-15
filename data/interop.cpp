@@ -357,21 +357,48 @@ int accept_client(int server_fd, double timeout_seconds) {
     return -1;
 }
 
-Message stream_recv(int client_fd){
+Message stream_recv(int client_fd) {
     struct Message result;
     result.length = 0;
 
     char* buffer = (char*)malloc(BUFFER_SIZE * sizeof(char));
-    size_t recv_length;
+    ssize_t recv_length;
+
+    struct pollfd pfd;
+    pfd.fd = client_fd;
+    pfd.events = POLLIN;
 
     // Receive the first part of the response, this will include the header
-    recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);
-    log_message("recv_length " + std::to_string(recv_length));
+    while (1) {
+        int poll_result = poll(&pfd, 1, -1); // Wait indefinitely
+
+        if (poll_result < 0) {
+            if (errno == EINTR) continue; // Interrupted system call, retry
+            log_message("Poll error: " + std::string(strerror(errno)));
+            free(buffer);
+            return result; // Return empty result on error
+        }
+
+        if (pfd.revents & POLLIN) {
+            recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);
+            if (recv_length > 0) break;
+            if (recv_length == 0) {
+                log_message("Connection closed by peer");
+                free(buffer);
+                return result; // Return empty result if connection closed
+            }
+            if (recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN) {
+                log_message("Recv error: " + std::string(strerror(errno)));
+                free(buffer);
+                return result; // Return empty result on error
+            }
+        }
+    }
+
+    log_message("recv_length " + std::to_string(recv_length) + " from client_fd " + std::to_string(client_fd));
 
     // Parse the header, from this we learn the expected size of the packet
     Header header = read_header(buffer);
-    log_message("header.length " + std::to_string(header.length));
-    log_message("header.offset " + std::to_string(header.offset));
     result.length = 32 + header.offset + header.length;
 
     // Allocate enough memory to store the entire packet
@@ -379,21 +406,54 @@ Message stream_recv(int client_fd){
 
     log_message("result.length " + std::to_string(result.length));
 
-    // Create a pointer the current writing index
+    // Create a pointer to the current writing index
     char* data_ptr = result.data;
 
     // copy data from the buffer to the message
     memcpy(data_ptr, buffer, recv_length);
     data_ptr += recv_length;
 
-    // we don't need to buffer anymore, we'll write directly into the msg
+    // we don't need the buffer anymore, we'll write directly into the msg
     free(buffer);
 
-    // read in buffers of data until all data is recieved
-    while(data_ptr - result.data < result.length){
-        recv_length = recv(client_fd, data_ptr, BUFFER_SIZE, 0);
-        data_ptr += recv_length;
+    // read in buffers of data until all data is received
+    log_message("Remaining data = " + std::to_string(result.length - recv_length));
+    while (data_ptr - result.data < result.length) {
+        while (1) {
+            int poll_result = poll(&pfd, 1, -1); // Wait indefinitely
+
+            if (poll_result < 0) {
+                if (errno == EINTR) continue; // Interrupted system call, retry
+                log_message("Poll error: " + std::string(strerror(errno)));
+                free(result.data);
+                result.length = 0;
+                return result; // Return empty result on error
+            }
+
+            if (pfd.revents & POLLIN) {
+                recv_length = recv(client_fd, data_ptr, BUFFER_SIZE, 0);
+                log_message("Read " + std::to_string(recv_length) + " bytes");
+                if (recv_length > 0) {
+                    data_ptr += recv_length;
+                    break;
+                }
+                if (recv_length == 0) {
+                    log_message("Connection closed by peer");
+                    free(result.data);
+                    result.length = 0;
+                    return result; // Return partial result if connection closed
+                }
+                if (recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN) {
+                    log_message("Recv error: " + std::string(strerror(errno)));
+                    free(result.data);
+                    result.length = 0;
+                    return result; // Return empty result on error
+                }
+            }
+        }
     }
+
+    log_message("Done: read " + std::to_string(data_ptr - result.data) + " bytes");
 
     return result;
 }

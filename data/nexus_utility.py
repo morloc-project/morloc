@@ -110,7 +110,7 @@ def client(pool, message):
 
     _log("entering nexus client")
 
-    data = b""
+    data = None
 
     # it may take awhile for the pool to initialize and create the socket
     delay_time = INITIAL_RETRY_DELAY
@@ -143,7 +143,7 @@ def client(pool, message):
                 current_size = len(data) 
 
                 if current_size > expected_size:
-                    _log("Too much data bitch")
+                    _log("Too much data")
                     sys.exit(1)
                 elif current_size < expected_size:
                     datas = [data]
@@ -165,6 +165,10 @@ def client(pool, message):
                 delay_time *= RETRY_MULTIPLIER
 
     _log("exiting nexus client")
+
+    if data is None:
+        _log("failed to retrieve data from client, returning empty string")
+        return ""
 
     return data
 

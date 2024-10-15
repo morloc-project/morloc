@@ -31,7 +31,13 @@ void run_job(int client_fd) {
             log_message("Job dispatched, result length:" + std::to_string(result.length));
 
             // return the result to the client
-            send(new_job.client_fd, result.data, result.length, 0);
+            size_t bytes_sent = send(new_job.client_fd, result.data, result.length, 0);
+
+            if (bytes_sent != result.length) {
+                log_message("Failed to send return result data");
+            } else {
+                log_message("Successfully sent " + std::to_string(bytes_sent) + " bytes to " + std::to_string(new_job.client_fd));
+            }
 
             // close the current client
             close(new_job.client_fd);
@@ -132,3 +138,4 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
+
