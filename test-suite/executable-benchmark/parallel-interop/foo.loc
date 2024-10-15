@@ -1,0 +1,22 @@
+module parallel (pcis, scis, ptrans, strans)
+
+source Py from "parallel.py" ("pmap", "smap")
+source Py from "foo.py" ("mockpy")
+source R from "foo.R" ("mockr")
+
+type Py => Int = "int"
+type Py => List a = "list" a
+
+type R => Int = "numeric"
+type R => List a = "list" a
+
+mockr :: Int -> Int
+mockpy :: Int -> Int
+pmap a b :: (a -> b) -> [a] -> [b]
+smap a b :: (a -> b) -> [a] -> [b]
+
+pcis = pmap mockpy
+ptrans = pmap mockr
+
+scis = smap mockpy
+strans = smap mockr
