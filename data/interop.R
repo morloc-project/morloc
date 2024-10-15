@@ -52,19 +52,34 @@
 }
 
 
-.morloc_foreign_call <- function(pool_pipe, manifold_id, arg_keys){
-
+.morloc_foreign_call <- function(pool_pipe, manifold_id, arg_keys) {
   packet_length <- sum(sapply(arg_keys, length))
 
-  cmd = c(PACKET_TYPE_CALL, int32(manifold_id), 0x00, 0x00, 0x00)
+  cmd <- c(PACKET_TYPE_CALL, int32(manifold_id), 0x00, 0x00, 0x00)
   header <- make_header(cmd, offset = 0, length = packet_length)
 
   call_packet <- c(header, unlist(arg_keys))
 
-  response <- .Call("R_ask", pool_pipe, list(call_packet, length(call_packet)))
+  response <- tryCatch(
+    {
+      .log(paste("R_ask send with packet of length", length(call_packet)))
+      .Call("R_ask", pool_pipe, list(call_packet, length(call_packet)))
+    },
+    error = function(e) {
+      errmsg <- paste("R_ask failed:", e$message)
+      return(make_data(errmsg, status = PACKET_STATUS_FAIL))
+    }
+  )
 
-  data_raw <- response[[1]]
-  data_length <- response[[2]]
-
-  data_raw[1:data_length]
+  tryCatch(
+    {
+      data_raw <- response[[1]]
+      data_length <- response[[2]]
+      data_raw[1:data_length]
+    },
+    error = function(e) {
+      errmsg <- paste("Malformed response from foreign call:", e$message)
+      make_data(errmsg, status = PACKET_STATUS_FAIL)
+    }
+  )
 }

@@ -917,7 +917,6 @@ makeMain includes signatures serialization manifolds dispatch = [idoc|#include <
 Message dispatch(const Message& msg){
 
     Header header = read_header(msg.data);
-    std::string errmsg;
 
     if (header.command[0] == PACKET_TYPE_PING){
         return msg;
@@ -951,19 +950,7 @@ Message dispatch(const Message& msg){
       #{dispatch}
     }
 
-    errmsg = "In C++ pool, call failed";
-
-    Message error_packet = make_data(
-      errmsg.c_str(),
-      errmsg.size(),
-      PACKET_SOURCE_MESG,
-      PACKET_FORMAT_JSON,
-      PACKET_COMPRESSION_NONE,
-      PACKET_ENCRYPTION_NONE,
-      PACKET_STATUS_FAIL
-    );
-
-    return error_packet;
+    return fail_packet("In C++ pool, call failed");
 }
 
 

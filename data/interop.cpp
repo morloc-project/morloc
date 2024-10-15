@@ -125,6 +125,18 @@ Message make_data(const char* data, size_t length, char src, char fmt, char cmpr
   return packet;
 }
 
+Message fail_packet(const std::string& errmsg){
+  return make_data(
+    errmsg.c_str(),
+    errmsg.size(),
+    PACKET_SOURCE_MESG,
+    PACKET_FORMAT_JSON,
+    PACKET_COMPRESSION_NONE,
+    PACKET_ENCRYPTION_NONE,
+    PACKET_STATUS_FAIL
+  );
+}
+
 std::string read(const std::string& file) {
     std::ifstream input_file(file);
 
@@ -399,21 +411,17 @@ Message ask(const char* socket_path, const Message& message){
     // If the connection succeeded, request data
     if (retcode != -1) {
         // Send a message and wait for a reply from the nexus
-        send(client_fd, message.data, message.length, 0);
-        result = stream_recv(client_fd);
+        ssize_t bytes_sent = send(client_fd, message.data, message.length, 0);
+
+        if (bytes_sent != message.length) {
+            result = fail_packet("Failed to send data");
+        } else {
+            result = stream_recv(client_fd);
+        }
     }
     // otherwise, create a DATA FAIL packet on failure
     else {
-        std::string errmsg = "Failed to access client";
-        result = make_data(
-          errmsg.c_str(),
-          errmsg.size(),
-          PACKET_SOURCE_MESG,
-          PACKET_FORMAT_JSON,
-          PACKET_COMPRESSION_NONE,
-          PACKET_ENCRYPTION_NONE,
-          PACKET_STATUS_FAIL
-        );
+        result = fail_packet("Failed to access client");
     }
 
     close(client_fd);

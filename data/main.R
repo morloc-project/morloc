@@ -31,29 +31,34 @@ processMessage <- function(msg){
     if(exists(mlc_pool_function_name)){
       .log(paste("Calling function:", mlc_pool_function_name))
 
-      tryCatch({
-        mlc_pool_function <- eval(parse(text=mlc_pool_function_name))
-        result <- do.call(mlc_pool_function, args)
-        .log(paste("Successfully ran mid", manifold_id))
-      }, error = function(e) {
-        errmsg = paste(
-          "Call to function",
-          mlc_pool_function_name,
-          "failed with message:",
-          e$message
-        )
-        .log(errmsg)
-        return(make_data(errmsg, status = PACKET_STATUS_FAIL))
-      })
+      tryCatch(
+        {
+          mlc_pool_function <- eval(parse(text=mlc_pool_function_name))
+          result <- do.call(mlc_pool_function, args)
+          .log(paste("Successfully ran mid", manifold_id))
+        }, error = function(e) {
+           errmsg = paste(
+             "Call to function",
+             mlc_pool_function_name,
+             "failed with message:",
+             e$message
+           )
+           return(make_data(errmsg, status = PACKET_STATUS_FAIL))
+        }
+      )
 
-      .log(paste("Got result:", result))
+      .log(paste("result header:", paste(result[1:32], collapse=" ")))
+      .log(paste("result tail:", paste(tail(result, 8), collapse=" ")))
+      .log(paste("result length:", length(result)))
     } else {
-      stop(paste("Could not find function", mlc_pool_function))
+      errmsg = paste("Could not find function", mlc_pool_function)
+      return(make_data(errmsg, status = PACKET_STATUS_FAIL))
     }
 
     return(result)
   } else {
-    stop("Unexpected packet type")
+    errmsg = "Unexpected packet type"
+    return(make_data(errmsg, status = PACKET_STATUS_FAIL))
   }
 }
 

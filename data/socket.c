@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
+#include <poll.h>
 
 
 #define BUFFER_SIZE 4096
@@ -79,6 +80,10 @@ SEXP R_new_server(SEXP R_SOCKET_PATH) {
     const char* SOCKET_PATH = CHAR(asChar(R_SOCKET_PATH));
     SEXP result = PROTECT(allocVector(INTSXP, 1));
     int server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+
+    int flags = fcntl(server_fd, F_GETFL, 0);
+    fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
+
     if (server_fd == -1) {
         REprintf("Error creating socket\n");
         INTEGER(result)[0] = -1;
@@ -195,16 +200,33 @@ struct Message stream_recv(int client_fd) {
         error("Failed to allocate memory for buffer");
     }
 
+    struct pollfd pfd;
+    pfd.fd = client_fd;
+    pfd.events = POLLIN;
+
     // Receive the first part of the response, this will include the header
-    ssize_t recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);
-    if (recv_length <= 0) {
-        free(buffer);
-        error("Failed to receive data from socket");
+    ssize_t recv_length = 0;
+    while (recv_length == 0) {
+        int poll_result = poll(&pfd, 1, -1);
+        if (poll_result < 0) {
+            free(buffer);
+            error("Poll failed");
+        }
+
+        recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);
+        if (recv_length < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                recv_length = 0;  // Try again
+            } else {
+                free(buffer);
+                error("Failed to receive data from socket");
+            }
+        }
     }
 
     // Parse the header, from this we learn the expected size of the packet
     struct Header header = read_header(buffer);
-    
+
     result.length = 32 + header.offset + header.length;
 
     // Allocate enough memory to store the entire packet
@@ -216,16 +238,30 @@ struct Message stream_recv(int client_fd) {
 
     char* data_ptr = result.data;
     memcpy(data_ptr, buffer, recv_length);
+
     data_ptr += recv_length;
 
     free(buffer);
 
     // read in buffers of data until all data is received
     while ((size_t)(data_ptr - result.data) < result.length) {
-        recv_length = recv(client_fd, data_ptr, BUFFER_SIZE, 0);
-        if (recv_length <= 0) {
+        int poll_result = poll(&pfd, 1, -1);
+        if (poll_result < 0) {
             free(result.data);
-            error("Failed to receive complete data from socket");
+            error("Poll failed");
+        }
+
+        recv_length = recv(client_fd, data_ptr, BUFFER_SIZE, 0);
+        if (recv_length < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                continue;  // Try again
+            } else {
+                free(result.data);
+                error("Failed to receive complete data from socket");
+            }
+        } else if (recv_length == 0) {
+            free(result.data);
+            error("Connection closed by peer");
         }
         data_ptr += recv_length;
     }
@@ -247,14 +283,14 @@ SEXP get(int client_fd) {
 
     SEXP message = PROTECT(allocVector(VECSXP, 2));
     if (message == R_NilValue) {
-        UNPROTECT(1);
+        UNPROTECT(2);
         free(received_data.data);
         error("Failed to allocate memory for R list");
     }
 
     SEXP length = PROTECT(allocVector(INTSXP, 1));
     if (length == R_NilValue) {
-        UNPROTECT(2);
+        UNPROTECT(3);
         free(received_data.data);
         error("Failed to allocate memory for R integer");
     }
@@ -275,13 +311,56 @@ SEXP R_get(SEXP r_client_fd) {
     return get(INTEGER(r_client_fd)[0]);
 }
 
+
+ssize_t send_all_data(int client_fd, const char* data, size_t length) {
+    ssize_t total_sent = 0;
+    const char* current_position = data;
+    
+    while (total_sent < length) {
+        size_t remaining = length - total_sent;
+        size_t to_send = (remaining < BUFFER_SIZE) ? remaining : BUFFER_SIZE;
+        
+        ssize_t sent = send(client_fd, current_position, to_send, 0);
+        
+        if (sent == -1) {
+            if (errno == EINTR) {
+                // Interrupted by signal, retry
+                continue;
+            }
+            // Handle other errors
+            return -1;
+        } else if (sent == 0) {
+            // Connection closed
+            return total_sent;
+        }
+        
+        total_sent += sent;
+        current_position += sent;
+    }
+    
+    return total_sent;
+}
+
+void send_all_data_or_die(int client_fd, const char* data, size_t length) {
+    ssize_t nbytes_sent = send_all_data(client_fd, data, length);
+
+    if (nbytes_sent < 0){
+        error("Failed to start sending data");
+    }
+
+    if (nbytes_sent < length){
+        error("Failed to send full message");
+    }
+}
+
+
 SEXP R_send_data(SEXP R_client_fd, SEXP R_msg) {
     int client_fd = INTEGER(R_client_fd)[0];
     SEXP data = VECTOR_ELT(R_msg, 0);
     SEXP length = VECTOR_ELT(R_msg, 1);
-    
-    send(client_fd, RAW(data), INTEGER(length)[0], 0);
-    
+
+    send_all_data_or_die(client_fd, RAW(data), INTEGER(length)[0]);
+
     return R_NilValue;
 }
 
@@ -291,29 +370,35 @@ SEXP R_close_socket(SEXP R_socket_fd) {
     return R_NilValue;
 }
 
+
+
 SEXP R_ask(SEXP R_socket_path, SEXP R_message) {
     const char* socket_path = CHAR(asChar(R_socket_path));
-    SEXP data = VECTOR_ELT(R_message, 0);
-    SEXP length = VECTOR_ELT(R_message, 1);
+    char* data = RAW(VECTOR_ELT(R_message, 0));
+    size_t length = INTEGER(VECTOR_ELT(R_message, 1))[0];
     
     int client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+
     if (client_fd == -1) {
         Rf_error("Error creating socket\n");
         return R_NilValue; // never reached
     }
+
+    int flags = fcntl(client_fd, F_GETFL, 0);
+    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
     
     struct sockaddr_un server_addr;
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sun_family = AF_UNIX;
     strncpy(server_addr.sun_path, socket_path, sizeof(server_addr.sun_path) - 1);
-    
+
     if (connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
         close(client_fd);
         Rf_error("Empty message");
         return R_NilValue; // never reached
     }
     
-    send(client_fd, RAW(data), INTEGER(length)[0], 0);
+    send_all_data_or_die(client_fd, data, length);
 
     SEXP result = get(client_fd);
     
