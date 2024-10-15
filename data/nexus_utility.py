@@ -130,20 +130,22 @@ def client(pool, message):
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
                 s.connect(pool.pipe)
-                _log(f"connected to {pool.lang} pool ...")
-                _log(f"sending message: {message}")
+                fd = s.fileno()
+                _log(f"connected to {pool.lang} pool on fd {fd} ...")
+                _log(f"sending message on fd {fd}: {message}")
                 s.sendall(message)
-                _log(f"waiting for response")
+                _log(f"waiting for response from fd {fd}")
 
                 data = s.recv(BUFFER_SIZE)
 
+                _log(f"data received from {pool.lang} on fd {fd}")
                 (_, offset, length) = _read_header(data)
 
                 expected_size = 32 + offset + length
                 current_size = len(data) 
 
                 if current_size > expected_size:
-                    _log("Too much data")
+                    _log("Too much data from fd {fd}")
                     sys.exit(1)
                 elif current_size < expected_size:
                     datas = [data]
@@ -153,7 +155,7 @@ def client(pool, message):
                         current_size += len(data)
                     data = b"".join(datas)
 
-                _log(f"response received: {data}")
+                _log(f"response received from fd {fd}: {data}")
             break
         # try try again
         except (FileNotFoundError, ConnectionRefusedError) as e:
@@ -262,6 +264,7 @@ def _read_header(data : bytes) -> tuple[bytes, int, int]:
 
 def print_return(data):
     # Parse the call return packet
+    _log("Printing return")
     (cmd, offset, _) = _read_header(data)
 
     start = 32 + offset

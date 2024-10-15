@@ -299,15 +299,15 @@ int new_server(const char* SOCKET_PATH){
 
     // Bind the socket to the address
     if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
-        std::cerr << "Error binding socket\n";
-        close(server_fd);
+        log_message("Error binding socket");
+        socket_close(server_fd, "failed server");
         return 1;
     }
 
     // Listen for connections
     if (listen(server_fd, 1) == -1) {
-        std::cerr << "Error listening on socket\n";
-        close(server_fd);
+        log_message("Error listening on socket");
+        socket_close(server_fd, "failed server");
         return 1;
     }
 
@@ -484,7 +484,7 @@ Message ask(const char* socket_path, const Message& message){
         result = fail_packet("Failed to access client");
     }
 
-    close(client_fd);
+    socket_close(client_fd, "finished ask client");
 
     return result;
 }

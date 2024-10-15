@@ -72,6 +72,11 @@ void log_message(M message) {
     log_file << "C: " << message << std::endl;
 }
 
+void socket_close(int socket_id, const std::string& desc){
+    log_message("Closing " + desc + " socket fd for " + std::to_string(socket_id));
+    close(socket_id);
+}
+
 std::string show_hex(const char* input, int length) {
     std::stringstream ss;
 

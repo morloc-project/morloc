@@ -1,30 +1,21 @@
 all:
 	rm -f obs.txt
 	morloc make -v foo.loc > log
-	python make_test_data.py 4096 > data.json
-	./nexus.py pid data.json | wc -c >> obs.txt
-	./nexus.py cid data.json | wc -c >> obs.txt
-	./nexus.py rid data.json | wc -c >> obs.txt
-	python make_test_data.py 4097 > data.json
-	./nexus.py pid data.json | wc -c >> obs.txt
-	./nexus.py cid data.json | wc -c >> obs.txt
-	./nexus.py rid data.json | wc -c >> obs.txt
-	python make_test_data.py 4097 > data.json
-	./nexus.py pid data.json | wc -c >> obs.txt
-	./nexus.py cid data.json | wc -c >> obs.txt
-	./nexus.py rid data.json | wc -c >> obs.txt
-	python make_test_data.py 65536 > data.json
-	./nexus.py pid data.json | wc -c >> obs.txt
-	./nexus.py cid data.json | wc -c >> obs.txt
-	./nexus.py rid data.json | wc -c >> obs.txt
-	python make_test_data.py 65537 > data.json
-	./nexus.py pid data.json | wc -c >> obs.txt
-	./nexus.py cid data.json | wc -c >> obs.txt
-	./nexus.py rid data.json | wc -c >> obs.txt
-	python make_test_data.py 1048577 > data.json
-	./nexus.py pid data.json | wc -c >> obs.txt
-	./nexus.py cid data.json | wc -c >> obs.txt
-	./nexus.py rid data.json | wc -c >> obs.txt
+	# below buffer
+	python make_test_data.py 4065 > test-data.json
+	./nexus.py pid test-data.json | wc -c >> obs.txt
+	./nexus.py cid test-data.json | wc -c >> obs.txt
+	./nexus.py rid test-data.json | wc -c >> obs.txt
+	# above buffer
+	python make_test_data.py 4066 > test-data.json
+	./nexus.py pid test-data.json | wc -c >> obs.txt
+	./nexus.py cid test-data.json | wc -c >> obs.txt
+	./nexus.py rid test-data.json | wc -c >> obs.txt
+	# above mesg size
+	python make_test_data.py 1048577 > test-data.json
+	./nexus.py pid test-data.json | wc -c >> obs.txt
+	./nexus.py cid test-data.json | wc -c >> obs.txt
+	./nexus.py rid test-data.json | wc -c >> obs.txt
 
 clean:
 	rm -rf nexus* pool* __pycache__ data* 

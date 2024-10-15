@@ -20,4 +20,4 @@ pfoo :: Str -> Str
 pfoo = pid . cid . pid
 
 rfoo :: Str -> Str
-rfoo = rid . cid . rid
+rfoo = rid . pid . rid

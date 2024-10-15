@@ -48,4 +48,4 @@ nexusFiles = NexusSource
   (pretty . decodeUtf8 $ $(embedFileRelative "data/nexus_utility.py"))
   (pretty . decodeUtf8 $ $(embedFileRelative "data/nexus_main.py"))
 
-rSocketLib = (pretty . decodeUtf8 $ $(embedFileRelative "data/socket.c"))
+rSocketLib = (pretty . decodeUtf8 $ $(embedFileRelative "data/socketr.c"))

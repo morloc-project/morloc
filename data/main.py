@@ -93,11 +93,11 @@ def server(socket_path):
 
             if ready:
                 conn, addr = s.accept()
-                _log(f"Connected by {addr}")
+                _log(f"Connected on fd {conn.fileno()}")
                 data = _stream_data(conn)
 
                 if data:
-                    _log(f"Job {str(conn)} starting")
+                    _log(f"Job starting on fd {conn.fileno()}")
                     result_queue = multiprocessing.Queue()
                     p = multiprocessing.Process(
                         target=worker, args=(data, result_queue)
@@ -110,19 +110,19 @@ def server(socket_path):
 
                 if not result_queue.empty():
                     try:
-                        _log("Processing queue result")
+                        _log("Processing queue result for fd {conn.fileno()}")
                         result = result_queue.get(block=True)
-                        _log("got result")
+                        _log("got result on fd {conn.fileno()}")
 
                         if result is not None:
-                            _log(f"Sending result")
+                            _log(f"Sending result on fd {conn.fileno()}")
                             conn.send(result)
-                            _log(f"Sent result for process {p.pid}")
+                            _log(f"Sent result for process {p.pid} on fd {conn.fileno()}")
                     except Exception as e:
-                        _log(f"failed to get result from queue: {str(e)}")
+                        _log(f"failed to get result from queue: {str(e)} on fd {conn.fileno()}")
                 elif not p.is_alive():
                     # Send an empty message signaling failure
-                    errmsg = f"Process {p.pid} not alive and no result available"
+                    errmsg = f"Process {p.pid} on fd {conn.fileno()} not alive and no result available"
                     error_packet = _make_data(errmsg, status = PACKET_STATUS_FAIL)
                     conn.send(error_packet)
                 else:
@@ -132,22 +132,23 @@ def server(socket_path):
 
                 try:
                     # Process is done or we got a result, clean up
-                    _log(f"Closing connection for process {p.pid}")
+                    _log(f"Closing connection for process {p.pid} on fd {conn.fileno()}")
                     conn.close()
-                    _log(f"Removing job for process {p.pid}")
+                    _log(f"Removing job for process {p.pid} on fd {conn.fileno()}")
                     queue.remove(job)
-                    _log(f"Joining process {p.pid}")
+                    _log(f"Joining process {p.pid} on fd {conn.fileno()}")
                     p.join(timeout=0.0001)  # Wait for up to 1ms
                     if p.is_alive():
-                        _log(f"Force terminating process {p.pid}")
+                        _log(f"Force terminating process {p.pid} on fd {conn.fileno()}")
                         p.terminate()
                         p.join(timeout=0.0001)  # Wait again to ensure termination
-                    _log(f"Finished handling process {p.pid}")
+                    _log(f"Finished handling process {p.pid} on fd {conn.fileno()}")
                 except Exception as e:
-                    _log(f"failed to cleanup properly: {str(e)}")
+                    _log(f"failed to cleanup properly: {str(e)} on fd {conn.fileno()}")
 
 
 if __name__ == "__main__":
     socket_path = sys.argv[1]
     server(socket_path)
+
 

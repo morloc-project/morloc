@@ -14,7 +14,12 @@
 #include <poll.h>
 
 
-#define BUFFER_SIZE 4096
+/* Fuck it, I can't get streaming to work properly here So I'll just make the      */
+/* buffer big enough to hold anything This isn't as bad as it sounds, since really */
+/* large objects are written to files.                                             */
+#define BUFFER_SIZE 1048608
+
+#define LOGFILE "log"
 
 #define PACKET_TYPE_DATA  0x00
 #define PACKET_TYPE_CALL  0x01
@@ -44,12 +49,34 @@ struct Header {
     uint64_t length;
 };
 
+
+int log_message(const char *message) {
+    FILE *file = fopen(LOGFILE, "a");
+    
+    if (file == NULL) {
+        printf("R: Error opening file %s\n", LOGFILE);
+        return -1;
+    }
+    
+    fprintf(file, "R socket: %s", message);
+    
+    fclose(file);
+    return 0;
+}
+
+void socket_close(int socket_fd, const char *desc){
+    char msg[256];
+    sprintf(msg, "Closing %s socket number %d\n", desc, socket_fd);
+    log_message(msg); 
+    close(socket_fd);
+}
+
 // Create a Unix domain socket
 SEXP R_new_socket() {
     SEXP result = PROTECT(allocVector(INTSXP, 1));
     int socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (socket_fd == -1) {
-        REprintf("Error creating socket\n");
+        log_message("Error creating socket");
         INTEGER(result)[0] = -1;
     } else {
         INTEGER(result)[0] = socket_fd;
@@ -85,7 +112,7 @@ SEXP R_new_server(SEXP R_SOCKET_PATH) {
     fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
 
     if (server_fd == -1) {
-        REprintf("Error creating socket\n");
+        log_message("Error creating socket");
         INTEGER(result)[0] = -1;
         UNPROTECT(1);
         return result;
@@ -99,16 +126,16 @@ SEXP R_new_server(SEXP R_SOCKET_PATH) {
     unlink(SOCKET_PATH);
     
     if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
-        REprintf("Error binding socket\n");
-        close(server_fd);
+        log_message("Error binding socket");
+        socket_close(server_fd, "failing server");
         INTEGER(result)[0] = -1;
         UNPROTECT(1);
         return result;
     }
     
     if (listen(server_fd, 1) == -1) {
-        REprintf("Error listening on socket\n");
-        close(server_fd);
+        log_message("Error listening on socket");
+        socket_close(server_fd, "failing server");
         INTEGER(result)[0] = -1;
         UNPROTECT(1);
         return result;
@@ -191,6 +218,9 @@ struct Header read_header(const char* msg) {
 }
 
 struct Message stream_recv(int client_fd) {
+
+    char logmsg[256];
+
     struct Message result;
     result.length = 0;
     result.data = NULL;
@@ -203,6 +233,9 @@ struct Message stream_recv(int client_fd) {
     struct pollfd pfd;
     pfd.fd = client_fd;
     pfd.events = POLLIN;
+
+    sprintf(logmsg, "Polling %d for first packet\n", client_fd);
+    log_message(logmsg); 
 
     // Receive the first part of the response, this will include the header
     ssize_t recv_length = 0;
@@ -229,6 +262,10 @@ struct Message stream_recv(int client_fd) {
 
     result.length = 32 + header.offset + header.length;
 
+    if(result.length > BUFFER_SIZE){
+        error("Data exceeds buffer size and streaming is not supported for R");
+    }
+
     // Allocate enough memory to store the entire packet
     result.data = (char*)malloc(result.length * sizeof(char));
     if (!result.data) {
@@ -236,42 +273,21 @@ struct Message stream_recv(int client_fd) {
         error("Failed to allocate memory for result data");
     }
 
-    char* data_ptr = result.data;
-    memcpy(data_ptr, buffer, recv_length);
-
-    data_ptr += recv_length;
-
-    free(buffer);
-
-    // read in buffers of data until all data is received
-    while ((size_t)(data_ptr - result.data) < result.length) {
-        int poll_result = poll(&pfd, 1, -1);
-        if (poll_result < 0) {
-            free(result.data);
-            error("Poll failed");
-        }
-
-        recv_length = recv(client_fd, data_ptr, BUFFER_SIZE, 0);
-        if (recv_length < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                continue;  // Try again
-            } else {
-                free(result.data);
-                error("Failed to receive complete data from socket");
-            }
-        } else if (recv_length == 0) {
-            free(result.data);
-            error("Connection closed by peer");
-        }
-        data_ptr += recv_length;
-    }
-
     return result;
 }
 
 
 SEXP get(int client_fd) {
+
+    char logmsg[256];
+
+    sprintf(logmsg, "Entering get with client %d\n", client_fd);
+    log_message(logmsg); 
+
     struct Message received_data = stream_recv(client_fd);
+
+    sprintf(logmsg, "Retrieved %ld bytes\n", received_data.length);
+    log_message(logmsg); 
 
     SEXP data = PROTECT(allocVector(RAWSXP, received_data.length));
     if (data == R_NilValue) {
@@ -366,7 +382,7 @@ SEXP R_send_data(SEXP R_client_fd, SEXP R_msg) {
 
 SEXP R_close_socket(SEXP R_socket_fd) {
     int socket_fd = INTEGER(R_socket_fd)[0];
-    close(socket_fd);
+    socket_close(socket_fd, "unknown (from R command)");
     return R_NilValue;
 }
 
@@ -393,7 +409,7 @@ SEXP R_ask(SEXP R_socket_path, SEXP R_message) {
     strncpy(server_addr.sun_path, socket_path, sizeof(server_addr.sun_path) - 1);
 
     if (connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
-        close(client_fd);
+        socket_close(client_fd, "failing ask client");
         Rf_error("Empty message");
         return R_NilValue; // never reached
     }
@@ -402,7 +418,7 @@ SEXP R_ask(SEXP R_socket_path, SEXP R_message) {
 
     SEXP result = get(client_fd);
     
-    close(client_fd);
+    socket_close(client_fd, "ask client");
     
     return result;
 }

@@ -91,7 +91,7 @@ make_data <- function(
     return(c(header, notes, value))
 }
 
-fail_packet <- function(errmsg, errobj){
+fail_packet <- function(errmsg, errobj = NULL){
   if(is.null(errobj$fail_packet)){
     make_data(charToRaw(errmsg), status = PACKET_STATUS_FAIL)
   } else {
@@ -116,7 +116,9 @@ ACCEPT_READ_TIME = 0.0001
 
 # The parallelism strategy (see documentation for the R `future` package)
 # NOTE: This will not work on Windows, but it is the fastest option for local
-# compute on a UNIX machine
+# compute on a UNIX machine. The other approaches, like multisession, fail
+# terribly because they can't find the appropriate globals or dynamically linked
+# functions.
 future::plan(future::multicore)
 
 

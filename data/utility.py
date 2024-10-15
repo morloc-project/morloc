@@ -385,13 +385,17 @@ def _stream_data(conn):
 def _request_from_socket(socket_path, message):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         try:
-            _log(f"connecting to {socket_path}")
+            _log(f"Connecting to {socket_path}")
             s.connect(socket_path)
-            _log(f"sending message '{message}' to {socket_path}")
+            fd = s.fileno()
+            _log(f"Connected to {socket_path} on file descriptor {fd}")
+            
+            _log(f"Sending message '{message}' to {socket_path} on fd {fd}")
             s.send(message)
-            _log("requesting data")
+            
+            _log(f"Requesting data on fd {fd}")
             data = _stream_data(s)
-            _log(f"data {data} received from {socket_path}")
+            _log(f"Data {data} received from {socket_path} on fd {fd}")
         except Exception as e:
             raise FailingPacket(f"Failed socket connection: {str(e)}")
     return data

@@ -40,9 +40,7 @@ void run_job(int client_fd) {
             }
 
             // close the current client
-            close(new_job.client_fd);
-
-            log_message("Job finished, connection closed");
+            socket_close(new_job.client_fd, "finished job client");
 
             // And exit the child
             exit(0);
@@ -53,12 +51,12 @@ void run_job(int client_fd) {
             log_message("Parent process: added child with PID " + std::to_string(pid));
         } else {
             log_message("Fork failed");
-            close(client_fd);
+            socket_close(client_fd, "failed job client");
         }
     } else {
         // Close the connection if no data was received
         log_message("No data received, closing connection");
-        close(client_fd);
+        socket_close(client_fd, "failed job client");
     }
 }
 
@@ -129,8 +127,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Close the server
-    close(server_fd);
-    log_message("Server socket closed");
+    socket_close(server_fd, "server");
 
     // Remove the socket file
     unlink(SOCKET_PATH);
@@ -138,4 +135,3 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
-

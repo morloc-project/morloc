@@ -25,8 +25,9 @@ main = do
       , substituteTVarTests
       , subtypeTests
 
+      -- testing packet transmission
       , golden "packets-large" "packets-large"
-      -- , golden "packets-medium" "packets-medium"
+      , golden "packets-interop" "packets-interop"
 
       , golden "typeclasses-1" "typeclasses-1"
       , golden "typeclasses-2" "typeclasses-2"
@@ -290,6 +291,8 @@ main = do
       , golden "scoping-9" "scoping-9"
       -- type identities
       , golden "type-identities-c" "type-identities-c"
+
+
 
       -- , golden "argument-form-1-rs" "argument-form-1-rs"
       -- , golden "argument-form-2-rs" "argument-form-2-rs"
