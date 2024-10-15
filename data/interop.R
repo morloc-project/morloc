@@ -59,7 +59,11 @@
 
 
 .morloc_foreign_call <- function(pool_pipe, manifold_id, arg_keys) {
-  packet_length <- sum(sapply(arg_keys, length))
+  if(length(arg_keys) > 0){
+    packet_length <- sum(sapply(arg_keys, length))
+  } else {
+    packet_length <- 0
+  }
 
   cmd <- c(PACKET_TYPE_CALL, int32(manifold_id), 0x00, 0x00, 0x00)
   header <- make_header(cmd, offset = 0, length = packet_length)
