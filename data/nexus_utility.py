@@ -10,6 +10,7 @@ import threading
 import queue
 import struct
 import json
+import msgpack
 
 PACKET_TYPE_DATA = 0x00
 PACKET_TYPE_CALL = 0x01
@@ -22,6 +23,7 @@ PACKET_SOURCE_FILE = 0x01 # the message is a path to a file of data
 PACKET_SOURCE_NXDB = 0x02 # the message is a key to the nexus uses to access the data
 
 PACKET_FORMAT_JSON = 0x00
+PACKET_FORMAT_MSGPACK = 0x01
 
 PACKET_COMPRESSION_NONE = 0x00 # uncompressed
 
@@ -30,6 +32,7 @@ PACKET_STATUS_FAIL = 0x01
 
 PACKET_ENCRYPTION_NONE  = 0x00 # unencrypted
 
+MSGPACK_TYPE_TUPLE = 0
 
 # These three parameters describe the retru times for a pool connection to
 # open. The default parameters sum to a 4s max wait, which is well beyond what
@@ -63,6 +66,8 @@ def _log(msg):
     with open("log", "a+") as fh:
         print(f"Nexus: {msg}", file=fh)
 
+def hex(xs: bytes) -> str:
+    return ' '.join('{:02x}'.format(x) for x in xs)
 
 def cleanup():
     pools = resources["pools"]
@@ -105,6 +110,72 @@ def signal_handler(sig, frame):
 # This avoids dumping a trace when a user kills a job
 signal.signal(signal.SIGINT, signal_handler)
 
+
+# JSON deserialization handling
+
+def _deserialize_list(xs, schema):
+    deserialize = _dispatch_deserialize[schema[0]]
+    return [deserialize(x, schema[1]) for x in xs]
+
+
+def _deserialize_tuple(xs, schema):
+    return tuple([_dispatch_deserialize[s[0]](x, s[1])  for (x,s) in zip(xs, schema)])
+
+
+def _deserialize_record(d0, schema):
+    d = dict()
+    for (k, v) in schema.items():
+        deserializer = _dispatch_deserialize[v[0]]
+        d[k] = deserializer(d0[k], v[1])
+    return d
+
+_dispatch_deserialize = {
+    "list"   : _deserialize_list,
+    "tuple"  : _deserialize_tuple,
+    "record" : _deserialize_record,
+    "dict"   : _deserialize_record,
+    "float"  : lambda x, _: x,
+    "int"    : lambda x, _: x,
+    "str"    : lambda x, _: x,
+    "bool"   : lambda x, _: x,
+    "None"   : None
+}
+
+def json_deserialize(json_data, schema, is_file = False):
+    _log(f"Deserializing JSON, is_file={str(is_file)}")
+    if is_file:
+        with open(json_data, "r") as fh:
+            x = json.load(fh)
+    else:
+        x = json.loads(json_data)
+    if type(schema[0]) == str:
+        return _dispatch_deserialize[schema[0]](x, schema[1])
+    else:
+        return schema[0](**_deserialize_record(x, schema[1]))
+
+
+# MessagePack handling
+
+# Custom encoder for tuples
+def encode_tuple(obj):
+    if isinstance(obj, tuple):
+        return msgpack.ExtType(MSGPACK_TYPE_TUPLE, msgpack.packb(list(obj), default=encode_tuple, strict_types = True))
+    return obj
+
+# Custom decoder for tuples
+def decode_tuple(code, data):
+    if code == MSGPACK_TYPE_TUPLE:
+        return tuple(msgpack.unpackb(data, ext_hook=decode_tuple))
+    return msgpack.ExtType(code, data)
+
+def msgpack_serialize(data):
+    return msgpack.packb(data, default=encode_tuple, strict_types = True)
+
+def msgpack_deserialize(data):
+    return msgpack.unpackb(data, ext_hook=decode_tuple)
+
+
+# Socket code
 
 def client(pool, message):
 
@@ -245,15 +316,14 @@ def _pack(fmt, *args):
 
 def _read_header(data : bytes) -> tuple[bytes, int, int]:
     if len(data) < 32:
-        _log(f"packet is too small '{str(data)}'")
-        sys.exit(1)
+        raise ValueError (f"packet is too small '{str(data)}'")
 
     fields = _unpack("4B4H8sIQ", data[0:32])  
 
     observed_magic = fields[0:4]
-    expected_magic = (0x6D, 0xf8, 0x07,0x07)
+    expected_magic = (0x6d, 0xf8, 0x07,0x07)
     if observed_magic != expected_magic:
-        _log(f"bad magic: observed {observed_magic}, expected {expected_magic}")
+        raise ValueError (f"bad magic: observed {observed_magic}, expected {expected_magic}")
 
     command = fields[8]
     offset = fields[9]
@@ -266,8 +336,6 @@ def print_return(data):
     # Parse the call return packet
     _log("Printing return")
     (cmd, offset, _) = _read_header(data)
-
-    start = 32 + offset
 
     cmd_type = cmd[0]
     status = cmd[5]
@@ -290,23 +358,25 @@ def print_return(data):
     error = ""
 
     if cmd_source == PACKET_SOURCE_MESG:
-        if cmd_format == PACKET_FORMAT_JSON:
-            print(data[data_start:].decode(), file=outfile)
-            isgood = True
-        else:
-            _log("Invalid format")
+        content = data[data_start: ]
     elif cmd_source == PACKET_SOURCE_FILE:
-        if cmd_format == PACKET_FORMAT_JSON:
-            filename = data[data_start:].decode()
-            with open(filename, 'r') as file:
-                content = file.read()
-            os.unlink(filename)  # Delete the temporary file
-            print(content, file=outfile)
-            isgood = True
-        else:
-            error = "Invalid format"
-    else:
-        error = "Not yet supported"
+        filename = data[data_start:].decode()
+        with open(filename, 'rb') as file:
+            content = file.read()
+        os.unlink(filename)  # Delete the temporary file
+
+
+    if cmd_format == PACKET_FORMAT_JSON:
+        print(content, file=outfile)
+        isgood = True
+
+    if cmd_format == PACKET_FORMAT_MSGPACK:
+        try:
+            json.dump(msgpack_deserialize(content), fp = sys.stdout)
+        except:
+            _log(f"Failed to read output MessagePack format:\n hex = {hex(content)}\n chr = {str(content)}")
+        print() # just for that adorable little newline
+        isgood = True
 
     # Exit with the proper error code
     if isgood:
@@ -341,48 +411,99 @@ def _make_header(
         length
     )
 
+def _make_data(
+    value,
+    src    = PACKET_SOURCE_MESG,
+    fmt    = PACKET_FORMAT_MSGPACK,
+    cmpr   = PACKET_COMPRESSION_NONE,
+    encr   = PACKET_ENCRYPTION_NONE,
+    status = PACKET_STATUS_PASS,
+):
+    return _pack(
+        "32s{}s".format(len(value)),
+        _make_header(
+            len(value),
+            _pack("BBBBBBxx", PACKET_TYPE_DATA, src, fmt, cmpr, encr, status)
+        ),
+        value
+    )
+
 def _make_ping_packet():
     return _make_header(
       length = 0,
       command = _pack("Bxxxxxxx", PACKET_TYPE_PING)
     )
 
-def prepare_call_packet(mid, args):
+def get_format_from_extension(file_path):
+    extension = os.path.splitext(file_path)[1]
+    if extension == ".json":
+        return PACKET_FORMAT_JSON
+    elif extension in [".mpk", ".msgpack"]:
+        return PACKET_FORMAT_MSGPACK
+    else:
+        print(f"Unexpectd input file extension {extension} in file {file_path}", file=sys.stderr)
+        sys.exit(1)
+
+def get_format_from_data(binary_data):
+    try:
+        # TODO: Just peak at the first 1000 lines or so. This is still not safe,
+        # though, since small integers are valid in JSON and MessagePack. "2",
+        # for example, would be 50 in MessagePack and 2 in JSON. So there is
+        # overlap.
+        _ = msgpack_deserialize(binary_data)
+        return PACKET_FORMAT_MSGPACK
+    except:
+        return PACKET_FORMAT_JSON
+
+def handle_json_file_argument(filename, schema):
+    """
+    Convert the JSON file to MessagePack
+
+    If the file is short, then pass as message.
+
+    Otherwise, write the JSON data to a MessagePack file with extenssion .mpk
+    """
+    data = msgpack_serialize(json_deserialize(filename, schema, is_file = True))
+
+    if len(data) <= 65536 - 32:
+        return _make_data(data)
+    else:
+        msgpack_filename = os.path.splitext(filename)[0] + ".mpk"
+        with open(msgpack_filename, "wb") as fh:
+            fh.write(data)
+        return _make_data(msgpack_filename.encode("utf8"), src=PACKET_SOURCE_FILE)
+
+def handle_msgpack_file_argument(filename):
+    """
+    Read a messagepack file argument
+    """
+    return _make_data(filename.encode("utf8"), src = PACKET_SOURCE_FILE)
+
+def prepare_call_packet(mid, args, schema):
     arg_msgs = []
-    for arg in args:
-        arg = arg.encode("utf8")
+    for (arg, schema) in zip(args, schema):
         if os.path.isfile(arg):
-            header = _make_header(
-              length = len(arg),
-              command = _pack(
-                "BBBBBxxx",
-                PACKET_TYPE_DATA,
-                PACKET_SOURCE_FILE,
-                PACKET_FORMAT_JSON,
-                PACKET_COMPRESSION_NONE,
-                PACKET_ENCRYPTION_NONE
-              )
-            )
+            fmt = get_format_from_extension(arg)
+            if fmt == PACKET_FORMAT_JSON:
+                packet = handle_json_file_argument(arg, schema)
+            else:
+                packet = handle_msgpack_file_argument(arg)
         else:
             try:
                 # if it isn't a file but is readable anyway
                 # e.g., the product of file substitution
                 with open(arg, "rb") as fh: 
-                    arg = fh.read().strip()
+                    data = fh.read().strip()
             except:
-                pass
-            header = _make_header(
-              length = len(arg),
-              command = _pack(
-                "BBBBBxxx",
-                PACKET_TYPE_DATA,
-                PACKET_SOURCE_MESG,
-                PACKET_FORMAT_JSON,
-                PACKET_COMPRESSION_NONE,
-                PACKET_ENCRYPTION_NONE
-              )
-            )
-        arg_msgs.append(_pack("32s{}s".format(len(arg)), header, arg))
+                data = arg.encode("utf8")
+
+            fmt = get_format_from_data(data) == PACKET_FORMAT_JSON
+            if fmt == PACKET_FORMAT_JSON:
+                packet = _make_data(msgpack_serialize(json_deserialize(data, schema)))
+            else:
+                packet = _make_data(arg)
+
+        arg_msgs.append(packet)
 
     call_data_length = sum([len(arg_msg) for arg_msg in arg_msgs])
 
@@ -399,7 +520,7 @@ def prepare_call_packet(mid, args):
     return _pack(call_format, call_header, *arg_msgs)
     
 
-def run_command(mid, args, pool_lang, sockets):
+def run_command(mid, args, pool_lang, sockets, arg_schema):
     result = None
     error = ""
 
@@ -412,16 +533,14 @@ def run_command(mid, args, pool_lang, sockets):
                 _log(f"Failed to start {lang} language server: {str(e)}")
                 raise  # Re-raise the exception to be caught in the outer try block
 
-        message = prepare_call_packet(mid, args)
+        message = prepare_call_packet(mid, args, arg_schema)
 
         # Send arguments over the socket
         result = client(resources["pools"][pool_lang], message)
 
     except Exception as e:
-        _log(f"An error occurred: {str(e)}")
-        # You might want to set a specific error value or re-raise the exception
-        # depending on how you want to handle errors at a higher level
-        error = str(e)
+        error = f"An error occurred in run_command: {str(e)}"
+        _log(error)
 
     # Ensure that processes are stopped and files deleted in all cases
     finally:

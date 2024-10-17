@@ -27,9 +27,7 @@ def message_response(data):
         _log(f"dispatching on {str(cmdID)}")
 
         if cmdID not in dispatch:
-            sys.exit(
-                "Internal error in python pool: no manifold found with id={}".format(cmdID)
-            )
+            raise FailingPacket(f"Internal error in python pool: no manifold found with id={str(cmdID)}")
 
         mlc_function = dispatch[cmdID]
 
@@ -37,12 +35,10 @@ def message_response(data):
             result = mlc_function(*args)
 
         except FailingPacket as e:
-            _log("returning error packet from run of manifold {str(cmdID)}")
-            result = e.packet
+            raise FailingPacket(f"Forwarding fail from m{str(cmdID)}: {str(e)}")
 
         except Exception as e:
-            errmsg = f"Error in m{str(cmdID)}: {str(e)}".encode("utf8")
-            result = _make_data(errmsg, status = PACKET_STATUS_FAIL)
+            raise FailingPacket(f"Error in m{str(cmdID)}: {str(e)}")
 
         _log(f"from cmdID {str(cmdID)} pool returning message '{len(result)}'")
     else:
@@ -64,7 +60,7 @@ def worker(data, result_queue):
         _log("Worker put result in queue")
         _log(f"New queue size: {str(result_queue.qsize())}")
     except Exception as e:
-        _log(f"Worker error: {e}")
+        _log(f"Worker error: {str(e)}")
         result_queue.put(
             None, block=True, timeout=None
         )  # Put None to indicate an error
@@ -122,7 +118,7 @@ def server(socket_path):
                         _log(f"failed to get result from queue: {str(e)} on fd {conn.fileno()}")
                 elif not p.is_alive():
                     # Send an empty message signaling failure
-                    errmsg = f"Process {p.pid} on fd {conn.fileno()} not alive and no result available"
+                    errmsg = msgpack.packb(f"Process {p.pid} on fd {conn.fileno()} not alive and no result available")
                     error_packet = _make_data(errmsg, status = PACKET_STATUS_FAIL)
                     conn.send(error_packet)
                 else:
@@ -148,7 +144,11 @@ def server(socket_path):
 
 
 if __name__ == "__main__":
-    socket_path = sys.argv[1]
-    server(socket_path)
-
-
+    try:
+        socket_path = sys.argv[1]
+        server(socket_path)
+        _log("Python pool exiting successfully")
+        sys.exit(0)
+    except Exception as e:
+        _log(f"Python pool failed: {str(e)}")
+        sys.exit(1)

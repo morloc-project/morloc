@@ -22,6 +22,8 @@ import qualified Control.Monad as CM
 import qualified Morloc.Config as MC
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
+import qualified Morloc.CodeGenerator.Infer as Infer
+import qualified Morloc.CodeGenerator.Serial as Serial
 
 type FData =
   ( Socket
@@ -29,6 +31,7 @@ type FData =
   , Int -- manifold ID
   , Type -- argument type
   , [Socket] -- list of sockets needed for this command
+  , [MDoc] -- argument type schemas
   )
 
 generate :: [NexusCommand] -> [(Type, Int, Lang, [Socket])] -> MorlocMonad Script
@@ -49,13 +52,45 @@ generate cs xs = do
 getFData :: (Type, Int, Lang, [Socket]) -> MorlocMonad FData
 getFData (t, i, lang, sockets) = do
   mayName <- MM.metaName i
+  schemas <- makeSchemas i lang t
   case mayName of
     (Just name') -> do
       config <- MM.ask
       let socket = MC.setupServerAndSocket config lang 
-      return (socket, pretty name', i, t, sockets)
+      return (socket, pretty name', i, t, sockets, schemas)
     Nothing -> MM.throwError . GeneratorError $ "No name in FData"
 
+makeSchemas :: Int -> Lang -> Type -> MorlocMonad [MDoc]
+makeSchemas mid lang (FunT ts _) = mapM (makeSchema mid lang) ts
+makeSchemas _ _ _ = return [] 
+
+makeSchema :: Int -> Lang -> Type -> MorlocMonad MDoc
+makeSchema mid lang t = do
+  ft <- Infer.inferConcreteTypeUniversal lang t
+  ast <- Serial.makeSerialAST mid lang ft
+  return $ typeSchema ast
+
+typeSchema :: SerialAST -> MDoc
+typeSchema = f . Serial.serialAstToJsonType
+  where
+    f :: JsonType -> MDoc
+    f (VarJ v) = lst [var v, "None"]
+    f (ArrJ v ts) = lst [var v, lst (map f ts)]
+    f (NamJ (CV "dict") es) = lst [dquotes "dict", dict (map entry es)]
+    f (NamJ (CV "record") es) = lst [dquotes "record", dict (map entry es)]
+    f (NamJ v es) = lst [pretty v, dict (map entry es)]
+
+    entry :: (Key, JsonType) -> MDoc
+    entry (v, t) = pretty v <> "=" <> f t
+
+    dict :: [MDoc] -> MDoc
+    dict xs = "OrderedDict" <> lst xs
+
+    lst :: [MDoc] -> MDoc
+    lst xs = encloseSep "(" ")" "," xs
+
+    var :: CVar -> MDoc
+    var v = dquotes (pretty v)
 
 
 main :: [MDoc] -> [FData] -> [NexusCommand] -> MDoc
@@ -89,7 +124,7 @@ def usage():
 |]
 
 usageLineT :: FData -> MDoc
-usageLineT (_, name', _, t, _) = vsep
+usageLineT (_, name', _, t, _, _) = vsep
   ( [idoc|print("  #{name'}")|]
   : writeTypes t
   )
@@ -112,7 +147,7 @@ writeType Nothing  t = [idoc|print('''    return: #{pretty t}''')|]
 
 
 functionT :: FData -> MDoc
-functionT (Socket lang _ _, subcommand, mid, t, sockets) =
+functionT (Socket lang _ _, subcommand, mid, t, sockets, schemas) =
   [idoc|
 def call_#{subcommand}(args):
     if len(args) != #{pretty (nargs t)}:
@@ -122,7 +157,8 @@ def call_#{subcommand}(args):
             mid = #{pretty mid},
             args = args,
             pool_lang = #{poolLangDoc},
-            sockets = #{socketsDoc}
+            sockets = #{socketsDoc},
+            arg_schema = #{list(schemas)},
         )
 |]
   where

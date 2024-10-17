@@ -1,205 +1,3 @@
-# Serialization section ####
-
-def mlc_list(arg):
-    """
-  Helper function for building list types
-
-  The "list" here is a homogenous vector, like the Haskell or lisp list, not
-  the named, heterogenous lists of python. So `mlc_list(mlc_integer)` would be
-  the python3 version of the Haskell type `[Int]`.
-
-  @param args The type parameter for a list
-  """
-    return ("list", arg)
-
-
-def mlc_tuple(*args):
-    """
-  Helper function for building tuple types
-
-  @param *args The type parameter for the tuple
-  """
-    return ("tuple", [*args])
-
-
-def mlc_record(**kwargs):
-    """
-  Helper function for building record types
-
-  @param **kwargs The keyword arguments for the record
-  """
-    return ("record", dict(**kwargs))
-
-
-def mlc_object(f, **kwargs):
-    """
-  Helper function for building object types
-
-  @param **kwargs The keyword arguments for the record
-  """
-    return (f, dict(**kwargs))
-
-
-mlc_int = ("int", None)
-
-mlc_float = ("float", None)
-
-mlc_str = ("str", None)
-
-mlc_bool = ("bool", None)
-
-mlc_null = ("null", None)
-
-def serialize_list(x, schema):
-    f = dispatch_serialize[schema[0]]
-    return "[{}]".format(",".join([f(y, schema[1]) for y in x]))
-
-
-def serialize_tuple(x, schema):
-    elements = []
-    for (t, e) in zip(schema, x):
-        f = dispatch_serialize[t[0]]
-        elements.append(f(e, t[1]))
-    return "[{}]".format(",".join(elements))
-
-
-def serialize_record(x, schema):
-    entries = []
-    for (k, t) in schema.items():
-        try:
-            f = dispatch_serialize[t[0]]
-            entries.append('"{}":{}'.format(k, f(x[k], t[1])))
-        except:
-            print(f"Mismatch found between serial specification and actual serialized data.", file = sys.stderr)
-            print(f"This may be caused by a sourced function that is not following its type signature.", file = sys.stderr)
-            print(f"  k ({type(k)}): {str(k)}", file = sys.stderr)
-            print(f"  t ({type(t)}): {str(t)}", file = sys.stderr)
-            print(f"  x ({type(x)}): {str(x)}", file = sys.stderr)
-            sys.exit(1)
-    return "{{{}}}".format(",".join(entries))
-
-
-def serialize_float(x, schema):
-    return str(x)
-
-
-def serialize_int(x, schema):
-    return str(x)
-
-
-def serialize_str(x, schema):
-    return json.dumps(x)
-
-
-def serialize_bool(x, schema):
-    return json.dumps(x)
-
-def serialize_none(x, schema):
-    return json.dumps(None)
-
-dispatch_serialize = { 
-    "list" : serialize_list,
-    "tuple" : serialize_tuple,
-    "record" : serialize_record,
-    "dict" : serialize_record,
-    "float" : serialize_float,
-    "int" : serialize_int,
-    "str" : serialize_str,
-    "bool" : serialize_bool,
-    "None" : serialize_none,
-  }
-
-
-def mlc_serialize(x, schema):
-    if type(schema[0]) == str:
-        return dispatch_serialize[schema[0]](x, schema[1])
-    else:
-        # Is the label is not a string, then it is a constructor,
-        # so the data should an object
-        return serialize_record(x.__dict__, schema[1])
-
-
-def deserialize_list(xs, schema):
-    deserialize = dispatch_deserialize[schema[0]]
-    return [deserialize(x, schema[1]) for x in xs]
-
-
-def deserialize_tuple(xs, schema):
-    return tuple([dispatch_deserialize[s[0]](x, s[1])  for (x,s) in zip(xs, schema)])
-
-
-def deserialize_record(d0, schema):
-    d = dict()
-    for (k, v) in schema.items():
-        deserializer = dispatch_deserialize[v[0]]
-        d[k] = deserializer(d0[k], v[1])
-    return d
-
-
-dispatch_deserialize = {
-    "list"   : deserialize_list,
-    "tuple"  : deserialize_tuple,
-    "record" : deserialize_record,
-    "dict"   : deserialize_record,
-    "float"  : lambda x, _: x,
-    "int"    : lambda x, _: x,
-    "str"    : lambda x, _: x,
-    "bool"   : lambda x, _: x,
-    "None"   : None
-}
-
-
-def mlc_deserialize(json_str, schema):
-    try:
-        x = json.loads(json_str)
-    except json.JSONDecodeError as e:
-        print(f"Python deserialization error in pymorlocinternals. Failed to deserialized type {type(json_str)} with value: {str(json_str)}", file=sys.stderr)
-        print(f"Using schema: {str(schema)}", file=sys.stderr)
-        print(f"JSONDecodeError: {str(e)}", file=sys.stderr)
-        sys.exit(1)
-    except:
-        print(f"Failed to deserialize '{json_str}' of type '{type(json_str)}'", file=sys.stderr)
-        sys.exit(1)
-    if type(schema[0]) == str:
-        return dispatch_deserialize[schema[0]](x, schema[1])
-    else:
-        return schema[0](**deserialize_record(x, schema[1]))
-
-
-def _get_value(data: bytes) -> str:
-
-    (cmd, offset, length) = _read_header(data)
-
-    cmd_type = cmd[0]
-
-    data_start = 32 + offset
-
-    if(cmd_type != PACKET_TYPE_DATA):
-        _log("You are fucked")
-
-    cmd_source = cmd[1]
-    cmd_format = cmd[2]
-
-    if cmd_source == PACKET_SOURCE_MESG:
-        if cmd_format == PACKET_FORMAT_JSON:
-            return data[data_start:].decode()
-        else:
-            _log("Invalid format")
-    elif cmd_source == PACKET_SOURCE_FILE:
-        if cmd_format == PACKET_FORMAT_JSON:
-            filename = data[data_start:].decode()
-            with open(filename, 'r') as file:
-                content = file.read()
-            os.unlink(filename)  # Delete the temporary file
-            return content
-        else:
-            _log("Invalid format")
-    else:
-        _log("Invalid source")
-
-    return ""  # fail
-
-
 def _unpack(fmt, *args):
     fmt = ">" + fmt
     try:
@@ -248,7 +46,7 @@ def _make_header(
 def _make_data(
     value,
     src    = PACKET_SOURCE_MESG,
-    fmt    = PACKET_FORMAT_JSON,
+    fmt    = PACKET_FORMAT_MSGPACK,
     cmpr   = PACKET_COMPRESSION_NONE,
     encr   = PACKET_ENCRYPTION_NONE,
     status = PACKET_STATUS_PASS,
@@ -282,28 +80,90 @@ def _read_header(data : bytes) -> tuple[bytes, int, int]:
     # return the offset and length
     return (command, offset, length)
 
-
 class FailingPacket(Exception):
     """An exception that passes up a Fail packet"""
 
     def __init__(self, errmsg, error_code=None):
         try:
-            errmsg = errmsg.encode("utf8")
+            errmsg = msgpack.packb(errmsg.encode("utf8"))
         except:
             pass
-        self.packet = _make_data(errmsg, status = PACKET_STATUS_FAIL)
+        try:
+            self.packet = _make_data(errmsg, status = PACKET_STATUS_FAIL)
+        except Exception as e:
+            errmsg = f"Failed to fail properly: {str(e)}"
+            _log(errmsg)
+            sys.exit(1)
         self.error_code = error_code
         super().__init__(self.packet)
 
     def __str__(self):
-        errmsg = self.packet[31:].decode()
+        try:
+            errmsg = msgpack.unpackb(self.packet[32:])
+        except Exception as e:
+            return f"Malformed FailingPacket {str(e)}"
         if self.error_code:
             return f"FailingPacket ({self.error_code}): {errmsg}"
         return f"FailingPacket: {errmsg}"
 
 
+# Custom encoder for tuples
+def encode_tuple(obj):
+    if isinstance(obj, tuple):
+        return msgpack.ExtType(MSGPACK_TYPE_TUPLE, msgpack.packb(list(obj), default=encode_tuple, strict_types = True))
+    return obj
 
-def _put_value(value: bytes) -> bytes:
+# Custom decoder for tuples
+def decode_tuple(code, data):
+    if code == MSGPACK_TYPE_TUPLE:
+        return tuple(msgpack.unpackb(data, ext_hook=decode_tuple))
+    return msgpack.ExtType(code, data)
+
+def msgpack_serialize(data):
+    return msgpack.packb(data, default=encode_tuple, strict_types = True)
+
+def msgpack_deserialize(data):
+    return msgpack.unpackb(data, ext_hook=decode_tuple)
+
+
+def _get_value(data: bytes):
+
+    (cmd, offset, _) = _read_header(data)
+
+    cmd_type   = cmd[0]
+    cmd_source = cmd[1]
+    cmd_format = cmd[2]
+
+    if(cmd_type != PACKET_TYPE_DATA):
+        errmsg = "Expected a data packet"
+        raise FailingPacket(errmsg)
+
+    if cmd_format == PACKET_FORMAT_MSGPACK:
+        deserializer = msgpack_deserialize
+    elif cmd_format == PACKET_FORMAT_JSON:
+        raise FailingPacket("JSON no longer supported inside pools")
+    else:
+        raise FailingPacket(f"Invalid format {str(cmd_format)}")
+
+    data_start = 32 + offset
+
+    if cmd_source == PACKET_SOURCE_MESG:
+        try:
+            return(deserializer(data[data_start:]))
+        except Exception as e:
+            raise FailingPacket(f"Failed to parse msg packet: {str(e)}")
+    elif cmd_source == PACKET_SOURCE_FILE:
+        try:
+            filename = data[data_start:].decode()
+            with open(filename, 'rb') as file:
+                return(deserializer(file.read()))
+        except Exception as e:
+            raise FailingPacket(f"Failed to parse file packet: {str(e)}")
+    else:
+        errmsg = "Invalid source" 
+        raise FailingPacket(errmsg)
+
+def _put_value(value) -> bytes:
     """
     Takes an encoded value and returns a packet representing it. This packet may
     be read by another _get_value function to retrieve the encoded value.
@@ -313,51 +173,19 @@ def _put_value(value: bytes) -> bytes:
     be a key or filename needed to retrieve it.
     """
 
-    if len(value) <= 65536 - 32:
-        return _make_data(value)
+    try:
+        data = msgpack_serialize(value)
+    except Exception as e:
+        raise FailingPacket(f"Could not serialize data: {str(e)}")
+
+    if len(data) <= 65536 - 32:
+        return _make_data(data)
     else:
         # for large data, write a temporary file
         with tempfile.NamedTemporaryFile(delete=False, mode='wb') as temp_file:
-            temp_file.write(value)
+            temp_file.write(data)
             tmpfilename = temp_file.name
         return _make_data(tmpfilename.encode("utf8"), src=PACKET_SOURCE_FILE)
-
-def _get_value(data: bytes) -> bytes:
-
-    (cmd, offset, _) = _read_header(data)
-
-    cmd_type = cmd[0]
-
-    data_start = 32 + offset
-
-    value = b''
-
-    if(cmd_type == PACKET_TYPE_DATA):
-
-        cmd_source = cmd[1]
-        cmd_format = cmd[2]
-
-        if cmd_source == PACKET_SOURCE_MESG:
-            if cmd_format == PACKET_FORMAT_JSON:
-                return data[data_start:]
-            else:
-                raise FailingPacket("Invalid format")
-        elif cmd_source == PACKET_SOURCE_FILE:
-            if cmd_format == PACKET_FORMAT_JSON:
-                filename = data[data_start:]
-                with open(filename, 'rb') as file:
-                    value = file.read()
-            else:
-                errmsg = "Invalid format" 
-                raise FailingPacket(errmsg)
-        else:
-            errmsg = "Invalid source" 
-            raise FailingPacket(errmsg)
-    else:
-        errmsg = "Expected a data packet"
-        raise FailingPacket(errmsg)
-
-    return value
 
 def _stream_data(conn):
     first_packet = conn.recv(BUFFER_SIZE)

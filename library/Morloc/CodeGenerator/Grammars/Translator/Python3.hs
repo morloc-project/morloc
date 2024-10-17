@@ -99,8 +99,7 @@ objectAccess object field = object <> "." <> field
 serialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 serialize v0 s0 = do
   (ms, v1) <- serialize' v0 s0
-  let schema = typeSchema s0
-      v2 = [idoc|_put_value(mlc_serialize#{tupled [v1, schema]}.encode("utf8"))|]
+  let v2 = [idoc|_put_value(#{v1})|]
   return (v2, ms)
   where
     serialize' :: MDoc -> SerialAST -> Index ([MDoc], MDoc)
@@ -146,13 +145,11 @@ serialize v0 s0 = do
 deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 deserialize v0 s0
   | isSerializable s0 = do
-      let schema = typeSchema s0
-          deserializing = [idoc|mlc_deserialize(_get_value(#{v0}), #{schema})|]
+      let deserializing = [idoc|_get_value(#{v0})|]
       return (deserializing, [])
   | otherwise = do
       rawvar <- helperNamer <$> newIndex
-      let schema = typeSchema s0
-          deserializing = [idoc|#{rawvar} = mlc_deserialize(_get_value(#{v0}), #{schema})|]
+      let deserializing = [idoc|#{rawvar} = _get_value(#{v0})|]
       (x, befores) <- check rawvar s0
       return (x, deserializing:befores)
   where
@@ -295,28 +292,6 @@ makeDispatch ms = align . vsep $ ["dispatch = {", indent 4 (vsep $ map entry ms)
     entry :: SerialManifold -> MDoc
     entry (SerialManifold i _ _ _)
       = pretty i <> ":" <+> manNamer i <> ","
-
-typeSchema :: SerialAST -> MDoc
-typeSchema = f . serialAstToJsonType
-  where
-    f :: JsonType -> MDoc
-    f (VarJ v) = lst [var v, "None"]
-    f (ArrJ v ts) = lst [var v, lst (map f ts)]
-    f (NamJ (CV "dict") es) = lst [dquotes "dict", dict (map entry es)]
-    f (NamJ (CV "record") es) = lst [dquotes "record", dict (map entry es)]
-    f (NamJ v es) = lst [pretty v, dict (map entry es)]
-
-    entry :: (Key, JsonType) -> MDoc
-    entry (v, t) = pretty v <> "=" <> f t
-
-    dict :: [MDoc] -> MDoc
-    dict xs = "OrderedDict" <> lst xs
-
-    lst :: [MDoc] -> MDoc
-    lst xs = encloseSep "(" ")" "," xs
-
-    var :: CVar -> MDoc
-    var v = dquotes (pretty v)
 
 makePool :: MDoc -> [MDoc] -> [MDoc] -> MDoc -> MDoc
 makePool lib includeDocs manifolds dispatch = [idoc|#!/usr/bin/env python

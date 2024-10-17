@@ -1,7 +1,7 @@
 import sys
 import tempfile
 import os
-import json
+import msgpack
 import struct
 
 # import only used if dictionaries are passed
@@ -24,6 +24,7 @@ PACKET_SOURCE_FILE = 0x01 # the message is a path to a file of data
 PACKET_SOURCE_NXDB = 0x02 # the message is a key to the nexus uses to access the data
 
 PACKET_FORMAT_JSON = 0x00
+PACKET_FORMAT_MSGPACK = 0x01
 
 PACKET_COMPRESSION_NONE = 0x00 # uncompressed
 
@@ -31,6 +32,8 @@ PACKET_STATUS_PASS = 0x00
 PACKET_STATUS_FAIL = 0x01
 
 PACKET_ENCRYPTION_NONE  = 0x00 # unencrypted
+
+MSGPACK_TYPE_TUPLE = 0
 
 # These three parameters describe the retry times for a pool connection to
 # open. The default parameters sum to a 4s max wait, which is well beyond what
