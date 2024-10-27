@@ -295,7 +295,7 @@ makePool :: [MDoc] -> [MDoc] -> MDoc
 makePool sources manifolds = [idoc|#!/usr/bin/env Rscript
 
 # TODO: get the path from config
-dyn.load("~/.morloc/lib/socketr.so")
+dyn.load("~/.morloc/lib/libsocketr.so")
 
 #{vsep sources}
 

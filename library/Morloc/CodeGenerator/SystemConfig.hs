@@ -39,7 +39,7 @@ makeRSocketLib socketLib = do
   config <- MM.ask
   let srcpath = configHome config <> "/lib/socketr.c"
       objpath = configHome config <> "/lib/socketr.o"
-      libpath = configHome config <> "/lib/socketr.so"
+      libpath = configHome config <> "/lib/libsocketr.so"
   liftIO (compileCCodeIfNeeded (MD.render socketLib) srcpath libpath objpath)
   
 compileCCodeIfNeeded :: MT.Text -> Path -> Path -> Path -> IO ()
@@ -54,7 +54,7 @@ compileCCodeIfNeeded codeText srcPath libPath objPath = do
 
            -- Compile the C code, will generate a .so file with same path and
            -- basename as the source .c file
-            let compileCommand = "R CMD SHLIB " ++ srcPath
+            let compileCommand = "R CMD SHLIB " ++ srcPath ++ "-o " ++ libPath 
             callCommand compileCommand
 
             -- Delete the source .c file
