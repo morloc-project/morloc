@@ -32,10 +32,17 @@ type FData =
   , Type -- argument type
   , [Socket] -- list of sockets needed for this command
   , [MDoc] -- argument type schemas
+  , MDoc -- return type schema
   )
 
 generate :: [NexusCommand] -> [(Type, Int, Lang, [Socket])] -> MorlocMonad Script
 generate cs xs = do
+
+  -- find the path for extensions
+  -- this includes the mlcmpack module needed for MessagePack handling
+  home <- MM.asks MC.configHome
+  let optDir = pretty $ home </> "opt" 
+
   callNames <- mapM (MM.metaName . (\(_, i, _, _) -> i)) xs |>> catMaybes |>> map pretty
   let gastNames = map (pretty . commandName) cs
       names = callNames <> gastNames
@@ -45,68 +52,42 @@ generate cs xs = do
     Script
       { scriptBase = outfile
       , scriptLang = ML.Python3Lang
-      , scriptCode = "." :/ File outfile (Code . render $ main names fdata cs)
+      , scriptCode = "." :/ File outfile (Code . render $ main optDir names fdata cs)
       , scriptMake = [SysExe outfile]
       }
 
 getFData :: (Type, Int, Lang, [Socket]) -> MorlocMonad FData
 getFData (t, i, lang, sockets) = do
   mayName <- MM.metaName i
-  schemas <- makeSchemas i lang t
+  (arg_schemas, return_schema) <- makeSchemas i lang t
   case mayName of
     (Just name') -> do
       config <- MM.ask
       let socket = MC.setupServerAndSocket config lang 
-      return (socket, pretty name', i, t, sockets, schemas)
+      return (socket, pretty name', i, t, sockets, map dquotes arg_schemas, dquotes return_schema)
     Nothing -> MM.throwError . GeneratorError $ "No name in FData"
 
-makeSchemas :: Int -> Lang -> Type -> MorlocMonad [MDoc]
-makeSchemas mid lang (FunT ts _) = mapM (makeSchema mid lang) ts
-makeSchemas _ _ _ = return [] 
+makeSchemas :: Int -> Lang -> Type -> MorlocMonad ([MDoc], MDoc)
+makeSchemas mid lang (FunT ts t) = do
+  ss <- mapM (makeSchema mid lang) ts
+  s <- makeSchema mid lang t
+  return (ss, s)
+makeSchemas _ _ _ = return ([], "z") -- return null schema, "z" 
 
 makeSchema :: Int -> Lang -> Type -> MorlocMonad MDoc
 makeSchema mid lang t = do
   ft <- Infer.inferConcreteTypeUniversal lang t
   ast <- Serial.makeSerialAST mid lang ft
-  return $ typeSchema ast
-
-typeSchema :: SerialAST -> MDoc
-typeSchema = f . Serial.serialAstToJsonType
-  where
-    f :: JsonType -> MDoc
-    f (VarJ v) = lst [var v, "None"]
-    f (ArrJ v ts) = lst [var v, lst (map f ts)]
-    f (NamJ (CV "dict") es) = lst [dquotes "dict", dict (map entry es)]
-    f (NamJ (CV "record") es) = lst [dquotes "record", dict (map entry es)]
-    f (NamJ v es) = lst [pretty v, dict (map entry es)]
-
-    entry :: (Key, JsonType) -> MDoc
-    entry (v, t) = pretty v <> "=" <> f t
-
-    dict :: [MDoc] -> MDoc
-    dict xs = "OrderedDict" <> lst xs
-
-    lst :: [MDoc] -> MDoc
-    lst xs = encloseSep "(" ")" "," xs
-
-    var :: CVar -> MDoc
-    var v = dquotes (pretty v)
+  return $ Serial.serialAstToMsgpackSchema ast
 
 
-main :: [MDoc] -> [FData] -> [NexusCommand] -> MDoc
-main names fdata cdata =
-  [idoc|#{nexusSourceUtility langSrc}
-
-#{usageT fdata cdata}
-
-#{vsep (map functionCT cdata ++ map functionT fdata)}
-
-#{mapT names}
-
-#{nexusSourceMain langSrc}
-|]
-  where
-    langSrc = DF.nexusFiles
+main :: MDoc -> [MDoc] -> [FData] -> [NexusCommand] -> MDoc
+main optDir names fdata cdata = format DF.nexusTemplate "# <<<BREAK>>>"
+ [ [idoc|sys.path = [os.path.expanduser("#{optDir}")] + sys.path|]
+ , usageT fdata cdata <> "\n" <>
+   vsep (map functionCT cdata ++ map functionT fdata) <> "\n" <>
+   mapT names
+ ]
 
 mapT :: [Doc ann] -> Doc ann
 mapT names = [idoc|command_table = #{dict}|] where
@@ -124,7 +105,7 @@ def usage():
 |]
 
 usageLineT :: FData -> MDoc
-usageLineT (_, name', _, t, _, _) = vsep
+usageLineT (_, name', _, t, _, _, _) = vsep
   ( [idoc|print("  #{name'}")|]
   : writeTypes t
   )
@@ -147,7 +128,7 @@ writeType Nothing  t = [idoc|print('''    return: #{pretty t}''')|]
 
 
 functionT :: FData -> MDoc
-functionT (Socket lang _ _, subcommand, mid, t, sockets, schemas) =
+functionT (Socket lang _ _, subcommand, mid, t, sockets, schemas, return_schema) =
   [idoc|
 def call_#{subcommand}(args):
     if len(args) != #{pretty (nargs t)}:
@@ -159,6 +140,7 @@ def call_#{subcommand}(args):
             pool_lang = #{poolLangDoc},
             sockets = #{socketsDoc},
             arg_schema = #{list(schemas)},
+            return_schema = #{return_schema}
         )
 |]
   where

@@ -11,41 +11,48 @@ Stability   : experimental
 -}
 
 module Morloc.DataFiles
-  ( languageFiles
-  , nexusFiles
+  ( poolTemplate
+  , nexusTemplate
   , rSocketLib
+  , msgpackSource
+  , rmpack
+  , pympack
   ) where
 
 import Morloc.Namespace
 import Data.Text.Encoding (decodeUtf8)
 import Data.FileEmbed (embedFileRelative)
+import Data.Text (Text) 
 
-import Morloc.Data.Doc as MD
+-- Pool templates for all supported languages
+poolTemplate :: Lang -> Text
+poolTemplate CppLang     = decodeUtf8 $ $(embedFileRelative "data/pools/pool.cpp")
+poolTemplate Python3Lang = decodeUtf8 $ $(embedFileRelative "data/pools/pool.py")
+poolTemplate RLang       = decodeUtf8 $ $(embedFileRelative "data/pools/pool.R")
+poolTemplate _ = undefined
 
--- | Language-specific source code that is inserted into the generated pools
-languageFiles :: Lang -> LanguageSource
-languageFiles CppLang = LanguageSource
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/preamble.cpp"))
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/interop.cpp"))
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/serialization.cpp"))
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/utility.cpp"))
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/main.cpp"))
-languageFiles Python3Lang = LanguageSource
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/preamble.py"))
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/interop.py"))
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/serialization.py"))
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/utility.py"))
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/main.py"))
-languageFiles RLang = LanguageSource
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/preamble.R"))
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/interop.R"))
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/serialization.R"))
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/utility.R"))
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/main.R"))
-languageFiles _ = LanguageSource "" "" "" "" ""
+-- The nexus template
+nexusTemplate :: Text
+nexusTemplate = decodeUtf8 $ $(embedFileRelative "data/nexus.py")
 
-nexusFiles = NexusSource
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/nexus_utility.py"))
-  (pretty . decodeUtf8 $ $(embedFileRelative "data/nexus_main.py"))
+-- C file describing socket bindings needed for R
+rSocketLib :: (Text, Text)
+rSocketLib = ("socketr.c", decodeUtf8 $ $(embedFileRelative "data/misc/socketr.c"))
 
-rSocketLib = (pretty . decodeUtf8 $ $(embedFileRelative "data/socketr.c"))
+-- The main header and required source files for the mlcmpack library
+msgpackSource :: ((String, Text), [(String, Text)])
+msgpackSource =
+  ( ("mlcmpack.h", decodeUtf8 $ $(embedFileRelative "data/msgpack/src/mlcmpack.h"))
+  , [ ("mlcmpack.c", decodeUtf8 $ $(embedFileRelative "data/msgpack/src/mlcmpack.c"))
+    , ("mpack.h",   decodeUtf8 $ $(embedFileRelative "data/msgpack/src/mpack.h")   )
+    , ("mpack.c",   decodeUtf8 $ $(embedFileRelative "data/msgpack/src/mpack.c")   )
+    ]
+  )
+
+-- A C file that defines the R binding to the mlcmpack MessagePack library
+rmpack :: (String, Text)
+rmpack = ("rmpack.c", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/r/rmpack.c"))
+
+-- A python code defining the python binding to the mlcmpack MessagePack library
+pympack :: (String, Text)
+pympack = ("pympack.py", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/py/pympack.py"))

@@ -22,6 +22,7 @@ module Morloc.Data.Doc
   , int
   , integer
   , block
+  , format
   ) where
 
 import qualified Data.Text as DT
@@ -57,3 +58,12 @@ textEsc' lit = (dquotes . pretty) $ DT.concatMap escapeChar lit
     escapeChar '"' = "\\\""
     escapeChar '\\' = "\\\\"
     escapeChar c = DT.singleton c
+
+format
+  :: DT.Text -- main text with substitution patterns
+  -> DT.Text -- break string
+  -> [Doc ann] -- replacement strings
+  -> Doc ann
+format fmtstr breaker replacements =
+  let xs = DT.splitOn breaker fmtstr
+  in foldl (<>) (pretty . head $ xs) $ zipWith (\r x -> r <> pretty x) replacements (tail xs)

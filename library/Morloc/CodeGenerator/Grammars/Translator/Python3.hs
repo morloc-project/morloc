@@ -16,7 +16,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Python3
   ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (isSerializable, serialAstToJsonType)
+import Morloc.CodeGenerator.Serial (isSerializable, serialAstToMsgpackSchema)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.DataFiles as DF
@@ -38,6 +38,9 @@ translate srcs es = do
   -- setup library paths
   lib <- pretty <$> asks MC.configLibrary
 
+  home <- pretty <$> asks MC.configHome
+  let opt = home <> "/opt" 
+
   -- translate sources
   includeDocs <- mapM
     translateSource
@@ -52,7 +55,7 @@ translate srcs es = do
   -- make code for dispatching to manifolds
   let dispatch = makeDispatch es
 
-  let code = makePool lib includeDocs mDocs dispatch
+  let code = makePool [opt, lib] includeDocs mDocs dispatch
   let outfile = ML.makeExecutableName Python3Lang "pool"
 
   return $ Script
@@ -99,7 +102,8 @@ objectAccess object field = object <> "." <> field
 serialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 serialize v0 s0 = do
   (ms, v1) <- serialize' v0 s0
-  let v2 = [idoc|_put_value(#{v1})|]
+  let schema = serialAstToMsgpackSchema s0
+  let v2 = [idoc|_put_value(#{v1}, "#{schema}")|]
   return (v2, ms)
   where
     serialize' :: MDoc -> SerialAST -> Index ([MDoc], MDoc)
@@ -145,11 +149,13 @@ serialize v0 s0 = do
 deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 deserialize v0 s0
   | isSerializable s0 = do
-      let deserializing = [idoc|_get_value(#{v0})|]
+      let schema = serialAstToMsgpackSchema s0
+      let deserializing = [idoc|_get_value(#{v0}, "#{schema}")|]
       return (deserializing, [])
   | otherwise = do
       rawvar <- helperNamer <$> newIndex
-      let deserializing = [idoc|#{rawvar} = _get_value(#{v0})|]
+      let schema = serialAstToMsgpackSchema s0
+      let deserializing = [idoc|#{rawvar} = _get_value(#{v0}, "#{schema}")|]
       (x, befores) <- check rawvar s0
       return (x, deserializing:befores)
   where
@@ -293,26 +299,9 @@ makeDispatch ms = align . vsep $ ["dispatch = {", indent 4 (vsep $ map entry ms)
     entry (SerialManifold i _ _ _)
       = pretty i <> ":" <+> manNamer i <> ","
 
-makePool :: MDoc -> [MDoc] -> [MDoc] -> MDoc -> MDoc
-makePool lib includeDocs manifolds dispatch = [idoc|#!/usr/bin/env python
-
-#{srcPreamble langSrc}
-
-sys.path = ["#{lib}"] + sys.path
-
-#{vsep includeDocs}
-
-#{srcUtility langSrc}
-
-# Manifolds
-
-#{vsep manifolds}
-
-# Dispatch
-
-#{dispatch}
-
-#{srcMain langSrc}
-|]
+makePool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
+makePool libs includeDocs manifolds dispatch
+  = format (DF.poolTemplate Python3Lang) "# <<<BREAK>>>" [path, vsep includeDocs, vsep manifolds, dispatch]
   where
-    langSrc = DF.languageFiles Python3Lang
+    path = [idoc|sys.path = #{list (map makePath libs)} + sys.path|]
+    makePath filename = [idoc|os.path.expanduser(#{dquotes(filename)})|]

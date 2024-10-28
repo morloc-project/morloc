@@ -117,7 +117,6 @@ module Morloc.Namespace
   , mostSpecific
   , mostSpecificSubtypes
   -- data files
-  , LanguageSource(..)
   , NexusSource(..)
   -- sockets
   , Socket(..)
@@ -404,15 +403,6 @@ data Import =
     }
   deriving (Ord, Eq, Show)
 
-
--- | Stores source that is inserted into language generation
-data LanguageSource = LanguageSource
-  { srcPreamble :: MDoc
-  , srcInterop :: MDoc
-  , srcSerialization :: MDoc
-  , srcUtility :: MDoc
-  , srcMain :: MDoc
-  }
 
 data NexusSource = NexusSource
   { nexusSourceUtility :: MDoc

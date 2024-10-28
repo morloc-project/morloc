@@ -899,62 +899,10 @@ whitespace(json, i);|]
 
 
 makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
-makeMain includes signatures serialization manifolds dispatch = [idoc|
-#{srcPreamble langSrc}
-
-#{vsep includes}
-
-#{srcSerialization langSrc}
-
-#{vsep serialization}
-
-#{srcInterop langSrc}
-
-#{vsep signatures}
-
-#{vsep manifolds}
-
-Message dispatch(const Message& msg){
-
-    Header header = read_header(msg.data);
-
-    if (header.command[0] == PACKET_TYPE_PING){
-        return msg;
-
-    } else if (header.command[0] == PACKET_TYPE_CALL) {
-
-      uint32_t mid = read_uint32(header.command, 1);
-
-      log_message("dispatching to mid " + std::to_string(mid));
-
-      Header arg_header;
-      size_t pos = 32 + header.offset;
-      size_t n = 0;
-      while(pos < msg.length){
-          arg_header = read_header(msg.data + pos);
-          pos += 32 + arg_header.offset + arg_header.length;
-          n++;
-      }
-
-      std::vector<Message> args(n);
-      pos = 32 + header.offset;
-      for(size_t i = 0; i < args.size(); i++){
-          arg_header = read_header(msg.data + pos);
-          args[i].length = 32 + arg_header.offset + arg_header.length;
-          args[i].data = (char*)malloc(args[i].length * sizeof(char));
-          memcpy(args[i].data, msg.data + pos, args[i].length);
-          pos += 32 + arg_header.offset + arg_header.length;
-          log_message("arg[" + std::to_string(i) + "] = " + show_hex(args[i].data, args[i].length));
-      }
-
-      #{dispatch}
-    }
-
-    return fail_packet("In C++ pool, call failed");
-}
-
-
-#{srcMain langSrc}
-|]
-  where
-    langSrc = DF.languageFiles CppLang
+makeMain includes signatures serialization manifolds dispatch
+  = format (DF.poolTemplate CppLang) "// <<<BREAK>>>"
+  [ vsep includes
+  , vsep serialization
+  , vsep signatures
+  , vsep manifolds
+  , dispatch]

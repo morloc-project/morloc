@@ -292,21 +292,4 @@ jsontype2rjson (NamJ objType rs) =
   rs' = zipWith (\key value -> key <> ":" <> value) keys values
 
 makePool :: [MDoc] -> [MDoc] -> MDoc
-makePool sources manifolds = [idoc|#!/usr/bin/env Rscript
-
-# TODO: get the path from config
-dyn.load("~/.morloc/lib/libsocketr.so")
-
-#{vsep sources}
-
-#{srcPreamble langSrc}
-
-#{srcSerialization langSrc}
-
-#{srcInterop langSrc}
-
-#{vsep manifolds}
-
-#{srcMain langSrc}|]
-  where
-    langSrc = DF.languageFiles RLang
+makePool sources manifolds = format (DF.poolTemplate RLang) "# <<<BREAK>>>" [vsep sources, vsep manifolds]

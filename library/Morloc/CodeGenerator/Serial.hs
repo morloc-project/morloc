@@ -17,11 +17,16 @@ module Morloc.CodeGenerator.Serial
   , serialAstToType
   , serialAstToJsonType
   , shallowType
+  , serialAstToMsgpackSchema
+  , encode64
+  , decode64
   ) where
 
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.BaseTypes as BT
 import qualified Data.Map as Map
+import qualified Data.Text as DT
+import qualified Data.Char as C
 import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
 import Morloc.Typecheck.Internal (subtype, apply, unqualify, qualify, substitute)
@@ -65,6 +70,48 @@ serialAstToJsonType (SerialBool    (FV _ v)) = VarJ v
 serialAstToJsonType (SerialString  (FV _ v)) = VarJ v
 serialAstToJsonType (SerialNull    (FV _ v)) = VarJ v
 serialAstToJsonType (SerialUnknown (FV _ v)) = VarJ v -- the unknown type is the serialization type
+
+
+
+encode64 :: Int -> String
+encode64 i
+  | i < 0 = error "Negative size - not in this universe my dear"
+  | i < 10 = [C.chr (C.ord '0' + i)] -- 0-9
+  | i < 36 = [C.chr (C.ord 'a' + i - 10)]
+  | i < 62 = [C.chr (C.ord 'A' + i - 36)]
+  | i == 62 = "+"
+  | i == 63 = "/"
+  | otherwise = "=" <> (encode64 (mod i 64)) <> (encode64 (div i 64))
+
+decode64 :: String -> Int
+decode64 (x:xs) 
+  | x >= '0' && x <= '9' = C.ord x - C.ord '0'
+  | x >= 'a' && x <= 'z' = C.ord x - C.ord 'a' + C.ord '0'
+  | x >= 'A' && x <= 'Z' = C.ord x - C.ord 'A' + C.ord 'a' + C.ord '0'
+  | x == '+' = 62
+  | x == '/' = 63
+  | x == '=' = decode64 [head xs] + 64 * decode64 (tail xs)
+  | otherwise = error "illegal character"
+decode64 [] = 0
+
+encode64D :: Int -> MDoc
+encode64D i = pretty (encode64 i)
+
+
+serialAstToMsgpackSchema :: SerialAST -> MDoc
+serialAstToMsgpackSchema (SerialPack _ (_, s)) = serialAstToMsgpackSchema s
+serialAstToMsgpackSchema (SerialList _ s) = "a" <> serialAstToMsgpackSchema s
+serialAstToMsgpackSchema (SerialTuple _ ss) = "t" <> encode64D (length ss) <> foldl (<>) "" (map serialAstToMsgpackSchema ss)
+serialAstToMsgpackSchema (SerialObject _ _ _ rs) = "m" <> encode64D (length rs) <> foldl (<>) "" (map keypair rs) where
+  keypair :: (Key, SerialAST) -> MDoc
+  keypair (k, s) = (encode64D . DT.length . unKey $ k) <> pretty (unKey k) <> serialAstToMsgpackSchema s
+serialAstToMsgpackSchema (SerialReal    _) = "f8" -- 64 bit float
+serialAstToMsgpackSchema (SerialInt     _) = "i4" -- 32 bit integer, will need to extend this soon
+serialAstToMsgpackSchema (SerialBool    _) = "b"
+serialAstToMsgpackSchema (SerialString  _) = "s"
+serialAstToMsgpackSchema (SerialNull    _) = "z"
+serialAstToMsgpackSchema (SerialUnknown _) = "?" -- I guess this works as a general bad new character?
+
 
 -- | get only the toplevel type
 shallowType :: SerialAST -> TypeF

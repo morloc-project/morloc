@@ -16,26 +16,18 @@ extra-source-files:
   - README.md
   - ChangeLog.md
   # libraries
-  - data/socketr.c # socket library for R
-  # language source files
-  # cpp
-  - data/preamble.cpp
-  - data/interop.cpp
-  - data/serialization.cpp
-  - data/serialization.cpp
-  - data/main.cpp
-  # R
-  - data/preamble.R
-  - data/interop.R
-  - data/serialization.R
-  - data/serialization.R
-  - data/main.R
-  # py
-  - data/preamble.py
-  - data/interop.py
-  - data/serialization.py
-  - data/serialization.py
-  - data/main.py
+  - data/nexus.py # nexus template
+  - data/pools/pool.R
+  - data/pools/pool.cpp
+  - data/pools/pool.py
+  # msgpack
+  - data/msgpack/src/mpack.h
+  - data/msgpack/src/mpack.c
+  - data/msgpack/src/mlcmpack.h
+  - data/msgpack/src/mlcmpack.c
+  # msgpack langs
+  - data/msgpack/lang/py/pympack.py
+  - data/msgpack/lang/r/rmpack.c
 
 default-extensions:
   - TypeOperators
