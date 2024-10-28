@@ -72,7 +72,9 @@ makeSchemas mid lang (FunT ts t) = do
   ss <- mapM (makeSchema mid lang) ts
   s <- makeSchema mid lang t
   return (ss, s)
-makeSchemas _ _ _ = return ([], "z") -- return null schema, "z" 
+makeSchemas mid lang t = do
+  s <- makeSchema mid lang t
+  return ([], s)
 
 makeSchema :: Int -> Lang -> Type -> MorlocMonad MDoc
 makeSchema mid lang t = do
