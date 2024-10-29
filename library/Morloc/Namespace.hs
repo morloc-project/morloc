@@ -828,10 +828,10 @@ instance FromJSON Config where
   parseJSON =
     withObject "object" $ \o ->
       Config
-        <$> o .:? "home" .!= "$HOME/.morloc"
-        <*> o .:? "source" .!= "$HOME/.morloc/src/morloc"
+        <$> o .:? "home" .!= "~/.morloc"
+        <*> o .:? "source" .!= "~/.morloc/src/morloc"
         <*> o .:? "plane" .!= "morloclib"
-        <*> o .:? "tmpdir" .!= "$HOME/.morloc/tmp"
+        <*> o .:? "tmpdir" .!= "~/.morloc/tmp"
         <*> o .:? "lang_python3" .!= "python3"
         <*> o .:? "lang_R" .!= "Rscript"
         <*> o .:? "lang_perl" .!= "perl"
@@ -851,6 +851,8 @@ instance FromJSON PackageMeta where
                 <*> o .:? "bug-reports" .!= ""
                 <*> o .:? "cpp-version" .!= 0
                 <*> o .:? "dependencies" .!= []
+
+
 
 instance Defaultable PackageMeta where
   defaultValue = PackageMeta

@@ -18,6 +18,7 @@ import Morloc.Frontend.Namespace
 import Text.RawString.QQ
 import Morloc (typecheckFrontend, typecheck)
 import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
+import qualified System.Directory as SD
 import qualified Morloc.Monad as MM
 import qualified Morloc.Typecheck.Internal as MTI
 
@@ -32,7 +33,8 @@ gtypeof (AnnoS (Idx _ t) _ _) = t
 
 runFront :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
 runFront code = do
-  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
+  config <- emptyConfig
+  ((x, _), _) <- MM.runMorlocMonad Nothing 0 config (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
   return x
 
 runMiddle
@@ -43,20 +45,24 @@ runMiddle
           )
         )
 runMiddle code = do
-  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheck Nothing (Code code))
+  config <- emptyConfig
+  ((x, _), _) <- MM.runMorlocMonad Nothing 0 config (typecheck Nothing (Code code))
   return x
 
 
-emptyConfig :: Config
-emptyConfig =  Config
-    { configHome = ""
-    , configLibrary = ""
-    , configPlane = ""
-    , configTmpDir = ""
-    , configLangPython3 = ""
-    , configLangR = ""
-    , configLangPerl = ""
+emptyConfig :: IO Config
+emptyConfig = do
+  home <- SD.getHomeDirectory
+  return $ Config
+    { configHome        = home <> "/.morloc"
+    , configLibrary     = home <> "/.morloc/src/morloc"
+    , configPlane       = "morloclib"
+    , configTmpDir      = home <> "/.morloc/tmp"
+    , configLangPython3 = "python3"
+    , configLangR       = "Rscript"
+    , configLangPerl    = "perl"
     }
+
 
 assertGeneralType :: String -> MT.Text -> TypeU -> TestTree
 assertGeneralType msg code t = testCase msg $ do
