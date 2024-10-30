@@ -21,13 +21,11 @@ extra-source-files:
   - data/pools/pool.cpp
   - data/pools/pool.py
   # msgpack
-  - data/msgpack/src/mpack.h
-  - data/msgpack/src/mpack.c
   - data/msgpack/src/mlcmpack.h
-  - data/msgpack/src/mlcmpack.c
   # msgpack langs
   - data/msgpack/lang/py/pympack.py
   - data/msgpack/lang/r/rmpack.c
+  - data/msgpack/lang/cpp/cppmapck.hpp
 
 default-extensions:
   - TypeOperators

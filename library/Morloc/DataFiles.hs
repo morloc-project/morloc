@@ -17,6 +17,7 @@ module Morloc.DataFiles
   , msgpackSource
   , rmpack
   , pympack
+  , cppmpack
   ) where
 
 import Morloc.Namespace
@@ -40,19 +41,22 @@ rSocketLib :: (Text, Text)
 rSocketLib = ("socketr.c", decodeUtf8 $ $(embedFileRelative "data/misc/socketr.c"))
 
 -- The main header and required source files for the mlcmpack library
-msgpackSource :: ((String, Text), [(String, Text)])
-msgpackSource =
-  ( ("mlcmpack.h", decodeUtf8 $ $(embedFileRelative "data/msgpack/src/mlcmpack.h"))
-  , [ ("mlcmpack.c", decodeUtf8 $ $(embedFileRelative "data/msgpack/src/mlcmpack.c"))
-    , ("mpack.h",   decodeUtf8 $ $(embedFileRelative "data/msgpack/src/mpack.h")   )
-    , ("mpack.c",   decodeUtf8 $ $(embedFileRelative "data/msgpack/src/mpack.c")   )
-    ]
-  )
+-- Required, by all MessagePack-based pools
+msgpackSource :: (String, Text)
+msgpackSource = ("mlcmpack.h", decodeUtf8 $ $(embedFileRelative "data/msgpack/src/mlcmpack.h"))
 
 -- A C file that defines the R binding to the mlcmpack MessagePack library
+-- compiled into a shared library loaded by R pools
+-- requires mlcmpack.h
 rmpack :: (String, Text)
 rmpack = ("rmpack.c", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/r/rmpack.c"))
 
+-- header used in C++ pools
+cppmpack :: (String, Text)
+cppmpack = ("cppmpack.hpp", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/cpp/cppmpack.hpp"))
+
 -- A python code defining the python binding to the mlcmpack MessagePack library
+-- imported into python pools
+-- requires libmlcmpack.so
 pympack :: (String, Text)
 pympack = ("pympack.py", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/py/pympack.py"))

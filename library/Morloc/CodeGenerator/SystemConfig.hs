@@ -59,37 +59,22 @@ setupMsgPackHandling langs = do
   liftIO $ createDirectoryIfMissing True includeDir
   liftIO $ createDirectoryIfMissing True libDir
 
+  let mlcmsgpackHeader = includeDir </> fst msgpackSource
+
   -- write mlcmpack header
-  let (headerName, headerContent) = fst msgpackSource
-  liftIO $ TIO.writeFile (includeDir </> headerName) headerContent
+  liftIO $ TIO.writeFile mlcmsgpackHeader (snd msgpackSource)
 
   -- Check if mlcmpack.so exists
   let soPath = libDir </> "libmlcmpack.so"
   soExists <- liftIO $ doesFileExist soPath
 
+  -- if the library doesn't exist, make it
   unless soExists $ do
-    let tmpDir = configTmpDir config </> "mlcmpack_build" 
-    liftIO $ createDirectoryIfMissing True tmpDir
-
-    -- Write all source files to the temporary directory
-    let (headerFile, sourceFiles) = msgpackSource
-
-    liftIO $ mapM_ (\(filename, content) -> TIO.writeFile (tmpDir </> filename) content)
-                   (headerFile : sourceFiles)
-
-    -- Copy the header file to the temporary directory
-    liftIO $ TIO.writeFile (tmpDir </> headerName) headerContent
-
-    -- Compile the shared library
-    let gccCmd = [ "-shared"
-                 , "-o", soPath
-                 , "-fPIC"
-                 , tmpDir </> "mlcmpack.c"
-                 , tmpDir </> "mlcmpack.h"
-                 , tmpDir </> "mpack.c"
-                 , tmpDir </> "mpack.h"
-                 ]
+    -- this is a stupid hack to make gcc compile a header to a shared object
+    liftIO $ TIO.writeFile "x.c" ("#include \"" <> MT.pack mlcmsgpackHeader <> "\"")
+    let gccCmd = [ "-shared", "-o", soPath, "-fPIC", "x.c" ]
     liftIO $ callProcess "gcc" gccCmd
+    liftIO $ removeFile "x.c"
 
   
 compileCCodeIfNeeded :: MT.Text -> Path -> Path -> Path -> IO ()
