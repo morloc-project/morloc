@@ -9,6 +9,13 @@ morloc.cabal
 run/
 .idea/
 *.iml
+pool.*
+nexus.*
+z/
+z
+zzz
+zzz*
+z.*
 # ignore debugging files
 *.aux
 *.hp

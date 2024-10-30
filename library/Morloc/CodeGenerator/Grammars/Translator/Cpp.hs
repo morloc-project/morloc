@@ -26,6 +26,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial ( isSerializable
                                    , serialAstToType
                                    , shallowType
+                                   , serialAstToMsgpackSchema
                                    )
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.DataFiles as DF
@@ -278,16 +279,12 @@ serialize nativeExpr s0 = do
   (x, before) <- serialize' nativeExpr s0
   typestr <- cppTypeOf $ serialAstToType s0
 
-  -- TODO: I can remove the requirement for this schema term by adding a type
-  -- annotation to the serialization function (I think)
-  schemaIndex <- getCounter
-  let schemaName = [idoc|#{helperNamer schemaIndex}_schema|]
-      schema = [idoc|#{typestr} #{schemaName};|]
-      final = [idoc|_put_value(serialize(#{x}, #{schemaName}))|]
+  let schema_str = serialAstToMsgpackSchema s0
+      putCommand = [idoc|_put_value(#{x}, "#{schema_str}")|]
   return $ PoolDocs
       { poolCompleteManifolds = []
-      , poolExpr = final
-      , poolPriorLines = before <> [schema]
+      , poolExpr = putCommand
+      , poolPriorLines = before
       , poolPriorExprs = []
       }
 
@@ -342,21 +339,19 @@ serialize nativeExpr s0 = do
 deserialize :: MDoc -> MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])
 deserialize varname0 typestr0 s0
   | isSerializable s0 = do
-      schemaVar <- helperNamer <$> getCounter
-      let schemaName = [idoc|#{schemaVar}_schema|]
-          schema = [idoc|#{typestr0} #{schemaName};|]
-          term = [idoc|deserialize(_get_value(#{varname0}), #{schemaName})|]
-      return (term, [schema])
+      rawtype <- cppTypeOf $ serialAstToType s0
+      let schema = serialAstToMsgpackSchema s0
+          getCmd = [idoc|_get_value<#{rawtype}>(#{varname0}, "#{schema}")|]
+      return (getCmd, [])
   | otherwise = do
       schemaVar <- helperNamer <$> getCounter
       rawtype <- cppTypeOf $ serialAstToType s0
       rawvar <- helperNamer <$> getCounter
-      let schemaName = [idoc|#{schemaVar}_schema|]
-          schema = [idoc|#{rawtype} #{schemaName};|]
-          deserializing = [idoc|#{rawtype} #{rawvar} = deserialize(_get_value(#{varname0}), #{schemaName});|]
+      let schema = serialAstToMsgpackSchema s0
+          getCmd = [idoc|#{rawtype} #{rawvar} = _get_value(#{varname0}, "#{schema}");|]
       (x, before) <- construct rawvar s0
       let final = [idoc|#{typestr0} #{schemaVar} = #{x};|]
-      return (schemaVar , [schema, deserializing] ++ before ++ [final])
+      return (schemaVar, [getCmd] ++ before ++ [final])
 
   where
     check :: MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])
