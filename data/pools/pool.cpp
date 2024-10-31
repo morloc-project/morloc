@@ -30,16 +30,16 @@
 #include <utility>
 #include <limits>
 
-#include "cppmpack.hpp"
-
 using namespace std;
-
 
 
 // AUTO include statements start
 // <<<BREAK>>>
 // AUTO include statements end
 
+
+// Proper linking of cppmpack requires it be included AFTER the custom modules 
+#include "cppmpack.hpp"
 
 
 // AUTO serialization statements start

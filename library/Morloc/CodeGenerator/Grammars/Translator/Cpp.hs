@@ -348,7 +348,7 @@ deserialize varname0 typestr0 s0
       rawtype <- cppTypeOf $ serialAstToType s0
       rawvar <- helperNamer <$> getCounter
       let schema = serialAstToMsgpackSchema s0
-          getCmd = [idoc|#{rawtype} #{rawvar} = _get_value(#{varname0}, "#{schema}");|]
+          getCmd = [idoc|#{rawtype} #{rawvar} = _get_value<#{rawtype}>(#{varname0}, "#{schema}");|]
       (x, before) <- construct rawvar s0
       let final = [idoc|#{typestr0} #{schemaVar} = #{x};|]
       return (schemaVar, [getCmd] ++ before ++ [final])
