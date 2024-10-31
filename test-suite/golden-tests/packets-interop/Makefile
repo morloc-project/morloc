@@ -28,4 +28,4 @@ all:
 	./nexus.py rfoo test-data.json | wc -c >> obs.txt
 
 clean:
-	rm -rf nexus* pool* __pycache__ data* 
+	rm -rf nexus* pool* __pycache__ data* test-data*
