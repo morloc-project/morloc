@@ -799,23 +799,24 @@ structTypedefTemplate params rname fields = vsep [template, struct] where
 
 -- Example
 -- > template <class T>
--- > std::string serialize(person<T> x, person<T> schema);
+-- > __mlc_Person__<T> fromAnything(const Schema* schema, const Anything* anything, __mlc_Person__<T>* dummy = nullptr)
 serialHeaderTemplate :: [MDoc] -> MDoc -> MDoc
 serialHeaderTemplate params rtype = vsep [template, prototype]
   where
   template = makeTemplateHeader params
-  prototype = [idoc|std::string serialize(#{rtype} x, #{rtype} schema);|]
+  prototype = [idoc|#{rtype} fromAnything(const Schema* schema, const Anything* anything, #{rtype}* dummy = nullptr);|]
+  
 
 
 
 -- Example:
--- > template <class T>
--- > bool deserialize(const std::string json, size_t &i, person<T> &x);
+-- > template<typename T>
+-- > Anything* toAnything(const Schema* schema, const __mlc_Person__<T>& obj)
 deserialHeaderTemplate :: [MDoc] -> MDoc -> MDoc
 deserialHeaderTemplate params rtype = vsep [template, prototype]
   where
   template = makeTemplateHeader params
-  prototype = [idoc|bool deserialize(const std::string json, size_t &i, #{rtype} &x);|]
+  prototype = [idoc|Anything* toAnything(const Schema* schema, const #{rtype}& obj);|]
 
 
 
@@ -826,16 +827,18 @@ serializerTemplate
   -> MDoc -- output serializer function
 serializerTemplate params rtype fields = [idoc|
 #{makeTemplateHeader params}
-std::string serialize(#{rtype} x, #{rtype} schema){
-    #{schemata}
-    std::ostringstream json;
-    json << "{" << #{align $ vsep (punctuate " << ',' <<" writers)} << "}";
-    return json.str();
+Anything* toAnything(const Schema* schema, const #{rtype}& obj)
+{
+    Anything* result = map_data_(#{pretty $ length fields});
+    #{align $ vsep (zipWith assignFields [0..] fields)}
+    return result;
 }
 |] where
-  schemata = align $ vsep (map (\(k,t) -> t <+> k <> "_" <> ";") fields)
-  writers = map (\(k,_) -> dquotes ("\\\"" <> k <> "\\\"" <> ":")
-          <+> "<<" <+> [idoc|serialize(x.#{k}, #{k}_)|] ) fields
+  assignFields :: Int -> (MDoc, MDoc) -> MDoc
+  assignFields idx (keyName, keyType) = vsep
+    [ [idoc|result->data.obj_arr[#{pretty idx}] = toAnything(schema->parameters[#{pretty idx}], obj.#{keyName});|]
+    , [idoc|result->data.obj_arr[#{pretty idx}]->key = strdup("#{keyName}");|]
+    ]
 
 
 
@@ -846,52 +849,23 @@ deserializerTemplate
   -> [(MDoc, MDoc)] -- ^ key and type for all fields
   -> MDoc -- ^ output deserializer function
 deserializerTemplate isObj params rtype fields
-  = [idoc|
+  =  [idoc|
 #{makeTemplateHeader params}
-bool deserialize(const std::string json, size_t &i, #{rtype} &x){
-    #{schemata}
-    try {
-        whitespace(json, i);
-        if(! match(json, "{", i))
-            throw 1;
-        whitespace(json, i);
-        #{fieldParsers}
-        if(! match(json, "}", i))
-            throw 1;
-        whitespace(json, i);
-    } catch (int e) {
-        return false;
-    }
-    #{assign}
-    return true;
-}
+#{block 4 header body}
 |] where
-  schemata = align $ vsep (map (\(k,t) -> t <+> k <> "_" <> ";") fields)
-  fieldParsers = align $ vsep (punctuate parseComma (map (makeParseField . fst) fields))
-  values = [k <> "_" | (k,_) <- fields]
-  assign = if isObj
-           then [idoc|#{rtype} y#{tupled values}; x = y;|]
-           else let obj = encloseSep "{" "}" "," values
-                in [idoc|#{rtype} y = #{obj}; x = y;|]
+  header = [idoc|#{rtype} fromAnything(const Schema* schema, const Anything* anything, #{rtype}* dummy)|]
+  body = vsep $ [ [idoc|#{rtype} obj;|] ]
+              <> zipWith assignFields [0..] fields
+              <> ["return obj;"]
 
-parseComma :: Doc ann
-parseComma = [idoc|
-if(! match(json, ",", i))
-    throw 800;
-whitespace(json, i);|]
+  assignFields :: Int -> (MDoc, MDoc) -> MDoc
+  assignFields idx (keyName, keyType) = vsep
+    [ [idoc|#{keyType}* elemental_dumby_#{keyName} = nullptr;|]
+    , [idoc|obj.#{keyName} = fromAnything(schema->parameters[#{pretty idx}], anything->data.obj_arr[#{pretty idx}], elemental_dumby_#{keyName});|]
+    ]
 
-makeParseField :: MDoc -> MDoc
-makeParseField field = [idoc|
-if(! match(json, "\"#{field}\"", i))
-    throw 1;
-whitespace(json, i);
-if(! match(json, ":", i))
-    throw 1;
-whitespace(json, i);
-if(! deserialize(json, i, #{field}_))
-    throw 1;
-whitespace(json, i);|]
-
+  -- XXX: here need to add back the isObj handling, if is object, need to call
+  -- the constructor rather than directly assigning to fields
 
 makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
 makeMain includes signatures serialization manifolds dispatch
