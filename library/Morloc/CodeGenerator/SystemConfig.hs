@@ -16,7 +16,7 @@ module Morloc.CodeGenerator.SystemConfig
 
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Monad as MM
-import Morloc.DataFiles (rSocketLib, pympack, msgpackSource)
+import Morloc.DataFiles (rSocketLib, pympack, msgpackSource, rmpack)
 
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.Doc as MD
@@ -56,6 +56,14 @@ setupMsgPackHandling langs = do
   let includeDir = configHome config </> "include"
   let libDir = configHome config </> "lib"
 
+  when (RLang `elem` langs) $ liftIO
+    ( compileCCodeIfNeeded
+      (snd rmpack)
+      (includeDir </> "mpackr.c")
+      (libDir </> "libmpackr.so")
+      (includeDir </> "mpackr.o")
+    )
+
   liftIO $ createDirectoryIfMissing True includeDir
   liftIO $ createDirectoryIfMissing True libDir
 
@@ -76,7 +84,6 @@ setupMsgPackHandling langs = do
     liftIO $ callProcess "gcc" gccCmd
     liftIO $ removeFile "x.c"
 
-  
 compileCCodeIfNeeded :: MT.Text -> Path -> Path -> Path -> IO ()
 compileCCodeIfNeeded codeText sourcePath libPath objPath = do
     alreadyExists <- doesFileExist libPath

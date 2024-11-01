@@ -24,7 +24,7 @@ extra-source-files:
   - data/msgpack/src/mlcmpack.h
   # msgpack langs
   - data/msgpack/lang/py/pympack.py
-  - data/msgpack/lang/r/rmpack.c
+  - data/msgpack/lang/r/mpackr.c
   - data/msgpack/lang/cpp/cppmapck.hpp
 
 default-extensions:

@@ -49,7 +49,7 @@ msgpackSource = ("mlcmpack.h", decodeUtf8 $ $(embedFileRelative "data/msgpack/sr
 -- compiled into a shared library loaded by R pools
 -- requires mlcmpack.h
 rmpack :: (String, Text)
-rmpack = ("rmpack.c", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/r/rmpack.c"))
+rmpack = ("mpackr.c", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/r/mpackr.c"))
 
 -- header used in C++ pools
 cppmpack :: (String, Text)
