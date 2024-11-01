@@ -12,7 +12,9 @@ import struct
 import json
 import traceback
 
+# AUTO include imports start
 # <<<BREAK>>>
+# AUTO include imports start
 
 import pympack as mp
 
@@ -560,9 +562,9 @@ def run_command(mid, args, pool_lang, sockets, arg_schema, return_schema):
 
 
 
-
+# AUTO include ui start
 # <<<BREAK>>>
-#### MAIN
+# AUTO include ui end
 
 
 

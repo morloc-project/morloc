@@ -14,8 +14,9 @@ import multiprocessing
 import select
 from contextlib import closing
 
+# AUTO include imports start
 # <<<BREAK>>>
-# BREAK
+# AUTO include imports end
 
 import pympack as mp
 
@@ -55,8 +56,9 @@ def _log(msg, logfile="log"):
     with open(logfile, "a+") as fh:
         print(f"Python3: {msg}", flush=True, file=fh)
 
+# AUTO include serialization start
 # <<<BREAK>>>
-# BREAK
+# AUTO include serialization end
 
 def _unpack(fmt, *args):
     fmt = ">" + fmt
@@ -299,11 +301,13 @@ def _morloc_foreign_call(pool_pipe, manifold_id, args):
     return _request_from_socket(pool_pipe, msg)
 
 
+# AUTO include manifolds start
 # <<<BREAK>>>
-# BREAK: MANIFOLDS
+# AUTO include manifolds end
 
+# AUTO include dispatch start
 # <<<BREAK>>>
-# BREAK: DISPATCH
+# AUTO include dispatch end
 
 
 

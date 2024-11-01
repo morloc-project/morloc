@@ -1,4 +1,6 @@
+# AUTO include morloc imports start
 # <<<BREAK>>>
+# AUTO include morloc imports end
 
 library(rlang)
 
@@ -129,7 +131,11 @@ future::plan(future::multicore)
 }
 
 
+
+# AUTO include manifolds start
 # <<<BREAK>>>
+# AUTO include manifolds end
+
 
 
 ### Main
@@ -229,8 +235,6 @@ future::plan(future::multicore)
   )
 }
 
-
-# <<<BREAK>>>
 
 
 processMessage <- function(msg){
