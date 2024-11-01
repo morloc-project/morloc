@@ -218,9 +218,7 @@ struct Header read_header(const char* msg) {
 }
 
 struct Message stream_recv(int client_fd) {
-
     char logmsg[256];
-
     struct Message result;
     result.length = 0;
     result.data = NULL;
@@ -263,6 +261,7 @@ struct Message stream_recv(int client_fd) {
     result.length = 32 + header.offset + header.length;
 
     if(result.length > BUFFER_SIZE){
+        free(buffer);
         error("Data exceeds buffer size and streaming is not supported for R");
     }
 
@@ -273,21 +272,33 @@ struct Message stream_recv(int client_fd) {
         error("Failed to allocate memory for result data");
     }
 
+    // Copy the already received data
+    memcpy(result.data, buffer, recv_length);
+
     return result;
 }
 
 
-SEXP get(int client_fd) {
 
+
+SEXP get(int client_fd) {
     char logmsg[256];
+    struct Message received_data;
 
     sprintf(logmsg, "Entering get with client %d\n", client_fd);
     log_message(logmsg); 
 
-    struct Message received_data = stream_recv(client_fd);
+    received_data = stream_recv(client_fd);
 
-    sprintf(logmsg, "Retrieved %ld bytes\n", received_data.length);
-    log_message(logmsg); 
+    if (received_data.data == NULL || received_data.length <= 0) {
+        error("Failed to receive data or received empty data");
+    }
+
+    sprintf(logmsg, "Retrieved %ld bytes. First few bytes: %02x %02x %02x %02x\n", 
+            received_data.length, 
+            received_data.data[0], received_data.data[1], 
+            received_data.data[2], received_data.data[3]);
+    log_message(logmsg);
 
     SEXP data = PROTECT(allocVector(RAWSXP, received_data.length));
     if (data == R_NilValue) {

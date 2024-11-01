@@ -89,11 +89,11 @@ compileCCodeIfNeeded codeText sourcePath libPath objPath = do
 
            -- Compile the C code, will generate a .so file with same path and
            -- basename as the source .c file
-            let compileCommand = "R CMD SHLIB " ++ sourcePath ++ "-o " ++ libPath 
+            let compileCommand = "R CMD SHLIB " ++ sourcePath ++ " -o " ++ libPath 
+
             callCommand compileCommand
 
             -- Delete the source .c file
-            
             sourcePathExists <- doesFileExist sourcePath
             when (sourcePathExists) (removeFile sourcePath)
 

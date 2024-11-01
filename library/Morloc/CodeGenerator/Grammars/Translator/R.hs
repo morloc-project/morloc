@@ -16,7 +16,7 @@ module Morloc.CodeGenerator.Grammars.Translator.R
   ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (isSerializable)
+import Morloc.CodeGenerator.Serial (isSerializable, serialAstToMsgpackSchema)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.DataFiles as DF
@@ -72,8 +72,8 @@ recordAccess record field = record <> "$" <> field
 serialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 serialize v0 s0 = do
   (ms, v1) <- serialize' v0 s0
-  let schema = typeSchema s0
-  let v2 = ".put_value(" <> "rmorlocinternals::mlc_serialize" <> tupled [v1, schema] <> ")"
+  let schema = serialAstToMsgpackSchema s0
+  let v2 = [idoc|.put_value(#{v1}, "#{schema}")|]
   return (v2, ms)
   where
     serialize' :: MDoc -> SerialAST -> Index ([MDoc], MDoc)
@@ -113,13 +113,14 @@ serialize v0 s0 = do
 deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 deserialize v0 s0
   | isSerializable s0 =
-      let schema = typeSchema s0
-          deserializing = [idoc|rmorlocinternals::mlc_deserialize(.get_value(#{v0}), #{schema})|]
+      let schema = serialAstToMsgpackSchema s0
+          deserializing = [idoc|.get_value(#{v0}, "#{schema}")|]
+
       in return (deserializing, [])
   | otherwise = do
       rawvar <- helperNamer <$> newIndex
-      let schema = typeSchema s0
-          deserializing = [idoc|#{rawvar} <- rmorlocinternals::mlc_deserialize(.get_value(#{v0}), #{schema})|]
+      let schema = serialAstToMsgpackSchema s0
+          deserializing = [idoc|#{rawvar} <- .get_value(#{v0}, "#{schema}")|]
       (x, befores) <- check rawvar s0
       return (x, deserializing:befores)
   where
@@ -260,36 +261,6 @@ translateSegment m0 =
     makeLet namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
       let rs = rs1 ++ [ namer i <+> "<-" <+> e1' ] ++ rs2
       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
-
--- For R, the type schema is the JSON representation of the type
-typeSchema :: SerialAST -> MDoc
-typeSchema s0 = squotes $ jsontype2rjson (serialAstToJsonType s0) where
-  serialAstToJsonType :: SerialAST -> JsonType
-  serialAstToJsonType (SerialPack _ (_, s)) = serialAstToJsonType s
-  serialAstToJsonType (SerialList _ s) = ArrJ (CV "list") [serialAstToJsonType s]
-  serialAstToJsonType (SerialTuple _ ss) = ArrJ (CV "tuple") (map serialAstToJsonType ss)
-  serialAstToJsonType (SerialObject _ (FV _ n) _ rs) = NamJ n (map (second serialAstToJsonType) rs)
-  serialAstToJsonType (SerialReal    (FV _ v)) = VarJ v
-  serialAstToJsonType (SerialInt     (FV _ v)) = VarJ v
-  serialAstToJsonType (SerialBool    (FV _ v)) = VarJ v
-  serialAstToJsonType (SerialString  (FV _ v)) = VarJ v
-  serialAstToJsonType (SerialNull    (FV _ v)) = VarJ v
-  serialAstToJsonType (SerialUnknown (FV _ v)) = VarJ v -- the unknown type is the serialization type
-
-jsontype2rjson :: JsonType -> MDoc
-jsontype2rjson (VarJ v) = dquotes (pretty v)
-jsontype2rjson (ArrJ v ts) = "{" <> key <> ":" <> value <> "}" where
-  key = dquotes (pretty v)
-  value = encloseSep "[" "]" "," (map jsontype2rjson ts)
-jsontype2rjson (NamJ objType rs) =
-  case objType of
-    (CV "data.frame") -> "{" <> dquotes "data.frame" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
-    (CV "record") -> "{" <> dquotes "record" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
-    _ -> encloseSep "{" "}" "," rs'
-  where
-  keys = map (dquotes . pretty . fst) rs
-  values = map (jsontype2rjson . snd) rs
-  rs' = zipWith (\key value -> key <> ":" <> value) keys values
 
 makePool :: [MDoc] -> [MDoc] -> MDoc
 makePool sources manifolds = format (DF.poolTemplate RLang) "# <<<BREAK>>>" [vsep sources, vsep manifolds]

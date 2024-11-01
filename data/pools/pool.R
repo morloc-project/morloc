@@ -2,6 +2,19 @@
 # <<<BREAK>>>
 # AUTO include morloc imports end
 
+dyn.load("~/.morloc/lib/libsocketr.so")
+
+dyn.load("~/.morloc/lib/libmpackr.so")
+
+msgpack_pack <- function(obj, schema) {
+    .Call("_mlcmpack_r_pack", obj, schema)
+}
+
+msgpack_unpack <- function(packed, schema) {
+    .Call("_mlcmpack_r_unpack", packed, schema)
+}
+
+
 library(rlang)
 
 PACKET_TYPE_DATA <- 0x00
@@ -15,6 +28,7 @@ PACKET_SOURCE_FILE <- 0x01 # the message is a path to a file of data
 PACKET_SOURCE_NXDB <- 0x02 # the message is a key to the nexus uses to access the data
 
 PACKET_FORMAT_JSON <- 0x00
+PACKET_FORMAT_MSGPACK = 0x01
 
 PACKET_COMPRESSION_NONE <- 0x00 # uncompressed
 
@@ -76,7 +90,7 @@ make_data <- function(
   value,
   notes = vector(0, mode="raw"),
   src = PACKET_SOURCE_MESG,
-  fmt = PACKET_FORMAT_JSON,
+  fmt = PACKET_FORMAT_MSGPACK,
   cmpr = PACKET_COMPRESSION_NONE,
   encr = PACKET_ENCRYPTION_NONE,
   status = PACKET_STATUS_PASS
@@ -131,17 +145,8 @@ future::plan(future::multicore)
 }
 
 
-
-# AUTO include manifolds start
-# <<<BREAK>>>
-# AUTO include manifolds end
-
-
-
-### Main
-
 # takes a data packet and returns data that can be deserialized
-.get_value <- function(key){
+.get_value <- function(key, schema){
   header <- read_header(key)
 
   if (header$cmd[6] == PACKET_STATUS_FAIL){
@@ -152,17 +157,18 @@ future::plan(future::multicore)
 
   if (header$cmd[1] == PACKET_TYPE_DATA) {
     if (header$cmd[2] == PACKET_SOURCE_MESG) {
-      if(header$cmd[3] == PACKET_FORMAT_JSON) {
-        json_data <- rawToChar(key[data_start:length(key)])
-        return(json_data)
+      if(header$cmd[3] == PACKET_FORMAT_MSGPACK) {
+        # return the value as inside the packet
+        msgpack_unpack(key[data_start:length(key)], schema)
       } else {
         abort("Unsupported data format")
       }
     } else if (header$cmd[2] == PACKET_SOURCE_FILE) {
-      if(header$cmd[3] == PACKET_FORMAT_JSON) {
+      if(header$cmd[3] == PACKET_FORMAT_MSGPACK) {
+        # return the value from a file
         filename <- rawToChar(key[data_start:length(key)])
-        json_data <- readChar(filename, file.info(filename)$size, useBytes=TRUE)
-        return(json_data)
+        msgpack_data <- readBin(con = filename, what = "raw", size = file.info(filename)$size)
+        msgpack_unpack(msgpack_data, schema)
       } else {
         abort("Unsupported data format")
       }
@@ -174,12 +180,10 @@ future::plan(future::multicore)
   }
 }
 
-# takes serialized data and creates a data packet representing it
-.put_value <- function(value){
-  if(typeof(value) != "character"){
-    abort("In put_value, expected input to be a character")
-  }
-  value_raw <- charToRaw(value)
+# take arbitrary R data and creates a data packet representing it
+.put_value <- function(value, schema){
+
+  value_raw <- msgpack_pack(value, schema)
 
   if (length(value_raw) <= 65536 - 32) {
     return(make_data(value_raw))
@@ -189,7 +193,7 @@ future::plan(future::multicore)
 
     .log(paste("Creating temporary file:", key))
 
-    cat(value, file=key)
+    writeBin(value_raw, con=key)
 
     .log(paste("Wrote data to:", key))
 
@@ -234,6 +238,12 @@ future::plan(future::multicore)
     }
   )
 }
+
+
+
+# AUTO include manifolds start
+# <<<BREAK>>>
+# AUTO include manifolds end
 
 
 
