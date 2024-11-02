@@ -334,6 +334,8 @@ def _read_header(data : bytes) -> tuple[bytes, int, int]:
     # return the offset and length
     return (command, offset, length)
 
+
+
 def print_return(data, schema_str):
     # Parse the call return packet
     _log("Printing return")
@@ -341,6 +343,7 @@ def print_return(data, schema_str):
 
     cmd_type = cmd[0]
     status = cmd[5]
+    data_start = 32 + offset
 
     if cmd_type == PACKET_TYPE_DATA and status == PACKET_STATUS_PASS:
         exit_code = 0
@@ -348,10 +351,11 @@ def print_return(data, schema_str):
     elif cmd_type == PACKET_TYPE_DATA and status == PACKET_STATUS_FAIL:
         exit_code = 1
         outfile = sys.stderr
+        error_content = data[data_start: ]
+        errmsg = error_content.decode("utf8")
+        clean_exit(1, errmsg)
     else:
         clean_exit(1, f"Implementation bug: expected data packet: {str(data)}")
-
-    data_start = 32 + offset
 
     cmd_source = cmd[1]
     cmd_format = cmd[2]
