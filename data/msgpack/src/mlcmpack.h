@@ -1201,6 +1201,43 @@ typedef struct Anything {
     } data;
 } Anything;
 
+
+///// Drop the shitty structure above and use this:
+// typedef struct BoxedArray {
+//   size_t size;
+//   void** elements;
+// } BoxedData;
+//
+// typedef struct UnboxedArray {
+//   size_t size;
+//   size_t width;
+//   void* elements;
+// } BoxedData;
+//
+// typedef struct NamedArray {
+//   size_t size
+//   char** key;
+//   Anything2* val;
+// } BoxedData;
+//
+// typedef struct Anything2 {
+//     union {
+//       int8_t i8,
+//       uint8_t u8,
+//       int16_t i16,
+//       uint16_t u16,
+//       int32_t i32,
+//       uint32_t u32,
+//       int64_t i64,
+//       uint64_t u64,
+//       char* cstring,
+//       BoxedArray* boxed_array,
+//       UnboxedArray* unboxed_array,
+//       void* object
+//     } data;
+// } Anything;
+
+
 // Prototypes
 
 void free_parsed_data(Anything* data);
