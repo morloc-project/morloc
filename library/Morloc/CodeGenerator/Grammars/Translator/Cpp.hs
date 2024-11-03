@@ -277,7 +277,6 @@ translateSource path = "#include" <+> (dquotes . pretty) path
 serialize :: MDoc -> SerialAST -> CppTranslator PoolDocs
 serialize nativeExpr s0 = do
   (x, before) <- serialize' nativeExpr s0
-  typestr <- cppTypeOf $ serialAstToType s0
 
   let schema_str = serialAstToMsgpackSchema s0
       putCommand = [idoc|_put_value(#{x}, "#{schema_str}")|]
@@ -835,7 +834,7 @@ Anything* toAnything(const Schema* schema, const #{rtype}& obj)
 }
 |] where
   assignFields :: Int -> (MDoc, MDoc) -> MDoc
-  assignFields idx (keyName, keyType) = vsep
+  assignFields idx (keyName, _) = vsep
     [ [idoc|result->data.obj_arr[#{pretty idx}] = toAnything(schema->parameters[#{pretty idx}], obj.#{keyName});|]
     , [idoc|result->data.obj_arr[#{pretty idx}]->key = strdup("#{keyName}");|]
     ]

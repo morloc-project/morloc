@@ -26,9 +26,6 @@ import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.Map as Map
 import Morloc.CodeGenerator.Generate (generatePools)
 
-import Morloc.DataFiles (rSocketLib, pympack, msgpackSource, rmpack)
-
-
 
 runMorloc :: CliCommand -> IO ()
 runMorloc args = do
