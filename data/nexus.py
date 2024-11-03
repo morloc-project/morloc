@@ -349,10 +349,7 @@ def print_return(data, schema_str):
         exit_code = 0
         outfile = sys.stdout
     elif cmd_type == PACKET_TYPE_DATA and status == PACKET_STATUS_FAIL:
-        exit_code = 1
-        outfile = sys.stderr
-        error_content = data[data_start: ]
-        errmsg = error_content.decode("utf8")
+        errmsg = mp.unpack(data[data_start: ], "s")
         clean_exit(1, errmsg)
     else:
         clean_exit(1, f"Implementation bug: expected data packet: {str(data)}")

@@ -311,10 +311,9 @@ Message _put_value(const T& value, const std::string& schema_str) {
         tempFile.write(payload.data(), payload.size());
         tempFile.close();
 
-        std::vector<char> msg = mpk_pack(tmpfilename, "s");
         packet = make_data(
-          msg.data(),
-          msg.size(),
+          tmpfilename.data(),
+          tmpfilename.size(),
           PACKET_SOURCE_FILE,
           PACKET_FORMAT_MSGPACK,
           PACKET_COMPRESSION_NONE,

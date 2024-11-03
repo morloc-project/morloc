@@ -178,8 +178,7 @@ def _get_value(data: bytes, schema_str: str):
     cmd_format = cmd[2]
 
     if(cmd_type != PACKET_TYPE_DATA):
-        errmsg = "Expected a data packet"
-        raise FailingPacket(errmsg)
+        raise FailingPacket("Expected a data packet")
 
     if cmd_format == PACKET_FORMAT_MSGPACK:
         deserializer = lambda x: mp.unpack(x, schema_str)
@@ -203,8 +202,7 @@ def _get_value(data: bytes, schema_str: str):
         except Exception as e:
             raise FailingPacket(f"Failed to parse file packet: {str(e)}")
     else:
-        errmsg = "Invalid source" 
-        raise FailingPacket(errmsg)
+        raise FailingPacket("Invalid source" )
 
 def _put_value(value, schema_str: str) -> bytes:
     """
@@ -355,10 +353,9 @@ def message_response(data):
         except Exception as e:
             raise FailingPacket(f"Error in m{str(cmdID)}: {str(e)}")
 
-        _log(f"from cmdID {str(cmdID)} pool returning message '{len(result)}'")
+        _log(f"from cmdID {str(cmdID)} pool returning message of length '{len(result)}'")
     else:
-        errmsg = "Expected a call packet, found {str(msg_cmd_type)}"
-        raise FailingPacket(errmsg)
+        raise FailingPacket(f"Expected a call packet, found {str(msg_cmd_type)}")
 
     return result
 
@@ -421,9 +418,9 @@ def server(socket_path):
 
                 if not result_queue.empty():
                     try:
-                        _log("Processing queue result for fd {conn.fileno()}")
+                        _log(f"Processing queue result for fd {conn.fileno()}")
                         result = result_queue.get(block=True)
-                        _log("got result on fd {conn.fileno()}")
+                        _log(f"got result on fd {conn.fileno()}")
 
                         if result is not None:
                             _log(f"Sending result on fd {conn.fileno()}")

@@ -167,7 +167,7 @@ future::plan(future::multicore)
       if(header$cmd[3] == PACKET_FORMAT_MSGPACK) {
         # return the value from a file
         filename <- rawToChar(key[data_start:length(key)])
-        msgpack_data <- readBin(con = filename, what = "raw", size = file.info(filename)$size)
+        msgpack_data <- readBin(con = filename, what = "raw", n = file.info(filename)$size)
         msgpack_unpack(msgpack_data, schema)
       } else {
         abort("Unsupported data format")
