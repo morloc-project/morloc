@@ -18,12 +18,15 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.API as F
+import qualified Morloc.CodeGenerator.SystemConfig as MSC
 import Morloc.CodeGenerator.Namespace (SerialManifold(..))
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.Map as Map
 import Morloc.CodeGenerator.Generate (generatePools)
+
+import Morloc.DataFiles (rSocketLib, pympack, msgpackSource, rmpack)
 
 
 
@@ -36,6 +39,7 @@ runMorloc args = do
     (CmdInstall g) -> cmdInstall g verbose config
     (CmdTypecheck g) -> cmdTypecheck g verbose config
     (CmdDump g) -> cmdDump g verbose config
+    (CmdInit g) -> cmdInit g config
 
 
 -- | read the global morloc config file or return a default one
@@ -44,6 +48,7 @@ getConfig (CmdMake g) = getConfig' (makeConfig g) (makeVanilla g)
 getConfig (CmdInstall g) = getConfig' (installConfig g) (installVanilla g)
 getConfig (CmdTypecheck g) = getConfig' (typecheckConfig g) (typecheckVanilla g)
 getConfig (CmdDump g) = getConfig' (dumpConfig g) (dumpVanilla g)
+getConfig (CmdInit g) = getConfig' (initConfig g) (initVanilla g)
 
 getConfig' :: String -> Bool -> IO Config.Config
 getConfig' _ True = Config.loadMorlocConfig Nothing
@@ -54,7 +59,8 @@ getVerbosity :: CliCommand -> Int
 getVerbosity (CmdMake      g) = makeVerbose      g
 getVerbosity (CmdInstall   g) = installVerbose   g
 getVerbosity (CmdTypecheck g) = typecheckVerbose g
-getVerbosity (CmdDump      g) = dumpVerbose g
+getVerbosity (CmdDump      g) = dumpVerbose      g
+getVerbosity (CmdInit      g) = if initQuiet g then 0 else 1 
 
 readScript :: Bool -> String -> IO (Maybe Path, Code)
 readScript True code = return (Nothing, Code (MT.pack code))
@@ -133,6 +139,10 @@ cmdDump args _ config = do
   case x of
     (Left e) -> putDoc $ pretty e
     (Right e) -> putDoc $ prettyDAG e
+
+
+cmdInit :: InitCommand -> Config.Config -> IO ()
+cmdInit ic config = MSC.configureAll (not (initQuiet ic)) (initForce ic) config
 
 prettyDAG :: DAG MVar e ExprI -> MDoc
 prettyDAG m0 = vsep (map prettyEntry (Map.toList m0)) where

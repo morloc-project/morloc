@@ -11,111 +11,126 @@ Stability   : experimental
 
 module Morloc.CodeGenerator.SystemConfig
 (
-  configure
+    configure
+  , configureAll
 ) where
 
 import Morloc.CodeGenerator.Namespace
-import qualified Morloc.Monad as MM
-import Morloc.DataFiles (rSocketLib, pympack, msgpackSource, rmpack)
+import Morloc.DataFiles (rSocketLib, pympack, msgpackSource, rmpack, cppmpack)
 
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Data.Doc as MD
 import qualified Data.Text.IO as TIO
 
 import System.Process (callCommand, callProcess)
-import System.Directory (doesFileExist, removeFile, createDirectoryIfMissing)
-import System.IO (withFile, IOMode(WriteMode))
+import System.Directory (doesFileExist, removeFile, doesDirectoryExist, createDirectory)
+import System.IO (withFile, IOMode(WriteMode), hPutStrLn, stderr)
 
 
 configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
-configure rASTs = do 
-  let langs = unique $ concatMap findAllLangsSAnno rASTs
-  when (RLang `elem` langs) (makeRSocketLib (MD.pretty . snd $ rSocketLib))
-  setupMsgPackHandling langs
-  return ()
+configure _ = return ()
 
-makeRSocketLib :: MDoc -> MorlocMonad ()
-makeRSocketLib socketLib = do
-  config <- MM.ask
+-- | Configure for all languages
+configureAll :: Bool -> Bool -> Config -> IO ()
+configureAll verbose force config = do 
+
+  -- Setup Morloc home directory structure
+  let homeDir = configHome config
+      srcLibrary = configLibrary config
+      includeDir = configHome config </> "include" 
+      planeDir = configPlane config
+      tmpDir = configTmpDir config
+      optDir = configHome config </> "opt"
+      libDir = configHome config </> "lib"
+
+  createDirectoryWithDescription "morloc home directory" homeDir
+  createDirectoryWithDescription "morloc lib directory" libDir
+  createDirectoryWithDescription "morloc include directory" includeDir
+  createDirectoryWithDescription "morloc plane directory" planeDir
+  createDirectoryWithDescription "morloc tmp directory" tmpDir
+  createDirectoryWithDescription "morloc opt directory" optDir
+  createDirectoryWithDescription "morloc module directory" srcLibrary
+
+  say "Configuring R socket library"
   let srcpath = configHome config </> "lib" </> "socketr.c"
       objpath = configHome config </> "lib" </> "socketr.o"
       libpath = configHome config </> "lib" </> "libsocketr.so"
-  liftIO (compileCCodeIfNeeded (MD.render socketLib) srcpath libpath objpath)
-
-
-setupMsgPackHandling :: [Lang] -> MorlocMonad ()
-setupMsgPackHandling langs = do 
-  config <- MM.ask
-
-  -- setup python module required for msgpack
-  let (pympackFilename, pympackCode) = pympack
-  liftIO $ createDirectoryIfMissing True $ configHome config </> "opt"
-  let pymackPath = configHome config </> "opt" </> pympackFilename
-  liftIO $ TIO.writeFile pymackPath pympackCode
-
-  let includeDir = configHome config </> "include"
-  let libDir = configHome config </> "lib"
-
-  when (RLang `elem` langs) $ liftIO
-    ( compileCCodeIfNeeded
-      (snd rmpack)
-      (includeDir </> "mpackr.c")
-      (libDir </> "libmpackr.so")
-      (includeDir </> "mpackr.o")
-    )
-
-  liftIO $ createDirectoryIfMissing True includeDir
-  liftIO $ createDirectoryIfMissing True libDir
+  compileCCodeIfNeeded (snd $ rSocketLib) srcpath libpath objpath
 
   let mlcmsgpackHeader = includeDir </> fst msgpackSource
 
-  -- write mlcmpack header
-  liftIO $ TIO.writeFile mlcmsgpackHeader (snd msgpackSource)
+  say "Creating mlcmpack header"
+  TIO.writeFile mlcmsgpackHeader (snd msgpackSource)
 
   -- Check if mlcmpack.so exists
   let soPath = libDir </> "libmlcmpack.so"
-  soExists <- liftIO $ doesFileExist soPath
+  soExists <- doesFileExist soPath
 
   -- if the library doesn't exist, make it
-  unless soExists $ do
+  unless (soExists && not force) $ do
+    say "Generating libmlcmpack.so"
     -- this is a stupid hack to make gcc compile a header to a shared object
-    liftIO $ TIO.writeFile "x.c" ("#include \"" <> MT.pack mlcmsgpackHeader <> "\"")
-    let gccCmd = [ "-shared", "-o", soPath, "-fPIC", "x.c" ]
-    liftIO $ callProcess "gcc" gccCmd
-    liftIO $ removeFile "x.c"
+    let tmpCFile = tmpDir </> "x.c"
+    TIO.writeFile tmpCFile ("#include \"" <> MT.pack mlcmsgpackHeader <> "\"")
+    let gccArgs = [ "-shared", "-o", soPath, "-fPIC", tmpCFile ]
+    callProcess "gcc" gccArgs
+    removeFile tmpCFile
 
-compileCCodeIfNeeded :: MT.Text -> Path -> Path -> Path -> IO ()
-compileCCodeIfNeeded codeText sourcePath libPath objPath = do
-    alreadyExists <- doesFileExist libPath
-    if alreadyExists
-        then return ()
-        else do
-            -- Write the code to the temporary file
-            withFile sourcePath WriteMode $ \tempHandle -> do
-                MT.hPutStr tempHandle codeText
+  say "Configuring C++ MessagePack header"
+  TIO.writeFile (includeDir </> fst cppmpack) (snd cppmpack)
 
-           -- Compile the C code, will generate a .so file with same path and
-           -- basename as the source .c file
-            let compileCommand = "R CMD SHLIB " ++ sourcePath ++ " -o " ++ libPath 
-
-            callCommand compileCommand
-
-            -- Delete the source .c file
-            sourcePathExists <- doesFileExist sourcePath
-            when (sourcePathExists) (removeFile sourcePath)
-
-            -- Delete the source .o file
-            objPathExists <- doesFileExist objPath
-            when (objPathExists) (removeFile objPath)
+  say "Configuring python MessagePack libraries"
+  let (pympackFilename, pympackCode) = pympack
+  let pymackPath = optDir </> pympackFilename
+  TIO.writeFile pymackPath pympackCode
 
 
-findAllLangsSAnno :: AnnoS e One (Indexed Lang) -> [Lang]
-findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e where
-  findAllLangsExpr (VarS _ (One x)) = findAllLangsSAnno x
-  findAllLangsExpr (AccS _ x) = findAllLangsSAnno x
-  findAllLangsExpr (AppS x xs) = concatMap findAllLangsSAnno (x:xs)
-  findAllLangsExpr (LamS _ x) = findAllLangsSAnno x
-  findAllLangsExpr (LstS xs) = concatMap findAllLangsSAnno xs
-  findAllLangsExpr (TupS xs) = concatMap findAllLangsSAnno xs
-  findAllLangsExpr (NamS rs) = concatMap (findAllLangsSAnno . snd) rs
-  findAllLangsExpr _ = []
+  say "Configuring R MessagePack libraries"
+  compileCCodeIfNeeded
+    (snd rmpack)
+    (includeDir </> "mpackr.c")
+    (libDir </> "libmpackr.so")
+    (includeDir </> "mpackr.o")
+  where
+
+  say :: String -> IO ()
+  say message =
+    if verbose
+    then do
+      hPutStrLn stderr ("\ESC[32m" <> message <> "\ESC[0m")
+    else
+      return ()
+
+  createDirectoryWithDescription :: String -> FilePath -> IO ()
+  createDirectoryWithDescription description path = do
+      exists <- doesDirectoryExist path
+      if exists
+          then when verbose $
+              say $ "Checking " ++ description ++ " ... using existing path " ++ path
+          else do
+              createDirectory path
+              when verbose $
+                  say $ "Checking " ++ description ++ " ... missing, creating at " ++ path
+
+  compileCCodeIfNeeded :: MT.Text -> Path -> Path -> Path -> IO ()
+  compileCCodeIfNeeded codeText sourcePath libPath objPath = do
+      alreadyExists <- doesFileExist libPath
+      if (alreadyExists && not force)
+          then return ()
+          else do
+              -- Write the code to the temporary file
+              withFile sourcePath WriteMode $ \tempHandle -> do
+                  MT.hPutStr tempHandle codeText
+
+             -- Compile the C code, will generate a .so file with same path and
+             -- basename as the source .c file
+              let compileCommand = "R CMD SHLIB " ++ sourcePath ++ " -o " ++ libPath 
+
+              callCommand compileCommand
+
+              -- Delete the source .c file
+              sourcePathExists <- doesFileExist sourcePath
+              when (sourcePathExists) (removeFile sourcePath)
+
+              -- Delete the source .o file
+              objPathExists <- doesFileExist objPath
+              when (objPathExists) (removeFile objPath)

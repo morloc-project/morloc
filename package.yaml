@@ -25,7 +25,7 @@ extra-source-files:
   # msgpack langs
   - data/msgpack/lang/py/pympack.py
   - data/msgpack/lang/r/mpackr.c
-  - data/msgpack/lang/cpp/cppmapck.hpp
+  - data/msgpack/lang/cpp/cppmpack.hpp
 
 default-extensions:
   - TypeOperators
