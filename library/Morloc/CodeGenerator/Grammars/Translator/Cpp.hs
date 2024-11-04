@@ -394,6 +394,8 @@ deserialize varname0 typestr0 s0
 
     construct _ _ = undefined -- TODO add support for deserialization of remaining types (e.g. other records)
 
+makeSocketPath :: MDoc -> MDoc
+makeSocketPath socketFileBasename = [idoc|g_tmpdir + "/" + #{dquotes socketFileBasename}|]
 
 translateSegment :: SerialManifold -> CppTranslator MDoc
 translateSegment m0 = do
@@ -435,7 +437,7 @@ translateSegment m0 = do
     let bufDef = "std::ostringstream s;"
         argList = encloseSep "{" "}" ", " (map argNamer args)
         argsDef = [idoc|std::vector<Message> args = #{argList};|]
-        call = [idoc|foreign_call("#{socketFile}", #{pretty mid}, args)|]
+        call = [idoc|foreign_call(#{makeSocketPath socketFile}, #{pretty mid}, args)|]
     return $ PoolDocs
       { poolCompleteManifolds = []
       , poolExpr = call

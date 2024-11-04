@@ -64,8 +64,12 @@ getFData (t, i, lang, sockets) = do
     (Just name') -> do
       config <- MM.ask
       let socket = MC.setupServerAndSocket config lang 
-      return (socket, pretty name', i, t, sockets, map dquotes arg_schemas, dquotes return_schema)
+      return (setSocketPath socket, pretty name', i, t, map setSocketPath sockets, map dquotes arg_schemas, dquotes return_schema)
     Nothing -> MM.throwError . GeneratorError $ "No name in FData"
+
+-- place the socket files in the temporary directory for the given process
+setSocketPath :: Socket -> Socket
+setSocketPath s = s { socketPath = [idoc|os.path.join(tmpdir, #{dquotes (socketPath s)})|] }
 
 makeSchemas :: Int -> Lang -> Type -> MorlocMonad ([MDoc], MDoc)
 makeSchemas mid lang (FunT ts t) = do
@@ -153,8 +157,8 @@ def call_#{subcommand}(args, tmpdir):
     makeSocketDoc :: Socket -> MDoc
     makeSocketDoc (Socket lang' cmdDocs pipeDoc) =
       tupled [ dquotes . pretty $ ML.showLangName lang'
-             , list (map dquotes cmdDocs <> ["tmpdir"])
-             , dquotes pipeDoc
+             , list (map dquotes cmdDocs <> [pipeDoc, "tmpdir"])
+             , pipeDoc
              ]
 
 functionCT :: NexusCommand -> MDoc

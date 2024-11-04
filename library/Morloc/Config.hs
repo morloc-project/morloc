@@ -69,7 +69,7 @@ setupServerAndSocket
   :: Config
   -> Lang
   -> Socket 
-setupServerAndSocket c lang = Socket lang (args <> [socket]) socket where
+setupServerAndSocket c lang = Socket lang args socket where
   args = case lang of
     CLang -> ["./" <> pretty (ML.makeExecutableName CLang "pool")]
     CppLang -> ["./" <> pretty (ML.makeExecutableName CppLang "pool")]

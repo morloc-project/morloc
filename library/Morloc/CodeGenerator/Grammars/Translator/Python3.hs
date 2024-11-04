@@ -199,6 +199,8 @@ deserialize v0 s0
 
     construct _ _ = error "Why is this OK? Well, I see that it never was."
 
+makeSocketPath :: MDoc -> MDoc
+makeSocketPath socketFileBasename = [idoc|os.path.join(global_state["tmpdir"], #{dquotes socketFileBasename})|]
 
 translateSegment :: SerialManifold -> MDoc
 translateSegment m0 =
@@ -227,7 +229,7 @@ translateSegment m0 =
     makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) args) _) = do
       -- I don't need to explicitly add single quoes to the arguments here as I
       -- do in C++ and R because the subprocess module bypasses Bash dequoting.
-      let call = "_morloc_foreign_call" <> tupled [dquotes socketFile, pretty mid, list (map argNamer args)]
+      let call = "_morloc_foreign_call" <> tupled [makeSocketPath socketFile, pretty mid, list (map argNamer args)]
       return $ defaultValue { poolExpr = call }
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
     makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet svarNamer i e1 e2
