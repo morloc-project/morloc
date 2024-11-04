@@ -1,12 +1,12 @@
-0.49.0 [2024-09-xx]
+0.49.0 [2024-11-04]
 -------------------
 
-Improved performance
+New backend with better performance
 
- [ ] move to gRPC for transport layer
- [ ] add benchmarking with hyperfine
-
- * Embed source files needed for compilation in the compiler binary
+ * Mediate inter-process communication with UNIX domain sockets
+ * Transmit data with MessagePack rather than JSON
+ * Added a benchmarking suite
+ * Added `morloc init` command to setup and verify morloc ecosystem
 
 0.48.0 [2024-05-10]
 -------------------
