@@ -1,0 +1,23 @@
+stack.yaml.lock
+tags
+*.hi
+*.o
+.stack-work/
+.history
+morloc.cabal
+*.out
+run/
+.idea/
+*.iml
+pool.*
+nexus.*
+z/
+z
+zzz
+zzz*
+z.*
+# ignore debugging files
+*.aux
+*.hp
+*.prof
+*.ps

@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.48.0
+version:          0.49.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
@@ -15,6 +15,17 @@ copyright:        "2020 Zebulun Arendsee"
 extra-source-files:
   - README.md
   - ChangeLog.md
+  # libraries
+  - data/nexus.py # nexus template
+  - data/pools/pool.R
+  - data/pools/pool.cpp
+  - data/pools/pool.py
+  # msgpack
+  - data/msgpack/src/mlcmpack.h
+  # msgpack langs
+  - data/msgpack/lang/py/pympack.py
+  - data/msgpack/lang/r/mpackr.c
+  - data/msgpack/lang/cpp/cppmpack.hpp
 
 default-extensions:
   - TypeOperators
@@ -28,6 +39,7 @@ dependencies:
   - directory-tree
   - extra
   - filepath
+  - file-embed
   - haskell-src-meta
   - megaparsec
   - mtl
@@ -43,7 +55,6 @@ dependencies:
   - text
   - unordered-containers
   - yaml
-
 
 ghc-options:
   - -Wall

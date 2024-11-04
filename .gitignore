@@ -4,16 +4,11 @@ tags
 *.o
 .stack-work/
 .history
-nexus.*
-pool.*
 morloc.cabal
 *.out
 run/
 .idea/
 *.iml
-z
-z.*
-zzz.*
 # ignore debugging files
 *.aux
 *.hp

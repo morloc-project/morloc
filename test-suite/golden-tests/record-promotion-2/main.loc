@@ -10,4 +10,3 @@ record Py => Person = "dict"
 
 siblings :: Str -> [(Str, Int)] -> [Person]
 siblings parent xs = map (\child -> { name = fst child, age = snd child, parent = parent }) xs
-

@@ -288,6 +288,12 @@ main = do
       -- type identities
       , golden "type-identities-c" "type-identities-c"
 
+      -- testing packet transmission
+      , golden "packets-large (wait ~10s)" "packets-large"
+      , golden "packets-interop (wait ~10s)" "packets-interop"
+
+
+
       -- , golden "argument-form-1-rs" "argument-form-1-rs"
       -- , golden "argument-form-2-rs" "argument-form-2-rs"
       -- , golden "argument-form-3-rs" "argument-form-3-rs"

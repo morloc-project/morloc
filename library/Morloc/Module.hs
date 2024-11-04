@@ -236,15 +236,13 @@ getLibraryPaths lib base sofile = map MS.joinPath
   , [lib, "lib", sofile]
   , [lib, "src", base, sofile]
   , [lib, "src", base, "lib", sofile]
-  , ["/usr/bin", sofile]
-  , ["/usr/local/bin", sofile]
   ]
 
 handleFlagsAndPaths :: Lang -> [Source] -> MorlocMonad ([Source], [MT.Text], [Path])
 handleFlagsAndPaths CppLang srcs = do
   state <- MM.get
-  let gccflags = filter (/= "") . map packageGccFlags $ statePackageMeta state
-
+  let gccversion = gccVersionFlag . foldl max 0 . map packageCppVersion $ statePackageMeta state
+  let explicitLibs = map ("-l" <>) . unique . concatMap packageDependencies $ statePackageMeta state
   (srcs', libflags, paths) <-
       fmap unzip3
     . mapM flagAndPath
@@ -260,11 +258,17 @@ handleFlagsAndPaths CppLang srcs = do
          -- all sources that have a defined path (import something)
            filter (isJust . srcPath) srcs'
          -- compiler flags and shared libraries
-         , gccflags ++ (map MT.pack . concat) (mlcInclude : libflags)
+         , [gccversion] <> explicitLibs ++ (map MT.pack . concat) (mlcInclude : libflags)
+          
          -- paths to files to include
          , unique (catMaybes paths)
          )
 handleFlagsAndPaths _ srcs = return (srcs, [], [])
+
+gccVersionFlag :: Int -> MT.Text
+gccVersionFlag i
+ | i <= 17 = "-std=c++17"
+ | otherwise = "-std=c++" <> MT.show' i
 
 flagAndPath :: Source -> MorlocMonad (Source, [String], Maybe Path)
 flagAndPath src@(Source _ CppLang (Just p) _ _)

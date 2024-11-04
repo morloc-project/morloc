@@ -16,9 +16,10 @@ module Morloc.CodeGenerator.Grammars.Translator.R
   ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (isSerializable)
+import Morloc.CodeGenerator.Serial (isSerializable, serialAstToMsgpackSchema)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
+import Morloc.DataFiles as DF
 import Morloc.Quasi
 import Morloc.Monad (gets, Index, newIndex, runIndex)
 import qualified Morloc.Data.Text as MT
@@ -71,8 +72,8 @@ recordAccess record field = record <> "$" <> field
 serialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 serialize v0 s0 = do
   (ms, v1) <- serialize' v0 s0
-  let schema = typeSchema s0
-  let v2 = "rmorlocinternals::mlc_serialize" <> tupled [v1, schema]
+  let schema = serialAstToMsgpackSchema s0
+  let v2 = [idoc|.put_value(#{v1}, "#{schema}")|]
   return (v2, ms)
   where
     serialize' :: MDoc -> SerialAST -> Index ([MDoc], MDoc)
@@ -112,13 +113,14 @@ serialize v0 s0 = do
 deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 deserialize v0 s0
   | isSerializable s0 =
-      let schema = typeSchema s0
-          deserializing = [idoc|rmorlocinternals::mlc_deserialize(#{v0}, #{schema})|]
+      let schema = serialAstToMsgpackSchema s0
+          deserializing = [idoc|.get_value(#{v0}, "#{schema}")|]
+
       in return (deserializing, [])
   | otherwise = do
       rawvar <- helperNamer <$> newIndex
-      let schema = typeSchema s0
-          deserializing = [idoc|#{rawvar} <- rmorlocinternals::mlc_deserialize(#{v0}, #{schema})|]
+      let schema = serialAstToMsgpackSchema s0
+          deserializing = [idoc|#{rawvar} <- .get_value(#{v0}, "#{schema}")|]
       (x, befores) <- check rawvar s0
       return (x, deserializing:befores)
   where
@@ -157,6 +159,9 @@ deserialize v0 s0
 
     construct _ _ = undefined
 
+makeSocketPath :: MDoc -> MDoc
+makeSocketPath socketFileBasename = [idoc|paste0(global_state.tmpdir, "/", #{dquotes socketFileBasename})|]
+
 translateSegment :: SerialManifold -> MDoc
 translateSegment m0 =
   let e = runIndex 0 (foldWithSerialManifoldM fm m0)
@@ -181,11 +186,8 @@ translateSegment m0 =
 
     makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
     makeSerialExpr _ (ManS_ f) = return f
-    makeSerialExpr _ (AppPoolS_ _ (PoolCall _ cmds args) _) = do
-      let quotedCmds = map dquotes cmds
-          cmdArgs = "list" <> tupled (tail quotedCmds)
-          positionalArgs = "list" <> tupled (map argNamer args)
-          call = ".morloc_foreign_call" <> tupled [head quotedCmds, cmdArgs, positionalArgs, dquotes "_", dquotes "_"]
+    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) args) _) = do
+      let call = [idoc|.morloc_foreign_call(#{makeSocketPath socketFile}, #{pretty mid}, list#{tupled (map argNamer args)})|]
       return $ PoolDocs
         { poolCompleteManifolds = []
         , poolExpr = call
@@ -263,141 +265,5 @@ translateSegment m0 =
       let rs = rs1 ++ [ namer i <+> "<-" <+> e1' ] ++ rs2
       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
--- For R, the type schema is the JSON representation of the type
-typeSchema :: SerialAST -> MDoc
-typeSchema s0 = squotes $ jsontype2rjson (serialAstToJsonType s0) where
-  serialAstToJsonType :: SerialAST -> JsonType
-  serialAstToJsonType (SerialPack _ (_, s)) = serialAstToJsonType s
-  serialAstToJsonType (SerialList _ s) = ArrJ (CV "list") [serialAstToJsonType s]
-  serialAstToJsonType (SerialTuple _ ss) = ArrJ (CV "tuple") (map serialAstToJsonType ss)
-  serialAstToJsonType (SerialObject _ (FV _ n) _ rs) = NamJ n (map (second serialAstToJsonType) rs)
-  serialAstToJsonType (SerialReal    (FV _ v)) = VarJ v
-  serialAstToJsonType (SerialInt     (FV _ v)) = VarJ v
-  serialAstToJsonType (SerialBool    (FV _ v)) = VarJ v
-  serialAstToJsonType (SerialString  (FV _ v)) = VarJ v
-  serialAstToJsonType (SerialNull    (FV _ v)) = VarJ v
-  serialAstToJsonType (SerialUnknown (FV _ v)) = VarJ v -- the unknown type is the serialization type
-
-jsontype2rjson :: JsonType -> MDoc
-jsontype2rjson (VarJ v) = dquotes (pretty v)
-jsontype2rjson (ArrJ v ts) = "{" <> key <> ":" <> value <> "}" where
-  key = dquotes (pretty v)
-  value = encloseSep "[" "]" "," (map jsontype2rjson ts)
-jsontype2rjson (NamJ objType rs) =
-  case objType of
-    (CV "data.frame") -> "{" <> dquotes "data.frame" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
-    (CV "record") -> "{" <> dquotes "record" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
-    _ -> encloseSep "{" "}" "," rs'
-  where
-  keys = map (dquotes . pretty . fst) rs
-  values = map (jsontype2rjson . snd) rs
-  rs' = zipWith (\key value -> key <> ":" <> value) keys values
-
 makePool :: [MDoc] -> [MDoc] -> MDoc
-makePool sources manifolds = [idoc|#!/usr/bin/env Rscript
-
-#{vsep sources}
-
-.morloc_run <- function(f, args){
-  fails <- ""
-  isOK <- TRUE
-  warns <- list()
-  notes <- capture.output(
-    {
-      value <- withCallingHandlers(
-        tryCatch(
-          do.call(f, args),
-          error = function(e) {
-            fails <<- e$message
-            isOK <<- FALSE
-          }
-        ),
-        warning = function(w){
-          warns <<- append(warns, w$message)
-          invokeRestart("muffleWarning")
-        }
-      )
-    },
-    type="message"
-  )
-  list(
-    value = value,
-    isOK  = isOK,
-    fails = fails,
-    warns = warns,
-    notes = notes
-  )
-}
-
-# dies on error, ignores warnings and messages
-.morloc_try <- function(f, args, .log=stderr(), .pool="_", .name="_"){
-  x <- .morloc_run(f=f, args=args)
-  location <- sprintf("%s::%s", .pool, .name)
-  if(! x$isOK){
-    cat("** R errors in ", location, "\n", file=stderr())
-    cat(x$fails, "\n", file=stderr())
-    stop(1)
-  }
-  if(! is.null(.log)){
-    lines = c()
-    if(length(x$warns) > 0){
-      cat("** R warnings in ", location, "\n", file=stderr())
-      cat(paste(unlist(x$warns), sep="\n"), file=stderr())
-    }
-    if(length(x$notes) > 0){
-      cat("** R messages in ", location, "\n", file=stderr())
-      cat(paste(unlist(x$notes), sep="\n"), file=stderr())
-    }
-  }
-  x$value
-}
-
-.morloc_unpack <- function(unpacker, x, .pool, .name){
-  x <- .morloc_try(f=unpacker, args=list(as.character(x)), .pool=.pool, .name=.name)
-  return(x)
-}
-
-.make_temporary_file <- function(x) {
-  temp_filename <- tempfile(pattern = "morloc_r_", tmpdir = "/tmp", fileext = "")
-  writeLines(x, temp_filename)
-  return(temp_filename)
-}
-
-.morloc_foreign_call <- function(cmd, cmd_args, args, .pool, .name){
-  # write the input arguments to temporary files
-  arg_files <- lapply(args, .make_temporary_file)
-
-  # try to run the foreign pool, passing the serialized arguments as tmp files
-  result <- .morloc_try(f=system2, args=list(cmd, args=c(cmd_args, arg_files), stdout=TRUE), .pool=.pool, .name=.name)
-
-  # clean up temp files
-  on.exit(unlink(arg_files))
-
-  return(result)
-}
-
-
-#{vsep manifolds}
-
-read <- function(file)
-{
-  paste(readLines(file), collapse="\n")
-}
-
-args <- as.list(commandArgs(trailingOnly=TRUE))
-if(length(args) == 0){
-  stop("Expected 1 or more arguments")
-} else {
-  mlc_pool_cmdID <- args[[1]]
-  mlc_pool_function_name <- paste0("m", mlc_pool_cmdID)
-  if(exists(mlc_pool_function_name)){
-    mlc_pool_function <- eval(parse(text=paste0("m", mlc_pool_cmdID)))
-    result <- do.call(mlc_pool_function, lapply(args[-1], read))
-    if(result != "null"){
-        cat(result, "\n")
-    }
-  } else {
-    cat("Could not find manifold '", mlc_pool_cmdID, "'\n", file=stderr())
-  }
-}
-|]
+makePool sources manifolds = format (DF.poolTemplate RLang) "# <<<BREAK>>>" [vsep sources, vsep manifolds]

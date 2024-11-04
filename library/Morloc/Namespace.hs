@@ -116,6 +116,10 @@ module Morloc.Namespace
   , mostGeneral
   , mostSpecific
   , mostSpecificSubtypes
+  -- data files
+  , NexusSource(..)
+  -- sockets
+  , Socket(..)
   ) where
 
 import Morloc.Language (Lang(..))
@@ -400,6 +404,18 @@ data Import =
   deriving (Ord, Eq, Show)
 
 
+data NexusSource = NexusSource
+  { nexusSourceUtility :: MDoc
+  , nexusSourceMain :: MDoc
+  }
+
+data Socket = Socket
+  { socketLang :: Lang
+  , socketServerInit :: [MDoc]
+  , socketPath :: MDoc
+  }
+  deriving (Show)
+
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
 data SysCommand
@@ -457,7 +473,8 @@ data PackageMeta =
     , packageMaintainer :: !Text
     , packageGithub :: !Text
     , packageBugReports :: !Text
-    , packageGccFlags :: !Text
+    , packageCppVersion :: !Int
+    , packageDependencies :: [Text]
     }
   deriving (Show, Ord, Eq)
 
@@ -811,10 +828,10 @@ instance FromJSON Config where
   parseJSON =
     withObject "object" $ \o ->
       Config
-        <$> o .:? "home" .!= "$HOME/.morloc"
-        <*> o .:? "source" .!= "$HOME/.morloc/src/morloc"
+        <$> o .:? "home" .!= "~/.morloc"
+        <*> o .:? "source" .!= "~/.morloc/src/morloc"
         <*> o .:? "plane" .!= "morloclib"
-        <*> o .:? "tmpdir" .!= "$HOME/.morloc/tmp"
+        <*> o .:? "tmpdir" .!= "~/.morloc/tmp"
         <*> o .:? "lang_python3" .!= "python3"
         <*> o .:? "lang_R" .!= "Rscript"
         <*> o .:? "lang_perl" .!= "perl"
@@ -832,7 +849,10 @@ instance FromJSON PackageMeta where
                 <*> o .:? "maintainer"  .!= ""
                 <*> o .:? "github"      .!= ""
                 <*> o .:? "bug-reports" .!= ""
-                <*> o .:? "gcc-flags"   .!= ""
+                <*> o .:? "cpp-version" .!= 0
+                <*> o .:? "dependencies" .!= []
+
+
 
 instance Defaultable PackageMeta where
   defaultValue = PackageMeta
@@ -847,7 +867,8 @@ instance Defaultable PackageMeta where
     , packageMaintainer = ""
     , packageGithub = ""
     , packageBugReports = ""
-    , packageGccFlags = ""
+    , packageCppVersion = 17
+    , packageDependencies = []
     }
 
 instance Defaultable MorlocState where
@@ -1051,7 +1072,6 @@ mostSpecific = P.maxima
 
 
 ----- Pretty instances -------------------------------------------------------
-
 
 instance Pretty Lit where
   pretty (MNum x) = viaShow x

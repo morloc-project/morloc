@@ -2,6 +2,7 @@ module UI (
     opts
   , CliCommand(..)
   , MakeCommand(..)
+  , InitCommand(..)
   , InstallCommand(..)
   , TypecheckCommand(..)
   , DumpCommand(..)
@@ -11,7 +12,7 @@ import Options.Applicative
 import qualified Options.Applicative.Extra as OAE
 
 version :: String
-version = "v0.48.0"   -- FIXME: HARDCODED VERSION NUMBER!!!
+version = "v0.49.0"   -- FIXME: HARDCODED VERSION NUMBER!!!
 
 opts :: ParserInfo CliCommand
 opts = info (cliParser <**> helper <**> OAE.simpleVersioner version)
@@ -23,6 +24,7 @@ opts = info (cliParser <**> helper <**> OAE.simpleVersioner version)
 
 data CliCommand
   = CmdMake MakeCommand
+  | CmdInit InitCommand
   | CmdInstall InstallCommand
   | CmdTypecheck TypecheckCommand
   | CmdDump DumpCommand
@@ -32,6 +34,7 @@ cliParser = hsubparser
   ( makeSubcommand
   <> installSubcommand
   <> typecheckSubcommand
+  <> initSubcommand
   <> dumpSubcommand
   )
 
@@ -57,6 +60,23 @@ makeCommandParser = MakeCommand
 makeSubcommand :: Mod CommandFields CliCommand
 makeSubcommand = command "make" (info (CmdMake <$> makeCommandParser) (progDesc "build a morloc script"))
 
+
+data InitCommand = InitCommand
+  { initConfig :: String
+  , initQuiet :: Bool
+  , initVanilla :: Bool
+  , initForce :: Bool
+  }
+
+initCommandParser :: Parser InitCommand
+initCommandParser = InitCommand
+  <$> optConfig
+  <*> optQuiet
+  <*> optVanilla
+  <*> optForce
+
+initSubcommand :: Mod CommandFields CliCommand
+initSubcommand = command "init" (info (CmdInit <$> initCommandParser) (progDesc "initialize morloc environment"))
 
 data InstallCommand = InstallCommand
   { installConfig :: String
@@ -146,8 +166,22 @@ optRaw = switch
   <> help "print raw objects"
   )
 
+optForce :: Parser Bool
+optForce = switch
+  ( long "force"
+  <> short 'f'
+  <> help "Force action overwriting existing files"
+  )
+
 optVerbose :: Parser Int
 optVerbose = length <$> many (flag' () (short 'v'))
+
+optQuiet :: Parser Bool
+optQuiet = switch
+  ( long "quiet"
+  <> short 'q'
+  <> help "print minimal output to STDERR"
+  )
 
 optRealize :: Parser Bool
 optRealize = switch

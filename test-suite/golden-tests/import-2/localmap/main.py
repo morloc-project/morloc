@@ -6,7 +6,7 @@ def morloc_packMap (xs):
   return d
 
 def morloc_unpackMap (d):
-  return [list(d.keys()), list(d.values())]
+  return (list(d.keys()), list(d.values()))
 
 def morloc_person(name):
-    return dict(name = name, age = 42)
+    return {name : 42}

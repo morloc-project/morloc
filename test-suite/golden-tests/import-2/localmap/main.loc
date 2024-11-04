@@ -1,10 +1,6 @@
 module localmap (Map, person)
 
-source py from "main.py"
- ( "morloc_packMap" as packMap
- , "morloc_unpackMap" as unpackMap
- , "morloc_person" as person
- )
+source py from "main.py" ( "morloc_person" as person )
 
 type py => Str = "str"
 type py => Int = "int"

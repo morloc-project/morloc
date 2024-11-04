@@ -26,9 +26,10 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial ( isSerializable
                                    , serialAstToType
                                    , shallowType
+                                   , serialAstToMsgpackSchema
                                    )
 import Morloc.CodeGenerator.Grammars.Common
-import qualified Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals as Src
+import Morloc.DataFiles as DF
 import Morloc.Data.Doc
 import Morloc.Quasi
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
@@ -101,7 +102,8 @@ instance {-# OVERLAPPABLE #-} HasTypeF e => HasCppType e where
         Nothing -> error $ "Record missing from recmap: " <> show t <> " from map: " <> show recmap
     f (NamF _ (FV _ s) ps _) = do
       ps' <- mapM f ps
-      return $ pretty s <> encloseSep "<" ">" "," ps'
+      return $ pretty s <> recordTemplate ps'
+
 
   cppArgOf s (Arg i t) = do
     t' <- cppTypeOf (typeFof t)
@@ -275,18 +277,13 @@ translateSource path = "#include" <+> (dquotes . pretty) path
 serialize :: MDoc -> SerialAST -> CppTranslator PoolDocs
 serialize nativeExpr s0 = do
   (x, before) <- serialize' nativeExpr s0
-  typestr <- cppTypeOf $ serialAstToType s0
 
-  -- TODO: I can remove the requirement for this schema term by adding a type
-  -- annotation to the serialization function (I think)
-  schemaIndex <- getCounter
-  let schemaName = [idoc|#{helperNamer schemaIndex}_schema|]
-      schema = [idoc|#{typestr} #{schemaName};|]
-      final = [idoc|serialize(#{x}, #{schemaName})|]
+  let schema_str = serialAstToMsgpackSchema s0
+      putCommand = [idoc|_put_value(#{x}, "#{schema_str}")|]
   return $ PoolDocs
       { poolCompleteManifolds = []
-      , poolExpr = final
-      , poolPriorLines = before <> [schema]
+      , poolExpr = putCommand
+      , poolPriorLines = before
       , poolPriorExprs = []
       }
 
@@ -341,21 +338,19 @@ serialize nativeExpr s0 = do
 deserialize :: MDoc -> MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])
 deserialize varname0 typestr0 s0
   | isSerializable s0 = do
-      schemaVar <- helperNamer <$> getCounter
-      let schemaName = [idoc|#{schemaVar}_schema|]
-          schema = [idoc|#{typestr0} #{schemaName};|]
-          term = [idoc|deserialize(#{varname0}, #{schemaName})|]
-      return (term, [schema])
+      rawtype <- cppTypeOf $ serialAstToType s0
+      let schema = serialAstToMsgpackSchema s0
+          getCmd = [idoc|_get_value<#{rawtype}>(#{varname0}, "#{schema}")|]
+      return (getCmd, [])
   | otherwise = do
       schemaVar <- helperNamer <$> getCounter
       rawtype <- cppTypeOf $ serialAstToType s0
       rawvar <- helperNamer <$> getCounter
-      let schemaName = [idoc|#{schemaVar}_schema|]
-          schema = [idoc|#{rawtype} #{schemaName};|]
-          deserializing = [idoc|#{rawtype} #{rawvar} = deserialize(#{varname0}, #{schemaName});|]
+      let schema = serialAstToMsgpackSchema s0
+          getCmd = [idoc|#{rawtype} #{rawvar} = _get_value<#{rawtype}>(#{varname0}, "#{schema}");|]
       (x, before) <- construct rawvar s0
       let final = [idoc|#{typestr0} #{schemaVar} = #{x};|]
-      return (schemaVar , [schema, deserializing] ++ before ++ [final])
+      return (schemaVar, [getCmd] ++ before ++ [final])
 
   where
     check :: MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])
@@ -399,6 +394,8 @@ deserialize varname0 typestr0 s0
 
     construct _ _ = undefined -- TODO add support for deserialization of remaining types (e.g. other records)
 
+makeSocketPath :: MDoc -> MDoc
+makeSocketPath socketFileBasename = [idoc|g_tmpdir + "/" + #{dquotes socketFileBasename}|]
 
 translateSegment :: SerialManifold -> CppTranslator MDoc
 translateSegment m0 = do
@@ -436,16 +433,15 @@ translateSegment m0 = do
 
   makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> CppTranslator PoolDocs
   makeSerialExpr _ (ManS_ e) = return e
-  makeSerialExpr _ (AppPoolS_ _ (PoolCall _ cmds args) _) = do
+  makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) args) _) = do
     let bufDef = "std::ostringstream s;"
         argList = encloseSep "{" "}" ", " (map argNamer args)
-        argsDef = [idoc|std::vector<std::string> args = #{argList};|]
-        cmd = "s << " <> cat (punctuate " << \" \" << " (map dquotes cmds)) <> ";"
-        call = [idoc|foreign_call(s.str(), args)|]
+        argsDef = [idoc|std::vector<Message> args = #{argList};|]
+        call = [idoc|foreign_call(#{makeSocketPath socketFile}, #{pretty mid}, args)|]
     return $ PoolDocs
       { poolCompleteManifolds = []
       , poolExpr = call
-      , poolPriorLines = [bufDef, argsDef, cmd]
+      , poolPriorLines = [bufDef, argsDef]
       , poolPriorExprs = []
       }
   makeSerialExpr _ (ReturnS_ e) = return $ e {poolExpr = "return(" <> poolExpr e <> ");"}
@@ -509,7 +505,7 @@ translateSegment m0 = do
   templateArguments [] = return ""
   templateArguments qs = do
     ts <- mapM (cppTypeOf . snd) qs
-    return $ encloseSep "<" ">" "," ts
+    return $ recordTemplate ts
 
 
   makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
@@ -522,7 +518,6 @@ translateSegment m0 = do
       , poolPriorLines = []
       , poolPriorExprs = pes1 <> pes2
       }
-
 
 makeManifold
   :: (HasTypeM t)
@@ -570,14 +565,15 @@ makeManifold callIndex form manifoldType e = do
         let tryBody = block 4 "try" body
             throwStatement = vsep
               [ [idoc|std::string error_message = "Error in m#{pretty callIndex} " + std::string(e.what());|]
-              , [idoc|std::cerr << error_message << std::endl;|]
+              , [idoc|log_message(error_message);|]
               , [idoc|throw std::runtime_error(error_message);|]
               ]
             catchBody = block 4 "catch (const std::exception& e)" throwStatement
             tryCatchBody = tryBody <+> catchBody
         return . Just . block 4 decl . vsep $
           [ {- can add diagnostic statements here -}
-            tryCatchBody
+            [idoc|log_message("Entering #{pretty callIndex}");|]
+          , tryCatchBody
           ]
   returnType :: TypeM -> CppTranslator MDoc
   returnType (Function _ t) = cppTypeOf t
@@ -588,28 +584,22 @@ stdBind xs = [idoc|std::bind(#{args})|] where
   args = cat (punctuate "," xs)
 
 makeDispatch :: [SerialManifold] -> MDoc
-makeDispatch ms = block 4 "switch(std::stoi(argv[1]))" (vsep (map makeCase ms))
+makeDispatch ms = block 4 "switch(mid)" (vsep (map makeCase ms))
   where
     makeCase :: SerialManifold -> MDoc
     makeCase (SerialManifold i _ form _) =
       -- this made more sense when I was using ArgTypes
       -- it may make sense yet again when I switch to Or
       let size = sum $ abilist (\_ _ -> 1) (\_ _ -> 1) form
-          args' = take size $ map (\j -> "read(argv[" <> viaShow j <> "])") ([2..] :: [Int])
+          args' = take size $ map (\j -> "args[" <> viaShow j <> "]") ([0..] :: [Int])
       in
         (nest 4 . vsep)
           [ "case" <+> viaShow i <> ":"
-          , "__mlc_result__ = " <> manNamer i <> tupled args' <> ";"
-          , "break;"
+          , "return" <+> manNamer i <> tupled args' <> ";"
           ]
 
 typeParams :: [(Maybe TypeF, TypeF)] -> CppTranslator MDoc
-typeParams ts = do
-  ds <- mapM cppTypeOf [t | (Nothing, t) <- ts]
-  return $
-    if null ds
-      then ""
-      else encloseSep "<" ">" "," ds
+typeParams ts = recordTemplate <$> mapM cppTypeOf [t | (Nothing, t) <- ts]
 
 collectRecords :: SerialManifold -> [(FVar, Int, [(Key, TypeF)])]
 collectRecords e0@(SerialManifold i0 _ _ _)
@@ -810,23 +800,24 @@ structTypedefTemplate params rname fields = vsep [template, struct] where
 
 -- Example
 -- > template <class T>
--- > std::string serialize(person<T> x, person<T> schema);
+-- > __mlc_Person__<T> fromAnything(const Schema* schema, const Anything* anything, __mlc_Person__<T>* dummy = nullptr)
 serialHeaderTemplate :: [MDoc] -> MDoc -> MDoc
 serialHeaderTemplate params rtype = vsep [template, prototype]
   where
   template = makeTemplateHeader params
-  prototype = [idoc|std::string serialize(#{rtype} x, #{rtype} schema);|]
+  prototype = [idoc|#{rtype} fromAnything(const Schema* schema, const Anything* anything, #{rtype}* dummy = nullptr);|]
+  
 
 
 
 -- Example:
--- > template <class T>
--- > bool deserialize(const std::string json, size_t &i, person<T> &x);
+-- > template<typename T>
+-- > Anything* toAnything(const Schema* schema, const __mlc_Person__<T>& obj)
 deserialHeaderTemplate :: [MDoc] -> MDoc -> MDoc
 deserialHeaderTemplate params rtype = vsep [template, prototype]
   where
   template = makeTemplateHeader params
-  prototype = [idoc|bool deserialize(const std::string json, size_t &i, #{rtype} &x);|]
+  prototype = [idoc|Anything* toAnything(const Schema* schema, const #{rtype}& obj);|]
 
 
 
@@ -837,16 +828,18 @@ serializerTemplate
   -> MDoc -- output serializer function
 serializerTemplate params rtype fields = [idoc|
 #{makeTemplateHeader params}
-std::string serialize(#{rtype} x, #{rtype} schema){
-    #{schemata}
-    std::ostringstream json;
-    json << "{" << #{align $ vsep (punctuate " << ',' <<" writers)} << "}";
-    return json.str();
+Anything* toAnything(const Schema* schema, const #{rtype}& obj)
+{
+    Anything* result = map_data_(#{pretty $ length fields});
+    #{align $ vsep (zipWith assignFields [0..] fields)}
+    return result;
 }
 |] where
-  schemata = align $ vsep (map (\(k,t) -> t <+> k <> "_" <> ";") fields)
-  writers = map (\(k,_) -> dquotes ("\\\"" <> k <> "\\\"" <> ":")
-          <+> "<<" <+> [idoc|serialize(x.#{k}, #{k}_)|] ) fields
+  assignFields :: Int -> (MDoc, MDoc) -> MDoc
+  assignFields idx (keyName, _) = vsep
+    [ [idoc|result->data.obj_arr[#{pretty idx}] = toAnything(schema->parameters[#{pretty idx}], obj.#{keyName});|]
+    , [idoc|result->data.obj_arr[#{pretty idx}]->key = strdup("#{keyName}");|]
+    ]
 
 
 
@@ -857,106 +850,29 @@ deserializerTemplate
   -> [(MDoc, MDoc)] -- ^ key and type for all fields
   -> MDoc -- ^ output deserializer function
 deserializerTemplate isObj params rtype fields
-  = [idoc|
+  =  [idoc|
 #{makeTemplateHeader params}
-bool deserialize(const std::string json, size_t &i, #{rtype} &x){
-    #{schemata}
-    try {
-        whitespace(json, i);
-        if(! match(json, "{", i))
-            throw 1;
-        whitespace(json, i);
-        #{fieldParsers}
-        if(! match(json, "}", i))
-            throw 1;
-        whitespace(json, i);
-    } catch (int e) {
-        return false;
-    }
-    #{assign}
-    return true;
-}
+#{block 4 header body}
 |] where
-  schemata = align $ vsep (map (\(k,t) -> t <+> k <> "_" <> ";") fields)
-  fieldParsers = align $ vsep (punctuate parseComma (map (makeParseField . fst) fields))
-  values = [k <> "_" | (k,_) <- fields]
-  assign = if isObj
-           then [idoc|#{rtype} y#{tupled values}; x = y;|]
-           else let obj = encloseSep "{" "}" "," values
-                in [idoc|#{rtype} y = #{obj}; x = y;|]
+  header = [idoc|#{rtype} fromAnything(const Schema* schema, const Anything* anything, #{rtype}* dummy)|]
+  body = vsep $ [ [idoc|#{rtype} obj;|] ]
+              <> zipWith assignFields [0..] fields
+              <> ["return obj;"]
 
-parseComma :: Doc ann
-parseComma = [idoc|
-if(! match(json, ",", i))
-    throw 800;
-whitespace(json, i);|]
+  assignFields :: Int -> (MDoc, MDoc) -> MDoc
+  assignFields idx (keyName, keyType) = vsep
+    [ [idoc|#{keyType}* elemental_dumby_#{keyName} = nullptr;|]
+    , [idoc|obj.#{keyName} = fromAnything(schema->parameters[#{pretty idx}], anything->data.obj_arr[#{pretty idx}], elemental_dumby_#{keyName});|]
+    ]
 
-makeParseField :: MDoc -> MDoc
-makeParseField field = [idoc|
-if(! match(json, "\"#{field}\"", i))
-    throw 1;
-whitespace(json, i);
-if(! match(json, ":", i))
-    throw 1;
-whitespace(json, i);
-if(! deserialize(json, i, #{field}_))
-    throw 1;
-whitespace(json, i);|]
-
+  -- XXX: here need to add back the isObj handling, if is object, need to call
+  -- the constructor rather than directly assigning to fields
 
 makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
-makeMain includes signatures serialization manifolds dispatch = [idoc|#include <string>
-#include <iostream>
-#include <sstream>
-#include <functional>
-#include <vector>
-#include <string>
-#include <algorithm> // for std::transform
-#include <stdexcept>
-#include <fstream>
-
-// needed for foreign interface
-#include <cstdlib>
-#include <cstring>
-#include <cstdio>
-#include <unistd.h>
-
-using namespace std;
-
-std::string read(const std::string& file) {
-    std::ifstream input_file(file);
-
-    if (!input_file.is_open()) {
-        throw std::runtime_error("Error opening file: " + file);
-    }
-
-    std::stringstream buffer;
-    buffer << input_file.rdbuf();
-
-    std::string content = buffer.str();
-
-    return content;
-}
-
-#{Src.foreignCallFunction}
-
-#{vsep includes}
-
-#{Src.serializationHandling}
-
-#{vsep serialization}
-
-#{vsep signatures}
-
-#{vsep manifolds}
-
-int main(int argc, char * argv[])
-{
-    #{serialType} __mlc_result__;
-    #{dispatch}
-    if(__mlc_result__ != "null"){
-        std::cout << __mlc_result__ << std::endl;
-    }
-    return 0;
-}
-|]
+makeMain includes signatures serialization manifolds dispatch
+  = format (DF.poolTemplate CppLang) "// <<<BREAK>>>"
+  [ vsep includes
+  , vsep serialization
+  , vsep signatures
+  , vsep manifolds
+  , dispatch]

@@ -16,9 +16,10 @@ module Morloc.CodeGenerator.Grammars.Translator.Python3
   ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (isSerializable, serialAstToJsonType)
+import Morloc.CodeGenerator.Serial (isSerializable, serialAstToMsgpackSchema)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
+import Morloc.DataFiles as DF
 import Morloc.Quasi
 import qualified Morloc.Config as MC
 import Morloc.Monad (asks, gets, Index, newIndex, runIndex)
@@ -37,6 +38,9 @@ translate srcs es = do
   -- setup library paths
   lib <- pretty <$> asks MC.configLibrary
 
+  home <- pretty <$> asks MC.configHome
+  let opt = home <> "/opt" 
+
   -- translate sources
   includeDocs <- mapM
     translateSource
@@ -51,7 +55,7 @@ translate srcs es = do
   -- make code for dispatching to manifolds
   let dispatch = makeDispatch es
 
-  let code = makePool lib includeDocs mDocs dispatch
+  let code = makePool [opt, lib] includeDocs mDocs dispatch
   let outfile = ML.makeExecutableName Python3Lang "pool"
 
   return $ Script
@@ -98,8 +102,8 @@ objectAccess object field = object <> "." <> field
 serialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 serialize v0 s0 = do
   (ms, v1) <- serialize' v0 s0
-  let schema = typeSchema s0
-      v2 = "mlc_serialize" <> tupled [v1, schema]
+  let schema = serialAstToMsgpackSchema s0
+  let v2 = [idoc|_put_value(#{v1}, "#{schema}")|]
   return (v2, ms)
   where
     serialize' :: MDoc -> SerialAST -> Index ([MDoc], MDoc)
@@ -145,13 +149,13 @@ serialize v0 s0 = do
 deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 deserialize v0 s0
   | isSerializable s0 = do
-      let schema = typeSchema s0
-          deserializing = [idoc|mlc_deserialize(#{v0}, #{schema})|]
+      let schema = serialAstToMsgpackSchema s0
+      let deserializing = [idoc|_get_value(#{v0}, "#{schema}")|]
       return (deserializing, [])
   | otherwise = do
       rawvar <- helperNamer <$> newIndex
-      let schema = typeSchema s0
-          deserializing = [idoc|#{rawvar} = mlc_deserialize(#{v0}, #{schema})|]
+      let schema = serialAstToMsgpackSchema s0
+      let deserializing = [idoc|#{rawvar} = _get_value(#{v0}, "#{schema}")|]
       (x, befores) <- check rawvar s0
       return (x, deserializing:befores)
   where
@@ -195,6 +199,8 @@ deserialize v0 s0
 
     construct _ _ = error "Why is this OK? Well, I see that it never was."
 
+makeSocketPath :: MDoc -> MDoc
+makeSocketPath socketFileBasename = [idoc|os.path.join(global_state["tmpdir"], #{dquotes socketFileBasename})|]
 
 translateSegment :: SerialManifold -> MDoc
 translateSegment m0 =
@@ -220,10 +226,10 @@ translateSegment m0 =
 
     makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
     makeSerialExpr _ (ManS_ f) = return f
-    makeSerialExpr _ (AppPoolS_ _ (PoolCall _ cmds args) _) = do
+    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) args) _) = do
       -- I don't need to explicitly add single quoes to the arguments here as I
       -- do in C++ and R because the subprocess module bypasses Bash dequoting.
-      let call = "_morloc_foreign_call(" <> list (map dquotes cmds) <> "," <+> list (map argNamer args) <> ")"
+      let call = "_morloc_foreign_call" <> tupled [makeSocketPath socketFile, pretty mid, list (map argNamer args)]
       return $ defaultValue { poolExpr = call }
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
     makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet svarNamer i e1 e2
@@ -289,103 +295,15 @@ translateSegment m0 =
     makeLambda args body = "lambda" <+> hsep (punctuate "," (map argNamer args)) <> ":" <+> body
 
 makeDispatch :: [SerialManifold] -> MDoc
-makeDispatch ms = align . vsep $
-  [ align . vsep $ ["dispatch = {", indent 4 (vsep $ map entry ms), "}"]
-  , "__mlc_function__ = dispatch[cmdID]"
-  ]
+makeDispatch ms = align . vsep $ ["dispatch = {", indent 4 (vsep $ map entry ms), "}"]
   where
     entry :: SerialManifold -> MDoc
     entry (SerialManifold i _ _ _)
       = pretty i <> ":" <+> manNamer i <> ","
 
-typeSchema :: SerialAST -> MDoc
-typeSchema = f . serialAstToJsonType
+makePool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
+makePool libs includeDocs manifolds dispatch
+  = format (DF.poolTemplate Python3Lang) "# <<<BREAK>>>" [path, vsep includeDocs, vsep manifolds, dispatch]
   where
-    f :: JsonType -> MDoc
-    f (VarJ v) = lst [var v, "None"]
-    f (ArrJ v ts) = lst [var v, lst (map f ts)]
-    f (NamJ (CV "dict") es) = lst [dquotes "dict", dict (map entry es)]
-    f (NamJ (CV "record") es) = lst [dquotes "record", dict (map entry es)]
-    f (NamJ v es) = lst [pretty v, dict (map entry es)]
-
-    entry :: (Key, JsonType) -> MDoc
-    entry (v, t) = pretty v <> "=" <> f t
-
-    dict :: [MDoc] -> MDoc
-    dict xs = "OrderedDict" <> lst xs
-
-    lst :: [MDoc] -> MDoc
-    lst xs = encloseSep "(" ")" "," xs
-
-    var :: CVar -> MDoc
-    var v = dquotes (pretty v)
-
-makePool :: MDoc -> [MDoc] -> [MDoc] -> MDoc -> MDoc
-makePool lib includeDocs manifolds dispatch = [idoc|#!/usr/bin/env python
-
-import sys
-import subprocess
-import json
-import tempfile
-import os
-from pymorlocinternals import (mlc_serialize, mlc_deserialize)
-from collections import OrderedDict
-
-sys.path = ["#{lib}"] + sys.path
-
-#{vsep includeDocs}
-
-class MorlocForeignCallError(Exception):
-    pass
-
-def _morloc_foreign_call(cmds, args):
-    arg_filenames = []
-    for (i, arg) in enumerate(args):
-        temp = tempfile.NamedTemporaryFile(prefix="morloc_py_", delete=False)
-        with open(temp.name, "w") as fh:
-            print(arg, file=fh)
-            arg_filenames.append(temp.name)
-    try:
-        sysObj = subprocess.run(
-            cmds + arg_filenames,
-            stdout=subprocess.PIPE,
-            check=True
-        )
-    except subprocess.CalledProcessError as e:
-        raise MorlocForeignCallError(f"python foreign call error: {str(e)}")
-    finally:
-        for arg_filename in arg_filenames:
-            try:
-                os.unlink(arg_filename)
-            except:
-                pass
-
-    return(sysObj.stdout.decode("ascii"))
-
-
-#{vsep manifolds}
-
-def read(filename):
-    xs = []
-    with open(filename, "r") as fh:
-        for line in fh.readlines():
-            xs.append(line)
-    return "\n".join(xs)
-
-if __name__ == '__main__':
-    try:
-        cmdID = int(sys.argv[1])
-    except IndexError:
-        sys.exit("Internal error in {}: no manifold id found".format(sys.argv[0]))
-    except ValueError:
-        sys.exit("Internal error in {}: expected integer manifold id".format(sys.argv[0]))
-    try:
-        #{dispatch}
-    except KeyError:
-        sys.exit("Internal error in {}: no manifold found with id={}".format(sys.argv[0], cmdID))
-
-    __mlc_result__ = __mlc_function__(*[read(x) for x in sys.argv[2:]])
-
-    if __mlc_result__ != "null":
-        print(__mlc_result__)
-|]
+    path = [idoc|sys.path = #{list (map makePath libs)} + sys.path|]
+    makePath filename = [idoc|os.path.expanduser(#{dquotes(filename)})|]

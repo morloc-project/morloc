@@ -14,6 +14,7 @@ module Morloc.CodeGenerator.Nexus
 
 import qualified Control.Monad.State as CMS
 import Morloc.Data.Doc
+import Morloc.DataFiles as DF
 import Morloc.CodeGenerator.Namespace
 import Morloc.Quasi
 import qualified Morloc.Data.Text as MT
@@ -21,18 +22,28 @@ import qualified Control.Monad as CM
 import qualified Morloc.Config as MC
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
+import qualified Morloc.CodeGenerator.Infer as Infer
+import qualified Morloc.CodeGenerator.Serial as Serial
 
 type FData =
-  ( [MDoc] -- pool call command arguments, (e.g., ["RScript", "pool.R", "4", "--"])
+  ( Socket
   , MDoc -- subcommand name
+  , Int -- manifold ID
   , Type -- argument type
+  , [Socket] -- list of sockets needed for this command
+  , [MDoc] -- argument type schemas
+  , MDoc -- return type schema
   )
 
-generate :: [NexusCommand] -> [(Type, Int, Lang)] -> MorlocMonad Script
+generate :: [NexusCommand] -> [(Type, Int, Lang, [Socket])] -> MorlocMonad Script
 generate cs xs = do
-  config <- MM.ask
 
-  callNames <- mapM (MM.metaName . (\(_, i, _) -> i)) xs |>> catMaybes |>> map pretty
+  -- find the path for extensions
+  -- this includes the mlcmpack module needed for MessagePack handling
+  home <- MM.asks MC.configHome
+  let optDir = pretty $ home </> "opt" 
+
+  callNames <- mapM (MM.metaName . (\(_, i, _, _) -> i)) xs |>> catMaybes |>> map pretty
   let gastNames = map (pretty . commandName) cs
       names = callNames <> gastNames
   fdata <- CM.mapM getFData xs -- [FData]
@@ -41,73 +52,49 @@ generate cs xs = do
     Script
       { scriptBase = outfile
       , scriptLang = ML.Python3Lang
-      , scriptCode = "." :/ File outfile (Code . render $ main names fdata (pretty $ configLangPython3 config) cs)
+      , scriptCode = "." :/ File outfile (Code . render $ main optDir (pretty home) names fdata cs)
       , scriptMake = [SysExe outfile]
       }
 
-getFData :: (Type, Int, Lang) -> MorlocMonad FData
-getFData (t, i, lang) = do
+getFData :: (Type, Int, Lang, [Socket]) -> MorlocMonad FData
+getFData (t, i, lang, sockets) = do
   mayName <- MM.metaName i
+  (arg_schemas, return_schema) <- makeSchemas i lang t
   case mayName of
     (Just name') -> do
       config <- MM.ask
-      case MC.buildPoolCallBase config (Just lang) i of
-        (Just cmds) -> return (cmds, pretty name', t)
-        Nothing ->
-          MM.throwError . GeneratorError $
-          "No execution method found for language: " <> ML.showLangName lang
+      let socket = MC.setupServerAndSocket config lang 
+      return (setSocketPath socket, pretty name', i, t, map setSocketPath sockets, map dquotes arg_schemas, dquotes return_schema)
     Nothing -> MM.throwError . GeneratorError $ "No name in FData"
 
+-- place the socket files in the temporary directory for the given process
+setSocketPath :: Socket -> Socket
+setSocketPath s = s { socketPath = [idoc|os.path.join(tmpdir, #{dquotes (socketPath s)})|] }
+
+makeSchemas :: Int -> Lang -> Type -> MorlocMonad ([MDoc], MDoc)
+makeSchemas mid lang (FunT ts t) = do
+  ss <- mapM (makeSchema mid lang) ts
+  s <- makeSchema mid lang t
+  return (ss, s)
+makeSchemas mid lang t = do
+  s <- makeSchema mid lang t
+  return ([], s)
+
+makeSchema :: Int -> Lang -> Type -> MorlocMonad MDoc
+makeSchema mid lang t = do
+  ft <- Infer.inferConcreteTypeUniversal lang t
+  ast <- Serial.makeSerialAST mid lang ft
+  return $ Serial.serialAstToMsgpackSchema ast
 
 
-main :: [MDoc] -> [FData] -> MDoc -> [NexusCommand] -> MDoc
-main names fdata pythonExe cdata =
-  [idoc|#!/usr/bin/env #{pythonExe}
-
-import json
-import subprocess
-import sys
-import os
-import tempfile
-
-#{usageT fdata cdata}
-
-#{vsep (map functionCT cdata ++ map functionT fdata)}
-
-#{mapT names}
-
-def dispatch(cmd, args):
-    if(cmd in ["-h", "--help", "-?", "?"]):
-        usage()
-    else:
-        command_table[cmd](args)
-
-def as_file(input_str):
-    if os.path.isfile(input_str):
-        return (False, input_str)
-    else:
-        x = tempfile.NamedTemporaryFile(prefix="morloc_nexus_", delete=False)
-        with open(x.name, "w") as fh_temp:
-            if os.path.exists(input_str):
-                with open(input_str, "r") as fh_sub:
-                    print(fh_sub.read().strip(), file=fh_temp)
-            else:
-                try:
-                    input_json = json.loads(input_str)
-                    print(json.dumps(input_json), file=fh_temp)
-                except json.JSONDecodeError:
-                    print("Invalid input '{input_str}'", file=sys.stderr)
-                    sys.exit(1)
-        return (True, x.name)
-
-if __name__ == '__main__':
-    if len(sys.argv) == 1:
-        usage()
-    else:
-        cmd = sys.argv[1]
-        args = sys.argv[2:]
-        dispatch(cmd, args)
-|]
+main :: MDoc -> MDoc -> [MDoc] -> [FData] -> [NexusCommand] -> MDoc
+main optDir homeDir names fdata cdata = format DF.nexusTemplate "# <<<BREAK>>>"
+ [ [idoc|sys.path = [os.path.expanduser("#{optDir}")] + sys.path
+MORLOC_HOME = os.path.expanduser("#{homeDir}")|]
+ , usageT fdata cdata <> "\n" <>
+   vsep (map functionCT cdata ++ map functionT fdata) <> "\n" <>
+   mapT names
+ ]
 
 mapT :: [Doc ann] -> Doc ann
 mapT names = [idoc|command_table = #{dict}|] where
@@ -125,7 +112,7 @@ def usage():
 |]
 
 usageLineT :: FData -> MDoc
-usageLineT (_, name', t) = vsep
+usageLineT (_, name', _, t, _, _, _) = vsep
   ( [idoc|print("  #{name'}")|]
   : writeTypes t
   )
@@ -148,25 +135,36 @@ writeType Nothing  t = [idoc|print('''    return: #{pretty t}''')|]
 
 
 functionT :: FData -> MDoc
-functionT (cmd, subcommand, t) =
+functionT (Socket lang _ _, subcommand, mid, t, sockets, schemas, return_schema) =
   [idoc|
-def call_#{subcommand}(args):
+def call_#{subcommand}(args, tmpdir):
     if len(args) != #{pretty (nargs t)}:
-        sys.exit("Expected #{pretty (nargs t)} arguments to '#{subcommand}', given " + str(len(args)))
+        clean_exit("Expected #{pretty (nargs t)} arguments to '#{subcommand}', given " + str(len(args)))
     else:
-        arg_files = [as_file(arg) for arg in args]
-        try:
-          subprocess.run(#{list $ map dquotes cmd} + [x[1] for x in arg_files])
-        finally:
-            for (is_temp, file) in arg_files:
-                if is_temp:
-                    os.unlink(file)
+        run_command(
+            mid = #{pretty mid},
+            args = args,
+            pool_lang = #{poolLangDoc},
+            sockets = #{socketsDoc},
+            arg_schema = #{list(schemas)},
+            return_schema = #{return_schema}
+        )
 |]
+  where
+    poolLangDoc = dquotes . pretty $ ML.showLangName lang
+    socketsDoc = list [align . vsep $ map (\x -> makeSocketDoc x <> ",") sockets]
+
+    makeSocketDoc :: Socket -> MDoc
+    makeSocketDoc (Socket lang' cmdDocs pipeDoc) =
+      tupled [ dquotes . pretty $ ML.showLangName lang'
+             , list (map dquotes cmdDocs <> [pipeDoc, "tmpdir"])
+             , pipeDoc
+             ]
 
 functionCT :: NexusCommand -> MDoc
 functionCT (NexusCommand cmd _ json_str args subs) =
   [idoc|
-def call_#{pretty cmd}(args):
+def call_#{pretty cmd}(args, tmpdir):
     if len(args) != #{pretty $ length args}:
         sys.exit("Expected #{pretty $ length args} arguments to '#{pretty cmd}', given " + str(len(args)))
     else:

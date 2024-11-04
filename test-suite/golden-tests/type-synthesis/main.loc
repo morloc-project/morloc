@@ -8,8 +8,8 @@ type Py => (Tuple2 a b) = "tuple" a b
 
 foo :: Int -> Int
 foos :: Int -> [Int]
-sfoos :: [Int] -> [Int]
+sfoos :: [Int] -> (Int, [Int])
 toPair a :: a -> (a, a)
 swapPair a b :: (a, b) -> (b, a)
 
-bar x = toPair (swapPair ((foo x), x))
+bar x = toPair (swapPair (foo x, x))

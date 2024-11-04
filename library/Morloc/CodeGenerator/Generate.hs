@@ -25,6 +25,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Nexus as Nexus
+import qualified Morloc.CodeGenerator.SystemConfig as MCS
 import Morloc.CodeGenerator.Infer
 
 import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
@@ -48,6 +49,10 @@ realityCheck es = do
     -- separate unrealized (general) ASTs (uASTs) from realized ASTs (rASTs)
     |>> partitionEithers
 
+  -- check and configure the system
+  -- in the future, the results of this step may be used to winnow the build
+  MCS.configure rASTs
+
   return (gASTs, rASTs)
 
 -- | Translate typed, abstract syntax forests into compilable code
@@ -64,10 +69,8 @@ generate gASTs rASTs = do
   -- -----------
   -- Each nexus subcommand calls one function from one one pool.
   -- The call passes the pool an index for the function (manifold) that will be called.
-  nexus <- Nexus.generate
-    gSerial
-    [(t, i, lang) | (AnnoS (Idx i t) (Idx _ lang) _) <- rASTs]
 
+  nexus <- mapM makeFData rASTs >>= Nexus.generate gSerial
 
   -- initialize counter for use in express
   MM.startCounter
@@ -77,6 +80,28 @@ generate gASTs rASTs = do
 
   return (nexus, pools)
 
+-- Prep the data needed for each subcommand in the nexus
+makeFData :: AnnoS (Indexed Type) One (Indexed Lang) -> MorlocMonad (Type, Int, Lang, [Socket])
+makeFData e@(AnnoS (Idx i t) (Idx _ lang) _) = do
+  sockets <- findSockets e
+  return (t, i, lang, sockets)
+
+findSockets :: AnnoS e One (Indexed Lang) -> MorlocMonad [Socket]
+findSockets rAST = do
+  config <- MM.ask
+  return . map (MC.setupServerAndSocket config) . unique $ findAllLangsSAnno rAST
+
+
+findAllLangsSAnno :: AnnoS e One (Indexed Lang) -> [Lang]
+findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e where
+  findAllLangsExpr (VarS _ (One x)) = findAllLangsSAnno x
+  findAllLangsExpr (AccS _ x) = findAllLangsSAnno x
+  findAllLangsExpr (AppS x xs) = concatMap findAllLangsSAnno (x:xs)
+  findAllLangsExpr (LamS _ x) = findAllLangsSAnno x
+  findAllLangsExpr (LstS xs) = concatMap findAllLangsSAnno xs
+  findAllLangsExpr (TupS xs) = concatMap findAllLangsSAnno xs
+  findAllLangsExpr (NamS rs) = concatMap (findAllLangsSAnno . snd) rs
+  findAllLangsExpr _ = []
 
 -- | Do everything except language specific code generation.
 generatePools :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [(Lang, [SerialManifold])]
@@ -1355,9 +1380,8 @@ segmentExpr _ args (PolyForeignInterface lang callingType cargs e@(PolyManifold 
   (ms, (_, e')) <- segmentExpr m (map ann foreignArgs) e
   let foreignHead = MonoHead lang m foreignArgs e'
   config <- MM.ask
-  case MC.buildPoolCallBase config (Just lang) m of
-    (Just cmds) -> return (foreignHead:ms, (Nothing, MonoPoolCall callingType m cmds foreignArgs))
-    Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' lang
+  let socket = MC.setupServerAndSocket config lang 
+  return (foreignHead:ms, (Nothing, MonoPoolCall callingType m socket foreignArgs))
 
 segmentExpr m _ (PolyForeignInterface lang callingType args e) = do
   MM.sayVVV $ "segmentExpr PolyForeignInterface m" <> pretty m
@@ -1368,11 +1392,11 @@ segmentExpr m _ (PolyForeignInterface lang callingType args e) = do
   let foreignHead = MonoHead lang m [Arg i None | i <- args] (MonoReturn e')
       -- pack the arguments that will be passed to the foreign manifold
       es' = map (MonoBndVar (A None)) args
+
   config <- MM.ask
-  -- create the body of the local helper function
-  localFun <- case MC.buildPoolCallBase config (Just lang) m of
-    (Just cmds) -> return $ MonoApp (MonoPoolCall callingType m cmds [Arg i None | i <- args]) es'
-    Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' lang
+  let socket = MC.setupServerAndSocket config lang 
+      localFun = MonoApp (MonoPoolCall callingType m socket [Arg i None | i <- args]) es'
+
   return (foreignHead:ms, (Nothing, localFun))
 
 segmentExpr _ _ (PolyManifold lang m form e) = do

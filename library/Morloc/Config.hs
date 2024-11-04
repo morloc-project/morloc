@@ -12,7 +12,7 @@ module Morloc.Config
   ( Config(..)
   , loadMorlocConfig
   , loadDefaultMorlocConfig
-  , buildPoolCallBase
+  , setupServerAndSocket
   , getDefaultConfigFilepath
   , getDefaultMorlocLibrary
   ) where
@@ -64,26 +64,21 @@ loadMorlocConfig (Just configFile) = do
     else
       loadMorlocConfig Nothing
 
--- | Create the base call to a pool (without arguments)
--- For example:
---   ./pool.R 1 --
---   ./pool.py 1 --
---   ./pool-cpp.out 1 --
---   ./pool.R 1 [1,2,3] true
-buildPoolCallBase
+
+setupServerAndSocket
   :: Config
-  -> Maybe Lang
-  -> Int
-  -> Maybe [MDoc]
-buildPoolCallBase _ (Just CLang) i =
-  Just ["./" <> pretty (ML.makeExecutableName CLang "pool"), pretty i]
-buildPoolCallBase _ (Just CppLang) i =
-  Just ["./" <> pretty (ML.makeExecutableName CppLang "pool"), pretty i]
-buildPoolCallBase c (Just RLang) i =
-  Just [pretty (configLangR c), pretty (ML.makeExecutableName RLang "pool"), pretty i]
-buildPoolCallBase c (Just Python3Lang) i =
-  Just [pretty (configLangPython3 c), pretty (ML.makeExecutableName Python3Lang "pool"), pretty i]
-buildPoolCallBase _ _ _ = Nothing -- FIXME: add error handling
+  -> Lang
+  -> Socket 
+setupServerAndSocket c lang = Socket lang args socket where
+  args = case lang of
+    CLang -> ["./" <> pretty (ML.makeExecutableName CLang "pool")]
+    CppLang -> ["./" <> pretty (ML.makeExecutableName CppLang "pool")]
+    RLang -> [pretty (configLangR c), pretty (ML.makeExecutableName RLang "pool")]
+    Python3Lang -> [pretty (configLangPython3 c), pretty (ML.makeExecutableName Python3Lang "pool")]
+    _ -> undefined 
+
+  socket = "pipe-" <> pretty (ML.showLangName lang)
+
 
 -- A key value map
 defaultFields :: IO (K.KeyMap MT.Text)

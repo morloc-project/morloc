@@ -1,10 +1,20 @@
+0.49.0 [2024-11-04]
+-------------------
+
+New backend with better performance
+
+ * Mediate inter-process communication with UNIX domain sockets
+ * Transmit data with MessagePack rather than JSON
+ * Added a benchmarking suite
+ * Added `morloc init` command to setup and verify morloc ecosystem
+
 0.48.0 [2024-05-10]
 -------------------
 
-Second PeerJ submission
+Second PeerJ submission (after return by editor for technical reasons)
 
  * Made type parameters explicit as type arguments:
-    `id a :: a -> a`
+   `id a :: a -> a`
     rather than either of
    `id :: a -> a`
    `id :: forall a . a -> a`.
