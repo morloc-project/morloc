@@ -21,10 +21,11 @@ import Morloc.DataFiles (rSocketLib, pympack, msgpackSource, rmpack, cppmpack)
 import qualified Morloc.Data.Text as MT
 import qualified Data.Text.IO as TIO
 
-import System.Process (callCommand, callProcess)
-import System.Directory (doesFileExist, removeFile, doesDirectoryExist, createDirectory)
+import System.Process (callCommand, callProcess, readCreateProcessWithExitCode, shell)
+import System.Directory (doesFileExist, removeFile, doesDirectoryExist, createDirectoryIfMissing)
 import System.IO (withFile, IOMode(WriteMode), hPutStrLn, stderr)
 
+import System.Exit (ExitCode(..), exitWith)
 
 configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
 configure _ = return ()
@@ -49,6 +50,11 @@ configureAll verbose force config = do
   createDirectoryWithDescription "morloc tmp directory" tmpDir
   createDirectoryWithDescription "morloc opt directory" optDir
   createDirectoryWithDescription "morloc module directory" srcLibrary
+
+  say "Installing C++ extra types"
+  let mlccpptypesRepoUrl = "https://github.com/morloclib/mlccpptypes"
+      cmd = unwords ["git clone", mlccpptypesRepoUrl, includeDir </> "mlccpptypes"]
+  runCommand "installing mlccpptypes" cmd
 
   say "Configuring R socket library"
   let srcpath = configHome config </> "lib" </> "socketr.c"
@@ -92,11 +98,22 @@ configureAll verbose force config = do
     (includeDir </> "mpackr.o")
   where
 
+  ok msg = "\ESC[32m" <> msg <> "\ESC[0m"
+  bad msg = "\ESC[31m" <> msg <> "\ESC[0m"
+
   say :: String -> IO ()
   say message =
     if verbose
     then do
-      hPutStrLn stderr ("\ESC[32m" <> message <> "\ESC[0m")
+      hPutStrLn stderr (ok message)
+    else
+      return ()
+
+  warn :: String -> IO ()
+  warn message =
+    if verbose
+    then do
+      hPutStrLn stderr (bad message)
     else
       return ()
 
@@ -105,11 +122,11 @@ configureAll verbose force config = do
       exists <- doesDirectoryExist path
       if exists
           then when verbose $
-              say $ "Checking " ++ description ++ " ... using existing path " ++ path
+              putStrLn $ "Checking " ++ description ++ " ... using existing path " ++ path
           else do
-              createDirectory path
+              createDirectoryIfMissing True path
               when verbose $
-                  say $ "Checking " ++ description ++ " ... missing, creating at " ++ path
+                  putStrLn $ "Checking " ++ description ++ " ... missing, creating at " ++ path
 
   compileCCodeIfNeeded :: MT.Text -> Path -> Path -> Path -> IO ()
   compileCCodeIfNeeded codeText sourcePath libPath objPath = do
@@ -134,3 +151,19 @@ configureAll verbose force config = do
               -- Delete the source .o file
               objPathExists <- doesFileExist objPath
               when (objPathExists) (removeFile objPath)
+
+  runCommand ::
+       String -- description of action
+    -> String -- system command
+    -> IO ()
+  runCommand runMsg cmd = do
+    say runMsg
+    putStrLn $ cmd
+    (exitCode, _, err') <-
+      readCreateProcessWithExitCode (shell cmd) []
+    case exitCode of
+      ExitSuccess -> return ()
+      ExitFailure code -> do
+        warn "  command failed - exiting"
+        putStrLn err'
+        exitWith (ExitFailure code)
