@@ -1,4 +1,4 @@
-module (cid, pid, rid, pfoo, rfoo, cfoo)
+module foo (cid, pid, rid, pfoo, rfoo, cfoo)
 
 source Cpp from "foo.h" ("cid")
 source Py from "foo.py" ("pid")

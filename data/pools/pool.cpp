@@ -32,11 +32,12 @@
 
 using namespace std;
 
+// global tmpdir value that will be set in main
+std::string g_tmpdir;
 
 // AUTO include statements start
 // <<<BREAK>>>
 // AUTO include statements end
-
 
 // Proper linking of cppmpack requires it be included AFTER the custom modules 
 #include "cppmpack.hpp"
@@ -266,19 +267,28 @@ std::string read(const std::string& file) {
 // Functions used in making foreign calls
 
 std::string generateTempFilename() {
-    char template_file[] = "/tmp/morloc_cpp_XXXXXX";
-    int fd = mkstemp(template_file);
+    // Combine tmpdir with a template name
+    std::string template_str = g_tmpdir + "/cpp_pool_XXXXXX";
+    
+    // Convert to a non-const char array (required by mkstemp)
+    std::vector<char> template_char(template_str.begin(), template_str.end());
+    template_char.push_back('\0'); // Ensure null-termination
 
+    // Call mkstemp
+    int fd = mkstemp(template_char.data());
     if (fd == -1) {
-        perror("Error generating temporary filename");
-        exit(EXIT_FAILURE);
+        throw std::runtime_error("Error generating temporary filename");
     }
 
     // Close the file descriptor
     close(fd);
 
-    return std::string(template_file);
+    // Convert back to string and return
+    return std::string(template_char.data());
 }
+
+
+
 
 // Transforms a serialized value into a message ready for the socket
 template <typename T>
@@ -302,6 +312,7 @@ Message _put_value(const T& value, const std::string& schema_str) {
           PACKET_STATUS_PASS
         );
     } else {
+
         // for large data, write a temporary file
         std::string tmpfilename = generateTempFilename();
         std::ofstream tempFile(tmpfilename, std::ios::binary);
@@ -411,23 +422,23 @@ int new_socket(){
     return socket_fd;
 }
 
-struct sockaddr_un new_server_addr(const char* SOCKET_PATH){
+struct sockaddr_un new_server_addr(const char* socket_path){
     // Set up the server address structure
     struct sockaddr_un server_addr;
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sun_family = AF_UNIX;
-    strncpy(server_addr.sun_path, SOCKET_PATH, sizeof(server_addr.sun_path) - 1);
+    strncpy(server_addr.sun_path, socket_path, sizeof(server_addr.sun_path) - 1);
     return server_addr;
 }
 
-int new_server(const char* SOCKET_PATH){
+int new_server(const char* socket_path){
 
     int server_fd = new_socket();
 
-    struct sockaddr_un server_addr = new_server_addr(SOCKET_PATH);
+    struct sockaddr_un server_addr = new_server_addr(socket_path);
 
     // Remove any existing socket file
-    unlink(SOCKET_PATH);
+    unlink(socket_path);
 
     // Bind the socket to the address
     if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
@@ -787,16 +798,19 @@ void run_job(int client_fd) {
 
 
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        std::cerr << "Usage: " << argv[0] << " <socket_path>\n";
+    if (argc != 3) {
+        std::cerr << "Usage: " << argv[0] << " <socket_path>" << " <tmpdir>\n";
         return 1;
     }
-    const char* SOCKET_PATH = argv[1];
+    const char* socket_path = argv[1];
 
-    log_message("Server starting with socket path: " + std::string(SOCKET_PATH));
+    // give a value to the global variable storing the main temporary directory
+    g_tmpdir = std::string(argv[2]);
+
+    log_message("Server starting with socket path: " + std::string(socket_path));
 
     // Setup a new server that uses a given path for the socket address
-    int server_fd = new_server(SOCKET_PATH);
+    int server_fd = new_server(socket_path);
 
     // Set the server socket to non-blocking mode
     fcntl(server_fd, F_SETFL, O_NONBLOCK);
@@ -855,7 +869,7 @@ int main(int argc, char* argv[]) {
     socket_close(server_fd, "server");
 
     // Remove the socket file
-    unlink(SOCKET_PATH);
+    unlink(socket_path);
     log_message("Socket file removed");
 
     return 0;

@@ -17,6 +17,8 @@ msgpack_unpack <- function(packed, schema) {
 
 library(rlang)
 
+global_state <- new.env()
+
 PACKET_TYPE_DATA <- 0x00
 PACKET_TYPE_CALL <- 0x01
 PACKET_TYPE_GET  <- 0x02
@@ -189,7 +191,10 @@ future::plan(future::multicore)
     return(make_data(value_raw))
 
   } else {
-    key <- paste0("/tmp/morloc_r_", sub("0.", "", as.character(runif(1))))
+
+    key <- tempfile(pattern = "r_", 
+                    tmpdir = global_state.tmpdir, 
+                    fileext = "")
 
     .log(paste("Creating temporary file:", key))
 
@@ -446,11 +451,17 @@ main <- function(socket_path) {
 
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) != 1) {
-  cat("Usage: Rscript pipe.R <socket_path>\n", file=stderr())
+if (length(args) != 2) {
+  cat("Usage: Rscript pipe.R <socket_path> <tmpdir>\n", file=stderr())
   quit(status = 1)
 }
 
-socket_path <- args[1]
-result <- main(socket_path)
-quit(status = result)
+tryCatch(
+  {
+    socket_path <- args[1]
+    global_state.tmpdir <- args[2]
+    result <- main(socket_path)
+    quit(status = result)
+  },  error = function(e) {
+      .log(paste("Pool failed:", e$message))
+  })

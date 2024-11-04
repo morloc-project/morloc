@@ -1,8 +1,8 @@
 #### PREAMBLE
 
 import sys
-import tempfile
 import os
+import tempfile
 import struct
 
 # import only used if dictionaries are passed
@@ -17,6 +17,8 @@ from contextlib import closing
 # AUTO include imports start
 # <<<BREAK>>>
 # AUTO include imports end
+
+global_state = {"tmpdir" : ""}
 
 import pympack as mp
 
@@ -223,7 +225,7 @@ def _put_value(value, schema_str: str) -> bytes:
         return _make_data(data)
     else:
         # for large data, write a temporary file
-        with tempfile.NamedTemporaryFile(delete=False, mode='wb') as temp_file:
+        with tempfile.NamedTemporaryFile(delete=False, dir=global_state["tmpdir"], mode='wb') as temp_file:
             temp_file.write(data)
             tmpfilename = temp_file.name
         return _make_data(tmpfilename.encode("utf8"), src=PACKET_SOURCE_FILE)
@@ -458,7 +460,9 @@ def server(socket_path):
 if __name__ == "__main__":
     try:
         socket_path = sys.argv[1]
+        global_state["tmpdir"] = sys.argv[2]
         server(socket_path)
     except Exception as e:
         _log(f"Python pool failed: {str(e)}")
         sys.exit(1)
+

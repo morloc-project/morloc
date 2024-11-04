@@ -11,6 +11,7 @@ import queue
 import struct
 import json
 import traceback
+import tempfile
 
 # AUTO include imports start
 # <<<BREAK>>>
@@ -52,11 +53,6 @@ MAX_RETRIES = 30
 
 # buffer size for socket IPC
 BUFFER_SIZE = 4096
-
-# default pipe names, must match the signal naming conventions of the pools
-PYTHON_PIPE = "python3-pipe"
-CPP_PIPE = "cpp-pipe"
-R_PIPE = "r-pipe"
 
 # Resources that need to be cleaned up when the session ends
 resources = {"pools": {}, "files": []}
@@ -248,7 +244,7 @@ def client(pool, message):
     return data
 
 
-def start_language_server(lang, cmd, pipe):
+def start_language_server(lang, cmd, pipe, tmpdir):
     # Create a queue to store stderr output
     stderr_queue = queue.Queue()
 
@@ -538,7 +534,7 @@ def run_command(mid, args, pool_lang, sockets, arg_schema, return_schema):
         # Start language servers
         for (lang, cmd, pipe) in sockets:
             try:
-                start_language_server(lang, cmd, pipe)
+                start_language_server(lang, cmd, pipe, tmpdir)
             except Exception as e:
                 _log(trace(f"Failed to start {lang} language server: {str(e)}"))
                 raise  # Re-raise the exception to be caught in the outer try block
@@ -569,11 +565,11 @@ def run_command(mid, args, pool_lang, sockets, arg_schema, return_schema):
 
 
 
-def dispatch(cmd, args):
+def dispatch(cmd, args, tmpdir):
     if cmd in ["-h", "--help", "-?", "?"]:
         usage()
     else:
-        command_table[cmd](args)
+        command_table[cmd](args, tmpdir)
 
 
 if __name__ == "__main__":
@@ -582,4 +578,9 @@ if __name__ == "__main__":
     else:
         cmd = sys.argv[1]
         args = sys.argv[2:]
-        dispatch(cmd, args)
+
+        base_dir = os.path.join(MORLOC_HOME, "tmp")
+        os.makedirs(base_dir, exist_ok=True)
+
+        with tempfile.TemporaryDirectory(dir=base_dir) as tmpdir:
+            dispatch(cmd, args, tmpdir)

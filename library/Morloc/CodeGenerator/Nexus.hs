@@ -52,7 +52,7 @@ generate cs xs = do
     Script
       { scriptBase = outfile
       , scriptLang = ML.Python3Lang
-      , scriptCode = "." :/ File outfile (Code . render $ main optDir names fdata cs)
+      , scriptCode = "." :/ File outfile (Code . render $ main optDir (pretty home) names fdata cs)
       , scriptMake = [SysExe outfile]
       }
 
@@ -83,9 +83,10 @@ makeSchema mid lang t = do
   return $ Serial.serialAstToMsgpackSchema ast
 
 
-main :: MDoc -> [MDoc] -> [FData] -> [NexusCommand] -> MDoc
-main optDir names fdata cdata = format DF.nexusTemplate "# <<<BREAK>>>"
- [ [idoc|sys.path = [os.path.expanduser("#{optDir}")] + sys.path|]
+main :: MDoc -> MDoc -> [MDoc] -> [FData] -> [NexusCommand] -> MDoc
+main optDir homeDir names fdata cdata = format DF.nexusTemplate "# <<<BREAK>>>"
+ [ [idoc|sys.path = [os.path.expanduser("#{optDir}")] + sys.path
+MORLOC_HOME = os.path.expanduser("#{homeDir}")|]
  , usageT fdata cdata <> "\n" <>
    vsep (map functionCT cdata ++ map functionT fdata) <> "\n" <>
    mapT names
@@ -132,7 +133,7 @@ writeType Nothing  t = [idoc|print('''    return: #{pretty t}''')|]
 functionT :: FData -> MDoc
 functionT (Socket lang _ _, subcommand, mid, t, sockets, schemas, return_schema) =
   [idoc|
-def call_#{subcommand}(args):
+def call_#{subcommand}(args, tmpdir):
     if len(args) != #{pretty (nargs t)}:
         clean_exit("Expected #{pretty (nargs t)} arguments to '#{subcommand}', given " + str(len(args)))
     else:
@@ -150,12 +151,16 @@ def call_#{subcommand}(args):
     socketsDoc = list [align . vsep $ map (\x -> makeSocketDoc x <> ",") sockets]
 
     makeSocketDoc :: Socket -> MDoc
-    makeSocketDoc (Socket lang' cmdDocs pipeDoc) = tupled [dquotes . pretty $ ML.showLangName lang', list (map dquotes cmdDocs), dquotes pipeDoc]
+    makeSocketDoc (Socket lang' cmdDocs pipeDoc) =
+      tupled [ dquotes . pretty $ ML.showLangName lang'
+             , list (map dquotes cmdDocs <> ["tmpdir"])
+             , dquotes pipeDoc
+             ]
 
 functionCT :: NexusCommand -> MDoc
 functionCT (NexusCommand cmd _ json_str args subs) =
   [idoc|
-def call_#{pretty cmd}(args):
+def call_#{pretty cmd}(args, tmpdir):
     if len(args) != #{pretty $ length args}:
         sys.exit("Expected #{pretty $ length args} arguments to '#{pretty cmd}', given " + str(len(args)))
     else:
