@@ -19,8 +19,6 @@ jobs:
       - name: Set up Python environment
         run: |
           sudo apt-get install -y python3
-          sudo apt-get install -y python3-pip
-          pip install pymorlocinternals
 
       - name: Set up C++ environment
         run: |
@@ -40,8 +38,6 @@ jobs:
         run: |
           sudo apt-get install -y r-base
           sudo apt-get install -y libgsl-dev # required for installation of morloc module math
-          Rscript -e 'install.packages("remotes", repos  = "https://cloud.r-project.org")'
-          Rscript -e 'remotes::install_github("morloc-project/rmorlocinternals", dependencies=TRUE)'
 
       - name: "Build Morloc"
         run: |
@@ -59,6 +55,7 @@ jobs:
           echo "tmpdir : $HOME/.morloc/tmp" >> $HOME/.morloc/config
           echo "lang_python3 : python3" >> $HOME/.morloc/config
           sudo apt-get install git # required for installations below
+          morloc init
           morloc install prelude
           morloc install types
           morloc install conventions
