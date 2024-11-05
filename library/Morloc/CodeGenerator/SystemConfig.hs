@@ -50,9 +50,14 @@ configureAll verbose force config = do
   createDirectoryWithDescription "morloc module directory" srcLibrary
 
   say "Installing C++ extra types"
-  let mlccpptypesRepoUrl = "https://github.com/morloclib/mlccpptypes"
-      cmd = unwords ["git clone", mlccpptypesRepoUrl, includeDir </> "mlccpptypes"]
-  runCommand "installing mlccpptypes" cmd
+
+  let mlccpptypesPath = includeDir </> "mlccpptypes"
+  mlccpptypesExists <- doesDirectoryExist mlccpptypesPath
+
+  unless mlccpptypesExists $ do
+    let mlccpptypesRepoUrl = "https://github.com/morloclib/mlccpptypes"
+        cmd = unwords ["git clone", mlccpptypesRepoUrl, mlccpptypesPath]
+    runCommand "installing mlccpptypes" cmd
 
   say "Configuring R socket library"
   let srcpath = configHome config </> "lib" </> "socketr.c"
