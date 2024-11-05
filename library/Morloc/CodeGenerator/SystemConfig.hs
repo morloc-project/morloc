@@ -38,7 +38,6 @@ configureAll verbose force config = do
   let homeDir = configHome config
       srcLibrary = configLibrary config
       includeDir = configHome config </> "include" 
-      planeDir = configPlane config
       tmpDir = configTmpDir config
       optDir = configHome config </> "opt"
       libDir = configHome config </> "lib"
@@ -46,7 +45,6 @@ configureAll verbose force config = do
   createDirectoryWithDescription "morloc home directory" homeDir
   createDirectoryWithDescription "morloc lib directory" libDir
   createDirectoryWithDescription "morloc include directory" includeDir
-  createDirectoryWithDescription "morloc plane directory" planeDir
   createDirectoryWithDescription "morloc tmp directory" tmpDir
   createDirectoryWithDescription "morloc opt directory" optDir
   createDirectoryWithDescription "morloc module directory" srcLibrary
