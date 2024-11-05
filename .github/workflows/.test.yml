@@ -32,6 +32,7 @@ jobs:
         run: |
           sudo apt-get install -y r-base
           sudo apt-get install -y libgsl-dev # required for installation of morloc module math
+          Rscript -e 'install.packages(c("rlang", "future"), repos  = "https://cloud.r-project.org")'
 
       - name: "Build Morloc"
         run: |
