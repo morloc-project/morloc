@@ -16,8 +16,7 @@ All information about morloc module structure should be defined here.
  * installation of modules from github
 -}
 module Morloc.Module
-  ( ModuleSource(..)
-  , installModule
+  ( installModule
   , findModule
   , loadModuleMetadata
   , handleFlagsAndPaths
@@ -32,14 +31,26 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
 import qualified Data.Yaml.Config as YC
 
--- | Specify where a module is located
-data ModuleSource
-  = LocalModule (Maybe String)
-  -- ^ A module in the working directory
-  | GithubRepo String
-  -- ^ A module stored in an arbitrary Github repo: "<username>/<reponame>"
-  | CoreGithubRepo String
-  -- ^ The repo name of a core package, e.g., "math"
+-- needed for github retrieval
+import qualified Data.ByteString.Lazy as BL
+import qualified Codec.Archive.Zip as Zip
+import Network.HTTP.Simple
+import System.Directory
+import System.FilePath
+import Control.Monad
+import Control.Exception
+import Data.Maybe (fromMaybe)
+import Data.Aeson
+import System.IO (hClose)
+
+
+
+data RepoInfo = RepoInfo { defaultBranch :: MT.Text } deriving Show
+
+instance FromJSON RepoInfo where
+    parseJSON = withObject "RepoInfo" $ \v -> RepoInfo
+        <$> v .: "default_branch"
+
 
 -- | Look for a local morloc module.
 findModule :: Maybe (Path, MVar) -> MVar -> MorlocMonad Path
@@ -321,30 +332,67 @@ getFile x = do
       then Just x
       else Nothing
 
--- | Attempt to clone a package from github
-installGithubRepo ::
-     String -- ^ the repo path ("<username>/<reponame>")
-  -> [String] -- ^ directory path (e.g., ["github"], or ["plane", "rbase"] for core)
-  -> String -- ^ the url for github (e.g., "https://github.com/")
-  -> MorlocMonad ()
-installGithubRepo repo dirPath url = do
-  config <- MM.ask
-  let path = foldl MS.combine (Config.configLibrary config) (dirPath <> [repo])
-      cmd = unwords ["git clone", url, path]
-  MM.runCommand "installGithubRepo" (MT.pack cmd)
 
 -- | Install a morloc module
 installModule
     :: ModuleSource
     -> Maybe Path -- plane path
     -> MorlocMonad ()
-installModule (GithubRepo repo) _ =
-  installGithubRepo repo ["github"] ("https://github.com/" <> repo) -- repo has form "user/reponame"
-installModule (CoreGithubRepo name') (Just plane) = do
-  planeDir <- MM.asks configPlane
-  installGithubRepo name' ["plane", plane] ("https://github.com/" <> planeDir <> "/" <> name')
+installModule (GithubRepo user repo selector) _ = do
+  libPath <- MM.asks Config.configLibrary
+  result <- liftIO $ retrieveGitHubSnapshot user repo (libPath </> "github" </> user </> repo) selector
+  maybe (return ()) (MM.throwError . ModuleInstallError . MT.pack) result
+installModule (CoreGithubRepo repo selector) (Just plane) = do
+  libPath <- MM.asks Config.configLibrary
+  planeDir <- MM.asks Config.configPlane
+  result <- liftIO $ retrieveGitHubSnapshot planeDir repo (libPath </> "plane" </> plane) selector
+  maybe (return ()) (MM.throwError . ModuleInstallError . MT.pack) result
 installModule (LocalModule Nothing) _ =
   MM.throwError (NotImplemented "module installation from working directory")
 installModule (LocalModule (Just _)) _ =
   MM.throwError (NotImplemented "module installation from local directory")
 installModule _ _ = undefined
+
+
+retrieveGitHubSnapshot
+  :: String -- github user/org name
+  -> String -- github repo name
+  -> FilePath -- path to installation folder
+  -> GithubSnapshotSelector -- snapshot specifier (latest default branch, commit hash, or tag)
+  -> IO (Maybe String) -- Nothing if all is good, Just error message otherwise
+retrieveGitHubSnapshot username repo finalPath selector = handle handleException $ do
+    pathExists <- doesDirectoryExist finalPath
+    if pathExists
+        then return $ Just $ "Path " ++ finalPath ++ " already exists."
+        else do
+            snapshotIdent <- case selector of
+                LatestDefaultBranch -> getDefaultBranch username repo
+                LatestOnBranch branch -> return branch
+                CommitHash hash -> return hash
+                ReleaseTag tag -> return $ "refs/tags/" ++ tag
+
+            zipContent <- downloadZip username repo snapshotIdent
+            let archive = Zip.toArchive zipContent
+            createDirectoryIfMissing True finalPath
+            Zip.extractFilesFromArchive [Zip.OptDestination finalPath] archive
+
+            return Nothing
+
+  where
+    handleException :: SomeException -> IO (Maybe String)
+    handleException e = return $ Just $ "Error: " ++ show e
+
+    getDefaultBranch :: String -> String -> IO String
+    getDefaultBranch user repo = do
+        let apiUrl = "https://api.github.com/repos/" ++ user ++ "/" ++ repo
+        request <- parseRequest apiUrl
+        response <- httpJSON request
+        let repoInfo = getResponseBody response :: RepoInfo
+        return $ MT.unpack $ defaultBranch repoInfo
+
+    downloadZip :: String -> String -> String -> IO BL.ByteString
+    downloadZip user repo ident = do
+        let url = "https://github.com/" ++ user ++ "/" ++ repo ++ "/archive/" ++ ident ++ ".zip"
+        request <- parseRequest url
+        response <- httpLBS request
+        return $ getResponseBody response

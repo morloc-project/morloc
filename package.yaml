@@ -41,6 +41,7 @@ dependencies:
   - filepath
   - file-embed
   - haskell-src-meta
+  - http-conduit
   - megaparsec
   - mtl
   - parsec
@@ -55,6 +56,7 @@ dependencies:
   - text
   - unordered-containers
   - yaml
+  - zip-archive
 
 ghc-options:
   - -Wall
@@ -83,15 +85,7 @@ executables:
       - -rtsopts
       - -with-rtsopts=-N
       - -O2
-      # The static build requires a static `libgmp.a` file
-      # On arch, this requires libgmp-static from AUR
-      # On debian systems, libgmp-dev should cover it
-      - -static
       - -haddock
-    cc-options:
-      - -static
-    ld-options:
-      - -static
     dependencies:
       - morloc 
       - base

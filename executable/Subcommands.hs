@@ -25,6 +25,8 @@ import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.Map as Map
 import Morloc.CodeGenerator.Generate (generatePools)
+import System.Exit (exitFailure)
+import System.IO (hPutStrLn, stderr)
 
 
 runMorloc :: CliCommand -> IO ()
@@ -66,16 +68,24 @@ readScript _ filename = do
   return (Just filename, Code code)
 
 
--- | install a module
+-- | Install a module
 cmdInstall :: InstallCommand -> Int -> Config.Config -> IO ()
-cmdInstall args verbosity conf =
-  MM.runMorlocMonad Nothing verbosity conf cmdInstall' >>= MM.writeMorlocReturn
+cmdInstall args verbosity conf = MM.runMorlocMonad Nothing verbosity conf cmdInstall' >>= MM.writeMorlocReturn
   where
-    cmdInstall' = do
-      let name' = installModuleName args
-      if installGithub args
-        then Mod.installModule (Mod.GithubRepo name') Nothing
-        else Mod.installModule (Mod.CoreGithubRepo name') (Just $ configPlane conf)
+    modName = installModuleName args
+    selector = installSelector args
+
+    cmdInstall'
+      | modName == "." = Mod.installModule (LocalModule Nothing) Nothing
+      | (head modName) `elem` ['.', '/'] = Mod.installModule (LocalModule (Just modName)) Nothing
+      | installGithub args = installGithubModule modName selector
+      | otherwise = Mod.installModule (GithubRepo (configPlane conf) modName selector) (Just $ configPlane conf)
+
+    installGithubModule :: String -> GithubSnapshotSelector -> MorlocMonad ()
+    installGithubModule fullName selector = case break (== '/') fullName of
+      (username, '/':repo) -> Mod.installModule (GithubRepo username repo selector) Nothing
+      _ -> do
+        MM.throwError . ModuleInstallError $ "Error: Expected \"<username>/<repo>\" format for GitHub module name"
 
 -- | build a Morloc program, generating the nexus and pool files
 cmdMake :: MakeCommand -> Int -> Config.Config -> IO ()

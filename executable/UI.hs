@@ -9,6 +9,7 @@ module UI (
 ) where
 
 import Options.Applicative
+import Morloc.Namespace
 import qualified Options.Applicative.Extra as OAE
 
 version :: String
@@ -84,6 +85,7 @@ data InstallCommand = InstallCommand
   , installGithub :: Bool
   , installVanilla :: Bool
   , installModuleName :: String
+  , installSelector :: GithubSnapshotSelector
   }
 
 makeInstallParser :: Parser InstallCommand
@@ -93,6 +95,25 @@ makeInstallParser = InstallCommand
   <*> optGithub
   <*> optVanilla
   <*> optModuleName
+  <*> optSelector
+
+optSelector :: Parser GithubSnapshotSelector
+optSelector = branchOption <|> commitOption <|> tagOption <|> pure LatestDefaultBranch
+  where
+    branchOption = LatestOnBranch <$> strOption
+      (  long "branch"
+      <> metavar "BRANCH"
+      <> help "Retrieve snapshot from a specific branch" )
+
+    commitOption = CommitHash <$> strOption
+      (  long "commit"
+      <> metavar "HASH"
+      <> help "Retrieve snapshot from a specific commit hash" )
+
+    tagOption = ReleaseTag <$> strOption
+      (  long "tag"
+      <> metavar "TAG"
+      <> help "Retrieve snapshot from a specific tag" )
 
 installSubcommand :: Mod CommandFields CliCommand
 installSubcommand = command "install" (info (CmdInstall <$> makeInstallParser) (progDesc "install a morloc module"))

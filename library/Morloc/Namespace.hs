@@ -120,6 +120,9 @@ module Morloc.Namespace
   , NexusSource(..)
   -- sockets
   , Socket(..)
+  -- module installation and github
+  , GithubSnapshotSelector(..)
+  , ModuleSource(..)
   ) where
 
 import Morloc.Language (Lang(..))
@@ -416,6 +419,23 @@ data Socket = Socket
   }
   deriving (Show)
 
+data GithubSnapshotSelector
+  = LatestDefaultBranch
+  | LatestOnBranch String
+  | CommitHash String
+  | ReleaseTag String
+  deriving (Show, Eq, Ord)
+
+-- | Specify where a module is located
+data ModuleSource
+  = LocalModule (Maybe String)
+  -- ^ A module in the working directory
+  | GithubRepo String String GithubSnapshotSelector
+  -- ^ A module stored in an arbitrary users repo, e.g., (GithubRepo "weena" "math")
+  | CoreGithubRepo String GithubSnapshotSelector
+  -- ^ The repo name of a core package, e.g., "math"
+  deriving (Show, Eq, Ord)
+
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
 data SysCommand
@@ -700,6 +720,8 @@ data MorlocError
   | UnknownLanguage Text
   -- | Raised when a module cannot be loaded
   | CannotLoadModule Text
+  -- | Raised when a module cannot be installed
+  | ModuleInstallError Text
   -- | System call failed
   | SystemCallError Text Text Text
   -- | Raised when there is an error in the code generators
@@ -1340,6 +1362,7 @@ instance Pretty MorlocError where
   pretty (SyntaxError err') = "SyntaxError: " <> pretty (errorBundlePretty err')
   pretty (SerializationError t) = "SerializationError: " <> pretty t
   pretty (CannotLoadModule t) = "CannotLoadModule: " <> pretty t
+  pretty (ModuleInstallError t) = "ModuleInstallError: " <> pretty t 
   pretty (SystemCallError cmd loc msg) =
     "System call failed at (" <>
     pretty loc <> "):\n" <> " cmd> " <> pretty cmd <> "\n" <> " msg>\n" <> pretty msg
