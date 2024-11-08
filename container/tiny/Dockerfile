@@ -2,13 +2,13 @@
 # Stage 1: Build the morloc compiler 
 FROM ubuntu:22.04 as morloc-build
 
-RUN apt-get update && apt-get install -y git curl
+RUN apt-get update && apt-get install -y git curl pkg-config libglib2.0-dev
 
 # Build morloc
 RUN curl -SL https://get.haskellstack.org/ | sh
 
 # Get the latest morloc release
-RUN git clone https://github.com/morloc-project/morloc
+RUN git clone https://github.com/morloc-project/morloc && echo "hi"
 
 # Build morloc
 RUN cd morloc && stack install

@@ -40,13 +40,8 @@ import qualified Data.ByteString.Char8 as BS
 import qualified Codec.Archive.Zip as Zip
 import Network.HTTP.Simple
 import System.Directory
-import System.FilePath
-import Control.Monad
 import Control.Exception
-import Data.Maybe (fromMaybe)
 import Data.Aeson
-import System.IO (hClose)
-import Network.HTTP.Types.Status (statusCode)
 import Data.Typeable
 import System.Process (callCommand)
 
@@ -398,8 +393,8 @@ retrieveGitHubSnapshot username repo finalPath selector = handle handleException
     handleException e = return $ Just $ "Error: " ++ show e
 
     getDefaultBranch :: String -> String -> IO String
-    getDefaultBranch user repo = do
-        let apiUrl = "https://api.github.com/repos/" ++ user ++ "/" ++ repo
+    getDefaultBranch user repo' = do
+        let apiUrl = "https://api.github.com/repos/" ++ user ++ "/" ++ repo'
         request <- parseRequest apiUrl
         let request' = setRequestHeader "User-Agent" [BS.pack ("morloc/" <> versionStr)] request
         response <- httpJSON request'
@@ -407,8 +402,8 @@ retrieveGitHubSnapshot username repo finalPath selector = handle handleException
         return $ MT.unpack $ defaultBranch repoInfo
 
     downloadZip :: String -> String -> String -> IO BL.ByteString
-    downloadZip user repo ident = do
-        let url = "https://github.com/" ++ user ++ "/" ++ repo ++ "/archive/" ++ ident ++ ".zip"
+    downloadZip user repo' ident = do
+        let url = "https://github.com/" ++ user ++ "/" ++ repo' ++ "/archive/" ++ ident ++ ".zip"
         request <- parseRequest url
         response <- httpLBS request
         return $ getResponseBody response

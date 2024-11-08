@@ -25,8 +25,6 @@ import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.Map as Map
 import Morloc.CodeGenerator.Generate (generatePools)
-import System.Exit (exitFailure)
-import System.IO (hPutStrLn, stderr)
 
 
 runMorloc :: CliCommand -> IO ()
@@ -82,8 +80,8 @@ cmdInstall args verbosity conf = MM.runMorlocMonad Nothing verbosity conf cmdIns
       | otherwise = Mod.installModule (CoreGithubRepo modName selector) (Just $ configPlane conf)
 
     installGithubModule :: String -> GithubSnapshotSelector -> MorlocMonad ()
-    installGithubModule fullName selector = case break (== '/') fullName of
-      (username, '/':repo) -> Mod.installModule (GithubRepo username repo selector) Nothing
+    installGithubModule fullName selector' = case break (== '/') fullName of
+      (username, '/':repo) -> Mod.installModule (GithubRepo username repo selector') Nothing
       _ -> do
         MM.throwError . ModuleInstallError $ "Error: Expected \"<username>/<repo>\" format for GitHub module name"
 
