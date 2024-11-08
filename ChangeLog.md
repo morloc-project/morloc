@@ -1,3 +1,18 @@
+0.50.0 [2024-11-08]
+-------------------
+
+Better installation
+
+ * `morloc install --commit 45d8df12` - for github retrieval by commit hash
+ * `morloc install --branch dev` - to retrieve latest from specific branch
+ * `morloc install --tag 0.1.0` - to retrieve specific tag
+
+Better containers
+ * Use podman rather than docker in Makefile
+ * `morloc-tiny:<version>` - everything needed to compile morloc projects
+ * `morloc-full:<version>` - an environment for running projects
+
+
 0.49.0 [2024-11-04]
 -------------------
 
@@ -6,7 +21,7 @@ New backend with better performance
  * Mediate inter-process communication with UNIX domain sockets
  * Transmit data with MessagePack rather than JSON
  * Added a benchmarking suite
- * Added `morloc init` command to setup and verify morloc ecosystem
+ * Added `morloc init` command to configure morloc ecosystem
 
 0.48.0 [2024-05-10]
 -------------------

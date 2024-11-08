@@ -1,22 +1,14 @@
 ###############################################################################
 # Stage 1: Build the morloc compiler 
-FROM alpine:3.19 as morloc-build
+FROM ubuntu:22.04 as morloc-build
 
-RUN apk update \
-  && apk add --no-cache git \
-  && apk add --no-cache gmp-dev \
-  && apk add --no-cache build-base \
-  && apk add --no-cache ncurses \
-  && apk add --no-cache curl
+RUN apt-get update && apt-get install -y git curl
 
 # Build morloc
 RUN curl -SL https://get.haskellstack.org/ | sh
 
 # Get the latest morloc release
-
-
 RUN git clone https://github.com/morloc-project/morloc
-
 
 # Build morloc
 RUN cd morloc && stack install

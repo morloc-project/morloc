@@ -3,6 +3,11 @@
 #
 # $ echo $GITHUB_TOKEN | podman login ghcr.io -u morloc-project --password-stdin
 
+
+### WARNING: I am foolishly assuming here that the local morloc version is the
+### same as the latest on github master.
+MORLOC_VERSION := $(shell morloc --version)
+
 define HEREDOC
 #!/bin/bash
 mkdir -p ~/.morloc
@@ -16,17 +21,17 @@ endef
 export HEREDOC
 
 install:
-	podman pull ghcr.io/morloc-project/morloc/morloc-tiny:latest
-	@echo "$$HEREDOC" > ${HOME}/bin/morloc-latest
+	podman pull ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION}
+	@echo "$$HEREDOC" > ${HOME}/bin/morloc-${MORLOC_VERSION}
 	chmod 755 ${HOME}/bin/morloc-latest
 
 # Build a container that just has the morloc compiler
 build-tiny:
-	podman build -t ghcr.io/morloc-project/morloc/morloc-tiny:latest tiny
+	podman build -t ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION} tiny
 
 # Build the required docker image
 build-full:
-	podman build -t ghcr.io/morloc-project/morloc/morloc-full:latest full
+	podman build -t ghcr.io/morloc-project/morloc/morloc-full:${MORLOC_VERSION} full
 
 # Open a shell with a nice environment (vim and other niceties)
 shell:
@@ -34,13 +39,13 @@ shell:
 
 # push local containers to the github registry
 push:
-	podman push ghcr.io/morloc-project/morloc/morloc-tiny:latest
-	podman push ghcr.io/morloc-project/morloc/morloc-full:latest
+	podman push ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION}
+	podman push ghcr.io/morloc-project/morloc/morloc-full:${MORLOC_VERSION}
 
 # retrieve the latest morloc builds from the github registry
 pull:
-	podman pull ghcr.io/morloc-project/morloc/morloc-tiny:latest
-	podman pull ghcr.io/morloc-project/morloc/morloc-full:latest
+	podman pull ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION}
+	podman pull ghcr.io/morloc-project/morloc/morloc-full:${MORLOC_VERSION}
 
 
 # Cleanup of podman images may be done as follows

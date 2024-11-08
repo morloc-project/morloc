@@ -21,53 +21,47 @@ welcome.
 
 ## Running morloc
 
-`morloc` should run on Linux and macOS. Windows may be supported eventually, but
-for now, I recommend using the [Windows Subsystem for
+`morloc` should run on Linux and macOS. For Windows, I suggest using [Windows Subsystem for
 Linux](https://learn.microsoft.com/en-us/windows/wsl/install).
 
-The easiest way to use `morloc` is through Docker.
+The easiest way to use `morloc` is through containers. Unless you love running
+with daemons, I recommend using podman.
 
-### Docker Installation on Linux
-
-On a Linux system, install Docker using your preferred package manager. Then start the Docker daemon with:
-
-```bash
-$ sudo systemctl start docker
-```
-
-This command should work for Linux distributions that use the `systemd` service
-manager (most popular Linux distros do).
-
-### Docker Installation on macOS
-
-Instructions coming soon.
-
-### Running `morloc` with Docker
-
-After installing Docker, you can pull the Docker image for the desired `morloc` version:
+A container with the morloc executable and batteries included can be retrieved
+from the GitHub container registry as follows:
 
 ```bash
-$ docker pull arendsee/morloc:v0.48.0
+$ podman pull ghcr.io/morloc-project/morloc/morloc-full:0.50.0
 ```
 
 Now you can enter a shell with a full working installation of `morloc`:
 
 ```bash
-$ docker run -v $PWD:/home -it arendsee/morloc:v0.48.0 /bin/bash
+$ podman run -v $PWD:/home -it ghcr.io/morloc-project/morloc/morloc-full:0.50.0 /bin/bash
 ```
 
-The `v0.48.0` may be replaced with the desired `morloc` version.
+The `v0.50.0` may be replaced with the desired `morloc` version.
 
 Alternatively, you can set up a script to emulate a local `morloc` installation:
 
 ```bash
 #!/bin/bash
-docker run --rm -v $HOME/.morloc:/root/.morloc -v $PWD:/root -w /root arendsee/morloc:v0.48.0 morloc "$@"
+mkdir -p ~/.morloc
+podman run --rm \
+           -e HOME=$HOME \
+           -v $HOME/.morloc:$HOME/.morloc \
+           -v $PWD:$HOME \
+           -w $HOME \
+           ghcr.io/morloc-project/morloc/morloc-full:0.50.0 morloc "$@"
 ```
 
 Name this script `morloc`, make it executable, and place it in your `PATH`. The
 script will mount your current working directory and your `morloc` home
 directory, allowing you to install and use modules.
+
+This script can serve as a drop-in replacement for a local morloc compiler. It
+will compile any generated C++ code and build required internal shared
+libraries.
 
 ## Installing from source
 
