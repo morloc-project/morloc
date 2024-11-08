@@ -42,6 +42,7 @@ dependencies:
   - file-embed
   - haskell-src-meta
   - http-conduit
+  - http-types
   - megaparsec
   - mtl
   - parsec

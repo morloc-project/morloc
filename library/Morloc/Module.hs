@@ -1,5 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+
 
 {-|
 Module      : Module
@@ -30,9 +32,11 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
 import qualified Data.Yaml.Config as YC
+import Morloc.Version (versionStr)
 
 -- needed for github retrieval
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Char8 as BS
 import qualified Codec.Archive.Zip as Zip
 import Network.HTTP.Simple
 import System.Directory
@@ -42,8 +46,9 @@ import Control.Exception
 import Data.Maybe (fromMaybe)
 import Data.Aeson
 import System.IO (hClose)
-
-
+import Network.HTTP.Types.Status (statusCode)
+import Data.Typeable
+import System.Process (callCommand)
 
 data RepoInfo = RepoInfo { defaultBranch :: MT.Text } deriving Show
 
@@ -354,29 +359,39 @@ installModule (LocalModule (Just _)) _ =
 installModule _ _ = undefined
 
 
+
+-- Define your custom exception type
+data GitHubError = RepoNotFound String
+                  | UnexpectedStatusCode String
+                  | BadResult String
+                  deriving (Show, Typeable)
+
+-- Make it an instance of Exception
+instance Exception GitHubError
+
 retrieveGitHubSnapshot
-  :: String -- github user/org name
+  :: String -- github user name
   -> String -- github repo name
   -> FilePath -- path to installation folder
   -> GithubSnapshotSelector -- snapshot specifier (latest default branch, commit hash, or tag)
   -> IO (Maybe String) -- Nothing if all is good, Just error message otherwise
 retrieveGitHubSnapshot username repo finalPath selector = handle handleException $ do
-    pathExists <- doesDirectoryExist finalPath
-    if pathExists
-        then return $ Just $ "Path " ++ finalPath ++ " already exists."
-        else do
-            snapshotIdent <- case selector of
-                LatestDefaultBranch -> getDefaultBranch username repo
-                LatestOnBranch branch -> return branch
-                CommitHash hash -> return hash
-                ReleaseTag tag -> return $ "refs/tags/" ++ tag
+  snapshotIdent <- case selector of
+      LatestDefaultBranch -> getDefaultBranch username repo
+      LatestOnBranch branch -> return branch
+      CommitHash hash -> return hash
+      ReleaseTag tag -> return $ "refs/tags/" ++ tag
 
-            zipContent <- downloadZip username repo snapshotIdent
-            let archive = Zip.toArchive zipContent
-            createDirectoryIfMissing True finalPath
-            Zip.extractFilesFromArchive [Zip.OptDestination finalPath] archive
+  zipContent <- downloadZip username repo snapshotIdent
+  let archive = Zip.toArchive zipContent
+  createDirectoryIfMissing True finalPath
+  Zip.extractFilesFromArchive [Zip.OptDestination finalPath] archive
 
-            return Nothing
+  -- create symlink
+  callCommand $ "rm -rf " ++ (finalPath </> repo)
+  callCommand $ "ln -sf " ++ (finalPath </> repo ++ "-" ++ snapshotIdent ++ "*") ++ " " ++ (finalPath </> repo)
+
+  return Nothing
 
   where
     handleException :: SomeException -> IO (Maybe String)
@@ -386,7 +401,8 @@ retrieveGitHubSnapshot username repo finalPath selector = handle handleException
     getDefaultBranch user repo = do
         let apiUrl = "https://api.github.com/repos/" ++ user ++ "/" ++ repo
         request <- parseRequest apiUrl
-        response <- httpJSON request
+        let request' = setRequestHeader "User-Agent" [BS.pack ("morloc/" <> versionStr)] request
+        response <- httpJSON request'
         let repoInfo = getResponseBody response :: RepoInfo
         return $ MT.unpack $ defaultBranch repoInfo
 

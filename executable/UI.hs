@@ -11,15 +11,13 @@ module UI (
 import Options.Applicative
 import Morloc.Namespace
 import qualified Options.Applicative.Extra as OAE
-
-version :: String
-version = "v0.49.0"   -- FIXME: HARDCODED VERSION NUMBER!!!
+import Morloc.Version (versionStr)
 
 opts :: ParserInfo CliCommand
-opts = info (cliParser <**> helper <**> OAE.simpleVersioner version)
+opts = info (cliParser <**> helper <**> OAE.simpleVersioner versionStr)
   (    fullDesc
     <> progDesc "call 'morloc make -h', 'morloc install -h', etc for details"
-    <> header ("morloc " <> version)
+    <> header ("morloc v" <> versionStr)
   )
 
 

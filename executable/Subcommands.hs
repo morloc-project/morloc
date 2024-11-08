@@ -79,7 +79,7 @@ cmdInstall args verbosity conf = MM.runMorlocMonad Nothing verbosity conf cmdIns
       | modName == "." = Mod.installModule (LocalModule Nothing) Nothing
       | (head modName) `elem` ['.', '/'] = Mod.installModule (LocalModule (Just modName)) Nothing
       | installGithub args = installGithubModule modName selector
-      | otherwise = Mod.installModule (GithubRepo (configPlane conf) modName selector) (Just $ configPlane conf)
+      | otherwise = Mod.installModule (CoreGithubRepo modName selector) (Just $ configPlane conf)
 
     installGithubModule :: String -> GithubSnapshotSelector -> MorlocMonad ()
     installGithubModule fullName selector = case break (== '/') fullName of

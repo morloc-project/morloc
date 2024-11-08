@@ -1362,7 +1362,7 @@ instance Pretty MorlocError where
   pretty (SyntaxError err') = "SyntaxError: " <> pretty (errorBundlePretty err')
   pretty (SerializationError t) = "SerializationError: " <> pretty t
   pretty (CannotLoadModule t) = "CannotLoadModule: " <> pretty t
-  pretty (ModuleInstallError t) = "ModuleInstallError: " <> pretty t 
+  pretty (ModuleInstallError t) = "ModuleInstallError: \n" <> pretty t 
   pretty (SystemCallError cmd loc msg) =
     "System call failed at (" <>
     pretty loc <> "):\n" <> " cmd> " <> pretty cmd <> "\n" <> " msg>\n" <> pretty msg
