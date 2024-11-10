@@ -353,7 +353,7 @@ check_for_new_client <- function(queue, server_fd){
                   fail_packet(errmsg)
               }
             )
-          }
+          }, globals=FALSE
         )
       },
       error = function(e) {
