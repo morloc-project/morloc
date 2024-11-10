@@ -21,25 +21,19 @@ module foo
   , pMarginalCost2
   , pMarginalCost3
   , pMarginalCost4
-  , mapManyPC
+  , mapManyPCP
+  , mapManyPCR
   )
 
-import types (Real, List)
+import types (List, Str, Int)
 import cppbase (map)
-import pybase (add)
 
-source py from "foo.py" ("nmb" as pnmb, "pid", "len" as plen)
-source R from "foo.R" ("nmb" as rnmb, "rid", "nchar" as rlen)
+source py from "foo.py" ("nmb" as pnmb, "pid", "len" as plen, "addp")
+source R from "foo.R" ("nmb" as rnmb, "rid", "nchar" as rlen, "addr")
 source Cpp from "foo.hpp" ("nmb" as cnmb, "cid", "strlen" as clen)
 
-type R => Str = "character"
-type R => Int = "integer"
-
-type Py => Str = "str"
-type Py => Int = "int"
-
-type Cpp => Str = "std::string"
-type Cpp => Int = "int"
+addp :: Int -> Int -> Int
+addr :: Int -> Int -> Int
 
 -- Generate a test string with a length of n megabytes
 pnmb :: Int -> Str
@@ -94,5 +88,8 @@ pMarginalCost2 = (pid . cid . pnmb) 0
 pMarginalCost3 = (pid . cid . pid . cid . pnmb) 0 
 pMarginalCost4 = (pid . cid . pid . cid . pid . cid . pnmb) 0 
 
-mapManyPC :: Real -> [Real] -> [Real]
-mapManyPC x xs = map (add x) xs
+mapManyPCP :: Int -> [Int] -> [Int]
+mapManyPCP x xs = map (addp x) xs
+
+mapManyPCR :: Int -> [Int] -> [Int]
+mapManyPCR x xs = map (addr x) xs

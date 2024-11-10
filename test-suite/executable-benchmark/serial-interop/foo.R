@@ -4,3 +4,5 @@ rid <- function(x) x
 nmb <- function(n){
   stringi::stri_dup("x", n * 1024 * 1024)
 }
+
+incr <- function(x, y) x + y

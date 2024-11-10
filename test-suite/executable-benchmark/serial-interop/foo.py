@@ -3,3 +3,6 @@ def nmb(n):
 
 def pid(x):
     return x
+
+def addp(x, y):
+    return x + y
