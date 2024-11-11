@@ -29,7 +29,7 @@
 
 #define PACKET_SOURCE_MESG  0x00 // the message contains the data
 #define PACKET_SOURCE_FILE  0x01 // the message is a path to a file of data
-#define PACKET_SOURCE_NXDB  0x02 // the message is a key to the nexus uses to access the data
+#define PACKET_SOURCE_MMAP  0x02 // the message is a memory mapped file
 
 #define PACKET_FORMAT_JSON  0x00
 

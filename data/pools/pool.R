@@ -16,6 +16,7 @@ msgpack_unpack <- function(packed, schema) {
 
 
 library(rlang)
+library(mmap)
 
 global_state <- new.env()
 
@@ -27,7 +28,7 @@ PACKET_TYPE_PING <- 0x04
 
 PACKET_SOURCE_MESG <- 0x00 # the message contains the data
 PACKET_SOURCE_FILE <- 0x01 # the message is a path to a file of data
-PACKET_SOURCE_NXDB <- 0x02 # the message is a key to the nexus uses to access the data
+PACKET_SOURCE_MMAP <- 0x02 # the message is a memory mapped file
 
 PACKET_FORMAT_JSON <- 0x00
 PACKET_FORMAT_MSGPACK = 0x01
@@ -139,6 +140,13 @@ ACCEPT_READ_TIME = 0.0001
 # compute on a UNIX machine. The other approaches, like multisession, fail
 # terribly because they can't find the appropriate globals or dynamically linked
 # functions.
+#
+# Without the workers option, R will spin up as many workers as there are
+# cores. Each will need to have global state sent to them each time. This leads
+# to an overhead of ~22ms on my system. With workers=2, the overhead falls to
+# ~13ms. In both cases, though, forking is being done which is slow. Setting
+# workers=1 does no forking and runs jobs sequentially. This drops overhead to
+# ~1ms per job.
 future::plan(future::multicore)
 
 
@@ -165,6 +173,11 @@ future::plan(future::multicore)
       } else {
         abort("Unsupported data format")
       }
+    } else if (header$cmd[2] == PACKET_SOURCE_MMAP) {
+      filename <- rawToChar(key[data_start:length(key)])
+      mm <- mmap(file = filename, mode = char())
+      msgpack_unpack(mm[1:length(mm)], schema)
+
     } else if (header$cmd[2] == PACKET_SOURCE_FILE) {
       if(header$cmd[3] == PACKET_FORMAT_MSGPACK) {
         # return the value from a file
@@ -184,29 +197,59 @@ future::plan(future::multicore)
 
 # take arbitrary R data and creates a data packet representing it
 .put_value <- function(value, schema){
-
   value_raw <- msgpack_pack(value, schema)
 
   if (length(value_raw) <= 65536 - 32) {
     return(make_data(value_raw))
-
   } else {
-
+    # Generate a temporary filename for the memory-mapped file
     key <- tempfile(pattern = "r_", 
                     tmpdir = global_state.tmpdir, 
-                    fileext = "")
+                    fileext = ".mmap")
 
-    .log(paste("Creating temporary file:", key))
+    .log(paste("Creating temporary memory-mapped file:", key))
 
-    writeBin(value_raw, con=key)
+    # Create an empty file on disk to serve as the backing store for the memory mapping
+    file.create(key)
+    
+    # Set file permissions to ensure it is readable by other processes
+    Sys.chmod(key, mode = "0644")  
 
-    .log(paste("Wrote data to:", key))
+    # Establish a memory mapping of the created file in the process's address space
+    # This allows direct access to the file's contents as if they were in memory
+    #
+    # Write the packed data directly to the memory-mapped region
+    # This operation modifies the memory-mapped area, which is backed by the file on disk
+    m <- as.mmap(value_raw, mode = char(), file=key)
 
+    # Asynchronously flush changes made to the memory-mapped region to disk.
+    # Returns immediately without waiting for completion; there is no guarantee 
+    # that all changes are flushed before subsequent accesses.
+    #
+    # WARNING: I *think* this is safe, the cached memory shouldn't be freed
+    # until the syncing is complete, so if another process accesses the file as
+    # a memory mapped file all data should be present. Are there edge cases
+    # where this may not be the case?
+    msync(m, flags=mmapFlags("MS_ASYNC"))
+
+    # Unmap the specified memory region from this process's address space.
+    # This operation releases the mapping but does not guarantee that any changes
+    # made to the memory-mapped region are flushed to disk. The kernel may retain
+    # cached pages in memory, allowing other processes to access the most recent
+    # data. However, further access to this unmapped region will result in a 
+    # SIGSEGV signal if attempted.
+    munmap(m)
+
+    .log(paste("Wrote data to memory-mapped file:", key))
+
+    # Convert the filename to a raw vector for use in downstream processes
     key_raw <- charToRaw(key)
 
-    return(make_data(key_raw, src = PACKET_SOURCE_FILE))
+    return(make_data(key_raw, src = PACKET_SOURCE_MMAP))
   }
 }
+
+
 
 
 .morloc_foreign_call <- function(pool_pipe, manifold_id, arg_keys) {

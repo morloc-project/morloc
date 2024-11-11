@@ -12,6 +12,7 @@ import struct
 import json
 import traceback
 import tempfile
+import mmap
 
 # AUTO include imports start
 # <<<BREAK>>>
@@ -30,7 +31,7 @@ PACKET_TYPE_PING = 0x04
 
 PACKET_SOURCE_MESG = 0x00 # the message contains the data
 PACKET_SOURCE_FILE = 0x01 # the message is a path to a file of data
-PACKET_SOURCE_NXDB = 0x02 # the message is a key to the nexus uses to access the data
+PACKET_SOURCE_MMAP = 0x02 # the message is a memory mapped file
 
 PACKET_FORMAT_JSON = 0x00
 PACKET_FORMAT_MSGPACK = 0x01
@@ -98,10 +99,9 @@ def cleanup():
             # this socket file may have been cleaned up by the pool
             pass
 
-    # clean up temporary files and sockets
-    for is_temp, file in files:
-        if is_temp and os.path.exists(file):
-            os.unlink(file)
+    # close memory mapped files that are given as arguments (i.e., NOT deleted)
+    for file in files:
+        file.close()
 
 
 def clean_exit(exit_code, msg=""):
@@ -363,7 +363,14 @@ def print_return(data, schema_str):
         with open(filename, 'rb') as file:
             content = file.read()
         os.unlink(filename)  # Delete the temporary file
-
+    elif cmd_source == PACKET_SOURCE_MMAP:
+        filename = data[data_start:].decode()
+        try:
+            with open(filename, 'rb') as file:
+                with mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                    content = mm.read()
+        except (IOError, OSError) as e:
+            clean_exit(1, f"Error processing memory-mapped file: {e}")
 
     if cmd_format == PACKET_FORMAT_JSON:
         print(content, file=outfile)
@@ -468,15 +475,26 @@ def handle_json_file_argument(filename, schema):
         return _make_data(data)
     else:
         msgpack_filename = os.path.splitext(filename)[0] + ".mpk"
+
         with open(msgpack_filename, "wb") as fh:
-            fh.write(data)
-        return _make_data(msgpack_filename.encode("utf8"), src=PACKET_SOURCE_FILE)
+            fh.truncate(len(data))
+
+        with open(msgpack_filename, "r+b") as fh:
+            mm = mmap.mmap(fh.fileno(), len(data), flags=mmap.MAP_SHARED, prot=mmap.PROT_WRITE)
+            mm[:] = data
+            mm.flush()
+            resources["files"].append(mm)
+
+        return _make_data(msgpack_filename.encode("utf8"), src=PACKET_SOURCE_MMAP)
 
 def handle_msgpack_file_argument(filename):
     """
     Read a messagepack file argument
     """
-    return _make_data(filename.encode("utf8"), src = PACKET_SOURCE_FILE)
+    with open(filename, "rb") as fh:
+        mm = mmap.mmap(fh.fileno(), 0)
+        resources["files"].append(mm)
+        return _make_data(filename.encode("utf8"), src = PACKET_SOURCE_MMAP)
 
 def prepare_call_packet(mid, args, schemas):
     arg_msgs = []

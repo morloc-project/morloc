@@ -7,6 +7,10 @@
 #include <stdexcept>
 #include <fstream>
 
+#include <sys/mman.h>    // For mmap
+#include <sys/stat.h>    // For mode constants
+#include <cstring>       // For memcpy
+
 // needed for foreign interface
 #include <cstdlib>
 #include <cstdio>
@@ -59,7 +63,7 @@ std::string g_tmpdir;
 
 #define PACKET_SOURCE_MESG  0x00 // the message contains the data
 #define PACKET_SOURCE_FILE  0x01 // the message is a path to a file of data
-#define PACKET_SOURCE_NXDB  0x02 // the message is a key to the nexus uses to access the data
+#define PACKET_SOURCE_MMAP  0x02 // the message is a memory mapped file
 
 #define PACKET_FORMAT_JSON  0x00
 #define PACKET_FORMAT_MSGPACK  0x01
@@ -81,6 +85,135 @@ struct Header {
     uint32_t offset; // this is a 4 byte int, so I should use a short
     uint64_t length;
 };
+
+#include <string>
+#include <vector>
+#include <stdexcept>
+#include <system_error>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+class MemoryMappedFile {
+private:
+    std::string filename;
+    char* data;
+    size_t data_size;
+    int fd;
+    bool is_writable;
+
+public:
+    // Constructor for creating a new memory-mapped file
+    MemoryMappedFile(const std::string& filename, char* data, size_t size)
+        : filename(filename), data(data), data_size(size), fd(-1), is_writable(true) {
+        createAndMapFile();
+    }
+
+    // Constructor for reading an existing memory-mapped file
+    explicit MemoryMappedFile(const std::string& filename)
+        : filename(filename), data(nullptr), data_size(0), fd(-1), is_writable(false) {
+        openExistingFile();
+    }
+
+    // Move constructor
+    MemoryMappedFile(MemoryMappedFile&& other) noexcept
+        : filename(std::move(other.filename)),
+          data(other.data),
+          data_size(other.data_size),
+          fd(other.fd),
+          is_writable(other.is_writable) {
+        other.data = nullptr;
+        other.fd = -1;
+    }
+
+    // Move assignment operator
+    MemoryMappedFile& operator=(MemoryMappedFile&& other) noexcept {
+        if (this != &other) {
+            cleanup();
+            filename = std::move(other.filename);
+            data = other.data;
+            data_size = other.data_size;
+            fd = other.fd;
+            is_writable = other.is_writable;
+            other.data = nullptr;
+            other.fd = -1;
+        }
+        return *this;
+    }
+
+    ~MemoryMappedFile() {
+        cleanup();
+    }
+
+    // Delete copy constructor and assignment operator
+    MemoryMappedFile(const MemoryMappedFile&) = delete;
+    MemoryMappedFile& operator=(const MemoryMappedFile&) = delete;
+
+    const char* getData() const { return data; }
+    size_t getSize() const { return data_size; }
+
+private:
+    void createAndMapFile() {
+        fd = open(filename.c_str(), O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+        if (fd == -1) {
+            throw std::system_error(errno, std::system_category(), "Failed to create file: " + filename);
+        }
+
+        if (ftruncate(fd, data_size) == -1) {
+            cleanup();
+            throw std::system_error(errno, std::system_category(), "Failed to set file size: " + filename);
+        }
+
+        void* mapped_addr = mmap(NULL, data_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (mapped_addr == MAP_FAILED) {
+            cleanup();
+            throw std::system_error(errno, std::system_category(), "Failed to map file: " + filename);
+        }
+
+        memcpy(mapped_addr, data, data_size);
+
+        if (msync(mapped_addr, data_size, MS_SYNC) == -1) {
+            cleanup();
+            throw std::system_error(errno, std::system_category(), "Failed to sync mapped file: " + filename);
+        }
+    }
+
+    void openExistingFile() {
+        fd = open(filename.c_str(), O_RDONLY);
+        if (fd == -1) {
+            throw std::system_error(errno, std::system_category(), "Unable to open file '" + filename + "'");
+        }
+
+        struct stat sb;
+        if (fstat(fd, &sb) == -1) {
+            close(fd);
+            throw std::system_error(errno, std::system_category(), "Error getting file size of '" + filename + "'");
+        }
+
+        data_size = sb.st_size;
+        void* mapped_data = mmap(NULL, data_size, PROT_READ, MAP_PRIVATE, fd, 0);
+
+        if (mapped_data == MAP_FAILED) {
+            close(fd);
+            throw std::system_error(errno, std::system_category(), "Error mapping file '" + filename + "'");
+        }
+
+        data = static_cast<char*>(mapped_data);
+    }
+
+    void cleanup() {
+        if (data) {
+            munmap(data, data_size);
+            data = nullptr;
+        }
+        if (fd != -1) {
+            close(fd);
+            fd = -1;
+        }
+    }
+};
+
 
 // Function to log messages
 template <class M> 
@@ -288,8 +421,6 @@ std::string generateTempFilename() {
 }
 
 
-
-
 // Transforms a serialized value into a message ready for the socket
 template <typename T>
 Message _put_value(const T& value, const std::string& schema_str) {
@@ -319,13 +450,15 @@ Message _put_value(const T& value, const std::string& schema_str) {
         if (!tempFile) {
             throw std::runtime_error("Failed to open temporary file: " + tmpfilename);
         }
-        tempFile.write(payload.data(), payload.size());
+        // The memory in payload will be given to the kernel to be managed as a
+        // memory mapped file.
+        MemoryMappedFile msg = MemoryMappedFile(tmpfilename, payload.data(), payload.size());
         tempFile.close();
 
         packet = make_data(
           tmpfilename.data(),
           tmpfilename.size(),
-          PACKET_SOURCE_FILE,
+          PACKET_SOURCE_MMAP,
           PACKET_FORMAT_MSGPACK,
           PACKET_COMPRESSION_NONE,
           PACKET_ENCRYPTION_NONE,
@@ -337,6 +470,66 @@ Message _put_value(const T& value, const std::string& schema_str) {
 
     return packet;
 }
+
+
+class MappedMemory {
+public:
+    // Constructor that performs memory mapping on an existing file
+    explicit MappedMemory(const std::string& filename) {
+        int fd = open(filename.c_str(), O_RDONLY);
+        if (fd == -1) {
+            throw std::system_error(errno, std::system_category(), "Unable to open file '" + filename + "'");
+        }
+
+        struct stat sb;
+        if (fstat(fd, &sb) == -1) {
+            close(fd);
+            throw std::system_error(errno, std::system_category(), "Error getting file size of '" + filename + "'");
+        }
+
+        void* mapped_data = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        close(fd);  // Close the file descriptor immediately after mapping
+
+        if (mapped_data == MAP_FAILED) {
+            throw std::system_error(errno, std::system_category(), "Error mapping file '" + filename + "'");
+        }
+
+        data_ = std::vector<char>(static_cast<char*>(mapped_data), static_cast<char*>(mapped_data) + sb.st_size);
+    }
+
+    // Constructor for moving in a vector
+    MappedMemory(std::vector<char>&& data) : data_(std::move(data)) {}
+
+    ~MappedMemory() {
+        if (!data_.empty()) {
+            munmap(data_.data(), data_.size());
+        }
+    }
+
+    // Delete copy constructor and assignment operator
+    MappedMemory(const MappedMemory&) = delete;
+    MappedMemory& operator=(const MappedMemory&) = delete;
+
+    // Move constructor
+    MappedMemory(MappedMemory&& other) noexcept : data_(std::move(other.data_)) {}
+
+    // Move assignment operator
+    MappedMemory& operator=(MappedMemory&& other) noexcept {
+        if (this != &other) {
+            if (!data_.empty()) {
+                munmap(data_.data(), data_.size());
+            }
+            data_ = std::move(other.data_);
+        }
+        return *this;
+    }
+
+    const std::vector<char>& data() const { return data_; }
+
+private:
+    std::vector<char> data_;
+};
+
 
 
 // Use a key to retrieve a value
@@ -357,6 +550,20 @@ T _get_value(const Message& packet, const std::string& schema_str){
             return mpk_unpack<T>(msg, schema_str);
         }
         log_message("Invalid format");
+        break;
+      case PACKET_SOURCE_MMAP:
+        switch(format){
+            case PACKET_FORMAT_MSGPACK:
+                {
+                    std::string filename(packet.data + 32, packet.data + packet.length);
+                    log_message("Reading memory-mapped filename " + filename + " of length " + std::to_string(packet.length));
+                    MappedMemory msg = MappedMemory(filename);
+                    return mpk_unpack<T>(msg.data(), schema_str);
+                }
+            default:
+                errmsg = "Invalid format";
+                break;
+        }
         break;
       case PACKET_SOURCE_FILE:
         switch(format){
@@ -381,9 +588,6 @@ T _get_value(const Message& packet, const std::string& schema_str){
                 return mpk_unpack<T>(msg, schema_str);
         }
         errmsg = "Invalid format";
-        break;
-      case PACKET_SOURCE_NXDB:
-        errmsg = "Not yet supported";
         break;
       default:
         errmsg = "Invalid source";

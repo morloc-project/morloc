@@ -4,6 +4,7 @@ import sys
 import os
 import tempfile
 import struct
+import mmap
 
 # import only used if dictionaries are passed
 from collections import OrderedDict
@@ -32,7 +33,7 @@ PACKET_TYPE_PING = 0x04
 
 PACKET_SOURCE_MESG = 0x00 # the message contains the data
 PACKET_SOURCE_FILE = 0x01 # the message is a path to a file of data
-PACKET_SOURCE_NXDB = 0x02 # the message is a key to the nexus uses to access the data
+PACKET_SOURCE_MMAP = 0x02 # the message is a memory mapped file
 
 PACKET_FORMAT_JSON = 0x00
 PACKET_FORMAT_MSGPACK = 0x01
@@ -196,6 +197,16 @@ def _get_value(data: bytes, schema_str: str):
             return(deserializer(data[data_start:]))
         except Exception as e:
             raise FailingPacket(f"Failed to parse msg packet: {str(e)}")
+    elif cmd_source == PACKET_SOURCE_MMAP:
+        try:
+            filename = data[data_start:].decode()
+            with open(filename, "rb") as fh:
+                mm = mmap.mmap(fh.fileno(), length=0, flags=mmap.MAP_PRIVATE, prot=mmap.PROT_READ)
+                obj = deserializer(mm[:])
+                mm.close()
+                return(obj)
+        except Exception as e:
+            raise FailingPacket(f"Failed to parse file packet: {str(e)}")
     elif cmd_source == PACKET_SOURCE_FILE:
         try:
             filename = data[data_start:].decode()
@@ -228,7 +239,18 @@ def _put_value(value, schema_str: str) -> bytes:
         with tempfile.NamedTemporaryFile(delete=False, dir=global_state["tmpdir"], mode='wb') as temp_file:
             temp_file.write(data)
             tmpfilename = temp_file.name
-        return _make_data(tmpfilename.encode("utf8"), src=PACKET_SOURCE_FILE)
+
+        # Create the file without writing any data
+        with open(tmpfilename, "wb") as fh:
+            fh.truncate(len(data))  # Set the file size without writing zeros
+        
+        # Memory-map the file
+        with open(tmpfilename, "r+b") as fh:
+            mm = mmap.mmap(fh.fileno(), len(data), access=mmap.ACCESS_WRITE)
+            mm.write(data)
+
+        return _make_data(tmpfilename.encode("utf8"), src=PACKET_SOURCE_MMAP)
+
 
 def _stream_data(conn):
     first_packet = conn.recv(BUFFER_SIZE)
@@ -465,4 +487,3 @@ if __name__ == "__main__":
     except Exception as e:
         _log(f"Python pool failed: {str(e)}")
         sys.exit(1)
-
