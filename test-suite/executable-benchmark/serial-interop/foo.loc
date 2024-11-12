@@ -23,9 +23,10 @@ module foo
   , pMarginalCost4
   , mapManyPCP
   , mapManyPCR
+  , memtest
   )
 
-import types (List, Str, Int)
+import types (List, Str, Int, Tuple2)
 import cppbase (map)
 
 source py from "foo.py" ("nmb" as pnmb, "pid", "len" as plen, "addp")
@@ -87,6 +88,10 @@ pMarginalCost1 = pnmb 0
 pMarginalCost2 = (pid . cid . pnmb) 0 
 pMarginalCost3 = (pid . cid . pid . cid . pnmb) 0 
 pMarginalCost4 = (pid . cid . pid . cid . pid . cid . pnmb) 0 
+
+memtest :: [Int] -> [(Int, Int)]
+memtest xs = map (\x -> (pid x, plen s)) xs where
+  s = cnmb 10
 
 mapManyPCP :: Int -> [Int] -> [Int]
 mapManyPCP x xs = map (addp x) xs

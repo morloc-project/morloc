@@ -17,6 +17,8 @@ hyperfine \
   --export-csv stats.csv \
   "./nexus.py {test}"
 
+hyperfine -w 5 -L test memtest "./nexus.py {test} medium-list.json"
+
 hyperfine -w 5 -L test mapManyPCP,mapManyPCR "./nexus.py {test} 5 long-list.json"
 
 hyperfine -w 5 -L test mapManyPCR "./nexus.py {test} 5 long-list.json"
