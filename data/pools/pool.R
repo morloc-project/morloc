@@ -503,6 +503,7 @@ tryCatch(
   {
     socket_path <- args[1]
     global_state.tmpdir <- args[2]
+
     result <- main(socket_path)
     quit(status = result)
   },  error = function(e) {
