@@ -21,24 +21,6 @@
 
 #define LOGFILE "log"
 
-#define PACKET_TYPE_DATA  0x00
-#define PACKET_TYPE_CALL  0x01
-#define PACKET_TYPE_GET   0x02
-#define PACKET_TYPE_PUT   0x03
-#define PACKET_TYPE_PING  0x04
-
-#define PACKET_SOURCE_MESG  0x00 // the message contains the data
-#define PACKET_SOURCE_FILE  0x01 // the message is a path to a file of data
-#define PACKET_SOURCE_MMAP  0x02 // the message is a memory mapped file
-
-#define PACKET_FORMAT_JSON  0x00
-
-#define PACKET_COMPRESSION_NONE  0x00 // uncompressed
-#define PACKET_ENCRYPTION_NONE   0x00 // unencrypted
-
-#define PACKET_STATUS_PASS  0x00
-#define PACKET_STATUS_FAIL  0x01
-
 struct Message {
   char* data;
   uint64_t length;

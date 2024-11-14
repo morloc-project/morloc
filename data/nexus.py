@@ -25,16 +25,19 @@ JSON_SEPARATORS = (",", ":")
 
 PACKET_TYPE_DATA = 0x00
 PACKET_TYPE_CALL = 0x01
-PACKET_TYPE_GET  = 0x02
-PACKET_TYPE_PUT  = 0x03
-PACKET_TYPE_PING = 0x04
+PACKET_TYPE_PING = 0x02
+PACKET_TYPE_GET  = 0x03
+PACKET_TYPE_POST = 0x04
+PACKET_TYPE_PUT  = 0x05
+PACKET_TYPE_DEL  = 0x06
 
 PACKET_SOURCE_MESG = 0x00 # the message contains the data
 PACKET_SOURCE_FILE = 0x01 # the message is a path to a file of data
-PACKET_SOURCE_MMAP = 0x02 # the message is a memory mapped file
+PACKET_SOURCE_SMEM = 0x02 # the message is an index in a shared memory pool
 
-PACKET_FORMAT_JSON = 0x00
+PACKET_FORMAT_JSON    = 0x00
 PACKET_FORMAT_MSGPACK = 0x01
+PACKET_FORMAT_TEXT    = 0x02
 
 PACKET_COMPRESSION_NONE = 0x00 # uncompressed
 
@@ -363,7 +366,7 @@ def print_return(data, schema_str):
         with open(filename, 'rb') as file:
             content = file.read()
         os.unlink(filename)  # Delete the temporary file
-    elif cmd_source == PACKET_SOURCE_MMAP:
+    elif cmd_source == PACKET_SOURCE_SMEM:
         filename = data[data_start:].decode()
         try:
             with open(filename, 'rb') as file:
@@ -485,7 +488,7 @@ def handle_json_file_argument(filename, schema):
             mm.flush()
             resources["files"].append(mm)
 
-        return _make_data(msgpack_filename.encode("utf8"), src=PACKET_SOURCE_MMAP)
+        return _make_data(msgpack_filename.encode("utf8"), src=PACKET_SOURCE_SMEM)
 
 def handle_msgpack_file_argument(filename):
     """
@@ -494,7 +497,7 @@ def handle_msgpack_file_argument(filename):
     with open(filename, "rb") as fh:
         mm = mmap.mmap(fh.fileno(), 0)
         resources["files"].append(mm)
-        return _make_data(filename.encode("utf8"), src = PACKET_SOURCE_MMAP)
+        return _make_data(filename.encode("utf8"), src = PACKET_SOURCE_SMEM)
 
 def prepare_call_packet(mid, args, schemas):
     arg_msgs = []

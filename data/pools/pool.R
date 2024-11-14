@@ -22,16 +22,19 @@ global_state <- new.env()
 
 PACKET_TYPE_DATA <- 0x00
 PACKET_TYPE_CALL <- 0x01
-PACKET_TYPE_GET  <- 0x02
-PACKET_TYPE_PUT  <- 0x03
-PACKET_TYPE_PING <- 0x04
+PACKET_TYPE_PING <- 0x02
+PACKET_TYPE_GET  <- 0x03
+PACKET_TYPE_POST <- 0x04
+PACKET_TYPE_PUT  <- 0x05
+PACKET_TYPE_DEL  <- 0x06
 
 PACKET_SOURCE_MESG <- 0x00 # the message contains the data
 PACKET_SOURCE_FILE <- 0x01 # the message is a path to a file of data
-PACKET_SOURCE_MMAP <- 0x02 # the message is a memory mapped file
+PACKET_SOURCE_SMEM <- 0x02 # the message is an index in a shared memory pool
 
-PACKET_FORMAT_JSON <- 0x00
-PACKET_FORMAT_MSGPACK = 0x01
+PACKET_FORMAT_JSON    <- 0x00
+PACKET_FORMAT_MSGPACK <- 0x01
+PACKET_FORMAT_TEXT    <- 0x02
 
 PACKET_COMPRESSION_NONE <- 0x00 # uncompressed
 
@@ -173,7 +176,7 @@ future::plan(future::multicore)
       } else {
         abort("Unsupported data format")
       }
-    } else if (header$cmd[2] == PACKET_SOURCE_MMAP) {
+    } else if (header$cmd[2] == PACKET_SOURCE_SMEM) {
       filename <- rawToChar(key[data_start:length(key)])
       mm <- mmap(file = filename, mode = char())
       msgpack_unpack(mm[1:length(mm)], schema)
@@ -245,7 +248,7 @@ future::plan(future::multicore)
     # Convert the filename to a raw vector for use in downstream processes
     key_raw <- charToRaw(key)
 
-    return(make_data(key_raw, src = PACKET_SOURCE_MMAP))
+    return(make_data(key_raw, src = PACKET_SOURCE_SMEM))
   }
 }
 

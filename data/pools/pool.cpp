@@ -57,16 +57,19 @@ std::string g_tmpdir;
 
 #define PACKET_TYPE_DATA  0x00
 #define PACKET_TYPE_CALL  0x01
-#define PACKET_TYPE_GET   0x02
-#define PACKET_TYPE_PUT   0x03
-#define PACKET_TYPE_PING  0x04
+#define PACKET_TYPE_PING  0x02
+#define PACKET_TYPE_GET   0x03
+#define PACKET_TYPE_POST  0x04
+#define PACKET_TYPE_PUT   0x05
+#define PACKET_TYPE_DEL   0x06
 
 #define PACKET_SOURCE_MESG  0x00 // the message contains the data
 #define PACKET_SOURCE_FILE  0x01 // the message is a path to a file of data
-#define PACKET_SOURCE_MMAP  0x02 // the message is a memory mapped file
+#define PACKET_SOURCE_SMEM  0x02 // the message is an index in a shared memory pool
 
-#define PACKET_FORMAT_JSON  0x00
+#define PACKET_FORMAT_JSON     0x00
 #define PACKET_FORMAT_MSGPACK  0x01
+#define PACKET_FORMAT_TEXT     0x02
 
 #define PACKET_COMPRESSION_NONE  0x00 // uncompressed
 #define PACKET_ENCRYPTION_NONE   0x00 // unencrypted
@@ -458,7 +461,7 @@ Message _put_value(const T& value, const std::string& schema_str) {
         packet = make_data(
           tmpfilename.data(),
           tmpfilename.size(),
-          PACKET_SOURCE_MMAP,
+          PACKET_SOURCE_SMEM,
           PACKET_FORMAT_MSGPACK,
           PACKET_COMPRESSION_NONE,
           PACKET_ENCRYPTION_NONE,
@@ -551,7 +554,7 @@ T _get_value(const Message& packet, const std::string& schema_str){
         }
         log_message("Invalid format");
         break;
-      case PACKET_SOURCE_MMAP:
+      case PACKET_SOURCE_SMEM:
         switch(format){
             case PACKET_FORMAT_MSGPACK:
                 {
@@ -659,49 +662,6 @@ int new_server(const char* socket_path){
     }
 
     return server_fd;
-}
-
-int accept_client(int server_fd){
-    // Accept a connection
-    int client_fd = accept(server_fd, nullptr, nullptr);
-    return client_fd;
-}
-
-int accept_client(int server_fd, double timeout_seconds) {
-    fd_set readfds;
-    struct timeval tv;
-    int client_fd;
-
-    // Clear the set
-    FD_ZERO(&readfds);
-
-    // Add server socket to the set
-    FD_SET(server_fd, &readfds);
-
-    // Set up the timeout
-    tv.tv_sec = static_cast<long>(floor(timeout_seconds));
-    tv.tv_usec = static_cast<long>((timeout_seconds - tv.tv_sec) * 1e6);
-
-    // Wait for activity on the socket, with timeout
-    int activity = select(server_fd + 1, &readfds, nullptr, nullptr, &tv);
-
-    if (activity < 0) {
-        // Error occurred
-        return -1;
-    } else if (activity == 0) {
-        // Timeout occurred
-        return -2;
-    } else {
-        // There is activity on the socket
-        if (FD_ISSET(server_fd, &readfds)) {
-            // Accept the connection
-            client_fd = accept(server_fd, nullptr, nullptr);
-            return client_fd;
-        }
-    }
-
-    // This should not be reached, but just in case
-    return -1;
 }
 
 Message stream_recv(int client_fd) {
