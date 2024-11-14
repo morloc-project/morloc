@@ -377,7 +377,7 @@ Message fail_packet(const std::string& errmsg){
     errmsg.c_str(),
     errmsg.size(),
     PACKET_SOURCE_MESG,
-    PACKET_FORMAT_JSON,
+    PACKET_FORMAT_TEXT,
     PACKET_COMPRESSION_NONE,
     PACKET_ENCRYPTION_NONE,
     PACKET_STATUS_FAIL

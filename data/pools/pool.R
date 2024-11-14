@@ -117,7 +117,7 @@ make_data <- function(
 
 fail_packet <- function(errmsg, errobj = NULL){
   if(is.null(errobj$fail_packet)){
-    make_data(charToRaw(errmsg), status = PACKET_STATUS_FAIL)
+    make_data(charToRaw(errmsg), status = PACKET_STATUS_FAIL, fmt = PACKET_FORMAT_TEXT)
   } else {
     header <- read_header(errobj$fail_packet)
     if(header$offset > 0){

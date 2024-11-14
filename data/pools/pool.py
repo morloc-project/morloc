@@ -153,11 +153,7 @@ class FailingPacket(Exception):
 
     def __init__(self, errmsg, error_code=None):
         try:
-            errmsg = mp.pack(errmsg.encode("utf8"), "s")
-        except:
-            pass
-        try:
-            self.packet = _make_data(errmsg, status = PACKET_STATUS_FAIL)
+            self.packet = _make_data(errmsg, status = PACKET_STATUS_FAIL, fmt = PACKET_FORMAT_TEXT)
         except Exception as e:
             errmsg = f"Failed to fail properly: {str(e)}"
             _log(errmsg)
@@ -167,7 +163,7 @@ class FailingPacket(Exception):
 
     def __str__(self):
         try:
-            errmsg = mp.unpack(self.packet[32:], "s")
+            errmsg = self.packet[32:]
         except Exception as e:
             return f"Malformed FailingPacket {str(e)}"
         if self.error_code:
@@ -457,8 +453,8 @@ def server(socket_path):
                         _log(f"failed to get result from queue: {str(e)} on fd {conn.fileno()}")
                 elif not p.is_alive():
                     # Send an empty message signaling failure
-                    errmsg = mp.pack(f"Process {p.pid} on fd {conn.fileno()} not alive and no result available", "s")
-                    error_packet = _make_data(errmsg, status = PACKET_STATUS_FAIL)
+                    errmsg = f"Process {p.pid} on fd {conn.fileno()} not alive and no result available"
+                    error_packet = _make_data(errmsg, status = PACKET_STATUS_FAIL, fmt = PACKET_FORMAT_TEXT)
                     conn.send(error_packet)
                 else:
                     # the process is still alive and no data has been reveived

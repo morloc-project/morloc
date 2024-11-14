@@ -341,6 +341,8 @@ def print_return(data, schema_str):
     (cmd, offset, _) = _read_header(data)
 
     cmd_type = cmd[0]
+    cmd_source = cmd[1]
+    cmd_format = cmd[2]
     status = cmd[5]
     data_start = 32 + offset
 
@@ -348,13 +350,13 @@ def print_return(data, schema_str):
         exit_code = 0
         outfile = sys.stdout
     elif cmd_type == PACKET_TYPE_DATA and status == PACKET_STATUS_FAIL:
-        errmsg = mp.unpack(data[data_start: ], "s")
-        clean_exit(1, errmsg)
+        if cmd_format == PACKET_FORMAT_TEXT:
+            errmsg = mp.unpack(data[data_start: ], "s")
+            clean_exit(1, errmsg)
+        else:
+            clean_exit(1, "Failed to read errmsg, pools should return erros as text")
     else:
         clean_exit(1, f"Implementation bug: expected data packet: {str(data)}")
-
-    cmd_source = cmd[1]
-    cmd_format = cmd[2]
 
     isgood = False
     error = ""
