@@ -14,6 +14,29 @@
 
 #define PAGE_SIZE 0x20000
 
+
+#define PACKET_TYPE_DATA  0x00
+#define PACKET_TYPE_CALL  0x01
+#define PACKET_TYPE_PING  0x02
+#define PACKET_TYPE_GET   0x03
+#define PACKET_TYPE_PUT   0x04
+#define PACKET_TYPE_DEL   0x05
+
+#define PACKET_SOURCE_MESG  0x00 // the message contains the data
+#define PACKET_SOURCE_FILE  0x01 // the message is a path to a file of data
+#define PACKET_SOURCE_SMEM  0x02 // the message is an index in a shared memory pool
+
+#define PACKET_FORMAT_JSON     0x00
+#define PACKET_FORMAT_MSGPACK  0x01
+#define PACKET_FORMAT_TEXT     0x02
+
+#define PACKET_COMPRESSION_NONE  0x00 // uncompressed
+#define PACKET_ENCRYPTION_NONE   0x00 // unencrypted
+
+#define PACKET_STATUS_PASS  0x00
+#define PACKET_STATUS_FAIL  0x01
+
+
 // Stores information on one contiguous block of memory
 typedef struct Block{
   // the address array index (0 indicates that the block is free)
@@ -55,6 +78,9 @@ typedef struct MemoryPool{
   // The name of the shared memory pool, e.g., "/morloc-memory-pool-1"
   char* shm_name;
 
+  // The shared memory file descriptor
+  int fd;
+
   // A pointer to the shared memory map for this process
   void* data;
 
@@ -69,37 +95,177 @@ typedef struct MemoryPool{
   Block* blocks;
 
   // The lowest unassigned block in `blocks`
-  size_t next_block;
+  size_t next_block_idx;
+
+  // The offset of the next block relative to the start of the memory pool
+  // (it will range from addr_size * sizeof(Addr) up to pool_size - 1)
+  size_t next_block_loc;
   
 } MemoryPool;
 
+typedef struct Op{
+  char method;
+  // either a key to delete or the size of the desired memory block
+  size_t mesg;
+} Op;
 
-void resize_addr(MemoryPool mempool, size_t size){
-    if (mempool.blocks == NULL){
-      free(mempool.blocks);
+void resize_memory_pool(MemoryPool* mempool, size_t new_size){
+
+    // Set size of shared memory object
+    if (ftruncate(mempool->fd, new_size) == -1) {
+        perror("ftruncate");
+        exit(1);
     }
 
-    mempool.addr_size = size;
-    mempool.blocks = (Block*)calloc(size, sizeof(Block));
+    // Free old memory map
+    munmap(mempool->data);
 
-    if (mempool.blocks == NULL) {
-      perror("malloc");
-      exit(1);
+    // Map shared memory object into process address space
+    mempool->data = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mempool->data == MAP_FAILED) {
+        perror("mmap");
+        exit(1);
     }
 }
 
-// Stub function for run_job
-void run_job(int fd) {
-    char buffer[BUFFER_SIZE];
-    ssize_t bytes_read = read(fd, buffer, BUFFER_SIZE - 1);
-    if (bytes_read > 0) {
-        buffer[bytes_read] = '\0';
-        printf("Received from client: %s\n", buffer);
-       // Process the job here
-    } else if (bytes_read == 0) {
-        printf("Client disconnected\n");
+
+// Read n bytes as an int starting from position offset in a char array
+uint64_t read_uint64(const char* bytes, size_t offset){
+  uint64_t x = 0;
+  for(size_t i = 0; i < 8; i++){
+    uint64_t multiplier = 1;
+    multiplier = multiplier << (8 * (8 - i - 1));
+    x += static_cast<unsigned char>(bytes[i + offset]) * multiplier;
+  }
+  return x;
+}
+
+void write_uint64(char* data, uint64_t value){
+    data[0] = (value >> 56) & 0xFF;
+    data[1] = (value >> 48) & 0xFF;
+    data[2] = (value >> 40) & 0xFF;
+    data[3] = (value >> 32) & 0xFF;
+    data[4] = (value >> 24) & 0xFF;
+    data[5] = (value >> 16) & 0xFF;
+    data[6] = (value >>  8) & 0xFF;
+    data[7] = value & 0xFF;
+}
+
+Op read_header(const char* buffer){
+
+    Op op;
+    op.method = char[12];
+
+    if(! (
+      buffer[0] == 0x6d && 
+      buffer[1] == 0xf8 && 
+      buffer[2] == 0x07 && 
+      buffer[3] == 0x07 && 
+      (op.method == PACKET_TYPE_DEL || method == PACKET_TYPE_GET)
+    )){
+      op.mesg = 0;
     } else {
-        perror("Error reading from client");
+      op.mesg = read_uint64(buffer, 32);
+    }
+
+    return op;
+}
+
+
+size_t write_key(Key key, char* buffer){
+  data[ 0] = 0x6d;
+  data[ 1] = 0xF8;
+  data[ 2] = 0x07;
+  data[ 3] = 0x07;
+  data[ 4] = 0x00; // plain
+  data[ 5] = 0x00;
+  data[ 6] = 0x00; // version
+  data[ 7] = 0x00;
+  data[ 8] = 0x00; // version_flavor
+  data[ 9] = 0x00;
+  data[10] = 0x00; // mode
+  data[11] = 0x00;
+  // command
+  data[12] = PACKET_TYPE_DATA;
+  data[13] = PACKET_FORMAT_DATA;
+  data[14] = PACKET_COMPRESSION_NONE;
+  data[15] = PACKET_ENCRYPTION_NONE;
+  data[16] = PACKET_STATUS_PASS;
+  data[17] = 0x00;
+  data[18] = 0x00;
+  data[19] = 0x00;
+  // offset
+  write_uint32(data + 20, 0);
+  // length, 2 X 64bit integers
+  write_int64(data + 24, 16);
+  // message
+  write_int64(data + 32, key.index);
+  write_int64(data + 40, key.pool_size);
+
+  return 32 + 16;
+}
+
+void defragment(MemoryPool* mempool){
+
+}
+
+void resize(size_t required_size, MemoryPool* mempool){
+
+}
+
+Key get_block(size_t size, MemoryPool* mempool){
+
+  if(mempool->size - mempool->next_block_loc < size){
+    defragment(mempool);  
+  }
+
+  if(mempool->size - mempool->next_block_loc < size){
+    resize(mempool);
+  }
+
+  Block block;
+  block.size = ((size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+
+  block.index =
+
+  mempool->blocks[mempool->next_block_idx] = 
+
+
+  // if there is not enough space for the desired block, defragment
+  // if there is still not enough space, resize
+  // create a new block, make an index and return
+}
+
+
+void run_job(int fd, char* buffer, MemoryPool* mempool) {
+    size_t reply_length;
+    ssize_t recv_length;
+    ssize_t bytes_sent;
+    Op op;
+    Key key;
+
+    // read from unix fomain socket on file descriptor fd
+    recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);
+
+    op = read_header(buffer);
+
+    switch(op.method){
+      case PACKET_TYPE_GET:
+        key = get_block(op.mesg, mempool); 
+        reply_length = write_key(key, buffer);
+        bytes_sent = send(fd, buffer, reply_length, 0); 
+        if(bytes_sent != reply_length){
+          perror("Failed to send reply");
+        }
+        break;
+      case PACKET_TYPE_DEL:
+        // Indicate that the index is free
+        // The memory will be freed for reuse with the next defragmentation call
+        mempool->data[op.mesg] = 0; 
+        break;
+      default:
+        perror("Bad packet");
+        break;
     }
 }
 
@@ -116,8 +282,10 @@ int main(int argc, char * argv[]){
     size_t initial_size;
     char* shm_name;
     int fd;
+    char* message_buffer = (char*)malloc(BUFFER_SIZE * sizeof(char));
+    
 
-    // Check if we have at least 2 command-line arguments
+    // Check if we have at least 3 command-line arguments
     if (argc < 3) {
         fprintf(stderr, "Usage: %s <shared_memory_name> <initial_size> <socket_path>\n", argv[0]);
         exit(1);
@@ -140,33 +308,23 @@ int main(int argc, char * argv[]){
     char* socket_path = argv[3];
 
     MemoryPool mempool;
-    mempool.shm_name   = shm_name;
-    mempool.data       = NULL;
-    mempool.pool_size  = initial_size;
-    mempool.blocks     = NULL;
-    mempool.next_block = 0;
+    mempool.shm_name       = shm_name;
+    mempool.data           = NULL;
+    mempool.pool_size      = initial_size;
+    mempool.blocks         = NULL;
+    mempool.addr_size      = 1024 * sizeof(Addr);
+    mempool.next_block_idx = 0;
+    mempool.next_block_loc = mempool.addr_size;
 
     // Open shared memory object
-    fd = shm_open(shm_name, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
-    if (fd == -1) {
+    mempool.fd = shm_open(shm_name, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+    if (mempool.fd == -1) {
         perror("shm_open");
         exit(1);
     }
 
-    // Set size of shared memory object
-    if (ftruncate(fd, initial_size) == -1) {
-        perror("ftruncate");
-        exit(1);
-    }
-
-    // Map shared memory object into process address space
-    mempool.data = mmap(NULL, initial_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (mempool.data == MAP_FAILED) {
-        perror("mmap");
-        exit(1);
-    }
-
-    resize_addr(mempool, 1024); 
+    // set the initial size of the memory pool
+    resize_memory_pool(&mempool, initial_size);
 
 
 
@@ -259,7 +417,7 @@ int main(int argc, char * argv[]){
         // Check for activity on client sockets
         for (int i = 0; i < client_count; i++) {
             if (FD_ISSET(client_fds[i], &read_fds)) {
-                run_job(client_fds[i]);
+                run_job(client_fds[i], message_buffer, &mempool);
                 // Remove the client from the array and close the socket
                 close(client_fds[i]);
                 for (int j = i; j < client_count - 1; j++) {
@@ -298,6 +456,7 @@ int main(int argc, char * argv[]){
     }
 
     free(mempool.blocks);
+    free(message_buffer);
 
     return 0;
 }
