@@ -1134,25 +1134,31 @@ struct Schema;
 typedef enum {
   MORLOC_NIL,
   MORLOC_BOOL,
-  MORLOC_INT,
-  MORLOC_FLOAT,
-  MORLOC_BYTE,
+  MORLOC_SINT8,
+  MORLOC_SINT16,
+  MORLOC_SINT32,
+  MORLOC_SINT64,
+  MORLOC_UINT8,
+  MORLOC_UINT16,
+  MORLOC_UINT32,
+  MORLOC_UINT64,
+  MORLOC_FLOAT32,
+  MORLOC_FLOAT64,
   MORLOC_STRING,
   MORLOC_ARRAY,
-  MORLOC_MAP,
-  MORLOC_TUPLE
+  MORLOC_TUPLE,
+  MORLOC_MAP 
 } morloc_serial_type;
 
-#define SCHEMA_ARRAY  'a'
-#define SCHEMA_TUPLE  't'
-#define SCHEMA_MAP    'm'
 #define SCHEMA_NIL    'z'
 #define SCHEMA_BOOL   'b'
 #define SCHEMA_SINT   'i'
 #define SCHEMA_UINT   'u'
-#define SCHEMA_BYTE   'c'
 #define SCHEMA_FLOAT  'f'
 #define SCHEMA_STRING 's'
+#define SCHEMA_ARRAY  'a'
+#define SCHEMA_TUPLE  't'
+#define SCHEMA_MAP    'm'
 
 #define BUFFER_SIZE 4096
 
@@ -1163,6 +1169,7 @@ typedef enum {
 typedef struct Schema {
     morloc_serial_type type;
     size_t size; // number of parameters
+    size_t width; // bytes in the object when stored in an array
     struct Schema** parameters;
     char** keys; // field names, used only for records
 } Schema;
@@ -1184,46 +1191,14 @@ int unpack(const char* mpk, size_t mpk_size, const char* schema_str, void** mlcp
 int unpack_with_schema(const char* mpk, size_t mpk_size, const Schema* schema, void** mlcptr);
 
 
-// This is the width of a morloc object (e.g., the amount of space it takes in
-// an array). The return size does not include the size of objects pointed to.
-size_t obj_width(const Schema* schema){
-  size_t size = 0;
-  switch(schema->type){
-    case MORLOC_NIL:
-    case MORLOC_BOOL:
-      return sizeof(int8_t);
-    case MORLOC_INT:
-      return sizeof(int64_t);
-    case MORLOC_FLOAT:
-      return sizeof(double);
-    case MORLOC_STRING:
-      return sizeof(char*);
-    case MORLOC_ARRAY:
-      return sizeof(Array);
-    case MORLOC_MAP:
-      for(size_t i = 0; i < schema->size; i++){
-        size += strlen(schema->keys[i]);
-        size += obj_width(schema->parameters[i]);
-      }
-      return size;
-    case MORLOC_TUPLE:
-      for(size_t i = 0; i < schema->size; i++){
-        size += obj_width(schema->parameters[i]);
-      }
-      return size;
-    default:
-      // This should be unreachable unless new types are added
-      return 0;
-  }
-}
-
 // Helper function to create a schema with parameters
-Schema* create_schema_with_params(morloc_serial_type type, int size, Schema** params, char** keys) {
+Schema* create_schema_with_params(morloc_serial_type type, size_t width, size_t size, Schema** params, char** keys) {
     Schema* schema = (Schema*)malloc(sizeof(Schema));
     if (!schema) return NULL;
 
     schema->type = type;
     schema->size = size;
+    schema->width = width;
     schema->parameters = params;
     schema->keys = keys;
 
@@ -1231,38 +1206,69 @@ Schema* create_schema_with_params(morloc_serial_type type, int size, Schema** pa
 }
 
 Schema* nil_schema() {
-    return create_schema_with_params(MORLOC_NIL, 0, NULL, NULL);
+    return create_schema_with_params(MORLOC_NIL, 1, 0, NULL, NULL);
 }
 
 Schema* bool_schema() {
-    return create_schema_with_params(MORLOC_BOOL, 0, NULL, NULL);
+    return create_schema_with_params(MORLOC_BOOL, 1, 0, NULL, NULL);
 }
 
-Schema* int_schema() {
-    return create_schema_with_params(MORLOC_INT, 0, NULL, NULL);
+Schema* uint_schema(size_t width) {
+    switch(width){
+      case 1:
+        return create_schema_with_params(MORLOC_UINT8, width, 0, NULL, NULL);
+      case 2:
+        return create_schema_with_params(MORLOC_UINT16, width, 0, NULL, NULL);
+      case 4:
+        return create_schema_with_params(MORLOC_UINT32, width, 0, NULL, NULL);
+      case 8:
+        return create_schema_with_params(MORLOC_UINT64, width, 0, NULL, NULL);
+      default:
+        perror("Integers may only have widths of 1, 2, 4, or 8 bytes");
+        return NULL;
+    }
 }
 
-Schema* byte_schema() {
-    return create_schema_with_params(MORLOC_BYTE, 0, NULL, NULL);
+Schema* sint_schema(size_t width) {
+    switch(width){
+      case 1:
+        return create_schema_with_params(MORLOC_SINT8, width, 0, NULL, NULL);
+      case 2:
+        return create_schema_with_params(MORLOC_SINT16, width, 0, NULL, NULL);
+      case 4:
+        return create_schema_with_params(MORLOC_SINT32, width, 0, NULL, NULL);
+      case 8:
+        return create_schema_with_params(MORLOC_SINT64, width, 0, NULL, NULL);
+      default:
+        perror("Integers may only have widths of 1, 2, 4, or 8 bytes");
+        return NULL;
+    }
 }
 
-Schema* float_schema() {
-    return create_schema_with_params(MORLOC_FLOAT, 0, NULL, NULL);
+Schema* float_schema(size_t width) {
+    switch(width){
+      case 4:
+        return create_schema_with_params(MORLOC_FLOAT32, width, 0, NULL, NULL);
+      case 8:
+        return create_schema_with_params(MORLOC_FLOAT64, width, 0, NULL, NULL);
+      default:
+        perror("Floats may only have widths of 4 or 8 bytes");
+        return NULL;
+    }
 }
 
 Schema* string_schema() {
-    return create_schema_with_params(MORLOC_STRING, 0, NULL, NULL);
+    return create_schema_with_params(MORLOC_STRING, sizeof(Array), 0, NULL, NULL);
 }
 
-Schema* tuple_schema_(size_t size) {
-
-    Schema** params = (Schema**)calloc(size, sizeof(Schema*));
-    if (!params) {
-        return NULL;
+Schema* tuple_schema(Schema** params, size_t size) {
+    size_t width = 0;
+    for(size_t i = 0; i < size; i++){
+      width += params[i]->width;
     }
-
-    return create_schema_with_params(MORLOC_TUPLE, size, params, NULL);
+    return create_schema_with_params(MORLOC_TUPLE, width, size, params, NULL);
 }
+
 
 Schema* array_schema(Schema* array_type) {
     Schema** params = (Schema**)malloc(sizeof(Schema*));
@@ -1270,20 +1276,17 @@ Schema* array_schema(Schema* array_type) {
     
     params[0] = array_type;
     
-    return create_schema_with_params(MORLOC_ARRAY, 1, params, NULL);
+    return create_schema_with_params(MORLOC_ARRAY, sizeof(Array), 1, params, NULL);
 }
 
-Schema* map_schema_(size_t size) {
-    Schema** params = (Schema**)calloc(size, sizeof(Schema*));
-    char** keys = (char**)calloc(size, sizeof(char*));
-
-    if (!params || !keys) {
-        free(params);
-        free(keys);
-        return NULL;
+Schema* map_schema(size_t size, char** keys, Schema** params) {
+    size_t width = 0;
+    for(size_t i = 0; i < size; i++){
+      width += strlen(keys[i]);
+      width += params[i]->width;
     }
 
-    return create_schema_with_params(MORLOC_MAP, size, params, keys);
+    return create_schema_with_params(MORLOC_MAP, width, size, params, keys);
 }
 
 // packing ####
@@ -1388,6 +1391,7 @@ char* parse_schema_key(const char** schema_ptr){
 
 Schema* parse_schema(const char** schema_ptr){
   Schema* schema = 0;
+  Schema** params;
   char c = **schema_ptr;
   (*schema_ptr)++;
   size_t size;
@@ -1397,34 +1401,33 @@ Schema* parse_schema(const char** schema_ptr){
       return array_schema(parse_schema(schema_ptr));
     case SCHEMA_TUPLE:
       size = parse_schema_size(schema_ptr);
-      schema = tuple_schema_(size);
+      params = (Schema**)calloc(size, sizeof(Schema*));
       for(size_t i = 0; i < size; i++){
-        schema->parameters[i] = parse_schema(schema_ptr);
+        params[i] = parse_schema(schema_ptr);
       }
-      return schema;
+      return tuple_schema(params, size);
     case SCHEMA_MAP:
       size = parse_schema_size(schema_ptr);
-      schema = map_schema_(size);
+      char** keys = (char**)calloc(size, sizeof(char*));
+      params = (Schema**)calloc(size, sizeof(Schema*));
       for(size_t i = 0; i < size; i++){
-        schema->keys[i] = parse_schema_key(schema_ptr);
-        schema->parameters[i] = parse_schema(schema_ptr);
+        keys[i] = parse_schema_key(schema_ptr);
+        params[i] = parse_schema(schema_ptr);
       }
-      return schema;
+      return map_schema(size, keys, params);
     case SCHEMA_NIL:
       return nil_schema();
     case SCHEMA_BOOL:
       return bool_schema();
     case SCHEMA_SINT:
       size = parse_schema_size(schema_ptr);
-      return int_schema();
+      return sint_schema(size);
     case SCHEMA_UINT:
       size = parse_schema_size(schema_ptr);
-      return int_schema();
-    case SCHEMA_BYTE:
-      return byte_schema();
+      return uint_schema(size);
     case SCHEMA_FLOAT:
       size = parse_schema_size(schema_ptr);
-      return float_schema();
+      return float_schema(size);
     case SCHEMA_STRING:
       return string_schema();
     default:
@@ -1452,17 +1455,29 @@ int pack_data(
         case MORLOC_BOOL:
             token = mpack_pack_boolean(*(int8_t*)mlc != 0);
             break;
-        case MORLOC_INT:
-            token = mpack_pack_int32(*(int64_t*)mlc);
+        case MORLOC_UINT8:
+        case MORLOC_UINT16:
+        case MORLOC_UINT32:
+        case MORLOC_SINT8:
+        case MORLOC_SINT16:
+        case MORLOC_SINT32:
+            token = mpack_pack_int32(*(int32_t*)mlc);
             break;
-        case MORLOC_FLOAT:
+        case MORLOC_UINT64:
+        case MORLOC_SINT64:
+            // TODO: fix the bug in 64 bit handling in the mpack library
+            perror("Not yet supported");
+            return 1;
+            break;
+        case MORLOC_FLOAT32:
+        case MORLOC_FLOAT64:
             token = mpack_pack_float(*(double*)mlc);
             break;
         case MORLOC_STRING:
             token = mpack_pack_str(strlen((char*)mlc));
             break;
         case MORLOC_ARRAY:
-            token = mpack_pack_array(obj_width(schema->parameters[0]));
+            token = mpack_pack_array(schema->parameters[0]->width);
             break;
         case MORLOC_TUPLE:
             token = mpack_pack_array(schema->size);
@@ -1489,7 +1504,7 @@ int pack_data(
       case MORLOC_ARRAY:
         array_length = ((Array*)mlc)->size;
         array_schema = schema->parameters[0];
-        array_width = obj_width(array_schema); 
+        array_width = array_schema->width; 
         for (size_t i = 0; i < array_length; i++) {
             pack_data(
               mlc + i * array_width,
@@ -1503,7 +1518,7 @@ int pack_data(
         break;
       case MORLOC_TUPLE:
         // tuples are unboxed data
-        // each element in the tuple is represented by obj_width(element) bytes
+        // each element in the tuple is represented by element->width bytes
         element_idx = 0;
         for (size_t i = 0; i < schema->size; i++) {
             pack_data(
@@ -1515,7 +1530,7 @@ int pack_data(
               tokbuf
             );
             // move the index to the location after the current element
-            element_idx += obj_width(schema->parameters[i]);
+            element_idx += schema->parameters[i]->width;
         }
         break;
       case MORLOC_MAP:
@@ -1538,7 +1553,7 @@ int pack_data(
             pack_data(mlc + element_idx, schema->parameters[i], packet, packet_ptr, packet_remaining, tokbuf);
 
             // move the index to the location after the current element
-            element_idx += obj_width(schema->parameters[i]);
+            element_idx += schema->parameters[i]->width;
         }
         break;
     }
@@ -1581,13 +1596,10 @@ int pack(const void* mlc, const char* schema_str, char** mpk, size_t* mpk_size) 
 
 // terminal parsers
 int parse_bool(        void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_bool_array(  void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_float(       void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_float_array( void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_int(         void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_int_array(   void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
 int parse_nil(         void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
 int parse_bytes(       void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+int parse_int(    int, void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+int parse_float(  int, void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
 
 // nested parsers
 int parse_array( void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
@@ -1609,15 +1621,45 @@ int parse_bool(void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* 
     return 0;
 }
 
-int parse_int(void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+int parse_int(int schema_type, void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     int64_t result;
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
     switch(token->type){
       case MPACK_TOKEN_UINT:
-        result = (int64_t)mpack_unpack_uint32(*token);
+        switch(schema_type){
+          case MORLOC_UINT8:
+            result = (uint8_t)mpack_unpack_uint32(*token);
+            break;
+          case MORLOC_UINT16:
+            result = (uint16_t)mpack_unpack_uint32(*token);
+            break;
+          case MORLOC_UINT32:
+            result = (uint32_t)mpack_unpack_uint32(*token);
+            break;
+          case MORLOC_UINT64:
+            result = (uint64_t)mpack_unpack_uint32(*token);
+            break;
+          default:
+            break;
+        }
         break;
       case MPACK_TOKEN_SINT:
-        result = (int64_t)mpack_unpack_sint32(*token);
+        switch(schema_type){
+          case MORLOC_SINT8:
+            result = (int8_t)mpack_unpack_uint32(*token);
+            break;
+          case MORLOC_SINT16:
+            result = (int16_t)mpack_unpack_uint32(*token);
+            break;
+          case MORLOC_SINT32:
+            result = (int32_t)mpack_unpack_uint32(*token);
+            break;
+          case MORLOC_SINT64:
+            result = (int64_t)mpack_unpack_uint32(*token);
+            break;
+          default:
+            break;
+        }
         break;
       default:
         fprintf(stderr, "Bad token %d\n", token->type);
@@ -1627,10 +1669,15 @@ int parse_int(void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* b
     return 0;
 }
 
-int parse_float(void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+int parse_float(int schema_type, void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
-    double result = mpack_unpack_float(*token);
-    memcpy(mlc, &result, sizeof(double));
+    if(schema_type == MORLOC_FLOAT32){
+      float result = (float)mpack_unpack_float(*token);
+      memcpy(mlc, &result, sizeof(float));
+    } else {
+      double result = (double)mpack_unpack_float(*token);
+      memcpy(mlc, &result, sizeof(double));
+    }
     
     return 0;
 }
@@ -1681,7 +1728,7 @@ int parse_array(void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const c
     int exitcode = 0;
     Array* result = (Array*) mlc;
 
-    size_t element_size = obj_width(schema);
+    size_t element_size = schema->width;
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
     result->size = token->length;
     result->data = (void*)calloc(result->size, element_size);
@@ -1706,7 +1753,7 @@ int parse_tuple(void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const c
         if(exitcode != 0){
           return exitcode;
         }
-        offset += obj_width(schema->parameters[i]); 
+        offset += schema->parameters[i]->width; 
     }
 
     return 0;
@@ -1724,7 +1771,7 @@ int parse_map(void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const cha
         if(exitcode != 0){
           return exitcode;
         }
-        offset += obj_width(schema->parameters[i]); 
+        offset += schema->parameters[i]->width; 
     }
 
     return 0;
@@ -1736,10 +1783,18 @@ int parse_obj(void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const cha
         return parse_nil(mlc, tokbuf, buf_ptr, buf_remaining, token);
       case MORLOC_BOOL:
         return parse_bool(mlc, tokbuf, buf_ptr, buf_remaining, token);
-      case MORLOC_INT:
-        return parse_int(mlc, tokbuf, buf_ptr, buf_remaining, token);
-      case MORLOC_FLOAT:
-        return parse_float(mlc, tokbuf, buf_ptr, buf_remaining, token);
+      case MORLOC_SINT8:
+      case MORLOC_SINT16:
+      case MORLOC_SINT32:
+      case MORLOC_SINT64:
+      case MORLOC_UINT8:
+      case MORLOC_UINT16:
+      case MORLOC_UINT32:
+      case MORLOC_UINT64:
+        return parse_int(schema->type, mlc, tokbuf, buf_ptr, buf_remaining, token);
+      case MORLOC_FLOAT32:
+      case MORLOC_FLOAT64:
+        return parse_float(schema->type, mlc, tokbuf, buf_ptr, buf_remaining, token);
       case MORLOC_STRING:
         return parse_bytes(mlc, tokbuf, buf_ptr, buf_remaining, token);
       case MORLOC_ARRAY:
@@ -1762,7 +1817,7 @@ int unpack_with_schema(const char* mgk, size_t mgk_size, const Schema* schema, v
     mpack_tokbuf_init(&tokbuf);
     mpack_token_t token;
 
-    void* mlc = (void*)malloc(obj_width(schema));
+    void* mlc = (void*)malloc(schema->width);
 
     int exitcode = parse_obj(mlc, schema, &tokbuf, &mgk, &buf_remaining, &token);
 
