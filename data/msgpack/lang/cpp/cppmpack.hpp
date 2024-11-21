@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <cstring>
 
 #include "mlcmpack.h"
 
@@ -22,191 +23,158 @@ T mpk_unpack(const std::vector<char>& packed_data, const std::string& schema_str
 
 
 
-// Helper function to check schema type
-void checkSchemaType(const Schema* schema, morloc_serial_type expected_type) {
-    if (schema->type != expected_type) {
-        fprintf(stderr, "Schema type mismatch. Expected %d but got %d\n", expected_type, schema->type);
-        
-        throw std::runtime_error("Schema mismatch\n");
-    }
-}
-
 // Forward declarations
 template<typename T>
-Anything* toAnything(const Schema* schema, const T& data);
+void* toAnything(void* dest, const Schema* schema, const T& data);
 
 // Specialization for nullptr_t (NIL)
-Anything* toAnything(const Schema* schema, const std::nullptr_t&) {
-    checkSchemaType(schema, MORLOC_NIL);
-    return nil_data();
+void* toAnything(void* dest, const Schema* schema, const std::nullptr_t&) {
+    if(!dest){
+        dest = get_ptr(schema);
+    }
+
+    *((int8_t*)dest) = (int8_t)0; 
+
+    return dest;
 }
 
-// Specialization for bool
-Anything* toAnything(const Schema* schema, const bool& data) {
-    checkSchemaType(schema, MORLOC_BOOL);
-    return bool_data(data);
-}
 
-// Specialization for int
-Anything* toAnything(const Schema* schema, const int& data) {
-    checkSchemaType(schema, MORLOC_INT);
-    return int_data(data);
-}
+// Primitives
+template<typename Primitive>
+void* toAnything(void* dest, const Schema* schema, const Primitive& data) {
+    if(!dest){
+        dest = get_ptr(schema);
+    }
 
-// Specialization for double
-Anything* toAnything(const Schema* schema, const double& data) {
-    checkSchemaType(schema, MORLOC_FLOAT);
-    return float_data(data);
-}
+    *((Primitive*)dest) = data;
 
-// Specialization for const char*
-Anything* toAnything(const Schema* schema, const std::string& data) {
-    checkSchemaType(schema, MORLOC_STRING);
-    return string_data(data.c_str(), data.size());
+    return dest;
 }
 
 // Specialization for std::vector (array)
 template<typename T>
-Anything* toAnything(const Schema* schema, const std::vector<T>& data) {
-    checkSchemaType(schema, MORLOC_ARRAY);
-    Anything* result = array_data_(data.size());
+void* toAnything(void* dest, const Schema* schema, const std::vector<T>& data) {
+    size_t width = schema->parameters[0]->width;
+    Array* result = array_data(dest, width, data.size());
+
     for (size_t i = 0; i < data.size(); ++i) {
-        result->data.obj_arr[i] = toAnything(schema->parameters[0], data[i]);
+         toAnything((char*)result->data + width * i, schema->parameters[0], data[i]);
     }
-    return result;
+
+    return (void*)result;
 }
 
-// Specialization for std::vector<bool>
-template<>
-Anything* toAnything<bool>(const Schema* schema, const std::vector<bool>& data) {
-    checkSchemaType(schema, MORLOC_BOOL_ARRAY);
-    // std::vector<bool> is a special case that does not guarantee contiguous
-    // memory, so we have to copy here
-    Anything* result = array_bool_data_(data.size());
-    for (size_t i = 0; i < data.size(); ++i) {
-        result->data.bool_arr[i] = data[i];
-    }
-    return result;
+// Specialization for string
+void* toAnything(void* dest, const Schema* schema, const std::string& data) {
+    // Create a vector<uint8_t> from the string's data without copying
+    std::vector<uint8_t> vec(
+        reinterpret_cast<const uint8_t*>(data.data()),
+        reinterpret_cast<const uint8_t*>(data.data() + data.size())
+    );
+
+    // Move the vector into the function call
+    return toAnything(dest, schema, std::move(vec));
 }
 
-// Specialization for const char*, i.e., binary
-Anything* toAnything(const Schema* schema, const std::vector<char>& data) {
-    checkSchemaType(schema, MORLOC_BINARY);
-    Anything* result = new Anything;
-    result->type = MORLOC_BINARY;
-    result->size = data.size();
-    result->data.char_arr = const_cast<char*>(data.data());
-    return result;
-}
+void* toAnything(void* dest, const Schema* schema, const char* data) {
+    std::vector<uint8_t> vec(
+        reinterpret_cast<const uint8_t*>(data),
+        reinterpret_cast<const uint8_t*>(data) + strlen(data)
+    );
 
-// Specialization for std::vector<int>
-template<>
-Anything* toAnything<int>(const Schema* schema, const std::vector<int>& data) {
-    checkSchemaType(schema, MORLOC_INT_ARRAY);
-    Anything* result = new Anything;
-    result->type = MORLOC_INT_ARRAY;
-    result->size = data.size();
-    result->data.int_arr = const_cast<int*>(data.data());
-    return result;
-}
-
-// Specialization for std::vector<double>
-template<>
-Anything* toAnything<double>(const Schema* schema, const std::vector<double>& data) {
-    checkSchemaType(schema, MORLOC_FLOAT_ARRAY);
-    Anything* result = new Anything;
-    result->type = MORLOC_FLOAT_ARRAY;
-    result->size = data.size();
-    result->data.float_arr = const_cast<double*>(data.data());
-    return result;
+    // Move the vector into the function call
+    return toAnything(dest, schema, std::move(vec));
 }
 
 // Specialization for std::tuple
 template<typename... Args>
-Anything* toAnything(const Schema* schema, const std::tuple<Args...>& data) {
-    checkSchemaType(schema, MORLOC_TUPLE);
-    return createTupleAnythingHelper(schema, data, std::index_sequence_for<Args...>{});
+void* toAnything(void* dest, const Schema* schema, const std::tuple<Args...>& data) {
+    return createTupleAnythingHelper(dest, schema, data, std::index_sequence_for<Args...>{});
 }
 
 // Helper function for tuple creation
 template<typename Tuple, size_t... Is>
-Anything* createTupleAnythingHelper(const Schema* schema, const Tuple& data, std::index_sequence<Is...>) {
-    Anything* result = tuple_data_(sizeof...(Is));
+void* createTupleAnythingHelper(void* dest, const Schema* schema, const Tuple& data, std::index_sequence<Is...>) {
+    if(!dest){
+        dest = tuple_data_(schema->parameters, schema->size, schema->width);
+    }
+
     (void)std::initializer_list<int>{(
-        result->data.obj_arr[Is] = toAnything(schema->parameters[Is], std::get<Is>(data)),
+        toAnything((char*)dest + schema->offsets[Is], schema->parameters[Is], std::get<Is>(data)),
         0
     )...};
-    return result;
+    return dest;
 }
 
 
-bool fromAnything(const Schema* schema, const Anything* data, bool* dumby = nullptr) {
-    return data->data.bool_val;
+
+template<typename Primitive>
+Primitive fromAnything(const Schema* schema, const void* data, Primitive* dumby = nullptr) {
+    return *(Primitive*)data;
 }
 
-double fromAnything(const Schema* schema, const Anything* data, double* dumby = nullptr) {
-    return data->data.double_val;
-}
-
-int fromAnything(const Schema* schema, const Anything* data, int* dumby = nullptr) {
-    return data->data.int_val;
-}
-
-std::string fromAnything(const Schema* schema, const Anything* data, std::string* dumby = nullptr) {
-    return std::string(data->data.char_arr);
-}
-
-
-std::vector<char> fromAnything(const Schema* schema, const Anything* data, std::vector<char>* dumby = nullptr) {
-    return std::vector<char>(const_cast<char*>(data->data.char_arr), 
-                             const_cast<char*>(data->data.char_arr) + data->size);
-}
-
-std::vector<bool> fromAnything(const Schema* schema, const Anything* data, std::vector<bool>* dumby = nullptr) {
-    return std::vector<bool>(const_cast<bool*>(data->data.bool_arr), 
-                             const_cast<bool*>(data->data.bool_arr) + data->size);
-}
-
-std::vector<int> fromAnything(const Schema* schema, const Anything* data, std::vector<int>* dumby = nullptr) {
-    return std::vector<int>(const_cast<int*>(data->data.int_arr), 
-                             const_cast<int*>(data->data.int_arr) + data->size);
-}
-
-std::vector<double> fromAnything(const Schema* schema, const Anything* data, std::vector<double>* dumby = nullptr) {
-    return std::vector<double>(const_cast<double*>(data->data.float_arr), 
-                             const_cast<double*>(data->data.float_arr) + data->size);
+std::string fromAnything(const Schema* schema, const void* data, std::string* dumby = nullptr) {
+    Array* array = (Array*)data;
+    return std::string((char*)array->data, array->size);
 }
 
 template<typename T>
-std::vector<T> fromAnything(const Schema* schema, const Anything* anything, std::vector<T>* dumby = nullptr) {
-    checkSchemaType(schema, MORLOC_ARRAY); // Ensure schema type matches for an array
-    std::vector<T> result;
-    result.reserve(anything->size); // Reserve space based on the size in Anything
+std::vector<T> fromAnything(const Schema* schema, const void* data, std::vector<T>* dumby = nullptr){
+  Array* array = (Array*) data;
 
-    const Schema* element_schema = schema->parameters[0]; // Get the schema for the element type
-    T* elemental_dumby = nullptr;
+  // Directly use memory for constant width primitives arrays
+  switch(schema->parameters[0]->type){
+    case MORLOC_NIL:
+    case MORLOC_BOOL:
+    case MORLOC_SINT8:
+    case MORLOC_SINT16:
+    case MORLOC_SINT32:
+    case MORLOC_SINT64:
+    case MORLOC_UINT8:
+    case MORLOC_UINT16:
+    case MORLOC_UINT32:
+    case MORLOC_UINT64:
+    case MORLOC_FLOAT32:
+    case MORLOC_FLOAT64:
+      std::vector<T> result((T*)array->data, (T*)array->data + array->size);
+      return result;
+  }
 
-    // Loop over elements in "Anything** obj_arr" and call fromAnything on each
-    for (size_t i = 0; i < anything->size; ++i) {
-        result.push_back(fromAnything(element_schema, anything->data.obj_arr[i], elemental_dumby));
-    }
-
-    return result;
+  // Other data types require some rearrangement
+  std::vector<T> result;
+  result.reserve(array->size);
+  const Schema* elemental_schema = schema->parameters[0];
+  T* elemental_dumby = nullptr;
+  for(size_t i = 0; i < result.size(); i++){
+    result.push_back(fromAnything(elemental_schema, (char*)array->data + i * elemental_schema->width, elemental_dumby));
+  }
+  return result;
 }
 
+
 template<typename... Args>
-std::tuple<Args...> fromAnything(const Schema* schema, const Anything* anything, std::tuple<Args...>* = nullptr) {
-    checkSchemaType(schema, MORLOC_TUPLE);
-    return fromTupleAnythingHelper(schema, anything, std::index_sequence_for<Args...>{}, static_cast<std::tuple<Args...>*>(nullptr));
+std::tuple<Args...> fromAnything(const Schema* schema, const void* anything, std::tuple<Args...>* = nullptr) {
+    return fromTupleAnythingHelper(
+      schema,
+      anything,
+      std::index_sequence_for<Args...>{},
+      static_cast<std::tuple<Args...>*>(nullptr)
+    );
 }
 
 // Helper function for tuple conversion
 template<typename Tuple, size_t... Is>
-Tuple fromTupleAnythingHelper(const Schema* schema, const Anything* anything, std::index_sequence<Is...>, Tuple* = nullptr) {
+Tuple fromTupleAnythingHelper(
+  const Schema* schema,
+  const void* anything,
+  std::index_sequence<Is...>,
+  Tuple* = nullptr
+) {
     return Tuple(fromAnything(schema->parameters[Is], 
-                              anything->data.obj_arr[Is], 
+                              (char*)anything + schema->offsets[Is], 
                               static_cast<std::tuple_element_t<Is, Tuple>*>(nullptr))...);
 }
+
 
 
 template<typename T>
@@ -215,22 +183,20 @@ std::vector<char> mpk_pack(const T& data, const std::string& schema_str) {
     Schema* schema = parse_schema(&schema_ptr);
 
     // Create Anything* from schema and data
-    Anything* data_obj_1 = toAnything(schema, data);
+    void* data_obj_1 = toAnything(NULL, schema, data);
     char* msgpack_data = nullptr;
     size_t msg_size = 0;
 
     int pack_result = pack(data_obj_1, schema_str.c_str(), &msgpack_data, &msg_size);
     if (pack_result != 0) {
-        free_schema(schema);
-        free_parsed_data(data_obj_1);
+        // free_schema(schema);
         throw std::runtime_error("Packing failed");
     }
 
     std::vector<char> result(msgpack_data, msgpack_data + msg_size);
 
-    free_schema(schema);
-    // free_parsed_data(data_obj_1);
-    free(msgpack_data);
+    // free_schema(schema);
+    // TODO: free the memories
 
     return result;
 }
@@ -240,16 +206,16 @@ T mpk_unpack(const std::vector<char>& packed_data, const std::string& schema_str
     const char* schema_ptr = schema_str.c_str();
     Schema* schema = parse_schema(&schema_ptr);
 
-    Anything* data_obj_2 = nullptr;
+    void* data_obj_2 = nullptr;
     int unpack_result = unpack(packed_data.data(), packed_data.size(), schema_str.c_str(), &data_obj_2);
     if (unpack_result != 0) {
-        free_schema(schema);
+        // free_schema(schema);
         throw std::runtime_error("Unpacking failed");
     }
 
     T x = fromAnything(schema, data_obj_2, static_cast<T*>(nullptr));
 
-    free_schema(schema);
+    // free_schema(schema);
     // free_parsed_data(data_obj_2);
 
     return x;

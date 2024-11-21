@@ -70,6 +70,7 @@ std::string g_tmpdir;
 #define PACKET_FORMAT_JSON     0x00
 #define PACKET_FORMAT_MSGPACK  0x01
 #define PACKET_FORMAT_TEXT     0x02
+#define PACKET_FORMAT_DATA     0x03 // raw binary data
 
 #define PACKET_COMPRESSION_NONE  0x00 // uncompressed
 #define PACKET_ENCRYPTION_NONE   0x00 // unencrypted
