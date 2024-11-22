@@ -12,7 +12,6 @@ import struct
 import json
 import traceback
 import tempfile
-import mmap
 
 # AUTO include imports start
 # <<<BREAK>>>
@@ -33,11 +32,11 @@ PACKET_TYPE_DEL  = 0x06
 
 PACKET_SOURCE_MESG = 0x00 # the message contains the data
 PACKET_SOURCE_FILE = 0x01 # the message is a path to a file of data
-PACKET_SOURCE_SMEM = 0x02 # the message is an index in a shared memory pool
 
 PACKET_FORMAT_JSON    = 0x00
 PACKET_FORMAT_MSGPACK = 0x01
 PACKET_FORMAT_TEXT    = 0x02
+PACKET_FORMAT_DATA    = 0x03
 
 PACKET_COMPRESSION_NONE = 0x00 # uncompressed
 
@@ -48,7 +47,7 @@ PACKET_ENCRYPTION_NONE  = 0x00 # unencrypted
 
 MSGPACK_TYPE_TUPLE = 0
 
-# These three parameters describe the retru times for a pool connection to
+# These three parameters describe the retry times for a pool connection to
 # open. The default parameters sum to a 4s max wait, which is well beyond what
 # it should take for any interpreter to fire up.
 INITIAL_RETRY_DELAY = 0.001
@@ -61,6 +60,11 @@ BUFFER_SIZE = 4096
 # Resources that need to be cleaned up when the session ends
 resources = {"pools": {}, "files": []}
 
+opts = {
+    "no-start" : False,
+    "leave-open" : False,
+    "wd" : "",
+}
 
 class Pool:
     def __init__(self, lang, process, pipe, stderr_queue, exit_status_queue):
@@ -83,8 +87,10 @@ def hex(xs: bytes) -> str:
     return ' '.join('{:02x}'.format(x) for x in xs)
 
 def cleanup():
+    if opts["leave-open"] or opts["no-start"]:
+        return None
+
     pools = resources["pools"]
-    files = resources["files"]
 
     _log(f"Cleaning up")
     for pool in pools.values():
@@ -101,10 +107,6 @@ def cleanup():
         except:
             # this socket file may have been cleaned up by the pool
             pass
-
-    # close memory mapped files that are given as arguments (i.e., NOT deleted)
-    for file in files:
-        file.close()
 
 
 def clean_exit(exit_code, msg=""):
@@ -188,8 +190,8 @@ def client(pool, message):
     delay_time = INITIAL_RETRY_DELAY
     _log(f"contacting {pool.lang} pool ...")
     for attempt in range(MAX_RETRIES):
-        # check to see if the pool has died
-        if not pool.exit_status_queue.empty():
+        # check if the pool has died if we started it (else we haven't eyes)
+        if not opts["no-start"] and not pool.exit_status_queue.empty():
             exit_status = pool.exit_status_queue.get()
             print(
                 f"{pool.lang} pool ended early with exit status {exit_status} and the error message:",
@@ -247,51 +249,58 @@ def client(pool, message):
     return data
 
 
-def start_language_server(lang, cmd, pipe, tmpdir):
-    # Create a queue to store stderr output
-    stderr_queue = queue.Queue()
+def start_language_server(lang, cmd, pipe):
 
-    # Create a queue to store the exit status
-    exit_status_queue = queue.Queue()
+    if not opts["no-start"]:
+        # Create a queue to store stderr output
+        stderr_queue = queue.Queue()
 
-    # Function to read stderr and put it in the queue
-    def read_stderr(process, queue):
-        for line in process.stderr:
-            queue.put(line)
-        process.stderr.close()
+        # Create a queue to store the exit status
+        exit_status_queue = queue.Queue()
 
-    # Function to monitor process and get exit status
-    def monitor_process(process, queue):
-        exit_status = process.wait()
-        queue.put(exit_status)
+        # Function to read stderr and put it in the queue
+        def read_stderr(process, queue):
+            for line in process.stderr:
+                queue.put(line)
+            process.stderr.close()
 
-    # Start the language server in the background
-    _log(f"Starting server with {cmd} ...")
-    process = subprocess.Popen(
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
-    )
-    _log(f"Server started")
+        # Function to monitor process and get exit status
+        def monitor_process(process, queue):
+            exit_status = process.wait()
+            queue.put(exit_status)
 
-    # Start thread to read stderr
-    stderr_thread = threading.Thread(target=read_stderr, args=(process, stderr_queue))
-    stderr_thread.daemon = True
-    stderr_thread.start()
+        # Start the language server in the background
+        _log(f"Starting server with {cmd} ...")
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+        )
+        _log(f"Server started")
 
-    # Start thread to monitor process and get exit status
-    monitor_thread = threading.Thread(
-        target=monitor_process, args=(process, exit_status_queue)
-    )
-    monitor_thread.daemon = True
-    monitor_thread.start()
+        # Start thread to read stderr
+        stderr_thread = threading.Thread(target=read_stderr, args=(process, stderr_queue))
+        stderr_thread.daemon = True
+        stderr_thread.start()
+
+        # Start thread to monitor process and get exit status
+        monitor_thread = threading.Thread(
+            target=monitor_process, args=(process, exit_status_queue)
+        )
+        monitor_thread.daemon = True
+        monitor_thread.start()
+    else:
+        process = None
+        stderr_queue = None
+        exit_status_queue = None
 
     pool = Pool(lang, process, pipe, stderr_queue, exit_status_queue)
 
     resources["pools"][lang] = pool
 
-    # ping the server, make sure it is up and going
-    _log(f"Pinging the {lang} server ...")
-    pong = client(pool, _make_ping_packet())
-    _log(f"Pong from {lang} - server is good (len(pong) == {len(pong)})")
+    if not opts["no-start"]:
+        # ping the server, make sure it is up and going
+        _log(f"Pinging the {lang} server ...")
+        pong = client(pool, _make_ping_packet())
+        _log(f"Pong from {lang} - server is good (len(pong) == {len(pong)})")
 
     return pool
 
@@ -351,8 +360,7 @@ def print_return(data, schema_str):
         outfile = sys.stdout
     elif cmd_type == PACKET_TYPE_DATA and status == PACKET_STATUS_FAIL:
         if cmd_format == PACKET_FORMAT_TEXT:
-            errmsg = mp.unpack(data[data_start: ], "s")
-            clean_exit(1, errmsg)
+            clean_exit(1, data[data_start: ])
         else:
             clean_exit(1, "Failed to read errmsg, pools should return erros as text")
     else:
@@ -368,14 +376,7 @@ def print_return(data, schema_str):
         with open(filename, 'rb') as file:
             content = file.read()
         os.unlink(filename)  # Delete the temporary file
-    elif cmd_source == PACKET_SOURCE_SMEM:
-        filename = data[data_start:].decode()
-        try:
-            with open(filename, 'rb') as file:
-                with mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                    content = mm.read()
-        except (IOError, OSError) as e:
-            clean_exit(1, f"Error processing memory-mapped file: {e}")
+
 
     if cmd_format == PACKET_FORMAT_JSON:
         print(content, file=outfile)
@@ -480,26 +481,15 @@ def handle_json_file_argument(filename, schema):
         return _make_data(data)
     else:
         msgpack_filename = os.path.splitext(filename)[0] + ".mpk"
-
         with open(msgpack_filename, "wb") as fh:
-            fh.truncate(len(data))
-
-        with open(msgpack_filename, "r+b") as fh:
-            mm = mmap.mmap(fh.fileno(), len(data), flags=mmap.MAP_SHARED, prot=mmap.PROT_WRITE)
-            mm[:] = data
-            mm.flush()
-            resources["files"].append(mm)
-
-        return _make_data(msgpack_filename.encode("utf8"), src=PACKET_SOURCE_SMEM)
+            fh.write(data)
+        return _make_data(msgpack_filename.encode("utf8"), src=PACKET_SOURCE_FILE)
 
 def handle_msgpack_file_argument(filename):
     """
     Read a messagepack file argument
     """
-    with open(filename, "rb") as fh:
-        mm = mmap.mmap(fh.fileno(), 0)
-        resources["files"].append(mm)
-        return _make_data(filename.encode("utf8"), src = PACKET_SOURCE_SMEM)
+    return _make_data(filename.encode("utf8"), src = PACKET_SOURCE_FILE)
 
 def prepare_call_packet(mid, args, schemas):
     arg_msgs = []
@@ -557,7 +547,7 @@ def run_command(mid, args, pool_lang, sockets, arg_schema, return_schema):
         # Start language servers
         for (lang, cmd, pipe) in sockets:
             try:
-                start_language_server(lang, cmd, pipe, tmpdir)
+                start_language_server(lang, cmd, pipe)
             except Exception as e:
                 _log(trace(f"Failed to start {lang} language server: {str(e)}"))
                 raise  # Re-raise the exception to be caught in the outer try block
@@ -588,22 +578,85 @@ def run_command(mid, args, pool_lang, sockets, arg_schema, return_schema):
 
 
 
-def dispatch(cmd, args, tmpdir):
+def dispatch(cmd, args):
     if cmd in ["-h", "--help", "-?", "?"]:
         usage()
     else:
-        command_table[cmd](args, tmpdir)
+        command_table[cmd](args)
+
+
+def opt_name(short="", long=""):
+    name = "<wtf>"
+    if short and long:
+        name = f"-{short}/--{long}"
+    elif short:
+        name = f"-{short}"
+    elif long:
+        name = f"--{long}"
+    return name
+
+
+def get_opt(args, short="", long=""):
+    opt_arg = "";
+    for (i, arg) in enumerate(args):
+        if arg == "--":
+            return "" 
+        elif (short and arg == "-" + short) or (long and arg == "--" + long):
+            try:
+                opt_arg = args[i+1]
+            except IndexError:
+                errmsg = f"Expected one argument to be passed to {opt_name(short, long)} but none found"
+                print(errmsg, file=sys.stderr)
+                sys.exit(1)
+            del args[i:i+2]
+            return opt_arg
+    return opt_arg
+
+def get_flag(args, short="", long=""):
+    for (i, arg) in enumerate(args):
+        if arg == "--":
+            return False
+        elif (short and arg == "-" + short) or (long and arg == "--" + long):
+            del args[i]
+            return True
+    return False
+
+def validate_args(args):
+    for arg in args:
+        if arg[0] == "-":
+            errmsg = f"Found unsupported argument {arg}"
+            print(errmsg, file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 1:
-        usage()
-    else:
-        cmd = sys.argv[1]
-        args = sys.argv[2:]
 
+    cli_args = sys.argv
+
+    if len(cli_args) == 1:
+        usage()
+
+    # -d <dirname> use the given directory, rather than a temporary one
+    opts["wd"] = get_opt(cli_args, short="d")
+
+    # --no-start - do not start processes, only call existing ones
+    opts["no-start"] = get_flag(cli_args, long="no-start")
+
+    # --leave-open - do not delete pipes and close lang servers on cleanup
+    opts["leave-open"] = get_flag(cli_args, long="leave-open")
+
+    validate_args(cli_args)
+
+    cmd = cli_args[1]
+    cmd_args = cli_args[2:]
+
+    if opts["wd"]:
+        os.makedirs(opts["wd"], exist_ok=True)
+        dispatch(cmd, cmd_args)
+    else:
         base_dir = os.path.join(MORLOC_HOME, "tmp")
         os.makedirs(base_dir, exist_ok=True)
 
         with tempfile.TemporaryDirectory(dir=base_dir) as tmpdir:
-            dispatch(cmd, args, tmpdir)
+            dispatch(cmd, cmd_args)
+_
