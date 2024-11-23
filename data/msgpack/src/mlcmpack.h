@@ -1133,7 +1133,7 @@ Schema* uint_schema(size_t width) {
       case 8:
         return create_schema_with_params(MORLOC_UINT64, width, 0, NULL, NULL);
       default:
-        fprintf(stderr, "Integers may only have widths of 1, 2, 4, or 8 bytes; found %uz", width);
+        fprintf(stderr, "Integers may only have widths of 1, 2, 4, or 8 bytes; found %lu", width);
         return NULL;
     }
 }
@@ -1149,7 +1149,7 @@ Schema* sint_schema(size_t width) {
       case 8:
         return create_schema_with_params(MORLOC_SINT64, width, 0, NULL, NULL);
       default:
-        fprintf(stderr, "Integers may only have widths of 1, 2, 4, or 8 bytes; found %uz", width);
+        fprintf(stderr, "Integers may only have widths of 1, 2, 4, or 8 bytes; found %lu", width);
         return NULL;
     }
 }
@@ -1161,7 +1161,7 @@ Schema* float_schema(size_t width) {
       case 8:
         return create_schema_with_params(MORLOC_FLOAT64, width, 0, NULL, NULL);
       default:
-        fprintf(stderr, "Floats may only have widths of 4 or 8 bytes, found %uz\n", width);
+        fprintf(stderr, "Floats may only have widths of 4 or 8 bytes, found %lu\n", width);
         return NULL;
     }
 }
@@ -1334,7 +1334,6 @@ char* parse_schema_key(const char** schema_ptr){
 }
 
 Schema* parse_schema(const char** schema_ptr){
-  Schema* schema = 0;
   Schema** params;
   char c = **schema_ptr;
   (*schema_ptr)++;
@@ -1383,6 +1382,40 @@ Schema* parse_schema(const char** schema_ptr){
   return NULL;
 }
 
+
+void free_schema(Schema* schema) {
+    if (schema == NULL) {
+        return;
+    }
+
+    // Free the offsets array
+    if (schema->offsets != NULL) {
+        free(schema->offsets);
+    }
+
+    // Free the parameters and their contents
+    if (schema->parameters != NULL) {
+        for (size_t i = 0; i < schema->size; i++) {
+            free_schema(schema->parameters[i]);
+        }
+        free(schema->parameters);
+    }
+
+    // Free the keys and their contents
+    if (schema->keys != NULL) {
+        for (size_t i = 0; i < schema->size; i++) {
+            if (schema->keys[i] != NULL) {
+                free(schema->keys[i]);
+            }
+        }
+        free(schema->keys);
+    }
+
+    // Finally, free the schema itself
+    free(schema);
+}
+
+
 //  The main function for writing MessagePack
 int pack_data(
   const void* mlc,           // input data structure
@@ -1393,7 +1426,6 @@ int pack_data(
   mpack_tokbuf_t* tokbuf
 ) {
     mpack_token_t token;
-    int result;
     Array* array;
 
     switch (schema->type) {
@@ -1453,7 +1485,6 @@ int pack_data(
 
     size_t array_length;
     size_t array_width;
-    size_t element_idx;
     Schema* array_schema;
 
     switch(schema->type){
@@ -1488,6 +1519,20 @@ int pack_data(
               tokbuf
             );
         }
+        break;
+      case MORLOC_NIL:
+      case MORLOC_BOOL:
+      case MORLOC_SINT8:
+      case MORLOC_SINT16:
+      case MORLOC_SINT32:
+      case MORLOC_SINT64:
+      case MORLOC_UINT8:
+      case MORLOC_UINT16:
+      case MORLOC_UINT32:
+      case MORLOC_UINT64:
+      case MORLOC_FLOAT32:
+      case MORLOC_FLOAT64:
+        // no further processing needed
         break;
     }
 
@@ -1736,7 +1781,6 @@ int parse_obj(void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const cha
 
 int unpack_with_schema(const char* mgk, size_t mgk_size, const Schema* schema, void** mlcptr) {
     // Use the existing unpack_with_schema function, but adapt it to the new prototype
-    const char* buf = mgk;
     size_t buf_remaining = mgk_size;
 
     mpack_tokbuf_t tokbuf;
