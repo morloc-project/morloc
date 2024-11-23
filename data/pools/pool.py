@@ -40,6 +40,7 @@ PACKET_SOURCE_SMEM = 0x02 # the message is an index in a shared memory pool
 PACKET_FORMAT_JSON    = 0x00
 PACKET_FORMAT_MSGPACK = 0x01
 PACKET_FORMAT_TEXT    = 0x02
+PACKET_FORMAT_DATA    = 0x03
 
 PACKET_COMPRESSION_NONE = 0x00 # uncompressed
 
