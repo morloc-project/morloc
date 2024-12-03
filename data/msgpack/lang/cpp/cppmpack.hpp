@@ -136,7 +136,7 @@ std::vector<T> fromAnything(const Schema* schema, const void* data, std::vector<
     case MORLOC_UINT64:
     case MORLOC_FLOAT32:
     case MORLOC_FLOAT64:
-      std::vector<T> result((T*)array->data, (T*)array->data + array->size);
+      std::vector<T> result((T*)(array->data), (T*)(array->data) + array->size);
       return result;
   }
 
@@ -145,7 +145,7 @@ std::vector<T> fromAnything(const Schema* schema, const void* data, std::vector<
   result.reserve(array->size);
   const Schema* elemental_schema = schema->parameters[0];
   T* elemental_dumby = nullptr;
-  for(size_t i = 0; i < result.size(); i++){
+  for(size_t i = 0; i < array->size; i++){
     result.push_back(fromAnything(elemental_schema, (char*)array->data + i * elemental_schema->width, elemental_dumby));
   }
   return result;
@@ -170,8 +170,8 @@ Tuple fromTupleAnythingHelper(
   std::index_sequence<Is...>,
   Tuple* = nullptr
 ) {
-    return Tuple(fromAnything(schema->parameters[Is], 
-                              (char*)anything + schema->offsets[Is], 
+    return Tuple(fromAnything(schema->parameters[Is],
+                              (char*)anything + schema->offsets[Is],
                               static_cast<std::tuple_element_t<Is, Tuple>*>(nullptr))...);
 }
 
@@ -180,14 +180,15 @@ Tuple fromTupleAnythingHelper(
 template<typename T>
 std::vector<char> mpk_pack(const T& data, const std::string& schema_str) {
     const char* schema_ptr = schema_str.c_str();
-    Schema* schema = parse_schema(&schema_ptr);
+    const Schema* schema = parse_schema(&schema_ptr);
 
     // Create Anything* from schema and data
     void* data_obj_1 = toAnything(NULL, schema, data);
-    char* msgpack_data = nullptr;
+    char* msgpack_data = NULL;
     size_t msg_size = 0;
 
     int pack_result = pack(data_obj_1, schema_str.c_str(), &msgpack_data, &msg_size);
+
     if (pack_result != 0) {
         // free_schema(schema);
         throw std::runtime_error("Packing failed");
@@ -204,10 +205,10 @@ std::vector<char> mpk_pack(const T& data, const std::string& schema_str) {
 template<typename T>
 T mpk_unpack(const std::vector<char>& packed_data, const std::string& schema_str) {
     const char* schema_ptr = schema_str.c_str();
-    Schema* schema = parse_schema(&schema_ptr);
+    const Schema* schema = parse_schema(&schema_ptr);
 
     void* data_obj_2 = nullptr;
-    int unpack_result = unpack(packed_data.data(), packed_data.size(), schema_str.c_str(), &data_obj_2);
+    int unpack_result = unpack_with_schema(packed_data.data(), packed_data.size(), schema, &data_obj_2);
     if (unpack_result != 0) {
         // free_schema(schema);
         throw std::runtime_error("Unpacking failed");

@@ -23,7 +23,8 @@ extra-source-files:
   # msgpack
   - data/msgpack/src/mlcmpack.h
   # msgpack langs
-  - data/msgpack/lang/py/pympack.py
+  - data/msgpack/lang/py/pympack.c
+  - data/msgpack/lang/py/setup.py
   - data/msgpack/lang/r/mpackr.c
   - data/msgpack/lang/cpp/cppmpack.hpp
 
