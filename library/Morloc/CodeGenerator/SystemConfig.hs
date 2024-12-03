@@ -16,7 +16,7 @@ module Morloc.CodeGenerator.SystemConfig
 ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.DataFiles (rSocketLib, pympack, msgpackSource, rmpack, cppmpack)
+import Morloc.DataFiles (rSocketLib, pympack, pympackSetup, pympackMakefile, msgpackSource, rmpack, cppmpack)
 
 import qualified Morloc.Data.Text as MT
 import qualified Data.Text.IO as TIO
@@ -87,10 +87,22 @@ configureAll verbose force config = do
   say "Configuring C++ MessagePack header"
   TIO.writeFile (includeDir </> fst cppmpack) (snd cppmpack)
 
-  say "Configuring python MessagePack libraries"
-  let (pympackFilename, pympackCode) = pympack
-  let pymackPath = optDir </> pympackFilename
-  TIO.writeFile pymackPath pympackCode
+  let pysoPath = optDir </> "pympack"
+  pysoExists <- doesFileExist pysoPath
+  unless (pysoExists && not force) $ do
+    say "Configuring python MessagePack libraries"
+    let (pympackFilename, pympackCode) = pympack
+    let (pympackSetupFilename, pympackSetupCode) = pympackSetup
+    let (pympackMakefileFilename, pympackMakefileCode) = pympackMakefile
+    let pymackPath = optDir </> pympackFilename
+    let pymackSetupPath = optDir </> pympackSetupFilename
+    let pymackMakePath = optDir </> pympackMakefileFilename
+
+    TIO.writeFile pymackPath pympackCode
+    TIO.writeFile pymackSetupPath pympackSetupCode
+    TIO.writeFile pymackMakePath pympackMakefileCode
+
+    runCommand "Generating pympack" ("make -C " <> optDir <> " -f " <> pymackMakePath)
 
 
   say "Configuring R MessagePack libraries"

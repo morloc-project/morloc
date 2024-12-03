@@ -17,6 +17,8 @@ module Morloc.DataFiles
   , msgpackSource
   , rmpack
   , pympack
+  , pympackSetup
+  , pympackMakefile
   , cppmpack
   ) where
 
@@ -55,8 +57,16 @@ rmpack = ("mpackr.c", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/r/mpac
 cppmpack :: (String, Text)
 cppmpack = ("cppmpack.hpp", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/cpp/cppmpack.hpp"))
 
--- A python code defining the python binding to the mlcmpack MessagePack library
--- imported into python pools
+-- A Python C API program binding to the mlcmpack MessagePack library
+-- will be built as a module and imported into python pools and the nexus
 -- requires libmlcmpack.so
 pympack :: (String, Text)
-pympack = ("pympack.py", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/py/pympack.py"))
+pympack = ("pympack.c", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/py/pympack.c"))
+
+-- A setup script for building pympack.c
+pympackSetup :: (String, Text)
+pympackSetup = ("setup.py", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/py/setup.py"))
+
+-- A Makefile for building pympack.c
+pympackMakefile :: (String, Text)
+pympackMakefile = ("Makefile", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/py/Makefile"))
