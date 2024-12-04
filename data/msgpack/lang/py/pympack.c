@@ -366,19 +366,19 @@ void* toAnything(void* dest, Schema* schema, PyObject* obj) {
             break;
 
         case MORLOC_TUPLE:
-            if (!PyTuple_Check(obj)) {
-                PyErr_Format(PyExc_TypeError, "Expected tuple for MORLOC_TUPLE, but got %s", Py_TYPE(obj)->tp_name);
+            if (!PyTuple_Check(obj) && !PyList_Check(obj)) {
+                PyErr_Format(PyExc_TypeError, "Expected tuple or list for MORLOC_TUPLE, but got %s", Py_TYPE(obj)->tp_name);
                 goto error;
             }
-
+      
             {
-                Py_ssize_t size = PyTuple_Size(obj);
+                Py_ssize_t size = PyTuple_Check(obj) ? PyTuple_Size(obj) : PyList_Size(obj);
                 if ((size_t)size != schema->size) {
-                    PyErr_SetString(PyExc_ValueError, "Tuple size mismatch");
+                    PyErr_SetString(PyExc_ValueError, "Tuple/List size mismatch");
                     goto error;
                 }
                 for (Py_ssize_t i = 0; i < size; ++i) {
-                    PyObject* item = PyTuple_GetItem(obj, i);
+                    PyObject* item = PyTuple_Check(obj) ? PyTuple_GetItem(obj, i) : PyList_GetItem(obj, i);
                     toAnything((char*)dest + schema->offsets[i], schema->parameters[i], item);
                 }
             }
@@ -448,20 +448,30 @@ static PyObject* py_to_mesgpack(PyObject* self, PyObject* args) {
   const char* schema_str;
 
   if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
+      PyErr_SetString(PyExc_ValueError, "py_to_mesgpack: Failed to parse arguments");
       return NULL;
   }
 
   const Schema* schema = parse_schema(&schema_str);
+  if (!schema) {
+      PyErr_SetString(PyExc_ValueError, "py_to_mesgpack: Failed to parse schema");
+      return NULL;
+  }
 
   void* voidstar = toAnything(NULL, schema, obj);
+  if (!voidstar && PyErr_Occurred()) {
+      free_schema(schema);
+      PyErr_SetString(PyExc_ValueError, "py_to_mesgpack: Failed to yield voidstar");
+      return NULL;
+  }
 
   char* msgpck_data = NULL;
   size_t msgpck_data_len = 0;
 
   int exitcode = pack_with_schema(voidstar, schema, &msgpck_data, &msgpck_data_len);
-
   if (exitcode != 0 || !msgpck_data) {
-      PyErr_SetString(PyExc_RuntimeError, "Packing failed");
+      PyErr_SetString(PyExc_RuntimeError, "py_to_mesgpack: Packing failed");
+      free(msgpck_data);
       return NULL;
   }
 
