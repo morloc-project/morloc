@@ -512,12 +512,75 @@ SEXP from_mesgpack(SEXP r_packed, SEXP r_schema_str) {
 }
 
 
+SEXP r_to_mesgpack(SEXP r_obj, SEXP r_schema_str){
+    PROTECT(r_obj);
+    PROTECT(r_schema_str);
+    const char* schema_str = CHAR(STRING_ELT(r_schema_str, 0));
+    Schema* schema = parse_schema(&schema_str);
+
+    void* voidstar = to_voidstar(NULL, r_obj, schema);
+    if (!voidstar) {
+        UNPROTECT(2);
+        free_schema(schema);
+        error("Failed to convert R object to Anything");
+    }
+
+    char* packed_data = NULL;
+    size_t packed_size = 0;
+    int result = pack_with_schema(voidstar, schema, &packed_data, &packed_size);
+    if (result != 0 || !packed_data) {
+        UNPROTECT(2);
+        free_schema(schema);
+        error("Packing failed");
+    }
+
+    SEXP r_packed = PROTECT(allocVector(RAWSXP, packed_size));
+    memcpy(RAW(r_packed), packed_data, packed_size);
+
+    // Clean up
+    free(packed_data);
+    free_schema(schema);
+
+    UNPROTECT(3);
+    return r_packed;
+}
+
+SEXP mesgpack_to_r(SEXP r_mesgpack, SEXP r_schema_str){
+    PROTECT(r_mesgpack);
+    PROTECT(r_schema_str);
+    
+    const char* schema_str = CHAR(STRING_ELT(r_schema_str, 0));
+    Schema* schema = parse_schema(&schema_str);
+    if (!schema) {
+        UNPROTECT(2);
+        error("Failed to parse schema");
+    }
+
+    const char* packed_data = (const char*)RAW(r_mesgpack);
+    size_t packed_size = LENGTH(r_mesgpack);
+
+    void* voidstar = NULL;
+    int result = unpack_with_schema(packed_data, packed_size, schema, &voidstar);
+
+    SEXP obj = from_voidstar(voidstar, schema);
+    if (result != 0 || !packed_data) {
+        UNPROTECT(2);
+        free_schema(schema);
+        error("Packing failed");
+    }
+
+    UNPROTECT(2);
+    return obj;
+}
+
 void R_init_mlcmpack(DllInfo *info) {
     R_CallMethodDef callMethods[] = {
         {"to_voidstar", (DL_FUNC) &to_voidstar, 2},
         {"from_voidstar", (DL_FUNC) &from_voidstar, 2},
         {"to_mesgpack", (DL_FUNC) &to_mesgpack, 2},
         {"from_mesgpack", (DL_FUNC) &from_mesgpack, 2},
+        {"mesgpack_to_r", (DL_FUNC) &mesgpack_to_r, 2},
+        {"r_to_mesgpack", (DL_FUNC) &r_to_mesgpack, 2},
         {NULL, NULL, 0}
     };
 

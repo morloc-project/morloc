@@ -7,11 +7,11 @@ dyn.load("~/.morloc/lib/libsocketr.so")
 dyn.load("~/.morloc/lib/libmpackr.so")
 
 msgpack_pack <- function(obj, schema) {
-    .Call("_mlcmpack_r_pack", obj, schema)
+    .Call("r_to_mesgpack", obj, schema)
 }
 
 msgpack_unpack <- function(packed, schema) {
-    .Call("_mlcmpack_r_unpack", packed, schema)
+    .Call("mesgpack_to_r", packed, schema)
 }
 
 
@@ -30,7 +30,7 @@ PACKET_TYPE_DEL  <- 0x06
 
 PACKET_SOURCE_MESG <- 0x00 # the message contains the data
 PACKET_SOURCE_FILE <- 0x01 # the message is a path to a file of data
-PACKET_SOURCE_SMEM <- 0x02 # the message is an index in a shared memory pool
+PACKET_SOURCE_NXDB <- 0x02 # the message is a key to the nexus uses to access the data
 
 PACKET_FORMAT_JSON    <- 0x00
 PACKET_FORMAT_MSGPACK <- 0x01
@@ -176,11 +176,6 @@ future::plan(future::multicore)
       } else {
         abort("Unsupported data format")
       }
-    } else if (header$cmd[2] == PACKET_SOURCE_SMEM) {
-      filename <- rawToChar(key[data_start:length(key)])
-      mm <- mmap(file = filename, mode = char())
-      msgpack_unpack(mm[1:length(mm)], schema)
-
     } else if (header$cmd[2] == PACKET_SOURCE_FILE) {
       if(header$cmd[3] == PACKET_FORMAT_MSGPACK) {
         # return the value from a file
@@ -205,54 +200,22 @@ future::plan(future::multicore)
   if (length(value_raw) <= 65536 - 32) {
     return(make_data(value_raw))
   } else {
-    # Generate a temporary filename for the memory-mapped file
-    key <- tempfile(pattern = "r_", 
-                    tmpdir = global_state.tmpdir, 
-                    fileext = ".mmap")
 
-    .log(paste("Creating temporary memory-mapped file:", key))
+    key <- tempfile(pattern = "r_",
+                tmpdir = global_state.tmpdir,
+                fileext = "")
 
-    # Create an empty file on disk to serve as the backing store for the memory mapping
-    file.create(key)
-    
-    # Set file permissions to ensure it is readable by other processes
-    Sys.chmod(key, mode = "0644")  
+    .log(paste("Creating temporary file:", key))
 
-    # Establish a memory mapping of the created file in the process's address space
-    # This allows direct access to the file's contents as if they were in memory
-    #
-    # Write the packed data directly to the memory-mapped region
-    # This operation modifies the memory-mapped area, which is backed by the file on disk
-    m <- as.mmap(value_raw, mode = char(), file=key)
+    writeBin(value_raw, con=key)
 
-    # Asynchronously flush changes made to the memory-mapped region to disk.
-    # Returns immediately without waiting for completion; there is no guarantee 
-    # that all changes are flushed before subsequent accesses.
-    #
-    # WARNING: I *think* this is safe, the cached memory shouldn't be freed
-    # until the syncing is complete, so if another process accesses the file as
-    # a memory mapped file all data should be present. Are there edge cases
-    # where this may not be the case?
-    msync(m, flags=mmapFlags("MS_ASYNC"))
+    .log(paste("Wrote data to:", key))
 
-    # Unmap the specified memory region from this process's address space.
-    # This operation releases the mapping but does not guarantee that any changes
-    # made to the memory-mapped region are flushed to disk. The kernel may retain
-    # cached pages in memory, allowing other processes to access the most recent
-    # data. However, further access to this unmapped region will result in a 
-    # SIGSEGV signal if attempted.
-    munmap(m)
-
-    .log(paste("Wrote data to memory-mapped file:", key))
-
-    # Convert the filename to a raw vector for use in downstream processes
     key_raw <- charToRaw(key)
 
-    return(make_data(key_raw, src = PACKET_SOURCE_SMEM))
+    return(make_data(key_raw, src = PACKET_SOURCE_FILE))
   }
 }
-
-
 
 
 .morloc_foreign_call <- function(pool_pipe, manifold_id, arg_keys) {
