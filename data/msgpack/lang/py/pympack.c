@@ -4,14 +4,16 @@
 
 
 // Exported prototypes
-static PyObject* to_msgpack(PyObject* self, PyObject* args);
-static PyObject* from_msgpack(PyObject* self, PyObject* args);
+static PyObject* to_mesgpack(PyObject* self, PyObject* args);
+static PyObject* from_mesgpack(PyObject* self, PyObject* args);
 static PyObject* to_voidstar(PyObject* self, PyObject* args);
 static PyObject* from_voidstar(PyObject* self, PyObject* args);
+static PyObject* py_to_mesgpack(PyObject* self, PyObject* args);
+static PyObject* mesgpack_to_py(PyObject* self, PyObject* args);
 
 
 // convert voidstar to MessagePack
-static PyObject* to_msgpack(PyObject* self, PyObject* args) {
+static PyObject* to_mesgpack(PyObject* self, PyObject* args) {
     PyObject* voidstar_capsule;
     char* schema;
     char* msgpck_data = NULL;
@@ -37,10 +39,10 @@ static PyObject* to_msgpack(PyObject* self, PyObject* args) {
     }
 
     // TODO: avoid memory copying here
-    PyObject* msgpack_bytes = PyBytes_FromStringAndSize(msgpck_data, msgpck_data_len);
+    PyObject* mesgpack_bytes = PyBytes_FromStringAndSize(msgpck_data, msgpck_data_len);
     free(msgpck_data);
 
-    return msgpack_bytes;
+    return mesgpack_bytes;
 }
 
 
@@ -53,7 +55,7 @@ static void voidstar_destructor(PyObject *capsule) {
 }
 
 // convert MessagePack to voidstar
-static PyObject* from_msgpack(PyObject* self, PyObject* args) {
+static PyObject* from_mesgpack(PyObject* self, PyObject* args) {
     const char* msgpck_data;
     Py_ssize_t msgpck_data_len;
     const char* schema;
@@ -441,14 +443,73 @@ static PyObject* to_voidstar(PyObject* self, PyObject* args){
 }
 
 
+static PyObject* py_to_mesgpack(PyObject* self, PyObject* args) {
+  PyObject* obj;
+  const char* schema_str;
+
+  if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
+      return NULL;
+  }
+
+  const Schema* schema = parse_schema(&schema_str);
+
+  void* voidstar = toAnything(NULL, schema, obj);
+
+  char* msgpck_data = NULL;
+  size_t msgpck_data_len = 0;
+
+  int exitcode = pack_with_schema(voidstar, schema, &msgpck_data, &msgpck_data_len);
+
+  if (exitcode != 0 || !msgpck_data) {
+      PyErr_SetString(PyExc_RuntimeError, "Packing failed");
+      return NULL;
+  }
+
+  // TODO: avoid memory copying here
+  PyObject* mesgpack_bytes = PyBytes_FromStringAndSize(msgpck_data, msgpck_data_len);
+  free(msgpck_data);
+
+  // free voidstar, we shan't be needing it now
+
+  return mesgpack_bytes;
+}
+
+
+static PyObject* mesgpack_to_py(PyObject* self, PyObject* args) {
+    const char* msgpck_data;
+    Py_ssize_t msgpck_data_len;
+    const char* schema_str;
+    void* voidstar = NULL;
+
+    if (!PyArg_ParseTuple(args, "y#s", &msgpck_data, &msgpck_data_len, &schema_str)) {
+        return NULL;
+    }
+
+    const Schema* schema = parse_schema(&schema_str);
+
+    int exitcode = unpack_with_schema(msgpck_data, msgpck_data_len, schema, &voidstar);
+
+    PyObject* obj = fromAnything(schema, voidstar);
+    if (obj == NULL) {
+        PyErr_SetString(PyExc_TypeError, "fromAnything returned NULL");
+        return NULL;
+    }
+
+    free_schema(schema);
+
+    return obj;
+}
+
+
 static PyMethodDef Methods[] = {
-    {"to_msgpack",    to_msgpack,    METH_VARARGS, "Serialize a voidstar to MessagePack data"},
-    {"from_msgpack",  from_msgpack,  METH_VARARGS, "Deserialize MessagePack data to voidstar"},
+    {"to_mesgpack",    to_mesgpack,    METH_VARARGS, "Serialize a voidstar to MessagePack data"},
+    {"from_mesgpack",  from_mesgpack,  METH_VARARGS, "Deserialize MessagePack data to voidstar"},
     {"to_voidstar",   to_voidstar,   METH_VARARGS, "Convert python data to voidstar"},
     {"from_voidstar", from_voidstar, METH_VARARGS, "Convert voidstar to python data"},
+    {"py_to_mesgpack", py_to_mesgpack, METH_VARARGS, "Convert python data to mesgpack"},
+    {"mesgpack_to_py", mesgpack_to_py, METH_VARARGS, "Convert mesgpack to python data"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
-
 
 static struct PyModuleDef pympack = {
     PyModuleDef_HEAD_INIT,

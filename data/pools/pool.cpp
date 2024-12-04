@@ -6,10 +6,9 @@
 #include <algorithm> // for std::transform
 #include <stdexcept>
 #include <fstream>
-
-#include <sys/mman.h>    // For mmap
-#include <sys/stat.h>    // For mode constants
-#include <cstring>       // For memcpy
+#include <system_error>
+#include <sys/stat.h>
+#include <sys/mman.h>
 
 // needed for foreign interface
 #include <cstdlib>
@@ -26,13 +25,11 @@
 #include <iomanip>
 #include <poll.h>
 #include <errno.h>
-
 #include <fcntl.h>
 
 #include <limits>
 #include <tuple>
 #include <utility>
-#include <limits>
 
 using namespace std;
 
@@ -127,9 +124,6 @@ uint64_t read_uint64(const char* bytes, size_t offset){
     multiplier = multiplier << (8 * (8 - i - 1));
     x += static_cast<unsigned char>(bytes[i + offset]) * multiplier;
   }
-
-  log_message("read uint64 " + std::to_string(x) + " from bytes " + show_hex(bytes + offset, 8));
-
   return x;
 }
 
@@ -140,20 +134,14 @@ uint32_t read_uint32(const char* bytes, size_t offset){
     multiplier = multiplier << (8 * (4 - i - 1));
     x += static_cast<unsigned char>(bytes[i + offset]) * multiplier;
   }
-
-  log_message("read uint32 " + std::to_string(x) + " from bytes " + show_hex(bytes + offset, 4));
-
   return x;
 }
 
 void write_int32(char* data, uint32_t value){
-
     data[0] = (value >> 24) & 0xFF;
     data[1] = (value >> 16) & 0xFF;
     data[2] = (value >>  8) & 0xFF;
     data[3] = value & 0xFF;
-
-    log_message("write_int32 convert " + std::to_string(value) + "(" + std::to_string(sizeof(value)) + ") -> " + show_hex(data, 4));
 }
 
 void write_int64(char* data, uint64_t value){
@@ -166,8 +154,6 @@ void write_int64(char* data, uint64_t value){
     data[5] = (value >> 16) & 0xFF;
     data[6] = (value >>  8) & 0xFF;
     data[7] = value & 0xFF;
-
-    log_message("write_int64 convert " + std::to_string(value) + "(" + std::to_string(sizeof(value)) + ") -> " + show_hex(data, 8));
 }
 
 Header read_header(const char* msg){
@@ -180,8 +166,6 @@ Header read_header(const char* msg){
       throw std::runtime_error(errmsg);
     }
 
-    log_message("reading header: " + show_hex(msg, 32));
-
     Header header;
 
     for(size_t offset = 0; offset < 8; offset++){
@@ -190,9 +174,6 @@ Header read_header(const char* msg){
 
     header.offset = read_uint32(msg, 20);
     header.length = read_uint64(msg, 24);
-
-    log_message("header.offset: " + std::to_string(header.offset));
-    log_message("header.length: " + std::to_string(header.length));
 
     return header;
 }
@@ -343,66 +324,6 @@ Message _put_value(const T& value, const std::string& schema_str) {
 
     return packet;
 }
-
-
-class MappedMemory {
-public:
-    // Constructor that performs memory mapping on an existing file
-    explicit MappedMemory(const std::string& filename) {
-        int fd = open(filename.c_str(), O_RDONLY);
-        if (fd == -1) {
-            throw std::system_error(errno, std::system_category(), "Unable to open file '" + filename + "'");
-        }
-
-        struct stat sb;
-        if (fstat(fd, &sb) == -1) {
-            close(fd);
-            throw std::system_error(errno, std::system_category(), "Error getting file size of '" + filename + "'");
-        }
-
-        void* mapped_data = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-        close(fd);  // Close the file descriptor immediately after mapping
-
-        if (mapped_data == MAP_FAILED) {
-            throw std::system_error(errno, std::system_category(), "Error mapping file '" + filename + "'");
-        }
-
-        data_ = std::vector<char>(static_cast<char*>(mapped_data), static_cast<char*>(mapped_data) + sb.st_size);
-    }
-
-    // Constructor for moving in a vector
-    MappedMemory(std::vector<char>&& data) : data_(std::move(data)) {}
-
-    ~MappedMemory() {
-        if (!data_.empty()) {
-            munmap(data_.data(), data_.size());
-        }
-    }
-
-    // Delete copy constructor and assignment operator
-    MappedMemory(const MappedMemory&) = delete;
-    MappedMemory& operator=(const MappedMemory&) = delete;
-
-    // Move constructor
-    MappedMemory(MappedMemory&& other) noexcept : data_(std::move(other.data_)) {}
-
-    // Move assignment operator
-    MappedMemory& operator=(MappedMemory&& other) noexcept {
-        if (this != &other) {
-            if (!data_.empty()) {
-                munmap(data_.data(), data_.size());
-            }
-            data_ = std::move(other.data_);
-        }
-        return *this;
-    }
-
-    const std::vector<char>& data() const { return data_; }
-
-private:
-    std::vector<char> data_;
-};
-
 
 
 // Use a key to retrieve a value

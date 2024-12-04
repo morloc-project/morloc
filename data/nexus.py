@@ -160,9 +160,77 @@ _dispatch_deserialize = {
     "z" : None
 }
 
+def parse_schema_size(schema: str, index: int) -> tuple[int, int]:
+    c = schema[index]
+    if '0' <= c <= '9':
+        size = ord(c) - ord('0')
+    elif 'a' <= c <= 'z':
+        size = ord(c) - ord('a') + 10
+    elif 'A' <= c <= 'Z':
+        size = ord(c) - ord('A') + 36
+    elif c == '+':
+        size = 62
+    elif c == '/':
+        size = 63
+    else:
+        raise ValueError(f"Invalid character for size: {c}")
+    return size, index + 1
+
+def parse_schema_key(schema: str, index: int) -> tuple[str, int]:
+    key_size, index = parse_schema_size(schema, index)
+    key = schema[index:index + key_size]
+    return key, index + key_size
+
+def parse_schema_r(schema: str, index: int = 0) -> tuple[list, int]:
+    if index >= len(schema):
+        return [], index
+
+    c = schema[index]
+    index += 1
+
+    if c == 'a':  # SCHEMA_ARRAY
+        sub_schema, index = parse_schema_r(schema, index)
+        return ['a', sub_schema], index
+    elif c == 't':  # SCHEMA_TUPLE
+        size, index = parse_schema_size(schema, index)
+        tuple_schema = ['t', []]
+        for _ in range(size):
+            sub_schema, index = parse_schema_r(schema, index)
+            tuple_schema[1].append(sub_schema)
+        return tuple_schema, index
+    elif c == 'm':  # SCHEMA_MAP
+        size, index = parse_schema_size(schema, index)
+        map_schema = ['m', []]
+        for _ in range(size):
+            key, index = parse_schema_key(schema, index)
+            value_schema, index = parse_schema_r(schema, index)
+            map_schema[1].append([key, value_schema])
+        return map_schema, index
+    elif c == 'z':  # SCHEMA_NIL
+        return ([c, []], index)
+    elif c == 'b':  # SCHEMA_BOOL
+        return [c, []], index
+    elif c in 'iu':  # SCHEMA_SINT or SCHEMA_UINT
+        _, index = parse_schema_size(schema, index)
+        return [c, []], index
+    elif c == 'f':  # SCHEMA_FLOAT
+        _, index = parse_schema_size(schema, index)
+        return ['f', []], index
+    elif c == 's':  # SCHEMA_STRING
+        return ['s', []], index
+    elif c == 'r':  # SCHEMA_BINARY
+        return ['r', []], index
+    else:
+        raise ValueError(f"Unrecognized schema type '{c}'")
+
+def parse_schema(schema: str) -> list:
+    result, _ = parse_schema_r(schema)
+    return result
+
+
 def json_deserialize(json_data, schema_str: str, is_file = False):
 
-    schema = mp.parse_schema(schema_str)
+    schema = parse_schema(schema_str)
 
     _log(f"Deserializing JSON, is_file={str(is_file)}")
     if is_file:
@@ -384,7 +452,7 @@ def print_return(data, schema_str):
 
     if cmd_format == PACKET_FORMAT_MSGPACK:
         try:
-            json.dump(mp.unpack(content, schema_str), fp = sys.stdout, separators = JSON_SEPARATORS)
+            json.dump(mp.mesgpack_to_py(content, schema_str), fp = sys.stdout, separators = JSON_SEPARATORS)
         except Exception as e:
             _log(trace(f"Failed to read output MessagePack format with error {str(e)}:\n hex = {hex(content)}\n chr = {str(content)}"))
         print() # just for that adorable little newline
@@ -475,7 +543,7 @@ def handle_json_file_argument(filename, schema):
 
     Otherwise, write the JSON data to a MessagePack file with extenssion .mpk
     """
-    data = mp.pack((json_deserialize(filename, schema, is_file = True)), schema)
+    data = mp.py_to_mesgpack((json_deserialize(filename, schema, is_file = True)), schema)
 
     if len(data) <= 65536 - 32:
         return _make_data(data)
@@ -515,12 +583,12 @@ def prepare_call_packet(mid, args, schemas):
             # or compressed)
             if is_file:
                 if get_format_from_data(data) == PACKET_FORMAT_JSON:
-                    packet = _make_data(mp.pack(json_deserialize(data, schema), schema))
+                    packet = _make_data(mp.py_to_mesgpack(json_deserialize(data, schema), schema))
                 else:
                     packet = _make_data(arg)
             # if data is not from a file, then it must be json
             else:
-                packet = _make_data(mp.pack(json_deserialize(data, schema), schema))
+                packet = _make_data(mp.py_to_mesgpack(json_deserialize(data, schema), schema))
 
         arg_msgs.append(packet)
 
@@ -578,11 +646,11 @@ def run_command(mid, args, pool_lang, sockets, arg_schema, return_schema):
 
 
 
-def dispatch(cmd, args):
+def dispatch(cmd, args, tmpdir):
     if cmd in ["-h", "--help", "-?", "?"]:
         usage()
     else:
-        command_table[cmd](args)
+        command_table[cmd](args, tmpdir)
 
 
 def opt_name(short="", long=""):
@@ -658,5 +726,4 @@ if __name__ == "__main__":
         os.makedirs(base_dir, exist_ok=True)
 
         with tempfile.TemporaryDirectory(dir=base_dir) as tmpdir:
-            dispatch(cmd, cmd_args)
-_
+            dispatch(cmd, cmd_args, tmpdir)
