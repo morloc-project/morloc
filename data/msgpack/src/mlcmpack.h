@@ -1,5 +1,5 @@
-#ifndef __MPACK_H__
-#define __MPACK_H__
+#ifndef __MORLOC_CLIB_H__
+#define __MORLOC_CLIB_H__
 
 // The following code is adapted from libmpack: https://github.com/libmpack/libmpack ///////////////
 
@@ -87,12 +87,8 @@ MPACK_API mpack_token_t mpack_pack_boolean(unsigned v) FUNUSED FPURE;
 MPACK_API mpack_token_t mpack_pack_uint(uint64_t v) FUNUSED FPURE;
 MPACK_API mpack_token_t mpack_pack_sint(int64_t v) FUNUSED FPURE;
 MPACK_API mpack_token_t mpack_pack_float(double v) FUNUSED FPURE;
-MPACK_API mpack_token_t mpack_pack_chunk(const char *p, uint32_t l) FUNUSED FPURE FNONULL;
 MPACK_API mpack_token_t mpack_pack_str(uint32_t l) FUNUSED FPURE;
-MPACK_API mpack_token_t mpack_pack_bin(uint32_t l) FUNUSED FPURE;
-MPACK_API mpack_token_t mpack_pack_ext(int type, uint32_t l) FUNUSED FPURE;
 MPACK_API mpack_token_t mpack_pack_array(uint32_t l) FUNUSED FPURE;
-MPACK_API mpack_token_t mpack_pack_map(uint32_t l) FUNUSED FPURE;
 MPACK_API bool mpack_unpack_boolean(mpack_token_t t) FUNUSED FPURE;
 MPACK_API uint64_t mpack_unpack_uint(mpack_token_t t) FUNUSED FPURE;
 MPACK_API int64_t mpack_unpack_sint(mpack_token_t t) FUNUSED FPURE;
@@ -764,15 +760,6 @@ MPACK_API mpack_token_t mpack_pack_float(double v)
   return rv;
 }
 
-MPACK_API mpack_token_t mpack_pack_chunk(const char *p, uint32_t l)
-{
-  mpack_token_t rv;
-  rv.type = MPACK_TOKEN_CHUNK;
-  rv.data.chunk_ptr = p;
-  rv.length = l;
-  return rv;
-}
-
 MPACK_API mpack_token_t mpack_pack_str(uint32_t l)
 {
   mpack_token_t rv;
@@ -781,35 +768,10 @@ MPACK_API mpack_token_t mpack_pack_str(uint32_t l)
   return rv;
 }
 
-MPACK_API mpack_token_t mpack_pack_bin(uint32_t l)
-{
-  mpack_token_t rv;
-  rv.type = MPACK_TOKEN_BIN;
-  rv.length = l;
-  return rv;
-}
-
-MPACK_API mpack_token_t mpack_pack_ext(int t, uint32_t l)
-{
-  mpack_token_t rv;
-  rv.type = MPACK_TOKEN_EXT;
-  rv.length = l;
-  rv.data.ext_type = t;
-  return rv;
-}
-
 MPACK_API mpack_token_t mpack_pack_array(uint32_t l)
 {
   mpack_token_t rv;
   rv.type = MPACK_TOKEN_ARRAY;
-  rv.length = l;
-  return rv;
-}
-
-MPACK_API mpack_token_t mpack_pack_map(uint32_t l)
-{
-  mpack_token_t rv;
-  rv.type = MPACK_TOKEN_MAP;
   rv.length = l;
   return rv;
 }
@@ -845,14 +807,6 @@ MPACK_API int64_t mpack_unpack_sint(mpack_token_t t)
    * represent the positive cast. */
   return -((int64_t)(rv - 1)) - 1;
 }
-
-// MPACK_API int mpack_unpack_sint32(mpack_token_t t)
-// {
-//   int rv = (int)t.data.value.lo;
-//   rv = ~rv + 1;
-//   return -(rv - 1) - 1;
-// }
-
 
 MPACK_API double mpack_unpack_float(mpack_token_t t)
 {
@@ -902,12 +856,8 @@ static double mpack_fmod_pow2_32(double a)
 }
 
 
-#endif // end __MPACK_H__
 
-
-
-#ifndef __MLCMPACK_HEADER_ONLY_H__
-#define __MLCMPACK_HEADER_ONLY_H__
+// ===== morloc mesgpack and voidstar handling =====
 
 #include <stdlib.h>
 #include <string.h>
@@ -1348,7 +1298,6 @@ int pack_data(
             break;
         case MORLOC_UINT32:
             token = mpack_pack_uint((uint64_t)*(uint32_t*)mlc);
-// fprintf(stderr, " %d\n", *(uint32_t*)mlc);
             break;
         case MORLOC_UINT64:
             token = mpack_pack_uint(*(uint64_t*)mlc);
@@ -1377,7 +1326,6 @@ int pack_data(
         case MORLOC_ARRAY:
             array = (Array*)mlc;
             token = mpack_pack_array(array->size);
-// fprintf(stderr, "packing array of size %zu\n", array->size);
             break;
         case MORLOC_MAP:
         case MORLOC_TUPLE:
@@ -1405,10 +1353,6 @@ int pack_data(
           char* data = (char*)((Array*)mlc)->data;
           array_schema = schema->parameters[0];
           array_width = array_schema->width;
-
-// fprintf(stderr, "mlc (size=%zu, width=%zu)\n", array_length, array_width);
-// hex(data, array_length * array_width);
-// fprintf(stderr, "\n");
 
           for (size_t i = 0; i < array_length; i++) {
               pack_data(
@@ -1701,10 +1645,6 @@ int unpack_with_schema(const char* mgk, size_t mgk_size, const Schema* schema, v
 
     void* mlc = (void*)malloc(schema->width);
 
-// fprintf(stderr, "mgk:\n");
-// hex(mgk, mgk_size);
-// fprintf(stderr, "\n");
-
     int exitcode = parse_obj(mlc, schema, &tokbuf, &mgk, &buf_remaining, &token);
 
     *mlcptr = mlc;
@@ -1719,4 +1659,4 @@ int unpack(const char* mpk, size_t mpk_size, const char* schema_str, void** mlcp
 }
 
 
-#endif // ending __MLCMPACK_HEADER_ONLY_H__
+#endif // ending __MORLOC_CLIB_H__
