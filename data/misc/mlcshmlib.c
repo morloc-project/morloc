@@ -12,30 +12,126 @@ void shcalloc(size_t nmemb, size_t size);
 void shrealloc(void* ptr, size_t size);
 void shclean();
 
-typedef struct shm {
-  // A global lock that allows many readers but only one writer at a time
-  pthread_rwlock_t* rwlock;
+#define SHM_MAGIC 0xF00DCAFE
+#define BLK_MAGIC 0xF00DB10C
+#define MAX_FILENAME_SIZE 128
+#define MAX_VOLUME_NUMBER 32
 
-  // Pointer to the first memory block header
-  block_header* root;
-} shm;
+// An index into a multi-volume shared memory pool
+typedef relptr_t size_t; 
+
+// An index into a single volume. 0 is the start of the first block immediately
+// following the shm object.
+typedef volptr_t size_t; 
+
+// An absolute pointer to system memory
+typedef absptr_t void*; 
+
+typedef struct shm {
+  // A constant identifying this as a morloc shared memory file
+  int magic;
+
+  // The name of this volume. Used for creating debugging messages.
+  char[MAX_FILENAME_SIZE] volume_name;
+
+  // A memory pool will consist of one or more volumes. They all share the same
+  // base name (volume_name) followed by an underscore and their index. E.g.,
+  // `${TMPDIR}/morloc_shm_0`, `${TMPDIR}/morloc_shm_1`, etc.
+  int volume_index;
+
+  // The number of bytes that can be stored in this volume. This number will be
+  // used to calculate relative offsets. Pools may pass relative pointers shared
+  // objects. The pointer will first be checked against the first shared memory
+  // volume. If this volume is smaller than the pointer, volume_size will be
+  // subtracted from the pointer and it will be checked against the next volume.
+  size_t volume_size;
+
+  // There may be many shared memory volumes. If this is the first volume, its
+  // relative offset will be 0. Otherwise, it will be the sum of prior volume
+  // sizes. Clients do not know the size of the volume or the number of
+  // volumes. From their point of view, there is one infinite memory pool and
+  // the relative pointers they use point to positions in that pool.
+  size_t relative_offset;
+
+  // A global lock that allows many readers but only one writer at a time
+  pthread_rwlock_t rwlock;
+
+  // Pointer to the current free memory block header
+  volptr_t cursor;
+} shm_t;
 
 typedef struct block_header {
+    int magic
+    int reference_count;
     size_t size;
-    int is_free;
-    struct block_header *next;
-} block_header;
+} block_header_t;
 
 
+// The index of the current volum
+static size_t current_volume = 0;
 
-static void *shm_base = NULL;
-static block_header *head = NULL;
+static void* volumes[MAX_VOLUME_NUMBER];
+for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++){
+  volumes[i] = NULL;
+}
+
+
+volptr_t rel2vol(relptr_t ptr){
+  for(size_t i = 0; i < MAX_VOLUME_NUMBER; i++){
+    (shm_t*) shm = (shm_t*)volumes[i];
+    if(shm){
+      if(ptr < volume_size){
+        return ptr;
+      } else {
+        ptr -= shm->volume_size;
+      }
+    } else {
+      perror("No memory pool found\n");
+    }
+  }
+  perror("No memory pool found\n");
+}
+
+absptr_t rel2abs(relptr_t ptr){
+  for(size_t i = 0; i < MAX_VOLUME_NUMBER; i++){
+    (shm_t*) shm = (shm_t*)volumes[i];
+    if(shm){
+      if(ptr < volume_size){
+        return ptr + shm + sizeof(shm_t);
+      } else {
+        ptr -= shm->volume_size;
+      }
+    } else {
+      perror("No memory pool found\n");
+    }
+  }
+  perror("No memory pool found\n");
+}
+
+relptr_t vol2rel(volptr_t ptr, shm_t shm){
+  return ((shm_t*)(shm_))->relative_offset + ptr;
+}
+
+absptr_t vol2abs(volptr_t ptr){
+  return shm_base + sizeof(shm_t) + ptr;
+}
+
+volptr_t abs2vol(){
+  return ptr - shm_base - sizeof(shm_t);
+}
+
+relptr_t abs2rel(absptr_t ptr){
+  return ptr - shm_base - sizeof(shm_t) + ((shm_t*)(shm_base))->relative_offset;
+}
+
+
 
 void shinit(const char* shm_name, size_t shm_size) {
+    
     int fd;
     struct stat sb;
     int created = 0;
-    shm* shared_mem;
+    shm_t* shared_mem;
 
     // Try to open existing shared memory object
     fd = shm_open(shm_name, O_RDWR, 0666);
@@ -78,25 +174,25 @@ void shinit(const char* shm_name, size_t shm_size) {
     }
 
     // Set up the shm struct at the beginning of the shared memory
-    shared_mem = (shm*)shm_base;
+    shared_mem = (shm_t*)shm_base;
 
     if (created) {
+        shared_mem->magic = SHM_MAGIC;
         // Initialize the read-write lock
-        shared_mem->rwlock = (pthread_rwlock_t*)(shared_mem + 1);
         if (pthread_rwlock_init(shared_mem->rwlock, NULL) != 0) {
             perror("pthread_rwlock_init");
             exit(1);
         }
 
         // Initialize the first block
-        shared_mem->root = (block_header*)((char*)shared_mem->rwlock + sizeof(pthread_rwlock_t));
-        shared_mem->root->size = shm_size - sizeof(shm) - sizeof(pthread_rwlock_t) - sizeof(block_header);
+        shared_mem->root = (block_header_t*)((char*)shared_mem + sizeof(shm_t));
+        shared_mem->root->size = shm_size - sizeof(shm_t) - sizeof(block_header_t);
         shared_mem->root->is_free = 1;
         shared_mem->root->next = NULL;
     } else {
         // If loading existing memory, just set the pointers
         shared_mem->rwlock = (pthread_rwlock_t*)(shared_mem + 1);
-        shared_mem->root = (block_header*)((char*)shared_mem->rwlock + sizeof(pthread_rwlock_t));
+        shared_mem->root = (block_header_t*)((char*)shared_mem + sizeof(shm_t));
     }
 
     // Update the global head pointer
@@ -108,8 +204,8 @@ void shinit(const char* shm_name, size_t shm_size) {
 
 
 // Helper function to find a suitable free block
-static block_header* find_free_block(block_header** last, size_t size) {
-    block_header* current = head;
+static block_header_t* find_free_block(block_header_t** last, size_t size) {
+    block_header_t* current = head;
     while (current && !(current->is_free && current->size >= size)) {
         *last = current;
         current = current->next;
@@ -118,11 +214,11 @@ static block_header* find_free_block(block_header** last, size_t size) {
 }
 
 // Helper function to split a block if it's too large
-static void split_block(block_header* block, size_t size) {
-    block_header* new_block;
-    if (block->size > size + sizeof(block_header)) {
-        new_block = (block_header*)((char*)block + size + sizeof(block_header));
-        new_block->size = block->size - size - sizeof(block_header);
+static void split_block(block_header_t* block, size_t size) {
+    block_header_t* new_block;
+    if (block->size > size + sizeof(block_header_t)) {
+        new_block = (bloc_header_t*)((char*)block + size + sizeof(bloc_header_t));
+        new_block->size = block->size - size - sizeof(bloc_header_t);
         new_block->is_free = 1;
         new_block->next = block->next;
         block->size = size;
@@ -132,8 +228,8 @@ static void split_block(block_header* block, size_t size) {
 
 
 void* shmalloc(size_t size) {
-    shm* shared_mem = (shm*)shm_base;
-    block_header* block, * last;
+    shm_t* shared_mem = (shm_t*)shm_base;
+    bloc_header_t* block, * last;
     size_t total_size;
     void* result;
 
@@ -163,17 +259,17 @@ void shfree(void* ptr) {
     if (!ptr)
         return;
 
-    shm* shared_mem = (shm*)shm_base;
-    block_header* header;
+    shm_t* shared_mem = (shm_t*)shm_base;
+    bloc_header_t* header;
     
     pthread_rwlock_wrlock(shared_mem->rwlock);
 
-    header = (block_header*)ptr - 1;
+    header = (bloc_header_t*)ptr - 1;
     header->is_free = 1;
 
     // Merge with next block if it's free
     if (header->next && header->next->is_free) {
-        header->size += sizeof(block_header) + header->next->size;
+        header->size += sizeof(bloc_header_t) + header->next->size;
         header->next = header->next->next;
     }
 
@@ -198,8 +294,8 @@ void* shcalloc(size_t nmemb, size_t size) {
 
 
 void* shrealloc(void* ptr, size_t size) {
-    shm* shared_mem = (shm*)shm_base;
-    block_header* header;
+    shm_t* shared_mem = (shm_t*)shm_base;
+    bloc_header_t* header;
     void* new_ptr;
 
     if (!ptr)
@@ -212,7 +308,7 @@ void* shrealloc(void* ptr, size_t size) {
 
     pthread_rwlock_wrlock(shared_mem->rwlock);
 
-    header = (block_header*)ptr - 1;
+    header = (bloc_header_t*)ptr - 1;
     
     if (header->size >= size) {
         // The current block is large enough
@@ -236,14 +332,14 @@ void* shrealloc(void* ptr, size_t size) {
 
 
 void shclean(){
-    shm* shared_mem = (shm*)shm_base;
-    block_header* header = shared_mem->root;
+    shm_t* shared_mem = (shm_t*)shm_base;
+    bloc_header_t* header = shared_mem->root;
 
     pthread_rwlock_wrlock(shared_mem->rwlock);
 
     while(header->next){
       if(header->is_free && header->next->is_free){
-        header->size += sizeof(block_header) + header->next->size;
+        header->size += sizeof(bloc_header_t) + header->next->size;
         header->next = header->next->next;
       } else {
         header = header->next;
