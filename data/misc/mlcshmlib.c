@@ -1,16 +1,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
+#include <pthread.h>
+#include <errno.h>
 
-void shinit(const char* shm_name, size_t shm_size);
-void shmalloc(size_t size);
-void shfree(void* ptr);
-void shcalloc(size_t nmemb, size_t size);
-void shrealloc(void* ptr, size_t size);
-void shclean();
+
 
 #define SHM_MAGIC 0xF00DCAFE
 #define BLK_MAGIC 0xF00DB10C
@@ -18,21 +16,24 @@ void shclean();
 #define MAX_VOLUME_NUMBER 32
 
 // An index into a multi-volume shared memory pool
-typedef relptr_t size_t; 
+typedef ssize_t relptr_t; 
 
 // An index into a single volume. 0 is the start of the first block immediately
 // following the shm object.
-typedef volptr_t size_t; 
+typedef ssize_t volptr_t; 
 
 // An absolute pointer to system memory
-typedef absptr_t void*; 
+typedef void* absptr_t; 
 
-typedef struct shm {
+#define VOLNULL -1
+#define RELNULL -1
+
+typedef struct shm_s {
   // A constant identifying this as a morloc shared memory file
   int magic;
 
   // The name of this volume. Used for creating debugging messages.
-  char[MAX_FILENAME_SIZE] volume_name;
+  char volume_name[MAX_FILENAME_SIZE];
 
   // A memory pool will consist of one or more volumes. They all share the same
   // base name (volume_name) followed by an underscore and their index. E.g.,
@@ -60,8 +61,8 @@ typedef struct shm {
   volptr_t cursor;
 } shm_t;
 
-typedef struct block_header {
-    int magic
+typedef struct block_header_s {
+    int magic;
     int reference_count;
     size_t size;
 } block_header_t;
@@ -69,69 +70,170 @@ typedef struct block_header {
 
 // The index of the current volum
 static size_t current_volume = 0;
+static char common_basename[MAX_FILENAME_SIZE];
 
-static void* volumes[MAX_VOLUME_NUMBER];
-for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++){
-  volumes[i] = NULL;
-}
+static shm_t* volumes[MAX_VOLUME_NUMBER] = {NULL};
+
+shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size);
+void* shmalloc(size_t size);
+int shfree(relptr_t ptr);
+void* shcalloc(size_t nmemb, size_t size);
+void* shrealloc(void* ptr, size_t size);
+
+volptr_t rel2vol(relptr_t ptr);
+absptr_t rel2abs(relptr_t ptr);
+relptr_t vol2rel(volptr_t ptr, shm_t* shm);
+absptr_t vol2abs(volptr_t ptr, shm_t* shm);
+volptr_t abs2vol(absptr_t ptr, shm_t* shm);
+relptr_t abs2rel(absptr_t ptr);
+shm_t* abs2shm(absptr_t ptr);
+block_header_t* abs2blk(void* ptr);
 
 
-volptr_t rel2vol(relptr_t ptr){
-  for(size_t i = 0; i < MAX_VOLUME_NUMBER; i++){
-    (shm_t*) shm = (shm_t*)volumes[i];
-    if(shm){
-      if(ptr < volume_size){
-        return ptr;
-      } else {
-        ptr -= shm->volume_size;
-      }
-    } else {
-      perror("No memory pool found\n");
+//             head of volume 1   inter-memory    head of volume 2
+//              n=6  block1          n=20                block2
+//         ---xxxxxx........--------------------xxxxxx............---->
+//         |  |     |      |                    |     |          |
+//         v  v     v      v                    v     v          v
+// absptr  0  4    10     17                   38    44         55
+// volptr           0      7                          0         10
+// relptr           0      7                          8         19
+//
+//  * the volumes may not be ordered in memory
+//    e.g., block2 may be less then block1
+//  * absptr will vary between processes, it is the virtual pointer used in
+//    process memory and mmap'd to the shared data structure.
+//  * relptr will be shared between processes
+//  * relptr abstracts away volumes, viewing the shared memory pool as a
+//    single contiguous block
+
+volptr_t rel2vol(relptr_t ptr) {
+    for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
+        shm_t* shm = volumes[i];
+        if (shm == NULL) {
+            return VOLNULL;
+        }
+        if ((size_t)ptr < shm->volume_size) {
+            return (volptr_t)ptr;
+        }
+        ptr -= (relptr_t)shm->volume_size;
     }
-  }
-  perror("No memory pool found\n");
+    return VOLNULL;
 }
 
-absptr_t rel2abs(relptr_t ptr){
-  for(size_t i = 0; i < MAX_VOLUME_NUMBER; i++){
-    (shm_t*) shm = (shm_t*)volumes[i];
-    if(shm){
-      if(ptr < volume_size){
-        return ptr + shm + sizeof(shm_t);
-      } else {
-        ptr -= shm->volume_size;
-      }
-    } else {
-      perror("No memory pool found\n");
+absptr_t rel2abs(relptr_t ptr) {
+    for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
+        shm_t* shm = volumes[i];
+        if (shm == NULL) {
+            return NULL;
+        }
+        if ((size_t)ptr < shm->volume_size) {
+            char* shm_start = (char*)shm;
+            return (absptr_t)(shm_start + sizeof(shm_t) + ptr);
+        }
+        ptr -= (relptr_t)shm->volume_size;
     }
-  }
-  perror("No memory pool found\n");
+    return NULL;
 }
 
-relptr_t vol2rel(volptr_t ptr, shm_t shm){
-  return ((shm_t*)(shm_))->relative_offset + ptr;
+relptr_t vol2rel(volptr_t ptr, shm_t* shm) {
+    return (relptr_t)(shm->relative_offset + ptr);
 }
 
-absptr_t vol2abs(volptr_t ptr){
-  return shm_base + sizeof(shm_t) + ptr;
+absptr_t vol2abs(volptr_t ptr, shm_t* shm) {
+    char* shm_start = (char*)shm;
+    return (absptr_t)(shm_start + sizeof(shm_t) + ptr);
 }
 
-volptr_t abs2vol(){
-  return ptr - shm_base - sizeof(shm_t);
+volptr_t abs2vol(absptr_t ptr, shm_t* shm) {
+    if (shm) {
+        char* shm_start = (char*)shm;
+        char* data_start = shm_start + sizeof(shm_t);
+        char* data_end = data_start + shm->volume_size;
+        
+        if ((char*)ptr >= data_start && (char*)ptr < data_end) {
+            return (volptr_t)((char*)ptr - data_start);
+        } else {
+            return VOLNULL;
+        }
+    } else {
+        for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
+            shm_t* current_shm = volumes[i];
+            if (current_shm) {
+                char* shm_start = (char*)current_shm;
+                char* data_start = shm_start + sizeof(shm_t);
+                char* data_end = data_start + current_shm->volume_size;
+                
+                if ((char*)ptr >= data_start && (char*)ptr < data_end) {
+                    return (volptr_t)((char*)ptr - data_start);
+                }
+            }
+        }
+    }
+    return VOLNULL;
 }
 
-relptr_t abs2rel(absptr_t ptr){
-  return ptr - shm_base - sizeof(shm_t) + ((shm_t*)(shm_base))->relative_offset;
+relptr_t abs2rel(absptr_t ptr) {
+    for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
+        shm_t* shm = volumes[i];
+        if (shm == NULL) {
+            continue;
+        }
+        char* shm_start = (char*)shm;
+        char* data_start = shm_start + sizeof(shm_t);
+        char* data_end = data_start + shm->volume_size;
+        
+        if ((char*)ptr > shm_start && (char*)ptr < data_end) {
+            return (relptr_t)((char*)ptr - data_start + shm->relative_offset);
+        }
+    }
+    return RELNULL;
+}
+
+shm_t* abs2shm(absptr_t ptr) {
+    for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
+        shm_t* shm = volumes[i];
+        if (shm == NULL) {
+            continue;
+        }
+        char* shm_start = (char*)shm;
+        char* data_start = shm_start + sizeof(shm_t);
+        char* data_end = data_start + shm->volume_size;
+        
+        if ((char*)ptr >= data_start && (char*)ptr < data_end) {
+            return shm;
+        }
+    }
+    return NULL;
 }
 
 
 
-void shinit(const char* shm_name, size_t shm_size) {
+// Get and check a block header given a pointer to the beginning of a block's
+// data section
+block_header_t* abs2blk(void* ptr){
+    block_header_t* blk = (block_header_t*)(ptr - sizeof(block_header_t));
+    if(blk && blk->magic != BLK_MAGIC){
+        return NULL;
+    }
+    return blk;
+}
+
+shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size) {
     
     int fd;
     struct stat sb;
     int created = 0;
-    shm_t* shared_mem;
+    shm_t* shm;
+
+    size_t full_size = shm_size + sizeof(shm_t);
+
+    strcpy(common_basename, shm_basename);
+
+    // create an indexed volume name
+    // Example: "$TMPDIR/morloc_shm_0" where 0 is the volume index
+    char* shm_name = (char*)calloc(MAX_FILENAME_SIZE, sizeof(char));
+    snprintf(shm_name, MAX_FILENAME_SIZE, "%s_%zu", shm_basename, volume_index);
 
     // Try to open existing shared memory object
     fd = shm_open(shm_name, O_RDWR, 0666);
@@ -141,210 +243,380 @@ void shinit(const char* shm_name, size_t shm_size) {
             fd = shm_open(shm_name, O_CREAT | O_RDWR, 0666);
             if (fd == -1) {
                 perror("shm_open (create)");
-                exit(1);
+                return NULL;
             }
             created = 1;
         } else {
             perror("shm_open (open)");
-            exit(1);
+            return NULL;
         }
     }
 
     if (created) {
         // If we created the object, set its size
-        if (ftruncate(fd, shm_size) == -1) {
+        if (ftruncate(fd, full_size) == -1) {
             perror("ftruncate");
-            exit(1);
+            return NULL;
         }
     } else {
         // Get the size of the shared memory object
         if (fstat(fd, &sb) == -1) {
             perror("fstat");
-            exit(1);
+            return NULL;
         }
         // If we're loading an existing object, use its current size
-        shm_size = sb.st_size;
+        full_size = sb.st_size;
+        shm_size = full_size - sizeof(shm_t);
     }
 
     // Map the shared memory object
-    shm_base = mmap(NULL, shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (shm_base == MAP_FAILED) {
+    volumes[volume_index] = mmap(NULL, full_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (volumes[volume_index] == MAP_FAILED) {
+        volumes[volume_index] = NULL;
         perror("mmap");
-        exit(1);
+        return NULL;
     }
 
     // Set up the shm struct at the beginning of the shared memory
-    shared_mem = (shm_t*)shm_base;
+    shm = (shm_t*) volumes[volume_index];
 
     if (created) {
-        shared_mem->magic = SHM_MAGIC;
-        // Initialize the read-write lock
-        if (pthread_rwlock_init(shared_mem->rwlock, NULL) != 0) {
-            perror("pthread_rwlock_init");
-            exit(1);
+        shm->magic = SHM_MAGIC;
+
+        strcpy(shm->volume_name, shm_name);
+
+        shm->volume_index = volume_index;
+
+        shm->relative_offset = 0;
+        for(size_t i = 0; i < volume_index; i++){
+            shm->relative_offset += volumes[i]->volume_size;
         }
 
-        // Initialize the first block
-        shared_mem->root = (block_header_t*)((char*)shared_mem + sizeof(shm_t));
-        shared_mem->root->size = shm_size - sizeof(shm_t) - sizeof(block_header_t);
-        shared_mem->root->is_free = 1;
-        shared_mem->root->next = NULL;
-    } else {
-        // If loading existing memory, just set the pointers
-        shared_mem->rwlock = (pthread_rwlock_t*)(shared_mem + 1);
-        shared_mem->root = (block_header_t*)((char*)shared_mem + sizeof(shm_t));
-    }
+        shm->volume_size = shm_size;
 
-    // Update the global head pointer
-    head = shared_mem->root;
+        // Initialize the read-write lock
+        if (pthread_rwlock_init(&shm->rwlock, NULL) != 0) {
+            perror("pthread_rwlock_init");
+            return NULL;
+        }
+
+        shm->cursor = 0;
+
+        block_header_t* first_block = (block_header_t*) (shm + sizeof(shm_t));
+        first_block->magic = BLK_MAGIC;
+        first_block->reference_count = 0;
+        first_block->size = shm_size;
+    }
 
     // Close the file descriptor (the mapping remains valid)
     close(fd);
+    free(shm_name);
+
+    return shm;
 }
 
 
-// Helper function to find a suitable free block
-static block_header_t* find_free_block(block_header_t** last, size_t size) {
-    block_header_t* current = head;
-    while (current && !(current->is_free && current->size >= size)) {
-        *last = current;
-        current = current->next;
-    }
-    return current;
+void erase_block_header(block_header_t* blk){
+  blk->magic = 0;
+  blk->reference_count = 0;
+  blk->size = 0;
 }
 
-// Helper function to split a block if it's too large
-static void split_block(block_header_t* block, size_t size) {
-    block_header_t* new_block;
-    if (block->size > size + sizeof(block_header_t)) {
-        new_block = (bloc_header_t*)((char*)block + size + sizeof(bloc_header_t));
-        new_block->size = block->size - size - sizeof(bloc_header_t);
-        new_block->is_free = 1;
-        new_block->next = block->next;
-        block->size = size;
-        block->next = new_block;
+size_t get_available_memory() {
+    FILE *meminfo = fopen("/proc/meminfo", "r");
+    if (meminfo == NULL) return -1;
+
+    char line[256];
+    size_t total_memory = 0;
+
+    while (fgets(line, sizeof(line), meminfo)) {
+        if (sscanf(line, "MemAvailable: %zu kB", &total_memory) == 1) {
+            break;
+        }
     }
+
+    fclose(meminfo);
+    return total_memory * 1024; // convert from kB to bytes
+}
+
+
+static size_t choose_next_volume_size(size_t new_data_size) {
+    size_t total_shm_size = 0;
+    size_t last_shm_size = 0;
+    size_t new_volume_size;
+
+    // Iterate through volumes to calculate total and last shared memory sizes
+    for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
+        shm_t* shm = volumes[i];
+        if (!shm) break;
+        total_shm_size += shm->volume_size;
+        last_shm_size = shm->volume_size;
+    }
+
+    size_t available_memory = get_available_memory();
+
+    // Check if there's enough memory for the new data
+    if (new_data_size > available_memory) {
+        fprintf(stderr, "Insufficient memory for new data size\n");
+        return 0;
+    }
+
+    // Determine the new volume size based on available memory and existing volumes
+    if (total_shm_size < available_memory && new_data_size < total_shm_size) {
+        new_volume_size = total_shm_size;
+    } else if (last_shm_size < available_memory && new_data_size < last_shm_size) {
+        new_volume_size = last_shm_size;
+    } else {
+        new_volume_size = new_data_size;
+    }
+
+    return new_volume_size;
+}
+
+
+
+
+block_header_t* get_block(shm_t* shm, size_t cursor){
+    block_header_t* blk = (block_header_t*) vol2abs(cursor, shm);
+    if(blk->magic != BLK_MAGIC){
+        perror("Missing BLK_MAGIC - corrupted memory");
+        return NULL;
+    }
+
+    if(blk->reference_count != 0){
+        perror("Bad cursor - expected reference_count = 0");
+        return NULL;
+    }
+
+    return blk;
+}
+
+
+block_header_t* find_free_block_in_volume(shm_t* shm, size_t size) {
+    if (shm == NULL || size == 0) {
+        return NULL;
+    }
+
+    block_header_t* blk = get_block(shm, shm->cursor);
+
+    if (blk != NULL && blk->size >= size) {
+        return blk;
+    }
+
+    blk = get_block(shm, 0);
+    if (blk == NULL) {
+        return NULL;
+    }
+
+    // Lock this pool while searching for a non-cursor block. This is necessary
+    // since adjacent free blocks will be merged, which could potentially lead to
+    // conflicts.
+    if (pthread_rwlock_wrlock(&shm->rwlock) != 0) {
+        perror("Failed to acquire write lock");
+        return NULL;
+    }
+
+    char* shm_end = (char*)shm + sizeof(shm_t) + shm->volume_size;
+
+    while ((char*)blk + sizeof(block_header_t) + size <= shm_end) {
+        if (blk->magic != BLK_MAGIC) {
+            pthread_rwlock_unlock(&shm->rwlock);
+            fprintf(stderr, "Corrupted memory: invalid block magic\n");
+            return NULL;
+        }
+
+        // Merge all following free blocks
+        while (blk->reference_count == 0) {
+            block_header_t* next_blk = (block_header_t*)((char*)blk + sizeof(block_header_t) + blk->size);
+            
+            if ((char*)next_blk >= shm_end || next_blk->reference_count != 0) {
+                break;
+            }
+
+            // Merge the blocks
+            blk->size += sizeof(block_header_t) + next_blk->size;
+            erase_block_header(next_blk);
+        }
+
+        if (blk->reference_count == 0 && blk->size >= size) {
+            pthread_rwlock_unlock(&shm->rwlock);
+            return blk;
+        }
+
+        blk = (block_header_t*)((char*)blk + sizeof(block_header_t) + blk->size);
+    }
+
+    pthread_rwlock_unlock(&shm->rwlock);
+    return NULL;  // No suitable space was found in this volume
+}
+
+
+// Find a free block that can allocate a given size of memory. If no lbock is
+// found, create a new volume.
+static block_header_t* find_free_block(size_t size, shm_t** shm_ptr) {
+    shm_t* shm = volumes[current_volume];
+    block_header_t* blk = get_block(shm, shm->cursor);
+
+    if(blk->size >= size){
+        goto success;
+    }
+
+    // If no suitable block is found at the cursor, search through all volumes
+    // for a suitable block, merging free blocks as they are observed
+    for(size_t i = 0; i < MAX_VOLUME_NUMBER; i++){
+      shm = volumes[i]; 
+
+      // If no block is found in any volume, create a new volume
+      if(!shm){
+        size_t new_volume_size = choose_next_volume_size(size);
+        shm = shinit(common_basename, i, size);
+        blk = (block_header_t*)(shm + sizeof(shm_t));
+        goto success;
+      }
+
+      blk = find_free_block_in_volume(shm, size);
+      if(blk) goto success;
+    }
+
+    perror("Could not find suitable block");
+    return NULL;
+
+success:
+    *shm_ptr = shm;
+    return blk;
+}
+
+static block_header_t* split_block(shm_t* shm, block_header_t* old_block, size_t size) {
+    if (old_block->reference_count > 0){
+        perror("Cannot split block since reference_count > 0");
+        return NULL;
+    }
+    if (old_block->size == size){
+        // hello goldilocks, this block is just the right size
+        return old_block;
+    }
+    if (old_block->size < size){
+        perror("This block is too small");
+        return NULL;
+    }
+
+    // lock memory in this pool
+    pthread_rwlock_wrlock(&shm->rwlock);
+
+    block_header_t* new_free_block = (block_header_t*)((char*)old_block + size + sizeof(block_header_t));
+    new_free_block->magic = BLK_MAGIC;
+    new_free_block->reference_count = 0;
+    new_free_block->size = old_block->size - size - sizeof(block_header_t);
+
+    old_block->reference_count = 1;
+    old_block->size = size;
+
+    shm->cursor = abs2vol(new_free_block, shm);
+
+    pthread_rwlock_unlock(&shm->rwlock);
+
+    return old_block;
 }
 
 
 void* shmalloc(size_t size) {
-    shm_t* shared_mem = (shm_t*)shm_base;
-    bloc_header_t* block, * last;
-    size_t total_size;
-    void* result;
-
+    // Can't allocate nothing ... though technically I could make a 0-sized
+    // block, but why?
     if (size == 0)
         return NULL;
 
-    pthread_rwlock_wrlock(shared_mem->rwlock);
+    shm_t* shm;
+    block_header_t* blk = find_free_block(size, &shm);
 
-    block = find_free_block(&last, size);
-    if (block) {
-        // If a suitable block is found
-        block->is_free = 0;
-        split_block(block, size);
-        result = (void*)(block + 1);
+    // If a suitable block is found
+    if (blk) {
+        return split_block(shm, blk, size);
     } else {
         // No suitable block found
-        result = NULL;
+        return NULL;
     }
-
-    pthread_rwlock_unlock(shared_mem->rwlock);
-
-    return result;
-}
-
-
-void shfree(void* ptr) {
-    if (!ptr)
-        return;
-
-    shm_t* shared_mem = (shm_t*)shm_base;
-    bloc_header_t* header;
-    
-    pthread_rwlock_wrlock(shared_mem->rwlock);
-
-    header = (bloc_header_t*)ptr - 1;
-    header->is_free = 1;
-
-    // Merge with next block if it's free
-    if (header->next && header->next->is_free) {
-        header->size += sizeof(bloc_header_t) + header->next->size;
-        header->next = header->next->next;
-    }
-
-    pthread_rwlock_unlock(shared_mem->rwlock);
 }
 
 
 void* shcalloc(size_t nmemb, size_t size) {
     size_t total_size;
-    void* ptr;
 
     total_size = nmemb * size;
     if (nmemb != 0 && total_size / nmemb != size)
         return NULL; // Check for overflow
 
-    ptr = shmalloc(total_size);
-    if (ptr)
+    shm_t* shm;
+    block_header_t* block = find_free_block(size, &shm);
+
+    if(!block){
+        perror("No free memory");
+        return NULL;
+    }
+
+    void* ptr = split_block(shm, block, size);
+
+    if (ptr){
+        pthread_rwlock_wrlock(&shm->rwlock);
         memset(ptr, 0, total_size);
+        pthread_rwlock_unlock(&shm->rwlock);
+    } else {
+        perror("Failed to split memory block");
+    }
 
     return ptr;
 }
 
 
 void* shrealloc(void* ptr, size_t size) {
-    shm_t* shared_mem = (shm_t*)shm_base;
-    bloc_header_t* header;
+    block_header_t* blk = (block_header_t*)(ptr - sizeof(block_header_t));
+    shm_t* shm = abs2shm(ptr);
     void* new_ptr;
 
-    if (!ptr)
-        return shmalloc(size);
+    if (!ptr) return shmalloc(size);
 
     if (size == 0) {
-        shfree(ptr);
+        shfree(abs2rel(ptr));
         return NULL;
     }
 
-    pthread_rwlock_wrlock(shared_mem->rwlock);
-
-    header = (bloc_header_t*)ptr - 1;
-    
-    if (header->size >= size) {
+    if (blk->size >= size) {
         // The current block is large enough
-        split_block(header, size);
-        new_ptr = ptr;
+        return split_block(shm, blk, size);
     } else {
         // Need to allocate a new block
-        pthread_rwlock_unlock(shared_mem->rwlock);
         new_ptr = shmalloc(size);
         if (new_ptr) {
-            memcpy(new_ptr, ptr, header->size);
-            shfree(ptr);
+            pthread_rwlock_wrlock(&shm->rwlock);
+            memcpy(new_ptr, ptr, blk->size);
+            pthread_rwlock_unlock(&shm->rwlock);
+            shfree(abs2rel(ptr));
         }
         return new_ptr;
     }
-
-    pthread_rwlock_unlock(shared_mem->rwlock);
 
     return new_ptr;
 }
 
 
-void shclean(){
-    shm_t* shared_mem = (shm_t*)shm_base;
-    bloc_header_t* header = shared_mem->root;
+// return 0 for success
+int shfree(relptr_t ptr) {
+    block_header_t* blk = (block_header_t*)rel2abs(ptr);
 
-    pthread_rwlock_wrlock(shared_mem->rwlock);
-
-    while(header->next){
-      if(header->is_free && header->next->is_free){
-        header->size += sizeof(bloc_header_t) + header->next->size;
-        header->next = header->next->next;
-      } else {
-        header = header->next;
-      }
+    if(!blk){
+      perror("Out-of-bounds relative pointer");
+      return 1;
     }
 
-    pthread_rwlock_unlock(shared_mem->rwlock);
+    if(blk->magic != BLK_MAGIC){
+      perror("Corrupted memory");
+      return 1;
+    }
+
+    if(blk->reference_count == 0){
+      perror("Cannot free memory, reference count is already 0");
+      return 1;
+    }
+
+    // This is an atomic operation, so no need to lock
+    blk->reference_count--;
 }
