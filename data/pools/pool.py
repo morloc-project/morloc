@@ -181,12 +181,15 @@ def _get_value(data: bytes, schema_str: str):
     cmd_type   = cmd[0]
     cmd_source = cmd[1]
     cmd_format = cmd[2]
+    cmd_status = cmd[5]
 
     if(cmd_type != PACKET_TYPE_DATA):
         raise FailingPacket("Expected a data packet")
 
     if cmd_format == PACKET_FORMAT_MSGPACK:
         deserializer = lambda x: mp.mesgpack_to_py(x, schema_str)
+    elif cmd_format == PACKET_FORMAT_TEXT:
+        deserializer = lambda x: x
     elif cmd_format == PACKET_FORMAT_JSON:
         raise FailingPacket("JSON no longer supported inside pools")
     else:
@@ -194,20 +197,28 @@ def _get_value(data: bytes, schema_str: str):
 
     data_start = 32 + offset
 
+    result = None
+
     if cmd_source == PACKET_SOURCE_MESG:
         try:
-            return(deserializer(data[data_start:]))
+            result = (deserializer(data[data_start:]))
         except Exception as e:
             raise FailingPacket(f"Failed to parse msg packet: {e!s}")
     elif cmd_source == PACKET_SOURCE_FILE:
         try:
             filename = data[data_start:].decode()
             with open(filename, 'rb') as file:
-                return(deserializer(file.read()))
+                result = deserializer(file.read())
         except Exception as e:
             raise FailingPacket(f"Failed to parse file packet: {e!s}")
     else:
         raise FailingPacket("Invalid source" )
+
+    if(cmd_status == PACKET_STATUS_FAIL):
+        raise FailingPacket(result)
+    else:
+        return result
+
 
 def _put_value(value, schema_str: str) -> bytes:
     """

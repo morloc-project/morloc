@@ -334,17 +334,28 @@ T _get_value(const Message& packet, const std::string& schema_str){
 
     char source = header.command[1];
     char format = header.command[2];
+    char status = header.command[5];
 
     std::string errmsg = "";
 
+    if (status == PACKET_STATUS_FAIL){
+        if(source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_TEXT){
+            std::string msg_str(packet.data + 32, packet.data + packet.length);
+            log_message("found unexpected text: " + msg_str);
+            throw std::runtime_error(msg_str);
+        } else {
+            throw std::runtime_error("Expected an error string to be formatted as as message with text");
+        }
+    }
+
     switch(source){
       case PACKET_SOURCE_MESG:
-        switch(format){
-          case PACKET_FORMAT_MSGPACK:
+        if(format == PACKET_FORMAT_MSGPACK){
             std::vector<char> msg(packet.data + 32, packet.data + packet.length);
             return mpk_unpack<T>(msg, schema_str);
+        } else {
+            log_message("Invalid format from mesg: " + std::to_string(format));
         }
-        log_message("Invalid format");
         break;
       case PACKET_SOURCE_FILE:
         switch(format){
@@ -368,10 +379,7 @@ T _get_value(const Message& packet, const std::string& schema_str){
                 }
                 return mpk_unpack<T>(msg, schema_str);
         }
-        errmsg = "Invalid format";
-        break;
-      case PACKET_SOURCE_NXDB:
-        errmsg = "Not yet supported";
+        errmsg = "Invalid format from file" + std::to_string(format);
         break;
       default:
         errmsg = "Invalid source";
@@ -380,6 +388,7 @@ T _get_value(const Message& packet, const std::string& schema_str){
 
     throw std::runtime_error(errmsg);
 }
+
 
 
 // Create a Unix domain socket
