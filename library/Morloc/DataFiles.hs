@@ -14,12 +14,12 @@ module Morloc.DataFiles
   ( poolTemplate
   , nexusTemplate
   , rSocketLib
-  , msgpackSource
-  , rmpack
-  , pympack
-  , pympackSetup
-  , pympackMakefile
-  , cppmpack
+  , libmorloc
+  , libcpplang
+  , libpylang
+  , libpylangMakefile
+  , libpylangSetup
+  , librlang
   ) where
 
 import Morloc.Namespace
@@ -42,31 +42,27 @@ nexusTemplate = decodeUtf8 $ $(embedFileRelative "data/nexus.py")
 rSocketLib :: (Text, Text)
 rSocketLib = ("socketr.c", decodeUtf8 $ $(embedFileRelative "data/misc/socketr.c"))
 
--- The main header and required source files for the mlcmpack library
--- Required, by all MessagePack-based pools
-msgpackSource :: (String, Text)
-msgpackSource = ("mlcmpack.h", decodeUtf8 $ $(embedFileRelative "data/msgpack/src/mlcmpack.h"))
 
--- A C file that defines the R binding to the mlcmpack MessagePack library
--- compiled into a shared library loaded by R pools
--- requires mlcmpack.h
-rmpack :: (String, Text)
-rmpack = ("mpackr.c", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/r/mpackr.c"))
+-- C library for universal binary formatting, serialization, and everything
+libmorloc :: (String, Text)
+libmorloc = ("morloc.h", decodeUtf8 $ $(embedFileRelative "data//morloc.h"))
 
--- header used in C++ pools
-cppmpack :: (String, Text)
-cppmpack = ("cppmpack.hpp", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/cpp/cppmpack.hpp"))
+-- R interface to morloc.h
+librlang :: (String, Text)
+librlang = ("rmorloc.c", decodeUtf8 $ $(embedFileRelative "data/lang/r/rmorloc.c"))
 
--- A Python C API program binding to the mlcmpack MessagePack library
--- will be built as a module and imported into python pools and the nexus
+-- C++ interface to morloc.h
+libcpplang :: (String, Text)
+libcpplang = ("cppmorloc.hpp", decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc.hpp"))
+
+-- Python interface to morloc.h
+-- built as a module and imported into python pools and the nexus
 -- requires libmlcmpack.so
-pympack :: (String, Text)
-pympack = ("pympack.c", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/py/pympack.c"))
+libpylang :: (String, Text)
+libpylang = ("pymorloc.c", decodeUtf8 $ $(embedFileRelative "data/lang/py/pymorloc.c"))
 
--- A setup script for building pympack.c
-pympackSetup :: (String, Text)
-pympackSetup = ("setup.py", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/py/setup.py"))
+libpylangSetup :: (String, Text)
+libpylangSetup = ("setup.py", decodeUtf8 $ $(embedFileRelative "data/lang/py/setup.py"))
 
--- A Makefile for building pympack.c
-pympackMakefile :: (String, Text)
-pympackMakefile = ("Makefile", decodeUtf8 $ $(embedFileRelative "data/msgpack/lang/py/Makefile"))
+libpylangMakefile :: (String, Text)
+libpylangMakefile = ("Makefile", decodeUtf8 $ $(embedFileRelative "data/lang/py/Makefile"))

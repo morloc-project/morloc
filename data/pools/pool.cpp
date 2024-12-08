@@ -40,8 +40,8 @@ std::string g_tmpdir;
 // <<<BREAK>>>
 // AUTO include statements end
 
-// Proper linking of cppmpack requires it be included AFTER the custom modules 
-#include "cppmpack.hpp"
+// Proper linking of cppmorloc requires it be included AFTER the custom modules 
+#include "cppmorloc.hpp"
 
 
 // AUTO serialization statements start

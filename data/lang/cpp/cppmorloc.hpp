@@ -1,5 +1,5 @@
-#ifndef __MLCMPACK_CPP_BINDINGS_HPP__
-#define __MLCMPACK_CPP_BINDINGS_HPP__
+#ifndef __CPPMORLOC_HPP__
+#define __CPPMORLOC_HPP__
 
 #include <vector>
 #include <tuple>
@@ -9,7 +9,7 @@
 #include <string>
 #include <cstring>
 
-#include "mlcmpack.h"
+#include "morloc.h"
 
 // The two main exported functions are mpk_pack and mpk_unpack. These translate
 // to and from MessagePack format given a schema.

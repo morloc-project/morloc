@@ -20,7 +20,7 @@ from contextlib import closing
 
 global_state = {"tmpdir" : ""}
 
-import pympack as mp
+import pymorloc as mp
 
 #### Packet handling
 

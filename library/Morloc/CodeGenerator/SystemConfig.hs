@@ -16,7 +16,7 @@ module Morloc.CodeGenerator.SystemConfig
 ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.DataFiles (rSocketLib, pympack, pympackSetup, pympackMakefile, msgpackSource, rmpack, cppmpack)
+import qualified Morloc.DataFiles as Files
 
 import qualified Morloc.Data.Text as MT
 import qualified Data.Text.IO as TIO
@@ -63,54 +63,46 @@ configureAll verbose force config = do
   let srcpath = configHome config </> "lib" </> "socketr.c"
       objpath = configHome config </> "lib" </> "socketr.o"
       libpath = configHome config </> "lib" </> "libsocketr.so"
-  compileCCodeIfNeeded (snd $ rSocketLib) srcpath libpath objpath
+  compileCCodeIfNeeded (snd $ Files.rSocketLib) srcpath libpath objpath
 
-  let mlcmsgpackHeader = includeDir </> fst msgpackSource
+  let libmorlocPath = includeDir </> fst Files.libmorloc
 
-  say "Creating mlcmpack header"
-  TIO.writeFile mlcmsgpackHeader (snd msgpackSource)
+  say "Creating morloc.h"
+  TIO.writeFile libmorlocPath (snd Files.libmorloc)
 
-  -- Check if mlcmpack.so exists
-  let soPath = libDir </> "libmlcmpack.so"
-  soExists <- doesFileExist soPath
+  say "Generating libmorloc.so"
+  -- this is a stupid hack to make gcc compile a header to a shared object
+  let tmpCFile = tmpDir </> "x.c"
+      soPath = libDir </> "libmorloc.so"
+  TIO.writeFile tmpCFile ("#include \"" <> MT.pack libmorlocPath <> "\"")
+  let gccArgs = [ "-shared", "-o", soPath, "-fPIC", tmpCFile ]
+  callProcess "gcc" gccArgs
+  removeFile tmpCFile
 
-  -- if the library doesn't exist, make it
-  unless (soExists && not force) $ do
-    say "Generating libmlcmpack.so"
-    -- this is a stupid hack to make gcc compile a header to a shared object
-    let tmpCFile = tmpDir </> "x.c"
-    TIO.writeFile tmpCFile ("#include \"" <> MT.pack mlcmsgpackHeader <> "\"")
-    let gccArgs = [ "-shared", "-o", soPath, "-fPIC", tmpCFile ]
-    callProcess "gcc" gccArgs
-    removeFile tmpCFile
+  say "Configuring C++ morloc api header"
+  TIO.writeFile (includeDir </> fst Files.libcpplang) (snd Files.libcpplang)
 
-  say "Configuring C++ MessagePack header"
-  TIO.writeFile (includeDir </> fst cppmpack) (snd cppmpack)
+  say "Configuring python MessagePack libraries"
+  let (libpyFilename, libpyCode) = Files.libpylang
+      (libpySetupFilename, libpySetupCode) = Files.libpylangSetup
+      (libpyMakefileFilename, libpyMakefileCode) = Files.libpylangMakefile
+      libpyPath = optDir </> libpyFilename
+      libpySetupPath = optDir </> libpySetupFilename
+      libpyMakePath = optDir </> libpyMakefileFilename
 
-  let pysoPath = optDir </> "pympack"
-  pysoExists <- doesFileExist pysoPath
-  unless (pysoExists && not force) $ do
-    say "Configuring python MessagePack libraries"
-    let (pympackFilename, pympackCode) = pympack
-    let (pympackSetupFilename, pympackSetupCode) = pympackSetup
-    let (pympackMakefileFilename, pympackMakefileCode) = pympackMakefile
-    let pymackPath = optDir </> pympackFilename
-    let pymackSetupPath = optDir </> pympackSetupFilename
-    let pymackMakePath = optDir </> pympackMakefileFilename
+  TIO.writeFile libpyPath libpyCode
+  TIO.writeFile libpySetupPath libpySetupCode
+  TIO.writeFile libpyMakePath libpyMakefileCode
 
-    TIO.writeFile pymackPath pympackCode
-    TIO.writeFile pymackSetupPath pympackSetupCode
-    TIO.writeFile pymackMakePath pympackMakefileCode
-
-    runCommand "Generating pympack" ("make -C " <> optDir <> " -f " <> pymackMakePath)
+  runCommand "Generating libpymorloc.so" ("make -C " <> optDir <> " -f " <> libpyMakePath)
 
 
-  say "Configuring R MessagePack libraries"
+  say "Configuring R morloc API libraries"
   compileCCodeIfNeeded
-    (snd rmpack)
-    (includeDir </> "mpackr.c")
-    (libDir </> "libmpackr.so")
-    (includeDir </> "mpackr.o")
+    (snd Files.librlang)
+    (includeDir </> fst Files.librlang)
+    (libDir </> "librmorloc.so")
+    (includeDir </> "librmorloc.o")
   where
 
   ok msg = "\ESC[32m" <> msg <> "\ESC[0m"

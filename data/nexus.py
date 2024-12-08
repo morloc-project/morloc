@@ -17,7 +17,7 @@ import tempfile
 # <<<BREAK>>>
 # AUTO include imports start
 
-import pympack as mp
+import pymorloc as mp
 
 # this determines how much whitespace is in the output
 JSON_SEPARATORS = (",", ":")

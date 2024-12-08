@@ -3,7 +3,7 @@
 #include <Rdefines.h>
 #include <R_ext/Arith.h>
 
-#include "mlcmpack.h"
+#include "morloc.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -573,7 +573,7 @@ SEXP mesgpack_to_r(SEXP r_mesgpack, SEXP r_schema_str){
     return obj;
 }
 
-void R_init_mlcmpack(DllInfo *info) {
+void R_init_rmorloc(DllInfo *info) {
     R_CallMethodDef callMethods[] = {
         {"to_voidstar", (DL_FUNC) &to_voidstar, 2},
         {"from_voidstar", (DL_FUNC) &from_voidstar, 2},

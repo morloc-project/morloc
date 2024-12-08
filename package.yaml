@@ -20,13 +20,14 @@ extra-source-files:
   - data/pools/pool.R
   - data/pools/pool.cpp
   - data/pools/pool.py
-  # msgpack
-  - data/msgpack/src/mlcmpack.h
+  # universal c library
+  - data/morloc.h
   # msgpack langs
-  - data/msgpack/lang/py/pympack.c
-  - data/msgpack/lang/py/setup.py
-  - data/msgpack/lang/r/mpackr.c
-  - data/msgpack/lang/cpp/cppmpack.hpp
+  - data/lang/cpp/cppmorloc.hpp
+  - data/lang/r/rmorloc.c
+  - data/lang/py/pymorloc.c
+  - data/lang/py/setup.py
+  - data/lang/py/Makefile
 
 default-extensions:
   - TypeOperators

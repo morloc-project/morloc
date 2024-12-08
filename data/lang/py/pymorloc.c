@@ -1,5 +1,5 @@
 #define PY_SSIZE_T_CLEAN
-#include "mlcmpack.h"
+#include "morloc.h"
 #include "Python.h"
 
 
@@ -207,7 +207,7 @@ static PyObject* from_voidstar(PyObject* self, PyObject* args) {
         return NULL;
     }
 
-    const Schema* schema = parse_schema(&schema_str);
+    Schema* schema = parse_schema(&schema_str);
     if (!schema) {
         PyErr_SetString(PyExc_ValueError, "Failed to parse schema");
         return NULL;
@@ -256,7 +256,7 @@ static PyObject* from_voidstar(PyObject* self, PyObject* args) {
     } while(0)
 
 
-void* toAnything(void* dest, Schema* schema, PyObject* obj) {
+void* toAnything(void* dest, const Schema* schema, PyObject* obj) {
     if (!dest) {
         dest = get_ptr(schema);
     }
@@ -342,7 +342,7 @@ void* toAnything(void* dest, Schema* schema, PyObject* obj) {
                     size = PyList_Size(obj);
                 } else if (PyBytes_Check(obj)) {
                     PyBytes_AsStringAndSize(obj, &data, &size);
-                } else { // PyUnicode_Check(obj)
+                } else {
                     data = PyUnicode_AsUTF8AndSize(obj, &size);
                 }
 
@@ -452,7 +452,7 @@ static PyObject* py_to_mesgpack(PyObject* self, PyObject* args) {
       return NULL;
   }
 
-  const Schema* schema = parse_schema(&schema_str);
+  Schema* schema = parse_schema(&schema_str);
   if (!schema) {
       PyErr_SetString(PyExc_ValueError, "py_to_mesgpack: Failed to parse schema");
       return NULL;
@@ -472,11 +472,13 @@ static PyObject* py_to_mesgpack(PyObject* self, PyObject* args) {
   if (exitcode != 0 || !msgpck_data) {
       PyErr_SetString(PyExc_RuntimeError, "py_to_mesgpack: Packing failed");
       free(msgpck_data);
+      free_schema(schema);
       return NULL;
   }
 
   // TODO: avoid memory copying here
   PyObject* mesgpack_bytes = PyBytes_FromStringAndSize(msgpck_data, msgpck_data_len);
+  free_schema(schema);
   free(msgpck_data);
 
   // free voidstar, we shan't be needing it now
@@ -495,9 +497,13 @@ static PyObject* mesgpack_to_py(PyObject* self, PyObject* args) {
         return NULL;
     }
 
-    const Schema* schema = parse_schema(&schema_str);
+    Schema* schema = parse_schema(&schema_str);
 
     int exitcode = unpack_with_schema(msgpck_data, msgpck_data_len, schema, &voidstar);
+    if(exitcode != 0){
+        PyErr_SetString(PyExc_TypeError, "unpack_with_schema failed in mesgpack_to_py");
+        return NULL;
+    }
 
     PyObject* obj = fromAnything(schema, voidstar);
     if (obj == NULL) {
@@ -521,14 +527,14 @@ static PyMethodDef Methods[] = {
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 
-static struct PyModuleDef pympack = {
+static struct PyModuleDef pymorloc = {
     PyModuleDef_HEAD_INIT,
-    "pympack",
+    "pymorloc",
     "Python interface to Morloc binary and MessagePack data",
     -1,
     Methods
 };
 
-PyMODINIT_FUNC PyInit_pympack(void) {
-    return PyModule_Create(&pympack);
+PyMODINIT_FUNC PyInit_pymorloc(void) {
+    return PyModule_Create(&pymorloc);
 }

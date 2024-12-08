@@ -2,5 +2,5 @@
 
 all:
 	python setup.py build_ext --inplace
-	cp -s pympack.cpython* pympack
-	rm -rf build pympack.c setup.py Makefile
+	cp -fs pymorloc.cpython* pymorloc
+	rm -rf build pymorloc.c setup.py Makefile

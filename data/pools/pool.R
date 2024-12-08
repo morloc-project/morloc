@@ -4,7 +4,7 @@
 
 dyn.load("~/.morloc/lib/libsocketr.so")
 
-dyn.load("~/.morloc/lib/libmpackr.so")
+dyn.load("~/.morloc/lib/librmorloc.so")
 
 msgpack_pack <- function(obj, schema) {
     .Call("r_to_mesgpack", obj, schema)

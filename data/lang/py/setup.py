@@ -1,10 +1,10 @@
 import os
 from distutils.core import setup, Extension
 
-module = Extension('pympack',
-                   sources=['pympack.c'],
+module = Extension('pymorloc',
+                   sources=['pymorloc.c'],
                    include_dirs=[os.path.expanduser('~/.morloc/include')],
                    library_dirs=[os.path.expanduser('~/.morloc/lib')],
-                   libraries=['mlcmpack'])
+                   libraries=['morloc'])
 
-setup(name='pympack', version='0.1', ext_modules=[module])
+setup(name='pymorloc', version='0.1', ext_modules=[module])
