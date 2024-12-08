@@ -30,11 +30,13 @@ PACKET_TYPE_DEL  <- 0x06
 
 PACKET_SOURCE_MESG <- 0x00 # the message contains the data
 PACKET_SOURCE_FILE <- 0x01 # the message is a path to a file of data
-PACKET_SOURCE_NXDB <- 0x02 # the message is a key to the nexus uses to access the data
+PACKET_SOURCE_RPTR <- 0x02 # the message is a path to a file of data
 
-PACKET_FORMAT_JSON    <- 0x00
-PACKET_FORMAT_MSGPACK <- 0x01
-PACKET_FORMAT_TEXT    <- 0x02
+PACKET_FORMAT_JSON     <- 0x00
+PACKET_FORMAT_MSGPACK  <- 0x01
+PACKET_FORMAT_TEXT     <- 0x02
+PACKET_FORMAT_DATA     <- 0x03
+PACKET_FORMAT_VOIDSTAR <- 0x04
 
 PACKET_COMPRESSION_NONE <- 0x00 # uncompressed
 

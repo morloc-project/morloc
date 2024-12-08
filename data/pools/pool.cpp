@@ -62,12 +62,13 @@ std::string g_tmpdir;
 
 #define PACKET_SOURCE_MESG  0x00 // the message contains the data
 #define PACKET_SOURCE_FILE  0x01 // the message is a path to a file of data
-#define PACKET_SOURCE_NXDB  0x02 // the message is a key to the nexus uses to access the data
+#define PACKET_SOURCE_RPTR  0x02 // the message is a relative pointer to shared memory
 
 #define PACKET_FORMAT_JSON     0x00
 #define PACKET_FORMAT_MSGPACK  0x01
 #define PACKET_FORMAT_TEXT     0x02
 #define PACKET_FORMAT_DATA     0x03 // raw binary data
+#define PACKET_FORMAT_VOIDSTAR 0x04 // binary morloc formatted data
 
 #define PACKET_COMPRESSION_NONE  0x00 // uncompressed
 #define PACKET_ENCRYPTION_NONE   0x00 // unencrypted
