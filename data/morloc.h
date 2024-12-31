@@ -861,8 +861,6 @@ static int mpack_is_be(void)
 #include <pthread.h>
 #include <errno.h>
 
-
-
 #define SHM_MAGIC 0xFECA0DF0
 #define BLK_MAGIC 0x0CB10DF0
 
@@ -935,7 +933,7 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size);
 void shclose();
 void* shmalloc(size_t size);
 void* shmemcpy(void* dest, size_t size);
-int shfree(void* ptr);
+int shfree(absptr_t ptr);
 void* shcalloc(size_t nmemb, size_t size);
 void* shrealloc(void* ptr, size_t size);
 size_t total_shm_size();
@@ -1128,7 +1126,7 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size) {
     }
 
     // Adjust sizes based on whether we created a new object or opened an existing one
-    full_size = created ? full_size : sb.st_size;
+    full_size = created ? full_size : (size_t)sb.st_size;
     shm_size = full_size - sizeof(shm_t);
 
     // Cast the mapped memory to our shared memory structure
@@ -1472,31 +1470,11 @@ void* shmemcpy(void* dest, size_t size){
 }
 
 void* shcalloc(size_t nmemb, size_t size) {
-    size_t total_size;
-
-    total_size = nmemb * size;
-    if (nmemb != 0 && total_size / nmemb != size)
-        return NULL; // Check for overflow
-
-    shm_t* shm;
-    block_header_t* block = find_free_block(size, &shm);
-
-    if(!block){
-        perror("No free memory");
-        return NULL;
+    void* data = shmalloc(nmemb * size);
+    if(data){
+       memset(data, 0, nmemb * size);
     }
-
-    void* ptr = split_block(shm, block, size);
-
-    if (ptr){
-        pthread_rwlock_wrlock(&shm->rwlock);
-        memset(ptr, 0, total_size);
-        pthread_rwlock_unlock(&shm->rwlock);
-    } else {
-        perror("Failed to split memory block");
-    }
-
-    return ptr;
+    return data;
 }
 
 
@@ -1537,7 +1515,15 @@ void* shrealloc(void* ptr, size_t size) {
 //
 // return 0 for success
 int shfree(absptr_t ptr) {
-    block_header_t* blk = (block_header_t*)(ptr - sizeof(block_header_t));
+
+    // Check if the pointer is accessible
+    if (ptr == NULL) {
+        errno = EFAULT;
+        perror("Invalid or inaccessible shared memory pool pointer - perhaps the pool is closed?");
+        return 1;
+    }
+
+    block_header_t* blk = (block_header_t*)((char*)ptr - sizeof(block_header_t));
 
     if(!blk){
       perror("Out-of-bounds relative pointer");
@@ -1557,14 +1543,15 @@ int shfree(absptr_t ptr) {
     // This is an atomic operation, so no need to lock
     blk->reference_count--;
 
-    // Set memory to 0, this may be perhaps be removed in the future for
-    // performance sake, but for now it helps with diagnostics. Note that the
-    // head remains, it may be used to merge free blocks in the future.
-    memset(blk + 1, 0, blk->size);
+    if (blk->reference_count == 0) {
+        // Set memory to 0, this may be perhaps be removed in the future for
+        // performance sake, but for now it helps with diagnostics. Note that the
+        // head remains, it may be used to merge free blocks in the future.
+        memset(blk + 1, 0, blk->size);
+    }
 
     return 0;
 }
-
 
 size_t total_shm_size(){
     size_t total_size = 0;
@@ -1653,7 +1640,7 @@ typedef struct Schema {
 
 typedef struct Array {
   size_t size;
-  void* data;
+  relptr_t data;
 } Array;
 
 // Prototypes
@@ -1784,32 +1771,6 @@ void* get_ptr(const Schema* schema){
     void* ptr = (void*)shmalloc(schema->width);
     return ptr;
 }
-
-void* string_data(const char* x, size_t size){
-  Array* data = (Array*)malloc(sizeof(Array));
-  data->size = size;
-  // TODO - only copy if the string data is not already in shared memory
-  data->data = (char*)malloc(size * sizeof(char));
-  memcpy(data->data, x, size);
-  return data;
-}
-
-void* tuple_data_(Schema** params, size_t size, size_t width){
-  return (void*)malloc(width);
-}
-
-Array* array_data(void* data, size_t width, size_t size){
-  Array* array;
-  if(data){
-      array = (Array*)data;
-  } else {
-      array = (Array*)malloc(sizeof(Array));
-  }
-  array->size = size;
-  array->data = (void*)malloc(size * width);
-  return array;
-}
-
 
 // packing ####
 
@@ -1993,7 +1954,6 @@ void free_schema(Schema* schema) {
     free(schema);
 }
 
-
 //  The main function for writing MessagePack
 int pack_data(
   const void* mlc,           // input data structure
@@ -2068,12 +2028,12 @@ int pack_data(
     switch(schema->type){
       case MORLOC_STRING:
         array = (Array*)mlc;
-        write_to_packet(array->data, packet, packet_ptr, packet_remaining, array->size);
+        write_to_packet(rel2abs(array->data), packet, packet_ptr, packet_remaining, array->size);
         break;
       case MORLOC_ARRAY:
         {
           array_length = ((Array*)mlc)->size;
-          char* data = (char*)((Array*)mlc)->data;
+          char* data = (char*)rel2abs(((Array*)mlc)->data);
           array_schema = schema->parameters[0];
           array_width = array_schema->width;
 
@@ -2156,30 +2116,109 @@ int pack(const void* mlc, const char* schema_str, char** mpk, size_t* mpk_size) 
 
 
 
+// nested msg_sizers
+size_t msg_size(const char* mgk, size_t mgk_size, const Schema* schema);
+size_t msg_size_r(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+size_t msg_size_bytes(mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+size_t msg_size_array(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+size_t msg_size_tuple(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+size_t msg_size_map(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+
+size_t msg_size_bytes(mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+    mpack_read(tokbuf, buf_ptr, buf_remaining, token);
+    size_t array_size = token->length;
+
+    size_t str_idx = 0;
+    while((array_size - str_idx) > 0){
+        mpack_read(tokbuf, buf_ptr, buf_remaining, token);
+        str_idx += token->length;
+    }
+    return array_size + sizeof(Array);
+}
+
+size_t msg_size_array(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+    mpack_read(tokbuf, buf_ptr, buf_remaining, token);
+    size_t array_length = token->length;
+    size_t size = sizeof(Array);
+    for(size_t i = 0; i < array_length; i++){
+        size += msg_size_r(schema, tokbuf, buf_ptr, buf_remaining, token);
+    }
+    return size;
+}
+
+size_t msg_size_tuple(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+    // parse the mesgpack tuple
+    mpack_read(tokbuf, buf_ptr, buf_remaining, token);
+    assert(token->length == schema->size); 
+    size_t size = 0;
+    for(size_t i = 0; i < schema->size; i++){
+        size += msg_size_r(schema->parameters[i], tokbuf, buf_ptr, buf_remaining, token);
+    }
+    return size;
+}
+
+size_t msg_size_r(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+    switch(schema->type){
+      case MORLOC_NIL:
+      case MORLOC_BOOL:
+      case MORLOC_SINT8:
+      case MORLOC_SINT16:
+      case MORLOC_SINT32:
+      case MORLOC_SINT64:
+      case MORLOC_UINT8:
+      case MORLOC_UINT16:
+      case MORLOC_UINT32:
+      case MORLOC_UINT64:
+      case MORLOC_FLOAT32:
+      case MORLOC_FLOAT64:
+        mpack_read(tokbuf, buf_ptr, buf_remaining, token);
+        return schema->width;
+      case MORLOC_STRING:
+        return msg_size_bytes(tokbuf, buf_ptr, buf_remaining, token);
+      case MORLOC_ARRAY:
+        return msg_size_array(schema->parameters[0], tokbuf, buf_ptr, buf_remaining, token);
+      case MORLOC_MAP:
+      case MORLOC_TUPLE:
+        return msg_size_tuple(schema, tokbuf, buf_ptr, buf_remaining, token);
+      default:
+        return 0;
+    }
+}
+
+size_t msg_size(const char* mgk, size_t mgk_size, const Schema* schema) {
+    size_t buf_remaining = mgk_size;
+
+    mpack_tokbuf_t tokbuf = MPACK_TOKBUF_INITIAL_VALUE;
+    mpack_token_t token;
+    return msg_size_r(schema, &tokbuf, &mgk, &buf_remaining, &token);
+}
+
+
+
 // terminal parsers
 int parse_bool(        void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
 int parse_nil(         void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_bytes(       void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+int parse_bytes(       void* mlc, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
 int parse_int(    morloc_serial_type, void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
 int parse_float(  morloc_serial_type, void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
 
 // nested parsers
-int parse_array( void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_map(   void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_tuple( void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_obj(   void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+int parse_array( void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+int parse_map(   void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+int parse_tuple( void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+int parse_obj(   void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
 
 int parse_nil(void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
-    int8_t result = 0;
-    memcpy(mlc, &result, sizeof(int8_t));
+    *((int8_t*)mlc) = (int8_t)0;
     return 0;
 }
 
 int parse_bool(void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
-    bool result = mpack_unpack_boolean(*token);
-    memcpy(mlc, &result, sizeof(bool));
+    // boolean here needs to be uint8 since the C `bool` type is not guaranteed
+    // to be 1 byte, it is likely typedefed to `int`, which is 32 bit.
+    *((uint8_t*)mlc) = (uint8_t) mpack_unpack_boolean(*token) ? 1 : 0;
     return 0;
 }
 
@@ -2253,39 +2292,19 @@ int parse_float(morloc_serial_type schema_type, void* mlc, mpack_tokbuf_t* tokbu
 }
 
 
-char* parse_key(mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
-
-    mpack_read(tokbuf, buf_ptr, buf_remaining, token);
-    size_t size = token->length;
-    char* key = (char*)calloc(token->length + 1, sizeof(char));
-
-    size_t str_idx = 0;
-
-    while(size - str_idx > 0){
-        mpack_read(tokbuf, buf_ptr, buf_remaining, token);
-        memcpy(
-          key + str_idx,
-          token->data.chunk_ptr,
-          token->length * sizeof(char)
-        );
-        str_idx += token->length;
-    }
-
-    return key;
-}
-
-int parse_bytes(void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+int parse_bytes(void* mlc, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     Array* result = (Array*) mlc;
 
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
     result->size = token->length;
-    result->data = (char*)malloc(result->size * sizeof(char));
+    result->data = abs2rel(*cursor);
+    *cursor = (char*)(*cursor) + result->size;
 
     size_t str_idx = 0;
     while((result->size - str_idx) > 0){
         mpack_read(tokbuf, buf_ptr, buf_remaining, token);
         memcpy(
-          (char*)result->data + str_idx,
+          rel2abs(result->data + str_idx),
           token->data.chunk_ptr,
           token->length * sizeof(char)
         );
@@ -2294,17 +2313,18 @@ int parse_bytes(void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t*
     return 0;
 }
 
-int parse_array(void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+int parse_array(void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     int exitcode = 0;
     Array* result = (Array*) mlc;
 
     size_t element_size = schema->width;
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
     result->size = token->length;
-    result->data = (void*)calloc(result->size, element_size);
+    result->data = abs2rel(*cursor);
+    *cursor = (char*)(*cursor) + result->size * element_size;
 
     for(size_t i = 0; i < result->size; i++){
-        exitcode = parse_obj((char*)result->data + i * element_size, schema, tokbuf, buf_ptr, buf_remaining, token);
+        exitcode = parse_obj(rel2abs(result->data + i * element_size), schema, cursor, tokbuf, buf_ptr, buf_remaining, token);
         if(exitcode != 0){
           return exitcode;
         }
@@ -2312,14 +2332,14 @@ int parse_array(void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const c
     return 0;
 }
 
-int parse_tuple(void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+int parse_tuple(void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     size_t offset = 0;
     int exitcode = 0;
 
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
 
     for(size_t i = 0; i < schema->size; i++){
-        exitcode = parse_obj((char*)mlc + offset, schema->parameters[i], tokbuf, buf_ptr, buf_remaining, token);
+        exitcode = parse_obj((char*)mlc + offset, schema->parameters[i], cursor, tokbuf, buf_ptr, buf_remaining, token);
         if(exitcode != 0){
           return exitcode;
         }
@@ -2329,7 +2349,7 @@ int parse_tuple(void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const c
     return 0;
 }
 
-int parse_obj(void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+int parse_obj(void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     switch(schema->type){
       case MORLOC_NIL:
         return parse_nil(mlc, tokbuf, buf_ptr, buf_remaining, token);
@@ -2348,27 +2368,33 @@ int parse_obj(void* mlc, const Schema* schema, mpack_tokbuf_t* tokbuf, const cha
       case MORLOC_FLOAT64:
         return parse_float(schema->type, mlc, tokbuf, buf_ptr, buf_remaining, token);
       case MORLOC_STRING:
-        return parse_bytes(mlc, tokbuf, buf_ptr, buf_remaining, token);
+        return parse_bytes(mlc, cursor, tokbuf, buf_ptr, buf_remaining, token);
       case MORLOC_ARRAY:
-        return parse_array(mlc, schema->parameters[0], tokbuf, buf_ptr, buf_remaining, token);
+        return parse_array(mlc, schema->parameters[0], cursor, tokbuf, buf_ptr, buf_remaining, token);
       case MORLOC_MAP:
       case MORLOC_TUPLE:
-        return parse_tuple(mlc, schema, tokbuf, buf_ptr, buf_remaining, token);
+        return parse_tuple(mlc, schema, cursor, tokbuf, buf_ptr, buf_remaining, token);
       default:
         return 1;
     }
 }
 
 int unpack_with_schema(const char* mgk, size_t mgk_size, const Schema* schema, void** mlcptr) {
+
+    // Pass once over the MessagePack data, calculating the allocation size
+    size_t size = msg_size(mgk, mgk_size, schema);
+
+    void* mlc = (void*)shmalloc(size);
+
     // Use the existing unpack_with_schema function, but adapt it to the new prototype
     size_t buf_remaining = mgk_size;
 
     mpack_tokbuf_t tokbuf = MPACK_TOKBUF_INITIAL_VALUE;
     mpack_token_t token;
 
-    void* mlc = (void*)malloc(schema->width);
+    void* cursor = (void*)((char*)mlc + schema->width);
 
-    int exitcode = parse_obj(mlc, schema, &tokbuf, &mgk, &buf_remaining, &token);
+    int exitcode = parse_obj(mlc, schema, &cursor, &tokbuf, &mgk, &buf_remaining, &token);
 
     *mlcptr = mlc;
 

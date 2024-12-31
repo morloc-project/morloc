@@ -381,6 +381,21 @@ T _get_value(const Message& packet, const std::string& schema_str){
         }
         errmsg = "Invalid format from file" + std::to_string(format);
         break;
+      case PACKET_SOURCE_RPTR:
+        if(format == PACKET_FORMAT_VOIDSTAR){
+           // convert value to size_t 
+           size_t relptr = (size_t)read_uint64(packet.data, 32);
+           log_message("Made relptr for argument: " + std::to_string(relptr));
+           // convert relptr to shared pointer
+           void* absptr = rel2abs(relptr);
+           // convert voidstar to local type
+           const char* schema_cstr = schema_str.c_str();
+           const Schema* schema = parse_schema(&schema_cstr);
+           T* dumby = nullptr;
+           return fromAnything(schema, absptr, dumby);
+        } else {
+            errmsg = "For RPTR source, expected voidstar format";
+        }
       default:
         errmsg = "Invalid source";
         break;
@@ -752,14 +767,22 @@ void run_job(int client_fd) {
 
 
 int main(int argc, char* argv[]) {
-    if (argc != 3) {
-        std::cerr << "Usage: " << argv[0] << " <socket_path>" << " <tmpdir>\n";
+    if (argc != 4) {
+        std::cerr << "Usage: " << argv[0] << " <socket_path>" << " <tmpdir>" << "<shm_basename>\n";
         return 1;
     }
+
+    // path to the socket file
     const char* socket_path = argv[1];
 
-    // give a value to the global variable storing the main temporary directory
+    // global variable storing the main temporary directory
     g_tmpdir = std::string(argv[2]);
+
+    // the basename for the shared memory files (i.e., in /dev/shm)
+    const char* shm_basename = argv[3];
+
+    // create the shared memory mappings
+    shm_t* shm = shinit(shm_basename, 0, 0xffff);
 
     log_message("Server starting with socket path: " + std::string(socket_path));
 

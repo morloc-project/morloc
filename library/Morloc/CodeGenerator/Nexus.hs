@@ -137,7 +137,7 @@ writeType Nothing  t = [idoc|print('''    return: #{pretty t}''')|]
 functionT :: FData -> MDoc
 functionT (Socket lang _ _, subcommand, mid, t, sockets, schemas, return_schema) =
   [idoc|
-def call_#{subcommand}(args, tmpdir):
+def call_#{subcommand}(args, tmpdir, shm_basename):
     if len(args) != #{pretty (nargs t)}:
         clean_exit("Expected #{pretty (nargs t)} arguments to '#{subcommand}', given " + str(len(args)))
     else:
@@ -157,14 +157,14 @@ def call_#{subcommand}(args, tmpdir):
     makeSocketDoc :: Socket -> MDoc
     makeSocketDoc (Socket lang' cmdDocs pipeDoc) =
       tupled [ dquotes . pretty $ ML.showLangName lang'
-             , list (map dquotes cmdDocs <> [pipeDoc, "tmpdir"])
+             , list (map dquotes cmdDocs <> [pipeDoc, "tmpdir", "shm_basename"])
              , pipeDoc
              ]
 
 functionCT :: NexusCommand -> MDoc
 functionCT (NexusCommand cmd _ json_str args subs) =
   [idoc|
-def call_#{pretty cmd}(args, tmpdir):
+def call_#{pretty cmd}(args, tmpdir, shm_basename):
     if len(args) != #{pretty $ length args}:
         sys.exit("Expected #{pretty $ length args} arguments to '#{pretty cmd}', given " + str(len(args)))
     else:

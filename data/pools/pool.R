@@ -409,9 +409,11 @@ handle_finished_client <- function(job){
   .Call("R_close_socket", job$client_fd)
 }
 
-main <- function(socket_path) {
+main <- function(socket_path, shm_basename) {
   # Setup a new server that uses a given path for the socket address
   server_fd <- .Call("R_new_server", socket_path)
+
+  # START SHM shm_basename
 
   if (server_fd == -1) {
     .log("Error creating server")
@@ -462,8 +464,8 @@ main <- function(socket_path) {
 
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) != 2) {
-  cat("Usage: Rscript pipe.R <socket_path> <tmpdir>\n", file=stderr())
+if (length(args) != 3) {
+  cat("Usage: Rscript pipe.R <socket_path> <tmpdir> <shm_basename>\n", file=stderr())
   quit(status = 1)
 }
 
@@ -471,8 +473,9 @@ tryCatch(
   {
     socket_path <- args[1]
     global_state.tmpdir <- args[2]
+    shm_basename <- args[2]
 
-    result <- main(socket_path)
+    result <- main(socket_path, shm_basename)
     quit(status = result)
   },  error = function(e) {
       .log(paste("Pool failed:", e$message))

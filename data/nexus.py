@@ -12,6 +12,7 @@ import struct
 import json
 import traceback
 import tempfile
+import hashlib
 
 # AUTO include imports start
 # <<<BREAK>>>
@@ -112,9 +113,19 @@ def cleanup():
 
 
 def clean_exit(exit_code, msg=""):
-    cleanup()
     if msg:
         print(msg, file=sys.stderr)
+
+    try:
+        cleanup()
+    except Exception as e:
+        print(str(e), file=sys.stderr)
+
+    try:
+        mp.shm_close()
+    except Exception as e:
+        print(str(e), file=sys.stderr)
+
     sys.exit(exit_code)
 
 
@@ -436,7 +447,8 @@ def print_return(data, schema_str):
     else:
         clean_exit(1, f"Implementation bug: expected data packet: {str(data)}")
 
-    isgood = False
+    content = None
+    isgood = True
     error = ""
 
     if cmd_source == PACKET_SOURCE_MESG:
@@ -446,19 +458,27 @@ def print_return(data, schema_str):
         with open(filename, 'rb') as file:
             content = file.read()
         os.unlink(filename)  # Delete the temporary file
-
-
-    if cmd_format == PACKET_FORMAT_JSON:
+    elif cmd_source == PACKET_SOURCE_RPTR:
+        relptr = _unpack("Q", data[data_start:])[0]
+        _log(f"Made relative pointer {relptr!s} for return")
+        content = mp.from_shm(relptr, schema_str)
+    if not content:
+        error = "Unexpected source"
+        isgood = False
+    elif cmd_format == PACKET_FORMAT_JSON:
         print(content, file=outfile)
         isgood = True
 
-    if cmd_format == PACKET_FORMAT_MSGPACK:
+    elif cmd_format == PACKET_FORMAT_MSGPACK:
         try:
             json.dump(mp.mesgpack_to_py(content, schema_str), fp = sys.stdout, separators = JSON_SEPARATORS)
         except Exception as e:
             _log(trace(f"Failed to read output MessagePack format with error {str(e)}:\n hex = {hex(content)}\n chr = {str(content)}"))
-        print() # just for that adorable little newline
+        print() # newline
         isgood = True
+    elif cmd_format == PACKET_FORMAT_VOIDSTAR:
+        json.dump(content, fp = sys.stdout, separators = JSON_SEPARATORS)
+        print() # newline
 
     # Exit with the proper error code
     if isgood:
@@ -539,21 +559,18 @@ def get_format_from_data(binary_data):
 
 def handle_json_file_argument(filename, schema):
     """
-    Convert the JSON file to MessagePack
-
-    If the file is short, then pass as message.
-
-    Otherwise, write the JSON data to a MessagePack file with extenssion .mpk
+    Read JSON file into shared memory and store relative pointer in the returned packet
     """
-    data = mp.py_to_mesgpack((json_deserialize(filename, schema, is_file = True)), schema)
-
-    if len(data) <= 65536 - 32:
-        return _make_data(data)
-    else:
-        msgpack_filename = os.path.splitext(filename)[0] + ".mpk"
-        with open(msgpack_filename, "wb") as fh:
-            fh.write(data)
-        return _make_data(msgpack_filename.encode("utf8"), src=PACKET_SOURCE_FILE)
+    # TODO: Rather than parse the JSON to a pyobj and then cast it to voidstar,
+    # I should just use a C JSON parser and go directly to voidstar. Or even
+    # better, I should pass it along as a JSON file and then load it into memory
+    # when it is actually needed. Currently doing so would be problematic since
+    # I don't want to require every language have its own JSON parser (they are
+    # rather heavy things). But if the JSON parser is in morloc.h, then life
+    # will be easy.
+    relptr = mp.to_shm(json_deserialize(filename, schema, is_file = True), schema)
+    _log(f"Made relative pointer {relptr!s} for json file")
+    return _make_data(_pack("Q", relptr), src=PACKET_SOURCE_RPTR, fmt=PACKET_FORMAT_VOIDSTAR)
 
 def handle_msgpack_file_argument(filename):
     """
@@ -585,12 +602,16 @@ def prepare_call_packet(mid, args, schemas):
             # or compressed)
             if is_file:
                 if get_format_from_data(data) == PACKET_FORMAT_JSON:
-                    packet = _make_data(mp.py_to_mesgpack(json_deserialize(data, schema), schema))
+                    relptr = mp.to_shm(json_deserialize(data, schema), schema)
+                    _log(f"Made relative pointer {relptr!s} for some file")
+                    packet = _make_data(_pack("Q", relptr), src=PACKET_SOURCE_RPTR, fmt=PACKET_FORMAT_VOIDSTAR)
                 else:
                     packet = _make_data(arg)
             # if data is not from a file, then it must be json
             else:
-                packet = _make_data(mp.py_to_mesgpack(json_deserialize(data, schema), schema))
+                relptr = mp.to_shm(json_deserialize(data, schema), schema)
+                _log(f"Made relative pointer {relptr!s} for argument")
+                packet = _make_data(_pack("Q", relptr), src=PACKET_SOURCE_RPTR, fmt=PACKET_FORMAT_VOIDSTAR)
 
         arg_msgs.append(packet)
 
@@ -648,13 +669,6 @@ def run_command(mid, args, pool_lang, sockets, arg_schema, return_schema):
 
 
 
-def dispatch(cmd, args, tmpdir):
-    if cmd in ["-h", "--help", "-?", "?"]:
-        usage()
-    else:
-        command_table[cmd](args, tmpdir)
-
-
 def opt_name(short="", long=""):
     name = "<wtf>"
     if short and long:
@@ -698,13 +712,18 @@ def validate_args(args):
             print(errmsg, file=sys.stderr)
             sys.exit(1)
 
+def make_shm_pool_name(base="morloc_"):
+    randhash = hashlib.md5(str(time.time_ns() + os.getpid() * 1000).encode("utf-8")).hexdigest()[0:8]
+    return base + str(randhash)
 
 if __name__ == "__main__":
 
     cli_args = sys.argv
 
     if len(cli_args) == 1:
+        # `usage` is automatically generated
         usage()
+        sys.exit(0)
 
     # -d <dirname> use the given directory, rather than a temporary one
     opts["wd"] = get_opt(cli_args, short="d")
@@ -715,17 +734,24 @@ if __name__ == "__main__":
     # --leave-open - do not delete pipes and close lang servers on cleanup
     opts["leave-open"] = get_flag(cli_args, long="leave-open")
 
+    if cli_args[1] in ["-h", "--help", "-?", "?"]:
+        usage()
+        sys.exit(0)
+
     validate_args(cli_args)
 
     cmd = cli_args[1]
     cmd_args = cli_args[2:]
 
+    shm_basename = make_shm_pool_name()
+    mp.shm_start(shm_basename, 0xffff)
+
     if opts["wd"]:
         os.makedirs(opts["wd"], exist_ok=True)
-        dispatch(cmd, cmd_args)
+        command_table[cmd](cmd_args, tmpdir=opts["wd"], shm_basename=shm_basename)
     else:
         base_dir = os.path.join(MORLOC_HOME, "tmp")
         os.makedirs(base_dir, exist_ok=True)
 
         with tempfile.TemporaryDirectory(dir=base_dir) as tmpdir:
-            dispatch(cmd, cmd_args, tmpdir)
+            command_table[cmd](cmd_args, tmpdir, shm_basename)

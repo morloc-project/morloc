@@ -1,7 +1,6 @@
 #### PREAMBLE
 
 import sys
-import tempfile
 import os
 import struct
 
@@ -186,7 +185,9 @@ def _get_value(data: bytes, schema_str: str):
     if(cmd_type != PACKET_TYPE_DATA):
         raise FailingPacket("Expected a data packet")
 
-    if cmd_format == PACKET_FORMAT_MSGPACK:
+    if cmd_format == PACKET_FORMAT_VOIDSTAR:
+        deserializer = lambda x: mp.from_shm(x, schema_str)
+    elif cmd_format == PACKET_FORMAT_MSGPACK:
         deserializer = lambda x: mp.mesgpack_to_py(x, schema_str)
     elif cmd_format == PACKET_FORMAT_TEXT:
         deserializer = lambda x: x
@@ -199,7 +200,16 @@ def _get_value(data: bytes, schema_str: str):
 
     result = None
 
-    if cmd_source == PACKET_SOURCE_MESG:
+    if cmd_source == PACKET_SOURCE_RPTR:
+        relptr = _unpack("Q", data[data_start:])[0]
+        _log(f"relptr = {relptr!s}")
+        try:
+            result = deserializer(relptr)
+        except Exception as e:
+            _log(f"deserialize failed with error {e!s}")
+            raise FailingPacket(f"Deserialize failed on {e!s}")
+        _log(f"result={result!s}")
+    elif cmd_source == PACKET_SOURCE_MESG:
         try:
             result = (deserializer(data[data_start:]))
         except Exception as e:
@@ -230,27 +240,11 @@ def _put_value(value, schema_str: str) -> bytes:
     be a key or filename needed to retrieve it.
     """
 
-    _log("1 .....")
-
-    try:
-        _log(f"value = {value!s}")
-        _log(f"schema = {schema_str!s}")
-        data = mp.py_to_mesgpack(value, schema_str)
-        _log("1a")
-    except Exception as e:
-        _log("1b")
-        raise FailingPacket(f"Could not serialize data: {e!s}")
-
-    _log("2")
-
-    if len(data) <= 65536 - 32:
-        return _make_data(data)
+    relptr = mp.to_shm(value, schema_str)
+    if relptr != None:
+        return _make_data(_pack("Q", relptr), src=PACKET_SOURCE_RPTR, fmt=PACKET_FORMAT_VOIDSTAR)
     else:
-        # for large data, write a temporary file
-        with tempfile.NamedTemporaryFile(delete=False, dir=global_state["tmpdir"], mode='wb') as temp_file:
-            temp_file.write(data)
-            tmpfilename = temp_file.name
-        return _make_data(tmpfilename.encode("utf8"), src=PACKET_SOURCE_FILE)
+        raise FailingPacket(f"Failed to convert value to voidstar")
 
 def _stream_data(conn):
     first_packet = conn.recv(BUFFER_SIZE)
@@ -483,8 +477,9 @@ if __name__ == "__main__":
     try:
         socket_path = sys.argv[1]
         global_state["tmpdir"] = sys.argv[2]
+        shm_basename = sys.argv[3]
+        mp.shm_start(shm_basename, 0xffff)
         server(socket_path)
     except Exception as e:
         _log(f"Python pool failed: {e!s}")
         sys.exit(1)
-
