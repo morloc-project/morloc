@@ -1222,27 +1222,35 @@ shm_t* shopen(size_t volume_index) {
 
 void shclose() {
     for (int i = 0; i < MAX_VOLUME_NUMBER; i++) {
-        if (volumes[i] != NULL) {
-            // Get the name of the shared memory object
-            char shm_name[MAX_FILENAME_SIZE];
-            strncpy(shm_name, volumes[i]->volume_name, MAX_FILENAME_SIZE);
-
-            // Unmap the shared memory
-            size_t full_size = volumes[i]->volume_size + sizeof(shm_t);
-            if (munmap(volumes[i], full_size) == -1) {
-                perror("munmap");
-                // Continue with other volumes even if this one fails
+        shm_t* shm;
+        if (volumes[i] == NULL){
+            shm = shopen(i);
+            if(shm == NULL){
+                continue;
             }
-
-            // Mark the shared memory object for deletion
-            if (shm_unlink(shm_name) == -1) {
-                perror("shm_unlink");
-                // Continue with other volumes even if this one fails
-            }
-
-            // Set the pointer to NULL to indicate it's no longer valid
-            volumes[i] = NULL;
+        } else {
+            shm = volumes[i];
         }
+
+        // Get the name of the shared memory object
+        char shm_name[MAX_FILENAME_SIZE];
+        strncpy(shm_name, shm->volume_name, MAX_FILENAME_SIZE);
+
+        // Unmap the shared memory
+        size_t full_size = shm->volume_size + sizeof(shm_t);
+        if (munmap(shm, full_size) == -1) {
+            perror("munmap");
+            // Continue with other volumes even if this one fails
+        }
+
+        // Mark the shared memory object for deletion
+        if (shm_unlink(shm_name) == -1) {
+            perror("shm_unlink");
+            // Continue with other volumes even if this one fails
+        }
+
+        // Set the pointer to NULL to indicate it's no longer valid
+        volumes[i] = NULL;
     }
 }
 
