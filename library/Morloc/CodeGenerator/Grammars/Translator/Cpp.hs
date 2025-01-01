@@ -211,7 +211,7 @@ makeTheMaker srcs = do
   let flags' = map pretty flags
 
   -- TODO: This is garbage - the C++ version should NOT be specified here
-  let cmd = SysRun . Code . render $ [idoc|g++ --std=c++17 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
+  let cmd = SysRun . Code . render $ [idoc|g++ -O3 --std=c++17 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
 
   return [cmd]
 
@@ -564,7 +564,7 @@ makeManifold callIndex form manifoldType e = do
         let decl = returnTypeStr <+> mname <> tupled args
         let tryBody = block 4 "try" body
             throwStatement = vsep
-              [ [idoc|std::string error_message = "Error in m#{pretty callIndex} " + std::string(e.what());|]
+              [ [idoc|std::string error_message = "Error raised by m#{pretty callIndex}: " + std::string(e.what());|]
               , [idoc|log_message(error_message);|]
               , [idoc|throw std::runtime_error(error_message);|]
               ]
