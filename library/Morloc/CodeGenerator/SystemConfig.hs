@@ -75,7 +75,7 @@ configureAll verbose force config = do
   let tmpCFile = tmpDir </> "x.c"
       soPath = libDir </> "libmorloc.so"
   TIO.writeFile tmpCFile ("#include \"" <> MT.pack libmorlocPath <> "\"")
-  let gccArgs = [ "-shared", "-o", soPath, "-fPIC", tmpCFile ]
+  let gccArgs = [ "-O", "-shared", "-o", soPath, "-fPIC", tmpCFile ]
   callProcess "gcc" gccArgs
   removeFile tmpCFile
 
