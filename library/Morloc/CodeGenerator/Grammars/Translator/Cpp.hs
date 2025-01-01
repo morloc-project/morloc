@@ -800,9 +800,9 @@ serializerTemplate
   -> MDoc -- output serializer function
 serializerTemplate params rtype fields = [idoc|
 #{makeTemplateHeader params}
-void* toAnything(void* dest, const Schema* schema, const #{rtype}& obj)
+void* toAnything(void* dest, void** cursor, const Schema* schema, const #{rtype}& obj)
 {
-    return toAnything(dest, schema, std::make_tuple#{arguments});
+    return toAnything(dest, cursor, schema, std::make_tuple#{arguments});
 }
 |] where
   arguments = tupled ["obj." <> key | (key, _) <- fields]
@@ -819,6 +819,9 @@ deserializerTemplate isObj params rtype fields
   =  [idoc|
 #{makeTemplateHeader params}
 #{block 4 header body}
+
+#{makeTemplateHeader params}
+#{block 4 headerGetSize bodyGetSize}
 |] where
   header = [idoc|#{rtype} fromAnything(const Schema* schema, const void * anything, #{rtype}* dummy = nullptr)|]
   body = vsep $ [ [idoc|#{rtype} obj;|] ]
@@ -831,6 +834,15 @@ deserializerTemplate isObj params rtype fields
     , [idoc|obj.#{keyName} = fromAnything(schema->parameters[#{pretty idx}], (char*)anything + schema->offsets[#{pretty idx}], elemental_dumby_#{keyName});|]
     
     ]
+
+  headerGetSize = [idoc|size_t get_shm_size(const Schema* schema, const #{rtype}& data)|]
+  bodyGetSize = vsep $
+    [ "size_t size = 0;" ] <>
+    [getSize idx key | (idx, (key, _)) <- zip [0..] fields] <>
+    ["return size;"]
+
+  getSize :: Int -> MDoc -> MDoc
+  getSize idx key = [idoc|size += get_shm_size(schema->parameters[#{pretty idx}], data.#{key});|]
 
   -- XXX: here need to add back the isObj handling, if is object, need to call
   -- the constructor rather than directly assigning to fields

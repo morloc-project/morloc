@@ -14,6 +14,22 @@ msgpack_unpack <- function(packed, schema) {
     .Call("mesgpack_to_r", packed, schema)
 }
 
+shm_start <- function(shm_basename, shm_size){
+    .Call("shm_start", shm_basename, shm_size)
+}
+
+shm_close <- function(){
+    .Call("shm_close")
+}
+
+to_shm <- function(x, schema_str){
+    .Call("to_shm", x, schema_str)
+}
+
+from_shm <- function(relptr, schema_str){
+    .Call("from_shm", relptr, schema_str)
+}
+
 
 library(rlang)
 library(mmap)
@@ -187,6 +203,15 @@ future::plan(future::multicore)
       } else {
         abort("Unsupported data format")
       }
+    } else if (header$cmd[2] == PACKET_SOURCE_RPTR) {
+      if(header$cmd[3] == PACKET_FORMAT_VOIDSTAR) {
+        # read a 64 bit integer
+        relptr <- read_int(key, data_start, data_start + 7)
+        from_shm(relptr, schema)
+      } else {
+        abort("Unsupported data format")
+      }
+
     } else {
       abort("Unsupported data source")
     }
@@ -196,26 +221,34 @@ future::plan(future::multicore)
 }
 
 # take arbitrary R data and creates a data packet representing it
-.put_value <- function(value, schema){
-  value_raw <- msgpack_pack(value, schema)
+.put_value <- function(value, schema, format="shm"){
+  
+  if(format == "shm"){
+    relptr <- to_shm(value, schema)
+    return(make_data(int64(relptr), src = PACKET_SOURCE_RPTR, fmt = PACKET_FORMAT_VOIDSTAR))
+  } else if(format == "mesgpack") {
+    value_raw <- msgpack_pack(value, schema)
 
-  if (length(value_raw) <= 65536 - 32) {
-    return(make_data(value_raw))
+    if (length(value_raw) <= 65536 - 32) {
+      return(make_data(value_raw))
+    } else {
+
+      key <- tempfile(pattern = "r_",
+                  tmpdir = global_state.tmpdir,
+                  fileext = "")
+
+      .log(paste("Creating temporary file:", key))
+
+      writeBin(value_raw, con=key)
+
+      .log(paste("Wrote data to:", key))
+
+      key_raw <- charToRaw(key)
+
+      return(make_data(key_raw, src = PACKET_SOURCE_FILE))
+    }
   } else {
-
-    key <- tempfile(pattern = "r_",
-                tmpdir = global_state.tmpdir,
-                fileext = "")
-
-    .log(paste("Creating temporary file:", key))
-
-    writeBin(value_raw, con=key)
-
-    .log(paste("Wrote data to:", key))
-
-    key_raw <- charToRaw(key)
-
-    return(make_data(key_raw, src = PACKET_SOURCE_FILE))
+    abort("Unexpected put_value format")
   }
 }
 
@@ -473,7 +506,9 @@ tryCatch(
   {
     socket_path <- args[1]
     global_state.tmpdir <- args[2]
-    shm_basename <- args[2]
+    shm_basename <- args[3]
+
+    shm_start(shm_basename, 0xffff)
 
     result <- main(socket_path, shm_basename)
     quit(status = result)

@@ -462,7 +462,8 @@ def print_return(data, schema_str):
         relptr = _unpack("Q", data[data_start:])[0]
         _log(f"Made relative pointer {relptr!s} for return")
         content = mp.from_shm(relptr, schema_str)
-    if not content:
+
+    if content == None:
         error = "Unexpected source"
         isgood = False
     elif cmd_format == PACKET_FORMAT_JSON:

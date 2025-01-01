@@ -15,8 +15,11 @@ SEXP from_mesgpack(SEXP r_packed, SEXP r_schema_str);
 void* to_voidstar(SEXP obj, const Schema* schema);
 SEXP from_voidstar(const void* data, const Schema* schema);
 
-size_t get_shm_size(const Schema* schema, SEXP obj);
-
+// Shared memory functions
+SEXP shm_start(SEXP shm_basename_r, SEXP shm_size_r);
+SEXP shm_close();
+SEXP to_shm(SEXP obj, SEXP schema_str_r);
+SEXP from_shm(SEXP relptr_r, SEXP schema_str_r);
 
 size_t get_shm_size(const Schema* schema, SEXP obj) {
     size_t size = 0;
@@ -44,12 +47,12 @@ size_t get_shm_size(const Schema* schema, SEXP obj) {
                 switch (TYPEOF(obj)) {
                     case CHARSXP:
                         str = CHAR(obj);
-                        size += strlen(str);  // Do not include null terminator
+                        size += (size_t)strlen(str);  // Do not include null terminator
                         break;
                     case STRSXP:
                         if (LENGTH(obj) == 1) {
                             str = CHAR(STRING_ELT(obj, 0));
-                            size += strlen(str);  // Do not include null terminator
+                            size += (size_t)strlen(str);  // Do not include null terminator
                         } else {
                             if(schema->parameters[0]->type == MORLOC_STRING){
                                 for(size_t i = 0; i < length; i++){
@@ -83,13 +86,13 @@ size_t get_shm_size(const Schema* schema, SEXP obj) {
             }
 
             {
-                size = (size_t)xlength(obj);
-                if (size != schema->size) {
+                size_t array_size = (size_t)xlength(obj);
+                if (array_size != schema->size) {
                     error("Expected tuple of length %zu, but found list of length %zu", schema->size, size);
                 }
-                for (R_xlen_t i = 0; i < size; ++i) {
+                for (R_xlen_t i = 0; i < array_size; ++i) {
                     SEXP item = VECTOR_ELT(obj, i);
-                    size += get_shm_size(schema->parameters[0], item);
+                    size += get_shm_size(schema->parameters[i], item);
                 }
                 return size;
             }
@@ -169,7 +172,7 @@ void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* schema){
             if (!isLogical(obj)) {
                 error("Expected logical for MORLOC_BOOL, but got %s", type2char(TYPEOF(obj)));
             }
-            *((bool*)dest) = (LOGICAL(obj)[0] == TRUE);
+            *((uint8_t*)dest) = (uint8_t)((LOGICAL(obj)[0] == TRUE) ? 1 : 0);
             break;
         case MORLOC_SINT8:
             HANDLE_SINT_TYPE(int8_t, INT8_MIN, INT8_MAX);
@@ -226,18 +229,22 @@ void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* schema){
                     error("Expected a character type");
                     break;
                 }
-                Array* array = (Array*)dest; 
-                array->size = strlen(str);  // Do not include null terminator
+                Array* array = (Array*)dest;
+                array->size = (size_t)strlen(str);  // Do not include null terminator
                 array->data = abs2rel(*cursor); 
-                memcpy(*cursor, str, array->size); 
-                *cursor = (void*)(*(char**)cursor + array->size); 
+
+                memcpy(rel2abs(array->data), str, array->size);
+
+                // move cursor to the location after the copied data
+                *cursor = (void*)(*(char**)cursor + array->size);
             }
             break;
         case MORLOC_ARRAY:
             Array* array = (Array*)dest; 
             array->size = (size_t)length(obj);
-            array->data = 0;
+            array->data = abs2rel(*cursor);
             Schema* element_schema = schema->parameters[0];
+            char* start;
           
             switch (TYPEOF(obj)) {
                 case STRSXP:
@@ -255,6 +262,13 @@ void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* schema){
                         }
                     }
                     break;
+                case RAWSXP:  // Raw vectors
+                    if (element_schema->type != MORLOC_UINT8) {
+                        error("Expected MORLOC_UINT8 for raw vector");
+                    }
+                    memcpy(rel2abs(array->data), RAW(obj), array->size * sizeof(uint8_t));
+                    *cursor = (void*)(*(char**)cursor + array->size * sizeof(uint8_t)); 
+                    break;
                 case VECSXP:  // This handles lists
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width); 
                     for (int i = 0; i < array->size; i++) {
@@ -263,39 +277,33 @@ void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* schema){
                         to_voidstar_r(element_ptr, cursor, elem, element_schema);
                     }
                     break;
+
                 case LGLSXP:
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width); 
+                    start = rel2abs(array->data);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarLogical(LOGICAL(obj)[i]));
-                        void* element_ptr = rel2abs(array->data + i * element_schema->width);
-                        to_voidstar_r(element_ptr, cursor, elem, element_schema);
+                        to_voidstar_r(start + i, cursor, elem, element_schema);
                         UNPROTECT(1);
                     }
                     break;
                 case INTSXP:
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width); 
+                    start = rel2abs(array->data);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarInteger(INTEGER(obj)[i]));
-                        void* element_ptr = (char*)array->data + i * element_schema->width;
-                        to_voidstar_r(element_ptr, cursor, elem, element_schema);
+                        to_voidstar_r(start + i * element_schema->width, cursor, elem, element_schema);
                         UNPROTECT(1);
                     }
                     break;
                 case REALSXP:
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width); 
+                    start = rel2abs(array->data);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarReal(REAL(obj)[i]));
-                        void* element_ptr = (char*)array->data + i * element_schema->width;
-                        to_voidstar_r(element_ptr, cursor, elem, element_schema);
+                        to_voidstar_r(start + i * element_schema->width, cursor, elem, element_schema);
                         UNPROTECT(1);
                     }
-                    break;
-                case RAWSXP:  // Raw vectors
-                    if (element_schema->type != MORLOC_UINT8) {
-                        error("Expected MORLOC_UINT8 for raw vector");
-                    }
-                    *cursor = (void*)(*(char**)cursor + array->size * element_schema->width); 
-                    memcpy(rel2abs(array->data), RAW(obj), array->size * sizeof(uint8_t));
                     break;
                 default:
                     error("Unsupported type in to_voidstar array: %s", type2char(TYPEOF(obj)));
@@ -367,7 +375,7 @@ void* to_voidstar(SEXP obj, const Schema* schema) {
 
     void* cursor = (void*)((char*)dest + schema->width);
 
-    return to_voidstar_r(dest, cursor, obj, schema);
+    return to_voidstar_r(dest, &cursor, obj, schema);
 }
 
 
@@ -377,7 +385,7 @@ SEXP from_voidstar(const void* data, const Schema* schema) {
         case MORLOC_NIL:
             return R_NilValue;
         case MORLOC_BOOL:
-            obj = ScalarLogical(*(bool*)data);
+            obj = ScalarLogical((bool)*(uint8_t*)data);
             break;
         case MORLOC_SINT8:
             obj = ScalarInteger((int)(*(int8_t*)data));
@@ -427,7 +435,7 @@ SEXP from_voidstar(const void* data, const Schema* schema) {
                         obj = PROTECT(allocVector(LGLSXP, array->size));
                         start = (char*)rel2abs(array->data);
                         for (size_t i = 0; i < array->size; i++) {
-                            LOGICAL(obj)[i] = *(bool*)(start + i * sizeof(bool)) ? TRUE : FALSE;
+                            LOGICAL(obj)[i] = (bool)*(uint8_t*)(start + i) ? TRUE : FALSE;
                         }
                         UNPROTECT(1);
                         break;
@@ -611,7 +619,7 @@ SEXP to_mesgpack(SEXP r_obj, SEXP r_schema_str) {
     memcpy(RAW(r_packed), packed_data, packed_size);
 
     // Clean up
-    free(packed_data);
+    /* free(packed_data); */
     free_schema(schema);
 
     UNPROTECT(3);
@@ -647,7 +655,7 @@ SEXP from_mesgpack(SEXP r_packed, SEXP r_schema_str) {
     SEXP r_unpacked = PROTECT(from_voidstar(unpacked_data, schema));
     
     // Assuming unpack_with_schema allocates memory for unpacked_data
-    free(unpacked_data);
+    /* free(unpacked_data); */
     free_schema(schema);
 
     UNPROTECT(3);
@@ -716,6 +724,62 @@ SEXP mesgpack_to_r(SEXP r_mesgpack, SEXP r_schema_str){
     return obj;
 }
 
+
+SEXP shm_start(SEXP shm_basename_r, SEXP shm_size_r) {
+    const char* shm_basename = CHAR(STRING_ELT(shm_basename_r, 0));
+    size_t shm_size = (size_t)asInteger(shm_size_r);
+
+    shm_t* shm = shinit(shm_basename, 0, shm_size);
+
+    if (shm) {
+        return R_NilValue; // Return NULL, representing success
+    } else {
+        error("Failed to open shared memory pool");
+    }
+}
+
+
+SEXP shm_close() {
+    shclose();
+    return R_NilValue; // Return NULL
+}
+
+
+SEXP to_shm(SEXP obj, SEXP schema_str_r) {
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+
+    Schema* schema = parse_schema(&schema_str);
+
+    absptr_t voidstar = to_voidstar(obj, schema);
+
+    free_schema(schema);
+
+    // relptr_t type is the integer representation of a pointer, so a 64bit integer
+    relptr_t relptr = abs2rel(voidstar);
+
+    // Return relptr as a numeric scalar
+    // Casting a pointer to a double is disturbing, but the 32bit R integers to
+    // small to represent reasonable possible allocations.
+    return ScalarReal((double)relptr);
+}
+
+
+SEXP from_shm(SEXP relptr_r, SEXP schema_str_r) {
+    relptr_t relptr = (relptr_t)asReal(relptr_r);
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+
+    Schema* schema = parse_schema(&schema_str);
+
+    absptr_t voidstar = rel2abs(relptr);
+
+    SEXP obj = from_voidstar(voidstar, schema);
+
+    free_schema(schema);
+
+    return obj;
+}
+
+
 void R_init_rmorloc(DllInfo *info) {
     R_CallMethodDef callMethods[] = {
         {"to_voidstar", (DL_FUNC) &to_voidstar, 2},
@@ -724,6 +788,10 @@ void R_init_rmorloc(DllInfo *info) {
         {"from_mesgpack", (DL_FUNC) &from_mesgpack, 2},
         {"mesgpack_to_r", (DL_FUNC) &mesgpack_to_r, 2},
         {"r_to_mesgpack", (DL_FUNC) &r_to_mesgpack, 2},
+        {"shm_start", (DL_FUNC) &shm_start, 2},
+        {"shm_close", (DL_FUNC) &shm_close, 0},
+        {"to_shm", (DL_FUNC) &to_shm, 2},
+        {"from_shm", (DL_FUNC) &from_shm, 2},
         {NULL, NULL, 0}
     };
 

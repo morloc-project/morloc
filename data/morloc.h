@@ -930,6 +930,7 @@ static char common_basename[MAX_FILENAME_SIZE];
 static shm_t* volumes[MAX_VOLUME_NUMBER] = {NULL};
 
 shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size);
+shm_t* shopen(size_t volume_index);
 void shclose();
 void* shmalloc(size_t size);
 void* shmemcpy(void* dest, size_t size);
@@ -983,7 +984,10 @@ absptr_t rel2abs(relptr_t ptr) {
     for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
         shm_t* shm = volumes[i];
         if (shm == NULL) {
-            return NULL;
+            shm = shopen(i);
+            if(shm == NULL){
+                return NULL;
+            }
         }
         if ((size_t)ptr < shm->volume_size) {
             char* shm_start = (char*)shm;
@@ -1169,6 +1173,51 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size) {
     return shm;
 }
 
+
+
+// like shinit, but only opens existing share memory volumes if the exist
+// if no volume exists, return NULL
+// Non-existence of the volume is not considered an error
+shm_t* shopen(size_t volume_index) {
+    // Prepare the shared memory name
+    char shm_name[MAX_FILENAME_SIZE] = { '\0' };
+    int written = snprintf(shm_name, MAX_FILENAME_SIZE - 1, "%s_%zu", common_basename, volume_index);
+    if (written >= MAX_FILENAME_SIZE - 1 || written < 0) {
+        perror("Invalid filename size");
+        return NULL;
+    }
+
+    shm_name[MAX_FILENAME_SIZE - 1] = '\0'; // ensure the name is NULL terminated
+    
+    // Create or open a shared memory object
+    // O_RDWR: Open for reading and writing
+    // 0666: Set permissions (rw-rw-rw-)
+    int fd = shm_open(shm_name, O_RDWR, 0666);
+    if (fd == -1) {
+        return NULL;
+    }
+
+    struct stat sb;
+    if (fstat(fd, &sb) == -1) {
+        close(fd);
+        return NULL;
+    }
+
+    size_t volume_size = (size_t)sb.st_size;
+
+    // Map the shared memory object into the process's address space
+    volumes[volume_index] = (shm_t*)mmap(NULL, volume_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+    if (volumes[volume_index] == MAP_FAILED) {
+        close(fd);
+        return NULL;
+    }
+
+    shm_t* shm = (shm_t*)volumes[volume_index];
+
+    close(fd);
+    return shm;
+}
 
 
 void shclose() {
