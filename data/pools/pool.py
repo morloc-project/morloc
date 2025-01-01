@@ -208,7 +208,6 @@ def _get_value(data: bytes, schema_str: str):
         except Exception as e:
             _log(f"deserialize failed with error {e!s}")
             raise FailingPacket(f"Deserialize failed on {e!s}")
-        _log(f"result={result!s}")
     elif cmd_source == PACKET_SOURCE_MESG:
         try:
             result = (deserializer(data[data_start:]))
