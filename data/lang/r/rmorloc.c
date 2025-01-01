@@ -252,10 +252,10 @@ void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* schema){
                         if(element_schema->type == MORLOC_STRING){
                             // set the cursor the the location after the array headers
                             *cursor = (void*)(*(char**)cursor + array->size * element_schema->width); 
+                            start = rel2abs(array->data);
                             for(size_t i = 0; i < array->size; i++){
                                 SEXP elem = STRING_ELT(obj, i);
-                                void* element_ptr = rel2abs(array->data + i * element_schema->width);
-                                to_voidstar_r(element_ptr, cursor, elem, element_schema); 
+                                to_voidstar_r(start + i * element_schema->width, cursor, elem, element_schema); 
                             }
                         } else {
                             error("Expected character vector of length 1, but got length %ld", array->size);
@@ -271,10 +271,10 @@ void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* schema){
                     break;
                 case VECSXP:  // This handles lists
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width); 
+                    start = rel2abs(array->data);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = VECTOR_ELT(obj, i);
-                        void* element_ptr = rel2abs(array->data + i * element_schema->width);
-                        to_voidstar_r(element_ptr, cursor, elem, element_schema);
+                        to_voidstar_r(start + i * element_schema->width, cursor, elem, element_schema);
                     }
                     break;
 

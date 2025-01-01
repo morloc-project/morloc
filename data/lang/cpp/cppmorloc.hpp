@@ -139,10 +139,11 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::vec
     // The cursor is mutated to point to the location after the children
     *cursor = static_cast<char*>(*cursor) + data.size() * schema->parameters[0]->width;
 
+    char* start = (char*)rel2abs(result->data);
     size_t width = schema->parameters[0]->width;
     for (size_t i = 0; i < data.size(); ++i) {
         // Any child variable data will be written to the cursor
-         toAnything(rel2abs(result->data + width * i), cursor, schema->parameters[0], data[i]);
+         toAnything(start + width * i, cursor, schema->parameters[0], data[i]);
     }
 
     return dest;
@@ -226,8 +227,9 @@ std::vector<T> fromAnything(const Schema* schema, const void* data, std::vector<
   result.reserve(array->size);
   const Schema* elemental_schema = schema->parameters[0];
   T* elemental_dumby = nullptr;
+  char* start = (char*)rel2abs(array->data);
   for(size_t i = 0; i < array->size; i++){
-    result.push_back(fromAnything(elemental_schema, rel2abs(array->data + i * elemental_schema->width), elemental_dumby));
+    result.push_back(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
   }
   return result;
 }

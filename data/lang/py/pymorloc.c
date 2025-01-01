@@ -393,18 +393,18 @@ error:
 int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj) {
     switch (schema->type) {
         case MORLOC_NIL:
-            if (obj != Py_None) {
-                PyErr_Format(PyExc_TypeError, "Expected None for MORLOC_NIL, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
-            }
+            /* if (obj != Py_None) {                                                                                 */
+            /*     PyErr_Format(PyExc_TypeError, "Expected None for MORLOC_NIL, but got %s", Py_TYPE(obj)->tp_name); */
+            /*     goto error;                                                                                       */
+            /* }                                                                                                     */
             *((int8_t*)dest) = (int8_t)0;
             break;
 
         case MORLOC_BOOL:
-            if (!PyBool_Check(obj)) {
-                PyErr_Format(PyExc_TypeError, "Expected bool for MORLOC_BOOL, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
-            }
+            /* if (!PyBool_Check(obj)) {                                                                              */
+            /*     PyErr_Format(PyExc_TypeError, "Expected bool for MORLOC_BOOL, but got %s", Py_TYPE(obj)->tp_name); */
+            /*     goto error;                                                                                        */
+            /* }                                                                                                      */
             *((bool*)dest) = (obj == Py_True);
             break;
 
@@ -434,10 +434,10 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
             break;
 
         case MORLOC_FLOAT32:
-            if (!PyFloat_Check(obj)) {
-                PyErr_Format(PyExc_TypeError, "Expected float for MORLOC_FLOAT32, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
-            }
+            /* if (!PyFloat_Check(obj)) {                                                                                 */
+            /*     PyErr_Format(PyExc_TypeError, "Expected float for MORLOC_FLOAT32, but got %s", Py_TYPE(obj)->tp_name); */
+            /*     goto error;                                                                                            */
+            /* }                                                                                                          */
             *((float*)dest) = (float)PyFloat_AsDouble(obj);
             break;
 
