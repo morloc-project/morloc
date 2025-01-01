@@ -166,11 +166,13 @@ functionCT (NexusCommand cmd _ json_str args subs) =
   [idoc|
 def call_#{pretty cmd}(args, tmpdir, shm_basename):
     if len(args) != #{pretty $ length args}:
-        sys.exit("Expected #{pretty $ length args} arguments to '#{pretty cmd}', given " + str(len(args)))
+        errmsg = "Expected #{pretty $ length args} arguments to '#{pretty cmd}', given " + str(len(args))
+        clean_exit(1, errmsg)
     else:
         json_obj = json.loads('''#{json_str}''')
         #{align . vsep $ readArguments ++ replacements}
         print(json.dumps(json_obj, separators=(",", ":")))
+        clean_exit(0)
 |]
   where
     readArguments = zipWith readJsonArg args [0..]
