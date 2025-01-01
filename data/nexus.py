@@ -714,8 +714,12 @@ def validate_args(args):
             sys.exit(1)
 
 def make_shm_pool_name(base="morloc_"):
+
+    current_dir = os.getcwd()
+    basename = os.path.basename(current_dir)
+
     randhash = hashlib.md5(str(time.time_ns() + os.getpid() * 1000).encode("utf-8")).hexdigest()[0:8]
-    return base + str(randhash)
+    return base + basename + "_" + str(randhash)
 
 if __name__ == "__main__":
 
