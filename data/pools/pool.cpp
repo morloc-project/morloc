@@ -40,7 +40,7 @@ std::string g_tmpdir;
 // <<<BREAK>>>
 // AUTO include statements end
 
-// Proper linking of cppmorloc requires it be included AFTER the custom modules 
+// Proper linking of cppmorloc requires it be included AFTER the custom modules
 #include "cppmorloc.hpp"
 
 
@@ -89,7 +89,7 @@ struct Header {
 };
 
 // Function to log messages
-template <class M> 
+template <class M>
 void log_message(M message) {
     std::ofstream log_file("log", std::ios_base::app);
     log_file << "C: " << message << std::endl;
@@ -259,7 +259,7 @@ std::string read(const std::string& file) {
 std::string generateTempFilename() {
     // Combine tmpdir with a template name
     std::string template_str = g_tmpdir + "/cpp_pool_XXXXXX";
-    
+
     // Convert to a non-const char array (required by mkstemp)
     std::vector<char> template_char(template_str.begin(), template_str.end());
     template_char.push_back('\0'); // Ensure null-termination
@@ -281,45 +281,23 @@ std::string generateTempFilename() {
 // Transforms a serialized value into a message ready for the socket
 template <typename T>
 Message _put_value(const T& value, const std::string& schema_str) {
+    const char* schema_ptr = schema_str.c_str();
+    Schema* schema = parse_schema(&schema_ptr);
+    void* voidstar = toAnything(schema, value);
+    relptr_t relptr = abs2rel(voidstar);
 
-    int length;
+    char payload[8] = { 0 };
+    write_int64(payload, (uint64_t)relptr);
 
-    Message packet;
-
-    std::vector<char> payload = mpk_pack(value, schema_str);
-
-    if (payload.size() <= 65536 - 32) {
-        // for small data, send directly over the socket
-        packet = make_data(
-          payload.data(),
-          payload.size(),
-          PACKET_SOURCE_MESG,
-          PACKET_FORMAT_MSGPACK,
-          PACKET_COMPRESSION_NONE,
-          PACKET_ENCRYPTION_NONE,
-          PACKET_STATUS_PASS
-        );
-    } else {
-
-        // for large data, write a temporary file
-        std::string tmpfilename = generateTempFilename();
-        std::ofstream tempFile(tmpfilename, std::ios::binary);
-        if (!tempFile) {
-            throw std::runtime_error("Failed to open temporary file: " + tmpfilename);
-        }
-        tempFile.write(payload.data(), payload.size());
-        tempFile.close();
-
-        packet = make_data(
-          tmpfilename.data(),
-          tmpfilename.size(),
-          PACKET_SOURCE_FILE,
-          PACKET_FORMAT_MSGPACK,
-          PACKET_COMPRESSION_NONE,
-          PACKET_ENCRYPTION_NONE,
-          PACKET_STATUS_PASS
-        );
-    }
+    Message packet = make_data(
+      payload,
+      sizeof(size_t),
+      PACKET_SOURCE_RPTR,
+      PACKET_FORMAT_VOIDSTAR,
+      PACKET_COMPRESSION_NONE,
+      PACKET_ENCRYPTION_NONE,
+      PACKET_STATUS_PASS
+    );
 
     log_message("Putting packet of length " + std::to_string(packet.length));
 
@@ -371,7 +349,7 @@ T _get_value(const Message& packet, const std::string& schema_str){
                     }
                     std::streamsize size = file.tellg();
                     file.seekg(0, std::ios::beg);
-          
+
                     msg.resize(size);
                     if (!file.read(msg.data(), size)) {
                         throw std::runtime_error("Failed to read file: " + filename);
@@ -383,7 +361,7 @@ T _get_value(const Message& packet, const std::string& schema_str){
         break;
       case PACKET_SOURCE_RPTR:
         if(format == PACKET_FORMAT_VOIDSTAR){
-           // convert value to size_t 
+           // convert value to size_t
            size_t relptr = (size_t)read_uint64(packet.data, 32);
            log_message("Made relptr for argument: " + std::to_string(relptr));
            // convert relptr to shared pointer
@@ -688,10 +666,20 @@ Message dispatch(const Message& msg){
       }
 
 
+        try {
 
 // AUTO dispatch statements start
 // <<<BREAK>>>
 // AUTO dispatch statements end
+
+
+        } catch (const std::exception& e) {
+            // Catch any exception derived from std::exception
+            return fail_packet(e.what());
+        } catch (...) {
+            // Catch any other type of exception
+            return fail_packet("An unknown error occurred");
+        }
 
     }
 
