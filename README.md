@@ -10,8 +10,9 @@ imported from foreign languages and unified under a common type system.
 See [the manual](https://morloc-project.github.io/docs) for more information.
 
 If you want to get straight to playing with code, go through the steps in the
-installation section and then visit the project `demo/01_sequence_analysis`
-or the less documented `demo/02_flu`.
+installation section and then visit `morloc` examples repo
+(here)[https://github.com/morloc-project/examples]. The `fasta` example is a
+well-annotated is a nice place to start.
 
 ## Status
 
@@ -21,11 +22,11 @@ welcome.
 
 ## Running morloc
 
-`morloc` should run on Linux and macOS. For Windows, I suggest using [Windows Subsystem for
+`morloc` should run on Linux and MacOS. For Windows, I suggest using [Windows Subsystem for
 Linux](https://learn.microsoft.com/en-us/windows/wsl/install).
 
-The easiest way to use `morloc` is through containers. Unless you love running
-with daemons, I recommend using podman.
+The easiest way to start using `morloc` is through containers. Unless you love
+running with daemons, I recommend using podman.
 
 A container with the morloc executable and batteries included can be retrieved
 from the GitHub container registry as follows:

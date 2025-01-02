@@ -1,7 +1,0 @@
-{ "mindate" : "2021/01/01"
-, "maxdate" : "2021/01/14"
-, "reffile" : "data/refs.txt"
-, "treefile" : "tree.pdf"
-, "email" : "wena@mailinator.com"
-, "query" : "Influenza+A+Virus[Organism]+H3N2[ALL]+HA[ALL]"
-}
