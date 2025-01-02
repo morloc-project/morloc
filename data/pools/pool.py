@@ -365,10 +365,12 @@ def message_response(data):
             result = mlc_function(*args)
 
         except FailingPacket as e:
-            raise FailingPacket(f"Forwarding fail from m{cmdID!s}: {e!s}")
+            _log("Returning failed packet")
+            return e.packet
 
         except Exception as e:
-            raise FailingPacket(f"Error in m{cmdID!s}: {e!s}")
+            raise FailingPacket(f"Error raised by Python m{cmdID!s}: {e!s}")
+
 
         _log(f"from cmdID {cmdID!s} pool returning message of length '{result!s}'")
     else:
@@ -388,8 +390,14 @@ def worker(data, result_queue):
         )  # block until a free spot is available in the queue
         _log("Worker put result in queue")
         _log(f"New queue size: {result_queue.qsize()!s}")
+    except FailingPacket as e:
+        result_queue.put(
+            e.packet, block=True, timeout=None
+        )  # block until a free spot is available in the queue
+        _log("Worker put failed result in queue")
+        _log(f"New queue size: {result_queue.qsize()!s}")
     except Exception as e:
-        _log(f"Worker error: {e!s}")
+        _log(f"Something very bad happened, uncaught exception: {e!s}")
         result_queue.put(
             None, block=True, timeout=None
         )  # Put None to indicate an error

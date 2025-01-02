@@ -1,0 +1,44 @@
+module foo (
+      ccerr, cperr, crerr
+    , rcerr, rperr, rrerr
+    , pcerr, pperr, prerr
+  )
+
+source Cpp from "foo.hpp" ("cid", "cdiv")
+source R from "foo.R" ("rid", "rdiv")
+source Py from "foo.py" ("pid", "pdiv")
+
+type Cpp => Real = "double"
+type Py => Real = "float"
+type R => Real = "double"
+
+cid a :: a -> a 
+rid a :: a -> a 
+pid a :: a -> a 
+
+-- 1 / n, raise an error if n == 0
+cdiv :: Real -> Real
+rdiv :: Real -> Real 
+pdiv :: Real -> Real
+
+ccerr :: Real -> Real
+cperr :: Real -> Real
+crerr :: Real -> Real
+rcerr :: Real -> Real
+rperr :: Real -> Real
+rrerr :: Real -> Real
+pcerr :: Real -> Real
+pperr :: Real -> Real
+prerr :: Real -> Real
+
+ccerr = cid . rid . cid . pid . cdiv
+cperr = cid . rid . pid . cid . pdiv
+crerr = cid . rid . rid . cid . rdiv
+
+rcerr = rid . pid . cid . rid . cdiv
+rperr = rid . pid . rid . cid . pdiv
+rrerr = rid . pid . rid . cid . rdiv
+
+pcerr = pid . cid . pid . rid . cdiv
+pperr = pid . rid . cid . rid . pdiv
+prerr = pid . cid . rid . pid . rdiv

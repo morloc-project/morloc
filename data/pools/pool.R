@@ -32,7 +32,6 @@ from_shm <- function(relptr, schema_str){
 
 
 library(rlang)
-library(mmap)
 
 global_state <- new.env()
 
@@ -334,8 +333,12 @@ processMessage <- function(msg){
           mlc_pool_function <- eval(parse(text=mlc_pool_function_name))
           do.call(mlc_pool_function, args)
         }, error = function(e) {
-          errmsg <- paste("Call to", mlc_pool_function_name, "failed with message:", e$message) 
-          fail_packet(errmsg)
+          if(!is.null(e$fail_packet)){
+            e$fail_packet
+          } else {
+              errmsg <- paste("Call to", mlc_pool_function_name, "in R failed with message:", e$message) 
+              fail_packet(errmsg)
+          }
         }
       )
 

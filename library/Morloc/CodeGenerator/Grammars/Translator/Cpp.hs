@@ -564,7 +564,7 @@ makeManifold callIndex form manifoldType e = do
         let decl = returnTypeStr <+> mname <> tupled args
         let tryBody = block 4 "try" body
             throwStatement = vsep
-              [ [idoc|std::string error_message = "Error raised by m#{pretty callIndex}: " + std::string(e.what());|]
+              [ [idoc|std::string error_message = "Error raised in C++ pool by m#{pretty callIndex}: " + std::string(e.what());|]
               , [idoc|log_message(error_message);|]
               , [idoc|throw std::runtime_error(error_message);|]
               ]
