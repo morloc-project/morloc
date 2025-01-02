@@ -292,6 +292,8 @@ main = do
       , golden "packets-large (wait ~10s)" "packets-large"
       , golden "packets-interop (wait ~10s)" "packets-interop"
 
+      -- test errors
+      , golden "errors (wait ~10s)" "errors"
 
 
       -- , golden "argument-form-1-rs" "argument-form-1-rs"

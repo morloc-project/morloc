@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.50.0
+version:          0.51.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
@@ -20,12 +20,14 @@ extra-source-files:
   - data/pools/pool.R
   - data/pools/pool.cpp
   - data/pools/pool.py
-  # msgpack
-  - data/msgpack/src/mlcmpack.h
+  # universal c library
+  - data/morloc.h
   # msgpack langs
-  - data/msgpack/lang/py/pympack.py
-  - data/msgpack/lang/r/mpackr.c
-  - data/msgpack/lang/cpp/cppmpack.hpp
+  - data/lang/cpp/cppmorloc.hpp
+  - data/lang/r/rmorloc.c
+  - data/lang/py/pymorloc.c
+  - data/lang/py/setup.py
+  - data/lang/py/Makefile
 
 default-extensions:
   - TypeOperators

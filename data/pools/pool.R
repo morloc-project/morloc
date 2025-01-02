@@ -4,14 +4,30 @@
 
 dyn.load("~/.morloc/lib/libsocketr.so")
 
-dyn.load("~/.morloc/lib/libmpackr.so")
+dyn.load("~/.morloc/lib/librmorloc.so")
 
 msgpack_pack <- function(obj, schema) {
-    .Call("_mlcmpack_r_pack", obj, schema)
+    .Call("r_to_mesgpack", obj, schema)
 }
 
 msgpack_unpack <- function(packed, schema) {
-    .Call("_mlcmpack_r_unpack", packed, schema)
+    .Call("mesgpack_to_r", packed, schema)
+}
+
+shm_start <- function(shm_basename, shm_size){
+    .Call("shm_start", shm_basename, shm_size)
+}
+
+shm_close <- function(){
+    .Call("shm_close")
+}
+
+to_shm <- function(x, schema_str){
+    .Call("to_shm", x, schema_str)
+}
+
+from_shm <- function(relptr, schema_str){
+    .Call("from_shm", relptr, schema_str)
 }
 
 
@@ -21,16 +37,21 @@ global_state <- new.env()
 
 PACKET_TYPE_DATA <- 0x00
 PACKET_TYPE_CALL <- 0x01
-PACKET_TYPE_GET  <- 0x02
-PACKET_TYPE_PUT  <- 0x03
-PACKET_TYPE_PING <- 0x04
+PACKET_TYPE_PING <- 0x02
+PACKET_TYPE_GET  <- 0x03
+PACKET_TYPE_POST <- 0x04
+PACKET_TYPE_PUT  <- 0x05
+PACKET_TYPE_DEL  <- 0x06
 
 PACKET_SOURCE_MESG <- 0x00 # the message contains the data
 PACKET_SOURCE_FILE <- 0x01 # the message is a path to a file of data
-PACKET_SOURCE_NXDB <- 0x02 # the message is a key to the nexus uses to access the data
+PACKET_SOURCE_RPTR <- 0x02 # the message is a path to a file of data
 
-PACKET_FORMAT_JSON <- 0x00
-PACKET_FORMAT_MSGPACK = 0x01
+PACKET_FORMAT_JSON     <- 0x00
+PACKET_FORMAT_MSGPACK  <- 0x01
+PACKET_FORMAT_TEXT     <- 0x02
+PACKET_FORMAT_DATA     <- 0x03
+PACKET_FORMAT_VOIDSTAR <- 0x04
 
 PACKET_COMPRESSION_NONE <- 0x00 # uncompressed
 
@@ -113,7 +134,7 @@ make_data <- function(
 
 fail_packet <- function(errmsg, errobj = NULL){
   if(is.null(errobj$fail_packet)){
-    make_data(charToRaw(errmsg), status = PACKET_STATUS_FAIL)
+    make_data(charToRaw(errmsg), status = PACKET_STATUS_FAIL, fmt = PACKET_FORMAT_TEXT)
   } else {
     header <- read_header(errobj$fail_packet)
     if(header$offset > 0){
@@ -139,6 +160,13 @@ ACCEPT_READ_TIME = 0.0001
 # compute on a UNIX machine. The other approaches, like multisession, fail
 # terribly because they can't find the appropriate globals or dynamically linked
 # functions.
+#
+# Without the workers option, R will spin up as many workers as there are
+# cores. Each will need to have global state sent to them each time. This leads
+# to an overhead of ~22ms on my system. With workers=2, the overhead falls to
+# ~13ms. In both cases, though, forking is being done which is slow. Setting
+# workers=1 does no forking and runs jobs sequentially. This drops overhead to
+# ~1ms per job.
 future::plan(future::multicore)
 
 
@@ -174,6 +202,15 @@ future::plan(future::multicore)
       } else {
         abort("Unsupported data format")
       }
+    } else if (header$cmd[2] == PACKET_SOURCE_RPTR) {
+      if(header$cmd[3] == PACKET_FORMAT_VOIDSTAR) {
+        # read a 64 bit integer
+        relptr <- read_int(key, data_start, data_start + 7)
+        from_shm(relptr, schema)
+      } else {
+        abort("Unsupported data format")
+      }
+
     } else {
       abort("Unsupported data source")
     }
@@ -183,28 +220,34 @@ future::plan(future::multicore)
 }
 
 # take arbitrary R data and creates a data packet representing it
-.put_value <- function(value, schema){
+.put_value <- function(value, schema, format="shm"){
+  
+  if(format == "shm"){
+    relptr <- to_shm(value, schema)
+    return(make_data(int64(relptr), src = PACKET_SOURCE_RPTR, fmt = PACKET_FORMAT_VOIDSTAR))
+  } else if(format == "mesgpack") {
+    value_raw <- msgpack_pack(value, schema)
 
-  value_raw <- msgpack_pack(value, schema)
+    if (length(value_raw) <= 65536 - 32) {
+      return(make_data(value_raw))
+    } else {
 
-  if (length(value_raw) <= 65536 - 32) {
-    return(make_data(value_raw))
+      key <- tempfile(pattern = "r_",
+                  tmpdir = global_state.tmpdir,
+                  fileext = "")
 
+      .log(paste("Creating temporary file:", key))
+
+      writeBin(value_raw, con=key)
+
+      .log(paste("Wrote data to:", key))
+
+      key_raw <- charToRaw(key)
+
+      return(make_data(key_raw, src = PACKET_SOURCE_FILE))
+    }
   } else {
-
-    key <- tempfile(pattern = "r_", 
-                    tmpdir = global_state.tmpdir, 
-                    fileext = "")
-
-    .log(paste("Creating temporary file:", key))
-
-    writeBin(value_raw, con=key)
-
-    .log(paste("Wrote data to:", key))
-
-    key_raw <- charToRaw(key)
-
-    return(make_data(key_raw, src = PACKET_SOURCE_FILE))
+    abort("Unexpected put_value format")
   }
 }
 
@@ -290,8 +333,12 @@ processMessage <- function(msg){
           mlc_pool_function <- eval(parse(text=mlc_pool_function_name))
           do.call(mlc_pool_function, args)
         }, error = function(e) {
-          errmsg <- paste("Call to", mlc_pool_function_name, "failed with message:", e$message) 
-          fail_packet(errmsg)
+          if(!is.null(e$fail_packet)){
+            e$fail_packet
+          } else {
+              errmsg <- paste("Call to", mlc_pool_function_name, "in R failed with message:", e$message) 
+              fail_packet(errmsg)
+          }
         }
       )
 
@@ -398,9 +445,11 @@ handle_finished_client <- function(job){
   .Call("R_close_socket", job$client_fd)
 }
 
-main <- function(socket_path) {
+main <- function(socket_path, shm_basename) {
   # Setup a new server that uses a given path for the socket address
   server_fd <- .Call("R_new_server", socket_path)
+
+  # START SHM shm_basename
 
   if (server_fd == -1) {
     .log("Error creating server")
@@ -451,8 +500,8 @@ main <- function(socket_path) {
 
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) != 2) {
-  cat("Usage: Rscript pipe.R <socket_path> <tmpdir>\n", file=stderr())
+if (length(args) != 3) {
+  cat("Usage: Rscript pipe.R <socket_path> <tmpdir> <shm_basename>\n", file=stderr())
   quit(status = 1)
 }
 
@@ -460,7 +509,11 @@ tryCatch(
   {
     socket_path <- args[1]
     global_state.tmpdir <- args[2]
-    result <- main(socket_path)
+    shm_basename <- args[3]
+
+    shm_start(shm_basename, 0xffff)
+
+    result <- main(socket_path, shm_basename)
     quit(status = result)
   },  error = function(e) {
       .log(paste("Pool failed:", e$message))

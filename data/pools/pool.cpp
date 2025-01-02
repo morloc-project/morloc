@@ -6,6 +6,9 @@
 #include <algorithm> // for std::transform
 #include <stdexcept>
 #include <fstream>
+#include <system_error>
+#include <sys/stat.h>
+#include <sys/mman.h>
 
 // needed for foreign interface
 #include <cstdlib>
@@ -22,13 +25,11 @@
 #include <iomanip>
 #include <poll.h>
 #include <errno.h>
-
 #include <fcntl.h>
 
 #include <limits>
 #include <tuple>
 #include <utility>
-#include <limits>
 
 using namespace std;
 
@@ -39,8 +40,8 @@ std::string g_tmpdir;
 // <<<BREAK>>>
 // AUTO include statements end
 
-// Proper linking of cppmpack requires it be included AFTER the custom modules 
-#include "cppmpack.hpp"
+// Proper linking of cppmorloc requires it be included AFTER the custom modules
+#include "cppmorloc.hpp"
 
 
 // AUTO serialization statements start
@@ -53,16 +54,21 @@ std::string g_tmpdir;
 
 #define PACKET_TYPE_DATA  0x00
 #define PACKET_TYPE_CALL  0x01
-#define PACKET_TYPE_GET   0x02
-#define PACKET_TYPE_PUT   0x03
-#define PACKET_TYPE_PING  0x04
+#define PACKET_TYPE_PING  0x02
+#define PACKET_TYPE_GET   0x03
+#define PACKET_TYPE_POST  0x04
+#define PACKET_TYPE_PUT   0x05
+#define PACKET_TYPE_DEL   0x06
 
 #define PACKET_SOURCE_MESG  0x00 // the message contains the data
 #define PACKET_SOURCE_FILE  0x01 // the message is a path to a file of data
-#define PACKET_SOURCE_NXDB  0x02 // the message is a key to the nexus uses to access the data
+#define PACKET_SOURCE_RPTR  0x02 // the message is a relative pointer to shared memory
 
-#define PACKET_FORMAT_JSON  0x00
+#define PACKET_FORMAT_JSON     0x00
 #define PACKET_FORMAT_MSGPACK  0x01
+#define PACKET_FORMAT_TEXT     0x02
+#define PACKET_FORMAT_DATA     0x03 // raw binary data
+#define PACKET_FORMAT_VOIDSTAR 0x04 // binary morloc formatted data
 
 #define PACKET_COMPRESSION_NONE  0x00 // uncompressed
 #define PACKET_ENCRYPTION_NONE   0x00 // unencrypted
@@ -83,7 +89,7 @@ struct Header {
 };
 
 // Function to log messages
-template <class M> 
+template <class M>
 void log_message(M message) {
     std::ofstream log_file("log", std::ios_base::app);
     log_file << "C: " << message << std::endl;
@@ -119,9 +125,6 @@ uint64_t read_uint64(const char* bytes, size_t offset){
     multiplier = multiplier << (8 * (8 - i - 1));
     x += static_cast<unsigned char>(bytes[i + offset]) * multiplier;
   }
-
-  log_message("read uint64 " + std::to_string(x) + " from bytes " + show_hex(bytes + offset, 8));
-
   return x;
 }
 
@@ -132,20 +135,14 @@ uint32_t read_uint32(const char* bytes, size_t offset){
     multiplier = multiplier << (8 * (4 - i - 1));
     x += static_cast<unsigned char>(bytes[i + offset]) * multiplier;
   }
-
-  log_message("read uint32 " + std::to_string(x) + " from bytes " + show_hex(bytes + offset, 4));
-
   return x;
 }
 
 void write_int32(char* data, uint32_t value){
-
     data[0] = (value >> 24) & 0xFF;
     data[1] = (value >> 16) & 0xFF;
     data[2] = (value >>  8) & 0xFF;
     data[3] = value & 0xFF;
-
-    log_message("write_int32 convert " + std::to_string(value) + "(" + std::to_string(sizeof(value)) + ") -> " + show_hex(data, 4));
 }
 
 void write_int64(char* data, uint64_t value){
@@ -158,8 +155,6 @@ void write_int64(char* data, uint64_t value){
     data[5] = (value >> 16) & 0xFF;
     data[6] = (value >>  8) & 0xFF;
     data[7] = value & 0xFF;
-
-    log_message("write_int64 convert " + std::to_string(value) + "(" + std::to_string(sizeof(value)) + ") -> " + show_hex(data, 8));
 }
 
 Header read_header(const char* msg){
@@ -172,8 +167,6 @@ Header read_header(const char* msg){
       throw std::runtime_error(errmsg);
     }
 
-    log_message("reading header: " + show_hex(msg, 32));
-
     Header header;
 
     for(size_t offset = 0; offset < 8; offset++){
@@ -182,9 +175,6 @@ Header read_header(const char* msg){
 
     header.offset = read_uint32(msg, 20);
     header.length = read_uint64(msg, 24);
-
-    log_message("header.offset: " + std::to_string(header.offset));
-    log_message("header.length: " + std::to_string(header.length));
 
     return header;
 }
@@ -241,7 +231,7 @@ Message fail_packet(const std::string& errmsg){
     errmsg.c_str(),
     errmsg.size(),
     PACKET_SOURCE_MESG,
-    PACKET_FORMAT_JSON,
+    PACKET_FORMAT_TEXT,
     PACKET_COMPRESSION_NONE,
     PACKET_ENCRYPTION_NONE,
     PACKET_STATUS_FAIL
@@ -269,7 +259,7 @@ std::string read(const std::string& file) {
 std::string generateTempFilename() {
     // Combine tmpdir with a template name
     std::string template_str = g_tmpdir + "/cpp_pool_XXXXXX";
-    
+
     // Convert to a non-const char array (required by mkstemp)
     std::vector<char> template_char(template_str.begin(), template_str.end());
     template_char.push_back('\0'); // Ensure null-termination
@@ -288,50 +278,26 @@ std::string generateTempFilename() {
 }
 
 
-
-
 // Transforms a serialized value into a message ready for the socket
 template <typename T>
 Message _put_value(const T& value, const std::string& schema_str) {
+    const char* schema_ptr = schema_str.c_str();
+    Schema* schema = parse_schema(&schema_ptr);
+    void* voidstar = toAnything(schema, value);
+    relptr_t relptr = abs2rel(voidstar);
 
-    int length;
+    char payload[8] = { 0 };
+    write_int64(payload, (uint64_t)relptr);
 
-    Message packet;
-
-    std::vector<char> payload = mpk_pack(value, schema_str);
-
-    if (payload.size() <= 65536 - 32) {
-        // for small data, send directly over the socket
-        packet = make_data(
-          payload.data(),
-          payload.size(),
-          PACKET_SOURCE_MESG,
-          PACKET_FORMAT_MSGPACK,
-          PACKET_COMPRESSION_NONE,
-          PACKET_ENCRYPTION_NONE,
-          PACKET_STATUS_PASS
-        );
-    } else {
-
-        // for large data, write a temporary file
-        std::string tmpfilename = generateTempFilename();
-        std::ofstream tempFile(tmpfilename, std::ios::binary);
-        if (!tempFile) {
-            throw std::runtime_error("Failed to open temporary file: " + tmpfilename);
-        }
-        tempFile.write(payload.data(), payload.size());
-        tempFile.close();
-
-        packet = make_data(
-          tmpfilename.data(),
-          tmpfilename.size(),
-          PACKET_SOURCE_FILE,
-          PACKET_FORMAT_MSGPACK,
-          PACKET_COMPRESSION_NONE,
-          PACKET_ENCRYPTION_NONE,
-          PACKET_STATUS_PASS
-        );
-    }
+    Message packet = make_data(
+      payload,
+      sizeof(size_t),
+      PACKET_SOURCE_RPTR,
+      PACKET_FORMAT_VOIDSTAR,
+      PACKET_COMPRESSION_NONE,
+      PACKET_ENCRYPTION_NONE,
+      PACKET_STATUS_PASS
+    );
 
     log_message("Putting packet of length " + std::to_string(packet.length));
 
@@ -346,17 +312,28 @@ T _get_value(const Message& packet, const std::string& schema_str){
 
     char source = header.command[1];
     char format = header.command[2];
+    char status = header.command[5];
 
     std::string errmsg = "";
 
+    if (status == PACKET_STATUS_FAIL){
+        if(source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_TEXT){
+            std::string msg_str(packet.data + 32, packet.data + packet.length);
+            log_message("found unexpected text: " + msg_str);
+            throw std::runtime_error(msg_str);
+        } else {
+            throw std::runtime_error("Expected an error string to be formatted as as message with text");
+        }
+    }
+
     switch(source){
       case PACKET_SOURCE_MESG:
-        switch(format){
-          case PACKET_FORMAT_MSGPACK:
+        if(format == PACKET_FORMAT_MSGPACK){
             std::vector<char> msg(packet.data + 32, packet.data + packet.length);
             return mpk_unpack<T>(msg, schema_str);
+        } else {
+            log_message("Invalid format from mesg: " + std::to_string(format));
         }
-        log_message("Invalid format");
         break;
       case PACKET_SOURCE_FILE:
         switch(format){
@@ -372,7 +349,7 @@ T _get_value(const Message& packet, const std::string& schema_str){
                     }
                     std::streamsize size = file.tellg();
                     file.seekg(0, std::ios::beg);
-          
+
                     msg.resize(size);
                     if (!file.read(msg.data(), size)) {
                         throw std::runtime_error("Failed to read file: " + filename);
@@ -380,11 +357,23 @@ T _get_value(const Message& packet, const std::string& schema_str){
                 }
                 return mpk_unpack<T>(msg, schema_str);
         }
-        errmsg = "Invalid format";
+        errmsg = "Invalid format from file" + std::to_string(format);
         break;
-      case PACKET_SOURCE_NXDB:
-        errmsg = "Not yet supported";
-        break;
+      case PACKET_SOURCE_RPTR:
+        if(format == PACKET_FORMAT_VOIDSTAR){
+           // convert value to size_t
+           size_t relptr = (size_t)read_uint64(packet.data, 32);
+           log_message("Made relptr for argument: " + std::to_string(relptr));
+           // convert relptr to shared pointer
+           void* absptr = rel2abs(relptr);
+           // convert voidstar to local type
+           const char* schema_cstr = schema_str.c_str();
+           const Schema* schema = parse_schema(&schema_cstr);
+           T* dumby = nullptr;
+           return fromAnything(schema, absptr, dumby);
+        } else {
+            errmsg = "For RPTR source, expected voidstar format";
+        }
       default:
         errmsg = "Invalid source";
         break;
@@ -392,6 +381,7 @@ T _get_value(const Message& packet, const std::string& schema_str){
 
     throw std::runtime_error(errmsg);
 }
+
 
 
 // Create a Unix domain socket
@@ -455,49 +445,6 @@ int new_server(const char* socket_path){
     }
 
     return server_fd;
-}
-
-int accept_client(int server_fd){
-    // Accept a connection
-    int client_fd = accept(server_fd, nullptr, nullptr);
-    return client_fd;
-}
-
-int accept_client(int server_fd, double timeout_seconds) {
-    fd_set readfds;
-    struct timeval tv;
-    int client_fd;
-
-    // Clear the set
-    FD_ZERO(&readfds);
-
-    // Add server socket to the set
-    FD_SET(server_fd, &readfds);
-
-    // Set up the timeout
-    tv.tv_sec = static_cast<long>(floor(timeout_seconds));
-    tv.tv_usec = static_cast<long>((timeout_seconds - tv.tv_sec) * 1e6);
-
-    // Wait for activity on the socket, with timeout
-    int activity = select(server_fd + 1, &readfds, nullptr, nullptr, &tv);
-
-    if (activity < 0) {
-        // Error occurred
-        return -1;
-    } else if (activity == 0) {
-        // Timeout occurred
-        return -2;
-    } else {
-        // There is activity on the socket
-        if (FD_ISSET(server_fd, &readfds)) {
-            // Accept the connection
-            client_fd = accept(server_fd, nullptr, nullptr);
-            return client_fd;
-        }
-    }
-
-    // This should not be reached, but just in case
-    return -1;
 }
 
 Message stream_recv(int client_fd) {
@@ -719,10 +666,20 @@ Message dispatch(const Message& msg){
       }
 
 
+        try {
 
 // AUTO dispatch statements start
 // <<<BREAK>>>
 // AUTO dispatch statements end
+
+
+        } catch (const std::exception& e) {
+            // Catch any exception derived from std::exception
+            return fail_packet(e.what());
+        } catch (...) {
+            // Catch any other type of exception
+            return fail_packet("An unknown error occurred");
+        }
 
     }
 
@@ -798,14 +755,22 @@ void run_job(int client_fd) {
 
 
 int main(int argc, char* argv[]) {
-    if (argc != 3) {
-        std::cerr << "Usage: " << argv[0] << " <socket_path>" << " <tmpdir>\n";
+    if (argc != 4) {
+        std::cerr << "Usage: " << argv[0] << " <socket_path>" << " <tmpdir>" << "<shm_basename>\n";
         return 1;
     }
+
+    // path to the socket file
     const char* socket_path = argv[1];
 
-    // give a value to the global variable storing the main temporary directory
+    // global variable storing the main temporary directory
     g_tmpdir = std::string(argv[2]);
+
+    // the basename for the shared memory files (i.e., in /dev/shm)
+    const char* shm_basename = argv[3];
+
+    // create the shared memory mappings
+    shm_t* shm = shinit(shm_basename, 0, 0xffff);
 
     log_message("Server starting with socket path: " + std::string(socket_path));
 

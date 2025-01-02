@@ -211,7 +211,7 @@ makeTheMaker srcs = do
   let flags' = map pretty flags
 
   -- TODO: This is garbage - the C++ version should NOT be specified here
-  let cmd = SysRun . Code . render $ [idoc|g++ --std=c++17 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
+  let cmd = SysRun . Code . render $ [idoc|g++ -O3 --std=c++17 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
 
   return [cmd]
 
@@ -564,7 +564,7 @@ makeManifold callIndex form manifoldType e = do
         let decl = returnTypeStr <+> mname <> tupled args
         let tryBody = block 4 "try" body
             throwStatement = vsep
-              [ [idoc|std::string error_message = "Error in m#{pretty callIndex} " + std::string(e.what());|]
+              [ [idoc|std::string error_message = "Error raised in C++ pool by m#{pretty callIndex}: " + std::string(e.what());|]
               , [idoc|log_message(error_message);|]
               , [idoc|throw std::runtime_error(error_message);|]
               ]
@@ -687,13 +687,11 @@ generateAnonymousStructs = do
     let fields = [(pretty k, v) | (k, v) <- zip fieldNames fieldTypes]
 
     let structDecl = structTypedefTemplate params rname fields
-        serialDecl = serialHeaderTemplate params rtype
-        deserialDecl = deserialHeaderTemplate params rtype
         serializer = serializerTemplate params rtype fields
         deserializer = deserializerTemplate False params rtype fields
 
 
-    return ([structDecl, serialDecl, deserialDecl], [serializer, deserializer])
+    return ([structDecl], [serializer, deserializer])
 
   -- monadic form of `maybe` function
   maybeM :: Monad m => a -> (b -> m a) -> Maybe b -> m a
@@ -726,13 +724,13 @@ generateSourcedSerializers es0 = do
       , opNativeManifoldM = \(NativeManifold_ i _ _ e) -> Map.union <$> MM.metaTypedefs i CppLang <*> pure e
       }
 
-    groupQuad :: ([a],[a]) -> (a, a, a, a) -> ([a],[a])
-    groupQuad (xs,ys) (x1, y1, x2, y2) = (x1:x2:xs, y1:y2:ys)
+    groupQuad :: ([a],[a]) -> (a, a) -> ([a],[a])
+    groupQuad (xs,ys) (x, y) = (x:xs, y:ys)
 
-    makeSerial :: Scope -> TVar -> ([TVar], TypeU, Bool) -> Maybe (MDoc, MDoc, MDoc, MDoc)
+    makeSerial :: Scope -> TVar -> ([TVar], TypeU, Bool) -> Maybe (MDoc, MDoc)
     makeSerial _ _ (_, NamU _ (TV "struct") _ _, _) = Nothing
     makeSerial scope _ (ps, NamU r (TV v) _ rs, _)
-      = Just (serialDecl, serializer, deserialDecl, deserializer) where
+      = Just (serializer, deserializer) where
 
         templateTerms = ["T" <> pretty p | p <- ps]
 
@@ -742,9 +740,6 @@ generateSourcedSerializers es0 = do
         rs' = map (second (evaluateTypeU scope)) rs
 
         fields = [(pretty k, showDefType ps (typeOf t)) | (k, t) <- rs']
-
-        serialDecl = serialHeaderTemplate params rtype
-        deserialDecl = deserialHeaderTemplate params rtype
 
         serializer = serializerTemplate params rtype fields
 
@@ -798,29 +793,6 @@ structTypedefTemplate params rname fields = vsep [template, struct] where
 
 
 
--- Example
--- > template <class T>
--- > __mlc_Person__<T> fromAnything(const Schema* schema, const Anything* anything, __mlc_Person__<T>* dummy = nullptr)
-serialHeaderTemplate :: [MDoc] -> MDoc -> MDoc
-serialHeaderTemplate params rtype = vsep [template, prototype]
-  where
-  template = makeTemplateHeader params
-  prototype = [idoc|#{rtype} fromAnything(const Schema* schema, const Anything* anything, #{rtype}* dummy = nullptr);|]
-  
-
-
-
--- Example:
--- > template<typename T>
--- > Anything* toAnything(const Schema* schema, const __mlc_Person__<T>& obj)
-deserialHeaderTemplate :: [MDoc] -> MDoc -> MDoc
-deserialHeaderTemplate params rtype = vsep [template, prototype]
-  where
-  template = makeTemplateHeader params
-  prototype = [idoc|Anything* toAnything(const Schema* schema, const #{rtype}& obj);|]
-
-
-
 serializerTemplate
   :: [MDoc] -- template parameters
   -> MDoc -- type of thing being serialized
@@ -828,18 +800,12 @@ serializerTemplate
   -> MDoc -- output serializer function
 serializerTemplate params rtype fields = [idoc|
 #{makeTemplateHeader params}
-Anything* toAnything(const Schema* schema, const #{rtype}& obj)
+void* toAnything(void* dest, void** cursor, const Schema* schema, const #{rtype}& obj)
 {
-    Anything* result = map_data_(#{pretty $ length fields});
-    #{align $ vsep (zipWith assignFields [0..] fields)}
-    return result;
+    return toAnything(dest, cursor, schema, std::make_tuple#{arguments});
 }
 |] where
-  assignFields :: Int -> (MDoc, MDoc) -> MDoc
-  assignFields idx (keyName, _) = vsep
-    [ [idoc|result->data.obj_arr[#{pretty idx}] = toAnything(schema->parameters[#{pretty idx}], obj.#{keyName});|]
-    , [idoc|result->data.obj_arr[#{pretty idx}]->key = strdup("#{keyName}");|]
-    ]
+  arguments = tupled ["obj." <> key | (key, _) <- fields]
 
 
 
@@ -853,8 +819,11 @@ deserializerTemplate isObj params rtype fields
   =  [idoc|
 #{makeTemplateHeader params}
 #{block 4 header body}
+
+#{makeTemplateHeader params}
+#{block 4 headerGetSize bodyGetSize}
 |] where
-  header = [idoc|#{rtype} fromAnything(const Schema* schema, const Anything* anything, #{rtype}* dummy)|]
+  header = [idoc|#{rtype} fromAnything(const Schema* schema, const void * anything, #{rtype}* dummy = nullptr)|]
   body = vsep $ [ [idoc|#{rtype} obj;|] ]
               <> zipWith assignFields [0..] fields
               <> ["return obj;"]
@@ -862,8 +831,18 @@ deserializerTemplate isObj params rtype fields
   assignFields :: Int -> (MDoc, MDoc) -> MDoc
   assignFields idx (keyName, keyType) = vsep
     [ [idoc|#{keyType}* elemental_dumby_#{keyName} = nullptr;|]
-    , [idoc|obj.#{keyName} = fromAnything(schema->parameters[#{pretty idx}], anything->data.obj_arr[#{pretty idx}], elemental_dumby_#{keyName});|]
+    , [idoc|obj.#{keyName} = fromAnything(schema->parameters[#{pretty idx}], (char*)anything + schema->offsets[#{pretty idx}], elemental_dumby_#{keyName});|]
+    
     ]
+
+  headerGetSize = [idoc|size_t get_shm_size(const Schema* schema, const #{rtype}& data)|]
+  bodyGetSize = vsep $
+    [ "size_t size = 0;" ] <>
+    [getSize idx key | (idx, (key, _)) <- zip [0..] fields] <>
+    ["return size;"]
+
+  getSize :: Int -> MDoc -> MDoc
+  getSize idx key = [idoc|size += get_shm_size(schema->parameters[#{pretty idx}], data.#{key});|]
 
   -- XXX: here need to add back the isObj handling, if is object, need to call
   -- the constructor rather than directly assigning to fields

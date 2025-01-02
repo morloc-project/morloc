@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y git curl pkg-config libglib2.0-dev
 RUN curl -SL https://get.haskellstack.org/ | sh
 
 # Get the latest morloc release
-RUN git clone https://github.com/morloc-project/morloc && echo "hi"
+RUN git clone https://github.com/morloc-project/morloc
 
 # Build morloc
 RUN cd morloc && stack install

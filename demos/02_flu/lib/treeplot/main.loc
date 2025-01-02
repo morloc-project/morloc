@@ -1,7 +1,0 @@
-module lib.treeplot (plotTree)
-
-import bio.tree(RootedTree)
-import types (Filename)
-
-source R from "plot-tree.R" ("plotTree")
-plotTree :: Filename -> RootedTree Str Real Str -> ()

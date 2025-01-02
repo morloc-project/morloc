@@ -1,3 +1,16 @@
+0.51.0 [2025-12-2]
+------------------
+
+Shared memory
+
+ * Allow processes to communicate through shared memory
+
+Other
+
+ * Fix cases where morloc stalls when errors are transmitted across languages
+ * Moved demos to the dedicated example repo
+
+
 0.50.0 [2024-11-08]
 -------------------
 

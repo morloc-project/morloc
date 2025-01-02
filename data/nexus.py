@@ -12,28 +12,34 @@ import struct
 import json
 import traceback
 import tempfile
+import hashlib
 
 # AUTO include imports start
 # <<<BREAK>>>
 # AUTO include imports start
 
-import pympack as mp
+import pymorloc as mp
 
 # this determines how much whitespace is in the output
 JSON_SEPARATORS = (",", ":")
 
 PACKET_TYPE_DATA = 0x00
 PACKET_TYPE_CALL = 0x01
-PACKET_TYPE_GET  = 0x02
-PACKET_TYPE_PUT  = 0x03
-PACKET_TYPE_PING = 0x04
+PACKET_TYPE_PING = 0x02
+PACKET_TYPE_GET  = 0x03
+PACKET_TYPE_POST = 0x04
+PACKET_TYPE_PUT  = 0x05
+PACKET_TYPE_DEL  = 0x06
 
 PACKET_SOURCE_MESG = 0x00 # the message contains the data
 PACKET_SOURCE_FILE = 0x01 # the message is a path to a file of data
-PACKET_SOURCE_NXDB = 0x02 # the message is a key to the nexus uses to access the data
+PACKET_SOURCE_RPTR = 0x02 # the message is a path to a file of data
 
-PACKET_FORMAT_JSON = 0x00
-PACKET_FORMAT_MSGPACK = 0x01
+PACKET_FORMAT_JSON     = 0x00
+PACKET_FORMAT_MSGPACK  = 0x01
+PACKET_FORMAT_TEXT     = 0x02
+PACKET_FORMAT_DATA     = 0x03
+PACKET_FORMAT_VOIDSTAR = 0x04
 
 PACKET_COMPRESSION_NONE = 0x00 # uncompressed
 
@@ -44,7 +50,7 @@ PACKET_ENCRYPTION_NONE  = 0x00 # unencrypted
 
 MSGPACK_TYPE_TUPLE = 0
 
-# These three parameters describe the retru times for a pool connection to
+# These three parameters describe the retry times for a pool connection to
 # open. The default parameters sum to a 4s max wait, which is well beyond what
 # it should take for any interpreter to fire up.
 INITIAL_RETRY_DELAY = 0.001
@@ -57,6 +63,11 @@ BUFFER_SIZE = 4096
 # Resources that need to be cleaned up when the session ends
 resources = {"pools": {}, "files": []}
 
+opts = {
+    "no-start" : False,
+    "leave-open" : False,
+    "wd" : "",
+}
 
 class Pool:
     def __init__(self, lang, process, pipe, stderr_queue, exit_status_queue):
@@ -79,8 +90,10 @@ def hex(xs: bytes) -> str:
     return ' '.join('{:02x}'.format(x) for x in xs)
 
 def cleanup():
+    if opts["leave-open"] or opts["no-start"]:
+        return None
+
     pools = resources["pools"]
-    files = resources["files"]
 
     _log(f"Cleaning up")
     for pool in pools.values():
@@ -98,16 +111,21 @@ def cleanup():
             # this socket file may have been cleaned up by the pool
             pass
 
-    # clean up temporary files and sockets
-    for is_temp, file in files:
-        if is_temp and os.path.exists(file):
-            os.unlink(file)
-
 
 def clean_exit(exit_code, msg=""):
-    cleanup()
     if msg:
         print(msg, file=sys.stderr)
+
+    try:
+        cleanup()
+    except Exception as e:
+        print(str(e), file=sys.stderr)
+
+    try:
+        mp.shm_close()
+    except Exception as e:
+        print(str(e), file=sys.stderr)
+
     sys.exit(exit_code)
 
 
@@ -155,9 +173,77 @@ _dispatch_deserialize = {
     "z" : None
 }
 
+def parse_schema_size(schema: str, index: int) -> tuple[int, int]:
+    c = schema[index]
+    if '0' <= c <= '9':
+        size = ord(c) - ord('0')
+    elif 'a' <= c <= 'z':
+        size = ord(c) - ord('a') + 10
+    elif 'A' <= c <= 'Z':
+        size = ord(c) - ord('A') + 36
+    elif c == '+':
+        size = 62
+    elif c == '/':
+        size = 63
+    else:
+        raise ValueError(f"Invalid character for size: {c}")
+    return size, index + 1
+
+def parse_schema_key(schema: str, index: int) -> tuple[str, int]:
+    key_size, index = parse_schema_size(schema, index)
+    key = schema[index:index + key_size]
+    return key, index + key_size
+
+def parse_schema_r(schema: str, index: int = 0) -> tuple[list, int]:
+    if index >= len(schema):
+        return [], index
+
+    c = schema[index]
+    index += 1
+
+    if c == 'a':  # SCHEMA_ARRAY
+        sub_schema, index = parse_schema_r(schema, index)
+        return ['a', sub_schema], index
+    elif c == 't':  # SCHEMA_TUPLE
+        size, index = parse_schema_size(schema, index)
+        tuple_schema = ['t', []]
+        for _ in range(size):
+            sub_schema, index = parse_schema_r(schema, index)
+            tuple_schema[1].append(sub_schema)
+        return tuple_schema, index
+    elif c == 'm':  # SCHEMA_MAP
+        size, index = parse_schema_size(schema, index)
+        map_schema = ['m', []]
+        for _ in range(size):
+            key, index = parse_schema_key(schema, index)
+            value_schema, index = parse_schema_r(schema, index)
+            map_schema[1].append([key, value_schema])
+        return map_schema, index
+    elif c == 'z':  # SCHEMA_NIL
+        return ([c, []], index)
+    elif c == 'b':  # SCHEMA_BOOL
+        return [c, []], index
+    elif c in 'iu':  # SCHEMA_SINT or SCHEMA_UINT
+        _, index = parse_schema_size(schema, index)
+        return [c, []], index
+    elif c == 'f':  # SCHEMA_FLOAT
+        _, index = parse_schema_size(schema, index)
+        return ['f', []], index
+    elif c == 's':  # SCHEMA_STRING
+        return ['s', []], index
+    elif c == 'r':  # SCHEMA_BINARY
+        return ['r', []], index
+    else:
+        raise ValueError(f"Unrecognized schema type '{c}'")
+
+def parse_schema(schema: str) -> list:
+    result, _ = parse_schema_r(schema)
+    return result
+
+
 def json_deserialize(json_data, schema_str: str, is_file = False):
 
-    schema = mp.parse_schema(schema_str)
+    schema = parse_schema(schema_str)
 
     _log(f"Deserializing JSON, is_file={str(is_file)}")
     if is_file:
@@ -185,8 +271,8 @@ def client(pool, message):
     delay_time = INITIAL_RETRY_DELAY
     _log(f"contacting {pool.lang} pool ...")
     for attempt in range(MAX_RETRIES):
-        # check to see if the pool has died
-        if not pool.exit_status_queue.empty():
+        # check if the pool has died if we started it (else we haven't eyes)
+        if not opts["no-start"] and not pool.exit_status_queue.empty():
             exit_status = pool.exit_status_queue.get()
             print(
                 f"{pool.lang} pool ended early with exit status {exit_status} and the error message:",
@@ -244,51 +330,58 @@ def client(pool, message):
     return data
 
 
-def start_language_server(lang, cmd, pipe, tmpdir):
-    # Create a queue to store stderr output
-    stderr_queue = queue.Queue()
+def start_language_server(lang, cmd, pipe):
 
-    # Create a queue to store the exit status
-    exit_status_queue = queue.Queue()
+    if not opts["no-start"]:
+        # Create a queue to store stderr output
+        stderr_queue = queue.Queue()
 
-    # Function to read stderr and put it in the queue
-    def read_stderr(process, queue):
-        for line in process.stderr:
-            queue.put(line)
-        process.stderr.close()
+        # Create a queue to store the exit status
+        exit_status_queue = queue.Queue()
 
-    # Function to monitor process and get exit status
-    def monitor_process(process, queue):
-        exit_status = process.wait()
-        queue.put(exit_status)
+        # Function to read stderr and put it in the queue
+        def read_stderr(process, queue):
+            for line in process.stderr:
+                queue.put(line)
+            process.stderr.close()
 
-    # Start the language server in the background
-    _log(f"Starting server with {cmd} ...")
-    process = subprocess.Popen(
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
-    )
-    _log(f"Server started")
+        # Function to monitor process and get exit status
+        def monitor_process(process, queue):
+            exit_status = process.wait()
+            queue.put(exit_status)
 
-    # Start thread to read stderr
-    stderr_thread = threading.Thread(target=read_stderr, args=(process, stderr_queue))
-    stderr_thread.daemon = True
-    stderr_thread.start()
+        # Start the language server in the background
+        _log(f"Starting server with {cmd} ...")
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+        )
+        _log(f"Server started")
 
-    # Start thread to monitor process and get exit status
-    monitor_thread = threading.Thread(
-        target=monitor_process, args=(process, exit_status_queue)
-    )
-    monitor_thread.daemon = True
-    monitor_thread.start()
+        # Start thread to read stderr
+        stderr_thread = threading.Thread(target=read_stderr, args=(process, stderr_queue))
+        stderr_thread.daemon = True
+        stderr_thread.start()
+
+        # Start thread to monitor process and get exit status
+        monitor_thread = threading.Thread(
+            target=monitor_process, args=(process, exit_status_queue)
+        )
+        monitor_thread.daemon = True
+        monitor_thread.start()
+    else:
+        process = None
+        stderr_queue = None
+        exit_status_queue = None
 
     pool = Pool(lang, process, pipe, stderr_queue, exit_status_queue)
 
     resources["pools"][lang] = pool
 
-    # ping the server, make sure it is up and going
-    _log(f"Pinging the {lang} server ...")
-    pong = client(pool, _make_ping_packet())
-    _log(f"Pong from {lang} - server is good (len(pong) == {len(pong)})")
+    if not opts["no-start"]:
+        # ping the server, make sure it is up and going
+        _log(f"Pinging the {lang} server ...")
+        pong = client(pool, _make_ping_packet())
+        _log(f"Pong from {lang} - server is good (len(pong) == {len(pong)})")
 
     return pool
 
@@ -338,6 +431,8 @@ def print_return(data, schema_str):
     (cmd, offset, _) = _read_header(data)
 
     cmd_type = cmd[0]
+    cmd_source = cmd[1]
+    cmd_format = cmd[2]
     status = cmd[5]
     data_start = 32 + offset
 
@@ -345,15 +440,15 @@ def print_return(data, schema_str):
         exit_code = 0
         outfile = sys.stdout
     elif cmd_type == PACKET_TYPE_DATA and status == PACKET_STATUS_FAIL:
-        errmsg = mp.unpack(data[data_start: ], "s")
-        clean_exit(1, errmsg)
+        if cmd_format == PACKET_FORMAT_TEXT:
+            clean_exit(1, data[data_start: ])
+        else:
+            clean_exit(1, "Failed to read errmsg, pools should return erros as text")
     else:
         clean_exit(1, f"Implementation bug: expected data packet: {str(data)}")
 
-    cmd_source = cmd[1]
-    cmd_format = cmd[2]
-
-    isgood = False
+    content = None
+    isgood = True
     error = ""
 
     if cmd_source == PACKET_SOURCE_MESG:
@@ -363,19 +458,28 @@ def print_return(data, schema_str):
         with open(filename, 'rb') as file:
             content = file.read()
         os.unlink(filename)  # Delete the temporary file
+    elif cmd_source == PACKET_SOURCE_RPTR:
+        relptr = _unpack("Q", data[data_start:])[0]
+        _log(f"Made relative pointer {relptr!s} for return")
+        content = mp.from_shm(relptr, schema_str)
 
-
-    if cmd_format == PACKET_FORMAT_JSON:
+    if content == None:
+        error = "Unexpected source"
+        isgood = False
+    elif cmd_format == PACKET_FORMAT_JSON:
         print(content, file=outfile)
         isgood = True
 
-    if cmd_format == PACKET_FORMAT_MSGPACK:
+    elif cmd_format == PACKET_FORMAT_MSGPACK:
         try:
-            json.dump(mp.unpack(content, schema_str), fp = sys.stdout, separators = JSON_SEPARATORS)
+            json.dump(mp.mesgpack_to_py(content, schema_str), fp = sys.stdout, separators = JSON_SEPARATORS)
         except Exception as e:
             _log(trace(f"Failed to read output MessagePack format with error {str(e)}:\n hex = {hex(content)}\n chr = {str(content)}"))
-        print() # just for that adorable little newline
+        print() # newline
         isgood = True
+    elif cmd_format == PACKET_FORMAT_VOIDSTAR:
+        json.dump(content, fp = sys.stdout, separators = JSON_SEPARATORS)
+        print() # newline
 
     # Exit with the proper error code
     if isgood:
@@ -456,21 +560,18 @@ def get_format_from_data(binary_data):
 
 def handle_json_file_argument(filename, schema):
     """
-    Convert the JSON file to MessagePack
-
-    If the file is short, then pass as message.
-
-    Otherwise, write the JSON data to a MessagePack file with extenssion .mpk
+    Read JSON file into shared memory and store relative pointer in the returned packet
     """
-    data = mp.pack((json_deserialize(filename, schema, is_file = True)), schema)
-
-    if len(data) <= 65536 - 32:
-        return _make_data(data)
-    else:
-        msgpack_filename = os.path.splitext(filename)[0] + ".mpk"
-        with open(msgpack_filename, "wb") as fh:
-            fh.write(data)
-        return _make_data(msgpack_filename.encode("utf8"), src=PACKET_SOURCE_FILE)
+    # TODO: Rather than parse the JSON to a pyobj and then cast it to voidstar,
+    # I should just use a C JSON parser and go directly to voidstar. Or even
+    # better, I should pass it along as a JSON file and then load it into memory
+    # when it is actually needed. Currently doing so would be problematic since
+    # I don't want to require every language have its own JSON parser (they are
+    # rather heavy things). But if the JSON parser is in morloc.h, then life
+    # will be easy.
+    relptr = mp.to_shm(json_deserialize(filename, schema, is_file = True), schema)
+    _log(f"Made relative pointer {relptr!s} for json file")
+    return _make_data(_pack("Q", relptr), src=PACKET_SOURCE_RPTR, fmt=PACKET_FORMAT_VOIDSTAR)
 
 def handle_msgpack_file_argument(filename):
     """
@@ -502,12 +603,16 @@ def prepare_call_packet(mid, args, schemas):
             # or compressed)
             if is_file:
                 if get_format_from_data(data) == PACKET_FORMAT_JSON:
-                    packet = _make_data(mp.pack(json_deserialize(data, schema), schema))
+                    relptr = mp.to_shm(json_deserialize(data, schema), schema)
+                    _log(f"Made relative pointer {relptr!s} for some file")
+                    packet = _make_data(_pack("Q", relptr), src=PACKET_SOURCE_RPTR, fmt=PACKET_FORMAT_VOIDSTAR)
                 else:
                     packet = _make_data(arg)
             # if data is not from a file, then it must be json
             else:
-                packet = _make_data(mp.pack(json_deserialize(data, schema), schema))
+                relptr = mp.to_shm(json_deserialize(data, schema), schema)
+                _log(f"Made relative pointer {relptr!s} for argument")
+                packet = _make_data(_pack("Q", relptr), src=PACKET_SOURCE_RPTR, fmt=PACKET_FORMAT_VOIDSTAR)
 
         arg_msgs.append(packet)
 
@@ -534,7 +639,7 @@ def run_command(mid, args, pool_lang, sockets, arg_schema, return_schema):
         # Start language servers
         for (lang, cmd, pipe) in sockets:
             try:
-                start_language_server(lang, cmd, pipe, tmpdir)
+                start_language_server(lang, cmd, pipe)
             except Exception as e:
                 _log(trace(f"Failed to start {lang} language server: {str(e)}"))
                 raise  # Re-raise the exception to be caught in the outer try block
@@ -565,22 +670,93 @@ def run_command(mid, args, pool_lang, sockets, arg_schema, return_schema):
 
 
 
-def dispatch(cmd, args, tmpdir):
-    if cmd in ["-h", "--help", "-?", "?"]:
-        usage()
-    else:
-        command_table[cmd](args, tmpdir)
+def opt_name(short="", long=""):
+    name = "<wtf>"
+    if short and long:
+        name = f"-{short}/--{long}"
+    elif short:
+        name = f"-{short}"
+    elif long:
+        name = f"--{long}"
+    return name
 
+
+def get_opt(args, short="", long=""):
+    opt_arg = "";
+    for (i, arg) in enumerate(args):
+        if arg == "--":
+            return "" 
+        elif (short and arg == "-" + short) or (long and arg == "--" + long):
+            try:
+                opt_arg = args[i+1]
+            except IndexError:
+                errmsg = f"Expected one argument to be passed to {opt_name(short, long)} but none found"
+                print(errmsg, file=sys.stderr)
+                sys.exit(1)
+            del args[i:i+2]
+            return opt_arg
+    return opt_arg
+
+def get_flag(args, short="", long=""):
+    for (i, arg) in enumerate(args):
+        if arg == "--":
+            return False
+        elif (short and arg == "-" + short) or (long and arg == "--" + long):
+            del args[i]
+            return True
+    return False
+
+def validate_args(args):
+    for arg in args:
+        if arg[0] == "-":
+            errmsg = f"Found unsupported argument {arg}"
+            print(errmsg, file=sys.stderr)
+            sys.exit(1)
+
+def make_shm_pool_name(base="morloc_"):
+
+    current_dir = os.getcwd()
+    basename = os.path.basename(current_dir)
+
+    randhash = hashlib.md5(str(time.time_ns() + os.getpid() * 1000).encode("utf-8")).hexdigest()[0:8]
+    return base + basename + "_" + str(randhash)
 
 if __name__ == "__main__":
-    if len(sys.argv) == 1:
-        usage()
-    else:
-        cmd = sys.argv[1]
-        args = sys.argv[2:]
 
+    cli_args = sys.argv
+
+    if len(cli_args) == 1:
+        # `usage` is automatically generated
+        usage()
+        sys.exit(0)
+
+    # -d <dirname> use the given directory, rather than a temporary one
+    opts["wd"] = get_opt(cli_args, short="d")
+
+    # --no-start - do not start processes, only call existing ones
+    opts["no-start"] = get_flag(cli_args, long="no-start")
+
+    # --leave-open - do not delete pipes and close lang servers on cleanup
+    opts["leave-open"] = get_flag(cli_args, long="leave-open")
+
+    if cli_args[1] in ["-h", "--help", "-?", "?"]:
+        usage()
+        sys.exit(0)
+
+    validate_args(cli_args)
+
+    cmd = cli_args[1]
+    cmd_args = cli_args[2:]
+
+    shm_basename = make_shm_pool_name()
+    mp.shm_start(shm_basename, 0xffff)
+
+    if opts["wd"]:
+        os.makedirs(opts["wd"], exist_ok=True)
+        command_table[cmd](cmd_args, tmpdir=opts["wd"], shm_basename=shm_basename)
+    else:
         base_dir = os.path.join(MORLOC_HOME, "tmp")
         os.makedirs(base_dir, exist_ok=True)
 
         with tempfile.TemporaryDirectory(dir=base_dir) as tmpdir:
-            dispatch(cmd, args, tmpdir)
+            command_table[cmd](cmd_args, tmpdir, shm_basename)
