@@ -1,8 +1,6 @@
-# # Pushing to the github registry requires a personal token with package
-# # permsions. Login is required as required:
-#
-# $ echo $GITHUB_TOKEN | podman login ghcr.io -u morloc-project --password-stdin
-
+# Pushing to the github registry requires a personal token with package
+# permissions. Login is required, for example:
+#   $ echo $GITHUB_TOKEN | podman login ghcr.io -u morloc-project --password-stdin
 
 ### WARNING: I am foolishly assuming here that the local morloc version is the
 ### same as the latest on github master.

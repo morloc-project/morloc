@@ -3,13 +3,8 @@ LABEL org.opencontainers.image.description="A morloc container intended for inte
 LABEL org.opencontainers.image.licenses=MIT
 
 FROM ubuntu:22.04
-<<<<<<< Updated upstream
-COPY --from=morloc-tiny /bin/morloc /bin/morloc
-=======
 COPY --from=ghcr.io/morloc-project/morloc/morloc-tiny:0.50.0 /bin/morloc /bin/morloc
 
-
->>>>>>> Stashed changes
 
 WORKDIR $HOME
 
