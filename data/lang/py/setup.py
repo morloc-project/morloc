@@ -1,5 +1,5 @@
 import os
-from distutils.core import setup, Extension
+from setuptools import setup, Extension
 
 module = Extension('pymorloc',
                    sources=['pymorloc.c'],
