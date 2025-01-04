@@ -448,44 +448,52 @@ def print_return(data, schema_str):
         clean_exit(1, f"Implementation bug: expected data packet: {str(data)}")
 
     content = None
-    isgood = True
-    error = ""
 
-    if cmd_source == PACKET_SOURCE_MESG:
-        content = data[data_start: ]
-    elif cmd_source == PACKET_SOURCE_FILE:
-        filename = data[data_start:].decode()
-        with open(filename, 'rb') as file:
-            content = file.read()
-        os.unlink(filename)  # Delete the temporary file
-    elif cmd_source == PACKET_SOURCE_RPTR:
-        relptr = _unpack("Q", data[data_start:])[0]
-        _log(f"Made relative pointer {relptr!s} for return")
-        content = mp.from_shm(relptr, schema_str)
+    try:
+        if cmd_source == PACKET_SOURCE_MESG:
+            content = data[data_start: ]
+        elif cmd_source == PACKET_SOURCE_FILE:
+            filename = data[data_start:].decode()
+            with open(filename, 'rb') as file:
+                content = file.read()
+            os.unlink(filename)  # Delete the temporary file
+        elif cmd_source == PACKET_SOURCE_RPTR:
+            relptr = _unpack("Q", data[data_start:])[0]
+            _log(f"Made relative pointer {relptr!s} for return")
+            content = mp.from_shm(relptr, schema_str)
+    except Exception as e:
+        errmsg = f"Failed to open return data packet: {e!s}"
+        clean_exit(1, errmsg)
 
-    if content == None:
-        error = "Unexpected source"
-        isgood = False
+    if content == None and schema_str == "z":
+        # if we expected a NULL result and got one, do nothing
+        pass
+    elif content == None and schema_str != "z":
+        errmsg = "Return data was expected but none was found"
+        clean_exit(1, errmsg)
     elif cmd_format == PACKET_FORMAT_JSON:
         print(content, file=outfile)
-        isgood = True
-
     elif cmd_format == PACKET_FORMAT_MSGPACK:
         try:
             json.dump(mp.mesgpack_to_py(content, schema_str), fp = sys.stdout, separators = JSON_SEPARATORS)
+            print() # newline
         except Exception as e:
-            _log(trace(f"Failed to read output MessagePack format with error {str(e)}:\n hex = {hex(content)}\n chr = {str(content)}"))
-        print() # newline
-        isgood = True
+            errmsg = f"Failed to read output MessagePack format with error:\n{e!s}"
+            _log(trace(errmsg))
+            clean_exit(1, errmsg)
     elif cmd_format == PACKET_FORMAT_VOIDSTAR:
-        json.dump(content, fp = sys.stdout, separators = JSON_SEPARATORS)
-        print() # newline
-
-    # Exit with the proper error code
-    if isgood:
-        clean_exit(exit_code)
+        try:
+            json.dump(content, fp = sys.stdout, separators = JSON_SEPARATORS)
+            print() # newline
+        except Exception as e:
+            errmsg = f"Failed to read output voidstar format with error:\n{e!s}"
+            _log(trace(errmsg))
+            clean_exit(1, errmsg)
     else:
-        clean_exit(1, error)
+        errmsg = "Unexpected source"
+        clean_exit(1, errmsg)
+
+    clean_exit(exit_code)
 
 
 def _make_header(
