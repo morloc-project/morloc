@@ -21,11 +21,9 @@ import qualified Morloc.DataFiles as Files
 import qualified Morloc.Data.Text as MT
 import qualified Data.Text.IO as TIO
 
-import System.Process (callCommand, callProcess, readCreateProcessWithExitCode, shell)
+import System.Process (callCommand, callProcess)
 import System.Directory (doesFileExist, removeFile, doesDirectoryExist, createDirectoryIfMissing)
 import System.IO (withFile, IOMode(WriteMode), hPutStrLn, stderr)
-
-import System.Exit (ExitCode(..), exitWith)
 
 configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
 configure _ = return ()
@@ -57,7 +55,9 @@ configureAll verbose force config = do
   unless mlccpptypesExists $ do
     let mlccpptypesRepoUrl = "https://github.com/morloclib/mlccpptypes"
         cmd = unwords ["git clone", mlccpptypesRepoUrl, mlccpptypesPath]
-    runCommand "installing mlccpptypes" cmd
+
+    say "installing mlccpptypes"
+    callCommand cmd
 
   say "Configuring R socket library"
   let srcpath = configHome config </> "lib" </> "socketr.c"
@@ -94,7 +94,8 @@ configureAll verbose force config = do
   TIO.writeFile libpySetupPath libpySetupCode
   TIO.writeFile libpyMakePath libpyMakefileCode
 
-  runCommand "Generating libpymorloc.so" ("make -C " <> optDir <> " -f " <> libpyMakePath)
+  say "Generating libpymorloc.so" 
+  callCommand ("make -C " <> optDir <> " -f " <> libpyMakePath)
 
 
   say "Configuring R morloc API libraries"
@@ -106,21 +107,12 @@ configureAll verbose force config = do
   where
 
   ok msg = "\ESC[32m" <> msg <> "\ESC[0m"
-  bad msg = "\ESC[31m" <> msg <> "\ESC[0m"
 
   say :: String -> IO ()
   say message =
     if verbose
     then do
       hPutStrLn stderr (ok message)
-    else
-      return ()
-
-  warn :: String -> IO ()
-  warn message =
-    if verbose
-    then do
-      hPutStrLn stderr (bad message)
     else
       return ()
 
@@ -158,19 +150,3 @@ configureAll verbose force config = do
               -- Delete the source .o file
               objPathExists <- doesFileExist objPath
               when (objPathExists) (removeFile objPath)
-
-  runCommand ::
-       String -- description of action
-    -> String -- system command
-    -> IO ()
-  runCommand runMsg cmd = do
-    say runMsg
-    putStrLn $ cmd
-    (exitCode, _, err') <-
-      readCreateProcessWithExitCode (shell cmd) []
-    case exitCode of
-      ExitSuccess -> return ()
-      ExitFailure code -> do
-        warn "  command failed - exiting"
-        putStrLn err'
-        exitWith (ExitFailure code)
