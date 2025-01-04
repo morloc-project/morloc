@@ -5,6 +5,11 @@ Shared memory
 
  * Allow processes to communicate through shared memory
 
+Setup
+
+ * `morloc init` command will now build the `morloc` ecosystem, writing all
+   required headers to `morloc` home and compiling any required shared libraries.
+
 Other
 
  * Fix cases where morloc stalls when errors are transmitted across languages
