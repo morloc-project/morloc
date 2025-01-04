@@ -1,0 +1,12 @@
+module foo (cfoo, pfoo, rfoo)
+
+import types (Unit, Str)
+import cppbase
+
+source Py from "foo.py" ("pfoo")
+source R from "foo.R" ("rfoo")
+source Cpp from "foo.hpp" ("cfoo")
+
+pfoo :: Str -> ()
+cfoo :: Str -> ()
+rfoo :: Str -> ()

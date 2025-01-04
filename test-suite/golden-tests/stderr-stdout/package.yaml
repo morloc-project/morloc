@@ -1,0 +1,17 @@
+name: math
+version: 0.0.0
+homepage: https://github.com/morloc-project
+synopsis: test
+description: test
+category: test
+license: MIT
+author: "Zebulun Arendsee"
+maintainer: "zbwrnz@gmail.com"
+github: https://github.com/morloc-lib/math
+bug-reports: "/dev/null"
+dependencies:
+  - "mlc"
+
+# -Wall -lm -lgsl -lcblas
+# # cblas is a faster library, but gslcblas comes with gsl, so it more likely to
+# # be installed. I need a system for specifying alternative sets of flags.

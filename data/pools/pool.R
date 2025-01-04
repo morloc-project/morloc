@@ -469,8 +469,6 @@ main <- function(socket_path, shm_basename) {
       while(job_idx <= length(queue)){
         # check is the job has finished
         if(job_has_finished(queue[[job_idx]])){
-          print(paste("job", job_idx, "is finished"))
-
           # send data back to the client and close the socket
           handle_finished_client(queue[[job_idx]])
 

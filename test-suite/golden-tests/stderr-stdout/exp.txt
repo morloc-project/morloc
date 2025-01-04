@@ -1,0 +1,6 @@
+STDERR Hello wena
+STDOUT Hello wena
+STDERR Hello wena 
+STDOUT Hello wena 
+STDERR Hello wena
+STDOUT Hello wena

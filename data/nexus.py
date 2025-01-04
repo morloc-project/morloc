@@ -70,11 +70,10 @@ opts = {
 }
 
 class Pool:
-    def __init__(self, lang, process, pipe, stderr_queue, exit_status_queue):
+    def __init__(self, lang, process, pipe, exit_status_queue):
         self.lang = lang
         self.process = process
         self.pipe = pipe
-        self.stderr_queue = stderr_queue
         self.exit_status_queue = exit_status_queue
 
 
@@ -278,8 +277,6 @@ def client(pool, message):
                 f"{pool.lang} pool ended early with exit status {exit_status} and the error message:",
                 file=sys.stderr,
             )
-            while not pool.stderr_queue.empty():
-                print(pool.stderr_queue.get(), file=sys.stderr, end="")
             clean_exit(1, "")
         # try to connect to the pool server
         try:
@@ -333,17 +330,9 @@ def client(pool, message):
 def start_language_server(lang, cmd, pipe):
 
     if not opts["no-start"]:
-        # Create a queue to store stderr output
-        stderr_queue = queue.Queue()
 
         # Create a queue to store the exit status
         exit_status_queue = queue.Queue()
-
-        # Function to read stderr and put it in the queue
-        def read_stderr(process, queue):
-            for line in process.stderr:
-                queue.put(line)
-            process.stderr.close()
 
         # Function to monitor process and get exit status
         def monitor_process(process, queue):
@@ -353,14 +342,9 @@ def start_language_server(lang, cmd, pipe):
         # Start the language server in the background
         _log(f"Starting server with {cmd} ...")
         process = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+            cmd, stdout=None, stderr=None, text=True
         )
         _log(f"Server started")
-
-        # Start thread to read stderr
-        stderr_thread = threading.Thread(target=read_stderr, args=(process, stderr_queue))
-        stderr_thread.daemon = True
-        stderr_thread.start()
 
         # Start thread to monitor process and get exit status
         monitor_thread = threading.Thread(
@@ -370,10 +354,9 @@ def start_language_server(lang, cmd, pipe):
         monitor_thread.start()
     else:
         process = None
-        stderr_queue = None
         exit_status_queue = None
 
-    pool = Pool(lang, process, pipe, stderr_queue, exit_status_queue)
+    pool = Pool(lang, process, pipe, exit_status_queue)
 
     resources["pools"][lang] = pool
 

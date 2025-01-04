@@ -1,6 +1,6 @@
 obs.txt
 0-*
-*out
+*.out
 000*
 __pycache__/
 pool-rust
