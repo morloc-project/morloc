@@ -25,15 +25,19 @@ install:
 
 # Build a container that just has the morloc compiler
 build-tiny:
-	podman build -t ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION} tiny
+	# podman build -t ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION} tiny
+	podman build --no-cache --force-rm -t ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION} tiny
 
 # Build the required docker image
 build-full:
-	podman build -t ghcr.io/morloc-project/morloc/morloc-full:${MORLOC_VERSION} full
+	podman build --no-cache --force-rm -t ghcr.io/morloc-project/morloc/morloc-full:${MORLOC_VERSION} full
 
 # Open a shell with a nice environment (vim and other niceties)
 shell:
-	podman run -w "/home/morloc" -it morloc-full /bin/sh
+	podman run --rm -it ghcr.io/morloc-project/morloc/morloc-full:${MORLOC_VERSION} /bin/bash
+
+shell-tiny:
+	podman run --rm -it ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION} /bin/bash
 
 # push local containers to the github registry
 push:
