@@ -1,4 +1,11 @@
-0.51.0 [2025-12-2]
+0.51.1 [2025-12-04]
+-------------------
+
+ * Do not catch STDOUT and STDERR
+ * Fix NULL return errors
+ * Fix container setup
+
+0.51.0 [2025-12-02]
 ------------------
 
 Shared memory
