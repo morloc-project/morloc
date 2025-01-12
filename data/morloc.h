@@ -968,7 +968,7 @@ block_header_t* abs2blk(void* ptr);
 
 volptr_t rel2vol(relptr_t ptr) {
     for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
-        shm_t* shm = volumes[i];
+        shm_t* shm = shopen(i);
         if (shm == NULL) {
             return VOLNULL;
         }
@@ -981,13 +981,14 @@ volptr_t rel2vol(relptr_t ptr) {
 }
 
 absptr_t rel2abs(relptr_t ptr) {
+    // If the input relative ptr is a failure, return NULL
+    if(ptr < 0){
+        return NULL;
+    }
     for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
-        shm_t* shm = volumes[i];
+        shm_t* shm = shopen(i);
         if (shm == NULL) {
-            shm = shopen(i);
-            if(shm == NULL){
-                return NULL;
-            }
+            return NULL;
         }
         if ((size_t)ptr < shm->volume_size) {
             char* shm_start = (char*)shm;
@@ -1020,7 +1021,7 @@ volptr_t abs2vol(absptr_t ptr, shm_t* shm) {
         }
     } else {
         for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
-            shm_t* current_shm = volumes[i];
+            shm_t* current_shm = shopen(i);
             if (current_shm) {
                 char* shm_start = (char*)current_shm;
                 char* data_start = shm_start + sizeof(shm_t);
@@ -1037,7 +1038,7 @@ volptr_t abs2vol(absptr_t ptr, shm_t* shm) {
 
 relptr_t abs2rel(absptr_t ptr) {
     for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
-        shm_t* shm = volumes[i];
+        shm_t* shm = shopen(i);
         if (shm == NULL) {
             continue;
         }
@@ -1054,7 +1055,7 @@ relptr_t abs2rel(absptr_t ptr) {
 
 shm_t* abs2shm(absptr_t ptr) {
     for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
-        shm_t* shm = volumes[i];
+        shm_t* shm = shopen(i);
         if (shm == NULL) {
             continue;
         }
@@ -1179,6 +1180,11 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size) {
 // if no volume exists, return NULL
 // Non-existence of the volume is not considered an error
 shm_t* shopen(size_t volume_index) {
+    // If the volume has already been loaded, return it
+    if(volumes[volume_index]){
+        return volumes[volume_index];
+    }
+
     // Prepare the shared memory name
     char shm_name[MAX_FILENAME_SIZE] = { '\0' };
     int written = snprintf(shm_name, MAX_FILENAME_SIZE - 1, "%s_%zu", common_basename, volume_index);

@@ -123,7 +123,7 @@ def clean_exit(exit_code, msg=""):
     try:
         mp.shm_close()
     except Exception as e:
-        print(str(e), file=sys.stderr)
+        print(f"Failed to close shared memory pool: {e!s}", file=sys.stderr)
 
     sys.exit(exit_code)
 
