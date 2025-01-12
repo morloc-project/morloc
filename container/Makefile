@@ -25,7 +25,6 @@ install:
 
 # Build a container that just has the morloc compiler
 build-tiny:
-	# podman build -t ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION} tiny
 	podman build --no-cache --force-rm -t ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION} tiny
 
 # Build the required docker image
