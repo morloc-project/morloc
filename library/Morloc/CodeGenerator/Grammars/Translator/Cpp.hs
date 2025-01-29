@@ -199,6 +199,18 @@ makeCppCode srcs es (srcDecl, srcSerial) = do
   -- create and return complete pool script
   return $ makeMain includeDocs signatures serializationCode mDocs dispatch
 
+metaTypedefs
+    :: GMap Int MVar (Map.Map Lang Scope)
+    -> Int -- manifold index
+    -> Scope
+metaTypedefs tmap i =
+    case GMap.lookup i tmap of
+      (GMapJust langmap) -> case Map.lookup CppLang langmap of
+        (Just scope) -> Map.filter (not . null) scope
+        Nothing -> Map.empty
+      _ -> Map.empty
+
+
 makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
 makeTheMaker srcs = do
   let outfile = pretty $ ML.makeExecutableName CppLang "pool"

@@ -37,8 +37,9 @@ module Morloc.Monad
   -- * metadata accessors
   , metaSources
   , metaName
-  , metaTypedefs
   , metaGeneralTypedefs
+  , getConcreteScope
+  , getGeneralScope
   -- * handling tree depth
   , incDepth
   , getDepth
@@ -262,18 +263,6 @@ metaSources i = do
 metaName :: Int -> MorlocMonad (Maybe EVar)
 metaName i = gets (Map.lookup i . stateName)
 
--- | This is currently only used in the C++ translator.
--- FIXME: should a term be allowed to have multiple type definitions within a language?
-metaTypedefs :: Int -> Lang -> MorlocMonad (Map.Map TVar ([TVar], TypeU, Bool))
-metaTypedefs i lang = do
-    p <- gets stateConcreteTypedefs
-
-    return $ case GMap.lookup i p of
-      (GMapJust langmap) -> case Map.lookup lang langmap of
-        (Just typemap) -> Map.map head (Map.filter (not . null) typemap)
-        Nothing -> Map.empty
-      _ -> Map.empty
-
 metaGeneralTypedefs :: Int -> MorlocMonad Scope
 metaGeneralTypedefs i = do
   p <- gets stateGeneralTypedefs
@@ -281,6 +270,16 @@ metaGeneralTypedefs i = do
   return $ case GMap.lookup i p of
     (GMapJust langmap) -> langmap
     _ -> Map.empty
+
+getConcreteScope :: Int -> Lang -> MorlocMonad Scope
+getConcreteScope _ lang = do
+  scopeMap <- gets stateUniversalConcreteTypedefs
+  case Map.lookup lang scopeMap of
+    (Just scope) -> return scope
+    Nothing -> return Map.empty
+
+getGeneralScope :: Int -> MorlocMonad Scope
+getGeneralScope _ = gets stateUniversalGeneralTypedefs
 
 newtype IndexState = IndexState { index :: Int }
 type Index a = StateT IndexState Identity a

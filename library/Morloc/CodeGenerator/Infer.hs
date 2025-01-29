@@ -29,8 +29,8 @@ import qualified Control.Monad.State as CMS
 
 getScope :: Int -> Lang -> MorlocMonad (Scope, Scope)
 getScope i lang = do
-  cscope <- getConcreteScope i lang
-  gscope <- getGeneralScope i
+  cscope <- MM.getConcreteScope i lang
+  gscope <- MM.getGeneralScope i
   MM.sayVVV $ "cscope:" <+> viaShow cscope
   return (cscope, gscope)
 
@@ -128,7 +128,7 @@ weave gscope = w where
 inferConcreteVar :: Lang -> Indexed TVar -> MorlocMonad FVar
 inferConcreteVar lang t@(Idx i v) = do
   MM.sayVVV $ "inferConcreteVar" <+> pretty lang <+> pretty t
-  inferConcreteVar' v <$> getConcreteScope i lang
+  inferConcreteVar' v <$> MM.getConcreteScope i lang
 
 inferConcreteVar' :: TVar -> Scope -> FVar
 inferConcreteVar' gv scope = case Map.lookup gv scope of
