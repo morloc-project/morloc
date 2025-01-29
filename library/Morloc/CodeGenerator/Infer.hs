@@ -42,17 +42,6 @@ evalGeneralStep i t = do
     _ -> return Map.empty
   return $ T.evaluateStep gscope t
 
-getConcreteScope :: Int -> Lang -> MorlocMonad Scope
-getConcreteScope _ lang = do
-  scopeMap <- MM.gets stateUniversalConcreteTypedefs
-  case Map.lookup lang scopeMap of
-    (Just scope) -> return scope
-    Nothing -> return Map.empty
-
-getGeneralScope :: Int -> MorlocMonad Scope
-getGeneralScope _ = MM.gets stateUniversalGeneralTypedefs
-
-
 inferConcreteTypeU :: Lang -> Indexed TypeU -> MorlocMonad TypeU
 inferConcreteTypeU lang t@(Idx i t0) = do
   MM.sayVVV $ "inferConcreteTypeU" <+> pretty lang <+> pretty t
@@ -120,7 +109,7 @@ weave gscope = w where
   w t1 t2 = case T.evaluateStep gscope t1 of
     Nothing -> Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <> "\n  t2:" <> pretty t2
     (Just t1') -> if t1 == t1'
-      then Left "failed to weave"
+      then Left ("failed to weave:" <> pretty t1 <+> "vs" <+> pretty t1')
       else do
         w t1' t2
 

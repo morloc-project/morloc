@@ -193,7 +193,7 @@ type MDoc = Doc ()
 -- has cycles.
 type DAG key edge node = Map key (node, [(key, edge)])
 
-type Scope = Map TVar [([TVar], TypeU, Bool)]
+type Scope = Map TVar [([Either TVar TypeU], TypeU, Bool)]
 
 data GMap a b c = GMap (Map a b) (Map b c)
   deriving(Show, Ord, Eq)
@@ -351,12 +351,12 @@ data Expr
   -- ^ the toplevel expression in a module
   | ClsE ClassName [TVar] [Signature]
   | IstE ClassName [TypeU] [ExprI]
-  | TypE (Maybe (Lang, Bool)) TVar [TVar] TypeU
+  | TypE (Maybe (Lang, Bool)) TVar [Either TVar TypeU] TypeU
   -- ^ a type definition
   --   1. the language, Nothing is general
   --      If Just, the Bool specifies whether the definition is terminal
   --   2. type name
-  --   3. parameters
+  --   3. parameters - these may be generic (TVar) or concrete (TypeU)
   --   4. type
   | ImpE Import
   -- ^ a morloc module import
@@ -1301,7 +1301,7 @@ instance Pretty Expr where
   pretty (IstE cls ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
   pretty (TypE lang v vs t)
     = "type" <+> pretty lang <> "@" <> pretty v
-    <+> sep (map pretty vs) <+> "=" <+> pretty t
+    <+> sep (map (either pretty (parens . pretty)) vs) <+> "=" <+> pretty t
   pretty (ImpE (Import m Nothing _ _)) = "import" <+> pretty m
   pretty (ImpE (Import m (Just xs) _ _)) = "import" <+> pretty m <+> tupled (map pretty xs)
   pretty (ExpE v) = "export" <+> pretty v
