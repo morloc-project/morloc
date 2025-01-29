@@ -1,6 +1,10 @@
 #define PY_SSIZE_T_CLEAN
 #include "morloc.h"
 #include "Python.h"
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
 
 
 // Exported prototypes
@@ -286,7 +290,7 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
 
             {
                 size_t required_size = sizeof(Array);
-            
+
                 if (PyList_Check(obj)) {
                     Py_ssize_t list_size = PyList_Size(obj);
                     size_t element_width = schema->parameters[0]->width;
@@ -310,7 +314,7 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                         case MORLOC_TUPLE:
                         case MORLOC_MAP:
                             for(size_t i = 0; i < (size_t)list_size; i++){
-                               required_size += get_shm_size(schema->parameters[0], PyList_GetItem(obj, i)); 
+                               required_size += get_shm_size(schema->parameters[0], PyList_GetItem(obj, i));
                             }
                             break;
                     }
@@ -331,7 +335,7 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                 PyErr_Format(PyExc_TypeError, "Expected tuple or list for MORLOC_TUPLE, but got %s", Py_TYPE(obj)->tp_name);
                 goto error;
             }
-      
+
             {
                 Py_ssize_t size = PyTuple_Check(obj) ? PyTuple_Size(obj) : PyList_Size(obj);
                 if ((size_t)size != schema->size) {
@@ -509,7 +513,7 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                 PyErr_Format(PyExc_TypeError, "Expected tuple or list for MORLOC_TUPLE, but got %s", Py_TYPE(obj)->tp_name);
                 goto error;
             }
-      
+
             {
                 Py_ssize_t size = PyTuple_Check(obj) ? PyTuple_Size(obj) : PyList_Size(obj);
                 if ((size_t)size != schema->size) {
@@ -707,7 +711,7 @@ static PyObject* shm_rel2abs(PyObject* self, PyObject* args) {
     if (!PyArg_ParseTuple(args, "k", &relptr)) {
         return NULL;
     }
-    
+
     absptr_t absptr = rel2abs((relptr_t)relptr);
     return PyCapsule_New((void*)absptr, "absptr_t", NULL);
 }
@@ -717,12 +721,12 @@ static PyObject* shm_abs2rel(PyObject* self, PyObject* args) {
     if (!PyArg_ParseTuple(args, "O", &capsule)) {
         return NULL;
     }
-    
+
     absptr_t absptr = (absptr_t)PyCapsule_GetPointer(capsule, "absptr_t");
     if (absptr == NULL) {
         return NULL;  // PyCapsule_GetPointer sets the error
     }
-    
+
     relptr_t relptr = abs2rel(absptr);
     return PyLong_FromSize_t(relptr);
 }
@@ -771,8 +775,111 @@ static PyObject* from_shm(PyObject* self, PyObject* args) {
   PyObject* obj = fromAnything(schema, voidstar);
 
   free_schema(schema);
-    
+
   return obj;
+}
+
+
+static  PyObject* write_voidstar_as_json(PyObject* self, PyObject* args) {
+  size_t relptr;
+  const char* schema_str;
+  if (!PyArg_ParseTuple(args, "ks", &relptr, &schema_str)) {
+    return NULL;
+  }
+
+  Schema* schema = parse_schema(&schema_str);
+  absptr_t voidstar = rel2abs(relptr);
+  print_voidstar(voidstar, schema);
+  free_schema(schema);
+  Py_RETURN_NONE;
+}
+
+static PyObject* write_msgpack_as_json(PyObject* self, PyObject* args) {
+  const char* msgpck_data;
+  Py_ssize_t msgpck_data_len;
+  const char* schema_str;
+  void* voidstar = NULL;
+
+  if (!PyArg_ParseTuple(args, "y#s", &msgpck_data, &msgpck_data_len, &schema_str)) {
+    return NULL;
+  }
+
+  Schema* schema = parse_schema(&schema_str);
+
+  int exitcode = unpack_with_schema(msgpck_data, msgpck_data_len, schema, &voidstar);
+  if (exitcode != 0) {
+    PyErr_Format(PyExc_RuntimeError, "Unpacking failed with exit code %d", exitcode);
+    return NULL;
+  }
+
+  print_voidstar(voidstar, schema);
+
+  free_schema(schema);
+
+  Py_RETURN_NONE;
+}
+
+static PyObject* write_msgpack_file_as_json(PyObject* self, PyObject* args) {
+  char* filename;
+  const char* schema_str;
+
+  if (!PyArg_ParseTuple(args, "ss", &filename, &schema_str)) {
+    return NULL;
+  }
+
+  Schema* schema = parse_schema(&schema_str);
+
+  // Get file size
+  struct stat st;
+  if (stat(filename, &st) != 0) {
+    PyErr_SetFromErrno(PyExc_IOError);
+    free_schema(schema);
+    return NULL;
+  }
+  size_t file_size = st.st_size;
+
+  // Allocate memory for file contents
+  char* msgpack_data = (char*)malloc(file_size);
+  if (msgpack_data == NULL) {
+    PyErr_NoMemory();
+    free_schema(schema);
+    return NULL;
+  }
+
+  // Open and read file
+  FILE* file = fopen(filename, "rb");
+  if (file == NULL) {
+    PyErr_SetFromErrno(PyExc_IOError);
+    free(msgpack_data);
+    free_schema(schema);
+    return NULL;
+  }
+
+  size_t bytes_read = fread(msgpack_data, 1, file_size, file);
+  fclose(file);
+
+  if (bytes_read != file_size) {
+    PyErr_Format(PyExc_IOError, "Failed to read entire file. Expected %zu bytes, read %zu bytes", file_size, bytes_read);
+    free(msgpack_data);
+    free_schema(schema);
+    return NULL;
+  }
+
+  void* voidstar;
+  int exitcode = unpack_with_schema(msgpack_data, file_size, schema, &voidstar);
+  if (exitcode != 0) {
+    PyErr_Format(PyExc_RuntimeError, "Unpacking failed with exit code %d", exitcode);
+    free(msgpack_data);
+    free_schema(schema);
+    return NULL;
+  }
+
+  print_voidstar(voidstar, schema);
+
+  free(msgpack_data);
+  free_schema(schema);
+
+  Py_RETURN_NONE;
 }
 
 
@@ -789,6 +896,9 @@ static PyMethodDef Methods[] = {
     {"shm_close", shm_close, METH_VARARGS, "Close shared memory pool"},
     {"to_shm", to_shm, METH_VARARGS, "Write python object to memory pool and return a relative pointer"},
     {"from_shm", from_shm, METH_VARARGS, "Create a python object from a memory pool relative pointer"},
+    {"write_msgpack_as_json", write_msgpack_as_json, METH_VARARGS, "Given MessagePack data, write JSON"},
+    {"write_msgpack_file_as_json", write_msgpack_file_as_json, METH_VARARGS, "Given a MessagePack filename, write JSON"},
+    {"write_voidstar_as_json", write_voidstar_as_json, METH_VARARGS, "Given a relative pointer to voidstar data, write JSON"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 

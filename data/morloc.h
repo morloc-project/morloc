@@ -1697,6 +1697,7 @@ typedef struct Schema {
     size_t size; // number of parameters
     size_t width; // bytes in the object when stored in an array
     size_t* offsets;
+    char* hint;
     struct Schema** parameters;
     char** keys; // field names, used only for records
 } Schema;
@@ -1935,6 +1936,57 @@ char* parse_schema_key(const char** schema_ptr){
   return key;
 }
 
+// This parser starts on the character **after** the initial '<'
+char* parse_hint(const char** schema_ptr) {
+  char* hint = NULL;
+
+  if (!schema_ptr || !*schema_ptr) {
+    return hint;
+  }
+
+  size_t depth = 1;
+  size_t buffer_size = 128;
+  size_t buffer_index = 0;
+  hint = (char*)malloc(buffer_size);
+  if (!hint) return NULL;
+
+  while (**schema_ptr != '\0') {
+    if (**schema_ptr == '<') {
+      depth++;
+    } else if (**schema_ptr == '>') {
+      depth--;
+      if (depth == 0) {
+        (*schema_ptr)++; // Move past the closing '>'
+        break;
+      }
+    }
+
+    if (buffer_index >= buffer_size - 1) {
+      buffer_size *= 2;
+      char* new_hint = (char*)realloc(hint, buffer_size);
+      if (!new_hint) {
+        free(hint);
+        return NULL;
+      }
+      hint = new_hint;
+    }
+
+    hint[buffer_index++] = **schema_ptr;
+    (*schema_ptr)++;
+  }
+
+  if (depth != 0) {
+    // Unmatched '<', free memory and return NULL
+    free(hint);
+    return NULL;
+  }
+
+  hint[buffer_index] = '\0';
+  return hint;
+}
+
+
+
 Schema* parse_schema(const char** schema_ptr){
   Schema** params;
   char c = **schema_ptr;
@@ -1942,16 +1994,21 @@ Schema* parse_schema(const char** schema_ptr){
   size_t size;
   char** keys; 
 
+  Schema* schema = NULL;
+  char* hint = NULL;
+
   switch(c){
     case SCHEMA_ARRAY:
-      return array_schema(parse_schema(schema_ptr));
+      schema = array_schema(parse_schema(schema_ptr));
+      break;
     case SCHEMA_TUPLE:
       size = parse_schema_size(schema_ptr);
       params = (Schema**)calloc(size, sizeof(Schema*));
       for(size_t i = 0; i < size; i++){
         params[i] = parse_schema(schema_ptr);
       }
-      return tuple_schema(params, size);
+      schema = tuple_schema(params, size);
+      break;
     case SCHEMA_MAP:
       size = parse_schema_size(schema_ptr);
       keys = (char**)calloc(size, sizeof(char*));
@@ -1960,34 +2017,53 @@ Schema* parse_schema(const char** schema_ptr){
         keys[i] = parse_schema_key(schema_ptr);
         params[i] = parse_schema(schema_ptr);
       }
-      return map_schema(size, keys, params);
+      schema = map_schema(size, keys, params);
+      break;
     case SCHEMA_NIL:
-      return nil_schema();
+      schema = nil_schema();
+      break;
     case SCHEMA_BOOL:
-      return bool_schema();
+      schema = bool_schema();
+      break;
     case SCHEMA_SINT:
       size = parse_schema_size(schema_ptr);
-      return sint_schema(size);
+      schema = sint_schema(size);
+      break;
     case SCHEMA_UINT:
       size = parse_schema_size(schema_ptr);
-      return uint_schema(size);
+      schema = uint_schema(size);
+      break;
     case SCHEMA_FLOAT:
       size = parse_schema_size(schema_ptr);
-      return float_schema(size);
+      schema = float_schema(size);
+      break;
     case SCHEMA_STRING:
-      return string_schema();
+      schema = string_schema();
+      break;
+    case '<':
+      {
+          hint = parse_hint(schema_ptr);
+          schema = parse_schema(schema_ptr);
+      }
+      break;
     default:
       fprintf(stderr, "Unrecognized schema type '%c'\n", c);
       return NULL;
   }
 
-  return NULL;
+  schema->hint = hint;
+
+  return schema;
 }
 
 
 void free_schema(Schema* schema) {
     if (schema == NULL) {
         return;
+    }
+
+    if (schema->hint != NULL) {
+        free(schema->hint);
     }
 
     // Free the offsets array
@@ -2470,5 +2546,157 @@ int unpack(const char* mpk, size_t mpk_size, const char* schema_str, void** mlcp
     return unpack_with_schema(mpk, mpk_size, schema, mlcptr);
 }
 
+
+
+// Function to escape a JSON string
+char* json_escape_string(const char* input, size_t input_len) {
+    size_t output_len = 0;
+    size_t i;
+
+    // First pass: calculate the required length of the escaped string
+    for (i = 0; i < input_len; i++) {
+        switch (input[i]) {
+            case '\"': case '\\': case '/': case '\b':
+            case '\f': case '\n': case '\r': case '\t':
+                output_len += 2;
+                break;
+            default:
+                if ((unsigned char)input[i] < 32) {
+                    output_len += 6; // \u00xx
+                } else {
+                    output_len++;
+                }
+        }
+    }
+
+    char* output = (char*)malloc(output_len + 1); // +1 for null terminator
+    if (!output) return NULL;
+
+    size_t j = 0;
+    // Second pass: copy and escape characters
+    for (i = 0; i < input_len; i++) {
+        switch (input[i]) {
+            case '\"': output[j++] = '\\'; output[j++] = '\"'; break;
+            case '\\': output[j++] = '\\'; output[j++] = '\\'; break;
+            case '/':  output[j++] = '\\'; output[j++] = '/';  break;
+            case '\b': output[j++] = '\\'; output[j++] = 'b';  break;
+            case '\f': output[j++] = '\\'; output[j++] = 'f';  break;
+            case '\n': output[j++] = '\\'; output[j++] = 'n';  break;
+            case '\r': output[j++] = '\\'; output[j++] = 'r';  break;
+            case '\t': output[j++] = '\\'; output[j++] = 't';  break;
+            default:
+                if ((unsigned char)input[i] < 32) {
+                    sprintf(&output[j], "\\u%04x", input[i]);
+                    j += 6;
+                } else {
+                    output[j++] = input[i];
+                }
+        }
+    }
+    output[j] = '\0';
+
+    return output;
+}
+
+
+void print_voidstar_r(const void* voidstar, const Schema* schema) {
+    Array* array;
+    const char* data;
+
+    switch (schema->type) {
+        case MORLOC_NIL:
+            printf("null");
+            break;
+        case MORLOC_BOOL:
+            printf(*(uint8_t*)voidstar ? "true" : "false");
+            break;
+        case MORLOC_UINT8:
+            printf("%u", *(uint8_t*)voidstar);
+            break;
+        case MORLOC_UINT16:
+            printf("%u", *(uint16_t*)voidstar);
+            break;
+        case MORLOC_UINT32:
+            printf("%u", *(uint32_t*)voidstar);
+            break;
+        case MORLOC_UINT64:
+            printf("%lu", *(uint64_t*)voidstar);
+            break;
+        case MORLOC_SINT8:
+            printf("%d", *(int8_t*)voidstar);
+            break;
+        case MORLOC_SINT16:
+            printf("%d", *(int16_t*)voidstar);
+            break;
+        case MORLOC_SINT32:
+            printf("%d", *(int32_t*)voidstar);
+            break;
+        case MORLOC_SINT64:
+            printf("%ld", *(int64_t*)voidstar);
+            break;
+        case MORLOC_FLOAT32:
+            printf("%.7g", *(float*)voidstar);
+            break;
+        case MORLOC_FLOAT64:
+            printf("%.15g", *(double*)voidstar);
+            break;
+        case MORLOC_STRING:
+            {
+                array = (Array*)voidstar;
+                data = (const char*)rel2abs(array->data);
+                char* escaped_string = json_escape_string(data, array->size);
+                if (escaped_string) {
+                    printf("\"%s\"", escaped_string);
+                    free(escaped_string);
+                } else {
+                    fprintf(stderr, "Memory allocation failed for string escaping\n");
+                }
+            }
+            break;
+        case MORLOC_ARRAY:
+            {
+                array = (Array*)voidstar;
+                data = (const char*)rel2abs(array->data);
+                printf("[");
+                for (size_t i = 0; i < array->size; i++) {
+                    if (i > 0) printf(",");
+                    print_voidstar_r(data + i * schema->parameters[0]->width, schema->parameters[0]);
+                }
+                printf("]");
+            }
+            break;
+        case MORLOC_TUPLE:
+            {
+                printf("[");
+                for (size_t i = 0; i < schema->size; i++) {
+                    if (i > 0) printf(",");
+                    print_voidstar_r((char*)voidstar + schema->offsets[i], schema->parameters[i]);
+                }
+                printf("]");
+            }
+            break;
+        case MORLOC_MAP:
+            {
+                printf("{");
+                for (size_t i = 0; i < schema->size; i++) {
+                    if (i > 0) printf(",");
+                    printf("\"%s\":", schema->keys[i]);
+                    print_voidstar_r((char*)voidstar + schema->offsets[i], schema->parameters[i]);
+                }
+                printf("}");
+            }
+            break;
+        default:
+            fprintf(stderr, "Unexpected morloc type\n");
+            break;
+    }
+}
+
+void print_voidstar(const void* voidstar, const Schema* schema) {
+    // print JSON with no spaces
+    print_voidstar_r(voidstar, schema);
+    // add terminal newline
+    printf("\n");
+}
 
 #endif // ending __MORLOC_CLIB_H__
