@@ -12,7 +12,11 @@ Stability   : experimental
 module Morloc.BaseTypes
   ( unit
   , real
+  , f32, f64
   , int
+  , i8, i16, i32, i64
+  , uint
+  , u8, u16, u32, u64
   , bool
   , str
   , tuple
@@ -37,8 +41,41 @@ unit = TV "Unit"
 real :: TVar
 real = TV "Real"
 
+f32 :: TVar
+f32 = TV "Float32" 
+
+f64 :: TVar
+f64 = TV "Float64" 
+
 int :: TVar
 int = TV "Int"
+
+i8 :: TVar
+i8 = TV "Int8"
+
+i16 :: TVar
+i16 = TV "Int16"
+
+i32 :: TVar
+i32 = TV "Int32"
+
+i64 :: TVar
+i64 = TV "Int64"
+
+u8 :: TVar
+u8 = TV "UInt8"
+
+uint :: TVar
+uint = TV "UInt"
+
+u16 :: TVar
+u16 = TV "UInt16"
+
+u32 :: TVar
+u32 = TV "UInt32"
+
+u64 :: TVar
+u64 = TV "UInt64"
 
 bool :: TVar
 bool = TV "Bool"

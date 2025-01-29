@@ -174,7 +174,18 @@ data SerialAST
   --   3) [TypeF] - the types of the parameters (used as parameters in C++ templates, e.g., map<int, map<int,string>>)
   --   4) [(FVar, SerialAST)] - entries with keys for concrete and general cases
   | SerialReal FVar
+  | SerialFloat32 FVar
+  | SerialFloat64 FVar
   | SerialInt FVar
+  | SerialInt8 FVar
+  | SerialInt16 FVar
+  | SerialInt32 FVar
+  | SerialInt64 FVar
+  | SerialUInt FVar
+  | SerialUInt8 FVar
+  | SerialUInt16 FVar
+  | SerialUInt32 FVar
+  | SerialUInt64 FVar
   | SerialBool FVar
   | SerialString FVar
   | SerialNull FVar
@@ -194,7 +205,17 @@ instance Pretty SerialAST where
     $ "SerialObject" <+> pretty o <+> tupled (map pretty vs)
     <+> encloseSep "{" "}" "," [pretty k <+> "=" <+> pretty p | (k, p) <- rs]
   pretty (SerialReal v) = parens ("SerialReal" <+> pretty v)
+  pretty (SerialFloat32 v) = parens ("SerialFloat32" <+> pretty v)
+  pretty (SerialFloat64 v) = parens ("SerialFloat64" <+> pretty v)
   pretty (SerialInt v) = parens ("SerialInt" <+> pretty v)
+  pretty (SerialInt8 v) = parens ("SerialInt8" <+> pretty v)
+  pretty (SerialInt16 v) = parens ("SerialInt16" <+> pretty v)
+  pretty (SerialInt32 v) = parens ("SerialInt32" <+> pretty v)
+  pretty (SerialInt64 v) = parens ("SerialInt64" <+> pretty v)
+  pretty (SerialUInt8 v) = parens ("SerialUInt8" <+> pretty v)
+  pretty (SerialUInt16 v) = parens ("SerialUInt16" <+> pretty v)
+  pretty (SerialUInt32 v) = parens ("SerialUInt32" <+> pretty v)
+  pretty (SerialUInt64 v) = parens ("SerialUInt64" <+> pretty v)
   pretty (SerialBool v) = parens ("SerialBool" <+> pretty v)
   pretty (SerialString v) = parens ("SerialString" <+> pretty v)
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)

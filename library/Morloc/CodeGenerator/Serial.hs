@@ -15,7 +15,6 @@ module Morloc.CodeGenerator.Serial
   , isSerializable
   , prettySerialOne
   , serialAstToType
-  , serialAstToJsonType
   , shallowType
   , serialAstToMsgpackSchema
   , encode64
@@ -51,26 +50,24 @@ serialAstToType (SerialTuple v ss) = AppF (VarF v) (map serialAstToType ss)
 serialAstToType (SerialObject o n ps rs) =
   let ts = map (serialAstToType . snd) rs
   in NamF o n ps (zip (map fst rs) ts)
-serialAstToType (SerialReal   x) = VarF x
-serialAstToType (SerialInt    x) = VarF x
+serialAstToType (SerialReal x) = VarF x
+serialAstToType (SerialFloat32 x) = VarF x
+serialAstToType (SerialFloat64 x) = VarF x
+serialAstToType (SerialInt x) = VarF x
+serialAstToType (SerialInt8 x) = VarF x
+serialAstToType (SerialInt16 x) = VarF x
+serialAstToType (SerialInt32 x) = VarF x
+serialAstToType (SerialInt64 x) = VarF x
+serialAstToType (SerialUInt x) = VarF x
+serialAstToType (SerialUInt8 x) = VarF x
+serialAstToType (SerialUInt16 x) = VarF x
+serialAstToType (SerialUInt32 x) = VarF x
+serialAstToType (SerialUInt64 x) = VarF x
 serialAstToType (SerialBool   x) = VarF x
 serialAstToType (SerialString x) = VarF x
 serialAstToType (SerialNull   x) = VarF x
 -- passthrough type, it cannot be deserialized or serialized, only passed in from a different language
 serialAstToType (SerialUnknown v) = UnkF v
-
-serialAstToJsonType :: SerialAST -> JsonType
-serialAstToJsonType (SerialPack _ (_, s)) = serialAstToJsonType s
-serialAstToJsonType (SerialList (FV _ v) s) = ArrJ v [serialAstToJsonType s]
-serialAstToJsonType (SerialTuple (FV _ v) ss) = ArrJ v (map serialAstToJsonType ss)
-serialAstToJsonType (SerialObject _ (FV _ n) _ rs) = NamJ n (map (second serialAstToJsonType) rs)
-serialAstToJsonType (SerialReal    (FV _ v)) = VarJ v
-serialAstToJsonType (SerialInt     (FV _ v)) = VarJ v
-serialAstToJsonType (SerialBool    (FV _ v)) = VarJ v
-serialAstToJsonType (SerialString  (FV _ v)) = VarJ v
-serialAstToJsonType (SerialNull    (FV _ v)) = VarJ v
-serialAstToJsonType (SerialUnknown (FV _ v)) = VarJ v -- the unknown type is the serialization type
-
 
 
 encode64 :: Int -> String
@@ -99,18 +96,32 @@ encode64D i = pretty (encode64 i)
 
 
 serialAstToMsgpackSchema :: SerialAST -> MDoc
-serialAstToMsgpackSchema (SerialPack _ (_, s)) = serialAstToMsgpackSchema s
-serialAstToMsgpackSchema (SerialList _ s) = "a" <> serialAstToMsgpackSchema s
-serialAstToMsgpackSchema (SerialTuple _ ss) = "t" <> encode64D (length ss) <> foldl (<>) "" (map serialAstToMsgpackSchema ss)
-serialAstToMsgpackSchema (SerialObject _ _ _ rs) = "m" <> encode64D (length rs) <> foldl (<>) "" (map keypair rs) where
+serialAstToMsgpackSchema (SerialPack v (_, s)) = addHint v <> serialAstToMsgpackSchema s
+serialAstToMsgpackSchema (SerialList v s) = addHint v <> "a" <> serialAstToMsgpackSchema s
+serialAstToMsgpackSchema (SerialTuple v ss) = addHint v <> "t" <> encode64D (length ss) <> foldl (<>) "" (map serialAstToMsgpackSchema ss)
+serialAstToMsgpackSchema (SerialObject _ v _ rs) = addHint v <> "m" <> encode64D (length rs) <> foldl (<>) "" (map keypair rs) where
   keypair :: (Key, SerialAST) -> MDoc
   keypair (k, s) = (encode64D . DT.length . unKey $ k) <> pretty (unKey k) <> serialAstToMsgpackSchema s
-serialAstToMsgpackSchema (SerialReal    _) = "f8" -- 64 bit float
-serialAstToMsgpackSchema (SerialInt     _) = "i4" -- 32 bit integer, will need to extend this soon
-serialAstToMsgpackSchema (SerialBool    _) = "b"
-serialAstToMsgpackSchema (SerialString  _) = "s"
-serialAstToMsgpackSchema (SerialNull    _) = "z"
-serialAstToMsgpackSchema (SerialUnknown _) = "?" -- I guess this works as a general bad new character?
+serialAstToMsgpackSchema (SerialReal    v) = addHint v <> "f8" -- 64 bit float
+serialAstToMsgpackSchema (SerialFloat32 v) = addHint v <> "f4"
+serialAstToMsgpackSchema (SerialFloat64 v) = addHint v <> "f8"
+serialAstToMsgpackSchema (SerialInt     v) = addHint v <> "i4" -- 32 bit integer, will need to extend this soon
+serialAstToMsgpackSchema (SerialInt8    v) = addHint v <> "i1"
+serialAstToMsgpackSchema (SerialInt16   v) = addHint v <> "i2"
+serialAstToMsgpackSchema (SerialInt32   v) = addHint v <> "i4"
+serialAstToMsgpackSchema (SerialInt64   v) = addHint v <> "i8"
+serialAstToMsgpackSchema (SerialUInt    v) = addHint v <> "t4"
+serialAstToMsgpackSchema (SerialUInt8   v) = addHint v <> "u1"
+serialAstToMsgpackSchema (SerialUInt16  v) = addHint v <> "u2"
+serialAstToMsgpackSchema (SerialUInt32  v) = addHint v <> "u4"
+serialAstToMsgpackSchema (SerialUInt64  v) = addHint v <> "u8"
+serialAstToMsgpackSchema (SerialBool    v) = addHint v <> "b"
+serialAstToMsgpackSchema (SerialString  v) = addHint v <> "s"
+serialAstToMsgpackSchema (SerialNull    v) = addHint v <> "z"
+serialAstToMsgpackSchema (SerialUnknown v) = addHint v <> "?" -- I guess this works as a general bad new character?
+
+addHint :: FVar -> MDoc
+addHint (FV _ (CV v)) = "<" <> pretty v <> ">"
 
 
 -- | get only the toplevel type
@@ -121,8 +132,19 @@ shallowType (SerialTuple v ss) = AppF (VarF v) $ map shallowType ss
 shallowType (SerialObject o n ps rs) =
   let ts = map (shallowType . snd) rs
   in NamF o n ps (zip (map fst rs) ts)
-shallowType (SerialReal   x) = VarF x
-shallowType (SerialInt    x) = VarF x
+shallowType (SerialReal x) = VarF x
+shallowType (SerialFloat32 x) = VarF x
+shallowType (SerialFloat64 x) = VarF x
+shallowType (SerialInt x) = VarF x
+shallowType (SerialInt8 x) = VarF x
+shallowType (SerialInt16 x) = VarF x
+shallowType (SerialInt32 x) = VarF x
+shallowType (SerialInt64 x) = VarF x
+shallowType (SerialUInt x) = VarF x
+shallowType (SerialUInt8 x) = VarF x
+shallowType (SerialUInt16 x) = VarF x
+shallowType (SerialUInt32 x) = VarF x
+shallowType (SerialUInt64 x) = VarF x
 shallowType (SerialBool   x) = VarF x
 shallowType (SerialString x) = VarF x
 shallowType (SerialNull   x) = VarF x
@@ -189,12 +211,23 @@ makeSerialAST m lang t0 = do
     -- type. So it will only be represented in the serialization form. As a
     -- string, for now.
     makeSerialAST' _ (UnkF (FV gv _)) = return $ SerialUnknown (FV gv (serialType lang))
-    makeSerialAST' typepackers (VarF v@(FV gv cv))
+    makeSerialAST' typepackers t@(VarF v@(FV gv cv))
       | gv == BT.unit = return $ SerialNull v
       | gv == BT.bool = return $ SerialBool v
       | gv == BT.str = return $ SerialString v
       | gv == BT.real = return $ SerialReal v
+      | gv == BT.f32 = return $ SerialFloat32 v
+      | gv == BT.f64 = return $ SerialFloat64 v
       | gv == BT.int = return $ SerialInt v
+      | gv == BT.i8 = return $ SerialInt8 v
+      | gv == BT.i16 = return $ SerialInt16 v
+      | gv == BT.i32 = return $ SerialInt32 v
+      | gv == BT.i64 = return $ SerialInt64 v
+      | gv == BT.uint = return $ SerialUInt v
+      | gv == BT.u8 = return $ SerialUInt8 v
+      | gv == BT.u16 = return $ SerialUInt16 v
+      | gv == BT.u32 = return $ SerialUInt32 v
+      | gv == BT.u64 = return $ SerialUInt64 v
       | otherwise = case Map.lookup gv typepackers of
           (Just ps) -> do
             packers <- mapM makeTypePacker ps
@@ -402,8 +435,19 @@ isSerializable (SerialPack _ _) = False
 isSerializable (SerialList _ x) = isSerializable x
 isSerializable (SerialTuple _ xs) = all isSerializable xs
 isSerializable (SerialObject _ _ _ rs) = all (isSerializable . snd) rs
-isSerializable (SerialReal   _) = True
-isSerializable (SerialInt    _) = True
+isSerializable (SerialReal _) = True
+isSerializable (SerialFloat32 _) = True
+isSerializable (SerialFloat64 _) = True
+isSerializable (SerialInt _) = True
+isSerializable (SerialInt8 _) = True
+isSerializable (SerialInt16 _) = True
+isSerializable (SerialInt32 _) = True
+isSerializable (SerialInt64 _) = True
+isSerializable (SerialUInt _) = True
+isSerializable (SerialUInt8 _) = True
+isSerializable (SerialUInt16 _) = True
+isSerializable (SerialUInt32 _) = True
+isSerializable (SerialUInt64 _) = True
 isSerializable (SerialBool   _) = True
 isSerializable (SerialString _) = True
 isSerializable (SerialNull   _) = True
@@ -416,8 +460,19 @@ prettySerialOne (SerialTuple v xs) = "SerialTuple" <> angles (pretty v) <> tuple
 prettySerialOne (SerialObject r _ _ rs)
   = block 4 ("SerialObject@" <> viaShow r)
   $ vsep (map (\(k,v) -> parens (viaShow k) <> "=" <> prettySerialOne v) rs)
-prettySerialOne (SerialReal   _) = "SerialReal"
-prettySerialOne (SerialInt    _) = "SerialInt"
+prettySerialOne (SerialReal _) = "SerialReal"
+prettySerialOne (SerialFloat32 _) = "SerialFloat32"
+prettySerialOne (SerialFloat64 _) = "SerialFloat64"
+prettySerialOne (SerialInt _) = "SerialInt"
+prettySerialOne (SerialInt8 _) = "SerialInt8"
+prettySerialOne (SerialInt16 _) = "SerialInt16"
+prettySerialOne (SerialInt32 _) = "SerialInt32"
+prettySerialOne (SerialInt64 _) = "SerialInt64"
+prettySerialOne (SerialUInt _) = "SerialUInt"
+prettySerialOne (SerialUInt8 _) = "SerialUInt8"
+prettySerialOne (SerialUInt16 _) = "SerialUInt16"
+prettySerialOne (SerialUInt32 _) = "SerialUInt32"
+prettySerialOne (SerialUInt64 _) = "SerialUInt64"
 prettySerialOne (SerialBool   _) = "SerialBool"
 prettySerialOne (SerialString _) = "SerialString"
 prettySerialOne (SerialNull   _) = "SerialNull"
