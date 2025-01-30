@@ -211,7 +211,7 @@ makeSerialAST m lang t0 = do
     -- type. So it will only be represented in the serialization form. As a
     -- string, for now.
     makeSerialAST' _ (UnkF (FV gv _)) = return $ SerialUnknown (FV gv (serialType lang))
-    makeSerialAST' typepackers t@(VarF v@(FV gv cv))
+    makeSerialAST' typepackers (VarF v@(FV gv cv))
       | gv == BT.unit = return $ SerialNull v
       | gv == BT.bool = return $ SerialBool v
       | gv == BT.str = return $ SerialString v

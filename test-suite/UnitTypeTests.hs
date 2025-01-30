@@ -218,7 +218,6 @@ subtypeTests =
     , assertSubtypeGamma "<a>, <b> -|[C] <: <a> <b> |- <a>:[C], <b>:C" [eag, ebg]
         (lst c) (ExistU (TV "x1") [eb] []) [solvedA (lst c), solvedB c]
     , assertSubtypeGamma "[] -| forall a . a <: A -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (TV "a") a]
-    , assertSubtypeGamma "[] -| A <: forall a . a -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (TV "a") a]
       -- nested types
     , assertSubtypeGamma "<b> -| [A] <: [<b>] |- <b>:A" [ebg] (lst a) (lst eb) [solvedB a]
     , assertSubtypeGamma "<a> -| [<a>] <: [B] |- <a>:B" [eag] (lst b) (lst ea) [solvedA b]
