@@ -35,33 +35,26 @@ getScope i lang = do
   return (cscope, gscope)
 
 evalGeneralStep :: Int -> TypeU -> MorlocMonad (Maybe TypeU)
-evalGeneralStep i t = do
-  globalMap <- MM.gets stateGeneralTypedefs
-  gscope <- case GMap.lookup i globalMap of
-    GMapJust scope -> return scope
-    _ -> return Map.empty
-  return $ T.evaluateStep gscope t
+evalGeneralStep i t = T.evaluateStep <$> MM.getGeneralScope i <*> pure t
 
 inferConcreteTypeU :: Lang -> Indexed TypeU -> MorlocMonad TypeU
 inferConcreteTypeU lang t@(Idx i t0) = do
   MM.sayVVV $ "inferConcreteTypeU" <+> pretty lang <+> pretty t
-  attemptT <- getScope i lang >>= inferConcreteTypeU' t0
+  attemptT <- inferConcreteTypeU' t0 <$> getScope i lang
   case attemptT of
     (Right t') -> return t'
     (Left e1) -> do
       MM.sayVVV $ "Warning: failed to infer concrete type" <+> pretty t0 <+> "for index" <+> pretty i
                 <> "\n  Observed error:" <> pretty e1
                 <> "\n  Retrying with universal scope"
-      gscopeUni <- CMS.gets stateUniversalGeneralTypedefs
-      cscopeUni <- CMS.gets stateUniversalConcreteTypedefs |>> fromMaybe Map.empty . Map.lookup lang
-      attemptUni <- inferConcreteTypeU' t0 (cscopeUni, gscopeUni)
-      case attemptUni of
+      gscopeUni <- MM.getGeneralUniversalScope
+      cscopeUni <- MM.getConcreteUniversalScope lang
+      case inferConcreteTypeU' t0 (cscopeUni, gscopeUni) of
         (Right t') -> return t'
         (Left e2) -> MM.throwError e2
 
-inferConcreteTypeU' :: TypeU -> (Scope, Scope)-> MorlocMonad (Either MorlocError TypeU)
-inferConcreteTypeU' generalType (cscope, gscope) = do
-  return $ T.pairEval cscope gscope generalType
+inferConcreteTypeU' :: TypeU -> (Scope, Scope) -> Either MorlocError TypeU
+inferConcreteTypeU' generalType (cscope, gscope) = T.pairEval cscope gscope generalType
 
 inferConcreteType :: Lang -> Indexed Type -> MorlocMonad TypeF
 inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
@@ -90,7 +83,7 @@ inferConcreteTypeUUniversal :: Lang -> TypeU -> MorlocMonad TypeU
 inferConcreteTypeUUniversal lang generalType = do
   gscopeUni <- CMS.gets stateUniversalGeneralTypedefs
   cscopeUni <- CMS.gets stateUniversalConcreteTypedefs |>> fromMaybe Map.empty . Map.lookup lang
-  attemptUni <- inferConcreteTypeU' generalType (cscopeUni, gscopeUni)
+  let attemptUni = inferConcreteTypeU' generalType (cscopeUni, gscopeUni)
   case attemptUni of
     (Right t) -> return t
     (Left e2) -> MM.throwError e2

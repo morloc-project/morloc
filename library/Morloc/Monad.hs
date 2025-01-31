@@ -37,9 +37,10 @@ module Morloc.Monad
   -- * metadata accessors
   , metaSources
   , metaName
-  , metaGeneralTypedefs
   , getConcreteScope
   , getGeneralScope
+  , getConcreteUniversalScope
+  , getGeneralUniversalScope
   -- * handling tree depth
   , incDepth
   , getDepth
@@ -263,23 +264,32 @@ metaSources i = do
 metaName :: Int -> MorlocMonad (Maybe EVar)
 metaName i = gets (Map.lookup i . stateName)
 
-metaGeneralTypedefs :: Int -> MorlocMonad Scope
-metaGeneralTypedefs i = do
-  p <- gets stateGeneralTypedefs
-
+getConcreteScope :: Int -> Lang -> MorlocMonad Scope
+getConcreteScope i lang = do
+  p <- gets stateConcreteTypedefs
   return $ case GMap.lookup i p of
-    (GMapJust langmap) -> langmap
+    (GMapJust langmap) -> case Map.lookup lang langmap of
+        (Just scope) -> scope
+        Nothing -> Map.empty
     _ -> Map.empty
 
-getConcreteScope :: Int -> Lang -> MorlocMonad Scope
-getConcreteScope _ lang = do
+getGeneralScope :: Int -> MorlocMonad Scope
+getGeneralScope i = do
+  p <- gets stateGeneralTypedefs
+  return $ case GMap.lookup i p of
+    (GMapJust scope) -> scope
+    _ -> Map.empty
+
+
+getConcreteUniversalScope :: Lang -> MorlocMonad Scope
+getConcreteUniversalScope lang = do
   scopeMap <- gets stateUniversalConcreteTypedefs
   case Map.lookup lang scopeMap of
     (Just scope) -> return scope
     Nothing -> return Map.empty
 
-getGeneralScope :: Int -> MorlocMonad Scope
-getGeneralScope _ = gets stateUniversalGeneralTypedefs
+getGeneralUniversalScope :: MorlocMonad Scope
+getGeneralUniversalScope = gets stateUniversalGeneralTypedefs
 
 newtype IndexState = IndexState { index :: Int }
 type Index a = StateT IndexState Identity a

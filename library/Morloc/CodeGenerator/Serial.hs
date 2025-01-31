@@ -270,7 +270,7 @@ makeSerialAST m lang t0 = do
             selection <- selectPacker (zip packers unpacked)
             return $ SerialPack v selection
           Nothing -> serializerError
-            $ "Could not find" <+> pretty generalTypeName <+> "from" <+> dquotes (pretty v)
+            $ "Cannot find" <+> pretty generalTypeName <+> "from" <+> dquotes (pretty v)
             <> "\n  t:" <+> pretty t
             <> "\n  typepackers:" <+> viaShow typepackers
       where

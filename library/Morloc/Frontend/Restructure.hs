@@ -256,11 +256,11 @@ evaluateAllTypes = MDD.mapNodeM f where
   f (ExprI i e0) = ExprI i <$> g e0 where
     g :: Expr -> MorlocMonad Expr
     g (SigE (Signature v l e)) = do
-      gscope <- MM.metaGeneralTypedefs i
+      gscope <- MM.getGeneralScope i
       e' <- evaluateEType gscope e
       return $ SigE (Signature v l e')
     g (AnnE e ts) = do
-      gscope <- MM.metaGeneralTypedefs i
+      gscope <- MM.getGeneralScope i
       ts' <- mapM (evaluateTypeU gscope) ts
       e' <- f e
       return (AnnE e' ts')

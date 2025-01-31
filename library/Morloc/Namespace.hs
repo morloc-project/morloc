@@ -241,9 +241,9 @@ data MorlocState = MorlocState
   --         `Type` is `"std::map<$1,$2>" k v`
   --         `[TVar]` is `[k,v]`
   , stateUniversalGeneralTypedefs :: Scope
-  -- ^ store the general typedefs pooled across all modules -- for the truly desparate
+  -- ^ store the general typedefs pooled across all modules -- for the truly desperate
   , stateUniversalConcreteTypedefs :: Map Lang Scope
-  -- ^ store the concrete typedefs pooled across all modules -- for the truly desparate
+  -- ^ store the concrete typedefs pooled across all modules -- for the truly desperate
   , stateSources :: GMap Int MVar [Source]
   , stateAnnotations :: Map Int [TypeU]
   -- ^ Stores non-top-level annotations.
