@@ -706,6 +706,8 @@ data TypeError
   | MissingFeature Text
   | InfiniteRecursion
   | FunctionSerialization EVar
+  | CannotEvaluateType
+  | TypeEvaluationError Text
 
 data MorlocError
   -- | An error that is associated with an expression index
@@ -1481,6 +1483,7 @@ instance Pretty TypeError where
     = "InvalidFunctionApplication:"
     <> "\n  application:" <+> pretty f <+> hsep (map (parens . pretty) xs)
     <> "\n  where" <+> pretty f <+> "::" <+> pretty t
+  pretty (TypeEvaluationError msg) = pretty msg
 
 
 

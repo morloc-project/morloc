@@ -17,6 +17,7 @@ module Morloc.TypeEval (
 ) where
 
 import Morloc.Namespace
+import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Map as Map
@@ -133,11 +134,12 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                    True -> terminate bnd $ foldr parsub newType (zip vs ts)
                    -- substitute the head term and re-evaluate
                    False -> recurse bnd $ foldr parsub newType (zip vs ts)
-                Nothing -> MM.throwError $ OtherError "No matching alias found"
+                Nothing -> MM.throwError . OtherError . render $
+                    "No matching alias found for" <+> viaShow t0 <+> "with scope" <+> viaShow scope <+> "with ts':" <+> viaShow ts'
           _ -> resolve bnd t0
 
-  -- Can only apply VarU?
-  f _ (AppU _ _) = undefined
+  -- t may be existential
+  f bnd (AppU t ts) = AppU <$> recurse bnd t <*> mapM (recurse bnd) ts
 
   -- type Foo = A
   -- f :: Foo -> B
@@ -155,7 +157,8 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                 if isTerminal
                   then terminate bnd t2
                   else recurse bnd t2
-            Nothing -> MM.throwError $ OtherError "No matching alias found"
+            Nothing -> MM.throwError . OtherError . render $
+              "No matching alias found for" <+> viaShow t0 <+> "with scope" <+> viaShow scope
       Nothing -> resolve bnd t0
 
   f bnd (ForallU v t) = ForallU v <$> recurse (Set.insert v bnd) t
@@ -251,7 +254,7 @@ parsub :: (TVar, TypeU) -> TypeU -> TypeU
 parsub (v, t2) t1@(VarU v0)
   | v0 == v = t2 -- substitute
   | otherwise = t1 -- keep the original
-parsub _ ExistU{} = error "What the bloody hell is an existential doing down here?"
+parsub pair (ExistU t ts rs) = ExistU t (map (parsub pair) ts) (zip (map fst rs) (map (parsub pair . snd) rs))
 parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
 parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
 parsub pair (AppU t ts) = AppU (parsub pair t) (map (parsub pair) ts)

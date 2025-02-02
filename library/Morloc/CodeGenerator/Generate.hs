@@ -26,6 +26,7 @@ import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import qualified Morloc.CodeGenerator.SystemConfig as MCS
+import qualified Morloc.TypeEval as TE
 import Morloc.CodeGenerator.Infer
 
 import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
@@ -829,6 +830,13 @@ express (AnnoS (Idx midx t) (Idx cidx lang, args) (NamS entries)) = do
 express e = expressDefault e
 
 
+reduceType :: Scope -> Type -> Maybe Type
+reduceType scope t0 =
+    let tu0 = type2typeu t0
+    in case TE.evaluateStep scope tu0 of
+        (Just tu1) -> if tu0 == tu1 then Nothing else Just (typeOf tu1)
+        Nothing -> Nothing
+
 expressDefault :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
 expressDefault e@(AnnoS (Idx midx t) (Idx cidx lang, args) _)
   = PolyHead lang midx [Arg i None | Arg i _ <- args] <$> expressPolyExpr lang (Idx cidx t) e
@@ -1298,6 +1306,12 @@ expressPolyExpr _ pc (AnnoS _ _ (AccS key record@(AnnoS (Idx _ (NamT o v _ rs)) 
   case lookup key rs of
     (Just valType) -> return $ PolyAcc (Idx cidx valType) o (Idx cidx v) record' key
     Nothing -> error "invalid key access"
+-- The the expected record type is not present, evaluate one step down
+expressPolyExpr pl pc (AnnoS g c (AccS k (AnnoS (Idx i t) c' e'))) = do
+    scope <- MM.getGeneralScope i
+    case reduceType scope t of
+        (Just t') -> expressPolyExpr pl pc (AnnoS g c (AccS k (AnnoS (Idx i t') c' e')))
+        Nothing -> error "Expected a record access type"
 
 -- lists
 expressPolyExpr _ _ (AnnoS (Idx _ (AppT (VarT v) [t])) (Idx cidx lang, _) (LstS xs))
@@ -1316,6 +1330,13 @@ expressPolyExpr _ _ (AnnoS (Idx _ (NamT o v ps rs)) (Idx cidx lang, _) (NamS ent
   let tsIdx = zipWith mkIdx (map snd entries) (map snd rs)
   xs' <- fromJust <$> safeZipWithM (expressPolyExpr lang) tsIdx (map snd entries)
   return $ PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip tsIdx xs'))
+-- if the type is not a record, evaluate one step and try again
+expressPolyExpr pl pc (AnnoS (Idx i t) c e@(NamS _)) = do
+    scope <- MM.getGeneralScope i
+    case reduceType scope t of
+        (Just t') -> expressPolyExpr pl pc (AnnoS (Idx i t') c e)
+        Nothing -> error "Expected a record type"
+
 
 expressPolyExpr _ _ (AnnoS _ _ (AppS (AnnoS _ _ (BndS v)) _))
   = MM.throwError . ConcreteTypeError $ FunctionSerialization v
@@ -1323,20 +1344,22 @@ expressPolyExpr _ _ (AnnoS _ _ (AppS (AnnoS _ _ (BndS v)) _))
 -- catch all exception case - not very classy
 expressPolyExpr _ _ (AnnoS _ _ (AppS (AnnoS _ _ (LamS vs _)) _))
   = error $ "All applications of lambdas should have been eliminated of length " <> show (length vs)
-expressPolyExpr _ parentType (AnnoS (Idx m t) _ _) = do
+expressPolyExpr _ parentType x@(AnnoS (Idx m t) _ _) = do
   MM.sayVVV "Bad case"
   MM.sayVVV $ "  t :: " <> pretty t
   name' <- MM.metaName m
   case name' of
       (Just v) -> MM.throwError . OtherError . render
                $ "Missing concrete:"
-               <> "\n  t:" <+> pretty t
+               <> "\n  t:" <+> viaShow t
                <> "\n  v:" <+> pretty v
                <> "\n parentType:" <+> pretty parentType
+               <> "\n x:" <+> pretty x
       Nothing ->  MM.throwError . OtherError . render
                $ "Missing concrete in unnamed function:"
                <> "\n  t:" <+> pretty t
                <> "\n parentType:" <+> pretty parentType
+               <> "\n x:" <+> pretty x
 
 unvalue :: Arg a -> Arg None
 unvalue (Arg i _) = Arg i None

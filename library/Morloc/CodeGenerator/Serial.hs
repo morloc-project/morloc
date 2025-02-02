@@ -344,7 +344,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
         -> MorlocMonad (Maybe TypeF) -- the resolved unpacked types
     resolveP a b c generalTypes = do
         let (ga, ca) = unweaveTypeF a
-        unpackedConcreteType <- case subtype b ca (Gamma 0 []) of
+        unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 []) of
             (Left typeErr) -> serializerError
                 $  "There was an error raised in subtyping while resolving serialization"
                 <> "\nThe packer involved maps the type:"
@@ -367,7 +367,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
             (u, gc) -> do
                 -- where u  is the unresolved general packed type that was stored in Desugar.hs
                 --       gc is the unresolved general unpacked type
-                case subtype u ga (Gamma 0 []) of
+                case subtype Map.empty u ga (Gamma 0 []) of
                     (Left _) -> return Nothing
                     (Right g) -> do
                         return . Just $ apply g (existential gc)

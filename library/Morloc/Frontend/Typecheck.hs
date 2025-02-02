@@ -184,8 +184,9 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
 
   connectInstance :: Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
   connectInstance g0 [] = return g0
-  connectInstance g0 (AnnoS (Idx _ t) _ _ : es) =
-    case subtype gt t g0 of
+  connectInstance g0 (AnnoS (Idx i t) _ _ : es) = do
+    scope <- MM.getGeneralScope i
+    case subtype scope gt t g0 of
       (Left e) -> MM.throwError $ GeneralTypeError e
       (Right g1) -> connectInstance g1 es
 
@@ -652,8 +653,9 @@ checkE i g1 e1 b = do
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do
+  scope <- MM.getGeneralScope i
   insetSay $ parens (pretty a) <+> "<:" <+> parens (pretty b)
-  case subtype a b g of
+  case subtype scope a b g of
     (Left err') -> gerr i err'
     (Right x) -> return x
 

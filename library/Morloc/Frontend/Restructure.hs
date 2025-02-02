@@ -19,7 +19,6 @@ import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.Map as Map
-import qualified Morloc.TypeEval as TE
 import qualified Data.Set as Set
 
 -- | Resolve type aliases, term aliases and import/exports
@@ -31,7 +30,6 @@ restructure s
   >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
   >>= doM collectTypes
   >>= doM collectSources
-  >>= evaluateAllTypes
   >>= removeTypeImports -- Remove type imports and exports
   |>> nullify -- TODO: unsus and document
 
@@ -203,13 +201,20 @@ collectTypes fullDag = do
   completeRecords :: Scope -> Scope -> Scope
   completeRecords gscope cscope = Map.mapWithKey (completeRecord gscope) cscope
 
-  completeRecord :: Scope -> TVar -> [(a, TypeU, Bool)] -> [(a, TypeU, Bool)]
+  completeRecord
+    :: Scope
+    -> TVar
+    -> [([Either TVar TypeU], TypeU, Bool)]
+    -> [([Either TVar TypeU], TypeU, Bool)]
   completeRecord gscope v xs = case Map.lookup v gscope of
-    (Just ys) -> map (completeValue [t | (_, t, _) <- ys]) xs
+    (Just ys) -> map (completeValue [(vs, t) | (vs, t, _) <- ys]) xs
     Nothing -> xs
 
-  completeValue :: [TypeU] -> (a, TypeU, Bool) -> (a, TypeU, Bool)
-  completeValue (NamU _ _ _ rs:_) (vs, NamU o v ps [], terminal) = (vs, NamU o v ps rs, terminal)
+  completeValue
+    :: [([Either TVar TypeU], TypeU)]
+    -> ([Either TVar TypeU], TypeU, Bool)
+    -> ([Either TVar TypeU], TypeU, Bool)
+  completeValue ((vs, NamU _ _ ps rs):_) (_, NamU o v _ [], terminal) = (vs, NamU o v ps rs, terminal)
   completeValue _ x = x
 
   getUniversalGeneralScope :: MorlocMonad Scope
@@ -229,7 +234,7 @@ mergeEntries xs0 ys0 = filter (isNovel ys0) xs0 <> ys0
   isNovel [] _ =  True
   isNovel ((vs2, t2, isTerminal1):ys) x@(vs1, t1, isTerminal2)
     | (length vs1 == length vs2) &&
-      t1 == foldl (\t (v1, v2) -> rename v2 v1 t) t2 [(v1, v2) | (Left v1, Left v2) <- zip vs1 vs2] && -- (zip vs1 vs2) &&
+      t1 == foldl (\t (v1, v2) -> rename v2 v1 t) t2 [(v1, v2) | (Left v1, Left v2) <- zip vs1 vs2] &&
       isTerminal1 == isTerminal2 = False
     | otherwise = isNovel ys x
 
@@ -249,39 +254,6 @@ filterAndSubstitute links typemap =
     = case Map.lookup sourceName typedefs of
       (Just xs) -> Map.insert localAlias (map (\(a,b,c) -> (a, rename sourceName localAlias b, c)) xs) (Map.delete sourceName typedefs)
       Nothing -> typedefs
-
-evaluateAllTypes :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
-evaluateAllTypes = MDD.mapNodeM f where
-  f :: ExprI -> MorlocMonad ExprI
-  f (ExprI i e0) = ExprI i <$> g e0 where
-    g :: Expr -> MorlocMonad Expr
-    g (SigE (Signature v l e)) = do
-      gscope <- MM.getGeneralScope i
-      e' <- evaluateEType gscope e
-      return $ SigE (Signature v l e')
-    g (AnnE e ts) = do
-      gscope <- MM.getGeneralScope i
-      ts' <- mapM (evaluateTypeU gscope) ts
-      e' <- f e
-      return (AnnE e' ts')
-    g (ModE m es) = ModE m <$> mapM f es
-    g (AssE v e es) = AssE v <$> f e <*> mapM f es
-    g (AccE k e) = AccE k <$> f e
-    g (LstE es) = LstE <$> mapM f es
-    g (TupE es) = TupE <$> mapM f es
-    g (NamE rs) = NamE <$> mapM (secondM f) rs
-    g (AppE e es) = AppE <$> f e <*> mapM f es
-    g (LamE vs e) = LamE vs <$> f e
-    g e = return e
-
-    evaluateEType :: Scope -> EType -> MorlocMonad EType
-    evaluateEType gscope et =
-      either MM.throwError (\t' -> return $ et {etype = t'}) $ TE.evaluateType gscope (etype et)
-
-    evaluateTypeU :: Scope -> TypeU -> MorlocMonad TypeU
-    evaluateTypeU gscope t =
-      either MM.throwError return $ TE.evaluateType gscope t
-
 
 
 collectSources :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
