@@ -25,6 +25,8 @@ main = do
       , substituteTVarTests
       , subtypeTests
 
+      , golden "type-eval-1" "type-eval-1"
+
       , golden "typeclasses-1" "typeclasses-1"
       , golden "typeclasses-2" "typeclasses-2"
       , golden "typeclasses-3" "typeclasses-3"

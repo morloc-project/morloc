@@ -1634,7 +1634,7 @@ serialize (MonoHead lang m0 args0 e0) = do
     qualifiers <- MM.gets stateTypeQualifier
     let qs = maybe [] id (Map.lookup idx qualifiers)
     -- Infer concrete types for all
-    ftypes <- mapM (\t -> inferConcreteType lang (Idx idx (typeOf t))) (map snd qs)
+    ftypes <- mapM (\t -> inferType (Idx idx (typeOf t))) (map snd qs)
     -- Clean up and zip together
     let vs = map (unTVar . fst) qs
         qs' = zip vs ftypes

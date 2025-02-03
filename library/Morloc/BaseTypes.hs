@@ -24,7 +24,11 @@ module Morloc.BaseTypes
   , record
   , unitU
   , realU
+  , f32U, f64U
   , intU
+  , i8U, i16U, i32U, i64U
+  , uintU
+  , u8U, u16U, u32U, u64U
   , boolU
   , strU
   , tupleU
@@ -42,10 +46,10 @@ real :: TVar
 real = TV "Real"
 
 f32 :: TVar
-f32 = TV "Float32" 
+f32 = TV "Float32"
 
 f64 :: TVar
-f64 = TV "Float64" 
+f64 = TV "Float64"
 
 int :: TVar
 int = TV "Int"
@@ -94,19 +98,52 @@ record = TV "Record"
 
 
 unitU :: TypeU
-unitU = VarU unit
+unitU = VarU $ TV "Unit"
 
 realU :: TypeU
-realU = VarU real
+realU = VarU $ TV "Real"
+
+f32U :: TypeU
+f32U = VarU $ TV "Float32"
+
+f64U :: TypeU
+f64U = VarU $ TV "Float64"
 
 intU :: TypeU
-intU = VarU int
+intU = VarU $ TV "Int"
+
+i8U :: TypeU
+i8U = VarU $ TV "Int8"
+
+i16U :: TypeU
+i16U = VarU $ TV "Int16"
+
+i32U :: TypeU
+i32U = VarU $ TV "Int32"
+
+i64U :: TypeU
+i64U = VarU $ TV "Int64"
+
+u8U :: TypeU
+u8U = VarU $ TV "UInt8"
+
+uintU :: TypeU
+uintU = VarU $ TV "UInt"
+
+u16U :: TypeU
+u16U = VarU $ TV "UInt16"
+
+u32U :: TypeU
+u32U = VarU $ TV "UInt32"
+
+u64U :: TypeU
+u64U = VarU $ TV "UInt64"
 
 boolU :: TypeU
-boolU = VarU bool
+boolU = VarU $ TV "Bool"
 
 strU :: TypeU
-strU = VarU str
+strU = VarU $ TV "Str"
 
 listU :: TypeU -> TypeU
 listU t = AppU (VarU list) [t]

@@ -26,6 +26,7 @@ import qualified Morloc.BaseTypes as BT
 import qualified Data.Map as Map
 import qualified Data.Text as DT
 import qualified Data.Char as C
+import qualified Morloc.TypeEval as TE
 import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
 import Morloc.Typecheck.Internal (subtype, apply, unqualify, qualify, substitute)
@@ -192,6 +193,8 @@ makeSerialAST m lang t0 = do
   MM.sayVVV $ "packs:" <+> viaShow packs
   MM.sayVVV $ "unpacks:" <+> viaShow unpacks
 
+  (_, gscope) <- getScope m lang
+
   -- Map TVar ((TypeU, Source), (TypeU, Source))
   let typepackers = Map.fromListWith (<>) [ (extractKey b1, [(length vs1, qualify vs1 a1, qualify vs1 b1, src1, src2)])
                                           | ((vs1, FunU [a1] b1), src1) <- packs
@@ -200,42 +203,46 @@ makeSerialAST m lang t0 = do
                                           , length vs1 == length vs2
                                           ]
 
-  makeSerialAST' typepackers t0
+  makeSerialAST' gscope typepackers t0
 
   where
     makeSerialAST'
-      :: Map.Map TVar [(Int, TypeU, TypeU, Source, Source)]
+      :: Scope
+      -> Map.Map TVar [(Int, TypeU, TypeU, Source, Source)]
       -> TypeF
       -> MorlocMonad SerialAST
     -- If the type is unknown in this language, then it must be a passthrough
     -- type. So it will only be represented in the serialization form. As a
     -- string, for now.
-    makeSerialAST' _ (UnkF (FV gv _)) = return $ SerialUnknown (FV gv (serialType lang))
-    makeSerialAST' typepackers (VarF v@(FV gv cv))
-      | gv == BT.unit = return $ SerialNull v
-      | gv == BT.bool = return $ SerialBool v
-      | gv == BT.str = return $ SerialString v
-      | gv == BT.real = return $ SerialReal v
-      | gv == BT.f32 = return $ SerialFloat32 v
-      | gv == BT.f64 = return $ SerialFloat64 v
-      | gv == BT.int = return $ SerialInt v
-      | gv == BT.i8 = return $ SerialInt8 v
-      | gv == BT.i16 = return $ SerialInt16 v
-      | gv == BT.i32 = return $ SerialInt32 v
-      | gv == BT.i64 = return $ SerialInt64 v
-      | gv == BT.uint = return $ SerialUInt v
-      | gv == BT.u8 = return $ SerialUInt8 v
-      | gv == BT.u16 = return $ SerialUInt16 v
-      | gv == BT.u32 = return $ SerialUInt32 v
-      | gv == BT.u64 = return $ SerialUInt64 v
+    makeSerialAST' _ _ (UnkF (FV gv _)) = return $ SerialUnknown (FV gv (serialType lang))
+    makeSerialAST' gscope typepackers ft@(VarF v@(FV gv cv))
+      | finalType == BT.unitU = return $ SerialNull v
+      | finalType == BT.boolU = return $ SerialBool v
+      | finalType == BT.strU = return $ SerialString v
+      | finalType == BT.realU = return $ SerialReal v
+      | finalType == BT.f32U = return $ SerialFloat32 v
+      | finalType == BT.f64U = return $ SerialFloat64 v
+      | finalType == BT.intU = return $ SerialInt v
+      | finalType == BT.i8U = return $ SerialInt8 v
+      | finalType == BT.i16U = return $ SerialInt16 v
+      | finalType == BT.i32U = return $ SerialInt32 v
+      | finalType == BT.i64U = return $ SerialInt64 v
+      | finalType == BT.uintU = return $ SerialUInt v
+      | finalType == BT.u8U = return $ SerialUInt8 v
+      | finalType == BT.u16U = return $ SerialUInt16 v
+      | finalType == BT.u32U = return $ SerialUInt32 v
+      | finalType == BT.u64U = return $ SerialUInt64 v
       | otherwise = case Map.lookup gv typepackers of
           (Just ps) -> do
             packers <- mapM makeTypePacker ps
-            unpacked <- mapM (makeSerialAST' typepackers . typePackerUnpacked) packers
+            unpacked <- mapM (makeSerialAST' gscope typepackers . typePackerUnpacked) packers
             selection <- selectPacker (zip packers unpacked)
             return $ SerialPack v selection
           Nothing ->  serializerError $ "Cannot find constructor in VarF" <+> dquotes (pretty v)
       where
+        finalType = let t = fst $ unweaveTypeF ft
+                    in either (const t) id (TE.evaluateType gscope t)
+
         makeTypePacker :: (Int, TypeU, TypeU, Source, Source) -> MorlocMonad TypePacker
         makeTypePacker (0, generalUnpackedType, generalPackedType, forwardSource, reverseSource) = do
           packedType <- inferConcreteType lang (Idx m (typeOf generalPackedType))
@@ -258,34 +265,49 @@ makeSerialAST m lang t0 = do
         selectPacker _ = serializerError "Two you say, oh, get out of here"
 
 
-    makeSerialAST' _ t@(FunF _ _)
+    makeSerialAST' _ _ t@(FunF _ _)
       = serializerError $ "Cannot serialize functions at" <+> pretty m <> ":" <+> pretty t
-    makeSerialAST' typepackers t@(AppF (VarF v@(FV generalTypeName _)) ts@(firstType:_))
-      | generalTypeName == BT.list = SerialList v <$> makeSerialAST' typepackers firstType
-      | generalTypeName == BT.tuple (length ts) = SerialTuple v <$> mapM (makeSerialAST' typepackers) ts
+    makeSerialAST' gscope typepackers ft@(AppF (VarF v@(FV generalTypeName _)) ts@(firstType:_))
+      | finalVar == Just BT.list = SerialList v <$> makeSerialAST' gscope typepackers firstType
+      | finalVar == Just (BT.tuple (length ts)) = SerialTuple v <$> mapM (makeSerialAST' gscope typepackers) ts
       | otherwise = case Map.lookup generalTypeName typepackers of
           (Just ps) -> do
-            packers <- catMaybes <$> mapM (resolvePacker lang m t) ps
-            unpacked <- mapM (makeSerialAST' typepackers . typePackerUnpacked) packers
+            packers <- catMaybes <$> mapM (resolvePacker lang m ft) ps
+            unpacked <- mapM (makeSerialAST' gscope typepackers . typePackerUnpacked) packers
             selection <- selectPacker (zip packers unpacked)
             return $ SerialPack v selection
           Nothing -> serializerError
             $ "Cannot find" <+> pretty generalTypeName <+> "from" <+> dquotes (pretty v)
-            <> "\n  t:" <+> pretty t
+            <> "\n  ft:" <+> pretty ft
+            <> "\n  finalVar:" <+> pretty finalVar
+            <> "\n  gscope:" <+> viaShow gscope
+            <> "\n  general t:" <+> (viaShow . fst $ unweaveTypeF ft)
+            <> "\n  concrete t:" <+> (viaShow . snd $ unweaveTypeF ft)
             <> "\n  typepackers:" <+> viaShow typepackers
       where
+         basevar :: TypeU -> Maybe TVar
+         basevar (VarU v) = Just v
+         basevar (ExistU v _ _) = Nothing
+         basevar (ForallU _ _) = Nothing
+         basevar (FunU _ _) = Nothing
+         basevar (AppU t _) = basevar t
+         basevar (NamU _ v _ _) = Just v
+
+         finalVar = let t = fst $ unweaveTypeF ft
+                    in basevar $ either (const t) id (TE.evaluateType gscope t)
+
          selectPacker :: [(TypePacker, SerialAST)] -> MorlocMonad (TypePacker, SerialAST)
-         selectPacker [] = serializerError $ "Cannot find constructor in selectPacker for" <+> pretty t
-          <> "\n  t:" <+> pretty t
+         selectPacker [] = serializerError $ "Cannot find constructor in selectPacker for" <+> pretty ft
+          <> "\n  ft:" <+> pretty ft
           <> "\n  generalTypeName (key):" <+> pretty generalTypeName
           <> "\n  typepackers:" <+> viaShow typepackers
           <> "\n  Map.lookup generalTypeName typepackers:" <+> viaShow (Map.lookup generalTypeName typepackers)
          selectPacker (x:_) = return x
 
-    makeSerialAST' typepackers (NamF o n ps rs) = do
-      ts <- mapM (makeSerialAST' typepackers . snd) rs
+    makeSerialAST' gscope typepackers (NamF o n ps rs) = do
+      ts <- mapM (makeSerialAST' gscope typepackers . snd) rs
       return $ SerialObject o n ps (zip (map fst rs) ts)
-    makeSerialAST' _ t = serializerError $ "makeSerialAST' error on type:" <+> pretty t
+    makeSerialAST' _ _ t = serializerError $ "makeSerialAST' error on type:" <+> pretty t
 
 
 resolvePacker
@@ -376,35 +398,6 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
           (Just resolvedUnpackedGeneralType) -> Just $ weaveTypeF resolvedUnpackedGeneralType unpackedConcreteType
           Nothing -> Nothing
 
-    unweaveTypeF :: TypeF -> (TypeU, TypeU)
-    unweaveTypeF (UnkF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
-    unweaveTypeF (VarF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
-    unweaveTypeF (FunF ts t) =
-        let (gt, ct) = unweaveTypeF t
-            (gts, cts) = unzip $ map unweaveTypeF ts
-        in (FunU gts gt, FunU cts ct)
-    unweaveTypeF (AppF t ts) =
-        let (gt, ct) = unweaveTypeF t
-            (gts, cts) = unzip $ map unweaveTypeF ts
-        in (AppU gt gts, AppU ct cts)
-    unweaveTypeF (NamF n (FV gv cv) ps rs) =
-        let (psg, psc) = unzip $ map unweaveTypeF ps
-            keys = map fst rs
-            (vsg, vsc) = unzip $ map (unweaveTypeF . snd) rs
-        in (NamU n gv psg (zip keys vsg), NamU n (cv2tv cv) psc (zip keys vsc))
-
-    weaveTypeF :: TypeU -> TypeU -> TypeF
-    weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv (tv2cv cv))
-    weaveTypeF (FunU tsg tg) (FunU tsc tc) = FunF (zipWith weaveTypeF tsg tsc) (weaveTypeF tg tc)
-    weaveTypeF (AppU tg tsg) (AppU tc tsc) = AppF (weaveTypeF tg tc) (zipWith weaveTypeF tsg tsc)
-    weaveTypeF (NamU n gv psg rsg) (NamU _ cv psc rsc) =
-        NamF n (FV gv (tv2cv cv)) (zipWith weaveTypeF psg psc) (
-          zip (map fst rsg)
-              (zipWith weaveTypeF (map snd rsg) (map snd rsc))
-        )
-    weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
-    weaveTypeF gt ct = error . show $ (gt, ct)
-
     -- Replaces each generic term with an existential term of the same name
     existential :: TypeU -> TypeU
     existential (ForallU v t0) = substitute v (existential t0)
@@ -416,6 +409,35 @@ cv2tv (CV x) = TV x
 
 tv2cv :: TVar -> CVar
 tv2cv (TV x) = CV x
+
+unweaveTypeF :: TypeF -> (TypeU, TypeU)
+unweaveTypeF (UnkF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
+unweaveTypeF (VarF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
+unweaveTypeF (FunF ts t) =
+    let (gt, ct) = unweaveTypeF t
+        (gts, cts) = unzip $ map unweaveTypeF ts
+    in (FunU gts gt, FunU cts ct)
+unweaveTypeF (AppF t ts) =
+    let (gt, ct) = unweaveTypeF t
+        (gts, cts) = unzip $ map unweaveTypeF ts
+    in (AppU gt gts, AppU ct cts)
+unweaveTypeF (NamF n (FV gv cv) ps rs) =
+    let (psg, psc) = unzip $ map unweaveTypeF ps
+        keys = map fst rs
+        (vsg, vsc) = unzip $ map (unweaveTypeF . snd) rs
+    in (NamU n gv psg (zip keys vsg), NamU n (cv2tv cv) psc (zip keys vsc))
+
+weaveTypeF :: TypeU -> TypeU -> TypeF
+weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv (tv2cv cv))
+weaveTypeF (FunU tsg tg) (FunU tsc tc) = FunF (zipWith weaveTypeF tsg tsc) (weaveTypeF tg tc)
+weaveTypeF (AppU tg tsg) (AppU tc tsc) = AppF (weaveTypeF tg tc) (zipWith weaveTypeF tsg tsc)
+weaveTypeF (NamU n gv psg rsg) (NamU _ cv psc rsc) =
+    NamF n (FV gv (tv2cv cv)) (zipWith weaveTypeF psg psc) (
+      zip (map fst rsg)
+          (zipWith weaveTypeF (map snd rsg) (map snd rsc))
+    )
+weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
+weaveTypeF gt ct = error . show $ (gt, ct)
 
 
 -- | Given a list of possible ways to (de)serialize data between two languages,
