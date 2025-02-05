@@ -267,17 +267,17 @@ makeSerialAST m lang t0 = do
 
     makeSerialAST' _ _ t@(FunF _ _)
       = serializerError $ "Cannot serialize functions at" <+> pretty m <> ":" <+> pretty t
-    makeSerialAST' gscope typepackers ft@(AppF (VarF v@(FV generalTypeName _)) ts@(firstType:_))
-      | finalVar == Just BT.list = SerialList v <$> makeSerialAST' gscope typepackers firstType
-      | finalVar == Just (BT.tuple (length ts)) = SerialTuple v <$> mapM (makeSerialAST' gscope typepackers) ts
+    makeSerialAST' gscope typepackers ft@(AppF (VarF fv@(FV generalTypeName _)) ts@(firstType:_))
+      | finalVar == Just BT.list = SerialList fv <$> makeSerialAST' gscope typepackers firstType
+      | finalVar == Just (BT.tuple (length ts)) = SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers) ts
       | otherwise = case Map.lookup generalTypeName typepackers of
           (Just ps) -> do
             packers <- catMaybes <$> mapM (resolvePacker lang m ft) ps
             unpacked <- mapM (makeSerialAST' gscope typepackers . typePackerUnpacked) packers
             selection <- selectPacker (zip packers unpacked)
-            return $ SerialPack v selection
+            return $ SerialPack fv selection
           Nothing -> serializerError
-            $ "Cannot find" <+> pretty generalTypeName <+> "from" <+> dquotes (pretty v)
+            $ "Cannot find" <+> pretty generalTypeName <+> "from" <+> dquotes (pretty fv)
             <> "\n  ft:" <+> pretty ft
             <> "\n  finalVar:" <+> pretty finalVar
             <> "\n  gscope:" <+> viaShow gscope
@@ -287,7 +287,7 @@ makeSerialAST m lang t0 = do
       where
          basevar :: TypeU -> Maybe TVar
          basevar (VarU v) = Just v
-         basevar (ExistU v _ _) = Nothing
+         basevar (ExistU _ _ _) = Nothing
          basevar (ForallU _ _) = Nothing
          basevar (FunU _ _) = Nothing
          basevar (AppU t _) = basevar t

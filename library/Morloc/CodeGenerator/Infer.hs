@@ -21,7 +21,6 @@ module Morloc.CodeGenerator.Infer
 
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.TypeEval as T
-import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
 import Morloc.Data.Doc
 import qualified Data.Map as Map

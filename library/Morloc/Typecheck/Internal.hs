@@ -278,7 +278,7 @@ zipSubtype _ _ _ [] [] g' = return g'
 zipSubtype a b scope (t1':ts1') (t2':ts2') g' = do
   g'' <- subtype scope t1' t2' g'
   zipSubtype a b scope ts1' ts2' g''
-zipSubtype a b _ t1 t2 _ = Left $ SubtypeError a b "Parameter type mismatch"
+zipSubtype a b _ _ _ _ = Left $ SubtypeError a b "Parameter type mismatch"
 
 
 -- | Dunfield Figure 10 -- type-level structural recursion
