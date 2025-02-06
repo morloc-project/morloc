@@ -24,6 +24,7 @@ import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
+import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import qualified Morloc.CodeGenerator.SystemConfig as MCS
 import qualified Morloc.TypeEval as TE
@@ -251,8 +252,8 @@ realize s0 = do
     :: Maybe Lang
     -> AnnoS (Indexed Type) Many (Indexed [(Lang, Int)])
     -> MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
-  collapseAnnoS l1 (AnnoS gi ci e) = do
-    (e', ci') <- collapseExpr l1 (e, ci)
+  collapseAnnoS l1 (AnnoS gi@(Idx _ gt) ci e) = do
+    (e', ci') <- collapseExpr gt l1 (e, ci)
     return (AnnoS gi ci' e')
 
   -- The biased cost adds a slight penalty to changing language.
@@ -278,28 +279,24 @@ realize s0 = do
   callCost src = Lang.languageCost (srcLang src)
 
   collapseExpr
-    :: Maybe Lang -- the language of the parent expression (if Nothing, then this is a GAST)
+    :: Type
+    -> Maybe Lang -- the language of the parent expression (if Nothing, then this is a GAST)
     -> (ExprS (Indexed Type) Many (Indexed [(Lang, Int)]), Indexed [(Lang, Int)])
     -> MorlocMonad (ExprS (Indexed Type) One (Indexed (Maybe Lang)), Indexed (Maybe Lang))
 
   -- This case should be caught earlier
-  collapseExpr _ (VarS v (Many []), _)
+  collapseExpr _ _ (VarS v (Many []), _)
     = MM.throwError . GeneratorError . render
     $ "No implementation found for" <+> squotes (pretty v)
 
   -- Select one implementation for the given term
-  collapseExpr l1 (VarS v (Many xs), Idx i _) = do
+  collapseExpr gt l1 (VarS v (Many xs), Idx i _) = do
     let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) xs
     (x, lang) <- case minXs of
       [] -> MM.throwError . GeneratorError . render $
              "No implementation found for" <+> squotes (pretty v)
       [x] -> handleOne x
-      choices@(x:_) -> case x of
-        (AnnoS _ _ (CallS _)) ->
-          MM.throwError . InseperableDefinitions . render
-            $ "no rule to separate the following sourced functions:\n"
-            <> indent 2 (vsep (map (\y -> "* " <> pretty y) choices))
-        _ -> handleOne x
+      choices -> mapM handleOne choices >>= handleMany gt
     return (VarS v (One x), Idx i lang)
     where
       handleOne
@@ -310,40 +307,67 @@ realize s0 = do
         x' <- collapseAnnoS newLang x
         return (x', newLang)
 
+      handleMany
+        :: Type
+        -> [(AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)]
+        -> MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
+      handleMany gt' xs =
+        -- select instances that exactly match the unevaluated general type
+        --
+        -- WARNING: this is an oversimplification, a temporary solution, I will
+        -- update it when I find a breaking case.
+        case [x | x@(AnnoS (Idx _ t) _ _, _) <- xs, gt' == t] of
+          [] -> do
+            gscope <- MM.getGeneralScope i
+            case TE.evaluateStep gscope (type2typeu gt') of
+              (Just gt'') -> handleMany (typeOf gt'') xs
+              Nothing -> MM.throwError . GeneratorError . render $
+                "I couldn't find implementation found for" <+> squotes (pretty v)
+          [x'] -> return x'
+
+          (x':_) -> return x'
+
+          ----- NOTE: Some cases are inseperable, the code above does not
+          ----- account for this, which may allow incorrect code to be
+          ----- generated.
+          -- xs' ->  MM.throwError . InseperableDefinitions . render
+          --   $ "no rule to separate the following sourced functions of type" <+> parens (pretty gt)":\n"
+          --   <> indent 2 (vsep [ "*" <+> pretty t <+> ":" <+> pretty y | y@(AnnoS (Idx _ t) _ _, _)  <- xs'])
+
   -- Propagate downwards
-  collapseExpr l1 (AccS k x, Idx i ss) = do
+  collapseExpr _ l1 (AccS k x, Idx i ss) = do
     lang <- chooseLanguage l1 ss
     x' <- collapseAnnoS lang x
     return (AccS k x', Idx i lang)
-  collapseExpr l1 (LstS xs, Idx i ss) = do
+  collapseExpr _ l1 (LstS xs, Idx i ss) = do
     lang <- chooseLanguage l1 ss
     xs' <- mapM (collapseAnnoS lang) xs
     return (LstS xs', Idx i lang)
-  collapseExpr l1 (TupS xs, Idx i ss) = do
+  collapseExpr _ l1 (TupS xs, Idx i ss) = do
     lang <- chooseLanguage l1 ss
     xs' <- mapM (collapseAnnoS lang) xs
     return (TupS xs', Idx i lang)
-  collapseExpr l1 (LamS vs x, Idx i ss) = do
+  collapseExpr _ l1 (LamS vs x, Idx i ss) = do
     lang <- chooseLanguage l1 ss
     x' <- collapseAnnoS lang x
     return (LamS vs x', Idx i lang)
-  collapseExpr l1 (AppS f xs, Idx i ss) = do
+  collapseExpr _ l1 (AppS f xs, Idx i ss) = do
     lang <- chooseLanguage l1 ss
     f' <- collapseAnnoS lang f
     xs' <- mapM (collapseAnnoS lang) xs
     return (AppS f' xs', Idx i lang)
-  collapseExpr l1 (NamS rs, Idx i ss) = do
+  collapseExpr _ l1 (NamS rs, Idx i ss) = do
     lang <- chooseLanguage l1 ss
     xs' <- mapM (collapseAnnoS lang . snd) rs
     return (NamS (zip (map fst rs) xs'), Idx i lang)
   -- collapse leaf expressions
-  collapseExpr _ (CallS src, Idx i _) = return (CallS src, Idx i (Just (srcLang src)))
-  collapseExpr lang (BndS v,   Idx i _) = return (BndS v,   Idx i lang)
-  collapseExpr lang (UniS,   Idx i _) = return (UniS,   Idx i lang)
-  collapseExpr lang (RealS x, Idx i _) = return (RealS x, Idx i lang)
-  collapseExpr lang (IntS x, Idx i _) = return (IntS x, Idx i lang)
-  collapseExpr lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
-  collapseExpr lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
+  collapseExpr _ _ (CallS src, Idx i _) = return (CallS src, Idx i (Just (srcLang src)))
+  collapseExpr _ lang (BndS v,   Idx i _) = return (BndS v,   Idx i lang)
+  collapseExpr _ lang (UniS,   Idx i _) = return (UniS,   Idx i lang)
+  collapseExpr _ lang (RealS x, Idx i _) = return (RealS x, Idx i lang)
+  collapseExpr _ lang (IntS x, Idx i _) = return (IntS x, Idx i lang)
+  collapseExpr _ lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
+  collapseExpr _ lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
 
   chooseLanguage :: Maybe Lang -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
   chooseLanguage l1 ss = do
@@ -368,7 +392,7 @@ realize s0 = do
           | newScore == best = (best, y:grp)
           | newScore < best = (newScore, [y])
           | otherwise = (best, grp)
-        
+
 
   -- find the lowest cost function for each key
   -- the groupSort function will never yield an empty value for vs, so `minimum` is safe
@@ -1403,7 +1427,7 @@ segmentExpr _ args (PolyForeignInterface lang callingType cargs e@(PolyManifold 
   (ms, (_, e')) <- segmentExpr m (map ann foreignArgs) e
   let foreignHead = MonoHead lang m foreignArgs e'
   config <- MM.ask
-  let socket = MC.setupServerAndSocket config lang 
+  let socket = MC.setupServerAndSocket config lang
   return (foreignHead:ms, (Nothing, MonoPoolCall callingType m socket foreignArgs))
 
 segmentExpr m _ (PolyForeignInterface lang callingType args e) = do
@@ -1417,7 +1441,7 @@ segmentExpr m _ (PolyForeignInterface lang callingType args e) = do
       es' = map (MonoBndVar (A None)) args
 
   config <- MM.ask
-  let socket = MC.setupServerAndSocket config lang 
+  let socket = MC.setupServerAndSocket config lang
       localFun = MonoApp (MonoPoolCall callingType m socket [Arg i None | i <- args]) es'
 
   return (foreignHead:ms, (Nothing, localFun))

@@ -41,7 +41,6 @@ module Morloc.Typecheck.Internal
   -- * subtyping
   , subtype
   , isSubtypeOf2
-  , equivalent2
   -- * debugging
   , seeGamma
   -- debugging
@@ -138,13 +137,10 @@ instance GammaIndexLike TVar where
 (++>) g xs = g {gammaContext = map index (reverse xs) <> gammaContext g }
 
 
-isSubtypeOf2 :: TypeU -> TypeU -> Bool
-isSubtypeOf2 a b = case subtype Map.empty a b (Gamma 0 []) of
+isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
+isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 []) of
   (Left _) -> False
   (Right _) -> True
-
-equivalent2 :: TypeU -> TypeU -> Bool
-equivalent2 t1 t2 = isSubtypeOf2 t1 t2 && isSubtypeOf2 t2 t1
 
 
 subtypeEvaluated :: Scope -> TypeU -> TypeU -> Gamma -> Either TypeError Gamma
