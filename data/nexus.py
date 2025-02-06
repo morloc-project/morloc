@@ -55,7 +55,7 @@ MSGPACK_TYPE_TUPLE = 0
 # it should take for any interpreter to fire up.
 INITIAL_RETRY_DELAY = 0.001
 RETRY_MULTIPLIER = 1.25
-MAX_RETRIES = 30
+MAX_RETRIES = 45
 
 # buffer size for socket IPC
 BUFFER_SIZE = 4096
@@ -282,7 +282,10 @@ def client(pool, message):
     # it may take awhile for the pool to initialize and create the socket
     delay_time = INITIAL_RETRY_DELAY
     _log(f"contacting {pool.lang} pool ...")
+    _log(f"will try {MAX_RETRIES!s} times")
     for attempt in range(MAX_RETRIES):
+        _log(f"attempt {attempt!s}")
+
         # check if the pool has died if we started it (else we haven't eyes)
         if not opts["no-start"] and not pool.exit_status_queue.empty():
             exit_status = pool.exit_status_queue.get()
