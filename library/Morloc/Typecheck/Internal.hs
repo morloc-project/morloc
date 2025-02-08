@@ -145,17 +145,10 @@ isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 []) of
 
 subtypeEvaluated :: Scope -> TypeU -> TypeU -> Gamma -> Either TypeError Gamma
 subtypeEvaluated scope t1 t2 g =
-    case (reduceType scope t1, reduceType scope t2) of
+    case (TE.reduceType scope t1, TE.reduceType scope t2) of
       (Just t1', _) -> subtype scope t1' t2 g
       (_, Just t2') -> subtype scope t1 t2' g
       (_, _) -> (Left . TypeEvaluationError . render) ("Type evaluation failed:" <+> viaShow (t1, t2))
-
--- evaluate a type one step, return nothing if no evaluation is possible
-reduceType :: Scope -> TypeU -> Maybe TypeU
-reduceType scope t0 =
-    case TE.evaluateStep scope t0 of
-        (Just t1) -> if t1 == t0 then Nothing else Just t1
-        Nothing -> Nothing
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Scope -> TypeU -> TypeU -> Gamma -> Either TypeError Gamma
@@ -283,7 +276,7 @@ instantiate :: Scope -> TypeU -> TypeU -> Gamma -> Either TypeError Gamma
 instantiate scope ta@(ExistU _ _ (_:_)) tb@(NamU _ _ _ _) g1 = instantiate scope tb ta g1
 instantiate scope ta@(ExistU _ _ (_:_)) tb@(VarU _) g1 = instantiate scope tb ta g1
 instantiate scope ta@(VarU _) tb@(ExistU _ _ (_:_)) g1 = do
-  case reduceType scope ta of
+  case TE.reduceType scope ta of
     (Just ta') -> instantiate scope ta' tb g1
     Nothing -> Left $ InstantiationError ta tb "Error in VarU versus NamU with existential keys"
 instantiate scope ta@(NamU _ _ _ rs1) tb@(ExistU v _ rs2@(_:_)) g1 = do

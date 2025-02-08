@@ -13,7 +13,8 @@ module Morloc.TypeEval (
   evaluateType,
   transformType,
   evaluateStep,
-  pairEval
+  pairEval,
+  reduceType
 ) where
 
 import Morloc.Namespace
@@ -55,6 +56,13 @@ evaluateStep scope t0 =
   case generalTransformType Set.empty (\_ _ -> return) resolveFail scope t0 of
     (Left _) -> Nothing
     (Right t) -> Just t
+
+-- | evaluate a type exactly one step, return nothing if no evaluation is possible
+reduceType :: Scope -> TypeU -> Maybe TypeU
+reduceType scope t0 =
+    case evaluateStep scope t0 of
+        (Just t1) -> if t1 == t0 then Nothing else Just t1
+        Nothing -> Nothing
 
 -- evaluate a type until terminal functions called, fail if termini are not reached
 transformType :: Scope -> TypeU -> Either MorlocError TypeU

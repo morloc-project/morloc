@@ -319,10 +319,10 @@ realize s0 = do
         case [x | x@(AnnoS (Idx _ t) _ _, _) <- xs, gt' == t] of
           [] -> do
             gscope <- MM.getGeneralScope i
-            case TE.evaluateStep gscope (type2typeu gt') of
+            case TE.reduceType gscope (type2typeu gt') of
               (Just gt'') -> handleMany (typeOf gt'') xs
               Nothing -> MM.throwError . GeneratorError . render $
-                "I couldn't find implementation found for" <+> squotes (pretty v)
+                "I couldn't find implementation for" <+> squotes (pretty v) <+> "gt' = " <+> pretty gt'
           [x'] -> return x'
 
           (x':_) -> return x'
