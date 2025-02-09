@@ -37,8 +37,10 @@ module Morloc.Monad
   -- * metadata accessors
   , metaSources
   , metaName
-  , metaTypedefs
-  , metaGeneralTypedefs
+  , getConcreteScope
+  , getGeneralScope
+  , getConcreteUniversalScope
+  , getGeneralUniversalScope
   -- * handling tree depth
   , incDepth
   , getDepth
@@ -262,25 +264,32 @@ metaSources i = do
 metaName :: Int -> MorlocMonad (Maybe EVar)
 metaName i = gets (Map.lookup i . stateName)
 
--- | This is currently only used in the C++ translator.
--- FIXME: should a term be allowed to have multiple type definitions within a language?
-metaTypedefs :: Int -> Lang -> MorlocMonad (Map.Map TVar ([TVar], TypeU, Bool))
-metaTypedefs i lang = do
-    p <- gets stateConcreteTypedefs
-
-    return $ case GMap.lookup i p of
-      (GMapJust langmap) -> case Map.lookup lang langmap of
-        (Just typemap) -> Map.map head (Map.filter (not . null) typemap)
-        Nothing -> Map.empty
-      _ -> Map.empty
-
-metaGeneralTypedefs :: Int -> MorlocMonad Scope
-metaGeneralTypedefs i = do
-  p <- gets stateGeneralTypedefs
-
+getConcreteScope :: Int -> Lang -> MorlocMonad Scope
+getConcreteScope i lang = do
+  p <- gets stateConcreteTypedefs
   return $ case GMap.lookup i p of
-    (GMapJust langmap) -> langmap
+    (GMapJust langmap) -> case Map.lookup lang langmap of
+        (Just scope) -> scope
+        Nothing -> Map.empty
     _ -> Map.empty
+
+getGeneralScope :: Int -> MorlocMonad Scope
+getGeneralScope i = do
+  p <- gets stateGeneralTypedefs
+  return $ case GMap.lookup i p of
+    (GMapJust scope) -> scope
+    _ -> Map.empty
+
+
+getConcreteUniversalScope :: Lang -> MorlocMonad Scope
+getConcreteUniversalScope lang = do
+  scopeMap <- gets stateUniversalConcreteTypedefs
+  case Map.lookup lang scopeMap of
+    (Just scope) -> return scope
+    Nothing -> return Map.empty
+
+getGeneralUniversalScope :: MorlocMonad Scope
+getGeneralUniversalScope = gets stateUniversalGeneralTypedefs
 
 newtype IndexState = IndexState { index :: Int }
 type Index a = StateT IndexState Identity a

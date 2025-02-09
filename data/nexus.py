@@ -55,7 +55,7 @@ MSGPACK_TYPE_TUPLE = 0
 # it should take for any interpreter to fire up.
 INITIAL_RETRY_DELAY = 0.001
 RETRY_MULTIPLIER = 1.25
-MAX_RETRIES = 30
+MAX_RETRIES = 45
 
 # buffer size for socket IPC
 BUFFER_SIZE = 4096
@@ -167,6 +167,7 @@ _dispatch_deserialize = {
     "m" : _deserialize_record,
     "f" : lambda x, _: x,
     "i" : lambda x, _: x,
+    "u" : lambda x, _: x,
     "s" : lambda x, _: x,
     "b" : lambda x, _: x,
     "z" : None
@@ -232,6 +233,18 @@ def parse_schema_r(schema: str, index: int = 0) -> tuple[list, int]:
         return ['s', []], index
     elif c == 'r':  # SCHEMA_BINARY
         return ['r', []], index
+    elif c == '<':
+        depth = 1
+        while(True):
+            index += 1
+            c = schema[index]
+            if c == '<':
+                depth += 1
+            elif c == '>':
+                depth -= 1
+
+            if depth == 0:
+                return parse_schema_r(schema, index + 1)
     else:
         raise ValueError(f"Unrecognized schema type '{c}'")
 
@@ -269,7 +282,10 @@ def client(pool, message):
     # it may take awhile for the pool to initialize and create the socket
     delay_time = INITIAL_RETRY_DELAY
     _log(f"contacting {pool.lang} pool ...")
+    _log(f"will try {MAX_RETRIES!s} times")
     for attempt in range(MAX_RETRIES):
+        _log(f"attempt {attempt!s}")
+
         # check if the pool has died if we started it (else we haven't eyes)
         if not opts["no-start"] and not pool.exit_status_queue.empty():
             exit_status = pool.exit_status_queue.get()
@@ -407,7 +423,6 @@ def _read_header(data : bytes) -> tuple[bytes, int, int]:
     return (command, offset, length)
 
 
-
 def print_return(data, schema_str):
     # Parse the call return packet
     _log("Printing return")
@@ -419,64 +434,56 @@ def print_return(data, schema_str):
     status = cmd[5]
     data_start = 32 + offset
 
-    if cmd_type == PACKET_TYPE_DATA and status == PACKET_STATUS_PASS:
-        exit_code = 0
-        outfile = sys.stdout
-    elif cmd_type == PACKET_TYPE_DATA and status == PACKET_STATUS_FAIL:
+    errmsg = ""
+    exit_code = 0
+
+    if cmd_type == PACKET_TYPE_DATA and status == PACKET_STATUS_FAIL:
         if cmd_format == PACKET_FORMAT_TEXT:
             clean_exit(1, data[data_start: ])
         else:
             clean_exit(1, "Failed to read errmsg, pools should return erros as text")
-    else:
-        clean_exit(1, f"Implementation bug: expected data packet: {str(data)}")
 
-    content = None
+    if cmd_type != PACKET_TYPE_DATA:
+        clean_exit(1, f"Implementation bug: expected data packet: {str(data)}")
 
     try:
         if cmd_source == PACKET_SOURCE_MESG:
             content = data[data_start: ]
-        elif cmd_source == PACKET_SOURCE_FILE:
+            if cmd_format == PACKET_FORMAT_JSON or cmd_source == PACKET_FORMAT_TEXT:
+                print(content)
+            # write MessagePack as JSON
+            elif cmd_format == PACKET_FORMAT_MSGPACK:
+                mp.write_msgpack_as_json(content)
+            clean_exit(0)
+        elif cmd_source == PACKET_SOURCE_FILE: 
             filename = data[data_start:].decode()
-            with open(filename, 'rb') as file:
-                content = file.read()
+            # write JSON directly to STDOUT
+            if cmd_format == PACKET_FORMAT_JSON or cmd_source == PACKET_FORMAT_TEXT:
+                with open(filename, 'rb') as f:
+                    while True:
+                        chunk = f.read(65536)  # Read in 64KB chunks
+                        if not chunk:
+                            break
+                        sys.stdout.buffer.write(chunk)
+            # write MessagePack as JSON
+            elif cmd_format == PACKET_FORMAT_MSGPACK:
+                mp.write_msgpack_file_as_json(filename)
+            else:
+                errmsg = "Unexpected format for file source"
+                exit_code = 1
             os.unlink(filename)  # Delete the temporary file
+            clean_exit(exit_code, errmsg)
         elif cmd_source == PACKET_SOURCE_RPTR:
-            relptr = _unpack("Q", data[data_start:])[0]
-            _log(f"Made relative pointer {relptr!s} for return")
-            content = mp.from_shm(relptr, schema_str)
+            if cmd_format == PACKET_FORMAT_VOIDSTAR:
+              relptr = _unpack("Q", data[data_start:])[0]
+              mp.write_voidstar_as_json(relptr, schema_str)
+              clean_exit(0)
+            else:
+                errmsg = "Expected voidstar format with rptr source"
+                clean_exit(1, errmsg)
     except Exception as e:
         errmsg = f"Failed to open return data packet: {e!s}"
         clean_exit(1, errmsg)
-
-    if content == None and schema_str == "z":
-        # if we expected a NULL result and got one, do nothing
-        pass
-    elif content == None and schema_str != "z":
-        errmsg = "Return data was expected but none was found"
-        clean_exit(1, errmsg)
-    elif cmd_format == PACKET_FORMAT_JSON:
-        print(content, file=outfile)
-    elif cmd_format == PACKET_FORMAT_MSGPACK:
-        try:
-            json.dump(mp.mesgpack_to_py(content, schema_str), fp = sys.stdout, separators = JSON_SEPARATORS)
-            print() # newline
-        except Exception as e:
-            errmsg = f"Failed to read output MessagePack format with error:\n{e!s}"
-            _log(trace(errmsg))
-            clean_exit(1, errmsg)
-    elif cmd_format == PACKET_FORMAT_VOIDSTAR:
-        try:
-            json.dump(content, fp = sys.stdout, separators = JSON_SEPARATORS)
-            print() # newline
-        except Exception as e:
-            errmsg = f"Failed to read output voidstar format with error:\n{e!s}"
-            _log(trace(errmsg))
-            clean_exit(1, errmsg)
-    else:
-        errmsg = "Unexpected source"
-        clean_exit(1, errmsg)
-
-    clean_exit(exit_code)
 
 
 def _make_header(

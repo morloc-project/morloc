@@ -21,7 +21,6 @@ module Morloc.CodeGenerator.Infer
 
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.TypeEval as T
-import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
 import Morloc.Data.Doc
 import qualified Data.Map as Map
@@ -29,50 +28,32 @@ import qualified Control.Monad.State as CMS
 
 getScope :: Int -> Lang -> MorlocMonad (Scope, Scope)
 getScope i lang = do
-  cscope <- getConcreteScope i lang
-  gscope <- getGeneralScope i
+  cscope <- MM.getConcreteScope i lang
+  gscope <- MM.getGeneralScope i
   MM.sayVVV $ "cscope:" <+> viaShow cscope
   return (cscope, gscope)
 
 evalGeneralStep :: Int -> TypeU -> MorlocMonad (Maybe TypeU)
-evalGeneralStep i t = do
-  globalMap <- MM.gets stateGeneralTypedefs
-  gscope <- case GMap.lookup i globalMap of
-    GMapJust scope -> return scope
-    _ -> return Map.empty
-  return $ T.evaluateStep gscope t
-
-getConcreteScope :: Int -> Lang -> MorlocMonad Scope
-getConcreteScope _ lang = do
-  scopeMap <- MM.gets stateUniversalConcreteTypedefs
-  case Map.lookup lang scopeMap of
-    (Just scope) -> return scope
-    Nothing -> return Map.empty
-
-getGeneralScope :: Int -> MorlocMonad Scope
-getGeneralScope _ = MM.gets stateUniversalGeneralTypedefs
-
+evalGeneralStep i t = T.evaluateStep <$> MM.getGeneralScope i <*> pure t
 
 inferConcreteTypeU :: Lang -> Indexed TypeU -> MorlocMonad TypeU
 inferConcreteTypeU lang t@(Idx i t0) = do
   MM.sayVVV $ "inferConcreteTypeU" <+> pretty lang <+> pretty t
-  attemptT <- getScope i lang >>= inferConcreteTypeU' t0
+  attemptT <- inferConcreteTypeU' t0 <$> getScope i lang
   case attemptT of
     (Right t') -> return t'
     (Left e1) -> do
       MM.sayVVV $ "Warning: failed to infer concrete type" <+> pretty t0 <+> "for index" <+> pretty i
                 <> "\n  Observed error:" <> pretty e1
                 <> "\n  Retrying with universal scope"
-      gscopeUni <- CMS.gets stateUniversalGeneralTypedefs
-      cscopeUni <- CMS.gets stateUniversalConcreteTypedefs |>> fromMaybe Map.empty . Map.lookup lang
-      attemptUni <- inferConcreteTypeU' t0 (cscopeUni, gscopeUni)
-      case attemptUni of
+      gscopeUni <- MM.getGeneralUniversalScope
+      cscopeUni <- MM.getConcreteUniversalScope lang
+      case inferConcreteTypeU' t0 (cscopeUni, gscopeUni) of
         (Right t') -> return t'
         (Left e2) -> MM.throwError e2
 
-inferConcreteTypeU' :: TypeU -> (Scope, Scope)-> MorlocMonad (Either MorlocError TypeU)
-inferConcreteTypeU' generalType (cscope, gscope) = do
-  return $ T.pairEval cscope gscope generalType
+inferConcreteTypeU' :: TypeU -> (Scope, Scope) -> Either MorlocError TypeU
+inferConcreteTypeU' generalType (cscope, gscope) = T.pairEval cscope gscope generalType
 
 inferConcreteType :: Lang -> Indexed Type -> MorlocMonad TypeF
 inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
@@ -101,7 +82,7 @@ inferConcreteTypeUUniversal :: Lang -> TypeU -> MorlocMonad TypeU
 inferConcreteTypeUUniversal lang generalType = do
   gscopeUni <- CMS.gets stateUniversalGeneralTypedefs
   cscopeUni <- CMS.gets stateUniversalConcreteTypedefs |>> fromMaybe Map.empty . Map.lookup lang
-  attemptUni <- inferConcreteTypeU' generalType (cscopeUni, gscopeUni)
+  let attemptUni = inferConcreteTypeU' generalType (cscopeUni, gscopeUni)
   case attemptUni of
     (Right t) -> return t
     (Left e2) -> MM.throwError e2
@@ -120,7 +101,7 @@ weave gscope = w where
   w t1 t2 = case T.evaluateStep gscope t1 of
     Nothing -> Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <> "\n  t2:" <> pretty t2
     (Just t1') -> if t1 == t1'
-      then Left "failed to weave"
+      then Left ("failed to weave:" <> pretty t1 <+> "vs" <+> pretty t1')
       else do
         w t1' t2
 
@@ -128,7 +109,7 @@ weave gscope = w where
 inferConcreteVar :: Lang -> Indexed TVar -> MorlocMonad FVar
 inferConcreteVar lang t@(Idx i v) = do
   MM.sayVVV $ "inferConcreteVar" <+> pretty lang <+> pretty t
-  inferConcreteVar' v <$> getConcreteScope i lang
+  inferConcreteVar' v <$> MM.getConcreteScope i lang
 
 inferConcreteVar' :: TVar -> Scope -> FVar
 inferConcreteVar' gv scope = case Map.lookup gv scope of

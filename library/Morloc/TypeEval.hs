@@ -13,16 +13,20 @@ module Morloc.TypeEval (
   evaluateType,
   transformType,
   evaluateStep,
-  pairEval
+  pairEval,
+  reduceType
 ) where
 
 import Morloc.Namespace
+import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
 
--- Evaluate an expression with both the concrete and general scopes.
+-- Evaluate a type expression with both the concrete and general scopes
+--
+-- This function does not know the concrete language, the parent sets that.
 --
 -- First try to resolve an expression with the concrete scope
 -- If this fails, resolve one step with the general scope.
@@ -52,6 +56,13 @@ evaluateStep scope t0 =
   case generalTransformType Set.empty (\_ _ -> return) resolveFail scope t0 of
     (Left _) -> Nothing
     (Right t) -> Just t
+
+-- | evaluate a type exactly one step, return nothing if no evaluation is possible
+reduceType :: Scope -> TypeU -> Maybe TypeU
+reduceType scope t0 =
+    case evaluateStep scope t0 of
+        (Just t1) -> if t1 == t0 then Nothing else Just t1
+        Nothing -> Nothing
 
 -- evaluate a type until terminal functions called, fail if termini are not reached
 transformType :: Scope -> TypeU -> Either MorlocError TypeU
@@ -83,8 +94,10 @@ generalTransformType
   :: Set.Set TVar
   -> ((Set.Set TVar -> TypeU -> Either MorlocError TypeU) -> Set.Set TVar -> TypeU -> Either MorlocError TypeU)
   -> ((Set.Set TVar -> TypeU -> Either MorlocError TypeU) -> Set.Set TVar -> TypeU -> Either MorlocError TypeU)
-  -> Scope -> TypeU -> Either MorlocError TypeU
-generalTransformType bnd0 recurse' resolve' h = f bnd0
+  -> Scope -- may be general or concrete scope
+  -> TypeU
+  -> Either MorlocError TypeU
+generalTransformType bnd0 recurse' resolve' scope = f bnd0
   where
 
   recurse = recurse' f
@@ -97,7 +110,7 @@ generalTransformType bnd0 recurse' resolve' h = f bnd0
     return $ ExistU v ps' rs'
   f bnd (FunU ts t) = FunU <$> mapM (recurse bnd) ts <*> recurse bnd t
   f bnd (NamU o n ps rs) = do
-    (n', o') <- case Map.lookup n h of
+    (n', o') <- case Map.lookup n scope of
         -- If the record type itself is aliased, substitute the name and record form
         (Just [(_, NamU o'' n'' _ _, _)]) -> return (n'', o'')
         -- Otherwise, keep the record name and form and recurse only into children
@@ -106,32 +119,35 @@ generalTransformType bnd0 recurse' resolve' h = f bnd0
     ps' <- mapM (recurse bnd) ps
     return $ NamU o' n' ps' (zip (map fst rs) ts')
 
-  -- type Cpp (A a b) = "map<$1,$2>" a b
-  -- foo Cpp :: A D [B] -> X
-  -- -----------------------------------
-  -- foo :: "map<$1,$2>" D [B] -> X
-  --
-  -- type Foo a = (a, A)
-  -- f :: Foo Int -> B
-  -- -----------------
-  -- f :: (Int, A) -> B
   f bnd t0@(AppU (VarU v) ts)
+    -- Handle generic case:
+    --   type Cpp => A a b = "map<$1,$2>" a b
+    --   foo Cpp :: A D [B] -> X
+    --   -----------------------------------
+    --   foo :: "map<$1,$2>" D [B] -> X
+    --  
+    --   type Foo a = (a, A)
+    --   f :: Foo Int -> B
+    --   -----------------
+    --   f :: (Int, A) -> B
     | Set.member v bnd = AppU (VarU v) <$> mapM (recurse bnd) ts
+    -- Handle specialization, e.g.
+    --   type Py => List Int64 = "np.ndarray" "int64"
     | otherwise =
-        case Map.lookup v h of
-          (Just (t':ts')) -> do
-            (vs, newType, isTerminal) <- foldlM (mergeAliases v (length ts)) t' ts' |>> renameTypedefs bnd
-            case (length ts == length vs, isTerminal) of
-              -- non-equal number of type parameters
-              (False, _) -> MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
-              -- reached a terminal type (e.g. `"vector<$1,$2>" a b`)
-              (_, True ) -> terminate bnd $ foldr parsub newType (zip vs ts)
-              -- substitute the head term and re-evaluate
-              (_, False) -> recurse bnd $ foldr parsub newType (zip vs ts)
+        case Map.lookup v scope of
+          (Just ts') -> do
+            mergedAliases <- foldlM (mergeAliases ts) Nothing (map Just ts') |>> fmap (renameTypedefs bnd)
+            case mergedAliases of
+                (Just (vs, newType, isTerminal)) -> case isTerminal of
+                   True -> terminate bnd $ foldr parsub newType (zip vs ts)
+                   -- substitute the head term and re-evaluate
+                   False -> recurse bnd $ foldr parsub newType (zip vs ts)
+                Nothing -> MM.throwError . OtherError . render $
+                    "No matching alias found for" <+> viaShow t0 <+> "with scope" <+> viaShow scope <+> "with ts':" <+> viaShow ts'
           _ -> resolve bnd t0
 
-  -- Can only apply VarU?
-  f _ (AppU _ _) = undefined
+  -- t may be existential
+  f bnd (AppU t ts) = AppU <$> recurse bnd t <*> mapM (recurse bnd) ts
 
   -- type Foo = A
   -- f :: Foo -> B
@@ -139,15 +155,18 @@ generalTransformType bnd0 recurse' resolve' h = f bnd0
   -- f :: A -> B
   f bnd t0@(VarU v)
     | Set.member v bnd = return t0
-    | otherwise =
-     case Map.lookup v h of
+    | otherwise = case Map.lookup v scope of
       (Just []) -> return t0
-      (Just ts1@(t1:_)) -> do
+      (Just ts1) -> do
         -- new parameters may be added on the right that are not on the left
-        (_, t2, isTerminal) <- foldlM (mergeAliases v 0) t1 ts1
-        if isTerminal
-          then terminate bnd t2
-          else recurse bnd t2
+        mergedAliases <- foldlM (mergeAliases []) Nothing (map Just ts1)
+        case mergedAliases of
+            (Just (_, t2, isTerminal)) ->
+                if isTerminal
+                  then terminate bnd t2
+                  else recurse bnd t2
+            Nothing -> MM.throwError . OtherError . render $
+              "No matching alias found for" <+> viaShow t0 <+> "with scope" <+> viaShow scope
       Nothing -> resolve bnd t0
 
   f bnd (ForallU v t) = ForallU v <$> recurse (Set.insert v bnd) t
@@ -160,9 +179,9 @@ generalTransformType bnd0 recurse' resolve' h = f bnd0
   terminate bnd (NamU o v ts rs) = NamU o v <$> mapM (recurse bnd) ts <*> mapM (secondM (recurse bnd)) rs
   terminate _   (VarU v) = return (VarU v)
 
-  renameTypedefs :: Set.Set TVar -> ([TVar], TypeU, Bool) -> ([TVar], TypeU, Bool)
+  renameTypedefs :: Set.Set TVar -> ([Either TVar TypeU], TypeU, Bool) -> ([TVar], TypeU, Bool)
   renameTypedefs _ ([], t, isTerminal) = ([], t, isTerminal)
-  renameTypedefs bnd (v@(TV x) : vs, t, isTerminal)
+  renameTypedefs bnd (Left v@(TV x) : vs, t, isTerminal)
     | Set.member v bnd =
         let (vs', t', isTerminal') = renameTypedefs bnd (vs, t, isTerminal)
             v' = head [x' | x' <- [TV (MT.show' i <> x) | i <- [(0 :: Int) ..]], not (Set.member x' bnd), x' `notElem` vs']
@@ -171,24 +190,71 @@ generalTransformType bnd0 recurse' resolve' h = f bnd0
     | otherwise =
         let (vs', t', isTerminal') = renameTypedefs bnd (vs, t, isTerminal)
         in (v:vs', t', isTerminal')
+  renameTypedefs bnd (Right _ : vs, t, isTerminal)
+    = renameTypedefs bnd (vs, t, isTerminal)
 
   -- When a type alias is imported from two places, this function reconciles them, if possible
   mergeAliases
-    :: TVar
-    -> Int
-    -> ([TVar], TypeU, Bool)
-    -> ([TVar], TypeU, Bool)
-    -> Either MorlocError ([TVar], TypeU, Bool)
-  mergeAliases v i t@(ts1, t1, isTerminal1) (ts2, t2, isTerminal2)
-    | i /= length ts1 = MM.throwError $ BadTypeAliasParameters v i (length ts1)
-    |    isSubtypeOf t1' t2'
-      && isSubtypeOf t2' t1'
-      && length ts1 == length ts2
-      && isTerminal1 == isTerminal2 = return t
+    :: [TypeU]
+    -> Maybe ([Either TVar TypeU], TypeU, Bool)
+    -> Maybe ([Either TVar TypeU], TypeU, Bool)
+    -> Either MorlocError (Maybe ([Either TVar TypeU], TypeU, Bool))
+  mergeAliases _ Nothing Nothing = Right Nothing
+  mergeAliases tsMain Nothing (Just b)
+    | checkAlias tsMain b = Right (Just b)
+    | otherwise = Right Nothing
+  mergeAliases tsMain (Just a) Nothing
+    | checkAlias tsMain a = Right (Just a)
+    | otherwise = Right Nothing
+  mergeAliases tsMain (Just a@(ts1, t1, isTerminal1)) (Just b@(ts2, t2, isTerminal2))
+    -- if both are invalid, return nothing
+    | not aIsValid && not bIsValid = Right Nothing
+    -- if one is valid and the other isn't, return the valid one
+    | aIsValid && not bIsValid = Right (Just a)
+    | not aIsValid && bIsValid = Right (Just b)
+    -- if they are both valid AND they are identical AND there is no specialization, return the first
+    | 
+      -- the return types are the same
+         isSubtypeOf t1 t2
+      && isSubtypeOf t2 t1
+      -- there is no specialization
+      && nonspecialized
+      -- the return type is concrete, not an alias for something else
+      && isTerminal1 == isTerminal2 = return (Just a)
+    -- handle specialization
+    | not nonspecialized = return $ selectSpecialization a b
     | otherwise = MM.throwError (ConflictingTypeAliases t1 t2)
     where
-      t1' = foldl (flip ForallU) t1 ts1
-      t2' = foldl (flip ForallU) t2 ts2
+      aIsValid = checkAlias tsMain a
+      bIsValid = checkAlias tsMain b
+      -- True if all parameters in both aliases are generic
+      nonspecialized = all
+        (\(x, y) -> either (\ _ -> either (const True) (const False) y) (const False) x)
+        (zip ts1 ts2)
+
+  selectSpecialization
+    :: ([Either TVar TypeU], TypeU, Bool)
+    -> ([Either TVar TypeU], TypeU, Bool)
+    -> Maybe ([Either TVar TypeU], TypeU, Bool)
+  selectSpecialization a@(aps0, _, _) b@(bps0, _, _) = g aps0 bps0 where 
+      g [] _ = Just a
+      g _ [] = Just b
+      g ((Right _):_) ((Left _):_) = Just a
+      g ((Left _):_) ((Right _):_) = Just b
+      g ((Left _):aps) ((Left _):bps) = g aps bps
+      g ((Right ta):aps) ((Right tb):bps)
+        | isSubtypeOf ta tb && isSubtypeOf tb ta = g aps bps
+        | isSubtypeOf ta tb && not (isSubtypeOf tb ta) = Just b
+        | not (isSubtypeOf ta tb) && isSubtypeOf tb ta = Just a
+        | otherwise = Nothing 
+
+  checkAlias
+    :: [TypeU]
+    -> ([Either TVar TypeU], TypeU, Bool)
+    -> Bool
+  checkAlias ts1 (ts2, _, _) =
+    length ts1 == length ts2 &&
+    all (\(x, y) -> either (const True) (\ytype -> isSubtypeOf ytype x) y) (zip ts1 ts2)
 
 -- Replace a type variable with an expression. For example:
 -- parsub ("a", "Int") -> "Map a b" -> "Map Int b"
@@ -196,7 +262,7 @@ parsub :: (TVar, TypeU) -> TypeU -> TypeU
 parsub (v, t2) t1@(VarU v0)
   | v0 == v = t2 -- substitute
   | otherwise = t1 -- keep the original
-parsub _ ExistU{} = error "What the bloody hell is an existential doing down here?"
+parsub pair (ExistU t ts rs) = ExistU t (map (parsub pair) ts) (zip (map fst rs) (map (parsub pair . snd) rs))
 parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
 parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
 parsub pair (AppU t ts) = AppU (parsub pair t) (map (parsub pair) ts)

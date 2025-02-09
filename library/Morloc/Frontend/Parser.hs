@@ -236,12 +236,22 @@ pImport = do
     a <- option n (reserved "as" >> freenameU)
     return (AliasedType (TV n) (TV a))
 
+-- example:
+--   class Show a where
+--     show a :: a -> Str
 pTypeclass :: Parser ExprI
 pTypeclass = do
   _ <- reserved "class"
-  (TV v, vs) <- pTypedefTerm <|> parens pTypedefTerm
+  (TV v, vs) <- pTypedefTerm' <|> parens pTypedefTerm'
   sigs <- option [] (reserved "where" >> alignInset pSignature)
   exprI $ ClsE (ClassName v) vs sigs
+  where
+    -- parses "Show a" from above example
+    pTypedefTerm' :: Parser (TVar, [TVar])
+    pTypedefTerm' = do
+      t <- freenameU
+      ts <- many freenameL -- The parameters must currently be generic, hence "L" for lowercase
+      return (TV t, map TV ts)
 
 pInstance :: Parser ExprI
 pInstance = do
@@ -307,7 +317,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     -- The vs are the parameters of the object. In C++ they are the required
     -- template parameters (e.g., A and B in Obj<A,B>). I have to maintain them
     -- as an ordered list all the way to code generation.
-    let t = NamU o (TV con) (map VarU vs) (map (first Key) entries)
+    let t = NamU o (TV con) (map (either VarU id) vs) (map (first Key) entries)
     exprI (TypE k v vs t)
 
   -- TODO: is this really the right place to be doing this?
@@ -346,11 +356,15 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     _ <- symbol "=>"
     return lang
 
-pTypedefTerm :: Parser (TVar, [TVar])
+-- Typedef terms may be fully or partially generic.
+-- examples:
+--   Map a b
+--   Map Str b
+pTypedefTerm :: Parser (TVar, [Either TVar TypeU])
 pTypedefTerm = do
   t <- freenameU
-  ts <- many freenameL
-  return (TV t, map TV ts)
+  ts <- many (fmap (Left . TV) freenameL <|> fmap Right pType)
+  return (TV t, ts)
 
 
 pAssE :: Parser ExprI

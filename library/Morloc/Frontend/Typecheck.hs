@@ -114,78 +114,94 @@ resolveTypes (AnnoS (Idx i t) ci e)
   f UniS = UniS
 
 resolveInstances :: Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
-resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
-    (g', e1) <- f g e0
+resolveInstances g (AnnoS gi@(Idx index gt) ci e0) = do
+    gscope <- MM.getGeneralScope index
+    (g', e1) <- f gscope g e0
     return (g', AnnoS gi ci e1)
   where
-  f :: Gamma -> ExprS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, ExprS (Indexed TypeU) Many Int)
+  f :: Scope -> Gamma -> ExprS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, ExprS (Indexed TypeU) Many Int)
 
   -- resolve instances
-  f g0 (VarS v (PolymorphicExpr clsName _ _ rss)) = do
+  f scope g0 (VarS v (PolymorphicExpr clsName _ _ rss)) = do
 
     -- find all instances that are a subtype of the inferred type
-    let rssSubtypes = [x | x@(EType t _ _, _) <- rss, isSubtypeOf2 t gt]
+    -- this resolve general aliases all the way to the general termini
+    let rssSubtypes = [x | x@(EType t _ _, _) <- rss, isSubtypeOf2 scope t gt]
 
-    -- find the most specific instance
+    -- find the most specific instance at the general level, this does not
+    -- consider a type to be more specific it is more evaluated.
+    --
+    -- So for the types below
+    --  type Stack = List
+    --  type SpecialStack = Stack
+    --
+    -- And the instances here:
+    --  instance Foo Stack where
+    --      bar :: ...
+    --  instance Foo SpecialStack where
+    --      bar :: ...
+    --
+    --  The two bar instances would be considered equally specialized
+    --
+    --  They will be separated later when concrete types are considered. From
+    --  the general perspective, the evaluate to being equal.
     (g2, es1) <- case mostSpecific [t | (EType t _ _, _) <- rssSubtypes] of
-      -- if there is exactly one most specific instance, go forward
-      [mostSpecificType] -> do
-        -- filter out the instances with the most specific type
-        let es0 = concat [rs | (t, rs) <- rssSubtypes, etype t == mostSpecificType]
-
-        MM.sayVVV $ "resolveInstances:"
-                  <> "\n  es0:" <+> encloseSep "{" "}" "," (map pretty es0)
-                  <> "\n  mostSpecificType:" <+> pretty mostSpecificType
-                  <> "\n  gt:" <+> pretty gt
-
-        g1 <- connectInstance g0 es0
-        return (g1, es0)
       -- if there are no suitable instances, die
       [] -> do
         MM.sayVVV $ "resolveInstance empty"
                   <> "\n  rss:" <+> pretty rss
-                  <> "\n  gt:" <+> pretty gt
-        MM.throwError $ NoInstanceFound clsName v
-      -- if there are many suitable instances, still die (maybe add handling for
-      -- less conherent cases later)
-      manyTypes -> do
-        MM.sayVVV $ "resolveInstance too many"
-                  <> "\n  manyTypes:" <+> encloseSep "{" "}" "," (map pretty manyTypes)
                   <> "\n  rssSubtypes:" <+> pretty rssSubtypes
                   <> "\n  gt:" <+> pretty gt
-        MM.throwError $ AmbiguousInstances clsName v
+        MM.throwError $ NoInstanceFound clsName v
+
+      -- There may be many suitable instances from the general type level,
+      -- however, they may differ at the concrete level, so keep all for know
+      -- and let the concrete inference code sort things out later.
+      manyTypes -> do
+
+        -- filter out just the instances that are in the most specific set
+        let es0 = concat [rs | (t, rs) <- rssSubtypes, etype t `elem` manyTypes]
+
+        MM.sayVVV $ "resolveInstances:"
+                  <> "\n  es0:" <+> encloseSep "{" "}" "," (map pretty es0)
+                  <> "\n  manyTypes:" <+> pretty manyTypes
+                  <> "\n  gt:" <+> pretty gt
+
+        g1 <- connectInstance g0 es0
+        return (g1, es0)
 
     (g3, es2) <- statefulMapM resolveInstances g2 es1
 
     return (g3, VarS v (Many es2))
 
-  f g0 (VarS v (MonomorphicExpr _ xs)) = statefulMapM resolveInstances g0 xs |>> second (VarS v . Many)
+  f _ g0 (VarS v (MonomorphicExpr _ xs)) = statefulMapM resolveInstances g0 xs |>> second (VarS v . Many)
   -- propagate
-  f g0 (AccS k e) = resolveInstances g0 e |>> second (AccS k)
-  f g0 (AppS e es) = do
+  f _ g0 (AccS k e) = resolveInstances g0 e |>> second (AccS k)
+  f _ g0 (AppS e es) = do
     (g1, e') <- resolveInstances g0 e
     (g2, es') <- statefulMapM resolveInstances g1 es
     return (g2, AppS e' es')
-  f g0 (LamS vs e) = resolveInstances g0 e |>> second (LamS vs)
-  f g0 (LstS es) = statefulMapM resolveInstances g0 es |>> second LstS
-  f g0 (TupS es) = statefulMapM resolveInstances g0 es |>> second TupS
-  f g0 (NamS rs) = do
+  f _ g0 (LamS vs e) = resolveInstances g0 e |>> second (LamS vs)
+  f _ g0 (LstS es) = statefulMapM resolveInstances g0 es |>> second LstS
+  f _ g0 (TupS es) = statefulMapM resolveInstances g0 es |>> second TupS
+  f _ g0 (NamS rs) = do
     (g1, es') <- statefulMapM resolveInstances g0 (map snd rs)
     return (g1, NamS (zip (map fst rs) es'))
 
   -- primitives
-  f g0 UniS = return (g0, UniS)
-  f g0 (BndS v) = return (g0, BndS v)
-  f g0 (RealS x) = return (g0, RealS x)
-  f g0 (IntS x) = return (g0, IntS x)
-  f g0 (LogS x) = return (g0, LogS x)
-  f g0 (StrS x) = return (g0, StrS x)
-  f g0 (CallS x) = return (g0, CallS x)
+  f _ g0 UniS = return (g0, UniS)
+  f _ g0 (BndS v) = return (g0, BndS v)
+  f _ g0 (RealS x) = return (g0, RealS x)
+  f _ g0 (IntS x) = return (g0, IntS x)
+  f _ g0 (LogS x) = return (g0, LogS x)
+  f _ g0 (StrS x) = return (g0, StrS x)
+  f _ g0 (CallS x) = return (g0, CallS x)
 
   connectInstance :: Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
   connectInstance g0 [] = return g0
-  connectInstance g0 (AnnoS (Idx _ t) _ _ : es) =
-    case subtype gt t g0 of
+  connectInstance g0 (AnnoS (Idx i t) _ _ : es) = do
+    scope <- MM.getGeneralScope i
+    case subtype scope gt t g0 of
       (Left e) -> MM.throwError $ GeneralTypeError e
       (Right g1) -> connectInstance g1 es
 
@@ -258,10 +274,7 @@ synthE i g0 (AccS k e) = do
             gerr i (KeyError k t)
       (Just value) -> return (g, value)
     accessRecord g t = do
-      globalMap <- MM.gets stateGeneralTypedefs
-      gscope <- case GMap.lookup i globalMap of
-        GMapJust scope -> return scope
-        _ -> return Map.empty
+      gscope <- MM.getGeneralScope i
       case TE.evaluateStep gscope t of
         (Just t') -> accessRecord g t'
         Nothing -> gerr i (KeyError k t)
@@ -652,8 +665,9 @@ checkE i g1 e1 b = do
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do
+  scope <- MM.getGeneralScope i
   insetSay $ parens (pretty a) <+> "<:" <+> parens (pretty b)
-  case subtype a b g of
+  case subtype scope a b g of
     (Left err') -> gerr i err'
     (Right x) -> return x
 

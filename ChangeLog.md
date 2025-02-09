@@ -1,11 +1,31 @@
-0.51.1 [2025-12-04]
+0.52.0 [2025-02-09]
+-------------------
+
+Type evaluation and specialization
+ * Delayed general alias evaluation
+ * Add strict numeric types (`int8`, `uint8`, `int16` etc)
+ * Allow concrete alias specialization
+ * Add type hints allowing concrete type conservation across foreign calls
+
+Bug fixes
+ * Fix bug in opening existing shared memory volumes
+
+Language support
+  * Add C++ support for std template list-like types (`list`, `forward_list`,
+     `deque`, `stack`, and `set` (I know, they're a tad different)
+  * Add Python support for `numpy` vectors and arrays
+  * Allow raw R vectors to be interpreted as strings
+  * Nexus no longer creates python objects from returned data, instead writes
+    results directly through C library (`morloc.h`)
+
+0.51.1 [2024-12-04]
 -------------------
 
  * Do not catch STDOUT and STDERR
  * Fix NULL return errors
  * Fix container setup
 
-0.51.0 [2025-12-02]
+0.51.0 [2024-12-02]
 ------------------
 
 Shared memory

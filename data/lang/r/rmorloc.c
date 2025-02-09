@@ -214,23 +214,30 @@ void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* schema){
         case MORLOC_STRING:
             {
                 const char* str = NULL;
+                size_t length = 0;
                 switch(TYPEOF(obj)){
                     case CHARSXP:
                         str = CHAR(obj);
+                        length = (size_t)strlen(str);
                         break;
                     case STRSXP:
                         if (LENGTH(obj) == 1) {
                             str = CHAR(STRING_ELT(obj, 0));
+                            length = (size_t)strlen(str);
                         } else {
                             error("Expected character of length 1");
                         }
                         break;
-                  default:
-                    error("Expected a character type");
-                    break;
+                    case RAWSXP:
+                        str = RAW(obj);
+                        length = LENGTH(obj);
+                        break;
+                    default:
+                      error("Expected a character type");
+                      break;
                 }
                 Array* array = (Array*)dest;
-                array->size = (size_t)strlen(str);  // Do not include null terminator
+                array->size = length;  // Do not include null terminator
                 array->data = abs2rel(*cursor); 
 
                 memcpy(rel2abs(array->data), str, array->size);
@@ -418,10 +425,17 @@ SEXP from_voidstar(const void* data, const Schema* schema) {
             obj = ScalarReal(*(double*)data);
             break;
         case MORLOC_STRING: {
-            Array* str_array = (Array*)data;
-            SEXP chr = PROTECT(mkCharLen(rel2abs(str_array->data), str_array->size));
-            obj = PROTECT(ScalarString(chr));
-            UNPROTECT(2);
+            if (strcmp(schema->hint, "raw") == 0){
+                Array* raw_array = (Array*)data;
+                obj = PROTECT(allocVector(RAWSXP, raw_array->size));
+                memcpy(RAW(obj), rel2abs(raw_array->data), raw_array->size);
+                UNPROTECT(1);
+            } else {
+                Array* str_array = (Array*)data;
+                SEXP chr = PROTECT(mkCharLen(rel2abs(str_array->data), str_array->size));
+                obj = PROTECT(ScalarString(chr));
+                UNPROTECT(2);
+            }
             break;
         }
         case MORLOC_ARRAY:

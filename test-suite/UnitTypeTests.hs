@@ -105,7 +105,7 @@ renameExistentials = snd . f (0 :: Int, Map.empty) where
 assertSubtypeGamma :: String -> [GammaIndex] -> TypeU -> TypeU -> [GammaIndex] -> TestTree
 assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do
   let g0 = Gamma {gammaCounter = 0, gammaContext = gs1}
-  case MTI.subtype a b g0 of
+  case MTI.subtype Map.empty a b g0 of
     Left e -> error $ show e
     Right (Gamma _ gs2') -> assertEqual "" gs2 gs2'
 
@@ -218,7 +218,6 @@ subtypeTests =
     , assertSubtypeGamma "<a>, <b> -|[C] <: <a> <b> |- <a>:[C], <b>:C" [eag, ebg]
         (lst c) (ExistU (TV "x1") [eb] []) [solvedA (lst c), solvedB c]
     , assertSubtypeGamma "[] -| forall a . a <: A -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (TV "a") a]
-    , assertSubtypeGamma "[] -| A <: forall a . a -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (TV "a") a]
       -- nested types
     , assertSubtypeGamma "<b> -| [A] <: [<b>] |- <b>:A" [ebg] (lst a) (lst eb) [solvedB a]
     , assertSubtypeGamma "<a> -| [<a>] <: [B] |- <a>:B" [eag] (lst b) (lst ea) [solvedA b]
@@ -1084,6 +1083,21 @@ unitTypeTests =
         fmap out (gify [1])
         |]
         (arr "G" [int])
+    , assertGeneralType
+        "generic parameter reordering"
+        [r|
+        module m (biz)
+        type M a b c = R b a c
+        foo a b c :: M a b c -> N b c
+        bar a b c :: a -> b -> c -> R a b c
+        da :: Int -> X
+        db :: Int -> Y
+        dc :: Int -> Z
+        baz a b c = foo (bar a b c)
+        -- biz :: N X Z
+        biz = baz (da 1) (db 2) (dc 3)
+        |]
+        (arr "N" [var "X", var "Z"])
 
     , assertGeneralType
         "variable annotation"

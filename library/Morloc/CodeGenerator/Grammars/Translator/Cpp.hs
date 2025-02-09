@@ -34,11 +34,12 @@ import Morloc.Data.Doc
 import Morloc.Quasi
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import qualified Morloc.Monad as MM
-import qualified Data.Map as Map
+import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Module as Mod
 import qualified Morloc.Language as ML
 import qualified Control.Monad.State as CMS
+import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.TypeEval as TE
 import qualified Morloc.Data.Text as MT
 import Control.Monad.Identity (Identity)
@@ -164,12 +165,15 @@ preprocess = return . invertSerialManifold
 
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate srcs es = do
-  -- generate code for serialization
-  serializationBoilerplate <- generateSourcedSerializers es
+  -- scopeMap :: GMap Int MVar (Map.Map Lang Scope)
+  scopeMap <- MM.gets stateConcreteTypedefs
+
+  -- universalScopeMap :: GMap Int MVar Scope
+  universalScopeMap <- MM.gets stateUniversalConcreteTypedefs
 
   let recmap = unifyRecords . concatMap collectRecords $ es
       translatorState = defaultValue { translatorRecmap = recmap }
-      code = CMS.evalState (makeCppCode srcs es serializationBoilerplate) translatorState
+      code = CMS.evalState (makeCppCode srcs es universalScopeMap scopeMap) translatorState
 
   maker <- makeTheMaker srcs
 
@@ -180,8 +184,15 @@ translate srcs es = do
     , scriptMake = maker
     }
 
-makeCppCode :: [Source] -> [SerialManifold] -> ([MDoc], [MDoc]) -> CppTranslator MDoc
-makeCppCode srcs es (srcDecl, srcSerial) = do
+makeCppCode
+  :: [Source]
+  -> [SerialManifold]
+  -> Map.Map Lang Scope
+  -> GMap Int MVar (Map.Map Lang Scope)
+  -> CppTranslator MDoc
+makeCppCode srcs es univeralScopeMap scopeMap = do
+  -- ([MDoc], [MDoc])
+  (srcDecl, srcSerial) <- generateSourcedSerializers univeralScopeMap scopeMap es
 
   -- write include statements for sources
   let includeDocs = map translateSource (unique . mapMaybe srcPath $ srcs)
@@ -198,6 +209,18 @@ makeCppCode srcs es (srcDecl, srcSerial) = do
 
   -- create and return complete pool script
   return $ makeMain includeDocs signatures serializationCode mDocs dispatch
+
+metaTypedefs
+    :: GMap Int MVar (Map.Map Lang Scope)
+    -> Int -- manifold index
+    -> Scope
+metaTypedefs tmap i =
+    case GMap.lookup i tmap of
+      (GMapJust langmap) -> case Map.lookup CppLang langmap of
+        (Just scope) -> Map.filter (not . null) scope
+        Nothing -> Map.empty
+      _ -> Map.empty
+
 
 makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
 makeTheMaker srcs = do
@@ -698,65 +721,58 @@ generateAnonymousStructs = do
   maybeM _ f (Just x) = f x
   maybeM x _ Nothing = return x
 
-
 generateSourcedSerializers
-  :: [SerialManifold] -- all segments that can be called in this pool
-  -> MorlocMonad ( [MDoc]
-                 , [MDoc]
-                 )
-generateSourcedSerializers es0 = do
+  :: Map.Map Lang Scope
+  -> GMap Int MVar (Map.Map Lang Scope)
+  -> [SerialManifold] -- all segments that can be called in this pool
+  -> CppTranslator ( [MDoc]
+                   , [MDoc]
+                   )
+generateSourcedSerializers univeralScopeMap scopeMap es0 = do
   typedef <- Map.unions <$> mapM (foldSerialManifoldM fm) es0
 
-  scopeMap <- MM.gets stateUniversalConcreteTypedefs
-
-  scope <- case Map.lookup CppLang scopeMap of
+  scope <- case Map.lookup CppLang univeralScopeMap of
     (Just scope) -> return scope
     Nothing -> return Map.empty
 
-
-  MM.sayVVV $ "typedef:" <+> viaShow typedef
-
-  return $ foldl groupQuad ([],[]) . Map.elems . Map.mapMaybeWithKey (makeSerial scope) $ typedef
+  foldl groupQuad ([],[]) . concat . Map.elems <$> Map.mapWithKeyM (makeSerials scope) typedef
   where
 
     fm = defaultValue
-      { opSerialManifoldM = \(SerialManifold_ i _ _ e) -> Map.union <$> MM.metaTypedefs i CppLang <*> pure e
-      , opNativeManifoldM = \(NativeManifold_ i _ _ e) -> Map.union <$> MM.metaTypedefs i CppLang <*> pure e
+      { opSerialManifoldM = \(SerialManifold_ i _ _ e) -> return $ Map.unionWith (<>) (metaTypedefs scopeMap i) e
+      , opNativeManifoldM = \(NativeManifold_ i _ _ e) -> return $ Map.unionWith (<>) (metaTypedefs scopeMap i) e
       }
 
     groupQuad :: ([a],[a]) -> (a, a) -> ([a],[a])
     groupQuad (xs,ys) (x, y) = (x:xs, y:ys)
 
-    makeSerial :: Scope -> TVar -> ([TVar], TypeU, Bool) -> Maybe (MDoc, MDoc)
-    makeSerial _ _ (_, NamU _ (TV "struct") _ _, _) = Nothing
-    makeSerial scope _ (ps, NamU r (TV v) _ rs, _)
-      = Just (serializer, deserializer) where
+    makeSerials :: Scope -> TVar -> [([Either TVar TypeU], TypeU, Bool)] -> CppTranslator [(MDoc, MDoc)]
+    makeSerials s v xs = catMaybes <$> mapM (makeSerial s v) xs
 
-        templateTerms = ["T" <> pretty p | p <- ps]
-
-        params = map (\p -> "T" <> pretty (unTVar p)) ps
-        rtype = pretty v <> recordTemplate templateTerms
-
-        rs' = map (second (evaluateTypeU scope)) rs
-
-        fields = [(pretty k, showDefType ps (typeOf t)) | (k, t) <- rs']
-
-        serializer = serializerTemplate params rtype fields
-
-        deserializer = deserializerTemplate (r == NamObject) params rtype fields
-    makeSerial _ _ _ = Nothing
+    makeSerial :: Scope -> TVar -> ([Either TVar TypeU], TypeU, Bool) -> CppTranslator (Maybe (MDoc, MDoc))
+    makeSerial _ _ (_, NamU _ (TV "struct") _ _, _) = return Nothing
+    makeSerial scope _ (ps, NamU r (TV v) _ rs, _) = do
+      params <- mapM (either (\p -> return $ "T" <> pretty p) (\_ -> return "XXX_FIXME")) ps
+      let templateTerms = ["T" <> pretty p | Left p <- ps]
+          rtype = pretty v <> recordTemplate templateTerms
+          rs' = map (second (evaluateTypeU scope)) rs
+          fields = [(pretty k, showDefType ps (typeOf t)) | (k, t) <- rs']
+          serializer = serializerTemplate params rtype fields
+          deserializer = deserializerTemplate (r == NamObject) params rtype fields
+      return $ Just (serializer, deserializer)
+    makeSerial _ _ _ = return Nothing
 
     evaluateTypeU :: Scope -> TypeU -> TypeU
     evaluateTypeU scope t = case TE.evaluateType scope t of
       (Left e) -> error $ show e
       (Right t') -> t'
 
-    showDefType :: [TVar] -> Type -> MDoc
+    showDefType :: [Either TVar TypeU] -> Type -> MDoc
     showDefType ps (UnkT v)
-      | v `elem` ps = "T" <> pretty v
+      | (Left v) `elem` ps = "T" <> pretty v
       | otherwise = pretty v
     showDefType ps (VarT v)
-      | v `elem` ps = "T" <> pretty v
+      | (Left v) `elem` ps = "T" <> pretty v
       | otherwise = pretty v
     showDefType _ (FunT _ _) = error "Cannot serialize functions"
     showDefType _ NamT{}

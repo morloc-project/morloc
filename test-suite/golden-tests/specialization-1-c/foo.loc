@@ -1,0 +1,82 @@
+module m (foo)
+
+-- base types
+type Cpp => Int = "int"
+type Cpp => List a = "std::vector<$1>" a
+
+
+-- aliases at the general level
+type Stack'       a = List a
+type List'        a = List a
+type ForwardList' a = List a
+type Deque'       a = List a
+type Queue'       a = List a
+type Vector'      a = List a
+
+
+-- define a C++ specialization for each type
+type Cpp => Stack' a = "std::stack<$1>" a
+type Cpp => List' a = "std::list<$1>" a
+type Cpp => ForwardList' a = "std::forward_list<$1>" a
+type Cpp => Deque' a = "std::deque<$1>" a
+type Cpp => Queue' a = "std::queue<$1>" a
+
+
+-- a typeclass for orderd containers
+class Listlike f where
+    -- add a new element to the end of a list
+    append f a :: a -> f a -> f a
+
+    -- convert to the canonical list type
+    toList f a :: f a -> List a
+
+
+-- define instances for each data structure, `append` and `toVector` have overloaded C++ definitions
+instance Listlike Stack' where
+    source Cpp from "foo.hpp" ("append", "toVector" as toList)
+
+instance Listlike List' where
+    source Cpp from "foo.hpp" ("append", "toVector" as toList)
+
+instance Listlike ForwardList' where
+    source Cpp from "foo.hpp" ("append", "toVector" as toList)
+
+instance Listlike Deque' where
+    source Cpp from "foo.hpp" ("append", "toVector" as toList)
+
+instance Listlike Queue' where
+    source Cpp from "foo.hpp" ("append", "toVector" as toList)
+
+instance Listlike Vector' where
+    source Cpp from "foo.hpp" ("append", "id" as toList)
+
+
+source Cpp from "foo.hpp"
+    ( "vectorToDeque"
+    , "vectorToForwardList"
+    , "vectorToList"
+    , "vectorToQueue"
+    , "vectorToStack"
+    )
+
+vectorToDeque a :: Vector' a -> Deque' a
+vectorToForwardList a :: Vector' a -> ForwardList' a
+vectorToList a :: Vector' a -> List' a
+vectorToQueue a :: Vector' a -> Queue' a
+vectorToStack a :: Vector' a -> Stack' a
+
+foo = toList
+    . append 18
+    . vectorToList
+    . toList
+    . append 16
+    . vectorToQueue
+    . toList
+    . append 14
+    . vectorToDeque
+    . toList
+    . append 12
+    . vectorToStack
+    . toList
+    . append 10
+    . vectorToForwardList

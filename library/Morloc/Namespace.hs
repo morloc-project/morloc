@@ -193,7 +193,7 @@ type MDoc = Doc ()
 -- has cycles.
 type DAG key edge node = Map key (node, [(key, edge)])
 
-type Scope = Map TVar [([TVar], TypeU, Bool)]
+type Scope = Map TVar [([Either TVar TypeU], TypeU, Bool)]
 
 data GMap a b c = GMap (Map a b) (Map b c)
   deriving(Show, Ord, Eq)
@@ -241,9 +241,9 @@ data MorlocState = MorlocState
   --         `Type` is `"std::map<$1,$2>" k v`
   --         `[TVar]` is `[k,v]`
   , stateUniversalGeneralTypedefs :: Scope
-  -- ^ store the general typedefs pooled across all modules -- for the truly desparate
+  -- ^ store the general typedefs pooled across all modules -- for the truly desperate
   , stateUniversalConcreteTypedefs :: Map Lang Scope
-  -- ^ store the concrete typedefs pooled across all modules -- for the truly desparate
+  -- ^ store the concrete typedefs pooled across all modules -- for the truly desperate
   , stateSources :: GMap Int MVar [Source]
   , stateAnnotations :: Map Int [TypeU]
   -- ^ Stores non-top-level annotations.
@@ -351,12 +351,12 @@ data Expr
   -- ^ the toplevel expression in a module
   | ClsE ClassName [TVar] [Signature]
   | IstE ClassName [TypeU] [ExprI]
-  | TypE (Maybe (Lang, Bool)) TVar [TVar] TypeU
+  | TypE (Maybe (Lang, Bool)) TVar [Either TVar TypeU] TypeU
   -- ^ a type definition
   --   1. the language, Nothing is general
   --      If Just, the Bool specifies whether the definition is terminal
   --   2. type name
-  --   3. parameters
+  --   3. parameters - these may be generic (TVar) or concrete (TypeU)
   --   4. type
   | ImpE Import
   -- ^ a morloc module import
@@ -706,6 +706,8 @@ data TypeError
   | MissingFeature Text
   | InfiniteRecursion
   | FunctionSerialization EVar
+  | CannotEvaluateType
+  | TypeEvaluationError Text
 
 data MorlocError
   -- | An error that is associated with an expression index
@@ -1301,7 +1303,7 @@ instance Pretty Expr where
   pretty (IstE cls ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
   pretty (TypE lang v vs t)
     = "type" <+> pretty lang <> "@" <> pretty v
-    <+> sep (map pretty vs) <+> "=" <+> pretty t
+    <+> sep (map (either pretty (parens . pretty)) vs) <+> "=" <+> pretty t
   pretty (ImpE (Import m Nothing _ _)) = "import" <+> pretty m
   pretty (ImpE (Import m (Just xs) _ _)) = "import" <+> pretty m <+> tupled (map pretty xs)
   pretty (ExpE v) = "export" <+> pretty v
@@ -1481,6 +1483,7 @@ instance Pretty TypeError where
     = "InvalidFunctionApplication:"
     <> "\n  application:" <+> pretty f <+> hsep (map (parens . pretty) xs)
     <> "\n  where" <+> pretty f <+> "::" <+> pretty t
+  pretty (TypeEvaluationError msg) = pretty msg
 
 
 
