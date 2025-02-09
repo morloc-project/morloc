@@ -1,4 +1,4 @@
-0.52.0 [2025-02-xx]
+0.52.0 [2025-02-09]
 -------------------
 
 Type evaluation and specialization
@@ -17,7 +17,6 @@ Language support
   * Allow raw R vectors to be interpreted as strings
   * Nexus no longer creates python objects from returned data, instead writes
     results directly through C library (`morloc.h`)
-
 
 0.51.1 [2024-12-04]
 -------------------
