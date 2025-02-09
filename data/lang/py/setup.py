@@ -24,5 +24,7 @@ setup(
     name='pymorloc',
     version='0.1',
     ext_modules=[module],
-    install_requires=['numpy']  # Explicitly declare numpy as a dependency
+    extras_require={
+        'numpy': ['numpy']
+    }
 )

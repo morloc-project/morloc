@@ -12,6 +12,24 @@
 #include <numpy/arrayobject.h>
 
 
+PyObject* numpy_module = NULL;
+
+
+// This function will be called to import numpy if, and only if, a numpy feature
+// is used. This avoids the agonizingly long numpy import time (and fuck you
+// very much if you think 100ms is agonizingly long).
+void* import_numpy() {
+    numpy_module = PyImport_ImportModule("numpy");
+    if (numpy_module == NULL) {
+        PyErr_SetString(PyExc_ImportError, "NumPy is not available");
+        return NULL;
+    }
+
+    import_array();
+}
+
+
+
 // Exported prototypes
 static PyObject* to_mesgpack(PyObject* self, PyObject* args);
 static PyObject* from_mesgpack(PyObject* self, PyObject* args);
@@ -141,6 +159,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){
         case MORLOC_ARRAY: {
             Array* array = (Array*)data;
             if (schema->hint != NULL && strcmp(schema->hint, "numpy.ndarray") == 0) {
+                import_numpy();
                 Schema* element_schema = schema->parameters[0];
                 npy_intp dims[] = {array->size};
                 int nd = 1; // number of dimensions
@@ -348,7 +367,7 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                 PyErr_Format(PyExc_TypeError, "Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
                 goto error;
             }
-            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyArray_Check(obj))) {
+            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) {
                 PyErr_Format(PyExc_TypeError, "Expected list for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
                 goto error;
             }
@@ -383,7 +402,8 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                             }
                             break;
                     }
-                } else if (PyArray_Check(obj)) {
+                } else if (PyObject_HasAttrString(obj, "__array_interface__")) {
+                    import_numpy();
                     PyArrayObject *arr = (PyArrayObject *)obj;
                     npy_intp *dims = PyArray_DIMS(arr);
                     int ndim = PyArray_NDIM(arr);
@@ -538,7 +558,7 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                 goto error;
             }
 
-            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyArray_Check(obj))) {
+            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) { 
                 PyErr_Format(PyExc_TypeError, "Expected list for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
                 goto error;
             }
@@ -546,14 +566,13 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
             {
                 Py_ssize_t size;
                 char* data = NULL; // Initialize data to NULL
-                bool is_numpy_array = false;
 
                 if (PyList_Check(obj)) {
                     size = PyList_Size(obj);
                 } else if (PyBytes_Check(obj)) {
                     PyBytes_AsStringAndSize(obj, &data, &size);
-                } else if (schema->type == MORLOC_ARRAY && PyArray_Check(obj)) { // check if it is a numpy array
-                    is_numpy_array = true;
+                } else if (schema->type == MORLOC_ARRAY && PyObject_HasAttrString(obj, "__array_interface__")) { // check if it is a numpy array
+                    import_numpy();
                     PyArrayObject* arr = (PyArrayObject*)obj;
                     size = PyArray_SIZE(arr);
                     data = (char*)PyArray_DATA(arr); // Get the data pointer
@@ -1012,10 +1031,5 @@ static struct PyModuleDef pymorloc = {
 };
 
 PyMODINIT_FUNC PyInit_pymorloc(void) {
-    PyObject *m;
-    m = PyModule_Create(&pymorloc);
-    if (m == NULL)
-        return NULL;
-    import_array();  // This is required for setting up numpy arrays
-    return m;
+    return PyModule_Create(&pymorloc);
 }
