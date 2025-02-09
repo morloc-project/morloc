@@ -425,10 +425,17 @@ SEXP from_voidstar(const void* data, const Schema* schema) {
             obj = ScalarReal(*(double*)data);
             break;
         case MORLOC_STRING: {
-            Array* str_array = (Array*)data;
-            SEXP chr = PROTECT(mkCharLen(rel2abs(str_array->data), str_array->size));
-            obj = PROTECT(ScalarString(chr));
-            UNPROTECT(2);
+            if (strcmp(schema->hint, "raw") == 0){
+                Array* raw_array = (Array*)data;
+                obj = PROTECT(allocVector(RAWSXP, raw_array->size));
+                memcpy(RAW(obj), rel2abs(raw_array->data), raw_array->size);
+                UNPROTECT(1);
+            } else {
+                Array* str_array = (Array*)data;
+                SEXP chr = PROTECT(mkCharLen(rel2abs(str_array->data), str_array->size));
+                obj = PROTECT(ScalarString(chr));
+                UNPROTECT(2);
+            }
             break;
         }
         case MORLOC_ARRAY:

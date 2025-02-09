@@ -28,9 +28,7 @@ main = do
       , golden "specialization-1-c" "specialization-1-c"
       , golden "specialization-2-c" "specialization-2-c"
       , golden "specialization-1-py" "specialization-1-py"
-      -- , golden "specialization-2-py" "specialization-2-py"
-      -- , golden "specialization-1-r" "specialization-1-r"
-      -- , golden "specialization-2-r" "specialization-2-r"
+      , golden "specialization-1-r" "specialization-1-r"
 
       , golden "typeclasses-1" "typeclasses-1"
       , golden "typeclasses-2" "typeclasses-2"
