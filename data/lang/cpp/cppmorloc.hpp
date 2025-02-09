@@ -8,6 +8,7 @@
 #include <queue>
 #include <deque>
 
+#include <algorithm>
 #include <tuple>
 #include <stdexcept>
 #include <cstring>

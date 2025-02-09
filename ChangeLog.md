@@ -11,9 +11,9 @@ Bug fixes
  * Fix bug in opening existing shared memory volumes
 
 Language support
-  [ ] Add C++ support for std template list-like types (`list`, `forward_list`,
+  * Add C++ support for std template list-like types (`list`, `forward_list`,
      `deque`, `stack`, and `set` (I know, they're a tad different)
-  [ ] Add Python support for `numpy` vectors and arrays
+  * Add Python support for `numpy` vectors and arrays
   * Allow raw R vectors to be interpreted as strings
   * Nexus no longer creates python objects from returned data, instead writes
     results directly through C library (`morloc.h`)

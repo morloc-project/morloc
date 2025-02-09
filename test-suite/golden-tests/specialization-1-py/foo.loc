@@ -1,0 +1,21 @@
+module m (foo, square)
+
+type Py => Numpy1D a = "numpy.ndarray" a
+type Py => List a = "list" a
+type Py => Int64 = "int64"
+
+type R => List Int64 = "double" Int64
+type R => Int64 = "double"
+
+type Numpy1D a = List a
+
+source Py from "foo.py" ("list2numpy", "numpy2list", "square")
+list2numpy a :: List a -> Numpy1D a
+numpy2list a :: Numpy1D a -> List a
+square :: Numpy1D Int64 -> Numpy1D Int64
+
+source R from "foo.R" ("rid")
+rid a :: a -> a
+
+foo :: List Int64 -> List Int64
+foo = numpy2list . square . list2numpy

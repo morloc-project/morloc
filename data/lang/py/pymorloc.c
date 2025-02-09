@@ -6,6 +6,11 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 
+// boilerplate for numpy support
+#define PY_ARRAY_UNIQUE_SYMBOL MORLOC_ARRAY_API
+#define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
+#include <numpy/arrayobject.h>
+
 
 // Exported prototypes
 static PyObject* to_mesgpack(PyObject* self, PyObject* args);
@@ -126,18 +131,66 @@ PyObject* fromAnything(const Schema* schema, const void* data){
         case MORLOC_STRING: {
             Array* str_array = (Array*)data;
             obj = PyUnicode_FromStringAndSize(rel2abs(str_array->data), str_array->size);
+            if (!obj) {
+                fprintf(stderr, "Failed to extract string from voidstar\n");
+                PyErr_SetString(PyExc_TypeError, "Failed to parse data");
+                goto error;
+            }
             break;
         }
         case MORLOC_ARRAY: {
             Array* array = (Array*)data;
-            if (schema->parameters[0]->type == MORLOC_UINT8) {
+            if (schema->hint != NULL && strcmp(schema->hint, "numpy.ndarray") == 0) {
+                Schema* element_schema = schema->parameters[0];
+                npy_intp dims[] = {array->size};
+                int nd = 1; // number of dimensions
+                int type_num;
+                // Determine the NumPy type number based on the element schema
+                switch (element_schema->type) {
+                    case MORLOC_BOOL:    type_num = NPY_BOOL; break;
+                    case MORLOC_SINT8:   type_num = NPY_INT8; break;
+                    case MORLOC_SINT16:  type_num = NPY_INT16; break;
+                    case MORLOC_SINT32:  type_num = NPY_INT32; break;
+                    case MORLOC_SINT64:  type_num = NPY_INT64; break;
+                    case MORLOC_UINT8:   type_num = NPY_UINT8; break;
+                    case MORLOC_UINT16:  type_num = NPY_UINT16; break;
+                    case MORLOC_UINT32:  type_num = NPY_UINT32; break;
+                    case MORLOC_UINT64:  type_num = NPY_UINT64; break;
+                    case MORLOC_FLOAT32: type_num = NPY_FLOAT32; break;
+                    case MORLOC_FLOAT64: type_num = NPY_FLOAT64; break;
+                    default:
+                        PyErr_SetString(PyExc_TypeError, "Unsupported element type for NumPy array");
+                        goto error;
+                }
+
+                void* absptr = rel2abs(array->data);
+
+                // Create the NumPy array
+                obj = PyArray_SimpleNewFromData(nd, dims, type_num, absptr);
+
+                if (!obj) {
+                    PyErr_SetString(PyExc_TypeError, "Failed to parse data");
+                    goto error;
+                }
+
+                // Note that we do not want to give ownership to Python
+                // This is shared memory, which means, python should not mutate
+                // it.
+
+            } else if (schema->parameters[0]->type == MORLOC_UINT8) {
                 // Create a Python bytes object for UINT8 arrays
                 obj = PyBytes_FromStringAndSize((const char*)rel2abs(array->data), array->size);
-                if (!obj) goto error;
-            } else {
-                // For other types, create a list as before
+                if (!obj) {
+                    PyErr_SetString(PyExc_TypeError, "Failed to one bytes");
+                    goto error;
+                }
+            } else if (schema->hint != NULL && strcmp(schema->hint, "list") == 0) {
+                // For other types, create a standard list
                 obj = PyList_New(array->size);
-                if (!obj) goto error;
+                if (!obj) {
+                    PyErr_SetString(PyExc_TypeError, "Failed to one string");
+                    goto error;
+                }
                 char* start = (char*)rel2abs(array->data);
                 size_t width = schema->parameters[0]->width;
                 Schema* element_schema = schema->parameters[0];
@@ -145,20 +198,28 @@ PyObject* fromAnything(const Schema* schema, const void* data){
                     PyObject* item = fromAnything(element_schema, start + width * i);
                     if (!item || PyList_SetItem(obj, i, item) < 0) {
                         Py_XDECREF(item);
+                        PyErr_SetString(PyExc_TypeError, "Failed to access element in list");
                         goto error;
                     }
                 }
+            } else {
+                PyErr_SetString(PyExc_TypeError, "Unexpected array hint");
+                goto error;
             }
             break;
         }
         case MORLOC_TUPLE: {
             obj = PyTuple_New(schema->size);
-            if (!obj) goto error;
+            if (!obj) {
+                PyErr_SetString(PyExc_TypeError, "Failed in tuple");
+                goto error;
+            }
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
                 PyObject* item = fromAnything(schema->parameters[i], item_ptr);
                 if (!item || PyTuple_SetItem(obj, i, item) < 0) {
                     Py_XDECREF(item);
+                    PyErr_SetString(PyExc_TypeError, "Failed to access tuple element");
                     goto error;
                 }
             }
@@ -166,7 +227,10 @@ PyObject* fromAnything(const Schema* schema, const void* data){
         }
         case MORLOC_MAP: {
             obj = PyDict_New();
-            if (!obj) goto error;
+            if (!obj) {
+                PyErr_SetString(PyExc_TypeError, "Failed in map");
+                goto error;
+            }
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
                 PyObject* value = fromAnything(schema->parameters[i], item_ptr);
@@ -174,6 +238,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){
                 if (!value || !key || PyDict_SetItem(obj, key, value) < 0) {
                     Py_XDECREF(value);
                     Py_XDECREF(key);
+                    PyErr_SetString(PyExc_TypeError, "Failed to access map element");
                     goto error;
                 }
                 Py_DECREF(key);
@@ -283,7 +348,7 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                 PyErr_Format(PyExc_TypeError, "Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
                 goto error;
             }
-            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj))) {
+            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyArray_Check(obj))) {
                 PyErr_Format(PyExc_TypeError, "Expected list for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
                 goto error;
             }
@@ -318,6 +383,15 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                             }
                             break;
                     }
+                } else if (PyArray_Check(obj)) {
+                    PyArrayObject *arr = (PyArrayObject *)obj;
+                    npy_intp *dims = PyArray_DIMS(arr);
+                    int ndim = PyArray_NDIM(arr);
+                    size_t total_elements = 1;
+                    for (int i = 0; i < ndim; i++) {
+                        total_elements *= dims[i];
+                    }
+                    required_size += total_elements * PyArray_ITEMSIZE(arr);
                 } else if (PyBytes_Check(obj)) {
                     required_size += (size_t)PyBytes_GET_SIZE(obj);
                 } else if (PyUnicode_Check(obj)) {
@@ -463,19 +537,32 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                 PyErr_Format(PyExc_TypeError, "Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
                 goto error;
             }
-            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj))) {
+
+            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyArray_Check(obj))) {
                 PyErr_Format(PyExc_TypeError, "Expected list for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
                 goto error;
             }
 
             {
                 Py_ssize_t size;
-                char* data;
+                char* data = NULL; // Initialize data to NULL
+                bool is_numpy_array = false;
 
                 if (PyList_Check(obj)) {
                     size = PyList_Size(obj);
                 } else if (PyBytes_Check(obj)) {
                     PyBytes_AsStringAndSize(obj, &data, &size);
+                } else if (schema->type == MORLOC_ARRAY && PyArray_Check(obj)) { // check if it is a numpy array
+                    is_numpy_array = true;
+                    PyArrayObject* arr = (PyArrayObject*)obj;
+                    size = PyArray_SIZE(arr);
+                    data = (char*)PyArray_DATA(arr); // Get the data pointer
+
+                    // Verify that the array is contiguous
+                    if (!PyArray_ISCONTIGUOUS(arr)) {
+                        PyErr_SetString(PyExc_ValueError, "NumPy array must be contiguous");
+                        goto error;
+                    }
                 } else {
                     data = PyUnicode_AsUTF8AndSize(obj, &size);
                 }
@@ -499,11 +586,20 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                         PyObject* item = PyList_GetItem(obj, i);
                         to_voidstar_r(start + width * i, cursor, element_schema, item);
                     }
-                } else {
+                } else if (PyBytes_Check(obj)){
                     memcpy(rel2abs(result->data), data, size);
 
                     // move cursor to the location after the copied data
                     *cursor = (void*)(*(char**)cursor + size);
+                }
+                else{
+                    size_t width = schema->parameters[0]->width;
+
+                    memcpy(rel2abs(result->data), data, size * width);
+
+                    // Move the cursor to the location immediately after the
+                    // fixed sized elements
+                    *cursor = (void*)(*(char**)cursor + size * width);
                 }
             }
             break;
@@ -773,6 +869,11 @@ static PyObject* from_shm(PyObject* self, PyObject* args) {
   absptr_t voidstar = rel2abs(relptr);
 
   PyObject* obj = fromAnything(schema, voidstar);
+  if (obj == NULL) {
+      free_schema(schema);
+      PyErr_SetString(PyExc_TypeError, "fromAnything returned NULL");
+      return NULL;
+  }
 
   free_schema(schema);
 
@@ -911,5 +1012,10 @@ static struct PyModuleDef pymorloc = {
 };
 
 PyMODINIT_FUNC PyInit_pymorloc(void) {
-    return PyModule_Create(&pymorloc);
+    PyObject *m;
+    m = PyModule_Create(&pymorloc);
+    if (m == NULL)
+        return NULL;
+    import_array();  // This is required for setting up numpy arrays
+    return m;
 }
