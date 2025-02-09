@@ -34,6 +34,10 @@ jobs:
           sudo apt-get install -y libgsl-dev # required for installation of morloc module math
           Rscript -e 'install.packages(c("rlang", "future"), repos  = "https://cloud.r-project.org")'
 
+      - name: "Set up Python environment"
+        run: |
+          sudo apt-get install -y python3-numpy
+
       - name: "Build Morloc"
         run: |
           curl -sSL https://get.haskellstack.org/ | sh || echo "already installed"
