@@ -3,7 +3,7 @@ LABEL org.opencontainers.image.description="A morloc container intended for inte
 LABEL org.opencontainers.image.licenses=MIT
 
 FROM ubuntu:22.04
-COPY --from=ghcr.io/morloc-project/morloc/morloc-tiny:0.51.1 /bin/morloc /bin/morloc
+COPY --from=ghcr.io/morloc-project/morloc/morloc-tiny:0.52.0 /bin/morloc /bin/morloc
 
 
 WORKDIR $HOME
@@ -13,7 +13,7 @@ RUN apt-get update
 # Set the timezone, this avoids hanging later on
 RUN DEBIAN_FRONTEND=noninteractive TZ=Antarctica/Troll apt-get -y install tzdata
 
-RUN apt-get install -y r-base python3.10 libgsl-dev git pip
+RUN apt-get install -y r-base python3.10 libgsl-dev git pip python3-numpy
 RUN python3 -m pip install --upgrade pip setuptools
 
 
