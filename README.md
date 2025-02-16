@@ -1,6 +1,6 @@
 [![build status](https://github.com/morloc-project/morloc/actions/workflows/.test.yml/badge.svg)](https://github.com/morloc-project/morloc/actions/workflows/.test.yml)
 [![github release](https://img.shields.io/github/release/morloc-project/morloc.svg?label=current+release)](https://github.com/morloc-project/morloc/releases)
-[![experimental](http://badges.github.io/stability-badges/dist/experimental.svg)](http://github.com/badges/stability-badges)
+[![unstable](http://badges.github.io/stability-badges/dist/experimental.svg)](http://github.com/badges/stability-badges)
 [![license: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![DOI](https://zenodo.org/badge/75355860.svg)](https://zenodo.org/badge/latestdoi/75355860)
 
@@ -16,9 +16,9 @@ well-annotated is a nice place to start.
 
 ## Status
 
-This project is under active development with no stability guarantees until the
-v1.0 release. Pull requests, issue reports, and private messages are very
-welcome.
+This project is under heavy development and I may make backwards incompatible
+changes without notice until the v1.0 release (hence the "unstable" badge). Pull
+requests, issue reports, and private messages are very welcome.
 
 ## Running morloc
 
