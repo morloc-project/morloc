@@ -402,7 +402,7 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
             }
         
             {
-                size_t required_size = sizeof(Array);
+                size_t required_size = 0;
 
                 if (PyList_Check(obj)) {
                     Py_ssize_t list_size = PyList_Size(obj);
@@ -446,12 +446,13 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                 } else if (PyByteArray_Check(obj)) {
                     required_size += (size_t)PyByteArray_GET_SIZE(obj);
                 } else if (PyUnicode_Check(obj)) {
-                    required_size += (size_t)PyUnicode_GET_LENGTH(obj);
+                    PyUnicode_AsUTF8AndSize(obj, &required_size);
                 } else {
                     PyErr_SetString(PyExc_TypeError, "Unsupported data type");
                     return -1;
                 }
 
+                required_size += sizeof(Array);
                 return required_size;
             }
 

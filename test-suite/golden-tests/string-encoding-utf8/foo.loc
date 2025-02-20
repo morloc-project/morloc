@@ -1,0 +1,14 @@
+module main (foo)
+
+type Py => Str = "str"
+type R => Str = "character"
+type Cpp => Str = "std::string"
+
+source Py from "foo.py" ("pfoo")
+source R from "foo.R" ("rfoo")
+source Cpp from "foo.hpp" ("cfoo")
+rfoo :: Str -> Str
+pfoo :: Str -> Str
+cfoo :: Str -> Str
+
+foo = cfoo . rfoo . pfoo

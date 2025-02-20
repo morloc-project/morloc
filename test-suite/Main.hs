@@ -37,6 +37,7 @@ main = do
       , golden "typeclasses-4" "typeclasses-4"
 
       , golden "string-encoding" "string-encoding"
+      , golden "string-encoding-utf8" "string-encoding-utf8"
 
       , golden "file-input-py" "file-input-py"
       , golden "file-input-c" "file-input-c"
