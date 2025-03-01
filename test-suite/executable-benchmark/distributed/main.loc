@@ -1,0 +1,13 @@
+module m (foo)
+
+simulate :: Int -> [Real]
+mean :: [Real] -> Real
+sd :: [Real] -> Real
+
+-- multi-threaded program for running a random process many times on the same input
+nTrials :: Int -> a -> (a -> b) -> [b]
+
+foo :: Int -> Int -> (Real, Real)
+foo n size = (mean means, sd means)
+  where
+  means = nTrials n size (small:mean . simulate)
