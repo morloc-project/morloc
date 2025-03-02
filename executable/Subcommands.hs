@@ -30,13 +30,14 @@ import Morloc.CodeGenerator.Generate (generatePools)
 runMorloc :: CliCommand -> IO ()
 runMorloc args = do
   config <- getConfig args
+  buildConfig <- Config.loadBuildConfig config
   let verbose = getVerbosity args
   case args of
-    (CmdMake g) -> cmdMake g verbose config
-    (CmdInstall g) -> cmdInstall g verbose config
-    (CmdTypecheck g) -> cmdTypecheck g verbose config
-    (CmdDump g) -> cmdDump g verbose config
-    (CmdInit g) -> cmdInit g config
+    (CmdMake g) -> cmdMake g verbose config buildConfig
+    (CmdInstall g) -> cmdInstall g verbose config buildConfig
+    (CmdTypecheck g) -> cmdTypecheck g verbose config buildConfig
+    (CmdDump g) -> cmdDump g verbose config buildConfig
+    (CmdInit g) -> cmdInit g config buildConfig
 
 
 -- | read the global morloc config file or return a default one
@@ -67,8 +68,8 @@ readScript _ filename = do
 
 
 -- | Install a module
-cmdInstall :: InstallCommand -> Int -> Config.Config -> IO ()
-cmdInstall args verbosity conf = MM.runMorlocMonad Nothing verbosity conf cmdInstall' >>= MM.writeMorlocReturn
+cmdInstall :: InstallCommand -> Int -> Config.Config -> BuildConfig -> IO ()
+cmdInstall args verbosity conf buildConfig = MM.runMorlocMonad Nothing verbosity conf buildConfig cmdInstall' >>= MM.writeMorlocReturn
   where
     modName = installModuleName args
     selector = installSelector args
@@ -86,17 +87,17 @@ cmdInstall args verbosity conf = MM.runMorlocMonad Nothing verbosity conf cmdIns
         MM.throwError . ModuleInstallError $ "Error: Expected \"<username>/<repo>\" format for GitHub module name"
 
 -- | build a Morloc program, generating the nexus and pool files
-cmdMake :: MakeCommand -> Int -> Config.Config -> IO ()
-cmdMake args verbosity config = do
+cmdMake :: MakeCommand -> Int -> Config.Config -> BuildConfig -> IO ()
+cmdMake args verbosity config buildConfig = do
   (path, code) <- readScript (makeExpression args) (makeScript args)
   outfile <- case makeOutfile args of
     "" -> return Nothing
     x -> return . Just $ x
-  MM.runMorlocMonad outfile verbosity config (M.writeProgram path code) >>=
+  MM.runMorlocMonad outfile verbosity config buildConfig (M.writeProgram path code) >>=
     MM.writeMorlocReturn
 
-cmdTypecheck :: TypecheckCommand -> Int -> Config.Config -> IO ()
-cmdTypecheck args _ config = do
+cmdTypecheck :: TypecheckCommand -> Int -> Config.Config -> BuildConfig -> IO ()
+cmdTypecheck args _ config buildConfig = do
   (path, code) <- readScript (typecheckExpression args) (typecheckScript args)
   let verbosity = typecheckVerbose args
   if typecheckType args
@@ -109,6 +110,7 @@ cmdTypecheck args _ config = do
                Nothing
                verbosity
                config
+               buildConfig
                (M.typecheck path code >>= (generatePools . snd) )
                |>> writeTypecheckOutput verbosity
                >>= (\s -> putDoc (s <> "\n"))
@@ -117,6 +119,7 @@ cmdTypecheck args _ config = do
                Nothing
                verbosity
                config
+               buildConfig
                (M.typecheckFrontend path code) |>> writeFrontendTypecheckOutput verbosity >>= (\s -> putDoc (s <> "\n"))
 
 writeFrontendTypecheckOutput :: Int -> ((Either MorlocError [AnnoS (Indexed TypeU) Many Int], [MT.Text]), MorlocState) -> MDoc
@@ -136,18 +139,18 @@ writePool :: Lang -> [SerialManifold] -> MDoc
 writePool lang manifolds = pretty lang <+> "pool:" <> "\n" <> vsep (map pseudocodeSerialManifold manifolds) <> "\n"
 
 
-cmdDump :: DumpCommand -> Int -> Config.Config -> IO ()
-cmdDump args _ config = do
+cmdDump :: DumpCommand -> Int -> Config.Config -> BuildConfig -> IO ()
+cmdDump args _ config buildConfig = do
   (path, code) <- readScript (dumpExpression args) (dumpScript args)
   let verbosity = dumpVerbose args
-  ((x, _), _) <- MM.runMorlocMonad Nothing verbosity config (F.parse path code)
+  ((x, _), _) <- MM.runMorlocMonad Nothing verbosity config buildConfig (F.parse path code)
   case x of
     (Left e) -> putDoc $ pretty e
     (Right e) -> putDoc $ prettyDAG e
 
 
-cmdInit :: InitCommand -> Config.Config -> IO ()
-cmdInit ic config = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSlurmSupport ic) config
+cmdInit :: InitCommand -> Config.Config -> BuildConfig -> IO ()
+cmdInit ic config buildConfig = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSlurmSupport ic) config
 
 prettyDAG :: DAG MVar e ExprI -> MDoc
 prettyDAG m0 = vsep (map prettyEntry (Map.toList m0)) where

@@ -11,7 +11,9 @@ Stability   : experimental
 module Morloc.Config
   ( Config(..)
   , loadMorlocConfig
+  , loadModuleConfig
   , loadDefaultMorlocConfig
+  , loadBuildConfig
   , setupServerAndSocket
   , getDefaultConfigFilepath
   , getDefaultMorlocLibrary
@@ -20,10 +22,14 @@ module Morloc.Config
 import Morloc.Data.Doc
 import Morloc.Namespace
 import qualified Morloc.Language as ML
+import qualified Data.Yaml as Y
 import qualified Data.Yaml.Config as YC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
+import qualified Morloc.Monad as MM
 import qualified Data.Aeson.KeyMap as K
+import qualified Data.Aeson as A
+import qualified Data.ByteString.Lazy as BL
 
 
 getDefaultConfigFilepath :: IO Path
@@ -65,6 +71,33 @@ loadMorlocConfig (Just configFile) = do
     else
       loadMorlocConfig Nothing
 
+loadModuleConfig :: Maybe Path -> MorlocMonad ModuleConfig
+loadModuleConfig Nothing = return defaultValue
+loadModuleConfig (Just configFile) = do
+  let moduleConfigFile = MS.dropExtension configFile <> ".yaml"
+  configExists <- liftIO $ MS.doesFileExist moduleConfigFile
+  if configExists
+    then do
+      result <- liftIO $ Y.decodeFileEither moduleConfigFile
+      case result of
+        Left errMsg -> MM.throwError . OtherError . MT.pack $
+            "Failed to parse module config file '" <> configFile <> "': " <> Y.prettyPrintParseException errMsg
+        Right config -> return config
+    else
+        return defaultValue
+
+loadBuildConfig :: Config -> IO BuildConfig
+loadBuildConfig config = do
+  let configFile = configBuildConfig config
+  configExists <- MS.doesFileExist configFile
+  if configExists
+    then do
+      fileContents <- BL.readFile configFile
+      case A.eitherDecode fileContents of
+        Left errMsg -> error $ "Failed to build config file '" <> configFile <> "': " <> errMsg
+        Right buildConfig -> return buildConfig
+    else
+        return defaultValue
 
 setupServerAndSocket
   :: Config

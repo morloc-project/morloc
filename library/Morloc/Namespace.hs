@@ -1,4 +1,4 @@
-{-# LANGUAGE ViewPatterns, OverloadedStrings, TypeFamilies #-}
+{-# LANGUAGE ViewPatterns, OverloadedStrings, TypeFamilies, DeriveGeneric #-}
 
 {-|
 Module      : Morloc.Namespace
@@ -57,6 +57,10 @@ module Morloc.Namespace
   , Config(..)
   -- ** Morloc monad
   , MorlocMonad
+  , ManifoldResources(..)
+  , ManifoldConfig(..)
+  , ModuleConfig(..)
+  , BuildConfig(..)
   , MorlocState(..)
   , SignatureSet(..)
   , Instance(..)
@@ -144,6 +148,8 @@ import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.PartialOrd as P
 import qualified Data.List as DL
 import Data.Aeson (FromJSON(..), (.!=), (.:?), withObject)
+import GHC.Generics (Generic)
+
 
 import Morloc.Data.Doc
 import qualified Data.Set as Set
@@ -221,6 +227,37 @@ data Instance = Instance
   }
   deriving(Show, Ord, Eq)
 
+data ManifoldResources = ManifoldResources
+  { manifoldResourcesThreads :: Maybe Int
+  , manifoldResourcesMemory :: Maybe Int
+  , manifoldResourcesTime :: Maybe Int -- walltime in seconds
+  , manifoldResourcesGpus :: Maybe Int
+  , manifoldResourcesRemoteRun :: Maybe Bool
+  }
+  deriving(Show, Ord, Eq, Generic)
+instance FromJSON ManifoldResources
+
+data ManifoldConfig = ManifoldConfig
+  { manifoldStateCache :: Maybe Bool
+  , manifoldStateBenchmark :: Maybe Bool
+  , manifoldStateResources :: Maybe ManifoldResources
+  }
+  deriving(Show, Ord, Eq, Generic)
+instance FromJSON ManifoldConfig
+
+data ModuleConfig = ModuleConfig
+  { moduleDefaultManifoldConfig :: Maybe ManifoldConfig
+  , moduleManifoldConfigs :: Map.Map String ManifoldConfig
+  }
+  deriving(Show, Generic)
+instance FromJSON ModuleConfig
+
+data BuildConfig = BuildConfig
+  { buildConfigSlurmSupport :: Maybe Bool
+  }
+  deriving(Show, Generic)
+instance FromJSON BuildConfig
+
 data MorlocState = MorlocState
   { statePackageMeta :: [PackageMeta]
   -- ^ The parsed contents of a package.yaml file
@@ -253,9 +290,12 @@ data MorlocState = MorlocState
   -- ^ The indices of each exported term
   , stateName :: Map Int EVar
   -- ^ store the names of morloc compositions
+  , stateManifoldConfig :: Map Int ManifoldConfig
+  -- ^ stores manifold settings such as resource usage, caching, and benchmarking
   , stateTypeQualifier :: Map Int [(TVar, TypeU)]
   -- ^ Store the ordered parameters of a type. This is required in C++ for
   -- specifying template parameter types.
+  , stateBuildConfig :: BuildConfig
   }
   deriving(Show)
 
@@ -880,6 +920,12 @@ instance FromJSON PackageMeta where
 
 
 
+instance Defaultable ModuleConfig where
+  defaultValue = ModuleConfig
+    { moduleDefaultManifoldConfig = Nothing
+    , moduleManifoldConfigs = Map.empty
+    }
+
 instance Defaultable PackageMeta where
   defaultValue = PackageMeta
     { packageName = ""
@@ -896,6 +942,27 @@ instance Defaultable PackageMeta where
     , packageCppVersion = 17
     , packageDependencies = []
     }
+
+instance Defaultable BuildConfig where 
+  defaultValue =  BuildConfig
+    { buildConfigSlurmSupport = Nothing
+    }
+
+instance Defaultable ManifoldResources where
+  defaultValue =  ManifoldResources
+    { manifoldResourcesThreads   = Nothing
+    , manifoldResourcesMemory    = Nothing
+    , manifoldResourcesTime      = Nothing
+    , manifoldResourcesGpus      = Nothing
+    , manifoldResourcesRemoteRun = Nothing
+    }
+
+instance Defaultable ManifoldConfig where
+  defaultValue = ManifoldConfig
+    { manifoldStateCache = Just False
+    , manifoldStateBenchmark = Just False
+    , manifoldStateResources = Nothing
+}
 
 instance Defaultable MorlocState where
   defaultValue = MorlocState {
@@ -914,7 +981,9 @@ instance Defaultable MorlocState where
     , stateOutfile = Nothing
     , stateExports = []
     , stateName = Map.empty
+    , stateManifoldConfig = Map.empty
     , stateTypeQualifier = Map.empty
+    , stateBuildConfig = defaultValue
   }
 
 instance Annotated IndexedGeneral where

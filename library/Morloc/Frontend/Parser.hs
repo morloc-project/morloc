@@ -37,8 +37,9 @@ readProgram
   -> MT.Text -- ^ Source code
   -> ParserState
   -> DAG MVar Import ExprI -- ^ Possibly empty directed graph of previously observed modules
+  -> ModuleConfig 
   -> Either (ParseErrorBundle MT.Text Void) (DAG MVar Import ExprI, ParserState)
-readProgram moduleName modulePath sourceCode pstate p =
+readProgram moduleName modulePath sourceCode pstate p moduleConfig =
   case runParser
          (CMS.runStateT (sc >> pProgram moduleName <* eof) (reenter modulePath pstate))
          (fromMaybe "<expr>" modulePath)

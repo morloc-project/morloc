@@ -77,9 +77,11 @@ import qualified Morloc.System as MS
 import qualified Data.Map as Map
 
 runMorlocMonad ::
-     Maybe Path -> Int -> Config -> MorlocMonad a -> IO (MorlocReturn a)
-runMorlocMonad outfile v config ev =
-  runStateT (runWriterT (runExceptT (runReaderT ev config))) (emptyState outfile v)
+     Maybe Path -> Int -> Config -> BuildConfig -> MorlocMonad a -> IO (MorlocReturn a)
+runMorlocMonad outfile v config buildConfig ev = do
+  let state0 = emptyState outfile v
+      state1 = state0 { stateBuildConfig = buildConfig }
+  runStateT (runWriterT (runExceptT (runReaderT ev config))) (state1)
 
 emptyState :: Maybe Path -> Int -> MorlocState
 emptyState path v = defaultValue
