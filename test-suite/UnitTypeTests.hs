@@ -58,6 +58,7 @@ emptyConfig = do
     , configLibrary     = home <> "/.morloc/src/morloc"
     , configPlane       = "morloclib"
     , configTmpDir      = home <> "/.morloc/tmp"
+    , configBuildConfig = home <> "/.morloc/.build-config"
     , configLangPython3 = "python3"
     , configLangR       = "Rscript"
     , configLangPerl    = "perl"

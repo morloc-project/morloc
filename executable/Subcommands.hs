@@ -147,7 +147,7 @@ cmdDump args _ config = do
 
 
 cmdInit :: InitCommand -> Config.Config -> IO ()
-cmdInit ic config = MSC.configureAll (not (initQuiet ic)) (initForce ic) config
+cmdInit ic config = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSlurmSupport ic) config
 
 prettyDAG :: DAG MVar e ExprI -> MDoc
 prettyDAG m0 = vsep (map prettyEntry (Map.toList m0)) where

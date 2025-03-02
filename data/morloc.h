@@ -1,6 +1,10 @@
 #ifndef __MORLOC_H__
 #define __MORLOC_H__
 
+#ifdef SLURM_SUPPORT
+#include <slurm.h>
+#endif // end SLURM_SUPPORT
+
 // The following code is adapted from libmpack: https://github.com/libmpack/libmpack ///////////////
 
 #ifndef MPACK_API

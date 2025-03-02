@@ -505,6 +505,7 @@ data Config =
     , configLibrary :: !Path
     , configPlane :: !Path
     , configTmpDir :: !Path
+    , configBuildConfig :: !Path
     , configLangPython3 :: !Path
     -- ^ path to python interpreter
     , configLangR :: !Path
@@ -856,6 +857,7 @@ instance FromJSON Config where
         <*> o .:? "source" .!= "~/.morloc/src/morloc"
         <*> o .:? "plane" .!= "morloclib"
         <*> o .:? "tmpdir" .!= "~/.morloc/tmp"
+        <*> o .:? "build-config" .!= "~/.morloc/build-config"
         <*> o .:? "lang_python3" .!= "python3"
         <*> o .:? "lang_R" .!= "Rscript"
         <*> o .:? "lang_perl" .!= "perl"

@@ -1,0 +1,21 @@
+group_default:
+  benchmark: false
+  cache: false # should this be cached (using argument hashes)
+  distribute: null # should I try to run this as a distributed job?
+
+group:
+  large:
+    benchmark: true
+    cache: true
+    distribute:
+      threads: 32
+      mem: 128
+      gpus: 0
+      time: "3-00:00:00"
+  small:
+    cache: true
+    distribute:
+      threads: 32
+      mem: 128
+      gpus: 0
+      time: "0-01:00:00"

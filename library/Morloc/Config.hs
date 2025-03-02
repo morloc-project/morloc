@@ -39,6 +39,7 @@ loadDefaultMorlocConfig = do
       (MT.unpack . fromJust $ defaults K.!? "source")
       (MT.unpack . fromJust $ defaults K.!? "plane")
       (MT.unpack . fromJust $ defaults K.!? "tmpdir")
+      (MT.unpack . fromJust $ defaults K.!? "build-config")
       "python3" -- lang_python3
       "Rscript" -- lang_R
       "perl" -- lang_perl
@@ -86,7 +87,8 @@ defaultFields = do
   home <- MT.pack <$> getDefaultMorlocHome
   lib <- MT.pack <$> getDefaultMorlocSource
   tmp <- MT.pack <$> getDefaultMorlocTmpDir
-  return $ K.fromList [("home", home), ("source", lib), ("plane", "morloclib"), ("tmpdir", tmp)]
+  buildConfig <- MT.pack <$> getDefaultMorlocBuildConfig
+  return $ K.fromList [("home", home), ("source", lib), ("plane", "morloclib"), ("tmpdir", tmp), ("build-config", buildConfig)]
 
 -- | Get the Morloc home directory (absolute path)
 getDefaultMorlocHome :: IO Path
@@ -102,7 +104,11 @@ getDefaultMorlocSource = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/sr
 getDefaultMorlocLibrary :: IO Path
 getDefaultMorlocLibrary = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/lib"
 
--- | Get the Morloc default temporary directory. This will store generated
--- SPARQL queries and rdf dumps that can be used in debugging.
+-- | Get the Morloc default temporary directory.
 getDefaultMorlocTmpDir :: IO Path
 getDefaultMorlocTmpDir = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/tmp"
+
+-- | Get the Morloc default build config. This will store `morloc init` flags
+-- that affect all builds
+getDefaultMorlocBuildConfig :: IO Path
+getDefaultMorlocBuildConfig = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/.build-config"

@@ -29,8 +29,8 @@ configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
 configure _ = return ()
 
 -- | Configure for all languages
-configureAll :: Bool -> Bool -> Config -> IO ()
-configureAll verbose force config = do 
+configureAll :: Bool -> Bool -> Bool -> Config -> IO ()
+configureAll verbose force slurmSupport config = do 
 
   -- Setup Morloc home directory structure
   let homeDir = configHome config
@@ -46,6 +46,13 @@ configureAll verbose force config = do
   createDirectoryWithDescription "morloc tmp directory" tmpDir
   createDirectoryWithDescription "morloc opt directory" optDir
   createDirectoryWithDescription "morloc module directory" srcLibrary
+
+  say $ "Slurm support ... " <> show slurmSupport
+
+  say $ "Writing build config file"
+
+  -- currently SLURM support is the only build option
+  TIO.writeFile (configBuildConfig config) ( if slurmSupport then "slurmSupport: true" else "slurmSupport: false" )
 
   say "Installing C++ extra types"
 
@@ -75,7 +82,9 @@ configureAll verbose force config = do
   let tmpCFile = tmpDir </> "x.c"
       soPath = libDir </> "libmorloc.so"
   TIO.writeFile tmpCFile ("#include \"" <> MT.pack libmorlocPath <> "\"")
-  let gccArgs = [ "-O", "-shared", "-o", soPath, "-fPIC", tmpCFile ]
+  -- special system-wide morloc build options
+  let morlocOptions = ( if slurmSupport then ["-DSLURM_SUPPORT"] else [] )
+  let gccArgs = [ "-O", "-shared", "-o", soPath, "-fPIC", tmpCFile ] <> morlocOptions
   callProcess "gcc" gccArgs
   removeFile tmpCFile
 

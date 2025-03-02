@@ -65,6 +65,7 @@ data InitCommand = InitCommand
   , initQuiet :: Bool
   , initVanilla :: Bool
   , initForce :: Bool
+  , initSlurmSupport :: Bool
   }
 
 initCommandParser :: Parser InitCommand
@@ -73,6 +74,7 @@ initCommandParser = InitCommand
   <*> optQuiet
   <*> optVanilla
   <*> optForce
+  <*> optSlurmSupport
 
 initSubcommand :: Mod CommandFields CliCommand
 initSubcommand = command "init" (info (CmdInit <$> initCommandParser) (progDesc "initialize morloc environment"))
@@ -190,6 +192,12 @@ optForce = switch
   ( long "force"
   <> short 'f'
   <> help "Force action overwriting existing files"
+  )
+
+optSlurmSupport :: Parser Bool
+optSlurmSupport = switch
+  ( long "slurm"
+  <> help "Allow use of SLURM for remote jobs"
   )
 
 optVerbose :: Parser Int
