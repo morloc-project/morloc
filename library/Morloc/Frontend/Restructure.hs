@@ -28,6 +28,7 @@ restructure
 restructure s
   = checkForSelfRecursion s -- modules should not import themselves
   >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
+  >>= doM collectTags
   >>= doM collectTypes
   >>= doM collectSources
   >>= removeTypeImports -- Remove type imports and exports
@@ -124,6 +125,31 @@ resolveImports = MDD.mapEdgeWithNodeAndKeyM resolveImport where
   toAliasedSymbol :: Symbol -> AliasedSymbol
   toAliasedSymbol (TypeSymbol x) = AliasedType x x
   toAliasedSymbol (TermSymbol x) = AliasedTerm x x
+
+collectTags :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
+collectTags fullDag = do
+    _ <- MDD.mapNodeM f fullDag
+    return ()
+    where
+    -- * add ManifoldConfigs associated with VarE types to MorlocMonad state
+    -- * the configs store the metadata associated with the term tags
+    -- * later we use the manifold indices to lookup things like runtime info
+    --   (threads required and such)
+    f :: ExprI -> MorlocMonad ()
+    f (ExprI i (VarE config _)) = do
+        s <- MM.get
+        MM.put (s {stateManifoldConfig = Map.insert i config (stateManifoldConfig s) })
+    f (ExprI _ (ModE _ es)) = mapM_ f es
+    f (ExprI _ (IstE _ _ es)) = mapM_ f es
+    f (ExprI _ (AssE _ e es)) = mapM_ f (e:es)
+    f (ExprI _ (AccE _ e)) = f e
+    f (ExprI _ (LstE es)) = mapM_ f es
+    f (ExprI _ (TupE es)) = mapM_ f es
+    f (ExprI _ (NamE rs)) = mapM_ (f . snd) rs
+    f (ExprI _ (AppE e es)) = mapM_ f (e:es)
+    f (ExprI _ (LamE _ e)) = f e
+    f (ExprI _ (AnnE e _)) = f e
+    f _ = return ()
 
 
 type GCMap = (Scope, Map.Map Lang Scope)
@@ -254,7 +280,6 @@ filterAndSubstitute links typemap =
     = case Map.lookup sourceName typedefs of
       (Just xs) -> Map.insert localAlias (map (\(a,b,c) -> (a, rename sourceName localAlias b, c)) xs) (Map.delete sourceName typedefs)
       Nothing -> typedefs
-
 
 collectSources :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectSources fullDag = do

@@ -11,3 +11,18 @@ foo :: Int -> Int -> (Real, Real)
 foo n size = (mean means, sd means)
   where
   means = nTrials n size (small:mean . simulate)
+
+-- -- case 1: applications
+-- f1 x = small:foo x
+--
+-- -- case 2: compositions
+-- f1 = small:foo . bar
+--
+-- -- non-case: lambdas, instead bind the top named function, there always is one
+-- f3 = (\y -> small:foo (bar y))
+--
+-- -- basically, we are always binding directly to a variable name
+--
+-- -- what about this? the label should travel with bar, so `f4 = small:foo`
+-- bar = small:foo
+-- f4 = bar

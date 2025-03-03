@@ -247,7 +247,7 @@ instance FromJSON ManifoldConfig
 
 data ModuleConfig = ModuleConfig
   { moduleDefaultManifoldConfig :: Maybe ManifoldConfig
-  , moduleManifoldConfigs :: Map.Map String ManifoldConfig
+  , moduleManifoldConfigs :: Map.Map Text ManifoldConfig
   }
   deriving(Show, Generic)
 instance FromJSON ModuleConfig
@@ -414,7 +414,8 @@ data Expr
   -- 3. term where statements
   | UniE
   -- ^ (())
-  | VarE EVar
+  | VarE ManifoldConfig -- annotations the tags link to
+         EVar   -- main variable
   -- ^ (x)
   | AccE Key ExprI
   -- ^ person@age - access a field in a record
@@ -1378,7 +1379,7 @@ instance Pretty Expr where
   pretty (ImpE (Import m Nothing _ _)) = "import" <+> pretty m
   pretty (ImpE (Import m (Just xs) _ _)) = "import" <+> pretty m <+> tupled (map pretty xs)
   pretty (ExpE v) = "export" <+> pretty v
-  pretty (VarE s) = pretty s
+  pretty (VarE _ s) = pretty s
   pretty (AccE k e) = parens (pretty e) <> "@" <> pretty k
   pretty (LamE v e) = "\\" <+> pretty v <+> "->" <+> pretty e
   pretty (AnnE e ts) = parens

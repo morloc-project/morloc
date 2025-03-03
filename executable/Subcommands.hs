@@ -37,7 +37,7 @@ runMorloc args = do
     (CmdInstall g) -> cmdInstall g verbose config buildConfig
     (CmdTypecheck g) -> cmdTypecheck g verbose config buildConfig
     (CmdDump g) -> cmdDump g verbose config buildConfig
-    (CmdInit g) -> cmdInit g config buildConfig
+    (CmdInit g) -> cmdInit g config
 
 
 -- | read the global morloc config file or return a default one
@@ -149,8 +149,8 @@ cmdDump args _ config buildConfig = do
     (Right e) -> putDoc $ prettyDAG e
 
 
-cmdInit :: InitCommand -> Config.Config -> BuildConfig -> IO ()
-cmdInit ic config buildConfig = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSlurmSupport ic) config
+cmdInit :: InitCommand -> Config.Config -> IO ()
+cmdInit ic config = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSlurmSupport ic) config
 
 prettyDAG :: DAG MVar e ExprI -> MDoc
 prettyDAG m0 = vsep (map prettyEntry (Map.toList m0)) where

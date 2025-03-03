@@ -183,7 +183,7 @@ pComposition = do
             s <- CMS.get
             let v = EV ("x" <> MT.show' (stateExpIndex s + 1))
 
-            v' <- exprI (VarE v)
+            v' <- exprI (VarE defaultValue v)
 
             inner <- case last fs of
                 (ExprI i (AppE x xs)) -> return $ ExprI i (AppE x (xs <> [v']))
@@ -408,7 +408,7 @@ pSigE = do
 
 pSignature :: Parser Signature
 pSignature = do
-  label' <- tag freename
+  label' <- optional pTag
   v <- freenameL
   vs <- many freenameL |>> map TV
   _ <- op "::"
@@ -481,7 +481,7 @@ pSource = do
 
   pImportSourceTerm :: Parser (SrcName, EVar, Maybe MT.Text)
   pImportSourceTerm = do
-    t <- tag stringLiteral
+    t <- optional pTag
     n <- stringLiteral
     a <- option n (reserved "as" >> freename)
     return (SrcName n, EV a, t)
@@ -583,7 +583,32 @@ pLam = do
   exprI $ LamE vs e
 
 pVar :: Parser ExprI
-pVar = pEVar >>= exprI . VarE
+pVar = do
+  labels <- pTags
+
+  s <- CMS.get
+
+  let baseConfig = maybe defaultValue id (moduleDefaultManifoldConfig (stateModuleConfig s))
+      configMap = moduleManifoldConfigs (stateModuleConfig s)
+      varConfigs = catMaybes [ Map.lookup label configMap | label <- labels]
+      manifoldConfig = foldl mergeConfigs baseConfig varConfigs
+
+  v <- pEVar
+  exprI $ VarE manifoldConfig v
+  where
+    former :: Maybe a -> Maybe a -> Maybe a
+    former (Just x) _ = Just x
+    former _ x = x
+
+    mergeConfigs :: ManifoldConfig -> ManifoldConfig -> ManifoldConfig
+    mergeConfigs (ManifoldConfig c1 b1 r1) (ManifoldConfig c2 b2 r2) =
+        ManifoldConfig (former c1 c2) (former b1 b2) (mergeResources r1 r2)
+
+    mergeResources :: Maybe ManifoldResources -> Maybe ManifoldResources -> Maybe ManifoldResources
+    mergeResources Nothing x = x
+    mergeResources x Nothing = x
+    mergeResources (Just (ManifoldResources r1 m1 t1 g1 s1)) (Just (ManifoldResources r2 m2 t2 g2 s2)) =
+        Just $ ManifoldResources (former r1 r2) (former m1 m2) (former t1 t2) (former g1 g2) (former s1 s2)
 
 
 pEVar :: Parser EVar
@@ -617,7 +642,7 @@ pVarUCon = VarU <$> pTermCon
 
 pTermCon :: Parser TVar
 pTermCon = do
-  _ <- tag stringLiteral
+  _ <- optional pTag
   TV <$> stringLiteral
 
 pType :: Parser TypeU
@@ -638,11 +663,13 @@ pUniU = do
   return BT.unitU
 
 parensType :: Parser TypeU
-parensType = tag (symbol "(") >> parens pType
+parensType = do
+    _ <- optional pTag
+    parens pType
 
 pTupleU :: Parser TypeU
 pTupleU = do
-  _ <- tag (symbol "(")
+  _ <- optional pTag
   ts <- parens (sepBy1 pType (symbol ","))
   return $ BT.tupleU ts
 
@@ -677,7 +704,7 @@ pFunU = do
 
 pListU :: Parser TypeU
 pListU = do
-  _ <- tag (symbol "[")
+  _ <- optional pTag
   t <- brackets pType
   return $ BT.listU t
 
@@ -686,7 +713,13 @@ pVarU = VarU <$> pTerm
 
 pTerm :: Parser TVar
 pTerm = do
-  _ <- tag freename
+  _ <- optional pTag
   t <- TV <$> freename
   appendGenerics t  -- add the term to the generic list IF generic
   return t
+
+pTags :: Parser [MT.Text]
+pTags = many (try (freenameL <* op ":"))
+
+pTag :: Parser MT.Text
+pTag = try (freenameL <* op ":")
