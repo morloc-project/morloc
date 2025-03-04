@@ -962,7 +962,7 @@ expressPolyExpr parentLang _
         . PolyManifold parentLang midx (ManifoldPass typedBoundArgs)
         . PolyReturn
         . PolyApp
-          ( PolyForeignInterface callLang (Idx cidxApp appType) (map ann appArgs)
+          ( PolyRemoteInterface callLang (Idx cidxApp appType) (map ann appArgs) ForeignCall
           . PolyManifold callLang midx (ManifoldFull (map unvalue appArgs))
           . PolyReturn
           $ PolyApp call xs'
@@ -1067,7 +1067,7 @@ expressPolyExpr parentLang _
         . chain lets
         . PolyReturn
         . PolyApp
-            ( PolyForeignInterface callLang (Idx cidxLam lamOutType) passedParentArgs
+            ( PolyRemoteInterface callLang (Idx cidxLam lamOutType) passedParentArgs ForeignCall
             . PolyManifold callLang midx foreignForm
             . PolyReturn
             $ PolyApp call xs'
@@ -1228,7 +1228,7 @@ expressPolyExpr parentLang pc (AnnoS (Idx midx _) (_, args) (AppS (AnnoS (Idx gi
           . PolyManifold parentLang midx (ManifoldFull (map unvalue args))
           . PolyReturn
           . PolyApp
-              ( PolyForeignInterface callLang pc [] -- no args are passed, so empty
+              ( PolyRemoteInterface callLang pc [] ForeignCall -- no args are passed, so empty
               . PolyManifold callLang midx (ManifoldFull (map unvalue args))
               . PolyReturn
               $ PolyApp f xs'
@@ -1297,7 +1297,7 @@ expressPolyExpr parentLang (val -> FunT pinputs poutput) (AnnoS (Idx midx c@(Fun
        . PolyManifold parentLang midx (ManifoldPass lambdaTypedArgs)
        . PolyReturn
        . PolyApp
-           ( PolyForeignInterface callLang (Idx cidx poutput) (map ann lambdaArgs)
+           ( PolyRemoteInterface callLang (Idx cidx poutput) (map ann lambdaArgs) ForeignCall
            . PolyManifold callLang midx (ManifoldFull lambdaArgs)
            . PolyReturn
            $ PolyApp (PolySrc (Idx midx c) src) callVals
@@ -1417,8 +1417,8 @@ segmentExpr
   -> PolyExpr
   -> MorlocMonad ([MonoHead], (Maybe Lang, MonoExpr))
 -- This is where segmentation happens, every other match is just traversal
-segmentExpr _ args (PolyForeignInterface lang callingType cargs e@(PolyManifold _ m (ManifoldFull foreignArgs) _)) = do
-  MM.sayVVV $ "segmentExpr PolyForeignInterface PolyManifold m" <> pretty m
+segmentExpr _ args (PolyRemoteInterface lang callingType cargs remoteCall e@(PolyManifold _ m (ManifoldFull foreignArgs) _)) = do
+  MM.sayVVV $ "segmentExpr PolyRemoteInterface PolyManifold m" <> pretty m
             <> "\n  forced ManifoldFull" <+> pretty foreignArgs
             <> "\n  lang" <+> pretty lang
             <> "\n  args" <+> pretty args
@@ -1428,10 +1428,10 @@ segmentExpr _ args (PolyForeignInterface lang callingType cargs e@(PolyManifold 
   let foreignHead = MonoHead lang m foreignArgs e'
   config <- MM.ask
   let socket = MC.setupServerAndSocket config lang
-  return (foreignHead:ms, (Nothing, MonoPoolCall callingType m socket foreignArgs))
+  return (foreignHead:ms, (Nothing, MonoPoolCall callingType m socket remoteCall foreignArgs))
 
-segmentExpr m _ (PolyForeignInterface lang callingType args e) = do
-  MM.sayVVV $ "segmentExpr PolyForeignInterface m" <> pretty m
+segmentExpr m _ (PolyRemoteInterface lang callingType args remoteCall e) = do
+  MM.sayVVV $ "segmentExpr PolyRemoteInterface m" <> pretty m
             <> "\n  args" <+> pretty args
             <> "\n  lang" <+> pretty lang
   (ms, (_, e')) <- segmentExpr m args e
@@ -1442,7 +1442,7 @@ segmentExpr m _ (PolyForeignInterface lang callingType args e) = do
 
   config <- MM.ask
   let socket = MC.setupServerAndSocket config lang
-      localFun = MonoApp (MonoPoolCall callingType m socket [Arg i None | i <- args]) es'
+      localFun = MonoApp (MonoPoolCall callingType m socket remoteCall [Arg i None | i <- args]) es'
 
   return (foreignHead:ms, (Nothing, localFun))
 
@@ -1570,9 +1570,9 @@ serialize (MonoHead lang m0 args0 e0) = do
     t' <- inferType t
     return $ LetVarS (Just t') i
   serialExpr m (MonoReturn e) = ReturnS <$> serialExpr m e
-  serialExpr _ (MonoApp (MonoPoolCall t m docs contextArgs) es) = do
+  serialExpr _ (MonoApp (MonoPoolCall t m docs remoteCall contextArgs) es) = do
     contextArgs' <- mapM (typeArg Serialized . ann) contextArgs
-    let poolCall' = PoolCall m docs contextArgs'
+    let poolCall' = PoolCall m docs remoteCall contextArgs'
     es' <- mapM (serialArg m) es
     t' <- inferType t
     return $ AppPoolS t' poolCall' es'
@@ -1664,7 +1664,7 @@ serialize (MonoHead lang m0 args0 e0) = do
         qs' = zip vs ftypes
 
     return $ AppSrcN appType src qs' args
-  nativeExpr m e@(MonoApp (MonoPoolCall t _ _ _) _) = do
+  nativeExpr m e@(MonoApp (MonoPoolCall t _ _ _ _) _) = do
     e' <- serialExpr m e
     t' <- inferType t
     MM.sayVVV $ "nativeExpr MonoApp:" <+> pretty t'
@@ -1814,7 +1814,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _) = foldSerialManifoldM fm sm0 |>> s
 
   wireSerialExpr (LetVarS_ t i) = return (Map.singleton i SerialContent, LetVarS t i)
   wireSerialExpr (BndVarS_ t i) = return (Map.singleton i SerialContent, BndVarS t i)
-  wireSerialExpr (AppPoolS_ t p@(PoolCall _ _ pargs) args) = do
+  wireSerialExpr (AppPoolS_ t p@(PoolCall _ _ _ pargs) args) = do
     let req1 = Map.unionsWith (<>) (map fst args)
         req2 = Map.fromList [(i, requestOf tm) | Arg i tm <- pargs]
         req3 = Map.unionWith (<>) req1 req2

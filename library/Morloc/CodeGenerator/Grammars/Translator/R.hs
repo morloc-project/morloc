@@ -186,7 +186,7 @@ translateSegment m0 =
 
     makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
     makeSerialExpr _ (ManS_ f) = return f
-    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) args) _) = do
+    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) _ args) _) = do
       let call = [idoc|.morloc_foreign_call(#{makeSocketPath socketFile}, #{pretty mid}, list#{tupled (map argNamer args)})|]
       return $ PoolDocs
         { poolCompleteManifolds = []

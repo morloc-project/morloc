@@ -456,7 +456,7 @@ translateSegment m0 = do
 
   makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> CppTranslator PoolDocs
   makeSerialExpr _ (ManS_ e) = return e
-  makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) args) _) = do
+  makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) _ args) _) = do
     let bufDef = "std::ostringstream s;"
         argList = encloseSep "{" "}" ", " (map argNamer args)
         argsDef = [idoc|std::vector<Message> args = #{argList};|]

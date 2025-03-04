@@ -60,7 +60,7 @@ data ParserState = ParserState {
   , stateVarIndex :: Int
   , stateExpIndex :: Int
   , stateGenerics :: [TVar] -- store the observed generic variables in the current type
-                               -- you should reset the field before parsing a new type
+                            -- you should reset the field before parsing a new type
   , stateMinPos :: Pos
   , stateAccepting :: Bool
   , stateModuleConfig :: ModuleConfig

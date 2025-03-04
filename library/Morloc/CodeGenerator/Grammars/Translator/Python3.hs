@@ -226,7 +226,7 @@ translateSegment m0 =
 
     makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
     makeSerialExpr _ (ManS_ f) = return f
-    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) args) _) = do
+    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) _ args) _) = do
       -- I don't need to explicitly add single quoes to the arguments here as I
       -- do in C++ and R because the subprocess module bypasses Bash dequoting.
       let call = "_morloc_foreign_call" <> tupled [makeSocketPath socketFile, pretty mid, list (map argNamer args)]

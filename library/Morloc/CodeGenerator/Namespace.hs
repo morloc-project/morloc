@@ -40,6 +40,7 @@ module Morloc.CodeGenerator.Namespace
   , ArgTypes(..)
   , argTypesToTypeM
   -- ** Manifold data types
+  , RemoteForm(..)
   , PolyHead(..)
   , PolyExpr(..)
   , MonoHead(..)
@@ -367,16 +368,20 @@ abiappend f g = runIdentity . abiappendM (return2 f) (return2 g)
 instance Pretty FVar where
     pretty (FV _ c) = pretty c
 
+data RemoteForm = ForeignCall | RemoteCall ManifoldConfig
+    deriving(Show, Eq)
+
 data PolyHead = PolyHead Lang Int [Arg None] PolyExpr
 
 -- no serialization and no argument types
 data PolyExpr
   -- organizational terms that may have undefined types
   = PolyManifold Lang Int (ManifoldForm None (Maybe Type)) PolyExpr
-  | PolyForeignInterface
+  | PolyRemoteInterface
       Lang           -- foreign language
       (Indexed Type) -- return type in calling language
       [Int]          -- argument ids
+      RemoteForm
       PolyExpr       -- foreign expression
   | PolyLet Int PolyExpr PolyExpr
   | PolyReturn PolyExpr
@@ -412,6 +417,7 @@ data MonoExpr
       (Indexed Type)       -- return type in calling language
       Int        -- foreign manifold id
       Socket     -- shell command components that preceed the passed data
+      RemoteForm
       [Arg None] -- arguments
   | MonoLet Int MonoExpr MonoExpr
   | MonoLetVar (Indexed Type) Int
@@ -434,6 +440,7 @@ data MonoExpr
 data PoolCall = PoolCall
   Int -- foreign manifold id
   Socket 
+  RemoteForm
   [Arg TypeM] -- contextual argument that are passed to the foreign function
               -- (not the main arguments to the foreign function)
   deriving(Show)
@@ -1143,7 +1150,7 @@ instance Pretty MonoExpr where
       = block 4 ("m" <> pretty i <> tupled (abilist contextArg boundArg form)) (pretty e) where
         contextArg j _ = "c" <> pretty j
         boundArg j _ = "b" <> pretty j
-    pretty (MonoPoolCall t i _ _) =  "PoolCall" <> parens (pretty i) <> parens (pretty t)
+    pretty (MonoPoolCall t i _ _ _) =  "PoolCall" <> parens (pretty i) <> parens (pretty t)
     pretty (MonoLet i e1 e2) = vsep ["let" <+> "x" <> pretty i <+> "=" <+> pretty e1, pretty e2]
     pretty (MonoLetVar t i) = parens $ "x" <> pretty i <> " :: " <> pretty t
     pretty (MonoReturn e) = "return" <> parens (pretty e)
