@@ -57,7 +57,7 @@ module Morloc.Namespace
   , Config(..)
   -- ** Morloc monad
   , MorlocMonad
-  , ManifoldResources(..)
+  , RemoteResources(..)
   , ManifoldConfig(..)
   , ModuleConfig(..)
   , BuildConfig(..)
@@ -147,8 +147,10 @@ import System.Directory.Tree (DirTree(..), AnchoredDirTree(..))
 import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.PartialOrd as P
 import qualified Data.List as DL
-import Data.Aeson (FromJSON(..), (.!=), (.:?), withObject)
+import Data.Aeson (FromJSON(..), (.!=), (.:?), withObject, genericParseJSON)
+import Data.Aeson.Types (Options(..), defaultOptions)
 import GHC.Generics (Generic)
+import Data.Char (isUpper, toLower)
 
 
 import Morloc.Data.Doc
@@ -227,36 +229,32 @@ data Instance = Instance
   }
   deriving(Show, Ord, Eq)
 
-data ManifoldResources = ManifoldResources
-  { manifoldResourcesThreads :: Maybe Int
-  , manifoldResourcesMemory :: Maybe Int
-  , manifoldResourcesTime :: Maybe Int -- walltime in seconds
-  , manifoldResourcesGpus :: Maybe Int
-  , manifoldResourcesRemoteRun :: Maybe Bool
+data RemoteResources = RemoteResources
+  { remoteResourcesThreads :: Maybe Int
+  , remoteResourcesMemory :: Maybe Int
+  , remoteResourcesTime :: Maybe Int -- walltime in seconds
+  , remoteResourcesGpus :: Maybe Int
   }
   deriving(Show, Ord, Eq, Generic)
-instance FromJSON ManifoldResources
 
 data ManifoldConfig = ManifoldConfig
   { manifoldStateCache :: Maybe Bool
   , manifoldStateBenchmark :: Maybe Bool
-  , manifoldStateResources :: Maybe ManifoldResources
+  , manifoldStateRemote :: Maybe RemoteResources
   }
   deriving(Show, Ord, Eq, Generic)
-instance FromJSON ManifoldConfig
 
 data ModuleConfig = ModuleConfig
-  { moduleDefaultManifoldConfig :: Maybe ManifoldConfig
-  , moduleManifoldConfigs :: Map.Map Text ManifoldConfig
+  { moduleConfigDefaultGroup :: Maybe ManifoldConfig
+  , moduleConfigLabeledGroups :: Map.Map Text ManifoldConfig
   }
   deriving(Show, Generic)
-instance FromJSON ModuleConfig
 
 data BuildConfig = BuildConfig
   { buildConfigSlurmSupport :: Maybe Bool
   }
   deriving(Show, Generic)
-instance FromJSON BuildConfig
+
 
 data MorlocState = MorlocState
   { statePackageMeta :: [PackageMeta]
@@ -923,8 +921,8 @@ instance FromJSON PackageMeta where
 
 instance Defaultable ModuleConfig where
   defaultValue = ModuleConfig
-    { moduleDefaultManifoldConfig = Nothing
-    , moduleManifoldConfigs = Map.empty
+    { moduleConfigDefaultGroup = Nothing
+    , moduleConfigLabeledGroups = Map.empty
     }
 
 instance Defaultable PackageMeta where
@@ -949,21 +947,20 @@ instance Defaultable BuildConfig where
     { buildConfigSlurmSupport = Nothing
     }
 
-instance Defaultable ManifoldResources where
-  defaultValue =  ManifoldResources
-    { manifoldResourcesThreads   = Nothing
-    , manifoldResourcesMemory    = Nothing
-    , manifoldResourcesTime      = Nothing
-    , manifoldResourcesGpus      = Nothing
-    , manifoldResourcesRemoteRun = Nothing
+instance Defaultable RemoteResources where
+  defaultValue =  RemoteResources
+    { remoteResourcesThreads   = Nothing
+    , remoteResourcesMemory    = Nothing
+    , remoteResourcesTime      = Nothing
+    , remoteResourcesGpus      = Nothing
     }
 
 instance Defaultable ManifoldConfig where
   defaultValue = ManifoldConfig
     { manifoldStateCache = Just False
     , manifoldStateBenchmark = Just False
-    , manifoldStateResources = Nothing
-}
+    , manifoldStateRemote = Nothing
+    }
 
 instance Defaultable MorlocState where
   defaultValue = MorlocState {
@@ -1653,3 +1650,33 @@ newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
     allVars :: TypeU -> Set.Set TypeU
     allVars (ForallU v t) = Set.union (Set.singleton (VarU v)) (allVars t)
     allVars t = free t
+
+
+-- Custom FromJSON instances
+
+-- Helper function to strip prefixes and convert to kebab-case
+stripPrefixAndKebabCase :: String -> String -> String
+stripPrefixAndKebabCase prefix str =
+  let stripped = drop (length prefix) str -- Remove prefix
+   in case stripped of
+        [] -> []
+        (x:xs) -> toLower x : convertToKebabCase xs -- Lowercase first letter and process the rest
+
+-- Convert remaining characters to kebab-case
+convertToKebabCase :: String -> String
+convertToKebabCase [] = []
+convertToKebabCase (x:xs)
+  | isUpper x = '-' : toLower x : convertToKebabCase xs -- Add hyphen before uppercase letters and lowercase them
+  | otherwise = x : convertToKebabCase xs -- Keep other characters as-is
+
+instance FromJSON ModuleConfig where
+  parseJSON = genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "moduleConfig" }
+
+instance FromJSON ManifoldConfig where
+  parseJSON = genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "manifoldConfig" }
+
+instance FromJSON RemoteResources where
+  parseJSON = genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "remoteResources" }
+
+instance FromJSON BuildConfig where
+  parseJSON = genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "buildConfig" }

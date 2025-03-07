@@ -7,15 +7,15 @@ manifold-config:
     large:
       benchmark: true
       cache: true
-      distribute:
+      remote:
         threads: 32
-        mem: 128
+        memory: 128
         gpus: 0
         time: "3-00:00:00"
     small:
       cache: true
-      distribute:
+      remote:
         threads: 32
-        mem: 128
+        memory: 128
         gpus: 0
         time: "0-01:00:00"

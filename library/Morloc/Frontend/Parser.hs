@@ -588,8 +588,8 @@ pVar = do
 
   s <- CMS.get
 
-  let baseConfig = maybe defaultValue id (moduleDefaultManifoldConfig (stateModuleConfig s))
-      configMap = moduleManifoldConfigs (stateModuleConfig s)
+  let baseConfig = maybe defaultValue id (moduleConfigDefaultGroup (stateModuleConfig s))
+      configMap = moduleConfigLabeledGroups (stateModuleConfig s)
       varConfigs = catMaybes [ Map.lookup label configMap | label <- labels]
       manifoldConfig = foldl mergeConfigs baseConfig varConfigs
 
@@ -604,11 +604,11 @@ pVar = do
     mergeConfigs (ManifoldConfig c1 b1 r1) (ManifoldConfig c2 b2 r2) =
         ManifoldConfig (former c1 c2) (former b1 b2) (mergeResources r1 r2)
 
-    mergeResources :: Maybe ManifoldResources -> Maybe ManifoldResources -> Maybe ManifoldResources
+    mergeResources :: Maybe RemoteResources -> Maybe RemoteResources -> Maybe RemoteResources
     mergeResources Nothing x = x
     mergeResources x Nothing = x
-    mergeResources (Just (ManifoldResources r1 m1 t1 g1 s1)) (Just (ManifoldResources r2 m2 t2 g2 s2)) =
-        Just $ ManifoldResources (former r1 r2) (former m1 m2) (former t1 t2) (former g1 g2) (former s1 s2)
+    mergeResources (Just (RemoteResources r1 m1 t1 g1)) (Just (RemoteResources r2 m2 t2 g2)) =
+        Just $ RemoteResources (former r1 r2) (former m1 m2) (former t1 t2) (former g1 g2)
 
 
 pEVar :: Parser EVar
