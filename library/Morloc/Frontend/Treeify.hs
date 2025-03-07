@@ -366,4 +366,5 @@ newIndex :: Int -> MorlocMonad Int
 newIndex i = do
   i' <- MM.getCounter
   copyState i i'
+  MM.sayVVV $ "Set indices " <> pretty i <> " = " <> pretty i'
   return i'
