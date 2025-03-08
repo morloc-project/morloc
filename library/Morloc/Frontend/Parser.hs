@@ -37,9 +37,8 @@ readProgram
   -> MT.Text -- ^ Source code
   -> ParserState
   -> DAG MVar Import ExprI -- ^ Possibly empty directed graph of previously observed modules
-  -> ModuleConfig 
   -> Either (ParseErrorBundle MT.Text Void) (DAG MVar Import ExprI, ParserState)
-readProgram moduleName modulePath sourceCode pstate p moduleConfig =
+readProgram moduleName modulePath sourceCode pstate p =
   case runParser
          (CMS.runStateT (sc >> pProgram moduleName <* eof) (reenter modulePath pstate))
          (fromMaybe "<expr>" modulePath)
@@ -590,7 +589,7 @@ pVar = do
 
   let baseConfig = maybe defaultValue id (moduleConfigDefaultGroup (stateModuleConfig s))
       configMap = moduleConfigLabeledGroups (stateModuleConfig s)
-      varConfigs = catMaybes [ Map.lookup label configMap | label <- labels]
+      varConfigs = catMaybes [ Map.lookup x configMap | x <- labels]
       manifoldConfig = foldl mergeConfigs baseConfig varConfigs
 
   v <- pEVar

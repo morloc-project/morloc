@@ -28,8 +28,6 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
 import qualified Morloc.Monad as MM
 import qualified Data.Aeson.KeyMap as K
-import qualified Data.Aeson as A
-import qualified Data.ByteString.Lazy as BL
 
 
 getDefaultConfigFilepath :: IO Path
@@ -92,9 +90,9 @@ loadBuildConfig config = do
   configExists <- MS.doesFileExist configFile
   if configExists
     then do
-      fileContents <- BL.readFile configFile
-      case A.eitherDecode fileContents of
-        Left errMsg -> error $ "Failed to build config file '" <> configFile <> "': " <> errMsg
+      result <- Y.decodeFileEither configFile
+      case result of
+        Left errMsg -> error $ "Failed to parse build config file '" <> configFile <> "': " <> Y.prettyPrintParseException errMsg
         Right buildConfig -> return buildConfig
     else
         return defaultValue
@@ -144,4 +142,4 @@ getDefaultMorlocTmpDir = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/tm
 -- | Get the Morloc default build config. This will store `morloc init` flags
 -- that affect all builds
 getDefaultMorlocBuildConfig :: IO Path
-getDefaultMorlocBuildConfig = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/.build-config"
+getDefaultMorlocBuildConfig = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/.build-config.yaml"

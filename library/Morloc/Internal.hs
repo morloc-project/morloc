@@ -28,6 +28,7 @@ module Morloc.Internal
   , module Morloc.Data.Annotated
   , isLower
   , isUpper
+  , toLower
   -- ** selected functions from Data.Foldable
   , foldlM
   , foldrM
@@ -84,7 +85,7 @@ import Data.Tuple.Extra ((***), (&&&))
 import Data.Maybe
 import Data.Monoid
 import Data.Traversable
-import Data.Char (isUpper, isLower)
+import Data.Char (isUpper, isLower, toLower)
 import Safe hiding (at, headDef, lastDef)
 import System.FilePath
 import qualified Data.Map as Map

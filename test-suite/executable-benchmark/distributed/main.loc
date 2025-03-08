@@ -1,11 +1,18 @@
 module m (foo)
 
+type Py => Int = "int"
+type Py => Real = "float"
+type Py => Tuple2 a b = "tuple" a b
+type Py => List a = "list" a
+
+source Py from "foo.py" ("nTrials", "mean", "sd", "simulate")
+
 simulate :: Int -> [Real]
 mean :: [Real] -> Real
 sd :: [Real] -> Real
 
 -- multi-threaded program for running a random process many times on the same input
-nTrials :: Int -> a -> (a -> b) -> [b]
+nTrials a b :: Int -> a -> (a -> b) -> [b]
 
 foo :: Int -> Int -> (Real, Real)
 foo n size = (mean means, sd means)

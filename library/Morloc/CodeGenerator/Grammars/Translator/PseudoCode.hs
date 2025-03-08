@@ -43,9 +43,11 @@ prettyFoldManifold = FoldWithManifoldM
 
     makeSerialExpr :: Monad m => SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs
     makeSerialExpr _ (ManS_ m) = return m
-    makeSerialExpr _ (AppPoolS_ t (PoolCall mid (Socket _ _ socketFile) _ _) args) = return $ mergePoolDocs makePoolCall args
+    makeSerialExpr _ (AppPoolS_ t (PoolCall mid (Socket _ _ socketFile) remote _) args) = return $ mergePoolDocs makePoolCall args
         where
-        makePoolCall xs' = parens (pretty t) <+> "__foreign_call__" <> tupled [dquotes socketFile, dquotes (pretty mid), list xs']
+        makePoolCall xs' = case remote of
+            ForeignCall -> parens (pretty t) <+> "__foreign_call__" <> tupled [dquotes socketFile, dquotes (pretty mid), list xs']
+            (RemoteCall _) -> "REMOTE_CALL"
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "ReturnS(" <> poolExpr x <> ")"}
     makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet letNamerS "SerialLetS" i e1 e2
     makeSerialExpr _ (NativeLetS_ i e1 e2) = return $ makeLet letNamerN "NativeLetS" i e1 e2

@@ -1,21 +1,20 @@
-manifold-config:
-  default-group:
-    benchmark: false
-    cache: false
-    distribute: null
-  labeled-groups:
-    large:
-      benchmark: true
-      cache: true
-      remote:
-        threads: 32
-        memory: 128
-        gpus: 0
-        time: "3-00:00:00"
-    small:
-      cache: true
-      remote:
-        threads: 32
-        memory: 128
-        gpus: 0
-        time: "0-01:00:00"
+default-group:
+  benchmark: false
+  cache: false
+  distribute: null
+labeled-groups:
+  large:
+    benchmark: true
+    cache: true
+    remote:
+      threads: 32
+      memory: 128
+      gpus: 0
+      time: "3-00:00:00"
+  small:
+    cache: true
+    remote:
+      threads: 32
+      memory: 128
+      gpus: 0
+      time: "0-01:00:00"

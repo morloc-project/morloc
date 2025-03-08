@@ -52,7 +52,7 @@ configureAll verbose force slurmSupport config = do
   say $ "Writing build config file"
 
   -- currently SLURM support is the only build option
-  TIO.writeFile (configBuildConfig config) ( if slurmSupport then "{ \"slurm-support\":true }" else "{\"slurm-support\":false}" )
+  TIO.writeFile (configBuildConfig config) ( if slurmSupport then "slurm-support: true" else "slurm-support: false" )
 
   say "Installing C++ extra types"
 

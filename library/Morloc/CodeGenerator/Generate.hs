@@ -24,7 +24,6 @@ import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
-import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import qualified Morloc.CodeGenerator.SystemConfig as MCS
 import qualified Morloc.TypeEval as TE
@@ -311,16 +310,16 @@ realize s0 = do
         :: Type
         -> [(AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)]
         -> MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
-      handleMany gt' xs =
+      handleMany gt' xs' =
         -- select instances that exactly match the unevaluated general type
         --
         -- WARNING: this is an oversimplification, a temporary solution, I will
         -- update it when I find a breaking case.
-        case [x | x@(AnnoS (Idx _ t) _ _, _) <- xs, gt' == t] of
+        case [x | x@(AnnoS (Idx _ t) _ _, _) <- xs', gt' == t] of
           [] -> do
             gscope <- MM.getGeneralScope i
             case TE.reduceType gscope (type2typeu gt') of
-              (Just gt'') -> handleMany (typeOf gt'') xs
+              (Just gt'') -> handleMany (typeOf gt'') xs'
               Nothing -> MM.throwError . GeneratorError . render $
                 "I couldn't find implementation for" <+> squotes (pretty v) <+> "gt' = " <+> pretty gt'
           [x'] -> return x'
@@ -795,14 +794,20 @@ setManifoldConfig
   -> MorlocMonad ()
 -- The positive case of an application to a term. The VarS here directly maps to
 -- a term in the users input code, e.g., `myTag:foo`.
-setManifoldConfig midx (AnnoS _ _ (AppS (AnnoS (Idx fidx _) _ (VarS _ _)) _)) = do
-  s <- MM.get
-  case Map.lookup fidx (stateManifoldConfig s) of
-    Nothing -> return ()
-    (Just mconfig) -> MM.put(s {stateManifoldConfig = Map.insert midx mconfig (stateManifoldConfig s)})
+setManifoldConfig midx (AnnoS _ _ (AppS (AnnoS (Idx fidx _) _ (VarS _ _)) _)) = linkConfigIndex midx fidx
+setManifoldConfig midx (AnnoS _ _ (AppS (AnnoS (Idx fidx _) _ (CallS _)) _)) = linkConfigIndex midx fidx
 setManifoldConfig midx (AnnoS _ _ (AppS e _)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (LamS _ e)) = setManifoldConfig midx e
 setManifoldConfig _ _ = return ()
+
+linkConfigIndex :: Int -> Int -> MorlocMonad ()
+linkConfigIndex midx fidx = do
+  s <- MM.get
+  case Map.lookup fidx (stateManifoldConfig s) of
+    Nothing -> return ()
+    (Just mconfig) -> do
+        MM.sayVVV $ "Copy manifold config from" <+> pretty fidx <+> "to" <+> pretty midx
+        MM.put(s {stateManifoldConfig = Map.insert midx mconfig (stateManifoldConfig s)})
 
 
 -- Conventions:
@@ -816,8 +821,7 @@ setManifoldConfig _ _ = return ()
 express :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
 -- CallS - direct export of a sourced function, e.g.:
 express (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (CallS src)) = do
-  MM.sayVVV $ "Case #who the hell cares"
-  MM.sayVVV $ "cidx:" <+> pretty cidx
+  MM.sayVVV $ "express CallS (midx=" <> pretty midx <> "," <+> "cidx=" <> pretty cidx <> "):"
   ids <- MM.takeFromCounter (length inputs)
   let lambdaVals = fromJust $ safeZipWith PolyBndVar (map (C . Idx cidx) inputs) ids
   return
@@ -840,7 +844,7 @@ express (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (CallS src)) = do
 -- ----
 -- lambda
 express (AnnoS (Idx midx _) (_, lambdaArgs) (LamS _ e@(AnnoS (Idx _ applicationType) (c, _) x))) = do
-  MM.sayVVV "express LamS:"
+  MM.sayVVV $ "express LamS (midx=" <> pretty midx <> "):"
   -- More evil, copy the manifold config from the top application to this lambda
   setManifoldConfig midx e
   -- attatch the lamba index to the application ManifoldConfig from state
@@ -892,7 +896,13 @@ expressDefault e@(AnnoS (Idx midx t) (Idx cidx lang, args) _)
 
 
 expressPolyExprWrap :: Lang -> Indexed Type -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyExpr
-expressPolyExprWrap l t e@(AnnoS (Idx midx _) _ _) = do
+expressPolyExprWrap l t e@(AnnoS (Idx midx _) _ (LamS _ lamExpr)) = do
+  setManifoldConfig midx lamExpr
+  expressPolyExprWrapCommon l t e
+expressPolyExprWrap l t e = expressPolyExprWrapCommon l t e
+
+expressPolyExprWrapCommon :: Lang -> Indexed Type -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyExpr
+expressPolyExprWrapCommon l t e@(AnnoS (Idx midx _) _ _) = do
   bconf <- MM.gets stateBuildConfig
   mconMap <- MM.gets stateManifoldConfig
   expressPolyExpr (decideRemoteness bconf (Map.lookup midx mconMap)) l t e
@@ -900,14 +910,14 @@ expressPolyExprWrap l t e@(AnnoS (Idx midx _) _ _) = do
 decideRemoteness :: BuildConfig -> Maybe ManifoldConfig -> Lang -> Lang -> Maybe RemoteForm
 decideRemoteness _ Nothing l1 l2
   | l1 == l2 = Nothing
-  | l1 /= l2 = Just ForeignCall
+  | otherwise = Just ForeignCall
 decideRemoteness _ (Just (ManifoldConfig _ _ Nothing)) l1 l2
   | l1 == l2 = Nothing
-  | l1 /= l2 = Just ForeignCall
+  | otherwise = Just ForeignCall
 decideRemoteness bconf (Just mconf@(ManifoldConfig _ _ (Just _))) l1 l2 =
   case (buildConfigSlurmSupport bconf, l1 /= l2) of
-    (Just True, _) -> Just $ RemoteCall mconf 
-    (_, True) -> Just $ ForeignCall 
+    (Just True, _) -> Just $ RemoteCall mconf
+    (_, True) -> Just $ ForeignCall
     _ -> Nothing
     
 
@@ -1012,7 +1022,7 @@ expressPolyExpr findRemote parentLang _
         . PolyManifold parentLang midx (ManifoldPass typedBoundArgs)
         . PolyReturn
         . PolyApp
-          ( PolyRemoteInterface callLang (Idx cidxApp appType) (map ann appArgs) ForeignCall
+          ( PolyRemoteInterface callLang (Idx cidxApp appType) (map ann appArgs) (fromJust remote)
           . PolyManifold callLang midx (ManifoldFull (map unvalue appArgs))
           . PolyReturn
           $ PolyApp call xs'
@@ -1117,7 +1127,7 @@ expressPolyExpr findRemote parentLang _
         . chain lets
         . PolyReturn
         . PolyApp
-            ( PolyRemoteInterface callLang (Idx cidxLam lamOutType) passedParentArgs ForeignCall
+            ( PolyRemoteInterface callLang (Idx cidxLam lamOutType) passedParentArgs (fromJust remote)
             . PolyManifold callLang midx foreignForm
             . PolyReturn
             $ PolyApp call xs'
@@ -1279,7 +1289,7 @@ expressPolyExpr findRemote parentLang pc (AnnoS (Idx midx _) (_, args) (AppS (An
           . PolyManifold parentLang midx (ManifoldFull (map unvalue args))
           . PolyReturn
           . PolyApp
-              ( PolyRemoteInterface callLang pc [] ForeignCall -- no args are passed, so empty
+              ( PolyRemoteInterface callLang pc [] (fromJust remote) -- no args are passed, so empty
               . PolyManifold callLang midx (ManifoldFull (map unvalue args))
               . PolyReturn
               $ PolyApp f xs'
@@ -1349,7 +1359,7 @@ expressPolyExpr findRemote parentLang (val -> FunT pinputs poutput) (AnnoS (Idx 
        . PolyManifold parentLang midx (ManifoldPass lambdaTypedArgs)
        . PolyReturn
        . PolyApp
-           ( PolyRemoteInterface callLang (Idx cidx poutput) (map ann lambdaArgs) ForeignCall
+           ( PolyRemoteInterface callLang (Idx cidx poutput) (map ann lambdaArgs) (fromJust remote)
            . PolyManifold callLang midx (ManifoldFull lambdaArgs)
            . PolyReturn
            $ PolyApp (PolySrc (Idx midx c) src) callVals

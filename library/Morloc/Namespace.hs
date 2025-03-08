@@ -40,6 +40,7 @@ module Morloc.Namespace
   , SrcName(..)
   , Path
   , Code(..)
+  , TimeInSeconds(..)   
   , DirTree(..)
   , AnchoredDirTree(..)
   -- ** Language
@@ -147,11 +148,12 @@ import System.Directory.Tree (DirTree(..), AnchoredDirTree(..))
 import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.PartialOrd as P
 import qualified Data.List as DL
-import Data.Aeson (FromJSON(..), (.!=), (.:?), withObject, genericParseJSON)
+import qualified Data.Aeson as Aeson
+import Data.Aeson (FromJSON(..), (.!=), (.:?))
 import Data.Aeson.Types (Options(..), defaultOptions)
 import GHC.Generics (Generic)
-import Data.Char (isUpper, toLower)
 
+import Text.Read (readMaybe)
 
 import Morloc.Data.Doc
 import qualified Data.Set as Set
@@ -232,15 +234,15 @@ data Instance = Instance
 data RemoteResources = RemoteResources
   { remoteResourcesThreads :: Maybe Int
   , remoteResourcesMemory :: Maybe Int
-  , remoteResourcesTime :: Maybe Int -- walltime in seconds
+  , remoteResourcesTime :: Maybe TimeInSeconds
   , remoteResourcesGpus :: Maybe Int
   }
   deriving(Show, Ord, Eq, Generic)
 
 data ManifoldConfig = ManifoldConfig
-  { manifoldStateCache :: Maybe Bool
-  , manifoldStateBenchmark :: Maybe Bool
-  , manifoldStateRemote :: Maybe RemoteResources
+  { manifoldConfigCache :: Maybe Bool
+  , manifoldConfigBenchmark :: Maybe Bool
+  , manifoldConfigRemote :: Maybe RemoteResources
   }
   deriving(Show, Ord, Eq, Generic)
 
@@ -582,6 +584,8 @@ newtype SrcName = SrcName {unSrcName :: Text} deriving (Show, Eq, Ord)
 
 newtype Code = Code {unCode :: Text} deriving (Show, Eq, Ord)
 
+newtype TimeInSeconds = TimeInSeconds Int deriving (Show, Eq, Ord)
+
 -- this is a string because the path libraries want strings
 type Path = String
 
@@ -890,19 +894,19 @@ instance Bifoldable Or where
 
 instance FromJSON Config where
   parseJSON =
-    withObject "object" $ \o ->
+    Aeson.withObject "object" $ \o ->
       Config
         <$> o .:? "home" .!= "~/.morloc"
         <*> o .:? "source" .!= "~/.morloc/src/morloc"
         <*> o .:? "plane" .!= "morloclib"
         <*> o .:? "tmpdir" .!= "~/.morloc/tmp"
-        <*> o .:? "build-config" .!= "~/.morloc/build-config"
+        <*> o .:? "build-config" .!= "~/.morloc/build-config.yaml"
         <*> o .:? "lang_python3" .!= "python3"
         <*> o .:? "lang_R" .!= "Rscript"
         <*> o .:? "lang_perl" .!= "perl"
 
 instance FromJSON PackageMeta where
-  parseJSON = withObject "object" $ \o ->
+  parseJSON = Aeson.withObject "object" $ \o ->
     PackageMeta <$> o .:? "name"        .!= ""
                 <*> o .:? "version"     .!= ""
                 <*> o .:? "homepage"    .!= ""
@@ -957,9 +961,9 @@ instance Defaultable RemoteResources where
 
 instance Defaultable ManifoldConfig where
   defaultValue = ManifoldConfig
-    { manifoldStateCache = Just False
-    , manifoldStateBenchmark = Just False
-    , manifoldStateRemote = Nothing
+    { manifoldConfigCache = Just False
+    , manifoldConfigBenchmark = Just False
+    , manifoldConfigRemote = Nothing
     }
 
 instance Defaultable MorlocState where
@@ -1654,6 +1658,34 @@ newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
 
 -- Custom FromJSON instances
 
+-- Convert SLURM time string (e.g., "01-00:00:00") to seconds
+parseSlurmTime :: String -> Maybe Int
+parseSlurmTime str = case splitOn "-" str of
+  [days, hms] -> do
+    d <- readMaybe days :: Maybe Int
+    s <- parseHMS hms
+    return $ d * 86400 + s
+  [hms] -> parseHMS hms -- No days specified
+  _ -> Nothing
+
+-- Helper to parse "HH:MM:SS" into seconds
+parseHMS :: String -> Maybe Int
+parseHMS hms = case splitOn ":" hms of
+  [hours, minutes, seconds] -> do
+    h <- readMaybe hours :: Maybe Int
+    m <- readMaybe minutes :: Maybe Int
+    s <- readMaybe seconds :: Maybe Int
+    return $ h * 3600 + m * 60 + s
+  _ -> Nothing
+
+-- Custom FromJSON instance for TimeInSeconds
+instance FromJSON TimeInSeconds where
+  parseJSON (Aeson.String t) = case parseSlurmTime (DT.unpack t) of
+    Just seconds -> return $ TimeInSeconds seconds
+    Nothing -> fail $ "Invalid SLURM time format: " ++ DT.unpack t
+  parseJSON _ = fail "Expected a string for SLURM time"
+
+
 -- Helper function to strip prefixes and convert to kebab-case
 stripPrefixAndKebabCase :: String -> String -> String
 stripPrefixAndKebabCase prefix str =
@@ -1670,13 +1702,13 @@ convertToKebabCase (x:xs)
   | otherwise = x : convertToKebabCase xs -- Keep other characters as-is
 
 instance FromJSON ModuleConfig where
-  parseJSON = genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "moduleConfig" }
+  parseJSON = Aeson.genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "moduleConfig" }
 
 instance FromJSON ManifoldConfig where
-  parseJSON = genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "manifoldConfig" }
+  parseJSON = Aeson.genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "manifoldConfig" }
 
 instance FromJSON RemoteResources where
-  parseJSON = genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "remoteResources" }
+  parseJSON = Aeson.genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "remoteResources" }
 
 instance FromJSON BuildConfig where
-  parseJSON = genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "buildConfig" }
+  parseJSON = Aeson.genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "buildConfig" }

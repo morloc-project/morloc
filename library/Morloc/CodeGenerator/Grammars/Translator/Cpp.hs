@@ -456,11 +456,13 @@ translateSegment m0 = do
 
   makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> CppTranslator PoolDocs
   makeSerialExpr _ (ManS_ e) = return e
-  makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) _ args) _) = do
+  makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) remote args) _) = do 
     let bufDef = "std::ostringstream s;"
         argList = encloseSep "{" "}" ", " (map argNamer args)
         argsDef = [idoc|std::vector<Message> args = #{argList};|]
-        call = [idoc|foreign_call(#{makeSocketPath socketFile}, #{pretty mid}, args)|]
+    call <- case remote of
+            ForeignCall -> return [idoc|foreign_call(#{makeSocketPath socketFile}, #{pretty mid}, args)|]
+            (RemoteCall _) -> return [idoc|REMOTE_CALL|]
     return $ PoolDocs
       { poolCompleteManifolds = []
       , poolExpr = call
