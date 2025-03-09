@@ -1,21 +1,47 @@
 #ifndef __MORLOC_H__
 #define __MORLOC_H__
 
-#ifdef SLURM_SUPPORT
-#include <slurm.h>
-#endif // end SLURM_SUPPORT
+#include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <pthread.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
-// The following code is adapted from libmpack: https://github.com/libmpack/libmpack ///////////////
+// {{{ utilities
+
+// just a debugging function
+void hex(const void *ptr, size_t size) {
+    unsigned char *byte_ptr = (unsigned char *)ptr;
+    for (size_t i = 0; i < size; i++) {
+        if(i > 0 && i % 8 == 0){
+          fprintf(stderr, " ");
+        }
+        fprintf(stderr, "%02X", byte_ptr[i]);
+        if (i < size - 1) {
+            fprintf(stderr, " ");
+        }
+    }
+}
+
+// }}}
+
+// {{{ MessagePack parser from libmpack
+
+// The following code is adapted from libmpack: https://github.com/libmpack/libmpack
 
 #ifndef MPACK_API
 # define MPACK_API extern
 #endif
-
-#include <assert.h>
-#include <limits.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <string.h>
 
 #ifdef __GNUC__
 # define FPURE __attribute__((const))
@@ -851,19 +877,9 @@ static int mpack_is_be(void)
   return test.c[0] == 0;
 }
 
+// }}}
 
-// ===== morloc shared library pool handling =====
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <string.h>
-#include <stdbool.h>
-#include <pthread.h>
-#include <errno.h>
+// {{{ morloc shared library pool handling
 
 #define SHM_MAGIC 0xFECA0DF0
 #define BLK_MAGIC 0x0CB10DF0
@@ -1632,34 +1648,9 @@ size_t total_shm_size(){
     return total_size;
 }
 
+// }}}
 
-
-// ===== morloc mesgpack and voidstar handling =====
-
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdarg.h>
-
-// just a debugging function
-void hex(const void *ptr, size_t size) {
-    unsigned char *byte_ptr = (unsigned char *)ptr;
-    for (size_t i = 0; i < size; i++) {
-        if(i > 0 && i % 8 == 0){
-          fprintf(stderr, " ");
-        }
-        fprintf(stderr, "%02X", byte_ptr[i]);
-        if (i < size - 1) {
-            fprintf(stderr, " ");
-        }
-    }
-}
-
-// Forward declarations
-struct Schema;
+// {{{ morloc schema support
 
 typedef enum {
   MORLOC_NIL,
@@ -1696,6 +1687,7 @@ typedef enum {
 //  * Primitives have no parameters
 //  * Arrays have one
 //  * Tuples and records have one or more
+struct Schema;
 typedef struct Schema {
     morloc_serial_type type;
     size_t size; // number of parameters
@@ -1706,6 +1698,13 @@ typedef struct Schema {
     char** keys; // field names, used only for records
 } Schema;
 
+// Allocate a shared memory block sufficient to store a schema's object
+void* get_ptr(const Schema* schema){
+    void* ptr = (void*)shmalloc(schema->width);
+    return ptr;
+}
+
+// The voidstar representation of variable length data
 typedef struct Array {
   size_t size;
   relptr_t data;
@@ -1714,14 +1713,6 @@ typedef struct Array {
 // Prototypes
 
 Schema* parse_schema(const char** schema_ptr);
-
-// Main pack function for creating morloc-encoded MessagePack data
-int pack(const void* mlc, const char* schema_str, char** mpkptr, size_t* mpk_size);
-int pack_with_schema(const void* mlc, const Schema* schema, char** mpkptr, size_t* mpk_size);
-
-int unpack(const char* mpk, size_t mpk_size, const char* schema_str, void** mlcptr);
-int unpack_with_schema(const char* mpk, size_t mpk_size, const Schema* schema, void** mlcptr);
-
 
 // Helper function to create a schema with parameters
 Schema* create_schema_with_params(morloc_serial_type type, size_t width, size_t size, Schema** params, char** keys) {
@@ -1835,86 +1826,6 @@ Schema* map_schema(size_t size, char** keys, Schema** params) {
     return create_schema_with_params(MORLOC_MAP, width, size, params, keys);
 }
 
-void* get_ptr(const Schema* schema){
-    void* ptr = (void*)shmalloc(schema->width);
-    return ptr;
-}
-
-// packing ####
-
-// Try to add `added_size` bytes of space to a buffer, if there is not enough
-// space, increase the buffer size.
-void upsize(
-  char** data,            // data that will be resized
-  char** data_ptr,        // pointer that will be updated to preserve offset
-  size_t* remaining_size, // remaining data size
-  size_t added_size       // the number of bytes that need to be added
-){
-    // check if any action is needed
-    if (added_size <= *remaining_size) {
-        return;
-    }
-
-    size_t used_size = *data_ptr - *data;
-    size_t buffer_size = used_size + *remaining_size;
-
-    // find an appropriate size for the new data
-    while (added_size > *remaining_size) {
-        if (buffer_size > SIZE_MAX / 2) {
-            buffer_size += BUFFER_SIZE;
-        } else {
-            buffer_size *= 2;
-        }
-        *remaining_size = buffer_size - used_size;
-    }
-
-    // allocate memory for the new data
-    *data = (char*)realloc(*data, buffer_size);
-
-    // point old pointer to the same offset in the new data
-    *data_ptr = *data + used_size;
-}
-
-
-// write data to a packet, if the buffer is too small, increase its size
-void write_to_packet(
-  const void* src,                // source data
-  char** packet,            // destination
-  char** packet_ptr,        // location in the destination that will be written to
-  size_t* packet_remaining, // remaining data size
-  size_t size               // the number of bytes to write
-
-){
-    upsize(packet, packet_ptr, packet_remaining, size);
-    memcpy(*packet_ptr, src, size);
-    *packet_ptr += size;
-    *packet_remaining -= size;
-}
-
-
-// write a token to a packet, increase buffer size as needed
-int dynamic_mpack_write(
-  mpack_tokbuf_t* tokbuf,
-  char** packet,
-  char** packet_ptr,
-  size_t* packet_remaining,
-  mpack_token_t* token,
-  size_t extra_size
-) {
-    int result = 0;
-    if(*packet_remaining <= 0){
-        upsize(packet, packet_ptr, packet_remaining, 1);
-    }
-    result = mpack_write(tokbuf, packet_ptr, packet_remaining, token);
-    if (result == MPACK_EOF || *packet_remaining == 0) {
-        upsize(packet, packet_ptr, packet_remaining, token->length + extra_size);
-        if (result == MPACK_EOF) {
-            mpack_write(tokbuf, packet_ptr, packet_remaining, token);
-        }
-    }
-    return result;
-}
-
 size_t parse_schema_size(const char** schema_ptr){
   char c = **schema_ptr;
   size_t size =
@@ -1988,8 +1899,6 @@ char* parse_hint(const char** schema_ptr) {
   hint[buffer_index] = '\0';
   return hint;
 }
-
-
 
 Schema* parse_schema(const char** schema_ptr){
   Schema** params;
@@ -2096,6 +2005,91 @@ void free_schema(Schema* schema) {
     // Finally, free the schema itself
     free(schema);
 }
+
+// }}} end morloc schema
+
+// {{{ morloc MessagePack support
+
+// Main pack function for creating morloc-encoded MessagePack data
+int pack(const void* mlc, const char* schema_str, char** mpkptr, size_t* mpk_size);
+int pack_with_schema(const void* mlc, const Schema* schema, char** mpkptr, size_t* mpk_size);
+
+int unpack(const char* mpk, size_t mpk_size, const char* schema_str, void** mlcptr);
+int unpack_with_schema(const char* mpk, size_t mpk_size, const Schema* schema, void** mlcptr);
+
+// Try to add `added_size` bytes of space to a buffer, if there is not enough
+// space, increase the buffer size.
+void upsize(
+  char** data,            // data that will be resized
+  char** data_ptr,        // pointer that will be updated to preserve offset
+  size_t* remaining_size, // remaining data size
+  size_t added_size       // the number of bytes that need to be added
+){
+    // check if any action is needed
+    if (added_size <= *remaining_size) {
+        return;
+    }
+
+    size_t used_size = *data_ptr - *data;
+    size_t buffer_size = used_size + *remaining_size;
+
+    // find an appropriate size for the new data
+    while (added_size > *remaining_size) {
+        if (buffer_size > SIZE_MAX / 2) {
+            buffer_size += BUFFER_SIZE;
+        } else {
+            buffer_size *= 2;
+        }
+        *remaining_size = buffer_size - used_size;
+    }
+
+    // allocate memory for the new data
+    *data = (char*)realloc(*data, buffer_size);
+
+    // point old pointer to the same offset in the new data
+    *data_ptr = *data + used_size;
+}
+
+
+// write data to a packet, if the buffer is too small, increase its size
+void write_to_packet(
+  const void* src,                // source data
+  char** packet,            // destination
+  char** packet_ptr,        // location in the destination that will be written to
+  size_t* packet_remaining, // remaining data size
+  size_t size               // the number of bytes to write
+
+){
+    upsize(packet, packet_ptr, packet_remaining, size);
+    memcpy(*packet_ptr, src, size);
+    *packet_ptr += size;
+    *packet_remaining -= size;
+}
+
+
+// write a token to a packet, increase buffer size as needed
+int dynamic_mpack_write(
+  mpack_tokbuf_t* tokbuf,
+  char** packet,
+  char** packet_ptr,
+  size_t* packet_remaining,
+  mpack_token_t* token,
+  size_t extra_size
+) {
+    int result = 0;
+    if(*packet_remaining <= 0){
+        upsize(packet, packet_ptr, packet_remaining, 1);
+    }
+    result = mpack_write(tokbuf, packet_ptr, packet_remaining, token);
+    if (result == MPACK_EOF || *packet_remaining == 0) {
+        upsize(packet, packet_ptr, packet_remaining, token->length + extra_size);
+        if (result == MPACK_EOF) {
+            mpack_write(tokbuf, packet_ptr, packet_remaining, token);
+        }
+    }
+    return result;
+}
+
 
 //  The main function for writing MessagePack
 int pack_data(
@@ -2550,7 +2544,9 @@ int unpack(const char* mpk, size_t mpk_size, const char* schema_str, void** mlcp
     return unpack_with_schema(mpk, mpk_size, schema, mlcptr);
 }
 
+// }}} end Morloc pack support
 
+// {{{ JSON support
 
 // Function to escape a JSON string
 char* json_escape_string(const char* input, size_t input_len) {
@@ -2602,6 +2598,9 @@ char* json_escape_string(const char* input, size_t input_len) {
     return output;
 }
 
+// }}} end JSON support
+
+// {{{ voidstar utilities
 
 void print_voidstar_r(const void* voidstar, const Schema* schema) {
     Array* array;
@@ -2702,5 +2701,13 @@ void print_voidstar(const void* voidstar, const Schema* schema) {
     // add terminal newline
     printf("\n");
 }
+
+// }}} end voidstar utilities
+
+#ifdef SLURM_SUPPORT
+
+// slurm support
+
+#endif // end SLURM_SUPPORT
 
 #endif // ending __MORLOC_CLIB_H__
