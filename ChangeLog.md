@@ -1,7 +1,8 @@
 0.53.0 [2025-02-09]
 -------------------
 
-Add SLURM support
+ [ ] Move packets to little-endian format
+ [ ] Add SLURM support
 
 0.52.0 [2025-02-09]
 -------------------
