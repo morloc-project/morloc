@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -957,7 +958,7 @@ void* shmemcpy(void* dest, size_t size);
 int shfree(absptr_t ptr);
 void* shcalloc(size_t nmemb, size_t size);
 void* shrealloc(void* ptr, size_t size);
-size_t total_shm_size();
+static size_t total_shm_size();
 
 volptr_t rel2vol(relptr_t ptr);
 absptr_t rel2abs(relptr_t ptr);
@@ -1281,7 +1282,7 @@ void shclose() {
 }
 
 
-size_t get_available_memory() {
+static size_t get_available_memory() {
     FILE *meminfo = fopen("/proc/meminfo", "r");
     if (meminfo == NULL) return -1;
 
@@ -1336,7 +1337,7 @@ static size_t choose_next_volume_size(size_t new_data_size) {
 
 
 
-block_header_t* get_block(shm_t* shm, ssize_t cursor){
+static block_header_t* get_block(shm_t* shm, ssize_t cursor){
     if (shm == NULL) {
         perror("Shared memory pool is not defined");
         return NULL;
@@ -1358,7 +1359,7 @@ block_header_t* get_block(shm_t* shm, ssize_t cursor){
     return blk;
 }
 
-block_header_t* scan_volume(block_header_t* blk, size_t size, char* end){
+static block_header_t* scan_volume(block_header_t* blk, size_t size, char* end){
     while ((char*)blk + sizeof(block_header_t) + size <= end) {
         if (!blk){
             return NULL;
@@ -1393,7 +1394,7 @@ block_header_t* scan_volume(block_header_t* blk, size_t size, char* end){
     return NULL;
 }
 
-block_header_t* find_free_block_in_volume(shm_t* shm, size_t size) {
+static block_header_t* find_free_block_in_volume(shm_t* shm, size_t size) {
     if (shm == NULL || size == 0) {
         return NULL;
     }
@@ -1636,7 +1637,7 @@ int shfree(absptr_t ptr) {
     return 0;
 }
 
-size_t total_shm_size(){
+static size_t total_shm_size(){
     size_t total_size = 0;
     shm_t* shm;
     for(size_t i = 0; i < MAX_VOLUME_NUMBER; i++){
@@ -1715,7 +1716,7 @@ typedef struct Array {
 Schema* parse_schema(const char** schema_ptr);
 
 // Helper function to create a schema with parameters
-Schema* create_schema_with_params(morloc_serial_type type, size_t width, size_t size, Schema** params, char** keys) {
+static Schema* create_schema_with_params(morloc_serial_type type, size_t width, size_t size, Schema** params, char** keys) {
     Schema* schema = (Schema*)malloc(sizeof(Schema));
     if (!schema) return NULL;
 
@@ -1738,15 +1739,15 @@ Schema* create_schema_with_params(morloc_serial_type type, size_t width, size_t 
     return schema;
 }
 
-Schema* nil_schema() {
+static Schema* nil_schema() {
     return create_schema_with_params(MORLOC_NIL, 1, 0, NULL, NULL);
 }
 
-Schema* bool_schema() {
+static Schema* bool_schema() {
     return create_schema_with_params(MORLOC_BOOL, 1, 0, NULL, NULL);
 }
 
-Schema* uint_schema(size_t width) {
+static Schema* uint_schema(size_t width) {
     switch(width){
       case 1:
         return create_schema_with_params(MORLOC_UINT8, width, 0, NULL, NULL);
@@ -1762,7 +1763,7 @@ Schema* uint_schema(size_t width) {
     }
 }
 
-Schema* sint_schema(size_t width) {
+static Schema* sint_schema(size_t width) {
     switch(width){
       case 1:
         return create_schema_with_params(MORLOC_SINT8, width, 0, NULL, NULL);
@@ -1778,7 +1779,7 @@ Schema* sint_schema(size_t width) {
     }
 }
 
-Schema* float_schema(size_t width) {
+static Schema* float_schema(size_t width) {
     switch(width){
       case 4:
         return create_schema_with_params(MORLOC_FLOAT32, width, 0, NULL, NULL);
@@ -1790,7 +1791,7 @@ Schema* float_schema(size_t width) {
     }
 }
 
-Schema* string_schema() {
+static Schema* string_schema() {
     Schema** params = (Schema**)malloc(sizeof(Schema*));
     if (!params) return NULL;
 
@@ -1800,7 +1801,7 @@ Schema* string_schema() {
     return create_schema_with_params(MORLOC_STRING, sizeof(Array), 0, params, NULL);
 }
 
-Schema* tuple_schema(Schema** params, size_t size) {
+static Schema* tuple_schema(Schema** params, size_t size) {
     size_t width = 0;
     for(size_t i = 0; i < size; i++){
       width += params[i]->width;
@@ -1809,7 +1810,7 @@ Schema* tuple_schema(Schema** params, size_t size) {
 }
 
 
-Schema* array_schema(Schema* array_type) {
+static Schema* array_schema(Schema* array_type) {
     Schema** params = (Schema**)malloc(sizeof(Schema*));
     if (!params) return NULL;
 
@@ -1818,7 +1819,7 @@ Schema* array_schema(Schema* array_type) {
     return create_schema_with_params(MORLOC_ARRAY, sizeof(Array), 1, params, NULL);
 }
 
-Schema* map_schema(size_t size, char** keys, Schema** params) {
+static Schema* map_schema(size_t size, char** keys, Schema** params) {
     size_t width = 0;
     for(size_t i = 0; i < size; i++){
       width += params[i]->width;
@@ -1826,7 +1827,7 @@ Schema* map_schema(size_t size, char** keys, Schema** params) {
     return create_schema_with_params(MORLOC_MAP, width, size, params, keys);
 }
 
-size_t parse_schema_size(const char** schema_ptr){
+static size_t parse_schema_size(const char** schema_ptr){
   char c = **schema_ptr;
   size_t size =
     // characters 0-9 are integers 0-9
@@ -1843,7 +1844,7 @@ size_t parse_schema_size(const char** schema_ptr){
   return size;
 }
 
-char* parse_schema_key(const char** schema_ptr){
+static char* parse_schema_key(const char** schema_ptr){
   size_t key_size = parse_schema_size(schema_ptr);
   char* key = (char*)calloc(key_size+1, sizeof(char));
   memcpy(key, *schema_ptr, key_size);
@@ -1852,7 +1853,7 @@ char* parse_schema_key(const char** schema_ptr){
 }
 
 // This parser starts on the character **after** the initial '<'
-char* parse_hint(const char** schema_ptr) {
+static char* parse_hint(const char** schema_ptr) {
   char* hint = NULL;
 
   if (!schema_ptr || !*schema_ptr) {
@@ -2019,7 +2020,7 @@ int unpack_with_schema(const char* mpk, size_t mpk_size, const Schema* schema, v
 
 // Try to add `added_size` bytes of space to a buffer, if there is not enough
 // space, increase the buffer size.
-void upsize(
+static void upsize(
   char** data,            // data that will be resized
   char** data_ptr,        // pointer that will be updated to preserve offset
   size_t* remaining_size, // remaining data size
@@ -2052,7 +2053,7 @@ void upsize(
 
 
 // write data to a packet, if the buffer is too small, increase its size
-void write_to_packet(
+static void write_to_packet(
   const void* src,                // source data
   char** packet,            // destination
   char** packet_ptr,        // location in the destination that will be written to
@@ -2068,7 +2069,7 @@ void write_to_packet(
 
 
 // write a token to a packet, increase buffer size as needed
-int dynamic_mpack_write(
+static int dynamic_mpack_write(
   mpack_tokbuf_t* tokbuf,
   char** packet,
   char** packet_ptr,
@@ -2092,7 +2093,7 @@ int dynamic_mpack_write(
 
 
 //  The main function for writing MessagePack
-int pack_data(
+static int pack_data(
   const void* mlc,           // input data structure
   const Schema* schema,      // input data schema
   char** packet,             // a pointer to the messagepack data
@@ -2254,14 +2255,14 @@ int pack(const void* mlc, const char* schema_str, char** mpk, size_t* mpk_size) 
 
 
 // nested msg_sizers
-size_t msg_size(const char* mgk, size_t mgk_size, const Schema* schema);
-size_t msg_size_r(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-size_t msg_size_bytes(mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-size_t msg_size_array(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-size_t msg_size_tuple(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-size_t msg_size_map(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+static size_t msg_size(const char* mgk, size_t mgk_size, const Schema* schema);
+static size_t msg_size_r(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+static size_t msg_size_bytes(mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+static size_t msg_size_array(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+static size_t msg_size_tuple(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+static size_t msg_size_map(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
 
-size_t msg_size_bytes(mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+static size_t msg_size_bytes(mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
     size_t array_size = token->length;
 
@@ -2273,7 +2274,7 @@ size_t msg_size_bytes(mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_
     return array_size + sizeof(Array);
 }
 
-size_t msg_size_array(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+static size_t msg_size_array(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
     size_t array_length = token->length;
     size_t size = sizeof(Array);
@@ -2283,7 +2284,7 @@ size_t msg_size_array(const Schema* schema, mpack_tokbuf_t* tokbuf, const char**
     return size;
 }
 
-size_t msg_size_tuple(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+static size_t msg_size_tuple(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     // parse the mesgpack tuple
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
     assert(token->length == schema->size); 
@@ -2294,7 +2295,7 @@ size_t msg_size_tuple(const Schema* schema, mpack_tokbuf_t* tokbuf, const char**
     return size;
 }
 
-size_t msg_size_r(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+static size_t msg_size_r(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     switch(schema->type){
       case MORLOC_NIL:
       case MORLOC_BOOL:
@@ -2322,7 +2323,7 @@ size_t msg_size_r(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf
     }
 }
 
-size_t msg_size(const char* mgk, size_t mgk_size, const Schema* schema) {
+static size_t msg_size(const char* mgk, size_t mgk_size, const Schema* schema) {
     size_t buf_remaining = mgk_size;
 
     mpack_tokbuf_t tokbuf = MPACK_TOKBUF_INITIAL_VALUE;
@@ -2333,25 +2334,25 @@ size_t msg_size(const char* mgk, size_t mgk_size, const Schema* schema) {
 
 
 // terminal parsers
-int parse_bool(        void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_nil(         void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_bytes(       void* mlc, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_int(    morloc_serial_type, void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_float(  morloc_serial_type, void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+static int parse_bool(        void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+static int parse_nil(         void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+static int parse_bytes(       void* mlc, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+static int parse_int(    morloc_serial_type, void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+static int parse_float(  morloc_serial_type, void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
 
 // nested parsers
-int parse_array( void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_map(   void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_tuple( void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
-int parse_obj(   void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+static int parse_array( void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+static int parse_map(   void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+static int parse_tuple( void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
+static int parse_obj(   void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token);
 
-int parse_nil(void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+static int parse_nil(void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
     *((int8_t*)mlc) = (int8_t)0;
     return 0;
 }
 
-int parse_bool(void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+static int parse_bool(void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
     // boolean here needs to be uint8 since the C `bool` type is not guaranteed
     // to be 1 byte, it is likely typedefed to `int`, which is 32 bit.
@@ -2359,7 +2360,7 @@ int parse_bool(void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* 
     return 0;
 }
 
-int parse_int(morloc_serial_type schema_type, void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+static int parse_int(morloc_serial_type schema_type, void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
     switch(token->type){
       case MPACK_TOKEN_UINT:
@@ -2417,7 +2418,7 @@ int parse_int(morloc_serial_type schema_type, void* mlc, mpack_tokbuf_t* tokbuf,
     return 0;
 }
 
-int parse_float(morloc_serial_type schema_type, void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+static int parse_float(morloc_serial_type schema_type, void* mlc, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
     if(schema_type == MORLOC_FLOAT32){
       *(float*)mlc = (float)mpack_unpack_float(*token);
@@ -2429,7 +2430,7 @@ int parse_float(morloc_serial_type schema_type, void* mlc, mpack_tokbuf_t* tokbu
 }
 
 
-int parse_bytes(void* mlc, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+static int parse_bytes(void* mlc, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     Array* result = (Array*) mlc;
 
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
@@ -2450,7 +2451,7 @@ int parse_bytes(void* mlc, void** cursor, mpack_tokbuf_t* tokbuf, const char** b
     return 0;
 }
 
-int parse_array(void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+static int parse_array(void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     int exitcode = 0;
     Array* result = (Array*) mlc;
 
@@ -2469,7 +2470,7 @@ int parse_array(void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* 
     return 0;
 }
 
-int parse_tuple(void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+static int parse_tuple(void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     size_t offset = 0;
     int exitcode = 0;
 
@@ -2486,7 +2487,7 @@ int parse_tuple(void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* 
     return 0;
 }
 
-int parse_obj(void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
+static int parse_obj(void* mlc, const Schema* schema, void** cursor, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
     switch(schema->type){
       case MORLOC_NIL:
         return parse_nil(mlc, tokbuf, buf_ptr, buf_remaining, token);
@@ -2549,7 +2550,7 @@ int unpack(const char* mpk, size_t mpk_size, const char* schema_str, void** mlcp
 // {{{ JSON support
 
 // Function to escape a JSON string
-char* json_escape_string(const char* input, size_t input_len) {
+static char* json_escape_string(const char* input, size_t input_len) {
     size_t output_len = 0;
     size_t i;
 
@@ -2602,7 +2603,7 @@ char* json_escape_string(const char* input, size_t input_len) {
 
 // {{{ voidstar utilities
 
-void print_voidstar_r(const void* voidstar, const Schema* schema) {
+static void print_voidstar_r(const void* voidstar, const Schema* schema) {
     Array* array;
     const char* data;
 
@@ -2704,10 +2705,404 @@ void print_voidstar(const void* voidstar, const Schema* schema) {
 
 // }}} end voidstar utilities
 
-#ifdef SLURM_SUPPORT
+// {{{ morloc packet support
 
-// slurm support
+#define MAXIMUM_FILENAME_SIZE 128
+#define ERRMSG_SIZE 256
 
-#endif // end SLURM_SUPPORT
+#define THIS_PLAIN     0
+#define THIS_VERSION   0
+#define DEFAULT_FLAVOR 0
+#define DEFAULT_MODE   0
 
-#endif // ending __MORLOC_CLIB_H__
+// Morloc packet types
+typedef uint8_t command_type_t;
+#define PACKET_TYPE_DATA  ((command_type_t)0)
+#define PACKET_TYPE_CALL  ((command_type_t)1)
+#define PACKET_TYPE_PING  ((command_type_t)2)
+
+// type: an element of the command union that is just for type resolution
+typedef struct __attribute__((packed)) packet_command_type_s {
+    command_type_t type; // identifier for resolving unions
+    uint8_t padding[7]; // pad to 8 bytes
+} packet_command_type_t;
+
+// call: send zero or more data packets as arguments to manifold midx
+typedef struct __attribute__((packed)) packet_command_call_s {
+    command_type_t type; // identifier for resolving unions
+    uint8_t padding[3]; // padding in the middle to align midx
+    uint32_t midx;
+} packet_command_call_t;
+
+// data: data or a fail message
+typedef struct __attribute__((packed)) packet_command_data_s {
+    command_type_t type; // identifier for resolving unions
+    uint8_t source; // where is the data stored (MESG, FILE, RPTR)
+    uint8_t format; // what is the data format (JSON, MSGPACK, etc)
+    uint8_t compression; // compression algorithm (if any)
+    uint8_t encryption; // encryption algorithm (if any)
+    uint8_t status; // PASS or FAIL status, no data if FAIL, only error message
+    uint8_t padding[2];
+} packet_command_data_t;
+
+// The method used to strore the data
+#define PACKET_SOURCE_MESG  0x00 // the message contains the data
+#define PACKET_SOURCE_FILE  0x01 // the message is a path to a file of data
+#define PACKET_SOURCE_RPTR  0x02 // the message is a relative pointer to shared memory
+
+// The format in which the data is stored
+#define PACKET_FORMAT_JSON     0x00
+#define PACKET_FORMAT_MSGPACK  0x01
+#define PACKET_FORMAT_TEXT     0x02
+#define PACKET_FORMAT_DATA     0x03 // raw binary data
+#define PACKET_FORMAT_VOIDSTAR 0x04 // binary morloc formatted data
+
+// Compression algorithm
+#define PACKET_COMPRESSION_NONE  0x00 // uncompressed
+
+// Encryption algorithm
+#define PACKET_ENCRYPTION_NONE   0x00 // unencrypted
+
+// Packet status
+#define PACKET_STATUS_PASS  0x00
+#define PACKET_STATUS_FAIL  0x01
+
+// ping: an empty salutation
+typedef struct __attribute__((packed)) packet_command_ping_s {
+    command_type_t type; // identifier for resolving unions
+    uint8_t padding[7];
+} packet_command_ping_t;
+
+// The union of the 8-byte commands above
+typedef union packet_command_u {
+    packet_command_type_t cmd_type;
+    packet_command_call_t call;
+    packet_command_data_t data;
+    packet_command_ping_t ping;
+} packet_command_t;
+
+// This structure directly represents the binary format of morloc packets. It is
+// essential that the compiler does not add padding (hence the "packed"
+// attribute).
+typedef struct __attribute__((packed)) morloc_packet_header_s {
+  // morloc-specific prefix, should always be: 6D F8 07 07
+  uint32_t magic;
+  // the morloc plain, plains do not interact, they represent different sets of
+  // incompatible functions and ways of looking at the world
+  uint16_t plain;
+  // morloc packet version
+  uint16_t version;
+  // flavor of the morloc packet - not yet used
+  uint16_t flavor;
+  // not yet used
+  uint16_t mode;
+  // union of all supported 7-byte commands, selected using `command_type`
+  packet_command_t command;
+  // offset - 32 bit integer specifying offset to start of payload, the space
+  // between the end of the header and the start of the payload may contain
+  // arbitrary extra information. Not currently used, but the <mode> field and
+  // special future command types may use this space for custom ends.
+  uint32_t offset;
+  // length of the main payload data
+  uint64_t length;
+} morloc_packet_header_t;
+
+static_assert(
+    sizeof(morloc_packet_header_t) == 32,
+    "Header size mismatch!"
+);
+
+#define MORLOC_PACKET_MAGIC 0x0707f86d
+
+
+morloc_packet_header_t* read_morloc_packet_header(const uint8_t* msg){
+    morloc_packet_header_t* header = (morloc_packet_header_t*) msg;
+    if (header->magic != MORLOC_PACKET_MAGIC){
+        return NULL;
+    }
+    return header;
+}
+
+
+size_t morloc_packet_size(const morloc_packet_header_t* header){
+    return sizeof(morloc_packet_header_t) + header->offset + header->length;
+}
+
+
+// Set the packet header at the first 32 bytes of a data block
+
+static void set_morloc_packet_header(
+    uint8_t* data,
+    packet_command_t cmd,
+    uint32_t offset,
+    uint64_t length
+){
+    morloc_packet_header_t* header = (morloc_packet_header_t*) data;
+    header->magic = MORLOC_PACKET_MAGIC;
+    header->plain = THIS_PLAIN;
+    header->version = THIS_VERSION;
+    header->flavor = DEFAULT_FLAVOR;
+    header->mode = DEFAULT_MODE;
+    header->command = cmd;
+    header->offset = offset;
+    header->length = length;
+}
+
+
+static uint8_t* make_morloc_data_packet(
+    const uint8_t* data,
+    size_t data_length,
+    const uint8_t* metadata,
+    size_t metadata_length,
+    uint8_t src,
+    uint8_t fmt,
+    uint8_t cmpr,
+    uint8_t encr,
+    uint8_t status
+){
+
+  size_t packet_length = sizeof(morloc_packet_header_t) + metadata_length + data_length;
+  uint8_t* packet = (uint8_t*)malloc(packet_length * sizeof(uint8_t));
+
+  packet_command_t cmd;
+  cmd.data = {
+      .type = PACKET_TYPE_DATA,
+      .source = src,
+      .format = fmt,
+      .compression = cmpr,
+      .encryption = encr,
+      .status = status,
+      .padding = { 0, 0 }
+  };
+
+  // generate the header
+  set_morloc_packet_header(packet, cmd, metadata_length, data_length);
+
+  if (metadata != NULL && metadata_length > 0) {
+      memcpy(packet + sizeof(morloc_packet_header_t), metadata, metadata_length);
+  }
+
+  if (data != NULL && data_length > 0){
+      memcpy(packet + sizeof(morloc_packet_header_t) + metadata_length, data, data_length);
+  }
+
+  return packet;
+}
+
+
+uint8_t* make_fail_packet(const char* errmsg){
+  return make_morloc_data_packet(
+    (const uint8_t*)errmsg,
+    strlen(errmsg),
+    NULL, 0,
+    PACKET_SOURCE_MESG,
+    PACKET_FORMAT_TEXT,
+    PACKET_COMPRESSION_NONE,
+    PACKET_ENCRYPTION_NONE,
+    PACKET_STATUS_FAIL
+  );
+}
+
+
+// TODO: I need to propagate errors here
+uint8_t* read_binary_file(const char* filename, size_t* file_size, char** errmsg_ptr) {
+
+    char errmsg[ERRMSG_SIZE] = { 0 };
+    uint8_t* msg = NULL;
+    size_t read_size = 0;
+    long file_size_long = 0;
+    FILE* file = NULL;
+
+    if (!filename) {
+        snprintf(errmsg, sizeof(errmsg), "Filename cannot be NULL");
+        goto fail;
+    }
+
+    file = fopen(filename, "rb");
+    if (!file) {
+        snprintf(errmsg, sizeof(errmsg), "Failed to open file '%s'", filename);
+        goto fail;
+    }
+
+    if (fseek(file, 0, SEEK_END) != 0) {
+        snprintf(errmsg, sizeof(errmsg), "Failed to seek to end of file");
+        fclose(file);
+        goto fail;
+    }
+
+    file_size_long = ftell(file);
+    if (file_size_long < 0 || file_size_long == 0) { // Handle zero-sized files
+        snprintf(errmsg, sizeof(errmsg), "Failed to determine file size or file is empty");
+        fclose(file);
+        goto fail;
+    }
+
+    // If the file is too large to fit in memory, we will need to stream it.
+    // TODO: add streaming support
+    if (file_size_long > SIZE_MAX) {
+        snprintf(errmsg, sizeof(errmsg), "File size exceeds maximum allocatable size");
+        goto fail;
+    }
+
+    *file_size = (size_t)file_size_long;
+    rewind(file);
+
+    msg = (uint8_t*)malloc(*file_size);
+    if (!msg) {
+        snprintf(errmsg, sizeof(errmsg), "Failed to allocate %zu bytes", *file_size);
+        fclose(file);
+        goto fail;
+    }
+
+    read_size = fread(msg, 1, *file_size, file);
+    if (read_size != *file_size) {
+        snprintf(errmsg, sizeof(errmsg), 
+                "Read %zu bytes (expected %zu)", read_size, *file_size);
+        free(msg);
+        fclose(file);
+        goto fail;
+    }
+
+    fclose(file);
+    return msg;
+
+fail:
+    *errmsg_ptr = strdup(errmsg);
+    return NULL;
+}
+
+
+
+// Opens a data packet returning a pointer to a packet
+//  * If packet has failing status, it is returned unchanged (error propagation)
+//  * If packet handling fails, the fail_packet is defined and NULL is returned
+//  * Else an absolute pointer to voidstar data is returned
+uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema, uint8_t** fail_packet) {
+
+    uint8_t source;
+    uint8_t format;
+    uint8_t status;
+
+    void* voidstar = NULL;
+    *fail_packet = NULL;
+    char errmsg[512] = { 0 };
+
+    morloc_packet_header_t* header = read_morloc_packet_header(data);
+
+    if(header->command.cmd_type.type != PACKET_TYPE_DATA){
+        snprintf(errmsg, sizeof(errmsg), "Expected a data packet");
+        goto fail;
+    }
+
+    source = header->command.data.source;
+    format = header->command.data.format;
+    status = header->command.data.status;
+
+    if (status == PACKET_STATUS_FAIL) {
+        // This is already a fail packet, so propagate it forwards
+        *fail_packet = (uint8_t*)data;
+        return NULL;
+    }
+
+    switch (source) {
+        case PACKET_SOURCE_MESG:
+            if (format == PACKET_FORMAT_MSGPACK) {
+                int unpack_result = unpack_with_schema((const char*)data + sizeof(morloc_packet_header_t) + header->offset, header->length, schema, &voidstar);
+                if (unpack_result != 0) {
+                    snprintf(errmsg, sizeof(errmsg), "Failed to parse MessagePacket data");
+                    goto fail;
+                }
+            } else {
+                snprintf(errmsg, sizeof(errmsg), "Invalid format from mesg: %uhh", format);
+                goto fail;
+            }
+            break;
+
+        case PACKET_SOURCE_FILE:
+            switch (format) {
+                case PACKET_FORMAT_MSGPACK: {
+                    char* filename = strndup((char*)data + sizeof(morloc_packet_header_t), MAXIMUM_FILENAME_SIZE);
+                    size_t file_size;
+                    char* read_errmsg = NULL;
+                    uint8_t* msg = read_binary_file(filename, &file_size, &read_errmsg);
+                    if (msg == NULL) {
+                        if (read_errmsg == NULL){
+                            snprintf(errmsg, sizeof(errmsg), "Failed to open MessagePack file: unspecified error");
+                        } else {
+                            snprintf(errmsg, sizeof(errmsg), "Failed to open MessagePack file: %s", read_errmsg);
+                            free(read_errmsg);
+                        }
+                        goto fail;
+                    }
+                    // Unpack the binary buffer using the schema
+                    int unpack_result = unpack_with_schema((const char*)msg, file_size, schema, &voidstar);
+                    free(msg);
+                    if (unpack_result != 0) {
+                        snprintf(errmsg, sizeof(errmsg), "Failed to unpack data from file");
+                        goto fail;
+                    }
+                }
+            }
+            snprintf(errmsg, sizeof(errmsg), "Invalid format from file: %uhh", format);
+            goto fail;
+
+        case PACKET_SOURCE_RPTR:
+            if (format == PACKET_FORMAT_VOIDSTAR) {
+                // This packet should contain a relative pointer as its payload
+                size_t relptr = *(size_t*)(data + header->offset + sizeof(morloc_packet_header_t));
+                voidstar = rel2abs(relptr);
+            } else {
+                snprintf(errmsg, sizeof(errmsg), "For RPTR source, expected voidstar format");
+                goto fail;
+            }
+            break;
+
+        default:
+            snprintf(errmsg, sizeof(errmsg), "Invalid source");
+            goto fail;
+    }
+
+    return (uint8_t*)voidstar;
+
+// On any failure, set fail packet from error message and return NULL
+fail:
+    *fail_packet = make_fail_packet(errmsg);
+    return NULL;
+}
+
+uint8_t* make_morloc_call_packet(uint64_t midx, const uint8_t** arg_packets, size_t nargs){
+
+    size_t data_length = 0;
+    uint32_t offset = 0;
+
+    for(size_t i = 0; i < nargs; i++){
+        morloc_packet_header_t* arg = read_morloc_packet_header(arg_packets[i]);
+        data_length += sizeof(morloc_packet_header_t) + (size_t)arg->offset + (size_t)arg->length;
+    }
+
+    size_t packet_length = data_length + offset + sizeof(morloc_packet_header_t);
+
+    uint8_t* data = (uint8_t*)malloc(packet_length * sizeof(uint8_t));
+
+    packet_command_t cmd;
+    cmd.call = {
+        .type = PACKET_TYPE_CALL,
+        .padding = {0, 0, 0},
+        .midx = (uint32_t)midx,
+    };
+
+    set_morloc_packet_header(data, cmd, offset, data_length);
+
+    size_t arg_start = sizeof(morloc_packet_header_t) + offset;
+    for(size_t i = 0; i < nargs; i++){
+      morloc_packet_header_t* arg = read_morloc_packet_header(arg_packets[i]);
+      size_t arg_length = morloc_packet_size(arg);
+      memcpy(data + arg_start, arg, arg_length);
+      arg_start += arg_length;
+    }
+
+    return data;
+}
+
+// }}} end packet support
+
