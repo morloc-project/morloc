@@ -1,6 +1,7 @@
 0.53.0 [2025-02-09]
 -------------------
 
+ [ ] Add xxhash hashing for caching
  [ ] Move packets to little-endian format
  [ ] Add SLURM support
 
