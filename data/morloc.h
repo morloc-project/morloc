@@ -3106,3 +3106,444 @@ uint8_t* make_morloc_call_packet(uint64_t midx, const uint8_t** arg_packets, siz
 
 // }}} end packet support
 
+// {{{ hash support
+
+// Define XXH_INLINE_ALL to include the implementation in this file
+#define XXH_INLINE_ALL
+#include "xxhash.h"
+// Main export from xxhash.h is XXH64 function with the following prototype:
+//   uint64_t XXH64(const char* data1, size_t dataLength, uint64_t seed)
+
+// Two prime numbers used in xxhash
+const uint64_t PRIME64_1 = 0x9E3779B185EBCA87;
+const uint64_t PRIME64_2 = 0xC2B2AE3D27D4EB4F;
+
+
+// Mix two hashes
+static uint64_t mix(uint64_t a, uint64_t b) {
+    a ^= b * PRIME64_1;
+    a = (a << 31) | (a >> (64 - 31)); // Rotate
+    a *= PRIME64_2;
+    return a;
+}
+
+
+static bool schema_is_fixed_width(const Schema* schema){
+    switch(schema->type){
+        case MORLOC_STRING:
+        case MORLOC_ARRAY:
+            return false;
+        case MORLOC_TUPLE:
+        case MORLOC_MAP:
+            for(size_t i = 0; i < schema->size; i++){
+                if (not schema_is_fixed_width(schema->parameters[i])){
+                    return false;
+                }
+            }
+            break;
+        default:
+            return true;
+            break;
+    }
+    return true;
+}
+
+
+static uint64_t hash_voidstar(absptr_t data, const Schema* schema, uint64_t seed){
+    uint64_t hash = seed;
+    switch(schema->type){
+        case MORLOC_STRING:
+        case MORLOC_ARRAY:
+            {
+                Array* array = (Array*)data;
+                size_t element_width = schema->parameters[0]->width;
+                uint8_t* element_data = (uint8_t*)rel2abs(array->data);
+                if (schema_is_fixed_width(schema)){
+                    size_t array_size = element_width * array->size;
+                    hash = XXH64(element_data, array_size, seed);
+                } else {
+                    for(size_t i = 0; i < array->size; i++){
+                        hash = hash_voidstar(element_data + i * element_width, schema->parameters[0], hash);
+                    }
+                }
+            }
+            break;
+        case MORLOC_TUPLE:
+        case MORLOC_MAP:
+            {
+                if (schema_is_fixed_width(schema)){
+                    hash = XXH64(data, schema->width, seed);
+                } else {
+                    uint8_t* element_data = (uint8_t*)data;
+                    for(size_t i = 0; i < schema->size; i++){
+                        hash = hash_voidstar(element_data + schema->offsets[i], schema->parameters[i], hash);
+                    }
+                }
+            }
+            break;
+        default:
+            hash = XXH64((uint8_t*)data, schema->width, seed);
+            break;
+    }
+    return hash;
+}
+
+
+// Hash a morloc packet
+int hash_morloc_packet(const uint8_t* packet, const Schema* schema, uint64_t seed, uint64_t* hash){
+    morloc_packet_header_t* header = (morloc_packet_header_t*)packet;
+    char errmsg[128];
+    *hash = 0; // 0 softly represents a failed hash, though it could appear by chance
+    uint8_t command_type = header->command.cmd_type.type;
+
+    if (command_type == PACKET_TYPE_CALL){
+        uint32_t midx = header->command.call.midx;
+        *hash = mix(seed, (uint64_t)midx);
+        const uint8_t* arg_data = packet + sizeof(morloc_packet_header_t) + (size_t)header->offset;
+        size_t arg_start = 0;
+        while(arg_start < header->length){
+            uint64_t arg_hash = hash_voidstar((void*)(arg_data + arg_start), schema, 0);
+            *hash = mix(*hash, arg_hash);
+        }
+    } else if (command_type == PACKET_TYPE_DATA){
+        uint8_t* fail_packet = NULL;
+        uint8_t* voidstar = get_morloc_data_packet_value(packet + sizeof(morloc_packet_header_t) + header->offset, schema, &fail_packet);
+        if (voidstar == NULL) {
+            snprintf(errmsg, sizeof(errmsg), "Cannot hash packet with command %uhh", command_type);
+            perror(errmsg);
+        }
+        *hash = hash_voidstar((void*)packet, schema, seed);
+    } else {
+        snprintf(errmsg, sizeof(errmsg), "Cannot hash packet with command %uhh", command_type);
+        perror(errmsg);
+    }
+
+    return -1; // success
+}
+
+
+static bool make_cache_filename(uint64_t key, const char* cache_path, char* buf, size_t buf_size) {
+    // Format the filename with the key in hexadecimal
+    //  * It is always padded to 16 characters
+    //  * The PRIx64 macro from inttypes.h ensures portability since the
+    //    uint64_t type may be aliased to different 64 bit types on
+    //    different systems (e.g., unsigned long or unsigned long long)
+    int written = snprintf(buf, buf_size, "%s/%016" PRIx64, cache_path, key);
+
+    // Check if snprintf succeeded and didn't truncate
+    return (written > 0 && (size_t)written < buf_size);
+}
+
+
+// Sends data to cache given an integer key. The main use case is caching the
+// return values from remote calls. In thise case, the key will be the hash of
+// the call which accounts for all inputs and the code the operates on
+// it. Importantly, the key is NOT the hash of this return value (because we
+// don't know the result before we run the computation).
+//
+// If the packet is successfully cached, return the cache filename
+// Else return NULL
+char* put_cache_packet(const uint8_t* packet, uint64_t key, const char* cache_path) {
+    morloc_packet_header_t* header = (morloc_packet_header_t*)packet;
+    size_t size = morloc_packet_size(header);
+
+    // Generate the cache filename
+    char filename[MAX_FILENAME_SIZE];
+    if (!make_cache_filename(key, cache_path, filename, sizeof(filename))) {
+        return NULL;
+    }
+
+    // Open the file for writing in binary mode
+    FILE* file = fopen(filename, "wb");
+    if (!file) {
+        return NULL;
+    }
+
+    // Write the packet data to the file
+    size_t written = fwrite(packet, 1, size, file);
+    if (written != size) {
+        fclose(file);
+        return NULL;
+    }
+
+    // Ensure all data is flushed and check for write errors
+    if (fclose(file) != 0) {
+        return NULL;
+    }
+
+    return strdup(filename);
+}
+
+
+// Get a cached packet given the key (usually a hash)
+uint8_t* get_cache_packet(uint64_t key, const char* cache_path) {
+    // Generate the cache filename
+    char filename[MAX_FILENAME_SIZE];
+    char errmsg[ERRMSG_SIZE];
+    if (!make_cache_filename(key, cache_path, filename, sizeof(filename))) {
+        snprintf(errmsg, sizeof(errmsg), "Failed to generate filename: %s", strerror(errno));
+        perror(errmsg);
+        return NULL;
+    }
+
+    // Read the binary file into memory (assuming read_binary_file is defined elsewhere)
+    size_t file_size;
+    char* read_errmsg = NULL;
+    uint8_t* data = read_binary_file(filename, &file_size, &read_errmsg);
+
+    if (data == NULL) {
+        snprintf(errmsg, sizeof(errmsg), "Failed to open cache file '%s': %s", filename, strerror(errno));
+        perror(errmsg);
+    }
+
+    return data;
+}
+
+
+// Deletes a cached packet given a key
+bool del_cache_packet(uint64_t key, const char* cache_path) {
+    // Generate the cache filename
+    char filename[MAX_FILENAME_SIZE];
+    char errmsg[ERRMSG_SIZE];
+    if (!make_cache_filename(key, cache_path, filename, sizeof(filename))) {
+        snprintf(errmsg, sizeof(errmsg), "Failed to generate filename: %s", strerror(errno));
+        perror(errmsg);
+        return false;
+    }
+
+    // Attempt to delete the file using unlink()
+    if (unlink(filename) != 0) {
+        snprintf(errmsg, sizeof(errmsg), "Failed to delete cache file '%s': %s", filename, strerror(errno));
+        perror(errmsg);
+        return false;
+    }
+
+    return true; // deletion success
+}
+
+// Checks if a cached packet exists given a key
+//
+// If a cached packet exists, return the filename
+// Else return NULL
+char* check_cache_packet(uint64_t key, const char* cache_path) {
+    // Generate the cache filename
+    char filename[MAX_FILENAME_SIZE];
+    char errmsg[ERRMSG_SIZE];
+    if (!make_cache_filename(key, cache_path, filename, sizeof(filename))) {
+        snprintf(errmsg, sizeof(errmsg), "Failed to generate filename '%s'", strerror(errno));
+        perror(errmsg);
+        return NULL;
+    }
+
+    // Use stat() to check if the file exists
+    struct stat file_stat;
+    if (stat(filename, &file_stat) == 0) {
+        return strdup(filename); // File exists
+    }
+
+    return NULL; // File does not exist or stat() failed
+}
+
+// }}} end hash support
+
+
+
+// prolly bring this back
+// #ifdef SLURM_SUPPORT
+
+
+
+// {{{ slurm support
+
+// For each field, -1 indicates undefined
+typedef struct resources {
+  int memory; // in Gb
+  int time; // in seconds, for 32bit int, you are limited to 68 years
+  int cpus;
+  int gpus;
+} resources;
+
+#define DEFAULT_XXHASH_SEED 0
+
+// Parse the arguments of a morloc call packet.
+//
+// This function mutates the `args ` and `nargs` arguments to store the call
+// arguments and counts (respectively). `args` contains pointers to locations
+// in the original `packet` array, so `packet` must not be freed until after
+// `args` is freed.
+bool parse_morloc_call_arguments(
+    uint8_t* packet, // input call packet
+    uint8_t** args, // pointer to vector of arguments (MUTATED)
+    size_t* nargs // pointer to number of arguments (MUTATED)
+){
+
+    *nargs = 0;
+
+    morloc_packet_header_t* header = (morloc_packet_header_t*)packet;
+    size_t packet_size = morloc_packet_size(header);
+
+    if (header->command.cmd_type.type != PACKET_TYPE_CALL) {
+        // handle error
+        return false;
+    }
+
+    uint32_t mid = header->command.call.midx;
+
+    morloc_packet_header_t* arg_header;
+    size_t pos = sizeof(morloc_packet_header_t) + header->offset;
+    while(pos < packet_size){
+        arg_header = (morloc_packet_header_t*)(packet + pos);
+        pos += sizeof(morloc_packet_header_t) + arg_header->offset + arg_header->length;
+        *nargs++;
+    }
+
+    *args = (uint8_t*)malloc(*nargs * sizeof(uint8_t*));
+
+    pos = sizeof(morloc_packet_header_t) + (size_t)header->offset;
+    for(size_t i = 0; i < *nargs; i++){
+        uint8_t* arg = packet + pos;
+        morloc_packet_header_t* arg_header = (morloc_packet_header_t*)arg;
+        args[i] = packet + pos;
+        pos += sizeof(morloc_packet_header_t) + arg_header->offset + arg_header->length;
+    }
+
+    return true;
+}
+
+// Before calling this function, every argument must be converted to a packet
+//   * if the data is native, then it should be converted
+uint8_t* remoteCall(
+    int midx,
+    const char* socket_path,
+    const char* cache_path,
+    const resources* res,
+    const Schema** arg_schemas,
+    const uint8_t** arg_packets,
+    size_t nargs
+){
+
+    uint64_t seed = (uint64_t) midx;
+
+    // The function hash determins the output file name on the remote node and is
+    // used to determine if this computation has already been run. The function
+    // hash **should** be unique to a function and its inputs.
+    //
+    // TODO: Actually hash the function code, not just the manifold id.
+    uint64_t function_hash = mix(seed, DEFAULT_XXHASH_SEED);
+
+    uint8_t** new_arg_packets = (uint8_t**)malloc(nargs * sizeof(uint8_t*));
+
+    // hash voidstar data for every argument
+    for(size_t i = 0; i < nargs; i++){
+        morloc_packet_header_t* arg_header = read_morloc_packet_header(arg_packets[i]);
+        if(arg_header == NULL){
+            // handle malformed packet error
+        }
+
+        uint8_t* fail_packet = NULL;
+        uint8_t* arg_voidstar = get_morloc_data_packet_value(arg_packets[i], arg_schemas[i], &fail_packet);
+        if(arg_voidstar == NULL){
+            // handle bad data packet error
+        }
+
+        uint64_t arg_hash = hash_voidstar(arg_voidstar, arg_schemas[i], DEFAULT_XXHASH_SEED);
+
+        function_hash = mix(function_hash, arg_hash);
+
+        char* arg_cache_filename = check_cache_packet(arg_hash, cache_path);
+        if(arg_cache_filename == NULL){
+            arg_cache_filename = put_cache_packet(arg_voidstar, arg_hash, cache_path);
+            if (arg_cache_filename == NULL){
+                // handle cache writing failure
+            }
+        }
+
+        new_arg_packets[i] = make_morloc_data_packet(
+          (uint8_t*)arg_cache_filename,
+          strlen(arg_cache_filename),
+          NULL, 0, // no metadata yet
+          PACKET_SOURCE_FILE,
+          PACKET_FORMAT_VOIDSTAR,
+          PACKET_COMPRESSION_NONE,
+          PACKET_ENCRYPTION_NONE,
+          PACKET_STATUS_PASS
+        );
+    }
+
+    uint8_t* call_packet = NULL;
+    char* result_cache_filename = check_cache_packet(function_hash, cache_path);
+    if(result_cache_filename == NULL){
+        // return result is not cached, so we do the operation
+        call_packet = make_morloc_call_packet(midx, (const uint8_t**)new_arg_packets, nargs);
+    } else {
+        // return result is cached, so load the cache and go
+        uint8_t* final_result = get_cache_packet(function_hash, cache_path);
+        if(final_result == NULL){
+            // handle error
+        }
+        return final_result;
+    }
+
+    morloc_packet_header_t* call_header = read_morloc_packet_header(call_packet);
+    // Note that this is not the same as the result hash, the remote compute
+    // node will load this packet as a call to run the job and will then write
+    // the results to the result hash cache.
+    uint64_t call_packet_hash_code = XXH64(call_packet, morloc_packet_size(call_header), DEFAULT_XXHASH_SEED);
+
+    // write the call packet to cache
+
+    // create the SLURM script
+    //   * call the remote nexus with the call packet
+    //   * write results to result_cache_filename
+
+    // run the SLURM script
+
+    // wait for the job to finish (looping every second or so)
+
+    // when the job completes, create a packet with the `result_cache_filename`
+    // file and return
+    
+    return NULL;
+
+}
+    // // use the job description object to start a new SLURM job where the
+    // // script calls nexus.py with three new arguments:
+    // //   1. `--packet <packet_path>` - read from packet file
+    // //   2. `--packet-lang <lang>` - send to this language pool
+    // //   3. `--output raw` - write raw binary packet
+    // //   4. `--output-file <file>` - write output to this file
+    // // wait for the job to finish, then open the output packet
+    // // if the packet is failing, delete the cached return value
+    // // return the packet
+    //
+    //
+    // job_descriptor_msg_t job_desc;
+    // submit_response_msg_t *submit_response = NULL;
+    //
+    // slurm_init_job_desc_msg(&job_desc);
+    //
+    // job_desc.name = "my_job";
+    // job_desc.partition = "standard";
+    // job_desc.min_cpus = 1;
+    // job_desc.min_memory = 1024;
+    // job_desc.time_limit = 60;
+    // job_desc.script = "#!/bin/bash\necho Hello, Slurm!";
+    //
+    // if (slurm_submit_batch_job(&job_desc, &submit_response) != SLURM_SUCCESS) {
+    //     fprintf(stderr, "Job submission failed: %s\n", slurm_strerror(slurm_get_errno()));
+    //     return 1;
+    // }
+    //
+    // printf("Job submitted with ID %u\n", submit_response->job_id);
+    // slurm_free_submit_response_response_msg(submit_response);
+    //
+    // // get message
+
+
+// }}} end slurm support
+
+
+
+// #endif // ending SLURM_SUPPORT
+
+#endif // ending __MORLOC_H__
