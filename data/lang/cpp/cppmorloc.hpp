@@ -18,6 +18,71 @@
 
 #include "morloc.h"
 
+absptr_t cpp_rel2abs(relptr_t ptr){
+    char* errmsg = NULL;
+    absptr_t absptr = rel2abs(ptr, &errmsg);
+    if(errmsg != NULL){
+        throw std::runtime_error(errmsg);
+    }
+    return absptr;
+}
+
+relptr_t abs2rel_cpp(absptr_t ptr){
+    char* errmsg = NULL;
+    relptr_t relptr = abs2rel(ptr, &errmsg);
+    if(errmsg != NULL){
+        throw std::runtime_error(errmsg);
+    }
+    return relptr;
+}
+
+bool shfree_cpp(absptr_t ptr){
+    char* errmsg = NULL;
+    bool success = shfree(ptr, &errmsg);
+    if(!success){
+        throw std::runtime_error(errmsg);
+    }
+    return success;
+}
+
+
+Schema* parse_schema_cpp(const char** schema_ptr){
+    char* errmsg = NULL;
+    Schema* schema = parse_schema(schema_ptr, &errmsg);
+    if(schema == NULL){
+        throw std::runtime_error(errmsg);
+    }
+    return schema;
+}
+
+void* shmalloc_cpp(size_t size){
+    char* errmsg = NULL;
+    void* new_ptr = shmalloc(size, &errmsg);
+    if(new_ptr == NULL){
+        throw std::runtime_error(errmsg);
+    }
+    return new_ptr;
+
+}
+
+int pack_with_schema_cpp(const void* mlc, const Schema* schema, char** mpk, size_t* mpk_size){
+    char* errmsg = NULL;
+    int exitcode = pack_with_schema(mlc, schema, mpk, mpk_size, &errmsg);
+    if(exitcode == EXIT_FAIL){
+        throw std::runtime_error(errmsg);
+    }
+    return exitcode; 
+}
+
+int unpack_with_schema_cpp(const char* mgk, size_t mgk_size, const Schema* schema, void** mlcptr){
+    char* errmsg = NULL;
+    int exitcode = unpack_with_schema(mgk, mgk_size, schema, mlcptr, &errmsg);
+    if(exitcode == EXIT_FAIL){
+        throw std::runtime_error(errmsg);
+    }
+    return exitcode; 
+}
+
 // The two main exported functions are mpk_pack and mpk_unpack. These translate
 // to and from MessagePack format given a schema.
 
@@ -106,7 +171,7 @@ void* toAnything(const Schema* schema, const T& data){
     size_t total_size = get_shm_size(schema, data);
 
     // Allocate this space in shared memory
-    void* dest = shmalloc(total_size);
+    void* dest = shmalloc_cpp(total_size);
 
     void* cursor = (void*)((char*)dest + schema->width);
 
@@ -192,12 +257,12 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::vec
 
     // The array data is written to the cursor location
     // The N fixed-size elements will be written here
-    result->data = abs2rel(static_cast<absptr_t>(*cursor));
+    result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
 
     // The cursor is mutated to point to the location after the children
     *cursor = static_cast<char*>(*cursor) + data.size() * schema->parameters[0]->width;
 
-    char* start = (char*)rel2abs(result->data);
+    char* start = (char*)cpp_rel2abs(result->data);
     size_t width = schema->parameters[0]->width;
     for (size_t i = 0; i < data.size(); ++i) {
         // Any child variable data will be written to the cursor
@@ -214,12 +279,12 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::lis
     result->size = data.size();
 
     // The array data is written to the cursor location
-    result->data = abs2rel(static_cast<absptr_t>(*cursor));
+    result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
 
     // The cursor is mutated to point to the location after the children
     *cursor = static_cast<char*>(*cursor) + data.size() * schema->parameters[0]->width;
 
-    char* start = (char*)rel2abs(result->data);
+    char* start = (char*)cpp_rel2abs(result->data);
     size_t width = schema->parameters[0]->width;
     size_t i = 0;
     for (const auto& item : data) {
@@ -241,12 +306,12 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::for
     result->size = size;
 
     // The array data is written to the cursor location
-    result->data = abs2rel(static_cast<absptr_t>(*cursor));
+    result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
 
     // The cursor is mutated to point to the location after the children
     *cursor = static_cast<char*>(*cursor) + size * schema->parameters[0]->width;
 
-    char* start = (char*)rel2abs(result->data);
+    char* start = (char*)cpp_rel2abs(result->data);
     size_t width = schema->parameters[0]->width;
     size_t i = 0;
     for (const auto& item : data) {
@@ -279,12 +344,12 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::deq
     result->size = data.size();
 
     // The array data is written to the cursor location
-    result->data = abs2rel(static_cast<absptr_t>(*cursor));
+    result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
 
     // The cursor is mutated to point to the location after the children
     *cursor = static_cast<char*>(*cursor) + data.size() * schema->parameters[0]->width;
 
-    char* start = (char*)rel2abs(result->data);
+    char* start = (char*)cpp_rel2abs(result->data);
     size_t width = schema->parameters[0]->width;
     for (size_t i = 0; i < data.size(); ++i) {
         // Any child variable data will be written to the cursor
@@ -342,7 +407,7 @@ Primitive fromAnything(const Schema* schema, const void* data, Primitive* dumby 
 
 std::string fromAnything(const Schema* schema, const void* data, std::string* dumby = nullptr) {
     Array* array = (Array*)data;
-    return std::string((char*)rel2abs(array->data), array->size);
+    return std::string((char*)cpp_rel2abs(array->data), array->size);
 }
 
 template<typename T>
@@ -363,7 +428,7 @@ std::vector<T> fromAnything(const Schema* schema, const void* data, std::vector<
     case MORLOC_UINT64:
     case MORLOC_FLOAT32:
     case MORLOC_FLOAT64:
-      std::vector<T> result((T*)(rel2abs(array->data)), (T*)(rel2abs(array->data)) + array->size);
+      std::vector<T> result((T*)(cpp_rel2abs(array->data)), (T*)(cpp_rel2abs(array->data)) + array->size);
       return result;
   }
 
@@ -372,7 +437,7 @@ std::vector<T> fromAnything(const Schema* schema, const void* data, std::vector<
   result.reserve(array->size);
   const Schema* elemental_schema = schema->parameters[0];
   T* elemental_dumby = nullptr;
-  char* start = (char*)rel2abs(array->data);
+  char* start = (char*)cpp_rel2abs(array->data);
   for(size_t i = 0; i < array->size; i++){
     result.push_back(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
   }
@@ -385,7 +450,7 @@ std::stack<T> fromAnything(const Schema* schema, const void* data, std::stack<T>
     std::stack<T> result;
     const Schema* elemental_schema = schema->parameters[0];
     T* elemental_dumby = nullptr;
-    char* start = (char*)rel2abs(array->data);
+    char* start = (char*)cpp_rel2abs(array->data);
     
     // We need to push elements in reverse order to maintain the original stack order
     for (size_t i = array->size; i > 0; --i) {
@@ -400,7 +465,7 @@ std::list<T> fromAnything(const Schema* schema, const void* data, std::list<T>* 
     std::list<T> result;
     const Schema* elemental_schema = schema->parameters[0];
     T* elemental_dumby = nullptr;
-    char* start = (char*)rel2abs(array->data);
+    char* start = (char*)cpp_rel2abs(array->data);
     
     for (size_t i = 0; i < array->size; ++i) {
         result.push_back(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
@@ -414,7 +479,7 @@ std::forward_list<T> fromAnything(const Schema* schema, const void* data, std::f
     std::forward_list<T> result;
     const Schema* elemental_schema = schema->parameters[0];
     T* elemental_dumby = nullptr;
-    char* start = (char*)rel2abs(array->data);
+    char* start = (char*)cpp_rel2abs(array->data);
     
     // We need to insert elements in reverse order to maintain the original list order
     for (size_t i = array->size; i > 0; --i) {
@@ -429,7 +494,7 @@ std::queue<T> fromAnything(const Schema* schema, const void* data, std::queue<T>
     std::queue<T> result;
     const Schema* elemental_schema = schema->parameters[0];
     T* elemental_dumby = nullptr;
-    char* start = (char*)rel2abs(array->data);
+    char* start = (char*)cpp_rel2abs(array->data);
     
     for (size_t i = 0; i < array->size; ++i) {
         result.push(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
@@ -443,7 +508,7 @@ std::deque<T> fromAnything(const Schema* schema, const void* data, std::deque<T>
     std::deque<T> result;
     const Schema* elemental_schema = schema->parameters[0];
     T* elemental_dumby = nullptr;
-    char* start = (char*)rel2abs(array->data);
+    char* start = (char*)cpp_rel2abs(array->data);
     
     for (size_t i = 0; i < array->size; ++i) {
         result.push_back(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
@@ -478,19 +543,14 @@ Tuple fromTupleAnythingHelper(
 template<typename T>
 std::vector<char> mpk_pack(const T& data, const std::string& schema_str) {
     const char* schema_ptr = schema_str.c_str();
-    Schema* schema = parse_schema(&schema_ptr);
+    Schema* schema = parse_schema_cpp(&schema_ptr);
 
     // Create Anything* from schema and data
     void* voidstar = toAnything(schema, data);
     char* msgpack_data = NULL;
     size_t msg_size = 0;
 
-    int pack_result = pack(voidstar, schema_str.c_str(), &msgpack_data, &msg_size);
-
-    if (pack_result != 0) {
-        free_schema(schema);
-        throw std::runtime_error("Packing failed");
-    }
+    int pack_result = pack_with_schema_cpp(voidstar, schema, &msgpack_data, &msg_size);
 
     std::vector<char> result(msgpack_data, msgpack_data + msg_size);
 
@@ -501,11 +561,12 @@ std::vector<char> mpk_pack(const T& data, const std::string& schema_str) {
 
 template<typename T>
 T mpk_unpack(const std::vector<char>& packed_data, const std::string& schema_str) {
+    char* errmsg = NULL;
     const char* schema_ptr = schema_str.c_str();
-    Schema* schema = parse_schema(&schema_ptr);
+    Schema* schema = parse_schema_cpp(&schema_ptr);
 
     void* voidstar = nullptr;
-    int unpack_result = unpack_with_schema(packed_data.data(), packed_data.size(), schema, &voidstar);
+    int unpack_result = unpack_with_schema_cpp(packed_data.data(), packed_data.size(), schema, &voidstar);
     if (unpack_result != 0) {
         // free_schema(schema);
         throw std::runtime_error("Unpacking failed");
@@ -514,7 +575,7 @@ T mpk_unpack(const std::vector<char>& packed_data, const std::string& schema_str
     T x = fromAnything(schema, voidstar, static_cast<T*>(nullptr));
 
     free_schema(schema);
-    shfree(voidstar);
+    shfree_cpp(voidstar);
 
     return x;
 }
