@@ -11,6 +11,42 @@
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
 
+#define NOTHING
+
+#define MAYFAIL \
+    char* child_errmsg_ = NULL; \
+    void* return_value_ = NULL;
+
+#define MAYFAIL_VOID \
+    char* child_errmsg_ = NULL;
+
+#define MAYFAIL_WITH(type, value) \
+    char* child_errmsg_ = NULL; \
+    type return_value_ = value;
+
+
+#define TRY(fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    if(child_errmsg_ != NULL){ \
+        PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
+        return return_value_; \
+    }
+
+#define TRY_VOID(fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    if(child_errmsg_ != NULL){ \
+        PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
+        return; \
+    }
+
+# define TRY_WITH(clean, fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    if(child_errmsg_ != NULL){ \
+        clean; \
+        PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
+        return return_value_; \
+    }
+
 
 PyObject* numpy_module = NULL;
 
@@ -40,7 +76,7 @@ static PyObject* mesgpack_to_py(PyObject* self, PyObject* args);
 
 
 // convert voidstar to MessagePack
-static PyObject* to_mesgpack(PyObject* self, PyObject* args) {
+static PyObject* to_mesgpack(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* voidstar_capsule;
     char* schema;
     char* msgpck_data = NULL;
@@ -58,12 +94,7 @@ static PyObject* to_mesgpack(PyObject* self, PyObject* args) {
         return NULL;
     }
 
-    int exitcode = pack(voidstar, schema, &msgpck_data, &msgpck_data_len);
-
-    if (exitcode != 0 || !msgpck_data) {
-        PyErr_SetString(PyExc_RuntimeError, "Packing failed");
-        return NULL;
-    }
+    TRY(pack, voidstar, schema, &msgpck_data, &msgpck_data_len);
 
     // TODO: avoid memory copying here
     PyObject* mesgpack_bytes = PyBytes_FromStringAndSize(msgpck_data, msgpck_data_len);
@@ -74,15 +105,15 @@ static PyObject* to_mesgpack(PyObject* self, PyObject* args) {
 
 
 // destroy the voidstar
-static void voidstar_destructor(PyObject *capsule) {
+static void voidstar_destructor(PyObject *capsule) { MAYFAIL_VOID
     void *voidstar = PyCapsule_GetPointer(capsule, "absptr_t");
     if (voidstar) {
-        shfree(voidstar);
+        TRY_VOID(shfree, voidstar);
     }
 }
 
 // convert MessagePack to voidstar
-static PyObject* from_mesgpack(PyObject* self, PyObject* args) {
+static PyObject* from_mesgpack(PyObject* self, PyObject* args) { MAYFAIL
     const char* msgpck_data;
     Py_ssize_t msgpck_data_len;
     const char* schema;
@@ -92,15 +123,11 @@ static PyObject* from_mesgpack(PyObject* self, PyObject* args) {
         return NULL;
     }
 
-    int exitcode = unpack(msgpck_data, msgpck_data_len, schema, &voidstar);
-    if (exitcode != 0) {
-        PyErr_Format(PyExc_RuntimeError, "Unpacking failed with exit code %d", exitcode);
-        return NULL;
-    }
+    TRY(unpack, msgpck_data, msgpck_data_len, schema, &voidstar);
 
     PyObject* voidstar_capsule = PyCapsule_New(voidstar, "absptr_t", voidstar_destructor);
     if (!voidstar_capsule) {
-        shfree(voidstar);  // Or use appropriate deallocation function
+        TRY(shfree, voidstar);  // Or use appropriate deallocation function
         return NULL;
     }
 
@@ -109,6 +136,8 @@ static PyObject* from_mesgpack(PyObject* self, PyObject* args) {
 
 
 PyObject* fromAnything(const Schema* schema, const void* data){
+    MAYFAIL
+
     PyObject* obj = NULL;
     switch (schema->type) {
         case MORLOC_NIL:
@@ -148,7 +177,8 @@ PyObject* fromAnything(const Schema* schema, const void* data){
             break;
         case MORLOC_STRING: {
             Array* str_array = (Array*)data;
-            obj = PyUnicode_FromStringAndSize(rel2abs(str_array->data), str_array->size);
+            absptr_t tmp_ptr = TRY(rel2abs, str_array->data);
+            obj = PyUnicode_FromStringAndSize(tmp_ptr, str_array->size);
             if (!obj) {
                 fprintf(stderr, "Failed to extract string from voidstar\n");
                 PyErr_SetString(PyExc_TypeError, "Failed to parse data");
@@ -182,7 +212,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){
                         goto error;
                 }
 
-                void* absptr = rel2abs(array->data);
+                void* absptr = TRY(rel2abs, array->data);
 
                 // Create the NumPy array
                 obj = PyArray_SimpleNewFromData(nd, dims, type_num, absptr);
@@ -198,19 +228,20 @@ PyObject* fromAnything(const Schema* schema, const void* data){
 
             } else if (schema->parameters[0]->type == MORLOC_UINT8) {
                 // Create a Python bytes object for UINT8 arrays
-                obj = PyBytes_FromStringAndSize((const char*)rel2abs(array->data), array->size);
+                absptr_t tmp_ptr = TRY(rel2abs, array->data);
+                obj = PyBytes_FromStringAndSize((const char*)tmp_ptr, array->size);
                 if (!obj) {
                     PyErr_SetString(PyExc_TypeError, "Failed to one bytes");
                     goto error;
                 }
-            } else if (schema->hint != NULL && strcmp(schema->hint, "list") == 0) {
+            } else if (schema->hint == NULL || (schema->hint != NULL && strcmp(schema->hint, "list") == 0)) {
                 // For other types, create a standard list
                 obj = PyList_New(array->size);
                 if (!obj) {
                     PyErr_SetString(PyExc_TypeError, "Failed to one string");
                     goto error;
                 }
-                char* start = (char*)rel2abs(array->data);
+                char* start = (char*) TRY(rel2abs, array->data);
                 size_t width = schema->parameters[0]->width;
                 Schema* element_schema = schema->parameters[0];
                 for (size_t i = 0; i < array->size; i++) {
@@ -279,7 +310,7 @@ error:
 
 
 // convert voidstar to PyObject
-static PyObject* from_voidstar(PyObject* self, PyObject* args) {
+static PyObject* from_voidstar(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* voidstar_capsule;
     const char* schema_str;
 
@@ -295,16 +326,11 @@ static PyObject* from_voidstar(PyObject* self, PyObject* args) {
         return NULL;
     }
 
-    Schema* schema = parse_schema(&schema_str);
-    if (!schema) {
-        PyErr_SetString(PyExc_ValueError, "Failed to parse schema");
-        return NULL;
-    }
+    Schema* schema = TRY(parse_schema, &schema_str);
 
     PyObject* obj = fromAnything(schema, voidstar);
     if (obj == NULL) {
         free_schema(schema);
-        PyErr_SetString(PyExc_TypeError, "fromAnything returned NULL");
         return NULL;
     }
 
@@ -489,6 +515,7 @@ error:
 
 
 int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj) {
+    MAYFAIL_WITH(int, -1)
     switch (schema->type) {
         case MORLOC_NIL:
             /* if (obj != Py_None) {                                                                                 */
@@ -588,7 +615,7 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
 
                 Array* result = (Array*)dest;
                 result->size = (size_t)size;
-                result->data = abs2rel(*cursor);
+                result->data = TRY(abs2rel, *cursor);
 
                 if (PyList_Check(obj)) {
                     // Fixed size width of each element (variable size data will
@@ -599,14 +626,15 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                     // fixed sized elements
                     *cursor = (void*)(*(char**)cursor + size * width);
 
-                    char* start = (char*)rel2abs(result->data);
+                    char* start = (char*) TRY(rel2abs, result->data);
                     Schema* element_schema = schema->parameters[0];
                     for (Py_ssize_t i = 0; i < size; i++) {
                         PyObject* item = PyList_GetItem(obj, i);
                         to_voidstar_r(start + width * i, cursor, element_schema, item);
                     }
                 } else if (PyBytes_Check(obj)){
-                    memcpy(rel2abs(result->data), data, size);
+                    absptr_t tmp_ptr = TRY(rel2abs, result->data);
+                    memcpy(tmp_ptr, data, size);
 
                     // move cursor to the location after the copied data
                     *cursor = (void*)(*(char**)cursor + size);
@@ -614,7 +642,8 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                 else{
                     size_t width = schema->parameters[0]->width;
 
-                    memcpy(rel2abs(result->data), data, size * width);
+                    absptr_t tmp_ptr = TRY(rel2abs, result->data);
+                    memcpy(tmp_ptr, data, size * width);
 
                     // Move the cursor to the location immediately after the
                     // fixed sized elements
@@ -671,7 +700,7 @@ error:
     return -1;
 }
 
-void* to_voidstar_c(const Schema* schema, PyObject* obj){
+void* to_voidstar_c(const Schema* schema, PyObject* obj){ MAYFAIL
   // calculate the required size of the shared memory object
   ssize_t shm_size = get_shm_size(schema, obj);
   if(shm_size == -1){
@@ -680,7 +709,7 @@ void* to_voidstar_c(const Schema* schema, PyObject* obj){
   }
 
   // allocate the required memory as a single block
-  void* dest = shmalloc((size_t)shm_size);
+  void* dest = TRY(shmalloc, (size_t)shm_size);
 
   // set the write location of variable size chunks
   void* cursor = (void*)((char*)dest + schema->width);
@@ -698,7 +727,7 @@ void* to_voidstar_c(const Schema* schema, PyObject* obj){
 
 
 // convert PyObject to voidstar
-static PyObject* to_voidstar(PyObject* self, PyObject* args){
+static PyObject* to_voidstar(PyObject* self, PyObject* args){ MAYFAIL
   PyObject* obj;
   const char* schema_str;
 
@@ -706,7 +735,7 @@ static PyObject* to_voidstar(PyObject* self, PyObject* args){
       return NULL;
   }
 
-  Schema* schema = parse_schema(&schema_str);
+  Schema* schema = TRY(parse_schema, &schema_str);
 
   void* voidstar = to_voidstar_c(schema, obj);
 
@@ -725,7 +754,7 @@ static PyObject* to_voidstar(PyObject* self, PyObject* args){
 }
 
 
-static PyObject* py_to_mesgpack(PyObject* self, PyObject* args) {
+static PyObject* py_to_mesgpack(PyObject* self, PyObject* args) { MAYFAIL
   PyObject* obj;
   const char* schema_str;
 
@@ -734,11 +763,7 @@ static PyObject* py_to_mesgpack(PyObject* self, PyObject* args) {
       return NULL;
   }
 
-  Schema* schema = parse_schema(&schema_str);
-  if (!schema) {
-      PyErr_SetString(PyExc_ValueError, "py_to_mesgpack: Failed to parse schema");
-      return NULL;
-  }
+  Schema* schema = TRY(parse_schema, &schema_str);
 
   void* voidstar = to_voidstar_c(schema, obj);
 
@@ -751,13 +776,14 @@ static PyObject* py_to_mesgpack(PyObject* self, PyObject* args) {
   char* msgpck_data = NULL;
   size_t msgpck_data_len = 0;
 
-  int exitcode = pack_with_schema(voidstar, schema, &msgpck_data, &msgpck_data_len);
-  if (exitcode != 0 || !msgpck_data) {
-      PyErr_SetString(PyExc_RuntimeError, "py_to_mesgpack: Packing failed");
-      free(msgpck_data);
-      free_schema(schema);
-      return NULL;
-  }
+  TRY_WITH(
+      free(msgpck_data); free_schema(schema),
+      pack_with_schema,
+      voidstar,
+      schema,
+      &msgpck_data,
+      &msgpck_data_len
+  );
 
   // TODO: avoid memory copying here
   PyObject* mesgpack_bytes = PyBytes_FromStringAndSize(msgpck_data, msgpck_data_len);
@@ -770,7 +796,7 @@ static PyObject* py_to_mesgpack(PyObject* self, PyObject* args) {
 }
 
 
-static PyObject* mesgpack_to_py(PyObject* self, PyObject* args) {
+static PyObject* mesgpack_to_py(PyObject* self, PyObject* args) { MAYFAIL
     const char* msgpck_data;
     Py_ssize_t msgpck_data_len;
     const char* schema_str;
@@ -780,13 +806,16 @@ static PyObject* mesgpack_to_py(PyObject* self, PyObject* args) {
         return NULL;
     }
 
-    Schema* schema = parse_schema(&schema_str);
+    Schema* schema = TRY(parse_schema, &schema_str);
 
-    int exitcode = unpack_with_schema(msgpck_data, msgpck_data_len, schema, &voidstar);
-    if(exitcode != 0){
-        PyErr_SetString(PyExc_TypeError, "unpack_with_schema failed in mesgpack_to_py");
-        return NULL;
-    }
+    TRY_WITH(
+        free_schema(schema),
+        unpack_with_schema,
+        msgpck_data,
+        msgpck_data_len,
+        schema,
+        &voidstar
+    );
 
     PyObject* obj = fromAnything(schema, voidstar);
     if (obj == NULL) {
@@ -802,7 +831,7 @@ static PyObject* mesgpack_to_py(PyObject* self, PyObject* args) {
 
 
 // initialize a shared memory pool with one volume
-static PyObject* shm_start(PyObject* self, PyObject* args) {
+static PyObject* shm_start(PyObject* self, PyObject* args) { MAYFAIL
     char* basename;
     size_t shm_desired_size;
     shm_t* shm;
@@ -812,26 +841,22 @@ static PyObject* shm_start(PyObject* self, PyObject* args) {
         return NULL;
     }
 
-    shm = shinit(basename, 0, shm_desired_size);
-    if (shm == NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "Failed to initialize shared memory");
-        return NULL;
-    }
+    shm = TRY(shinit, basename, 0, shm_desired_size);
 
     return PyCapsule_New(shm, "shm_t", NULL);
 }
 
-static PyObject* shm_rel2abs(PyObject* self, PyObject* args) {
+static PyObject* shm_rel2abs(PyObject* self, PyObject* args) { MAYFAIL
     size_t relptr;
     if (!PyArg_ParseTuple(args, "k", &relptr)) {
         return NULL;
     }
 
-    absptr_t absptr = rel2abs((relptr_t)relptr);
+    absptr_t absptr = TRY(rel2abs, (relptr_t)relptr);
     return PyCapsule_New((void*)absptr, "absptr_t", NULL);
 }
 
-static PyObject* shm_abs2rel(PyObject* self, PyObject* args) {
+static PyObject* shm_abs2rel(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* capsule;
     if (!PyArg_ParseTuple(args, "O", &capsule)) {
         return NULL;
@@ -842,20 +867,20 @@ static PyObject* shm_abs2rel(PyObject* self, PyObject* args) {
         return NULL;  // PyCapsule_GetPointer sets the error
     }
 
-    relptr_t relptr = abs2rel(absptr);
+    relptr_t relptr = TRY(abs2rel, absptr);
     return PyLong_FromSize_t(relptr);
 }
 
 
-static PyObject* shm_close(PyObject* self, PyObject* args) {
-    shclose();
+static PyObject* shm_close(PyObject* self, PyObject* args) { MAYFAIL
+    TRY(shclose);
     Py_RETURN_NONE;
 }
 
 // Take a python object and a schema, convert it to voidstar, write the
 // voidstar to the shared memory pool, and return the relative pointer as an
 // integer.
-static PyObject* to_shm(PyObject* self, PyObject* args) {
+static PyObject* to_shm(PyObject* self, PyObject* args) { MAYFAIL
   PyObject* obj;
   const char* schema_str;
 
@@ -863,19 +888,19 @@ static PyObject* to_shm(PyObject* self, PyObject* args) {
       return NULL;
   }
 
-  Schema* schema = parse_schema(&schema_str);
+  Schema* schema = TRY(parse_schema, &schema_str);
 
   void* voidstar = to_voidstar_c(schema, obj);
 
   free_schema(schema);
 
-  relptr_t relptr = abs2rel(voidstar);
+  relptr_t relptr = TRY(abs2rel, voidstar);
   return PyLong_FromSize_t(relptr);
 }
 
 // Takes a relative pointer as an integer and a schema, looks up the voidstar in
 // the shared memory pool, convert it to a python object, and return it
-static PyObject* from_shm(PyObject* self, PyObject* args) {
+static PyObject* from_shm(PyObject* self, PyObject* args) { MAYFAIL
   size_t relptr;
   const char* schema_str;
 
@@ -883,9 +908,9 @@ static PyObject* from_shm(PyObject* self, PyObject* args) {
       return NULL;
   }
 
-  Schema* schema = parse_schema(&schema_str);
+  Schema* schema = TRY(parse_schema, &schema_str);
 
-  absptr_t voidstar = rel2abs(relptr);
+  absptr_t voidstar = TRY(rel2abs, relptr);
 
   PyObject* obj = fromAnything(schema, voidstar);
   if (obj == NULL) {
@@ -900,21 +925,28 @@ static PyObject* from_shm(PyObject* self, PyObject* args) {
 }
 
 
-static  PyObject* write_voidstar_as_json(PyObject* self, PyObject* args) {
+static  PyObject* write_voidstar_as_json(PyObject* self, PyObject* args) { MAYFAIL
   size_t relptr;
   const char* schema_str;
   if (!PyArg_ParseTuple(args, "ks", &relptr, &schema_str)) {
     return NULL;
   }
 
-  Schema* schema = parse_schema(&schema_str);
-  absptr_t voidstar = rel2abs(relptr);
-  print_voidstar(voidstar, schema);
+  Schema* schema = TRY(parse_schema, &schema_str);
+  absptr_t voidstar = TRY(rel2abs, relptr);
+
+  TRY_WITH(
+      free_schema(schema),
+      print_voidstar,
+      voidstar,
+      schema
+  );
+
   free_schema(schema);
   Py_RETURN_NONE;
 }
 
-static PyObject* write_msgpack_as_json(PyObject* self, PyObject* args) {
+static PyObject* write_msgpack_as_json(PyObject* self, PyObject* args) { MAYFAIL
   const char* msgpck_data;
   Py_ssize_t msgpck_data_len;
   const char* schema_str;
@@ -924,22 +956,30 @@ static PyObject* write_msgpack_as_json(PyObject* self, PyObject* args) {
     return NULL;
   }
 
-  Schema* schema = parse_schema(&schema_str);
+  Schema* schema = TRY(parse_schema, &schema_str);
 
-  int exitcode = unpack_with_schema(msgpck_data, msgpck_data_len, schema, &voidstar);
-  if (exitcode != 0) {
-    PyErr_Format(PyExc_RuntimeError, "Unpacking failed with exit code %d", exitcode);
-    return NULL;
-  }
+  TRY_WITH(
+      free_schema(schema),
+      unpack_with_schema,
+      msgpck_data,
+      msgpck_data_len,
+      schema,
+      &voidstar
+  );
 
-  print_voidstar(voidstar, schema);
+  TRY_WITH(
+      free_schema(schema),
+      print_voidstar,
+      voidstar,
+      schema
+  );
 
   free_schema(schema);
 
   Py_RETURN_NONE;
 }
 
-static PyObject* write_msgpack_file_as_json(PyObject* self, PyObject* args) {
+static PyObject* write_msgpack_file_as_json(PyObject* self, PyObject* args) { MAYFAIL
   char* filename;
   const char* schema_str;
 
@@ -947,7 +987,7 @@ static PyObject* write_msgpack_file_as_json(PyObject* self, PyObject* args) {
     return NULL;
   }
 
-  Schema* schema = parse_schema(&schema_str);
+  Schema* schema = TRY(parse_schema, &schema_str);
 
   // Get file size
   struct stat st;
@@ -986,15 +1026,22 @@ static PyObject* write_msgpack_file_as_json(PyObject* self, PyObject* args) {
   }
 
   void* voidstar;
-  int exitcode = unpack_with_schema(msgpack_data, file_size, schema, &voidstar);
-  if (exitcode != 0) {
-    PyErr_Format(PyExc_RuntimeError, "Unpacking failed with exit code %d", exitcode);
-    free(msgpack_data);
-    free_schema(schema);
-    return NULL;
-  }
 
-  print_voidstar(voidstar, schema);
+  TRY_WITH(
+      free(msgpack_data); free_schema(schema),
+      unpack_with_schema,
+      msgpack_data,
+      file_size,
+      schema,
+      &voidstar
+  );
+
+  TRY_WITH(
+      free_schema(schema),
+      print_voidstar,
+      voidstar,
+      schema
+  );
 
   free(msgpack_data);
   free_schema(schema);

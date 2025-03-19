@@ -1054,7 +1054,6 @@ volptr_t rel2vol(relptr_t ptr, ERRMSG) {
     VAL_RETURN_SETUP(volptr_t, VOLNULL)
 
     for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
-        char* child_error = NULL;
         shm_t* shm = shopen(i, &CHILD_ERRMSG);
         if (shm == NULL) {
             RAISE_IF(CHILD_ERRMSG == NULL, "Shared volume %zu does not exist", ptr)
@@ -1110,11 +1109,11 @@ volptr_t abs2vol(absptr_t ptr, shm_t* shm, ERRMSG) {
         char* shm_start = (char*)shm;
         char* data_start = shm_start + sizeof(shm_t);
         char* data_end = data_start + shm->volume_size;
-        
+
         if ((char*)ptr >= data_start && (char*)ptr < data_end) {
             return (volptr_t)((char*)ptr - data_start);
         } else {
-            return VOLNULL;
+            RAISE("Could not find absolute pointer %p in shared memory pool", ptr)
         }
     // otherwise, seek a suitable volume
     } else {
@@ -2703,7 +2702,6 @@ static EXIT_CODE parse_obj(
 ){
     INT_RETURN_SETUP
 
-    int retcode = EXIT_FAIL;
     int child_retcode;
     switch(schema->type){
       case MORLOC_NIL:
@@ -2933,9 +2931,10 @@ static bool print_voidstar_r(const void* voidstar, const Schema* schema, ERRMSG)
             }
             break;
         default:
-            fprintf(stderr, "Unexpected morloc type\n");
-            break;
+            RAISE("Unexpected morloc type");
     }
+
+    return true;
 }
 
 bool print_voidstar(const void* voidstar, const Schema* schema, ERRMSG) {
@@ -2947,6 +2946,8 @@ bool print_voidstar(const void* voidstar, const Schema* schema, ERRMSG) {
 
     // add terminal newline
     printf("\n");
+
+    return success;
 }
 
 // }}} end voidstar utilities
@@ -3275,7 +3276,6 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
     status = header->command.data.status;
 
     if (status == PACKET_STATUS_FAIL) {
-        char* old_errmsg = NULL;
         bool passed = get_morloc_data_packet_error_message(data, &CHILD_ERRMSG);
         if(passed){
             RAISE("Propagating:\n%s", CHILD_ERRMSG)

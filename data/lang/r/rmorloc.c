@@ -9,7 +9,7 @@
 #include <stdbool.h>
 #include <limits.h>
 
-#define R_MAYFAIL char* child_errmsg_ = NULL;
+#define MAYFAIL char* child_errmsg_ = NULL;
 
 #define TRY(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
@@ -175,7 +175,7 @@ size_t get_shm_size(const Schema* schema, SEXP obj) {
     } while(0)
 
 void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* schema){
-    R_MAYFAIL
+    MAYFAIL
 
     switch (schema->type) {
         case MORLOC_NIL:
@@ -394,7 +394,7 @@ void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* schema){
 
 
 void* to_voidstar(SEXP obj, const Schema* schema) {
-    R_MAYFAIL
+    MAYFAIL
 
     size_t total_size = get_shm_size(schema, obj);
 
@@ -407,7 +407,7 @@ void* to_voidstar(SEXP obj, const Schema* schema) {
 
 
 SEXP from_voidstar(const void* data, const Schema* schema) {
-    R_MAYFAIL
+    MAYFAIL
 
     if(data == NULL){
         error("NULL data (%s:%d in %s)", __FILE__, __LINE__, __func__);
@@ -635,7 +635,7 @@ error:
 
 
 SEXP to_mesgpack(SEXP r_obj, SEXP r_schema_str) {
-    R_MAYFAIL
+    MAYFAIL
 
     PROTECT(r_obj);
     PROTECT(r_schema_str);
@@ -678,7 +678,7 @@ SEXP to_mesgpack(SEXP r_obj, SEXP r_schema_str) {
 
 // R-callable function to unpack to R object
 SEXP from_mesgpack(SEXP r_packed, SEXP r_schema_str) {
-    R_MAYFAIL
+    MAYFAIL
 
     PROTECT(r_packed);
     PROTECT(r_schema_str);
@@ -711,7 +711,7 @@ SEXP from_mesgpack(SEXP r_packed, SEXP r_schema_str) {
 
 
 SEXP r_to_mesgpack(SEXP r_obj, SEXP r_schema_str){
-    R_MAYFAIL
+    MAYFAIL
 
     PROTECT(r_obj);
     PROTECT(r_schema_str);
@@ -748,7 +748,7 @@ SEXP r_to_mesgpack(SEXP r_obj, SEXP r_schema_str){
 }
 
 SEXP mesgpack_to_r(SEXP r_mesgpack, SEXP r_schema_str){
-    R_MAYFAIL
+    MAYFAIL
     
     PROTECT(r_mesgpack);
     PROTECT(r_schema_str);
@@ -781,7 +781,7 @@ SEXP mesgpack_to_r(SEXP r_mesgpack, SEXP r_schema_str){
 
 
 SEXP shm_start(SEXP shm_basename_r, SEXP shm_size_r) {
-    R_MAYFAIL
+    MAYFAIL
 
     const char* shm_basename = CHAR(STRING_ELT(shm_basename_r, 0));
     size_t shm_size = (size_t)asInteger(shm_size_r);
@@ -797,13 +797,13 @@ SEXP shm_start(SEXP shm_basename_r, SEXP shm_size_r) {
 
 
 SEXP shm_close() {
-    R_MAYFAIL
+    MAYFAIL
     TRY(shclose)
     return R_NilValue; // Return NULL
 }
 
 SEXP to_shm(SEXP obj, SEXP schema_str_r) {
-    R_MAYFAIL
+    MAYFAIL
 
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
 
@@ -824,7 +824,7 @@ SEXP to_shm(SEXP obj, SEXP schema_str_r) {
 
 
 SEXP from_shm(SEXP relptr_r, SEXP schema_str_r) {
-    R_MAYFAIL
+    MAYFAIL
 
     relptr_t relptr = (relptr_t)asReal(relptr_r);
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
