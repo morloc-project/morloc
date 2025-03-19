@@ -1153,7 +1153,7 @@ relptr_t abs2rel(absptr_t ptr, ERRMSG) {
         }
     }
 
-    RAISE("Failed to find absptr %zu in shared memory", ptr)
+    RAISE("Failed to find absptr %p in shared memory", ptr)
 }
 
 shm_t* abs2shm(absptr_t ptr, ERRMSG) {
@@ -1174,7 +1174,7 @@ shm_t* abs2shm(absptr_t ptr, ERRMSG) {
         }
     }
 
-    RAISE("Failed to find absptr %zu in shared memory", ptr)
+    RAISE("Failed to find absptr %p in shared memory", ptr)
 }
 
 
