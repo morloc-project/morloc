@@ -43,6 +43,13 @@ std::string g_tmpdir;
 // Proper linking of cppmorloc requires it be included AFTER the custom modules
 #include "cppmorloc.hpp"
 
+#define PROPAGATE_ERROR(errmsg) \
+    if(errmsg != NULL) { \
+      char errmsg_buffer[MAX_ERRMSG_SIZE] = { 0 }; \
+      snprintf(errmsg_buffer, MAX_ERRMSG_SIZE, "Error C++ pool (%s:%d in %s):\n%s" , __FILE__, __LINE__, __func__, errmsg); \
+      free(errmsg); \
+      throw std::runtime_error(errmsg_buffer); \
+    }
 
 // AUTO serialization statements start
 // <<<BREAK>>>
@@ -52,40 +59,10 @@ std::string g_tmpdir;
 
 #define BUFFER_SIZE 4096
 
-#define PACKET_TYPE_DATA  0x00
-#define PACKET_TYPE_CALL  0x01
-#define PACKET_TYPE_PING  0x02
-#define PACKET_TYPE_GET   0x03
-#define PACKET_TYPE_POST  0x04
-#define PACKET_TYPE_PUT   0x05
-#define PACKET_TYPE_DEL   0x06
-
-#define PACKET_SOURCE_MESG  0x00 // the message contains the data
-#define PACKET_SOURCE_FILE  0x01 // the message is a path to a file of data
-#define PACKET_SOURCE_RPTR  0x02 // the message is a relative pointer to shared memory
-
-#define PACKET_FORMAT_JSON     0x00
-#define PACKET_FORMAT_MSGPACK  0x01
-#define PACKET_FORMAT_TEXT     0x02
-#define PACKET_FORMAT_DATA     0x03 // raw binary data
-#define PACKET_FORMAT_VOIDSTAR 0x04 // binary morloc formatted data
-
-#define PACKET_COMPRESSION_NONE  0x00 // uncompressed
-#define PACKET_ENCRYPTION_NONE   0x00 // unencrypted
-
-#define PACKET_STATUS_PASS  0x00
-#define PACKET_STATUS_FAIL  0x01
-
 
 struct Message {
   char* data;
   uint64_t length;
-};
-
-struct Header {
-    char command[8];
-    uint32_t offset; // this is a 4 byte int, so I should use a short
-    uint64_t length;
 };
 
 // Function to log messages
@@ -100,158 +77,21 @@ void socket_close(int socket_id, const std::string& desc){
     close(socket_id);
 }
 
-std::string show_hex(const char* input, int length) {
-    std::stringstream ss;
-
-    for(int i = 0; i < length; i++) {
-        ss << std::hex << std::setw(2) << std::setfill('0') << (int)(unsigned char)input[i];
-        if (i < length - 1) {
-            ss << " ";
-        }
-
-    }
-
-    return ss.str();
-}
-
-
 // Interop /////////////
 
-// Read n bytes as an int starting from position offset in a char array
-uint64_t read_uint64(const char* bytes, size_t offset){
-  uint64_t x = 0;
-  for(size_t i = 0; i < 8; i++){
-    uint64_t multiplier = 1;
-    multiplier = multiplier << (8 * (8 - i - 1));
-    x += static_cast<unsigned char>(bytes[i + offset]) * multiplier;
-  }
-  return x;
+Message fail_packet(const char* errmsg){
+    Message message;
+
+    uint8_t* packet = make_fail_packet("Failed to send data");
+    message.data = (char*)packet;
+
+    char** child_errmsg = NULL;
+    message.length = morloc_packet_size(packet, child_errmsg);
+    PROPAGATE_ERROR(child_errmsg)
+
+    return message;
 }
 
-uint32_t read_uint32(const char* bytes, size_t offset){
-  uint32_t x = 0;
-  for(size_t i = 0; i < 4; i++){
-    uint32_t multiplier = 1;
-    multiplier = multiplier << (8 * (4 - i - 1));
-    x += static_cast<unsigned char>(bytes[i + offset]) * multiplier;
-  }
-  return x;
-}
-
-void write_int32(char* data, uint32_t value){
-    data[0] = (value >> 24) & 0xFF;
-    data[1] = (value >> 16) & 0xFF;
-    data[2] = (value >>  8) & 0xFF;
-    data[3] = value & 0xFF;
-}
-
-void write_int64(char* data, uint64_t value){
-
-    data[0] = (value >> 56) & 0xFF;
-    data[1] = (value >> 48) & 0xFF;
-    data[2] = (value >> 40) & 0xFF;
-    data[3] = (value >> 32) & 0xFF;
-    data[4] = (value >> 24) & 0xFF;
-    data[5] = (value >> 16) & 0xFF;
-    data[6] = (value >>  8) & 0xFF;
-    data[7] = value & 0xFF;
-}
-
-Header read_header(const char* msg){
-
-    std::string magic = show_hex(msg, 4);
-
-    if( magic != "6d f8 07 07"){
-      std::string errmsg = "Bad magic: " + magic;
-      log_message(errmsg);
-      throw std::runtime_error(errmsg);
-    }
-
-    Header header;
-
-    for(size_t offset = 0; offset < 8; offset++){
-      header.command[offset] = msg[12+offset];
-    }
-
-    header.offset = read_uint32(msg, 20);
-    header.length = read_uint64(msg, 24);
-
-    return header;
-}
-
-// char command[8];
-// int offset; // this is a 4 byte int, so I should use a short
-// int length;
-void make_header(char* data, char cmd[8], int offset, int length){
-    data[ 0] = 0x6d;
-    data[ 1] = 0xF8;
-    data[ 2] = 0x07;
-    data[ 3] = 0x07;
-    data[ 4] = 0x00; // plain
-    data[ 5] = 0x00;
-    data[ 6] = 0x00; // version
-    data[ 7] = 0x00;
-    data[ 8] = 0x00; // version_flavor
-    data[ 9] = 0x00;
-    data[10] = 0x00; // mode
-    data[11] = 0x00;
-    for(size_t i = 0; i < 8; i++){
-      data[12 + i] = cmd[i];
-    }
-    write_int32(data + 20, offset);
-    write_int64(data + 24, length);
-}
-
-Message make_data(const char* data, size_t length, char src, char fmt, char cmpr, char encr, char status){
-  Message packet;
-  packet.length = 32 + length;
-  packet.data = (char*)malloc(packet.length * sizeof(char));
-
-  char cmd[8];
-  cmd[0] = PACKET_TYPE_DATA;
-  cmd[1] = src;
-  cmd[2] = fmt;
-  cmd[3] = cmpr;
-  cmd[4] = encr;
-  cmd[5] = status;
-  cmd[6] = 0x00;
-  cmd[7] = 0x00;
-
-  // generate the header
-  make_header(packet.data, cmd, 0, length);
-
-  // directly copy the value data
-  memcpy(packet.data + 32, data, length);
-
-  return packet;
-}
-
-Message fail_packet(const std::string& errmsg){
-  return make_data(
-    errmsg.c_str(),
-    errmsg.size(),
-    PACKET_SOURCE_MESG,
-    PACKET_FORMAT_TEXT,
-    PACKET_COMPRESSION_NONE,
-    PACKET_ENCRYPTION_NONE,
-    PACKET_STATUS_FAIL
-  );
-}
-
-std::string read(const std::string& file) {
-    std::ifstream input_file(file);
-
-    if (!input_file.is_open()) {
-        throw std::runtime_error("Error opening file: " + file);
-    }
-
-    std::stringstream buffer;
-    buffer << input_file.rdbuf();
-
-    std::string content = buffer.str();
-
-    return content;
-}
 
 
 // Functions used in making foreign calls
@@ -282,104 +122,45 @@ std::string generateTempFilename() {
 template <typename T>
 Message _put_value(const T& value, const std::string& schema_str) {
     const char* schema_ptr = schema_str.c_str();
-    Schema* schema = parse_schema(&schema_ptr);
+    Schema* schema = parse_schema_cpp(&schema_ptr);
+
+    // toAnything writes to the shared memory volume
     void* voidstar = toAnything(schema, value);
-    relptr_t relptr = abs2rel(voidstar);
 
-    char payload[8] = { 0 };
-    write_int64(payload, (uint64_t)relptr);
+    // convert to a relative pointer conserved between language servers
+    relptr_t relptr = abs2rel_cpp(voidstar);
 
-    Message packet = make_data(
-      payload,
-      sizeof(size_t),
-      PACKET_SOURCE_RPTR,
-      PACKET_FORMAT_VOIDSTAR,
-      PACKET_COMPRESSION_NONE,
-      PACKET_ENCRYPTION_NONE,
-      PACKET_STATUS_PASS
-    );
+    uint8_t* packet = make_relptr_data_packet(relptr, schema);
 
-    log_message("Putting packet of length " + std::to_string(packet.length));
+    Message message;
+    message.data = (char*)packet;
 
-    return packet;
+    char** errmsg = NULL;
+    message.length = morloc_packet_size(packet, errmsg);
+    PROPAGATE_ERROR(errmsg)
+
+    return message;
 }
 
 
 // Use a key to retrieve a value
 template <typename T>
 T _get_value(const Message& packet, const std::string& schema_str){
-    Header header = read_header(packet.data);
 
-    char source = header.command[1];
-    char format = header.command[2];
-    char status = header.command[5];
+    const char* schema_ptr = schema_str.c_str();
+    Schema* schema = parse_schema_cpp(&schema_ptr);
 
-    std::string errmsg = "";
-
-    if (status == PACKET_STATUS_FAIL){
-        if(source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_TEXT){
-            std::string msg_str(packet.data + 32, packet.data + packet.length);
-            log_message("found unexpected text: " + msg_str);
-            throw std::runtime_error(msg_str);
-        } else {
-            throw std::runtime_error("Expected an error string to be formatted as as message with text");
-        }
+    char* errmsg = nullptr;
+    char* child_errmsg = nullptr;
+    uint8_t* voidstar = (uint8_t*)get_morloc_data_packet_value((uint8_t*)packet.data, schema, &child_errmsg);
+    if(voidstar == nullptr){
+        std::string errmsg = strdup(child_errmsg);
+        FREE(child_errmsg);
+        throw std::runtime_error("Error in _get_value:\n" + errmsg);
     }
 
-    switch(source){
-      case PACKET_SOURCE_MESG:
-        if(format == PACKET_FORMAT_MSGPACK){
-            std::vector<char> msg(packet.data + 32, packet.data + packet.length);
-            return mpk_unpack<T>(msg, schema_str);
-        } else {
-            log_message("Invalid format from mesg: " + std::to_string(format));
-        }
-        break;
-      case PACKET_SOURCE_FILE:
-        switch(format){
-            case PACKET_FORMAT_MSGPACK:
-                std::string filename(packet.data + 32, packet.data + packet.length);
-                log_message("Reading filename " + filename + " of length " + std::to_string(packet.length));
-                // read filename in as a std::vector<char> binary object named "msg"
-                std::vector<char> msg;
-                {
-                    std::ifstream file(filename, std::ios::binary | std::ios::ate);
-                    if (!file.is_open()) {
-                        throw std::runtime_error("Unable to open file: " + filename);
-                    }
-                    std::streamsize size = file.tellg();
-                    file.seekg(0, std::ios::beg);
-
-                    msg.resize(size);
-                    if (!file.read(msg.data(), size)) {
-                        throw std::runtime_error("Failed to read file: " + filename);
-                    }
-                }
-                return mpk_unpack<T>(msg, schema_str);
-        }
-        errmsg = "Invalid format from file" + std::to_string(format);
-        break;
-      case PACKET_SOURCE_RPTR:
-        if(format == PACKET_FORMAT_VOIDSTAR){
-           // convert value to size_t
-           size_t relptr = (size_t)read_uint64(packet.data, 32);
-           log_message("Made relptr for argument: " + std::to_string(relptr));
-           // convert relptr to shared pointer
-           void* absptr = rel2abs(relptr);
-           // convert voidstar to local type
-           const char* schema_cstr = schema_str.c_str();
-           const Schema* schema = parse_schema(&schema_cstr);
-           T* dumby = nullptr;
-           return fromAnything(schema, absptr, dumby);
-        } else {
-            errmsg = "For RPTR source, expected voidstar format";
-        }
-      default:
-        errmsg = "Invalid source";
-        break;
-    }
-
-    throw std::runtime_error(errmsg);
+    T* dumby = nullptr;
+    return fromAnything(schema, (void*)voidstar, dumby);
 }
 
 
@@ -488,8 +269,9 @@ Message stream_recv(int client_fd) {
     log_message("recv_length " + std::to_string(recv_length) + " from client_fd " + std::to_string(client_fd));
 
     // Parse the header, from this we learn the expected size of the packet
-    Header header = read_header(buffer);
-    result.length = 32 + header.offset + header.length;
+    char** errmsg = NULL;
+    result.length = morloc_packet_size((uint8_t*)buffer, errmsg);
+    PROPAGATE_ERROR(errmsg)
 
     // Allocate enough memory to store the entire packet
     result.data = (char*)malloc(result.length * sizeof(char));
@@ -584,36 +366,22 @@ Message foreign_call(
     size_t mid,
     const std::vector<Message>& arg_keys
 ) {
+    Message message;
 
-    log_message("Starting foreign call");
-
-    Message call_packet;
-    call_packet.length = 32;
-
+    const uint8_t** args = (const uint8_t**)calloc(arg_keys.size(), sizeof(uint8_t*));
     for(size_t i = 0; i < arg_keys.size(); i++){
-      call_packet.length += arg_keys[i].length;
+        args[i] = (uint8_t*)arg_keys[i].data;
     }
 
-    call_packet.data = (char*)malloc(call_packet.length * sizeof(char));
+    char** errmsg = NULL;
+    uint8_t* packet = make_morloc_call_packet(mid, args, arg_keys.size(), errmsg);
+    PROPAGATE_ERROR(errmsg)
 
-    char cmd[8];
-    cmd[0] = PACKET_TYPE_CALL;
-    write_int32(cmd + 1, mid);
-    cmd[5] = 0x00;
-    cmd[6] = 0x00;
-    cmd[7] = 0x00;
-    make_header(call_packet.data, cmd, 0, call_packet.length - 32);
+    message.data = (char*)packet;
+    message.length = morloc_packet_size(packet, errmsg);
+    PROPAGATE_ERROR(errmsg)
 
-    size_t arg_start = 32;
-    for(size_t i = 0; i < arg_keys.size(); i++){
-      Message arg = arg_keys[i];
-      memcpy(call_packet.data + arg_start, arg.data, arg.length);
-      arg_start += arg.length;
-    }
-
-    log_message("Send request to " + socket_path);
-    struct Message result_msg = ask(socket_path.c_str(), call_packet);
-    log_message("Receive data from cmd: " + socket_path);
+    Message result_msg = ask(socket_path.c_str(), message);
 
     return result_msg;
 }
@@ -633,38 +401,28 @@ Message foreign_call(
 
 
 Message dispatch(const Message& msg){
+    char** errmsg = NULL;
+    morloc_packet_header_t* header = read_morloc_packet_header((uint8_t*)msg.data, errmsg);
+    PROPAGATE_ERROR(errmsg)
 
-    Header header = read_header(msg.data);
-
-    if (header.command[0] == PACKET_TYPE_PING){
+    if (header->command.cmd_type.type == PACKET_TYPE_PING){
         return msg;
+    } else if (header->command.cmd_type.type == PACKET_TYPE_CALL) {
 
-    } else if (header.command[0] == PACKET_TYPE_CALL) {
+        morloc_call_t* call_packet = read_morloc_call_packet((uint8_t*)msg.data, errmsg);
 
-      uint32_t mid = read_uint32(header.command, 1);
+        uint32_t mid = call_packet->midx;
 
-      log_message("dispatching to mid " + std::to_string(mid));
+        std::vector<Message> args(n);
+        for(size_t i = 0; i < call_packet->nargs; i++){
+            Message arg_msg;
+            arg_msg.length = morloc_packet_size(call_packet->args[i], errmsg);
+            PROPAGATE_ERROR(errmsg)
+            arg_msg.data = call_packet.args[i];
+            args.push_back(arg_msg);
+        }
 
-      Header arg_header;
-      size_t pos = 32 + header.offset;
-      size_t n = 0;
-      while(pos < msg.length){
-          arg_header = read_header(msg.data + pos);
-          pos += 32 + arg_header.offset + arg_header.length;
-          n++;
-      }
-
-      std::vector<Message> args(n);
-      pos = 32 + header.offset;
-      for(size_t i = 0; i < args.size(); i++){
-          arg_header = read_header(msg.data + pos);
-          args[i].length = 32 + arg_header.offset + arg_header.length;
-          args[i].data = (char*)malloc(args[i].length * sizeof(char));
-          memcpy(args[i].data, msg.data + pos, args[i].length);
-          pos += 32 + arg_header.offset + arg_header.length;
-          log_message("arg[" + std::to_string(i) + "] = " + show_hex(args[i].data, args[i].length));
-      }
-
+        free(call_packet);
 
         try {
 
@@ -770,7 +528,7 @@ int main(int argc, char* argv[]) {
     const char* shm_basename = argv[3];
 
     // create the shared memory mappings
-    shm_t* shm = shinit(shm_basename, 0, 0xffff);
+    shm_t* shm = shinit_cpp(shm_basename, 0, 0xffff);
 
     log_message("Server starting with socket path: " + std::string(socket_path));
 

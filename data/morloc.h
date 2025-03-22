@@ -27,6 +27,8 @@
 
 #define FREE(ptr) if(ptr != NULL){ free(ptr); ptr = NULL; }
 
+// {{{ Error handling macro definictions
+
 #define ERRMSG char** errmsg_
 #define CHILD_ERRMSG child_errmsg_
 
@@ -81,6 +83,7 @@
         RAISE_WITH(end, msg, ##__VA_ARGS__) \
     }
 
+/// }}}
 
 // {{{ utilities
 
@@ -1076,8 +1079,8 @@ absptr_t rel2abs(relptr_t ptr, ERRMSG) {
     for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
         shm_t* shm = shopen(i, &CHILD_ERRMSG);
         if (shm == NULL) {
-            RAISE_IF(CHILD_ERRMSG == NULL, "Shared volume %zu does not exist", ptr)
-            RAISE("Error occured while opening shared volume %zu:\n%s", ptr, CHILD_ERRMSG)
+            RAISE_IF(CHILD_ERRMSG == NULL, "Failed to find shared volume %zu while searching for relative pointer %zu", i, ptr)
+            RAISE("Error occured while opening shared volume %zu while searching for %zu:\n%s", i, ptr, CHILD_ERRMSG)
         }
         if ((size_t)ptr < shm->volume_size) {
             char* shm_start = (char*)shm;
@@ -2952,7 +2955,7 @@ bool print_voidstar(const void* voidstar, const Schema* schema, ERRMSG) {
 
 // }}} end voidstar utilities
 
-// {{{ morloc packet support
+// {{{ morloc packet binary protocol
 
 // The first 4 bytes of every morloc packet begin with these characters
 #define MORLOC_PACKET_MAGIC 0x0707f86d // backwards since we are little endian 
@@ -3059,6 +3062,15 @@ static_assert(
     "Header size mismatch!"
 );
 
+// }}}
+
+// {{{ morloc packet API
+
+typedef struct morloc_call_s {
+    uint32_t midx;
+    uint8_t** args;
+    size_t nargs;
+} morloc_call_t;
 
 morloc_packet_header_t* read_morloc_packet_header(const uint8_t* msg, ERRMSG){
     PTR_RETURN_SETUP(morloc_packet_header_t)
@@ -3072,7 +3084,16 @@ morloc_packet_header_t* read_morloc_packet_header(const uint8_t* msg, ERRMSG){
 }
 
 
-size_t morloc_packet_size(const morloc_packet_header_t* header){
+size_t morloc_packet_size_from_header(const morloc_packet_header_t* header){
+    return sizeof(morloc_packet_header_t) + header->offset + header->length;
+}
+
+size_t morloc_packet_size(const uint8_t* packet, ERRMSG){
+    VAL_RETURN_SETUP(size_t, 0);
+
+    morloc_packet_header_t* header = read_morloc_packet_header(packet, &CHILD_ERRMSG);
+    RAISE_IF(header == NULL, "\n%s", CHILD_ERRMSG)
+
     return sizeof(morloc_packet_header_t) + header->offset + header->length;
 }
 
@@ -3135,6 +3156,25 @@ static uint8_t* make_morloc_data_packet(
   }
 
   return packet;
+}
+
+
+// Make a data packet from a relative pointer to shared memory data
+uint8_t* make_relptr_data_packet(relptr_t ptr, const Schema* schema){
+    uint8_t* packet = make_morloc_data_packet(
+      NULL, sizeof(ssize_t), // send no payload, only allocate space
+      NULL, 0, // no metadata
+      PACKET_SOURCE_RPTR,
+      PACKET_FORMAT_VOIDSTAR,
+      PACKET_COMPRESSION_NONE,
+      PACKET_ENCRYPTION_NONE,
+      PACKET_STATUS_PASS
+    );
+
+    // set the payload
+    *((ssize_t*)(packet + sizeof(morloc_packet_header_t))) = ptr;
+
+    return packet;
 }
 
 
@@ -3369,12 +3409,56 @@ uint8_t* make_morloc_call_packet(uint64_t midx, const uint8_t** arg_packets, siz
     for(size_t i = 0; i < nargs; i++){
       morloc_packet_header_t* arg = read_morloc_packet_header(arg_packets[i], &CHILD_ERRMSG);
       RAISE_IF(arg == NULL, "\n%s", CHILD_ERRMSG)
-      size_t arg_length = morloc_packet_size(arg);
+      size_t arg_length = morloc_packet_size_from_header(arg);
       memcpy(data + arg_start, arg, arg_length);
       arg_start += arg_length;
     }
 
     return data;
+}
+
+
+
+morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
+    PTR_RETURN_SETUP(morloc_call_t)
+
+    morloc_call_t* call = (morloc_call_t*)malloc(sizeof(morloc_call_t));
+
+    morloc_packet_header_t* header = read_morloc_packet_header(packet, &CHILD_ERRMSG);
+    RAISE_IF(CHILD_ERRMSG != NULL, "Failed to read call packet header:\n%s", CHILD_ERRMSG)
+    RAISE_IF(header->command.cmd_type.type != PACKET_TYPE_CALL, "Expected packet to be a call")
+
+    call->midx = header->command.call.midx;
+    call->nargs = 0;
+    call->args = NULL;
+
+    size_t pos = sizeof(morloc_packet_header_t) + header->offset;
+    while(pos < header->length){
+        pos += morloc_packet_size(packet + pos, &CHILD_ERRMSG);
+        RAISE_IF(CHILD_ERRMSG != NULL, "Failed to read argument #%zu\n%s", call->nargs, CHILD_ERRMSG)
+        call->nargs++;
+    }
+
+    call->args = (uint8_t**)calloc(call->nargs, sizeof(uint8_t*));
+    pos = sizeof(morloc_packet_header_t) + header->offset;
+    for(size_t i = 0; i < call->nargs; i++){
+        morloc_packet_header_t* arg_header = read_morloc_packet_header(packet + pos, &CHILD_ERRMSG);
+        RAISE_IF(CHILD_ERRMSG != NULL, "Failed to read call argument #%zu:\n%s", i, CHILD_ERRMSG)
+        RAISE_IF(header->command.cmd_type.type != PACKET_TYPE_DATA, "Expected argument to be a data packet")
+
+        size_t arg_packet_size = morloc_packet_size_from_header(arg_header);
+
+        // Copy the argument
+        // We alternatively we could avoid this copy and pass the pointer to the
+        // original memory. This would improve performance, but would be less
+        // safe. I'll leave this optimization for later.
+        call->args[i] = (uint8_t*)malloc(arg_packet_size * sizeof(uint8_t));
+        memcpy(call->args[i], packet + pos, arg_packet_size);
+
+        pos += arg_packet_size;
+    }
+
+    return call;
 }
 
 // }}} end packet support
@@ -3524,8 +3608,8 @@ static bool make_cache_filename(uint64_t key, const char* cache_path, char* buf,
 char* put_cache_packet(const uint8_t* packet, uint64_t key, const char* cache_path, ERRMSG) {
     PTR_RETURN_SETUP(char)
 
-    morloc_packet_header_t* header = (morloc_packet_header_t*)packet;
-    size_t size = morloc_packet_size(header);
+    size_t size = morloc_packet_size(packet, &CHILD_ERRMSG);
+    RAISE_IF(size == 0, "\n%s", CHILD_ERRMSG)
 
     // Generate the cache filename
     char filename[MAX_FILENAME_SIZE];
@@ -3651,7 +3735,7 @@ bool parse_morloc_call_arguments(
     *nargs = 0;
 
     morloc_packet_header_t* header = (morloc_packet_header_t*)packet;
-    size_t packet_size = morloc_packet_size(header);
+    size_t packet_size = morloc_packet_size_from_header(header);
 
     RAISE_IF(
         header->command.cmd_type.type != PACKET_TYPE_CALL,

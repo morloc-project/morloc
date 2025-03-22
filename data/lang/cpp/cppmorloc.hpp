@@ -39,7 +39,7 @@ relptr_t abs2rel_cpp(absptr_t ptr){
 bool shfree_cpp(absptr_t ptr){
     char* errmsg = NULL;
     bool success = shfree(ptr, &errmsg);
-    if(!success){
+    if(errmsg != NULL){
         throw std::runtime_error(errmsg);
     }
     return success;
@@ -49,7 +49,7 @@ bool shfree_cpp(absptr_t ptr){
 Schema* parse_schema_cpp(const char** schema_ptr){
     char* errmsg = NULL;
     Schema* schema = parse_schema(schema_ptr, &errmsg);
-    if(schema == NULL){
+    if(errmsg != NULL){
         throw std::runtime_error(errmsg);
     }
     return schema;
@@ -58,7 +58,17 @@ Schema* parse_schema_cpp(const char** schema_ptr){
 void* shmalloc_cpp(size_t size){
     char* errmsg = NULL;
     void* new_ptr = shmalloc(size, &errmsg);
-    if(new_ptr == NULL){
+    if(errmsg != NULL){
+        throw std::runtime_error(errmsg);
+    }
+    return new_ptr;
+
+}
+
+shm_t* shinit_cpp(const char* shm_basename, size_t volume_index, size_t shm_size) {
+    char* errmsg = NULL;
+    shm_t* new_ptr = shinit(shm_basename, volume_index, shm_size, &errmsg);
+    if(errmsg != NULL){
         throw std::runtime_error(errmsg);
     }
     return new_ptr;
@@ -68,7 +78,7 @@ void* shmalloc_cpp(size_t size){
 int pack_with_schema_cpp(const void* mlc, const Schema* schema, char** mpk, size_t* mpk_size){
     char* errmsg = NULL;
     int exitcode = pack_with_schema(mlc, schema, mpk, mpk_size, &errmsg);
-    if(exitcode == EXIT_FAIL){
+    if(errmsg != NULL){
         throw std::runtime_error(errmsg);
     }
     return exitcode; 
@@ -77,7 +87,7 @@ int pack_with_schema_cpp(const void* mlc, const Schema* schema, char** mpk, size
 int unpack_with_schema_cpp(const char* mgk, size_t mgk_size, const Schema* schema, void** mlcptr){
     char* errmsg = NULL;
     int exitcode = unpack_with_schema(mgk, mgk_size, schema, mlcptr, &errmsg);
-    if(exitcode == EXIT_FAIL){
+    if(errmsg != NULL){
         throw std::runtime_error(errmsg);
     }
     return exitcode; 
