@@ -113,7 +113,10 @@ def cleanup():
 
 def clean_exit(exit_code, msg=""):
     if msg:
-        print(msg, file=sys.stderr)
+        if isinstance(msg, bytes):
+            print(msg.decode(), file=sys.stderr)
+        else:
+            print(msg, file=sys.stderr)
 
     try:
         cleanup()
