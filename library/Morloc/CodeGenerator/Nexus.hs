@@ -88,7 +88,7 @@ makeSchema mid lang t = do
 
 
 main :: MDoc -> MDoc -> [MDoc] -> [FData] -> [NexusCommand] -> MDoc
-main optDir homeDir names fdata cdata = format DF.nexusTemplate "# <<<BREAK>>>"
+main optDir homeDir names fdata cdata = format (DF.embededFileText DF.nexusTemplate) "# <<<BREAK>>>"
  [ [idoc|sys.path = [os.path.expanduser("#{optDir}")] + sys.path
 MORLOC_HOME = os.path.expanduser("#{homeDir}")|]
  , usageT fdata cdata <> "\n" <>

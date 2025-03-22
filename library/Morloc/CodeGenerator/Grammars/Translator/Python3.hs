@@ -306,7 +306,8 @@ makeDispatch ms = align . vsep $ ["dispatch = {", indent 4 (vsep $ map entry ms)
 
 makePool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
 makePool libs includeDocs manifolds dispatch
-  = format (DF.poolTemplate Python3Lang) "# <<<BREAK>>>" [path, vsep includeDocs, vsep manifolds, dispatch]
+  = format (DF.embededFileText (DF.poolTemplate Python3Lang)) "# <<<BREAK>>>"
+           [path, vsep includeDocs, vsep manifolds, dispatch]
   where
     path = [idoc|sys.path = #{list (map makePath libs)} + sys.path|]
     makePath filename = [idoc|os.path.expanduser(#{dquotes(filename)})|]

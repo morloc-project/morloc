@@ -16,7 +16,7 @@ module Morloc.CodeGenerator.SystemConfig
 ) where
 
 import Morloc.CodeGenerator.Namespace
-import qualified Morloc.DataFiles as Files
+import qualified Morloc.DataFiles as DF
 
 import qualified Morloc.Data.Text as MT
 import qualified Data.Text.IO as TIO
@@ -70,18 +70,24 @@ configureAll verbose force slurmSupport config = do
   let srcpath = configHome config </> "lib" </> "socketr.c"
       objpath = configHome config </> "lib" </> "socketr.o"
       libpath = configHome config </> "lib" </> "libsocketr.so"
-  compileCCodeIfNeeded (snd $ Files.rSocketLib) srcpath libpath objpath
+  compileCCodeIfNeeded (DF.embededFileText DF.rSocketLib) srcpath libpath objpath
 
-  let libmorlocPath = includeDir </> fst Files.libmorloc
+  let libmorlocPath = includeDir </> DF.embededFileName (DF.libMorlocH DF.libmorloc)
+      libhashPath = includeDir </> DF.embededFileName (DF.libHashH DF.libmorloc)
 
   say "Creating morloc.h"
-  TIO.writeFile libmorlocPath (snd Files.libmorloc)
+  TIO.writeFile libmorlocPath $ DF.embededFileText (DF.libMorlocH DF.libmorloc)
+  TIO.writeFile libhashPath $ DF.embededFileText (DF.libHashH DF.libmorloc)
 
   say "Generating libmorloc.so"
   -- this is a stupid hack to make gcc compile a header to a shared object
   let tmpCFile = tmpDir </> "x.c"
+
       soPath = libDir </> "libmorloc.so"
-  TIO.writeFile tmpCFile ("#include \"" <> MT.pack libmorlocPath <> "\"")
+  TIO.writeFile tmpCFile (
+      "#include \"" <> MT.pack libmorlocPath <> "\"" <> "\n" <>
+      "#include \"" <> MT.pack libhashPath <> "\""
+    )
   -- special system-wide morloc build options
   let morlocOptions = ( if slurmSupport then ["-DSLURM_SUPPORT"] else [] )
   let gccArgs = [ "-O", "-shared", "-o", soPath, "-fPIC", tmpCFile ] <> morlocOptions
@@ -89,28 +95,25 @@ configureAll verbose force slurmSupport config = do
   removeFile tmpCFile
 
   say "Configuring C++ morloc api header"
-  TIO.writeFile (includeDir </> fst Files.libcpplang) (snd Files.libcpplang)
+  TIO.writeFile (includeDir </> DF.embededFileName DF.libcpplang) (DF.embededFileText DF.libcpplang)
 
   say "Configuring python MessagePack libraries"
-  let (libpyFilename, libpyCode) = Files.libpylang
-      (libpySetupFilename, libpySetupCode) = Files.libpylangSetup
-      (libpyMakefileFilename, libpyMakefileCode) = Files.libpylangMakefile
-      libpyPath = optDir </> libpyFilename
-      libpySetupPath = optDir </> libpySetupFilename
-      libpyMakePath = optDir </> libpyMakefileFilename
+  let libpyPath = optDir </> DF.embededFileName DF.libpylang
+      libpySetupPath = optDir </> DF.embededFileName DF.libpylangSetup
+      libpyMakePath = optDir </> DF.embededFileName DF.libpylangMakefile
 
-  TIO.writeFile libpyPath libpyCode
-  TIO.writeFile libpySetupPath libpySetupCode
-  TIO.writeFile libpyMakePath libpyMakefileCode
+  TIO.writeFile libpyPath $ DF.embededFileText DF.libpylang
+  TIO.writeFile libpySetupPath $ DF.embededFileText DF.libpylangSetup
+  TIO.writeFile libpyMakePath $ DF.embededFileText DF.libpylangMakefile
 
   say "Generating libpymorloc.so" 
-  callCommand ("make -C " <> optDir <> " -f " <> libpyMakePath)
+  callCommand ("make -C " <> optDir <> " -f " <> DF.embededFileName DF.libpylangMakefile)
 
 
   say "Configuring R morloc API libraries"
   compileCCodeIfNeeded
-    (snd Files.librlang)
-    (includeDir </> fst Files.librlang)
+    (DF.embededFileText DF.librlang)
+    (includeDir </> DF.embededFileName DF.librlang)
     (libDir </> "librmorloc.so")
     (includeDir </> "librmorloc.o")
   where

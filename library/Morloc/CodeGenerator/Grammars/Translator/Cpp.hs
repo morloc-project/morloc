@@ -867,9 +867,10 @@ deserializerTemplate isObj params rtype fields
 
 makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
 makeMain includes signatures serialization manifolds dispatch
-  = format (DF.poolTemplate CppLang) "// <<<BREAK>>>"
+  = format (DF.embededFileText (DF.poolTemplate CppLang)) "// <<<BREAK>>>"
   [ vsep includes
   , vsep serialization
   , vsep signatures
   , vsep manifolds
-  , dispatch]
+  , dispatch
+  ]

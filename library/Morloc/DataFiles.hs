@@ -11,10 +11,12 @@ Stability   : experimental
 -}
 
 module Morloc.DataFiles
-  ( poolTemplate
-  , nexusTemplate
-  , rSocketLib
+  ( EmbededFile(..)
+  , LibMorloc(..)
   , libmorloc
+  , nexusTemplate
+  , poolTemplate
+  , rSocketLib
   , libcpplang
   , libpylang
   , libpylangMakefile
@@ -27,42 +29,53 @@ import Data.Text.Encoding (decodeUtf8)
 import Data.FileEmbed (embedFileRelative)
 import Data.Text (Text) 
 
--- Pool templates for all supported languages
-poolTemplate :: Lang -> Text
-poolTemplate CppLang     = decodeUtf8 $ $(embedFileRelative "data/pools/pool.cpp")
-poolTemplate Python3Lang = decodeUtf8 $ $(embedFileRelative "data/pools/pool.py")
-poolTemplate RLang       = decodeUtf8 $ $(embedFileRelative "data/pools/pool.R")
-poolTemplate _ = undefined
-
--- The nexus template
-nexusTemplate :: Text
-nexusTemplate = decodeUtf8 $ $(embedFileRelative "data/nexus.py")
-
--- C file describing socket bindings needed for R
-rSocketLib :: (Text, Text)
-rSocketLib = ("socketr.c", decodeUtf8 $ $(embedFileRelative "data/misc/socketr.c"))
-
+data EmbededFile = EmbededFile
+  { embededFileName :: String -- basename for the file
+  , embededFileText :: Text -- full text the file contained at compile time
+  }
 
 -- C library for universal binary formatting, serialization, and everything
-libmorloc :: (String, Text)
-libmorloc = ("morloc.h", decodeUtf8 $ $(embedFileRelative "data//morloc.h"))
+data LibMorloc = LibMorloc
+  { libMorlocH :: EmbededFile
+  , libHashH :: EmbededFile
+  }
+libmorloc = LibMorloc
+  { libMorlocH = EmbededFile "morloc.h" (decodeUtf8 $ $(embedFileRelative "data/morloc.h"))
+  , libHashH = EmbededFile "xxhash.h" (decodeUtf8 $ $(embedFileRelative "data/third-party/xxhash.h"))
+  }
+
+-- The nexus template
+nexusTemplate :: EmbededFile
+nexusTemplate = EmbededFile "nexus.py" (decodeUtf8 $ $(embedFileRelative "data/nexus.py"))
+
+
+-- Pool templates for all supported languages
+poolTemplate :: Lang -> EmbededFile
+poolTemplate CppLang     = EmbededFile "pool.cpp" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.cpp"))
+poolTemplate Python3Lang = EmbededFile "pool.py" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.py"))
+poolTemplate RLang       = EmbededFile "pool.R" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.R"))
+poolTemplate _ = undefined
+
+-- C file describing socket bindings needed for R
+rSocketLib :: EmbededFile
+rSocketLib = EmbededFile "socketr.c" (decodeUtf8 $ $(embedFileRelative "data/misc/socketr.c"))
 
 -- R interface to morloc.h
-librlang :: (String, Text)
-librlang = ("rmorloc.c", decodeUtf8 $ $(embedFileRelative "data/lang/r/rmorloc.c"))
+librlang :: EmbededFile
+librlang = EmbededFile "rmorloc.c" (decodeUtf8 $ $(embedFileRelative "data/lang/r/rmorloc.c"))
 
 -- C++ interface to morloc.h
-libcpplang :: (String, Text)
-libcpplang = ("cppmorloc.hpp", decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc.hpp"))
+libcpplang :: EmbededFile
+libcpplang = EmbededFile "cppmorloc.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc.hpp"))
 
 -- Python interface to morloc.h
 -- built as a module and imported into python pools and the nexus
 -- requires libmlcmpack.so
-libpylang :: (String, Text)
-libpylang = ("pymorloc.c", decodeUtf8 $ $(embedFileRelative "data/lang/py/pymorloc.c"))
+libpylang :: EmbededFile
+libpylang = EmbededFile "pymorloc.c" (decodeUtf8 $ $(embedFileRelative "data/lang/py/pymorloc.c"))
 
-libpylangSetup :: (String, Text)
-libpylangSetup = ("setup.py", decodeUtf8 $ $(embedFileRelative "data/lang/py/setup.py"))
+libpylangSetup :: EmbededFile
+libpylangSetup = EmbededFile "setup.py" (decodeUtf8 $ $(embedFileRelative "data/lang/py/setup.py"))
 
-libpylangMakefile :: (String, Text)
-libpylangMakefile = ("Makefile", decodeUtf8 $ $(embedFileRelative "data/lang/py/Makefile"))
+libpylangMakefile :: EmbededFile
+libpylangMakefile = EmbededFile "Makefile" (decodeUtf8 $ $(embedFileRelative "data/lang/py/Makefile"))

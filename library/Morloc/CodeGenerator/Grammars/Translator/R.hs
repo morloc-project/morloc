@@ -268,4 +268,4 @@ translateSegment m0 =
       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
 makePool :: [MDoc] -> [MDoc] -> MDoc
-makePool sources manifolds = format (DF.poolTemplate RLang) "# <<<BREAK>>>" [vsep sources, vsep manifolds]
+makePool sources manifolds = format (DF.embededFileText (DF.poolTemplate RLang)) "# <<<BREAK>>>" [vsep sources, vsep manifolds]
