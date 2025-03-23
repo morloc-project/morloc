@@ -3066,6 +3066,8 @@ static_assert(
 
 // {{{ morloc packet API
 
+#define BUFFER_SIZE 4096
+
 typedef struct morloc_call_s {
     uint32_t midx;
     uint8_t** args;
@@ -3084,6 +3086,21 @@ morloc_packet_header_t* read_morloc_packet_header(const uint8_t* msg, ERRMSG){
 }
 
 
+bool packet_is_ping(const uint8_t* packet, ERRMSG){
+    BOOL_RETURN_SETUP
+    morloc_packet_header_t* header = read_morloc_packet_header(packet, &CHILD_ERRMSG);
+    RAISE_IF(header == NULL, "\n%s", CHILD_ERRMSG)
+    return header->command.cmd_type.type == PACKET_TYPE_PING;
+}
+
+bool packet_is_call(const uint8_t* packet, ERRMSG){
+    BOOL_RETURN_SETUP
+    morloc_packet_header_t* header = read_morloc_packet_header(packet, &CHILD_ERRMSG);
+    RAISE_IF(header == NULL, "\n%s", CHILD_ERRMSG)
+    return header->command.cmd_type.type == PACKET_TYPE_CALL;
+}
+
+
 size_t morloc_packet_size_from_header(const morloc_packet_header_t* header){
     return sizeof(morloc_packet_header_t) + header->offset + header->length;
 }
@@ -3097,6 +3114,22 @@ size_t morloc_packet_size(const uint8_t* packet, ERRMSG){
     return sizeof(morloc_packet_header_t) + header->offset + header->length;
 }
 
+
+// TODO: what should our submarine reflect?
+// Currently I just return an exact copy of the ping packet
+uint8_t* return_ping(const uint8_t* packet, ERRMSG){
+    PTR_RETURN_SETUP(uint8_t)
+    packet_is_ping(packet, &CHILD_ERRMSG);
+    RAISE_IF(CHILD_ERRMSG != NULL, "\n%s")
+
+    size_t size = morloc_packet_size(packet, &CHILD_ERRMSG);
+    RAISE_IF(CHILD_ERRMSG != NULL, "\n%s")
+    
+    uint8_t* pong = (uint8_t*)malloc(size * sizeof(uint8_t));
+    memcpy(pong, packet, size);
+    
+    return pong; 
+}
 
 // Set the packet header at the first 32 bytes of a data block
 static void set_morloc_packet_header(
@@ -3462,6 +3495,334 @@ morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
 }
 
 // }}} end packet support
+
+// {{{ socket API
+
+// needed for interop
+#include <sys/wait.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/select.h>
+#include <poll.h>
+#include <errno.h>
+#include <fcntl.h>
+
+
+typedef struct client_list_s {
+    int fd;
+    struct client_list_s* next;
+} client_list_t;
+
+typedef struct language_daemon_s {
+    char* socket_path;
+    char* tmpdir;
+    char* shm_basename;
+    shm_t* shm;
+    size_t shm_default_size;
+    int server_fd;
+    fd_set read_fds;
+    client_list_t* client_fds;
+} language_daemon_t;
+
+
+void socket_close(int socket_id){
+    close(socket_id);
+}
+
+
+void close_daemon(language_daemon_t* daemon){
+    // Close the server
+    socket_close(daemon->server_fd);
+
+    // Remove the socket file
+    unlink(daemon->socket_path);
+}
+
+
+// Create a Unix domain socket
+static int new_socket(ERRMSG){
+    INT_RETURN_SETUP
+
+    int socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+
+    // AF_UNIX: Unix domain socket - other possibilities include:
+    //  * AF_NET: For IPv4 Internet protocols - with SOCK_STREAM for TCP or
+    //             with SOCK_DGRAM for UDP
+    //  * AF_INET6: For IPv6 Internet protocols
+    //  * AF_NETLINK: For kernel user interface device
+    //  * AF_PACKET: For low-level packet interface
+
+    // SOCK_STREAM - a stream socket that provides two-way, connection-based communication
+    //  Alternatives include:
+    //  * SOCK_DGRAM: For datagram (connectionless) sockets
+    //  * SOCK_RAW: For raw network protocol access
+    //  * SOCK_SEQPACKET: For sequential, reliable, connection-based packet streams
+
+    // The 3rd argument, 0, is the protocol. For domain sockets there is only
+    // one protocol, so this is always 0.
+
+    RAISE_IF(socket_fd == EXIT_FAIL, "Error creating socket")
+
+    return socket_fd;
+}
+
+
+static struct sockaddr_un new_server_addr(const char* socket_path){
+    // Set up the server address structure
+    struct sockaddr_un server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sun_family = AF_UNIX;
+    strncpy(server_addr.sun_path, socket_path, sizeof(server_addr.sun_path) - 1);
+    return server_addr;
+}
+
+
+static int new_server(const char* socket_path, ERRMSG){
+    INT_RETURN_SETUP
+
+    int server_fd = new_socket(&CHILD_ERRMSG);
+    RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG)
+
+    struct sockaddr_un server_addr = new_server_addr(socket_path);
+
+    // Remove any existing socket file
+    unlink(socket_path);
+
+    // Bind the socket to the address
+    RAISE_IF_WITH(
+        bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == EXIT_FAIL,
+        socket_close(server_fd),
+        "Error binding socket"
+    )
+
+    RAISE_IF_WITH(
+        listen(server_fd, 1) == EXIT_FAIL,
+        socket_close(server_fd),
+        "Error listening on socket"
+    )
+
+    return server_fd;
+}
+
+
+language_daemon_t* start_daemon(
+    const char* socket_path,
+    const char* tmpdir,
+    const char* shm_basename,
+    size_t shm_default_size,
+    ERRMSG
+){
+    PTR_RETURN_SETUP(language_daemon_t)
+
+    language_daemon_t* server = (language_daemon_t*)malloc(sizeof(language_daemon_t));
+    RAISE_IF(server == NULL, "Malloc for language_daemon_t failed")
+
+    server->socket_path = strdup(socket_path);
+    server->tmpdir = strdup(tmpdir);
+    server->shm_basename = strdup(shm_basename);
+    server->shm_default_size = shm_default_size;
+    
+    // create the shared memory mappings
+    server->shm = shinit(shm_basename, 0, shm_default_size, &CHILD_ERRMSG);
+    RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG)
+
+    // Setup a new server that uses a given path for the socket address
+    server->server_fd = new_server(socket_path, &CHILD_ERRMSG);
+    RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG)
+
+    // Set the server socket to non-blocking mode
+    fcntl(server->server_fd, F_SETFL, O_NONBLOCK);
+
+    return server;
+}
+
+
+uint8_t* stream_from_client(int client_fd, ERRMSG) {
+    PTR_RETURN_SETUP(uint8_t)
+
+    char* buffer = (char*)malloc(BUFFER_SIZE * sizeof(char));
+    RAISE_IF(buffer == NULL, "malloc failed for buffer")
+
+    ssize_t recv_length;
+
+    struct pollfd pfd;
+    pfd.fd = client_fd;
+    pfd.events = POLLIN;
+
+    // Receive the first part of the response, this will include the header
+    while (1) {
+        int poll_result = poll(&pfd, 1, -1); // Wait indefinitely
+
+        if (poll_result < 0) {
+            if (errno == EINTR) continue; // Interrupted system call, retry
+            RAISE_WITH(free(buffer), "Poll error")
+        }
+
+        if (pfd.revents & POLLIN) {
+            recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);
+            if (recv_length > 0) break;
+
+            // Return empty result if connection closed
+            RAISE_IF_WITH(recv_length == 0, free(buffer), "Connection closed by peer")
+            RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN, free(buffer), "Recv error")
+        }
+    }
+
+    size_t packet_length = morloc_packet_size((uint8_t*)buffer, &CHILD_ERRMSG);
+    RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG)
+
+    // Allocate enough memory to store the entire packet
+    uint8_t* result = (uint8_t*)malloc(packet_length * sizeof(uint8_t));
+    RAISE_IF(result == NULL, "malloc failure")
+
+    // Create a pointer to the current writing index
+    uint8_t* data_ptr = result;
+
+    // copy data from the buffer to the message
+    memcpy(data_ptr, buffer, recv_length);
+    data_ptr += recv_length;
+
+    // we don't need the buffer anymore, we'll write directly into the msg
+    free(buffer);
+
+    // read in buffers of data until all data is received
+    while (data_ptr - result < packet_length) {
+        while (1) {
+            int poll_result = poll(&pfd, 1, -1); // Wait indefinitely
+
+            if (poll_result < 0) {
+                if (errno == EINTR) continue; // Interrupted system call, retry
+                RAISE_WITH(free(result), "Pool fail")
+            }
+
+            if (pfd.revents & POLLIN) {
+                recv_length = recv(client_fd, data_ptr, BUFFER_SIZE, 0);
+                if (recv_length > 0) {
+                    data_ptr += recv_length;
+                    break;
+                }
+                RAISE_IF_WITH(recv_length == 0, free(result), "Connection closed before all results were read")
+                RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN, free(result), "Recv error")
+            }
+        }
+    }
+
+    return result;
+}
+
+
+uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG){
+    PTR_RETURN_SETUP(uint8_t)
+
+    int client_fd = new_socket(&CHILD_ERRMSG);
+    RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG)
+
+    struct sockaddr_un server_addr = new_server_addr(socket_path);
+
+    // Data packet to return
+    uint8_t* result = NULL;
+
+    // Connect to the server
+    int retcode = connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr));
+
+    size_t packet_size = morloc_packet_size(packet, &CHILD_ERRMSG);
+    RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG)
+
+    // If the connection succeeded, request data
+    if (retcode != -1) {
+        // Send a message and wait for a reply from the nexus
+        ssize_t bytes_sent = send(client_fd, packet, packet_size, 0);
+        RAISE_IF_WITH(
+            bytes_sent != packet_size,
+            socket_close(client_fd),
+            "Failed to send data"
+        )
+        result = stream_from_client(client_fd, &CHILD_ERRMSG);
+        RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG)
+    }
+    // otherwise, die
+    else {
+        RAISE("Failed to open client");
+    }
+
+    socket_close(client_fd);
+
+    return result;
+}
+
+
+size_t send_packet_to_foreign_server(int client_fd, uint8_t* packet, ERRMSG){
+    VAL_RETURN_SETUP(size_t, 0)
+
+    size_t size = morloc_packet_size(packet, &CHILD_ERRMSG);
+    RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG)
+
+    size_t bytes_sent = send(client_fd, packet, size, 0);
+
+    RAISE_IF(bytes_sent != size, "Transmition over client %d failed, only set %zu of %zu bytes", client_fd, bytes_sent, size)
+
+    return bytes_sent;
+}
+
+
+int wait_for_client(language_daemon_t* daemon, ERRMSG){
+    VAL_RETURN_SETUP(int, -1)
+
+    int return_fd = -1;
+
+    FD_ZERO(&daemon->read_fds);
+    FD_SET(daemon->server_fd, &daemon->read_fds);
+    int max_fd = daemon->server_fd;
+
+    client_list_t* client_fd;
+
+    for(client_fd = daemon->client_fds; client_fd != NULL; client_fd = client_fd->next){
+        FD_SET(client_fd->fd, &daemon->read_fds);
+        max_fd = max_fd > client_fd->fd ? max_fd : client_fd->fd;
+    }
+
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 10; // 100 microseconds timeout
+
+    int ready = select(max_fd + 1, &daemon->read_fds, NULL, NULL, &tv);
+
+    if (ready < 0) {
+        return -1;
+    }
+
+    if (FD_ISSET(daemon->server_fd, &daemon->read_fds)) {
+        int client_fd = accept(daemon->server_fd, NULL, NULL);
+        if (client_fd > 0) {
+            fcntl(client_fd, F_SETFL, O_NONBLOCK);
+
+            // Add the new client to the beginning of the linked list of clients
+            client_list_t* new_client = (client_list_t*)malloc(sizeof(client_list_t));
+            new_client->fd = client_fd;
+            new_client->next = daemon->client_fds;
+            daemon->client_fds->next = new_client;
+        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            RAISE("Error accepting client connection");
+        }
+    }
+
+    client_list_t* last_client = NULL;
+    client_fd = daemon->client_fds;
+    while(client_fd != NULL){
+        if (FD_ISSET(client_fd->fd, &daemon->read_fds)) {
+            last_client->next = client_fd->next;
+            return_fd = client_fd->fd;
+            free(client_fd);
+            return return_fd;
+        }
+        last_client = client_fd;
+        client_fd = client_fd->next;
+    }
+
+    return return_fd;
+}
+
+// }}} end socket API
 
 // {{{ hash support
 
@@ -3864,7 +4225,7 @@ uint8_t* remoteCall(
     //
     // // when the job completes, create a packet with the `result_cache_filename`
     // // file and return
-    
+
     return NULL;
 
 }

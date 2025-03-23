@@ -590,15 +590,13 @@ makeManifold callIndex form manifoldType e = do
         let tryBody = block 4 "try" body
             throwStatement = vsep
               [ [idoc|std::string error_message = "Error raised in C++ pool by m#{pretty callIndex}: " + std::string(e.what());|]
-              , [idoc|log_message(error_message);|]
               , [idoc|throw std::runtime_error(error_message);|]
               ]
             catchBody = block 4 "catch (const std::exception& e)" throwStatement
             tryCatchBody = tryBody <+> catchBody
         return . Just . block 4 decl . vsep $
           [ {- can add diagnostic statements here -}
-            [idoc|log_message("Entering #{pretty callIndex}");|]
-          , tryCatchBody
+            tryCatchBody
           ]
   returnType :: TypeM -> CppTranslator MDoc
   returnType (Function _ t) = cppTypeOf t
