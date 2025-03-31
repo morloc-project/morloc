@@ -46,7 +46,7 @@ libmorloc = LibMorloc
 
 -- The nexus template
 nexusTemplate :: EmbededFile
-nexusTemplate = EmbededFile "nexus.py" (decodeUtf8 $ $(embedFileRelative "data/nexus.py"))
+nexusTemplate = EmbededFile "nexus.c" (decodeUtf8 $ $(embedFileRelative "data/nexus.c"))
 
 
 -- Pool templates for all supported languages
