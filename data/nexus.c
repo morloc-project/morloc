@@ -1,28 +1,92 @@
 #include "morloc.h"
 
+#include <dirent.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 
-// The maximum allowed number of language servers
-//
-// Currently set to the number of supported languages. This will of course need
-// to be updated as more languages are added.
-#define MAX_DAEMONS 3
+#define MAX_DAEMONS 32
 
-int daemon_pids[MAX_DAEMONS] = { 0 }; 
-char tmpdir[MAX_FILENAME_SIZE];
+// global pid list of language daemons
+int pids[MAX_DAEMONS] = { 0 }; 
+
+// global temporary file
+char* tmpdir = NULL;
+
+// Recursively delete a directory and its contents
+void delete_directory(const char* path) {
+    // open a directory stream
+    DIR* dir = opendir(path);
+    if (dir == NULL) {
+        perror("Failed to tmpdir");
+        return;
+    }
+
+    struct dirent* entry;
+    char filepath[PATH_MAX];
+
+    // iterate through all files in the directory
+    while ((entry = readdir(dir)) != NULL) {
+        // Skip "." and ".."
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        snprintf(filepath, sizeof(filepath), "%s/%s", path, entry->d_name);
+
+        struct stat statbuf;
+        if (stat(filepath, &statbuf) == -1) {
+            perror("Failed to stat file");
+            continue;
+        }
+
+        if (S_ISDIR(statbuf.st_mode)) {
+            // recursively delete subdirectories
+            delete_directory(filepath);
+        } else {
+            // delete files
+            if (unlink(filepath) == -1) {
+                perror("Failed to delete file");
+            }
+        }
+    }
+
+    closedir(dir);
+
+    // Delete the directory itself
+    if (rmdir(path) == -1) {
+        perror("Failed to delete directory");
+    }
+}
 
 void clean_exit(int exit_code){
-    // TODO: kill children
-    // TODO: delete tmp files
-    exit(exit_code);
+    // Kill all daemon processes
+    for (size_t i = 0; i < MAX_DAEMONS; i++) {
+        if (pids[i] > 0) { // Ensure pid is valid
+            if (kill(pids[i], SIGTERM) == -1) { // Send SIGTERM to gracefully terminate
+                perror("Failed to kill process");
+            }
+        }
+    }
+
+    // Delete the temporary directory and its contents
+    if (tmpdir != NULL) {
+        delete_directory(tmpdir);
+        free(tmpdir); // Free memory allocated for tmpdir
+        tmpdir = NULL; // Clear the pointer
+    }
+
+    exit(exit_code); // Exit with the provided code
 }
+
 
 typedef struct morloc_socket_s{
     char* lang;
@@ -30,6 +94,7 @@ typedef struct morloc_socket_s{
     char* socket_filename;
     int pid; // language server pid 
 } morloc_socket_t;
+
 
 // make a hash from a seed, the process id, nanoseconds since the epoch
 uint64_t make_job_hash(uint64_t seed) {
@@ -140,8 +205,7 @@ void run_command(
     const char** arg_schema_strs,
     const char* return_schema_str,
     morloc_socket_t root_socket,
-    morloc_socket_t** all_sockets, // not const, these are modified to add pid
-    const char* tmpdir
+    morloc_socket_t** all_sockets // not const, these are modified to add pid
 ){
     int pid = 0;
     char* errmsg = NULL;
@@ -153,6 +217,8 @@ void run_command(
 
     for(size_t i = 0; all_sockets[i] != NULL; i++){
         all_sockets[i]->pid = start_language_server(all_sockets[i], &errmsg);
+        // add pid to global list for later cleanup
+        pids[i] = pid;
         if(errmsg != NULL){
             fprintf(stderr, errmsg);
             clean_exit(1);
@@ -191,7 +257,6 @@ void usage(){
 int dispatch(
     const char* cmd,
     const char** args,
-    const char* tmpdir,
     const char* shm_basename,
     size_t shm_initial_size
 ){
@@ -225,7 +290,9 @@ int main(int argc, char* argv[]){
 
     char* cmd = argv[1];
 
-    char* tmpdir = make_tmpdir(&errmsg);
+    // set the global temporary directory
+    tmpdir = make_tmpdir(&errmsg);
+
     if(errmsg != NULL){
         fprintf(stderr, errmsg);
         return 1;
@@ -237,5 +304,5 @@ int main(int argc, char* argv[]){
         args[i] = argv[i + 2];  // Copy pointers as const
     }
 
-    return dispatch(cmd, args, tmpdir, shm_basename, shm_initial_size);
+    return dispatch(cmd, args, shm_basename, shm_initial_size);
 }

@@ -54,7 +54,7 @@ generate cs xs = do
       { scriptBase = outfile
       , scriptLang = ML.CLang
       , scriptCode = "." :/ File outfile (Code . render $ main (pretty home) names fdata cs)
-      , scriptMake = [SysRun . Code $ "gcc -O -I" <> MT.pack includeDir <> " " <> MT.pack outfile]
+      , scriptMake = [SysRun . Code $ "gcc -o nexus -O -I" <> MT.pack includeDir <> " " <> MT.pack outfile]
       }
 
 getFData :: (Type, Int, Lang, [Socket]) -> MorlocMonad FData
@@ -90,9 +90,36 @@ makeSchema mid lang t = do
 
 main :: MDoc -> [MDoc] -> [FData] -> [NexusCommand] -> MDoc
 main homeDir names fdata cdata
-    = format (DF.embededFileText DF.nexusTemplate) "// <<<BREAK>>>" [ usageCode fdata, dispatchCode fdata ]
+    = format (DF.embededFileText DF.nexusTemplate) "// <<<BREAK>>>" [ usageCode fdata cdata, dispatchCode fdata ]
 
-usageCode _ = [idoc|fprintf(stderr, "Usage STUB");|]
+usageCode :: [FData] -> [NexusCommand] -> MDoc
+usageCode fdata cdata =
+  [idoc|
+    fprintf(stderr, "The following commands are exported:\n");
+    #{align $ vsep (map usageLineT fdata ++ map usageLineConst cdata)}
+|]
+
+usageLineT :: FData -> MDoc
+usageLineT (_, name', _, t, _, _, _) = vsep
+  ( [idoc|fprintf(stderr, "  #{name'}\n");|]
+  : writeTypes t
+  )
+
+usageLineConst :: NexusCommand -> MDoc
+usageLineConst cmd = vsep
+  ( [idoc|fprintf(stderr, "  #{pretty (commandName cmd)}\n");|]
+  : writeTypes (commandType cmd)
+  )
+
+writeTypes :: Type -> [MDoc]
+writeTypes (FunT inputs output)
+  = zipWith writeType (map Just [1..]) inputs
+  ++ writeTypes output
+writeTypes t = [writeType Nothing t]
+
+writeType :: Maybe Int -> Type -> MDoc
+writeType (Just i) t = [idoc|fprintf(stderr, "    param #{pretty i}: #{pretty t}\n");|]
+writeType Nothing  t = [idoc|fprintf(stderr, "    return: #{pretty t}\n");|]
 
 dispatchCode fdata = [idoc|
     uint32_t mid = 0;
@@ -126,7 +153,7 @@ dispatchCode fdata = [idoc|
     morloc_socket_t* sockets[] = #{socketList};
     const char* arg_schemas[] = #{argSchemasList};
     char return_schema[] = #{returnSchema};
-    run_command(mid, args, arg_schemas, return_schema, #{lang}_socket, sockets, tmpdir);
+    run_command(mid, args, arg_schemas, return_schema, #{lang}_socket, sockets);
           |]
         )
         where
