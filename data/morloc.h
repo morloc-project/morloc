@@ -3,6 +3,7 @@
 
 #include <assert.h>
 #include <ctype.h>
+#include <dirent.h> // used in delete_directory
 #include <errno.h>
 #include <fcntl.h>
 #include <float.h>
@@ -111,6 +112,72 @@ void hex(const void *ptr, size_t size) {
         }
     }
 }
+
+// return true if file exists (may or may not be openable)
+bool file_exists(const char *filename) {
+    return access(filename, F_OK) == 0; // F_OK checks for existence
+}
+
+// Recursively delete a directory and its contents
+void delete_directory(const char* path) {
+    // open a directory stream
+    DIR* dir = opendir(path);
+    if (dir == NULL) {
+        perror("Failed to tmpdir");
+        return;
+    }
+
+    struct dirent* entry;
+    char filepath[PATH_MAX];
+
+    // iterate through all files in the directory
+    while ((entry = readdir(dir)) != NULL) {
+        // Skip "." and ".."
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        snprintf(filepath, sizeof(filepath), "%s/%s", path, entry->d_name);
+
+        struct stat statbuf;
+        if (stat(filepath, &statbuf) == -1) {
+            perror("Failed to stat file");
+            continue;
+        }
+
+        if (S_ISDIR(statbuf.st_mode)) {
+            // recursively delete subdirectories
+            delete_directory(filepath);
+        } else {
+            // delete files
+            if (unlink(filepath) == -1) {
+                perror("Failed to delete file");
+            }
+        }
+    }
+
+    closedir(dir);
+
+    // Delete the directory itself
+    if (rmdir(path) == -1) {
+        perror("Failed to delete directory");
+    }
+}
+
+// Check if a string has a given suffix
+bool has_suffix(const char* x, const char* suffix){
+    if( x == NULL || suffix == NULL){
+        return false;
+    }
+
+    size_t x_len = strlen(x);
+    size_t suffix_len = strlen(suffix);
+
+    return (x_len >= suffix_len) &&
+           strcmp(x + x_len - suffix_len, suffix) == 0;
+}
+
+
 
 // }}}
 
@@ -3613,6 +3680,20 @@ static void set_morloc_packet_header(
     header->length = length;
 }
 
+uint8_t* make_ping_packet(){
+    uint8_t* packet = (uint8_t*)calloc(1, sizeof(morloc_packet_header_t));
+
+    packet_command_t cmd = {
+        .ping = {
+            PACKET_TYPE_PING,
+            .padding = { 0, 0, 0, 0, 0, 0, 0 }
+        }
+    };
+
+    set_morloc_packet_header(packet, cmd, 0, 0);
+
+    return packet;
+}
 
 static uint8_t* make_morloc_data_packet(
     const uint8_t* data,
@@ -3655,7 +3736,6 @@ static uint8_t* make_morloc_data_packet(
   return packet;
 }
 
-
 // Make a data packet from a relative pointer to shared memory data
 uint8_t* make_relptr_data_packet(relptr_t ptr, const Schema* schema){
     uint8_t* packet = make_morloc_data_packet(
@@ -3688,48 +3768,26 @@ uint8_t* make_fail_packet(const char* failure_message){
   );
 }
 
-
-uint8_t* read_binary_file(const char* filename, size_t* file_size, ERRMSG) {
+uint8_t* read_binary_fd(FILE* file, size_t* file_size, ERRMSG) {
     PTR_RETURN_SETUP(uint8_t)
-
-    RAISE_IF(filename == NULL, "Found NULL filename")
 
     uint8_t* msg = NULL;
     size_t read_size = 0;
     size_t file_size_long = 0;
-    FILE* file = NULL;
-
-    file = fopen(filename, "rb");
-    RAISE_IF(file == NULL, "Failed to open file '%s'", filename)
 
     int return_code = fseek(file, 0, SEEK_END);
-    RAISE_IF_WITH(
-        return_code != 0,
-        fclose(file),
-        "Failed to seek to end of file"
-    )
+    RAISE_IF(return_code != 0, "Failed to seek to end of file")
 
     file_size_long = ftell(file);
-    RAISE_IF_WITH(
-        file_size_long < 0,
-        fclose(file),
-        "Failed to determine the size of file '%s'",
-        filename
-    )
+    RAISE_IF(file_size_long < 0, "Failed to determine file size")
 
-    RAISE_IF_WITH(
-        file_size_long == 0,
-        fclose(file),
-        "The file '%s' is empty",
-        filename
-    )
+    RAISE_IF(file_size_long == 0, "The file is empty")
 
     // If the file is too large to fit in memory, we will need to stream it.
     // TODO: add streaming support
     RAISE_IF(
         file_size_long > SIZE_MAX,
-        "The file '%s' is %zu bytes in length which exceeds the maximum allocatable size",
-        filename,
+        "The file maximum allocatable size (%zu bytes)",
         file_size_long
     )
 
@@ -3739,22 +3797,30 @@ uint8_t* read_binary_file(const char* filename, size_t* file_size, ERRMSG) {
     rewind(file);
 
     msg = (uint8_t*)malloc(*file_size);
-    RAISE_IF_WITH(
-        msg == NULL,
-        fclose(file),
-        "Failed to allocate %zu bytes",
-        *file_size
-    )
+    RAISE_IF(msg == NULL, "Failed to allocate %zu bytes", *file_size)
 
     read_size = fread(msg, 1, *file_size, file);
     if(read_size != *file_size){
         free(msg);
-        fclose(file);
         RAISE("Read %zu bytes (expected %zu)", read_size, *file_size)
     }
 
-    fclose(file);
     return msg;
+}
+
+uint8_t* read_binary_file(const char* filename, size_t* file_size, ERRMSG) {
+    PTR_RETURN_SETUP(uint8_t)
+
+    RAISE_IF(filename == NULL, "Found NULL filename")
+
+    FILE* file = fopen(filename, "rb");
+    RAISE_IF(file == NULL, "Failed to open file '%s'", filename)
+
+    uint8_t* data = read_binary_fd(file, file_size, &CHILD_ERRMSG);
+    fclose(file);
+    RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG);
+
+    return data;
 }
 
 // mutates the given errmsg to the error value of the data packet
@@ -4505,6 +4571,128 @@ char* check_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
 }
 
 // }}} end hash support
+
+// {{{ Parsing CLI arguments
+
+// Parse a command line argument string that should contain data of a given type
+uint8_t* parse_cli_data_argument(const char* arg, const Schema* schema, ERRMSG){
+    PTR_RETURN_SETUP(uint8_t)
+
+    FILE* fd;
+    uint8_t* packet;
+
+    // handle STDIN
+    if(strcmp(arg, "/dev/stdin") == 0 || strcmp(arg, "-") == 0){
+        fd = stdin;
+    }
+    // If the argument is a file, try to open it and parse it as JSON or MessagePack
+    else if(file_exists(arg)){
+        fd = fopen(arg, "rb");
+        RAISE_IF(fd == NULL, "The argument '%s' is a filename, but it can't be read:\n%s", arg, strerror(errno));
+    } else {
+        fd = NULL; // this argument is not a file
+    }
+
+    if(fd == NULL){
+        // The argument is the data
+        // JSON is currently the only supported option
+        packet = read_json_with_schema(arg, schema, &CHILD_ERRMSG);
+        RAISE_IF(CHILD_ERRMSG != NULL, "Failed to read argument:\n%s", CHILD_ERRMSG)
+        return packet;
+    } else {
+        // The argument is a file
+        size_t data_size = 0;
+        char* data = (char*)read_binary_fd(fd, &data_size, &CHILD_ERRMSG);
+        if(fd != stdin){
+            fclose(fd);
+        }
+        RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "\n%s", CHILD_ERRMSG)
+
+        if(has_suffix(arg, ".json")){
+            packet = read_json_with_schema((char*)data, schema, &CHILD_ERRMSG);
+            // If this isn't a JSON file, but you say it is, then either you are
+            // confused or evil. In either case, I'll just play it safe and die.
+            RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "Failed to read json argument file '%s':\n%s", arg, CHILD_ERRMSG)
+            return packet;
+        } 
+
+        if(has_suffix(arg, ".mpk") || has_suffix(arg, ".msgpack")){
+            unpack_with_schema(data, data_size, schema, (void**)&packet, &CHILD_ERRMSG);
+            RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "Failed to read MessagePack argument file '%s':\n%s", arg, CHILD_ERRMSG) 
+            return packet;
+        }
+
+        // If the extension is not recognized
+        // First try to read it as a morloc voidstar packet
+        morloc_packet_header_t* header = read_morloc_packet_header((uint8_t*)data, &CHILD_ERRMSG);
+        if(CHILD_ERRMSG == NULL && header != NULL){
+            return (uint8_t*)data;
+        }
+
+        unpack_with_schema(data, data_size, schema, (void**)&packet, &CHILD_ERRMSG);
+        if(CHILD_ERRMSG == NULL && packet != NULL){
+            free(data);
+            return (uint8_t*)packet;
+        }
+
+        free(data);
+        RAISE("Failed to read argument from file '%s'\n", arg)
+    }
+}
+
+// Given the manifold ID and argument and schema strings, create a morloc call packet
+uint8_t* make_call_packet_from_cli(
+    uint32_t mid,
+    const char** args, // NULL terminated array of argument strings
+    const char** arg_schema_strs, // NULL terminated array of schema strings
+    ERRMSG
+){
+    PTR_RETURN_SETUP(uint8_t)
+
+    size_t nschemas = 0;
+    for(size_t i = 0; arg_schema_strs[i] != NULL; i++){
+        nschemas++;
+    }
+
+    const Schema** schemas = (const Schema**)calloc(nschemas + 1, sizeof(Schema*));
+    RAISE_IF(schemas == NULL, "Failed to allocate memory for schemas\n")
+
+    for(size_t i = 0; arg_schema_strs[i] != NULL; i++){
+        schemas[i] = parse_schema(&arg_schema_strs[i], &CHILD_ERRMSG);
+        RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(schemas), "Failed to parse argument %zu:\n%s", i, CHILD_ERRMSG)
+    }
+    schemas[nschemas] = NULL;
+
+    size_t nargs = 0;
+    for(size_t i = 0; args[i] != NULL; i++){
+        nargs++;
+    }
+
+    const uint8_t** packet_args = (const uint8_t**)calloc(nargs, sizeof(uint8_t*));
+    RAISE_IF_WITH(packet_args == NULL, free(schemas), "Failed to allocate packet_args");
+
+    for(size_t i = 0; i < nargs; i++){
+        packet_args[i] = parse_cli_data_argument(args[i], schemas[i], &CHILD_ERRMSG);
+        if(CHILD_ERRMSG != NULL){
+            free(schemas);
+            free(packet_args);
+            RAISE("Failed to parse argument %zu\n%s", i, CHILD_ERRMSG);
+        }
+    }
+
+    uint8_t* call_packet = make_morloc_call_packet((uint64_t)mid, packet_args, nargs, &CHILD_ERRMSG);
+    if(CHILD_ERRMSG != NULL){
+        free(schemas);
+        free(packet_args);
+        RAISE("Failed to make call packet:\n%s", CHILD_ERRMSG);
+    }
+
+    free(schemas);
+    free(packet_args);
+    return call_packet;
+}
+
+/// }}}
 
 // prolly bring this back
 // #ifdef SLURM_SUPPORT

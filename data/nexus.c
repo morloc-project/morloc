@@ -1,6 +1,5 @@
 #include "morloc.h"
 
-#include <dirent.h>
 #include <inttypes.h>
 #include <signal.h>
 #include <stdio.h>
@@ -12,60 +11,19 @@
 #include <time.h>
 #include <unistd.h>
 
+#define INITIAL_RETRY_DELAY 0.001
+#define RETRY_MULTIPLIER 1.25
+#define MAX_RETRIES 45
 
 #define MAX_DAEMONS 32
 
 // global pid list of language daemons
 int pids[MAX_DAEMONS] = { 0 }; 
 
+
 // global temporary file
 char* tmpdir = NULL;
 
-// Recursively delete a directory and its contents
-void delete_directory(const char* path) {
-    // open a directory stream
-    DIR* dir = opendir(path);
-    if (dir == NULL) {
-        perror("Failed to tmpdir");
-        return;
-    }
-
-    struct dirent* entry;
-    char filepath[PATH_MAX];
-
-    // iterate through all files in the directory
-    while ((entry = readdir(dir)) != NULL) {
-        // Skip "." and ".."
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-
-        snprintf(filepath, sizeof(filepath), "%s/%s", path, entry->d_name);
-
-        struct stat statbuf;
-        if (stat(filepath, &statbuf) == -1) {
-            perror("Failed to stat file");
-            continue;
-        }
-
-        if (S_ISDIR(statbuf.st_mode)) {
-            // recursively delete subdirectories
-            delete_directory(filepath);
-        } else {
-            // delete files
-            if (unlink(filepath) == -1) {
-                perror("Failed to delete file");
-            }
-        }
-    }
-
-    closedir(dir);
-
-    // Delete the directory itself
-    if (rmdir(path) == -1) {
-        perror("Failed to delete directory");
-    }
-}
 
 void clean_exit(int exit_code){
     // Kill all daemon processes
@@ -134,7 +92,6 @@ char* make_tmpdir(ERRMSG) {
 }
 
 
-
 bool is_help(char* arg1){
     return (
         strcmp(arg1, "-h") == 0 ||
@@ -143,6 +100,7 @@ bool is_help(char* arg1){
         strcmp(arg1, "?") == 0
     );
 }
+
 
 int start_language_server(const morloc_socket_t* socket, ERRMSG){
     INT_RETURN_SETUP
@@ -159,15 +117,6 @@ int start_language_server(const morloc_socket_t* socket, ERRMSG){
     }
 }
 
-uint8_t* prepare_call_packet(uint32_t mid, const char** args, const Schema** arg_schemas){
-    // TODO: complete
-    return NULL;
-}
-
-uint8_t* client(morloc_socket_t root_socket, uint8_t* message){
-    // TODO complete
-    return NULL;
-}
 
 void print_return(uint8_t* packet, Schema* schema){
     char* child_errmsg = NULL;
@@ -199,6 +148,7 @@ void print_return(uint8_t* packet, Schema* schema){
     }
 }
 
+
 void run_command(
     uint32_t mid,
     const char** args,
@@ -212,10 +162,12 @@ void run_command(
 
     Schema* return_schema = parse_schema(&return_schema_str, &errmsg);
     if(errmsg != NULL){
-        fprintf(stderr, "Failed to parse return schema");
+        fprintf(stderr, "Failed to parse return schema\n");
     }
 
+    size_t npids = 0;
     for(size_t i = 0; all_sockets[i] != NULL; i++){
+        npids++;
         all_sockets[i]->pid = start_language_server(all_sockets[i], &errmsg);
         // add pid to global list for later cleanup
         pids[i] = pid;
@@ -225,25 +177,50 @@ void run_command(
         }
     }
 
-    size_t nschemas = 0;
-    for(size_t i = 0; arg_schema_strs[i] != NULL; i++){
-        nschemas++;
-    }
-
-    const Schema** arg_schemas = (const Schema**)calloc(nschemas + 1, sizeof(Schema*));
-    for(size_t i = 0; arg_schema_strs[i] != NULL; i++){
-        arg_schemas[i] = parse_schema(&arg_schema_strs[i], &errmsg);
-        if(errmsg != NULL){
-            fprintf(stderr, errmsg);
-            clean_exit(1);
+    // wait for everything to wake up
+    uint8_t* ping_packet = make_ping_packet();
+    bool all_pass;
+    uint8_t* return_data;
+    double retry_time = INITIAL_RETRY_DELAY;
+    int attempts = 0;
+    while(!all_pass){
+        all_pass = true;
+        for(morloc_socket_t** socket_ptr = all_sockets; *socket_ptr != NULL; socket_ptr++){
+            return_data = send_and_receive_over_socket((*socket_ptr)->socket_filename, ping_packet, &errmsg);
+            if(errmsg != NULL || return_data == NULL){
+                all_pass = false;
+                if(errmsg) fprintf(stderr, "Socket error: %s\n", errmsg);
+            }
+        }
+        if(!all_pass){
+            // Sleep using exponential backoff
+            struct timespec sleep_time = {
+                .tv_sec = (time_t)retry_time,
+                .tv_nsec = (long)((retry_time - (time_t)retry_time) * 1e9)
+            };
+            nanosleep(&sleep_time, NULL);
+            
+            retry_time *= RETRY_MULTIPLIER;
+            attempts++;
+            
+            if(attempts > MAX_RETRIES){
+                fprintf(stderr, "Timed out after %d attempts while waiting for language servers to start\n", attempts);
+                clean_exit(1);
+            }
         }
     }
-    arg_schemas[nschemas] = NULL;
-    
 
-    uint8_t* call_packet = prepare_call_packet(mid, args, arg_schemas);
+    uint8_t* call_packet = make_call_packet_from_cli(mid, args, arg_schema_strs, &errmsg);
+    if(errmsg != NULL){
+        fprintf(stderr, "Failed to parse arguments\n%s", errmsg);
+        clean_exit(1);
+    }
 
-    uint8_t* result_packet = client(root_socket, call_packet);
+    uint8_t* result_packet = send_and_receive_over_socket(root_socket.socket_filename, call_packet, &errmsg);
+    if(errmsg != NULL){
+        fprintf(stderr, "Daemon is unresponsive: %s\n", errmsg);
+        clean_exit(1);
+    }
 
     print_return(result_packet, return_schema);
 }
@@ -253,6 +230,7 @@ void usage(){
     // <<<BREAK>>>
     clean_exit(0);
 }
+
 
 int dispatch(
     const char* cmd,
@@ -267,6 +245,7 @@ int dispatch(
 
     clean_exit(0);
 }
+
 
 int main(int argc, char* argv[]){
     char* errmsg = NULL;
