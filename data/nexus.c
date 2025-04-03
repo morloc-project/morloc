@@ -20,7 +20,6 @@
 // global pid list of language daemons
 int pids[MAX_DAEMONS] = { 0 }; 
 
-
 // global temporary file
 char* tmpdir = NULL;
 
@@ -38,12 +37,16 @@ void clean_exit(int exit_code){
     // Delete the temporary directory and its contents
     if (tmpdir != NULL) {
         delete_directory(tmpdir);
-        free(tmpdir); // Free memory allocated for tmpdir
         tmpdir = NULL; // Clear the pointer
     }
 
     exit(exit_code); // Exit with the provided code
 }
+
+
+#define ERROR(msg, ...) \
+    fprintf(stderr, "Error (%s:%d in %s): " msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    clean_exit(1);
 
 
 typedef struct morloc_socket_s{
@@ -109,11 +112,11 @@ int start_language_server(const morloc_socket_t* socket, ERRMSG){
 
     if (pid == 0) { // Child process
         execvp(socket->syscmd[0], socket->syscmd);
-        RAISE("execvp failed") // Only reached if exec fails
+        RAISE("execvp failed: %s", strerror(errno)) // Only reached if exec fails
     } else if (pid > 0) { // Parent process
         return pid;
     } else {
-        RAISE("fork failed");
+        RAISE("fork failed: %s", strerror(errno));
     }
 }
 
@@ -121,21 +124,19 @@ int start_language_server(const morloc_socket_t* socket, ERRMSG){
 void print_return(uint8_t* packet, Schema* schema){
     char* child_errmsg = NULL;
 
-    bool readable = get_morloc_data_packet_error_message(packet, &child_errmsg);
+    bool failed = get_morloc_data_packet_error_message(packet, &child_errmsg);
     // print error due to malformed packet
-    if(!readable){
+    if(failed){
         if(child_errmsg == NULL){
-            fprintf(stderr, "Failed to read returned data packet\n");
+            ERROR("Failed to read returned data packet\n");
         } else {
-            fprintf(stderr, "Failed to read returned data packet:\n%s\n", child_errmsg);
+            ERROR("Failed to read returned data packet:\n%s\n", child_errmsg);
         }
-        clean_exit(1);
     }
 
     // print error raised from inside morloc
-    if(readable && child_errmsg != NULL){
-        fprintf(stderr, child_errmsg);
-        clean_exit(1);
+    if(child_errmsg != NULL){
+        ERROR("%s", child_errmsg);
     }
 
     // print result
@@ -143,15 +144,14 @@ void print_return(uint8_t* packet, Schema* schema){
     if(child_errmsg == NULL){
         clean_exit(0);
     } else {
-        fprintf(stderr, "Failed to print return packet:\n%s\n", child_errmsg);
-        clean_exit(1);
+        ERROR("Failed to print return packet:\n%s\n", child_errmsg);
     }
 }
 
 
 void run_command(
     uint32_t mid,
-    const char** args,
+    char** args,
     const char** arg_schema_strs,
     const char* return_schema_str,
     morloc_socket_t root_socket,
@@ -162,7 +162,7 @@ void run_command(
 
     Schema* return_schema = parse_schema(&return_schema_str, &errmsg);
     if(errmsg != NULL){
-        fprintf(stderr, "Failed to parse return schema\n");
+        ERROR("Failed to parse return schema\n");
     }
 
     size_t npids = 0;
@@ -172,8 +172,7 @@ void run_command(
         // add pid to global list for later cleanup
         pids[i] = pid;
         if(errmsg != NULL){
-            fprintf(stderr, errmsg);
-            clean_exit(1);
+            ERROR("%s", errmsg);
         }
     }
 
@@ -189,7 +188,11 @@ void run_command(
             return_data = send_and_receive_over_socket((*socket_ptr)->socket_filename, ping_packet, &errmsg);
             if(errmsg != NULL || return_data == NULL){
                 all_pass = false;
-                if(errmsg) fprintf(stderr, "Socket error: %s\n", errmsg);
+                fprintf(stderr, "Failed to ping '%s', waiting %fs\n", (*socket_ptr)->socket_filename, retry_time);
+                if(errmsg){
+                    fprintf(stderr, " %s", errmsg);
+                }
+                break;
             }
         }
         if(!all_pass){
@@ -204,22 +207,19 @@ void run_command(
             attempts++;
             
             if(attempts > MAX_RETRIES){
-                fprintf(stderr, "Timed out after %d attempts while waiting for language servers to start\n", attempts);
-                clean_exit(1);
+                ERROR("Timed out after %d attempts while waiting for language servers to start\n", attempts);
             }
         }
     }
 
     uint8_t* call_packet = make_call_packet_from_cli(mid, args, arg_schema_strs, &errmsg);
     if(errmsg != NULL){
-        fprintf(stderr, "Failed to parse arguments\n%s", errmsg);
-        clean_exit(1);
+        ERROR("Failed to parse arguments\n%s", errmsg);
     }
 
     uint8_t* result_packet = send_and_receive_over_socket(root_socket.socket_filename, call_packet, &errmsg);
     if(errmsg != NULL){
-        fprintf(stderr, "Daemon is unresponsive: %s\n", errmsg);
-        clean_exit(1);
+        ERROR("Daemon is unresponsive: %s\n", errmsg);
     }
 
     print_return(result_packet, return_schema);
@@ -234,7 +234,7 @@ void usage(){
 
 int dispatch(
     const char* cmd,
-    const char** args,
+    char** args,
     const char* shm_basename,
     size_t shm_initial_size
 ){
@@ -250,7 +250,7 @@ int dispatch(
 int main(int argc, char* argv[]){
     char* errmsg = NULL;
 
-    if(argc == 1 || is_help(argv[1]) ){
+    if(argc == 1 || (argv[1] != NULL && is_help(argv[1]))){
         usage();
         return 1;
     }
@@ -259,12 +259,12 @@ int main(int argc, char* argv[]){
 
     size_t shm_initial_size = 0xffff;
     char shm_basename[MAX_FILENAME_SIZE];
-    snprintf(shm_basename, sizeof(shm_basename), "morloc-%llu", job_hash);
+    snprintf(shm_basename, sizeof(shm_basename), "morloc-%" PRIu64, job_hash);
+    /* char shm_basename[] = "test"; */
 
     shm_t* shm = shinit(shm_basename, 0, shm_initial_size, &errmsg);
     if(errmsg != NULL){
-        fprintf(stderr, errmsg);
-        return 1;
+        ERROR("%s", errmsg);
     }
 
     char* cmd = argv[1];
@@ -273,15 +273,8 @@ int main(int argc, char* argv[]){
     tmpdir = make_tmpdir(&errmsg);
 
     if(errmsg != NULL){
-        fprintf(stderr, errmsg);
-        return 1;
+        ERROR("%s", errmsg);
     }
 
-    size_t nargs = argc - 2;
-    const char* args[nargs];
-    for (size_t i = 0; i < nargs; i++) {
-        args[i] = argv[i + 2];  // Copy pointers as const
-    }
-
-    return dispatch(cmd, args, shm_basename, shm_initial_size);
+    return dispatch(cmd, argv+2, shm_basename, shm_initial_size);
 }

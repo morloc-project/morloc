@@ -65,7 +65,7 @@
     FREE(CHILD_ERRMSG);
 
 #define RAISE(msg, ...) \
-    snprintf(errmsg_buffer, MAX_ERRMSG_SIZE, "Error (%s:%d in %s): " msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    snprintf(errmsg_buffer, MAX_ERRMSG_SIZE, "Error (%s:%d in %s): " msg "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
     *errmsg_ = strdup(errmsg_buffer); \
     if(child_errmsg_ != NULL){ \
         free(child_errmsg_); \
@@ -73,7 +73,7 @@
     return fail_value_;
 
 #define RAISE_WITH(end, msg, ...) \
-    snprintf(errmsg_buffer, MAX_ERRMSG_SIZE, "Error (%s:%d in %s): " msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    snprintf(errmsg_buffer, MAX_ERRMSG_SIZE, "Error (%s:%d in %s): " msg "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
     *errmsg_ = strdup(errmsg_buffer); \
     end; \
     if(child_errmsg_ != NULL){ \
@@ -94,6 +94,31 @@
 #define TRY(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &CHILD_ERRMSG); \
     RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG)
+
+#define WAIT(code, cond, timeout_code) do { \
+    double retry_time = 0.001; \
+    int attempts = 0; \
+    bool timed_out = false; \
+    while(!timed_out){ \
+        code; \
+        if((cond)){ \
+            break; \
+        } \
+        struct timespec sleep_time = { \
+            .tv_sec = (time_t)retry_time, \
+            .tv_nsec = (long)((retry_time - (time_t)retry_time) * 1e9) \
+        }; \
+        nanosleep(&sleep_time, NULL); \
+        attempts++; \
+        retry_time *= 1.25; \
+        if(attempts > 50){ \
+            timed_out = true; \
+        } \
+        if(attempts > 20) { \
+            timeout_code; \
+        } \
+    } \
+    } while(0);
 
 /// }}}
 
@@ -1915,7 +1940,7 @@ Schema* parse_schema(const char** schema_ptr, ERRMSG);
 
 // Helper function to create a schema with parameters
 static Schema* create_schema_with_params(morloc_serial_type type, size_t width, size_t size, Schema** params, char** keys) {
-    Schema* schema = (Schema*)malloc(sizeof(Schema));
+    Schema* schema = (Schema*)calloc(1, sizeof(Schema));
     if (!schema) return NULL;
 
     schema->type = type;
@@ -1986,13 +2011,13 @@ static Schema* float_schema(size_t width) {
       case 8:
         return create_schema_with_params(MORLOC_FLOAT64, width, 0, NULL, NULL);
       default:
-        fprintf(stderr, "Floats may only have widths of 4 or 8 bytes, found %lu\n", width);
+        fprintf(stderr, "Floats may only have widths of 4 or 8 bytes, found %lu", width);
         return NULL;
     }
 }
 
 static Schema* string_schema() {
-    Schema** params = (Schema**)malloc(sizeof(Schema*));
+    Schema** params = (Schema**)calloc(1, sizeof(Schema*));
     if (!params) return NULL;
 
     // This parameter is needed for compatibility with arrays
@@ -2011,7 +2036,7 @@ static Schema* tuple_schema(Schema** params, size_t size) {
 
 
 static Schema* array_schema(Schema* array_type) {
-    Schema** params = (Schema**)malloc(sizeof(Schema*));
+    Schema** params = (Schema**)calloc(1, sizeof(Schema*));
     if (!params) return NULL;
 
     params[0] = array_type;
@@ -2063,7 +2088,7 @@ static char* parse_hint(const char** schema_ptr) {
   size_t depth = 1;
   size_t buffer_size = 128;
   size_t buffer_index = 0;
-  hint = (char*)malloc(buffer_size);
+  hint = (char*)calloc(1, buffer_size);
   if (!hint) return NULL;
 
   while (**schema_ptr != '\0') {
@@ -2169,7 +2194,7 @@ Schema* parse_schema(const char** schema_ptr, ERRMSG){
       }
       break;
     default:
-      RAISE("Unrecognized schema type '%c'\n", c);
+      RAISE("Unrecognized schema type '%c'", c);
   }
 
   schema->hint = hint;
@@ -2443,7 +2468,7 @@ int pack_with_schema(const void* mlc, const Schema* schema, char** packet, size_
 
     *packet_size = 0;
 
-    *packet = (char*)malloc(BUFFER_SIZE * sizeof(char));
+    *packet = (char*)calloc(BUFFER_SIZE, sizeof(char));
     if (*packet == NULL) return 1;
     size_t packet_remaining = BUFFER_SIZE;
     char* packet_ptr = *packet;
@@ -2638,7 +2663,7 @@ static EXIT_CODE parse_int(morloc_serial_type schema_type, void* mlc, mpack_tokb
         }
         break;
       default:
-        RAISE("Bad token %d\n", token->type);
+        RAISE("Bad token %d", token->type);
     }
     return EXIT_PASS;
 }
@@ -2804,7 +2829,7 @@ static EXIT_CODE parse_obj(
         RAISE_IF(child_retcode == EXIT_FAIL, "\n%s", CHILD_ERRMSG)
         break;
       default:
-        RAISE("Failed to parse morloc type %d\n", schema->type)
+        RAISE("Failed to parse morloc type %d", schema->type)
     }
     return EXIT_PASS;
 }
@@ -2868,7 +2893,7 @@ static char* json_escape_string(const char* input, size_t input_len) {
         }
     }
 
-    char* output = (char*)malloc(output_len + 1); // +1 for null terminator
+    char* output = (char*)calloc(output_len + 1, sizeof(char)); // +1 for null terminator
     if (!output) return NULL;
 
     size_t j = 0;
@@ -3086,7 +3111,7 @@ static char* read_json_key(char** json_ptr, ERRMSG){
 
     TRY(json_string_size, *json_ptr, &j_string_size, &c_string_size);
 
-    char* key = calloc(c_string_size + 1, sizeof(char));
+    char* key = (char*)calloc(c_string_size + 1, sizeof(char));
 
     // If the C and JSON strings are the same length, then there are
     // no special characters to consider and we can simply memcpy.
@@ -3166,86 +3191,87 @@ static size_t json_array_size(char* ptr, ERRMSG) {
 }
 
 // input JSON data should be NULL terminated
-int read_json_with_schema_r(absptr_t* voidstar, char** json_ptr, const Schema* schema, ERRMSG){
+int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* schema, ERRMSG){
     INT_RETURN_SETUP
 
     consume_whitespace(json_ptr);
 
-    switch(**json_ptr){
-        case MORLOC_NIL:
-            *(uint8_t*)voidstar = (uint8_t)0;
+    switch(schema->type){
+        case MORLOC_NIL: {
+            *((uint8_t*)*voidstar) = (uint8_t)0;
             break;
-        case MORLOC_BOOL:
-            {
-                bool val = TRY(match_json_boolean, json_ptr);
-                *(uint8_t*)voidstar = val ? (uint8_t)1  // true
-                                          : (uint8_t)0; // false
-            }
+        }
+        case MORLOC_BOOL: {
+            bool val = TRY(match_json_boolean, json_ptr);
+            *((uint8_t*)*voidstar) = val ? (uint8_t)1  // true
+                                        : (uint8_t)0; // false
+            break;
+        }
 
         case MORLOC_SINT8: {
             int64_t val = TRY(parse_json_int, json_ptr);
             RAISE_IF(val < INT8_MIN || val > INT8_MAX, "Value out of range for 8-bit signed integer");
-            *(int8_t*)voidstar = (int8_t)val;
+            *((int8_t*)*voidstar) = (int8_t)val;
             break;
         }
 
         case MORLOC_SINT16: {
             int64_t val = TRY(parse_json_int, json_ptr);
             RAISE_IF(val < INT16_MIN || val > INT16_MAX, "Value out of range for 16-bit signed integer");
-            *(int16_t*)voidstar = (int16_t)val;
+            *((int16_t*)*voidstar) = (int16_t)val;
             break;
         }
 
         case MORLOC_SINT32: {
             int64_t val = TRY(parse_json_int, json_ptr);
             RAISE_IF(val < INT32_MIN || val > INT32_MAX, "Value out of range for 32-bit signed integer");
-            *(int32_t*)voidstar = (int32_t)val;
+            *((int32_t*)*voidstar) = (int32_t)val;
             break;
         }
 
         case MORLOC_SINT64: {
             int64_t val = TRY(parse_json_int, json_ptr);
-            *(int64_t*)voidstar = val;
+            *((int64_t*)*voidstar) = val;
             break;
         }
 
         case MORLOC_UINT8: {
             uint64_t val = TRY(parse_json_uint, json_ptr);
             RAISE_IF(val > UINT8_MAX, "Value out of range for 8-bit unsigned integer");
-            *(uint8_t*)voidstar = (uint8_t)val;
+            *((uint8_t*)*voidstar) = (uint8_t)val;
             break;
         }
 
         case MORLOC_UINT16: {
             uint64_t val = TRY(parse_json_uint, json_ptr);
             RAISE_IF(val > UINT16_MAX, "Value out of range for 16-bit unsigned integer");
-            *(uint16_t*)voidstar = (uint16_t)val;
+            *((uint16_t*)*voidstar) = (uint16_t)val;
             break;
         }
 
         case MORLOC_UINT32: {
             uint64_t val = TRY(parse_json_uint, json_ptr);
             RAISE_IF(val > UINT32_MAX, "Value out of range for 32-bit unsigned integer");
-            *(uint32_t*)voidstar = (uint32_t)val;
+            *((uint32_t*)*voidstar) = (uint32_t)val;
             break;
         }
 
         case MORLOC_UINT64: {
             uint64_t val = TRY(parse_json_uint, json_ptr);
-            *(uint64_t*)voidstar = val;
+            *((uint64_t*)*voidstar) = val;
             break;
         }
 
         case MORLOC_FLOAT32: {
             double val = TRY(parse_json_double, json_ptr);
             RAISE_IF((val < -FLT_MAX || val > FLT_MAX) && !isinf(val), "Value out of range for 32-bit float");
-            *(float*)voidstar = (float)val;
+            *((float*)*voidstar) = (float)val;
             break;
         }
 
         case MORLOC_FLOAT64: {
             double val = TRY(parse_json_double, json_ptr);
-            *(double*)voidstar = val;
+            *((double*)*voidstar) = val;
             break;
         }
 
@@ -3260,17 +3286,18 @@ int read_json_with_schema_r(absptr_t* voidstar, char** json_ptr, const Schema* s
             // no special characters to consider and we can simply memcpy.
             if(c_string_size == j_string_size){
                 // copy from the position AFTER the initial quote
-                memcpy(mlc_str, *json_ptr + 1, c_string_size);
+                memcpy(mlc_str, (*json_ptr) + 1, c_string_size);
                 // consume the string and quotes
                 *json_ptr += j_string_size + 2;
             }
             // Otherwise we need to loop through the string and handle escapees
             else {
-                TRY(write_json_string, json_ptr, mlc_str);
+                TRY(write_json_string, json_ptr, (char*)mlc_str);
             }
 
-            ((Array*)voidstar)->size = c_string_size;
-            ((Array*)voidstar)->data = TRY(abs2rel, mlc_str)
+            Array* arr = (Array*)*voidstar;
+            arr->size = c_string_size;
+            arr->data = TRY(abs2rel, mlc_str)
 
             break;
         }
@@ -3281,15 +3308,13 @@ int read_json_with_schema_r(absptr_t* voidstar, char** json_ptr, const Schema* s
             absptr_t array_data = TRY(shmalloc, size * schema->parameters[0]->width);
 
             for(size_t element_idx = 0; element_idx < size; element_idx++){
-                TRY(read_json_with_schema_r,
-                    array_data + element_idx * schema->parameters[0]->width,
-                    json_ptr,
-                    schema->parameters[0]
-                )
+                uint8_t* element = (uint8_t*)array_data + element_idx * schema->parameters[0]->width;
+                TRY(read_json_with_schema_r, &element, json_ptr, schema->parameters[0])
             }
 
-            ((Array*)voidstar)->size = size;
-            ((Array*)voidstar)->data = TRY(abs2rel, array_data)
+            Array* arr = (Array*)*voidstar;
+            arr->size = size;
+            arr->data = TRY(abs2rel, array_data);
 
             break;
         }
@@ -3297,20 +3322,18 @@ int read_json_with_schema_r(absptr_t* voidstar, char** json_ptr, const Schema* s
         case MORLOC_TUPLE: {
             absptr_t tuple_data = TRY(shmalloc, schema->width);
             for(size_t element_idx = 0; element_idx < schema->size; element_idx++){
-                TRY(
-                    read_json_with_schema_r,
-                    tuple_data + schema->offsets[element_idx],
-                    json_ptr,
-                    schema->parameters[element_idx]
-                )
+                uint8_t* element = (uint8_t*)tuple_data + schema->offsets[element_idx];
+                TRY(read_json_with_schema_r, &element, json_ptr, schema->parameters[element_idx])
             }
+            *voidstar = (uint8_t*)tuple_data;
             break;
         }
 
         case MORLOC_MAP: {
             TRY(consume_char, '{', json_ptr);
 
-            absptr_t record_data = TRY(shcalloc, 1, schema->width);
+            uint8_t* record_data = (uint8_t*)TRY(shcalloc, 1, schema->width);
+            uint8_t* element_ptr = NULL;
             size_t nentries_complete = 0;
             while(**json_ptr != '}'){
                 RAISE_IF(**json_ptr == '\0', "Unexpected end of JSON object")
@@ -3327,9 +3350,10 @@ int read_json_with_schema_r(absptr_t* voidstar, char** json_ptr, const Schema* s
                 for(size_t element_idx = 0; element_idx < schema->size; element_idx++){
                     // if the key is matches, parse to the appropriate offset
                     if(strcmp(key, schema->keys[element_idx]) == 0){
+                        element_ptr = record_data + schema->offsets[element_idx];
                         TRY(
                             read_json_with_schema_r,
-                            record_data + schema->offsets[element_idx],
+                            &element_ptr,
                             json_ptr,
                             schema->parameters[element_idx]
                         )
@@ -3353,22 +3377,25 @@ int read_json_with_schema_r(absptr_t* voidstar, char** json_ptr, const Schema* s
         }
 
         default:
-            RAISE("Unhandled schema type")
+            RAISE("Unhandled schema type %c", **json_ptr)
             break;
     }
 
     return EXIT_PASS;
 }
 
-absptr_t read_json_with_schema(char* json_data, const Schema* schema, ERRMSG){
-    PTR_RETURN_SETUP(uint8_t)
+// Returns a pointer to voidstar data
+relptr_t read_json_with_schema(char* json_data, const Schema* schema, ERRMSG){
+    VAL_RETURN_SETUP(relptr_t, RELNULL)
 
     char* json_ptr = json_data;
 
-    absptr_t voidstar = NULL;
+    uint8_t* voidstar = (uint8_t*)TRY(shcalloc, 1, schema->width);
     TRY(read_json_with_schema_r, &voidstar, &json_ptr, schema);
 
-    return voidstar;
+    relptr_t ptr = TRY(abs2rel, (absptr_t)voidstar);
+
+    return ptr;
 }
 
 // }}} end JSON support
@@ -3656,7 +3683,7 @@ uint8_t* return_ping(const uint8_t* packet, ERRMSG){
 
     size_t size = TRY(morloc_packet_size, packet);
 
-    uint8_t* pong = (uint8_t*)malloc(size * sizeof(uint8_t));
+    uint8_t* pong = (uint8_t*)calloc(size, sizeof(uint8_t));
     memcpy(pong, packet, size);
 
     return pong;
@@ -3708,7 +3735,7 @@ static uint8_t* make_morloc_data_packet(
 ){
 
   size_t packet_length = sizeof(morloc_packet_header_t) + metadata_length + data_length;
-  uint8_t* packet = (uint8_t*)malloc(packet_length * sizeof(uint8_t));
+  uint8_t* packet = (uint8_t*)calloc(packet_length, sizeof(uint8_t));
 
   packet_command_t cmd = {
     .data = {
@@ -3737,7 +3764,7 @@ static uint8_t* make_morloc_data_packet(
 }
 
 // Make a data packet from a relative pointer to shared memory data
-uint8_t* make_relptr_data_packet(relptr_t ptr, const Schema* schema){
+uint8_t* make_relptr_data_packet(relptr_t ptr){
     uint8_t* packet = make_morloc_data_packet(
       NULL, sizeof(ssize_t), // send no payload, only allocate space
       NULL, 0, // no metadata
@@ -3939,7 +3966,7 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
     return (uint8_t*)voidstar;
 }
 
-uint8_t* make_morloc_call_packet(uint64_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG){
+uint8_t* make_morloc_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG){
     PTR_RETURN_SETUP(uint8_t)
 
     size_t data_length = 0;
@@ -3953,13 +3980,13 @@ uint8_t* make_morloc_call_packet(uint64_t midx, const uint8_t** arg_packets, siz
 
     size_t packet_length = data_length + offset + sizeof(morloc_packet_header_t);
 
-    uint8_t* data = (uint8_t*)malloc(packet_length * sizeof(uint8_t));
+    uint8_t* data = (uint8_t*)calloc(packet_length, sizeof(uint8_t));
 
     packet_command_t cmd = {
       .call = {
         .type = PACKET_TYPE_CALL,
         .padding = {0, 0, 0},
-        .midx = (uint32_t)midx,
+        .midx = midx,
       }
     };
 
@@ -3981,7 +4008,8 @@ uint8_t* make_morloc_call_packet(uint64_t midx, const uint8_t** arg_packets, siz
 morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
     PTR_RETURN_SETUP(morloc_call_t)
 
-    morloc_call_t* call = (morloc_call_t*)malloc(sizeof(morloc_call_t));
+    morloc_call_t* call = (morloc_call_t*)calloc(1, sizeof(morloc_call_t));
+    RAISE_IF(call == NULL, "calloc failed: %s", strerror(errno))
 
     morloc_packet_header_t* header = TRY(read_morloc_packet_header, packet);
     RAISE_IF(header->command.cmd_type.type != PACKET_TYPE_CALL, "Expected packet to be a call")
@@ -3990,8 +4018,10 @@ morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
     call->nargs = 0;
     call->args = NULL;
 
-    size_t pos = sizeof(morloc_packet_header_t) + header->offset;
-    while(pos < header->length){
+    size_t start_pos = sizeof(morloc_packet_header_t) + header->offset;
+    size_t end_pos = start_pos + header->length;
+    size_t pos = start_pos;
+    while (pos < end_pos) {
         pos += TRY(morloc_packet_size, packet + pos);
         call->nargs++;
     }
@@ -4001,7 +4031,12 @@ morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
     for(size_t i = 0; i < call->nargs; i++){
         morloc_packet_header_t* arg_header = read_morloc_packet_header(packet + pos, &CHILD_ERRMSG);
         RAISE_IF(CHILD_ERRMSG != NULL, "Failed to read call argument #%zu:\n%s", i, CHILD_ERRMSG)
-        RAISE_IF(header->command.cmd_type.type != PACKET_TYPE_DATA, "Expected argument to be a data packet")
+        RAISE_IF(
+            arg_header->command.cmd_type.type != PACKET_TYPE_DATA,
+            "Argument #%zu is not a DATA packet (type=%d)",
+            i,
+            arg_header->command.cmd_type.type
+        );
 
         size_t arg_packet_size = morloc_packet_size_from_header(arg_header);
 
@@ -4009,7 +4044,7 @@ morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
         // We alternatively we could avoid this copy and pass the pointer to the
         // original memory. This would improve performance, but would be less
         // safe. I'll leave this optimization for later.
-        call->args[i] = (uint8_t*)malloc(arg_packet_size * sizeof(uint8_t));
+        call->args[i] = (uint8_t*)calloc(arg_packet_size, sizeof(uint8_t));
         memcpy(call->args[i], packet + pos, arg_packet_size);
 
         pos += arg_packet_size;
@@ -4137,8 +4172,8 @@ language_daemon_t* start_daemon(
 ){
     PTR_RETURN_SETUP(language_daemon_t)
 
-    language_daemon_t* server = (language_daemon_t*)malloc(sizeof(language_daemon_t));
-    RAISE_IF(server == NULL, "Malloc for language_daemon_t failed")
+    language_daemon_t* server = (language_daemon_t*)calloc(1, sizeof(language_daemon_t));
+    RAISE_IF(server == NULL, "Calloc for language_daemon_t failed")
 
     server->socket_path = strdup(socket_path);
     server->tmpdir = strdup(tmpdir);
@@ -4161,8 +4196,8 @@ language_daemon_t* start_daemon(
 uint8_t* stream_from_client(int client_fd, ERRMSG) {
     PTR_RETURN_SETUP(uint8_t)
 
-    char* buffer = (char*)malloc(BUFFER_SIZE * sizeof(char));
-    RAISE_IF(buffer == NULL, "malloc failed for buffer")
+    char* buffer = (char*)calloc(BUFFER_SIZE, sizeof(char));
+    RAISE_IF(buffer == NULL, "calloc failed for buffer: %s", strerror(errno))
 
     ssize_t recv_length;
 
@@ -4173,10 +4208,15 @@ uint8_t* stream_from_client(int client_fd, ERRMSG) {
     // Receive the first part of the response, this will include the header
     while (1) {
         int poll_result = poll(&pfd, 1, -1); // Wait indefinitely
+        
+
+        RAISE_IF_WITH(pfd.revents & POLLERR, free(buffer), "Socket error POLLERR: %s", strerror(errno));
+        RAISE_IF_WITH(pfd.revents & POLLHUP, free(buffer), "Socket error POLLHUP: %s", strerror(errno));
+        RAISE_IF_WITH(pfd.revents & POLLNVAL, free(buffer), "Socket error POLLNVAL: %s", strerror(errno));
 
         if (poll_result < 0) {
             if (errno == EINTR) continue; // Interrupted system call, retry
-            RAISE_WITH(free(buffer), "Poll error")
+            RAISE_WITH(free(buffer), "Poll error: %s", strerror(errno))
         }
 
         if (pfd.revents & POLLIN) {
@@ -4184,16 +4224,16 @@ uint8_t* stream_from_client(int client_fd, ERRMSG) {
             if (recv_length > 0) break;
 
             // Return empty result if connection closed
-            RAISE_IF_WITH(recv_length == 0, free(buffer), "Connection closed by peer")
-            RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN, free(buffer), "Recv error")
+            RAISE_IF_WITH(recv_length == 0, free(buffer), "Connection closed by peer: %s", strerror(errno))
+            RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN, free(buffer), "Recv error: %s", strerror(errno))
         }
     }
 
     size_t packet_length = TRY(morloc_packet_size, (uint8_t*)buffer);
 
     // Allocate enough memory to store the entire packet
-    uint8_t* result = (uint8_t*)malloc(packet_length * sizeof(uint8_t));
-    RAISE_IF(result == NULL, "malloc failure")
+    uint8_t* result = (uint8_t*)calloc(packet_length, sizeof(uint8_t));
+    RAISE_IF(result == NULL, "calloc failure: %s", strerror(errno))
 
     // Create a pointer to the current writing index
     uint8_t* data_ptr = result;
@@ -4209,10 +4249,14 @@ uint8_t* stream_from_client(int client_fd, ERRMSG) {
     while ((size_t)(data_ptr - result) < packet_length) {
         while (1) {
             int poll_result = poll(&pfd, 1, -1); // Wait indefinitely
+                                                 //
+            RAISE_IF_WITH(pfd.revents & POLLERR, free(buffer), "Socket error POLLERR: %s", strerror(errno));
+            RAISE_IF_WITH(pfd.revents & POLLHUP, free(buffer), "Socket error POLLHUP: %s", strerror(errno));
+            RAISE_IF_WITH(pfd.revents & POLLNVAL, free(buffer), "Socket error POLLNVAL: %s", strerror(errno));
 
             if (poll_result < 0) {
                 if (errno == EINTR) continue; // Interrupted system call, retry
-                RAISE_WITH(free(result), "Pool fail")
+                RAISE_WITH(free(result), "Pool fail: %s", strerror(errno))
             }
 
             if (pfd.revents & POLLIN) {
@@ -4221,14 +4265,15 @@ uint8_t* stream_from_client(int client_fd, ERRMSG) {
                     data_ptr += recv_length;
                     break;
                 }
-                RAISE_IF_WITH(recv_length == 0, free(result), "Connection closed before all results were read")
-                RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN, free(result), "Recv error")
+                RAISE_IF_WITH(recv_length == 0, free(result), "Connection closed before all results were read: %s", strerror(errno))
+                RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN, free(result), "Recv error: %s", strerror(errno))
             }
         }
     }
 
     return result;
 }
+
 
 
 uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG){
@@ -4242,25 +4287,24 @@ uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* pa
     uint8_t* result = NULL;
 
     // Connect to the server
-    int retcode = connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr));
+    int retcode = -1;
+    WAIT( { retcode = connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)); },
+          retcode == 0,
+          RAISE("Failed to connect to pipe '%s', ran out of time", socket_path)
+        )
 
     size_t packet_size = TRY(morloc_packet_size, packet);
 
-    // If the connection succeeded, request data
-    if (retcode != -1) {
-        // Send a message and wait for a reply from the nexus
-        ssize_t bytes_sent = send(client_fd, packet, packet_size, 0);
-        RAISE_IF_WITH(
-            bytes_sent < 0 || (size_t)bytes_sent != packet_size,
-            socket_close(client_fd),
-            "Failed to send data"
+    // Send a message and wait for a reply from the nexus
+    ssize_t bytes_sent = 0;
+
+    WAIT( { bytes_sent = send(client_fd, packet, packet_size, MSG_NOSIGNAL); },
+          (size_t)bytes_sent == packet_size,
+          RAISE("Failed to send data to '%s', ran out of time", socket_path)
         )
-        result = TRY(stream_from_client, client_fd);
-    }
-    // otherwise, die
-    else {
-        RAISE("Failed to open client");
-    }
+
+    result = stream_from_client(client_fd, &CHILD_ERRMSG);
+    RAISE_IF(CHILD_ERRMSG != NULL, "Failed to read data returned from pipe '%s'\n%s", socket_path, CHILD_ERRMSG);
 
     socket_close(client_fd);
 
@@ -4273,67 +4317,68 @@ size_t send_packet_to_foreign_server(int client_fd, uint8_t* packet, ERRMSG){
 
     size_t size = TRY(morloc_packet_size, packet);
 
-    size_t bytes_sent = send(client_fd, packet, size, 0);
+    size_t bytes_sent = send(client_fd, packet, size, MSG_NOSIGNAL);
 
-    RAISE_IF(bytes_sent != size, "Transmition over client %d failed, only set %zu of %zu bytes", client_fd, bytes_sent, size)
+    RAISE_IF(bytes_sent < 0, "Failed to send over client %d: %s", client_fd, strerror(errno))
+    RAISE_IF(bytes_sent != size, "Partial send over client %d, only sent %zu of %zu bytes: %s", client_fd, bytes_sent, size, strerror(errno))
 
     return bytes_sent;
 }
 
-
 int wait_for_client(language_daemon_t* daemon, ERRMSG){
     VAL_RETURN_SETUP(int, -1)
 
-    int return_fd = -1;
-
+    // clear the list of file descriptors, these will be re-added below 
     FD_ZERO(&daemon->read_fds);
+
+    // add the server file descriptor to the fds_set
     FD_SET(daemon->server_fd, &daemon->read_fds);
+
     int max_fd = daemon->server_fd;
 
-    client_list_t* client_fd;
+    client_list_t* client_fds;
 
-    for(client_fd = daemon->client_fds; client_fd != NULL; client_fd = client_fd->next){
-        FD_SET(client_fd->fd, &daemon->read_fds);
-        max_fd = max_fd > client_fd->fd ? max_fd : client_fd->fd;
+    // loop through all pre-existing the client file descriptors stored in the daemon list
+    for(client_fds = daemon->client_fds; client_fds != NULL; client_fds = client_fds->next){
+        FD_SET(client_fds->fd, &daemon->read_fds);
+        max_fd = max_fd > client_fds->fd ? max_fd : client_fds->fd;
     }
 
-    struct timeval tv;
-    tv.tv_sec = 0;
-    tv.tv_usec = 10; // 100 microseconds timeout
+    // wait forever
+    int ready;
+    WAIT( { ready = select(max_fd + 1, &daemon->read_fds, NULL, NULL, NULL); },
+          ready > 0,
+          RAISE("Failed to read data")
+        )
 
-    int ready = select(max_fd + 1, &daemon->read_fds, NULL, NULL, &tv);
+    int selected_fd = -1;
 
-    if (ready < 0) {
-        return -1;
-    }
-
+    // get the new client that select found and add it to the end of the client list
     if (FD_ISSET(daemon->server_fd, &daemon->read_fds)) {
-        int client_fd = accept(daemon->server_fd, NULL, NULL);
-        if (client_fd > 0) {
-            fcntl(client_fd, F_SETFL, O_NONBLOCK);
+        selected_fd = accept(daemon->server_fd, NULL, NULL);
+        if (selected_fd > 0) {
+            fcntl(selected_fd, F_SETFL, O_NONBLOCK);
 
-            // Add the new client to the beginning of the linked list of clients
-            client_list_t* new_client = (client_list_t*)malloc(sizeof(client_list_t));
-            new_client->fd = client_fd;
-            new_client->next = daemon->client_fds;
-            daemon->client_fds->next = new_client;
+            // Create the new client
+            client_list_t* new_client = (client_list_t*)calloc(1, sizeof(client_list_t));
+            new_client->fd = selected_fd;
+            new_client->next = NULL;
+
+            if(daemon->client_fds == NULL){
+                daemon->client_fds = new_client; 
+            } else {
+                daemon->client_fds->next = new_client;
+            }
         } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
             RAISE("Error accepting client connection");
         }
     }
 
-    client_list_t* last_client = NULL;
-    client_fd = daemon->client_fds;
-    while(client_fd != NULL){
-        if (FD_ISSET(client_fd->fd, &daemon->read_fds)) {
-            last_client->next = client_fd->next;
-            return_fd = client_fd->fd;
-            free(client_fd);
-            return return_fd;
-        }
-        last_client = client_fd;
-        client_fd = client_fd->next;
-    }
+
+    client_fds = daemon->client_fds;
+    int return_fd = client_fds->fd;
+    daemon->client_fds = daemon->client_fds->next;
+    free(client_fds);
 
     return return_fd;
 }
@@ -4446,7 +4491,7 @@ bool hash_morloc_packet(const uint8_t* packet, const Schema* schema, uint64_t se
         }
     } else if (command_type == PACKET_TYPE_DATA){
         uint8_t* voidstar = TRY(get_morloc_data_packet_value, packet + sizeof(morloc_packet_header_t) + header->offset, schema);
-        *hash = TRY(hash_voidstar, (void*)packet, schema, seed);
+        *hash = TRY(hash_voidstar, (void*)voidstar, schema, seed);
     } else {
         RAISE("Cannot hash packet with command %uhh", command_type)
     }
@@ -4575,7 +4620,7 @@ char* check_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
 // {{{ Parsing CLI arguments
 
 // Parse a command line argument string that should contain data of a given type
-uint8_t* parse_cli_data_argument(const char* arg, const Schema* schema, ERRMSG){
+uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
     PTR_RETURN_SETUP(uint8_t)
 
     FILE* fd;
@@ -4596,7 +4641,8 @@ uint8_t* parse_cli_data_argument(const char* arg, const Schema* schema, ERRMSG){
     if(fd == NULL){
         // The argument is the data
         // JSON is currently the only supported option
-        packet = read_json_with_schema(arg, schema, &CHILD_ERRMSG);
+        relptr_t packet_ptr = read_json_with_schema(arg, schema, &CHILD_ERRMSG);
+        packet = make_relptr_data_packet(packet_ptr);
         RAISE_IF(CHILD_ERRMSG != NULL, "Failed to read argument:\n%s", CHILD_ERRMSG)
         return packet;
     } else {
@@ -4609,7 +4655,8 @@ uint8_t* parse_cli_data_argument(const char* arg, const Schema* schema, ERRMSG){
         RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "\n%s", CHILD_ERRMSG)
 
         if(has_suffix(arg, ".json")){
-            packet = read_json_with_schema((char*)data, schema, &CHILD_ERRMSG);
+            relptr_t packet_ptr = read_json_with_schema(data, schema, &CHILD_ERRMSG);
+            packet = make_relptr_data_packet(packet_ptr);
             // If this isn't a JSON file, but you say it is, then either you are
             // confused or evil. In either case, I'll just play it safe and die.
             RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "Failed to read json argument file '%s':\n%s", arg, CHILD_ERRMSG)
@@ -4636,14 +4683,14 @@ uint8_t* parse_cli_data_argument(const char* arg, const Schema* schema, ERRMSG){
         }
 
         free(data);
-        RAISE("Failed to read argument from file '%s'\n", arg)
+        RAISE("Failed to read argument from file '%s'", arg)
     }
 }
 
 // Given the manifold ID and argument and schema strings, create a morloc call packet
 uint8_t* make_call_packet_from_cli(
     uint32_t mid,
-    const char** args, // NULL terminated array of argument strings
+    char** args, // NULL terminated array of argument strings
     const char** arg_schema_strs, // NULL terminated array of schema strings
     ERRMSG
 ){
@@ -4655,7 +4702,7 @@ uint8_t* make_call_packet_from_cli(
     }
 
     const Schema** schemas = (const Schema**)calloc(nschemas + 1, sizeof(Schema*));
-    RAISE_IF(schemas == NULL, "Failed to allocate memory for schemas\n")
+    RAISE_IF(schemas == NULL, "Failed to allocate memory for schemas")
 
     for(size_t i = 0; arg_schema_strs[i] != NULL; i++){
         schemas[i] = parse_schema(&arg_schema_strs[i], &CHILD_ERRMSG);
@@ -4676,11 +4723,11 @@ uint8_t* make_call_packet_from_cli(
         if(CHILD_ERRMSG != NULL){
             free(schemas);
             free(packet_args);
-            RAISE("Failed to parse argument %zu\n%s", i, CHILD_ERRMSG);
+            RAISE("Failed to parse argument %zu ('%s')\n%s", i, args[i], CHILD_ERRMSG);
         }
     }
 
-    uint8_t* call_packet = make_morloc_call_packet((uint64_t)mid, packet_args, nargs, &CHILD_ERRMSG);
+    uint8_t* call_packet = make_morloc_call_packet(mid, packet_args, nargs, &CHILD_ERRMSG);
     if(CHILD_ERRMSG != NULL){
         free(schemas);
         free(packet_args);
@@ -4741,7 +4788,7 @@ bool parse_morloc_call_arguments(
         *nargs += 1;
     }
 
-    *args = (uint8_t*)malloc(*nargs * sizeof(uint8_t*));
+    *args = (uint8_t*)calloc(*nargs, sizeof(uint8_t*));
     RAISE_IF(*args == NULL, "Failed to allocate memory for argument vector")
 
     pos = sizeof(morloc_packet_header_t) + (size_t)header->offset;
@@ -4778,7 +4825,7 @@ uint8_t* remoteCall(
     // TODO: Actually hash the function code, not just the manifold id.
     uint64_t function_hash = mix(seed, DEFAULT_XXHASH_SEED);
 
-    uint8_t** new_arg_packets = (uint8_t**)malloc(nargs * sizeof(uint8_t*));
+    uint8_t** new_arg_packets = (uint8_t**)calloc(nargs, sizeof(uint8_t*));
 
     // hash voidstar data for every argument
     for(size_t i = 0; i < nargs; i++){
@@ -4811,7 +4858,7 @@ uint8_t* remoteCall(
     if(result_cache_filename == NULL){
         CHILD_ERRMSG = NULL; // ignore error, if it failed, remake the cache
         // return result is not cached, so we do the operation
-        call_packet = TRY(make_morloc_call_packet, midx, (const uint8_t**)new_arg_packets, nargs);
+        call_packet = TRY(make_morloc_call_packet, (uint32_t)midx, (const uint8_t**)new_arg_packets, nargs);
     } else {
         // return result is cached, so load the cache and go
         uint8_t* final_result = TRY(get_cache_packet, function_hash, cache_path);
@@ -4838,7 +4885,9 @@ uint8_t* remoteCall(
     // // when the job completes, create a packet with the `result_cache_filename`
     // // file and return
 
-    return NULL;
+    return call_packet; // TODO, return the correct result, this is just a
+                        // standin to make the compiler not complain about
+                        // call_packet being undefined
 
 }
     // // use the job description object to start a new SLURM job where the

@@ -60,7 +60,7 @@ uint8_t* _put_value(const T& value, const std::string& schema_str) {
     // convert to a relative pointer conserved between language servers
     relptr_t relptr = abs2rel_cpp(voidstar);
 
-    uint8_t* packet = make_relptr_data_packet(relptr, schema);
+    uint8_t* packet = make_relptr_data_packet(relptr);
 
     return packet;
 }
@@ -90,7 +90,7 @@ uint8_t* foreign_call(
 ) {
     char* errmsg = NULL;
 
-    uint8_t* packet = make_morloc_call_packet(mid, args, nargs, &errmsg);
+    uint8_t* packet = make_morloc_call_packet((uint32_t)mid, args, nargs, &errmsg);
     PROPAGATE_ERROR(errmsg)
 
     uint8_t* result = send_and_receive_over_socket(socket_path, packet, &errmsg);
@@ -119,7 +119,7 @@ uint8_t* dispatch(const uint8_t* msg){
     bool is_ping = packet_is_ping(msg, &errmsg);
     PROPAGATE_FAIL_PACKET(errmsg)
 
-    else if(is_ping){
+    if(is_ping){
         uint8_t* pong = return_ping(msg, &errmsg);
         PROPAGATE_FAIL_PACKET(errmsg)
         return pong;
@@ -161,30 +161,30 @@ uint8_t* dispatch(const uint8_t* msg){
 // MAIN
 
 int run_job(int client_fd) {
-    char* errmsg = NULL;
-
-    // Pull data from the client
-    uint8_t* client_data = stream_from_client(client_fd, &errmsg);
-    if(errmsg != NULL){
-        std::cerr << "Failed to read client data: " << errmsg << std::endl;
-        return -1;
-    }
-
-    // Fail if no data was pulled
-    size_t length = morloc_packet_size(client_data, &errmsg);
-    if(errmsg != NULL){
-        socket_close(client_fd);
-        std::cerr << "Malformed packet: " << errmsg << std::endl;
-        return -1;
-    } else if (length == 0) {
-        socket_close(client_fd);
-        std::cerr << "Zero length packet received from client" << std::endl;
-        return -1;
-    }
-
     pid_t pid = fork();
     if (pid == 0) {
         // Enter child process
+        //
+        char* errmsg = NULL;
+
+        // Pull data from the client
+        uint8_t* client_data = stream_from_client(client_fd, &errmsg);
+        if(errmsg != NULL){
+            std::cerr << "Failed to read client data: " << errmsg << std::endl;
+            return -1;
+        }
+
+        // Fail if no data was pulled
+        size_t length = morloc_packet_size(client_data, &errmsg);
+        if(errmsg != NULL){
+            socket_close(client_fd);
+            std::cerr << "Malformed packet: " << errmsg << std::endl;
+            return -1;
+        } else if (length == 0) {
+            socket_close(client_fd);
+            std::cerr << "Zero length packet received from client" << std::endl;
+            return -1;
+        }
 
         // Run the job
         uint8_t* result = dispatch(client_data);
@@ -226,6 +226,7 @@ int main(int argc, char* argv[]) {
         0xffff,  // default shm size
         &errmsg
     );
+
     if(errmsg != NULL){
         std::cerr << "Failed to start language server:\n" << errmsg << std::endl;
         return 1;
@@ -235,6 +236,8 @@ int main(int argc, char* argv[]) {
         int client_fd = wait_for_client(daemon, &errmsg);
         if (errmsg != NULL){
             std::cerr << "Failed to read client:\n" << errmsg << std::endl;
+            errmsg = NULL;
+            // return 1;
         }
         if (client_fd >= 0){
             run_job(client_fd);

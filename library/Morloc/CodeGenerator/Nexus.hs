@@ -133,10 +133,12 @@ dispatchCode fdata = [idoc|
         [idoc|
     morloc_socket_t #{varName} = { 0 };
     #{varName}.lang = strdup("#{lang}");
+    #{varName}.syscmd = (char**)calloc(5, sizeof(morloc_socket_t*));
     #{varName}.syscmd[0] = strdup("./pool-#{lang}.out");
     asprintf(&#{varName}.syscmd[1], "%s/pipe-#{lang}", tmpdir);
     #{varName}.syscmd[2] = strdup(tmpdir);
     #{varName}.syscmd[3] = strdup(shm_basename);
+    #{varName}.syscmd[4] = NULL;
     asprintf(&#{varName}.socket_filename, "%s/pipe-#{lang}", tmpdir);
 
         |]
