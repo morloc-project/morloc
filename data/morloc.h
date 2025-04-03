@@ -111,10 +111,7 @@
         nanosleep(&sleep_time, NULL); \
         attempts++; \
         retry_time *= 1.25; \
-        if(attempts > 50){ \
-            timed_out = true; \
-        } \
-        if(attempts > 20) { \
+        if(attempts > 60) { \
             timeout_code; \
         } \
     } \

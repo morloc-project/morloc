@@ -139,8 +139,13 @@ void print_return(uint8_t* packet, Schema* schema){
         ERROR("%s", child_errmsg);
     }
 
+    uint8_t* packet_value = get_morloc_data_packet_value(packet, schema, &child_errmsg);
+    if(child_errmsg != NULL){
+        ERROR("%s", child_errmsg);
+    }
+
     // print result
-    print_voidstar(packet, schema, &child_errmsg);
+    print_voidstar(packet_value, schema, &child_errmsg);
     if(child_errmsg == NULL){
         clean_exit(0);
     } else {
@@ -271,6 +276,7 @@ int main(int argc, char* argv[]){
 
     // set the global temporary directory
     tmpdir = make_tmpdir(&errmsg);
+    /* tmpdir = "tmp"; */
 
     if(errmsg != NULL){
         ERROR("%s", errmsg);
