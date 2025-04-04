@@ -3304,10 +3304,19 @@ int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* s
 
             absptr_t array_data = TRY(shmalloc, size * schema->parameters[0]->width);
 
+            TRY(consume_char, '[', json_ptr);
+
             for(size_t element_idx = 0; element_idx < size; element_idx++){
                 uint8_t* element = (uint8_t*)array_data + element_idx * schema->parameters[0]->width;
                 TRY(read_json_with_schema_r, &element, json_ptr, schema->parameters[0])
+                consume_whitespace(json_ptr);
+                if(element_idx < size - 1){
+                    TRY(consume_char, ',', json_ptr);
+                }
             }
+
+            consume_whitespace(json_ptr);
+            TRY(consume_char, ']', json_ptr);
 
             Array* arr = (Array*)*voidstar;
             arr->size = size;
