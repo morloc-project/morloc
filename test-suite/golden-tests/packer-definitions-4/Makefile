@@ -1,6 +1,6 @@
 all:
 	morloc make main.loc
-	./nexus.py foo 42 > obs.txt
+	./nexus foo 42 > obs.txt
 
 .PHONY: clean
 clean:
