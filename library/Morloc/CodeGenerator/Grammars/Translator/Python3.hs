@@ -56,12 +56,13 @@ translate srcs es = do
   let dispatch = makeDispatch es
 
   let code = makePool [opt, lib] includeDocs mDocs dispatch
-  let outfile = ML.makeExecutableName Python3Lang "pool"
+  let exefile = ML.makeExecutablePoolName Python3Lang
+      outfile = ML.makeSourcePoolName Python3Lang
 
   return $ Script
     { scriptBase = "pool"
     , scriptLang = Python3Lang
-    , scriptCode = "." :/ File "pool.py" (Code . render $ code)
+    , scriptCode = "." :/ File exefile (Code . render $ code)
     , scriptMake = [SysExe outfile]
     }
 
@@ -103,7 +104,7 @@ serialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 serialize v0 s0 = do
   (ms, v1) <- serialize' v0 s0
   let schema = serialAstToMsgpackSchema s0
-  let v2 = [idoc|_put_value(#{v1}, "#{schema}")|]
+  let v2 = [idoc|morloc.put_value(#{v1}, "#{schema}")|]
   return (v2, ms)
   where
     serialize' :: MDoc -> SerialAST -> Index ([MDoc], MDoc)
@@ -150,12 +151,12 @@ deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 deserialize v0 s0
   | isSerializable s0 = do
       let schema = serialAstToMsgpackSchema s0
-      let deserializing = [idoc|_get_value(#{v0}, "#{schema}")|]
+      let deserializing = [idoc|morloc.get_value(#{v0}, "#{schema}")|]
       return (deserializing, [])
   | otherwise = do
       rawvar <- helperNamer <$> newIndex
       let schema = serialAstToMsgpackSchema s0
-      let deserializing = [idoc|#{rawvar} = _get_value(#{v0}, "#{schema}")|]
+      let deserializing = [idoc|#{rawvar} = morloc.get_value(#{v0}, "#{schema}")|]
       (x, befores) <- check rawvar s0
       return (x, deserializing:befores)
   where

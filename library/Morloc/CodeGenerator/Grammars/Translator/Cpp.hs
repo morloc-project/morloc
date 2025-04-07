@@ -224,8 +224,8 @@ metaTypedefs tmap i =
 
 makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
 makeTheMaker srcs = do
-  let outfile = pretty $ ML.makeExecutableName CppLang "pool"
-  let src = pretty (ML.makeSourceName CppLang "pool")
+  let outfile = pretty $ ML.makeExecutablePoolName CppLang
+  let src = pretty (ML.makeSourcePoolName CppLang)
 
   -- this function cleans up source names (if needed) and generates compiler flags and paths to search
   (_, flags, includes) <- Mod.handleFlagsAndPaths CppLang srcs

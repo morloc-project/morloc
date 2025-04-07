@@ -1178,7 +1178,7 @@ absptr_t rel2abs(relptr_t ptr, ERRMSG) {
     for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
         shm_t* shm = TRY(shopen, i);
         if (shm == NULL) {
-            RAISE("Failed to find shared volume %zu while searching for relative pointer %zu", i, ptr)
+            RAISE("Failed to find shared volume %zu while searching for relative pointer %zu in shm at '%s'", i, ptr, shm->volume_name)
         }
         if ((size_t)ptr < shm->volume_size) {
             char* shm_start = (char*)shm;
@@ -4256,9 +4256,9 @@ uint8_t* stream_from_client(int client_fd, ERRMSG) {
         while (1) {
             int poll_result = poll(&pfd, 1, -1); // Wait indefinitely
                                                  //
-            RAISE_IF_WITH(pfd.revents & POLLERR, free(buffer), "Socket error POLLERR: %s", strerror(errno));
-            RAISE_IF_WITH(pfd.revents & POLLHUP, free(buffer), "Socket error POLLHUP: %s", strerror(errno));
-            RAISE_IF_WITH(pfd.revents & POLLNVAL, free(buffer), "Socket error POLLNVAL: %s", strerror(errno));
+            RAISE_IF(pfd.revents & POLLERR, "Socket error POLLERR: %s", strerror(errno));
+            RAISE_IF(pfd.revents & POLLHUP, "Socket error POLLHUP: %s", strerror(errno));
+            RAISE_IF(pfd.revents & POLLNVAL, "Socket error POLLNVAL: %s", strerror(errno));
 
             if (poll_result < 0) {
                 if (errno == EINTR) continue; // Interrupted system call, retry
@@ -4323,7 +4323,8 @@ size_t send_packet_to_foreign_server(int client_fd, uint8_t* packet, ERRMSG){
 
     size_t size = TRY(morloc_packet_size, packet);
 
-    size_t bytes_sent = send(client_fd, packet, size, MSG_NOSIGNAL);
+    size_t bytes_sent = 0;
+    bytes_sent = send(client_fd, packet, size, MSG_NOSIGNAL);
 
     RAISE_IF(bytes_sent < 0, "Failed to send over client %d: %s", client_fd, strerror(errno))
     RAISE_IF(bytes_sent != size, "Partial send over client %d, only sent %zu of %zu bytes: %s", client_fd, bytes_sent, size, strerror(errno))
@@ -4350,7 +4351,11 @@ int wait_for_client(language_daemon_t* daemon, ERRMSG){
         max_fd = max_fd > client_fds->fd ? max_fd : client_fds->fd;
     }
 
-    // wait forever
+    // `select` will wait forever for something to crawl out of the pipe.
+    // But if the pipe itself is missing or brokn (for example, if the socket
+    // file has not yet been written), then select dies immediately, for this
+    // reason it is wrapped in WAIT to retry for a few minutes for giving up the
+    // ghost for good.
     int ready;
     WAIT( { ready = select(max_fd + 1, &daemon->read_fds, NULL, NULL, NULL); },
           ready > 0,

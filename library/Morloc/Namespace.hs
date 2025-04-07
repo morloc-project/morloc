@@ -551,8 +551,6 @@ data Config =
     -- ^ path to python interpreter
     , configLangR :: !Path
     -- ^ path to R interpreter
-    , configLangPerl :: !Path
-    -- ^ path to perl interpreter
     }
   deriving (Show, Ord, Eq)
 
@@ -903,7 +901,6 @@ instance FromJSON Config where
         <*> o .:? "build-config" .!= "~/.morloc/build-config.yaml"
         <*> o .:? "lang_python3" .!= "python3"
         <*> o .:? "lang_R" .!= "Rscript"
-        <*> o .:? "lang_perl" .!= "perl"
 
 instance FromJSON PackageMeta where
   parseJSON = Aeson.withObject "object" $ \o ->

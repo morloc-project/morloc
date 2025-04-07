@@ -265,7 +265,6 @@ int main(int argc, char* argv[]){
     size_t shm_initial_size = 0xffff;
     char shm_basename[MAX_FILENAME_SIZE];
     snprintf(shm_basename, sizeof(shm_basename), "morloc-%" PRIu64, job_hash);
-    /* char shm_basename[] = "test"; */
 
     shm_t* shm = shinit(shm_basename, 0, shm_initial_size, &errmsg);
     if(errmsg != NULL){
@@ -276,7 +275,6 @@ int main(int argc, char* argv[]){
 
     // set the global temporary directory
     tmpdir = make_tmpdir(&errmsg);
-    /* tmpdir = "tmp"; */
 
     if(errmsg != NULL){
         ERROR("%s", errmsg);

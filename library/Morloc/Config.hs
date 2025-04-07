@@ -46,7 +46,6 @@ loadDefaultMorlocConfig = do
       (MT.unpack . fromJust $ defaults K.!? "build-config")
       "python3" -- lang_python3
       "Rscript" -- lang_R
-      "perl" -- lang_perl
 
 -- | Load a Morloc config file. If no file is given (i.e., Nothing), then the
 -- default configuration will be used.
@@ -103,10 +102,10 @@ setupServerAndSocket
   -> Socket 
 setupServerAndSocket c lang = Socket lang args socket where
   args = case lang of
-    CLang -> ["./" <> pretty (ML.makeExecutableName CLang "pool")]
-    CppLang -> ["./" <> pretty (ML.makeExecutableName CppLang "pool")]
-    RLang -> [pretty (configLangR c), pretty (ML.makeExecutableName RLang "pool")]
-    Python3Lang -> [pretty (configLangPython3 c), pretty (ML.makeExecutableName Python3Lang "pool")]
+    CLang -> ["./" <> pretty (ML.makeExecutablePoolName CLang)]
+    CppLang -> ["./" <> pretty (ML.makeExecutablePoolName CppLang)]
+    RLang -> [pretty (configLangR c), pretty (ML.makeExecutablePoolName RLang)]
+    Python3Lang -> [pretty (configLangPython3 c), pretty (ML.makeExecutablePoolName Python3Lang)]
     _ -> undefined 
 
   socket = "pipe-" <> pretty (ML.showLangName lang)

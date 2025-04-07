@@ -25,21 +25,21 @@
     type return_value_ = value;
 
 
-#define TRY(fun, ...) \
+#define PyTRY(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
         PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
         return return_value_; \
     }
 
-#define TRY_VOID(fun, ...) \
+#define PyTRY_VOID(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
         PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
         return; \
     }
 
-# define TRY_WITH(clean, fun, ...) \
+# define PyTRY_WITH(clean, fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
         clean; \
@@ -64,75 +64,6 @@ void* import_numpy() {
     import_array();
 }
 
-
-
-// Exported prototypes
-static PyObject* to_mesgpack(PyObject* self, PyObject* args);
-static PyObject* from_mesgpack(PyObject* self, PyObject* args);
-static PyObject* to_voidstar(PyObject* self, PyObject* args);
-static PyObject* from_voidstar(PyObject* self, PyObject* args);
-static PyObject* py_to_mesgpack(PyObject* self, PyObject* args);
-static PyObject* mesgpack_to_py(PyObject* self, PyObject* args);
-
-
-// convert voidstar to MessagePack
-static PyObject* to_mesgpack(PyObject* self, PyObject* args) { MAYFAIL
-    PyObject* voidstar_capsule;
-    char* schema;
-    char* msgpck_data = NULL;
-    size_t msgpck_data_len = 0;
-
-    if (!PyArg_ParseTuple(args, "Os", &voidstar_capsule, &schema)) {
-        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
-        return NULL;
-    }
-
-    void* voidstar = PyCapsule_GetPointer(voidstar_capsule, "absptr_t");
-
-    if (voidstar == NULL) {
-        PyErr_SetString(PyExc_TypeError, "Invalid voidstar capsule");
-        return NULL;
-    }
-
-    TRY(pack, voidstar, schema, &msgpck_data, &msgpck_data_len);
-
-    // TODO: avoid memory copying here
-    PyObject* mesgpack_bytes = PyBytes_FromStringAndSize(msgpck_data, msgpck_data_len);
-    free(msgpck_data);
-
-    return mesgpack_bytes;
-}
-
-
-// destroy the voidstar
-static void voidstar_destructor(PyObject *capsule) { MAYFAIL_VOID
-    void *voidstar = PyCapsule_GetPointer(capsule, "absptr_t");
-    if (voidstar) {
-        TRY_VOID(shfree, voidstar);
-    }
-}
-
-// convert MessagePack to voidstar
-static PyObject* from_mesgpack(PyObject* self, PyObject* args) { MAYFAIL
-    const char* msgpck_data;
-    Py_ssize_t msgpck_data_len;
-    const char* schema;
-    void* voidstar = NULL;
-
-    if (!PyArg_ParseTuple(args, "y#s", &msgpck_data, &msgpck_data_len, &schema)) {
-        return NULL;
-    }
-
-    TRY(unpack, msgpck_data, msgpck_data_len, schema, &voidstar);
-
-    PyObject* voidstar_capsule = PyCapsule_New(voidstar, "absptr_t", voidstar_destructor);
-    if (!voidstar_capsule) {
-        TRY(shfree, voidstar);  // Or use appropriate deallocation function
-        return NULL;
-    }
-
-    return voidstar_capsule;
-}
 
 
 PyObject* fromAnything(const Schema* schema, const void* data){
@@ -177,7 +108,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){
             break;
         case MORLOC_STRING: {
             Array* str_array = (Array*)data;
-            absptr_t tmp_ptr = TRY(rel2abs, str_array->data);
+            absptr_t tmp_ptr = PyTRY(rel2abs, str_array->data);
             obj = PyUnicode_FromStringAndSize(tmp_ptr, str_array->size);
             if (!obj) {
                 fprintf(stderr, "Failed to extract string from voidstar\n");
@@ -212,7 +143,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){
                         goto error;
                 }
 
-                void* absptr = TRY(rel2abs, array->data);
+                void* absptr = PyTRY(rel2abs, array->data);
 
                 // Create the NumPy array
                 obj = PyArray_SimpleNewFromData(nd, dims, type_num, absptr);
@@ -228,7 +159,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){
 
             } else if (schema->parameters[0]->type == MORLOC_UINT8) {
                 // Create a Python bytes object for UINT8 arrays
-                absptr_t tmp_ptr = TRY(rel2abs, array->data);
+                absptr_t tmp_ptr = PyTRY(rel2abs, array->data);
                 obj = PyBytes_FromStringAndSize((const char*)tmp_ptr, array->size);
                 if (!obj) {
                     PyErr_SetString(PyExc_TypeError, "Failed to one bytes");
@@ -241,7 +172,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){
                     PyErr_SetString(PyExc_TypeError, "Failed to one string");
                     goto error;
                 }
-                char* start = (char*) TRY(rel2abs, array->data);
+                char* start = (char*) PyTRY(rel2abs, array->data);
                 size_t width = schema->parameters[0]->width;
                 Schema* element_schema = schema->parameters[0];
                 for (size_t i = 0; i < array->size; i++) {
@@ -307,39 +238,6 @@ error:
     Py_XDECREF(obj);
     return NULL;
 }
-
-
-// convert voidstar to PyObject
-static PyObject* from_voidstar(PyObject* self, PyObject* args) { MAYFAIL
-    PyObject* voidstar_capsule;
-    const char* schema_str;
-
-    if (!PyArg_ParseTuple(args, "Os", &voidstar_capsule, &schema_str)) {
-        PyErr_SetString(PyExc_TypeError, "Failed to parse input");
-        return NULL;
-    }
-
-    void* voidstar = PyCapsule_GetPointer(voidstar_capsule, "absptr_t");
-
-    if (voidstar == NULL) {
-        PyErr_SetString(PyExc_TypeError, "Invalid voidstar capsule");
-        return NULL;
-    }
-
-    Schema* schema = TRY(parse_schema, &schema_str);
-
-    PyObject* obj = fromAnything(schema, voidstar);
-    if (obj == NULL) {
-        free_schema(schema);
-        return NULL;
-    }
-
-    free_schema(schema);
-
-    return obj;
-}
-
-
 
 
 #define HANDLE_SINT_TYPE(CTYPE, PYLONG_FUNC, MIN, MAX) \
@@ -615,7 +513,7 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
 
                 Array* result = (Array*)dest;
                 result->size = (size_t)size;
-                result->data = TRY(abs2rel, *cursor);
+                result->data = PyTRY(abs2rel, *cursor);
 
                 if (PyList_Check(obj)) {
                     // Fixed size width of each element (variable size data will
@@ -626,14 +524,14 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                     // fixed sized elements
                     *cursor = (void*)(*(char**)cursor + size * width);
 
-                    char* start = (char*) TRY(rel2abs, result->data);
+                    char* start = (char*) PyTRY(rel2abs, result->data);
                     Schema* element_schema = schema->parameters[0];
                     for (Py_ssize_t i = 0; i < size; i++) {
                         PyObject* item = PyList_GetItem(obj, i);
                         to_voidstar_r(start + width * i, cursor, element_schema, item);
                     }
                 } else if (PyBytes_Check(obj)){
-                    absptr_t tmp_ptr = TRY(rel2abs, result->data);
+                    absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
                     memcpy(tmp_ptr, data, size);
 
                     // move cursor to the location after the copied data
@@ -642,7 +540,7 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                 else{
                     size_t width = schema->parameters[0]->width;
 
-                    absptr_t tmp_ptr = TRY(rel2abs, result->data);
+                    absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
                     memcpy(tmp_ptr, data, size * width);
 
                     // Move the cursor to the location immediately after the
@@ -700,7 +598,7 @@ error:
     return -1;
 }
 
-void* to_voidstar_c(const Schema* schema, PyObject* obj){ MAYFAIL
+void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
   // calculate the required size of the shared memory object
   ssize_t shm_size = get_shm_size(schema, obj);
   if(shm_size == -1){
@@ -709,7 +607,7 @@ void* to_voidstar_c(const Schema* schema, PyObject* obj){ MAYFAIL
   }
 
   // allocate the required memory as a single block
-  void* dest = TRY(shmalloc, (size_t)shm_size);
+  void* dest = PyTRY(shmalloc, (size_t)shm_size);
 
   // set the write location of variable size chunks
   void* cursor = (void*)((char*)dest + schema->width);
@@ -726,100 +624,178 @@ void* to_voidstar_c(const Schema* schema, PyObject* obj){ MAYFAIL
 }
 
 
-// convert PyObject to voidstar
-static PyObject* to_voidstar(PyObject* self, PyObject* args){ MAYFAIL
-  PyObject* obj;
-  const char* schema_str;
+static PyObject* pybinding__wait_for_client(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* daemon_capsule;
 
-  if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
-      return NULL;
-  }
-
-  Schema* schema = TRY(parse_schema, &schema_str);
-
-  void* voidstar = to_voidstar_c(schema, obj);
-
-  if(!voidstar){
-      return NULL;
-  }
-
-  // Note that there is no destructor. This memory is managed by the custom
-  // memory allocator. I will eventually add some means of reference
-  // counting. When I do, the destructor will decrement this count.
-  PyObject* voidstar_capsule = PyCapsule_New(voidstar, "absptr_t", NULL);
-
-  free_schema(schema);
-
-  return voidstar_capsule;
-}
-
-
-static PyObject* py_to_mesgpack(PyObject* self, PyObject* args) { MAYFAIL
-  PyObject* obj;
-  const char* schema_str;
-
-  if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
-      PyErr_SetString(PyExc_ValueError, "py_to_mesgpack: Failed to parse arguments");
-      return NULL;
-  }
-
-  Schema* schema = TRY(parse_schema, &schema_str);
-
-  void* voidstar = to_voidstar_c(schema, obj);
-
-  if (!voidstar && PyErr_Occurred()) {
-      free_schema(schema);
-      PyErr_SetString(PyExc_ValueError, "py_to_mesgpack: Failed to yield voidstar");
-      return NULL;
-  }
-
-  char* msgpck_data = NULL;
-  size_t msgpck_data_len = 0;
-
-  TRY_WITH(
-      free(msgpck_data); free_schema(schema),
-      pack_with_schema,
-      voidstar,
-      schema,
-      &msgpck_data,
-      &msgpck_data_len
-  );
-
-  // TODO: avoid memory copying here
-  PyObject* mesgpack_bytes = PyBytes_FromStringAndSize(msgpck_data, msgpck_data_len);
-  free_schema(schema);
-  free(msgpck_data);
-
-  // free voidstar, we shan't be needing it now
-
-  return mesgpack_bytes;
-}
-
-
-static PyObject* mesgpack_to_py(PyObject* self, PyObject* args) { MAYFAIL
-    const char* msgpck_data;
-    Py_ssize_t msgpck_data_len;
-    const char* schema_str;
-    void* voidstar = NULL;
-
-    if (!PyArg_ParseTuple(args, "y#s", &msgpck_data, &msgpck_data_len, &schema_str)) {
+    if (!PyArg_ParseTuple(args, "O", &daemon_capsule)) {
+        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
         return NULL;
     }
 
-    Schema* schema = TRY(parse_schema, &schema_str);
+    language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
 
-    TRY_WITH(
-        free_schema(schema),
-        unpack_with_schema,
-        msgpck_data,
-        msgpck_data_len,
-        schema,
-        &voidstar
+    int client_fd = PyTRY(wait_for_client, daemon);
+
+    return PyLong_FromLong((long)client_fd);
+}
+
+static PyObject* pybinding__start_daemon(PyObject* self, PyObject* args) { MAYFAIL
+    const char* socket_path;
+    const char* tmpdir;
+    const char* shm_basename;
+    size_t shm_default_size;
+ 
+    if (!PyArg_ParseTuple(args, "sssk", &socket_path, &tmpdir, &shm_basename, &shm_default_size)) {
+      return NULL;
+    }
+ 
+    language_daemon_t* daemon = PyTRY(
+        start_daemon,
+        socket_path,
+        tmpdir,
+        shm_basename,
+        shm_default_size
     );
+ 
+    return PyCapsule_New(daemon, "language_daemon_t", NULL);
+}
+
+
+static PyObject* pybinding__close_daemon(PyObject* self, PyObject* args) {
+    PyObject* daemon_capsule;
+
+    if (!PyArg_ParseTuple(args, "O", &daemon_capsule)) {
+        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
+        return NULL;
+    }
+
+    language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
+
+    close_daemon(daemon);
+
+    Py_RETURN_NONE;
+}
+
+
+static PyObject*  pybinding__read_morloc_call_packet(PyObject* self, PyObject* args){ MAYFAIL
+    char* packet;
+    size_t packet_size;
+  
+    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
+        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
+        return NULL;
+    }
+    morloc_call_t* call_packet = PyTRY(read_morloc_call_packet, packet);
+
+    PyObject* py_tuple = PyTuple_New(2);
+    PyObject* py_args = PyList_New(call_packet->nargs);
+    PyObject* py_mid = PyLong_FromLong((long)call_packet->midx);
+    for(size_t i = 0; i < call_packet->nargs; i++){
+        size_t arg_packet_size = PyTRY(morloc_packet_size, call_packet->args[i]);
+        PyObject* py_arg = PyBytes_FromStringAndSize(
+            (char*)call_packet->args[i], 
+            arg_packet_size
+        );
+        PyList_SetItem(py_args, i, py_arg);
+    }
+
+    PyTuple_SetItem(py_tuple, 0, py_mid);
+    PyTuple_SetItem(py_tuple, 1, py_args);
+
+    return py_tuple;
+}
+
+static PyObject*  pybinding__send_packet_to_foreign_server(PyObject* self, PyObject* args){ MAYFAIL
+    int client_fd = 0;
+    uint8_t* packet = NULL;
+    size_t packet_size = 0;
+
+    if (!PyArg_ParseTuple(args, "iy#", &client_fd, &packet, &packet_size)) {
+        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
+        return NULL;
+    }
+
+    size_t bytes_sent = PyTRY(send_packet_to_foreign_server, client_fd, packet);
+
+    return PyLong_FromSize_t(bytes_sent);
+}
+
+
+static PyObject*  pybinding__stream_from_client(PyObject* self, PyObject* args){ MAYFAIL
+    int client_fd = 0;
+
+    if (!PyArg_ParseTuple(args, "i", &client_fd)) {
+        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
+        return NULL;
+    }
+
+    uint8_t* packet = PyTRY(stream_from_client, client_fd);
+
+    size_t packet_size = PyTRY(morloc_packet_size, packet);
+
+    return PyBytes_FromStringAndSize((char*)packet, packet_size);
+}
+
+
+
+static PyObject*  pybinding__socket_close(PyObject* self, PyObject* args){
+    int socket_id = 0;
+
+    if (!PyArg_ParseTuple(args, "i", &socket_id)) {
+        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
+        return NULL;
+    }
+
+    socket_close(socket_id);
+
+    Py_RETURN_NONE;
+}
+
+// Transforms a value into a message ready for the socket
+static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
+    PyObject* obj;
+    const char* schema_str;
+  
+    if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
+        return NULL;
+    }
+  
+    Schema* schema = PyTRY(parse_schema, &schema_str);
+  
+    void* voidstar = to_voidstar(schema, obj);
+  
+    if(!voidstar){
+        return NULL;
+    }
+
+    // convert to a relative pointer conserved between language servers
+    relptr_t relptr = PyTRY(abs2rel, voidstar);
+
+    uint8_t* packet = make_relptr_data_packet(relptr);
+
+    size_t packet_size = PyTRY(morloc_packet_size, packet);
+
+    return PyBytes_FromStringAndSize((char*)packet, packet_size);
+}
+
+
+// Use a key to retrieve a value
+static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
+    const char* packet;
+    size_t packet_size;
+    const char* schema_str;
+  
+    if (!PyArg_ParseTuple(args, "y#s", &packet, &packet_size, &schema_str)) {
+        return NULL;
+    }
+
+    Schema* schema = PyTRY(parse_schema, &schema_str)
+
+    uint8_t* voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
     PyObject* obj = fromAnything(schema, voidstar);
     if (obj == NULL) {
-        PyErr_SetString(PyExc_TypeError, "fromAnything returned NULL");
+        free_schema(schema);
         return NULL;
     }
 
@@ -829,243 +805,131 @@ static PyObject* mesgpack_to_py(PyObject* self, PyObject* args) { MAYFAIL
 }
 
 
+// Make a foreign call
+//
+// Arguments:
+//   1. socket path
+//   2. midx
+//   3. list of arguments, each is bytestring packet
+static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFAIL
+    char* socket_path;
+    int mid;
+    PyObject* py_args;
+    const uint8_t** arg_packets = NULL;
+    Py_ssize_t nargs;
+    Py_ssize_t i;
+    
+    // Parse arguments: string, integer, and sequence
+    if (!PyArg_ParseTuple(args, "siO", &socket_path, &mid, &py_args)) {
+        return NULL;
+    }
 
-// initialize a shared memory pool with one volume
-static PyObject* shm_start(PyObject* self, PyObject* args) { MAYFAIL
-    char* basename;
-    size_t shm_desired_size;
-    shm_t* shm;
+    // Verify third argument is a sequence
+    if (!PySequence_Check(py_args)) {
+        PyErr_SetString(PyExc_TypeError, "Third argument must be a sequence");
+        return NULL;
+    }
 
-    if (!PyArg_ParseTuple(args, "sk", &basename, &shm_desired_size)) {
+    // Get sequence size and allocate C arrays
+    nargs = PySequence_Size(py_args);
+    arg_packets = (const uint8_t**)calloc(nargs, sizeof(uint8_t*));
+    if (!arg_packets) {
+        free(arg_packets);
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    // Convert Python bytes to C buffers
+    for (i = 0; i < nargs; i++) {
+        PyObject* item = PySequence_GetItem(py_args, i);
+        if (!PyBytes_Check(item)) {
+            Py_DECREF(item);
+            free(arg_packets);
+            PyErr_SetString(PyExc_TypeError, "All arguments must be bytes objects");
+            return NULL;
+        }
+        arg_packets[i] = (const uint8_t*)PyBytes_AsString(item);
+        Py_DECREF(item);
+    }
+
+    uint8_t* packet = PyTRY_WITH(free(arg_packets), make_morloc_call_packet, (uint32_t)mid, arg_packets, (size_t)nargs);
+
+    free(arg_packets);
+    
+    uint8_t* result = PyTRY_WITH(free(packet), send_and_receive_over_socket, socket_path, packet);
+    free(packet);
+
+    size_t result_length = PyTRY(morloc_packet_size, result);
+
+    return PyBytes_FromStringAndSize((char*)result, result_length);
+}
+
+
+static PyObject* pybinding__is_ping(PyObject* self, PyObject* args) { MAYFAIL
+    char* packet;
+    size_t packet_size;
+  
+    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
         PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
         return NULL;
     }
 
-    shm = TRY(shinit, basename, 0, shm_desired_size);
+    bool is_ping = PyTRY(packet_is_ping, (uint8_t*)packet);
 
-    return PyCapsule_New(shm, "shm_t", NULL);
+    PyObject* obj = PyBool_FromLong((long)is_ping);
+    
+    return obj;
 }
 
-static PyObject* shm_rel2abs(PyObject* self, PyObject* args) { MAYFAIL
-    size_t relptr;
-    if (!PyArg_ParseTuple(args, "k", &relptr)) {
+
+static PyObject* pybinding__is_call(PyObject* self, PyObject* args) { MAYFAIL
+    char* packet;
+    size_t packet_size;
+  
+    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
+        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
         return NULL;
     }
 
-    absptr_t absptr = TRY(rel2abs, (relptr_t)relptr);
-    return PyCapsule_New((void*)absptr, "absptr_t", NULL);
+    bool is_call = PyTRY(packet_is_call, (uint8_t*)packet);
+
+    PyObject* obj = PyBool_FromLong((long)is_call);
+    
+    return obj;
 }
 
-static PyObject* shm_abs2rel(PyObject* self, PyObject* args) { MAYFAIL
-    PyObject* capsule;
-    if (!PyArg_ParseTuple(args, "O", &capsule)) {
+
+static PyObject* pybinding__pong(PyObject* self, PyObject* args) { MAYFAIL
+    char* packet;
+    size_t packet_size;
+  
+    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
+        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
         return NULL;
     }
 
-    absptr_t absptr = (absptr_t)PyCapsule_GetPointer(capsule, "absptr_t");
-    if (absptr == NULL) {
-        return NULL;  // PyCapsule_GetPointer sets the error
-    }
+    const uint8_t* pong = PyTRY(return_ping, (uint8_t*)packet);
 
-    relptr_t relptr = TRY(abs2rel, absptr);
-    return PyLong_FromSize_t(relptr);
-}
+    size_t pong_size = PyTRY(morloc_packet_size, pong);
 
-
-static PyObject* shm_close(PyObject* self, PyObject* args) { MAYFAIL
-    TRY(shclose);
-    Py_RETURN_NONE;
-}
-
-// Take a python object and a schema, convert it to voidstar, write the
-// voidstar to the shared memory pool, and return the relative pointer as an
-// integer.
-static PyObject* to_shm(PyObject* self, PyObject* args) { MAYFAIL
-  PyObject* obj;
-  const char* schema_str;
-
-  if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
-      return NULL;
-  }
-
-  Schema* schema = TRY(parse_schema, &schema_str);
-
-  void* voidstar = to_voidstar_c(schema, obj);
-
-  free_schema(schema);
-
-  relptr_t relptr = TRY(abs2rel, voidstar);
-  return PyLong_FromSize_t(relptr);
-}
-
-// Takes a relative pointer as an integer and a schema, looks up the voidstar in
-// the shared memory pool, convert it to a python object, and return it
-static PyObject* from_shm(PyObject* self, PyObject* args) { MAYFAIL
-  size_t relptr;
-  const char* schema_str;
-
-  if (!PyArg_ParseTuple(args, "ks", &relptr, &schema_str)) {
-      return NULL;
-  }
-
-  Schema* schema = TRY(parse_schema, &schema_str);
-
-  absptr_t voidstar = TRY(rel2abs, relptr);
-
-  PyObject* obj = fromAnything(schema, voidstar);
-  if (obj == NULL) {
-      free_schema(schema);
-      PyErr_SetString(PyExc_TypeError, "fromAnything returned NULL");
-      return NULL;
-  }
-
-  free_schema(schema);
-
-  return obj;
-}
-
-
-static  PyObject* write_voidstar_as_json(PyObject* self, PyObject* args) { MAYFAIL
-  size_t relptr;
-  const char* schema_str;
-  if (!PyArg_ParseTuple(args, "ks", &relptr, &schema_str)) {
-    return NULL;
-  }
-
-  Schema* schema = TRY(parse_schema, &schema_str);
-  absptr_t voidstar = TRY(rel2abs, relptr);
-
-  TRY_WITH(
-      free_schema(schema),
-      print_voidstar,
-      voidstar,
-      schema
-  );
-
-  free_schema(schema);
-  Py_RETURN_NONE;
-}
-
-static PyObject* write_msgpack_as_json(PyObject* self, PyObject* args) { MAYFAIL
-  const char* msgpck_data;
-  Py_ssize_t msgpck_data_len;
-  const char* schema_str;
-  void* voidstar = NULL;
-
-  if (!PyArg_ParseTuple(args, "y#s", &msgpck_data, &msgpck_data_len, &schema_str)) {
-    return NULL;
-  }
-
-  Schema* schema = TRY(parse_schema, &schema_str);
-
-  TRY_WITH(
-      free_schema(schema),
-      unpack_with_schema,
-      msgpck_data,
-      msgpck_data_len,
-      schema,
-      &voidstar
-  );
-
-  TRY_WITH(
-      free_schema(schema),
-      print_voidstar,
-      voidstar,
-      schema
-  );
-
-  free_schema(schema);
-
-  Py_RETURN_NONE;
-}
-
-static PyObject* write_msgpack_file_as_json(PyObject* self, PyObject* args) { MAYFAIL
-  char* filename;
-  const char* schema_str;
-
-  if (!PyArg_ParseTuple(args, "ss", &filename, &schema_str)) {
-    return NULL;
-  }
-
-  Schema* schema = TRY(parse_schema, &schema_str);
-
-  // Get file size
-  struct stat st;
-  if (stat(filename, &st) != 0) {
-    PyErr_SetFromErrno(PyExc_IOError);
-    free_schema(schema);
-    return NULL;
-  }
-  size_t file_size = st.st_size;
-
-  // Allocate memory for file contents
-  char* msgpack_data = (char*)malloc(file_size);
-  if (msgpack_data == NULL) {
-    PyErr_NoMemory();
-    free_schema(schema);
-    return NULL;
-  }
-
-  // Open and read file
-  FILE* file = fopen(filename, "rb");
-  if (file == NULL) {
-    PyErr_SetFromErrno(PyExc_IOError);
-    free(msgpack_data);
-    free_schema(schema);
-    return NULL;
-  }
-
-  size_t bytes_read = fread(msgpack_data, 1, file_size, file);
-  fclose(file);
-
-  if (bytes_read != file_size) {
-    PyErr_Format(PyExc_IOError, "Failed to read entire file. Expected %zu bytes, read %zu bytes", file_size, bytes_read);
-    free(msgpack_data);
-    free_schema(schema);
-    return NULL;
-  }
-
-  void* voidstar;
-
-  TRY_WITH(
-      free(msgpack_data); free_schema(schema),
-      unpack_with_schema,
-      msgpack_data,
-      file_size,
-      schema,
-      &voidstar
-  );
-
-  TRY_WITH(
-      free_schema(schema),
-      print_voidstar,
-      voidstar,
-      schema
-  );
-
-  free(msgpack_data);
-  free_schema(schema);
-
-  Py_RETURN_NONE;
+    return PyBytes_FromStringAndSize((char*)pong, pong_size);
 }
 
 
 static PyMethodDef Methods[] = {
-    {"to_mesgpack", to_mesgpack, METH_VARARGS, "Serialize a voidstar to MessagePack data"},
-    {"from_mesgpack", from_mesgpack, METH_VARARGS, "Deserialize MessagePack data to voidstar"},
-    {"to_voidstar", to_voidstar, METH_VARARGS, "Convert python data to voidstar"},
-    {"from_voidstar", from_voidstar, METH_VARARGS, "Convert voidstar to python data"},
-    {"py_to_mesgpack", py_to_mesgpack, METH_VARARGS, "Convert python data to mesgpack"},
-    {"mesgpack_to_py", mesgpack_to_py, METH_VARARGS, "Convert mesgpack to python data"},
-    {"shm_rel2abs", shm_rel2abs, METH_VARARGS, "Convert a relative shared memory pointer to an absolute pointer to process memory"},
-    {"shm_abs2rel", shm_abs2rel, METH_VARARGS, "Convert an absolute pointer to process memory to a relative shared memory pointer"},
-    {"shm_start", shm_start, METH_VARARGS, "Initialize the shared memory pool"},
-    {"shm_close", shm_close, METH_VARARGS, "Close shared memory pool"},
-    {"to_shm", to_shm, METH_VARARGS, "Write python object to memory pool and return a relative pointer"},
-    {"from_shm", from_shm, METH_VARARGS, "Create a python object from a memory pool relative pointer"},
-    {"write_msgpack_as_json", write_msgpack_as_json, METH_VARARGS, "Given MessagePack data, write JSON"},
-    {"write_msgpack_file_as_json", write_msgpack_file_as_json, METH_VARARGS, "Given a MessagePack filename, write JSON"},
-    {"write_voidstar_as_json", write_voidstar_as_json, METH_VARARGS, "Given a relative pointer to voidstar data, write JSON"},
+    {"start_daemon", pybinding__start_daemon, METH_VARARGS, "Initialize the shared memory and socket for the python daemon"},
+    {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
+    {"wait_for_client", pybinding__wait_for_client, METH_VARARGS, "Listen over a pipe until a client packet arrives"},
+    {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},
+    {"send_packet_to_foreign_server", pybinding__send_packet_to_foreign_server, METH_VARARGS, "Send data to a foreign server"},
+    {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
+    {"socket_close", pybinding__socket_close, METH_VARARGS, "Close a fucking socket"},
+    {"foreign_call", pybinding__foreign_call, METH_VARARGS, "Close a fucking socket"},
+    {"get_value", pybinding__get_value, METH_VARARGS, "Convert a packet to a Python value"},
+    {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},
+    {"is_ping", pybinding__is_ping, METH_VARARGS, "Packet is a ping"},
+    {"is_call", pybinding__is_call, METH_VARARGS, "Packet is a call"},
+    {"pong", pybinding__pong, METH_VARARGS, "Return a ping"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 

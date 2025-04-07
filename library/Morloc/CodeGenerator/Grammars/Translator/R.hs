@@ -44,12 +44,13 @@ translate srcs es = do
   let mDocs = map translateSegment es
 
   let code = makePool includeDocs mDocs
-  let outfile = ML.makeExecutableName RLang "pool"
+      exefile = ML.makeExecutablePoolName RLang
+      outfile = ML.makeSourcePoolName RLang
 
   return $ Script
     { scriptBase = "pool"
     , scriptLang = RLang
-    , scriptCode = "." :/ File "pool.R" (Code . render $ code)
+    , scriptCode = "." :/ File exefile (Code . render $ code)
     , scriptMake = [SysExe outfile]
     }
 

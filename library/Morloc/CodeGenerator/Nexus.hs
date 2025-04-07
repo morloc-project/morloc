@@ -2,7 +2,7 @@
 
 {-|
 Module      : Morloc.CodeGenerator.Nexus
-Description : Templates for generating a Perl nexus
+Description : Templates for generating the nexus
 Copyright   : (c) Zebulun Arendsee, 2016-2024
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
@@ -38,10 +38,12 @@ type FData =
 generate :: [NexusCommand] -> [(Type, Int, Lang, [Socket])] -> MorlocMonad Script
 generate cs xs = do
 
+  config <- MM.ask
+
   -- find the path for extensions
   -- this includes the mlcmpack module needed for MessagePack handling
-  home <- MM.asks MC.configHome
-  let includeDir = home </> "include"
+  let home = MC.configHome config
+      includeDir = home </> "include"
       
 
   callNames <- mapM (MM.metaName . (\(_, i, _, _) -> i)) xs |>> catMaybes |>> map pretty
@@ -53,7 +55,7 @@ generate cs xs = do
     Script
       { scriptBase = outfile
       , scriptLang = ML.CLang
-      , scriptCode = "." :/ File outfile (Code . render $ main (pretty home) names fdata cs)
+      , scriptCode = "." :/ File outfile (Code . render $ main config names fdata cs)
       , scriptMake = [SysRun . Code $ "gcc -o nexus -O -I" <> MT.pack includeDir <> " " <> MT.pack outfile]
       }
 
@@ -88,9 +90,9 @@ makeSchema mid lang t = do
   return $ Serial.serialAstToMsgpackSchema ast
 
 
-main :: MDoc -> [MDoc] -> [FData] -> [NexusCommand] -> MDoc
-main homeDir names fdata cdata
-    = format (DF.embededFileText DF.nexusTemplate) "// <<<BREAK>>>" [ usageCode fdata cdata, dispatchCode fdata ]
+main :: MC.Config -> [MDoc] -> [FData] -> [NexusCommand] -> MDoc
+main config names fdata cdata
+    = format (DF.embededFileText DF.nexusTemplate) "// <<<BREAK>>>" [ usageCode fdata cdata, dispatchCode config fdata ]
 
 usageCode :: [FData] -> [NexusCommand] -> MDoc
 usageCode fdata cdata =
@@ -121,7 +123,7 @@ writeType :: Maybe Int -> Type -> MDoc
 writeType (Just i) t = [idoc|fprintf(stderr, "    param #{pretty i}: #{pretty t}\n");|]
 writeType Nothing  t = [idoc|fprintf(stderr, "    return: #{pretty t}\n");|]
 
-dispatchCode fdata = [idoc|
+dispatchCode config fdata = [idoc|
     uint32_t mid = 0;
 
     #{vsep socketDocs}
@@ -129,27 +131,40 @@ dispatchCode fdata = [idoc|
     #{cIfElse (head cases) (tail cases) (Just elseClause)}
     |]
     where
-    makeSocketDoc fdata@(socket, sub, midx, argType, sockets, schemas, returnSchema) = 
+    makeSocketDoc (socket, _, _, _, _, _, _) = 
         [idoc|
     morloc_socket_t #{varName} = { 0 };
-    #{varName}.lang = strdup("#{lang}");
-    #{varName}.syscmd = (char**)calloc(5, sizeof(morloc_socket_t*));
-    #{varName}.syscmd[0] = strdup("./pool-#{lang}.out");
-    asprintf(&#{varName}.syscmd[1], "%s/pipe-#{lang}", tmpdir);
-    #{varName}.syscmd[2] = strdup(tmpdir);
-    #{varName}.syscmd[3] = strdup(shm_basename);
-    #{varName}.syscmd[4] = NULL;
-    asprintf(&#{varName}.socket_filename, "%s/pipe-#{lang}", tmpdir);
+    #{varName}.lang = strdup("#{langName}");
+    #{varName}.syscmd = (char**)calloc(#{pretty $ length execArgs + 4}, sizeof(morloc_socket_t*));
+    #{execArgsDoc} 
+    asprintf(&#{varName}.syscmd[#{pretty $ length execArgs}], "%s/pipe-#{langName}", tmpdir);
+    #{varName}.syscmd[#{pretty $ length execArgs + 1}] = strdup(tmpdir);
+    #{varName}.syscmd[#{pretty $ length execArgs + 2}] = strdup(shm_basename);
+    #{varName}.syscmd[#{pretty $ length execArgs + 3}] = NULL;
+    asprintf(&#{varName}.socket_filename, "%s/pipe-#{langName}", tmpdir);
 
         |]
         where
-            lang = pretty . ML.makeExtension $ socketLang socket
-            varName = lang <> "_socket"
+            langName = pretty . ML.makeExtension $ socketLang socket
+            varName = langName <> "_socket"
             cmd = dquotes . hsep $ socketServerInit socket
+
+            makeExecutionArgs :: Lang -> [String]
+            makeExecutionArgs CppLang = ["./" <> ML.makeExecutablePoolName CppLang]
+            makeExecutionArgs CLang = ["./" <> ML.makeExecutablePoolName CLang]
+            makeExecutionArgs Python3Lang = [configLangPython3 config, ML.makeExecutablePoolName Python3Lang]
+            makeExecutionArgs RLang = [configLangPython3 config, ML.makeExecutablePoolName Python3Lang]
+
+            execArgs = makeExecutionArgs (socketLang socket)
+            execArgsDoc = vsep [ [idoc|#{varName}.syscmd[#{pretty i}] = strdup("#{pretty arg}");|]
+                               | (i, arg) <- zip ([0..] :: [Int]) execArgs ]
+
+            executableName = pretty $ ML.makeExecutablePoolName (socketLang socket)
+
 
     socketDocs = map makeSocketDoc fdata
 
-    makeCaseDoc fdata@(socket, sub, midx, argType, sockets, schemas, returnSchema) = 
+    makeCaseDoc (socket, sub, midx, _, sockets, schemas, returnSchema) = 
         ( [idoc|strcmp(cmd, "#{sub}") == 0|]
         ,[idoc|    uint32_t mid = #{pretty midx};
     morloc_socket_t* sockets[] = #{socketList};
@@ -173,4 +188,79 @@ cIfElse :: (MDoc, MDoc) -> [(MDoc, MDoc)] -> Maybe MDoc -> MDoc
 cIfElse (cond1, block1) ifelses elseBlock = hsep $
     [ "if" <> block 4 (parens cond1) block1 ] <>
     [ block 4 ("if else" <+> parens condX) blockX  | (condX, blockX) <- ifelses] <>
-    [ maybe "" (\elseBlock -> block 4 "else" elseBlock) elseBlock ]
+    [ maybe "" (block 4 "else") elseBlock ]
+
+
+
+
+--  [ usageT fdata cdata <> "\n" <>
+--    vsep (map functionCT cdata ++ map functionT fdata) <> "\n" <>
+--    mapT names
+--  ]
+--
+-- mapT :: [Doc ann] -> Doc ann
+-- mapT names = [idoc|command_table = #{dict}|] where
+--     dict = encloseSep "{" "}" "," (map mapEntryT names)
+--
+-- mapEntryT :: Doc ann -> Doc ann
+-- mapEntryT n = [idoc|"#{n}" : call_#{n}|]
+--
+-- functionT :: FData -> MDoc
+-- functionT (Socket lang _ _, subcommand, mid, t, sockets, schemas, return_schema) =
+--   [idoc|
+-- def call_#{subcommand}(args, tmpdir, shm_basename):
+--     if len(args) != #{pretty (nargs t)}:
+--         clean_exit("Expected #{pretty (nargs t)} arguments to '#{subcommand}', given " + str(len(args)))
+--     else:
+--         run_command(
+--             mid = #{pretty mid},
+--             args = args,
+--             pool_lang = #{poolLangDoc},
+--             sockets = #{socketsDoc},
+--             arg_schema = #{list(schemas)},
+--             return_schema = #{return_schema}
+--         )
+-- |]
+--   where
+--     poolLangDoc = dquotes . pretty $ ML.showLangName lang
+--     socketsDoc = list [align . vsep $ map (\x -> makeSocketDoc x <> ",") sockets]
+--
+--     makeSocketDoc :: Socket -> MDoc
+--     makeSocketDoc (Socket lang' cmdDocs pipeDoc) =
+--       tupled [ dquotes . pretty $ ML.showLangName lang'
+--              , list (map dquotes cmdDocs <> [pipeDoc, "tmpdir", "shm_basename"])
+--              , pipeDoc
+--              ]
+--
+-- functionCT :: NexusCommand -> MDoc
+-- functionCT (NexusCommand cmd _ json_str args subs) =
+--   [idoc|
+-- def call_#{pretty cmd}(args, tmpdir, shm_basename):
+--     if len(args) != #{pretty $ length args}:
+--         errmsg = "Expected #{pretty $ length args} arguments to '#{pretty cmd}', given " + str(len(args))
+--         clean_exit(1, errmsg)
+--     else:
+--         json_obj = json.loads('''#{json_str}''')
+--         #{align . vsep $ readArguments ++ replacements}
+--         print(json.dumps(json_obj, separators=(",", ":")))
+--         clean_exit(0)
+-- |]
+--   where
+--     readArguments = zipWith readJsonArg args [0..]
+--     replacements = map (uncurry3 replaceJson) subs
+--
+-- replaceJson :: JsonPath -> MT.Text -> JsonPath -> MDoc
+-- replaceJson pathTo v pathFrom
+--   = access "json_obj" pathTo
+--   <+> "="
+--   <+> access [idoc|json_#{pretty v}|] pathFrom
+--
+-- access :: MDoc -> JsonPath -> MDoc
+-- access = foldl pathElement
+--
+-- pathElement :: MDoc -> JsonAccessor -> MDoc
+-- pathElement jsonObj (JsonIndex i) = jsonObj <> brackets (pretty i)
+-- pathElement jsonObj (JsonKey key) = jsonObj <> brackets (dquotes (pretty key))
+--
+-- readJsonArg :: EVar -> Int -> MDoc
+-- readJsonArg (EV v) i = [idoc|json_#{pretty v} = json.loads([*args][#{pretty i}])|]
