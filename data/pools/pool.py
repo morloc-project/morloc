@@ -5,9 +5,6 @@ import time
 from multiprocessing import Process, cpu_count, Pipe, Value
 from multiprocessing.reduction import recv_handle, send_handle
 
-def log(msg):
-    print(msg, file=sys.stderr)
-
 
 # Global variables for clean signal handling
 daemon = None
@@ -34,49 +31,37 @@ import pymorloc as morloc
 # AUTO include dispatch end
 
 def run_job(client_fd: int) -> None:
-    log("running job")
     try:
-        log(f" client {client_fd!s}: begin streaming")
         client_data = morloc.stream_from_client(client_fd)
-        log(f" client {client_fd!s}: {len(client_data)!s} bytes retrieved")
 
         if(morloc.is_ping(client_data)):
-            log(f" client {client_fd!s}: handling pong")
             result = morloc.pong(client_data)
 
         elif(morloc.is_call(client_data)):
-            log(f" client {client_fd!s}: handling call")
             (mid, args) = morloc.read_morloc_call_packet(client_data)
 
-            log(f" client {client_fd!s}: dispatching")
             result = dispatch[mid](*args)
-            log(f" client {client_fd!s}: {len(result)!s} bytes retrieved")
 
         else:
             raise ValueError("Expected a ping or call type packet")
 
         morloc.send_packet_to_foreign_server(client_fd, result)
-        log(f" client {client_fd!s}: data sent")
 
     except Exception as e:
         print(f"job failed: {e!s}", file=sys.stderr)
     finally:
         morloc.socket_close(client_fd)
-        log(f" client {client_fd!s}: socket closed")
 
 
-def worker_process(worker_id, pipe, shutdown_flag):
-    log(f"worker {worker_id!s} started")
+def worker_process(worker_id, pipe, shm_basename, shutdown_flag):
+    morloc.shinit(shm_basename, 0, 0xffff)
     while not shutdown_flag.value:
         try:
-            log(f" worker {worker_id!s}: waiting for data")
             # Receive duplicated FD valid in this process
             client_fd = recv_handle(pipe)
 
-            log(f" worker {worker_id!s}: client {client_fd!s} handle received, running job")
             run_job(client_fd) # Process with original FD
         except (EOFError, OSError):
-            log(f" worker {worker_id!s}: ending")
             break
 
 
@@ -87,26 +72,20 @@ def signal_handler(sig, frame):
 
 
 def client_listener(worker_pipes, socket_path, tmpdir, shm_basename, shutdown_flag):
-    log("listener starting")
     global daemon
     daemon = morloc.start_daemon(socket_path, tmpdir, shm_basename, 0xffff)
     current_worker = 0  # Round-robin counter
 
     while not shutdown_flag.value:
         try:
-            log("listener waiting for client ...")
             client_fd = morloc.wait_for_client(daemon)
 
-            log(f"client {client_fd!s} found")
             if client_fd >= 0:
                 # Round-robin distribution to workers
-                log(f"listener client {client_fd!s} entering round robin")
                 pipe = worker_pipes[current_worker]
 
-                log(f"listener sending data")
                 send_handle(pipe, client_fd, os.getpid())
 
-                log(f"listener data sent")
                 current_worker = (current_worker + 1) % len(worker_pipes)
         except Exception as e:
             print(f"Listener error: {e!s}", file=sys.stderr)
@@ -135,7 +114,7 @@ if __name__ == "__main__":
     for i in range(num_workers):
         # Create separate pipe for each worker
         parent_conn, child_conn = Pipe()
-        worker = Process(target=worker_process, args=(i, parent_conn, shutdown_flag))
+        worker = Process(target=worker_process, args=(i, parent_conn, shm_basename, shutdown_flag))
         worker.start()
         workers.append(worker)
         worker_pipes.append(child_conn)  # Store listener-side ends
@@ -149,9 +128,6 @@ if __name__ == "__main__":
 
     while not shutdown_flag:
         time.sleep(0.1)  # Keep main thread alive and responsive to signals
-
-    # Graceful shutdown
-    log("Shutting down")
 
     # Terminate listener process
     if(listener_process):

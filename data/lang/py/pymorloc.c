@@ -915,8 +915,28 @@ static PyObject* pybinding__pong(PyObject* self, PyObject* args) { MAYFAIL
     return PyBytes_FromStringAndSize((char*)pong, pong_size);
 }
 
+static PyObject* pybinding__shinit(PyObject* self, PyObject* args) { MAYFAIL
+    const char* socket_path;
+    const char* shm_basename;
+    size_t volume_index;
+    size_t shm_default_size;
+ 
+    if (!PyArg_ParseTuple(args, "skk", &shm_basename, &volume_index, &shm_default_size)) {
+      return NULL;
+    }
+ 
+    shm_t* shm = PyTRY(
+        shinit,
+        shm_basename,
+        volume_index,
+        shm_default_size
+    );
+ 
+    return PyCapsule_New(shm, "shm_t", NULL);
+}
 
 static PyMethodDef Methods[] = {
+    {"shinit", pybinding__shinit, METH_VARARGS, "Open the shared memory pool"},
     {"start_daemon", pybinding__start_daemon, METH_VARARGS, "Initialize the shared memory and socket for the python daemon"},
     {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
     {"wait_for_client", pybinding__wait_for_client, METH_VARARGS, "Listen over a pipe until a client packet arrives"},
