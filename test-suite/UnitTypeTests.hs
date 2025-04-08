@@ -61,7 +61,6 @@ emptyConfig = do
     , configBuildConfig = home <> "/.morloc/.build-config.yaml"
     , configLangPython3 = "python3"
     , configLangR       = "Rscript"
-    , configLangPerl    = "perl"
     }
 
 

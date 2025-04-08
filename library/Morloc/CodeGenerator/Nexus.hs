@@ -131,7 +131,7 @@ dispatchCode config fdata = [idoc|
     #{cIfElse (head cases) (tail cases) (Just elseClause)}
     |]
     where
-    makeSocketDoc (socket, _, _, _, _, _, _) = 
+    makeSocketDoc slang sinit = 
         [idoc|
     morloc_socket_t #{varName} = { 0 };
     #{varName}.lang = strdup("#{langName}");
@@ -145,9 +145,9 @@ dispatchCode config fdata = [idoc|
 
         |]
         where
-            langName = pretty . ML.makeExtension $ socketLang socket
+            langName = pretty . ML.makeExtension $ slang
             varName = langName <> "_socket"
-            cmd = dquotes . hsep $ socketServerInit socket
+            cmd = dquotes . hsep $ sinit
 
             makeExecutionArgs :: Lang -> [String]
             makeExecutionArgs CppLang = ["./" <> ML.makeExecutablePoolName CppLang]
@@ -155,14 +155,22 @@ dispatchCode config fdata = [idoc|
             makeExecutionArgs Python3Lang = [configLangPython3 config, ML.makeExecutablePoolName Python3Lang]
             makeExecutionArgs RLang = [configLangPython3 config, ML.makeExecutablePoolName Python3Lang]
 
-            execArgs = makeExecutionArgs (socketLang socket)
+            execArgs = makeExecutionArgs slang
             execArgsDoc = vsep [ [idoc|#{varName}.syscmd[#{pretty i}] = strdup("#{pretty arg}");|]
                                | (i, arg) <- zip ([0..] :: [Int]) execArgs ]
 
-            executableName = pretty $ ML.makeExecutablePoolName (socketLang socket)
+            executableName = pretty $ ML.makeExecutablePoolName slang
 
+    uniqueFst :: Eq a => [(a, b)] -> [(a, b)]
+    uniqueFst = f [] where
+        f _ [] = []
+        f seen (x@(a, _):xs)
+            | a `elem` seen = f seen xs 
+            | otherwise = x : f (a:seen) xs
 
-    socketDocs = map makeSocketDoc fdata
+    daemonSets = uniqueFst [ (socketLang socket, socketServerInit socket) | (socket, _, _, _, _, _, _) <- fdata ]
+
+    socketDocs = [makeSocketDoc a b | (a,b) <- daemonSets]
 
     makeCaseDoc (socket, sub, midx, _, sockets, schemas, returnSchema) = 
         ( [idoc|strcmp(cmd, "#{sub}") == 0|]
@@ -187,7 +195,7 @@ dispatchCode config fdata = [idoc|
 cIfElse :: (MDoc, MDoc) -> [(MDoc, MDoc)] -> Maybe MDoc -> MDoc
 cIfElse (cond1, block1) ifelses elseBlock = hsep $
     [ "if" <> block 4 (parens cond1) block1 ] <>
-    [ block 4 ("if else" <+> parens condX) blockX  | (condX, blockX) <- ifelses] <>
+    [ block 4 ("else if" <+> parens condX) blockX  | (condX, blockX) <- ifelses] <>
     [ maybe "" (block 4 "else") elseBlock ]
 
 
