@@ -3275,9 +3275,10 @@ int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* s
         case MORLOC_STRING: {
             size_t j_string_size = 0;
             size_t c_string_size = 0;
-            absptr_t mlc_str = TRY(shmalloc, c_string_size * sizeof(char));
 
             TRY(json_string_size, *json_ptr, &j_string_size, &c_string_size);
+
+            absptr_t mlc_str = TRY(shmalloc, c_string_size * sizeof(char));
 
             // If the C and JSON strings are the same length, then there are
             // no special characters to consider and we can simply memcpy.
