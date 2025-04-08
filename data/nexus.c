@@ -181,7 +181,7 @@ void run_command(
         npids++;
         all_sockets[i]->pid = start_language_server(all_sockets[i], &errmsg);
         // add pid to global list for later cleanup
-        pids[i] = pid;
+        pids[i] = all_sockets[i]->pid;
         if(errmsg != NULL){
             ERROR("%s", errmsg);
         }

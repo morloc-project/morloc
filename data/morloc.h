@@ -3415,10 +3415,6 @@ relptr_t read_json_with_schema(char* json_data, const Schema* schema, ERRMSG){
     return ptr;
 }
 
-// }}} end JSON support
-
-// {{{ voidstar utilities
-
 static bool print_voidstar_r(const void* voidstar, const Schema* schema, ERRMSG) {
     BOOL_RETURN_SETUP
 
@@ -3534,7 +3530,8 @@ bool print_voidstar(const void* voidstar, const Schema* schema, ERRMSG) {
     return success;
 }
 
-// }}} end voidstar utilities
+// }}} end JSON
+
 
 // {{{ morloc packet binary protocol
 

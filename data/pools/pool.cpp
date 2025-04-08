@@ -171,7 +171,7 @@ int run_job(int client_fd) {
         uint8_t* client_data = stream_from_client(client_fd, &errmsg);
         if(errmsg != NULL){
             std::cerr << "Failed to read client data: " << errmsg << std::endl;
-            return -1;
+            exit(1);
         }
 
         // Fail if no data was pulled
@@ -179,11 +179,11 @@ int run_job(int client_fd) {
         if(errmsg != NULL){
             socket_close(client_fd);
             std::cerr << "Malformed packet: " << errmsg << std::endl;
-            return -1;
+            exit(1);
         } else if (length == 0) {
             socket_close(client_fd);
             std::cerr << "Zero length packet received from client" << std::endl;
-            return -1;
+            exit(1);
         }
 
         // Run the job
@@ -192,7 +192,10 @@ int run_job(int client_fd) {
         // return the result to the client and move on
         // do not wait for the client to finish processing
         size_t bytes_sent = send_packet_to_foreign_server(client_fd, result, &errmsg);
-        PROPAGATE_ERROR(errmsg)
+        if(errmsg != NULL){
+            std::cerr << "Failed to send data: " << errmsg << std::endl;
+            exit(1);
+        }
 
         // close the current client
         socket_close(client_fd);
@@ -237,7 +240,6 @@ int main(int argc, char* argv[]) {
         if (errmsg != NULL){
             std::cerr << "Failed to read client:\n" << errmsg << std::endl;
             errmsg = NULL;
-            // return 1;
         }
         if (client_fd >= 0){
             run_job(client_fd);
