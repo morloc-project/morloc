@@ -2532,7 +2532,7 @@ static size_t msg_size_array(const Schema* schema, mpack_tokbuf_t* tokbuf, const
 }
 
 static size_t msg_size_tuple(const Schema* schema, mpack_tokbuf_t* tokbuf, const char** buf_ptr, size_t* buf_remaining, mpack_token_t* token){
-    // parse the mesgpack tuple
+    // parse the msgpack tuple
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
     assert(token->length == schema->size);
     size_t size = 0;
@@ -3518,6 +3518,7 @@ bool print_voidstar(const void* voidstar, const Schema* schema, ERRMSG) {
     RAISE_IF(!success, "\n%s", CHILD_ERRMSG)
 
     // add terminal newline
+    // IMPORTANT: the newline distinguishes JSON from MessagePack for 0-9 values
     printf("\n");
 
     return success;
@@ -3808,39 +3809,55 @@ uint8_t* read_binary_fd(FILE* file, size_t* file_size, ERRMSG) {
     uint8_t* msg = NULL;
     size_t read_size = 0;
     size_t file_size_long = 0;
+    size_t allocated_size = 0;
+    const size_t chunk_size = 0xffff;  // 64KB chunks
+    int is_seekable = 1;
 
-    int return_code = fseek(file, 0, SEEK_END);
-    RAISE_IF(return_code != 0, "Failed to seek to end of file")
-
-    file_size_long = ftell(file);
-    RAISE_IF(file_size_long < 0, "Failed to determine file size")
-
-    RAISE_IF(file_size_long == 0, "The file is empty")
-
-    // If the file is too large to fit in memory, we will need to stream it.
-    // TODO: add streaming support
-    RAISE_IF(
-        file_size_long > SIZE_MAX,
-        "The file maximum allocatable size (%zu bytes)",
-        file_size_long
-    )
-
-    // NOTE, do not cast this to size_t earlier since it may overflow
-    *file_size = (size_t)file_size_long;
-
-    rewind(file);
-
-    msg = (uint8_t*)malloc(*file_size);
-    RAISE_IF(msg == NULL, "Failed to allocate %zu bytes", *file_size)
-
-    read_size = fread(msg, 1, *file_size, file);
-    if(read_size != *file_size){
-        free(msg);
-        RAISE("Read %zu bytes (expected %zu)", read_size, *file_size)
+    // First attempt to use seek-based size detection
+    if (fseek(file, 0, SEEK_END) == 0) {
+        file_size_long = ftell(file);
+        if (file_size_long > 0) {
+            rewind(file);
+            // Proceed with normal file handling
+            RAISE_IF(file_size_long > SIZE_MAX,
+                   "File too large (%zu bytes)", file_size_long)
+            *file_size = (size_t)file_size_long;
+            msg = (uint8_t*)malloc(*file_size);
+            RAISE_IF(msg == NULL, "Failed to allocate %zu bytes", *file_size)
+            read_size = fread(msg, 1, *file_size, file);
+            if(read_size == *file_size) {
+                return msg;
+            }
+            free(msg);  // Fall through to streaming if full read failed
+        }
     }
 
-    return msg;
+    // Handle non-seekable files (pipes, special devices)
+    is_seekable = 0;
+    *file_size = 0;
+    msg = NULL;
+
+    while (1) {
+        uint8_t* new_buf = (uint8_t*)realloc(msg, allocated_size + chunk_size);
+        RAISE_IF(new_buf == NULL, "Failed to allocate %zu bytes", allocated_size + chunk_size)
+        msg = new_buf;
+
+        read_size = fread(msg + allocated_size, 1, chunk_size, file);
+        allocated_size += read_size;
+
+        if (read_size < chunk_size) {
+            if (feof(file)) {
+                *file_size = allocated_size;
+                return msg;
+            }
+            if (ferror(file)) {
+                free(msg);
+                RAISE("Read error after %zu bytes", allocated_size)
+            }
+        }
+    }
 }
+
 
 uint8_t* read_binary_file(const char* filename, size_t* file_size, ERRMSG) {
     PTR_RETURN_SETUP(uint8_t)
@@ -4215,7 +4232,7 @@ uint8_t* stream_from_client(int client_fd, ERRMSG) {
     // Receive the first part of the response, this will include the header
     while (1) {
         int poll_result = poll(&pfd, 1, -1); // Wait indefinitely
-        
+
 
         RAISE_IF_WITH(pfd.revents & POLLERR, free(buffer), "Socket error POLLERR: %s", strerror(errno));
         RAISE_IF_WITH(pfd.revents & POLLHUP, free(buffer), "Socket error POLLHUP: %s", strerror(errno));
@@ -4631,6 +4648,30 @@ char* check_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
 
 // {{{ Parsing CLI arguments
 
+
+// Check if the data may be MessagePack (and is not JSON)
+//
+// We look ONLY at the first character and the size
+static bool maybe_msgpack(const uint8_t* data, size_t size) {
+    if (size < 1) return false;
+
+    // Check for MessagePack's initial byte patterns
+    uint8_t c = data[0];
+
+    // MessagePack stores the integers 0 to 127 in the characters 0x7f, which
+    // coincide with the ASCII characters. JSON starts with whitespace, 't'
+    // (true), 'f' (false), 'n', (nil), quotes, '[', or '{'. A complete
+    // MessagePack message that begins with a FixInt must end there (it isn't an
+    // array).
+
+    // Trouble is that 0x30-0x39 may be either 0-9 in JSON or 48-57 in
+    // MessagePack. That said, JSON does often have a newline. And I can ensure
+    // that Morloc-produced JSON always does. So perhaps it is still safe assume
+    // that no JSON file can be a single character.
+
+    return c > 0x7f || (c <= 0x7f && size == 1);
+}
+
 // Parse a command line argument string that should contain data of a given type
 uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
     PTR_RETURN_SETUP(uint8_t)
@@ -4682,16 +4723,29 @@ uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
         }
 
         // If the extension is not recognized
-        // First try to read it as a morloc voidstar packet
-        morloc_packet_header_t* header = read_morloc_packet_header((uint8_t*)data, &CHILD_ERRMSG);
-        if(CHILD_ERRMSG == NULL && header != NULL){
-            return (uint8_t*)data;
+        // First try to read it as a morloc voidstar packet if the data is at
+        // least as large as a header
+        if(data_size >= sizeof(morloc_packet_header_t)){
+            morloc_packet_header_t* header = read_morloc_packet_header((uint8_t*)data, &CHILD_ERRMSG);
+            if(CHILD_ERRMSG == NULL && header != NULL){
+                return (uint8_t*)data;
+            }
         }
 
-        unpack_with_schema(data, data_size, schema, (void**)&packet, &CHILD_ERRMSG);
-        if(CHILD_ERRMSG == NULL && packet != NULL){
+        // Next check if it is MessagePack
+        if(maybe_msgpack((uint8_t*)data, data_size)){
+            // Try to parse as MessagePack
+            TRY(unpack_with_schema, data, data_size, schema, (void**)&packet);
             free(data);
             return (uint8_t*)packet;
+        }
+
+        // Try to parse as JSON
+        relptr_t packet_ptr = read_json_with_schema(data, schema, &CHILD_ERRMSG);
+        if(CHILD_ERRMSG == NULL){
+            free(data);
+            packet = make_relptr_data_packet(packet_ptr);
+            return packet;
         }
 
         free(data);
