@@ -40,9 +40,15 @@ void clean_exit(int exit_code){
         tmpdir = NULL; // Clear the pointer
     }
 
+    char* errmsg = NULL;
+    shclose(&errmsg);
+    if(errmsg != NULL){
+        fprintf(stderr, errmsg);
+        exit(1);
+    }
+
     exit(exit_code); // Exit with the provided code
 }
-
 
 #define ERROR(msg, ...) \
     fprintf(stderr, "Error (%s:%d in %s): " msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \

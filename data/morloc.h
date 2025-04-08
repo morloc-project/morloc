@@ -2979,7 +2979,7 @@ static double parse_json_double(char** json_ptr, ERRMSG) {
 static int json_string_size(char* ptr, size_t* json_size, size_t* c_size, ERRMSG) {
     INT_RETURN_SETUP
 
-    RAISE_IF(*ptr != '"', "Expected string, but no initial quote found")
+    RAISE_IF(*ptr != '"', "Expected string, but no initial quote found (observed '%c')", *ptr)
     ptr++; // Skip opening quote
 
     size_t json_size_ = 0;
@@ -3327,12 +3327,22 @@ int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* s
         }
 
         case MORLOC_TUPLE: {
+
+            TRY(consume_char, '[', json_ptr);
+
             absptr_t tuple_data = TRY(shmalloc, schema->width);
             for(size_t element_idx = 0; element_idx < schema->size; element_idx++){
                 uint8_t* element = (uint8_t*)tuple_data + schema->offsets[element_idx];
                 TRY(read_json_with_schema_r, &element, json_ptr, schema->parameters[element_idx])
+                consume_whitespace(json_ptr);
+                if(element_idx < schema->size - 1){
+                    TRY(consume_char, ',', json_ptr);
+                }
             }
             *voidstar = (uint8_t*)tuple_data;
+
+            TRY(consume_char, ']', json_ptr);
+
             break;
         }
 
