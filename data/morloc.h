@@ -3532,7 +3532,6 @@ bool print_voidstar(const void* voidstar, const Schema* schema, ERRMSG) {
 
 // }}} end JSON
 
-
 // {{{ morloc packet binary protocol
 
 // The first 4 bytes of every morloc packet begin with these characters
@@ -4321,7 +4320,7 @@ uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* pa
     int retcode = -1;
     WAIT( { retcode = connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)); },
           retcode == 0,
-          RAISE("Failed to connect to pipe '%s', ran out of time", socket_path)
+          RAISE_WITH(socket_close(client_fd), "Failed to connect to pipe '%s', ran out of time", socket_path)
         )
 
     size_t packet_size = TRY(morloc_packet_size, packet);
@@ -4331,11 +4330,11 @@ uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* pa
 
     WAIT( { bytes_sent = send(client_fd, packet, packet_size, MSG_NOSIGNAL); },
           (size_t)bytes_sent == packet_size,
-          RAISE("Failed to send data to '%s', ran out of time", socket_path)
+          RAISE_WITH(socket_close(client_fd), "Failed to send data to '%s', ran out of time", socket_path)
         )
 
     result = stream_from_client(client_fd, &CHILD_ERRMSG);
-    RAISE_IF(CHILD_ERRMSG != NULL, "Failed to read data returned from pipe '%s'\n%s", socket_path, CHILD_ERRMSG);
+    RAISE_IF_WITH(CHILD_ERRMSG != NULL, socket_close(client_fd), "Failed to read data returned from pipe '%s'\n%s", socket_path, CHILD_ERRMSG);
 
     socket_close(client_fd);
 

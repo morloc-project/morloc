@@ -53,7 +53,7 @@ def run_job(client_fd: int) -> None:
         morloc.socket_close(client_fd)
 
 
-def worker_process(worker_id, pipe, shm_basename, shutdown_flag):
+def worker_process(pipe, shm_basename, shutdown_flag):
     morloc.shinit(shm_basename, 0, 0xffff)
     while not shutdown_flag.value:
         try:
@@ -114,7 +114,7 @@ if __name__ == "__main__":
     for i in range(num_workers):
         # Create separate pipe for each worker
         parent_conn, child_conn = Pipe()
-        worker = Process(target=worker_process, args=(i, parent_conn, shm_basename, shutdown_flag))
+        worker = Process(target=worker_process, args=(parent_conn, shm_basename, shutdown_flag))
         worker.start()
         workers.append(worker)
         worker_pipes.append(child_conn)  # Store listener-side ends
@@ -126,20 +126,30 @@ if __name__ == "__main__":
     )
     listener_process.start()
 
-    while not shutdown_flag:
+    while not shutdown_flag.value:
         time.sleep(0.1)  # Keep main thread alive and responsive to signals
 
-    # Terminate listener process
-    if(listener_process):
-        listener_process.join(0.1)
-        listener_process.terminate()
+    # Shutdown sequence
 
-    # Terminate worker processes
+    # 1. Stop listener first
+    listener_process.terminate()
+    listener_process.join(timeout=0.01)
+    listener_process.kill()
+    listener_process.join()  # Final blocking reap
+    listener_process.close()
+
+    # 2. Drain and close worker pipes
+    for pipe in worker_pipes:
+        while pipe.poll():
+            pipe.recv()  # Clear buffers
+        pipe.close()
+
+    # 3. Terminate workers with escalating force
     for p in workers:
-        if p is not None:
-            if p.is_alive():
-                p.join(0.1)  # Wait for clean exit
-                if p.is_alive():
-                    p.terminate()
+        if p.is_alive():
+            p.kill()
+        p.join()  # Final blocking reap
+        p.close()
 
+    # 4. Clean shared resources
     sys.exit(0)
