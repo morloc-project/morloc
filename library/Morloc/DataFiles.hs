@@ -16,7 +16,6 @@ module Morloc.DataFiles
   , libmorloc
   , nexusTemplate
   , poolTemplate
-  , rSocketLib
   , libcpplang
   , libpylang
   , libpylangMakefile
@@ -55,10 +54,6 @@ poolTemplate CppLang     = EmbededFile "pool.cpp" (decodeUtf8 $ $(embedFileRelat
 poolTemplate Python3Lang = EmbededFile "pool.py" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.py"))
 poolTemplate RLang       = EmbededFile "pool.R" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.R"))
 poolTemplate _ = undefined
-
--- C file describing socket bindings needed for R
-rSocketLib :: EmbededFile
-rSocketLib = EmbededFile "socketr.c" (decodeUtf8 $ $(embedFileRelative "data/misc/socketr.c"))
 
 -- R interface to morloc.h
 librlang :: EmbededFile

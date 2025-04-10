@@ -66,12 +66,6 @@ configureAll verbose force slurmSupport config = do
     say "installing mlccpptypes"
     callCommand cmd
 
-  say "Configuring R socket library"
-  let srcpath = configHome config </> "lib" </> "socketr.c"
-      objpath = configHome config </> "lib" </> "socketr.o"
-      libpath = configHome config </> "lib" </> "libsocketr.so"
-  compileCCodeIfNeeded (DF.embededFileText DF.rSocketLib) srcpath libpath objpath
-
   let libmorlocPath = includeDir </> DF.embededFileName (DF.libMorlocH DF.libmorloc)
       libhashPath = includeDir </> DF.embededFileName (DF.libHashH DF.libmorloc)
 
