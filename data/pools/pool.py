@@ -50,7 +50,7 @@ def run_job(client_fd: int) -> None:
     except Exception as e:
         print(f"job failed: {e!s}", file=sys.stderr)
     finally:
-        morloc.socket_close(client_fd)
+        morloc.close_socket(client_fd)
 
 
 def worker_process(pipe, shm_basename, shutdown_flag):

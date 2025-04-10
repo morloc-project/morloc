@@ -153,7 +153,7 @@ dispatchCode config fdata = [idoc|
             makeExecutionArgs CppLang = ["./" <> ML.makeExecutablePoolName CppLang]
             makeExecutionArgs CLang = ["./" <> ML.makeExecutablePoolName CLang]
             makeExecutionArgs Python3Lang = [configLangPython3 config, ML.makeExecutablePoolName Python3Lang]
-            makeExecutionArgs RLang = [configLangPython3 config, ML.makeExecutablePoolName Python3Lang]
+            makeExecutionArgs RLang = [configLangR config, ML.makeExecutablePoolName RLang]
 
             execArgs = makeExecutionArgs slang
             execArgsDoc = vsep [ [idoc|#{varName}.syscmd[#{pretty i}] = strdup("#{pretty arg}");|]

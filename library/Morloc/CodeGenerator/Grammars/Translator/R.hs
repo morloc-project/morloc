@@ -21,7 +21,7 @@ import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.DataFiles as DF
 import Morloc.Quasi
-import Morloc.Monad (gets, Index, newIndex, runIndex)
+import Morloc.Monad (gets, Index, newIndex, runIndex, asks)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
@@ -37,13 +37,16 @@ translate srcs es = do
     translateSource
     (unique . mapMaybe srcPath $ srcs)
 
+  homeDir <- asks configHome
+  let dynlibDocs = [ [idoc|dyn.load("#{pretty $ homeDir </> "lib" </> "librmorloc.so"}")|] ]
+
   -- diagnostics
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
   let mDocs = map translateSegment es
 
-  let code = makePool includeDocs mDocs
+  let code = makePool includeDocs dynlibDocs mDocs
       exefile = ML.makeExecutablePoolName RLang
       outfile = ML.makeSourcePoolName RLang
 
@@ -74,7 +77,7 @@ serialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 serialize v0 s0 = do
   (ms, v1) <- serialize' v0 s0
   let schema = serialAstToMsgpackSchema s0
-  let v2 = [idoc|.put_value(#{v1}, "#{schema}")|]
+  let v2 = [idoc|morloc_put_value(#{v1}, "#{schema}")|]
   return (v2, ms)
   where
     serialize' :: MDoc -> SerialAST -> Index ([MDoc], MDoc)
@@ -115,13 +118,13 @@ deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 deserialize v0 s0
   | isSerializable s0 =
       let schema = serialAstToMsgpackSchema s0
-          deserializing = [idoc|.get_value(#{v0}, "#{schema}")|]
+          deserializing = [idoc|morloc_get_value(#{v0}, "#{schema}")|]
 
       in return (deserializing, [])
   | otherwise = do
       rawvar <- helperNamer <$> newIndex
       let schema = serialAstToMsgpackSchema s0
-          deserializing = [idoc|#{rawvar} <- .get_value(#{v0}, "#{schema}")|]
+          deserializing = [idoc|#{rawvar} <- morloc_get_value(#{v0}, "#{schema}")|]
       (x, befores) <- check rawvar s0
       return (x, deserializing:befores)
   where
@@ -189,7 +192,7 @@ translateSegment m0 =
     makeSerialExpr _ (ManS_ f) = return f
     makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) remote args) _) = do
       call <- case remote of
-        ForeignCall -> return [idoc|.morloc_foreign_call(#{makeSocketPath socketFile}, #{pretty mid}, list#{tupled (map argNamer args)})|]
+        ForeignCall -> return [idoc|morloc_foreign_call(#{makeSocketPath socketFile}, #{pretty mid}, list#{tupled (map argNamer args)})|]
         (RemoteCall _) -> return [idoc|REMOTE_CALL|] 
       return $ PoolDocs
         { poolCompleteManifolds = []
@@ -268,5 +271,6 @@ translateSegment m0 =
       let rs = rs1 ++ [ namer i <+> "<-" <+> e1' ] ++ rs2
       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
-makePool :: [MDoc] -> [MDoc] -> MDoc
-makePool sources manifolds = format (DF.embededFileText (DF.poolTemplate RLang)) "# <<<BREAK>>>" [vsep sources, vsep manifolds]
+makePool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc
+makePool sources dynlibs manifolds
+    = format (DF.embededFileText (DF.poolTemplate RLang)) "# <<<BREAK>>>" [vsep sources, vsep dynlibs, vsep manifolds]

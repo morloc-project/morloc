@@ -738,7 +738,7 @@ static PyObject*  pybinding__stream_from_client(PyObject* self, PyObject* args){
 
 
 
-static PyObject*  pybinding__socket_close(PyObject* self, PyObject* args){
+static PyObject*  pybinding__close_socket(PyObject* self, PyObject* args){
     int socket_id = 0;
 
     if (!PyArg_ParseTuple(args, "i", &socket_id)) {
@@ -943,8 +943,8 @@ static PyMethodDef Methods[] = {
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},
     {"send_packet_to_foreign_server", pybinding__send_packet_to_foreign_server, METH_VARARGS, "Send data to a foreign server"},
     {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
-    {"socket_close", pybinding__socket_close, METH_VARARGS, "Close a fucking socket"},
-    {"foreign_call", pybinding__foreign_call, METH_VARARGS, "Close a fucking socket"},
+    {"close_socket", pybinding__close_socket, METH_VARARGS, "Close the socket"},
+    {"foreign_call", pybinding__foreign_call, METH_VARARGS, "Send a call packet to a foreign pool"},
     {"get_value", pybinding__get_value, METH_VARARGS, "Convert a packet to a Python value"},
     {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},
     {"is_ping", pybinding__is_ping, METH_VARARGS, "Packet is a ping"},
