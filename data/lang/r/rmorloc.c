@@ -635,22 +635,6 @@ error:
 
 // {{{ exported morloc API functions
 
-SEXP morloc_shinit(SEXP shm_basename_r, SEXP shm_size_r) {
-    MAYFAIL
-
-    const char* shm_basename = CHAR(STRING_ELT(shm_basename_r, 0));
-    size_t shm_size = (size_t)asInteger(shm_size_r);
-
-    shm_t* shm = R_TRY(shinit, shm_basename, 0, shm_size);
-
-    if (shm) {
-        return R_NilValue; // Return NULL, representing success
-    } else {
-        error("Failed to open shared memory pool");
-    }
-}
-
-
 // Close the daemon when the R object dies
 static void daemon_finalizer(SEXP ptr) {
     if (!R_ExternalPtrAddr(ptr)) return;
@@ -688,7 +672,7 @@ SEXP morloc_start_daemon(
     SEXP class_name = PROTECT(mkString("language_daemon"));
     SET_CLASS(result, class_name);
 
-    UNPROTECT(3);  // Added 1 for finalizer object
+    UNPROTECT(2);
     return result;
 }
 
@@ -959,6 +943,7 @@ SEXP morloc_make_fail_packet(SEXP failure_message_r) { MAYFAIL
     SEXP packet_r = PROTECT(allocVector(RAWSXP, packet_size));
     memcpy(RAW(packet_r), fail_packet, packet_size);
 
+    UNPROTECT(1);
     return packet_r;
 }
 
@@ -967,7 +952,6 @@ SEXP morloc_make_fail_packet(SEXP failure_message_r) { MAYFAIL
 
 void R_init_rmorloc(DllInfo *info) {
     R_CallMethodDef callMethods[] = {
-        {"morloc_shinit", (DL_FUNC) &morloc_shinit, 2},
         {"morloc_start_daemon", (DL_FUNC) &morloc_start_daemon, 4},
         {"morloc_wait_for_client", (DL_FUNC) &morloc_wait_for_client, 1},
         {"morloc_read_morloc_call_packet", (DL_FUNC) &morloc_read_morloc_call_packet, 1},

@@ -8,6 +8,7 @@
 
 library(rlang)
 
+morloc_is_ping                       <- function(...){ .Call("morloc_is_ping",                       ...) }
 morloc_pong                          <- function(...){ .Call("morloc_pong",                          ...) }
 morloc_is_call                       <- function(...){ .Call("morloc_is_call",                       ...) }
 morloc_make_fail_packet              <- function(...){ .Call("morloc_make_fail_packet",              ...) }

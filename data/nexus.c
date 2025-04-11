@@ -199,9 +199,10 @@ void run_command(
             return_data = send_and_receive_over_socket((*socket_ptr)->socket_filename, ping_packet, &errmsg);
             if(errmsg != NULL || return_data == NULL){
                 all_pass = false;
-                fprintf(stderr, "Failed to ping '%s', waiting %fs\n", (*socket_ptr)->socket_filename, retry_time);
-                if(errmsg){
-                    fprintf(stderr, " %s", errmsg);
+                if(attempts < MAX_RETRIES){
+                    fprintf(stderr, "Failed to ping, waiting\n");
+                } else {
+                    fprintf(stderr, "Ran out of attempts with error: %s\n", errmsg);
                 }
                 break;
             }

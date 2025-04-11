@@ -1294,6 +1294,8 @@ block_header_t* abs2blk(void* ptr, ERRMSG){
 shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ERRMSG) {
     PTR_RETURN_SETUP(shm_t)
 
+    RAISE_IF(shm_basename == NULL, "Undefined shm basename");
+
     // Calculate the total size needed for the shared memory segment
     size_t full_size = shm_size + sizeof(shm_t);
 
@@ -4088,13 +4090,16 @@ morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
 // {{{ socket API
 
 // needed for interop
-#include <sys/wait.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <sys/select.h>
-#include <poll.h>
-#include <errno.h>
+#include <errno.h>       // For errno  
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>      // For sigprocmask, sigset_t  
+#include <stdlib.h>      // For calloc, free  
+#include <string.h>      // For memcpy, strerror  
+#include <sys/select.h>  // For pselect, fd_set  
+#include <sys/socket.h>  // For recv  
+#include <sys/un.h>
+#include <sys/wait.h>
 
 
 typedef struct client_list_s {
@@ -4223,87 +4228,75 @@ language_daemon_t* start_daemon(
 }
 
 
-uint8_t* stream_from_client(int client_fd, ERRMSG) {
-    PTR_RETURN_SETUP(uint8_t)
+uint8_t* stream_from_client(int client_fd, ERRMSG) {  
+    PTR_RETURN_SETUP(uint8_t)  
 
-    char* buffer = (char*)calloc(BUFFER_SIZE, sizeof(char));
-    RAISE_IF(buffer == NULL, "calloc failed for buffer: %s", strerror(errno))
+    char* buffer = (char*)calloc(BUFFER_SIZE, sizeof(char));  
+    RAISE_IF(buffer == NULL, "calloc failed for buffer: %s", strerror(errno))  
 
-    ssize_t recv_length;
+    ssize_t recv_length;  
+    fd_set read_fds;  
+    int max_fd = client_fd;  
 
-    struct pollfd pfd;
-    pfd.fd = client_fd;
-    pfd.events = POLLIN;
+    // Block signals during pselect (e.g., SIGINT)  
+    sigset_t mask, origmask;  
+    sigemptyset(&mask);  
+    sigaddset(&mask, SIGINT);  // Add other signals as needed  
+    sigprocmask(SIG_SETMASK, &mask, &origmask);  
 
-    // Receive the first part of the response, this will include the header
-    while (1) {
-        int poll_result = poll(&pfd, 1, -1); // Wait indefinitely
+    // Receive initial data  
+    FD_ZERO(&read_fds);  
+    FD_SET(client_fd, &read_fds);  
+    int ready = pselect(max_fd + 1, &read_fds, NULL, NULL, NULL, &origmask);  
+    sigprocmask(SIG_SETMASK, &origmask, NULL); // Restore mask  
 
+    RAISE_IF_WITH(FD_ISSET(client_fd, &read_fds) && (errno == EBADF || errno == ECONNRESET),  
+                  free(buffer), "Socket error (%d): %s", client_fd, strerror(errno));  
+    RAISE_IF(ready < 0, "pselect error: %s", strerror(errno));  
 
-        RAISE_IF_WITH(pfd.revents & POLLERR, free(buffer), "Socket error POLLERR: %s", strerror(errno));
-        RAISE_IF_WITH(pfd.revents & POLLHUP, free(buffer), "Socket error POLLHUP: %s", strerror(errno));
-        RAISE_IF_WITH(pfd.revents & POLLNVAL, free(buffer), "Socket error POLLNVAL: %s", strerror(errno));
+    if (FD_ISSET(client_fd, &read_fds)) {  
+        recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);  
+        RAISE_IF_WITH(recv_length == 0, free(buffer), "Connection closed by peer: %s", strerror(errno));  
+        RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN,  
+                      free(buffer), "Recv error: %s", strerror(errno));  
+    }  
 
-        if (poll_result < 0) {
-            if (errno == EINTR) continue; // Interrupted system call, retry
-            RAISE_WITH(free(buffer), "Poll error: %s", strerror(errno))
-        }
+    size_t packet_length = TRY(morloc_packet_size, (uint8_t*)buffer);  
+    uint8_t* result = (uint8_t*)calloc(packet_length, sizeof(uint8_t));  
+    RAISE_IF(result == NULL, "calloc failure: %s", strerror(errno))  
 
-        if (pfd.revents & POLLIN) {
-            recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);
-            if (recv_length > 0) break;
+    uint8_t* data_ptr = result;  
+    memcpy(data_ptr, buffer, recv_length);  
+    data_ptr += recv_length;  
+    free(buffer);  
 
-            // Return empty result if connection closed
-            RAISE_IF_WITH(recv_length == 0, free(buffer), "Connection closed by peer: %s", strerror(errno))
-            RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN, free(buffer), "Recv error: %s", strerror(errno))
-        }
-    }
+    // Read remaining data  
+    while ((size_t)(data_ptr - result) < packet_length) {  
+        while (1) {  
+            FD_ZERO(&read_fds);  
+            FD_SET(client_fd, &read_fds);  
+            sigprocmask(SIG_SETMASK, &mask, NULL); // Block signals  
+            ready = pselect(max_fd + 1, &read_fds, NULL, NULL, NULL, &origmask);  
+            sigprocmask(SIG_SETMASK, &origmask, NULL); // Restore signals  
 
-    size_t packet_length = TRY(morloc_packet_size, (uint8_t*)buffer);
+            RAISE_IF(ready < 0 && errno != EINTR, "pselect error: %s", strerror(errno));  
+            if (ready <= 0) continue;  
 
-    // Allocate enough memory to store the entire packet
-    uint8_t* result = (uint8_t*)calloc(packet_length, sizeof(uint8_t));
-    RAISE_IF(result == NULL, "calloc failure: %s", strerror(errno))
+            if (FD_ISSET(client_fd, &read_fds)) {  
+                recv_length = recv(client_fd, data_ptr, BUFFER_SIZE, 0);  
+                if (recv_length > 0) {  
+                    data_ptr += recv_length;  
+                    break;  
+                }  
+                RAISE_IF_WITH(recv_length == 0, free(result), "Connection closed early: %s", strerror(errno));  
+                RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN,  
+                              free(result), "Recv error: %s", strerror(errno));  
+            }  
+        }  
+    }  
 
-    // Create a pointer to the current writing index
-    uint8_t* data_ptr = result;
-
-    // copy data from the buffer to the message
-    memcpy(data_ptr, buffer, recv_length);
-    data_ptr += recv_length;
-
-    // we don't need the buffer anymore, we'll write directly into the msg
-    free(buffer);
-
-    // read in buffers of data until all data is received
-    while ((size_t)(data_ptr - result) < packet_length) {
-        while (1) {
-            int poll_result = poll(&pfd, 1, -1); // Wait indefinitely
-                                                 //
-            RAISE_IF(pfd.revents & POLLERR, "Socket error POLLERR: %s", strerror(errno));
-            RAISE_IF(pfd.revents & POLLHUP, "Socket error POLLHUP: %s", strerror(errno));
-            RAISE_IF(pfd.revents & POLLNVAL, "Socket error POLLNVAL: %s", strerror(errno));
-
-            if (poll_result < 0) {
-                if (errno == EINTR) continue; // Interrupted system call, retry
-                RAISE_WITH(free(result), "Pool fail: %s", strerror(errno))
-            }
-
-            if (pfd.revents & POLLIN) {
-                recv_length = recv(client_fd, data_ptr, BUFFER_SIZE, 0);
-                if (recv_length > 0) {
-                    data_ptr += recv_length;
-                    break;
-                }
-                RAISE_IF_WITH(recv_length == 0, free(result), "Connection closed before all results were read: %s", strerror(errno))
-                RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN, free(result), "Recv error: %s", strerror(errno))
-            }
-        }
-    }
-
-    return result;
-}
-
+    return result;  
+}  
 
 
 uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG){
@@ -4376,7 +4369,7 @@ int wait_for_client(language_daemon_t* daemon, ERRMSG){
     }
 
     // `select` will wait forever for something to crawl out of the pipe.
-    // But if the pipe itself is missing or brokn (for example, if the socket
+    // But if the pipe itself is missing or broken (for example, if the socket
     // file has not yet been written), then select dies immediately, for this
     // reason it is wrapped in WAIT to retry for a few minutes for giving up the
     // ghost for good.
