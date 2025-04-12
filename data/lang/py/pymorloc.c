@@ -671,7 +671,9 @@ static PyObject* pybinding__close_daemon(PyObject* self, PyObject* args) {
 
     language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
 
-    close_daemon(daemon);
+    if(daemon != NULL){
+        close_daemon(&daemon);
+    }
 
     Py_RETURN_NONE;
 }
@@ -746,7 +748,7 @@ static PyObject*  pybinding__close_socket(PyObject* self, PyObject* args){
         return NULL;
     }
 
-    socket_close(socket_id);
+    close_socket(socket_id);
 
     Py_RETURN_NONE;
 }

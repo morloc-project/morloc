@@ -4090,14 +4090,14 @@ morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
 // {{{ socket API
 
 // needed for interop
-#include <errno.h>       // For errno  
+#include <errno.h>       // For errno
 #include <fcntl.h>
 #include <poll.h>
-#include <signal.h>      // For sigprocmask, sigset_t  
-#include <stdlib.h>      // For calloc, free  
-#include <string.h>      // For memcpy, strerror  
-#include <sys/select.h>  // For pselect, fd_set  
-#include <sys/socket.h>  // For recv  
+#include <signal.h>      // For sigprocmask, sigset_t
+#include <stdlib.h>      // For calloc, free
+#include <string.h>      // For memcpy, strerror
+#include <sys/select.h>  // For pselect, fd_set
+#include <sys/socket.h>  // For recv
 #include <sys/un.h>
 #include <sys/wait.h>
 
@@ -4119,17 +4119,35 @@ typedef struct language_daemon_s {
 } language_daemon_t;
 
 
-void socket_close(int socket_id){
+void close_socket(int socket_id){
     close(socket_id);
 }
 
 
-void close_daemon(language_daemon_t* daemon){
-    // Close the server
-    socket_close(daemon->server_fd);
+void close_daemon(language_daemon_t** daemon_ptr) {
+    if (daemon_ptr && *daemon_ptr) {
+        language_daemon_t* daemon = *daemon_ptr;
 
-    // Remove the socket file
-    unlink(daemon->socket_path);
+        close_socket(daemon->server_fd);
+
+        // This list should always be empty if the run was successful
+        client_list_t *current = daemon->client_fds;
+        while (current) {
+            client_list_t *next = current->next;
+            close(current->fd);
+            free(current);
+            current = next;
+        }
+
+        unlink(daemon->socket_path);
+
+        free(daemon->socket_path);
+        free(daemon->tmpdir);
+        free(daemon->shm_basename);
+
+        free(daemon);
+        *daemon_ptr = NULL;  // Safe nullification of caller's pointer
+    }
 }
 
 
@@ -4184,13 +4202,13 @@ static int new_server(const char* socket_path, ERRMSG){
     // Bind the socket to the address
     RAISE_IF_WITH(
         bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == EXIT_FAIL,
-        socket_close(server_fd),
+        close_socket(server_fd),
         "Error binding socket"
     )
 
     RAISE_IF_WITH(
         listen(server_fd, 1) == EXIT_FAIL,
-        socket_close(server_fd),
+        close_socket(server_fd),
         "Error listening on socket"
     )
 
@@ -4207,96 +4225,108 @@ language_daemon_t* start_daemon(
 ){
     PTR_RETURN_SETUP(language_daemon_t)
 
-    language_daemon_t* server = (language_daemon_t*)calloc(1, sizeof(language_daemon_t));
-    RAISE_IF(server == NULL, "Calloc for language_daemon_t failed")
+    language_daemon_t* daemon = (language_daemon_t*)calloc(1, sizeof(language_daemon_t));
+    RAISE_IF(daemon == NULL, "Calloc for language_daemon_t failed")
 
-    server->socket_path = strdup(socket_path);
-    server->tmpdir = strdup(tmpdir);
-    server->shm_basename = strdup(shm_basename);
-    server->shm_default_size = shm_default_size;
+    daemon->socket_path = strdup(socket_path);
+    daemon->tmpdir = strdup(tmpdir);
+    daemon->shm_basename = strdup(shm_basename);
+    daemon->shm_default_size = shm_default_size;
+
+    // Initialize thread-shared resources
+    daemon->client_fds = NULL;  // Explicit NULL initialization
+    FD_ZERO(&daemon->read_fds); // Initialize descriptor set
 
     // create the shared memory mappings
-    server->shm = TRY(shinit, shm_basename, 0, shm_default_size);
+    daemon->shm = TRY(shinit, shm_basename, 0, shm_default_size);
 
-    // Setup a new server that uses a given path for the socket address
-    server->server_fd = TRY(new_server, socket_path);
+    // Setup a new daemon that uses a given path for the socket address
+    daemon->server_fd = TRY(new_server, socket_path);
 
-    // Set the server socket to non-blocking mode
-    fcntl(server->server_fd, F_SETFL, O_NONBLOCK);
+    // Set the daemon socket to non-blocking mode (critical for pselect safety)
+    int flags = fcntl(daemon->server_fd, F_GETFL);
+    if (flags == -1 || fcntl(daemon->server_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+        free(daemon);
+        RAISE("Failed to set non-blocking mode: %s", strerror(errno));
+    }
 
-    return server;
+    return daemon;
 }
 
 
-uint8_t* stream_from_client(int client_fd, ERRMSG) {  
-    PTR_RETURN_SETUP(uint8_t)  
+uint8_t* stream_from_client(int client_fd, ERRMSG) {
+    PTR_RETURN_SETUP(uint8_t)
 
-    char* buffer = (char*)calloc(BUFFER_SIZE, sizeof(char));  
-    RAISE_IF(buffer == NULL, "calloc failed for buffer: %s", strerror(errno))  
+    if (fcntl(client_fd, F_GETFD) == -1) {
+        RAISE("Invalid file descriptor: %s", strerror(errno));
+    }
 
-    ssize_t recv_length;  
-    fd_set read_fds;  
-    int max_fd = client_fd;  
+    char* buffer = (char*)calloc(BUFFER_SIZE, sizeof(char));
+    RAISE_IF(buffer == NULL, "calloc failed for buffer: %s", strerror(errno))
 
-    // Block signals during pselect (e.g., SIGINT)  
-    sigset_t mask, origmask;  
-    sigemptyset(&mask);  
-    sigaddset(&mask, SIGINT);  // Add other signals as needed  
-    sigprocmask(SIG_SETMASK, &mask, &origmask);  
+    ssize_t recv_length;
+    fd_set read_fds;
+    int max_fd = client_fd;
 
-    // Receive initial data  
-    FD_ZERO(&read_fds);  
-    FD_SET(client_fd, &read_fds);  
-    int ready = pselect(max_fd + 1, &read_fds, NULL, NULL, NULL, &origmask);  
-    sigprocmask(SIG_SETMASK, &origmask, NULL); // Restore mask  
+    // Block signals during pselect (e.g., SIGINT)
+    sigset_t mask, origmask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);  // Add other signals as needed
+    sigprocmask(SIG_SETMASK, &mask, &origmask);
 
-    RAISE_IF_WITH(FD_ISSET(client_fd, &read_fds) && (errno == EBADF || errno == ECONNRESET),  
-                  free(buffer), "Socket error (%d): %s", client_fd, strerror(errno));  
-    RAISE_IF(ready < 0, "pselect error: %s", strerror(errno));  
+    // Receive initial data
+    FD_ZERO(&read_fds);
+    FD_SET(client_fd, &read_fds);
+    int ready = pselect(max_fd + 1, &read_fds, NULL, NULL, NULL, &origmask);
+    sigprocmask(SIG_SETMASK, &origmask, NULL); // Restore mask
 
-    if (FD_ISSET(client_fd, &read_fds)) {  
-        recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);  
-        RAISE_IF_WITH(recv_length == 0, free(buffer), "Connection closed by peer: %s", strerror(errno));  
-        RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN,  
-                      free(buffer), "Recv error: %s", strerror(errno));  
-    }  
+    RAISE_IF_WITH(FD_ISSET(client_fd, &read_fds) && (errno == EBADF || errno == ECONNRESET),
+                  free(buffer), "Socket error (%d): %s", client_fd, strerror(errno));
+    RAISE_IF(ready < 0, "pselect error: %s", strerror(errno));
 
-    size_t packet_length = TRY(morloc_packet_size, (uint8_t*)buffer);  
-    uint8_t* result = (uint8_t*)calloc(packet_length, sizeof(uint8_t));  
-    RAISE_IF(result == NULL, "calloc failure: %s", strerror(errno))  
+    if (FD_ISSET(client_fd, &read_fds)) {
+        recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);
+        RAISE_IF_WITH(recv_length == 0, free(buffer), "Connection closed by peer: %s", strerror(errno));
+        RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN,
+                      free(buffer), "Recv error: %s", strerror(errno));
+    }
 
-    uint8_t* data_ptr = result;  
-    memcpy(data_ptr, buffer, recv_length);  
-    data_ptr += recv_length;  
-    free(buffer);  
+    size_t packet_length = TRY(morloc_packet_size, (uint8_t*)buffer);
+    uint8_t* result = (uint8_t*)calloc(packet_length, sizeof(uint8_t));
+    RAISE_IF(result == NULL, "calloc failure: %s", strerror(errno))
 
-    // Read remaining data  
-    while ((size_t)(data_ptr - result) < packet_length) {  
-        while (1) {  
-            FD_ZERO(&read_fds);  
-            FD_SET(client_fd, &read_fds);  
-            sigprocmask(SIG_SETMASK, &mask, NULL); // Block signals  
-            ready = pselect(max_fd + 1, &read_fds, NULL, NULL, NULL, &origmask);  
-            sigprocmask(SIG_SETMASK, &origmask, NULL); // Restore signals  
+    uint8_t* data_ptr = result;
+    memcpy(data_ptr, buffer, recv_length);
+    data_ptr += recv_length;
+    free(buffer);
 
-            RAISE_IF(ready < 0 && errno != EINTR, "pselect error: %s", strerror(errno));  
-            if (ready <= 0) continue;  
+    // Read remaining data
+    while ((size_t)(data_ptr - result) < packet_length) {
+        while (1) {
+            FD_ZERO(&read_fds);
+            FD_SET(client_fd, &read_fds);
+            sigprocmask(SIG_SETMASK, &mask, NULL); // Block signals
+            ready = pselect(max_fd + 1, &read_fds, NULL, NULL, NULL, &origmask);
+            sigprocmask(SIG_SETMASK, &origmask, NULL); // Restore signals
 
-            if (FD_ISSET(client_fd, &read_fds)) {  
-                recv_length = recv(client_fd, data_ptr, BUFFER_SIZE, 0);  
-                if (recv_length > 0) {  
-                    data_ptr += recv_length;  
-                    break;  
-                }  
-                RAISE_IF_WITH(recv_length == 0, free(result), "Connection closed early: %s", strerror(errno));  
-                RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN,  
-                              free(result), "Recv error: %s", strerror(errno));  
-            }  
-        }  
-    }  
+            RAISE_IF(ready < 0 && errno != EINTR, "pselect error: %s", strerror(errno));
+            if (ready <= 0) continue;
 
-    return result;  
-}  
+            if (FD_ISSET(client_fd, &read_fds)) {
+                recv_length = recv(client_fd, data_ptr, BUFFER_SIZE, 0);
+                if (recv_length > 0) {
+                    data_ptr += recv_length;
+                    break;
+                }
+                RAISE_IF_WITH(recv_length == 0, free(result), "Connection closed early: %s", strerror(errno));
+                RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN,
+                              free(result), "Recv error: %s", strerror(errno));
+            }
+        }
+    }
+
+    return result;
+}
 
 
 uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG){
@@ -4313,7 +4343,7 @@ uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* pa
     int retcode = -1;
     WAIT( { retcode = connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)); },
           retcode == 0,
-          RAISE_WITH(socket_close(client_fd), "Failed to connect to pipe '%s', ran out of time", socket_path)
+          RAISE_WITH(close_socket(client_fd), "Failed to connect to pipe '%s', ran out of time", socket_path)
         )
 
     size_t packet_size = TRY(morloc_packet_size, packet);
@@ -4323,13 +4353,13 @@ uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* pa
 
     WAIT( { bytes_sent = send(client_fd, packet, packet_size, MSG_NOSIGNAL); },
           (size_t)bytes_sent == packet_size,
-          RAISE_WITH(socket_close(client_fd), "Failed to send data to '%s', ran out of time", socket_path)
+          RAISE_WITH(close_socket(client_fd), "Failed to send data to '%s', ran out of time", socket_path)
         )
 
     result = stream_from_client(client_fd, &CHILD_ERRMSG);
-    RAISE_IF_WITH(CHILD_ERRMSG != NULL, socket_close(client_fd), "Failed to read data returned from pipe '%s'\n%s", socket_path, CHILD_ERRMSG);
+    RAISE_IF_WITH(CHILD_ERRMSG != NULL, close_socket(client_fd), "Failed to read data returned from pipe '%s'\n%s", socket_path, CHILD_ERRMSG);
 
-    socket_close(client_fd);
+    close_socket(client_fd);
 
     return result;
 }
@@ -4349,10 +4379,10 @@ size_t send_packet_to_foreign_server(int client_fd, uint8_t* packet, ERRMSG){
     return bytes_sent;
 }
 
-int wait_for_client(language_daemon_t* daemon, ERRMSG){
+int wait_for_client(language_daemon_t* daemon, ERRMSG) {
     VAL_RETURN_SETUP(int, -1)
 
-    // clear the list of file descriptors, these will be re-added below 
+    // clear the list of file descriptors, these will be re-added below
     FD_ZERO(&daemon->read_fds);
 
     // add the server file descriptor to the fds_set
@@ -4368,13 +4398,16 @@ int wait_for_client(language_daemon_t* daemon, ERRMSG){
         max_fd = max_fd > client_fds->fd ? max_fd : client_fds->fd;
     }
 
+    // Modified WAIT block using pselect
+    int ready;
+    sigset_t emptymask;
+    sigemptyset(&emptymask);
     // `select` will wait forever for something to crawl out of the pipe.
     // But if the pipe itself is missing or broken (for example, if the socket
     // file has not yet been written), then select dies immediately, for this
     // reason it is wrapped in WAIT to retry for a few minutes for giving up the
     // ghost for good.
-    int ready;
-    WAIT( { ready = select(max_fd + 1, &daemon->read_fds, NULL, NULL, NULL); },
+    WAIT( { ready = pselect(max_fd + 1, &daemon->read_fds, NULL, NULL, NULL, &emptymask); },
           ready > 0,
           RAISE("Failed to read data")
         )
@@ -4393,15 +4426,16 @@ int wait_for_client(language_daemon_t* daemon, ERRMSG){
             new_client->next = NULL;
 
             if(daemon->client_fds == NULL){
-                daemon->client_fds = new_client; 
+                daemon->client_fds = new_client;
             } else {
-                daemon->client_fds->next = new_client;
+                client_list_t* last = daemon->client_fds;
+                while (last->next) last = last->next;  // Find last node
+                last->next = new_client;
             }
         } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
             RAISE("Error accepting client connection");
         }
     }
-
 
     client_fds = daemon->client_fds;
     int return_fd = client_fds->fd;
@@ -4713,11 +4747,11 @@ uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
             // confused or evil. In either case, I'll just play it safe and die.
             RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "Failed to read json argument file '%s':\n%s", arg, CHILD_ERRMSG)
             return packet;
-        } 
+        }
 
         if(has_suffix(arg, ".mpk") || has_suffix(arg, ".msgpack")){
             unpack_with_schema(data, data_size, schema, (void**)&packet, &CHILD_ERRMSG);
-            RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "Failed to read MessagePack argument file '%s':\n%s", arg, CHILD_ERRMSG) 
+            RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "Failed to read MessagePack argument file '%s':\n%s", arg, CHILD_ERRMSG)
             return packet;
         }
 

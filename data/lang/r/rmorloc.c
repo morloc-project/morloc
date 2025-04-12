@@ -639,7 +639,9 @@ error:
 static void daemon_finalizer(SEXP ptr) {
     if (!R_ExternalPtrAddr(ptr)) return;
     language_daemon_t* daemon = (language_daemon_t*)R_ExternalPtrAddr(ptr);
-    close_daemon(daemon);
+    if(daemon != NULL){
+        close_daemon(&daemon);
+    }
     R_ClearExternalPtr(ptr);
 }
 
@@ -769,13 +771,13 @@ SEXP morloc_stream_from_client(SEXP client_fd_r) { MAYFAIL
 }
 
 
-// socket_close
+// close_socket
 SEXP morloc_close_socket(SEXP socket_id_r) {
     if (TYPEOF(socket_id_r) != INTSXP || LENGTH(socket_id_r) != 1) {
         error("socket_id must be a single integer");
     }
     int socket_id = INTEGER(socket_id_r)[0];
-    socket_close(socket_id);
+    close_socket(socket_id);
     // Return invisible NULL
     return R_NilValue;
 }

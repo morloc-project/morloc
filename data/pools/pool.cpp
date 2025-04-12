@@ -177,11 +177,11 @@ int run_job(int client_fd) {
         // Fail if no data was pulled
         size_t length = morloc_packet_size(client_data, &errmsg);
         if(errmsg != NULL){
-            socket_close(client_fd);
+            close_socket(client_fd);
             std::cerr << "Malformed packet: " << errmsg << std::endl;
             exit(1);
         } else if (length == 0) {
-            socket_close(client_fd);
+            close_socket(client_fd);
             std::cerr << "Zero length packet received from client" << std::endl;
             exit(1);
         }
@@ -198,7 +198,7 @@ int run_job(int client_fd) {
         }
 
         // close the current client
-        socket_close(client_fd);
+        close_socket(client_fd);
 
         // And exit the child
         exit(0);
@@ -207,7 +207,7 @@ int run_job(int client_fd) {
         return pid; // success
     } else {
         // fork failed
-        socket_close(client_fd);
+        close_socket(client_fd);
     }
 
     return -1; // failure
@@ -246,7 +246,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    close_daemon(daemon);
+    if(daemon != NULL){
+        close_daemon(&daemon);
+    }
 
     return 0;
 }
