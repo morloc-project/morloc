@@ -44,7 +44,6 @@ generate cs xs = do
   -- this includes the mlcmpack module needed for MessagePack handling
   let home = MC.configHome config
       includeDir = home </> "include"
-      
 
   callNames <- mapM (MM.metaName . (\(_, i, _, _) -> i)) xs |>> catMaybes |>> map pretty
   let gastNames = map (pretty . commandName) cs
@@ -131,23 +130,23 @@ dispatchCode config fdata = [idoc|
     #{cIfElse (head cases) (tail cases) (Just elseClause)}
     |]
     where
-    makeSocketDoc slang sinit = 
+    makeSocketDoc socket = 
         [idoc|
     morloc_socket_t #{varName} = { 0 };
-    #{varName}.lang = strdup("#{langName}");
+    #{varName}.lang = strdup("#{pretty $ socketLang socket}");
     #{varName}.syscmd = (char**)calloc(#{pretty $ length execArgs + 4}, sizeof(morloc_socket_t*));
     #{execArgsDoc} 
-    asprintf(&#{varName}.syscmd[#{pretty $ length execArgs}], "%s/pipe-#{langName}", tmpdir);
+    asprintf(&#{varName}.syscmd[#{pretty $ length execArgs}], "%s/#{socketBasename}", tmpdir);
     #{varName}.syscmd[#{pretty $ length execArgs + 1}] = strdup(tmpdir);
     #{varName}.syscmd[#{pretty $ length execArgs + 2}] = strdup(shm_basename);
     #{varName}.syscmd[#{pretty $ length execArgs + 3}] = NULL;
-    asprintf(&#{varName}.socket_filename, "%s/pipe-#{langName}", tmpdir);
+    asprintf(&#{varName}.socket_filename, "%s/#{socketBasename}", tmpdir);
 
         |]
         where
-            langName = pretty . ML.makeExtension $ slang
-            varName = langName <> "_socket"
-            cmd = dquotes . hsep $ sinit
+
+            varName = (pretty . ML.makeExtension $ socketLang socket) <> "_socket"
+            cmd = dquotes . hsep $ socketServerInit socket
 
             makeExecutionArgs :: Lang -> [String]
             makeExecutionArgs CppLang = ["./" <> ML.makeExecutablePoolName CppLang]
@@ -155,11 +154,13 @@ dispatchCode config fdata = [idoc|
             makeExecutionArgs Python3Lang = [configLangPython3 config, ML.makeExecutablePoolName Python3Lang]
             makeExecutionArgs RLang = [configLangR config, ML.makeExecutablePoolName RLang]
 
-            execArgs = makeExecutionArgs slang
+            execArgs = makeExecutionArgs (socketLang socket)
             execArgsDoc = vsep [ [idoc|#{varName}.syscmd[#{pretty i}] = strdup("#{pretty arg}");|]
                                | (i, arg) <- zip ([0..] :: [Int]) execArgs ]
 
-            executableName = pretty $ ML.makeExecutablePoolName slang
+            executableName = pretty $ ML.makeExecutablePoolName (socketLang socket)
+
+            socketBasename = "pipe-" <> pretty (ML.showLangName (socketLang socket))
 
     uniqueFst :: Eq a => [(a, b)] -> [(a, b)]
     uniqueFst = f [] where
@@ -168,9 +169,11 @@ dispatchCode config fdata = [idoc|
             | a `elem` seen = f seen xs 
             | otherwise = x : f (a:seen) xs
 
-    daemonSets = uniqueFst [ (socketLang socket, socketServerInit socket) | (socket, _, _, _, _, _, _) <- fdata ]
+    allSockets = concat [ s:ss | (s, _, _, _, ss, _, _) <- fdata]
 
-    socketDocs = [makeSocketDoc a b | (a,b) <- daemonSets]
+    daemonSets = uniqueFst [ (socketLang s, s) | s <- allSockets ]
+
+    socketDocs = [makeSocketDoc s | (a, s) <- daemonSets]
 
     makeCaseDoc (socket, sub, midx, _, sockets, schemas, returnSchema) = 
         ( [idoc|strcmp(cmd, "#{sub}") == 0|]

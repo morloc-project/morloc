@@ -21,6 +21,10 @@
 
 using namespace std;
 
+char* g_tmpdir;
+
+uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) __attribute__((sentinel));
+
 // AUTO include statements start
 // <<<BREAK>>>
 // AUTO include statements end
@@ -82,20 +86,38 @@ T _get_value(const uint8_t* packet, const std::string& schema_str){
 }
 
 
-uint8_t* foreign_call(
-    const char* socket_path,
-    size_t mid,
-    const uint8_t** args,
-    size_t nargs
-) {
+uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
     char* errmsg = NULL;
+    va_list args;
+    size_t nargs = 0;
 
-    uint8_t* packet = make_morloc_call_packet((uint32_t)mid, args, nargs, &errmsg);
+    char socket_path[128];
+    snprintf(socket_path, sizeof(socket_path), "%s/%s", g_tmpdir, socket_filename);
+
+    // Count arguments (must be NULL-terminated)
+    va_start(args, mid);
+    while (va_arg(args, uint8_t*) != NULL) nargs++;
+    va_end(args);
+
+    // Allocate and populate args array
+    const uint8_t** args_array = (const uint8_t**)malloc((nargs + 1) * sizeof(uint8_t*));
+    if (!args_array) return NULL;
+
+    va_start(args, mid);
+    for (size_t i = 0; i < nargs; i++) {
+        args_array[i] = va_arg(args, uint8_t*);
+    }
+    args_array[nargs] = NULL;  // Sentinel
+    va_end(args);
+
+    // Original logic with variadic args converted to array
+    uint8_t* packet = make_morloc_call_packet((uint32_t)mid, args_array, nargs, &errmsg);
     PROPAGATE_ERROR(errmsg)
 
     uint8_t* result = send_and_receive_over_socket(socket_path, packet, &errmsg);
     PROPAGATE_ERROR(errmsg)
 
+    free(args_array);
     return result;
 }
 
@@ -230,6 +252,8 @@ int main(int argc, char* argv[]) {
         &errmsg
     );
 
+    g_tmpdir = strdup(argv[2]);
+
     if(errmsg != NULL){
         std::cerr << "Failed to start language server:\n" << errmsg << std::endl;
         return 1;
@@ -249,6 +273,8 @@ int main(int argc, char* argv[]) {
     if(daemon != NULL){
         close_daemon(&daemon);
     }
+
+    free(g_tmpdir);
 
     return 0;
 }

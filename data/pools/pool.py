@@ -9,6 +9,7 @@ from multiprocessing.reduction import recv_handle, send_handle
 # Global variables for clean signal handling
 daemon = None
 workers = []
+global_state = dict()
 
 # AUTO include imports start
 # <<<BREAK>>>
@@ -105,6 +106,8 @@ if __name__ == "__main__":
     except IndexError:
         print("Usage: script.py <socket_path> <tmpdir> <shm_basename>")
         sys.exit(1)
+
+    global_state["tmpdir"] = tmpdir
 
     # Create worker pool
     num_workers = cpu_count()

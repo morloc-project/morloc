@@ -44,7 +44,7 @@ import qualified Morloc.TypeEval as TE
 import qualified Morloc.Data.Text as MT
 import Control.Monad.Identity (Identity)
 
-data CallSemantics = Copy | Reference
+data CallSemantics = Copy | Reference | ConstPtr
 
 class HasCppType a where
   cppTypeOf :: a -> CppTranslator MDoc
@@ -55,6 +55,13 @@ class HasCppType a where
 setCallSemantics :: CallSemantics -> MDoc -> MDoc
 setCallSemantics Copy typestr = typestr
 setCallSemantics Reference typestr = "const" <+> typestr <> "&"
+setCallSemantics ConstPtr typestr = "const" <+> typestr
+
+chooseCallSemantics :: TypeM -> CallSemantics
+chooseCallSemantics Passthrough = ConstPtr -- const uint8_t* packet
+chooseCallSemantics (Serial _) = ConstPtr -- const uint8_t* packet
+chooseCallSemantics (Native _) = Reference -- for now, primitives should be pass by copy
+chooseCallSemantics (Function _ _) = Copy -- currently not used
 
 instance HasCppType TypeM where
   cppTypeOf (Serial _) = return serialType
@@ -65,17 +72,14 @@ instance HasCppType TypeM where
     ts' <- mapM cppTypeOf ts
     return $ "std::function<" <> t' <> tupled ts' <> ">"
 
-  cppArgOf (setCallSemantics -> setCall) = f where
-    f (Arg i t@(Serial _)) = do
-      t' <- cppTypeOf t
-      return $ setCall t' <+> svarNamer i
-    f (Arg i t@(Native _)) = do
-      t' <- cppTypeOf t
-      return $ setCall t' <+> nvarNamer i
-    f (Arg i Passthrough) = return $ setCall serialType <+> svarNamer i
-    f (Arg i t@(Function _ _)) = do
-      t' <- cppTypeOf t
-      return $ t' <+> nvarNamer i
+  cppArgOf s arg@(Arg i t) = do
+    typeStr <- cppTypeOf t
+    let typeStrQualified = setCallSemantics s typeStr
+    return $ case t of
+        (Serial _) -> typeStrQualified <+> svarNamer i
+        (Native _) -> typeStrQualified <+> nvarNamer i
+        Passthrough -> typeStrQualified <+> svarNamer i
+        (Function _ _) -> typeStrQualified <+> nvarNamer i
 
 instance HasCppType NativeManifold where
   cppTypeOf = cppTypeOf . typeMof
@@ -261,7 +265,8 @@ makeSignature = foldWithSerialManifoldM fm where
       then return []
       else do
         let formArgs = typeMofForm form
-        args <- mapM (cppArgOf Reference) formArgs
+
+        args <- mapM (\r@(Arg _ t) -> cppArgOf (chooseCallSemantics t) r) formArgs
         CMS.put (s {translatorSignatureSet = Set.insert i (translatorSignatureSet s)})
         return [typestr <+> manNamer i <> tupled args <> ";"]
 
@@ -417,9 +422,6 @@ deserialize varname0 typestr0 s0
 
     construct _ _ = undefined -- TODO add support for deserialization of remaining types (e.g. other records)
 
-makeSocketPath :: MDoc -> MDoc
-makeSocketPath socketFileBasename = [idoc|g_tmpdir + "/" + #{dquotes socketFileBasename}|]
-
 translateSegment :: SerialManifold -> CppTranslator MDoc
 translateSegment m0 = do
   resetCounter
@@ -457,16 +459,19 @@ translateSegment m0 = do
   makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> CppTranslator PoolDocs
   makeSerialExpr _ (ManS_ e) = return e
   makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) remote args) _) = do 
-    let bufDef = "std::ostringstream s;"
-        argList = encloseSep "{" "}" ", " (map argNamer args)
-        argsDef = [idoc|std::vector<Message> args = #{argList};|]
+    -- arguments sent to foreign_call:
+    --  * basename of socket, e.g., "pipe-python3"
+    --  * manifold id
+    --  * list of voidstar packets
+    --  * NULL sentinel
+    let argList = [ dquotes socketFile , pretty mid ] <> map argNamer args <> ["NULL"]
     call <- case remote of
-            ForeignCall -> return [idoc|foreign_call(#{makeSocketPath socketFile}, #{pretty mid}, args)|]
+            ForeignCall -> return [idoc|foreign_call#{tupled argList}|]
             (RemoteCall _) -> return [idoc|REMOTE_CALL|]
     return $ PoolDocs
       { poolCompleteManifolds = []
       , poolExpr = call
-      , poolPriorLines = [bufDef, argsDef]
+      , poolPriorLines = []
       , poolPriorExprs = []
       }
   makeSerialExpr _ (ReturnS_ e) = return $ e {poolExpr = "return(" <> poolExpr e <> ");"}
@@ -585,7 +590,7 @@ makeManifold callIndex form manifoldType e = do
         CMS.put $ state {translatorManifoldSet = Set.insert callIndex (translatorManifoldSet state)}
         returnTypeStr <- returnType manifoldType
         let argList = typeMofForm form
-        args <- mapM (cppArgOf Reference) argList
+        args <- mapM (\r@(Arg _ t) -> cppArgOf (chooseCallSemantics t) r) argList
         let decl = returnTypeStr <+> mname <> tupled args
         let tryBody = block 4 "try" body
             throwStatement = vsep
