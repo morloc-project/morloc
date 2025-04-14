@@ -164,7 +164,7 @@ deserialize v0 s0
     construct _ _ = undefined
 
 makeSocketPath :: MDoc -> MDoc
-makeSocketPath socketFileBasename = [idoc|paste0(global_state.tmpdir, "/", #{dquotes socketFileBasename})|]
+makeSocketPath socketFileBasename = [idoc|paste0(global_state$tmpdir, "/", #{dquotes socketFileBasename})|]
 
 translateSegment :: SerialManifold -> MDoc
 translateSegment m0 =
@@ -192,7 +192,7 @@ translateSegment m0 =
     makeSerialExpr _ (ManS_ f) = return f
     makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) remote args) _) = do
       call <- case remote of
-        ForeignCall -> return [idoc|morloc_foreign_call(#{makeSocketPath socketFile}, #{pretty mid}, list#{tupled (map argNamer args)})|]
+        ForeignCall -> return [idoc|morloc_foreign_call(#{makeSocketPath socketFile}, #{pretty mid}L, list#{tupled (map argNamer args)})|]
         (RemoteCall _) -> return [idoc|REMOTE_CALL|] 
       return $ PoolDocs
         { poolCompleteManifolds = []

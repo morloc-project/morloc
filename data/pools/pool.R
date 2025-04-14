@@ -25,6 +25,8 @@ morloc_put_value                     <- function(...){ .Call("morloc_put_value",
 
 LISTENER_TICK <- 0.01
 
+global_state <- list()
+
 # AUTO include manifolds start
 # <<<BREAK>>>
 # AUTO include manifolds end
@@ -198,6 +200,8 @@ if (length(args) != 3) {
 socket_path <- args[1]
 tmpdir <- args[2]
 shm_basename <- args[3]
+
+global_state$tmpdir <- tmpdir
 
 tryCatch(
   {
