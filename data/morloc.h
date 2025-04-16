@@ -2929,13 +2929,15 @@ static void consume_whitespace(char** json_data){
 
 static bool consume_char(char c, char** json_ptr, ERRMSG){
     BOOL_RETURN_SETUP
-    RAISE_IF(**json_ptr != c, "Unexpected character: found '%c', exptected '%c'", **json_ptr, c)
+    consume_whitespace(json_ptr);
+    RAISE_IF(**json_ptr != c, "Unexpected character: expected '%c' at '%s'", c, *json_ptr)
     (*json_ptr)++;
     return true;
 }
 
 static bool match_json_boolean(char** json_data, ERRMSG){
     BOOL_RETURN_SETUP
+    consume_whitespace(json_data);
     if(**json_data == 't' && *(*json_data + 1) == 'r' && *(*json_data + 2) == 'u' && *(*json_data + 3) == 'e') {
         *json_data += 4;
         return true;
@@ -2949,6 +2951,7 @@ static bool match_json_boolean(char** json_data, ERRMSG){
 
 static int64_t parse_json_int(char** json_ptr, ERRMSG) {
     VAL_RETURN_SETUP(uint64_t, 0)
+    consume_whitespace(json_ptr);
     char* end;
     int64_t val = strtoll(*json_ptr, &end, 10);
     RAISE_IF(*json_ptr == end, "Not a valid integer: '%c'", **json_ptr);
@@ -2958,6 +2961,7 @@ static int64_t parse_json_int(char** json_ptr, ERRMSG) {
 
 static uint64_t parse_json_uint(char** json_ptr, ERRMSG) {
     VAL_RETURN_SETUP(uint64_t, 0)
+    consume_whitespace(json_ptr);
     char* end;
     uint64_t val = strtoull(*json_ptr, &end, 10);
     RAISE_IF(*json_ptr == end, "Not a valid integer: '%c'", **json_ptr);
@@ -2967,6 +2971,7 @@ static uint64_t parse_json_uint(char** json_ptr, ERRMSG) {
 
 static double parse_json_double(char** json_ptr, ERRMSG) {
     VAL_RETURN_SETUP(double, 0)
+    consume_whitespace(json_ptr);
     char* end;
     double val = strtod(*json_ptr, &end);
     RAISE_IF(*json_ptr == end, "Not a valid floating-point number: '%c'", **json_ptr);
@@ -2980,7 +2985,6 @@ static double parse_json_double(char** json_ptr, ERRMSG) {
 // special characters count as one. Any formatting errors will be caught.
 static int json_string_size(char* ptr, size_t* json_size, size_t* c_size, ERRMSG) {
     INT_RETURN_SETUP
-
     RAISE_IF(*ptr != '"', "Expected string, but no initial quote found (observed '%c')", *ptr)
     ptr++; // Skip opening quote
 
@@ -3040,6 +3044,7 @@ static int json_string_size(char* ptr, size_t* json_size, size_t* c_size, ERRMSG
 
 static int write_json_string(char** json_ptr, char* dest, ERRMSG){
     INT_RETURN_SETUP
+    consume_whitespace(json_ptr);
 
     char* ptr = *json_ptr;
 
@@ -3108,6 +3113,7 @@ static char* read_json_key(char** json_ptr, ERRMSG){
     size_t j_string_size = 0;
     size_t c_string_size = 0;
 
+    consume_whitespace(json_ptr);
     TRY(json_string_size, *json_ptr, &j_string_size, &c_string_size);
 
     char* key = (char*)calloc(c_string_size + 1, sizeof(char));
@@ -3161,7 +3167,7 @@ static size_t json_array_size(char* ptr, ERRMSG) {
                   // handle the first element
                   if(depth == 1){
                     consume_whitespace(&ptr);
-                    if(*ptr == ']'){
+                    if(*ptr != ']'){
                         size = 1;
                     }
                   }
@@ -3195,7 +3201,6 @@ static size_t json_array_size(char* ptr, ERRMSG) {
 // input JSON data should be NULL terminated
 int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* schema, ERRMSG){
     INT_RETURN_SETUP
-
     consume_whitespace(json_ptr);
 
     switch(schema->type){
@@ -3326,32 +3331,24 @@ int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* s
                         TRY(consume_char, ',', json_ptr);
                     }
                 }
-
-                consume_whitespace(json_ptr);
-
                 arr->data = TRY(abs2rel, array_data);
             }
 
-            consume_whitespace(json_ptr);
             TRY(consume_char, ']', json_ptr);
 
             break;
         }
 
         case MORLOC_TUPLE: {
-
             TRY(consume_char, '[', json_ptr);
 
-            absptr_t tuple_data = TRY(shmalloc, schema->width);
             for(size_t element_idx = 0; element_idx < schema->size; element_idx++){
-                uint8_t* element = (uint8_t*)tuple_data + schema->offsets[element_idx];
+                uint8_t* element = ((uint8_t*)*voidstar) + schema->offsets[element_idx];
                 TRY(read_json_with_schema_r, &element, json_ptr, schema->parameters[element_idx])
-                consume_whitespace(json_ptr);
-                if(element_idx < schema->size - 1){
+                if(element_idx < (schema->size - 1)){
                     TRY(consume_char, ',', json_ptr);
                 }
             }
-            *voidstar = (uint8_t*)tuple_data;
 
             TRY(consume_char, ']', json_ptr);
 
