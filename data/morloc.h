@@ -2929,7 +2929,7 @@ static void consume_whitespace(char** json_data){
 
 static bool consume_char(char c, char** json_ptr, ERRMSG){
     BOOL_RETURN_SETUP
-    RAISE_IF(**json_ptr != c, "Unexpected character")
+    RAISE_IF(**json_ptr != c, "Unexpected character: found '%c', exptected '%c'", **json_ptr, c)
     (*json_ptr)++;
     return true;
 }
@@ -2951,7 +2951,7 @@ static int64_t parse_json_int(char** json_ptr, ERRMSG) {
     VAL_RETURN_SETUP(uint64_t, 0)
     char* end;
     int64_t val = strtoll(*json_ptr, &end, 10);
-    RAISE_IF(*json_ptr == end, "Not a valid integer");
+    RAISE_IF(*json_ptr == end, "Not a valid integer: '%c'", **json_ptr);
     *json_ptr = end;
     return val;
 }
@@ -2960,7 +2960,7 @@ static uint64_t parse_json_uint(char** json_ptr, ERRMSG) {
     VAL_RETURN_SETUP(uint64_t, 0)
     char* end;
     uint64_t val = strtoull(*json_ptr, &end, 10);
-    RAISE_IF(*json_ptr == end, "Not a valid integer");
+    RAISE_IF(*json_ptr == end, "Not a valid integer: '%c'", **json_ptr);
     *json_ptr = end;
     return val;
 }
@@ -2969,7 +2969,7 @@ static double parse_json_double(char** json_ptr, ERRMSG) {
     VAL_RETURN_SETUP(double, 0)
     char* end;
     double val = strtod(*json_ptr, &end);
-    RAISE_IF(*json_ptr == end, "Not a valid floating-point number");
+    RAISE_IF(*json_ptr == end, "Not a valid floating-point number: '%c'", **json_ptr);
     *json_ptr = end;
     return val;
 }
@@ -3134,18 +3134,11 @@ static size_t json_array_size(char* ptr, ERRMSG) {
 
     RAISE_IF(*ptr != '[', "Expected an array, but found no starting bracket");
 
-    consume_whitespace(&ptr);
-
-    if(*ptr == ']'){
-        return 0;
-    }
-
-    // if not empty, there must be at least 1 element
-    // we'll increment this as we encounter commas
-    size_t size = 1;
+    size_t size = 0;
     size_t depth = 0;
     bool in_string = false;
     bool in_escape = false;
+    bool found_value = false;
 
     while(*ptr != '\0'){
         if(in_string){
@@ -3163,7 +3156,17 @@ static size_t json_array_size(char* ptr, ERRMSG) {
             }
         } else {
             switch(*ptr){
-                case '[': depth++; break;
+                case '[': {
+                  depth++;
+                  // handle the first element
+                  if(depth == 1){
+                    consume_whitespace(&ptr);
+                    if(*ptr == ']'){
+                        size = 1;
+                    }
+                  }
+                  break;
+                }
                 case '{': depth++; break;
                 case ']': depth--; break;
                 case '}': depth--; break;
@@ -3305,25 +3308,32 @@ int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* s
         case MORLOC_ARRAY: {
             size_t size = TRY(json_array_size, *json_ptr);
 
-            absptr_t array_data = TRY(shmalloc, size * schema->parameters[0]->width);
+            Array* arr = (Array*)*voidstar;
+            arr->size = size;
 
             TRY(consume_char, '[', json_ptr);
 
-            for(size_t element_idx = 0; element_idx < size; element_idx++){
-                uint8_t* element = (uint8_t*)array_data + element_idx * schema->parameters[0]->width;
-                TRY(read_json_with_schema_r, &element, json_ptr, schema->parameters[0])
-                consume_whitespace(json_ptr);
-                if(element_idx < size - 1){
-                    TRY(consume_char, ',', json_ptr);
+            if(size == 0){
+                arr->data = RELNULL; // handle empty array
+            } else {
+                absptr_t array_data = TRY(shmalloc, size * schema->parameters[0]->width);
+
+                for(size_t element_idx = 0; element_idx < size; element_idx++){
+                    uint8_t* element = (uint8_t*)array_data + element_idx * schema->parameters[0]->width;
+                    TRY(read_json_with_schema_r, &element, json_ptr, schema->parameters[0])
+                    consume_whitespace(json_ptr);
+                    if(element_idx < size - 1){
+                        TRY(consume_char, ',', json_ptr);
+                    }
                 }
+
+                consume_whitespace(json_ptr);
+
+                arr->data = TRY(abs2rel, array_data);
             }
 
             consume_whitespace(json_ptr);
             TRY(consume_char, ']', json_ptr);
-
-            Array* arr = (Array*)*voidstar;
-            arr->size = size;
-            arr->data = TRY(abs2rel, array_data);
 
             break;
         }

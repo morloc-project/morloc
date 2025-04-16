@@ -172,15 +172,17 @@ PyObject* fromAnything(const Schema* schema, const void* data){
                     PyErr_SetString(PyExc_TypeError, "Failed to one string");
                     goto error;
                 }
-                char* start = (char*) PyTRY(rel2abs, array->data);
-                size_t width = schema->parameters[0]->width;
-                Schema* element_schema = schema->parameters[0];
-                for (size_t i = 0; i < array->size; i++) {
-                    PyObject* item = fromAnything(element_schema, start + width * i);
-                    if (!item || PyList_SetItem(obj, i, item) < 0) {
-                        Py_XDECREF(item);
-                        PyErr_SetString(PyExc_TypeError, "Failed to access element in list");
-                        goto error;
+                if(array->size > 0){
+                    char* start = (char*) PyTRY(rel2abs, array->data);
+                    size_t width = schema->parameters[0]->width;
+                    Schema* element_schema = schema->parameters[0];
+                    for (size_t i = 0; i < array->size; i++) {
+                        PyObject* item = fromAnything(element_schema, start + width * i);
+                        if (!item || PyList_SetItem(obj, i, item) < 0) {
+                            Py_XDECREF(item);
+                            PyErr_SetString(PyExc_TypeError, "Failed to access element in list");
+                            goto error;
+                        }
                     }
                 }
             } else {
