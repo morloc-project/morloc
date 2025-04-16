@@ -3199,18 +3199,24 @@ static size_t json_array_size(char* ptr, ERRMSG) {
 }
 
 // input JSON data should be NULL terminated
-int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* schema, ERRMSG){
+int read_json_with_schema_r(
+    uint8_t* voidstar, // pre-allocated and zeroed space that will be mutated
+    char** json_ptr, // a pointer to the current location in the json string
+    const Schema* schema,
+    ERRMSG
+){
+
     INT_RETURN_SETUP
     consume_whitespace(json_ptr);
 
     switch(schema->type){
         case MORLOC_NIL: {
-            *((uint8_t*)*voidstar) = (uint8_t)0;
+            *((uint8_t*)voidstar) = (uint8_t)0;
             break;
         }
         case MORLOC_BOOL: {
             bool val = TRY(match_json_boolean, json_ptr);
-            *((uint8_t*)*voidstar) = val ? (uint8_t)1  // true
+            *((uint8_t*)voidstar) = val ? (uint8_t)1  // true
                                         : (uint8_t)0; // false
             break;
         }
@@ -3218,67 +3224,67 @@ int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* s
         case MORLOC_SINT8: {
             int64_t val = TRY(parse_json_int, json_ptr);
             RAISE_IF(val < INT8_MIN || val > INT8_MAX, "Value out of range for 8-bit signed integer");
-            *((int8_t*)*voidstar) = (int8_t)val;
+            *((int8_t*)voidstar) = (int8_t)val;
             break;
         }
 
         case MORLOC_SINT16: {
             int64_t val = TRY(parse_json_int, json_ptr);
             RAISE_IF(val < INT16_MIN || val > INT16_MAX, "Value out of range for 16-bit signed integer");
-            *((int16_t*)*voidstar) = (int16_t)val;
+            *((int16_t*)voidstar) = (int16_t)val;
             break;
         }
 
         case MORLOC_SINT32: {
             int64_t val = TRY(parse_json_int, json_ptr);
             RAISE_IF(val < INT32_MIN || val > INT32_MAX, "Value out of range for 32-bit signed integer");
-            *((int32_t*)*voidstar) = (int32_t)val;
+            *((int32_t*)voidstar) = (int32_t)val;
             break;
         }
 
         case MORLOC_SINT64: {
             int64_t val = TRY(parse_json_int, json_ptr);
-            *((int64_t*)*voidstar) = val;
+            *((int64_t*)voidstar) = val;
             break;
         }
 
         case MORLOC_UINT8: {
             uint64_t val = TRY(parse_json_uint, json_ptr);
             RAISE_IF(val > UINT8_MAX, "Value out of range for 8-bit unsigned integer");
-            *((uint8_t*)*voidstar) = (uint8_t)val;
+            *((uint8_t*)voidstar) = (uint8_t)val;
             break;
         }
 
         case MORLOC_UINT16: {
             uint64_t val = TRY(parse_json_uint, json_ptr);
             RAISE_IF(val > UINT16_MAX, "Value out of range for 16-bit unsigned integer");
-            *((uint16_t*)*voidstar) = (uint16_t)val;
+            *((uint16_t*)voidstar) = (uint16_t)val;
             break;
         }
 
         case MORLOC_UINT32: {
             uint64_t val = TRY(parse_json_uint, json_ptr);
             RAISE_IF(val > UINT32_MAX, "Value out of range for 32-bit unsigned integer");
-            *((uint32_t*)*voidstar) = (uint32_t)val;
+            *((uint32_t*)voidstar) = (uint32_t)val;
             break;
         }
 
         case MORLOC_UINT64: {
             uint64_t val = TRY(parse_json_uint, json_ptr);
-            *((uint64_t*)*voidstar) = val;
+            *((uint64_t*)voidstar) = val;
             break;
         }
 
         case MORLOC_FLOAT32: {
             double val = TRY(parse_json_double, json_ptr);
             RAISE_IF((val < -FLT_MAX || val > FLT_MAX) && !isinf(val), "Value out of range for 32-bit float");
-            *((float*)*voidstar) = (float)val;
+            *((float*)voidstar) = (float)val;
             break;
         }
 
         case MORLOC_FLOAT64: {
             double val = TRY(parse_json_double, json_ptr);
-            *((double*)*voidstar) = val;
+            *((double*)voidstar) = val;
             break;
         }
 
@@ -3288,7 +3294,7 @@ int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* s
 
             TRY(json_string_size, *json_ptr, &j_string_size, &c_string_size);
 
-            absptr_t mlc_str = TRY(shmalloc, c_string_size * sizeof(char));
+            absptr_t mlc_str = TRY(shcalloc, c_string_size, sizeof(char));
 
             // If the C and JSON strings are the same length, then there are
             // no special characters to consider and we can simply memcpy.
@@ -3303,7 +3309,7 @@ int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* s
                 TRY(write_json_string, json_ptr, (char*)mlc_str);
             }
 
-            Array* arr = (Array*)*voidstar;
+            Array* arr = (Array*)voidstar;
             arr->size = c_string_size;
             arr->data = TRY(abs2rel, mlc_str)
 
@@ -3313,7 +3319,7 @@ int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* s
         case MORLOC_ARRAY: {
             size_t size = TRY(json_array_size, *json_ptr);
 
-            Array* arr = (Array*)*voidstar;
+            Array* arr = (Array*)voidstar;
             arr->size = size;
 
             TRY(consume_char, '[', json_ptr);
@@ -3321,11 +3327,11 @@ int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* s
             if(size == 0){
                 arr->data = RELNULL; // handle empty array
             } else {
-                absptr_t array_data = TRY(shmalloc, size * schema->parameters[0]->width);
+                absptr_t array_data = TRY(shcalloc, size, schema->parameters[0]->width);
 
                 for(size_t element_idx = 0; element_idx < size; element_idx++){
                     uint8_t* element = (uint8_t*)array_data + element_idx * schema->parameters[0]->width;
-                    TRY(read_json_with_schema_r, &element, json_ptr, schema->parameters[0])
+                    TRY(read_json_with_schema_r, element, json_ptr, schema->parameters[0])
                     consume_whitespace(json_ptr);
                     if(element_idx < size - 1){
                         TRY(consume_char, ',', json_ptr);
@@ -3343,8 +3349,8 @@ int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* s
             TRY(consume_char, '[', json_ptr);
 
             for(size_t element_idx = 0; element_idx < schema->size; element_idx++){
-                uint8_t* element = ((uint8_t*)*voidstar) + schema->offsets[element_idx];
-                TRY(read_json_with_schema_r, &element, json_ptr, schema->parameters[element_idx])
+                uint8_t* element = voidstar + schema->offsets[element_idx];
+                TRY(read_json_with_schema_r, element, json_ptr, schema->parameters[element_idx])
                 if(element_idx < (schema->size - 1)){
                     TRY(consume_char, ',', json_ptr);
                 }
@@ -3358,7 +3364,6 @@ int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* s
         case MORLOC_MAP: {
             TRY(consume_char, '{', json_ptr);
 
-            uint8_t* record_data = (uint8_t*)TRY(shcalloc, 1, schema->width);
             uint8_t* element_ptr = NULL;
             size_t nentries_complete = 0;
             while(**json_ptr != '}'){
@@ -3367,19 +3372,17 @@ int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* s
                 // match '<key><space>:<space>"
                 consume_whitespace(json_ptr);
                 char* key = TRY(read_json_key, json_ptr)
-                consume_whitespace(json_ptr);
                 TRY(consume_char, ':', json_ptr);
-                consume_whitespace(json_ptr);
 
                 // Search for key in schema and write to appropriate offset
                 bool parse_failed = true;
                 for(size_t element_idx = 0; element_idx < schema->size; element_idx++){
                     // if the key is matches, parse to the appropriate offset
                     if(strcmp(key, schema->keys[element_idx]) == 0){
-                        element_ptr = record_data + schema->offsets[element_idx];
+                        element_ptr = voidstar + schema->offsets[element_idx];
                         TRY(
                             read_json_with_schema_r,
-                            &element_ptr,
+                            element_ptr,
                             json_ptr,
                             schema->parameters[element_idx]
                         )
@@ -3397,7 +3400,7 @@ int read_json_with_schema_r(uint8_t** voidstar, char** json_ptr, const Schema* s
                 }
             }
             RAISE_IF(nentries_complete != schema->size, "Expected %zu entries in JSON object, only found %zu", schema->size, nentries_complete)
-            consume_whitespace(json_ptr);
+
             TRY(consume_char, '}', json_ptr);
             break;
         }
@@ -3417,7 +3420,7 @@ relptr_t read_json_with_schema(char* json_data, const Schema* schema, ERRMSG){
     char* json_ptr = json_data;
 
     uint8_t* voidstar = (uint8_t*)TRY(shcalloc, 1, schema->width);
-    TRY(read_json_with_schema_r, &voidstar, &json_ptr, schema);
+    TRY(read_json_with_schema_r, voidstar, &json_ptr, schema);
 
     relptr_t ptr = TRY(abs2rel, (absptr_t)voidstar);
 
