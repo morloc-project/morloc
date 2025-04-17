@@ -91,7 +91,7 @@ makeSchema mid lang t = do
 
 main :: MC.Config -> [MDoc] -> [FData] -> [NexusCommand] -> MDoc
 main config names fdata cdata
-    = format (DF.embededFileText DF.nexusTemplate) "// <<<BREAK>>>" [ usageCode fdata cdata, dispatchCode config fdata ]
+    = format (DF.embededFileText DF.nexusTemplate) "// <<<BREAK>>>" [ usageCode fdata cdata, dispatchCode config fdata cdata ]
 
 usageCode :: [FData] -> [NexusCommand] -> MDoc
 usageCode fdata cdata =
@@ -122,7 +122,8 @@ writeType :: Maybe Int -> Type -> MDoc
 writeType (Just i) t = [idoc|fprintf(stderr, "    param #{pretty i}: #{pretty t}\n");|]
 writeType Nothing  t = [idoc|fprintf(stderr, "    return: #{pretty t}\n");|]
 
-dispatchCode config fdata = [idoc|
+dispatchCode _ [] [] = "// nothing to dispatch"
+dispatchCode config fdata cdata = [idoc|
     uint32_t mid = 0;
 
     #{vsep socketDocs}
@@ -191,7 +192,7 @@ dispatchCode config fdata = [idoc|
         argSchemasList = encloseSep "{ " " }" ", " $ schemas <> ["(char*)NULL"]
         lang = pretty . ML.makeExtension $ socketLang socket
 
-    cases = map makeCaseDoc fdata
+    cases = map makeCaseDoc fdata <> map makeGastCaseDoc cdata
 
     elseClause = [idoc|fprintf(stderr, "Unrecognized command '%s'\n", cmd);|]
 
@@ -201,8 +202,34 @@ cIfElse (cond1, block1) ifelses elseBlock = hsep $
     [ block 4 ("else if" <+> parens condX) blockX  | (condX, blockX) <- ifelses] <>
     [ maybe "" (block 4 "else") elseBlock ]
 
+makeGastCaseDoc :: NexusCommand -> (MDoc, MDoc)
+makeGastCaseDoc nc = (cond, body) 
+    where
+    cond = [idoc|strcmp(cmd, "#{func}") == 0|]
+    func = pretty . unEVar . commandName $ nc 
+    body = [idoc|printf("#{commandForm nc}\n"#{argStr});|]
+    argStr = case commandSubs nc of
+        [] -> ""
+        xs -> hsep ["," <+> makeArg x | x <- xs]
+    
+    makeArg :: (JsonPath, MT.Text, JsonPath) -> MDoc
+    makeArg (_, key, []) = "args[" <> pretty (lookupKey key (commandArgs nc)) <> "]"
+    makeArg x = dquotes $ viaShow x
 
+    lookupKey :: MT.Text -> [EVar] -> Int
+    lookupKey key vs = f 0 vs where
+        f _ [] = error "Invalid key" -- this should not be reachable
+        f i ((EV v):rs)
+            | key == v = i
+            | otherwise = f (i+1) rs
 
+    -- NexusCommand {
+    --     commandName = EV {unEVar = "foo"},
+    --     commandType = VarT (TV {unTVar = "Int"}),
+    --     commandJson = 5,
+    --     commandArgs = [],
+    --     commandSubs = []
+    -- }
 
 --  [ usageT fdata cdata <> "\n" <>
 --    vsep (map functionCT cdata ++ map functionT fdata) <> "\n" <>
@@ -242,7 +269,7 @@ cIfElse (cond1, block1) ifelses elseBlock = hsep $
 --              , list (map dquotes cmdDocs <> [pipeDoc, "tmpdir", "shm_basename"])
 --              , pipeDoc
 --              ]
---
+
 -- functionCT :: NexusCommand -> MDoc
 -- functionCT (NexusCommand cmd _ json_str args subs) =
 --   [idoc|

@@ -462,43 +462,44 @@ generalSerial :: AnnoS (Indexed Type) One () -> MorlocMonad NexusCommand
 generalSerial x0@(AnnoS (Idx i t) _ _) = do
   mayName <- MM.metaName i
   n <- case mayName of
-    Nothing -> MM.throwError . OtherError $ "No general type found for call-free function"
+    Nothing -> MM.throwError . OtherError $ "No name found for call-free function"
     (Just n') -> return n'
   let base = NexusCommand {
-      commandName = n -- EVar -- user-exposed subcommand name in the nexus
-    , commandType = t -- Type -- the general type of the expression
-    , commandJson = dquotes "_" -- MDoc -- JSON output with null's where values will be replaced
-    , commandArgs = [] -- [EVar] -- list of function arguments
-    , commandSubs = [] -- [(JsonPath, Text, JsonPath)]
-    -- list of tuples with values 1) path in JSON to value needs to be replaced
-    -- 2) the function argument from which to pull replacement value and 3) the
-    -- path to the replacement value
+      commandName = n
+    , commandType = t
+    , commandForm = ""
+    , commandArgs = []
+    , commandSubs = []
     }
   generalSerial' base [] x0
+
   where
+
     generalSerial' :: NexusCommand -> JsonPath -> AnnoS (Indexed Type) One () -> MorlocMonad NexusCommand
     generalSerial' base _ (AnnoS _ _ UniS)
-      = return $ base { commandJson = "null" }
+      = return $ base { commandForm = "null" }
     generalSerial' base _ (AnnoS _ _ (RealS x))
-      = return $ base { commandJson = viaShow x }
+      = return $ base { commandForm = viaShow x }
     generalSerial' base _ (AnnoS _ _ (IntS x))
-      = return $ base { commandJson = viaShow x }
+      = return $ base { commandForm = viaShow x }
     generalSerial' base _ (AnnoS _ _ (LogS x))
-      = return $ base { commandJson = if x then "true" else "false" }
+      = return $ base { commandForm = if x then "true" else "false" }
     generalSerial' base _ (AnnoS _ _ (StrS x))
-      = return $ base { commandJson = dquotes (pretty x) }
+      = return $ base { commandForm = "\\\"" <> pretty x <> "\\\"" }
     -- if a nested accessor is observed, evaluate the nested expression and
     -- append the path
     generalSerial' base ps (AnnoS _ _ (AccS k x@(AnnoS _ _ (AccS _ _)))) = do
       ncmd <- generalSerial' base ps x
       case commandSubs ncmd of
         [(ps1, arg, ps2)] ->
-          return $ ncmd { commandSubs = [(ps1, arg, JsonKey k : ps2)] }
+          return $ ncmd { commandForm = "%s"
+                        , commandSubs = [(ps1, arg, JsonKey k : ps2)]
+                        }
         _ -> error "Bad record access"
-    -- record the path to and from a record access, leave the value as null, it
-    -- will be set in the nexus
+    -- record the path to and from a record access
     generalSerial' base ps (AnnoS _ _ (AccS k (AnnoS (Idx _ NamT {}) _ (BndS v)))) =
-      return $ base { commandSubs = [(ps, unEVar v, [JsonKey k])] }
+      return $ base { commandForm = "%s"
+                    , commandSubs = [(ps, unEVar v, [JsonKey k])] }
     -- If the accessed type is not a record, try to simplify the type
     generalSerial' base ps (AnnoS g1 c1 (AccS key (AnnoS (Idx m oldType) c2 x))) = do
       mayT <- evalGeneralStep i (type2typeu oldType)
@@ -509,13 +510,13 @@ generalSerial x0@(AnnoS (Idx i t) _ _) = do
     generalSerial' base ps (AnnoS _ _ (LstS xs)) = do
       ncmds <- zipWithM (generalSerial' base) [ps ++ [JsonIndex j] | j <- [0..]] xs
       return $ base
-        { commandJson = list (map commandJson ncmds)
+        { commandForm = oneLineEnclose "[" "]" "," (map commandForm ncmds)
         , commandSubs = concatMap commandSubs ncmds
         }
     generalSerial' base ps (AnnoS _ _ (TupS xs)) = do
       ncmds <- zipWithM (generalSerial' base) [ps ++ [JsonIndex j] | j <- [0..]] xs
       return $ base
-        { commandJson = list (map commandJson ncmds)
+        { commandForm = oneLineEnclose "[" "]" "," (map commandForm ncmds)
         , commandSubs = concatMap commandSubs ncmds
         }
     generalSerial' base ps (AnnoS _ _ (NamS es)) = do
@@ -524,22 +525,29 @@ generalSerial x0@(AnnoS (Idx i t) _ _) = do
           (generalSerial' base)
           [ps ++ [JsonKey k] | k <- map fst es]
           (map snd es)
-      let entries = zip (map fst es) (map commandJson ncmds)
-          obj = encloseSep "{" "}" ","
-                (map (\(k, v) -> dquotes (pretty k) <> ":" <> v) entries)
+      let entries = zip (map fst es) (map commandForm ncmds)
+          obj = oneLineEnclose "{" "}" ","
+                (map (\(k, v) -> "\\\"" <> (pretty k) <> "\\\"" <> ":" <> v) entries)
       return $ base
-        { commandJson = obj
+        { commandForm = obj
         , commandSubs = concatMap commandSubs ncmds
         }
     generalSerial' base ps (AnnoS _ _ (LamS vs x)) = do
       ncmd <- generalSerial' base ps x
       return $ ncmd { commandArgs = vs }
     generalSerial' base ps (AnnoS _ _(BndS (EV v))) =
-      return $ base { commandSubs = [(ps, v, [])] }
+      return $ base { commandForm = "%s"
+                    , commandSubs = [(ps, v, [])] }
     -- bad states
     generalSerial' _ _ (AnnoS _ _ (VarS v _)) = error $ "VarS should have been removed in the prior step, found: " <> show v
     generalSerial' NexusCommand{} _ (AnnoS _ _ (CallS _)) = error "Functions should not occur here, observed AppS"
     generalSerial' NexusCommand{} _ (AnnoS _ _ (AppS _ _)) = error "Functions should not occur here, observed AppS"
+
+    -- enclose with no extra space, good for compact JSON
+    oneLineEnclose :: MDoc -> MDoc -> MDoc -> [MDoc] -> MDoc
+    oneLineEnclose lhs rhs _ [] = lhs <> rhs
+    oneLineEnclose lhs rhs _ [first] = lhs <> first <> rhs
+    oneLineEnclose lhs rhs sep (first:rest) = lhs <> first <> foldl (<>) "" [sep <> r | r <- rest] <> rhs
 
 
 -- {- | Remove lambdas introduced through substitution

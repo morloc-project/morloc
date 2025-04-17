@@ -151,17 +151,20 @@ type JsonPath = [JsonAccessor]
 data JsonAccessor
   = JsonIndex Int
   | JsonKey Key
+  deriving(Show)
 
 data NexusCommand = NexusCommand
   { commandName :: EVar -- ^ user-exposed subcommand name in the nexus
   , commandType :: Type -- ^ the general type of the expression
-  , commandJson :: MDoc -- ^ JSON output with null's where values will be replaced
+  , commandForm :: MDoc -- ^ JSON format string
   , commandArgs :: [EVar] -- ^ list of function arguments
   , commandSubs :: [(JsonPath, Text, JsonPath)]
-  -- ^ list of tuples with values 1) path in JSON to value needs to be replaced
-  -- 2) the function argument from which to pull replacement value and 3) the
-  -- path to the replacement value
+  -- ^ list of tuples with values:
+  --    1) path in JSON to value needs to be replaced
+  --    2) the function argument from which to pull replacement value
+  --    3) the path to the replacement value
   }
+  deriving(Show)
 
 -- | A tree describing how to (de)serialize an object
 data SerialAST
