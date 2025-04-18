@@ -2935,6 +2935,20 @@ static bool consume_char(char c, char** json_ptr, ERRMSG){
     return true;
 }
 
+static void consume_many(char* cs, char** json_ptr){
+    bool match = true;
+    while(match){
+        match = false;
+        for(size_t i = 0; cs[i] != '\0'; i++){
+            if((**json_ptr) == cs[i]){
+                match = true;
+                (*json_ptr)++;
+                break;
+            }
+        }
+    }
+}
+
 static bool match_json_boolean(char** json_data, ERRMSG){
     BOOL_RETURN_SETUP
     consume_whitespace(json_data);
@@ -3144,7 +3158,6 @@ static size_t json_array_size(char* ptr, ERRMSG) {
     size_t depth = 0;
     bool in_string = false;
     bool in_escape = false;
-    bool found_value = false;
 
     while(*ptr != '\0'){
         if(in_string){
@@ -3379,6 +3392,7 @@ int read_json_with_schema_r(
                 for(size_t element_idx = 0; element_idx < schema->size; element_idx++){
                     // if the key is matches, parse to the appropriate offset
                     if(strcmp(key, schema->keys[element_idx]) == 0){
+                        FREE(key)
                         element_ptr = voidstar + schema->offsets[element_idx];
                         TRY(
                             read_json_with_schema_r,
@@ -3392,7 +3406,7 @@ int read_json_with_schema_r(
                     }
                 }
                 RAISE_IF_WITH(parse_failed, free(key), "Could not find key %s in record", key)
-                free(key);
+                FREE(key);
 
                 consume_whitespace(json_ptr);
                 if(**json_ptr == ','){
@@ -3540,6 +3554,188 @@ bool print_voidstar(const void* voidstar, const Schema* schema, ERRMSG) {
     printf("\n");
 
     return success;
+}
+
+
+#define JSON_PATH_TYPE_KEY 0
+#define JSON_PATH_TYPE_IDX 1
+
+typedef union json_path_u {
+    char* key;
+    size_t index;
+} json_path_u;
+
+typedef struct path_s{
+    uint8_t json_path_type;
+    json_path_u element;
+} path_t;
+
+
+// json_ptr is a pointer to a json element.
+// This function iterates through the json data until the end of the element
+// and returns a pointer to the character after the element.
+static char* find_end_of_element(char* json, ERRMSG){
+    PTR_RETURN_SETUP(char)
+
+    size_t size = 0;
+
+    switch(*json){
+        case '"':
+            // handle string, size is the number of characters until the closing quote
+            size_t json_size;
+            size_t c_size;
+            TRY(json_string_size, json, &json_size, &c_size);
+            json += json_size + 2;
+            break;
+        case '[':
+            // handle array, size is the number of characters until the closing bracket
+            size = TRY(json_array_size, json)
+            json += size + 1;
+            break;
+        case '{':
+            // handle object, size is the number of characters until the closing brace
+            TRY(consume_char, '{', &json)
+            consume_whitespace(&json);
+            while(*json != '}'){
+                // parse key
+                json = TRY(find_end_of_element, json);
+                // parse entry separator
+                TRY(consume_char, ':', &json)
+                // parse object
+                json = TRY(find_end_of_element, json);
+                // parse object separater if present
+                consume_whitespace(&json);
+                if(*json == ','){
+                    TRY(consume_char, ',', &json)
+                }
+            }
+            TRY(consume_char, '}', &json)
+            break;
+        case 't':
+            // handle boolean, size is 4, if the "true" is matched
+            if(strncmp(json, "true", 4) == 0){
+                return json + 4;
+            } else {
+                RAISE("Invalid JSON")
+            }
+            break;
+        case 'f':
+            // handle boolean, size is 5, if the "false" is matched
+            if(strncmp(json, "false", 5) == 0){
+                return json + 5;
+            } else {
+                RAISE("Invalid JSON")
+            }
+            break;
+        case 'n':
+            // handle boolean, size is 4, if the "null" is matched
+            if(strncmp(json, "null", 4) == 0){
+                return json + 4;
+            } else {
+                RAISE("Invalid JSON")
+            }
+            break;
+        case '-':
+        case '+':
+        case '.':
+        case '0':
+        case '1':
+        case '2':
+        case '3':
+        case '4':
+        case '5':
+        case '6':
+        case '7':
+        case '8':
+        case '9':
+            // handle integer or real number
+            consume_many("0123456789+-.eE", &json);
+            break;
+        default:
+            RAISE("Invalid JSON element: %s\n", json)
+    }
+
+    return json;
+}
+
+char* access_json_by_path(char* json, path_t* path, size_t path_length, ERRMSG){
+    PTR_RETURN_SETUP(char)
+
+    if(json == NULL){
+        RAISE("json must not be null")
+    }
+
+    // base case
+    if(path == NULL || path_length == 0){
+        char* json_end = TRY(find_end_of_element, json);
+        return strndup(json, (size_t)(json_end - json));
+    }
+
+    if(path->json_path_type == JSON_PATH_TYPE_KEY){
+
+        char* key = path->element.key;
+
+        // The JSON data should be an object
+        TRY(consume_char, '{', &json);
+
+        // iterate through the object until the required key is found
+        while(*json != '\0'){
+            char* json_key = TRY(read_json_key, &json);
+
+            TRY(consume_char, ':', &json);
+            consume_whitespace(&json);
+
+            // the desired object was found, so recurse into it and return the result
+            if(strcmp(key, json_key) == 0){
+                free(json_key);
+                break;
+            } else {
+                // if the key did not match, move past the value to the next key
+                json = TRY(find_end_of_element, json);
+                consume_whitespace(&json);
+                if((*json) == ','){
+                    TRY(consume_char, ',', &json);
+                }
+            }
+            free(json_key);
+        }
+
+        consume_whitespace(&json);
+        if (*json == '}') {
+            RAISE("Key not found");
+        }
+
+    } else if((*path).json_path_type == JSON_PATH_TYPE_IDX) {
+        // The JSON data should be an array, iterate through it until the
+        // required index is found. Then return the value.
+        TRY(consume_char, '[', &json);
+
+        size_t idx = path->element.index;
+
+        // iterate through the object until the required key is found
+        for(size_t i = 0; i < idx; i++){
+            consume_whitespace(&json);
+            json = TRY(find_end_of_element, json);
+            consume_whitespace(&json);
+            if(*json == ']'){
+                if(i != idx){
+                    RAISE("Invalid JSON input: cannot extract element %zu since has only %zu elements", idx, i+1)
+                }
+                break;
+            } else {
+                TRY(consume_char, ',', &json);
+            }
+        }
+
+    } else {
+        // This should be unreachable
+        RAISE("Unexpected json_path_type\n")
+    }
+
+    // if there are more elements in the path, recurse
+    char* result = TRY(access_json_by_path, json, path + 1, path_length - 1);
+
+    return result;
 }
 
 // }}} end JSON
@@ -3829,7 +4025,6 @@ uint8_t* read_binary_fd(FILE* file, size_t* file_size, ERRMSG) {
     size_t file_size_long = 0;
     size_t allocated_size = 0;
     const size_t chunk_size = 0xffff;  // 64KB chunks
-    int is_seekable = 1;
 
     // First attempt to use seek-based size detection
     if (fseek(file, 0, SEEK_END) == 0) {
@@ -3851,7 +4046,6 @@ uint8_t* read_binary_fd(FILE* file, size_t* file_size, ERRMSG) {
     }
 
     // Handle non-seekable files (pipes, special devices)
-    is_seekable = 0;
     *file_size = 0;
     msg = NULL;
 

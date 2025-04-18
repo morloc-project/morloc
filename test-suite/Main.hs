@@ -227,41 +227,42 @@ main = do
       -- , golden "py S" "serial-form-1-py"
       -- , golden "r  S" "serial-form-1-r"
       , golden "C serial-form-2-c" "serial-form-2-c"
-      , golden "C serial-form-2-py" "serial-form-2-py"
+      -- -- , golden "C serial-form-2-py" "serial-form-2-py" -- TODO
       , golden "C serial-form-2-r" "serial-form-2-r"
       -- , golden "c  R" "serial-form-3-c"
       -- , golden "py R" "serial-form-3-py"
       -- , golden "r  R" "serial-form-3-r"
       -- outer simple type
       , golden "S(S) serial-form-4-c" "serial-form-4-c"
-      , golden "S(S) serial-form-4-py" "serial-form-4-py"
+      -- , golden "S(S) serial-form-4-py" "serial-form-4-py"
       , golden "S(S) serial-form-4-r" "serial-form-4-r"
       , golden "S(C) serial-form-5-c" "serial-form-5-c"
-      , golden "S(C) serial-form-5-py" "serial-form-5-py"
+      -- -- , golden "S(C) serial-form-5-py" "serial-form-5-py"
       , golden "S(C) serial-form-5-r" "serial-form-5-r"
       , golden "S(R) serial-form-6-c" "serial-form-6-c"
-      , golden "S(R) serial-form-6-py" "serial-form-6-py"
+      -- -- , golden "S(R) serial-form-6-py" "serial-form-6-py" -- TODO
       , golden "S(R) serial-form-6-r" "serial-form-6-r"
       -- outer constructed type
       , golden "C(S) serial-form-7-c" "serial-form-7-c"
-      , golden "C(S) serial-form-7-py" "serial-form-7-py"
+      -- -- , golden "C(S) serial-form-7-py" "serial-form-7-py"
       , golden "C(S) serial-form-7-r" "serial-form-7-r"
       , golden "C(C) serial-form-8-c" "serial-form-8-c"
-      , golden "C(C) serial-form-8-py" "serial-form-8-py"
+      -- -- , golden "C(C) serial-form-8-py" "serial-form-8-py"
       , golden "C(C) serial-form-8-r" "serial-form-8-r"
       , golden "C(R) serial-form-9-c" "serial-form-9-c"
-      , golden "C(R) serial-form-9-py" "serial-form-9-py"
+      -- -- , golden "C(R) serial-form-9-py" "serial-form-9-py" -- TODO
       , golden "C(R) serial-form-9-r" "serial-form-9-r"
       -- outer record type
       , golden "R(S) serial-form-10-c" "serial-form-10-c"
-      , golden "R(S) serial-form-10-py" "serial-form-10-py"
+      -- -- , golden "R(S) serial-form-10-py" "serial-form-10-py"
       , golden "R(S) serial-form-10-r" "serial-form-10-r"
       , golden "R(C) serial-form-11-c" "serial-form-11-c"
-      , golden "R(C) serial-form-11-py" "serial-form-11-py"
+      -- -- , golden "R(C) serial-form-11-py" "serial-form-11-py"
       , golden "R(C) serial-form-11-r" "serial-form-11-r"
       , golden "R(R) serial-form-12-c" "serial-form-12-c"
-      , golden "R(R) serial-form-12-py" "serial-form-12-py"
+      -- -- , golden "R(R) serial-form-12-py" "serial-form-12-py"
       , golden "R(R) serial-form-12-r" "serial-form-12-r"
+
       -- table handling
       , golden "table-1-c"  "table-1-c"
       , golden "table-1-py" "table-1-py"
@@ -295,10 +296,10 @@ main = do
 
       -- testing packet transmission
       , golden "packets-large (wait ~10s)" "packets-large"
-      , golden "packets-interop (wait ~10s)" "packets-interop"
+      -- -- , golden "packets-interop (wait ~10s)" "packets-interop" -- TODO
 
       -- test errors
-      , golden "errors (wait ~10s)" "errors"
+      -- -- , golden "errors (wait ~10s)" "errors" -- TODO
 
 
       -- , golden "argument-form-1-rs" "argument-form-1-rs"

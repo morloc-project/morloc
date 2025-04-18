@@ -1,3 +1,6 @@
-module main (foo)
+module main (foo, bar, baz, zanzibar)
 
 foo x = [x,x]
+bar x y = [x,y]
+baz x y = [y,x,x]
+zanzibar x y = [[x,y],[y,y],[y,x,x]]

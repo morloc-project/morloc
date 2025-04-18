@@ -207,14 +207,32 @@ makeGastCaseDoc nc = (cond, body)
     where
     cond = [idoc|strcmp(cmd, "#{func}") == 0|]
     func = pretty . unEVar . commandName $ nc 
-    body = [idoc|printf("#{commandForm nc}\n"#{argStr});|]
-    argStr = case commandSubs nc of
-        [] -> ""
-        xs -> hsep ["," <+> makeArg x | x <- xs]
+    (argDefs, argStr) = case commandSubs nc of
+        [] -> ("", "")
+        xs -> ( vsep (map makeArgDef $ zip ([0..] :: [Int]) xs)
+              , hsep ["," <+> "arg_str_" <> pretty i | (i, _) <- zip ([0..] :: [Int]) xs]
+              )
+    body = vsep
+        [ argDefs
+        , [idoc|printf("#{commandForm nc}\n"#{argStr});|]
+        ]
     
-    makeArg :: (JsonPath, MT.Text, JsonPath) -> MDoc
-    makeArg (_, key, []) = "args[" <> pretty (lookupKey key (commandArgs nc)) <> "]"
-    makeArg x = dquotes $ viaShow x
+    makeArgDef :: (Int, (JsonPath, MT.Text, JsonPath)) -> MDoc
+    makeArgDef (i, (_, key, [])) = [idoc|char* arg_str_#{pretty i} = args[#{pretty (lookupKey key (commandArgs nc))}];|]
+    makeArgDef (i, (_, key, path)) = vsep
+        [ [idoc|char* errmsg_#{pretty i} = NULL;|]
+        , [idoc|path_t path_#{pretty i}[] = #{pathStr}; |]
+        , [idoc|size_t path_length_#{pretty i} = #{pretty $ length path}; |]
+        , [idoc|char* arg_str_#{pretty i} = access_json_by_path(args[#{pretty (lookupKey key (commandArgs nc))}], path_#{pretty i}, path_length_#{pretty i}, &errmsg_#{pretty i});|]
+        , [idoc|if(errmsg_#{pretty i} != NULL) { fprintf(stderr, "failed to parse json argument\n"); exit(1); } |]
+        ]
+        where
+            pathStr = encloseSep "{" "}" "," $ map makeElementStr path
+
+            makeElementStr :: JsonAccessor -> MDoc
+            makeElementStr (JsonIndex i) = [idoc|{JSON_PATH_TYPE_IDX, {.index = #{pretty i}}}|]
+            makeElementStr (JsonKey k) = [idoc|{JSON_PATH_TYPE_KEY, {.key = "#{pretty k}"}}|] 
+
 
     lookupKey :: MT.Text -> [EVar] -> Int
     lookupKey key vs = f 0 vs where
@@ -222,83 +240,3 @@ makeGastCaseDoc nc = (cond, body)
         f i ((EV v):rs)
             | key == v = i
             | otherwise = f (i+1) rs
-
-    -- NexusCommand {
-    --     commandName = EV {unEVar = "foo"},
-    --     commandType = VarT (TV {unTVar = "Int"}),
-    --     commandJson = 5,
-    --     commandArgs = [],
-    --     commandSubs = []
-    -- }
-
---  [ usageT fdata cdata <> "\n" <>
---    vsep (map functionCT cdata ++ map functionT fdata) <> "\n" <>
---    mapT names
---  ]
---
--- mapT :: [Doc ann] -> Doc ann
--- mapT names = [idoc|command_table = #{dict}|] where
---     dict = encloseSep "{" "}" "," (map mapEntryT names)
---
--- mapEntryT :: Doc ann -> Doc ann
--- mapEntryT n = [idoc|"#{n}" : call_#{n}|]
---
--- functionT :: FData -> MDoc
--- functionT (Socket lang _ _, subcommand, mid, t, sockets, schemas, return_schema) =
---   [idoc|
--- def call_#{subcommand}(args, tmpdir, shm_basename):
---     if len(args) != #{pretty (nargs t)}:
---         clean_exit("Expected #{pretty (nargs t)} arguments to '#{subcommand}', given " + str(len(args)))
---     else:
---         run_command(
---             mid = #{pretty mid},
---             args = args,
---             pool_lang = #{poolLangDoc},
---             sockets = #{socketsDoc},
---             arg_schema = #{list(schemas)},
---             return_schema = #{return_schema}
---         )
--- |]
---   where
---     poolLangDoc = dquotes . pretty $ ML.showLangName lang
---     socketsDoc = list [align . vsep $ map (\x -> makeSocketDoc x <> ",") sockets]
---
---     makeSocketDoc :: Socket -> MDoc
---     makeSocketDoc (Socket lang' cmdDocs pipeDoc) =
---       tupled [ dquotes . pretty $ ML.showLangName lang'
---              , list (map dquotes cmdDocs <> [pipeDoc, "tmpdir", "shm_basename"])
---              , pipeDoc
---              ]
-
--- functionCT :: NexusCommand -> MDoc
--- functionCT (NexusCommand cmd _ json_str args subs) =
---   [idoc|
--- def call_#{pretty cmd}(args, tmpdir, shm_basename):
---     if len(args) != #{pretty $ length args}:
---         errmsg = "Expected #{pretty $ length args} arguments to '#{pretty cmd}', given " + str(len(args))
---         clean_exit(1, errmsg)
---     else:
---         json_obj = json.loads('''#{json_str}''')
---         #{align . vsep $ readArguments ++ replacements}
---         print(json.dumps(json_obj, separators=(",", ":")))
---         clean_exit(0)
--- |]
---   where
---     readArguments = zipWith readJsonArg args [0..]
---     replacements = map (uncurry3 replaceJson) subs
---
--- replaceJson :: JsonPath -> MT.Text -> JsonPath -> MDoc
--- replaceJson pathTo v pathFrom
---   = access "json_obj" pathTo
---   <+> "="
---   <+> access [idoc|json_#{pretty v}|] pathFrom
---
--- access :: MDoc -> JsonPath -> MDoc
--- access = foldl pathElement
---
--- pathElement :: MDoc -> JsonAccessor -> MDoc
--- pathElement jsonObj (JsonIndex i) = jsonObj <> brackets (pretty i)
--- pathElement jsonObj (JsonKey key) = jsonObj <> brackets (dquotes (pretty key))
---
--- readJsonArg :: EVar -> Int -> MDoc
--- readJsonArg (EV v) i = [idoc|json_#{pretty v} = json.loads([*args][#{pretty i}])|]
