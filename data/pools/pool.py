@@ -50,6 +50,8 @@ def run_job(client_fd: int) -> None:
         morloc.send_packet_to_foreign_server(client_fd, result)
 
     except Exception as e:
+        # this may be OK, a broken pipe will occur if a ping times out, in which
+        # case a new ping will be sent
         print(f"job failed: {e!s}", file=sys.stderr)
     finally:
         morloc.close_socket(client_fd)
@@ -58,6 +60,7 @@ def run_job(client_fd: int) -> None:
 def worker_process(pipe, shm_basename, shutdown_flag):
     morloc.shinit(shm_basename, 0, 0xffff)
     while not shutdown_flag.value:
+        time.sleep(0.00001)
         try:
             # Receive duplicated FD valid in this process
             client_fd = recv_handle(pipe)
@@ -145,7 +148,10 @@ if __name__ == "__main__":
     # 2. Drain and close worker pipes
     for pipe in worker_pipes:
         while pipe.poll():
-            pipe.recv()  # Clear buffers
+            try:
+                pipe.recv()  # Clear buffers
+            except (EOFError, OSError):
+                break
         pipe.close()
 
     # 3. Terminate workers with escalating force
