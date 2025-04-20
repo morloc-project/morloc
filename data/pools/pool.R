@@ -8,6 +8,8 @@
 
 library(rlang)
 
+future::plan(future::multicore)
+
 morloc_is_ping                       <- function(...){ .Call("morloc_is_ping",                       ...) }
 morloc_pong                          <- function(...){ .Call("morloc_pong",                          ...) }
 morloc_is_call                       <- function(...){ .Call("morloc_is_call",                       ...) }
@@ -96,7 +98,7 @@ handle_finished_client <- function(job){
       morloc_send_packet_to_foreign_server(job$client_fd, data)
     },
     error = function(e){
-      cat("Failed to return packet\n", file=stderr())
+      # cat("Failed to return packet\n", file=stderr())
     }
   )
 
