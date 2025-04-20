@@ -42,7 +42,10 @@ def run_job(client_fd: int) -> None:
         elif(morloc.is_call(client_data)):
             (mid, args) = morloc.read_morloc_call_packet(client_data)
 
-            result = dispatch[mid](*args)
+            try:
+                result = dispatch[mid](*args)
+            except Exception as e:
+                result = morloc.make_fail_packet(str(e))
 
         else:
             raise ValueError("Expected a ping or call type packet")

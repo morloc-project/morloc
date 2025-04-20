@@ -209,7 +209,12 @@ int run_job(int client_fd) {
         }
 
         // Run the job
-        uint8_t* result = dispatch(client_data);
+        uint8_t* result = NULL;
+        try {
+            result = dispatch(client_data);
+        } catch (const std::exception& e) {
+            result = make_fail_packet(e.what());
+        }
 
         // return the result to the client and move on
         // do not wait for the client to finish processing

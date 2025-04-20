@@ -4091,36 +4091,26 @@ uint8_t* read_binary_file(const char* filename, size_t* file_size, ERRMSG) {
     return data;
 }
 
-// mutates the given errmsg to the error value of the data packet
-//
-// if the data packet cannot be read, false is returned and errmsg is set to the
-// reason for the reading failure
-//
-// if the data packet can be read, but it does not have a failing state, or is
-// not a data packet, then true is returned and errmsg is set to an empty string
-// (just a \0 character)
-//
-// if the data packet can be read, and it is a failing data packet, then true is
-// returned and errmsg is copied from the packet (this will need to be freed)
-bool get_morloc_data_packet_error_message(const uint8_t* data, ERRMSG){
-    BOOL_RETURN_SETUP
+// Returns the error message if this packet failed and NULL otherwise
+char* get_morloc_data_packet_error_message(const uint8_t* data, ERRMSG){
+    PTR_RETURN_SETUP(char)
 
-    morloc_packet_header_t* header = read_morloc_packet_header(data, &CHILD_ERRMSG);
-    RAISE_IF(header == NULL, "Failed to read packet:\n%s", CHILD_ERRMSG);
+    char* packet_err = NULL;
+
+    morloc_packet_header_t* header = TRY(read_morloc_packet_header, data);
 
     if (header->command.data.status == PACKET_STATUS_FAIL) {
-        char* new_packet_error = (char*)calloc(header->length + 1, sizeof(char));
-        RAISE_IF(new_packet_error == NULL, "Failed to allocate error message");
+        packet_err = (char*)calloc(header->length + 1, sizeof(char));
+        RAISE_IF(packet_err == NULL, "Failed to allocate error message");
 
         char* packet_data = (char*)data + sizeof(morloc_packet_header_t) + (size_t)header->offset;
-        void* copy_ptr = memcpy(new_packet_error, packet_data, header->length);
+        void* copy_ptr = memcpy(packet_err, packet_data, header->length);
         RAISE_IF(copy_ptr == NULL, "Failed to copy error message to packet")
 
-        FREE(new_packet_error)
-        return true;
+        return packet_err;
     }
 
-    return false;
+    return packet_err;
 }
 
 
@@ -4146,14 +4136,8 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
     format = header->command.data.format;
     status = header->command.data.status;
 
-    if (status == PACKET_STATUS_FAIL) {
-        bool passed = get_morloc_data_packet_error_message(data, &CHILD_ERRMSG);
-        if(passed){
-            RAISE("Propagating:\n%s", CHILD_ERRMSG)
-        } else {
-            RAISE("Empty error packet")
-        }
-    }
+    char* packet_error = TRY(get_morloc_data_packet_error_message, data);
+    RAISE_IF(packet_error != NULL, "Propagating:\n%s", packet_error)
 
     switch (source) {
         case PACKET_SOURCE_MESG:

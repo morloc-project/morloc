@@ -939,6 +939,21 @@ static PyObject* pybinding__shinit(PyObject* self, PyObject* args) { MAYFAIL
     return PyCapsule_New(shm, "shm_t", NULL);
 }
 
+
+static PyObject* pybinding__make_fail_packetg(PyObject* self, PyObject* args) { MAYFAIL
+    const char* packet_errmsg;
+ 
+    if (!PyArg_ParseTuple(args, "s", &packet_errmsg)) {
+      return NULL;
+    }
+ 
+    uint8_t* packet = make_fail_packet(packet_errmsg);
+
+    size_t packet_size = PyTRY(morloc_packet_size, packet);
+
+    return PyBytes_FromStringAndSize((char*)packet, packet_size);
+}
+
 static PyMethodDef Methods[] = {
     {"shinit", pybinding__shinit, METH_VARARGS, "Open the shared memory pool"},
     {"start_daemon", pybinding__start_daemon, METH_VARARGS, "Initialize the shared memory and socket for the python daemon"},
@@ -954,6 +969,7 @@ static PyMethodDef Methods[] = {
     {"is_ping", pybinding__is_ping, METH_VARARGS, "Packet is a ping"},
     {"is_call", pybinding__is_call, METH_VARARGS, "Packet is a call"},
     {"pong", pybinding__pong, METH_VARARGS, "Return a ping"},
+    {"make_fail_packet", pybinding__make_fail_packetg, METH_VARARGS, "Create a fail packet from an error message"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 

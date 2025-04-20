@@ -131,19 +131,12 @@ int start_language_server(const morloc_socket_t* socket, ERRMSG){
 void print_return(uint8_t* packet, Schema* schema){
     char* child_errmsg = NULL;
 
-    bool failed = get_morloc_data_packet_error_message(packet, &child_errmsg);
-    // print error due to malformed packet
-    if(failed){
-        if(child_errmsg == NULL){
-            ERROR("Failed to read returned data packet\n");
-        } else {
-            ERROR("Failed to read returned data packet:\n%s\n", child_errmsg);
-        }
+    char* packet_error = get_morloc_data_packet_error_message(packet, &child_errmsg);
+    if(packet_error != NULL){
+        ERROR("Run failed: %s\n", packet_error)
     }
-
-    // print error raised from inside morloc
     if(child_errmsg != NULL){
-        ERROR("%s", child_errmsg);
+        ERROR("Internal error: %s\n", packet_error)
     }
 
     uint8_t* packet_value = get_morloc_data_packet_value(packet, schema, &child_errmsg);
@@ -159,6 +152,7 @@ void print_return(uint8_t* packet, Schema* schema){
         ERROR("Failed to print return packet:\n%s\n", child_errmsg);
     }
 }
+
 
 
 void run_command(
