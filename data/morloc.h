@@ -3005,13 +3005,13 @@ static double parse_json_double(char** json_ptr, ERRMSG) {
 static int json_string_size(char* ptr, size_t* json_size, size_t* c_size, ERRMSG) {
     INT_RETURN_SETUP
     RAISE_IF(*ptr != '"', "Expected string, but no initial quote found (observed '%c')", *ptr)
-    ptr++; // Skip opening quote
 
     size_t json_size_ = 0;
+    char* json_start = ptr;
     size_t c_size_ = 0;
 
+    ptr++; // Skip opening quote
     while (*ptr != '\0' && *ptr != '"') {
-        json_size_++;
         if (*ptr == '\\') {
             ptr++; // Move past backslash
             RAISE_IF(*ptr == '\0', "Unexpected end of string in escape sequence");
@@ -3054,8 +3054,9 @@ static int json_string_size(char* ptr, size_t* json_size, size_t* c_size, ERRMSG
     }
 
     RAISE_IF(*ptr != '"', "Unterminated string, missing closing quote");
+    ptr++;
 
-    *json_size = json_size_;
+    *json_size = (size_t)(ptr - json_start - 2);
     *c_size = c_size_;
 
     return EXIT_PASS;
@@ -3108,6 +3109,7 @@ static int write_json_string(char** json_ptr, char* dest, ERRMSG){
                 default:
                     RAISE("Invalid escape character");
             }
+            ptr++;
         } else {
             // Regular character
             *dest = *ptr;

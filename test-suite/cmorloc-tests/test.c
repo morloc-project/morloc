@@ -9,8 +9,17 @@ void test_json() {
     TEST( strcmp(element, "420") == 0, "access_json_by_path" );
 }
 
+void test_json_string_size() {
+    size_t json_size = 0;
+    size_t c_size = 0;
+    char* errmsg = NULL;
+    char* json = "";
+    json_string_size
+}
+
 int main() {
     test_json();
+    test_json_string_size();
     
     TEST_SUMMARY();
     return fails ? 1 : 0;

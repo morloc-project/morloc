@@ -3,7 +3,7 @@
 
 template <class A>
 std::string mlc_foo(A x){
-  A y = x + "\n" + "c++: <\\,\",\f,\n,\r,\t>";
+  A y = x + "\n" + "c++: <\\,\",\f,\n,\r,\t,草泥马>";
   return y;
 }
 
