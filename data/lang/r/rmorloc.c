@@ -686,7 +686,7 @@ SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
     }
     language_daemon_t* daemon = (language_daemon_t*)R_ExternalPtrAddr(daemon_r);
 
-    int client_fd = R_TRY(wait_for_client, daemon);
+    int client_fd = R_TRY(wait_for_client_with_timeout, daemon, 10000);
 
     return ScalarInteger(client_fd);
 }

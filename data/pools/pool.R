@@ -75,59 +75,6 @@ run_job <- function(client_data){
 }
 
 
-check_for_new_client <- function(queue, daemon){
-
-  client_fd <- morloc_wait_for_client(daemon)
-
-  if (client_fd == -1) {
-    # An error occurred, don't worry about it
-    return(queue)
-  } else if (client_fd == -2) {
-    # A timeout occurred, certainly don't worry about
-    return(queue)
-  }
-
-  # Pull data from the client
-  tryCatch({
-    packet <- morloc_stream_from_client(client_fd)
-  }, error = function(e) {
-    errmsg = paste(
-      "Failed to read from socket with error message:",
-      e$message
-    )
-    abort(errmsg)
-  })
-
-  # If any data was pulled, operate on it
-  if (length(packet) > 0) {
-    # Run the job in a newly forked process in the backgroun
-    tryCatch(
-      {
-        work <- future::future(
-          { tryCatch(
-              { run_job(packet) },
-              error = function(e) {
-                  errmsg <- paste("run_job failed:", e$message)
-                  morloc_make_fail_packet(errmsg)
-              }
-            )
-          }, globals=FALSE
-        )
-      },
-      error = function(e) {
-        errmsg <- paste("Error preparing in future work:", e$message)
-        abort(errmsg)
-      }
-    )
-
-    # Add the job to the queue
-    queue[[length(queue)+1]] <- list( client_fd = client_fd, work = work)
-  }
-
-  queue
-}
-
-
 job_has_finished <- function(job){
   future::resolved(job$work) 
 }
@@ -142,49 +89,88 @@ handle_finished_client <- function(job){
       morloc_make_fail_packet(paste("Error retrieving work from job:", e$message))
     }
   )
-  # Return the result to the client
-  morloc_send_packet_to_foreign_server(job$client_fd, data)
+
+  tryCatch(
+    {
+      # Return the result to the client
+      morloc_send_packet_to_foreign_server(job$client_fd, data)
+    },
+    error = function(e){
+      cat("Failed to return packet\n", file=stderr())
+    }
+  )
 
   # Close the current client
   morloc_close_socket(job$client_fd)
 }
 
 
+# Listen for clients
 main <- function(socket_path, tmpdir, shm_basename) {
 
-  # Listen for clients
-  tryCatch({
-    # Initialize the R daemon
-    daemon = morloc_start_daemon(socket_path, tmpdir, shm_basename, 0xffff)
+  # Initialize the R daemon
+  daemon = morloc_start_daemon(socket_path, tmpdir, shm_basename, 0xffff)
 
-    queue <- list()
+  queue <- list()
 
-    while (TRUE) {
-      queue <- check_for_new_client(queue, daemon)
-
-      job_idx = 1
-      while(job_idx <= length(queue)){
-        # check is the job has finished
-        if(job_has_finished(queue[[job_idx]])){
-          # send data back to the client and close the socket
-          handle_finished_client(queue[[job_idx]])
-
-          # remove this completed job from the queue
-          # job_idx will now point to the next job
-          queue[[job_idx]] <- NULL
-        } else {
-          # if this job is still running, move onto the next one
-          job_idx <- job_idx + 1
-        }
+  while (TRUE) {
+    client_fd <- morloc_wait_for_client(daemon)
+    
+    if(client_fd > 0){
+      # Pull data from the client
+      tryCatch({
+        packet <- morloc_stream_from_client(client_fd)
+      }, error = function(e) {
+        errmsg = paste(
+          "Failed to read from socket with error message:",
+          e$message
+        )
+        abort(errmsg)
+      })
+      
+      # If any data was pulled, operate on it
+      if (length(packet) > 0) {
+        # Run the job in a newly forked process in the backgroun
+        tryCatch(
+          {
+            work <- future::future(
+              { tryCatch(
+                  { run_job(packet) },
+                  error = function(e) {
+                      errmsg <- paste("run_job failed:", e$message)
+                      morloc_make_fail_packet(errmsg)
+                  }
+                )
+              }, globals=FALSE
+            )
+          },
+          error = function(e) {
+            errmsg <- paste("Error preparing in future work:", e$message)
+            abort(errmsg)
+          }
+        )
+      
+        # Add the job to the queue
+        queue[[length(queue)+1]] <- list( client_fd = client_fd, work = work)
       }
-
-      # sleep to avoid busy waiting
-      Sys.sleep(LISTENER_TICK)
     }
-  }, finally = {
-      # no extra cleanup is needed just yet
-      NULL
-  })
+
+    job_idx = 1
+    while(job_idx <= length(queue)){
+      # check is the job has finished
+      if(job_has_finished(queue[[job_idx]])){
+        # send data back to the client and close the socket
+        handle_finished_client(queue[[job_idx]])
+
+        # remove this completed job from the queue
+        # job_idx will now point to the next job
+        queue[[job_idx]] <- NULL
+      } else {
+        # if this job is still running, move onto the next one
+        job_idx <- job_idx + 1
+      }
+    }
+  }
 
   # Exit with success
   return(0)

@@ -29,6 +29,11 @@
 #define MAX_FILENAME_SIZE 128
 #define MAX_ERRMSG_SIZE 1024
 
+// With these parameters, the max wait time is around 6s
+#define WAIT_RETY_INITIAL_TIME 0.001
+#define WAIT_RETRY_MULTIPLIER 1.25
+#define WAIT_RETRY_ATTEMPTS 32
+
 // {{{ Error handling macro definictions
 
 #define FREE(ptr) \
@@ -96,7 +101,7 @@
     RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG)
 
 #define WAIT(code, cond, timeout_code) do { \
-    double retry_time = 0.001; \
+    double retry_time = WAIT_RETY_INITIAL_TIME; \
     int attempts = 0; \
     bool timed_out = false; \
     while(!timed_out){ \
@@ -110,8 +115,8 @@
         }; \
         nanosleep(&sleep_time, NULL); \
         attempts++; \
-        retry_time *= 1.25; \
-        if(attempts > 60) { \
+        retry_time *= WAIT_RETRY_MULTIPLIER; \
+        if(attempts > WAIT_RETRY_ATTEMPTS) { \
             timeout_code; \
         } \
     } \
@@ -4458,7 +4463,7 @@ language_daemon_t* start_daemon(
 }
 
 
-uint8_t* stream_from_client(int client_fd, ERRMSG) {
+uint8_t* stream_from_client_wait(int client_fd, int pselect_timeout_us, int recv_timeout_us, ERRMSG) {
     PTR_RETURN_SETUP(uint8_t)
 
     if (fcntl(client_fd, F_GETFD) == -1) {
@@ -4472,21 +4477,32 @@ uint8_t* stream_from_client(int client_fd, ERRMSG) {
     fd_set read_fds;
     int max_fd = client_fd;
 
-    // Block signals during pselect (e.g., SIGINT)
+    // Timeout structure initialization
+    struct timespec* timeout_loop_ptr = NULL;
+    struct timespec ts_loop;
+    if(pselect_timeout_us > 0) {
+        ts_loop.tv_sec = pselect_timeout_us / 1000000;
+        ts_loop.tv_nsec = (pselect_timeout_us % 1000000) * 1000;
+        timeout_loop_ptr = &ts_loop;
+    }
+
+    // Signal masking setup
     sigset_t mask, origmask;
     sigemptyset(&mask);
-    sigaddset(&mask, SIGINT);  // Add other signals as needed
+    sigaddset(&mask, SIGINT); // do we need to add more masks here?
     sigprocmask(SIG_SETMASK, &mask, &origmask);
 
-    // Receive initial data
+    // Initial receive with timeout
     FD_ZERO(&read_fds);
     FD_SET(client_fd, &read_fds);
-    int ready = pselect(max_fd + 1, &read_fds, NULL, NULL, NULL, &origmask);
-    sigprocmask(SIG_SETMASK, &origmask, NULL); // Restore mask
+    // int ready = pselect(max_fd + 1, &read_fds, NULL, NULL, timeout_loop_ptr, &origmask);
+    int ready = pselect(max_fd + 1, &read_fds, NULL, NULL, timeout_loop_ptr, &origmask);
+    sigprocmask(SIG_SETMASK, &origmask, NULL);
 
+    RAISE_IF_WITH(ready == 0, free(buffer), "Timeout waiting for initial data");
+    RAISE_IF(ready < 0, "pselect error: %s", strerror(errno));
     RAISE_IF_WITH(FD_ISSET(client_fd, &read_fds) && (errno == EBADF || errno == ECONNRESET),
                   free(buffer), "Socket error (%d): %s", client_fd, strerror(errno));
-    RAISE_IF(ready < 0, "pselect error: %s", strerror(errno));
 
     if (FD_ISSET(client_fd, &read_fds)) {
         recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);
@@ -4504,15 +4520,28 @@ uint8_t* stream_from_client(int client_fd, ERRMSG) {
     data_ptr += recv_length;
     free(buffer);
 
-    // Read remaining data
+    int attempts = 10;
+    int initial_timeout = 10000;
+    // Receive remaining data with per-operation timeout
     while ((size_t)(data_ptr - result) < packet_length) {
-        while (1) {
+        bool packet_received = false;
+        for(int packet_attempts = 0; packet_attempts < attempts; packet_attempts++) {
             FD_ZERO(&read_fds);
             FD_SET(client_fd, &read_fds);
-            sigprocmask(SIG_SETMASK, &mask, NULL); // Block signals
-            ready = pselect(max_fd + 1, &read_fds, NULL, NULL, NULL, &origmask);
-            sigprocmask(SIG_SETMASK, &origmask, NULL); // Restore signals
+            
+            // Reset timeout for each iteration
+            struct timespec ts_loop;
+            if(recv_timeout_us > 0) {
+                ts_loop.tv_sec = recv_timeout_us / 1000000;
+                ts_loop.tv_nsec = (recv_timeout_us % 1000000) * initial_timeout * (packet_attempts + 1);
+                timeout_loop_ptr = &ts_loop;
+            }
 
+            sigprocmask(SIG_SETMASK, &mask, NULL);
+            ready = pselect(max_fd + 1, &read_fds, NULL, NULL, timeout_loop_ptr, &origmask);
+            sigprocmask(SIG_SETMASK, &origmask, NULL);
+
+            RAISE_IF_WITH(ready == 0, free(result), "Timeout waiting for remaining data");
             RAISE_IF(ready < 0 && errno != EINTR, "pselect error: %s", strerror(errno));
             if (ready <= 0) continue;
 
@@ -4520,6 +4549,7 @@ uint8_t* stream_from_client(int client_fd, ERRMSG) {
                 recv_length = recv(client_fd, data_ptr, BUFFER_SIZE, 0);
                 if (recv_length > 0) {
                     data_ptr += recv_length;
+                    packet_received = true;
                     break;
                 }
                 RAISE_IF_WITH(recv_length == 0, free(result), "Connection closed early: %s", strerror(errno));
@@ -4527,13 +4557,22 @@ uint8_t* stream_from_client(int client_fd, ERRMSG) {
                               free(result), "Recv error: %s", strerror(errno));
             }
         }
+        RAISE_IF(!packet_received, "Failed to retrieve packet")
     }
 
     return result;
 }
 
 
-uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG){
+// Stream with eternal wait
+uint8_t* stream_from_client(int client_fd, ERRMSG) {
+    PTR_RETURN_SETUP(uint8_t)
+    uint8_t* packet = TRY(stream_from_client_wait, client_fd, 0, 0);
+    return packet;
+}
+
+
+uint8_t* send_and_receive_over_socket_wait(const char* socket_path, const uint8_t* packet, int pselect_timeout_us, int recv_timeout_us, ERRMSG){
     PTR_RETURN_SETUP(uint8_t)
 
     int client_fd = TRY(new_socket);
@@ -4560,11 +4599,18 @@ uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* pa
           RAISE_WITH(close_socket(client_fd), "Failed to send data to '%s', ran out of time", socket_path)
         )
 
-    result = stream_from_client(client_fd, &CHILD_ERRMSG);
+    result = stream_from_client_wait(client_fd, pselect_timeout_us, recv_timeout_us, &CHILD_ERRMSG);
     RAISE_IF_WITH(CHILD_ERRMSG != NULL, close_socket(client_fd), "Failed to read data returned from pipe '%s'\n%s", socket_path, CHILD_ERRMSG);
 
     close_socket(client_fd);
 
+    return result;
+}
+
+
+uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG){
+    PTR_RETURN_SETUP(uint8_t)
+    uint8_t* result = TRY(send_and_receive_over_socket_wait, socket_path, packet, 0, 0);
     return result;
 }
 
@@ -4574,16 +4620,16 @@ size_t send_packet_to_foreign_server(int client_fd, uint8_t* packet, ERRMSG){
 
     size_t size = TRY(morloc_packet_size, packet);
 
-    size_t bytes_sent = 0;
+    ssize_t bytes_sent = 0;
     bytes_sent = send(client_fd, packet, size, MSG_NOSIGNAL);
 
     RAISE_IF(bytes_sent < 0, "Failed to send over client %d: %s", client_fd, strerror(errno))
-    RAISE_IF(bytes_sent != size, "Partial send over client %d, only sent %zu of %zu bytes: %s", client_fd, bytes_sent, size, strerror(errno))
+    RAISE_IF((size_t)bytes_sent != size, "Partial send over client %d, only sent %zd of %zu bytes: %s", client_fd, bytes_sent, size, strerror(errno))
 
     return bytes_sent;
 }
 
-int wait_for_client(language_daemon_t* daemon, ERRMSG) {
+int wait_for_client_with_timeout(language_daemon_t* daemon, int timeout_us, ERRMSG) {
     VAL_RETURN_SETUP(int, -1)
 
     // clear the list of file descriptors, these will be re-added below
@@ -4603,18 +4649,33 @@ int wait_for_client(language_daemon_t* daemon, ERRMSG) {
     }
 
     // Modified WAIT block using pselect
+
+    // Timeout structure initialization
+    struct timespec* timeout_ptr = NULL;
+    struct timespec ts_loop;
+    if(timeout_us > 0) {
+        ts_loop.tv_sec = timeout_us / 1000000;
+        ts_loop.tv_nsec = (timeout_us % 1000000) * 1000;
+        timeout_ptr = &ts_loop;
+    }
+
     int ready;
     sigset_t emptymask;
     sigemptyset(&emptymask);
-    // `select` will wait forever for something to crawl out of the pipe.
+    // `pselect` will until timeout for something to crawl out of the pipe.
     // But if the pipe itself is missing or broken (for example, if the socket
     // file has not yet been written), then select dies immediately, for this
     // reason it is wrapped in WAIT to retry for a few minutes for giving up the
     // ghost for good.
-    WAIT( { ready = pselect(max_fd + 1, &daemon->read_fds, NULL, NULL, NULL, &emptymask); },
-          ready > 0,
+    WAIT( { ready = pselect(max_fd + 1, &daemon->read_fds, NULL, NULL, timeout_ptr, &emptymask); },
+          ready >= 0,
           RAISE("Failed to read data")
         )
+
+    // if pselect timed out, return 0
+    if(ready == 0){
+        return ready;
+    }
 
     int selected_fd = -1;
 
@@ -4646,6 +4707,13 @@ int wait_for_client(language_daemon_t* daemon, ERRMSG) {
     daemon->client_fds = daemon->client_fds->next;
     free(client_fds);
 
+    return return_fd;
+}
+
+// wait forever
+int wait_for_client(language_daemon_t* daemon, ERRMSG) {
+    VAL_RETURN_SETUP(int, -1)
+    int return_fd = TRY(wait_for_client_with_timeout, daemon, 0);
     return return_fd;
 }
 
