@@ -11,9 +11,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#define INITIAL_PING_TIMEOUT_MICROSECONDS 10000
 #define INITIAL_RETRY_DELAY 0.001
 #define RETRY_MULTIPLIER 1.25
-#define MAX_RETRIES 45
+#define MAX_RETRIES 16
 
 #define MAX_DAEMONS 32
 
@@ -188,39 +189,38 @@ void run_command(
     }
 
     // wait for everything to wake up
-    uint8_t* ping_packet = make_ping_packet();
-    bool all_pass;
-    uint8_t* return_data;
-    double retry_time = INITIAL_RETRY_DELAY;
-    int attempts = 0;
-    while(!all_pass){
-        all_pass = true;
-        for(morloc_socket_t** socket_ptr = all_sockets; *socket_ptr != NULL; socket_ptr++){
-            return_data = send_and_receive_over_socket((*socket_ptr)->socket_filename, ping_packet, &errmsg);
+    for(morloc_socket_t** socket_ptr = all_sockets; *socket_ptr != NULL; socket_ptr++){
+        uint8_t* ping_packet = make_ping_packet();
+        double retry_time = INITIAL_RETRY_DELAY;
+        int ping_timeout = INITIAL_PING_TIMEOUT_MICROSECONDS;
+        uint8_t* return_data;
+        for(int attempt = 0; attempt <= MAX_RETRIES; attempt++){
+            return_data = send_and_receive_over_socket_wait((*socket_ptr)->socket_filename, ping_packet, ping_timeout, ping_timeout, &errmsg);
             if(errmsg != NULL || return_data == NULL){
-                all_pass = false;
-                if(attempts < MAX_RETRIES){
-                    fprintf(stderr, "Failed to ping, waiting\n");
-                } else {
-                    fprintf(stderr, "Ran out of attempts with error: %s\n", errmsg);
+                if(attempt == MAX_RETRIES){
+                    fprintf(stderr, "Failed to ping '%s': %s\n", (*socket_ptr)->socket_filename, errmsg);
                 }
-                break;
+
+                // Sleep using exponential backoff
+                struct timespec sleep_time = {
+                    .tv_sec = (time_t)retry_time,
+                    .tv_nsec = (long)((retry_time - (time_t)retry_time) * 1e9)
+                };
+                nanosleep(&sleep_time, NULL);
+    
+                retry_time *= RETRY_MULTIPLIER;
+    
+                // Increase the ping timeout
+                //
+                // An infinite timeout, of course, would hang on unresponsive
+                // daemons. But if the timeout is too short, the daemon may not have
+                // time to respond. And response time decreases when the system is
+                // under heavy load, which in the past caused non-deterministic
+                // freezes.
+                ping_timeout = 2 * ping_timeout;
+                continue;
             }
-        }
-        if(!all_pass){
-            // Sleep using exponential backoff
-            struct timespec sleep_time = {
-                .tv_sec = (time_t)retry_time,
-                .tv_nsec = (long)((retry_time - (time_t)retry_time) * 1e9)
-            };
-            nanosleep(&sleep_time, NULL);
-            
-            retry_time *= RETRY_MULTIPLIER;
-            attempts++;
-            
-            if(attempts > MAX_RETRIES){
-                ERROR("Timed out after %d attempts while waiting for language servers to start\n", attempts);
-            }
+            break;
         }
     }
 
