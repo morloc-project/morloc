@@ -224,13 +224,17 @@ int run_job(int client_fd) {
             exit(1);
         }
 
-        // close the current client
+        // close the child file descriptor
         close_socket(client_fd);
 
         // And exit the child
         exit(0);
     } else if (pid > 0) {
         // Enter the parent process
+
+        // immediately close the parent copy of the file descriptor
+        close_socket(client_fd);
+
         return pid; // success
     } else {
         // fork failed

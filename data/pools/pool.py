@@ -57,6 +57,7 @@ def run_job(client_fd: int) -> None:
         # case a new ping will be sent
         print(f"job failed: {e!s}", file=sys.stderr)
     finally:
+        # close child copy
         morloc.close_socket(client_fd)
 
 
@@ -87,16 +88,24 @@ def client_listener(worker_pipes, socket_path, tmpdir, shm_basename, shutdown_fl
     while not shutdown_flag.value:
         try:
             client_fd = morloc.wait_for_client(daemon)
+        except Exception as e:
+            print(f"In python daemon, failed to connect to client: {e!s}", file=sys.stderr)
+            continue
 
-            if client_fd >= 0:
+        if client_fd >= 0:
+            try:
                 # Round-robin distribution to workers
                 pipe = worker_pipes[current_worker]
 
                 send_handle(pipe, client_fd, os.getpid())
 
                 current_worker = (current_worker + 1) % len(worker_pipes)
-        except Exception as e:
-            print(f"Listener error: {e!s}", file=sys.stderr)
+            except Exception as e:
+                print(f"In python daemon, failed to start worker: {e!s}", file=sys.stderr)
+            finally:
+                # close parent copy
+                morloc.close_socket(client_fd)
+
 
 
 if __name__ == "__main__":
