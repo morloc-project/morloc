@@ -43,15 +43,8 @@ jobs:
 
       - name: "Load morloc modules"
         run: |
-          pwd
-          mkdir -p $HOME/.morloc/lib
-          mkdir -p $HOME/.morloc/tmp
-          echo "home : $HOME/.morloc" > ~/.morloc/config
-          echo "library : $HOME/.morloc/lib" >> $HOME/.morloc/config
-          echo "tmpdir : $HOME/.morloc/tmp" >> $HOME/.morloc/config
-          echo "lang_python3 : python3" >> $HOME/.morloc/config
-          sudo apt-get install git # required for installations below
-          morloc init
+          sudo apt-get install git
+          morloc init -f
           morloc install prelude
           morloc install types
           morloc install conventions

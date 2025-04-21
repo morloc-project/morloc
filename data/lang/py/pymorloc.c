@@ -52,8 +52,7 @@ PyObject* numpy_module = NULL;
 
 
 // This function will be called to import numpy if, and only if, a numpy feature
-// is used. This avoids the agonizingly long numpy import time (and fuck you
-// very much if you think 100ms is agonizingly long).
+// is used. This avoids the agonizingly long numpy import time.
 void* import_numpy() {
     numpy_module = PyImport_ImportModule("numpy");
     if (numpy_module == NULL) {

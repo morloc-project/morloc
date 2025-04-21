@@ -16,7 +16,7 @@ extra-source-files:
   - README.md
   - ChangeLog.md
   # libraries
-  - data/nexus.py # nexus template
+  - data/nexus.c # nexus template
   - data/pools/pool.R
   - data/pools/pool.cpp
   - data/pools/pool.py
