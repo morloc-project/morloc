@@ -7,8 +7,7 @@
 # AUTO load dynamic libraries
 
 library(rlang)
-
-future::plan(future::multicore)
+library(parallel)
 
 morloc_is_ping                       <- function(...){ .Call("morloc_is_ping",                       ...) }
 morloc_pong                          <- function(...){ .Call("morloc_pong",                          ...) }
@@ -34,147 +33,62 @@ global_state <- list()
 # AUTO include manifolds end
 
 
-run_job <- function(client_data){
 
-  if(morloc_is_ping(client_data)){
-    # create and return a response to the ping
-    return( morloc_pong(client_data) )
-  }
-  
-  if(!morloc_is_call(client_data)){
-    # fail if this isn't a call packet
-    errmsg = "Unexpected packet type"
-    return( morloc_make_fail_packet(errmsg) )
-  }
-
-  call_packet <- morloc_read_morloc_call_packet(client_data)
-  midx <- call_packet[[1]]
-  args <- call_packet[[2]]
-
-  mlc_pool_function_name <- paste0("m", midx)
-  
-  if(exists(mlc_pool_function_name)){
-  
-    result <- tryCatch(
-      {
-        mlc_pool_function <- eval(parse(text=mlc_pool_function_name))
-        do.call(mlc_pool_function, args)
-      }, error = function(e) {
-        if(!is.null(e$fail_packet)){
-          e$fail_packet
-        } else {
-            errmsg <- paste("Call to", mlc_pool_function_name, "in R failed with message:", e$message) 
-            morloc_make_fail_packet(errmsg)
-        }
+run_job <- function(client_fd) {
+  tryCatch({
+    client_data <- morloc_stream_from_client(client_fd)
+    
+    if(morloc_is_ping(client_data)){
+      response <- morloc_pong(client_data)
+    }
+    else if(morloc_is_call(client_data)){
+      call_packet <- morloc_read_morloc_call_packet(client_data)
+      midx <- call_packet[[1]]
+      args <- call_packet[[2]]
+      
+      mlc_pool_function_name <- paste0("m", midx)
+      
+      if(exists(mlc_pool_function_name)){
+        response <- tryCatch({
+          mlc_pool_function <- get(mlc_pool_function_name)
+          do.call(mlc_pool_function, args)
+        }, error = function(e) {
+          if(!is.null(e$fail_packet)) e$fail_packet else {
+            morloc_make_fail_packet(paste("Call failed:", e$message))
+          }
+        })
+      } else {
+        response <- morloc_make_fail_packet(paste("Function not found:", mlc_pool_function_name))
       }
-    )
-    return(result)
-  
-  } else {
-    errmsg <- paste("Could not find function", mlc_pool_function_name)
-    return( morloc_make_fail_packet(errmsg) )
-  }
-}
-
-
-job_has_finished <- function(job){
-  future::resolved(job$work) 
-}
-
-handle_finished_client <- function(job){
-  # get the result of the calculation
-  data <- tryCatch(
-    {
-      future::value(job$work)
-    },
-    error = function(e){
-      morloc_make_fail_packet(paste("Error retrieving work from job:", e$message))
+    } else {
+      response <- morloc_make_fail_packet("Unexpected packet type")
     }
-  )
-
-  tryCatch(
-    {
-      # Return the result to the client
-      morloc_send_packet_to_foreign_server(job$client_fd, data)
-    },
-    error = function(e){
-      # cat("Failed to return packet\n", file=stderr())
-    }
-  )
-
-  # Close the current client
-  morloc_close_socket(job$client_fd)
+    
+    morloc_send_packet_to_foreign_server(client_fd, response)
+  }, error = function(e) {
+    errmsg <- paste("Job failed:", e$message)
+    morloc_send_packet_to_foreign_server(client_fd, morloc_make_fail_packet(errmsg))
+  }, finally = {
+    morloc_close_socket(client_fd)
+  })
 }
-
 
 # Listen for clients
 main <- function(socket_path, tmpdir, shm_basename) {
-
   # Initialize the R daemon
-  daemon = morloc_start_daemon(socket_path, tmpdir, shm_basename, 0xffff)
-
-  queue <- list()
-
+  daemon <- morloc_start_daemon(socket_path, tmpdir, shm_basename, 0xffff)
+  
   while (TRUE) {
     client_fd <- morloc_wait_for_client(daemon)
-    
-    if(client_fd > 0){
-      # Pull data from the client
-      tryCatch({
-        packet <- morloc_stream_from_client(client_fd)
-      }, error = function(e) {
-        errmsg = paste(
-          "Failed to read from socket with error message:",
-          e$message
-        )
-        abort(errmsg)
-      })
-      
-      # If any data was pulled, operate on it
-      if (length(packet) > 0) {
-        # Run the job in a newly forked process in the backgroun
-        tryCatch(
-          {
-            work <- future::future(
-              { tryCatch(
-                  { run_job(packet) },
-                  error = function(e) {
-                      errmsg <- paste("run_job failed:", e$message)
-                      morloc_make_fail_packet(errmsg)
-                  }
-                )
-              }, globals=FALSE
-            )
-          },
-          error = function(e) {
-            errmsg <- paste("Error preparing in future work:", e$message)
-            abort(errmsg)
-          }
-        )
-      
-        # Add the job to the queue
-        queue[[length(queue)+1]] <- list( client_fd = client_fd, work = work)
-      }
-    }
-
-    job_idx = 1
-    while(job_idx <= length(queue)){
-      # check is the job has finished
-      if(job_has_finished(queue[[job_idx]])){
-        # send data back to the client and close the socket
-        handle_finished_client(queue[[job_idx]])
-
-        # remove this completed job from the queue
-        # job_idx will now point to the next job
-        queue[[job_idx]] <- NULL
-      } else {
-        # if this job is still running, move onto the next one
-        job_idx <- job_idx + 1
-      }
+    if(client_fd > 0) {
+      mcparallel(
+        { run_job(client_fd) },
+        detached = TRUE
+      )
+      morloc_close_socket(client_fd)
     }
   }
-
-  # Exit with success
+  
   return(0)
 }
 
