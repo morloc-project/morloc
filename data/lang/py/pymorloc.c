@@ -919,7 +919,6 @@ static PyObject* pybinding__pong(PyObject* self, PyObject* args) { MAYFAIL
 }
 
 static PyObject* pybinding__shinit(PyObject* self, PyObject* args) { MAYFAIL
-    const char* socket_path;
     const char* shm_basename;
     size_t volume_index;
     size_t shm_default_size;

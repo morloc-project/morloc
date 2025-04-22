@@ -232,7 +232,7 @@ translateSegment m0 =
       -- do in C++ and R because the subprocess module bypasses Bash dequoting.
       let call = "morloc.foreign_call" <> tupled [makeSocketPath socketFile, pretty mid, list (map argNamer args)]
       return $ defaultValue { poolExpr = call }
-    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) (RemoteCall mconf) args) _) = do
+    makeSerialExpr _ (AppPoolS_ _ (PoolCall _ _ (RemoteCall _) _) _) = do
       let call = "REMOTE_CALL"
       return $ defaultValue { poolExpr = call }
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}

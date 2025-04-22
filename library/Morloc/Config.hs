@@ -106,7 +106,6 @@ setupServerAndSocket c lang = Socket lang args socket where
     CppLang -> ["./" <> pretty (ML.makeExecutablePoolName CppLang)]
     RLang -> [pretty (configLangR c), pretty (ML.makeExecutablePoolName RLang)]
     Python3Lang -> [pretty (configLangPython3 c), pretty (ML.makeExecutablePoolName Python3Lang)]
-    _ -> undefined 
 
   socket = "pipe-" <> pretty (ML.showLangName lang)
 

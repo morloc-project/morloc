@@ -1,9 +1,15 @@
-0.53.0 [2025-02-09]
+0.53.0 [2025-04-xx]
 -------------------
 
- [ ] Add xxhash hashing for caching
- [ ] Move packets to little-endian format
- [ ] Add SLURM support
+Unify backend under shared C library
+
+ * Move packets to little-endian format
+ * Add conventions for specifying caching and evaluation strategy
+ * Replace python nexus with C nexus
+ * Move all packet and binary formatting code, socket handling, and json
+   parsing from pool code into the shared morloc.h library.
+ * Replace R `future` parallelism scheme with builtin `parallel` library
+ * Add xxhash hashing for caching
 
 0.52.0 [2025-02-09]
 -------------------

@@ -114,8 +114,8 @@ resolveTypes (AnnoS (Idx i t) ci e)
   f UniS = UniS
 
 resolveInstances :: Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
-resolveInstances g (AnnoS gi@(Idx index gt) ci e0) = do
-    gscope <- MM.getGeneralScope index
+resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
+    gscope <- MM.getGeneralScope genIndex
     (g', e1) <- f gscope g e0
     return (g', AnnoS gi ci e1)
   where

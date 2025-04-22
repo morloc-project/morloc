@@ -17,8 +17,6 @@ hyperfine \
   --export-csv stats.csv \
   "./nexus {test}"
 
-# hyperfine -w 5 -L test memtest "./nexus {test} medium-list.json"
+hyperfine -w 5 -L test memtest "./nexus {test} medium-list.json"
 
-# hyperfine -w 5 -L test mapManyPCP,mapManyPCR "./nexus {test} 5 long-list.json"
-
-# hyperfine -w 5 -L test mapManyPCR "./nexus {test} 5 long-list.json"
+hyperfine -w 5 -L test mapManyPCP,mapManyPCR "./nexus {test} 5 long-list.json"

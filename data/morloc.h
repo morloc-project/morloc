@@ -3006,7 +3006,6 @@ static int json_string_size(char* ptr, size_t* json_size, size_t* c_size, ERRMSG
     INT_RETURN_SETUP
     RAISE_IF(*ptr != '"', "Expected string, but no initial quote found (observed '%c')", *ptr)
 
-    size_t json_size_ = 0;
     char* json_start = ptr;
     size_t c_size_ = 0;
 
@@ -4125,7 +4124,6 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
 
     uint8_t source;
     uint8_t format;
-    uint8_t status;
 
     void* voidstar = NULL;
 
@@ -4136,7 +4134,6 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
 
     source = header->command.data.source;
     format = header->command.data.format;
-    status = header->command.data.status;
 
     char* packet_error = TRY(get_morloc_data_packet_error_message, data);
     RAISE_IF(packet_error != NULL, "Propagating:\n%s", packet_error)
@@ -4459,7 +4456,6 @@ uint8_t* stream_from_client_wait(int client_fd, int pselect_timeout_us, int recv
     char* buffer = (char*)calloc(BUFFER_SIZE, sizeof(char));
     RAISE_IF(buffer == NULL, "calloc failed for buffer: %s", strerror(errno))
 
-    ssize_t recv_length;
     fd_set read_fds;
     int max_fd = client_fd;
 
@@ -4490,12 +4486,12 @@ uint8_t* stream_from_client_wait(int client_fd, int pselect_timeout_us, int recv
     RAISE_IF_WITH(FD_ISSET(client_fd, &read_fds) && (errno == EBADF || errno == ECONNRESET),
                   free(buffer), "Socket error (%d): %s", client_fd, strerror(errno));
 
-    if (FD_ISSET(client_fd, &read_fds)) {
-        recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);
-        RAISE_IF_WITH(recv_length == 0, free(buffer), "Connection closed by peer: %s", strerror(errno));
-        RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN,
-                      free(buffer), "Recv error: %s", strerror(errno));
-    }
+    RAISE_IF(!FD_ISSET(client_fd, &read_fds), "Bad client file descriptor")
+    ssize_t recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);
+
+    RAISE_IF_WITH(recv_length == 0, free(buffer), "Connection closed by peer: %s", strerror(errno));
+    RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN,
+                  free(buffer), "Recv error: %s", strerror(errno));
 
     size_t packet_length = TRY(morloc_packet_size, (uint8_t*)buffer);
     uint8_t* result = (uint8_t*)calloc(packet_length, sizeof(uint8_t));

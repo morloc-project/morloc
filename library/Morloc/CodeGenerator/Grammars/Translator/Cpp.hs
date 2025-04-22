@@ -72,7 +72,7 @@ instance HasCppType TypeM where
     ts' <- mapM cppTypeOf ts
     return $ "std::function<" <> t' <> tupled ts' <> ">"
 
-  cppArgOf s arg@(Arg i t) = do
+  cppArgOf s (Arg i t) = do
     typeStr <- cppTypeOf t
     let typeStrQualified = setCallSemantics s typeStr
     return $ case t of

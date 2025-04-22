@@ -748,7 +748,6 @@ data TypeError
   | MissingFeature Text
   | InfiniteRecursion
   | FunctionSerialization EVar
-  | CannotEvaluateType
   | TypeEvaluationError Text
 
 data MorlocError

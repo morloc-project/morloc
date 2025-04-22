@@ -80,10 +80,6 @@ findModuleMetadata :: Path -> IO (Maybe Path)
 findModuleMetadata mainFile =
   getFile $ MS.combine (MS.takeDirectory mainFile) "package.yaml"
 
-getModuleGroups :: Path -> IO (Maybe Path)
-getModuleGroups mainFile =
-  getFile $ MS.combine (MS.dropExtension mainFile) ".yaml"
-
 loadModuleMetadata :: Path -> MorlocMonad ()
 loadModuleMetadata main = do
   maybef <- liftIO $ findModuleMetadata main

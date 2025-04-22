@@ -216,6 +216,7 @@ instance Pretty SerialAST where
   pretty (SerialInt16 v) = parens ("SerialInt16" <+> pretty v)
   pretty (SerialInt32 v) = parens ("SerialInt32" <+> pretty v)
   pretty (SerialInt64 v) = parens ("SerialInt64" <+> pretty v)
+  pretty (SerialUInt v) = parens ("SerialUInt" <+> pretty v)
   pretty (SerialUInt8 v) = parens ("SerialUInt8" <+> pretty v)
   pretty (SerialUInt16 v) = parens ("SerialUInt16" <+> pretty v)
   pretty (SerialUInt32 v) = parens ("SerialUInt32" <+> pretty v)

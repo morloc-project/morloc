@@ -546,8 +546,8 @@ generalSerial x0@(AnnoS (Idx i t) _ _) = do
     -- enclose with no extra space, good for compact JSON
     oneLineEnclose :: MDoc -> MDoc -> MDoc -> [MDoc] -> MDoc
     oneLineEnclose lhs rhs _ [] = lhs <> rhs
-    oneLineEnclose lhs rhs _ [first] = lhs <> first <> rhs
-    oneLineEnclose lhs rhs sep (first:rest) = lhs <> first <> foldl (<>) "" [sep <> r | r <- rest] <> rhs
+    oneLineEnclose lhs rhs _ [x] = lhs <> x <> rhs
+    oneLineEnclose lhs rhs sepVal (x:rs) = lhs <> x <> foldl (<>) "" [sepVal <> r | r <- rs] <> rhs
 
 
 -- {- | Remove lambdas introduced through substitution

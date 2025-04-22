@@ -45,16 +45,13 @@ generate cs xs = do
   let home = MC.configHome config
       includeDir = home </> "include"
 
-  callNames <- mapM (MM.metaName . (\(_, i, _, _) -> i)) xs |>> catMaybes |>> map pretty
-  let gastNames = map (pretty . commandName) cs
-      names = callNames <> gastNames
   fdata <- CM.mapM getFData xs -- [FData]
   outfile <- CMS.gets (fromMaybe "nexus.c" . stateOutfile)
   return $
     Script
       { scriptBase = outfile
       , scriptLang = ML.CLang
-      , scriptCode = "." :/ File outfile (Code . render $ main config names fdata cs)
+      , scriptCode = "." :/ File outfile (Code . render $ main config fdata cs)
       , scriptMake = [SysRun . Code $ "gcc -o nexus -O -I" <> MT.pack includeDir <> " " <> MT.pack outfile]
       }
 
@@ -89,8 +86,8 @@ makeSchema mid lang t = do
   return $ Serial.serialAstToMsgpackSchema ast
 
 
-main :: MC.Config -> [MDoc] -> [FData] -> [NexusCommand] -> MDoc
-main config names fdata cdata
+main :: MC.Config -> [FData] -> [NexusCommand] -> MDoc
+main config fdata cdata
     = format (DF.embededFileText DF.nexusTemplate) "// <<<BREAK>>>" [ usageCode fdata cdata, dispatchCode config fdata cdata ]
 
 usageCode :: [FData] -> [NexusCommand] -> MDoc
@@ -147,7 +144,6 @@ dispatchCode config fdata cdata = [idoc|
         where
 
             varName = (pretty . ML.makeExtension $ socketLang socket) <> "_socket"
-            cmd = dquotes . hsep $ socketServerInit socket
 
             makeExecutionArgs :: Lang -> [String]
             makeExecutionArgs CppLang = ["./" <> ML.makeExecutablePoolName CppLang]
@@ -158,8 +154,6 @@ dispatchCode config fdata cdata = [idoc|
             execArgs = makeExecutionArgs (socketLang socket)
             execArgsDoc = vsep [ [idoc|#{varName}.syscmd[#{pretty i}] = strdup("#{pretty arg}");|]
                                | (i, arg) <- zip ([0..] :: [Int]) execArgs ]
-
-            executableName = pretty $ ML.makeExecutablePoolName (socketLang socket)
 
             socketBasename = "pipe-" <> pretty (ML.showLangName (socketLang socket))
 
@@ -174,7 +168,7 @@ dispatchCode config fdata cdata = [idoc|
 
     daemonSets = uniqueFst [ (socketLang s, s) | s <- allSockets ]
 
-    socketDocs = [makeSocketDoc s | (a, s) <- daemonSets]
+    socketDocs = [makeSocketDoc s | (_, s) <- daemonSets]
 
     makeCaseDoc (socket, sub, midx, _, sockets, schemas, returnSchema) = 
         ( [idoc|strcmp(cmd, "#{sub}") == 0|]
@@ -230,7 +224,7 @@ makeGastCaseDoc nc = (cond, body)
             pathStr = encloseSep "{" "}" "," $ map makeElementStr path
 
             makeElementStr :: JsonAccessor -> MDoc
-            makeElementStr (JsonIndex i) = [idoc|{JSON_PATH_TYPE_IDX, {.index = #{pretty i}}}|]
+            makeElementStr (JsonIndex ji) = [idoc|{JSON_PATH_TYPE_IDX, {.index = #{pretty ji}}}|]
             makeElementStr (JsonKey k) = [idoc|{JSON_PATH_TYPE_KEY, {.key = "#{pretty k}"}}|] 
 
 
