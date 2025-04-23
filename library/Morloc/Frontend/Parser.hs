@@ -595,19 +595,21 @@ pVar = do
   v <- pEVar
   exprI $ VarE manifoldConfig v
   where
-    former :: Maybe a -> Maybe a -> Maybe a
-    former (Just x) _ = Just x
-    former _ x = x
+    -- The the rightmost (the newer) value
+    useRight :: Maybe a -> Maybe a -> Maybe a
+    useRight _ (Just x) = Just x
+    useRight x _ = x
 
+    -- Merge manifold configs, replace default values with particular values
     mergeConfigs :: ManifoldConfig -> ManifoldConfig -> ManifoldConfig
     mergeConfigs (ManifoldConfig c1 b1 r1) (ManifoldConfig c2 b2 r2) =
-        ManifoldConfig (former c1 c2) (former b1 b2) (mergeResources r1 r2)
+        ManifoldConfig (useRight c1 c2) (useRight b1 b2) (mergeResources r1 r2)
 
     mergeResources :: Maybe RemoteResources -> Maybe RemoteResources -> Maybe RemoteResources
     mergeResources Nothing x = x
     mergeResources x Nothing = x
     mergeResources (Just (RemoteResources r1 m1 t1 g1)) (Just (RemoteResources r2 m2 t2 g2)) =
-        Just $ RemoteResources (former r1 r2) (former m1 m2) (former t1 t2) (former g1 g2)
+        Just $ RemoteResources (useRight r1 r2) (useRight m1 m2) (useRight t1 t2) (useRight g1 g2)
 
 
 pEVar :: Parser EVar
