@@ -5099,6 +5099,76 @@ uint8_t* make_call_packet_from_cli(
 
 // {{{ slurm support
 
+
+// Parse a slurm walltime string
+//
+// For now, in morloc, I will be fairly strict and allow only two forms:
+//  1. days-hours:minutes:seconds
+//  1. hours:minutes:seconds
+//
+// Examples:
+//   * 5-12:00:00 - 5 and a half days
+//   * 12:00:00 - 12 hours
+//   * 00:30:00 - 30 minutes
+size_t parse_slurm_time(const char* time_str, ERRMSG) {
+    VAL_RETURN_SETUP(size_t, 0)
+
+    int days = 0;
+    int hours = 0;
+    int minutes = 0;
+    int seconds = 0;
+
+    int n;
+    errno = 0;
+    n = sscanf(time_str, "%d-%02d:%02d:%02d", &days, &hours, &minutes, &seconds);
+    // if not all of the 4 values where parsed, try the day-less format
+    if(n != 4){
+        days = 0;
+        n = sscanf(time_str, "%02d:%02d:%02d", &hours, &minutes, &seconds);
+        // if not all of the 3 values where parsed, die
+        if(n != 3){
+            RAISE("Failed to scan slurm walltime string '%s'", time_str);
+        }
+    }
+
+    // Check for negative time
+    if(days < 0 || hours < 0 || minutes < 0 || seconds < 0) {
+        RAISE("Negative time component in '%s'", time_str);
+    }
+
+    // Check for non-canonical time specifications
+    if(hours > 23 || minutes > 59 || seconds > 59) {
+        RAISE("Invalid time component in '%s' (HH<=23 MM<=59 SS<=59)", time_str);
+    }
+
+    // Specifying too many days is probably a mistake and could lead to overflows
+    if(days > 3650){
+        RAISE("Do you really want to run this job for more than 10 years?") 
+    }
+
+    return seconds + 60*minutes + 60*60*hours + 60*60*24*days;
+}
+
+// Convert a number of seconds to a walltime string of format:
+//   days-hours:minutes:seconds
+// hours, minutes, and seconds should be 0-padded to 2 digits
+char* write_slurm_time(int seconds){
+
+    int days = seconds / (60 * 60 * 24);
+    seconds -= days * 60 * 60 * 24;
+
+    int hours = seconds / (60 * 60);
+    seconds -= hours * 60 * 60;
+
+    int minutes = seconds / 60;
+    seconds -= minutes * 60;
+
+    char* time_str = (char*)calloc(16, sizeof(char));
+    snprintf(time_str, 16, "%d-%02d:%02d:%02d", days, hours, minutes, seconds);
+
+    return time_str;
+}
+
 // For each field, -1 indicates undefined
 typedef struct resources {
   int memory; // in Gb
