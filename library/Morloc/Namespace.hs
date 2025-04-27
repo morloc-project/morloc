@@ -582,7 +582,8 @@ newtype SrcName = SrcName {unSrcName :: Text} deriving (Show, Eq, Ord)
 
 newtype Code = Code {unCode :: Text} deriving (Show, Eq, Ord)
 
-newtype TimeInSeconds = TimeInSeconds Int deriving (Show, Eq, Ord)
+newtype TimeInSeconds = TimeInSeconds { unTimeInSeconds :: Int } deriving (Show, Eq, Ord)
+
 
 -- this is a string because the path libraries want strings
 type Path = String
@@ -1264,6 +1265,8 @@ instance Pretty EVar where
 instance Pretty MVar where
   pretty = pretty . unMVar
 
+instance Pretty TimeInSeconds where
+  pretty = pretty . unTimeInSeconds
 
 instance Pretty TVar where
   pretty (TV v) = pretty v

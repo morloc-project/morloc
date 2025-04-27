@@ -859,6 +859,7 @@ express (AnnoS (Idx midx _) (_, lambdaArgs) (LamS _ e@(AnnoS (Idx _ applicationT
   express (AnnoS (Idx midx applicationType) (c, lambdaArgs) x)
 
 express (AnnoS (Idx midx (AppT (VarT v) [t])) (Idx cidx lang, args) (LstS xs)) = do
+  MM.sayVVV $ "express LstS"
   xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
   let x = PolyList (Idx cidx v) (Idx cidx t) xs'
   return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
@@ -874,7 +875,8 @@ express (AnnoS t@(Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs)) 
 express (AnnoS g _ (TupS _)) = error $ "Invalid tuple form: " <> show g
 
 -- records
-express (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
+express (AnnoS (Idx midx t@(NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
+  MM.sayVVV $ "express NamT:" <+> pretty t
   let idxTypes = zipWith mkIdx (map snd entries) (map snd rs)
   xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) idxTypes (map snd entries)
   let x = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip idxTypes xs'))
@@ -882,13 +884,16 @@ express (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entries))
 
 -- expand the record type if possible, otherwise die
 express (AnnoS (Idx midx t) (Idx cidx lang, args) (NamS entries)) = do
+  MM.sayVVV $ "express NamT expand:" <+> pretty t
   mayT <- evalGeneralStep midx (type2typeu t)
   case mayT of
     (Just t') -> express (AnnoS (Idx midx (typeOf t')) (Idx cidx lang, args) (NamS entries))
     Nothing -> MM.throwError . OtherError . render $ "Missing concrete:" <+> "t=" <> pretty t
 
 -- In other cases, it doesn't matter whether we are at the top of the call
-express e = expressDefault e
+express e = do
+    MM.sayVVV "express default"
+    expressDefault e
 
 
 reduceType :: Scope -> Type -> Maybe Type
@@ -903,13 +908,23 @@ expressDefault e@(AnnoS (Idx midx t) (Idx cidx lang, args) _)
   = PolyHead lang midx [Arg i None | Arg i _ <- args] <$> expressPolyExprWrap lang (Idx cidx t) e
 
 
-expressPolyExprWrap :: Lang -> Indexed Type -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyExpr
+expressPolyExprWrap
+    :: Lang
+    -> Indexed Type -- indexed with the concrete type
+    -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
+    -> MorlocMonad PolyExpr
 expressPolyExprWrap l t e@(AnnoS (Idx midx _) _ (LamS _ lamExpr)) = do
   setManifoldConfig midx lamExpr
   expressPolyExprWrapCommon l t e
 expressPolyExprWrap l t e = expressPolyExprWrapCommon l t e
 
+-- | Determine the "remoteness" of an expression
 expressPolyExprWrapCommon :: Lang -> Indexed Type -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyExpr
+-- If the expression is an application, the check if the function index (not the application index)
+expressPolyExprWrapCommon l t e@(AnnoS _ _ (AppS (AnnoS (Idx gidxCall _) _ _) _)) = do
+  bconf <- MM.gets stateBuildConfig
+  mconMap <- MM.gets stateManifoldConfig
+  expressPolyExpr (decideRemoteness bconf (Map.lookup gidxCall mconMap)) l t e
 expressPolyExprWrapCommon l t e@(AnnoS (Idx midx _) _ _) = do
   bconf <- MM.gets stateBuildConfig
   mconMap <- MM.gets stateManifoldConfig
@@ -922,12 +937,12 @@ decideRemoteness _ Nothing l1 l2
 decideRemoteness _ (Just (ManifoldConfig _ _ Nothing)) l1 l2
   | l1 == l2 = Nothing
   | otherwise = Just ForeignCall
-decideRemoteness bconf (Just mconf@(ManifoldConfig _ _ (Just _))) l1 l2 =
+decideRemoteness bconf (Just (ManifoldConfig _ _ (Just res))) l1 l2 =
   case (buildConfigSlurmSupport bconf, l1 /= l2) of
-    (Just True, _) -> Just $ RemoteCall mconf
+    (Just True, _) -> Just $ RemoteCall res
     (_, True) -> Just $ ForeignCall
     _ -> Nothing
-    
+
 
 expressPolyExpr
     :: (Lang -> Lang -> Maybe RemoteForm)

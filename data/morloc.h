@@ -3571,7 +3571,7 @@ typedef union json_path_u {
     size_t index;
 } json_path_u;
 
-typedef struct path_s{
+typedef struct path_s {
     uint8_t json_path_type;
     json_path_u element;
 } path_t;
@@ -3654,8 +3654,11 @@ static char* find_end_of_element(char* json, ERRMSG){
         case '7':
         case '8':
         case '9':
-            // handle integer or real number
-            consume_many("0123456789+-.eE", &json);
+            {
+                // handle integer or real number
+                char decimal_chars[] = "0123456789+-.eE";
+                consume_many(decimal_chars, &json);
+            }
             break;
         default:
             RAISE("Invalid JSON element: %s\n", json)
@@ -3768,10 +3771,16 @@ typedef struct __attribute__((packed)) packet_command_type_s {
     uint8_t padding[7]; // pad to 8 bytes
 } packet_command_type_t;
 
+#define PACKET_ENTRYPOINT_LOCAL      0x00
+#define PACKET_ENTRYPOINT_REMOTE_SFS 0x01 // packet is from a parent, and reader
+                                          // is a worker on a shared file system
+                                          // (e.g., in a slurm environment)
+
 // call: send zero or more data packets as arguments to manifold midx
 typedef struct __attribute__((packed)) packet_command_call_s {
     command_type_t type; // identifier for resolving unions
-    uint8_t padding[3]; // padding in the middle to align midx
+    uint8_t entrypoint; // is this call local, remote, or something more nuanced
+    uint8_t padding[2]; // padding in the middle to align midx
     uint32_t midx;
 } packet_command_call_t;
 
@@ -3883,10 +3892,18 @@ bool packet_is_ping(const uint8_t* packet, ERRMSG){
     return header->command.cmd_type.type == PACKET_TYPE_PING;
 }
 
-bool packet_is_call(const uint8_t* packet, ERRMSG){
+bool packet_is_local_call(const uint8_t* packet, ERRMSG){
     BOOL_RETURN_SETUP
     morloc_packet_header_t* header = TRY(read_morloc_packet_header, packet);
-    return header->command.cmd_type.type == PACKET_TYPE_CALL;
+    return header->command.cmd_type.type == PACKET_TYPE_CALL &&
+           header->command.call.entrypoint == PACKET_ENTRYPOINT_LOCAL;
+}
+
+bool packet_is_remote_call(const uint8_t* packet, ERRMSG){
+    BOOL_RETURN_SETUP
+    morloc_packet_header_t* header = TRY(read_morloc_packet_header, packet);
+    return header->command.cmd_type.type == PACKET_TYPE_CALL &&
+           header->command.call.entrypoint == PACKET_ENTRYPOINT_REMOTE_SFS;
 }
 
 
@@ -4209,7 +4226,7 @@ uint8_t* make_morloc_call_packet(uint32_t midx, const uint8_t** arg_packets, siz
     packet_command_t cmd = {
       .call = {
         .type = PACKET_TYPE_CALL,
-        .padding = {0, 0, 0},
+        .padding = {0, 0},
         .midx = midx,
       }
     };
@@ -5170,12 +5187,12 @@ char* write_slurm_time(int seconds){
 }
 
 // For each field, -1 indicates undefined
-typedef struct resources {
+typedef struct resources_s {
   int memory; // in Gb
-  int time; // in seconds, for 32bit int, you are limited to 68 years
+  int time; // walltime in seconds
   int cpus;
   int gpus;
-} resources;
+} resources_t;
 
 #define DEFAULT_XXHASH_SEED 0
 
@@ -5227,12 +5244,11 @@ bool parse_morloc_call_arguments(
 
 // Before calling this function, every argument must be converted to a packet
 //   * if the data is native, then it should be converted
-uint8_t* remoteCall(
+uint8_t* remote_call(
     int midx,
     const char* socket_path, // domain socket file for target pool
     const char* cache_path, // path where args and results will be written
-    const resources* res, // required system resources (mem, cpus, etc)
-    const Schema** arg_schemas, // schemas for each argument
+    const resources_t* res, // required system resources (mem, cpus, etc)
     const uint8_t** arg_packets, // voidstar for each argument
     size_t nargs, // number of arguments
     ERRMSG
@@ -5240,6 +5256,8 @@ uint8_t* remoteCall(
     PTR_RETURN_SETUP(uint8_t)
 
     uint64_t seed = (uint64_t) midx;
+
+    const Schema** arg_schemas = NULL; // get schemas from the argument
 
     // The function hash determins the output file name on the remote node and is
     // used to determine if this computation has already been run. The function

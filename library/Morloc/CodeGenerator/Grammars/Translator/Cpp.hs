@@ -313,6 +313,7 @@ serialize nativeExpr s0 = do
       , poolExpr = putCommand
       , poolPriorLines = before
       , poolPriorExprs = []
+      , poolIsRemote = False
       }
 
   where
@@ -458,29 +459,40 @@ translateSegment m0 = do
 
   makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> CppTranslator PoolDocs
   makeSerialExpr _ (ManS_ e) = return e
-  makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) remote args) _) = do 
+  makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) ForeignCall args) _) = do 
     -- arguments sent to foreign_call:
     --  * basename of socket, e.g., "pipe-python3"
     --  * manifold id
     --  * list of voidstar packets
     --  * NULL sentinel
-    let argList = [ dquotes socketFile , pretty mid ] <> map argNamer args <> ["NULL"]
-    call <- case remote of
-            ForeignCall -> return [idoc|foreign_call#{tupled argList}|]
-            (RemoteCall _) -> return [idoc|REMOTE_CALL|]
-    return $ PoolDocs
-      { poolCompleteManifolds = []
-      , poolExpr = call
-      , poolPriorLines = []
-      , poolPriorExprs = []
+    let argList = [ dquotes socketFile, pretty mid ] <> map argNamer args <> ["NULL"]
+        call = [idoc|foreign_call#{tupled argList}|]
+    return $ defaultValue
+      { poolExpr = call
+      , poolIsRemote = False
       }
+  makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) (RemoteCall res) args) _) = do
+    let resMem = pretty $ remoteResourcesMemory res
+        resTime = pretty $ remoteResourcesTime res
+        resCPU = pretty $ remoteResourcesThreads res
+        resGPU = pretty $ remoteResourcesGpus res
+        resVarname = "resources_" <> pretty mid
+        resourcesDef = [idoc|resources_t #{resVarname} = {#{resMem}, #{resTime}, #{resCPU}, #{resGPU}};|]
+        argList = list (map argNamer args)
+        call = "remote_call" <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resVarname, argList]
+    return $ defaultValue
+      { poolExpr = call
+      , poolPriorLines = [resourcesDef]
+      , poolIsRemote = True
+      }
+
   makeSerialExpr _ (ReturnS_ e) = return $ e {poolExpr = "return(" <> poolExpr e <> ");"}
   makeSerialExpr _ (SerialLetS_ letIndex sa sb) = return $ makeLet svarNamer letIndex serialType sa sb
   makeSerialExpr (NativeLetS _ (typeFof -> t) _) (NativeLetS_ letIndex na sb) = do
     typestr <- cppTypeOf t
     return $ makeLet nvarNamer letIndex typestr na sb
-  makeSerialExpr _ (LetVarS_ _ i) = return $ PoolDocs [] (svarNamer i) [] []
-  makeSerialExpr _ (BndVarS_ _ i) = return $ PoolDocs [] (svarNamer i) [] []
+  makeSerialExpr _ (LetVarS_ _ i) = return $ defaultValue { poolExpr = svarNamer i }
+  makeSerialExpr _ (BndVarS_ _ i) = return $ defaultValue { poolExpr = svarNamer i }
   makeSerialExpr _ (SerializeS_ s e) = do
     se <- serialize (poolExpr e) s
     return $ mergePoolDocs (\_ -> poolExpr se) [e, se]
@@ -495,8 +507,8 @@ translateSegment m0 = do
     return $ e {poolExpr = "return" <> parens (poolExpr e) <> ";"}
   makeNativeExpr _ (SerialLetN_ i sa nb) = return $ makeLet svarNamer i serialType sa nb
   makeNativeExpr (NativeLetN _ (typeFof -> t1) _) (NativeLetN_ i na nb) = makeLet nvarNamer i <$> cppTypeOf t1 <*> pure na <*> pure nb
-  makeNativeExpr _ (LetVarN_ _ i) = return $ PoolDocs [] (nvarNamer i) [] []
-  makeNativeExpr _ (BndVarN_ _ i) = return $ PoolDocs [] (nvarNamer i) [] []
+  makeNativeExpr _ (LetVarN_ _ i) = return $ defaultValue { poolExpr = nvarNamer i }
+  makeNativeExpr _ (BndVarN_ _ i) = return $ defaultValue { poolExpr = nvarNamer i }
   makeNativeExpr _ (DeserializeN_ t s e) = do
     typestr <- cppTypeOf t
     (deserialized, assignments) <- deserialize (poolExpr e) typestr s
@@ -524,11 +536,11 @@ translateSegment m0 = do
     let p = mergePoolDocs (const v') (map snd rs)
     return (p {poolPriorLines = poolPriorLines p <> [decl]})
 
-  makeNativeExpr _ (LogN_         _ x) = return (PoolDocs [] (if x then "true" else "false") [] [])
-  makeNativeExpr _ (RealN_        _ x) = return (PoolDocs [] (viaShow x) [] [])
-  makeNativeExpr _ (IntN_         _ x) = return (PoolDocs [] (viaShow x) [] [])
-  makeNativeExpr _ (StrN_         _ x) = return (PoolDocs [] [idoc|std::string("#{pretty x}")|] [] [])
-  makeNativeExpr _ (NullN_        _  ) = return (PoolDocs [] "null" [] [])
+  makeNativeExpr _ (LogN_         _ x) = return $ defaultValue { poolExpr = if x then "true" else "false" }
+  makeNativeExpr _ (RealN_        _ x) = return $ defaultValue { poolExpr = viaShow x }
+  makeNativeExpr _ (IntN_         _ x) = return $ defaultValue { poolExpr = viaShow x }
+  makeNativeExpr _ (StrN_         _ x) = return $ defaultValue { poolExpr = [idoc|std::string("#{pretty x}")|] }
+  makeNativeExpr _ (NullN_        _  ) = return $ defaultValue { poolExpr = "null" }
   makeNativeExpr _ _ = error "Unreachable"
 
   templateArguments :: [(MT.Text, TypeF)] -> CppTranslator MDoc
@@ -539,7 +551,7 @@ translateSegment m0 = do
 
 
   makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
-  makeLet namer letIndex typestr (PoolDocs ms1 e1 rs1 pes1) (PoolDocs ms2 e2 rs2 pes2) =
+  makeLet namer letIndex typestr (PoolDocs ms1 e1 rs1 pes1 isremote1) (PoolDocs ms2 e2 rs2 pes2 isremote2) =
     let letAssignment = [idoc|#{typestr} #{namer letIndex} = #{e1};|]
         rs = rs1 <> [ letAssignment ] <> rs2 <> [e2]
     in PoolDocs
@@ -547,6 +559,7 @@ translateSegment m0 = do
       , poolExpr = vsep rs
       , poolPriorLines = []
       , poolPriorExprs = pes1 <> pes2
+      , poolIsRemote = isremote1 || isremote2
       }
 
 makeManifold

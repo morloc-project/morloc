@@ -190,21 +190,28 @@ translateSegment m0 =
 
     makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
     makeSerialExpr _ (ManS_ f) = return f
-    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) remote args) _) = do
-      call <- case remote of
-        ForeignCall -> return [idoc|morloc_foreign_call(#{makeSocketPath socketFile}, #{pretty mid}L, list#{tupled (map argNamer args)})|]
-        (RemoteCall _) -> return [idoc|REMOTE_CALL|] 
-      return $ PoolDocs
-        { poolCompleteManifolds = []
-        , poolExpr = call
-        , poolPriorLines = []
-        , poolPriorExprs = []
+
+    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) ForeignCall args) _) = do 
+      let call = [idoc|morloc_foreign_call(#{makeSocketPath socketFile}, #{pretty mid}L, list#{tupled (map argNamer args)})|]
+      return $ defaultValue { poolExpr = call, poolIsRemote = False }
+    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) (RemoteCall res) args) _) = do
+      let resMem = pretty $ remoteResourcesMemory res
+          resTime = pretty $ remoteResourcesTime res
+          resCPU = pretty $ remoteResourcesThreads res
+          resGPU = pretty $ remoteResourcesGpus res
+          resources = [idoc|list(mem=#{resMem}L, time=#{resTime}L, cpus=#{resCPU}L, gpus=#{resGPU}L)|]
+          argList = list (map argNamer args)
+          call = "morloc_remote_call" <> tupled [pretty mid, makeSocketPath socketFile, dquotes ".morloc-cache", resources, argList]
+      return $ defaultValue
+        { poolExpr = call
+        , poolIsRemote = True
         }
+
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
     makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet svarNamer i e1 e2
     makeSerialExpr _ (NativeLetS_ i e1 e2) = return $ makeLet nvarNamer i e1 e2
-    makeSerialExpr _ (LetVarS_ _ i) = return $ PoolDocs [] (svarNamer i) [] []
-    makeSerialExpr _ (BndVarS_ _ i) = return $ PoolDocs [] (svarNamer i) [] []
+    makeSerialExpr _ (LetVarS_ _ i) = return $ defaultValue { poolExpr = svarNamer i }
+    makeSerialExpr _ (BndVarS_ _ i) = return $ defaultValue { poolExpr = svarNamer i }
     makeSerialExpr _ (SerializeS_ s e) = do
       (serialized, assignments) <- serialize (poolExpr e) s
       return $ e {poolExpr = serialized, poolPriorLines = poolPriorLines e <> assignments}
@@ -217,8 +224,8 @@ translateSegment m0 =
         return $ x { poolExpr = "return(" <> poolExpr x <> ")" }
     makeNativeExpr _ (SerialLetN_ i x1 x2) = return $ makeLet svarNamer i x1 x2
     makeNativeExpr _ (NativeLetN_ i x1 x2) = return $ makeLet nvarNamer i x1 x2
-    makeNativeExpr _ (LetVarN_ _ i) = return $ PoolDocs [] (nvarNamer i) [] []
-    makeNativeExpr _ (BndVarN_ _ i) = return $ PoolDocs [] (nvarNamer i) [] []
+    makeNativeExpr _ (LetVarN_ _ i) = return $ defaultValue { poolExpr = nvarNamer i }
+    makeNativeExpr _ (BndVarN_ _ i) = return $ defaultValue { poolExpr = nvarNamer i }
     makeNativeExpr _ (DeserializeN_ _ s x) = do
         (deserialized, assignments) <- deserialize (poolExpr x) s
         return $ x
@@ -227,7 +234,7 @@ translateSegment m0 =
           }
     makeNativeExpr _ (AccN_ _ _ x k) =
         return $ x {poolExpr = recordAccess (poolExpr x) (pretty k)}
-    makeNativeExpr _ (SrcN_ _ src) = return $ PoolDocs [] (pretty (srcName src)) [] []
+    makeNativeExpr _ (SrcN_ _ src) = return $ defaultValue { poolExpr = pretty (srcName src) }
     makeNativeExpr _ (ListN_ v _ xs) = return $ mergePoolDocs rlist xs where
        rlist es' = case v of
          (FV _ (CV "numeric")) -> "c" <> tupled es'
@@ -244,11 +251,11 @@ translateSegment m0 =
                 let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) es'
                 in "list" <> tupled entries'
 
-    makeNativeExpr _ (LogN_ _ v) = return $ PoolDocs [] (if v then "TRUE" else "FALSE") [] []
-    makeNativeExpr _ (RealN_ _ v) = return $ PoolDocs [] (viaShow v) [] []
-    makeNativeExpr _ (IntN_ _ v) = return $ PoolDocs [] (viaShow v) [] []
-    makeNativeExpr _ (StrN_ _ v) = return $ PoolDocs [] (dquotes $ pretty v) [] []
-    makeNativeExpr _ (NullN_ _) = return $ PoolDocs [] "NULL" [] []
+    makeNativeExpr _ (LogN_ _ v) = return $ defaultValue { poolExpr = if v then "TRUE" else "FALSE" }
+    makeNativeExpr _ (RealN_ _ v) = return $ defaultValue { poolExpr = viaShow v }
+    makeNativeExpr _ (IntN_ _ v) = return $ defaultValue { poolExpr = viaShow v }
+    makeNativeExpr _ (StrN_ _ v) = return $ defaultValue { poolExpr = dquotes (pretty v) }
+    makeNativeExpr _ (NullN_ _) = return $ defaultValue { poolExpr = "NULL" }
 
     makeSerialArg :: SerialArg -> SerialArg_ PoolDocs PoolDocs -> Index (TypeS, PoolDocs)
     makeSerialArg sr (SerialArgManifold_ x) = return (typeSof sr, x)
@@ -258,18 +265,20 @@ translateSegment m0 =
     makeNativeArg nr (NativeArgManifold_ x) = return (typeMof nr, x)
     makeNativeArg nr (NativeArgExpr_ x) = return (typeMof nr, x)
 
-    makeFunction :: MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> MDoc
-    makeFunction mname args priorLines body =
-      let def = mname <+> "<-" <+> "function" <> tupled (map argNamer args)
-      in block 4 def (vsep $ priorLines <> [body])
+    makeFunction :: MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Bool -> MDoc
+    makeFunction mname args priorLines body isRemote
+      = block 4 def (vsep $ priorLines <> [body])
+      where
+        ext = if isRemote then "_remote" else "" 
+        def = mname <> ext <+> "<-" <+> "function" <> tupled (map argNamer args)
 
     makeLambda :: [Arg TypeM] -> MDoc -> MDoc
     makeLambda args body = "function" <+> tupled (map argNamer args) <> "{" <> body <> "}"
 
     makeLet :: (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
-    makeLet namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
+    makeLet namer i (PoolDocs ms1' e1' rs1 pes1 rm1) (PoolDocs ms2' e2' rs2 pes2 rm2) =
       let rs = rs1 ++ [ namer i <+> "<-" <+> e1' ] ++ rs2
-      in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
+      in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2) (rm1 || rm2)
 
 makePool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc
 makePool sources dynlibs manifolds

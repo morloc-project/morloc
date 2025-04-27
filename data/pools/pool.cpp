@@ -147,8 +147,37 @@ uint8_t* dispatch(const uint8_t* msg){
         return pong;
     }
 
-    bool is_call = packet_is_call(msg, &errmsg);
-    if(!is_call){
+    bool is_local_call = packet_is_local_call(msg, &errmsg);
+    bool is_remote_call = packet_is_remote_call(msg, &errmsg);
+    errmsg = NULL;
+    if(is_local_call || is_remote_call){
+        morloc_call_t* call_packet = read_morloc_call_packet(msg, &errmsg);
+        uint32_t mid = call_packet->midx;
+        const uint8_t** args = (const uint8_t**)call_packet->args;
+        free(call_packet);
+
+        try {
+
+    // AUTO dispatch statements start
+    // <<<BREAK>>>
+    // AUTO dispatch statements end
+
+        } catch (const std::exception& e) {
+            // Wrap any exceptions in a failing data packet
+            return make_fail_packet(e.what());
+        } catch (...) {
+            // Wrap any unexpected exceptions in failing data packet
+            return make_fail_packet("An unknown error occurred");
+        }
+
+    }
+
+    if(is_remote_call){
+        fprintf(stderr, "Remote calls not yet handled in C");
+        exit(1);
+    }
+
+    if(!is_local_call){
         if(errmsg != NULL) {
             return make_fail_packet(errmsg);
         } else {
@@ -156,24 +185,6 @@ uint8_t* dispatch(const uint8_t* msg){
         }
     }
 
-    morloc_call_t* call_packet = read_morloc_call_packet(msg, &errmsg);
-    uint32_t mid = call_packet->midx;
-    const uint8_t** args = (const uint8_t**)call_packet->args;
-    free(call_packet);
-
-    try {
-
-// AUTO dispatch statements start
-// <<<BREAK>>>
-// AUTO dispatch statements end
-
-    } catch (const std::exception& e) {
-        // Wrap any exceptions in a failing data packet
-        return make_fail_packet(e.what());
-    } catch (...) {
-        // Wrap any unexpected exceptions in failing data packet
-        return make_fail_packet("An unknown error occurred");
-    }
 
     return make_fail_packet("No manifold found");
 }

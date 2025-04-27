@@ -484,7 +484,7 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                 goto error;
             }
 
-            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) { 
+            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) {
                 PyErr_Format(PyExc_TypeError, "Expected list for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
                 goto error;
             }
@@ -645,11 +645,11 @@ static PyObject* pybinding__start_daemon(PyObject* self, PyObject* args) { MAYFA
     const char* tmpdir;
     const char* shm_basename;
     size_t shm_default_size;
- 
+
     if (!PyArg_ParseTuple(args, "sssk", &socket_path, &tmpdir, &shm_basename, &shm_default_size)) {
       return NULL;
     }
- 
+
     language_daemon_t* daemon = PyTRY(
         start_daemon,
         socket_path,
@@ -657,7 +657,7 @@ static PyObject* pybinding__start_daemon(PyObject* self, PyObject* args) { MAYFA
         shm_basename,
         shm_default_size
     );
- 
+
     return PyCapsule_New(daemon, "language_daemon_t", NULL);
 }
 
@@ -683,7 +683,7 @@ static PyObject* pybinding__close_daemon(PyObject* self, PyObject* args) {
 static PyObject*  pybinding__read_morloc_call_packet(PyObject* self, PyObject* args){ MAYFAIL
     char* packet;
     size_t packet_size;
-  
+
     if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
         PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
         return NULL;
@@ -696,7 +696,7 @@ static PyObject*  pybinding__read_morloc_call_packet(PyObject* self, PyObject* a
     for(size_t i = 0; i < call_packet->nargs; i++){
         size_t arg_packet_size = PyTRY(morloc_packet_size, call_packet->args[i]);
         PyObject* py_arg = PyBytes_FromStringAndSize(
-            (char*)call_packet->args[i], 
+            (char*)call_packet->args[i],
             arg_packet_size
         );
         PyList_SetItem(py_args, i, py_arg);
@@ -758,15 +758,15 @@ static PyObject*  pybinding__close_socket(PyObject* self, PyObject* args){
 static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     PyObject* obj;
     const char* schema_str;
-  
+
     if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
         return NULL;
     }
-  
+
     Schema* schema = PyTRY(parse_schema, &schema_str);
-  
+
     void* voidstar = to_voidstar(schema, obj);
-  
+
     if(!voidstar){
         return NULL;
     }
@@ -787,7 +787,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     const char* packet;
     size_t packet_size;
     const char* schema_str;
-  
+
     if (!PyArg_ParseTuple(args, "y#s", &packet, &packet_size, &schema_str)) {
         return NULL;
     }
@@ -821,7 +821,7 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     const uint8_t** arg_packets = NULL;
     Py_ssize_t nargs;
     Py_ssize_t i;
-    
+
     // Parse arguments: string, integer, and sequence
     if (!PyArg_ParseTuple(args, "siO", &socket_path, &mid, &py_args)) {
         return NULL;
@@ -858,7 +858,7 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     uint8_t* packet = PyTRY_WITH(free(arg_packets), make_morloc_call_packet, (uint32_t)mid, arg_packets, (size_t)nargs);
 
     free(arg_packets);
-    
+
     uint8_t* result = PyTRY_WITH(free(packet), send_and_receive_over_socket, socket_path, packet);
     free(packet);
 
@@ -868,10 +868,75 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
 }
 
 
+static PyObject* pybinding__remote_call(PyObject* self, PyObject* args) { MAYFAIL
+    int midx;
+    char* socket_path;
+    char* cache_path;
+    PyObject* res_struct; // python strut that is converted to a resource_t struct
+    PyObject* arg_packets_obj; // python list of bytes types
+
+    if (!PyArg_ParseTuple(args, "issOOO", &midx, &socket_path, &cache_path, &res_struct, &arg_packets_obj)) {
+        return NULL;
+    }
+
+    if (!PyBytes_Check(res_struct)) {
+        PyErr_SetString(PyExc_TypeError, "res_struct must be a bytes object from struct.pack()");
+        return NULL;
+    }
+
+    // Ensure the resources struct is the right size
+    if (PyBytes_Size(res_struct) != sizeof(resources_t)) {
+        PyErr_SetString(PyExc_ValueError, "Struct size mismatch");
+        return NULL;
+    }
+
+    resources_t* res = (resources_t*)PyBytes_AsString(res_struct);
+    if (!res) return NULL;  // Error already set
+
+    uint8_t* result = NULL;
+
+    Py_ssize_t nargs = PyList_Size(arg_packets_obj);
+
+    const uint8_t** arg_packets = calloc(nargs, sizeof(uint8_t*));
+    if (!arg_packets) {
+        PyErr_SetString(PyExc_MemoryError, "Memory allocation failed");
+        free(arg_packets);
+        return NULL;
+    }
+
+    for (Py_ssize_t i = 0; i < nargs; i++) {
+        PyObject* packet_obj = PyList_GetItem(arg_packets_obj, i);
+        if (!PyBytes_Check(packet_obj)) {
+            PyErr_SetString(PyExc_TypeError, "Packets must be bytes");
+            goto cleanup;
+        }
+        arg_packets[i] = (uint8_t*)PyBytes_AsString(packet_obj);
+    }
+
+    result = PyTRY(
+        remote_call,
+        midx,
+        socket_path,
+        cache_path,
+        res,
+        arg_packets,
+        (size_t)nargs
+    );
+
+cleanup:
+    free(arg_packets);
+
+    if (!result) Py_RETURN_NONE;
+    PyObject* py_result = PyBytes_FromString((char*)result);
+    free(result);
+    return py_result;
+}
+
+
 static PyObject* pybinding__is_ping(PyObject* self, PyObject* args) { MAYFAIL
     char* packet;
     size_t packet_size;
-  
+
     if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
         PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
         return NULL;
@@ -880,24 +945,40 @@ static PyObject* pybinding__is_ping(PyObject* self, PyObject* args) { MAYFAIL
     bool is_ping = PyTRY(packet_is_ping, (uint8_t*)packet);
 
     PyObject* obj = PyBool_FromLong((long)is_ping);
-    
+
     return obj;
 }
 
 
-static PyObject* pybinding__is_call(PyObject* self, PyObject* args) { MAYFAIL
+static PyObject* pybinding__is_local_call(PyObject* self, PyObject* args) { MAYFAIL
     char* packet;
     size_t packet_size;
-  
+
     if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
         PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
         return NULL;
     }
 
-    bool is_call = PyTRY(packet_is_call, (uint8_t*)packet);
+    bool is_local_call = PyTRY(packet_is_local_call, (uint8_t*)packet);
 
-    PyObject* obj = PyBool_FromLong((long)is_call);
-    
+    PyObject* obj = PyBool_FromLong((long)is_local_call);
+
+    return obj;
+}
+
+static PyObject* pybinding__is_remote_call(PyObject* self, PyObject* args) { MAYFAIL
+    char* packet;
+    size_t packet_size;
+
+    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
+        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
+        return NULL;
+    }
+
+    bool is_remote_call = PyTRY(packet_is_remote_call, (uint8_t*)packet);
+
+    PyObject* obj = PyBool_FromLong((long)is_remote_call);
+
     return obj;
 }
 
@@ -905,7 +986,7 @@ static PyObject* pybinding__is_call(PyObject* self, PyObject* args) { MAYFAIL
 static PyObject* pybinding__pong(PyObject* self, PyObject* args) { MAYFAIL
     char* packet;
     size_t packet_size;
-  
+
     if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
         PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
         return NULL;
@@ -922,29 +1003,29 @@ static PyObject* pybinding__shinit(PyObject* self, PyObject* args) { MAYFAIL
     const char* shm_basename;
     size_t volume_index;
     size_t shm_default_size;
- 
+
     if (!PyArg_ParseTuple(args, "skk", &shm_basename, &volume_index, &shm_default_size)) {
       return NULL;
     }
- 
+
     shm_t* shm = PyTRY(
         shinit,
         shm_basename,
         volume_index,
         shm_default_size
     );
- 
+
     return PyCapsule_New(shm, "shm_t", NULL);
 }
 
 
 static PyObject* pybinding__make_fail_packetg(PyObject* self, PyObject* args) { MAYFAIL
     const char* packet_errmsg;
- 
+
     if (!PyArg_ParseTuple(args, "s", &packet_errmsg)) {
       return NULL;
     }
- 
+
     uint8_t* packet = make_fail_packet(packet_errmsg);
 
     size_t packet_size = PyTRY(morloc_packet_size, packet);
@@ -965,9 +1046,11 @@ static PyMethodDef Methods[] = {
     {"get_value", pybinding__get_value, METH_VARARGS, "Convert a packet to a Python value"},
     {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},
     {"is_ping", pybinding__is_ping, METH_VARARGS, "Packet is a ping"},
-    {"is_call", pybinding__is_call, METH_VARARGS, "Packet is a call"},
+    {"is_local_call", pybinding__is_local_call, METH_VARARGS, "Packet is a local call"},
+    {"is_remote_call", pybinding__is_remote_call, METH_VARARGS, "Packet is a remote call"},
     {"pong", pybinding__pong, METH_VARARGS, "Return a ping"},
     {"make_fail_packet", pybinding__make_fail_packetg, METH_VARARGS, "Create a fail packet from an error message"},
+    {"remote_call", pybinding__remote_call, METH_VARARGS, "Make a call to a remote cluster"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 

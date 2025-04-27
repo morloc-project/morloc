@@ -11,7 +11,8 @@ library(parallel)
 
 morloc_is_ping                       <- function(...){ .Call("morloc_is_ping",                       ...) }
 morloc_pong                          <- function(...){ .Call("morloc_pong",                          ...) }
-morloc_is_call                       <- function(...){ .Call("morloc_is_call",                       ...) }
+morloc_is_local_call                 <- function(...){ .Call("morloc_is_local_call",                 ...) }
+morloc_is_remote_call                <- function(...){ .Call("morloc_is_remote_call",                ...) }
 morloc_make_fail_packet              <- function(...){ .Call("morloc_make_fail_packet",              ...) }
 morloc_wait_for_client               <- function(...){ .Call("morloc_wait_for_client",               ...) }
 morloc_stream_from_client            <- function(...){ .Call("morloc_stream_from_client",            ...) }
@@ -37,16 +38,20 @@ global_state <- list()
 run_job <- function(client_fd) {
   tryCatch({
     client_data <- morloc_stream_from_client(client_fd)
+
+    is_local <- morloc_is_local_call(client_data)
+    is_remote <- morloc_is_remote_call(client_data)
     
     if(morloc_is_ping(client_data)){
       response <- morloc_pong(client_data)
     }
-    else if(morloc_is_call(client_data)){
+    else if(is_local || is_remote){
+      ext <- if(is_remote) { "_remote" } else { "" }
       call_packet <- morloc_read_morloc_call_packet(client_data)
       midx <- call_packet[[1]]
       args <- call_packet[[2]]
       
-      mlc_pool_function_name <- paste0("m", midx)
+      mlc_pool_function_name <- paste0("m", midx, ext)
       
       if(exists(mlc_pool_function_name)){
         response <- tryCatch({

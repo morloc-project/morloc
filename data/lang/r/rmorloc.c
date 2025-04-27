@@ -9,7 +9,10 @@
 
 #include "morloc.h"
 
-// {{{ error handling
+// {{{ macros
+
+// get a list element by name
+#define GET_LIST_ELEMENT(x, name) (VECTOR_ELT(x, Rf_match_string(name, x)))
 
 #define MAYFAIL char* child_errmsg_ = NULL;
 
@@ -908,14 +911,25 @@ SEXP morloc_is_ping(SEXP packet_r) { MAYFAIL
 }
 
 
-SEXP morloc_is_call(SEXP packet_r) { MAYFAIL
+SEXP morloc_is_local_call(SEXP packet_r) { MAYFAIL
     if (TYPEOF(packet_r) != RAWSXP) {
         error("packet must be a raw vector");
     }
 
-    bool is_call = R_TRY(packet_is_call, RAW(packet_r));
+    bool is_local_call = R_TRY(packet_is_local_call, RAW(packet_r));
 
-    return ScalarLogical(is_call);
+    return ScalarLogical(is_local_call);
+}
+
+
+SEXP morloc_is_remote_call(SEXP packet_r) { MAYFAIL
+    if (TYPEOF(packet_r) != RAWSXP) {
+        error("packet must be a raw vector");
+    }
+
+    bool is_remote_call = R_TRY(packet_is_remote_call, RAW(packet_r));
+
+    return ScalarLogical(is_remote_call);
 }
 
 
@@ -936,6 +950,7 @@ SEXP morloc_pong(SEXP packet_r) { MAYFAIL
     return result_r;
 }
 
+
 SEXP morloc_make_fail_packet(SEXP failure_message_r) { MAYFAIL
     char* failure_message = CHAR(STRING_ELT(failure_message_r, 0));
     uint8_t* fail_packet = make_fail_packet(failure_message);
@@ -948,6 +963,46 @@ SEXP morloc_make_fail_packet(SEXP failure_message_r) { MAYFAIL
     UNPROTECT(1);
     return packet_r;
 }
+
+
+SEXP morloc_remote_call(SEXP midx, SEXP socket_path, SEXP cache_path, SEXP resources, SEXP arg_packets) { MAYFAIL
+    // Extract integer from R vector
+    int c_midx = INTEGER(midx)[0];
+
+    // Convert R character vectors to C strings
+    char* c_socket_path = CHAR(STRING_ELT(socket_path, 0));
+    char* c_cache_path = CHAR(STRING_ELT(cache_path, 0));
+
+    // Extract resource values from named list
+    resources_t c_resources;
+    c_resources.memory = INTEGER(GET_LIST_ELEMENT(resources, "memory"))[0];
+    c_resources.time = INTEGER(GET_LIST_ELEMENT(resources, "time"))[0];
+    c_resources.cpus = INTEGER(GET_LIST_ELEMENT(resources, "cpus"))[0];
+    c_resources.gpus = INTEGER(GET_LIST_ELEMENT(resources, "gpus"))[0];
+
+    // Process list of raw vectors
+    size_t nargs = LENGTH(arg_packets);
+    uint8_t** c_arg_packets = (uint8_t**) R_alloc(nargs, sizeof(uint8_t*));
+    for (size_t i = 0; i < nargs; i++) {
+        SEXP raw_vec = VECTOR_ELT(arg_packets, i);
+        c_arg_packets[i] = RAW(raw_vec);
+    }
+
+    // Execute remote call with error propagation
+    uint8_t* result_packet = R_TRY(remote_call, c_midx, c_socket_path, c_cache_path, 
+                                  c_resources, c_arg_packets, nargs);
+
+    // Get result packet size
+    size_t packet_size = R_TRY(morloc_packet_size, result_packet);
+
+    // Create and populate return vector
+    SEXP result_packet_r = PROTECT(allocVector(RAWSXP, packet_size));
+    memcpy(RAW(result_packet_r), result_packet, packet_size);
+    UNPROTECT(1);
+
+    return result_packet_r;
+}
+
 
 // }}} exported functions
 
@@ -964,7 +1019,9 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_get_value", (DL_FUNC) &morloc_get_value, 2},
         {"morloc_put_value", (DL_FUNC) &morloc_put_value, 2},
         {"morloc_is_ping", (DL_FUNC) &morloc_is_ping, 1},
-        {"morloc_is_call", (DL_FUNC) &morloc_is_call, 1},
+        {"morloc_is_local_call", (DL_FUNC) &morloc_is_local_call, 1},
+        {"morloc_is_remote_call", (DL_FUNC) &morloc_is_remote_call, 1},
+        {"morloc_remote_call", (DL_FUNC) &morloc_is_remote_call, 1},
         {"morloc_pong", (DL_FUNC) &morloc_pong, 1},
         {"morloc_make_fail_packet", (DL_FUNC) &morloc_make_fail_packet, 1},
         {NULL, NULL, 0}

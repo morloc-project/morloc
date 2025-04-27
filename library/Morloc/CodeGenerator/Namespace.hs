@@ -372,7 +372,7 @@ abiappend f g = runIdentity . abiappendM (return2 f) (return2 g)
 instance Pretty FVar where
     pretty (FV _ c) = pretty c
 
-data RemoteForm = ForeignCall | RemoteCall ManifoldConfig
+data RemoteForm = ForeignCall | RemoteCall RemoteResources
     deriving(Show, Eq)
 
 data PolyHead = PolyHead Lang Int [Arg None] PolyExpr

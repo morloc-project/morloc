@@ -39,6 +39,8 @@ data PoolDocs = PoolDocs
   , poolPriorExprs :: [MDoc]
     -- ^ expressions that should precede this manifold, may include helper
     -- functions or imports
+  , poolIsRemote :: Bool
+    -- ^ is this a remote call?
   }
 
 instance Defaultable PoolDocs where
@@ -47,17 +49,19 @@ instance Defaultable PoolDocs where
     , poolExpr = ""
     , poolPriorLines = []
     , poolPriorExprs = []
+    , poolIsRemote = False
     }
 
 -- | Merge a series of pools, keeping prior lines, expression and manifolds, but
 -- merging bodies with a function. For example, merge all elements in a list and
--- process the poolExpr variales into list syntax in the given language.
+-- process the poolExpr variables into list syntax in the given language.
 mergePoolDocs :: ([MDoc] -> MDoc) -> [PoolDocs] -> PoolDocs
 mergePoolDocs f ms = PoolDocs
     { poolCompleteManifolds = concatMap poolCompleteManifolds ms
     , poolExpr = f (map poolExpr ms)
     , poolPriorLines = concatMap poolPriorLines ms
     , poolPriorExprs = concatMap poolPriorExprs ms
+    , poolIsRemote = foldl (||) False (map poolIsRemote ms)
     }
 
 
@@ -265,14 +269,14 @@ maxIndex = (+1) . runIdentity . foldSerialManifoldM fm
 
 translateManifold
   :: HasTypeM t
-  => (MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> MDoc) -- make function
+  => (MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Bool -> MDoc) -- make function
   -> ([Arg TypeM] -> MDoc -> MDoc)
   -> Int -> ManifoldForm (Or TypeS TypeF) t -> PoolDocs -> PoolDocs
-translateManifold makeFunction makeLambda m form (PoolDocs completeManifolds body priorLines priorExprs) =
+translateManifold makeFunction makeLambda m form (PoolDocs completeManifolds body priorLines priorExprs isRemote) =
   let args = abiappend (\i r -> [Arg i t | t <- bilist typeMof typeMof r])
                        (\i t -> [Arg i (typeMof t)]) form
       mname = manNamer m
-      newManifold = makeFunction mname args priorLines body
+      newManifold = makeFunction mname args priorLines body isRemote
       call = case form of
         (ManifoldPass _) -> mname
         (ManifoldFull rs) -> mname <> tupled (map argNamer (asArgs rs))
@@ -287,6 +291,7 @@ translateManifold makeFunction makeLambda m form (PoolDocs completeManifolds bod
       , poolExpr = call
       , poolPriorLines = []
       , poolPriorExprs = priorExprs
+      , poolIsRemote = False
       }
   where
     asArgs :: [Arg (Or TypeS TypeF)] -> [Arg TypeM]

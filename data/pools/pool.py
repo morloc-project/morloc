@@ -5,6 +5,7 @@ import time
 from collections import OrderedDict
 from multiprocessing import Process, cpu_count, Pipe, Value
 from multiprocessing.reduction import recv_handle, send_handle
+import struct
 
 
 # Global variables for clean signal handling
@@ -36,16 +37,24 @@ def run_job(client_fd: int) -> None:
     try:
         client_data = morloc.stream_from_client(client_fd)
 
-        if(morloc.is_ping(client_data)):
-            result = morloc.pong(client_data)
-
-        elif(morloc.is_call(client_data)):
+        if(morloc.is_local_call(client_data)):
             (mid, args) = morloc.read_morloc_call_packet(client_data)
 
             try:
                 result = dispatch[mid](*args)
             except Exception as e:
                 result = morloc.make_fail_packet(str(e))
+
+        elif(morloc.is_remote_call(client_data)):
+            (mid, args) = morloc.read_morloc_call_packet(client_data)
+
+            try:
+                result = remote_dispatch[mid](*args)
+            except Exception as e:
+                result = morloc.make_fail_packet(str(e))
+
+        elif(morloc.is_ping(client_data)):
+            result = morloc.pong(client_data)
 
         else:
             raise ValueError("Expected a ping or call type packet")
