@@ -6,13 +6,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <limits.h>
+#include <string.h>
 
 #include "morloc.h"
 
 // {{{ macros
-
-// get a list element by name
-#define GET_LIST_ELEMENT(x, name) (VECTOR_ELT(x, Rf_match_string(name, x)))
 
 #define MAYFAIL char* child_errmsg_ = NULL;
 
@@ -803,7 +801,7 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 
     relptr_t relptr = R_TRY(abs2rel, voidstar);
 
-    uint8_t* packet = make_relptr_data_packet(relptr);
+    uint8_t* packet = make_standard_data_packet(relptr, schema);
 
     size_t packet_size = R_TRY(morloc_packet_size, packet);
 
@@ -965,41 +963,83 @@ SEXP morloc_make_fail_packet(SEXP failure_message_r) { MAYFAIL
 }
 
 
+SEXP extract_element_by_name(SEXP list, const char* key) {
+  // Ensure inputs are correct types
+  if (TYPEOF(list) != VECSXP) error("Input must be a list");
+
+  // Get list names attribute
+  SEXP names = Rf_getAttrib(list, R_NamesSymbol);
+
+  // Iterate through list elements
+  for (int i = 0; i < Rf_length(list); i++) {
+    const char *current_name = CHAR(STRING_ELT(names, i));
+
+    if (strcmp(key, current_name) == 0) {
+      return VECTOR_ELT(list, i);  // Return matching element
+    }
+  }
+
+  return R_NilValue;  // Return NULL if name not found
+}
+
+
 SEXP morloc_remote_call(SEXP midx, SEXP socket_path, SEXP cache_path, SEXP resources, SEXP arg_packets) { MAYFAIL
-    // Extract integer from R vector
+    // Protect all R inputs immediately
+    PROTECT(socket_path);
+    PROTECT(cache_path);
+    PROTECT(resources);
+    PROTECT(arg_packets = coerceVector(arg_packets, VECSXP));
+
+    // Convert basic parameters
     int c_midx = INTEGER(midx)[0];
+    const char* c_socket_path = CHAR(STRING_ELT(socket_path, 0));
+    const char* c_cache_path = CHAR(STRING_ELT(cache_path, 0));
 
-    // Convert R character vectors to C strings
-    char* c_socket_path = CHAR(STRING_ELT(socket_path, 0));
-    char* c_cache_path = CHAR(STRING_ELT(cache_path, 0));
-
-    // Extract resource values from named list
+    // Extract resources using safe macro
     resources_t c_resources;
-    c_resources.memory = INTEGER(GET_LIST_ELEMENT(resources, "memory"))[0];
-    c_resources.time = INTEGER(GET_LIST_ELEMENT(resources, "time"))[0];
-    c_resources.cpus = INTEGER(GET_LIST_ELEMENT(resources, "cpus"))[0];
-    c_resources.gpus = INTEGER(GET_LIST_ELEMENT(resources, "gpus"))[0];
+    c_resources.memory = INTEGER(extract_element_by_name(resources, "memory"))[0];
+    c_resources.time = INTEGER(extract_element_by_name(resources, "time"))[0];
+    c_resources.cpus = INTEGER(extract_element_by_name(resources, "cpus"))[0];
+    c_resources.gpus = INTEGER(extract_element_by_name(resources, "gpus"))[0];
 
-    // Process list of raw vectors
+    // Process argument packets with type checking
     size_t nargs = LENGTH(arg_packets);
-    uint8_t** c_arg_packets = (uint8_t**) R_alloc(nargs, sizeof(uint8_t*));
-    for (size_t i = 0; i < nargs; i++) {
-        SEXP raw_vec = VECTOR_ELT(arg_packets, i);
-        c_arg_packets[i] = RAW(raw_vec);
+    const uint8_t** c_arg_packets = (const uint8_t**) R_alloc(nargs, sizeof(uint8_t*));
+
+    for(size_t i = 0; i < nargs; i++) {
+        SEXP raw_vec = PROTECT(VECTOR_ELT(arg_packets, i));
+        if(TYPEOF(raw_vec) != RAWSXP) {
+            Rf_error("arg_packets must contain only raw vectors");
+        }
+        c_arg_packets[i] = (uint8_t*)RAW(raw_vec);
+        UNPROTECT(1);
     }
 
-    // Execute remote call with error propagation
-    uint8_t* result_packet = R_TRY(remote_call, c_midx, c_socket_path, c_cache_path, 
-                                  c_resources, c_arg_packets, nargs);
+    // Execute remote call
+    uint8_t* result_packet = R_TRY(
+        remote_call,
+        c_midx,
+        c_socket_path,
+        c_cache_path,
+        &c_resources,
+        c_arg_packets,
+        nargs
+    );
 
-    // Get result packet size
+    // Validate and copy result
     size_t packet_size = R_TRY(morloc_packet_size, result_packet);
+    if(!result_packet || packet_size == 0) {
+        if(result_packet) free(result_packet);
+        error("Invalid result packet from remote call");
+    }
 
-    // Create and populate return vector
     SEXP result_packet_r = PROTECT(allocVector(RAWSXP, packet_size));
     memcpy(RAW(result_packet_r), result_packet, packet_size);
-    UNPROTECT(1);
+    free(result_packet);
 
+    // Cleanup and return
+    UNPROTECT(4);  // socket_path, cache_path, resources, arg_packets
+    UNPROTECT(1);  // result_packet_r
     return result_packet_r;
 }
 

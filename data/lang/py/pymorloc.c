@@ -774,7 +774,7 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     // convert to a relative pointer conserved between language servers
     relptr_t relptr = PyTRY(abs2rel, voidstar);
 
-    uint8_t* packet = make_relptr_data_packet(relptr);
+    uint8_t* packet = make_standard_data_packet(relptr, schema);
 
     size_t packet_size = PyTRY(morloc_packet_size, packet);
 

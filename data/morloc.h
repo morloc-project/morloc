@@ -34,6 +34,8 @@
 #define WAIT_RETRY_MULTIPLIER 1.25
 #define WAIT_RETRY_ATTEMPTS 32
 
+#define CEILING(x) (x-(int)(x) > 0 ? (int)(x+1) : (int)(x))
+
 // {{{ Error handling macro definictions
 
 #define FREE(ptr) \
@@ -1924,6 +1926,133 @@ typedef struct Schema {
     struct Schema** parameters;
     char** keys; // field names, used only for records
 } Schema;
+
+
+// Convert an integer to a character, assuming that the size is 0-63. This is
+// the currently allowed limit on tuple length. I'll extend this soon.
+static char schema_size_to_string(size_t size) {
+  if (size < 10) {
+      // characters 0-9 are integers 0-9
+      return (char)(0x30 + size);
+  } else if (size < 36) {
+      // characters a-z are integers 10-35
+      return (char)(0x61 + (size - 10));
+  } else if (size < 62) {
+      // characters A-Z are integers 36-61
+      return (char)(0x41 + (size - 36));
+  } else if (size == 62) {
+      // '+' is 62
+      return '+';
+  } else if (size == 63) {
+      // '/' is 63
+      return '/';
+  } else {
+      // TODO: update this to encode arbitrary size
+      return '\a'; // error - ding!!!
+  }
+}
+
+static char* resize_schema_buffer(char* schema_str, size_t pos, size_t* buffer_size, size_t requirement){
+    if(pos + requirement + 1 >= *buffer_size){
+        *buffer_size += 32 * (1 + (*buffer_size - pos + requirement) / 32);
+        schema_str = (char*)realloc(schema_str, *buffer_size);
+    }
+    return schema_str;
+}
+
+static char* write_generic_schema_r(const Schema* schema, char* schema_str, size_t* pos, size_t* buffer_size){
+    schema_str = resize_schema_buffer(schema_str, *pos, buffer_size, 2);
+    switch (schema->type) {
+        case MORLOC_NIL:
+            schema_str[*pos] = SCHEMA_NIL; (*pos)++;
+            break;
+        case MORLOC_BOOL:
+            schema_str[*pos] = SCHEMA_BOOL; (*pos)++;
+            break;
+        case MORLOC_UINT8:
+            schema_str[*pos] = SCHEMA_UINT; (*pos)++;
+            schema_str[*pos] = '1'; (*pos)++;
+            break;
+        case MORLOC_UINT16:
+            schema_str[*pos] = SCHEMA_UINT; (*pos)++;
+            schema_str[*pos] = '2'; (*pos)++;
+            break;
+        case MORLOC_UINT32:
+            schema_str[*pos] = SCHEMA_UINT; (*pos)++;
+            schema_str[*pos] = '4'; (*pos)++;
+            break;
+        case MORLOC_UINT64:
+            schema_str[*pos] = SCHEMA_UINT; (*pos)++;
+            schema_str[*pos] = '8'; (*pos)++;
+            break;
+        case MORLOC_SINT8:
+            schema_str[*pos] = SCHEMA_SINT; (*pos)++;
+            schema_str[*pos] = '1'; (*pos)++;
+            break;
+        case MORLOC_SINT16:
+            schema_str[*pos] = SCHEMA_SINT; (*pos)++;
+            schema_str[*pos] = '2'; (*pos)++;
+            break;
+        case MORLOC_SINT32:
+            schema_str[*pos] = SCHEMA_SINT; (*pos)++;
+            schema_str[*pos] = '4'; (*pos)++;
+            break;
+        case MORLOC_SINT64:
+            schema_str[*pos] = SCHEMA_SINT; (*pos)++;
+            schema_str[*pos] = '8'; (*pos)++;
+            break;
+        case MORLOC_FLOAT32:
+            schema_str[*pos] = SCHEMA_FLOAT; (*pos)++;
+            schema_str[*pos] = '4'; (*pos)++;
+            break;
+        case MORLOC_FLOAT64:
+            schema_str[*pos] = SCHEMA_FLOAT; (*pos)++;
+            schema_str[*pos] = '8'; (*pos)++;
+            break;
+        case MORLOC_STRING:
+            schema_str[*pos] = SCHEMA_STRING; (*pos)++;
+            break;
+        case MORLOC_ARRAY:
+            schema_str[*pos] = SCHEMA_ARRAY; (*pos)++;
+            schema_str = write_generic_schema_r(schema->parameters[0], schema_str, pos, buffer_size);
+            break;
+        case MORLOC_MAP:
+            schema_str[*pos] = SCHEMA_MAP; (*pos)++;
+            schema_str[*pos] = schema_size_to_string(schema->size); (*pos)++;
+            for(size_t i = 0; i < schema->size; i++){
+                // write key
+                size_t key_len = strlen(schema->keys[i]);
+                schema_str = resize_schema_buffer(schema_str, *pos, buffer_size, key_len + 1);
+                schema_str[*pos] = schema_size_to_string(key_len); (*pos)++;
+                strncpy(schema_str + *pos, schema->keys[i], key_len); *pos += key_len;
+                // write value
+                schema_str = write_generic_schema_r(schema->parameters[i], schema_str, pos, buffer_size);
+            }
+            break;
+
+        case MORLOC_TUPLE:
+            schema_str[*pos] = SCHEMA_TUPLE; (*pos)++;
+            schema_str[*pos] = schema_size_to_string(schema->size); (*pos)++;
+            for(size_t i = 0; i < schema->size; i++){
+                schema_str = write_generic_schema_r(schema->parameters[i], schema_str, pos, buffer_size);
+            }
+            break;
+        default:
+            // This should be unreachable
+            fprintf(stderr, "Missing case in morloc schema");
+    }
+
+    return schema_str;
+}
+
+char* schema_to_string(const Schema* schema){
+    char* schema_str = (char*)calloc(32, sizeof(char));
+    size_t pos = 0;
+    size_t buffer_size = 32;
+    schema_str = write_generic_schema_r(schema, schema_str, &pos, &buffer_size);
+    schema_str[pos] = '\0';
+    return schema_str;
+}
 
 // Allocate a shared memory block sufficient to store a schema's object
 void* get_ptr(const Schema* schema, ERRMSG){
@@ -3862,6 +3991,18 @@ static_assert(
     "Header size mismatch!"
 );
 
+
+#define MORLOC_METADATA_TYPE_SCHEMA_STRING 0x01
+#define MORLOC_METADATA_TYPE_XXHASH 0x02
+
+#define MORLOC_METADATA_HEADER_MAGIC "mmh"
+
+typedef struct morloc_metadata_header_s {
+    char magic[3];
+    uint8_t type;
+    uint32_t size;
+} morloc_metadata_header_t;
+
 // }}}
 
 // {{{ morloc packet API
@@ -3952,6 +4093,15 @@ static void set_morloc_packet_header(
     header->length = length;
 }
 
+static void set_morloc_metadata_header(uint8_t* metadata, uint8_t metadata_type, uint32_t metadata_length){
+    morloc_metadata_header_t* metadata_header = (morloc_metadata_header_t*)metadata;
+    metadata_header->magic[0] = 'm';
+    metadata_header->magic[1] = 'm';
+    metadata_header->magic[2] = 'h';
+    metadata_header->type = metadata_type;
+    metadata_header->size = (uint32_t)metadata_length;
+}
+
 uint8_t* make_ping_packet(){
     uint8_t* packet = (uint8_t*)calloc(1, sizeof(morloc_packet_header_t));
 
@@ -4008,22 +4158,90 @@ static uint8_t* make_morloc_data_packet(
   return packet;
 }
 
+static uint8_t* make_morloc_data_packet_with_schema(
+    const uint8_t* data,
+    size_t data_length,
+    const Schema* schema,
+    uint8_t src,
+    uint8_t fmt,
+    uint8_t cmpr,
+    uint8_t encr,
+    uint8_t status
+){
+  if(schema == NULL){
+    return make_morloc_data_packet(data, data_length, NULL, 0, src, fmt, cmpr, encr, status);
+  }
+
+  char* schema_str = schema_to_string(schema);
+  size_t metadata_length = strlen(schema_str) + 1; // +1 for null byte
+  size_t metadata_length_total = CEILING(sizeof(morloc_metadata_header_t) + metadata_length / 32) * 32;
+  uint8_t* metadata = (uint8_t*)calloc(metadata_length_total, sizeof(char));
+
+  set_morloc_metadata_header(metadata, MORLOC_METADATA_TYPE_SCHEMA_STRING, metadata_length);
+  memcpy(metadata + sizeof(morloc_metadata_header_t), schema_str, metadata_length);
+  FREE(schema_str);
+
+  return make_morloc_data_packet(data, data_length, metadata, metadata_length_total, src, fmt, cmpr, encr, status);
+}
+
 // Make a data packet from a relative pointer to shared memory data
-uint8_t* make_relptr_data_packet(relptr_t ptr){
-    uint8_t* packet = make_morloc_data_packet(
-      NULL, sizeof(ssize_t), // send no payload, only allocate space
-      NULL, 0, // no metadata
-      PACKET_SOURCE_RPTR,
-      PACKET_FORMAT_VOIDSTAR,
-      PACKET_COMPRESSION_NONE,
-      PACKET_ENCRYPTION_NONE,
-      PACKET_STATUS_PASS
+// Include the schema in the packet metadata
+uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema){
+  uint8_t* packet = make_morloc_data_packet_with_schema(
+        NULL, sizeof(relptr_t),
+        schema,
+        PACKET_SOURCE_RPTR,
+        PACKET_FORMAT_VOIDSTAR,
+        PACKET_COMPRESSION_NONE,
+        PACKET_ENCRYPTION_NONE,
+        PACKET_STATUS_PASS
     );
 
-    // set the payload
-    *((ssize_t*)(packet + sizeof(morloc_packet_header_t))) = ptr;
+  morloc_packet_header_t* header = (morloc_packet_header_t*)(packet);
 
-    return packet;
+  *((ssize_t*)(packet + sizeof(morloc_packet_header_t) + (size_t)header->offset)) = ptr;
+
+  return packet;
+}
+
+// Returns a metadata header if the magic matches, otherwise returns NULL
+morloc_metadata_header_t* as_morloc_metadata_header(const uint8_t* ptr){
+
+    morloc_metadata_header_t* metadata_header = (morloc_metadata_header_t*)(ptr);
+
+    if(strncmp(metadata_header->magic, MORLOC_METADATA_HEADER_MAGIC, 3) != 0){
+        return NULL;
+    }
+
+    return metadata_header;
+}
+
+// Read a data packet type schema from the packet metadata
+// If no type schema is defined, return NULL
+// If there is any error
+char* read_schema_from_packet_meta(const uint8_t* packet, ERRMSG){
+    PTR_RETURN_SETUP(char)
+
+    morloc_packet_header_t* header = TRY(read_morloc_packet_header, packet);
+
+    if(header->offset >= sizeof(morloc_metadata_header_t)){
+        size_t offset = 0;
+        do {
+            morloc_metadata_header_t* metadata_header = as_morloc_metadata_header(packet + sizeof(morloc_packet_header_t));
+            if(metadata_header == NULL){
+                return NULL;
+            }
+            offset += sizeof(morloc_metadata_header_t);
+            if(metadata_header != NULL && metadata_header->type == MORLOC_METADATA_TYPE_SCHEMA_STRING) {
+                char* schema_str = (char*)packet + sizeof(morloc_packet_header_t) + offset;
+                return strdup(schema_str);
+            } else {
+                offset += metadata_header->size;
+            }
+        } while(offset <= (header->offset - sizeof(morloc_metadata_header_t)));
+    }
+
+    return NULL;
 }
 
 
@@ -4527,7 +4745,7 @@ uint8_t* stream_from_client_wait(int client_fd, int pselect_timeout_us, int recv
         for(int packet_attempts = 0; packet_attempts < attempts; packet_attempts++) {
             FD_ZERO(&read_fds);
             FD_SET(client_fd, &read_fds);
-            
+
             // Reset timeout for each iteration
             struct timespec ts_loop;
             if(recv_timeout_us > 0) {
@@ -4833,17 +5051,27 @@ bool hash_morloc_packet(const uint8_t* packet, const Schema* schema, uint64_t se
 }
 
 
-static bool make_cache_filename(uint64_t key, const char* cache_path, char* buf, size_t buf_size) {
+static bool make_cache_filename_gen(uint64_t key, const char* cache_path, char* buf, size_t buf_size, bool is_packet) {
+    const char* ext = is_packet ? ".packet" : ".dat";
+
     // Format the filename with the key in hexadecimal
     //  * It is always padded to 16 characters
     //  * The PRIx64 macro from inttypes.h ensures portability since the
     //    uint64_t type may be aliased to different 64 bit types on
     //    different systems (e.g., unsigned long or unsigned long long)
-    int written = snprintf(buf, buf_size, "%s/%016" PRIx64, cache_path, key);
+    int written = snprintf(buf, buf_size, "%s/%016" PRIx64 "%s", cache_path, key, ext);
 
-    // Check if snprintf succeeded and didn't truncate
     return (written > 0 && (size_t)written < buf_size);
 }
+
+static bool make_cache_filename(uint64_t key, const char* cache_path, char* buf, size_t buf_size) {
+    return make_cache_filename_gen(key, cache_path, buf, buf_size, true);
+}
+
+static bool make_cache_data_filename(uint64_t key, const char* cache_path, char* buf, size_t buf_size) {
+    return make_cache_filename_gen(key, cache_path, buf, buf_size, false);
+}
+
 
 
 // Sends data to cache given an integer key. The main use case is caching the
@@ -4854,37 +5082,85 @@ static bool make_cache_filename(uint64_t key, const char* cache_path, char* buf,
 //
 // If the packet is successfully cached, return the cache filename
 // Else return NULL
-char* put_cache_packet(const uint8_t* packet, uint64_t key, const char* cache_path, ERRMSG) {
+
+// TODO:
+//   * send in a full data packet, not just the contents
+//   * write the contents to a MessagePack file in the cache folder
+//   * create a new data pack the wraps the MessagePack data file and write it
+//     also to the cache folder
+//   * return the path to the new data packet
+char* put_cache_packet(const uint8_t* voidstar, const Schema* schema, uint64_t key, const char* cache_path, ERRMSG) {
     PTR_RETURN_SETUP(char)
 
-    size_t size = TRY(morloc_packet_size, packet);
-
     // Generate the cache filename
-    char filename[MAX_FILENAME_SIZE];
-    RAISE_IF(!make_cache_filename(key, cache_path, filename, sizeof(filename)), "Failed to make cache filename")
+    char packet_filename[MAX_FILENAME_SIZE];
+    RAISE_IF(!make_cache_filename(key, cache_path, packet_filename, sizeof(packet_filename)), "Failed to make cache filename")
+
+    // Generate the data filename
+    char data_filename[MAX_FILENAME_SIZE];
+    RAISE_IF(!make_cache_data_filename(key, cache_path, data_filename, sizeof(data_filename)), "Failed to make data filename")
+
+    // make data packet
+    uint8_t* data_packet = make_morloc_data_packet_with_schema(
+        (uint8_t*)data_filename,
+        strlen(data_filename),
+        schema,
+        PACKET_SOURCE_FILE,
+        PACKET_FORMAT_MSGPACK,
+        PACKET_COMPRESSION_NONE,
+        PACKET_ENCRYPTION_NONE,
+        PACKET_STATUS_PASS
+    );
+
+    size_t data_packet_size = TRY(morloc_packet_size, data_packet);
+
+    // convert voidstar data to MessagePack
+    char* mpk_data = NULL;
+    size_t mpk_size = 0;
+    int retcode = TRY(pack_with_schema, voidstar, schema, &mpk_data, &mpk_size);
 
     // Open the file to store the binary packet data
-    FILE* file = fopen(filename, "wb");
-    RAISE_IF(!file, "Failed to open file '%s'", filename)
+    FILE* packet_file = fopen(packet_filename, "wb");
+    RAISE_IF(!packet_file, "Failed to open file '%s'", packet_filename)
 
     // Write the packet data to the file
-    size_t written = fwrite(packet, 1, size, file);
+    size_t written = fwrite(data_packet, 1, data_packet_size, packet_file);
+    FREE(data_packet);
     RAISE_IF_WITH(
-        written != size,
-        fclose(file),
+        written != data_packet_size,
+        fclose(packet_file),
         "Failed to write to cache file '%s'",
-        filename
+        packet_filename
     )
+    fclose(packet_file);
+
+    // Open the file to store the MessagePack data
+    FILE* data_file = fopen(data_filename, "wb");
+    RAISE_IF(!data_file, "Failed to open file '%s'", data_filename)
+
+    // Write the MessagePack data to the file
+    written = fwrite(mpk_data, 1, mpk_size, data_file);
+    RAISE_IF_WITH(
+        written != mpk_size,
+        fclose(data_file),
+        "Failed to write to cache file '%s'",
+        data_filename
+    )
+    fclose(data_file);
 
     // Ensure all data is flushed and check for write errors
-    int exit_code = fclose(file);
-    RAISE_IF(exit_code != 0, "Failed to close cache file '%s'", filename)
+    int exit_code = fclose(data_file);
+    RAISE_IF(exit_code != 0, "Failed to close cache file '%s'", data_filename)
 
-    return strdup(filename);
+    return strdup(packet_filename);
 }
 
 
 // Get a cached packet given the key (usually a hash)
+//
+// The cached packet should be stateless, independent of the shared memory pool
+// (which is local and transient). The packet should either store its contents
+// as raw data or should contain a path to a file with the raw data.
 uint8_t* get_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
     PTR_RETURN_SETUP(uint8_t)
 
@@ -4905,6 +5181,8 @@ uint8_t* get_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
 
 
 // Deletes a cached packet given a key
+//
+// Also deletes the associated data file, if any is defined
 bool del_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
     BOOL_RETURN_SETUP
 
@@ -4999,7 +5277,7 @@ uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
         // The argument is the data
         // JSON is currently the only supported option
         relptr_t packet_ptr = read_json_with_schema(arg, schema, &CHILD_ERRMSG);
-        packet = make_relptr_data_packet(packet_ptr);
+        packet = make_standard_data_packet(packet_ptr, schema);
         RAISE_IF(CHILD_ERRMSG != NULL, "Failed to read argument:\n%s", CHILD_ERRMSG)
         return packet;
     } else {
@@ -5013,7 +5291,7 @@ uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
 
         if(has_suffix(arg, ".json")){
             relptr_t packet_ptr = read_json_with_schema(data, schema, &CHILD_ERRMSG);
-            packet = make_relptr_data_packet(packet_ptr);
+            packet = make_standard_data_packet(packet_ptr, schema);
             // If this isn't a JSON file, but you say it is, then either you are
             // confused or evil. In either case, I'll just play it safe and die.
             RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "Failed to read json argument file '%s':\n%s", arg, CHILD_ERRMSG)
@@ -5048,7 +5326,7 @@ uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
         relptr_t packet_ptr = read_json_with_schema(data, schema, &CHILD_ERRMSG);
         if(CHILD_ERRMSG == NULL){
             free(data);
-            packet = make_relptr_data_packet(packet_ptr);
+            packet = make_standard_data_packet(packet_ptr, schema);
             return packet;
         }
 
@@ -5160,7 +5438,7 @@ size_t parse_slurm_time(const char* time_str, ERRMSG) {
 
     // Specifying too many days is probably a mistake and could lead to overflows
     if(days > 3650){
-        RAISE("Do you really want to run this job for more than 10 years?") 
+        RAISE("Do you really want to run this job for more than 10 years?")
     }
 
     return seconds + 60*minutes + 60*60*hours + 60*60*24*days;
@@ -5257,8 +5535,6 @@ uint8_t* remote_call(
 
     uint64_t seed = (uint64_t) midx;
 
-    const Schema** arg_schemas = NULL; // get schemas from the argument
-
     // The function hash determins the output file name on the remote node and is
     // used to determine if this computation has already been run. The function
     // hash **should** be unique to a function and its inputs.
@@ -5270,16 +5546,21 @@ uint8_t* remote_call(
 
     // hash voidstar data for every argument
     for(size_t i = 0; i < nargs; i++){
-        uint8_t* arg_voidstar = TRY(get_morloc_data_packet_value, arg_packets[i], arg_schemas[i]);
+        char* arg_schema_str = TRY(read_schema_from_packet_meta, arg_packets[i]);
+        Schema* arg_schema = TRY(parse_schema, (const char**)&arg_schema_str);
+        FREE(arg_schema_str);
 
-        uint64_t arg_hash = TRY(hash_voidstar, arg_voidstar, arg_schemas[i], DEFAULT_XXHASH_SEED);
+        // get the raw data stored in the packet (after the header and metadata)
+        uint8_t* arg_voidstar = TRY(get_morloc_data_packet_value, arg_packets[i], arg_schema);
+
+        uint64_t arg_hash = TRY(hash_voidstar, arg_voidstar, arg_schema, DEFAULT_XXHASH_SEED);
 
         function_hash = mix(function_hash, arg_hash);
 
         char* arg_cache_filename = check_cache_packet(arg_hash, cache_path, &CHILD_ERRMSG);
         if(arg_cache_filename == NULL){
             CHILD_ERRMSG = NULL; // ignore error, if it failed, remake the cache
-            arg_cache_filename = TRY(put_cache_packet, arg_voidstar, arg_hash, cache_path);
+            arg_cache_filename = TRY(put_cache_packet, arg_voidstar, arg_schema, arg_hash, cache_path);
         }
 
         new_arg_packets[i] = make_morloc_data_packet(
@@ -5287,7 +5568,7 @@ uint8_t* remote_call(
           strlen(arg_cache_filename),
           NULL, 0, // no metadata yet
           PACKET_SOURCE_FILE,
-          PACKET_FORMAT_VOIDSTAR,
+          PACKET_FORMAT_MSGPACK,
           PACKET_COMPRESSION_NONE,
           PACKET_ENCRYPTION_NONE,
           PACKET_STATUS_PASS

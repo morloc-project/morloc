@@ -64,7 +64,7 @@ uint8_t* _put_value(const T& value, const std::string& schema_str) {
     // convert to a relative pointer conserved between language servers
     relptr_t relptr = abs2rel_cpp(voidstar);
 
-    uint8_t* packet = make_relptr_data_packet(relptr);
+    uint8_t* packet = make_standard_data_packet(relptr, schema);
 
     return packet;
 }
