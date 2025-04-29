@@ -102,6 +102,10 @@
     fun(__VA_ARGS__ __VA_OPT__(,) &CHILD_ERRMSG); \
     RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG)
 
+#define TRY_WITH(end, fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &CHILD_ERRMSG); \
+    RAISE_IF_WITH(CHILD_ERRMSG != NULL, end, "\n%s", CHILD_ERRMSG)
+
 #define WAIT(code, cond, timeout_code) do { \
     double retry_time = WAIT_RETY_INITIAL_TIME; \
     int attempts = 0; \
@@ -4395,6 +4399,7 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
                     char* filename = strndup((char*)data + sizeof(morloc_packet_header_t), MAX_FILENAME_SIZE);
                     size_t file_size;
                     uint8_t* msg = TRY(read_binary_file, filename, &file_size);
+                    FREE(filename);
 
                     // Unpack the binary buffer using the schema
                     int unpack_result = unpack_with_schema((const char*)msg, file_size, schema, &voidstar, &CHILD_ERRMSG);
@@ -5051,27 +5056,36 @@ bool hash_morloc_packet(const uint8_t* packet, const Schema* schema, uint64_t se
 }
 
 
-static bool make_cache_filename_gen(uint64_t key, const char* cache_path, char* buf, size_t buf_size, bool is_packet) {
-    const char* ext = is_packet ? ".packet" : ".dat";
+static char* make_cache_filename_ext(uint64_t key, const char* cache_path, const char* ext, ERRMSG) {
+    PTR_RETURN_SETUP(char)
+
+    char buffer[MAX_FILENAME_SIZE] = { '\0' };
 
     // Format the filename with the key in hexadecimal
     //  * It is always padded to 16 characters
     //  * The PRIx64 macro from inttypes.h ensures portability since the
     //    uint64_t type may be aliased to different 64 bit types on
     //    different systems (e.g., unsigned long or unsigned long long)
-    int written = snprintf(buf, buf_size, "%s/%016" PRIx64 "%s", cache_path, key, ext);
+    int written = snprintf(buffer, sizeof(buffer), "%s/%016" PRIx64 "%s", cache_path, key, ext);
 
-    return (written > 0 && (size_t)written < buf_size);
+    RAISE_IF((size_t)written < sizeof(buffer), "Failed to create filename")
+
+    return strdup(buffer);
 }
 
-static bool make_cache_filename(uint64_t key, const char* cache_path, char* buf, size_t buf_size) {
-    return make_cache_filename_gen(key, cache_path, buf, buf_size, true);
+
+static char* make_cache_filename(uint64_t key, const char* cache_path, ERRMSG) {
+    PTR_RETURN_SETUP(char)
+    char packet_ext[] = ".packet";
+    return TRY(make_cache_filename_ext, key, cache_path, packet_ext);
 }
 
-static bool make_cache_data_filename(uint64_t key, const char* cache_path, char* buf, size_t buf_size) {
-    return make_cache_filename_gen(key, cache_path, buf, buf_size, false);
-}
 
+static char* make_cache_data_filename(uint64_t key, const char* cache_path, ERRMSG) {
+    PTR_RETURN_SETUP(char)
+    char dat_ext[] = ".dat";
+    return TRY(make_cache_filename_ext, key, cache_path, dat_ext);
+}
 
 
 // Sends data to cache given an integer key. The main use case is caching the
@@ -5093,12 +5107,10 @@ char* put_cache_packet(const uint8_t* voidstar, const Schema* schema, uint64_t k
     PTR_RETURN_SETUP(char)
 
     // Generate the cache filename
-    char packet_filename[MAX_FILENAME_SIZE];
-    RAISE_IF(!make_cache_filename(key, cache_path, packet_filename, sizeof(packet_filename)), "Failed to make cache filename")
+    char* packet_filename = TRY(make_cache_filename, key, cache_path)
 
     // Generate the data filename
-    char data_filename[MAX_FILENAME_SIZE];
-    RAISE_IF(!make_cache_data_filename(key, cache_path, data_filename, sizeof(data_filename)), "Failed to make data filename")
+    char* data_filename = TRY(make_cache_data_filename, key, cache_path)
 
     // make data packet
     uint8_t* data_packet = make_morloc_data_packet_with_schema(
@@ -5164,13 +5176,7 @@ char* put_cache_packet(const uint8_t* voidstar, const Schema* schema, uint64_t k
 uint8_t* get_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
     PTR_RETURN_SETUP(uint8_t)
 
-    // Generate the cache filename
-    char filename[MAX_FILENAME_SIZE];
-
-    RAISE_IF(
-        !make_cache_filename(key, cache_path, filename, sizeof(filename)),
-        "Failed to make cache filename"
-    )
+    char* filename = TRY(make_cache_filename, key, cache_path)
 
     // Read the binary file into memory
     size_t file_size;
@@ -5187,12 +5193,7 @@ bool del_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
     BOOL_RETURN_SETUP
 
     // Generate the cache filename
-    char filename[MAX_FILENAME_SIZE];
-
-    RAISE_IF(
-        !make_cache_filename(key, cache_path, filename, sizeof(filename)),
-        "Failed to make cache filename"
-    )
+    char* filename = TRY(make_cache_filename, key, cache_path)
 
     // Attempt to delete the file
     RAISE_IF(
@@ -5212,9 +5213,7 @@ char* check_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
     PTR_RETURN_SETUP(char)
 
     // Generate the cache filename
-    char filename[MAX_FILENAME_SIZE];
-    bool success = make_cache_filename(key, cache_path, filename, sizeof(filename));
-    RAISE_IF(!success, "Failed to make cache filename")
+    char* filename = TRY(make_cache_filename, key, cache_path)
 
     // check if the file exists
     struct stat file_stat;
@@ -5394,6 +5393,18 @@ uint8_t* make_call_packet_from_cli(
 
 // {{{ slurm support
 
+#define MAX_SLURM_COMMAND_LENGTH 1024
+
+// For each field, -1 indicates undefined
+typedef struct resources_s {
+  int memory; // in Gb
+  int time; // walltime in seconds
+  int cpus;
+  int gpus;
+} resources_t;
+
+#define DEFAULT_XXHASH_SEED 0
+
 
 // Parse a slurm walltime string
 //
@@ -5464,16 +5475,6 @@ char* write_slurm_time(int seconds){
     return time_str;
 }
 
-// For each field, -1 indicates undefined
-typedef struct resources_s {
-  int memory; // in Gb
-  int time; // walltime in seconds
-  int cpus;
-  int gpus;
-} resources_t;
-
-#define DEFAULT_XXHASH_SEED 0
-
 // Parse the arguments of a morloc call packet.
 //
 // This function mutates the `args ` and `nargs` arguments to store the call
@@ -5520,20 +5521,127 @@ bool parse_morloc_call_arguments(
     return true;
 }
 
+
+// Check if a given SLURM job has completed
+bool slurm_job_is_complete(uint32_t job_id) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "sacct -j %u --format=State --noheader", job_id);
+    
+    FILE *sacct = popen(cmd, "r");
+    if (!sacct) return false;
+    
+    char state[16];
+    bool done = false;
+    while (fgets(state, sizeof(state), sacct)) {
+        if (strstr(state, "COMPLETED") || 
+            strstr(state, "FAILED") ||
+            strstr(state, "CANCELLED")) {
+            done = true;
+            break;
+        }
+    }
+    pclose(sacct);
+    return done;
+}
+
+
+uint32_t submit_morloc_slurm_job(
+    const char* nexus_path,
+    const char* socket_path,
+    const char* call_packet_filename,
+    const char* result_cache_filename,
+    const char* output_filename,
+    const char* error_filename,
+    const resources_t* resources,
+    ERRMSG)
+{
+    VAL_RETURN_SETUP(uint32_t, 0)
+
+    char cmd[MAX_SLURM_COMMAND_LENGTH];
+    FILE *slurm;
+    uint32_t job_id = 0;
+    
+    // Build resource parameters
+    char* time_str = write_slurm_time(resources->time); // DD-HH:MM:SS
+    char resources_spec[256];
+    snprintf(resources_spec, sizeof(resources_spec),
+        "--mem=%dG --time=%s --cpus-per-task=%d --gres=gpu:%d",
+        resources->memory,
+        time_str,
+        resources->cpus,
+        resources->gpus
+    );
+    free(time_str);
+
+    // Build submission command
+    int written = snprintf(
+        cmd,
+        MAX_SLURM_COMMAND_LENGTH,
+        "sbatch --parsable -o %s -e %s %s --wrap='%s --call-packet %s --socket-path %s --output-file %s --output-format raw",
+        output_filename,
+        error_filename,
+        resources_spec,
+        nexus_path,
+        call_packet_filename,
+        socket_path,
+        result_cache_filename
+    );
+
+    RAISE_IF(written >= MAX_SLURM_COMMAND_LENGTH, "Command too long")
+
+    // Submit job and capture output
+    slurm = popen(cmd, "r");
+    RAISE_IF(!slurm, "Failed to execute sbatch")
+
+    // Parse job ID from first line
+    if (fscanf(slurm, "%u", &job_id) != 1) {
+        pclose(slurm);
+        RAISE("Failed to parse job ID from sbatch output");
+    }
+    
+    pclose(slurm);
+    return job_id;
+}
+
+
 // Before calling this function, every argument must be converted to a packet
 //   * if the data is native, then it should be converted
 uint8_t* remote_call(
     int midx,
     const char* socket_path, // domain socket file for target pool
     const char* cache_path, // path where args and results will be written
-    const resources_t* res, // required system resources (mem, cpus, etc)
+    const resources_t* resources, // required system resources (mem, cpus, etc)
     const uint8_t** arg_packets, // voidstar for each argument
     size_t nargs, // number of arguments
     ERRMSG
 ){
     PTR_RETURN_SETUP(uint8_t)
 
-    uint64_t seed = (uint64_t) midx;
+    uint64_t seed = (uint64_t)midx;
+
+    // Initialization of allocated data
+    uint8_t* return_packet = NULL;
+    uint64_t* arg_hashes = NULL;
+    uint8_t** arg_voidstars = NULL;
+    Schema** arg_schemas = NULL;
+    char** cached_arg_filenames = NULL;
+    uint8_t* call_packet = NULL;
+    char* result_cache_filename = NULL;
+    uint8_t** cached_arg_packets = NULL;
+    char* call_packet_filename = NULL;
+    char* output_filename = NULL;
+    char* error_filename = NULL;
+
+    // Initializations
+    FILE* call_packet_file = NULL;
+    size_t call_packet_size = 0;
+    uint64_t call_packet_hash_code = 0;
+    int written = 0;
+    char output_ext[] = ".out";
+    char error_ext[] = ".err";
+    uint32_t pid = 0;
+    size_t return_packet_size = 0;
+    char* failure = NULL;
 
     // The function hash determins the output file name on the remote node and is
     // used to determine if this computation has already been run. The function
@@ -5542,109 +5650,151 @@ uint8_t* remote_call(
     // TODO: Actually hash the function code, not just the manifold id.
     uint64_t function_hash = mix(seed, DEFAULT_XXHASH_SEED);
 
-    uint8_t** new_arg_packets = (uint8_t**)calloc(nargs, sizeof(uint8_t*));
+    // Collect the hash of the voidstar data in every argument packet. This is
+    // independent of language, does not consider the header or metadata, and is
+    // unaffected by representation in the shared memory pool.
+    arg_hashes = (uint64_t*)calloc(nargs, sizeof(uint64_t));
 
-    // hash voidstar data for every argument
+    // Collect the voidstar data for each argument
+    arg_voidstars = (uint8_t**)calloc(nargs, sizeof(uint8_t*));
+
+    // Collect the schema for each argument. This schema must be written into
+    // the packet metadata (which will be done automatically by the packet
+    // creators provided in this library.
+    arg_schemas = (Schema**)calloc(nargs, sizeof(Schema*));
+
+    // It would be rather better if I automatically hashed every packet at
+    // creation time and stored the hash in the packet metadata. For file
+    // sources, then I would need to hash the file and store the hash time.
+    // Then I could avoid unpacking the data.
     for(size_t i = 0; i < nargs; i++){
         char* arg_schema_str = TRY(read_schema_from_packet_meta, arg_packets[i]);
-        Schema* arg_schema = TRY(parse_schema, (const char**)&arg_schema_str);
+        arg_schemas[i] = TRY(parse_schema, (const char**)&arg_schema_str);
         FREE(arg_schema_str);
 
         // get the raw data stored in the packet (after the header and metadata)
-        uint8_t* arg_voidstar = TRY(get_morloc_data_packet_value, arg_packets[i], arg_schema);
+        // possibly heavy memory
+        arg_voidstars[i] = TRY(get_morloc_data_packet_value, arg_packets[i], arg_schemas[i]);
 
-        uint64_t arg_hash = TRY(hash_voidstar, arg_voidstar, arg_schema, DEFAULT_XXHASH_SEED);
+        arg_hashes[i] = TRY(hash_voidstar, arg_voidstars[i], arg_schemas[i], DEFAULT_XXHASH_SEED);
 
-        function_hash = mix(function_hash, arg_hash);
-
-        char* arg_cache_filename = check_cache_packet(arg_hash, cache_path, &CHILD_ERRMSG);
-        if(arg_cache_filename == NULL){
-            CHILD_ERRMSG = NULL; // ignore error, if it failed, remake the cache
-            arg_cache_filename = TRY(put_cache_packet, arg_voidstar, arg_schema, arg_hash, cache_path);
-        }
-
-        new_arg_packets[i] = make_morloc_data_packet(
-          (uint8_t*)arg_cache_filename,
-          strlen(arg_cache_filename),
-          NULL, 0, // no metadata yet
-          PACKET_SOURCE_FILE,
-          PACKET_FORMAT_MSGPACK,
-          PACKET_COMPRESSION_NONE,
-          PACKET_ENCRYPTION_NONE,
-          PACKET_STATUS_PASS
-        );
+        function_hash = mix(function_hash, arg_hashes[i]);
     }
 
-    uint8_t* call_packet = NULL;
-    char* result_cache_filename = check_cache_packet(function_hash, cache_path, &CHILD_ERRMSG);
-    if(result_cache_filename == NULL){
-        CHILD_ERRMSG = NULL; // ignore error, if it failed, remake the cache
-        // return result is not cached, so we do the operation
-        call_packet = TRY(make_morloc_call_packet, (uint32_t)midx, (const uint8_t**)new_arg_packets, nargs);
-    } else {
+    call_packet = NULL;
+    result_cache_filename = check_cache_packet(function_hash, cache_path, &CHILD_ERRMSG);
+    CHILD_ERRMSG = NULL; // ignore error
+
+    // If a cached result already exists, return it
+    if(result_cache_filename != NULL){
         // return result is cached, so load the cache and go
-        uint8_t* final_result = TRY(get_cache_packet, function_hash, cache_path);
-        return final_result;
+        return_packet = TRY(get_cache_packet, function_hash, cache_path);
+        goto end;
     }
 
-    // morloc_packet_header_t* call_header = TRY(read_morloc_packet_header, call_packet);
+    // return result is not cached, so we need to run
+    cached_arg_filenames = (char**)calloc(nargs, sizeof(char*));
+    for(size_t i = 0; i < nargs; i++){
+        cached_arg_filenames[i] = check_cache_packet(arg_hashes[i], cache_path, &CHILD_ERRMSG);
+        if(cached_arg_filenames[i] == NULL){
+            CHILD_ERRMSG = NULL; // ignore error, if it failed, remake the cache
+            cached_arg_filenames[i] = TRY(put_cache_packet, arg_voidstars[i], arg_schemas[i], arg_hashes[i], cache_path);
+        }
+    }
 
-    // // Note that this is not the same as the result hash, the remote compute
-    // // node will load this packet as a call to run the job and will then write
-    // // the results to the result hash cache.
-    // uint64_t call_packet_hash_code = XXH64(call_packet, morloc_packet_size(call_header), DEFAULT_XXHASH_SEED);
-    //
-    // // write the call packet to cache
-    //
-    // // create the SLURM script
-    // //   * call the remote nexus with the call packet
-    // //   * write results to result_cache_filename
-    //
-    // // run the SLURM script
-    //
-    // // wait for the job to finish (looping every second or so)
-    //
-    // // when the job completes, create a packet with the `result_cache_filename`
-    // // file and return
+    cached_arg_packets = (uint8_t**)calloc(nargs, sizeof(uint8_t*));
+    for(size_t i = 0; i < nargs; i++){
+        size_t file_size = 0;
+        cached_arg_packets[i] = TRY(read_binary_file, cached_arg_filenames[i], &file_size);
+    }
 
-    return call_packet; // TODO, return the correct result, this is just a
-                        // standin to make the compiler not complain about
-                        // call_packet being undefined
 
+    // write the call packet to cache
+    call_packet = TRY_WITH(
+        FREE(cached_arg_packets),
+        make_morloc_call_packet,
+        (uint32_t)midx,
+        (const uint8_t**)cached_arg_packets,
+        nargs
+    ); 
+
+    call_packet_size = TRY(morloc_packet_size, call_packet);
+
+    // Note that this is not the same as the result hash, the remote compute
+    // node will load this packet as a call to run the job and will then write
+    // the results to the result hash cache.
+    call_packet_hash_code = XXH64(call_packet, call_packet_size, DEFAULT_XXHASH_SEED);
+
+    call_packet_filename = TRY(make_cache_filename, call_packet_hash_code, cache_path)
+    call_packet_file = fopen(call_packet_filename, "wb");
+    RAISE_IF(!call_packet_file, "Failed to open file '%s'", call_packet_filename)
+
+    written = fwrite(call_packet, 1, call_packet_size, call_packet_file);
+    RAISE_IF_WITH(
+        written != call_packet_size,
+        fclose(call_packet_file),
+        "Failed to write to cache file '%s'",
+        call_packet_filename
+    )
+    fclose(call_packet_file);
+
+    output_filename = TRY(make_cache_filename_ext, function_hash, cache_path, output_ext);
+    error_filename = TRY(make_cache_filename_ext, function_hash, cache_path, error_ext);
+
+    // submit slurm call, save process ID for watching and killing, if needed
+    pid = TRY(
+        submit_morloc_slurm_job,
+        "./nexus", // TODO: need a non-hard-coded path here
+        socket_path,
+        call_packet_filename,
+        result_cache_filename,
+        output_filename,
+        error_filename,
+        resources
+    );
+
+    // Wait forever. Since this is a remote job, it is assumed that it will be
+    // rather heavy so the 1 second loop is probably fine.
+    while(!slurm_job_is_complete(pid)) {
+        sleep(1);
+    }
+
+    return_packet_size = 0;
+    return_packet = TRY(read_binary_file, output_filename, &return_packet_size);
+
+    failure = TRY(get_morloc_data_packet_error_message, return_packet)
+    if(failure != NULL){
+        remove(result_cache_filename);
+    }
+
+end:
+    for(size_t i = 0; i < nargs; i++){
+        if(arg_voidstars != NULL){
+            FREE(arg_voidstars[i])
+        }
+        if(arg_schemas != NULL){
+            FREE(arg_schemas[i])
+        }
+        if(cached_arg_filenames != NULL){
+            FREE(cached_arg_filenames[i])
+        }
+        if(cached_arg_packets != NULL){
+            FREE(cached_arg_packets[i])
+        }
+    }
+
+    FREE(arg_hashes)
+    FREE(arg_voidstars)
+    FREE(arg_schemas)
+    FREE(result_cache_filename)
+    FREE(call_packet_filename)
+    FREE(output_filename)
+    FREE(error_filename)
+    FREE(cached_arg_filenames)
+    FREE(cached_arg_packets)
+
+    return return_packet;
 }
-    // // use the job description object to start a new SLURM job where the
-    // // script calls nexus.py with three new arguments:
-    // //   1. `--packet <packet_path>` - read from packet file
-    // //   2. `--packet-lang <lang>` - send to this language pool
-    // //   3. `--output raw` - write raw binary packet
-    // //   4. `--output-file <file>` - write output to this file
-    // // wait for the job to finish, then open the output packet
-    // // if the packet is failing, delete the cached return value
-    // // return the packet
-    //
-    //
-    // job_descriptor_msg_t job_desc;
-    // submit_response_msg_t *submit_response = NULL;
-    //
-    // slurm_init_job_desc_msg(&job_desc);
-    //
-    // job_desc.name = "my_job";
-    // job_desc.partition = "standard";
-    // job_desc.min_cpus = 1;
-    // job_desc.min_memory = 1024;
-    // job_desc.time_limit = 60;
-    // job_desc.script = "#!/bin/bash\necho Hello, Slurm!";
-    //
-    // if (slurm_submit_batch_job(&job_desc, &submit_response) != SLURM_SUCCESS) {
-    //     fprintf(stderr, "Job submission failed: %s\n", slurm_strerror(slurm_get_errno()));
-    //     return 1;
-    // }
-    //
-    // printf("Job submitted with ID %u\n", submit_response->job_id);
-    // slurm_free_submit_response_response_msg(submit_response);
-    //
-    // // get message
-
 
 // }}} end slurm support
 
