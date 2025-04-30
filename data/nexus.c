@@ -27,9 +27,9 @@ typedef enum {
 
 typedef struct config_s {
     int help_flag;
-    char* call_packet;
+    char* packet_path;
     char* socket_path;
-    char* output_file;
+    char* output_path;
     format_enum output_format;
 } config_t;
 
@@ -70,6 +70,10 @@ void clean_exit(int exit_code){
     fprintf(stderr, "Error (%s:%d in %s): " msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
     clean_exit(1);
 
+#define ERROR_WITH(end, msg, ...) \
+    fprintf(stderr, "Error (%s:%d in %s): " msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    end; \
+    clean_exit(1);
 
 typedef struct morloc_socket_s{
     char* lang;
@@ -240,7 +244,30 @@ void run_command(
 
 
 void run_call_packet(config_t config){
-    printf("stub");
+    char* errmsg = NULL;
+    char* write_errmsg = NULL;
+    size_t call_packet_size = 0;
+    uint8_t* call_packet = read_binary_file(config.packet_path, &call_packet_size, &errmsg);
+    if(errmsg != NULL || call_packet == NULL){
+        ERROR_WITH(free(errmsg), "Failed to open call packet file '%s': %s\n", config.packet_path, errmsg)
+    }
+
+    uint8_t* result_packet = send_and_receive_over_socket(config.socket_path, call_packet, &errmsg);
+    free(call_packet);
+    if(errmsg != NULL || result_packet == NULL){
+        ERROR_WITH(free(errmsg), "Failed to contact socket '%s': %s\n", config.socket_path, errmsg)
+    }
+
+    size_t result_packet_size = morloc_packet_size(result_packet, &errmsg);
+    if(errmsg != NULL){
+        ERROR_WITH(free(errmsg), "Packet returned to nexus from '%s' is invalid: %s\n", config.socket_path, errmsg)
+    }
+
+    if(write_atomic(config.output_path, result_packet, result_packet_size, &errmsg) != 0){
+        ERROR_WITH(free(result_packet), "Failed to write '%s': %s\n", config.output_path, errmsg)
+    }
+
+    clean_exit(0);
 }
 
 
@@ -287,7 +314,7 @@ int main(int argc, char *argv[]) {
                 break;
 
             case 'c':
-                config.call_packet = optarg;
+                config.packet_path = optarg;
                 break;
 
             case 's':
@@ -295,7 +322,7 @@ int main(int argc, char *argv[]) {
                 break;
 
             case 'o':
-                config.output_file = optarg;
+                config.output_path = optarg;
                 break;
 
             case 'f':
@@ -349,7 +376,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Command logic routing
-    if (config.call_packet == NULL) {
+    if (config.packet_path == NULL) {
         // Require subcommand when not using call packets
         if (optind >= argc) {
             usage();

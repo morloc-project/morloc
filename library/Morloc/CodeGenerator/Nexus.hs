@@ -123,7 +123,7 @@ dispatchCode _ [] [] = "// nothing to dispatch"
 dispatchCode config fdata cdata = [idoc|
     uint32_t mid = 0;
     #{vsep socketDocs}
-    if(config.call_packet != NULL){
+    if(config.packet_path != NULL){
         morloc_socket_t* all_sockets[] = #{allSocketsList};
         start_daemons(all_sockets);
         run_call_packet(config);
@@ -173,9 +173,9 @@ dispatchCode config fdata cdata = [idoc|
 
     daemonSets = uniqueFst [ (socketLang s, s) | s <- allSockets ]
 
-    allSocketsList = encloseSep "{ " " }" ", " (socketDocs <> ["(morloc_socket_t*)NULL"])
+    allSocketsList = encloseSep "{ " " }" ", " (allSocketDocs <> ["(morloc_socket_t*)NULL"])
         where
-        socketDocs = [ "&" <> (pretty . ML.makeExtension $ lang) <> "_socket" | (lang, _) <- daemonSets]
+        allSocketDocs = [ "&" <> (pretty . ML.makeExtension $ lang) <> "_socket" | (lang, _) <- daemonSets]
             
 
     socketDocs = [makeSocketDoc s | (_, s) <- daemonSets]

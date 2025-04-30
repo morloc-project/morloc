@@ -98,6 +98,15 @@
         RAISE_WITH(end, msg, ##__VA_ARGS__) \
     }
 
+#define TRY_GOTO(fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &CHILD_ERRMSG); \
+    if(CHILD_ERRMSG != NULL){ \
+        snprintf(errmsg_buffer, MAX_ERRMSG_SIZE, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, CHILD_ERRMSG); \
+        *errmsg_ = strdup(errmsg_buffer); \
+        FREE(CHILD_ERRMSG) \
+        goto end; \
+    }
+
 #define TRY(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &CHILD_ERRMSG); \
     RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG)
@@ -210,6 +219,120 @@ bool has_suffix(const char* x, const char* suffix){
            strcmp(x + x_len - suffix_len, suffix) == 0;
 }
 
+
+// Get the base directory from a directory path
+//
+// The input path is mutated
+//
+// Examples:
+//   "foo/bar/baz/" --> "foo/bar"
+//   "foo/bar/baz" --> "foo/bar"
+//   "foo/bar" --> "foo"
+//   "bar" --> "."
+//   "/" --> "/"
+char* dirname(char* path){
+    static char dot[] = ".";
+    char *last_slash;
+    
+    if (!path || !*path) return dot;
+    
+    /* Remove trailing slashes */
+    last_slash = path + strlen(path) - 1;
+    while (last_slash > path && *last_slash == '/') *last_slash-- = '\0';
+    
+    /* Find last slash */
+    last_slash = strrchr(path, '/');
+    
+    if (!last_slash) return dot;
+    if (last_slash == path) *(path+1) = '\0';  // Root case
+    else *last_slash = '\0';  // Normal case
+    
+    return path;
+}
+
+
+int write_atomic(const char* filename, const uint8_t* data, size_t size, ERRMSG) {
+    VAL_RETURN_SETUP(int, -1)
+
+    char tmp_path[] = "morloc-tmp_XXXXXX";
+    FILE* file = NULL;
+    int fd = -1;
+    int ret = -1;
+    char* dirpath = NULL;
+    int last_errno;
+    int tmp_errno;
+    char* file_dirpath = NULL;
+
+    char *file_dirname = NULL;
+    int dirfd = -1;
+
+    // Validate input
+    if (filename == NULL || data == NULL || size == 0) {
+        errno = EINVAL;
+        goto cleanup;
+    }
+
+    // Create secure temp file
+    if ((fd = mkstemp(tmp_path)) == -1) {
+        goto cleanup;
+    }
+
+    // Convert to FILE* stream
+    if ((file = fdopen(fd, "wb")) == NULL) {
+        goto cleanup;
+    }
+    fd = -1; // Prevent double-close
+
+    // Write data with verification
+    if (fwrite(data, 1, size, file) != size) {
+        goto cleanup;
+    }
+
+    // Critical data persistence sequence
+    if (fflush(file) != 0) goto cleanup;
+    if (fsync(fileno(file)) == -1) goto cleanup;
+
+    // Close file properly before rename
+    if (fclose(file) != 0) {
+        file = NULL;
+        goto cleanup;
+    }
+    file = NULL;
+
+    // Extract directory path for syncing
+    if ((file_dirpath = strdup(filename)) == NULL) {
+        goto cleanup;
+    }
+    file_dirname = dirname(file_dirpath); // need to replace this
+
+    // Atomic commit with directory sync
+    if (rename(tmp_path, filename) == -1) {
+        goto cleanup;
+    }
+
+    // Sync parent directory
+    dirfd = open(file_dirname, O_RDONLY | O_DIRECTORY);
+    if (dirfd == -1) {
+        goto cleanup;
+    }
+    if (fsync(dirfd) == -1) {
+        tmp_errno = errno;
+        close(dirfd);
+        errno = tmp_errno;
+        goto cleanup;
+    }
+    close(dirfd);
+
+    ret = 0;
+
+cleanup:
+    last_errno = errno;
+    if (file) fclose(file);
+    if (file_dirpath) free(file_dirpath);
+    if (ret == -1) unlink(tmp_path);
+    RAISE_IF(ret == -1, "Atomic write to '%s' failed: %s", filename, strerror(last_errno))
+    return ret;
+}
 
 
 // }}}
@@ -5131,38 +5254,12 @@ char* put_cache_packet(const uint8_t* voidstar, const Schema* schema, uint64_t k
     size_t mpk_size = 0;
     int retcode = TRY(pack_with_schema, voidstar, schema, &mpk_data, &mpk_size);
 
-    // Open the file to store the binary packet data
-    FILE* packet_file = fopen(packet_filename, "wb");
-    RAISE_IF(!packet_file, "Failed to open file '%s'", packet_filename)
+    // write packet
+    TRY_WITH(free(data_packet), write_atomic, packet_filename, data_packet, data_packet_size);
+    free(data_packet);
 
-    // Write the packet data to the file
-    size_t written = fwrite(data_packet, 1, data_packet_size, packet_file);
-    FREE(data_packet);
-    RAISE_IF_WITH(
-        written != data_packet_size,
-        fclose(packet_file),
-        "Failed to write to cache file '%s'",
-        packet_filename
-    )
-    fclose(packet_file);
-
-    // Open the file to store the MessagePack data
-    FILE* data_file = fopen(data_filename, "wb");
-    RAISE_IF(!data_file, "Failed to open file '%s'", data_filename)
-
-    // Write the MessagePack data to the file
-    written = fwrite(mpk_data, 1, mpk_size, data_file);
-    RAISE_IF_WITH(
-        written != mpk_size,
-        fclose(data_file),
-        "Failed to write to cache file '%s'",
-        data_filename
-    )
-    fclose(data_file);
-
-    // Ensure all data is flushed and check for write errors
-    int exit_code = fclose(data_file);
-    RAISE_IF(exit_code != 0, "Failed to close cache file '%s'", data_filename)
+    TRY_WITH(free(mpk_data), write_atomic, data_filename, (uint8_t*)mpk_data, mpk_size);
+    free(mpk_data);
 
     return strdup(packet_filename);
 }
@@ -5526,14 +5623,14 @@ bool parse_morloc_call_arguments(
 bool slurm_job_is_complete(uint32_t job_id) {
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "sacct -j %u --format=State --noheader", job_id);
-    
+
     FILE *sacct = popen(cmd, "r");
     if (!sacct) return false;
-    
+
     char state[16];
     bool done = false;
     while (fgets(state, sizeof(state), sacct)) {
-        if (strstr(state, "COMPLETED") || 
+        if (strstr(state, "COMPLETED") ||
             strstr(state, "FAILED") ||
             strstr(state, "CANCELLED")) {
             done = true;
@@ -5560,7 +5657,7 @@ uint32_t submit_morloc_slurm_job(
     char cmd[MAX_SLURM_COMMAND_LENGTH];
     FILE *slurm;
     uint32_t job_id = 0;
-    
+
     // Build resource parameters
     char* time_str = write_slurm_time(resources->time); // DD-HH:MM:SS
     char resources_spec[256];
@@ -5598,7 +5695,7 @@ uint32_t submit_morloc_slurm_job(
         pclose(slurm);
         RAISE("Failed to parse job ID from sbatch output");
     }
-    
+
     pclose(slurm);
     return job_id;
 }
@@ -5668,15 +5765,15 @@ uint8_t* remote_call(
     // sources, then I would need to hash the file and store the hash time.
     // Then I could avoid unpacking the data.
     for(size_t i = 0; i < nargs; i++){
-        char* arg_schema_str = TRY(read_schema_from_packet_meta, arg_packets[i]);
-        arg_schemas[i] = TRY(parse_schema, (const char**)&arg_schema_str);
+        char* arg_schema_str = TRY_GOTO(read_schema_from_packet_meta, arg_packets[i]);
+        arg_schemas[i] = TRY_GOTO(parse_schema, (const char**)&arg_schema_str);
         FREE(arg_schema_str);
 
         // get the raw data stored in the packet (after the header and metadata)
         // possibly heavy memory
-        arg_voidstars[i] = TRY(get_morloc_data_packet_value, arg_packets[i], arg_schemas[i]);
+        arg_voidstars[i] = TRY_GOTO(get_morloc_data_packet_value, arg_packets[i], arg_schemas[i]);
 
-        arg_hashes[i] = TRY(hash_voidstar, arg_voidstars[i], arg_schemas[i], DEFAULT_XXHASH_SEED);
+        arg_hashes[i] = TRY_GOTO(hash_voidstar, arg_voidstars[i], arg_schemas[i], DEFAULT_XXHASH_SEED);
 
         function_hash = mix(function_hash, arg_hashes[i]);
     }
@@ -5688,7 +5785,7 @@ uint8_t* remote_call(
     // If a cached result already exists, return it
     if(result_cache_filename != NULL){
         // return result is cached, so load the cache and go
-        return_packet = TRY(get_cache_packet, function_hash, cache_path);
+        return_packet = TRY_GOTO(get_cache_packet, function_hash, cache_path);
         goto end;
     }
 
@@ -5698,51 +5795,40 @@ uint8_t* remote_call(
         cached_arg_filenames[i] = check_cache_packet(arg_hashes[i], cache_path, &CHILD_ERRMSG);
         if(cached_arg_filenames[i] == NULL){
             CHILD_ERRMSG = NULL; // ignore error, if it failed, remake the cache
-            cached_arg_filenames[i] = TRY(put_cache_packet, arg_voidstars[i], arg_schemas[i], arg_hashes[i], cache_path);
+            cached_arg_filenames[i] = TRY_GOTO(put_cache_packet, arg_voidstars[i], arg_schemas[i], arg_hashes[i], cache_path);
         }
     }
 
     cached_arg_packets = (uint8_t**)calloc(nargs, sizeof(uint8_t*));
     for(size_t i = 0; i < nargs; i++){
         size_t file_size = 0;
-        cached_arg_packets[i] = TRY(read_binary_file, cached_arg_filenames[i], &file_size);
+        cached_arg_packets[i] = TRY_GOTO(read_binary_file, cached_arg_filenames[i], &file_size);
     }
 
 
     // write the call packet to cache
-    call_packet = TRY_WITH(
-        FREE(cached_arg_packets),
+    call_packet = TRY_GOTO(
         make_morloc_call_packet,
         (uint32_t)midx,
         (const uint8_t**)cached_arg_packets,
         nargs
-    ); 
+    );
 
-    call_packet_size = TRY(morloc_packet_size, call_packet);
+    call_packet_size = TRY_GOTO(morloc_packet_size, call_packet);
 
     // Note that this is not the same as the result hash, the remote compute
     // node will load this packet as a call to run the job and will then write
     // the results to the result hash cache.
     call_packet_hash_code = XXH64(call_packet, call_packet_size, DEFAULT_XXHASH_SEED);
 
-    call_packet_filename = TRY(make_cache_filename, call_packet_hash_code, cache_path)
-    call_packet_file = fopen(call_packet_filename, "wb");
-    RAISE_IF(!call_packet_file, "Failed to open file '%s'", call_packet_filename)
+    // Write packet the call to disk, this will be sent the worker daemon
+    TRY_GOTO(write_atomic, call_packet_filename, call_packet, call_packet_size)
 
-    written = fwrite(call_packet, 1, call_packet_size, call_packet_file);
-    RAISE_IF_WITH(
-        written != call_packet_size,
-        fclose(call_packet_file),
-        "Failed to write to cache file '%s'",
-        call_packet_filename
-    )
-    fclose(call_packet_file);
-
-    output_filename = TRY(make_cache_filename_ext, function_hash, cache_path, output_ext);
-    error_filename = TRY(make_cache_filename_ext, function_hash, cache_path, error_ext);
+    output_filename = TRY_GOTO(make_cache_filename_ext, function_hash, cache_path, output_ext);
+    error_filename = TRY_GOTO(make_cache_filename_ext, function_hash, cache_path, error_ext);
 
     // submit slurm call, save process ID for watching and killing, if needed
-    pid = TRY(
+    pid = TRY_GOTO(
         submit_morloc_slurm_job,
         "./nexus", // TODO: need a non-hard-coded path here
         socket_path,
@@ -5760,9 +5846,9 @@ uint8_t* remote_call(
     }
 
     return_packet_size = 0;
-    return_packet = TRY(read_binary_file, output_filename, &return_packet_size);
+    return_packet = TRY_GOTO(read_binary_file, output_filename, &return_packet_size);
 
-    failure = TRY(get_morloc_data_packet_error_message, return_packet)
+    failure = TRY_GOTO(get_morloc_data_packet_error_message, return_packet)
     if(failure != NULL){
         remove(result_cache_filename);
     }
