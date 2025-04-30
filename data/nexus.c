@@ -1,5 +1,6 @@
 #include "morloc.h"
 
+#include <getopt.h>
 #include <inttypes.h>
 #include <signal.h>
 #include <stdio.h>
@@ -17,6 +18,20 @@
 #define MAX_RETRIES 16
 
 #define MAX_DAEMONS 32
+
+typedef enum {
+    JSON,
+    MessagePack,
+    Packet
+} format_enum;
+
+typedef struct config_s {
+    int help_flag;
+    char* call_packet;
+    char* socket_path;
+    char* output_file;
+    format_enum output_format;
+} config_t;
 
 // global pid list of language daemons
 int pids[MAX_DAEMONS] = { 0 }; 
@@ -102,16 +117,6 @@ char* make_tmpdir(ERRMSG) {
 }
 
 
-bool is_help(char* arg1){
-    return (
-        strcmp(arg1, "-h") == 0 ||
-        strcmp(arg1, "--help") == 0 ||
-        strcmp(arg1, "-?") == 0 ||
-        strcmp(arg1, "?") == 0
-    );
-}
-
-
 int start_language_server(const morloc_socket_t* socket, ERRMSG){
     INT_RETURN_SETUP
 
@@ -154,22 +159,9 @@ void print_return(uint8_t* packet, Schema* schema){
 }
 
 
-
-void run_command(
-    uint32_t mid,
-    char** args,
-    const char** arg_schema_strs,
-    const char* return_schema_str,
-    morloc_socket_t root_socket,
-    morloc_socket_t** all_sockets // not const, these are modified to add pid
-){
+void start_daemons(morloc_socket_t** all_sockets){
     int pid = 0;
     char* errmsg = NULL;
-
-    Schema* return_schema = parse_schema(&return_schema_str, &errmsg);
-    if(errmsg != NULL){
-        ERROR("Failed to parse return schema\n");
-    }
 
     size_t npids = 0;
     for(size_t i = 0; all_sockets[i] != NULL; i++){
@@ -192,7 +184,7 @@ void run_command(
             return_data = send_and_receive_over_socket_wait((*socket_ptr)->socket_filename, ping_packet, ping_timeout, ping_timeout, &errmsg);
             if(errmsg != NULL || return_data == NULL){
                 if(attempt == MAX_RETRIES){
-                    fprintf(stderr, "Failed to ping '%s': %s\n", (*socket_ptr)->socket_filename, errmsg);
+                    ERROR("Failed to ping '%s': %s\n", (*socket_ptr)->socket_filename, errmsg);
                 }
 
                 // Sleep using exponential backoff
@@ -217,6 +209,21 @@ void run_command(
             break;
         }
     }
+}
+
+void run_command(
+    uint32_t mid,
+    char** args,
+    const char** arg_schema_strs,
+    const char* return_schema_str,
+    morloc_socket_t root_socket
+){
+    char* errmsg = NULL;
+
+    Schema* return_schema = parse_schema(&return_schema_str, &errmsg);
+    if(errmsg != NULL){
+        ERROR("Failed to parse return schema\n");
+    }
 
     uint8_t* call_packet = make_call_packet_from_cli(mid, args, arg_schema_strs, &errmsg);
     if(errmsg != NULL){
@@ -232,47 +239,96 @@ void run_command(
 }
 
 
+void run_call_packet(config_t config){
+    printf("stub");
+}
+
+
 void usage(){
+    // AUTO general usage statement
     // <<<BREAK>>>
+    // AUTO usage
     clean_exit(0);
 }
 
 
-int dispatch(
+void dispatch(
     const char* cmd,
     char** args,
     const char* shm_basename,
-    size_t shm_initial_size
+    config_t config
 ){
 
-// AUTO usage and dispatch
+// AUTO dispatch
 // <<<BREAK>>>
-// AUTO usage and dispatch
+// AUTO dispatch
 
     clean_exit(0);
 }
 
+int main(int argc, char *argv[]) {
 
-int main(int argc, char* argv[]){
-    char* errmsg = NULL;
+    config_t config = { 0, NULL, NULL, NULL, JSON };
+    
+    struct option long_options[] = {
+        {"help",        no_argument,       0, 'h'},
+        {"call-packet", required_argument, 0, 'c'},
+        {"socket-path", required_argument, 0, 's'},
+        {"output-file", required_argument, 0, 'o'},
+        {"output-form", required_argument, 0, 'f'},
+        {NULL, 0, NULL, 0}
+    };
+    
+    int opt;
+    while ((opt = getopt_long(argc, argv, "+hc:s:o:f:", long_options, NULL)) != -1) {
+        switch (opt) {
+            case 'h':
+                config.help_flag = 1;
+                break;
 
-    if(argc == 1 || (argv[1] != NULL && is_help(argv[1]))){
+            case 'c':
+                config.call_packet = optarg;
+                break;
+
+            case 's':
+                config.socket_path = optarg;
+                break;
+
+            case 'o':
+                config.output_file = optarg;
+                break;
+
+            case 'f':
+                if (strcmp(optarg, "json") == 0) {
+                    config.output_format = JSON;
+                } else if (strcmp(optarg, "mpk") == 0) {
+                    config.output_format = MessagePack;
+                } else if (strcmp(optarg, "packet") == 0) {
+                    config.output_format = Packet;
+                } else {
+                    fprintf(stderr, "Invalid output format: %s\n", optarg);
+                    exit(EXIT_FAILURE);
+                }
+                break;
+                
+            case '?':
+                fprintf(stderr, "Unknown option: %c\n", optopt);
+                exit(EXIT_FAILURE);
+                
+            case ':':
+                fprintf(stderr, "Option %c requires an argument\n", optopt);
+                exit(EXIT_FAILURE);
+        }
+    }
+
+    // Handle help flag immediately
+    if (config.help_flag) {
         usage();
-        return 1;
+        exit(EXIT_SUCCESS);
     }
 
-    uint64_t job_hash = make_job_hash(42);
 
-    size_t shm_initial_size = 0xffff;
-    char shm_basename[MAX_FILENAME_SIZE];
-    snprintf(shm_basename, sizeof(shm_basename), "morloc-%" PRIu64, job_hash);
-
-    shm_t* shm = shinit(shm_basename, 0, shm_initial_size, &errmsg);
-    if(errmsg != NULL){
-        ERROR("%s", errmsg);
-    }
-
-    char* cmd = argv[1];
+    char* errmsg = NULL;
 
     // set the global temporary directory
     tmpdir = make_tmpdir(&errmsg);
@@ -281,5 +337,52 @@ int main(int argc, char* argv[]){
         ERROR("%s", errmsg);
     }
 
-    return dispatch(cmd, argv+2, shm_basename, shm_initial_size);
+    uint64_t job_hash = make_job_hash(42);
+
+    size_t shm_initial_size = 0xffff;
+    char shm_basename[MAX_FILENAME_SIZE] = { '\0' };
+    snprintf(shm_basename, sizeof(shm_basename), "morloc-%" PRIu64, job_hash);
+
+    shm_t* shm = shinit(shm_basename, 0, shm_initial_size, &errmsg);
+    if(errmsg != NULL){
+        ERROR("%s", errmsg);
+    }
+
+    // Command logic routing
+    if (config.call_packet == NULL) {
+        // Require subcommand when not using call packets
+        if (optind >= argc) {
+            usage();
+            clean_exit(EXIT_FAILURE);
+        }
+
+        // Extract subcommand and arguments
+        const char* subcommand = argv[optind];
+        char** command_arguments = &argv[optind + 1];
+
+        // Validate we don't have conflicting options
+        if (config.socket_path) {
+            fprintf(stderr, "Error: Socket path can't be used with subcommands\n");
+            clean_exit(EXIT_FAILURE);
+        }
+
+        dispatch(subcommand, command_arguments, shm_basename, config);
+    } else {
+        // Validate no positional arguments when using call packet
+        if (optind < argc) {
+            fprintf(stderr, "Error: Positional arguments not allowed with --call-packet\n");
+            clean_exit(EXIT_FAILURE);
+        }
+
+        // Validate required fields for packet mode
+        if (!config.socket_path) {
+            fprintf(stderr, "Error: Socket path required for call packet mode\n");
+            clean_exit(EXIT_FAILURE);
+        }
+
+        dispatch(NULL, NULL, shm_basename, config);
+    }
+
+    // unrechable
+    clean_exit(EXIT_SUCCESS);
 }

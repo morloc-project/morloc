@@ -122,8 +122,13 @@ writeType Nothing  t = [idoc|fprintf(stderr, "    return: #{pretty t}\n");|]
 dispatchCode _ [] [] = "// nothing to dispatch"
 dispatchCode config fdata cdata = [idoc|
     uint32_t mid = 0;
-
     #{vsep socketDocs}
+    if(config.call_packet != NULL){
+        morloc_socket_t* all_sockets[] = #{allSocketsList};
+        start_daemons(all_sockets);
+        run_call_packet(config);
+        clean_exit(0);
+    }
 
     #{cIfElse (head cases) (tail cases) (Just elseClause)}
     |]
@@ -168,6 +173,11 @@ dispatchCode config fdata cdata = [idoc|
 
     daemonSets = uniqueFst [ (socketLang s, s) | s <- allSockets ]
 
+    allSocketsList = encloseSep "{ " " }" ", " (socketDocs <> ["(morloc_socket_t*)NULL"])
+        where
+        socketDocs = [ "&" <> (pretty . ML.makeExtension $ lang) <> "_socket" | (lang, _) <- daemonSets]
+            
+
     socketDocs = [makeSocketDoc s | (_, s) <- daemonSets]
 
     makeCaseDoc (socket, sub, midx, _, sockets, schemas, returnSchema) = 
@@ -176,7 +186,8 @@ dispatchCode config fdata cdata = [idoc|
     morloc_socket_t* sockets[] = #{socketList};
     const char* arg_schemas[] = #{argSchemasList};
     char return_schema[] = #{returnSchema};
-    run_command(mid, args, arg_schemas, return_schema, #{lang}_socket, sockets);
+    start_daemons(sockets);
+    run_command(mid, args, arg_schemas, return_schema, #{lang}_socket);
           |]
         )
         where
