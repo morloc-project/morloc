@@ -619,7 +619,10 @@ void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
   if(result == 0){
       return dest;
   } else {
-      PyErr_SetString(PyExc_TypeError, "Failed to write data to shared memory pool");
+      if (!PyErr_Occurred()) {
+          PyErr_SetString(PyExc_TypeError, 
+              "Failed to write data to shared memory pool - Unknown Error");
+      }
       return NULL;
   }
 }
