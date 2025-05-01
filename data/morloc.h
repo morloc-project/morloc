@@ -233,20 +233,20 @@ bool has_suffix(const char* x, const char* suffix){
 char* dirname(char* path){
     static char dot[] = ".";
     char *last_slash;
-    
+
     if (!path || !*path) return dot;
-    
+
     /* Remove trailing slashes */
     last_slash = path + strlen(path) - 1;
     while (last_slash > path && *last_slash == '/') *last_slash-- = '\0';
-    
+
     /* Find last slash */
     last_slash = strrchr(path, '/');
-    
+
     if (!last_slash) return dot;
     if (last_slash == path) *(path+1) = '\0';  // Root case
     else *last_slash = '\0';  // Normal case
-    
+
     return path;
 }
 
@@ -5644,7 +5644,7 @@ bool slurm_job_is_complete(uint32_t job_id) {
 
 uint32_t submit_morloc_slurm_job(
     const char* nexus_path,
-    const char* socket_path,
+    const char* socket_basename,
     const char* call_packet_filename,
     const char* result_cache_filename,
     const char* output_filename,
@@ -5680,7 +5680,7 @@ uint32_t submit_morloc_slurm_job(
         resources_spec,
         nexus_path,
         call_packet_filename,
-        socket_path,
+        socket_basename,
         result_cache_filename
     );
 
@@ -5705,11 +5705,24 @@ uint32_t submit_morloc_slurm_job(
 //   * if the data is native, then it should be converted
 uint8_t* remote_call(
     int midx,
-    const char* socket_path, // domain socket file for target pool
-    const char* cache_path, // path where args and results will be written
-    const resources_t* resources, // required system resources (mem, cpus, etc)
-    const uint8_t** arg_packets, // voidstar for each argument
-    size_t nargs, // number of arguments
+
+    // The base socket name for the target pool (e.g., "pipe-r").
+    // This is not the full socket path, since the parent and remote will be
+    // using different socket files in different temporary directories. But the
+    // basename generation will be conserved.
+    const char* socket_basename,
+
+    // path where args and results will be written
+    const char* cache_path,
+
+    // required system resources (mem, cpus, etc)
+    const resources_t* resources,
+
+    // voidstar for each argument
+    const uint8_t** arg_packets,
+
+    // number of arguments
+    size_t nargs,
     ERRMSG
 ){
     PTR_RETURN_SETUP(uint8_t)
@@ -5831,7 +5844,7 @@ uint8_t* remote_call(
     pid = TRY_GOTO(
         submit_morloc_slurm_job,
         "./nexus", // TODO: need a non-hard-coded path here
-        socket_path,
+        socket_basename,
         call_packet_filename,
         result_cache_filename,
         output_filename,

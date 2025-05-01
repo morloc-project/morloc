@@ -201,7 +201,7 @@ translateSegment m0 =
           resGPU = pretty $ remoteResourcesGpus res
           resources = [idoc|list(mem=#{resMem}L, time=#{resTime}L, cpus=#{resCPU}L, gpus=#{resGPU}L)|]
           argList = list (map argNamer args)
-          call = "morloc_remote_call" <> tupled [pretty mid, makeSocketPath socketFile, dquotes ".morloc-cache", resources, argList]
+          call = "morloc_remote_call" <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resources, argList]
       return $ defaultValue
         { poolExpr = call
         , poolIsRemote = True

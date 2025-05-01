@@ -241,7 +241,7 @@ translateSegment m0 =
           resGPU = pretty $ remoteResourcesGpus res
           resStruct = "struct.pack" <> tupled [squotes "iiii", resMem, resTime, resCPU, resGPU]
           argList = list (map argNamer args)
-          call = "morloc.remote_call" <> tupled [pretty mid, makeSocketPath socketFile, dquotes ".morloc-cache", resStruct, argList]
+          call = "morloc.remote_call" <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resStruct, argList]
       return $ defaultValue { poolExpr = call, poolIsRemote = True }
 
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}

@@ -870,12 +870,12 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
 
 static PyObject* pybinding__remote_call(PyObject* self, PyObject* args) { MAYFAIL
     int midx;
-    char* socket_path;
+    char* socket_base;
     char* cache_path;
-    PyObject* res_struct; // python strut that is converted to a resource_t struct
+    PyObject* res_struct; // python struct that is converted to a resource_t struct
     PyObject* arg_packets_obj; // python list of bytes types
 
-    if (!PyArg_ParseTuple(args, "issOOO", &midx, &socket_path, &cache_path, &res_struct, &arg_packets_obj)) {
+    if (!PyArg_ParseTuple(args, "issOOO", &midx, &socket_base, &cache_path, &res_struct, &arg_packets_obj)) {
         return NULL;
     }
 
@@ -916,7 +916,7 @@ static PyObject* pybinding__remote_call(PyObject* self, PyObject* args) { MAYFAI
     result = PyTRY(
         remote_call,
         midx,
-        socket_path,
+        socket_base,
         cache_path,
         res,
         arg_packets,

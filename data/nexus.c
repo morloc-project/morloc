@@ -28,7 +28,7 @@ typedef enum {
 typedef struct config_s {
     int help_flag;
     char* packet_path;
-    char* socket_path;
+    char* socket_base;
     char* output_path;
     format_enum output_format;
 } config_t;
@@ -252,15 +252,19 @@ void run_call_packet(config_t config){
         ERROR_WITH(free(errmsg), "Failed to open call packet file '%s': %s\n", config.packet_path, errmsg)
     }
 
-    uint8_t* result_packet = send_and_receive_over_socket(config.socket_path, call_packet, &errmsg);
+    // make the local socket filename relative to the current temporary directry
+    char socket_path[MAX_FILENAME_SIZE] = { '\0' };
+    snprintf(socket_path, sizeof(socket_path), "%s/%s", tmpdir, config.socket_base);
+
+    uint8_t* result_packet = send_and_receive_over_socket(socket_path, call_packet, &errmsg);
     free(call_packet);
     if(errmsg != NULL || result_packet == NULL){
-        ERROR_WITH(free(errmsg), "Failed to contact socket '%s': %s\n", config.socket_path, errmsg)
+        ERROR_WITH(free(errmsg), "Failed to contact socket '%s': %s\n", socket_path, errmsg)
     }
 
     size_t result_packet_size = morloc_packet_size(result_packet, &errmsg);
     if(errmsg != NULL){
-        ERROR_WITH(free(errmsg), "Packet returned to nexus from '%s' is invalid: %s\n", config.socket_path, errmsg)
+        ERROR_WITH(free(errmsg), "Packet returned to nexus from '%s' is invalid: %s\n", socket_path, errmsg)
     }
 
     if(write_atomic(config.output_path, result_packet, result_packet_size, &errmsg) != 0){
@@ -300,7 +304,7 @@ int main(int argc, char *argv[]) {
     struct option long_options[] = {
         {"help",        no_argument,       0, 'h'},
         {"call-packet", required_argument, 0, 'c'},
-        {"socket-path", required_argument, 0, 's'},
+        {"socket-base", required_argument, 0, 's'},
         {"output-file", required_argument, 0, 'o'},
         {"output-form", required_argument, 0, 'f'},
         {NULL, 0, NULL, 0}
@@ -318,7 +322,7 @@ int main(int argc, char *argv[]) {
                 break;
 
             case 's':
-                config.socket_path = optarg;
+                config.socket_base = optarg;
                 break;
 
             case 'o':
@@ -388,8 +392,8 @@ int main(int argc, char *argv[]) {
         char** command_arguments = &argv[optind + 1];
 
         // Validate we don't have conflicting options
-        if (config.socket_path) {
-            fprintf(stderr, "Error: Socket path can't be used with subcommands\n");
+        if (config.socket_base) {
+            fprintf(stderr, "Error: socket-base can't be used with subcommands\n");
             clean_exit(EXIT_FAILURE);
         }
 
@@ -402,8 +406,8 @@ int main(int argc, char *argv[]) {
         }
 
         // Validate required fields for packet mode
-        if (!config.socket_path) {
-            fprintf(stderr, "Error: Socket path required for call packet mode\n");
+        if (!config.socket_base) {
+            fprintf(stderr, "Error: socket-base required for call packet mode\n");
             clean_exit(EXIT_FAILURE);
         }
 
