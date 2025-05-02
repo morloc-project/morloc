@@ -899,7 +899,7 @@ static PyObject* pybinding__remote_call(PyObject* self, PyObject* args) { MAYFAI
     const uint8_t** arg_packets = NULL;
     uint8_t* result = NULL;
 
-    if (!PyArg_ParseTuple(args, "issOOO", &midx, &socket_base, &cache_path, &res_struct, &arg_packets_obj)) {
+    if (!PyArg_ParseTuple(args, "issOO", &midx, &socket_base, &cache_path, &res_struct, &arg_packets_obj)) {
         PyRAISE("Failed to parse arguments");
     }
 
