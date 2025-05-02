@@ -15,38 +15,57 @@
 
 #define MAYFAIL \
     char* child_errmsg_ = NULL; \
-    void* return_value_ = NULL;
 
-#define MAYFAIL_VOID \
-    char* child_errmsg_ = NULL;
+char* get_prior_err(){
+    char* prior_err = NULL;
+    if (PyErr_Occurred()) {
+        // Fetch existing exception
+        PyObject *type, *value, *traceback;
+        PyErr_Fetch(&type, &value, &traceback);
 
-#define MAYFAIL_WITH(type, value) \
-    char* child_errmsg_ = NULL; \
-    type return_value_ = value;
+        // Extract error message
+        PyObject* str = PyObject_Str(value);  // Convert exception to string
+        prior_err = PyUnicode_AsUTF8(str);
+
+        // Cleanup
+        Py_XDECREF(str);
+        Py_XDECREF(type);
+        Py_XDECREF(value);
+        Py_XDECREF(traceback);
+    }
+    return prior_err;
+}
 
 
 #define PyTRY(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
-        PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
-        return return_value_; \
+        char* prior_err = get_prior_err(); \
+        if(prior_err == NULL){ \
+            PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
+        } else { \
+            PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_); \
+        } \
+        goto error; \
     }
 
-#define PyTRY_VOID(fun, ...) \
-    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
-    if(child_errmsg_ != NULL){ \
-        PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
-        return; \
-    }
+#define PyRAISE(msg, ...) \
+    char* prior_err = get_prior_err(); \
+    if(prior_err == NULL){ \
+        PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n" msg "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    } else { \
+        PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n" msg "\n", prior_err, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    } \
+    goto error;
 
-# define PyTRY_WITH(clean, fun, ...) \
-    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
-    if(child_errmsg_ != NULL){ \
-        clean; \
-        PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
-        return return_value_; \
+#define PyTRACE(cond) \
+    if(cond){ \
+        char* prior_err = get_prior_err(); \
+        if(prior_err != NULL){ \
+            PyErr_Format(PyExc_TypeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, prior_err); \
+            goto error; \
+        } \
     }
-
 
 PyObject* numpy_module = NULL;
 
@@ -55,18 +74,19 @@ PyObject* numpy_module = NULL;
 // is used. This avoids the agonizingly long numpy import time.
 void* import_numpy() {
     numpy_module = PyImport_ImportModule("numpy");
-    if (numpy_module == NULL) {
-        PyErr_SetString(PyExc_ImportError, "NumPy is not available");
-        return NULL;
+    if(numpy_module == NULL){
+        PyRAISE("NumPy is not available");
     }
 
     import_array();
+
+error:
+    return NULL;
 }
 
 
 
-PyObject* fromAnything(const Schema* schema, const void* data){
-    MAYFAIL
+PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
 
     PyObject* obj = NULL;
     switch (schema->type) {
@@ -110,9 +130,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){
             absptr_t tmp_ptr = PyTRY(rel2abs, str_array->data);
             obj = PyUnicode_FromStringAndSize(tmp_ptr, str_array->size);
             if (!obj) {
-                fprintf(stderr, "Failed to extract string from voidstar\n");
-                PyErr_SetString(PyExc_TypeError, "Failed to parse data");
-                goto error;
+                PyRAISE("Failed to extract string from voidstar")
             }
             break;
         }
@@ -122,6 +140,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){
                 import_numpy();
                 Schema* element_schema = schema->parameters[0];
                 npy_intp dims[] = {array->size};
+                void* absptr = NULL;
                 int nd = 1; // number of dimensions
                 int type_num;
                 // Determine the NumPy type number based on the element schema
@@ -138,18 +157,16 @@ PyObject* fromAnything(const Schema* schema, const void* data){
                     case MORLOC_FLOAT32: type_num = NPY_FLOAT32; break;
                     case MORLOC_FLOAT64: type_num = NPY_FLOAT64; break;
                     default:
-                        PyErr_SetString(PyExc_TypeError, "Unsupported element type for NumPy array");
-                        goto error;
+                        PyRAISE("Unsupported element type for NumPy array");
                 }
 
-                void* absptr = PyTRY(rel2abs, array->data);
+                absptr = PyTRY(rel2abs, array->data);
 
                 // Create the NumPy array
                 obj = PyArray_SimpleNewFromData(nd, dims, type_num, absptr);
 
-                if (!obj) {
-                    PyErr_SetString(PyExc_TypeError, "Failed to parse data");
-                    goto error;
+                if(obj == NULL) {
+                    PyRAISE("Failed to parse data");
                 }
 
                 // Note that we do not want to give ownership to Python
@@ -160,16 +177,14 @@ PyObject* fromAnything(const Schema* schema, const void* data){
                 // Create a Python bytes object for UINT8 arrays
                 absptr_t tmp_ptr = PyTRY(rel2abs, array->data);
                 obj = PyBytes_FromStringAndSize((const char*)tmp_ptr, array->size);
-                if (!obj) {
-                    PyErr_SetString(PyExc_TypeError, "Failed to one bytes");
-                    goto error;
+                if (obj == NULL) {
+                    PyRAISE("Failed to one bytes")
                 }
             } else if (schema->hint == NULL || (schema->hint != NULL && strcmp(schema->hint, "list") == 0)) {
                 // For other types, create a standard list
                 obj = PyList_New(array->size);
-                if (!obj) {
-                    PyErr_SetString(PyExc_TypeError, "Failed to one string");
-                    goto error;
+                if(obj == NULL){
+                    PyRAISE("Failed to one string");
                 }
                 if(array->size > 0){
                     char* start = (char*) PyTRY(rel2abs, array->data);
@@ -179,39 +194,34 @@ PyObject* fromAnything(const Schema* schema, const void* data){
                         PyObject* item = fromAnything(element_schema, start + width * i);
                         if (!item || PyList_SetItem(obj, i, item) < 0) {
                             Py_XDECREF(item);
-                            PyErr_SetString(PyExc_TypeError, "Failed to access element in list");
-                            goto error;
+                            PyRAISE("Failed to access element in list")
                         }
                     }
                 }
             } else {
-                PyErr_SetString(PyExc_TypeError, "Unexpected array hint");
-                goto error;
+                PyRAISE("Unexpected array hint");
             }
             break;
         }
         case MORLOC_TUPLE: {
             obj = PyTuple_New(schema->size);
-            if (!obj) {
-                PyErr_SetString(PyExc_TypeError, "Failed in tuple");
-                goto error;
+            if(obj == NULL){
+                PyRAISE("Failed in tuple");
             }
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
                 PyObject* item = fromAnything(schema->parameters[i], item_ptr);
                 if (!item || PyTuple_SetItem(obj, i, item) < 0) {
                     Py_XDECREF(item);
-                    PyErr_SetString(PyExc_TypeError, "Failed to access tuple element");
-                    goto error;
+                    PyRAISE("Failed to access tuple element");
                 }
             }
             break;
         }
         case MORLOC_MAP: {
             obj = PyDict_New();
-            if (!obj) {
-                PyErr_SetString(PyExc_TypeError, "Failed in map");
-                goto error;
+            if(obj == NULL){
+                PyRAISE("Failed in map");
             }
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
@@ -220,8 +230,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){
                 if (!value || !key || PyDict_SetItem(obj, key, value) < 0) {
                     Py_XDECREF(value);
                     Py_XDECREF(key);
-                    PyErr_SetString(PyExc_TypeError, "Failed to access map element");
-                    goto error;
+                    PyRAISE("Failed to access map element");
                 }
                 Py_DECREF(key);
                 Py_DECREF(value);
@@ -229,8 +238,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){
             break;
         }
         default:
-            PyErr_SetString(PyExc_TypeError, "Unsupported schema type");
-            goto error;
+            PyRAISE("Unsupported schema type");
     }
 
     return obj;
@@ -289,12 +297,10 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
         case MORLOC_STRING:
         case MORLOC_ARRAY:
             if (schema->type == MORLOC_STRING && !(PyUnicode_Check(obj) || PyBytes_Check(obj))) {
-                PyErr_Format(PyExc_TypeError, "Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
             }
             if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) {
-                PyErr_Format(PyExc_TypeError, "Expected list for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected list for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
             }
 
             {
@@ -342,8 +348,7 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                 } else if (PyUnicode_Check(obj)) {
                     required_size += (size_t)PyUnicode_GET_LENGTH(obj);
                 } else {
-                    PyErr_SetString(PyExc_TypeError, "Unsupported data type");
-                    return -1;
+                    PyRAISE("Unsupported data type");
                 }
 
                 return required_size;
@@ -351,15 +356,13 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
 
         case MORLOC_TUPLE:
             if (!PyTuple_Check(obj) && !PyList_Check(obj)) {
-                PyErr_Format(PyExc_TypeError, "Expected tuple or list for MORLOC_TUPLE, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected tuple or list for MORLOC_TUPLE, but got %s", Py_TYPE(obj)->tp_name);
             }
 
             {
                 Py_ssize_t size = PyTuple_Check(obj) ? PyTuple_Size(obj) : PyList_Size(obj);
                 if ((size_t)size != schema->size) {
-                    PyErr_SetString(PyExc_ValueError, "Tuple/List size mismatch");
-                    goto error;
+                    PyRAISE("Tuple/List size mismatch");
                 }
 
                 size_t required_size = 0;
@@ -377,9 +380,8 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
             }
 
         case MORLOC_MAP:
-            if (!PyDict_Check(obj)) {
-                PyErr_Format(PyExc_TypeError, "Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+            if (PyDict_Check(obj) == NULL) {
+                PyRAISE("Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
             }
 
             {
@@ -401,11 +403,10 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
             }
 
         default:
-            PyErr_SetString(PyExc_TypeError, "Unsupported schema type");
-            goto error;
+            PyRAISE("Unsupported schema type");
     }
 
-    PyErr_SetString(PyExc_TypeError, "Impossible error");
+    PyRAISE("Reached the unreachable");
 
 error:
     return -1;
@@ -413,22 +414,19 @@ error:
 
 
 
-int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj) {
-    MAYFAIL_WITH(int, -1)
+int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj) { MAYFAIL
     switch (schema->type) {
         case MORLOC_NIL:
-            /* if (obj != Py_None) {                                                                                 */
-            /*     PyErr_Format(PyExc_TypeError, "Expected None for MORLOC_NIL, but got %s", Py_TYPE(obj)->tp_name); */
-            /*     goto error;                                                                                       */
-            /* }                                                                                                     */
+            if (obj != Py_None) {
+                PyRAISE("Expected None for MORLOC_NIL, but got %s", Py_TYPE(obj)->tp_name);
+            }
             *((int8_t*)dest) = (int8_t)0;
             break;
 
         case MORLOC_BOOL:
-            /* if (!PyBool_Check(obj)) {                                                                              */
-            /*     PyErr_Format(PyExc_TypeError, "Expected bool for MORLOC_BOOL, but got %s", Py_TYPE(obj)->tp_name); */
-            /*     goto error;                                                                                        */
-            /* }                                                                                                      */
+            if (!PyBool_Check(obj)) {
+                PyRAISE("Expected bool for MORLOC_BOOL, but got %s", Py_TYPE(obj)->tp_name);
+            }
             *((bool*)dest) = (obj == Py_True);
             break;
 
@@ -458,10 +456,9 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
             break;
 
         case MORLOC_FLOAT32:
-            /* if (!PyFloat_Check(obj)) {                                                                                 */
-            /*     PyErr_Format(PyExc_TypeError, "Expected float for MORLOC_FLOAT32, but got %s", Py_TYPE(obj)->tp_name); */
-            /*     goto error;                                                                                            */
-            /* }                                                                                                          */
+            if (!PyFloat_Check(obj)) {
+                PyRAISE("Expected float for MORLOC_FLOAT32, but got %s", Py_TYPE(obj)->tp_name);
+            }
             *((float*)dest) = (float)PyFloat_AsDouble(obj);
             break;
 
@@ -472,21 +469,18 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
             } else if(PyLong_Check(obj)){
                 *((double*)dest) = (double)PyLong_AsLongLong(obj);
             } else {
-                PyErr_Format(PyExc_TypeError, "Expected float or int for MORLOC_FLOAT64, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected float or int for MORLOC_FLOAT64, but got %s", Py_TYPE(obj)->tp_name);
             }
             break;
 
         case MORLOC_STRING:
         case MORLOC_ARRAY:
             if (schema->type == MORLOC_STRING && !(PyUnicode_Check(obj) || PyBytes_Check(obj))) {
-                PyErr_Format(PyExc_TypeError, "Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
             }
 
             if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) {
-                PyErr_Format(PyExc_TypeError, "Expected list for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected list for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
             }
 
             {
@@ -505,8 +499,7 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
 
                     // Verify that the array is contiguous
                     if (!PyArray_ISCONTIGUOUS(arr)) {
-                        PyErr_SetString(PyExc_ValueError, "NumPy array must be contiguous");
-                        goto error;
+                        PyRAISE("NumPy array must be contiguous");
                     }
                 } else {
                     data = PyUnicode_AsUTF8AndSize(obj, &size);
@@ -553,15 +546,13 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
 
         case MORLOC_TUPLE:
             if (!PyTuple_Check(obj) && !PyList_Check(obj)) {
-                PyErr_Format(PyExc_TypeError, "Expected tuple or list for MORLOC_TUPLE, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected tuple or list for MORLOC_TUPLE, but got %s", Py_TYPE(obj)->tp_name);
             }
 
             {
                 Py_ssize_t size = PyTuple_Check(obj) ? PyTuple_Size(obj) : PyList_Size(obj);
                 if ((size_t)size != schema->size) {
-                    PyErr_SetString(PyExc_ValueError, "Tuple/List size mismatch");
-                    goto error;
+                    PyRAISE("Tuple/List size mismatch");
                 }
                 for (Py_ssize_t i = 0; i < size; ++i) {
                     PyObject* item = PyTuple_Check(obj) ? PyTuple_GetItem(obj, i) : PyList_GetItem(obj, i);
@@ -572,8 +563,7 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
 
         case MORLOC_MAP:
             if (!PyDict_Check(obj)) {
-                PyErr_Format(PyExc_TypeError, "Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
             }
 
             {
@@ -589,8 +579,7 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
             break;
 
         default:
-            PyErr_SetString(PyExc_TypeError, "Unsupported schema type");
-            goto error;
+            PyRAISE("Unsupported schema type");
     }
 
     return 0;
@@ -603,8 +592,7 @@ void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
   // calculate the required size of the shared memory object
   ssize_t shm_size = get_shm_size(schema, obj);
   if(shm_size == -1){
-      PyErr_SetString(PyExc_TypeError, "Schema does not match object");
-      return NULL;
+      PyRAISE("Schema does not match object");
   }
 
   // allocate the required memory as a single block
@@ -615,16 +603,12 @@ void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
 
   // write the data to the block
   int result = to_voidstar_r(dest, &cursor, schema, obj);
+  PyTRACE(result != 0)
 
-  if(result == 0){
-      return dest;
-  } else {
-      if (!PyErr_Occurred()) {
-          PyErr_SetString(PyExc_TypeError, 
-              "Failed to write data to shared memory pool - Unknown Error");
-      }
-      return NULL;
-  }
+  return dest;
+
+error:
+  return NULL;
 }
 
 
@@ -632,8 +616,7 @@ static PyObject* pybinding__wait_for_client(PyObject* self, PyObject* args) { MA
     PyObject* daemon_capsule;
 
     if (!PyArg_ParseTuple(args, "O", &daemon_capsule)) {
-        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
-        return NULL;
+        PyRAISE("Failed to parse arguments");
     }
 
     language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
@@ -641,6 +624,9 @@ static PyObject* pybinding__wait_for_client(PyObject* self, PyObject* args) { MA
     int client_fd = PyTRY(wait_for_client, daemon);
 
     return PyLong_FromLong((long)client_fd);
+
+error:
+    return NULL;
 }
 
 static PyObject* pybinding__start_daemon(PyObject* self, PyObject* args) { MAYFAIL
@@ -648,12 +634,13 @@ static PyObject* pybinding__start_daemon(PyObject* self, PyObject* args) { MAYFA
     const char* tmpdir;
     const char* shm_basename;
     size_t shm_default_size;
+    language_daemon_t* daemon = NULL;
 
     if (!PyArg_ParseTuple(args, "sssk", &socket_path, &tmpdir, &shm_basename, &shm_default_size)) {
-      return NULL;
+      goto error;
     }
 
-    language_daemon_t* daemon = PyTRY(
+    daemon = PyTRY(
         start_daemon,
         socket_path,
         tmpdir,
@@ -662,6 +649,10 @@ static PyObject* pybinding__start_daemon(PyObject* self, PyObject* args) { MAYFA
     );
 
     return PyCapsule_New(daemon, "language_daemon_t", NULL);
+
+error:
+    FREE(daemon)
+    return NULL;
 }
 
 
@@ -669,8 +660,7 @@ static PyObject* pybinding__close_daemon(PyObject* self, PyObject* args) {
     PyObject* daemon_capsule;
 
     if (!PyArg_ParseTuple(args, "O", &daemon_capsule)) {
-        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
-        return NULL;
+        PyRAISE("Failed to parse arguments");
     }
 
     language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
@@ -680,6 +670,9 @@ static PyObject* pybinding__close_daemon(PyObject* self, PyObject* args) {
     }
 
     Py_RETURN_NONE;
+
+error:
+    return NULL;
 }
 
 
@@ -688,8 +681,7 @@ static PyObject*  pybinding__read_morloc_call_packet(PyObject* self, PyObject* a
     size_t packet_size;
 
     if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
-        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
-        return NULL;
+        PyRAISE("Failed to parse arguments");
     }
     morloc_call_t* call_packet = PyTRY(read_morloc_call_packet, packet);
 
@@ -709,6 +701,9 @@ static PyObject*  pybinding__read_morloc_call_packet(PyObject* self, PyObject* a
     PyTuple_SetItem(py_tuple, 1, py_args);
 
     return py_tuple;
+
+error:
+    return NULL;
 }
 
 static PyObject*  pybinding__send_packet_to_foreign_server(PyObject* self, PyObject* args){ MAYFAIL
@@ -717,13 +712,15 @@ static PyObject*  pybinding__send_packet_to_foreign_server(PyObject* self, PyObj
     size_t packet_size = 0;
 
     if (!PyArg_ParseTuple(args, "iy#", &client_fd, &packet, &packet_size)) {
-        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
-        return NULL;
+        PyRAISE("Failed to parse arguments");
     }
 
     size_t bytes_sent = PyTRY(send_packet_to_foreign_server, client_fd, packet);
 
     return PyLong_FromSize_t(bytes_sent);
+
+error:
+    return NULL;
 }
 
 
@@ -731,8 +728,7 @@ static PyObject*  pybinding__stream_from_client(PyObject* self, PyObject* args){
     int client_fd = 0;
 
     if (!PyArg_ParseTuple(args, "i", &client_fd)) {
-        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
-        return NULL;
+        PyRAISE("Failed to parse arguments");
     }
 
     uint8_t* packet = PyTRY(stream_from_client, client_fd);
@@ -740,6 +736,9 @@ static PyObject*  pybinding__stream_from_client(PyObject* self, PyObject* args){
     size_t packet_size = PyTRY(morloc_packet_size, packet);
 
     return PyBytes_FromStringAndSize((char*)packet, packet_size);
+
+error:
+    return NULL;
 }
 
 
@@ -748,13 +747,15 @@ static PyObject*  pybinding__close_socket(PyObject* self, PyObject* args){
     int socket_id = 0;
 
     if (!PyArg_ParseTuple(args, "i", &socket_id)) {
-        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
-        return NULL;
+        PyRAISE("Failed to parse arguments");
     }
 
     close_socket(socket_id);
 
     Py_RETURN_NONE;
+
+error:
+    return NULL;
 }
 
 // Transforms a value into a message ready for the socket
@@ -763,25 +764,32 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     const char* schema_str;
 
     if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
-        return NULL;
+        PyRAISE("Failed to parse arguments");
     }
 
-    Schema* schema = PyTRY(parse_schema, &schema_str);
+    uint8_t* packet = NULL;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    size_t packet_size = 0;
 
-    void* voidstar = to_voidstar(schema, obj);
+    schema = PyTRY(parse_schema, &schema_str);
 
-    if(!voidstar){
-        return NULL;
-    }
+    voidstar = to_voidstar(schema, obj);
+    PyTRACE(voidstar == NULL)
 
     // convert to a relative pointer conserved between language servers
     relptr_t relptr = PyTRY(abs2rel, voidstar);
 
-    uint8_t* packet = make_standard_data_packet(relptr, schema);
+    packet = make_standard_data_packet(relptr, schema);
 
-    size_t packet_size = PyTRY(morloc_packet_size, packet);
+    packet_size = PyTRY(morloc_packet_size, packet);
 
     return PyBytes_FromStringAndSize((char*)packet, packet_size);
+
+error:
+    FREE(packet)
+    free_schema(schema);
+    return NULL;
 }
 
 
@@ -792,22 +800,27 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     const char* schema_str;
 
     if (!PyArg_ParseTuple(args, "y#s", &packet, &packet_size, &schema_str)) {
-        return NULL;
+        PyRAISE("Failed to parse arguments");
     }
 
-    Schema* schema = PyTRY(parse_schema, &schema_str)
+    uint8_t* voidstar = NULL;
+    Schema* schema = NULL;
+    PyObject* obj = NULL;
 
-    uint8_t* voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+    schema = PyTRY(parse_schema, &schema_str)
 
-    PyObject* obj = fromAnything(schema, voidstar);
-    if (obj == NULL) {
-        free_schema(schema);
-        return NULL;
-    }
+    voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+
+    obj = fromAnything(schema, voidstar);
+    PyTRACE(obj == NULL)
 
     free_schema(schema);
 
     return obj;
+
+error:
+    free_schema(schema);
+    return NULL;
 }
 
 
@@ -824,16 +837,18 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     const uint8_t** arg_packets = NULL;
     Py_ssize_t nargs;
     Py_ssize_t i;
+    uint8_t* packet = NULL;
+    uint8_t* result = NULL;
+    size_t result_length = 0;
 
     // Parse arguments: string, integer, and sequence
     if (!PyArg_ParseTuple(args, "siO", &socket_path, &mid, &py_args)) {
-        return NULL;
+        PyRAISE("Failed to parse argument")
     }
 
     // Verify third argument is a sequence
     if (!PySequence_Check(py_args)) {
-        PyErr_SetString(PyExc_TypeError, "Third argument must be a sequence");
-        return NULL;
+        PyRAISE("Third argument must be a sequence");
     }
 
     // Get sequence size and allocate C arrays
@@ -842,7 +857,7 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     if (!arg_packets) {
         free(arg_packets);
         PyErr_NoMemory();
-        return NULL;
+        goto error;
     }
 
     // Convert Python bytes to C buffers
@@ -851,23 +866,27 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
         if (!PyBytes_Check(item)) {
             Py_DECREF(item);
             free(arg_packets);
-            PyErr_SetString(PyExc_TypeError, "All arguments must be bytes objects");
-            return NULL;
+            PyRAISE("All arguments must be bytes objects");
         }
         arg_packets[i] = (const uint8_t*)PyBytes_AsString(item);
         Py_DECREF(item);
     }
 
-    uint8_t* packet = PyTRY_WITH(free(arg_packets), make_morloc_call_packet, (uint32_t)mid, arg_packets, (size_t)nargs);
+    packet = PyTRY(make_morloc_call_packet, (uint32_t)mid, arg_packets, (size_t)nargs);
 
     free(arg_packets);
 
-    uint8_t* result = PyTRY_WITH(free(packet), send_and_receive_over_socket, socket_path, packet);
+    result = PyTRY(send_and_receive_over_socket, socket_path, packet);
     free(packet);
 
-    size_t result_length = PyTRY(morloc_packet_size, result);
+    result_length = PyTRY(morloc_packet_size, result);
 
     return PyBytes_FromStringAndSize((char*)result, result_length);
+
+error:
+    FREE(arg_packets)
+    FREE(packet)
+    return NULL;
 }
 
 
@@ -877,41 +896,37 @@ static PyObject* pybinding__remote_call(PyObject* self, PyObject* args) { MAYFAI
     char* cache_path;
     PyObject* res_struct; // python struct that is converted to a resource_t struct
     PyObject* arg_packets_obj; // python list of bytes types
+    const uint8_t** arg_packets = NULL;
+    uint8_t* result = NULL;
 
     if (!PyArg_ParseTuple(args, "issOOO", &midx, &socket_base, &cache_path, &res_struct, &arg_packets_obj)) {
-        return NULL;
+        PyRAISE("Failed to parse arguments");
     }
 
     if (!PyBytes_Check(res_struct)) {
-        PyErr_SetString(PyExc_TypeError, "res_struct must be a bytes object from struct.pack()");
-        return NULL;
+        PyRAISE("res_struct must be a bytes object from struct.pack()");
     }
 
     // Ensure the resources struct is the right size
     if (PyBytes_Size(res_struct) != sizeof(resources_t)) {
-        PyErr_SetString(PyExc_ValueError, "Struct size mismatch");
-        return NULL;
+        PyRAISE("Struct size mismatch");
     }
 
     resources_t* res = (resources_t*)PyBytes_AsString(res_struct);
-    if (!res) return NULL;  // Error already set
-
-    uint8_t* result = NULL;
+    PyTRACE(res == NULL)
 
     Py_ssize_t nargs = PyList_Size(arg_packets_obj);
 
-    const uint8_t** arg_packets = calloc(nargs, sizeof(uint8_t*));
+    arg_packets = calloc(nargs, sizeof(uint8_t*));
     if (!arg_packets) {
-        PyErr_SetString(PyExc_MemoryError, "Memory allocation failed");
+        PyRAISE("Memory allocation failed");
         free(arg_packets);
-        return NULL;
     }
 
     for (Py_ssize_t i = 0; i < nargs; i++) {
         PyObject* packet_obj = PyList_GetItem(arg_packets_obj, i);
         if (!PyBytes_Check(packet_obj)) {
-            PyErr_SetString(PyExc_TypeError, "Packets must be bytes");
-            goto cleanup;
+            PyRAISE("Packets must be bytes");
         }
         arg_packets[i] = (uint8_t*)PyBytes_AsString(packet_obj);
     }
@@ -926,13 +941,25 @@ static PyObject* pybinding__remote_call(PyObject* self, PyObject* args) { MAYFAI
         (size_t)nargs
     );
 
-cleanup:
     free(arg_packets);
 
     if (!result) Py_RETURN_NONE;
     PyObject* py_result = PyBytes_FromString((char*)result);
     free(result);
     return py_result;
+
+error:
+    if (result != NULL){
+        free(result);
+    }
+    if (arg_packets != NULL){
+        for (Py_ssize_t i = 0; i < nargs; i++) {
+            if(arg_packets[i] != NULL){
+                free(arg_packets[i]);
+            }
+        }
+    }
+    return NULL;
 }
 
 
@@ -941,8 +968,7 @@ static PyObject* pybinding__is_ping(PyObject* self, PyObject* args) { MAYFAIL
     size_t packet_size;
 
     if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
-        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
-        return NULL;
+        PyRAISE("Failed to parse arguments");
     }
 
     bool is_ping = PyTRY(packet_is_ping, (uint8_t*)packet);
@@ -950,6 +976,9 @@ static PyObject* pybinding__is_ping(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* obj = PyBool_FromLong((long)is_ping);
 
     return obj;
+
+error:
+    return NULL;
 }
 
 
@@ -958,8 +987,7 @@ static PyObject* pybinding__is_local_call(PyObject* self, PyObject* args) { MAYF
     size_t packet_size;
 
     if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
-        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
-        return NULL;
+        PyRAISE("Failed to parse arguments");
     }
 
     bool is_local_call = PyTRY(packet_is_local_call, (uint8_t*)packet);
@@ -967,6 +995,9 @@ static PyObject* pybinding__is_local_call(PyObject* self, PyObject* args) { MAYF
     PyObject* obj = PyBool_FromLong((long)is_local_call);
 
     return obj;
+
+error:
+    return NULL;
 }
 
 static PyObject* pybinding__is_remote_call(PyObject* self, PyObject* args) { MAYFAIL
@@ -974,8 +1005,7 @@ static PyObject* pybinding__is_remote_call(PyObject* self, PyObject* args) { MAY
     size_t packet_size;
 
     if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
-        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
-        return NULL;
+        PyRAISE("Failed to parse arguments");
     }
 
     bool is_remote_call = PyTRY(packet_is_remote_call, (uint8_t*)packet);
@@ -983,6 +1013,9 @@ static PyObject* pybinding__is_remote_call(PyObject* self, PyObject* args) { MAY
     PyObject* obj = PyBool_FromLong((long)is_remote_call);
 
     return obj;
+
+error:
+    return NULL;
 }
 
 
@@ -991,8 +1024,7 @@ static PyObject* pybinding__pong(PyObject* self, PyObject* args) { MAYFAIL
     size_t packet_size;
 
     if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
-        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
-        return NULL;
+        PyRAISE("Failed to parse arguments");
     }
 
     const uint8_t* pong = PyTRY(return_ping, (uint8_t*)packet);
@@ -1000,6 +1032,9 @@ static PyObject* pybinding__pong(PyObject* self, PyObject* args) { MAYFAIL
     size_t pong_size = PyTRY(morloc_packet_size, pong);
 
     return PyBytes_FromStringAndSize((char*)pong, pong_size);
+
+error:
+    return NULL;
 }
 
 static PyObject* pybinding__shinit(PyObject* self, PyObject* args) { MAYFAIL
@@ -1008,7 +1043,7 @@ static PyObject* pybinding__shinit(PyObject* self, PyObject* args) { MAYFAIL
     size_t shm_default_size;
 
     if (!PyArg_ParseTuple(args, "skk", &shm_basename, &volume_index, &shm_default_size)) {
-      return NULL;
+        PyRAISE("Failed to parse arguments");
     }
 
     shm_t* shm = PyTRY(
@@ -1019,6 +1054,10 @@ static PyObject* pybinding__shinit(PyObject* self, PyObject* args) { MAYFAIL
     );
 
     return PyCapsule_New(shm, "shm_t", NULL);
+
+error:
+    FREE(shm)
+    return NULL;
 }
 
 
@@ -1026,7 +1065,7 @@ static PyObject* pybinding__make_fail_packetg(PyObject* self, PyObject* args) { 
     const char* packet_errmsg;
 
     if (!PyArg_ParseTuple(args, "s", &packet_errmsg)) {
-      return NULL;
+        PyRAISE("Failed to parse arguments");
     }
 
     uint8_t* packet = make_fail_packet(packet_errmsg);
@@ -1034,6 +1073,9 @@ static PyObject* pybinding__make_fail_packetg(PyObject* self, PyObject* args) { 
     size_t packet_size = PyTRY(morloc_packet_size, packet);
 
     return PyBytes_FromStringAndSize((char*)packet, packet_size);
+
+error:
+    return NULL;
 }
 
 static PyMethodDef Methods[] = {

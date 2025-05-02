@@ -19,6 +19,15 @@
 
 #define MAX_DAEMONS 32
 
+#define ERROR(msg, ...) \
+    fprintf(stderr, "Error (%s:%d in %s): " msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    clean_exit(1);
+
+#define ERROR_WITH(end, msg, ...) \
+    fprintf(stderr, "Error (%s:%d in %s): " msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    end; \
+    clean_exit(1);
+
 typedef enum {
     JSON,
     MessagePack,
@@ -65,15 +74,6 @@ void clean_exit(int exit_code){
 
     exit(exit_code); // Exit with the provided code
 }
-
-#define ERROR(msg, ...) \
-    fprintf(stderr, "Error (%s:%d in %s): " msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
-    clean_exit(1);
-
-#define ERROR_WITH(end, msg, ...) \
-    fprintf(stderr, "Error (%s:%d in %s): " msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
-    end; \
-    clean_exit(1);
 
 typedef struct morloc_socket_s{
     char* lang;
@@ -142,10 +142,10 @@ void print_return(uint8_t* packet, Schema* schema){
 
     char* packet_error = get_morloc_data_packet_error_message(packet, &child_errmsg);
     if(packet_error != NULL){
-        ERROR("Run failed: %s\n", packet_error)
+        ERROR("Run failed:\n%s\n", packet_error)
     }
     if(child_errmsg != NULL){
-        ERROR("Internal error: %s\n", packet_error)
+        ERROR("Internal error:\n%s\n", packet_error)
     }
 
     uint8_t* packet_value = get_morloc_data_packet_value(packet, schema, &child_errmsg);
@@ -188,7 +188,7 @@ void start_daemons(morloc_socket_t** all_sockets){
             return_data = send_and_receive_over_socket_wait((*socket_ptr)->socket_filename, ping_packet, ping_timeout, ping_timeout, &errmsg);
             if(errmsg != NULL || return_data == NULL){
                 if(attempt == MAX_RETRIES){
-                    ERROR("Failed to ping '%s': %s\n", (*socket_ptr)->socket_filename, errmsg);
+                    ERROR("Failed to ping '%s':\n%s\n", (*socket_ptr)->socket_filename, errmsg);
                 }
 
                 // Sleep using exponential backoff
@@ -226,17 +226,17 @@ void run_command(
 
     Schema* return_schema = parse_schema(&return_schema_str, &errmsg);
     if(errmsg != NULL){
-        ERROR("Failed to parse return schema\n");
+        ERROR("Failed to parse return schema");
     }
 
     uint8_t* call_packet = make_call_packet_from_cli(mid, args, arg_schema_strs, &errmsg);
     if(errmsg != NULL){
-        ERROR("Failed to parse arguments\n%s", errmsg);
+        ERROR("Failed to parse arguments:\n%s", errmsg);
     }
 
     uint8_t* result_packet = send_and_receive_over_socket(root_socket.socket_filename, call_packet, &errmsg);
     if(errmsg != NULL){
-        ERROR("Daemon is unresponsive: %s\n", errmsg);
+        ERROR("Daemon is unresponsive:\n%s\n", errmsg);
     }
 
     print_return(result_packet, return_schema);
@@ -249,7 +249,7 @@ void run_call_packet(config_t config){
     size_t call_packet_size = 0;
     uint8_t* call_packet = read_binary_file(config.packet_path, &call_packet_size, &errmsg);
     if(errmsg != NULL || call_packet == NULL){
-        ERROR_WITH(free(errmsg), "Failed to open call packet file '%s': %s\n", config.packet_path, errmsg)
+        ERROR_WITH(free(errmsg), "Failed to open call packet file '%s':\n%s\n", config.packet_path, errmsg)
     }
 
     // make the local socket filename relative to the current temporary directry
@@ -259,16 +259,16 @@ void run_call_packet(config_t config){
     uint8_t* result_packet = send_and_receive_over_socket(socket_path, call_packet, &errmsg);
     free(call_packet);
     if(errmsg != NULL || result_packet == NULL){
-        ERROR_WITH(free(errmsg), "Failed to contact socket '%s': %s\n", socket_path, errmsg)
+        ERROR_WITH(free(errmsg), "Failed to contact socket '%s':\n%s\n", socket_path, errmsg)
     }
 
     size_t result_packet_size = morloc_packet_size(result_packet, &errmsg);
     if(errmsg != NULL){
-        ERROR_WITH(free(errmsg), "Packet returned to nexus from '%s' is invalid: %s\n", socket_path, errmsg)
+        ERROR_WITH(free(errmsg), "Packet returned to nexus from '%s' is invalid:\n%s\n", socket_path, errmsg)
     }
 
     if(write_atomic(config.output_path, result_packet, result_packet_size, &errmsg) != 0){
-        ERROR_WITH(free(result_packet), "Failed to write '%s': %s\n", config.output_path, errmsg)
+        ERROR_WITH(free(result_packet), "Failed to write '%s':\n%s\n", config.output_path, errmsg)
     }
 
     clean_exit(0);
