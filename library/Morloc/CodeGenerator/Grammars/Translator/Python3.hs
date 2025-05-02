@@ -301,10 +301,19 @@ translateSegment m0 =
 
     makeFunction :: MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Bool -> MDoc 
     makeFunction mname args priorLines body isRemote
-      = nest 4 (vsep $ def:priorLines <> [body])
+      = nest 4 (vsep [def, tryCatch priorLines, body])
       where
         ext = if isRemote then "_remote" else ""
         def = "def" <+> mname <> ext <> tupled (map argNamer args) <> ":"
+
+        tryCatch :: [MDoc] -> MDoc
+        tryCatch [] = "" where
+        tryCatch xs = vsep [tryBlock, exceptBlock] where
+            tryBlock = nest 4 (vsep ("try:": xs))
+            exceptBlock = nest 4 (vsep
+                [ "except Exception as e:"
+                , [idoc|raise RuntimeError(f"Error (Python daemon in #{mname}):\n{e!s}")|]
+                ])
 
     makeLambda :: [Arg TypeM] -> MDoc -> MDoc
     makeLambda args body = "lambda" <+> hsep (punctuate "," (map argNamer args)) <> ":" <+> body
