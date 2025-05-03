@@ -142,10 +142,10 @@ void print_return(uint8_t* packet, Schema* schema){
 
     char* packet_error = get_morloc_data_packet_error_message(packet, &child_errmsg);
     if(packet_error != NULL){
-        ERROR("Run failed:\n%s\n", packet_error)
+        ERROR("Run failed\n%s\n", packet_error)
     }
     if(child_errmsg != NULL){
-        ERROR("Internal error:\n%s\n", packet_error)
+        ERROR("Internal error\n%s\n", packet_error)
     }
 
     uint8_t* packet_value = get_morloc_data_packet_value(packet, schema, &child_errmsg);
@@ -158,7 +158,7 @@ void print_return(uint8_t* packet, Schema* schema){
     if(child_errmsg == NULL){
         clean_exit(0);
     } else {
-        ERROR("Failed to print return packet:\n%s\n", child_errmsg);
+        ERROR("Failed to print return packet\n%s\n", child_errmsg);
     }
 }
 
@@ -267,7 +267,9 @@ void run_call_packet(config_t config){
         ERROR_WITH(free(errmsg), "Packet returned to nexus from '%s' is invalid:\n%s\n", socket_path, errmsg)
     }
 
-    if(write_atomic(config.output_path, result_packet, result_packet_size, &errmsg) != 0){
+    // Write resulting packet (even if it failed)
+    write_atomic(config.output_path, result_packet, result_packet_size, &errmsg);
+    if(errmsg != NULL){
         ERROR_WITH(free(result_packet), "Failed to write '%s':\n%s\n", config.output_path, errmsg)
     }
 

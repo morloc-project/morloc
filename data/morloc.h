@@ -72,7 +72,7 @@
     FREE(CHILD_ERRMSG);
 
 #define RAISE(msg, ...) \
-    snprintf(errmsg_buffer, MAX_ERRMSG_SIZE, "Error (%s:%d in %s): " msg "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    snprintf(errmsg_buffer, MAX_ERRMSG_SIZE, "Error (%s:%d in %s): " msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
     *errmsg_ = strdup(errmsg_buffer); \
     if(child_errmsg_ != NULL){ \
         free(child_errmsg_); \
@@ -80,7 +80,7 @@
     return fail_value_;
 
 #define RAISE_WITH(end, msg, ...) \
-    snprintf(errmsg_buffer, MAX_ERRMSG_SIZE, "Error (%s:%d in %s): " msg "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    snprintf(errmsg_buffer, MAX_ERRMSG_SIZE, "Error (%s:%d in %s): " msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
     *errmsg_ = strdup(errmsg_buffer); \
     end; \
     if(child_errmsg_ != NULL){ \
@@ -159,6 +159,66 @@ void hex(const void *ptr, size_t size) {
 bool file_exists(const char *filename) {
     return access(filename, F_OK) == 0; // F_OK checks for existence
 }
+
+
+// make a directory recursively (like `mkdir -p`)
+int mkdir_p(const char *path, ERRMSG) {
+    VAL_RETURN_SETUP(int, -1)
+    char *tmp = NULL;
+    char *p = NULL;
+    size_t len;
+    int ret = -1;
+    int const_err = 0;
+
+    if (path == NULL || *path == '\0') {
+        const_err = EINVAL;
+        goto cleanup;
+    }
+
+    len = strlen(path);
+    tmp = (char*)calloc(len + 2, sizeof(char)); // +2 for possible '/' and '\0'
+    if (tmp == NULL) {
+        const_err = errno;
+        goto cleanup;
+    }
+    strncpy(tmp, path, len + 1); // +1 to copy the null terminator
+
+    // Add trailing slash if not present
+    if (tmp[len - 1] != '/') {
+        tmp[len] = '/';
+        tmp[len + 1] = '\0';
+        len++;
+    }
+
+    // Iterate and create directories
+    for (p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0777) != 0) {
+                if (errno != EEXIST) {
+                    const_err = errno;
+                    goto cleanup;
+                }
+            }
+            *p = '/';
+        }
+    }
+    // Create the final directory (in case path didn't end with '/')
+    if (mkdir(tmp, 0777) != 0) {
+        if (errno != EEXIST) {
+            const_err = errno;
+            goto cleanup;
+        }
+    }
+    ret = 0;
+
+cleanup:
+    FREE(tmp);
+    RAISE_IF(ret == -1, "mkdir_p('%s') failed: %s", path, strerror(const_err))
+    return ret;
+}
+
+
 
 // Recursively delete a directory and its contents
 void delete_directory(const char* path) {
@@ -254,7 +314,7 @@ char* dirname(char* path){
 int write_atomic(const char* filename, const uint8_t* data, size_t size, ERRMSG) {
     VAL_RETURN_SETUP(int, -1)
 
-    char tmp_path[] = "morloc-tmp_XXXXXX";
+    char tmp_path[MAX_FILENAME_SIZE];;
     FILE* file = NULL;
     int fd = -1;
     int ret = -1;
@@ -267,10 +327,18 @@ int write_atomic(const char* filename, const uint8_t* data, size_t size, ERRMSG)
     int dirfd = -1;
 
     // Validate input
-    if (filename == NULL || data == NULL || size == 0) {
+    if (filename == NULL || (data == NULL && size != 0)) {
         errno = EINVAL;
         goto cleanup;
     }
+
+    // Extract directory path for syncing
+    if ((file_dirpath = strdup(filename)) == NULL) {
+        goto cleanup;
+    }
+    file_dirname = dirname(file_dirpath);
+
+    snprintf(tmp_path, sizeof(tmp_path), "%s/morloc-tmp_XXXXXX", file_dirname);
 
     // Create secure temp file
     if ((fd = mkstemp(tmp_path)) == -1) {
@@ -299,16 +367,11 @@ int write_atomic(const char* filename, const uint8_t* data, size_t size, ERRMSG)
     }
     file = NULL;
 
-    // Extract directory path for syncing
-    if ((file_dirpath = strdup(filename)) == NULL) {
-        goto cleanup;
-    }
-    file_dirname = dirname(file_dirpath); // need to replace this
-
     // Atomic commit with directory sync
     if (rename(tmp_path, filename) == -1) {
         goto cleanup;
     }
+
 
     // Sync parent directory
     dirfd = open(file_dirname, O_RDONLY | O_DIRECTORY);
@@ -327,9 +390,12 @@ int write_atomic(const char* filename, const uint8_t* data, size_t size, ERRMSG)
 
 cleanup:
     last_errno = errno;
+    FREE(file_dirpath)
     if (file) fclose(file);
-    if (file_dirpath) free(file_dirpath);
     if (ret == -1) unlink(tmp_path);
+
+fprintf(stderr, "atomic writing ret=%d to %s\n", ret, filename);
+
     RAISE_IF(ret == -1, "Atomic write to '%s' failed: %s", filename, strerror(last_errno))
     return ret;
 }
@@ -4345,7 +4411,8 @@ morloc_metadata_header_t* as_morloc_metadata_header(const uint8_t* ptr){
 
 // Read a data packet type schema from the packet metadata
 // If no type schema is defined, return NULL
-// If there is any error
+// Raise an error if the packet is malformed
+// On success, return a pointer to the schema string in the packet (no copying)
 char* read_schema_from_packet_meta(const uint8_t* packet, ERRMSG){
     PTR_RETURN_SETUP(char)
 
@@ -4361,7 +4428,7 @@ char* read_schema_from_packet_meta(const uint8_t* packet, ERRMSG){
             offset += sizeof(morloc_metadata_header_t);
             if(metadata_header != NULL && metadata_header->type == MORLOC_METADATA_TYPE_SCHEMA_STRING) {
                 char* schema_str = (char*)packet + sizeof(morloc_packet_header_t) + offset;
-                return strdup(schema_str);
+                return schema_str;
             } else {
                 offset += metadata_header->size;
             }
@@ -4489,8 +4556,7 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
 
     void* voidstar = NULL;
 
-    morloc_packet_header_t* header = read_morloc_packet_header(data, &CHILD_ERRMSG);
-    RAISE_IF(header == NULL, "Failed to read packet:\n%s", CHILD_ERRMSG)
+    morloc_packet_header_t* header = TRY(read_morloc_packet_header, data);
 
     RAISE_IF(header->command.cmd_type.type != PACKET_TYPE_DATA, "Expected a data packet");
 
@@ -4503,19 +4569,17 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
     switch (source) {
         case PACKET_SOURCE_MESG:
             if (format == PACKET_FORMAT_MSGPACK) {
-                int unpack_result = unpack_with_schema((
-                    const char*)data + sizeof(morloc_packet_header_t) + header->offset,
+                int unpack_result = TRY(
+                    unpack_with_schema,
+                    (const char*)data + sizeof(morloc_packet_header_t) + header->offset,
                     header->length,
                     schema,
-                    &voidstar,
-                    &CHILD_ERRMSG
+                    &voidstar
                 );
-                RAISE_IF(unpack_result == EXIT_FAIL, "Failed to parse MessagePacket data:\n%s", CHILD_ERRMSG);
             } else {
-                RAISE("Invalid format from mesg: %uhh", format);
+                RAISE("Invalid format from mesg: 0x%02hhx", format);
             }
             break;
-
         case PACKET_SOURCE_FILE:
             switch (format) {
                 case PACKET_FORMAT_MSGPACK: {
@@ -4523,16 +4587,13 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
                     size_t file_size;
                     uint8_t* msg = TRY(read_binary_file, filename, &file_size);
                     FREE(filename);
-
                     // Unpack the binary buffer using the schema
-                    int unpack_result = unpack_with_schema((const char*)msg, file_size, schema, &voidstar, &CHILD_ERRMSG);
-                    RAISE_IF(unpack_result == EXIT_FAIL, "\n%s", CHILD_ERRMSG)
-
+                    TRY(unpack_with_schema, (const char*)msg, file_size, schema, &voidstar);
                     FREE(msg);
-                    RAISE_IF(unpack_result != 0, "Failed to unpack data from file")
+                    break;
                 }
             }
-            RAISE("Invalid format from file: %uhh", format);
+            RAISE("Invalid format from file: 0x%02hhx", format);
             return NULL;
 
         case PACKET_SOURCE_RPTR:
@@ -5172,7 +5233,7 @@ bool hash_morloc_packet(const uint8_t* packet, const Schema* schema, uint64_t se
         uint8_t* voidstar = TRY(get_morloc_data_packet_value, packet + sizeof(morloc_packet_header_t) + header->offset, schema);
         *hash = TRY(hash_voidstar, (void*)voidstar, schema, seed);
     } else {
-        RAISE("Cannot hash packet with command %uhh", command_type)
+        RAISE("Cannot hash packet with command 0x%02hhxh", command_type)
     }
 
     return true; // success
@@ -5191,23 +5252,25 @@ static char* make_cache_filename_ext(uint64_t key, const char* cache_path, const
     //    different systems (e.g., unsigned long or unsigned long long)
     int written = snprintf(buffer, sizeof(buffer), "%s/%016" PRIx64 "%s", cache_path, key, ext);
 
-    RAISE_IF((size_t)written < sizeof(buffer), "Failed to create filename")
+    RAISE_IF((size_t)written == 0, "Failed to create filename")
 
-    return strdup(buffer);
+    return strndup(buffer, sizeof(buffer)-1);
 }
 
 
 static char* make_cache_filename(uint64_t key, const char* cache_path, ERRMSG) {
     PTR_RETURN_SETUP(char)
     char packet_ext[] = ".packet";
-    return TRY(make_cache_filename_ext, key, cache_path, packet_ext);
+    char* filename = TRY(make_cache_filename_ext, key, cache_path, packet_ext);
+    return filename;
 }
 
 
 static char* make_cache_data_filename(uint64_t key, const char* cache_path, ERRMSG) {
     PTR_RETURN_SETUP(char)
     char dat_ext[] = ".dat";
-    return TRY(make_cache_filename_ext, key, cache_path, dat_ext);
+    char* filename = TRY(make_cache_filename_ext, key, cache_path, dat_ext);
+    return filename;
 }
 
 
@@ -5621,24 +5684,25 @@ bool parse_morloc_call_arguments(
 
 // Check if a given SLURM job has completed
 bool slurm_job_is_complete(uint32_t job_id) {
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "sacct -j %u --format=State --noheader", job_id);
-
-    FILE *sacct = popen(cmd, "r");
-    if (!sacct) return false;
-
-    char state[16];
-    bool done = false;
-    while (fgets(state, sizeof(state), sacct)) {
-        if (strstr(state, "COMPLETED") ||
-            strstr(state, "FAILED") ||
-            strstr(state, "CANCELLED")) {
-            done = true;
-            break;
-        }
-    }
-    pclose(sacct);
-    return done;
+    return true;
+    // char cmd[256];
+    // snprintf(cmd, sizeof(cmd), "sacct -j %u --format=State --noheader", job_id);
+    //
+    // FILE *sacct = popen(cmd, "r");
+    // if (!sacct) return false;
+    //
+    // char state[16];
+    // bool done = false;
+    // while (fgets(state, sizeof(state), sacct)) {
+    //     if (strstr(state, "COMPLETED") ||
+    //         strstr(state, "FAILED") ||
+    //         strstr(state, "CANCELLED")) {
+    //         done = true;
+    //         break;
+    //     }
+    // }
+    // pclose(sacct);
+    // return done;
 }
 
 
@@ -5653,6 +5717,13 @@ uint32_t submit_morloc_slurm_job(
     ERRMSG)
 {
     VAL_RETURN_SETUP(uint32_t, 0)
+
+    RAISE_IF(nexus_path == NULL, "nexus path undefined")
+    RAISE_IF(socket_basename == NULL, "socket basename undefined")
+    RAISE_IF(call_packet_filename == NULL, "call packet filename undefined")
+    RAISE_IF(result_cache_filename == NULL, "result cache filename undefined")
+    RAISE_IF(output_filename == NULL, "slurm output filename undefined")
+    RAISE_IF(error_filename == NULL, "slurm error filename undefined")
 
     char cmd[MAX_SLURM_COMMAND_LENGTH];
     FILE *slurm;
@@ -5674,10 +5745,11 @@ uint32_t submit_morloc_slurm_job(
     int written = snprintf(
         cmd,
         MAX_SLURM_COMMAND_LENGTH,
-        "sbatch --parsable -o %s -e %s %s --wrap='%s --call-packet %s --socket-path %s --output-file %s --output-format raw",
-        output_filename,
-        error_filename,
-        resources_spec,
+        // "sbatch --parsable -o %s -e %s %s --wrap='%s --call-packet %s --socket-base %s --output-file %s --output-form packet",
+        "%s --call-packet %s --socket-base %s --output-file %s --output-form packet",
+        // output_filename,
+        // error_filename,
+        // resources_spec,
         nexus_path,
         call_packet_filename,
         socket_basename,
@@ -5690,11 +5762,12 @@ uint32_t submit_morloc_slurm_job(
     slurm = popen(cmd, "r");
     RAISE_IF(!slurm, "Failed to execute sbatch")
 
-    // Parse job ID from first line
-    if (fscanf(slurm, "%u", &job_id) != 1) {
-        pclose(slurm);
-        RAISE("Failed to parse job ID from sbatch output");
-    }
+    ////// UNCOMMENT WHEN I GO BACK TO SLURM
+    // // Parse job ID from first line
+    // if (fscanf(slurm, "%u", &job_id) != 1) {
+    //     pclose(slurm);
+    //     RAISE("Failed to parse job ID from sbatch output");
+    // }
 
     pclose(slurm);
     return job_id;
@@ -5749,6 +5822,9 @@ uint8_t* remote_call(
     int written = 0;
     char output_ext[] = ".out";
     char error_ext[] = ".err";
+    char call_ext[] = "-call.dat";
+    char result_ext[] = "-result.dat";
+
     uint32_t pid = 0;
     size_t return_packet_size = 0;
     char* failure = NULL;
@@ -5778,9 +5854,11 @@ uint8_t* remote_call(
     // sources, then I would need to hash the file and store the hash time.
     // Then I could avoid unpacking the data.
     for(size_t i = 0; i < nargs; i++){
+
+        // direct pointer to the packet string (do not free)
         char* arg_schema_str = TRY_GOTO(read_schema_from_packet_meta, arg_packets[i]);
+
         arg_schemas[i] = TRY_GOTO(parse_schema, (const char**)&arg_schema_str);
-        FREE(arg_schema_str);
 
         // get the raw data stored in the packet (after the header and metadata)
         // possibly heavy memory
@@ -5791,15 +5869,19 @@ uint8_t* remote_call(
         function_hash = mix(function_hash, arg_hashes[i]);
     }
 
+    TRY_GOTO(mkdir_p, cache_path)
+
     call_packet = NULL;
     result_cache_filename = check_cache_packet(function_hash, cache_path, &CHILD_ERRMSG);
     CHILD_ERRMSG = NULL; // ignore error
-
+                         //
     // If a cached result already exists, return it
     if(result_cache_filename != NULL){
         // return result is cached, so load the cache and go
         return_packet = TRY_GOTO(get_cache_packet, function_hash, cache_path);
         goto end;
+    } else {
+        result_cache_filename = TRY_GOTO(make_cache_filename, function_hash, cache_path);
     }
 
     // return result is not cached, so we need to run
@@ -5834,6 +5916,8 @@ uint8_t* remote_call(
     // the results to the result hash cache.
     call_packet_hash_code = XXH64(call_packet, call_packet_size, DEFAULT_XXHASH_SEED);
 
+    call_packet_filename = TRY_GOTO(make_cache_filename_ext, function_hash, cache_path, call_ext);
+
     // Write packet the call to disk, this will be sent the worker daemon
     TRY_GOTO(write_atomic, call_packet_filename, call_packet, call_packet_size)
 
@@ -5859,18 +5943,15 @@ uint8_t* remote_call(
     }
 
     return_packet_size = 0;
-    return_packet = TRY_GOTO(read_binary_file, output_filename, &return_packet_size);
+    return_packet = TRY_GOTO(read_binary_file, result_cache_filename, &return_packet_size);
 
     failure = TRY_GOTO(get_morloc_data_packet_error_message, return_packet)
     if(failure != NULL){
-        remove(result_cache_filename);
+        unlink(result_cache_filename);
     }
 
 end:
     for(size_t i = 0; i < nargs; i++){
-        if(arg_voidstars != NULL){
-            FREE(arg_voidstars[i])
-        }
         if(arg_schemas != NULL){
             FREE(arg_schemas[i])
         }

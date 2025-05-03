@@ -918,9 +918,8 @@ static PyObject* pybinding__remote_call(PyObject* self, PyObject* args) { MAYFAI
     Py_ssize_t nargs = PyList_Size(arg_packets_obj);
 
     arg_packets = calloc(nargs, sizeof(uint8_t*));
-    if (!arg_packets) {
+    if (arg_packets == NULL) {
         PyRAISE("Memory allocation failed");
-        free(arg_packets);
     }
 
     for (Py_ssize_t i = 0; i < nargs; i++) {
@@ -943,7 +942,7 @@ static PyObject* pybinding__remote_call(PyObject* self, PyObject* args) { MAYFAI
 
     free(arg_packets);
 
-    if (!result) Py_RETURN_NONE;
+    if (result == NULL) Py_RETURN_NONE;
     PyObject* py_result = PyBytes_FromString((char*)result);
     free(result);
     return py_result;
@@ -953,11 +952,8 @@ error:
         free(result);
     }
     if (arg_packets != NULL){
-        for (Py_ssize_t i = 0; i < nargs; i++) {
-            if(arg_packets[i] != NULL){
-                free(arg_packets[i]);
-            }
-        }
+        // The elements are handled by Python and should not be freed
+        free(arg_packets);
     }
     return NULL;
 }
