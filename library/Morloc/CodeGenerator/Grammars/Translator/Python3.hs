@@ -219,12 +219,12 @@ translateSegment m0 =
       }
 
     makeSerialManifold :: SerialManifold -> SerialManifold_ PoolDocs -> Index PoolDocs
-    makeSerialManifold _ (SerialManifold_ m _ form x)
-      = return $ translateManifold makeFunction makeLambda m form x
+    makeSerialManifold _ (SerialManifold_ m _ form headForm x)
+      = return $ translateManifold makeFunction makeLambda m form (Just headForm) x
 
     makeNativeManifold :: NativeManifold -> NativeManifold_ PoolDocs -> Index PoolDocs
     makeNativeManifold _ (NativeManifold_ m _ form x)
-      = return $ translateManifold makeFunction makeLambda m form x
+      = return $ translateManifold makeFunction makeLambda m form Nothing x
 
     makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
     makeSerialExpr _ (ManS_ f) = return f
@@ -232,7 +232,7 @@ translateSegment m0 =
       -- I don't need to explicitly add single quoes to the arguments here as I
       -- do in C++ and R because the subprocess module bypasses Bash dequoting.
       let call = "morloc.foreign_call" <> tupled [makeSocketPath socketFile, pretty mid, list (map argNamer args)]
-      return $ defaultValue { poolExpr = call, poolIsRemote = False }
+      return $ defaultValue { poolExpr = call }
 
     makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) (RemoteCall res) args) _) = do
       let resMem = pretty $ remoteResourcesMemory res
@@ -242,7 +242,7 @@ translateSegment m0 =
           resStruct = "struct.pack" <> tupled [squotes "iiii", resMem, resTime, resCPU, resGPU]
           argList = list (map argNamer args)
           call = "morloc.remote_call" <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resStruct, argList]
-      return $ defaultValue { poolExpr = call, poolIsRemote = True }
+      return $ defaultValue { poolExpr = call }
 
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
     makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet svarNamer i e1 e2
@@ -295,16 +295,18 @@ translateSegment m0 =
     makeNativeArg nr (NativeArgExpr_ x) = return (typeMof nr, x)
 
     makeLet :: (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
-    makeLet namer i (PoolDocs ms1' e1' rs1 pes1 rm1) (PoolDocs ms2' e2' rs2 pes2 rm2) =
+    makeLet namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
       let rs = rs1 ++ [ namer i <+> "=" <+> e1' ] ++ rs2
-      in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2) (rm1 || rm2)
+      in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
-    makeFunction :: MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Bool -> MDoc 
-    makeFunction mname args priorLines body isRemote
+    makeFunction :: MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> MDoc 
+    makeFunction mname args priorLines body headForm
       = nest 4 (vsep [def, tryCatch priorLines, body])
       where
-        ext = if isRemote then "_remote" else ""
-        def = "def" <+> mname <> ext <> tupled (map argNamer args) <> ":"
+        makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
+        makeExt _ = ""
+
+        def = "def" <+> mname <> makeExt headForm <> tupled (map argNamer args) <> ":"
 
         tryCatch :: [MDoc] -> MDoc
         tryCatch [] = "" where
@@ -326,7 +328,7 @@ makeDispatch ms = vsep [localDispatch, remoteDispatch]
     localDispatch = align . vsep $ ["dispatch = {", indent 4 (vsep $ map entry ms), "}"]
 
     entry :: SerialManifold -> MDoc
-    entry (SerialManifold i _ _ _)
+    entry (SerialManifold i _ _ _ _)
       = pretty i <> ":" <+> manNamer i <> ","
 
     remoteDispatch = align . vsep $ ["remote_dispatch = {", indent 4 (vsep remotes), "}"]

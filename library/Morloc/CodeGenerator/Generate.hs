@@ -947,7 +947,7 @@ decideRemoteness bconf (Just (ManifoldConfig _ _ (Just res))) l1 l2 =
 expressPolyExpr
     :: (Lang -> Lang -> Maybe RemoteForm)
     -> Lang
-    -> Indexed Type 
+    -> Indexed Type
     -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
     -> MorlocMonad PolyExpr
 -- these cases will include partially applied functions and explicit lambdas
@@ -1497,7 +1497,7 @@ segment (PolyHead lang m0 args0 e0) = do
             <> "\n  topExpr: " <+> pretty topExpr
             <> "\n  heads:" <+> list (map pretty heads)
 
-  return (MonoHead lang m0 args0 topExpr : heads)
+  return (MonoHead lang m0 args0 HeadManifoldFormLocalRoot topExpr : heads)
 
 segmentExpr
   :: Int -- manifold index
@@ -1513,7 +1513,10 @@ segmentExpr _ args (PolyRemoteInterface lang callingType cargs remoteCall e@(Pol
             <> "\n  cargs" <+> pretty cargs
             <> "\n  foreignArgs" <+> pretty (map ann foreignArgs)
   (ms, (_, e')) <- segmentExpr m (map ann foreignArgs) e
-  let foreignHead = MonoHead lang m foreignArgs e'
+  headForm <- case remoteCall of
+    ForeignCall -> return HeadManifoldFormLocalForeign
+    (RemoteCall _) -> return HeadManifoldFormRemoteWorker
+  let foreignHead = MonoHead lang m foreignArgs headForm e'
   config <- MM.ask
   let socket = MC.setupServerAndSocket config lang
   return (foreignHead:ms, (Nothing, MonoPoolCall callingType m socket remoteCall foreignArgs))
@@ -1523,8 +1526,11 @@ segmentExpr m _ (PolyRemoteInterface lang callingType args remoteCall e) = do
             <> "\n  args" <+> pretty args
             <> "\n  lang" <+> pretty lang
   (ms, (_, e')) <- segmentExpr m args e
+  headForm <- case remoteCall of
+    ForeignCall -> return HeadManifoldFormLocalForeign
+    (RemoteCall _) -> return HeadManifoldFormRemoteWorker
   -- create the foreign manifold, make sure all arugments are packed
-  let foreignHead = MonoHead lang m [Arg i None | i <- args] (MonoReturn e')
+  let foreignHead = MonoHead lang m [Arg i None | i <- args] headForm (MonoReturn e')
       -- pack the arguments that will be passed to the foreign manifold
       es' = map (MonoBndVar (A None)) args
 
@@ -1587,7 +1593,7 @@ segmentExpr _ _ (PolyNull v)    = return ([], (Nothing, MonoNull v))
 -- language. Here we need to determine where inputs are (de)serialized and the
 -- serialization states of arguments and variables.
 serialize :: MonoHead -> MorlocMonad SerialManifold
-serialize (MonoHead lang m0 args0 e0) = do
+serialize (MonoHead lang m0 args0 headForm0 e0) = do
 
   form0 <- ManifoldFull <$> mapM prepareArg args0
 
@@ -1597,7 +1603,7 @@ serialize (MonoHead lang m0 args0 e0) = do
             <>  "\n  This map we made from the expression:\n  " <> pretty e0
 
   se1 <- serialExpr m0 e0
-  let sm = SerialManifold m0 lang form0 se1
+  let sm = SerialManifold m0 lang form0 headForm0 se1
   wireSerial lang sm
   where
 
@@ -1873,7 +1879,7 @@ type (D a) = (Map.Map Int Request, a)
 -- (de)serialize arguments as needed
 -- determines whether arguments are passed as serialized, native, or both
 wireSerial :: Lang -> SerialManifold -> MorlocMonad SerialManifold
-wireSerial lang sm0@(SerialManifold m0 _ _ _) = foldSerialManifoldM fm sm0 |>> snd
+wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>> snd
   where
   defs = makeMonoidFoldDefault Map.empty (Map.unionWith (<>))
 
@@ -1887,11 +1893,11 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _) = foldSerialManifoldM fm sm0 |>> s
     }
 
   wireSerialManifold :: SerialManifold_ (D SerialExpr) -> MorlocMonad (D SerialManifold)
-  wireSerialManifold (SerialManifold_ m _ form (req, e)) = do
+  wireSerialManifold (SerialManifold_ m _ form headForm (req, e)) = do
     let form' = afirst (specialize req) form
         req' = Map.map fst (manifoldToMap form')
     e' <- letWrap m form' req e
-    return (req', SerialManifold m lang form' e')
+    return (req', SerialManifold m lang form' headForm e')
 
   wireNativeManifold :: NativeManifold_ (D NativeExpr) -> MorlocMonad (D NativeManifold)
   wireNativeManifold (NativeManifold_ m _ form (req, e)) = do
@@ -2038,7 +2044,7 @@ data SerializationState = Serialized | Unserialized
 pool :: [SerialManifold] -> [(Lang, [SerialManifold])]
 pool es =
     -- [SerialManifold] --> [(Lang, [(Int, SerialManifold)])]
-    let (langs, indexedSegments) = unzip . groupSort . map (\x@(SerialManifold i lang _ _) -> (lang, (i, x))) $ es
+    let (langs, indexedSegments) = unzip . groupSort . map (\x@(SerialManifold i lang _ _ _) -> (lang, (i, x))) $ es
         {-
         Each of the `SerialManifold` values is represents a single subtree of the
         program and may thus contain many nested manifolds. Each is thus the root
@@ -2089,7 +2095,7 @@ findSources ms = unique <$> concatMapM (foldSerialManifoldM fm) ms
   serialASTsources _ = []
 
   nativeManifoldSrcs (NativeManifold_ m lang _ e) = (<>) e <$> lookupConstructors lang m
-  nativeSerialSrcs (SerialManifold_ m lang _ e) = (<>) e <$> lookupConstructors lang m
+  nativeSerialSrcs (SerialManifold_ m lang _ _ e) = (<>) e <$> lookupConstructors lang m
 
   -- Find object constructors that are NOT defined (un)pack functions
   -- These are object constructors imported from the concrete sources that are

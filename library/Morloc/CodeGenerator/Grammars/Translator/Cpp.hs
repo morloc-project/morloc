@@ -252,7 +252,7 @@ makeSignature = foldWithSerialManifoldM fm where
     , opFoldWithNativeManifoldM = nativeManifold
     }
 
-  serialManifold (SerialManifold m _ form _) _ = manifoldSignature m serialType form
+  serialManifold (SerialManifold m _ form _ _) _ = manifoldSignature m serialType form
 
   nativeManifold e@(NativeManifold m _ form _) _ = do
     typestr <- cppTypeOf e
@@ -313,7 +313,6 @@ serialize nativeExpr s0 = do
       , poolExpr = putCommand
       , poolPriorLines = before
       , poolPriorExprs = []
-      , poolIsRemote = False
       }
 
   where
@@ -444,10 +443,10 @@ translateSegment m0 = do
                                         (\i -> CMS.modify (\s -> s { translatorCurrentManifold = i}))
 
   makeSerialManifold :: SerialManifold -> SerialManifold_ PoolDocs -> CppTranslator PoolDocs
-  makeSerialManifold sm (SerialManifold_ i _ form e) = makeManifold i form (typeMof sm) e
+  makeSerialManifold sm (SerialManifold_ i _ form headForm e) = makeManifold i form (Just headForm) (typeMof sm) e
 
   makeNativeManifold :: NativeManifold -> NativeManifold_ PoolDocs -> CppTranslator PoolDocs
-  makeNativeManifold nm (NativeManifold_ i _ form e) = makeManifold i form (typeMof nm) e
+  makeNativeManifold nm (NativeManifold_ i _ form e) = makeManifold i form Nothing (typeMof nm) e
 
   makeSerialArg :: SerialArg -> SerialArg_ PoolDocs PoolDocs -> CppTranslator (TypeS, PoolDocs)
   makeSerialArg sr (SerialArgManifold_ x) = return (typeSof sr, x)
@@ -467,10 +466,7 @@ translateSegment m0 = do
     --  * NULL sentinel
     let argList = [ dquotes socketFile, pretty mid ] <> map argNamer args <> ["NULL"]
         call = [idoc|foreign_call#{tupled argList}|]
-    return $ defaultValue
-      { poolExpr = call
-      , poolIsRemote = False
-      }
+    return $ defaultValue { poolExpr = call }
   makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) (RemoteCall res) args) _) = do
     let resMem = pretty $ remoteResourcesMemory res
         resTime = pretty $ remoteResourcesTime res
@@ -479,11 +475,10 @@ translateSegment m0 = do
         resVarname = "resources_" <> pretty mid
         resourcesDef = [idoc|resources_t #{resVarname} = {#{resMem}, #{resTime}, #{resCPU}, #{resGPU}};|]
         argList = list (map argNamer args)
-        call = "remote_call" <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resVarname, argList]
+        call = "remote_call" <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", "&" <> resVarname, argList]
     return $ defaultValue
       { poolExpr = call
       , poolPriorLines = [resourcesDef]
-      , poolIsRemote = True
       }
 
   makeSerialExpr _ (ReturnS_ e) = return $ e {poolExpr = "return(" <> poolExpr e <> ");"}
@@ -551,7 +546,7 @@ translateSegment m0 = do
 
 
   makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
-  makeLet namer letIndex typestr (PoolDocs ms1 e1 rs1 pes1 isremote1) (PoolDocs ms2 e2 rs2 pes2 isremote2) =
+  makeLet namer letIndex typestr (PoolDocs ms1 e1 rs1 pes1) (PoolDocs ms2 e2 rs2 pes2) =
     let letAssignment = [idoc|#{typestr} #{namer letIndex} = #{e1};|]
         rs = rs1 <> [ letAssignment ] <> rs2 <> [e2]
     in PoolDocs
@@ -559,17 +554,17 @@ translateSegment m0 = do
       , poolExpr = vsep rs
       , poolPriorLines = []
       , poolPriorExprs = pes1 <> pes2
-      , poolIsRemote = isremote1 || isremote2
       }
 
 makeManifold
   :: (HasTypeM t)
   => Int -- ^ The index of the manifold that is being created
   -> ManifoldForm (Or TypeS TypeF) t
+  -> Maybe HeadManifoldForm
   -> TypeM -- ^ The type of the manifold (usually a function, serialized terms are of general type "Str" and C++ type "std::string"
   -> PoolDocs -- ^ Generated content for the manifold body
   -> CppTranslator PoolDocs
-makeManifold callIndex form manifoldType e = do
+makeManifold callIndex form headForm manifoldType e = do
   completeManifold <- makeManifoldBody (poolExpr e)
   call <- makeManifoldCall form
   return $ e { poolExpr = call
@@ -578,7 +573,10 @@ makeManifold callIndex form manifoldType e = do
              }
   where
 
-  mname = manNamer callIndex
+  mnameExt (Just HeadManifoldFormRemoteWorker) = "_remote"
+  mnameExt _ = ""
+
+  mname = manNamer callIndex <> mnameExt headForm
 
   makeManifoldCall :: ManifoldForm (Or TypeS TypeF) t -> CppTranslator MDoc
   makeManifoldCall (ManifoldFull rs) = do
@@ -628,7 +626,7 @@ makeDispatch :: [SerialManifold] -> MDoc
 makeDispatch ms = block 4 "switch(mid)" (vsep (map makeCase ms))
   where
     makeCase :: SerialManifold -> MDoc
-    makeCase (SerialManifold i _ form _) =
+    makeCase (SerialManifold i _ form _ _) =
       -- this made more sense when I was using ArgTypes
       -- it may make sense yet again when I switch to Or
       let size = sum $ abilist (\_ _ -> 1) (\_ _ -> 1) form
@@ -643,7 +641,7 @@ typeParams :: [(Maybe TypeF, TypeF)] -> CppTranslator MDoc
 typeParams ts = recordTemplate <$> mapM cppTypeOf [t | (Nothing, t) <- ts]
 
 collectRecords :: SerialManifold -> [(FVar, Int, [(Key, TypeF)])]
-collectRecords e0@(SerialManifold i0 _ _ _)
+collectRecords e0@(SerialManifold i0 _ _ _ _)
   = unique $ CMS.evalState (surroundFoldSerialManifoldM manifoldIndexer fm e0) i0
   where
     fm = defaultValue { opFoldWithNativeExprM = nativeExpr, opFoldWithSerialExprM = serialExpr }
@@ -757,7 +755,7 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
   where
 
     fm = defaultValue
-      { opSerialManifoldM = \(SerialManifold_ i _ _ e) -> return $ Map.unionWith (<>) (metaTypedefs scopeMap i) e
+      { opSerialManifoldM = \(SerialManifold_ i _ _ _ e) -> return $ Map.unionWith (<>) (metaTypedefs scopeMap i) e
       , opNativeManifoldM = \(NativeManifold_ i _ _ e) -> return $ Map.unionWith (<>) (metaTypedefs scopeMap i) e
       }
 

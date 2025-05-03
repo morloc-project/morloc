@@ -35,6 +35,7 @@ module Morloc.CodeGenerator.Namespace
   , JsonAccessor(..)
   , NexusCommand(..)
   , ManifoldForm(..)
+  , HeadManifoldForm(..)
   , manifoldContext
   , manifoldBound
   , ArgTypes(..)
@@ -375,6 +376,12 @@ instance Pretty FVar where
 data RemoteForm = ForeignCall | RemoteCall RemoteResources
     deriving(Show, Eq)
 
+data HeadManifoldForm
+    = HeadManifoldFormLocalRoot
+    | HeadManifoldFormRemoteWorker
+    | HeadManifoldFormLocalForeign
+    deriving(Show, Eq)
+
 data PolyHead = PolyHead Lang Int [Arg None] PolyExpr
 
 -- no serialization and no argument types
@@ -412,7 +419,7 @@ data PolyExpr
   | PolyStr    (Indexed TVar) Text
   | PolyNull   (Indexed TVar)
 
-data MonoHead = MonoHead Lang Int [Arg None] MonoExpr
+data MonoHead = MonoHead Lang Int [Arg None] HeadManifoldForm MonoExpr
 
 data MonoExpr
   -- organizational terms that may have undefined types
@@ -443,7 +450,7 @@ data MonoExpr
 
 data PoolCall = PoolCall
   Int -- foreign manifold id
-  Socket 
+  Socket
   RemoteForm
   [Arg TypeM] -- contextual argument that are passed to the foreign function
               -- (not the main arguments to the foreign function)
@@ -461,7 +468,7 @@ data ArgTypes
 data NativeManifold = NativeManifold Int Lang (ManifoldForm (Or TypeS TypeF) TypeF) NativeExpr
   deriving(Show)
 
-data SerialManifold = SerialManifold Int Lang (ManifoldForm (Or TypeS TypeF) TypeS) SerialExpr
+data SerialManifold = SerialManifold Int Lang (ManifoldForm (Or TypeS TypeF) TypeS) HeadManifoldForm SerialExpr
   deriving(Show)
 
 data SerialArg = SerialArgManifold SerialManifold | SerialArgExpr SerialExpr
@@ -506,7 +513,7 @@ data NativeExpr
   deriving(Show)
 
 foldlSM :: (b -> a -> b) -> b -> SerialManifold_ a -> b
-foldlSM f b (SerialManifold_ _ _ _ se) = f b se
+foldlSM f b (SerialManifold_ _ _ _ _ se) = f b se
 
 foldlNM :: (b -> a -> b) -> b -> NativeManifold_ a -> b
 foldlNM f b (NativeManifold_ _ _ _ ne) = f b ne
@@ -571,8 +578,8 @@ makeMonoidFoldDefault mempty' mappend' =
     }
   where
 
-  monoidSerialManifold' (SerialManifold_ m lang form (req, ne)) = do
-    return (req, SerialManifold m lang form ne)
+  monoidSerialManifold' (SerialManifold_ m lang form headForm (req, ne)) = do
+    return (req, SerialManifold m lang form headForm ne)
 
   monoidNativeManifold' (NativeManifold_ m lang form (req, ne)) = do
     return (req, NativeManifold m lang form ne)
@@ -702,7 +709,7 @@ instance MayHaveTypeF TypeM where
   mayHaveTypeF (Function ts t) = FunF <$> mapM mayHaveTypeF ts <*> mayHaveTypeF t
 
 data NativeManifold_ ne = NativeManifold_ Int Lang (ManifoldForm (Or TypeS TypeF) TypeF) ne
-data SerialManifold_ se = SerialManifold_ Int Lang (ManifoldForm (Or TypeS TypeF) TypeS) se
+data SerialManifold_ se = SerialManifold_ Int Lang (ManifoldForm (Or TypeS TypeF) TypeS) HeadManifoldForm se
 data SerialArg_ sm se = SerialArgManifold_ sm | SerialArgExpr_ se
 data NativeArg_ nm ne = NativeArgManifold_ nm | NativeArgExpr_ ne
 
@@ -794,9 +801,9 @@ foldWithNativeExprM = surroundFoldNativeExprM defaultValue
 surroundFoldSerialManifoldM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldWithManifoldM m sm nm se ne sr nr -> SerialManifold -> m sm
 surroundFoldSerialManifoldM sfm fm = surroundSerialManifoldM sfm f
   where
-  f full@(SerialManifold m lang form e) = do
+  f full@(SerialManifold m lang form headForm e) = do
     e' <- surroundFoldSerialExprM sfm fm e
-    opFoldWithSerialManifoldM fm full $ SerialManifold_ m lang form e'
+    opFoldWithSerialManifoldM fm full $ SerialManifold_ m lang form headForm e'
 
 surroundFoldNativeManifoldM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldWithManifoldM m sm nm se ne sr nr -> NativeManifold -> m nm
 surroundFoldNativeManifoldM sfm fm = surroundNativeManifoldM sfm f
@@ -979,10 +986,10 @@ instance HasTypeM NativeManifold where
   typeMof (NativeManifold _ _ form e) = typeOfManifold form (typeMof e)
 
 instance HasTypeM SerialManifold where
-  typeMof (SerialManifold _ _ form e) = typeOfManifold form (typeMof e)
+  typeMof (SerialManifold _ _ form _ e) = typeOfManifold form (typeMof e)
 
 instance HasTypeS SerialManifold where
-  typeSof (SerialManifold _ _ form e) =
+  typeSof (SerialManifold _ _ form _ e) =
     let inputTypes = concat $ bilist (bilist typeMof typeMof) (return . typeMof) form
     in case inputTypes of
         [] -> typeSof e
@@ -1067,8 +1074,8 @@ instance MFunctor NativeManifold where
 
 
 instance MFunctor SerialManifold where
-    mgatedMap g f sm@(SerialManifold m l form se)
-      | gateSerialManifold g sm = mapSerialManifold f $ SerialManifold m l form (mgatedMap g f se)
+    mgatedMap g f sm@(SerialManifold m l form headForm se)
+      | gateSerialManifold g sm = mapSerialManifold f $ SerialManifold m l form headForm (mgatedMap g f se)
       | otherwise = mapSerialManifold f sm
 
 
@@ -1175,10 +1182,11 @@ instance Pretty MonoExpr where
     pretty (MonoNull   _) = "NULL"
 
 instance Pretty MonoHead where
-  pretty (MonoHead lang i args e) = block 4 "MonoHead" $ encloseSep "{" "}" ","
+  pretty (MonoHead lang i args headForm e) = block 4 "MonoHead" $ encloseSep "{" "}" ","
     [ "lang:" <+> pretty lang
     , "index:" <+> pretty i
     , "args:" <+> list (map pretty args)
+    , "headForm:" <+> viaShow headForm
     , "expr:" <+> pretty e
     ]
 

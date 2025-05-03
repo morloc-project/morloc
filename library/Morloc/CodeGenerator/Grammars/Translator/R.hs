@@ -181,19 +181,19 @@ translateSegment m0 =
       }
 
     makeSerialManifold :: SerialManifold -> SerialManifold_ PoolDocs -> Index PoolDocs
-    makeSerialManifold _ (SerialManifold_ m _ form x)
-      = return $ translateManifold makeFunction makeLambda m form x
+    makeSerialManifold _ (SerialManifold_ m _ form headForm x)
+      = return $ translateManifold makeFunction makeLambda m form (Just headForm) x
 
     makeNativeManifold :: NativeManifold -> NativeManifold_ PoolDocs -> Index PoolDocs
     makeNativeManifold _ (NativeManifold_ m _ form x)
-      = return $ translateManifold makeFunction makeLambda m form x
+      = return $ translateManifold makeFunction makeLambda m form Nothing x
 
     makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
     makeSerialExpr _ (ManS_ f) = return f
 
     makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) ForeignCall args) _) = do 
       let call = [idoc|morloc_foreign_call(#{makeSocketPath socketFile}, #{pretty mid}L, list#{tupled (map argNamer args)})|]
-      return $ defaultValue { poolExpr = call, poolIsRemote = False }
+      return $ defaultValue { poolExpr = call }
     makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) (RemoteCall res) args) _) = do
       let resMem = pretty $ remoteResourcesMemory res
           resTime = pretty $ remoteResourcesTime res
@@ -202,10 +202,7 @@ translateSegment m0 =
           resources = [idoc|list(mem=#{resMem}L, time=#{resTime}L, cpus=#{resCPU}L, gpus=#{resGPU}L)|]
           argList = list (map argNamer args)
           call = "morloc_remote_call" <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resources, argList]
-      return $ defaultValue
-        { poolExpr = call
-        , poolIsRemote = True
-        }
+      return $ defaultValue { poolExpr = call }
 
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
     makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet svarNamer i e1 e2
@@ -265,20 +262,22 @@ translateSegment m0 =
     makeNativeArg nr (NativeArgManifold_ x) = return (typeMof nr, x)
     makeNativeArg nr (NativeArgExpr_ x) = return (typeMof nr, x)
 
-    makeFunction :: MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Bool -> MDoc
-    makeFunction mname args priorLines body isRemote
+    makeFunction :: MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> MDoc
+    makeFunction mname args priorLines body headForm
       = block 4 def (vsep $ priorLines <> [body])
       where
-        ext = if isRemote then "_remote" else "" 
-        def = mname <> ext <+> "<-" <+> "function" <> tupled (map argNamer args)
+        makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
+        makeExt _ = ""
+
+        def = mname <> makeExt headForm <+> "<-" <+> "function" <> tupled (map argNamer args)
 
     makeLambda :: [Arg TypeM] -> MDoc -> MDoc
     makeLambda args body = "function" <+> tupled (map argNamer args) <> "{" <> body <> "}"
 
     makeLet :: (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
-    makeLet namer i (PoolDocs ms1' e1' rs1 pes1 rm1) (PoolDocs ms2' e2' rs2 pes2 rm2) =
+    makeLet namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
       let rs = rs1 ++ [ namer i <+> "<-" <+> e1' ] ++ rs2
-      in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2) (rm1 || rm2)
+      in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
 makePool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc
 makePool sources dynlibs manifolds
