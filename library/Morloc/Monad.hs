@@ -137,12 +137,13 @@ setDepth i = do
   put $ s {stateDepth = i}
   return ()
 
-writeMorlocReturn :: MorlocReturn a -> IO ()
-writeMorlocReturn ((Left err', msgs), _)
-  =  MT.hPutStrLn stderr (MT.unlines msgs) -- write messages
-  >> MT.hPutStrLn stderr (MT.show' err') -- write terminal failing message
-writeMorlocReturn ((Right _, _), s) = do
-    print $ stateExports s
+writeMorlocReturn :: MorlocReturn a -> IO Bool
+writeMorlocReturn ((Left err', msgs), _) = do
+  MT.hPutStrLn stderr (MT.unlines msgs) -- write messages
+  MT.hPutStrLn stderr (MT.show' err') -- write terminal failing message
+  return False
+writeMorlocReturn ((Right _, _), _) = return True
+
 
 -- | Execute a system call
 runCommand ::

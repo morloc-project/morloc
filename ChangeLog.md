@@ -1,15 +1,23 @@
-0.53.0 [2025-04-xx]
+0.53.0 [2025-05-04]
 -------------------
 
 Unify backend under shared C library
 
- * Move packets to little-endian format
- * Add conventions for specifying caching and evaluation strategy
  * Replace python nexus with C nexus
+ * Move packets to little-endian format
  * Move all packet and binary formatting code, socket handling, and json
    parsing from pool code into the shared morloc.h library.
  * Replace R `future` parallelism scheme with builtin `parallel` library
+
+Add remote worker and resource management support
+
+ * Add conventions for specifying caching and evaluation strategy
  * Add xxhash hashing for caching
+ * Add remote handling with experimental slurm support
+
+Other
+
+ * `morloc` commands now return proper exit codes
 
 0.52.0 [2025-02-09]
 -------------------

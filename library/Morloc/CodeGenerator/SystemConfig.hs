@@ -24,13 +24,27 @@ import qualified Data.Text.IO as TIO
 import System.Process (callCommand, callProcess)
 import System.Directory (doesFileExist, removeFile, doesDirectoryExist, createDirectoryIfMissing)
 import System.IO (withFile, IOMode(WriteMode), hPutStrLn, stderr)
+import Control.Exception (SomeException, try, throwIO, displayException)
+
 
 configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
 configure _ = return ()
 
--- | Configure for all languages
-configureAll :: Bool -> Bool -> Bool -> Config -> IO ()
+
+configureAll :: Bool -> Bool -> Bool -> Config -> IO Bool
 configureAll verbose force slurmSupport config = do 
+  -- Wrap the entire configuration process in exception handling
+  result <- try (configureAllSteps verbose force slurmSupport config) :: IO (Either SomeException ())
+  case result of
+    Left e -> do
+        hPutStrLn stderr $ "\ESC[31mConfiguration failed: " ++ displayException e ++ "\ESC[0m"
+        return False
+    Right _ -> return True
+
+
+-- | Configure for all languages
+configureAllSteps :: Bool -> Bool -> Bool -> Config -> IO ()
+configureAllSteps verbose force slurmSupport config = do 
 
   -- Setup Morloc home directory structure
   let homeDir = configHome config
