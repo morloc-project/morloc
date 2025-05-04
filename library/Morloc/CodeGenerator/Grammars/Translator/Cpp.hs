@@ -136,7 +136,8 @@ data CppTranslatorState = CppTranslatorState
   { translatorCounter :: Int
   , translatorRecmap :: RecMap
   , translatorSignatureSet :: Set.Set Int
-  , translatorManifoldSet :: Set.Set Int
+  , translatorLocalManifoldSet :: Set.Set Int
+  , translatorRemoteManifoldSet :: Set.Set Int
   , translatorCurrentManifold :: Int
   }
 
@@ -145,7 +146,8 @@ instance Defaultable CppTranslatorState where
     { translatorCounter = 0
     , translatorRecmap = []
     , translatorSignatureSet = Set.empty
-    , translatorManifoldSet = Set.empty
+    , translatorLocalManifoldSet = Set.empty
+    , translatorRemoteManifoldSet = Set.empty
     , translatorCurrentManifold = -1 -- -1 indicates we are not inside a manifold
     }
 
@@ -458,7 +460,7 @@ translateSegment m0 = do
 
   makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> CppTranslator PoolDocs
   makeSerialExpr _ (ManS_ e) = return e
-  makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) ForeignCall args) _) = do 
+  makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) ForeignCall args) _) = do
     -- arguments sent to foreign_call:
     --  * basename of socket, e.g., "pipe-python3"
     --  * manifold id
@@ -472,14 +474,23 @@ translateSegment m0 = do
         resTime = pretty $ remoteResourcesTime res
         resCPU = pretty $ remoteResourcesThreads res
         resGPU = pretty $ remoteResourcesGpus res
-        resVarname = "resources_" <> pretty mid
-        resourcesDef = [idoc|resources_t #{resVarname} = {#{resMem}, #{resTime}, #{resCPU}, #{resGPU}};|]
-        argList = list (map argNamer args)
-        call = "remote_call" <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", "&" <> resVarname, argList]
-    return $ defaultValue
-      { poolExpr = call
-      , poolPriorLines = [resourcesDef]
-      }
+        cacheDir = ".morloc-cache"
+        argList = encloseSep "{" "}" "," (map argNamer args)
+        setup = [idoc|resources_t resources = {#{resMem}, #{resTime}, #{resCPU}, #{resGPU}};
+const uint8_t* args[] = #{argList};
+char* errmsg = NULL;|]
+        call = [idoc|remote_call(
+    #{pretty mid},
+    #{dquotes socketFile},
+    #{dquotes cacheDir},
+    &resources,
+    args,
+    #{pretty (length args)},
+    &errmsg
+);
+PROPAGATE_ERROR(errmsg)|]
+
+    return $ defaultValue { poolExpr = call, poolPriorLines = [setup] }
 
   makeSerialExpr _ (ReturnS_ e) = return $ e {poolExpr = "return(" <> poolExpr e <> ");"}
   makeSerialExpr _ (SerialLetS_ letIndex sa sb) = return $ makeLet svarNamer letIndex serialType sa sb
@@ -565,13 +576,29 @@ makeManifold
   -> PoolDocs -- ^ Generated content for the manifold body
   -> CppTranslator PoolDocs
 makeManifold callIndex form headForm manifoldType e = do
-  completeManifold <- makeManifoldBody (poolExpr e)
+  state <- CMS.get
+  let alreadyDone = manifoldHasBeenGenerated headForm state
+  completeManifold <- case alreadyDone of
+    True -> return $ Nothing
+    False -> Just <$> makeManifoldBody (poolExpr e)
   call <- makeManifoldCall form
   return $ e { poolExpr = call
              , poolCompleteManifolds = poolCompleteManifolds e <> maybeToList completeManifold
              , poolPriorLines = poolPriorLines e
              }
   where
+
+  manifoldHasBeenGenerated :: Maybe HeadManifoldForm -> CppTranslatorState -> Bool
+  manifoldHasBeenGenerated (Just HeadManifoldFormRemoteWorker) state = Set.member callIndex (translatorRemoteManifoldSet state)
+  manifoldHasBeenGenerated _ state = Set.member callIndex (translatorLocalManifoldSet state)
+
+  updateCounts :: Maybe HeadManifoldForm -> CppTranslator ()
+  updateCounts (Just HeadManifoldFormRemoteWorker) = do
+    state <- CMS.get
+    CMS.put $ state {translatorRemoteManifoldSet = Set.insert callIndex (translatorRemoteManifoldSet state)}
+  updateCounts _ = do
+    state <- CMS.get
+    CMS.put $ state {translatorLocalManifoldSet = Set.insert callIndex (translatorLocalManifoldSet state)}
 
   mnameExt (Just HeadManifoldFormRemoteWorker) = "_remote"
   mnameExt _ = ""
@@ -591,29 +618,25 @@ makeManifold callIndex form headForm manifoldType e = do
         bindStr = stdBind $ mname : (rs' ++ vs')
     return bindStr
 
-  makeManifoldBody :: MDoc -> CppTranslator (Maybe MDoc)
+  makeManifoldBody :: MDoc -> CppTranslator MDoc
   makeManifoldBody body = do
-    state <- CMS.get
-    let manifoldHasBeenGenerated = Set.member callIndex (translatorManifoldSet state)
-    if manifoldHasBeenGenerated
-      then return Nothing
-      else do
-        CMS.put $ state {translatorManifoldSet = Set.insert callIndex (translatorManifoldSet state)}
-        returnTypeStr <- returnType manifoldType
-        let argList = typeMofForm form
-        args <- mapM (\r@(Arg _ t) -> cppArgOf (chooseCallSemantics t) r) argList
-        let decl = returnTypeStr <+> mname <> tupled args
-        let tryBody = block 4 "try" body
-            throwStatement = vsep
-              [ [idoc|std::string error_message = "Error raised in C++ pool by m#{pretty callIndex}: " + std::string(e.what());|]
-              , [idoc|throw std::runtime_error(error_message);|]
-              ]
-            catchBody = block 4 "catch (const std::exception& e)" throwStatement
-            tryCatchBody = tryBody <+> catchBody
-        return . Just . block 4 decl . vsep $
-          [ {- can add diagnostic statements here -}
-            tryCatchBody
+    updateCounts headForm
+    returnTypeStr <- returnType manifoldType
+    let argList = typeMofForm form
+    args <- mapM (\r@(Arg _ t) -> cppArgOf (chooseCallSemantics t) r) argList
+    let decl = returnTypeStr <+> mname <> tupled args
+    let tryBody = block 4 "try" body
+        throwStatement = vsep
+          [ [idoc|std::string error_message = "Error raised in C++ pool by m#{pretty callIndex}:\n" + std::string(e.what());|]
+          , [idoc|throw std::runtime_error(error_message);|]
           ]
+        catchBody = block 4 "catch (const std::exception& e)" throwStatement
+        tryCatchBody = tryBody <+> catchBody
+    return . block 4 decl . vsep $
+      [ {- can add diagnostic statements here -}
+        tryCatchBody
+      ]
+
   returnType :: TypeM -> CppTranslator MDoc
   returnType (Function _ t) = cppTypeOf t
   returnType t = cppTypeOf t
@@ -623,19 +646,47 @@ stdBind xs = [idoc|std::bind(#{args})|] where
   args = cat (punctuate "," xs)
 
 makeDispatch :: [SerialManifold] -> MDoc
-makeDispatch ms = block 4 "switch(mid)" (vsep (map makeCase ms))
-  where
-    makeCase :: SerialManifold -> MDoc
-    makeCase (SerialManifold i _ form _ _) =
-      -- this made more sense when I was using ArgTypes
-      -- it may make sense yet again when I switch to Or
-      let size = sum $ abilist (\_ _ -> 1) (\_ _ -> 1) form
-          args' = take size $ map (\j -> "args[" <> viaShow j <> "]") ([0..] :: [Int])
-      in
-        (nest 4 . vsep)
-          [ "case" <+> viaShow i <> ":"
-          , "return" <+> manNamer i <> tupled args' <> ";"
-          ]
+makeDispatch ms = [idoc|uint8_t* local_dispatch(uint32_t mid, const uint8_t** args){
+    switch(mid){
+        #{align (vsep localCases)}
+        default:
+            throw std::runtime_error("Invalid manifold id");
+    }
+}
+
+uint8_t* remote_dispatch(uint32_t mid, const uint8_t** args){
+    switch(mid){
+        #{align (vsep remoteCases)}
+        default:
+            throw std::runtime_error("Invalid manifold id");
+    }
+}|]
+    where
+    localCases = catMaybes $ map localCase ms
+
+    localCase :: SerialManifold -> Maybe MDoc
+    localCase (SerialManifold _ _ _ HeadManifoldFormRemoteWorker _) = Nothing
+    localCase (SerialManifold i _ form _ _) = Just $ makeCase "" (i, getSize form)
+
+
+    getSize :: ManifoldForm (Or TypeS TypeF) TypeS -> Int
+    getSize = sum . abilist (\_ _ -> 1) (\_ _ -> 1)
+
+    remoteCases :: [MDoc]
+    remoteCases = map (makeCase  "_remote") . unique . concat $ map getRemotes ms
+
+    makeCase :: MDoc -> (Int, Int) -> MDoc
+    makeCase suffix (i, n) =
+        "case" <+> pretty i <> ":" <+>
+        "return" <+> manNamer i <> suffix <> tupled ["args[" <> pretty j <> "]" | j <- take n ([0..]::[Int])] <> ";"
+
+    getRemotes :: SerialManifold -> [(Int, Int)]
+    getRemotes = MM.runIdentity . foldSerialManifoldM (defaultValue {opSerialExprM = getRemoteSE})
+
+    getRemoteSE :: SerialExpr_ [(Int, Int)] [(Int, Int)] [(Int, Int)] [(Int, Int)] [(Int, Int)] -> MM.Identity [(Int, Int)]
+    getRemoteSE (AppPoolS_ _ (PoolCall i _ (RemoteCall _) _) xss) = return $ (i, length xss) : concat xss
+    getRemoteSE x = return $ foldlSE mappend mempty x
+
 
 typeParams :: [(Maybe TypeF, TypeF)] -> CppTranslator MDoc
 typeParams ts = recordTemplate <$> mapM cppTypeOf [t | (Nothing, t) <- ts]
@@ -864,7 +915,7 @@ deserializerTemplate isObj params rtype fields
   assignFields idx (keyName, keyType) = vsep
     [ [idoc|#{keyType}* elemental_dumby_#{keyName} = nullptr;|]
     , [idoc|obj.#{keyName} = fromAnything(schema->parameters[#{pretty idx}], (char*)anything + schema->offsets[#{pretty idx}], elemental_dumby_#{keyName});|]
-    
+
     ]
 
   headerGetSize = [idoc|size_t get_shm_size(const Schema* schema, const #{rtype}& data)|]
