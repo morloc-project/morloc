@@ -181,7 +181,7 @@ int mkdir_p(const char *path, ERRMSG) {
         const_err = errno;
         goto cleanup;
     }
-    strncpy(tmp, path, len + 1); // +1 to copy the null terminator
+    strcpy(tmp, path);
 
     // Add trailing slash if not present
     if (tmp[len - 1] != '/') {
@@ -318,7 +318,6 @@ int write_atomic(const char* filename, const uint8_t* data, size_t size, ERRMSG)
     FILE* file = NULL;
     int fd = -1;
     int ret = -1;
-    char* dirpath = NULL;
     int last_errno;
     int tmp_errno;
     char* file_dirpath = NULL;
@@ -4564,12 +4563,12 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
     format = header->command.data.format;
 
     char* packet_error = TRY(get_morloc_data_packet_error_message, data);
-    RAISE_IF(packet_error != NULL, "Propagating:\n%s", packet_error)
+    RAISE_IF(packet_error != NULL, "\n%s", packet_error)
 
     switch (source) {
         case PACKET_SOURCE_MESG:
             if (format == PACKET_FORMAT_MSGPACK) {
-                int unpack_result = TRY(
+                TRY(
                     unpack_with_schema,
                     (const char*)data + sizeof(morloc_packet_header_t) + header->offset,
                     header->length,
@@ -5315,7 +5314,7 @@ char* put_cache_packet(const uint8_t* voidstar, const Schema* schema, uint64_t k
     // convert voidstar data to MessagePack
     char* mpk_data = NULL;
     size_t mpk_size = 0;
-    int retcode = TRY(pack_with_schema, voidstar, schema, &mpk_data, &mpk_size);
+    TRY(pack_with_schema, voidstar, schema, &mpk_data, &mpk_size);
 
     // write packet
     TRY_WITH(free(data_packet), write_atomic, packet_filename, data_packet, data_packet_size);
@@ -5629,8 +5628,8 @@ char* write_slurm_time(int seconds){
     int minutes = seconds / 60;
     seconds -= minutes * 60;
 
-    char* time_str = (char*)calloc(16, sizeof(char));
-    snprintf(time_str, 16, "%d-%02d:%02d:%02d", days, hours, minutes, seconds);
+    char* time_str = (char*)calloc(32, sizeof(char));
+    snprintf(time_str, 32, "%d-%02d:%02d:%02d", days, hours, minutes, seconds);
 
     return time_str;
 }
@@ -5798,7 +5797,7 @@ uint8_t* remote_call(
     size_t nargs,
     ERRMSG
 ){
-    PTR_RETURN_SETUP(uint8_t)
+    ERROR_HANDLING_SETUP
 
     uint64_t seed = (uint64_t)midx;
 
@@ -5816,14 +5815,11 @@ uint8_t* remote_call(
     char* error_filename = NULL;
 
     // Initializations
-    FILE* call_packet_file = NULL;
     size_t call_packet_size = 0;
     uint64_t call_packet_hash_code = 0;
-    int written = 0;
     char output_ext[] = ".out";
     char error_ext[] = ".err";
     char call_ext[] = "-call.dat";
-    char result_ext[] = "-result.dat";
 
     uint32_t pid = 0;
     size_t return_packet_size = 0;
@@ -5916,7 +5912,7 @@ uint8_t* remote_call(
     // the results to the result hash cache.
     call_packet_hash_code = XXH64(call_packet, call_packet_size, DEFAULT_XXHASH_SEED);
 
-    call_packet_filename = TRY_GOTO(make_cache_filename_ext, function_hash, cache_path, call_ext);
+    call_packet_filename = TRY_GOTO(make_cache_filename_ext, call_packet_hash_code, cache_path, call_ext);
 
     // Write packet the call to disk, this will be sent the worker daemon
     TRY_GOTO(write_atomic, call_packet_filename, call_packet, call_packet_size)

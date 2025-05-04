@@ -135,8 +135,18 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
 
 
 
+// AUTO dispatch start
+// <<<BREAK>>>
+// AUTO dispatch end
+
+
+
 uint8_t* dispatch(const uint8_t* msg){
     char* errmsg = NULL;
+
+    morloc_call_t* call_packet = NULL;
+    uint32_t mid = 0;
+    const uint8_t** args;
 
     bool is_ping = packet_is_ping(msg, &errmsg);
     PROPAGATE_FAIL_PACKET(errmsg)
@@ -150,18 +160,19 @@ uint8_t* dispatch(const uint8_t* msg){
     bool is_local_call = packet_is_local_call(msg, &errmsg);
     bool is_remote_call = packet_is_remote_call(msg, &errmsg);
     errmsg = NULL;
+
+
     if(is_local_call || is_remote_call){
-        morloc_call_t* call_packet = read_morloc_call_packet(msg, &errmsg);
-        uint32_t mid = call_packet->midx;
-        const uint8_t** args = (const uint8_t**)call_packet->args;
+        call_packet = read_morloc_call_packet(msg, &errmsg);
+        mid = call_packet->midx;
+        args = (const uint8_t**)call_packet->args;
         free(call_packet);
-
         try {
-
-    // AUTO dispatch statements start
-    // <<<BREAK>>>
-    // AUTO dispatch statements end
-
+            if(is_local_call){
+                return local_dispatch(mid, args);
+            } else {
+                return remote_dispatch(mid, args);
+            }
         } catch (const std::exception& e) {
             // Wrap any exceptions in a failing data packet
             return make_fail_packet(e.what());
@@ -170,11 +181,6 @@ uint8_t* dispatch(const uint8_t* msg){
             return make_fail_packet("An unknown error occurred");
         }
 
-    }
-
-    if(is_remote_call){
-        fprintf(stderr, "Remote calls not yet handled in C");
-        exit(1);
     }
 
     if(!is_local_call){

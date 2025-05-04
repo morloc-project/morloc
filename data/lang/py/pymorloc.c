@@ -16,8 +16,8 @@
 #define MAYFAIL \
     char* child_errmsg_ = NULL; \
 
-char* get_prior_err(){
-    char* prior_err = NULL;
+const char* get_prior_err(){
+    const char* prior_err = NULL;
     if (PyErr_Occurred()) {
         // Fetch existing exception
         PyObject *type, *value, *traceback;
@@ -40,7 +40,7 @@ char* get_prior_err(){
 #define PyTRY(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
-        char* prior_err = get_prior_err(); \
+        const char* prior_err = get_prior_err(); \
         if(prior_err == NULL){ \
             PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
         } else { \
@@ -50,7 +50,7 @@ char* get_prior_err(){
     }
 
 #define PyRAISE(msg, ...) \
-    char* prior_err = get_prior_err(); \
+    const char* prior_err = get_prior_err(); \
     if(prior_err == NULL){ \
         PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n" msg "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
     } else { \
@@ -60,7 +60,7 @@ char* get_prior_err(){
 
 #define PyTRACE(cond) \
     if(cond){ \
-        char* prior_err = get_prior_err(); \
+        const char* prior_err = get_prior_err(); \
         if(prior_err != NULL){ \
             PyErr_Format(PyExc_TypeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, prior_err); \
             goto error; \
@@ -380,7 +380,7 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
             }
 
         case MORLOC_MAP:
-            if (PyDict_Check(obj) == NULL) {
+            if (!PyDict_Check(obj)) {
                 PyRAISE("Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
             }
 
@@ -485,24 +485,31 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
 
             {
                 Py_ssize_t size;
-                char* data = NULL; // Initialize data to NULL
+
+                // "bytes" type is mutable, so it exposes a non-const pointer 
+                char* mutable_data = NULL;
+
+                // strings type are immutable, so const
+                const char* immutable_data = NULL; 
 
                 if (PyList_Check(obj)) {
                     size = PyList_Size(obj);
                 } else if (PyBytes_Check(obj)) {
-                    PyBytes_AsStringAndSize(obj, &data, &size);
+                    // This needs non-const data
+                    PyBytes_AsStringAndSize(obj, &mutable_data, &size);
                 } else if (schema->type == MORLOC_ARRAY && PyObject_HasAttrString(obj, "__array_interface__")) { // check if it is a numpy array
                     import_numpy();
                     PyArrayObject* arr = (PyArrayObject*)obj;
                     size = PyArray_SIZE(arr);
-                    data = (char*)PyArray_DATA(arr); // Get the data pointer
+                    // This needs const data
+                    immutable_data = PyArray_DATA(arr); // Get the data pointer
 
                     // Verify that the array is contiguous
                     if (!PyArray_ISCONTIGUOUS(arr)) {
                         PyRAISE("NumPy array must be contiguous");
                     }
                 } else {
-                    data = PyUnicode_AsUTF8AndSize(obj, &size);
+                    immutable_data = PyUnicode_AsUTF8AndSize(obj, &size);
                 }
 
                 Array* result = (Array*)dest;
@@ -526,7 +533,7 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                     }
                 } else if (PyBytes_Check(obj)){
                     absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
-                    memcpy(tmp_ptr, data, size);
+                    memcpy(tmp_ptr, mutable_data, size);
 
                     // move cursor to the location after the copied data
                     *cursor = (void*)(*(char**)cursor + size);
@@ -535,7 +542,7 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                     size_t width = schema->parameters[0]->width;
 
                     absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
-                    memcpy(tmp_ptr, data, size * width);
+                    memcpy(tmp_ptr, immutable_data, size * width);
 
                     // Move the cursor to the location immediately after the
                     // fixed sized elements
@@ -683,7 +690,7 @@ static PyObject*  pybinding__read_morloc_call_packet(PyObject* self, PyObject* a
     if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
         PyRAISE("Failed to parse arguments");
     }
-    morloc_call_t* call_packet = PyTRY(read_morloc_call_packet, packet);
+    morloc_call_t* call_packet = PyTRY(read_morloc_call_packet, (const uint8_t*)packet);
 
     PyObject* py_tuple = PyTuple_New(2);
     PyObject* py_args = PyList_New(call_packet->nargs);
@@ -760,17 +767,17 @@ error:
 
 // Transforms a value into a message ready for the socket
 static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
+    uint8_t* packet = NULL;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    size_t packet_size = 0;
+
     PyObject* obj;
     const char* schema_str;
 
     if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
         PyRAISE("Failed to parse arguments");
     }
-
-    uint8_t* packet = NULL;
-    Schema* schema = NULL;
-    void* voidstar = NULL;
-    size_t packet_size = 0;
 
     schema = PyTRY(parse_schema, &schema_str);
 
@@ -795,6 +802,10 @@ error:
 
 // Use a key to retrieve a value
 static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
+    uint8_t* voidstar = NULL;
+    Schema* schema = NULL;
+    PyObject* obj = NULL;
+
     const char* packet;
     size_t packet_size;
     const char* schema_str;
@@ -802,10 +813,6 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     if (!PyArg_ParseTuple(args, "y#s", &packet, &packet_size, &schema_str)) {
         PyRAISE("Failed to parse arguments");
     }
-
-    uint8_t* voidstar = NULL;
-    Schema* schema = NULL;
-    PyObject* obj = NULL;
 
     schema = PyTRY(parse_schema, &schema_str)
 
@@ -1034,6 +1041,8 @@ error:
 }
 
 static PyObject* pybinding__shinit(PyObject* self, PyObject* args) { MAYFAIL
+    shm_t* shm = NULL;
+    
     const char* shm_basename;
     size_t volume_index;
     size_t shm_default_size;
@@ -1042,7 +1051,7 @@ static PyObject* pybinding__shinit(PyObject* self, PyObject* args) { MAYFAIL
         PyRAISE("Failed to parse arguments");
     }
 
-    shm_t* shm = PyTRY(
+    shm = PyTRY(
         shinit,
         shm_basename,
         volume_index,

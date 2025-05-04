@@ -950,7 +950,7 @@ SEXP morloc_pong(SEXP packet_r) { MAYFAIL
 
 
 SEXP morloc_make_fail_packet(SEXP failure_message_r) { MAYFAIL
-    char* failure_message = CHAR(STRING_ELT(failure_message_r, 0));
+    const char* failure_message = CHAR(STRING_ELT(failure_message_r, 0));
     uint8_t* fail_packet = make_fail_packet(failure_message);
 
     size_t packet_size = R_TRY(morloc_packet_size, fail_packet);
