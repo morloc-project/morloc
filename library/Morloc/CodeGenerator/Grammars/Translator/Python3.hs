@@ -325,11 +325,11 @@ makeDispatch :: [SerialManifold] -> MDoc
 makeDispatch ms = vsep [localDispatch, remoteDispatch]
   where
 
-    localDispatch = align . vsep $ ["dispatch = {", indent 4 (vsep $ map entry ms), "}"]
+    localDispatch = align . vsep $ ["dispatch = {", indent 4 (vsep . catMaybes $ map entry ms), "}"]
 
-    entry :: SerialManifold -> MDoc
-    entry (SerialManifold i _ _ _ _)
-      = pretty i <> ":" <+> manNamer i <> ","
+    entry :: SerialManifold -> Maybe MDoc
+    entry (SerialManifold _ _ _ HeadManifoldFormRemoteWorker _) = Nothing
+    entry (SerialManifold i _ _ _ _) = Just $ pretty i <> ":" <+> manNamer i <> ","
 
     remoteDispatch = align . vsep $ ["remote_dispatch = {", indent 4 (vsep remotes), "}"]
 
