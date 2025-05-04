@@ -111,7 +111,7 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
     va_end(args);
 
     // Original logic with variadic args converted to array
-    uint8_t* packet = make_morloc_call_packet((uint32_t)mid, args_array, nargs, &errmsg);
+    uint8_t* packet = make_morloc_local_call_packet((uint32_t)mid, args_array, nargs, &errmsg);
     PROPAGATE_ERROR(errmsg)
 
     uint8_t* result = send_and_receive_over_socket(socket_path, packet, &errmsg);

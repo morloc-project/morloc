@@ -879,7 +879,7 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
         Py_DECREF(item);
     }
 
-    packet = PyTRY(make_morloc_call_packet, (uint32_t)mid, arg_packets, (size_t)nargs);
+    packet = PyTRY(make_morloc_local_call_packet, (uint32_t)mid, arg_packets, (size_t)nargs);
 
     free(arg_packets);
 

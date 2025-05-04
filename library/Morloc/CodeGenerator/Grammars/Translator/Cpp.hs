@@ -650,7 +650,9 @@ makeDispatch ms = [idoc|uint8_t* local_dispatch(uint32_t mid, const uint8_t** ar
     switch(mid){
         #{align (vsep localCases)}
         default:
-            throw std::runtime_error("Invalid manifold id");
+            std::ostringstream oss;
+            oss << "Invalid local manifold id: " << mid;
+            throw std::runtime_error(oss.str());
     }
 }
 
@@ -658,7 +660,9 @@ uint8_t* remote_dispatch(uint32_t mid, const uint8_t** args){
     switch(mid){
         #{align (vsep remoteCases)}
         default:
-            throw std::runtime_error("Invalid manifold id");
+            std::ostringstream oss;
+            oss << "Invalid remote manifold id: " << mid;
+            throw std::runtime_error(oss.str());
     }
 }|]
     where

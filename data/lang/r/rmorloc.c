@@ -872,7 +872,7 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
 
     // Create call packet
     uint8_t* packet = R_TRY(
-        make_morloc_call_packet,
+        make_morloc_local_call_packet,
         (uint32_t)mid,
         arg_packets,
         nargs

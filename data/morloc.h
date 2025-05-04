@@ -34,8 +34,6 @@
 #define WAIT_RETRY_MULTIPLIER 1.25
 #define WAIT_RETRY_ATTEMPTS 32
 
-#define CEILING(x) (x-(int)(x) > 0 ? (int)(x+1) : (int)(x))
-
 // {{{ Error handling macro definictions
 
 #define FREE(ptr) \
@@ -392,9 +390,6 @@ cleanup:
     FREE(file_dirpath)
     if (file) fclose(file);
     if (ret == -1) unlink(tmp_path);
-
-fprintf(stderr, "atomic writing ret=%d to %s\n", ret, filename);
-
     RAISE_IF(ret == -1, "Atomic write to '%s' failed: %s", filename, strerror(last_errno))
     return ret;
 }
@@ -4366,7 +4361,7 @@ static uint8_t* make_morloc_data_packet_with_schema(
 
   char* schema_str = schema_to_string(schema);
   size_t metadata_length = strlen(schema_str) + 1; // +1 for null byte
-  size_t metadata_length_total = CEILING(sizeof(morloc_metadata_header_t) + metadata_length / 32) * 32;
+  size_t metadata_length_total = (1 + (sizeof(morloc_metadata_header_t) + metadata_length) / 32) * 32;
   uint8_t* metadata = (uint8_t*)calloc(metadata_length_total, sizeof(char));
 
   set_morloc_metadata_header(metadata, MORLOC_METADATA_TYPE_SCHEMA_STRING, metadata_length);
@@ -4394,6 +4389,20 @@ uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema){
   *((ssize_t*)(packet + sizeof(morloc_packet_header_t) + (size_t)header->offset)) = ptr;
 
   return packet;
+}
+
+uint8_t* make_mpk_data_packet(const char* mpk_filename, const Schema* schema){
+    uint8_t* packet = make_morloc_data_packet_with_schema(
+        (const uint8_t*)mpk_filename,
+        strlen(mpk_filename),
+        schema,
+        PACKET_SOURCE_FILE,
+        PACKET_FORMAT_MSGPACK,
+        PACKET_COMPRESSION_NONE,
+        PACKET_ENCRYPTION_NONE,
+        PACKET_STATUS_PASS
+    );
+    return packet;
 }
 
 // Returns a metadata header if the magic matches, otherwise returns NULL
@@ -4582,7 +4591,7 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
         case PACKET_SOURCE_FILE:
             switch (format) {
                 case PACKET_FORMAT_MSGPACK: {
-                    char* filename = strndup((char*)data + sizeof(morloc_packet_header_t), MAX_FILENAME_SIZE);
+                    char* filename = strndup((char*)data + sizeof(morloc_packet_header_t) + header->offset, MAX_FILENAME_SIZE);
                     size_t file_size;
                     uint8_t* msg = TRY(read_binary_file, filename, &file_size);
                     FREE(filename);
@@ -4591,9 +4600,11 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
                     FREE(msg);
                     break;
                 }
+                default:
+                    RAISE("Invalid format from file: 0x%02hhx", format);
+                    return NULL;
             }
-            RAISE("Invalid format from file: 0x%02hhx", format);
-            return NULL;
+            break;
 
         case PACKET_SOURCE_RPTR:
             if (format == PACKET_FORMAT_VOIDSTAR) {
@@ -4601,7 +4612,7 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
                 size_t relptr = *(size_t*)(data + header->offset + sizeof(morloc_packet_header_t));
                 voidstar = TRY(rel2abs, relptr);
             } else {
-                RAISE("For RPTR source, expected voidstar format");
+                RAISE("For RPTR source, expected voidstar format, found: 0x%02hhx", format);
                 return NULL;
             }
             break;
@@ -4613,7 +4624,7 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
     return (uint8_t*)voidstar;
 }
 
-uint8_t* make_morloc_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG){
+static uint8_t* make_morloc_call_packet_gen(uint32_t midx, uint8_t entrypoint, const uint8_t** arg_packets, size_t nargs, ERRMSG){
     PTR_RETURN_SETUP(uint8_t)
 
     size_t data_length = 0;
@@ -4632,6 +4643,7 @@ uint8_t* make_morloc_call_packet(uint32_t midx, const uint8_t** arg_packets, siz
     packet_command_t cmd = {
       .call = {
         .type = PACKET_TYPE_CALL,
+        .entrypoint = entrypoint,
         .padding = {0, 0},
         .midx = midx,
       }
@@ -4650,6 +4662,19 @@ uint8_t* make_morloc_call_packet(uint32_t midx, const uint8_t** arg_packets, siz
     return data;
 }
 
+// Make a packet wrapping a call on the local machine
+uint8_t* make_morloc_local_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG){
+    PTR_RETURN_SETUP(uint8_t)
+    uint8_t* packet = TRY(make_morloc_call_packet_gen, midx, PACKET_ENTRYPOINT_LOCAL, arg_packets, nargs);
+    return packet;
+}
+
+// Make a packet wrapping a call on a remote worker
+uint8_t* make_morloc_remote_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG){
+    PTR_RETURN_SETUP(uint8_t)
+    uint8_t* packet = TRY(make_morloc_call_packet_gen, midx, PACKET_ENTRYPOINT_REMOTE_SFS, arg_packets, nargs);
+    return packet;
+}
 
 
 morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
@@ -5297,17 +5322,7 @@ char* put_cache_packet(const uint8_t* voidstar, const Schema* schema, uint64_t k
     // Generate the data filename
     char* data_filename = TRY(make_cache_data_filename, key, cache_path)
 
-    // make data packet
-    uint8_t* data_packet = make_morloc_data_packet_with_schema(
-        (uint8_t*)data_filename,
-        strlen(data_filename),
-        schema,
-        PACKET_SOURCE_FILE,
-        PACKET_FORMAT_MSGPACK,
-        PACKET_COMPRESSION_NONE,
-        PACKET_ENCRYPTION_NONE,
-        PACKET_STATUS_PASS
-    );
+    uint8_t* data_packet = make_mpk_data_packet(data_filename, schema);
 
     size_t data_packet_size = TRY(morloc_packet_size, data_packet);
 
@@ -5533,7 +5548,7 @@ uint8_t* make_call_packet_from_cli(
         }
     }
 
-    uint8_t* call_packet = make_morloc_call_packet(mid, packet_args, nargs, &CHILD_ERRMSG);
+    uint8_t* call_packet = make_morloc_local_call_packet(mid, packet_args, nargs, &CHILD_ERRMSG);
     if(CHILD_ERRMSG != NULL){
         free(schemas);
         free(packet_args);
@@ -5683,25 +5698,24 @@ bool parse_morloc_call_arguments(
 
 // Check if a given SLURM job has completed
 bool slurm_job_is_complete(uint32_t job_id) {
-    return true;
-    // char cmd[256];
-    // snprintf(cmd, sizeof(cmd), "sacct -j %u --format=State --noheader", job_id);
-    //
-    // FILE *sacct = popen(cmd, "r");
-    // if (!sacct) return false;
-    //
-    // char state[16];
-    // bool done = false;
-    // while (fgets(state, sizeof(state), sacct)) {
-    //     if (strstr(state, "COMPLETED") ||
-    //         strstr(state, "FAILED") ||
-    //         strstr(state, "CANCELLED")) {
-    //         done = true;
-    //         break;
-    //     }
-    // }
-    // pclose(sacct);
-    // return done;
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "sacct -j %u --format=State --noheader", job_id);
+
+    FILE *sacct = popen(cmd, "r");
+    if (!sacct) return false;
+
+    char state[16];
+    bool done = false;
+    while (fgets(state, sizeof(state), sacct)) {
+        if (strstr(state, "COMPLETED") ||
+            strstr(state, "FAILED") ||
+            strstr(state, "CANCELLED")) {
+            done = true;
+            break;
+        }
+    }
+    pclose(sacct);
+    return done;
 }
 
 
@@ -5744,11 +5758,10 @@ uint32_t submit_morloc_slurm_job(
     int written = snprintf(
         cmd,
         MAX_SLURM_COMMAND_LENGTH,
-        // "sbatch --parsable -o %s -e %s %s --wrap='%s --call-packet %s --socket-base %s --output-file %s --output-form packet",
-        "%s --call-packet %s --socket-base %s --output-file %s --output-form packet",
-        // output_filename,
-        // error_filename,
-        // resources_spec,
+        "sbatch --parsable -o %s -e %s %s --wrap='%s --call-packet %s --socket-base %s --output-file %s --output-form packet",
+        output_filename,
+        error_filename,
+        resources_spec,
         nexus_path,
         call_packet_filename,
         socket_basename,
@@ -5761,12 +5774,11 @@ uint32_t submit_morloc_slurm_job(
     slurm = popen(cmd, "r");
     RAISE_IF(!slurm, "Failed to execute sbatch")
 
-    ////// UNCOMMENT WHEN I GO BACK TO SLURM
-    // // Parse job ID from first line
-    // if (fscanf(slurm, "%u", &job_id) != 1) {
-    //     pclose(slurm);
-    //     RAISE("Failed to parse job ID from sbatch output");
-    // }
+    // Parse job ID from first line
+    if (fscanf(slurm, "%u", &job_id) != 1) {
+        pclose(slurm);
+        RAISE("Failed to parse job ID from sbatch output");
+    }
 
     pclose(slurm);
     return job_id;
@@ -5825,7 +5837,9 @@ uint8_t* remote_call(
     size_t return_packet_size = 0;
     char* failure = NULL;
 
-    // The function hash determins the output file name on the remote node and is
+    // Initialize function hash
+    //
+    // The function hash determines the output file name on the remote node and is
     // used to determine if this computation has already been run. The function
     // hash **should** be unique to a function and its inputs.
     //
@@ -5862,6 +5876,7 @@ uint8_t* remote_call(
 
         arg_hashes[i] = TRY_GOTO(hash_voidstar, arg_voidstars[i], arg_schemas[i], DEFAULT_XXHASH_SEED);
 
+        // update function hash with ith argument hash
         function_hash = mix(function_hash, arg_hashes[i]);
     }
 
@@ -5890,16 +5905,17 @@ uint8_t* remote_call(
         }
     }
 
+    // read the cached argument packets (these will be small since they contain
+    // only a wrapper around the MessagePack file names)
     cached_arg_packets = (uint8_t**)calloc(nargs, sizeof(uint8_t*));
     for(size_t i = 0; i < nargs; i++){
         size_t file_size = 0;
         cached_arg_packets[i] = TRY_GOTO(read_binary_file, cached_arg_filenames[i], &file_size);
     }
 
-
     // write the call packet to cache
     call_packet = TRY_GOTO(
-        make_morloc_call_packet,
+        make_morloc_remote_call_packet,
         (uint32_t)midx,
         (const uint8_t**)cached_arg_packets,
         nargs
@@ -5943,6 +5959,7 @@ uint8_t* remote_call(
 
     failure = TRY_GOTO(get_morloc_data_packet_error_message, return_packet)
     if(failure != NULL){
+        fprintf(stderr, "Failed, deleting result %s\n", result_cache_filename);
         unlink(result_cache_filename);
     }
 

@@ -28,6 +28,13 @@
     end; \
     clean_exit(1);
 
+#define ERROR_TRY_GOTO(fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &errmsg); \
+    if(errmsg != NULL){ \
+        fprintf(stderr, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, errmsg); \
+        goto end; \
+    }
+
 typedef enum {
     JSON,
     MessagePack,
@@ -243,36 +250,83 @@ void run_command(
 }
 
 
+// Run a call packet on a remote worker node
 void run_call_packet(config_t config){
+
     char* errmsg = NULL;
     char* write_errmsg = NULL;
     size_t call_packet_size = 0;
+    uint8_t* result_packet = NULL;
+    uint8_t* cache_result_packet = NULL;
+    char* run_errmsg = NULL;
+
     uint8_t* call_packet = read_binary_file(config.packet_path, &call_packet_size, &errmsg);
+
     if(errmsg != NULL || call_packet == NULL){
-        ERROR_WITH(free(errmsg), "Failed to open call packet file '%s':\n%s\n", config.packet_path, errmsg)
+        ERROR("Failed to open call packet file '%s':\n%s\n", config.packet_path, errmsg)
     }
 
     // make the local socket filename relative to the current temporary directry
     char socket_path[MAX_FILENAME_SIZE] = { '\0' };
     snprintf(socket_path, sizeof(socket_path), "%s/%s", tmpdir, config.socket_base);
 
-    uint8_t* result_packet = send_and_receive_over_socket(socket_path, call_packet, &errmsg);
-    free(call_packet);
-    if(errmsg != NULL || result_packet == NULL){
-        ERROR_WITH(free(errmsg), "Failed to contact socket '%s':\n%s\n", socket_path, errmsg)
+    // send request to the language daemon and wait for a response
+    result_packet = send_and_receive_over_socket(socket_path, call_packet, &errmsg);
+    if(errmsg != NULL){
+        ERROR("Run failed - bad message: %s\n", errmsg);
+    }
+    run_errmsg = get_morloc_data_packet_error_message(result_packet, &errmsg);
+    if(run_errmsg != NULL){
+        ERROR("Run failed: %s\n", run_errmsg);
+    }
+    if(errmsg != NULL){
+        ERROR("Run failed - unable to parse: %s\n", errmsg);
     }
 
-    size_t result_packet_size = morloc_packet_size(result_packet, &errmsg);
-    if(errmsg != NULL){
-        ERROR_WITH(free(errmsg), "Packet returned to nexus from '%s' is invalid:\n%s\n", socket_path, errmsg)
-    }
+    // parse the schema from the response packet
+    char* schema_str = ERROR_TRY_GOTO(read_schema_from_packet_meta, result_packet);
+    Schema* schema = ERROR_TRY_GOTO(parse_schema, (const char**)&schema_str);
+
+    uint8_t* mlc = ERROR_TRY_GOTO(get_morloc_data_packet_value, result_packet, schema)
+    char* mpk_data = NULL; // MessagePack data point
+    size_t mpk_size = 0;
+
+    // translate returned data to MessagePack format
+    ERROR_TRY_GOTO(pack_with_schema, (void*)mlc, schema, &mpk_data, &mpk_size);
+
+    // make a filename in cachedir for mpk_data
+    char mpk_data_filename[MAX_FILENAME_SIZE];
+    snprintf(mpk_data_filename, MAX_FILENAME_SIZE, "%s.mpk", config.output_path);
+
+    // write MessagePack data to cache dir
+    ERROR_TRY_GOTO(write_atomic, mpk_data_filename, mpk_data, mpk_size);
+
+    // create packet that wraps the message pack file
+    cache_result_packet = make_mpk_data_packet(mpk_data_filename, schema);
+
+    // read the packet size based on packet header size, data length and metadata lengths
+    size_t cache_result_packet_size = ERROR_TRY_GOTO(morloc_packet_size, cache_result_packet);
 
     // Write resulting packet (even if it failed)
-    write_atomic(config.output_path, result_packet, result_packet_size, &errmsg);
-    if(errmsg != NULL){
-        ERROR_WITH(free(result_packet), "Failed to write '%s':\n%s\n", config.output_path, errmsg)
-    }
+    ERROR_TRY_GOTO(write_atomic, config.output_path, cache_result_packet, cache_result_packet_size);
 
+end:
+    if(mpk_data != NULL){
+        free(mpk_data);
+    }
+    if(call_packet != NULL){
+        free(call_packet);
+    }
+    if(cache_result_packet != NULL){
+        free(cache_result_packet);
+    }
+    if(result_packet != NULL){
+        free(result_packet);
+    }
+    if(errmsg != NULL){
+        free(errmsg);
+        clean_exit(1);
+    }
     clean_exit(0);
 }
 
