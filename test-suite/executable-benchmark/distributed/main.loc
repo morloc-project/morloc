@@ -1,35 +1,88 @@
-module m (foo)
+-- module m (bar)
+--
+-- source Py from "foo.py" ("double", "mean" as pmean)
+--
+-- type Py => Real = "float"
+-- type Py => List a = "list" a
+--
+-- pmean :: [Real] -> Real
+-- double :: Real -> Real
+--
+-- bar xs = double (large:pmean xs)
 
-type Py => Int = "int"
-type Py => Real = "float"
-type Py => Tuple2 a b = "tuple" a b
-type Py => List a = "list" a
 
-source Py from "foo.py" ("nTrials", "mean", "sd", "simulate")
+module m (bar)
 
-simulate :: Int -> [Real]
+source Cpp from "foo.cpp" ("cdouble" as double, "cmean" as mean)
+
+type Cpp => Real = "double"
+type Cpp => List a = "std::vector<$1>" a
 mean :: [Real] -> Real
-sd :: [Real] -> Real
+double :: Real -> Real
 
--- multi-threaded program for running a random process many times on the same input
-nTrials a b :: Int -> a -> (a -> b) -> [b]
+bar xs = double (large:mean xs)
 
-foo :: Int -> Int -> (Real, Real)
-foo n size = (mean means, sd means)
-  where
-  means = nTrials n size (small:mean . simulate)
 
--- -- case 1: applications
--- f1 x = small:foo x
+
+-- -- module m (foo, bar)
+-- -- module m (foo)
+-- module m (bar)
 --
--- -- case 2: compositions
--- f1 = small:foo . bar
+-- -- source R from "foo.R" ("mean" as rmean)
+-- -- source Py from "foo.py" ("double", "mean" as pmean)
+-- source Cpp from "foo.cpp" ("cdouble" as double, "cmean" as mean)
 --
--- -- non-case: lambdas, instead bind the top named function, there always is one
--- f3 = (\y -> small:foo (bar y))
+-- -- type Py => Real = "float"
+-- -- type Py => List a = "list" a
 --
--- -- basically, we are always binding directly to a variable name
+-- type Cpp => Real = "double"
+-- type Cpp => List a = "std::vector<$1>" a
 --
--- -- what about this? the label should travel with bar, so `f4 = small:foo`
--- bar = small:foo
--- f4 = bar
+-- -- type R => Real = "numeric"
+-- -- type R => List a = "list" a
+--
+-- -- rmean :: [Real] -> Real
+-- -- pmean :: [Real] -> Real
+-- mean :: [Real] -> Real
+-- double :: Real -> Real
+--
+-- -- -- This should *immediately* make a remote call from the nexus and then that
+-- -- -- remote nexus will call the remote pool
+-- -- foo = large:mean
+--
+-- -- Here the pool makes the remote call
+-- bar xs = double (large:mean xs)
+--
+-- -- type Py => Int = "int"
+-- -- type Py => Real = "float"
+-- -- type Py => Tuple2 a b = "tuple" a b
+-- -- type Py => List a = "list" a
+-- --
+-- -- source Py from "foo.py" ("nTrials", "mean", "sd", "simulate")
+-- --
+-- -- simulate :: Int -> [Real]
+-- -- mean :: [Real] -> Real
+-- -- sd :: [Real] -> Real
+-- --
+-- -- -- multi-threaded program for running a random process many times on the same input
+-- -- nTrials a b :: Int -> a -> (a -> b) -> [b]
+-- --
+-- -- foo :: Int -> Int -> (Real, Real)
+-- -- foo n size = (mean means, sd means)
+-- --   where
+-- --   means = nTrials n size (small:mean . simulate)
+--
+-- -- -- case 1: applications
+-- -- f1 x = small:foo x
+-- --
+-- -- -- case 2: compositions
+-- -- f1 = small:foo . bar
+-- --
+-- -- -- non-case: lambdas, instead bind the top named function, there always is one
+-- -- f3 = (\y -> small:foo (bar y))
+-- --
+-- -- -- basically, we are always binding directly to a variable name
+-- --
+-- -- -- what about this? the label should travel with bar, so `f4 = small:foo`
+-- -- bar = small:foo
+-- -- f4 = bar

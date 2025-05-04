@@ -13,6 +13,9 @@ def sd(xs: list[float]) -> float:
     mu = mean(xs)
     return math.sqrt(sum([(x - mu) * (x - mu) for x in xs]) / (len(xs) - 1))
 
+def double(x: float):
+    return x * 2
+
 def nTrials(n: int, a, f):
     with multiprocessing.Pool() as pool:
         results = pool.map(f, (a for _ in range(n)))
