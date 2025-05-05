@@ -58,18 +58,32 @@ mapExprM f = g where
   g (ExprI i e) = ExprI i <$> f e
 
 
--- WARNING: silent bad things happen if this function does not copy all indices
 copyState :: Int -> Int -> MorlocMonad ()
 copyState oldIndex newIndex = do
   s <- MM.get
-  MM.put $ s
-    { stateSignatures = updateGMap (stateSignatures s)
+
+  -- Could be defined more succinctly, but it is IMPERATIVE that every index
+  -- is copied. Listing all fields will ensure that an error is raised if a
+  -- new MorlocState field is added but included in this function.
+  MM.put $ MorlocState
+    { statePackageMeta = statePackageMeta s
+    , stateVerbosity = stateVerbosity s
+    , stateCounter = stateCounter s
+    , stateDepth = stateDepth s
+    , stateSignatures = updateGMap (stateSignatures s)
+    , stateTypeclasses =  stateTypeclasses s
     , stateConcreteTypedefs = updateGMap (stateConcreteTypedefs s)
     , stateGeneralTypedefs = updateGMap (stateGeneralTypedefs s)
+    , stateUniversalGeneralTypedefs = stateUniversalGeneralTypedefs s
+    , stateUniversalConcreteTypedefs = stateUniversalConcreteTypedefs s
     , stateSources = updateGMap (stateSources s)
     , stateAnnotations = updateMap (stateAnnotations s)
+    , stateOutfile = stateOutfile s
     , stateExports = updateList (stateExports s)
     , stateName = updateMap (stateName s)
+    , stateManifoldConfig = updateMap (stateManifoldConfig s)
+    , stateTypeQualifier = updateMap (stateTypeQualifier s)
+    , stateBuildConfig = stateBuildConfig s
     }
   where
     updateGMap g = case GMap.yIsX oldIndex newIndex g of

@@ -44,7 +44,7 @@ import qualified Morloc.TypeEval as TE
 import qualified Morloc.Data.Text as MT
 import Control.Monad.Identity (Identity)
 
-data CallSemantics = Copy | Reference
+data CallSemantics = Copy | Reference | ConstPtr
 
 class HasCppType a where
   cppTypeOf :: a -> CppTranslator MDoc
@@ -55,6 +55,13 @@ class HasCppType a where
 setCallSemantics :: CallSemantics -> MDoc -> MDoc
 setCallSemantics Copy typestr = typestr
 setCallSemantics Reference typestr = "const" <+> typestr <> "&"
+setCallSemantics ConstPtr typestr = "const" <+> typestr
+
+chooseCallSemantics :: TypeM -> CallSemantics
+chooseCallSemantics Passthrough = ConstPtr -- const uint8_t* packet
+chooseCallSemantics (Serial _) = ConstPtr -- const uint8_t* packet
+chooseCallSemantics (Native _) = Reference -- for now, primitives should be pass by copy
+chooseCallSemantics (Function _ _) = Copy -- currently not used
 
 instance HasCppType TypeM where
   cppTypeOf (Serial _) = return serialType
@@ -65,17 +72,14 @@ instance HasCppType TypeM where
     ts' <- mapM cppTypeOf ts
     return $ "std::function<" <> t' <> tupled ts' <> ">"
 
-  cppArgOf (setCallSemantics -> setCall) = f where
-    f (Arg i t@(Serial _)) = do
-      t' <- cppTypeOf t
-      return $ setCall t' <+> svarNamer i
-    f (Arg i t@(Native _)) = do
-      t' <- cppTypeOf t
-      return $ setCall t' <+> nvarNamer i
-    f (Arg i Passthrough) = return $ setCall serialType <+> svarNamer i
-    f (Arg i t@(Function _ _)) = do
-      t' <- cppTypeOf t
-      return $ t' <+> nvarNamer i
+  cppArgOf s (Arg i t) = do
+    typeStr <- cppTypeOf t
+    let typeStrQualified = setCallSemantics s typeStr
+    return $ case t of
+        (Serial _) -> typeStrQualified <+> svarNamer i
+        (Native _) -> typeStrQualified <+> nvarNamer i
+        Passthrough -> typeStrQualified <+> svarNamer i
+        (Function _ _) -> typeStrQualified <+> nvarNamer i
 
 instance HasCppType NativeManifold where
   cppTypeOf = cppTypeOf . typeMof
@@ -132,7 +136,8 @@ data CppTranslatorState = CppTranslatorState
   { translatorCounter :: Int
   , translatorRecmap :: RecMap
   , translatorSignatureSet :: Set.Set Int
-  , translatorManifoldSet :: Set.Set Int
+  , translatorLocalManifoldSet :: Set.Set Int
+  , translatorRemoteManifoldSet :: Set.Set Int
   , translatorCurrentManifold :: Int
   }
 
@@ -141,7 +146,8 @@ instance Defaultable CppTranslatorState where
     { translatorCounter = 0
     , translatorRecmap = []
     , translatorSignatureSet = Set.empty
-    , translatorManifoldSet = Set.empty
+    , translatorLocalManifoldSet = Set.empty
+    , translatorRemoteManifoldSet = Set.empty
     , translatorCurrentManifold = -1 -- -1 indicates we are not inside a manifold
     }
 
@@ -224,8 +230,8 @@ metaTypedefs tmap i =
 
 makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
 makeTheMaker srcs = do
-  let outfile = pretty $ ML.makeExecutableName CppLang "pool"
-  let src = pretty (ML.makeSourceName CppLang "pool")
+  let outfile = pretty $ ML.makeExecutablePoolName CppLang
+  let src = pretty (ML.makeSourcePoolName CppLang)
 
   -- this function cleans up source names (if needed) and generates compiler flags and paths to search
   (_, flags, includes) <- Mod.handleFlagsAndPaths CppLang srcs
@@ -248,7 +254,7 @@ makeSignature = foldWithSerialManifoldM fm where
     , opFoldWithNativeManifoldM = nativeManifold
     }
 
-  serialManifold (SerialManifold m _ form _) _ = manifoldSignature m serialType form
+  serialManifold (SerialManifold m _ form _ _) _ = manifoldSignature m serialType form
 
   nativeManifold e@(NativeManifold m _ form _) _ = do
     typestr <- cppTypeOf e
@@ -261,7 +267,8 @@ makeSignature = foldWithSerialManifoldM fm where
       then return []
       else do
         let formArgs = typeMofForm form
-        args <- mapM (cppArgOf Reference) formArgs
+
+        args <- mapM (\r@(Arg _ t) -> cppArgOf (chooseCallSemantics t) r) formArgs
         CMS.put (s {translatorSignatureSet = Set.insert i (translatorSignatureSet s)})
         return [typestr <+> manNamer i <> tupled args <> ";"]
 
@@ -417,9 +424,6 @@ deserialize varname0 typestr0 s0
 
     construct _ _ = undefined -- TODO add support for deserialization of remaining types (e.g. other records)
 
-makeSocketPath :: MDoc -> MDoc
-makeSocketPath socketFileBasename = [idoc|g_tmpdir + "/" + #{dquotes socketFileBasename}|]
-
 translateSegment :: SerialManifold -> CppTranslator MDoc
 translateSegment m0 = do
   resetCounter
@@ -441,10 +445,10 @@ translateSegment m0 = do
                                         (\i -> CMS.modify (\s -> s { translatorCurrentManifold = i}))
 
   makeSerialManifold :: SerialManifold -> SerialManifold_ PoolDocs -> CppTranslator PoolDocs
-  makeSerialManifold sm (SerialManifold_ i _ form e) = makeManifold i form (typeMof sm) e
+  makeSerialManifold sm (SerialManifold_ i _ form headForm e) = makeManifold i form (Just headForm) (typeMof sm) e
 
   makeNativeManifold :: NativeManifold -> NativeManifold_ PoolDocs -> CppTranslator PoolDocs
-  makeNativeManifold nm (NativeManifold_ i _ form e) = makeManifold i form (typeMof nm) e
+  makeNativeManifold nm (NativeManifold_ i _ form e) = makeManifold i form Nothing (typeMof nm) e
 
   makeSerialArg :: SerialArg -> SerialArg_ PoolDocs PoolDocs -> CppTranslator (TypeS, PoolDocs)
   makeSerialArg sr (SerialArgManifold_ x) = return (typeSof sr, x)
@@ -456,24 +460,45 @@ translateSegment m0 = do
 
   makeSerialExpr :: SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> CppTranslator PoolDocs
   makeSerialExpr _ (ManS_ e) = return e
-  makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) args) _) = do
-    let bufDef = "std::ostringstream s;"
-        argList = encloseSep "{" "}" ", " (map argNamer args)
-        argsDef = [idoc|std::vector<Message> args = #{argList};|]
-        call = [idoc|foreign_call(#{makeSocketPath socketFile}, #{pretty mid}, args)|]
-    return $ PoolDocs
-      { poolCompleteManifolds = []
-      , poolExpr = call
-      , poolPriorLines = [bufDef, argsDef]
-      , poolPriorExprs = []
-      }
+  makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) ForeignCall args) _) = do
+    -- arguments sent to foreign_call:
+    --  * basename of socket, e.g., "pipe-python3"
+    --  * manifold id
+    --  * list of voidstar packets
+    --  * NULL sentinel
+    let argList = [ dquotes socketFile, pretty mid ] <> map argNamer args <> ["NULL"]
+        call = [idoc|foreign_call#{tupled argList}|]
+    return $ defaultValue { poolExpr = call }
+  makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) (RemoteCall res) args) _) = do
+    let resMem = pretty $ remoteResourcesMemory res
+        resTime = pretty $ remoteResourcesTime res
+        resCPU = pretty $ remoteResourcesThreads res
+        resGPU = pretty $ remoteResourcesGpus res
+        cacheDir = ".morloc-cache"
+        argList = encloseSep "{" "}" "," (map argNamer args)
+        setup = [idoc|resources_t resources = {#{resMem}, #{resTime}, #{resCPU}, #{resGPU}};
+const uint8_t* args[] = #{argList};
+char* errmsg = NULL;|]
+        call = [idoc|remote_call(
+    #{pretty mid},
+    #{dquotes socketFile},
+    #{dquotes cacheDir},
+    &resources,
+    args,
+    #{pretty (length args)},
+    &errmsg
+);
+PROPAGATE_ERROR(errmsg)|]
+
+    return $ defaultValue { poolExpr = call, poolPriorLines = [setup] }
+
   makeSerialExpr _ (ReturnS_ e) = return $ e {poolExpr = "return(" <> poolExpr e <> ");"}
   makeSerialExpr _ (SerialLetS_ letIndex sa sb) = return $ makeLet svarNamer letIndex serialType sa sb
   makeSerialExpr (NativeLetS _ (typeFof -> t) _) (NativeLetS_ letIndex na sb) = do
     typestr <- cppTypeOf t
     return $ makeLet nvarNamer letIndex typestr na sb
-  makeSerialExpr _ (LetVarS_ _ i) = return $ PoolDocs [] (svarNamer i) [] []
-  makeSerialExpr _ (BndVarS_ _ i) = return $ PoolDocs [] (svarNamer i) [] []
+  makeSerialExpr _ (LetVarS_ _ i) = return $ defaultValue { poolExpr = svarNamer i }
+  makeSerialExpr _ (BndVarS_ _ i) = return $ defaultValue { poolExpr = svarNamer i }
   makeSerialExpr _ (SerializeS_ s e) = do
     se <- serialize (poolExpr e) s
     return $ mergePoolDocs (\_ -> poolExpr se) [e, se]
@@ -488,8 +513,8 @@ translateSegment m0 = do
     return $ e {poolExpr = "return" <> parens (poolExpr e) <> ";"}
   makeNativeExpr _ (SerialLetN_ i sa nb) = return $ makeLet svarNamer i serialType sa nb
   makeNativeExpr (NativeLetN _ (typeFof -> t1) _) (NativeLetN_ i na nb) = makeLet nvarNamer i <$> cppTypeOf t1 <*> pure na <*> pure nb
-  makeNativeExpr _ (LetVarN_ _ i) = return $ PoolDocs [] (nvarNamer i) [] []
-  makeNativeExpr _ (BndVarN_ _ i) = return $ PoolDocs [] (nvarNamer i) [] []
+  makeNativeExpr _ (LetVarN_ _ i) = return $ defaultValue { poolExpr = nvarNamer i }
+  makeNativeExpr _ (BndVarN_ _ i) = return $ defaultValue { poolExpr = nvarNamer i }
   makeNativeExpr _ (DeserializeN_ t s e) = do
     typestr <- cppTypeOf t
     (deserialized, assignments) <- deserialize (poolExpr e) typestr s
@@ -517,11 +542,11 @@ translateSegment m0 = do
     let p = mergePoolDocs (const v') (map snd rs)
     return (p {poolPriorLines = poolPriorLines p <> [decl]})
 
-  makeNativeExpr _ (LogN_         _ x) = return (PoolDocs [] (if x then "true" else "false") [] [])
-  makeNativeExpr _ (RealN_        _ x) = return (PoolDocs [] (viaShow x) [] [])
-  makeNativeExpr _ (IntN_         _ x) = return (PoolDocs [] (viaShow x) [] [])
-  makeNativeExpr _ (StrN_         _ x) = return (PoolDocs [] [idoc|std::string("#{pretty x}")|] [] [])
-  makeNativeExpr _ (NullN_        _  ) = return (PoolDocs [] "null" [] [])
+  makeNativeExpr _ (LogN_         _ x) = return $ defaultValue { poolExpr = if x then "true" else "false" }
+  makeNativeExpr _ (RealN_        _ x) = return $ defaultValue { poolExpr = viaShow x }
+  makeNativeExpr _ (IntN_         _ x) = return $ defaultValue { poolExpr = viaShow x }
+  makeNativeExpr _ (StrN_         _ x) = return $ defaultValue { poolExpr = [idoc|std::string("#{pretty x}")|] }
+  makeNativeExpr _ (NullN_        _  ) = return $ defaultValue { poolExpr = "null" }
   makeNativeExpr _ _ = error "Unreachable"
 
   templateArguments :: [(MT.Text, TypeF)] -> CppTranslator MDoc
@@ -546,11 +571,16 @@ makeManifold
   :: (HasTypeM t)
   => Int -- ^ The index of the manifold that is being created
   -> ManifoldForm (Or TypeS TypeF) t
+  -> Maybe HeadManifoldForm
   -> TypeM -- ^ The type of the manifold (usually a function, serialized terms are of general type "Str" and C++ type "std::string"
   -> PoolDocs -- ^ Generated content for the manifold body
   -> CppTranslator PoolDocs
-makeManifold callIndex form manifoldType e = do
-  completeManifold <- makeManifoldBody (poolExpr e)
+makeManifold callIndex form headForm manifoldType e = do
+  state <- CMS.get
+  let alreadyDone = manifoldHasBeenGenerated headForm state
+  completeManifold <- case alreadyDone of
+    True -> return $ Nothing
+    False -> Just <$> makeManifoldBody (poolExpr e)
   call <- makeManifoldCall form
   return $ e { poolExpr = call
              , poolCompleteManifolds = poolCompleteManifolds e <> maybeToList completeManifold
@@ -558,7 +588,22 @@ makeManifold callIndex form manifoldType e = do
              }
   where
 
-  mname = manNamer callIndex
+  manifoldHasBeenGenerated :: Maybe HeadManifoldForm -> CppTranslatorState -> Bool
+  manifoldHasBeenGenerated (Just HeadManifoldFormRemoteWorker) state = Set.member callIndex (translatorRemoteManifoldSet state)
+  manifoldHasBeenGenerated _ state = Set.member callIndex (translatorLocalManifoldSet state)
+
+  updateCounts :: Maybe HeadManifoldForm -> CppTranslator ()
+  updateCounts (Just HeadManifoldFormRemoteWorker) = do
+    state <- CMS.get
+    CMS.put $ state {translatorRemoteManifoldSet = Set.insert callIndex (translatorRemoteManifoldSet state)}
+  updateCounts _ = do
+    state <- CMS.get
+    CMS.put $ state {translatorLocalManifoldSet = Set.insert callIndex (translatorLocalManifoldSet state)}
+
+  mnameExt (Just HeadManifoldFormRemoteWorker) = "_remote"
+  mnameExt _ = ""
+
+  mname = manNamer callIndex <> mnameExt headForm
 
   makeManifoldCall :: ManifoldForm (Or TypeS TypeF) t -> CppTranslator MDoc
   makeManifoldCall (ManifoldFull rs) = do
@@ -573,31 +618,25 @@ makeManifold callIndex form manifoldType e = do
         bindStr = stdBind $ mname : (rs' ++ vs')
     return bindStr
 
-  makeManifoldBody :: MDoc -> CppTranslator (Maybe MDoc)
+  makeManifoldBody :: MDoc -> CppTranslator MDoc
   makeManifoldBody body = do
-    state <- CMS.get
-    let manifoldHasBeenGenerated = Set.member callIndex (translatorManifoldSet state)
-    if manifoldHasBeenGenerated
-      then return Nothing
-      else do
-        CMS.put $ state {translatorManifoldSet = Set.insert callIndex (translatorManifoldSet state)}
-        returnTypeStr <- returnType manifoldType
-        let argList = typeMofForm form
-        args <- mapM (cppArgOf Reference) argList
-        let decl = returnTypeStr <+> mname <> tupled args
-        let tryBody = block 4 "try" body
-            throwStatement = vsep
-              [ [idoc|std::string error_message = "Error raised in C++ pool by m#{pretty callIndex}: " + std::string(e.what());|]
-              , [idoc|log_message(error_message);|]
-              , [idoc|throw std::runtime_error(error_message);|]
-              ]
-            catchBody = block 4 "catch (const std::exception& e)" throwStatement
-            tryCatchBody = tryBody <+> catchBody
-        return . Just . block 4 decl . vsep $
-          [ {- can add diagnostic statements here -}
-            [idoc|log_message("Entering #{pretty callIndex}");|]
-          , tryCatchBody
+    updateCounts headForm
+    returnTypeStr <- returnType manifoldType
+    let argList = typeMofForm form
+    args <- mapM (\r@(Arg _ t) -> cppArgOf (chooseCallSemantics t) r) argList
+    let decl = returnTypeStr <+> mname <> tupled args
+    let tryBody = block 4 "try" body
+        throwStatement = vsep
+          [ [idoc|std::string error_message = "Error raised in C++ pool by m#{pretty callIndex}:\n" + std::string(e.what());|]
+          , [idoc|throw std::runtime_error(error_message);|]
           ]
+        catchBody = block 4 "catch (const std::exception& e)" throwStatement
+        tryCatchBody = tryBody <+> catchBody
+    return . block 4 decl . vsep $
+      [ {- can add diagnostic statements here -}
+        tryCatchBody
+      ]
+
   returnType :: TypeM -> CppTranslator MDoc
   returnType (Function _ t) = cppTypeOf t
   returnType t = cppTypeOf t
@@ -607,25 +646,57 @@ stdBind xs = [idoc|std::bind(#{args})|] where
   args = cat (punctuate "," xs)
 
 makeDispatch :: [SerialManifold] -> MDoc
-makeDispatch ms = block 4 "switch(mid)" (vsep (map makeCase ms))
-  where
-    makeCase :: SerialManifold -> MDoc
-    makeCase (SerialManifold i _ form _) =
-      -- this made more sense when I was using ArgTypes
-      -- it may make sense yet again when I switch to Or
-      let size = sum $ abilist (\_ _ -> 1) (\_ _ -> 1) form
-          args' = take size $ map (\j -> "args[" <> viaShow j <> "]") ([0..] :: [Int])
-      in
-        (nest 4 . vsep)
-          [ "case" <+> viaShow i <> ":"
-          , "return" <+> manNamer i <> tupled args' <> ";"
-          ]
+makeDispatch ms = [idoc|uint8_t* local_dispatch(uint32_t mid, const uint8_t** args){
+    switch(mid){
+        #{align (vsep localCases)}
+        default:
+            std::ostringstream oss;
+            oss << "Invalid local manifold id: " << mid;
+            throw std::runtime_error(oss.str());
+    }
+}
+
+uint8_t* remote_dispatch(uint32_t mid, const uint8_t** args){
+    switch(mid){
+        #{align (vsep remoteCases)}
+        default:
+            std::ostringstream oss;
+            oss << "Invalid remote manifold id: " << mid;
+            throw std::runtime_error(oss.str());
+    }
+}|]
+    where
+    localCases = catMaybes $ map localCase ms
+
+    localCase :: SerialManifold -> Maybe MDoc
+    localCase (SerialManifold _ _ _ HeadManifoldFormRemoteWorker _) = Nothing
+    localCase (SerialManifold i _ form _ _) = Just $ makeCase "" (i, getSize form)
+
+
+    getSize :: ManifoldForm (Or TypeS TypeF) TypeS -> Int
+    getSize = sum . abilist (\_ _ -> 1) (\_ _ -> 1)
+
+    remoteCases :: [MDoc]
+    remoteCases = map (makeCase  "_remote") . unique . concat $ map getRemotes ms
+
+    makeCase :: MDoc -> (Int, Int) -> MDoc
+    makeCase suffix (i, n) =
+        "case" <+> pretty i <> ":" <+>
+        "return" <+> manNamer i <> suffix <> tupled ["args[" <> pretty j <> "]" | j <- take n ([0..]::[Int])] <> ";"
+
+    getRemotes :: SerialManifold -> [(Int, Int)]
+    getRemotes = MM.runIdentity . foldSerialManifoldM (defaultValue {opSerialExprM = getRemoteSE})
+
+    getRemoteSE :: SerialExpr_ [(Int, Int)] [(Int, Int)] [(Int, Int)] [(Int, Int)] [(Int, Int)] -> MM.Identity [(Int, Int)]
+    getRemoteSE (AppPoolS_ _ (PoolCall i _ (RemoteCall _) _) xss) = return $ (i, length xss) : concat xss
+    getRemoteSE x = return $ foldlSE mappend mempty x
+
 
 typeParams :: [(Maybe TypeF, TypeF)] -> CppTranslator MDoc
 typeParams ts = recordTemplate <$> mapM cppTypeOf [t | (Nothing, t) <- ts]
 
 collectRecords :: SerialManifold -> [(FVar, Int, [(Key, TypeF)])]
-collectRecords e0@(SerialManifold i0 _ _ _)
+collectRecords e0@(SerialManifold i0 _ _ _ _)
   = unique $ CMS.evalState (surroundFoldSerialManifoldM manifoldIndexer fm e0) i0
   where
     fm = defaultValue { opFoldWithNativeExprM = nativeExpr, opFoldWithSerialExprM = serialExpr }
@@ -739,7 +810,7 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
   where
 
     fm = defaultValue
-      { opSerialManifoldM = \(SerialManifold_ i _ _ e) -> return $ Map.unionWith (<>) (metaTypedefs scopeMap i) e
+      { opSerialManifoldM = \(SerialManifold_ i _ _ _ e) -> return $ Map.unionWith (<>) (metaTypedefs scopeMap i) e
       , opNativeManifoldM = \(NativeManifold_ i _ _ e) -> return $ Map.unionWith (<>) (metaTypedefs scopeMap i) e
       }
 
@@ -848,7 +919,7 @@ deserializerTemplate isObj params rtype fields
   assignFields idx (keyName, keyType) = vsep
     [ [idoc|#{keyType}* elemental_dumby_#{keyName} = nullptr;|]
     , [idoc|obj.#{keyName} = fromAnything(schema->parameters[#{pretty idx}], (char*)anything + schema->offsets[#{pretty idx}], elemental_dumby_#{keyName});|]
-    
+
     ]
 
   headerGetSize = [idoc|size_t get_shm_size(const Schema* schema, const #{rtype}& data)|]
@@ -865,9 +936,10 @@ deserializerTemplate isObj params rtype fields
 
 makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
 makeMain includes signatures serialization manifolds dispatch
-  = format (DF.poolTemplate CppLang) "// <<<BREAK>>>"
+  = format (DF.embededFileText (DF.poolTemplate CppLang)) "// <<<BREAK>>>"
   [ vsep includes
   , vsep serialization
   , vsep signatures
   , vsep manifolds
-  , dispatch]
+  , dispatch
+  ]

@@ -168,7 +168,7 @@ linkVariablesToTermTypes mv m0 = mapM_ (link m0) where
   -- 1. exported terms (but not exported types)
   link m (ExprI i (ExpE (TermSymbol v))) = setMonomorphicType m i v
   -- 2. variables
-  link m (ExprI i (VarE v)) = setMonomorphicType m i v
+  link m (ExprI i (VarE _ v)) = setMonomorphicType m i v
   -- 3. assignments
   link m (ExprI i (AssE v (ExprI _ (LamE ks e)) es)) = do
     setMonomorphicType m i v
@@ -276,7 +276,7 @@ collect gi v = do
   MM.sayVVV $ "collect"
             <> "\n  gi:" <+> pretty gi
             <> "\n  v:" <+> pretty v
-  AnnoS gi gi <$> collectExprS (ExprI gi (VarE v))
+  AnnoS gi gi <$> collectExprS (ExprI gi (VarE defaultValue v))
 
 
 collectAnnoS :: ExprI -> MorlocMonad (AnnoS Int ManyPoly Int)
@@ -286,7 +286,7 @@ collectAnnoS e@(ExprI gi _) = AnnoS gi gi <$> collectExprS e
 -- | Translate ExprI to ExprS tree
 collectExprS :: ExprI -> MorlocMonad (ExprS Int ManyPoly Int)
 collectExprS (ExprI gi e0) = f e0 where
-  f (VarE v) = do
+  f (VarE _ v) = do
     MM.sayVVV $ "collectExprS VarE"
               <> "\n  gi:" <+> pretty gi
               <> "\n  v:" <+> pretty v
@@ -366,4 +366,5 @@ newIndex :: Int -> MorlocMonad Int
 newIndex i = do
   i' <- MM.getCounter
   copyState i i'
+  MM.sayVVV $ "Set indices " <> pretty i <> " = " <> pretty i'
   return i'

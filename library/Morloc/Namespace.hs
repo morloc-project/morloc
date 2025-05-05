@@ -1,4 +1,4 @@
-{-# LANGUAGE ViewPatterns, OverloadedStrings, TypeFamilies #-}
+{-# LANGUAGE ViewPatterns, OverloadedStrings, TypeFamilies, DeriveGeneric #-}
 
 {-|
 Module      : Morloc.Namespace
@@ -40,6 +40,7 @@ module Morloc.Namespace
   , SrcName(..)
   , Path
   , Code(..)
+  , TimeInSeconds(..)   
   , DirTree(..)
   , AnchoredDirTree(..)
   -- ** Language
@@ -57,6 +58,10 @@ module Morloc.Namespace
   , Config(..)
   -- ** Morloc monad
   , MorlocMonad
+  , RemoteResources(..)
+  , ManifoldConfig(..)
+  , ModuleConfig(..)
+  , BuildConfig(..)
   , MorlocState(..)
   , SignatureSet(..)
   , Instance(..)
@@ -143,7 +148,12 @@ import System.Directory.Tree (DirTree(..), AnchoredDirTree(..))
 import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.PartialOrd as P
 import qualified Data.List as DL
-import Data.Aeson (FromJSON(..), (.!=), (.:?), withObject)
+import qualified Data.Aeson as Aeson
+import Data.Aeson (FromJSON(..), (.!=), (.:?))
+import Data.Aeson.Types (Options(..), defaultOptions)
+import GHC.Generics (Generic)
+
+import Text.Read (readMaybe)
 
 import Morloc.Data.Doc
 import qualified Data.Set as Set
@@ -221,6 +231,33 @@ data Instance = Instance
   }
   deriving(Show, Ord, Eq)
 
+data RemoteResources = RemoteResources
+  { remoteResourcesThreads :: Maybe Int
+  , remoteResourcesMemory :: Maybe Int
+  , remoteResourcesTime :: Maybe TimeInSeconds
+  , remoteResourcesGpus :: Maybe Int
+  }
+  deriving(Show, Ord, Eq, Generic)
+
+data ManifoldConfig = ManifoldConfig
+  { manifoldConfigCache :: Maybe Bool
+  , manifoldConfigBenchmark :: Maybe Bool
+  , manifoldConfigRemote :: Maybe RemoteResources
+  }
+  deriving(Show, Ord, Eq, Generic)
+
+data ModuleConfig = ModuleConfig
+  { moduleConfigDefaultGroup :: Maybe ManifoldConfig
+  , moduleConfigLabeledGroups :: Map.Map Text ManifoldConfig
+  }
+  deriving(Show, Generic)
+
+data BuildConfig = BuildConfig
+  { buildConfigSlurmSupport :: Maybe Bool
+  }
+  deriving(Show, Generic)
+
+
 data MorlocState = MorlocState
   { statePackageMeta :: [PackageMeta]
   -- ^ The parsed contents of a package.yaml file
@@ -253,9 +290,12 @@ data MorlocState = MorlocState
   -- ^ The indices of each exported term
   , stateName :: Map Int EVar
   -- ^ store the names of morloc compositions
+  , stateManifoldConfig :: Map Int ManifoldConfig
+  -- ^ stores manifold settings such as resource usage, caching, and benchmarking
   , stateTypeQualifier :: Map Int [(TVar, TypeU)]
   -- ^ Store the ordered parameters of a type. This is required in C++ for
   -- specifying template parameter types.
+  , stateBuildConfig :: BuildConfig
   }
   deriving(Show)
 
@@ -374,7 +414,8 @@ data Expr
   -- 3. term where statements
   | UniE
   -- ^ (())
-  | VarE EVar
+  | VarE ManifoldConfig -- annotations the tags link to
+         EVar   -- main variable
   -- ^ (x)
   | AccE Key ExprI
   -- ^ person@age - access a field in a record
@@ -505,12 +546,11 @@ data Config =
     , configLibrary :: !Path
     , configPlane :: !Path
     , configTmpDir :: !Path
+    , configBuildConfig :: !Path
     , configLangPython3 :: !Path
     -- ^ path to python interpreter
     , configLangR :: !Path
     -- ^ path to R interpreter
-    , configLangPerl :: !Path
-    -- ^ path to perl interpreter
     }
   deriving (Show, Ord, Eq)
 
@@ -541,6 +581,9 @@ newtype Label = Label { unLabel :: Text } deriving (Show, Eq, Ord)
 newtype SrcName = SrcName {unSrcName :: Text} deriving (Show, Eq, Ord)
 
 newtype Code = Code {unCode :: Text} deriving (Show, Eq, Ord)
+
+newtype TimeInSeconds = TimeInSeconds { unTimeInSeconds :: Int } deriving (Show, Eq, Ord)
+
 
 -- this is a string because the path libraries want strings
 type Path = String
@@ -706,7 +749,6 @@ data TypeError
   | MissingFeature Text
   | InfiniteRecursion
   | FunctionSerialization EVar
-  | CannotEvaluateType
   | TypeEvaluationError Text
 
 data MorlocError
@@ -850,18 +892,18 @@ instance Bifoldable Or where
 
 instance FromJSON Config where
   parseJSON =
-    withObject "object" $ \o ->
+    Aeson.withObject "object" $ \o ->
       Config
         <$> o .:? "home" .!= "~/.morloc"
         <*> o .:? "source" .!= "~/.morloc/src/morloc"
         <*> o .:? "plane" .!= "morloclib"
         <*> o .:? "tmpdir" .!= "~/.morloc/tmp"
+        <*> o .:? "build-config" .!= "~/.morloc/build-config.yaml"
         <*> o .:? "lang_python3" .!= "python3"
         <*> o .:? "lang_R" .!= "Rscript"
-        <*> o .:? "lang_perl" .!= "perl"
 
 instance FromJSON PackageMeta where
-  parseJSON = withObject "object" $ \o ->
+  parseJSON = Aeson.withObject "object" $ \o ->
     PackageMeta <$> o .:? "name"        .!= ""
                 <*> o .:? "version"     .!= ""
                 <*> o .:? "homepage"    .!= ""
@@ -878,6 +920,12 @@ instance FromJSON PackageMeta where
 
 
 
+instance Defaultable ModuleConfig where
+  defaultValue = ModuleConfig
+    { moduleConfigDefaultGroup = Nothing
+    , moduleConfigLabeledGroups = Map.empty
+    }
+
 instance Defaultable PackageMeta where
   defaultValue = PackageMeta
     { packageName = ""
@@ -893,6 +941,26 @@ instance Defaultable PackageMeta where
     , packageBugReports = ""
     , packageCppVersion = 17
     , packageDependencies = []
+    }
+
+instance Defaultable BuildConfig where 
+  defaultValue =  BuildConfig
+    { buildConfigSlurmSupport = Nothing
+    }
+
+instance Defaultable RemoteResources where
+  defaultValue =  RemoteResources
+    { remoteResourcesThreads   = Nothing
+    , remoteResourcesMemory    = Nothing
+    , remoteResourcesTime      = Nothing
+    , remoteResourcesGpus      = Nothing
+    }
+
+instance Defaultable ManifoldConfig where
+  defaultValue = ManifoldConfig
+    { manifoldConfigCache = Just False
+    , manifoldConfigBenchmark = Just False
+    , manifoldConfigRemote = Nothing
     }
 
 instance Defaultable MorlocState where
@@ -912,7 +980,9 @@ instance Defaultable MorlocState where
     , stateOutfile = Nothing
     , stateExports = []
     , stateName = Map.empty
+    , stateManifoldConfig = Map.empty
     , stateTypeQualifier = Map.empty
+    , stateBuildConfig = defaultValue
   }
 
 instance Annotated IndexedGeneral where
@@ -1195,6 +1265,8 @@ instance Pretty EVar where
 instance Pretty MVar where
   pretty = pretty . unMVar
 
+instance Pretty TimeInSeconds where
+  pretty = pretty . unTimeInSeconds
 
 instance Pretty TVar where
   pretty (TV v) = pretty v
@@ -1307,7 +1379,7 @@ instance Pretty Expr where
   pretty (ImpE (Import m Nothing _ _)) = "import" <+> pretty m
   pretty (ImpE (Import m (Just xs) _ _)) = "import" <+> pretty m <+> tupled (map pretty xs)
   pretty (ExpE v) = "export" <+> pretty v
-  pretty (VarE s) = pretty s
+  pretty (VarE _ s) = pretty s
   pretty (AccE k e) = parens (pretty e) <> "@" <> pretty k
   pretty (LamE v e) = "\\" <+> pretty v <+> "->" <+> pretty e
   pretty (AnnE e ts) = parens
@@ -1581,3 +1653,61 @@ newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
     allVars :: TypeU -> Set.Set TypeU
     allVars (ForallU v t) = Set.union (Set.singleton (VarU v)) (allVars t)
     allVars t = free t
+
+
+-- Custom FromJSON instances
+
+-- Convert SLURM time string (e.g., "01-00:00:00") to seconds
+parseSlurmTime :: String -> Maybe Int
+parseSlurmTime str = case splitOn "-" str of
+  [days, hms] -> do
+    d <- readMaybe days :: Maybe Int
+    s <- parseHMS hms
+    return $ d * 86400 + s
+  [hms] -> parseHMS hms -- No days specified
+  _ -> Nothing
+
+-- Helper to parse "HH:MM:SS" into seconds
+parseHMS :: String -> Maybe Int
+parseHMS hms = case splitOn ":" hms of
+  [hours, minutes, seconds] -> do
+    h <- readMaybe hours :: Maybe Int
+    m <- readMaybe minutes :: Maybe Int
+    s <- readMaybe seconds :: Maybe Int
+    return $ h * 3600 + m * 60 + s
+  _ -> Nothing
+
+-- Custom FromJSON instance for TimeInSeconds
+instance FromJSON TimeInSeconds where
+  parseJSON (Aeson.String t) = case parseSlurmTime (DT.unpack t) of
+    Just seconds -> return $ TimeInSeconds seconds
+    Nothing -> fail $ "Invalid SLURM time format: " ++ DT.unpack t
+  parseJSON _ = fail "Expected a string for SLURM time"
+
+
+-- Helper function to strip prefixes and convert to kebab-case
+stripPrefixAndKebabCase :: String -> String -> String
+stripPrefixAndKebabCase prefix str =
+  let stripped = drop (length prefix) str -- Remove prefix
+   in case stripped of
+        [] -> []
+        (x:xs) -> toLower x : convertToKebabCase xs -- Lowercase first letter and process the rest
+
+-- Convert remaining characters to kebab-case
+convertToKebabCase :: String -> String
+convertToKebabCase [] = []
+convertToKebabCase (x:xs)
+  | isUpper x = '-' : toLower x : convertToKebabCase xs -- Add hyphen before uppercase letters and lowercase them
+  | otherwise = x : convertToKebabCase xs -- Keep other characters as-is
+
+instance FromJSON ModuleConfig where
+  parseJSON = Aeson.genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "moduleConfig" }
+
+instance FromJSON ManifoldConfig where
+  parseJSON = Aeson.genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "manifoldConfig" }
+
+instance FromJSON RemoteResources where
+  parseJSON = Aeson.genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "remoteResources" }
+
+instance FromJSON BuildConfig where
+  parseJSON = Aeson.genericParseJSON $ defaultOptions { fieldLabelModifier = stripPrefixAndKebabCase "buildConfig" }

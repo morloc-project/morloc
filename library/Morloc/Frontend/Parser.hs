@@ -182,7 +182,7 @@ pComposition = do
             s <- CMS.get
             let v = EV ("x" <> MT.show' (stateExpIndex s + 1))
 
-            v' <- exprI (VarE v)
+            v' <- exprI (VarE defaultValue v)
 
             inner <- case last fs of
                 (ExprI i (AppE x xs)) -> return $ ExprI i (AppE x (xs <> [v']))
@@ -407,7 +407,7 @@ pSigE = do
 
 pSignature :: Parser Signature
 pSignature = do
-  label' <- tag freename
+  label' <- optional pTag
   v <- freenameL
   vs <- many freenameL |>> map TV
   _ <- op "::"
@@ -480,7 +480,7 @@ pSource = do
 
   pImportSourceTerm :: Parser (SrcName, EVar, Maybe MT.Text)
   pImportSourceTerm = do
-    t <- tag stringLiteral
+    t <- optional pTag
     n <- stringLiteral
     a <- option n (reserved "as" >> freename)
     return (SrcName n, EV a, t)
@@ -582,7 +582,34 @@ pLam = do
   exprI $ LamE vs e
 
 pVar :: Parser ExprI
-pVar = pEVar >>= exprI . VarE
+pVar = do
+  labels <- pTags
+
+  s <- CMS.get
+
+  let baseConfig = maybe defaultValue id (moduleConfigDefaultGroup (stateModuleConfig s))
+      configMap = moduleConfigLabeledGroups (stateModuleConfig s)
+      varConfigs = catMaybes [ Map.lookup x configMap | x <- labels]
+      manifoldConfig = foldl mergeConfigs baseConfig varConfigs
+
+  v <- pEVar
+  exprI $ VarE manifoldConfig v
+  where
+    -- The the rightmost (the newer) value
+    useRight :: Maybe a -> Maybe a -> Maybe a
+    useRight _ (Just x) = Just x
+    useRight x _ = x
+
+    -- Merge manifold configs, replace default values with particular values
+    mergeConfigs :: ManifoldConfig -> ManifoldConfig -> ManifoldConfig
+    mergeConfigs (ManifoldConfig c1 b1 r1) (ManifoldConfig c2 b2 r2) =
+        ManifoldConfig (useRight c1 c2) (useRight b1 b2) (mergeResources r1 r2)
+
+    mergeResources :: Maybe RemoteResources -> Maybe RemoteResources -> Maybe RemoteResources
+    mergeResources Nothing x = x
+    mergeResources x Nothing = x
+    mergeResources (Just (RemoteResources r1 m1 t1 g1)) (Just (RemoteResources r2 m2 t2 g2)) =
+        Just $ RemoteResources (useRight r1 r2) (useRight m1 m2) (useRight t1 t2) (useRight g1 g2)
 
 
 pEVar :: Parser EVar
@@ -616,7 +643,7 @@ pVarUCon = VarU <$> pTermCon
 
 pTermCon :: Parser TVar
 pTermCon = do
-  _ <- tag stringLiteral
+  _ <- optional pTag
   TV <$> stringLiteral
 
 pType :: Parser TypeU
@@ -637,11 +664,13 @@ pUniU = do
   return BT.unitU
 
 parensType :: Parser TypeU
-parensType = tag (symbol "(") >> parens pType
+parensType = do
+    _ <- optional pTag
+    parens pType
 
 pTupleU :: Parser TypeU
 pTupleU = do
-  _ <- tag (symbol "(")
+  _ <- optional pTag
   ts <- parens (sepBy1 pType (symbol ","))
   return $ BT.tupleU ts
 
@@ -676,7 +705,7 @@ pFunU = do
 
 pListU :: Parser TypeU
 pListU = do
-  _ <- tag (symbol "[")
+  _ <- optional pTag
   t <- brackets pType
   return $ BT.listU t
 
@@ -685,7 +714,13 @@ pVarU = VarU <$> pTerm
 
 pTerm :: Parser TVar
 pTerm = do
-  _ <- tag freename
+  _ <- optional pTag
   t <- TV <$> freename
   appendGenerics t  -- add the term to the generic list IF generic
   return t
+
+pTags :: Parser [MT.Text]
+pTags = many (try (freenameL <* op ":"))
+
+pTag :: Parser MT.Text
+pTag = try (freenameL <* op ":")

@@ -178,7 +178,7 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
       link :: Map.Map EVar (Indexed Instance) -> ExprI -> MorlocMonad ()
       -- The following may have terms from typeclasses
       -- 1. variables
-      link m (ExprI i (VarE v)) = setClass m i v
+      link m (ExprI i (VarE _ v)) = setClass m i v
       -- recurse into assignments, allow shadowing of typeclass functions (TODO: warn)
       link m (ExprI _ (AssE _ (ExprI _ (LamE ks e)) es)) = do
         -- shadow all terms bound under the lambda

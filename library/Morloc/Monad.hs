@@ -77,9 +77,11 @@ import qualified Morloc.System as MS
 import qualified Data.Map as Map
 
 runMorlocMonad ::
-     Maybe Path -> Int -> Config -> MorlocMonad a -> IO (MorlocReturn a)
-runMorlocMonad outfile v config ev =
-  runStateT (runWriterT (runExceptT (runReaderT ev config))) (emptyState outfile v)
+     Maybe Path -> Int -> Config -> BuildConfig -> MorlocMonad a -> IO (MorlocReturn a)
+runMorlocMonad outfile v config buildConfig ev = do
+  let state0 = emptyState outfile v
+      state1 = state0 { stateBuildConfig = buildConfig }
+  runStateT (runWriterT (runExceptT (runReaderT ev config))) (state1)
 
 emptyState :: Maybe Path -> Int -> MorlocState
 emptyState path v = defaultValue
@@ -135,12 +137,13 @@ setDepth i = do
   put $ s {stateDepth = i}
   return ()
 
-writeMorlocReturn :: MorlocReturn a -> IO ()
-writeMorlocReturn ((Left err', msgs), _)
-  =  MT.hPutStrLn stderr (MT.unlines msgs) -- write messages
-  >> MT.hPutStrLn stderr (MT.show' err') -- write terminal failing message
-writeMorlocReturn ((Right _, _), s) = do
-    print $ stateExports s
+writeMorlocReturn :: MorlocReturn a -> IO Bool
+writeMorlocReturn ((Left err', msgs), _) = do
+  MT.hPutStrLn stderr (MT.unlines msgs) -- write messages
+  MT.hPutStrLn stderr (MT.show' err') -- write terminal failing message
+  return False
+writeMorlocReturn ((Right _, _), _) = return True
+
 
 -- | Execute a system call
 runCommand ::

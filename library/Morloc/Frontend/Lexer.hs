@@ -38,7 +38,6 @@ module Morloc.Frontend.Lexer
   , surround
   , symbol
   , pLang
-  , tag
   , exprId
   , exprI
   ) where
@@ -61,9 +60,10 @@ data ParserState = ParserState {
   , stateVarIndex :: Int
   , stateExpIndex :: Int
   , stateGenerics :: [TVar] -- store the observed generic variables in the current type
-                               -- you should reset the field before parsing a new type
+                            -- you should reset the field before parsing a new type
   , stateMinPos :: Pos
   , stateAccepting :: Bool
+  , stateModuleConfig :: ModuleConfig
 } deriving(Show)
 
 emptyState :: ParserState
@@ -74,6 +74,7 @@ emptyState = ParserState {
   , stateGenerics = []
   , stateMinPos = mkPos 1
   , stateAccepting = False
+  , stateModuleConfig = defaultValue
 }
 
 exprId :: Parser Int
@@ -296,13 +297,3 @@ pLang = do
     (Just lang) -> return lang
     Nothing -> fancyFailure . Set.singleton . ErrorFail
       $ "Langage '" <> MT.unpack langStr <> "' is not supported"
-
--- | match an optional tag that precedes some construction
-tag :: Parser a -> Parser (Maybe MT.Text)
-tag p = optional (try tag')
-  where
-    tag' = do
-      l <- freenameL
-      _ <- op ":"
-      _ <- lookAhead p
-      return l

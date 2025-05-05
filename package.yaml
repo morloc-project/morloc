@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.52.1
+version:          0.53.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
@@ -7,16 +7,16 @@ category:         Language, Compiler, Code Generation
 license:          GPL-3
 license-file:     LICENSE
 author:           "Zebulun Arendsee" 
-maintainer:       "zbwrbz@gmail.com"
+maintainer:       "zbwrnz@gmail.com"
 github:           "morloc-project/morloc"
 bug-reports:      https://github.com/morloc-project/morloc/issues
-copyright:        "2020 Zebulun Arendsee"
+copyright:        "2025 Zebulun Arendsee"
 
 extra-source-files:
   - README.md
   - ChangeLog.md
   # libraries
-  - data/nexus.py # nexus template
+  - data/nexus.c # nexus template
   - data/pools/pool.R
   - data/pools/pool.cpp
   - data/pools/pool.py

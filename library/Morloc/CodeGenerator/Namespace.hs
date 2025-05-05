@@ -35,11 +35,13 @@ module Morloc.CodeGenerator.Namespace
   , JsonAccessor(..)
   , NexusCommand(..)
   , ManifoldForm(..)
+  , HeadManifoldForm(..)
   , manifoldContext
   , manifoldBound
   , ArgTypes(..)
   , argTypesToTypeM
   -- ** Manifold data types
+  , RemoteForm(..)
   , PolyHead(..)
   , PolyExpr(..)
   , MonoHead(..)
@@ -150,17 +152,20 @@ type JsonPath = [JsonAccessor]
 data JsonAccessor
   = JsonIndex Int
   | JsonKey Key
+  deriving(Show)
 
 data NexusCommand = NexusCommand
   { commandName :: EVar -- ^ user-exposed subcommand name in the nexus
   , commandType :: Type -- ^ the general type of the expression
-  , commandJson :: MDoc -- ^ JSON output with null's where values will be replaced
+  , commandForm :: MDoc -- ^ JSON format string
   , commandArgs :: [EVar] -- ^ list of function arguments
   , commandSubs :: [(JsonPath, Text, JsonPath)]
-  -- ^ list of tuples with values 1) path in JSON to value needs to be replaced
-  -- 2) the function argument from which to pull replacement value and 3) the
-  -- path to the replacement value
+  -- ^ list of tuples with values:
+  --    1) path in JSON to value needs to be replaced
+  --    2) the function argument from which to pull replacement value
+  --    3) the path to the replacement value
   }
+  deriving(Show)
 
 -- | A tree describing how to (de)serialize an object
 data SerialAST
@@ -212,6 +217,7 @@ instance Pretty SerialAST where
   pretty (SerialInt16 v) = parens ("SerialInt16" <+> pretty v)
   pretty (SerialInt32 v) = parens ("SerialInt32" <+> pretty v)
   pretty (SerialInt64 v) = parens ("SerialInt64" <+> pretty v)
+  pretty (SerialUInt v) = parens ("SerialUInt" <+> pretty v)
   pretty (SerialUInt8 v) = parens ("SerialUInt8" <+> pretty v)
   pretty (SerialUInt16 v) = parens ("SerialUInt16" <+> pretty v)
   pretty (SerialUInt32 v) = parens ("SerialUInt32" <+> pretty v)
@@ -367,16 +373,26 @@ abiappend f g = runIdentity . abiappendM (return2 f) (return2 g)
 instance Pretty FVar where
     pretty (FV _ c) = pretty c
 
+data RemoteForm = ForeignCall | RemoteCall RemoteResources
+    deriving(Show, Eq)
+
+data HeadManifoldForm
+    = HeadManifoldFormLocalRoot
+    | HeadManifoldFormRemoteWorker
+    | HeadManifoldFormLocalForeign
+    deriving(Show, Eq)
+
 data PolyHead = PolyHead Lang Int [Arg None] PolyExpr
 
 -- no serialization and no argument types
 data PolyExpr
   -- organizational terms that may have undefined types
   = PolyManifold Lang Int (ManifoldForm None (Maybe Type)) PolyExpr
-  | PolyForeignInterface
+  | PolyRemoteInterface
       Lang           -- foreign language
       (Indexed Type) -- return type in calling language
       [Int]          -- argument ids
+      RemoteForm
       PolyExpr       -- foreign expression
   | PolyLet Int PolyExpr PolyExpr
   | PolyReturn PolyExpr
@@ -403,7 +419,7 @@ data PolyExpr
   | PolyStr    (Indexed TVar) Text
   | PolyNull   (Indexed TVar)
 
-data MonoHead = MonoHead Lang Int [Arg None] MonoExpr
+data MonoHead = MonoHead Lang Int [Arg None] HeadManifoldForm MonoExpr
 
 data MonoExpr
   -- organizational terms that may have undefined types
@@ -412,6 +428,7 @@ data MonoExpr
       (Indexed Type)       -- return type in calling language
       Int        -- foreign manifold id
       Socket     -- shell command components that preceed the passed data
+      RemoteForm
       [Arg None] -- arguments
   | MonoLet Int MonoExpr MonoExpr
   | MonoLetVar (Indexed Type) Int
@@ -433,7 +450,8 @@ data MonoExpr
 
 data PoolCall = PoolCall
   Int -- foreign manifold id
-  Socket 
+  Socket
+  RemoteForm
   [Arg TypeM] -- contextual argument that are passed to the foreign function
               -- (not the main arguments to the foreign function)
   deriving(Show)
@@ -450,7 +468,7 @@ data ArgTypes
 data NativeManifold = NativeManifold Int Lang (ManifoldForm (Or TypeS TypeF) TypeF) NativeExpr
   deriving(Show)
 
-data SerialManifold = SerialManifold Int Lang (ManifoldForm (Or TypeS TypeF) TypeS) SerialExpr
+data SerialManifold = SerialManifold Int Lang (ManifoldForm (Or TypeS TypeF) TypeS) HeadManifoldForm SerialExpr
   deriving(Show)
 
 data SerialArg = SerialArgManifold SerialManifold | SerialArgExpr SerialExpr
@@ -495,7 +513,7 @@ data NativeExpr
   deriving(Show)
 
 foldlSM :: (b -> a -> b) -> b -> SerialManifold_ a -> b
-foldlSM f b (SerialManifold_ _ _ _ se) = f b se
+foldlSM f b (SerialManifold_ _ _ _ _ se) = f b se
 
 foldlNM :: (b -> a -> b) -> b -> NativeManifold_ a -> b
 foldlNM f b (NativeManifold_ _ _ _ ne) = f b ne
@@ -560,8 +578,8 @@ makeMonoidFoldDefault mempty' mappend' =
     }
   where
 
-  monoidSerialManifold' (SerialManifold_ m lang form (req, ne)) = do
-    return (req, SerialManifold m lang form ne)
+  monoidSerialManifold' (SerialManifold_ m lang form headForm (req, ne)) = do
+    return (req, SerialManifold m lang form headForm ne)
 
   monoidNativeManifold' (NativeManifold_ m lang form (req, ne)) = do
     return (req, NativeManifold m lang form ne)
@@ -691,7 +709,7 @@ instance MayHaveTypeF TypeM where
   mayHaveTypeF (Function ts t) = FunF <$> mapM mayHaveTypeF ts <*> mayHaveTypeF t
 
 data NativeManifold_ ne = NativeManifold_ Int Lang (ManifoldForm (Or TypeS TypeF) TypeF) ne
-data SerialManifold_ se = SerialManifold_ Int Lang (ManifoldForm (Or TypeS TypeF) TypeS) se
+data SerialManifold_ se = SerialManifold_ Int Lang (ManifoldForm (Or TypeS TypeF) TypeS) HeadManifoldForm se
 data SerialArg_ sm se = SerialArgManifold_ sm | SerialArgExpr_ se
 data NativeArg_ nm ne = NativeArgManifold_ nm | NativeArgExpr_ ne
 
@@ -783,9 +801,9 @@ foldWithNativeExprM = surroundFoldNativeExprM defaultValue
 surroundFoldSerialManifoldM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldWithManifoldM m sm nm se ne sr nr -> SerialManifold -> m sm
 surroundFoldSerialManifoldM sfm fm = surroundSerialManifoldM sfm f
   where
-  f full@(SerialManifold m lang form e) = do
+  f full@(SerialManifold m lang form headForm e) = do
     e' <- surroundFoldSerialExprM sfm fm e
-    opFoldWithSerialManifoldM fm full $ SerialManifold_ m lang form e'
+    opFoldWithSerialManifoldM fm full $ SerialManifold_ m lang form headForm e'
 
 surroundFoldNativeManifoldM :: Monad m => SurroundManifoldM m sm nm se ne sr nr -> FoldWithManifoldM m sm nm se ne sr nr -> NativeManifold -> m nm
 surroundFoldNativeManifoldM sfm fm = surroundNativeManifoldM sfm f
@@ -968,10 +986,10 @@ instance HasTypeM NativeManifold where
   typeMof (NativeManifold _ _ form e) = typeOfManifold form (typeMof e)
 
 instance HasTypeM SerialManifold where
-  typeMof (SerialManifold _ _ form e) = typeOfManifold form (typeMof e)
+  typeMof (SerialManifold _ _ form _ e) = typeOfManifold form (typeMof e)
 
 instance HasTypeS SerialManifold where
-  typeSof (SerialManifold _ _ form e) =
+  typeSof (SerialManifold _ _ form _ e) =
     let inputTypes = concat $ bilist (bilist typeMof typeMof) (return . typeMof) form
     in case inputTypes of
         [] -> typeSof e
@@ -1056,8 +1074,8 @@ instance MFunctor NativeManifold where
 
 
 instance MFunctor SerialManifold where
-    mgatedMap g f sm@(SerialManifold m l form se)
-      | gateSerialManifold g sm = mapSerialManifold f $ SerialManifold m l form (mgatedMap g f se)
+    mgatedMap g f sm@(SerialManifold m l form headForm se)
+      | gateSerialManifold g sm = mapSerialManifold f $ SerialManifold m l form headForm (mgatedMap g f se)
       | otherwise = mapSerialManifold f sm
 
 
@@ -1143,7 +1161,7 @@ instance Pretty MonoExpr where
       = block 4 ("m" <> pretty i <> tupled (abilist contextArg boundArg form)) (pretty e) where
         contextArg j _ = "c" <> pretty j
         boundArg j _ = "b" <> pretty j
-    pretty (MonoPoolCall t i _ _) =  "PoolCall" <> parens (pretty i) <> parens (pretty t)
+    pretty (MonoPoolCall t i _ _ _) =  "PoolCall" <> parens (pretty i) <> parens (pretty t)
     pretty (MonoLet i e1 e2) = vsep ["let" <+> "x" <> pretty i <+> "=" <+> pretty e1, pretty e2]
     pretty (MonoLetVar t i) = parens $ "x" <> pretty i <> " :: " <> pretty t
     pretty (MonoReturn e) = "return" <> parens (pretty e)
@@ -1164,10 +1182,11 @@ instance Pretty MonoExpr where
     pretty (MonoNull   _) = "NULL"
 
 instance Pretty MonoHead where
-  pretty (MonoHead lang i args e) = block 4 "MonoHead" $ encloseSep "{" "}" ","
+  pretty (MonoHead lang i args headForm e) = block 4 "MonoHead" $ encloseSep "{" "}" ","
     [ "lang:" <+> pretty lang
     , "index:" <+> pretty i
     , "args:" <+> list (map pretty args)
+    , "headForm:" <+> viaShow headForm
     , "expr:" <+> pretty e
     ]
 

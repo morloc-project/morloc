@@ -25,18 +25,23 @@ import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.Map as Map
 import Morloc.CodeGenerator.Generate (generatePools)
+import System.Exit (exitSuccess, exitFailure)
 
 
 runMorloc :: CliCommand -> IO ()
 runMorloc args = do
   config <- getConfig args
+  buildConfig <- Config.loadBuildConfig config
   let verbose = getVerbosity args
-  case args of
-    (CmdMake g) -> cmdMake g verbose config
-    (CmdInstall g) -> cmdInstall g verbose config
-    (CmdTypecheck g) -> cmdTypecheck g verbose config
-    (CmdDump g) -> cmdDump g verbose config
+  runPassed <- case args of
+    (CmdMake g) -> cmdMake g verbose config buildConfig
+    (CmdInstall g) -> cmdInstall g verbose config buildConfig
+    (CmdTypecheck g) -> cmdTypecheck g verbose config buildConfig
+    (CmdDump g) -> cmdDump g verbose config buildConfig
     (CmdInit g) -> cmdInit g config
+  case runPassed of
+    True -> exitSuccess
+    False -> exitFailure
 
 
 -- | read the global morloc config file or return a default one
@@ -67,8 +72,8 @@ readScript _ filename = do
 
 
 -- | Install a module
-cmdInstall :: InstallCommand -> Int -> Config.Config -> IO ()
-cmdInstall args verbosity conf = MM.runMorlocMonad Nothing verbosity conf cmdInstall' >>= MM.writeMorlocReturn
+cmdInstall :: InstallCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
+cmdInstall args verbosity conf buildConfig = MM.runMorlocMonad Nothing verbosity conf buildConfig cmdInstall' >>= MM.writeMorlocReturn
   where
     modName = installModuleName args
     selector = installSelector args
@@ -86,68 +91,76 @@ cmdInstall args verbosity conf = MM.runMorlocMonad Nothing verbosity conf cmdIns
         MM.throwError . ModuleInstallError $ "Error: Expected \"<username>/<repo>\" format for GitHub module name"
 
 -- | build a Morloc program, generating the nexus and pool files
-cmdMake :: MakeCommand -> Int -> Config.Config -> IO ()
-cmdMake args verbosity config = do
+cmdMake :: MakeCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
+cmdMake args verbosity config buildConfig = do
   (path, code) <- readScript (makeExpression args) (makeScript args)
   outfile <- case makeOutfile args of
     "" -> return Nothing
     x -> return . Just $ x
-  MM.runMorlocMonad outfile verbosity config (M.writeProgram path code) >>=
-    MM.writeMorlocReturn
+  MM.runMorlocMonad outfile verbosity config buildConfig (M.writeProgram path code) >>= MM.writeMorlocReturn
 
-cmdTypecheck :: TypecheckCommand -> Int -> Config.Config -> IO ()
-cmdTypecheck args _ config = do
+cmdTypecheck :: TypecheckCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
+cmdTypecheck args _ config buildConfig = do
   (path, code) <- readScript (typecheckExpression args) (typecheckScript args)
   let verbosity = typecheckVerbose args
   if typecheckType args
     then case F.readType (unCode code) of
-      (Left err') -> print (errorBundlePretty err')
-      (Right x) -> print x
+      (Left err') -> do
+        print (errorBundlePretty err')
+        return False
+      (Right x) -> do
+        print x
+        return True
     else if typecheckRealize args
-        then
-            MM.runMorlocMonad
-               Nothing
-               verbosity
-               config
-               (M.typecheck path code >>= (generatePools . snd) )
+        then do
+            (passed, result) <- MM.runMorlocMonad Nothing verbosity config buildConfig (M.typecheck path code
+               >>= (generatePools . snd) )
                |>> writeTypecheckOutput verbosity
-               >>= (\s -> putDoc (s <> "\n"))
-        else
-            MM.runMorlocMonad
+            putDoc (result <> "\n")
+            return passed
+        else do
+            (passed, result) <- MM.runMorlocMonad
                Nothing
                verbosity
                config
-               (M.typecheckFrontend path code) |>> writeFrontendTypecheckOutput verbosity >>= (\s -> putDoc (s <> "\n"))
+               buildConfig
+               (M.typecheckFrontend path code) |>> writeFrontendTypecheckOutput verbosity
+            putDoc (result <> "\n")
+            return passed
 
-writeFrontendTypecheckOutput :: Int -> ((Either MorlocError [AnnoS (Indexed TypeU) Many Int], [MT.Text]), MorlocState) -> MDoc
-writeFrontendTypecheckOutput _ ((Left e, _), _) = pretty e
-writeFrontendTypecheckOutput 0 ((Right xs, _), _) = vsep (map writeFrontendTypes xs)
+writeFrontendTypecheckOutput :: Int -> ((Either MorlocError [AnnoS (Indexed TypeU) Many Int], [MT.Text]), MorlocState) -> (Bool, MDoc)
+writeFrontendTypecheckOutput _ ((Left e, _), _) = (False, pretty e)
+writeFrontendTypecheckOutput 0 ((Right xs, _), _) = (True, vsep (map writeFrontendTypes xs))
 writeFrontendTypecheckOutput 1 x = writeFrontendTypecheckOutput 0 x -- no difference in verbosity
-writeFrontendTypecheckOutput _ _ = "I don't know how to be that verbose"
+writeFrontendTypecheckOutput _ _ = (False, "I don't know how to be that verbose")
 
 writeFrontendTypes :: AnnoS (Indexed TypeU) Many Int -> MDoc
 writeFrontendTypes  (AnnoS (Idx _ t) _ e) = pretty e <+> "::" <+> pretty t 
 
-writeTypecheckOutput :: Int -> ((Either MorlocError [(Lang, [SerialManifold])], [MT.Text]), MorlocState) -> MDoc
-writeTypecheckOutput _ ((Left e, _), _) = pretty e
-writeTypecheckOutput _ ((Right pools, _), _) = vsep $ map (uncurry writePool) pools
+writeTypecheckOutput :: Int -> ((Either MorlocError [(Lang, [SerialManifold])], [MT.Text]), MorlocState) -> (Bool, MDoc)
+writeTypecheckOutput _ ((Left e, _), _) = (False, pretty e)
+writeTypecheckOutput _ ((Right pools, _), _) = (True, vsep $ map (uncurry writePool) pools)
 
 writePool :: Lang -> [SerialManifold] -> MDoc
 writePool lang manifolds = pretty lang <+> "pool:" <> "\n" <> vsep (map pseudocodeSerialManifold manifolds) <> "\n"
 
 
-cmdDump :: DumpCommand -> Int -> Config.Config -> IO ()
-cmdDump args _ config = do
+cmdDump :: DumpCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
+cmdDump args _ config buildConfig = do
   (path, code) <- readScript (dumpExpression args) (dumpScript args)
   let verbosity = dumpVerbose args
-  ((x, _), _) <- MM.runMorlocMonad Nothing verbosity config (F.parse path code)
+  ((x, _), _) <- MM.runMorlocMonad Nothing verbosity config buildConfig (F.parse path code)
   case x of
-    (Left e) -> putDoc $ pretty e
-    (Right e) -> putDoc $ prettyDAG e
+    (Left e) -> do
+        putDoc $ pretty e
+        return False
+    (Right e) -> do
+        putDoc $ prettyDAG e
+        return True
 
 
-cmdInit :: InitCommand -> Config.Config -> IO ()
-cmdInit ic config = MSC.configureAll (not (initQuiet ic)) (initForce ic) config
+cmdInit :: InitCommand -> Config.Config -> IO Bool
+cmdInit ic config = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSlurmSupport ic) config
 
 prettyDAG :: DAG MVar e ExprI -> MDoc
 prettyDAG m0 = vsep (map prettyEntry (Map.toList m0)) where

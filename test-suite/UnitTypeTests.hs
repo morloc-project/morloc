@@ -34,7 +34,7 @@ gtypeof (AnnoS (Idx _ t) _ _) = t
 runFront :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
 runFront code = do
   config <- emptyConfig
-  ((x, _), _) <- MM.runMorlocMonad Nothing 0 config (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
+  ((x, _), _) <- MM.runMorlocMonad Nothing 0 config defaultValue (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
   return x
 
 runMiddle
@@ -46,7 +46,7 @@ runMiddle
         )
 runMiddle code = do
   config <- emptyConfig
-  ((x, _), _) <- MM.runMorlocMonad Nothing 0 config (typecheck Nothing (Code code))
+  ((x, _), _) <- MM.runMorlocMonad Nothing 0 config defaultValue (typecheck Nothing (Code code))
   return x
 
 
@@ -58,9 +58,9 @@ emptyConfig = do
     , configLibrary     = home <> "/.morloc/src/morloc"
     , configPlane       = "morloclib"
     , configTmpDir      = home <> "/.morloc/tmp"
+    , configBuildConfig = home <> "/.morloc/.build-config.yaml"
     , configLangPython3 = "python3"
     , configLangR       = "Rscript"
-    , configLangPerl    = "perl"
     }
 
 

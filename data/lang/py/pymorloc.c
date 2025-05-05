@@ -11,104 +11,83 @@
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
 
+#define NOTHING
+
+#define MAYFAIL \
+    char* child_errmsg_ = NULL; \
+
+const char* get_prior_err(){
+    const char* prior_err = NULL;
+    if (PyErr_Occurred()) {
+        // Fetch existing exception
+        PyObject *type, *value, *traceback;
+        PyErr_Fetch(&type, &value, &traceback);
+
+        // Extract error message
+        PyObject* str = PyObject_Str(value);  // Convert exception to string
+        prior_err = PyUnicode_AsUTF8(str);
+
+        // Cleanup
+        Py_XDECREF(str);
+        Py_XDECREF(type);
+        Py_XDECREF(value);
+        Py_XDECREF(traceback);
+    }
+    return prior_err;
+}
+
+
+#define PyTRY(fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    if(child_errmsg_ != NULL){ \
+        const char* prior_err = get_prior_err(); \
+        if(prior_err == NULL){ \
+            PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
+        } else { \
+            PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_); \
+        } \
+        goto error; \
+    }
+
+#define PyRAISE(msg, ...) \
+    const char* prior_err = get_prior_err(); \
+    if(prior_err == NULL){ \
+        PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n" msg "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    } else { \
+        PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n" msg "\n", prior_err, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    } \
+    goto error;
+
+#define PyTRACE(cond) \
+    if(cond){ \
+        const char* prior_err = get_prior_err(); \
+        if(prior_err != NULL){ \
+            PyErr_Format(PyExc_TypeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, prior_err); \
+            goto error; \
+        } \
+    }
 
 PyObject* numpy_module = NULL;
 
 
 // This function will be called to import numpy if, and only if, a numpy feature
-// is used. This avoids the agonizingly long numpy import time (and fuck you
-// very much if you think 100ms is agonizingly long).
+// is used. This avoids the agonizingly long numpy import time.
 void* import_numpy() {
     numpy_module = PyImport_ImportModule("numpy");
-    if (numpy_module == NULL) {
-        PyErr_SetString(PyExc_ImportError, "NumPy is not available");
-        return NULL;
+    if(numpy_module == NULL){
+        PyRAISE("NumPy is not available");
     }
 
     import_array();
+
+error:
+    return NULL;
 }
 
 
 
-// Exported prototypes
-static PyObject* to_mesgpack(PyObject* self, PyObject* args);
-static PyObject* from_mesgpack(PyObject* self, PyObject* args);
-static PyObject* to_voidstar(PyObject* self, PyObject* args);
-static PyObject* from_voidstar(PyObject* self, PyObject* args);
-static PyObject* py_to_mesgpack(PyObject* self, PyObject* args);
-static PyObject* mesgpack_to_py(PyObject* self, PyObject* args);
+PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
 
-
-// convert voidstar to MessagePack
-static PyObject* to_mesgpack(PyObject* self, PyObject* args) {
-    PyObject* voidstar_capsule;
-    char* schema;
-    char* msgpck_data = NULL;
-    size_t msgpck_data_len = 0;
-
-    if (!PyArg_ParseTuple(args, "Os", &voidstar_capsule, &schema)) {
-        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
-        return NULL;
-    }
-
-    void* voidstar = PyCapsule_GetPointer(voidstar_capsule, "absptr_t");
-
-    if (voidstar == NULL) {
-        PyErr_SetString(PyExc_TypeError, "Invalid voidstar capsule");
-        return NULL;
-    }
-
-    int exitcode = pack(voidstar, schema, &msgpck_data, &msgpck_data_len);
-
-    if (exitcode != 0 || !msgpck_data) {
-        PyErr_SetString(PyExc_RuntimeError, "Packing failed");
-        return NULL;
-    }
-
-    // TODO: avoid memory copying here
-    PyObject* mesgpack_bytes = PyBytes_FromStringAndSize(msgpck_data, msgpck_data_len);
-    free(msgpck_data);
-
-    return mesgpack_bytes;
-}
-
-
-// destroy the voidstar
-static void voidstar_destructor(PyObject *capsule) {
-    void *voidstar = PyCapsule_GetPointer(capsule, "absptr_t");
-    if (voidstar) {
-        shfree(voidstar);
-    }
-}
-
-// convert MessagePack to voidstar
-static PyObject* from_mesgpack(PyObject* self, PyObject* args) {
-    const char* msgpck_data;
-    Py_ssize_t msgpck_data_len;
-    const char* schema;
-    void* voidstar = NULL;
-
-    if (!PyArg_ParseTuple(args, "y#s", &msgpck_data, &msgpck_data_len, &schema)) {
-        return NULL;
-    }
-
-    int exitcode = unpack(msgpck_data, msgpck_data_len, schema, &voidstar);
-    if (exitcode != 0) {
-        PyErr_Format(PyExc_RuntimeError, "Unpacking failed with exit code %d", exitcode);
-        return NULL;
-    }
-
-    PyObject* voidstar_capsule = PyCapsule_New(voidstar, "absptr_t", voidstar_destructor);
-    if (!voidstar_capsule) {
-        shfree(voidstar);  // Or use appropriate deallocation function
-        return NULL;
-    }
-
-    return voidstar_capsule;
-}
-
-
-PyObject* fromAnything(const Schema* schema, const void* data){
     PyObject* obj = NULL;
     switch (schema->type) {
         case MORLOC_NIL:
@@ -148,29 +127,24 @@ PyObject* fromAnything(const Schema* schema, const void* data){
             break;
         case MORLOC_STRING: {
             Array* str_array = (Array*)data;
+            absptr_t tmp_ptr = PyTRY(rel2abs, str_array->data);
             if (schema->hint != NULL && strcmp(schema->hint, "bytes") == 0) {
                 // load binary data as a python bytes object
-                obj = PyBytes_FromStringAndSize(rel2abs(str_array->data), str_array->size);
+                obj = PyBytes_FromStringAndSize(tmp_ptr, str_array->size);
                 if (!obj) {
-                    fprintf(stderr, "Failed to create bytes object from voidstar\n");
-                    PyErr_SetString(PyExc_TypeError, "Failed to parse data as bytes");
-                    goto error;
+                    PyRAISE("Failed to parse data as bytes");
                 }
             } else if(schema->hint != NULL && strcmp(schema->hint, "bytearray") == 0){ 
                 // load binary data as a python bytearray object
-                obj = PyByteArray_FromStringAndSize(rel2abs(str_array->data), str_array->size);
+                obj = PyByteArray_FromStringAndSize(tmp_ptr, str_array->size);
                 if (!obj) {
-                    fprintf(stderr, "Failed to create bytearray object from voidstar\n");
-                    PyErr_SetString(PyExc_TypeError, "Failed to parse data as bytearray");
-                    goto error;
+                    PyRAISE("Failed to parse data as bytearray");
                 }
             } else {
                 // otherwise, load this as a str type
-                obj = PyUnicode_FromStringAndSize(rel2abs(str_array->data), str_array->size);
+                obj = PyUnicode_FromStringAndSize(tmp_ptr, str_array->size);
                 if (!obj) {
-                    fprintf(stderr, "Failed to extract string from voidstar\n");
-                    PyErr_SetString(PyExc_TypeError, "Failed to parse data as string");
-                    goto error;
+                    PyRAISE("Failed to parse data as string");
                 }
             }
             break;
@@ -181,6 +155,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){
                 import_numpy();
                 Schema* element_schema = schema->parameters[0];
                 npy_intp dims[] = {array->size};
+                void* absptr = NULL;
                 int nd = 1; // number of dimensions
                 int type_num;
                 // Determine the NumPy type number based on the element schema
@@ -197,18 +172,16 @@ PyObject* fromAnything(const Schema* schema, const void* data){
                     case MORLOC_FLOAT32: type_num = NPY_FLOAT32; break;
                     case MORLOC_FLOAT64: type_num = NPY_FLOAT64; break;
                     default:
-                        PyErr_SetString(PyExc_TypeError, "Unsupported element type for NumPy array");
-                        goto error;
+                        PyRAISE("Unsupported element type for NumPy array");
                 }
 
-                void* absptr = rel2abs(array->data);
+                absptr = PyTRY(rel2abs, array->data);
 
                 // Create the NumPy array
                 obj = PyArray_SimpleNewFromData(nd, dims, type_num, absptr);
 
-                if (!obj) {
-                    PyErr_SetString(PyExc_TypeError, "Failed to parse data");
-                    goto error;
+                if(obj == NULL) {
+                    PyRAISE("Failed to parse data");
                 }
 
                 // Note that we do not want to give ownership to Python
@@ -217,7 +190,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){
 
             } else if (schema->hint != NULL && strcmp(schema->hint, "bytearray") == 0) {
                 // Create a Python bytearray object
-                void* absptr = rel2abs(array->data);
+                absptr_t absptr = PyTRY(rel2abs, array->data);
                 obj = PyByteArray_FromStringAndSize((const char*)absptr, array->size);
                 if (!obj) {
                     PyErr_SetString(PyExc_TypeError, "Failed to create bytearray");
@@ -227,57 +200,53 @@ PyObject* fromAnything(const Schema* schema, const void* data){
                 // The bytearray is created from a copy of the data, so no additional handling is needed.
             } else if (schema->parameters[0]->type == MORLOC_UINT8) {
                 // Create a Python bytes object for UINT8 arrays
-                obj = PyBytes_FromStringAndSize((const char*)rel2abs(array->data), array->size);
-                if (!obj) {
-                    PyErr_SetString(PyExc_TypeError, "Failed to one bytes");
-                    goto error;
+                absptr_t tmp_ptr = PyTRY(rel2abs, array->data);
+                obj = PyBytes_FromStringAndSize((const char*)tmp_ptr, array->size);
+                if (obj == NULL) {
+                    PyRAISE("Failed to one bytes")
                 }
-            } else if (schema->hint != NULL && strcmp(schema->hint, "list") == 0) {
+            } else if (schema->hint == NULL || (schema->hint != NULL && strcmp(schema->hint, "list") == 0)) {
                 // For other types, create a standard list
                 obj = PyList_New(array->size);
-                if (!obj) {
-                    PyErr_SetString(PyExc_TypeError, "Failed to one string");
-                    goto error;
+                if(obj == NULL){
+                    PyRAISE("Failed to one string");
                 }
-                char* start = (char*)rel2abs(array->data);
-                size_t width = schema->parameters[0]->width;
-                Schema* element_schema = schema->parameters[0];
-                for (size_t i = 0; i < array->size; i++) {
-                    PyObject* item = fromAnything(element_schema, start + width * i);
-                    if (!item || PyList_SetItem(obj, i, item) < 0) {
-                        Py_XDECREF(item);
-                        PyErr_SetString(PyExc_TypeError, "Failed to access element in list");
-                        goto error;
+                if(array->size > 0){
+                    char* start = (char*) PyTRY(rel2abs, array->data);
+                    size_t width = schema->parameters[0]->width;
+                    Schema* element_schema = schema->parameters[0];
+                    for (size_t i = 0; i < array->size; i++) {
+                        PyObject* item = fromAnything(element_schema, start + width * i);
+                        if (!item || PyList_SetItem(obj, i, item) < 0) {
+                            Py_XDECREF(item);
+                            PyRAISE("Failed to access element in list")
+                        }
                     }
                 }
             } else {
-                PyErr_SetString(PyExc_TypeError, "Unexpected array hint");
-                goto error;
+                PyRAISE("Unexpected array hint");
             }
             break;
         }
         case MORLOC_TUPLE: {
             obj = PyTuple_New(schema->size);
-            if (!obj) {
-                PyErr_SetString(PyExc_TypeError, "Failed in tuple");
-                goto error;
+            if(obj == NULL){
+                PyRAISE("Failed in tuple");
             }
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
                 PyObject* item = fromAnything(schema->parameters[i], item_ptr);
                 if (!item || PyTuple_SetItem(obj, i, item) < 0) {
                     Py_XDECREF(item);
-                    PyErr_SetString(PyExc_TypeError, "Failed to access tuple element");
-                    goto error;
+                    PyRAISE("Failed to access tuple element");
                 }
             }
             break;
         }
         case MORLOC_MAP: {
             obj = PyDict_New();
-            if (!obj) {
-                PyErr_SetString(PyExc_TypeError, "Failed in map");
-                goto error;
+            if(obj == NULL){
+                PyRAISE("Failed in map");
             }
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
@@ -286,8 +255,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){
                 if (!value || !key || PyDict_SetItem(obj, key, value) < 0) {
                     Py_XDECREF(value);
                     Py_XDECREF(key);
-                    PyErr_SetString(PyExc_TypeError, "Failed to access map element");
-                    goto error;
+                    PyRAISE("Failed to access map element");
                 }
                 Py_DECREF(key);
                 Py_DECREF(value);
@@ -295,8 +263,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){
             break;
         }
         default:
-            PyErr_SetString(PyExc_TypeError, "Unsupported schema type");
-            goto error;
+            PyRAISE("Unsupported schema type");
     }
 
     return obj;
@@ -305,44 +272,6 @@ error:
     Py_XDECREF(obj);
     return NULL;
 }
-
-
-// convert voidstar to PyObject
-static PyObject* from_voidstar(PyObject* self, PyObject* args) {
-    PyObject* voidstar_capsule;
-    const char* schema_str;
-
-    if (!PyArg_ParseTuple(args, "Os", &voidstar_capsule, &schema_str)) {
-        PyErr_SetString(PyExc_TypeError, "Failed to parse input");
-        return NULL;
-    }
-
-    void* voidstar = PyCapsule_GetPointer(voidstar_capsule, "absptr_t");
-
-    if (voidstar == NULL) {
-        PyErr_SetString(PyExc_TypeError, "Invalid voidstar capsule");
-        return NULL;
-    }
-
-    Schema* schema = parse_schema(&schema_str);
-    if (!schema) {
-        PyErr_SetString(PyExc_ValueError, "Failed to parse schema");
-        return NULL;
-    }
-
-    PyObject* obj = fromAnything(schema, voidstar);
-    if (obj == NULL) {
-        free_schema(schema);
-        PyErr_SetString(PyExc_TypeError, "fromAnything returned NULL");
-        return NULL;
-    }
-
-    free_schema(schema);
-
-    return obj;
-}
-
-
 
 
 #define HANDLE_SINT_TYPE(CTYPE, PYLONG_FUNC, MIN, MAX) \
@@ -393,16 +322,14 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
         case MORLOC_STRING:
         case MORLOC_ARRAY:
             if (schema->type == MORLOC_STRING && !(PyUnicode_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) )) {
-                PyErr_Format(PyExc_TypeError, "Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
             }
             if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) {
-                PyErr_Format(PyExc_TypeError, "Expected list, bytes, bytearray, or numpy array for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected list, bytes, bytearray, or numpy array for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
             }
         
             {
-                size_t required_size = 0;
+                ssize_t required_size = 0;
 
                 if (PyList_Check(obj)) {
                     Py_ssize_t list_size = PyList_Size(obj);
@@ -442,14 +369,13 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                     }
                     required_size += total_elements * PyArray_ITEMSIZE(arr);
                 } else if (PyBytes_Check(obj)) {
-                    required_size += (size_t)PyBytes_GET_SIZE(obj);
+                    required_size += (ssize_t)PyBytes_GET_SIZE(obj);
                 } else if (PyByteArray_Check(obj)) {
-                    required_size += (size_t)PyByteArray_GET_SIZE(obj);
+                    required_size += (ssize_t)PyByteArray_GET_SIZE(obj);
                 } else if (PyUnicode_Check(obj)) {
                     PyUnicode_AsUTF8AndSize(obj, &required_size);
                 } else {
-                    PyErr_SetString(PyExc_TypeError, "Unsupported data type");
-                    return -1;
+                    PyRAISE("Unsupported data type");
                 }
 
                 required_size += sizeof(Array);
@@ -458,15 +384,13 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
 
         case MORLOC_TUPLE:
             if (!PyTuple_Check(obj) && !PyList_Check(obj)) {
-                PyErr_Format(PyExc_TypeError, "Expected tuple or list for MORLOC_TUPLE, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected tuple or list for MORLOC_TUPLE, but got %s", Py_TYPE(obj)->tp_name);
             }
 
             {
                 Py_ssize_t size = PyTuple_Check(obj) ? PyTuple_Size(obj) : PyList_Size(obj);
                 if ((size_t)size != schema->size) {
-                    PyErr_SetString(PyExc_ValueError, "Tuple/List size mismatch");
-                    goto error;
+                    PyRAISE("Tuple/List size mismatch");
                 }
 
                 size_t required_size = 0;
@@ -485,8 +409,7 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
 
         case MORLOC_MAP:
             if (!PyDict_Check(obj)) {
-                PyErr_Format(PyExc_TypeError, "Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
             }
 
             {
@@ -508,11 +431,10 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
             }
 
         default:
-            PyErr_SetString(PyExc_TypeError, "Unsupported schema type");
-            goto error;
+            PyRAISE("Unsupported schema type");
     }
 
-    PyErr_SetString(PyExc_TypeError, "Impossible error");
+    PyRAISE("Reached the unreachable");
 
 error:
     return -1;
@@ -520,21 +442,19 @@ error:
 
 
 
-int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj) {
+int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj) { MAYFAIL
     switch (schema->type) {
         case MORLOC_NIL:
-            /* if (obj != Py_None) {                                                                                 */
-            /*     PyErr_Format(PyExc_TypeError, "Expected None for MORLOC_NIL, but got %s", Py_TYPE(obj)->tp_name); */
-            /*     goto error;                                                                                       */
-            /* }                                                                                                     */
+            if (obj != Py_None) {
+                PyRAISE("Expected None for MORLOC_NIL, but got %s", Py_TYPE(obj)->tp_name);
+            }
             *((int8_t*)dest) = (int8_t)0;
             break;
 
         case MORLOC_BOOL:
-            /* if (!PyBool_Check(obj)) {                                                                              */
-            /*     PyErr_Format(PyExc_TypeError, "Expected bool for MORLOC_BOOL, but got %s", Py_TYPE(obj)->tp_name); */
-            /*     goto error;                                                                                        */
-            /* }                                                                                                      */
+            if (!PyBool_Check(obj)) {
+                PyRAISE("Expected bool for MORLOC_BOOL, but got %s", Py_TYPE(obj)->tp_name);
+            }
             *((bool*)dest) = (obj == Py_True);
             break;
 
@@ -564,10 +484,9 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
             break;
 
         case MORLOC_FLOAT32:
-            /* if (!PyFloat_Check(obj)) {                                                                                 */
-            /*     PyErr_Format(PyExc_TypeError, "Expected float for MORLOC_FLOAT32, but got %s", Py_TYPE(obj)->tp_name); */
-            /*     goto error;                                                                                            */
-            /* }                                                                                                          */
+            if (!PyFloat_Check(obj)) {
+                PyRAISE("Expected float for MORLOC_FLOAT32, but got %s", Py_TYPE(obj)->tp_name);
+            }
             *((float*)dest) = (float)PyFloat_AsDouble(obj);
             break;
 
@@ -578,53 +497,56 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
             } else if(PyLong_Check(obj)){
                 *((double*)dest) = (double)PyLong_AsLongLong(obj);
             } else {
-                PyErr_Format(PyExc_TypeError, "Expected float or int for MORLOC_FLOAT64, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected float or int for MORLOC_FLOAT64, but got %s", Py_TYPE(obj)->tp_name);
             }
             break;
 
         case MORLOC_STRING:
         case MORLOC_ARRAY:
             if (schema->type == MORLOC_STRING && !(PyUnicode_Check(obj) || PyBytes_Check(obj)  || PyByteArray_Check(obj))) {
-                PyErr_Format(PyExc_TypeError, "Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
             }
     
             if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) { 
-                PyErr_Format(PyExc_TypeError, "Expected list, bytes, bytearray, or numpy array for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected list, bytes, bytearray, or numpy array for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
             }
     
             {
                 Py_ssize_t size;
-                char* data = NULL; // Initialize data to NULL
-    
+
+                // "bytes" type is mutable, so it exposes a non-const pointer 
+                char* mutable_data = NULL;
+
+                // strings type are immutable, so const
+                const char* immutable_data = NULL; 
+
                 if (PyList_Check(obj)) {
                     size = PyList_Size(obj);
                 } else if (PyBytes_Check(obj)) {
-                    PyBytes_AsStringAndSize(obj, &data, &size);
+                    // This needs non-const data
+                    PyBytes_AsStringAndSize(obj, &mutable_data, &size);
                 } else if (PyByteArray_Check(obj)) {
-                    data = PyByteArray_AS_STRING(obj);
+                    mutable_data = PyByteArray_AS_STRING(obj);
                     size = PyByteArray_GET_SIZE(obj);
                 } else if (schema->type == MORLOC_ARRAY && PyObject_HasAttrString(obj, "__array_interface__")) { // check if it is a numpy array
                     import_numpy();
                     PyArrayObject* arr = (PyArrayObject*)obj;
                     size = PyArray_SIZE(arr);
-                    data = (char*)PyArray_DATA(arr); // Get the data pointer
-    
+                    // This needs const data
+                    immutable_data = PyArray_DATA(arr); // Get the data pointer
+
                     // Verify that the array is contiguous
                     if (!PyArray_ISCONTIGUOUS(arr)) {
-                        PyErr_SetString(PyExc_ValueError, "NumPy array must be contiguous");
-                        goto error;
+                        PyRAISE("NumPy array must be contiguous");
                     }
                 } else {
-                    data = PyUnicode_AsUTF8AndSize(obj, &size);
+                    immutable_data = PyUnicode_AsUTF8AndSize(obj, &size);
                 }
     
                 Array* result = (Array*)dest;
                 result->size = (size_t)size;
-                result->data = abs2rel(*cursor);
-    
+                result->data = PyTRY(abs2rel, *cursor);
+
                 if (PyList_Check(obj)) {
                     // Fixed size width of each element (variable size data will
                     // be written to the cursor location)
@@ -633,24 +555,26 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                     // Move the cursor to the location immediately after the
                     // fixed sized elements
                     *cursor = (void*)(*(char**)cursor + size * width);
-    
-                    char* start = (char*)rel2abs(result->data);
+
+                    char* start = (char*) PyTRY(rel2abs, result->data);
                     Schema* element_schema = schema->parameters[0];
                     for (Py_ssize_t i = 0; i < size; i++) {
                         PyObject* item = PyList_GetItem(obj, i);
                         to_voidstar_r(start + width * i, cursor, element_schema, item);
                     }
+
                 } else if (PyBytes_Check(obj) || PyByteArray_Check(obj)){
-                    memcpy(rel2abs(result->data), data, size);
-    
+                    absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
+                    memcpy(tmp_ptr, mutable_data, size);
                     // move cursor to the location after the copied data
                     *cursor = (void*)(*(char**)cursor + size);
                 }
                 else{
                     size_t width = schema->parameters[0]->width;
-    
-                    memcpy(rel2abs(result->data), data, size * width);
-    
+
+                    absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
+                    memcpy(tmp_ptr, immutable_data, size * width);
+
                     // Move the cursor to the location immediately after the
                     // fixed sized elements
                     *cursor = (void*)(*(char**)cursor + size * width);
@@ -661,15 +585,13 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
 
         case MORLOC_TUPLE:
             if (!PyTuple_Check(obj) && !PyList_Check(obj)) {
-                PyErr_Format(PyExc_TypeError, "Expected tuple or list for MORLOC_TUPLE, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected tuple or list for MORLOC_TUPLE, but got %s", Py_TYPE(obj)->tp_name);
             }
 
             {
                 Py_ssize_t size = PyTuple_Check(obj) ? PyTuple_Size(obj) : PyList_Size(obj);
                 if ((size_t)size != schema->size) {
-                    PyErr_SetString(PyExc_ValueError, "Tuple/List size mismatch");
-                    goto error;
+                    PyRAISE("Tuple/List size mismatch");
                 }
                 for (Py_ssize_t i = 0; i < size; ++i) {
                     PyObject* item = PyTuple_Check(obj) ? PyTuple_GetItem(obj, i) : PyList_GetItem(obj, i);
@@ -680,8 +602,7 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
 
         case MORLOC_MAP:
             if (!PyDict_Check(obj)) {
-                PyErr_Format(PyExc_TypeError, "Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
+                PyRAISE("Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
             }
 
             {
@@ -697,8 +618,7 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
             break;
 
         default:
-            PyErr_SetString(PyExc_TypeError, "Unsupported schema type");
-            goto error;
+            PyRAISE("Unsupported schema type");
     }
 
     return 0;
@@ -707,354 +627,512 @@ error:
     return -1;
 }
 
-void* to_voidstar_c(const Schema* schema, PyObject* obj){
+void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
   // calculate the required size of the shared memory object
   ssize_t shm_size = get_shm_size(schema, obj);
   if(shm_size == -1){
-      PyErr_SetString(PyExc_TypeError, "Schema does not match object");
-      return NULL;
+      PyRAISE("Schema does not match object");
   }
 
   // allocate the required memory as a single block
-  void* dest = shmalloc((size_t)shm_size);
+  void* dest = PyTRY(shmalloc, (size_t)shm_size);
 
   // set the write location of variable size chunks
   void* cursor = (void*)((char*)dest + schema->width);
 
   // write the data to the block
   int result = to_voidstar_r(dest, &cursor, schema, obj);
+  PyTRACE(result != 0)
 
-  if(result == 0){
-      return dest;
-  } else {
-      PyErr_SetString(PyExc_TypeError, "Failed to write data to shared memory pool");
-      return NULL;
-  }
+  return dest;
+
+error:
+  return NULL;
 }
 
 
-// convert PyObject to voidstar
-static PyObject* to_voidstar(PyObject* self, PyObject* args){
-  PyObject* obj;
-  const char* schema_str;
+static PyObject* pybinding__wait_for_client(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* daemon_capsule;
 
-  if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
-      return NULL;
-  }
+    if (!PyArg_ParseTuple(args, "O", &daemon_capsule)) {
+        PyRAISE("Failed to parse arguments");
+    }
 
-  Schema* schema = parse_schema(&schema_str);
+    language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
 
-  void* voidstar = to_voidstar_c(schema, obj);
+    int client_fd = PyTRY(wait_for_client, daemon);
 
-  if(!voidstar){
-      return NULL;
-  }
+    return PyLong_FromLong((long)client_fd);
 
-  // Note that there is no destructor. This memory is managed by the custom
-  // memory allocator. I will eventually add some means of reference
-  // counting. When I do, the destructor will decrement this count.
-  PyObject* voidstar_capsule = PyCapsule_New(voidstar, "absptr_t", NULL);
+error:
+    return NULL;
+}
 
-  free_schema(schema);
+static PyObject* pybinding__start_daemon(PyObject* self, PyObject* args) { MAYFAIL
+    const char* socket_path;
+    const char* tmpdir;
+    const char* shm_basename;
+    size_t shm_default_size;
+    language_daemon_t* daemon = NULL;
 
-  return voidstar_capsule;
+    if (!PyArg_ParseTuple(args, "sssk", &socket_path, &tmpdir, &shm_basename, &shm_default_size)) {
+      goto error;
+    }
+
+    daemon = PyTRY(
+        start_daemon,
+        socket_path,
+        tmpdir,
+        shm_basename,
+        shm_default_size
+    );
+
+    return PyCapsule_New(daemon, "language_daemon_t", NULL);
+
+error:
+    FREE(daemon)
+    return NULL;
 }
 
 
-static PyObject* py_to_mesgpack(PyObject* self, PyObject* args) {
-  PyObject* obj;
-  const char* schema_str;
+static PyObject* pybinding__close_daemon(PyObject* self, PyObject* args) {
+    PyObject* daemon_capsule;
 
-  if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
-      PyErr_SetString(PyExc_ValueError, "py_to_mesgpack: Failed to parse arguments");
-      return NULL;
-  }
+    if (!PyArg_ParseTuple(args, "O", &daemon_capsule)) {
+        PyRAISE("Failed to parse arguments");
+    }
 
-  Schema* schema = parse_schema(&schema_str);
-  if (!schema) {
-      PyErr_SetString(PyExc_ValueError, "py_to_mesgpack: Failed to parse schema");
-      return NULL;
-  }
+    language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
 
-  void* voidstar = to_voidstar_c(schema, obj);
+    if(daemon != NULL){
+        close_daemon(&daemon);
+    }
 
-  if (!voidstar && PyErr_Occurred()) {
-      free_schema(schema);
-      PyErr_SetString(PyExc_ValueError, "py_to_mesgpack: Failed to yield voidstar");
-      return NULL;
-  }
+    Py_RETURN_NONE;
 
-  char* msgpck_data = NULL;
-  size_t msgpck_data_len = 0;
-
-  int exitcode = pack_with_schema(voidstar, schema, &msgpck_data, &msgpck_data_len);
-  if (exitcode != 0 || !msgpck_data) {
-      PyErr_SetString(PyExc_RuntimeError, "py_to_mesgpack: Packing failed");
-      free(msgpck_data);
-      free_schema(schema);
-      return NULL;
-  }
-
-  // TODO: avoid memory copying here
-  PyObject* mesgpack_bytes = PyBytes_FromStringAndSize(msgpck_data, msgpck_data_len);
-  free_schema(schema);
-  free(msgpck_data);
-
-  // free voidstar, we shan't be needing it now
-
-  return mesgpack_bytes;
+error:
+    return NULL;
 }
 
 
-static PyObject* mesgpack_to_py(PyObject* self, PyObject* args) {
-    const char* msgpck_data;
-    Py_ssize_t msgpck_data_len;
-    const char* schema_str;
+static PyObject*  pybinding__read_morloc_call_packet(PyObject* self, PyObject* args){ MAYFAIL
+    char* packet;
+    size_t packet_size;
+
+    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    morloc_call_t* call_packet = PyTRY(read_morloc_call_packet, (const uint8_t*)packet);
+
+    PyObject* py_tuple = PyTuple_New(2);
+    PyObject* py_args = PyList_New(call_packet->nargs);
+    PyObject* py_mid = PyLong_FromLong((long)call_packet->midx);
+    for(size_t i = 0; i < call_packet->nargs; i++){
+        size_t arg_packet_size = PyTRY(morloc_packet_size, call_packet->args[i]);
+        PyObject* py_arg = PyBytes_FromStringAndSize(
+            (char*)call_packet->args[i],
+            arg_packet_size
+        );
+        PyList_SetItem(py_args, i, py_arg);
+    }
+
+    PyTuple_SetItem(py_tuple, 0, py_mid);
+    PyTuple_SetItem(py_tuple, 1, py_args);
+
+    return py_tuple;
+
+error:
+    return NULL;
+}
+
+static PyObject*  pybinding__send_packet_to_foreign_server(PyObject* self, PyObject* args){ MAYFAIL
+    int client_fd = 0;
+    uint8_t* packet = NULL;
+    size_t packet_size = 0;
+
+    if (!PyArg_ParseTuple(args, "iy#", &client_fd, &packet, &packet_size)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    size_t bytes_sent = PyTRY(send_packet_to_foreign_server, client_fd, packet);
+
+    return PyLong_FromSize_t(bytes_sent);
+
+error:
+    return NULL;
+}
+
+
+static PyObject*  pybinding__stream_from_client(PyObject* self, PyObject* args){ MAYFAIL
+    int client_fd = 0;
+
+    if (!PyArg_ParseTuple(args, "i", &client_fd)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    uint8_t* packet = PyTRY(stream_from_client, client_fd);
+
+    size_t packet_size = PyTRY(morloc_packet_size, packet);
+
+    return PyBytes_FromStringAndSize((char*)packet, packet_size);
+
+error:
+    return NULL;
+}
+
+
+
+static PyObject*  pybinding__close_socket(PyObject* self, PyObject* args){
+    int socket_id = 0;
+
+    if (!PyArg_ParseTuple(args, "i", &socket_id)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    close_socket(socket_id);
+
+    Py_RETURN_NONE;
+
+error:
+    return NULL;
+}
+
+// Transforms a value into a message ready for the socket
+static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
+    uint8_t* packet = NULL;
+    Schema* schema = NULL;
     void* voidstar = NULL;
+    size_t packet_size = 0;
 
-    if (!PyArg_ParseTuple(args, "y#s", &msgpck_data, &msgpck_data_len, &schema_str)) {
-        return NULL;
+    PyObject* obj;
+    const char* schema_str;
+
+    if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
+        PyRAISE("Failed to parse arguments");
     }
 
-    Schema* schema = parse_schema(&schema_str);
+    schema = PyTRY(parse_schema, &schema_str);
 
-    int exitcode = unpack_with_schema(msgpck_data, msgpck_data_len, schema, &voidstar);
-    if(exitcode != 0){
-        PyErr_SetString(PyExc_TypeError, "unpack_with_schema failed in mesgpack_to_py");
-        return NULL;
+    voidstar = to_voidstar(schema, obj);
+    PyTRACE(voidstar == NULL)
+
+    // convert to a relative pointer conserved between language servers
+    relptr_t relptr = PyTRY(abs2rel, voidstar);
+
+    packet = make_standard_data_packet(relptr, schema);
+
+    packet_size = PyTRY(morloc_packet_size, packet);
+
+    return PyBytes_FromStringAndSize((char*)packet, packet_size);
+
+error:
+    FREE(packet)
+    free_schema(schema);
+    return NULL;
+}
+
+
+// Use a key to retrieve a value
+static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
+    uint8_t* voidstar = NULL;
+    Schema* schema = NULL;
+    PyObject* obj = NULL;
+
+    const char* packet;
+    size_t packet_size;
+    const char* schema_str;
+
+    if (!PyArg_ParseTuple(args, "y#s", &packet, &packet_size, &schema_str)) {
+        PyRAISE("Failed to parse arguments");
     }
 
-    PyObject* obj = fromAnything(schema, voidstar);
-    if (obj == NULL) {
-        PyErr_SetString(PyExc_TypeError, "fromAnything returned NULL");
-        return NULL;
-    }
+    schema = PyTRY(parse_schema, &schema_str)
+
+    voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+
+    obj = fromAnything(schema, voidstar);
+    PyTRACE(obj == NULL)
 
     free_schema(schema);
 
     return obj;
+
+error:
+    free_schema(schema);
+    return NULL;
 }
 
 
+// Make a foreign call
+//
+// Arguments:
+//   1. socket path
+//   2. midx
+//   3. list of arguments, each is bytestring packet
+static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFAIL
+    char* socket_path;
+    int mid;
+    PyObject* py_args;
+    const uint8_t** arg_packets = NULL;
+    Py_ssize_t nargs;
+    Py_ssize_t i;
+    uint8_t* packet = NULL;
+    uint8_t* result = NULL;
+    size_t result_length = 0;
 
-// initialize a shared memory pool with one volume
-static PyObject* shm_start(PyObject* self, PyObject* args) {
-    char* basename;
-    size_t shm_desired_size;
-    shm_t* shm;
-
-    if (!PyArg_ParseTuple(args, "sk", &basename, &shm_desired_size)) {
-        PyErr_SetString(PyExc_TypeError, "Failed to parse arguments");
-        return NULL;
+    // Parse arguments: string, integer, and sequence
+    if (!PyArg_ParseTuple(args, "siO", &socket_path, &mid, &py_args)) {
+        PyRAISE("Failed to parse argument")
     }
 
-    shm = shinit(basename, 0, shm_desired_size);
-    if (shm == NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "Failed to initialize shared memory");
-        return NULL;
+    // Verify third argument is a sequence
+    if (!PySequence_Check(py_args)) {
+        PyRAISE("Third argument must be a sequence");
     }
+
+    // Get sequence size and allocate C arrays
+    nargs = PySequence_Size(py_args);
+    arg_packets = (const uint8_t**)calloc(nargs, sizeof(uint8_t*));
+    if (!arg_packets) {
+        free(arg_packets);
+        PyErr_NoMemory();
+        goto error;
+    }
+
+    // Convert Python bytes to C buffers
+    for (i = 0; i < nargs; i++) {
+        PyObject* item = PySequence_GetItem(py_args, i);
+        if (!PyBytes_Check(item)) {
+            Py_DECREF(item);
+            free(arg_packets);
+            PyRAISE("All arguments must be bytes objects");
+        }
+        arg_packets[i] = (const uint8_t*)PyBytes_AsString(item);
+        Py_DECREF(item);
+    }
+
+    packet = PyTRY(make_morloc_local_call_packet, (uint32_t)mid, arg_packets, (size_t)nargs);
+
+    free(arg_packets);
+
+    result = PyTRY(send_and_receive_over_socket, socket_path, packet);
+    free(packet);
+
+    result_length = PyTRY(morloc_packet_size, result);
+
+    return PyBytes_FromStringAndSize((char*)result, result_length);
+
+error:
+    FREE(arg_packets)
+    FREE(packet)
+    return NULL;
+}
+
+
+static PyObject* pybinding__remote_call(PyObject* self, PyObject* args) { MAYFAIL
+    int midx;
+    char* socket_base;
+    char* cache_path;
+    PyObject* res_struct; // python struct that is converted to a resource_t struct
+    PyObject* arg_packets_obj; // python list of bytes types
+    const uint8_t** arg_packets = NULL;
+    uint8_t* result = NULL;
+
+    if (!PyArg_ParseTuple(args, "issOO", &midx, &socket_base, &cache_path, &res_struct, &arg_packets_obj)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    if (!PyBytes_Check(res_struct)) {
+        PyRAISE("res_struct must be a bytes object from struct.pack()");
+    }
+
+    // Ensure the resources struct is the right size
+    if (PyBytes_Size(res_struct) != sizeof(resources_t)) {
+        PyRAISE("Struct size mismatch");
+    }
+
+    resources_t* res = (resources_t*)PyBytes_AsString(res_struct);
+    PyTRACE(res == NULL)
+
+    Py_ssize_t nargs = PyList_Size(arg_packets_obj);
+
+    arg_packets = calloc(nargs, sizeof(uint8_t*));
+    if (arg_packets == NULL) {
+        PyRAISE("Memory allocation failed");
+    }
+
+    for (Py_ssize_t i = 0; i < nargs; i++) {
+        PyObject* packet_obj = PyList_GetItem(arg_packets_obj, i);
+        if (!PyBytes_Check(packet_obj)) {
+            PyRAISE("Packets must be bytes");
+        }
+        arg_packets[i] = (uint8_t*)PyBytes_AsString(packet_obj);
+    }
+
+    result = PyTRY(
+        remote_call,
+        midx,
+        socket_base,
+        cache_path,
+        res,
+        arg_packets,
+        (size_t)nargs
+    );
+
+    free(arg_packets);
+
+    if (result == NULL) Py_RETURN_NONE;
+    PyObject* py_result = PyBytes_FromString((char*)result);
+    free(result);
+    return py_result;
+
+error:
+    if (result != NULL){
+        free(result);
+    }
+    if (arg_packets != NULL){
+        // The elements are handled by Python and should not be freed
+        free(arg_packets);
+    }
+    return NULL;
+}
+
+
+static PyObject* pybinding__is_ping(PyObject* self, PyObject* args) { MAYFAIL
+    char* packet;
+    size_t packet_size;
+
+    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    bool is_ping = PyTRY(packet_is_ping, (uint8_t*)packet);
+
+    PyObject* obj = PyBool_FromLong((long)is_ping);
+
+    return obj;
+
+error:
+    return NULL;
+}
+
+
+static PyObject* pybinding__is_local_call(PyObject* self, PyObject* args) { MAYFAIL
+    char* packet;
+    size_t packet_size;
+
+    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    bool is_local_call = PyTRY(packet_is_local_call, (uint8_t*)packet);
+
+    PyObject* obj = PyBool_FromLong((long)is_local_call);
+
+    return obj;
+
+error:
+    return NULL;
+}
+
+static PyObject* pybinding__is_remote_call(PyObject* self, PyObject* args) { MAYFAIL
+    char* packet;
+    size_t packet_size;
+
+    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    bool is_remote_call = PyTRY(packet_is_remote_call, (uint8_t*)packet);
+
+    PyObject* obj = PyBool_FromLong((long)is_remote_call);
+
+    return obj;
+
+error:
+    return NULL;
+}
+
+
+static PyObject* pybinding__pong(PyObject* self, PyObject* args) { MAYFAIL
+    char* packet;
+    size_t packet_size;
+
+    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    const uint8_t* pong = PyTRY(return_ping, (uint8_t*)packet);
+
+    size_t pong_size = PyTRY(morloc_packet_size, pong);
+
+    return PyBytes_FromStringAndSize((char*)pong, pong_size);
+
+error:
+    return NULL;
+}
+
+static PyObject* pybinding__shinit(PyObject* self, PyObject* args) { MAYFAIL
+    shm_t* shm = NULL;
+    
+    const char* shm_basename;
+    size_t volume_index;
+    size_t shm_default_size;
+
+    if (!PyArg_ParseTuple(args, "skk", &shm_basename, &volume_index, &shm_default_size)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    shm = PyTRY(
+        shinit,
+        shm_basename,
+        volume_index,
+        shm_default_size
+    );
 
     return PyCapsule_New(shm, "shm_t", NULL);
+
+error:
+    FREE(shm)
+    return NULL;
 }
 
-static PyObject* shm_rel2abs(PyObject* self, PyObject* args) {
-    size_t relptr;
-    if (!PyArg_ParseTuple(args, "k", &relptr)) {
-        return NULL;
+
+static PyObject* pybinding__make_fail_packetg(PyObject* self, PyObject* args) { MAYFAIL
+    const char* packet_errmsg;
+
+    if (!PyArg_ParseTuple(args, "s", &packet_errmsg)) {
+        PyRAISE("Failed to parse arguments");
     }
 
-    absptr_t absptr = rel2abs((relptr_t)relptr);
-    return PyCapsule_New((void*)absptr, "absptr_t", NULL);
+    uint8_t* packet = make_fail_packet(packet_errmsg);
+
+    size_t packet_size = PyTRY(morloc_packet_size, packet);
+
+    return PyBytes_FromStringAndSize((char*)packet, packet_size);
+
+error:
+    return NULL;
 }
-
-static PyObject* shm_abs2rel(PyObject* self, PyObject* args) {
-    PyObject* capsule;
-    if (!PyArg_ParseTuple(args, "O", &capsule)) {
-        return NULL;
-    }
-
-    absptr_t absptr = (absptr_t)PyCapsule_GetPointer(capsule, "absptr_t");
-    if (absptr == NULL) {
-        return NULL;  // PyCapsule_GetPointer sets the error
-    }
-
-    relptr_t relptr = abs2rel(absptr);
-    return PyLong_FromSize_t(relptr);
-}
-
-
-static PyObject* shm_close(PyObject* self, PyObject* args) {
-    shclose();
-    Py_RETURN_NONE;
-}
-
-// Take a python object and a schema, convert it to voidstar, write the
-// voidstar to the shared memory pool, and return the relative pointer as an
-// integer.
-static PyObject* to_shm(PyObject* self, PyObject* args) {
-  PyObject* obj;
-  const char* schema_str;
-
-  if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
-      return NULL;
-  }
-
-  Schema* schema = parse_schema(&schema_str);
-
-  void* voidstar = to_voidstar_c(schema, obj);
-
-  free_schema(schema);
-
-  relptr_t relptr = abs2rel(voidstar);
-  return PyLong_FromSize_t(relptr);
-}
-
-// Takes a relative pointer as an integer and a schema, looks up the voidstar in
-// the shared memory pool, convert it to a python object, and return it
-static PyObject* from_shm(PyObject* self, PyObject* args) {
-  size_t relptr;
-  const char* schema_str;
-
-  if (!PyArg_ParseTuple(args, "ks", &relptr, &schema_str)) {
-      return NULL;
-  }
-
-  Schema* schema = parse_schema(&schema_str);
-
-  absptr_t voidstar = rel2abs(relptr);
-
-  PyObject* obj = fromAnything(schema, voidstar);
-  if (obj == NULL) {
-      free_schema(schema);
-      PyErr_SetString(PyExc_TypeError, "fromAnything returned NULL");
-      return NULL;
-  }
-
-  free_schema(schema);
-
-  return obj;
-}
-
-
-static  PyObject* write_voidstar_as_json(PyObject* self, PyObject* args) {
-  size_t relptr;
-  const char* schema_str;
-  if (!PyArg_ParseTuple(args, "ks", &relptr, &schema_str)) {
-    return NULL;
-  }
-
-  Schema* schema = parse_schema(&schema_str);
-  absptr_t voidstar = rel2abs(relptr);
-  print_voidstar(voidstar, schema);
-  free_schema(schema);
-  Py_RETURN_NONE;
-}
-
-static PyObject* write_msgpack_as_json(PyObject* self, PyObject* args) {
-  const char* msgpck_data;
-  Py_ssize_t msgpck_data_len;
-  const char* schema_str;
-  void* voidstar = NULL;
-
-  if (!PyArg_ParseTuple(args, "y#s", &msgpck_data, &msgpck_data_len, &schema_str)) {
-    return NULL;
-  }
-
-  Schema* schema = parse_schema(&schema_str);
-
-  int exitcode = unpack_with_schema(msgpck_data, msgpck_data_len, schema, &voidstar);
-  if (exitcode != 0) {
-    PyErr_Format(PyExc_RuntimeError, "Unpacking failed with exit code %d", exitcode);
-    return NULL;
-  }
-
-  print_voidstar(voidstar, schema);
-
-  free_schema(schema);
-
-  Py_RETURN_NONE;
-}
-
-static PyObject* write_msgpack_file_as_json(PyObject* self, PyObject* args) {
-  char* filename;
-  const char* schema_str;
-
-  if (!PyArg_ParseTuple(args, "ss", &filename, &schema_str)) {
-    return NULL;
-  }
-
-  Schema* schema = parse_schema(&schema_str);
-
-  // Get file size
-  struct stat st;
-  if (stat(filename, &st) != 0) {
-    PyErr_SetFromErrno(PyExc_IOError);
-    free_schema(schema);
-    return NULL;
-  }
-  size_t file_size = st.st_size;
-
-  // Allocate memory for file contents
-  char* msgpack_data = (char*)malloc(file_size);
-  if (msgpack_data == NULL) {
-    PyErr_NoMemory();
-    free_schema(schema);
-    return NULL;
-  }
-
-  // Open and read file
-  FILE* file = fopen(filename, "rb");
-  if (file == NULL) {
-    PyErr_SetFromErrno(PyExc_IOError);
-    free(msgpack_data);
-    free_schema(schema);
-    return NULL;
-  }
-
-  size_t bytes_read = fread(msgpack_data, 1, file_size, file);
-  fclose(file);
-
-  if (bytes_read != file_size) {
-    PyErr_Format(PyExc_IOError, "Failed to read entire file. Expected %zu bytes, read %zu bytes", file_size, bytes_read);
-    free(msgpack_data);
-    free_schema(schema);
-    return NULL;
-  }
-
-  void* voidstar;
-  int exitcode = unpack_with_schema(msgpack_data, file_size, schema, &voidstar);
-  if (exitcode != 0) {
-    PyErr_Format(PyExc_RuntimeError, "Unpacking failed with exit code %d", exitcode);
-    free(msgpack_data);
-    free_schema(schema);
-    return NULL;
-  }
-
-  print_voidstar(voidstar, schema);
-
-  free(msgpack_data);
-  free_schema(schema);
-
-  Py_RETURN_NONE;
-}
-
 
 static PyMethodDef Methods[] = {
-    {"to_mesgpack", to_mesgpack, METH_VARARGS, "Serialize a voidstar to MessagePack data"},
-    {"from_mesgpack", from_mesgpack, METH_VARARGS, "Deserialize MessagePack data to voidstar"},
-    {"to_voidstar", to_voidstar, METH_VARARGS, "Convert python data to voidstar"},
-    {"from_voidstar", from_voidstar, METH_VARARGS, "Convert voidstar to python data"},
-    {"py_to_mesgpack", py_to_mesgpack, METH_VARARGS, "Convert python data to mesgpack"},
-    {"mesgpack_to_py", mesgpack_to_py, METH_VARARGS, "Convert mesgpack to python data"},
-    {"shm_rel2abs", shm_rel2abs, METH_VARARGS, "Convert a relative shared memory pointer to an absolute pointer to process memory"},
-    {"shm_abs2rel", shm_abs2rel, METH_VARARGS, "Convert an absolute pointer to process memory to a relative shared memory pointer"},
-    {"shm_start", shm_start, METH_VARARGS, "Initialize the shared memory pool"},
-    {"shm_close", shm_close, METH_VARARGS, "Close shared memory pool"},
-    {"to_shm", to_shm, METH_VARARGS, "Write python object to memory pool and return a relative pointer"},
-    {"from_shm", from_shm, METH_VARARGS, "Create a python object from a memory pool relative pointer"},
-    {"write_msgpack_as_json", write_msgpack_as_json, METH_VARARGS, "Given MessagePack data, write JSON"},
-    {"write_msgpack_file_as_json", write_msgpack_file_as_json, METH_VARARGS, "Given a MessagePack filename, write JSON"},
-    {"write_voidstar_as_json", write_voidstar_as_json, METH_VARARGS, "Given a relative pointer to voidstar data, write JSON"},
+    {"shinit", pybinding__shinit, METH_VARARGS, "Open the shared memory pool"},
+    {"start_daemon", pybinding__start_daemon, METH_VARARGS, "Initialize the shared memory and socket for the python daemon"},
+    {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
+    {"wait_for_client", pybinding__wait_for_client, METH_VARARGS, "Listen over a pipe until a client packet arrives"},
+    {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},
+    {"send_packet_to_foreign_server", pybinding__send_packet_to_foreign_server, METH_VARARGS, "Send data to a foreign server"},
+    {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
+    {"close_socket", pybinding__close_socket, METH_VARARGS, "Close the socket"},
+    {"foreign_call", pybinding__foreign_call, METH_VARARGS, "Send a call packet to a foreign pool"},
+    {"get_value", pybinding__get_value, METH_VARARGS, "Convert a packet to a Python value"},
+    {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},
+    {"is_ping", pybinding__is_ping, METH_VARARGS, "Packet is a ping"},
+    {"is_local_call", pybinding__is_local_call, METH_VARARGS, "Packet is a local call"},
+    {"is_remote_call", pybinding__is_remote_call, METH_VARARGS, "Packet is a remote call"},
+    {"pong", pybinding__pong, METH_VARARGS, "Return a ping"},
+    {"make_fail_packet", pybinding__make_fail_packetg, METH_VARARGS, "Create a fail packet from an error message"},
+    {"remote_call", pybinding__remote_call, METH_VARARGS, "Make a call to a remote cluster"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 

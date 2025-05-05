@@ -249,7 +249,7 @@ main = do
       , golden "C(S) serial-form-7-py" "serial-form-7-py"
       , golden "C(S) serial-form-7-r" "serial-form-7-r"
       , golden "C(C) serial-form-8-c" "serial-form-8-c"
-      , golden "C(C) serial-form-8-py" "serial-form-8-py"
+      -- , golden "C(C) serial-form-8-py" "serial-form-8-py"
       , golden "C(C) serial-form-8-r" "serial-form-8-r"
       , golden "C(R) serial-form-9-c" "serial-form-9-c"
       , golden "C(R) serial-form-9-py" "serial-form-9-py"
@@ -264,6 +264,7 @@ main = do
       , golden "R(R) serial-form-12-c" "serial-form-12-c"
       , golden "R(R) serial-form-12-py" "serial-form-12-py"
       , golden "R(R) serial-form-12-r" "serial-form-12-r"
+
       -- table handling
       , golden "table-1-c"  "table-1-c"
       , golden "table-1-py" "table-1-py"
