@@ -64,7 +64,7 @@ translate srcs es = do
     { scriptBase = "pool"
     , scriptLang = Python3Lang
     , scriptCode = "." :/ File exefile (Code . render $ code)
-    , scriptMake = [SysExe outfile]
+    , scriptMake = []
     }
 
 debugLog :: Doc ann -> MorlocMonad ()
