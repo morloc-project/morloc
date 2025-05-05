@@ -50,7 +50,7 @@ typedef struct config_s {
 } config_t;
 
 // global pid list of language daemons
-int pids[MAX_DAEMONS] = { 0 }; 
+int pids[MAX_DAEMONS] = { 0 };
 
 // global temporary file
 char* tmpdir = NULL;
@@ -86,7 +86,7 @@ typedef struct morloc_socket_s{
     char* lang;
     char** syscmd;
     char* socket_filename;
-    int pid; // language server pid 
+    int pid; // language server pid
 } morloc_socket_t;
 
 
@@ -191,7 +191,18 @@ void start_daemons(morloc_socket_t** all_sockets){
         double retry_time = INITIAL_RETRY_DELAY;
         int ping_timeout = INITIAL_PING_TIMEOUT_MICROSECONDS;
         uint8_t* return_data;
+        pid_t child_pid = (*socket_ptr)->pid;
+
         for(int attempt = 0; attempt <= MAX_RETRIES; attempt++){
+
+            int status = 0;
+            pid_t wait_result = waitpid(child_pid, &status, WNOHANG);
+            if (wait_result == child_pid) {
+                ERROR("Child process with pid %d for socket '%s' died unexpectedly (status: %d).", child_pid, (*socket_ptr)->socket_filename, status);
+            } else if (wait_result != 0){
+                ERROR("Child process with pid %d for socket '%s' ended with weird error (status: %d).", child_pid, (*socket_ptr)->socket_filename, status);
+            }
+
             return_data = send_and_receive_over_socket_wait((*socket_ptr)->socket_filename, ping_packet, ping_timeout, ping_timeout, &errmsg);
             if(errmsg != NULL || return_data == NULL){
                 if(attempt == MAX_RETRIES){
@@ -204,9 +215,9 @@ void start_daemons(morloc_socket_t** all_sockets){
                     .tv_nsec = (long)((retry_time - (time_t)retry_time) * 1e9)
                 };
                 nanosleep(&sleep_time, NULL);
-    
+
                 retry_time *= RETRY_MULTIPLIER;
-    
+
                 // Increase the ping timeout
                 //
                 // An infinite timeout, of course, would hang on unresponsive
@@ -356,7 +367,7 @@ void dispatch(
 int main(int argc, char *argv[]) {
 
     config_t config = { 0, NULL, NULL, NULL, JSON };
-    
+
     struct option long_options[] = {
         {"help",        no_argument,       0, 'h'},
         {"call-packet", required_argument, 0, 'c'},
@@ -365,7 +376,7 @@ int main(int argc, char *argv[]) {
         {"output-form", required_argument, 0, 'f'},
         {NULL, 0, NULL, 0}
     };
-    
+
     int opt;
     while ((opt = getopt_long(argc, argv, "+hc:s:o:f:", long_options, NULL)) != -1) {
         switch (opt) {
@@ -397,11 +408,11 @@ int main(int argc, char *argv[]) {
                     exit(EXIT_FAILURE);
                 }
                 break;
-                
+
             case '?':
                 fprintf(stderr, "Unknown option: %c\n", optopt);
                 exit(EXIT_FAILURE);
-                
+
             case ':':
                 fprintf(stderr, "Option %c requires an argument\n", optopt);
                 exit(EXIT_FAILURE);

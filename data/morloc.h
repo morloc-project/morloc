@@ -32,7 +32,7 @@
 // With these parameters, the max wait time is around 6s
 #define WAIT_RETY_INITIAL_TIME 0.001
 #define WAIT_RETRY_MULTIPLIER 1.25
-#define WAIT_RETRY_ATTEMPTS 32
+#define WAIT_RETRY_ATTEMPTS 24
 
 // {{{ Error handling macro definictions
 
