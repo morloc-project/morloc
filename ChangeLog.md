@@ -5,8 +5,8 @@ Unify backend under shared C library
 
  * Replace python nexus with C nexus
  * Move packets to little-endian format
- * Move all packet and binary formatting code, socket handling, and json
-   parsing from pool code into the shared morloc.h library.
+ * Move all packet handling, binary protocol specs, socket handling, JSON
+   parsing from pool code into the shared morloc.h library
  * Replace R `future` parallelism scheme with builtin `parallel` library
 
 Add remote worker and resource management support
