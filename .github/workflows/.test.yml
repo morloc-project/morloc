@@ -19,6 +19,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           sudo apt-get update
+          python3 -m pip install numpy
           sudo apt-get install -y python3-numpy
 
       - uses: r-lib/actions/setup-r@v2
