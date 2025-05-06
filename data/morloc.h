@@ -3503,7 +3503,7 @@ static size_t json_array_size(char* ptr, ERRMSG) {
                   // handle the first element
                   if(depth == 1){
                     consume_whitespace(&ptr);
-                    if(*ptr != ']'){
+                    if(*(ptr+1) != ']'){
                         size = 1;
                     }
                   }
