@@ -1,3 +1,10 @@
+0.53.1 [2025-05-06]
+-------------------
+
+ * Update containers
+ * Update github actions
+ * Fix bug in type scoping (sort of)
+
 0.53.0 [2025-05-04]
 -------------------
 

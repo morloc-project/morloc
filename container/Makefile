@@ -1,6 +1,8 @@
 # Pushing to the github registry requires a personal token with package
 # permissions. Login is required, for example:
 #   $ echo $GITHUB_TOKEN | podman login ghcr.io -u morloc-project --password-stdin
+# I am currently using the "classic" token (ghp_*), not the fine-grained
+# token. These need to be refreshed every few months. For some reason
 
 ### WARNING: I am foolishly assuming here that the local morloc version is the
 ### same as the latest on github master.

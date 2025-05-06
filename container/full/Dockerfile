@@ -3,7 +3,7 @@ LABEL org.opencontainers.image.description="A morloc container intended for inte
 LABEL org.opencontainers.image.licenses=MIT
 
 FROM ubuntu:22.04
-COPY --from=ghcr.io/morloc-project/morloc/morloc-tiny:0.52.1 /bin/morloc /bin/morloc
+COPY --from=ghcr.io/morloc-project/morloc/morloc-tiny:0.53.1 /bin/morloc /bin/morloc
 
 
 WORKDIR $HOME
@@ -18,7 +18,7 @@ RUN python3 -m pip install --upgrade pip setuptools
 
 
 # Set up R environment
-RUN Rscript -e 'install.packages(c("rlang", "future"), repos  = "https://cloud.r-project.org")'
+RUN Rscript -e 'install.packages(c("rlang"), repos  = "https://cloud.r-project.org")'
 
 # Setup the morloc home
 RUN morloc init
