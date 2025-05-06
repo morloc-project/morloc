@@ -1,0 +1,13 @@
+module main (foo)
+
+source Py from "foo.py" ("ident" as ident)
+
+type Py => Str = "str"
+type Py => Real = "float"
+type Py => List a = "list" a
+type Py => Tuple3 a b c = "tuple" a b c
+
+ident a :: a -> a
+
+foo :: [(Str, [Str], Real)] -> [(Str, [Str], Real)]
+foo = ident

@@ -38,6 +38,7 @@ main = do
 
       , golden "string-encoding" "string-encoding"
       , golden "string-encoding-utf8" "string-encoding-utf8"
+      , golden "string-json-parsing" "string-json-parsing"
 
       , golden "file-input-py" "file-input-py"
       , golden "file-input-c" "file-input-c"

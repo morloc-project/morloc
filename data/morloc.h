@@ -3491,8 +3491,9 @@ static size_t json_array_size(char* ptr, ERRMSG) {
                     if(!in_escape){
                         in_string = false;
                     }
-                    break;
+                // fall through
                 default:
+                    in_escape = false;
                     break;
             }
         } else {
@@ -3530,7 +3531,7 @@ static size_t json_array_size(char* ptr, ERRMSG) {
         ptr++;
     }
 
-    RAISE("Found JSON array with no closing bracket")
+    RAISE("Found JSON array with no closing bracket\n")
 }
 
 // input JSON data should be NULL terminated
