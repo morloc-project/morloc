@@ -1,0 +1,5 @@
+module lib.footypes (*)
+
+type Py => Str = "str"
+
+type FooType = Str

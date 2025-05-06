@@ -238,7 +238,7 @@ makeSerialAST m lang t0 = do
             unpacked <- mapM (makeSerialAST' gscope typepackers . typePackerUnpacked) packers
             selection <- selectPacker (zip packers unpacked)
             return $ SerialPack v selection
-          Nothing ->  serializerError $ "Cannot find constructor in VarF" <+> dquotes (pretty v)
+          Nothing ->  serializerError $ "Cannot find constructor in VarF" <+> dquotes (pretty v) <+> " finalType=" <> pretty finalType
       where
         finalType = let t = fst $ unweaveTypeF ft
                     in either (const t) id (TE.evaluateType gscope t)

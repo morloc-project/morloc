@@ -1,0 +1,3 @@
+module m (f)
+
+import lib.foo (f)

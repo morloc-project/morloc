@@ -26,10 +26,11 @@ import Morloc.Data.Doc
 import qualified Data.Map as Map
 import qualified Control.Monad.State as CMS
 
+-- TODO: do not use global scope here
 getScope :: Int -> Lang -> MorlocMonad (Scope, Scope)
-getScope i lang = do
-  cscope <- MM.getConcreteScope i lang
-  gscope <- MM.getGeneralScope i
+getScope _ lang = do
+  cscope <- MM.getConcreteUniversalScope lang
+  gscope <- MM.getGeneralUniversalScope
   MM.sayVVV $ "cscope:" <+> viaShow cscope
   return (cscope, gscope)
 

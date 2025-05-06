@@ -57,7 +57,8 @@ main = do
       , golden "edge-cases-1" "edge-cases-1"
       , golden "edge-cases-2" "edge-cases-2"
 
-      , golden "type-synthesis" "type-synthesis"
+      , golden "type-synthesis-1" "type-synthesis-1"
+      , golden "type-synthesis-2" "type-synthesis-2"
 
       , golden "argument-form-1-c" "argument-form-1-c"
       , golden "argument-form-1-py" "argument-form-1-py"
