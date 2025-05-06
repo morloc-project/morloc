@@ -265,6 +265,11 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::vec
     Array* result = static_cast<Array*>(dest);
     result->size = data.size();
 
+    if(data.size() == 0){
+        result->data = RELNULL;
+        return dest;
+    }
+
     // The array data is written to the cursor location
     // The N fixed-size elements will be written here
     result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
@@ -287,6 +292,11 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::lis
     // The fixed length array wrapper is written to the destination
     Array* result = static_cast<Array*>(dest);
     result->size = data.size();
+
+    if(data.size() == 0){
+        result->data = RELNULL;
+        return dest;
+    }
 
     // The array data is written to the cursor location
     result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
@@ -314,6 +324,11 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::for
     // The fixed length array wrapper is written to the destination
     Array* result = static_cast<Array*>(dest);
     result->size = size;
+
+    if(size == 0){
+        result->data = RELNULL;
+        return dest;
+    }
 
     // The array data is written to the cursor location
     result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
@@ -352,6 +367,11 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::deq
     // The fixed length array wrapper is written to the destination
     Array* result = static_cast<Array*>(dest);
     result->size = data.size();
+
+    if(data.size() == 0){
+        result->data = RELNULL;
+        return dest;
+    }
 
     // The array data is written to the cursor location
     result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
@@ -417,12 +437,21 @@ Primitive fromAnything(const Schema* schema, const void* data, Primitive* dumby 
 
 std::string fromAnything(const Schema* schema, const void* data, std::string* dumby = nullptr) {
     Array* array = (Array*)data;
-    return std::string((char*)cpp_rel2abs(array->data), array->size);
+    if(array->size > 0){
+        return std::string((char*)cpp_rel2abs(array->data), array->size);
+    } else {
+        return std::string("");
+    }
 }
 
 template<typename T>
 std::vector<T> fromAnything(const Schema* schema, const void* data, std::vector<T>* dumby = nullptr){
+  std::vector<T> result;
   Array* array = (Array*) data;
+
+  if(array->size == 0){
+      return result;
+  }
 
   // Directly use memory for constant width primitives arrays
   switch(schema->parameters[0]->type){
@@ -438,18 +467,19 @@ std::vector<T> fromAnything(const Schema* schema, const void* data, std::vector<
     case MORLOC_UINT64:
     case MORLOC_FLOAT32:
     case MORLOC_FLOAT64:
-      std::vector<T> result((T*)(cpp_rel2abs(array->data)), (T*)(cpp_rel2abs(array->data)) + array->size);
-      return result;
+      std::vector<T> primitive_vector((T*)(cpp_rel2abs(array->data)), (T*)(cpp_rel2abs(array->data)) + array->size);
+      return primitive_vector;
   }
 
   // Other data types require some rearrangement
-  std::vector<T> result;
   result.reserve(array->size);
-  const Schema* elemental_schema = schema->parameters[0];
-  T* elemental_dumby = nullptr;
-  char* start = (char*)cpp_rel2abs(array->data);
-  for(size_t i = 0; i < array->size; i++){
-    result.push_back(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
+  if(array->size > 0){
+      const Schema* elemental_schema = schema->parameters[0];
+      T* elemental_dumby = nullptr;
+      char* start = (char*)cpp_rel2abs(array->data);
+      for(size_t i = 0; i < array->size; i++){
+        result.push_back(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
+      }
   }
   return result;
 }
@@ -458,13 +488,15 @@ template<typename T>
 std::stack<T> fromAnything(const Schema* schema, const void* data, std::stack<T>* dumby = nullptr) {
     Array* array = (Array*)data;
     std::stack<T> result;
-    const Schema* elemental_schema = schema->parameters[0];
-    T* elemental_dumby = nullptr;
-    char* start = (char*)cpp_rel2abs(array->data);
-    
-    // We need to push elements in reverse order to maintain the original stack order
-    for (size_t i = array->size; i > 0; --i) {
-        result.push(fromAnything(elemental_schema, (void*)(start + (i-1) * elemental_schema->width), elemental_dumby));
+    if(array->size > 0){
+        const Schema* elemental_schema = schema->parameters[0];
+        T* elemental_dumby = nullptr;
+        char* start = (char*)cpp_rel2abs(array->data);
+        
+        // We need to push elements in reverse order to maintain the original stack order
+        for (size_t i = array->size; i > 0; --i) {
+            result.push(fromAnything(elemental_schema, (void*)(start + (i-1) * elemental_schema->width), elemental_dumby));
+        }
     }
     return result;
 }
@@ -473,12 +505,14 @@ template<typename T>
 std::list<T> fromAnything(const Schema* schema, const void* data, std::list<T>* dumby = nullptr) {
     Array* array = (Array*)data;
     std::list<T> result;
-    const Schema* elemental_schema = schema->parameters[0];
-    T* elemental_dumby = nullptr;
-    char* start = (char*)cpp_rel2abs(array->data);
-    
-    for (size_t i = 0; i < array->size; ++i) {
-        result.push_back(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
+    if(array->size > 0){
+        const Schema* elemental_schema = schema->parameters[0];
+        T* elemental_dumby = nullptr;
+        char* start = (char*)cpp_rel2abs(array->data);
+        
+        for (size_t i = 0; i < array->size; ++i) {
+            result.push_back(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
+        }
     }
     return result;
 }
@@ -487,13 +521,15 @@ template<typename T>
 std::forward_list<T> fromAnything(const Schema* schema, const void* data, std::forward_list<T>* dumby = nullptr) {
     Array* array = (Array*)data;
     std::forward_list<T> result;
-    const Schema* elemental_schema = schema->parameters[0];
-    T* elemental_dumby = nullptr;
-    char* start = (char*)cpp_rel2abs(array->data);
-    
-    // We need to insert elements in reverse order to maintain the original list order
-    for (size_t i = array->size; i > 0; --i) {
-        result.push_front(fromAnything(elemental_schema, (void*)(start + (i-1) * elemental_schema->width), elemental_dumby));
+    if(array->size > 0){
+        const Schema* elemental_schema = schema->parameters[0];
+        T* elemental_dumby = nullptr;
+        char* start = (char*)cpp_rel2abs(array->data);
+        
+        // We need to insert elements in reverse order to maintain the original list order
+        for (size_t i = array->size; i > 0; --i) {
+            result.push_front(fromAnything(elemental_schema, (void*)(start + (i-1) * elemental_schema->width), elemental_dumby));
+        }
     }
     return result;
 }
@@ -502,12 +538,14 @@ template<typename T>
 std::queue<T> fromAnything(const Schema* schema, const void* data, std::queue<T>* dumby = nullptr) {
     Array* array = (Array*)data;
     std::queue<T> result;
-    const Schema* elemental_schema = schema->parameters[0];
-    T* elemental_dumby = nullptr;
-    char* start = (char*)cpp_rel2abs(array->data);
-    
-    for (size_t i = 0; i < array->size; ++i) {
-        result.push(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
+    if(array->size > 0){
+        const Schema* elemental_schema = schema->parameters[0];
+        T* elemental_dumby = nullptr;
+        char* start = (char*)cpp_rel2abs(array->data);
+        
+        for (size_t i = 0; i < array->size; ++i) {
+            result.push(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
+        }
     }
     return result;
 }
@@ -516,12 +554,14 @@ template<typename T>
 std::deque<T> fromAnything(const Schema* schema, const void* data, std::deque<T>* dumby = nullptr) {
     Array* array = (Array*)data;
     std::deque<T> result;
-    const Schema* elemental_schema = schema->parameters[0];
-    T* elemental_dumby = nullptr;
-    char* start = (char*)cpp_rel2abs(array->data);
-    
-    for (size_t i = 0; i < array->size; ++i) {
-        result.push_back(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
+    if(array->size > 0){
+        const Schema* elemental_schema = schema->parameters[0];
+        T* elemental_dumby = nullptr;
+        char* start = (char*)cpp_rel2abs(array->data);
+        
+        for (size_t i = 0; i < array->size; ++i) {
+            result.push_back(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
+        }
     }
     return result;
 }

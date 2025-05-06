@@ -127,22 +127,39 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
             break;
         case MORLOC_STRING: {
             Array* str_array = (Array*)data;
-            absptr_t tmp_ptr = PyTRY(rel2abs, str_array->data);
+            absptr_t tmp_ptr = NULL;
+            
+            if (str_array->size != 0) {
+                tmp_ptr = PyTRY(rel2abs, str_array->data);
+            }
+            
             if (schema->hint != NULL && strcmp(schema->hint, "bytes") == 0) {
                 // load binary data as a python bytes object
-                obj = PyBytes_FromStringAndSize(tmp_ptr, str_array->size);
+                if (str_array->size == 0) {
+                    obj = PyBytes_FromStringAndSize("", 0);  // empty bytes object
+                } else {
+                    obj = PyBytes_FromStringAndSize(tmp_ptr, str_array->size);
+                }
                 if (!obj) {
                     PyRAISE("Failed to parse data as bytes");
                 }
-            } else if(schema->hint != NULL && strcmp(schema->hint, "bytearray") == 0){ 
+            } else if (schema->hint != NULL && strcmp(schema->hint, "bytearray") == 0) {
                 // load binary data as a python bytearray object
-                obj = PyByteArray_FromStringAndSize(tmp_ptr, str_array->size);
+                if (str_array->size == 0) {
+                    obj = PyByteArray_FromStringAndSize("", 0);  // empty bytearray object
+                } else {
+                    obj = PyByteArray_FromStringAndSize(tmp_ptr, str_array->size);
+                }
                 if (!obj) {
                     PyRAISE("Failed to parse data as bytearray");
                 }
             } else {
                 // otherwise, load this as a str type
-                obj = PyUnicode_FromStringAndSize(tmp_ptr, str_array->size);
+                if (str_array->size == 0) {
+                    obj = PyUnicode_New(0, 127);  // empty string object
+                } else {
+                    obj = PyUnicode_FromStringAndSize(tmp_ptr, str_array->size);
+                }
                 if (!obj) {
                     PyRAISE("Failed to parse data as string");
                 }

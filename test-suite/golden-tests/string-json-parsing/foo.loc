@@ -1,13 +1,33 @@
-module main (foo)
+module main (pfoo, cfoo, rfoo)
 
-source Py from "foo.py" ("ident" as ident)
+source Py from "foo.py" ("ident" as pident)
+source Cpp from "foo.hpp" ("ident" as cident)
+source R from "foo.R" ("ident" as rident)
 
 type Py => Str = "str"
 type Py => Real = "float"
 type Py => List a = "list" a
 type Py => Tuple3 a b c = "tuple" a b c
 
-ident a :: a -> a
+type R => Str = "character"
+type R => Real = "numeric"
+type R => List a = "list" a
+type R => Tuple3 a b c = "list" a b c
 
-foo :: [(Str, [Str], Real)] -> [(Str, [Str], Real)]
-foo = ident
+type Cpp => Str = "std::string"
+type Cpp => Real = "double"
+type Cpp => List a = "std::vector<$1>" a
+type Cpp => Tuple3 a b c = "std::tuple<$1,$2,$3>" a b c
+
+pident a :: a -> a
+cident a :: a -> a
+rident a :: a -> a
+
+pfoo :: [(Str, [Str], [Real])] -> [(Str, [Str], [Real])]
+pfoo = pident
+
+cfoo :: [(Str, [Str], [Real])] -> [(Str, [Str], [Real])]
+cfoo = cident
+
+rfoo :: [(Str, [Str], [Real])] -> [(Str, [Str], [Real])]
+rfoo = rident

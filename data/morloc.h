@@ -3628,7 +3628,18 @@ int read_json_with_schema_r(
             size_t j_string_size = 0;
             size_t c_string_size = 0;
 
+            Array* arr = (Array*)voidstar;
+            arr->size = 0;
+            arr->data = RELNULL;
+
             TRY(json_string_size, *json_ptr, &j_string_size, &c_string_size);
+
+            if(c_string_size == 0){
+                // eat the empty string and leave
+                TRY(consume_char, '"', json_ptr);
+                TRY(consume_char, '"', json_ptr);
+                break;
+            }
 
             absptr_t mlc_str = TRY(shcalloc, c_string_size, sizeof(char));
 
@@ -3645,7 +3656,6 @@ int read_json_with_schema_r(
                 TRY(write_json_string, json_ptr, (char*)mlc_str);
             }
 
-            Array* arr = (Array*)voidstar;
             arr->size = c_string_size;
             arr->data = TRY(abs2rel, mlc_str)
 
@@ -3810,6 +3820,12 @@ static bool print_voidstar_r(const void* voidstar, const Schema* schema, ERRMSG)
         case MORLOC_STRING:
             {
                 array = (Array*)voidstar;
+
+                if(array->size == 0){
+                    printf("\"\"");
+                    break;
+                }
+
                 data = TRY((const char*)rel2abs, array->data);
 
                 char* escaped_string = json_escape_string(data, array->size);
@@ -3824,6 +3840,12 @@ static bool print_voidstar_r(const void* voidstar, const Schema* schema, ERRMSG)
         case MORLOC_ARRAY:
             {
                 array = (Array*)voidstar;
+
+                if(array->size == 0){
+                    printf("[]");
+                    break;
+                }
+
                 data = TRY((const char*)rel2abs, array->data);
 
                 printf("[");
