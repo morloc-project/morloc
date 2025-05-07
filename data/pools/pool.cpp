@@ -252,6 +252,9 @@ int run_job(int client_fd) {
         // immediately close the parent copy of the file descriptor
         close_socket(client_fd);
 
+        // harvest children
+        waitpid(-1, NULL, WNOHANG);
+
         return pid; // success
     } else {
         // fork failed
