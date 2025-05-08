@@ -1,3 +1,9 @@
+0.53.4 [2025-05-08]
+-------------------
+
+ * Replace C daemon forking with thread pooling (4X speedup)
+ * Fix bugs related to 0-length array memory allocation
+
 0.53.3 [2025-05-06]
 -------------------
 
