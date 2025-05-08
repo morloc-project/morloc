@@ -1,5 +1,6 @@
 import signal
 import sys
+import select
 import os # required for setting path to morloc dependencies
 import time
 from collections import OrderedDict
@@ -72,15 +73,18 @@ def run_job(client_fd: int) -> None:
 
 def worker_process(pipe, shm_basename, shutdown_flag):
     morloc.shinit(shm_basename, 0, 0xffff)
+    pipe_fd = pipe.fileno()  # Get the file descriptor
     while not shutdown_flag.value:
-        time.sleep(0.00001)
-        try:
-            # Receive duplicated FD valid in this process
-            client_fd = recv_handle(pipe)
-
-            run_job(client_fd) # Process with original FD
-        except (EOFError, OSError):
+        # Wait until pipe is readable or shutdown is requested
+        rlist, _, _ = select.select([pipe_fd], [], [], 0.1)
+        if shutdown_flag.value:
             break
+        if rlist:
+            try:
+                client_fd = recv_handle(pipe)
+                run_job(client_fd)
+            except (EOFError, OSError):
+                break
 
 
 def signal_handler(sig, frame):
