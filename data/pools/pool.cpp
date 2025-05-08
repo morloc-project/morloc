@@ -19,6 +19,11 @@
 #include <limits>
 #include <utility>
 
+// needed for the thread pool
+#include <pthread.h>
+#include <signal.h>
+
+
 using namespace std;
 
 char* g_tmpdir;
@@ -140,6 +145,22 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
 // AUTO dispatch end
 
 
+pthread_mutex_t shutting_down_mutex = PTHREAD_MUTEX_INITIALIZER;
+int shutting_down = 0;
+
+int is_shutting_down() {
+    int value;
+    pthread_mutex_lock(&shutting_down_mutex);
+    value = shutting_down;
+    pthread_mutex_unlock(&shutting_down_mutex);
+    return value;
+}
+
+void set_shutting_down(int value) {
+    pthread_mutex_lock(&shutting_down_mutex);
+    shutting_down = value;
+    pthread_mutex_unlock(&shutting_down_mutex);
+}
 
 uint8_t* dispatch(const uint8_t* msg){
     char* errmsg = NULL;
@@ -196,38 +217,108 @@ uint8_t* dispatch(const uint8_t* msg){
 }
 
 
+typedef struct job_s {
+    int client_fd;
+    struct job_s* next;
+} job_t;
 
-// MAIN
+typedef struct job_queue_s {
+    job_t* head;
+    job_t* tail;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+} job_queue_t;
 
-int run_job(int client_fd) {
-    pid_t pid = fork();
-    if (pid == 0) {
-        // Enter child process
-        //
+
+// start an empty job queue
+void job_queue_init(job_queue_t* q) {
+    q->head = q->tail = NULL;
+    pthread_mutex_init(&q->mutex, NULL);
+    pthread_cond_init(&q->cond, NULL);
+}
+
+
+// add a new client socket fd to the queue
+void job_queue_push(job_queue_t* q, int client_fd) {
+    job_t* job = (job_t*)malloc(sizeof(job_t));
+    job->client_fd = client_fd;
+    job->next = NULL;
+    pthread_mutex_lock(&q->mutex);
+    if (q->tail) {
+        q->tail->next = job;
+        q->tail = job;
+    } else {
+        q->head = job;
+        q->tail = job;
+    }
+    // signal that a job is ready, one worker will be awoken
+    pthread_cond_signal(&q->cond);
+    pthread_mutex_unlock(&q->mutex);
+}
+
+
+// remove and return the oldest element as soon as one is available 
+int job_queue_pop(job_queue_t* q) {
+    pthread_mutex_lock(&q->mutex);
+
+    while (!q->head && !is_shutting_down()) {
+        // wati for job_queue_push to add a new job (this releases the mutex
+        // until the condition is met)
+        pthread_cond_wait(&q->cond, &q->mutex);
+    }
+    if (is_shutting_down()) {
+        pthread_mutex_unlock(&q->mutex);
+        pthread_exit(NULL);
+    }
+    job_t* job = q->head;
+    q->head = job->next;
+    if (!q->head) q->tail = NULL;
+    int fd = job->client_fd;
+    free(job);
+    pthread_mutex_unlock(&q->mutex);
+    return fd;
+}
+
+
+void* worker_thread(void* arg) {
+    job_queue_t* q = (job_queue_t*)arg;
+    while (!is_shutting_down()) {
+        // takes a job from the queue as soon as one is available
+        int client_fd = job_queue_pop(q);
+
         char* errmsg = NULL;
+        uint8_t* result = NULL;
+        size_t bytes_sent = 0;
+        size_t length = 0;
 
         // Pull data from the client
         uint8_t* client_data = stream_from_client(client_fd, &errmsg);
         if(errmsg != NULL){
             std::cerr << "Failed to read client data: " << errmsg << std::endl;
-            exit(1);
+            close_socket(client_fd);
+            continue;
+        }
+        if(client_data == NULL){
+            std::cerr << "Retrieved NULL client result: " << std::endl;
+            close_socket(client_fd);
+            continue;
         }
 
         // Fail if no data was pulled
-        size_t length = morloc_packet_size(client_data, &errmsg);
+        length = morloc_packet_size(client_data, &errmsg);
         if(errmsg != NULL){
-            close_socket(client_fd);
             std::cerr << "Malformed packet: " << errmsg << std::endl;
-            exit(1);
-        } else if (length == 0) {
             close_socket(client_fd);
+            continue;
+        } else if (length == 0) {
             std::cerr << "Zero length packet received from client" << std::endl;
-            exit(1);
+            close_socket(client_fd);
+            continue;
         }
 
         // Run the job
-        uint8_t* result = NULL;
         try {
+            // failure in the user code must be caught gracefully and passed forward
             result = dispatch(client_data);
         } catch (const std::exception& e) {
             result = make_fail_packet(e.what());
@@ -235,33 +326,17 @@ int run_job(int client_fd) {
 
         // return the result to the client and move on
         // do not wait for the client to finish processing
-        size_t bytes_sent = send_packet_to_foreign_server(client_fd, result, &errmsg);
+        bytes_sent = send_packet_to_foreign_server(client_fd, result, &errmsg);
         if(errmsg != NULL){
             std::cerr << "Failed to send data: " << errmsg << std::endl;
-            exit(1);
+            close_socket(client_fd);
+            continue;
         }
 
         // close the child file descriptor
         close_socket(client_fd);
-
-        // And exit the child
-        exit(0);
-    } else if (pid > 0) {
-        // Enter the parent process
-
-        // immediately close the parent copy of the file descriptor
-        close_socket(client_fd);
-
-        // harvest children
-        waitpid(-1, NULL, WNOHANG);
-
-        return pid; // success
-    } else {
-        // fork failed
-        close_socket(client_fd);
     }
-
-    return -1; // failure
+    return NULL;
 }
 
 
@@ -288,22 +363,40 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    while (true) {
-        int client_fd = wait_for_client(daemon, &errmsg);
+    job_queue_t queue;
+    job_queue_init(&queue);
+
+    long nthreads = sysconf(_SC_NPROCESSORS_ONLN);
+    pthread_t threads[nthreads];
+    for (int i = 0; i < nthreads; ++i) {
+        pthread_create(&threads[i], NULL, worker_thread, &queue);
+    }
+
+    while (!is_shutting_down()) {
+        int client_fd = wait_for_client_with_timeout(daemon, 10000, &errmsg);
         if (errmsg != NULL){
+
             std::cerr << "Failed to read client:\n" << errmsg << std::endl;
             errmsg = NULL;
         }
-        if (client_fd >= 0){
-            run_job(client_fd);
+        if( client_fd > 0 ){
+            job_queue_push(&queue, client_fd);
         }
     }
+
+    // set_shutting_down(1);
+    // // tell all the workers that it is time to die
+    // pthread_cond_broadcast(&q->cond);
 
     if(daemon != NULL){
         close_daemon(&daemon);
     }
 
     free(g_tmpdir);
+
+    for (int i = 0; i < nthreads; ++i) {
+        pthread_join(threads[i], NULL);
+    }
 
     return 0;
 }
