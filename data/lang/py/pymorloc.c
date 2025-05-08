@@ -562,6 +562,12 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
     
                 Array* result = (Array*)dest;
                 result->size = (size_t)size;
+
+                if(result->size == 0){
+                    result->data = RELNULL;
+                    break;
+                }
+
                 result->data = PyTRY(abs2rel, *cursor);
 
                 if (PyList_Check(obj)) {
