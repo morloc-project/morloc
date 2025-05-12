@@ -243,6 +243,32 @@ void* toAnything(const Schema* schema, const std::list<T>& data) {
 template<typename T>
 void* toAnything(void* dest, void** cursor, const Schema* schema, const T& data);
 
+// write a raw data array
+void* binarytoAnything(void* dest, void** cursor, const Schema* schema, const uint8_t* data, size_t size) {
+    // The fixed length array wrapper is written to the destination
+    Array* result = static_cast<Array*>(dest);
+    result->size = size;
+
+    if(size == 0){
+        result->data = RELNULL;
+        return dest;
+    }
+
+    absptr_t data_ptr = static_cast<absptr_t>(*cursor);
+
+    // The array data is written to the cursor location
+    // The N fixed-size elements will be written here
+    result->data = abs2rel_cpp(data_ptr);
+
+    // The cursor is mutated to point to the location after the children
+    *cursor = static_cast<char*>(*cursor) + size * schema->parameters[0]->width;
+
+    memcpy(data_ptr, data, size);
+
+    return dest;
+}
+
+
 // Specialization for nullptr_t (NIL)
 void* toAnything(void* dest, void** cursor, const Schema* schema, const std::nullptr_t&) {
     *((int8_t*)dest) = (int8_t)0; 
@@ -391,25 +417,12 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::deq
 
 // Specialization for string, casts a string to a uint8_t vector and recalls
 void* toAnything(void* dest, void** cursor, const Schema* schema, const std::string& data) {
-    // Create a vector<uint8_t> from the string's data without copying
-    std::vector<uint8_t> vec(
-        reinterpret_cast<const uint8_t*>(data.data()),
-        reinterpret_cast<const uint8_t*>(data.data() + data.size())
-    );
-
-    // Move the vector into the function call
-    return toAnything(dest, cursor, schema, std::move(vec));
+    return binarytoAnything(dest, cursor, schema, (const uint8_t*)data.c_str(), data.size());
 }
 
 // Specialization for C strings, casts to uint8_t vector and recalls
 void* toAnything(void* dest, void** cursor, const Schema* schema, const char* data) {
-    std::vector<uint8_t> vec(
-        reinterpret_cast<const uint8_t*>(data),
-        reinterpret_cast<const uint8_t*>(data) + strlen(data)
-    );
-
-    // Move the vector into the function call
-    return toAnything(dest, cursor, schema, std::move(vec));
+    return binarytoAnything(dest, cursor, schema, (const uint8_t*)data, strlen(data));
 }
 
 // Specialization for std::tuple
