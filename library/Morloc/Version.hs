@@ -10,7 +10,7 @@ Stability   : experimental
 module Morloc.Version ( version, versionStr ) where
 
 version :: (Int, Int, Int)
-version = (0, 53, 4)
+version = (0, 53, 5)
 
 versionStr :: String
 versionStr = case version of

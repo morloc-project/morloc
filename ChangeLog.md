@@ -1,3 +1,9 @@
+0.53.5 [2025-05-12]
+-------------------
+
+ * Fixed unnecessary copying in C libs
+ * Fixed double let-binding in code gen
+
 0.53.4 [2025-05-08]
 -------------------
 
