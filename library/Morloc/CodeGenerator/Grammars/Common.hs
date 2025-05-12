@@ -130,7 +130,6 @@ instance Dependable NativeExpr where
   isAtomic ManN{} = False
   isAtomic SerialLetN{} = False
   isAtomic NativeLetN{} = False
-  isAtomic DeserializeN{} = False
   isAtomic AccN{} = False
   isAtomic ListN{} = False
   isAtomic TupleN{} = False
@@ -155,6 +154,7 @@ instance Dependable SerialExpr where
   isAtomic (LetVarS _ _) = True
   isAtomic (BndVarS _ _) = True
   isAtomic (ReturnS _) = True
+  isAtomic (SerializeS _ _) = True
   isAtomic _ = False
 
 
@@ -204,10 +204,12 @@ invertSerialManifold sm0 =
     atomize (AppSrcN t src qs nativeArgs') deps
   invertNativeExprM (ManN_ (D nm lets)) = atomize (ManN nm) lets
   invertNativeExprM (ReturnN_ (D ne lets)) = atomize (ReturnN ne) lets
+
   invertNativeExprM (SerialLetN_ i (D se1 lets1) (D ne2 lets2)) =
     return $ D ne2 (lets2 <> ((i, Left  se1) : lets1))
-  invertNativeExprM (NativeLetN_ i (D ne1 lets1) (D se2 lets2)) =
-    return $ D se2 (lets2 <> ((i, Right ne1) : lets1))
+  invertNativeExprM (NativeLetN_ i (D ne1 lets1) (D ne2 lets2)) =
+    return $ D ne2 (lets2 <> ((i, Right ne1) : lets1))
+
   invertNativeExprM (LetVarN_ t i) = atomize (LetVarN t i) []
   invertNativeExprM (BndVarN_ t i) = atomize (BndVarN t i) []
   invertNativeExprM (DeserializeN_ t s (D se lets)) = atomize (DeserializeN t s se) lets
