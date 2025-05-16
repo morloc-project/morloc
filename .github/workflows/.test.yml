@@ -1,9 +1,16 @@
 name: Test Morloc
 on: [push]
+
 jobs:
   linux-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: ghcr.io/morloc-project/morloc/morloc-test:latest
+      options: --shm-size=4g # required for shared memory pool
+
     env:
+      HOME: /root
       DEBIAN_FRONTEND: noninteractive
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
@@ -11,46 +18,18 @@ jobs:
       - name: Checkout Morloc code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Python dependencies
+      - name: Diagnostics
         run: |
-          sudo apt-get update
-          python3 -m pip install pip numpy setuptools
-          sudo apt-get install -y python3-numpy
+          pwd
+          ls -l
+          whoami
 
-      - uses: r-lib/actions/setup-r@v2
-
-      - name: Set up R caching
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.R_LIBS_USER }}
-          key: r-${{ hashFiles('DESCRIPTION') }}
-
-      - name: Set up R environment
-        run: |
-          sudo apt-get install -y r-base libgsl-dev
-          Rscript -e 'install.packages(c("rlang"), repos="https://cloud.r-project.org")'
-
-      - name: Cache Stack dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.stack
-            .stack-work
-          key: stack-${{ hashFiles('stack.yaml.lock') }}-${{ hashFiles('package.yaml', '*.cabal') }}
-    
       - name: Build Morloc
         run: |
-          curl -sSL https://get.haskellstack.org/ | sh || echo "already installed"
-          stack install --fast
+          stack --allow-different-user install --fast --local-bin-path=/usr/local/bin
 
       - name: Load morloc modules
         run: |
-          sudo apt-get install -y git
           morloc init -f
           morloc install prelude
           morloc install types
@@ -64,3 +43,4 @@ jobs:
       - name: Test morloc
         run: |
           stack test --fast
+        timeout-minutes: 30

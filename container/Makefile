@@ -33,22 +33,31 @@ build-tiny:
 build-full:
 	podman build --no-cache --force-rm -t ghcr.io/morloc-project/morloc/morloc-full:${MORLOC_VERSION} full
 
+# Build the required docker image
+build-test:
+	podman build --no-cache --force-rm -t ghcr.io/morloc-project/morloc/morloc-test test
+
 # Open a shell with a nice environment (vim and other niceties)
 shell:
-	podman run --rm -it ghcr.io/morloc-project/morloc/morloc-full:${MORLOC_VERSION} /bin/bash
+	podman run --shm-size=4g --rm -it ghcr.io/morloc-project/morloc/morloc-full:${MORLOC_VERSION} /bin/bash
 
 shell-tiny:
-	podman run --rm -it ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION} /bin/bash
+	podman run --shm-size=4g --rm -it ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION} /bin/bash
+
+shell-test:
+	podman run --shm-size=4g --rm -it ghcr.io/morloc-project/morloc/morloc-test /bin/bash
 
 # push local containers to the github registry
 push:
 	podman push ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION}
 	podman push ghcr.io/morloc-project/morloc/morloc-full:${MORLOC_VERSION}
+	podman push ghcr.io/morloc-project/morloc/morloc-test
 
 # retrieve the latest morloc builds from the github registry
 pull:
 	podman pull ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION}
 	podman pull ghcr.io/morloc-project/morloc/morloc-full:${MORLOC_VERSION}
+	podman pull ghcr.io/morloc-project/morloc/morloc-test
 
 
 # Cleanup of podman images may be done as follows
