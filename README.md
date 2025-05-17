@@ -1,8 +1,6 @@
 [![build status](https://github.com/morloc-project/morloc/actions/workflows/.test.yml/badge.svg)](https://github.com/morloc-project/morloc/actions/workflows/.test.yml)
 [![github release](https://img.shields.io/github/release/morloc-project/morloc.svg?label=current+release)](https://github.com/morloc-project/morloc/releases)
-[![unstable](http://badges.github.io/stability-badges/dist/experimental.svg)](http://github.com/badges/stability-badges)
 [![license: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![DOI](https://zenodo.org/badge/75355860.svg)](https://zenodo.org/badge/latestdoi/75355860)
 
 `morloc` is a strongly-typed functional programming language where functions are
 imported from foreign languages and unified under a common type system.
