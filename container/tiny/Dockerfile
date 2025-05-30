@@ -1,6 +1,6 @@
 ###############################################################################
 # Stage 1: Build the morloc compiler 
-FROM ubuntu:22.04 as morloc-build
+FROM docker.io/library/ubuntu:22.04 as morloc-build
 
 RUN apt-get update && apt-get install -y git curl pkg-config libglib2.0-dev
 
@@ -21,7 +21,7 @@ LABEL org.opencontainers.image.source=https://github.com/morloc-project/morloc
 LABEL org.opencontainers.image.description="Morloc executable in a minimal container"
 LABEL org.opencontainers.image.licenses=MIT
 
-FROM ubuntu:22.04
+FROM docker.io/library/ubuntu:22.04
 COPY --from=morloc-build /root/.local/bin/morloc /bin/morloc
 
 # morloc make builds C++ pools, so g++ is needed

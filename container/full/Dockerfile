@@ -2,9 +2,8 @@ LABEL org.opencontainers.image.source=https://github.com/morloc-project/morloc
 LABEL org.opencontainers.image.description="A morloc container intended for interactive shell use"
 LABEL org.opencontainers.image.licenses=MIT
 
-FROM ubuntu:22.04
+FROM docker.io/library/ubuntu:22.04
 COPY --from=ghcr.io/morloc-project/morloc/morloc-tiny:0.53.5 /bin/morloc /bin/morloc
-
 
 WORKDIR $HOME
 
