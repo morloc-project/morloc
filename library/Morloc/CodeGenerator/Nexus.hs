@@ -93,19 +93,19 @@ main config fdata cdata
 usageCode :: [FData] -> [NexusCommand] -> MDoc
 usageCode fdata cdata =
   [idoc|
-    fprintf(stderr, "The following commands are exported:\n");
+    fprintf(stderr, "%s", "The following commands are exported:\n");
     #{align $ vsep (map usageLineT fdata ++ map usageLineConst cdata)}
 |]
 
 usageLineT :: FData -> MDoc
 usageLineT (_, name', _, t, _, _, _) = vsep
-  ( [idoc|fprintf(stderr, "  #{name'}\n");|]
+  ( [idoc|fprintf(stderr, "%s", "  #{name'}\n");|]
   : writeTypes t
   )
 
 usageLineConst :: NexusCommand -> MDoc
 usageLineConst cmd = vsep
-  ( [idoc|fprintf(stderr, "  #{pretty (commandName cmd)}\n");|]
+  ( [idoc|fprintf(stderr, "%s", "  #{pretty (commandName cmd)}\n");|]
   : writeTypes (commandType cmd)
   )
 
@@ -116,12 +116,13 @@ writeTypes (FunT inputs output)
 writeTypes t = [writeType Nothing t]
 
 writeType :: Maybe Int -> Type -> MDoc
-writeType (Just i) t = [idoc|fprintf(stderr, "    param #{pretty i}: #{pretty t}\n");|]
-writeType Nothing  t = [idoc|fprintf(stderr, "    return: #{pretty t}\n");|]
+writeType (Just i) t = [idoc|fprintf(stderr, "%s", "    param #{pretty i}: #{pretty t}\n");|]
+writeType Nothing  t = [idoc|fprintf(stderr, "%s", "    return: #{pretty t}\n");|]
 
 dispatchCode _ [] [] = "// nothing to dispatch"
 dispatchCode config fdata cdata = [idoc|
     uint32_t mid = 0;
+    int retcode = 0;
     #{vsep socketDocs}
     if(config.packet_path != NULL){
         morloc_socket_t* all_sockets[] = #{allSocketsList};
@@ -137,13 +138,21 @@ dispatchCode config fdata cdata = [idoc|
         [idoc|
     morloc_socket_t #{varName} = { 0 };
     #{varName}.lang = strdup("#{pretty $ socketLang socket}");
-    #{varName}.syscmd = (char**)calloc(#{pretty $ length execArgs + 4}, sizeof(morloc_socket_t*));
+    #{varName}.syscmd = (char**)calloc(#{pretty $ length execArgs + 4}, sizeof(char*));
     #{execArgsDoc} 
-    asprintf(&#{varName}.syscmd[#{pretty $ length execArgs}], "%s/#{socketBasename}", tmpdir);
+    retcode = asprintf(&#{varName}.syscmd[#{pretty $ length execArgs}], "%s/#{socketBasename}", tmpdir);
+    if(retcode == -1){
+        fprintf(stderr, "%s", "Failed to make syscmd\n");
+        clean_exit(1);
+    }
     #{varName}.syscmd[#{pretty $ length execArgs + 1}] = strdup(tmpdir);
     #{varName}.syscmd[#{pretty $ length execArgs + 2}] = strdup(shm_basename);
     #{varName}.syscmd[#{pretty $ length execArgs + 3}] = NULL;
-    asprintf(&#{varName}.socket_filename, "%s/#{socketBasename}", tmpdir);
+    retcode = asprintf(&#{varName}.socket_filename, "%s/#{socketBasename}", tmpdir);
+    if(retcode == -1){
+        fprintf(stderr, "%s", "Failed to make socket name\n");
+        clean_exit(1);
+    }
 
         |]
         where
@@ -182,7 +191,7 @@ dispatchCode config fdata cdata = [idoc|
 
     makeCaseDoc (socket, sub, midx, _, sockets, schemas, returnSchema) = 
         ( [idoc|strcmp(cmd, "#{sub}") == 0|]
-        ,[idoc|    uint32_t mid = #{pretty midx};
+        ,[idoc|    mid = #{pretty midx};
     morloc_socket_t* sockets[] = #{socketList};
     const char* arg_schemas[] = #{argSchemasList};
     char return_schema[] = #{returnSchema};
@@ -229,7 +238,7 @@ makeGastCaseDoc nc = (cond, body)
         , [idoc|path_t path_#{pretty i}[] = #{pathStr}; |]
         , [idoc|size_t path_length_#{pretty i} = #{pretty $ length path}; |]
         , [idoc|char* arg_str_#{pretty i} = access_json_by_path(args[#{pretty (lookupKey key (commandArgs nc))}], path_#{pretty i}, path_length_#{pretty i}, &errmsg_#{pretty i});|]
-        , [idoc|if(errmsg_#{pretty i} != NULL) { fprintf(stderr, "failed to parse json argument\n"); exit(1); } |]
+        , [idoc|if(errmsg_#{pretty i} != NULL) { fprintf(stderr, "%s", "failed to parse json argument\n"); exit(1); } |]
         ]
         where
             pathStr = encloseSep "{" "}" "," $ map makeElementStr path
