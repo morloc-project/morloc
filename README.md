@@ -20,57 +20,75 @@ requests, issue reports, and private messages are very welcome.
 
 ## Running morloc
 
-`morloc` should run on Linux and MacOS. For Windows, I suggest using [Windows Subsystem for
-Linux](https://learn.microsoft.com/en-us/windows/wsl/install).
-
-The easiest way to start using `morloc` is through containers. Unless you love
-running with daemons, I recommend using podman.
+The easiest way to start using `morloc` is through containers. I recommend using
+podman, since it doesn't require a daemon or sudo access. But Docker,
+Singularity, and similar tools should suffice.
 
 A container with the morloc executable and batteries included can be retrieved
 from the GitHub container registry as follows:
 
 ```bash
-$ podman pull ghcr.io/morloc-project/morloc/morloc-full:0.50.0
+$ podman pull ghcr.io/morloc-project/morloc/morloc-full:0.53.5
 ```
+
+The `v0.53.5` may be replaced with the desired `morloc` version.
 
 Now you can enter a shell with a full working installation of `morloc`:
 
 ```bash
-$ podman run -v $PWD:/home -it ghcr.io/morloc-project/morloc/morloc-full:0.50.0 /bin/bash
+$ podman run --shm-size=4g -v $HOME:$HOME -w $PWD -e HOME=$HOME -it ghcr.io/morloc-project/morloc/morloc-full:0.53.5 /bin/bash
 ```
 
-The `v0.50.0` may be replaced with the desired `morloc` version.
+The `--shm-size=4g` option sets the shared memory space to 4GB. `morloc` uses
+shared memory for communication between languages, but containers often limit
+the shared memory space to 64MB by default.
 
-Alternatively, you can set up a script to emulate a local `morloc` installation:
+Alternatively, you can set up a script to run commands in a `morloc` environment:
 
 ```bash
-#!/bin/bash
-mkdir -p ~/.morloc
 podman run --rm \
+           --shm-size=4g \
            -e HOME=$HOME \
            -v $HOME/.morloc:$HOME/.morloc \
            -v $PWD:$HOME \
            -w $HOME \
-           ghcr.io/morloc-project/morloc/morloc-full:0.50.0 morloc "$@"
+           ghcr.io/morloc-project/morloc/morloc-full:0.53.5 "$@"
 ```
 
-Name this script `morloc`, make it executable, and place it in your `PATH`. The
-script will mount your current working directory and your `morloc` home
-directory, allowing you to install and use modules.
+Name this script `menv`, for "morloc environment", make it executable, and place
+it in your PATH. The script will mount your current working directory and your
+`morloc` home directory, allowing you to run commands in a morloc-compatible
+environment.
 
-This script can serve as a drop-in replacement for a local morloc compiler. It
-will compile any generated C++ code and build required internal shared
-libraries.
+You can can run commands like so:
+
+```
+$ menv morloc --version      # get the current morloc version
+$ menv morloc -h             # list morloc commands
+$ menv morloc init -f        # setup the morloc environment
+$ menv morloc install types  # install a morloc module
+$ menv morloc make foo.loc   # compile a local morloc module
+```
+
+The generated executables may not work on your system since they were compiled
+inside the container, but you can run them also in the `morloc` environment:
+
+```
+$ menv ./nexus foo 1 2 3
+```
+
+More advanced solutions with richer dependency handling will be introduced in
+the future, but for now this allows easy experimentation with the language in a
+safe(ish) sandbox.
 
 ## Installing from source
 
-Unless you know what you are doing, I don't recommend building from
+Unless you are hacking on the compiler itself, I don't recommend building from
 source. Doing so will require a working Haskell environment. Running examples
 may also require installing Python, R, and suitable C++ compilers. If you still
-want to build from source, I recommend you read the `morloc`
-[Dockerfile](https://github.com/morloc-project/morloc/blob/master/container/ubuntu/base/Dockerfile). It
-contains instructions for Alpine and will at least point you in the right
-direction.
+want to build from source, I recommend you read the `morloc` Dockerfile's in the
+`container` folder. They contain instructions that will at point you in the
+right direction.
 
 ## Installing `morloc` modules
 
