@@ -28,15 +28,15 @@ A container with the morloc executable and batteries included can be retrieved
 from the GitHub container registry as follows:
 
 ```bash
-$ podman pull ghcr.io/morloc-project/morloc/morloc-full:0.53.6
+$ podman pull ghcr.io/morloc-project/morloc/morloc-full:0.53.7
 ```
 
-The `v0.53.6` may be replaced with the desired `morloc` version.
+The `v0.53.7` may be replaced with the desired `morloc` version.
 
 Now you can enter a shell with a full working installation of `morloc`:
 
 ```bash
-$ podman run --shm-size=4g -v $HOME:$HOME -w $PWD -e HOME=$HOME -it ghcr.io/morloc-project/morloc/morloc-full:0.53.6 /bin/bash
+$ podman run --shm-size=4g -v $HOME:$HOME -w $PWD -e HOME=$HOME -it ghcr.io/morloc-project/morloc/morloc-full:0.53.7 /bin/bash
 ```
 
 The `--shm-size=4g` option sets the shared memory space to 4GB. `morloc` uses
@@ -52,7 +52,7 @@ podman run --rm \
            -v $HOME/.morloc:$HOME/.morloc \
            -v $PWD:$HOME \
            -w $HOME \
-           ghcr.io/morloc-project/morloc/morloc-full:0.53.6 "$@"
+           ghcr.io/morloc-project/morloc/morloc-full:0.53.7 "$@"
 ```
 
 Name this script `menv`, for "morloc environment", make it executable, and place

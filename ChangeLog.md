@@ -1,3 +1,8 @@
+0.53.7 [2025-05-31]
+-------------------
+
+ * Fix bug in parameterized type definition concrete type inference
+
 0.53.6 [2025-05-31]
 -------------------
 
