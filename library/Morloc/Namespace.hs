@@ -815,7 +815,7 @@ data MorlocError
   | IncompatibleRealization MVar
   | MissingAbstractType
   | ExpectedAbstractType
-  | CannotInferConcretePrimitiveType
+  | CannotInferConcretePrimitiveType Type
   | ToplevelStatementsHaveNoLanguage
   | InconsistentWithinTypeLanguage
   | CannotInferLanguageOfEmptyRecord
@@ -1494,7 +1494,7 @@ instance Pretty MorlocError where
   pretty (IncompatibleRealization _) = "IncompatibleRealization"
   pretty MissingAbstractType = "MissingAbstractType"
   pretty ExpectedAbstractType = "ExpectedAbstractType"
-  pretty CannotInferConcretePrimitiveType = "CannotInferConcretePrimitiveType"
+  pretty (CannotInferConcretePrimitiveType t) = "Cannot infer concrete primitive type for" <+> parens (pretty t)
   pretty ToplevelStatementsHaveNoLanguage = "ToplevelStatementsHaveNoLanguage"
   pretty InconsistentWithinTypeLanguage = "InconsistentWithinTypeLanguage"
   pretty CannotInferLanguageOfEmptyRecord = "CannotInferLanguageOfEmptyRecord"

@@ -57,7 +57,7 @@ inferConcreteTypeU' :: TypeU -> (Scope, Scope) -> Either MorlocError TypeU
 inferConcreteTypeU' generalType (cscope, gscope) = T.pairEval cscope gscope generalType
 
 inferConcreteType :: Lang -> Indexed Type -> MorlocMonad TypeF
-inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
+inferConcreteType lang (Idx i t@(type2typeu -> generalType)) = do
   concreteType <- inferConcreteTypeU lang (Idx i generalType)
   (_, gscope) <- getScope i lang
   case weave gscope generalType concreteType of
@@ -69,15 +69,30 @@ inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
       gscopeUni <- CMS.gets stateUniversalGeneralTypedefs
       case weave gscopeUni generalType concreteType of
         (Right tf) -> return tf
-        (Left _) -> MM.throwError CannotInferConcretePrimitiveType
+        (Left _) -> do
+            -- Evaluate the general type one level and try again
+            --
+            -- Weaving will fail for parameterize type definitions, such as
+            --   type (Foo a) = [(a, Str)]
+            -- Here the primitive type (e.g., "std::vector<std::tuple<$1,std::string>>" a)
+            -- cannot be woven with the `Foo a` type. So `Foo a` needs to be
+            -- substituted for [(a, Str)], which can be woven.
+            mayReducedGType <- evalGeneralStep i generalType
+            case mayReducedGType of
+                (Just reducedGType) -> inferConcreteType lang (Idx i (typeOf reducedGType))
+                Nothing -> MM.throwError (CannotInferConcretePrimitiveType t)
 
 inferConcreteTypeUniversal :: Lang -> Type -> MorlocMonad TypeF
-inferConcreteTypeUniversal lang (type2typeu -> generalType) = do
+inferConcreteTypeUniversal lang t@(type2typeu -> generalType) = do
   gscopeUni <- CMS.gets stateUniversalGeneralTypedefs
   concreteType <- inferConcreteTypeUUniversal lang generalType
   case weave gscopeUni generalType concreteType of
     (Right tf) -> return tf
-    (Left _) -> MM.throwError CannotInferConcretePrimitiveType
+    (Left _) -> do
+        -- Evaluate the general type one level and try again
+        case T.evaluateStep gscopeUni generalType of
+            (Just reducedGType) -> inferConcreteTypeUniversal lang (typeOf reducedGType)
+            Nothing -> MM.throwError (CannotInferConcretePrimitiveType t)
 
 inferConcreteTypeUUniversal :: Lang -> TypeU -> MorlocMonad TypeU
 inferConcreteTypeUUniversal lang generalType = do
