@@ -1,3 +1,11 @@
+0.53.6 [2025-05-31]
+-------------------
+
+ * Improve container instructions in README
+ * Fix all README examples
+ * Make Dockerfiles more portable
+ * Fix bug in implicit typeclass instance inheritance
+
 0.53.5 [2025-05-12]
 -------------------
 
