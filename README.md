@@ -279,12 +279,13 @@ will be used in the generated C++ signature. The same occurs in the python type
 constructors `list`, except here the same Python type, `list`, is generated
 regardless of the type of `a`.
 
-This following example cannot be compiled since none of the functions are
-imported or sourced:
+This following example is the same as the previous but without imports.
 
 ```
+module sos (square, sumOfSquares)
+
 type Cpp => Real = "double"
-type Cpo => List a = "std::vector<$1>" a
+type Cpp => List a = "std::vector<$1>" a
 
 add :: Real -> Real -> Real
 mul :: Real -> Real -> Real
@@ -292,10 +293,11 @@ fold a b :: (b -> a -> b) -> b -> [a] -> b
 map a b :: (a -> b) -> [a] -> [b]
 
 square x = mul x x
-sumOfSquares xs = fold add 0 (map square xs)
+sumOfSquares xs = fold add 0.0 (map square xs)
 ```
 
-But it can be typechecked:
+No implementations are given for the functions, so the code cannot be
+compiled. It can, however, be typechecked:
 
 ```
 $ morloc typecheck examples/rmsWithTypes.loc
