@@ -167,9 +167,10 @@ Hello World
 The following code uses only C++ functions (`fold`, `map`, `add` and `mul`). 
 
 ```
-module sos (*)  -- '*' means export every term
+module sos (square, sumOfSquares)
 
-import cppbase (fold)
+import types (Real, List)
+import cppbase (fold, map)
 
 square :: Real -> Real
 square x = mul x x

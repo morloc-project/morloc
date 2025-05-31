@@ -40,6 +40,7 @@ main = do
       , golden "typeclasses-2" "typeclasses-2"
       , golden "typeclasses-3" "typeclasses-3"
       , golden "typeclasses-4" "typeclasses-4"
+      , golden "typeclasses-5" "typeclasses-5"
 
       , golden "string-encoding" "string-encoding"
       , golden "string-encoding-utf8" "string-encoding-utf8"

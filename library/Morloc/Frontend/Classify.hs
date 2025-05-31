@@ -41,8 +41,8 @@ linkTypeclasses
   -> MorlocMonad (Map.Map EVar (Indexed Instance))
 linkTypeclasses mv e es = do
 
-  -- remove any instance implementations that are not imported
-  let instances = [pruneInstances imports maps | (_, imports, maps) <- es]
+  -- import all instances, even if they are not explicitely imported
+  let instances = [maps | (_, _, maps) <- es]
 
   MM.sayVVV $ "linkTypeclasses" <+> pretty mv
 
@@ -53,14 +53,6 @@ linkTypeclasses mv e es = do
   -- Augment the inherited map with the typeclasses and instances in this module
   findTypeclasses e kids
 
-pruneInstances :: [(EVar, EVar)] -> Map.Map EVar (Indexed Instance) -> Map.Map EVar (Indexed Instance) 
-pruneInstances imports = Map.mapWithKey checkInstance where
-  checkInstance :: EVar -> Indexed Instance -> Indexed Instance
-  checkInstance v inst@(Idx i t) = case lookup v imports of
-    (Just v') -> if v == v'
-                 then inst
-                 else error "Cannot alias polymorphic terms"
-    Nothing -> Idx i $ t {instanceTerms = []}
 
 findTypeclasses
   :: ExprI
