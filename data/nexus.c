@@ -75,7 +75,7 @@ void clean_exit(int exit_code){
     char* errmsg = NULL;
     shclose(&errmsg);
     if(errmsg != NULL){
-        fprintf(stderr, errmsg);
+        fprintf(stderr, "%s", errmsg);
         exit(1);
     }
 
@@ -144,7 +144,8 @@ int start_language_server(const morloc_socket_t* socket, ERRMSG){
 }
 
 
-void print_return(uint8_t* packet, Schema* schema){
+void print_return(uint8_t* packet, Schema* schema, config_t config){
+    char* errmsg = NULL;
     char* child_errmsg = NULL;
 
     char* packet_error = get_morloc_data_packet_error_message(packet, &child_errmsg);
@@ -160,13 +161,37 @@ void print_return(uint8_t* packet, Schema* schema){
         ERROR("%s", child_errmsg);
     }
 
-    // print result
-    print_voidstar(packet_value, schema, &child_errmsg);
+    if(config.output_format == JSON){
+        // print result
+        print_voidstar(packet_value, schema, &child_errmsg);
+    } else if (config.output_format == MessagePack) {
+
+        char* mpk_ptr = NULL; // MessagePack data point
+        size_t mpk_size = 0;
+
+        // translate returned data to MessagePack format
+        ERROR_TRY_GOTO(pack_with_schema, (void*)packet_value, schema, &mpk_ptr, &mpk_size);
+
+        // print MessagePack data to STDOUT
+        ERROR_TRY_GOTO(print_binary, mpk_ptr, mpk_size);
+
+    } else if (config.output_format == Packet) {
+
+        // print Morloc packet
+        ERROR_TRY_GOTO(print_morloc_data_packet, packet, schema);
+
+    } else {
+        ERROR("Unsupported output_format specified (this should be impossible, this error message indicates a bug in the code).");
+    }
+
     if(child_errmsg == NULL){
         clean_exit(0);
     } else {
         ERROR("Failed to print return packet\n%s\n", child_errmsg);
     }
+
+end:
+    clean_exit(0);
 }
 
 
@@ -238,7 +263,8 @@ void run_command(
     char** args,
     const char** arg_schema_strs,
     const char* return_schema_str,
-    morloc_socket_t root_socket
+    morloc_socket_t root_socket,
+    config_t config
 ){
     char* errmsg = NULL;
 
@@ -257,7 +283,7 @@ void run_command(
         ERROR("Daemon is unresponsive:\n%s\n", errmsg);
     }
 
-    print_return(result_packet, return_schema);
+    print_return(result_packet, return_schema, config);
 }
 
 
@@ -372,7 +398,7 @@ int main(int argc, char *argv[]) {
         {"help",        no_argument,       0, 'h'},
         {"call-packet", required_argument, 0, 'c'},
         {"socket-base", required_argument, 0, 's'},
-        {"output-file", required_argument, 0, 'o'},
+        {"output-file", required_argument, 0, 'o'}, // where to write nexus final output
         {"output-form", required_argument, 0, 'f'},
         {NULL, 0, NULL, 0}
     };

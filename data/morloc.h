@@ -395,6 +395,23 @@ cleanup:
 }
 
 
+// Write a given number of bytes to STDOUT
+int print_binary(const char *buf, size_t count, ERRMSG) {
+    VAL_RETURN_SETUP(int, -1)
+    size_t total_written = 0;
+    ssize_t written;
+
+    while (total_written < count) {
+        written = write(STDOUT_FILENO, buf + total_written, count - total_written);
+        if (written < 0) {
+            RAISE("Failed to print data");
+        }
+        total_written += (size_t)written;
+    }
+    return 0;
+}
+
+
 // }}}
 
 // {{{ MessagePack parser from libmpack
@@ -2551,6 +2568,30 @@ void free_schema(Schema* schema) {
     FREE(schema);
 }
 
+// Check is the datastructure defined by a schema has fixed length.
+//
+// This will be true if there are no arrays in the structure.
+static bool schema_is_fixed_width(const Schema* schema){
+    switch(schema->type){
+        case MORLOC_STRING:
+        case MORLOC_ARRAY:
+            return false;
+        case MORLOC_TUPLE:
+        case MORLOC_MAP:
+            for(size_t i = 0; i < schema->size; i++){
+                if (! schema_is_fixed_width(schema->parameters[i])){
+                    return false;
+                }
+            }
+            break;
+        default:
+            return true;
+            break;
+    }
+    return true;
+}
+
+
 // }}} end morloc schema
 
 // {{{ morloc MessagePack support
@@ -4189,8 +4230,7 @@ typedef struct __attribute__((packed)) morloc_packet_header_s {
   packet_command_t command;
   // offset - 32 bit integer specifying offset to start of payload, the space
   // between the end of the header and the start of the payload may contain
-  // arbitrary extra information. Not currently used, but the <mode> field and
-  // special future command types may use this space for custom ends.
+  // arbitrary extra information.
   uint32_t offset;
   // length of the main payload data
   uint64_t length;
@@ -4645,6 +4685,235 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
     }
 
     return (uint8_t*)voidstar;
+}
+
+static size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG){
+    VAL_RETURN_SETUP(size_t, 0)
+
+    size_t size = 0;
+
+    switch(schema->type){
+        case MORLOC_STRING:
+            {
+                Array* array = (Array*)data;
+                size = sizeof(Array) + array->size * schema->parameters[0]->width;
+            }
+            break;
+        case MORLOC_ARRAY:
+            {
+                Array* array = (Array*)data;
+                size_t element_width = schema->parameters[0]->width;
+
+                uint8_t* element_data = TRY((uint8_t*)rel2abs, array->data);
+
+                size = sizeof(Array);
+
+                if (schema_is_fixed_width(schema)){
+                    size += element_width * array->size;
+                } else {
+                    for(size_t i = 0; i < array->size; i++){
+                        size += TRY(calculate_voidstar_size, element_data + i * element_width, schema->parameters[0]);
+                    }
+                }
+            }
+            break;
+        case MORLOC_TUPLE:
+        case MORLOC_MAP:
+            {
+                if (schema_is_fixed_width(schema)){
+                    size = schema->width;
+                } else {
+                    uint8_t* element_data = (uint8_t*)data;
+                    for(size_t i = 0; i < schema->size; i++){
+                        size += TRY(calculate_voidstar_size, element_data + schema->offsets[i], schema->parameters[i]);
+                    }
+                }
+            }
+            break;
+        default:
+            size = schema->width;
+            break;
+    }
+    return size;
+}
+
+
+
+static int print_voidstar_binary_r(const void* data, const Schema* schema, size_t* index, ERRMSG);
+static int print_voidstar_binary_arrays_r(const void* data, const Schema* schema, size_t* data_index, ERRMSG);
+static int print_voidstar_binary_binder_r(const void* data, const Schema* schema, size_t* data_index, ERRMSG);
+
+static int print_voidstar_binary_arrays_r(
+    const void* data,     // voidstar data
+    const Schema* schema, // voidstar schema
+    size_t* data_index,   // index relative to absolute data start
+    ERRMSG
+){
+    INT_RETURN_SETUP
+    switch (schema->type) {
+        case MORLOC_STRING:
+            {
+                Array* array = (Array*)data;
+                void* absptr = TRY(rel2abs, array->data);
+                size_t array_size = array->size * schema->parameters[0]->width;
+                TRY(print_binary, (char*)absptr, array_size);
+                *data_index = *data_index + array_size;
+            }
+            break;
+        case MORLOC_ARRAY:
+            {
+                Array* array = (Array*)data;
+                void* absptr = TRY(rel2abs, array->data);
+
+                if (schema_is_fixed_width(schema->parameters[0])){
+                    TRY(print_binary, (char*)absptr, schema->parameters[0]->width * array->size);
+                } else {
+                    size_t element_width = schema->parameters[0]->width;
+                    // All variable-length data for this element needs to be in
+                    // one contiguous block starting at location data_index
+                    for(size_t i = 0; i < array->size; i++){
+                        void* child = (void*)((char*)absptr + i * element_width);
+                        TRY(print_voidstar_binary_r, child, schema->parameters[0], data_index);
+                    }
+                }
+            }
+            break;
+        case MORLOC_TUPLE:
+        case MORLOC_MAP:
+            {
+                for(size_t i = 0; i < schema->size; i++){
+                    TRY(print_voidstar_binary_arrays_r, (void*)((char*)data + schema->offsets[i]), schema->parameters[i], data_index);
+                }
+            }
+            break;
+        default:
+            break;
+    }
+    return EXIT_PASS;
+}
+
+// Print voidstar data, starting at relptr location
+static int print_voidstar_binary_binder_r(
+    const void* data,     // voidstar data
+    const Schema* schema, // voidstar schema
+    size_t* data_index,   // index relative to absolute data start
+    ERRMSG
+){
+    INT_RETURN_SETUP
+
+    size_t data_size = 0;
+
+    switch (schema->type) {
+        case MORLOC_STRING:
+        case MORLOC_ARRAY:
+            {
+                Array array = *(Array*)data;
+                array.data = (relptr_t)(*data_index);
+                TRY(print_binary, (char*)(&array), sizeof(Array));
+                data_size = TRY(calculate_voidstar_size, data, schema);
+                *data_index = *data_index + data_size - schema->width;
+            }
+            break;
+        case MORLOC_TUPLE:
+        case MORLOC_MAP:
+            {
+                for(size_t i = 0; i < schema->size; i++){
+                    void* child = (void*)((char*)data + schema->offsets[i]);
+                    TRY(print_voidstar_binary_binder_r, child, schema->parameters[i], data_index);
+                }
+            }
+            break;
+        default:
+            {
+                TRY(print_binary, (char*)data, schema->width);
+            }
+    }
+    return EXIT_PASS;
+}
+
+int print_voidstar_binary_r(const void* data, const Schema* schema, size_t* index, ERRMSG){
+    INT_RETURN_SETUP
+    size_t width = schema->width;
+    *index = *index + width;
+    size_t initial_array_index = *index;
+    TRY(print_voidstar_binary_binder_r, data, schema, index);
+    TRY(print_voidstar_binary_arrays_r, data, schema, &initial_array_index);
+    return EXIT_PASS;
+}
+
+// Print voidstar data, update relative pointers so that the start of data is 0
+static int print_voidstar_binary(const void* data, const Schema* schema, ERRMSG){
+    INT_RETURN_SETUP
+    size_t index = 0;
+    int result = TRY(print_voidstar_binary_r, data, schema, &index);
+    return result;
+}
+
+// Print morloc data packet to a file descriptor
+//  * If the packet has the failed bit set, an error will be raised
+//  * If the data is stored as a file or message, the exact packet is printed
+//  * If the packet contains a relative pointer, it will be linearized and included as raw data
+int print_morloc_data_packet(const uint8_t* packet, const Schema* schema, ERRMSG){
+    INT_RETURN_SETUP
+
+    uint8_t source;
+    uint8_t format;
+
+    morloc_packet_header_t* header = TRY(read_morloc_packet_header, packet);
+
+    size_t packet_size = morloc_packet_size_from_header(header);
+
+    RAISE_IF(header->command.cmd_type.type != PACKET_TYPE_DATA, "Expected a data packet");
+
+    source = header->command.data.source;
+    format = header->command.data.format;
+
+    char* packet_error = TRY(get_morloc_data_packet_error_message, packet);
+    RAISE_IF(packet_error != NULL, "\n%s", packet_error)
+
+    switch (source) {
+        case PACKET_SOURCE_MESG:
+        case PACKET_SOURCE_FILE:
+            // verbatim print messages and files
+            TRY(print_binary, (char*)packet, packet_size);
+            break;
+        case PACKET_SOURCE_RPTR:
+            switch (format) {
+                case PACKET_FORMAT_JSON:
+                case PACKET_FORMAT_MSGPACK:
+                case PACKET_FORMAT_TEXT:
+                case PACKET_FORMAT_DATA:
+                    TRY(print_binary, (char*)packet, packet_size);
+                    break;
+                case PACKET_FORMAT_VOIDSTAR:
+                    {
+                        size_t relptr = *(size_t*)(packet + header->offset + sizeof(morloc_packet_header_t));
+                        void* voidstar_ptr = TRY(rel2abs, relptr);
+
+                        morloc_packet_header_t new_header = *header;
+                        new_header.command.data.format = PACKET_FORMAT_VOIDSTAR;
+                        new_header.length = TRY(calculate_voidstar_size, voidstar_ptr, schema);
+
+                        // print header
+                        TRY(print_binary, (char*)&new_header, sizeof(morloc_packet_header_t));
+
+                        // print metadata
+                        if(new_header.offset > 0) {
+                            TRY(print_binary, (char*)packet + sizeof(morloc_packet_header_t), new_header.offset);
+                        }
+
+                        // print flattened voidstar data
+                        TRY(print_voidstar_binary, voidstar_ptr, schema);
+                    }
+                    break;
+            }
+            break;
+
+        default:
+            RAISE("Invalid source");
+    }
+
+    return EXIT_PASS;
 }
 
 static uint8_t* make_morloc_call_packet_gen(uint32_t midx, uint8_t entrypoint, const uint8_t** arg_packets, size_t nargs, ERRMSG){
@@ -5194,27 +5463,6 @@ static uint64_t mix(uint64_t a, uint64_t b) {
 }
 
 
-static bool schema_is_fixed_width(const Schema* schema){
-    switch(schema->type){
-        case MORLOC_STRING:
-        case MORLOC_ARRAY:
-            return false;
-        case MORLOC_TUPLE:
-        case MORLOC_MAP:
-            for(size_t i = 0; i < schema->size; i++){
-                if (! schema_is_fixed_width(schema->parameters[i])){
-                    return false;
-                }
-            }
-            break;
-        default:
-            return true;
-            break;
-    }
-    return true;
-}
-
-
 static uint64_t hash_voidstar(absptr_t data, const Schema* schema, uint64_t seed, ERRMSG){
     VAL_RETURN_SETUP(uint64_t, 0)
 
@@ -5456,6 +5704,7 @@ uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
 
     FILE* fd;
     uint8_t* packet;
+    void* voidstar = NULL;
 
     // handle STDIN
     if(strcmp(arg, "/dev/stdin") == 0 || strcmp(arg, "-") == 0){
@@ -5495,8 +5744,10 @@ uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
         }
 
         if(has_suffix(arg, ".mpk") || has_suffix(arg, ".msgpack")){
-            unpack_with_schema(data, data_size, schema, (void**)&packet, &CHILD_ERRMSG);
+            unpack_with_schema(data, data_size, schema, &voidstar, &CHILD_ERRMSG);
             RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "Failed to read MessagePack argument file '%s':\n%s", arg, CHILD_ERRMSG)
+            relptr_t relptr = TRY(abs2rel, voidstar);
+            packet = make_standard_data_packet(relptr, schema);
             return packet;
         }
 
@@ -5513,7 +5764,9 @@ uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
         // Next check if it is MessagePack
         if(maybe_msgpack((uint8_t*)data, data_size)){
             // Try to parse as MessagePack
-            TRY(unpack_with_schema, data, data_size, schema, (void**)&packet);
+            TRY(unpack_with_schema, data, data_size, schema, &voidstar);
+            relptr_t relptr = TRY(abs2rel, voidstar);
+            packet = make_standard_data_packet(relptr, schema);
             free(data);
             return (uint8_t*)packet;
         }

@@ -196,7 +196,7 @@ dispatchCode config fdata cdata = [idoc|
     const char* arg_schemas[] = #{argSchemasList};
     char return_schema[] = #{returnSchema};
     start_daemons(sockets);
-    run_command(mid, args, arg_schemas, return_schema, #{lang}_socket);
+    run_command(mid, args, arg_schemas, return_schema, #{lang}_socket, config);
           |]
         )
         where
