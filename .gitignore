@@ -17,3 +17,4 @@ run/
 .bash_history
 .local
 .stack
+.aider*
