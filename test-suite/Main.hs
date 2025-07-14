@@ -36,6 +36,7 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "formatting" "formatting"
       , golden "cases-1" "cases-1"
 
       , golden "typeclasses-1" "typeclasses-1"

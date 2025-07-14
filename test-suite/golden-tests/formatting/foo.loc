@@ -1,0 +1,11 @@
+module m (f1, f2)
+
+type Py => Int = "int"
+type Py => Str = "str"
+type Py => Tuple2 a b = "tuple" a b
+type Py => List a = "list" a
+
+source Py from "foo.py" ("foo" as f1, "foo" as f2)
+
+f1 :: [(Str,Int)] -> [(Str,Int)]
+f2 :: ([Str],[Int]) -> ([Str],[Int])
