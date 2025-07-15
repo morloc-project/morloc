@@ -38,7 +38,7 @@
 typedef enum {
     JSON,
     MessagePack,
-    Packet
+    VoidStar
 } format_enum;
 
 typedef struct config_s {
@@ -175,7 +175,7 @@ void print_return(uint8_t* packet, Schema* schema, config_t config){
         // print MessagePack data to STDOUT
         ERROR_TRY_GOTO(print_binary, mpk_ptr, mpk_size);
 
-    } else if (config.output_format == Packet) {
+    } else if (config.output_format == VoidStar) {
 
         // print Morloc packet
         ERROR_TRY_GOTO(print_morloc_data_packet, packet, schema);
@@ -427,8 +427,8 @@ int main(int argc, char *argv[]) {
                     config.output_format = JSON;
                 } else if (strcmp(optarg, "mpk") == 0) {
                     config.output_format = MessagePack;
-                } else if (strcmp(optarg, "packet") == 0) {
-                    config.output_format = Packet;
+                } else if (strcmp(optarg, "voidstar") == 0) {
+                    config.output_format = VoidStar;
                 } else {
                     fprintf(stderr, "Invalid output format: %s\n", optarg);
                     exit(EXIT_FAILURE);

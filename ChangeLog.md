@@ -1,7 +1,7 @@
 0.54.0 [2025-07-13]
 -------------------
 
- [ ] Add full MessagePack and packet IO to nexus
+ * Add full MessagePack and VoidStar IO to nexus
 
 0.53.7 [2025-05-31]
 -------------------
