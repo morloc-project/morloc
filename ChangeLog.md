@@ -2,6 +2,7 @@
 -------------------
 
  * Add full MessagePack and VoidStar IO to nexus
+ * Fixed type printing in usage and typechecking output
 
 0.53.7 [2025-05-31]
 -------------------
