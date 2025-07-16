@@ -93,7 +93,14 @@ main config fdata cdata
 usageCode :: [FData] -> [NexusCommand] -> MDoc
 usageCode fdata cdata =
   [idoc|
-    fprintf(stderr, "%s", "The following commands are exported:\n");
+    fprintf(stderr, "%s", "Usage: ./nexus [OPTION]... COMMAND [ARG]...\n");
+    fprintf(stderr, "%s", "\n");
+    fprintf(stderr, "%s", "Nexus Options:\n");
+    fprintf(stderr, "%s", " -h, --help            Print this help message\n");
+    fprintf(stderr, "%s", " -o, --output-file     Print to this file instead of STDOUT\n");
+    fprintf(stderr, "%s", " -f, --output-format   Output format [json|mpk|voidstar]\n");
+    fprintf(stderr, "%s", "\n");
+    fprintf(stderr, "%s", "Exported Commands:\n");
     #{align $ vsep (map usageLineT fdata ++ map usageLineConst cdata)}
 |]
 
