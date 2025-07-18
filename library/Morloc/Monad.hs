@@ -37,6 +37,7 @@ module Morloc.Monad
   -- * metadata accessors
   , metaSources
   , metaName
+  , getDocStrings
   , getConcreteScope
   , getGeneralScope
   , getConcreteUniversalScope
@@ -266,6 +267,24 @@ metaSources i = do
 -- The name is linked to the SAnno general data structure.
 metaName :: Int -> MorlocMonad (Maybe EVar)
 metaName i = gets (Map.lookup i . stateName)
+
+-- Get the docstrings associated with an item
+getDocStrings
+    :: Int -- expression index
+    -> MorlocMonad
+        ( Maybe [[MT.Text]] -- docstrings for each top-level argument and the return value
+        , [MT.Text] -- docstrings for the entire expression
+        )
+getDocStrings i = do
+  sgmap <- gets stateSignatures
+  docstrings <- case GMap.lookup i sgmap of
+    GMapNoFst -> return (Nothing, [])
+    GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
+    (GMapJust (Monomorphic (TermTypes (Just e) _ _))) -> return (edocs e, sigDocs e)
+    (GMapJust (Polymorphic _ _ e _)) -> return (edocs e, sigDocs e)
+    _ -> return (Nothing, [])
+  return docstrings
+
 
 getConcreteScope :: Int -> Lang -> MorlocMonad Scope
 getConcreteScope i lang = do

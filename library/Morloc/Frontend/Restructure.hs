@@ -330,7 +330,7 @@ rename sourceName localAlias = f where
 nullify :: DAG m e ExprI -> DAG m e ExprI
 nullify = MDD.mapNode f where
     f :: ExprI -> ExprI
-    f (ExprI i (SigE (Signature v n (EType t ps cs)))) = ExprI i (SigE (Signature v n (EType (nullifyT t) ps cs)))
+    f (ExprI i (SigE (Signature v n (EType t ps cs edocs tdocs)))) = ExprI i (SigE (Signature v n (EType (nullifyT t) ps cs edocs tdocs)))
     f (ExprI i (ModE m es)) = ExprI i (ModE m (map f es))
     f (ExprI i (AssE v e es)) = ExprI i (AssE v (f e) (map f es))
     f e = e

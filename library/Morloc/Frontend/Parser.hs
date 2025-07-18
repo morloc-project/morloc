@@ -407,23 +407,30 @@ pSigE = do
 
 pSignature :: Parser Signature
 pSignature = do
+  sigDocs <- many (try preDoc)
   label' <- optional pTag
   v <- freenameL
   vs <- many freenameL |>> map TV
   _ <- op "::"
   props <- option [] (try pPropertyList)
-  t <- pType |>> forallWrap vs
-  constraints <- option [] pConstraints
-  return $ Signature
-    (EV v)
-    (Label <$> label')
-    (EType
-       { etype = t
-       , eprop = Set.fromList props
-       , econs = Set.fromList constraints
-       })
-  where
 
+  -- TODO: undocument and fix this for argument-wise docstring support
+  -- (mayDocs, t') <- pDocumentedFunction <|> pUndocumentedFunction
+  (mayDocs, t') <- pUndocumentedFunction
+
+  constraints <- option [] pConstraints
+
+  let t = forallWrap vs t'
+  let etype = EType { etype = t
+                    , eprop = Set.fromList props
+                    , econs = Set.fromList constraints
+                    , edocs = mayDocs
+                    , sigDocs = sigDocs
+                    }
+  let sig = Signature (EV v) (Label <$> label') etype
+
+  return sig
+  where
 
   pPropertyList :: Parser [Property]
   pPropertyList = do
@@ -444,6 +451,32 @@ pSignature = do
 
     pWord :: Parser MT.Text
     pWord =  MT.pack <$> lexeme (many1 alphaNumChar)
+
+-- foo
+--   :: A --' ladida description
+--   -> B --' ladida description
+pDocumentedFunction :: Parser (Maybe [[MT.Text]], TypeU)
+pDocumentedFunction = do
+  ts <- sepBy2 pDocumentedType (op "->")
+  case (init ts, last ts) of
+    (inputs, output) -> return
+      ( Just $ map fst inputs <> [fst output]
+      , FunU (map snd inputs) (snd output)
+      )
+  where
+    pDocumentedType :: Parser ([MT.Text], TypeU)
+    pDocumentedType = do
+      t <- pType'
+      -- docstrs <- many doc
+      let docstrs = []
+      return (docstrs, t)
+      where
+        pType' = try pUniU <|> try parensType <|> try pAppU <|> pVarU <|> pListU <|> pTupleU
+
+pUndocumentedFunction :: Parser (Maybe [[MT.Text]], TypeU)
+pUndocumentedFunction = do
+    t <- pType
+    return (Nothing, t)
 
 
 pSrcE :: Parser [ExprI]

@@ -17,6 +17,7 @@ import Morloc.Data.Doc
 import Morloc.DataFiles as DF
 import Morloc.CodeGenerator.Namespace
 import Morloc.Quasi
+import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Text as MT
 import qualified Control.Monad as CM
 import qualified Morloc.Config as MC
@@ -25,15 +26,18 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Infer as Infer
 import qualified Morloc.CodeGenerator.Serial as Serial
 
-type FData =
-  ( Socket
-  , MDoc -- subcommand name
-  , Int -- manifold ID
-  , Type -- argument type
-  , [Socket] -- list of sockets needed for this command
-  , [MDoc] -- argument type schemas
-  , MDoc -- return type schema
-  )
+data FData = FData
+  { fdataSocket :: Socket
+  , fdataSubcommand :: MDoc -- subcommand name
+  , fdataSubcommandLength :: Int -- subcommand length
+  , fdataMid :: Int -- manifold ID
+  , fdataType :: Type -- argument type
+  , fdataSubSockets :: [Socket] -- list of sockets needed for this command
+  , fdataArgSchemas :: [MDoc] -- argument type schemas
+  , fdataReturnSchema :: MDoc -- return type schema
+  , fdataArgDocs :: Maybe [[MT.Text]]
+  , fdataFunDocs :: [MT.Text]
+  }
 
 generate :: [NexusCommand] -> [(Type, Int, Lang, [Socket])] -> MorlocMonad Script
 generate cs xs = do
@@ -46,25 +50,48 @@ generate cs xs = do
       includeDir = home </> "include"
 
   fdata <- CM.mapM getFData xs -- [FData]
+
+  -- get the length of the longest subcommand name (needed for alignment)
+  let allSubcommandsLengths = map fdataSubcommandLength fdata <> map (MT.length . unEVar . commandName) cs
+  let longestSubcommand = if length allSubcommandsLengths > 0
+                          then maximum allSubcommandsLengths
+                          else 0
+
   outfile <- CMS.gets (fromMaybe "nexus.c" . stateOutfile)
   return $
     Script
       { scriptBase = outfile
       , scriptLang = ML.CLang
-      , scriptCode = "." :/ File outfile (Code . render $ main config fdata cs)
+      , scriptCode = "." :/ File outfile (Code . render $ main config fdata longestSubcommand cs)
       , scriptMake = [SysRun . Code $ "gcc -o nexus -O -I" <> MT.pack includeDir <> " " <> MT.pack outfile]
       }
 
 getFData :: (Type, Int, Lang, [Socket]) -> MorlocMonad FData
 getFData (t, i, lang, sockets) = do
+
+  (es, ss) <- MM.getDocStrings i
+
   mayName <- MM.metaName i
-  (arg_schemas, return_schema) <- makeSchemas i lang t
+  (argSchemas, returnSchema) <- makeSchemas i lang t
+
   case mayName of
     (Just name') -> do
       config <- MM.ask
-      let socket = MC.setupServerAndSocket config lang 
-      return (setSocketPath socket, pretty name', i, t, map setSocketPath sockets, map dquotes arg_schemas, dquotes return_schema)
+      let socket = MC.setupServerAndSocket config lang
+      return $ FData
+        { fdataSocket = setSocketPath socket
+        , fdataSubcommand = pretty name'
+        , fdataSubcommandLength = MT.length (unEVar name')
+        , fdataMid = i
+        , fdataType = t
+        , fdataSubSockets = map setSocketPath sockets
+        , fdataArgSchemas = map dquotes argSchemas
+        , fdataReturnSchema = dquotes returnSchema
+        , fdataArgDocs = es
+        , fdataFunDocs = ss
+        }
     Nothing -> MM.throwError . GeneratorError $ "No name in FData"
+
 
 -- place the socket files in the temporary directory for the given process
 setSocketPath :: Socket -> Socket
@@ -86,12 +113,12 @@ makeSchema mid lang t = do
   return $ Serial.serialAstToMsgpackSchema ast
 
 
-main :: MC.Config -> [FData] -> [NexusCommand] -> MDoc
-main config fdata cdata
-    = format (DF.embededFileText DF.nexusTemplate) "// <<<BREAK>>>" [ usageCode fdata cdata, dispatchCode config fdata cdata ]
+main :: MC.Config -> [FData] -> Int -> [NexusCommand] -> MDoc
+main config fdata longestCommandLength cdata
+    = format (DF.embededFileText DF.nexusTemplate) "// <<<BREAK>>>" [ usageCode fdata longestCommandLength cdata, dispatchCode config fdata cdata ]
 
-usageCode :: [FData] -> [NexusCommand] -> MDoc
-usageCode fdata cdata =
+usageCode :: [FData] -> Int -> [NexusCommand] -> MDoc
+usageCode fdata longestCommandLength cdata =
   [idoc|
     fprintf(stderr, "%s", "Usage: ./nexus [OPTION]... COMMAND [ARG]...\n");
     fprintf(stderr, "%s", "\n");
@@ -101,31 +128,48 @@ usageCode fdata cdata =
     fprintf(stderr, "%s", " -f, --output-format   Output format [json|mpk|voidstar]\n");
     fprintf(stderr, "%s", "\n");
     fprintf(stderr, "%s", "Exported Commands:\n");
-    #{align $ vsep (map usageLineT fdata ++ map usageLineConst cdata)}
+    #{align $ vsep (map (usageLineT longestCommandLength) fdata ++ map (usageLineConst longestCommandLength) cdata)}
 |]
 
-usageLineT :: FData -> MDoc
-usageLineT (_, name', _, t, _, _, _) = vsep
-  ( [idoc|fprintf(stderr, "%s", "  #{name'}\n");|]
-  : writeTypes t
+usageLineT :: Int -> FData -> MDoc
+usageLineT longestCommandLength fdata = vsep
+  ( [idoc|fprintf(stderr, "%s", "  #{fdataSubcommand fdata}#{desc (fdataFunDocs fdata)}\n");|]
+  : typeStrs
   )
+  where
+    padding = longestCommandLength - (fdataSubcommandLength fdata) + 2
 
-usageLineConst :: NexusCommand -> MDoc
-usageLineConst cmd = vsep
-  ( [idoc|fprintf(stderr, "%s", "  #{pretty (commandName cmd)}\n");|]
-  : writeTypes (commandType cmd)
+    desc [] = ""
+    desc (x:_) = pretty (replicate padding ' ') <> pretty x
+
+    typePadding = pretty $ replicate (longestCommandLength + 5) ' '
+
+    typeStrs = writeTypes typePadding (fdataType fdata)
+
+usageLineConst :: Int -> NexusCommand -> MDoc
+usageLineConst longestCommandLength cmd = vsep
+  ( [idoc|fprintf(stderr, "%s", "  #{pretty (commandName cmd)}#{desc (commandDocs cmd)}\n");|]
+  : writeTypes typePadding (commandType cmd)
   )
+  where
+    padding = longestCommandLength - (MT.length . unEVar . commandName $ cmd) + 2
 
-writeTypes :: Type -> [MDoc]
-writeTypes (FunT inputs output)
-  = zipWith writeType (map Just [1..]) inputs
-  ++ writeTypes output
-writeTypes t = [writeType Nothing t]
+    typePadding = pretty $ replicate (longestCommandLength + 5) ' '
 
-writeType :: Maybe Int -> Type -> MDoc
-writeType (Just i) t = [idoc|fprintf(stderr, "%s", "    param #{pretty i}: #{pretty t}\n");|]
-writeType Nothing  t = [idoc|fprintf(stderr, "%s", "    return: #{pretty t}\n");|]
+    desc [] = ""
+    desc (x:_) = pretty (replicate padding ' ') <> pretty x
 
+writeTypes :: MDoc -> Type -> [MDoc]
+writeTypes padding (FunT inputs output)
+  = zipWith (writeType padding) (map Just [1..]) inputs
+  ++ writeTypes padding output
+writeTypes padding t = [writeType padding Nothing t]
+
+writeType :: MDoc -> Maybe Int -> Type -> MDoc
+writeType padding (Just i) t = [idoc|fprintf(stderr, "%s", "  #{padding}param #{pretty i}: #{pretty t}\n");|]
+writeType padding Nothing  t = [idoc|fprintf(stderr, "%s", "  #{padding}return: #{pretty t}\n");|]
+
+dispatchCode :: Config -> [FData] -> [NexusCommand] -> MDoc
 dispatchCode _ [] [] = "// nothing to dispatch"
 dispatchCode config fdata cdata = [idoc|
     uint32_t mid = 0;
@@ -141,12 +185,12 @@ dispatchCode config fdata cdata = [idoc|
     #{cIfElse (head cases) (tail cases) (Just elseClause)}
     |]
     where
-    makeSocketDoc socket = 
+    makeSocketDoc socket =
         [idoc|
     morloc_socket_t #{varName} = { 0 };
     #{varName}.lang = strdup("#{pretty $ socketLang socket}");
     #{varName}.syscmd = (char**)calloc(#{pretty $ length execArgs + 4}, sizeof(char*));
-    #{execArgsDoc} 
+    #{execArgsDoc}
     retcode = asprintf(&#{varName}.syscmd[#{pretty $ length execArgs}], "%s/#{socketBasename}", tmpdir);
     if(retcode == -1){
         fprintf(stderr, "%s", "Failed to make syscmd\n");
@@ -182,23 +226,23 @@ dispatchCode config fdata cdata = [idoc|
     uniqueFst = f [] where
         f _ [] = []
         f seen (x@(a, _):xs)
-            | a `elem` seen = f seen xs 
+            | a `elem` seen = f seen xs
             | otherwise = x : f (a:seen) xs
 
-    allSockets = concat [ s:ss | (s, _, _, _, ss, _, _) <- fdata]
+    allSockets = concat [ (fdataSocket x) : (fdataSubSockets x) | x <- fdata]
 
     daemonSets = uniqueFst [ (socketLang s, s) | s <- allSockets ]
 
     allSocketsList = encloseSep "{ " " }" ", " (allSocketDocs <> ["(morloc_socket_t*)NULL"])
         where
         allSocketDocs = [ "&" <> (pretty . ML.makeExtension $ lang) <> "_socket" | (lang, _) <- daemonSets]
-            
+
 
     socketDocs = [makeSocketDoc s | (_, s) <- daemonSets]
 
-    makeCaseDoc (socket, sub, midx, _, sockets, schemas, returnSchema) = 
+    makeCaseDoc (FData socket sub _ midx _ sockets schemas returnSchema _ _) =
         ( [idoc|strcmp(cmd, "#{sub}") == 0|]
-        ,[idoc|    mid = #{pretty midx};
+        , [idoc|    mid = #{pretty midx};
     morloc_socket_t* sockets[] = #{socketList};
     const char* arg_schemas[] = #{argSchemasList};
     char return_schema[] = #{returnSchema};
@@ -224,10 +268,10 @@ cIfElse (cond1, block1) ifelses elseBlock = hsep $
     [ maybe "" (block 4 "else") elseBlock ]
 
 makeGastCaseDoc :: NexusCommand -> (MDoc, MDoc)
-makeGastCaseDoc nc = (cond, body) 
+makeGastCaseDoc nc = (cond, body)
     where
     cond = [idoc|strcmp(cmd, "#{func}") == 0|]
-    func = pretty . unEVar . commandName $ nc 
+    func = pretty . unEVar . commandName $ nc
     (argDefs, argStr) = case commandSubs nc of
         [] -> ("", "")
         xs -> ( vsep (map makeArgDef $ zip ([0..] :: [Int]) xs)
@@ -237,7 +281,7 @@ makeGastCaseDoc nc = (cond, body)
         [ argDefs
         , [idoc|printf("#{commandForm nc}\n"#{argStr});|]
         ]
-    
+
     makeArgDef :: (Int, (JsonPath, MT.Text, JsonPath)) -> MDoc
     makeArgDef (i, (_, key, [])) = [idoc|char* arg_str_#{pretty i} = args[#{pretty (lookupKey key (commandArgs nc))}];|]
     makeArgDef (i, (_, key, path)) = vsep
@@ -252,7 +296,7 @@ makeGastCaseDoc nc = (cond, body)
 
             makeElementStr :: JsonAccessor -> MDoc
             makeElementStr (JsonIndex ji) = [idoc|{JSON_PATH_TYPE_IDX, {.index = #{pretty ji}}}|]
-            makeElementStr (JsonKey k) = [idoc|{JSON_PATH_TYPE_KEY, {.key = "#{pretty k}"}}|] 
+            makeElementStr (JsonKey k) = [idoc|{JSON_PATH_TYPE_KEY, {.key = "#{pretty k}"}}|]
 
 
     lookupKey :: MT.Text -> [EVar] -> Int

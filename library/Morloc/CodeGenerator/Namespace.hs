@@ -164,6 +164,7 @@ data NexusCommand = NexusCommand
   --    1) path in JSON to value needs to be replaced
   --    2) the function argument from which to pull replacement value
   --    3) the path to the replacement value
+  , commandDocs :: [Text]
   }
   deriving(Show)
 

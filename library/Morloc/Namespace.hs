@@ -719,6 +719,8 @@ data EType =
     { etype :: TypeU
     , eprop :: Set.Set Property
     , econs :: Set.Set Constraint
+    , edocs :: Maybe [[Text]] -- Docstrings for each positional argument in a function
+    , sigDocs :: [Text] -- Docstrings for the signature
     }
   deriving (Show, Eq, Ord)
 
@@ -1255,7 +1257,7 @@ instance Pretty TypeU where
                       (vsep [pretty k <+> "::" <+> f True x | (k, x) <- rs])
 
 instance Pretty EType where
-  pretty (EType t (Set.toList -> ps) (Set.toList -> cs)) = case (ps, cs) of
+  pretty (EType t (Set.toList -> ps) (Set.toList -> cs) _ _) = case (ps, cs) of
     ([], []) -> pretty t
     _ -> parens (psStr ps <> pretty t <> csStr cs)
     where
