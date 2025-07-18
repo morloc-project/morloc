@@ -1,3 +1,11 @@
+0.54.0 [2025-07-13]
+-------------------
+
+ * Add full MessagePack and VoidStar IO to nexus
+ * Fixed type pretty printing in usage and typechecking output
+ * Add nexus option and usage info
+ * Add support for one-line command docstrings
+
 0.53.7 [2025-05-31]
 -------------------
 

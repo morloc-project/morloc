@@ -1,6 +1,8 @@
 #ifndef __MORLOC_H__
 #define __MORLOC_H__
 
+// {{{ setup
+
 #include <assert.h>
 #include <ctype.h>
 #include <dirent.h> // used in delete_directory
@@ -34,7 +36,11 @@
 #define WAIT_RETRY_MULTIPLIER 1.25
 #define WAIT_RETRY_ATTEMPTS 24
 
-// {{{ Error handling macro definictions
+#define BUFFER_SIZE 4096
+
+// }}} setup
+
+// {{{ error handling macro definictions
 
 #define FREE(ptr) \
     if(ptr != NULL){ \
@@ -392,6 +398,93 @@ cleanup:
     if (ret == -1) unlink(tmp_path);
     RAISE_IF(ret == -1, "Atomic write to '%s' failed: %s", filename, strerror(last_errno))
     return ret;
+}
+
+
+// Write a given number of bytes to STDOUT
+int print_binary(const char *buf, size_t count, ERRMSG) {
+    VAL_RETURN_SETUP(int, -1)
+    size_t total_written = 0;
+    ssize_t written;
+
+    while (total_written < count) {
+        written = write(STDOUT_FILENO, buf + total_written, count - total_written);
+        if (written < 0) {
+            RAISE("Failed to print data");
+        }
+        total_written += (size_t)written;
+    }
+    return 0;
+}
+
+
+uint8_t* read_binary_fd(FILE* file, size_t* file_size, ERRMSG) {
+    PTR_RETURN_SETUP(uint8_t)
+
+    uint8_t* msg = NULL;
+    size_t read_size = 0;
+    size_t file_size_long = 0;
+    size_t allocated_size = 0;
+    const size_t chunk_size = 0xffff;  // 64KB chunks
+
+    // First attempt to use seek-based size detection
+    if (fseek(file, 0, SEEK_END) == 0) {
+        file_size_long = ftell(file);
+        if (file_size_long > 0) {
+            rewind(file);
+            // Proceed with normal file handling
+            RAISE_IF(file_size_long > SIZE_MAX,
+                   "File too large (%zu bytes)", file_size_long)
+            *file_size = (size_t)file_size_long;
+            msg = (uint8_t*)malloc(*file_size);
+            RAISE_IF(msg == NULL, "Failed to allocate %zu bytes", *file_size)
+            read_size = fread(msg, 1, *file_size, file);
+            if(read_size == *file_size) {
+                return msg;
+            }
+            free(msg);  // Fall through to streaming if full read failed
+        }
+    }
+
+    // Handle non-seekable files (pipes, special devices)
+    *file_size = 0;
+    msg = NULL;
+
+    while (1) {
+        uint8_t* new_buf = (uint8_t*)realloc(msg, allocated_size + chunk_size);
+        RAISE_IF(new_buf == NULL, "Failed to allocate %zu bytes", allocated_size + chunk_size)
+        msg = new_buf;
+
+        read_size = fread(msg + allocated_size, 1, chunk_size, file);
+        allocated_size += read_size;
+
+        if (read_size < chunk_size) {
+            if (feof(file)) {
+                *file_size = allocated_size;
+                return msg;
+            }
+            if (ferror(file)) {
+                free(msg);
+                RAISE("Read error after %zu bytes", allocated_size)
+            }
+        }
+    }
+}
+
+
+uint8_t* read_binary_file(const char* filename, size_t* file_size, ERRMSG) {
+    PTR_RETURN_SETUP(uint8_t)
+
+    RAISE_IF(filename == NULL, "Found NULL filename")
+
+    FILE* file = fopen(filename, "rb");
+    RAISE_IF(file == NULL, "Failed to open file '%s'", filename)
+
+    uint8_t* data = read_binary_fd(file, file_size, &CHILD_ERRMSG);
+    fclose(file);
+    RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG);
+
+    return data;
 }
 
 
@@ -1314,7 +1407,7 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ER
 shm_t* shopen(size_t volume_index, ERRMSG);
 bool shclose(ERRMSG);
 void* shmalloc(size_t size, ERRMSG);
-void* shmemcpy(void* dest, size_t size, ERRMSG);
+void* shmemcpy(void* src, size_t size, ERRMSG);
 bool shfree(absptr_t ptr, ERRMSG);
 void* shcalloc(size_t nmemb, size_t size, ERRMSG);
 void* shrealloc(void* ptr, size_t size, ERRMSG);
@@ -1966,14 +2059,14 @@ void* shmalloc(size_t size, ERRMSG) {
     RAISE("Failed to allocate shared memory block of size %zu:\n%s", size, CHILD_ERRMSG);
 }
 
-void* shmemcpy(void* dest, size_t size, ERRMSG){
+void* shmemcpy(void* src, size_t size, ERRMSG){
     PTR_RETURN_SETUP(void)
 
-    void* src = TRY(shmalloc, size);
+    void* dest = TRY(shmalloc, size);
 
     memmove(dest, src, size);
 
-    return src;
+    return dest;
 }
 
 void* shcalloc(size_t nmemb, size_t size, ERRMSG) {
@@ -2096,8 +2189,6 @@ typedef enum {
 #define SCHEMA_ARRAY  'a'
 #define SCHEMA_TUPLE  't'
 #define SCHEMA_MAP    'm'
-
-#define BUFFER_SIZE 4096
 
 // Schema definition
 //  * Primitives have no parameters
@@ -2253,6 +2344,82 @@ typedef struct Array {
   size_t size;
   relptr_t data;
 } Array;
+
+
+// Check is the datastructure defined by a schema has fixed length.
+//
+// This will be true if there are no arrays in the structure.
+static bool schema_is_fixed_width(const Schema* schema){
+    switch(schema->type){
+        case MORLOC_STRING:
+        case MORLOC_ARRAY:
+            return false;
+        case MORLOC_TUPLE:
+        case MORLOC_MAP:
+            for(size_t i = 0; i < schema->size; i++){
+                if (! schema_is_fixed_width(schema->parameters[i])){
+                    return false;
+                }
+            }
+            break;
+        default:
+            return true;
+            break;
+    }
+    return true;
+}
+
+
+static size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG){
+    VAL_RETURN_SETUP(size_t, 0)
+
+    size_t size = 0;
+
+    switch(schema->type){
+        case MORLOC_STRING:
+            {
+                Array* array = (Array*)data;
+                size = sizeof(Array) + array->size * schema->parameters[0]->width;
+            }
+            break;
+        case MORLOC_ARRAY:
+            {
+                Array* array = (Array*)data;
+                size_t element_width = schema->parameters[0]->width;
+
+                uint8_t* element_data = TRY((uint8_t*)rel2abs, array->data);
+
+                size = sizeof(Array);
+
+                if (schema_is_fixed_width(schema)){
+                    size += element_width * array->size;
+                } else {
+                    for(size_t i = 0; i < array->size; i++){
+                        size += TRY(calculate_voidstar_size, element_data + i * element_width, schema->parameters[0]);
+                    }
+                }
+            }
+            break;
+        case MORLOC_TUPLE:
+        case MORLOC_MAP:
+            {
+                if (schema_is_fixed_width(schema)){
+                    size = schema->width;
+                } else {
+                    uint8_t* element_data = (uint8_t*)data;
+                    for(size_t i = 0; i < schema->size; i++){
+                        size += TRY(calculate_voidstar_size, element_data + schema->offsets[i], schema->parameters[i]);
+                    }
+                }
+            }
+            break;
+        default:
+            size = schema->width;
+            break;
+    }
+    return size;
+}
+
 
 // Prototypes
 
@@ -3190,7 +3357,7 @@ int unpack(const char* mpk, size_t mpk_size, const char* schema_str, void** mlcp
 
 // }}} end Morloc pack support
 
-// {{{ JSON support
+// {{{ morloc JSON support
 
 // Function to escape a JSON string
 static char* json_escape_string(const char* input, size_t input_len) {
@@ -4189,8 +4356,7 @@ typedef struct __attribute__((packed)) morloc_packet_header_s {
   packet_command_t command;
   // offset - 32 bit integer specifying offset to start of payload, the space
   // between the end of the header and the start of the payload may contain
-  // arbitrary extra information. Not currently used, but the <mode> field and
-  // special future command types may use this space for custom ends.
+  // arbitrary extra information.
   uint32_t offset;
   // length of the main payload data
   uint64_t length;
@@ -4217,13 +4383,12 @@ typedef struct morloc_metadata_header_s {
 
 // {{{ morloc packet API
 
-#define BUFFER_SIZE 4096
-
 typedef struct morloc_call_s {
     uint32_t midx;
     uint8_t** args;
     size_t nargs;
 } morloc_call_t;
+
 
 morloc_packet_header_t* read_morloc_packet_header(const uint8_t* msg, ERRMSG){
     PTR_RETURN_SETUP(morloc_packet_header_t)
@@ -4243,6 +4408,7 @@ bool packet_is_ping(const uint8_t* packet, ERRMSG){
     return header->command.cmd_type.type == PACKET_TYPE_PING;
 }
 
+
 bool packet_is_local_call(const uint8_t* packet, ERRMSG){
     BOOL_RETURN_SETUP
     morloc_packet_header_t* header = TRY(read_morloc_packet_header, packet);
@@ -4261,6 +4427,7 @@ bool packet_is_remote_call(const uint8_t* packet, ERRMSG){
 size_t morloc_packet_size_from_header(const morloc_packet_header_t* header){
     return sizeof(morloc_packet_header_t) + header->offset + header->length;
 }
+
 
 size_t morloc_packet_size(const uint8_t* packet, ERRMSG){
     VAL_RETURN_SETUP(size_t, 0);
@@ -4285,6 +4452,7 @@ uint8_t* return_ping(const uint8_t* packet, ERRMSG){
     return pong;
 }
 
+
 // Set the packet header at the first 32 bytes of a data block
 static void set_morloc_packet_header(
     uint8_t* data,
@@ -4303,6 +4471,7 @@ static void set_morloc_packet_header(
     header->length = length;
 }
 
+
 static void set_morloc_metadata_header(uint8_t* metadata, uint8_t metadata_type, uint32_t metadata_length){
     morloc_metadata_header_t* metadata_header = (morloc_metadata_header_t*)metadata;
     metadata_header->magic[0] = 'm';
@@ -4311,6 +4480,7 @@ static void set_morloc_metadata_header(uint8_t* metadata, uint8_t metadata_type,
     metadata_header->type = metadata_type;
     metadata_header->size = (uint32_t)metadata_length;
 }
+
 
 uint8_t* make_ping_packet(){
     uint8_t* packet = (uint8_t*)calloc(1, sizeof(morloc_packet_header_t));
@@ -4326,6 +4496,7 @@ uint8_t* make_ping_packet(){
 
     return packet;
 }
+
 
 static uint8_t* make_morloc_data_packet(
     const uint8_t* data,
@@ -4368,6 +4539,7 @@ static uint8_t* make_morloc_data_packet(
   return packet;
 }
 
+
 static uint8_t* make_morloc_data_packet_with_schema(
     const uint8_t* data,
     size_t data_length,
@@ -4394,6 +4566,7 @@ static uint8_t* make_morloc_data_packet_with_schema(
   return make_morloc_data_packet(data, data_length, metadata, metadata_length_total, src, fmt, cmpr, encr, status);
 }
 
+
 // Make a data packet from a relative pointer to shared memory data
 // Include the schema in the packet metadata
 uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema){
@@ -4414,6 +4587,7 @@ uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema){
   return packet;
 }
 
+
 uint8_t* make_mpk_data_packet(const char* mpk_filename, const Schema* schema){
     uint8_t* packet = make_morloc_data_packet_with_schema(
         (const uint8_t*)mpk_filename,
@@ -4428,6 +4602,7 @@ uint8_t* make_mpk_data_packet(const char* mpk_filename, const Schema* schema){
     return packet;
 }
 
+
 // Returns a metadata header if the magic matches, otherwise returns NULL
 morloc_metadata_header_t* as_morloc_metadata_header(const uint8_t* ptr){
 
@@ -4439,6 +4614,7 @@ morloc_metadata_header_t* as_morloc_metadata_header(const uint8_t* ptr){
 
     return metadata_header;
 }
+
 
 // Read a data packet type schema from the packet metadata
 // If no type schema is defined, return NULL
@@ -4483,74 +4659,6 @@ uint8_t* make_fail_packet(const char* failure_message){
   );
 }
 
-uint8_t* read_binary_fd(FILE* file, size_t* file_size, ERRMSG) {
-    PTR_RETURN_SETUP(uint8_t)
-
-    uint8_t* msg = NULL;
-    size_t read_size = 0;
-    size_t file_size_long = 0;
-    size_t allocated_size = 0;
-    const size_t chunk_size = 0xffff;  // 64KB chunks
-
-    // First attempt to use seek-based size detection
-    if (fseek(file, 0, SEEK_END) == 0) {
-        file_size_long = ftell(file);
-        if (file_size_long > 0) {
-            rewind(file);
-            // Proceed with normal file handling
-            RAISE_IF(file_size_long > SIZE_MAX,
-                   "File too large (%zu bytes)", file_size_long)
-            *file_size = (size_t)file_size_long;
-            msg = (uint8_t*)malloc(*file_size);
-            RAISE_IF(msg == NULL, "Failed to allocate %zu bytes", *file_size)
-            read_size = fread(msg, 1, *file_size, file);
-            if(read_size == *file_size) {
-                return msg;
-            }
-            free(msg);  // Fall through to streaming if full read failed
-        }
-    }
-
-    // Handle non-seekable files (pipes, special devices)
-    *file_size = 0;
-    msg = NULL;
-
-    while (1) {
-        uint8_t* new_buf = (uint8_t*)realloc(msg, allocated_size + chunk_size);
-        RAISE_IF(new_buf == NULL, "Failed to allocate %zu bytes", allocated_size + chunk_size)
-        msg = new_buf;
-
-        read_size = fread(msg + allocated_size, 1, chunk_size, file);
-        allocated_size += read_size;
-
-        if (read_size < chunk_size) {
-            if (feof(file)) {
-                *file_size = allocated_size;
-                return msg;
-            }
-            if (ferror(file)) {
-                free(msg);
-                RAISE("Read error after %zu bytes", allocated_size)
-            }
-        }
-    }
-}
-
-
-uint8_t* read_binary_file(const char* filename, size_t* file_size, ERRMSG) {
-    PTR_RETURN_SETUP(uint8_t)
-
-    RAISE_IF(filename == NULL, "Found NULL filename")
-
-    FILE* file = fopen(filename, "rb");
-    RAISE_IF(file == NULL, "Failed to open file '%s'", filename)
-
-    uint8_t* data = read_binary_fd(file, file_size, &CHILD_ERRMSG);
-    fclose(file);
-    RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG);
-
-    return data;
-}
 
 // Returns the error message if this packet failed and NULL otherwise
 char* get_morloc_data_packet_error_message(const uint8_t* data, ERRMSG){
@@ -4647,6 +4755,7 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
     return (uint8_t*)voidstar;
 }
 
+
 static uint8_t* make_morloc_call_packet_gen(uint32_t midx, uint8_t entrypoint, const uint8_t** arg_packets, size_t nargs, ERRMSG){
     PTR_RETURN_SETUP(uint8_t)
 
@@ -4685,12 +4794,14 @@ static uint8_t* make_morloc_call_packet_gen(uint32_t midx, uint8_t entrypoint, c
     return data;
 }
 
+
 // Make a packet wrapping a call on the local machine
 uint8_t* make_morloc_local_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG){
     PTR_RETURN_SETUP(uint8_t)
     uint8_t* packet = TRY(make_morloc_call_packet_gen, midx, PACKET_ENTRYPOINT_LOCAL, arg_packets, nargs);
     return packet;
 }
+
 
 // Make a packet wrapping a call on a remote worker
 uint8_t* make_morloc_remote_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG){
@@ -4748,7 +4859,215 @@ morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
     return call;
 }
 
+
 // }}} end packet support
+
+// {{{ morloc packet IO
+
+// * recurse through the data structure
+// * for each array, calculate the full size of the data it points to (subtract
+//   the 16 byte Array struct), add this to data_index
+static relptr_t print_voidstar_binary_binder_r(
+    const void* data,
+    const Schema* schema,
+    relptr_t data_index,
+    ERRMSG
+){
+    VAL_RETURN_SETUP(relptr_t, -1)
+
+    switch (schema->type) {
+        case MORLOC_STRING:
+        case MORLOC_ARRAY:
+            {
+                // copy the array struct
+                Array array = *(Array*)data;
+                // set the element pointer to the current data location
+                array.data = data_index;
+                // print just the array struct, the data will be printed later
+                TRY(print_binary, (char*)(&array), sizeof(Array));
+                // reserve space for the array and all its recursive contents
+                size_t data_size = TRY(calculate_voidstar_size, data, schema);
+                data_index += data_size - sizeof(Array);
+            }
+            break;
+        case MORLOC_TUPLE:
+        case MORLOC_MAP:
+            {
+                // recursively print every tuple element
+                for(size_t i = 0; i < schema->size; i++){
+                    void* child = (void*)((char*)data + schema->offsets[i]);
+                    data_index = TRY(print_voidstar_binary_binder_r, child, schema->parameters[i], data_index);
+                }
+            }
+            break;
+        default:
+            {
+                // print primitives
+                TRY(print_binary, (char*)data, schema->width);
+            }
+    }
+    return data_index;
+}
+
+// forward declaration, the *data_r and *arra_r functions are mutually recursive
+static relptr_t print_voidstar_binary_array_r(const void*, const Schema*, size_t, relptr_t, ERRMSG);
+
+// * recurse through the data structure
+// * call print_voidstar_binary_array_r on each array
+static relptr_t print_voidstar_binary_data_r(
+    const void* data,
+    const Schema* schema,
+    relptr_t data_index, // pointer to start of the data for all arrays
+    ERRMSG
+){
+    VAL_RETURN_SETUP(relptr_t, -1)
+
+    switch (schema->type) {
+        case MORLOC_STRING:
+        case MORLOC_ARRAY:
+            {
+                Array* array = (Array*)data;
+                void* absptr = TRY(rel2abs, array->data);
+                data_index = TRY(print_voidstar_binary_array_r, absptr, schema->parameters[0], array->size, data_index);
+            }
+            break;
+        case MORLOC_TUPLE:
+        case MORLOC_MAP:
+            {
+                // recursively print every tuple element
+                for(size_t i = 0; i < schema->size; i++){
+                    void* child = (void*)((char*)data + schema->offsets[i]);
+                    data_index = TRY(print_voidstar_binary_data_r, child, schema->parameters[i], data_index);
+                }
+            }
+            break;
+        default:
+            break;
+    }
+    return data_index;
+}
+
+// * map print_voidstar_binary_binder_r over elements
+// * map print_voidstar_binary_data_r over elements
+static relptr_t print_voidstar_binary_array_r(
+    const void* data, // pointer to the start of the array
+    const Schema* schema, // schema for the element type
+    size_t length, // number of elements in the array
+    relptr_t data_index, // relative pointer to the start of the data block
+    ERRMSG
+){
+    VAL_RETURN_SETUP(relptr_t, -1)
+
+    // all the fixed-size elements will be printed first
+    size_t fixed_array_size = schema->width * length;
+    data_index += fixed_array_size;
+    if (schema_is_fixed_width(schema)){
+        TRY(print_binary, (char*)data, fixed_array_size);
+    } else {
+        // print fixed width array elements
+        relptr_t binder_ptr = data_index; // for array pointers, don't reuse
+        for(size_t i = 0; i < length; i++){
+            void* child = (void*)((char*)data + i * schema->width);
+            binder_ptr = TRY(print_voidstar_binary_binder_r, child, schema, binder_ptr);
+        }
+        // print array data
+        for(size_t i = 0; i < length; i++){
+            void* child = (void*)((char*)data + i * schema->width);
+            data_index = TRY(print_voidstar_binary_data_r, child, schema, data_index);
+        }
+    }
+    return data_index;
+}
+
+// Print voidstar data relative to 0
+//
+// All array relative pointers need to be readjusted, since we are printing, all
+// actions have to be linear. The existing structure is not changed and no new
+// memory is allocated.
+//
+// On success, returns a relptr to the position after the data (probably not
+// useful unless you want to calculate the size of the printed data)
+static relptr_t print_voidstar_binary(
+    const void* data,
+    const Schema* schema,
+    ERRMSG
+){
+    VAL_RETURN_SETUP(relptr_t, -1)
+    relptr_t data_index = (relptr_t)schema->width;
+    TRY(print_voidstar_binary_binder_r, data, schema, data_index);
+    data_index = TRY(print_voidstar_binary_data_r, data, schema, data_index);
+    return data_index;
+}
+
+
+// Print morloc data packet to a file descriptor
+//  * If the packet has the failed bit set, an error will be raised
+//  * If the data is stored as a file or message, the exact packet is printed
+//  * If the packet contains a relative pointer, it will be linearized and included as raw data
+int print_morloc_data_packet(const uint8_t* packet, const Schema* schema, ERRMSG){
+    INT_RETURN_SETUP
+
+    uint8_t source;
+    uint8_t format;
+
+    morloc_packet_header_t* header = TRY(read_morloc_packet_header, packet);
+
+    size_t packet_size = morloc_packet_size_from_header(header);
+
+    RAISE_IF(header->command.cmd_type.type != PACKET_TYPE_DATA, "Expected a data packet");
+
+    source = header->command.data.source;
+    format = header->command.data.format;
+
+    char* packet_error = TRY(get_morloc_data_packet_error_message, packet);
+    RAISE_IF(packet_error != NULL, "\n%s", packet_error)
+
+    switch (source) {
+        case PACKET_SOURCE_MESG:
+        case PACKET_SOURCE_FILE:
+            // verbatim print messages and files
+            TRY(print_binary, (char*)packet, packet_size);
+            break;
+        case PACKET_SOURCE_RPTR:
+            switch (format) {
+                case PACKET_FORMAT_JSON:
+                case PACKET_FORMAT_MSGPACK:
+                case PACKET_FORMAT_TEXT:
+                case PACKET_FORMAT_DATA:
+                    TRY(print_binary, (char*)packet, packet_size);
+                    break;
+                case PACKET_FORMAT_VOIDSTAR:
+                    {
+                        size_t relptr = *(size_t*)(packet + header->offset + sizeof(morloc_packet_header_t));
+                        void* voidstar_ptr = TRY(rel2abs, relptr);
+
+                        morloc_packet_header_t new_header = *header;
+                        new_header.command.data.format = PACKET_FORMAT_VOIDSTAR;
+                        new_header.length = TRY(calculate_voidstar_size, voidstar_ptr, schema);
+
+                        // print header
+                        TRY(print_binary, (char*)&new_header, sizeof(morloc_packet_header_t));
+
+                        // print metadata
+                        if(new_header.offset > 0) {
+                            TRY(print_binary, (char*)packet + sizeof(morloc_packet_header_t), new_header.offset);
+                        }
+
+                        // print flattened voidstar data
+                        TRY(print_voidstar_binary, voidstar_ptr, schema);
+                    }
+                    break;
+            }
+            break;
+
+        default:
+            RAISE("Invalid source");
+    }
+
+    return EXIT_PASS;
+}
+
+// }}} end morloc packet IO
 
 // {{{ socket API
 
@@ -5194,27 +5513,6 @@ static uint64_t mix(uint64_t a, uint64_t b) {
 }
 
 
-static bool schema_is_fixed_width(const Schema* schema){
-    switch(schema->type){
-        case MORLOC_STRING:
-        case MORLOC_ARRAY:
-            return false;
-        case MORLOC_TUPLE:
-        case MORLOC_MAP:
-            for(size_t i = 0; i < schema->size; i++){
-                if (! schema_is_fixed_width(schema->parameters[i])){
-                    return false;
-                }
-            }
-            break;
-        default:
-            return true;
-            break;
-    }
-    return true;
-}
-
-
 static uint64_t hash_voidstar(absptr_t data, const Schema* schema, uint64_t seed, ERRMSG){
     VAL_RETURN_SETUP(uint64_t, 0)
 
@@ -5424,8 +5722,7 @@ char* check_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
 
 // }}} end hash support
 
-// {{{ Parsing CLI arguments
-
+// {{{ parsing CLI arguments
 
 // Check if the data may be MessagePack (and is not JSON)
 //
@@ -5450,12 +5747,58 @@ static bool maybe_msgpack(const uint8_t* data, size_t size) {
     return c > 0x7f || (c <= 0x7f && size == 1);
 }
 
+
+int rebase_relative_pointers(absptr_t mem, relptr_t rel, const Schema* schema, ERRMSG){
+    INT_RETURN_SETUP
+
+    switch(schema->type){
+        case MORLOC_STRING:
+            {
+                Array* arr = (Array*)mem;
+                arr->data += rel;
+            }
+            break;
+        case MORLOC_ARRAY:
+            {
+                Array* arr = (Array*)mem;
+                arr->data += rel;
+                if (!schema_is_fixed_width(schema->parameters[0])){
+                    absptr_t element_data = TRY(rel2abs, arr->data);
+                    for(size_t i = 0; i < arr->size; i++){
+                        absptr_t element_ptr = (absptr_t)((char*)element_data + i * schema->parameters[0]->width);
+                        TRY(rebase_relative_pointers, element_ptr, rel, schema->parameters[0]);
+                    }
+                }
+            }
+            break;
+        case MORLOC_TUPLE:
+        case MORLOC_MAP:
+            {
+                if (! schema_is_fixed_width(schema)){
+                    for(size_t i = 0; i < schema->size; i++){
+                        if (! schema_is_fixed_width(schema->parameters[i])){
+                            absptr_t element_ptr = (absptr_t)((char*)mem + schema->offsets[i]);
+                            TRY(rebase_relative_pointers, element_ptr, rel, schema->parameters[i]);
+                        } else {
+                        }
+                    }
+                }
+            }
+            break;
+        default:
+            break;
+    }
+
+    return EXIT_PASS;
+}
+
 // Parse a command line argument string that should contain data of a given type
 uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
     PTR_RETURN_SETUP(uint8_t)
 
     FILE* fd;
     uint8_t* packet;
+    void* voidstar = NULL;
 
     // handle STDIN
     if(strcmp(arg, "/dev/stdin") == 0 || strcmp(arg, "-") == 0){
@@ -5495,8 +5838,10 @@ uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
         }
 
         if(has_suffix(arg, ".mpk") || has_suffix(arg, ".msgpack")){
-            unpack_with_schema(data, data_size, schema, (void**)&packet, &CHILD_ERRMSG);
+            unpack_with_schema(data, data_size, schema, &voidstar, &CHILD_ERRMSG);
             RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "Failed to read MessagePack argument file '%s':\n%s", arg, CHILD_ERRMSG)
+            relptr_t relptr = TRY(abs2rel, voidstar);
+            packet = make_standard_data_packet(relptr, schema);
             return packet;
         }
 
@@ -5506,6 +5851,33 @@ uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
         if(data_size >= sizeof(morloc_packet_header_t)){
             morloc_packet_header_t* header = read_morloc_packet_header((uint8_t*)data, &CHILD_ERRMSG);
             if(CHILD_ERRMSG == NULL && header != NULL){
+                uint8_t source = header->command.data.source;
+                uint8_t format = header->command.data.format;
+
+                if (source == PACKET_SOURCE_RPTR) {
+                    if (format == PACKET_FORMAT_VOIDSTAR) {
+                        // get a pointer to the payload start
+                        void* voidstar_ptr = (void*)(data + sizeof(morloc_packet_header_t) + header->offset);
+
+                        // copy the data to shared memory
+                        absptr_t mem = TRY(shmemcpy, voidstar_ptr, header->length);
+                        free(data);
+
+                        // Get the relative pointer to the beginning of the
+                        // loaded data. This will be the offset by which we need
+                        // to adjust all realtive pointers in the uploaded
+                        // voidstar.
+                        relptr_t relptr = TRY(abs2rel, mem);
+
+                        // set all relative pointers
+                        TRY(rebase_relative_pointers, mem, relptr, schema);
+
+                        packet = make_standard_data_packet(relptr, schema);
+
+                        return (uint8_t*)packet;
+                    }
+                    RAISE("For RPTR source, expected voidstar format, found: 0x%02hhx", format);
+                }
                 return (uint8_t*)data;
             }
         }
@@ -5513,7 +5885,9 @@ uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
         // Next check if it is MessagePack
         if(maybe_msgpack((uint8_t*)data, data_size)){
             // Try to parse as MessagePack
-            TRY(unpack_with_schema, data, data_size, schema, (void**)&packet);
+            TRY(unpack_with_schema, data, data_size, schema, &voidstar);
+            relptr_t relptr = TRY(abs2rel, voidstar);
+            packet = make_standard_data_packet(relptr, schema);
             free(data);
             return (uint8_t*)packet;
         }

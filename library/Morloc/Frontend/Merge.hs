@@ -70,8 +70,17 @@ weaveTermTypes t1 [] = [t1]
 --  * Can properties simply be concatenated?
 --  * What if constraints are contradictory?
 mergeEType :: EType -> EType -> MorlocMonad EType
-mergeEType (EType t1 ps1 cs1) (EType t2 ps2 cs2)
-  = EType <$> mergeTypeUs t1 t2 <*> pure (ps1 <> ps2) <*> pure (cs1 <> cs2)
+mergeEType (EType t1 ps1 cs1 edocs1 tsigs1) (EType t2 ps2 cs2 edocs2 tsigs2)
+  = EType <$> mergeTypeUs t1 t2 <*> pure (ps1 <> ps2) <*> pure (cs1 <> cs2) <*> pure edocs <*> pure tsigs
+  where
+    edocs = mergeEdocs edocs1 edocs2
+    tsigs = mergeTsigs tsigs1 tsigs2
+
+    mergeEdocs x Nothing = x
+    mergeEdocs _ x = x
+
+    mergeTsigs x [] = x
+    mergeTsigs _ x = x
 
 
 -- merge two general types

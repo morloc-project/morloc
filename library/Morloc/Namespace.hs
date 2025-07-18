@@ -719,6 +719,8 @@ data EType =
     { etype :: TypeU
     , eprop :: Set.Set Property
     , econs :: Set.Set Constraint
+    , edocs :: Maybe [[Text]] -- Docstrings for each positional argument in a function
+    , sigDocs :: [Text] -- Docstrings for the signature
     }
   deriving (Show, Eq, Ord)
 
@@ -1208,41 +1210,54 @@ instance Pretty NamType where
   pretty = viaShow
 
 instance Pretty Type where
-  pretty (UnkT v) = pretty v
-  pretty (VarT v) = pretty v
-  pretty (FunT [] t) = "() -> " <> pretty t
-  pretty (FunT ts t) = encloseSep "(" ")" " -> " (map pretty (ts <> [t]))
-  pretty (AppT t ts) = hsep (map pretty (t:ts))
-  pretty (NamT o n ps rs)
-    = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
-              (vsep [pretty k <+> "::" <+> pretty x | (k, x) <- rs])
+  -- True if the expression is on top, otherwise it needs to be parenthesized
+  pretty t0 = f True t0 where
+    f _ (UnkT v) = pretty v
+    f _ (VarT v) = pretty v
+    f _ (AppT (VarT (TV "List")) [t]) = "[" <> f True t <> "]"
+    f _ (AppT (VarT (TV "Tuple2")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+    f _ (AppT (VarT (TV "Tuple3")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+    f _ (AppT (VarT (TV "Tuple4")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+    f _ (AppT (VarT (TV "Tuple5")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+    f _ (AppT (VarT (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+    f _ (AppT (VarT (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+    f _ (AppT (VarT (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+    f False t = parens (f True t) 
+    f _ (FunT [] t) = "() -> " <> f False t
+    f _ (FunT ts t) = hsep $ punctuate " -> " (map (f False) (ts <> [t]))
+    f _ (AppT t ts) = hsep (map (f False) (t:ts))
+    f _ (NamT o n ps rs)
+      = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
+                (vsep [pretty k <+> "::" <+> pretty x | (k, x) <- rs])
 
 instance Pretty TypeU where
-  pretty (FunU [] t) = "() -> " <> prettyTypeU t
-  pretty (FunU ts t) = hsep $ punctuate " ->" (map prettyTypeU (ts <> [t]))
-  pretty (ForallU v t) = "forall" <+> pretty v <+> "." <+> pretty t
-  pretty t = prettyTypeU t
-
-prettyTypeU :: TypeU -> Doc ann
-prettyTypeU (ExistU v [] []) = angles $ pretty v
-prettyTypeU (ExistU v ts rs)
-  = angles $ pretty v
-  <+> list (map prettyTypeU ts)
-  <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty prettyTypeU) rs)
-prettyTypeU (ForallU v t) = "forall" <+> pretty v <+> "." <+> prettyTypeU t
-prettyTypeU (VarU v) = pretty v
-prettyTypeU (FunU [] t) = parens $ "() -> " <> prettyTypeU t
-prettyTypeU (FunU ts t) = encloseSep "(" ")" " -> " (map prettyTypeU (ts <> [t]))
-prettyTypeU (AppU t ts) = hsep $ map parenTypeU (t:ts) where
-    parenTypeU t'@(AppU _ _) = parens $ prettyTypeU t'
-    parenTypeU t' = prettyTypeU t'
-prettyTypeU (NamU o n ps rs)
-    = parens
-    $ block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
-              (vsep [pretty k <+> "::" <+> prettyTypeU x | (k, x) <- rs])
+  -- True if the expression is on top, otherwise it needs to be parenthesized
+    pretty t0 = f True t0 where
+        f _ (VarU v) = pretty v
+        f _ (ExistU v [] []) = angles $ pretty v
+        f _ (AppU (VarU (TV "List")) [t]) = "[" <> f True t <> "]"
+        f _ (AppU (VarU (TV "Tuple2")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+        f _ (AppU (VarU (TV "Tuple3")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+        f _ (AppU (VarU (TV "Tuple4")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+        f _ (AppU (VarU (TV "Tuple5")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+        f _ (AppU (VarU (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+        f _ (AppU (VarU (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+        f _ (AppU (VarU (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+        f False t = parens (f True t)
+        f _ (ExistU v ts rs)
+          = angles $ pretty v
+          <+> list (map (f False) ts)
+          <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty (f True)) rs)
+        f _ (FunU [] t) = "() -> " <> f False t
+        f _ (FunU ts t) = hsep $ punctuate " ->" (map (f False) (ts <> [t]))
+        f _ (ForallU v t) = "forall" <+> pretty v <+> "." <+> f True t
+        f _ (AppU t ts) = hsep $ map (f False) (t:ts)
+        f _ (NamU o n ps rs)
+            = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
+                      (vsep [pretty k <+> "::" <+> f True x | (k, x) <- rs])
 
 instance Pretty EType where
-  pretty (EType t (Set.toList -> ps) (Set.toList -> cs)) = case (ps, cs) of
+  pretty (EType t (Set.toList -> ps) (Set.toList -> cs) _ _) = case (ps, cs) of
     ([], []) -> pretty t
     _ -> parens (psStr ps <> pretty t <> csStr cs)
     where
@@ -1359,7 +1374,7 @@ instance Pretty GammaIndex where
     = "ExistG:"
     <+> pretty tv
     <+> list (map (parens . pretty) ts)
-    <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty prettyTypeU) rs)
+    <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty pretty) rs)
   pretty (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> pretty t
   pretty (MarkG tv) = "MarkG:" <+> pretty tv
   pretty (SrcG (Source ev1 lang _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang

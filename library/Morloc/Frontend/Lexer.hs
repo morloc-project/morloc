@@ -19,6 +19,8 @@ module Morloc.Frontend.Lexer
   , braces
   , brackets
   , comments
+  , preDoc
+  , postDoc
   , emptyState
   , lexeme
   , many1
@@ -177,9 +179,33 @@ sepBy2 p s = do
 
 
 comments :: Parser ()
-comments =  L.skipLineComment "--"
+comments = try lineComment
         <|> L.skipBlockCommentNested "{-" "-}"
         <?> "comment"
+  where
+  lineComment :: Parser ()
+  lineComment = do
+    _ <- string "--"
+    -- ignore special comments
+    notFollowedBy (oneOf ['\'', '^'])
+    _ <- takeWhileP Nothing (/= '\n')
+    return ()
+
+
+preDoc :: Parser MT.Text
+preDoc = do
+    _ <- string "--'"
+    docstr <- takeWhileP Nothing (/= '\n')
+    _ <- sc
+    return docstr
+
+postDoc :: Parser MT.Text
+postDoc = do
+    _ <- string "--^"
+    docstr <- takeWhileP Nothing (/= '\n')
+    _ <- sc
+    return docstr
+
 
 data Sign = Pos | Neg
 

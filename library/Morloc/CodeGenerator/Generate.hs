@@ -460,6 +460,9 @@ removeVarS x = x
 
 generalSerial :: AnnoS (Indexed Type) One () -> MorlocMonad NexusCommand
 generalSerial x0@(AnnoS (Idx i t) _ _) = do
+
+  (_, docstrings) <- MM.getDocStrings i
+
   mayName <- MM.metaName i
   n <- case mayName of
     Nothing -> MM.throwError . OtherError $ "No name found for call-free function"
@@ -470,6 +473,7 @@ generalSerial x0@(AnnoS (Idx i t) _ _) = do
     , commandForm = ""
     , commandArgs = []
     , commandSubs = []
+    , commandDocs = docstrings
     }
   generalSerial' base [] x0
 
