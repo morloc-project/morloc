@@ -15,9 +15,24 @@ source Py from "foo.py"
  ,  "foo" as f5
  )
 
-f0 :: [Int] -> [Int]
-f1 :: [(Str,Int)] -> [(Str,Int)]
-f2 :: ([Str],[Int]) -> ([Str],[Int])
+--' yolo foo foo 0
+f0 :: [Int]
+   -> [Int]
+
+--' yolo foo foo 1
+f1 :: 
+    [(Str,Int)] ->
+    [(Str,Int)]
+
+--' yolo foo foo 2
+f2 :: ([Str],[Int])
+   -> ([Str],[Int])
+
+--' yolo foo foo 3
 f3 :: ([([Int],[Int],Int)],Int) -> ([([Int],[Int],Int)],Int)
+
+--' yolo foo foo 4
 f4 :: [[[Int]]] -> [[[Int]]]
+
+--' yolo foo foo 5
 f5 :: ([([Str],[Int],Int)],Int) -> ([([Str],[Int],Int)],Int)
