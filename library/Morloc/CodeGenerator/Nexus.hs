@@ -174,6 +174,7 @@ dispatchCode _ [] [] = "// nothing to dispatch"
 dispatchCode config fdata cdata = [idoc|
     uint32_t mid = 0;
     int retcode = 0;
+    char buffer[256];
     #{vsep socketDocs}
     if(config.packet_path != NULL){
         morloc_socket_t* all_sockets[] = #{allSocketsList};
@@ -189,22 +190,15 @@ dispatchCode config fdata cdata = [idoc|
         [idoc|
     morloc_socket_t #{varName} = { 0 };
     #{varName}.lang = strdup("#{pretty $ socketLang socket}");
-    #{varName}.syscmd = (char**)calloc(#{pretty $ length execArgs + 4}, sizeof(char*));
+    #{varName}.syscmd = (char**)calloc(5, sizeof(char*));
     #{execArgsDoc}
-    retcode = asprintf(&#{varName}.syscmd[#{pretty $ length execArgs}], "%s/#{socketBasename}", tmpdir);
-    if(retcode == -1){
-        fprintf(stderr, "%s", "Failed to make syscmd\n");
-        clean_exit(1);
-    }
-    #{varName}.syscmd[#{pretty $ length execArgs + 1}] = strdup(tmpdir);
-    #{varName}.syscmd[#{pretty $ length execArgs + 2}] = strdup(shm_basename);
-    #{varName}.syscmd[#{pretty $ length execArgs + 3}] = NULL;
-    retcode = asprintf(&#{varName}.socket_filename, "%s/#{socketBasename}", tmpdir);
-    if(retcode == -1){
-        fprintf(stderr, "%s", "Failed to make socket name\n");
-        clean_exit(1);
-    }
-
+    // Use a fixed buffer, then strdup to allocate the final string
+    snprintf(buffer, 256, "%s/#{socketBasename}", tmpdir);
+    #{varName}.syscmd[#{pretty $ length execArgs}] = strdup(buffer);
+    #{varName}.syscmd[#{pretty $ length execArgs} + 1] = strdup(tmpdir);
+    #{varName}.syscmd[#{pretty $ length execArgs} + 2] = strdup(shm_basename);
+    #{varName}.syscmd[#{pretty $ length execArgs} + 3] = NULL;
+    #{varName}.socket_filename = strdup(buffer);
         |]
         where
 
