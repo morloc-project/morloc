@@ -270,8 +270,10 @@ translateSegment m0 =
 
         def = mname <> makeExt headForm <+> "<-" <+> "function" <> tupled (map argNamer args)
 
-    makeLambda :: [Arg TypeM] -> MDoc -> MDoc
-    makeLambda args body = "function" <+> tupled (map argNamer args) <> "{" <> body <> "}"
+    makeLambda :: MDoc -> [MDoc] -> [MDoc] -> MDoc
+    makeLambda mname contextArgs boundArgs =
+          let functionCall = mname <> tupled (contextArgs <> boundArgs)
+          in "function" <+> tupled boundArgs <> "{" <> functionCall <> "}"
 
     makeLet :: (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
     makeLet namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =

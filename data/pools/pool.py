@@ -6,7 +6,7 @@ import time
 from collections import OrderedDict
 from multiprocessing import Process, cpu_count, Pipe, Value
 from multiprocessing.reduction import recv_handle, send_handle
-import struct
+import functools
 
 
 # Global variables for clean signal handling
