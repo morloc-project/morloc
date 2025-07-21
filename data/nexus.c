@@ -152,8 +152,11 @@ void print_return(uint8_t* packet, Schema* schema, config_t config){
     if(packet_error != NULL){
         ERROR("Run failed\n%s\n", packet_error)
     }
-    if(child_errmsg != NULL){
+    if(child_errmsg != NULL && packet_error != NULL){
         ERROR("Internal error\n%s\n", packet_error)
+    }
+    if(child_errmsg != NULL){
+        ERROR("Internal error\n")
     }
 
     uint8_t* packet_value = get_morloc_data_packet_value(packet, schema, &child_errmsg);
