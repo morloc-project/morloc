@@ -203,7 +203,14 @@ type MDoc = Doc ()
 -- has cycles.
 type DAG key edge node = Map key (node, [(key, edge)])
 
-type Scope = Map TVar [([Either TVar TypeU], TypeU, Bool)]
+-- | Stores a list of types that are present in the scope of each type variable
+type Scope = Map TVar
+  [( [Either TVar TypeU]  -- type parameters (generic for left, specific for right)
+   , TypeU
+   , Bool -- True if this is a "terminal" type (won't be reduced further)
+          --  * This is determined by the parser (see pTypedef)
+          --  * A type is terminal it is NOT general AND it
+   )]
 
 data GMap a b c = GMap (Map a b) (Map b c)
   deriving(Show, Ord, Eq)
@@ -393,10 +400,11 @@ data Expr
   | IstE ClassName [TypeU] [ExprI]
   | TypE (Maybe (Lang, Bool)) TVar [Either TVar TypeU] TypeU
   -- ^ a type definition
-  --   1. the language, Nothing is general
-  --      If Just, the Bool specifies whether the definition is terminal
+  --   1. the language:
+  --      If Nothing, then general
+  --      If Just, then the Bool specifies whether the definition is terminal
   --   2. type name
-  --   3. parameters - these may be generic (TVar) or concrete (TypeU)
+  --   3. parameters - these may be generic (TVar) or specific (TypeU)
   --   4. type
   | ImpE Import
   -- ^ a morloc module import

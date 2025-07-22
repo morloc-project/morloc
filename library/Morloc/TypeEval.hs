@@ -43,7 +43,7 @@ pairEval cscope gscope
     resolveGen f bnd t
       = case generalTransformType bnd (\_ _ -> return) resolveFail gscope t of
         (Right t') -> if t' /= t
-          -- if general resolution succeedds, continue evaluation with the concrete scope
+          -- if general resolution succeeds, continue evaluation with the concrete scope
           then f bnd t'
           -- if it fails, return to the concrete scope to handle failure without
           -- general resolution option

@@ -800,6 +800,9 @@ generateSourcedSerializers
                    , [MDoc]
                    )
 generateSourcedSerializers univeralScopeMap scopeMap es0 = do
+
+  -- find the scopes that are used in this manifold
+  -- we need to generate (de)serializers for all records
   typedef <- Map.unions <$> mapM (foldSerialManifoldM fm) es0
 
   scope <- case Map.lookup CppLang univeralScopeMap of
@@ -809,10 +812,14 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
   foldl groupQuad ([],[]) . concat . Map.elems <$> Map.mapWithKeyM (makeSerials scope) typedef
   where
 
+    -- given the universal map of scopes, pull out every one that is used in this subtree
     fm = defaultValue
-      { opSerialManifoldM = \(SerialManifold_ i _ _ _ e) -> return $ Map.unionWith (<>) (metaTypedefs scopeMap i) e
-      , opNativeManifoldM = \(NativeManifold_ i _ _ e) -> return $ Map.unionWith (<>) (metaTypedefs scopeMap i) e
+      { opSerialManifoldM = \(SerialManifold_ i _ _ _ e) -> return $ Map.unionWith mergeScopes (metaTypedefs scopeMap i) e
+      , opNativeManifoldM = \(NativeManifold_ i _ _ e) -> return $ Map.unionWith mergeScopes (metaTypedefs scopeMap i) e
       }
+
+    -- there are likely to be repeats in the scopes, we only want the unique ones
+    mergeScopes xs ys = unique (xs <> ys)
 
     groupQuad :: ([a],[a]) -> (a, a) -> ([a],[a])
     groupQuad (xs,ys) (x, y) = (x:xs, y:ys)
