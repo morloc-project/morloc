@@ -139,7 +139,7 @@ if __name__ == "__main__":
     global_state["tmpdir"] = tmpdir
 
     # Create worker pool
-    num_workers = cpu_count()
+    num_workers = max(1, cpu_count() - 1)
     workers = []
     worker_pipes = []  # Store worker-specific pipes
 
