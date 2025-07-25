@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (Real)
-import base (mul, add)
+import base
 
 bar y = mul (add 1.0 y)
 

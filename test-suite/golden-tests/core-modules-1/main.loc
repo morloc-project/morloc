@@ -1,0 +1,7 @@
+module main (foo)
+
+import base
+import pybase (fromList as fromListPy)
+
+foo :: Str -> Int -> Map Str Int
+foo n i = mapVal (\ x -> sub 1 (add 2 x)) (fromListPy [(n, i)])

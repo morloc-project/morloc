@@ -9,8 +9,9 @@ Stability   : experimental
 
 module Morloc.Frontend.AST
   ( findEdges
-  , findExports
+  , findExport
   , findExportSet
+  , setExport
   , findSignatures
   , findTypedefs
   , findSignatureTypeTerms
@@ -31,12 +32,27 @@ findEdges e@(ExprI _ (ModE n es)) = (n, [(importModuleName i, i) | (ExprI _ (Imp
 findEdges _ = error "Expected a module"
 
 findExportSet :: ExprI -> Set.Set Symbol
-findExportSet = Set.fromList . map snd . findExports
+findExportSet e = case findExport e of
+    (ExportMany ss) -> Set.map snd ss
+    _ -> Set.empty
 
-findExports :: ExprI -> [(Int, Symbol)]
-findExports (ExprI i (ExpE v)) = [(i, v)]
-findExports (ExprI _ (ModE _ es)) = concatMap findExports es
-findExports _ = []
+findExport :: ExprI -> Export
+findExport e0 = case f e0 of
+    (Just export) -> export
+    Nothing -> ExportMany Set.empty
+    where
+    f (ExprI _ (ExpE export)) = Just export
+    f (ExprI i (ModE j (e:es))) = case f e of
+        (Just export) -> Just export
+        Nothing -> f (ExprI i (ModE j es))
+    f _ = Nothing
+
+setExport :: Export -> ExprI -> ExprI
+setExport export e0 = f e0
+    where
+    f (ExprI i (ExpE _)) = ExprI i (ExpE export)
+    f (ExprI i (ModE m es)) = ExprI i (ModE m (map f es))
+    f e = e
 
 findSources :: ExprI -> [Source]
 findSources (ExprI _ (SrcE ss)) = [ss]
@@ -112,6 +128,8 @@ maxIndex (ExprI i (AppE e es)) = maximum (i : map maxIndex (e:es))
 maxIndex (ExprI i (LstE es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (TupE es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (NamE rs)) = maximum (i : map (maxIndex . snd) rs)
+maxIndex (ExprI i (ExpE ExportAll)) = i
+maxIndex (ExprI i (ExpE (ExportMany ss))) = maximum (i : (map fst (Set.toList ss)))
 maxIndex (ExprI i _) = i
 
 getIndices :: ExprI -> [Int]
@@ -124,4 +142,6 @@ getIndices (ExprI i (AppE e es)) = i : concatMap getIndices (e:es)
 getIndices (ExprI i (LstE es)) = i : concatMap getIndices es
 getIndices (ExprI i (TupE es)) = i : concatMap getIndices es
 getIndices (ExprI i (NamE rs)) = i : concatMap (getIndices . snd) rs
+getIndices (ExprI i (ExpE ExportAll)) = [i]
+getIndices (ExprI i (ExpE (ExportMany ss))) = i : [j | (j, _) <- Set.toList ss]
 getIndices (ExprI i _) = [i]

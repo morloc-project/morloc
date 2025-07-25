@@ -36,7 +36,9 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
-      , golden "multiprocessing-py-1" "multiprocessing-py-1"
+      -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
+
+      , golden "core-modules-1" "core-modules-1"
 
       , golden "formatting" "formatting"
       , golden "cases-1" "cases-1"

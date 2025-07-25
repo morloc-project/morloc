@@ -90,7 +90,7 @@ module Morloc.Namespace
   , E(..)
   , Lit(..)
   , Import(..)
-  , Exports(..)
+  , Export(..)
   -- ** Type extensions
   , Constraint(..)
   , Property(..)
@@ -380,7 +380,7 @@ data TermTypes = TermTypes {
 data Symbol = TypeSymbol TVar | TermSymbol EVar
   deriving (Show, Ord, Eq)
 
-data Exports = ExportMany (Set.Set Symbol) | ExportAll
+data Export = ExportMany (Set.Set (Int, Symbol)) | ExportAll
   deriving (Show, Ord, Eq)
 
 data AliasedSymbol = AliasedType TVar TVar | AliasedTerm EVar EVar
@@ -408,7 +408,7 @@ data Expr
   --   4. type
   | ImpE Import
   -- ^ a morloc module import
-  | ExpE Symbol
+  | ExpE Export
   -- ^ a term that is exported from a module (should only exist at the toplevel)
   | SrcE Source
   -- ^ import "c" from "foo.c" ("f" as yolo).
@@ -1401,7 +1401,8 @@ instance Pretty Expr where
     <+> sep (map (either pretty (parens . pretty)) vs) <+> "=" <+> pretty t
   pretty (ImpE (Import m Nothing _ _)) = "import" <+> pretty m
   pretty (ImpE (Import m (Just xs) _ _)) = "import" <+> pretty m <+> tupled (map pretty xs)
-  pretty (ExpE v) = "export" <+> pretty v
+  pretty (ExpE ExportAll) = "export *"
+  pretty (ExpE (ExportMany symbols)) = "export" <+> tupled (map pretty (Set.toList symbols))
   pretty (VarE _ s) = pretty s
   pretty (AccE k e) = parens (pretty e) <> "@" <> pretty k
   pretty (LamE v e) = "\\" <+> pretty v <+> "->" <+> pretty e
