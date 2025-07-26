@@ -98,8 +98,10 @@ prettyFoldManifold = FoldWithManifoldM
 
         def = manStr <+> mname <> makeExt headForm <> tupled [argName r <+> ":" <+> pretty t | r@(Arg _ t) <- args] <> ":"
 
-    makeLambda :: [Arg TypeM] -> MDoc -> MDoc
-    makeLambda args body = "lambda" <+> hsep (punctuate "," (map argName args)) <> ":" <+> body
+    makeLambda :: MDoc -> [MDoc] -> [MDoc] -> MDoc
+    makeLambda mname contextArgs boundArgs =
+          let functionCall = mname <> tupled (contextArgs <> boundArgs)
+          in "lambda" <+> tupled boundArgs <> ":" <+> functionCall
 
     makeLet :: (Int -> MDoc) -> MDoc -> Int -> PoolDocs -> PoolDocs -> PoolDocs
     makeLet letNamer letStr i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =

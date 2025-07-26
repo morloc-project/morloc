@@ -9,7 +9,7 @@
 # You need to provide the desired morloc version as an environmental variable,
 # so run the make commands like so:
 #
-# $ make MORLOC_VERSION=0.54.0 build-tiny
+# $ make MORLOC_VERSION=0.54.1 build-tiny
 
 define HEREDOC
 #!/bin/bash

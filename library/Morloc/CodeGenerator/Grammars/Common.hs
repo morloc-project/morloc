@@ -268,7 +268,7 @@ maxIndex = (+1) . runIdentity . foldSerialManifoldM fm
 translateManifold
   :: HasTypeM t
   => (MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> MDoc) -- make function
-  -> ([Arg TypeM] -> MDoc -> MDoc)
+  -> (MDoc -> [MDoc] -> [MDoc] -> MDoc)
   -> Int -> ManifoldForm (Or TypeS TypeF) t -> Maybe HeadManifoldForm -> PoolDocs -> PoolDocs
 translateManifold makeFunction makeLambda m form headForm (PoolDocs completeManifolds body priorLines priorExprs) =
   let args = abiappend (\i r -> [Arg i t | t <- bilist typeMof typeMof r])
@@ -278,11 +278,10 @@ translateManifold makeFunction makeLambda m form headForm (PoolDocs completeMani
       call = case form of
         (ManifoldPass _) -> mname
         (ManifoldFull rs) -> mname <> tupled (map argNamer (asArgs rs))
-        (ManifoldPart rs vs) ->
-          let variableNames = [Arg i (typeMof t) | (Arg i t) <- vs]
-              functionCall = mname <> tupled
-                (map argNamer $ asArgs rs <> variableNames)
-          in makeLambda variableNames functionCall
+        (ManifoldPart rs vs) -> makeLambda
+            mname
+            (map argNamer (asArgs rs))
+            [argNamer (Arg i (typeMof t)) | Arg i t <- vs]
 
   in PoolDocs
       { poolCompleteManifolds = newManifold : completeManifolds
@@ -291,5 +290,5 @@ translateManifold makeFunction makeLambda m form headForm (PoolDocs completeMani
       , poolPriorExprs = priorExprs
       }
   where
-    asArgs :: [Arg (Or TypeS TypeF)] -> [Arg TypeM]
-    asArgs rs = concat [[Arg i t | t <- bilist typeMof typeMof orT] | (Arg i orT) <- rs]
+      asArgs :: [Arg (Or TypeS TypeF)] -> [Arg TypeM]
+      asArgs rs = concat [[Arg i t | t <- bilist typeMof typeMof orT] | (Arg i orT) <- rs]

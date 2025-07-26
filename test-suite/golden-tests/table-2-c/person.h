@@ -17,4 +17,9 @@ class PersonYay{
         }
 };
 
+template <class T>
+T id(T x){
+    return x;
+}
+
 #endif

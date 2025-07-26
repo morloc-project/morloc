@@ -90,7 +90,7 @@ module Morloc.Namespace
   , E(..)
   , Lit(..)
   , Import(..)
-  , Exports(..)
+  , Export(..)
   -- ** Type extensions
   , Constraint(..)
   , Property(..)
@@ -203,7 +203,14 @@ type MDoc = Doc ()
 -- has cycles.
 type DAG key edge node = Map key (node, [(key, edge)])
 
-type Scope = Map TVar [([Either TVar TypeU], TypeU, Bool)]
+-- | Stores a list of types that are present in the scope of each type variable
+type Scope = Map TVar
+  [( [Either TVar TypeU]  -- type parameters (generic for left, specific for right)
+   , TypeU
+   , Bool -- True if this is a "terminal" type (won't be reduced further)
+          --  * This is determined by the parser (see pTypedef)
+          --  * A type is terminal it is NOT general AND it
+   )]
 
 data GMap a b c = GMap (Map a b) (Map b c)
   deriving(Show, Ord, Eq)
@@ -373,7 +380,7 @@ data TermTypes = TermTypes {
 data Symbol = TypeSymbol TVar | TermSymbol EVar
   deriving (Show, Ord, Eq)
 
-data Exports = ExportMany (Set.Set Symbol) | ExportAll
+data Export = ExportMany (Set.Set (Int, Symbol)) | ExportAll
   deriving (Show, Ord, Eq)
 
 data AliasedSymbol = AliasedType TVar TVar | AliasedTerm EVar EVar
@@ -393,14 +400,15 @@ data Expr
   | IstE ClassName [TypeU] [ExprI]
   | TypE (Maybe (Lang, Bool)) TVar [Either TVar TypeU] TypeU
   -- ^ a type definition
-  --   1. the language, Nothing is general
-  --      If Just, the Bool specifies whether the definition is terminal
+  --   1. the language:
+  --      If Nothing, then general
+  --      If Just, then the Bool specifies whether the definition is terminal
   --   2. type name
-  --   3. parameters - these may be generic (TVar) or concrete (TypeU)
+  --   3. parameters - these may be generic (TVar) or specific (TypeU)
   --   4. type
   | ImpE Import
   -- ^ a morloc module import
-  | ExpE Symbol
+  | ExpE Export
   -- ^ a term that is exported from a module (should only exist at the toplevel)
   | SrcE Source
   -- ^ import "c" from "foo.c" ("f" as yolo).
@@ -1393,7 +1401,8 @@ instance Pretty Expr where
     <+> sep (map (either pretty (parens . pretty)) vs) <+> "=" <+> pretty t
   pretty (ImpE (Import m Nothing _ _)) = "import" <+> pretty m
   pretty (ImpE (Import m (Just xs) _ _)) = "import" <+> pretty m <+> tupled (map pretty xs)
-  pretty (ExpE v) = "export" <+> pretty v
+  pretty (ExpE ExportAll) = "export *"
+  pretty (ExpE (ExportMany symbols)) = "export" <+> tupled (map pretty (Set.toList symbols))
   pretty (VarE _ s) = pretty s
   pretty (AccE k e) = parens (pretty e) <> "@" <> pretty k
   pretty (LamE v e) = "\\" <+> pretty v <+> "->" <+> pretty e

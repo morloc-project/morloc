@@ -79,38 +79,22 @@ pModule expModuleName = do
     Nothing -> MT.intercalate "." <$> sepBy freename (symbol ".")
     (Just (MV n)) -> symbol n
 
-  exportSym <- parens ((char '*' >> return ExportAll) <|> (sepBy pSymbol (symbol ",") |>> ExportMany . Set.fromList))
+  export <- parens ( (char '*' >> return ExportAll)
+                      <|> (sepBy pIndexedSymbol (symbol ",") |>> ExportMany . Set.fromList)
+                   )
+
+  expE <- exprI (ExpE export)
 
   es <- align pTopExpr |>> concat
 
-  let allSymbols = Set.unions . map findSymbols $ es
-      exports = case exportSym of
-        ExportAll -> allSymbols
-        (ExportMany exps) -> exps
+  exprI $ ModE (MV moduleName) (expE : es)
 
-  case Set.toList (exports `Set.difference` allSymbols) of
-    [] -> return ()
-    missing -> fancyFailure . Set.singleton . ErrorFail
-            $ "Module " <> show moduleName
-            <> " does not export the following terms or types: ["
-            <>  (intercalate ", " . map show $ missing) <> "]"
 
-  exportExpr <- mapM (exprI . ExpE) (Set.toList exports)
-
-  exprI $ ModE (MV moduleName) (es <> exportExpr)
-
-  where
-    findSymbols :: ExprI -> Set.Set Symbol
-    findSymbols (ExprI _ (TypE _ v _ _)) = Set.singleton $ TypeSymbol v
-    findSymbols (ExprI _ (AssE e _ _)) = Set.singleton $ TermSymbol e
-    findSymbols (ExprI _ (SigE (Signature e _ _))) = Set.singleton $ TermSymbol e
-    findSymbols (ExprI _ (ImpE (Import _ (Just imps) _ _)))
-        = Set.fromList $ [TermSymbol alias | (AliasedTerm _ alias) <- imps] <>
-                         [TypeSymbol alias | (AliasedType _ alias) <- imps]
-    findSymbols (ExprI _ (SrcE src)) = Set.singleton $ TermSymbol (srcAlias src)
-    findSymbols (ExprI _ (IstE _ _ es)) = Set.unions (map findSymbols es)
-    findSymbols _ = Set.empty
-
+pIndexedSymbol :: Parser (Int, Symbol)
+pIndexedSymbol = do
+    symbol <- pSymbol
+    i <- exprId
+    return (i, symbol)
 
 -- | match an implicit Main module
 pMain :: Parser ExprI
@@ -132,7 +116,8 @@ createMainFunction es = case (init es, last es) of
     (_, ExprI _ AssE{}) -> return es
     (_, ExprI _ (ExpE _))     -> return es
     (rs, terminalExpr) -> do
-      expMain <- exprI $ ExpE (TermSymbol (EV "__main__"))
+      i <- exprId
+      expMain <- exprI $ ExpE (ExportMany $ Set.singleton (i, TermSymbol (EV "__main__")))
       assMain <- exprI $ AssE (EV "__main__") terminalExpr []
       return $ expMain : (assMain : rs)
 
@@ -452,26 +437,26 @@ pSignature = do
     pWord :: Parser MT.Text
     pWord =  MT.pack <$> lexeme (many1 alphaNumChar)
 
--- foo
---   :: A --' ladida description
---   -> B --' ladida description
-pDocumentedFunction :: Parser (Maybe [[MT.Text]], TypeU)
-pDocumentedFunction = do
-  ts <- sepBy2 pDocumentedType (op "->")
-  case (init ts, last ts) of
-    (inputs, output) -> return
-      ( Just $ map fst inputs <> [fst output]
-      , FunU (map snd inputs) (snd output)
-      )
-  where
-    pDocumentedType :: Parser ([MT.Text], TypeU)
-    pDocumentedType = do
-      t <- pType'
-      -- docstrs <- many doc
-      let docstrs = []
-      return (docstrs, t)
-      where
-        pType' = try pUniU <|> try parensType <|> try pAppU <|> pVarU <|> pListU <|> pTupleU
+-- -- foo
+-- --   :: A --' ladida description
+-- --   -> B --' ladida description
+-- pDocumentedFunction :: Parser (Maybe [[MT.Text]], TypeU)
+-- pDocumentedFunction = do
+--   ts <- sepBy2 pDocumentedType (op "->")
+--   case (init ts, last ts) of
+--     (inputs, output) -> return
+--       ( Just $ map fst inputs <> [fst output]
+--       , FunU (map snd inputs) (snd output)
+--       )
+--   where
+--     pDocumentedType :: Parser ([MT.Text], TypeU)
+--     pDocumentedType = do
+--       t <- pType'
+--       -- docstrs <- many doc
+--       let docstrs = []
+--       return (docstrs, t)
+--       where
+--         pType' = try pUniU <|> try parensType <|> try pAppU <|> pVarU <|> pListU <|> pTupleU
 
 pUndocumentedFunction :: Parser (Maybe [[MT.Text]], TypeU)
 pUndocumentedFunction = do

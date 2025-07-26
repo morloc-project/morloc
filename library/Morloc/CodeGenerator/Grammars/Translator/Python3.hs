@@ -316,8 +316,8 @@ translateSegment m0 =
                 , [idoc|raise RuntimeError(f"Error (Python daemon in #{mname}):\n{e!s}")|]
                 ])
 
-    makeLambda :: [Arg TypeM] -> MDoc -> MDoc
-    makeLambda args body = "lambda" <+> hsep (punctuate "," (map argNamer args)) <> ":" <+> body
+    makeLambda :: MDoc -> [MDoc] -> [MDoc] -> MDoc
+    makeLambda mname contextArgs _ = "functools.partial" <> tupled (mname : contextArgs)
 
 
 makeDispatch :: [SerialManifold] -> MDoc

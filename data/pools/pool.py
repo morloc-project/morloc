@@ -6,7 +6,7 @@ import time
 from collections import OrderedDict
 from multiprocessing import Process, cpu_count, Pipe, Value
 from multiprocessing.reduction import recv_handle, send_handle
-import struct
+import functools
 
 
 # Global variables for clean signal handling
@@ -139,7 +139,7 @@ if __name__ == "__main__":
     global_state["tmpdir"] = tmpdir
 
     # Create worker pool
-    num_workers = cpu_count()
+    num_workers = max(1, cpu_count() - 1)
     workers = []
     worker_pipes = []  # Store worker-specific pipes
 

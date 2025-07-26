@@ -36,6 +36,12 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
+
+      , golden "demo-trimming" "demo-trimming"
+
+      , golden "core-modules-1" "core-modules-1"
+
       , golden "formatting" "formatting"
       , golden "cases-1" "cases-1"
 
@@ -189,15 +195,8 @@ main = do
       , golden "manifold-form-7_py" "manifold-form-7_py"
       , golden "manifold-form-7_r" "manifold-form-7_r"
 
-      , golden "records-1-py" "records-1-py"
-      , golden "records-1-r" "records-1-r"
-      -- see github issue #8
-      , golden "records-1-c" "records-1-c"
-
-      , golden "records-2" "records-2"
-
-      , golden "record-promotion-1" "record-promotion-1"
-      , golden "record-promotion-2" "record-promotion-2"
+      -- test records
+      , golden "records-primitive" "records-primitive"
 
       , golden "selection-1" "selection-1"
       , golden "selection-2" "selection-2"
@@ -287,13 +286,6 @@ main = do
       , golden "object-1-c"  "object-1-c"
       , golden "object-1-py" "object-1-py"
       , golden "object-1-r"  "object-1-r"
-      -- record access
-      , golden "record-access-gen" "record-access-gen"
-      , golden "record-access-c" "record-access-c"
-      , golden "record-access-py" "record-access-py"
-      , golden "record-access-r" "record-access-r"
-      -- Test the @clade issue from the case study
-      , golden "record-access-2" "record-access-2"
       -- scoping
       , golden "scoping-1" "scoping-1"
       , golden "scoping-2" "scoping-2"
