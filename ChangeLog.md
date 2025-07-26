@@ -1,11 +1,9 @@
-0.54.1 [2025-xx-xx]
+0.54.1 [2025-07-26]
 -------------------
 
  * Fix pickle bug in Python multiprocessing
  * Replace asprintf non-standard C function 
- [ ] Fix interop for C structs
-     * For primitive records
-     [ ] For complex records
+ * Partially fix interop for C structs
  * Fix bug in unqualified imports
 
 0.54.0 [2025-07-13]
