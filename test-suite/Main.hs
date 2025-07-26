@@ -38,6 +38,8 @@ main = do
 
       -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
+      , golden "demo-trimming" "demo-trimming"
+
       , golden "core-modules-1" "core-modules-1"
 
       , golden "formatting" "formatting"
