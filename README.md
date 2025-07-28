@@ -31,8 +31,8 @@
  * Universal function composition: Import functions from multiple languages and
    compose them together under a unified, strongly-typed functional framework.
 
- * Polyglot without boilerplate: Use the best language for each task—mix C,
-   Python, R, etc.—with no manual bindings or interop code.
+ * Polyglot without boilerplate: Use the best language for each task with no
+   manual bindings or interop code.
 
  * Seamless benchmarking and testing: Swap implementations and run the same
    benchmarks/tests across languages with consistent type signatures and data
@@ -42,13 +42,13 @@
    populate them with foreign language implementations, enabling rigorous code
    organization and reuse.
 
- * Smarter workflows: Replace brittle file-based pipelines (e.g., in
-   bioinformatics) with modular pure functions and structured data, for faster
-   and more maintainable workflows.
+ * Smarter workflows: Replace brittle application/file-based pipelines with more
+   fast, more maintainable pipelines made from functions acting on structured
+   data.
 
 
 Below is a simple example, for installation details and more examples, see the
-[Manual]("https://morloc-project.github.io/docs").
+[Manual](https://morloc-project.github.io/docs).
 
 A Morloc module can import functions from foreign languages, assign them general
 types, and compose new functions:
