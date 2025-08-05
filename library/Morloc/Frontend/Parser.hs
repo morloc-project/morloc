@@ -101,7 +101,7 @@ pMain :: Parser ExprI
 pMain = do
   setMinPos
   es <- align pTopExpr |>> concat >>= createMainFunction
-  exprI $ ModE (MV "Main") es
+  exprI $ ModE (MV "main") es
 
 plural :: Functor m => m a -> m [a]
 plural = fmap return
