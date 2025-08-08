@@ -16,7 +16,7 @@ record Cpp => Config = "Config"
 readFASTQ
     :: Str -- FASTQ filename
     -> [ ( ( Str -- FASTQ header
-           , Str -- quality reads as fred scores
+           , Str -- quality reads as phred scores
            )
          , Str -- read sequence
          ) ]

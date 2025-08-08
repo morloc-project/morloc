@@ -1,0 +1,11 @@
+module main (foo)
+
+import types
+import base
+import math (sqrt)
+
+sum = fold add 0.0
+
+square x = mul x x
+
+foo = sqrt . sum . map square
