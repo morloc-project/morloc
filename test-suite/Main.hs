@@ -199,7 +199,7 @@ main = do
 
       -- test records
       , golden "records-primitive" "records-primitive"
-      -- , golden "records-complex" "records-complex"
+      , golden "records-complex" "records-complex"
       -- , golden "records-nested" "records-nested"
 
       , golden "selection-1" "selection-1"

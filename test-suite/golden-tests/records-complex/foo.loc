@@ -1,12 +1,12 @@
 -- Tests passing records of primitives across languages and accessing fields
 
-module m (foo, bar)
+module m (foo)
 
 import types (Str, Int, List)
 import base
 
 record Foo = Foo
-  { shitlist :: Map Str Bool
+  { shitlist :: Map Str Int
   , things :: [Str]
   , size :: Int
   }
@@ -14,40 +14,43 @@ record Cpp => Foo = "foo_t"
 record Py  => Foo = "dict"
 record R   => Foo = "list"
 
-source Py from "foo.py" ("addFlooz" as addFloozPy)
-source Cpp from "foo.hpp" ("addFlooz" as addFloozCpp)
-source R from "foo.R" ("addFlooz" as addFloozR)
-addFloozCpp :: Int -> Foo -> Foo
-addFloozPy  :: Int -> Foo -> Foo
-addFloozR   :: Int -> Foo -> Foo
+source Py from "foo.py" ("addShit" as addShitPy)
+source Cpp from "foo.hpp" ("addShit" as addShitCpp)
+source R from "foo.R" ("addShit" as addShitR)
+addShitCpp :: Str -> Int -> Foo -> Foo
+addShitPy  :: Str -> Int -> Foo -> Foo
+addShitR   :: Str -> Int -> Foo -> Foo
+
+emptyMap :: Map Str Int
+emptyMap = pack ([],[])
 
 -- test interop
 foo size =
-  ( addFloozPy  3
-  . addFloozCpp 2
-  . addFloozR   1
-  . addFloozPy  0
-  ) { flooz = []
+  ( addShitPy  "nextflow" 3
+  . addShitCpp "earwigs" 2
+  . addShitR   "tollroads" 1
+  . addShitPy  "campers who play load music" 0
+  ) { shitlist = emptyMap
     , things = ["spiders"]
     , size = size
     }
 
 -- test access
-bar size = (fpy@flooz, fcpp@things, fr@size) where
-    fpy = addFloozPy 42
-      { flooz = []
+bar size = (fpy@shitlist, fcpp@things, fr@size) where
+    fpy = addShitPy "aa" 42
+      { shitlist = emptyMap
       , things = ["a"]
       , size = size
       }
 
-    fcpp = addFloozPy 42
-      { flooz = []
+    fcpp = addShitPy "bb" 42
+      { shitlist = emptyMap
       , things = ["b"]
       , size = size
       }
 
-    fr = addFloozR 42
-      { flooz = []
+    fr = addShitR "cc" 42
+      { shitlist = emptyMap
       , things = ["c"]
       , size = size
       }

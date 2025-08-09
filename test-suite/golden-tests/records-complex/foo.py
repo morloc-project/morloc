@@ -1,3 +1,3 @@
-def addFlooz(flooz, foo):
-    foo["flooz"].append(flooz)
+def addShit(name, level_of_shit, foo):
+    foo["shitlist"][name] = level_of_shit
     return foo

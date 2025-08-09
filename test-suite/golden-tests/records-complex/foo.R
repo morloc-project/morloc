@@ -1,4 +1,4 @@
-addFlooz <- function(flooz, foo){
-    foo$flooz <- append(foo$flooz, flooz)
+addShit <- function(name, level_of_shit, foo){
+    foo$shitlist[[name]] <- level_of_shit
     foo
 }
