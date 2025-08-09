@@ -59,7 +59,7 @@ run_job <- function(client_fd) {
           do.call(mlc_pool_function, args)
         }, error = function(e) {
           if(!is.null(e$fail_packet)) e$fail_packet else {
-            morloc_make_fail_packet(paste("Call failed:", e$message))
+            morloc_make_fail_packet(e$message)
           }
         })
       } else {

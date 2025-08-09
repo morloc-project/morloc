@@ -17,15 +17,17 @@
 #define R_TRY(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
-        error("Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
+        error("Error in R pool (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
     }
 
-# define R_TRY_WITH(clean, fun, ...) \
+#define R_TRY_WITH(clean, fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
         clean; \
-        error("Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
+        error("Error in R pool (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
     }
+
+#define MORLOC_ERROR(msg, ...) error("Error in R pool (%s:%d in %s):" msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__);
 
 /// }}}
 
@@ -69,7 +71,7 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
                                     size += get_shm_size(schema->parameters[0], STRING_ELT(obj, i));
                                 }
                             } else {
-                                error("Expected character vector of length 1, but got length %zu", length);
+                                MORLOC_ERROR("Expected character vector of length 1, but got length %zu", length);
                             }
                         }
                         break;
@@ -85,20 +87,20 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
                         size += length * schema->parameters[0]->width;
                         break;
                     default:
-                        error("Unsupported type in get_shm_size array: %s", type2char(TYPEOF(obj)));
+                        MORLOC_ERROR("Unsupported type in get_shm_size array: %s", type2char(TYPEOF(obj)));
                 }
                 return size;
             }
 
         case MORLOC_TUPLE:
             if (!isVectorList(obj)) {
-                error("Expected list for MORLOC_TUPLE, but got %s", type2char(TYPEOF(obj)));
+                MORLOC_ERROR("Expected list for MORLOC_TUPLE, but got %s", type2char(TYPEOF(obj)));
             }
 
             {
                 size_t array_size = (size_t)xlength(obj);
                 if (array_size != schema->size) {
-                    error("Expected tuple of length %zu, but found list of length %zu", schema->size, size);
+                    MORLOC_ERROR("Expected tuple of length %zu, but found list of length %zu", schema->size, size);
                 }
                 for (R_xlen_t i = 0; i < array_size; ++i) {
                     SEXP item = VECTOR_ELT(obj, i);
@@ -138,7 +140,7 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
             }
 
         default:
-            error("Unhandled schema type");
+            MORLOC_ERROR("Unhandled schema type");
             break;
     }
 
@@ -149,11 +151,11 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
 #define HANDLE_SINT_TYPE(CTYPE, MIN, MAX) \
     do { \
         if (!(isInteger(obj) || isReal(obj))) { \
-            error("Expected integer for %s, but got %s", #CTYPE, type2char(TYPEOF(obj))); \
+            MORLOC_ERROR("Expected integer for %s, but got %s", #CTYPE, type2char(TYPEOF(obj))); \
         } \
         double value = asReal(obj); \
         if (value < MIN || value > MAX) { \
-            error("Integer overflow for %s", #CTYPE); \
+            MORLOC_ERROR("Integer overflow for %s", #CTYPE); \
         } \
         *(CTYPE*)dest = (CTYPE)value; \
     } while(0)
@@ -161,11 +163,11 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
 #define HANDLE_UINT_TYPE(CTYPE, MAX) \
     do { \
         if (!(isInteger(obj) || isReal(obj))) { \
-            error("Expected integer for %s, but got %s", #CTYPE, type2char(TYPEOF(obj))); \
+            MORLOC_ERROR("Expected integer for %s, but got %s", #CTYPE, type2char(TYPEOF(obj))); \
         } \
         double value = asReal(obj); \
         if (value < 0 || value > MAX) { \
-            error("Integer overflow for %s", #CTYPE); \
+            MORLOC_ERROR("Integer overflow for %s", #CTYPE); \
         } \
         *(CTYPE*)dest = (CTYPE)value; \
     } while(0)
@@ -176,13 +178,13 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
     switch (schema->type) {
         case MORLOC_NIL:
             if (obj != R_NilValue) {
-                error("Expected NULL for MORLOC_NIL, but got %s", type2char(TYPEOF(obj)));
+                MORLOC_ERROR("Expected NULL for MORLOC_NIL, but got %s", type2char(TYPEOF(obj)));
             }
             *((int8_t*)dest) = (int8_t)0;
             break;
         case MORLOC_BOOL:
             if (!isLogical(obj)) {
-                error("Expected logical for MORLOC_BOOL, but got %s", type2char(TYPEOF(obj)));
+                MORLOC_ERROR("Expected logical for MORLOC_BOOL, but got %s", type2char(TYPEOF(obj)));
             }
             *((uint8_t*)dest) = (uint8_t)((LOGICAL(obj)[0] == TRUE) ? 1 : 0);
             break;
@@ -212,14 +214,14 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
             break;
         case MORLOC_FLOAT32:
             if (!(isReal(obj) || isInteger(obj))) {
-                error("Expected numeric for MORLOC_FLOAT32, but got %s", type2char(TYPEOF(obj)));
+                MORLOC_ERROR("Expected numeric for MORLOC_FLOAT32, but got %s", type2char(TYPEOF(obj)));
             }
             *((float*)dest) = (float)asReal(obj);
             break;
 
         case MORLOC_FLOAT64:
             if (!(isReal(obj) || isInteger(obj))) {
-                error("Expected numeric for MORLOC_FLOAT64, but got %s", type2char(TYPEOF(obj)));
+                MORLOC_ERROR("Expected numeric for MORLOC_FLOAT64, but got %s", type2char(TYPEOF(obj)));
             }
             *((double*)dest) = asReal(obj);
             break;
@@ -237,7 +239,7 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                             str = CHAR(STRING_ELT(obj, 0));
                             length = (size_t)strlen(str);
                         } else {
-                            error("Expected character of length 1");
+                            MORLOC_ERROR("Expected character of length 1");
                         }
                         break;
                     case RAWSXP:
@@ -245,7 +247,7 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                         length = LENGTH(obj);
                         break;
                     default:
-                      error("Expected a character type");
+                      MORLOC_ERROR("Expected a character type");
                       break;
                 }
                 Array* array = (Array*)dest;
@@ -286,13 +288,13 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                                 to_voidstar_r(start + i * element_schema->width, cursor, elem, element_schema);
                             }
                         } else {
-                            error("Expected character vector of length 1, but got length %ld", array->size);
+                            MORLOC_ERROR("Expected character vector of length 1, but got length %ld", array->size);
                         }
                     }
                     break;
                 case RAWSXP:  // Raw vectors
                     if (element_schema->type != MORLOC_UINT8) {
-                        error("Expected MORLOC_UINT8 for raw vector");
+                        MORLOC_ERROR("Expected MORLOC_UINT8 for raw vector");
                     }
                     absptr_t tmp_ptr = R_TRY(rel2abs, array->data);
                     memcpy(tmp_ptr, RAW(obj), array->size * sizeof(uint8_t));
@@ -334,7 +336,7 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                     }
                     break;
                 default:
-                    error("Unsupported type in to_voidstar array: %s", type2char(TYPEOF(obj)));
+                    MORLOC_ERROR("Unsupported type in to_voidstar array: %s", type2char(TYPEOF(obj)));
             }
             break;
 
@@ -342,13 +344,13 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
 
         case MORLOC_TUPLE:
             if (!isVectorList(obj)) {
-                error("Expected list for MORLOC_TUPLE, but got %s", type2char(TYPEOF(obj)));
+                MORLOC_ERROR("Expected list for MORLOC_TUPLE, but got %s", type2char(TYPEOF(obj)));
             }
 
             {
                 R_xlen_t size = xlength(obj);
                 if ((size_t)size != schema->size) {
-                    error("Expected tuple of length %zu, but found list of length %zu", schema->size, size);
+                    MORLOC_ERROR("Expected tuple of length %zu, but found list of length %zu", schema->size, size);
                 }
                 for (R_xlen_t i = 0; i < size; ++i) {
                     SEXP item = VECTOR_ELT(obj, i);
@@ -363,7 +365,7 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                     // Handle named list
                     SEXP names = getAttrib(obj, R_NamesSymbol);
                     if (names == R_NilValue) {
-                        error("List must have names for MORLOC_MAP");
+                        MORLOC_ERROR("List must have names for MORLOC_MAP");
                     }
                     for (size_t i = 0; i < schema->size; ++i) {
                         SEXP key = PROTECT(mkChar(schema->keys[i]));
@@ -381,13 +383,13 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                         UNPROTECT(1);
                     }
                 } else {
-                    error("Expected a named list for MORLOC_MAP");
+                    MORLOC_ERROR("Expected a named list for MORLOC_MAP");
                 }
             }
             break;
 
         default:
-            error("Unhandled schema type");
+            MORLOC_ERROR("Unhandled schema type");
             break;
     }
 
@@ -416,11 +418,11 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
     MAYFAIL
 
     if(data == NULL){
-        error("NULL data (%s:%d in %s)", __FILE__, __LINE__, __func__);
+        MORLOC_ERROR("NULL data (%s:%d in %s)", __FILE__, __LINE__, __func__);
     }
 
     if(schema == NULL){
-        error("NULL schema (%s:%d in %s)", __FILE__, __LINE__, __func__);
+        MORLOC_ERROR("NULL schema (%s:%d in %s)", __FILE__, __LINE__, __func__);
     }
 
     SEXP obj = R_NilValue;
@@ -697,7 +699,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
             break;
         }
         default:
-            error("Unsupported schema type");
+            MORLOC_ERROR("Unsupported schema type");
             goto error;
     }
 
@@ -758,7 +760,7 @@ SEXP morloc_start_daemon(
 
 SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
     if (!R_ExternalPtrAddr(daemon_r)) {
-        error("Expected a daemon pointer");
+        MORLOC_ERROR("Expected a daemon pointer");
     }
     language_daemon_t* daemon = (language_daemon_t*)R_ExternalPtrAddr(daemon_r);
 
@@ -802,10 +804,10 @@ SEXP morloc_read_morloc_call_packet(SEXP packet_r) { MAYFAIL
 
 SEXP morloc_send_packet_to_foreign_server(SEXP client_fd_r, SEXP packet_r) { MAYFAIL
     if (TYPEOF(client_fd_r) != INTSXP || LENGTH(client_fd_r) != 1) {
-        error("client_fd must be a single integer");
+        MORLOC_ERROR("client_fd must be a single integer");
     }
     if (TYPEOF(packet_r) != RAWSXP) {
-        error("packet must be a raw vector");
+        MORLOC_ERROR("packet must be a raw vector");
     }
 
     // Extract arguments
@@ -827,7 +829,7 @@ SEXP morloc_send_packet_to_foreign_server(SEXP client_fd_r, SEXP packet_r) { MAY
 // Read from socket returning raw vector of received data
 SEXP morloc_stream_from_client(SEXP client_fd_r) { MAYFAIL
     if (TYPEOF(client_fd_r) != INTSXP || LENGTH(client_fd_r) != 1) {
-        error("client_fd must be a single integer");
+        MORLOC_ERROR("client_fd must be a single integer");
     }
 
     int client_fd = INTEGER(client_fd_r)[0];
@@ -850,7 +852,7 @@ SEXP morloc_stream_from_client(SEXP client_fd_r) { MAYFAIL
 // close_socket
 SEXP morloc_close_socket(SEXP socket_id_r) {
     if (TYPEOF(socket_id_r) != INTSXP || LENGTH(socket_id_r) != 1) {
-        error("socket_id must be a single integer");
+        MORLOC_ERROR("socket_id must be a single integer");
     }
     int socket_id = INTEGER(socket_id_r)[0];
     close_socket(socket_id);
@@ -862,7 +864,7 @@ SEXP morloc_close_socket(SEXP socket_id_r) {
 // put_value
 SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        error("schema must be a single string");
+        MORLOC_ERROR("schema must be a single string");
     }
 
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
@@ -871,7 +873,7 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 
     void* voidstar = to_voidstar(obj_r, schema);
     if (!voidstar) {
-        error("Failed to convert R object to internal representation");
+        MORLOC_ERROR("Failed to convert R object to internal representation");
     }
 
     relptr_t relptr = R_TRY(abs2rel, voidstar);
@@ -890,10 +892,10 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 
 SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(packet_r) != RAWSXP) {
-        error("packet must be a raw vector");
+        MORLOC_ERROR("packet must be a raw vector");
     }
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        error("schema must be a single string");
+        MORLOC_ERROR("schema must be a single string");
     }
 
     // Extract arguments
@@ -907,7 +909,7 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
 
     SEXP obj_r = from_voidstar(voidstar, schema);
     if (obj_r == NULL) {
-        error("Failed to convert internal representation to R object");
+        MORLOC_ERROR("Failed to convert internal representation to R object");
     }
 
     free_schema(schema);
@@ -919,13 +921,13 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
 SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
     // Validate inputs
     if (TYPEOF(socket_path_r) != STRSXP || LENGTH(socket_path_r) != 1) {
-        error("socket_path must be a single string");
+        MORLOC_ERROR("socket_path must be a single string");
     }
     if (TYPEOF(mid_r) != INTSXP || LENGTH(mid_r) != 1) {
-        error("mid must be a single integer");
+        MORLOC_ERROR("mid must be a single integer");
     }
     if (TYPEOF(args_r) != VECSXP) {
-        error("args must be a list of raw vectors");
+        MORLOC_ERROR("args must be a list of raw vectors");
     }
 
     // Extract arguments
@@ -940,7 +942,7 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
     for (size_t i = 0; i < nargs; i++) {
         SEXP arg = VECTOR_ELT(args_r, i);
         if (TYPEOF(arg) != RAWSXP) {
-            error("All arguments must be raw vectors (argument %zu)", i+1);
+            MORLOC_ERROR("All arguments must be raw vectors (argument %zu)", i+1);
         }
         arg_packets[i] = RAW(arg);
     }
@@ -975,7 +977,7 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
 
 SEXP morloc_is_ping(SEXP packet_r) { MAYFAIL
     if (TYPEOF(packet_r) != RAWSXP) {
-        error("packet must be a raw vector");
+        MORLOC_ERROR("packet must be a raw vector");
     }
 
     bool is_ping = R_TRY(packet_is_ping, RAW(packet_r));
@@ -986,7 +988,7 @@ SEXP morloc_is_ping(SEXP packet_r) { MAYFAIL
 
 SEXP morloc_is_local_call(SEXP packet_r) { MAYFAIL
     if (TYPEOF(packet_r) != RAWSXP) {
-        error("packet must be a raw vector");
+        MORLOC_ERROR("packet must be a raw vector");
     }
 
     bool is_local_call = R_TRY(packet_is_local_call, RAW(packet_r));
@@ -997,7 +999,7 @@ SEXP morloc_is_local_call(SEXP packet_r) { MAYFAIL
 
 SEXP morloc_is_remote_call(SEXP packet_r) { MAYFAIL
     if (TYPEOF(packet_r) != RAWSXP) {
-        error("packet must be a raw vector");
+        MORLOC_ERROR("packet must be a raw vector");
     }
 
     bool is_remote_call = R_TRY(packet_is_remote_call, RAW(packet_r));
@@ -1008,7 +1010,7 @@ SEXP morloc_is_remote_call(SEXP packet_r) { MAYFAIL
 
 SEXP morloc_pong(SEXP packet_r) { MAYFAIL
     if (TYPEOF(packet_r) != RAWSXP) {
-        error("packet must be a raw vector");
+        MORLOC_ERROR("packet must be a raw vector");
     }
 
     // Generate a response to ping
@@ -1040,7 +1042,7 @@ SEXP morloc_make_fail_packet(SEXP failure_message_r) { MAYFAIL
 
 SEXP extract_element_by_name(SEXP list, const char* key) {
   // Ensure inputs are correct types
-  if (TYPEOF(list) != VECSXP) error("Input must be a list");
+  if (TYPEOF(list) != VECSXP) MORLOC_ERROR("Input must be a list");
 
   // Get list names attribute
   SEXP names = Rf_getAttrib(list, R_NamesSymbol);
@@ -1084,7 +1086,7 @@ SEXP morloc_remote_call(SEXP midx, SEXP socket_path, SEXP cache_path, SEXP resou
     for(size_t i = 0; i < nargs; i++) {
         SEXP raw_vec = PROTECT(VECTOR_ELT(arg_packets, i));
         if(TYPEOF(raw_vec) != RAWSXP) {
-            Rf_error("arg_packets must contain only raw vectors");
+            MORLOC_ERROR("arg_packets must contain only raw vectors");
         }
         c_arg_packets[i] = (uint8_t*)RAW(raw_vec);
         UNPROTECT(1);
@@ -1105,7 +1107,7 @@ SEXP morloc_remote_call(SEXP midx, SEXP socket_path, SEXP cache_path, SEXP resou
     size_t packet_size = R_TRY(morloc_packet_size, result_packet);
     if(!result_packet || packet_size == 0) {
         if(result_packet) free(result_packet);
-        error("Invalid result packet from remote call");
+        MORLOC_ERROR("Invalid result packet from remote call");
     }
 
     SEXP result_packet_r = PROTECT(allocVector(RAWSXP, packet_size));
