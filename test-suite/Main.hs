@@ -51,6 +51,7 @@ main = do
       , golden "typeclasses-3" "typeclasses-3"
       , golden "typeclasses-4" "typeclasses-4"
       , golden "typeclasses-5" "typeclasses-5"
+      , golden "typeclasses-6" "typeclasses-6"
 
       , golden "string-encoding" "string-encoding"
       , golden "string-encoding-utf8" "string-encoding-utf8"
@@ -198,6 +199,8 @@ main = do
 
       -- test records
       , golden "records-primitive" "records-primitive"
+      -- , golden "records-complex" "records-complex"
+      -- , golden "records-nested" "records-nested"
 
       , golden "selection-1" "selection-1"
       , golden "selection-2" "selection-2"
