@@ -168,7 +168,17 @@ writeTypes padding t = [writeType padding Nothing t]
 
 writeType :: MDoc -> Maybe Int -> Type -> MDoc
 writeType padding (Just i) t = [idoc|fprintf(stderr, "%s", "  #{padding}param #{pretty i}: #{pretty t}\n");|]
-writeType padding Nothing  t = [idoc|fprintf(stderr, "%s", "  #{padding}return: #{pretty t}\n");|]
+writeType padding Nothing  t = [idoc|fprintf(stderr, "%s", "  #{padding}return: #{fixLineWrapping $ pretty t}\n");|]
+
+-- Long type names may be wrapped to multiple lines. This funtion adds new line
+-- escapes at the end of each line (required in C strings)
+fixLineWrapping :: MDoc -> MDoc
+fixLineWrapping x = case lines (render' x) of
+    [] -> pretty ("" :: String)
+    [x] -> pretty x
+    xs -> vsep $ [pretty (str <> "\\") | str <- init xs] <> [pretty (last xs)]
+
+fixLineWrapping x = vsep [pretty (str <> "\\") | str <- lines (render' x)]
 
 dispatchCode :: Config -> [FData] -> [NexusCommand] -> MDoc
 dispatchCode _ [] [] = "// nothing to dispatch"

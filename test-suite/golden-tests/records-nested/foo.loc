@@ -1,0 +1,63 @@
+-- Tests passing records of primitives across languages and accessing fields
+
+-- module m (foo, bar)
+module m (foo)
+
+import types (Str, Int, List)
+import base
+
+record Foo = Foo
+  { bars :: [Bar]
+  , things :: [Str]
+  , size :: Int
+  }
+record Cpp => Foo = "foo_t"
+record Py  => Foo = "dict"
+record R   => Foo = "list"
+
+record Bar = Bar
+  { things :: [Str] -- note that record names CAN be reused (not like in Haskell)
+  , size :: Int
+  }
+record Cpp => Bar = "bar_t"
+record Py  => Bar = "dict"
+record R   => Bar = "list"
+
+source Py from "foo.py" ("addBar" as addBarPy)
+source Cpp from "foo.hpp" ("addBar" as addBarCpp)
+source R from "foo.R" ("addBar" as addBarR)
+addBarCpp :: Bar -> Foo -> Foo
+addBarPy  :: Bar -> Foo -> Foo
+addBarR   :: Bar -> Foo -> Foo
+
+
+-- test interop
+foo size =
+  ( addBarPy  { things = [], size = 3}
+  . addBarCpp { things = [], size = 2}
+  . addBarR   { things = [], size = 1}
+  . addBarPy  { things = [], size = 0}
+  ) { bars = []
+    , things = ["spiders"]
+    , size = size
+    }
+
+-- -- test access
+-- bar size = (fpy@bars, fcpp@things, fr@size) where
+--     fpy = addBarPy { things = ["carrot"], size = 1}
+--       { bar = []
+--       , things = ["a"]
+--       , size = size
+--       }
+--
+--     fcpp = addBarPy { things = ["stick"], size = 2}
+--       { bars = []
+--       , things = ["b"]
+--       , size = size
+--       }
+--
+--     fr = addBarR { things = ["winch"], size = 3}
+--       { bars = []
+--       , things = ["c"]
+--       , size = size
+--       }
