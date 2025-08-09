@@ -2,6 +2,7 @@
 -------------------
 
  * Enforce lowercase module name rule
+ * Fix handling of executable file name option
 
 0.54.1 [2025-07-26]
 -------------------

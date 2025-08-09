@@ -57,13 +57,14 @@ generate cs xs = do
                           then maximum allSubcommandsLengths
                           else 0
 
-  outfile <- CMS.gets (fromMaybe "nexus.c" . stateOutfile)
+  outfile <- CMS.gets (fromMaybe "nexus" . stateOutfile)
+  let nexusfile = "nexus.c"
   return $
     Script
-      { scriptBase = outfile
+      { scriptBase = nexusfile
       , scriptLang = ML.CLang
-      , scriptCode = "." :/ File outfile (Code . render $ main config fdata longestSubcommand cs)
-      , scriptMake = [SysRun . Code $ "gcc -o nexus -O -I" <> MT.pack includeDir <> " " <> MT.pack outfile]
+      , scriptCode = "." :/ File nexusfile (Code . render $ main config fdata longestSubcommand cs)
+      , scriptMake = [SysRun . Code $ "gcc -o " <> MT.pack outfile <> " -O -I" <> MT.pack includeDir <> " " <> MT.pack nexusfile]
       }
 
 getFData :: (Type, Int, Lang, [Socket]) -> MorlocMonad FData
