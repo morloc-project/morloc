@@ -837,6 +837,7 @@ data MorlocError
   -- typeclass errors
   | MissingTypeclassDefinition ClassName EVar
   | ConflictingClasses ClassName ClassName EVar
+  | ConflictingInstances Text Instance Instance
   | InstanceSizeMismatch ClassName [TVar] [TypeU]
   | IllegalExpressionInInstance ClassName [TypeU] Expr
   | CannotUnifySignatures SignatureSet SignatureSet
@@ -1538,6 +1539,15 @@ instance Pretty MorlocError where
       "  Are you missing type alias imports?"
   pretty (MissingTypeclassDefinition cls v) = "No definition found in typeclass" <+> dquotes (pretty cls) <+> "for term" <+> dquotes (pretty v)
   pretty (ConflictingClasses cls1 cls2 v) = "Conflicting typeclasses for" <+> pretty v <+> "found definitions in both" <+> pretty cls1 <+> "and" <+> pretty cls2
+  pretty (ConflictingInstances msg inst1 inst2)
+    | inst1 == inst2
+        = "Found conflict between overlapping instances for class"
+        <+> squotes (pretty (className inst1)) <> ":"
+        <+> pretty msg
+    | otherwise
+        = "Found conflict between overlapping instances for classes"
+        <+> squotes (pretty (className inst1)) <+> "and" <+> squotes (pretty (className inst2)) <> ":"
+        <+> pretty msg
   pretty (InstanceSizeMismatch cls vs ts) = "For class" <+> pretty cls <+> "expected" <+> pretty (length vs) <+> "parameters" <+> tupled (map pretty vs)
     <+> "but found" <+> pretty (length ts) <+> tupled (map pretty ts)
   pretty (IllegalExpressionInInstance cls ts e) = "Illegal expression found in" <+> pretty cls <+> "instance for" <> "\n   " <> align (hsep (map pretty ts)) <> "\n   " <> pretty e
