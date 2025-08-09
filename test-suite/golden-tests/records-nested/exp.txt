@@ -1,2 +1,2 @@
-{"flooz":[0,1,2,3],"things":["spiders"],"size":42}
-[[42],["b"],42]
+{"bars":[{"things":[],"size":0},{"things":[],"size":1},{"things":[],"size":2},{"things":[],"size":3}],"things":["spiders"],"size":42}
+[[{"things":["carrot"],"size":1}],["b"],42]

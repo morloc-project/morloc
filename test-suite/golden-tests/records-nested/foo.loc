@@ -1,7 +1,6 @@
 -- Tests passing records of primitives across languages and accessing fields
 
--- module m (foo, bar)
-module m (foo)
+module m (foo, bar)
 
 import types (Str, Int, List)
 import base
@@ -42,22 +41,22 @@ foo size =
     , size = size
     }
 
--- -- test access
--- bar size = (fpy@bars, fcpp@things, fr@size) where
---     fpy = addBarPy { things = ["carrot"], size = 1}
---       { bar = []
---       , things = ["a"]
---       , size = size
---       }
---
---     fcpp = addBarPy { things = ["stick"], size = 2}
---       { bars = []
---       , things = ["b"]
---       , size = size
---       }
---
---     fr = addBarR { things = ["winch"], size = 3}
---       { bars = []
---       , things = ["c"]
---       , size = size
---       }
+-- test access
+bar size = (fpy@bars, fcpp@things, fr@size) where
+    fpy = addBarPy { things = ["carrot"], size = 1}
+      { bars = []
+      , things = ["a"]
+      , size = size
+      }
+
+    fcpp = addBarPy { things = ["stick"], size = 2}
+      { bars = []
+      , things = ["b"]
+      , size = size
+      }
+
+    fr = addBarR { things = ["winch"], size = 3}
+      { bars = []
+      , things = ["c"]
+      , size = size
+      }
