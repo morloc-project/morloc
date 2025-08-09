@@ -1,6 +1,6 @@
 -- Tests passing records of primitives across languages and accessing fields
 
-module m (foo)
+module m (foo, bar)
 
 import types (Str, Int, List)
 import base

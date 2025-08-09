@@ -353,7 +353,9 @@ serialize nativeExpr s0 = do
     construct v rec@(SerialObject NamRecord _ _ rs) = do
       (ss', befores) <- unzip <$> mapM (\(k, s) -> serialize' (recordAccess v (pretty k)) s) rs
       idx <- getCounter
-      t <- cppTypeOf (serialAstToType rec)
+
+      -- This should store the record as a tuple, the tuple will be serialized
+      t <- recordToCppTuple (map snd rs)
       let v' = helperNamer idx
           decl = encloseSep "{" "}" "," ss'
           x = [idoc|#{t} #{v'} = #{decl};|]
@@ -374,7 +376,7 @@ deserialize varname0 typestr0 s0
       return (getCmd, [])
   | otherwise = do
       schemaVar <- helperNamer <$> getCounter
-      rawtype <- cppTypeOf $ serialAstToType s0
+      rawtype <- rawTypeOf s0
       rawvar <- helperNamer <$> getCounter
       let schema = serialAstToMsgpackSchema s0
           getCmd = [idoc|#{rawtype} #{rawvar} = _get_value<#{rawtype}>(#{varname0}, "#{schema}");|]
@@ -383,6 +385,11 @@ deserialize varname0 typestr0 s0
       return (schemaVar, [getCmd] ++ before ++ [final])
 
   where
+
+    rawTypeOf :: SerialAST -> CppTranslator MDoc
+    rawTypeOf (SerialObject _ _ _ rs) = recordToCppTuple (map snd rs)
+    rawTypeOf t = cppTypeOf . serialAstToType $ t
+
     check :: MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])
     check v s
       | isSerializable s = return (v, [])
@@ -415,7 +422,9 @@ deserialize varname0 typestr0 s0
       return (v', concat befores ++ [x]);
 
     construct v rec@(SerialObject NamRecord _ _ rs) = do
-      (ss', befores) <- mapAndUnzipM (\(k,s) -> check (recordAccess v (pretty k)) s) rs
+      (ss', befores) <- mapAndUnzipM
+                        (\(i, (_, s)) -> check ("std::get<" <> pretty i <> ">(" <> v <> ")") s)
+                        (zip ([0..] :: [Int]) rs)
       t <- cppTypeOf (shallowType rec)
       v' <- helperNamer <$> getCounter
       let decl = encloseSep "{" "}" "," ss'
@@ -423,6 +432,12 @@ deserialize varname0 typestr0 s0
       return (v', concat befores ++ [x]);
 
     construct _ _ = undefined -- TODO add support for deserialization of remaining types (e.g. other records)
+
+recordToCppTuple :: [SerialAST] -> CppTranslator MDoc
+recordToCppTuple ts = do
+    tsDocs <- mapM (cppTypeOf . serialAstToType) ts
+    return $ "std::tuple" <> encloseSep "<" ">" "," tsDocs
+
 
 translateSegment :: SerialManifold -> CppTranslator MDoc
 translateSegment m0 = do
