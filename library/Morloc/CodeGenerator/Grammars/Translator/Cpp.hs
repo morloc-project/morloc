@@ -868,8 +868,7 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
       | (Left v) `elem` ps = "T" <> pretty v
       | otherwise = pretty v
     showDefType _ (FunT _ _) = error "Cannot serialize functions"
-    showDefType _ NamT{}
-      = undefined -- pretty v <> encloseSep "<" ">" "," (map (showDefType ps) ts)
+    showDefType _ (NamT o v ts rs) = pretty v
     showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
     showDefType _ (AppT _ _) = error "AppT is only OK with VarT, for now"
 

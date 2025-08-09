@@ -1,4 +1,4 @@
 addBar <- function(bar, foo){
-    foo$bars <- append(foo$bars, bar)
+    foo$bars[[length(foo$bars) + 1]] <- bar
     foo
 }
