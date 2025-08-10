@@ -1,8 +1,9 @@
-0.54.2 [2025-xx-xx]
+0.54.2 [2025-08-09]
 -------------------
 
  * Enforce lowercase module name rule
  * Fix handling of executable file name option
+ * Fix record handling
 
 0.54.1 [2025-07-26]
 -------------------
