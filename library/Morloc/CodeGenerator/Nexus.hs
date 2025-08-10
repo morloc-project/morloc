@@ -57,13 +57,14 @@ generate cs xs = do
                           then maximum allSubcommandsLengths
                           else 0
 
-  outfile <- CMS.gets (fromMaybe "nexus.c" . stateOutfile)
+  outfile <- CMS.gets (fromMaybe "nexus" . stateOutfile)
+  let nexusfile = "nexus.c"
   return $
     Script
-      { scriptBase = outfile
+      { scriptBase = nexusfile
       , scriptLang = ML.CLang
-      , scriptCode = "." :/ File outfile (Code . render $ main config fdata longestSubcommand cs)
-      , scriptMake = [SysRun . Code $ "gcc -o nexus -O -I" <> MT.pack includeDir <> " " <> MT.pack outfile]
+      , scriptCode = "." :/ File nexusfile (Code . render $ main config fdata longestSubcommand cs)
+      , scriptMake = [SysRun . Code $ "gcc -o " <> MT.pack outfile <> " -O -I" <> MT.pack includeDir <> " " <> MT.pack nexusfile]
       }
 
 getFData :: (Type, Int, Lang, [Socket]) -> MorlocMonad FData
@@ -167,7 +168,17 @@ writeTypes padding t = [writeType padding Nothing t]
 
 writeType :: MDoc -> Maybe Int -> Type -> MDoc
 writeType padding (Just i) t = [idoc|fprintf(stderr, "%s", "  #{padding}param #{pretty i}: #{pretty t}\n");|]
-writeType padding Nothing  t = [idoc|fprintf(stderr, "%s", "  #{padding}return: #{pretty t}\n");|]
+writeType padding Nothing  t = [idoc|fprintf(stderr, "%s", "  #{padding}return: #{fixLineWrapping $ pretty t}\n");|]
+
+-- Long type names may be wrapped to multiple lines. This funtion adds new line
+-- escapes at the end of each line (required in C strings)
+fixLineWrapping :: MDoc -> MDoc
+fixLineWrapping x = case lines (render' x) of
+    [] -> pretty ("" :: String)
+    [x] -> pretty x
+    xs -> vsep $ [pretty (str <> "\\") | str <- init xs] <> [pretty (last xs)]
+
+fixLineWrapping x = vsep [pretty (str <> "\\") | str <- lines (render' x)]
 
 dispatchCode :: Config -> [FData] -> [NexusCommand] -> MDoc
 dispatchCode _ [] [] = "// nothing to dispatch"

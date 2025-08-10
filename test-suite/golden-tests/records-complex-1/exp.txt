@@ -1,0 +1,2 @@
+{"shitlist":[["campers who play load music","earwigs","tollroads","nextflow"],[0,2,1,3]],"things":["spiders"],"size":42}
+[[["aa"],[42]],["b"],42]

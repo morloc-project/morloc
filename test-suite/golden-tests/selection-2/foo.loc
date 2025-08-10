@@ -5,6 +5,6 @@ module main (foo)
 -- away the concrete language imports, this is likely to be a common pattern.
 
 import types (Real)
-import Arithmetic (add)
+import arithmetic (add)
 
 foo x y = add x (add y 42.0)

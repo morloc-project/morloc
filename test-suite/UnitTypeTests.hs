@@ -69,7 +69,7 @@ assertGeneralType msg code t = testCase msg $ do
   result <- runFront code
   case result of
     (Right [x]) -> assertEqual "" t (renameExistentials (gtypeof x))
-    (Right _) -> error "Expected exactly one export from Main for assertGeneralType"
+    (Right _) -> error "Expected exactly one export from main for assertGeneralType"
     (Left e) -> error $
       "The following error was raised: " <> show e <> "\nin:\n" <> show code
 
@@ -258,19 +258,19 @@ whitespaceTests =
     "Tests whitespace handling for modules"
     [ assertGeneralType
       "module indent == 1 and top indent == module indent"
-      "module Foo (y)\nx = 1\ny = 2"
+      "module foo (y)\nx = 1\ny = 2"
       int
     , assertGeneralType
       "module indent == 1 and top indent > module indent"
-      "module Foo (y)\n  x = 1\n  y = 2"
+      "module foo (y)\n  x = 1\n  y = 2"
       int
     , assertGeneralType
       "module indent > 1 and top indent > module indent"
-      " module Foo (y)\n   x = 1\n   y = 2"
+      " module foo (y)\n   x = 1\n   y = 2"
       int
     , assertGeneralType
       "module indent > 1 and top indent = module indent"
-      "  module Foo (y)\n  x = 1\n  y = 2"
+      "  module foo (y)\n  x = 1\n  y = 2"
       int
     -- indenting main
     , assertGeneralType
@@ -285,13 +285,13 @@ whitespaceTests =
     , assertGeneralType
       "multiple modules at pos 1 with pos > 1 exprs"
       [r|
-module Foo (x)
+module foo (x)
   x = True
-module Bar (y)
-  import Foo
+module bar (y)
+  import foo
   y = True
-module Main (z)
-  import Bar
+module main (z)
+  import bar
   z = 1
       |]
       int
@@ -488,51 +488,51 @@ typeAliasTests =
     , assertGeneralType
         "non-parametric, general type alias, imported"
         [r|
-           module M1 (Foo)
+           module m1 (Foo)
              type Foo = A
-           module Main (f)
-             import M1 (Foo)
+           module main (f)
+             import m1 (Foo)
              f :: Foo -> B
         |]
         (fun [var "A", var "B"])
     , assertGeneralType
         "non-parametric, general type alias, reimported"
         [r|
-           module M3 (Foo)
+           module m3 (Foo)
              type Foo = A
-           module M2 (Foo)
-             import M3 (Foo)
-           module M1 (Foo)
-             import M2 (Foo)
-           module Main (f)
-             import M1 (Foo)
+           module m2 (Foo)
+             import m3 (Foo)
+           module m1 (Foo)
+             import m2 (Foo)
+           module main (f)
+             import m1 (Foo)
              f :: Foo -> B
         |]
         (fun [var "A", var "B"])
     , assertGeneralType
         "non-parametric, general type alias, imported aliased"
         [r|
-           module M1 (Foo)
+           module m1 (Foo)
              type Foo = A
-           module Main (f)
-             import M1 (Foo as Bar)
+           module main (f)
+             import m1 (Foo as Bar)
              f :: Bar -> B
         |]
         (fun [var "A", var "B"])
     , assertGeneralType
         "non-parametric, general type alias, reimported aliased"
         [r|
-           module M3 (Foo1)
+           module m3 (Foo1)
              type Foo1 = A
 
-           module M2 (Foo2)
-             import M3 (Foo1 as Foo2)
+           module m2 (Foo2)
+             import m3 (Foo1 as Foo2)
 
-           module M1 (Foo3)
-             import M2 (Foo2 as Foo3)
+           module m1 (Foo3)
+             import m2 (Foo2 as Foo3)
 
-           module Main (f)
-             import M1 (Foo3 as Foo4)
+           module main (f)
+             import m1 (Foo3 as Foo4)
              f :: Foo4 -> B
         |]
         (fun [var "A", var "B"])
@@ -540,30 +540,30 @@ typeAliasTests =
     , assertGeneralType
         "non-parametric, general type alias, duplicate import"
         [r|
-           module M2 (Foo)
+           module m2 (Foo)
              type Foo = A
 
-           module M1 (Foo)
+           module m1 (Foo)
              type Foo = A
 
-           module Main (f)
-             import M1 (Foo)
-             import M2 (Foo)
+           module main (f)
+             import m1 (Foo)
+             import m2 (Foo)
              f :: Foo -> B
         |]
         (fun [var "A", var "B"])
     , assertGeneralType
         "parametric alias, general type alias, duplicate import"
         [r|
-           module M2 (Foo)
+           module m2 (Foo)
              type (Foo a b) = (a,b)
 
-           module M1 (Foo)
+           module m1 (Foo)
              type (Foo c d) = (c,d)
 
-           module Main (f)
-             import M1 (Foo)
-             import M2 (Foo)
+           module main (f)
+             import m1 (Foo)
+             import m2 (Foo)
              f :: Foo X Y -> Z
         |]
         (fun [tuple [var "X", var "Y"], var "Z"])
@@ -1532,26 +1532,26 @@ unitTypeTests =
 
     -- tests modules
     , assertGeneralType
-        "basic Main module"
+        "basic main module"
         [r|
-          module Main(x)
+          module main(x)
           x = [1,2,3]
         |]
         (lst int)
     , (flip $ assertGeneralType "import/export") (lst int) $
         [r|
-          module Foo (x)
+          module foo (x)
             x = 42
-          module Bar (f)
+          module bar (f)
             f a :: a -> [a]
-          module Main (z)
-            import Foo (x)
-            import Bar (f)
+          module main (z)
+            import foo (x)
+            import bar (f)
             z = f x
         |]
     , (flip $ assertGeneralType "complex parse (1)") int $
       [r|
-         module Foo (x)
+         module foo (x)
            add :: Int -> Int -> Int
            x = add a y where
              a = 1
