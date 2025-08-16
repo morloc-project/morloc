@@ -1,6 +1,6 @@
 module main (foo)
 
-import rbase (add, mul)
+import base-r (add, mul)
 
 type R => Real = "numeric"
 

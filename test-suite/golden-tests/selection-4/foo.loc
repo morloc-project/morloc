@@ -2,9 +2,9 @@
 -- Arithmetic module is in the same file.
 
 module arithmetic (add, mul, div, sub)
-import pybase  (add, mul, div, sub)
-import cppbase (add, mul, div, sub)
-import rbase   (add, mul, div, sub)
+import base-py  (add, mul, div, sub)
+import base-cpp (add, mul, div, sub)
+import base-r   (add, mul, div, sub)
 import types (Real)
 
 module main (foo)

@@ -1,6 +1,6 @@
 module main (foo)
 
-import rbase (fold, mul, add)
+import base-r (fold, mul, add)
 
 type R => List a = "list" a
 type R => Real = "numeric"

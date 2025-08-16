@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (Int, Str, List, Tuple2)
-import rbase (id, Map)
+import base-r (id, Map)
 
 record (Person a) = Person {name :: Str, info :: a}
 record R => (Person a) = "list" {name :: Str, info :: a}

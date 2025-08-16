@@ -1,8 +1,8 @@
 module main (foo)
 
 import types (List, Real)
-import rbase (map)
-import cppbase (neg)
+import base-r (map)
+import base-cpp (neg)
 
 -- this is also a test of repeated signatures. Having duplicates like this in a
 -- single module is highly sus. Should I really support it? It does show up

@@ -1,6 +1,6 @@
 module main (foo)
 
-import cppbase (fold, mul, add)
+import base-cpp (fold, mul, add)
 
 type Cpp => List a = "std::vector<$1>" a
 type Cpp => Real = "double"

@@ -1,6 +1,6 @@
 module main (foo)
 
-import pybase (div)
+import base-py (div)
 
 type Py => Tuple3 a b c = "tuple" a b c
 type Py => Bool = "bool"

@@ -1,6 +1,6 @@
 module main (foo)
 
-import rbase (div)
+import base-r (div)
 
 type R => Tuple3 a b c = "list" a b c
 type R => Bool = "logical"

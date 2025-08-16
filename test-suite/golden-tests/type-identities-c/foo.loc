@@ -1,6 +1,6 @@
 module main (foo)
 
-import cppbase (id)
+import base-cpp (id)
 
 instance Packable (Int) SizeT where
   source Cpp from "types.h"

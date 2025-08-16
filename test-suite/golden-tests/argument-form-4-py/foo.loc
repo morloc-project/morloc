@@ -1,6 +1,6 @@
 module main (foo)
 
-import pybase (add, mul)
+import base-py (add, mul)
 
 f = mul 20.0 2.0
 

@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (Int, Str, List, Tuple2)
-import rbase (id, Map)
+import base-r (id, Map)
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.

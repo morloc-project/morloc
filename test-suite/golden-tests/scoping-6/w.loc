@@ -1,6 +1,6 @@
 module main (f)
 
-import pybase (add)
+import base-py (add)
 import types (Real)
 
 -- where-scopes inherit the scope of their parent

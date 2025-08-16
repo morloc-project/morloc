@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (Real, List)
-import pybase (map, neg)
+import base-py (map, neg)
 
 foo :: [Real] -> [Real]
 foo xs = map neg xs

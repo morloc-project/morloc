@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (List, Real)
-import pybase (zipWith, mul, add)
+import base-py (zipWith, mul, add)
 
 add3 x y z = add x (add y z)
 

@@ -1,7 +1,7 @@
 module m (foo)
 
 import types
-import cppbase
+import base-cpp
 
 foo :: Str -> Int -> Map Str Int
 foo k v = pack ([k], [v])

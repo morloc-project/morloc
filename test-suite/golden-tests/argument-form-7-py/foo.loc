@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (List, Real)
-import pybase (map, mul)
+import base-py (map, mul)
 
 -- literal partially-applied function passed as argument
 foo xs = map (mul 2.0) xs

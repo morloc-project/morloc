@@ -1,6 +1,6 @@
 module main (foo)
 
-import pybase (map, id)
+import base-py (map, id)
 
 type Py => Real = "float"
 type Py => (List a) = "list" a

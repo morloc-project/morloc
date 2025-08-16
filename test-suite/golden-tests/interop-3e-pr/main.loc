@@ -1,8 +1,8 @@
 module main (foo)
 
 import types (Real, List)
-import pybase (zipWith, mul)
-import rbase (add, div)
+import base-py (zipWith, mul)
+import base-r (add, div)
 
 foo :: Real -> [Real] -> [Real] -> [Real]
 foo x ys zs = zipWith (\y z -> add (mul x y) (div y z)) ys zs

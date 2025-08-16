@@ -1,7 +1,7 @@
 module main (foo)
 
 import types
-import base
+import base-all
 import math (sqrt)
 
 sum = fold add 0.0

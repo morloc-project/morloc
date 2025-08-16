@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (Str, Int, List)
-import pybase (id)
+import base-py (id)
 
 table (Person a) = Person {name :: Str, info :: a}
 table Py => (Person a) = "dict"

@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (Str, Int, List)
-import rbase (id)
+import base-r (id)
 
 table (Person a) = Person {name :: Str, info :: a}
 table R => (Person a) = "data.frame"

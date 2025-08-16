@@ -1,7 +1,7 @@
 module main (bar)
 
 import types (Real)
-import base
+import base-all
 
 -- foo0       = add
 -- foo1 x     = add x

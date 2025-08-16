@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (List, Real)
-import rbase (map, mul)
+import base-r (map, mul)
 
 -- literal function with constant application
 foo xs = map (mul 2.0) xs

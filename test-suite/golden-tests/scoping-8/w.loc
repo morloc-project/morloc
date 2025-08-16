@@ -1,7 +1,7 @@
 module main (f)
 
 import types (Real)
-import pybase (add)
+import base-py (add)
 
 -- cousins do not interfere with one another
 f = x where

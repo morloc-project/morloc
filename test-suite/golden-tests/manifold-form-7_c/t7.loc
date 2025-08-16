@@ -1,6 +1,6 @@
 module main (foo)
 
-import cppbase (fold, div, add)
+import base-cpp (fold, div, add)
 
 type Cpp => List a = "std::vector<$1>" a
 type Cpp => Bool = "bool"

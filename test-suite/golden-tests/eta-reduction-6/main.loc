@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (Real, List)
-import base
+import base-all
 
 bar :: Real -> Real
 bar = add (mul 4.2 2.0)

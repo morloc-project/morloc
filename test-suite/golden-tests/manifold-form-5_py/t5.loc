@@ -1,6 +1,6 @@
 module main (foo)
 
-import pybase (fold, mul, add)
+import base-py (fold, mul, add)
 
 type Py => List a = "list" a
 type Py => Real = "float"

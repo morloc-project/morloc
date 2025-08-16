@@ -1,7 +1,7 @@
 module main (foo0, foo1, foo2)
 
 import types (Real, List)
-import pybase (zipWith, add)
+import base-py (zipWith, add)
 
 bar x y z = add x (add y z)
 

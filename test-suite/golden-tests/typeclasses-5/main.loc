@@ -1,7 +1,7 @@
 module sos (square, sumOfSquares)
 
 import types (Real, List)
-import cppbase (fold, map)
+import base-cpp (fold, map)
 
 square :: Real -> Real
 square x = mul x x

@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (Int, Str, List)
-import rbase (id)
+import base-r (id)
 
 source R from "person.R" ("person")
 

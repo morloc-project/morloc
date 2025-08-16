@@ -1,6 +1,6 @@
 module main (foo)
 
-import rbase (add)
+import base-r (add)
 
 y = 40.0
 
