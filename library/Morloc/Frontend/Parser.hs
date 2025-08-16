@@ -76,7 +76,7 @@ pModule expModuleName = do
   _ <- reserved "module"
 
   moduleName <- case expModuleName of
-    Nothing -> MT.intercalate "." <$> sepBy freename (symbol ".")
+    Nothing -> MT.intercalate "." <$> sepBy moduleComponent (symbol ".")
     (Just (MV n)) -> symbol n
 
   export <- parens ( (char '*' >> return ExportAll)
@@ -193,7 +193,7 @@ pImport :: Parser ExprI
 pImport = do
   _ <- reserved "import"
   -- There may be '.' in import names, these represent folders/namespaces of modules
-  n <- MT.intercalate "." <$> sepBy freename (symbol ".")
+  n <- MT.intercalate "." <$> sepBy moduleComponent (symbol ".")
   imports <-
     optional $
     parens (sepBy pImportItem (symbol ","))
