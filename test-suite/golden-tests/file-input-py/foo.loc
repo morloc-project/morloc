@@ -1,6 +1,7 @@
 module main (foo)
 
-source Py from "foo.py" ("cat", "len")
+source Py ("len")
+source Py from "foo.py" ("cat")
 
 type Py => Str = "str"
 type Py => Int = "int"

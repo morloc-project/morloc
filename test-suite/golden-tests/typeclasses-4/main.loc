@@ -14,7 +14,8 @@ instance Reversible ([a],[b]) [(a,b)] where
   source Py from "foo.py" ("forward", "backward")
 
 
-source Py from "foo.py" ("addLen", "map")
+source Py ("map")
+source Py from "foo.py" ("addLen")
 addLen :: Str -> (Str, Int)
 map a b :: (a -> b) -> [a] -> [b]
 
