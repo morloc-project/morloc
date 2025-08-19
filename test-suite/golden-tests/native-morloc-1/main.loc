@@ -1,0 +1,10 @@
+module m (foo)
+
+toSnd f x = (x, f x)
+
+double x = (x, x)
+
+int :: Int -> Int
+int x = x 
+
+foo = toSnd double . int

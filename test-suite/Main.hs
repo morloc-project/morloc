@@ -38,6 +38,9 @@ main = do
 
       -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
+      , golden "native-morloc-1" "native-morloc-1"
+      , golden "native-morloc-2" "native-morloc-2"
+
       , golden "demo-trimming" "demo-trimming"
 
       , golden "core-modules-1" "core-modules-1"
