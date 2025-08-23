@@ -1,0 +1,374 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
+
+{-|
+Module      : Morloc.CodeGenerator.Realize
+Description : Resolve all implementation polymorphism
+Copyright   : (c) Zebulun Arendsee, 2016-2025
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+-}
+
+module Morloc.CodeGenerator.Realize (
+    realityCheck
+) where
+
+import Morloc.CodeGenerator.Namespace
+import Morloc.Data.Doc
+import qualified Morloc.Language as Lang
+import qualified Morloc.Monad as MM
+import qualified Morloc.TypeEval as TE
+import qualified Morloc.CodeGenerator.SystemConfig as MCS
+
+realityCheck
+  :: [AnnoS (Indexed Type) Many Int]
+  -- ^ one AST forest for each command exported from main
+  -> MorlocMonad ( [AnnoS (Indexed Type) One ()]
+                 , [AnnoS (Indexed Type) One (Indexed Lang)]
+                 )
+realityCheck es = do
+
+  -- translate modules into bitrees
+  (gASTs, rASTs)
+    -- select a single instance at each node in the tree
+    <- mapM realize es
+    -- separate unrealized (general) ASTs (uASTs) from realized ASTs (rASTs)
+    |>> partitionEithers
+
+  -- check and configure the system
+  -- in the future, the results of this step may be used to winnow the build
+  MCS.configure rASTs
+
+  return (gASTs, rASTs)
+
+-- | Choose a single concrete implementation. In the future, this component
+-- may be one of the more complex components of the morloc compiler. It will
+-- probably need to be implemented using an optimizing SMT solver. It will
+-- also need benchmarking data from all the implementations and possibly
+-- statistical info describing inputs.
+realize
+  :: AnnoS (Indexed Type) Many Int
+  -> MorlocMonad (Either (AnnoS (Indexed Type) One ())
+                         (AnnoS (Indexed Type) One (Indexed Lang)))
+realize s0 = do
+  e@(AnnoS _ li _) <- scoreAnnoS [] s0 >>= collapseAnnoS Nothing |>> removeVarS
+  case li of
+    (Idx _ Nothing) -> makeGAST e |>> Left
+    (Idx _ _) -> Right <$> propagateDown e
+  where
+
+  -- | Depth first pass calculating scores for each language. Alternates with
+  -- scoresSExpr.
+  --
+  scoreAnnoS
+    :: [Lang]
+    -> AnnoS (Indexed Type) Many Int
+    -> MorlocMonad (AnnoS (Indexed Type) Many (Indexed [(Lang, Int)]))
+  scoreAnnoS langs (AnnoS gi ci e) = do
+    (e', ci') <- scoreExpr langs (e, ci)
+    return $ AnnoS gi ci' e'
+
+  -- | Alternates with scoresAnnoS, finds the best score for each language at
+  -- application nodes.
+  scoreExpr
+    :: [Lang]
+    -> (ExprS (Indexed Type) Many Int, Int)
+    -> MorlocMonad (ExprS (Indexed Type) Many (Indexed [(Lang, Int)]), Indexed [(Lang, Int)])
+  scoreExpr langs (AccS k x, i) = do
+    x' <- scoreAnnoS langs x
+    return (AccS k x', Idx i (scoresOf x'))
+  scoreExpr langs (LstS xs, i) = do
+    (xs', best) <- scoreMany langs xs
+    return (LstS xs', Idx i best)
+  scoreExpr langs (TupS xs, i) = do
+    (xs', best) <- scoreMany langs xs
+    return (TupS xs', Idx i best)
+  scoreExpr langs (LamS vs x, i) = do
+    MM.sayVVV $ "scoreExpr LamS"
+              <> "\n  langs:" <+> pretty langs
+              <> "\n  vs:" <+> pretty vs
+              <> "\n  i:" <+> pretty i
+    x' <- scoreAnnoS langs x
+    return (LamS vs x', Idx i (scoresOf x'))
+  scoreExpr _ (AppS f xs, i) = do
+    MM.sayVVV $ "scoreExpr AppS"
+              <> "\n  i" <> pretty i
+    f' <- scoreAnnoS [] f
+
+    -- best scores for each language for f
+    let scores = scoresOf f'
+
+    xs' <- mapM (scoreAnnoS (unique $ map fst scores)) xs
+
+    -- [[(Lang, Int)]] : where Lang is unique within each list and Int is minimized
+    let pairss = [minPairs pairs | AnnoS _ (Idx _ pairs) _ <- xs']
+
+        {- find the best score for each language supported by function f
+
+           Below is the cost function where
+            l1: the language of the ith calling function implementation
+            s1: the score of the ith implementation
+            l2: the language of the jth implementation of the kth argument
+            s2: the score of the jth implementation of the kth argument
+        -}
+        best = [ (l1, s1 + sum [ minimumDef 999999999 [s2 + Lang.pairwiseCost l1 l2 | (l2, s2) <- pairs]
+                               | pairs <- pairss
+                               ]
+                 )
+               | (l1, s1) <- scores
+               ]
+
+    return (AppS f' xs', Idx i best)
+  scoreExpr langs (NamS rs, i) = do
+    (xs, best) <- scoreMany langs (map snd rs)
+    return (NamS (zip (map fst rs) xs), Idx i best)
+  -- non-recursive expressions
+  scoreExpr langs (UniS, i) = return (UniS, zipLang i langs)
+
+  scoreExpr langs (VarS v (Many xs), i) = do
+    (xs', best) <- scoreMany langs xs
+    return (VarS v (Many xs'), Idx i best)
+
+  scoreExpr _ (CallS src, i) = return (CallS src, Idx i [(srcLang src, callCost src)])
+  scoreExpr langs (BndS v, i) = return (BndS v, zipLang i langs)
+  scoreExpr langs (RealS x, i) = return (RealS x, zipLang i langs)
+  scoreExpr langs (IntS x, i) = return (IntS x, zipLang i langs)
+  scoreExpr langs (LogS x, i) = return (LogS x, zipLang i langs)
+  scoreExpr langs (StrS x, i) = return (StrS x, zipLang i langs)
+
+  zipLang :: Int -> [Lang] -> Indexed [(Lang, Int)]
+  zipLang i langs = Idx i (zip langs (repeat 0))
+
+  scoresOf :: AnnoS a Many (Indexed [(Lang, Int)]) -> [(Lang, Int)]
+  scoresOf (AnnoS _ (Idx _ xs) _) = minPairs xs
+
+  -- find the scores of all implementations from all possible language contexts
+  scoreMany
+    :: [Lang]
+    -> [AnnoS (Indexed Type) Many Int]
+    -> MorlocMonad ([AnnoS (Indexed Type) Many (Indexed [(Lang, Int)])], [(Lang, Int)])
+  scoreMany langs xs0 = do
+    xs1 <- mapM (scoreAnnoS langs) xs0
+    return (xs1, scoreMany' xs1)
+    where
+      scoreMany' :: [AnnoS (Indexed Type) Many (Indexed [(Lang, Int)])] -> [(Lang, Int)]
+      scoreMany' xs =
+        let pairss = [ (minPairs . concat) [xs' | (AnnoS _ (Idx _ xs') _) <- xs] ]
+            langs' = unique (langs <> concatMap (map fst) pairss)
+        -- Got 10 billion nodes in your AST? I didn't think so, so don't say my sentinal's ugly.
+        in [(l1, sum [ minimumDef 999999999 [ score + Lang.pairwiseCost l1 l2
+                               | (l2, score) <- pairs]
+                     | pairs <- pairss])
+           | l1 <- langs']
+
+
+  collapseAnnoS
+    :: Maybe Lang
+    -> AnnoS (Indexed Type) Many (Indexed [(Lang, Int)])
+    -> MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
+  collapseAnnoS l1 (AnnoS gi@(Idx _ gt) ci e) = do
+    (e', ci') <- collapseExpr gt l1 (e, ci)
+    return (AnnoS gi ci' e')
+
+  -- The biased cost adds a slight penalty to changing language.
+  -- This penalty is unrelated to the often large penalty of foreign calls.
+  -- Rather, the purpose is just to distinguish VarS terms. It is totally
+  -- kludgy, a better recursion scheme is needed here.
+  biasedCost :: Maybe Lang -> (Lang, Int) -> Int
+  biasedCost l1 (l2, s)
+    | l1 == Just l2 = cost l1 l2 s
+    | otherwise = 1 + cost l1 l2 s
+
+  cost
+    :: Maybe Lang -- parent language (if given)
+    -> Lang -- child lang (should always be given if we are working from scored pairs)
+    -> Int -- score
+    -> Int
+  cost (Just l1) l2 score = score + Lang.pairwiseCost l1 l2
+  cost _ _ score = score
+
+  -- FIXME: in the future, this function should be replaced by an estimate of
+  -- the function runtime, for now I will just base it off languages.
+  callCost :: Source -> Int
+  callCost src = Lang.languageCost (srcLang src)
+
+  collapseExpr
+    :: Type
+    -> Maybe Lang -- the language of the parent expression (if Nothing, then this is a GAST)
+    -> (ExprS (Indexed Type) Many (Indexed [(Lang, Int)]), Indexed [(Lang, Int)])
+    -> MorlocMonad (ExprS (Indexed Type) One (Indexed (Maybe Lang)), Indexed (Maybe Lang))
+
+  -- This case should be caught earlier
+  collapseExpr _ _ (VarS v (Many []), _)
+    = MM.throwError . GeneratorError . render
+    $ "No implementation found for" <+> squotes (pretty v)
+
+  -- Select one implementation for the given term
+  collapseExpr gt l1 (VarS v (Many xs), Idx i _) = do
+    let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) xs
+    (x, lang) <- case minXs of
+      [] -> MM.throwError . GeneratorError . render $
+             "No implementation found for" <+> squotes (pretty v)
+      [x] -> handleOne x
+      choices -> mapM handleOne choices >>= handleMany gt
+    return (VarS v (One x), Idx i lang)
+    where
+      handleOne
+        :: AnnoS (Indexed Type) Many (Indexed [(Lang, Int)])
+        -> MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
+      handleOne x@(AnnoS _ (Idx _ ss) _) = do
+        let newLang = fmap fst (minBy (biasedCost l1) ss)
+        x' <- collapseAnnoS newLang x
+        return (x', newLang)
+
+      handleMany
+        :: Type
+        -> [(AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)]
+        -> MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
+      handleMany gt' xs' =
+        -- select instances that exactly match the unevaluated general type
+        --
+        -- WARNING: this is an oversimplification, a temporary solution, I will
+        -- update it when I find a breaking case.
+        case [x | x@(AnnoS (Idx _ t) _ _, _) <- xs', gt' == t] of
+          [] -> do
+            gscope <- MM.getGeneralScope i
+            case TE.reduceType gscope (type2typeu gt') of
+              (Just gt'') -> handleMany (typeOf gt'') xs'
+              Nothing -> MM.throwError . GeneratorError . render $
+                "I couldn't find implementation for" <+> squotes (pretty v) <+> "gt' = " <+> pretty gt'
+          [x'] -> return x'
+
+          (x':_) -> return x'
+
+          ----- NOTE: Some cases are inseperable, the code above does not
+          ----- account for this, which may allow incorrect code to be
+          ----- generated.
+          -- xs' ->  MM.throwError . InseperableDefinitions . render
+          --   $ "no rule to separate the following sourced functions of type" <+> parens (pretty gt)":\n"
+          --   <> indent 2 (vsep [ "*" <+> pretty t <+> ":" <+> pretty y | y@(AnnoS (Idx _ t) _ _, _)  <- xs'])
+
+  -- Propagate downwards
+  collapseExpr _ l1 (AccS k x, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    x' <- collapseAnnoS lang x
+    return (AccS k x', Idx i lang)
+  collapseExpr _ l1 (LstS xs, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    xs' <- mapM (collapseAnnoS lang) xs
+    return (LstS xs', Idx i lang)
+  collapseExpr _ l1 (TupS xs, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    xs' <- mapM (collapseAnnoS lang) xs
+    return (TupS xs', Idx i lang)
+  collapseExpr _ l1 (LamS vs x, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    x' <- collapseAnnoS lang x
+    return (LamS vs x', Idx i lang)
+  collapseExpr _ l1 (AppS f xs, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    f' <- collapseAnnoS lang f
+    xs' <- mapM (collapseAnnoS lang) xs
+    return (AppS f' xs', Idx i lang)
+  collapseExpr _ l1 (NamS rs, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    xs' <- mapM (collapseAnnoS lang . snd) rs
+    return (NamS (zip (map fst rs) xs'), Idx i lang)
+  -- collapse leaf expressions
+  collapseExpr _ _ (CallS src, Idx i _) = return (CallS src, Idx i (Just (srcLang src)))
+  collapseExpr _ lang (BndS v,   Idx i _) = return (BndS v,   Idx i lang)
+  collapseExpr _ lang (UniS,   Idx i _) = return (UniS,   Idx i lang)
+  collapseExpr _ lang (RealS x, Idx i _) = return (RealS x, Idx i lang)
+  collapseExpr _ lang (IntS x, Idx i _) = return (IntS x, Idx i lang)
+  collapseExpr _ lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
+  collapseExpr _ lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
+
+  chooseLanguage :: Maybe Lang -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
+  chooseLanguage l1 ss = do
+    case minBy snd [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
+      Nothing -> return Nothing
+      (Just (l3, _)) -> return (Just l3)
+
+  minBy :: Ord b => (a -> b) -> [a] -> Maybe a
+  minBy _ [] = Nothing
+  minBy _ [x] = Just x
+  minBy f (x1:rs) = case minBy f rs of
+    Nothing -> Just x1
+    (Just x2) -> if f x1 <= f x2 then Just x1 else Just x2
+
+  minsBy :: Ord b => (a -> b) -> [a] -> [a]
+  minsBy _ [] = []
+  minsBy f (x:xs) = snd $ minsBy' (f x, [x]) xs where
+    minsBy' (best, grp) [] = (best, grp)
+    minsBy' (best, grp) (y:ys) = minsBy' (newSet (f y)) ys
+      where
+        newSet newScore
+          | newScore == best = (best, y:grp)
+          | newScore < best = (newScore, [y])
+          | otherwise = (best, grp)
+
+
+  -- find the lowest cost function for each key
+  -- the groupSort function will never yield an empty value for vs, so `minimum` is safe
+  minPairs :: (Ord a, Ord b) => [(a, b)] -> [(a, b)]
+  minPairs = map (second minimum) . groupSort
+
+  propagateDown
+    ::              AnnoS (Indexed Type) One (Indexed (Maybe Lang))
+    -> MorlocMonad (AnnoS (Indexed Type) One (Indexed        Lang))
+  propagateDown (AnnoS _ (Idx _ Nothing) _) = MM.throwError . CallTheMonkeys $ "Nothing is not OK"
+  propagateDown e@(AnnoS _ (Idx _ (Just lang0)) _) = f lang0 e where
+    f :: Lang ->     AnnoS (Indexed Type) One (Indexed (Maybe Lang))
+      -> MorlocMonad (AnnoS (Indexed Type) One (Indexed        Lang))
+    f lang (AnnoS g (Idx i Nothing) e') = f lang (AnnoS g (Idx i (Just lang)) e')
+    f _ (AnnoS g (Idx i (Just lang)) e') = do
+      e'' <- case e' of
+        (AccS k x) -> AccS k <$> f lang x
+        (AppS x xs) -> AppS <$> f lang x <*> mapM (f lang) xs
+        (LamS vs x) -> LamS vs <$> f lang x
+        (LstS xs) -> LstS <$> mapM (f lang) xs
+        (TupS xs) -> TupS <$> mapM (f lang) xs
+        (NamS rs) -> NamS <$> (zip (map fst rs) <$> mapM (f lang . snd) rs)
+        UniS -> return UniS
+        (VarS v (One x)) -> VarS v . One <$> f lang x
+        (BndS v) -> return (BndS v)
+        (RealS x) -> return (RealS x)
+        (IntS x) -> return (IntS x)
+        (LogS x) -> return (LogS x)
+        (StrS x) -> return (StrS x)
+        (CallS x) -> return (CallS x)
+      return (AnnoS g (Idx i lang) e'')
+
+-- | This function is called on trees that contain no language-specific
+-- components.  "GAST" refers to General Abstract Syntax Tree. The most common
+-- GAST case, and the only one that is currently supported, is a expression
+-- that merely rearranges data structures without calling any functions. Here
+-- are a few examples:
+--
+--  Constant values and containters (currently supported):
+--  f1 = 5
+--  f2 = [1,2,3]
+--
+--  Variable values and containers (coming soon):
+--  f3 x = x
+--
+--  f4 x = [1,2,x]
+--
+--  Combinations of transformations on containers (possible, but not coming soon):
+--  f5 :: forall a b . (a, b) -> (b, a)
+--  f6 (x,y) = (y,x)
+--
+-- The idea could be elaborated into a full-fledged language.
+makeGAST :: AnnoS (Indexed Type) One (Indexed (Maybe Lang)) -> MorlocMonad (AnnoS (Indexed Type) One ())
+makeGAST = mapAnnoSCM (\(Idx _ _) -> return ())
+
+removeVarS :: AnnoS g One c -> AnnoS g One c
+removeVarS (AnnoS g1 _ (VarS _ (One (AnnoS _ c2 x)))) = removeVarS (AnnoS g1 c2 x)
+removeVarS (AnnoS g c (AccS k x)) = AnnoS g c (AccS k (removeVarS x))
+removeVarS (AnnoS g c (AppS x xs)) = AnnoS g c (AppS (removeVarS x) (map removeVarS xs))
+removeVarS (AnnoS g c (LamS vs x )) = AnnoS g c (LamS vs (removeVarS x))
+removeVarS (AnnoS g c (LstS xs)) = AnnoS g c (LstS (map removeVarS xs))
+removeVarS (AnnoS g c (TupS xs)) = AnnoS g c (TupS (map removeVarS xs))
+removeVarS (AnnoS g c (NamS rs)) = AnnoS g c (NamS (map (second removeVarS) rs))
+removeVarS x = x

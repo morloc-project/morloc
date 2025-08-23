@@ -8,7 +8,8 @@ import Morloc.Namespace
 
 import qualified Morloc.Frontend.API as F
 import Morloc.Frontend.Restructure (restructure)
-import Morloc.CodeGenerator.Generate (generate, realityCheck)
+import Morloc.CodeGenerator.Generate (generate)
+import Morloc.CodeGenerator.Realize (realityCheck)
 import Morloc.ProgramBuilder.Build (buildProgram)
 import Morloc.Frontend.Treeify (treeify)
 
