@@ -1,6 +1,6 @@
 module main (foo)
 
 import types (List, Real)
-import base-py (map, add)
+import pybase (map, add)
 
 foo xs = map (add 1.0) xs

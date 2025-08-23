@@ -2,7 +2,7 @@ module main (rms)
 
 import types (List, Real)
 import math (sqrt, mean, mul)
-import base-cpp (map)
+import cppbase (map)
 
 source cpp from "rms.h"
  ( "rms1" as rms

@@ -3,7 +3,7 @@ module main (sum)
 -- 110 - source 1, import 1
 
 import types (Real, List)
-import base-py (add, fold)
+import pybase (add, fold)
 
 source py from "foo.py" ("sum_loc" as sum)
 sum :: [Real] -> Real

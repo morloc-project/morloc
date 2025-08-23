@@ -3,9 +3,9 @@ module main (foo)
 -- 00n - declare n
 
 import types (Real)
-import base-py
-import base-cpp
-import base-r
+import pybase
+import cppbase
+import rbase
 
 foo x y = mul 2.0 (add x y)
 foo x y = add 0.0 (mul 2.0 (add x y))

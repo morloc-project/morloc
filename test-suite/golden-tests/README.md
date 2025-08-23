@@ -43,7 +43,7 @@ structures (trees) and maybe an 11th really deep structure just for good feels.
 
 The `x-` tests cover unimplemented features with syntactic support. They are
 just tests of the parser.
-import base-py (map, add)
+import pybase (map, add)
 export foo
 
 # Eta reduction
@@ -131,7 +131,7 @@ everything that needs to be known about the type. Maybe. Actually, it might make
 sense to have one general module defining a type, then many language-specific
 modules that import the general module and add the language-specific instance,
 and then maybe one base module that imports many language-specific modules. This
-is what I am currently doing with `conventions`, `base-py`/`cppbase`/`rbase`, and
+is what I am currently doing with `conventions`, `pybase`/`cppbase`/`rbase`, and
 `base`.
 
 The next paper, then would add typeclasses, replace (un)packers with a Packable

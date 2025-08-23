@@ -2,6 +2,6 @@ module main (and)
 
 -- 0n0 - import n
 
-import base-py (and)
-import base-cpp (and)
-import base-r (and)
+import pybase (and)
+import cppbase (and)
+import rbase (and)

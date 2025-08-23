@@ -1,8 +1,8 @@
 module main (foo)
 
 import types (Real)
-import base-py (id)
-import base-cpp (add)
+import pybase (id)
+import cppbase (add)
 
 foo :: Real -> Real
 foo x = id (add 1.0 x)

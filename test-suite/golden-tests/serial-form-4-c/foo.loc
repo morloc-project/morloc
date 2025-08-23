@@ -2,7 +2,7 @@ module main (foo)
 
 
 import types (Int, Str, List, Tuple2)
-import base-cpp (id)
+import cppbase (id)
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.

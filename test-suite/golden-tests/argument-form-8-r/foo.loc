@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (List, Real)
-import base-r (map, mul)
+import rbase (map, mul)
 
 -- variable partially-applied function passed as argument
 foo :: Real -> [Real] -> [Real]

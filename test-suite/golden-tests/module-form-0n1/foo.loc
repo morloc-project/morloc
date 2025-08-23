@@ -3,8 +3,8 @@ module main (sub)
 -- 0n1 - import n, declare 1
 
 import types (Real)
-import base-py  (sub, add, mul)
-import base-cpp (sub, add, mul)
-import base-r   (sub, add, mul)
+import pybase  (sub, add, mul)
+import cppbase (sub, add, mul)
+import rbase   (sub, add, mul)
 
 sub x y = add x (mul -1.0 y)

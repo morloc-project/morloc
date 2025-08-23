@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (Str, Int, List)
-import base-cpp (id)
+import cppbase (id)
 
 table (Person a) = Person {name :: Str, info :: a}
 table Cpp => (Person a) = "struct"

@@ -3,7 +3,7 @@
 module m (foo, bar)
 
 import types (Str, Int, List)
-import base-all
+import base
 
 record Foo = Foo
   { shitlists :: Map Str (Map Str Int)

@@ -1,8 +1,8 @@
 module main (py2c, c2py)
 
 import types (Real)
-import base-py (add)
-import base-cpp (mul)
+import pybase (add)
+import cppbase (mul)
 
 py2c x y = add (mul x y) 100.0
 c2py x y = mul (add x y) 100.0

@@ -4,7 +4,7 @@
 
     -- defines Int, Str, List and Tuple types
     import types
-    import base-cpp
+    import cppbase
 
     record Config = Config
         { minLength :: Int

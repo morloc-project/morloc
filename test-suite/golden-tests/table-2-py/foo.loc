@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (Str, Int, List)
-import base-py (id)
+import pybase (id)
 
 source py from "person.py" ("PersonObj")
 

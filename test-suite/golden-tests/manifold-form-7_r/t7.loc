@@ -1,6 +1,6 @@
 module main (foo)
 
-import base-r (fold, div, add)
+import rbase (fold, div, add)
 
 type R => List a = "list" a
 type R => Bool = "logical"

@@ -1,6 +1,6 @@
 module main (foo)
 
-import base-r (mul)
+import rbase (mul)
 
 type R => (Tuple2 a b) = "list" a b
 type R => Real = "numeric"

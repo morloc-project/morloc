@@ -1,6 +1,6 @@
 module main (foo)
 
-import base-py (add, mul)
+import pybase (add, mul)
 
 type Py => Real = "float"
 

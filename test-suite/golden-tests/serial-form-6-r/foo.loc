@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (Str, Int, List)
-import base-r (id)
+import rbase (id)
 
 record (Person a) = Person {name :: Str, info :: a}
 record R   => Person a = "list"   {name :: Str, info :: a}

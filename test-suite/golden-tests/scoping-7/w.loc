@@ -1,7 +1,7 @@
 module main (f)
 
 import types (Real)
-import base-py (add)
+import pybase (add)
 
 -- where-scopes inherit the scope of all their ancestors
 f = x where

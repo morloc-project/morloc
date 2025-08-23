@@ -3,9 +3,9 @@ module main (sub)
 -- n01 - source n, declare 1
 
 import types (Real)
-import base-py (add, mul)
-import base-r (add, mul)
-import base-cpp (add, mul)
+import pybase (add, mul)
+import rbase (add, mul)
+import cppbase (add, mul)
 
 source py from "foo.py" ("sub_loc" as sub)
 source r from "foo.R" ("sub_loc" as sub)

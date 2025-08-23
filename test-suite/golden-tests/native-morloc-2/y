@@ -1,0 +1,1824 @@
+linkTypeclasses m
+findTypeclasses
+  allClasses keys: []
+moduleClasses: []
+collect
+  gi: 1
+  v: foo
+collectExprS VarE
+  gi: 1
+  v: foo
+  monomorphic: ?
+Set indices 21 = 33
+Set indices 20 = 34
+Set indices 15 = 35
+Set indices 18 = 36
+Set indices 16 = 37
+Set indices 17 = 38
+Set indices 19 = 39
+collectExprS VarE
+  gi: 35
+  v: toSnd
+  monomorphic: forall a . forall b . (a -> b) -> a -> (a, b)
+Set indices 13 = 40
+Set indices 12 = 41
+Set indices 8 = 42
+Set indices 11 = 43
+Set indices 9 = 44
+Set indices 10 = 45
+collectExprS VarE
+  gi: 42
+  v: x
+bound term
+collectExprS VarE
+  gi: 44
+  v: f
+bound term
+collectExprS VarE
+  gi: 45
+  v: x
+bound term
+collectExprS VarE
+  gi: 37
+  v: add
+  monomorphic: Int -> Int -> Int
+collectExprS VarE
+  gi: 39
+  v: x
+bound term
+ : --1--> synthE
+ : synthesize type for: VarS foo :: ?
+ : --2--> synthE
+ : synthesize type for: LamS(x___e0)
+ : --3--> synthE
+ : synthesize type for: AppS nargs=2
+ : --4--> synthE
+ : synthesize type for: VarS toSnd :: forall a . forall b . (a -> b) -> a -> (a
+, b)
+ : --5--> checkE
+ : check if expr: LamS(f___e1, x___e2)
+ : matches type: forall a___q3 . forall b___q4 . (a___q3 -> b___q4) -> a___q3 -> (a___q3
+, b___q4)
+ : --6--> checkE
+ : check if expr: LamS(f___e1, x___e2)
+ : matches type: forall b___q4 . (<a___q3> -> b___q4) -> <a___q3> -> (<a___q3>
+, b___q4)
+ : --7--> checkE
+ : check if expr: LamS(f___e1, x___e2)
+ : matches type: (<a___q3> -> <b___q4>) -> <a___q3> -> (<a___q3>, <b___q4>)
+ : --8--> checkE
+ : check if expr: TupSn=2
+ : matches type: (<a___q3>, <b___q4>)
+ : --9--> synthE
+ : synthesize type for: TupSn=2
+ : --10--> synthE
+ : synthesize type for: BndS x___e2
+ : <--10-- synthE
+Gamma:
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = <a___q3>
+ : --10--> synthE
+ : synthesize type for: TupSn=1
+ : --11--> synthE
+ : synthesize type for: AppS nargs=1
+ : --12--> synthE
+ : synthesize type for: BndS f___e1
+ : <--12-- synthE
+Gamma:
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = <a___q3> -> <b___q4>
+synthE AppS
+  f: f___e1
+  xs0: [x___e2]
+  funType0: <a___q3> -> <b___q4>
+  funExpr0: f___e1
+ : --12--> application
+ : <a___q3> -> <b___q4>
+ : es: [BndS x___e2]
+ : --13--> checkE
+ : check if expr: BndS x___e2
+ : matches type: <a___q3>
+ : --14--> synthE
+ : synthesize type for: BndS x___e2
+ : <--14-- synthE
+Gamma:
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = <a___q3>
+ : (<a___q3>) <: (<a___q3>)
+ : <--13-- checkE
+Gamma:
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : <a___q3>
+ : remainder: 
+ : <--12-- application
+Gamma:
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : <a___q3> -> <b___q4>
+  funType1: <a___q3> -> <b___q4>
+  inputExprs: [x___e2]
+ : <--11-- synthE
+Gamma:
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = <b___q4>
+ : --11--> synthE
+ : synthesize type for: TupSn=0
+ : <--11-- synthE
+Gamma:
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = Tuple0
+ : <--10-- synthE
+Gamma:
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = Tuple1 <b___q4>
+ : <--9-- synthE
+Gamma:
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = (<a___q3>, <b___q4>)
+ : ((<a___q3>, <b___q4>)) <: ((<a___q3>, <b___q4>))
+ : <--8-- checkE
+Gamma:
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : (<a___q3>, <b___q4>)
+ : <--7-- checkE
+Gamma:
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : (<a___q3> -> <b___q4>) -> <a___q3> -> (<a___q3>, <b___q4>)
+ : <--6-- checkE
+Gamma:
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : (<a___q3> -> <b___q4>) -> <a___q3> -> (<a___q3>, <b___q4>)
+ : <--5-- checkE
+Gamma:
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : (<a___q3> -> <b___q4>) -> <a___q3> -> (<a___q3>, <b___q4>)
+ : <--4-- synthE
+Gamma:
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = (<a___q3> -> <b___q4>) -> <a___q3> -> (<a___q3>, <b___q4>)
+synthE AppS
+  f: toSnd
+  xs0: [App add1, x___e0]
+  funType0: (<a___q3> -> <b___q4>) -> <a___q3> -> (<a___q3>, <b___q4>)
+  funExpr0: toSnd
+ : --4--> application
+ : (<a___q3> -> <b___q4>) -> <a___q3> -> (<a___q3>, <b___q4>)
+ : es: [AppS nargs=1, BndS x___e0]
+ : --5--> checkE
+ : check if expr: AppS nargs=1
+ : matches type: <a___q3> -> <b___q4>
+ : --6--> synthE
+ : synthesize type for: AppS nargs=1
+ : --7--> synthE
+ : synthesize type for: VarS add :: Int -> Int -> Int
+ : --8--> checkE
+ : check if expr: CallS source Python3Lang from "./foo.py" "add" as add
+ : matches type: Int -> Int -> Int
+ : --9--> synthE
+ : synthesize type for: CallS source Python3Lang from "./foo.py" "add" as add
+ : <--9-- synthE
+Gamma:
+    <call_5>
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = <call_5>
+ : (<call_5>) <: (Int -> Int -> Int)
+ : <--8-- checkE
+Gamma:
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : Int -> Int -> Int
+ : <--7-- synthE
+Gamma:
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = Int -> Int -> Int
+synthE AppS
+  f: add
+  xs0: [1]
+  funType0: Int -> Int -> Int
+  funExpr0: add
+ : --7--> synthE
+ : synthesize type for: LamS(v9)
+ : --8--> synthE
+ : synthesize type for: AppS nargs=2
+ : --9--> synthE
+ : synthesize type for: VarS add :: Int -> Int -> Int
+ : --10--> checkE
+ : check if expr: CallS source Python3Lang from "./foo.py" "add" as add
+ : matches type: Int -> Int -> Int
+ : --11--> synthE
+ : synthesize type for: CallS source Python3Lang from "./foo.py" "add" as add
+ : <--11-- synthE
+Gamma:
+    <call_10>
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = <call_10>
+ : (<call_10>) <: (Int -> Int -> Int)
+ : <--10-- checkE
+Gamma:
+    SolvedG: call_10 = <ta11> -> <ta12> -> <to13>
+    SolvedG: to13 = Int
+    SolvedG: ta11 = Int
+    SolvedG: ta12 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : Int -> Int -> Int
+ : <--9-- synthE
+Gamma:
+    SolvedG: call_10 = <ta11> -> <ta12> -> <to13>
+    SolvedG: to13 = Int
+    SolvedG: ta11 = Int
+    SolvedG: ta12 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = Int -> Int -> Int
+synthE AppS
+  f: add
+  xs0: [1, v9]
+  funType0: Int -> Int -> Int
+  funExpr0: add
+ : --9--> application
+ : Int -> Int -> Int
+ : es: [IntS 1, BndS v9]
+ : --10--> checkE
+ : check if expr: IntS 1
+ : matches type: Int
+ : --11--> synthE
+ : synthesize type for: IntS 1
+ : <--11-- synthE
+Gamma:
+    SolvedG: call_10 = <ta11> -> <ta12> -> <to13>
+    SolvedG: to13 = Int
+    SolvedG: ta11 = Int
+    SolvedG: ta12 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = Int
+ : (Int) <: (Int)
+ : <--10-- checkE
+Gamma:
+    SolvedG: call_10 = <ta11> -> <ta12> -> <to13>
+    SolvedG: to13 = Int
+    SolvedG: ta11 = Int
+    SolvedG: ta12 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : Int
+ : --10--> checkE
+ : check if expr: BndS v9
+ : matches type: Int
+ : --11--> synthE
+ : synthesize type for: BndS v9
+ : <--11-- synthE
+Gamma:
+    <v9_u14>
+    SolvedG: call_10 = <ta11> -> <ta12> -> <to13>
+    SolvedG: to13 = Int
+    SolvedG: ta11 = Int
+    SolvedG: ta12 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = <v9_u14>
+ : (<v9_u14>) <: (Int)
+ : <--10-- checkE
+Gamma:
+    SolvedG: v9_u14 = Int
+    SolvedG: call_10 = <ta11> -> <ta12> -> <to13>
+    SolvedG: to13 = Int
+    SolvedG: ta11 = Int
+    SolvedG: ta12 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : Int
+ : remainder: 
+ : <--9-- application
+Gamma:
+    SolvedG: v9_u14 = Int
+    SolvedG: call_10 = <ta11> -> <ta12> -> <to13>
+    SolvedG: to13 = Int
+    SolvedG: ta11 = Int
+    SolvedG: ta12 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : Int -> Int -> Int
+  funType1: Int -> Int -> Int
+  inputExprs: [1, v9]
+ : <--8-- synthE
+Gamma:
+    SolvedG: v9_u14 = Int
+    SolvedG: call_10 = <ta11> -> <ta12> -> <to13>
+    SolvedG: to13 = Int
+    SolvedG: ta11 = Int
+    SolvedG: ta12 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = Int
+ : --8--> checkE
+ : check if expr: LamS(v9)
+ : matches type: <v9_x10> -> <o_11>
+ : --9--> checkE
+ : check if expr: AppS nargs=2
+ : matches type: <o_11>
+ : --10--> synthE
+ : synthesize type for: AppS nargs=2
+ : --11--> synthE
+ : synthesize type for: VarS add :: Int -> Int -> Int
+ : --12--> checkE
+ : check if expr: CallS source Python3Lang from "./foo.py" "add" as add
+ : matches type: Int -> Int -> Int
+ : --13--> synthE
+ : synthesize type for: CallS source Python3Lang from "./foo.py" "add" as add
+ : <--13-- synthE
+Gamma:
+    <call_12>
+    v9 :: <v9_x10>
+    <o_11>
+    <v9_x10>
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = <call_12>
+ : (<call_12>) <: (Int -> Int -> Int)
+ : <--12-- checkE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    <o_11>
+    <v9_x10>
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : Int -> Int -> Int
+ : <--11-- synthE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    <o_11>
+    <v9_x10>
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = Int -> Int -> Int
+synthE AppS
+  f: add
+  xs0: [1, v9]
+  funType0: Int -> Int -> Int
+  funExpr0: add
+ : --11--> application
+ : Int -> Int -> Int
+ : es: [IntS 1, BndS v9]
+ : --12--> checkE
+ : check if expr: IntS 1
+ : matches type: Int
+ : --13--> synthE
+ : synthesize type for: IntS 1
+ : <--13-- synthE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    <o_11>
+    <v9_x10>
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = Int
+ : (Int) <: (Int)
+ : <--12-- checkE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    <o_11>
+    <v9_x10>
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : Int
+ : --12--> checkE
+ : check if expr: BndS v9
+ : matches type: Int
+ : --13--> synthE
+ : synthesize type for: BndS v9
+ : <--13-- synthE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    <o_11>
+    <v9_x10>
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = <v9_x10>
+ : (<v9_x10>) <: (Int)
+ : <--12-- checkE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    <o_11>
+    SolvedG: v9_x10 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : Int
+ : remainder: 
+ : <--11-- application
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    <o_11>
+    SolvedG: v9_x10 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : Int -> Int -> Int
+  funType1: Int -> Int -> Int
+  inputExprs: [1, v9]
+ : <--10-- synthE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    <o_11>
+    SolvedG: v9_x10 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = Int
+ : (Int) <: (<o_11>)
+ : <--9-- checkE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    SolvedG: o_11 = Int
+    SolvedG: v9_x10 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : Int
+ : <--8-- checkE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    SolvedG: o_11 = Int
+    SolvedG: v9_x10 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : Int -> Int
+ : <--7-- synthE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    SolvedG: o_11 = Int
+    SolvedG: v9_x10 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = Int -> Int
+ : <--6-- synthE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    SolvedG: o_11 = Int
+    SolvedG: v9_x10 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    <b___q4>
+    <a___q3>
+ : synthesized type = Int -> Int
+ : (Int -> Int) <: (<a___q3> -> <b___q4>)
+ : <--5-- checkE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    SolvedG: o_11 = Int
+    SolvedG: v9_x10 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    SolvedG: b___q4 = Int
+    SolvedG: a___q3 = Int
+ : Int -> Int
+ : --5--> checkE
+ : check if expr: BndS x___e0
+ : matches type: <a___q3>
+ : --6--> synthE
+ : synthesize type for: BndS x___e0
+ : <--6-- synthE
+Gamma:
+    <x___e0_u16>
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    SolvedG: o_11 = Int
+    SolvedG: v9_x10 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    SolvedG: b___q4 = Int
+    SolvedG: a___q3 = Int
+ : synthesized type = <x___e0_u16>
+ : (<x___e0_u16>) <: (Int)
+ : <--5-- checkE
+Gamma:
+    SolvedG: x___e0_u16 = Int
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    SolvedG: o_11 = Int
+    SolvedG: v9_x10 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    SolvedG: b___q4 = Int
+    SolvedG: a___q3 = Int
+ : Int
+ : remainder: 
+ : <--4-- application
+Gamma:
+    SolvedG: x___e0_u16 = Int
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    SolvedG: o_11 = Int
+    SolvedG: v9_x10 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    SolvedG: b___q4 = Int
+    SolvedG: a___q3 = Int
+ : (Int -> Int) -> Int -> (Int, Int)
+  funType1: (Int -> Int) -> Int -> (Int, Int)
+  inputExprs: [(\ v9 -> App add1 v9), x___e0]
+ : <--3-- synthE
+Gamma:
+    SolvedG: x___e0_u16 = Int
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    v9 :: <v9_x10>
+    SolvedG: o_11 = Int
+    SolvedG: v9_x10 = Int
+    SolvedG: call_5 = <ta6> -> <ta7> -> <to8>
+    SolvedG: to8 = Int
+    SolvedG: ta6 = Int
+    SolvedG: ta7 = Int
+    x___e2 :: <a___q3>
+    f___e1 :: <a___q3> -> <b___q4>
+    SolvedG: b___q4 = Int
+    SolvedG: a___q3 = Int
+ : synthesized type = (Int, Int)
+ : --3--> checkE
+ : check if expr: LamS(x___e0)
+ : matches type: <x___e0_x3> -> <o_4>
+ : --4--> checkE
+ : check if expr: AppS nargs=2
+ : matches type: <o_4>
+ : --5--> synthE
+ : synthesize type for: AppS nargs=2
+ : --6--> synthE
+ : synthesize type for: VarS toSnd :: forall a . forall b . (a -> b) -> a -> (a
+, b)
+ : --7--> checkE
+ : check if expr: LamS(f___e1, x___e2)
+ : matches type: forall a___q5 . forall b___q6 . (a___q5 -> b___q6) -> a___q5 -> (a___q5
+, b___q6)
+ : --8--> checkE
+ : check if expr: LamS(f___e1, x___e2)
+ : matches type: forall b___q6 . (<a___q5> -> b___q6) -> <a___q5> -> (<a___q5>
+, b___q6)
+ : --9--> checkE
+ : check if expr: LamS(f___e1, x___e2)
+ : matches type: (<a___q5> -> <b___q6>) -> <a___q5> -> (<a___q5>, <b___q6>)
+ : --10--> checkE
+ : check if expr: TupSn=2
+ : matches type: (<a___q5>, <b___q6>)
+ : --11--> synthE
+ : synthesize type for: TupSn=2
+ : --12--> synthE
+ : synthesize type for: BndS x___e2
+ : <--12-- synthE
+Gamma:
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = <a___q5>
+ : --12--> synthE
+ : synthesize type for: TupSn=1
+ : --13--> synthE
+ : synthesize type for: AppS nargs=1
+ : --14--> synthE
+ : synthesize type for: BndS f___e1
+ : <--14-- synthE
+Gamma:
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = <a___q5> -> <b___q6>
+synthE AppS
+  f: f___e1
+  xs0: [x___e2]
+  funType0: <a___q5> -> <b___q6>
+  funExpr0: f___e1
+ : --14--> application
+ : <a___q5> -> <b___q6>
+ : es: [BndS x___e2]
+ : --15--> checkE
+ : check if expr: BndS x___e2
+ : matches type: <a___q5>
+ : --16--> synthE
+ : synthesize type for: BndS x___e2
+ : <--16-- synthE
+Gamma:
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = <a___q5>
+ : (<a___q5>) <: (<a___q5>)
+ : <--15-- checkE
+Gamma:
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : <a___q5>
+ : remainder: 
+ : <--14-- application
+Gamma:
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : <a___q5> -> <b___q6>
+  funType1: <a___q5> -> <b___q6>
+  inputExprs: [x___e2]
+ : <--13-- synthE
+Gamma:
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = <b___q6>
+ : --13--> synthE
+ : synthesize type for: TupSn=0
+ : <--13-- synthE
+Gamma:
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = Tuple0
+ : <--12-- synthE
+Gamma:
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = Tuple1 <b___q6>
+ : <--11-- synthE
+Gamma:
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = (<a___q5>, <b___q6>)
+ : ((<a___q5>, <b___q6>)) <: ((<a___q5>, <b___q6>))
+ : <--10-- checkE
+Gamma:
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : (<a___q5>, <b___q6>)
+ : <--9-- checkE
+Gamma:
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : (<a___q5> -> <b___q6>) -> <a___q5> -> (<a___q5>, <b___q6>)
+ : <--8-- checkE
+Gamma:
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : (<a___q5> -> <b___q6>) -> <a___q5> -> (<a___q5>, <b___q6>)
+ : <--7-- checkE
+Gamma:
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : (<a___q5> -> <b___q6>) -> <a___q5> -> (<a___q5>, <b___q6>)
+ : <--6-- synthE
+Gamma:
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = (<a___q5> -> <b___q6>) -> <a___q5> -> (<a___q5>, <b___q6>)
+synthE AppS
+  f: toSnd
+  xs0: [App add1, x___e0]
+  funType0: (<a___q5> -> <b___q6>) -> <a___q5> -> (<a___q5>, <b___q6>)
+  funExpr0: toSnd
+ : --6--> application
+ : (<a___q5> -> <b___q6>) -> <a___q5> -> (<a___q5>, <b___q6>)
+ : es: [AppS nargs=1, BndS x___e0]
+ : --7--> checkE
+ : check if expr: AppS nargs=1
+ : matches type: <a___q5> -> <b___q6>
+ : --8--> synthE
+ : synthesize type for: AppS nargs=1
+ : --9--> synthE
+ : synthesize type for: VarS add :: Int -> Int -> Int
+ : --10--> checkE
+ : check if expr: CallS source Python3Lang from "./foo.py" "add" as add
+ : matches type: Int -> Int -> Int
+ : --11--> synthE
+ : synthesize type for: CallS source Python3Lang from "./foo.py" "add" as add
+ : <--11-- synthE
+Gamma:
+    <call_7>
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = <call_7>
+ : (<call_7>) <: (Int -> Int -> Int)
+ : <--10-- checkE
+Gamma:
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : Int -> Int -> Int
+ : <--9-- synthE
+Gamma:
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = Int -> Int -> Int
+synthE AppS
+  f: add
+  xs0: [1]
+  funType0: Int -> Int -> Int
+  funExpr0: add
+ : --9--> synthE
+ : synthesize type for: LamS(v11)
+ : --10--> synthE
+ : synthesize type for: AppS nargs=2
+ : --11--> synthE
+ : synthesize type for: VarS add :: Int -> Int -> Int
+ : --12--> checkE
+ : check if expr: CallS source Python3Lang from "./foo.py" "add" as add
+ : matches type: Int -> Int -> Int
+ : --13--> synthE
+ : synthesize type for: CallS source Python3Lang from "./foo.py" "add" as add
+ : <--13-- synthE
+Gamma:
+    <call_12>
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = <call_12>
+ : (<call_12>) <: (Int -> Int -> Int)
+ : <--12-- checkE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : Int -> Int -> Int
+ : <--11-- synthE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = Int -> Int -> Int
+synthE AppS
+  f: add
+  xs0: [1, v11]
+  funType0: Int -> Int -> Int
+  funExpr0: add
+ : --11--> application
+ : Int -> Int -> Int
+ : es: [IntS 1, BndS v11]
+ : --12--> checkE
+ : check if expr: IntS 1
+ : matches type: Int
+ : --13--> synthE
+ : synthesize type for: IntS 1
+ : <--13-- synthE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = Int
+ : (Int) <: (Int)
+ : <--12-- checkE
+Gamma:
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : Int
+ : --12--> checkE
+ : check if expr: BndS v11
+ : matches type: Int
+ : --13--> synthE
+ : synthesize type for: BndS v11
+ : <--13-- synthE
+Gamma:
+    <v11_u16>
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = <v11_u16>
+ : (<v11_u16>) <: (Int)
+ : <--12-- checkE
+Gamma:
+    SolvedG: v11_u16 = Int
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : Int
+ : remainder: 
+ : <--11-- application
+Gamma:
+    SolvedG: v11_u16 = Int
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : Int -> Int -> Int
+  funType1: Int -> Int -> Int
+  inputExprs: [1, v11]
+ : <--10-- synthE
+Gamma:
+    SolvedG: v11_u16 = Int
+    SolvedG: call_12 = <ta13> -> <ta14> -> <to15>
+    SolvedG: to15 = Int
+    SolvedG: ta13 = Int
+    SolvedG: ta14 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = Int
+ : --10--> checkE
+ : check if expr: LamS(v11)
+ : matches type: <v11_x12> -> <o_13>
+ : --11--> checkE
+ : check if expr: AppS nargs=2
+ : matches type: <o_13>
+ : --12--> synthE
+ : synthesize type for: AppS nargs=2
+ : --13--> synthE
+ : synthesize type for: VarS add :: Int -> Int -> Int
+ : --14--> checkE
+ : check if expr: CallS source Python3Lang from "./foo.py" "add" as add
+ : matches type: Int -> Int -> Int
+ : --15--> synthE
+ : synthesize type for: CallS source Python3Lang from "./foo.py" "add" as add
+ : <--15-- synthE
+Gamma:
+    <call_14>
+    v11 :: <v11_x12>
+    <o_13>
+    <v11_x12>
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = <call_14>
+ : (<call_14>) <: (Int -> Int -> Int)
+ : <--14-- checkE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    <o_13>
+    <v11_x12>
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : Int -> Int -> Int
+ : <--13-- synthE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    <o_13>
+    <v11_x12>
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = Int -> Int -> Int
+synthE AppS
+  f: add
+  xs0: [1, v11]
+  funType0: Int -> Int -> Int
+  funExpr0: add
+ : --13--> application
+ : Int -> Int -> Int
+ : es: [IntS 1, BndS v11]
+ : --14--> checkE
+ : check if expr: IntS 1
+ : matches type: Int
+ : --15--> synthE
+ : synthesize type for: IntS 1
+ : <--15-- synthE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    <o_13>
+    <v11_x12>
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = Int
+ : (Int) <: (Int)
+ : <--14-- checkE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    <o_13>
+    <v11_x12>
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : Int
+ : --14--> checkE
+ : check if expr: BndS v11
+ : matches type: Int
+ : --15--> synthE
+ : synthesize type for: BndS v11
+ : <--15-- synthE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    <o_13>
+    <v11_x12>
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = <v11_x12>
+ : (<v11_x12>) <: (Int)
+ : <--14-- checkE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    <o_13>
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : Int
+ : remainder: 
+ : <--13-- application
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    <o_13>
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : Int -> Int -> Int
+  funType1: Int -> Int -> Int
+  inputExprs: [1, v11]
+ : <--12-- synthE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    <o_13>
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = Int
+ : (Int) <: (<o_13>)
+ : <--11-- checkE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    SolvedG: o_13 = Int
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : Int
+ : <--10-- checkE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    SolvedG: o_13 = Int
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : Int -> Int
+ : <--9-- synthE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    SolvedG: o_13 = Int
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = Int -> Int
+ : <--8-- synthE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    SolvedG: o_13 = Int
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    <b___q6>
+    <a___q5>
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = Int -> Int
+ : (Int -> Int) <: (<a___q5> -> <b___q6>)
+ : <--7-- checkE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    SolvedG: o_13 = Int
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    SolvedG: b___q6 = Int
+    SolvedG: a___q5 = Int
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : Int -> Int
+ : --7--> checkE
+ : check if expr: BndS x___e0
+ : matches type: <a___q5>
+ : --8--> synthE
+ : synthesize type for: BndS x___e0
+ : <--8-- synthE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    SolvedG: o_13 = Int
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    SolvedG: b___q6 = Int
+    SolvedG: a___q5 = Int
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    <x___e0_x3>
+ : synthesized type = <x___e0_x3>
+ : (<x___e0_x3>) <: (Int)
+ : <--7-- checkE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    SolvedG: o_13 = Int
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    SolvedG: b___q6 = Int
+    SolvedG: a___q5 = Int
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    SolvedG: x___e0_x3 = Int
+ : Int
+ : remainder: 
+ : <--6-- application
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    SolvedG: o_13 = Int
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    SolvedG: b___q6 = Int
+    SolvedG: a___q5 = Int
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    SolvedG: x___e0_x3 = Int
+ : (Int -> Int) -> Int -> (Int, Int)
+  funType1: (Int -> Int) -> Int -> (Int, Int)
+  inputExprs: [(\ v11 -> App add1 v11), x___e0]
+ : <--5-- synthE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    SolvedG: o_13 = Int
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    SolvedG: b___q6 = Int
+    SolvedG: a___q5 = Int
+    x___e0 :: <x___e0_x3>
+    <o_4>
+    SolvedG: x___e0_x3 = Int
+ : synthesized type = (Int, Int)
+ : ((Int, Int)) <: (<o_4>)
+ : <--4-- checkE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    SolvedG: o_13 = Int
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    SolvedG: b___q6 = Int
+    SolvedG: a___q5 = Int
+    x___e0 :: <x___e0_x3>
+    SolvedG: o_4 = (Int, Int)
+    SolvedG: x___e0_x3 = Int
+ : (Int, Int)
+ : <--3-- checkE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    SolvedG: o_13 = Int
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    SolvedG: b___q6 = Int
+    SolvedG: a___q5 = Int
+    x___e0 :: <x___e0_x3>
+    SolvedG: o_4 = (Int, Int)
+    SolvedG: x___e0_x3 = Int
+ : Int -> (Int, Int)
+ : <--2-- synthE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    SolvedG: o_13 = Int
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    SolvedG: b___q6 = Int
+    SolvedG: a___q5 = Int
+    x___e0 :: <x___e0_x3>
+    SolvedG: o_4 = (Int, Int)
+    SolvedG: x___e0_x3 = Int
+ : synthesized type = Int -> (Int, Int)
+ : <--1-- synthE
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    SolvedG: o_13 = Int
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    SolvedG: b___q6 = Int
+    SolvedG: a___q5 = Int
+    x___e0 :: <x___e0_x3>
+    SolvedG: o_4 = (Int, Int)
+    SolvedG: x___e0_x3 = Int
+ : synthesized type = Int -> (Int, Int)
+ : -------- leaving frontend typechecker ------------------
+ : g2:
+Gamma:
+    SolvedG: call_14 = <ta15> -> <ta16> -> <to17>
+    SolvedG: to17 = Int
+    SolvedG: ta15 = Int
+    SolvedG: ta16 = Int
+    v11 :: <v11_x12>
+    SolvedG: o_13 = Int
+    SolvedG: v11_x12 = Int
+    SolvedG: call_7 = <ta8> -> <ta9> -> <to10>
+    SolvedG: to10 = Int
+    SolvedG: ta8 = Int
+    SolvedG: ta9 = Int
+    x___e2 :: <a___q5>
+    f___e1 :: <a___q5> -> <b___q6>
+    SolvedG: b___q6 = Int
+    SolvedG: a___q5 = Int
+    x___e0 :: <x___e0_x3>
+    SolvedG: o_4 = (Int, Int)
+    SolvedG: x___e0_x3 = Int
+ : ========================================================
+ : Qualifier Map: fromList [(35,[(TV {unTVar = "a"},VarU (TV {unTVar = "Int"})),(TV {unTVar = "b"},VarU (TV {unTVar = "Int"}))])]
+scoreExpr AppS
+  i34
+scoreExpr AppS
+  i43
+scores = []
+pairss = [[]]
+best = []
+scoreExpr LamS
+  langs: []
+  vs: [f___e1, x___e2]
+  i: 13
+  scores: []
+scores = []
+scoreExpr AppS
+  i48
+scores = [(Python3Lang,13)]
+pairss = [[(Python3Lang,0)],[(Python3Lang,0)]]
+best = [(Python3Lang,33)]
+scoreExpr LamS
+  langs: []
+  vs: [v11]
+  i: 36
+  scores: [(Python3Lang,33)]
+pairss = [[(Python3Lang,33)],[]]
+best = []
+scoreExpr LamS
+  langs: []
+  vs: [x___e0]
+  i: 21
+  scores: []
+#gASTs = 1
+#rASTs = 0

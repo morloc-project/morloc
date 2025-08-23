@@ -3,9 +3,9 @@ module main (sub)
 -- 1n0 - souce 1, import n
 
 import types (Real)
-import base-py (sub)
-import base-cpp (sub)
-import base-r (sub)
+import pybase (sub)
+import cppbase (sub)
+import rbase (sub)
 
 source py from "foo.py" ("sub_loc" as sub)
 sub :: Real -> Real -> Real

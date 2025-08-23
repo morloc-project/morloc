@@ -1,6 +1,6 @@
 module main (foo)
 
-import base-cpp (add, mul)
+import cppbase (add, mul)
 
 f = mul 20.0 2.0
 

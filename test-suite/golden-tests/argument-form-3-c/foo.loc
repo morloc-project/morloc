@@ -1,6 +1,6 @@
 module main (foo)
 
-import base-cpp (add)
+import cppbase (add)
 
 y = 40.0
 

@@ -1,6 +1,6 @@
 module main (foo)
 
-import base-cpp (map, mul)
+import cppbase (map, mul)
 
 type Cpp => Real = "double"
 type Cpp => (List a) = "std::vector<$1>" a

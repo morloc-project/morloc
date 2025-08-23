@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (Int, Str)
-import base-cpp (id)
+import cppbase (id)
 
 source Cpp from "person.h" ("PersonObj")
 

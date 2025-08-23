@@ -7,7 +7,7 @@ module main (foo)
 -- C++ is the faster language.
 
 import types (Real)
-import base-py (add)
-import base-cpp (add)
+import pybase (add)
+import cppbase (add)
 
 foo x y = add x (add y 42.0)

@@ -1,6 +1,6 @@
 module main (foo)
 
-import base-py (mul)
+import pybase (mul)
 
 type Py => Tuple2 a b = "tuple" a b
 type Py => Real = "float"

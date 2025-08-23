@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (List, Real)
-import base-cpp (map)
+import cppbase (map)
 import math (sqrt, sum, mul, div)
 
 square x = mul x x

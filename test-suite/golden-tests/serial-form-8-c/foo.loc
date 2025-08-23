@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (Str, Int, Real, Tuple2, List)
-import base-cpp (id, Map)
+import cppbase (id, Map)
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.

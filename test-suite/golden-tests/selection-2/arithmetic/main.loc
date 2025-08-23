@@ -3,6 +3,6 @@ module arithmetic (add, mul, div, sub)
 -- Imports multiple instances and exports all of them. I expect
 -- this will be a very common pattern.
 
-import base-py  (add, mul, div, sub)
-import base-cpp (add, mul, div, sub)
-import base-r   (add, mul, div, sub)
+import pybase  (add, mul, div, sub)
+import cppbase (add, mul, div, sub)
+import rbase   (add, mul, div, sub)

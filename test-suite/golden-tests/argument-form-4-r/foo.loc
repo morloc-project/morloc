@@ -1,6 +1,6 @@
 module main (foo)
 
-import base-r (add, mul)
+import rbase (add, mul)
 
 f = mul 20.0 2.0
 

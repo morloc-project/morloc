@@ -1,7 +1,7 @@
 module main (foo)
 
 import types (List, Real)
-import base-r (zipWith, mul)
+import rbase (zipWith, mul)
 
 -- literal function with no application
 foo :: [Real] -> [Real] -> [Real]

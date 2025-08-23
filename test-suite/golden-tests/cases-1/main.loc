@@ -1,7 +1,7 @@
 module main (fastaRevcom)
 
 import types (Str, List, Tuple2, Filename)
-import base-cpp (map, fst, snd)
+import cppbase (map, fst, snd)
 
 source Cpp from "fastaIO.hpp" ("readFasta", "writeFasta")
 source Cpp from "bio.hpp" ("revcom")

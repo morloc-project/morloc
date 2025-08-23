@@ -1,6 +1,6 @@
 module main (foo)
 
-import base-cpp (div)
+import cppbase (div)
 
 type Cpp => Tuple3 a b c = "std::tuple<$1,$2,$3>" a b c
 type Cpp => Bool = "bool"

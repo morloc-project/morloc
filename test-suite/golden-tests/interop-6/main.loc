@@ -1,8 +1,8 @@
 module main (foo)
 
 import types (List, Real)
-import base-py (map, add)
-import base-r (fold)
+import pybase (map, add)
+import rbase (fold)
 
 -- yes, this is an odd definition of `sum`
 sum xs b = fold add b xs
