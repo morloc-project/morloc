@@ -52,7 +52,7 @@ treeify d
    [k] -> do
 
      -- find all expressions with annotations and link the expression index to its type
-     -- in the typecheckers, these types will be trigger a switch to checking mode.
+     -- in the typecheckers, these types will trigger a switch to checking mode.
      d' <- DAG.mapNodeM linkAndRemoveAnnotations d
 
      -- build a map

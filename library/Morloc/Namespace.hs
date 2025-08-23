@@ -40,7 +40,7 @@ module Morloc.Namespace
   , SrcName(..)
   , Path
   , Code(..)
-  , TimeInSeconds(..)   
+  , TimeInSeconds(..)
   , DirTree(..)
   , AnchoredDirTree(..)
   -- ** Language
@@ -142,6 +142,7 @@ import Data.Monoid
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 import Data.Void (Void)
+import Data.Foldable (toList)
 import Morloc.Internal
 import Text.Megaparsec (ParseErrorBundle)
 import System.Directory.Tree (DirTree(..), AnchoredDirTree(..))
@@ -954,7 +955,7 @@ instance Defaultable PackageMeta where
     , packageDependencies = []
     }
 
-instance Defaultable BuildConfig where 
+instance Defaultable BuildConfig where
   defaultValue =  BuildConfig
     { buildConfigSlurmSupport = Nothing
     }
@@ -1231,7 +1232,7 @@ instance Pretty Type where
     f _ (AppT (VarT (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
     f _ (AppT (VarT (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
     f _ (AppT (VarT (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-    f False t = parens (f True t) 
+    f False t = parens (f True t)
     f _ (FunT [] t) = "() -> " <> f False t
     f _ (FunT ts t) = hsep $ punctuate " -> " (map (f False) (ts <> [t]))
     f _ (AppT t ts) = hsep (map (f False) (t:ts))
@@ -1354,25 +1355,6 @@ instance Pretty a => Pretty (One a) where
 instance Pretty a => Pretty (Many a) where
   pretty (Many xs) = list $ map pretty xs
 
-instance Pretty (AnnoS g f c) where
-  pretty (AnnoS _ _ e) = pretty e
-
-instance Pretty (ExprS g f c) where
-  pretty UniS = "UniS"
-  pretty (BndS v) = pretty v
-  pretty (VarS v _) = pretty v
-  pretty (AccS k e) = parens (pretty e) <> "[" <> pretty k <> "]"
-  pretty (AppS e es) = "App" <+> pretty e <> vsep (map pretty es)
-  pretty (LamS vs e) = parens ("\\" <+> hsep (map pretty vs) <+> "->" <+> pretty e)
-  pretty (LstS es) = list (map pretty es)
-  pretty (TupS es) = tupled (map pretty es)
-  pretty (NamS rs) = encloseSep "{" "}" "," [pretty k <+> "=" <+> pretty v | (k,v) <- rs]
-  pretty (RealS x) = viaShow x
-  pretty (IntS x) = pretty x
-  pretty (LogS x) = pretty x
-  pretty (StrS x) = dquotes (pretty x)
-  pretty (CallS src) = pretty src
-
 instance (Pretty k, Pretty a) => Pretty (IndexedGeneral k a) where
   pretty (Idx i x) = parens (pretty i <> ":" <+> pretty x)
 
@@ -1443,6 +1425,25 @@ instance Pretty Expr where
           [] -> ""
           xs -> " where" <+> tupled (map (\(Con x) -> pretty x) xs)
 
+instance Foldable f => Pretty (AnnoS a f b) where
+    pretty (AnnoS _ _ e)  = pretty e
+
+instance Foldable f => Pretty (ExprS a f b) where
+    pretty (AppS e es)  = "(AppS" <+> list (map pretty (e:es)) <> ")"
+    pretty (VarS v res) = "(VarS" <+> pretty v <+> "=" <+> list (map pretty (toList res)) <> ")"
+    pretty (AccS k e)   = pretty k <> "(" <> pretty e <> ")"
+    pretty (LamS vs e)  = "(LamS" <+> list (map pretty vs) <+> "->" <+> (pretty e) <> ")"
+    pretty (LstS es)    = "(LstS" <+> list (map pretty es) <> ")"
+    pretty (TupS es)    = "(TupS" <+> list (map pretty es) <> ")"
+    pretty (NamS rs)    = "(NamS" <+> list [pretty k <> "=" <> pretty v | (k,v) <- rs] <> ")"
+    pretty UniS         = "UniS"
+    pretty (BndS x)     = "(BndS" <+> pretty x <> ")"
+    pretty (RealS x)    = viaShow x
+    pretty (IntS x)     = viaShow x
+    pretty (LogS x)     = viaShow x
+    pretty (StrS x)     = viaShow x
+    pretty (CallS x)    = pretty x
+
 instance Pretty Signature where
   pretty (Signature v _ e) = pretty v <+> "::" <+> pretty (etype e)
 
@@ -1461,7 +1462,7 @@ instance Pretty MorlocError where
   pretty (SyntaxError err') = "SyntaxError: " <> pretty (errorBundlePretty err')
   pretty (SerializationError t) = "SerializationError: " <> pretty t
   pretty (CannotLoadModule t) = "CannotLoadModule: " <> pretty t
-  pretty (ModuleInstallError t) = "ModuleInstallError: \n" <> pretty t 
+  pretty (ModuleInstallError t) = "ModuleInstallError: \n" <> pretty t
   pretty (SystemCallError cmd loc msg) =
     "System call failed at (" <>
     pretty loc <> "):\n" <> " cmd> " <> pretty cmd <> "\n" <> " msg>\n" <> pretty msg

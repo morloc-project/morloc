@@ -597,9 +597,9 @@ leave d = do
 seeGamma :: Gamma -> MorlocMonad ()
 seeGamma g = MM.sayVVV $ nest 4 $ "Gamma:" <> line <> vsep (map pretty (gammaContext g))
 
-peak :: ExprS g f c -> MorlocMonad ()
+peak :: Foldable f => ExprS g f c -> MorlocMonad ()
 peak = insetSay . pretty
 
-peakGen :: AnnoS g f c -> MorlocMonad ()
+peakGen :: Foldable f => AnnoS g f c -> MorlocMonad ()
 peakGen = insetSay . pretty
 
