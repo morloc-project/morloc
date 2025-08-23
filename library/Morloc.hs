@@ -8,6 +8,7 @@ import Morloc.Namespace
 
 import qualified Morloc.Frontend.API as F
 import Morloc.Frontend.Restructure (restructure)
+import Morloc.CodeGenerator.LambdaEval (applyLambdas)
 import Morloc.CodeGenerator.Generate (generate)
 import Morloc.CodeGenerator.Realize (realityCheck)
 import Morloc.ProgramBuilder.Build (buildProgram)
@@ -55,6 +56,8 @@ writeProgram ::
   -> MorlocMonad ()
 writeProgram path code
   = typecheck path code
+  -- evaluate all applied lambdas in rasts and gasts
+  >>= bimapM (mapM applyLambdas) (mapM applyLambdas)
   -- prepare scripts
   >>= uncurry generate
   -- (Script, [Script]) -> IO ()
