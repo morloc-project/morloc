@@ -1,0 +1,12 @@
+module m (foo)
+
+toSnd f z = (double z, f (bar double z))
+
+double x = (x, x)
+
+bar f x = (x, f x)
+
+int :: Int -> Int
+int x = x
+
+foo = toSnd double . int
