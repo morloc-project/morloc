@@ -37,27 +37,26 @@ typecheck = mapM run where
 
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
       let g0 = Gamma {gammaCounter = 0, gammaContext = []}
-          ((_, g1), e1) = renameAnnoS (Map.empty, g0) e0
-      (g2, _, e2) <- synthG g1 e1
+      (g1, _, e1) <- synthG g0 e0
       insetSay "-------- leaving frontend typechecker ------------------"
-      insetSay "g2:"
-      seeGamma g2
+      insetSay "g1:"
+      seeGamma g1
       insetSay "========================================================"
-      let e3 = mapAnnoSG (fmap normalizeType) . applyGen g2 $ e2
+      let e2 = mapAnnoSG (fmap normalizeType) . applyGen g1 $ e1
 
-      (g3, e4) <- resolveInstances g2 e3
+      (g2, e3) <- resolveInstances g1 e2
 
       -- apply inferred type information to the extracted type qualifiers
       -- this information was uploaded by the `recordParameter` function
       s <- MM.get
-      let qmap = Map.map (prepareQualifierMap g3) (stateTypeQualifier s)
+      let qmap = Map.map (prepareQualifierMap g2) (stateTypeQualifier s)
       MM.put (s {stateTypeQualifier = qmap})
 
       insetSay $ "Qualifier Map:" <+> viaShow qmap
 
       -- perform a final application of gamma the final expression and return
       -- (is this necessary?)
-      return (applyGen g3 e4)
+      return (applyGen g2 e3)
 
 -- The typechecker goes through two passes assigning two different var names
 -- to the qualifiers. The first is never resolved, and is left as

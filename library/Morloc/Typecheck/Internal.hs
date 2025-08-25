@@ -35,7 +35,6 @@ module Morloc.Typecheck.Internal
   , cut
   , substitute
   , rename
-  , renameAnnoS
   , occursCheck
   , toExistential
   -- * subtyping
@@ -523,47 +522,6 @@ rename g0 (ForallU v@(TV s) t0) =
 -- Unless I add N-rank types, foralls can only be on top, so no need to recurse.
 rename g t = (g, t)
 
-renameAnnoS :: (Map.Map EVar EVar, Gamma) -> AnnoS g ManyPoly c -> ((Map.Map EVar EVar, Gamma), AnnoS g ManyPoly c)
-renameAnnoS context (AnnoS gt ct e) =
-  let (context', e') = renameSExpr context e
-  in (context', AnnoS gt ct e')
-
-renameSExpr :: (Map.Map EVar EVar, Gamma) -> ExprS g ManyPoly c -> ((Map.Map EVar EVar, Gamma), ExprS g ManyPoly c)
-renameSExpr c0@(m, g) e0 = case e0 of
-  (BndS v) -> case Map.lookup v m of
-    (Just v') -> (c0, BndS v')
-    Nothing -> (c0, BndS v)
-  (VarS v (MonomorphicExpr t xs)) ->
-    let (context', xs') = statefulMap renameAnnoS c0 xs
-    in (context', VarS v (MonomorphicExpr t xs'))
-  (VarS v (PolymorphicExpr cls clsName t rs)) ->
-    let (ts, ass) = unzip rs
-        (context', ass') = statefulMap (statefulMap renameAnnoS) c0 ass
-        rs' = zip ts ass'
-    in (context', VarS v $ PolymorphicExpr cls clsName t rs')
-  (LamS vs x) ->
-    let (g', vs') = statefulMap (\g'' (EV v) -> evarname g'' (v <> "___e")) g vs
-        m' = foldr (uncurry Map.insert) m (zip vs vs')
-        (c1, x') = renameAnnoS (m', g') x
-    in (c1, LamS vs' x')
-  (AccS k e) ->
-    let (c1, e') = renameAnnoS c0 e
-    in (c1, AccS k e')
-  (AppS e es) ->
-    let (c1, es') = statefulMap renameAnnoS c0 es
-        (c2, e') = renameAnnoS c1 e -- order matters here, the arguments are bound under the PARENT
-    in (c2, AppS e' es')
-  (LstS es) ->
-    let (c1, es') = statefulMap renameAnnoS c0 es
-    in (c1, LstS es')
-  (TupS es) ->
-    let (c1, es') = statefulMap renameAnnoS c0 es
-    in (c1, TupS es')
-  (NamS rs) ->
-    let (c1, es') = statefulMap renameAnnoS c0 (map snd rs)
-    in (c1, NamS (zip (map fst rs) es'))
-  e -> (c0, e)
-
 tvarname :: Gamma -> MT.Text -> (Gamma, TVar)
 tvarname g prefix =
   let i = gammaCounter g
@@ -572,7 +530,7 @@ tvarname g prefix =
 evarname :: Gamma -> MT.Text -> (Gamma, EVar)
 evarname g prefix =
   let i = gammaCounter g
-  in (g {gammaCounter = i + 1}, EV (prefix <> MT.pack (show i)))
+  in (g {gammaCounter = i + 1}, EV (prefix <> "@@" <> MT.pack (show i)))
 
 
 -- debugging -------------------
