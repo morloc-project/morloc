@@ -16,6 +16,7 @@ module Morloc.CodeGenerator.Realize (
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
+import qualified Data.Map as Map
 import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
@@ -42,6 +43,19 @@ realityCheck es = do
 
   return (gASTs, rASTs)
 
+-- State for the realize scoring algorithm
+data RState = RState
+    { rLangs :: [Lang]
+    , rApplied :: [AnnoS (Indexed Type) Many Int]
+    , rBndVars :: Map.Map EVar (AnnoS (Indexed Type) Many Int)
+    }
+
+emptyRState = RState
+    { rLangs = []
+    , rApplied = []
+    , rBndVars = Map.empty
+    }
+
 -- | Choose a single concrete implementation. In the future, this component
 -- may be one of the more complex components of the morloc compiler. It will
 -- probably need to be implemented using an optimizing SMT solver. It will
@@ -52,7 +66,7 @@ realize
   -> MorlocMonad (Either (AnnoS (Indexed Type) One ())
                          (AnnoS (Indexed Type) One (Indexed Lang)))
 realize s0 = do
-  e@(AnnoS _ li _) <- scoreAnnoS [] s0 >>= collapseAnnoS Nothing |>> removeVarS
+  e@(AnnoS _ li _) <- scoreAnnoS emptyRState s0 >>= collapseAnnoS Nothing |>> removeVarS
   case li of
     (Idx _ Nothing) -> makeGAST e |>> Left
     (Idx _ _) -> Right <$> propagateDown e
@@ -60,46 +74,46 @@ realize s0 = do
 
   -- | Depth first pass calculating scores for each language. Alternates with
   -- scoresSExpr.
-  --
   scoreAnnoS
-    :: [Lang]
+    :: RState
     -> AnnoS (Indexed Type) Many Int
     -> MorlocMonad (AnnoS (Indexed Type) Many (Indexed [(Lang, Int)]))
-  scoreAnnoS langs (AnnoS gi ci e) = do
-    (e', ci') <- scoreExpr langs (e, ci)
+  scoreAnnoS rstat (AnnoS gi ci e) = do
+    (e', ci') <- scoreExpr rstat (e, ci)
     return $ AnnoS gi ci' e'
 
   -- | Alternates with scoresAnnoS, finds the best score for each language at
   -- application nodes.
   scoreExpr
-    :: [Lang]
+    :: RState
     -> (ExprS (Indexed Type) Many Int, Int)
     -> MorlocMonad (ExprS (Indexed Type) Many (Indexed [(Lang, Int)]), Indexed [(Lang, Int)])
-  scoreExpr langs (AccS k x, i) = do
-    x' <- scoreAnnoS langs x
+  scoreExpr rstat (AccS k x, i) = do
+    x' <- scoreAnnoS rstat x
     return (AccS k x', Idx i (scoresOf x'))
-  scoreExpr langs (LstS xs, i) = do
-    (xs', best) <- scoreMany langs xs
+  scoreExpr rstat (LstS xs, i) = do
+    (xs', best) <- scoreMany rstat xs
     return (LstS xs', Idx i best)
-  scoreExpr langs (TupS xs, i) = do
-    (xs', best) <- scoreMany langs xs
+  scoreExpr rstat (TupS xs, i) = do
+    (xs', best) <- scoreMany rstat xs
     return (TupS xs', Idx i best)
-  scoreExpr langs (LamS vs x, i) = do
-    MM.sayVVV $ "scoreExpr LamS"
-              <> "\n  langs:" <+> pretty langs
-              <> "\n  vs:" <+> pretty vs
-              <> "\n  i:" <+> pretty i
-    x' <- scoreAnnoS langs x
+  scoreExpr rstat (LamS vs x, i) = do
+    x' <- scoreAnnoS (updateRState vs rstat) x
     return (LamS vs x', Idx i (scoresOf x'))
-  scoreExpr _ (AppS f xs, i) = do
-    MM.sayVVV $ "scoreExpr AppS"
-              <> "\n  i" <> pretty i
-    f' <- scoreAnnoS [] f
+  scoreExpr rstat (AppS f xs, i) = do
+
+    -- store all applied arguments
+    -- these may be bound to lambdas within f
+    -- they are required for resolving the application language
+    let rstat' = rstat { rLangs = [], rApplied = xs }
+
+    f' <- scoreAnnoS rstat' f
 
     -- best scores for each language for f
     let scores = scoresOf f'
+        rstat'' = emptyRState { rLangs = unique $ map fst scores }
 
-    xs' <- mapM (scoreAnnoS (unique $ map fst scores)) xs
+    xs' <- mapM (scoreAnnoS rstat'') xs
 
     -- [[(Lang, Int)]] : where Lang is unique within each list and Int is minimized
     let pairss = [minPairs pairs | AnnoS _ (Idx _ pairs) _ <- xs']
@@ -120,42 +134,54 @@ realize s0 = do
                ]
 
     return (AppS f' xs', Idx i best)
-  scoreExpr langs (NamS rs, i) = do
-    (xs, best) <- scoreMany langs (map snd rs)
+  scoreExpr rstat (NamS rs, i) = do
+    (xs, best) <- scoreMany rstat (map snd rs)
     return (NamS (zip (map fst rs) xs), Idx i best)
   -- non-recursive expressions
-  scoreExpr langs (UniS, i) = return (UniS, zipLang i langs)
+  scoreExpr rstat (UniS, i) = return (UniS, zipLang i rstat)
 
-  scoreExpr langs (VarS v (Many xs), i) = do
-    (xs', best) <- scoreMany langs xs
+  scoreExpr rstat (VarS v (Many xs), i) = do
+    (xs', best) <- scoreMany rstat xs
     return (VarS v (Many xs'), Idx i best)
 
-  scoreExpr _ (CallS src, i) = return (CallS src, Idx i [(srcLang src, callCost src)])
-  scoreExpr langs (BndS v, i) = return (BndS v, zipLang i langs)
-  scoreExpr langs (RealS x, i) = return (RealS x, zipLang i langs)
-  scoreExpr langs (IntS x, i) = return (IntS x, zipLang i langs)
-  scoreExpr langs (LogS x, i) = return (LogS x, zipLang i langs)
-  scoreExpr langs (StrS x, i) = return (StrS x, zipLang i langs)
+  scoreExpr rstat (BndS v, i) = do
+    case Map.lookup v (rBndVars rstat) of
+        (Just e@(AnnoS (Idx _ (FunT _ _)) _ _)) -> do
+            scores <- scoreAnnoS rstat e |>> scoresOf
+            return (BndS v, Idx i scores)
+        _ -> return (BndS v, zipLang i rstat)
 
-  zipLang :: Int -> [Lang] -> Indexed [(Lang, Int)]
-  zipLang i langs = Idx i (zip langs (repeat 0))
+  scoreExpr _ (CallS src, i) = return (CallS src, Idx i [(srcLang src, callCost src)])
+  scoreExpr rstat (RealS x, i) = return (RealS x, zipLang i rstat)
+  scoreExpr rstat (IntS x, i) = return (IntS x, zipLang i rstat)
+  scoreExpr rstat (LogS x, i) = return (LogS x, zipLang i rstat)
+  scoreExpr rstat (StrS x, i) = return (StrS x, zipLang i rstat)
+
+  updateRState :: [EVar] -> RState -> RState
+  updateRState [] rstat = rstat
+  updateRState _ rstat@(RState _ [] _) = rstat
+  updateRState (v:vs) rstat@(RState _ (p:ps) bound) = updateRState vs $
+    rstat { rApplied = ps, rBndVars = Map.insert v p bound }
+
+  zipLang :: Int -> RState -> Indexed [(Lang, Int)]
+  zipLang i (rLangs -> langs) = Idx i (zip langs (repeat 0))
 
   scoresOf :: AnnoS a Many (Indexed [(Lang, Int)]) -> [(Lang, Int)]
   scoresOf (AnnoS _ (Idx _ xs) _) = minPairs xs
 
   -- find the scores of all implementations from all possible language contexts
   scoreMany
-    :: [Lang]
+    :: RState
     -> [AnnoS (Indexed Type) Many Int]
     -> MorlocMonad ([AnnoS (Indexed Type) Many (Indexed [(Lang, Int)])], [(Lang, Int)])
-  scoreMany langs xs0 = do
-    xs1 <- mapM (scoreAnnoS langs) xs0
+  scoreMany rstat xs0 = do
+    xs1 <- mapM (scoreAnnoS rstat) xs0
     return (xs1, scoreMany' xs1)
     where
       scoreMany' :: [AnnoS (Indexed Type) Many (Indexed [(Lang, Int)])] -> [(Lang, Int)]
       scoreMany' xs =
         let pairss = [ (minPairs . concat) [xs' | (AnnoS _ (Idx _ xs') _) <- xs] ]
-            langs' = unique (langs <> concatMap (map fst) pairss)
+            langs' = unique (rLangs rstat <> concatMap (map fst) pairss)
         -- Got 10 billion nodes in your AST? I didn't think so, so don't say my sentinal's ugly.
         in [(l1, sum [ minimumDef 999999999 [ score + Lang.pairwiseCost l1 l2
                                | (l2, score) <- pairs]
