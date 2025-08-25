@@ -271,7 +271,7 @@ data MorlocState = MorlocState
   -- ^ The parsed contents of a package.yaml file
   , stateVerbosity :: Int
   , stateCounter :: Int
-  -- ^ Used in Treeify generate new indices (starting from max parser index).
+  -- ^ Used in Treeify to generate new indices (starting from max parser index).
   -- Also used (after resetting to 0) in each of the backend generators.
   , stateDepth :: Int
   -- ^ store depth in the AnnoS tree in the frontend and backend typecheckers
@@ -785,6 +785,8 @@ data MorlocError
   | SerializationError Text
   -- | Error in building a pool (i.e., in a compiled language)
   | PoolBuildError Text
+  -- | Undefined variable error
+  | UndefinedVariable EVar
   -- | Raise when a type alias substitution fails
   | SelfRecursiveTypeAlias TVar
   | MutuallyRecursiveTypeAlias [Text]
@@ -1467,6 +1469,7 @@ instance Pretty MorlocError where
     "System call failed at (" <>
     pretty loc <> "):\n" <> " cmd> " <> pretty cmd <> "\n" <> " msg>\n" <> pretty msg
   pretty (PoolBuildError msg) = "PoolBuildError: " <> pretty msg
+  pretty (UndefinedVariable v) = "Undefined variable" <+> squotes (pretty v)
   pretty (SelfRecursiveTypeAlias v) = "SelfRecursiveTypeAlias: " <> pretty v
   pretty (MutuallyRecursiveTypeAlias vs) = "MutuallyRecursiveTypeAlias: " <> tupled (map pretty vs)
   pretty (BadTypeAliasParameters v exp' obs)
@@ -1571,7 +1574,7 @@ instance Pretty TypeError where
     = "InstantiationError:" <+> "(" <> pretty t1 <+> "<:=" <+> pretty t2 <> ")" <> "\n"
     <> "   " <> align (pretty msg)
   pretty (EmptyCut gi) = "EmptyCut:" <+> pretty gi
-  pretty OccursCheckFail {} = "OccursCheckFail"
+  pretty (OccursCheckFail t1 t2 msg) = "OccursCheckFail:" <+> parens (pretty t1) <+> parens (pretty t2) <+> ":" <+> pretty msg
   pretty (Mismatch t1 t2 msg)
     = "Mismatch"
     <+> tupled ["t1=" <> pretty t1, "t2=" <> pretty t2]

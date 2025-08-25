@@ -411,6 +411,7 @@ typeAliasTests =
         [r|
            module main (f)
            type Foo = A
+           g a b :: a -> b
            f :: Foo -> Int
            f = g  {- yes, g isn't defined -}
         |]
@@ -933,11 +934,6 @@ unitTypeTests =
         single 1
         |]
         (lst int)
-
-    , assertGeneralType
-        "existential application"
-        "f 1"
-        (exist "e0")
 
     , assertGeneralType
         "existential function passing"

@@ -332,7 +332,7 @@ collectExprS namer (ExprI gi e0) = f namer e0 where
         MM.sayVVV "bound term"
         case Map.lookup v (namerMap namer) of
             (Just v') -> return (namer, BndS v')
-            Nothing -> MM.throwError . CallTheMonkeys . render $ "Seemingly bound term" <+> squotes (pretty v) <+> "not found in renaming map"
+            Nothing -> MM.throwError $ UndefinedVariable v
     where
       termtypesToAnnoS :: Int -> Namer -> TermTypes -> MorlocMonad (Namer, [AnnoS Int ManyPoly Int])
       termtypesToAnnoS gi namer t = do
