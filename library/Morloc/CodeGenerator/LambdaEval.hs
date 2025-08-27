@@ -175,9 +175,11 @@ substituteAnnoS v r = f where
   f (AnnoS g c (AccS k e)) =
     let e' = f e
     in AnnoS g c (AccS k e')
-  f (AnnoS g c (LamS vs e)) =
-    let e' = f e
-    in AnnoS g c (LamS vs e')
+  f e0@(AnnoS g c (LamS vs e))
+    | v `elem` vs = e0 -- the replacement term is shadowed
+    | otherwise =
+        let e' = f e
+        in AnnoS g c (LamS vs e')
   f (AnnoS g c (LstS es)) =
     let es' = map f es
     in AnnoS g c (LstS es')
