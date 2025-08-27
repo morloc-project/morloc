@@ -290,6 +290,7 @@ collect
   -> EVar
   -> MorlocMonad (AnnoS Int ManyPoly Int)
 collect gi v = do
+  -- FIXME: this macro expansion strategy needs to be replaced
   MM.sayVVV $ "collect"
             <> "\n  gi:" <+> pretty gi
             <> "\n  v:" <+> pretty v
