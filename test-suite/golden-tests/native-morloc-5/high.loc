@@ -1,0 +1,17 @@
+module high (foo)
+
+type Py => Int = "int"
+type Py => Tuple2 a b = "tuple" a b
+
+source Py from "high.py" ("fst", "snd")
+fst a b :: (a, b) -> a
+snd a b :: (a, b) -> b
+
+const a b :: a -> b -> a
+const a b = a
+
+uncurry a b c :: (a -> b -> c) -> (a, b) -> c
+uncurry fabc ab = fabc (fst ab) (snd ab) 
+
+foo :: (Int, Int) -> Int
+foo = uncurry const
