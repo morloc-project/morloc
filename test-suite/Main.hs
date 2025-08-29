@@ -307,6 +307,7 @@ main = do
       , golden "scoping-7" "scoping-7"
       , golden "scoping-8" "scoping-8"
       , golden "scoping-9" "scoping-9"
+      , golden "scoping-10" "scoping-10"
       -- type identities
       , golden "type-identities-c" "type-identities-c"
 

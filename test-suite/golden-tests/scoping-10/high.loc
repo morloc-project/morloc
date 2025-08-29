@@ -1,0 +1,10 @@
+module high (foo)
+
+import low
+
+source Py from "high.py" ("fst", "snd")
+
+type Py => Int = "int"
+
+foo :: (Int, Int) -> Int
+foo = uncurry const
