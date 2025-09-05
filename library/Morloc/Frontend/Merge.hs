@@ -20,6 +20,7 @@ module Morloc.Frontend.Merge
   , mergeEType
   , mergeTypeUs
   , mergeTypeclasses
+  , mergeIndexedInstances
   , unionTermTypes
   , mergeSignatureSet
   , mergeFirstIndexM
@@ -37,7 +38,7 @@ module Morloc.Frontend.Merge
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 
-mergeFirstIndexM :: Monad m => (a -> a -> m a) -> Indexed a -> Indexed a -> m (Indexed a) 
+mergeFirstIndexM :: Monad m => (a -> a -> m a) -> Indexed a -> Indexed a -> m (Indexed a)
 mergeFirstIndexM f (Idx i x) (Idx _ y) = Idx i <$> f x y
 
 mergeTermTypes :: TermTypes -> TermTypes -> MorlocMonad TermTypes
@@ -91,11 +92,18 @@ mergeTypeUs t1 t2
 
 mergeTypeclasses :: Instance -> Instance -> MorlocMonad Instance
 mergeTypeclasses inst1@(Instance cls1 vs1 t1 ts1) inst2@(Instance cls2 vs2 t2 ts2)
-  | cls1 /= cls2 = MM.throwError $ ConflictingInstances "Mismatched class names" inst1 inst2 
+  | cls1 /= cls2 = MM.throwError $ ConflictingInstances "Mismatched class names" inst1 inst2
   | not (equivalent (etype t1) (etype t2)) = MM.throwError $ ConflictingInstances "Conflicting typeclass term general type" inst1 inst2
   | length vs1 /= length vs2 = MM.throwError $ ConflictingInstances "Conflicting typeclass parameter count" inst1 inst2
   -- here I should do reciprocal subtyping
   | otherwise = return $ Instance cls1 vs1 t1 (unionTermTypes ts1 ts2)
+
+-- Merge two indexed instances keeping the left index
+mergeIndexedInstances
+  :: Indexed Instance
+  -> Indexed Instance
+  -> MorlocMonad (Indexed Instance)
+mergeIndexedInstances = mergeFirstIndexM mergeTypeclasses
 
 mergeSignatureSet :: SignatureSet -> SignatureSet -> MorlocMonad SignatureSet
 mergeSignatureSet s1@(Polymorphic cls1 v1 t1 ts1) s2@(Polymorphic cls2 v2 t2 ts2)

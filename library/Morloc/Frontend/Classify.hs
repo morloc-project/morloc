@@ -17,16 +17,14 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Text as DT
+import qualified Morloc.Data.DAG as DAG
 import Morloc.Typecheck.Internal (unqualify, qualify)
-import Morloc.Frontend.Merge (weaveTermTypes, mergeTypeclasses, mergeSignatureSet, mergeFirstIndexM)
+import Morloc.Frontend.Merge (weaveTermTypes, mergeTypeclasses, mergeSignatureSet, mergeIndexedInstances)
 
-
--- Merge two indexed instances keeping the left index
-mergeIndexedInstances
-  :: Indexed Instance
-  -> Indexed Instance
-  -> MorlocMonad (Indexed Instance) 
-mergeIndexedInstances = mergeFirstIndexM mergeTypeclasses
+linkTypeclasses :: DAG MVar [(EVar, EVar)] ExprI -> MorlocMonad ()
+linkTypeclasses d0 = do
+    _ <- DAG.synthesizeDAG linkTypeclassesFun d0
+    return ()
 
 -- Handle typeclasses
 --
@@ -34,12 +32,12 @@ mergeIndexedInstances = mergeFirstIndexM mergeTypeclasses
 --    serialization
 --
 --  * Associate each variable with polymorphic
-linkTypeclasses
+linkTypeclassesFun
   :: MVar
   -> ExprI
   -> [(m, [(EVar, EVar)], Map.Map EVar (Indexed Instance))]
   -> MorlocMonad (Map.Map EVar (Indexed Instance))
-linkTypeclasses mv e es = do
+linkTypeclassesFun mv e es = do
 
   -- import all instances, even if they are not explicitely imported
   let instances = [maps | (_, _, maps) <- es]
@@ -59,7 +57,6 @@ findTypeclasses
   -> Map.Map EVar (Indexed Instance)
   -> MorlocMonad (Map.Map EVar (Indexed Instance))
 findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
-
 
   -- first we collect all typeclass definitions in this module
   -- typeclasses are defined only at the top-level, so no descent into sub-expressions
