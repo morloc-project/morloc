@@ -1,3 +1,15 @@
+0.55.0-dev [2025-09-xx]
+-------------------
+
+ [ ] Allow undirected dependencies
+ * Allow dashes in module names
+ * Fix many bugs in native Morloc code handling
+ * Simplify internal unique naming conventions
+ * BREAKING CHANGE: Fix handling of Python builtin imports
+    Now builtins must not be imported from Python source. Instead
+    import directly from Python, for example: `source Py ("len")`
+ * More efficient Haskell Map usage
+
 0.54.2 [2025-08-09]
 -------------------
 
