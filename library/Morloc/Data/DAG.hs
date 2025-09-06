@@ -44,7 +44,7 @@ module Morloc.Data.DAG
 
 import Morloc.Namespace
 import qualified Morloc.Monad as MM
-import qualified Data.Map as Map
+import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
 
 edgelist :: DAG k e n -> [(k,k)]
@@ -133,15 +133,11 @@ mapNodeWithKey f = Map.mapWithKey (\k (n, xs) -> (f k n, xs))
 
 -- | Map function over nodes independent of the edge data
 mapNodeM :: Ord k => (n1 -> MorlocMonad n2) -> DAG k e n1 -> MorlocMonad (DAG k e n2)
-mapNodeM f d
-  = mapM (\(k,(n,xs)) -> f n >>= (\n' -> return (k, (n',xs)))) (Map.toList d)
-  |>> Map.fromList
+mapNodeM f = Map.mapWithKeyM (\k (n,xs) -> f n >>= (\n' -> return (n',xs)))
 
 -- | Map function over nodes independent of the edge data
 mapNodeWithKeyM :: Ord k => (k -> n1 -> MorlocMonad n2) -> DAG k e n1 -> MorlocMonad (DAG k e n2)
-mapNodeWithKeyM f d
-  = mapM (\(k,(n,xs)) -> f k n >>= (\n' -> return (k, (n',xs)))) (Map.toList d)
-  |>> Map.fromList
+mapNodeWithKeyM f = Map.mapWithKeyM (\k (n,xs) -> f k n >>= (\n' -> return (n',xs)))
 
 -- | Map function over edges independent of the node data
 mapEdge :: (e1 -> e2) -> DAG k e1 n -> DAG k e2 n
@@ -196,12 +192,12 @@ mapEdgeWithNodeM
   :: Ord k
   => (n -> e1 -> n -> MorlocMonad e2)
   -> DAG k e1 n -> MorlocMonad (DAG k e2 n)
-mapEdgeWithNodeM f d = mapM runit (Map.toList d) |>> Map.fromList
+mapEdgeWithNodeM f d = Map.mapWithKeyM runit d
   where
-    runit (k, _) = case local k d of
+    runit k _ = case local k d of
       (Just (n1, xs)) -> do
         e2s <- mapM (\(_, e, n2) -> f n1 e n2) xs
-        return (k, (n1, zip (map (\(x,_,_)->x) xs) e2s))
+        return (n1, zip (map (\(x,_,_)->x) xs) e2s)
       Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, missing object"
 
 -- | map over edges given the nodes the edge connects
@@ -209,12 +205,12 @@ mapEdgeWithNodeAndKeyM
   :: Ord k
   => (k -> n -> e1 -> n -> MorlocMonad e2)
   -> DAG k e1 n -> MorlocMonad (DAG k e2 n)
-mapEdgeWithNodeAndKeyM f d = mapM runit (Map.toList d) |>> Map.fromList
+mapEdgeWithNodeAndKeyM f d = Map.mapWithKeyM runit d
   where
-    runit (k, _) = case local k d of
+    runit k _ = case local k d of
       (Just (n1, xs)) -> do
         e2s <- mapM (\(_, e, n2) -> f k n1 e n2) xs
-        return (k, (n1, zip (map (\(x,_,_)->x) xs) e2s))
+        return (n1, zip (map (\(x,_,_)->x) xs) e2s)
       Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, missing object"
 
 -- | Map a monadic function over a DAG yielding a new DAG with the same

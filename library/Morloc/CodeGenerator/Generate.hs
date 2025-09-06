@@ -18,9 +18,9 @@ module Morloc.CodeGenerator.Generate
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
-import qualified Data.Map as Map
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.Map as Map
 import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Nexus as Nexus

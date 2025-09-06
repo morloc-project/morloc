@@ -53,13 +53,13 @@ module Morloc.Typecheck.Internal
 
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.Map as Map
 import Morloc.Data.Doc
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 
 import qualified Data.Set as Set
-import qualified Data.Map as Map
 
 qualify :: [TVar] -> TypeU -> TypeU
 qualify vs t = foldr ForallU t vs

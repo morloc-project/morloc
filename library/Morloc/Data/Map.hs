@@ -8,9 +8,9 @@ Stability   : experimental
 -}
 
 module Morloc.Data.Map (
-    module Data.Map
+    module Data.Map.Strict
   , module Morloc.Data.Map.Extra
 ) where
 
-import Data.Map
+import Data.Map.Strict
 import Morloc.Data.Map.Extra

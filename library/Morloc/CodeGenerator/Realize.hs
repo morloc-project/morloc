@@ -16,7 +16,7 @@ module Morloc.CodeGenerator.Realize (
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
-import qualified Data.Map as Map
+import qualified Morloc.Data.Map as Map
 import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE

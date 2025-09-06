@@ -21,9 +21,9 @@ import Text.Megaparsec hiding (Label)
 import Text.Megaparsec.Char hiding (eol)
 import qualified Morloc.BaseTypes as BT
 import qualified Control.Monad.State as CMS
-import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.Map as Map
 import qualified Morloc.System as MS
 
 -- | Parse a single file or string that may contain multiple modules. Each

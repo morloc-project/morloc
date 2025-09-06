@@ -23,7 +23,7 @@ module Morloc.CodeGenerator.Serial
 
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.BaseTypes as BT
-import qualified Data.Map as Map
+import qualified Morloc.Data.Map as Map
 import qualified Data.Text as DT
 import qualified Data.Char as C
 import qualified Morloc.TypeEval as TE

@@ -23,7 +23,7 @@ import Morloc.CodeGenerator.Namespace
 import qualified Morloc.TypeEval as T
 import qualified Morloc.Monad as MM
 import Morloc.Data.Doc
-import qualified Data.Map as Map
+import qualified Morloc.Data.Map as Map
 import qualified Control.Monad.State as CMS
 
 -- TODO: do not use global scope here

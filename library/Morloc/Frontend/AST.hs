@@ -23,7 +23,7 @@ module Morloc.Frontend.AST
 
 import Morloc.Frontend.Namespace
 import qualified Data.Set as Set
-import qualified Data.Map as Map
+import qualified Morloc.Data.Map as Map
 
 
 -- | In the DAG, the two MVar are the two keys, Import is the edge data, Expr is the node data

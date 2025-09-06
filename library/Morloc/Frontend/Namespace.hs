@@ -20,10 +20,10 @@ module Morloc.Frontend.Namespace
 import Morloc.Namespace hiding (name)
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Data.Char as DC
 import qualified Data.Text as DT
-import qualified Data.Map as Map
 
 -- | Determine if a type term is generic (i.e., is the first letter lowercase?)
 isGeneric :: MT.Text -> Bool

@@ -19,7 +19,7 @@ module Morloc.Frontend.API
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Lexer (ParserState(..), emptyState)
 import qualified Data.Set as Set
-import qualified Data.Map as Map
+import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod

@@ -17,10 +17,9 @@ import Morloc.Data.Doc
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-
-import qualified Data.Map as Map
 
 -- | Each SAnno object in the input list represents one exported function.
 -- Modules, scopes, imports and everything else are abstracted away.
