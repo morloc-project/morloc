@@ -30,132 +30,68 @@ term --<i>--.--<
 -}
 
 linkTerms :: DAG MVar [(EVar, EVar)] ExprI -> MorlocMonad ()
-linkTerms d0 = do
-    _ <- DAG.synthesizeDAG linkTermsFun d0
-    return ()
-
--- in each scope (top of a module or after descending into a where statement)
---  1 collect all type signatures (Map EVar [EType])
---  2 find all equivalent appearences of a given term across modules (including across aliases)
-linkTermsFun
-  :: MVar
-  -> ExprI
-  -> [(MVar, [(EVar, EVar)], Map.Map EVar TermTypes)]
-  -- ^ This is a list of
-  -> MorlocMonad (Map.Map EVar TermTypes)
-linkTermsFun m0 (ExprI _ (ModE v es)) edges
-  -- a map from alias to all signatures associated with the alias
-  = Map.mapM (foldlM mergeTermTypes (TermTypes Nothing [] []))
-              (Map.unionsWith (<>) [unalias es' m' | (_, es', m') <- edges]) >>=
-    linkSignatures v es
+linkTerms d0 = DAG.foldNeighborsWithTermsM makeAcc linkSources terminator d0 ()
   where
-  -- map from a srcname linking to an alias linking
-  -- NOTE: This is NOT a one to one mapping. Many sources may map to one alias.
-  --   import A (foo as f, bar as f, baz as g)
-  --   [("f", [x, y]), ("g", [z])] -- where x,y, and z values of type `a`
-  unalias :: [(EVar, EVar)] -> Map.Map EVar a -> Map.Map EVar [a]
-  unalias es0 m =
-    let aliases = Map.fromList . groupSort $ [(alias, srcname) | (srcname, alias) <- es0]
-    in Map.map (mapMaybe (`Map.lookup` m)) aliases
-linkTermsFun _ _ _ = MM.throwError . CallTheMonkeys $ "Expected a module at the top level"
+
+  -- start with an empty state
+  makeAcc _ k = case Map.lookup k d0 of
+    (Just (e0, _)) -> do
+        -- these are the types that are present in the current module, they will
+        -- all be annotated as we go forward
+        mOut <- collectTermTypes k e0
+        return (k, Map.empty, k, mOut)
+    Nothing -> return (k, Map.empty, k, Map.empty)
+
+  -- after finishing processing this module, link the resulting map to MorlocState
+  terminator :: (MVar, Map.Map EVar TermTypes, MVar, Map.Map EVar TermTypes) -> MorlocMonad ()
+  terminator (_, _, k, m) = do
+    iterms <- Map.mapM indexTerm m
+    case Map.lookup k d0 of
+        (Just (e, _)) -> linkVariablesToTermTypes iterms e
+        _ -> return ()
+
+  linkSources
+    :: MVar
+    -> ExprI
+    -> EVar
+    -> EVar
+    -> ( MVar -- the current module name
+       , Map.Map EVar TermTypes -- the current module term info
+       , MVar -- the original module that we are collecting data for
+       , Map.Map EVar TermTypes -- the term info that is updated across this traversal
+       )
+    -> MorlocMonad (MVar, Map.Map EVar TermTypes, MVar, Map.Map EVar TermTypes)
+  linkSources k e0 originalTerm currentAlias s@(kCur, mCur, kOri, mOri)
+    -- do nothing if we are at the original node
+    | k == kOri = do
+        MM.sayVVV $ "Entering module" <+> pretty k
+        return s
+
+    -- if we have just entered a new node, then collect all info and re-enter
+    | k /= kCur = do
+        MM.sayVVV $ "Entering neighboring module" <+> pretty k
+        mCur' <- collectTermTypes k e0
+        linkSources k e0 originalTerm currentAlias (k, mCur', kOri, mOri)
+
+    -- if we are in a non-origin node and have info, then do the work
+    | otherwise = do
+        MM.sayVVV $ "Processing " <+> pretty originalTerm <+> "under alias" <+> pretty currentAlias <+> "in" <+> pretty k
+        case (Map.lookup currentAlias mCur, Map.lookup originalTerm mOri) of
+            (Just tCur, Just tOut) -> do
+                t <- mergeTermTypes tCur tOut
+                return (kCur, mCur, kOri, Map.insert originalTerm t mOri)
+            _ -> return s
 
 
-linkSignatures
-  :: MVar -- ^ the current module name
-  -> [ExprI] -- ^ all expressions in the module
-  -> Map.Map EVar TermTypes -- ^ the inherited termtypes form imported modules
-  -> MorlocMonad (Map.Map EVar TermTypes)
-linkSignatures v es m = do
-  -- find all top-level terms in this module
-  --   terms :: Map.Map EVar TermTypes
-  -- there is a lot of checking happening here, we ensure that
-  --   - concrete type signatures appear only where there is a source statement
-  --   - there can be only one general type in a given scope for a given term
-  terms <- unifyTermTypes v es m
-
-  -- Map EVar (Int, TermTypes)
-  iterms <- Map.mapM indexTerm terms
-
-  -- link terms to types
-  _ <- linkVariablesToTermTypes v iterms es
-
-  return terms
-
-indexTerm :: a -> MorlocMonad (Int, a)
-indexTerm x = do
-  i <- MM.getCounter
-  return (i, x)
-
-
-linkVariablesToTermTypes
-  :: MVar -- ^ the current module
-  -> Map.Map EVar (Int, TermTypes) -- ^ a map term terms to types, Int is the inner GMAp key
-  -> [ExprI] -- ^ list of expressions in the module
-  -> MorlocMonad ()
-linkVariablesToTermTypes mv m0 = mapM_ (link m0) where
-  link :: Map.Map EVar (Int, TermTypes) -> ExprI -> MorlocMonad ()
-  -- The following have terms associated with them:
-  -- 1. exported terms (but not exported types)
-  link m (ExprI _ (ExpE export)) = linkExports m export
-  -- 2. variables
-  link m (ExprI i (VarE _ v)) = setMonomorphicType m i v
-  -- 3. assignments
-  link m (ExprI i (AssE v (ExprI _ (LamE ks e)) es)) = do
-    setMonomorphicType m i v
-    -- shadow all terms bound under the lambda
-    let m' = foldr Map.delete m ks
-    -- then link the assignment term and all local "where" statements (es)
-    _ <- linkSignatures mv (e:es) (Map.map snd m')
-    return ()
-  -- 4. assignments that have no parameters
-  link m (ExprI i (AssE v e es)) = do
-    _ <- setMonomorphicType m i v
-    -- then link the assignment term and all local "where" statements (es)
-    _ <- linkSignatures mv (e:es) (Map.map snd m)
-    return ()
-  -- 5. instances
-  link m (ExprI i (IstE cls ts es)) = do
-    _ <- linkSignatures mv es (Map.map snd m)
-    return ()
-  -- modules currently cannot be nested (should this be allowed?)
-  link _ (ExprI _ (ModE v _)) = MM.throwError $ NestedModule v
-  -- everything below boilerplate
-  link m (ExprI _ (AccE _ e)) = link m e
-  link m (ExprI _ (LstE xs)) = mapM_ (link m) xs
-  link m (ExprI _ (TupE xs)) = mapM_ (link m) xs
-  link m (ExprI _ (LamE vs e)) = link (foldr Map.delete m vs) e
-  link m (ExprI _ (AppE f es)) = link m f >> mapM_ (link m) es
-  link m (ExprI _ (AnnE e _)) = link m e
-  link m (ExprI _ (NamE rs)) = mapM_ (link m . snd) rs
-  link _ _ = return ()
-
-  linkExports :: Map.Map EVar (Int, TermTypes) -> Export -> MorlocMonad ()
-  linkExports _ ExportAll = error "All exports should have been resolved"
-  linkExports m (ExportMany ss) = mapM_ linkSymbol (Set.toList ss) where
-    linkSymbol :: (Int, Symbol) -> MorlocMonad ()
-    linkSymbol (_, TypeSymbol _) = return ()
-    linkSymbol (i, TermSymbol v) = setMonomorphicType m i v
-
-  setMonomorphicType :: Map.Map EVar (Int, TermTypes) -> Int -> EVar -> MorlocMonad ()
-  setMonomorphicType m i v = case Map.lookup v m of
-    (Just (j, t)) -> do
-      s <- MM.get
-      newSigs <- GMap.insertWithM mergeSignatureSet i j (Monomorphic t) (stateSignatures s)
-      MM.put (s { stateSignatures = newSigs
-                 , stateName = Map.insert i v (stateName s) } )
-      return ()
-    Nothing -> return ()
-
-unifyTermTypes :: MVar -> [ExprI] -> Map.Map EVar TermTypes -> MorlocMonad (Map.Map EVar TermTypes)
-unifyTermTypes mv xs m0
+collectTermTypes :: MVar -> ExprI -> MorlocMonad (Map.Map EVar TermTypes)
+collectTermTypes mv e0
   = Map.mergeMapsM fb fc fbc sigs srcs
   >>= Map.mapKeysWithM mergeTermTypes (\(v,_,_) -> v)
-  >>= Map.unionWithM mergeTermTypes m0
   >>= Map.unionWithM mergeTermTypes decs
   where
-  sigs = Map.fromListWith (<>) [((v, l, Nothing), [t]) | (ExprI _ (SigE (Signature v l t))) <- xs]
-  srcs = Map.fromListWith (<>) [((srcAlias s, srcLabel s, langOf s), [(s, i)]) | (ExprI i (SrcE s)) <- xs]
-  decs = Map.map (TermTypes Nothing []) $ Map.fromListWith (<>) [(v, [e]) | (ExprI _ (AssE v e _)) <- xs]
+  sigs = Map.fromListWith (<>) [((v, l, Nothing), [t]) | (v, l, t) <- findTopSignatures e0]
+  srcs = Map.fromListWith (<>) [((srcAlias s, srcLabel s, langOf s), [(s, i)]) | (s, i) <- findTopSourcesWithIndex e0]
+  decs = Map.map (TermTypes Nothing []) $ Map.fromListWith (<>) [(v, [e]) | (v, e) <- findTopDeclarations e0]
 
   -- generate a TermType object from only signatures
   fb :: [EType] -> MorlocMonad TermTypes
@@ -177,3 +113,79 @@ unifyTermTypes mv xs m0
       [] -> return Nothing
       _ -> MM.throwError . CallTheMonkeys $ "Expected a single general type - I don't know how to merge them"
     return $ TermTypes gt [(mv, Idx i src) | (src, i) <- srcs'] []
+
+  findTopSignatures :: ExprI -> [(EVar, Maybe Label, EType)]
+  -- v is the name of the type
+  -- l is the optional label for the signature
+  -- t is the type
+  findTopSignatures (ExprI _ (ModE _ es)) = [(v, l, t) | (ExprI _ (SigE (Signature v l t))) <- es]
+  findTopSignatures (ExprI _ (SigE (Signature v l t))) = [(v, l, t)]
+  findTopSignatures _ = []
+
+  findTopSourcesWithIndex :: ExprI -> [(Source, Int)]
+  findTopSourcesWithIndex (ExprI _ (ModE _ es)) = concatMap findTopSourcesWithIndex es
+  findTopSourcesWithIndex (ExprI i (SrcE ss)) = [(ss, i)]
+  findTopSourcesWithIndex _ = []
+
+  findTopDeclarations :: ExprI -> [(EVar, ExprI)]
+  findTopDeclarations (ExprI _ (ModE _ es)) = concatMap findTopDeclarations es
+  findTopDeclarations (ExprI _ (AssE v e _)) = [(v, e)]
+  findTopDeclarations _ = []
+
+
+indexTerm :: a -> MorlocMonad (Indexed a)
+indexTerm x = Idx <$> MM.getCounter <*> pure x
+
+
+linkVariablesToTermTypes
+  :: Map.Map EVar (Indexed TermTypes) -- ^ a map term terms to types, Int is the inner GMAp key
+  -> ExprI -- ^ list of expressions in the module
+  -> MorlocMonad ()
+linkVariablesToTermTypes m0 = link m0 where
+  link :: Map.Map EVar (Indexed TermTypes) -> ExprI -> MorlocMonad ()
+  -- The following have terms associated with them:
+  -- 1. exported terms (but not exported types)
+  link m (ExprI _ (ExpE export)) = linkExports m export
+  -- 2. variables
+  link m (ExprI i (VarE _ v)) = setMonomorphicType m i v
+  -- 3. assignments
+  link m (ExprI i (AssE v (ExprI _ (LamE ks e)) es)) = do
+    setMonomorphicType m i v
+    -- shadow all terms bound under the lambda
+    let m' = foldr Map.delete m ks
+    -- then link the assignment term and all local "where" statements (es)
+    mapM_ (link m') (e:es)
+  -- 4. assignments that have no parameters
+  link m (ExprI i (AssE v e es)) = do
+    setMonomorphicType m i v
+    -- then link the assignment term and all local "where" statements (es)
+    mapM_ (link m) (e:es)
+  -- 5. instances
+  link m (ExprI _ (IstE _ _ es)) = mapM_ (link m) es
+  -- everything below boilerplate
+  link m (ExprI _ (ModE _ es)) = mapM_ (link m) es
+  link m (ExprI _ (AccE _ e)) = link m e
+  link m (ExprI _ (LstE xs)) = mapM_ (link m) xs
+  link m (ExprI _ (TupE xs)) = mapM_ (link m) xs
+  link m (ExprI _ (LamE vs e)) = link (foldr Map.delete m vs) e
+  link m (ExprI _ (AppE f es)) = link m f >> mapM_ (link m) es
+  link m (ExprI _ (AnnE e _)) = link m e
+  link m (ExprI _ (NamE rs)) = mapM_ (link m . snd) rs
+  link _ _ = return ()
+
+  linkExports :: Map.Map EVar (Indexed TermTypes) -> Export -> MorlocMonad ()
+  linkExports _ ExportAll = error "All exports should have been resolved"
+  linkExports m (ExportMany ss) = mapM_ linkSymbol (Set.toList ss) where
+    linkSymbol :: (Int, Symbol) -> MorlocMonad ()
+    linkSymbol (_, TypeSymbol _) = return ()
+    linkSymbol (i, TermSymbol v) = setMonomorphicType m i v
+
+  setMonomorphicType :: Map.Map EVar (Indexed TermTypes) -> Int -> EVar -> MorlocMonad ()
+  setMonomorphicType m i v = case Map.lookup v m of
+    (Just (Idx j t)) -> do
+      s <- MM.get
+      newSigs <- GMap.insertWithM mergeSignatureSet i j (Monomorphic t) (stateSignatures s)
+      MM.put (s { stateSignatures = newSigs
+                 , stateName = Map.insert i v (stateName s) } )
+      return ()
+    Nothing -> return ()

@@ -391,16 +391,21 @@ foldNeighborsWithTermsOneM k0 f d0 b0 = foldNWT m0 k0 (Set.empty, b0) |>> snd wh
 
 foldNeighborsWithTermsM
     :: (Monad m, Ord k, Ord v)
-    => (b -> k -> m b) -- setup of state for each new central node
+    => (outerState -> k -> m innerState) -- setup of state for each new central node
     -> (    k -- current node
          -> n -- current node data
          -> v -- original term name in the first module
          -> v -- current term alias
-         -> b -- current accumulator value
-         -> m b
+         -> innerState -- current accumulator value
+         -> m innerState
        ) -- update the accumulator
+    -> (innerState -> m outerState) -- final action after iterating over neighbors for a node
     -> DAG k [(v,v)] n -- the original dag
-    -> b -- the initial accumulator
-    -> m b -- monadic result
-foldNeighborsWithTermsM makeAcc f d0 b0 =
-    foldrM (\k b -> makeAcc b k >>= foldNeighborsWithTermsOneM k f d0) b0 (Map.keys d0)
+    -> outerState -- the initial accumulator
+    -> m outerState -- monadic result
+foldNeighborsWithTermsM makeAcc f terminator d0 b0
+    = foldrM processOneModule b0 (Map.keys d0) where
+        processOneModule k b
+            =   makeAcc b k
+            >>= foldNeighborsWithTermsOneM k f d0
+            >>= terminator
