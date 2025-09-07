@@ -38,7 +38,9 @@ linkTerms d0 = DAG.foldNeighborsWithTermsM makeAcc linkSources terminator d0 ()
     (Just (e0, _)) -> do
         -- these are the types that are present in the current module, they will
         -- all be annotated as we go forward
-        mOut <- collectTermTypes k e0
+        mOut <- collectTermTypes k e0 >>=
+                -- merge in empty TermTypes with all free terms
+                Map.unionWithM mergeTermTypes (getAllFreeTerms e0)
         return (k, Map.empty, k, mOut)
     Nothing -> return (k, Map.empty, k, Map.empty)
 
@@ -82,6 +84,28 @@ linkTerms d0 = DAG.foldNeighborsWithTermsM makeAcc linkSources terminator d0 ()
                 return (kCur, mCur, kOri, Map.insert originalTerm t mOri)
             _ -> return s
 
+
+getAllFreeTerms :: ExprI -> Map.Map EVar TermTypes
+getAllFreeTerms e0 = Map.fromList $ [(v, TermTypes Nothing [] []) | v <- f e0]
+    where
+        f (ExprI _ (ModE _ es)) = concatMap f es
+        f (ExprI _ (IstE _ _ es)) = concatMap f es
+        f (ExprI _ (ImpE imp)) = case importInclude imp of
+            (Just ss) -> [alias | AliasedTerm _ alias <- ss]
+            Nothing -> []
+        f (ExprI _ (SrcE src)) = [srcAlias src]
+        -- Do not descend into "where" scopes, these will be handled later
+        f (ExprI _ (AssE v e _)) = v : f e
+        f (ExprI _ (VarE _ v)) = [v]
+        f (ExprI _ (AccE _ e)) = f e
+        f (ExprI _ (LstE es )) = concatMap f es
+        f (ExprI _ (TupE es)) = concatMap f es
+        f (ExprI _ (NamE rs)) = concatMap f (map snd rs)
+        f (ExprI _ (AppE e es)) = concatMap f (e:es)
+        -- Handle shadowing
+        f (ExprI _ (LamE vs e)) = [v | v <- f e, v `notElem` vs]
+        f (ExprI _ (AnnE e _)) = f e
+        f _ = []
 
 collectTermTypes :: MVar -> ExprI -> MorlocMonad (Map.Map EVar TermTypes)
 collectTermTypes mv e0
