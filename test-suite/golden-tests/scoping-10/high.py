@@ -1,5 +1,5 @@
-def fst(x)
-    x[0]
+def fst(x):
+    return x[0]
 
-def snd(x)
-    x[1]
+def snd(x):
+    return x[1]

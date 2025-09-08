@@ -117,21 +117,7 @@ realize s0 = do
 
     -- [[(Lang, Int)]] : where Lang is unique within each list and Int is minimized
     let pairss = [minPairs pairs | AnnoS _ (Idx _ pairs) _ <- xs']
-
-        {- find the best score for each language supported by function f
-
-           Below is the cost function where
-            l1: the language of the ith calling function implementation
-            s1: the score of the ith implementation
-            l2: the language of the jth implementation of the kth argument
-            s2: the score of the jth implementation of the kth argument
-        -}
-        best = [ (l1, s1 + sum [ minimumDef 999999999 [s2 + Lang.pairwiseCost l1 l2 | (l2, s2) <- pairs]
-                               | pairs <- pairss
-                               ]
-                 )
-               | (l1, s1) <- scores
-               ]
+    let best = scoreApp scores pairss
 
     return (AppS f' xs', Idx i best)
   scoreExpr rstat (NamS rs, i) = do
@@ -156,6 +142,38 @@ realize s0 = do
   scoreExpr rstat (IntS x, i) = return (IntS x, zipLang i rstat)
   scoreExpr rstat (LogS x, i) = return (LogS x, zipLang i rstat)
   scoreExpr rstat (StrS x, i) = return (StrS x, zipLang i rstat)
+
+
+  -- calculate the score for an application based on the score of the function
+  -- and the scores of the arguments
+  scoreApp
+    :: [ ( Lang -- the language of the ith calling function implementation
+         , Int  -- the score of the ith implementation
+         )]
+    -> [[( Lang -- the language of the jth implementation of the kth argument
+         , Int  -- the score of the jth implementation of the kth argument
+         )]]
+    -> [(Lang, Int)]
+  -- if nothing is known, nothing is returned
+  scoreApp [] (concat -> []) = []
+  -- if none of the arguments are language-specific, the scores are based only
+  -- on the functions
+  scoreApp scores (concat -> []) = scores
+  -- if the function is not language-specific, calculate the cost of calling
+  -- all arguments from each possible language context
+  scoreApp [] pairss =
+    let score = [(lang, 0) | lang <- unique $ map fst (concat pairss)]
+    in scoreApp score pairss
+  -- if arguments and function have implementations, calculate cost relative to
+  -- each function implementation
+  scoreApp scores pairss =
+    [ (l1, s1 + sum [ minimumDef 999999999 [s2 + Lang.pairwiseCost l1 l2 | (l2, s2) <- pairs]
+                    | pairs <- pairss
+                    ]
+      )
+    | (l1, s1) <- scores
+    ]
+
 
   updateRState :: [EVar] -> RState -> RState
   updateRState [] rstat = rstat
