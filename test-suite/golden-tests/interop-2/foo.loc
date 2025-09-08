@@ -1,7 +1,7 @@
 module main (foo)
 
-import pybase (map, add)
-import rbase (fold, add)
+import pybase (map)
+import rbase (fold)
 
 import types (List, Real)
 

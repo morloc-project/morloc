@@ -348,7 +348,7 @@ findNeighboringTerms k0 d0 = Set.fromList (outgoing <> incoming) where
 
 -- | fold over all neighbors, cycles are allowed
 --
--- The (v,v) therms indicate neighber name and local alias, respectively
+-- The (v,v) terms indicate neighbor name and local alias, respectively
 foldNeighborsWithTermsOneM
     :: (Monad m, Ord k, Ord v)
     => k -- start at this node
@@ -362,32 +362,36 @@ foldNeighborsWithTermsOneM
     -> DAG k [(v,v)] n -- the original dag
     -> b -- the initial accumulator
     -> m b -- monadic result
-foldNeighborsWithTermsOneM k0 f d0 b0 = foldNWT m0 k0 (Set.empty, b0) |>> snd where
+foldNeighborsWithTermsOneM k0 f d0 b0 = foldNWT m0 k0 (Map.empty, b0) |>> snd where
 
     -- The initial term map from local alias to the term in the original node
     m0 = Map.fromList [ (v, v) | (_, _, v) <- Set.toList (findNeighboringTerms k0 d0)]
 
-    -- foldNWT :: Map.Map v v -> k -> (Set.Set k, b) -> m (Set.Set k, b)
-    foldNWT vmap k (priors, b)
-        | Set.member k priors = return (priors, b)
-        | otherwise = do
-            let priors' = Set.insert k priors
+    -- foldNWT :: Map.Map v v -> k -> (Map.Map k (Set.Set v), b) -> m (Map.Map k (Set.Set v), b)
+    foldNWT vmap k (priors, b) = do
+        let localPriors = Map.findWithDefault Set.empty k priors
+        let vmap' = Map.filter (\x -> Set.notMember x localPriors) vmap
+        case Map.size vmap' of
+            0 -> return (priors, b)
+            _ -> do
+                let priors' = Map.insert k (Set.union localPriors (Set.fromList (Map.elems vmap'))) priors
 
-            b' <- case Map.lookup k d0 of
-                Nothing -> return b
-                (Just (n, _)) ->
-                    foldrM (\(local, original) b' -> f k n original local b') b (Map.toList vmap)
+                b' <- case Map.lookup k d0 of
+                    Nothing -> return b
+                    (Just (n, _)) ->
+                        foldrM (\(local, original) b' -> f k n original local b') b (Map.toList vmap')
 
-            -- [(k, [(neighbor_name, local_name)])]
-            let neighborTerms = groupSort [ (k, (n,a)) | (k, n, a) <- Set.toList (findNeighboringTerms k d0) ]
+                -- [(k, [(neighbor_name, local_name)])]
+                let neighborTerms = groupSort [ (k', (n, a)) | (k', n, a) <- Set.toList (findNeighboringTerms k d0) ]
 
-            foldrM (wrapFoldNWT vmap) (priors', b') neighborTerms
+                foldrM (wrapFoldNWT vmap') (priors', b') neighborTerms
 
-    -- wrapFoldNWT :: Map.Map v v -> (k, [(v,v)]) -> (Set.Set k, b) -> m (Set.Set k, b)
+    -- wrapFoldNWT :: Map.Map v v -> (k, [(v,v)]) -> (Map.Map k (Set.Set v), b) -> m (Map.Map k (Set.Set v), b)
     wrapFoldNWT vmap (k, vs) (priors, b) = do
         let vmap' = Map.fromList . catMaybes
                   $ [ (,) alias <$> Map.lookup k vmap | (k, alias) <- vs ]
         foldNWT vmap' k (priors, b)
+
 
 foldNeighborsWithTermsM
     :: (Monad m, Ord k, Ord v)
