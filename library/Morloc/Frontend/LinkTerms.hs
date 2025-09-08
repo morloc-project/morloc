@@ -39,7 +39,6 @@ linkTerms d0 = DAG.foldNeighborsWithTermsM makeAcc linkSources terminator d0 ()
         -- these are the types that are present in the current module, they will
         -- all be annotated as we go forward
         mOut <- collectTermTypes k e0 >>=
-                -- merge in empty TermTypes with all free terms
                 Map.unionWithM mergeTermTypes (getAllFreeTerms e0)
         return (k, Map.empty, k, mOut)
     Nothing -> return (k, Map.empty, k, Map.empty)
@@ -49,7 +48,7 @@ linkTerms d0 = DAG.foldNeighborsWithTermsM makeAcc linkSources terminator d0 ()
   terminator (_, _, k, m) = do
     iterms <- Map.mapM indexTerm m
     case Map.lookup k d0 of
-        (Just (e, _)) -> linkVariablesToTermTypes iterms e
+        (Just (e, _)) -> linkVariablesToTermTypes k iterms e
         _ -> return ()
 
   linkSources
@@ -94,8 +93,9 @@ getAllFreeTerms e0 = Map.fromList $ [(v, TermTypes Nothing [] []) | v <- f e0]
             (Just ss) -> [alias | AliasedTerm _ alias <- ss]
             Nothing -> []
         f (ExprI _ (SrcE src)) = [srcAlias src]
-        -- Do not descend into "where" scopes, these will be handled later
-        f (ExprI _ (AssE v e _)) = v : f e
+        -- within where statements, do not include anything that is locally bound
+        f (ExprI _ (AssE v e es)) = v : (f e <> nonlocalWhere) where
+            nonlocalWhere = [v | v <- (concatMap f es), v `notElem` (concatMap local es)]
         f (ExprI _ (VarE _ v)) = [v]
         f (ExprI _ (AccE _ e)) = f e
         f (ExprI _ (LstE es )) = concatMap f es
@@ -106,6 +106,25 @@ getAllFreeTerms e0 = Map.fromList $ [(v, TermTypes Nothing [] []) | v <- f e0]
         f (ExprI _ (LamE vs e)) = [v | v <- f e, v `notElem` vs]
         f (ExprI _ (AnnE e _)) = f e
         f _ = []
+
+        local (ExprI _ (ModE _ es)) = concatMap local es
+        local (ExprI _ (IstE _ _ es)) = concatMap local es
+        local (ExprI _ (ImpE imp)) = case importInclude imp of
+            (Just ss) -> [alias | AliasedTerm _ alias <- ss]
+            Nothing -> []
+        local (ExprI _ (SrcE src)) = [srcAlias src]
+        local (ExprI _ (AssE v e es)) = v : (local e <> concatMap local es)
+        local (ExprI _ (VarE _ _)) = [] -- KEY DIFFERENCE: These may not be local
+        local (ExprI _ (AccE _ e)) = local e
+        local (ExprI _ (LstE es )) = concatMap local es
+        local (ExprI _ (TupE es)) = concatMap local es
+        local (ExprI _ (NamE rs)) = concatMap local (map snd rs)
+        local (ExprI _ (AppE e es)) = concatMap local (e:es)
+        -- Handle shadowing
+        local (ExprI _ (LamE vs e)) = [v | v <- local e, v `notElem` vs]
+        local (ExprI _ (AnnE e _)) = local e
+        local _ = []
+
 
 collectTermTypes :: MVar -> ExprI -> MorlocMonad (Map.Map EVar TermTypes)
 collectTermTypes mv e0
@@ -162,10 +181,11 @@ indexTerm x = Idx <$> MM.getCounter <*> pure x
 
 
 linkVariablesToTermTypes
-  :: Map.Map EVar (Indexed TermTypes) -- ^ a map term terms to types, Int is the inner GMAp key
+  :: MVar
+  -> Map.Map EVar (Indexed TermTypes) -- ^ a map term terms to types, Int is the inner GMAp key
   -> ExprI -- ^ list of expressions in the module
   -> MorlocMonad ()
-linkVariablesToTermTypes m0 = link m0 where
+linkVariablesToTermTypes mv m0 = link m0 where
   link :: Map.Map EVar (Indexed TermTypes) -> ExprI -> MorlocMonad ()
   -- The following have terms associated with them:
   -- 1. exported terms (but not exported types)
@@ -177,13 +197,17 @@ linkVariablesToTermTypes m0 = link m0 where
     setMonomorphicType m i v
     -- shadow all terms bound under the lambda
     let m' = foldr Map.delete m ks
+    -- update with local scope
+    m'' <- addLocalDefs m' es
     -- then link the assignment term and all local "where" statements (es)
-    mapM_ (link m') (e:es)
+    mapM_ (link m'') (e:es)
   -- 4. assignments that have no parameters
   link m (ExprI i (AssE v e es)) = do
     setMonomorphicType m i v
+    -- update with local scope
+    m' <- addLocalDefs m es
     -- then link the assignment term and all local "where" statements (es)
-    mapM_ (link m) (e:es)
+    mapM_ (link m') (e:es)
   -- 5. instances
   link m (ExprI _ (IstE _ _ es)) = mapM_ (link m) es
   -- everything below boilerplate
@@ -196,6 +220,17 @@ linkVariablesToTermTypes m0 = link m0 where
   link m (ExprI _ (AnnE e _)) = link m e
   link m (ExprI _ (NamE rs)) = mapM_ (link m . snd) rs
   link _ _ = return ()
+
+  addLocalDefs
+    :: Map.Map EVar (Indexed TermTypes)
+    -> [ExprI]
+    -> MorlocMonad (Map.Map EVar (Indexed TermTypes))
+  addLocalDefs m es = do
+    ms <- mapM (collectTermTypes mv) es
+    foldrM (\um im -> Map.mergeMapsM return indexTerm mergeWithIdx im um) m ms
+    where
+      mergeWithIdx :: Indexed TermTypes -> TermTypes -> MorlocMonad (Indexed TermTypes)
+      mergeWithIdx (Idx i t1) t2 = Idx i <$> mergeTermTypes t1 t2
 
   linkExports :: Map.Map EVar (Indexed TermTypes) -> Export -> MorlocMonad ()
   linkExports _ ExportAll = error "All exports should have been resolved"
