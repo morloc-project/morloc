@@ -389,7 +389,7 @@ foldNeighborsWithTermsOneM k0 f d0 b0 = foldNWT m0 k0 (Map.empty, b0) |>> snd wh
     -- wrapFoldNWT :: Map.Map v v -> (k, [(v,v)]) -> (Map.Map k (Set.Set v), b) -> m (Map.Map k (Set.Set v), b)
     wrapFoldNWT vmap (k, vs) (priors, b) = do
         let vmap' = Map.fromList . catMaybes
-                  $ [ (,) alias <$> Map.lookup k vmap | (k, alias) <- vs ]
+                  $ [ (,) <$> Map.lookup k vmap <*> pure alias | (k, alias) <- vs ]
         foldNWT vmap' k (priors, b)
 
 
