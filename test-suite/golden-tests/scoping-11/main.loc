@@ -1,0 +1,6 @@
+module second (foo)
+foo = "hellosh"  
+
+
+module main (*)
+import second
