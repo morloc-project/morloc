@@ -370,7 +370,7 @@ data TermTypes = TermTypes {
   -- ^ all declarations of this type
   --      AssE EVar ExprI [ExprI]
   --            ^     ^      ^----- TermType knows nothing about this
-  --            '      '--- each ExprI in [ExprI] is one of these
+  --            '     '--- each ExprI in [ExprI] is one of these
   --            '--- this will match the term name
 } deriving (Show, Ord, Eq)
 

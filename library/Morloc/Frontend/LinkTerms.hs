@@ -35,11 +35,13 @@ linkTerms d0 = DAG.foldNeighborsWithTermsM makeAcc linkSources terminator d0 ()
 
   -- start with an empty state
   makeAcc _ k = case Map.lookup k d0 of
-    (Just (e0, _)) -> do
+    (Just (e0, edges)) -> do
+        let importedTerms = concat $ map (map snd . snd) edges
+
         -- these are the types that are present in the current module, they will
         -- all be annotated as we go forward
         mOut <- collectTermTypes k e0 >>=
-                Map.unionWithM mergeTermTypes (getAllFreeTerms e0)
+                Map.unionWithM mergeTermTypes (getAllFreeTerms e0 importedTerms)
         return (k, Map.empty, k, mOut)
     Nothing -> return (k, Map.empty, k, Map.empty)
 
@@ -54,8 +56,8 @@ linkTerms d0 = DAG.foldNeighborsWithTermsM makeAcc linkSources terminator d0 ()
   linkSources
     :: MVar
     -> ExprI
-    -> EVar
-    -> EVar
+    -> EVar -- term name (or alias) in the original module
+    -> EVar -- term name in the current module
     -> ( MVar -- the current module name
        , Map.Map EVar TermTypes -- the current module term info
        , MVar -- the original module that we are collecting data for
@@ -65,18 +67,18 @@ linkTerms d0 = DAG.foldNeighborsWithTermsM makeAcc linkSources terminator d0 ()
   linkSources k e0 originalTerm currentAlias s@(kCur, mCur, kOri, mOri)
     -- do nothing if we are at the original node
     | k == kOri = do
-        MM.sayVVV $ "Entering module" <+> pretty k
+        MM.sayVVV $ ">>> starting" <+> pretty kOri <+> pretty kCur <+> pretty k <+> pretty originalTerm <+> pretty currentAlias
         return s
 
     -- if we have just entered a new node, then collect all info and re-enter
     | k /= kCur = do
-        MM.sayVVV $ "Entering neighboring module" <+> pretty k
+        MM.sayVVV $ ">>> entering" <+> pretty kOri <+> pretty kCur <+> pretty k <+> pretty originalTerm <+> pretty currentAlias
         mCur' <- collectTermTypes k e0
         linkSources k e0 originalTerm currentAlias (k, mCur', kOri, mOri)
 
     -- if we are in a non-origin node and have info, then do the work
     | otherwise = do
-        MM.sayVVV $ "Processing " <+> pretty originalTerm <+> "under alias" <+> pretty currentAlias <+> "in" <+> pretty k
+        MM.sayVVV $ ">>> neighbor" <+> pretty kOri <+> pretty kCur <+> pretty k <+> pretty originalTerm <+> pretty currentAlias
         case (Map.lookup currentAlias mCur, Map.lookup originalTerm mOri) of
             (Just tCur, Just tOut) -> do
                 t <- mergeTermTypes tCur tOut
@@ -84,8 +86,9 @@ linkTerms d0 = DAG.foldNeighborsWithTermsM makeAcc linkSources terminator d0 ()
             _ -> return s
 
 
-getAllFreeTerms :: ExprI -> Map.Map EVar TermTypes
-getAllFreeTerms e0 = Map.fromList $ [(v, TermTypes Nothing [] []) | v <- f e0]
+-- | find all free terms in the expression and the list of imports, return empty TermTypes records
+getAllFreeTerms :: ExprI -> [EVar] -> Map.Map EVar TermTypes
+getAllFreeTerms e0 imports = Map.fromList $ [(v, TermTypes Nothing [] []) | v <- (f e0 <> imports)]
     where
         f (ExprI _ (ModE _ es)) = concatMap f es
         f (ExprI _ (IstE _ _ es)) = concatMap f es
