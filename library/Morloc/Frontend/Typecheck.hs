@@ -220,7 +220,12 @@ checkG
        , AnnoS (Indexed TypeU) ManyPoly Int
        )
 checkG g (AnnoS i j e) t = do
-  (g', t', e') <- checkE' i g e t
+  ann <- MM.gets stateAnnotations
+  (g', t', e') <- case Map.lookup i ann of
+    Nothing -> checkE' i g e t
+    (Just annType) -> do
+      gAnn <- subtype' i annType t g
+      checkE' i gAnn e t
   return (g', t', AnnoS (Idx i t') j e')
 
 synthG
@@ -232,7 +237,10 @@ synthG
        , AnnoS (Indexed TypeU) ManyPoly Int
        )
 synthG g (AnnoS gi ci e) = do
-  (g', t, e') <- synthE' gi g e
+  ann <- MM.gets stateAnnotations
+  (g', t, e') <- case Map.lookup gi ann of
+    Nothing   -> synthE' gi g e
+    (Just annType) -> checkE' gi g e annType
   return (g', t, AnnoS (Idx gi t) ci e')
 
 synthE

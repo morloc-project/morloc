@@ -106,11 +106,11 @@ treeify d
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
 linkAndRemoveAnnotations = f where
   f :: ExprI -> MorlocMonad ExprI
-  f (ExprI _ (AnnE e@(ExprI i _) ts)) = do
+  f (ExprI _ (AnnE e@(ExprI i _) t)) = do
     --     ^                ^-- this one is connected to the given types
     --     '-- this index disappears with the lost annotation node
     s <- MM.get
-    MM.put $ s {stateAnnotations = Map.insert i ts (stateAnnotations s)}
+    MM.put $ s {stateAnnotations = Map.insert i t (stateAnnotations s)}
     f e -- notice the topology change
   -- everything below is boilerplate (this is why I need recursion schemes)
   f (ExprI i (ModE v es)) = ExprI i <$> (ModE v <$> mapM f es)

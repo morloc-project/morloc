@@ -553,7 +553,7 @@ pAnn = do
     parens pExpr <|> pVar <|> pLstE <|> try pNumE <|> pLogE <|> pStrE
   _ <- op "::"
   t <- pTypeGen
-  exprI $ AnnE e [t]
+  exprI $ AnnE e t
 
 pApp :: Parser ExprI
 pApp = do

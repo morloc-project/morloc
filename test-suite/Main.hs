@@ -38,6 +38,8 @@ main = do
 
       -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
+      , golden "type-annotations-1" "type-annotations-1"
+
       , golden "native-morloc-1" "native-morloc-1"
       , golden "native-morloc-2" "native-morloc-2"
       , golden "native-morloc-3" "native-morloc-3"

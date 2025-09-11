@@ -290,7 +290,7 @@ data MorlocState = MorlocState
   , stateUniversalConcreteTypedefs :: Map Lang Scope
   -- ^ store the concrete typedefs pooled across all modules -- for the truly desperate
   , stateSources :: GMap Int MVar [Source]
-  , stateAnnotations :: Map Int [TypeU]
+  , stateAnnotations :: Map Int TypeU
   -- ^ Stores non-top-level annotations.
   , stateOutfile :: Maybe Path
   -- ^ The nexus filename ("nexus.py" by default)
@@ -435,7 +435,7 @@ data Expr
   -- ^ Function application
   | LamE [EVar] ExprI
   -- ^ (\x -> e)
-  | AnnE ExprI [TypeU]
+  | AnnE ExprI TypeU
   -- ^ (e : A)
   | RealE Scientific
   -- ^ number of arbitrary size and precision
@@ -1391,10 +1391,7 @@ instance Pretty Expr where
   pretty (VarE _ s) = pretty s
   pretty (AccE k e) = parens (pretty e) <> "@" <> pretty k
   pretty (LamE v e) = "\\" <+> pretty v <+> "->" <+> pretty e
-  pretty (AnnE e ts) = parens
-    $   pretty e
-    <+> "::"
-    <+> encloseSep "(" ")" "; " (map pretty ts)
+  pretty (AnnE e t) = parens (pretty e <+> "::" <+> pretty t)
   pretty (LstE es) = encloseSep "[" "]" "," (map pretty es)
   pretty (TupE es) = encloseSep "[" "]" "," (map pretty es)
   pretty (AppE f es) = vsep (map pretty (f:es))
