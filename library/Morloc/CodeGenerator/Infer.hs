@@ -57,6 +57,9 @@ inferConcreteTypeU' :: TypeU -> (Scope, Scope) -> Either MorlocError TypeU
 inferConcreteTypeU' generalType (cscope, gscope) = T.pairEval cscope gscope generalType
 
 inferConcreteType :: Lang -> Indexed Type -> MorlocMonad TypeF
+inferConcreteType _ (Idx _ t@(UnkT _))
+    = MM.throwError
+    $ CannotInferConcretePrimitiveType t "This may be an unsolved generic term"
 inferConcreteType lang (Idx i t@(type2typeu -> generalType)) = do
   concreteType <- inferConcreteTypeU lang (Idx i generalType)
   (_, gscope) <- getScope i lang
@@ -80,7 +83,8 @@ inferConcreteType lang (Idx i t@(type2typeu -> generalType)) = do
             mayReducedGType <- evalGeneralStep i generalType
             case mayReducedGType of
                 (Just reducedGType) -> inferConcreteType lang (Idx i (typeOf reducedGType))
-                Nothing -> MM.throwError (CannotInferConcretePrimitiveType t)
+                Nothing -> MM.throwError $
+                           CannotInferConcretePrimitiveType t "Could not reduce type"
 
 inferConcreteTypeUniversal :: Lang -> Type -> MorlocMonad TypeF
 inferConcreteTypeUniversal lang t@(type2typeu -> generalType) = do
@@ -92,7 +96,8 @@ inferConcreteTypeUniversal lang t@(type2typeu -> generalType) = do
         -- Evaluate the general type one level and try again
         case T.evaluateStep gscopeUni generalType of
             (Just reducedGType) -> inferConcreteTypeUniversal lang (typeOf reducedGType)
-            Nothing -> MM.throwError (CannotInferConcretePrimitiveType t)
+            Nothing -> MM.throwError $
+                       CannotInferConcretePrimitiveType t "Could not reduce type in broadest scope"
 
 inferConcreteTypeUUniversal :: Lang -> TypeU -> MorlocMonad TypeU
 inferConcreteTypeUUniversal lang generalType = do
