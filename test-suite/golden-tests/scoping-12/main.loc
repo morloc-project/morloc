@@ -1,0 +1,18 @@
+-- base module defines a general typeclass and function using it
+module foo (*)
+class Addable a where
+    add a :: a -> a -> a
+inc :: Int -> Int
+inc = add 1
+
+-- language-specific module adds an implementation
+module foo-py (*)
+import foo 
+type Py => Int = "int"
+instance Addable Int where
+    source Py from "foo.py" ("morloc_add" as add)
+
+-- 3rd party module uses a function depending on add but does NOT explicitly use add
+module main (foo)
+import foo-py
+foo x = inc (inc x)
