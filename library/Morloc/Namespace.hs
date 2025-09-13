@@ -64,6 +64,7 @@ module Morloc.Namespace
   , BuildConfig(..)
   , MorlocState(..)
   , SignatureSet(..)
+  , Typeclass(..)
   , Instance(..)
   , TermTypes(..)
   , MorlocReturn
@@ -378,16 +379,25 @@ data TermTypes = TermTypes {
 
 -- | Distinguishes between term and type symbols in import/export expression
 -- before they are separated in Treeify.
-data Symbol = TypeSymbol TVar | TermSymbol EVar
+data Symbol
+  = TypeSymbol TVar
+  | TermSymbol EVar
+  | ClassSymbol ClassName
   deriving (Show, Ord, Eq)
 
 data Export = ExportMany (Set.Set (Int, Symbol)) | ExportAll
   deriving (Show, Ord, Eq)
 
-data AliasedSymbol = AliasedType TVar TVar | AliasedTerm EVar EVar
+data AliasedSymbol
+  = AliasedType TVar TVar
+  | AliasedTerm EVar EVar
+  | AliasedClass ClassName ClassName
   deriving (Show, Ord, Eq)
 
 data Signature = Signature EVar (Maybe Label) EType
+  deriving (Show, Ord, Eq)
+
+data Typeclass a = Typeclass ClassName [TVar] [a]
   deriving (Show, Ord, Eq)
 
 data ExprI = ExprI Int Expr
@@ -397,7 +407,7 @@ data ExprI = ExprI Int Expr
 data Expr
   = ModE MVar [ExprI]
   -- ^ the toplevel expression in a module
-  | ClsE ClassName [TVar] [Signature]
+  | ClsE (Typeclass Signature)
   | IstE ClassName [TypeU] [ExprI]
   | TypE (Maybe (Lang, Bool)) TVar [Either TVar TypeU] TypeU
   -- ^ a type definition
@@ -840,6 +850,8 @@ data MorlocError
   -- typeclass errors
   | MissingTypeclassDefinition ClassName EVar
   | ConflictingClasses ClassName ClassName EVar
+  | OverlappingClasses ClassName MVar MVar
+  | OverlappingClassesSameModule ClassName MVar
   | ConflictingInstances Text Instance Instance
   | InstanceSizeMismatch ClassName [TVar] [TypeU]
   | IllegalExpressionInInstance ClassName [TypeU] Expr
@@ -1326,6 +1338,7 @@ instance Pretty Source where
 instance Pretty Symbol where
   pretty (TypeSymbol x) = viaShow x
   pretty (TermSymbol x) = viaShow x
+  pretty (ClassSymbol x) = viaShow x
 
 instance Pretty TermTypes where
   pretty (TermTypes (Just t) cs es) = "TermTypes" <+> (align . vsep $ (parens (pretty t) : map pretty cs <> map pretty es))
@@ -1345,6 +1358,9 @@ instance Pretty AliasedSymbol where
     | x == alias = pretty x
     | otherwise = pretty x <+> "as" <+> pretty alias
   pretty (AliasedTerm x alias)
+    | x == alias = pretty x
+    | otherwise = pretty x <+> "as" <+> pretty alias
+  pretty (AliasedClass x alias)
     | x == alias = pretty x
     | otherwise = pretty x <+> "as" <+> pretty alias
 
@@ -1379,7 +1395,7 @@ instance Pretty ExprI where
 instance Pretty Expr where
   pretty UniE = "()"
   pretty (ModE v es) = align . vsep $ ("module" <+> pretty v) : map pretty es
-  pretty (ClsE cls vs sigs) = "class" <+> pretty cls <+> hsep (map pretty vs) <> (align . vsep . map pretty) sigs
+  pretty (ClsE (Typeclass cls vs sigs)) = "class" <+> pretty cls <+> hsep (map pretty vs) <> (align . vsep . map pretty) sigs
   pretty (IstE cls ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
   pretty (TypE lang v vs t)
     = "type" <+> pretty lang <> "@" <> pretty v
@@ -1542,6 +1558,8 @@ instance Pretty MorlocError where
       "  Are you missing type alias imports?"
   pretty (MissingTypeclassDefinition cls v) = "No definition found in typeclass" <+> dquotes (pretty cls) <+> "for term" <+> dquotes (pretty v)
   pretty (ConflictingClasses cls1 cls2 v) = "Conflicting typeclasses for" <+> pretty v <+> "found definitions in both" <+> pretty cls1 <+> "and" <+> pretty cls2
+  pretty (OverlappingClasses cls m1 m2) = "Typeclass" <+> pretty cls <+> "has overlapping definitions in both" <+> pretty m1 <+> "and" <+> pretty m2
+  pretty (OverlappingClassesSameModule cls m) = "Typeclass" <+> pretty cls <+> "is defined multiple times in" <+> pretty m
   pretty (ConflictingInstances msg inst1 inst2)
     | inst1 == inst2
         = "Found conflict between overlapping instances for class"

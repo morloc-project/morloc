@@ -185,7 +185,7 @@ pComposition = do
     compose inner (ExprI i (AppE x xs)) = return $ ExprI i (AppE x (xs <> [inner]))
     compose inner outer = exprI (AppE outer [inner])
 
--- Either a lowercase term name or an uppercase type name
+-- Either a lowercase term name or an uppercase type/class name
 pSymbol :: Parser Symbol
 pSymbol = (TermSymbol . EV <$> freenameL) <|> (TypeSymbol . TV <$> freenameU)
 
@@ -229,7 +229,7 @@ pTypeclass = do
   _ <- reserved "class"
   (TV v, vs) <- pTypedefTerm' <|> parens pTypedefTerm'
   sigs <- option [] (reserved "where" >> alignInset pSignature)
-  exprI $ ClsE (ClassName v) vs sigs
+  exprI . ClsE $ Typeclass (ClassName v) vs sigs
   where
     -- parses "Show a" from above example
     pTypedefTerm' :: Parser (TVar, [TVar])

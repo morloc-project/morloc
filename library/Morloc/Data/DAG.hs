@@ -37,9 +37,11 @@ module Morloc.Data.DAG
   , mapEdgeWithNodeAndKeyM
   , lookupAliasedTerm
   , lookupAliasedTermM
-  , synthesizeDAG
+  , synthesize
+  , synthesizeNodes
   , foldDAG
   , foldNeighborsWithTermsM
+  , reverseFoldDAGM
   ) where
 
 import Morloc.Namespace
@@ -213,18 +215,33 @@ mapEdgeWithNodeAndKeyM f d = Map.mapWithKeyM runit d
         return (n1, zip (map (\(x,_,_)->x) xs) e2s)
       Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, missing object"
 
--- | Map a monadic function over a DAG yielding a new DAG with the same
--- topology but new node values. If the DAG contains cycles, Nothing is
--- returned.
-synthesizeDAG
+synthesizeNodes
   :: (Ord k, Monad m)
   => (k -> n1 -> [(k, e, n2)] -> m n2)
   -> DAG k e n1
   -> m (Maybe (DAG k e n2))
-synthesizeDAG f d0 = synthesizeDAG' (Just Map.empty) where
+synthesizeNodes f = synthesize f (\e _ _ -> return e)
+
+synthesizeEdges
+  :: (Ord k, Monad m)
+  => (e1 -> n {- parent -} -> n {- child -} -> m e2)
+  -> DAG k e1 n
+  -> m (Maybe (DAG k e2 n))
+synthesizeEdges = synthesize (\_ n _ -> return n)
+
+-- | Map a monadic function over a DAG yielding a new DAG with the same
+-- topology but new node values. If the DAG contains cycles, Nothing is
+-- returned.
+synthesize
+  :: (Ord k, Monad m)
+  => (k -> n1 -> [(k, e1, n2)] -> m n2)
+  -> (e1 -> n2 {- parent -} -> n2 {- child -} -> m e2)
+  -> DAG k e1 n1
+  -> m (Maybe (DAG k e2 n2))
+synthesize f fe d0 = synthesizeNodes' (Just Map.empty) where
   -- iteratively synthesize all nodes that have met dependencies
-  synthesizeDAG' Nothing = return Nothing
-  synthesizeDAG' (Just dn)
+  synthesizeNodes' Nothing = return Nothing
+  synthesizeNodes' (Just dn)
     -- stop, we have completed the mapping. Jubilation.
     | Map.size d0 == Map.size dn = return (Just dn)
     | otherwise = do
@@ -234,7 +251,7 @@ synthesizeDAG f d0 = synthesizeDAG' (Just Map.empty) where
           -- if map size hasn't changed, then nothing was added and we are stuck
           then return Nothing
           -- otherwise move on to the next iteration
-          else synthesizeDAG' (Just dn')
+          else synthesizeNodes' (Just dn')
 
   -- add leaves
   addIfPossible dn (k1, (n1, []))
@@ -243,14 +260,15 @@ synthesizeDAG f d0 = synthesizeDAG' (Just Map.empty) where
         n2 <- f k1 n1 []
         return $ Map.insert k1 (n2, []) dn
   -- add nodes where all children have been processed
-  addIfPossible dn (k1, (n1, xs))
+  addIfPossible dn (k1, (n1, xs1))
     | Map.member k1 dn = return dn
-    | otherwise = case mapM ((`Map.lookup` dn) . fst) xs of
+    | otherwise = case mapM ((`Map.lookup` dn) . fst) xs1 of
         Nothing -> return dn
         (Just children) -> do
-          let augmented = [(k,e,n2) | ((k, e), (n2, _)) <- zip xs children]
+          let augmented = [(k,e,n2) | ((k, e), (n2, _)) <- zip xs1 children]
           n2 <- f k1 n1 augmented
-          return $ Map.insert k1 (n2, xs) dn
+          xs2 <- mapM (\((k2, e), (n2child, _)) -> (,) k2 <$> fe e n2 n2child) (zip xs1 children)
+          return $ Map.insert k1 (n2, xs2) dn
 
 foldDAG
   :: (Ord k, Monad m)
@@ -266,6 +284,39 @@ foldDAG k e f b d =
       a <- foldlM (\b' (k', e') -> foldDAG k' (Just e') f b' d) b es
       f k e n a
     Nothing -> undefined
+
+findDependencies
+  :: (Ord k, Ord e)
+  => (e -> Bool)
+  -> k
+  -> DAG k e n
+  -> [(k, e)]
+findDependencies edgeCond k0 d0
+    = unique . concat
+    $ [[(k, e) | (k, e) <- es, k == k0, edgeCond e] | (k, (_, es)) <- Map.toList d0]
+
+reverseFoldDAGM
+  :: (Ord k, Ord e, Monad m)
+  => k -- initial key
+  -> Maybe e -- the edge to this node if not root
+  -> (e -> Bool) -- edge traversal condition
+  -> (k -> Maybe e -> n -> a -> m a) -- aggregation function
+  -> a -- initial accumulator
+  -> DAG k e n -- DAG folded over
+  -> m a
+reverseFoldDAGM k0 mayE0 edgeCond f acc0 d = rrFoldDAG Set.empty k0 mayE0 acc0 |>> snd
+  where
+  -- rrFoldDAG :: Set.Set k -> k -> Maybe e -> a -> m (Set.Set k, a)
+  rrFoldDAG prior0 k mayE acc0
+    | Set.member k prior0 = return (prior0, acc0)
+    | otherwise = do
+        let prior1 = Set.insert k prior0
+        case Map.lookup k0 d of
+          Nothing -> return (prior1, acc0)
+          (Just (n0, _)) -> do
+            acc1 <- f k0 mayE n0 acc0
+            let deps = findDependencies edgeCond k d
+            foldlM (\(p, b) (k, e) -> rrFoldDAG p k (Just e) b) (prior0, acc1) deps
 
 -- Inherit all imported values and their terminal aliases
 inherit

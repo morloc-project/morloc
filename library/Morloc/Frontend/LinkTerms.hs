@@ -241,6 +241,7 @@ linkVariablesToTermTypes mv m0 = link m0 where
     linkSymbol :: (Int, Symbol) -> MorlocMonad ()
     linkSymbol (_, TypeSymbol _) = return ()
     linkSymbol (i, TermSymbol v) = setMonomorphicType m i v
+    linkSymbol (_, ClassSymbol _) = return ()
 
   setMonomorphicType :: Map.Map EVar (Indexed TermTypes) -> Int -> EVar -> MorlocMonad ()
   setMonomorphicType m i v = case Map.lookup v m of

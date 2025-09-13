@@ -23,7 +23,7 @@ import Morloc.Frontend.Merge (weaveTermTypes, mergeTypeclasses, mergeSignatureSe
 
 linkTypeclasses :: DAG MVar [(EVar, EVar)] ExprI -> MorlocMonad ()
 linkTypeclasses d0 = do
-    _ <- DAG.synthesizeDAG linkTypeclassesFun d0
+    _ <- DAG.synthesizeNodes linkTypeclassesFun d0
     return ()
 
 -- Handle typeclasses
@@ -60,7 +60,7 @@ findTypeclasses (ExprI _ (ModE moduleName es0)) priorClasses = do
 
   -- first we collect all typeclass definitions in this module
   -- typeclasses are defined only at the top-level, so no descent into sub-expressions
-  localClasses <- mapM makeClass [(cls, vs, sigs) | (ExprI _ (ClsE cls vs sigs)) <- es0]
+  localClasses <- mapM makeClass [(cls, vs, sigs) | (ExprI _ (ClsE (Typeclass cls vs sigs))) <- es0]
                >>= Map.unionsWithM mergeIndexedInstances
 
   -- then merge them with all prior typeclasses and instances
