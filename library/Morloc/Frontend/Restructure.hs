@@ -17,7 +17,6 @@ import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Data.GMap as GMap
-import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import qualified Data.Set as Set
@@ -25,7 +24,7 @@ import qualified Data.Set as Set
 -- | Resolve type aliases, term aliases and import/exports
 restructure
   :: DAG MVar Import ExprI
-  -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
+  -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
 restructure s = do
   -- Set the counter for reindexing expressions.
   --
@@ -40,8 +39,6 @@ restructure s = do
     >>= doM collectTags
     >>= doM collectTypes
     >>= doM collectSources
-    >>= removeTypeImports -- Remove type imports and exports
-    |>> nullify -- TODO: unsus and document
 
 
 doM :: Monad m => (a -> m ()) -> a -> m a
@@ -155,7 +152,7 @@ resolveImports d0
               Nothing -> Nothing
               (Just (TermSymbol _)) -> Just $ AliasedTerm (EV name) (EV alias)
               (Just (TypeSymbol _)) -> Just $ AliasedType (TV name) (TV alias)
-              (Just (ClassSymbol _)) -> Just $ AliasedClass (ClassName name) (ClassName alias)
+              (Just (ClassSymbol _)) -> Just $ AliasedClass (ClassName name)
 
 
   -- find all class names in a module, these are used to distinguish types from
@@ -200,12 +197,15 @@ resolveImports d0
   findSymbols (ExprI _ (ClsE (Typeclass cls _ _))) = Set.singleton $ ClassSymbol cls
   findSymbols (ExprI _ (SigE (Signature e _ _))) = Set.singleton $ TermSymbol e
   findSymbols (ExprI _ (SrcE src)) = Set.singleton $ TermSymbol (srcAlias src)
-  findSymbols (ExprI _ (IstE _ _ es)) = Set.unions (map findSymbols es)
+  -- The definition of an instance does not automatically imply export or make
+  -- the values available. The instance is ALWAYS relative to the class
+  -- definition (either local or imported).
+  findSymbols (ExprI _ (IstE _ _ _)) = Set.empty
   findSymbols _ = Set.empty
 
   unalias :: AliasedSymbol -> Symbol
   unalias (AliasedType x _) = TypeSymbol x
-  unalias (AliasedClass x _) = ClassSymbol x
+  unalias (AliasedClass x) = ClassSymbol x
   unalias (AliasedTerm x _) = TermSymbol x
 
   unSymbol :: Symbol -> MT.Text
@@ -216,12 +216,12 @@ resolveImports d0
   unAliasedSymbol :: AliasedSymbol -> (MT.Text, MT.Text)
   unAliasedSymbol (AliasedType x y) = (unTVar x, unTVar y)
   unAliasedSymbol (AliasedTerm x y) = (unEVar x, unEVar y)
-  unAliasedSymbol (AliasedClass x y) = (unClassName x, unClassName y)
+  unAliasedSymbol (AliasedClass x) = (unClassName x, unClassName x)
 
   toAliasedSymbol :: Symbol -> AliasedSymbol
   toAliasedSymbol (TypeSymbol x) = AliasedType x x
   toAliasedSymbol (TermSymbol x) = AliasedTerm x x
-  toAliasedSymbol (ClassSymbol x) = AliasedClass x x
+  toAliasedSymbol (ClassSymbol x) = AliasedClass x
 
 collectTags :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTags fullDag = do
@@ -422,36 +422,3 @@ rename sourceName localAlias = f where
   f (FunU ts t) = FunU (map f ts) (f t)
   f (AppU t ts) = AppU (f t) (map f ts)
   f (NamU o v ts rs) = NamU o v (map f ts) (map (second f) rs)
-
--- TODO: document
-nullify :: DAG m e ExprI -> DAG m e ExprI
-nullify = DAG.mapNode f where
-    f :: ExprI -> ExprI
-    f (ExprI i (SigE (Signature v n (EType t ps cs edocs tdocs)))) = ExprI i (SigE (Signature v n (EType (nullifyT t) ps cs edocs tdocs)))
-    f (ExprI i (ModE m es)) = ExprI i (ModE m (map f es))
-    f (ExprI i (AssE v e es)) = ExprI i (AssE v (f e) (map f es))
-    f e = e
-
-    nullifyT :: TypeU -> TypeU
-    nullifyT (FunU ts t) = FunU (filter (not . isNull) (map nullifyT ts)) (nullifyT t)
-    nullifyT (ExistU v ts rs) = ExistU v (map nullifyT ts) (map (second nullifyT) rs)
-    nullifyT (ForallU v t) = ForallU v (nullifyT t)
-    nullifyT (AppU t ts) = AppU (nullifyT t) (map nullifyT ts)
-    nullifyT (NamU o v ds rs) = NamU o v (map nullifyT ds) (map (second nullifyT) rs)
-    nullifyT t = t
-
-    isNull :: TypeU -> Bool
-    isNull t = t == BT.unitU
-
-
-removeTypeImports :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
-removeTypeImports d = case DAG.roots d of
-  [root] -> return
-          . DAG.shake root
-          . DAG.mapEdge (mapMaybe maybeEVar)
-          $ d
-  roots -> MM.throwError $ NonSingularRoot roots
-  where
-    maybeEVar :: AliasedSymbol -> Maybe (EVar, EVar)
-    maybeEVar (AliasedTerm x y) = Just (x, y)
-    maybeEVar _ = Nothing -- remove type/class symbols, they have already been used

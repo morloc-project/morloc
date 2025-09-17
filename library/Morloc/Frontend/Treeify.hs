@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {-|
 Module      : Morloc.Frontend.Treeify
@@ -14,14 +15,14 @@ module Morloc.Frontend.Treeify (treeify) where
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Frontend.AST as AST
+import qualified Morloc.Frontend.Link as MFL
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Data.Map as Map
+import qualified Morloc.BaseTypes as BT
 import qualified Data.Set as Set
 import qualified Morloc.Data.GMap as GMap
-import Morloc.Frontend.Classify (linkTypeclasses)
-import Morloc.Frontend.LinkTerms (linkTerms)
 import Morloc.Frontend.Merge (mergeTermTypes, mergeEType, mergeSignatureSet)
 
 
@@ -34,6 +35,7 @@ data Namer = Namer
     { namerMap :: Map.Map EVar EVar
     , namerIndex :: Int
     }
+    deriving(Show)
 
 -- When I see a term, I need to look it up. To do so, I need to walk up through
 -- scope and fine all sources/declarations and type annotations. This involves
@@ -49,7 +51,7 @@ data Namer = Namer
 -- ultimate type annotations. The indices also match terms to their signatures
 -- and locations in source code.
 treeify
-  :: DAG MVar [(EVar, EVar)] ExprI
+  :: DAG MVar [AliasedSymbol] ExprI
   -> MorlocMonad [AnnoS Int ManyPoly Int]
 treeify d
  | Map.size d == 0 = return []
@@ -59,31 +61,16 @@ treeify d
    -- else if exactly one module name key (k) is found
    [k] -> do
 
-     -- find all expressions with annotations and link the expression index to its type
-     -- in the typecheckers, these types will trigger a switch to checking mode.
-     d' <- DAG.mapNodeM linkAndRemoveAnnotations d
-
-     -- build a map
-     -- - fill stateSignatures map in the MorlocState reader monad
-     --       stateSignatures :: GMap Int Int [EType]
-     -- - this is a map from term (VarE) indices to signature sets
-     -- - after this step, all signatures and type annotation expressions are redundant
-     -- - the map won't be used until the type inference step in Typecheck.hs
-     _ <- linkTerms d'
-
-     -- build typeclasses and instance map
-     _ <- linkTypeclasses d'
-
-     case DAG.lookupNode k d' of
+     case DAG.lookupNode k d of
        -- if the key is not in the DAG, then something is dreadfully wrong codewise
        Nothing -> MM.throwError . DagMissingKey . render $ pretty k
-       (Just e) -> do
+       (Just (AST.findExport -> ExportMany symbols)) -> do
+
+         -- move all to state, after this the DAG will no longer be needed
+         _ <- MFL.link d
 
          -- find all term exports (do not include type exports)
-         symbols <- case AST.findExport e of
-            (ExportMany ss) -> return $ Set.toList ss
-            ExportAll -> error "This should not be possible, all ExportAll cases should have been removed in Restructure.hs"
-         let exports = [(i, v) | (i, TermSymbol v) <- symbols]
+         let exports = [(i, v) | (i, TermSymbol v) <- Set.toList symbols]
 
          -- - store all exported indices in state
          -- - Add the export name to state. Failing to do so here, will lose
@@ -95,12 +82,48 @@ treeify d
          -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
          mapM (uncurry collect) exports
 
+       (Just _) -> error "This should not be possible, all ExportAll cases should have been removed in Restructure.hs"
+
    -- There is no currently supported use case that exposes multiple roots in
    -- one compilation process. The compiler executable takes a single morloc
    -- file as input, therefore this MUST be the root. In the future compiling
    -- multiple projects in parallel with potentially shared information and
    -- constraints could be valuable.
    roots -> MM.throwError . CallTheMonkeys . render $ "How did you end up with so many roots?" <+> tupled (map pretty roots)
+
+
+-- TODO: document
+nullify :: DAG m e ExprI -> DAG m e ExprI
+nullify = DAG.mapNode f where
+    f :: ExprI -> ExprI
+    f (ExprI i (SigE (Signature v n (EType t ps cs edocs tdocs)))) = ExprI i (SigE (Signature v n (EType (nullifyT t) ps cs edocs tdocs)))
+    f (ExprI i (ModE m es)) = ExprI i (ModE m (map f es))
+    f (ExprI i (AssE v e es)) = ExprI i (AssE v (f e) (map f es))
+    f e = e
+
+    nullifyT :: TypeU -> TypeU
+    nullifyT (FunU ts t) = FunU (filter (not . isNull) (map nullifyT ts)) (nullifyT t)
+    nullifyT (ExistU v ts rs) = ExistU v (map nullifyT ts) (map (second nullifyT) rs)
+    nullifyT (ForallU v t) = ForallU v (nullifyT t)
+    nullifyT (AppU t ts) = AppU (nullifyT t) (map nullifyT ts)
+    nullifyT (NamU o v ds rs) = NamU o v (map nullifyT ds) (map (second nullifyT) rs)
+    nullifyT t = t
+
+    isNull :: TypeU -> Bool
+    isNull t = t == BT.unitU
+
+
+removeTypeImports :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
+removeTypeImports d = case DAG.roots d of
+  [root] -> return
+          . DAG.shake root
+          . DAG.mapEdge (mapMaybe maybeEVar)
+          $ d
+  roots -> MM.throwError $ NonSingularRoot roots
+  where
+    maybeEVar :: AliasedSymbol -> Maybe (EVar, EVar)
+    maybeEVar (AliasedTerm x y) = Just (x, y)
+    maybeEVar _ = Nothing -- remove type/class symbols, they have already been used
 
 
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
@@ -163,19 +186,20 @@ collectExprS namer (ExprI gi e0) = f namer e0 where
               <> "\n  gi:" <+> pretty gi
               <> "\n  v:" <+> pretty v
     sigs <- MM.gets stateSignatures
+
     case GMap.lookup gi sigs of
 
       -- A monomorphic term will have a type if it is linked to any source
       -- since sources require signatures. But if it associated only with a
       -- declaration, then it will have no type.
       (GMapJust (Monomorphic t)) -> do
-        MM.sayVVV $ "  monomorphic:" <+> maybe "?" pretty (termGeneral t)
+        MM.sayVVV $ "  monomorphic term" <+> pretty v <> ":" <+> maybe "?" pretty (termGeneral t)
         (namer', es) <- termtypesToAnnoS gi namer t
         return $ (namer', VarS v (MonomorphicExpr (termGeneral t) es))
 
       -- A polymorphic term should always have a type.
       (GMapJust (Polymorphic cls clsName t ts)) -> do
-        MM.sayVVV $ "  polymorphic:" <+> list (map (maybe "?" pretty . termGeneral) ts)
+        MM.sayVVV $ "  polymorphic term" <+> pretty v <> ":" <+> list (map (maybe "?" pretty . termGeneral) ts)
         (namer', ess) <- statefulMapM (termtypesToAnnoS gi) namer ts
         let etypes = map (fromJust . termGeneral) ts
         return $ (namer', VarS v (PolymorphicExpr cls clsName t (zip etypes ess)))
@@ -183,10 +207,10 @@ collectExprS namer (ExprI gi e0) = f namer e0 where
       -- Terms not associated with TermTypes objects must be lambda-bound
       -- These terms will be renamed for uniqueness
       _ -> do
-        MM.sayVVV "bound term"
+        MM.sayVVV $ "bound term" <+> pretty v
         case Map.lookup v (namerMap namer) of
             (Just v') -> return (namer, BndS v')
-            Nothing -> MM.throwError $ UndefinedVariable v
+            Nothing -> error $ "undefined term in namer map (" <> show v <> "): " <> show namer -- MM.throwError $ UndefinedVariable v
     where
       termtypesToAnnoS :: Int -> Namer -> TermTypes -> MorlocMonad (Namer, [AnnoS Int ManyPoly Int])
       termtypesToAnnoS gi namer t = do

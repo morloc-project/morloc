@@ -228,10 +228,21 @@ type MorlocMonadGen c e l s a
 
 type MorlocReturn a = ((Either MorlocError a, [Text]), MorlocState)
 
-data SignatureSet = Monomorphic TermTypes | Polymorphic ClassName EVar EType [TermTypes]
+-- Note that the signatures do NOT include the name of the term.
+-- This is because the signature describes the common form of the type but the
+-- name may change if the term is imported under an alias.
+data SignatureSet
+  = Monomorphic TermTypes
+  | Polymorphic ClassName   -- typeclass name
+                EVar        -- name of one term from a typeclass
+                EType       -- the term's common fully-generic general type
+                [TermTypes] -- list of instances
   deriving(Show)
 
 
+-- This describes ONE term in a typeclass instance
+-- For example, in the Packable type class, there would be one Instance type for
+-- `pack` and one for `unpack`.
 data Instance = Instance
   { className :: ClassName
   , classVars :: [TVar]
@@ -391,7 +402,7 @@ data Export = ExportMany (Set.Set (Int, Symbol)) | ExportAll
 data AliasedSymbol
   = AliasedType TVar TVar
   | AliasedTerm EVar EVar
-  | AliasedClass ClassName ClassName
+  | AliasedClass ClassName -- classes cannot be aliased (they may eventually have namespaces)
   deriving (Show, Ord, Eq)
 
 data Signature = Signature EVar (Maybe Label) EType
@@ -1360,9 +1371,7 @@ instance Pretty AliasedSymbol where
   pretty (AliasedTerm x alias)
     | x == alias = pretty x
     | otherwise = pretty x <+> "as" <+> pretty alias
-  pretty (AliasedClass x alias)
-    | x == alias = pretty x
-    | otherwise = pretty x <+> "as" <+> pretty alias
+  pretty (AliasedClass x) = pretty x
 
 instance Pretty None where
   pretty None = "()"

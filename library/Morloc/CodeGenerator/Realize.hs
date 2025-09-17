@@ -245,9 +245,7 @@ realize s0 = do
 
   -- This case should be caught earlier
   collapseExpr _ _ (VarS v (Many []), _)
-    = MM.throwError . GeneratorError . render
-    $ "No implementation found for" <+> squotes (pretty v)
-
+    = error $ "Unreachable case found - no implementations for '" <> show v <> "'"
   -- Select one implementation for the given term
   collapseExpr gt l1 (VarS v (Many xs), Idx i _) = do
     let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) xs

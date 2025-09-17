@@ -293,10 +293,10 @@ findDependencies
   -> [(k, e)]
 findDependencies edgeCond k0 d0
     = unique . concat
-    $ [[(k, e) | (k, e) <- es, k == k0, edgeCond e] | (k, (_, es)) <- Map.toList d0]
+    $ [[(k1, e) | (k, e) <- es, k == k0, edgeCond e] | (k1, (_, es)) <- Map.toList d0]
 
 reverseFoldDAGM
-  :: (Ord k, Ord e, Monad m)
+  :: (Ord k, Ord e, Monad m, Show k, Show e)
   => k -- initial key
   -> Maybe e -- the edge to this node if not root
   -> (e -> Bool) -- edge traversal condition
@@ -311,10 +311,10 @@ reverseFoldDAGM k0 mayE0 edgeCond f acc0 d = rrFoldDAG Set.empty k0 mayE0 acc0 |
     | Set.member k prior0 = return (prior0, acc0)
     | otherwise = do
         let prior1 = Set.insert k prior0
-        case Map.lookup k0 d of
+        case Map.lookup k d of
           Nothing -> return (prior1, acc0)
-          (Just (n0, _)) -> do
-            acc1 <- f k0 mayE n0 acc0
+          (Just (n, _)) -> do
+            acc1 <- f k mayE n acc0
             let deps = findDependencies edgeCond k d
             foldlM (\(p, b) (k, e) -> rrFoldDAG p k (Just e) b) (prior0, acc1) deps
 
