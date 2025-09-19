@@ -95,7 +95,10 @@ inferConcreteTypeUniversal lang t@(type2typeu -> generalType) = do
     (Left _) -> do
         -- Evaluate the general type one level and try again
         case T.evaluateStep gscopeUni generalType of
-            (Just reducedGType) -> inferConcreteTypeUniversal lang (typeOf reducedGType)
+            (Just reducedGType) ->
+              if reducedGType == generalType
+              then MM.throwError $ CannotInferConcretePrimitiveType t "Failed to resolve and cannot evaluate any further"
+              else inferConcreteTypeUniversal lang (typeOf reducedGType)
             Nothing -> MM.throwError $
                        CannotInferConcretePrimitiveType t "Could not reduce type in broadest scope"
 
