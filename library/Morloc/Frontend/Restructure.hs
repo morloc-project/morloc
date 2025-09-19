@@ -20,6 +20,7 @@ import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import qualified Data.Set as Set
+import Data.Set (Set)
 
 -- | Resolve type aliases, term aliases and import/exports
 restructure
@@ -115,7 +116,7 @@ resolveImports d0
 
     exports <- case export of
         ExportAll -> mapM addIndex (Set.toList allSymbols) |>> Set.fromList
-        (ExportMany explicitExports) ->
+        (ExportMany (resolveExplicitTypeclasses allSymbols -> explicitExports)) ->
             let missing = (Set.map snd explicitExports) `Set.difference` allSymbols
             in if Set.null missing
                then
@@ -126,6 +127,14 @@ resolveImports d0
                    <+> list (map viaShow (Set.toList missing))
 
     return $ AST.setExport (ExportMany exports) e
+
+  resolveExplicitTypeclasses :: Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol)
+  resolveExplicitTypeclasses ss sis = Set.map f sis where
+    f :: (Int, Symbol) -> (Int, Symbol)
+    f (i, TypeSymbol (TV x))
+      | (ClassSymbol (ClassName x)) `Set.member` ss = (i, ClassSymbol (ClassName x))
+      | otherwise = (i, TypeSymbol (TV x))
+    f x = x
 
   addIndex :: a -> MorlocMonad (Int, a)
   addIndex x = (,) <$> MM.getCounter <*> pure x
@@ -157,7 +166,7 @@ resolveImports d0
 
   -- find all class names in a module, these are used to distinguish types from
   -- classes when resolving imports and exports
-  findClasses :: ExprI -> Set.Set ClassName
+  findClasses :: ExprI -> Set ClassName
   findClasses (ExprI _ (ClsE (Typeclass cls _ _))) = Set.singleton cls
   findClasses (ExprI _ (ModE _ es)) = Set.unions (map findClasses es)
   findClasses _ = Set.empty
@@ -166,17 +175,17 @@ resolveImports d0
     :: MVar
     -> Import -- the current node import list
     -> Export -- the imported modules export list
-    -> MorlocMonad (Set.Set Symbol)
+    -> MorlocMonad (Set Symbol)
   -- Here we import everything outside the exclude set, no aliasing
   filterImports _ (Import _ Nothing exclude _) (ExportMany exports) =
     return $ (Set.map snd exports) `Set.difference` (Set.fromList exclude)
   -- Here we need to carefully handle aliasing
-  filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) _) (ExportMany exports)
+  filterImports m1 imp@(Import m2 (Just as) (map unSymbol -> exclude) _) (ExportMany exports)
     = case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
         ([], imps) -> return $ Set.fromList imps
         (missing, _) -> MM.throwError . ImportExportError m1 $
            "The following imported terms are not exported from module '" <> unMVar m2 <> "': " <>
-           render (tupledNoFold $ map pretty missing)
+           render (tupledNoFold $ map pretty missing) <> "\nimports = " <> render (pretty (importInclude imp))
     where
         exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList exports]
 
@@ -190,7 +199,7 @@ resolveImports d0
                 (Just (ClassSymbol _)) -> Just . Right $ ClassSymbol (ClassName alias)
   filterImports _ _ _ = error "Unreachable -- all Export values should have been converted to ExportMany"
 
-  findSymbols :: ExprI -> Set.Set Symbol
+  findSymbols :: ExprI -> Set Symbol
   findSymbols (ExprI _ (ModE _ es)) = Set.unions (map findSymbols es)
   findSymbols (ExprI _ (TypE _ v _ _)) = Set.singleton $ TypeSymbol v
   findSymbols (ExprI _ (AssE e _ _)) = Set.singleton $ TermSymbol e
@@ -200,7 +209,7 @@ resolveImports d0
   -- The definition of an instance does not automatically imply export or make
   -- the values available. The instance is ALWAYS relative to the class
   -- definition (either local or imported).
-  findSymbols (ExprI _ (IstE _ _ _)) = Set.empty
+  findSymbols (ExprI _ (IstE cls _ _)) = Set.singleton $ ClassSymbol cls
   findSymbols _ = Set.empty
 
   unalias :: AliasedSymbol -> Symbol

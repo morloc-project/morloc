@@ -22,7 +22,7 @@ import qualified Data.Set as Set
 import qualified Morloc.Data.Text as DT
 import Data.Set (Set)
 import qualified Morloc.Data.GMap as GMap
-import Morloc.Frontend.Merge (mergeIndexedInstances, mergeSignatureSet)
+import Morloc.Frontend.Merge (mergeIndexedInstances, mergeSignatureSet, weaveTermTypes)
 import Morloc.Typecheck.Internal (unqualify, qualify)
 
 implicitImportExport = [AliasedClass (ClassName "Packable")]
@@ -57,7 +57,7 @@ synth
   -> ExprI
   -> [(MVar, [AliasedSymbol], LinkState)]
   -> MorlocMonad LinkState
-synth k0 e0 edges = do 
+synth k0 e0 edges = do
   inheritedState <- mapM (realiasLinkState k0) edges >>= mergeLinkStates k0
   finalState <- addLocalState k0 e0 inheritedState
   _ <- linkLocalTerms k0 finalState e0
@@ -73,7 +73,7 @@ realiasLinkState m1 (m2, ss, s) = do
   where
 
   mergeValues :: (Ord k, Show k) => String -> [(k, Maybe v)] -> MorlocMonad (Map k v)
-  mergeValues msg xs = case [v | (v, Nothing) <- xs] of 
+  mergeValues msg xs = case [v | (v, Nothing) <- xs] of
     [] -> return $ Map.fromList [(v,i) | (v, Just i) <- xs]
     missing -> error $ "Undefined " <> msg <> " imports:" <> show missing <> "\n  ss = " <> show ss
 
@@ -94,9 +94,9 @@ realiasLinkState m1 (m2, ss, s) = do
 mergeLinkStates :: MVar -> [(MVar, LinkState)] -> MorlocMonad LinkState
 mergeLinkStates m imps = do
       -- Set EVar
-  let terms = Set.unions $ [Map.keysSet s | (_, LinkState s _) <- imps] 
+  let terms = Set.unions $ [Map.keysSet s | (_, LinkState s _) <- imps]
       -- Set ClassName
-      classes = Set.unions $ [Map.keysSet s | (_, LinkState _ s) <- imps] 
+      classes = Set.unions $ [Map.keysSet s | (_, LinkState _ s) <- imps]
       -- Map EVar [(MVar, Int)]
       termGroups = Map.fromSet (\k -> catMaybes [(,) m <$> Map.lookup k (linkTerms s) | (m, s) <- imps]) terms
       -- Map ClassName [(MVar, (Int, Map EVar Int))]
@@ -114,7 +114,7 @@ mergeLinkStates m imps = do
   mergeTerms _ [(_, i)] = return i
   mergeTerms v ((m1, i):((m2, j):xs))
     | i == j = mergeTerms v ((m2, j):xs)
-    | i /= j = undefined -- raise error for illegal term masking
+    | i /= j = error $ "raise error for illegal term masking: " <> show (unEVar v)
 
   mergeClasses :: ClassName -> [(MVar, (Int, a, Map EVar Int))] -> MorlocMonad (Int, a, Map EVar Int)
   mergeClasses _ [] = error "This will never be empty"
@@ -158,7 +158,7 @@ addLocalState m0 e0 s0 = do
     MM.modify (\s -> s {stateSignatures = GMap idmap sigmap'})
     -- update the map between term names and signature indices
     return $ lstate { linkTerms = Map.insert v sigIndex (linkTerms lstate) }
-  -- create new entries for class definitions and type signatures 
+  -- create new entries for class definitions and type signatures
   findDefs (ExprI clsIndex (ClsE tcls@(Typeclass cls vs sigs))) lstate = do
     -- get sigmap
     (GMap idmap sigmap) <- MM.gets stateSignatures
@@ -166,8 +166,16 @@ addLocalState m0 e0 s0 = do
     sigsIdx <- mapM (\sig -> (,) <$> MM.getCounter <*> pure sig) sigs
     -- add these new typeclass methods to stateSignatures as polymorphic entries
     let sigmap' = foldr (\(i, Signature v _ t) m -> Map.insert i (Polymorphic cls v t []) m) sigmap sigsIdx
+
+    -- setup stateTypeclasses
+    clsmap <- makeClass tcls
+    let xs = [(v, Instance cls vs et []) | Signature v _ et <- sigs]
+    tmap <- MM.gets stateTypeclasses
+    tmap' <- foldlM (\m (k, v) -> insertWithCheck k v m) tmap xs
+
     -- update morloc state
-    MM.modify (\s -> s {stateSignatures = GMap idmap sigmap'})
+    MM.modify (\s -> s {stateSignatures = GMap idmap sigmap', stateTypeclasses = tmap'})
+
     -- generate the (Map EVar Int) list for LinkedState
     let vmap = Map.fromList [(v, i) | (i, Signature v _ _) <- sigsIdx]
         classes = Map.insert cls (clsIndex, tcls, vmap) (linkClasses lstate)
@@ -177,6 +185,11 @@ addLocalState m0 e0 s0 = do
   findDefs (ExprI _ (ModE _ es)) lstate = foldrM findDefs lstate es
   -- All other types return the map unchanged
   findDefs _ lstate = return lstate
+
+  insertWithCheck :: Ord k => k -> v -> Map k v -> MorlocMonad (Map k v)
+  insertWithCheck k v m
+    | Map.member k m = error "Complain about an error with double definition of typeclass"
+    | otherwise = return $ Map.insert k v m
 
   -- make a map of all terms that are defined in a typeclass (these will all
   -- be general term)
@@ -192,7 +205,7 @@ addLocalState m0 e0 s0 = do
 
   -- Handle assignments that do not have signatures
   findFreeDefs (ExprI _ (AssE v e es)) (terms, lstate)
-    | Set.member v terms = return (terms, lstate)
+    | Set.member v terms || Map.member v (linkTerms lstate) = return (terms, lstate)
     | otherwise = do
         -- make new index to use for all definitions of this term
         idx <- MM.getCounter
@@ -224,8 +237,8 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
   linkLocal :: Set EVar -> LinkState -> Map EVar (Int, Maybe (Typeclass Signature)) -> ExprI -> MorlocMonad ()
   linkLocal _ _ cs (ExprI i (SrcE src)) = do
     case Map.lookup (srcAlias src) cs of
-      Nothing -> undefined -- handle error for src that has no associated type signature
-      (Just (_, Just _)) -> undefined -- handle error for src that overlaps typeclass term
+      Nothing -> error $ "handle error for src that has no associated type signature: " <> show src
+      (Just (_, Just (Typeclass cls _ _))) -> error $ "handle error for src '" <> show (srcAlias src) <> "' that overlaps typeclass '" <> show cls <> "'"
       (Just (termIdx, Nothing)) -> do
         (GMap idmap sigmap) <- MM.gets stateSignatures
         case Map.lookup termIdx sigmap of
@@ -259,13 +272,13 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
             mapM_ ( linkLocal bnds c' (toCondensedState c')) (e:es)
           (Just (Polymorphic _ _ _ _)) -> undefined "Raise error about giving a monomorphic definition to a polymorphic creature"
 
-  linkLocal _ c _ (ExprI _ (IstE cls ts es)) = do
+  linkLocal bnds c cs (ExprI _ (IstE cls ts es)) = do
     case Map.lookup cls (linkClasses c) of
-      Nothing -> undefined -- handle error for src that has no associated type signature
+      Nothing -> error $ "handle error for src that has no associated type signature with cls=" <> show cls <> " in module " <> show m0
       (Just (clsIdx, Typeclass _ vs sigs, emap)) ->
-        if length vs == length ts
-        then mapM_ (linkInstance m0 cls (zip vs ts) sigs emap) es
-        else undefined "Complain loudly about kind differences between the class and instance"
+        if length vs /= length ts
+        then undefined "Complain loudly about kind differences between the class and instance"
+        else mapM_ (linkInstance (linkLocal bnds c cs) m0 cls (zip vs ts) sigs emap) es
 
   linkLocal bnds _ cs (ExprI termIdx (VarE _ v))
     | Set.member v bnds = return ()
@@ -275,7 +288,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
           (GMap idmap sigmap) <- MM.gets stateSignatures
           let idmap' = Map.insert termIdx sigIdx idmap
           MM.modify (\ms -> ms {stateSignatures = GMap idmap' sigmap})
-        Nothing -> error "This should be unreachable"
+        Nothing -> error $ "This should be unreachable: v=" <> show (unEVar v) <> " not found"
 
 
   linkLocal bnds _ cs (ExprI termIdx (ExpE (ExportMany (Set.toList -> ss)))) =
@@ -285,8 +298,13 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
       linkExp (v, termIdx, Just (sigIdx, _)) = do
           (GMap idmap sigmap) <- MM.gets stateSignatures
           let idmap' = Map.insert termIdx sigIdx idmap
-          MM.modify (\ms -> ms {stateSignatures = GMap idmap' sigmap})
-      linkExp (v, termIdx, Nothing) = undefined "Undefined export"
+          MM.modify (\ms -> ms { stateSignatures = GMap idmap' sigmap
+                               , stateName = Map.insert termIdx v (stateName ms)
+                               } )
+      -- TODO: give this a good error message - it is a user facing issue
+      -- Is raised when an exported term, such as a sourced function, is
+      -- exported with no signature in scope.
+      linkExp (v, termIdx, Nothing) = error $ "Undefined export: " <> show v
   linkLocal _ _ _ (ExprI _ (ExpE ExportAll)) = error "ExportAll should no longer be present"
 
   -- Shadowing is allowed, so here all terms in `s` that are bound by the lambda
@@ -294,7 +312,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
   linkLocal bnds c cs (ExprI _ (LamE vs e)) = do
     (c', cs') <- foldlM shadow (c,cs) vs
     let bnds' = Set.union bnds (Set.fromList vs)
-    linkLocal bnds' c' cs' e 
+    linkLocal bnds' c' cs' e
     where
 
     shadow :: (LinkState, Map EVar (Int, Maybe (Typeclass Signature)))
@@ -329,34 +347,55 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
 --   for each term in [Signature], add a TermTypes instance to the correct
 --   SignatureSet in stateSignatures. This will be a polymorphic case.
 --     Polymorphic ClassName EVar EType [TermTypes]
-linkInstance :: MVar -> ClassName -> [(TVar, TypeU)] -> [Signature] -> Map EVar Int -> ExprI -> MorlocMonad ()
-linkInstance m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0 where
+linkInstance
+  :: (ExprI -> MorlocMonad ())
+  -> MVar
+  -> ClassName
+  -> [(TVar, TypeU)]
+  -> [Signature]
+  -> Map EVar Int
+  -> ExprI
+  -> MorlocMonad ()
+linkInstance linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0 where
+
   linkExpr (ExprI i (SrcE src)) = do
     let v = srcAlias src
     (Signature _ _ et, stateIdx) <- lookupInfo v
-    let tt = TermTypes (Just et) [(m0, Idx i src)] []
+    t <- substituteInstanceTypes params0 (etype et)
+    let et' = et { etype = t }
+    let tt = TermTypes (Just et') [(m0, Idx i src)] []
     linkTermTypes v et tt stateIdx
-  linkExpr e@(ExprI _ (AssE v _ _)) = do
+  linkExpr (ExprI _ (AssE v e es)) = do
+    mapM_ linker (e:es)
     (Signature _ _ et, stateIdx) <- lookupInfo v
-    let tt = TermTypes (Just et) [] [e]
+    t <- substituteInstanceTypes params0 (etype et)
+    let et' = et { etype = t }
+    let tt = TermTypes (Just et') [] [e]
     linkTermTypes v et tt stateIdx
-  linkExpr _ = undefined "Raise error about why this should not be allowed, only sources and asses are allowed"
+  linkExpr _ = error "Raise error about why this should not be allowed, only sources and asses are allowed"
 
   lookupInfo :: EVar -> MorlocMonad (Signature, Int)
   lookupInfo v = case ([sig | sig@(Signature v' _ _) <- sigs0, v == v'], Map.lookup v emap0) of
     ([sig], Just i) -> return (sig, i)
-    _ -> undefined "Raise error about the instance containing terms that are not defined in the class"
+    -- TODO: raise error for terms defined in signatures that are missing in the class
+    _ -> error $ "Raise error about the instance containing the term " <> show (unEVar v) <> " that is not defined in the class " <> show (unClassName cls0)
 
   linkTermTypes :: EVar -> EType -> TermTypes -> Int -> MorlocMonad ()
   linkTermTypes v et tt stateIdx = do
     (GMap idmap sigmap) <- MM.gets stateSignatures
+    tcls <- MM.gets stateTypeclasses
     case Map.lookup stateIdx sigmap of
       Nothing -> undefined "Raise error about something"
       (Just sigset) -> do
         sigset' <- mergeSignatureSet sigset (Polymorphic cls0 v et [tt])
         let sigmap' = Map.insert stateIdx sigset' sigmap
-        MM.modify (\ms -> ms {stateSignatures = GMap idmap sigmap'})
-
+        newInstance <- case Map.lookup v tcls of
+          Nothing -> do
+            return $ Instance cls0 (map fst params0) et [tt]
+          (Just inst) -> do
+            return $ inst {instanceTerms = weaveTermTypes tt (instanceTerms inst) }
+        let tcls' = Map.insert v newInstance tcls
+        MM.modify (\ms -> ms {stateSignatures = GMap idmap sigmap', stateTypeclasses = tcls'})
 
 {- Substitute the instance types into the class function definition
 
@@ -386,8 +425,8 @@ same as the `a` and `b` in the class.
 
 
 -}
-substituteInstanceTypes :: [TVar] -> TypeU -> [TypeU] -> MorlocMonad TypeU
-substituteInstanceTypes clsVars clsType instanceParameters = do
+substituteInstanceTypes :: [(TVar, TypeU)] -> TypeU -> MorlocMonad TypeU
+substituteInstanceTypes (unzip -> (clsVars, instanceParameters)) clsType  = do
 
       -- find all qualifiers in the instance parameter list
   let instanceQualifiers = unique $ concatMap (fst . unqualify) instanceParameters

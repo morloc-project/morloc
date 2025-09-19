@@ -772,13 +772,9 @@ data TypeError
   | Mismatch TypeU TypeU Text
   | UnboundVariable EVar
   | KeyError Key TypeU
-  | MissingConcreteSignature EVar Lang
-  | MissingGeneralSignature EVar
   | ApplicationOfNonFunction
   | InvalidApplication (AnnoS Int ManyPoly Int) [AnnoS Int ManyPoly Int] TypeU
   | TooManyArguments
-  | EmptyExpression EVar
-  | MissingFeature Text
   | InfiniteRecursion
   | FunctionSerialization EVar
   | TypeEvaluationError Text
@@ -788,8 +784,6 @@ data MorlocError
   = IndexedError Int MorlocError
   -- | Raised for calls to unimplemented features
   | NotImplemented Text
-  -- | Raised for unsupported features (such as specific languages)
-  | NotSupported Text
   -- | Raised by parsec on parse errors
   | SyntaxError (ParseErrorBundle Text Void)
   -- | Raised when an unsupported language is encountered
@@ -1480,7 +1474,6 @@ instance Show TypeError where
 instance Pretty MorlocError where
   pretty (IndexedError i e) = "At index" <+> pretty i <> ":" <+> pretty e
   pretty (NotImplemented msg) = "Not yet implemented: " <> pretty msg
-  pretty (NotSupported msg) = "NotSupported: " <> pretty msg
   pretty (UnknownLanguage lang) =
     "'" <> pretty lang <> "' is not recognized as a supported language"
   pretty (SyntaxError err') = "SyntaxError: " <> pretty (errorBundlePretty err')
@@ -1607,12 +1600,8 @@ instance Pretty TypeError where
     <+> pretty msg
   pretty (UnboundVariable v) = "UnboundVariable:" <+> pretty v
   pretty (KeyError k t) = "KeyError:" <+> dquotes (pretty k) <+> "not found in record:" <+> pretty t
-  pretty (MissingConcreteSignature e lang) = "No concrete signature found for" <+> pretty lang <+> "function named" <+> squotes (pretty e)
-  pretty (MissingGeneralSignature e) = "MissingGeneralSignature for" <+> squotes (pretty e)
   pretty ApplicationOfNonFunction = "ApplicationOfNonFunction"
   pretty TooManyArguments = "TooManyArguments"
-  pretty (MissingFeature msg) = "MissingFeature: " <> pretty msg
-  pretty (EmptyExpression e) = "EmptyExpression:" <+> squotes (pretty e) <+> "has no bound signature or expression"
   pretty InfiniteRecursion = "InfiniteRecursion"
   pretty (FunctionSerialization v) = "Undefined function" <+> dquotes (pretty v) <> ", did you forget an import?"
   pretty (InvalidApplication f xs t)

@@ -66,8 +66,10 @@ treeify d
        Nothing -> MM.throwError . DagMissingKey . render $ pretty k
        (Just (AST.findExport -> ExportMany symbols)) -> do
 
+         d' <- DAG.mapNodeM linkAndRemoveAnnotations d |>> nullify
+
          -- move all to state, after this the DAG will no longer be needed
-         _ <- MFL.link d
+         _ <- MFL.link d'
 
          -- find all term exports (do not include type exports)
          let exports = [(i, v) | (i, TermSymbol v) <- Set.toList symbols]
@@ -193,6 +195,9 @@ collectExprS namer (ExprI gi e0) = f namer e0 where
       -- since sources require signatures. But if it associated only with a
       -- declaration, then it will have no type.
       (GMapJust (Monomorphic t)) -> do
+
+        MM.sayVVV $ "  searchged gi " <+> pretty gi <+> "for" <+> pretty v
+
         MM.sayVVV $ "  monomorphic term" <+> pretty v <> ":" <+> maybe "?" pretty (termGeneral t)
         (namer', es) <- termtypesToAnnoS gi namer t
         return $ (namer', VarS v (MonomorphicExpr (termGeneral t) es))
@@ -254,7 +259,7 @@ collectExprS namer (ExprI gi e0) = f namer e0 where
   f namer (LogE x) = return (namer, LogS x)
   f namer (StrE x) = return (namer, StrS x)
   -- all other expressions are strictly illegal here and represent compiler bugs
-  f _ _ = error $ "Bug in collectExprS "
+  f _ e = error $ "Bug in collectExprS: " <> show (render (pretty e))
 
 reindexExprI :: ExprI -> MorlocMonad ExprI
 reindexExprI (ExprI i e) = ExprI <$> newIndex i <*> reindexExpr e
