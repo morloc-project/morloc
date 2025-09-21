@@ -1,8 +1,7 @@
 module main (rms)
 
-import types (List, Real)
-import math (sqrt, mean, mul)
-import cppbase (map)
+import math (sqrt, mean)
+import root-cpp (Functor, Integral)
 
 source cpp from "rms.h"
  ( "rms1" as rms

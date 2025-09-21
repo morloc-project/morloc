@@ -267,9 +267,17 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
                 sigmap' = Map.insert termIdx (Monomorphic tt') sigmap
                 idmap' = Map.insert i termIdx idmap
             MM.modify (\ms -> ms {stateSignatures = GMap idmap' sigmap'})
+            (bnds', c', cs') <- case e of
+              (ExprI j (LamE vs body)) ->
+                return ( foldr Set.insert bnds vs
+                       , c {linkTerms = foldr Map.delete (linkTerms c) vs }
+                       , foldr Map.delete cs vs
+                       )
+              body -> return (bnds, c, cs)
             -- link expressions in the where statement within a local scope
-            c' <- foldrM (addLocalState m0) c (e:es)
-            mapM_ ( linkLocal bnds c' (toCondensedState c')) (e:es)
+            c'' <- foldrM (addLocalState m0) c' (e:es)
+
+            mapM_ ( linkLocal bnds' c'' (toCondensedState c'')) (e:es)
           (Just (Polymorphic _ _ _ _)) -> undefined "Raise error about giving a monomorphic definition to a polymorphic creature"
 
   linkLocal bnds c cs (ExprI _ (IstE cls ts es)) = do
@@ -284,27 +292,18 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
     | Set.member v bnds = return ()
     | otherwise = case Map.lookup v cs of
         -- handle both monomorphic terms and polymorphic typeclass terms
-        (Just (sigIdx, _)) -> do
-          (GMap idmap sigmap) <- MM.gets stateSignatures
-          let idmap' = Map.insert termIdx sigIdx idmap
-          MM.modify (\ms -> ms {stateSignatures = GMap idmap' sigmap})
+        (Just (sigIdx, _)) ->  updateSigLinks v termIdx sigIdx
         Nothing -> error $ "This should be unreachable: v=" <> show (unEVar v) <> " not found"
 
-
-  linkLocal bnds _ cs (ExprI termIdx (ExpE (ExportMany (Set.toList -> ss)))) =
+  linkLocal _ _ cs (ExprI termIdx (ExpE (ExportMany (Set.toList -> ss)))) =
     mapM_ linkExp [(v, termIdx, Map.lookup v cs) | (termIdx, TermSymbol v) <- ss]
     where
       linkExp :: (EVar, Int, Maybe (Int, a)) -> MorlocMonad ()
-      linkExp (v, termIdx, Just (sigIdx, _)) = do
-          (GMap idmap sigmap) <- MM.gets stateSignatures
-          let idmap' = Map.insert termIdx sigIdx idmap
-          MM.modify (\ms -> ms { stateSignatures = GMap idmap' sigmap
-                               , stateName = Map.insert termIdx v (stateName ms)
-                               } )
+      linkExp (v, termIdx, Just (sigIdx, _)) = updateSigLinks v termIdx sigIdx
       -- TODO: give this a good error message - it is a user facing issue
       -- Is raised when an exported term, such as a sourced function, is
       -- exported with no signature in scope.
-      linkExp (v, termIdx, Nothing) = error $ "Undefined export: " <> show v
+      linkExp (v, termIdx, Nothing) = error $ "Undefined export: " <> show v <> " from module " <> show (unMVar m0)
   linkLocal _ _ _ (ExprI _ (ExpE ExportAll)) = error "ExportAll should no longer be present"
 
   -- Shadowing is allowed, so here all terms in `s` that are bound by the lambda
@@ -339,6 +338,15 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
   linkLocal bnds c cs (ExprI _ (AnnE e _)) = linkLocal bnds c cs e
   -- terminal cases
   linkLocal _ _ _ _ = return ()
+
+
+  updateSigLinks :: EVar -> Int -> Int -> MorlocMonad ()
+  updateSigLinks v termIdx sigIdx = do
+    (GMap idmap sigmap) <- MM.gets stateSignatures
+    let idmap' = Map.insert termIdx sigIdx idmap
+    MM.modify (\ms -> ms { stateSignatures = GMap idmap' sigmap
+                         , stateName = Map.insert termIdx v (stateName ms)
+                         } )
 
   updateName :: Int -> EVar -> MorlocMonad ()
   updateName i v = MM.modify (\s -> s { stateName = Map.insert i v (stateName s) } )

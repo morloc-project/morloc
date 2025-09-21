@@ -526,6 +526,14 @@ expressPolyExpr findRemote parentLang _
             (drop (length appArgs - length lamInputTypes) lamArgs)
             lamInputTypes
 
+      MM.sayVVV $ "vs:" <+> pretty vs
+      MM.sayVVV $ "call:" <+> pretty call
+      MM.sayVVV $ "appLang:" <+> pretty appLang
+      MM.sayVVV $ "xs:" <+> list (map pretty xs)
+      MM.sayVVV $ "callInputTypes:" <+> list (map pretty callInputTypes)
+      MM.sayVVV $ "xsLocal:" <+> list (map pretty xsLocal)
+      MM.sayVVV $ "xsPassed:" <+> list (map pretty xsPassed)
+
       MM.sayVVV $ "Making foreign interface 7 of type:" <+> pretty (Idx cidxApp appType)
 
       return
@@ -762,7 +770,7 @@ expressPolyExpr findRemote parentLang pc (AnnoS (Idx midx _) (_, args) (AppS (An
       -- applied, the lambda case would have been entered previously instead.
       mayxs <- safeZipWithM (expressPolyExprWrap callLang) (map (Idx cidxCall) inputs) xs
 
-      MM.sayVVV "  leaving case #1"
+      MM.sayVVV $ "  leaving case #1 for" <+> pretty midx
       return
           . PolyManifold callLang midx (ManifoldFull (map unvalue args))
           . PolyReturn

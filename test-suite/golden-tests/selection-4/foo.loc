@@ -1,13 +1,12 @@
 -- This should compile to exactly the same code as selection-2. Expect the
 -- Arithmetic module is in the same file.
 
-module arithmetic (add, mul, div, sub)
-import pybase  (add, mul, div, sub)
-import cppbase (add, mul, div, sub)
-import rbase   (add, mul, div, sub)
-import types (Real)
+module arithmetic (*)
+import root (Real, Int)
+import root-r (Integral)
+import root-py (Integral)
+import root-cpp (Integral)
 
 module main (foo)
-import types (Real)
-import arithmetic (add)
+import arithmetic (Integral)
 foo x y = add x (add y 42.0)

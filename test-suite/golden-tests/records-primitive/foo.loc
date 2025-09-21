@@ -2,7 +2,7 @@
 
 module m (foo, bar)
 
-import types (Str, Int, Tuple3, List)
+import root (Str, Int, Tuple3, List)
 
 record Foo = Foo
   { flooz :: [Int]
