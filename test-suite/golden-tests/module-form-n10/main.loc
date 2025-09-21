@@ -1,0 +1,9 @@
+module main (foo)
+
+-- n10 - source n, import 1, declare 0
+
+import fooroot
+import foopy (foo)
+
+source Py from "foo.py" ("foo")
+source Py from "foo.R" ("foo")

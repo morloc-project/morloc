@@ -1,0 +1,9 @@
+module main (foo)
+
+-- 101 - source 1, import 0, declare 1
+
+import fooroot
+
+source Py from "foo.py" ("foo")
+
+foo x y = add x (mul (-1) y)

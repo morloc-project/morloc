@@ -1,10 +1,10 @@
 module main (foo)
 
-import types (List, Real)
-import rbase (zipWith, mul)
-import cppbase (add)
+import foo
+import foor (rzipWith, rmul)
+import fooc (cadd)
 
-add3 x y z = add x (add y z)
+add3 x y z = cadd x (cadd y z)
 
-foo :: Real -> [Real] -> [Real] -> [Real]
-foo x = zipWith (\y -> add3 (mul x y) y)
+foo :: Int -> [Int] -> [Int] -> [Int]
+foo x = rzipWith (\y -> add3 (rmul x y) y)

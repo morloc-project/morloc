@@ -1,10 +1,8 @@
 module main (foo)
 
-import cppbase (add, mul)
+import root-cpp
 
 f = mul 20.0 2.0
-
-type Cpp => Real = "double"
 
 -- external 0 input argument
 -- cannot optimize out the manifold

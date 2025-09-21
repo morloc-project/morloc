@@ -1,2 +1,2 @@
-def sub_loc(x, y):
-  return (x - y) 
+def foo(x,y):
+  return x + (-1) * y

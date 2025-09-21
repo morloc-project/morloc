@@ -1,8 +1,8 @@
 module main (foo)
 
-import types (Real)
-import pybase (div)
-import rbase (mul)
-import cppbase (add)
+import foo (Int)
+import foopy
+import foor
+import fooc
 
-foo x = div (add (mul 20.0 x) x) 10.0
+foo x = pmul (cadd (rmul 20 x) x) 10

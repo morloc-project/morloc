@@ -1,0 +1,11 @@
+module foopy (*)
+
+import foo
+
+pneg :: Int -> Int
+padd :: Int -> Int -> Int
+pmul :: Int -> Int -> Int
+pmap a b :: (a -> b) -> [a] -> [b] 
+pzipWith a b c :: (a -> b -> c) -> [a] -> [b] -> [c]
+
+source Py from "foo.py" ("pneg", "padd", "pmul", "pmap", "pzipWith")

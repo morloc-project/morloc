@@ -1,7 +1,6 @@
 module main (foo)
 
-import types (Real, List)
-import pybase (map, neg)
+import foopy
 
-foo :: [Real] -> [Real]
-foo xs = map neg xs
+foo :: [Int] -> [Int]
+foo xs = pmap pneg xs

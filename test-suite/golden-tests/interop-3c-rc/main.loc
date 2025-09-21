@@ -1,8 +1,8 @@
 module main (foo)
 
-import types (Real, List)
-import rbase (map)
-import cppbase (add)
+import foo
+import foor (rmap)
+import fooc (cadd)
 
-foo :: Real -> [Real] -> [Real]
-foo x xs = map (add x) xs
+foo :: Int -> [Int] -> [Int]
+foo x xs = rmap (cadd x) xs

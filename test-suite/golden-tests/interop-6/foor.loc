@@ -1,0 +1,11 @@
+module foor (*)
+
+import foo
+
+rneg :: Int -> Int
+radd :: Int -> Int -> Int
+rmul :: Int -> Int -> Int
+rmap a b :: (a -> b) -> [a] -> [b] 
+rfold a b :: (b -> a -> b) -> b -> [a] -> b
+
+source R from "foo.R" ("rneg", "radd", "rmul", "rmap", "rfold")

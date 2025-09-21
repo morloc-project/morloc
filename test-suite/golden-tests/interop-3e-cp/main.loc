@@ -1,13 +1,12 @@
 module main (foo)
 
-import types (Real, List)
-import cppbase (zipWith, mul)
-import pybase (add)
+import foo
+import fooc (czipWith, cmul)
+import foopy (padd)
 
-add3 x y z = add x (add y z)
+add3 x y z = padd x (padd y z)
 
-foo :: Real -> [Real] -> [Real] -> [Real]
-foo x = zipWith (\y -> add3 (mul x y) y)
+foo x = czipWith (\y -> add3 (cmul x y) y)
 
 --                          |-> z <-|
 -- Tests the case where z is dependent on both a context argument (x) and a

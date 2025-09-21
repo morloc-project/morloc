@@ -1,8 +1,10 @@
 module main (py2c, c2py)
 
-import types (Real)
-import pybase (add)
-import cppbase (mul)
+import root-py
+import root-cpp
 
-py2c x y = add (mul x y) 100.0
-c2py x y = mul (add x y) 100.0
+padd x = idpy . add x
+cmul x = idcpp . mul x
+
+py2c x y = padd (cmul x y) (100.0 :: Real)
+c2py x y = cmul (padd x y) (100.0 :: Real)

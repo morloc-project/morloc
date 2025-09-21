@@ -1,7 +1,6 @@
 module main (foo)
 
-import types (List, Real)
-import rbase (zipWith, mul)
+import root-r
 
 -- literal function with no application
 foo :: [Real] -> [Real] -> [Real]

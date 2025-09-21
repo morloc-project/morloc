@@ -1,0 +1,11 @@
+module fooc (*)
+
+import foo
+
+cneg :: Int -> Int
+cadd :: Int -> Int -> Int
+cmul :: Int -> Int -> Int
+cmap a b :: (a -> b) -> [a] -> [b] 
+czipWith a b c :: (a -> b -> c) -> [a] -> [b] -> [c] 
+
+source Cpp from "foo.hpp" ("cneg", "cadd", "cmul", "cmap", "czipWith")

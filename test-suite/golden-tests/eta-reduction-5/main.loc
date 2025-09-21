@@ -1,7 +1,6 @@
 module main (foo0, foo1, foo2)
 
-import types (Real, List)
-import base (zipWith)
+import root-cpp (zipWith, Integral, Real, List)
 
 foo0 :: [Real] -> [Real] -> [Real]
 foo0 = zipWith add

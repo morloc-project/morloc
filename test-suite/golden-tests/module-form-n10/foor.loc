@@ -1,0 +1,5 @@
+module foor (foo)
+
+import fooroot
+
+source R from "foo.R" ("foo")

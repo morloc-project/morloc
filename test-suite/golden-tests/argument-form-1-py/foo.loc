@@ -1,8 +1,6 @@
 module main (foo)
 
-import pybase (add, mul)
-
-type Py => Real = "float"
+import root-py
 
 -- full application with constants
 -- can potentially optimize out this manifold

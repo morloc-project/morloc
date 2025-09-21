@@ -1,8 +1,6 @@
 module main (foo)
 
-import rbase (add, mul)
-
-type R => Real = "numeric"
+import root-r
 
 -- full application with variable passing
 -- cannot optimize out this manifold

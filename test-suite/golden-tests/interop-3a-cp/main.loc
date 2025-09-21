@@ -1,8 +1,8 @@
 module main (foo)
 
-import types (List, Real)
-import cppbase (map)
-import pybase (neg)
+import foo (List, Int)
+import fooc (cmap)
+import foopy (pneg)
 
-foo :: [Real] -> [Real]
-foo xs = map neg xs
+foo :: [Int] -> [Int]
+foo xs = cmap pneg xs

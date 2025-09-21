@@ -1,9 +1,5 @@
 module main (foo)
 
-import cppbase (mul)
-
-type Cpp => Tuple2 a b = "std::tuple<$1,$2>" a b
-type Cpp => Real = "double"
-type Cpp => Bool = "bool"
+import root-cpp
 
 foo = ((True, 42.0), mul 1.0 4.0)

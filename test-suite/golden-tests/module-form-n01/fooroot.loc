@@ -1,0 +1,8 @@
+module fooroot (*)
+
+import root-r
+import root-py
+
+foo :: Int -> Int -> Int
+foo x y = add x (mul -1 y)
+foo x y = mul 1 (add x (mul -1 y))

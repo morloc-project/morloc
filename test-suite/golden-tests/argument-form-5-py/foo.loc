@@ -1,7 +1,7 @@
 module main (foo)
 
-import types (List, Real)
-import pybase (map, mul)
+import root-py
 
 -- literal function with constant application
+foo :: [Real] -> [Real]
 foo xs = map (mul 2.0) xs

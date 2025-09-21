@@ -1,9 +1,5 @@
 module main (foo)
 
-import pybase (mul)
-
-type Py => Tuple2 a b = "tuple" a b
-type Py => Real = "float"
-type Py => Bool = "bool"
+import root-py
 
 foo = ((42.0, True), mul 1.0 4.0)

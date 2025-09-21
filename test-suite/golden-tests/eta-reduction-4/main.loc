@@ -1,6 +1,6 @@
 module main (foo)
 
-import types(Real, List)
-import pybase (map, add)
+import root-py (Functor, Integral, List, Real)
 
+foo :: [Real] -> [Real]
 foo = map (add 1.0)

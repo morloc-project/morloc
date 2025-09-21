@@ -1,6 +1,5 @@
 all:
-	morloc typecheck -r main.loc
-	morloc make main.loc
+	morloc make main.loc 2> log
 	./nexus foo '"asdf"' 3.14 > obs.txt
 
 .PHONY: clean

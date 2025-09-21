@@ -1,13 +1,9 @@
-module main (foo)
+module foo (*)
 
-import pybase (map)
-import rbase (fold)
+type Py => List a = "list" a
+type R => List a = "list" a
 
-import types (List, Real)
+type Py => Real = "float"
+type R => Real = "numeric"
 
-sum xs b = fold add b xs
-
-foo xs = sum (map (add 1.0) xs) 0.0
-
----- this works
--- foo xs = fold add 0.0 (map (add 1.0) xs)
+add :: Real -> Real -> Real

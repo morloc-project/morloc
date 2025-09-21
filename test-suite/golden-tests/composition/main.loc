@@ -1,6 +1,6 @@
 module main (foo, bar)
 
-import pybase (map, sub)
+import root-py
 
 source py from "paste.py" (
     "morloc_paste" as paste
@@ -8,13 +8,11 @@ source py from "paste.py" (
 
 source py ("abs")
 
-type Py => Real = "float"
-type Py => Str = "str"
-type Py => (List a) = "list" a
-
 abs :: Real -> Real
-
 paste :: Str -> Str -> Str
 
+foo :: [Str] -> [Str]
 foo xs = map (paste "a" . paste "b" . paste "c") xs
+
+bar :: Real -> Real
 bar = abs . sub 1.0 . abs

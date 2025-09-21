@@ -1,8 +1,11 @@
 module main (foo)
 
-import types (List, Real)
-import cppbase (map)
-import math (sqrt, sum, mul, div)
+import root-cpp
+import math (sqrt)
+
+sum = fold add zero
 
 square x = mul x x
+
+foo :: [Real] -> Real
 foo xs = sqrt (sum (map square xs))

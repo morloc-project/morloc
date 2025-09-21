@@ -1,7 +1,6 @@
 module main (foo)
 
-import types (List, Real)
-import cppbase (map, mul)
+import root-cpp
 
 -- variable partially-applied function passed as argument
 foo :: Real -> [Real] -> [Real]

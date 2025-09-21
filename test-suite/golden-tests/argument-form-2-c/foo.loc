@@ -1,8 +1,6 @@
 module main (foo)
 
-import cppbase (add, mul)
-
-type Cpp => Real = "double"
+import root-cpp
 
 -- full application with variable passing
 -- cannot optimize out this manifold
