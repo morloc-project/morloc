@@ -237,7 +237,10 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
   linkLocal :: Set EVar -> LinkState -> Map EVar (Int, Maybe (Typeclass Signature)) -> ExprI -> MorlocMonad ()
   linkLocal _ _ cs (ExprI i (SrcE src)) = do
     case Map.lookup (srcAlias src) cs of
-      Nothing -> error $ "handle error for src that has no associated type signature: " <> show src
+      -- A source with no associated type signature may be a constructor.
+      -- If it is a term, then it must have a signature if it is to be used, but
+      -- its use will raise a dedicated error later. So we let it pass for now.
+      Nothing -> return ()
       (Just (_, Just (Typeclass cls _ _))) -> error $ "handle error for src '" <> show (srcAlias src) <> "' that overlaps typeclass '" <> show cls <> "'"
       (Just (termIdx, Nothing)) -> do
         (GMap idmap sigmap) <- MM.gets stateSignatures
