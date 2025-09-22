@@ -53,25 +53,28 @@ instance FromJSON RepoInfo where
 
 
 -- | Look for a local morloc module.
-findModule :: Maybe (Path, MVar) -> MVar -> MorlocMonad Path
-findModule currentModuleM importModule = do
+findModule :: (Maybe Path, MVar) -> MVar -> MorlocMonad Path
+findModule currentPathAndModule@(_, currentModule) importModule = do
   config <- MM.ask
   let lib = Config.configLibrary config
       plane = Config.configPlane config
-      allPaths = getModulePaths lib plane currentModuleM importModule
+      allPaths = getModulePaths lib plane currentPathAndModule importModule
   existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
   case existingPaths of
     [x] -> return x
     xs@(x:_) -> do
-      MM.say $ "WARNING: module path shadowing, for" <+> pretty importModule <+> "found paths:"
+      MM.say $ "WARNING: module path shadowing, for" <+> pretty importModule
+             <+> "from module" <+> pretty currentModule <+> "found paths:"
              <+> "\n  " <> pretty xs
              <> "\n  selecting path:" <+> pretty x
       return x
     [] ->
-      MM.throwError . CannotLoadModule . render $
-        "module" <+> squotes (pretty importModule) <+> "not found among the paths:" <+> list (map pretty allPaths) <> "\n" <>
-        "current module:" <+> viaShow currentModuleM <> "\n" <>
-        "import module:" <+> viaShow importModule
+      MM.throwError . CannotLoadModule . render
+        $  "Within module" <+> squotes (pretty currentModule) <> ","
+        <+> "failed to import module" <+> squotes (pretty importModule) <> "\n"
+        <> "The following paths were searched:\n"
+        <+> indent 4 (vsep (map pretty allPaths))
+        <> "\nPerhaps you need to install this module?"
 
 -- | Give a module path (e.g. "/your/path/foo.loc") find the package metadata.
 -- It currently only looks for a file named "package.yaml" in the same folder
@@ -119,7 +122,7 @@ removePathSuffix xs ys
 getModulePaths
     :: Path -- ^ morloc default library path (e.g., "~/.morloc/src/morloc")
     -> Path -- ^ morloc plane (e.g., "morloclib")
-    -> Maybe (Path, MVar) -- ^ the path and name of the current module (e.g., `Just ("foo.loc", MVar "bar")`)
+    -> (Maybe Path, MVar) -- ^ the path and name of the current module (e.g., `Just ("foo.loc", MVar "bar")`)
     -> MVar -- ^ the name of the module that is being imported
     -> [Path]
 -- CASE #1
@@ -134,7 +137,7 @@ getModulePaths
 -- `bif.buf` may be imported locally or from the system
 -- --  1. /../src/foo/bar/baz/bif/buf/main.loc
 -- --  2. $MORLOC_LIB/src/bif/buf/main.loc
-getModulePaths lib plane Nothing (splitModuleName -> namePath) = map MS.joinPath paths where
+getModulePaths lib plane (Nothing, _) (splitModuleName -> namePath) = map MS.joinPath paths where
 
     -- either search the working directory for a life like "math.loc" or look
     -- for a folder named after the module with with a "main.loc" script
@@ -159,7 +162,7 @@ getModulePaths lib plane Nothing (splitModuleName -> namePath) = map MS.joinPath
 
     paths = localPaths <> planePaths <> systemPaths
 
-getModulePaths lib plane (Just (MS.splitPath -> modulePath, splitModuleName -> moduleName)) (splitModuleName -> importName) =
+getModulePaths lib plane (Just (MS.splitPath -> modulePath), splitModuleName -> moduleName) (splitModuleName -> importName) =
     case commonPrefix moduleName importName of
     -- CASE #2
     --   If we are in a module, and if the module name path and the import name

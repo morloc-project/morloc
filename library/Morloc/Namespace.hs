@@ -827,7 +827,7 @@ data MorlocError
   | NonSingularRoot [MVar]
   | ImportExportError MVar Text
   | CannotFindModule MVar
-  | CyclicDependency
+  | CyclicDependency Text
   | SelfImport MVar
   | BadRealization
   | TooManyRealizations
@@ -853,6 +853,7 @@ data MorlocError
   -- type synthesis errors
   | CannotSynthesizeConcreteType MVar Source TypeU [Text]
   -- typeclass errors
+  | TypeclassError Text
   | MissingTypeclassDefinition ClassName EVar
   | ConflictingClasses ClassName ClassName EVar
   | OverlappingClasses ClassName MVar MVar
@@ -1513,9 +1514,9 @@ instance Pretty MorlocError where
   pretty (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations: " <> tupled (map pretty mv)
   pretty (NestedModule name') = "Nested modules are currently illegal: " <> pretty name'
   pretty (NonSingularRoot ms) = "Expected exactly one root module, found" <+> list (map pretty ms)
-  pretty (ImportExportError (MV m) msg) = "Error in module '" <> pretty m <> "': "  <> pretty msg
+  pretty (ImportExportError (MV m) msg) = "ImportExportError in module '" <> pretty m <> "': "  <> pretty msg
   pretty (CannotFindModule name') = "Cannot find morloc module '" <> pretty name' <> "'"
-  pretty CyclicDependency = "CyclicDependency"
+  pretty (CyclicDependency msg) = "CyclicDependency:" <+> pretty msg
   pretty (SelfImport _) = "SelfImport"
   pretty BadRealization = "BadRealization"
   pretty MissingSource = "MissingSource"
@@ -1558,6 +1559,7 @@ instance Pretty MorlocError where
     = pretty (CannotSynthesizeConcreteType m src t []) <> "\n" <>
       "  Cannot resolve concrete types for these general types:" <+> list (map pretty vs) <> "\n" <>
       "  Are you missing type alias imports?"
+  pretty (TypeclassError msg) = "TypeclassError:" <+> pretty msg
   pretty (MissingTypeclassDefinition cls v) = "No definition found in typeclass" <+> dquotes (pretty cls) <+> "for term" <+> dquotes (pretty v)
   pretty (ConflictingClasses cls1 cls2 v) = "Conflicting typeclasses for" <+> pretty v <+> "found definitions in both" <+> pretty cls1 <+> "and" <+> pretty cls2
   pretty (OverlappingClasses cls m1 m2) = "Typeclass" <+> pretty cls <+> "has overlapping definitions in both" <+> pretty m1 <+> "and" <+> pretty m2

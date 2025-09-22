@@ -54,8 +54,8 @@ parse f (Code code) = do
       [] -> return d
       ((mainModule, importedModule):_) -> do
           importPath <- case Map.lookup mainModule m of
-              (Just mainPath) -> Mod.findModule (Just (mainPath, mainModule)) importedModule
-              Nothing -> Mod.findModule Nothing importedModule
+              (Just mainPath) -> Mod.findModule (Just mainPath, mainModule) importedModule
+              Nothing -> Mod.findModule (Nothing, mainModule) importedModule
 
           -- Load the <main>.yaml file associated with the main morloc package file
           moduleConfig <- Config.loadModuleConfig (Just importPath)

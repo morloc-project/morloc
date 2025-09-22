@@ -114,22 +114,24 @@ mergeLinkStates m imps = do
   mergeTerms _ [(_, i)] = return i
   mergeTerms v ((m1, i):((m2, j):xs))
     | i == j = mergeTerms v ((m2, j):xs)
-    | i /= j = error $ "raise error for illegal term masking: " <> show (unEVar v)
+    | i /= j = MM.throwError . ImportExportError m . render
+             $ "Illegal masking of term" <+> squotes (pretty v)
+             <+> "imported from" <+> pretty m2
 
   mergeClasses :: ClassName -> [(MVar, (Int, a, Map EVar Int))] -> MorlocMonad (Int, a, Map EVar Int)
   mergeClasses _ [] = error "This will never be empty"
   mergeClasses _ [(_, x)] = return x
   mergeClasses v ((m1, (i, _, _)):((m2, y@(j, _, _)):xs))
     | i == j = mergeClasses v ((m2, y):xs)
-    | i /= j = undefined -- raise error for illegal typeclass masking
+    | i /= j = undefined
 
   checkTermClassConflicts :: Map EVar Int -> Map ClassName (Int, a, Map EVar Int) -> MorlocMonad ()
   checkTermClassConflicts me mc = case catMaybes . map (checkTermClassConflict me) $ Map.toList mc of
     [] -> return ()
-    ((cls, vs):_) -> undefined -- raise error for term that shadows typeclass method
-      -- error $ "In module " <> show m
-      --       <> " conflict between imported terms and typeclass "
-      --       <> show (unClassName cls) <> ": " <> show vs
+    ((cls, vs):_) -> MM.throwError . ImportExportError m . render
+                  $   "The following terms in the typeclass" <+> squotes (pretty cls)
+                  <+> "conflict with monomorphic terms in scope:"
+                  <+> list (map pretty vs)
 
   checkTermClassConflict :: Map EVar Int -> (ClassName, (Int, a, Map EVar Int)) -> Maybe (ClassName, [EVar])
   checkTermClassConflict me (cls, (_, _, mc)) = case Set.toList (Set.intersection (Map.keysSet me) (Map.keysSet mc)) of
@@ -186,10 +188,14 @@ addLocalState m0 e0 s0 = do
   -- All other types return the map unchanged
   findDefs _ lstate = return lstate
 
-  insertWithCheck :: Ord k => k -> v -> Map k v -> MorlocMonad (Map k v)
-  insertWithCheck k v m
-    | Map.member k m = error "Complain about an error with double definition of typeclass"
-    | otherwise = return $ Map.insert k v m
+  insertWithCheck :: EVar -> Instance -> Map EVar Instance -> MorlocMonad (Map EVar Instance)
+  insertWithCheck k v m = case Map.lookup k m of
+    (Just inst2) -> MM.throwError . ImportExportError m0 . render
+                    $ "Conflict between typeclasses over term" <+> squotes (pretty k)
+                    <+> "that is present the typeclasses"
+                    <+> squotes (pretty (className inst2)) <+> "and"
+                    <+> squotes (pretty (className v))
+    Nothing -> return $ Map.insert k v m
 
   -- make a map of all terms that are defined in a typeclass (these will all
   -- be general term)
@@ -241,7 +247,9 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
       -- If it is a term, then it must have a signature if it is to be used, but
       -- its use will raise a dedicated error later. So we let it pass for now.
       Nothing -> return ()
-      (Just (_, Just (Typeclass cls _ _))) -> error $ "handle error for src '" <> show (srcAlias src) <> "' that overlaps typeclass '" <> show cls <> "'"
+      (Just (_, Just (Typeclass cls _ _))) -> MM.throwError . TypeclassError . render $
+        "Source term" <+> squotes (pretty (srcAlias src)) <+> " shadows the typeclass" <+> squotes (pretty cls)
+
       (Just (termIdx, Nothing)) -> do
         (GMap idmap sigmap) <- MM.gets stateSignatures
         case Map.lookup termIdx sigmap of
@@ -252,19 +260,20 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
                 sigmap' = Map.insert termIdx (Monomorphic tt') sigmap
                 idmap' = Map.insert i termIdx idmap
             MM.modify (\s -> s {stateSignatures = GMap idmap' sigmap'})
-          (Just (Polymorphic _ _ _ _)) -> undefined "Raise error about giving a monomorphic definition to a polymorphic creature"
+          (Just (Polymorphic cls _ _ _)) -> MM.throwError . TypeclassError . render $
+            "Source term" <+> squotes (pretty (srcAlias src)) <+> " overlaps a term in typeclass" <+> squotes (pretty cls)
 
   -- link a new declaration to its type in morloc state and recurse into its
   -- local where block as needed
   linkLocal bnds c cs (ExprI i (AssE v e es)) = do
     updateName i v
     case Map.lookup v cs of
-      Nothing -> error "This case should be unreachable"
+      Nothing -> error "Bug: This case should be unreachable"
       (Just (_, Just _)) -> undefined -- handle error for src that overlaps typeclass term
       (Just (termIdx, Nothing)) -> do
         (GMap idmap sigmap) <- MM.gets stateSignatures
         case Map.lookup termIdx sigmap of
-          Nothing -> error "BUG: This should be unreachable since there is an associated signature and it should have been loaded"
+          Nothing -> error "Bug: This should be unreachable since there is an associated signature and it should have been loaded"
           (Just (Monomorphic tt)) -> do
             let tt' = tt { termDecl = e : termDecl tt}
                 sigmap' = Map.insert termIdx (Monomorphic tt') sigmap
@@ -281,14 +290,19 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
             c'' <- foldrM (addLocalState m0) c' (e:es)
 
             mapM_ ( linkLocal bnds' c'' (toCondensedState c'')) (e:es)
-          (Just (Polymorphic _ _ _ _)) -> undefined "Raise error about giving a monomorphic definition to a polymorphic creature"
+          (Just (Polymorphic cls _ _ _)) -> MM.throwError . TypeclassError . render $
+            "Declared term" <+> squotes (pretty v) <+> " overlaps a term in typeclass" <+> squotes (pretty cls)
 
   linkLocal bnds c cs (ExprI _ (IstE cls ts es)) = do
     case Map.lookup cls (linkClasses c) of
-      Nothing -> error $ "handle error for src that has no associated type signature with cls=" <> show cls <> " in module " <> show m0
+      Nothing -> MM.throwError . TypeclassError . render
+              $ "There is no typeclass declaration for instance" <+> squotes (pretty cls) <+> "in the scope of module" <+> squotes (pretty m0)
+
       (Just (clsIdx, Typeclass _ vs sigs, emap)) ->
         if length vs /= length ts
-        then undefined "Complain loudly about kind differences between the class and instance"
+        then MM.throwError . TypeclassError . render
+          $ "In module" <+> squotes (pretty m0) <> ": the instance and typeclass definitions for" <+> squotes (pretty cls) <+> "differ in number of terms"
+
         else mapM_ (linkInstance (linkLocal bnds c cs) m0 cls (zip vs ts) sigs emap) es
 
   linkLocal bnds _ cs (ExprI termIdx (VarE _ v))
@@ -306,8 +320,10 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
       -- TODO: give this a good error message - it is a user facing issue
       -- Is raised when an exported term, such as a sourced function, is
       -- exported with no signature in scope.
-      linkExp (v, termIdx, Nothing) = error $ "Undefined export: " <> show v <> " from module " <> show (unMVar m0)
-  linkLocal _ _ _ (ExprI _ (ExpE ExportAll)) = error "ExportAll should no longer be present"
+      linkExp (v, termIdx, Nothing) = MM.throwError . ImportExportError m0 . render $
+        "Undefined export" <+> squotes (pretty v)
+
+  linkLocal _ _ _ (ExprI _ (ExpE ExportAll)) = error "Bug: ExportAll should no longer be present"
 
   -- Shadowing is allowed, so here all terms in `s` that are bound by the lambda
   -- need to be removed
@@ -383,20 +399,20 @@ linkInstance linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0 where
     let et' = et { etype = t }
     let tt = TermTypes (Just et') [] [e]
     linkTermTypes v et tt stateIdx
-  linkExpr _ = error "Raise error about why this should not be allowed, only sources and asses are allowed"
+  linkExpr _ = error "Unreachable, instances may only contain sources and instances -- this should have been caught in the parser."
 
   lookupInfo :: EVar -> MorlocMonad (Signature, Int)
   lookupInfo v = case ([sig | sig@(Signature v' _ _) <- sigs0, v == v'], Map.lookup v emap0) of
     ([sig], Just i) -> return (sig, i)
-    -- TODO: raise error for terms defined in signatures that are missing in the class
-    _ -> error $ "Raise error about the instance containing the term " <> show (unEVar v) <> " that is not defined in the class " <> show (unClassName cls0)
+    _ -> MM.throwError . TypeclassError . render
+       $ "Instance of class" <+> squotes (pretty cls0) <+> "contains undefined term" <+> squotes (pretty v)
 
   linkTermTypes :: EVar -> EType -> TermTypes -> Int -> MorlocMonad ()
   linkTermTypes v et tt stateIdx = do
     (GMap idmap sigmap) <- MM.gets stateSignatures
     tcls <- MM.gets stateTypeclasses
     case Map.lookup stateIdx sigmap of
-      Nothing -> undefined "Raise error about something"
+      Nothing -> undefined -- should be unreachable
       (Just sigset) -> do
         sigset' <- mergeSignatureSet sigset (Polymorphic cls0 v et [tt])
         let sigmap' = Map.insert stateIdx sigset' sigmap
