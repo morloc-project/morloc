@@ -1,0 +1,6 @@
+module foo (*)
+
+class Eq a where
+  eq a :: a -> a -> Bool
+
+fst a b :: (a, b) -> a
