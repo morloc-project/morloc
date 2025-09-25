@@ -699,7 +699,7 @@ evaluateAnnoSTypes = mapAnnoSGM resolve where
       (Right tu) -> return (Idx m tu)
 
   getScope :: Int -> MorlocMonad Scope
-  getScope i= do
+  getScope i = do
     globalMap <- MM.gets stateGeneralTypedefs
     case GMap.lookup i globalMap of
       GMapNoFst -> return Map.empty

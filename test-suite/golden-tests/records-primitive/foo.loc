@@ -2,7 +2,9 @@
 
 module m (foo, bar)
 
-import root (Str, Int, Tuple3, List)
+import root-py  (Str, Int, Tuple3, List)
+import root-cpp (Str, Int, Tuple3, List)
+import root-r   (Str, Int, Tuple3, List)
 
 record Foo = Foo
   { flooz :: [Int]

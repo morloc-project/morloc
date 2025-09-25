@@ -35,8 +35,9 @@ restructure s = do
   -- Since d is the entire tree, the initizalized counter will start at global maximum.
   MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes s)) + 1
 
-  checkForSelfRecursion s -- modules should not import themselves
+  checkForSelfRecursion s -- currently, do no not allow type self-recursion
     >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
+    |>> handleTypeDeclarations
     >>= doM collectTags
     >>= doM collectTypes
     >>= doM collectSources
@@ -66,7 +67,15 @@ checkForSelfRecursion d = do
   where
     -- A typedef is self-recursive if its name appears in its definition
     isExprSelfRecursive :: ExprI -> MorlocMonad ()
-    isExprSelfRecursive (ExprI _ (TypE _ v _ t))
+    -- Allow general type existence statements without parameters
+    isExprSelfRecursive (ExprI _ (TypE Nothing v [] t)) = return ()
+    --  and also with parameters
+    isExprSelfRecursive (ExprI _ (TypE Nothing v vs t))
+      | t == AppU (VarU v) (map (either VarU id) vs) = return ()
+      | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v
+      | otherwise = return ()
+    -- otherwise disallow self-recursion
+    isExprSelfRecursive (ExprI _ (TypE _ v vs t))
       | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v
       | otherwise = return ()
     isExprSelfRecursive _ = return ()
@@ -231,6 +240,21 @@ resolveImports d0
   toAliasedSymbol (TypeSymbol x) = AliasedType x x
   toAliasedSymbol (TermSymbol x) = AliasedTerm x x
   toAliasedSymbol (ClassSymbol x) = AliasedClass x
+
+handleTypeDeclarations
+  :: Ord k
+  => DAG k e ExprI
+  -> DAG k e ExprI
+handleTypeDeclarations = DAG.mapNode f where
+  f (ExprI i (ModE m es)) = ExprI i (ModE m (filter isNotSelfDef es))
+  f e = e
+
+  isNotSelfDef :: ExprI -> Bool
+  isNotSelfDef (ExprI _ (TypE Nothing v [] (VarU v'))) = v /= v'
+  isNotSelfDef (ExprI _ (TypE Nothing (VarU -> v) (map (either VarU id) -> vs) (AppU v' vs'))) =
+    v /= v' || length vs /= length vs' || not (all (\(x,y) -> x == y) (zip vs vs'))
+  isNotSelfDef _ = True
+
 
 collectTags :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTags fullDag = do

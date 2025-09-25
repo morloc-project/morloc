@@ -5,6 +5,7 @@ source Py from "foo.py" ("cat")
 
 type Py => Str = "str"
 type Py => Int = "int"
+type Py => List a = "list" a
 type Py => Tuple2 a b = "tuple" a b
 cat :: [Str] -> Str
 len :: Str -> Int

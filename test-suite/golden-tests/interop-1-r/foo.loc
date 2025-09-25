@@ -1,8 +1,7 @@
 module main (r2c, c2r)
 
-import root (Real)
-import root-r (Integral, idr)
-import root-cpp (Numeric, idcpp)
+import root-r (Real, Integral, idr)
+import root-cpp (Real, Numeric, idcpp)
 
 radd x = idr . add x
 cmul x = idcpp . mul x

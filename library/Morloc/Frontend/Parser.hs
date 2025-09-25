@@ -275,14 +275,17 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     _ <- reserved "type"
     mayLang <- optional (try pLangNamespace)
     (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
-    _ <- symbol "="
     case mayLang of
       (Just lang) -> do
+        _ <- symbol "="
         (t, isTerminal) <- pConcreteType <|> pGeneralType
         exprI (TypE (Just (lang, isTerminal)) v vs t)
       Nothing -> do
-        t <- pType
-        exprI (TypE Nothing v vs t)
+        mayT <- optional (symbol "=" >> pType)
+        case (vs, mayT) of
+          (_, Just t) -> exprI (TypE Nothing v vs t)
+          ([], Nothing) -> exprI (TypE Nothing v vs (VarU v))
+          (_, Nothing) -> exprI (TypE Nothing v vs (AppU (VarU v) (map (either (VarU) id) vs)))
 
   pTypedefObject :: Parser ExprI
   pTypedefObject = do

@@ -142,8 +142,10 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                    True -> terminate bnd $ foldr parsub newType (zip vs ts)
                    -- substitute the head term and re-evaluate
                    False -> recurse bnd $ foldr parsub newType (zip vs ts)
-                Nothing -> MM.throwError . OtherError . render $
-                    "No matching alias found for" <+> viaShow t0 <+> "with scope" <+> viaShow scope <+> "with ts':" <+> viaShow ts'
+                Nothing -> MM.throwError . OtherError . render
+                    $ "No matching alias found for" <+> viaShow t0
+                    <+> "\n  scope" <+> viaShow scope
+                    <+> "\n  ts':" <+> viaShow ts'
           _ -> resolve bnd t0
 
   -- t may be existential
@@ -165,8 +167,11 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                 if isTerminal
                   then terminate bnd t2
                   else recurse bnd t2
-            Nothing -> MM.throwError . OtherError . render $
-              "No matching alias found for" <+> viaShow t0 <+> "with scope" <+> viaShow scope
+            Nothing -> MM.throwError . OtherError . render
+              $ "No matching alias found for" <+> viaShow t0
+              <> "\n  scope:" <+> viaShow scope
+              <> "\n  v:" <+> pretty v
+              <> "\n  ts1:" <+> list (map viaShow ts1)
       Nothing -> resolve bnd t0
 
   f bnd (ForallU v t) = ForallU v <$> recurse (Set.insert v bnd) t

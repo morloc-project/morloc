@@ -1,6 +1,7 @@
 0.55.0 [2025-09-xx]
 -------------------
 
+ * Allow general types to be declared and imported/exported
  * Allow undirected dependencies
  * Allow dashes in module names
  * Fix many bugs in native Morloc code handling
