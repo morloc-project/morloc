@@ -133,10 +133,15 @@ weave gscope = w where
 inferConcreteVar :: Lang -> Indexed TVar -> MorlocMonad FVar
 inferConcreteVar lang t@(Idx i v) = do
   MM.sayVVV $ "inferConcreteVar" <+> pretty lang <+> pretty t
-  inferConcreteVar' v <$> MM.getConcreteScope i lang
-
-inferConcreteVar' :: TVar -> Scope -> FVar
-inferConcreteVar' gv scope = case Map.lookup gv scope of
-  (Just ((_, t, True):_)) -> FV gv (CV . unTVar $ extractKey t)
-  (Just ((_, t, False):_)) -> error $ "Substituting the non-terminal " <> show (extractKey t) <> " into type " <> show t
-  _ -> error $ "Concrete type var inference error for " <> show gv <> " in scope " <> show scope
+  localScope <- MM.getConcreteScope i lang
+  globalScope <- MM.getConcreteUniversalScope lang
+  case Map.lookup v localScope of
+    (Just ((_, t, True):_)) -> return $ FV v (CV . unTVar $ extractKey t)
+    (Just ((_, t, False):_)) -> error $ "Substituting the non-terminal " <> show (extractKey t) <> " into type " <> show t
+    _ -> case Map.lookup v globalScope of
+      (Just ((_, t, True):_)) -> do
+        -- TODO fix this, the types should be in scope
+        MM.sayVVV $ "WARNING: using global definition for v=" <> pretty v
+        return $ FV v (CV . unTVar $ extractKey t)
+      (Just ((_, t, False):_)) -> error $ "Substituting the non-terminal " <> show (extractKey t) <> " into type " <> show t
+      _ -> error $ "Concrete type var inference error for " <> show v <> " in scope " <> show globalScope
