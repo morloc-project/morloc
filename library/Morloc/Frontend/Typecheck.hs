@@ -4,7 +4,7 @@
 {-|
 Module      : Morloc.Frontend.Typecheck
 Description : Core inference module
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -17,10 +17,9 @@ import Morloc.Data.Doc
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-
-import qualified Data.Map as Map
 
 -- | Each SAnno object in the input list represents one exported function.
 -- Modules, scopes, imports and everything else are abstracted away.
@@ -37,27 +36,26 @@ typecheck = mapM run where
 
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
       let g0 = Gamma {gammaCounter = 0, gammaContext = []}
-          ((_, g1), e1) = renameAnnoS (Map.empty, g0) e0
-      (g2, _, e2) <- synthG g1 e1
+      (g1, _, e1) <- synthG g0 e0
       insetSay "-------- leaving frontend typechecker ------------------"
-      insetSay "g2:"
-      seeGamma g2
+      insetSay "g1:"
+      seeGamma g1
       insetSay "========================================================"
-      let e3 = mapAnnoSG (fmap normalizeType) . applyGen g2 $ e2
+      let e2 = mapAnnoSG (fmap normalizeType) . applyGen g1 $ e1
 
-      (g3, e4) <- resolveInstances g2 e3
+      (g2, e3) <- resolveInstances g1 e2
 
       -- apply inferred type information to the extracted type qualifiers
       -- this information was uploaded by the `recordParameter` function
       s <- MM.get
-      let qmap = Map.map (prepareQualifierMap g3) (stateTypeQualifier s)
+      let qmap = Map.map (prepareQualifierMap g2) (stateTypeQualifier s)
       MM.put (s {stateTypeQualifier = qmap})
 
       insetSay $ "Qualifier Map:" <+> viaShow qmap
 
       -- perform a final application of gamma the final expression and return
       -- (is this necessary?)
-      return (applyGen g3 e4)
+      return (applyGen g2 e3)
 
 -- The typechecker goes through two passes assigning two different var names
 -- to the qualifiers. The first is never resolved, and is left as
@@ -222,7 +220,12 @@ checkG
        , AnnoS (Indexed TypeU) ManyPoly Int
        )
 checkG g (AnnoS i j e) t = do
-  (g', t', e') <- checkE' i g e t
+  ann <- MM.gets stateAnnotations
+  (g', t', e') <- case Map.lookup i ann of
+    Nothing -> checkE' i g e t
+    (Just annType) -> do
+      gAnn <- subtype' i annType t g
+      checkE' i gAnn e t
   return (g', t', AnnoS (Idx i t') j e')
 
 synthG
@@ -234,7 +237,10 @@ synthG
        , AnnoS (Indexed TypeU) ManyPoly Int
        )
 synthG g (AnnoS gi ci e) = do
-  (g', t, e') <- synthE' gi g e
+  ann <- MM.gets stateAnnotations
+  (g', t, e') <- case Map.lookup gi ann of
+    Nothing   -> synthE' gi g e
+    (Just annType) -> checkE' gi g e annType
   return (g', t, AnnoS (Idx gi t) ci e')
 
 synthE
@@ -693,7 +699,7 @@ evaluateAnnoSTypes = mapAnnoSGM resolve where
       (Right tu) -> return (Idx m tu)
 
   getScope :: Int -> MorlocMonad Scope
-  getScope i= do
+  getScope i = do
     globalMap <- MM.gets stateGeneralTypedefs
     case GMap.lookup i globalMap of
       GMapNoFst -> return Map.empty

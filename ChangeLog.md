@@ -1,3 +1,24 @@
+0.55.0 [2025-09-27]
+-------------------
+
+ * Allow general types to be declared and imported/exported
+ * Allow undirected dependencies
+ * Allow dashes in module names
+ * Fix many bugs in native Morloc code handling
+ * Fix bug in certain higher order foreign functions
+ * Simplify internal unique naming conventions
+ * Move all tests to use the new root module (rather than base)
+ * Slightly improved error messages
+
+Breaking changes:
+ * Move to reverse tree model of dependency handling
+ * Allow exactly one type signature for each term and class
+ * Require explicit typeclass import/export
+ * Fix handling of Python builtin imports
+    Now builtins must not be imported from Python source. Instead
+    import directly from Python, for example: `source Py ("len")`
+ * More efficient Haskell Map usage
+
 0.54.2 [2025-08-09]
 -------------------
 

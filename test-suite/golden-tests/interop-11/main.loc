@@ -1,0 +1,28 @@
+module m (foo, foo2, foo3)
+
+type Py => Int = "int"
+type Py => List a = "list" a
+type Py => Tuple2 a b = "tuple" a b
+
+type Cpp => Int = "int"
+type Cpp => List a = "std::vector<$1>" a
+type Cpp => Tuple2 a b = "std::tuple<$1,$2>" a b
+
+record Bar = Bar
+  { sass :: Int
+  , fass :: Int
+  }
+record Cpp => Bar = "bar_t"
+
+source Py ("sum")
+source Py from "pysum.py" ("sum2", "sumDict" as sumBar)
+sum :: [Int] -> Int
+sum2 :: (Int, Int) -> Int
+sumBar :: Bar -> Int
+
+source Cpp from "incdef.hpp" ("inc")
+inc :: Int -> Int
+
+foo x = sum [inc x]
+foo2 x = sum2 (inc x, inc x)
+foo3 x = sumBar {sass = inc x, fass = inc x}

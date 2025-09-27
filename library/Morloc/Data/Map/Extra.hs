@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Data.Map.Extra
 Description : Additional functions for the Map class
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -20,7 +20,7 @@ module Morloc.Data.Map.Extra (
 
 import Prelude hiding (mapM)
 import qualified Prelude
-import qualified Data.Map as Map
+import qualified Data.Map.Strict as Map
 import Control.Monad (foldM)
 import Data.List.Extra (groupSort)
 import Data.Bifunctor (first)
@@ -64,17 +64,11 @@ mapKeysWithM f g m
 
 -- | monadic version of Data.Map.map
 mapM :: (Ord k, Monad m) => (a -> m b) -> Map.Map k a -> m (Map.Map k b)
-mapM f m = do
-  let xs = Map.toList m
-  xs' <- Prelude.mapM (\(k,x) -> (,) k <$> f x) xs
-  return $ Map.fromList xs'
+mapM f = Map.traverseWithKey (\_ a -> f a)
 
 -- | monadic version of Data.Map mapWithKey
 mapWithKeyM :: (Ord k, Monad m) => (k -> a -> m b) -> Map.Map k a -> m (Map.Map k b)
-mapWithKeyM f m = do
-  let xs = Map.toList m
-  xs' <- Prelude.mapM (\(k,x) -> (,) k <$> f k x) xs
-  return $ Map.fromList xs'
+mapWithKeyM = Map.traverseWithKey
 
 mergeMaps
   :: Ord a
@@ -100,7 +94,7 @@ mergeMapsM
   -> Map.Map a c
   -> m (Map.Map a d)
 mergeMapsM fb fc fbc m1 m2 = do
-  bs <- Prelude.mapM (onSndM fb) . Map.toList $ Map.difference m1 m2
-  bcs <- Prelude.mapM (onSndM (uncurry fbc)) . Map.toList $ Map.intersectionWith (,) m1 m2
-  cs <- Prelude.mapM (onSndM fc) . Map.toList $ Map.difference m2 m1
-  return $ Map.fromList (bs <> bcs <> cs)
+  bs <- mapM fb $ Map.difference m1 m2
+  bcs <- mapM (uncurry fbc) $ Map.intersectionWith (,) m1 m2
+  cs <- mapM fc $ Map.difference m2 m1
+  return $ Map.unions [bs, bcs, cs]

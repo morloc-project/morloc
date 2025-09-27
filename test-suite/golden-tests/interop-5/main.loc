@@ -1,8 +1,7 @@
 module main (foo)
 
-import types (List, Real)
-import pybase (add)
-import rbase (map)
+import foo (List, Int)
+import foopy (padd)
+import fooc (cmap)
 
-foo :: [Real] -> [Real]
-foo xs = map (\x -> add 1.0 x) xs
+foo xs = cmap (\x -> padd 1 x) xs

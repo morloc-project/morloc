@@ -1,8 +1,6 @@
 module main (foo)
 
-import rbase (add, mul)
-
-type R => Real = "numeric"
+import root-r
 
 -- full application with constants
 -- can potentially optimize out this manifold

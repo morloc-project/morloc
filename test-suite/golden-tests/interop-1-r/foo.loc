@@ -1,8 +1,10 @@
 module main (r2c, c2r)
 
-import types (Real)
-import rbase (add)
-import cppbase (mul)
+import root-r (Real, Integral, idr)
+import root-cpp (Real, Numeric, idcpp)
 
-r2c x y = add (mul x y) 100.0
-c2r x y = mul (add x y) 100.0
+radd x = idr . add x
+cmul x = idcpp . mul x
+
+r2c x y = radd (cmul x y) (100.0 :: Real)
+c2r x y = cmul (radd x y) (100.0 :: Real)

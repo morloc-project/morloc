@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.CodeGenerator.Grammars.Translator.R
 Description : R translator
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental

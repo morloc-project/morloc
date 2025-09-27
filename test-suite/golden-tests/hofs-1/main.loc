@@ -1,0 +1,55 @@
+module main (test)
+
+import foor
+import foopy
+
+source Py from "eq.py" ("eq", "check")
+eq a :: a -> a -> Bool
+check :: [(Str, Bool)] -> Bool
+
+radd3 x y z = radd x (radd y z)
+padd3 x y z = padd x (padd y z)
+
+test = check
+  [ ("0", eq (pzipWith radd [1,2] [5,6]) [6,8])
+  , ("1", eq (pzipWith (\x y -> 1) [1,2] [5,6]) [1,1])
+  , ("2", eq (pzipWith (\x y -> x) [1,2] [5,6]) [1,2])
+  , ("3", eq (pzipWith (\x y -> y) [1,2] [5,6]) [5,6])
+  , ("4", eq (pzipWith (\x y -> radd x 10) [1,2] [5,6]) [11,12])
+  , ("5", eq (pzipWith (\x y -> radd 10 y) [1,2] [5,6]) [15,16])
+  , ("6", eq (pzipWith (\x y -> radd x x) [1,2] [5,6]) [2,4])
+  , ("7", eq (pzipWith (\x y -> radd y y) [1,2] [5,6]) [10,12])
+  , ("8", eq (pzipWith (\x y -> radd x (radd x 5)) [1,2] [5,6]) [7,9])
+  , ("9", eq (pzipWith (\x y -> radd (radd x 5) 1) [1,2] [5,6]) [7,8])
+  , ("a", eq (pzipWith (\x y -> rneg (radd x y)) [1,2] [5,6]) [-6,-8])
+  , ("b", eq (pzipWith (\x y -> [x,y]) [1,2] [5,6]) [[1,5],[2,6]])
+  , ("c", eq (pzipWith (\x y -> (x,y)) [1,2] [5,6]) [(1,5),(2,6)])
+  , ("d", eq (pzipWith (\x y -> [radd 1 x]) [1,2] [5,6]) [[2],[3]])
+  , ("e", eq (pzipWith (\x y -> (x,radd 1 y)) [1,2] [5,6]) [(1,6),(2,7)])
+  -----------------------
+  , ("f", eq (pzipWith (radd3 10) [1,2] [5,6]) [16,18])
+  , ("10", eq (pzipWith (\x y -> radd3 x y 10) [1,2] [5,6]) [16,18])
+  , ("11", eq (pmap (\x -> radd3 x x 10) [1,2]) [12,14])
+  , ("12", eq (pzipWith (\x y -> rneg (radd3 x y 10)) [1,2] [5,6]) [-16,-18])
+  ------ cis
+  , ("13", eq (pzipWith padd [1,2] [5,6]) [6,8])
+  , ("14", eq (pzipWith (\x y -> 1) [1,2] [5,6]) [1,1])
+  , ("15", eq (pzipWith (\x y -> x) [1,2] [5,6]) [1,2])
+  , ("16", eq (pzipWith (\x y -> y) [1,2] [5,6]) [5,6])
+  , ("17", eq (pzipWith (\x y -> padd x 10) [1,2] [5,6]) [11,12])
+  , ("18", eq (pzipWith (\x y -> padd 10 y) [1,2] [5,6]) [15,16])
+  , ("19", eq (pzipWith (\x y -> padd x x) [1,2] [5,6]) [2,4])
+  , ("1a", eq (pzipWith (\x y -> padd y y) [1,2] [5,6]) [10,12])
+  , ("1b", eq (pzipWith (\x y -> padd x (padd x 5)) [1,2] [5,6]) [7,9])
+  , ("1c", eq (pzipWith (\x y -> padd (padd x 5) 1) [1,2] [5,6]) [7,8])
+  , ("1d", eq (pzipWith (\x y -> pneg (padd x y)) [1,2] [5,6]) [-6,-8])
+  , ("1e", eq (pzipWith (\x y -> [x,y]) [1,2] [5,6]) [[1,5],[2,6]])
+  , ("20", eq (pzipWith (\x y -> (x,y)) [1,2] [5,6]) [(1,5),(2,6)])
+  , ("21", eq (pzipWith (\x y -> [padd 1 x]) [1,2] [5,6]) [[2],[3]])
+  , ("22", eq (pzipWith (\x y -> (x,padd 1 y)) [1,2] [5,6]) [(1,6),(2,7)])
+  -----------------------
+  , ("23", eq (pzipWith (padd3 10) [1,2] [5,6]) [16,18])
+  , ("24", eq (pzipWith (\x y -> padd3 x y 10) [1,2] [5,6]) [16,18])
+  , ("25", eq (pmap (\x -> padd3 x x 10) [1,2]) [12,14])
+  , ("26", eq (pzipWith (\x y -> pneg (padd3 x y 10)) [1,2] [5,6]) [-16,-18])
+  ]

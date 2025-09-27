@@ -1,7 +1,6 @@
 module main (foo)
 
-import types (List, Real)
-import pybase (map, add)
+import foo
+import foopy
 
-foo :: Real -> [Real] -> [Real]
-foo x xs = map (add x) xs
+foo x xs = pmap (padd x) xs

@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.CodeGenerator.Grammars.Translator.Python3
 Description : Python3 translator
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -37,7 +37,7 @@ preprocess = return . invertSerialManifold
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate srcs es = do
   -- setup library paths
-  lib <- pretty <$> asks MC.configLibrary
+  lib <- MT.pack <$> asks MC.configLibrary
 
   home <- pretty <$> asks MC.configHome
   let opt = home <> "/opt" 
@@ -51,12 +51,12 @@ translate srcs es = do
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
-  let mDocs = map translateSegment es
+  let mDocs = map (translateSegment (qualifiedSrcName lib)) es
 
   -- make code for dispatching to manifolds
   let dispatch = makeDispatch es
 
-  let code = makePool [opt, lib] includeDocs mDocs dispatch
+  let code = makePool [opt, pretty lib] includeDocs mDocs dispatch
   let exefile = ML.makeExecutablePoolName Python3Lang
 
   return $ Script
@@ -65,17 +65,36 @@ translate srcs es = do
     , scriptCode = "." :/ File exefile (Code . render $ code)
     , scriptMake = []
     }
+  where
+      qualifiedSrcName :: MT.Text -> Source -> MDoc
+      qualifiedSrcName lib src = case srcPath src of
+          Nothing -> pretty $ srcName src
+          (Just path) -> makeNamespace lib path <> "." <> pretty (srcName src)
+
 
 debugLog :: Doc ann -> MorlocMonad ()
 debugLog d = do
   verbosity <- gets stateVerbosity
   when (verbosity > 0) $ (liftIO . putDoc) d
 
+makeNamespace :: MT.Text -> Path -> MDoc 
+makeNamespace lib = pretty
+              . MT.liftToText (map DC.toLower)
+              . MT.replace "/" "_"
+              . MT.replace "-" "_"
+              . MT.replace "." "_"
+              . MT.stripPrefixIfPresent "/" -- strip the leading slash (if present)
+              . MT.stripPrefixIfPresent "./" -- no path if relative to here
+              . MT.stripPrefixIfPresent lib  -- make the path relative to the library
+              . MT.liftToText SF.dropExtensions
+              . MT.pack
+
 -- FIXME: should definitely use namespaces here, not `import *`
 translateSource :: Path -> MorlocMonad MDoc
 translateSource s = do
   lib <- MT.pack <$> asks configLibrary
-  let moduleStr = pretty
+
+  let importStr = pretty
                 . MT.liftToText (map DC.toLower)
                 . MT.replace "/" "."
                 . MT.stripPrefixIfPresent "/" -- strip the leading slash (if present)
@@ -83,7 +102,8 @@ translateSource s = do
                 . MT.stripPrefixIfPresent lib  -- make the path relative to the library
                 . MT.liftToText SF.dropExtensions
                 $ MT.pack s
-  return $ "from" <+> moduleStr <+> "import *"
+
+  return $ makeNamespace lib s <+> "=" <+> "importlib.import_module(" <> dquotes importStr <> ")"
 
 tupleKey :: Int -> MDoc -> MDoc
 tupleKey i v = [idoc|#{v}[#{pretty i}]|]
@@ -100,8 +120,8 @@ recordAccess record field = record <> "[" <> dquotes field <> "]"
 objectAccess :: MDoc -> MDoc -> MDoc
 objectAccess object field = object <> "." <> field
 
-serialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
-serialize v0 s0 = do
+serialize :: (Source -> MDoc) -> MDoc -> SerialAST -> Index (MDoc, [MDoc])
+serialize makeSrcName v0 s0 = do
   (ms, v1) <- serialize' v0 s0
   let schema = serialAstToMsgpackSchema s0
   let v2 = [idoc|morloc.put_value(#{v1}, "#{schema}")|]
@@ -114,7 +134,7 @@ serialize v0 s0 = do
 
     construct :: MDoc -> SerialAST -> Index ([MDoc], MDoc)
     construct v (SerialPack _ (p, s)) =
-      let unpacker = pretty . srcName . typePackerReverse $ p
+      let unpacker = makeSrcName . typePackerReverse $ p
       in serialize' [idoc|#{unpacker}(#{v})|] s
 
     construct v (SerialList _ s) = do
@@ -147,8 +167,8 @@ serialize v0 s0 = do
 
 
 
-deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
-deserialize v0 s0
+deserialize :: (Source -> MDoc) -> MDoc -> SerialAST -> Index (MDoc, [MDoc])
+deserialize makeSrcName v0 s0
   | isSerializable s0 = do
       let schema = serialAstToMsgpackSchema s0
       let deserializing = [idoc|morloc.get_value(#{v0}, "#{schema}")|]
@@ -168,7 +188,7 @@ deserialize v0 s0
     construct :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
     construct v (SerialPack _ (p, s')) = do
       (x, before) <- check v s'
-      let packer = pretty . srcName . typePackerForward $ p
+      let packer = makeSrcName . typePackerForward $ p
           deserialized = [idoc|#{packer}(#{x})|]
       return (deserialized, before)
 
@@ -203,8 +223,8 @@ deserialize v0 s0
 makeSocketPath :: MDoc -> MDoc
 makeSocketPath socketFileBasename = [idoc|os.path.join(global_state["tmpdir"], #{dquotes socketFileBasename})|]
 
-translateSegment :: SerialManifold -> MDoc
-translateSegment m0 =
+translateSegment :: (Source -> MDoc) -> SerialManifold -> MDoc
+translateSegment makeSrcName m0 =
   let e = runIndex 0 (foldWithSerialManifoldM fm m0)
   in vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
   where
@@ -249,11 +269,11 @@ translateSegment m0 =
     makeSerialExpr _ (LetVarS_ _ i) = return $ defaultValue { poolExpr = svarNamer i }
     makeSerialExpr _ (BndVarS_ _ i) = return $ defaultValue { poolExpr = svarNamer i }
     makeSerialExpr _ (SerializeS_ s e) = do
-      (serialized, assignments) <- serialize (poolExpr e) s
+      (serialized, assignments) <- serialize makeSrcName (poolExpr e) s
       return $ e {poolExpr = serialized, poolPriorLines = poolPriorLines e <> assignments}
 
     makeNativeExpr :: NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
-    makeNativeExpr _ (AppSrcN_ _ (pretty . srcName -> functionName) _ xs) =
+    makeNativeExpr _ (AppSrcN_ _ (makeSrcName -> functionName) _ xs) =
         return $ mergePoolDocs ((<>) functionName . tupled) (map snd xs)
     makeNativeExpr _ (ManN_ call) = return call
     makeNativeExpr _ (ReturnN_ x) =
@@ -263,14 +283,14 @@ translateSegment m0 =
     makeNativeExpr _ (LetVarN_ _ i) = return $ defaultValue { poolExpr = nvarNamer i }
     makeNativeExpr _ (BndVarN_ _ i) = return $ defaultValue { poolExpr = nvarNamer i }
     makeNativeExpr _ (DeserializeN_ _ s x) = do
-        (deserialized, assignments) <- deserialize (poolExpr x) s
+        (deserialized, assignments) <- deserialize makeSrcName (poolExpr x) s
         return $ x
           { poolExpr = deserialized
           , poolPriorLines = poolPriorLines x <> assignments
           }
     makeNativeExpr _ (AccN_ r (FV _ v) x k) =
         return $ x {poolExpr = selectAccessor r v (poolExpr x) (pretty k)}
-    makeNativeExpr _ (SrcN_ _ src) = return $ defaultValue { poolExpr = pretty (srcName src) }
+    makeNativeExpr _ (SrcN_ _ src) = return $ defaultValue { poolExpr = makeSrcName src }
     makeNativeExpr _ (ListN_ _ _ xs) = return $ mergePoolDocs list xs
     makeNativeExpr _ (TupleN_ _ xs) = return $ mergePoolDocs tupled xs
     makeNativeExpr _ (RecordN_ _ _ _ rs)
@@ -349,7 +369,10 @@ makeDispatch ms = vsep [localDispatch, remoteDispatch]
 makePool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
 makePool libs includeDocs manifolds dispatch
   = format (DF.embededFileText (DF.poolTemplate Python3Lang)) "# <<<BREAK>>>"
-           [path, vsep includeDocs, vsep manifolds, dispatch]
+           [path, includeStatements includeDocs, vsep manifolds, dispatch]
   where
     path = [idoc|sys.path = #{list (map makePath libs)} + sys.path|]
     makePath filename = [idoc|os.path.expanduser(#{dquotes(filename)})|]
+
+    includeStatements [] = ""
+    includeStatements docs = vsep ("import importlib" : includeDocs)

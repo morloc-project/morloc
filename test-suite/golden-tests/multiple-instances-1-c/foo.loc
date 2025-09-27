@@ -2,8 +2,7 @@
 
 module main (rms)
 
-import types (List, Real)
-import cppbase
+import root-cpp
 
 source cpp from "rms.h"
   ( "rms1" as rms

@@ -1,0 +1,18 @@
+module foo.test (test)
+
+-- import everything from foo (functions this module tests)
+import foo
+
+type Py => Int = "int"
+type Py => Bool = "bool"
+type Py => List a = "list" a
+type Py => Tuple2 a b = "tuple" a b
+
+source Py from "bar.py" ("runTest")
+runTest :: [Bool] -> Bool
+
+test :: Bool
+test = runTest
+  [ eq 0 (fst (0,1))
+  , eq 1 (fst (1,0))
+  ]

@@ -1,0 +1,7 @@
+module foo2 (Farcy)
+
+class Farcy a where
+  foo a :: a -> a -> a
+
+instance Farcy a where
+  source Py ("foo")

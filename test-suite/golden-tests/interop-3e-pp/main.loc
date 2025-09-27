@@ -1,9 +1,8 @@
 module main (foo)
 
-import types (List, Real)
-import pybase (zipWith, mul, add)
+import foo
+import foopy (pzipWith, pmul, padd)
 
-add3 x y z = add x (add y z)
+add3 x y z = padd x (padd y z)
 
-foo :: Real -> [Real] -> [Real] -> [Real]
-foo x = zipWith (\y -> add3 (mul x y) y)
+foo x = pzipWith (\y -> add3 (pmul x y) y)

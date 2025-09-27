@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Namespace
 Description : All types and datastructures
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -40,7 +40,7 @@ module Morloc.Namespace
   , SrcName(..)
   , Path
   , Code(..)
-  , TimeInSeconds(..)   
+  , TimeInSeconds(..)
   , DirTree(..)
   , AnchoredDirTree(..)
   -- ** Language
@@ -64,6 +64,7 @@ module Morloc.Namespace
   , BuildConfig(..)
   , MorlocState(..)
   , SignatureSet(..)
+  , Typeclass(..)
   , Instance(..)
   , TermTypes(..)
   , MorlocReturn
@@ -142,6 +143,7 @@ import Data.Monoid
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 import Data.Void (Void)
+import Data.Foldable (toList)
 import Morloc.Internal
 import Text.Megaparsec (ParseErrorBundle)
 import System.Directory.Tree (DirTree(..), AnchoredDirTree(..))
@@ -226,10 +228,21 @@ type MorlocMonadGen c e l s a
 
 type MorlocReturn a = ((Either MorlocError a, [Text]), MorlocState)
 
-data SignatureSet = Monomorphic TermTypes | Polymorphic ClassName EVar EType [TermTypes]
+-- Note that the signatures do NOT include the name of the term.
+-- This is because the signature describes the common form of the type but the
+-- name may change if the term is imported under an alias.
+data SignatureSet
+  = Monomorphic TermTypes
+  | Polymorphic ClassName   -- typeclass name
+                EVar        -- name of one term from a typeclass
+                EType       -- the term's common fully-generic general type
+                [TermTypes] -- list of instances
   deriving(Show)
 
 
+-- This describes ONE term in a typeclass instance
+-- For example, in the Packable type class, there would be one Instance type for
+-- `pack` and one for `unpack`.
 data Instance = Instance
   { className :: ClassName
   , classVars :: [TVar]
@@ -270,7 +283,7 @@ data MorlocState = MorlocState
   -- ^ The parsed contents of a package.yaml file
   , stateVerbosity :: Int
   , stateCounter :: Int
-  -- ^ Used in Treeify generate new indices (starting from max parser index).
+  -- ^ Used in Treeify to generate new indices (starting from max parser index).
   -- Also used (after resetting to 0) in each of the backend generators.
   , stateDepth :: Int
   -- ^ store depth in the AnnoS tree in the frontend and backend typecheckers
@@ -289,7 +302,7 @@ data MorlocState = MorlocState
   , stateUniversalConcreteTypedefs :: Map Lang Scope
   -- ^ store the concrete typedefs pooled across all modules -- for the truly desperate
   , stateSources :: GMap Int MVar [Source]
-  , stateAnnotations :: Map Int [TypeU]
+  , stateAnnotations :: Map Int TypeU
   -- ^ Stores non-top-level annotations.
   , stateOutfile :: Maybe Path
   -- ^ The nexus filename ("nexus.py" by default)
@@ -369,7 +382,7 @@ data TermTypes = TermTypes {
   -- ^ all declarations of this type
   --      AssE EVar ExprI [ExprI]
   --            ^     ^      ^----- TermType knows nothing about this
-  --            '      '--- each ExprI in [ExprI] is one of these
+  --            '     '--- each ExprI in [ExprI] is one of these
   --            '--- this will match the term name
 } deriving (Show, Ord, Eq)
 
@@ -377,16 +390,25 @@ data TermTypes = TermTypes {
 
 -- | Distinguishes between term and type symbols in import/export expression
 -- before they are separated in Treeify.
-data Symbol = TypeSymbol TVar | TermSymbol EVar
+data Symbol
+  = TypeSymbol TVar
+  | TermSymbol EVar
+  | ClassSymbol ClassName
   deriving (Show, Ord, Eq)
 
 data Export = ExportMany (Set.Set (Int, Symbol)) | ExportAll
   deriving (Show, Ord, Eq)
 
-data AliasedSymbol = AliasedType TVar TVar | AliasedTerm EVar EVar
+data AliasedSymbol
+  = AliasedType TVar TVar
+  | AliasedTerm EVar EVar
+  | AliasedClass ClassName -- classes cannot be aliased (they may eventually have namespaces)
   deriving (Show, Ord, Eq)
 
 data Signature = Signature EVar (Maybe Label) EType
+  deriving (Show, Ord, Eq)
+
+data Typeclass a = Typeclass ClassName [TVar] [a]
   deriving (Show, Ord, Eq)
 
 data ExprI = ExprI Int Expr
@@ -396,7 +418,7 @@ data ExprI = ExprI Int Expr
 data Expr
   = ModE MVar [ExprI]
   -- ^ the toplevel expression in a module
-  | ClsE ClassName [TVar] [Signature]
+  | ClsE (Typeclass Signature)
   | IstE ClassName [TypeU] [ExprI]
   | TypE (Maybe (Lang, Bool)) TVar [Either TVar TypeU] TypeU
   -- ^ a type definition
@@ -434,7 +456,7 @@ data Expr
   -- ^ Function application
   | LamE [EVar] ExprI
   -- ^ (\x -> e)
-  | AnnE ExprI [TypeU]
+  | AnnE ExprI TypeU
   -- ^ (e : A)
   | RealE Scientific
   -- ^ number of arbitrary size and precision
@@ -750,13 +772,9 @@ data TypeError
   | Mismatch TypeU TypeU Text
   | UnboundVariable EVar
   | KeyError Key TypeU
-  | MissingConcreteSignature EVar Lang
-  | MissingGeneralSignature EVar
   | ApplicationOfNonFunction
   | InvalidApplication (AnnoS Int ManyPoly Int) [AnnoS Int ManyPoly Int] TypeU
   | TooManyArguments
-  | EmptyExpression EVar
-  | MissingFeature Text
   | InfiniteRecursion
   | FunctionSerialization EVar
   | TypeEvaluationError Text
@@ -766,8 +784,6 @@ data MorlocError
   = IndexedError Int MorlocError
   -- | Raised for calls to unimplemented features
   | NotImplemented Text
-  -- | Raised for unsupported features (such as specific languages)
-  | NotSupported Text
   -- | Raised by parsec on parse errors
   | SyntaxError (ParseErrorBundle Text Void)
   -- | Raised when an unsupported language is encountered
@@ -784,6 +800,8 @@ data MorlocError
   | SerializationError Text
   -- | Error in building a pool (i.e., in a compiled language)
   | PoolBuildError Text
+  -- | Undefined variable error
+  | UndefinedVariable EVar
   -- | Raise when a type alias substitution fails
   | SelfRecursiveTypeAlias TVar
   | MutuallyRecursiveTypeAlias [Text]
@@ -809,7 +827,7 @@ data MorlocError
   | NonSingularRoot [MVar]
   | ImportExportError MVar Text
   | CannotFindModule MVar
-  | CyclicDependency
+  | CyclicDependency Text
   | SelfImport MVar
   | BadRealization
   | TooManyRealizations
@@ -825,7 +843,7 @@ data MorlocError
   | IncompatibleRealization MVar
   | MissingAbstractType
   | ExpectedAbstractType
-  | CannotInferConcretePrimitiveType Type
+  | CannotInferConcretePrimitiveType Type Text
   | ToplevelStatementsHaveNoLanguage
   | InconsistentWithinTypeLanguage
   | CannotInferLanguageOfEmptyRecord
@@ -835,8 +853,11 @@ data MorlocError
   -- type synthesis errors
   | CannotSynthesizeConcreteType MVar Source TypeU [Text]
   -- typeclass errors
+  | TypeclassError Text
   | MissingTypeclassDefinition ClassName EVar
   | ConflictingClasses ClassName ClassName EVar
+  | OverlappingClasses ClassName MVar MVar
+  | OverlappingClassesSameModule ClassName MVar
   | ConflictingInstances Text Instance Instance
   | InstanceSizeMismatch ClassName [TVar] [TypeU]
   | IllegalExpressionInInstance ClassName [TypeU] Expr
@@ -954,7 +975,7 @@ instance Defaultable PackageMeta where
     , packageDependencies = []
     }
 
-instance Defaultable BuildConfig where 
+instance Defaultable BuildConfig where
   defaultValue =  BuildConfig
     { buildConfigSlurmSupport = Nothing
     }
@@ -1231,7 +1252,7 @@ instance Pretty Type where
     f _ (AppT (VarT (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
     f _ (AppT (VarT (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
     f _ (AppT (VarT (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-    f False t = parens (f True t) 
+    f False t = parens (f True t)
     f _ (FunT [] t) = "() -> " <> f False t
     f _ (FunT ts t) = hsep $ punctuate " -> " (map (f False) (ts <> [t]))
     f _ (AppT t ts) = hsep (map (f False) (t:ts))
@@ -1323,6 +1344,7 @@ instance Pretty Source where
 instance Pretty Symbol where
   pretty (TypeSymbol x) = viaShow x
   pretty (TermSymbol x) = viaShow x
+  pretty (ClassSymbol x) = viaShow x
 
 instance Pretty TermTypes where
   pretty (TermTypes (Just t) cs es) = "TermTypes" <+> (align . vsep $ (parens (pretty t) : map pretty cs <> map pretty es))
@@ -1344,6 +1366,7 @@ instance Pretty AliasedSymbol where
   pretty (AliasedTerm x alias)
     | x == alias = pretty x
     | otherwise = pretty x <+> "as" <+> pretty alias
+  pretty (AliasedClass x) = pretty x
 
 instance Pretty None where
   pretty None = "()"
@@ -1353,25 +1376,6 @@ instance Pretty a => Pretty (One a) where
 
 instance Pretty a => Pretty (Many a) where
   pretty (Many xs) = list $ map pretty xs
-
-instance Pretty (AnnoS g f c) where
-  pretty (AnnoS _ _ e) = pretty e
-
-instance Pretty (ExprS g f c) where
-  pretty UniS = "UniS"
-  pretty (BndS v) = pretty v
-  pretty (VarS v _) = pretty v
-  pretty (AccS k e) = parens (pretty e) <> "[" <> pretty k <> "]"
-  pretty (AppS e es) = "App" <+> pretty e <> vsep (map pretty es)
-  pretty (LamS vs e) = parens ("\\" <+> hsep (map pretty vs) <+> "->" <+> pretty e)
-  pretty (LstS es) = list (map pretty es)
-  pretty (TupS es) = tupled (map pretty es)
-  pretty (NamS rs) = encloseSep "{" "}" "," [pretty k <+> "=" <+> pretty v | (k,v) <- rs]
-  pretty (RealS x) = viaShow x
-  pretty (IntS x) = pretty x
-  pretty (LogS x) = pretty x
-  pretty (StrS x) = dquotes (pretty x)
-  pretty (CallS src) = pretty src
 
 instance (Pretty k, Pretty a) => Pretty (IndexedGeneral k a) where
   pretty (Idx i x) = parens (pretty i <> ":" <+> pretty x)
@@ -1395,7 +1399,7 @@ instance Pretty ExprI where
 instance Pretty Expr where
   pretty UniE = "()"
   pretty (ModE v es) = align . vsep $ ("module" <+> pretty v) : map pretty es
-  pretty (ClsE cls vs sigs) = "class" <+> pretty cls <+> hsep (map pretty vs) <> (align . vsep . map pretty) sigs
+  pretty (ClsE (Typeclass cls vs sigs)) = "class" <+> pretty cls <+> hsep (map pretty vs) <> (align . vsep . map pretty) sigs
   pretty (IstE cls ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
   pretty (TypE lang v vs t)
     = "type" <+> pretty lang <> "@" <> pretty v
@@ -1407,10 +1411,7 @@ instance Pretty Expr where
   pretty (VarE _ s) = pretty s
   pretty (AccE k e) = parens (pretty e) <> "@" <> pretty k
   pretty (LamE v e) = "\\" <+> pretty v <+> "->" <+> pretty e
-  pretty (AnnE e ts) = parens
-    $   pretty e
-    <+> "::"
-    <+> encloseSep "(" ")" "; " (map pretty ts)
+  pretty (AnnE e t) = parens (pretty e <+> "::" <+> pretty t)
   pretty (LstE es) = encloseSep "[" "]" "," (map pretty es)
   pretty (TupE es) = encloseSep "[" "]" "," (map pretty es)
   pretty (AppE f es) = vsep (map pretty (f:es))
@@ -1443,6 +1444,25 @@ instance Pretty Expr where
           [] -> ""
           xs -> " where" <+> tupled (map (\(Con x) -> pretty x) xs)
 
+instance Foldable f => Pretty (AnnoS a f b) where
+    pretty (AnnoS _ _ e)  = pretty e
+
+instance Foldable f => Pretty (ExprS a f b) where
+    pretty (AppS e es)  = "(AppS" <+> list (map pretty (e:es)) <> ")"
+    pretty (VarS v res) = "(VarS" <+> pretty v <+> "=" <+> list (map pretty (toList res)) <> ")"
+    pretty (AccS k e)   = pretty k <> "(" <> pretty e <> ")"
+    pretty (LamS vs e)  = "(LamS" <+> list (map pretty vs) <+> "->" <+> (pretty e) <> ")"
+    pretty (LstS es)    = "(LstS" <+> list (map pretty es) <> ")"
+    pretty (TupS es)    = "(TupS" <+> list (map pretty es) <> ")"
+    pretty (NamS rs)    = "(NamS" <+> list [pretty k <> "=" <> pretty v | (k,v) <- rs] <> ")"
+    pretty UniS         = "UniS"
+    pretty (BndS x)     = "(BndS" <+> pretty x <> ")"
+    pretty (RealS x)    = viaShow x
+    pretty (IntS x)     = viaShow x
+    pretty (LogS x)     = viaShow x
+    pretty (StrS x)     = viaShow x
+    pretty (CallS x)    = pretty x
+
 instance Pretty Signature where
   pretty (Signature v _ e) = pretty v <+> "::" <+> pretty (etype e)
 
@@ -1455,17 +1475,17 @@ instance Show TypeError where
 instance Pretty MorlocError where
   pretty (IndexedError i e) = "At index" <+> pretty i <> ":" <+> pretty e
   pretty (NotImplemented msg) = "Not yet implemented: " <> pretty msg
-  pretty (NotSupported msg) = "NotSupported: " <> pretty msg
   pretty (UnknownLanguage lang) =
     "'" <> pretty lang <> "' is not recognized as a supported language"
   pretty (SyntaxError err') = "SyntaxError: " <> pretty (errorBundlePretty err')
   pretty (SerializationError t) = "SerializationError: " <> pretty t
   pretty (CannotLoadModule t) = "CannotLoadModule: " <> pretty t
-  pretty (ModuleInstallError t) = "ModuleInstallError: \n" <> pretty t 
+  pretty (ModuleInstallError t) = "ModuleInstallError: \n" <> pretty t
   pretty (SystemCallError cmd loc msg) =
     "System call failed at (" <>
     pretty loc <> "):\n" <> " cmd> " <> pretty cmd <> "\n" <> " msg>\n" <> pretty msg
   pretty (PoolBuildError msg) = "PoolBuildError: " <> pretty msg
+  pretty (UndefinedVariable v) = "Undefined variable" <+> squotes (pretty v)
   pretty (SelfRecursiveTypeAlias v) = "SelfRecursiveTypeAlias: " <> pretty v
   pretty (MutuallyRecursiveTypeAlias vs) = "MutuallyRecursiveTypeAlias: " <> tupled (map pretty vs)
   pretty (BadTypeAliasParameters v exp' obs)
@@ -1494,9 +1514,9 @@ instance Pretty MorlocError where
   pretty (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations: " <> tupled (map pretty mv)
   pretty (NestedModule name') = "Nested modules are currently illegal: " <> pretty name'
   pretty (NonSingularRoot ms) = "Expected exactly one root module, found" <+> list (map pretty ms)
-  pretty (ImportExportError (MV m) msg) = "Error in module '" <> pretty m <> "': "  <> pretty msg
+  pretty (ImportExportError (MV m) msg) = "ImportExportError in module '" <> pretty m <> "': "  <> pretty msg
   pretty (CannotFindModule name') = "Cannot find morloc module '" <> pretty name' <> "'"
-  pretty CyclicDependency = "CyclicDependency"
+  pretty (CyclicDependency msg) = "CyclicDependency:" <+> pretty msg
   pretty (SelfImport _) = "SelfImport"
   pretty BadRealization = "BadRealization"
   pretty MissingSource = "MissingSource"
@@ -1519,7 +1539,9 @@ instance Pretty MorlocError where
   pretty (IncompatibleRealization _) = "IncompatibleRealization"
   pretty MissingAbstractType = "MissingAbstractType"
   pretty ExpectedAbstractType = "ExpectedAbstractType"
-  pretty (CannotInferConcretePrimitiveType t) = "Cannot infer concrete primitive type for" <+> parens (pretty t)
+  pretty (CannotInferConcretePrimitiveType t msg)
+    = "Cannot infer concrete primitive type for" <+> parens (pretty t) <>
+      ":" <+> pretty msg
   pretty ToplevelStatementsHaveNoLanguage = "ToplevelStatementsHaveNoLanguage"
   pretty InconsistentWithinTypeLanguage = "InconsistentWithinTypeLanguage"
   pretty CannotInferLanguageOfEmptyRecord = "CannotInferLanguageOfEmptyRecord"
@@ -1537,8 +1559,11 @@ instance Pretty MorlocError where
     = pretty (CannotSynthesizeConcreteType m src t []) <> "\n" <>
       "  Cannot resolve concrete types for these general types:" <+> list (map pretty vs) <> "\n" <>
       "  Are you missing type alias imports?"
+  pretty (TypeclassError msg) = "TypeclassError:" <+> pretty msg
   pretty (MissingTypeclassDefinition cls v) = "No definition found in typeclass" <+> dquotes (pretty cls) <+> "for term" <+> dquotes (pretty v)
   pretty (ConflictingClasses cls1 cls2 v) = "Conflicting typeclasses for" <+> pretty v <+> "found definitions in both" <+> pretty cls1 <+> "and" <+> pretty cls2
+  pretty (OverlappingClasses cls m1 m2) = "Typeclass" <+> pretty cls <+> "has overlapping definitions in both" <+> pretty m1 <+> "and" <+> pretty m2
+  pretty (OverlappingClassesSameModule cls m) = "Typeclass" <+> pretty cls <+> "is defined multiple times in" <+> pretty m
   pretty (ConflictingInstances msg inst1 inst2)
     | inst1 == inst2
         = "Found conflict between overlapping instances for class"
@@ -1570,19 +1595,15 @@ instance Pretty TypeError where
     = "InstantiationError:" <+> "(" <> pretty t1 <+> "<:=" <+> pretty t2 <> ")" <> "\n"
     <> "   " <> align (pretty msg)
   pretty (EmptyCut gi) = "EmptyCut:" <+> pretty gi
-  pretty OccursCheckFail {} = "OccursCheckFail"
+  pretty (OccursCheckFail t1 t2 msg) = "OccursCheckFail:" <+> parens (pretty t1) <+> parens (pretty t2) <+> ":" <+> pretty msg
   pretty (Mismatch t1 t2 msg)
     = "Mismatch"
     <+> tupled ["t1=" <> pretty t1, "t2=" <> pretty t2]
     <+> pretty msg
   pretty (UnboundVariable v) = "UnboundVariable:" <+> pretty v
   pretty (KeyError k t) = "KeyError:" <+> dquotes (pretty k) <+> "not found in record:" <+> pretty t
-  pretty (MissingConcreteSignature e lang) = "No concrete signature found for" <+> pretty lang <+> "function named" <+> squotes (pretty e)
-  pretty (MissingGeneralSignature e) = "MissingGeneralSignature for" <+> squotes (pretty e)
   pretty ApplicationOfNonFunction = "ApplicationOfNonFunction"
   pretty TooManyArguments = "TooManyArguments"
-  pretty (MissingFeature msg) = "MissingFeature: " <> pretty msg
-  pretty (EmptyExpression e) = "EmptyExpression:" <+> squotes (pretty e) <+> "has no bound signature or expression"
   pretty InfiniteRecursion = "InfiniteRecursion"
   pretty (FunctionSerialization v) = "Undefined function" <+> dquotes (pretty v) <> ", did you forget an import?"
   pretty (InvalidApplication f xs t)

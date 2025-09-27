@@ -2,8 +2,7 @@
 
 module main (rms)
 
-import types (List, Real)
-import pybase
+import root-py
 
 source py from "rms.py"
   ( "rms1" as rms

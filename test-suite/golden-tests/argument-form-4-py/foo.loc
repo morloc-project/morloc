@@ -1,10 +1,8 @@
 module main (foo)
 
-import pybase (add, mul)
+import root-py
 
 f = mul 20.0 2.0
-
-type Py => Real = "float"
 
 -- external 0 input argument
 -- cannot optimize out the manifold

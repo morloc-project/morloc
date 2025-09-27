@@ -1,7 +1,7 @@
 module main (foo)
 
-import types (List, Real)
-import rbase (map, mul)
+import root-r
 
 -- literal function with constant application
+foo :: [Real] -> [Real]
 foo xs = map (mul 2.0) xs

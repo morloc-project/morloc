@@ -1,0 +1,3 @@
+module barm (bar)
+
+bar a :: a -> a -> a 

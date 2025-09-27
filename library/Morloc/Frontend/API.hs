@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Frontend.API
 Description : Morloc frontend API
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -19,7 +19,7 @@ module Morloc.Frontend.API
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Lexer (ParserState(..), emptyState)
 import qualified Data.Set as Set
-import qualified Data.Map as Map
+import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
@@ -54,8 +54,8 @@ parse f (Code code) = do
       [] -> return d
       ((mainModule, importedModule):_) -> do
           importPath <- case Map.lookup mainModule m of
-              (Just mainPath) -> Mod.findModule (Just (mainPath, mainModule)) importedModule
-              Nothing -> Mod.findModule Nothing importedModule
+              (Just mainPath) -> Mod.findModule (Just mainPath, mainModule) importedModule
+              Nothing -> Mod.findModule (Nothing, mainModule) importedModule
 
           -- Load the <main>.yaml file associated with the main morloc package file
           moduleConfig <- Config.loadModuleConfig (Just importPath)

@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Frontend.Parser
 Description : Full parser for Morloc
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -21,9 +21,9 @@ import Text.Megaparsec hiding (Label)
 import Text.Megaparsec.Char hiding (eol)
 import qualified Morloc.BaseTypes as BT
 import qualified Control.Monad.State as CMS
-import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.Map as Map
 import qualified Morloc.System as MS
 
 -- | Parse a single file or string that may contain multiple modules. Each
@@ -76,7 +76,7 @@ pModule expModuleName = do
   _ <- reserved "module"
 
   moduleName <- case expModuleName of
-    Nothing -> MT.intercalate "." <$> sepBy freename (symbol ".")
+    Nothing -> MT.intercalate "." <$> sepBy moduleComponent (symbol ".")
     (Just (MV n)) -> symbol n
 
   export <- parens ( (char '*' >> return ExportAll)
@@ -185,7 +185,7 @@ pComposition = do
     compose inner (ExprI i (AppE x xs)) = return $ ExprI i (AppE x (xs <> [inner]))
     compose inner outer = exprI (AppE outer [inner])
 
--- Either a lowercase term name or an uppercase type name
+-- Either a lowercase term name or an uppercase type/class name
 pSymbol :: Parser Symbol
 pSymbol = (TermSymbol . EV <$> freenameL) <|> (TypeSymbol . TV <$> freenameU)
 
@@ -193,7 +193,7 @@ pImport :: Parser ExprI
 pImport = do
   _ <- reserved "import"
   -- There may be '.' in import names, these represent folders/namespaces of modules
-  n <- MT.intercalate "." <$> sepBy freename (symbol ".")
+  n <- MT.intercalate "." <$> sepBy moduleComponent (symbol ".")
   imports <-
     optional $
     parens (sepBy pImportItem (symbol ","))
@@ -229,7 +229,7 @@ pTypeclass = do
   _ <- reserved "class"
   (TV v, vs) <- pTypedefTerm' <|> parens pTypedefTerm'
   sigs <- option [] (reserved "where" >> alignInset pSignature)
-  exprI $ ClsE (ClassName v) vs sigs
+  exprI . ClsE $ Typeclass (ClassName v) vs sigs
   where
     -- parses "Show a" from above example
     pTypedefTerm' :: Parser (TVar, [TVar])
@@ -275,14 +275,17 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     _ <- reserved "type"
     mayLang <- optional (try pLangNamespace)
     (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
-    _ <- symbol "="
     case mayLang of
       (Just lang) -> do
+        _ <- symbol "="
         (t, isTerminal) <- pConcreteType <|> pGeneralType
         exprI (TypE (Just (lang, isTerminal)) v vs t)
       Nothing -> do
-        t <- pType
-        exprI (TypE Nothing v vs t)
+        mayT <- optional (symbol "=" >> pType)
+        case (vs, mayT) of
+          (_, Just t) -> exprI (TypE Nothing v vs t)
+          ([], Nothing) -> exprI (TypE Nothing v vs (VarU v))
+          (_, Nothing) -> exprI (TypE Nothing v vs (AppU (VarU v) (map (either (VarU) id) vs)))
 
   pTypedefObject :: Parser ExprI
   pTypedefObject = do
@@ -553,7 +556,7 @@ pAnn = do
     parens pExpr <|> pVar <|> pLstE <|> try pNumE <|> pLogE <|> pStrE
   _ <- op "::"
   t <- pTypeGen
-  exprI $ AnnE e [t]
+  exprI $ AnnE e t
 
 pApp :: Parser ExprI
 pApp = do

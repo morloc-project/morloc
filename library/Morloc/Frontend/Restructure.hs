@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Frontend.Restructure
 Description : Write Module objects to resolve type aliases and such
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -17,14 +17,15 @@ import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Data.GMap as GMap
-import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.Map as Map
+import qualified Morloc.Data.Text as MT
 import qualified Data.Set as Set
+import Data.Set (Set)
 
 -- | Resolve type aliases, term aliases and import/exports
 restructure
   :: DAG MVar Import ExprI
-  -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
+  -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
 restructure s = do
   -- Set the counter for reindexing expressions.
   --
@@ -34,13 +35,12 @@ restructure s = do
   -- Since d is the entire tree, the initizalized counter will start at global maximum.
   MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes s)) + 1
 
-  checkForSelfRecursion s -- modules should not import themselves
+  checkForSelfRecursion s -- currently, do no not allow type self-recursion
     >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
+    |>> handleTypeDeclarations
     >>= doM collectTags
     >>= doM collectTypes
     >>= doM collectSources
-    >>= removeTypeImports -- Remove type imports and exports
-    |>> nullify -- TODO: unsus and document
 
 
 doM :: Monad m => (a -> m ()) -> a -> m a
@@ -58,7 +58,7 @@ doM f x = f x >> return x
 --
 --   type (Tree n) = Node n [Tree n]
 --
--- This type probably should be legal, but currently it is not supported. Which
+-- This type should be legal, but currently it is not supported. Which
 -- is why I need to raise an explicit error to avoid infinite loops.
 checkForSelfRecursion :: Ord k => DAG k e ExprI -> MorlocMonad (DAG k e ExprI)
 checkForSelfRecursion d = do
@@ -67,7 +67,15 @@ checkForSelfRecursion d = do
   where
     -- A typedef is self-recursive if its name appears in its definition
     isExprSelfRecursive :: ExprI -> MorlocMonad ()
-    isExprSelfRecursive (ExprI _ (TypE _ v _ t))
+    -- Allow general type existence statements without parameters
+    isExprSelfRecursive (ExprI _ (TypE Nothing v [] t)) = return ()
+    --  and also with parameters
+    isExprSelfRecursive (ExprI _ (TypE Nothing v vs t))
+      | t == AppU (VarU v) (map (either VarU id) vs) = return ()
+      | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v
+      | otherwise = return ()
+    -- otherwise disallow self-recursion
+    isExprSelfRecursive (ExprI _ (TypE _ v vs t))
       | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v
       | otherwise = return ()
     isExprSelfRecursive _ = return ()
@@ -93,15 +101,15 @@ maybeM :: MorlocError -> Maybe a -> MorlocMonad a
 maybeM _ (Just x) = return x
 maybeM e Nothing = MM.throwError e
 
--- | Consider export/import information to determine which terms are imported
--- into each module. This step reduces the Import edge type to an alias map.
+-- | Use export/import information to find which terms are imported into each module
+-- * reduces the Import edge type to an alias map.
+-- * replaces Export terms in expressions
 resolveImports
   :: DAG MVar Import ExprI
   -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
 resolveImports d0
-    =   DAG.synthesizeDAG resolveExports d0
-    >>= maybeM CyclicDependency
-    >>= DAG.mapEdgeWithNodeAndKeyM resolveImport
+    = DAG.synthesize resolveExports resolveEdge d0
+    >>= maybeM (CyclicDependency "cyclical import dependency in resolveImports")
   where
 
   -- Collect all exported terms from a module (including those imported
@@ -111,13 +119,13 @@ resolveImports d0
     let allLocalSymbols = findSymbols e -- Set Symbol
         export = AST.findExport e       -- Export
 
-    let allImportedSymbols = Set.unions [filterImports imp' (AST.findExport expr') | (_, imp', expr') <- children]
+    allImportedSymbols <- Set.unions <$> mapM (\(_, imp', expr') -> filterImports m imp' (AST.findExport expr')) children
 
     let allSymbols = Set.union allLocalSymbols allImportedSymbols
 
     exports <- case export of
         ExportAll -> mapM addIndex (Set.toList allSymbols) |>> Set.fromList
-        (ExportMany explicitExports) ->
+        (ExportMany (resolveExplicitTypeclasses allSymbols -> explicitExports)) ->
             let missing = (Set.map snd explicitExports) `Set.difference` allSymbols
             in if Set.null missing
                then
@@ -129,78 +137,124 @@ resolveImports d0
 
     return $ AST.setExport (ExportMany exports) e
 
+  resolveExplicitTypeclasses :: Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol)
+  resolveExplicitTypeclasses ss sis = Set.map f sis where
+    f :: (Int, Symbol) -> (Int, Symbol)
+    f (i, TypeSymbol (TV x))
+      | (ClassSymbol (ClassName x)) `Set.member` ss = (i, ClassSymbol (ClassName x))
+      | otherwise = (i, TypeSymbol (TV x))
+    f x = x
+
   addIndex :: a -> MorlocMonad (Int, a)
   addIndex x = (,) <$> MM.getCounter <*> pure x
 
+  -- TODO: distinguish between these expressions at the type-level
+  --       the contains unresolved imports, that later resolved
+  resolveEdge
+    :: Import
+    -> ExprI -- importing module expression (with resolved exports)
+    -> ExprI -- imported module expression  (with resolved exports)
+    -> MorlocMonad [AliasedSymbol]
+  resolveEdge imp parentX childX = case (importInclude imp, AST.findExport childX) of
+    (_, ExportAll) -> error "This should have been resolved already"
+    (Nothing, ExportMany exps) -> return $ map (toAliasedSymbol . snd) (Set.toList exps)
+    (Just ass, ExportMany exps) -> return . catMaybes $ map (importAlias . unAliasedSymbol) ass
+      where
+      exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList exps]
+      excludes = map unSymbol (importExclude imp)
+
+      importAlias :: (MT.Text, MT.Text) -> Maybe AliasedSymbol
+      importAlias (name, alias)
+          | name `elem` excludes = Nothing
+          | otherwise = case Map.lookup name exportMap of
+              Nothing -> Nothing
+              (Just (TermSymbol _)) -> Just $ AliasedTerm (EV name) (EV alias)
+              (Just (TypeSymbol _)) -> Just $ AliasedType (TV name) (TV alias)
+              (Just (ClassSymbol _)) -> Just $ AliasedClass (ClassName name)
+
+
+  -- find all class names in a module, these are used to distinguish types from
+  -- classes when resolving imports and exports
+  findClasses :: ExprI -> Set ClassName
+  findClasses (ExprI _ (ClsE (Typeclass cls _ _))) = Set.singleton cls
+  findClasses (ExprI _ (ModE _ es)) = Set.unions (map findClasses es)
+  findClasses _ = Set.empty
+
   filterImports
-    :: Import -- the current node import list
+    :: MVar
+    -> Import -- the current node import list
     -> Export -- the imported modules export list
-    -> Set.Set Symbol
+    -> MorlocMonad (Set Symbol)
   -- Here we import everything outside the exclude set, no aliasing
-  filterImports (Import _ Nothing exclude _) (ExportMany exports) =
-    (Set.map snd exports) `Set.difference` (Set.fromList exclude)
+  filterImports _ (Import _ Nothing exclude _) (ExportMany exports) =
+    return $ (Set.map snd exports) `Set.difference` (Set.fromList exclude)
   -- Here we need to carefully handle aliasing
-  filterImports (Import _ (Just as) exclude _) (ExportMany exports)
-    = Set.fromList [ toSymbolAlias x
-                   | x <- as
-                   , Set.member (toSymbolPriorName x) exportedSymbols
-                   ]
+  filterImports m1 imp@(Import m2 (Just as) (map unSymbol -> exclude) _) (ExportMany exports)
+    = case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
+        ([], imps) -> return $ Set.fromList imps
+        (missing, _) -> MM.throwError . ImportExportError m1
+           $ "The following imported terms are not exported from module '" <> unMVar m2 <> "': "
+           <> render (list $ map pretty missing)
     where
-        exportedSymbols = Set.map snd exports
+        exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList exports]
 
-        toSymbolAlias (AliasedType _ alias) = TypeSymbol alias
-        toSymbolAlias (AliasedTerm _ alias) = TermSymbol alias
+        importAlias :: (MT.Text, MT.Text) -> Maybe (Either MT.Text Symbol)
+        importAlias (name, alias)
+            | name `elem` exclude = Nothing
+            | otherwise = case Map.lookup name exportMap of
+                Nothing -> Just (Left name)
+                (Just (TermSymbol _)) -> Just . Right $ TermSymbol (EV alias)
+                (Just (TypeSymbol _)) -> Just . Right $ TypeSymbol (TV alias)
+                (Just (ClassSymbol _)) -> Just . Right $ ClassSymbol (ClassName alias)
+  filterImports _ _ _ = error "Unreachable -- all Export values should have been converted to ExportMany"
 
-        toSymbolPriorName (AliasedType name _) = TypeSymbol name
-        toSymbolPriorName (AliasedTerm name _) = TermSymbol name
-  filterImports _ _ = error "Unreachable -- all Export values should have been converted to ExportMany"
-
-  findSymbols :: ExprI -> Set.Set Symbol
+  findSymbols :: ExprI -> Set Symbol
   findSymbols (ExprI _ (ModE _ es)) = Set.unions (map findSymbols es)
   findSymbols (ExprI _ (TypE _ v _ _)) = Set.singleton $ TypeSymbol v
   findSymbols (ExprI _ (AssE e _ _)) = Set.singleton $ TermSymbol e
+  findSymbols (ExprI _ (ClsE (Typeclass cls _ _))) = Set.singleton $ ClassSymbol cls
   findSymbols (ExprI _ (SigE (Signature e _ _))) = Set.singleton $ TermSymbol e
   findSymbols (ExprI _ (SrcE src)) = Set.singleton $ TermSymbol (srcAlias src)
-  findSymbols (ExprI _ (IstE _ _ es)) = Set.unions (map findSymbols es)
+  -- The definition of an instance does not automatically imply export or make
+  -- the values available. The instance is ALWAYS relative to the class
+  -- definition (either local or imported).
+  findSymbols (ExprI _ (IstE cls _ _)) = Set.singleton $ ClassSymbol cls
   findSymbols _ = Set.empty
-
-  resolveImport
-    :: MVar
-    -> ExprI
-    -> Import
-    -> ExprI
-    -> MorlocMonad [AliasedSymbol]
-  -- import everything except the excluded and use no aliases
-  resolveImport _ _ (Import _ Nothing exc _) n2
-    = return
-    . map toAliasedSymbol
-    . Set.toList
-    $ Set.difference (AST.findExportSet n2) (Set.fromList exc)
-  -- import only the selected values with (possibly identical) aliases
-  resolveImport m1 _ (Import m2 (Just inc) exc _) n2
-    | not (null contradict)
-        = MM.throwError . ImportExportError m1
-        $ "The following terms imported from module '" <> unMVar m2 <> "' are both included and excluded: " <>
-          render (tupledNoFold $ map pretty contradict)
-    | not (null missing)
-        = MM.throwError . ImportExportError m1
-        $ "The following imported terms are not exported from module '" <> unMVar m2 <> "': " <>
-          render (tupledNoFold $ map pretty missing)
-    | otherwise = return inc
-    where
-      exportSet = AST.findExportSet n2
-      -- terms that are imported from n2 but that n2 does not export
-      missing = filter (not . (`Set.member` exportSet)) (map unalias inc)
-      -- terms that are both included and excluded
-      contradict = filter (`elem` exc) (map unalias inc)
 
   unalias :: AliasedSymbol -> Symbol
   unalias (AliasedType x _) = TypeSymbol x
+  unalias (AliasedClass x) = ClassSymbol x
   unalias (AliasedTerm x _) = TermSymbol x
+
+  unSymbol :: Symbol -> MT.Text
+  unSymbol (TypeSymbol (TV v)) = v
+  unSymbol (TermSymbol (EV v)) = v
+  unSymbol (ClassSymbol (ClassName v)) = v
+
+  unAliasedSymbol :: AliasedSymbol -> (MT.Text, MT.Text)
+  unAliasedSymbol (AliasedType x y) = (unTVar x, unTVar y)
+  unAliasedSymbol (AliasedTerm x y) = (unEVar x, unEVar y)
+  unAliasedSymbol (AliasedClass x) = (unClassName x, unClassName x)
 
   toAliasedSymbol :: Symbol -> AliasedSymbol
   toAliasedSymbol (TypeSymbol x) = AliasedType x x
   toAliasedSymbol (TermSymbol x) = AliasedTerm x x
+  toAliasedSymbol (ClassSymbol x) = AliasedClass x
+
+handleTypeDeclarations
+  :: Ord k
+  => DAG k e ExprI
+  -> DAG k e ExprI
+handleTypeDeclarations = DAG.mapNode f where
+  f (ExprI i (ModE m es)) = ExprI i (ModE m (filter isNotSelfDef es))
+  f e = e
+
+  isNotSelfDef :: ExprI -> Bool
+  isNotSelfDef (ExprI _ (TypE Nothing v [] (VarU v'))) = v /= v'
+  isNotSelfDef (ExprI _ (TypE Nothing (VarU -> v) (map (either VarU id) -> vs) (AppU v' vs'))) =
+    v /= v' || length vs /= length vs' || not (all (\(x,y) -> x == y) (zip vs vs'))
+  isNotSelfDef _ = True
+
 
 collectTags :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTags fullDag = do
@@ -233,7 +287,7 @@ type GCMap = (Scope, Map.Map Lang Scope)
 collectTypes :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTypes fullDag = do
   let typeDAG = DAG.mapEdge (\xs -> [(x,y) | AliasedType x y <- xs]) fullDag
-  _ <- DAG.synthesizeDAG formTypes typeDAG
+  _ <- DAG.synthesizeNodes formTypes typeDAG
 
   universalGeneralScope <- getUniversalGeneralScope
   universalConcreteScope <- getUniversalConcreteScope universalGeneralScope
@@ -360,7 +414,7 @@ filterAndSubstitute links typemap =
 collectSources :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectSources fullDag = do
   let typeDag = DAG.mapEdge (\xs -> [(x,y) | AliasedType x y <- xs]) fullDag
-  _ <- DAG.synthesizeDAG linkSources typeDag
+  _ <- DAG.synthesizeNodes linkSources typeDag
   return ()
   where
 
@@ -401,36 +455,3 @@ rename sourceName localAlias = f where
   f (FunU ts t) = FunU (map f ts) (f t)
   f (AppU t ts) = AppU (f t) (map f ts)
   f (NamU o v ts rs) = NamU o v (map f ts) (map (second f) rs)
-
--- TODO: document
-nullify :: DAG m e ExprI -> DAG m e ExprI
-nullify = DAG.mapNode f where
-    f :: ExprI -> ExprI
-    f (ExprI i (SigE (Signature v n (EType t ps cs edocs tdocs)))) = ExprI i (SigE (Signature v n (EType (nullifyT t) ps cs edocs tdocs)))
-    f (ExprI i (ModE m es)) = ExprI i (ModE m (map f es))
-    f (ExprI i (AssE v e es)) = ExprI i (AssE v (f e) (map f es))
-    f e = e
-
-    nullifyT :: TypeU -> TypeU
-    nullifyT (FunU ts t) = FunU (filter (not . isNull) (map nullifyT ts)) (nullifyT t)
-    nullifyT (ExistU v ts rs) = ExistU v (map nullifyT ts) (map (second nullifyT) rs)
-    nullifyT (ForallU v t) = ForallU v (nullifyT t)
-    nullifyT (AppU t ts) = AppU (nullifyT t) (map nullifyT ts)
-    nullifyT (NamU o v ds rs) = NamU o v (map nullifyT ds) (map (second nullifyT) rs)
-    nullifyT t = t
-
-    isNull :: TypeU -> Bool
-    isNull t = t == BT.unitU
-
-
-removeTypeImports :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
-removeTypeImports d = case DAG.roots d of
-  [root] -> return
-          . DAG.shake root
-          . DAG.mapEdge (mapMaybe maybeEVar)
-          $ d
-  roots -> MM.throwError $ NonSingularRoot roots
-  where
-    maybeEVar :: AliasedSymbol -> Maybe (EVar, EVar)
-    maybeEVar (AliasedTerm x y) = Just (x, y)
-    maybeEVar (AliasedType _ _) = Nothing -- remove type symbols, they have already been used

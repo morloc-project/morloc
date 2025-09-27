@@ -1,7 +1,6 @@
 module main (foo)
 
-import types (List, Real)
-import pybase (zipWith, mul)
+import root-py
 
 -- literal function with no application
 foo :: [Real] -> [Real] -> [Real]

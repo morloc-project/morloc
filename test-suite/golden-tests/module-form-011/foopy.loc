@@ -1,0 +1,5 @@
+module foopy (foo)
+
+import fooroot
+
+source Py from "foo.py" ("foo")

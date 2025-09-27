@@ -1,12 +1,12 @@
 module main (foo)
 
-import types (List, Real)
-import pybase (map, add)
-import rbase (fold)
+import foo (List, Int)
+import foopy (pmap, padd)
+import foor (rfold)
 
 -- yes, this is an odd definition of `sum`
-sum xs b = fold add b xs
+sum xs b = rfold padd b xs
 
-foo xs = sum (map (add 1.0) xs) 0.0
--- foo xs = fold add (map (add 1.0) xs) 0.0
+foo xs = sum (pmap (padd 1) xs) 0
+-- foo xs = fold add (map (add 1) xs) 0
 --          R    Py   Py   Py

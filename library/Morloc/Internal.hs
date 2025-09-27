@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Internal
 Description : Internal utility functions
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -33,8 +33,6 @@ module Morloc.Internal
   , foldlM
   , foldrM
   , foldl1M
-  -- ** extra Map functions
-  , mapKeysM
   -- ** selected functions from Data.Tuple.Extra
   , return2
   , uncurry3
@@ -46,13 +44,6 @@ module Morloc.Internal
   , (<|>) -- alternative operator
   , (&&&) -- (a -> a') -> (b -> b') -> (a, b) -> (a', b')
   , (***) -- (a -> b) -> (a -> c) -> a -> (b, c)
-  -- ** map and set helper functions
-  , keyset
-  , valset
-  , mapFold
-  , mapSum
-  , mapSumWith
-  , catEither
   -- ** safe versions of errant functions
   , module Safe
   , maximumOnMay
@@ -88,7 +79,7 @@ import Data.Traversable
 import Data.Char (isUpper, isLower, toLower)
 import Safe hiding (at, headDef, lastDef)
 import System.FilePath
-import qualified Data.Map as Map
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Morloc.Data.Bifoldable
 import Morloc.Data.Bifunctor
@@ -121,21 +112,6 @@ curry3 f x y z = f (x, y, z)
 
 third :: (a, b, c) -> c
 third (_, _, x) = x
-
-keyset :: Ord k => Map.Map k b -> Set.Set k
-keyset = Set.fromList . Map.keys
-
-valset :: Ord b => Map.Map k b -> Set.Set b
-valset = Set.fromList . Map.elems
-
-mapFold :: Monoid b => (a -> b -> b) -> Map.Map k a -> b
-mapFold f = Map.foldr f mempty
-
-mapSum :: Monoid a => Map.Map k a -> a
-mapSum = Map.foldr mappend mempty
-
-mapSumWith :: Monoid b => (a -> b) -> Map.Map k a -> b
-mapSumWith f = Map.foldr (\x y -> mappend y (f x)) mempty
 
 ifelse :: Bool -> a -> a -> a
 ifelse True x _ = x
@@ -198,16 +174,6 @@ safeZipWithM :: Monad m => (a -> b -> m c) -> [a] -> [b] -> m (Maybe [c])
 safeZipWithM f xs ys
     | length xs == length ys = zipWithM f xs ys |>> Just
     | otherwise = return Nothing
-
-mapKeysM :: (Ord k', Monad m) => (k -> m k') -> Map.Map k v -> m (Map.Map k' v)
-mapKeysM f x = do
-    let (keys, vals) = unzip $ Map.toList x
-    keys' <- mapM f keys
-    return . Map.fromList $ zip keys' vals
-
-catEither :: Either a a -> a
-catEither (Left x) = x
-catEither (Right x) = x
 
 -- | pipe the lhs functor into the rhs function
 infixl 1 |>>

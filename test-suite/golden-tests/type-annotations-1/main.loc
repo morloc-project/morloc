@@ -1,0 +1,9 @@
+module main (foo)
+
+type Py => List a = "list" a
+type Py => Int = "int"
+
+length a :: [a] -> Int
+source Py ("len" as length)
+
+foo = length ([] :: [Int])

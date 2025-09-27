@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Monad
 Description : A great big stack of monads
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -70,12 +70,12 @@ import Morloc.Namespace
 import Morloc.Data.Doc
 import System.IO (stderr)
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Language as ML
 import qualified System.Exit as SE
 import qualified System.Process as SP
 import qualified Morloc.System as MS
-import qualified Data.Map as Map
 
 runMorlocMonad ::
      Maybe Path -> Int -> Config -> BuildConfig -> MorlocMonad a -> IO (MorlocReturn a)

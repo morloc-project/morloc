@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Frontend.Lexer
 Description : Lexing functions used in the parser Morloc
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -28,6 +28,7 @@ module Morloc.Frontend.Lexer
   , freename
   , freenameU
   , freenameL
+  , moduleComponent
   , number
   , op
   , parens
@@ -308,6 +309,14 @@ mkFreename firstLetter = (lexeme . try) (p >>= check)
 
 freename :: Parser MT.Text
 freename = mkFreename letterChar
+
+-- part of a module path, must start with a lower-case letter
+-- may have uppercase or digits or dashes after the first letter
+moduleComponent :: Parser MT.Text
+moduleComponent = lexeme $ do
+    firstLetter <- lowerChar
+    nextLetters <- many (alphaNumChar <|> char '-')
+    return $ MT.pack (firstLetter : nextLetters)
 
 freenameL :: Parser MT.Text
 freenameL = mkFreename lowerChar

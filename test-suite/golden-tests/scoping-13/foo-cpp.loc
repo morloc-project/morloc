@@ -1,0 +1,21 @@
+module foo-cpp (*)
+
+import foo 
+
+type Cpp => Filename = "std::string"
+type Cpp => Unit = "mlc::Unit" -- this is an enum with a single element, NOT `void`, which corresponds to bottom
+type Cpp => Real = "double"
+type Cpp => Int = "int"
+type Cpp => Str = "std::string"
+type Cpp => Bool = "bool"
+type Cpp => (Map a b) = "std::map<$1,$2>" a b
+type Cpp => (List a) = "std::vector<$1>" a
+type Cpp => (Tuple2 a b) = "std::tuple<$1,$2>" a b
+type Cpp => (Tuple3 a b c) = "std::tuple<$1,$2,$3>" a b c
+
+source Cpp from "core.hpp"
+    ( "morloc_fst" as fst
+    )
+
+instance Eq a where
+  source Cpp from "core.hpp" ("morloc_eq" as eq)

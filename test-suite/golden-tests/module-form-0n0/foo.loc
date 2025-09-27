@@ -1,7 +1,0 @@
-module main (and)
-
--- 0n0 - import n
-
-import pybase (and)
-import cppbase (and)
-import rbase (and)

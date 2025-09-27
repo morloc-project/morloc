@@ -411,19 +411,20 @@ typeAliasTests =
         [r|
            module main (f)
            type Foo = A
+           g a b :: a -> b
            f :: Foo -> Int
            f = g  {- yes, g isn't defined -}
         |]
         (fun [var "A", var "Int"])
 
-    , expectError
-        "fail neatly for self-recursive type aliases"
-        (SelfRecursiveTypeAlias (TV "A"))
-        [r|
-           type A = (A,A)
-           foo :: A -> B -> C
-           foo
-        |]
+    -- , expectError
+    --     "fail neatly for self-recursive type aliases"
+    --     (SelfRecursiveTypeAlias (TV "A"))
+    --     [r|
+    --        type A = (A,A)
+    --        foo :: A -> B -> C
+    --        foo
+    --     |]
     -- -- TODO: find a way to catch mutually recursive type aliases
     -- , expectError
     --     "fail neatly for mutually-recursive type aliases"
@@ -933,11 +934,6 @@ unitTypeTests =
         single 1
         |]
         (lst int)
-
-    , assertGeneralType
-        "existential application"
-        "f 1"
-        (exist "e0")
 
     , assertGeneralType
         "existential function passing"

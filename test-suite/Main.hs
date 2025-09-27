@@ -38,6 +38,16 @@ main = do
 
       -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
+      , golden "hofs-1" "hofs-1"
+
+      , golden "type-annotations-1" "type-annotations-1"
+
+      , golden "native-morloc-1" "native-morloc-1"
+      , golden "native-morloc-2" "native-morloc-2"
+      , golden "native-morloc-3" "native-morloc-3"
+      , golden "native-morloc-4" "native-morloc-4"
+      , golden "native-morloc-5" "native-morloc-5"
+
       , golden "demo-trimming" "demo-trimming"
 
       , golden "core-modules-1" "core-modules-1"
@@ -174,6 +184,7 @@ main = do
       , golden "interop-8-py-to-r" "interop-8-py-to-r"
       , golden "interop-9" "interop-9"
       , golden "interop-10" "interop-10"
+      , golden "interop-11" "interop-11"
 
       , golden "manifold-form-0" "manifold-form-0"
       , golden "manifold-form-0x" "manifold-form-0x"
@@ -301,6 +312,10 @@ main = do
       , golden "scoping-7" "scoping-7"
       , golden "scoping-8" "scoping-8"
       , golden "scoping-9" "scoping-9"
+      , golden "scoping-10" "scoping-10"
+      , golden "scoping-11" "scoping-11"
+      , golden "scoping-12" "scoping-12"
+      , golden "scoping-13" "scoping-13"
       -- type identities
       , golden "type-identities-c" "type-identities-c"
 

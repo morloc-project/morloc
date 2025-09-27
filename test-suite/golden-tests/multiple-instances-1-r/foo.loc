@@ -2,8 +2,7 @@
 
 module main (rms)
 
-import types (List, Real)
-import rbase
+import root-r
 
 source r from "rms.R"
   ( "rms1" as rms

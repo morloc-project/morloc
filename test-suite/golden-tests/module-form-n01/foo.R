@@ -1,1 +1,3 @@
-sub_loc <- function(x,y){ x - y }
+foo <- function(x,y){
+  x + (-1) * y
+}

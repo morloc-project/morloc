@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Version
 Description : Store the morloc version
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -10,7 +10,7 @@ Stability   : experimental
 module Morloc.Version ( version, versionStr ) where
 
 version :: (Int, Int, Int)
-version = (0, 54, 2)
+version = (0, 55, 0)
 
 versionStr :: String
 versionStr = case version of

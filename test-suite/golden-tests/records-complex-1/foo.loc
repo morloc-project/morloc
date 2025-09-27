@@ -2,8 +2,10 @@
 
 module m (foo, bar)
 
-import types (Str, Int, List)
-import base
+import root
+import root-py
+import root-r
+import root-cpp
 
 record Foo = Foo
   { shitlist :: Map Str Int

@@ -1,16 +1,11 @@
 module m (foo)
 
-source Py from "foo.py"
-  ( "foo"
-  , "packJsonObj"
-  , "unpackJsonObj"
-  )
+source Py from "foo.py" ("foo")
 
 foo :: Str -> JsonObj
 
 type Py => Str = "str"
 type Py => JsonObj = "dict"
-
 
 class Packable a b where
   pack :: a -> b

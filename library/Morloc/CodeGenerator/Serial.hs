@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.CodeGenerator.Serial
 Description : Process serialization trees
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -23,7 +23,7 @@ module Morloc.CodeGenerator.Serial
 
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.BaseTypes as BT
-import qualified Data.Map as Map
+import qualified Morloc.Data.Map as Map
 import qualified Data.Text as DT
 import qualified Data.Char as C
 import qualified Morloc.TypeEval as TE

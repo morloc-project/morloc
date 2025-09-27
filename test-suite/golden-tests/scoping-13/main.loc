@@ -1,0 +1,4 @@
+module main (test)
+
+import foo-cpp
+import foo.test (test)

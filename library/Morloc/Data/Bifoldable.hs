@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.Data.Bifoldable
 Description : The Bifoldable typeclass with monadic instances
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental

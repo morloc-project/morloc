@@ -1,0 +1,6 @@
+module foor (*)
+
+import foo
+
+source R from "foo.R" ("morloc_fold" as fold, "morloc_add" as add)
+fold a b :: (b -> a -> b) -> b -> [a] -> b

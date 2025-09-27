@@ -1,0 +1,9 @@
+module main (foo)
+
+import foo (List, Real)
+import foopy (map, add)
+import foor (fold, add)
+
+sum xs b = fold add b xs
+
+foo xs = sum (map (add 1.0) xs) 0.0

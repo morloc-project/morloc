@@ -1,7 +1,6 @@
 module main (foo)
 
-import types (List, Real)
-import cppbase (zipWith, mul)
+import root-cpp
 
 -- literal function with no application
 foo :: [Real] -> [Real] -> [Real]

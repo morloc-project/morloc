@@ -1,2 +1,2 @@
-def sum_loc(xs):
-    return sum(xs)
+def foo(x,y):
+  return x + (-1) * y

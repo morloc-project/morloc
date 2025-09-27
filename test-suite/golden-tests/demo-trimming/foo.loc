@@ -1,47 +1,49 @@
-module m (trim, readFASTQ, writeFASTA)
+    module m (trim, readFASTQ, writeFASTA)
 
-source Cpp from "foo.hpp" ("trimRead", "readFASTQ", "writeFASTA")
+    source Cpp from "foo.hpp" ("trimRead", "readFASTQ", "writeFASTA")
 
--- defines Int, Str, List and Tuple types
-import types
-import base
+    -- defines Int, Str, List and Tuple types
+    import types
+    import cppbase
 
-record Config = Config
-    { minLength :: Int
-    , minQuality :: Int 
-    }
-record Cpp => Config = "Config"
+    record Config = Config
+        { minLength :: Int
+        , minQuality :: Int 
+        }
+    record Cpp => Config = "Config"
 
---' Read a FASTQ file
-readFASTQ
-    :: Str -- FASTQ filename
-    -> [ ( ( Str -- FASTQ header
-           , Str -- quality reads as phred scores
-           )
-         , Str -- read sequence
-         ) ]
+    --' Read a FASTQ file
+    readFASTQ
+        :: Str -- FASTQ filename
+        -> [ ( ( Str -- FASTQ header
+               , Str -- quality reads as phred scores
+               )
+             , Str -- read sequence
+             ) ]
 
---' Write a annotated sequence data to a FASTA file
-writeFASTA
-    :: Str -- output filename
-    -> [(Str, Str)] -- list of headers and sequences
-    -> Int -- exit code, 0 for success, 1 for failure
+    --' Write a annotated sequence data to a FASTA file
+    writeFASTA
+        :: Str -- output filename
+        -> [(Str, Str)] -- list of headers and sequences
+        -> Int -- exit code, 0 for success, 1 for failure
 
---' Trim a single read
-trimRead
-    :: Config
-    -> Str -- quality scores
-    -> Str -- sequence
-    -> Str -- trimmed sequence
+    --' Trim a single read
+    trimRead
+        :: Config
+        -> Str -- quality scores
+        -> Str -- sequence
+        -> Str -- trimmed sequence
 
-wrapRead :: Config -> ((Str, Str), Str) -> (Str, Str) 
-wrapRead config x = ( fst (fst x)
-             , trimRead config (snd (fst x)) (snd x)
-             )
+    wrapRead :: Config -> ((Str, Str), Str) -> (Str, Str) 
+    wrapRead config x = ( fst (fst x)
+                 , trimRead config (snd (fst x)) (snd x)
+                 )
 
---' Trim a list of reads with phred quality scores
-trim
-    :: Config
-    -> [((Str, Str), Str)]
-    -> [(Str, Str)]
-trim config = map (wrapRead config) 
+    --' Trim a list of reads with phred quality scores
+    trim
+        :: Config
+        -> [((Str, Str), Str)]
+        -> [(Str, Str)]
+    trim config = map (wrapRead config) 
+
+

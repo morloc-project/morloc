@@ -7,7 +7,7 @@
 {-|
 Module      : Morloc.CodeGenerator.Namespace
 Description : All code generator types and datastructures
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -280,7 +280,7 @@ instance HasTypeM TypeS where
 class HasTypeS a where
   typeSof :: a -> TypeS
 
--- | This type stores
+-- | Stores arguments to a manifold
 --
 -- Examples:
 --
@@ -1155,7 +1155,23 @@ instance Pretty PolyHead where
     pretty _ = "PolyHead stub"
 
 instance Pretty PolyExpr where
-    pretty _ = "PolyExpr stub"
+    pretty (PolyManifold lang int _ _) = "PolyManifold"
+    pretty (PolyRemoteInterface _ _ _ _ _) = "PolyRemoteInterface"
+    pretty (PolyLet i e1 e2) = "PolyLet<" <> pretty i <> ">" <+> list [pretty e1, pretty e2]
+    pretty (PolyReturn e) = "PolyReturn" <+> parens (pretty e)
+    pretty (PolyApp e es) = "PolyApp" <+> list (map pretty (e:es))
+    pretty (PolyBndVar _ _) = "PolyBndVar"
+    pretty (PolyLetVar t i) = "PolyLetVar"
+    pretty (PolySrc t src) = "PolySrc<" <> pretty (srcAlias src) <> ">"
+    pretty (PolyAcc t _ v _ key) = "PolyAcc"
+    pretty (PolyList _ _ xs) = "PolyList"
+    pretty (PolyTuple _ xs) = "PolyTuple" <+> pretty (length xs)
+    pretty (PolyRecord _ _ _ _) = "PolyRecord"
+    pretty (PolyLog   _ _) = "PolyLog"
+    pretty (PolyReal  _ _) = "PolyReal"
+    pretty (PolyInt   _ _) = "PolyInt"
+    pretty (PolyStr   _ _) = "PolyStr"
+    pretty (PolyNull  _) = "PolyNull"
 
 instance Pretty MonoExpr where
     pretty (MonoManifold i form e)

@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Frontend.AST
 Description : Functions for parsing the Expr abstract syntax trees
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -23,7 +23,7 @@ module Morloc.Frontend.AST
 
 import Morloc.Frontend.Namespace
 import qualified Data.Set as Set
-import qualified Data.Map as Map
+import qualified Morloc.Data.Map as Map
 
 
 -- | In the DAG, the two MVar are the two keys, Import is the edge data, Expr is the node data
@@ -111,6 +111,7 @@ checkExprI f e@(ExprI _ (ModE _ es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (AccE _ e')) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (AnnE e' _)) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (AssE _ e' es')) = f e >> checkExprI f e' >> mapM_ f es'
+checkExprI f e@(ExprI _ (IstE _ _ es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (LamE _ e')) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (AppE e' es)) = f e >> checkExprI f e' >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (LstE es)) = f e >> mapM_ (checkExprI f) es
@@ -122,6 +123,7 @@ maxIndex :: ExprI -> Int
 maxIndex (ExprI i (ModE _ es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (AccE _ e)) = max i (maxIndex e)
 maxIndex (ExprI i (AnnE e _)) = max i (maxIndex e)
+maxIndex (ExprI i (IstE _ _ es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (AssE _ e es)) = maximum (i : map maxIndex (e:es))
 maxIndex (ExprI i (LamE _ e)) = max i (maxIndex e)
 maxIndex (ExprI i (AppE e es)) = maximum (i : map maxIndex (e:es))
@@ -137,6 +139,7 @@ getIndices (ExprI i (ModE _ es)) = i : concatMap getIndices es
 getIndices (ExprI i (AccE _ e)) = i : getIndices e
 getIndices (ExprI i (AnnE e _)) = i : getIndices e
 getIndices (ExprI i (AssE _ e es)) = i : concatMap getIndices (e:es)
+getIndices (ExprI i (IstE _ _ es)) = i : concatMap getIndices es
 getIndices (ExprI i (LamE _ e)) = i : getIndices e
 getIndices (ExprI i (AppE e es)) = i : concatMap getIndices (e:es)
 getIndices (ExprI i (LstE es)) = i : concatMap getIndices es

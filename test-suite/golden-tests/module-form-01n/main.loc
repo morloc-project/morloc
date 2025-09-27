@@ -1,0 +1,9 @@
+module main (foo)
+
+-- 01n - source 0, import 1, declare n
+
+import fooroot
+import foopy (foo)
+
+foo x y = add x (mul (-1) y)
+foo x y = add 0 (add x (mul (-1) y))

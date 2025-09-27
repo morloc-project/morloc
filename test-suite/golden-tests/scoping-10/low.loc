@@ -1,0 +1,10 @@
+module low (*)
+
+fst a b :: (a, b) -> a
+snd a b :: (a, b) -> b
+
+const a b :: a -> b -> a
+const a b = a
+
+uncurry a b c :: (a -> b -> c) -> (a, b) -> c
+uncurry fabc ab = fabc (fst ab) (snd ab) 

@@ -1,0 +1,7 @@
+module main (foo)
+
+-- 0n0 - source 0, import n, declare 0
+
+import fooroot
+import foopy (foo)
+import foor (foo)

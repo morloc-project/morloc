@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Data.GMap
 Description : A general map datatype (non-injective and non-surjective)
-Copyright   : (c) Zebulun Arendsee, 2016-2024
+Copyright   : (c) Zebulun Arendsee, 2016-2025
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -29,7 +29,7 @@ module Morloc.Data.GMap
 
 import Morloc.Namespace hiding (insert, lookup)
 import Prelude hiding (lookup)
-import qualified Data.Map as Map
+import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
 
 mapVals :: (c -> c') -> GMap a b c -> GMap a b c'

@@ -3,7 +3,7 @@ LABEL org.opencontainers.image.description="A morloc container intended for inte
 LABEL org.opencontainers.image.licenses=MIT
 
 FROM docker.io/library/ubuntu:22.04
-COPY --from=ghcr.io/morloc-project/morloc/morloc-tiny:0.54.2 /bin/morloc /bin/morloc
+COPY --from=ghcr.io/morloc-project/morloc/morloc-tiny:0.55.0 /bin/morloc /bin/morloc
 
 WORKDIR $HOME
 
@@ -24,13 +24,11 @@ RUN morloc init
 RUN echo "lang_python3 : python3" >> $HOME/.morloc/config
 
 # Install the morloc modules that are required for the morloc tests to pass
-RUN morloc install prelude
-RUN morloc install types
-RUN morloc install conventions
-RUN morloc install base
-RUN morloc install rbase
-RUN morloc install pybase
-RUN morloc install cppbase
+RUN morloc install internal
+RUN morloc install root
+RUN morloc install root-py
+RUN morloc install root-r
+RUN morloc install root-cpp
 RUN morloc install math
 
 RUN apt-get install -y vim

@@ -1,9 +1,7 @@
 module main (foo)
 
-import cppbase (map, mul)
-
-type Cpp => Real = "double"
-type Cpp => (List a) = "std::vector<$1>" a
+import root-cpp
 
 -- literal function with constant application
+foo :: [Real] -> [Real]
 foo xs = map (mul 2.0) xs
