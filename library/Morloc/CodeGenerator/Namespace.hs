@@ -280,7 +280,7 @@ instance HasTypeM TypeS where
 class HasTypeS a where
   typeSof :: a -> TypeS
 
--- | This type stores
+-- | Stores arguments to a manifold
 --
 -- Examples:
 --

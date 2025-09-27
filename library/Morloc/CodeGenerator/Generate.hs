@@ -666,7 +666,8 @@ expressPolyExpr _ _ _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manifoldArgume
 --   connections will be snapped apart in the segment step.
 -- * These applications will be fully applied, the case of partially applied
 --   functions will have been handled previously by LamM
-expressPolyExpr findRemote parentLang pc (AnnoS (Idx midx _) (_, args) (AppS (AnnoS (Idx gidxCall fc@(FunT inputs _)) (Idx cidxCall callLang, _) (CallS src)) xs))
+expressPolyExpr findRemote parentLang pc (AnnoS (Idx midx _) (_, args)
+  (AppS (AnnoS (Idx gidxCall fc@(FunT inputs _)) (Idx cidxCall callLang, _) (CallS src)) xs))
 
   ----------------------------------------------------------------------------------------
   -- #1 cis applied                                            | contextArgs | boundArgs |
@@ -841,22 +842,27 @@ expressPolyExpr _ pl pc (AnnoS g c (AccS k (AnnoS (Idx i t) c' e'))) = do
         Nothing -> error "Expected a record access type"
 
 -- lists
-expressPolyExpr _ _ _ (AnnoS (Idx _ (AppT (VarT v) [t])) (Idx cidx lang, _) (LstS xs))
-  = PolyList (Idx cidx v) (Idx cidx t) <$> mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
+expressPolyExpr remote parentLang pc (AnnoS (Idx midx (AppT (VarT v) [t])) (Idx cidx lang, args) (LstS xs)) = do
+  xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
+  let e = PolyList (Idx cidx v) (Idx cidx t) xs'
+  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ _ _ (AnnoS _ _ (LstS _)) = error "LstS can only be (AppP (VarP _) [_]) type"
 
 -- tuples
-expressPolyExpr _ _ _ (AnnoS (Idx _ (AppT (VarT v) ts)) (Idx cidx lang, _) (TupS xs)) = do
+expressPolyExpr remote parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs)) = do
   let idxTs = zipWith mkIdx xs ts
   xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) idxTs xs
-  return $ PolyTuple (Idx cidx v) (fromJust $ safeZip idxTs xs')
-expressPolyExpr _ _ _ (AnnoS _ _ (TupS _)) = error "TupS can only be (TupP (TupP _) ts) type"
+  let e = PolyTuple (Idx cidx v) (fromJust $ safeZip idxTs xs')
+  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 
 -- records
-expressPolyExpr _ _ _ (AnnoS (Idx _ (NamT o v ps rs)) (Idx cidx lang, _) (NamS entries)) = do
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
   let tsIdx = zipWith mkIdx (map snd entries) (map snd rs)
   xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) tsIdx (map snd entries)
-  return $ PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip tsIdx xs'))
+  let e = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip tsIdx xs'))
+  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+
+
 -- if the type is not a record, evaluate one step and try again
 expressPolyExpr _ pl pc (AnnoS (Idx i t) c e@(NamS _)) = do
     scope <- MM.getGeneralScope i
@@ -887,6 +893,19 @@ expressPolyExpr _ _ parentType x@(AnnoS (Idx m t) _ _) = do
                <> "\n  t:" <+> pretty t
                <> "\n parentType:" <+> pretty parentType
                <> "\n x:" <+> pretty x
+
+expressContainer :: Indexed Type -> Indexed Lang -> Indexed Lang -> [Arg EVar] -> PolyExpr -> PolyExpr
+expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+  | parentLang /= lang =
+      PolyApp
+        ( PolyRemoteInterface lang pc [i | Arg i _ <- args] ForeignCall
+        . PolyManifold lang midx (ManifoldFull (map unvalue args))
+        . PolyReturn
+        $ e
+        )
+      -- pass required args from the parent language
+      $ [PolyBndVar (A parentLang) i | Arg i _ <- args]
+  | otherwise = e
 
 unvalue :: Arg a -> Arg None
 unvalue (Arg i _) = Arg i None
