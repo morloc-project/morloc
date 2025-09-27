@@ -24,13 +24,11 @@ RUN morloc init
 RUN echo "lang_python3 : python3" >> $HOME/.morloc/config
 
 # Install the morloc modules that are required for the morloc tests to pass
-RUN morloc install prelude
-RUN morloc install types
-RUN morloc install base
-RUN morloc install base-py
-RUN morloc install base-r
-RUN morloc install base-cpp
-RUN morloc install base-all
+RUN morloc install internal
+RUN morloc install root
+RUN morloc install root-py
+RUN morloc install root-r
+RUN morloc install root-cpp
 RUN morloc install math
 
 RUN apt-get install -y vim
