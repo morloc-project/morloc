@@ -1,0 +1,7 @@
+module foo3 (*)
+
+class Marcy a where
+  foo a :: a -> a -> a
+
+instance Marcy a where
+  source Py ("foo", "bar")
