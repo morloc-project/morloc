@@ -1,6 +1,7 @@
 module m (foo)
 
-import types (Bool, List)
+import root-r (Bool, List)
+import root-py (Bool, List)
 
 source R from "foo.R" ("f")
 source Py from "foo.py" ("g")

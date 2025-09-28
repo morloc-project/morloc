@@ -1,6 +1,7 @@
 module m (foo)
 
-import types (Bool, List)
+import root-r (Bool, List)
+import root-cpp (Bool, List)
 
 source R from "foo.R" ("f")
 source Cpp from "foo.hpp" ("g")

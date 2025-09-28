@@ -1,6 +1,6 @@
 module m (foo)
 
-import types (Tuple2, Tuple3, Int, Str, Bool)
+import root-py
 
 source Py from "foo.py" ("onThree" as onThree, "inc")
 

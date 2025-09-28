@@ -1,7 +1,6 @@
 module main (f)
 
-import types (Real)
-import pybase (add)
+import root-py
 
 -- where scopes may be nested
 f = x where

@@ -1,6 +1,8 @@
 module m (foo)
 
-import root (Str, Int, Real, Bool, Tuple2)
+import root-cpp (Str, Int, Real, Bool, Tuple2)
+import root-py (Str, Int, Real, Bool, Tuple2)
+
 source Cpp from "foo.hpp" ("f", "g")
 source Py from "foo.py" ("h")
 

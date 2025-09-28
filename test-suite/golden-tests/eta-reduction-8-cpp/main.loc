@@ -1,6 +1,6 @@
 module m (foo)
 
-import types (Tuple2, Tuple3, Int, Str, Bool)
+import root-cpp
 
 source Cpp from "foo.hpp" ("onThree", "inc")
 

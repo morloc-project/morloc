@@ -1,6 +1,7 @@
 module m (foo)
 
-import types (Str, Int, Real, Bool, Tuple3)
+import root-r (Str, Int, Real, Bool, Tuple3)
+import root-cpp (Str, Int, Real, Bool, Tuple3)
 
 source R from "foo.R" ("f")
 source Cpp from "foo.hpp" ("g")

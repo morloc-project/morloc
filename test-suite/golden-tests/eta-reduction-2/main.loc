@@ -1,7 +1,6 @@
 module main (bar)
 
-import types (Real)
-import base
+import root-py
 
 -- foo0       = add
 -- foo1 x     = add x

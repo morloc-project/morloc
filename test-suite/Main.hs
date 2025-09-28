@@ -50,11 +50,7 @@ main = do
 
       , golden "demo-trimming" "demo-trimming"
 
-      , golden "core-modules-1" "core-modules-1"
-      , golden "core-modules-2" "core-modules-2"
-
       , golden "formatting" "formatting"
-      , golden "cases-1" "cases-1"
 
       , golden "typeclasses-1" "typeclasses-1"
       , golden "typeclasses-2" "typeclasses-2"

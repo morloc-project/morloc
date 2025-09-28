@@ -1,7 +1,6 @@
 module main (foo)
 
-import types (Str, Int, List)
-import pybase (id)
+import root-py
 
 record (Person a) = Person {name :: Str, info :: a}
 record Py  => Person a = "dict"   {name :: Str, info :: a}
