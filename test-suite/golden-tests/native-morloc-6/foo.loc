@@ -1,0 +1,20 @@
+-- This tests issue #50
+
+module high (srcFoo, natFoo)
+
+type Py => Str = "str"
+type Py => List a = "list" a
+
+source Py from "high.py" ("morloc_map" as map, "morloc_id" as srcId)
+map a b :: (a -> b) -> [a] -> [b]
+
+srcId :: Str -> Str
+
+natId :: Str -> Str
+natId x = x
+
+srcFoo :: Str -> [Str]
+srcFoo x = map srcId ["a","b", x]
+
+natFoo :: Str -> [Str]
+natFoo x = map natId ["a","b", x]
