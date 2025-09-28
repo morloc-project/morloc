@@ -31,14 +31,12 @@ jobs:
       - name: Load morloc modules
         run: |
           morloc init -f
-          morloc install prelude
-          morloc install types
-          morloc install conventions
-          morloc install base
-          morloc install rbase
-          morloc install pybase
-          morloc install cppbase
           morloc install math
+          morloc install internal
+          morloc install root
+          morloc install root-py
+          morloc install root-cpp
+          morloc install root-r
 
       - name: Test morloc
         run: |

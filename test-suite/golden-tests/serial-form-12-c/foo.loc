@@ -1,7 +1,6 @@
 module main (foo)
 
-import types (Int, Str)
-import cppbase (id)
+import root-cpp (id, Int, Str)
 
 record (Person a) = Person {name :: Str, info :: a}
 record cpp => (Person a) = "struct" {name :: Str, info :: a}

@@ -1,7 +1,6 @@
 module foo (cfoo, pfoo, rfoo)
 
-import types (Unit, Str)
-import cppbase
+import root-cpp
 
 source Py from "foo.py" ("pfoo")
 source R from "foo.R" ("rfoo")

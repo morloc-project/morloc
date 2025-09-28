@@ -1,7 +1,6 @@
 module main (f)
 
-import types (Real)
-import pybase (add)
+import root-py
 
 -- functions with or without signatures may be defined in the where-scope
 f = bar (bif 2.0) where

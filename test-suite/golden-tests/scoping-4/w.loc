@@ -1,7 +1,6 @@
 module main (f)
 
-import types (Real)
-import pybase (add)
+import root-py
 
 -- terms in the function's where-scope are unordered and share scope
 f = x where
