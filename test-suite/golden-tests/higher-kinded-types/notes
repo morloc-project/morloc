@@ -1,0 +1,13 @@
+morloc: see: AppU (VarU (TV {unTVar = "List"})) [VarU (TV {unTVar = "Int"})]
+  bnd: fromList []
+CallStack (from HasCallStack):
+  error, called at library/Morloc/TypeEval.hs:124:24 in morloc-0.55.0-6B2a5tHeUon5TyP9WSJ7Sf:Morloc.TypeEval
+
+scope: fromList [
+  (TV {unTVar = "Int"},[([],VarU (TV {unTVar = "int"}),True)]),
+  (TV {unTVar = "List"},[(
+    [Left (TV {unTVar = "a"})],
+    AppU (VarU (TV {unTVar = "list"})) [VarU (TV {unTVar = "a"})],
+    True)]
+  )
+]

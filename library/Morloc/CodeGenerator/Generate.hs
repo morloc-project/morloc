@@ -1180,13 +1180,20 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
         [] -> inferType (Idx idx outputType)
         remaining -> inferType $ Idx idx (FunT remaining outputType)
 
-    MM.sayVVV $ "loading qualifier" <+> pretty idx <+> "for" <+> pretty src
-
     -- Pull the parameter types that were solved in the frontend typechecker
     qualifiers <- MM.gets stateTypeQualifier
-    let qs = maybe [] id (Map.lookup idx qualifiers)
+
+    let qsAll = maybe [] id (Map.lookup idx qualifiers)
+        qs = [(v, t) | (v, t, 1) <- qsAll]
+
+    -- check if any qualifiers where skipped
+    case [v | (v, _, i) <- qsAll, i > 1] of
+      [] -> return ()
+      vs -> MM.sayVVV $ "Warning: skipping higher-kinded qualifiers:" <+> list (map pretty vs)
+
     -- Infer concrete types for all
-    ftypes <- mapM (\t -> inferType (Idx idx (typeOf t))) (map snd qs)
+    ftypes <- mapM (\t -> do
+      inferType (Idx idx (typeOf t))) (map snd qs)
     -- Clean up and zip together
     let vs = map (unTVar . fst) qs
         qs' = zip vs ftypes

@@ -47,6 +47,7 @@ main = do
       , golden "native-morloc-3" "native-morloc-3"
       , golden "native-morloc-4" "native-morloc-4"
       , golden "native-morloc-5" "native-morloc-5"
+      , golden "native-morloc-6" "native-morloc-6"
 
       , golden "demo-trimming" "demo-trimming"
 
@@ -58,6 +59,8 @@ main = do
       , golden "typeclasses-4" "typeclasses-4"
       , golden "typeclasses-5" "typeclasses-5"
       , golden "typeclasses-6" "typeclasses-6"
+
+      , golden "higher-kinded-types" "higher-kinded-types"
 
       , golden "string-encoding" "string-encoding"
       , golden "string-encoding-utf8" "string-encoding-utf8"

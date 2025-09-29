@@ -492,7 +492,8 @@ data SerialExpr
 data NativeExpr
   = ManN         NativeManifold
   -- The [TypeF] term stores solved generic terms. These map to the required
-  -- template variables for C++ functions.
+  -- template variables for C++ functions. These are NOT the arguments the
+  -- function takes, rather these are the type parameters.
   | AppSrcN      TypeF Source [(Text, TypeF)] [NativeArg]
   | ReturnN      NativeExpr
   | SerialLetN   Int SerialExpr NativeExpr
