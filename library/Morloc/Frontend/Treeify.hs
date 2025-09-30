@@ -82,7 +82,7 @@ treeify d
                             , stateName = Map.union (stateName s) (Map.fromList exports)})
 
          -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
-         mapM (uncurry collect) exports
+         statefulMapM collect (Namer Map.empty 0) exports |>> snd
 
        (Just _) -> error "This should not be possible, all ExportAll cases should have been removed in Restructure.hs"
 
@@ -164,16 +164,18 @@ linkAndRemoveAnnotations = f where
 --       - to detect recursion, I need to remember every term that has been expanded,
 -- collect v declarations or sources
 collect
-  :: Int -- ^ the general index for the term
-  -> EVar
-  -> MorlocMonad (AnnoS Int ManyPoly Int)
-collect gi v = do
+  :: Namer
+  -> ( Int -- the general index for the term
+     , EVar -- name of root expression
+     )
+  -> MorlocMonad (Namer, AnnoS Int ManyPoly Int)
+collect namer (gi, v) = do
   -- FIXME: this macro expansion strategy needs to be replaced
   MM.sayVVV $ "collect"
             <> "\n  gi:" <+> pretty gi
             <> "\n  v:" <+> pretty v
-  (_, e) <- collectExprS (Namer Map.empty 0) (ExprI gi (VarE defaultValue v))
-  return $ AnnoS gi gi e
+  (namer, e) <- collectExprS namer (ExprI gi (VarE defaultValue v))
+  return (namer, AnnoS gi gi e)
 
 
 collectAnnoS :: Namer -> ExprI -> MorlocMonad (Namer, AnnoS Int ManyPoly Int)
@@ -239,8 +241,9 @@ collectExprS namer (ExprI gi e0) = f namer e0 where
   f namer (LamE vs e) = do
     let namer' = foldr updateRenamer namer vs
         vs' = map (fromJust . (flip Map.lookup) (namerMap namer')) vs
-    (namer'', e') <- collectAnnoS namer' e
-    return (namer'', LamS vs' e')
+    (_, e') <- collectAnnoS namer' e
+    -- return the original name, the lambda bound terms are defined only below
+    return (namer, LamS vs' e')
     where
         updateRenamer :: EVar -> Namer -> Namer
         updateRenamer v (Namer rmap ridx) =

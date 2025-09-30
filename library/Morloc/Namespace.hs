@@ -312,9 +312,16 @@ data MorlocState = MorlocState
   -- ^ store the names of morloc compositions
   , stateManifoldConfig :: Map Int ManifoldConfig
   -- ^ stores manifold settings such as resource usage, caching, and benchmarking
-  , stateTypeQualifier :: Map Int [(TVar, TypeU)]
+  , stateTypeQualifier :: Map Int [(TVar, TypeU, Int)]
   -- ^ Store the ordered parameters of a type. This is required in C++ for
-  -- specifying template parameter types.
+  -- specifying template parameter types. Consider the general functor map:
+  --   map a b f :: (a -> b) -> f a -> f b
+  --   map show [[1],[2,3],[4]]
+  -- Here  a :: List Int
+  --       b :: Str
+  --       f :: List
+  -- Note that `f` is a higher-kinded type, it takes one argument
+  -- The int the qualifier triple stores the number of type arguments
   , stateBuildConfig :: BuildConfig
   }
   deriving(Show)

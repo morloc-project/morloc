@@ -1,0 +1,30 @@
+module main (foo1, foo2, foo3, foo4)
+
+type Py => Int = "int"
+type Py => Str = "str"
+type Py => List a = "list" a
+
+source Py from "foo.py" ("morloc_map" as listMap, "morloc_map" as functorMap)
+listMap a b :: (a -> b) -> [a] -> [b]
+functorMap a b f :: (a -> b) -> f a -> f b
+
+class TestFunctor f where
+  classFMap a b f :: (a -> b) -> f a -> f b
+
+instance TestFunctor List where
+  source Py from "foo.py" ("morloc_map" as classFMap)
+
+
+class TestList f where
+  classMap a b f :: (a -> b) -> f a -> f b
+
+instance TestList List where
+  source Py from "foo.py" ("morloc_map" as classMap)
+
+source Py from "foo.py" ("testshow")
+testshow :: Int -> Str
+
+foo1 x = listMap testshow [1,2,x]
+foo2 x = functorMap testshow [1,2,x]
+foo3 x = classMap testshow [1,2,x]
+foo4 x = classFMap testshow [1,2,x]
