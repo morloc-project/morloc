@@ -1183,6 +1183,9 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     -- Pull the parameter types that were solved in the frontend typechecker
     qualifiers <- MM.gets stateTypeQualifier
 
+    -- WARNING: removing all higher-kinded qualifier types
+    -- This will bite me in the future. Future me has been warned.
+    -- Currently, these qualifiers are used only in C++ code for explicit template resolution.
     let qsAll = maybe [] id (Map.lookup idx qualifiers)
         qs = [(v, t) | (v, t, 1) <- qsAll]
 
