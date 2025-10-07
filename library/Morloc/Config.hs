@@ -42,6 +42,7 @@ loadDefaultMorlocConfig = do
       (MT.unpack . fromJust $ defaults K.!? "home")
       (MT.unpack . fromJust $ defaults K.!? "source")
       (MT.unpack . fromJust $ defaults K.!? "plane")
+      (MT.unpack . fromJust $ defaults K.!? "default")
       (MT.unpack . fromJust $ defaults K.!? "tmpdir")
       (MT.unpack . fromJust $ defaults K.!? "build-config")
       "python3" -- lang_python3

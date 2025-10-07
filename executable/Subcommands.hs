@@ -75,20 +75,15 @@ readScript _ filename = do
 cmdInstall :: InstallCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
 cmdInstall args verbosity conf buildConfig = MM.runMorlocMonad Nothing verbosity conf buildConfig cmdInstall' >>= MM.writeMorlocReturn
   where
-    modName = installModuleName args
-    selector = installSelector args
-
+    path = (configLibrary conf) </> (configPlane conf)
     cmdInstall'
-      | modName == "." = Mod.installModule (LocalModule Nothing) Nothing
-      | (head modName) `elem` ['.', '/'] = Mod.installModule (LocalModule (Just modName)) Nothing
-      | installGithub args = installGithubModule modName selector
-      | otherwise = Mod.installModule (CoreGithubRepo modName selector) (Just $ configPlane conf)
-
-    installGithubModule :: String -> GithubSnapshotSelector -> MorlocMonad ()
-    installGithubModule fullName selector' = case break (== '/') fullName of
-      (username, '/':repo) -> Mod.installModule (GithubRepo username repo selector') Nothing
-      _ -> do
-        MM.throwError . ModuleInstallError $ "Error: Expected \"<username>/<repo>\" format for GitHub module name"
+      = mapM ( Mod.installModule
+                 (installForce args)
+                 (installUseSSH args)
+                 path
+                 (configPlaneCore conf)
+             )
+      $ map MT.pack (installModuleStrings args)
 
 -- | build a Morloc program, generating the nexus and pool files
 cmdMake :: MakeCommand -> Int -> Config.Config -> BuildConfig -> IO Bool

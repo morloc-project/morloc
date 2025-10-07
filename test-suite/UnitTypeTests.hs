@@ -57,6 +57,7 @@ emptyConfig = do
     { configHome        = home <> "/.morloc"
     , configLibrary     = home <> "/.morloc/src/morloc"
     , configPlane       = "morloclib"
+    , configPlaneCore   = "default"
     , configTmpDir      = home <> "/.morloc/tmp"
     , configBuildConfig = home <> "/.morloc/.build-config.yaml"
     , configLangPython3 = "python3"

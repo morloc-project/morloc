@@ -10,6 +10,7 @@ module UI (
 
 import Options.Applicative
 import Morloc.Namespace
+import Morloc.Module (GitProtocol(..), OverwriteProtocol(..))
 import qualified Options.Applicative.Extra as OAE
 import Morloc.Version (versionStr)
 
@@ -64,7 +65,7 @@ data InitCommand = InitCommand
   { initConfig :: String
   , initQuiet :: Bool
   , initVanilla :: Bool
-  , initForce :: Bool
+  , initForce :: OverwriteProtocol
   , initSlurmSupport :: Bool
   }
 
@@ -81,39 +82,21 @@ initSubcommand = command "init" (info (CmdInit <$> initCommandParser) (progDesc 
 
 data InstallCommand = InstallCommand
   { installConfig :: String
-  , installVerbose :: Int
-  , installGithub :: Bool
   , installVanilla :: Bool
-  , installModuleName :: String
-  , installSelector :: GithubSnapshotSelector
+  , installVerbose :: Int
+  , installForce :: OverwriteProtocol
+  , installUseSSH :: GitProtocol
+  , installModuleStrings :: [String]
   }
 
 makeInstallParser :: Parser InstallCommand
 makeInstallParser = InstallCommand
   <$> optConfig
-  <*> optVerbose
-  <*> optGithub
   <*> optVanilla
-  <*> optModuleName
-  <*> optSelector
-
-optSelector :: Parser GithubSnapshotSelector
-optSelector = branchOption <|> commitOption <|> tagOption <|> pure LatestDefaultBranch
-  where
-    branchOption = LatestOnBranch <$> strOption
-      (  long "branch"
-      <> metavar "BRANCH"
-      <> help "Retrieve snapshot from a specific branch" )
-
-    commitOption = CommitHash <$> strOption
-      (  long "commit"
-      <> metavar "HASH"
-      <> help "Retrieve snapshot from a specific commit hash" )
-
-    tagOption = ReleaseTag <$> strOption
-      (  long "tag"
-      <> metavar "TAG"
-      <> help "Retrieve snapshot from a specific tag" )
+  <*> optVerbose
+  <*> optForce
+  <*> optUseSSH
+  <*> optModuleStrings
 
 installSubcommand :: Mod CommandFields CliCommand
 installSubcommand = command "install" (info (CmdInstall <$> makeInstallParser) (progDesc "install a morloc module"))
@@ -181,17 +164,31 @@ optVanilla = switch
   <> help "ignore local configuration files"
   )
 
+optForce :: Parser OverwriteProtocol
+optForce = flag DoNotOverwrite ForceOverwrite
+  ( long "force"
+  <> short 'f'
+  <> help "Overwrite files if they already exist"
+  )
+
+optUseSSH :: Parser GitProtocol
+optUseSSH = flag HttpsProtocol SshProtocol
+  ( long "--ssh"
+  <> help "Use the SSH protocol for remote git access (default: https)"
+  )
+
+optModuleStrings :: Parser [String]
+optModuleStrings
+  = some -- one or more
+  . strArgument
+  $ ( metavar "INSTALL"
+    <> help "Module install strings"
+    )
+
 optRaw :: Parser Bool
 optRaw = switch
   ( long "raw"
-  <> help "print raw objects"
-  )
-
-optForce :: Parser Bool
-optForce = switch
-  ( long "force"
-  <> short 'f'
-  <> help "Force action overwriting existing files"
+  <> help "Print raw objects"
   )
 
 optSlurmSupport :: Parser Bool
@@ -215,12 +212,6 @@ optRealize = switch
   ( long "realize"
   <> short 'r'
   <> help "typecheck the composition realizations"
-  )
-
-optGithub :: Parser Bool
-optGithub = switch
-  ( long "github"
-  <> help "install module from github"
   )
 
 optConfig :: Parser String
@@ -250,6 +241,3 @@ optType = switch
   <> short 't'
   <> help "parse a typestring instread of an expression"
   )
-
-optModuleName :: Parser String
-optModuleName = argument str (metavar "<module_name>")
