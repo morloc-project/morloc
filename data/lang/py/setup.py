@@ -13,10 +13,10 @@ module = Extension(
     'pymorloc',
     sources=['pymorloc.c'],
     include_dirs=[
-        os.path.expanduser('~/.morloc/include'),
+        os.path.expanduser('~/.local/share/morloc/include'),
         np_include_path  # Add numpy include directory
     ],
-    library_dirs=[os.path.expanduser('~/.morloc/lib')],
+    library_dirs=[os.path.expanduser('~/.local/share/morloc/lib')],
     libraries=['morloc']
 )
 

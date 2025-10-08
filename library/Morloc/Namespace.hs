@@ -126,9 +126,6 @@ module Morloc.Namespace
   , NexusSource(..)
   -- sockets
   , Socket(..)
-  -- module installation and github
-  , GithubSnapshotSelector(..)
-  , ModuleSource(..)
   ) where
 
 import Morloc.Language (Lang(..))
@@ -497,23 +494,6 @@ data Socket = Socket
   }
   deriving (Show)
 
-data GithubSnapshotSelector
-  = LatestDefaultBranch
-  | LatestOnBranch String
-  | CommitHash String
-  | ReleaseTag String
-  deriving (Show, Eq, Ord)
-
--- | Specify where a module is located
-data ModuleSource
-  = LocalModule (Maybe String)
-  -- ^ A module in the working directory
-  | GithubRepo String String GithubSnapshotSelector
-  -- ^ A module stored in an arbitrary users repo, e.g., (GithubRepo "weena" "math")
-  | CoreGithubRepo String GithubSnapshotSelector
-  -- ^ The repo name of a core package, e.g., "math"
-  deriving (Show, Eq, Ord)
-
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
 data SysCommand
@@ -582,6 +562,7 @@ data Config =
     { configHome :: !Path
     , configLibrary :: !Path
     , configPlane :: !Path
+    , configPlaneCore :: !Path
     , configTmpDir :: !Path
     , configBuildConfig :: !Path
     , configLangPython3 :: !Path
@@ -933,11 +914,12 @@ instance FromJSON Config where
   parseJSON =
     Aeson.withObject "object" $ \o ->
       Config
-        <$> o .:? "home" .!= "~/.morloc"
-        <*> o .:? "source" .!= "~/.morloc/src/morloc"
-        <*> o .:? "plane" .!= "morloclib"
-        <*> o .:? "tmpdir" .!= "~/.morloc/tmp"
-        <*> o .:? "build-config" .!= "~/.morloc/build-config.yaml"
+        <$> o .:? "home" .!= "~/.local/share/morloc"
+        <*> o .:? "source" .!= "~/.local/share/morloc/src/morloc"
+        <*> o .:? "plane" .!= "default"
+        <*> o .:? "plane-core" .!= "morloclib"
+        <*> o .:? "tmpdir" .!= "~/.local/share/morloc/tmp"
+        <*> o .:? "build-config" .!= "~/.local/share/morloc/build-config.yaml"
         <*> o .:? "lang_python3" .!= "python3"
         <*> o .:? "lang_R" .!= "Rscript"
 

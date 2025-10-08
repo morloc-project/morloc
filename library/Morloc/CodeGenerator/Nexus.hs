@@ -17,7 +17,6 @@ import Morloc.Data.Doc
 import Morloc.DataFiles as DF
 import Morloc.CodeGenerator.Namespace
 import Morloc.Quasi
-import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Text as MT
 import qualified Control.Monad as CM
 import qualified Morloc.Config as MC
@@ -173,12 +172,10 @@ writeType padding Nothing  t = [idoc|fprintf(stderr, "%s", "  #{padding}return: 
 -- Long type names may be wrapped to multiple lines. This funtion adds new line
 -- escapes at the end of each line (required in C strings)
 fixLineWrapping :: MDoc -> MDoc
-fixLineWrapping x = case lines (render' x) of
+fixLineWrapping typestr = case lines (render' typestr) of
     [] -> pretty ("" :: String)
     [x] -> pretty x
     xs -> vsep $ [pretty (str <> "\\") | str <- init xs] <> [pretty (last xs)]
-
-fixLineWrapping x = vsep [pretty (str <> "\\") | str <- lines (render' x)]
 
 dispatchCode :: Config -> [FData] -> [NexusCommand] -> MDoc
 dispatchCode _ [] [] = "// nothing to dispatch"

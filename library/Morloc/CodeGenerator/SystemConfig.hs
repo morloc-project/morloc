@@ -17,6 +17,7 @@ module Morloc.CodeGenerator.SystemConfig
 
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.DataFiles as DF
+import Morloc.Module (OverwriteProtocol(..))
 
 import qualified Morloc.Data.Text as MT
 import qualified Data.Text.IO as TIO
@@ -31,7 +32,7 @@ configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
 configure _ = return ()
 
 
-configureAll :: Bool -> Bool -> Bool -> Config -> IO Bool
+configureAll :: Bool -> OverwriteProtocol -> Bool -> Config -> IO Bool
 configureAll verbose force slurmSupport config = do 
   -- Wrap the entire configuration process in exception handling
   result <- try (configureAllSteps verbose force slurmSupport config) :: IO (Either SomeException ())
@@ -43,7 +44,7 @@ configureAll verbose force slurmSupport config = do
 
 
 -- | Configure for all languages
-configureAllSteps :: Bool -> Bool -> Bool -> Config -> IO ()
+configureAllSteps :: Bool -> OverwriteProtocol -> Bool -> Config -> IO ()
 configureAllSteps verbose force slurmSupport config = do 
 
   -- Setup Morloc home directory structure
@@ -150,7 +151,7 @@ configureAllSteps verbose force slurmSupport config = do
   compileCCodeIfNeeded :: MT.Text -> Path -> Path -> Path -> IO ()
   compileCCodeIfNeeded codeText sourcePath libPath objPath = do
       alreadyExists <- doesFileExist libPath
-      if (alreadyExists && not force)
+      if (alreadyExists && force == DoNotOverwrite)
           then return ()
           else do
               -- Write the code to the temporary file

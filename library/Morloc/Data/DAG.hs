@@ -40,8 +40,6 @@ module Morloc.Data.DAG
   , synthesize
   , synthesizeNodes
   , foldDAG
-  , foldNeighborsWithTermsM
-  , reverseFoldDAGM
   ) where
 
 import Morloc.Namespace
@@ -134,11 +132,11 @@ mapNodeWithKey :: (k -> n1 -> n2) -> DAG k e n1 -> DAG k e n2
 mapNodeWithKey f = Map.mapWithKey (\k (n, xs) -> (f k n, xs))
 
 -- | Map function over nodes independent of the edge data
-mapNodeM :: Ord k => (n1 -> MorlocMonad n2) -> DAG k e n1 -> MorlocMonad (DAG k e n2)
-mapNodeM f = Map.mapWithKeyM (\k (n,xs) -> f n >>= (\n' -> return (n',xs)))
+mapNodeM :: (n1 -> MorlocMonad n2) -> DAG k e n1 -> MorlocMonad (DAG k e n2)
+mapNodeM f = Map.mapM (\(n,xs) -> f n >>= (\n' -> return (n',xs)))
 
 -- | Map function over nodes independent of the edge data
-mapNodeWithKeyM :: Ord k => (k -> n1 -> MorlocMonad n2) -> DAG k e n1 -> MorlocMonad (DAG k e n2)
+mapNodeWithKeyM :: (k -> n1 -> MorlocMonad n2) -> DAG k e n1 -> MorlocMonad (DAG k e n2)
 mapNodeWithKeyM f = Map.mapWithKeyM (\k (n,xs) -> f k n >>= (\n' -> return (n',xs)))
 
 -- | Map function over edges independent of the node data
@@ -222,13 +220,6 @@ synthesizeNodes
   -> m (Maybe (DAG k e n2))
 synthesizeNodes f = synthesize f (\e _ _ -> return e)
 
-synthesizeEdges
-  :: (Ord k, Monad m)
-  => (e1 -> n {- parent -} -> n {- child -} -> m e2)
-  -> DAG k e1 n
-  -> m (Maybe (DAG k e2 n))
-synthesizeEdges = synthesize (\_ n _ -> return n)
-
 -- | Map a monadic function over a DAG yielding a new DAG with the same
 -- topology but new node values. If the DAG contains cycles, Nothing is
 -- returned.
@@ -284,39 +275,6 @@ foldDAG k e f b d =
       a <- foldlM (\b' (k', e') -> foldDAG k' (Just e') f b' d) b es
       f k e n a
     Nothing -> undefined
-
-findDependencies
-  :: (Ord k, Ord e)
-  => (e -> Bool)
-  -> k
-  -> DAG k e n
-  -> [(k, e)]
-findDependencies edgeCond k0 d0
-    = unique . concat
-    $ [[(k1, e) | (k, e) <- es, k == k0, edgeCond e] | (k1, (_, es)) <- Map.toList d0]
-
-reverseFoldDAGM
-  :: (Ord k, Ord e, Monad m, Show k, Show e)
-  => k -- initial key
-  -> Maybe e -- the edge to this node if not root
-  -> (e -> Bool) -- edge traversal condition
-  -> (k -> Maybe e -> n -> a -> m a) -- aggregation function
-  -> a -- initial accumulator
-  -> DAG k e n -- DAG folded over
-  -> m a
-reverseFoldDAGM k0 mayE0 edgeCond f acc0 d = rrFoldDAG Set.empty k0 mayE0 acc0 |>> snd
-  where
-  -- rrFoldDAG :: Set.Set k -> k -> Maybe e -> a -> m (Set.Set k, a)
-  rrFoldDAG prior0 k mayE acc0
-    | Set.member k prior0 = return (prior0, acc0)
-    | otherwise = do
-        let prior1 = Set.insert k prior0
-        case Map.lookup k d of
-          Nothing -> return (prior1, acc0)
-          (Just (n, _)) -> do
-            acc1 <- f k mayE n acc0
-            let deps = findDependencies edgeCond k d
-            foldlM (\(p, b) (k, e) -> rrFoldDAG p k (Just e) b) (prior0, acc1) deps
 
 -- Inherit all imported values and their terminal aliases
 inherit
@@ -375,92 +333,3 @@ lookupAliasedTermM v0 k0 f d0 = lookupAliasedTerm' v0 k0 mempty where
           foldlM (\d2 (k2,v2) -> lookupAliasedTerm' v2 k2 d2)
                 (Map.insert k ((v, n'), edges') d)
                 (concat [zip (repeat k') (map fst vs) | (k', vs) <- xs'])
-
-findNeighboringTerms
-    :: (Ord k, Ord v)
-    => k
-    -> DAG k [(v,v)] n
-    -> Set.Set ( k -- neighbor node key
-               , v -- neighbor term name
-               , v -- local alias for term
-               )
-findNeighboringTerms k0 d0 = Set.fromList (outgoing <> incoming) where
-
-    incoming = case Map.lookup k0 d0 of
-        (Just (_, xss)) -> concat [ [ (k, name, alias) | (name, alias) <- xs] | (k, xs) <- xss]
-        _ -> []
-
-    outgoing = concat [getOutgoing k es | (k, (_, es)) <- Map.toList d0]
-
-    -- getOutgoing :: k -> [(k, [(v,v)])] -> [(k,v,v)]
-    getOutgoing k es = case concat [vs | (k', vs) <- es, k' == k0] of
-        [] -> []
-        vs -> [(k, outerAlias, outerName) | (outerName, outerAlias) <- vs]
-
--- | fold over all neighbors, cycles are allowed
---
--- The (v,v) terms indicate neighbor name and local alias, respectively
-foldNeighborsWithTermsOneM
-    :: (Monad m, Ord k, Ord v)
-    => k -- start at this node
-    -> (    k -- current node
-         -> n -- current node data
-         -> v -- original term name in the first module
-         -> v -- current term alias
-         -> b -- current accumulator value
-         -> m b
-       ) -- update the accumulator
-    -> DAG k [(v,v)] n -- the original dag
-    -> b -- the initial accumulator
-    -> m b -- monadic result
-foldNeighborsWithTermsOneM k0 f d0 b0 = foldNWT m0 k0 (Map.empty, b0) |>> snd where
-
-    -- The initial term map from local alias to the term in the original node
-    m0 = Map.fromList [ (v, v) | (_, _, v) <- Set.toList (findNeighboringTerms k0 d0)]
-
-    -- foldNWT :: Map.Map v v -> k -> (Map.Map k (Set.Set v), b) -> m (Map.Map k (Set.Set v), b)
-    foldNWT vmap k (priors, b) = do
-        let localPriors = Map.findWithDefault Set.empty k priors
-        let vmap' = Map.filter (\x -> Set.notMember x localPriors) vmap
-        case Map.size vmap' of
-            0 -> return (priors, b)
-            _ -> do
-                let priors' = Map.insert k (Set.union localPriors (Set.fromList (Map.elems vmap'))) priors
-
-                b' <- case Map.lookup k d0 of
-                    Nothing -> return b
-                    (Just (n, _)) ->
-                        foldrM (\(local, original) b' -> f k n original local b') b (Map.toList vmap')
-
-                -- [(k, [(neighbor_name, local_name)])]
-                let neighborTerms = groupSort [ (k', (n, a)) | (k', n, a) <- Set.toList (findNeighboringTerms k d0) ]
-
-                foldrM (wrapFoldNWT vmap') (priors', b') neighborTerms
-
-    -- wrapFoldNWT :: Map.Map v v -> (k, [(v,v)]) -> (Map.Map k (Set.Set v), b) -> m (Map.Map k (Set.Set v), b)
-    wrapFoldNWT vmap (k, vs) (priors, b) = do
-        let vmap' = Map.fromList . catMaybes
-                  $ [ (,) <$> Map.lookup k vmap <*> pure alias | (k, alias) <- vs ]
-        foldNWT vmap' k (priors, b)
-
-
-foldNeighborsWithTermsM
-    :: (Monad m, Ord k, Ord v)
-    => (outerState -> k -> m innerState) -- setup of state for each new central node
-    -> (    k -- current node
-         -> n -- current node data
-         -> v -- original term name in the first module
-         -> v -- current term alias
-         -> innerState -- current accumulator value
-         -> m innerState
-       ) -- update the accumulator
-    -> (innerState -> m outerState) -- final action after iterating over neighbors for a node
-    -> DAG k [(v,v)] n -- the original dag
-    -> outerState -- the initial accumulator
-    -> m outerState -- monadic result
-foldNeighborsWithTermsM makeAcc f terminator d0 b0
-    = foldrM processOneModule b0 (Map.keys d0) where
-        processOneModule k b
-            =   makeAcc b k
-            >>= foldNeighborsWithTermsOneM k f d0
-            >>= terminator

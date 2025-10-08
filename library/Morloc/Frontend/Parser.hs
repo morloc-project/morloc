@@ -92,9 +92,9 @@ pModule expModuleName = do
 
 pIndexedSymbol :: Parser (Int, Symbol)
 pIndexedSymbol = do
-    symbol <- pSymbol
+    sym <- pSymbol
     i <- exprId
-    return (i, symbol)
+    return (i, sym)
 
 -- | match an implicit Main module
 pMain :: Parser ExprI
@@ -395,7 +395,7 @@ pSigE = do
 
 pSignature :: Parser Signature
 pSignature = do
-  sigDocs <- many (try preDoc)
+  sigDocstrings <- many (try preDoc)
   label' <- optional pTag
   v <- freenameL
   vs <- many freenameL |>> map TV
@@ -409,13 +409,13 @@ pSignature = do
   constraints <- option [] pConstraints
 
   let t = forallWrap vs t'
-  let etype = EType { etype = t
-                    , eprop = Set.fromList props
-                    , econs = Set.fromList constraints
-                    , edocs = mayDocs
-                    , sigDocs = sigDocs
-                    }
-  let sig = Signature (EV v) (Label <$> label') etype
+  let et = EType { etype = t
+                 , eprop = Set.fromList props
+                 , econs = Set.fromList constraints
+                 , edocs = mayDocs
+                 , sigDocs = sigDocstrings
+                 }
+  let sig = Signature (EV v) (Label <$> label') et
 
   return sig
   where

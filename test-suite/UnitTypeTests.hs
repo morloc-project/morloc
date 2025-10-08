@@ -57,6 +57,7 @@ emptyConfig = do
     { configHome        = home <> "/.morloc"
     , configLibrary     = home <> "/.morloc/src/morloc"
     , configPlane       = "morloclib"
+    , configPlaneCore   = "default"
     , configTmpDir      = home <> "/.morloc/tmp"
     , configBuildConfig = home <> "/.morloc/.build-config.yaml"
     , configLangPython3 = "python3"
@@ -173,8 +174,8 @@ fun [] = error "Cannot infer type of empty list"
 fun [t] = FunU [] t
 fun ts = FunU (init ts) (last ts)
 
-forall :: [MT.Text] -> TypeU -> TypeU
-forall ss t = foldr (ForallU . TV) t ss
+forallu :: [MT.Text] -> TypeU -> TypeU
+forallu ss t = foldr (ForallU . TV) t ss
 
 exist :: MT.Text -> TypeU
 exist v = ExistU (TV v) [] []
@@ -217,7 +218,7 @@ subtypeTests =
         (ExistU (TV "x1") [eb] []) (lst c) [solvedA (lst c), solvedB c]
     , assertSubtypeGamma "<a>, <b> -|[C] <: <a> <b> |- <a>:[C], <b>:C" [eag, ebg]
         (lst c) (ExistU (TV "x1") [eb] []) [solvedA (lst c), solvedB c]
-    , assertSubtypeGamma "[] -| forall a . a <: A -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (TV "a") a]
+    , assertSubtypeGamma "[] -| forall a . a <: A -| a:A" [] (forallu ["a"] (var "a")) a [SolvedG (TV "a") a]
       -- nested types
     , assertSubtypeGamma "<b> -| [A] <: [<b>] |- <b>:A" [ebg] (lst a) (lst eb) [solvedB a]
     , assertSubtypeGamma "<a> -| [<a>] <: [B] |- <a>:B" [eag] (lst b) (lst ea) [solvedA b]
@@ -355,7 +356,7 @@ typeAliasTests =
         module main (f)
         f m a b :: m (a -> b)
         |]
-        (forall ["m___q0", "a___q1", "b___q2"] (arr "m___q0" [fun [var "a___q1", var "b___q2"]]))
+        (forallu ["m___q0", "a___q1", "b___q2"] (arr "m___q0" [fun [var "a___q1", var "b___q2"]]))
     , assertGeneralType
         "non-parametric, general type alias"
         [r|
@@ -469,8 +470,8 @@ typeAliasTests =
         |]
     , expectError
         "fail on conflicting types (Map vs List)"
-        (ConflictingTypeAliases (forall ["a", "b"] $ lst (tuple [var "a", var "b"]))
-                                (forall ["a", "b"] $ arr "Map" [var "a", var "b"]))
+        (ConflictingTypeAliases (forallu ["a", "b"] $ lst (tuple [var "a", var "b"]))
+                                (forallu ["a", "b"] $ arr "Map" [var "a", var "b"]))
         [r|
            module a (A)
            type A a b = Map a b
@@ -653,27 +654,27 @@ typeOrderTests =
         (isSubtypeOf (fun [str, str]) (fun [int, int, int]))
     , testTrue
         "a <: Int"
-        (isSubtypeOf (forall ["a"] (var "a")) int)
+        (isSubtypeOf (forallu ["a"] (var "a")) int)
     , testFalse
         "Int !< forall a . a"
-        (isSubtypeOf int (forall ["a"] (var "a")))
+        (isSubtypeOf int (forallu ["a"] (var "a")))
     , testTrue
         "forall a . (Int, a) <: (Int, Str)"
-        (isSubtypeOf (forall ["a"] (tuple [int, var "a"])) (tuple [int, str]))
+        (isSubtypeOf (forallu ["a"] (tuple [int, var "a"])) (tuple [int, str]))
     , testTrue
         "forall a b . (a, b) <: (Int, Str)"
-        (isSubtypeOf (forall ["a", "b"] (tuple [var "a", var "b"])) (tuple [int, str]))
+        (isSubtypeOf (forallu ["a", "b"] (tuple [var "a", var "b"])) (tuple [int, str]))
     , testTrue
         "forall a . (Int, a) <: forall b . (Int, b)"
         (isSubtypeOf
-          (forall ["a"] (tuple [int, var "a"]))
-          (forall ["b"] (tuple [int, var "b"])))
+          (forallu ["a"] (tuple [int, var "a"]))
+          (forallu ["b"] (tuple [int, var "b"])))
     , testTrue
         "forall a . a <: (Int, Str)"
-        (isSubtypeOf (forall ["a"] (var "a")) (tuple [int, str]))
+        (isSubtypeOf (forallu ["a"] (var "a")) (tuple [int, str]))
     , testTrue
         "forall a . a <: forall a b . (a, b)"
-        (isSubtypeOf (forall ["a"] (var "a")) (forall ["a", "b"] (tuple [var "a", var "b"])))
+        (isSubtypeOf (forallu ["a"] (var "a")) (forallu ["a", "b"] (tuple [var "a", var "b"])))
     -- cannot compare
     , testFalse
         "[Int] !< Int"
@@ -684,43 +685,43 @@ typeOrderTests =
     -- partial order of types
     , testTrue
         "forall a . [a] <= [Int]"
-        ((forall ["a"] (lst (var "a"))) <= (lst (var "a")))
+        ((forallu ["a"] (lst (var "a"))) <= (lst (var "a")))
     , testFalse
         "[Int] !< forall a . [a]"
-        ((lst (var "a")) <= (forall ["a"] (lst (var "a"))))
+        ((lst (var "a")) <= (forallu ["a"] (lst (var "a"))))
     , testTrue
         "forall a . (Int, a) <= (Int, Bool)"
-        ((forall ["a"] (tuple [int, var "a"])) <= (tuple [int, bool]))
+        ((forallu ["a"] (tuple [int, var "a"])) <= (tuple [int, bool]))
     , testFalse
         "(Int, Bool) !<= forall a . (Int, a)"
-        ((tuple [int, bool]) <= (forall ["a"] (tuple [int, var "a"])))
+        ((tuple [int, bool]) <= (forallu ["a"] (tuple [int, var "a"])))
     , testTrue
         "forall a b . (a, b) <= forall c . (Int, c)"
-        ((forall ["a", "b"] (tuple [var "a", var "b"])) <= (forall ["c"] (tuple [int, var "c"])))
+        ((forallu ["a", "b"] (tuple [var "a", var "b"])) <= (forallu ["c"] (tuple [int, var "c"])))
     , testFalse
         "forall c . (Int, c) !<= forall a b . (a, b)"
-        ((forall ["c"] (tuple [int, var "c"])) <= (forall ["a", "b"] (tuple [var "a", var "b"])))
+        ((forallu ["c"] (tuple [int, var "c"])) <= (forallu ["a", "b"] (tuple [var "a", var "b"])))
     , testTrue
         "forall a . a <= forall a b . (a, b)"
-        ((forall ["a"] (var "a")) <= (forall ["a", "b"] (tuple [var "a", var "b"])))
+        ((forallu ["a"] (var "a")) <= (forallu ["a", "b"] (tuple [var "a", var "b"])))
     -- test "mostSpecific"
     , testEqual
         "mostSpecific [Int, Str, forall a . a] = [Int, Str]"
-        (mostSpecific [int, str, forall ["a"] (var "a")])
+        (mostSpecific [int, str, forallu ["a"] (var "a")])
         [int, str]
     -- test "mostGeneral"
     , testEqual
         "mostGeneral [Int, Str, forall a . a] = forall a . a"
-        (mostGeneral [int, str, forall ["a"] (var "a")])
-        [forall ["a"] (var "a")]
+        (mostGeneral [int, str, forallu ["a"] (var "a")])
+        [forallu ["a"] (var "a")]
     -- test mostSpecificSubtypes
     , testEqual
         "mostSpecificSubtypes: Int against [forall a . a]"
-        (mostSpecificSubtypes int [forall ["a"] (var "a")])
-        [forall ["a"] (var "a")]
+        (mostSpecificSubtypes int [forallu ["a"] (var "a")])
+        [forallu ["a"] (var "a")]
     , testEqual
         "mostSpecificSubtypes: (Int -> Int)"
-        (mostSpecificSubtypes (fun [int, int]) [fun [str,str], fun [int, int], forall ["a"] (fun [var "a", var "a"])])
+        (mostSpecificSubtypes (fun [int, int]) [fun [str,str], fun [int, int], forallu ["a"] (fun [var "a", var "a"])])
         [fun [int, int]]
     , testEqual
         "mostSpecificSubtypes: empty"
@@ -732,26 +733,26 @@ typeOrderTests =
         "mostSpecificSubtypes: tuples"
         (mostSpecificSubtypes
           (tuple [int, int])
-          [ forall ["a"] (var "a")
-          , forall ["a", "b"] (tuple [var "a", var "b"])
-          , forall ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
+          [ forallu ["a"] (var "a")
+          , forallu ["a", "b"] (tuple [var "a", var "b"])
+          , forallu ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
           ]
         )
-        [forall ["a", "b"] (tuple [var "a", var "b"])]
+        [forallu ["a", "b"] (tuple [var "a", var "b"])]
 
     -- test mostSpecificSubtypes for tuples
     , testEqual
         "mostSpecificSubtypes: with partially generic tuples"
         (mostSpecificSubtypes
-          (forall ["a"] (tuple [int, var "a"]))
-          [ forall ["a"] (var "a")
-          , forall ["a", "b"] (tuple [var "a", var "b"])
-          , forall ["a"] (tuple [int, var "a"])
-          , forall ["a"] (tuple [int, bool])
-          , forall ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
+          (forallu ["a"] (tuple [int, var "a"]))
+          [ forallu ["a"] (var "a")
+          , forallu ["a", "b"] (tuple [var "a", var "b"])
+          , forallu ["a"] (tuple [int, var "a"])
+          , forallu ["a"] (tuple [int, bool])
+          , forallu ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
           ]
         )
-        [forall ["a"] (tuple [int, var "a"])]
+        [forallu ["a"] (tuple [int, var "a"])]
     ]
 
 unitTypeTests :: TestTree

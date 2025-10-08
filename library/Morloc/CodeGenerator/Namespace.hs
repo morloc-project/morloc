@@ -1156,16 +1156,16 @@ instance Pretty PolyHead where
     pretty _ = "PolyHead stub"
 
 instance Pretty PolyExpr where
-    pretty (PolyManifold lang int _ _) = "PolyManifold"
+    pretty (PolyManifold _ _ _ _) = "PolyManifold"
     pretty (PolyRemoteInterface _ _ _ _ _) = "PolyRemoteInterface"
     pretty (PolyLet i e1 e2) = "PolyLet<" <> pretty i <> ">" <+> list [pretty e1, pretty e2]
     pretty (PolyReturn e) = "PolyReturn" <+> parens (pretty e)
     pretty (PolyApp e es) = "PolyApp" <+> list (map pretty (e:es))
     pretty (PolyBndVar _ _) = "PolyBndVar"
-    pretty (PolyLetVar t i) = "PolyLetVar"
-    pretty (PolySrc t src) = "PolySrc<" <> pretty (srcAlias src) <> ">"
-    pretty (PolyAcc t _ v _ key) = "PolyAcc"
-    pretty (PolyList _ _ xs) = "PolyList"
+    pretty (PolyLetVar _ _) = "PolyLetVar"
+    pretty (PolySrc _ src) = "PolySrc<" <> pretty (srcAlias src) <> ">"
+    pretty (PolyAcc _ _ _ _ _) = "PolyAcc"
+    pretty (PolyList _ _ _) = "PolyList"
     pretty (PolyTuple _ xs) = "PolyTuple" <+> pretty (length xs)
     pretty (PolyRecord _ _ _ _) = "PolyRecord"
     pretty (PolyLog   _ _) = "PolyLog"

@@ -21,10 +21,8 @@ import Morloc.Data.Doc
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.Map as Map
-import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Nexus as Nexus
-import qualified Morloc.CodeGenerator.SystemConfig as MCS
 import qualified Morloc.TypeEval as TE
 import Morloc.CodeGenerator.Infer
 
@@ -442,7 +440,7 @@ expressPolyExpr
 expressPolyExpr findRemote parentLang _
   (AnnoS (Idx midx lamType@(FunT lamInputTypes lamOutType)) (Idx cidxLam _, lamArgs)
     (LamS vs
-      (AnnoS (Idx _ appType) (Idx cidxApp appLang, appArgs)
+      (AnnoS _ (Idx _ appLang, appArgs)
         (AppS
           (AnnoS callTypeI@(Idx _ (FunT callInputTypes _)) (Idx _ callLang, _)
             (CallS src)) xs))))
@@ -842,14 +840,14 @@ expressPolyExpr _ pl pc (AnnoS g c (AccS k (AnnoS (Idx i t) c' e'))) = do
         Nothing -> error "Expected a record access type"
 
 -- lists
-expressPolyExpr remote parentLang pc (AnnoS (Idx midx (AppT (VarT v) [t])) (Idx cidx lang, args) (LstS xs)) = do
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) [t])) (Idx cidx lang, args) (LstS xs)) = do
   xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
   let e = PolyList (Idx cidx v) (Idx cidx t) xs'
   return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ _ _ (AnnoS _ _ (LstS _)) = error "LstS can only be (AppP (VarP _) [_]) type"
 
 -- tuples
-expressPolyExpr remote parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs)) = do
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs)) = do
   let idxTs = zipWith mkIdx xs ts
   xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) idxTs xs
   let e = PolyTuple (Idx cidx v) (fromJust $ safeZip idxTs xs')
@@ -895,7 +893,7 @@ expressPolyExpr _ _ parentType x@(AnnoS (Idx m t) _ _) = do
                <> "\n x:" <+> pretty x
 
 expressContainer :: Indexed Type -> Indexed Lang -> Indexed Lang -> [Arg EVar] -> PolyExpr -> PolyExpr
-expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+expressContainer pc (Idx midx parentLang) (Idx _ lang) args e
   | parentLang /= lang =
       PolyApp
         ( PolyRemoteInterface lang pc [i | Arg i _ <- args] ForeignCall
@@ -909,9 +907,6 @@ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 
 unvalue :: Arg a -> Arg None
 unvalue (Arg i _) = Arg i None
-
-bindVar :: [Arg a] -> [Three Lang Type (Indexed Type)] -> [PolyExpr]
-bindVar args = bindVarIds (map ann args)
 
 bindVarIds :: [Int] -> [Three Lang Type (Indexed Type)] -> [PolyExpr]
 bindVarIds [] [] = []

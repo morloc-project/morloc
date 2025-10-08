@@ -31,12 +31,7 @@ jobs:
       - name: Load morloc modules
         run: |
           morloc init -f
-          morloc install math
-          morloc install internal
-          morloc install root
-          morloc install root-py
-          morloc install root-cpp
-          morloc install root-r
+          morloc install math internal root root-py root-cpp root-r
 
       - name: Test morloc
         run: |

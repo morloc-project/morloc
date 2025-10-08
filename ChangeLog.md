@@ -1,3 +1,26 @@
+0.56.0 [2025-09-29]
+-------------------
+
+New file organization
+ * Change file layout to conform to XDG spec; 
+   replaced `~/.morloc` with `~/.local/share/morloc`
+ * Move standard library to `$MORLOC_HOME/src/morloc/plane/default/morloclib`
+   * src/ - stores any source code morloc needs, not just modules 
+   * morloc/ - stores morloc modules
+   * plane/ - stores morloc modules that are part of a plane
+   * default/ - the current default plane
+   * morloclib/ - the org name for the core modules in the default plane
+
+New `morloc install` subcommand functionality
+ * Multiple imports may be chained on one command
+ * Source and ref can be included per install, for example:
+   * `root` - install a core module
+   * `root@hash:abcdef1234` - specific core instance
+   * `root@tag:v1.0.0` - specific tag/version
+   * `codeberg:weena/calendar@hash:abcdef1234` - 3rd party with source and ref
+ * Support for install of local modules
+   
+
 0.55.1 [2025-09-29]
 -------------------
 

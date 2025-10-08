@@ -15,11 +15,6 @@ module Morloc.CodeGenerator.LambdaEval (
 ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.Data.Doc
-import qualified Morloc.Language as Lang
-import qualified Morloc.Monad as MM
-import qualified Morloc.TypeEval as TE
-import qualified Morloc.CodeGenerator.SystemConfig as MCS
 
 -- {- | Remove lambdas introduced through substitution
 --

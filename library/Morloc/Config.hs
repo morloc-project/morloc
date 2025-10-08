@@ -31,7 +31,7 @@ import qualified Data.Aeson.KeyMap as K
 
 
 getDefaultConfigFilepath :: IO Path
-getDefaultConfigFilepath = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/config"
+getDefaultConfigFilepath = MS.combine <$> getDefaultMorlocHome <*> pure "config"
 
 -- | Load the default Morloc configuration, ignoring any local configurations.
 loadDefaultMorlocConfig :: IO Config
@@ -42,6 +42,7 @@ loadDefaultMorlocConfig = do
       (MT.unpack . fromJust $ defaults K.!? "home")
       (MT.unpack . fromJust $ defaults K.!? "source")
       (MT.unpack . fromJust $ defaults K.!? "plane")
+      (MT.unpack . fromJust $ defaults K.!? "plane-core")
       (MT.unpack . fromJust $ defaults K.!? "tmpdir")
       (MT.unpack . fromJust $ defaults K.!? "build-config")
       "python3" -- lang_python3
@@ -110,34 +111,41 @@ setupServerAndSocket c lang = Socket lang args socket where
   socket = "pipe-" <> pretty (ML.showLangName lang)
 
 
--- A key value map
+-- This is where the default file organization of morloc is set
 defaultFields :: IO (K.KeyMap MT.Text)
 defaultFields = do
   home <- MT.pack <$> getDefaultMorlocHome
   lib <- MT.pack <$> getDefaultMorlocSource
   tmp <- MT.pack <$> getDefaultMorlocTmpDir
   buildConfig <- MT.pack <$> getDefaultMorlocBuildConfig
-  return $ K.fromList [("home", home), ("source", lib), ("plane", "morloclib"), ("tmpdir", tmp), ("build-config", buildConfig)]
+  return $ K.fromList
+    [ ("home", home)
+    , ("source", lib)
+    , ("plane", "default")
+    , ("plane-core", "morloclib")
+    , ("tmpdir", tmp)
+    , ("build-config", buildConfig)
+    ]
 
 -- | Get the Morloc home directory (absolute path)
 getDefaultMorlocHome :: IO Path
-getDefaultMorlocHome = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc"
+getDefaultMorlocHome = MS.combine <$> MS.getHomeDirectory <*> pure ".local/share/morloc"
 
 -- | Get the Morloc source directory (absolute path). Usually this will be a
 -- folder inside the home directory. This is the path to the source data (often
 -- a get repo).
 getDefaultMorlocSource :: IO Path
-getDefaultMorlocSource = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/src/morloc"
+getDefaultMorlocSource = MS.combine <$> getDefaultMorlocHome <*> pure "src/morloc/plane"
 
 -- | Get the path to the morloc shared libraries folder
 getDefaultMorlocLibrary :: IO Path
-getDefaultMorlocLibrary = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/lib"
+getDefaultMorlocLibrary = MS.combine <$> getDefaultMorlocHome <*> pure "lib"
 
 -- | Get the Morloc default temporary directory.
 getDefaultMorlocTmpDir :: IO Path
-getDefaultMorlocTmpDir = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/tmp"
+getDefaultMorlocTmpDir = MS.combine <$> getDefaultMorlocHome <*> pure "tmp"
 
 -- | Get the Morloc default build config. This will store `morloc init` flags
 -- that affect all builds
 getDefaultMorlocBuildConfig :: IO Path
-getDefaultMorlocBuildConfig = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/.build-config.yaml"
+getDefaultMorlocBuildConfig = MS.combine <$> getDefaultMorlocHome <*> pure ".build-config.yaml"
