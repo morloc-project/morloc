@@ -173,7 +173,7 @@ optForce = flag DoNotOverwrite ForceOverwrite
 
 optUseSSH :: Parser GitProtocol
 optUseSSH = flag HttpsProtocol SshProtocol
-  ( long "--ssh"
+  ( long "ssh"
   <> help "Use the SSH protocol for remote git access (default: https)"
   )
 

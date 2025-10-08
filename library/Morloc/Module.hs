@@ -167,8 +167,8 @@ getModulePaths lib plane (Nothing, _) (splitModuleName -> namePath) = map MS.joi
         ]
 
     planePaths = [
-            [lib, "plane", plane] <> init namePath <> [last namePath <> ".loc"]
-          , [lib, "plane", plane] <> namePath <> ["main.loc"]
+            [lib, plane] <> init namePath <> [last namePath <> ".loc"]
+          , [lib, plane] <> namePath <> ["main.loc"]
         ]
 
     paths = localPaths <> planePaths <> systemPaths
@@ -193,8 +193,8 @@ getModulePaths lib plane (Just (MS.splitPath -> modulePath), splitModuleName -> 
                   lib : init importName <> [last importName <> ".loc"]
                 , lib : importName <> ["main.loc"]
                 -- plane paths
-                , [lib, "plane", plane] <> init importName <> [last importName <> ".loc"]
-                , [lib, "plane", plane] <> importName <> ["main.loc"]
+                , [lib, plane] <> init importName <> [last importName <> ".loc"]
+                , [lib, plane] <> importName <> ["main.loc"]
                 -- local path
                 , init importName <> [last importName <> ".loc"]
                 , importName <> ["main.loc"]
@@ -407,7 +407,9 @@ installModule overwrite gitprot libpath coreorg modstr =
     (Left errstr) -> MM.throwError . ModuleInstallError . MT.pack . errorBundlePretty $ errstr
     (Right (Left errstr)) -> MM.throwError . ModuleInstallError $ errstr
     (Right (Right (ModuleSourceLocal path selector))) -> installLocal overwrite libpath selector path
-    (Right (Right (ModuleSourceRemoteGit remote))) -> installRemote overwrite gitprot libpath remote
+    (Right (Right (ModuleSourceRemoteGit remote))) ->
+      let targetDir = libpath </> MT.unpack (gitReponame remote)
+      in installRemote overwrite gitprot targetDir remote
 
 -- {{{ parse module source
 
@@ -672,7 +674,7 @@ installLocal overwrite libpath maySelector modulePath = do
   let sourceDir = MT.unpack modulePath
 
   -- Extract module name from path (last component)
-  let moduleName = takeFileName sourceDir
+  let moduleName = MS.takeFileName sourceDir
   let targetDir = libpath </> moduleName
 
   -- Check if source exists
@@ -704,12 +706,9 @@ installLocalGitRepo :: FilePath -> FilePath -> GitSnapshotSelector -> MorlocMona
 installLocalGitRepo sourceDir targetDir selector = do
   case selector of
     -- If not ref is given, treat the repo like a folder
-    LatestDefaultBranch -> liftIO $ callCommand $ "cp -r " ++ sourceDir ++ " " ++ targetDir
+    LatestDefaultBranch -> cpDir sourceDir targetDir
     -- Otherwise, clone the repository, ignoring un-committed changes
-    _ -> liftIO $ callCommand $ "git clone " ++ sourceDir ++ " " ++ targetDir
-
-  -- TODO: cloning the ENTIRE git history when only a point should be needed is
-  -- inefficient. find a way around this.
+    _ -> cloneRepo sourceDir targetDir
 
   -- Checkout the appropriate ref
   case selector of
@@ -731,6 +730,17 @@ installLocalGitRepo sourceDir targetDir selector = do
   MM.sayVVV $ "Removing history in the installed folder"
   liftIO $ callCommand $ "cd " ++ targetDir ++ " && rm -rf .git/"
 
+cpDir :: FilePath -> FilePath -> MorlocMonad ()
+cpDir fromDir toDir = do
+  let cmd = "cp -r " <> fromDir <> toDir
+  MM.sayVVV $ pretty cmd
+  liftIO $ callCommand cmd
+
+cloneRepo :: String -> FilePath -> MorlocMonad ()
+cloneRepo repoURL targetDir = do
+  let cmd = "git clone -q " <> repoURL <> " " <> targetDir
+  MM.sayVVV $ pretty cmd
+  liftIO $ callCommand cmd
 
 -- | Install from a local directory (non-git)
 installLocalDirectory :: FilePath -> FilePath -> MorlocMonad ()
@@ -739,19 +749,20 @@ installLocalDirectory sourceDir targetDir = do
   liftIO . callCommand $ "cp -r " ++ sourceDir ++ " " ++ targetDir
 
 
+
+-- TODO: Download directly from the archive with hashes, this will be MUCH faster
 installRemote
   :: OverwriteProtocol
-  -- ^ whether to overwrite the existing module in libpath if it existss
+  -- ^ whether to overwrite existing modules
   -> GitProtocol
   -- ^ whether to use SSH or HTTPS protocols for cloning remote git repos
   -> Path
-  -- ^ path to the morloc module installation folder
+  -- ^ path to the morloc module that will be installed
   -> GitRemote
   -- ^ git repo info
   -> MorlocMonad ()
-installRemote overwrite gitprot libpath remote = do
+installRemote overwrite gitprot targetDir remote = do
   let moduleName = gitReponame remote
-  let targetDir = libpath </> MT.unpack moduleName
 
   -- Check if target already exists
   targetExists <- liftIO $ doesDirectoryExist targetDir
@@ -769,62 +780,49 @@ installRemote overwrite gitprot libpath remote = do
   let gitUrl = buildGitUrl gitprot remote
 
   -- Clone the repository
-  MM.sayVVV $ "Cloning from" <+> pretty gitUrl
-  liftIO . callCommand $ "git clone " ++ gitUrl ++ " " ++ targetDir
+  cloneRepo gitUrl targetDir
 
   -- Checkout the appropriate ref
   checkoutRef targetDir (gitReference remote)
 
--- | Build a git URL from protocol and remote info
-buildGitUrl :: GitProtocol -> GitRemote -> String
-buildGitUrl protocol remote =
-  let username = MT.unpack $ gitUsername remote
-      reponame = MT.unpack $ gitReponame remote
-      source = gitRemoteSource remote
-      baseUrl = getBaseUrl source
-  in case protocol of
-       HttpsProtocol -> "https://" ++ baseUrl ++ "/" ++ username ++ "/" ++ reponame ++ ".git"
-       SshProtocol -> "git@" ++ baseUrl ++ ":" ++ username ++ "/" ++ reponame ++ ".git"
-
--- | Get base URL for each remote source
-getBaseUrl :: RemoteSource -> String
-getBaseUrl RemoteGithub = "github.com"
-getBaseUrl RemoteGitlab = "gitlab.com"
-getBaseUrl RemoteBitbucket = "bitbucket.org"
-getBaseUrl RemoteCodeberg = "codeberg.org"
-getBaseUrl RemoteAzure = "dev.azure.com"
-
--- | Checkout a specific git reference
-checkoutRef :: FilePath -> GitSnapshotSelector -> MorlocMonad ()
-checkoutRef targetDir selector = case selector of
-  LatestDefaultBranch ->
-    MM.sayVVV "Using default branch"
-
-  LatestOnBranch branch -> do
-    MM.sayVVV $ "Checking out branch:" <+> pretty branch
-    liftIO . callCommand $ "cd " ++ targetDir ++ " && git checkout " ++ MT.unpack branch
-    liftIO . callCommand $ "cd " ++ targetDir ++ " && git pull"
-
-  CommitHash hash -> do
-    MM.sayVVV $ "Checking out commit:" <+> pretty hash
-    liftIO . callCommand $ "cd " ++ targetDir ++ " && git checkout " ++ MT.unpack hash
-
-  ReleaseTag tag -> do
-    MM.sayVVV $ "Checking out tag:" <+> pretty tag
-    liftIO . callCommand $ "cd " ++ targetDir ++ " && git checkout tags/" ++ MT.unpack tag
-
--- | Helper to get the last component of a path
-takeFileName :: FilePath -> FilePath
-takeFileName path =
-  case reverse $ splitOn '/' path of
-    (name:_) -> name
-    [] -> path
   where
-    splitOn _ [] = []
-    splitOn delim str =
-      let (before, after) = break (== delim) str
-      in before : case after of
-                    [] -> []
-                    (_:rest) -> splitOn delim rest
+
+  -- | Build a git URL from protocol and remote info
+  buildGitUrl :: GitProtocol -> GitRemote -> String
+  buildGitUrl protocol remote =
+    let username = MT.unpack $ gitUsername remote
+        reponame = MT.unpack $ gitReponame remote
+        source = gitRemoteSource remote
+        baseUrl = getBaseUrl source
+    in case protocol of
+         HttpsProtocol -> "https://" ++ baseUrl ++ "/" ++ username ++ "/" ++ reponame
+         SshProtocol -> "git@" ++ baseUrl ++ ":" ++ username ++ "/" ++ reponame ++ ".git"
+
+  -- | Get base URL for each remote source
+  getBaseUrl :: RemoteSource -> String
+  getBaseUrl RemoteGithub = "github.com"
+  getBaseUrl RemoteGitlab = "gitlab.com"
+  getBaseUrl RemoteBitbucket = "bitbucket.org"
+  getBaseUrl RemoteCodeberg = "codeberg.org"
+  getBaseUrl RemoteAzure = "dev.azure.com"
+
+  -- | Checkout a specific git reference
+  checkoutRef :: FilePath -> GitSnapshotSelector -> MorlocMonad ()
+  checkoutRef targetDir selector = case selector of
+    LatestDefaultBranch ->
+      MM.sayVVV "Using default branch"
+
+    LatestOnBranch branch -> do
+      MM.sayVVV $ "Checking out branch:" <+> pretty branch
+      liftIO . callCommand $ "cd " ++ targetDir ++ " && git checkout " ++ MT.unpack branch
+      liftIO . callCommand $ "cd " ++ targetDir ++ " && git pull"
+
+    CommitHash hash -> do
+      MM.sayVVV $ "Checking out commit:" <+> pretty hash
+      liftIO . callCommand $ "cd " ++ targetDir ++ " && git checkout " ++ MT.unpack hash
+
+    ReleaseTag tag -> do
+      MM.sayVVV $ "Checking out tag:" <+> pretty tag
+      liftIO . callCommand $ "cd " ++ targetDir ++ " && git checkout tags/" ++ MT.unpack tag
 
 -- }}}
