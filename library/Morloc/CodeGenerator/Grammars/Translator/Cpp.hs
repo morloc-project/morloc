@@ -350,7 +350,7 @@ serialize nativeExpr s0 = do
           x = [idoc|#{typestr} #{v'} = std::make_tuple#{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
-    construct v rec@(SerialObject NamRecord _ _ rs) = do
+    construct v (SerialObject NamRecord _ _ rs) = do
       (ss', befores) <- unzip <$> mapM (\(k, s) -> serialize' (recordAccess v (pretty k)) s) rs
       idx <- getCounter
 
@@ -868,7 +868,7 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
       | (Left v) `elem` ps = "T" <> pretty v
       | otherwise = pretty v
     showDefType _ (FunT _ _) = error "Cannot serialize functions"
-    showDefType _ (NamT o v ts rs) = pretty v
+    showDefType _ (NamT _ v _ _) = pretty v
     showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
     showDefType _ (AppT _ _) = error "AppT is only OK with VarT, for now"
 
@@ -918,12 +918,12 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const #{rtype}
 
 
 deserializerTemplate
-  :: Bool -- build object with constructor
+  :: Bool -- build object with constructor -- TODO: isObj, bring this back
   -> [MDoc] -- ^ template parameters
   -> MDoc -- ^ type of thing being deserialized
   -> [(MDoc, MDoc)] -- ^ key and type for all fields
   -> MDoc -- ^ output deserializer function
-deserializerTemplate isObj params rtype fields
+deserializerTemplate _ params rtype fields
   =  [idoc|
 #{makeTemplateHeader params}
 #{block 4 header body}

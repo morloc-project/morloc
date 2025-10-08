@@ -60,7 +60,7 @@ doM f x = f x >> return x
 --
 -- This type should be legal, but currently it is not supported. Which
 -- is why I need to raise an explicit error to avoid infinite loops.
-checkForSelfRecursion :: Ord k => DAG k e ExprI -> MorlocMonad (DAG k e ExprI)
+checkForSelfRecursion :: DAG k e ExprI -> MorlocMonad (DAG k e ExprI)
 checkForSelfRecursion d = do
   _ <- DAG.mapNodeM (AST.checkExprI isExprSelfRecursive) d
   return d
@@ -68,15 +68,15 @@ checkForSelfRecursion d = do
     -- A typedef is self-recursive if its name appears in its definition
     isExprSelfRecursive :: ExprI -> MorlocMonad ()
     -- Allow general type existence statements without parameters
-    isExprSelfRecursive (ExprI _ (TypE Nothing v [] t)) = return ()
+    isExprSelfRecursive (ExprI _ (TypE Nothing _ [] _)) = return ()
     --  and also with parameters
     isExprSelfRecursive (ExprI _ (TypE Nothing v vs t))
       | t == AppU (VarU v) (map (either VarU id) vs) = return ()
       | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v
       | otherwise = return ()
     -- otherwise disallow self-recursion
-    isExprSelfRecursive (ExprI _ (TypE _ v vs t))
-      | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v
+    isExprSelfRecursive (ExprI _ (TypE _ v ts t))
+      | any (hasTerm v) (t:(rights ts)) = MM.throwError . SelfRecursiveTypeAlias $ v
       | otherwise = return ()
     isExprSelfRecursive _ = return ()
 
@@ -155,7 +155,7 @@ resolveImports d0
     -> ExprI -- importing module expression (with resolved exports)
     -> ExprI -- imported module expression  (with resolved exports)
     -> MorlocMonad [AliasedSymbol]
-  resolveEdge imp parentX childX = case (importInclude imp, AST.findExport childX) of
+  resolveEdge imp _ childX = case (importInclude imp, AST.findExport childX) of
     (_, ExportAll) -> error "This should have been resolved already"
     (Nothing, ExportMany exps) -> return $ map (toAliasedSymbol . snd) (Set.toList exps)
     (Just ass, ExportMany exps) -> return . catMaybes $ map (importAlias . unAliasedSymbol) ass
@@ -172,14 +172,6 @@ resolveImports d0
               (Just (TypeSymbol _)) -> Just $ AliasedType (TV name) (TV alias)
               (Just (ClassSymbol _)) -> Just $ AliasedClass (ClassName name)
 
-
-  -- find all class names in a module, these are used to distinguish types from
-  -- classes when resolving imports and exports
-  findClasses :: ExprI -> Set ClassName
-  findClasses (ExprI _ (ClsE (Typeclass cls _ _))) = Set.singleton cls
-  findClasses (ExprI _ (ModE _ es)) = Set.unions (map findClasses es)
-  findClasses _ = Set.empty
-
   filterImports
     :: MVar
     -> Import -- the current node import list
@@ -189,7 +181,7 @@ resolveImports d0
   filterImports _ (Import _ Nothing exclude _) (ExportMany exports) =
     return $ (Set.map snd exports) `Set.difference` (Set.fromList exclude)
   -- Here we need to carefully handle aliasing
-  filterImports m1 imp@(Import m2 (Just as) (map unSymbol -> exclude) _) (ExportMany exports)
+  filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) _) (ExportMany exports)
     = case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
         ([], imps) -> return $ Set.fromList imps
         (missing, _) -> MM.throwError . ImportExportError m1
@@ -221,11 +213,6 @@ resolveImports d0
   findSymbols (ExprI _ (IstE cls _ _)) = Set.singleton $ ClassSymbol cls
   findSymbols _ = Set.empty
 
-  unalias :: AliasedSymbol -> Symbol
-  unalias (AliasedType x _) = TypeSymbol x
-  unalias (AliasedClass x) = ClassSymbol x
-  unalias (AliasedTerm x _) = TermSymbol x
-
   unSymbol :: Symbol -> MT.Text
   unSymbol (TypeSymbol (TV v)) = v
   unSymbol (TermSymbol (EV v)) = v
@@ -242,8 +229,7 @@ resolveImports d0
   toAliasedSymbol (ClassSymbol x) = AliasedClass x
 
 handleTypeDeclarations
-  :: Ord k
-  => DAG k e ExprI
+  :: DAG k e ExprI
   -> DAG k e ExprI
 handleTypeDeclarations = DAG.mapNode f where
   f (ExprI i (ModE m es)) = ExprI i (ModE m (filter isNotSelfDef es))

@@ -53,7 +53,6 @@ module Morloc.Typecheck.Internal
 
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Data.Map as Map
 import Morloc.Data.Doc
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Monad as MM

@@ -63,11 +63,11 @@ mapKeysWithM f g m
     foldValues _ = undefined -- there will never be empty values
 
 -- | monadic version of Data.Map.map
-mapM :: (Ord k, Monad m) => (a -> m b) -> Map.Map k a -> m (Map.Map k b)
+mapM :: Monad m => (a -> m b) -> Map.Map k a -> m (Map.Map k b)
 mapM f = Map.traverseWithKey (\_ a -> f a)
 
 -- | monadic version of Data.Map mapWithKey
-mapWithKeyM :: (Ord k, Monad m) => (k -> a -> m b) -> Map.Map k a -> m (Map.Map k b)
+mapWithKeyM :: Monad m => (k -> a -> m b) -> Map.Map k a -> m (Map.Map k b)
 mapWithKeyM = Map.traverseWithKey
 
 mergeMaps

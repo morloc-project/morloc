@@ -131,8 +131,8 @@ weave gscope = w where
 
 
 inferConcreteVar :: Lang -> Indexed TVar -> MorlocMonad FVar
-inferConcreteVar lang t@(Idx i v) = do
-  MM.sayVVV $ "inferConcreteVar" <+> pretty lang <+> pretty t
+inferConcreteVar lang t0@(Idx i v) = do
+  MM.sayVVV $ "inferConcreteVar" <+> pretty lang <+> pretty t0
   localScope <- MM.getConcreteScope i lang
   globalScope <- MM.getConcreteUniversalScope lang
   case Map.lookup v localScope of

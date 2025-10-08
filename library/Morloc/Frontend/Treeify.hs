@@ -23,7 +23,6 @@ import qualified Morloc.Data.Map as Map
 import qualified Morloc.BaseTypes as BT
 import qualified Data.Set as Set
 import qualified Morloc.Data.GMap as GMap
-import Morloc.Frontend.Merge (mergeTermTypes, mergeEType, mergeSignatureSet)
 
 
 -- | Every term must either be sourced or declared.
@@ -98,7 +97,7 @@ treeify d
 nullify :: DAG m e ExprI -> DAG m e ExprI
 nullify = DAG.mapNode f where
     f :: ExprI -> ExprI
-    f (ExprI i (SigE (Signature v n (EType t ps cs edocs tdocs)))) = ExprI i (SigE (Signature v n (EType (nullifyT t) ps cs edocs tdocs)))
+    f (ExprI i (SigE (Signature v n (EType t ps cs docs tdocs)))) = ExprI i (SigE (Signature v n (EType (nullifyT t) ps cs docs tdocs)))
     f (ExprI i (ModE m es)) = ExprI i (ModE m (map f es))
     f (ExprI i (AssE v e es)) = ExprI i (AssE v (f e) (map f es))
     f e = e
@@ -113,19 +112,6 @@ nullify = DAG.mapNode f where
 
     isNull :: TypeU -> Bool
     isNull t = t == BT.unitU
-
-
-removeTypeImports :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
-removeTypeImports d = case DAG.roots d of
-  [root] -> return
-          . DAG.shake root
-          . DAG.mapEdge (mapMaybe maybeEVar)
-          $ d
-  roots -> MM.throwError $ NonSingularRoot roots
-  where
-    maybeEVar :: AliasedSymbol -> Maybe (EVar, EVar)
-    maybeEVar (AliasedTerm x y) = Just (x, y)
-    maybeEVar _ = Nothing -- remove type/class symbols, they have already been used
 
 
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
@@ -169,12 +155,12 @@ collect
      , EVar -- name of root expression
      )
   -> MorlocMonad (Namer, AnnoS Int ManyPoly Int)
-collect namer (gi, v) = do
+collect namer0 (gi, v) = do
   -- FIXME: this macro expansion strategy needs to be replaced
   MM.sayVVV $ "collect"
             <> "\n  gi:" <+> pretty gi
             <> "\n  v:" <+> pretty v
-  (namer, e) <- collectExprS namer (ExprI gi (VarE defaultValue v))
+  (namer, e) <- collectExprS namer0 (ExprI gi (VarE defaultValue v))
   return (namer, AnnoS gi gi e)
 
 
@@ -184,30 +170,30 @@ collectAnnoS namer e@(ExprI gi _) = collectExprS namer e |>> second (AnnoS gi gi
 
 -- | Translate ExprI to ExprS tree
 collectExprS :: Namer -> ExprI -> MorlocMonad (Namer, ExprS Int ManyPoly Int)
-collectExprS namer (ExprI gi e0) = f namer e0 where
+collectExprS namer0 (ExprI gi0 e0) = f namer0 e0 where
   f namer (VarE _ v) = do
     MM.sayVVV $ "collectExprS VarE"
-              <> "\n  gi:" <+> pretty gi
+              <> "\n  gi:" <+> pretty gi0
               <> "\n  v:" <+> pretty v
     sigs <- MM.gets stateSignatures
 
-    case GMap.lookup gi sigs of
+    case GMap.lookup gi0 sigs of
 
       -- A monomorphic term will have a type if it is linked to any source
       -- since sources require signatures. But if it associated only with a
       -- declaration, then it will have no type.
       (GMapJust (Monomorphic t)) -> do
 
-        MM.sayVVV $ "  searchged gi " <+> pretty gi <+> "for" <+> pretty v
+        MM.sayVVV $ "  searchged gi " <+> pretty gi0 <+> "for" <+> pretty v
 
         MM.sayVVV $ "  monomorphic term" <+> pretty v <> ":" <+> maybe "?" pretty (termGeneral t)
-        (namer', es) <- termtypesToAnnoS gi namer t
+        (namer', es) <- termtypesToAnnoS gi0 namer t
         return $ (namer', VarS v (MonomorphicExpr (termGeneral t) es))
 
       -- A polymorphic term should always have a type.
       (GMapJust (Polymorphic cls clsName t ts)) -> do
         MM.sayVVV $ "  polymorphic term" <+> pretty v <> ":" <+> list (map (maybe "?" pretty . termGeneral) ts)
-        (namer', ess) <- statefulMapM (termtypesToAnnoS gi) namer ts
+        (namer', ess) <- statefulMapM (termtypesToAnnoS gi0) namer ts
         let etypes = map (fromJust . termGeneral) ts
         return $ (namer', VarS v (PolymorphicExpr cls clsName t (zip etypes ess)))
 
@@ -220,16 +206,16 @@ collectExprS namer (ExprI gi e0) = f namer e0 where
             Nothing -> error $ "undefined term in namer map (" <> show v <> "): " <> show namer -- MM.throwError $ UndefinedVariable v
     where
       termtypesToAnnoS :: Int -> Namer -> TermTypes -> MorlocMonad (Namer, [AnnoS Int ManyPoly Int])
-      termtypesToAnnoS gi namer t = do
+      termtypesToAnnoS gi n t = do
         let calls = [AnnoS gi ci (CallS src) | (_, Idx ci src) <- termConcrete t]
 
-        (namer', declarations) <- statefulMapM termExprToAnnoS namer (termDecl t)
-        return (namer', (calls <> declarations))
+        (n', declarations) <- statefulMapM termExprToAnnoS n (termDecl t)
+        return (n', (calls <> declarations))
 
       termExprToAnnoS :: Namer -> ExprI -> MorlocMonad (Namer, AnnoS Int ManyPoly Int)
-      termExprToAnnoS namer e@(ExprI ci _) = do
-        (namer', e') <- reindexExprI e >>= collectExprS namer
-        return $ (namer', AnnoS gi ci e')
+      termExprToAnnoS n e@(ExprI ci _) = do
+        (n', e') <- reindexExprI e >>= collectExprS n
+        return $ (n', AnnoS gi0 ci e')
 
   f namer (AccE k e) = collectAnnoS namer e |>> second (AccS k)
   f namer (LstE es) = statefulMapM collectAnnoS namer es |>> second LstS
@@ -254,7 +240,7 @@ collectExprS namer (ExprI gi e0) = f namer e0 where
 
   f namer (AppE e es) = do
     (namer', e') <- collectAnnoS namer e
-    (namer'', es') <- statefulMapM collectAnnoS namer es
+    (namer'', es') <- statefulMapM collectAnnoS namer' es
     return (namer'', AppS e' es')
   f namer UniE = return (namer, UniS)
   f namer (RealE x) = return (namer, RealS x)

@@ -66,12 +66,6 @@ typecheck = mapM run where
 -- to the qualifiers. The first is never resolved, and is left as
 -- existential. So here I remove them. This is hacky as hell. Need a cleaner
 -- solution.
---
--- I'm making a list, I'm checking it twice. Why am I checking it twice? Why do
--- I generate two qualifiers for each term? When I first made this typechecker,
--- it was doing both general and concrete typechecking at the same time. Then I
--- recanted this witchcraft and began inferring all concrete types. But some
--- witchy kinks remain. I should just rewrite the whole thing.
 prepareQualifierMap :: Gamma -> [(TVar, TypeU, Int)] -> [(TVar, TypeU, Int)]
 prepareQualifierMap g = takeLast . filter notExistential . map f where
   f ( TV . head . MT.splitOn "___" . unTVar -> v
@@ -103,6 +97,7 @@ findTypeKindSize v = head . catMaybes . f where
   f (AppU (VarU v') ts)
     | v == v' = [Just (1 + (length ts))]
     | otherwise = concat $ map f ts
+  f (AppU t ts) = concat $ map f (t:ts) 
   f (VarU v')
     | v == v' = [Just 1]
     | otherwise = [Nothing]
@@ -245,8 +240,8 @@ checkG
        , AnnoS (Indexed TypeU) ManyPoly Int
        )
 checkG g (AnnoS i j e) t = do
-  ann <- MM.gets stateAnnotations
-  (g', t', e') <- case Map.lookup i ann of
+  annotation <- MM.gets stateAnnotations
+  (g', t', e') <- case Map.lookup i annotation of
     Nothing -> checkE' i g e t
     (Just annType) -> do
       gAnn <- subtype' i annType t g
@@ -262,8 +257,8 @@ synthG
        , AnnoS (Indexed TypeU) ManyPoly Int
        )
 synthG g (AnnoS gi ci e) = do
-  ann <- MM.gets stateAnnotations
-  (g', t, e') <- case Map.lookup gi ann of
+  annotation <- MM.gets stateAnnotations
+  (g', t, e') <- case Map.lookup gi annotation of
     Nothing   -> synthE' gi g e
     (Just annType) -> checkE' gi g e annType
   return (g', t, AnnoS (Idx gi t) ci e')

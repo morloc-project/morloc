@@ -9,7 +9,6 @@ module UI (
 ) where
 
 import Options.Applicative
-import Morloc.Namespace
 import Morloc.Module (GitProtocol(..), OverwriteProtocol(..))
 import qualified Options.Applicative.Extra as OAE
 import Morloc.Version (versionStr)

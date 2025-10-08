@@ -375,4 +375,4 @@ makePool libs includeDocs manifolds dispatch
     makePath filename = [idoc|os.path.expanduser(#{dquotes(filename)})|]
 
     includeStatements [] = ""
-    includeStatements docs = vsep ("import importlib" : includeDocs)
+    includeStatements _ = vsep ("import importlib" : includeDocs)

@@ -24,7 +24,6 @@ module Morloc.Module
   -- * Module installation
   , OverwriteProtocol(..)
   , GitProtocol(..)
-  , OverwriteProtocol(..)
   , installModule
   ) where
 
@@ -35,7 +34,6 @@ import Data.Void (Void)
 
 import Morloc.Namespace
 import Morloc.Data.Doc
-import qualified Data.List as DL
 import qualified Data.Char as DC
 import qualified Morloc.Config as Config
 import qualified Morloc.Data.Text as MT
@@ -43,17 +41,10 @@ import Morloc.Data.Text (Text)
 import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
 import qualified Data.Yaml.Config as YC
-import Morloc.Version (versionStr)
 
 -- needed for github retrieval
-import qualified Data.ByteString.Lazy as BL
-import qualified Data.ByteString.Char8 as BS
-import qualified Codec.Archive.Zip as Zip
-import Network.HTTP.Simple
 import System.Directory
-import Control.Exception hiding (try)
 import Data.Aeson
-import Data.Typeable
 import System.Process (callCommand)
 
 data RepoInfo = RepoInfo { defaultBranch :: Text } deriving Show
@@ -440,6 +431,8 @@ moduleInstallParser coreorg = do
               , gitReponame = modname
               }
       | otherwise = Left "Core modules are only imported from github"
+    makeModuleSource (Just _) (ModulePathLocal _) _ 
+      = Left "Invalid mix of local and remote import names"
     makeModuleSource (maybe RemoteGithub id -> remote) (ModulePathGit user repo) selector
       = return . ModuleSourceRemoteGit $ GitRemote
         { gitRemoteSource = remote
@@ -485,12 +478,12 @@ parseCoreModule = ModulePathCore <$> parseModuleSegment
 
 parseModuleSegment :: Parser Text
 parseModuleSegment = do
-  first <- alphaNumChar
+  firstChar <- alphaNumChar
   rest <- many (alphaNumChar <|> char '-')
   -- Ensure we don't end with dash if there are rest chars
   if last rest == '-'
     then fail "Module name cannot end with a dash"
-    else return (MT.pack (first:rest))
+    else return (MT.pack (firstChar:rest))
 
 -- parse a local file
 --   .
@@ -553,16 +546,16 @@ parseVersion = do
       v <- optional (string "v")
 
       -- Parse major version
-      major <- MT.show' <$> L.decimal
+      major <- MT.show' <$> (L.decimal :: Parser Int)
       _ <- char '.'
 
       -- Parse minor version
-      minor <- MT.show' <$> L.decimal
+      minor <- MT.show' <$> (L.decimal :: Parser Int)
       _ <- char '.'
 
       -- Optional patch version
       patchMay <- optional $ do
-        p <- MT.show' <$> L.decimal
+        p <- MT.show' <$> (L.decimal :: Parser Int)
         _ <- char '.'
         return p
 
@@ -632,22 +625,22 @@ parseBranch = do
       && c /= '\DEL'  -- Also exclude DEL (0x7F)
 
     -- Comprehensive validation according to git-check-ref-format
-    isValidBranchName name =
-      not (MT.null name)                           -- Must have content
-      && name /= "@"                              -- Cannot be just '@'
-      && not (MT.isPrefixOf "/" name)              -- Cannot start with /
-      && not (MT.isSuffixOf "/" name)              -- Cannot end with /
-      && not (MT.isSuffixOf "." name)              -- Cannot end with .
-      && not (MT.isSuffixOf ".lock" name)          -- Cannot end with .lock
-      && not (".." `MT.isInfixOf` name)            -- No consecutive dots
-      && not ("@{" `MT.isInfixOf` name)            -- No reflog syntax
-      && not ("//" `MT.isInfixOf` name)            -- No consecutive slashes
-      && not (hasComponentStartingWithDot name)   -- Components can't start with .
-      && not (MT.any isInvalidChar name)           -- Final safety check
+    isValidBranchName branchName =
+      not (MT.null branchName)                           -- Must have content
+      && branchName /= "@"                              -- Cannot be just '@'
+      && not (MT.isPrefixOf "/" branchName)              -- Cannot start with /
+      && not (MT.isSuffixOf "/" branchName)              -- Cannot end with /
+      && not (MT.isSuffixOf "." branchName)              -- Cannot end with .
+      && not (MT.isSuffixOf ".lock" branchName)          -- Cannot end with .lock
+      && not (".." `MT.isInfixOf` branchName)            -- No consecutive dots
+      && not ("@{" `MT.isInfixOf` branchName)            -- No reflog syntax
+      && not ("//" `MT.isInfixOf` branchName)            -- No consecutive slashes
+      && not (hasComponentStartingWithDot branchName)   -- Components can't start with .
+      && not (MT.any isInvalidChar branchName)           -- Final safety check
 
     -- Check if any path component starts with a dot
-    hasComponentStartingWithDot name =
-      let components = MT.splitOn "/" name
+    hasComponentStartingWithDot txt =
+      let components = MT.splitOn "/" txt
       in any (MT.isPrefixOf ".") components
 
     -- Characters that should never appear (belt-and-suspenders check)
@@ -762,7 +755,6 @@ installRemote
   -- ^ git repo info
   -> MorlocMonad ()
 installRemote overwrite gitprot targetDir remote = do
-  let moduleName = gitReponame remote
 
   -- Check if target already exists
   targetExists <- liftIO $ doesDirectoryExist targetDir
@@ -785,44 +777,42 @@ installRemote overwrite gitprot targetDir remote = do
   -- Checkout the appropriate ref
   checkoutRef targetDir (gitReference remote)
 
-  where
+-- | Build a git URL from protocol and remote info
+buildGitUrl :: GitProtocol -> GitRemote -> String
+buildGitUrl protocol remote =
+  let username = MT.unpack $ gitUsername remote
+      reponame = MT.unpack $ gitReponame remote
+      source = gitRemoteSource remote
+      baseUrl = getBaseUrl source
+  in case protocol of
+       HttpsProtocol -> "https://" ++ baseUrl ++ "/" ++ username ++ "/" ++ reponame
+       SshProtocol -> "git@" ++ baseUrl ++ ":" ++ username ++ "/" ++ reponame ++ ".git"
 
-  -- | Build a git URL from protocol and remote info
-  buildGitUrl :: GitProtocol -> GitRemote -> String
-  buildGitUrl protocol remote =
-    let username = MT.unpack $ gitUsername remote
-        reponame = MT.unpack $ gitReponame remote
-        source = gitRemoteSource remote
-        baseUrl = getBaseUrl source
-    in case protocol of
-         HttpsProtocol -> "https://" ++ baseUrl ++ "/" ++ username ++ "/" ++ reponame
-         SshProtocol -> "git@" ++ baseUrl ++ ":" ++ username ++ "/" ++ reponame ++ ".git"
+-- | Get base URL for each remote source
+getBaseUrl :: RemoteSource -> String
+getBaseUrl RemoteGithub = "github.com"
+getBaseUrl RemoteGitlab = "gitlab.com"
+getBaseUrl RemoteBitbucket = "bitbucket.org"
+getBaseUrl RemoteCodeberg = "codeberg.org"
+getBaseUrl RemoteAzure = "dev.azure.com"
 
-  -- | Get base URL for each remote source
-  getBaseUrl :: RemoteSource -> String
-  getBaseUrl RemoteGithub = "github.com"
-  getBaseUrl RemoteGitlab = "gitlab.com"
-  getBaseUrl RemoteBitbucket = "bitbucket.org"
-  getBaseUrl RemoteCodeberg = "codeberg.org"
-  getBaseUrl RemoteAzure = "dev.azure.com"
+-- | Checkout a specific git reference
+checkoutRef :: FilePath -> GitSnapshotSelector -> MorlocMonad ()
+checkoutRef targetDir selector = case selector of
+  LatestDefaultBranch ->
+    MM.sayVVV "Using default branch"
 
-  -- | Checkout a specific git reference
-  checkoutRef :: FilePath -> GitSnapshotSelector -> MorlocMonad ()
-  checkoutRef targetDir selector = case selector of
-    LatestDefaultBranch ->
-      MM.sayVVV "Using default branch"
+  LatestOnBranch branch -> do
+    MM.sayVVV $ "Checking out branch:" <+> pretty branch
+    liftIO . callCommand $ "cd " ++ targetDir ++ " && git checkout " ++ MT.unpack branch
+    liftIO . callCommand $ "cd " ++ targetDir ++ " && git pull"
 
-    LatestOnBranch branch -> do
-      MM.sayVVV $ "Checking out branch:" <+> pretty branch
-      liftIO . callCommand $ "cd " ++ targetDir ++ " && git checkout " ++ MT.unpack branch
-      liftIO . callCommand $ "cd " ++ targetDir ++ " && git pull"
+  CommitHash hash -> do
+    MM.sayVVV $ "Checking out commit:" <+> pretty hash
+    liftIO . callCommand $ "cd " ++ targetDir ++ " && git checkout " ++ MT.unpack hash
 
-    CommitHash hash -> do
-      MM.sayVVV $ "Checking out commit:" <+> pretty hash
-      liftIO . callCommand $ "cd " ++ targetDir ++ " && git checkout " ++ MT.unpack hash
-
-    ReleaseTag tag -> do
-      MM.sayVVV $ "Checking out tag:" <+> pretty tag
-      liftIO . callCommand $ "cd " ++ targetDir ++ " && git checkout tags/" ++ MT.unpack tag
+  ReleaseTag tag -> do
+    MM.sayVVV $ "Checking out tag:" <+> pretty tag
+    liftIO . callCommand $ "cd " ++ targetDir ++ " && git checkout tags/" ++ MT.unpack tag
 
 -- }}}
