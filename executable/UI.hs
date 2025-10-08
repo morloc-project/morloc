@@ -16,7 +16,7 @@ import Morloc.Version (versionStr)
 opts :: ParserInfo CliCommand
 opts = info (cliParser <**> helper <**> OAE.simpleVersioner versionStr)
   (    fullDesc
-    <> progDesc "call 'morloc make -h', 'morloc install -h', etc for details"
+    <> progDesc "Call 'morloc make -h', 'morloc install -h', etc for details"
     <> header ("morloc v" <> versionStr)
   )
 
@@ -57,7 +57,7 @@ makeCommandParser = MakeCommand
   <*> optScript
 
 makeSubcommand :: Mod CommandFields CliCommand
-makeSubcommand = command "make" (info (CmdMake <$> makeCommandParser) (progDesc "build a morloc script"))
+makeSubcommand = command "make" (info (CmdMake <$> makeCommandParser) (progDesc "Build a morloc script"))
 
 
 data InitCommand = InitCommand
@@ -77,7 +77,7 @@ initCommandParser = InitCommand
   <*> optSlurmSupport
 
 initSubcommand :: Mod CommandFields CliCommand
-initSubcommand = command "init" (info (CmdInit <$> initCommandParser) (progDesc "initialize morloc environment"))
+initSubcommand = command "init" (info (CmdInit <$> initCommandParser) (progDesc "Initialize morloc environment"))
 
 data InstallCommand = InstallCommand
   { installConfig :: String
@@ -98,7 +98,7 @@ makeInstallParser = InstallCommand
   <*> optModuleStrings
 
 installSubcommand :: Mod CommandFields CliCommand
-installSubcommand = command "install" (info (CmdInstall <$> makeInstallParser) (progDesc "install a morloc module"))
+installSubcommand = command "install" (info (CmdInstall <$> makeInstallParser) (progDesc "Install a morloc module"))
 
 
 data TypecheckCommand = TypecheckCommand
@@ -125,12 +125,12 @@ makeTypecheckParser = TypecheckCommand
 
 typecheckSubcommand :: Mod CommandFields CliCommand
 typecheckSubcommand =
-  command "typecheck" (info (CmdTypecheck <$> makeTypecheckParser) (progDesc "typecheck a morloc program"))
+  command "typecheck" (info (CmdTypecheck <$> makeTypecheckParser) (progDesc "Typecheck a morloc program"))
 
 
 dumpSubcommand :: Mod CommandFields CliCommand
 dumpSubcommand =
-  command "dump" (info (CmdDump <$> makeDumpParser) (progDesc "dump parsed code"))
+  command "dump" (info (CmdDump <$> makeDumpParser) (progDesc "Dump parsed code"))
 
 data DumpCommand = DumpCommand
   { dumpConfig :: String
@@ -154,13 +154,13 @@ optExpression :: Parser Bool
 optExpression = switch
   ( long "expression"
   <> short 'e'
-  <> help "read script as string rather than file"
+  <> help "Read script as string rather than file"
   )
 
 optVanilla :: Parser Bool
 optVanilla = switch
   ( long "vanilla"
-  <> help "ignore local configuration files"
+  <> help "Ignore local configuration files"
   )
 
 optForce :: Parser OverwriteProtocol
@@ -173,7 +173,7 @@ optForce = flag DoNotOverwrite ForceOverwrite
 optUseSSH :: Parser GitProtocol
 optUseSSH = flag HttpsProtocol SshProtocol
   ( long "ssh"
-  <> help "Use the SSH protocol for remote git access (default: https)"
+  <> help "Use SSH protocol for remote git access"
   )
 
 optModuleStrings :: Parser [String]
@@ -203,14 +203,14 @@ optQuiet :: Parser Bool
 optQuiet = switch
   ( long "quiet"
   <> short 'q'
-  <> help "print minimal output to STDERR"
+  <> help "Print minimal output to STDERR"
   )
 
 optRealize :: Parser Bool
 optRealize = switch
   ( long "realize"
   <> short 'r'
-  <> help "typecheck the composition realizations"
+  <> help "Typecheck the composition realizations"
   )
 
 optConfig :: Parser String
@@ -218,7 +218,7 @@ optConfig = strOption
   ( long "config"
   <> metavar "CONFIG"
   <> value ""
-  <> help "use this config file rather than the one in morloc home"
+  <> help "Use this config rather than the one in morloc home"
   )
 
 optOutfile :: Parser String
@@ -228,7 +228,7 @@ optOutfile = strOption
   <> metavar "OUT"
   <> value ""
   <> showDefault
-  <> help "the name of the generated executable"
+  <> help "The name of the generated executable"
   )
 
 optScript :: Parser String
@@ -238,5 +238,5 @@ optType :: Parser Bool
 optType = switch
   ( long "type"
   <> short 't'
-  <> help "parse a typestring instread of an expression"
+  <> help "Parse a typestring instread of an expression"
   )
