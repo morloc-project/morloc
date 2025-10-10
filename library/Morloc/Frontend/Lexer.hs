@@ -301,7 +301,7 @@ stringLiteral = lexeme $ do
 mkFreename :: Parser Char -> Parser MT.Text
 mkFreename firstLetter = (lexeme . try) (p >>= check)
   where
-    p = fmap MT.pack $ (:) <$> firstLetter <*> many (alphaNumChar <|> char '\'')
+    p = fmap MT.pack $ (:) <$> firstLetter <*> many (alphaNumChar <|> char '\'' <|> char '_')
     check x =
       if x `elem` reservedWords
         then failure Nothing Set.empty -- TODO: error message
