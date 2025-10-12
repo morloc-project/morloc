@@ -26,7 +26,7 @@ jobs:
 
       - name: Build Morloc
         run: |
-          stack --allow-different-user install --fast --local-bin-path=/usr/local/bin
+          stack --allow-different-user install --local-bin-path=/usr/local/bin
 
       - name: Load morloc modules
         run: |
@@ -35,5 +35,5 @@ jobs:
 
       - name: Test morloc
         run: |
-          stack test --fast
+          stack test
         timeout-minutes: 30
