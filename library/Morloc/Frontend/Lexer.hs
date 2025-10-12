@@ -56,6 +56,7 @@ import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
 import qualified Text.Megaparsec.Char.Lexer as L
 import qualified Morloc.Language as ML
+import qualified Data.Char as DC
 
 type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
 
@@ -293,11 +294,52 @@ reserved :: MT.Text -> Parser MT.Text
 reserved w = try (symbol w)
 
 stringLiteral :: Parser MT.Text
-stringLiteral = lexeme $ do
+stringLiteral = stringLiteralMultiline <|> stringLiteralDoubleQuote
+
+stringLiteralDoubleQuote :: Parser MT.Text
+stringLiteralDoubleQuote = lexeme $ do
   _ <- char '\"'
   s <- many (noneOf ['"'])
   _ <- char '\"'
   return $ MT.pack s
+
+stringLiteralMultiline :: Parser MT.Text
+stringLiteralMultiline = lexeme $ do
+  sep <- string "'''" <|> string "\"\"\""
+  s <- many (notFollowedBy (string sep) *> anySingle)
+  _ <- string sep
+  return . respace . MT.pack $ s
+  where
+    -- Rules for removing space from multi-line string
+    respace :: MT.Text -> MT.Text
+    respace
+      = MT.unlines
+      . reindent
+      . removeLeadingSpace
+      . removeTrailingSpace
+      . MT.lines
+
+    --  1. Remove zero or one leading newlines
+    removeLeadingSpace :: [MT.Text] -> [MT.Text]
+    removeLeadingSpace [] = []
+    removeLeadingSpace (s:rs)
+      | MT.null (MT.strip s) = rs
+      | otherwise = s:rs
+
+    --  2. Remove the final newline and preceding non-newline space
+    removeTrailingSpace :: [MT.Text] -> [MT.Text]
+    removeTrailingSpace [] = []
+    removeTrailingSpace ss
+      | MT.null . MT.strip . last $ ss = init ss
+      | otherwise = ss
+
+    --  3. Trim an initial number of space from each line equal to the minimum
+    --     number of starting spaces
+    reindent :: [MT.Text] -> [MT.Text]
+    reindent ss = map (MT.drop initSpaces) ss where
+      initSpaces = minimum $ map (MT.length . MT.takeWhile DC.isSpace) ss
+
+
 
 hole :: Parser ()
 hole = lexeme $ do

@@ -1,0 +1,6 @@
+"  This is the start of a grand paragraph. That
+has many lines that have few initial spaces than
+the first paragraph."
+"you can also use "multiline" strings in one line with internal quotes"
+"single quotes are also OK"
+""

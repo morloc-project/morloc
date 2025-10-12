@@ -1,0 +1,17 @@
+module foo (s1, s2, s3, s4)
+
+s1 =
+  """
+    This is the start of a grand paragraph. That
+  has many lines that have few initial spaces than
+  the first paragraph.
+  """
+
+s2 = """you can also use "multiline" strings in one line with internal quotes"""
+
+s3 = '''single quotes are also OK'''
+
+-- empty string
+s4 =
+  """
+  """

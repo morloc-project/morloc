@@ -134,7 +134,12 @@ generalSerial x0@(AnnoS (Idx i t) _ _) = do
     generalSerial' base _ (AnnoS _ _ (LogS x))
       = return $ base { commandForm = if x then "true" else "false" }
     generalSerial' base _ (AnnoS _ _ (StrS x))
-      = return $ base { commandForm = "\\\"" <> pretty x <> "\\\"" }
+      = return $ base { commandForm = "\\\"" <> pretty cstring <> "\\\"" }
+        where
+          cstring = MT.replace "\"" "\\\"" $ case MT.lines x of
+            [] -> ""
+            [l] ->  l
+            ll -> MT.concat [l <> "\\n" | l <- init ll] <> last ll
     -- if a nested accessor is observed, evaluate the nested expression and
     -- append the path
     generalSerial' base ps (AnnoS _ _ (AccS k x@(AnnoS _ _ (AccS _ _)))) = do

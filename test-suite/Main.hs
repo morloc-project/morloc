@@ -38,7 +38,7 @@ main = do
 
       -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
-      , golden "hofs-1" "hofs-1"
+      , golden "multiline-strings" "multiline-strings"
 
       , golden "holes-func" "holes-func"
       , golden "holes-record" "holes-record"
@@ -325,6 +325,9 @@ main = do
       -- testing packet transmission
       , golden "packets-large (wait ~10s)" "packets-large"
       , golden "packets-interop (wait ~10s)" "packets-interop"
+
+      -- many tests of higher-order functions
+      , golden "hofs-1" "hofs-1"
 
       -- test errors
       , golden "errors (wait ~10s)" "errors"
