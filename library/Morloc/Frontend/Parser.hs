@@ -139,12 +139,13 @@ pTopExpr =
 pExpr :: Parser ExprI
 pExpr =
       try pAcc    -- access <expr>@
+  <|> try pHolE
   <|> try pUni
   <|> try pComposition
-  <|> try pNamE   -- record
-  <|> try pTupE
-  <|> try pAnn
   <|> try pApp
+  <|> try pNamE   -- record
+  <|> try pAnn
+  <|> try pTupE
   <|> try pStrE
   <|> try pLogE
   <|> try pNumE
@@ -552,26 +553,40 @@ pAcc = do
 
 pAnn :: Parser ExprI
 pAnn = do
-  e <-
-    parens pExpr <|> pVar <|> pLstE <|> try pNumE <|> pLogE <|> pStrE
+  e <-  try (parens pExpr)
+    <|> try pTupE
+    <|> pVar
+    <|> pLstE
+    <|> pNamE
+    <|> pNumE
+    <|> pLogE
+    <|> pStrE
   _ <- op "::"
   t <- pTypeGen
   exprI $ AnnE e t
 
 pApp :: Parser ExprI
 pApp = do
-  f <- parens pExpr <|> pVar
-  es <- many1 s
+  f <- parseFun
+  es <- many1 parseArg
   exprI $ AppE f es
   where
-    s =   try pAcc
+    parseFun =
+          pVar
+      <|> try pTupE -- only valid if wholy
+      <|> try pLstE     --  /
+      <|> try pNamE     -- /
+      <|> try (parens pExpr)
+    parseArg =
+          try pAcc
       <|> try pUni
+      <|> try pTupE
       <|> try (parens pExpr)
       <|> try pStrE
       <|> try pLogE
       <|> try pNumE
+      <|> pHolE
       <|> pLstE
-      <|> pTupE
       <|> pNamE
       <|> pVar
 
@@ -632,6 +647,8 @@ pVar = do
     mergeResources (Just (RemoteResources r1 m1 t1 g1)) (Just (RemoteResources r2 m2 t2 g2)) =
         Just $ RemoteResources (useRight r1 r2) (useRight m1 m2) (useRight t1 t2) (useRight g1 g2)
 
+pHolE :: Parser ExprI
+pHolE = hole >> exprI HolE
 
 pEVar :: Parser EVar
 pEVar = fmap EV freenameL

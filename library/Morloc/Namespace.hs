@@ -451,6 +451,8 @@ data Expr
   | VarE ManifoldConfig -- annotations the tags link to
          EVar   -- main variable
   -- ^ (x)
+  | HolE
+  -- ^ a "hole" variable that will be desugared into lambda-bound variable
   | AccE Key ExprI
   -- ^ person@age - access a field in a record
   | LstE [ExprI]
@@ -1386,6 +1388,7 @@ instance Pretty ExprI where
   pretty (ExprI i e) = parens (pretty e) <> ":" <> pretty i
 
 instance Pretty Expr where
+  pretty HolE = "_"
   pretty UniE = "()"
   pretty (ModE v es) = align . vsep $ ("module" <+> pretty v) : map pretty es
   pretty (ClsE (Typeclass cls vs sigs)) = "class" <+> pretty cls <+> hsep (map pretty vs) <> (align . vsep . map pretty) sigs

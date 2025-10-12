@@ -25,6 +25,7 @@ module Morloc.Frontend.Lexer
   , lexeme
   , many1
   , sepBy2
+  , hole
   , freename
   , freenameU
   , freenameL
@@ -297,6 +298,11 @@ stringLiteral = lexeme $ do
   s <- many (noneOf ['"'])
   _ <- char '\"'
   return $ MT.pack s
+
+hole :: Parser ()
+hole = lexeme $ do
+ _ <- char '_'
+ return ()
 
 mkFreename :: Parser Char -> Parser MT.Text
 mkFreename firstLetter = (lexeme . try) (p >>= check)
