@@ -137,7 +137,8 @@ realize s0 = do
             return (BndS v, Idx i scores)
         _ -> return (BndS v, zipLang i rstat)
 
-  scoreExpr _ (CallS src, i) = return (CallS src, Idx i [(srcLang src, callCost src)])
+  scoreExpr _     (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, callCost src)])
+  scoreExpr rstat (ExeS x@(PatCall   _), i) = return (ExeS x, zipLang i rstat)
   scoreExpr rstat (RealS x, i) = return (RealS x, zipLang i rstat)
   scoreExpr rstat (IntS x, i) = return (IntS x, zipLang i rstat)
   scoreExpr rstat (LogS x, i) = return (LogS x, zipLang i rstat)
@@ -318,7 +319,8 @@ realize s0 = do
     xs' <- mapM (collapseAnnoS lang . snd) rs
     return (NamS (zip (map fst rs) xs'), Idx i lang)
   -- collapse leaf expressions
-  collapseExpr _ _ (CallS src, Idx i _) = return (CallS src, Idx i (Just (srcLang src)))
+  collapseExpr _ _ (ExeS x@(SrcCall src), Idx i _) = return (ExeS x, Idx i (Just (srcLang src)))
+  collapseExpr _ lang (ExeS x@(PatCall _), Idx i _) = return (ExeS x, Idx i lang)
   collapseExpr _ lang (BndS v,   Idx i _) = return (BndS v,   Idx i lang)
   collapseExpr _ lang (UniS,   Idx i _) = return (UniS,   Idx i lang)
   collapseExpr _ lang (RealS x, Idx i _) = return (RealS x, Idx i lang)
@@ -379,7 +381,7 @@ realize s0 = do
         (IntS x) -> return (IntS x)
         (LogS x) -> return (LogS x)
         (StrS x) -> return (StrS x)
-        (CallS x) -> return (CallS x)
+        (ExeS x) -> return (ExeS x)
       return (AnnoS g (Idx i lang) e'')
 
 -- | This function is called on trees that contain no language-specific

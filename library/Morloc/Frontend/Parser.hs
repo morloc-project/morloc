@@ -600,7 +600,14 @@ pLogE = do
     pFalse = reserved "False" >> return (LogE False)
 
 pStrE :: Parser ExprI
-pStrE = stringLiteral >>= exprI . StrE
+pStrE = do
+-- (Either Text (Text, [(a, Text)]))
+  eitherS <- stringPatterned pExpr
+  case eitherS of
+    (Left txt) -> exprI . StrE $ txt
+    (Right (s, es)) -> do
+      pattern <- exprI . PatE $ PatternText s (map snd es)
+      exprI $ AppE pattern (map fst es)
 
 pNumE :: Parser ExprI
 pNumE = do

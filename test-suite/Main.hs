@@ -38,8 +38,6 @@ main = do
 
       -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
-      , golden "multiline-strings" "multiline-strings"
-
       , golden "holes-func" "holes-func"
       , golden "holes-record" "holes-record"
       , golden "holes-simple" "holes-simple"
@@ -69,6 +67,9 @@ main = do
       , golden "string-encoding" "string-encoding"
       , golden "string-encoding-utf8" "string-encoding-utf8"
       , golden "string-json-parsing" "string-json-parsing"
+      , golden "string-multiline" "string-multiline"
+      , golden "string-interpolation" "string-interpolation"
+
 
       , golden "file-input-py" "file-input-py"
       , golden "file-input-c" "file-input-c"

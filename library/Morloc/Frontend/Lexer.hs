@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {-|
 Module      : Morloc.Frontend.Lexer
@@ -39,6 +40,7 @@ module Morloc.Frontend.Lexer
   , sc
   , setMinPos
   , stringLiteral
+  , stringPatterned
   , surround
   , symbol
   , pLang
@@ -54,11 +56,12 @@ import qualified Control.Monad.State as CMS
 import qualified Data.Scientific as DS
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
+import Morloc.Data.Text (Text)
 import qualified Text.Megaparsec.Char.Lexer as L
 import qualified Morloc.Language as ML
 import qualified Data.Char as DC
 
-type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
+type Parser a = CMS.StateT ParserState (Parsec Void Text) a
 
 data ParserState = ParserState {
     stateModulePath :: Maybe Path
@@ -128,7 +131,7 @@ isInset = do
 sc :: Parser ()
 sc = L.space space1 comments empty
 
-symbol :: MT.Text -> Parser MT.Text
+symbol :: Text -> Parser Text
 symbol = lexeme . L.symbol sc
 
 lexemeBase :: Parser a -> Parser a
@@ -195,14 +198,14 @@ comments = try lineComment
     return ()
 
 
-preDoc :: Parser MT.Text
+preDoc :: Parser Text
 preDoc = do
     _ <- string "--'"
     docstr <- takeWhileP Nothing (/= '\n')
     _ <- sc
     return docstr
 
-postDoc :: Parser MT.Text
+postDoc :: Parser Text
 postDoc = do
     _ <- string "--^"
     docstr <- takeWhileP Nothing (/= '\n')
@@ -268,7 +271,7 @@ braces = surround (symbol "{") (symbol "}")
 angles :: Parser a -> Parser a
 angles = surround (symbol "<") (symbol ">")
 
-reservedWords :: [MT.Text]
+reservedWords :: [Text]
 reservedWords =
   [ "module"
   , "source"
@@ -287,58 +290,91 @@ reservedWords =
 operatorChars :: String
 operatorChars = ":!$%&*+./<=>?@\\^|-~#"
 
-op :: MT.Text -> Parser MT.Text
+op :: Text -> Parser Text
 op o = (lexeme . try) (symbol o <* notFollowedBy (oneOf operatorChars))
 
-reserved :: MT.Text -> Parser MT.Text
+reserved :: Text -> Parser Text
 reserved w = try (symbol w)
 
-stringLiteral :: Parser MT.Text
-stringLiteral = stringLiteralMultiline <|> stringLiteralDoubleQuote
-
-stringLiteralDoubleQuote :: Parser MT.Text
-stringLiteralDoubleQuote = lexeme $ do
+stringLiteral :: Parser Text
+stringLiteral = lexeme $ do
   _ <- char '\"'
   s <- many (noneOf ['"'])
   _ <- char '\"'
   return $ MT.pack s
 
-stringLiteralMultiline :: Parser MT.Text
-stringLiteralMultiline = lexeme $ do
-  sep <- string "'''" <|> string "\"\"\""
-  s <- many (notFollowedBy (string sep) *> anySingle)
-  _ <- string sep
-  return . respace . MT.pack $ s
-  where
-    -- Rules for removing space from multi-line string
-    respace :: MT.Text -> MT.Text
-    respace
-      = MT.unlines
-      . reindent
-      . removeLeadingSpace
-      . removeTrailingSpace
-      . MT.lines
 
+stringPatterned :: Parser a -> Parser (Either Text (Text, [(a, Text)]))
+stringPatterned exprParser = do
+  x <- stringLiteralMultiline exprParser <|> stringLiteralDoubleQuote exprParser
+  case x of
+    (s, []) -> return $ Left s
+    (s, es) -> return $ Right (s, es)
+
+stringLiteralDoubleQuote :: Parser a -> Parser (Text, [(a, Text)])
+stringLiteralDoubleQuote exprParser = lexeme $ do
+  _ <- char '\"'
+  s <- interpolatedStringParser "\"" exprParser
+  _ <- char '\"'
+  return $ s
+
+stringLiteralMultiline :: Parser a -> Parser (Text, [(a, Text)])
+stringLiteralMultiline exprParser = lexeme $ do
+  sep <- string "'''" <|> string "\"\"\""
+  (s, exprs) <- interpolatedStringParser sep exprParser
+  _ <- string sep
+  return . reindent . removeTrailingSpace $ (removeLeadingSpace s, exprs)
+  where
     --  1. Remove zero or one leading newlines
-    removeLeadingSpace :: [MT.Text] -> [MT.Text]
-    removeLeadingSpace [] = []
-    removeLeadingSpace (s:rs)
-      | MT.null (MT.strip s) = rs
-      | otherwise = s:rs
+    removeLeadingSpace :: Text -> Text
+    removeLeadingSpace (MT.lines -> []) = ""
+    removeLeadingSpace (MT.lines -> (s:rs))
+      | MT.null (MT.strip s) = MT.unlines rs
+      | otherwise = MT.unlines (s:rs)
 
     --  2. Remove the final newline and preceding non-newline space
-    removeTrailingSpace :: [MT.Text] -> [MT.Text]
-    removeTrailingSpace [] = []
-    removeTrailingSpace ss
-      | MT.null . MT.strip . last $ ss = init ss
-      | otherwise = ss
+    removeTrailingSpace :: (Text, [(a, Text)]) -> (Text, [(a, Text)])
+    removeTrailingSpace (MT.lines -> [], []) = ("", [])
+    removeTrailingSpace x@(MT.lines -> ss, [])
+      | MT.null . MT.strip . last $ ss = (MT.unlines (init ss), [])
+      | otherwise = x
+    removeTrailingSpace (s, ss) = case (init ss, last ss) of
+      (initLines, (e, MT.lines -> slines)) ->
+        if MT.null . MT.strip . last $ slines
+        then (s, initLines <> [(e, MT.unlines (init slines))])
+        else (s, ss)
 
     --  3. Trim an initial number of space from each line equal to the minimum
     --     number of starting spaces
-    reindent :: [MT.Text] -> [MT.Text]
-    reindent ss = map (MT.drop initSpaces) ss where
+    reindent :: (Text, [(a, Text)]) -> (Text, [(a, Text)])
+    reindent (MT.lines -> ss, []) = (MT.unlines $ map (MT.drop initSpaces) ss, [])
+      where
       initSpaces = minimum $ map (MT.length . MT.takeWhile DC.isSpace) ss
+    reindent (s, xs) = (replaceFun s, map (second replaceFun) xs)
+      where
+      replaceFun = MT.replace replacePattern "\n"
+      replacePattern = MT.pack $ '\n' : take initSpace (repeat ' ')
+      initSpace = minimum $ map (MT.length . MT.takeWhile DC.isSpace) (MT.lines $ MT.concat (s : map snd xs))
 
+-- | Parse an interpolated string with embedded expressions
+interpolatedStringParser :: Text -> Parser a -> Parser (Text, [(a, Text)])
+interpolatedStringParser sep exprParser = do
+  initial <- literalText sep
+  parts <- many $ do
+    expr <- interpolatedExpr exprParser
+    text <- literalText sep
+    pure (expr, text)
+  pure (initial, parts)
+
+-- | Parse literal text until we hit an interpolation or end
+literalText :: Text -> Parser Text
+literalText sep = MT.pack <$> many literalChar
+  where
+    literalChar = notFollowedBy (string "#{" <|> string sep) >> anySingle
+
+-- | Parse an interpolated expression: #{...}
+interpolatedExpr :: Parser a -> Parser a
+interpolatedExpr exprParser = string "#{" *> exprParser <* char '}'
 
 
 hole :: Parser ()
@@ -346,7 +382,7 @@ hole = lexeme $ do
  _ <- char '_'
  return ()
 
-mkFreename :: Parser Char -> Parser MT.Text
+mkFreename :: Parser Char -> Parser Text
 mkFreename firstLetter = (lexeme . try) (p >>= check)
   where
     p = fmap MT.pack $ (:) <$> firstLetter <*> many (alphaNumChar <|> char '\'' <|> char '_')
@@ -355,21 +391,21 @@ mkFreename firstLetter = (lexeme . try) (p >>= check)
         then failure Nothing Set.empty -- TODO: error message
         else return x
 
-freename :: Parser MT.Text
+freename :: Parser Text
 freename = mkFreename letterChar
 
 -- part of a module path, must start with a lower-case letter
 -- may have uppercase or digits or dashes after the first letter
-moduleComponent :: Parser MT.Text
+moduleComponent :: Parser Text
 moduleComponent = lexeme $ do
     firstLetter <- lowerChar
     nextLetters <- many (alphaNumChar <|> char '-')
     return $ MT.pack (firstLetter : nextLetters)
 
-freenameL :: Parser MT.Text
+freenameL :: Parser Text
 freenameL = mkFreename lowerChar
 
-freenameU :: Parser MT.Text
+freenameU :: Parser Text
 freenameU = mkFreename upperChar
 
 -- | match the name of a supported language

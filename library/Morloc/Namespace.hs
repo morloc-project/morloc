@@ -86,6 +86,7 @@ module Morloc.Namespace
   , Symbol(..)
   , AliasedSymbol(..)
   , Signature(..)
+  , Pattern(..)
   , Expr(..)
   , ExprI(..)
   , E(..)
@@ -96,6 +97,7 @@ module Morloc.Namespace
   , Constraint(..)
   , Property(..)
   -- ** Types used in post-typechecking tree
+  , ExecutableExpr(..)
   , AnnoS(..)
   , ExprS(..)
   , mapAnnoSM
@@ -415,6 +417,9 @@ data Signature = Signature EVar (Maybe Label) EType
 data Typeclass a = Typeclass ClassName [TVar] [a]
   deriving (Show, Ord, Eq)
 
+data Pattern = PatternText Text [Text]
+  deriving (Show, Ord, Eq)
+
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)
 
@@ -472,6 +477,8 @@ data Expr
   -- ^ boolean primitive
   | StrE Text
   -- ^ string primitive
+  | PatE Pattern
+  -- ^ a pattern that can be applied as a function
   deriving (Show, Ord, Eq)
 
 data Import =
@@ -646,6 +653,8 @@ data E
   | SrcP (Indexed Type) Source
   deriving (Ord, Eq, Show)
 
+data ExecutableExpr = SrcCall Source | PatCall Pattern
+  deriving (Ord, Eq, Show)
 
 -- The AnnoS ExprS cycle is annoying, it requires mutually recursive
 -- operations. But please think very carefully before replacing it with
@@ -673,7 +682,7 @@ data ExprS g f c
   | IntS Integer
   | LogS Bool
   | StrS Text
-  | CallS Source
+  | ExeS ExecutableExpr
 
 data Three a b c = A a | B b | C c
   deriving (Ord, Eq, Show)
@@ -1387,8 +1396,12 @@ instance Pretty GammaIndex where
 instance Pretty ExprI where
   pretty (ExprI i e) = parens (pretty e) <> ":" <> pretty i
 
+instance Pretty Pattern where
+  pretty (PatternText s ss) = dquotes $ hcat (pretty s : [ "#{}" <> pretty s' | s' <- ss])
+
 instance Pretty Expr where
   pretty HolE = "_"
+  pretty (PatE pat) = "pattern:" <+> pretty pat
   pretty UniE = "()"
   pretty (ModE v es) = align . vsep $ ("module" <+> pretty v) : map pretty es
   pretty (ClsE (Typeclass cls vs sigs)) = "class" <+> pretty cls <+> hsep (map pretty vs) <> (align . vsep . map pretty) sigs
@@ -1453,7 +1466,11 @@ instance Foldable f => Pretty (ExprS a f b) where
     pretty (IntS x)     = viaShow x
     pretty (LogS x)     = viaShow x
     pretty (StrS x)     = viaShow x
-    pretty (CallS x)    = pretty x
+    pretty (ExeS x)     = pretty x
+
+instance Pretty ExecutableExpr where
+  pretty (SrcCall src) = pretty src
+  pretty (PatCall pat) = pretty pat
 
 instance Pretty Signature where
   pretty (Signature v _ e) = pretty v <+> "::" <+> pretty (etype e)
@@ -1622,7 +1639,7 @@ mapExprSM _ (RealS x) = return $ RealS x
 mapExprSM _ (IntS x) = return $ IntS x
 mapExprSM _ (LogS x) = return $ LogS x
 mapExprSM _ (StrS x) = return $ StrS x
-mapExprSM _ (CallS x) = return $ CallS x
+mapExprSM _ (ExeS x) = return $ ExeS x
 
 mapAnnoSM :: (Traversable f, Monad m) => (ExprS g f c -> g -> c -> m (g', c')) -> AnnoS g f c -> m (AnnoS g' f c')
 mapAnnoSM fun (AnnoS g c e) = do

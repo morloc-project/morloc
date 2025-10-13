@@ -126,7 +126,7 @@ instance Dependable NativeExpr where
       i <- newIndex
       return $ D (LetVarN (typeFof e) i) ((i, Right e) : deps)
 
-  isAtomic AppSrcN{} = False
+  isAtomic AppExeN{} = False
   isAtomic ManN{} = False
   isAtomic SerialLetN{} = False
   isAtomic NativeLetN{} = False
@@ -198,10 +198,10 @@ invertSerialManifold sm0 =
   invertSerialExprM (SerializeS_ s (D ne lets)) = atomize (SerializeS s ne) lets
 
   invertNativeExprM :: NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) -> Index (D NativeExpr)
-  invertNativeExprM (AppSrcN_ t src qs nativeArgs) = do
+  invertNativeExprM (AppExeN_ t exe qs nativeArgs) = do
     let nativeArgs' = map unD nativeArgs
         deps = concatMap getDeps nativeArgs
-    atomize (AppSrcN t src qs nativeArgs') deps
+    atomize (AppExeN t exe qs nativeArgs') deps
   invertNativeExprM (ManN_ (D nm lets)) = atomize (ManN nm) lets
   invertNativeExprM (ReturnN_ (D ne lets)) = atomize (ReturnN ne) lets
 
@@ -214,7 +214,7 @@ invertSerialManifold sm0 =
   invertNativeExprM (BndVarN_ t i) = atomize (BndVarN t i) []
   invertNativeExprM (DeserializeN_ t s (D se lets)) = atomize (DeserializeN t s se) lets
   invertNativeExprM (AccN_ o v (D ne deps) key) = atomize (AccN o v ne key) deps
-  invertNativeExprM (SrcN_ t src) = atomize (SrcN t src) []
+  invertNativeExprM (ExeN_ t x) = atomize (ExeN t x) []
   invertNativeExprM (ListN_ v t nes) = atomize (ListN v t (map unD nes)) (concatMap getDeps nes)
   invertNativeExprM (TupleN_ v xs) = atomize (TupleN v (map unD xs)) (concatMap getDeps xs)
   invertNativeExprM (RecordN_ o v ps rs) = atomize (RecordN o v ps (map (second unD) rs)) (concatMap (getDeps . snd) rs)

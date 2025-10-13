@@ -213,8 +213,10 @@ translateSegment m0 =
       return $ e {poolExpr = serialized, poolPriorLines = poolPriorLines e <> assignments}
 
     makeNativeExpr :: NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
-    makeNativeExpr _ (AppSrcN_ _ (pretty . srcName -> functionName) _ xs) =
-        return $ mergePoolDocs ((<>) functionName . tupled) (map snd xs)
+    makeNativeExpr _ (AppExeN_ _ (SrcCall src) _ xs) =
+        return $ mergePoolDocs ((<>) (pretty (srcName src)) . tupled) (map snd xs)
+    makeNativeExpr _ (AppExeN_ _ (PatCall p) _ xs) =
+        return $ mergePoolDocs (evaluatePattern p) (map snd xs)
     makeNativeExpr _ (ManN_ call) = return call
     makeNativeExpr _ (ReturnN_ x) =
         return $ x { poolExpr = "return(" <> poolExpr x <> ")" }
@@ -230,7 +232,8 @@ translateSegment m0 =
           }
     makeNativeExpr _ (AccN_ _ _ x k) =
         return $ x {poolExpr = recordAccess (poolExpr x) (pretty k)}
-    makeNativeExpr _ (SrcN_ _ src) = return $ defaultValue { poolExpr = pretty (srcName src) }
+    makeNativeExpr _ (ExeN_ _ (SrcCall src)) = return $ defaultValue { poolExpr = pretty (srcName src) }
+    makeNativeExpr _ (ExeN_ _ (PatCall _)) = error "Unreachable: patterns are always used in applications"
     makeNativeExpr _ (ListN_ v _ xs) = return $ mergePoolDocs rlist xs where
        rlist es' = case v of
          (FV _ (CV "numeric")) -> "c" <> tupled es'
@@ -279,6 +282,10 @@ translateSegment m0 =
     makeLet namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
       let rs = rs1 ++ [ namer i <+> "<-" <+> e1' ] ++ rs2
       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
+
+evaluatePattern :: Pattern -> [MDoc] -> MDoc
+evaluatePattern (PatternText firstStr fragments) xs
+  = "paste0" <> tupled (dquotes (pretty firstStr) : concat [[x, dquotes (pretty s)] | (x, s) <- zip xs fragments])
 
 makePool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc
 makePool sources dynlibs manifolds

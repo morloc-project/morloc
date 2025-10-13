@@ -118,7 +118,7 @@ resolveTypes (AnnoS (Idx i t) ci e)
   f :: ExprS (Indexed TypeU) Many Int -> ExprS (Indexed Type) Many Int
   f (BndS x) = BndS x
   f (VarS v xs) = VarS v (fmap resolveTypes xs)
-  f (CallS src) = CallS src
+  f (ExeS exe) = ExeS exe
   f (AccS k x) = AccS k (resolveTypes x)
   f (AppS x xs) = AppS (resolveTypes x) (map resolveTypes xs)
   f (LamS vs x) = LamS vs (resolveTypes x)
@@ -213,7 +213,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
   f _ g0 (IntS x) = return (g0, IntS x)
   f _ g0 (LogS x) = return (g0, LogS x)
   f _ g0 (StrS x) = return (g0, StrS x)
-  f _ g0 (CallS x) = return (g0, CallS x)
+  f _ g0 (ExeS x) = return (g0, ExeS x)
 
   connectInstance :: Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
   connectInstance g0 [] = return g0
@@ -304,6 +304,16 @@ synthE i g0 (AccS k e) = do
       case TE.evaluateStep gscope t of
         (Just t') -> accessRecord g t'
         Nothing -> gerr i (KeyError k t)
+
+-- synthesize a string interpolation pattern
+synthE i g (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternText _ _)))) es) = do
+  (g1, _, f1) <- synthG g f
+  (g2, _, es1, _) <- zipCheck i g1 es (take (length es) (repeat BT.strU))
+  return (g2, BT.strU, AppS f1 es1)
+
+synthE _ g (ExeS (PatCall (PatternText s ss@(length -> n)))) = do
+  let t = FunU (take n (repeat BT.strU)) BT.strU
+  return (g, t, ExeS (PatCall (PatternText s ss)))
 
 --   -->E0
 synthE _ g (AppS f []) = do
@@ -485,9 +495,9 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
 
 -- This case will only be encountered in check, the existential generated here
 -- will be subtyped against the type known from the VarS case.
-synthE _ g (CallS src) = do
+synthE _ g (ExeS exe) = do
   let (g', t) = newvar "call_" g
-  return (g', t, CallS src)
+  return (g', t, ExeS exe)
 
 synthE _ g (BndS v) = do
   (g', t') <- case lookupE v g of
@@ -805,4 +815,4 @@ peakSExpr (RealS x) = "RealS" <+> viaShow x
 peakSExpr (IntS x) = "IntS" <+> pretty x
 peakSExpr (LogS x) = "LogS" <+> pretty  x
 peakSExpr (StrS x) = "StrS" <+> pretty x
-peakSExpr (CallS src) = "CallS" <+> pretty src
+peakSExpr (ExeS exe) = "ExeS" <+> pretty exe

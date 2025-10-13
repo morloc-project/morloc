@@ -31,12 +31,14 @@ toE (AnnoS g _ (RealS x))          = LitP g (MNum x)
 toE (AnnoS g _ (IntS x))           = LitP g (MInt x)
 toE (AnnoS g _ (LogS x))           = LitP g (MLog x)
 toE (AnnoS g _ (StrS x))           = LitP g (MStr x)
-toE (AnnoS g _ (CallS src))        = SrcP g src
+toE (AnnoS g _ (ExeS (SrcCall s))) = SrcP g s
+toE (AnnoS g _ (ExeS (PatCall (PatternText s ss))))
+  = LitP g (MStr (s <> DT.concat ["#{}" <> s' | s' <- ss]))
 
 -- Check the harmony of typed implementations.
 --
 -- A naive implementation of this functions (and mine is naive as heck) will run
--- in exponential time in some cases. This can be avoided with touch of
+-- in exponential time in some cases. This can be avoided with a touch of
 -- memoization. But I will leave that as an exercise for my user (PR's accepted).
 valuecheck :: AnnoS (Indexed Type) Many Int -> MorlocMonad (AnnoS (Indexed Type) Many Int)
 valuecheck e0 = check (toE e0) >> return e0

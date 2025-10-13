@@ -207,7 +207,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0 where
     where
       termtypesToAnnoS :: Int -> Namer -> TermTypes -> MorlocMonad (Namer, [AnnoS Int ManyPoly Int])
       termtypesToAnnoS gi n t = do
-        let calls = [AnnoS gi ci (CallS src) | (_, Idx ci src) <- termConcrete t]
+        let calls = [AnnoS gi ci (ExeS (SrcCall src)) | (_, Idx ci src) <- termConcrete t]
 
         (n', declarations) <- statefulMapM termExprToAnnoS n (termDecl t)
         return (n', (calls <> declarations))
@@ -247,6 +247,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0 where
   f namer (IntE x) = return (namer, IntS x)
   f namer (LogE x) = return (namer, LogS x)
   f namer (StrE x) = return (namer, StrS x)
+  f namer (PatE p) = return (namer, ExeS (PatCall p))
   -- all other expressions are strictly illegal here and represent compiler bugs
   f _ e = error $ "Bug in collectExprS: " <> show (render (pretty e))
 

@@ -57,6 +57,31 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) __attribute_
 
 
 
+std::string interweave_strings(const std::vector<std::string>& first, const std::vector<std::string>& second)
+{
+    // Validate sizes - errors here indicate a bug in the morloc compiler
+    if (first.size() != second.size() + 1) {
+        throw std::invalid_argument("First list must have exactly 1 more element than second list");
+    }
+
+    // Pre-calculate total size to avoid reallocations
+    size_t total_size = 0;
+    for (const auto& s : first) total_size += s.size();
+    for (const auto& s : second) total_size += s.size();
+
+    std::string result;
+    result.reserve(total_size);
+
+    // Interweave the strings
+    for (size_t i = 0; i < second.size(); ++i) {
+        result += first[i];
+        result += second[i];
+    }
+    result += first.back();  // Append the final element from first list
+
+    return result;
+}
+
 // Transforms a serialized value into a message ready for the socket
 template <typename T>
 uint8_t* _put_value(const T& value, const std::string& schema_str) {
@@ -257,7 +282,7 @@ void job_queue_push(job_queue_t* q, int client_fd) {
 }
 
 
-// remove and return the oldest element as soon as one is available 
+// remove and return the oldest element as soon as one is available
 int job_queue_pop(job_queue_t* q) {
     pthread_mutex_lock(&q->mutex);
 
