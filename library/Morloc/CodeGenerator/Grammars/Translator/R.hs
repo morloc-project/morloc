@@ -230,8 +230,6 @@ translateSegment m0 =
           { poolExpr = deserialized
           , poolPriorLines = poolPriorLines x <> assignments
           }
-    makeNativeExpr _ (AccN_ _ _ x k) =
-        return $ x {poolExpr = recordAccess (poolExpr x) (pretty k)}
     makeNativeExpr _ (ExeN_ _ (SrcCall src)) = return $ defaultValue { poolExpr = pretty (srcName src) }
     makeNativeExpr _ (ExeN_ _ (PatCall _)) = error "Unreachable: patterns are always used in applications"
     makeNativeExpr _ (ListN_ v _ xs) = return $ mergePoolDocs rlist xs where

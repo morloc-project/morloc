@@ -119,7 +119,6 @@ resolveTypes (AnnoS (Idx i t) ci e)
   f (BndS x) = BndS x
   f (VarS v xs) = VarS v (fmap resolveTypes xs)
   f (ExeS exe) = ExeS exe
-  f (AccS k x) = AccS k (resolveTypes x)
   f (AppS x xs) = AppS (resolveTypes x) (map resolveTypes xs)
   f (LamS vs x) = LamS vs (resolveTypes x)
   f (LstS xs) = LstS (map resolveTypes xs)
@@ -194,7 +193,6 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
 
   f _ g0 (VarS v (MonomorphicExpr _ xs)) = statefulMapM resolveInstances g0 xs |>> second (VarS v . Many)
   -- propagate
-  f _ g0 (AccS k e) = resolveInstances g0 e |>> second (AccS k)
   f _ g0 (AppS e es) = do
     (g1, e') <- resolveInstances g0 e
     (g2, es') <- statefulMapM resolveInstances g1 es
@@ -279,31 +277,31 @@ synthE _ g (IntS x) = return (g, BT.intU, IntS x)
 synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
 synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 
-synthE i g0 (AccS k e) = do
-  (g1, t1, e1) <- synthG g0 e
-  (g2, valType) <- accessRecord g1 t1
-  return (g2, valType, AccS k e1)
-  where
-    accessRecord :: Gamma -> TypeU -> MorlocMonad (Gamma, TypeU)
-    accessRecord g t@(NamU _ _ _ rs) = case lookup k rs of
-      Nothing -> gerr i (KeyError k t)
-      (Just value) -> return (g, value)
-    accessRecord g t@(ExistU v ps rs) = case lookup k rs of
-      Nothing -> do
-        let (g', value) = newvar (unTVar v <> "_" <> unKey k) g
-        case access1 v (gammaContext g') of
-          (Just (rhs, _, lhs)) -> return (g' { gammaContext = rhs <> [ExistG v ps ((k, value):rs)] <> lhs }, value)
-          Nothing -> do
-            MM.sayVVV $ "Case b"
-                      <> "\n  rs:" <+> pretty rs
-                      <> "\n  v:" <+> pretty v
-            gerr i (KeyError k t)
-      (Just value) -> return (g, value)
-    accessRecord g t = do
-      gscope <- MM.getGeneralScope i
-      case TE.evaluateStep gscope t of
-        (Just t') -> accessRecord g t'
-        Nothing -> gerr i (KeyError k t)
+-- synthE i g0 (AccS k e) = do
+--   (g1, t1, e1) <- synthG g0 e
+--   (g2, valType) <- accessRecord g1 t1
+--   return (g2, valType, AccS k e1)
+--   where
+--     accessRecord :: Gamma -> TypeU -> MorlocMonad (Gamma, TypeU)
+--     accessRecord g t@(NamU _ _ _ rs) = case lookup k rs of
+--       Nothing -> gerr i (KeyError k t)
+--       (Just value) -> return (g, value)
+--     accessRecord g t@(ExistU v ps rs) = case lookup k rs of
+--       Nothing -> do
+--         let (g', value) = newvar (unTVar v <> "_" <> unKey k) g
+--         case access1 v (gammaContext g') of
+--           (Just (rhs, _, lhs)) -> return (g' { gammaContext = rhs <> [ExistG v ps ((k, value):rs)] <> lhs }, value)
+--           Nothing -> do
+--             MM.sayVVV $ "Case b"
+--                       <> "\n  rs:" <+> pretty rs
+--                       <> "\n  v:" <+> pretty v
+--             gerr i (KeyError k t)
+--       (Just value) -> return (g, value)
+--     accessRecord g t = do
+--       gscope <- MM.getGeneralScope i
+--       case TE.evaluateStep gscope t of
+--         (Just t') -> accessRecord g t'
+--         Nothing -> gerr i (KeyError k t)
 
 -- synthesize a string interpolation pattern
 synthE i g (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternText _ _)))) es) = do
@@ -805,7 +803,6 @@ peakSExpr UniS = "UniS"
 peakSExpr (VarS v (MonomorphicExpr mayT _)) = "VarS" <+> pretty v <+> "::" <+> maybe "?" pretty mayT
 peakSExpr (VarS v (PolymorphicExpr cls _ t _)) = "VarS" <+> pretty cls <+> " => " <+> pretty v <+> "::" <+> pretty t
 peakSExpr (BndS v) = "BndS" <+> pretty v
-peakSExpr (AccS k _) = "AccS" <> brackets (pretty k)
 peakSExpr (AppS _ xs) = "AppS" <+> "nargs=" <> pretty (length xs)
 peakSExpr (LamS vs _) = "LamS" <> tupled (map pretty vs)
 peakSExpr (LstS xs) = "LstS" <> "n=" <> pretty (length xs)

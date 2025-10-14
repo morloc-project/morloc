@@ -68,7 +68,6 @@ prettyFoldManifold = FoldWithManifoldM
     makeNativeExpr _ (LetVarN_ _ i) = return $ defaultValue { poolExpr = letNamerN i }
     makeNativeExpr _ (BndVarN_ _ i) = return $ defaultValue { poolExpr = bndNamerN i }
     makeNativeExpr _ (DeserializeN_ _ _ e) = return $ e {poolExpr = "DeserializeN" <> parens (poolExpr e)}
-    makeNativeExpr _ (AccN_ _ _ e k) = return $ e {poolExpr = poolExpr e <> "[" <> dquotes (pretty k) <> "]"}
     makeNativeExpr _ (ExeN_ _ (SrcCall src)) = return $ defaultValue { poolExpr = pretty (srcName src) }
     makeNativeExpr _ (ExeN_ _ (PatCall pat)) = return $ defaultValue { poolExpr = pretty pat }
     makeNativeExpr _ (ListN_ _ _ xs) = return $ mergePoolDocs list xs

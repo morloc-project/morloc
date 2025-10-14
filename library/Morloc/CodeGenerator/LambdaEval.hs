@@ -145,7 +145,6 @@ applyLambdas (AnnoS g c (AppS f es)) = do
   f' <- applyLambdas f
   es' <- mapM applyLambdas es
   return (AnnoS g c (AppS f' es'))
-applyLambdas (AnnoS g c (AccS k e)) = AnnoS g c . AccS k <$> applyLambdas e
 applyLambdas (AnnoS g c (LamS vs e)) = AnnoS g c . LamS vs <$> applyLambdas e
 applyLambdas (AnnoS g c (LstS es)) = AnnoS g c . LstS <$> mapM applyLambdas es
 applyLambdas (AnnoS g c (TupS es)) = AnnoS g c . TupS <$> mapM applyLambdas es
@@ -167,9 +166,6 @@ substituteAnnoS v r = f where
     let f' = f e
         es' = map f es
     in AnnoS g c (AppS f' es')
-  f (AnnoS g c (AccS k e)) =
-    let e' = f e
-    in AnnoS g c (AccS k e')
   f e0@(AnnoS g c (LamS vs e))
     | v `elem` vs = e0 -- the replacement term is shadowed
     | otherwise =

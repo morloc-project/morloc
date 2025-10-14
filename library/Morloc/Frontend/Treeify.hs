@@ -126,7 +126,6 @@ linkAndRemoveAnnotations = f where
   -- everything below is boilerplate (this is why I need recursion schemes)
   f (ExprI i (ModE v es)) = ExprI i <$> (ModE v <$> mapM f es)
   f (ExprI i (AssE v e es)) = ExprI i <$> (AssE v <$> f e <*> mapM f es)
-  f (ExprI i (AccE k e)) = ExprI i <$> (AccE k <$> f e)
   f (ExprI i (LstE es)) = ExprI i <$> (LstE <$> mapM f es)
   f (ExprI i (TupE es)) = ExprI i <$> (TupE <$> mapM f es)
   f (ExprI i (NamE rs)) = do
@@ -217,7 +216,6 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0 where
         (n', e') <- reindexExprI e >>= collectExprS n
         return $ (n', AnnoS gi0 ci e')
 
-  f namer (AccE k e) = collectAnnoS namer e |>> second (AccS k)
   f namer (LstE es) = statefulMapM collectAnnoS namer es |>> second LstS
   f namer (TupE es) = statefulMapM collectAnnoS namer es |>> second TupS
   f namer (NamE rs) = do
@@ -256,7 +254,6 @@ reindexExprI (ExprI i e) = ExprI <$> newIndex i <*> reindexExpr e
 
 reindexExpr :: Expr -> MorlocMonad Expr
 reindexExpr (ModE m es) = ModE m <$> mapM reindexExprI es
-reindexExpr (AccE k e) = AccE k <$> reindexExprI e
 reindexExpr (AnnE e ts) = AnnE <$> reindexExprI e <*> pure ts
 reindexExpr (AppE e es) = AppE <$> reindexExprI e <*> mapM reindexExprI es
 reindexExpr (AssE v e es) = AssE v <$> reindexExprI e <*> mapM reindexExprI es

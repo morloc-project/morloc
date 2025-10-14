@@ -8,7 +8,6 @@ module UnitTypeTests
   , typeOrderTests
   , typeAliasTests
   , packerTests
-  , recordAccessTests
   , whereTests
   , orderInvarianceTests
   , whitespaceTests
@@ -296,40 +295,6 @@ module main (z)
   z = 1
       |]
       int
-    ]
-
-recordAccessTests :: TestTree
-recordAccessTests =
-  testGroup
-    "Test record access"
-    [ assertGeneralType
-      "Access into anonymous record"
-      [r|{a = 5, b = "asdf"}@b|]
-      str
-    , assertGeneralType
-      "Access record variable"
-      [r|
-          record Person = Person {a :: Int, b :: Str}
-          bar :: Person
-          bar@b
-      |]
-      str
-    , assertGeneralType
-      "Access record-returning expression"
-      [r|
-          record Person = Person {a :: Int, b :: Str}
-          bar :: Int -> Person
-          (bar 5)@b
-      |]
-      str
-    , assertGeneralType
-      "Access into tupled"
-      [r|
-         record Person = Person {a :: Int, b :: Str}
-         bar :: Int -> Person
-         ((bar 5)@a, (bar 6)@b)
-      |]
-      (tuple [int, str])
     ]
 
 packerTests :: TestTree
@@ -788,7 +753,7 @@ unitTypeTests =
         "primitive string annotation"
         "\"this is a string literal\" :: Str"
         str
-    , assertGeneralType "primitive declaration" "x = True\n4.2" real
+    , assertGeneralType "primitive declaration" "4.2" real
     -- containers
     -- - lists
     , assertGeneralType "list of one primitive" "[1]" (lst int)

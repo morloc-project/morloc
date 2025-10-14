@@ -41,6 +41,8 @@ module Morloc.Frontend.Lexer
   , setMinPos
   , stringLiteral
   , stringPatterned
+  , parsePatternSetter
+  , parsePatternGetter
   , surround
   , symbol
   , pLang
@@ -303,6 +305,84 @@ stringLiteral = lexeme $ do
   _ <- char '\"'
   return $ MT.pack s
 
+
+parsePatternSetter :: Parser a -> Parser ([Selector], [a])
+parsePatternSetter par = char '.' >> parsePatternSetter' Nothing par
+
+parsePatternGetter :: Parser [Selector]
+parsePatternGetter = char '.' >> parsePatternGetter' Nothing
+
+
+-- -- .(x.y = _, z.0.(x = _, y = _))
+-- -- (\m -> .(x.y, z.0.(x, y)) 1 2 3) data
+parsePatternSetter' :: Maybe (Parser Selector) -> Parser a -> Parser ([Selector], [a])
+parsePatternSetter' maySelInit setValue = lexeme $ do
+  selectors <- parseSelectors maySelInit
+  mayGroup <- optional (parseGroupSetterKey setValue <|> parseGroupSetterIdx setValue)
+  case mayGroup of
+    (Just (s, es)) -> return (selectors <> [s], es)
+    Nothing -> do
+      value <- setValue
+      return $ (selectors, [value])
+
+  where
+
+  parseGroupSetterIdx :: Parser a -> Parser (Selector, [a])
+  parseGroupSetterIdx setValue = lexeme $ parens $ do
+    xs <- sepBy1 (parsePatternSetter' (Just parseSelectorIdx) setValue) (symbol ",")
+    let ss = map ((\(SelectorIdx i : ss) -> (i, ss)) . fst) xs
+        es = concatMap snd xs
+    return (SelectorIdxGrp ss, es)
+
+  parseGroupSetterKey :: Parser a -> Parser (Selector, [a])
+  parseGroupSetterKey setValue = parens $ do
+    xs <- sepBy1 (parsePatternSetter' (Just parseSelectorKey) setValue) (symbol ",")
+    let ss = map ((\(SelectorKey k : ss) -> (k, ss)) . fst) xs
+        es = concatMap snd xs
+    return (SelectorKeyGrp ss, es)
+
+
+parsePatternGetter' :: Maybe (Parser Selector) -> Parser [Selector]
+parsePatternGetter' maySelInit = lexeme $ do
+  selectors <- parseSelectors maySelInit
+  mayGroup <- optional (parseGroupGetterKey <|> parseGroupGetterIdx)
+  return $ case mayGroup of
+    (Just s) -> selectors <> [s]
+    Nothing -> selectors
+
+  where
+
+  parseGroupGetterIdx :: Parser Selector
+  parseGroupGetterIdx = lexeme . parens $ do
+    ss <- sepBy1 (parsePatternGetter' (Just parseSelectorIdx)) (symbol ",")
+    let ss' = map (\((SelectorIdx i):rs) -> (i, rs)) ss
+    return $ SelectorIdxGrp ss'
+
+  parseGroupGetterKey :: Parser Selector
+  parseGroupGetterKey = lexeme . parens $ do
+    ss <- sepBy1 (parsePatternGetter' (Just parseSelectorKey)) (symbol ",")
+    let ss' = map (\((SelectorKey k):rs) -> (k, rs)) ss
+    return $ SelectorKeyGrp ss'
+
+parseSelectors :: Maybe (Parser Selector) -> Parser [Selector]
+parseSelectors mayInitialParser = lexeme $ do
+  s <- fromMaybe parseEitherSelector mayInitialParser
+  ss <- many (char '.' >> parseEitherSelector)
+  return (s:ss)
+
+parseEitherSelector :: Parser Selector
+parseEitherSelector = try parseSelectorIdx <|> try parseSelectorKey
+
+parseSelectorIdx :: Parser Selector
+parseSelectorIdx = SelectorIdx <$> L.decimal
+
+-- if True, then this is an initial key in a group, so will have no dot
+parseSelectorKey :: Parser Selector
+parseSelectorKey = do
+  firstLetter <- lowerChar
+  remaining <- many (alphaNumChar <|> char '\'' <|> char '_')
+  let key = MT.pack (firstLetter : remaining)
+  return $ SelectorKey key
 
 stringPatterned :: Parser a -> Parser (Either Text (Text, [(a, Text)]))
 stringPatterned exprParser = do

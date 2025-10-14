@@ -130,7 +130,6 @@ instance Dependable NativeExpr where
   isAtomic ManN{} = False
   isAtomic SerialLetN{} = False
   isAtomic NativeLetN{} = False
-  isAtomic AccN{} = False
   isAtomic ListN{} = False
   isAtomic TupleN{} = False
   isAtomic _ = True
@@ -213,7 +212,6 @@ invertSerialManifold sm0 =
   invertNativeExprM (LetVarN_ t i) = atomize (LetVarN t i) []
   invertNativeExprM (BndVarN_ t i) = atomize (BndVarN t i) []
   invertNativeExprM (DeserializeN_ t s (D se lets)) = atomize (DeserializeN t s se) lets
-  invertNativeExprM (AccN_ o v (D ne deps) key) = atomize (AccN o v ne key) deps
   invertNativeExprM (ExeN_ t x) = atomize (ExeN t x) []
   invertNativeExprM (ListN_ v t nes) = atomize (ListN v t (map unD nes)) (concatMap getDeps nes)
   invertNativeExprM (TupleN_ v xs) = atomize (TupleN v (map unD xs)) (concatMap getDeps xs)

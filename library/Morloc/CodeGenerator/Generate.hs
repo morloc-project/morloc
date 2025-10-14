@@ -73,7 +73,6 @@ findSockets rAST = do
 findAllLangsSAnno :: AnnoS e One (Indexed Lang) -> [Lang]
 findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e where
   findAllLangsExpr (VarS _ (One x)) = findAllLangsSAnno x
-  findAllLangsExpr (AccS _ x) = findAllLangsSAnno x
   findAllLangsExpr (AppS x xs) = concatMap findAllLangsSAnno (x:xs)
   findAllLangsExpr (LamS _ x) = findAllLangsSAnno x
   findAllLangsExpr (LstS xs) = concatMap findAllLangsSAnno xs
@@ -145,27 +144,6 @@ generalSerial x0@(AnnoS (Idx i t) _ _) = do
             [] -> ""
             [l] ->  l
             ll -> MT.concat [l <> "\\n" | l <- init ll] <> last ll
-    -- if a nested accessor is observed, evaluate the nested expression and
-    -- append the path
-    generalSerial' base ps (AnnoS _ _ (AccS k x@(AnnoS _ _ (AccS _ _)))) = do
-      ncmd <- generalSerial' base ps x
-      case commandSubs ncmd of
-        [(ps1, arg, ps2)] ->
-          return $ ncmd { commandForm = "%s"
-                        , commandSubs = [(ps1, arg, JsonKey k : ps2)]
-                        }
-        _ -> error "Bad record access"
-    -- record the path to and from a record access
-    generalSerial' base ps (AnnoS _ _ (AccS k (AnnoS (Idx _ NamT {}) _ (BndS v)))) =
-      return $ base { commandForm = "%s"
-                    , commandSubs = [(ps, unEVar v, [JsonKey k])] }
-    -- If the accessed type is not a record, try to simplify the type
-    generalSerial' base ps (AnnoS g1 c1 (AccS key (AnnoS (Idx m oldType) c2 x))) = do
-      mayT <- evalGeneralStep i (type2typeu oldType)
-      case mayT of
-        (Just recordType) ->
-          generalSerial' base ps (AnnoS g1 c1 (AccS key (AnnoS (Idx m (typeOf recordType)) c2 x)))
-        Nothing -> MM.throwError . OtherError . render $ "Non-record access of type:" <+> pretty oldType
     generalSerial' base ps (AnnoS _ _ (LstS xs)) = do
       ncmds <- zipWithM (generalSerial' base) [ps ++ [JsonIndex j] | j <- [0..]] xs
       return $ base
@@ -243,10 +221,6 @@ parameterize' _ (AnnoS g c (StrS x))  = return (AnnoS g (c, []) (StrS x))
 parameterize' args (AnnoS g c (BndS v)) = do
   let args' = [r | r@(Arg _ v') <- args, v' == v]
   return $ AnnoS g (c, args') (BndS v)
-parameterize' args (AnnoS g c (AccS k x)) = do
-  x' <- parameterize' args x
-  let args' = pruneArgs args [x']
-  return $ AnnoS g (c, args') (AccS k x')
 parameterize' _ (AnnoS m c (ExeS (SrcCall src)))
   = return $ AnnoS m (c, []) (ExeS (SrcCall src))
 parameterize' _ (AnnoS g c (ExeS (PatCall x)))
@@ -792,19 +766,6 @@ expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (LogS x  )) = retu
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (StrS x  )) = return $ PolyStr  (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _)  UniS     ) = return $ PolyNull (Idx cidx v)
 
--- record access
-expressPolyExpr _ _ pc (AnnoS _ _ (AccS key record@(AnnoS (Idx _ (NamT o v _ rs)) (Idx cidx lang, _) _))) = do
-  record' <- expressPolyExprWrap lang pc record
-  case lookup key rs of
-    (Just valType) -> return $ PolyAcc (Idx cidx valType) o (Idx cidx v) record' key
-    Nothing -> error "invalid key access"
--- The the expected record type is not present, evaluate one step down
-expressPolyExpr _ pl pc (AnnoS g c (AccS k (AnnoS (Idx i t) c' e'))) = do
-    scope <- MM.getGeneralScope i
-    case reduceType scope t of
-        (Just t') -> expressPolyExprWrap pl pc (AnnoS g c (AccS k (AnnoS (Idx i t') c' e')))
-        Nothing -> error "Expected a record access type"
-
 -- lists
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) [t])) (Idx cidx lang, args) (LstS xs)) = do
   xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
@@ -949,10 +910,6 @@ segmentExpr m args (PolyLet i e1 e2) = do
   (ms1, (_, e1')) <- segmentExpr m args e1
   (ms2, (lang2, e2')) <- segmentExpr m args e2
   return (ms1 ++ ms2, (lang2, MonoLet i e1' e2'))
-
-segmentExpr m args (PolyAcc t o v e k) = do
-  (ms, (_, e')) <- segmentExpr m args e
-  return (ms, (Nothing, MonoAcc t o v e' k))
 
 segmentExpr m args (PolyList v t es) = do
   (mss, es') <- mapM (segmentExpr m args) es |>> unzip
@@ -1177,10 +1134,6 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       _ -> error "No type found"
   nativeExpr _ (MonoBndVar (C t) i) = BndVarN <$> inferType t <*> pure i
   -- simple native types
-  nativeExpr m (MonoAcc _ o v e k) = do
-    v' <- inferVar v
-    e' <- nativeExpr m e
-    return $ AccN o v' e' k
   nativeExpr m (MonoList v t es) =
     ListN
       <$> inferVar v
@@ -1238,7 +1191,6 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
   makeTypemap parentIdx (MonoReturn e) = makeTypemap parentIdx e
   makeTypemap _ (MonoApp (MonoExe (ann -> idx) _) es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
   makeTypemap parentIdx (MonoApp e es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) (e:es))
-  makeTypemap parentIdx (MonoAcc _ _ _ e _) = makeTypemap parentIdx e
   makeTypemap _ (MonoList (ann -> idx) _ es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
   makeTypemap _ (MonoTuple (ann -> idx) (map snd -> es)) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
   makeTypemap _ (MonoRecord _ (ann -> idx) _ (map (snd . snd) -> es)) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)

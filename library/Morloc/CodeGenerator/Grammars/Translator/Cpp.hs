@@ -540,9 +540,6 @@ PROPAGATE_ERROR(errmsg)|]
       , poolPriorLines = poolPriorLines e <> assignments
       }
 
-  makeNativeExpr _ (AccN_ _ _ e k) =
-    return (e {poolExpr = poolExpr e <> "." <> pretty k})
-
   makeNativeExpr _ (ListN_ _ _ es) =
     return $ mergePoolDocs (encloseSep "{" "}" ",") es
 

@@ -86,6 +86,7 @@ module Morloc.Namespace
   , Symbol(..)
   , AliasedSymbol(..)
   , Signature(..)
+  , Selector(..)
   , Pattern(..)
   , Expr(..)
   , ExprI(..)
@@ -417,7 +418,17 @@ data Signature = Signature EVar (Maybe Label) EType
 data Typeclass a = Typeclass ClassName [TVar] [a]
   deriving (Show, Ord, Eq)
 
-data Pattern = PatternText Text [Text]
+data Selector
+  = SelectorKey Text
+  | SelectorIdx Int
+  | SelectorKeyGrp [(Text, [Selector])]
+  | SelectorIdxGrp [(Int, [Selector])]
+  deriving (Show, Ord, Eq)
+
+data Pattern
+  = PatternText Text [Text]
+  | PatternGetter [Selector]
+  | PatternSetter [Selector]
   deriving (Show, Ord, Eq)
 
 data ExprI = ExprI Int Expr
@@ -458,8 +469,6 @@ data Expr
   -- ^ (x)
   | HolE
   -- ^ a "hole" variable that will be desugared into lambda-bound variable
-  | AccE Key ExprI
-  -- ^ person@age - access a field in a record
   | LstE [ExprI]
   | TupE [ExprI]
   | NamE [(Key, ExprI)]
@@ -643,7 +652,6 @@ data Lit
 data E
   = BndP (Indexed Type) EVar
   | VarP (Indexed Type) EVar [E]
-  | AccP (Indexed Type) Key E
   | AppP (Indexed Type) E [E]
   | LamP (Indexed Type) [EVar] E
   | LstP (Indexed Type) [E]
@@ -672,7 +680,6 @@ data ExprS g f c
   = UniS
   | BndS EVar
   | VarS EVar (f (AnnoS g f c))
-  | AccS Key (AnnoS g f c)
   | AppS (AnnoS g f c) [AnnoS g f c]
   | LamS [EVar] (AnnoS g f c)
   | LstS [AnnoS g f c]
@@ -1209,7 +1216,6 @@ instance Pretty Lit where
 instance Pretty E where
   pretty (BndP _ v) = pretty v
   pretty (VarP _ v _) = pretty v
-  pretty (AccP _ k e) = parens (pretty e) <> "[" <> pretty k <> "]"
   pretty (AppP _ e es) = pretty e <+> hsep (map f es) where
     f x@AppP{} = parens (pretty x)
     f x@LamP{} = parens (pretty x)
@@ -1414,7 +1420,6 @@ instance Pretty Expr where
   pretty (ExpE ExportAll) = "export *"
   pretty (ExpE (ExportMany symbols)) = "export" <+> tupled (map pretty (Set.toList symbols))
   pretty (VarE _ s) = pretty s
-  pretty (AccE k e) = parens (pretty e) <> "@" <> pretty k
   pretty (LamE v e) = "\\" <+> pretty v <+> "->" <+> pretty e
   pretty (AnnE e t) = parens (pretty e <+> "::" <+> pretty t)
   pretty (LstE es) = encloseSep "[" "]" "," (map pretty es)
@@ -1455,7 +1460,6 @@ instance Foldable f => Pretty (AnnoS a f b) where
 instance Foldable f => Pretty (ExprS a f b) where
     pretty (AppS e es)  = "(AppS" <+> list (map pretty (e:es)) <> ")"
     pretty (VarS v res) = "(VarS" <+> pretty v <+> "=" <+> list (map pretty (toList res)) <> ")"
-    pretty (AccS k e)   = pretty k <> "(" <> pretty e <> ")"
     pretty (LamS vs e)  = "(LamS" <+> list (map pretty vs) <+> "->" <+> (pretty e) <> ")"
     pretty (LstS es)    = "(LstS" <+> list (map pretty es) <> ")"
     pretty (TupS es)    = "(TupS" <+> list (map pretty es) <> ")"
@@ -1627,7 +1631,6 @@ instance Pretty TypeError where
 
 mapExprSM :: (Traversable f, Monad m) => (AnnoS g f c -> m (AnnoS g' f c')) -> ExprS g f c -> m (ExprS g' f c')
 mapExprSM f (VarS v xs) = VarS v <$> traverse f xs
-mapExprSM f (AccS k x) = AccS k <$> f x
 mapExprSM f (AppS x xs) = AppS <$> f x <*> mapM f xs
 mapExprSM f (LamS vs x) = LamS vs <$> f x
 mapExprSM f (LstS xs) = LstS <$> mapM f xs

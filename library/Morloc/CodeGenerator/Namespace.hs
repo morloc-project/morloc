@@ -409,7 +409,6 @@ data PolyExpr
   | PolyLetVar (Indexed Type) Int
   -- terms that map 1:1 versus SAnno; have defined types in one language
   | PolyExe    (Indexed Type) ExecutableExpr
-  | PolyAcc    (Indexed Type) NamType (Indexed TVar) PolyExpr Key
   -- data types
   | PolyList   (Indexed TVar) (Indexed Type) [PolyExpr]
   | PolyTuple  (Indexed TVar) [(Indexed Type, PolyExpr)]
@@ -438,7 +437,6 @@ data MonoExpr
   -- terms that map 1:1 versus SAnno; have defined types in one language
   | MonoExe    (Indexed Type) ExecutableExpr
   | MonoBndVar (Three None Type (Indexed Type)) Int -- (Three Lang Type (Indexed Type)) Int  -- (Maybe (Indexed Type))
-  | MonoAcc    (Indexed Type) NamType (Indexed TVar) MonoExpr Key
   -- data types
   | MonoRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, MonoExpr))]
   | MonoList   (Indexed TVar) (Indexed Type) [MonoExpr]
@@ -501,7 +499,6 @@ data NativeExpr
   | LetVarN      TypeF Int
   | BndVarN      TypeF Int
   | DeserializeN TypeF SerialAST SerialExpr
-  | AccN         NamType FVar NativeExpr Key
   | ExeN         TypeF ExecutableExpr
   -- data types
   | ListN        FVar TypeF [NativeExpr]
@@ -547,7 +544,6 @@ foldlNE f b (NativeLetN_   _ x1 x2) = foldl f b [x1, x2]
 foldlNE _ b (LetVarN_      _ _) = b
 foldlNE _ b (BndVarN_      _ _) = b
 foldlNE f b (DeserializeN_ _ _ x) = f b x
-foldlNE f b (AccN_         _ _ x _) =  f b x
 foldlNE _ b (ExeN_         _ _) = b
 foldlNE f b (ListN_        _ _ xs) = foldl f b xs
 foldlNE f b (TupleN_       _ xs) = foldl f b xs
@@ -609,7 +605,6 @@ makeMonoidFoldDefault mempty' mappend' =
   monoidNativeExpr' (LetVarN_ t i) = return (mempty', LetVarN t i)
   monoidNativeExpr' (BndVarN_ t i) = return (mempty', BndVarN t i)
   monoidNativeExpr' (DeserializeN_ t s (req, e)) = return (req, DeserializeN t s e)
-  monoidNativeExpr' (AccN_ o v (req, e) k) = return (req, AccN o v e k)
   monoidNativeExpr' (ExeN_ t exe) = return (mempty', ExeN t exe)
   monoidNativeExpr' (ListN_ v t xs) = return (foldl mappend' mempty' (map fst xs), ListN v t (map snd xs))
   monoidNativeExpr' (TupleN_ v xs) = return (foldl mappend' mempty' (map fst xs), TupleN v $ map snd xs)
@@ -740,7 +735,6 @@ data NativeExpr_ nm se ne sr nr
   | LetVarN_      TypeF Int
   | BndVarN_      TypeF Int
   | DeserializeN_ TypeF SerialAST se
-  | AccN_         NamType FVar ne Key
   | ExeN_         TypeF ExecutableExpr
   -- data types
   | ListN_        FVar TypeF [ne]
@@ -890,9 +884,6 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
   f full@(DeserializeN t s se) = do
       se' <- surroundFoldSerialExprM sfm fm se
       opFoldWithNativeExprM fm full (DeserializeN_ t s se')
-  f full@(AccN n v ne key) = do
-      ne' <- surroundFoldNativeExprM sfm fm ne
-      opFoldWithNativeExprM fm full (AccN_ n v ne' key)
   f full@(ExeN t exe) = opFoldWithNativeExprM fm full (ExeN_ t exe)
   f full@(ListN v t nes) = do
       nes' <- mapM (surroundFoldNativeExprM sfm fm) nes
@@ -928,12 +919,6 @@ instance HasTypeF NativeExpr where
   typeFof (LetVarN      t _) = t
   typeFof (BndVarN      t _) = t
   typeFof (DeserializeN t _ _) = t
-  typeFof (AccN           _ _ (typeFof -> NamF _ _ _ rs) key) =
-    -- NOTE: This will fail if the key does not exist. However, non-existence of
-    -- a key should have been caught by the typechecker. So such non-existence
-    -- here indicates a but in the compiler and should die immediately.
-    fromJust . listToMaybe $ [t | (key', t) <- rs, key' == key]
-  typeFof AccN{} = error "Bug - illegal key access should have been caught in the typechecker"
   typeFof (ExeN         t _) = t
   typeFof (ListN        v p _) = AppF (VarF v) [p]
   typeFof (TupleN       v (map typeFof -> ps)) = AppF (VarF v) ps
@@ -1120,7 +1105,6 @@ instance MFunctor NativeExpr where
         e@(LetVarN _ _) -> mapNativeExpr f e
         e@(BndVarN _ _) -> mapNativeExpr f e
         (DeserializeN t s se ) -> mapNativeExpr f $ DeserializeN t s (mgatedMap g f se)
-        (AccN o v ne key) -> mapNativeExpr f $ AccN o v (mgatedMap g f ne) key
         e@(ExeN _ _) -> mapNativeExpr f e
         (ListN v t nes) -> mapNativeExpr f $ ListN v t (map (mgatedMap g f) nes)
         (TupleN v xs) -> mapNativeExpr f $ TupleN v (map (mgatedMap g f) xs)
@@ -1165,7 +1149,6 @@ instance Pretty PolyExpr where
     pretty (PolyLetVar _ _) = "PolyLetVar"
     pretty (PolyExe _ (SrcCall src)) = "PolyExe<" <> pretty (srcAlias src) <> ">"
     pretty (PolyExe _ (PatCall _)) = "PolyExe<pattern>"
-    pretty (PolyAcc _ _ _ _ _) = "PolyAcc"
     pretty (PolyList _ _ _) = "PolyList"
     pretty (PolyTuple _ xs) = "PolyTuple" <+> pretty (length xs)
     pretty (PolyRecord _ _ _ _) = "PolyRecord"
@@ -1189,7 +1172,6 @@ instance Pretty MonoExpr where
     pretty (MonoBndVar (A _) i) = parens $ "x" <> pretty i <+> ":" <+> "<unknown>"
     pretty (MonoBndVar (B t) i) = parens $ "x" <> pretty i <+> ":" <+> pretty t
     pretty (MonoBndVar (C t) i) = parens $ "x" <> pretty i <+> ":" <+> pretty t
-    pretty (MonoAcc    _ _ _ e k) = parens (pretty e) <> "@" <> pretty k
     pretty (MonoList   _ _ es) = list (map pretty es)
     pretty (MonoTuple  v es) = pretty v <+> tupled (map pretty es)
     pretty (MonoRecord o v fs _)

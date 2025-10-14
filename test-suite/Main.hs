@@ -13,7 +13,6 @@ main = do
     testGroup
       "Morloc tests"
       [ packerTests
-      , recordAccessTests
       , unitTypeTests
       , unitValuecheckTests
       , typeOrderTests

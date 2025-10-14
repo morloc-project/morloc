@@ -21,7 +21,6 @@ toE :: AnnoS (Indexed Type) Many Int -> E
 toE (AnnoS g _ UniS)               = LitP g MUni
 toE (AnnoS g _ (BndS v))           = BndP g v
 toE (AnnoS g _ (VarS v (Many es))) = VarP g v (map toE es)
-toE (AnnoS g _ (AccS k e))         = AccP g k (toE e)
 toE (AnnoS g _ (AppS e es))        = AppP g (toE e) (map toE es)
 toE (AnnoS g _ (LamS vs e))        = LamP g vs (toE e)
 toE (AnnoS g _ (LstS es))          = LstP g (map toE es)
@@ -52,7 +51,6 @@ check (VarP _ _ es) = mapM_ (uncurry checkPair) (pairwise es) where
   -- find all unique pairs
   pairwise :: [a] -> [(a,a)]
   pairwise xs = [(xs !! i, xs !! j) | i <- [0..length xs - 1], j <- [0..length xs - 1], j > i]
-check (AccP _ _ e) = check e
 check (AppP _ e es) = mapM_ check (e:es)
 check (LamP _ _ e) = check e
 check (LstP _ es) = mapM_ check es
@@ -130,7 +128,6 @@ checkPair e1 e2@SrcP{}
     -- For VarP, simplicity of ANY instance indicates an error
     isSimple (VarP _ _ es) = any isSimple es
     -- For other expressions, only simplicity of ALL elements is error
-    isSimple (AccP _ _ e) = isSimple e
     isSimple (LstP _ es) = all isSimple es
     isSimple (TupP _ es) = all isSimple es
     isSimple (NamP _ (map snd -> es)) = all isSimple es
@@ -192,9 +189,6 @@ checkPair (NamP g1 ((k,x):rs1)) (NamP g2 rs2)
   = case lookup k rs2 of
     (Just y) -> checkPair x y >> checkPair (NamP g1 rs1) (NamP g2 rs2)
     Nothing -> error "Unreachable if typechecker has passed"
-checkPair e1@(AccP _ k1 r1) e2@(AccP _ k2 r2)
-  | k1 /= k2 = valueError e1 e2
-  | otherwise = checkPair r1 r2
 
 -- Primitives must be equal
 checkPair e1@(LitP _ x) e2@(LitP _ y)
@@ -240,7 +234,6 @@ substituteEVar oldVar newVar e0
     f _ _ e@(VarP g v es)
       | v == oldVar = VarP g newVar es
       | otherwise = e
-    f used idx (AccP g k e) = AccP g k $ f used idx e
     f used idx (AppP g e es) = AppP g (f used idx e) $ map (f used idx) es
     f used idx (LstP g es) = LstP g $ map (f used idx) es
     f used idx (TupP g es) = TupP g $ map (f used idx) es
@@ -279,7 +272,6 @@ freeTerms = f Set.empty where
   f boundterms (LamP _ vs e) =
     let boundterms' = Set.union boundterms (Set.fromList vs)
     in f boundterms' e
-  f boundterms (AccP _ _ e) = f boundterms e
   f boundterms (AppP _ e es) = Set.unions . map (f boundterms) $ (e:es)
   f boundterms (LstP _ es) = Set.unions . map (f boundterms) $ es
   f boundterms (TupP _ es) = Set.unions . map (f boundterms) $ es
@@ -298,7 +290,6 @@ substituteExpr oldVar replacementExpr = f where
   f e@(LamP g vs body)
     | oldVar `elem` vs = e -- stop if term is shadowed
     | otherwise = LamP g vs (f body)
-  f (AccP g k e) = AccP g k (f e)
   f (AppP g e es) = AppP g (f e) (map f es)
   f (LstP g es) = LstP g (map f es)
   f (TupP g es) = TupP g (map f es)

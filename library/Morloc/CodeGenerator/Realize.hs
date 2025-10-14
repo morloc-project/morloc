@@ -88,9 +88,6 @@ realize s0 = do
     :: RState
     -> (ExprS (Indexed Type) Many Int, Int)
     -> MorlocMonad (ExprS (Indexed Type) Many (Indexed [(Lang, Int)]), Indexed [(Lang, Int)])
-  scoreExpr rstat (AccS k x, i) = do
-    x' <- scoreAnnoS rstat x
-    return (AccS k x', Idx i (scoresOf x'))
   scoreExpr rstat (LstS xs, i) = do
     (xs', best) <- scoreMany rstat xs
     return (LstS xs', Idx i best)
@@ -293,10 +290,6 @@ realize s0 = do
           --   <> indent 2 (vsep [ "*" <+> pretty t <+> ":" <+> pretty y | y@(AnnoS (Idx _ t) _ _, _)  <- xs'])
 
   -- Propagate downwards
-  collapseExpr _ l1 (AccS k x, Idx i ss) = do
-    lang <- chooseLanguage l1 ss
-    x' <- collapseAnnoS lang x
-    return (AccS k x', Idx i lang)
   collapseExpr _ l1 (LstS xs, Idx i ss) = do
     lang <- chooseLanguage l1 ss
     xs' <- mapM (collapseAnnoS lang) xs
@@ -368,7 +361,6 @@ realize s0 = do
     f lang (AnnoS g (Idx i Nothing) e') = f lang (AnnoS g (Idx i (Just lang)) e')
     f _ (AnnoS g (Idx i (Just lang)) e') = do
       e'' <- case e' of
-        (AccS k x) -> AccS k <$> f lang x
         (AppS x xs) -> AppS <$> f lang x <*> mapM (f lang) xs
         (LamS vs x) -> LamS vs <$> f lang x
         (LstS xs) -> LstS <$> mapM (f lang) xs
@@ -409,7 +401,6 @@ makeGAST = mapAnnoSCM (\(Idx _ _) -> return ())
 
 removeVarS :: AnnoS g One c -> AnnoS g One c
 removeVarS (AnnoS g1 _ (VarS _ (One (AnnoS _ c2 x)))) = removeVarS (AnnoS g1 c2 x)
-removeVarS (AnnoS g c (AccS k x)) = AnnoS g c (AccS k (removeVarS x))
 removeVarS (AnnoS g c (AppS x xs)) = AnnoS g c (AppS (removeVarS x) (map removeVarS xs))
 removeVarS (AnnoS g c (LamS vs x )) = AnnoS g c (LamS vs (removeVarS x))
 removeVarS (AnnoS g c (LstS xs)) = AnnoS g c (LstS (map removeVarS xs))

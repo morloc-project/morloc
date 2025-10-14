@@ -138,17 +138,18 @@ pTopExpr =
 -- | Expressions that are allowed in function or data declarations
 pExpr :: Parser ExprI
 pExpr =
-      try pAcc    -- access <expr>@
-  <|> try pHolE
+      try pHolE
   <|> try pUni
+  <|> try pAnn
+  <|> try pNumE
+  <|> try pSetter
+  <|> try pGetter
   <|> try pComposition
   <|> try pApp
   <|> try pNamE   -- record
-  <|> try pAnn
   <|> try pTupE
   <|> try pStrE
   <|> try pLogE
-  <|> try pNumE
   <|> pLstE
   <|> parens pExpr
   <|> pLam
@@ -543,14 +544,6 @@ pUni :: Parser ExprI
 pUni = symbol "(" >> symbol ")" >> exprI UniE
 
 
-pAcc :: Parser ExprI
-pAcc = do
-  e <- parens pExpr <|> pNamE <|> pVar
-  _ <- symbol "@"
-  f <- freenameL
-  exprI $ AccE (Key f) e
-
-
 pAnn :: Parser ExprI
 pAnn = do
   e <-  try (parens pExpr)
@@ -576,10 +569,11 @@ pApp = do
       <|> try pTupE -- only valid if wholy
       <|> try pLstE     --  /
       <|> try pNamE     -- /
+      <|> try pSetter
+      <|> try pGetter
       <|> try (parens pExpr)
     parseArg =
-          try pAcc
-      <|> try pUni
+          try pUni
       <|> try pTupE
       <|> try (parens pExpr)
       <|> try pStrE
@@ -608,6 +602,35 @@ pStrE = do
     (Right (s, es)) -> do
       pattern <- exprI . PatE $ PatternText s (map snd es)
       exprI $ AppE pattern (map fst es)
+
+pSetter :: Parser ExprI
+pSetter = do
+  -- parse the setter pattern
+  -- for example: .(x.0 = 1, y.a = 2, z = 3)
+  --  ss: the selectors, in this case the pattern .(x.0, y.a, z)
+  --  es: a list of expressions: [1,2,3]
+  (ss, es) <- parsePatternSetter pExpr
+  setter <- exprI $ PatE (PatternSetter ss)
+
+  -- fresh indices for the lambda and application expressions we'll create
+  idxLam <- exprId
+
+  -- a unique name for the lambda-bound datastructure variable
+  let v = EV (".setter_" <> MT.show' idxLam)
+
+  -- a variable to store the datastructure that will be passed to the lambda
+  vArg <- exprI $ VarE defaultValue v
+
+  -- apply arguments to the setter
+  -- first the datastructure and then all setting values
+  setterApp <- exprI $ AppE setter (vArg : es)
+
+  return $ ExprI idxLam (LamE [v] setterApp)
+
+pGetter :: Parser ExprI
+pGetter = do
+  ss <- parsePatternGetter
+  exprI $ PatE (PatternGetter ss)
 
 pNumE :: Parser ExprI
 pNumE = do
