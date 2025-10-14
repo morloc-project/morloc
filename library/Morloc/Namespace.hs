@@ -87,6 +87,8 @@ module Morloc.Namespace
   , AliasedSymbol(..)
   , Signature(..)
   , Selector(..)
+  , BasicSelector(..)
+  , ungroup
   , Pattern(..)
   , Expr(..)
   , ExprI(..)
@@ -424,6 +426,27 @@ data Selector
   | SelectorKeyGrp [(Text, [Selector])]
   | SelectorIdxGrp [(Int, [Selector])]
   deriving (Show, Ord, Eq)
+
+data BasicSelector = BasicSelectorKey Text | BasicSelectorIdx Int
+
+-- suppose you have the pattern: .1.y.(.1.(.y, .z), .2.x)
+-- this returns a tuple of three terms
+-- ungroup expands it to one path per selected value
+--   [ .1.y.1.y
+--   , .1.y.1.z
+--   , .1.y.2.x
+--   ]
+-- these may easily be used to generate getters/setters in more
+-- conventional languages
+ungroup :: [Selector] -> [[BasicSelector]]
+ungroup [] = []
+ungroup [SelectorKey k] = [[BasicSelectorKey k]]
+ungroup [SelectorIdx i] = [[BasicSelectorIdx i]]
+ungroup ((SelectorKey k):ss) = [BasicSelectorKey k : bss | bss <- ungroup ss]
+ungroup ((SelectorIdx i):ss) = [BasicSelectorIdx i : bss | bss <- ungroup ss]
+ungroup [SelectorKeyGrp xs] = concat [ungroup (SelectorKey k : ss) | (k, ss) <- xs]
+ungroup [SelectorIdxGrp xs] = concat [ungroup (SelectorIdx i : ss) | (i, ss) <- xs]
+ungroup _ = error "Currently I do not support iterative grouping -- it would be silly"
 
 data Pattern
   = PatternText Text [Text]

@@ -33,6 +33,7 @@ module Morloc.Frontend.Lexer
   , moduleComponent
   , number
   , op
+  , dot
   , parens
   , reserved
   , reservedWords
@@ -295,6 +296,12 @@ operatorChars = ":!$%&*+./<=>?@\\^|-~#"
 op :: Text -> Parser Text
 op o = (lexeme . try) (symbol o <* notFollowedBy (oneOf operatorChars))
 
+-- the rugged dot, free and alone
+dot :: Parser Text
+dot = lexeme $ do
+  _ <- char '.' <* notFollowedBy (char '(' <|> char '[' <|> char '{' <|> alphaNumChar)
+  return "."
+
 reserved :: Text -> Parser Text
 reserved w = try (symbol w)
 
@@ -307,21 +314,21 @@ stringLiteral = lexeme $ do
 
 
 parsePatternSetter :: Parser a -> Parser ([Selector], [a])
-parsePatternSetter par = char '.' >> parsePatternSetter' Nothing par
+parsePatternSetter par = parsePatternSetter' Nothing par
 
 parsePatternGetter :: Parser [Selector]
-parsePatternGetter = char '.' >> parsePatternGetter' Nothing
-
+parsePatternGetter = parsePatternGetter' Nothing
 
 -- -- .(x.y = _, z.0.(x = _, y = _))
 -- -- (\m -> .(x.y, z.0.(x, y)) 1 2 3) data
 parsePatternSetter' :: Maybe (Parser Selector) -> Parser a -> Parser ([Selector], [a])
 parsePatternSetter' maySelInit setValue = lexeme $ do
   selectors <- parseSelectors maySelInit
-  mayGroup <- optional (parseGroupSetterKey setValue <|> parseGroupSetterIdx setValue)
+  mayGroup <- optional (char '.' >> try (parseGroupSetterKey setValue) <|> try (parseGroupSetterIdx setValue))
   case mayGroup of
     (Just (s, es)) -> return (selectors <> [s], es)
     Nothing -> do
+      _ <- op "="
       value <- setValue
       return $ (selectors, [value])
 
@@ -345,7 +352,7 @@ parsePatternSetter' maySelInit setValue = lexeme $ do
 parsePatternGetter' :: Maybe (Parser Selector) -> Parser [Selector]
 parsePatternGetter' maySelInit = lexeme $ do
   selectors <- parseSelectors maySelInit
-  mayGroup <- optional (parseGroupGetterKey <|> parseGroupGetterIdx)
+  mayGroup <- optional (char '.' >> try parseGroupGetterKey <|> try parseGroupGetterIdx)
   return $ case mayGroup of
     (Just s) -> selectors <> [s]
     Nothing -> selectors
@@ -367,18 +374,22 @@ parsePatternGetter' maySelInit = lexeme $ do
 parseSelectors :: Maybe (Parser Selector) -> Parser [Selector]
 parseSelectors mayInitialParser = lexeme $ do
   s <- fromMaybe parseEitherSelector mayInitialParser
-  ss <- many (char '.' >> parseEitherSelector)
+  ss <- many parseEitherSelector
   return (s:ss)
 
 parseEitherSelector :: Parser Selector
 parseEitherSelector = try parseSelectorIdx <|> try parseSelectorKey
 
 parseSelectorIdx :: Parser Selector
-parseSelectorIdx = SelectorIdx <$> L.decimal
+parseSelectorIdx = do
+  _ <- char '.'
+  i <- L.decimal
+  return $ SelectorIdx i
 
 -- if True, then this is an initial key in a group, so will have no dot
 parseSelectorKey :: Parser Selector
 parseSelectorKey = do
+  _ <- char '.'
   firstLetter <- lowerChar
   remaining <- many (alphaNumChar <|> char '\'' <|> char '_')
   let key = MT.pack (firstLetter : remaining)

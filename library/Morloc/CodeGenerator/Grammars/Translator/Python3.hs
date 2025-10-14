@@ -343,6 +343,16 @@ translateSegment makeSrcName m0 =
 evaluatePattern :: Pattern -> [MDoc] -> MDoc
 evaluatePattern (PatternText firstStr fragments) xs
   = "f" <> (dquotes . hcat) (pretty firstStr : [ ("{" <> x <> "}" <> pretty s) | (x, s) <- zip xs fragments])
+evaluatePattern (PatternGetter (ungroup -> [ss])) [m]
+  = hcat (m : map writeBasicSelector ss)
+evaluatePattern (PatternGetter (ungroup -> sss)) [m]
+  = tupled [hcat (m : map writeBasicSelector ss) | ss <- sss]
+evaluatePattern (PatternGetter _) _ = error "expected exactly one argument, the data structure"
+evaluatePattern (PatternSetter ss) xs = undefined
+
+writeBasicSelector :: BasicSelector -> MDoc
+writeBasicSelector (BasicSelectorKey txt) = "[" <> dquotes (pretty txt) <> "]"
+writeBasicSelector (BasicSelectorIdx int) = "[" <> pretty int <> "]"
 
 makeDispatch :: [SerialManifold] -> MDoc
 makeDispatch ms = vsep [localDispatch, remoteDispatch]

@@ -142,10 +142,10 @@ pExpr =
   <|> try pUni
   <|> try pAnn
   <|> try pNumE
-  <|> try pSetter
-  <|> try pGetter
   <|> try pComposition
   <|> try pApp
+  <|> try pSetter
+  <|> try pGetter
   <|> try pNamE   -- record
   <|> try pTupE
   <|> try pStrE
@@ -159,8 +159,7 @@ pExpr =
 pComposition :: Parser ExprI
 pComposition = do
 
-    fs <- sepBy pFunction (symbol ".")
-
+    fs <- sepBy pFunction dot
     case length fs of
         0 -> failure Nothing Set.empty
         1 -> failure Nothing Set.empty

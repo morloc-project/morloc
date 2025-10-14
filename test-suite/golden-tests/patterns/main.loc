@@ -1,0 +1,10 @@
+module foo (foo, bar)
+
+import root
+import root-py
+
+foo :: Str
+foo = .1 (42, idpy "Jim")
+
+bar :: (Str, Int)
+bar = .1.(.0, .2) (idpy 42, ("Jim", True, 69))

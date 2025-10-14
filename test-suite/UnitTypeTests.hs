@@ -753,7 +753,7 @@ unitTypeTests =
         "primitive string annotation"
         "\"this is a string literal\" :: Str"
         str
-    , assertGeneralType "primitive declaration" "4.2" real
+    , assertGeneralType "primitive declaration" "x = True\n4.2" real
     -- containers
     -- - lists
     , assertGeneralType "list of one primitive" "[1]" (lst int)
