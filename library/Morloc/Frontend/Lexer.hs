@@ -324,7 +324,9 @@ parsePatternGetter = parsePatternGetter' Nothing
 parsePatternSetter' :: Maybe (Parser Selector) -> Parser a -> Parser ([Selector], [a])
 parsePatternSetter' maySelInit setValue = lexeme $ do
   selectors <- parseSelectors maySelInit
-  mayGroup <- optional (char '.' >> (try parseGroupSetterKey) <|> (try parseGroupSetterIdx))
+  mayGroup <- if null selectors
+    then Just <$> parseGroup
+    else optional parseGroup
   case mayGroup of
     (Just (s, es)) -> return (selectors <> [s], es)
     Nothing -> do
@@ -333,6 +335,8 @@ parsePatternSetter' maySelInit setValue = lexeme $ do
       return $ (selectors, [value])
 
   where
+
+  parseGroup = char '.' >> (try parseGroupSetterKey <|> try parseGroupSetterIdx)
 
   parseGroupSetterIdx = lexeme $ parens $ do
     xs <- sepBy1 (parsePatternSetter' (Just parseSelectorIdx) setValue) (symbol ",")
@@ -350,12 +354,16 @@ parsePatternSetter' maySelInit setValue = lexeme $ do
 parsePatternGetter' :: Maybe (Parser Selector) -> Parser [Selector]
 parsePatternGetter' maySelInit = lexeme $ do
   selectors <- parseSelectors maySelInit
-  mayGroup <- optional (char '.' >> try parseGroupGetterKey <|> try parseGroupGetterIdx)
+  mayGroup <- if null selectors
+    then Just <$> parseGroup
+    else optional parseGroup
   return $ case mayGroup of
     (Just s) -> selectors <> [s]
     Nothing -> selectors
 
   where
+
+  parseGroup = char '.' >> (try parseGroupGetterKey <|> try parseGroupGetterIdx)
 
   parseGroupGetterIdx :: Parser Selector
   parseGroupGetterIdx = lexeme . parens $ do
@@ -370,8 +378,9 @@ parsePatternGetter' maySelInit = lexeme $ do
     return $ SelectorKeyGrp ss'
 
 parseSelectors :: Maybe (Parser Selector) -> Parser [Selector]
-parseSelectors mayInitialParser = lexeme $ do
-  s <- fromMaybe parseEitherSelector mayInitialParser
+parseSelectors Nothing = many parseEitherSelector
+parseSelectors (Just initialParser) = do
+  s <- initialParser
   ss <- many parseEitherSelector
   return (s:ss)
 
