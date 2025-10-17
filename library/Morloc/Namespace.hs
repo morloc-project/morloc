@@ -74,6 +74,7 @@ module Morloc.Namespace
   , NamType(..)
   , Type(..)
   , TypeU(..)
+  , OpenOrClosed(..)
   , extractKey
   , type2typeu
   , EType(..)
@@ -562,8 +563,8 @@ data GammaIndex
   | AnnG EVar TypeU
   -- ^ store a bound variable
   | ExistG TVar
-    [TypeU] -- type parameters
-    [(Key, TypeU)] -- keys
+    ([TypeU], OpenOrClosed) -- type parameters
+    ([(Key, TypeU)], OpenOrClosed) -- keys
   -- ^ (G,a^) unsolved existential variable
   | SolvedG TVar TypeU
   -- ^ (G,a^=t) Store a solved existential variable
@@ -682,6 +683,7 @@ data E
   | NamP (Indexed Type) [(Key, E)]
   | LitP (Indexed Type) Lit
   | SrcP (Indexed Type) Source
+  | PatP (Indexed Type) [Selector]
   deriving (Ord, Eq, Show)
 
 data ExecutableExpr = SrcCall Source | PatCall Pattern
@@ -757,12 +759,26 @@ data Type
   | NamT NamType TVar [Type] [(Key, Type)]
   deriving (Show, Ord, Eq)
 
+data OpenOrClosed = Open | Closed
+  deriving (Show, Ord, Eq)
+
 -- | A type with existentials and universals
 data TypeU
   = VarU TVar
   | ExistU TVar
-    [TypeU] -- type parameters
-    [(Key, TypeU)] -- key accesses into this type
+    ([TypeU], OpenOrClosed)
+      -- type parameters
+      --   open if the given parameters are an ordered prefix of all parameters
+      --     example: if a selector accesses element n of a term, then the term must be a
+      --     tuple with at least n parameters.
+      --   closed if the given parameters are ordered and of full count
+    ([(Key, TypeU)], OpenOrClosed)
+      -- named parameters for this type
+      --   open if this is an unordered subset of keys
+      --     example: if a selector accesses an element using a key, then this key
+      --     must exist in the terms type, but the order is not known and more
+      --     keys may exist
+      --   closed if this is an unordered set of all keys
   -- ^ (a^) will be solved into one of the other types
   | ForallU TVar TypeU
   -- ^ (Forall a . A)
@@ -1086,7 +1102,7 @@ instance Typelike TypeU where
   --  * all qualified terms are replaced with UnkT
   --  * all existentials are replaced with default values if a possible
   typeOf (VarU v) = VarT v
-  typeOf (ExistU _ ps rs@(_:_)) = NamT NamRecord (TV "Record") (map typeOf ps) (map (second typeOf) rs)
+  typeOf (ExistU _ (ps, _) (rs@(_:_), _)) = NamT NamRecord (TV "Record") (map typeOf ps) (map (second typeOf) rs)
   typeOf (ExistU v _ _) = typeOf (ForallU v (VarU v)) -- this will cause problems eventually
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
   typeOf (FunU ts t) = FunT (map typeOf ts) (typeOf t)
@@ -1094,9 +1110,9 @@ instance Typelike TypeU where
   typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
 
   free v@(VarU _) = Set.singleton v
-  free v@(ExistU _ [] rs) = Set.unions $ Set.singleton v : map (free . snd) rs
+  free v@(ExistU _ ([], _) (rs, _)) = Set.unions $ Set.singleton v : map (free . snd) rs
   -- Why exactly do you turn ExistU into AppU? Not judging, but it seems weird ...
-  free (ExistU v ts _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
+  free (ExistU v (ts, _) _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
   free (ForallU v t) = Set.delete (VarU v) (free t)
   free (FunU ts t) = Set.unions $ map free (t:ts)
   free (AppU t ts) = Set.unions $ map free (t:ts)
@@ -1117,7 +1133,7 @@ instance Typelike TypeU where
       sub t@(VarU v)
         | v0 == v = r0 -- replace v with the new type
         | otherwise = t
-      sub (ExistU v (map sub -> ps) (map (second sub) -> rs)) = ExistU v ps rs
+      sub (ExistU v (map sub -> ps, pc) (map (second sub) -> rs, rc)) = ExistU v (ps, pc) (rs, rc)
       sub (ForallU v t)
         | v0 == v = ForallU v t -- stop looking if we hit a bound variable of the same name
         | otherwise = ForallU v (sub t)
@@ -1129,7 +1145,7 @@ instance Typelike TypeU where
   normalizeType (AppU t ts) = AppU (normalizeType t) (map normalizeType ts)
   normalizeType (NamU n v ds ks) = NamU n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
   normalizeType (ForallU v t) = ForallU v (normalizeType t)
-  normalizeType (ExistU v (map normalizeType -> ps) (map (second normalizeType) -> rs)) = ExistU v ps rs
+  normalizeType (ExistU v (map normalizeType -> ps, pc) (map (second normalizeType) -> rs, rc)) = ExistU v (ps, pc) (rs, rc)
   normalizeType t = t
 
 
@@ -1142,7 +1158,7 @@ instance Typelike TypeU where
 -- As far as serialization is concerned, properties and constraints do not matter.
 instance P.PartialOrd TypeU where
   (<=) (VarU v1) (VarU v2) = v1 == v2
-  (<=) (ExistU v1 ts1 rs1) (ExistU v2 ts2 rs2)
+  (<=) (ExistU v1 (ts1, _) (rs1, _)) (ExistU v2 (ts2, _) (rs2, _))
     =  v1 == v2
     && length ts1 == length ts2
     && and (zipWith (P.<=) ts1 ts2)
@@ -1250,6 +1266,7 @@ instance Pretty E where
   pretty (NamP _ rs) = encloseSep "{" "}" "," [pretty k <+> "=" <+> pretty e | (k,e) <- rs]
   pretty (LitP _ l) = pretty l
   pretty (SrcP _ src) = pretty src
+  pretty (PatP _ ss) = pretty ss
 
 
 instance Pretty Instance where
@@ -1293,7 +1310,7 @@ instance Pretty TypeU where
   -- True if the expression is on top, otherwise it needs to be parenthesized
     pretty t0 = f True t0 where
         f _ (VarU v) = pretty v
-        f _ (ExistU v [] []) = angles $ pretty v
+        f _ (ExistU v ([], _) ([], _)) = angles $ pretty v
         f _ (AppU (VarU (TV "List")) [t]) = "[" <> f True t <> "]"
         f _ (AppU (VarU (TV "Tuple2")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
         f _ (AppU (VarU (TV "Tuple3")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
@@ -1303,7 +1320,7 @@ instance Pretty TypeU where
         f _ (AppU (VarU (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
         f _ (AppU (VarU (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
         f False t = parens (f True t)
-        f _ (ExistU v ts rs)
+        f _ (ExistU v (ts, _) (rs, _))
           = angles $ pretty v
           <+> list (map (f False) ts)
           <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty (f True)) rs)
@@ -1411,8 +1428,8 @@ instance (Pretty k, Pretty a) => Pretty (IndexedGeneral k a) where
 
 instance Pretty GammaIndex where
   pretty (VarG tv) = "VarG:" <+> pretty tv
-  pretty (ExistG tv [] []) = angles (pretty tv)
-  pretty (ExistG tv ts rs)
+  pretty (ExistG tv ([], _) ([], _)) = angles (pretty tv)
+  pretty (ExistG tv (ts, _) (rs, _))
     = "ExistG:"
     <+> pretty tv
     <+> list (map (parens . pretty) ts)
@@ -1427,6 +1444,14 @@ instance Pretty ExprI where
 
 instance Pretty Pattern where
   pretty (PatternText s ss) = dquotes $ hcat (pretty s : [ "#{}" <> pretty s' | s' <- ss])
+  pretty (PatternGetter ss) = hcat (map pretty ss)
+  pretty (PatternSetter ss) = hcat (map pretty ss)
+
+instance Pretty Selector where
+  pretty (SelectorKey k) = "." <> pretty k
+  pretty (SelectorIdx i) = "." <> pretty i
+  pretty (SelectorKeyGrp rs) = "." <> tupled ["." <> pretty k <> hcat (map pretty ss) | (k, ss) <- rs]
+  pretty (SelectorIdxGrp rs) = "." <> tupled ["." <> pretty i <> hcat (map pretty ss) | (i, ss) <- rs]
 
 instance Pretty Expr where
   pretty HolE = "_"

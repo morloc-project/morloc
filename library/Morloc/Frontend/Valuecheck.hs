@@ -33,6 +33,8 @@ toE (AnnoS g _ (StrS x))           = LitP g (MStr x)
 toE (AnnoS g _ (ExeS (SrcCall s))) = SrcP g s
 toE (AnnoS g _ (ExeS (PatCall (PatternText s ss))))
   = LitP g (MStr (s <> DT.concat ["#{}" <> s' | s' <- ss]))
+toE (AnnoS g _ (ExeS (PatCall (PatternGetter ss)))) = PatP g ss
+toE (AnnoS g _ (ExeS (PatCall (PatternSetter ss)))) = PatP g ss
 
 -- Check the harmony of typed implementations.
 --
@@ -136,6 +138,7 @@ checkPair e1 e2@SrcP{}
     isSimple AppP{} = False
     isSimple LamP{} = False
     isSimple SrcP{} = False
+    isSimple PatP{} = False
 
 -- reduce empty lambdas
 --
@@ -296,3 +299,4 @@ substituteExpr oldVar replacementExpr = f where
   f (NamP g rs) = NamP g (map (second f) rs)
   f e@LitP{} = e
   f e@SrcP{} = e
+  f e@PatP{} = e

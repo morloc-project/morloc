@@ -53,10 +53,10 @@ emptyConfig :: IO Config
 emptyConfig = do
   home <- SD.getHomeDirectory
   return $ Config
-    { configHome        = home <> "/.morloc"
-    , configLibrary     = home <> "/.morloc/src/morloc"
-    , configPlane       = "morloclib"
-    , configPlaneCore   = "default"
+    { configHome        = home <> "/.local/share/morloc"
+    , configLibrary     = home <> "/.local/share/src/morloc"
+    , configPlane       = "default"
+    , configPlaneCore   = "morloclib"
     , configTmpDir      = home <> "/.morloc/tmp"
     , configBuildConfig = home <> "/.morloc/.build-config.yaml"
     , configLangPython3 = "python3"
@@ -68,7 +68,7 @@ assertGeneralType :: String -> MT.Text -> TypeU -> TestTree
 assertGeneralType msg code t = testCase msg $ do
   result <- runFront code
   case result of
-    (Right [x]) -> assertEqual "" t (renameExistentials (gtypeof x))
+    (Right [x]) -> assertEqual "" (closeExistentials t) (closeExistentials . renameExistentials . gtypeof $ x)
     (Right _) -> error "Expected exactly one export from main for assertGeneralType"
     (Left e) -> error $
       "The following error was raised: " <> show e <> "\nin:\n" <> show code
@@ -76,16 +76,16 @@ assertGeneralType msg code t = testCase msg $ do
 renameExistentials :: TypeU -> TypeU
 renameExistentials = snd . f (0 :: Int, Map.empty) where
  f s (VarU v) = (s, VarU v)
- f (i,m) (ExistU v ps rs) =
+ f (i,m) (ExistU v (ps, pc) (rs, rc)) =
   case Map.lookup v m of
-    (Just v') -> ((i, m), ExistU v' ps rs)
+    (Just v') -> ((i, m), ExistU v' (ps, pc) (rs, rc))
     Nothing ->
       let v' = TV ("e" <> MT.pack (show i))
           i' = i+1
           m' = Map.insert v v' m
           (s', ps') = statefulMap f (i', m') ps 
           (s'', vs') = statefulMap f s' (map snd rs)
-      in (s'', ExistU v' ps' (zip (map fst rs) vs'))
+      in (s'', ExistU v' (ps', pc) (zip (map fst rs) vs', rc))
  f s (ForallU v t) =
   let (s', t') = f s t
   in (s', ForallU v t') 
@@ -101,6 +101,14 @@ renameExistentials = snd . f (0 :: Int, Map.empty) where
   let (s', ts') = statefulMap f s (map snd rs)
   in (s', NamU o n vs (zip (map fst rs) ts'))
 
+closeExistentials :: TypeU -> TypeU
+closeExistentials = f where
+  f (ExistU v (ts, _) (rs, _)) = ExistU v (map f ts, Closed) (map (second f) rs, Closed)
+  f t@(VarU _) = t
+  f (ForallU v t) = ForallU v (f t)
+  f (FunU ts t) = FunU (map f ts) (f t)
+  f (AppU t ts) = AppU (f t) (map f ts)
+  f (NamU o v ts rs) = NamU o v (map f ts) (map (second f) rs)
 
 assertSubtypeGamma :: String -> [GammaIndex] -> TypeU -> TypeU -> [GammaIndex] -> TestTree
 assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do
@@ -177,7 +185,9 @@ forallu :: [MT.Text] -> TypeU -> TypeU
 forallu ss t = foldr (ForallU . TV) t ss
 
 exist :: MT.Text -> TypeU
-exist v = ExistU (TV v) [] []
+exist v = ExistU (TV v) ([], Open) ([], Open)
+
+existP v ts rs = ExistU (TV v) (ts, Open) (rs, Open)
 
 var :: MT.Text -> TypeU
 var s = VarU (TV s)
@@ -214,9 +224,9 @@ subtypeTests =
     , assertSubtypeGamma "<b> -| [A] <: <b> |- <b>:[A]" [ebg] (lst a) (eb) [solvedB (lst a)]
     , assertSubtypeGamma "<a> -| <a> <: [B] |- <a>:[B]" [eag] (lst b) (ea) [solvedA (lst b)]
     , assertSubtypeGamma "<a>, <b> -| <a> <b> <: [C] |- <a>:[C], <b>:C" [eag, ebg]
-        (ExistU (TV "x1") [eb] []) (lst c) [solvedA (lst c), solvedB c]
+        (existP "x1" [eb] []) (lst c) [solvedA (lst c), solvedB c]
     , assertSubtypeGamma "<a>, <b> -|[C] <: <a> <b> |- <a>:[C], <b>:C" [eag, ebg]
-        (lst c) (ExistU (TV "x1") [eb] []) [solvedA (lst c), solvedB c]
+        (lst c) (existP "x1" [eb] []) [solvedA (lst c), solvedB c]
     , assertSubtypeGamma "[] -| forall a . a <: A -| a:A" [] (forallu ["a"] (var "a")) a [SolvedG (TV "a") a]
       -- nested types
     , assertSubtypeGamma "<b> -| [A] <: [<b>] |- <b>:A" [ebg] (lst a) (lst eb) [solvedB a]
@@ -232,14 +242,14 @@ subtypeTests =
     a = var "A"
     b = var "B"
     c = var "C"
-    ea = ExistU (TV "x1") [] []
-    eb = ExistU (TV "x2") [] []
-    ec = ExistU (TV "x3") [] []
-    ed = ExistU (TV "x4") [] []
-    eag = ExistG (TV "x1") [] []
-    ebg = ExistG (TV "x2") [] []
-    ecg = ExistG (TV "x3") [] []
-    edg = ExistG (TV "x4") [] []
+    ea = exist "x1"
+    eb = exist "x2"
+    ec = exist "x3"
+    ed = exist "x4"
+    eag = ExistG (TV "x1") ([], Open) ([], Open)
+    ebg = ExistG (TV "x2") ([], Open) ([], Open)
+    ecg = ExistG (TV "x3") ([], Open) ([], Open)
+    edg = ExistG (TV "x4") ([], Open) ([], Open)
     solvedA t = SolvedG (TV "x1") t
     solvedB t = SolvedG (TV "x2") t
 
@@ -768,7 +778,7 @@ unitTypeTests =
         [r|
         {x=42, y="yolo"}
         |]
-        (ExistU (TV "e0") [] [(Key "x", int), (Key "y", str)])
+        (existP "e0" [] [(Key "x", int), (Key "y", str)])
     , assertGeneralType
         "primitive record signature"
         [r|
@@ -783,13 +793,13 @@ unitTypeTests =
         foo = {x = 42, y = "yolo"}
         foo
         |]
-        (ExistU (TV "e0") [] [(Key "x", int), (Key "y", str)])
+        (existP "e0" [] [(Key "x", int), (Key "y", str)])
     , assertGeneralType
         "nested records"
         [r|
         {x = 42, y = {bob = 24601, tod = "listen now closely and hear how I've planned it"}}
         |]
-        (ExistU (TV "e0") [] [(Key "x", int),(Key "y",ExistU (TV "e1") [] [(Key "bob",int),(Key "tod",str)])])
+        (existP "e0" [] [(Key "x", int),(Key "y", existP "e1" [] [(Key "bob",int),(Key "tod",str)])])
 
     , assertGeneralType
         "records with bound variables"
@@ -797,7 +807,7 @@ unitTypeTests =
         foo a = {x=a, y="yolo"}
         foo 42
         |]
-        (ExistU (TV "e0") [] [(Key "x", int),(Key "y", str)])
+        (existP "e0" [] [(Key "x", int),(Key "y", str)])
 
     -- functions
     , assertGeneralType

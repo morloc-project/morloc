@@ -1,4 +1,4 @@
-module foo (foo, bar)
+module foo (foo, bar, baz)
 
 import root
 import root-py
@@ -7,4 +7,7 @@ foo :: Str
 foo = .1 (42, idpy "Jim")
 
 bar :: (Str, Int)
-bar = .1.(.0, .2) (idpy 42, ("Jim", True, 69))
+bar = .1.(.0,.2) (idpy 42, ("Jim", True, 69))
+
+baz :: [Int]
+baz = map .1 [(1,2), (2,3)]

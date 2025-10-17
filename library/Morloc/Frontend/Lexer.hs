@@ -324,7 +324,7 @@ parsePatternGetter = parsePatternGetter' Nothing
 parsePatternSetter' :: Maybe (Parser Selector) -> Parser a -> Parser ([Selector], [a])
 parsePatternSetter' maySelInit setValue = lexeme $ do
   selectors <- parseSelectors maySelInit
-  mayGroup <- optional (char '.' >> try (parseGroupSetterKey setValue) <|> try (parseGroupSetterIdx setValue))
+  mayGroup <- optional (char '.' >> (try parseGroupSetterKey) <|> (try parseGroupSetterIdx))
   case mayGroup of
     (Just (s, es)) -> return (selectors <> [s], es)
     Nothing -> do
@@ -334,19 +334,17 @@ parsePatternSetter' maySelInit setValue = lexeme $ do
 
   where
 
-  parseGroupSetterIdx :: Parser a -> Parser (Selector, [a])
-  parseGroupSetterIdx setValue = lexeme $ parens $ do
+  parseGroupSetterIdx = lexeme $ parens $ do
     xs <- sepBy1 (parsePatternSetter' (Just parseSelectorIdx) setValue) (symbol ",")
-    let ss = map ((\(SelectorIdx i : ss) -> (i, ss)) . fst) xs
+    let grps = [(i, ss) | (SelectorIdx i : ss, _) <- xs]
         es = concatMap snd xs
-    return (SelectorIdxGrp ss, es)
+    return (SelectorIdxGrp grps, es)
 
-  parseGroupSetterKey :: Parser a -> Parser (Selector, [a])
-  parseGroupSetterKey setValue = parens $ do
+  parseGroupSetterKey = parens $ do
     xs <- sepBy1 (parsePatternSetter' (Just parseSelectorKey) setValue) (symbol ",")
-    let ss = map ((\(SelectorKey k : ss) -> (k, ss)) . fst) xs
+    let grps = [(k, ss) | (SelectorKey k : ss, _) <- xs]
         es = concatMap snd xs
-    return (SelectorKeyGrp ss, es)
+    return (SelectorKeyGrp grps, es)
 
 
 parsePatternGetter' :: Maybe (Parser Selector) -> Parser [Selector]
@@ -362,13 +360,13 @@ parsePatternGetter' maySelInit = lexeme $ do
   parseGroupGetterIdx :: Parser Selector
   parseGroupGetterIdx = lexeme . parens $ do
     ss <- sepBy1 (parsePatternGetter' (Just parseSelectorIdx)) (symbol ",")
-    let ss' = map (\((SelectorIdx i):rs) -> (i, rs)) ss
+    let ss' = [(i, rs) | (SelectorIdx i:rs) <- ss]
     return $ SelectorIdxGrp ss'
 
   parseGroupGetterKey :: Parser Selector
   parseGroupGetterKey = lexeme . parens $ do
     ss <- sepBy1 (parsePatternGetter' (Just parseSelectorKey)) (symbol ",")
-    let ss' = map (\((SelectorKey k):rs) -> (k, rs)) ss
+    let ss' = [(k, rs) | (SelectorKey k:rs) <- ss]
     return $ SelectorKeyGrp ss'
 
 parseSelectors :: Maybe (Parser Selector) -> Parser [Selector]

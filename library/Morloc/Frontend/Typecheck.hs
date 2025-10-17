@@ -89,7 +89,7 @@ recordParameter :: Int -> TVar -> TypeU -> MorlocMonad ()
 recordParameter i v t = do
   s <- MM.get
   let size = findTypeKindSize v t
-      updatedMap = Map.insertWith (\xs ys -> ys <> xs) i [(v, ExistU v [] [], size)] (stateTypeQualifier s)
+      updatedMap = Map.insertWith (\xs ys -> ys <> xs) i [(v, ExistU v ([], Open) ([], Open), size)] (stateTypeQualifier s)
   MM.put $ s { stateTypeQualifier = updatedMap }
 
 findTypeKindSize :: TVar -> TypeU -> Int
@@ -97,11 +97,11 @@ findTypeKindSize v = head . catMaybes . f where
   f (AppU (VarU v') ts)
     | v == v' = [Just (1 + (length ts))]
     | otherwise = concat $ map f ts
-  f (AppU t ts) = concat $ map f (t:ts) 
+  f (AppU t ts) = concat $ map f (t:ts)
   f (VarU v')
     | v == v' = [Just 1]
     | otherwise = [Nothing]
-  f (ExistU v' ts1 (map snd -> ts2))
+  f (ExistU v' (ts1, _) (map snd . fst -> ts2))
     | v == v' = [Just (1 + (length ts1))]
     | otherwise = concat $ map f (ts1 <> ts2)
   f (ForallU _ t) = f t
@@ -277,37 +277,34 @@ synthE _ g (IntS x) = return (g, BT.intU, IntS x)
 synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
 synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 
--- synthE i g0 (AccS k e) = do
---   (g1, t1, e1) <- synthG g0 e
---   (g2, valType) <- accessRecord g1 t1
---   return (g2, valType, AccS k e1)
---   where
---     accessRecord :: Gamma -> TypeU -> MorlocMonad (Gamma, TypeU)
---     accessRecord g t@(NamU _ _ _ rs) = case lookup k rs of
---       Nothing -> gerr i (KeyError k t)
---       (Just value) -> return (g, value)
---     accessRecord g t@(ExistU v ps rs) = case lookup k rs of
---       Nothing -> do
---         let (g', value) = newvar (unTVar v <> "_" <> unKey k) g
---         case access1 v (gammaContext g') of
---           (Just (rhs, _, lhs)) -> return (g' { gammaContext = rhs <> [ExistG v ps ((k, value):rs)] <> lhs }, value)
---           Nothing -> do
---             MM.sayVVV $ "Case b"
---                       <> "\n  rs:" <+> pretty rs
---                       <> "\n  v:" <+> pretty v
---             gerr i (KeyError k t)
---       (Just value) -> return (g, value)
---     accessRecord g t = do
---       gscope <- MM.getGeneralScope i
---       case TE.evaluateStep gscope t of
---         (Just t') -> accessRecord g t'
---         Nothing -> gerr i (KeyError k t)
-
 -- synthesize a string interpolation pattern
 synthE i g (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternText _ _)))) es) = do
   (g1, _, f1) <- synthG g f
   (g2, _, es1, _) <- zipCheck i g1 es (take (length es) (repeat BT.strU))
   return (g2, BT.strU, AppS f1 es1)
+
+synthE _ g0 (ExeS (PatCall (PatternGetter ss))) = do
+  -- generate an existential type that contains the pattern
+  let (g1, dtn) = selectorType g0 ss
+
+  -- type returned from pattern (with one element for each extracted value)
+  retType <- return $ case map (selectorGetter dtn) (ungroup ss) of
+    [] -> error "Illegal empty selection"
+    [t] -> t
+    ts -> BT.tupleU ts
+  let ft = FunU [dtn] retType
+
+  return (g1, ft, ExeS (PatCall (PatternGetter ss)))
+
+synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall (PatternGetter _)))) []) = error "Unreachable application pattern to no data"
+synthE _ g0 (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternGetter _)))) [e0]) = do
+  -- synthesize the pattern type (will be a function of data that returns a tuple
+  (g1, FunU [datType] retType, f') <- synthG g0 f
+
+  -- use selector-derived type to update context and data expression
+  (g2, _, e') <- checkG g1 e0 datType
+
+  return (g2, apply g2 retType, AppS f' [e'])
 
 synthE _ g (ExeS (PatCall (PatternText s ss@(length -> n)))) = do
   let t = FunU (take n (repeat BT.strU)) BT.strU
@@ -416,7 +413,7 @@ synthE _ g0 (NamS rs) = do
   (g1, xs) <- statefulMapM (\s v -> synthG s v |>> (\(a,b,c) -> (a,(b,c)))) g0 (map snd rs)
   let (ts, es) = unzip xs
       ks = map fst rs
-      (g2, t) = newvarRich [] (zip ks ts) "record_" g1
+      (g2, t) = newvarRich ([], Closed) (zip ks ts, Closed) "record_" g1
       e = NamS (zip ks es)
   return (g2, t, e)
 
@@ -596,14 +593,14 @@ application i g0 es (ForallU v s) = application' i (g0 +> v) es (substitute v s)
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-application i g0 es (ExistU v@(TV s) [] _) =
+application i g0 es (ExistU v@(TV s) ([], _) _) =
   case access1 v (gammaContext g0) of
     -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
       let (g1, veas) = statefulMap (\g _ -> tvarname g "a_") g0 es
           (g2, vea) = tvarname g1 (s <> "o_")
-          eas = [ExistU v' [] [] | v' <- veas]
-          ea = ExistU vea [] []
+          eas = [ExistU v' ([], Open) ([], Open) | v' <- veas]
+          ea = ExistU vea ([], Open) ([], Open)
           f = FunU eas ea
           g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
       (g4, _, es', _) <- zipCheck i g3 es eas

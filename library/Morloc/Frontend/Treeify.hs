@@ -104,7 +104,7 @@ nullify = DAG.mapNode f where
 
     nullifyT :: TypeU -> TypeU
     nullifyT (FunU ts t) = FunU (filter (not . isNull) (map nullifyT ts)) (nullifyT t)
-    nullifyT (ExistU v ts rs) = ExistU v (map nullifyT ts) (map (second nullifyT) rs)
+    nullifyT (ExistU v (ts, tc) (rs, rc)) = ExistU v (map nullifyT ts, tc) (map (second nullifyT) rs, rc)
     nullifyT (ForallU v t) = ForallU v (nullifyT t)
     nullifyT (AppU t ts) = AppU (nullifyT t) (map nullifyT ts)
     nullifyT (NamU o v ds rs) = NamU o v (map nullifyT ds) (map (second nullifyT) rs)

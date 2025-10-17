@@ -284,6 +284,8 @@ translateSegment m0 =
 evaluatePattern :: Pattern -> [MDoc] -> MDoc
 evaluatePattern (PatternText firstStr fragments) xs
   = "paste0" <> tupled (dquotes (pretty firstStr) : concat [[x, dquotes (pretty s)] | (x, s) <- zip xs fragments])
+evaluatePattern (PatternGetter _) _ = undefined
+evaluatePattern (PatternSetter _) _ = undefined
 
 makePool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc
 makePool sources dynlibs manifolds

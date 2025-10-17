@@ -586,6 +586,8 @@ evaluatePattern (PatternText s ss) xs = "interweave_strings" <> tupled [fragment
   where
     fragments = encloseSep "{" "}" "," (map (dquotes . pretty) (s:ss))
     insertions = encloseSep "{" "}" "," xs
+evaluatePattern (PatternGetter _) _ = undefined
+evaluatePattern (PatternSetter _) _ = undefined
 
 makeManifold
   :: (HasTypeM t)

@@ -575,6 +575,8 @@ pApp = do
           try pUni
       <|> try pTupE
       <|> try (parens pExpr)
+      <|> try pSetter
+      <|> try pGetter
       <|> try pStrE
       <|> try pLogE
       <|> try pNumE
@@ -752,7 +754,7 @@ pNamEntryU = do
 pExistential :: Parser TypeU
 pExistential = do
   v <- angles freenameL
-  return (ExistU (TV v) [] [])
+  return (ExistU (TV v) ([], Open) ([], Open))
 
 pAppU :: Parser TypeU
 pAppU = do

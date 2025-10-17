@@ -348,11 +348,11 @@ evaluatePattern (PatternGetter (ungroup -> [ss])) [m]
 evaluatePattern (PatternGetter (ungroup -> sss)) [m]
   = tupled [hcat (m : map writeBasicSelector ss) | ss <- sss]
 evaluatePattern (PatternGetter _) _ = error "expected exactly one argument, the data structure"
-evaluatePattern (PatternSetter ss) xs = undefined
+evaluatePattern (PatternSetter _) _ = undefined
 
 writeBasicSelector :: BasicSelector -> MDoc
-writeBasicSelector (BasicSelectorKey txt) = "[" <> dquotes (pretty txt) <> "]"
-writeBasicSelector (BasicSelectorIdx int) = "[" <> pretty int <> "]"
+writeBasicSelector (BasicSelectorKey k) = "[" <> dquotes (pretty k) <> "]"
+writeBasicSelector (BasicSelectorIdx i) = "[" <> pretty i <> "]"
 
 makeDispatch :: [SerialManifold] -> MDoc
 makeDispatch ms = vsep [localDispatch, remoteDispatch]
