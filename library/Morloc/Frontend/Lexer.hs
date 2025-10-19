@@ -313,94 +313,60 @@ stringLiteral = lexeme $ do
   return $ MT.pack s
 
 
-parsePatternSetter :: Parser a -> Parser ([Selector], [a])
-parsePatternSetter par = parsePatternSetter' Nothing par
+parsePatternSetter :: Parser a -> Parser (Selector, [a])
+parsePatternSetter parseValue = parsePattern (string "=" >> parseValue)
 
-parsePatternGetter :: Parser [Selector]
-parsePatternGetter = parsePatternGetter' Nothing
+parsePatternGetter :: Parser Selector
+parsePatternGetter = fst <$> parsePattern (return True)
 
--- -- .(x.y = _, z.0.(x = _, y = _))
--- -- (\m -> .(x.y, z.0.(x, y)) 1 2 3) data
-parsePatternSetter' :: Maybe (Parser Selector) -> Parser a -> Parser ([Selector], [a])
-parsePatternSetter' maySelInit setValue = lexeme $ do
-  selectors <- parseSelectors maySelInit
-  mayGroup <- if null selectors
-    then Just <$> parseGroup
-    else optional parseGroup
-  case mayGroup of
-    (Just (s, es)) -> return (selectors <> [s], es)
-    Nothing -> do
-      _ <- op "="
-      value <- setValue
-      return $ (selectors, [value])
-
+parsePattern :: Parser a -> Parser (Selector, [a])
+parsePattern parseValue = lexeme $ try parseIdx <|> try parseKey <|> try parseGrpIdx <|> try parseGrpKey
   where
 
-  parseGroup = char '.' >> (try parseGroupSetterKey <|> try parseGroupSetterIdx)
+  parseIdx = parseSegment L.decimal SelectorIdx
 
-  parseGroupSetterIdx = lexeme $ parens $ do
-    xs <- sepBy1 (parsePatternSetter' (Just parseSelectorIdx) setValue) (symbol ",")
-    let grps = [(i, ss) | (SelectorIdx i : ss, _) <- xs]
-        es = concatMap snd xs
-    return (SelectorIdxGrp grps, es)
+  parseKey = parseSegment key SelectorKey where
+    key = do
+      firstLetter <- lowerChar
+      remaining <- many (alphaNumChar <|> char '\'' <|> char '_')
+      return $ MT.pack (firstLetter : remaining)
 
-  parseGroupSetterKey = parens $ do
-    xs <- sepBy1 (parsePatternSetter' (Just parseSelectorKey) setValue) (symbol ",")
-    let grps = [(k, ss) | (SelectorKey k : ss, _) <- xs]
-        es = concatMap snd xs
-    return (SelectorKeyGrp grps, es)
+  -- parseSegment :: Parser p -> ((p, Selector) -> [(p, Selector)] -> Selector) -> Parser (Selector, [a])
+  parseSegment fieldParser constructor = do
+    _ <- char '.'
+    k <- fieldParser
+    mayS <- optional (parsePattern parseValue)
+    case mayS of
+      (Just (s, es)) -> return (constructor (k, s) [], es)
+      Nothing -> do
+        e <- parseValue
+        return (constructor (k, SelectorEnd) [], [e])
+
+  parseGrpKey = parseGrp parseKey
+
+  parseGrpIdx = parseGrp parseIdx
+
+  parseGrp grpparser = lexeme $ do
+    _ <- char '.'
+    xs <- parens (sepBy1 grpparser (symbol ","))
+    let es = concat $ map snd xs
+    case flattenSelector (map fst xs) of
+      (s, SelectorEnd) -> return (s, es)
+      (SelectorEnd, s) -> return (s, es)
+      _ -> error "Unreachable - grpparser can only return on selector type"
+
+  flattenSelector :: [Selector] -> (Selector, Selector)
+  flattenSelector sss = (flatIdx, flatKey)
+    where
+    flatIdx = case concat [s:ss | (SelectorIdx s ss) <- sss] of
+      [] -> SelectorEnd
+      ss -> SelectorIdx (head ss) (tail ss)
+
+    flatKey = case concat [s:ss | (SelectorKey s ss) <- sss] of
+      [] -> SelectorEnd
+      ss -> SelectorKey (head ss) (tail ss)
 
 
-parsePatternGetter' :: Maybe (Parser Selector) -> Parser [Selector]
-parsePatternGetter' maySelInit = lexeme $ do
-  selectors <- parseSelectors maySelInit
-  mayGroup <- if null selectors
-    then Just <$> parseGroup
-    else optional parseGroup
-  return $ case mayGroup of
-    (Just s) -> selectors <> [s]
-    Nothing -> selectors
-
-  where
-
-  parseGroup = char '.' >> (try parseGroupGetterKey <|> try parseGroupGetterIdx)
-
-  parseGroupGetterIdx :: Parser Selector
-  parseGroupGetterIdx = lexeme . parens $ do
-    ss <- sepBy1 (parsePatternGetter' (Just parseSelectorIdx)) (symbol ",")
-    let ss' = [(i, rs) | (SelectorIdx i:rs) <- ss]
-    return $ SelectorIdxGrp ss'
-
-  parseGroupGetterKey :: Parser Selector
-  parseGroupGetterKey = lexeme . parens $ do
-    ss <- sepBy1 (parsePatternGetter' (Just parseSelectorKey)) (symbol ",")
-    let ss' = [(k, rs) | (SelectorKey k:rs) <- ss]
-    return $ SelectorKeyGrp ss'
-
-parseSelectors :: Maybe (Parser Selector) -> Parser [Selector]
-parseSelectors Nothing = many parseEitherSelector
-parseSelectors (Just initialParser) = do
-  s <- initialParser
-  ss <- many parseEitherSelector
-  return (s:ss)
-
-parseEitherSelector :: Parser Selector
-parseEitherSelector = try parseSelectorIdx <|> try parseSelectorKey
-
-parseSelectorIdx :: Parser Selector
-parseSelectorIdx = do
-  _ <- char '.'
-  i <- L.decimal
-  return $ SelectorIdx i
-
--- if True, then this is an initial key in a group, so will have no dot
-parseSelectorKey :: Parser Selector
-parseSelectorKey = do
-  _ <- char '.'
-  firstLetter <- lowerChar
-  remaining <- many (alphaNumChar <|> char '\'' <|> char '_')
-  let key = MT.pack (firstLetter : remaining)
-  return $ SelectorKey key
 
 stringPatterned :: Parser a -> Parser (Either Text (Text, [(a, Text)]))
 stringPatterned exprParser = do

@@ -1,13 +1,46 @@
-module foo (foo, bar, baz)
+module m (testpy, testr, testcpp)
+-- module m (foo)
 
 import root
 import root-py
+import root-r
+import root-cpp
 
-foo :: Str
-foo = .1 (42, idpy "Jim")
+-- foo = idr ( eq (map .1 [(1,True), (2,False)]) [True,False] )
 
-bar :: (Str, Int)
-bar = .1.(.0,.2) (idpy 42, ("Jim", True, 69))
+testr = idr
+  [ eq ((.1 (42, "Jim")))
+       "Jim"
+  , eq (.1.(.0,.2) (42, ("Jim", True, 69)))
+       ("Jim", 69)
+  , eq (map .1 [(1,2), (2,3)]) [2,3]
+  , eq (.(.1, .0) (1, 2))
+       (2,1)
+  , eq (.(.1) (1, 2))
+       2
+  ]
 
-baz :: [Int]
-baz = map .1 [(1,2), (2,3)]
+testpy = idpy -- force into python
+  [ eq (.1 (42, "Jim"))
+       "Jim"
+  , eq (.1.(.0,.2) (42, ("Jim", True, 69)))
+       ("Jim", 69)
+  , eq (map .1 [(1,2), (2,3)])
+       [2,3]
+  , eq (.(.1, .0) (1, 2))
+       (2,1)
+  , eq (.(.1) (1, 2))
+       2
+  ]
+
+testcpp = idcpp
+  [ eq (.1 (42, "Jim"))
+       "Jim"
+  , eq (.1.(.0,.2) (42, ("Jim", True, 69)))
+       ("Jim", 69)
+  , eq (map .1 [(1,2), (2,3)]) [2,3]
+  , eq (.(.1, .0) (1, 2))
+       (2,1)
+  , eq (.(.1) (1, 2))
+       2
+  ]

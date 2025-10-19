@@ -24,6 +24,7 @@ import Morloc.Quasi
 import qualified Morloc.Config as MC
 import Morloc.Monad (asks, gets, Index, newIndex, runIndex)
 import qualified Morloc.Data.Text as MT
+import Morloc.Data.Text (Text)
 import qualified System.FilePath as SF
 import qualified Data.Char as DC
 import qualified Morloc.Language as ML
@@ -40,7 +41,7 @@ translate srcs es = do
   lib <- MT.pack <$> asks MC.configLibrary
 
   home <- pretty <$> asks MC.configHome
-  let opt = home <> "/opt" 
+  let opt = home <> "/opt"
 
   -- translate sources
   includeDocs <- mapM
@@ -66,7 +67,7 @@ translate srcs es = do
     , scriptMake = []
     }
   where
-      qualifiedSrcName :: MT.Text -> Source -> MDoc
+      qualifiedSrcName :: Text -> Source -> MDoc
       qualifiedSrcName lib src = case srcPath src of
           Nothing -> pretty $ srcName src
           (Just path) -> makeNamespace lib path <> "." <> pretty (srcName src)
@@ -77,7 +78,7 @@ debugLog d = do
   verbosity <- gets stateVerbosity
   when (verbosity > 0) $ (liftIO . putDoc) d
 
-makeNamespace :: MT.Text -> Path -> MDoc 
+makeNamespace :: Text -> Path -> MDoc
 makeNamespace lib = pretty
               . MT.liftToText (map DC.toLower)
               . MT.replace "/" "_"
@@ -319,7 +320,7 @@ translateSegment makeSrcName m0 =
       let rs = rs1 ++ [ namer i <+> "=" <+> e1' ] ++ rs2
       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
-    makeFunction :: MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> MDoc 
+    makeFunction :: MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> MDoc
     makeFunction mname args priorLines body headForm
       = nest 4 (vsep [def, tryCatch priorLines, body])
       where
@@ -343,16 +344,15 @@ translateSegment makeSrcName m0 =
 evaluatePattern :: Pattern -> [MDoc] -> MDoc
 evaluatePattern (PatternText firstStr fragments) xs
   = "f" <> (dquotes . hcat) (pretty firstStr : [ ("{" <> x <> "}" <> pretty s) | (x, s) <- zip xs fragments])
-evaluatePattern (PatternGetter (ungroup -> [ss])) [m]
+evaluatePattern (PatternStruct (ungroup -> [ss])) [m]
   = hcat (m : map writeBasicSelector ss)
-evaluatePattern (PatternGetter (ungroup -> sss)) [m]
+evaluatePattern (PatternStruct (ungroup -> sss)) [m]
   = tupled [hcat (m : map writeBasicSelector ss) | ss <- sss]
-evaluatePattern (PatternGetter _) _ = error "expected exactly one argument, the data structure"
-evaluatePattern (PatternSetter _) _ = undefined
+evaluatePattern (PatternStruct _) _ = undefined
 
-writeBasicSelector :: BasicSelector -> MDoc
-writeBasicSelector (BasicSelectorKey k) = "[" <> dquotes (pretty k) <> "]"
-writeBasicSelector (BasicSelectorIdx i) = "[" <> pretty i <> "]"
+writeBasicSelector :: Either Int Text -> MDoc
+writeBasicSelector (Right k) = "[" <> dquotes (pretty k) <> "]"
+writeBasicSelector (Left i) = "[" <> pretty i <> "]"
 
 makeDispatch :: [SerialManifold] -> MDoc
 makeDispatch ms = vsep [localDispatch, remoteDispatch]

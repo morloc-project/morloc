@@ -41,7 +41,7 @@ import qualified Morloc.Language as ML
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.TypeEval as TE
-import qualified Morloc.Data.Text as MT
+import Morloc.Data.Text (Text)
 import Control.Monad.Identity (Identity)
 
 data CallSemantics = Copy | Reference | ConstPtr
@@ -563,7 +563,7 @@ PROPAGATE_ERROR(errmsg)|]
   makeNativeExpr _ (NullN_        _  ) = return $ defaultValue { poolExpr = "null" }
   makeNativeExpr _ _ = error "Unreachable"
 
-  templateArguments :: [(MT.Text, TypeF)] -> CppTranslator MDoc
+  templateArguments :: [(Text, TypeF)] -> CppTranslator MDoc
   templateArguments [] = return ""
   templateArguments qs = do
     ts <- mapM (cppTypeOf . snd) qs
@@ -586,8 +586,16 @@ evaluatePattern (PatternText s ss) xs = "interweave_strings" <> tupled [fragment
   where
     fragments = encloseSep "{" "}" "," (map (dquotes . pretty) (s:ss))
     insertions = encloseSep "{" "}" "," xs
-evaluatePattern (PatternGetter _) _ = undefined
-evaluatePattern (PatternSetter _) _ = undefined
+evaluatePattern (PatternStruct (ungroup -> [ss])) [m]
+  = writeSelector m ss
+evaluatePattern (PatternStruct (ungroup -> sss)) [m]
+  = encloseSep "{" "}" "," (map (writeSelector m) sss)
+evaluatePattern (PatternStruct _) _ = undefined
+
+writeSelector :: MDoc -> [Either Int Text] -> MDoc
+writeSelector d [] = d
+writeSelector d (Right k: rs) = writeSelector (d <> "." <> pretty k) rs
+writeSelector d (Left i: rs) = writeSelector ("std::get<" <> pretty i <> ">" <> parens d) rs
 
 makeManifold
   :: (HasTypeM t)

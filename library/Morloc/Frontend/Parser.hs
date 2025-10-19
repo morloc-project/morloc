@@ -610,8 +610,8 @@ pSetter = do
   -- for example: .(x.0 = 1, y.a = 2, z = 3)
   --  ss: the selectors, in this case the pattern .(x.0, y.a, z)
   --  es: a list of expressions: [1,2,3]
-  (ss, es) <- parsePatternSetter pExpr
-  setter <- exprI $ PatE (PatternSetter ss)
+  (s, es) <- parsePatternSetter pExpr
+  setter <- exprI $ PatE (PatternStruct s)
 
   -- fresh indices for the lambda and application expressions we'll create
   idxLam <- exprId
@@ -630,8 +630,8 @@ pSetter = do
 
 pGetter :: Parser ExprI
 pGetter = do
-  ss <- parsePatternGetter
-  exprI $ PatE (PatternGetter ss)
+  s <- parsePatternGetter
+  exprI $ PatE (PatternStruct s)
 
 pNumE :: Parser ExprI
 pNumE = do

@@ -547,76 +547,59 @@ cut i g = do
     | otherwise = f xs
 
 
--- generate an existential type that matches a selector pattern
-selectorType :: Gamma -> [Selector] -> (Gamma, TypeU)
-selectorType g0 [] = newvar "_pattern_" g0
-selectorType g0 ((SelectorKey k):ss)
-  = newvarRich ([], Closed) ([(Key k, t)], Open) "_pattern_" g1
-  where
-    (g1, t) = selectorType g0 ss
-selectorType g0 ((SelectorIdx i):ss)
-  = newvarRich (ts <> [ti], Open) ([], Closed) "_pattern" g2
-  where
-    (g1, ts) = unfoldStateN i (newvar "_pattern_") g0
-    (g2, ti) = selectorType g1 ss
-selectorType g0 [SelectorKeyGrp xs]
-  = newvarRich ([], Closed) (zip (map (Key . fst) xs') tns, Open) "_pattern" gn
-  where
-    xs' = [(k, foldl1 zipSelectors sss) | (k, sss) <- groupSort xs]
-    (gn, tns) = statefulMap selectorType g0 (map snd xs')
-selectorType g0 [SelectorIdxGrp xs]
-  = newvarRich (ts, Open) ([], Closed) "_pattern" gn
-  where
-    zippedGrp = [(i, foldl1 zipSelectors sss) | (i, sss) <- groupSort xs]
-    maxI = maximum (map fst zippedGrp)
-    (gn, ts) = makeSelectors maxI g0
+-- data Selector
+--   = SelectorKey (Text, Selector) [(Text, Selector)] -- bag, may be multiple identical keys
+--   | SelectorIdx (Int,  Selector) [(Int,  Selector)] -- bag, may be multiple identical indices
+--   | SelectorEnd
 
-    makeSelectors :: Int -> Gamma -> (Gamma, [TypeU])
-    makeSelectors i g
-      | i < 0 = (g, [])
-      | otherwise = (g2, t:rightTs) where
-          (g1, t) = case lookup i zippedGrp of
-            (Just ss) -> selectorType g ss
-            Nothing -> newvar "_pattern_" g
-          (g2, rightTs) = makeSelectors (i-1) g1
-selectorType _ (SelectorKeyGrp _:_) = error "Illegal chained group"
-selectorType _ (SelectorIdxGrp _:_) = error "Illegal chained group"
+selectorType :: Gamma -> Selector -> MorlocMonad (Gamma, TypeU)
+selectorType g0 SelectorEnd = do
+  let (g1, s) = newvar "_pattern_" g0
+  return (g1, s)
+selectorType g0 (SelectorIdx x xs) = do
+  -- highest index in this pattern, matching tuple must be at least this long
+  let maxIndex = maximum (map fst (x:xs))
 
-zipSelectors :: [Selector] -> [Selector] -> [Selector]
--- merge two basic selectors
-zipSelectors (SelectorIdx i : iss) (SelectorIdx j : jss)
-  | i == j = SelectorIdx i : zipSelectors iss jss
-  | otherwise = [SelectorIdxGrp [(i, iss), (j, jss)]]
-zipSelectors (SelectorKey m : iss) (SelectorKey n : jss)
-  | m == n = SelectorKey m : zipSelectors iss jss
-  | otherwise = [SelectorKeyGrp [(m, iss), (n, jss)]]
--- merge a basic selector and a group
-zipSelectors x@[SelectorIdxGrp _] y@(SelectorIdx _ : _) = zipSelectors y x
-zipSelectors (SelectorIdx i : iss) [SelectorIdxGrp xs] = [SelectorIdxGrp xs']
-  where
-  xs' = case lookup i xs of
-    (Just jss) -> take i xs <> ((i, zipSelectors iss jss) : drop (i+1) xs)
-    Nothing -> (i, iss):xs
-zipSelectors x@[SelectorKeyGrp _] y@(SelectorKey _ : _) = zipSelectors y x
-zipSelectors (SelectorKey m : mss) [SelectorKeyGrp xs] = [SelectorKeyGrp xs']
-  where
-  xs' = case lookup m xs of
-    (Just nss) -> (m, zipSelectors mss nss):[x | x@(n, _) <- xs , m /= n]
-    Nothing -> (m, mss):xs
--- merge two groups
-zipSelectors [SelectorIdxGrp xs] [SelectorIdxGrp ys] =
-  [SelectorIdxGrp $ map (\(k, sss) -> (k, foldl1 zipSelectors sss)) (groupSort (xs <> ys))]
-zipSelectors [SelectorKeyGrp xs] [SelectorKeyGrp ys] =
-  [SelectorKeyGrp $ map (\(k, sss) -> (k, foldl1 zipSelectors sss)) (groupSort (xs <> ys))]
--- all else is error
-zipSelectors _ _ = error "Illegal pattern form"
+  -- combine groups, e.g.: .(.1.(0,1), .1.2, .2) --> .(.1.(0,1,2), .2)
+  xs' <- mapM (secondM weaveSelectors) (groupSort (x:xs))
 
--- get the terminal types from a getter pattern type
-selectorGetter :: TypeU -> [BasicSelector] -> TypeU
-selectorGetter t [] = t
-selectorGetter (ExistU _ _ (ks, _)) ((BasicSelectorKey k) : ss) = selectorGetter (fromJust (lookup (Key k) ks)) ss
-selectorGetter (ExistU _ (ts, _) _) ((BasicSelectorIdx i) : ss) = selectorGetter (ts !! i) ss
-selectorGetter _ _ = error "Illegal type created for selector data -- must be existential"
+  (g1, ts) <- statefulMapM (makeIndexType xs') g0 (take (maxIndex+1) [0..])
+
+  return $ newvarRich (ts, Open) ([], Closed) "_pattern_" g1
+
+  where
+    makeIndexType :: [(Int, Selector)] -> Gamma -> Int -> MorlocMonad (Gamma, TypeU)
+    makeIndexType xs' g i = case lookup i xs' of
+      (Just s) -> selectorType g s
+      Nothing -> selectorType g SelectorEnd
+selectorType g0 (SelectorKey x xs) = do
+  xs' <- mapM (secondM weaveSelectors) (groupSort (x:xs))
+  (g1, ss) <- statefulMapM selectorType g0 (map snd xs')
+  return $ newvarRich ([], Closed) (zip (map (Key . fst) xs') ss, Open) "_pattern_" g1
+
+
+weaveSelectors :: [Selector] -> MorlocMonad Selector
+weaveSelectors [] = return SelectorEnd
+weaveSelectors (s0:ss0) = foldrM weavePair s0 ss0 where
+  weavePair :: Selector -> Selector -> MorlocMonad Selector
+  weavePair SelectorEnd s = return s
+  weavePair s SelectorEnd = return s
+  weavePair (SelectorIdx s1 ss1) (SelectorIdx s2 ss2) = do
+    xs <- mapM (secondM weaveSelectors) (groupSort ((s1:ss1) <> (s2:ss2)))
+    return $ SelectorIdx (head xs) (tail xs)
+  weavePair (SelectorKey s1 ss1) (SelectorKey s2 ss2) = do
+    xs <- mapM (secondM weaveSelectors) (groupSort ((s1:ss1) <> (s2:ss2)))
+    return $ SelectorKey (head xs) (tail xs)
+  weavePair x@(SelectorKey _ _) y@(SelectorIdx _ _) = weavePair y x
+  weavePair (SelectorIdx _ _) (SelectorKey _ _) = MM.throwError . BadPattern $ "Cannot merge index and keyword patterns"
+
+selectorGetter :: TypeU -> Selector -> [TypeU]
+selectorGetter t SelectorEnd = [t]
+selectorGetter (ExistU _ _ (ks, _)) (SelectorKey x xs)
+  = concat [maybe [] (\t -> selectorGetter t s) (lookup (Key k) ks) | (k, s) <- (x:xs)]
+selectorGetter (ExistU _ (ts, _) _) (SelectorIdx x xs)
+  = concat [selectorGetter (ts !! i) s | (i, s) <- (x:xs)]
+selectorGetter _ _ = error "Unreachable"
 
 extendList :: [a] -> [a] -> ([a], [a])
 extendList [] ys = (ys, ys)

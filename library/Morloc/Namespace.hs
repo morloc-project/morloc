@@ -88,7 +88,6 @@ module Morloc.Namespace
   , AliasedSymbol(..)
   , Signature(..)
   , Selector(..)
-  , BasicSelector(..)
   , ungroup
   , Pattern(..)
   , Expr(..)
@@ -422,13 +421,10 @@ data Typeclass a = Typeclass ClassName [TVar] [a]
   deriving (Show, Ord, Eq)
 
 data Selector
-  = SelectorKey Text
-  | SelectorIdx Int
-  | SelectorKeyGrp [(Text, [Selector])]
-  | SelectorIdxGrp [(Int, [Selector])]
+  = SelectorKey (Text, Selector) [(Text, Selector)] -- bag, may be multiple identical keys
+  | SelectorIdx (Int,  Selector) [(Int,  Selector)] -- bag, may be multiple identical indices
+  | SelectorEnd
   deriving (Show, Ord, Eq)
-
-data BasicSelector = BasicSelectorKey Text | BasicSelectorIdx Int
 
 -- suppose you have the pattern: .1.y.(.1.(.y, .z), .2.x)
 -- this returns a tuple of three terms
@@ -439,20 +435,16 @@ data BasicSelector = BasicSelectorKey Text | BasicSelectorIdx Int
 --   ]
 -- these may easily be used to generate getters/setters in more
 -- conventional languages
-ungroup :: [Selector] -> [[BasicSelector]]
-ungroup [] = []
-ungroup [SelectorKey k] = [[BasicSelectorKey k]]
-ungroup [SelectorIdx i] = [[BasicSelectorIdx i]]
-ungroup ((SelectorKey k):ss) = [BasicSelectorKey k : bss | bss <- ungroup ss]
-ungroup ((SelectorIdx i):ss) = [BasicSelectorIdx i : bss | bss <- ungroup ss]
-ungroup [SelectorKeyGrp xs] = concat [ungroup (SelectorKey k : ss) | (k, ss) <- xs]
-ungroup [SelectorIdxGrp xs] = concat [ungroup (SelectorIdx i : ss) | (i, ss) <- xs]
-ungroup _ = error "Currently I do not support iterative grouping -- it would be silly"
+ungroup :: Selector -> [[Either Int Text]]
+ungroup SelectorEnd = [[]]
+ungroup (SelectorKey (k, SelectorEnd) []) = [[Right k]]
+ungroup (SelectorIdx (i, SelectorEnd) []) = [[Left i]]
+ungroup (SelectorKey x xs) = concat [map ((:) (Right k)) (ungroup s) | (k, s) <- (x:xs)]
+ungroup (SelectorIdx x xs) = concat [map ((:) (Left  i)) (ungroup s) | (i, s) <- (x:xs)]
 
 data Pattern
   = PatternText Text [Text]
-  | PatternGetter [Selector]
-  | PatternSetter [Selector]
+  | PatternStruct Selector
   deriving (Show, Ord, Eq)
 
 data ExprI = ExprI Int Expr
@@ -683,7 +675,7 @@ data E
   | NamP (Indexed Type) [(Key, E)]
   | LitP (Indexed Type) Lit
   | SrcP (Indexed Type) Source
-  | PatP (Indexed Type) [Selector]
+  | PatP (Indexed Type) Selector
   deriving (Ord, Eq, Show)
 
 data ExecutableExpr = SrcCall Source | PatCall Pattern
@@ -866,6 +858,7 @@ data MorlocError
   | EmptyTuple
   | TupleSingleton
   | EmptyRecord
+  | BadPattern Text
   -- module errors
   | MultipleModuleDeclarations [MVar]
   | NestedModule MVar
@@ -1266,7 +1259,7 @@ instance Pretty E where
   pretty (NamP _ rs) = encloseSep "{" "}" "," [pretty k <+> "=" <+> pretty e | (k,e) <- rs]
   pretty (LitP _ l) = pretty l
   pretty (SrcP _ src) = pretty src
-  pretty (PatP _ ss) = pretty ss
+  pretty (PatP _ s) = pretty (PatternStruct s)
 
 
 instance Pretty Instance where
@@ -1444,14 +1437,14 @@ instance Pretty ExprI where
 
 instance Pretty Pattern where
   pretty (PatternText s ss) = dquotes $ hcat (pretty s : [ "#{}" <> pretty s' | s' <- ss])
-  pretty (PatternGetter ss) = hcat (map pretty ss)
-  pretty (PatternSetter ss) = hcat (map pretty ss)
+  pretty (PatternStruct s) = pretty s
 
 instance Pretty Selector where
-  pretty (SelectorKey k) = "." <> pretty k
-  pretty (SelectorIdx i) = "." <> pretty i
-  pretty (SelectorKeyGrp rs) = "." <> tupled ["." <> pretty k <> hcat (map pretty ss) | (k, ss) <- rs]
-  pretty (SelectorIdxGrp rs) = "." <> tupled ["." <> pretty i <> hcat (map pretty ss) | (i, ss) <- rs]
+  pretty SelectorEnd = ""
+  pretty (SelectorKey (k, s) []) = "." <> pretty k <> pretty s
+  pretty (SelectorIdx (i, s) []) = "." <> pretty i <> pretty s
+  pretty (SelectorKey r rs) = "." <> tupled ["." <> pretty k <> pretty s | (k, s) <- (r:rs)]
+  pretty (SelectorIdx r rs) = "." <> tupled ["." <> pretty i <> pretty s | (i, s) <- (r:rs)]
 
 instance Pretty Expr where
   pretty HolE = "_"
@@ -1571,6 +1564,7 @@ instance Pretty MorlocError where
   pretty EmptyTuple = "EmptyTuple"
   pretty TupleSingleton = "TupleSingleton"
   pretty EmptyRecord = "EmptyRecord"
+  pretty (BadPattern msg) = "Bad pattern:" <+> pretty msg
   -- module errors
   pretty (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations: " <> tupled (map pretty mv)
   pretty (NestedModule name') = "Nested modules are currently illegal: " <> pretty name'

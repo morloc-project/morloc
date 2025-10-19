@@ -283,21 +283,21 @@ synthE i g (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternText _ _)))) es) = do
   (g2, _, es1, _) <- zipCheck i g1 es (take (length es) (repeat BT.strU))
   return (g2, BT.strU, AppS f1 es1)
 
-synthE _ g0 (ExeS (PatCall (PatternGetter ss))) = do
+synthE _ g0 (ExeS (PatCall (PatternStruct s))) = do
   -- generate an existential type that contains the pattern
-  let (g1, dtn) = selectorType g0 ss
+  (g1, dtn) <- selectorType g0 s
 
   -- type returned from pattern (with one element for each extracted value)
-  retType <- return $ case map (selectorGetter dtn) (ungroup ss) of
+  retType <- return $ case selectorGetter dtn s of
     [] -> error "Illegal empty selection"
     [t] -> t
     ts -> BT.tupleU ts
   let ft = FunU [dtn] retType
 
-  return (g1, ft, ExeS (PatCall (PatternGetter ss)))
+  return (g1, ft, ExeS (PatCall (PatternStruct s)))
 
-synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall (PatternGetter _)))) []) = error "Unreachable application pattern to no data"
-synthE _ g0 (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternGetter _)))) [e0]) = do
+synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall (PatternStruct _)))) []) = error "Unreachable application pattern to no data"
+synthE _ g0 (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternStruct _)))) [e0]) = do
   -- synthesize the pattern type (will be a function of data that returns a tuple
   (g1, FunU [datType] retType, f') <- synthG g0 f
 

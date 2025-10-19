@@ -33,8 +33,7 @@ toE (AnnoS g _ (StrS x))           = LitP g (MStr x)
 toE (AnnoS g _ (ExeS (SrcCall s))) = SrcP g s
 toE (AnnoS g _ (ExeS (PatCall (PatternText s ss))))
   = LitP g (MStr (s <> DT.concat ["#{}" <> s' | s' <- ss]))
-toE (AnnoS g _ (ExeS (PatCall (PatternGetter ss)))) = PatP g ss
-toE (AnnoS g _ (ExeS (PatCall (PatternSetter ss)))) = PatP g ss
+toE (AnnoS g _ (ExeS (PatCall (PatternStruct s)))) = PatP g s
 
 -- Check the harmony of typed implementations.
 --
