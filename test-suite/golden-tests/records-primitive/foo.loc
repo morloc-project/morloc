@@ -34,7 +34,7 @@ foo size =
     }
 
 -- test access
-bar size = (fpy@flooz, fcpp@things, fr@size) where
+bar size = (.flooz fpy, .things fcpp, .size fr) where
     fpy = addFloozPy 42
       { flooz = []
       , things = ["a"]

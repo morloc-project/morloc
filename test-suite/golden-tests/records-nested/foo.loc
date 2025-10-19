@@ -44,7 +44,7 @@ foo size =
     }
 
 -- test access
-bar size = (fpy@bars, fcpp@things, fr@size) where
+bar size = (.bars fpy, .things fcpp, .size fr) where
     fpy = addBarPy { things = ["carrot"], size = 1}
       { bars = []
       , things = ["a"]
