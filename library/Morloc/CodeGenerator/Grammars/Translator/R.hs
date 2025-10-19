@@ -23,6 +23,7 @@ import Morloc.DataFiles as DF
 import Morloc.Quasi
 import Morloc.Monad (gets, Index, newIndex, runIndex, asks)
 import qualified Morloc.Data.Text as MT
+import Morloc.Data.Text (Text)
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 
@@ -234,6 +235,7 @@ translateSegment m0 =
     makeNativeExpr _ (ExeN_ _ (PatCall _)) = error "Unreachable: patterns are always used in applications"
     makeNativeExpr _ (ListN_ v _ xs) = return $ mergePoolDocs rlist xs where
        rlist es' = case v of
+         (FV _ (CV "integer")) -> "c" <> tupled es'
          (FV _ (CV "numeric")) -> "c" <> tupled es'
          (FV _ (CV "double")) -> "c" <> tupled es'
          (FV _ (CV "logical")) -> "c" <> tupled es'
@@ -284,8 +286,15 @@ translateSegment m0 =
 evaluatePattern :: Pattern -> [MDoc] -> MDoc
 evaluatePattern (PatternText firstStr fragments) xs
   = "paste0" <> tupled (dquotes (pretty firstStr) : concat [[x, dquotes (pretty s)] | (x, s) <- zip xs fragments])
-evaluatePattern (PatternGetter _) _ = undefined
-evaluatePattern (PatternSetter _) _ = undefined
+evaluatePattern (PatternStruct (ungroup -> [ss])) [m]
+  = hcat (m : map writeBasicSelector ss)
+evaluatePattern (PatternStruct (ungroup -> sss)) [m]
+  = "list" <> tupled [hcat (m : map writeBasicSelector ss) | ss <- sss]
+evaluatePattern (PatternStruct _) _ = undefined
+
+writeBasicSelector :: Either Int Text -> MDoc
+writeBasicSelector (Right k) = "[[" <> dquotes (pretty k) <> "]]"
+writeBasicSelector (Left i) = "[[" <> pretty (i + 1) <> "]]"
 
 makePool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc
 makePool sources dynlibs manifolds
