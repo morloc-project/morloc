@@ -40,6 +40,7 @@ module Morloc.Typecheck.Internal
   -- * selectors
   , selectorType
   , selectorGetter
+  , selectorSetter
   -- * subtyping
   , subtype
   , isSubtypeOf2
@@ -56,6 +57,7 @@ module Morloc.Typecheck.Internal
 
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import Morloc.Data.Doc
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Monad as MM
@@ -269,8 +271,12 @@ subtype scope (ForallU v a) b g0 = subtype scope (substitute v a) b (g0 +> v)
 --  g1 |- A <: Forall a. B -| g2
 subtype scope a (ForallU v b) g = subtype scope a b (g +> VarG v) >>= cut (VarG v)
 
+-- note that these need to be evaluated AFTER all the existentials
+subtype scope t1@(VarU _) t2 g = subtypeEvaluated scope t1 t2 g
+subtype scope t1 t2@(VarU _) g = subtypeEvaluated scope t1 t2 g
+
 -- fall through
-subtype _ a b _ = Left $ SubtypeError a b "Type mismatch"
+subtype _ a b _ = Left $ SubtypeError a b "Type mismatch fall through"
 
 
 zipSubtype :: TypeU -> TypeU -> Scope -> [TypeU] -> [TypeU] -> Gamma -> Either TypeError Gamma
@@ -475,7 +481,7 @@ solve v t
 
 
 
-occursCheck :: TypeU -> TypeU -> MT.Text -> Either TypeError ()
+occursCheck :: TypeU -> TypeU -> Text -> Either TypeError ()
 occursCheck t1 t2 place =
   if Set.member t1 (free t2)
   then Left $ OccursCheckFail t1 t2 place
@@ -601,6 +607,58 @@ selectorGetter (ExistU _ (ts, _) _) (SelectorIdx x xs)
   = concat [selectorGetter (ts !! i) s | (i, s) <- (x:xs)]
 selectorGetter _ _ = error "Unreachable"
 
+-- | map over a type using a selector and update the type using set values
+selectorSetter
+  :: TypeU    -- current type that is being updated
+  -> [TypeU]  -- types to which the selected fields are set
+  -> Selector -- current selector pattern
+  -> TypeU    -- modified return type
+selectorSetter t0 setTypes0 s0 = fst (f t0 setTypes0 s0) where
+  f :: TypeU
+    -> [TypeU]
+    -> Selector
+    -> (TypeU, [TypeU]) -- the modified type and the list of remaining setters
+  f _ (t:ts) SelectorEnd = (t, ts)
+  f (ExistU v (ts, tc) (ks, kc)) setTypes1 (SelectorKey s ss) =
+    let (ks', setTypes2) = foldr subKey (ks, setTypes1) (s:ss)
+    in (ExistU v (ts, tc) (ks', kc), setTypes2)
+
+  f (NamU o v ps ks) setTypes1 (SelectorKey s ss) =
+    let (ks', setTypes2) = foldr subKey (ks, setTypes1) (s:ss)
+    in (NamU o v ps ks', setTypes2)
+  -- handle non-existential records
+  --  * note that this may well change the field type of the record, this should
+  --    raise an error later if such changes are not allowed
+  f (ExistU v (ts, tc) (ks, kc)) setTypes1 (SelectorIdx s ss) =
+    let (ts', setTypes2) = foldr subIdx (ts, setTypes1) (s:ss)
+    in (ExistU v (ts', tc) (ks, kc), setTypes2)
+  -- handle non-existential tuples
+  f (AppU t ts) setTypes1 (SelectorIdx s ss)
+    -- if this is a tuple, fine, proceed
+    | (VarU (BT.tuple (length ts))) == t =
+        let (ts', setTypes2) = foldr subIdx (ts, setTypes1) (s:ss)
+        in (AppU t ts', setTypes2)
+    -- otherwise die
+    | otherwise = error "Unreachable case"
+  -- and die some more
+  f _ _ _ = error "Unreachable pattern case"
+
+  subKey :: (Text, Selector) -> ([(Key, TypeU)], [TypeU]) -> ([(Key, TypeU)], [TypeU])
+  subKey (k, s) (ks, setTypesN) = case lookup (Key k) ks of
+    Nothing -> error "Malformed pattern"
+    (Just priorType) -> (ks', setTypesN')
+      where
+        (newType, setTypesN') = f priorType setTypesN s
+        ks' = [ if k' == k then (Key k, newType) else x | x@(Key k', _) <- ks]
+
+  subIdx :: (Int, Selector) -> ([TypeU], [TypeU]) -> ([TypeU], [TypeU])
+  subIdx (i, s) (ts, setTypesN)
+    | i < length ts =
+        let (newType, setTypesN') = f (ts !! i) setTypesN s
+        in (take i ts <> [newType] <> drop i ts, setTypesN')
+    | otherwise = error $ "Bad pattern, index " <> show i <> " is greather than tuple length"
+
+
 extendList :: [a] -> [a] -> ([a], [a])
 extendList [] ys = (ys, ys)
 extendList xs [] = (xs, xs)
@@ -617,14 +675,14 @@ extendRec xs ys =
     setX = Set.fromList (map fst xs)
     setY = Set.fromList (map fst ys)
 
-newvar :: MT.Text -> Gamma -> (Gamma, TypeU)
+newvar :: Text -> Gamma -> (Gamma, TypeU)
 newvar = newvarRich ([], Open) ([], Open)
 
 
 newvarRich
   :: ([TypeU], OpenOrClosed) -- ^ type parameters
   -> ([(Key, TypeU)], OpenOrClosed) -- ^ key-value pairs
-  -> MT.Text -- ^ prefix, just for readability
+  -> Text -- ^ prefix, just for readability
   -> Gamma
   -> (Gamma, TypeU)
 newvarRich ps rs prefix g =
@@ -641,12 +699,12 @@ rename g0 (ForallU v@(TV s) t0) =
 -- Unless I add N-rank types, foralls can only be on top, so no need to recurse.
 rename g t = (g, t)
 
-tvarname :: Gamma -> MT.Text -> (Gamma, TVar)
+tvarname :: Gamma -> Text -> (Gamma, TVar)
 tvarname g prefix =
   let i = gammaCounter g
   in (g {gammaCounter = i + 1}, TV (prefix <> MT.pack (show i)))
 
-evarname :: Gamma -> MT.Text -> (Gamma, EVar)
+evarname :: Gamma -> Text -> (Gamma, EVar)
 evarname g prefix =
   let i = gammaCounter g
   in (g {gammaCounter = i + 1}, EV (prefix <> "@@" <> MT.pack (show i)))

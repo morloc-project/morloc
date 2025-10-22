@@ -15,17 +15,18 @@ module Morloc.CodeGenerator.Grammars.Macro
 
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import qualified Control.Monad.State as CMS
 import Text.Megaparsec
 import Text.Megaparsec.Char
 import Data.Void (Void)
 import qualified Text.Megaparsec.Char.Lexer as L
 
-type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
+type Parser a = CMS.StateT ParserState (Parsec Void Text) a
 
-newtype ParserState = ParserState { stateParameters :: [MT.Text] }
+newtype ParserState = ParserState { stateParameters :: [Text] }
 
-expandMacro :: MT.Text -> [MT.Text] -> MT.Text
+expandMacro :: Text -> [Text] -> Text
 expandMacro t [] = t
 expandMacro t ps =
   case runParser
@@ -42,13 +43,13 @@ many1 p = do
   xs <- many p
   return (x : xs)
 
-pBase :: Parser MT.Text
+pBase :: Parser Text
 pBase = MT.concat <$> many1 (pChar <|> pMacro)
 
-pChar :: Parser MT.Text
+pChar :: Parser Text
 pChar = MT.pack <$> many1 (noneOf ['$'])
 
-pMacro :: Parser MT.Text
+pMacro :: Parser Text
 pMacro = do
   xs <- CMS.gets stateParameters
   _ <- string "$"

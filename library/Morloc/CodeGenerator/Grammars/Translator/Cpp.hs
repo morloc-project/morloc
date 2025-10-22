@@ -41,7 +41,7 @@ import qualified Morloc.Language as ML
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.TypeEval as TE
-import Morloc.Data.Text (Text)
+import Data.Text (Text)
 import Control.Monad.Identity (Identity)
 
 data CallSemantics = Copy | Reference | ConstPtr

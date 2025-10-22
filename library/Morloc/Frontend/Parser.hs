@@ -23,6 +23,7 @@ import qualified Morloc.BaseTypes as BT
 import qualified Control.Monad.State as CMS
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.System as MS
 
@@ -34,10 +35,10 @@ readProgram
   -> Maybe Path
   -- ^ An optional path to the file the source code was read from. If no path
   -- is given, then the source code was provided as a string.
-  -> MT.Text -- ^ Source code
+  -> Text -- ^ Source code
   -> ParserState
   -> DAG MVar Import ExprI -- ^ Possibly empty directed graph of previously observed modules
-  -> Either (ParseErrorBundle MT.Text Void) (DAG MVar Import ExprI, ParserState)
+  -> Either (ParseErrorBundle Text Void) (DAG MVar Import ExprI, ParserState)
 readProgram moduleName modulePath sourceCode pstate p =
   case runParser
          (CMS.runStateT (sc >> pProgram moduleName <* eof) (reenter modulePath pstate))
@@ -51,7 +52,7 @@ readProgram moduleName modulePath sourceCode pstate p =
 
 -- | Parse a single type. This function used only in debugging in command line
 -- calls such as: `morloc typecheck -te "A -> B"`.
-readType :: MT.Text -> Either (ParseErrorBundle MT.Text Void) TypeU
+readType :: Text -> Either (ParseErrorBundle Text Void) TypeU
 readType typeStr =
   case runParser (CMS.runStateT (sc >> pTypeGen <* eof) (reenter Nothing emptyState)) "" typeStr of
     Left err' -> Left err'
@@ -312,8 +313,8 @@ pTypedef = try pTypedefType <|> pTypedefObject where
   -- TODO: is this really the right place to be doing this?
   desugarTableEntries
     :: NamType
-    -> (MT.Text, TypeU)
-    -> Parser (MT.Text, TypeU)
+    -> (Text, TypeU)
+    -> Parser (Text, TypeU)
   desugarTableEntries NamRecord entry = return entry
   desugarTableEntries NamObject entry = return entry
   desugarTableEntries NamTable (k0, t0) = (,) k0 <$> f t0 where
@@ -438,13 +439,13 @@ pSignature = do
     pConstraint :: Parser Constraint
     pConstraint = fmap (Con . MT.unwords) (many1 pWord)
 
-    pWord :: Parser MT.Text
+    pWord :: Parser Text
     pWord =  MT.pack <$> lexeme (many1 alphaNumChar)
 
 -- -- foo
 -- --   :: A --' ladida description
 -- --   -> B --' ladida description
--- pDocumentedFunction :: Parser (Maybe [[MT.Text]], TypeU)
+-- pDocumentedFunction :: Parser (Maybe [[Text]], TypeU)
 -- pDocumentedFunction = do
 --   ts <- sepBy2 pDocumentedType (op "->")
 --   case (init ts, last ts) of
@@ -453,7 +454,7 @@ pSignature = do
 --       , FunU (map snd inputs) (snd output)
 --       )
 --   where
---     pDocumentedType :: Parser ([MT.Text], TypeU)
+--     pDocumentedType :: Parser ([Text], TypeU)
 --     pDocumentedType = do
 --       t <- pType'
 --       -- docstrs <- many doc
@@ -462,7 +463,7 @@ pSignature = do
 --       where
 --         pType' = try pUniU <|> try parensType <|> try pAppU <|> pVarU <|> pListU <|> pTupleU
 
-pUndocumentedFunction :: Parser (Maybe [[MT.Text]], TypeU)
+pUndocumentedFunction :: Parser (Maybe [[Text]], TypeU)
 pUndocumentedFunction = do
     t <- pType
     return (Nothing, t)
@@ -500,7 +501,7 @@ pSource = do
       } | (srcVar, aliasVar, label') <- rs]
   where
 
-  pImportSourceTerm :: Parser (SrcName, EVar, Maybe MT.Text)
+  pImportSourceTerm :: Parser (SrcName, EVar, Maybe Text)
   pImportSourceTerm = do
     t <- optional pTag
     n <- stringLiteral
@@ -531,7 +532,7 @@ pNamE = do
   -- whatever.
   exprI $ NamE (map (first Key) rs)
 
-pNamEntryE :: Parser (MT.Text, ExprI)
+pNamEntryE :: Parser (Text, ExprI)
 pNamEntryE = do
   n <- freenameL
   _ <- symbol "="
@@ -744,7 +745,7 @@ pTupleU = do
   return $ BT.tupleU ts
 
 
-pNamEntryU :: Parser (MT.Text, TypeU)
+pNamEntryU :: Parser (Text, TypeU)
 pNamEntryU = do
   n <- freename
   _ <- op "::"
@@ -788,8 +789,8 @@ pTerm = do
   appendGenerics t  -- add the term to the generic list IF generic
   return t
 
-pTags :: Parser [MT.Text]
+pTags :: Parser [Text]
 pTags = many (try (freenameL <* op ":"))
 
-pTag :: Parser MT.Text
+pTag :: Parser Text
 pTag = try (freenameL <* op ":")

@@ -18,6 +18,7 @@ import Morloc.DataFiles as DF
 import Morloc.CodeGenerator.Namespace
 import Morloc.Quasi
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import qualified Control.Monad as CM
 import qualified Morloc.Config as MC
 import qualified Morloc.Language as ML
@@ -34,8 +35,8 @@ data FData = FData
   , fdataSubSockets :: [Socket] -- list of sockets needed for this command
   , fdataArgSchemas :: [MDoc] -- argument type schemas
   , fdataReturnSchema :: MDoc -- return type schema
-  , fdataArgDocs :: Maybe [[MT.Text]]
-  , fdataFunDocs :: [MT.Text]
+  , fdataArgDocs :: Maybe [[Text]]
+  , fdataFunDocs :: [Text]
   }
 
 generate :: [NexusCommand] -> [(Type, Int, Lang, [Socket])] -> MorlocMonad Script
@@ -284,7 +285,7 @@ makeGastCaseDoc nc = (cond, body)
         , [idoc|printf("#{commandForm nc}\n"#{argStr});|]
         ]
 
-    makeArgDef :: (Int, (JsonPath, MT.Text, JsonPath)) -> MDoc
+    makeArgDef :: (Int, (JsonPath, Text, JsonPath)) -> MDoc
     makeArgDef (i, (_, key, [])) = [idoc|char* arg_str_#{pretty i} = args[#{pretty (lookupKey key (commandArgs nc))}];|]
     makeArgDef (i, (_, key, path)) = vsep
         [ [idoc|char* errmsg_#{pretty i} = NULL;|]
@@ -301,7 +302,7 @@ makeGastCaseDoc nc = (cond, body)
             makeElementStr (JsonKey k) = [idoc|{JSON_PATH_TYPE_KEY, {.key = "#{pretty k}"}}|]
 
 
-    lookupKey :: MT.Text -> [EVar] -> Int
+    lookupKey :: Text -> [EVar] -> Int
     lookupKey key vs = f 0 vs where
         f _ [] = error "Invalid key" -- this should not be reachable
         f i ((EV v):rs)

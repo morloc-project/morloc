@@ -20,7 +20,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
-import Morloc.Data.Text (Text)
+import Data.Text (Text)
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Nexus as Nexus

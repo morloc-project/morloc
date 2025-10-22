@@ -37,7 +37,8 @@ main = do
 
       -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
-      , golden "patterns" "patterns"
+      , golden "pattern-getters" "pattern-getters"
+      , golden "pattern-setters" "pattern-setters"
 
       , golden "holes-func" "holes-func"
       , golden "holes-record" "holes-record"

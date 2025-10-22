@@ -3,6 +3,7 @@ import sys
 import select
 import os # required for setting path to morloc dependencies
 import time
+import copy
 from collections import OrderedDict
 from multiprocessing import Process, cpu_count, Pipe, Value
 from multiprocessing.reduction import recv_handle, send_handle
@@ -24,6 +25,29 @@ import pymorloc as morloc
 # <<<BREAK>>>
 # AUTO include serialization end
 
+def morloc_set_patterns(data, pattern, setargs):
+    data_copy = copy.copy(data)
+    return morloc_set_patterns_r(data_copy, pattern, setargs)
+
+def morloc_set_patterns_r(data, pattern, setargs):
+    if isinstance(pattern, list) and isinstance(data, tuple):
+        data = list(data)
+        for (index, element_pattern) in pattern:
+            if isinstance(element_pattern, int):
+                data[index] = setargs[element_pattern]
+            else:
+                data[index] = morloc_set_patterns_r(data[index], element_pattern, setargs)
+        data = tuple(data)
+    elif isinstance(pattern, dict) and isinstance(data, dict):
+        for (key, element_pattern) in pattern.items():
+            if isinstance(element_pattern, int):
+                data[key] = setargs[element_pattern]
+            else:
+                data[key] = morloc_set_patterns_r(data[key], element_pattern, setargs)
+    else:
+        # this should be unreachable
+        raise RuntimeError(f"Illegal pattern {pattern!s}")
+    return data
 
 # AUTO include manifolds start
 # <<<BREAK>>>

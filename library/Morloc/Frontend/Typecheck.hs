@@ -283,28 +283,61 @@ synthE i g (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternText _ _)))) es) = do
   (g2, _, es1, _) <- zipCheck i g1 es (take (length es) (repeat BT.strU))
   return (g2, BT.strU, AppS f1 es1)
 
-synthE _ g0 (ExeS (PatCall (PatternStruct s))) = do
+-- handle getter patterns
+synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall (PatternStruct _)))) []) = error "Unreachable application pattern to no data"
+synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) [e0]) = do
+
   -- generate an existential type that contains the pattern
-  (g1, dtn) <- selectorType g0 s
+  (g1, datType) <- selectorType g0 s
 
   -- type returned from pattern (with one element for each extracted value)
-  retType <- return $ case selectorGetter dtn s of
+  retType <- return $ case selectorGetter datType s of
     [] -> error "Illegal empty selection"
     [t] -> t
     ts -> BT.tupleU ts
-  let ft = FunU [dtn] retType
-
-  return (g1, ft, ExeS (PatCall (PatternStruct s)))
-
-synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall (PatternStruct _)))) []) = error "Unreachable application pattern to no data"
-synthE _ g0 (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternStruct _)))) [e0]) = do
-  -- synthesize the pattern type (will be a function of data that returns a tuple
-  (g1, FunU [datType] retType, f') <- synthG g0 f
+  let ft = FunU [datType] retType
 
   -- use selector-derived type to update context and data expression
   (g2, _, e') <- checkG g1 e0 datType
 
-  return (g2, apply g2 retType, AppS f' [e'])
+  let f1 = (AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall (PatternStruct s))))
+
+  return (g2, apply g2 retType, AppS f1 [e'])
+
+-- handle setter patterns
+synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0:es0)) = do
+
+  -- generate an existential type that contains the pattern
+  (g1, selType) <- selectorType g0 s
+
+  (g2, datType, e1) <- checkG g1 e0 selType
+
+  (g3, (unzip -> (setTypes, es1))) <-
+    statefulMapM (\s' e -> synthG s' e |>> (\(a,b,c) -> (a,(b,c)))) g2 es0
+
+  let outputType = selectorSetter datType setTypes s
+      patternType = FunU (datType:setTypes) outputType
+      f1 = (AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s))))
+
+  return (g2, apply g3 outputType, AppS f1 (e1:es1))
+
+-- -- handle setter patterns
+-- synthE i g0 (AppS f@(AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0:es0)) = do
+--
+--   -- generate an existential type that contains the pattern
+--   (g1, selType) <- selectorType g0 s
+--
+--   (g2, datType, _) <- checkG g1 e0 selType
+--
+--   (g3, (unzip -> (setTypes, _))) <-
+--     statefulMapM (\s' e -> synthG s' e |>> (\(a,b,c) -> (a,(b,c)))) g2 es0
+--
+--   let outputType = selectorSetter datType setTypes s
+--       patternType = FunU [datType] outputType
+--       f1 = (AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s))))
+--
+--   etaExpandSynthE i g3 (apply g3 patternType) f1 f (e0:es0)
+
 
 synthE _ g (ExeS (PatCall (PatternText s ss@(length -> n)))) = do
   let t = FunU (take n (repeat BT.strU)) BT.strU
@@ -320,36 +353,7 @@ synthE i g0 (AppS f xs0) = do
   -- synthesize the type of the function
   (g1, funType0, funExpr0) <- synthG g0 f
 
-  MM.sayVVV $ "synthE AppS"
-            <> "\n  f:" <+> pretty f
-            <> "\n  xs0:" <+> list (map pretty xs0)
-            <> "\n  funType0:" <+> pretty funType0
-            <> "\n  funExpr0:" <+> pretty funExpr0
-
-  -- eta expand
-  mayExpanded <- etaExpand g1 f xs0 funType0
-
-  case mayExpanded of
-    -- If the term was eta-expanded, retypecheck it
-    (Just (g', x')) -> synthE' i g' x'
-    -- Otherwise proceed
-    Nothing -> do
-
-      -- extend the function type with the type of the expressions it is applied to
-      (g2, funType1, inputExprs) <- application' i g1 xs0 (normalizeType funType0)
-
-      MM.sayVVV $ "  funType1:" <+> pretty funType1
-                <> "\n  inputExprs:" <+> list (map pretty inputExprs)
-
-      -- determine the type after application
-      appliedType <- case funType1 of
-        (FunU ts t) -> case drop (length inputExprs) ts of
-          [] -> return t -- full application
-          rs -> return $ FunU rs t -- partial application
-        _ -> error "impossible"
-
-      -- put the AppS back together with the synthesized function and input expressions
-      return (g2, apply g2 appliedType, AppS (applyGen g2 funExpr0) inputExprs)
+  etaExpandSynthE i g1 funType0 funExpr0 f xs0 
 
 -- -->I==>
 synthE i g0 f@(LamS vs x) = do
@@ -503,6 +507,44 @@ synthE _ g (BndS v) = do
     Nothing -> return $ newvar (unEVar v <> "_u") g
   return (g', t', BndS v)
 
+
+etaExpandSynthE
+  :: Int
+  -> Gamma
+  -> TypeU
+  -> AnnoS (Indexed TypeU) ManyPoly Int
+  -> AnnoS Int ManyPoly Int
+  -> [AnnoS Int ManyPoly Int]
+  -> MorlocMonad
+       ( Gamma
+       , TypeU
+       , ExprS (Indexed TypeU) ManyPoly Int
+       )
+etaExpandSynthE i g1 funType0 funExpr0 f xs0 = do
+  -- eta expand
+  mayExpanded <- etaExpand g1 f xs0 funType0
+
+  case mayExpanded of
+    -- If the term was eta-expanded, retypecheck it
+    (Just (g', x')) -> synthE' i g' x'
+    -- Otherwise proceed
+    Nothing -> do
+
+      -- extend the function type with the type of the expressions it is applied to
+      (g2, funType1, inputExprs) <- application' i g1 xs0 (normalizeType funType0)
+
+      MM.sayVVV $ "  funType1:" <+> pretty funType1
+                <> "\n  inputExprs:" <+> list (map pretty inputExprs)
+
+      -- determine the type after application
+      appliedType <- case funType1 of
+        (FunU ts t) -> case drop (length inputExprs) ts of
+          [] -> return t -- full application
+          rs -> return $ FunU rs t -- partial application
+        _ -> error "impossible"
+
+      -- put the AppS back together with the synthesized function and input expressions
+      return (g2, apply g2 appliedType, AppS (applyGen g2 funExpr0) inputExprs)
 
 etaExpand
   :: Gamma

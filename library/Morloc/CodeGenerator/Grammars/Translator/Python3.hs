@@ -24,7 +24,7 @@ import Morloc.Quasi
 import qualified Morloc.Config as MC
 import Morloc.Monad (asks, gets, Index, newIndex, runIndex)
 import qualified Morloc.Data.Text as MT
-import Morloc.Data.Text (Text)
+import Data.Text (Text)
 import qualified System.FilePath as SF
 import qualified Data.Char as DC
 import qualified Morloc.Language as ML
@@ -344,11 +344,33 @@ translateSegment makeSrcName m0 =
 evaluatePattern :: Pattern -> [MDoc] -> MDoc
 evaluatePattern (PatternText firstStr fragments) xs
   = "f" <> (dquotes . hcat) (pretty firstStr : [ ("{" <> x <> "}" <> pretty s) | (x, s) <- zip xs fragments])
+-- getters (always have exactly one argument)
 evaluatePattern (PatternStruct (ungroup -> [ss])) [m]
   = hcat (m : map writeBasicSelector ss)
 evaluatePattern (PatternStruct (ungroup -> sss)) [m]
   = tupled [hcat (m : map writeBasicSelector ss) | ss <- sss]
+-- setters (always have 1 + n arguments, where the first is the data structure)
+evaluatePattern (PatternStruct s) (m:vs)
+  = "morloc_set_patterns" <> tupled [m, makeSetterPattern s, list vs]
 evaluatePattern (PatternStruct _) _ = undefined
+
+-- build the selector string used in the python morloc_set_pattern function
+makeSetterPattern :: Selector -> MDoc
+makeSetterPattern s0 = snd (f 0 s0) where
+  -- recursive build function
+  f :: Int -> Selector -> (Int, MDoc)
+  -- return the updated setarg index and the accessor
+  f i SelectorEnd = (i + 1, pretty i)
+  f i (SelectorIdx s1 ss1) = second list $ statefulMap g i (s1:ss1) where
+    -- make a pair for each selector
+    g :: Int -> (Int, Selector) -> (Int, MDoc)
+    g j (k, s) = let (j', value) = f j s
+                  in (j', tupled [pretty k, value])
+  f i (SelectorKey s1 ss1) = second (encloseSep "{" "}" ",") $ statefulMap g i (s1:ss1) where
+    -- make a pair for each selector
+    g :: Int -> (Text, Selector) -> (Int, MDoc)
+    g j (k, s) = let (j', value) = f j s
+                  in (j', dquotes (pretty k) <> ":" <> value)
 
 writeBasicSelector :: Either Int Text -> MDoc
 writeBasicSelector (Right k) = "[" <> dquotes (pretty k) <> "]"

@@ -19,6 +19,7 @@ import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import qualified Data.Set as Set
 import Data.Set (Set)
 
@@ -240,7 +241,7 @@ resolveImports d0
       exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList exps]
       excludes = map unSymbol (importExclude imp)
 
-      importAlias :: (MT.Text, MT.Text) -> Maybe AliasedSymbol
+      importAlias :: (Text, Text) -> Maybe AliasedSymbol
       importAlias (name, alias)
           | name `elem` excludes = Nothing
           | otherwise = case Map.lookup name exportMap of
@@ -267,7 +268,7 @@ resolveImports d0
     where
         exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList exports]
 
-        importAlias :: (MT.Text, MT.Text) -> Maybe (Either MT.Text Symbol)
+        importAlias :: (Text, Text) -> Maybe (Either Text Symbol)
         importAlias (name, alias)
             | name `elem` exclude = Nothing
             | otherwise = case Map.lookup name exportMap of
@@ -290,12 +291,12 @@ resolveImports d0
   findSymbols (ExprI _ (IstE cls _ _)) = Set.singleton $ ClassSymbol cls
   findSymbols _ = Set.empty
 
-  unSymbol :: Symbol -> MT.Text
+  unSymbol :: Symbol -> Text
   unSymbol (TypeSymbol (TV v)) = v
   unSymbol (TermSymbol (EV v)) = v
   unSymbol (ClassSymbol (ClassName v)) = v
 
-  unAliasedSymbol :: AliasedSymbol -> (MT.Text, MT.Text)
+  unAliasedSymbol :: AliasedSymbol -> (Text, Text)
   unAliasedSymbol (AliasedType x y) = (unTVar x, unTVar y)
   unAliasedSymbol (AliasedTerm x y) = (unEVar x, unEVar y)
   unAliasedSymbol (AliasedClass x) = (unClassName x, unClassName x)

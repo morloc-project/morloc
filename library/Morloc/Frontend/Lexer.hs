@@ -59,7 +59,7 @@ import qualified Control.Monad.State as CMS
 import qualified Data.Scientific as DS
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
-import Morloc.Data.Text (Text)
+import Data.Text (Text)
 import qualified Text.Megaparsec.Char.Lexer as L
 import qualified Morloc.Language as ML
 import qualified Data.Char as DC
@@ -314,7 +314,7 @@ stringLiteral = lexeme $ do
 
 
 parsePatternSetter :: Parser a -> Parser (Selector, [a])
-parsePatternSetter parseValue = parsePattern (string "=" >> parseValue)
+parsePatternSetter parseValue = parsePattern (sc >> symbol "=" >> parseValue)
 
 parsePatternGetter :: Parser Selector
 parsePatternGetter = fst <$> parsePattern (return True)

@@ -1,0 +1,59 @@
+module m (testpy)
+
+import root
+import root-py
+
+record Location = Location
+  { latitude :: Real
+  , longitude :: Real
+  , altitude :: Real
+  }
+record Py => Location = "dict"
+
+record Worker = Worker
+  { home :: Location
+  , age :: Int
+  , job :: (Bool, Location)
+  }
+record Py => Worker = "dict"
+
+defaultLocation :: Location
+defaultLocation =
+  { latitude = 42.03
+  , longitude = -93.62
+  , altitude = 942.0
+  } 
+
+defaultWorker :: Worker
+defaultWorker =
+  { home = defaultLocation
+  , age = 12
+  , job = (True, defaultLocation)
+  }
+
+testpy =
+  [ eq (.(.1 = "Sally") (42, "Jim"))
+       (42, "Sally")
+  , eq (.1.(.0 = "Sally", .2 = 70) (42, ("Jim", True, 69)))
+       (42, ("Sally", True, 70))
+  , eq (map .(.1 = 9) [(1,2), (2,3)])
+       [(1,9), (2,9)]
+  , eq (.latitude defaultLocation)
+       (42.03 :: Real)
+  , eq ((.latitude = 0.7) defaultLocation)
+       { latitude = 0.7 , longitude = -93.62 , altitude = 942.0 }
+  , eq (.(.age, .job.1.altitude, .age) defaultWorker)
+       (12, 942.0, 12)
+  , eq (.(.latitude = 0.7, .longitude = -100.0) defaultLocation)
+       { latitude = 0.7, longitude = -100.0 , altitude = 942.0 }
+  , eq ( .(.home.altitude = 936.0, .job.1.altitude = 666.0) defaultWorker )
+       { home = { latitude = 42.03 , longitude = -93.62 , altitude = 936.0 }
+       , age = 12
+       , job = (True, { latitude = 42.03 , longitude = -93.62 , altitude = 666.0 } )
+       }
+  , eq ( .(.home.altitude = 936.0, .job.1.altitude = 666.0) defaultWorker )
+       { home = .(.altitude = 936.0) defaultLocation
+       , age = 12
+       , job = (True, .(.altitude = 666.0) defaultLocation )
+       }
+  ]

@@ -23,7 +23,7 @@ import Morloc.DataFiles as DF
 import Morloc.Quasi
 import Morloc.Monad (gets, Index, newIndex, runIndex, asks)
 import qualified Morloc.Data.Text as MT
-import Morloc.Data.Text (Text)
+import Data.Text (Text)
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 

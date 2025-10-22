@@ -37,7 +37,7 @@ import Morloc.Data.Doc
 import qualified Data.Char as DC
 import qualified Morloc.Config as Config
 import qualified Morloc.Data.Text as MT
-import Morloc.Data.Text (Text)
+import Data.Text (Text)
 import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
 import qualified Data.Yaml.Config as YC
