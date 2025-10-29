@@ -34,7 +34,7 @@ defaultWorker =
   , job = (True, defaultLocation)
   }
 
-test = 
+test = -- map .(.1 = 9) [(1,2), (2,3)]
   [
     -- getters
     eq (.(.1 = "Sally") (42, "Jim"))
