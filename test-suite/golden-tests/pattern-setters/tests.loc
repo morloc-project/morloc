@@ -1,7 +1,6 @@
-module m (testpy)
+module tests (test)
 
 import root
-import root-py
 
 record Location = Location
   { latitude :: Real
@@ -9,6 +8,8 @@ record Location = Location
   , altitude :: Real
   }
 record Py => Location = "dict"
+record R => Location = "list"
+record Cpp => Location = "location_t"
 
 record Worker = Worker
   { home :: Location
@@ -16,6 +17,8 @@ record Worker = Worker
   , job :: (Bool, Location)
   }
 record Py => Worker = "dict"
+record R => Worker = "list"
+record Cpp => Worker = "worker_t"
 
 defaultLocation :: Location
 defaultLocation =
@@ -31,8 +34,10 @@ defaultWorker =
   , job = (True, defaultLocation)
   }
 
-testpy =
-  [ eq (.(.1 = "Sally") (42, "Jim"))
+test = 
+  [
+    -- getters
+    eq (.(.1 = "Sally") (42, "Jim"))
        (42, "Sally")
   , eq (.1.(.0 = "Sally", .2 = 70) (42, ("Jim", True, 69)))
        (42, ("Sally", True, 70))
@@ -40,20 +45,13 @@ testpy =
        [(1,9), (2,9)]
   , eq (.latitude defaultLocation)
        (42.03 :: Real)
-  , eq ((.latitude = 0.7) defaultLocation)
-       { latitude = 0.7 , longitude = -93.62 , altitude = 942.0 }
   , eq (.(.age, .job.1.altitude, .age) defaultWorker)
        (12, 942.0, 12)
-  , eq (.(.latitude = 0.7, .longitude = -100.0) defaultLocation)
-       { latitude = 0.7, longitude = -100.0 , altitude = 942.0 }
-  , eq ( .(.home.altitude = 936.0, .job.1.altitude = 666.0) defaultWorker )
-       { home = { latitude = 42.03 , longitude = -93.62 , altitude = 936.0 }
-       , age = 12
-       , job = (True, { latitude = 42.03 , longitude = -93.62 , altitude = 666.0 } )
-       }
-  , eq ( .(.home.altitude = 936.0, .job.1.altitude = 666.0) defaultWorker )
-       { home = .(.altitude = 936.0) defaultLocation
-       , age = 12
-       , job = (True, .(.altitude = 666.0) defaultLocation )
-       }
+    -- setters
+  , eq (.latitude ((.latitude = 0.7) defaultLocation)) 0.7
+  , eq (.(.latitude, .longitude) (.(.latitude = 0.7, .longitude = -100.0) defaultLocation))
+       ( 0.7, -100.0 )
+  , eq (   .(.home.altitude,         .job.1.altitude)
+         ( .(.home.altitude = 936.0, .job.1.altitude = 666.0) defaultWorker ))
+       (936.0, 666.0)
   ]

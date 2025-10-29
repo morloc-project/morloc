@@ -2956,7 +2956,8 @@ int pack_with_schema(const void* mlc, const Schema* schema, char** packet, size_
     *packet_size = 0;
 
     *packet = (char*)calloc(BUFFER_SIZE, sizeof(char));
-    if (*packet == NULL) return 1;
+    RAISE_IF(*packet == NULL, "\n%s", "Empty packet")
+
     size_t packet_remaining = BUFFER_SIZE;
     char* packet_ptr = *packet;
 

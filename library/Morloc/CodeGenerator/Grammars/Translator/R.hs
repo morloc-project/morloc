@@ -216,8 +216,8 @@ translateSegment m0 =
     makeNativeExpr :: NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
     makeNativeExpr _ (AppExeN_ _ (SrcCall src) _ xs) =
         return $ mergePoolDocs ((<>) (pretty (srcName src)) . tupled) (map snd xs)
-    makeNativeExpr _ (AppExeN_ _ (PatCall p) _ xs) =
-        return $ mergePoolDocs (evaluatePattern p) (map snd xs)
+    makeNativeExpr _ (AppExeN_ t (PatCall p) _ xs) =
+        return $ mergePoolDocs (evaluatePattern t p) (map snd xs)
     makeNativeExpr _ (ManN_ call) = return call
     makeNativeExpr _ (ReturnN_ x) =
         return $ x { poolExpr = "return(" <> poolExpr x <> ")" }
@@ -283,14 +283,27 @@ translateSegment m0 =
       let rs = rs1 ++ [ namer i <+> "<-" <+> e1' ] ++ rs2
       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
-evaluatePattern :: Pattern -> [MDoc] -> MDoc
-evaluatePattern (PatternText firstStr fragments) xs
+evaluatePattern :: TypeF -> Pattern -> [MDoc] -> MDoc
+evaluatePattern _ (PatternText firstStr fragments) xs
   = "paste0" <> tupled (dquotes (pretty firstStr) : concat [[x, dquotes (pretty s)] | (x, s) <- zip xs fragments])
-evaluatePattern (PatternStruct (ungroup -> [ss])) [m]
+evaluatePattern _ (PatternStruct (ungroup -> [ss])) [m]
   = hcat (m : map writeBasicSelector ss)
-evaluatePattern (PatternStruct (ungroup -> sss)) [m]
+evaluatePattern _ (PatternStruct (ungroup -> sss)) [m]
   = "list" <> tupled [hcat (m : map writeBasicSelector ss) | ss <- sss]
-evaluatePattern (PatternStruct _) _ = undefined
+evaluatePattern t (PatternStruct s) (m:xs)
+  = patternSetter makeTuple makeRecord tupleAccess recordAccess m t s xs
+  where
+
+  makeTuple _ xs = "list" <> tupled xs
+
+  makeRecord (NamF _ _ _ rs) xs = "list" <> tupled [pretty k <+> "=" <+> x | (k, x) <- zip (map fst rs) xs]
+  makeRecord _ _ = error "Incorrectly typed record setter"
+
+  tupleAccess _ m i = m <> "[[" <> pretty (i + 1) <> "]]"
+
+  recordAccess (NamF o (FV _ cname) _ _) d k = d <> "[[" <> dquotes (pretty k) <> "]]"
+  recordAccess t _ _ = error $ "Invalid record type: " <> show t
+
 
 writeBasicSelector :: Either Int Text -> MDoc
 writeBasicSelector (Right k) = "[[" <> dquotes (pretty k) <> "]]"

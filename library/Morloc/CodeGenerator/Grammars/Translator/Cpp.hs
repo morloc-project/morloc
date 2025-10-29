@@ -523,8 +523,9 @@ PROPAGATE_ERROR(errmsg)|]
   makeNativeExpr _ (AppExeN_ _ (SrcCall src) qs (map snd -> es)) = do
     templateStr <- templateArguments qs
     return $ mergePoolDocs ((<>) (pretty (srcName src) <> templateStr) . tupled) es
-  makeNativeExpr _ (AppExeN_ _ (PatCall p) _ xs) = do
-      return $ mergePoolDocs (evaluatePattern p) (map snd xs)
+  makeNativeExpr _ (AppExeN_ t (PatCall p) _ xs) = do
+      state <- CMS.get
+      return $ mergePoolDocs (evaluatePattern state t p) (map snd xs)
   makeNativeExpr _ (ManN_ call) = return call
   makeNativeExpr _ (ReturnN_ e) =
     return $ e {poolExpr = "return" <> parens (poolExpr e) <> ";"}
@@ -550,7 +551,7 @@ PROPAGATE_ERROR(errmsg)|]
     t <- cppTypeOf e
     idx <- getCounter
     let v' = "a" <> pretty idx
-        decl = t <+> v' <+> encloseSep "{" "}" "," (map (poolExpr . snd) rs) <> ";"
+        decl = t <+> v' <+> "=" <+> encloseSep "{" "}" "," (map (poolExpr . snd) rs) <> ";"
     let p = mergePoolDocs (const v') (map snd rs)
     return (p {poolPriorLines = poolPriorLines p <> [decl]})
 
@@ -581,16 +582,34 @@ PROPAGATE_ERROR(errmsg)|]
       , poolPriorExprs = pes1 <> pes2
       }
 
-evaluatePattern :: Pattern -> [MDoc] -> MDoc
-evaluatePattern (PatternText s ss) xs = "interweave_strings" <> tupled [fragments, insertions]
+
+-- handle string interpolation
+evaluatePattern :: CppTranslatorState -> TypeF -> Pattern -> [MDoc] -> MDoc
+evaluatePattern _ _ (PatternText s ss) xs = "interweave_strings" <> tupled [fragments, insertions]
   where
-    fragments = encloseSep "{" "}" "," (map (dquotes . pretty) (s:ss))
-    insertions = encloseSep "{" "}" "," xs
-evaluatePattern (PatternStruct (ungroup -> [ss])) [m]
+    fragments = encloseSep "{" "}" ", " (map (dquotes . pretty) (s:ss))
+    insertions = encloseSep "{" "}" ", " xs
+
+-- handle getters
+evaluatePattern _ _ (PatternStruct (ungroup -> [ss])) [m]
   = writeSelector m ss
-evaluatePattern (PatternStruct (ungroup -> sss)) [m]
+evaluatePattern _ _ (PatternStruct (ungroup -> sss)) [m]
   = encloseSep "{" "}" "," (map (writeSelector m) sss)
-evaluatePattern (PatternStruct _) _ = undefined
+evaluatePattern state t (PatternStruct s) (m:xs)
+  = patternSetter makeTuple makeRecord tupleAccess recordAccess m t s xs
+  where
+
+  makeTuple (AppF _ ts) xs =
+    let tupleTypes = CMS.evalState (mapM cppTypeOf ts) state
+    in "std::tuple" <> encloseSep "<" ">" "," tupleTypes <> tupled xs
+  makeTuple _ _ = error "Unreachable"
+
+  makeRecord _ xs = encloseSep "{" "}" ", " xs
+  makeRecord _ _ = error "Incorrectly typed record setter"
+
+  tupleAccess _ m i = "std::get<" <> pretty i <> ">(" <> m <> ")"
+  recordAccess _ d k = d <> "." <> pretty k
+
 
 writeSelector :: MDoc -> [Either Int Text] -> MDoc
 writeSelector d [] = d
