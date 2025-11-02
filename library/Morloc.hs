@@ -43,9 +43,9 @@ typecheck path code
   = typecheckFrontend path code
   -- resolve all TypeU types to Type
   |>> map F.resolveTypes
-  -- check for value contradictions between implementations
-  >>= mapM F.valuecheck
   -- resolve all TypeU types to Type
+  >>= mapM F.valuecheck
+  -- check for value contradictions between implementations
   >>= realityCheck
 
 
