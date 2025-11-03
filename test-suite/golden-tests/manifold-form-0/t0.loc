@@ -1,5 +1,14 @@
-module main (foo)
+module main (*)
 
---' The number 5
-foo :: Int
-foo = 5
+checkInt    = 1 :: Int
+checkSInt8  = 2 :: SInt8
+checkSInt16 = 3 :: SInt16
+checkSInt32 = 4 :: SInt32
+checkSInt64 = 5 :: SInt64
+checkUInt8  = 6 :: UInt8
+checkUInt16 = 7 :: UInt16
+checkUInt32 = 8 :: UInt32
+checkUInt64 = 9 :: UInt64
+checkReal   = 420.69 :: Real
+checkBool   = True
+checkStr    = "abcd"
