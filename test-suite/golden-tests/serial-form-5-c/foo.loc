@@ -1,8 +1,8 @@
 module main (foo)
 
-import root-cpp (id, Map, Int, Str, List, Tuple2)
+import root-cpp (idcpp, Map, Int, Str, List, Tuple2)
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
 foo :: [Map Str Int] -> [Map Str Int]
-foo xs = id xs
+foo xs = idcpp xs

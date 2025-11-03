@@ -11,4 +11,4 @@ object Cpp => (Person a) = "PersonObj"
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
 foo :: Person Int -> Person Int
-foo xs = id xs
+foo xs = idcpp xs

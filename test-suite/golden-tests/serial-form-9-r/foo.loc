@@ -8,4 +8,4 @@ record R => (Person a) = "list" {name :: Str, info :: a}
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
 foo :: Map Str (Person Int) -> Map Str (Person Int)
-foo xs = id xs
+foo xs = idr xs

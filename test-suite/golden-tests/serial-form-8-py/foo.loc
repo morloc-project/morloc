@@ -6,4 +6,4 @@ import root-py
 -- function, which forces deserialization and then serialization.
 foo :: Map Str (Map Int Real) -> Map Str (Map Int Real)
 
-foo xs = id xs
+foo xs = idpy xs

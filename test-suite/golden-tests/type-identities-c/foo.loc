@@ -1,6 +1,6 @@
 module main (foo)
 
-import root-cpp (id, Packable)
+import root-cpp (idcpp, Packable)
 
 instance Packable (Int) SizeT where
   source Cpp from "types.h"
@@ -19,4 +19,4 @@ type Cpp => Long = "int64_t"
 type Cpp => Int = "int"
 
 foo :: (SizeT, Long) -> (SizeT, Long)
-foo x = id x
+foo x = idcpp x

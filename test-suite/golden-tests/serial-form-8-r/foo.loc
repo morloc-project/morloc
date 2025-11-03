@@ -6,4 +6,4 @@ import root-r
 -- function, which forces deserialization and then serialization.
 foo :: Map Str (Map Str Real) -> Map Str (Map Str Real)
 
-foo xs = id xs
+foo xs = idr xs
