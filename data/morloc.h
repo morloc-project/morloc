@@ -5960,6 +5960,620 @@ uint8_t* make_call_packet_from_cli(
 
 /// }}}
 
+// {{{ pure morloc types and constructors
+
+// all morloc expression types
+typedef enum {
+  MORLOC_X_DAT,
+  MORLOC_X_APP,
+  MORLOC_X_LAM,
+  MORLOC_X_BND,
+  MORLOC_X_PAT,
+} morloc_expression_type;
+
+// application types
+typedef enum { APPLY_PATTERN, APPLY_LAMBDA } morloc_app_expression_type;
+
+// pattern types
+typedef enum { SELECT_BY_KEY, SELECT_BY_INDEX, SELECT_END } morloc_pattern_type;
+
+// Forward declarations
+typedef struct morloc_expression_s morloc_expression_t;
+typedef struct morloc_app_expression_s morloc_app_expression_t;
+typedef struct morloc_lam_expression_s morloc_lam_expression_t;
+typedef struct morloc_data_s morloc_data_t;
+typedef struct morloc_pattern_s morloc_pattern_t;
+
+// represent a pure morloc expression, a node in the syntax tree
+typedef struct morloc_expression_s {
+    morloc_expression_type type;
+    union {
+        morloc_app_expression_t* app_expr;
+        morloc_lam_expression_t* lam_expr;
+        char* bnd_expr;
+        morloc_pattern_t* pattern_expr;
+        morloc_data_t* data_expr;
+    } expr;
+} morloc_expression_t;
+
+// represent all primitives
+// field names are same as schema terms
+typedef union primitive_u {
+    char*    s; // pointer to null-terminated string
+    uint8_t  z;    // storing value 0
+    bool     b;
+    int8_t   i1;
+    int16_t  i2;
+    int32_t  i4;
+    int64_t  i8;
+    uint8_t  u1;
+    uint16_t u2;
+    uint32_t u4;
+    uint64_t u8;
+    float    f4;
+    double   f8;
+} primitive_t;
+
+// morloc literal array
+typedef struct morloc_data_array_s {
+    Schema* schema; // element schema
+    size_t size;
+    morloc_expression_t** values;
+} morloc_data_array_t;
+
+// store morloc data, primitives or containers
+typedef struct morloc_data_s {
+    Schema* schema;
+    bool is_voidstar;
+    union {
+        // literal data values stored here
+        primitive_t lit_val;
+        morloc_expression_t** tuple_val;
+        morloc_data_array_t* array_val;
+        // data stored in shared memory, either from arguments or aggregated
+        // results; voidstar data is the final product of evaluation
+        void* voidstar;
+    } data;
+} morloc_data_t;
+
+// store an application of many args to either a pattern or a lambda
+typedef struct morloc_app_expression_s {
+    morloc_app_expression_type type;
+    union {
+        morloc_pattern_t* pattern;
+        morloc_lam_expression_t* lambda;
+    } function;
+    morloc_expression_t** args;
+    size_t nargs;
+} morloc_app_expression_t;
+
+// store a lambda
+typedef struct morloc_lam_expression_s {
+    size_t nargs;
+    char** args;
+    morloc_expression_t* body;
+} morloc_lam_expression_t;
+
+// store a pattern selector
+typedef struct morloc_pattern_s {
+    morloc_pattern_type type;
+    size_t size;
+    union {
+      char** keys;
+      size_t* indices;
+    };
+   morloc_pattern_t* selectors;
+} morloc_pattern_t;
+
+morloc_expression_t* make_morloc_bound_var(const char* varname){
+    morloc_expression_t* expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
+    expr->type = MORLOC_X_BND;
+    expr->expr.bnd_expr = varname;
+    return expr;
+}
+
+morloc_expression_t* make_morloc_literal(
+  const char* schema_str,
+  primitive_t lit
+){
+    char* error_msg = NULL;
+    Schema* schema = parse_schema(&schema_str, &error_msg);
+    morloc_data_t* data = (morloc_data_t*)malloc(sizeof(morloc_data_t));
+
+    data->is_voidstar = false;
+    data->data.lit_val = lit;
+    data->schema = schema;
+
+    morloc_expression_t* expr = (morloc_expression_t*)malloc(sizeof(morloc_expression_t));
+    expr->type = MORLOC_X_DAT;
+    expr->expr.data_expr = data;
+    return expr;
+}
+
+morloc_expression_t* make_morloc_container(
+  const char* schema_str,
+  size_t nargs,
+  ... // list of container elements
+){
+    va_list value_list;
+    va_start(value_list, nargs);
+    char* error_msg = NULL;
+    Schema* schema = parse_schema(&schema_str, &error_msg);
+    morloc_data_t* data = (morloc_data_t*)malloc(sizeof(morloc_data_t));
+    data->schema = schema;
+    data->is_voidstar = false;
+
+    morloc_expression_t** values = (morloc_expression_t**)calloc(nargs, sizeof(morloc_expression_t*));
+    for(size_t i = 0; i < nargs; i++){
+        values[i] = va_arg(value_list, morloc_expression_t*);
+    }
+
+    // Set the appropriate container field based on schema type
+    switch(schema->type) {
+        case MORLOC_ARRAY: {
+            morloc_data_array_t* array = (morloc_data_array_t*)malloc(sizeof(morloc_data_array_t));
+            array->schema = schema->parameters[0];
+            array->size = nargs;
+            array->values = values;
+            data->data.array_val = array;
+            break;
+        }
+        case MORLOC_TUPLE:
+        case MORLOC_MAP:
+            data->data.tuple_val = values;
+            break;
+        default:
+            // Schema type is not a container type
+            return NULL;
+    }
+    morloc_expression_t* expr = (morloc_expression_t*)malloc(sizeof(morloc_expression_t));
+    expr->type = MORLOC_X_DAT;
+    expr->expr.data_expr = data;
+
+    va_end(value_list);
+
+    return expr;
+}
+
+morloc_expression_t* make_morloc_app(
+  morloc_expression_t* func,
+  size_t nargs,
+  ... // list of input arguments
+){
+    va_list args;
+    va_start(args, nargs);
+
+    morloc_app_expression_t* app = (morloc_app_expression_t*)malloc(sizeof(morloc_app_expression_t));
+    // Determine application type based on func
+    switch(func->type) {
+        case MORLOC_X_PAT:
+            app->type = APPLY_PATTERN;
+            app->function.pattern = func->expr.pattern_expr;
+            break;
+        case MORLOC_X_LAM:
+            app->type = APPLY_LAMBDA;
+            app->function.lambda = func->expr.lam_expr;
+            break;
+        default:
+            // Can only apply pattern or lambda
+            return NULL;
+    }
+
+    app->args = (morloc_expression_t**)calloc(nargs, sizeof(morloc_expression_t*));
+    for(size_t i = 0; i < nargs; i++){
+        app->args[i] = va_arg(args, morloc_expression_t*);
+    }
+    app->nargs = nargs;
+
+    morloc_expression_t* expr = (morloc_expression_t*)malloc(sizeof(morloc_expression_t));
+    expr->type = MORLOC_X_APP;
+    expr->expr.app_expr = app;
+
+    va_end(args);
+
+    return expr;
+}
+
+morloc_lam_expression_t* make_morloc_lambda(
+  morloc_expression_t* body,
+  size_t nvars,
+  ... // list of input variable names
+){
+    va_list var_list;
+    va_start(var_list, nvars);
+
+    char** vars = (char**)calloc(nvars, sizeof(char*));
+    for(size_t i = 0; i < nvars; i++){
+        vars[i] = va_arg(var_list, char*);
+    }
+
+    morloc_lam_expression_t* lam = (morloc_lam_expression_t*)malloc(sizeof(morloc_lam_expression_t));
+    lam->nargs = nvars;
+    lam->args = vars;
+    lam->body = body;
+
+    va_end(var_list);
+
+    return lam;
+}
+
+morloc_pattern_t* make_key_selector(
+  char** keys,
+  morloc_pattern_t* vals,
+  size_t nargs
+){
+    morloc_pattern_t* pattern = (morloc_pattern_t*)malloc(sizeof(morloc_pattern_t));
+    pattern->type = SELECT_BY_KEY;
+    pattern->size = nargs;
+    pattern->keys = keys;
+    pattern->selectors = vals;
+    return pattern;
+}
+
+morloc_pattern_t* make_index_selector(
+  size_t* indices,
+  morloc_pattern_t* vals,
+  size_t nargs
+){
+    morloc_pattern_t* pattern = (morloc_pattern_t*)malloc(sizeof(morloc_pattern_t));
+    pattern->type = SELECT_BY_INDEX;
+    pattern->size = nargs;
+    pattern->indices = (size_t*)indices;
+    pattern->selectors = vals;
+    return pattern;
+}
+
+// }}}
+
+// {{{ pure morloc interpretor
+
+static bool write_morloc_data(morloc_data_t* data, absptr_t dest, ERRMSG);
+static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, ERRMSG);
+static morloc_expression_t* substitute_variable( morloc_expression_t* expr, char* varname, morloc_expression_t* term);
+static morloc_expression_t* apply_getter( morloc_expression_t* expr, morloc_pattern_t* pattern, ERRMSG);
+static morloc_expression_t* apply_setter( morloc_expression_t* expr, morloc_pattern_t* pattern, morloc_expression_t** args, size_t nargs, ERRMSG);
+absptr_t morloc_eval(morloc_expression_t* expr, uint8_t** arg_voidstar, Schema** arg_schemas, size_t nargs, ERRMSG);
+
+// evaluate a pure morloc expression with user provided arguments
+absptr_t morloc_eval(
+  morloc_expression_t* expr,
+  uint8_t** arg_voidstar, // voidstar data
+  Schema** arg_schemas, // argument schema strings
+  size_t nargs,
+  ERRMSG
+) {
+    PTR_RETURN_SETUP(absptr_t)
+
+    // If the top expression is a lambda, then the arguments are the user
+    // provided arguments. The arguments are given as voidstar values. We need
+    // to make a new application expression that wraps all the voidstar values
+    // and applies them to the lambda function.
+    if (expr->type == MORLOC_X_LAM) {
+        morloc_expression_t** arg_exprs = (morloc_expression_t**)calloc(nargs, sizeof(morloc_expression_t*));
+        for(size_t i = 0; i < nargs; i++){
+            arg_exprs[i] = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
+            arg_exprs[i]->type = MORLOC_X_DAT;
+            arg_exprs[i]->expr.data_expr->schema = arg_schemas[i];
+            arg_exprs[i]->expr.data_expr->is_voidstar = true;
+            arg_exprs[i]->expr.data_expr->data.voidstar = arg_voidstar[i];
+        }
+
+        morloc_app_expression_t* app_expr = (morloc_app_expression_t*)calloc(1, sizeof(morloc_app_expression_t));
+        app_expr->type = APPLY_LAMBDA;
+        app_expr->function.lambda = expr->expr.lam_expr;
+        app_expr->args = arg_exprs;
+
+        morloc_expression_t* new_expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
+        new_expr->type = MORLOC_X_APP;
+        new_expr->expr.app_expr = app_expr;
+        return TRY(morloc_eval_r, new_expr, NULL);
+    }
+    // If we are not dealing with a lambda, we should instead directly evaluate
+    // the input expression
+    else {
+        return TRY(morloc_eval_r, expr, NULL);
+    }
+}
+
+static bool write_morloc_data(morloc_data_t* data, absptr_t dest, ERRMSG){
+    BOOL_RETURN_SETUP
+    void* raw_data = NULL;
+    size_t size = data->schema->width;
+
+    switch (data->schema->type) {
+        case MORLOC_NIL:
+            raw_data = (void*)(&data->data.lit_val.z);
+            break;
+        case MORLOC_BOOL:
+            raw_data = (void*)(&data->data.lit_val.b);
+            break;
+        case MORLOC_SINT8:
+            raw_data = (void*)(&data->data.lit_val.i1);
+            break;
+        case MORLOC_SINT16:
+            raw_data = (void*)(&data->data.lit_val.i2);
+            break;
+        case MORLOC_SINT32:
+            raw_data = (void*)(&data->data.lit_val.i4);
+            break;
+        case MORLOC_SINT64:
+            raw_data = (void*)(&data->data.lit_val.i8);
+            break;
+        case MORLOC_UINT8:
+            raw_data = (void*)(&data->data.lit_val.u1);
+            break;
+        case MORLOC_UINT16:
+            raw_data = (void*)(&data->data.lit_val.u2);
+            break;
+        case MORLOC_UINT32:
+            raw_data = (void*)(&data->data.lit_val.u4);
+            break;
+        case MORLOC_UINT64:
+            raw_data = (void*)(&data->data.lit_val.u8);
+            break;
+        case MORLOC_FLOAT32:
+            raw_data = (void*)(&data->data.lit_val.f4);
+            break;
+        case MORLOC_FLOAT64:
+            raw_data = (void*)(&data->data.lit_val.f8);
+            break;
+        case MORLOC_STRING:
+            {
+                char* str = data->data.lit_val.s;
+                size_t str_size = strlen(str);
+                absptr_t str_absptr = TRY(shmemcpy, (void*)str, str_size);
+                relptr_t str_relptr = TRY(abs2rel, str_absptr);
+                Array str_array;
+                str_array.size = str_size;
+                str_array.data = str_relptr;
+                raw_data = (void*)(&str_array);
+                memcpy(dest, raw_data, size);
+                return true;
+            }
+            break;
+        case MORLOC_ARRAY:
+            {
+                morloc_data_array_t* arr = data->data.array_val;
+                size_t arr_size = arr->size;
+
+                size_t element_width = arr->schema->parameters[0]->width;
+                absptr_t arr_data = (absptr_t)calloc(arr_size, element_width);
+
+                for(size_t i = 0; i < arr_size; i++){
+                    TRY(morloc_eval_r, arr->values[i], arr_data + i * element_width);
+                }
+
+                Array array;
+                array.size = arr_size;
+                array.data = TRY(abs2rel, arr_data);
+                raw_data = (void*)(&array);
+                memcpy(dest, raw_data, size);
+                return true;
+            }
+            break;
+        case MORLOC_TUPLE:
+        case MORLOC_MAP:
+            {
+                morloc_expression_t** elements = data->data.tuple_val;
+                for(size_t i = 0; i < data->schema->size; i++){
+                    TRY(morloc_eval_r, elements[i], dest + data->schema->offsets[i]);
+                }
+                return true; // the recursive morloc_eval_r write data into the
+                             // tuple, no need for the last memcpy
+            }
+            break;
+    };
+
+    memcpy(dest, raw_data, size);
+
+    return true;
+}
+
+// evaluate AFTER resolving arguments
+static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, ERRMSG) {
+    PTR_RETURN_SETUP(absptr_t)
+    RAISE_IF(!expr, "Empty expression")
+
+    switch(expr->type) {
+        case MORLOC_X_DAT: {
+            // directly return voidstar data
+            if (expr->expr.data_expr->is_voidstar) {
+                return expr->expr.data_expr->data.voidstar;
+            } else {
+                if(dest == NULL) {
+                    dest = TRY(shcalloc, 1, expr->expr.data_expr->schema->width)
+                }
+                TRY(write_morloc_data, expr->expr.data_expr, dest);
+                return dest;
+            }
+        }
+
+        case MORLOC_X_APP: {
+            // Application: apply function to arguments
+            morloc_app_expression_t* app = expr->expr.app_expr;
+
+            switch(app->type) {
+                case APPLY_PATTERN:
+                    // TODO: Apply pattern to arguments
+                    // return apply_getter(...);
+                    return NULL;
+
+                case APPLY_LAMBDA: {
+                    morloc_lam_expression_t* lam = app->function.lambda;
+                    // substitute all arguments into the main expression
+                    for(size_t i = 0; i < app->nargs; i++){
+                        lam->body = substitute_variable(lam->body, lam->args[i], app->args[i]);
+                    }
+
+                    TRY(morloc_eval_r, lam->body, dest);
+                    return dest;
+                }
+                default:
+                    return NULL;
+            }
+        }
+
+        case MORLOC_X_LAM:
+        case MORLOC_X_BND:
+        case MORLOC_X_PAT:
+            RAISE("Illegal top expression");
+
+        default:
+            RAISE("Unsupported term in case-switch");
+    }
+}
+
+static morloc_expression_t* substitute_variable(
+  morloc_expression_t* expr, // oritinal term
+  char* varname, // variable to substitute
+  morloc_expression_t* term // replacement term
+) {
+    if (!expr || !varname) return expr;
+
+    switch(expr->type) {
+        case MORLOC_X_DAT: {
+            Schema* schema = expr->expr.data_expr->schema;
+            switch(schema->type) {
+                case MORLOC_ARRAY:
+                    {
+                        morloc_data_array_t* arr = expr->expr.data_expr->data.array_val;
+                        for(size_t i = 0; i < arr->size; i++){
+                            arr->values[i] = substitute_variable(arr->values[i], varname, term);
+                        }
+                        return expr;
+                    }
+                case MORLOC_TUPLE:
+                case MORLOC_MAP:
+                    {
+                        morloc_expression_t** vals = expr->expr.data_expr->data.tuple_val;
+                        for(size_t i = 0; i < schema->size; i++){
+                            vals[i] = substitute_variable(vals[i], varname, term);
+                        }
+                        return expr;
+                    }
+                default:
+                    return expr;
+            }
+        }
+
+        case MORLOC_X_APP: {
+            // Recursively substitute in application
+            morloc_app_expression_t* app = expr->expr.app_expr;
+
+            // substitute into lambda
+            if(app->type == APPLY_LAMBDA){
+                app->function.lambda->body = substitute_variable(app->function.lambda->body, varname, term);
+            }
+
+            for(size_t i = 0; i < app->nargs; i++){
+                app->args[i] = substitute_variable(app->args[i], varname, term);
+            }
+
+            return expr;
+        }
+
+        case MORLOC_X_LAM: {
+            // Substitute in lambda body if variable not shadowed
+            morloc_lam_expression_t* lam = expr->expr.lam_expr;
+
+            // Check if variable is shadowed by lambda parameters
+            for (size_t i = 0; i < lam->nargs; i++) {
+                if (strcmp(lam->args[i], varname) == 0) {
+                    // Variable is shadowed, don't substitute
+                    return expr;
+                }
+            }
+
+            lam->body = substitute_variable(lam->body, varname, term);
+
+            return expr;
+        }
+
+        // Substitute the bound term if it matches
+        case MORLOC_X_BND: {
+            if (strcmp(expr->expr.bnd_expr, varname) == 0) {
+                return term;
+            }
+            return expr;
+        }
+
+        // For all other cases, return the original expression unchanged
+        default:
+            return expr;
+    }
+}
+
+static morloc_expression_t* apply_getter(
+  morloc_expression_t* expr,
+  morloc_pattern_t* pattern,
+  ERRMSG
+) {
+    PTR_RETURN_SETUP(morloc_expression_t)
+    if (!expr || !pattern) return NULL;
+
+    switch(pattern->type) {
+        case SELECT_BY_KEY:
+            // Extract fields by key from tuple/map
+            // TODO: Check expr is MORLOC_X_DAT with tuple_val or map_val
+            // TODO: For each key in pattern->keys, extract corresponding value
+            // TODO: Recursively apply pattern->selectors if present
+            return NULL;
+
+        case SELECT_BY_INDEX:
+            // Extract elements by index from tuple/array
+            // TODO: Check expr is MORLOC_X_DAT with tuple_val or array_val
+            // TODO: For each index in pattern->indices, extract corresponding value
+            // TODO: Recursively apply pattern->selectors if present
+            return NULL;
+
+        case SELECT_END:
+            // End of pattern - return expr as-is
+            return expr;
+
+        default:
+            RAISE("Illegal pattern enum value");
+    }
+}
+
+static morloc_expression_t* apply_setter(
+  morloc_expression_t* expr,
+  morloc_pattern_t* pattern,
+  morloc_expression_t** args,
+  size_t nargs,
+  ERRMSG
+) {
+    PTR_RETURN_SETUP(morloc_expression_t)
+    if (!expr || !pattern) return NULL;
+
+    switch(pattern->type) {
+        case SELECT_BY_KEY:
+            // Set fields by key in tuple/map
+            // TODO: Check expr is MORLOC_X_DAT with tuple_val or map_val
+            // TODO: Check nargs matches pattern->size
+            // TODO: For each key in pattern->keys, set corresponding value from args
+            // TODO: Recursively apply pattern->selectors if present
+            return NULL;
+
+        case SELECT_BY_INDEX:
+            // Set elements by index in tuple/array
+            // TODO: Check expr is MORLOC_X_DAT with tuple_val or array_val
+            // TODO: Check nargs matches pattern->size
+            // TODO: For each index in pattern->indices, set corresponding value from args
+            // TODO: Recursively apply pattern->selectors if present
+            return NULL;
+
+        case SELECT_END:
+            // End of pattern - should not be called with setter
+            // TODO: Handle error
+            return NULL;
+
+        default:
+            RAISE("Invalid pattern type");
+    }
+}
+
+// }}}
+
 // prolly bring this back
 // #ifdef SLURM_SUPPORT
 
@@ -6078,9 +6692,6 @@ bool parse_morloc_call_arguments(
         pos += sizeof(morloc_packet_header_t) + arg_header->offset + arg_header->length;
         *nargs += 1;
     }
-
-    *args = (uint8_t*)calloc(*nargs, sizeof(uint8_t*));
-    RAISE_IF(*args == NULL, "Failed to allocate memory for argument vector")
 
     pos = sizeof(morloc_packet_header_t) + (size_t)header->offset;
     for(size_t i = 0; i < *nargs; i++){

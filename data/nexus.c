@@ -289,6 +289,72 @@ void run_command(
     print_return(result_packet, return_schema, config);
 }
 
+void run_pure_command(
+    morloc_expression_t* expr,
+    char** args,
+    const char** arg_schema_strs,
+    const char* return_schema_str,
+    config_t config
+){
+    char* errmsg = NULL;
+
+    size_t nargs = 0;
+    // args are the remaining char pointers from argv, these are guaranteed to
+    // end with a NULL pointer
+    for(; args[nargs] != NULL; nargs++){
+        nargs++;
+        // assert that there are an appropriate number of schemas
+        // mismatch implies an input mistake on the users side
+        if(arg_schema_strs == NULL){
+          ERROR("To many arguments provided");
+        }
+    }
+    if(arg_schema_strs[nargs] != NULL){
+        ERROR("To few arguments provided");
+    }
+
+    Schema** arg_schemas = (Schema**)calloc(nargs, sizeof(Schema*));
+    uint8_t** arg_packets = (uint8_t**)calloc(nargs, sizeof(uint8_t*));
+    uint8_t** arg_voidstars = (uint8_t**)calloc(nargs, sizeof(uint8_t*));
+
+    for(size_t i = 0; i < nargs; i++){
+      arg_schemas[i] = parse_schema(&arg_schema_strs[i], &errmsg);
+      if(errmsg != NULL){
+          ERROR("Failed to parse arg schema: %s", errmsg);
+      }
+
+      arg_packets[i] = parse_cli_data_argument(args[i], arg_schemas[i], &errmsg);
+      if(errmsg != NULL){
+          ERROR("Failed read argument: %s", errmsg);
+      }
+
+      arg_voidstars[i] = get_morloc_data_packet_value(arg_packets[i], arg_schemas[i], &errmsg);
+      if(errmsg != NULL){
+          ERROR("Failed to read arg packet: %s", errmsg);
+      }
+
+    }
+
+    Schema* return_schema = parse_schema(&return_schema_str, &errmsg);
+    if(errmsg != NULL){
+        ERROR("Failed to parse return schema");
+    }
+
+    absptr_t result_abs = morloc_eval(expr, arg_voidstars, arg_schemas, nargs, &errmsg);
+    if(errmsg != NULL){
+        ERROR("Failed to evaluate expression:\n%s", errmsg)
+    }
+
+    relptr_t result_rel = abs2rel(result_abs, &errmsg);
+    if(errmsg != NULL){
+        ERROR("Failed to convert absolute pointer to relative:\n%s", errmsg)
+    }
+
+    uint8_t* result_packet = make_standard_data_packet(result_rel, return_schema);
+
+    print_return(result_packet, return_schema, config);
+}
+
 
 // Run a call packet on a remote worker node
 void run_call_packet(config_t config){

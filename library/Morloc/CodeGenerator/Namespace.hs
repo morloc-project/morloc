@@ -30,10 +30,6 @@ module Morloc.CodeGenerator.Namespace
   -- **
   , Arg
   , ArgGeneral(..)
-  , JsonType(..)
-  , JsonPath
-  , JsonAccessor(..)
-  , NexusCommand(..)
   , ManifoldForm(..)
   , HeadManifoldForm(..)
   , manifoldContext
@@ -148,26 +144,6 @@ data TypeS
   | FunctionS [TypeM] TypeS -- This is the type of a manifold
   deriving(Show, Eq, Ord)
 
-type JsonPath = [JsonAccessor]
-data JsonAccessor
-  = JsonIndex Int
-  | JsonKey Key
-  deriving(Show)
-
-data NexusCommand = NexusCommand
-  { commandName :: EVar -- ^ user-exposed subcommand name in the nexus
-  , commandType :: Type -- ^ the general type of the expression
-  , commandForm :: MDoc -- ^ JSON format string
-  , commandArgs :: [EVar] -- ^ list of function arguments
-  , commandSubs :: [(JsonPath, Text, JsonPath)]
-  -- ^ list of tuples with values:
-  --    1) path in JSON to value needs to be replaced
-  --    2) the function argument from which to pull replacement value
-  --    3) the path to the replacement value
-  , commandDocs :: [Text]
-  }
-  deriving(Show)
-
 -- | A tree describing how to (de)serialize an object
 data SerialAST
   = SerialPack FVar (TypePacker, SerialAST) -- ^ use an (un)pack function to simplify an object
@@ -244,17 +220,6 @@ instance Pretty TypePacker where
     , "typePackerForward" <+> "=" <+> pretty (typePackerForward p)
     , "typePackerReverse" <+> "=" <+> pretty (typePackerReverse p)
     ]
-
--- | A simplified subset of the Type record where functions, existentials,
--- universals and language-specific info are removed
-data JsonType
-  = VarJ CVar
-  -- ^ {"int"}
-  | ArrJ CVar [JsonType]
-  -- ^ {"list":["int"]}
-  | NamJ CVar [(Key, JsonType)]
-  -- ^ {"Foo":{"bar":"A","baz":"B"}}
-  deriving (Show, Ord, Eq)
 
 type Arg = ArgGeneral Int
 
