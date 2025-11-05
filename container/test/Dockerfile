@@ -1,6 +1,6 @@
 FROM ubuntu:22.04 as morloc-build
 
-RUN apt-get update && apt-get install -y git curl pkg-config libglib2.0-dev
+RUN apt-get update && apt-get install -y git gdb curl pkg-config libglib2.0-dev
 
 # Build morloc
 RUN curl -SL https://get.haskellstack.org/ | sh
