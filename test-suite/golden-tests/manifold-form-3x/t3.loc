@@ -1,3 +1,4 @@
 module main (foo)
 
+foo :: [Bool] -> ([Bool], Int, Str)
 foo x = (x, 42, "hello")

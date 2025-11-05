@@ -302,7 +302,6 @@ void run_pure_command(
     // args are the remaining char pointers from argv, these are guaranteed to
     // end with a NULL pointer
     for(; args[nargs] != NULL; nargs++){
-        nargs++;
         // assert that there are an appropriate number of schemas
         // mismatch implies an input mistake on the users side
         if(arg_schema_strs == NULL){

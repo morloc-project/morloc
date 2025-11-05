@@ -59,7 +59,7 @@ data NexusExpr
   -- expressions that must be evaluated to data
   = AppX NexusExpr [NexusExpr]
   | LamX [MDoc] NexusExpr
-  | BndX MDoc
+  | BndX SchemaStr MDoc
   | PatX Pattern
   -- literal data
   | LstX SchemaStr [NexusExpr]
@@ -136,7 +136,7 @@ annotateGasts x0@(AnnoS (Idx i gtype) _ e0) = do
     toNexusExpr (AnnoS _ _ (AppS e es)) = AppX <$> toNexusExpr e <*> mapM toNexusExpr es
     toNexusExpr (AnnoS _ _ (LamS vs e)) = LamX (map pretty vs) <$> toNexusExpr e
     toNexusExpr (AnnoS _ _ (ExeS (PatCall p))) = return $ PatX p
-    toNexusExpr (AnnoS _ _ (BndS v)) = return $ BndX (pretty v)
+    toNexusExpr (AnnoS (Idx _ t) _ (BndS v)) = BndX <$> makeSchema t <*> pure (pretty v)
     toNexusExpr (AnnoS (Idx _ t) _ (LstS es)) = LstX <$> makeSchema t <*> mapM toNexusExpr es
     toNexusExpr (AnnoS (Idx _ t) _ (TupS es)) = TupX <$> makeSchema t <*> mapM toNexusExpr es
     toNexusExpr (AnnoS (Idx _ t) _ (NamS rs)) = NamX <$> makeSchema t <*> mapM (bimapM (pure . pretty) toNexusExpr) rs
@@ -173,14 +173,14 @@ makePureExpression index e0 = (code, varName) where
 
 makeExpr :: NexusExpr -> MDoc
 makeExpr (LstX s es) =
-  let args = punctuate ", " (map makeExpr es)
-  in [idoc|make_morloc_container(#{s}, #{pretty (length es)}, #{hsep args});|]
+  let args = hsep ["," <+> (makeExpr e) | e <- es]
+  in [idoc|make_morloc_container(#{s}, #{pretty (length es)}#{args})|]
 makeExpr (TupX s es) =
-  let args = punctuate ", " (map makeExpr es)
-  in [idoc|make_morloc_container(#{s}, #{pretty (length es)}, #{hsep args});|]
+  let args = hsep ["," <+> (makeExpr e) | e <- es]
+  in [idoc|make_morloc_container(#{s}, #{pretty (length es)}#{args})|]
 makeExpr (NamX s rs) =
-  let args = punctuate ", " (map makeExpr (map snd rs))
-  in [idoc|make_morloc_container(#{s}, #{pretty (length rs)}, #{hsep args});|]
+  let args = hsep ["," <+> (makeExpr e) | (_, e) <- rs]
+  in [idoc|make_morloc_container(#{s}, #{pretty (length rs)}#{args})|]
 makeExpr (AppX e es) =
   let args = punctuate ", " (map makeExpr es)
   in [idoc|make_morloc_app(#{makeExpr e}, #{pretty (length es)}, #{hsep args})|]
@@ -188,7 +188,7 @@ makeExpr (LamX vs e) =
   let vars = punctuate ", " ["strdup" <> parens (dquotes v) | v <- vs]
   in [idoc|make_morloc_lambda(#{makeExpr e}, #{pretty (length vs)}, #{hsep vars})|]
 makeExpr (PatX pattern) = undefined
-makeExpr (BndX v) = [idoc|make_morloc_bound_var((const char*)strdup(#{dquotes v}))|]
+makeExpr (BndX s v) = [idoc|make_morloc_bound_var(#{s}, strdup(#{dquotes v}))|]
 makeExpr (StrX s x) = [idoc|make_morloc_literal(#{s}, (primitive_t){.s = strdup(#{x})})|]
 makeExpr (LitX t x) = [idoc|make_morloc_literal(#{dquotes (litSchema t)}, (primitive_t){.#{litSchema t} = #{x}})|]
 
