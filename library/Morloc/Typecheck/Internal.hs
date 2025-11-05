@@ -150,7 +150,8 @@ subtypeEvaluated scope t1 t2 g =
     case (TE.reduceType scope t1, TE.reduceType scope t2) of
       (Just t1', _) -> subtype scope t1' t2 g
       (_, Just t2') -> subtype scope t1 t2' g
-      (_, _) -> (Left . TypeEvaluationError . render) ("Type evaluation failed:" <+> viaShow (t1, t2))
+      (_, _) -> Left . TypeEvaluationError . render $
+          "Cannot compare types" <+> pretty t1 <+> "and" <+> pretty t2
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Scope -> TypeU -> TypeU -> Gamma -> Either TypeError Gamma
