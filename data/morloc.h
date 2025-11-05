@@ -3490,7 +3490,7 @@ static void consume_whitespace(char** json_data){
 static bool consume_char(char c, char** json_ptr, ERRMSG){
     BOOL_RETURN_SETUP
     consume_whitespace(json_ptr);
-    RAISE_IF(**json_ptr != c, "Unexpected character: expected '%c' at '%s'", c, *json_ptr)
+    RAISE_IF(**json_ptr != c, "\n  Unexpected character: expected '%c' at '%s'", c, *json_ptr)
     (*json_ptr)++;
     return true;
 }
@@ -3519,7 +3519,7 @@ static bool match_json_boolean(char** json_data, ERRMSG){
         *json_data += 5;
         return false;
     } else {
-        RAISE("Expected (true/false) value in JSON")
+        RAISE("\n  Expected (true/false) value in JSON")
     }
 }
 
@@ -3528,7 +3528,7 @@ static int64_t parse_json_int(char** json_ptr, ERRMSG) {
     consume_whitespace(json_ptr);
     char* end;
     int64_t val = strtoll(*json_ptr, &end, 10);
-    RAISE_IF(*json_ptr == end, "Not a valid integer: '%c'", **json_ptr);
+    RAISE_IF(*json_ptr == end, "\n  Not a valid integer: '%c'", **json_ptr);
     *json_ptr = end;
     return val;
 }
@@ -3538,7 +3538,7 @@ static uint64_t parse_json_uint(char** json_ptr, ERRMSG) {
     consume_whitespace(json_ptr);
     char* end;
     uint64_t val = strtoull(*json_ptr, &end, 10);
-    RAISE_IF(*json_ptr == end, "Not a valid integer: '%c'", **json_ptr);
+    RAISE_IF(*json_ptr == end, "\n  Not a valid integer: '%c'", **json_ptr);
     *json_ptr = end;
     return val;
 }
@@ -3548,7 +3548,7 @@ static double parse_json_double(char** json_ptr, ERRMSG) {
     consume_whitespace(json_ptr);
     char* end;
     double val = strtod(*json_ptr, &end);
-    RAISE_IF(*json_ptr == end, "Not a valid floating-point number: '%c'", **json_ptr);
+    RAISE_IF(*json_ptr == end, "\n  Not a valid floating-point number: '%c'", **json_ptr);
     *json_ptr = end;
     return val;
 }
@@ -3559,7 +3559,7 @@ static double parse_json_double(char** json_ptr, ERRMSG) {
 // special characters count as one. Any formatting errors will be caught.
 static int json_string_size(char* ptr, size_t* json_size, size_t* c_size, ERRMSG) {
     INT_RETURN_SETUP
-    RAISE_IF(*ptr != '"', "Expected string, but no initial quote found (observed '%c')", *ptr)
+    RAISE_IF(*ptr != '"', "\n  Expected string, but no initial quote found (observed '%c')", *ptr)
 
     char* json_start = ptr;
     size_t c_size_ = 0;
@@ -3568,7 +3568,7 @@ static int json_string_size(char* ptr, size_t* json_size, size_t* c_size, ERRMSG
     while (*ptr != '\0' && *ptr != '"') {
         if (*ptr == '\\') {
             ptr++; // Move past backslash
-            RAISE_IF(*ptr == '\0', "Unexpected end of string in escape sequence");
+            RAISE_IF(*ptr == '\0', "\n  Unexpected end of string in escape sequence");
 
             switch (*ptr) {
                 case '"':
@@ -3589,8 +3589,8 @@ static int json_string_size(char* ptr, size_t* json_size, size_t* c_size, ERRMSG
                     ptr++; // Move past 'u'
                     // Validate 4 hex digits
                     for (int i = 0; i < 4; i++) {
-                        RAISE_IF(*ptr == '\0', "Truncated Unicode escape");
-                        RAISE_IF(!isxdigit(*ptr), "Invalid hex digit in Unicode escape");
+                        RAISE_IF(*ptr == '\0', "\n  Truncated Unicode escape");
+                        RAISE_IF(!isxdigit(*ptr), "\n  Invalid hex digit in Unicode escape");
                         ptr++;
                     }
                     c_size_ += 4; // Count as one character
@@ -3598,7 +3598,7 @@ static int json_string_size(char* ptr, size_t* json_size, size_t* c_size, ERRMSG
                 }
 
                 default:
-                    RAISE("Invalid escape character");
+                    RAISE("\n  Invalid escape character");
             }
         } else {
             // Regular character
@@ -3607,7 +3607,7 @@ static int json_string_size(char* ptr, size_t* json_size, size_t* c_size, ERRMSG
         }
     }
 
-    RAISE_IF(*ptr != '"', "Unterminated string, missing closing quote");
+    RAISE_IF(*ptr != '"', "\n  Unterminated string, missing closing quote");
     ptr++;
 
     *json_size = (size_t)(ptr - json_start - 2);
@@ -3622,13 +3622,13 @@ static int write_json_string(char** json_ptr, char* dest, ERRMSG){
 
     char* ptr = *json_ptr;
 
-    RAISE_IF(*ptr != '"', "Expected string, but no initial quote found")
+    RAISE_IF(*ptr != '"', "\n  Expected string, but no initial quote found")
     ptr++; // Skip opening quote
 
     while (*ptr != '\0' && *ptr != '"') {
         if (*ptr == '\\') {
             ptr++; // Move past backslash
-            RAISE_IF(*ptr == '\0', "Unexpected end of string in escape sequence");
+            RAISE_IF(*ptr == '\0', "\n  Unexpected end of string in escape sequence");
 
             switch (*ptr) {
                 case '"':
@@ -3652,8 +3652,8 @@ static int write_json_string(char** json_ptr, char* dest, ERRMSG){
                     ptr++; // Move past 'u'
                     // Validate 4 hex digits
                     for (int i = 0; i < 4; i++) {
-                        RAISE_IF(*ptr == '\0', "Truncated Unicode escape");
-                        RAISE_IF(!isxdigit(*ptr), "Invalid hex digit in Unicode escape");
+                        RAISE_IF(*ptr == '\0', "\n  Truncated Unicode escape");
+                        RAISE_IF(!isxdigit(*ptr), "\n  Invalid hex digit in Unicode escape");
                         *dest = *ptr;
                         dest++;
                         ptr++;
@@ -3661,7 +3661,7 @@ static int write_json_string(char** json_ptr, char* dest, ERRMSG){
                     break;
                 }
                 default:
-                    RAISE("Invalid escape character");
+                    RAISE("\n  Invalid escape character");
             }
             ptr++;
         } else {
@@ -3672,7 +3672,7 @@ static int write_json_string(char** json_ptr, char* dest, ERRMSG){
         }
     }
 
-    RAISE_IF(*ptr != '"', "Unterminated string, missing closing quote");
+    RAISE_IF(*ptr != '"', "\n  Unterminated string, missing closing quote");
     ptr++; // move past closing quote
 
     // consume the string
@@ -3713,7 +3713,7 @@ static char* read_json_key(char** json_ptr, ERRMSG){
 static size_t json_array_size(char* ptr, ERRMSG) {
     VAL_RETURN_SETUP(size_t, 0)
 
-    RAISE_IF(*ptr != '[', "Expected an array, but found no starting bracket");
+    RAISE_IF(*ptr != '[', "\n  Failed to parse input JSON. Expected an array, but found no starting bracket\n");
 
     size_t size = 0;
     size_t depth = 0;
@@ -3770,7 +3770,7 @@ static size_t json_array_size(char* ptr, ERRMSG) {
         ptr++;
     }
 
-    RAISE("Found JSON array with no closing bracket\n")
+    RAISE("\n  Failed to parse JSON: missing closing bracket on array\n")
 }
 
 // input JSON data should be NULL terminated
