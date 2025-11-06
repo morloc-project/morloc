@@ -57,10 +57,10 @@ type SchemaStr = MDoc
 -- | A data type that stores pure morloc expressions
 data NexusExpr
   -- expressions that must be evaluated to data
-  = AppX NexusExpr [NexusExpr]
+  = AppX SchemaStr NexusExpr [NexusExpr]
   | LamX [MDoc] NexusExpr
   | BndX SchemaStr MDoc
-  | PatX Pattern
+  | PatX SchemaStr Pattern
   -- literal data
   | LstX SchemaStr [NexusExpr]
   | TupX SchemaStr [NexusExpr]
@@ -133,9 +133,9 @@ annotateGasts x0@(AnnoS (Idx i gtype) _ e0) = do
     makeSchema t = generalTypeToSerialAST t |>> Serial.serialAstToMsgpackSchema |>> dquotes
 
     toNexusExpr :: AnnoS (Indexed Type) One () -> MorlocMonad NexusExpr
-    toNexusExpr (AnnoS _ _ (AppS e es)) = AppX <$> toNexusExpr e <*> mapM toNexusExpr es
+    toNexusExpr (AnnoS (Idx _ t) _ (AppS e es)) = AppX <$> makeSchema t <*> toNexusExpr e <*> mapM toNexusExpr es
     toNexusExpr (AnnoS _ _ (LamS vs e)) = LamX (map pretty vs) <$> toNexusExpr e
-    toNexusExpr (AnnoS _ _ (ExeS (PatCall p))) = return $ PatX p
+    toNexusExpr (AnnoS (Idx _ (FunT _ t)) _ (ExeS (PatCall p))) = PatX <$> makeSchema t <*> pure p
     toNexusExpr (AnnoS (Idx _ t) _ (BndS v)) = BndX <$> makeSchema t <*> pure (pretty v)
     toNexusExpr (AnnoS (Idx _ t) _ (LstS es)) = LstX <$> makeSchema t <*> mapM toNexusExpr es
     toNexusExpr (AnnoS (Idx _ t) _ (TupS es)) = TupX <$> makeSchema t <*> mapM toNexusExpr es
@@ -181,13 +181,24 @@ makeExpr (TupX s es) =
 makeExpr (NamX s rs) =
   let args = hsep ["," <+> (makeExpr e) | (_, e) <- rs]
   in [idoc|make_morloc_container(#{s}, #{pretty (length rs)}#{args})|]
-makeExpr (AppX e es) =
+makeExpr (AppX s e es) =
   let args = punctuate ", " (map makeExpr es)
-  in [idoc|make_morloc_app(#{makeExpr e}, #{pretty (length es)}, #{hsep args})|]
+  in [idoc|make_morloc_app(#{s}, #{makeExpr e}, #{pretty (length es)}, #{hsep args})|]
 makeExpr (LamX vs e) =
-  let vars = punctuate ", " ["strdup" <> parens (dquotes v) | v <- vs]
+  let vars = punctuate ", " ["strdup" <> (parens . dquotes $ v) | v <- vs]
   in [idoc|make_morloc_lambda(#{makeExpr e}, #{pretty (length vs)}, #{hsep vars})|]
-makeExpr (PatX pattern) = undefined
+makeExpr (PatX s (PatternText p ps)) =
+  let vars = punctuate ", " ["strdup" <> (parens . dquotes . pretty $ v) | v <- (p:ps)]
+  in [idoc|make_morloc_interpolation(#{s}, #{pretty (1 + length ps)}, #{hsep vars})|]
+makeExpr (PatX s (PatternStruct p)) = [idoc|make_morloc_pattern(#{s}, #{makePatternExpr p})|]  where
+  makePatternExpr :: Selector -> MDoc
+  makePatternExpr (SelectorIdx t ts) =
+    let vars = punctuate ", " [ pretty i <> "," <+> makePatternExpr v  | (i, v) <- (t:ts)]
+    in [idoc|make_morloc_pattern_idx(#{pretty (length (t:ts))}, #{hsep vars})|]
+  makePatternExpr (SelectorKey t ts) =
+    let vars = punctuate ", " [ "strdup" <> (parens . dquotes . pretty $ k) <> "," <+> makePatternExpr v  | (k, v) <- (t:ts)]
+    in [idoc|make_morloc_pattern_key(#{pretty (length (t:ts))}, #{hsep vars})|]
+  makePatternExpr SelectorEnd = [idoc|make_morloc_pattern_end()|]
 makeExpr (BndX s v) = [idoc|make_morloc_bound_var(#{s}, strdup(#{dquotes v}))|]
 makeExpr (StrX s x) = [idoc|make_morloc_literal(#{s}, (primitive_t){.s = strdup(#{x})})|]
 makeExpr (LitX t x) = [idoc|make_morloc_literal(#{dquotes (litSchema t)}, (primitive_t){.#{litSchema t} = #{x}})|]

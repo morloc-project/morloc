@@ -6040,6 +6040,7 @@ typedef enum {
   MORLOC_X_LAM,
   MORLOC_X_BND,
   MORLOC_X_PAT,
+  MORLOC_X_FMT,
 } morloc_expression_type;
 
 // application types
@@ -6054,24 +6055,20 @@ typedef struct morloc_app_expression_s morloc_app_expression_t;
 typedef struct morloc_lam_expression_s morloc_lam_expression_t;
 typedef struct morloc_data_s morloc_data_t;
 typedef struct morloc_pattern_s morloc_pattern_t;
-typedef struct morloc_bnd_expression_s morloc_bnd_expression_t;
 
 // represent a pure morloc expression, a node in the syntax tree
 typedef struct morloc_expression_s {
     morloc_expression_type type;
+    Schema* schema;
     union {
         morloc_app_expression_t* app_expr;
         morloc_lam_expression_t* lam_expr;
-        morloc_bnd_expression_t* bnd_expr;
+        char* bnd_expr;
+        char** interpolation; // NULL pointer terminated array of strings
         morloc_pattern_t* pattern_expr;
         morloc_data_t* data_expr;
     } expr;
 } morloc_expression_t;
-
-typedef struct morloc_bnd_expression_s {
-  char* varname;
-  Schema* schema;
-} morloc_bnd_expression_t;
 
 // represent all primitives
 // field names are same as schema terms
@@ -6100,7 +6097,6 @@ typedef struct morloc_data_array_s {
 
 // store morloc data, primitives or containers
 typedef struct morloc_data_s {
-    Schema* schema;
     bool is_voidstar;
     union {
         // literal data values stored here
@@ -6136,24 +6132,20 @@ typedef struct morloc_pattern_s {
     morloc_pattern_type type;
     size_t size;
     union {
-      char** keys;
-      size_t* indices;
-    };
-   morloc_pattern_t* selectors;
+        size_t* indices;
+        char** keys;
+    } fields;
+   morloc_pattern_t** selectors;
 } morloc_pattern_t;
 
 morloc_expression_t* make_morloc_bound_var(const char* schema_str, char* varname){
     char* error_msg = NULL;
     Schema* schema = parse_schema(&schema_str, &error_msg);
-    // careful here, I'm ignoring the error
-
-    morloc_bnd_expression_t* bndvar = (morloc_bnd_expression_t*)calloc(1, sizeof(morloc_bnd_expression_t));
-    bndvar->varname = varname;
-    bndvar->schema = schema;
 
     morloc_expression_t* expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
     expr->type = MORLOC_X_BND;
-    expr->expr.bnd_expr = bndvar;
+    expr->schema = schema;
+    expr->expr.bnd_expr = varname;
 
     return expr;
 }
@@ -6168,9 +6160,9 @@ morloc_expression_t* make_morloc_literal(
 
     data->is_voidstar = false;
     data->data.lit_val = lit;
-    data->schema = schema;
 
     morloc_expression_t* expr = (morloc_expression_t*)malloc(sizeof(morloc_expression_t));
+    expr->schema = schema;
     expr->type = MORLOC_X_DAT;
     expr->expr.data_expr = data;
     return expr;
@@ -6186,7 +6178,6 @@ morloc_expression_t* make_morloc_container(
     char* error_msg = NULL;
     Schema* schema = parse_schema(&schema_str, &error_msg);
     morloc_data_t* data = (morloc_data_t*)malloc(sizeof(morloc_data_t));
-    data->schema = schema;
     data->is_voidstar = false;
 
     morloc_expression_t** values = (morloc_expression_t**)calloc(nargs, sizeof(morloc_expression_t*));
@@ -6214,6 +6205,7 @@ morloc_expression_t* make_morloc_container(
     }
     morloc_expression_t* expr = (morloc_expression_t*)malloc(sizeof(morloc_expression_t));
     expr->type = MORLOC_X_DAT;
+    expr->schema = schema;
     expr->expr.data_expr = data;
 
     va_end(value_list);
@@ -6222,6 +6214,7 @@ morloc_expression_t* make_morloc_container(
 }
 
 morloc_expression_t* make_morloc_app(
+  const char* schema_str,
   morloc_expression_t* func,
   size_t nargs,
   ... // list of input arguments
@@ -6229,7 +6222,11 @@ morloc_expression_t* make_morloc_app(
     va_list args;
     va_start(args, nargs);
 
+    char* error_msg = NULL;
+    Schema* schema = parse_schema(&schema_str, &error_msg);
+
     morloc_app_expression_t* app = (morloc_app_expression_t*)malloc(sizeof(morloc_app_expression_t));
+
     // Determine application type based on func
     switch(func->type) {
         case MORLOC_X_PAT:
@@ -6253,6 +6250,7 @@ morloc_expression_t* make_morloc_app(
 
     morloc_expression_t* expr = (morloc_expression_t*)malloc(sizeof(morloc_expression_t));
     expr->type = MORLOC_X_APP;
+    expr->schema = schema;
     expr->expr.app_expr = app;
 
     va_end(args);
@@ -6282,34 +6280,110 @@ morloc_expression_t* make_morloc_lambda(
 
     morloc_expression_t* lam_expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
     lam_expr->type = MORLOC_X_LAM;
+    lam_expr->schema = NULL;
     lam_expr->expr.lam_expr = lam;
 
     return lam_expr;
 }
 
-morloc_pattern_t* make_key_selector(
-  char** keys,
-  morloc_pattern_t* vals,
-  size_t nargs
-){
-    morloc_pattern_t* pattern = (morloc_pattern_t*)malloc(sizeof(morloc_pattern_t));
-    pattern->type = SELECT_BY_KEY;
-    pattern->size = nargs;
-    pattern->keys = keys;
-    pattern->selectors = vals;
+morloc_expression_t* make_morloc_interpolation(const char* schema_str, size_t nargs, ...){
+    char* error_msg = NULL;
+    Schema* schema = parse_schema(&schema_str, &error_msg);
+
+    va_list var_list;
+    va_start(var_list, nargs);
+
+    char** strings = (char**)calloc(nargs+1, sizeof(char*)); // include terminal NULL
+
+    for(size_t i = 0; i < nargs; i++){
+        strings[i] = va_arg(var_list, char*);
+    }
+
+    va_end(var_list);
+
+    morloc_expression_t* expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
+    expr->type = MORLOC_X_FMT;
+    expr->schema = schema;
+    expr->expr.interpolation = strings;
+    return expr;
+}
+
+morloc_expression_t* make_morloc_pattern(const char* schema_str, morloc_pattern_t* pattern){
+    char* error_msg = NULL;
+    Schema* schema = parse_schema(&schema_str, &error_msg);
+    morloc_expression_t* expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
+    expr->type = MORLOC_X_PAT;
+    expr->schema = schema;
+    expr->expr.pattern_expr = pattern;
+    return expr;
+}
+
+morloc_pattern_t* make_morloc_pattern_end(){
+    morloc_pattern_t* pattern = (morloc_pattern_t*)calloc(1, sizeof(morloc_pattern_t));
+    pattern->type = SELECT_END;
+    pattern->size = 0;
+    pattern->fields.indices = NULL;
+    pattern->selectors = NULL;
     return pattern;
 }
 
-morloc_pattern_t* make_index_selector(
-  size_t* indices,
-  morloc_pattern_t* vals,
-  size_t nargs
-){
-    morloc_pattern_t* pattern = (morloc_pattern_t*)malloc(sizeof(morloc_pattern_t));
+// The variables are alternating indices (size_t) and patterns
+// (morloc_pattern_t*) types. The patterns may be null, indicating they are
+// terminals.
+morloc_pattern_t* make_morloc_pattern_idx(size_t nargs, ...){
+    size_t* indices = (size_t*)calloc(nargs, sizeof(size_t));
+    morloc_pattern_t** selectors = (morloc_pattern_t**)calloc(nargs, sizeof(morloc_pattern_t*));
+
+    va_list var_list;
+    va_start(var_list, nargs);
+
+    for(size_t i = 0; i < (2 * nargs); i++){
+        if(i % 2 == 0){
+            indices[i / 2] = va_arg(var_list, size_t);
+        } else {
+            selectors[i / 2] = va_arg(var_list, morloc_pattern_t*);
+        }
+    }
+
+    va_end(var_list);
+
+    morloc_pattern_t* pattern = (morloc_pattern_t*)calloc(1, sizeof(morloc_pattern_t));
     pattern->type = SELECT_BY_INDEX;
     pattern->size = nargs;
-    pattern->indices = (size_t*)indices;
-    pattern->selectors = vals;
+    pattern->fields.indices = indices;
+    pattern->selectors = selectors;
+
+    return pattern;
+}
+
+// Like the *idx function above, the two functions can't be collapsed yet
+// because the record selector is polymorphic over records with the same
+// fields. Technically, at compile-time, the record involved is currently known,
+// but I may add more dynamicism in the future, so I will leave the pattern
+// polymorphic and resolve to record indices using the Schema.
+morloc_pattern_t* make_morloc_pattern_key(size_t nargs, ...){
+    char** keys = (char**)calloc(nargs, sizeof(char*));
+    morloc_pattern_t** selectors = (morloc_pattern_t**)calloc(nargs, sizeof(morloc_pattern_t*));
+
+    va_list var_list;
+    va_start(var_list, nargs);
+
+    for(size_t i = 0; i < (2 * nargs); i++){
+        if(i % 2 == 0){
+            keys[i / 2] = va_arg(var_list, char*);
+        } else {
+            selectors[i / 2] = va_arg(var_list, morloc_pattern_t*);
+        }
+    }
+
+    va_end(var_list);
+
+    morloc_pattern_t* pattern = (morloc_pattern_t*)calloc(1, sizeof(morloc_pattern_t));
+    pattern->type = SELECT_BY_KEY;
+    pattern->size = nargs;
+    pattern->fields.keys = keys;
+    pattern->selectors = selectors;
+
     return pattern;
 }
 
@@ -6317,13 +6391,15 @@ morloc_pattern_t* make_index_selector(
 
 // {{{ pure morloc interpretor
 
-static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t width, dict_t* bndvars, ERRMSG);
-static morloc_expression_t* apply_getter( morloc_expression_t* expr, morloc_pattern_t* pattern, ERRMSG);
-static morloc_expression_t* apply_setter( morloc_expression_t* expr, morloc_pattern_t* pattern, morloc_expression_t** args, size_t nargs, ERRMSG);
+static absptr_t morloc_eval_r(morloc_expression_t*, absptr_t, size_t, dict_t*, ERRMSG);
+static absptr_t apply_setter(absptr_t, Schema*, morloc_pattern_t*, Schema*, absptr_t, Schema**, absptr_t*, size_t, ERRMSG);
+static absptr_t apply_getter(absptr_t, Schema*, morloc_pattern_t*, Schema*, absptr_t, ERRMSG);
+
 
 // evaluate a pure morloc expression with user provided arguments
 absptr_t morloc_eval(
   morloc_expression_t* expr,
+  Schema* return_schema,
   uint8_t** arg_voidstar, // voidstar data
   Schema** arg_schemas, // argument schema strings
   size_t nargs,
@@ -6341,8 +6417,8 @@ absptr_t morloc_eval(
         for(size_t i = 0; i < nargs; i++){
             arg_exprs[i] = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
             arg_exprs[i]->type = MORLOC_X_DAT;
+            arg_exprs[i]->schema = arg_schemas[i];
             arg_exprs[i]->expr.data_expr = (morloc_data_t*)calloc(1, sizeof(morloc_data_t));
-            arg_exprs[i]->expr.data_expr->schema = arg_schemas[i];
             arg_exprs[i]->expr.data_expr->is_voidstar = true;
             arg_exprs[i]->expr.data_expr->data.voidstar = arg_voidstar[i];
         }
@@ -6355,6 +6431,7 @@ absptr_t morloc_eval(
 
         new_expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
         new_expr->type = MORLOC_X_APP;
+        new_expr->schema = return_schema;
         new_expr->expr.app_expr = app_expr;
     }
     // If we are not dealing with a lambda, we should instead directly evaluate
@@ -6373,6 +6450,15 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
 
     RAISE_IF(!expr, "Empty expression")
 
+    Schema* schema = expr->schema;
+
+    if (dest == NULL){
+        width = schema->width;
+        dest = TRY(shcalloc, 1, width);
+    } else {
+        RAISE_IF(width != schema->width, "Unexpected data size")
+    }
+
     switch(expr->type) {
         case MORLOC_X_DAT: {
             morloc_data_t* data = expr->expr.data_expr;
@@ -6382,14 +6468,7 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
                 return data->data.voidstar;
             }
 
-            if (dest == NULL){
-                dest = TRY(shcalloc, 1, data->schema->width);
-                width = data->schema->width;
-            } else {
-                RAISE_IF(width != data->schema->width, "Unexpected data size")
-            }
-
-            switch(data->schema->type){
+            switch(schema->type){
                  case MORLOC_NIL:
                      memcpy(dest, (void*)(&data->data.lit_val.z), width);
                      break;
@@ -6450,7 +6529,7 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
                          if(arr_size > 0){
                              absptr_t arr_data = TRY(shcalloc, arr_size, element_width);
                              for(size_t i = 0; i < arr_size; i++){
-                                 TRY(morloc_eval_r, arr->values[i], arr_data + i * element_width, element_width, bndvars)
+                                 TRY(morloc_eval_r, arr->values[i], (void*)((char*)arr_data + i * element_width), element_width, bndvars)
                              }
                              arr_reldata = TRY(abs2rel, arr_data)
                          }
@@ -6464,10 +6543,10 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
                  case MORLOC_MAP:
                      {
                          size_t element_width = 0;
-                         for(size_t i = 0; i < data->schema->size; i++){
-                             element_width = data->schema->parameters[i]->width;
+                         for(size_t i = 0; i < schema->size; i++){
+                             element_width = schema->parameters[i]->width;
                              morloc_expression_t* element = data->data.tuple_val[i];
-                             absptr_t element_dest = dest + data->schema->offsets[i];
+                             absptr_t element_dest = (void*)((char*)dest + schema->offsets[i]);
                              TRY(morloc_eval_r, element, element_dest, element_width, bndvars)
                          }
                      }
@@ -6483,21 +6562,30 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
             // Application: apply function to arguments
             morloc_app_expression_t* app = expr->expr.app_expr;
 
+            absptr_t* arg_results = (absptr_t*)calloc(app->nargs, sizeof(absptr_t));
+            // evaluate all arguments outside the new lambda scope
+            for(size_t i = 0; i < app->nargs; i++){
+                arg_results[i] = TRY(morloc_eval_r, app->args[i], NULL, 0, bndvars);
+            }
+
             switch(app->type) {
-                case APPLY_PATTERN:
-                    // TODO: Apply pattern to arguments
-                    // return apply_getter(...);
-                    RAISE("Patterns not yet supported")
+                case APPLY_PATTERN: {
+                    if(app->nargs == 1){
+                        TRY(apply_getter, dest, schema, app->function.pattern, app->args[0]->schema, arg_results[0])
+                    } else if(app->nargs > 1) {
+                        Schema** arg_schemas = (Schema**)calloc(app->nargs-1, sizeof(Schema*));
+                        for(size_t i = 1; i < app->nargs; i++){
+                            arg_schemas[i-1] = app->args[i]->schema;
+                        }
+                        TRY(apply_setter, dest, schema, app->function.pattern, app->args[0]->schema, arg_results[0], arg_schemas, arg_results + 1, app->nargs - 1)
+                        free(arg_schemas);
+                    } else {
+                        RAISE("No arguments provided to pattern, this should be unreachable")
+                    }
+                } break;
 
                 case APPLY_LAMBDA: {
                     morloc_lam_expression_t* lam = app->function.lambda;
-                    absptr_t* arg_results = (absptr_t*)calloc(app->nargs, sizeof(absptr_t));
-
-                    // evaluate all arguments outside the new lambda scope
-                    for(size_t i = 0; i < app->nargs; i++){
-                        arg_results[i] = TRY(morloc_eval_r, app->args[i], NULL, 0, bndvars);
-                    }
-
                     // remove shadowed values from the variable table
                     for(size_t i = 0; i < app->nargs; i++){
                         bndvars = dict_delete(lam->args[i], bndvars);
@@ -6514,17 +6602,14 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
                 default:
                     RAISE("Invalid functional term")
             }
+            free(arg_results);
         } break;
 
         case MORLOC_X_BND: {
-            morloc_bnd_expression_t* bndvar = expr->expr.bnd_expr;
-            absptr_t bnd_result = dict_lookup(bndvar->varname, bndvars);
-            RAISE_IF(bnd_result == NULL, "Unbound variable %s", bndvar->varname);
-            if(dest == NULL){
-                dest = bnd_result;
-            } else {
-                memcpy(dest, bnd_result, bndvar->schema->width);
-            }
+            char* varname = expr->expr.bnd_expr;
+            absptr_t bnd_value = dict_lookup(varname, bndvars);
+            RAISE_IF(bnd_value == NULL, "Unbound variable %s", varname);
+            memcpy(dest, bnd_value, schema->width);
         } break;
 
         default:
@@ -6534,47 +6619,104 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
     return dest;
 }
 
-static morloc_expression_t* apply_getter(
-  morloc_expression_t* expr,
-  morloc_pattern_t* pattern,
-  ERRMSG
-) {
-    PTR_RETURN_SETUP(morloc_expression_t)
-    if (!expr || !pattern) return NULL;
+static bool convert_keys_to_indices(morloc_pattern_t* pattern, Schema* schema, ERRMSG) {
+    BOOL_RETURN_SETUP
+
+    for(size_t i = 0; i < pattern->size; i++){
+        TRY(convert_keys_to_indices, pattern->selectors[i], schema->parameters[i]);
+    }
+
+    if(pattern->type == SELECT_BY_KEY){
+        size_t* indices = (size_t*)calloc(schema->size, sizeof(size_t));
+        for(size_t i = 0; i < pattern->size; i++){
+            char* pattern_key = pattern->fields.keys[i];
+            bool found = false;
+            for(size_t j = 0; j < schema->size; j++){
+                char* record_key = schema->keys[j];
+                if(strcmp(record_key, pattern_key) == 0){
+                    found = true;
+                    indices[i] = j;
+                    break;
+                }
+            }
+            if(!found){
+                RAISE_WITH(free(pattern_key), "Pattern contains key that is missing in schema: %s", pattern_key)
+            }
+            free(pattern_key);
+        }
+        pattern->type = SELECT_BY_INDEX;
+        free(pattern->fields.keys);
+        pattern->fields.indices = indices;
+    }
+
+    return true;
+}
+
+static absptr_t apply_getter(absptr_t dest, Schema* return_schema, morloc_pattern_t* pattern, Schema* value_schema, absptr_t value, ERRMSG) {
+    PTR_RETURN_SETUP(void)
+    if (!return_schema || !pattern || !value_schema || !value) {
+        RAISE("Required field is NULL")
+    }
+
+    if(dest == NULL){
+        dest = TRY(shcalloc, 1, return_schema->width);
+    }
 
     switch(pattern->type) {
-        case SELECT_BY_KEY:
-            // Extract fields by key from tuple/map
-            // TODO: Check expr is MORLOC_X_DAT with tuple_val or map_val
-            // TODO: For each key in pattern->keys, extract corresponding value
-            // TODO: Recursively apply pattern->selectors if present
-            return NULL;
-
         case SELECT_BY_INDEX:
-            // Extract elements by index from tuple/array
-            // TODO: Check expr is MORLOC_X_DAT with tuple_val or array_val
-            // TODO: For each index in pattern->indices, extract corresponding value
-            // TODO: Recursively apply pattern->selectors if present
-            return NULL;
+            for(size_t i = 0; i < pattern->size; i++){
+                size_t index = pattern->fields.indices[i];
+                absptr_t element_dest = dest;
+                Schema* element_schema = return_schema;
+                if(pattern->size > 1){
+                    element_dest = (void*)((char*)dest + return_schema->offsets[i]);
+                    element_schema = return_schema->parameters[i];
+                }
+                TRY(
+                  apply_getter,
+                  element_dest,
+                  element_schema,
+                  pattern->selectors[i],
+                  value_schema->parameters[index],
+                  (void*)((char*)value + value_schema->offsets[index])
+                )
+            }
+            break;
+
+        case SELECT_BY_KEY:
+            // if selecting by key, use the schema to translate key-based
+            // lookups to index-based lookups
+            TRY(convert_keys_to_indices, pattern, value_schema);
+            // re-call as an index-based pattern
+            TRY(apply_getter, dest, return_schema, pattern, value_schema, value)
+            break;
 
         case SELECT_END:
-            // End of pattern - return expr as-is
-            return expr;
+            memcpy(dest, value, value_schema->width);
+            break;
 
         default:
             RAISE("Illegal pattern enum value");
     }
+
+    return dest;
 }
 
-static morloc_expression_t* apply_setter(
-  morloc_expression_t* expr,
+static absptr_t apply_setter(
+  absptr_t dest,
+  Schema* return_schema,
   morloc_pattern_t* pattern,
-  morloc_expression_t** args,
+  Schema* value_schema,
+  absptr_t value,
+  Schema** set_value_schemas,
+  absptr_t* set_values,
   size_t nargs,
   ERRMSG
 ) {
-    PTR_RETURN_SETUP(morloc_expression_t)
-    if (!expr || !pattern) return NULL;
+    PTR_RETURN_SETUP(void)
+    if (!return_schema || !pattern || !value_schema || !value || !set_value_schemas || !set_values) {
+        RAISE("Required value is NULL")
+    }
 
     switch(pattern->type) {
         case SELECT_BY_KEY:

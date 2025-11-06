@@ -339,7 +339,7 @@ void run_pure_command(
         ERROR("Failed to parse return schema");
     }
 
-    absptr_t result_abs = morloc_eval(expr, arg_voidstars, arg_schemas, nargs, &errmsg);
+    absptr_t result_abs = morloc_eval(expr, return_schema, arg_voidstars, arg_schemas, nargs, &errmsg);
     if(errmsg != NULL){
         ERROR("Failed to evaluate expression:\n%s", errmsg)
     }
