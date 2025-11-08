@@ -6393,7 +6393,7 @@ morloc_pattern_t* make_morloc_pattern_key(size_t nargs, ...){
 
 static absptr_t morloc_eval_r(morloc_expression_t*, absptr_t, size_t, dict_t*, ERRMSG);
 static absptr_t apply_setter(absptr_t, Schema*, morloc_pattern_t*, Schema*, absptr_t, Schema**, absptr_t*, size_t, ERRMSG);
-static absptr_t apply_getter(absptr_t, Schema*, morloc_pattern_t*, Schema*, absptr_t, ERRMSG);
+static absptr_t apply_getter(absptr_t, size_t*, Schema*, morloc_pattern_t*, Schema*, absptr_t, ERRMSG);
 
 
 // evaluate a pure morloc expression with user provided arguments
@@ -6571,7 +6571,8 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
             switch(app->type) {
                 case APPLY_PATTERN: {
                     if(app->nargs == 1){
-                        TRY(apply_getter, dest, schema, app->function.pattern, app->args[0]->schema, arg_results[0])
+                        size_t return_index = 0;
+                        TRY(apply_getter, dest, &return_index, schema, app->function.pattern, app->args[0]->schema, arg_results[0])
                     } else if(app->nargs > 1) {
                         Schema** arg_schemas = (Schema**)calloc(app->nargs-1, sizeof(Schema*));
                         for(size_t i = 1; i < app->nargs; i++){
@@ -6622,8 +6623,10 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
 static bool convert_keys_to_indices(morloc_pattern_t* pattern, Schema* schema, ERRMSG) {
     BOOL_RETURN_SETUP
 
-    for(size_t i = 0; i < pattern->size; i++){
-        TRY(convert_keys_to_indices, pattern->selectors[i], schema->parameters[i]);
+    if(schema->size > 1){
+        for(size_t i = 0; i < pattern->size; i++){
+            TRY(convert_keys_to_indices, pattern->selectors[i], schema->parameters[i]);
+        }
     }
 
     if(pattern->type == SELECT_BY_KEY){
@@ -6652,7 +6655,7 @@ static bool convert_keys_to_indices(morloc_pattern_t* pattern, Schema* schema, E
     return true;
 }
 
-static absptr_t apply_getter(absptr_t dest, Schema* return_schema, morloc_pattern_t* pattern, Schema* value_schema, absptr_t value, ERRMSG) {
+static absptr_t apply_getter(absptr_t dest, size_t* return_index, Schema* return_schema, morloc_pattern_t* pattern, Schema* value_schema, absptr_t value, ERRMSG) {
     PTR_RETURN_SETUP(void)
     if (!return_schema || !pattern || !value_schema || !value) {
         RAISE("Required field is NULL")
@@ -6666,16 +6669,11 @@ static absptr_t apply_getter(absptr_t dest, Schema* return_schema, morloc_patter
         case SELECT_BY_INDEX:
             for(size_t i = 0; i < pattern->size; i++){
                 size_t index = pattern->fields.indices[i];
-                absptr_t element_dest = dest;
-                Schema* element_schema = return_schema;
-                if(pattern->size > 1){
-                    element_dest = (void*)((char*)dest + return_schema->offsets[i]);
-                    element_schema = return_schema->parameters[i];
-                }
                 TRY(
                   apply_getter,
-                  element_dest,
-                  element_schema,
+                  dest,
+                  return_index,
+                  return_schema,
                   pattern->selectors[i],
                   value_schema->parameters[index],
                   (void*)((char*)value + value_schema->offsets[index])
@@ -6688,11 +6686,21 @@ static absptr_t apply_getter(absptr_t dest, Schema* return_schema, morloc_patter
             // lookups to index-based lookups
             TRY(convert_keys_to_indices, pattern, value_schema);
             // re-call as an index-based pattern
-            TRY(apply_getter, dest, return_schema, pattern, value_schema, value)
+            TRY(apply_getter, dest, return_index, return_schema, pattern, value_schema, value)
             break;
 
         case SELECT_END:
-            memcpy(dest, value, value_schema->width);
+            size_t element_width;
+            absptr_t element_dest;
+            if(return_schema->size > 1){
+                element_dest = (void*)((char*)dest + return_schema->offsets[*return_index]);
+                element_width = return_schema->parameters[*return_index]->width;
+            } else {
+                element_dest = dest;
+                element_width = return_schema->width;
+            }
+            *return_index = *return_index + 1;
+            memcpy(element_dest, value, element_width);
             break;
 
         default:

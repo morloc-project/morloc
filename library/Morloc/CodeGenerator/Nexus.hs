@@ -17,6 +17,7 @@ import Morloc.Data.Doc
 import Morloc.DataFiles as DF
 import Morloc.CodeGenerator.Namespace
 import Morloc.Quasi
+import qualified Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import Data.Text (Text)
 import qualified Control.Monad as CM
@@ -271,7 +272,13 @@ generalTypeToSerialAST (VarT v)
   | v == MBT.bool = return $ SerialBool   (FV v (CV ""))
   | v == MBT.str  = return $ SerialString (FV v (CV ""))
   | v == MBT.unit = return $ SerialNull   (FV v (CV ""))
-  | otherwise = error "Unsupported term"
+  | otherwise = do
+      scope <- MM.gets stateUniversalGeneralTypedefs
+      case Map.lookup v scope of
+        (Just [(_, _, True)]) -> error "Cannot handle terminal types"
+        (Just [([], t', False)]) -> generalTypeToSerialAST (typeOf t')
+        (Just [(ps, t, _)]) -> error $ "Cannot currently handle parameterized pure morloc types"
+        Nothing -> error $ "Failed to interpret type variable: " <> show (unTVar v)
 generalTypeToSerialAST (AppT (VarT v) [t])
   | v == MBT.list = SerialList (FV v (CV "")) <$> generalTypeToSerialAST t
   | otherwise = do
