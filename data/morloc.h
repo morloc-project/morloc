@@ -6392,7 +6392,7 @@ morloc_pattern_t* make_morloc_pattern_key(size_t nargs, ...){
 // {{{ pure morloc interpretor
 
 static absptr_t morloc_eval_r(morloc_expression_t*, absptr_t, size_t, dict_t*, ERRMSG);
-static absptr_t apply_setter(absptr_t, Schema*, morloc_pattern_t*, Schema*, absptr_t, Schema**, absptr_t*, size_t, ERRMSG);
+static absptr_t apply_setter(absptr_t, Schema*, morloc_pattern_t*, Schema*, absptr_t, Schema**, absptr_t*, size_t*, ERRMSG);
 static absptr_t apply_getter(absptr_t, size_t*, Schema*, morloc_pattern_t*, Schema*, absptr_t, ERRMSG);
 
 
@@ -6578,7 +6578,18 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
                         for(size_t i = 1; i < app->nargs; i++){
                             arg_schemas[i-1] = app->args[i]->schema;
                         }
-                        TRY(apply_setter, dest, schema, app->function.pattern, app->args[0]->schema, arg_results[0], arg_schemas, arg_results + 1, app->nargs - 1)
+                        size_t set_idx = 0;
+                        TRY(
+                          apply_setter,
+                          dest,
+                          schema,
+                          app->function.pattern,
+                          app->args[0]->schema,
+                          arg_results[0],
+                          arg_schemas,
+                          arg_results + 1,
+                          &set_idx
+                        )
                         free(arg_schemas);
                     } else {
                         RAISE("No arguments provided to pattern, this should be unreachable")
@@ -6718,7 +6729,7 @@ static absptr_t apply_setter(
   absptr_t value,
   Schema** set_value_schemas,
   absptr_t* set_values,
-  size_t nargs,
+  size_t* set_idx,
   ERRMSG
 ) {
     PTR_RETURN_SETUP(void)
@@ -6727,30 +6738,63 @@ static absptr_t apply_setter(
     }
 
     switch(pattern->type) {
-        case SELECT_BY_KEY:
-            // Set fields by key in tuple/map
-            // TODO: Check expr is MORLOC_X_DAT with tuple_val or map_val
-            // TODO: Check nargs matches pattern->size
-            // TODO: For each key in pattern->keys, set corresponding value from args
-            // TODO: Recursively apply pattern->selectors if present
-            return NULL;
+        case SELECT_BY_KEY: {
+            // if selecting by key, use the schema to translate key-based
+            // lookups to index-based lookups
+            TRY(convert_keys_to_indices, pattern, value_schema);
 
-        case SELECT_BY_INDEX:
-            // Set elements by index in tuple/array
-            // TODO: Check expr is MORLOC_X_DAT with tuple_val or array_val
-            // TODO: Check nargs matches pattern->size
-            // TODO: For each index in pattern->indices, set corresponding value from args
-            // TODO: Recursively apply pattern->selectors if present
-            return NULL;
+            // re-call as an index-based pattern
+            TRY(
+              apply_setter,
+              dest,
+              return_schema,
+              pattern,
+              value_schema,
+              value,
+              set_value_schemas,
+              set_values,
+              set_idx
+            )
+        } break;
 
-        case SELECT_END:
-            // End of pattern - should not be called with setter
-            // TODO: Handle error
-            return NULL;
+        case SELECT_BY_INDEX: {
+            RAISE_IF(value_schema->size != return_schema->size, "Expected setter return and input sizes to be the same")
+            for(size_t i = 0; i < value_schema->size; i++){
+                bool changed = false;
+                absptr_t new_dest = (void*)((char*)dest + return_schema->offsets[i]);
+                absptr_t new_value = (void*)((char*)value + value_schema->offsets[i]);
+                for(size_t j = 0; j < pattern->size; j++){
+                    if(i == pattern->fields.indices[j]){
+                        TRY(
+                          apply_setter,
+                          new_dest,
+                          return_schema->parameters[i],
+                          pattern->selectors[j],
+                          value_schema->parameters[i],
+                          new_value,
+                          set_value_schemas,
+                          set_values,
+                          set_idx
+                        )
+                        changed = true; 
+                        break;
+                    }
+                }
+                if(!changed){
+                    memcpy(new_dest, new_value, value_schema->parameters[i]->width);
+                }
+            }
+        } break;
+
+        case SELECT_END: {
+            memcpy(dest, set_values[*set_idx], return_schema->width);
+            *set_idx = *set_idx + 1;
+        } break;
 
         default:
             RAISE("Invalid pattern type");
     }
+    return dest;
 }
 
 // }}}

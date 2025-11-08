@@ -316,28 +316,10 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0:es0
     statefulMapM (\s' e -> synthG s' e |>> (\(a,b,c) -> (a,(b,c)))) g2 es0
 
   let outputType = selectorSetter datType setTypes s
-      patternType = FunU (datType:setTypes) outputType
-      f1 = (AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s))))
+      patternType = apply g3 $ FunU (datType:setTypes) outputType
+      f1 = AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s)))
 
   return (g2, apply g3 outputType, AppS f1 (e1:es1))
-
--- -- handle setter patterns
--- synthE i g0 (AppS f@(AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0:es0)) = do
---
---   -- generate an existential type that contains the pattern
---   (g1, selType) <- selectorType g0 s
---
---   (g2, datType, _) <- checkG g1 e0 selType
---
---   (g3, (unzip -> (setTypes, _))) <-
---     statefulMapM (\s' e -> synthG s' e |>> (\(a,b,c) -> (a,(b,c)))) g2 es0
---
---   let outputType = selectorSetter datType setTypes s
---       patternType = FunU [datType] outputType
---       f1 = (AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s))))
---
---   etaExpandSynthE i g3 (apply g3 patternType) f1 f (e0:es0)
-
 
 synthE _ g (ExeS (PatCall (PatternText s ss@(length -> n)))) = do
   let t = FunU (take n (repeat BT.strU)) BT.strU

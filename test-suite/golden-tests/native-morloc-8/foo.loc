@@ -1,0 +1,25 @@
+module m (foo)
+
+test1 = (67,True,3.14)
+test2 = (67, (True, "Nessie", 6.7))
+
+record Thing = Thing { a :: Int, b :: (Bool, Int, Str)  }
+
+test3 :: Thing
+test3 = { a = 67, b = (True, 42, "Alice") }
+
+test4 :: (Thing, Int, Thing)
+test4 = ({ a = 67, b = (True, 420, "Alice") }, 42, { a = 68, b = (False, 421, "Bob") })
+
+  -- , .(.0 = False) test1 -- blows up on type change
+  -- , .(.2 = 6.28, .0 = 42) test1   -- blows up on non-canonical order
+foo =
+  ( .(.0 = 42) test1                               -- [42, true, 3.14]
+  , .(.1 = False) test1                            -- [67,false,3.14],
+  , .(.2 = 6.28) test1                             -- [67,true,6.28],
+  , .(.0 = 42, .2 = 6.28) test1                    -- [42,true,6.28],
+  , .(.0 = 42, .1.1 = "Evangeline") test2          -- [42,[true,"Evangeline",6.7]],
+  , .(.0 = 42, .1.(.0 = False, .2 = 6.28)) test2   -- [42,[false,"Nessie",6.28]],
+  , .(.a = 42) test3                               -- {"a":42,"b":[true,42,"Alice"]},
+  , .(.0.b.1 = 210, .1 = 67) test4                 -- [{"a":67,"b":[true,210,"Alice"]},67,{"a":68,"b":[false,421,"Bob"]}]
+  )
