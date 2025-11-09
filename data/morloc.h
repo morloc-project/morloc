@@ -6392,7 +6392,9 @@ morloc_pattern_t* make_morloc_pattern_key(size_t nargs, ...){
 // {{{ pure morloc interpretor
 
 static absptr_t morloc_eval_r(morloc_expression_t*, absptr_t, size_t, dict_t*, ERRMSG);
-static absptr_t apply_setter(absptr_t, Schema*, morloc_pattern_t*, Schema*, absptr_t, Schema**, absptr_t*, size_t*, ERRMSG);
+static absptr_t apply_setter(absptr_t, Schema*, morloc_pattern_t*, Schema*, absptr_t, Schema**, absptr_t*, ERRMSG);
+static absptr_t apply_setter_copy(absptr_t, Schema*, morloc_pattern_t*, Schema*, absptr_t, ERRMSG);
+static absptr_t apply_setter_set(absptr_t, Schema*, morloc_pattern_t*, Schema*, absptr_t, Schema**, absptr_t*, size_t*, ERRMSG);
 static absptr_t apply_getter(absptr_t, size_t*, Schema*, morloc_pattern_t*, Schema*, absptr_t, ERRMSG);
 
 
@@ -6578,7 +6580,6 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
                         for(size_t i = 1; i < app->nargs; i++){
                             arg_schemas[i-1] = app->args[i]->schema;
                         }
-                        size_t set_idx = 0;
                         TRY(
                           apply_setter,
                           dest,
@@ -6587,8 +6588,7 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
                           app->args[0]->schema,
                           arg_results[0],
                           arg_schemas,
-                          arg_results + 1,
-                          &set_idx
+                          arg_results + 1
                         )
                         free(arg_schemas);
                     } else {
@@ -6721,6 +6721,7 @@ static absptr_t apply_getter(absptr_t dest, size_t* return_index, Schema* return
     return dest;
 }
 
+
 static absptr_t apply_setter(
   absptr_t dest,
   Schema* return_schema,
@@ -6729,7 +6730,6 @@ static absptr_t apply_setter(
   absptr_t value,
   Schema** set_value_schemas,
   absptr_t* set_values,
-  size_t* set_idx,
   ERRMSG
 ) {
     PTR_RETURN_SETUP(void)
@@ -6737,6 +6737,23 @@ static absptr_t apply_setter(
         RAISE("Required value is NULL")
     }
 
+    TRY(apply_setter_copy, dest, return_schema, pattern, value_schema, value);
+
+    size_t set_idx = 0;
+    TRY(apply_setter_set, dest, return_schema, pattern, value_schema, value, set_value_schemas, set_values, &set_idx);
+
+    return dest;
+}
+
+static absptr_t apply_setter_copy(
+  absptr_t dest,
+  Schema* return_schema,
+  morloc_pattern_t* pattern,
+  Schema* value_schema,
+  absptr_t value,
+  ERRMSG
+) {
+    PTR_RETURN_SETUP(void)
     switch(pattern->type) {
         case SELECT_BY_KEY: {
             // if selecting by key, use the schema to translate key-based
@@ -6744,17 +6761,7 @@ static absptr_t apply_setter(
             TRY(convert_keys_to_indices, pattern, value_schema);
 
             // re-call as an index-based pattern
-            TRY(
-              apply_setter,
-              dest,
-              return_schema,
-              pattern,
-              value_schema,
-              value,
-              set_value_schemas,
-              set_values,
-              set_idx
-            )
+            TRY(apply_setter_copy, dest, return_schema, pattern, value_schema, value)
         } break;
 
         case SELECT_BY_INDEX: {
@@ -6766,15 +6773,12 @@ static absptr_t apply_setter(
                 for(size_t j = 0; j < pattern->size; j++){
                     if(i == pattern->fields.indices[j]){
                         TRY(
-                          apply_setter,
+                          apply_setter_copy,
                           new_dest,
                           return_schema->parameters[i],
                           pattern->selectors[j],
                           value_schema->parameters[i],
-                          new_value,
-                          set_value_schemas,
-                          set_values,
-                          set_idx
+                          new_value
                         )
                         changed = true; 
                         break;
@@ -6786,10 +6790,54 @@ static absptr_t apply_setter(
             }
         } break;
 
+        case SELECT_END:
+            break;
+
+        default:
+            RAISE("Invalid pattern type");
+    }
+    return dest;
+}
+
+static absptr_t apply_setter_set(
+  absptr_t dest,
+  Schema* return_schema,
+  morloc_pattern_t* pattern,
+  Schema* value_schema,
+  absptr_t value,
+  Schema** set_value_schemas,
+  absptr_t* set_values,
+  size_t* set_idx,
+  ERRMSG
+) {
+    PTR_RETURN_SETUP(void)
+    switch(pattern->type) {
+        case SELECT_BY_INDEX: {
+            for(size_t pat_idx = 0; pat_idx < pattern->size; pat_idx++){
+                size_t data_idx = pattern->fields.indices[pat_idx];
+                absptr_t new_dest = (void*)((char*)dest + return_schema->offsets[data_idx]);
+                absptr_t new_value = (void*)((char*)value + value_schema->offsets[data_idx]);
+                TRY(
+                  apply_setter_set,
+                  new_dest,
+                  return_schema->parameters[data_idx],
+                  pattern->selectors[pat_idx],
+                  value_schema->parameters[data_idx],
+                  new_value,
+                  set_value_schemas,
+                  set_values,
+                  set_idx
+                )
+            }
+        } break;
+
         case SELECT_END: {
             memcpy(dest, set_values[*set_idx], return_schema->width);
             *set_idx = *set_idx + 1;
         } break;
+
+        case SELECT_BY_KEY:
+            RAISE("No key enums should be present, they should have been resolved in the copy step");
 
         default:
             RAISE("Invalid pattern type");
