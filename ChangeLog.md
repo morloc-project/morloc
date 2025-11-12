@@ -11,6 +11,10 @@
  [ ] record syntax docstrings
  [ ] records to argument option sets
 
+0.57.1 [2025-11-12]
+-------------------
+ * minor bug fixes
+
 0.57.0 [2025-11-11]
 -------------------
  * re-allow underscores in variable names
