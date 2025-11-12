@@ -54,6 +54,7 @@ main = do
       , golden "native-morloc-6" "native-morloc-6"
       , golden "native-morloc-7" "native-morloc-7"
       , golden "native-morloc-8" "native-morloc-8"
+      , golden "native-morloc-9" "native-morloc-9"
 
       , golden "demo-trimming" "demo-trimming"
 

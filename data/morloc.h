@@ -6044,7 +6044,7 @@ typedef enum {
 } morloc_expression_type;
 
 // application types
-typedef enum { APPLY_PATTERN, APPLY_LAMBDA } morloc_app_expression_type;
+typedef enum { APPLY_PATTERN, APPLY_LAMBDA, APPLY_FORMAT } morloc_app_expression_type;
 
 // pattern types
 typedef enum { SELECT_BY_KEY, SELECT_BY_INDEX, SELECT_END } morloc_pattern_type;
@@ -6115,6 +6115,7 @@ typedef struct morloc_app_expression_s {
     union {
         morloc_pattern_t* pattern;
         morloc_lam_expression_t* lambda;
+        char** fmt;
     } function;
     morloc_expression_t** args;
     size_t nargs;
@@ -6236,6 +6237,10 @@ morloc_expression_t* make_morloc_app(
         case MORLOC_X_LAM:
             app->type = APPLY_LAMBDA;
             app->function.lambda = func->expr.lam_expr;
+            break;
+        case MORLOC_X_FMT:
+            app->type = APPLY_FORMAT;
+            app->function.fmt = func->expr.interpolation;
             break;
         default:
             // Can only apply pattern or lambda
@@ -6609,8 +6614,46 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
                     }
 
                     // evaluate the lambda body with the new variable table
-                    dest = TRY(morloc_eval_r, lam->body, dest, width, bndvars);
+                    TRY(morloc_eval_r, lam->body, dest, width, bndvars);
                 } break;
+
+                case APPLY_FORMAT: {
+                    char** strings = app->function.fmt;
+                    size_t* string_lengths = (size_t*)calloc(app->nargs+1, sizeof(size_t));
+
+                    size_t result_size = 0;
+
+                    for(size_t i = 0; i < (app->nargs + 1); i++){
+                        string_lengths[i] = strlen(strings[i]);
+                        result_size += string_lengths[i];
+                    }
+
+                    for(size_t i = 0; i < app->nargs; i++){
+                        Array* arr = (Array*)arg_results[i];
+                        result_size += arr->size;
+                    }
+
+                    absptr_t new_string = TRY(shmalloc, result_size);
+                    Array* result_array = (Array*)dest;
+                    result_array->size = result_size;
+                    result_array->data = TRY(abs2rel, new_string);
+
+                    char* cursor = (char*)new_string;
+                    for(size_t i = 0; i < (app->nargs + 1); i++){
+                        memcpy((void*)cursor, strings[i], string_lengths[i]); 
+                        cursor += string_lengths[i];
+                        if(i < app->nargs){
+                            Array* arr = (Array*)arg_results[i];
+                            absptr_t arr_data = TRY(rel2abs, arr->data);
+                            memcpy(cursor, arr_data, arr->size);
+                            cursor += arr->size;
+                        }
+                    }
+
+                    free(string_lengths);
+
+                } break;
+
                 default:
                     RAISE("Invalid functional term")
             }
