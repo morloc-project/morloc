@@ -280,7 +280,7 @@ synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 -- Ensures pattern setting operations return the correct type.
 -- Without this case, patterns that change type will pass silently, but lead to
 -- corrupted data.
-synthE i g0
+synthE _ g0
   ( AppS f0@(AnnoS _ _ (LamS [_]
            (AnnoS _ _ (AppS (
              (AnnoS _ _ (ExeS (PatCall (PatternStruct _))))) (_:_))))) [x0]

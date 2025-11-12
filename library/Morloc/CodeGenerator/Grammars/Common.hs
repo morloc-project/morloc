@@ -131,7 +131,7 @@ patternSetter makeTuple makeRecord accessTuple accessRecord dat0 t0 s0 args0
           Nothing -> (args, dat') 
 
   -- record setters
-  setter dat1 recType@(NamF _ (FV _ cname) _ rs1) (SelectorKey s1 ss1) args1 = 
+  setter dat1 recType@(NamF _ _ _ rs1) (SelectorKey s1 ss1) args1 = 
     second (makeRecord recType) $ statefulMap (chooseField dat1 (s1:ss1)) args1 rs1
     where
       chooseField :: MDoc -> [(Text, Selector)] -> [MDoc] -> (Key, TypeF) -> ([MDoc], MDoc)
@@ -141,7 +141,9 @@ patternSetter makeTuple makeRecord accessTuple accessRecord dat0 t0 s0 args0
           (Just s) -> setter dat' t s args
           Nothing -> (args, dat')
 
-  setter dat1 _ _ (arg:args2) = (args2, arg)
+  setter _ _ _ (arg:args2) = (args2, arg)
+
+  setter _ _ _ [] = error "Illegal setter"
 
 -- Represents the dependency of a on previously bound expressions
 data D a = D a [(Int, Either SerialExpr NativeExpr)]

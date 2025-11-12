@@ -595,21 +595,21 @@ evaluatePattern _ _ (PatternStruct (ungroup -> [ss])) [m]
   = writeSelector m ss
 evaluatePattern _ _ (PatternStruct (ungroup -> sss)) [m]
   = encloseSep "{" "}" "," (map (writeSelector m) sss)
-evaluatePattern state t (PatternStruct s) (m:xs)
-  = patternSetter makeTuple makeRecord tupleAccess recordAccess m t s xs
+evaluatePattern state0 t0 (PatternStruct s0) (m0:xs0)
+  = patternSetter makeTuple makeRecord accessTuple accessRecord m0 t0 s0 xs0
   where
 
   makeTuple (AppF _ ts) xs =
-    let tupleTypes = CMS.evalState (mapM cppTypeOf ts) state
+    let tupleTypes = CMS.evalState (mapM cppTypeOf ts) state0
     in "std::tuple" <> encloseSep "<" ">" "," tupleTypes <> tupled xs
   makeTuple _ _ = error "Unreachable"
 
   makeRecord _ xs = encloseSep "{" "}" ", " xs
-  makeRecord _ _ = error "Incorrectly typed record setter"
 
-  tupleAccess _ m i = "std::get<" <> pretty i <> ">(" <> m <> ")"
-  recordAccess _ d k = d <> "." <> pretty k
+  accessTuple _ m i = "std::get<" <> pretty i <> ">(" <> m <> ")"
+  accessRecord _ d k = d <> "." <> pretty k
 
+evaluatePattern _ _ (PatternStruct _) [] = error "Unreachable illegal pattern"
 
 writeSelector :: MDoc -> [Either Int Text] -> MDoc
 writeSelector d [] = d

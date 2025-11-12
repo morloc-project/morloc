@@ -103,7 +103,7 @@ generate cs xs = do
       }
 
 annotateGasts :: AnnoS (Indexed Type) One () -> MorlocMonad GastData
-annotateGasts x0@(AnnoS (Idx i gtype) _ e0) = do
+annotateGasts x0@(AnnoS (Idx i gtype) _ _) = do
   (_, docstrings) <- MM.getDocStrings i
 
   mayName <- MM.metaName i
@@ -131,17 +131,17 @@ annotateGasts x0@(AnnoS (Idx i gtype) _ e0) = do
     findArgs (AnnoS _ _ (LamS vs _)) = vs
     findArgs _ = []
 
-    makeSchema t = generalTypeToSerialAST t |>> Serial.serialAstToMsgpackSchema |>> dquotes
+    type2schema t = generalTypeToSerialAST t |>> Serial.serialAstToMsgpackSchema |>> dquotes
 
     toNexusExpr :: AnnoS (Indexed Type) One () -> MorlocMonad NexusExpr
-    toNexusExpr (AnnoS (Idx _ t) _ (AppS e es)) = AppX <$> makeSchema t <*> toNexusExpr e <*> mapM toNexusExpr es
+    toNexusExpr (AnnoS (Idx _ t) _ (AppS e es)) = AppX <$> type2schema t <*> toNexusExpr e <*> mapM toNexusExpr es
     toNexusExpr (AnnoS _ _ (LamS vs e)) = LamX (map pretty vs) <$> toNexusExpr e
-    toNexusExpr (AnnoS (Idx _ (FunT _ t)) _ (ExeS (PatCall p))) = PatX <$> makeSchema t <*> pure p
-    toNexusExpr (AnnoS (Idx _ t) _ (BndS v)) = BndX <$> makeSchema t <*> pure (pretty v)
-    toNexusExpr (AnnoS (Idx _ t) _ (LstS es)) = LstX <$> makeSchema t <*> mapM toNexusExpr es
-    toNexusExpr (AnnoS (Idx _ t) _ (TupS es)) = TupX <$> makeSchema t <*> mapM toNexusExpr es
-    toNexusExpr (AnnoS (Idx _ t) _ (NamS rs)) = NamX <$> makeSchema t <*> mapM (bimapM (pure . pretty) toNexusExpr) rs
-    toNexusExpr (AnnoS (Idx _ t) _ (StrS v)) = StrX <$> makeSchema t <*> pure (dquotes (pretty v))
+    toNexusExpr (AnnoS (Idx _ (FunT _ t)) _ (ExeS (PatCall p))) = PatX <$> type2schema t <*> pure p
+    toNexusExpr (AnnoS (Idx _ t) _ (BndS v)) = BndX <$> type2schema t <*> pure (pretty v)
+    toNexusExpr (AnnoS (Idx _ t) _ (LstS es)) = LstX <$> type2schema t <*> mapM toNexusExpr es
+    toNexusExpr (AnnoS (Idx _ t) _ (TupS es)) = TupX <$> type2schema t <*> mapM toNexusExpr es
+    toNexusExpr (AnnoS (Idx _ t) _ (NamS rs)) = NamX <$> type2schema t <*> mapM (bimapM (pure . pretty) toNexusExpr) rs
+    toNexusExpr (AnnoS (Idx _ t) _ (StrS v)) = StrX <$> type2schema t <*> pure (dquotes (pretty v))
     toNexusExpr (AnnoS (Idx _ t) _ (RealS v)) = do
       s <- generalTypeToSerialAST t
       return $ case s of
@@ -277,8 +277,9 @@ generalTypeToSerialAST (VarT v)
       case Map.lookup v scope of
         (Just [(_, _, True)]) -> error "Cannot handle terminal types"
         (Just [([], t', False)]) -> generalTypeToSerialAST (typeOf t')
-        (Just [(ps, t, _)]) -> error $ "Cannot currently handle parameterized pure morloc types"
+        (Just [_]) -> error $ "Cannot currently handle parameterized pure morloc types"
         Nothing -> error $ "Failed to interpret type variable: " <> show (unTVar v)
+        x -> error $ "Unexpected scope: " <> show x 
 generalTypeToSerialAST (AppT (VarT v) [t])
   | v == MBT.list = SerialList (FV v (CV "")) <$> generalTypeToSerialAST t
   | otherwise = do

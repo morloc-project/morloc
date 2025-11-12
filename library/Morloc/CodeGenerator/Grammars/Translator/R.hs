@@ -290,8 +290,8 @@ evaluatePattern _ (PatternStruct (ungroup -> [ss])) [m]
   = hcat (m : map writeBasicSelector ss)
 evaluatePattern _ (PatternStruct (ungroup -> sss)) [m]
   = "list" <> tupled [hcat (m : map writeBasicSelector ss) | ss <- sss]
-evaluatePattern t (PatternStruct s) (m:xs)
-  = patternSetter makeTuple makeRecord tupleAccess recordAccess m t s xs
+evaluatePattern t0 (PatternStruct s0) (m0:xs0)
+  = patternSetter makeTuple makeRecord accessTuple accessRecord m0 t0 s0 xs0
   where
 
   makeTuple _ xs = "list" <> tupled xs
@@ -299,11 +299,12 @@ evaluatePattern t (PatternStruct s) (m:xs)
   makeRecord (NamF _ _ _ rs) xs = "list" <> tupled [pretty k <+> "=" <+> x | (k, x) <- zip (map fst rs) xs]
   makeRecord _ _ = error "Incorrectly typed record setter"
 
-  tupleAccess _ m i = m <> "[[" <> pretty (i + 1) <> "]]"
+  accessTuple _ m i = m <> "[[" <> pretty (i + 1) <> "]]"
 
-  recordAccess (NamF o (FV _ cname) _ _) d k = d <> "[[" <> dquotes (pretty k) <> "]]"
-  recordAccess t _ _ = error $ "Invalid record type: " <> show t
+  accessRecord (NamF _ _ _ _) d k = d <> "[[" <> dquotes (pretty k) <> "]]"
+  accessRecord t _ _ = error $ "Invalid record type: " <> show t
 
+evaluatePattern _ (PatternStruct _) [] = error "Unreachable empty pattern"
 
 writeBasicSelector :: Either Int Text -> MDoc
 writeBasicSelector (Right k) = "[[" <> dquotes (pretty k) <> "]]"
