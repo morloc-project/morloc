@@ -20,6 +20,6 @@ test = fold and True
   -- Requires the Record def, there is something wrong in type inference.
   , eq (map {name = _, age = 0} ["Alice", "Bob"]) ([{name = "Alice", age = 0 }, {name = "Bob", age = 0}])
 
-  -- anonymous records (workds in Python and R, would fail in C++ currently)
+  -- anonymous records (works in Python and R, would fail in C++ currently)
   , eq (map {foo = _, bar = 0} ["Alice", "Bob"]) ([{foo = "Alice", bar = 0 }, {foo = "Bob", bar = 0}])
   ]

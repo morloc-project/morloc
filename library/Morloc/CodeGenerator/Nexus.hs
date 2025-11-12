@@ -27,6 +27,8 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.BaseTypes as MBT
 import qualified Morloc.CodeGenerator.Infer as Infer
 import qualified Morloc.CodeGenerator.Serial as Serial
+import Data.Char (ord)
+import Text.Printf (printf)
 
 data FData = FData
   { fdataSocket :: Socket
@@ -133,6 +135,21 @@ annotateGasts x0@(AnnoS (Idx i gtype) _ _) = do
 
     type2schema t = generalTypeToSerialAST t |>> Serial.serialAstToMsgpackSchema |>> dquotes
 
+    -- make potentially multi-line strings legal C literals
+    escapeString = MT.concatMap escapeChar
+      where
+        escapeChar '"'  = "\\\""
+        escapeChar '\\' = "\\\\"
+        escapeChar '\n' = "\\n"
+        escapeChar '\r' = "\\r"
+        escapeChar '\t' = "\\t"
+        escapeChar '\b' = "\\b"
+        escapeChar '\f' = "\\f"
+        escapeChar '\v' = "\\v"
+        escapeChar c
+          | c < ' ' || c == '\DEL' = MT.pack $ "\\x" ++ printf "%02x" (ord c)
+          | otherwise = MT.singleton c
+
     toNexusExpr :: AnnoS (Indexed Type) One () -> MorlocMonad NexusExpr
     toNexusExpr (AnnoS (Idx _ t) _ (AppS e es)) = AppX <$> type2schema t <*> toNexusExpr e <*> mapM toNexusExpr es
     toNexusExpr (AnnoS _ _ (LamS vs e)) = LamX (map pretty vs) <$> toNexusExpr e
@@ -141,7 +158,7 @@ annotateGasts x0@(AnnoS (Idx i gtype) _ _) = do
     toNexusExpr (AnnoS (Idx _ t) _ (LstS es)) = LstX <$> type2schema t <*> mapM toNexusExpr es
     toNexusExpr (AnnoS (Idx _ t) _ (TupS es)) = TupX <$> type2schema t <*> mapM toNexusExpr es
     toNexusExpr (AnnoS (Idx _ t) _ (NamS rs)) = NamX <$> type2schema t <*> mapM (bimapM (pure . pretty) toNexusExpr) rs
-    toNexusExpr (AnnoS (Idx _ t) _ (StrS v)) = StrX <$> type2schema t <*> pure (dquotes (pretty v))
+    toNexusExpr (AnnoS (Idx _ t) _ (StrS v)) = StrX <$> type2schema t <*> (pure . dquotes . pretty . escapeString $ v)
     toNexusExpr (AnnoS (Idx _ t) _ (RealS v)) = do
       s <- generalTypeToSerialAST t
       return $ case s of

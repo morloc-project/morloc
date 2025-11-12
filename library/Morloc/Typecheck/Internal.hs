@@ -391,12 +391,13 @@ instantiate scope ta@(ExistU v1 (ps1, pc1) (rs1, rc1)) tb@(ExistU v2 (ps2, pc2) 
 
   -- check and expand open parameters
   (ps1', ps2') <- case (pc1, pc2, compare (length ps1) (length ps2)) of
+    (_, _, EQ) -> Right (ps1, ps2)
     (Closed, Closed, _) -> Left $ InstantiationError ta tb "Unequal parameter length for closed existentials"
     (Closed, Open, GT)  -> Right $ extendList ps1 ps2
     (Closed, Open, LT)  -> Left $ InstantiationError ta tb "Left closed existential parameter list is less than right"
     (Open, Closed, LT)  -> Right $ extendList ps1 ps2
     (Open, Closed, GT)  -> Left $ InstantiationError ta tb "Right closed existential parameter list is less than left"
-    _ -> Right $ extendList ps1 ps2
+    (Open, Open, _)  -> Right $ extendList ps1 ps2
 
   let keyset1 = Set.fromList rs1
   let keyset2 = Set.fromList rs2
