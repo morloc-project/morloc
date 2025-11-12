@@ -22,6 +22,7 @@ import qualified Data.Set as Set
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.Parser as Parser
@@ -74,7 +75,7 @@ parse f (Code code) = do
         unimported = filter (\(_, importMod) -> not (Set.member importMod parsed)) (MDD.edgelist d)
 
 -- | assume @t@ is a filename and open it, return file name and contents
-openLocalModule :: Path -> MorlocMonad (Maybe Path, MT.Text)
+openLocalModule :: Path -> MorlocMonad (Maybe Path, Text)
 openLocalModule filename = do
   code <- liftIO $ MT.readFile filename
   return (Just filename, code)

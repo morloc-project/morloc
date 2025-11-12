@@ -53,6 +53,7 @@ module Morloc.Internal
   -- ** other useful functions
   , statefulMap
   , statefulMapM
+  , unfoldStateN
   , filterApart
   -- ** Zip functions that fail on inputs of unequal length. These should be
   -- used when unequal lengths implies a compiler bug. In a better world, the
@@ -151,6 +152,12 @@ statefulMapM f s (x:xs) = do
   (s'', xs') <- statefulMapM f s' xs
   return (s'', x':xs')
 
+unfoldStateN :: Int -> (s -> (s, a)) -> s -> (s, [a])
+unfoldStateN 0 _ s = (s, [])
+unfoldStateN i f s = (s'', x:xs)
+  where
+    (s', x) = f s
+    (s'', xs) = unfoldStateN (i-1) f s'
 
 -- pull one element from a list
 filterApart :: (a -> Bool) -> [a] -> (Maybe a, [a])

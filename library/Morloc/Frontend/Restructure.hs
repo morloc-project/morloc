@@ -19,6 +19,7 @@ import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import qualified Data.Set as Set
 import Data.Set (Set)
 
@@ -36,6 +37,7 @@ restructure s = do
   MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes s)) + 1
 
   checkForSelfRecursion s -- currently, do no not allow type self-recursion
+    >>= resolveHoles
     >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
     |>> handleTypeDeclarations
     >>= doM collectTags
@@ -101,6 +103,82 @@ maybeM :: MorlocError -> Maybe a -> MorlocMonad a
 maybeM _ (Just x) = return x
 maybeM e Nothing = MM.throwError e
 
+resolveHoles
+  :: DAG MVar Import ExprI
+  -> MorlocMonad (DAG MVar Import ExprI)
+resolveHoles = DAG.mapNodeM unhole where
+  unhole :: ExprI -> MorlocMonad ExprI
+  unhole e@(ExprI _ (LstE _)) = unholeContainer e
+  unhole e@(ExprI _ (TupE _)) = unholeContainer e
+  unhole e@(ExprI _ (NamE _)) = unholeContainer e
+  unhole (ExprI i (AppE e0 es0)) =
+    case length [HolE | (ExprI _ HolE) <- es0] of
+      0 -> AppE <$> unhole e0 <*> mapM unhole es0 |>> ExprI i
+      n -> do
+        lambdaIndex <- MM.getCounter
+        let vs = map (nameHole lambdaIndex) [1..n]
+            (_, es) = statefulMap insertHole vs es0
+        newApp <- AppE <$> unhole e0 <*> mapM unhole es
+        return $ ExprI lambdaIndex (LamE vs (ExprI i newApp))
+    where
+      insertHole :: [EVar] -> ExprI -> ([EVar], ExprI)
+      insertHole (v:vs) (ExprI j HolE) = (vs, ExprI j (VarE defaultValue v))
+      insertHole vs e = (vs, e)
+  -- simple recursion
+  unhole (ExprI i (ModE m es)) = ModE m <$> mapM unhole es |>> ExprI i
+  unhole (ExprI i (IstE c ts es)) = IstE c ts <$> mapM unhole es |>> ExprI i
+  unhole (ExprI i (AssE v e es)) = AssE v <$> unhole e <*> mapM unhole es |>> ExprI i
+  unhole (ExprI i (HolE)) = return HolE |>> ExprI i
+  unhole (ExprI i (LamE vs e)) = LamE vs <$> unhole e |>> ExprI i
+  unhole (ExprI i (AnnE e t)) = AnnE <$> unhole e <*> pure t |>> ExprI i
+  unhole e = return e
+
+  unholeContainer :: ExprI -> MorlocMonad ExprI
+  unholeContainer e0@(ExprI i0 _) =
+    case countHoles e0 of
+      0 -> descend e0
+      n -> do
+        let vs = map (nameHole i0) [1..n]
+        e <- descend . snd . insertHoles vs $ e0
+        MM.sayVVV $ "unholeContainer vs:" <+> list (map pretty vs)
+        MM.sayVVV $ "unholeContainer e:" <+> pretty e
+        return $ ExprI i0 (LamE vs e)
+        where
+          insertHoles :: [EVar] -> ExprI -> ([EVar], ExprI)
+          insertHoles (v:vs) (ExprI i HolE) = (vs, ExprI i (VarE defaultValue v))
+          insertHoles vs (ExprI i (LstE es)) =
+            let (vs', es') = statefulMap insertHoles vs es
+            in (vs', ExprI i (LstE es'))
+          insertHoles vs (ExprI i (TupE es)) =
+            let (vs', es') = statefulMap insertHoles vs es
+            in (vs', ExprI i (TupE es'))
+          insertHoles vs (ExprI i (NamE (unzip -> (ks, es)))) =
+            let (vs', es') = statefulMap insertHoles vs es
+            in (vs', ExprI i (NamE (zip ks es')))
+          insertHoles vs e = (vs, e)
+
+  countHoles :: ExprI -> Int
+  countHoles (ExprI _ HolE) = 1
+  countHoles (ExprI _ (LstE xs)) = sum (map countHoles xs)
+  countHoles (ExprI _ (TupE xs)) = sum (map countHoles xs)
+  countHoles (ExprI _ (NamE (map snd -> xs))) = sum (map countHoles xs)
+  countHoles _ = 0
+
+  descend :: ExprI -> MorlocMonad ExprI
+  -- refresh
+  descend e@(ExprI _ (AppE _ _)) = unhole e
+  -- simple recurse
+  descend (ExprI i (LamE vs e)) = LamE vs <$> descend e |>> ExprI i
+  descend (ExprI i (LstE es)) = LstE <$> mapM descend es |>> ExprI i
+  descend (ExprI i (TupE es)) = TupE <$> mapM descend es |>> ExprI i
+  descend (ExprI i (NamE rs)) = NamE <$> mapM (\(k, e) -> (,) k <$> descend e) rs |>> ExprI i
+  descend (ExprI i (AnnE e t)) = AnnE <$> descend e <*> pure t |>> ExprI i
+  descend e = return e
+
+  -- name a hole based on the index of the new lambda and the hole position
+  nameHole :: Int -> Int -> EVar
+  nameHole lidx aidx = EV ("_hole" <> MT.show' lidx <> "_" <> MT.show' aidx)
+
 -- | Use export/import information to find which terms are imported into each module
 -- * reduces the Import edge type to an alias map.
 -- * replaces Export terms in expressions
@@ -163,7 +241,7 @@ resolveImports d0
       exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList exps]
       excludes = map unSymbol (importExclude imp)
 
-      importAlias :: (MT.Text, MT.Text) -> Maybe AliasedSymbol
+      importAlias :: (Text, Text) -> Maybe AliasedSymbol
       importAlias (name, alias)
           | name `elem` excludes = Nothing
           | otherwise = case Map.lookup name exportMap of
@@ -190,7 +268,7 @@ resolveImports d0
     where
         exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList exports]
 
-        importAlias :: (MT.Text, MT.Text) -> Maybe (Either MT.Text Symbol)
+        importAlias :: (Text, Text) -> Maybe (Either Text Symbol)
         importAlias (name, alias)
             | name `elem` exclude = Nothing
             | otherwise = case Map.lookup name exportMap of
@@ -213,12 +291,12 @@ resolveImports d0
   findSymbols (ExprI _ (IstE cls _ _)) = Set.singleton $ ClassSymbol cls
   findSymbols _ = Set.empty
 
-  unSymbol :: Symbol -> MT.Text
+  unSymbol :: Symbol -> Text
   unSymbol (TypeSymbol (TV v)) = v
   unSymbol (TermSymbol (EV v)) = v
   unSymbol (ClassSymbol (ClassName v)) = v
 
-  unAliasedSymbol :: AliasedSymbol -> (MT.Text, MT.Text)
+  unAliasedSymbol :: AliasedSymbol -> (Text, Text)
   unAliasedSymbol (AliasedType x y) = (unTVar x, unTVar y)
   unAliasedSymbol (AliasedTerm x y) = (unEVar x, unEVar y)
   unAliasedSymbol (AliasedClass x) = (unClassName x, unClassName x)
@@ -258,7 +336,6 @@ collectTags fullDag = do
     f (ExprI _ (ModE _ es)) = mapM_ f es
     f (ExprI _ (IstE _ _ es)) = mapM_ f es
     f (ExprI _ (AssE _ e es)) = mapM_ f (e:es)
-    f (ExprI _ (AccE _ e)) = f e
     f (ExprI _ (LstE es)) = mapM_ f es
     f (ExprI _ (TupE es)) = mapM_ f es
     f (ExprI _ (NamE rs)) = mapM_ (f . snd) rs

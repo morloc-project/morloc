@@ -24,6 +24,7 @@ import Morloc.Quasi
 import qualified Morloc.Config as MC
 import Morloc.Monad (asks, gets, Index, newIndex, runIndex)
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import qualified System.FilePath as SF
 import qualified Data.Char as DC
 import qualified Morloc.Language as ML
@@ -40,7 +41,7 @@ translate srcs es = do
   lib <- MT.pack <$> asks MC.configLibrary
 
   home <- pretty <$> asks MC.configHome
-  let opt = home <> "/opt" 
+  let opt = home <> "/opt"
 
   -- translate sources
   includeDocs <- mapM
@@ -66,7 +67,7 @@ translate srcs es = do
     , scriptMake = []
     }
   where
-      qualifiedSrcName :: MT.Text -> Source -> MDoc
+      qualifiedSrcName :: Text -> Source -> MDoc
       qualifiedSrcName lib src = case srcPath src of
           Nothing -> pretty $ srcName src
           (Just path) -> makeNamespace lib path <> "." <> pretty (srcName src)
@@ -77,7 +78,7 @@ debugLog d = do
   verbosity <- gets stateVerbosity
   when (verbosity > 0) $ (liftIO . putDoc) d
 
-makeNamespace :: MT.Text -> Path -> MDoc 
+makeNamespace :: Text -> Path -> MDoc
 makeNamespace lib = pretty
               . MT.liftToText (map DC.toLower)
               . MT.replace "/" "_"
@@ -273,8 +274,10 @@ translateSegment makeSrcName m0 =
       return $ e {poolExpr = serialized, poolPriorLines = poolPriorLines e <> assignments}
 
     makeNativeExpr :: NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
-    makeNativeExpr _ (AppSrcN_ _ (makeSrcName -> functionName) _ xs) =
-        return $ mergePoolDocs ((<>) functionName . tupled) (map snd xs)
+    makeNativeExpr _ (AppExeN_ _ (SrcCall src) _ xs) =
+        return $ mergePoolDocs ((<>) (makeSrcName src) . tupled) (map snd xs)
+    makeNativeExpr _ (AppExeN_ t (PatCall p) _ xs) =
+        return $ mergePoolDocs (evaluatePattern t p) (map snd xs)
     makeNativeExpr _ (ManN_ call) = return call
     makeNativeExpr _ (ReturnN_ x) =
         return $ x { poolExpr = "return(" <> poolExpr x <> ")" }
@@ -288,9 +291,8 @@ translateSegment makeSrcName m0 =
           { poolExpr = deserialized
           , poolPriorLines = poolPriorLines x <> assignments
           }
-    makeNativeExpr _ (AccN_ r (FV _ v) x k) =
-        return $ x {poolExpr = selectAccessor r v (poolExpr x) (pretty k)}
-    makeNativeExpr _ (SrcN_ _ src) = return $ defaultValue { poolExpr = makeSrcName src }
+    makeNativeExpr _ (ExeN_ _ (SrcCall src)) = return $ defaultValue { poolExpr = makeSrcName src }
+    makeNativeExpr _ (ExeN_ _ (PatCall _)) = error "Unreachable: patterns are always used in applications"
     makeNativeExpr _ (ListN_ _ _ xs) = return $ mergePoolDocs list xs
     makeNativeExpr _ (TupleN_ _ xs) = return $ mergePoolDocs tupled xs
     makeNativeExpr _ (RecordN_ _ _ _ rs)
@@ -318,7 +320,7 @@ translateSegment makeSrcName m0 =
       let rs = rs1 ++ [ namer i <+> "=" <+> e1' ] ++ rs2
       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
-    makeFunction :: MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> MDoc 
+    makeFunction :: MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> MDoc
     makeFunction mname args priorLines body headForm
       = nest 4 (vsep [def, tryCatch priorLines, body])
       where
@@ -339,6 +341,34 @@ translateSegment makeSrcName m0 =
     makeLambda :: MDoc -> [MDoc] -> [MDoc] -> MDoc
     makeLambda mname contextArgs _ = "functools.partial" <> tupled (mname : contextArgs)
 
+evaluatePattern :: TypeF -> Pattern -> [MDoc] -> MDoc
+evaluatePattern _ (PatternText firstStr fragments) xs
+  = "f" <> (dquotes . hcat) (pretty firstStr : [ ("{" <> x <> "}" <> pretty s) | (x, s) <- zip xs fragments])
+-- getters (always have exactly one argument)
+evaluatePattern _ (PatternStruct (ungroup -> [ss])) [m]
+  = hcat (m : map writeBasicSelector ss)
+evaluatePattern _ (PatternStruct (ungroup -> sss)) [m]
+  = tupled [hcat (m : map writeBasicSelector ss) | ss <- sss]
+-- setters (always have 1 + n arguments, where the first is the data structure)
+evaluatePattern t0 (PatternStruct s0) (m0:xs0)
+  = patternSetter makeTuple makeRecord accessTuple accessRecord m0 t0 s0 xs0
+  where
+
+  makeTuple _ xs = tupled xs
+
+  makeRecord (NamF _ _ _ rs) xs = "OrderedDict" <> tupled [pretty k <+> "=" <+> x | (k, x) <- zip (map fst rs) xs]
+  makeRecord _ _ = error "Incorrectly typed record setter"
+
+  accessTuple _ m i = m <> "[" <> pretty i <> "]"
+
+  accessRecord (NamF o (FV _ cname) _ _) d k = (selectAccessor o cname) d (pretty k)
+  accessRecord t _ _ = error $ "Invalid record type: " <> show t
+
+evaluatePattern _ (PatternStruct _) [] = error "Unreachable empty pattern"
+
+writeBasicSelector :: Either Int Text -> MDoc
+writeBasicSelector (Right k) = "[" <> dquotes (pretty k) <> "]"
+writeBasicSelector (Left i) = "[" <> pretty i <> "]"
 
 makeDispatch :: [SerialManifold] -> MDoc
 makeDispatch ms = vsep [localDispatch, remoteDispatch]

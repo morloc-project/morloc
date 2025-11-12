@@ -38,7 +38,7 @@ foo size =
     }
 
 -- test access
-bar size = (fpy@shitlists, fcpp@things, fr@size) where
+bar size = (.shitlists fpy, .things fcpp, .size fr) where
     fpy = addShitPy "aa" 42
       { shitlists = emptyMap
       , things = ["a"]

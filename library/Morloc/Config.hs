@@ -25,6 +25,7 @@ import qualified Morloc.Language as ML
 import qualified Data.Yaml as Y
 import qualified Data.Yaml.Config as YC
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import qualified Morloc.System as MS
 import qualified Morloc.Monad as MM
 import qualified Data.Aeson.KeyMap as K
@@ -112,7 +113,7 @@ setupServerAndSocket c lang = Socket lang args socket where
 
 
 -- This is where the default file organization of morloc is set
-defaultFields :: IO (K.KeyMap MT.Text)
+defaultFields :: IO (K.KeyMap Text)
 defaultFields = do
   home <- MT.pack <$> getDefaultMorlocHome
   lib <- MT.pack <$> getDefaultMorlocSource

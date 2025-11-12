@@ -20,18 +20,18 @@
 #define MAX_DAEMONS 32
 
 #define ERROR(msg, ...) \
-    fprintf(stderr, "Error (%s:%d in %s): " msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    fprintf(stderr, "Error (%s:%d in %s): " msg "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
     clean_exit(1);
 
 #define ERROR_WITH(end, msg, ...) \
-    fprintf(stderr, "Error (%s:%d in %s): " msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    fprintf(stderr, "Error (%s:%d in %s): " msg "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
     end; \
     clean_exit(1);
 
 #define ERROR_TRY_GOTO(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &errmsg); \
     if(errmsg != NULL){ \
-        fprintf(stderr, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, errmsg); \
+        fprintf(stderr, "Error (%s:%d in %s):\n%s\n", __FILE__, __LINE__, __func__, errmsg); \
         goto end; \
     }
 
@@ -150,13 +150,13 @@ void print_return(uint8_t* packet, Schema* schema, config_t config){
 
     char* packet_error = get_morloc_data_packet_error_message(packet, &child_errmsg);
     if(packet_error != NULL){
-        ERROR("Run failed\n%s\n", packet_error)
+        ERROR("Run failed\n%s", packet_error)
     }
     if(child_errmsg != NULL && packet_error != NULL){
-        ERROR("Internal error\n%s\n", packet_error)
+        ERROR("Internal error\n%s", packet_error)
     }
     if(child_errmsg != NULL){
-        ERROR("Internal error\n")
+        ERROR("Internal error")
     }
 
     uint8_t* packet_value = get_morloc_data_packet_value(packet, schema, &child_errmsg);
@@ -190,7 +190,7 @@ void print_return(uint8_t* packet, Schema* schema, config_t config){
     if(child_errmsg == NULL){
         clean_exit(0);
     } else {
-        ERROR("Failed to print return packet\n%s\n", child_errmsg);
+        ERROR("Failed to print return packet\n%s", child_errmsg);
     }
 
 end:
@@ -234,7 +234,7 @@ void start_daemons(morloc_socket_t** all_sockets){
             return_data = send_and_receive_over_socket_wait((*socket_ptr)->socket_filename, ping_packet, ping_timeout, ping_timeout, &errmsg);
             if(errmsg != NULL || return_data == NULL){
                 if(attempt == MAX_RETRIES){
-                    ERROR("Failed to ping '%s':\n%s\n", (*socket_ptr)->socket_filename, errmsg);
+                    ERROR("Failed to ping '%s':\n%s", (*socket_ptr)->socket_filename, errmsg);
                 }
 
                 // Sleep using exponential backoff
@@ -283,8 +283,73 @@ void run_command(
 
     uint8_t* result_packet = send_and_receive_over_socket(root_socket.socket_filename, call_packet, &errmsg);
     if(errmsg != NULL){
-        ERROR("Daemon is unresponsive:\n%s\n", errmsg);
+        ERROR("Daemon is unresponsive:\n%s", errmsg);
     }
+
+    print_return(result_packet, return_schema, config);
+}
+
+void run_pure_command(
+    morloc_expression_t* expr,
+    char** args,
+    const char** arg_schema_strs,
+    const char* return_schema_str,
+    config_t config
+){
+    char* errmsg = NULL;
+
+    size_t nargs = 0;
+    // args are the remaining char pointers from argv, these are guaranteed to
+    // end with a NULL pointer
+    for(; args[nargs] != NULL; nargs++){
+        // assert that there are an appropriate number of schemas
+        // mismatch implies an input mistake on the users side
+        if(arg_schema_strs == NULL){
+          ERROR("To many arguments provided");
+        }
+    }
+    if(arg_schema_strs[nargs] != NULL){
+        ERROR("To few arguments provided");
+    }
+
+    Schema** arg_schemas = (Schema**)calloc(nargs, sizeof(Schema*));
+    uint8_t** arg_packets = (uint8_t**)calloc(nargs, sizeof(uint8_t*));
+    uint8_t** arg_voidstars = (uint8_t**)calloc(nargs, sizeof(uint8_t*));
+
+    for(size_t i = 0; i < nargs; i++){
+      arg_schemas[i] = parse_schema(&arg_schema_strs[i], &errmsg);
+      if(errmsg != NULL){
+          ERROR("Failed to parse arg schema: %s", errmsg);
+      }
+
+      arg_packets[i] = parse_cli_data_argument(args[i], arg_schemas[i], &errmsg);
+      if(errmsg != NULL){
+          ERROR("Failed read argument: %s", errmsg);
+      }
+
+      arg_voidstars[i] = get_morloc_data_packet_value(arg_packets[i], arg_schemas[i], &errmsg);
+      if(errmsg != NULL){
+          ERROR("Failed to read arg packet: %s", errmsg);
+      }
+
+    }
+
+    Schema* return_schema = parse_schema(&return_schema_str, &errmsg);
+    if(errmsg != NULL){
+        ERROR("Failed to parse return schema");
+    }
+
+    absptr_t result_abs = morloc_eval(expr, return_schema, arg_voidstars, arg_schemas, nargs, &errmsg);
+    if(errmsg != NULL){
+        ERROR("Failed to evaluate expression:\n%s", errmsg)
+    }
+
+    relptr_t result_rel = abs2rel(result_abs, &errmsg);
+    if(errmsg != NULL){
+        ERROR("Failed to convert absolute pointer to relative:\n%s", errmsg)
+    }
+
+    uint8_t* result_packet = make_standard_data_packet(result_rel, return_schema);
 
     print_return(result_packet, return_schema, config);
 }
@@ -303,7 +368,7 @@ void run_call_packet(config_t config){
     uint8_t* call_packet = read_binary_file(config.packet_path, &call_packet_size, &errmsg);
 
     if(errmsg != NULL || call_packet == NULL){
-        ERROR("Failed to open call packet file '%s':\n%s\n", config.packet_path, errmsg)
+        ERROR("Failed to open call packet file '%s':\n%s", config.packet_path, errmsg)
     }
 
     // make the local socket filename relative to the current temporary directry
@@ -313,14 +378,14 @@ void run_call_packet(config_t config){
     // send request to the language daemon and wait for a response
     result_packet = send_and_receive_over_socket(socket_path, call_packet, &errmsg);
     if(errmsg != NULL){
-        ERROR("Run failed - bad message: %s\n", errmsg);
+        ERROR("Run failed - bad message: %s", errmsg);
     }
     run_errmsg = get_morloc_data_packet_error_message(result_packet, &errmsg);
     if(run_errmsg != NULL){
-        ERROR("Run failed: %s\n", run_errmsg);
+        ERROR("Run failed: %s", run_errmsg);
     }
     if(errmsg != NULL){
-        ERROR("Run failed - unable to parse: %s\n", errmsg);
+        ERROR("Run failed - unable to parse: %s", errmsg);
     }
 
     // parse the schema from the response packet

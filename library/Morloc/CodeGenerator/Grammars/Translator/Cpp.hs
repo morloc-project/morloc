@@ -41,7 +41,7 @@ import qualified Morloc.Language as ML
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.TypeEval as TE
-import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import Control.Monad.Identity (Identity)
 
 data CallSemantics = Copy | Reference | ConstPtr
@@ -520,9 +520,12 @@ PROPAGATE_ERROR(errmsg)|]
   makeSerialExpr _ _ = error "Unreachable"
 
   makeNativeExpr :: NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> CppTranslator PoolDocs
-  makeNativeExpr _ (AppSrcN_ _ src qs (map snd -> es)) = do
+  makeNativeExpr _ (AppExeN_ _ (SrcCall src) qs (map snd -> es)) = do
     templateStr <- templateArguments qs
     return $ mergePoolDocs ((<>) (pretty (srcName src) <> templateStr) . tupled) es
+  makeNativeExpr _ (AppExeN_ t (PatCall p) _ xs) = do
+      state <- CMS.get
+      return $ mergePoolDocs (evaluatePattern state t p) (map snd xs)
   makeNativeExpr _ (ManN_ call) = return call
   makeNativeExpr _ (ReturnN_ e) =
     return $ e {poolExpr = "return" <> parens (poolExpr e) <> ";"}
@@ -538,11 +541,6 @@ PROPAGATE_ERROR(errmsg)|]
       , poolPriorLines = poolPriorLines e <> assignments
       }
 
-  makeNativeExpr _ (AccN_ _ _ e k) =
-    return (e {poolExpr = poolExpr e <> "." <> pretty k})
-
-  makeNativeExpr _ (SrcN_ _ _) = undefined
-
   makeNativeExpr _ (ListN_ _ _ es) =
     return $ mergePoolDocs (encloseSep "{" "}" ",") es
 
@@ -553,9 +551,11 @@ PROPAGATE_ERROR(errmsg)|]
     t <- cppTypeOf e
     idx <- getCounter
     let v' = "a" <> pretty idx
-        decl = t <+> v' <+> encloseSep "{" "}" "," (map (poolExpr . snd) rs) <> ";"
+        decl = t <+> v' <+> "=" <+> encloseSep "{" "}" "," (map (poolExpr . snd) rs) <> ";"
     let p = mergePoolDocs (const v') (map snd rs)
     return (p {poolPriorLines = poolPriorLines p <> [decl]})
+
+  makeNativeExpr _ (ExeN_ _ (PatCall _)) = error "Unreachable: patterns are always used in applications"
 
   makeNativeExpr _ (LogN_         _ x) = return $ defaultValue { poolExpr = if x then "true" else "false" }
   makeNativeExpr _ (RealN_        _ x) = return $ defaultValue { poolExpr = viaShow x }
@@ -564,7 +564,7 @@ PROPAGATE_ERROR(errmsg)|]
   makeNativeExpr _ (NullN_        _  ) = return $ defaultValue { poolExpr = "null" }
   makeNativeExpr _ _ = error "Unreachable"
 
-  templateArguments :: [(MT.Text, TypeF)] -> CppTranslator MDoc
+  templateArguments :: [(Text, TypeF)] -> CppTranslator MDoc
   templateArguments [] = return ""
   templateArguments qs = do
     ts <- mapM (cppTypeOf . snd) qs
@@ -581,6 +581,40 @@ PROPAGATE_ERROR(errmsg)|]
       , poolPriorLines = []
       , poolPriorExprs = pes1 <> pes2
       }
+
+
+-- handle string interpolation
+evaluatePattern :: CppTranslatorState -> TypeF -> Pattern -> [MDoc] -> MDoc
+evaluatePattern _ _ (PatternText s ss) xs = "interweave_strings" <> tupled [fragments, insertions]
+  where
+    fragments = encloseSep "{" "}" ", " (map (dquotes . pretty) (s:ss))
+    insertions = encloseSep "{" "}" ", " xs
+
+-- handle getters
+evaluatePattern _ _ (PatternStruct (ungroup -> [ss])) [m]
+  = writeSelector m ss
+evaluatePattern _ _ (PatternStruct (ungroup -> sss)) [m]
+  = encloseSep "{" "}" "," (map (writeSelector m) sss)
+evaluatePattern state0 t0 (PatternStruct s0) (m0:xs0)
+  = patternSetter makeTuple makeRecord accessTuple accessRecord m0 t0 s0 xs0
+  where
+
+  makeTuple (AppF _ ts) xs =
+    let tupleTypes = CMS.evalState (mapM cppTypeOf ts) state0
+    in "std::tuple" <> encloseSep "<" ">" "," tupleTypes <> tupled xs
+  makeTuple _ _ = error "Unreachable"
+
+  makeRecord _ xs = encloseSep "{" "}" ", " xs
+
+  accessTuple _ m i = "std::get<" <> pretty i <> ">(" <> m <> ")"
+  accessRecord _ d k = d <> "." <> pretty k
+
+evaluatePattern _ _ (PatternStruct _) [] = error "Unreachable illegal pattern"
+
+writeSelector :: MDoc -> [Either Int Text] -> MDoc
+writeSelector d [] = d
+writeSelector d (Right k: rs) = writeSelector (d <> "." <> pretty k) rs
+writeSelector d (Left i: rs) = writeSelector ("std::get<" <> pretty i <> ">" <> parens d) rs
 
 makeManifold
   :: (HasTypeM t)

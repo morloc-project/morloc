@@ -1,3 +1,4 @@
 module main (foo)
 
+foo :: Int -> Int
 foo x = x

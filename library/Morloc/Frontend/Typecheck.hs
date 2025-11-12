@@ -89,7 +89,7 @@ recordParameter :: Int -> TVar -> TypeU -> MorlocMonad ()
 recordParameter i v t = do
   s <- MM.get
   let size = findTypeKindSize v t
-      updatedMap = Map.insertWith (\xs ys -> ys <> xs) i [(v, ExistU v [] [], size)] (stateTypeQualifier s)
+      updatedMap = Map.insertWith (\xs ys -> ys <> xs) i [(v, ExistU v ([], Open) ([], Open), size)] (stateTypeQualifier s)
   MM.put $ s { stateTypeQualifier = updatedMap }
 
 findTypeKindSize :: TVar -> TypeU -> Int
@@ -97,11 +97,11 @@ findTypeKindSize v = head . catMaybes . f where
   f (AppU (VarU v') ts)
     | v == v' = [Just (1 + (length ts))]
     | otherwise = concat $ map f ts
-  f (AppU t ts) = concat $ map f (t:ts) 
+  f (AppU t ts) = concat $ map f (t:ts)
   f (VarU v')
     | v == v' = [Just 1]
     | otherwise = [Nothing]
-  f (ExistU v' ts1 (map snd -> ts2))
+  f (ExistU v' (ts1, _) (map snd . fst -> ts2))
     | v == v' = [Just (1 + (length ts1))]
     | otherwise = concat $ map f (ts1 <> ts2)
   f (ForallU _ t) = f t
@@ -118,8 +118,7 @@ resolveTypes (AnnoS (Idx i t) ci e)
   f :: ExprS (Indexed TypeU) Many Int -> ExprS (Indexed Type) Many Int
   f (BndS x) = BndS x
   f (VarS v xs) = VarS v (fmap resolveTypes xs)
-  f (CallS src) = CallS src
-  f (AccS k x) = AccS k (resolveTypes x)
+  f (ExeS exe) = ExeS exe
   f (AppS x xs) = AppS (resolveTypes x) (map resolveTypes xs)
   f (LamS vs x) = LamS vs (resolveTypes x)
   f (LstS xs) = LstS (map resolveTypes xs)
@@ -194,7 +193,6 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
 
   f _ g0 (VarS v (MonomorphicExpr _ xs)) = statefulMapM resolveInstances g0 xs |>> second (VarS v . Many)
   -- propagate
-  f _ g0 (AccS k e) = resolveInstances g0 e |>> second (AccS k)
   f _ g0 (AppS e es) = do
     (g1, e') <- resolveInstances g0 e
     (g2, es') <- statefulMapM resolveInstances g1 es
@@ -213,7 +211,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
   f _ g0 (IntS x) = return (g0, IntS x)
   f _ g0 (LogS x) = return (g0, LogS x)
   f _ g0 (StrS x) = return (g0, StrS x)
-  f _ g0 (CallS x) = return (g0, CallS x)
+  f _ g0 (ExeS x) = return (g0, ExeS x)
 
   connectInstance :: Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
   connectInstance g0 [] = return g0
@@ -279,31 +277,67 @@ synthE _ g (IntS x) = return (g, BT.intU, IntS x)
 synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
 synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 
-synthE i g0 (AccS k e) = do
-  (g1, t1, e1) <- synthG g0 e
-  (g2, valType) <- accessRecord g1 t1
-  return (g2, valType, AccS k e1)
-  where
-    accessRecord :: Gamma -> TypeU -> MorlocMonad (Gamma, TypeU)
-    accessRecord g t@(NamU _ _ _ rs) = case lookup k rs of
-      Nothing -> gerr i (KeyError k t)
-      (Just value) -> return (g, value)
-    accessRecord g t@(ExistU v ps rs) = case lookup k rs of
-      Nothing -> do
-        let (g', value) = newvar (unTVar v <> "_" <> unKey k) g
-        case access1 v (gammaContext g') of
-          (Just (rhs, _, lhs)) -> return (g' { gammaContext = rhs <> [ExistG v ps ((k, value):rs)] <> lhs }, value)
-          Nothing -> do
-            MM.sayVVV $ "Case b"
-                      <> "\n  rs:" <+> pretty rs
-                      <> "\n  v:" <+> pretty v
-            gerr i (KeyError k t)
-      (Just value) -> return (g, value)
-    accessRecord g t = do
-      gscope <- MM.getGeneralScope i
-      case TE.evaluateStep gscope t of
-        (Just t') -> accessRecord g t'
-        Nothing -> gerr i (KeyError k t)
+-- Ensures pattern setting operations return the correct type.
+-- Without this case, patterns that change type will pass silently, but lead to
+-- corrupted data.
+synthE _ g0
+  ( AppS f0@(AnnoS _ _ (LamS [_]
+           (AnnoS _ _ (AppS (
+             (AnnoS _ _ (ExeS (PatCall (PatternStruct _))))) (_:_))))) [x0]
+  ) = do
+    (g1, patternType, f1) <- synthG g0 f0
+    case patternType of
+      (FunU _ selectType) -> do
+        (g2, dataType, x1) <- checkG g1 x0 selectType
+        return (g2, dataType, AppS f1 [x1])
+      _ -> error "This should be unreachable"
+
+-- synthesize a string interpolation pattern
+synthE i g (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternText _ _)))) es) = do
+  (g1, _, f1) <- synthG g f
+  (g2, _, es1, _) <- zipCheck i g1 es (take (length es) (repeat BT.strU))
+  return (g2, BT.strU, AppS f1 es1)
+
+-- handle getter patterns
+synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall (PatternStruct _)))) []) = error "Unreachable application pattern to no data"
+synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) [e0]) = do
+
+  -- generate an existential type that contains the pattern
+  (g1, datType) <- selectorType g0 s
+
+  -- type returned from pattern (with one element for each extracted value)
+  retType <- return $ case selectorGetter datType s of
+    [] -> error "Illegal empty selection"
+    [t] -> t
+    ts -> BT.tupleU ts
+  let ft = FunU [datType] retType
+
+  -- use selector-derived type to update context and data expression
+  (g2, _, e') <- checkG g1 e0 datType
+
+  let f1 = (AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall (PatternStruct s))))
+
+  return (g2, apply g2 retType, AppS f1 [e'])
+
+-- handle setter patterns
+synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0:es0)) = do
+
+  (g1, (unzip -> (setTypes, es1))) <-
+    statefulMapM (\s' e -> synthG s' e |>> (\(a,b,c) -> (a,(b,c)))) g0 es0
+
+  -- generate an existential type that contains the pattern
+  (g2, outputType) <- selectorType g1 s |>> second (selectorSetter setTypes s)
+
+  (g3, datType, e1) <- checkG g2 e0 outputType
+
+  let patternType = apply g3 $ FunU (datType:setTypes) outputType
+      f1 = AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s)))
+
+  return (g3, apply g3 outputType, AppS f1 (e1:es1))
+
+synthE _ g (ExeS (PatCall (PatternText s ss@(length -> n)))) = do
+  let t = FunU (take n (repeat BT.strU)) BT.strU
+  return (g, t, ExeS (PatCall (PatternText s ss)))
 
 --   -->E0
 synthE _ g (AppS f []) = do
@@ -315,36 +349,7 @@ synthE i g0 (AppS f xs0) = do
   -- synthesize the type of the function
   (g1, funType0, funExpr0) <- synthG g0 f
 
-  MM.sayVVV $ "synthE AppS"
-            <> "\n  f:" <+> pretty f
-            <> "\n  xs0:" <+> list (map pretty xs0)
-            <> "\n  funType0:" <+> pretty funType0
-            <> "\n  funExpr0:" <+> pretty funExpr0
-
-  -- eta expand
-  mayExpanded <- etaExpand g1 f xs0 funType0
-
-  case mayExpanded of
-    -- If the term was eta-expanded, retypecheck it
-    (Just (g', x')) -> synthE' i g' x'
-    -- Otherwise proceed
-    Nothing -> do
-
-      -- extend the function type with the type of the expressions it is applied to
-      (g2, funType1, inputExprs) <- application' i g1 xs0 (normalizeType funType0)
-
-      MM.sayVVV $ "  funType1:" <+> pretty funType1
-                <> "\n  inputExprs:" <+> list (map pretty inputExprs)
-
-      -- determine the type after application
-      appliedType <- case funType1 of
-        (FunU ts t) -> case drop (length inputExprs) ts of
-          [] -> return t -- full application
-          rs -> return $ FunU rs t -- partial application
-        _ -> error "impossible"
-
-      -- put the AppS back together with the synthesized function and input expressions
-      return (g2, apply g2 appliedType, AppS (applyGen g2 funExpr0) inputExprs)
+  etaExpandSynthE i g1 funType0 funExpr0 f xs0 
 
 -- -->I==>
 synthE i g0 f@(LamS vs x) = do
@@ -408,7 +413,7 @@ synthE _ g0 (NamS rs) = do
   (g1, xs) <- statefulMapM (\s v -> synthG s v |>> (\(a,b,c) -> (a,(b,c)))) g0 (map snd rs)
   let (ts, es) = unzip xs
       ks = map fst rs
-      (g2, t) = newvarRich [] (zip ks ts) "record_" g1
+      (g2, t) = newvarRich ([], Closed) (zip ks ts, Closed) "record_" g1
       e = NamS (zip ks es)
   return (g2, t, e)
 
@@ -485,9 +490,9 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
 
 -- This case will only be encountered in check, the existential generated here
 -- will be subtyped against the type known from the VarS case.
-synthE _ g (CallS src) = do
+synthE _ g (ExeS exe) = do
   let (g', t) = newvar "call_" g
-  return (g', t, CallS src)
+  return (g', t, ExeS exe)
 
 synthE _ g (BndS v) = do
   (g', t') <- case lookupE v g of
@@ -498,6 +503,44 @@ synthE _ g (BndS v) = do
     Nothing -> return $ newvar (unEVar v <> "_u") g
   return (g', t', BndS v)
 
+
+etaExpandSynthE
+  :: Int
+  -> Gamma
+  -> TypeU
+  -> AnnoS (Indexed TypeU) ManyPoly Int
+  -> AnnoS Int ManyPoly Int
+  -> [AnnoS Int ManyPoly Int]
+  -> MorlocMonad
+       ( Gamma
+       , TypeU
+       , ExprS (Indexed TypeU) ManyPoly Int
+       )
+etaExpandSynthE i g1 funType0 funExpr0 f xs0 = do
+  -- eta expand
+  mayExpanded <- etaExpand g1 f xs0 funType0
+
+  case mayExpanded of
+    -- If the term was eta-expanded, retypecheck it
+    (Just (g', x')) -> synthE' i g' x'
+    -- Otherwise proceed
+    Nothing -> do
+
+      -- extend the function type with the type of the expressions it is applied to
+      (g2, funType1, inputExprs) <- application' i g1 xs0 (normalizeType funType0)
+
+      MM.sayVVV $ "  funType1:" <+> pretty funType1
+                <> "\n  inputExprs:" <+> list (map pretty inputExprs)
+
+      -- determine the type after application
+      appliedType <- case funType1 of
+        (FunU ts t) -> case drop (length inputExprs) ts of
+          [] -> return t -- full application
+          rs -> return $ FunU rs t -- partial application
+        _ -> error "impossible"
+
+      -- put the AppS back together with the synthesized function and input expressions
+      return (g2, apply g2 appliedType, AppS (applyGen g2 funExpr0) inputExprs)
 
 etaExpand
   :: Gamma
@@ -588,14 +631,14 @@ application i g0 es (ForallU v s) = application' i (g0 +> v) es (substitute v s)
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-application i g0 es (ExistU v@(TV s) [] _) =
+application i g0 es (ExistU v@(TV s) ([], _) _) =
   case access1 v (gammaContext g0) of
     -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
       let (g1, veas) = statefulMap (\g _ -> tvarname g "a_") g0 es
           (g2, vea) = tvarname g1 (s <> "o_")
-          eas = [ExistU v' [] [] | v' <- veas]
-          ea = ExistU vea [] []
+          eas = [ExistU v' ([], Open) ([], Open) | v' <- veas]
+          ea = ExistU vea ([], Open) ([], Open)
           f = FunU eas ea
           g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
       (g4, _, es', _) <- zipCheck i g3 es eas
@@ -795,7 +838,6 @@ peakSExpr UniS = "UniS"
 peakSExpr (VarS v (MonomorphicExpr mayT _)) = "VarS" <+> pretty v <+> "::" <+> maybe "?" pretty mayT
 peakSExpr (VarS v (PolymorphicExpr cls _ t _)) = "VarS" <+> pretty cls <+> " => " <+> pretty v <+> "::" <+> pretty t
 peakSExpr (BndS v) = "BndS" <+> pretty v
-peakSExpr (AccS k _) = "AccS" <> brackets (pretty k)
 peakSExpr (AppS _ xs) = "AppS" <+> "nargs=" <> pretty (length xs)
 peakSExpr (LamS vs _) = "LamS" <> tupled (map pretty vs)
 peakSExpr (LstS xs) = "LstS" <> "n=" <> pretty (length xs)
@@ -805,4 +847,4 @@ peakSExpr (RealS x) = "RealS" <+> viaShow x
 peakSExpr (IntS x) = "IntS" <+> pretty x
 peakSExpr (LogS x) = "LogS" <+> pretty  x
 peakSExpr (StrS x) = "StrS" <+> pretty x
-peakSExpr (CallS src) = "CallS" <+> pretty src
+peakSExpr (ExeS exe) = "ExeS" <+> pretty exe

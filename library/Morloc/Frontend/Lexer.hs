@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {-|
 Module      : Morloc.Frontend.Lexer
@@ -25,12 +26,14 @@ module Morloc.Frontend.Lexer
   , lexeme
   , many1
   , sepBy2
+  , hole
   , freename
   , freenameU
   , freenameL
   , moduleComponent
   , number
   , op
+  , dot
   , parens
   , reserved
   , reservedWords
@@ -38,6 +41,9 @@ module Morloc.Frontend.Lexer
   , sc
   , setMinPos
   , stringLiteral
+  , stringPatterned
+  , parsePatternSetter
+  , parsePatternGetter
   , surround
   , symbol
   , pLang
@@ -53,10 +59,12 @@ import qualified Control.Monad.State as CMS
 import qualified Data.Scientific as DS
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import qualified Text.Megaparsec.Char.Lexer as L
 import qualified Morloc.Language as ML
+import qualified Data.Char as DC
 
-type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
+type Parser a = CMS.StateT ParserState (Parsec Void Text) a
 
 data ParserState = ParserState {
     stateModulePath :: Maybe Path
@@ -126,7 +134,7 @@ isInset = do
 sc :: Parser ()
 sc = L.space space1 comments empty
 
-symbol :: MT.Text -> Parser MT.Text
+symbol :: Text -> Parser Text
 symbol = lexeme . L.symbol sc
 
 lexemeBase :: Parser a -> Parser a
@@ -193,14 +201,14 @@ comments = try lineComment
     return ()
 
 
-preDoc :: Parser MT.Text
+preDoc :: Parser Text
 preDoc = do
     _ <- string "--'"
     docstr <- takeWhileP Nothing (/= '\n')
     _ <- sc
     return docstr
 
-postDoc :: Parser MT.Text
+postDoc :: Parser Text
 postDoc = do
     _ <- string "--^"
     docstr <- takeWhileP Nothing (/= '\n')
@@ -266,7 +274,7 @@ braces = surround (symbol "{") (symbol "}")
 angles :: Parser a -> Parser a
 angles = surround (symbol "<") (symbol ">")
 
-reservedWords :: [MT.Text]
+reservedWords :: [Text]
 reservedWords =
   [ "module"
   , "source"
@@ -285,43 +293,183 @@ reservedWords =
 operatorChars :: String
 operatorChars = ":!$%&*+./<=>?@\\^|-~#"
 
-op :: MT.Text -> Parser MT.Text
+op :: Text -> Parser Text
 op o = (lexeme . try) (symbol o <* notFollowedBy (oneOf operatorChars))
 
-reserved :: MT.Text -> Parser MT.Text
+-- the rugged dot, free and alone
+dot :: Parser Text
+dot = lexeme $ do
+  _ <- char '.' <* notFollowedBy (char '(' <|> char '[' <|> char '{' <|> alphaNumChar)
+  return "."
+
+reserved :: Text -> Parser Text
 reserved w = try (symbol w)
 
-stringLiteral :: Parser MT.Text
+stringLiteral :: Parser Text
 stringLiteral = lexeme $ do
   _ <- char '\"'
   s <- many (noneOf ['"'])
   _ <- char '\"'
   return $ MT.pack s
 
-mkFreename :: Parser Char -> Parser MT.Text
+
+parsePatternSetter :: Parser a -> Parser (Selector, [a])
+parsePatternSetter parseValue = parsePattern (sc >> symbol "=" >> parseValue)
+
+parsePatternGetter :: Parser Selector
+parsePatternGetter = fst <$> parsePattern (return True)
+
+parsePattern :: Parser a -> Parser (Selector, [a])
+parsePattern parseValue = lexeme $ try parseIdx <|> try parseKey <|> try parseGrpIdx <|> try parseGrpKey
+  where
+
+  parseIdx = parseSegment L.decimal SelectorIdx
+
+  parseKey = parseSegment key SelectorKey where
+    key = do
+      firstLetter <- lowerChar
+      remaining <- many (alphaNumChar <|> char '\'' <|> char '_')
+      return $ MT.pack (firstLetter : remaining)
+
+  -- parseSegment :: Parser p -> ((p, Selector) -> [(p, Selector)] -> Selector) -> Parser (Selector, [a])
+  parseSegment fieldParser constructor = do
+    _ <- char '.'
+    k <- fieldParser
+    mayS <- optional (parsePattern parseValue)
+    case mayS of
+      (Just (s, es)) -> return (constructor (k, s) [], es)
+      Nothing -> do
+        e <- parseValue
+        return (constructor (k, SelectorEnd) [], [e])
+
+  parseGrpKey = parseGrp parseKey
+
+  parseGrpIdx = parseGrp parseIdx
+
+  parseGrp grpparser = lexeme $ do
+    _ <- char '.'
+    xs <- parens (sepBy1 grpparser (symbol ","))
+    let es = concat $ map snd xs
+    case flattenSelector (map fst xs) of
+      (s, SelectorEnd) -> return (s, es)
+      (SelectorEnd, s) -> return (s, es)
+      _ -> error "Unreachable - grpparser can only return on selector type"
+
+  flattenSelector :: [Selector] -> (Selector, Selector)
+  flattenSelector sss = (flatIdx, flatKey)
+    where
+    flatIdx = case concat [s:ss | (SelectorIdx s ss) <- sss] of
+      [] -> SelectorEnd
+      ss -> SelectorIdx (head ss) (tail ss)
+
+    flatKey = case concat [s:ss | (SelectorKey s ss) <- sss] of
+      [] -> SelectorEnd
+      ss -> SelectorKey (head ss) (tail ss)
+
+
+
+stringPatterned :: Parser a -> Parser (Either Text (Text, [(a, Text)]))
+stringPatterned exprParser = do
+  x <- stringLiteralMultiline exprParser <|> stringLiteralDoubleQuote exprParser
+  case x of
+    (s, []) -> return $ Left s
+    (s, es) -> return $ Right (s, es)
+
+stringLiteralDoubleQuote :: Parser a -> Parser (Text, [(a, Text)])
+stringLiteralDoubleQuote exprParser = lexeme $ do
+  _ <- char '\"'
+  s <- interpolatedStringParser "\"" exprParser
+  _ <- char '\"'
+  return $ s
+
+stringLiteralMultiline :: Parser a -> Parser (Text, [(a, Text)])
+stringLiteralMultiline exprParser = lexeme $ do
+  sep <- string "'''" <|> string "\"\"\""
+  (s, exprs) <- interpolatedStringParser sep exprParser
+  _ <- string sep
+  return . reindent . removeTrailingSpace $ (removeLeadingSpace s, exprs)
+  where
+    --  1. Remove zero or one leading newlines
+    removeLeadingSpace :: Text -> Text
+    removeLeadingSpace (MT.lines -> []) = ""
+    removeLeadingSpace (MT.lines -> (s:rs))
+      | MT.null (MT.strip s) = MT.unlines rs
+      | otherwise = MT.unlines (s:rs)
+
+    --  2. Remove the final newline and preceding non-newline space
+    removeTrailingSpace :: (Text, [(a, Text)]) -> (Text, [(a, Text)])
+    removeTrailingSpace (MT.lines -> [], []) = ("", [])
+    removeTrailingSpace x@(MT.lines -> ss, [])
+      | MT.null . MT.strip . last $ ss = (MT.unlines (init ss), [])
+      | otherwise = x
+    removeTrailingSpace (s, ss) = case (init ss, last ss) of
+      (initLines, (e, MT.lines -> slines)) ->
+        if MT.null . MT.strip . last $ slines
+        then (s, initLines <> [(e, MT.unlines (init slines))])
+        else (s, ss)
+
+    --  3. Trim an initial number of space from each line equal to the minimum
+    --     number of starting spaces
+    reindent :: (Text, [(a, Text)]) -> (Text, [(a, Text)])
+    reindent (MT.lines -> ss, []) = (MT.unlines $ map (MT.drop initSpaces) ss, [])
+      where
+      initSpaces = minimum $ map (MT.length . MT.takeWhile DC.isSpace) ss
+    reindent (s, xs) = (replaceFun s, map (second replaceFun) xs)
+      where
+      replaceFun = MT.replace replacePattern "\n"
+      replacePattern = MT.pack $ '\n' : take initSpace (repeat ' ')
+      initSpace = minimum $ map (MT.length . MT.takeWhile DC.isSpace) (MT.lines $ MT.concat (s : map snd xs))
+
+-- | Parse an interpolated string with embedded expressions
+interpolatedStringParser :: Text -> Parser a -> Parser (Text, [(a, Text)])
+interpolatedStringParser sep exprParser = do
+  initial <- literalText sep
+  parts <- many $ do
+    expr <- interpolatedExpr exprParser
+    text <- literalText sep
+    pure (expr, text)
+  pure (initial, parts)
+
+-- | Parse literal text until we hit an interpolation or end
+literalText :: Text -> Parser Text
+literalText sep = MT.pack <$> many literalChar
+  where
+    literalChar = notFollowedBy (string "#{" <|> string sep) >> anySingle
+
+-- | Parse an interpolated expression: #{...}
+interpolatedExpr :: Parser a -> Parser a
+interpolatedExpr exprParser = string "#{" *> exprParser <* char '}'
+
+
+hole :: Parser ()
+hole = lexeme $ do
+ _ <- char '_'
+ return ()
+
+mkFreename :: Parser Char -> Parser Text
 mkFreename firstLetter = (lexeme . try) (p >>= check)
   where
-    p = fmap MT.pack $ (:) <$> firstLetter <*> many (alphaNumChar <|> char '\'')
+    p = fmap MT.pack $ (:) <$> firstLetter <*> many (alphaNumChar <|> char '\'' <|> char '_')
     check x =
       if x `elem` reservedWords
         then failure Nothing Set.empty -- TODO: error message
         else return x
 
-freename :: Parser MT.Text
+freename :: Parser Text
 freename = mkFreename letterChar
 
 -- part of a module path, must start with a lower-case letter
 -- may have uppercase or digits or dashes after the first letter
-moduleComponent :: Parser MT.Text
+moduleComponent :: Parser Text
 moduleComponent = lexeme $ do
     firstLetter <- lowerChar
     nextLetters <- many (alphaNumChar <|> char '-')
     return $ MT.pack (firstLetter : nextLetters)
 
-freenameL :: Parser MT.Text
+freenameL :: Parser Text
 freenameL = mkFreename lowerChar
 
-freenameU :: Parser MT.Text
+freenameU :: Parser Text
 freenameU = mkFreename upperChar
 
 -- | match the name of a supported language

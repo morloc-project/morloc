@@ -1,6 +1,10 @@
-module main (foo, bar, baz, zanzibar)
+module main (foo, bar, baz)
 
+foo x :: Int -> [Int] 
 foo x = [x,x]
-bar x y = [x,y]
+
+bar :: Bool -> Str -> (Bool, Str)
+bar x y = (x,y)
+
+baz :: Real -> Real -> [Real]
 baz x y = [y,x,x]
-zanzibar x y = [[x,y],[y,y],[y,x,x]]

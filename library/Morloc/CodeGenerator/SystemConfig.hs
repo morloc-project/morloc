@@ -20,6 +20,7 @@ import qualified Morloc.DataFiles as DF
 import Morloc.Module (OverwriteProtocol(..))
 
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import qualified Data.Text.IO as TIO
 
 import System.Process (callCommand, callProcess)
@@ -148,7 +149,7 @@ configureAllSteps verbose force slurmSupport config = do
               when verbose $
                   putStrLn $ "Checking " ++ description ++ " ... missing, creating at " ++ path
 
-  compileCCodeIfNeeded :: MT.Text -> Path -> Path -> Path -> IO ()
+  compileCCodeIfNeeded :: Text -> Path -> Path -> Path -> IO ()
   compileCCodeIfNeeded codeText sourcePath libPath objPath = do
       alreadyExists <- doesFileExist libPath
       if (alreadyExists && force == DoNotOverwrite)

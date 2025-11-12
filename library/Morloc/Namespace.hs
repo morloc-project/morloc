@@ -74,6 +74,7 @@ module Morloc.Namespace
   , NamType(..)
   , Type(..)
   , TypeU(..)
+  , OpenOrClosed(..)
   , extractKey
   , type2typeu
   , EType(..)
@@ -86,6 +87,9 @@ module Morloc.Namespace
   , Symbol(..)
   , AliasedSymbol(..)
   , Signature(..)
+  , Selector(..)
+  , ungroup
+  , Pattern(..)
   , Expr(..)
   , ExprI(..)
   , E(..)
@@ -96,6 +100,7 @@ module Morloc.Namespace
   , Constraint(..)
   , Property(..)
   -- ** Types used in post-typechecking tree
+  , ExecutableExpr(..)
   , AnnoS(..)
   , ExprS(..)
   , mapAnnoSM
@@ -415,6 +420,33 @@ data Signature = Signature EVar (Maybe Label) EType
 data Typeclass a = Typeclass ClassName [TVar] [a]
   deriving (Show, Ord, Eq)
 
+data Selector
+  = SelectorKey (Text, Selector) [(Text, Selector)] -- bag, may be multiple identical keys
+  | SelectorIdx (Int,  Selector) [(Int,  Selector)] -- bag, may be multiple identical indices
+  | SelectorEnd
+  deriving (Show, Ord, Eq)
+
+-- suppose you have the pattern: .1.y.(.1.(.y, .z), .2.x)
+-- this returns a tuple of three terms
+-- ungroup expands it to one path per selected value
+--   [ .1.y.1.y
+--   , .1.y.1.z
+--   , .1.y.2.x
+--   ]
+-- these may easily be used to generate getters/setters in more
+-- conventional languages
+ungroup :: Selector -> [[Either Int Text]]
+ungroup SelectorEnd = [[]]
+ungroup (SelectorKey (k, SelectorEnd) []) = [[Right k]]
+ungroup (SelectorIdx (i, SelectorEnd) []) = [[Left i]]
+ungroup (SelectorKey x xs) = concat [map ((:) (Right k)) (ungroup s) | (k, s) <- (x:xs)]
+ungroup (SelectorIdx x xs) = concat [map ((:) (Left  i)) (ungroup s) | (i, s) <- (x:xs)]
+
+data Pattern
+  = PatternText Text [Text]
+  | PatternStruct Selector
+  deriving (Show, Ord, Eq)
+
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)
 
@@ -451,8 +483,8 @@ data Expr
   | VarE ManifoldConfig -- annotations the tags link to
          EVar   -- main variable
   -- ^ (x)
-  | AccE Key ExprI
-  -- ^ person@age - access a field in a record
+  | HolE
+  -- ^ a "hole" variable that will be desugared into lambda-bound variable
   | LstE [ExprI]
   | TupE [ExprI]
   | NamE [(Key, ExprI)]
@@ -470,6 +502,8 @@ data Expr
   -- ^ boolean primitive
   | StrE Text
   -- ^ string primitive
+  | PatE Pattern
+  -- ^ a pattern that can be applied as a function
   deriving (Show, Ord, Eq)
 
 data Import =
@@ -521,8 +555,8 @@ data GammaIndex
   | AnnG EVar TypeU
   -- ^ store a bound variable
   | ExistG TVar
-    [TypeU] -- type parameters
-    [(Key, TypeU)] -- keys
+    ([TypeU], OpenOrClosed) -- type parameters
+    ([(Key, TypeU)], OpenOrClosed) -- keys
   -- ^ (G,a^) unsolved existential variable
   | SolvedG TVar TypeU
   -- ^ (G,a^=t) Store a solved existential variable
@@ -634,7 +668,6 @@ data Lit
 data E
   = BndP (Indexed Type) EVar
   | VarP (Indexed Type) EVar [E]
-  | AccP (Indexed Type) Key E
   | AppP (Indexed Type) E [E]
   | LamP (Indexed Type) [EVar] E
   | LstP (Indexed Type) [E]
@@ -642,8 +675,11 @@ data E
   | NamP (Indexed Type) [(Key, E)]
   | LitP (Indexed Type) Lit
   | SrcP (Indexed Type) Source
+  | PatP (Indexed Type) Selector
   deriving (Ord, Eq, Show)
 
+data ExecutableExpr = SrcCall Source | PatCall Pattern
+  deriving (Ord, Eq, Show)
 
 -- The AnnoS ExprS cycle is annoying, it requires mutually recursive
 -- operations. But please think very carefully before replacing it with
@@ -661,7 +697,6 @@ data ExprS g f c
   = UniS
   | BndS EVar
   | VarS EVar (f (AnnoS g f c))
-  | AccS Key (AnnoS g f c)
   | AppS (AnnoS g f c) [AnnoS g f c]
   | LamS [EVar] (AnnoS g f c)
   | LstS [AnnoS g f c]
@@ -671,7 +706,7 @@ data ExprS g f c
   | IntS Integer
   | LogS Bool
   | StrS Text
-  | CallS Source
+  | ExeS ExecutableExpr
 
 data Three a b c = A a | B b | C c
   deriving (Ord, Eq, Show)
@@ -716,12 +751,26 @@ data Type
   | NamT NamType TVar [Type] [(Key, Type)]
   deriving (Show, Ord, Eq)
 
+data OpenOrClosed = Open | Closed
+  deriving (Show, Ord, Eq)
+
 -- | A type with existentials and universals
 data TypeU
   = VarU TVar
   | ExistU TVar
-    [TypeU] -- type parameters
-    [(Key, TypeU)] -- key accesses into this type
+    ([TypeU], OpenOrClosed)
+      -- type parameters
+      --   open if the given parameters are an ordered prefix of all parameters
+      --     example: if a selector accesses element n of a term, then the term must be a
+      --     tuple with at least n parameters.
+      --   closed if the given parameters are ordered and of full count
+    ([(Key, TypeU)], OpenOrClosed)
+      -- named parameters for this type
+      --   open if this is an unordered subset of keys
+      --     example: if a selector accesses an element using a key, then this key
+      --     must exist in the terms type, but the order is not known and more
+      --     keys may exist
+      --   closed if this is an unordered set of all keys
   -- ^ (a^) will be solved into one of the other types
   | ForallU TVar TypeU
   -- ^ (Forall a . A)
@@ -809,6 +858,7 @@ data MorlocError
   | EmptyTuple
   | TupleSingleton
   | EmptyRecord
+  | BadPattern Text
   -- module errors
   | MultipleModuleDeclarations [MVar]
   | NestedModule MVar
@@ -1045,7 +1095,7 @@ instance Typelike TypeU where
   --  * all qualified terms are replaced with UnkT
   --  * all existentials are replaced with default values if a possible
   typeOf (VarU v) = VarT v
-  typeOf (ExistU _ ps rs@(_:_)) = NamT NamRecord (TV "Record") (map typeOf ps) (map (second typeOf) rs)
+  typeOf (ExistU _ (ps, _) (rs@(_:_), _)) = NamT NamRecord (TV "Record") (map typeOf ps) (map (second typeOf) rs)
   typeOf (ExistU v _ _) = typeOf (ForallU v (VarU v)) -- this will cause problems eventually
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
   typeOf (FunU ts t) = FunT (map typeOf ts) (typeOf t)
@@ -1053,9 +1103,9 @@ instance Typelike TypeU where
   typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
 
   free v@(VarU _) = Set.singleton v
-  free v@(ExistU _ [] rs) = Set.unions $ Set.singleton v : map (free . snd) rs
+  free v@(ExistU _ ([], _) (rs, _)) = Set.unions $ Set.singleton v : map (free . snd) rs
   -- Why exactly do you turn ExistU into AppU? Not judging, but it seems weird ...
-  free (ExistU v ts _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
+  free (ExistU v (ts, _) _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
   free (ForallU v t) = Set.delete (VarU v) (free t)
   free (FunU ts t) = Set.unions $ map free (t:ts)
   free (AppU t ts) = Set.unions $ map free (t:ts)
@@ -1076,7 +1126,7 @@ instance Typelike TypeU where
       sub t@(VarU v)
         | v0 == v = r0 -- replace v with the new type
         | otherwise = t
-      sub (ExistU v (map sub -> ps) (map (second sub) -> rs)) = ExistU v ps rs
+      sub (ExistU v (map sub -> ps, pc) (map (second sub) -> rs, rc)) = ExistU v (ps, pc) (rs, rc)
       sub (ForallU v t)
         | v0 == v = ForallU v t -- stop looking if we hit a bound variable of the same name
         | otherwise = ForallU v (sub t)
@@ -1088,7 +1138,7 @@ instance Typelike TypeU where
   normalizeType (AppU t ts) = AppU (normalizeType t) (map normalizeType ts)
   normalizeType (NamU n v ds ks) = NamU n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
   normalizeType (ForallU v t) = ForallU v (normalizeType t)
-  normalizeType (ExistU v (map normalizeType -> ps) (map (second normalizeType) -> rs)) = ExistU v ps rs
+  normalizeType (ExistU v (map normalizeType -> ps, pc) (map (second normalizeType) -> rs, rc)) = ExistU v (ps, pc) (rs, rc)
   normalizeType t = t
 
 
@@ -1101,7 +1151,7 @@ instance Typelike TypeU where
 -- As far as serialization is concerned, properties and constraints do not matter.
 instance P.PartialOrd TypeU where
   (<=) (VarU v1) (VarU v2) = v1 == v2
-  (<=) (ExistU v1 ts1 rs1) (ExistU v2 ts2 rs2)
+  (<=) (ExistU v1 (ts1, _) (rs1, _)) (ExistU v2 (ts2, _) (rs2, _))
     =  v1 == v2
     && length ts1 == length ts2
     && and (zipWith (P.<=) ts1 ts2)
@@ -1198,7 +1248,6 @@ instance Pretty Lit where
 instance Pretty E where
   pretty (BndP _ v) = pretty v
   pretty (VarP _ v _) = pretty v
-  pretty (AccP _ k e) = parens (pretty e) <> "[" <> pretty k <> "]"
   pretty (AppP _ e es) = pretty e <+> hsep (map f es) where
     f x@AppP{} = parens (pretty x)
     f x@LamP{} = parens (pretty x)
@@ -1210,6 +1259,7 @@ instance Pretty E where
   pretty (NamP _ rs) = encloseSep "{" "}" "," [pretty k <+> "=" <+> pretty e | (k,e) <- rs]
   pretty (LitP _ l) = pretty l
   pretty (SrcP _ src) = pretty src
+  pretty (PatP _ s) = pretty (PatternStruct s)
 
 
 instance Pretty Instance where
@@ -1253,7 +1303,7 @@ instance Pretty TypeU where
   -- True if the expression is on top, otherwise it needs to be parenthesized
     pretty t0 = f True t0 where
         f _ (VarU v) = pretty v
-        f _ (ExistU v [] []) = angles $ pretty v
+        f _ (ExistU v ([], _) ([], _)) = angles $ pretty v
         f _ (AppU (VarU (TV "List")) [t]) = "[" <> f True t <> "]"
         f _ (AppU (VarU (TV "Tuple2")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
         f _ (AppU (VarU (TV "Tuple3")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
@@ -1263,7 +1313,7 @@ instance Pretty TypeU where
         f _ (AppU (VarU (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
         f _ (AppU (VarU (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
         f False t = parens (f True t)
-        f _ (ExistU v ts rs)
+        f _ (ExistU v (ts, _) (rs, _))
           = angles $ pretty v
           <+> list (map (f False) ts)
           <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty (f True)) rs)
@@ -1371,8 +1421,8 @@ instance (Pretty k, Pretty a) => Pretty (IndexedGeneral k a) where
 
 instance Pretty GammaIndex where
   pretty (VarG tv) = "VarG:" <+> pretty tv
-  pretty (ExistG tv [] []) = angles (pretty tv)
-  pretty (ExistG tv ts rs)
+  pretty (ExistG tv ([], _) ([], _)) = angles (pretty tv)
+  pretty (ExistG tv (ts, _) (rs, _))
     = "ExistG:"
     <+> pretty tv
     <+> list (map (parens . pretty) ts)
@@ -1385,7 +1435,20 @@ instance Pretty GammaIndex where
 instance Pretty ExprI where
   pretty (ExprI i e) = parens (pretty e) <> ":" <> pretty i
 
+instance Pretty Pattern where
+  pretty (PatternText s ss) = dquotes $ hcat (pretty s : [ "#{}" <> pretty s' | s' <- ss])
+  pretty (PatternStruct s) = pretty s
+
+instance Pretty Selector where
+  pretty SelectorEnd = ""
+  pretty (SelectorKey (k, s) []) = "." <> pretty k <> pretty s
+  pretty (SelectorIdx (i, s) []) = "." <> pretty i <> pretty s
+  pretty (SelectorKey r rs) = "." <> tupled ["." <> pretty k <> pretty s | (k, s) <- (r:rs)]
+  pretty (SelectorIdx r rs) = "." <> tupled ["." <> pretty i <> pretty s | (i, s) <- (r:rs)]
+
 instance Pretty Expr where
+  pretty HolE = "_"
+  pretty (PatE pat) = "pattern:" <+> pretty pat
   pretty UniE = "()"
   pretty (ModE v es) = align . vsep $ ("module" <+> pretty v) : map pretty es
   pretty (ClsE (Typeclass cls vs sigs)) = "class" <+> pretty cls <+> hsep (map pretty vs) <> (align . vsep . map pretty) sigs
@@ -1398,7 +1461,6 @@ instance Pretty Expr where
   pretty (ExpE ExportAll) = "export *"
   pretty (ExpE (ExportMany symbols)) = "export" <+> tupled (map pretty (Set.toList symbols))
   pretty (VarE _ s) = pretty s
-  pretty (AccE k e) = parens (pretty e) <> "@" <> pretty k
   pretty (LamE v e) = "\\" <+> pretty v <+> "->" <+> pretty e
   pretty (AnnE e t) = parens (pretty e <+> "::" <+> pretty t)
   pretty (LstE es) = encloseSep "[" "]" "," (map pretty es)
@@ -1439,7 +1501,6 @@ instance Foldable f => Pretty (AnnoS a f b) where
 instance Foldable f => Pretty (ExprS a f b) where
     pretty (AppS e es)  = "(AppS" <+> list (map pretty (e:es)) <> ")"
     pretty (VarS v res) = "(VarS" <+> pretty v <+> "=" <+> list (map pretty (toList res)) <> ")"
-    pretty (AccS k e)   = pretty k <> "(" <> pretty e <> ")"
     pretty (LamS vs e)  = "(LamS" <+> list (map pretty vs) <+> "->" <+> (pretty e) <> ")"
     pretty (LstS es)    = "(LstS" <+> list (map pretty es) <> ")"
     pretty (TupS es)    = "(TupS" <+> list (map pretty es) <> ")"
@@ -1450,7 +1511,11 @@ instance Foldable f => Pretty (ExprS a f b) where
     pretty (IntS x)     = viaShow x
     pretty (LogS x)     = viaShow x
     pretty (StrS x)     = viaShow x
-    pretty (CallS x)    = pretty x
+    pretty (ExeS x)     = pretty x
+
+instance Pretty ExecutableExpr where
+  pretty (SrcCall src) = pretty src
+  pretty (PatCall pat) = pretty pat
 
 instance Pretty Signature where
   pretty (Signature v _ e) = pretty v <+> "::" <+> pretty (etype e)
@@ -1499,6 +1564,7 @@ instance Pretty MorlocError where
   pretty EmptyTuple = "EmptyTuple"
   pretty TupleSingleton = "TupleSingleton"
   pretty EmptyRecord = "EmptyRecord"
+  pretty (BadPattern msg) = "Bad pattern:" <+> pretty msg
   -- module errors
   pretty (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations: " <> tupled (map pretty mv)
   pretty (NestedModule name') = "Nested modules are currently illegal: " <> pretty name'
@@ -1607,7 +1673,6 @@ instance Pretty TypeError where
 
 mapExprSM :: (Traversable f, Monad m) => (AnnoS g f c -> m (AnnoS g' f c')) -> ExprS g f c -> m (ExprS g' f c')
 mapExprSM f (VarS v xs) = VarS v <$> traverse f xs
-mapExprSM f (AccS k x) = AccS k <$> f x
 mapExprSM f (AppS x xs) = AppS <$> f x <*> mapM f xs
 mapExprSM f (LamS vs x) = LamS vs <$> f x
 mapExprSM f (LstS xs) = LstS <$> mapM f xs
@@ -1619,7 +1684,7 @@ mapExprSM _ (RealS x) = return $ RealS x
 mapExprSM _ (IntS x) = return $ IntS x
 mapExprSM _ (LogS x) = return $ LogS x
 mapExprSM _ (StrS x) = return $ StrS x
-mapExprSM _ (CallS x) = return $ CallS x
+mapExprSM _ (ExeS x) = return $ ExeS x
 
 mapAnnoSM :: (Traversable f, Monad m) => (ExprS g f c -> g -> c -> m (g', c')) -> AnnoS g f c -> m (AnnoS g' f c')
 mapAnnoSM fun (AnnoS g c e) = do

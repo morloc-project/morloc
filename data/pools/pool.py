@@ -3,6 +3,7 @@ import sys
 import select
 import os # required for setting path to morloc dependencies
 import time
+import copy
 from collections import OrderedDict
 from multiprocessing import Process, cpu_count, Pipe, Value
 from multiprocessing.reduction import recv_handle, send_handle
@@ -23,7 +24,6 @@ import pymorloc as morloc
 # AUTO include serialization start
 # <<<BREAK>>>
 # AUTO include serialization end
-
 
 # AUTO include manifolds start
 # <<<BREAK>>>

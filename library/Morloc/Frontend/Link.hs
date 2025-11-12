@@ -335,7 +335,6 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
     | otherwise = mapM_ (linkLocal bnds c cs) es
 
   -- simple recursive cases
-  linkLocal bnds c cs (ExprI _ (AccE _ e)) = linkLocal bnds c cs e
   linkLocal bnds c cs (ExprI _ (LstE es )) = mapM_ (linkLocal bnds c cs) es
   linkLocal bnds c cs (ExprI _ (TupE es)) = mapM_ (linkLocal bnds c cs) es
   linkLocal bnds c cs (ExprI _ (NamE (map snd -> es))) = mapM_ (linkLocal bnds c cs) es

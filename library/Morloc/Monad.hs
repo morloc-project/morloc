@@ -70,6 +70,7 @@ import Morloc.Namespace
 import Morloc.Data.Doc
 import System.IO (stderr)
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Language as ML
@@ -148,8 +149,8 @@ writeMorlocReturn ((Right _, _), _) = return True
 
 -- | Execute a system call
 runCommand ::
-     MT.Text -- function making the call (used only in debugging messages on error)
-  -> MT.Text -- system command
+     Text -- function making the call (used only in debugging messages on error)
+  -> Text -- system command
   -> MorlocMonad ()
 runCommand loc cmd = do
   liftIO . MT.putStrLn $ "$ " <> cmd
@@ -187,9 +188,9 @@ sayVVV = sayIf 3
 
 -- | Execute a system call and return a function of the STDOUT
 runCommandWith ::
-     MT.Text -- function making the call (used only in debugging messages on error)
-  -> (MT.Text -> a) -- ^ A function of the output (run on success)
-  -> MT.Text -- ^ System command
+     Text -- function making the call (used only in debugging messages on error)
+  -> (Text -> a) -- ^ A function of the output (run on success)
+  -> Text -- ^ System command
   -> MorlocMonad a
 runCommandWith loc f cmd = do
   liftIO . MT.putStrLn $ "$ " <> cmd
@@ -228,7 +229,7 @@ logFileWith s f m = do
 
 -- | Attempt to read a language name. This is a wrapper around the
 -- @Morloc.Language::readLangName@ that appropriately handles error.
-readLang :: MT.Text -> MorlocMonad Lang
+readLang :: Text -> MorlocMonad Lang
 readLang langStr =
   case ML.readLangName langStr of
     (Just x) -> return x
@@ -272,8 +273,8 @@ metaName i = gets (Map.lookup i . stateName)
 getDocStrings
     :: Int -- expression index
     -> MorlocMonad
-        ( Maybe [[MT.Text]] -- docstrings for each top-level argument and the return value
-        , [MT.Text] -- docstrings for the entire expression
+        ( Maybe [[Text]] -- docstrings for each top-level argument and the return value
+        , [Text] -- docstrings for the entire expression
         )
 getDocStrings i = do
   sgmap <- gets stateSignatures

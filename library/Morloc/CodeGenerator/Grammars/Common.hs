@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , helperNamer
   , argNamer
   , manNamer
+  , patternSetter
   -- * Utilities
   , makeManifoldIndexer
   , translateManifold
@@ -26,6 +27,7 @@ module Morloc.CodeGenerator.Grammars.Common
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
+import Morloc.Data.Text (Text)
 import Morloc.Monad (Index, runIndex, newIndex, runIdentity)
 
 -- Stores pieces of code made while building a pool
@@ -101,6 +103,48 @@ makeManifoldIndexer getId putId = defaultValue
   surroundNM f nm@(NativeManifold i _ _ _) = descend i nm f
 
 
+patternSetter
+  :: (TypeF -> [MDoc] -> MDoc) -- make a tuple from a type and list of elements
+  -> (TypeF -> [MDoc] -> MDoc) -- make a record from a type and list of elements
+  -> (TypeF -> MDoc -> Int -> MDoc) -- access an element in a tuple
+  -> (TypeF -> MDoc -> Text -> MDoc) -- access an element in a record
+  -> MDoc -- initial data variable name
+  -> TypeF -- data type
+  -> Selector -- selection pattern
+  -> [MDoc] -- ordered arguments substituted at set sites
+  -> MDoc -- the returned data structure with a new spine that reuses unchanged fields
+patternSetter makeTuple makeRecord accessTuple accessRecord dat0 t0 s0 args0
+  = snd (setter dat0 t0 s0 args0)
+  where
+ 
+  setter :: MDoc -> TypeF -> Selector -> [MDoc] -> ([MDoc], MDoc)
+
+  -- tuple setters
+  setter dat1 tupleType@(AppF _ ts1) (SelectorIdx s1 ss1) args1 =
+    second (makeTuple tupleType) $ statefulMap (chooseField dat1 (s1:ss1)) args1 (zip [0..] ts1)
+    where
+      chooseField :: MDoc -> [(Int, Selector)] -> [MDoc] -> (Int, TypeF) -> ([MDoc], MDoc)
+      chooseField dat ss args (i, t) =
+        let dat' = accessTuple tupleType dat i
+        in case (lookup i ss) of
+          (Just s) -> setter dat' t s args
+          Nothing -> (args, dat') 
+
+  -- record setters
+  setter dat1 recType@(NamF _ _ _ rs1) (SelectorKey s1 ss1) args1 = 
+    second (makeRecord recType) $ statefulMap (chooseField dat1 (s1:ss1)) args1 rs1
+    where
+      chooseField :: MDoc -> [(Text, Selector)] -> [MDoc] -> (Key, TypeF) -> ([MDoc], MDoc)
+      chooseField dat ss args (Key k, t) =
+        let dat' = accessRecord recType dat k
+        in case (lookup k ss) of
+          (Just s) -> setter dat' t s args
+          Nothing -> (args, dat')
+
+  setter _ _ _ (arg:args2) = (args2, arg)
+
+  setter _ _ _ [] = error "Illegal setter"
+
 -- Represents the dependency of a on previously bound expressions
 data D a = D a [(Int, Either SerialExpr NativeExpr)]
 
@@ -126,13 +170,13 @@ instance Dependable NativeExpr where
       i <- newIndex
       return $ D (LetVarN (typeFof e) i) ((i, Right e) : deps)
 
-  isAtomic AppSrcN{} = False
+  isAtomic (AppExeN _ _ _ _) = False
   isAtomic ManN{} = False
   isAtomic SerialLetN{} = False
   isAtomic NativeLetN{} = False
-  isAtomic AccN{} = False
   isAtomic ListN{} = False
   isAtomic TupleN{} = False
+  isAtomic RecordN{} = False
   isAtomic _ = True
 
 instance Dependable SerialExpr where
@@ -198,10 +242,11 @@ invertSerialManifold sm0 =
   invertSerialExprM (SerializeS_ s (D ne lets)) = atomize (SerializeS s ne) lets
 
   invertNativeExprM :: NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) -> Index (D NativeExpr)
-  invertNativeExprM (AppSrcN_ t src qs nativeArgs) = do
+  invertNativeExprM (AppExeN_ t exe qs nativeArgs) = do
     let nativeArgs' = map unD nativeArgs
         deps = concatMap getDeps nativeArgs
-    atomize (AppSrcN t src qs nativeArgs') deps
+    atomize (AppExeN t exe qs nativeArgs') deps
+
   invertNativeExprM (ManN_ (D nm lets)) = atomize (ManN nm) lets
   invertNativeExprM (ReturnN_ (D ne lets)) = atomize (ReturnN ne) lets
 
@@ -213,8 +258,7 @@ invertSerialManifold sm0 =
   invertNativeExprM (LetVarN_ t i) = atomize (LetVarN t i) []
   invertNativeExprM (BndVarN_ t i) = atomize (BndVarN t i) []
   invertNativeExprM (DeserializeN_ t s (D se lets)) = atomize (DeserializeN t s se) lets
-  invertNativeExprM (AccN_ o v (D ne deps) key) = atomize (AccN o v ne key) deps
-  invertNativeExprM (SrcN_ t src) = atomize (SrcN t src) []
+  invertNativeExprM (ExeN_ t x) = atomize (ExeN t x) []
   invertNativeExprM (ListN_ v t nes) = atomize (ListN v t (map unD nes)) (concatMap getDeps nes)
   invertNativeExprM (TupleN_ v xs) = atomize (TupleN v (map unD xs)) (concatMap getDeps xs)
   invertNativeExprM (RecordN_ o v ps rs) = atomize (RecordN o v ps (map (second unD) rs)) (concatMap (getDeps . snd) rs)

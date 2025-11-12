@@ -23,6 +23,7 @@ import qualified Morloc.BaseTypes as BT
 import qualified Control.Monad.State as CMS
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.System as MS
 
@@ -34,10 +35,10 @@ readProgram
   -> Maybe Path
   -- ^ An optional path to the file the source code was read from. If no path
   -- is given, then the source code was provided as a string.
-  -> MT.Text -- ^ Source code
+  -> Text -- ^ Source code
   -> ParserState
   -> DAG MVar Import ExprI -- ^ Possibly empty directed graph of previously observed modules
-  -> Either (ParseErrorBundle MT.Text Void) (DAG MVar Import ExprI, ParserState)
+  -> Either (ParseErrorBundle Text Void) (DAG MVar Import ExprI, ParserState)
 readProgram moduleName modulePath sourceCode pstate p =
   case runParser
          (CMS.runStateT (sc >> pProgram moduleName <* eof) (reenter modulePath pstate))
@@ -51,7 +52,7 @@ readProgram moduleName modulePath sourceCode pstate p =
 
 -- | Parse a single type. This function used only in debugging in command line
 -- calls such as: `morloc typecheck -te "A -> B"`.
-readType :: MT.Text -> Either (ParseErrorBundle MT.Text Void) TypeU
+readType :: Text -> Either (ParseErrorBundle Text Void) TypeU
 readType typeStr =
   case runParser (CMS.runStateT (sc >> pTypeGen <* eof) (reenter Nothing emptyState)) "" typeStr of
     Left err' -> Left err'
@@ -138,16 +139,18 @@ pTopExpr =
 -- | Expressions that are allowed in function or data declarations
 pExpr :: Parser ExprI
 pExpr =
-      try pAcc    -- access <expr>@
+      try pHolE
   <|> try pUni
+  <|> try pAnn
+  <|> try pNumE
   <|> try pComposition
+  <|> try pApp
+  <|> try pSetter
+  <|> try pGetter
   <|> try pNamE   -- record
   <|> try pTupE
-  <|> try pAnn
-  <|> try pApp
   <|> try pStrE
   <|> try pLogE
-  <|> try pNumE
   <|> pLstE
   <|> parens pExpr
   <|> pLam
@@ -157,8 +160,7 @@ pExpr =
 pComposition :: Parser ExprI
 pComposition = do
 
-    fs <- sepBy pFunction (symbol ".")
-
+    fs <- sepBy pFunction dot
     case length fs of
         0 -> failure Nothing Set.empty
         1 -> failure Nothing Set.empty
@@ -311,8 +313,8 @@ pTypedef = try pTypedefType <|> pTypedefObject where
   -- TODO: is this really the right place to be doing this?
   desugarTableEntries
     :: NamType
-    -> (MT.Text, TypeU)
-    -> Parser (MT.Text, TypeU)
+    -> (Text, TypeU)
+    -> Parser (Text, TypeU)
   desugarTableEntries NamRecord entry = return entry
   desugarTableEntries NamObject entry = return entry
   desugarTableEntries NamTable (k0, t0) = (,) k0 <$> f t0 where
@@ -437,13 +439,13 @@ pSignature = do
     pConstraint :: Parser Constraint
     pConstraint = fmap (Con . MT.unwords) (many1 pWord)
 
-    pWord :: Parser MT.Text
+    pWord :: Parser Text
     pWord =  MT.pack <$> lexeme (many1 alphaNumChar)
 
 -- -- foo
 -- --   :: A --' ladida description
 -- --   -> B --' ladida description
--- pDocumentedFunction :: Parser (Maybe [[MT.Text]], TypeU)
+-- pDocumentedFunction :: Parser (Maybe [[Text]], TypeU)
 -- pDocumentedFunction = do
 --   ts <- sepBy2 pDocumentedType (op "->")
 --   case (init ts, last ts) of
@@ -452,7 +454,7 @@ pSignature = do
 --       , FunU (map snd inputs) (snd output)
 --       )
 --   where
---     pDocumentedType :: Parser ([MT.Text], TypeU)
+--     pDocumentedType :: Parser ([Text], TypeU)
 --     pDocumentedType = do
 --       t <- pType'
 --       -- docstrs <- many doc
@@ -461,7 +463,7 @@ pSignature = do
 --       where
 --         pType' = try pUniU <|> try parensType <|> try pAppU <|> pVarU <|> pListU <|> pTupleU
 
-pUndocumentedFunction :: Parser (Maybe [[MT.Text]], TypeU)
+pUndocumentedFunction :: Parser (Maybe [[Text]], TypeU)
 pUndocumentedFunction = do
     t <- pType
     return (Nothing, t)
@@ -499,7 +501,7 @@ pSource = do
       } | (srcVar, aliasVar, label') <- rs]
   where
 
-  pImportSourceTerm :: Parser (SrcName, EVar, Maybe MT.Text)
+  pImportSourceTerm :: Parser (SrcName, EVar, Maybe Text)
   pImportSourceTerm = do
     t <- optional pTag
     n <- stringLiteral
@@ -530,7 +532,7 @@ pNamE = do
   -- whatever.
   exprI $ NamE (map (first Key) rs)
 
-pNamEntryE :: Parser (MT.Text, ExprI)
+pNamEntryE :: Parser (Text, ExprI)
 pNamEntryE = do
   n <- freenameL
   _ <- symbol "="
@@ -542,36 +544,45 @@ pUni :: Parser ExprI
 pUni = symbol "(" >> symbol ")" >> exprI UniE
 
 
-pAcc :: Parser ExprI
-pAcc = do
-  e <- parens pExpr <|> pNamE <|> pVar
-  _ <- symbol "@"
-  f <- freenameL
-  exprI $ AccE (Key f) e
-
-
 pAnn :: Parser ExprI
 pAnn = do
-  e <-
-    parens pExpr <|> pVar <|> pLstE <|> try pNumE <|> pLogE <|> pStrE
+  e <-  try (parens pExpr)
+    <|> try pTupE
+    <|> pVar
+    <|> pLstE
+    <|> pNamE
+    <|> pNumE
+    <|> pLogE
+    <|> pStrE
   _ <- op "::"
   t <- pTypeGen
   exprI $ AnnE e t
 
 pApp :: Parser ExprI
 pApp = do
-  f <- parens pExpr <|> pVar
-  es <- many1 s
+  f <- parseFun
+  es <- many1 parseArg
   exprI $ AppE f es
   where
-    s =   try pAcc
-      <|> try pUni
+    parseFun =
+          pVar
+      <|> try pTupE -- only valid if wholy
+      <|> try pLstE     --  /
+      <|> try pNamE     -- /
+      <|> try pSetter
+      <|> try pGetter
       <|> try (parens pExpr)
+    parseArg =
+          try pUni
+      <|> try pTupE
+      <|> try (parens pExpr)
+      <|> try pSetter
+      <|> try pGetter
       <|> try pStrE
       <|> try pLogE
       <|> try pNumE
+      <|> pHolE
       <|> pLstE
-      <|> pTupE
       <|> pNamE
       <|> pVar
 
@@ -585,7 +596,43 @@ pLogE = do
     pFalse = reserved "False" >> return (LogE False)
 
 pStrE :: Parser ExprI
-pStrE = stringLiteral >>= exprI . StrE
+pStrE = do
+-- (Either Text (Text, [(a, Text)]))
+  eitherS <- stringPatterned pExpr
+  case eitherS of
+    (Left txt) -> exprI . StrE $ txt
+    (Right (s, es)) -> do
+      pattern <- exprI . PatE $ PatternText s (map snd es)
+      exprI $ AppE pattern (map fst es)
+
+pSetter :: Parser ExprI
+pSetter = do
+  -- parse the setter pattern
+  -- for example: .(x.0 = 1, y.a = 2, z = 3)
+  --  ss: the selectors, in this case the pattern .(x.0, y.a, z)
+  --  es: a list of expressions: [1,2,3]
+  (s, es) <- parsePatternSetter pExpr
+  setter <- exprI $ PatE (PatternStruct s)
+
+  -- fresh indices for the lambda and application expressions we'll create
+  idxLam <- exprId
+
+  -- a unique name for the lambda-bound datastructure variable
+  let v = EV (".setter_" <> MT.show' idxLam)
+
+  -- a variable to store the datastructure that will be passed to the lambda
+  vArg <- exprI $ VarE defaultValue v
+
+  -- apply arguments to the setter
+  -- first the datastructure and then all setting values
+  setterApp <- exprI $ AppE setter (vArg : es)
+
+  return $ ExprI idxLam (LamE [v] setterApp)
+
+pGetter :: Parser ExprI
+pGetter = do
+  s <- parsePatternGetter
+  exprI $ PatE (PatternStruct s)
 
 pNumE :: Parser ExprI
 pNumE = do
@@ -632,6 +679,8 @@ pVar = do
     mergeResources (Just (RemoteResources r1 m1 t1 g1)) (Just (RemoteResources r2 m2 t2 g2)) =
         Just $ RemoteResources (useRight r1 r2) (useRight m1 m2) (useRight t1 t2) (useRight g1 g2)
 
+pHolE :: Parser ExprI
+pHolE = hole >> exprI HolE
 
 pEVar :: Parser EVar
 pEVar = fmap EV freenameL
@@ -696,7 +745,7 @@ pTupleU = do
   return $ BT.tupleU ts
 
 
-pNamEntryU :: Parser (MT.Text, TypeU)
+pNamEntryU :: Parser (Text, TypeU)
 pNamEntryU = do
   n <- freename
   _ <- op "::"
@@ -706,7 +755,7 @@ pNamEntryU = do
 pExistential :: Parser TypeU
 pExistential = do
   v <- angles freenameL
-  return (ExistU (TV v) [] [])
+  return (ExistU (TV v) ([], Open) ([], Open))
 
 pAppU :: Parser TypeU
 pAppU = do
@@ -740,8 +789,8 @@ pTerm = do
   appendGenerics t  -- add the term to the generic list IF generic
   return t
 
-pTags :: Parser [MT.Text]
+pTags :: Parser [Text]
 pTags = many (try (freenameL <* op ":"))
 
-pTag :: Parser MT.Text
+pTag :: Parser Text
 pTag = try (freenameL <* op ":")

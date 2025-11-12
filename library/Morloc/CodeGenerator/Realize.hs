@@ -88,9 +88,6 @@ realize s0 = do
     :: RState
     -> (ExprS (Indexed Type) Many Int, Int)
     -> MorlocMonad (ExprS (Indexed Type) Many (Indexed [(Lang, Int)]), Indexed [(Lang, Int)])
-  scoreExpr rstat (AccS k x, i) = do
-    x' <- scoreAnnoS rstat x
-    return (AccS k x', Idx i (scoresOf x'))
   scoreExpr rstat (LstS xs, i) = do
     (xs', best) <- scoreMany rstat xs
     return (LstS xs', Idx i best)
@@ -137,7 +134,8 @@ realize s0 = do
             return (BndS v, Idx i scores)
         _ -> return (BndS v, zipLang i rstat)
 
-  scoreExpr _ (CallS src, i) = return (CallS src, Idx i [(srcLang src, callCost src)])
+  scoreExpr _     (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, callCost src)])
+  scoreExpr rstat (ExeS x@(PatCall   _), i) = return (ExeS x, zipLang i rstat)
   scoreExpr rstat (RealS x, i) = return (RealS x, zipLang i rstat)
   scoreExpr rstat (IntS x, i) = return (IntS x, zipLang i rstat)
   scoreExpr rstat (LogS x, i) = return (LogS x, zipLang i rstat)
@@ -292,10 +290,6 @@ realize s0 = do
           --   <> indent 2 (vsep [ "*" <+> pretty t <+> ":" <+> pretty y | y@(AnnoS (Idx _ t) _ _, _)  <- xs'])
 
   -- Propagate downwards
-  collapseExpr _ l1 (AccS k x, Idx i ss) = do
-    lang <- chooseLanguage l1 ss
-    x' <- collapseAnnoS lang x
-    return (AccS k x', Idx i lang)
   collapseExpr _ l1 (LstS xs, Idx i ss) = do
     lang <- chooseLanguage l1 ss
     xs' <- mapM (collapseAnnoS lang) xs
@@ -318,7 +312,8 @@ realize s0 = do
     xs' <- mapM (collapseAnnoS lang . snd) rs
     return (NamS (zip (map fst rs) xs'), Idx i lang)
   -- collapse leaf expressions
-  collapseExpr _ _ (CallS src, Idx i _) = return (CallS src, Idx i (Just (srcLang src)))
+  collapseExpr _ _ (ExeS x@(SrcCall src), Idx i _) = return (ExeS x, Idx i (Just (srcLang src)))
+  collapseExpr _ lang (ExeS x@(PatCall _), Idx i _) = return (ExeS x, Idx i lang)
   collapseExpr _ lang (BndS v,   Idx i _) = return (BndS v,   Idx i lang)
   collapseExpr _ lang (UniS,   Idx i _) = return (UniS,   Idx i lang)
   collapseExpr _ lang (RealS x, Idx i _) = return (RealS x, Idx i lang)
@@ -366,7 +361,6 @@ realize s0 = do
     f lang (AnnoS g (Idx i Nothing) e') = f lang (AnnoS g (Idx i (Just lang)) e')
     f _ (AnnoS g (Idx i (Just lang)) e') = do
       e'' <- case e' of
-        (AccS k x) -> AccS k <$> f lang x
         (AppS x xs) -> AppS <$> f lang x <*> mapM (f lang) xs
         (LamS vs x) -> LamS vs <$> f lang x
         (LstS xs) -> LstS <$> mapM (f lang) xs
@@ -379,7 +373,7 @@ realize s0 = do
         (IntS x) -> return (IntS x)
         (LogS x) -> return (LogS x)
         (StrS x) -> return (StrS x)
-        (CallS x) -> return (CallS x)
+        (ExeS x) -> return (ExeS x)
       return (AnnoS g (Idx i lang) e'')
 
 -- | This function is called on trees that contain no language-specific
@@ -407,7 +401,6 @@ makeGAST = mapAnnoSCM (\(Idx _ _) -> return ())
 
 removeVarS :: AnnoS g One c -> AnnoS g One c
 removeVarS (AnnoS g1 _ (VarS _ (One (AnnoS _ c2 x)))) = removeVarS (AnnoS g1 c2 x)
-removeVarS (AnnoS g c (AccS k x)) = AnnoS g c (AccS k (removeVarS x))
 removeVarS (AnnoS g c (AppS x xs)) = AnnoS g c (AppS (removeVarS x) (map removeVarS xs))
 removeVarS (AnnoS g c (LamS vs x )) = AnnoS g c (LamS vs (removeVarS x))
 removeVarS (AnnoS g c (LstS xs)) = AnnoS g c (LstS (map removeVarS xs))

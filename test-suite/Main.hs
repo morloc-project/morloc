@@ -13,7 +13,6 @@ main = do
     testGroup
       "Morloc tests"
       [ packerTests
-      , recordAccessTests
       , unitTypeTests
       , unitValuecheckTests
       , typeOrderTests
@@ -38,7 +37,12 @@ main = do
 
       -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
-      , golden "hofs-1" "hofs-1"
+      , golden "pattern-getters" "pattern-getters"
+      , golden "pattern-setters" "pattern-setters"
+
+      , golden "holes-func" "holes-func"
+      , golden "holes-record" "holes-record"
+      , golden "holes-simple" "holes-simple"
 
       , golden "type-annotations-1" "type-annotations-1"
 
@@ -48,6 +52,9 @@ main = do
       , golden "native-morloc-4" "native-morloc-4"
       , golden "native-morloc-5" "native-morloc-5"
       , golden "native-morloc-6" "native-morloc-6"
+      , golden "native-morloc-7" "native-morloc-7"
+      , golden "native-morloc-8" "native-morloc-8"
+      , golden "native-morloc-9" "native-morloc-9"
 
       , golden "demo-trimming" "demo-trimming"
 
@@ -65,6 +72,9 @@ main = do
       , golden "string-encoding" "string-encoding"
       , golden "string-encoding-utf8" "string-encoding-utf8"
       , golden "string-json-parsing" "string-json-parsing"
+      , golden "string-multiline" "string-multiline"
+      , golden "string-interpolation" "string-interpolation"
+
 
       , golden "file-input-py" "file-input-py"
       , golden "file-input-c" "file-input-c"
@@ -321,6 +331,9 @@ main = do
       -- testing packet transmission
       , golden "packets-large (wait ~10s)" "packets-large"
       , golden "packets-interop (wait ~10s)" "packets-interop"
+
+      -- many tests of higher-order functions
+      , golden "hofs-1" "hofs-1"
 
       -- test errors
       , golden "errors (wait ~10s)" "errors"

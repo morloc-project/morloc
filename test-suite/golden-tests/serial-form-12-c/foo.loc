@@ -1,6 +1,6 @@
 module main (foo)
 
-import root-cpp (id, Int, Str)
+import root-cpp (idcpp, Int, Str)
 
 record (Person a) = Person {name :: Str, info :: a}
 record cpp => (Person a) = "struct" {name :: Str, info :: a}
@@ -8,4 +8,4 @@ record cpp => (Person a) = "struct" {name :: Str, info :: a}
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
 foo :: Person (Person Int) -> Person (Person Int)
-foo xs = id xs
+foo xs = idcpp xs

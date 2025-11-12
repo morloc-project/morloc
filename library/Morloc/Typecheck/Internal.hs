@@ -37,6 +37,10 @@ module Morloc.Typecheck.Internal
   , rename
   , occursCheck
   , toExistential
+  -- * selectors
+  , selectorType
+  , selectorGetter
+  , selectorSetter
   -- * subtyping
   , subtype
   , isSubtypeOf2
@@ -53,11 +57,11 @@ module Morloc.Typecheck.Internal
 
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import Morloc.Data.Doc
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-
 import qualified Data.Set as Set
 
 qualify :: [TVar] -> TypeU -> TypeU
@@ -96,11 +100,11 @@ instance Applicable TypeU where
       Nothing -> ForallU v (apply g a)
 
   -- [G[a=t]]a = [G[a=t]]t
-  apply g (ExistU v ts rs) =
+  apply g (ExistU v (ts, tc) (rs, rc)) =
     case lookupU v g of
       -- FIXME: this seems problematic - do I keep the previous parameters or the new ones?
       (Just t') -> apply g t' -- reduce an existential; strictly smaller term
-      Nothing -> ExistU v (map (apply g) ts) (map (second (apply g)) rs)
+      Nothing -> ExistU v (map (apply g) ts, tc) (map (second (apply g)) rs, rc)
   apply g (NamU o n ps rs) = NamU o n ps [(k, apply g t) | (k, t) <- rs]
 
 instance Applicable EType where
@@ -110,7 +114,7 @@ instance Applicable Gamma where
   apply g1 g2 = g2 {gammaContext = map f (gammaContext g2)} where
     f :: GammaIndex -> GammaIndex
     f (AnnG v t) = AnnG v (apply g1 t)
-    f (ExistG v ps rs) = ExistG v (map (apply g1) ps) (map (second (apply g1)) rs)
+    f (ExistG v (ps, pc) (rs, rc)) = ExistG v (map (apply g1) ps, pc) (map (second (apply g1)) rs, rc)
     f (SolvedG v t) = SolvedG v (apply g1 t)
     f x = x
 
@@ -121,11 +125,11 @@ instance GammaIndexLike GammaIndex where
   index = id
 
 instance GammaIndexLike TypeU where
-  index (ExistU t ts rs) = ExistG t ts rs
+  index (ExistU t (ts, tc) (rs, rc)) = ExistG t (ts, tc) (rs, rc)
   index t = error $ "Can only index ExistT, found: " <> show t
 
 instance GammaIndexLike TVar where
-  index v = ExistG v [] []
+  index v = ExistG v ([], Open) ([], Open)
 
 (+>) :: GammaIndexLike a => Gamma -> a -> Gamma
 (+>) g x = g {gammaContext = index x : gammaContext g}
@@ -146,7 +150,8 @@ subtypeEvaluated scope t1 t2 g =
     case (TE.reduceType scope t1, TE.reduceType scope t2) of
       (Just t1', _) -> subtype scope t1' t2 g
       (_, Just t2') -> subtype scope t1 t2' g
-      (_, _) -> (Left . TypeEvaluationError . render) ("Type evaluation failed:" <+> viaShow (t1, t2))
+      (_, _) -> Left . TypeEvaluationError . render $
+          "Cannot compare types" <+> pretty t1 <+> "and" <+> pretty t2
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Scope -> TypeU -> TypeU -> Gamma -> Either TypeError Gamma
@@ -222,23 +227,34 @@ subtype scope t1@(NamU o1 v1 p1 ((k1,x1):rs1)) t2@(NamU o2 v2 p2 es2) g0 =
 --  g1[Ea] |- A <=: Ea -| g2
 -- ----------------------------------------- <:InstantiateR
 --  g1[Ea] |- A <: Ea -| g2
-subtype scope a b@(ExistU _ [] _) g = occursCheck b a "InstantiateR" >> instantiate scope a b g
+subtype scope a b@(ExistU _ ([], _) _) g = occursCheck b a "InstantiateR" >> instantiate scope a b g
 --  Ea not in FV(a)
 --  g1[Ea] |- Ea <=: A -| g2
 -- ----------------------------------------- <:InstantiateL
 --  g1[Ea] |- Ea <: A -| g2
-subtype scope a@(ExistU _ [] _) b g = occursCheck a b "InstantiateL" >> instantiate scope a b g
+subtype scope a@(ExistU _ ([], _) _) b g = occursCheck a b "InstantiateL" >> instantiate scope a b g
 
 subtype scope a@(AppU _ _) b@(ExistU _ _ _) g = subtype scope b a g
 
-subtype scope t1@(ExistU v1 ps1 []) t2@(AppU _ ps2) g1
-  | length ps1 /= length ps2 = Left $ SubtypeError t1 t2 "InstantiateL - Expected equal number of type parameters"
+subtype scope t1@(ExistU v1 (ps1, pc1) rs@([], _)) t2@(AppU _ ps2) g1
+  -- if the existential is closed and the parameter length is not equal, die
+  | pc1 == Closed && length ps1 /= length ps2 = Left $ SubtypeError t1 t2 "InstantiateL - Expected equal number of type parameters"
+
+  -- if the exsistential is open and it has fewer parameters, extend the
+  -- parameter list and retry
+  | pc1 == Open && length ps1 < length ps2 = do
+      let (ps1', _) = extendList ps1 ps2
+      subtype scope (ExistU v1 (ps1', pc1) rs) t2 g1
+
+  | length ps1 > length ps2 = Left $ SubtypeError t1 t2 "InstantiateL - too many parameters in left existential"
+
+  -- otherwise, do the thing
   | otherwise = do
     g2 <- foldM (\g (p1, p2) -> subtype scope p1 p2 g) g1 (zip ps1 ps2)
     case access1 v1 (gammaContext g2) of
-      Just (rs, _, ls) -> do
+      Just (rhs, _, lhs) -> do
         solved <- solve v1 t2
-        return $ g2 { gammaContext = rs ++ [solved] ++ ls }
+        return $ g2 { gammaContext = rhs ++ [solved] ++ lhs }
       Nothing -> return g2 -- it is already solved, so do nothing
 
 --  g1,>Ea,Ea |- [Ea/x]A <: B -| g2,>Ea,g3
@@ -256,8 +272,12 @@ subtype scope (ForallU v a) b g0 = subtype scope (substitute v a) b (g0 +> v)
 --  g1 |- A <: Forall a. B -| g2
 subtype scope a (ForallU v b) g = subtype scope a b (g +> VarG v) >>= cut (VarG v)
 
+-- note that these need to be evaluated AFTER all the existentials
+subtype scope t1@(VarU _) t2 g = subtypeEvaluated scope t1 t2 g
+subtype scope t1 t2@(VarU _) g = subtypeEvaluated scope t1 t2 g
+
 -- fall through
-subtype _ a b _ = Left $ SubtypeError a b "Type mismatch"
+subtype _ a b _ = Left $ SubtypeError a b "Type mismatch fall through"
 
 
 zipSubtype :: TypeU -> TypeU -> Scope -> [TypeU] -> [TypeU] -> Gamma -> Either TypeError Gamma
@@ -271,13 +291,27 @@ zipSubtype a b _ _ _ _ = Left $ SubtypeError a b "Parameter type mismatch"
 -- | Dunfield Figure 10 -- type-level structural recursion
 instantiate :: Scope -> TypeU -> TypeU -> Gamma -> Either TypeError Gamma
 
-instantiate scope ta@(ExistU _ _ (_:_)) tb@(NamU _ _ _ _) g1 = instantiate scope tb ta g1
-instantiate scope ta@(ExistU _ _ (_:_)) tb@(VarU _) g1 = instantiate scope tb ta g1
-instantiate scope ta@(VarU _) tb@(ExistU _ _ (_:_)) g1 = do
+instantiate scope ta@(ExistU _ _ (_:_, _)) tb@(NamU _ _ _ _) g1 = instantiate scope tb ta g1
+instantiate scope ta@(ExistU _ _ (_:_, _)) tb@(VarU _) g1 = instantiate scope tb ta g1
+instantiate scope ta@(VarU _) tb@(ExistU _ _ (_:_, _)) g1 = do
   case TE.reduceType scope ta of
     (Just ta') -> instantiate scope ta' tb g1
     Nothing -> Left $ InstantiationError ta tb "Error in VarU versus NamU with existential keys"
-instantiate scope ta@(NamU _ _ _ rs1) tb@(ExistU v _ rs2@(_:_)) g1 = do
+instantiate scope ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_:_), rc)) g1 = do
+
+  let keyset1 = Set.fromList $ map fst rs1
+      keyset2 = Set.fromList $ map fst rs2
+  _ <- case rc of
+    -- if the existential keys are closed, the the ta and tb keys must be identical
+    Closed -> if keyset1 == keyset2
+              then return ()
+              else Left $ InstantiationError ta tb "Error in NamU with conflicting closed keysets"
+    -- if the existential keys are open, then all existential keys muts be in
+    -- ta, but not vice versa
+    Open -> if Set.isSubsetOf keyset2 keyset1
+            then return ()
+            else Left $ InstantiationError ta tb "Error in NamU with conflicting open keysets"
+
   g2 <- foldM (\g' (t1, t2) -> subtype scope t1 t2 g') g1 [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
   case access1 v (gammaContext g2) of
     (Just (rhs, _, lhs)) -> do
@@ -285,15 +319,15 @@ instantiate scope ta@(NamU _ _ _ rs1) tb@(ExistU v _ rs2@(_:_)) g1 = do
         return $ g2 {gammaContext = rhs ++ [solved] ++ lhs}
     Nothing -> Left $ InstantiationError ta tb "Error in NamU with existential keys"
 
-instantiate scope ta@(ExistU v [] _) tb@(FunU as b) g1 = do
+instantiate scope ta@(ExistU v ([], _) _) tb@(FunU as b) g1 = do
   let (g2, veas) = statefulMap (\g _ -> tvarname g "ta") g1 as
       (g3, veb) = tvarname g2 "to"
-      eas = [ExistU v' [] [] | v' <- veas]
-      eb = ExistU veb [] []
+      eas = [ExistU v' ([], Open) ([], Open) | v' <- veas]
+      eb = ExistU veb ([], Open) ([], Open)
   g4 <- case access1 v (gammaContext g3) of
-      Just (rs, _, ls) -> do
+      Just (rhs, _, lhs) -> do
         solved <- solve v (FunU eas eb)
-        return $ g3 { gammaContext = rs ++ [solved] ++ (index eb : map index eas) ++ ls }
+        return $ g3 { gammaContext = rhs ++ [solved] ++ (index eb : map index eas) ++ lhs }
       Nothing -> Left $ InstantiationError ta tb "Error in InstLApp"
   g5 <- foldlM (\g (e, t) -> instantiate scope e t g) g4 (zip eas as)
   instantiate scope eb (apply g5 b) g5
@@ -302,15 +336,15 @@ instantiate scope ta@(ExistU v [] _) tb@(FunU as b) g1 = do
 --  g2 |- [g2]A2 <=: Ea2 -| g3
 -- ----------------------------------------- InstRApp
 --  g1[Ea] |- A1 -> A2 <=: Ea -| g3
-instantiate scope ta@(FunU as b) tb@(ExistU v [] _) g1 = do
+instantiate scope ta@(FunU as b) tb@(ExistU v ([], _) _) g1 = do
   let (g2, veas) = statefulMap (\g _ -> tvarname g "ta") g1 as
       (g3, veb) = tvarname g2 "to"
-      eas = [ExistU v' [] [] | v' <- veas]
-      eb = ExistU veb [] []
+      eas = [ExistU v' ([], Open) ([], Open) | v' <- veas]
+      eb = ExistU veb ([], Open) ([], Open)
   g4 <- case access1 v (gammaContext g3) of
-    Just (rs, _, ls) -> do
+    Just (rhs, _, lhs) -> do
         solved <- solve v (FunU eas eb)
-        return $ g3 { gammaContext = rs ++ [solved] ++ (index eb : map index eas) ++ ls }
+        return $ g3 { gammaContext = rhs ++ [solved] ++ (index eb : map index eas) ++ lhs }
     Nothing -> Left $ InstantiationError ta tb "Error in InstRApp"
   g5 <- foldlM (\g (e, t) -> instantiate scope t e g) g4 (zip eas as)
   instantiate scope eb (apply g5 b) g5
@@ -320,21 +354,21 @@ instantiate scope ta@(FunU as b) tb@(ExistU v [] _) g1 = do
 -- This is terrible kludge, I am not close to having considered all the edge
 -- cases. I need to completely rewrite my type system. Argh. I also need to get
 -- rid of all default types. Defaults should be set explicitly in morloc code.
-instantiate _ ta@(ExistU _ _ (_:_)) tb@(ExistU v [] []) g1 =
+instantiate _ ta@(ExistU _ _ (_:_, _)) tb@(ExistU v ([], _) ([], _)) g1 =
   case access1 v (gammaContext g1) of
-    (Just (ls, _, rs)) -> do
+    (Just (lhs, _, rhs)) -> do
         solved <- solve v ta
-        return $ g1 { gammaContext = ls ++ solved : rs }
+        return $ g1 { gammaContext = lhs ++ solved : rhs }
     Nothing ->
       case lookupU v g1 of
         (Just _) -> return g1
         Nothing -> Left . InstantiationError ta tb . render
           $ "Error in recordInstRSolve with gamma:\n" <> tupled (map pretty (gammaContext g1))
-instantiate _ ta@(ExistU v [] []) tb@(ExistU _ _ (_:_)) g1 =
+instantiate _ ta@(ExistU v ([], _) ([], _)) tb@(ExistU _ _ (_:_, _)) g1 =
   case access1 v (gammaContext g1) of
-    (Just (ls, _, rs)) -> do
+    (Just (lhs, _, rhs)) -> do
         solved <- solve v tb
-        return $ g1 { gammaContext = ls ++ solved : rs }
+        return $ g1 { gammaContext = lhs ++ solved : rhs }
     Nothing ->
       case lookupU v g1 of
         (Just _) -> return g1
@@ -353,43 +387,66 @@ instantiate scope ta@(ExistU _ _ _) (ForallU v2 t2) g1
 -- WARNING: be careful here, since the implementation adds to the front and the
 -- formal syntax adds to the back. Don't change anything in the function unless
 -- you really know what you are doing and have tests to confirm it.
-instantiate scope (ExistU v1 ps1 rs1) (ExistU v2 ps2 rs2) g1 = do
+instantiate scope ta@(ExistU v1 (ps1, pc1) (rs1, rc1)) tb@(ExistU v2 (ps2, pc2) (rs2, rc2)) g1 = do
+
+  -- check and expand open parameters
+  (ps1', ps2') <- case (pc1, pc2, compare (length ps1) (length ps2)) of
+    (Closed, Closed, _) -> Left $ InstantiationError ta tb "Unequal parameter length for closed existentials"
+    (Closed, Open, GT)  -> Right $ extendList ps1 ps2
+    (Closed, Open, LT)  -> Left $ InstantiationError ta tb "Left closed existential parameter list is less than right"
+    (Open, Closed, LT)  -> Right $ extendList ps1 ps2
+    (Open, Closed, GT)  -> Left $ InstantiationError ta tb "Right closed existential parameter list is less than left"
+    _ -> Right $ extendList ps1 ps2
+
+  let keyset1 = Set.fromList rs1
+  let keyset2 = Set.fromList rs2
+
+  -- check and expand open records
+  (rs1', rs2') <- case (rc1, rc2, Set.isSubsetOf keyset1 keyset2, Set.isSubsetOf keyset2 keyset1) of
+    (Closed, Closed, False, _     ) -> Left $ InstantiationError ta tb "Right closed existential contains keys missing in left closed existential"
+    (Closed, Closed, _,     False ) -> Left $ InstantiationError ta tb "Right closed existential contains keys missing in left closed existential"
+    (Closed, Open,   _,     False ) -> Left $ InstantiationError ta tb "Right existential contains keys missing in left closed existential"
+    (Open,   Closed, False, _     ) -> Left $ InstantiationError ta tb "Left existential contains keys missing in right closed existential"
+    _ -> Right $ extendRec rs1 rs2
+
   g2 <- foldM (\g (t1, t2) -> subtype scope t1 t2 g) g1 (zip ps1 ps2)
   g3 <- foldM (\g' (t1, t2) -> subtype scope t1 t2 g') g2 [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
-  let rs3 = rs1 <> [x | x <- rs2, fst x `notElem` map fst rs1]
-      ta = ExistU v1 ps1 rs3
-      tb = ExistU v2 ps2 rs3
+
+  -- define new types to insert
+  let taExpanded = ExistU v1 (ps1', pc1) (rs1', rc1)
+  let tbExpanded = ExistU v2 (ps2', pc1) (rs2', rc1)
+
   case access2 v1 v2 (gammaContext g3) of
     -- InstLReach
-    (Just (ls, _, ms, x, rs)) -> do
-        solved <- solve v1 tb
-        return $ g3 { gammaContext = ls <> (solved : ms) <> (x : rs) }
+    (Just (lhs, _, ms, x, rhs)) -> do
+        solved <- solve v1 tbExpanded
+        return $ g3 { gammaContext = lhs <> (solved : ms) <> (x : rhs) }
     Nothing ->
       case access2 v2 v1 (gammaContext g3) of
       -- InstRReach
-        (Just (ls, _, ms, x, rs)) -> do
-          solved <- solve v2 ta
-          return $ g3 { gammaContext = ls <> (solved : ms) <> (x : rs) }
+        (Just (lhs, _, ms, x, rhs)) -> do
+          solved <- solve v2 taExpanded
+          return $ g3 { gammaContext = lhs <> (solved : ms) <> (x : rhs) }
         Nothing -> return g3
 
 --  g1[Ea],>Eb,Eb |- [Eb/x]B <=: Ea -| g2,>Eb,g3
 -- ----------------------------------------- InstRAllL
 --  g1[Ea] |- Forall x. B <=: Ea -| g2
-instantiate scope (ForallU x b) tb@(ExistU _ [] _) g1
+instantiate scope (ForallU x b) tb@(ExistU _ ([], _) _) g1
   = instantiate
       scope
       (substitute x b) -- [Eb/x]B
       tb -- Ea
-      (g1 +> MarkG x +> ExistG x [] []) -- g1[Ea],>Eb,Eb
+      (g1 +> MarkG x +> ExistG x ([], Open) ([], Open)) -- g1[Ea],>Eb,Eb
   >>= cut (MarkG x)
 --  g1 |- t
 -- ----------------------------------------- InstRSolve
 --  g1,Ea,g2 |- t <=: Ea -| g1,Ea=t,g2
-instantiate _ ta tb@(ExistU v [] []) g1 =
+instantiate _ ta tb@(ExistU v ([], _) ([], _)) g1 =
   case access1 v (gammaContext g1) of
-    (Just (ls, _, rs)) -> do
+    (Just (lhs, _, rhs)) -> do
         solved <- solve v ta
-        return $ g1 { gammaContext = ls ++ solved : rs }
+        return $ g1 { gammaContext = lhs ++ solved : rhs }
     Nothing ->
       case lookupU v g1 of
         (Just _) -> return g1
@@ -400,11 +457,11 @@ instantiate _ ta tb@(ExistU v [] []) g1 =
 --  g1 |- t
 -- ----------------------------------------- instLSolve
 --  g1,Ea,g2 |- Ea <=: t -| g1,Ea=t,g2
-instantiate _ ta@(ExistU v [] []) tb g1 =
+instantiate _ ta@(ExistU v ([], _) ([], _)) tb g1 =
   case access1 v (gammaContext g1) of
-    (Just (ls, _, rs)) -> do
+    (Just (lhs, _, rhs)) -> do
         solved <- solve v tb
-        return $ g1 { gammaContext = ls ++ solved : rs }
+        return $ g1 { gammaContext = lhs ++ solved : rhs }
     Nothing ->
       case lookupU v g1 of
         (Just _) -> return g1
@@ -425,7 +482,7 @@ solve v t
 
 
 
-occursCheck :: TypeU -> TypeU -> MT.Text -> Either TypeError ()
+occursCheck :: TypeU -> TypeU -> Text -> Either TypeError ()
 occursCheck t1 t2 place =
   if Set.member t1 (free t2)
   then Left $ OccursCheckFail t1 t2 place
@@ -436,7 +493,7 @@ occursCheck t1 t2 place =
 -- | substitute all appearances of a given variable with an existential
 -- [t/v]A
 substitute :: TVar -> TypeU -> TypeU
-substitute v = substituteTVar v (ExistU v [] [])
+substitute v = substituteTVar v (ExistU v ([], Open) ([], Open))
 
 access1 :: TVar -> [GammaIndex] -> Maybe ([GammaIndex], GammaIndex, [GammaIndex])
 access1 v gs =
@@ -457,9 +514,9 @@ access2
   -> Maybe ([GammaIndex], GammaIndex, [GammaIndex], GammaIndex, [GammaIndex])
 access2 lv rv gs =
   case access1 lv gs of
-    Just (ls, x, rs) ->
-      case access1 rv rs of
-        Just (ls', y, rs') -> Just (ls, x, ls', y, rs')
+    Just (lhs, x, rhs) ->
+      case access1 rv rhs of
+        Just (ls', y, rs') -> Just (lhs, x, ls', y, rs')
         _ -> Nothing
     _ -> Nothing
 
@@ -497,14 +554,131 @@ cut i g = do
     | otherwise = f xs
 
 
-newvar :: MT.Text -> Gamma -> (Gamma, TypeU)
-newvar = newvarRich [] []
+selectorType :: Gamma -> Selector -> MorlocMonad (Gamma, TypeU)
+selectorType g0 SelectorEnd = do
+  let (g1, s) = newvar "_pattern_" g0
+  return (g1, s)
+selectorType g0 (SelectorIdx x xs) = do
+  -- highest index in this pattern, matching tuple must be at least this long
+  let maxIndex = maximum (map fst (x:xs))
+
+  -- combine groups, e.g.: .(.1.(0,1), .1.2, .2) --> .(.1.(0,1,2), .2)
+  xs' <- mapM (secondM weaveSelectors) (groupSort (x:xs))
+
+  (g1, ts) <- statefulMapM (makeIndexType xs') g0 (take (maxIndex+1) [0..])
+
+  return $ newvarRich (ts, Open) ([], Closed) "_pattern_" g1
+
+  where
+    makeIndexType :: [(Int, Selector)] -> Gamma -> Int -> MorlocMonad (Gamma, TypeU)
+    makeIndexType xs' g i = case lookup i xs' of
+      (Just s) -> selectorType g s
+      Nothing -> selectorType g SelectorEnd
+selectorType g0 (SelectorKey x xs) = do
+  xs' <- mapM (secondM weaveSelectors) (groupSort (x:xs))
+  (g1, ss) <- statefulMapM selectorType g0 (map snd xs')
+  return $ newvarRich ([], Closed) (zip (map (Key . fst) xs') ss, Open) "_pattern_" g1
+
+
+weaveSelectors :: [Selector] -> MorlocMonad Selector
+weaveSelectors [] = return SelectorEnd
+weaveSelectors (s0:ss0) = foldrM weavePair s0 ss0 where
+  weavePair :: Selector -> Selector -> MorlocMonad Selector
+  weavePair SelectorEnd s = return s
+  weavePair s SelectorEnd = return s
+  weavePair (SelectorIdx s1 ss1) (SelectorIdx s2 ss2) = do
+    xs <- mapM (secondM weaveSelectors) (groupSort ((s1:ss1) <> (s2:ss2)))
+    return $ SelectorIdx (head xs) (tail xs)
+  weavePair (SelectorKey s1 ss1) (SelectorKey s2 ss2) = do
+    xs <- mapM (secondM weaveSelectors) (groupSort ((s1:ss1) <> (s2:ss2)))
+    return $ SelectorKey (head xs) (tail xs)
+  weavePair x@(SelectorKey _ _) y@(SelectorIdx _ _) = weavePair y x
+  weavePair (SelectorIdx _ _) (SelectorKey _ _) = MM.throwError . BadPattern $ "Cannot merge index and keyword patterns"
+
+selectorGetter :: TypeU -> Selector -> [TypeU]
+selectorGetter t SelectorEnd = [t]
+selectorGetter (ExistU _ _ (ks, _)) (SelectorKey x xs)
+  = concat [maybe [] (\t -> selectorGetter t s) (lookup (Key k) ks) | (k, s) <- (x:xs)]
+selectorGetter (ExistU _ (ts, _) _) (SelectorIdx x xs)
+  = concat [selectorGetter (ts !! i) s | (i, s) <- (x:xs)]
+selectorGetter _ _ = error "Unreachable"
+
+-- | map over a type using a selector and update the type using set values
+selectorSetter
+  :: [TypeU]  -- types to which the selected fields are set
+  -> Selector -- current selector pattern
+  -> TypeU    -- current type that is being updated
+  -> TypeU    -- modified return type
+selectorSetter setTypes0 s0 t0 = fst (f t0 setTypes0 s0) where
+  f :: TypeU
+    -> [TypeU]
+    -> Selector
+    -> (TypeU, [TypeU]) -- the modified type and the list of remaining setters
+  f _ (t:ts) SelectorEnd = (t, ts)
+  f (ExistU v (ts, tc) (ks, kc)) setTypes1 (SelectorKey s ss) =
+    let (ks', setTypes2) = foldr subKey (ks, setTypes1) (s:ss)
+    in (ExistU v (ts, tc) (ks', kc), setTypes2)
+
+  f (NamU o v ps ks) setTypes1 (SelectorKey s ss) =
+    let (ks', setTypes2) = foldr subKey (ks, setTypes1) (s:ss)
+    in (NamU o v ps ks', setTypes2)
+  -- handle non-existential records
+  --  * note that this may well change the field type of the record, this should
+  --    raise an error later if such changes are not allowed
+  f (ExistU v (ts, tc) (ks, kc)) setTypes1 (SelectorIdx s ss) =
+    let (ts', setTypes2) = foldl subIdx (ts, setTypes1) (s:ss)
+    in (ExistU v (ts', tc) (ks, kc), setTypes2)
+  -- handle non-existential tuples
+  f (AppU t ts) setTypes1 (SelectorIdx s ss)
+    -- if this is a tuple, fine, proceed
+    | (VarU (BT.tuple (length ts))) == t =
+        let (ts', setTypes2) = foldl subIdx (ts, setTypes1) (s:ss)
+        in (AppU t ts', setTypes2)
+    -- otherwise die
+    | otherwise = error "Unreachable case"
+  -- and die some more
+  f _ _ _ = error "Unreachable pattern case"
+
+  subKey :: (Text, Selector) -> ([(Key, TypeU)], [TypeU]) -> ([(Key, TypeU)], [TypeU])
+  subKey (k, s) (ks, setTypesN) = case lookup (Key k) ks of
+    Nothing -> error "Malformed pattern"
+    (Just priorType) -> (ks', setTypesN')
+      where
+        (newType, setTypesN') = f priorType setTypesN s
+        ks' = [ if k' == k then (Key k, newType) else x | x@(Key k', _) <- ks]
+
+  subIdx :: ([TypeU], [TypeU]) -> (Int, Selector) -> ([TypeU], [TypeU])
+  subIdx (ts, setTypesN) (i, s)
+    | i < length ts = 
+        let (newType, setTypesN') = f (ts !! i) setTypesN s
+        in (take i ts <> [newType] <> drop (i+1) ts, setTypesN')
+    | otherwise = error $ "Bad pattern, index " <> show i <> " is greather than tuple length"
+
+
+extendList :: [a] -> [a] -> ([a], [a])
+extendList [] ys = (ys, ys)
+extendList xs [] = (xs, xs)
+extendList (x:xs) (y:ys) =
+  let (xs', ys') = extendList xs ys
+  in (x:xs', y:ys')
+
+extendRec :: Ord k => [(k, a)] -> [(k, a)] -> ([(k, a)], [(k, a)])
+extendRec xs ys =
+  ( xs <> [y | y@(k, _) <- ys, Set.notMember k setX]
+  , ys <> [x | x@(k, _) <- xs, Set.notMember k setY]
+  )
+  where
+    setX = Set.fromList (map fst xs)
+    setY = Set.fromList (map fst ys)
+
+newvar :: Text -> Gamma -> (Gamma, TypeU)
+newvar = newvarRich ([], Open) ([], Open)
 
 
 newvarRich
-  :: [TypeU] -- ^ type parameters
-  -> [(Key, TypeU)] -- ^ key-value pairs
-  -> MT.Text -- ^ prefix, just for readability
+  :: ([TypeU], OpenOrClosed) -- ^ type parameters
+  -> ([(Key, TypeU)], OpenOrClosed) -- ^ key-value pairs
+  -> Text -- ^ prefix, just for readability
   -> Gamma
   -> (Gamma, TypeU)
 newvarRich ps rs prefix g =
@@ -521,12 +695,12 @@ rename g0 (ForallU v@(TV s) t0) =
 -- Unless I add N-rank types, foralls can only be on top, so no need to recurse.
 rename g t = (g, t)
 
-tvarname :: Gamma -> MT.Text -> (Gamma, TVar)
+tvarname :: Gamma -> Text -> (Gamma, TVar)
 tvarname g prefix =
   let i = gammaCounter g
   in (g {gammaCounter = i + 1}, TV (prefix <> MT.pack (show i)))
 
-evarname :: Gamma -> MT.Text -> (Gamma, EVar)
+evarname :: Gamma -> Text -> (Gamma, EVar)
 evarname g prefix =
   let i = gammaCounter g
   in (g {gammaCounter = i + 1}, EV (prefix <> "@@" <> MT.pack (show i)))

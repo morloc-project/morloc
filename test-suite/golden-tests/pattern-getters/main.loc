@@ -1,0 +1,47 @@
+module m (testpy, testr, testcpp)
+
+import root
+import root-py
+import root-r
+import root-cpp
+
+-- module m (foo)
+-- foo = idr ( eq (map .1 [(1,True), (2,False)]) [True,False] )
+
+testr = idr
+  [ eq ((.1 (42, "Jim")))
+       "Jim"
+  , eq (.1.(.0,.2) (42, ("Jim", True, 69)))
+       ("Jim", 69)
+  -- , eq (map .1 [(1,2), (2,3)]) [2,3]
+  , True -- for now, I'm ignoring this case, there is an issue with list versus vector generation
+  , eq (.(.1, .0) (1, 2))
+       (2,1)
+  , eq (.(.1) (1, 2))
+       2
+  ]
+
+testpy = idpy -- force into python
+  [ eq (.1 (42, "Jim"))
+       "Jim"
+  , eq (.1.(.0,.2) (42, ("Jim", True, 69)))
+       ("Jim", 69)
+  , eq (map .1 [(1,2), (2,3)])
+       [2,3]
+  , eq (.(.1, .0) (1, 2))
+       (2,1)
+  , eq (.(.1) (1, 2))
+       2
+  ]
+
+testcpp = idcpp
+  [ eq (.1 (42, "Jim"))
+       "Jim"
+  , eq (.1.(.0,.2) (42, ("Jim", True, 69)))
+       ("Jim", 69)
+  , eq (map .1 [(1,2), (2,3)]) [2,3]
+  , eq (.(.1, .0) (1, 2))
+       (2,1)
+  , eq (.(.1) (1, 2))
+       2
+  ]

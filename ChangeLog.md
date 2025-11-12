@@ -1,4 +1,28 @@
-0.56.0 [2025-09-29]
+0.59.0 [2025-12-xx]
+ [ ] slicer patterns
+ [ ] filter pattern syntax
+ [ ] pattern commands for voidstar exploration
+ [ ] infix operators
+ [ ] pure functions (arithmetic, conditionals, map, fold, voidstar functions)
+ [ ] debug options and logging of failing inputs
+
+0.58.0 [2025-11-xx]
+ [ ] new record syntax
+ [ ] record syntax docstrings
+ [ ] records to argument option sets
+
+0.57.0 [2025-11-11]
+-------------------
+ * re-allow underscores in variable names
+ * add placeholder syntax / lambda lifting from holes
+ * multi-line strings
+ * string interpolation
+ * getter patterns
+ * setter patterns
+ * write full Morloc nexus evaluator
+ * Fix bug in local installs with "."
+
+0.56.0 [2025-10-08]
 -------------------
 
 New file organization

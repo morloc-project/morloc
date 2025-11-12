@@ -104,10 +104,10 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
   resolve = resolve' recurse
 
   f :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
-  f bnd (ExistU v ps rs) = do
+  f bnd (ExistU v (ps, pc) (rs, rc)) = do
     ps' <- mapM (recurse bnd) ps
     rs' <- mapM (\(k, v') -> (,) k <$> recurse bnd v') rs
-    return $ ExistU v ps' rs'
+    return $ ExistU v (ps', pc) (rs', rc)
   f bnd (FunU ts t) = FunU <$> mapM (recurse bnd) ts <*> recurse bnd t
   f bnd (NamU o n ps rs) = do
     (n', o') <- case Map.lookup n scope of
@@ -177,7 +177,10 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
   f bnd (ForallU v t) = ForallU v <$> recurse (Set.insert v bnd) t
 
   terminate :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
-  terminate bnd (ExistU v ts rs) = ExistU v <$> mapM (recurse bnd) ts <*> mapM (secondM (recurse bnd)) rs
+  terminate bnd (ExistU v (ts, tc) (rs, rc)) = do
+    ts' <- mapM (recurse bnd) ts
+    rs' <- mapM (secondM (recurse bnd)) rs
+    return $ ExistU v (ts', tc) (rs', rc)
   terminate bnd (FunU ts t) = FunU <$> mapM (recurse bnd) ts <*> recurse bnd t
   terminate bnd (ForallU v t) = ForallU v <$> recurse (Set.insert v bnd) t
   terminate bnd (AppU t ts) = AppU t <$> mapM (recurse bnd) ts
@@ -267,7 +270,7 @@ parsub :: (TVar, TypeU) -> TypeU -> TypeU
 parsub (v, t2) t1@(VarU v0)
   | v0 == v = t2 -- substitute
   | otherwise = t1 -- keep the original
-parsub pair (ExistU t ts rs) = ExistU t (map (parsub pair) ts) (zip (map fst rs) (map (parsub pair . snd) rs))
+parsub pair (ExistU t (ts, tc) (rs, rc)) = ExistU t (map (parsub pair) ts, tc) (zip (map fst rs) (map (parsub pair . snd) rs), rc)
 parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
 parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
 parsub pair (AppU t ts) = AppU (parsub pair t) (map (parsub pair) ts)

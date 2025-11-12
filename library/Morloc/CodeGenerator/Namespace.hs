@@ -30,10 +30,6 @@ module Morloc.CodeGenerator.Namespace
   -- **
   , Arg
   , ArgGeneral(..)
-  , JsonType(..)
-  , JsonPath
-  , JsonAccessor(..)
-  , NexusCommand(..)
   , ManifoldForm(..)
   , HeadManifoldForm(..)
   , manifoldContext
@@ -148,26 +144,6 @@ data TypeS
   | FunctionS [TypeM] TypeS -- This is the type of a manifold
   deriving(Show, Eq, Ord)
 
-type JsonPath = [JsonAccessor]
-data JsonAccessor
-  = JsonIndex Int
-  | JsonKey Key
-  deriving(Show)
-
-data NexusCommand = NexusCommand
-  { commandName :: EVar -- ^ user-exposed subcommand name in the nexus
-  , commandType :: Type -- ^ the general type of the expression
-  , commandForm :: MDoc -- ^ JSON format string
-  , commandArgs :: [EVar] -- ^ list of function arguments
-  , commandSubs :: [(JsonPath, Text, JsonPath)]
-  -- ^ list of tuples with values:
-  --    1) path in JSON to value needs to be replaced
-  --    2) the function argument from which to pull replacement value
-  --    3) the path to the replacement value
-  , commandDocs :: [Text]
-  }
-  deriving(Show)
-
 -- | A tree describing how to (de)serialize an object
 data SerialAST
   = SerialPack FVar (TypePacker, SerialAST) -- ^ use an (un)pack function to simplify an object
@@ -244,17 +220,6 @@ instance Pretty TypePacker where
     , "typePackerForward" <+> "=" <+> pretty (typePackerForward p)
     , "typePackerReverse" <+> "=" <+> pretty (typePackerReverse p)
     ]
-
--- | A simplified subset of the Type record where functions, existentials,
--- universals and language-specific info are removed
-data JsonType
-  = VarJ CVar
-  -- ^ {"int"}
-  | ArrJ CVar [JsonType]
-  -- ^ {"list":["int"]}
-  | NamJ CVar [(Key, JsonType)]
-  -- ^ {"Foo":{"bar":"A","baz":"B"}}
-  deriving (Show, Ord, Eq)
 
 type Arg = ArgGeneral Int
 
@@ -408,8 +373,7 @@ data PolyExpr
   -- The Let variables are generated only in partialExpress, where the type is known
   | PolyLetVar (Indexed Type) Int
   -- terms that map 1:1 versus SAnno; have defined types in one language
-  | PolySrc    (Indexed Type) Source
-  | PolyAcc    (Indexed Type) NamType (Indexed TVar) PolyExpr Key
+  | PolyExe    (Indexed Type) ExecutableExpr
   -- data types
   | PolyList   (Indexed TVar) (Indexed Type) [PolyExpr]
   | PolyTuple  (Indexed TVar) [(Indexed Type, PolyExpr)]
@@ -436,9 +400,8 @@ data MonoExpr
   | MonoReturn MonoExpr
   | MonoApp MonoExpr [MonoExpr]
   -- terms that map 1:1 versus SAnno; have defined types in one language
-  | MonoSrc    (Indexed Type) Source
+  | MonoExe    (Indexed Type) ExecutableExpr
   | MonoBndVar (Three None Type (Indexed Type)) Int -- (Three Lang Type (Indexed Type)) Int  -- (Maybe (Indexed Type))
-  | MonoAcc    (Indexed Type) NamType (Indexed TVar) MonoExpr Key
   -- data types
   | MonoRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, MonoExpr))]
   | MonoList   (Indexed TVar) (Indexed Type) [MonoExpr]
@@ -494,15 +457,14 @@ data NativeExpr
   -- The [TypeF] term stores solved generic terms. These map to the required
   -- template variables for C++ functions. These are NOT the arguments the
   -- function takes, rather these are the type parameters.
-  | AppSrcN      TypeF Source [(Text, TypeF)] [NativeArg]
+  | AppExeN      TypeF ExecutableExpr [(Text, TypeF)] [NativeArg]
   | ReturnN      NativeExpr
   | SerialLetN   Int SerialExpr NativeExpr
   | NativeLetN   Int NativeExpr NativeExpr
   | LetVarN      TypeF Int
   | BndVarN      TypeF Int
   | DeserializeN TypeF SerialAST SerialExpr
-  | AccN         NamType FVar NativeExpr Key
-  | SrcN         TypeF Source
+  | ExeN         TypeF ExecutableExpr
   -- data types
   | ListN        FVar TypeF [NativeExpr]
   | TupleN       FVar [NativeExpr]
@@ -539,7 +501,7 @@ foldlSE _ b (BndVarS_ _ _) = b
 foldlSE f b (SerializeS_ _ x) = f b x
 
 foldlNE :: (b -> a -> b) -> b -> NativeExpr_ a a a a a -> b
-foldlNE f b (AppSrcN_    _ _ _ xs) = foldl f b xs
+foldlNE f b (AppExeN_    _ _ _ xs) = foldl f b xs
 foldlNE f b (ManN_            x) = f b x
 foldlNE f b (ReturnN_       x) = f b x
 foldlNE f b (SerialLetN_   _ x1 x2) = foldl f b [x1, x2]
@@ -547,8 +509,7 @@ foldlNE f b (NativeLetN_   _ x1 x2) = foldl f b [x1, x2]
 foldlNE _ b (LetVarN_      _ _) = b
 foldlNE _ b (BndVarN_      _ _) = b
 foldlNE f b (DeserializeN_ _ _ x) = f b x
-foldlNE f b (AccN_         _ _ x _) =  f b x
-foldlNE _ b (SrcN_         _ _) = b
+foldlNE _ b (ExeN_         _ _) = b
 foldlNE f b (ListN_        _ _ xs) = foldl f b xs
 foldlNE f b (TupleN_       _ xs) = foldl f b xs
 foldlNE f b (RecordN_      _ _ _ rs) = foldl (\b' (_, a') -> f b' a') b rs
@@ -602,15 +563,14 @@ makeMonoidFoldDefault mempty' mappend' =
   monoidSerialExpr' (SerializeS_ s (req, ne)) = return (req, SerializeS s ne)
 
   monoidNativeExpr' (ManN_ (req, nm)) = return (req, ManN nm)
-  monoidNativeExpr' (AppSrcN_ t src qs (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppSrcN t src qs es)
+  monoidNativeExpr' (AppExeN_ t exe qs (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppExeN t exe qs es)
   monoidNativeExpr' (ReturnN_ (req, ne)) = return (req, ReturnN ne)
   monoidNativeExpr' (SerialLetN_ i (req1, se) (req2, ne)) = return (mappend' req1 req2, SerialLetN i se ne)
   monoidNativeExpr' (NativeLetN_ i (req1, ne1) (req2, ne2)) = return (mappend' req1 req2, NativeLetN i ne1 ne2)
   monoidNativeExpr' (LetVarN_ t i) = return (mempty', LetVarN t i)
   monoidNativeExpr' (BndVarN_ t i) = return (mempty', BndVarN t i)
   monoidNativeExpr' (DeserializeN_ t s (req, e)) = return (req, DeserializeN t s e)
-  monoidNativeExpr' (AccN_ o v (req, e) k) = return (req, AccN o v e k)
-  monoidNativeExpr' (SrcN_ t src) = return (mempty', SrcN t src)
+  monoidNativeExpr' (ExeN_ t exe) = return (mempty', ExeN t exe)
   monoidNativeExpr' (ListN_ v t xs) = return (foldl mappend' mempty' (map fst xs), ListN v t (map snd xs))
   monoidNativeExpr' (TupleN_ v xs) = return (foldl mappend' mempty' (map fst xs), TupleN v $ map snd xs)
   monoidNativeExpr' (RecordN_ o v ps rs)
@@ -732,7 +692,7 @@ data SerialExpr_ sm se ne sr nr
   | SerializeS_ SerialAST ne
 
 data NativeExpr_ nm se ne sr nr
-  = AppSrcN_      TypeF Source [(Text, TypeF)] [nr]
+  = AppExeN_      TypeF ExecutableExpr [(Text, TypeF)] [nr]
   | ManN_         nm
   | ReturnN_      ne
   | SerialLetN_   Int se ne
@@ -740,8 +700,7 @@ data NativeExpr_ nm se ne sr nr
   | LetVarN_      TypeF Int
   | BndVarN_      TypeF Int
   | DeserializeN_ TypeF SerialAST se
-  | AccN_         NamType FVar ne Key
-  | SrcN_         TypeF Source
+  | ExeN_         TypeF ExecutableExpr
   -- data types
   | ListN_        FVar TypeF [ne]
   | TupleN_       FVar [ne]
@@ -868,9 +827,9 @@ surroundFoldNativeExprM
   -> m ne
 surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
   where
-  f full@(AppSrcN t src qs nativeArgs) = do
+  f full@(AppExeN t exe qs nativeArgs) = do
       nativeArgs' <- mapM (surroundFoldNativeArgM sfm fm) nativeArgs
-      opFoldWithNativeExprM fm full $ AppSrcN_ t src qs nativeArgs'
+      opFoldWithNativeExprM fm full $ AppExeN_ t exe qs nativeArgs'
   f full@(ManN nativeManifold) = do
       nativeManifold' <- surroundFoldNativeManifoldM sfm fm nativeManifold
       opFoldWithNativeExprM fm full $ ManN_ nativeManifold'
@@ -890,10 +849,7 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
   f full@(DeserializeN t s se) = do
       se' <- surroundFoldSerialExprM sfm fm se
       opFoldWithNativeExprM fm full (DeserializeN_ t s se')
-  f full@(AccN n v ne key) = do
-      ne' <- surroundFoldNativeExprM sfm fm ne
-      opFoldWithNativeExprM fm full (AccN_ n v ne' key)
-  f full@(SrcN t src) = opFoldWithNativeExprM fm full (SrcN_ t src)
+  f full@(ExeN t exe) = opFoldWithNativeExprM fm full (ExeN_ t exe)
   f full@(ListN v t nes) = do
       nes' <- mapM (surroundFoldNativeExprM sfm fm) nes
       opFoldWithNativeExprM fm full (ListN_ v t nes')
@@ -921,20 +877,14 @@ instance HasTypeF TypeF where
 
 instance HasTypeF NativeExpr where
   typeFof (ManN nm) = typeFof nm
-  typeFof (AppSrcN      t _ _ _) = t
+  typeFof (AppExeN      t _ _ _) = t
   typeFof (ReturnN      e) = typeFof e
   typeFof (SerialLetN   _ _ e) = typeFof e
   typeFof (NativeLetN   _ _ e) = typeFof e
   typeFof (LetVarN      t _) = t
   typeFof (BndVarN      t _) = t
   typeFof (DeserializeN t _ _) = t
-  typeFof (AccN           _ _ (typeFof -> NamF _ _ _ rs) key) =
-    -- NOTE: This will fail if the key does not exist. However, non-existence of
-    -- a key should have been caught by the typechecker. So such non-existence
-    -- here indicates a but in the compiler and should die immediately.
-    fromJust . listToMaybe $ [t | (key', t) <- rs, key' == key]
-  typeFof AccN{} = error "Bug - illegal key access should have been caught in the typechecker"
-  typeFof (SrcN         t _) = t
+  typeFof (ExeN         t _) = t
   typeFof (ListN        v p _) = AppF (VarF v) [p]
   typeFof (TupleN       v (map typeFof -> ps)) = AppF (VarF v) ps
   typeFof (RecordN      o n ps (map (second typeFof) -> rs)) = NamF o n ps rs
@@ -1112,7 +1062,7 @@ instance MFunctor SerialExpr where
 instance MFunctor NativeExpr where
   mgatedMap g f ne0
     | gateNativeExpr g ne0 = case ne0 of
-        (AppSrcN t src qs nativeArgs) -> mapNativeExpr f $ AppSrcN t src qs (map (mgatedMap g f) nativeArgs)
+        (AppExeN t exe qs nativeArgs) -> mapNativeExpr f $ AppExeN t exe qs (map (mgatedMap g f) nativeArgs)
         (ManN nm) -> mapNativeExpr f $ ManN (mgatedMap g f nm)
         (ReturnN ne) -> mapNativeExpr f $ ReturnN (mgatedMap g f ne)
         (SerialLetN i se ne) -> mapNativeExpr f $ SerialLetN i (mgatedMap g f se) (mgatedMap g f ne)
@@ -1120,8 +1070,7 @@ instance MFunctor NativeExpr where
         e@(LetVarN _ _) -> mapNativeExpr f e
         e@(BndVarN _ _) -> mapNativeExpr f e
         (DeserializeN t s se ) -> mapNativeExpr f $ DeserializeN t s (mgatedMap g f se)
-        (AccN o v ne key) -> mapNativeExpr f $ AccN o v (mgatedMap g f ne) key
-        e@(SrcN _ _) -> mapNativeExpr f e
+        e@(ExeN _ _) -> mapNativeExpr f e
         (ListN v t nes) -> mapNativeExpr f $ ListN v t (map (mgatedMap g f) nes)
         (TupleN v xs) -> mapNativeExpr f $ TupleN v (map (mgatedMap g f) xs)
         (RecordN o v ps rs) -> mapNativeExpr f $ RecordN o v ps (map (second (mgatedMap g f)) rs)
@@ -1163,8 +1112,8 @@ instance Pretty PolyExpr where
     pretty (PolyApp e es) = "PolyApp" <+> list (map pretty (e:es))
     pretty (PolyBndVar _ _) = "PolyBndVar"
     pretty (PolyLetVar _ _) = "PolyLetVar"
-    pretty (PolySrc _ src) = "PolySrc<" <> pretty (srcAlias src) <> ">"
-    pretty (PolyAcc _ _ _ _ _) = "PolyAcc"
+    pretty (PolyExe _ (SrcCall src)) = "PolyExe<" <> pretty (srcAlias src) <> ">"
+    pretty (PolyExe _ (PatCall _)) = "PolyExe<pattern>"
     pretty (PolyList _ _ _) = "PolyList"
     pretty (PolyTuple _ xs) = "PolyTuple" <+> pretty (length xs)
     pretty (PolyRecord _ _ _ _) = "PolyRecord"
@@ -1184,11 +1133,10 @@ instance Pretty MonoExpr where
     pretty (MonoLetVar t i) = parens $ "x" <> pretty i <> " :: " <> pretty t
     pretty (MonoReturn e) = "return" <> parens (pretty e)
     pretty (MonoApp e es) = parens (pretty e) <+> hsep (map (parens . pretty) es)
-    pretty (MonoSrc    _ src) = pretty src
+    pretty (MonoExe    _ exe) = pretty exe
     pretty (MonoBndVar (A _) i) = parens $ "x" <> pretty i <+> ":" <+> "<unknown>"
     pretty (MonoBndVar (B t) i) = parens $ "x" <> pretty i <+> ":" <+> pretty t
     pretty (MonoBndVar (C t) i) = parens $ "x" <> pretty i <+> ":" <+> pretty t
-    pretty (MonoAcc    _ _ _ e k) = parens (pretty e) <> "@" <> pretty k
     pretty (MonoList   _ _ es) = list (map pretty es)
     pretty (MonoTuple  v es) = pretty v <+> tupled (map pretty es)
     pretty (MonoRecord o v fs _)

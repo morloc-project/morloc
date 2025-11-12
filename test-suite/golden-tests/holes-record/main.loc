@@ -1,0 +1,25 @@
+module foo (test)
+
+import root-py
+
+record Person = Person
+  { name :: Str
+  , age :: Int
+  }
+record Py => Person = "dict"
+
+-- This defines how Python works when it doesn't know the type
+type Py => Record = "dict"
+
+bar :: Str -> Person
+bar = { name = _, age = 0 }
+
+test = fold and True
+  [ eq (map bar ["Alice", "Bob"]) ([{name = "Alice", age = 0 }, {name = "Bob", age = 0}])
+
+  -- Requires the Record def, there is something wrong in type inference.
+  , eq (map {name = _, age = 0} ["Alice", "Bob"]) ([{name = "Alice", age = 0 }, {name = "Bob", age = 0}])
+
+  -- anonymous records (workds in Python and R, would fail in C++ currently)
+  , eq (map {foo = _, bar = 0} ["Alice", "Bob"]) ([{foo = "Alice", bar = 0 }, {foo = "Bob", bar = 0}])
+  ]

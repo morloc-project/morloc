@@ -122,6 +122,8 @@ serialAstToMsgpackSchema (SerialNull    v) = addHint v <> "z"
 serialAstToMsgpackSchema (SerialUnknown v) = addHint v <> "?" -- I guess this works as a general bad new character?
 
 addHint :: FVar -> MDoc
+addHint (FV _ (CV "")) = "" -- no hint if no concrete type is defined
+                            -- this is helpful in the nexus
 addHint (FV _ (CV v)) = "<" <> pretty v <> ">"
 
 

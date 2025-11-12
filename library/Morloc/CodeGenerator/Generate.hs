@@ -20,6 +20,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Nexus as Nexus
@@ -39,15 +40,12 @@ generate
   -> MorlocMonad (Script, [Script])
   -- ^ the nexus code and the source code for each language pool
 generate gASTs rASTs = do
-  -- Collect all call-free data
-  gSerial <- mapM generalSerial gASTs
-
   -- build nexus
   -- -----------
   -- Each nexus subcommand calls one function from one one pool.
   -- The call passes the pool an index for the function (manifold) that will be called.
 
-  nexus <- mapM makeFData rASTs >>= Nexus.generate gSerial
+  nexus <- mapM makeFData rASTs >>= Nexus.generate gASTs
 
   -- initialize counter for use in express
   MM.startCounter
@@ -72,7 +70,6 @@ findSockets rAST = do
 findAllLangsSAnno :: AnnoS e One (Indexed Lang) -> [Lang]
 findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e where
   findAllLangsExpr (VarS _ (One x)) = findAllLangsSAnno x
-  findAllLangsExpr (AccS _ x) = findAllLangsSAnno x
   findAllLangsExpr (AppS x xs) = concatMap findAllLangsSAnno (x:xs)
   findAllLangsExpr (LamS _ x) = findAllLangsSAnno x
   findAllLangsExpr (LstS xs) = concatMap findAllLangsSAnno xs
@@ -101,103 +98,6 @@ generatePools rASTs = do
     -- segments from a given language into one pool. Later it may be more
     -- nuanced.
     |>> pool
-
-
-generalSerial :: AnnoS (Indexed Type) One () -> MorlocMonad NexusCommand
-generalSerial x0@(AnnoS (Idx i t) _ _) = do
-
-  (_, docstrings) <- MM.getDocStrings i
-
-  mayName <- MM.metaName i
-  n <- case mayName of
-    Nothing -> MM.throwError . OtherError $ "No name found for call-free function"
-    (Just n') -> return n'
-  let base = NexusCommand {
-      commandName = n
-    , commandType = t
-    , commandForm = ""
-    , commandArgs = []
-    , commandSubs = []
-    , commandDocs = docstrings
-    }
-  generalSerial' base [] x0
-
-  where
-
-    generalSerial' :: NexusCommand -> JsonPath -> AnnoS (Indexed Type) One () -> MorlocMonad NexusCommand
-    generalSerial' base _ (AnnoS _ _ UniS)
-      = return $ base { commandForm = "null" }
-    generalSerial' base _ (AnnoS _ _ (RealS x))
-      = return $ base { commandForm = viaShow x }
-    generalSerial' base _ (AnnoS _ _ (IntS x))
-      = return $ base { commandForm = viaShow x }
-    generalSerial' base _ (AnnoS _ _ (LogS x))
-      = return $ base { commandForm = if x then "true" else "false" }
-    generalSerial' base _ (AnnoS _ _ (StrS x))
-      = return $ base { commandForm = "\\\"" <> pretty x <> "\\\"" }
-    -- if a nested accessor is observed, evaluate the nested expression and
-    -- append the path
-    generalSerial' base ps (AnnoS _ _ (AccS k x@(AnnoS _ _ (AccS _ _)))) = do
-      ncmd <- generalSerial' base ps x
-      case commandSubs ncmd of
-        [(ps1, arg, ps2)] ->
-          return $ ncmd { commandForm = "%s"
-                        , commandSubs = [(ps1, arg, JsonKey k : ps2)]
-                        }
-        _ -> error "Bad record access"
-    -- record the path to and from a record access
-    generalSerial' base ps (AnnoS _ _ (AccS k (AnnoS (Idx _ NamT {}) _ (BndS v)))) =
-      return $ base { commandForm = "%s"
-                    , commandSubs = [(ps, unEVar v, [JsonKey k])] }
-    -- If the accessed type is not a record, try to simplify the type
-    generalSerial' base ps (AnnoS g1 c1 (AccS key (AnnoS (Idx m oldType) c2 x))) = do
-      mayT <- evalGeneralStep i (type2typeu oldType)
-      case mayT of
-        (Just recordType) ->
-          generalSerial' base ps (AnnoS g1 c1 (AccS key (AnnoS (Idx m (typeOf recordType)) c2 x)))
-        Nothing -> MM.throwError . OtherError . render $ "Non-record access of type:" <+> pretty oldType
-    generalSerial' base ps (AnnoS _ _ (LstS xs)) = do
-      ncmds <- zipWithM (generalSerial' base) [ps ++ [JsonIndex j] | j <- [0..]] xs
-      return $ base
-        { commandForm = oneLineEnclose "[" "]" "," (map commandForm ncmds)
-        , commandSubs = concatMap commandSubs ncmds
-        }
-    generalSerial' base ps (AnnoS _ _ (TupS xs)) = do
-      ncmds <- zipWithM (generalSerial' base) [ps ++ [JsonIndex j] | j <- [0..]] xs
-      return $ base
-        { commandForm = oneLineEnclose "[" "]" "," (map commandForm ncmds)
-        , commandSubs = concatMap commandSubs ncmds
-        }
-    generalSerial' base ps (AnnoS _ _ (NamS es)) = do
-      ncmds <- fromJust <$>
-        safeZipWithM
-          (generalSerial' base)
-          [ps ++ [JsonKey k] | k <- map fst es]
-          (map snd es)
-      let entries = zip (map fst es) (map commandForm ncmds)
-          obj = oneLineEnclose "{" "}" ","
-                (map (\(k, v) -> "\\\"" <> (pretty k) <> "\\\"" <> ":" <> v) entries)
-      return $ base
-        { commandForm = obj
-        , commandSubs = concatMap commandSubs ncmds
-        }
-    generalSerial' base ps (AnnoS _ _ (LamS vs x)) = do
-      ncmd <- generalSerial' base ps x
-      return $ ncmd { commandArgs = vs }
-    generalSerial' base ps (AnnoS _ _(BndS (EV v))) =
-      return $ base { commandForm = "%s"
-                    , commandSubs = [(ps, v, [])] }
-    -- bad states
-    generalSerial' _ _ (AnnoS _ _ (VarS v _)) = error $ "VarS should have been removed in the prior step, found: " <> show v
-    generalSerial' NexusCommand{} _ (AnnoS _ _ (CallS _)) = error "Functions should not occur here, observed AppS"
-    generalSerial' NexusCommand{} _ (AnnoS _ _ (AppS _ _)) = error "Functions should not occur here, observed AppS"
-
-    -- enclose with no extra space, good for compact JSON
-    oneLineEnclose :: MDoc -> MDoc -> MDoc -> [MDoc] -> MDoc
-    oneLineEnclose lhs rhs _ [] = lhs <> rhs
-    oneLineEnclose lhs rhs _ [x] = lhs <> x <> rhs
-    oneLineEnclose lhs rhs sepVal (x:rs) = lhs <> x <> foldl (<>) "" [sepVal <> r | r <- rs] <> rhs
-
 
 -- | Add arguments that are required for each term. Unneeded arguments are
 -- removed at each step.
@@ -233,12 +133,10 @@ parameterize' _ (AnnoS g c (StrS x))  = return (AnnoS g (c, []) (StrS x))
 parameterize' args (AnnoS g c (BndS v)) = do
   let args' = [r | r@(Arg _ v') <- args, v' == v]
   return $ AnnoS g (c, args') (BndS v)
-parameterize' args (AnnoS g c (AccS k x)) = do
-  x' <- parameterize' args x
-  let args' = pruneArgs args [x']
-  return $ AnnoS g (c, args') (AccS k x')
-parameterize' _ (AnnoS m c (CallS src)) = do
-  return $ AnnoS m (c, []) (CallS src)
+parameterize' _ (AnnoS m c (ExeS (SrcCall src)))
+  = return $ AnnoS m (c, []) (ExeS (SrcCall src))
+parameterize' _ (AnnoS g c (ExeS (PatCall x)))
+  = return (AnnoS g (c, []) (ExeS (PatCall x)))
 parameterize' args (AnnoS g c (LstS xs)) = do
   xs' <- mapM (parameterize' args) xs
   let args' = pruneArgs args xs'
@@ -288,7 +186,7 @@ setManifoldConfig
 -- The positive case of an application to a term. The VarS here directly maps to
 -- a term in the users input code, e.g., `myTag:foo`.
 setManifoldConfig midx (AnnoS _ _ (AppS (AnnoS (Idx fidx _) _ (VarS _ _)) _)) = linkConfigIndex midx fidx
-setManifoldConfig midx (AnnoS _ _ (AppS (AnnoS (Idx fidx _) _ (CallS _)) _)) = linkConfigIndex midx fidx
+setManifoldConfig midx (AnnoS _ _ (AppS (AnnoS (Idx fidx _) _ (ExeS _)) _)) = linkConfigIndex midx fidx
 setManifoldConfig midx (AnnoS _ _ (AppS e _)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (LamS _ e)) = setManifoldConfig midx e
 setManifoldConfig _ _ = return ()
@@ -313,14 +211,14 @@ linkConfigIndex midx fidx = do
 --         expression.
 express :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
 -- CallS - direct export of a sourced function, e.g.:
-express (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (CallS src)) = do
+express (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) = do
   MM.sayVVV $ "express CallS (midx=" <> pretty midx <> "," <+> "cidx=" <> pretty cidx <> "):"
   ids <- MM.takeFromCounter (length inputs)
   let lambdaVals = fromJust $ safeZipWith PolyBndVar (map (C . Idx cidx) inputs) ids
   return
     . PolyHead lang midx [Arg i None | i <- ids]
     . PolyReturn
-    $ PolyApp (PolySrc (Idx midx c) src) lambdaVals
+    $ PolyApp (PolyExe (Idx midx c) exe) lambdaVals
 
 -- *****************  EVIL INDEX REWRITE HACK WARNING ************************
 -- Move the index from the lambda to the application.
@@ -438,12 +336,12 @@ expressPolyExpr
 -- these cases will include partially applied functions and explicit lambdas
 -- the former is transformed into the latter in the frontend typechecker
 expressPolyExpr findRemote parentLang _
-  (AnnoS (Idx midx lamType@(FunT lamInputTypes lamOutType)) (Idx cidxLam _, lamArgs)
+  (AnnoS (Idx midx (FunT lamInputTypes lamOutType)) (Idx cidxLam _, lamArgs)
     (LamS vs
       (AnnoS _ (Idx _ appLang, appArgs)
         (AppS
           (AnnoS callTypeI@(Idx _ (FunT callInputTypes _)) (Idx _ callLang, _)
-            (CallS src)) xs))))
+            (ExeS exe)) xs))))
 
   ----------------------------------------------------------------------------------------
   -- #4 cis partial lambda                                     | contextArgs | boundArgs |
@@ -486,11 +384,6 @@ expressPolyExpr findRemote parentLang _
   --          return g(lambda z, x: m2(x, y, z))               |             |           |
   ----------------------------------------------------------------------------------------
   | not isLocal = do
-      MM.sayVVV $ "case #8 m" <> pretty midx
-                <> "\n  lamType = " <+> pretty lamType
-                <> "\n  len(xs) = " <+> pretty (length xs)
-                <> "\n  src = " <+> pretty src
-                <> "\n  appArgs:" <+> list (map pretty appArgs)
       -- 1. express all xs under the foreign type if they are in the foreign language or
       --    the parent type (pc) if they are in the parent language
       --
@@ -543,21 +436,6 @@ expressPolyExpr findRemote parentLang _
           -- boundArgs = map unvalue (drop () appArgs)
           foreignForm = ManifoldFull [Arg i None | i <- passedParentArgs]
 
-      MM.sayVVV $ "Making foreign interface 8 of type:" <+> pretty (Idx cidxLam lamOutType)
-        <> "\n  appArgs" <+> pretty appArgs
-        <> "\n  src" <+> pretty src
-        <> "\n  vs:" <+> pretty vs
-        <> "\n  callArgs:" <+> pretty callArgs
-        <> "\n  args:" <+> pretty args
-        <> "\n  allParentArgs:" <+> pretty allParentArgs
-        <> "\n  passedParentArgs:" <+> pretty passedParentArgs
-        <> "\n  nContextArgs:" <+> pretty nContextArgs
-        <> "\n  boundVars:" <+> pretty boundVars
-        <> "\n  untypedContextArgs:" <+> pretty untypedContextArgs
-        <> "\n  typedPassedArgs:" <+> pretty typedPassedArgs
-        <> "\n  local manifold form args:" <+> pretty localForm
-        <> "\n  foreign manifold form args:" <+> pretty (foreignForm :: ManifoldForm None (Maybe Type))
-
       return
         . PolyManifold parentLang midx localForm
         . chain lets
@@ -574,7 +452,7 @@ expressPolyExpr findRemote parentLang _
     remote = findRemote parentLang callLang
     isLocal = isNothing remote
 
-    call = PolySrc callTypeI src
+    call = PolyExe callTypeI exe
 
     chain :: [a -> a] -> a -> a
     chain [] x = x
@@ -665,7 +543,7 @@ expressPolyExpr _ _ _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manifoldArgume
 -- * These applications will be fully applied, the case of partially applied
 --   functions will have been handled previously by LamM
 expressPolyExpr findRemote parentLang pc (AnnoS (Idx midx _) (_, args)
-  (AppS (AnnoS (Idx gidxCall fc@(FunT inputs _)) (Idx cidxCall callLang, _) (CallS src)) xs))
+  (AppS (AnnoS (Idx gidxCall fc@(FunT inputs _)) (Idx cidxCall callLang, _) (ExeS exe)) xs))
 
   ----------------------------------------------------------------------------------------
   -- #1 cis applied                                            | contextArgs | boundArgs |
@@ -677,13 +555,6 @@ expressPolyExpr findRemote parentLang pc (AnnoS (Idx midx _) (_, args)
   --          g m2(x, y, z)                                    |             |           |
   ----------------------------------------------------------------------------------------
   | isLocal = do
-      MM.sayVVV $ "case #1 - m" <> pretty midx <> parens (pretty (srcName src)) <> ":" <+> pretty fc
-                <> "\n  (map (Idx cidxCall) inputs):" <+> list (map (pretty . Idx cidxCall) inputs)
-                <> "\n  xs:" <+> list (map pretty xs)
-                <> "\n  args:" <+> list (map pretty args)
-                <> "\n  fc:" <+> pretty fc
-                <> "\n  src:" <+> pretty src
-
       -- There should be an equal number of input types and input arguments
       -- That is, the function should be fully applied. If it were partially
       -- applied, the lambda case would have been entered previously instead.
@@ -712,15 +583,8 @@ expressPolyExpr findRemote parentLang pc (AnnoS (Idx midx _) (_, args)
   --                                                           |             |           |
   ----------------------------------------------------------------------------------------
   | not isLocal = do
-        MM.sayVVV $ "case #5 - m" <> pretty midx <+> parens (pretty (srcName src)) <> ":"
-        MM.sayVVV $ "args:" <+> list (map pretty args)
-        MM.sayVVV $ "callLang:" <+> pretty callLang
-        MM.sayVVV $ "parentLang:" <+> pretty parentLang
-
         let idxInputTypes = zipWith mkIdx xs inputs
         xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap callLang) idxInputTypes xs
-
-        MM.sayVVV $ "Making foreign interface 5 of type:" <+> pretty pc
 
         return
           . PolyManifold parentLang midx (ManifoldFull (map unvalue args))
@@ -738,10 +602,10 @@ expressPolyExpr findRemote parentLang pc (AnnoS (Idx midx _) (_, args)
   where
     remote = findRemote parentLang callLang
     isLocal = isNothing remote
-    f = PolySrc (Idx gidxCall fc) src
+    f = PolyExe (Idx gidxCall fc) exe
 
 -- An un-applied source call
-expressPolyExpr findRemote parentLang (val -> FunT pinputs poutput) (AnnoS (Idx midx c@(FunT callInputs _)) (Idx cidx callLang, _) (CallS src))
+expressPolyExpr findRemote parentLang (val -> FunT pinputs poutput) (AnnoS (Idx midx c@(FunT callInputs _)) (Idx cidx callLang, _) (ExeS exe))
 
   ----------------------------------------------------------------------------------------
   -- #2 cis passed                                             | contextArgs | boundArgs |
@@ -753,16 +617,13 @@ expressPolyExpr findRemote parentLang (val -> FunT pinputs poutput) (AnnoS (Idx 
   --          g(m2, xs)                                        |             |           |
   ----------------------------------------------------------------------------------------
   | isLocal = do
-      MM.sayVVV $ "case #2 - un-applied cis source call:" <+> pretty (srcName src)
-      MM.sayVVV $ "cidx:" <+> pretty cidx
-      MM.sayVVV $ "midx:" <+> pretty midx
       ids <- MM.takeFromCounter (length callInputs)
       let lambdaVals = bindVarIds ids (map (C . Idx cidx) callInputs)
           lambdaTypedArgs = fromJust $ safeZipWith annotate ids (map Just callInputs)
       return
         . PolyManifold callLang midx (ManifoldPass lambdaTypedArgs)
         . PolyReturn
-        $ PolyApp (PolySrc (Idx midx c) src) lambdaVals
+        $ PolyApp (PolyExe (Idx midx c) exe) lambdaVals
 
   ----------------------------------------------------------------------------------------
   -- #6 trans passed                                           | contextArgs | boundArgs |
@@ -779,19 +640,10 @@ expressPolyExpr findRemote parentLang (val -> FunT pinputs poutput) (AnnoS (Idx 
   --          return g(m2, xs)                                 |             |           |
   ----------------------------------------------------------------------------------------
   | otherwise = do
-      MM.sayVVV $ "case #6 - " <> pretty midx
-      MM.sayVVV $ "cidx:" <+> pretty cidx
-      MM.sayVVV $ "Un-applied trans source call:" <+> pretty (srcName src)
       ids <- MM.takeFromCounter (length callInputs)
       let lambdaArgs = [Arg i None | i <- ids]
           lambdaTypedArgs = map (`Arg` Nothing) ids
           callVals = bindVarIds ids (map (C . Idx cidx) callInputs)
-
-      MM.sayVVV $ "src:" <+> pretty src
-      MM.sayVVV $ "lambdaArgs:" <+> list (map pretty lambdaArgs)
-
-      MM.sayVVV $ "Making foreign interface 6 of type:" <+> pretty (Idx cidx poutput)
-
       return
        . PolyManifold parentLang midx (ManifoldPass lambdaTypedArgs)
        . PolyReturn
@@ -799,7 +651,7 @@ expressPolyExpr findRemote parentLang (val -> FunT pinputs poutput) (AnnoS (Idx 
            ( PolyRemoteInterface callLang (Idx cidx poutput) (map ann lambdaArgs) (fromJust remote)
            . PolyManifold callLang midx (ManifoldFull lambdaArgs)
            . PolyReturn
-           $ PolyApp (PolySrc (Idx midx c) src) callVals
+           $ PolyApp (PolyExe (Idx midx c) exe) callVals
            )
        $ fromJust $ safeZipWith (PolyBndVar . C) (map (Idx cidx) pinputs) (map ann lambdaArgs)
     where
@@ -825,19 +677,6 @@ expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (IntS x  )) = retu
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (LogS x  )) = return $ PolyLog  (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (StrS x  )) = return $ PolyStr  (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _)  UniS     ) = return $ PolyNull (Idx cidx v)
-
--- record access
-expressPolyExpr _ _ pc (AnnoS _ _ (AccS key record@(AnnoS (Idx _ (NamT o v _ rs)) (Idx cidx lang, _) _))) = do
-  record' <- expressPolyExprWrap lang pc record
-  case lookup key rs of
-    (Just valType) -> return $ PolyAcc (Idx cidx valType) o (Idx cidx v) record' key
-    Nothing -> error "invalid key access"
--- The the expected record type is not present, evaluate one step down
-expressPolyExpr _ pl pc (AnnoS g c (AccS k (AnnoS (Idx i t) c' e'))) = do
-    scope <- MM.getGeneralScope i
-    case reduceType scope t of
-        (Just t') -> expressPolyExprWrap pl pc (AnnoS g c (AccS k (AnnoS (Idx i t') c' e')))
-        Nothing -> error "Expected a record access type"
 
 -- lists
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) [t])) (Idx cidx lang, args) (LstS xs)) = do
@@ -984,10 +823,6 @@ segmentExpr m args (PolyLet i e1 e2) = do
   (ms2, (lang2, e2')) <- segmentExpr m args e2
   return (ms1 ++ ms2, (lang2, MonoLet i e1' e2'))
 
-segmentExpr m args (PolyAcc t o v e k) = do
-  (ms, (_, e')) <- segmentExpr m args e
-  return (ms, (Nothing, MonoAcc t o v e' k))
-
 segmentExpr m args (PolyList v t es) = do
   (mss, es') <- mapM (segmentExpr m args) es |>> unzip
   return (concat mss, (Nothing, MonoList v t (map snd es')))
@@ -1010,7 +845,7 @@ segmentExpr _ _ (PolyLetVar t x) = return ([], (Nothing, MonoLetVar t x))
 segmentExpr _ _ (PolyBndVar (A lang) i) = return ([], (Just lang, MonoBndVar (A None) i))
 segmentExpr _ _ (PolyBndVar (B t) i) = return ([], (Nothing, MonoBndVar (B t) i))
 segmentExpr _ _ (PolyBndVar (C t) i) = return ([], (Nothing, MonoBndVar (C t) i))
-segmentExpr _ _ (PolySrc t src) = return ([], (Nothing, MonoSrc t src))
+segmentExpr _ _ (PolyExe t exe) = return ([], (Nothing, MonoExe t exe))
 segmentExpr _ _ (PolyLog v x)   = return ([], (Nothing, MonoLog v x))
 segmentExpr _ _ (PolyReal v x)  = return ([], (Nothing, MonoReal v x))
 segmentExpr _ _ (PolyInt v x)   = return ([], (Nothing, MonoInt v x))
@@ -1106,7 +941,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       _ -> return $ BndVarS Nothing i
   serialExpr _ (MonoBndVar (C t) i) = BndVarS <$> fmap Just (inferType t) <*> pure i
   -- failing cases that should be unreachable
-  serialExpr _ (MonoSrc _ _) = error "Can represent MonoSrc as SerialExpr"
+  serialExpr _ (MonoExe _ _) = error "Can represent MonoSrc as SerialExpr"
   serialExpr _ MonoPoolCall{} = error "MonoPoolCall does not map to a SerialExpr"
   serialExpr _ (MonoApp MonoManifold{} _) = error "Illegal?"
   -- the following are all native types that need to be directly serialized
@@ -1124,7 +959,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       _ -> error "Unreachable?"
   -- Pool and source calls should have previously been wrapped in manifolds
   serialArg _ MonoPoolCall{} = error "This step should be unreachable"
-  serialArg _ (MonoSrc    _ _) = error "This step should be unreachable"
+  serialArg _ (MonoExe    _ _) = error "This step should be unreachable"
   serialArg _ (MonoReturn _) = error "Return should not happen hear (really I should remove this term completely)"
   serialArg m e = SerialArgExpr <$> serialExpr m e
 
@@ -1144,7 +979,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       _ -> error "Unreachable?"
   -- Pool and source calls should have previously been wrapped in manifolds
   nativeArg _ MonoPoolCall{} = error "This step should be unreachable"
-  nativeArg _ (MonoSrc    _ _) = error "This step should be unreachable"
+  nativeArg _ (MonoExe    _ _) = error "This step should be unreachable"
   nativeArg _ (MonoReturn _) = error "Return should not happen here (really I should remove this term completely)"
   nativeArg m e = NativeArgExpr <$> nativeExpr m e
 
@@ -1169,7 +1004,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       return $ NativeLetN i ne1 ne2
   nativeExpr _ (MonoLetVar t i) = LetVarN <$> inferType t <*> pure i
   nativeExpr m (MonoReturn e) = ReturnN <$> nativeExpr m e
-  nativeExpr m (MonoApp (MonoSrc (Idx idx (FunT inputTypes outputType)) src) es) = do
+  nativeExpr m (MonoApp (MonoExe (Idx idx (FunT inputTypes outputType)) exe) es) = do
     args <- mapM (nativeArg m) es
     appType <- case drop (length es) inputTypes of
         [] -> inferType (Idx idx outputType)
@@ -1196,14 +1031,14 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     let vs = map (unTVar . fst) qs
         qs' = zip vs ftypes
 
-    return $ AppSrcN appType src qs' args
+    return $ AppExeN appType exe qs' args
   nativeExpr m e@(MonoApp (MonoPoolCall t _ _ _ _) _) = do
     e' <- serialExpr m e
     t' <- inferType t
     MM.sayVVV $ "nativeExpr MonoApp:" <+> pretty t'
     naturalizeN "nativeE MonoApp" m lang t' e'
   nativeExpr _ (MonoApp _ _) = error "Illegal application"
-  nativeExpr _ (MonoSrc t src) = SrcN <$> inferType t <*> pure src
+  nativeExpr _ (MonoExe t exe) = ExeN <$> inferType t <*> pure exe
   nativeExpr _ (MonoBndVar (A _) _) = error "MonoBndVar must have a type if used in native context"
   nativeExpr _ (MonoBndVar (B _) i) =
     case Map.lookup i typemap of
@@ -1211,10 +1046,6 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       _ -> error "No type found"
   nativeExpr _ (MonoBndVar (C t) i) = BndVarN <$> inferType t <*> pure i
   -- simple native types
-  nativeExpr m (MonoAcc _ o v e k) = do
-    v' <- inferVar v
-    e' <- nativeExpr m e
-    return $ AccN o v' e' k
   nativeExpr m (MonoList v t es) =
     ListN
       <$> inferVar v
@@ -1270,9 +1101,8 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     Map.union (Map.fromList [(i, Left t) | (Arg i (Just t)) <- ys]) (makeTypemap midx e)
   makeTypemap parentIdx (MonoLet _ e1 e2) = Map.union (makeTypemap parentIdx e1) (makeTypemap parentIdx e2)
   makeTypemap parentIdx (MonoReturn e) = makeTypemap parentIdx e
-  makeTypemap _ (MonoApp (MonoSrc (ann -> idx) _) es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
+  makeTypemap _ (MonoApp (MonoExe (ann -> idx) _) es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
   makeTypemap parentIdx (MonoApp e es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) (e:es))
-  makeTypemap parentIdx (MonoAcc _ _ _ e _) = makeTypemap parentIdx e
   makeTypemap _ (MonoList (ann -> idx) _ es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
   makeTypemap _ (MonoTuple (ann -> idx) (map snd -> es)) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
   makeTypemap _ (MonoRecord _ (ann -> idx) _ (map (snd . snd) -> es)) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
@@ -1292,7 +1122,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
   -- infer the preferred serialization state for an expression.
   inferState :: MonoExpr -> SerializationState
   inferState (MonoApp MonoPoolCall{} _) = Serialized
-  inferState (MonoApp MonoSrc{} _) = Unserialized
+  inferState (MonoApp MonoExe{} _) = Unserialized
   inferState (MonoApp (MonoManifold _ _ e) _) = inferState e
   inferState (MonoLet _ _ e) = inferState e
   inferState (MonoReturn e) = inferState e
@@ -1517,8 +1347,8 @@ findSources ms = unique <$> concatMapM (foldSerialManifoldM fm) ms
     , opSerialManifoldM = nativeSerialSrcs
     }
 
-  nativeExprSrcs (AppSrcN_ _ src _ xss) = return (src : concat xss)
-  nativeExprSrcs (SrcN_ _ src) = return [src]
+  nativeExprSrcs (AppExeN_ _ (SrcCall src) _ xss) = return (src : concat xss)
+  nativeExprSrcs (ExeN_ _ (SrcCall src)) = return [src]
   nativeExprSrcs (DeserializeN_ _ s xs) = return $ serialASTsources s <> xs
   nativeExprSrcs e = return $ foldlNE (<>) [] e
 
@@ -1569,8 +1399,8 @@ sannoSnd (AnnoS _ (_, x) _) = x
 -- generate infinite list of fresh variables of form
 -- ['a','b',...,'z','aa','ab',...,'zz',...]
 freshVarsAZ
-  :: [MT.Text] -- variables to exclude
-  -> [MT.Text]
+  :: [Text] -- variables to exclude
+  -> [Text]
 freshVarsAZ exclude =
   filter
     (`notElem` exclude)

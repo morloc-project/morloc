@@ -1,0 +1,15 @@
+module foo (sr, spy, scpp)
+
+import root
+import root-r
+import root-py
+import root-cpp
+
+sr :: Str -> Str -> Str
+sr x y = "x=#{idr x};y=#{idr y};"
+
+spy :: Str -> Str -> Str
+spy x y = "x=#{idpy x};y=#{idpy y};"
+
+scpp :: Str -> Str -> Str
+scpp x y = "x=#{idcpp x};y=#{idcpp y};"

@@ -23,6 +23,7 @@ import Morloc.DataFiles as DF
 import Morloc.Quasi
 import Morloc.Monad (gets, Index, newIndex, runIndex, asks)
 import qualified Morloc.Data.Text as MT
+import Data.Text (Text)
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 
@@ -213,8 +214,10 @@ translateSegment m0 =
       return $ e {poolExpr = serialized, poolPriorLines = poolPriorLines e <> assignments}
 
     makeNativeExpr :: NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
-    makeNativeExpr _ (AppSrcN_ _ (pretty . srcName -> functionName) _ xs) =
-        return $ mergePoolDocs ((<>) functionName . tupled) (map snd xs)
+    makeNativeExpr _ (AppExeN_ _ (SrcCall src) _ xs) =
+        return $ mergePoolDocs ((<>) (pretty (srcName src)) . tupled) (map snd xs)
+    makeNativeExpr _ (AppExeN_ t (PatCall p) _ xs) =
+        return $ mergePoolDocs (evaluatePattern t p) (map snd xs)
     makeNativeExpr _ (ManN_ call) = return call
     makeNativeExpr _ (ReturnN_ x) =
         return $ x { poolExpr = "return(" <> poolExpr x <> ")" }
@@ -228,11 +231,11 @@ translateSegment m0 =
           { poolExpr = deserialized
           , poolPriorLines = poolPriorLines x <> assignments
           }
-    makeNativeExpr _ (AccN_ _ _ x k) =
-        return $ x {poolExpr = recordAccess (poolExpr x) (pretty k)}
-    makeNativeExpr _ (SrcN_ _ src) = return $ defaultValue { poolExpr = pretty (srcName src) }
+    makeNativeExpr _ (ExeN_ _ (SrcCall src)) = return $ defaultValue { poolExpr = pretty (srcName src) }
+    makeNativeExpr _ (ExeN_ _ (PatCall _)) = error "Unreachable: patterns are always used in applications"
     makeNativeExpr _ (ListN_ v _ xs) = return $ mergePoolDocs rlist xs where
        rlist es' = case v of
+         (FV _ (CV "integer")) -> "c" <> tupled es'
          (FV _ (CV "numeric")) -> "c" <> tupled es'
          (FV _ (CV "double")) -> "c" <> tupled es'
          (FV _ (CV "logical")) -> "c" <> tupled es'
@@ -279,6 +282,33 @@ translateSegment m0 =
     makeLet namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
       let rs = rs1 ++ [ namer i <+> "<-" <+> e1' ] ++ rs2
       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
+
+evaluatePattern :: TypeF -> Pattern -> [MDoc] -> MDoc
+evaluatePattern _ (PatternText firstStr fragments) xs
+  = "paste0" <> tupled (dquotes (pretty firstStr) : concat [[x, dquotes (pretty s)] | (x, s) <- zip xs fragments])
+evaluatePattern _ (PatternStruct (ungroup -> [ss])) [m]
+  = hcat (m : map writeBasicSelector ss)
+evaluatePattern _ (PatternStruct (ungroup -> sss)) [m]
+  = "list" <> tupled [hcat (m : map writeBasicSelector ss) | ss <- sss]
+evaluatePattern t0 (PatternStruct s0) (m0:xs0)
+  = patternSetter makeTuple makeRecord accessTuple accessRecord m0 t0 s0 xs0
+  where
+
+  makeTuple _ xs = "list" <> tupled xs
+
+  makeRecord (NamF _ _ _ rs) xs = "list" <> tupled [pretty k <+> "=" <+> x | (k, x) <- zip (map fst rs) xs]
+  makeRecord _ _ = error "Incorrectly typed record setter"
+
+  accessTuple _ m i = m <> "[[" <> pretty (i + 1) <> "]]"
+
+  accessRecord (NamF _ _ _ _) d k = d <> "[[" <> dquotes (pretty k) <> "]]"
+  accessRecord t _ _ = error $ "Invalid record type: " <> show t
+
+evaluatePattern _ (PatternStruct _) [] = error "Unreachable empty pattern"
+
+writeBasicSelector :: Either Int Text -> MDoc
+writeBasicSelector (Right k) = "[[" <> dquotes (pretty k) <> "]]"
+writeBasicSelector (Left i) = "[[" <> pretty (i + 1) <> "]]"
 
 makePool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc
 makePool sources dynlibs manifolds

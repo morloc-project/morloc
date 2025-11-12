@@ -8,3 +8,5 @@ good-*
 log
 nexus
 *.gdb
+.Rhistory
+.RData
