@@ -11,20 +11,15 @@
  [ ] record syntax docstrings
  [ ] records to argument option sets
 
-0.57.0 [2025-10-xx]
+0.57.0 [2025-11-11]
 -------------------
  * re-allow underscores in variable names
  * add placeholder syntax / lambda lifting from holes
  * multi-line strings
  * string interpolation
  * getter patterns
- [ ] setter patterns
-     * Python
-     [ ] R
-     [ ] C++
- [ ] write full Morloc nexus evaluator
- [ ] update root libraries
-
+ * setter patterns
+ * write full Morloc nexus evaluator
  * Fix bug in local installs with "."
 
 0.56.0 [2025-10-08]
