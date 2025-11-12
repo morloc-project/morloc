@@ -21,5 +21,5 @@ foo =
   , .(.a = 42) test3                               -- {"a":42,"b":[true,42,"Alice"]},
   , .(.0.b.1 = 210, .1 = 67) test4                 -- [{"a":67,"b":[true,210,"Alice"]},67,{"a":68,"b":[false,421,"Bob"]}]
   , .(.2 = 6.28, .0 = 42) test1                    -- [42,true,6.28]
-  -- , .(.0 = False) test1 -- blows up on type change
+  , .(.0 = .2.a test4) test1
   )

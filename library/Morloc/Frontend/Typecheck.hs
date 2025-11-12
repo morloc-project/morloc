@@ -277,6 +277,21 @@ synthE _ g (IntS x) = return (g, BT.intU, IntS x)
 synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
 synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 
+-- Ensures pattern setting operations return the correct type.
+-- Without this case, patterns that change type will pass silently, but lead to
+-- corrupted data.
+synthE i g0
+  ( AppS f0@(AnnoS _ _ (LamS [_]
+           (AnnoS _ _ (AppS (
+             (AnnoS _ _ (ExeS (PatCall (PatternStruct _))))) (_:_))))) [x0]
+  ) = do
+    (g1, patternType, f1) <- synthG g0 f0
+    case patternType of
+      (FunU _ selectType) -> do
+        (g2, dataType, x1) <- checkG g1 x0 selectType
+        return (g2, dataType, AppS f1 [x1])
+      _ -> error "This should be unreachable"
+
 -- synthesize a string interpolation pattern
 synthE i g (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternText _ _)))) es) = do
   (g1, _, f1) <- synthG g f
@@ -307,19 +322,18 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) [e0]) =
 -- handle setter patterns
 synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0:es0)) = do
 
+  (g1, (unzip -> (setTypes, es1))) <-
+    statefulMapM (\s' e -> synthG s' e |>> (\(a,b,c) -> (a,(b,c)))) g0 es0
+
   -- generate an existential type that contains the pattern
-  (g1, selType) <- selectorType g0 s
+  (g2, outputType) <- selectorType g1 s |>> second (selectorSetter setTypes s)
 
-  (g2, datType, e1) <- checkG g1 e0 selType
+  (g3, datType, e1) <- checkG g2 e0 outputType
 
-  (g3, (unzip -> (setTypes, es1))) <-
-    statefulMapM (\s' e -> synthG s' e |>> (\(a,b,c) -> (a,(b,c)))) g2 es0
-
-  let outputType = selectorSetter datType setTypes s
-      patternType = apply g3 $ FunU (datType:setTypes) outputType
+  let patternType = apply g3 $ FunU (datType:setTypes) outputType
       f1 = AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s)))
 
-  return (g2, apply g3 outputType, AppS f1 (e1:es1))
+  return (g3, apply g3 outputType, AppS f1 (e1:es1))
 
 synthE _ g (ExeS (PatCall (PatternText s ss@(length -> n)))) = do
   let t = FunU (take n (repeat BT.strU)) BT.strU

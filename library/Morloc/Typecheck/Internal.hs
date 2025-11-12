@@ -554,11 +554,6 @@ cut i g = do
     | otherwise = f xs
 
 
--- data Selector
---   = SelectorKey (Text, Selector) [(Text, Selector)] -- bag, may be multiple identical keys
---   | SelectorIdx (Int,  Selector) [(Int,  Selector)] -- bag, may be multiple identical indices
---   | SelectorEnd
-
 selectorType :: Gamma -> Selector -> MorlocMonad (Gamma, TypeU)
 selectorType g0 SelectorEnd = do
   let (g1, s) = newvar "_pattern_" g0
@@ -610,11 +605,11 @@ selectorGetter _ _ = error "Unreachable"
 
 -- | map over a type using a selector and update the type using set values
 selectorSetter
-  :: TypeU    -- current type that is being updated
-  -> [TypeU]  -- types to which the selected fields are set
+  :: [TypeU]  -- types to which the selected fields are set
   -> Selector -- current selector pattern
+  -> TypeU    -- current type that is being updated
   -> TypeU    -- modified return type
-selectorSetter t0 setTypes0 s0 = fst (f t0 setTypes0 s0) where
+selectorSetter setTypes0 s0 t0 = fst (f t0 setTypes0 s0) where
   f :: TypeU
     -> [TypeU]
     -> Selector
@@ -631,13 +626,13 @@ selectorSetter t0 setTypes0 s0 = fst (f t0 setTypes0 s0) where
   --  * note that this may well change the field type of the record, this should
   --    raise an error later if such changes are not allowed
   f (ExistU v (ts, tc) (ks, kc)) setTypes1 (SelectorIdx s ss) =
-    let (ts', setTypes2) = foldr subIdx (ts, setTypes1) (s:ss)
+    let (ts', setTypes2) = foldl subIdx (ts, setTypes1) (s:ss)
     in (ExistU v (ts', tc) (ks, kc), setTypes2)
   -- handle non-existential tuples
   f (AppU t ts) setTypes1 (SelectorIdx s ss)
     -- if this is a tuple, fine, proceed
     | (VarU (BT.tuple (length ts))) == t =
-        let (ts', setTypes2) = foldr subIdx (ts, setTypes1) (s:ss)
+        let (ts', setTypes2) = foldl subIdx (ts, setTypes1) (s:ss)
         in (AppU t ts', setTypes2)
     -- otherwise die
     | otherwise = error "Unreachable case"
@@ -652,11 +647,11 @@ selectorSetter t0 setTypes0 s0 = fst (f t0 setTypes0 s0) where
         (newType, setTypesN') = f priorType setTypesN s
         ks' = [ if k' == k then (Key k, newType) else x | x@(Key k', _) <- ks]
 
-  subIdx :: (Int, Selector) -> ([TypeU], [TypeU]) -> ([TypeU], [TypeU])
-  subIdx (i, s) (ts, setTypesN)
-    | i < length ts =
+  subIdx :: ([TypeU], [TypeU]) -> (Int, Selector) -> ([TypeU], [TypeU])
+  subIdx (ts, setTypesN) (i, s)
+    | i < length ts = 
         let (newType, setTypesN') = f (ts !! i) setTypesN s
-        in (take i ts <> [newType] <> drop i ts, setTypesN')
+        in (take i ts <> [newType] <> drop (i+1) ts, setTypesN')
     | otherwise = error $ "Bad pattern, index " <> show i <> " is greather than tuple length"
 
 
