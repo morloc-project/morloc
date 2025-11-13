@@ -219,39 +219,59 @@ postDoc = do
 data Sign = Pos | Neg
 
 number :: Parser (Either Integer DS.Scientific)
-number = lexeme number_
-
-number_ :: Parser (Either Integer DS.Scientific)
-number_ = do
-  x  <- try (fmap (Right . DS.fromFloatDigits) signedFloat) <|> fmap Left signedDecimal
+number = lexeme $ do
+  x  <- try (fmap (Right . DS.fromFloatDigits) signedFloat) 
+    <|> try unsignedHex
+    <|> try unsignedOctal
+    <|> try unsignedBinary
+    <|> fmap Left signedDecimal
   e <- optional _exp
   return $ case (x, e) of
     (Left i,  Nothing) -> Left i
     (Right f, Nothing) -> Right f
     -- anything in scientific notation is cast as a real
-    (Left i,  Just (Neg, expval)) -> Right  $ DS.scientific i ((-1) * expval)
+    (Left i,  Just (Neg, expval)) -> Right $ DS.scientific i ((-1) * expval)
     (Left i,  Just (Pos, expval)) -> Right $ DS.scientific i expval
     (Right f, Just (Pos, expval)) -> Right $ f * (10 ^^ expval)
     (Right f, Just (Neg, expval)) -> Right $ f * (10 ^^ (-1 * expval))
   where
-
   _exp :: Parser (Sign, Int)
   _exp = do
     _ <- char 'e'
     expsign <- _sign
     expval <- L.decimal
     return (expsign, expval)
-
+  
   _sign :: Parser Sign
   _sign = do
     sign <- optional (char '-' <|> char '+')
     case sign of
       (Just '-') -> return Neg
       _ -> return Pos
-
+  
+  -- Hexadecimal: 0x or 0X prefix (unsigned only)
+  unsignedHex :: Parser (Either Integer DS.Scientific)
+  unsignedHex = do
+    _ <- string "0x" <|> string "0X"
+    fmap Left L.hexadecimal
+  
+  -- Octal: 0o or 0O prefix (unsigned only)
+  unsignedOctal :: Parser (Either Integer DS.Scientific)
+  unsignedOctal = do
+    _ <- string "0o" <|> string "0O"
+    fmap Left L.octal
+  
+  -- Binary: 0b or 0B prefix (unsigned only)
+  unsignedBinary :: Parser (Either Integer DS.Scientific)
+  unsignedBinary = do
+    _ <- string "0b" <|> string "0B"
+    fmap Left L.binary
+  
+  -- Signed floating point
   signedFloat :: Parser Double
   signedFloat = L.signed sc L.float
-
+  
+  -- Signed decimal integer
   signedDecimal :: Parser Integer
   signedDecimal = L.signed sc L.decimal
 
