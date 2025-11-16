@@ -6,11 +6,10 @@ import root-py  (Str, Int, Tuple3, List)
 import root-cpp (Str, Int, Tuple3, List)
 import root-r   (Str, Int, Tuple3, List)
 
-record Foo = Foo
-  { flooz :: [Int]
-  , things :: [Str]
-  , size :: Int
-  }
+record Foo where
+  flooz :: [Int]
+  things :: [Str]
+  size :: Int
 record Cpp => Foo = "foo_t"
 record Py  => Foo = "dict"
 record R   => Foo = "list"

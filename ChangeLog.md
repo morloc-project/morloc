@@ -7,7 +7,8 @@
  [ ] debug options and logging of failing inputs
 
 0.58.0 [2025-11-xx]
- [ ] new record syntax
+ * add hex, octal, and binary numeric representations
+ * new record syntax
  [ ] record syntax docstrings
  [ ] records to argument option sets
 

@@ -254,7 +254,7 @@ pInstance = do
       <|> (pAssE |>> return)
 
 pTypedef :: Parser ExprI
-pTypedef = try pTypedefType <|> pTypedefObject where
+pTypedef = try pTypedefType <|> try pTypedefObjectLegacy <|> pTypedefObject where
 
   pConcreteType = do
     t <- pTypeCon
@@ -289,8 +289,8 @@ pTypedef = try pTypedefType <|> pTypedefObject where
           ([], Nothing) -> exprI (TypE Nothing v vs (VarU v))
           (_, Nothing) -> exprI (TypE Nothing v vs (AppU (VarU v) (map (either (VarU) id) vs)))
 
-  pTypedefObject :: Parser ExprI
-  pTypedefObject = do
+  pTypedefObjectLegacy :: Parser ExprI
+  pTypedefObjectLegacy = do
     o <- pNamType
     mayLang <- optional (try pLangNamespace)
     (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
@@ -310,6 +310,15 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     let t = NamU o (TV con) (map (either VarU id) vs) (map (first Key) entries)
     exprI (TypE k v vs t)
 
+  pTypedefObject :: Parser ExprI
+  pTypedefObject = do
+    o <- pNamType
+    (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
+    reserved "where"
+    entries <- alignInset pNamEntryU >>= mapM (desugarTableEntries o)
+    let t = NamU o v (map (either VarU id) vs) (map (first Key) entries)
+    exprI (TypE Nothing v vs t)
+
   -- TODO: is this really the right place to be doing this?
   desugarTableEntries
     :: NamType
@@ -323,7 +332,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     f t = return $ BT.listU t
 
   pNamType :: Parser NamType
-  pNamType = choice [pNamObject, pNamTable, pNamRecord]
+  pNamType = pNamObject <|> pNamTable <|> pNamRecord
 
   pNamObject :: Parser NamType
   pNamObject = do
@@ -529,7 +538,7 @@ pNamE = do
   -- FIXME - making records without constructors is a bit sketch, for now it is
   -- allowed (and heavily tested) and I will leave it for the moment. But
   -- eventually the syntax should be `Person {Age = 5, Name = "Juicebox"}` or
-  -- whatever.
+  -- whatever. The hell it should fucking dimwit. Constructors are shit.
   exprI $ NamE (map (first Key) rs)
 
 pNamEntryE :: Parser (Text, ExprI)
