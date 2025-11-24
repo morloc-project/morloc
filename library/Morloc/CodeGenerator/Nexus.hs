@@ -39,8 +39,7 @@ data FData = FData
   , fdataSubSockets :: [Socket] -- list of sockets needed for this command
   , fdataArgSchemas :: [MDoc] -- argument type schemas
   , fdataReturnSchema :: MDoc -- return type schema
-  , fdataArgDocs :: Maybe [[Text]]
-  , fdataFunDocs :: [Text]
+  , fdataCmdDocSet :: CmdDocSet
   }
 
 -- | Description of a pure morloc expression
@@ -49,7 +48,7 @@ data GastData = GastData
   , commandName :: EVar -- ^ user-exposed subcommand name in the nexus
   , commandType :: Type -- ^ the general type of the expression
   , commandArgs :: [EVar] -- ^ list of function arguments
-  , commandDocs :: [Text] -- ^ docstrings
+  , commandDocs :: CmdDocSet -- ^ docstrings
   , commandExpr :: ([MDoc], MDoc)
   -- ^ lines of code setting up the expression and the final variable name
   , commandSchemas :: (MDoc, [MDoc])
@@ -106,7 +105,7 @@ generate cs xs = do
 
 annotateGasts :: AnnoS (Indexed Type) One () -> MorlocMonad GastData
 annotateGasts x0@(AnnoS (Idx i gtype) _ _) = do
-  (_, docstrings) <- MM.getDocStrings i
+  docs <- MM.getDocStrings i
 
   mayName <- MM.metaName i
   gname <- case mayName of
@@ -124,7 +123,7 @@ annotateGasts x0@(AnnoS (Idx i gtype) _ _) = do
     , commandName = gname
     , commandType = gtype
     , commandArgs = gargs
-    , commandDocs = docstrings
+    , commandDocs = docs
     , commandExpr = expr
     , commandSchemas = schemas
     }
@@ -238,8 +237,7 @@ litSchema NullX = "z"
 getFData :: (Type, Int, Lang, [Socket]) -> MorlocMonad FData
 getFData (t, i, lang, sockets) = do
 
-  (es, ss) <- MM.getDocStrings i
-
+  doc <- MM.getDocStrings i
   mayName <- MM.metaName i
   (argSchemas, returnSchema) <- makeSchemas i lang t
 
@@ -256,8 +254,7 @@ getFData (t, i, lang, sockets) = do
         , fdataSubSockets = map setSocketPath sockets
         , fdataArgSchemas = map dquotes argSchemas
         , fdataReturnSchema = dquotes returnSchema
-        , fdataArgDocs = es
-        , fdataFunDocs = ss
+        , fdataCmdDocSet = doc
         }
     Nothing -> MM.throwError . GeneratorError $ "No name in FData"
 
@@ -292,8 +289,8 @@ generalTypeToSerialAST (VarT v)
   | otherwise = do
       scope <- MM.gets stateUniversalGeneralTypedefs
       case Map.lookup v scope of
-        (Just [(_, _, True)]) -> error "Cannot handle terminal types"
-        (Just [([], t', False)]) -> generalTypeToSerialAST (typeOf t')
+        (Just [(_, _, _, True)]) -> error "Cannot handle terminal types"
+        (Just [([], t', _, False)]) -> generalTypeToSerialAST (typeOf t')
         (Just [_]) -> error $ "Cannot currently handle parameterized pure morloc types"
         Nothing -> error $ "Failed to interpret type variable: " <> show (unTVar v)
         x -> error $ "Unexpected scope: " <> show x 
@@ -352,32 +349,34 @@ usageCode fdata longestCommandLength cdata =
 |]
 
 usageLineT :: Int -> FData -> MDoc
-usageLineT longestCommandLength fdata = vsep
-  ( [idoc|fprintf(stderr, "%s", "  #{fdataSubcommand fdata}#{desc (fdataFunDocs fdata)}\n");|]
-  : typeStrs
-  )
-  where
-    padding = longestCommandLength - (fdataSubcommandLength fdata) + 2
-
-    desc [] = ""
-    desc (x:_) = pretty (replicate padding ' ') <> pretty x
-
-    typePadding = pretty $ replicate (longestCommandLength + 5) ' '
-
-    typeStrs = writeTypes typePadding (fdataType fdata)
+usageLineT _ _ = [idoc|fprintf(stderr, "%s", "x\n");|]
+-- usageLineT longestCommandLength fdata = vsep
+--   ( [idoc|fprintf(stderr, "%s", "  #{fdataSubcommand fdata}#{desc (fdataFunDocs fdata)}\n");|]
+--   : typeStrs
+--   )
+--   where
+--     padding = longestCommandLength - (fdataSubcommandLength fdata) + 2
+--
+--     desc [] = ""
+--     desc (x:_) = pretty (replicate padding ' ') <> pretty x
+--
+--     typePadding = pretty $ replicate (longestCommandLength + 5) ' '
+--
+--     typeStrs = writeTypes typePadding (fdataType fdata)
 
 usageLineConst :: Int -> GastData -> MDoc
-usageLineConst longestCommandLength cmd = vsep
-  ( [idoc|fprintf(stderr, "%s", "  #{pretty (commandName cmd)}#{desc (commandDocs cmd)}\n");|]
-  : writeTypes typePadding (commandType cmd)
-  )
-  where
-    padding = longestCommandLength - (MT.length . unEVar . commandName $ cmd) + 2
-
-    typePadding = pretty $ replicate (longestCommandLength + 5) ' '
-
-    desc [] = ""
-    desc (x:_) = pretty (replicate padding ' ') <> pretty x
+usageLineConst _ _ = [idoc|fprintf(stderr, "%s", "y\n");|]
+-- usageLineConst longestCommandLength cmd = vsep
+--   ( [idoc|fprintf(stderr, "%s", "  #{pretty (commandName cmd)}#{desc (commandDocs cmd)}\n");|]
+--   : writeTypes typePadding (commandType cmd)
+--   )
+--   where
+--     padding = longestCommandLength - (MT.length . unEVar . commandName $ cmd) + 2
+--
+--     typePadding = pretty $ replicate (longestCommandLength + 5) ' '
+--
+--     desc [] = ""
+--     desc (x:_) = pretty (replicate padding ' ') <> pretty x
 
 writeTypes :: MDoc -> Type -> [MDoc]
 writeTypes padding (FunT inputs output)
@@ -462,7 +461,7 @@ dispatchCode config fdata cdata = [idoc|
 
     socketDocs = [makeSocketDoc s | (_, s) <- daemonSets]
 
-    makeCaseDoc (FData socket sub _ midx _ sockets schemas returnSchema _ _) =
+    makeCaseDoc (FData socket sub _ midx _ sockets schemas returnSchema _) =
         ( [idoc|strcmp(cmd, "#{sub}") == 0|]
         , [idoc|    mid = #{pretty midx};
     morloc_socket_t* sockets[] = #{socketList};

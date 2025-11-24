@@ -873,12 +873,12 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     groupQuad :: ([a],[a]) -> (a, a) -> ([a],[a])
     groupQuad (xs,ys) (x, y) = (x:xs, y:ys)
 
-    makeSerials :: Scope -> TVar -> [([Either TVar TypeU], TypeU, Bool)] -> CppTranslator [(MDoc, MDoc)]
+    makeSerials :: Scope -> TVar -> [([Either TVar TypeU], TypeU, CmdArg, Bool)] -> CppTranslator [(MDoc, MDoc)]
     makeSerials s v xs = catMaybes <$> mapM (makeSerial s v) xs
 
-    makeSerial :: Scope -> TVar -> ([Either TVar TypeU], TypeU, Bool) -> CppTranslator (Maybe (MDoc, MDoc))
-    makeSerial _ _ (_, NamU _ (TV "struct") _ _, _) = return Nothing
-    makeSerial scope _ (ps, NamU r (TV v) _ rs, _) = do
+    makeSerial :: Scope -> TVar -> ([Either TVar TypeU], TypeU, CmdArg, Bool) -> CppTranslator (Maybe (MDoc, MDoc))
+    makeSerial _ _ (_, NamU _ (TV "struct") _ _, _, _) = return Nothing
+    makeSerial scope _ (ps, NamU r (TV v) _ rs, _, _) = do
       params <- mapM (either (\p -> return $ "T" <> pretty p) (\_ -> return "XXX_FIXME")) ps
       let templateTerms = ["T" <> pretty p | Left p <- ps]
           rtype = pretty v <> recordTemplate templateTerms

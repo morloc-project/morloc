@@ -80,6 +80,13 @@ module Morloc.Namespace
   , EType(..)
   , unresolvedType2type
   , Source(..)
+  -- * Docstring related types
+  , ArgOptDocSet(..)
+  , ArgPosDocSet(..)
+  , CmdArg(..)
+  , CmdDocSet(..)
+  , RecDocSet(..)
+  , ExprTypeE(..)
   -- * Typechecking
   , Gamma(..)
   , GammaIndex(..)
@@ -211,6 +218,7 @@ type DAG key edge node = Map key (node, [(key, edge)])
 type Scope = Map TVar
   [( [Either TVar TypeU]  -- type parameters (generic for left, specific for right)
    , TypeU
+   , CmdArg
    , Bool -- True if this is a "terminal" type (won't be reduced further)
           --  * This is determined by the parser (see pTypedef)
           --  * A type is terminal it is NOT general AND it
@@ -450,20 +458,104 @@ data Pattern
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)
 
+
+data CmdArg
+  = CmdArgPos ArgPosDocSet
+  -- positional argument
+  | CmdArgOpt ArgOptDocSet
+  -- optional argument
+  | CmdArgGrp RecDocSet
+  -- argument group (made from a record)
+  | CmdArgDef
+  -- unannotated argument
+  deriving (Show, Ord, Eq)
+
+data CmdDocSet = CmdDocSet
+  { cmdDocDesc :: [Text]
+  -- free description, the first line is used in the top-level help statement
+  , cmdDocName :: Maybe Text
+  -- an alternative name to give this subcommand (defaults to the function name)
+  , cmdDocArgs :: [CmdArg]
+  -- one element for each argument to the function
+  }
+  deriving (Show, Ord, Eq)
+
+data RecDocSet = RecDocSet
+  { recDocDesc :: [Text]
+  -- free description
+  , recDocMetavar :: Text
+  -- name of the record used in docs, with record type in uppercase as the default
+  , recDocUnroll :: Maybe Bool
+  -- whether to unroll by default, over-ridden by the argument unroll option
+  , recDocShort :: Maybe Char
+  -- short option for loading the record from a single argument
+  , recDocLong :: Maybe Text
+  -- long option for loading the record from a single argument
+  , recDocEntries :: [(Key, ArgOptDocSet)]
+  -- doc info on all record fields
+  }
+  deriving (Show, Ord, Eq)
+
+data ArgOptDocSet = ArgOptDocSet
+  { argOptDocDesc :: [Text]
+    -- free description
+  , argOptDocMetavar :: [Text]
+    -- a variable used in the interface to refer to this argument term
+  , argOptDocLiteral :: Maybe Bool
+    -- if Just True, require an argument be literal rather than from a file
+    -- if Just False, require an argument be from a file
+    -- if Nothing, infer as usual
+  , argOptDocUnroll :: Maybe Bool
+    -- if Just True, unroll the option if it is unrollable
+    -- if Just False, do not unroll the option
+    -- if Nothing, unroll the option if it feels like being unrolled
+  , argOptDocShort :: Maybe Char
+    -- short form of the argument name (e.g., -v)
+  , argOptDocLong :: Maybe Text
+    -- long form of the argument name (e.g., --verbose)
+  , argOptDocDefault :: Maybe Text
+    -- default value that is used when no argument is provided at the CLI interface
+  }
+  deriving (Show, Ord, Eq)
+
+data ArgPosDocSet = ArgPosDocSet
+  { argPosDocDesc :: [Text]
+    -- free description
+  , argPosDocMetavar :: [Text]
+    -- a variable used in the interface to refer to this argument term
+  , argPosDocLiteral :: Maybe Bool
+    -- if Just True, require an argument be literal rather than from a file
+    -- if Just False, require an argument be from a file
+    -- if Nothing, infer as usual
+  }
+  deriving (Show, Ord, Eq)
+
+
+-- Wraps all inforamtion stored in a type definition
+-- Some of this data will be transferred to Morloc monad state
+data ExprTypeE = ExprTypeE
+  { exprTypeConcreteForm :: Maybe (Lang, Bool)
+  -- ^ the language:
+  --   If Nothing, then general
+  --   If Just, then the Bool specifies whether the definition is terminal
+  , exprTypeName :: TVar
+  -- ^ main type name
+  , exprTypeParams :: [Either TVar TypeU]
+  -- ^ parameters - these may be generic (TVar) or specific (TypeU)
+  , exprTypeType :: TypeU
+  -- ^ type
+  , exprTypeDoc :: CmdArg
+  -- ^ docstring data for the full type
+  }
+  deriving (Show, Ord, Eq)
+
 -- | Terms, see Dunfield Figure 1
 data Expr
   = ModE MVar [ExprI]
   -- ^ the toplevel expression in a module
   | ClsE (Typeclass Signature)
   | IstE ClassName [TypeU] [ExprI]
-  | TypE (Maybe (Lang, Bool)) TVar [Either TVar TypeU] TypeU
-  -- ^ a type definition
-  --   1. the language:
-  --      If Nothing, then general
-  --      If Just, then the Bool specifies whether the definition is terminal
-  --   2. type name
-  --   3. parameters - these may be generic (TVar) or specific (TypeU)
-  --   4. type
+  | TypE ExprTypeE
   | ImpE Import
   -- ^ a morloc module import
   | ExpE Export
@@ -786,8 +878,7 @@ data EType =
     { etype :: TypeU
     , eprop :: Set.Set Property
     , econs :: Set.Set Constraint
-    , edocs :: Maybe [[Text]] -- Docstrings for each positional argument in a function
-    , sigDocs :: [Text] -- Docstrings for the signature
+    , edocs :: CmdDocSet -- Docstrings for the signature
     }
   deriving (Show, Eq, Ord)
 
@@ -995,6 +1086,41 @@ instance Defaultable ModuleConfig where
   defaultValue = ModuleConfig
     { moduleConfigDefaultGroup = Nothing
     , moduleConfigLabeledGroups = Map.empty
+    }
+
+instance Defaultable CmdDocSet where
+  defaultValue = CmdDocSet
+    { cmdDocDesc = []
+    , cmdDocName = Nothing
+    , cmdDocArgs = []
+    }
+
+instance Defaultable RecDocSet where
+  defaultValue = RecDocSet
+    { recDocDesc = []
+    , recDocMetavar = "RECORD"
+    , recDocUnroll = Nothing
+    , recDocShort = Nothing
+    , recDocLong = Nothing
+    , recDocEntries = []
+    }
+
+instance Defaultable ArgOptDocSet where
+  defaultValue = ArgOptDocSet
+    { argOptDocDesc = []
+    , argOptDocMetavar = []
+    , argOptDocLiteral = Nothing
+    , argOptDocUnroll = Nothing
+    , argOptDocShort = Nothing
+    , argOptDocLong = Nothing
+    , argOptDocDefault = Nothing
+    }
+
+instance Defaultable ArgPosDocSet where
+  defaultValue = ArgPosDocSet
+    { argPosDocDesc = []
+    , argPosDocMetavar = []
+    , argPosDocLiteral = Nothing
     }
 
 instance Defaultable PackageMeta where
@@ -1326,7 +1452,7 @@ instance Pretty TypeU where
                       (vsep [pretty k <+> "::" <+> f True x | (k, x) <- rs])
 
 instance Pretty EType where
-  pretty (EType t (Set.toList -> ps) (Set.toList -> cs) _ _) = case (ps, cs) of
+  pretty (EType t (Set.toList -> ps) (Set.toList -> cs) _) = case (ps, cs) of
     ([], []) -> pretty t
     _ -> parens (psStr ps <> pretty t <> csStr cs)
     where
@@ -1453,7 +1579,7 @@ instance Pretty Expr where
   pretty (ModE v es) = align . vsep $ ("module" <+> pretty v) : map pretty es
   pretty (ClsE (Typeclass cls vs sigs)) = "class" <+> pretty cls <+> hsep (map pretty vs) <> (align . vsep . map pretty) sigs
   pretty (IstE cls ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
-  pretty (TypE lang v vs t)
+  pretty (TypE (ExprTypeE lang v vs t _))
     = "type" <+> pretty lang <> "@" <> pretty v
     <+> sep (map (either pretty (parens . pretty)) vs) <+> "=" <+> pretty t
   pretty (ImpE (Import m Nothing _ _)) = "import" <+> pretty m

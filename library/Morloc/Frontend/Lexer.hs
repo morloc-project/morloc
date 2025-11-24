@@ -20,8 +20,6 @@ module Morloc.Frontend.Lexer
   , braces
   , brackets
   , comments
-  , preDoc
-  , postDoc
   , emptyState
   , lexeme
   , many1
@@ -49,6 +47,12 @@ module Morloc.Frontend.Lexer
   , pLang
   , exprId
   , exprI
+  -- * docstring parsers
+  , parseArgDocStr
+  , parseFlagDocStr
+  , parseLineDocStr
+  , parseTextDocStr
+  , parseWordDocStr
   ) where
 
 import Data.Void (Void)
@@ -200,21 +204,79 @@ comments = try lineComment
     _ <- takeWhileP Nothing (/= '\n')
     return ()
 
+docstr :: Parser ()
+docstr = do
+  _ <- string "--'"
+  _ <- hspace
+  return ()
 
-preDoc :: Parser Text
-preDoc = do
-    _ <- string "--'"
-    docstr <- takeWhileP Nothing (/= '\n')
-    _ <- sc
-    return docstr
+parseFlagDocStr :: Text -> Parser Bool
+parseFlagDocStr flag = do
+  _ <- docstr
+  _ <- string (flag <> ":")
+  value <- parseTrue <|> parseFalse
+  _ <- sc
+  return value
+  where
+    parseTrue :: Parser Bool
+    parseTrue = do
+      string "true"
+      return True
 
-postDoc :: Parser Text
-postDoc = do
-    _ <- string "--^"
-    docstr <- takeWhileP Nothing (/= '\n')
-    _ <- sc
-    return docstr
+    parseFalse :: Parser Bool
+    parseFalse = do
+      string "false"
+      return False
 
+parseTextDocStr :: Text -> Parser Text
+parseTextDocStr flag = do
+  _ <- docstr
+  string (flag <> ":")
+  value <- takeWhileP Nothing (/= '\n')
+  _ <- sc
+  return value
+
+parseWordDocStr :: Text -> Parser Text
+parseWordDocStr flag = do
+  _ <- docstr
+  string (flag <> ":")
+  value <- many1 (alphaNumChar <|> char '-' <|> char '_')
+  _ <- sc
+  return $ MT.pack value
+
+parseLineDocStr :: Parser Text
+parseLineDocStr = do
+  _ <- docstr
+  text <- takeWhileP Nothing (/= '\n')
+  _ <- sc
+  return text
+
+parseArgDocStr :: Parser (Maybe Char, Maybe Text)
+parseArgDocStr = do
+  _ <- docstr
+  string "arg:"
+  mayShort <- optional parseShortDocStr
+  mayLong <- case mayShort of
+    (Just _) -> optional (char '/' >> parseLongDocStr)
+    Nothing -> parseLongDocStr |>> Just
+  _ <- sc
+  return (mayShort, mayLong)
+  where
+
+  parseShortDocStr :: Parser Char
+  parseShortDocStr = do
+    char '-'
+    short <- alphaNumChar
+    return $ short
+
+  parseLongDocStr :: Parser Text
+  parseLongDocStr = do
+    char '-'
+    char '-'
+    longArgStart <- alphaNumChar
+    longArgRest <- many (alphaNumChar <|> char '-' <|> char '_')
+    let longArg = MT.pack $ longArgStart : longArgRest
+    return longArg
 
 data Sign = Pos | Neg
 

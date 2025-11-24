@@ -143,7 +143,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
 
     -- find all instances that are a subtype of the inferred type
     -- this resolve general aliases all the way to the general termini
-    let rssSubtypes = [x | x@(EType t _ _ _ _, _) <- rss, isSubtypeOf2 scope t gt]
+    let rssSubtypes = [x | x@(EType t _ _ _, _) <- rss, isSubtypeOf2 scope t gt]
 
     -- find the most specific instance at the general level, this does not
     -- consider a type to be more specific it is more evaluated.
@@ -162,7 +162,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     --
     --  They will be separated later when concrete types are considered. From
     --  the general perspective, the evaluate to being equal.
-    (g2, es1) <- case mostSpecific [t | (EType t _ _ _ _, _) <- rssSubtypes] of
+    (g2, es1) <- case mostSpecific [t | (EType t _ _ _, _) <- rssSubtypes] of
       -- if there are no suitable instances, die
       [] -> do
         MM.sayVVV $ "resolveInstance empty"

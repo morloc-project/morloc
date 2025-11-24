@@ -70,19 +70,15 @@ weaveTermTypes t1 [] = [t1]
 -- encoded in this function that should be vary carefully considered.
 --  * Can properties simply be concatenated?
 --  * What if constraints are contradictory?
+--  * Should general type merging even be possible?
 mergeEType :: EType -> EType -> MorlocMonad EType
-mergeEType (EType t1 ps1 cs1 edocs1 tsigs1) (EType t2 ps2 cs2 edocs2 tsigs2)
-  = EType <$> mergeTypeUs t1 t2 <*> pure (ps1 <> ps2) <*> pure (cs1 <> cs2) <*> pure edocs12 <*> pure tsigs
+mergeEType (EType t1 ps1 cs1 edoc1) (EType t2 ps2 cs2 edoc2)
+  = EType <$> mergeTypeUs t1 t2 <*> pure (ps1 <> ps2) <*> pure (cs1 <> cs2) <*> pure edocs12
   where
-    edocs12 = mergeEdocs edocs1 edocs2
-    tsigs = mergeTsigs tsigs1 tsigs2
+    edocs12 = mergeEdocs edoc1 edoc2
 
-    mergeEdocs x Nothing = x
-    mergeEdocs _ x = x
-
-    mergeTsigs x [] = x
-    mergeTsigs _ x = x
-
+    -- TODO: is there a real use case where we would want to merge docstrings?
+    mergeEdocs x _ = x
 
 -- merge two general types
 mergeTypeUs :: TypeU -> TypeU -> MorlocMonad TypeU
