@@ -14,6 +14,8 @@ module Morloc.Frontend.Lexer
   ( Parser
   , ParserState(..)
   , align
+  , foldMany
+  , indentFreeTerm
   , alignInset
   , angles
   , appendGenerics
@@ -78,6 +80,7 @@ data ParserState = ParserState {
                             -- you should reset the field before parsing a new type
   , stateMinPos :: Pos
   , stateAccepting :: Bool
+  , stateIgnoreAlignment :: Bool
   , stateModuleConfig :: ModuleConfig
 } deriving(Show)
 
@@ -89,6 +92,7 @@ emptyState = ParserState {
   , stateGenerics = []
   , stateMinPos = mkPos 1
   , stateAccepting = False
+  , stateIgnoreAlignment = False
   , stateModuleConfig = defaultValue
 }
 
@@ -108,23 +112,39 @@ setMinPos = do
   level <- L.indentLevel
   CMS.put (s { stateMinPos = level })
 
--- | Require elements all start on the same line as the first element. At least
--- one expression must match.
-align :: Parser a -> Parser [a]
-align p = do
+-- | A general function for parsing aligned things
+alignGen :: Bool -> (Parser () -> Parser a) -> Parser a
+alignGen flexibleStart p = do
   s <- CMS.get
   let minPos0 = stateMinPos s
       accept0 = stateAccepting s
-  curPos <- L.indentLevel
-  xs <- many1 (resetPos curPos True >> p)
+
+  minPos <- case flexibleStart of
+    True -> L.indentLevel
+    False -> return minPos0
+
+  x <- p (resetPos minPos True)
+
   -- put everything back the way it was
   resetPos minPos0 accept0
-  return xs
+  return x
   where
     resetPos :: Pos -> Bool -> Parser ()
     resetPos i r = do
       s' <- CMS.get
       CMS.put (s' {stateMinPos = i, stateAccepting = r})
+
+-- | Map over one or more aligned elements
+align :: Parser a -> Parser [a]
+align p = alignGen True (\reset -> many1 (reset >> try p))
+
+-- | Fold over 0 or more elements
+foldMany :: a -> (a -> Parser a) -> Parser a
+foldMany x p = do
+  mayX <- optional (p x)
+  case mayX of
+    (Just x') -> foldMany x' p
+    Nothing -> return x
 
 alignInset :: Parser a -> Parser [a]
 alignInset p = isInset >> align p
@@ -147,23 +167,43 @@ lexemeBase = L.lexeme sc
 lexeme :: Parser a -> Parser a
 lexeme p = do
   minPos <- CMS.gets stateMinPos
-  accepting <- CMS.gets stateAccepting
   s <- CMS.get
   curPos <- L.indentLevel
-  if accepting
-    then
-      if curPos == minPos
+
+  -- if indent doesn't matter at for this parse
+  if stateIgnoreAlignment s
+    -- then just handle terminal whitespace
+    then lexemeBase p
+    else
+      -- if we are awaiting exactly aligned input
+      if stateAccepting s
+      then
+        -- if we are exactly aligned
+        if curPos == minPos
         then
           CMS.put (s { stateAccepting = False }) >> lexemeBase p
+        -- otherwise die
         else
           L.incorrectIndent EQ minPos curPos
-    else
-      if minPos < curPos
+      -- if we are not waiting for aligned input
+      else
+        -- we are indented further than
+        if minPos < curPos
         then
           lexemeBase p
+        -- otherwise die
         else
           L.incorrectIndent LT minPos curPos
 
+indentFreeTerm :: Parser a -> Parser a
+indentFreeTerm p = do
+  s <- CMS.get
+  CMS.put (s { stateIgnoreAlignment = True })
+  xEither <- observing p
+  CMS.put s
+  case xEither of
+    (Left _) -> failure Nothing Set.empty
+    (Right x) -> return x
 
 resetGenerics :: Parser ()
 resetGenerics = do
@@ -211,11 +251,10 @@ docstr = do
   return ()
 
 parseFlagDocStr :: Text -> Parser Bool
-parseFlagDocStr flag = do
+parseFlagDocStr flag = lexeme $ do
   _ <- docstr
   _ <- string (flag <> ":")
   value <- parseTrue <|> parseFalse
-  _ <- sc
   return value
   where
     parseTrue :: Parser Bool
@@ -229,37 +268,33 @@ parseFlagDocStr flag = do
       return False
 
 parseTextDocStr :: Text -> Parser Text
-parseTextDocStr flag = do
+parseTextDocStr flag = lexeme $ do
   _ <- docstr
   string (flag <> ":")
   value <- takeWhileP Nothing (/= '\n')
-  _ <- sc
   return value
 
 parseWordDocStr :: Text -> Parser Text
-parseWordDocStr flag = do
+parseWordDocStr flag = lexeme $ do
   _ <- docstr
   string (flag <> ":")
   value <- many1 (alphaNumChar <|> char '-' <|> char '_')
-  _ <- sc
   return $ MT.pack value
 
 parseLineDocStr :: Parser Text
-parseLineDocStr = do
+parseLineDocStr = lexeme $ do
   _ <- docstr
   text <- takeWhileP Nothing (/= '\n')
-  _ <- sc
   return text
 
 parseArgDocStr :: Parser (Maybe Char, Maybe Text)
-parseArgDocStr = do
+parseArgDocStr = lexeme $ do
   _ <- docstr
   string "arg:"
   mayShort <- optional parseShortDocStr
   mayLong <- case mayShort of
     (Just _) -> optional (char '/' >> parseLongDocStr)
     Nothing -> parseLongDocStr |>> Just
-  _ <- sc
   return (mayShort, mayLong)
   where
 
@@ -282,7 +317,7 @@ data Sign = Pos | Neg
 
 number :: Parser (Either Integer DS.Scientific)
 number = lexeme $ do
-  x  <- try (fmap (Right . DS.fromFloatDigits) signedFloat) 
+  x  <- try (fmap (Right . DS.fromFloatDigits) signedFloat)
     <|> try unsignedHex
     <|> try unsignedOctal
     <|> try unsignedBinary
@@ -303,36 +338,36 @@ number = lexeme $ do
     expsign <- _sign
     expval <- L.decimal
     return (expsign, expval)
-  
+
   _sign :: Parser Sign
   _sign = do
     sign <- optional (char '-' <|> char '+')
     case sign of
       (Just '-') -> return Neg
       _ -> return Pos
-  
+
   -- Hexadecimal: 0x or 0X prefix (unsigned only)
   unsignedHex :: Parser (Either Integer DS.Scientific)
   unsignedHex = do
     _ <- string "0x" <|> string "0X"
     fmap Left L.hexadecimal
-  
+
   -- Octal: 0o or 0O prefix (unsigned only)
   unsignedOctal :: Parser (Either Integer DS.Scientific)
   unsignedOctal = do
     _ <- string "0o" <|> string "0O"
     fmap Left L.octal
-  
+
   -- Binary: 0b or 0B prefix (unsigned only)
   unsignedBinary :: Parser (Either Integer DS.Scientific)
   unsignedBinary = do
     _ <- string "0b" <|> string "0B"
     fmap Left L.binary
-  
+
   -- Signed floating point
   signedFloat :: Parser Double
   signedFloat = L.signed sc L.float
-  
+
   -- Signed decimal integer
   signedDecimal :: Parser Integer
   signedDecimal = L.signed sc L.decimal
@@ -376,7 +411,7 @@ operatorChars :: String
 operatorChars = ":!$%&*+./<=>?@\\^|-~#"
 
 op :: Text -> Parser Text
-op o = (lexeme . try) (symbol o <* notFollowedBy (oneOf operatorChars))
+op o = (lexeme . try) (string o <* notFollowedBy (oneOf operatorChars))
 
 -- the rugged dot, free and alone
 dot :: Parser Text
