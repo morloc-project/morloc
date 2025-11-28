@@ -73,7 +73,7 @@ data NexusExpr
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX
 
 
-generate :: [AnnoS (Indexed Type) One ()] -> [(Type, Int, Lang, [Socket])] -> MorlocMonad Script
+generate :: [(AnnoS (Indexed Type) One (), CmdDocSet)] -> [(Type, Int, Lang, CmdDocSet, [Socket])] -> MorlocMonad Script
 generate cs xs = do
 
   config <- MM.ask
@@ -103,10 +103,8 @@ generate cs xs = do
       , scriptMake = [SysRun . Code $ "gcc -o " <> MT.pack outfile <> " -O -I" <> MT.pack includeDir <> " " <> MT.pack nexusfile]
       }
 
-annotateGasts :: AnnoS (Indexed Type) One () -> MorlocMonad GastData
-annotateGasts x0@(AnnoS (Idx i gtype) _ _) = do
-  docs <- MM.getDocStrings i
-
+annotateGasts :: (AnnoS (Indexed Type) One (), CmdDocSet) -> MorlocMonad GastData
+annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
   mayName <- MM.metaName i
   gname <- case mayName of
     Nothing -> MM.throwError . OtherError $ "No name found for call-free function"
@@ -234,10 +232,9 @@ litSchema U64X = "u8"
 litSchema BoolX = "b"
 litSchema NullX = "z"
 
-getFData :: (Type, Int, Lang, [Socket]) -> MorlocMonad FData
-getFData (t, i, lang, sockets) = do
+getFData :: (Type, Int, Lang, CmdDocSet, [Socket]) -> MorlocMonad FData
+getFData (t, i, lang, doc, sockets) = do
 
-  doc <- MM.getDocStrings i
   mayName <- MM.metaName i
   (argSchemas, returnSchema) <- makeSchemas i lang t
 
@@ -349,20 +346,21 @@ usageCode fdata longestCommandLength cdata =
 |]
 
 usageLineT :: Int -> FData -> MDoc
-usageLineT _ _ = [idoc|fprintf(stderr, "%s", "x\n");|]
--- usageLineT longestCommandLength fdata = vsep
---   ( [idoc|fprintf(stderr, "%s", "  #{fdataSubcommand fdata}#{desc (fdataFunDocs fdata)}\n");|]
---   : typeStrs
---   )
---   where
---     padding = longestCommandLength - (fdataSubcommandLength fdata) + 2
---
---     desc [] = ""
---     desc (x:_) = pretty (replicate padding ' ') <> pretty x
---
---     typePadding = pretty $ replicate (longestCommandLength + 5) ' '
---
---     typeStrs = writeTypes typePadding (fdataType fdata)
+usageLineT longestCommandLength fdata = vsep
+  ( [idoc|fprintf(stderr, "%s", "  #{fdataSubcommand fdata}#{desc (cmdDocDesc doc)}\n");|]
+  : typeStrs
+  )
+  where
+    doc = fdataCmdDocSet fdata
+
+    padding = longestCommandLength - (fdataSubcommandLength fdata) + 2
+
+    desc [] = ""
+    desc (x:_) = pretty (replicate padding ' ') <> pretty x
+
+    typePadding = pretty $ replicate (longestCommandLength + 5) ' '
+
+    typeStrs = writeTypes typePadding (fdataType fdata)
 
 usageLineConst :: Int -> GastData -> MDoc
 usageLineConst _ _ = [idoc|fprintf(stderr, "%s", "y\n");|]
