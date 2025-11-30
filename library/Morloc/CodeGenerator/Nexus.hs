@@ -118,7 +118,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
 
   return $ GastData
     { commandIndex = i
-    , commandName = gname
+    , commandName = maybe gname EV (cmdDocName docs)
     , commandType = gtype
     , commandArgs = gargs
     , commandDocs = docs
@@ -244,7 +244,7 @@ getFData (t, i, lang, doc, sockets) = do
       let socket = MC.setupServerAndSocket config lang
       return $ FData
         { fdataSocket = setSocketPath socket
-        , fdataSubcommand = pretty name'
+        , fdataSubcommand = maybe (pretty name') pretty (cmdDocName doc)
         , fdataSubcommandLength = MT.length (unEVar name')
         , fdataMid = i
         , fdataType = t
@@ -341,40 +341,27 @@ usageCode fdata longestCommandLength cdata =
     fprintf(stderr, "%s", " -o, --output-file     Print to this file instead of STDOUT\n");
     fprintf(stderr, "%s", " -f, --output-format   Output format [json|mpk|voidstar]\n");
     fprintf(stderr, "%s", "\n");
-    fprintf(stderr, "%s", "Exported Commands:\n");
+    fprintf(stderr, "%s", "Exported commands (call with -h/--help for more info):\n");
     #{align $ vsep (map (usageLineT longestCommandLength) fdata ++ map (usageLineConst longestCommandLength) cdata)}
 |]
 
 usageLineT :: Int -> FData -> MDoc
-usageLineT longestCommandLength fdata = vsep
-  ( [idoc|fprintf(stderr, "%s", "  #{fdataSubcommand fdata}#{desc (cmdDocDesc doc)}\n");|]
-  : typeStrs
-  )
+usageLineT longestCommandLength fdata =
+  [idoc|fprintf(stderr, "%s", "  #{fdataSubcommand fdata}#{desc (cmdDocDesc doc)}\n");|]
   where
     doc = fdataCmdDocSet fdata
-
-    padding = longestCommandLength - (fdataSubcommandLength fdata) + 2
-
+    padding = longestCommandLength - (fdataSubcommandLength fdata) + 5
     desc [] = ""
     desc (x:_) = pretty (replicate padding ' ') <> pretty x
 
-    typePadding = pretty $ replicate (longestCommandLength + 5) ' '
-
-    typeStrs = writeTypes typePadding (fdataType fdata)
-
 usageLineConst :: Int -> GastData -> MDoc
-usageLineConst _ _ = [idoc|fprintf(stderr, "%s", "y\n");|]
--- usageLineConst longestCommandLength cmd = vsep
---   ( [idoc|fprintf(stderr, "%s", "  #{pretty (commandName cmd)}#{desc (commandDocs cmd)}\n");|]
---   : writeTypes typePadding (commandType cmd)
---   )
---   where
---     padding = longestCommandLength - (MT.length . unEVar . commandName $ cmd) + 2
---
---     typePadding = pretty $ replicate (longestCommandLength + 5) ' '
---
---     desc [] = ""
---     desc (x:_) = pretty (replicate padding ' ') <> pretty x
+usageLineConst longestCommandLength cmd =
+  [idoc|fprintf(stderr, "%s", "  #{pretty (commandName cmd)}#{desc (cmdDocDesc doc)}\n");|]
+  where
+    doc = commandDocs cmd
+    padding = longestCommandLength - (MT.length . unEVar . commandName $ cmd) + 2
+    desc [] = ""
+    desc (x:_) = pretty (replicate padding ' ') <> pretty x
 
 writeTypes :: MDoc -> Type -> [MDoc]
 writeTypes padding (FunT inputs output)
@@ -394,37 +381,38 @@ fixLineWrapping typestr = case lines (render' typestr) of
     [x] -> pretty x
     xs -> vsep $ [pretty (str <> "\\") | str <- init xs] <> [pretty (last xs)]
 
+createStructLong [] = "{ NULL }"
+createStructLong (x:xs) = align . vsep $ ["{" <+> x] <> ["," <+> x | x <- xs] <> ["}"]
+
 dispatchCode :: Config -> [FData] -> [GastData] -> MDoc
 dispatchCode _ [] [] = "// nothing to dispatch"
-dispatchCode config fdata cdata = [idoc|
-    uint32_t mid = 0;
-    int retcode = 0;
-    char buffer[256];
-    #{vsep socketDocs}
-    if(config.packet_path != NULL){
-        morloc_socket_t* all_sockets[] = #{allSocketsList};
-        start_daemons(all_sockets);
-        run_call_packet(config);
-        clean_exit(0);
-    }
-
-    #{cIfElse (head cases) (tail cases) (Just elseClause)}
-    |]
+dispatchCode config fdata cdata = indent 4 $ vsep
+        [ [idoc|uint32_t mid = 0;|]
+        , [idoc|int retcode = 0;|]
+        , [idoc|char buffer[256];|]
+        , [idoc|#{vsep socketDocs}|]
+        , [idoc|if(config.packet_path != NULL){|]
+        , [idoc|    morloc_socket_t* all_sockets[] = #{allSocketsList};|]
+        , [idoc|    start_daemons(all_sockets);|]
+        , [idoc|    run_call_packet(config);|]
+        , [idoc|    clean_exit(0);|]
+        , [idoc|}|]
+        , [idoc|#{cIfElse (head cases) (tail cases) (Just elseClause)}|]
+        ]
     where
-    makeSocketDoc socket =
-        [idoc|
-    morloc_socket_t #{varName} = { 0 };
-    #{varName}.lang = strdup("#{pretty $ socketLang socket}");
-    #{varName}.syscmd = (char**)calloc(5, sizeof(char*));
-    #{execArgsDoc}
-    // Use a fixed buffer, then strdup to allocate the final string
-    snprintf(buffer, 256, "%s/#{socketBasename}", tmpdir);
-    #{varName}.syscmd[#{pretty $ length execArgs}] = strdup(buffer);
-    #{varName}.syscmd[#{pretty $ length execArgs} + 1] = strdup(tmpdir);
-    #{varName}.syscmd[#{pretty $ length execArgs} + 2] = strdup(shm_basename);
-    #{varName}.syscmd[#{pretty $ length execArgs} + 3] = NULL;
-    #{varName}.socket_filename = strdup(buffer);
-        |]
+    makeSocketDoc socket = vsep
+        [ [idoc|morloc_socket_t #{varName} = { 0 };|]
+        , [idoc|#{varName}.lang = strdup("#{pretty $ socketLang socket}");|]
+        , [idoc|#{varName}.syscmd = (char**)calloc(5, sizeof(char*));|]
+        , [idoc|#{execArgsDoc}|]
+        , [idoc|// Use a fixed buffer, then strdup to allocate the final string|]
+        , [idoc|snprintf(buffer, 256, "%s/#{socketBasename}", tmpdir);|]
+        , [idoc|#{varName}.syscmd[#{pretty $ length execArgs}] = strdup(buffer);|]
+        , [idoc|#{varName}.syscmd[#{pretty $ length execArgs} + 1] = strdup(tmpdir);|]
+        , [idoc|#{varName}.syscmd[#{pretty $ length execArgs} + 2] = strdup(shm_basename);|]
+        , [idoc|#{varName}.syscmd[#{pretty $ length execArgs} + 3] = NULL;|]
+        , [idoc|#{varName}.socket_filename = strdup(buffer);|]
+        ]
         where
 
             varName = (pretty . ML.makeExtension $ socketLang socket) <> "_socket"
@@ -461,19 +449,22 @@ dispatchCode config fdata cdata = [idoc|
 
     makeCaseDoc (FData socket sub _ midx _ sockets schemas returnSchema _) =
         ( [idoc|strcmp(cmd, "#{sub}") == 0|]
-        , [idoc|    mid = #{pretty midx};
-    morloc_socket_t* sockets[] = #{socketList};
-    const char* arg_schemas[] = #{argSchemasList};
-    char return_schema[] = #{returnSchema};
-    start_daemons(sockets);
-    run_command(mid, args, arg_schemas, return_schema, #{lang}_socket, config);
-          |]
+        , vsep
+          [ [idoc|mid = #{pretty midx};|]
+          , [idoc|morloc_socket_t* sockets[] =|]
+          , [idoc|#{indent 4 socketList};|]
+          , [idoc|const char* arg_schemas[] =|]
+          , [idoc|#{indent 4 argSchemasList};|]
+          , [idoc|char return_schema[] = #{returnSchema};|]
+          , [idoc|start_daemons(sockets);|]
+          , [idoc|run_command(mid, args, arg_schemas, return_schema, #{lang}_socket, config);|]
+          ]
         )
         where
         socketList = encloseSep "{ " " }" ", " $
             [ "&" <> (pretty . ML.makeExtension $ socketLang s) <> "_socket" | s <- sockets] <> ["(morloc_socket_t*)NULL"]
 
-        argSchemasList = encloseSep "{ " " }" ", " $ schemas <> ["(char*)NULL"]
+        argSchemasList = createStructLong $ schemas <> ["(char*)NULL"]
         lang = pretty . ML.makeExtension $ socketLang socket
 
     cases = map makeCaseDoc fdata <> map makeGastCaseDoc cdata
@@ -481,10 +472,10 @@ dispatchCode config fdata cdata = [idoc|
     elseClause = [idoc|fprintf(stderr, "Unrecognized command '%s'\n", cmd);|]
 
 cIfElse :: (MDoc, MDoc) -> [(MDoc, MDoc)] -> Maybe MDoc -> MDoc
-cIfElse (cond1, block1) ifelses elseBlock = hsep $
-    [ "if" <> block 4 (parens cond1) block1 ] <>
-    [ block 4 ("else if" <+> parens condX) blockX  | (condX, blockX) <- ifelses] <>
-    [ maybe "" (block 4 "else") elseBlock ]
+cIfElse (cond1, block1) ifelses elseBlock = vsep $
+  [block 4 ("if" <+> parens cond1) block1 ] <>
+  [block 4 ("else if" <+> parens c) b | (c, b) <- ifelses] <>
+  maybe [] (return . block 4 "else") elseBlock
 
 makeGastCaseDoc :: GastData -> (MDoc, MDoc)
 makeGastCaseDoc gdata = (cond, body)
@@ -492,10 +483,13 @@ makeGastCaseDoc gdata = (cond, body)
     func = pretty . unEVar . commandName $ gdata
     returnSchema = dquotes . fst . commandSchemas $ gdata
     (exprBody, exprVar) = commandExpr gdata
-    argSchemasList = encloseSep "{" "}" ", " ((map dquotes . snd . commandSchemas $ gdata) <> ["NULL"])
+    argSchemasList = createStructLong $ ((map dquotes . snd . commandSchemas $ gdata) <> ["NULL"])
+
     cond = [idoc|strcmp(cmd, "#{func}") == 0|]
-    body = [idoc|    const char* arg_schemas[] = #{argSchemasList};
-    char return_schema[] = #{returnSchema};
-    #{vsep exprBody}
-    run_pure_command(#{exprVar}, args, arg_schemas, return_schema, config);
-    |]
+    body = vsep
+      [ [idoc|const char* arg_schemas[] =|]
+      , [idoc|#{indent 4 argSchemasList};|]
+      , [idoc|char return_schema[] = #{returnSchema};|]
+      , [idoc|#{vsep exprBody}|]
+      , [idoc|run_pure_command(#{exprVar}, args, arg_schemas, return_schema, config);|]
+      ]

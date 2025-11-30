@@ -263,7 +263,7 @@ void start_daemons(morloc_socket_t** all_sockets){
 
 void run_command(
     uint32_t mid,
-    char** args,
+    argument_t** args,
     const char** arg_schema_strs,
     const char* return_schema_str,
     morloc_socket_t root_socket,
@@ -291,7 +291,7 @@ void run_command(
 
 void run_pure_command(
     morloc_expression_t* expr,
-    char** args,
+    argument_t** args,
     const char** arg_schema_strs,
     const char* return_schema_str,
     config_t config
@@ -305,11 +305,11 @@ void run_pure_command(
         // assert that there are an appropriate number of schemas
         // mismatch implies an input mistake on the users side
         if(arg_schema_strs == NULL){
-          ERROR("To many arguments provided");
+          ERROR("Too many arguments provided");
         }
     }
     if(arg_schema_strs[nargs] != NULL){
-        ERROR("To few arguments provided");
+        ERROR("Too few arguments provided");
     }
 
     Schema** arg_schemas = (Schema**)calloc(nargs, sizeof(Schema*));
@@ -323,6 +323,7 @@ void run_pure_command(
       }
 
       arg_packets[i] = parse_cli_data_argument(args[i], arg_schemas[i], &errmsg);
+
       if(errmsg != NULL){
           ERROR("Failed read argument: %s", errmsg);
       }
@@ -389,8 +390,8 @@ void run_call_packet(config_t config){
     }
 
     // parse the schema from the response packet
-    char* schema_str = ERROR_TRY_GOTO(read_schema_from_packet_meta, result_packet);
-    Schema* schema = ERROR_TRY_GOTO(parse_schema, (const char**)&schema_str);
+    const char* schema_str = ERROR_TRY_GOTO(read_schema_from_packet_meta, result_packet);
+    Schema* schema = ERROR_TRY_GOTO(parse_schema, &schema_str);
 
     uint8_t* mlc = ERROR_TRY_GOTO(get_morloc_data_packet_value, result_packet, schema)
     char* mpk_data = NULL; // MessagePack data point
@@ -443,17 +444,45 @@ void usage(){
     clean_exit(0);
 }
 
+argument_t** parse_subcommands(const char* cmd, int argc, char** arg_strs){
+
+  if(arg_strs == NULL){
+    return NULL;
+  }
+
+  int nargs = 0;
+  while(arg_strs[optind + nargs] != NULL){
+    nargs++;
+  }
+
+  argument_t** args = (argument_t**)calloc(nargs + 1, sizeof(argument_t*));
+  for(int i = 0; i < nargs; i++){
+    args[i] = initialize_positional(strdup(arg_strs[optind + i]));
+  }
+
+  return args;
+}
 
 void dispatch(
-    const char* cmd,
-    char** args,
+    int argc,
+    char* arg_strs[],
     const char* shm_basename,
     config_t config
 ){
 
+    char* cmd = arg_strs[optind];
+    optind++;
+
+    argument_t** args = parse_subcommands(cmd, argc, arg_strs);
+
 // AUTO dispatch
 // <<<BREAK>>>
 // AUTO dispatch
+
+    for(size_t i = 0; args[i] != NULL; i++){
+        free_argument_t(args[i]);
+    }
+    free(args);
 
     clean_exit(0);
 }
@@ -548,17 +577,13 @@ int main(int argc, char *argv[]) {
             clean_exit(EXIT_FAILURE);
         }
 
-        // Extract subcommand and arguments
-        const char* subcommand = argv[optind];
-        char** command_arguments = &argv[optind + 1];
-
         // Validate we don't have conflicting options
         if (config.socket_base) {
             fprintf(stderr, "Error: socket-base can't be used with subcommands\n");
             clean_exit(EXIT_FAILURE);
         }
 
-        dispatch(subcommand, command_arguments, shm_basename, config);
+        dispatch(argc, argv, shm_basename, config);
     } else {
         // Validate no positional arguments when using call packet
         if (optind < argc) {
@@ -572,7 +597,7 @@ int main(int argc, char *argv[]) {
             clean_exit(EXIT_FAILURE);
         }
 
-        dispatch(NULL, NULL, shm_basename, config);
+        dispatch(argc, argv, shm_basename, config);
     }
 
     // unrechable

@@ -271,6 +271,7 @@ parseTextDocStr :: Text -> Parser Text
 parseTextDocStr flag = lexeme $ do
   _ <- docstr
   string (flag <> ":")
+  _ <- hspace
   value <- takeWhileP Nothing (/= '\n')
   return value
 
@@ -278,6 +279,7 @@ parseWordDocStr :: Text -> Parser Text
 parseWordDocStr flag = lexeme $ do
   _ <- docstr
   string (flag <> ":")
+  _ <- hspace
   value <- many1 (alphaNumChar <|> char '-' <|> char '_')
   return $ MT.pack value
 
@@ -291,6 +293,7 @@ parseArgDocStr :: Parser (Maybe Char, Maybe Text)
 parseArgDocStr = lexeme $ do
   _ <- docstr
   string "arg:"
+  _ <- hspace
   mayShort <- optional parseShortDocStr
   mayLong <- case mayShort of
     (Just _) -> optional (char '/' >> parseLongDocStr)
