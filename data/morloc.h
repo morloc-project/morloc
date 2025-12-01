@@ -2494,7 +2494,8 @@ static size_t calculate_voidstar_size(const void* data, const Schema* schema, ER
 
 // Prototypes
 
-Schema* parse_schema(const char** schema_ptr, ERRMSG);
+Schema* parse_schema(const char* schema, ERRMSG);
+Schema* parse_schema_r(char** schema_ptr, ERRMSG);
 
 // Helper function to create a schema with parameters
 static Schema* create_schema_with_params(morloc_serial_type type, size_t width, size_t size, Schema** params, char** keys) {
@@ -2610,7 +2611,7 @@ static Schema* map_schema(size_t size, char** keys, Schema** params) {
     return create_schema_with_params(MORLOC_MAP, width, size, params, keys);
 }
 
-static size_t parse_schema_size(const char** schema_ptr){
+static size_t parse_schema_size(char** schema_ptr){
   char c = **schema_ptr;
   size_t size =
     // characters 0-9 are integers 0-9
@@ -2627,7 +2628,7 @@ static size_t parse_schema_size(const char** schema_ptr){
   return size;
 }
 
-static char* parse_schema_key(const char** schema_ptr){
+static char* parse_schema_key(char** schema_ptr){
   size_t key_size = parse_schema_size(schema_ptr);
   char* key = (char*)calloc(key_size+1, sizeof(char));
   memcpy(key, *schema_ptr, key_size);
@@ -2636,7 +2637,7 @@ static char* parse_schema_key(const char** schema_ptr){
 }
 
 // This parser starts on the character **after** the initial '<'
-static char* parse_hint(const char** schema_ptr) {
+static char* parse_hint(char** schema_ptr) {
   char* hint = NULL;
 
   if (!schema_ptr || !*schema_ptr) {
@@ -2684,7 +2685,20 @@ static char* parse_hint(const char** schema_ptr) {
   return hint;
 }
 
-Schema* parse_schema(const char** schema_ptr, ERRMSG){
+Schema* parse_schema(const char* schema_str, ERRMSG){
+  PTR_RETURN_SETUP(Schema)
+
+  char* schema_copy = strdup(schema_str);
+  RAISE_IF(schema_copy == NULL, "Failed to allocate schema string")
+
+  char* parse_ptr = schema_copy;  // This pointer will be modified
+  Schema* schema = TRY(parse_schema_r, &parse_ptr);
+
+  free(schema_copy);
+  return schema;
+}
+
+Schema* parse_schema_r(char** schema_ptr, ERRMSG){
   PTR_RETURN_SETUP(Schema)
 
   Schema** params;
@@ -2699,7 +2713,7 @@ Schema* parse_schema(const char** schema_ptr, ERRMSG){
 
   switch(c){
     case SCHEMA_ARRAY:
-      child_schema = parse_schema(schema_ptr, &CHILD_ERRMSG);
+      child_schema = parse_schema_r(schema_ptr, &CHILD_ERRMSG);
       RAISE_IF(child_schema == NULL, "\n%s", CHILD_ERRMSG)
       schema = array_schema(child_schema);
       break;
@@ -2707,7 +2721,7 @@ Schema* parse_schema(const char** schema_ptr, ERRMSG){
       size = parse_schema_size(schema_ptr);
       params = (Schema**)calloc(size, sizeof(Schema*));
       for(size_t i = 0; i < size; i++){
-        params[i] = parse_schema(schema_ptr, &CHILD_ERRMSG);
+        params[i] = parse_schema_r(schema_ptr, &CHILD_ERRMSG);
         RAISE_IF(params[i] == NULL, "\n%s", CHILD_ERRMSG)
       }
       schema = tuple_schema(params, size);
@@ -2718,7 +2732,7 @@ Schema* parse_schema(const char** schema_ptr, ERRMSG){
       params = (Schema**)calloc(size, sizeof(Schema*));
       for(size_t i = 0; i < size; i++){
         keys[i] = parse_schema_key(schema_ptr);
-        params[i] = parse_schema(schema_ptr, &CHILD_ERRMSG);
+        params[i] = parse_schema_r(schema_ptr, &CHILD_ERRMSG);
         RAISE_IF(params[i] == NULL, "\n%s", CHILD_ERRMSG)
       }
       schema = map_schema(size, keys, params);
@@ -2747,7 +2761,7 @@ Schema* parse_schema(const char** schema_ptr, ERRMSG){
     case '<':
       {
           hint = parse_hint(schema_ptr);
-          schema = parse_schema(schema_ptr, &CHILD_ERRMSG);
+          schema = parse_schema_r(schema_ptr, &CHILD_ERRMSG);
           RAISE_IF(schema == NULL, "\n%s", CHILD_ERRMSG)
       }
       break;
@@ -3053,7 +3067,7 @@ int pack_with_schema(const void* mlc, const Schema* schema, char** packet, size_
 int pack(const void* mlc, const char* schema_str, char** mpk, size_t* mpk_size, ERRMSG) {
     INT_RETURN_SETUP
 
-    Schema* schema = parse_schema(&schema_str, &CHILD_ERRMSG);
+    Schema* schema = parse_schema(schema_str, &CHILD_ERRMSG);
     RAISE_IF(schema == NULL, "\n%s", CHILD_ERRMSG)
 
     int exit_code = pack_with_schema(mlc, schema, mpk, mpk_size, &CHILD_ERRMSG);
@@ -3420,7 +3434,7 @@ int unpack_with_schema(const char* mgk, size_t mgk_size, const Schema* schema, v
 // take MessagePack data and set a pointer to an in-memory data structure
 int unpack(const char* mpk, size_t mpk_size, const char* schema_str, void** mlcptr, ERRMSG) {
     INT_RETURN_SETUP
-    const Schema* schema = parse_schema(&schema_str, &CHILD_ERRMSG);
+    const Schema* schema = parse_schema(schema_str, &CHILD_ERRMSG);
     RAISE_IF(schema == NULL, "\n%s", CHILD_ERRMSG)
     int exit_code = unpack_with_schema(mpk, mpk_size, schema, mlcptr, &CHILD_ERRMSG);
     RAISE_IF(exit_code == EXIT_FAIL, "\n%s", CHILD_ERRMSG)
@@ -6052,26 +6066,52 @@ static uint8_t* parse_cli_data_argument_singular(uint8_t* dest, char* arg, const
 }
 
 // Parse a command line argument unrolled record
-static uint8_t* parse_cli_data_argument_unrolled(char** field, const Schema* schema, ERRMSG){
-    // PTR_RETURN_SETUP(uint8_t)
+static uint8_t* parse_cli_data_argument_unrolled(uint8_t* dest, char** fields, const Schema* schema, ERRMSG){
+    PTR_RETURN_SETUP(uint8_t)
 
-    // TODO: complete this STUB
-    return NULL;
+    bool denovo = dest == NULL;
+    if(dest == NULL){
+        dest = (uint8_t*) TRY(shcalloc, 1, schema->width)
+    }
+
+    switch(schema->type) {
+        case MORLOC_TUPLE:
+        case MORLOC_MAP: {
+            for(size_t i = 0; i < schema->size; i++){
+                if(fields[i] == NULL){
+                    // this error should be caught earlier in the nexus
+                    RAISE_IF(denovo, "Undefined field")
+                    // If a dest record was provided, then it is possible that
+                    // it defined the field, so NULL fields in `fields` is OK.
+                } else {
+                    TRY(
+                      parse_cli_data_argument_singular,
+                      dest + schema->offsets[i],
+                      fields[i],
+                      schema->parameters[i]
+                    )
+                }
+            }
+        }; break;
+        default: {
+            RAISE("Only record an tuple types may be unrolled")
+        }
+    }
+    return dest;
 }
 
 // Parse one CLI argument and return a data packet
-static uint8_t* parse_cli_data_argument(const argument_t* arg, const Schema* schema, ERRMSG){
+static uint8_t* parse_cli_data_argument(uint8_t* dest, const argument_t* arg, const Schema* schema, ERRMSG){
     PTR_RETURN_SETUP(uint8_t)
 
-    uint8_t* voidstar = NULL;
-
+    // modify dest if it is not NULL, otherwise allocate it
     if(arg->type == SINGULAR_ARG) {
-        voidstar = parse_cli_data_argument_singular(NULL, arg->arg.value, schema, &CHILD_ERRMSG);
+        dest = TRY(parse_cli_data_argument_singular, dest, arg->arg.value, schema);
     } else {
-        voidstar = parse_cli_data_argument_unrolled(arg->arg.fields, schema, &CHILD_ERRMSG);
+        dest = TRY(parse_cli_data_argument_unrolled, dest, arg->arg.fields, schema);
     }
 
-    relptr_t relptr = TRY(abs2rel, voidstar);
+    relptr_t relptr = TRY(abs2rel, dest);
     uint8_t* packet_arg = make_standard_data_packet(relptr, schema);
 
     return packet_arg;
@@ -6080,9 +6120,10 @@ static uint8_t* parse_cli_data_argument(const argument_t* arg, const Schema* sch
 
 // Given the manifold ID and argument and schema strings, create a morloc call packet
 uint8_t* make_call_packet_from_cli(
+    uint8_t* dest,
     uint32_t mid,
     argument_t** args, // NULL terminated array of arguments
-    const char** arg_schema_strs, // NULL terminated array of schema strings
+    char** arg_schema_strs, // NULL terminated array of schema strings
     ERRMSG
 ){
     PTR_RETURN_SETUP(uint8_t)
@@ -6096,7 +6137,7 @@ uint8_t* make_call_packet_from_cli(
     RAISE_IF(schemas == NULL, "Failed to allocate memory for schemas")
 
     for(size_t i = 0; arg_schema_strs[i] != NULL; i++){
-        schemas[i] = parse_schema(&arg_schema_strs[i], &CHILD_ERRMSG);
+        schemas[i] = parse_schema(arg_schema_strs[i], &CHILD_ERRMSG);
         RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(schemas), "Failed to parse argument %zu:\n%s", i, CHILD_ERRMSG)
     }
     schemas[nschemas] = NULL;
@@ -6110,7 +6151,7 @@ uint8_t* make_call_packet_from_cli(
     RAISE_IF_WITH(packet_args == NULL, free(schemas), "Failed to allocate packet_args");
 
     for(size_t i = 0; i < nargs; i++){
-        packet_args[i] = parse_cli_data_argument(args[i], schemas[i], &CHILD_ERRMSG);
+        packet_args[i] = parse_cli_data_argument(dest, args[i], schemas[i], &CHILD_ERRMSG);
         if(CHILD_ERRMSG != NULL){
             free(schemas);
             free(packet_args);
@@ -6242,7 +6283,7 @@ typedef struct morloc_pattern_s {
 
 morloc_expression_t* make_morloc_bound_var(const char* schema_str, char* varname){
     char* error_msg = NULL;
-    Schema* schema = parse_schema(&schema_str, &error_msg);
+    Schema* schema = parse_schema(schema_str, &error_msg);
 
     morloc_expression_t* expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
     expr->type = MORLOC_X_BND;
@@ -6257,7 +6298,7 @@ morloc_expression_t* make_morloc_literal(
   primitive_t lit
 ){
     char* error_msg = NULL;
-    Schema* schema = parse_schema(&schema_str, &error_msg);
+    Schema* schema = parse_schema(schema_str, &error_msg);
     morloc_data_t* data = (morloc_data_t*)malloc(sizeof(morloc_data_t));
 
     data->is_voidstar = false;
@@ -6278,7 +6319,7 @@ morloc_expression_t* make_morloc_container(
     va_list value_list;
     va_start(value_list, nargs);
     char* error_msg = NULL;
-    Schema* schema = parse_schema(&schema_str, &error_msg);
+    Schema* schema = parse_schema(schema_str, &error_msg);
     morloc_data_t* data = (morloc_data_t*)malloc(sizeof(morloc_data_t));
     data->is_voidstar = false;
 
@@ -6325,7 +6366,7 @@ morloc_expression_t* make_morloc_app(
     va_start(args, nargs);
 
     char* error_msg = NULL;
-    Schema* schema = parse_schema(&schema_str, &error_msg);
+    Schema* schema = parse_schema(schema_str, &error_msg);
 
     morloc_app_expression_t* app = (morloc_app_expression_t*)malloc(sizeof(morloc_app_expression_t));
 
@@ -6394,7 +6435,7 @@ morloc_expression_t* make_morloc_lambda(
 
 morloc_expression_t* make_morloc_interpolation(const char* schema_str, size_t nargs, ...){
     char* error_msg = NULL;
-    Schema* schema = parse_schema(&schema_str, &error_msg);
+    Schema* schema = parse_schema(schema_str, &error_msg);
 
     va_list var_list;
     va_start(var_list, nargs);
@@ -6416,7 +6457,7 @@ morloc_expression_t* make_morloc_interpolation(const char* schema_str, size_t na
 
 morloc_expression_t* make_morloc_pattern(const char* schema_str, morloc_pattern_t* pattern){
     char* error_msg = NULL;
-    Schema* schema = parse_schema(&schema_str, &error_msg);
+    Schema* schema = parse_schema(schema_str, &error_msg);
     morloc_expression_t* expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
     expr->type = MORLOC_X_PAT;
     expr->schema = schema;
@@ -7294,7 +7335,7 @@ uint8_t* remote_call(
         // direct pointer to the packet string (do not free)
         char* arg_schema_str = TRY_GOTO(read_schema_from_packet_meta, arg_packets[i]);
 
-        arg_schemas[i] = TRY_GOTO(parse_schema, (const char**)&arg_schema_str);
+        arg_schemas[i] = TRY_GOTO(parse_schema, arg_schema_str);
 
         // get the raw data stored in the packet (after the header and metadata)
         // possibly heavy memory

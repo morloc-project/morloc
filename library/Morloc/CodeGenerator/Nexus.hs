@@ -290,7 +290,7 @@ generalTypeToSerialAST (VarT v)
         (Just [([], t', _, False)]) -> generalTypeToSerialAST (typeOf t')
         (Just [_]) -> error $ "Cannot currently handle parameterized pure morloc types"
         Nothing -> error $ "Failed to interpret type variable: " <> show (unTVar v)
-        x -> error $ "Unexpected scope: " <> show x 
+        x -> error $ "Unexpected scope: " <> show x
 generalTypeToSerialAST (AppT (VarT v) [t])
   | v == MBT.list = SerialList (FV v (CV "")) <$> generalTypeToSerialAST t
   | otherwise = do
@@ -328,8 +328,15 @@ makeSchema mid lang t = do
 
 
 main :: MC.Config -> [FData] -> Int -> [GastData] -> MDoc
-main config fdata longestCommandLength cdata
-    = format (DF.embededFileText DF.nexusTemplate) "// <<<BREAK>>>" [ usageCode fdata longestCommandLength cdata, dispatchCode config fdata cdata ]
+main config fdata longestCommandLength cdata = format
+  (DF.embededFileText DF.nexusTemplate)
+  "// <<<BREAK>>>"
+  [ usageCode fdata longestCommandLength cdata
+  , vsep subcommandDispatchers
+  , dispatch
+  ]
+  where
+    (subcommandDispatchers, dispatch) = dispatchCode config fdata cdata
 
 usageCode :: [FData] -> Int -> [GastData] -> MDoc
 usageCode fdata longestCommandLength cdata =
@@ -384,9 +391,11 @@ fixLineWrapping typestr = case lines (render' typestr) of
 createStructLong [] = "{ NULL }"
 createStructLong (x:xs) = align . vsep $ ["{" <+> x] <> ["," <+> x | x <- xs] <> ["}"]
 
-dispatchCode :: Config -> [FData] -> [GastData] -> MDoc
-dispatchCode _ [] [] = "// nothing to dispatch"
-dispatchCode config fdata cdata = indent 4 $ vsep
+dispatchCode :: Config -> [FData] -> [GastData] -> ([MDoc], MDoc)
+dispatchCode _ [] [] = (["// no dispatchers registered"], "// nothing to dispatch")
+dispatchCode config fdata cdata = (dispatchers, dispatchBlock)
+    where
+    dispatchBlock = indent 4 $ vsep
         [ [idoc|uint32_t mid = 0;|]
         , [idoc|int retcode = 0;|]
         , [idoc|char buffer[256];|]
@@ -399,7 +408,7 @@ dispatchCode config fdata cdata = indent 4 $ vsep
         , [idoc|}|]
         , [idoc|#{cIfElse (head cases) (tail cases) (Just elseClause)}|]
         ]
-    where
+
     makeSocketDoc socket = vsep
         [ [idoc|morloc_socket_t #{varName} = { 0 };|]
         , [idoc|#{varName}.lang = strdup("#{pretty $ socketLang socket}");|]
@@ -447,27 +456,7 @@ dispatchCode config fdata cdata = indent 4 $ vsep
 
     socketDocs = [makeSocketDoc s | (_, s) <- daemonSets]
 
-    makeCaseDoc (FData socket sub _ midx _ sockets schemas returnSchema _) =
-        ( [idoc|strcmp(cmd, "#{sub}") == 0|]
-        , vsep
-          [ [idoc|mid = #{pretty midx};|]
-          , [idoc|morloc_socket_t* sockets[] =|]
-          , [idoc|#{indent 4 socketList};|]
-          , [idoc|const char* arg_schemas[] =|]
-          , [idoc|#{indent 4 argSchemasList};|]
-          , [idoc|char return_schema[] = #{returnSchema};|]
-          , [idoc|start_daemons(sockets);|]
-          , [idoc|run_command(mid, args, arg_schemas, return_schema, #{lang}_socket, config);|]
-          ]
-        )
-        where
-        socketList = encloseSep "{ " " }" ", " $
-            [ "&" <> (pretty . ML.makeExtension $ socketLang s) <> "_socket" | s <- sockets] <> ["(morloc_socket_t*)NULL"]
-
-        argSchemasList = createStructLong $ schemas <> ["(char*)NULL"]
-        lang = pretty . ML.makeExtension $ socketLang socket
-
-    cases = map makeCaseDoc fdata <> map makeGastCaseDoc cdata
+    (dispatchers, cases) = unzip $ map makeCaseDoc fdata <> map makeGastCaseDoc cdata
 
     elseClause = [idoc|fprintf(stderr, "Unrecognized command '%s'\n", cmd);|]
 
@@ -477,8 +466,56 @@ cIfElse (cond1, block1) ifelses elseBlock = vsep $
   [block 4 ("else if" <+> parens c) b | (c, b) <- ifelses] <>
   maybe [] (return . block 4 "else") elseBlock
 
-makeGastCaseDoc :: GastData -> (MDoc, MDoc)
-makeGastCaseDoc gdata = (cond, body)
+
+makeCaseDoc :: FData -> (MDoc, (MDoc, MDoc))
+makeCaseDoc (FData socket sub _ midx _ sockets schemas returnSchema _) =
+    (dispatcher, (cond, body))
+    where
+
+    cond = [idoc|strcmp(cmd, "#{sub}") == 0|]
+    body = vsep
+      [ [idoc|morloc_socket_t* sockets[] = #{socketList};|]
+      , [idoc|start_daemons(sockets);|]
+      , [idoc|dispatch_#{sub}(argc, argv, shm_basename, config, #{lang}_socket);|]
+      ]
+
+    socketList = encloseSep "{ " " }" ", " $
+        [ "&" <> (pretty . ML.makeExtension $ socketLang s) <> "_socket" | s <- sockets] <> ["(morloc_socket_t*)NULL"]
+
+    lang = pretty . ML.makeExtension $ socketLang socket
+
+    dispatcher = [idoc|
+void dispatch_#{sub}(
+    int argc,
+    char* argv[],
+    const char* shm_basename,
+    config_t config,
+    morloc_socket_t socket
+){
+    char* arg_schemas[] =
+      #{argSchemasList};
+
+    char return_schema[] = #{returnSchema};
+
+    int nargs = 0;
+    while(argv[optind + nargs] != NULL){
+      nargs++;
+    }
+
+    argument_t** args = (argument_t**)calloc(nargs + 1, sizeof(argument_t*));
+    for(int i = 0; i < nargs; i++){
+      args[i] = initialize_positional(strdup(argv[optind + i]));
+    }
+
+    run_command(#{pretty midx}, args, arg_schemas, return_schema, socket, config);
+}
+|]
+
+    argSchemasList = createStructLong $ schemas <> ["(char*)NULL"]
+
+
+makeGastCaseDoc :: GastData -> (MDoc, (MDoc, MDoc))
+makeGastCaseDoc gdata = (dispatcher, (cond, body))
     where
     func = pretty . unEVar . commandName $ gdata
     returnSchema = dquotes . fst . commandSchemas $ gdata
@@ -486,10 +523,29 @@ makeGastCaseDoc gdata = (cond, body)
     argSchemasList = createStructLong $ ((map dquotes . snd . commandSchemas $ gdata) <> ["NULL"])
 
     cond = [idoc|strcmp(cmd, "#{func}") == 0|]
-    body = vsep
-      [ [idoc|const char* arg_schemas[] =|]
-      , [idoc|#{indent 4 argSchemasList};|]
-      , [idoc|char return_schema[] = #{returnSchema};|]
-      , [idoc|#{vsep exprBody}|]
-      , [idoc|run_pure_command(#{exprVar}, args, arg_schemas, return_schema, config);|]
-      ]
+    body = [idoc|dispatch_#{func}(argc, argv, shm_basename, config);|]
+
+    dispatcher = [idoc|
+void dispatch_#{func}(
+    int argc,
+    char* argv[],
+    const char* shm_basename,
+    config_t config
+){
+    char* arg_schemas[] = #{argSchemasList};
+    char return_schema[] = #{returnSchema};
+    #{vsep exprBody}
+
+    int nargs = 0;
+    while(argv[optind + nargs] != NULL){
+      nargs++;
+    }
+
+    argument_t** args = (argument_t**)calloc(nargs + 1, sizeof(argument_t*));
+    for(int i = 0; i < nargs; i++){
+      args[i] = initialize_positional(strdup(argv[optind + i]));
+    }
+
+    run_pure_command(#{exprVar}, args, arg_schemas, return_schema, config);
+}
+|]

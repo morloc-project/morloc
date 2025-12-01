@@ -264,22 +264,28 @@ void start_daemons(morloc_socket_t** all_sockets){
 void run_command(
     uint32_t mid,
     argument_t** args,
-    const char** arg_schema_strs,
+    char** arg_schema_strs,
     const char* return_schema_str,
     morloc_socket_t root_socket,
     config_t config
 ){
     char* errmsg = NULL;
 
-    Schema* return_schema = parse_schema(&return_schema_str, &errmsg);
+    Schema* return_schema = parse_schema(return_schema_str, &errmsg);
     if(errmsg != NULL){
         ERROR("Failed to parse return schema");
     }
 
-    uint8_t* call_packet = make_call_packet_from_cli(mid, args, arg_schema_strs, &errmsg);
+    uint8_t* call_packet = make_call_packet_from_cli(NULL, mid, args, arg_schema_strs, &errmsg);
     if(errmsg != NULL){
         ERROR("Failed to parse arguments:\n%s", errmsg);
     }
+
+    // free arguments
+    for(size_t i = 0; args[i] != NULL; i++){
+        free_argument_t(args[i]);
+    }
+    free(args);
 
     uint8_t* result_packet = send_and_receive_over_socket(root_socket.socket_filename, call_packet, &errmsg);
     if(errmsg != NULL){
@@ -292,7 +298,7 @@ void run_command(
 void run_pure_command(
     morloc_expression_t* expr,
     argument_t** args,
-    const char** arg_schema_strs,
+    char** arg_schema_strs,
     const char* return_schema_str,
     config_t config
 ){
@@ -317,12 +323,12 @@ void run_pure_command(
     uint8_t** arg_voidstars = (uint8_t**)calloc(nargs, sizeof(uint8_t*));
 
     for(size_t i = 0; i < nargs; i++){
-      arg_schemas[i] = parse_schema(&arg_schema_strs[i], &errmsg);
+      arg_schemas[i] = parse_schema(arg_schema_strs[i], &errmsg);
       if(errmsg != NULL){
           ERROR("Failed to parse arg schema: %s", errmsg);
       }
 
-      arg_packets[i] = parse_cli_data_argument(args[i], arg_schemas[i], &errmsg);
+      arg_packets[i] = parse_cli_data_argument(NULL, args[i], arg_schemas[i], &errmsg);
 
       if(errmsg != NULL){
           ERROR("Failed read argument: %s", errmsg);
@@ -335,7 +341,7 @@ void run_pure_command(
 
     }
 
-    Schema* return_schema = parse_schema(&return_schema_str, &errmsg);
+    Schema* return_schema = parse_schema(return_schema_str, &errmsg);
     if(errmsg != NULL){
         ERROR("Failed to parse return schema");
     }
@@ -390,8 +396,8 @@ void run_call_packet(config_t config){
     }
 
     // parse the schema from the response packet
-    const char* schema_str = ERROR_TRY_GOTO(read_schema_from_packet_meta, result_packet);
-    Schema* schema = ERROR_TRY_GOTO(parse_schema, &schema_str);
+    char* schema_str = ERROR_TRY_GOTO(read_schema_from_packet_meta, result_packet);
+    Schema* schema = ERROR_TRY_GOTO(parse_schema, schema_str);
 
     uint8_t* mlc = ERROR_TRY_GOTO(get_morloc_data_packet_value, result_packet, schema)
     char* mpk_data = NULL; // MessagePack data point
@@ -444,45 +450,23 @@ void usage(){
     clean_exit(0);
 }
 
-argument_t** parse_subcommands(const char* cmd, int argc, char** arg_strs){
-
-  if(arg_strs == NULL){
-    return NULL;
-  }
-
-  int nargs = 0;
-  while(arg_strs[optind + nargs] != NULL){
-    nargs++;
-  }
-
-  argument_t** args = (argument_t**)calloc(nargs + 1, sizeof(argument_t*));
-  for(int i = 0; i < nargs; i++){
-    args[i] = initialize_positional(strdup(arg_strs[optind + i]));
-  }
-
-  return args;
-}
+// AUTO subcommand dispatchers
+// <<<BREAK>>>
+// AUTO subcommand dispatchers
 
 void dispatch(
     int argc,
-    char* arg_strs[],
+    char* argv[],
     const char* shm_basename,
     config_t config
 ){
 
-    char* cmd = arg_strs[optind];
+    char* cmd = argv[optind];
     optind++;
-
-    argument_t** args = parse_subcommands(cmd, argc, arg_strs);
 
 // AUTO dispatch
 // <<<BREAK>>>
 // AUTO dispatch
-
-    for(size_t i = 0; args[i] != NULL; i++){
-        free_argument_t(args[i]);
-    }
-    free(args);
 
     clean_exit(0);
 }

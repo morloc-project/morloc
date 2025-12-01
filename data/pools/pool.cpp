@@ -86,7 +86,7 @@ std::string interweave_strings(const std::vector<std::string>& first, const std:
 template <typename T>
 uint8_t* _put_value(const T& value, const std::string& schema_str) {
     const char* schema_ptr = schema_str.c_str();
-    Schema* schema = parse_schema_cpp(&schema_ptr);
+    Schema* schema = parse_schema_cpp(schema_ptr);
 
     // toAnything writes to the shared memory volume
     void* voidstar = toAnything(schema, value);
@@ -105,7 +105,7 @@ template <typename T>
 T _get_value(const uint8_t* packet, const std::string& schema_str){
 
     const char* schema_ptr = schema_str.c_str();
-    Schema* schema = parse_schema_cpp(&schema_ptr);
+    Schema* schema = parse_schema_cpp(schema_ptr);
 
     char* errmsg = NULL;
     uint8_t* voidstar = get_morloc_data_packet_value(packet, schema, &errmsg);

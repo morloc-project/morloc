@@ -834,7 +834,7 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
         PyRAISE("Failed to parse arguments");
     }
 
-    schema = PyTRY(parse_schema, &schema_str);
+    schema = PyTRY(parse_schema, schema_str);
 
     voidstar = to_voidstar(schema, obj);
     PyTRACE(voidstar == NULL)
@@ -869,7 +869,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         PyRAISE("Failed to parse arguments");
     }
 
-    schema = PyTRY(parse_schema, &schema_str)
+    schema = PyTRY(parse_schema, schema_str)
 
     voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
