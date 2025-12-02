@@ -276,6 +276,7 @@ pTypedef =   try pTypedefType
 
   pTypedefType :: Parser ExprI
   pTypedefType = do
+    doc <- parseArgOptDocSet |>> CmdArgOpt
     _ <- reserved "type"
     mayLang <- optional (try pLangNamespace)
     (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
@@ -283,12 +284,12 @@ pTypedef =   try pTypedefType
       (Just lang) -> do
         _ <- symbol "="
         (t, isTerminal) <- pConcreteType <|> pGeneralType
-        exprI (TypE (ExprTypeE (Just (lang, isTerminal)) v vs t CmdArgDef))
+        exprI (TypE (ExprTypeE (Just (lang, isTerminal)) v vs t doc))
       Nothing -> do
         mayT <- optional (symbol "=" >> pType)
         case (vs, mayT) of
-          (_, Just (_, t)) -> exprI (TypE (ExprTypeE Nothing v vs t CmdArgDef))
-          ([], Nothing) -> exprI (TypE (ExprTypeE Nothing v vs (VarU v) CmdArgDef))
+          (_, Just (_, t)) -> exprI (TypE (ExprTypeE Nothing v vs t doc))
+          ([], Nothing) -> exprI (TypE (ExprTypeE Nothing v vs (VarU v) doc))
           (_, Nothing) -> exprI (TypE (ExprTypeE Nothing v vs (AppU (VarU v) (map (either (VarU) id) vs)) CmdArgDef))
 
   pTypedefObjectLegacy :: Parser ExprI
