@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, QuasiQuotes, OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell, QuasiQuotes, OverloadedStrings, ViewPatterns #-}
 
 {-|
 Module      : Morloc.CodeGenerator.Nexus
@@ -468,15 +468,14 @@ cIfElse (cond1, block1) ifelses elseBlock = vsep $
 
 
 makeCaseDoc :: FData -> (MDoc, (MDoc, MDoc))
-makeCaseDoc (FData socket sub _ midx _ sockets schemas returnSchema _) =
+makeCaseDoc fdata@(FData socket sub _ midx _ sockets schemas returnSchema _) =
     (dispatcher, (cond, body))
     where
 
     cond = [idoc|strcmp(cmd, "#{sub}") == 0|]
     body = vsep
       [ [idoc|morloc_socket_t* sockets[] = #{socketList};|]
-      , [idoc|start_daemons(sockets);|]
-      , [idoc|dispatch_#{sub}(argc, argv, shm_basename, config, #{lang}_socket);|]
+      , [idoc|dispatch_#{sub}(argc, argv, shm_basename, config, #{lang}_socket, sockets);|]
       ]
 
     socketList = encloseSep "{ " " }" ", " $
@@ -490,8 +489,34 @@ void dispatch_#{sub}(
     char* argv[],
     const char* shm_basename,
     config_t config,
-    morloc_socket_t socket
+    morloc_socket_t socket,
+    morloc_socket_t** sockets
 ){
+    int opt;
+    const int OPT_HELP_VERBOSE = 256;
+
+    static struct option long_options[] = {
+        {"help", no_argument, 0, OPT_HELP_VERBOSE},
+        {0, 0, 0, 0}
+    };
+
+    const char *short_options = "h";
+
+    while ((opt = getopt_long(argc, argv, short_options, long_options, NULL)) != -1) {
+        switch (opt) {
+            case 'h': {
+                #{align (subcmdHelpShortF fdata)}
+                clean_exit(0);
+            }; break;
+            case OPT_HELP_VERBOSE: {
+                #{align (subcmdHelpLongF fdata)}
+                clean_exit(0);
+            }; break;
+        }
+    }
+
+    start_daemons(sockets);
+
     char* arg_schemas[] =
       #{argSchemasList};
 
@@ -532,6 +557,29 @@ void dispatch_#{func}(
     const char* shm_basename,
     config_t config
 ){
+    int opt;
+    const int OPT_HELP_VERBOSE = 256;
+
+    static struct option long_options[] = {
+        {"help", no_argument, 0, OPT_HELP_VERBOSE},
+        {0, 0, 0, 0}
+    };
+
+    const char *short_options = "h";
+
+    while ((opt = getopt_long(argc, argv, short_options, long_options, NULL)) != -1) {
+        switch (opt) {
+            case 'h': {
+                #{align (subcmdHelpShortG gdata)}
+                clean_exit(0);
+            }; break;
+            case OPT_HELP_VERBOSE: {
+                #{align (subcmdHelpLongG gdata)}
+                clean_exit(0);
+            }; break;
+        }
+    }
+
     char* arg_schemas[] = #{argSchemasList};
     char return_schema[] = #{returnSchema};
     #{vsep exprBody}
@@ -549,3 +597,44 @@ void dispatch_#{func}(
     run_pure_command(#{exprVar}, args, arg_schemas, return_schema, config);
 }
 |]
+
+linePrinter :: [MDoc] -> MDoc
+linePrinter xs = vsep [ [idoc|fprintf(stderr, "#{x}\n");|] | x <- xs]
+
+subcmdHelpShortF :: FData -> MDoc
+subcmdHelpShortF f = subcmdHelpShort (fdataSubcommand f) (fdataType f) (fdataCmdDocSet f)
+
+subcmdHelpLongF :: FData -> MDoc
+subcmdHelpLongF f = subcmdHelpLong (fdataSubcommand f) (fdataType f) (fdataCmdDocSet f)
+
+subcmdHelpShortG :: GastData -> MDoc
+subcmdHelpShortG g = subcmdHelpShort (pretty $ commandName g) (commandType g) (commandDocs g)
+
+subcmdHelpLongG :: GastData -> MDoc
+subcmdHelpLongG g = subcmdHelpLong (pretty $ commandName g) (commandType g) (commandDocs g)
+
+subcmdHelpShort :: MDoc -> Type -> CmdDocSet -> MDoc
+subcmdHelpShort cmd t0 docs = linePrinter
+  $  [usage t0]
+  <> desc docs
+  <> args t0
+
+  where
+    usage (FunT (length -> n) _) =
+      "Usage: ./nexus" <+> foldl (<+>) cmd ["ARG" <> pretty i | i <- take n ([1..] :: [Int])]
+    usage _ = "Usage: ./nexus" <+> cmd
+
+    desc (CmdDocSet [] _ _) = []
+    desc (CmdDocSet (x:[]) _ _) = ["", pretty x]
+    desc (CmdDocSet (x:details) _ _) = ["", pretty x, ""] <> (map pretty details)
+
+    args (FunT ts _)
+      =  ["", "Subcommand Arguments:"]
+      <> concat (zipWith makeArg [1..] ts)
+    args _ = []
+
+    makeArg :: Int -> Type -> [MDoc]
+    makeArg i t = [" ARG" <> pretty i <> ":  " <> pretty t]
+
+subcmdHelpLong :: MDoc -> Type -> CmdDocSet -> MDoc
+subcmdHelpLong = subcmdHelpShort
