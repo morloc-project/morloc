@@ -483,7 +483,7 @@ data CmdDocSet = CmdDocSet
 data RecDocSet = RecDocSet
   { recDocDesc :: [Text]
   -- free description
-  , recDocMetavar :: Text
+  , recDocMetavar :: Maybe Text
   -- name of the record used in docs, with record type in uppercase as the default
   , recDocUnroll :: Maybe Bool
   -- whether to unroll by default, over-ridden by the argument unroll option
@@ -491,7 +491,7 @@ data RecDocSet = RecDocSet
   -- short option for loading the record from a single argument
   , recDocLong :: Maybe Text
   -- long option for loading the record from a single argument
-  , recDocEntries :: [(Key, ArgOptDocSet)]
+  , recDocEntries :: [(Key, CmdArg)]
   -- doc info on all record fields
   }
   deriving (Show, Ord, Eq)
@@ -499,7 +499,7 @@ data RecDocSet = RecDocSet
 data ArgOptDocSet = ArgOptDocSet
   { argOptDocDesc :: [Text]
     -- free description
-  , argOptDocMetavar :: [Text]
+  , argOptDocMetavar :: Maybe Text
     -- a variable used in the interface to refer to this argument term
   , argOptDocLiteral :: Maybe Bool
     -- if Just True, require an argument be literal rather than from a file
@@ -521,12 +521,16 @@ data ArgOptDocSet = ArgOptDocSet
 data ArgPosDocSet = ArgPosDocSet
   { argPosDocDesc :: [Text]
     -- free description
-  , argPosDocMetavar :: [Text]
+  , argPosDocMetavar :: Maybe Text
     -- a variable used in the interface to refer to this argument term
   , argPosDocLiteral :: Maybe Bool
     -- if Just True, require an argument be literal rather than from a file
     -- if Just False, require an argument be from a file
     -- if Nothing, infer as usual
+  , argPosDocUnroll :: Maybe Bool
+    -- if Just True, unroll the option if it is unrollable
+    -- if Just False, do not unroll the option
+    -- if Nothing, unroll the option if it feels like being unrolled
   }
   deriving (Show, Ord, Eq)
 
@@ -1098,7 +1102,7 @@ instance Defaultable CmdDocSet where
 instance Defaultable RecDocSet where
   defaultValue = RecDocSet
     { recDocDesc = []
-    , recDocMetavar = "RECORD"
+    , recDocMetavar = Nothing
     , recDocUnroll = Nothing
     , recDocShort = Nothing
     , recDocLong = Nothing
@@ -1108,7 +1112,7 @@ instance Defaultable RecDocSet where
 instance Defaultable ArgOptDocSet where
   defaultValue = ArgOptDocSet
     { argOptDocDesc = []
-    , argOptDocMetavar = []
+    , argOptDocMetavar = Nothing
     , argOptDocLiteral = Nothing
     , argOptDocUnroll = Nothing
     , argOptDocShort = Nothing
@@ -1119,8 +1123,9 @@ instance Defaultable ArgOptDocSet where
 instance Defaultable ArgPosDocSet where
   defaultValue = ArgPosDocSet
     { argPosDocDesc = []
-    , argPosDocMetavar = []
+    , argPosDocMetavar = Nothing
     , argPosDocLiteral = Nothing
+    , argPosDocUnroll = Nothing
     }
 
 instance Defaultable PackageMeta where

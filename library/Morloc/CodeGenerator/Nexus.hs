@@ -19,7 +19,6 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.Quasi
 import qualified Data.Map as Map
 import qualified Morloc.Data.Text as MT
-import Data.Text (Text)
 import qualified Control.Monad as CM
 import qualified Morloc.Config as MC
 import qualified Morloc.Language as ML

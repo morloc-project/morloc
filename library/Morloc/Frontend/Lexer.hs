@@ -15,6 +15,7 @@ module Morloc.Frontend.Lexer
   , ParserState(..)
   , align
   , foldMany
+  , foldMany1
   , indentFreeTerm
   , alignInset
   , angles
@@ -145,6 +146,11 @@ foldMany x p = do
   case mayX of
     (Just x') -> foldMany x' p
     Nothing -> return x
+
+foldMany1 :: a -> (a -> Parser a) -> Parser a
+foldMany1 x p = do 
+  x' <- p x
+  foldMany x' p
 
 alignInset :: Parser a -> Parser [a]
 alignInset p = isInset >> align p

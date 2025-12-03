@@ -276,7 +276,7 @@ pTypedef =   try pTypedefType
 
   pTypedefType :: Parser ExprI
   pTypedefType = do
-    doc <- parseArgOptDocSet |>> CmdArgOpt
+    doc <- parseCmdArg
     _ <- reserved "type"
     mayLang <- optional (try pLangNamespace)
     (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
@@ -319,7 +319,7 @@ pTypedef =   try pTypedefType
     o <- pNamType
     (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
     reserved "where"
-    entries <- alignInset ((,) <$> parseArgOptDocSet <*> pNamEntryU) >>=
+    entries <- alignInset ((,) <$> parseCmdArg <*> pNamEntryU) >>=
                (mapM (secondM (desugarTableEntries o)))
     let docEntries = zip (map (Key . fst . snd) entries) (map fst entries)
     let grpArg = CmdArgGrp $ recDoc { recDocEntries = docEntries }
@@ -424,8 +424,7 @@ pSignature = do
 
   constraints <- option [] pConstraints
 
-  -- note that CmdArgOpt is later modified to the proper CmdArg type
-  let cmdDoc = doc {cmdDocArgs = map CmdArgOpt docs}
+  let cmdDoc = doc {cmdDocArgs = docs}
 
   let t = forallWrap vs t'
       et = EType { etype = t
@@ -458,6 +457,11 @@ pSignature = do
     pWord :: Parser Text
     pWord =  MT.pack <$> lexeme (many1 alphaNumChar)
 
+parseCmdArg :: Parser CmdArg
+parseCmdArg = option CmdArgDef $
+  try (CmdArgPos <$> parseArgPosDocSet)
+  <|> (CmdArgOpt <$> parseArgOptDocSet)
+
 parseCmdDocSet :: Parser CmdDocSet
 parseCmdDocSet = indentFreeTerm $ foldMany defaultValue parseCmdDocSetLine
 
@@ -465,7 +469,11 @@ parseRecDocSet :: Parser RecDocSet
 parseRecDocSet = indentFreeTerm $ foldMany defaultValue parseRecDocSetLine
 
 parseArgOptDocSet :: Parser ArgOptDocSet
-parseArgOptDocSet = indentFreeTerm $ foldMany defaultValue parseArgOptDocSetLine
+parseArgOptDocSet = indentFreeTerm $ foldMany1 defaultValue parseArgOptDocSetLine
+
+parseArgPosDocSet :: Parser ArgPosDocSet
+parseArgPosDocSet = indentFreeTerm $ foldMany1 defaultValue parseArgPosDocSetLine
+
 
 -- parse a top-level function definition (not the entries)
 parseCmdDocSetLine :: CmdDocSet -> Parser CmdDocSet
@@ -476,7 +484,7 @@ parseCmdDocSetLine d
 -- parse a top-level record definition (not the entries)
 parseRecDocSetLine :: RecDocSet -> Parser RecDocSet
 parseRecDocSetLine d =
-      try (parseWordDocStr "metavar" |>> (\x -> d { recDocMetavar = x }))
+      try (parseWordDocStr "metavar" |>> (\x -> d { recDocMetavar = Just x }))
   <|> try (parseFlagDocStr "unroll" |>> (\x -> d { recDocUnroll = Just x }))
   <|> try (parseArgDocStr |>> (\(s, l) -> d { recDocShort = s, recDocLong = l }))
   <|>     (parseLineDocStr |>> (\x -> d { recDocDesc = recDocDesc d <> [x] }))
@@ -486,9 +494,18 @@ parseArgOptDocSetLine d =
         try (parseFlagDocStr "literal" |>> (\x -> d { argOptDocLiteral = Just x }))
     <|> try (parseFlagDocStr "unroll"  |>> (\x -> d { argOptDocUnroll = Just x }))
     <|> try (parseTextDocStr "default" |>> (\x -> d { argOptDocDefault = Just x }))
-    <|> try (parseTextDocStr "metavar" |>> (\x -> d { argOptDocMetavar = MT.words x }))
+    <|> try (parseWordDocStr "metavar" |>> (\x -> d { argOptDocMetavar = Just x }))
     <|> try (parseArgDocStr |>> (\(s, l) -> d { argOptDocShort = s, argOptDocLong = l }))
     <|>     (parseLineDocStr |>> (\x -> d { argOptDocDesc = argOptDocDesc d <> [x] }))
+
+parseArgPosDocSetLine :: ArgPosDocSet -> Parser ArgPosDocSet
+parseArgPosDocSetLine d =
+        try (parseFlagDocStr "literal" |>> (\x -> d { argPosDocLiteral = Just x }))
+    <|> try (parseWordDocStr "metavar" |>> (\x -> d { argPosDocMetavar = Just x }))
+    <|> try (parseFlagDocStr "unroll"  |>> (\x -> d { argPosDocUnroll = Just x }))
+
+    <|>     (parseLineDocStr |>> (\x -> d { argPosDocDesc = argPosDocDesc d <> [x] }))
+
 
 pSrcE :: Parser [ExprI]
 pSrcE = do
@@ -737,11 +754,11 @@ pTermCon = do
   _ <- optional pTag
   TV <$> stringLiteral
 
-pTypeDoc :: Parser ([ArgOptDocSet], TypeU)
+pTypeDoc :: Parser ([CmdArg], TypeU)
 pTypeDoc = try pFunUDoc <|> (pType |>> first return)
 
-pType :: Parser (ArgOptDocSet, TypeU)
-pType = (,) <$> try parseArgOptDocSet <*> (
+pType :: Parser (CmdArg, TypeU)
+pType = (,) <$> try parseCmdArg <*> (
         try pExistential
     <|> try (pFunUDoc |>> snd) -- discard argument docs (for now)
     <|> try pUniU
@@ -791,14 +808,14 @@ pAppU = do
   where
     pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU
 
-pFunUDoc :: Parser ([ArgOptDocSet], TypeU)
+pFunUDoc :: Parser ([CmdArg], TypeU)
 pFunUDoc = do
   ts <- sepBy2 pType' (op "->")
   case (init ts, last ts) of
     (inputs, output) -> return $
       (map fst inputs <> [fst output], FunU (map snd inputs) (snd output))
   where
-    pType' = (,) <$> try parseArgOptDocSet <*> pFunCompatibleType
+    pType' = (,) <$> try parseCmdArg <*> pFunCompatibleType
 
 
 pFunCompatibleType :: Parser TypeU
