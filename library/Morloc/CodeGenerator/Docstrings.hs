@@ -14,6 +14,7 @@ module Morloc.CodeGenerator.Docstrings (processDocstrings) where
 
 import Morloc.Namespace
 import qualified Data.Map as Map
+import Data.Text (Text)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.GMap as GMap
 
@@ -29,8 +30,15 @@ processDocstrings e@(AnnoS (Idx i t) _ _) = do
 processCmdDocSet :: Int -> Type -> CmdDocSet -> MorlocMonad CmdDocSet
 processCmdDocSet i (FunT ts _) cmd = do
   cmdargs' <- zipWithM (processCmdArg i) ts (cmdDocArgs cmd)
-  return $ cmd { cmdDocArgs = cmdargs' }
+  let retDocs = getRetDocs $ last (cmdDocArgs cmd)
+  return $ cmd { cmdDocArgs = cmdargs', cmdDocRet = retDocs }
 processCmdDocSet _ _ c = return c
+
+getRetDocs :: CmdArg -> [Text]
+getRetDocs (CmdArgPos r) = argPosDocDesc r
+getRetDocs (CmdArgOpt r) = argOptDocDesc r
+getRetDocs (CmdArgGrp r) = recDocDesc r
+getRetDocs CmdArgDef = []
 
 processCmdArg :: Int -> Type -> CmdArg -> MorlocMonad CmdArg
 processCmdArg i (VarT v) arg = do

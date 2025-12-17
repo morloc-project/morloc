@@ -61,6 +61,7 @@ module Morloc.Internal
   , safeZip
   , safeZipWith
   , safeZipWithM
+  , zipWith3M
   ) where
 
 -- Don't import anything from Morloc here. This module should be VERY lowest
@@ -181,6 +182,13 @@ safeZipWithM :: Monad m => (a -> b -> m c) -> [a] -> [b] -> m (Maybe [c])
 safeZipWithM f xs ys
     | length xs == length ys = zipWithM f xs ys |>> Just
     | otherwise = return Nothing
+
+zipWith3M :: Monad m => (a -> b -> c -> m d) -> [a] -> [b] -> [c] -> m [d]
+zipWith3M f (a:as) (b:bs) (c:cs) = do
+  d <- f a b c
+  ds <- zipWith3M f as bs cs
+  return $ d:ds
+zipWith3M _ _ _ _ = return []
 
 -- | pipe the lhs functor into the rhs function
 infixl 1 |>>

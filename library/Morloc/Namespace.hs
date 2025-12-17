@@ -477,6 +477,8 @@ data CmdDocSet = CmdDocSet
   -- an alternative name to give this subcommand (defaults to the function name)
   , cmdDocArgs :: [CmdArg]
   -- one element for each argument to the function
+  , cmdDocRet :: [Text]
+  -- description of the return data
   }
   deriving (Show, Ord, Eq)
 
@@ -1097,6 +1099,7 @@ instance Defaultable CmdDocSet where
     { cmdDocDesc = []
     , cmdDocName = Nothing
     , cmdDocArgs = []
+    , cmdDocRet = []
     }
 
 instance Defaultable RecDocSet where

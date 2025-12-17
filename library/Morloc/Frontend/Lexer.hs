@@ -260,6 +260,7 @@ parseFlagDocStr :: Text -> Parser Bool
 parseFlagDocStr flag = lexeme $ do
   _ <- docstr
   _ <- string (flag <> ":")
+  _ <- hspace
   value <- parseTrue <|> parseFalse
   return value
   where
@@ -300,7 +301,7 @@ parseArgDocStr = lexeme $ do
   _ <- docstr
   string "arg:"
   _ <- hspace
-  mayShort <- optional parseShortDocStr
+  mayShort <- optional (try parseShortDocStr)
   mayLong <- case mayShort of
     (Just _) -> optional (char '/' >> parseLongDocStr)
     Nothing -> parseLongDocStr |>> Just

@@ -457,10 +457,50 @@ pSignature = do
     pWord :: Parser Text
     pWord =  MT.pack <$> lexeme (many1 alphaNumChar)
 
+-- A temporary data structure that stores any field from either a positional or
+-- optional parameter
+data AnyArg = AnyArg
+  { anyLiteral :: Maybe Bool
+  , anyUnroll :: Maybe Bool
+  , anyDefault :: Maybe Text
+  , anyMetavar :: Maybe Text
+  , anyShort :: Maybe Char
+  , anyLong :: Maybe Text
+  , anyLines :: [Text]
+  }
+
+instance Defaultable AnyArg where
+  defaultValue = AnyArg
+    { anyLiteral = Nothing
+    , anyUnroll = Nothing
+    , anyDefault = Nothing
+    , anyMetavar = Nothing
+    , anyShort = Nothing
+    , anyLong = Nothing
+    , anyLines = []
+    }
+
 parseCmdArg :: Parser CmdArg
-parseCmdArg = option CmdArgDef $
-  try (CmdArgPos <$> parseArgPosDocSet)
-  <|> (CmdArgOpt <$> parseArgOptDocSet)
+parseCmdArg = option CmdArgDef $ do
+  r <- parseAnyArg
+  case (anyShort r, anyLong r) of
+    (Nothing, Nothing) ->
+      return . CmdArgPos $ ArgPosDocSet
+        { argPosDocDesc = anyLines r
+        , argPosDocMetavar = anyMetavar r
+        , argPosDocLiteral = anyLiteral r
+        , argPosDocUnroll = anyUnroll r
+        }
+    _ ->
+      return . CmdArgOpt $ ArgOptDocSet
+        { argOptDocDesc = anyLines r
+        , argOptDocMetavar = anyMetavar r
+        , argOptDocLiteral = anyLiteral r
+        , argOptDocUnroll = anyUnroll r
+        , argOptDocShort = anyShort r
+        , argOptDocLong = anyLong r
+        , argOptDocDefault = anyDefault r
+        }
 
 parseCmdDocSet :: Parser CmdDocSet
 parseCmdDocSet = indentFreeTerm $ foldMany defaultValue parseCmdDocSetLine
@@ -468,12 +508,8 @@ parseCmdDocSet = indentFreeTerm $ foldMany defaultValue parseCmdDocSetLine
 parseRecDocSet :: Parser RecDocSet
 parseRecDocSet = indentFreeTerm $ foldMany defaultValue parseRecDocSetLine
 
-parseArgOptDocSet :: Parser ArgOptDocSet
-parseArgOptDocSet = indentFreeTerm $ foldMany1 defaultValue parseArgOptDocSetLine
-
-parseArgPosDocSet :: Parser ArgPosDocSet
-parseArgPosDocSet = indentFreeTerm $ foldMany1 defaultValue parseArgPosDocSetLine
-
+parseAnyArg :: Parser AnyArg
+parseAnyArg = indentFreeTerm $ foldMany1 defaultValue parseAnyArgLine
 
 -- parse a top-level function definition (not the entries)
 parseCmdDocSetLine :: CmdDocSet -> Parser CmdDocSet
@@ -489,23 +525,14 @@ parseRecDocSetLine d =
   <|> try (parseArgDocStr |>> (\(s, l) -> d { recDocShort = s, recDocLong = l }))
   <|>     (parseLineDocStr |>> (\x -> d { recDocDesc = recDocDesc d <> [x] }))
 
-parseArgOptDocSetLine :: ArgOptDocSet -> Parser ArgOptDocSet
-parseArgOptDocSetLine d =
-        try (parseFlagDocStr "literal" |>> (\x -> d { argOptDocLiteral = Just x }))
-    <|> try (parseFlagDocStr "unroll"  |>> (\x -> d { argOptDocUnroll = Just x }))
-    <|> try (parseTextDocStr "default" |>> (\x -> d { argOptDocDefault = Just x }))
-    <|> try (parseWordDocStr "metavar" |>> (\x -> d { argOptDocMetavar = Just x }))
-    <|> try (parseArgDocStr |>> (\(s, l) -> d { argOptDocShort = s, argOptDocLong = l }))
-    <|>     (parseLineDocStr |>> (\x -> d { argOptDocDesc = argOptDocDesc d <> [x] }))
-
-parseArgPosDocSetLine :: ArgPosDocSet -> Parser ArgPosDocSet
-parseArgPosDocSetLine d =
-        try (parseFlagDocStr "literal" |>> (\x -> d { argPosDocLiteral = Just x }))
-    <|> try (parseWordDocStr "metavar" |>> (\x -> d { argPosDocMetavar = Just x }))
-    <|> try (parseFlagDocStr "unroll"  |>> (\x -> d { argPosDocUnroll = Just x }))
-
-    <|>     (parseLineDocStr |>> (\x -> d { argPosDocDesc = argPosDocDesc d <> [x] }))
-
+parseAnyArgLine :: AnyArg -> Parser AnyArg
+parseAnyArgLine d =
+        try (parseFlagDocStr "literal" |>> (\x -> d { anyLiteral = Just x }))
+    <|> try (parseFlagDocStr "unroll"  |>> (\x -> d { anyUnroll = Just x }))
+    <|> try (parseTextDocStr "default" |>> (\x -> d { anyDefault = Just x }))
+    <|> try (parseWordDocStr "metavar" |>> (\x -> d { anyMetavar = Just x }))
+    <|> try (parseArgDocStr |>> (\(s, l) -> d { anyShort = s, anyLong = l }))
+    <|>     (parseLineDocStr |>> (\x -> d { anyLines = anyLines d <> [x] }))
 
 pSrcE :: Parser [ExprI]
 pSrcE = do
