@@ -555,6 +555,11 @@ void dispatch_#{sub}(
 
     #{argInits}
 
+    if(argv[optind] != NULL){
+      fprintf(stderr, "Error: too many positional arguments given\n");
+      clean_exit(EXIT_FAILURE);
+    }
+
     run_command(#{pretty midx}, args, arg_schemas, return_schema, socket, config);
 }
 |]
@@ -621,6 +626,11 @@ void dispatch_#{func}(
     argument_t** args = (argument_t**)calloc(#{nargs} + 1, sizeof(argument_t*));
 
     #{argInits}
+
+    if(argv[optind] != NULL){
+      fprintf(stderr, "Error: too many positional arguments given\n");
+      clean_exit(EXIT_FAILURE);
+    }
 
     run_pure_command(#{exprVar}, args, arg_schemas, return_schema, config);
 }
@@ -940,11 +950,15 @@ writeArgToSharedMemory i t (CmdArgGrp r) = vsep $ [fieldDef] <> fields <> [argSe
                      (map pretty ([0..] :: [Int]))
                      (map (toVarNameCmdArg . snd) (recDocEntries r))
     argSet = [idoc|args[#{pretty i}] = initialize_unrolled(#{size}, #{varname}, #{fieldArgName});|]
-writeArgToSharedMemory i t (CmdArgPos r) = vsep $
-  [ [idoc|args[#{pretty i}] = initialize_positional(strdup(argv[optind]));|]
-  ,  "optind++;"
-  ]
-writeArgToSharedMemory i t CmdArgDef = vsep $
-  [ [idoc|args[#{pretty i}] = initialize_positional(strdup(argv[optind]));|]
-  ,  "optind++;"
-  ]
+writeArgToSharedMemory i _ (CmdArgPos _) = initPositional i
+writeArgToSharedMemory i _ CmdArgDef = initPositional i
+
+initPositional :: Int -> MDoc
+initPositional i =
+  [idoc|if(argv[optind] == NULL){
+  fprintf(stderr, "Error: too few positional arguments\n");
+  clean_exit(EXIT_FAILURE);
+} else {
+  args[#{pretty i}] = initialize_positional(strdup(argv[optind]));
+  optind++;
+}|]
