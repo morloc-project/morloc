@@ -137,21 +137,6 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
 
     type2schema t = generalTypeToSerialAST t |>> Serial.serialAstToMsgpackSchema |>> dquotes
 
-    -- make potentially multi-line strings legal C literals
-    escapeString = MT.concatMap escapeChar
-      where
-        escapeChar '"'  = "\\\""
-        escapeChar '\\' = "\\\\"
-        escapeChar '\n' = "\\n"
-        escapeChar '\r' = "\\r"
-        escapeChar '\t' = "\\t"
-        escapeChar '\b' = "\\b"
-        escapeChar '\f' = "\\f"
-        escapeChar '\v' = "\\v"
-        escapeChar c
-          | c < ' ' || c == '\DEL' = MT.pack $ "\\x" ++ printf "%02x" (ord c)
-          | otherwise = MT.singleton c
-
     toNexusExpr :: AnnoS (Indexed Type) One () -> MorlocMonad NexusExpr
     toNexusExpr (AnnoS (Idx _ t) _ (AppS e es)) = AppX <$> type2schema t <*> toNexusExpr e <*> mapM toNexusExpr es
     toNexusExpr (AnnoS _ _ (LamS vs e)) = LamX (map pretty vs) <$> toNexusExpr e
@@ -184,6 +169,24 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS _ _ (LogS False)) = return $ LitX BoolX "0"
     toNexusExpr (AnnoS _ _ UniS) = return $ LitX NullX "0"
     toNexusExpr _ = error $ "Unreachable value of type reached"
+
+
+-- make potentially multi-line strings legal C literals
+escapeString :: Text -> Text
+escapeString = MT.concatMap escapeChar
+  where
+    escapeChar '"'  = "\\\""
+    escapeChar '\\' = "\\\\"
+    escapeChar '\n' = "\\n"
+    escapeChar '\r' = "\\r"
+    escapeChar '\t' = "\\t"
+    escapeChar '\b' = "\\b"
+    escapeChar '\f' = "\\f"
+    escapeChar '\v' = "\\v"
+    escapeChar c
+      | c < ' ' || c == '\DEL' = MT.pack $ "\\x" ++ printf "%02x" (ord c)
+      | otherwise = MT.singleton c
+
 
 makePureExpression :: Int -> NexusExpr -> ([MDoc], MDoc)
 makePureExpression index e0 = (code, varName) where
@@ -496,7 +499,9 @@ makeCaseDoc fdata@(FData socket sub _ midx t sockets schemas returnSchema cmdDoc
 
         argSchemasList = createStructLong $ schemas <> ["(char*)NULL"]
 
-    (longOptVal, longArgDecs, shortArgDec, argCases) <-
+        nargs = pretty . length $ schemas
+
+    (longOptVal, vardefs, longArgDecs, shortArgDec, argCases, argInits) <-
         makeParameters midx t (cmdDocArgs cmdDocSet)
 
     usageQuiet <- subcmdHelpQuietF fdata
@@ -523,6 +528,8 @@ void dispatch_#{sub}(
 
     const char *short_options = "h#{shortArgDec}";
 
+    #{align vardefs}
+
     while ((opt = getopt_long(argc, argv, short_options, long_options, NULL)) != -1) {
         switch (opt) {
             case 'h': {
@@ -544,15 +551,9 @@ void dispatch_#{sub}(
 
     char return_schema[] = #{returnSchema};
 
-    int nargs = 0;
-    while(argv[optind + nargs] != NULL){
-      nargs++;
-    }
+    argument_t** args = (argument_t**)calloc(#{nargs} + 1, sizeof(argument_t*));
 
-    argument_t** args = (argument_t**)calloc(nargs + 1, sizeof(argument_t*));
-    for(int i = 0; i < nargs; i++){
-      args[i] = initialize_positional(strdup(argv[optind + i]));
-    }
+    #{argInits}
 
     run_command(#{pretty midx}, args, arg_schemas, return_schema, socket, config);
 }
@@ -570,7 +571,9 @@ makeGastCaseDoc gdata = do
         cond = [idoc|strcmp(cmd, "#{func}") == 0|]
         body = [idoc|dispatch_#{func}(argc, argv, shm_basename, config);|]
 
-    (longOptVal, longArgDecs, shortArgDec, argCases) <-
+        nargs = pretty . length . commandArgs $ gdata
+
+    (longOptVal, vardefs, longArgDecs, shortArgDec, argCases, argInits) <-
         makeParameters (commandIndex gdata) (commandType gdata) (cmdDocArgs (commandDocs gdata))
 
     usageQuiet <- subcmdHelpQuietG gdata
@@ -595,6 +598,8 @@ void dispatch_#{func}(
 
     const char *short_options = "h#{shortArgDec}";
 
+    #{align vardefs}
+
     while ((opt = getopt_long(argc, argv, short_options, long_options, NULL)) != -1) {
         switch (opt) {
             case 'h': {
@@ -613,15 +618,9 @@ void dispatch_#{func}(
     char return_schema[] = #{returnSchema};
     #{vsep exprBody}
 
-    int nargs = 0;
-    while(argv[optind + nargs] != NULL){
-      nargs++;
-    }
+    argument_t** args = (argument_t**)calloc(#{nargs} + 1, sizeof(argument_t*));
 
-    argument_t** args = (argument_t**)calloc(nargs + 1, sizeof(argument_t*));
-    for(int i = 0; i < nargs; i++){
-      args[i] = initialize_positional(strdup(argv[optind + i]));
-    }
+    #{argInits}
 
     run_pure_command(#{exprVar}, args, arg_schemas, return_schema, config);
 }
@@ -806,9 +805,23 @@ toOptName varname = "OPT_" <> pretty (MT.map convertChar varname)
       | isAlphaNum c = toUpper c
       | otherwise    = '_'
 
+toVarName :: Maybe Char -> Maybe Text -> MDoc
+toVarName mayShort mayLong = [idoc|cliarg_#{short}_#{long}|] where
+  convertChar c
+    | isAlphaNum c = c
+    | otherwise    = '_'
+  short = maybe "" (pretty . convertChar) mayShort
+  long  = maybe "" (pretty . MT.map convertChar) mayLong
+
+toVarNameCmdArg :: CmdArg -> MDoc
+toVarNameCmdArg (CmdArgPos _) = "";
+toVarNameCmdArg CmdArgDef = "";
+toVarNameCmdArg (CmdArgOpt r) = toVarName (argOptDocShort r) (argOptDocLong r);
+toVarNameCmdArg (CmdArgGrp r) = toVarName (recDocShort r) (recDocLong r);
+
 unrollArgs :: Int -> Type -> CmdArg -> MorlocMonad [(Type, ArgOptDocSet)]
 unrollArgs _ t (CmdArgOpt r) = return [(t, r)]
-unrollArgs i t@(NamT _ _ _ rs) (CmdArgGrp r) = do
+unrollArgs i t (CmdArgGrp r) = do
   t' <- evalType i t
   case t' of
     (NamT _ _ _ rs) -> do
@@ -830,32 +843,47 @@ unrollArgs _ t r = return []
 
 makeParameters :: Int -> Type -> [CmdArg] -> MorlocMonad
   ( MDoc -- long optional index defintions
+  , MDoc -- argument variable definitions (with defaults)
   , MDoc -- long argument declarations
   , MDoc -- short argument declarations
   , MDoc -- switch-case case codes
+  , MDoc -- write arguments to shared memory
   )
 makeParameters i (FunT ts _) args = do
   optArgs <- concat <$> zipWithM (unrollArgs i) ts args
 
   let longArgs = filter (isJust . argOptDocLong . snd) optArgs
-      shortArgs = filter (isNothing . argOptDocLong . snd) optArgs
+      shortArgs = filter (isJust . argOptDocShort . snd) optArgs
       longOnly = filter (\r -> (isJust . argOptDocLong . snd $ r) &&
                                (isNothing . argOptDocShort . snd $ r)) optArgs
+      allOpts = filter (\r -> (isJust . argOptDocLong . snd $ r) ||
+                              (isJust . argOptDocShort . snd $ r)) optArgs
       defs = zipWith makeLongDef [0..] (map snd longOnly)
+      vars = map makeVarDef allOpts
+      argDefs = zipWith3 writeArgToSharedMemory [0..] ts args
+
       longs = map makeLongOption longArgs
       shorts = map makeShortOption shortArgs
       cases = map makeCase optArgs
 
   return $
     ( vsep defs
+    , vsep vars
     , vsep longs
     , hcat shorts
     , vsep cases
+    , vsep argDefs
     )
-makeParameters _ _ _ = return ("", "", "", "")
+makeParameters _ _ _ = return ("", "", "", "", "", "")
+
+makeVarDef :: (Type, ArgOptDocSet) -> MDoc
+makeVarDef (_, r) =
+  let varname = toVarName (argOptDocShort r) (argOptDocLong r)
+      defvalue = maybe "NULL" (dquotes . pretty . escapeString) (argOptDocDefault r)
+  in [idoc|char* #{varname} = #{defvalue};|]
 
 makeLongDef :: Int -> ArgOptDocSet -> MDoc
-makeLongDef i r = [idoc|const int #{varname} = #{optVal};}|]
+makeLongDef i r = [idoc|const int #{varname} = #{optVal};|]
   where
     optVal = pretty $ 257 + i
     varname = toOptName . fromJust . argOptDocLong $ r
@@ -873,7 +901,6 @@ makeLongOption (t, r) = [idoc|{"#{longVar}", #{argType t}, 0, #{varname}},|]
 
     varname = maybe (toOptName . fromJust . argOptDocLong $ r) (squotes . pretty) (argOptDocShort r)
 
-
 makeShortOption :: (Type, ArgOptDocSet) -> MDoc
 makeShortOption (t@(VarT v), r)
   | v == MBT.bool = extractShort t r
@@ -887,12 +914,37 @@ extractShort t r = case argOptDocShort r of
 
 makeCase :: (Type, ArgOptDocSet) -> MDoc
 makeCase (t, r) = vsep
-  [ [idoc|case #{caseIdx}: {|]
-  , [idoc|  // STUB|]
-  , [idoc|}; break;|]
+  [ [idoc|case #{caseIdx}:|]
+  , [idoc|  #{varname} = optarg;|]
+  , [idoc|  break;|]
   ]
   where
     caseIdx = case (argOptDocShort r, argOptDocLong r) of
       (Just v, _) -> squotes . pretty $ v
       (_, Just v) -> toOptName v
       _ -> "BAD"
+
+    varname = toVarName (argOptDocShort r) (argOptDocLong r)
+
+writeArgToSharedMemory :: Int -> Type -> CmdArg -> MDoc
+writeArgToSharedMemory i _ (CmdArgOpt r) =
+  let varname = toVarName (argOptDocShort r) (argOptDocLong r)
+  in [idoc|args[#{pretty i}] = initialize_positional(strdup(#{varname}));|]
+writeArgToSharedMemory i t (CmdArgGrp r) = vsep $ [fieldDef] <> fields <> [argSet]
+  where
+    size = pretty (length (recDocEntries r))
+    varname = toVarName (recDocShort r) (recDocLong r)
+    fieldArgName = [idoc|arg_#{pretty i}_fields|]
+    fieldDef = [idoc|char** #{fieldArgName} = (char**)calloc(#{size}, sizeof(char*));|]
+    fields = zipWith (\i v -> [idoc|#{fieldArgName}[#{i}] = strdup(#{v});|])
+                     (map pretty ([0..] :: [Int]))
+                     (map (toVarNameCmdArg . snd) (recDocEntries r))
+    argSet = [idoc|args[#{pretty i}] = initialize_unrolled(#{size}, #{varname}, #{fieldArgName});|]
+writeArgToSharedMemory i t (CmdArgPos r) = vsep $
+  [ [idoc|args[#{pretty i}] = initialize_positional(strdup(argv[optind]));|]
+  ,  "optind++;"
+  ]
+writeArgToSharedMemory i t CmdArgDef = vsep $
+  [ [idoc|args[#{pretty i}] = initialize_positional(strdup(argv[optind]));|]
+  ,  "optind++;"
+  ]

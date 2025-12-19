@@ -5815,52 +5815,45 @@ char* check_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
 
 // {{{ parsing CLI arguments
 
-typedef enum {
-  SINGULAR_ARG,
-  UNROLLED_ARG,
-} argument_type;
-
 typedef struct argument_s {
-    argument_type type;
-    union {
-        char* value;
-        char** fields;
-    } arg;
+    char* value;
+    char** fields;
+    size_t size;
 } argument_t;
 
 argument_t* initialize_positional(char* value){
   argument_t* arg = (argument_t*)calloc(1, sizeof(argument_t));
-  arg->type = SINGULAR_ARG;
-  arg->arg.value = value;
+  arg->value = strdup(value);
+  arg->size = 0;
   return arg;
 }
 
-argument_t* initialize_unrolled(size_t size, char** fields){
+argument_t* initialize_unrolled(size_t size, char* default_value, char** fields){
   argument_t* arg = (argument_t*)calloc(1, sizeof(argument_t));
-  arg->type = UNROLLED_ARG;
-  arg->arg.fields = (char**)calloc(size, sizeof(char*));
+  if(default_value != NULL){
+    arg->value = strdup(default_value);
+  }
+  arg->fields = (char**)calloc(size, sizeof(char*));
+  arg->size = size;
   for(size_t i = 0; i < size; i++){
-    arg->arg.fields[i] = fields[i];
+    if(fields[i] != NULL){
+      arg->fields[i] = strdup(fields[i]);
+    }
   }
   return arg;
 }
 
+// assumes argument_t owns all arguments
+// this will be true if the initializers above are used
 void free_argument_t(argument_t* arg){
-  if(arg != NULL){
-    if(arg->type == SINGULAR_ARG){
-      if(arg->arg.value != NULL){
-        free(arg->arg.value);
+  FREE(arg->value)
+  if(arg != NULL && arg->fields != NULL){
+      for(size_t i = 0; i < arg->size; i++){
+          FREE(arg->fields[i]);
       }
-    } else {
-      if(arg->arg.fields != NULL){
-          for(size_t i = 0; arg->arg.fields[i] != NULL; i++){
-              free(arg->arg.fields[i]);
-          }
-          free(arg->arg.fields);
-      }
-    }
-    free(arg);
+      free(arg->fields);
   }
+  FREE(arg);
 }
 
 
@@ -6065,13 +6058,59 @@ static uint8_t* parse_cli_data_argument_singular(uint8_t* dest, char* arg, const
     }
 }
 
+// recursively free any memory stored at the specified location
+// zero the location
+static bool shfree_by_schema(absptr_t ptr, const Schema* schema, ERRMSG){
+    BOOL_RETURN_SETUP
+
+    switch(schema->type) {
+        case MORLOC_STRING:
+        case MORLOC_ARRAY: {
+            Array* arr = (Array*)ptr;
+            if(arr->data > 0){
+              absptr_t arr_data = TRY(rel2abs, arr->data)
+              if(schema_is_fixed_width(schema->parameters[0])){
+                for(size_t i = 0; i < arr->size; i++){
+                  absptr_t element_ptr = (absptr_t)((char*)arr_data + i * schema->parameters[0]->width);
+                  TRY(shfree_by_schema, element_ptr, schema->parameters[0])
+                }
+              }
+              TRY(shfree, arr_data)
+            }
+          }
+          break;
+        case MORLOC_TUPLE:
+        case MORLOC_MAP: {
+          // free every element
+            for(size_t i = 0; i < schema->size; i++){
+              absptr_t element_ptr = (absptr_t)((char*)ptr + schema->offsets[i]);
+              TRY(shfree_by_schema, element_ptr, schema->parameters[i])
+            }
+          }
+          break;
+        default:
+          // fixed-size types will directly over-written
+          // no freeing needed
+          break;
+    }
+
+    // zero location
+    memset(ptr, 0, schema->width);
+
+    return true;
+}
+
 // Parse a command line argument unrolled record
-static uint8_t* parse_cli_data_argument_unrolled(uint8_t* dest, char** fields, const Schema* schema, ERRMSG){
+static uint8_t* parse_cli_data_argument_unrolled(uint8_t* dest, char* default_value, char** fields, const Schema* schema, ERRMSG){
     PTR_RETURN_SETUP(uint8_t)
 
     bool denovo = dest == NULL;
     if(dest == NULL){
         dest = (uint8_t*) TRY(shcalloc, 1, schema->width)
+    }
+
+    if(default_value != NULL){
+        dest = TRY(parse_cli_data_argument_singular, dest, default_value, schema)
     }
 
     switch(schema->type) {
@@ -6084,9 +6123,14 @@ static uint8_t* parse_cli_data_argument_unrolled(uint8_t* dest, char** fields, c
                     // If a dest record was provided, then it is possible that
                     // it defined the field, so NULL fields in `fields` is OK.
                 } else {
+                    uint8_t* element_dest = dest + schema->offsets[i];
+
+                    // free any memory written in the default record for this field
+                    TRY(shfree_by_schema, (absptr_t)element_dest, schema->parameters[i])
+
                     TRY(
                       parse_cli_data_argument_singular,
-                      dest + schema->offsets[i],
+                      element_dest,
                       fields[i],
                       schema->parameters[i]
                     )
@@ -6105,10 +6149,10 @@ static uint8_t* parse_cli_data_argument(uint8_t* dest, const argument_t* arg, co
     PTR_RETURN_SETUP(uint8_t)
 
     // modify dest if it is not NULL, otherwise allocate it
-    if(arg->type == SINGULAR_ARG) {
-        dest = TRY(parse_cli_data_argument_singular, dest, arg->arg.value, schema);
+    if(arg->fields == NULL) {
+        dest = TRY(parse_cli_data_argument_singular, dest, arg->value, schema);
     } else {
-        dest = TRY(parse_cli_data_argument_unrolled, dest, arg->arg.fields, schema);
+        dest = TRY(parse_cli_data_argument_unrolled, dest, arg->value, arg->fields, schema);
     }
 
     relptr_t relptr = TRY(abs2rel, dest);

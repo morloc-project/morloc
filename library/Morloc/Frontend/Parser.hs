@@ -842,7 +842,7 @@ pFunUDoc = do
     (inputs, output) -> return $
       (map fst inputs <> [fst output], FunU (map snd inputs) (snd output))
   where
-    pType' = (,) <$> try parseCmdArg <*> pFunCompatibleType
+    pType' = (,) <$> option CmdArgDef parseCmdArg <*> pFunCompatibleType
 
 
 pFunCompatibleType :: Parser TypeU

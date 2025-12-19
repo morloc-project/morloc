@@ -24,7 +24,9 @@ processDocstrings e@(AnnoS (Idx i t) _ _) = do
     doc <- case GMap.lookup i sgmap of
       (GMapJust (Monomorphic (TermTypes (Just et) _ _))) -> processCmdDocSet i t (edocs et)
       (GMapJust (Polymorphic _ _ et _)) -> processCmdDocSet i t (edocs et)
-      _ -> return defaultValue
+      _ -> case t of
+        (FunT ts _) -> return $ defaultValue { cmdDocArgs = take (length ts) (repeat CmdArgDef) }
+        _ -> return defaultValue
     return (e, doc)
 
 processCmdDocSet :: Int -> Type -> CmdDocSet -> MorlocMonad CmdDocSet
