@@ -936,7 +936,7 @@ extractShort t r = case argOptDocShort r of
 makeCase :: (Type, ArgOptDocSet) -> MDoc
 makeCase (t, r) = vsep
   [ [idoc|case #{caseIdx}:|]
-  , [idoc|  #{varname} = optarg;|]
+  , [idoc|  #{varname} = #{value t};|]
   , [idoc|  break;|]
   ]
   where
@@ -944,6 +944,14 @@ makeCase (t, r) = vsep
       (Just v, _) -> squotes . pretty $ v
       (_, Just v) -> toOptName v
       _ -> "BAD"
+
+    value (VarT v)
+      -- if this is a flag, than invert relative to the default
+      | v == MBT.bool = case argOptDocDefault r of
+          (Just "true") -> dquotes "false"
+          _ -> dquotes "true"
+      | otherwise = "optarg"
+    value (VarT v) = "optarg"
 
     varname = toVarName UserVar (argOptDocShort r) (argOptDocLong r)
 

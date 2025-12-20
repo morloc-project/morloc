@@ -6,3 +6,6 @@ def barFun(sysconf, algconf, yolo, xs):
 
 def travelTime(w,b,d):
     return w * b * d
+
+def bif(algconf):
+    return str(algconf["removeCaches"])

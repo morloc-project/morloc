@@ -18,6 +18,11 @@ all:
 	./nexus travelTime -w 2 3 4 >> obs.txt
 	echo baz >> obs.txt
 	./nexus baz 5 >> obs.txt
+	echo bif >> obs.txt
+	./nexus bif >> obs.txt
+	./nexus bif --clean >> obs.txt
+	./nexus bif --sys-config sysconf.json --clean >> obs.txt
+	./nexus bif --sys-config sysconf.json >> obs.txt
 
 clean:
 	rm -rf nexus* __pycache__ pool*

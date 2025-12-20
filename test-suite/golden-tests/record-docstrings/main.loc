@@ -8,7 +8,7 @@
 --
 -- Here are some details
 -- that span several lines
-module foobar (fooFun, barFun, baz, travelTime)
+module foobar (fooFun, barFun, baz, travelTime, bif)
 
 import root-py
 
@@ -52,6 +52,8 @@ record AlgConfig where
 record Py => SysConfig = "dict"
 record Py => AlgConfig = "dict"
 
+bif :: SysConfig -> Str
+
 --' Do some foo stuff
 --'
 --' Lalala more info
@@ -93,7 +95,7 @@ barFun ::
     --' metavar: RESULT
     Int
 
-source Py from "foo.py" ("fooFun", "barFun", "travelTime")
+source Py from "foo.py" ("fooFun", "barFun", "travelTime", "bif")
 
 --' baz is the dope
 baz ::

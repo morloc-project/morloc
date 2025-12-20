@@ -16,3 +16,8 @@ travelTime
 24
 baz
 [5,5]
+bif
+"False"
+"True"
+"True"
+"True"
