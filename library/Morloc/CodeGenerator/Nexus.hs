@@ -446,9 +446,9 @@ dispatchCode fdata cdata = do
       , [idoc|// Use a fixed buffer, then strdup to allocate the final string|]
       , [idoc|snprintf(buffer, 256, "%s/#{socketBasename}", tmpdir);|]
       , [idoc|#{varName}.syscmd[#{pretty $ length execArgs}] = strdup(buffer);|]
-      , [idoc|#{varName}.syscmd[#{pretty $ length execArgs} + 1] = strdup(tmpdir);|]
-      , [idoc|#{varName}.syscmd[#{pretty $ length execArgs} + 2] = strdup(shm_basename);|]
-      , [idoc|#{varName}.syscmd[#{pretty $ length execArgs} + 3] = NULL;|]
+      , [idoc|#{varName}.syscmd[#{pretty $ 1 + length execArgs}] = strdup(tmpdir);|]
+      , [idoc|#{varName}.syscmd[#{pretty $ 2 + length execArgs}] = strdup(shm_basename);|]
+      , [idoc|#{varName}.syscmd[#{pretty $ 3 + length execArgs}] = NULL;|]
       , [idoc|#{varName}.socket_filename = strdup(buffer);|]
       ]
       where
@@ -499,7 +499,7 @@ makeCaseDoc fdata@(FData socket sub _ midx t sockets schemas returnSchema cmdDoc
 
         argSchemasList = createStructLong $ schemas <> ["(char*)NULL"]
 
-        nargs = pretty . length $ schemas
+        nargs = length schemas
 
     (longOptVal, vardefs, longArgDecs, shortArgDec, argCases, argInits) <-
         makeParameters midx t (cmdDocArgs cmdDocSet)
@@ -551,7 +551,7 @@ void dispatch_#{sub}(
 
     char return_schema[] = #{returnSchema};
 
-    argument_t** args = (argument_t**)calloc(#{nargs} + 1, sizeof(argument_t*));
+    argument_t** args = (argument_t**)calloc(#{pretty $ nargs + 1}, sizeof(argument_t*));
 
     #{argInits}
 
@@ -576,7 +576,7 @@ makeGastCaseDoc gdata = do
         cond = [idoc|strcmp(cmd, "#{func}") == 0|]
         body = [idoc|dispatch_#{func}(argc, argv, shm_basename, config);|]
 
-        nargs = pretty . length . commandArgs $ gdata
+        nargs = length . commandArgs $ gdata
 
     (longOptVal, vardefs, longArgDecs, shortArgDec, argCases, argInits) <-
         makeParameters (commandIndex gdata) (commandType gdata) (cmdDocArgs (commandDocs gdata))
@@ -623,7 +623,7 @@ void dispatch_#{func}(
     char return_schema[] = #{returnSchema};
     #{vsep exprBody}
 
-    argument_t** args = (argument_t**)calloc(#{nargs} + 1, sizeof(argument_t*));
+    argument_t** args = (argument_t**)calloc(#{pretty $ nargs + 1}, sizeof(argument_t*));
 
     #{argInits}
 
@@ -815,19 +815,26 @@ toOptName varname = "OPT_" <> pretty (MT.map convertChar varname)
       | isAlphaNum c = toUpper c
       | otherwise    = '_'
 
-toVarName :: Maybe Char -> Maybe Text -> MDoc
-toVarName mayShort mayLong = [idoc|cliarg_#{short}_#{long}|] where
+data VarCase = UserVar | DefaultVar
+
+toVarName :: VarCase -> Maybe Char -> Maybe Text -> MDoc
+toVarName varcase mayShort mayLong = [idoc|cliarg_#{short}_#{long}_#{makeSuffix varcase}|] where
   convertChar c
     | isAlphaNum c = c
     | otherwise    = '_'
+
   short = maybe "" (pretty . convertChar) mayShort
+
   long  = maybe "" (pretty . MT.map convertChar) mayLong
 
-toVarNameCmdArg :: CmdArg -> MDoc
-toVarNameCmdArg (CmdArgPos _) = "";
-toVarNameCmdArg CmdArgDef = "";
-toVarNameCmdArg (CmdArgOpt r) = toVarName (argOptDocShort r) (argOptDocLong r);
-toVarNameCmdArg (CmdArgGrp r) = toVarName (recDocShort r) (recDocLong r);
+  makeSuffix UserVar = "usr"
+  makeSuffix DefaultVar = "def"
+
+toVarNameCmdArg :: VarCase -> CmdArg -> MDoc
+toVarNameCmdArg _ (CmdArgPos _) = "";
+toVarNameCmdArg _ CmdArgDef = "";
+toVarNameCmdArg v (CmdArgOpt r) = toVarName v (argOptDocShort r) (argOptDocLong r);
+toVarNameCmdArg v (CmdArgGrp r) = toVarName v (recDocShort r) (recDocLong r);
 
 unrollArgs :: Int -> Type -> CmdArg -> MorlocMonad [(Type, ArgOptDocSet)]
 unrollArgs _ t (CmdArgOpt r) = return [(t, r)]
@@ -888,9 +895,13 @@ makeParameters _ _ _ = return ("", "", "", "", "", "")
 
 makeVarDef :: (Type, ArgOptDocSet) -> MDoc
 makeVarDef (_, r) =
-  let varname = toVarName (argOptDocShort r) (argOptDocLong r)
+  let usrVarname = toVarName UserVar (argOptDocShort r) (argOptDocLong r)
+      defVarname = toVarName DefaultVar (argOptDocShort r) (argOptDocLong r)
       defvalue = maybe "NULL" (dquotes . pretty . escapeString) (argOptDocDefault r)
-  in [idoc|char* #{varname} = #{defvalue};|]
+  in vsep
+    [ [idoc|char* #{usrVarname} = NULL;|]
+    , [idoc|char* #{defVarname} = #{defvalue};|]
+    ]
 
 makeLongDef :: Int -> ArgOptDocSet -> MDoc
 makeLongDef i r = [idoc|const int #{varname} = #{optVal};|]
@@ -934,22 +945,36 @@ makeCase (t, r) = vsep
       (_, Just v) -> toOptName v
       _ -> "BAD"
 
-    varname = toVarName (argOptDocShort r) (argOptDocLong r)
+    varname = toVarName UserVar (argOptDocShort r) (argOptDocLong r)
 
 writeArgToSharedMemory :: Int -> Type -> CmdArg -> MDoc
 writeArgToSharedMemory i _ (CmdArgOpt r) =
-  let varname = toVarName (argOptDocShort r) (argOptDocLong r)
-  in [idoc|args[#{pretty i}] = initialize_positional(strdup(#{varname}));|]
-writeArgToSharedMemory i t (CmdArgGrp r) = vsep $ [fieldDef] <> fields <> [argSet]
+  let defVarname = toVarName DefaultVar (argOptDocShort r) (argOptDocLong r)
+      usrVarname = toVarName UserVar (argOptDocShort r) (argOptDocLong r)
+  in [idoc|if(#{usrVarname} == NULL){
+  if(#{defVarname} == NULL){
+    args[#{pretty i}] = initialize_positional(NULL);
+  } else {
+    args[#{pretty i}] = initialize_positional(strdup(#{defVarname}));
+  }
+} else {
+  args[#{pretty i}] = initialize_positional(strdup(#{usrVarname}));
+}|]
+writeArgToSharedMemory i t (CmdArgGrp r) = vsep $ [fieldDef] <> fields <> [defFieldDef] <> defFields <> [argSet] <> [""]
   where
     size = pretty (length (recDocEntries r))
-    varname = toVarName (recDocShort r) (recDocLong r)
+    varname = toVarName UserVar (recDocShort r) (recDocLong r)
     fieldArgName = [idoc|arg_#{pretty i}_fields|]
     fieldDef = [idoc|char** #{fieldArgName} = (char**)calloc(#{size}, sizeof(char*));|]
-    fields = zipWith (\i v -> [idoc|#{fieldArgName}[#{i}] = strdup(#{v});|])
+    fields = zipWith (\i v -> [idoc|#{fieldArgName}[#{i}] = #{v} == NULL ? NULL : strdup(#{v});|])
                      (map pretty ([0..] :: [Int]))
-                     (map (toVarNameCmdArg . snd) (recDocEntries r))
-    argSet = [idoc|args[#{pretty i}] = initialize_unrolled(#{size}, #{varname}, #{fieldArgName});|]
+                     (map (toVarNameCmdArg UserVar . snd) (recDocEntries r))
+    defFieldArgName = [idoc|arg_#{pretty i}_def_fields|]
+    defFieldDef = [idoc|char** #{defFieldArgName} = (char**)calloc(#{size}, sizeof(char*));|]
+    defFields = zipWith (\i v -> [idoc|#{defFieldArgName}[#{i}] = #{v} == NULL? NULL : strdup(#{v});|])
+                     (map pretty ([0..] :: [Int]))
+                     (map (toVarNameCmdArg DefaultVar . snd) (recDocEntries r))
+    argSet = [idoc|args[#{pretty i}] = initialize_unrolled(#{size}, #{varname}, #{fieldArgName}, #{defFieldArgName});|]
 writeArgToSharedMemory i _ (CmdArgPos _) = initPositional i
 writeArgToSharedMemory i _ CmdArgDef = initPositional i
 

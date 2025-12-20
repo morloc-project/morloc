@@ -5818,6 +5818,7 @@ char* check_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
 typedef struct argument_s {
     char* value;
     char** fields;
+    char** default_fields;
     size_t size;
 } argument_t;
 
@@ -5828,16 +5829,22 @@ argument_t* initialize_positional(char* value){
   return arg;
 }
 
-argument_t* initialize_unrolled(size_t size, char* default_value, char** fields){
+argument_t* initialize_unrolled(size_t size, char* default_value, char** fields, char** default_fields){
   argument_t* arg = (argument_t*)calloc(1, sizeof(argument_t));
   if(default_value != NULL){
     arg->value = strdup(default_value);
   }
-  arg->fields = (char**)calloc(size, sizeof(char*));
   arg->size = size;
+  arg->fields = (char**)calloc(size, sizeof(char*));
   for(size_t i = 0; i < size; i++){
     if(fields[i] != NULL){
       arg->fields[i] = strdup(fields[i]);
+    }
+  }
+  arg->default_fields = (char**)calloc(size, sizeof(char*));
+  for(size_t i = 0; i < size; i++){
+    if(default_fields[i] != NULL){
+      arg->default_fields[i] = strdup(default_fields[i]);
     }
   }
   return arg;
@@ -6101,39 +6108,52 @@ static bool shfree_by_schema(absptr_t ptr, const Schema* schema, ERRMSG){
 }
 
 // Parse a command line argument unrolled record
-static uint8_t* parse_cli_data_argument_unrolled(uint8_t* dest, char* default_value, char** fields, const Schema* schema, ERRMSG){
+static uint8_t* parse_cli_data_argument_unrolled(uint8_t* dest, char* default_value, char** fields, char** default_fields, const Schema* schema, ERRMSG){
     PTR_RETURN_SETUP(uint8_t)
 
-    bool denovo = dest == NULL;
+    bool using_record_default = false;
     if(dest == NULL){
         dest = (uint8_t*) TRY(shcalloc, 1, schema->width)
     }
 
     if(default_value != NULL){
         dest = TRY(parse_cli_data_argument_singular, dest, default_value, schema)
+        using_record_default = true;
     }
 
     switch(schema->type) {
         case MORLOC_TUPLE:
         case MORLOC_MAP: {
             for(size_t i = 0; i < schema->size; i++){
-                if(fields[i] == NULL){
-                    // this error should be caught earlier in the nexus
-                    RAISE_IF(denovo, "Undefined field")
-                    // If a dest record was provided, then it is possible that
-                    // it defined the field, so NULL fields in `fields` is OK.
-                } else {
-                    uint8_t* element_dest = dest + schema->offsets[i];
+                uint8_t* element_dest = dest + schema->offsets[i];
 
+                // if the user provided a value, use it
+                if(fields[i] != NULL){
                     // free any memory written in the default record for this field
                     TRY(shfree_by_schema, (absptr_t)element_dest, schema->parameters[i])
 
                     TRY(
-                      parse_cli_data_argument_singular,
-                      element_dest,
-                      fields[i],
-                      schema->parameters[i]
+                        parse_cli_data_argument_singular,
+                        element_dest,
+                        fields[i],
+                        schema->parameters[i]
                     )
+                // if the user provided no specific value, but specified a
+                // default record, use that
+                } else if (using_record_default) {
+                    continue;
+                // otherwise use the hard-coded default
+                } else if (default_fields[i] != NULL) {
+                    TRY(
+                        parse_cli_data_argument_singular,
+                        element_dest,
+                        default_fields[i],
+                        schema->parameters[i]
+                    )
+                // if there isn't even a hard-coded default (an issue the
+                // compiler should catch), then die screaming
+                } else {
+                    RAISE("Field %zu missing with no default or default record", i)
                 }
             }
         }; break;
@@ -6152,7 +6172,7 @@ static uint8_t* parse_cli_data_argument(uint8_t* dest, const argument_t* arg, co
     if(arg->fields == NULL) {
         dest = TRY(parse_cli_data_argument_singular, dest, arg->value, schema);
     } else {
-        dest = TRY(parse_cli_data_argument_unrolled, dest, arg->value, arg->fields, schema);
+        dest = TRY(parse_cli_data_argument_unrolled, dest, arg->value, arg->fields, arg->default_fields, schema);
     }
 
     relptr_t relptr = TRY(abs2rel, dest);

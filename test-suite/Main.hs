@@ -59,6 +59,7 @@ main = do
       , golden "demo-trimming" "demo-trimming"
 
       , golden "formatting" "formatting"
+      , golden "record-docstrings" "record-docstrings"
 
       , golden "typeclasses-1" "typeclasses-1"
       , golden "typeclasses-2" "typeclasses-2"
