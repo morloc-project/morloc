@@ -379,14 +379,6 @@ usageLineConst longestCommandLength cmd =
     desc [] = ""
     desc (x:_) = pretty (replicate padding ' ') <> pretty x
 
--- Long type names may be wrapped to multiple lines. This funtion adds new line
--- escapes at the end of each line (required in C strings)
-fixLineWrapping :: MDoc -> MDoc
-fixLineWrapping typestr = case lines (render' typestr) of
-    [] -> pretty ("" :: String)
-    [x] -> pretty x
-    xs -> vsep $ [pretty (str <> "\\") | str <- init xs] <> [pretty (last xs)]
-
 createStructLong [] = "{ NULL }"
 createStructLong (x:xs) = align . vsep $ ["{" <+> x] <> ["," <+> x' | x' <- xs] <> ["}"]
 
@@ -694,6 +686,11 @@ subcmdHelpQuiet cmd t0 docs
     toOpts (CmdArgFlag r) = Just (Left r)
     toOpts _ = Nothing
 
+    showArgType :: Type -> Maybe Bool -> MDoc
+    showArgType t isLiteral
+      | t == VarT (MBT.str) && isLiteral /= Just True = "Str    (quoted JSON string)"
+      | otherwise = pretty t
+
     makePosArgs :: [ArgPosDocSet] -> [MDoc]
     makePosArgs [] = []
     makePosArgs rs =
@@ -711,7 +708,7 @@ subcmdHelpQuiet cmd t0 docs
     makePosArg :: Int -> (MDoc, Int) -> ArgPosDocSet -> [MDoc]
     makePosArg maxSpace (metavar, metavarLen) r =
       [ metavar <> postMetSpace <> makeDesc (argPosDocDesc r)
-      , pretypeSpace <> "type:" <+> pretty (argPosDocType r)
+      , pretypeSpace <> "type:" <+> showArgType (argPosDocType r) (argPosDocLiteral r)
       ]
       where
         postMetSpace = pretty (take (maxSpace - metavarLen + 2) (repeat ' '))
@@ -736,7 +733,7 @@ subcmdHelpQuiet cmd t0 docs
       let argstr = makeArg (argOptDocArg opt) (Just $ argOptDocMetavar opt)
       in makeOption [argstr]
           $  map pretty (argOptDocDesc opt)
-          <> ["type:" <+> pretty (argOptDocType opt)
+          <> ["type:" <+> showArgType (argOptDocType opt) (argOptDocLiteral opt)
              ,"default:" <+> (pretty . escapeString) (argOptDocDefault opt)
              ]
 
@@ -909,10 +906,20 @@ makeParameters args =
         , [idoc|  break;|]
         ]
 
+  makeDuplifier :: CmdArg -> MDoc
+  makeDuplifier (CmdArgPos r)
+    | argPosDocLiteral r == Just True && argPosDocType r == VarT (MBT.str) = "quoted"
+    | otherwise = "strdup"
+  makeDuplifier (CmdArgOpt r)
+    | argOptDocLiteral r == Just True && argOptDocType r == VarT (MBT.str) = "quoted"
+    | otherwise = "strdup"
+  makeDuplifier _ = "strdup"
+
   makeArgDefs :: Int -> CmdArg -> MDoc
-  makeArgDefs i (CmdArgOpt r) =
+  makeArgDefs i cmdarg@(CmdArgOpt r) =
     let defVarname = toVarName DefVar (argOptDocArg r)
         usrVarname = toVarName UsrVar (argOptDocArg r)
+        duplifier = makeDuplifier cmdarg
     in [idoc|if(#{usrVarname} == NULL){
     if(#{defVarname} == NULL){
       args[#{pretty i}] = initialize_positional(NULL);
@@ -920,7 +927,7 @@ makeParameters args =
       args[#{pretty i}] = initialize_positional(strdup(#{defVarname}));
     }
   } else {
-    args[#{pretty i}] = initialize_positional(strdup(#{usrVarname}));
+    args[#{pretty i}] = initialize_positional(#{duplifier}(#{usrVarname}));
   }|]
   makeArgDefs _ (CmdArgFlag _) = "// flag stub"
   makeArgDefs i (CmdArgGrp r) = vsep $ [fieldDef] <> fields <> [defFieldDef] <> defFields <> [argSet] <> [""]
@@ -929,8 +936,9 @@ makeParameters args =
       varname = maybe "NULL" (toVarName UsrVar) (recDocOpt r)
       fieldArgName = [idoc|arg_#{pretty i}_fields|]
       fieldDef = [idoc|char** #{fieldArgName} = (char**)calloc(#{size}, sizeof(char*));|]
-      fields = zipWith (\idx v -> [idoc|#{fieldArgName}[#{idx}] = #{v} == NULL ? NULL : strdup(#{v});|])
+      fields = zipWith3 (\idx dup v -> [idoc|#{fieldArgName}[#{idx}] = #{v} == NULL ? NULL : #{dup}(#{v});|])
                        (map pretty ([0..] :: [Int]))
+                       (map (makeDuplifier . either CmdArgFlag CmdArgOpt . snd) (recDocEntries r))
                        (map (toVarNameEntry UsrVar . snd) (recDocEntries r))
       defFieldArgName = [idoc|arg_#{pretty i}_def_fields|]
       defFieldDef = [idoc|char** #{defFieldArgName} = (char**)calloc(#{size}, sizeof(char*));|]
@@ -942,11 +950,12 @@ makeParameters args =
       toVarNameEntry :: VarCase -> Either ArgFlagDocSet ArgOptDocSet -> MDoc
       toVarNameEntry v (Left flag) = toVarName v (argFlagDocOpt flag)
       toVarNameEntry v (Right opt) = toVarName v (argOptDocArg opt)
-  makeArgDefs i (CmdArgPos _) =
-    [idoc|if(argv[optind] == NULL){
+  makeArgDefs i cmdarg@(CmdArgPos _) =
+    let duplifier = makeDuplifier cmdarg
+    in [idoc|if(argv[optind] == NULL){
     fprintf(stderr, "Error: too few positional arguments\n");
     clean_exit(EXIT_FAILURE);
   } else {
-    args[#{pretty i}] = initialize_positional(strdup(argv[optind]));
+    args[#{pretty i}] = initialize_positional(#{duplifier}(argv[optind]));
     optind++;
   }|]

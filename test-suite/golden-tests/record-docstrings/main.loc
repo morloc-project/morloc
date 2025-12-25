@@ -101,9 +101,10 @@ source Py from "foo.py" ("fooFun", "barFun", "travelTime", "bif")
 --' baz is the dope
 baz ::
   --' this is the
-  Int ->
+  --' literal: true
+  Str ->
   --' thing i like
-  [Int]
+  [Str]
 baz x = [x,x]
 
 

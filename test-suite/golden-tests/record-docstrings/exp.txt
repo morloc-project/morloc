@@ -15,7 +15,8 @@ bar
 travelTime
 24
 baz
-[5,5]
+["foo","foo"]
+["foo bar","foo bar"]
 bif
 "False"
 "True"

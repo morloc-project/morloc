@@ -3445,6 +3445,16 @@ int unpack(const char* mpk, size_t mpk_size, const char* schema_str, void** mlcp
 
 // {{{ morloc JSON support
 
+// Allocate a new string that with double quotes around the input string
+char* quoted(const char* input){
+  size_t len = strlen(input);
+  char* quoted_string = (char*)calloc(len + 3, sizeof(char));
+  quoted_string[0] = '"';
+  quoted_string[len + 1] = '"';
+  memcpy(quoted_string + 1, input, len);
+  return quoted_string;
+}
+
 // Function to escape a JSON string
 static char* json_escape_string(const char* input, size_t input_len) {
     size_t output_len = 0;

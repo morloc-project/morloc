@@ -11,13 +11,14 @@ all:
 	./nexus foo [1,2,3] >> obs.txt
 	echo bar >> obs.txt
 	./nexus bar [1,2,3] >> obs.txt
-	./nexus bar -y '"a"' [1,2,3] >> obs.txt
-	./nexus bar -y '"a"' -t 5 -m 6 [1,2,3] >> obs.txt
-	./nexus bar -y '"f"' -t 5 -m 6 --alg-conf=algconf.json [1,2,3] >> obs.txt
+	./nexus bar -y a [1,2,3] >> obs.txt
+	./nexus bar -y a -t 5 -m 6 [1,2,3] >> obs.txt
+	./nexus bar -y f -t 5 -m 6 --alg-conf=algconf.json [1,2,3] >> obs.txt
 	echo travelTime >> obs.txt
 	./nexus travelTime -w 2 3 4 >> obs.txt
 	echo baz >> obs.txt
-	./nexus baz 5 >> obs.txt
+	./nexus baz foo >> obs.txt
+	./nexus baz "foo bar" >> obs.txt
 	echo bif >> obs.txt
 	./nexus bif >> obs.txt
 	./nexus bif --clean >> obs.txt
