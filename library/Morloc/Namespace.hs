@@ -81,11 +81,9 @@ module Morloc.Namespace
   , unresolvedType2type
   , Source(..)
   -- * Docstring related types
-  , ArgOptDocSet(..)
-  , ArgPosDocSet(..)
-  , CmdArg(..)
-  , CmdDocSet(..)
-  , RecDocSet(..)
+  , CliOpt(..)
+  , ArgDoc(..)
+  , ArgDocVars(..)
   , ExprTypeE(..)
   -- * Typechecking
   , Gamma(..)
@@ -218,7 +216,7 @@ type DAG key edge node = Map key (node, [(key, edge)])
 type Scope = Map TVar
   [( [Either TVar TypeU]  -- type parameters (generic for left, specific for right)
    , TypeU
-   , CmdArg
+   , ArgDoc
    , Bool -- True if this is a "terminal" type (won't be reduced further)
           --  * This is determined by the parser (see pTypedef)
           --  * A type is terminal it is NOT general AND it
@@ -458,84 +456,43 @@ data Pattern
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)
 
-
-data CmdArg
-  = CmdArgPos ArgPosDocSet
-  -- positional argument
-  | CmdArgOpt ArgOptDocSet
-  -- optional argument
-  | CmdArgGrp RecDocSet
-  -- argument group (made from a record)
-  | CmdArgDef
-  -- unannotated argument
+-- a CLI option that takes an argument
+data CliOpt
+  = CliOptShort Char
+  | CliOptLong Text
+  | CliOptBoth Char Text
   deriving (Show, Ord, Eq)
 
-data CmdDocSet = CmdDocSet
-  { cmdDocDesc :: [Text]
-  -- free description, the first line is used in the top-level help statement
-  , cmdDocName :: Maybe Text
-  -- an alternative name to give this subcommand (defaults to the function name)
-  , cmdDocArgs :: [CmdArg]
-  -- one element for each argument to the function
-  , cmdDocRet :: [Text]
-  -- description of the return data
+-- A temporary data structure that stores any field from either a positional or
+-- optional parameter
+data ArgDocVars = ArgDocVars
+  { docLines :: [Text]
+  , docName :: Maybe Text
+  , docLiteral :: Maybe Bool
+  , docUnroll :: Maybe Bool
+  , docDefault :: Maybe Text
+  , docMetavar :: Maybe Text
+  , docArg :: Maybe CliOpt
+  , docTrue :: Maybe CliOpt
+  , docFalse :: Maybe CliOpt
   }
   deriving (Show, Ord, Eq)
 
-data RecDocSet = RecDocSet
-  { recDocDesc :: [Text]
-  -- free description
-  , recDocMetavar :: Maybe Text
-  -- name of the record used in docs, with record type in uppercase as the default
-  , recDocUnroll :: Maybe Bool
-  -- whether to unroll by default, over-ridden by the argument unroll option
-  , recDocShort :: Maybe Char
-  -- short option for loading the record from a single argument
-  , recDocLong :: Maybe Text
-  -- long option for loading the record from a single argument
-  , recDocEntries :: [(Key, CmdArg)]
-  -- doc info on all record fields
-  }
+data ArgDoc
+  = ArgDocRec ArgDocVars [(Key, ArgDocVars)]
+    -- ^ docstring for a record declaration
+  | ArgDocSig ArgDocVars   -- leading docstrings
+              [ArgDocVars] -- argument docstrings
+              ArgDocVars   -- return docstrings
+    -- ^ docstrings for a function signature
+  | ArgDocAlias ArgDocVars
+    -- ^ type alias docstrings
+    -- example:
+    --   --' distance in meters
+    --   --' arg: -d/--distance
+    --   --' type Distance = Real
+    -- The right hand type does not need an annotation
   deriving (Show, Ord, Eq)
-
-data ArgOptDocSet = ArgOptDocSet
-  { argOptDocDesc :: [Text]
-    -- free description
-  , argOptDocMetavar :: Maybe Text
-    -- a variable used in the interface to refer to this argument term
-  , argOptDocLiteral :: Maybe Bool
-    -- if Just True, require an argument be literal rather than from a file
-    -- if Just False, require an argument be from a file
-    -- if Nothing, infer as usual
-  , argOptDocUnroll :: Maybe Bool
-    -- if Just True, unroll the option if it is unrollable
-    -- if Just False, do not unroll the option
-    -- if Nothing, unroll the option if it feels like being unrolled
-  , argOptDocShort :: Maybe Char
-    -- short form of the argument name (e.g., -v)
-  , argOptDocLong :: Maybe Text
-    -- long form of the argument name (e.g., --verbose)
-  , argOptDocDefault :: Maybe Text
-    -- default value that is used when no argument is provided at the CLI interface
-  }
-  deriving (Show, Ord, Eq)
-
-data ArgPosDocSet = ArgPosDocSet
-  { argPosDocDesc :: [Text]
-    -- free description
-  , argPosDocMetavar :: Maybe Text
-    -- a variable used in the interface to refer to this argument term
-  , argPosDocLiteral :: Maybe Bool
-    -- if Just True, require an argument be literal rather than from a file
-    -- if Just False, require an argument be from a file
-    -- if Nothing, infer as usual
-  , argPosDocUnroll :: Maybe Bool
-    -- if Just True, unroll the option if it is unrollable
-    -- if Just False, do not unroll the option
-    -- if Nothing, unroll the option if it feels like being unrolled
-  }
-  deriving (Show, Ord, Eq)
-
 
 -- Wraps all inforamtion stored in a type definition
 -- Some of this data will be transferred to Morloc monad state
@@ -550,7 +507,7 @@ data ExprTypeE = ExprTypeE
   -- ^ parameters - these may be generic (TVar) or specific (TypeU)
   , exprTypeType :: TypeU
   -- ^ type
-  , exprTypeDoc :: CmdArg
+  , exprTypeDoc :: ArgDoc
   -- ^ docstring data for the full type
   }
   deriving (Show, Ord, Eq)
@@ -884,7 +841,7 @@ data EType =
     { etype :: TypeU
     , eprop :: Set.Set Property
     , econs :: Set.Set Constraint
-    , edocs :: CmdDocSet -- Docstrings for the signature
+    , edocs :: ArgDoc -- Docstrings for the signature
     }
   deriving (Show, Eq, Ord)
 
@@ -941,6 +898,8 @@ data MorlocError
   | MutuallyRecursiveTypeAlias [Text]
   | BadTypeAliasParameters TVar Int Int
   | ConflictingTypeAliases TypeU TypeU
+  -- | Raise for bad docstrings
+  | DocStrError Text
   -- | Problems with the directed acyclic graph datastructures
   | DagMissingKey Text
   -- | Raised when a branch is reached that should not be possible
@@ -1094,41 +1053,17 @@ instance Defaultable ModuleConfig where
     , moduleConfigLabeledGroups = Map.empty
     }
 
-instance Defaultable CmdDocSet where
-  defaultValue = CmdDocSet
-    { cmdDocDesc = []
-    , cmdDocName = Nothing
-    , cmdDocArgs = []
-    , cmdDocRet = []
-    }
-
-instance Defaultable RecDocSet where
-  defaultValue = RecDocSet
-    { recDocDesc = []
-    , recDocMetavar = Nothing
-    , recDocUnroll = Nothing
-    , recDocShort = Nothing
-    , recDocLong = Nothing
-    , recDocEntries = []
-    }
-
-instance Defaultable ArgOptDocSet where
-  defaultValue = ArgOptDocSet
-    { argOptDocDesc = []
-    , argOptDocMetavar = Nothing
-    , argOptDocLiteral = Nothing
-    , argOptDocUnroll = Nothing
-    , argOptDocShort = Nothing
-    , argOptDocLong = Nothing
-    , argOptDocDefault = Nothing
-    }
-
-instance Defaultable ArgPosDocSet where
-  defaultValue = ArgPosDocSet
-    { argPosDocDesc = []
-    , argPosDocMetavar = Nothing
-    , argPosDocLiteral = Nothing
-    , argPosDocUnroll = Nothing
+instance Defaultable ArgDocVars where
+  defaultValue = ArgDocVars
+    { docLines = []
+    , docName = Nothing
+    , docLiteral = Nothing
+    , docUnroll = Nothing
+    , docDefault = Nothing
+    , docMetavar = Nothing
+    , docArg = Nothing
+    , docTrue = Nothing
+    , docFalse = Nothing
     }
 
 instance Defaultable PackageMeta where
@@ -1737,6 +1672,7 @@ instance Pretty MorlocError where
   pretty ConflictingSignatures = "ConflictingSignatures: currently a given term can have only one type per language"
   pretty CompositionsMustBeGeneral = "CompositionsMustBeGeneral"
   pretty IllegalConcreteAnnotation = "IllegalConcreteAnnotation"
+  pretty (DocStrError msg) = "Bad DocString: " <> pretty msg
   pretty (DagMissingKey msg) = "DagMissingKey: " <> pretty msg
   pretty TooManyRealizations = "TooManyRealizations"
   pretty (CannotSynthesizeConcreteType m src t [])

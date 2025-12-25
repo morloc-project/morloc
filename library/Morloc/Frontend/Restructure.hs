@@ -423,16 +423,16 @@ collectTypes fullDag = do
   completeRecord
     :: Scope
     -> TVar
-    -> [([Either TVar TypeU], TypeU, CmdArg, Bool)]
-    -> [([Either TVar TypeU], TypeU, CmdArg, Bool)]
+    -> [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
+    -> [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
   completeRecord gscope v xs = case Map.lookup v gscope of
     (Just ys) -> map (completeValue [(vs, t) | (vs, t, _, _) <- ys]) xs
     Nothing -> xs
 
   completeValue
     :: [([Either TVar TypeU], TypeU)]
-    -> ([Either TVar TypeU], TypeU, CmdArg, Bool)
-    -> ([Either TVar TypeU], TypeU, CmdArg, Bool)
+    -> ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+    -> ([Either TVar TypeU], TypeU, ArgDoc, Bool)
   completeValue ((vs, NamU _ _ ps rs):_) (_, NamU o v _ [], d, terminal) = (vs, NamU o v ps rs, d, terminal)
   completeValue _ x = x
 
@@ -444,12 +444,12 @@ collectTypes fullDag = do
 
 -- merge type functions, names of generics do not matter
 mergeEntries
-    :: [([Either TVar TypeU], TypeU, CmdArg, Bool)]
-    -> [([Either TVar TypeU], TypeU, CmdArg, Bool)]
-    -> [([Either TVar TypeU], TypeU, CmdArg, Bool)]
+    :: [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
+    -> [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
+    -> [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
 mergeEntries xs0 ys0 = filter (isNovel ys0) xs0 <> ys0
   where
-  isNovel :: [([Either TVar TypeU], TypeU, CmdArg, Bool)] -> ([Either TVar TypeU], TypeU, CmdArg, Bool) -> Bool
+  isNovel :: [([Either TVar TypeU], TypeU, ArgDoc, Bool)] -> ([Either TVar TypeU], TypeU, ArgDoc, Bool) -> Bool
   isNovel [] _ =  True
   isNovel ((vs2, t2, _, isTerminal1):ys) x@(vs1, t1, _, isTerminal2)
     | (length vs1 == length vs2) &&

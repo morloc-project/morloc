@@ -187,7 +187,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
   terminate bnd (NamU o v ts rs) = NamU o v <$> mapM (recurse bnd) ts <*> mapM (secondM (recurse bnd)) rs
   terminate _   (VarU v) = return (VarU v)
 
-  renameTypedefs :: Set.Set TVar -> ([Either TVar TypeU], TypeU, CmdArg, Bool) -> ([TVar], TypeU, CmdArg, Bool)
+  renameTypedefs :: Set.Set TVar -> ([Either TVar TypeU], TypeU, ArgDoc, Bool) -> ([TVar], TypeU, ArgDoc, Bool)
   renameTypedefs _ ([], t, d, isTerminal) = ([], t, d, isTerminal)
   renameTypedefs bnd (Left v@(TV x) : vs, t, d, isTerminal)
     | Set.member v bnd =
@@ -204,9 +204,9 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
   -- When a type alias is imported from two places, this function reconciles them, if possible
   mergeAliases
     :: [TypeU]
-    -> Maybe ([Either TVar TypeU], TypeU, CmdArg, Bool)
-    -> Maybe ([Either TVar TypeU], TypeU, CmdArg, Bool)
-    -> Either MorlocError (Maybe ([Either TVar TypeU], TypeU, CmdArg, Bool))
+    -> Maybe ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+    -> Maybe ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+    -> Either MorlocError (Maybe ([Either TVar TypeU], TypeU, ArgDoc, Bool))
   mergeAliases _ Nothing Nothing = Right Nothing
   mergeAliases tsMain Nothing (Just b)
     | checkAlias tsMain b = Right (Just b)
@@ -242,9 +242,9 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
         (zip ts1 ts2)
 
   selectSpecialization
-    :: ([Either TVar TypeU], TypeU, CmdArg, Bool)
-    -> ([Either TVar TypeU], TypeU, CmdArg, Bool)
-    -> Maybe ([Either TVar TypeU], TypeU, CmdArg, Bool)
+    :: ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+    -> ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+    -> Maybe ([Either TVar TypeU], TypeU, ArgDoc, Bool)
   selectSpecialization a@(aps0, _, _, _) b@(bps0, _, _, _) = g aps0 bps0 where 
       g [] _ = Just a
       g _ [] = Just b
@@ -259,7 +259,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
 
   checkAlias
     :: [TypeU]
-    -> ([Either TVar TypeU], TypeU, CmdArg, Bool)
+    -> ([Either TVar TypeU], TypeU, ArgDoc, Bool)
     -> Bool
   checkAlias ts1 (ts2, _, _, _) =
     length ts1 == length ts2 &&

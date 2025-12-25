@@ -272,15 +272,14 @@ metaName i = gets (Map.lookup i . stateName)
 -- Get the docstrings associated with an item
 getDocStrings
     :: Int -- expression index
-    -> MorlocMonad CmdDocSet
+    -> MorlocMonad ArgDoc
 getDocStrings i = do
   sgmap <- gets stateSignatures
   case GMap.lookup i sgmap of
-    GMapNoFst -> return defaultValue
-    GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
     (GMapJust (Monomorphic (TermTypes (Just e) _ _))) -> return $ edocs e
     (GMapJust (Polymorphic _ _ e _)) -> return $ edocs e
-    _ -> return defaultValue
+    GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
+    _ -> throwError . CallTheMonkeys $ "No entry found for index in stateSignatures"
 
 
 getConcreteScope :: Int -> Lang -> MorlocMonad Scope

@@ -13,143 +13,225 @@ Stability   : experimental
 module Morloc.CodeGenerator.Docstrings (processDocstrings) where
 
 import Morloc.Namespace
+import Morloc.CodeGenerator.Namespace
 import qualified Data.Map as Map
 import Data.Text (Text)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.GMap as GMap
+import qualified Morloc.BaseTypes as MBT
 
+-- Most of the transmogrification of docstrings occurs in the parser, but there
+-- are some limitations there since the types are not yet known. If a type in a
+-- function signature is labeled as `unrolled: true`, then the standard
+-- positional argument should be replaced with a group of arguments for every
+-- field in the record. But the type signature for the function will have only
+-- the name of the type, not the details.
+--
+-- In addition to unrolling arguments, docstring information can be inherited
+-- even for non-record types. The main use case for this is defining a type that
+-- has a description and short/long option terms that are reused across function
+-- signatures.
+--
+-- This top-level function collects docstring info and passes it to `processArgDoc`
 processDocstrings :: AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a, CmdDocSet)
 processDocstrings e@(AnnoS (Idx i t) _ _) = do
     sgmap <- MM.gets stateSignatures
-    doc <- case GMap.lookup i sgmap of
-      (GMapJust (Monomorphic (TermTypes (Just et) _ _))) -> processCmdDocSet i t (edocs et)
-      (GMapJust (Polymorphic _ _ et _)) -> processCmdDocSet i t (edocs et)
+    argdoc <- case GMap.lookup i sgmap of
+      (GMapJust (Monomorphic (TermTypes (Just et) _ _))) -> return $ edocs et
+      (GMapJust (Polymorphic _ _ et _)) -> return $ edocs et
       _ -> case t of
-        (FunT ts _) -> return $ defaultValue { cmdDocArgs = take (length ts) (repeat CmdArgDef) }
-        _ -> return defaultValue
+        (FunT ts _) -> return $ ArgDocSig defaultValue (take (length ts) (repeat defaultValue)) defaultValue
+        _ -> return $ ArgDocAlias defaultValue
+    doc <- processArgDoc i t argdoc
     return (e, doc)
 
-processCmdDocSet :: Int -> Type -> CmdDocSet -> MorlocMonad CmdDocSet
-processCmdDocSet i (FunT ts _) cmd = do
-  cmdargs' <- zipWithM (processCmdArg i) ts (cmdDocArgs cmd)
-  let retDocs = getRetDocs $ last (cmdDocArgs cmd)
-  return $ cmd { cmdDocArgs = cmdargs', cmdDocRet = retDocs }
-processCmdDocSet _ _ c = return c
+-- dispatch docstring info for each argument to `processArgDoc`
+processArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad CmdDocSet
+processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
+  (ts', argdocs') <- zipWithM (reduceArgDoc i) ts (map ArgDocAlias argdocs) |>> unzip
+  cmdargs <- zipWithM makeCmdArg ts' argdocs'
+  (t', retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
+  return $ CmdDocSet
+    { cmdDocDesc = docLines cmddoc
+    , cmdDocName = docName cmddoc
+    , cmdDocArgs = cmdargs
+    , cmdDocRet = (t', getDesc retdoc')
+    }
+processArgDoc i t (ArgDocSig cmddoc [] retdoc) = do
+  (t', retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
+  return $ CmdDocSet
+    { cmdDocDesc = docLines cmddoc
+    , cmdDocName = docName cmddoc
+    , cmdDocArgs = []
+    , cmdDocRet = (t', getDesc retdoc')
+    }
+processArgDoc _ t (ArgDocAlias r) =
+  return $ CmdDocSet
+    { cmdDocDesc = docLines r
+    , cmdDocName = docName r
+    , cmdDocArgs = []
+    , cmdDocRet = (t, [])
+    }
+processArgDoc i t r = do
+  (t', r') <- reduceArgDoc i t r
+  case (t', r') of
+    (NamT _ _ _ ts, ArgDocRec args entries) -> do
+      cmdargs <- zipWithM makeCmdArg (map snd ts) (map (ArgDocAlias . snd) entries)
+      return $ CmdDocSet
+        { cmdDocDesc = docLines args
+        , cmdDocName = docName args
+        , cmdDocArgs = cmdargs
+        , cmdDocRet = (t, [])
+        }
+    _ -> error "Impossible - record type and argument expected"
 
-getRetDocs :: CmdArg -> [Text]
-getRetDocs (CmdArgPos r) = argPosDocDesc r
-getRetDocs (CmdArgOpt r) = argOptDocDesc r
-getRetDocs (CmdArgGrp r) = recDocDesc r
-getRetDocs CmdArgDef = []
 
-processCmdArg :: Int -> Type -> CmdArg -> MorlocMonad CmdArg
-processCmdArg i (VarT v) arg = do
+getDesc :: ArgDoc -> [Text]
+getDesc (ArgDocRec r _) = docLines r
+getDesc (ArgDocSig r _ _) = docLines r
+getDesc (ArgDocAlias r) = docLines r
+
+reduceArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad (Type, ArgDoc)
+reduceArgDoc i t@(VarT v) arg = do
   scope <- MM.getGeneralScope i
   case Map.lookup v scope of
     (Just [(_, typeOf -> parentType, parentArg, _)]) ->
-      processCmdArg i parentType (inheritCmdArg arg parentArg)
-    (Just xs) -> error $ show xs
-    Nothing -> return arg
-processCmdArg i (NamT _ _ _ rs) (CmdArgGrp recarg) = do
-  args <- zipWithM (processCmdArg i) (map snd rs) (map snd (recDocEntries recarg))
-  return . CmdArgGrp $ recarg { recDocEntries = zip (map fst rs) args }
-processCmdArg _ (NamT _ _ _ _) _ =  error "Unreachable?"
-processCmdArg _ _ r = return r
+      inheritArgDoc arg parentArg >>= reduceArgDoc i parentType
+    (Just _) -> error "Impossible?"
+    Nothing -> return (t, arg)
+  where
 
--- | Define rules for docstring term inheritance and promotion
-inheritCmdArg :: CmdArg -> CmdArg -> CmdArg
-inheritCmdArg CmdArgDef x =  x
-inheritCmdArg x CmdArgDef =  x
+  inheritArgDoc :: ArgDoc -> ArgDoc -> MorlocMonad ArgDoc
+  inheritArgDoc (ArgDocAlias r1) (ArgDocAlias r2) = return $ ArgDocAlias (inheritArgDocVars r1 r2)
+  inheritArgDoc (ArgDocAlias r1) (ArgDocRec r2 rs) = return $ ArgDocRec (inheritArgDocVars r1 r2) rs
+  inheritArgDoc _ _ = error "Impossible?"
 
--- for two positionals, inherit from parent field when child field is empty
-inheritCmdArg (CmdArgPos (ArgPosDocSet d1 m1 l1 u1)) (CmdArgPos (ArgPosDocSet d2 m2 l2 u2)) =
-  CmdArgPos $ ArgPosDocSet
-    { argPosDocDesc = if (length d1 > 0) then d1 else d2
-    , argPosDocMetavar = m1 <|> m2
-    , argPosDocLiteral = l1 <|> l2
-    , argPosDocUnroll = u1 <|> u2
+  inheritArgDocVars :: ArgDocVars -> ArgDocVars -> ArgDocVars
+  inheritArgDocVars r1 r2 = ArgDocVars
+    { docLines = if (length (docLines r1) > 0) then docLines r1 else docLines r2
+    , docName = docName r1 <|> docName r2
+    , docLiteral = docLiteral r1 <|> docLiteral r2
+    , docUnroll = docUnroll r1 <|> docUnroll r2
+    , docDefault = docDefault r1 <|> docDefault r2
+    , docMetavar = docMetavar r1 <|> docMetavar r2
+    , docArg = docArg r1 <|> docArg r2
+    , docTrue = docTrue r1 <|> docTrue r2
+    , docFalse = docFalse r1 <|> docFalse r2
+    }
+reduceArgDoc _ t r = return (t, r)
+
+makeCmdArg :: Type -> ArgDoc -> MorlocMonad CmdArg
+makeCmdArg recType@(NamT _ _ _ rs) (ArgDocRec arg entries) = do
+  -- Set the metavar default for groups to the record type name
+  let typedEntries = zipWith (\(k,t) (_,r) -> (k, (t,r))) rs entries
+  resolveArgDocVars typedEntries recType arg
+makeCmdArg t (ArgDocRec r _) = resolveArgDocVars [] t r
+makeCmdArg t (ArgDocAlias r) = resolveArgDocVars [] t r
+makeCmdArg _ (ArgDocSig _ _ _) = MM.throwError . DocStrError $ "Illegal functional CLI parameter"
+
+resolveArgDocVars :: [(Key, (Type, ArgDocVars))] -> Type -> ArgDocVars -> MorlocMonad CmdArg
+resolveArgDocVars rs t r
+  | docUnroll r == Just False = resolvePos t r |>> CmdArgPos
+  | length rs > 0 = resolveGrp t r rs
+  | t == VarT MBT.bool = resolveFlagCmdArg r
+  | isJust (docArg r) = resolveOpt t r |>> CmdArgOpt
+  | otherwise = resolvePos t r |>> CmdArgPos
+
+resolveGrp :: Type -> ArgDocVars -> [(Key, (Type, ArgDocVars))] -> MorlocMonad CmdArg
+resolveGrp recType@(NamT _ v _ _) arg argEntries = do
+  entries <- mapM resolveRecDocVars argEntries
+  return . CmdArgGrp $ RecDocSet
+       { recDocType = recType
+       , recDocDesc = docLines arg
+       , recDocMetavar = fromMaybe (unTVar v) (docMetavar arg)
+       , recDocOpt = docArg arg
+       , recDocEntries = entries
+       }
+  where
+    resolveRecDocVars :: (Key, (Type, ArgDocVars)) -> MorlocMonad (Key, Either ArgFlagDocSet ArgOptDocSet)
+    resolveRecDocVars (k, (t, r))
+      | t == VarT MBT.bool = do
+          eitherFlag <- resolveFlag r
+          case eitherFlag of
+            (Right flag) -> return $ (k, Left flag)
+            (Left _) -> MM.throwError . DocStrError $ "Non-optional field found in unrolled record"
+      | otherwise = do
+          opt <- resolveOpt t r
+          return (k, Right opt)
+resolveGrp _ _ _ = error "Impossible, groups must be records"
+
+-- resolve a boolean into either a flag option or a positional
+resolveFlag :: ArgDocVars -> MorlocMonad (Either ArgPosDocSet ArgFlagDocSet)
+resolveFlag r =
+  case (docTrue r, docFalse r, (==) "true" <$> docDefault r) of
+      -- if no default value is given, make default based on given args
+      -- e.g., true: -v/--verbose
+      (Just rt, Nothing, Nothing    ) -> flag rt  Nothing   False
+      -- e.g., false: -q/--quit
+      (Nothing, Just rf, Nothing    ) -> flag rf  Nothing   True
+      -- e.g., true: -v/--verbose
+      --       false: -q/--quit
+      (Just rt, Just rf, Nothing    ) -> flag rt  (Just rf) False
+      -- set default to TRUE
+      (Nothing, Just rf, Just True  ) -> flag rf  Nothing   True
+      (Just rt, Just rf, Just True  ) -> flag rf  (Just rt) True
+      -- set default to FALSE
+      (Just rt, Nothing, Just False ) -> flag rt  Nothing   False
+      (Just rt, Just rf, Just False ) -> flag rt  (Just rf) False
+      -- handle noop cases
+      (Just _, Nothing, Just True  ) -> MM.throwError . DocStrError $ "Noop flag"
+      (Nothing, Just _, Just False ) -> MM.throwError . DocStrError $ "Noop flag"
+      -- handle positional with a given default
+      (Nothing, Nothing, Just _    ) -> MM.throwError . DocStrError $ "Positional argument with default"
+      -- handle positional
+      (Nothing, Nothing, Nothing    ) -> return . Left $ ArgPosDocSet
+        { argPosDocType = VarT MBT.bool
+        , argPosDocDesc = docLines r
+        , argPosDocMetavar = docMetavar r <|> Just "BOOL"
+        , argPosDocLiteral = docLiteral r
+        }
+  where
+  flag :: CliOpt -> Maybe CliOpt -> Bool -> MorlocMonad (Either ArgPosDocSet ArgFlagDocSet)
+  flag opt rev def = return . Right $ ArgFlagDocSet
+    { argFlagDocDesc = docLines r
+    , argFlagDocOpt = opt
+    , argFlagDocOptRev = rev
+    , argFlagDocDefault = if def then "true" else "false"
     }
 
--- for positional child, with unroll=False, only inherit description
-inheritCmdArg (CmdArgPos r1@(ArgPosDocSet d1 _ _ (Just False))) (CmdArgOpt r2) =
-  CmdArgPos $ r1
-    { argPosDocDesc = if (length d1 > 0) then d1 else argOptDocDesc r2
+resolveFlagCmdArg :: ArgDocVars -> MorlocMonad CmdArg
+resolveFlagCmdArg r = do
+  eitherFlag <- resolveFlag r
+  case eitherFlag of
+    (Right flag) -> return . CmdArgFlag $ flag
+    (Left pos) -> return . CmdArgPos $ pos
+
+resolveOpt :: Type -> ArgDocVars -> MorlocMonad ArgOptDocSet
+resolveOpt t r = case (docArg r, docDefault r) of
+  (Nothing, _) -> MM.throwError . DocStrError $ "Optional argument missing tags"
+  (_, Nothing) -> MM.throwError . DocStrError $ "Optional arguments must have default values"
+  (Just opt, Just def) -> return $ ArgOptDocSet
+    { argOptDocType = t
+    , argOptDocDesc = docLines r
+    , argOptDocMetavar = fromMaybe (makeOptMeta t) (docMetavar r)
+    , argOptDocLiteral = docLiteral r
+    , argOptDocArg = opt
+    , argOptDocDefault = def
     }
 
--- for positional child, with unroll=True, convert
-inheritCmdArg (CmdArgPos (ArgPosDocSet d1 m1 l1 _)) (CmdArgOpt r2) =
-  CmdArgOpt $ r2
-    { argOptDocDesc = if (length d1 > 0) then d1 else argOptDocDesc r2
-    , argOptDocMetavar = m1 <|> argOptDocMetavar r2
-    , argOptDocLiteral = l1 <|> argOptDocLiteral r2
-    }
+makeOptMeta :: Type -> Text
+makeOptMeta (UnkT v) = unTVar v
+makeOptMeta (VarT v) = unTVar v
+makeOptMeta (FunT _ _) = "FUN" -- illegal, but who's watching?
+makeOptMeta (AppT (VarT v) _) = unTVar v
+makeOptMeta (AppT _ _) = "VAL" -- weird stuff, choose your own metadata
+makeOptMeta (NamT _ v _ _) = unTVar v
 
--- for positional child, with unroll=True, convert
-inheritCmdArg (CmdArgPos (ArgPosDocSet d1 m1 _ _)) (CmdArgGrp r2) =
-  CmdArgGrp $ r2
-    { recDocDesc = if (length d1 > 0) then d1 else recDocDesc r2
-    , recDocMetavar = m1 <|> recDocMetavar r2
-    }
-
-inheritCmdArg (CmdArgOpt r1) (CmdArgPos r2) =
-  CmdArgOpt $ r1
-    { argOptDocDesc = if (length (argOptDocDesc r1) > 0) then argOptDocDesc r1 else argPosDocDesc r2
-    , argOptDocMetavar = argOptDocMetavar r1 <|> argPosDocMetavar r2
-    , argOptDocLiteral = argOptDocLiteral r1 <|> argPosDocLiteral r2
-    , argOptDocUnroll  = argOptDocUnroll  r1 <|> argPosDocUnroll  r2
-    }
-
-inheritCmdArg (CmdArgOpt r1) (CmdArgOpt r2) = undefined
-  CmdArgOpt $ r1
-    { argOptDocDesc = if (length (argOptDocDesc r1) > 0) then argOptDocDesc r1 else argOptDocDesc r2
-    , argOptDocMetavar = argOptDocMetavar r1 <|> argOptDocMetavar r2
-    , argOptDocLiteral = argOptDocLiteral r1 <|> argOptDocLiteral r2
-    , argOptDocUnroll  = argOptDocUnroll  r1 <|> argOptDocUnroll  r2
-    , argOptDocShort   = argOptDocShort   r1 <|> argOptDocShort   r2
-    , argOptDocLong    = argOptDocLong    r1 <|> argOptDocLong    r2
-    , argOptDocDefault = argOptDocDefault r1 <|> argOptDocDefault r2
-    }
-
-inheritCmdArg (CmdArgOpt r1) (CmdArgGrp r2)
-  | argOptDocUnroll r1 == Just False = CmdArgOpt $ r1
-    { argOptDocDesc = if (length (argOptDocDesc r1) > 0) then argOptDocDesc r1 else recDocDesc r2
-    , argOptDocMetavar = argOptDocMetavar r1 <|> recDocMetavar r2
-    , argOptDocShort   = argOptDocShort   r1 <|> recDocShort   r2
-    , argOptDocLong    = argOptDocLong    r1 <|> recDocLong    r2
-    }
-  | otherwise = CmdArgGrp $ r2
-    { recDocDesc = if (length (argOptDocDesc r1) > 0) then argOptDocDesc r1 else recDocDesc r2
-    , recDocMetavar = argOptDocMetavar r1 <|> recDocMetavar r2
-    , recDocUnroll  = argOptDocUnroll  r1 <|> recDocUnroll  r2
-    , recDocShort   = argOptDocShort   r1 <|> recDocShort   r2
-    , recDocLong    = argOptDocLong    r1 <|> recDocLong    r2
-    , recDocEntries = recDocEntries r2
-  }
-
-inheritCmdArg (CmdArgGrp r1) (CmdArgPos r2) =
-  CmdArgGrp $ r1
-    { recDocDesc = if (length (recDocDesc r1) > 0) then recDocDesc r1 else argPosDocDesc r2
-    , recDocMetavar = recDocMetavar r1 <|> argPosDocMetavar r2
-    }
-
-inheritCmdArg (CmdArgGrp r1) (CmdArgOpt r2) = undefined
-  CmdArgGrp $ r1
-    { recDocDesc = if (length (recDocDesc r1) > 0) then recDocDesc r1 else argOptDocDesc r2
-    , recDocMetavar = recDocMetavar r1 <|> argOptDocMetavar r2
-    , recDocShort   = recDocShort   r1 <|> argOptDocShort   r2
-    , recDocLong    = recDocLong    r1 <|> argOptDocLong    r2
-    }
-
-inheritCmdArg (CmdArgGrp r1) (CmdArgGrp r2) = undefined
-  CmdArgGrp $ r1
-    { recDocDesc = if (length (recDocDesc r1) > 0) then recDocDesc r1 else recDocDesc r2
-    , recDocMetavar = recDocMetavar r1 <|> recDocMetavar r2
-    , recDocUnroll  = recDocUnroll  r1 <|> recDocUnroll  r2
-    , recDocShort   = recDocShort   r1 <|> recDocShort   r2
-    , recDocLong    = recDocLong    r1 <|> recDocLong    r2
-    , recDocEntries = [ (k1, inheritCmdArg f1 f2)
-                      | (k1, f1) <- recDocEntries r1
-                      , (k2, f2) <- recDocEntries r2
-                      , k1 == k2
-                      ]
+resolvePos :: Type -> ArgDocVars -> MorlocMonad ArgPosDocSet
+resolvePos t r = do
+  return $ ArgPosDocSet
+    { argPosDocType = t
+    , argPosDocDesc = docLines r
+    , argPosDocMetavar = docMetavar r
+    , argPosDocLiteral = docLiteral r
     }

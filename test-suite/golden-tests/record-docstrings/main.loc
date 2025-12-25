@@ -30,7 +30,8 @@ record SysConfig where
   numThreads :: Int
 
   --' clean out caches before running?
-  --' arg: --clean
+  --' true:  --clean
+  --' false: --no-clean
   --' default: false
   removeCaches :: Bool
 

@@ -15,7 +15,6 @@ module Morloc.Frontend.Lexer
   , ParserState(..)
   , align
   , foldMany
-  , foldMany1
   , indentFreeTerm
   , alignInset
   , angles
@@ -146,11 +145,6 @@ foldMany x p = do
   case mayX of
     (Just x') -> foldMany x' p
     Nothing -> return x
-
-foldMany1 :: a -> (a -> Parser a) -> Parser a
-foldMany1 x p = do 
-  x' <- p x
-  foldMany x' p
 
 alignInset :: Parser a -> Parser [a]
 alignInset p = isInset >> align p
@@ -296,16 +290,19 @@ parseLineDocStr = lexeme $ do
   text <- takeWhileP Nothing (/= '\n')
   return text
 
-parseArgDocStr :: Parser (Maybe Char, Maybe Text)
-parseArgDocStr = lexeme $ do
+parseArgDocStr :: Text -> Parser CliOpt
+parseArgDocStr flag = lexeme $ do
   _ <- docstr
-  string "arg:"
+  string (flag <> ":")
   _ <- hspace
   mayShort <- optional (try parseShortDocStr)
-  mayLong <- case mayShort of
-    (Just _) -> optional (char '/' >> parseLongDocStr)
-    Nothing -> parseLongDocStr |>> Just
-  return (mayShort, mayLong)
+  case mayShort of
+    (Just short) -> do
+      mayLong <- optional (char '/' >> parseLongDocStr)
+      case mayLong of
+        (Just long) -> return $ CliOptBoth short long
+        Nothing -> return $ CliOptShort short
+    Nothing -> parseLongDocStr |>> CliOptLong
   where
 
   parseShortDocStr :: Parser Char

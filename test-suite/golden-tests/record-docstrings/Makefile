@@ -23,6 +23,7 @@ all:
 	./nexus bif --clean >> obs.txt
 	./nexus bif --sys-config sysconf.json --clean >> obs.txt
 	./nexus bif --sys-config sysconf.json >> obs.txt
+	./nexus bif --sys-config sysconf.json --no-clean >> obs.txt
 
 clean:
 	rm -rf nexus* __pycache__ pool*

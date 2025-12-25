@@ -337,7 +337,8 @@ makeSchema mid lang t = do
 
 main :: [FData] -> Int -> [GastData] -> MorlocMonad MDoc
 main fdata longestCommandLength cdata = do
-  (subcommandDispatchers, dispatch) <- dispatchCode fdata cdata
+  config <- MM.ask
+  let (subcommandDispatchers, dispatch) = dispatchCode config fdata cdata
   return $ format
     (DF.embededFileText DF.nexusTemplate)
     "// <<<BREAK>>>"
@@ -349,7 +350,7 @@ main fdata longestCommandLength cdata = do
 usageCode :: [FData] -> Int -> [GastData] -> MDoc
 usageCode fdata longestCommandLength cdata =
   [idoc|
-    fprintf(stderr, "%s", "Usage: ./nexus [OPTION]... COMMAND [ARG]...\n");
+    fprintf(stderr, "%s", "Usage: ./nexus [OPTION...] COMMAND [ARG...]\n");
     fprintf(stderr, "%s", "\n");
     fprintf(stderr, "%s", "Nexus Options:\n");
     fprintf(stderr, "%s", " -h, --help            Print this help message\n");
@@ -378,16 +379,6 @@ usageLineConst longestCommandLength cmd =
     desc [] = ""
     desc (x:_) = pretty (replicate padding ' ') <> pretty x
 
-writeTypes :: MDoc -> Type -> [MDoc]
-writeTypes padding (FunT inputs output)
-  = zipWith (writeType padding) (map Just [1..]) inputs
-  ++ writeTypes padding output
-writeTypes padding t = [writeType padding Nothing t]
-
-writeType :: MDoc -> Maybe Int -> Type -> MDoc
-writeType padding (Just i) t = [idoc|fprintf(stderr, "%s", "  #{padding}param #{pretty i}: #{pretty t}\n");|]
-writeType padding Nothing  t = [idoc|fprintf(stderr, "%s", "  #{padding}return: #{fixLineWrapping $ pretty t}\n");|]
-
 -- Long type names may be wrapped to multiple lines. This funtion adds new line
 -- escapes at the end of each line (required in C strings)
 fixLineWrapping :: MDoc -> MDoc
@@ -397,22 +388,19 @@ fixLineWrapping typestr = case lines (render' typestr) of
     xs -> vsep $ [pretty (str <> "\\") | str <- init xs] <> [pretty (last xs)]
 
 createStructLong [] = "{ NULL }"
-createStructLong (x:xs) = align . vsep $ ["{" <+> x] <> ["," <+> x | x <- xs] <> ["}"]
+createStructLong (x:xs) = align . vsep $ ["{" <+> x] <> ["," <+> x' | x' <- xs] <> ["}"]
 
-dispatchCode :: [FData] -> [GastData] -> MorlocMonad ([MDoc], MDoc)
-dispatchCode [] [] = return (["// no dispatchers registered"], "// nothing to dispatch")
-dispatchCode fdata cdata = do
-
-    config <- MM.ask
-    rastDocs <- mapM makeCaseDoc fdata
-    gastDocs <- mapM makeGastCaseDoc cdata
-
-    let (dispatchers, cases) = unzip (rastDocs <> gastDocs)
-        socketDocs = [makeSocketDoc s config | (_, s) <- daemonSets]
-
-    return (dispatchers, dispatchBlock cases socketDocs)
-
+dispatchCode :: Config -> [FData] -> [GastData] -> ([MDoc], MDoc)
+dispatchCode _ [] [] = (["// no dispatchers registered"], "// nothing to dispatch")
+dispatchCode config fdata cdata = (dispatchers, dispatchBlock)
     where
+
+    rastDocs = map makeCaseDoc fdata
+
+    gastDocs = map makeGastCaseDoc cdata
+
+    (dispatchers, cases) = unzip (rastDocs <> gastDocs)
+    socketDocs = [makeSocketDoc s | (_, s) <- daemonSets]
 
     allSockets = concat [ (fdataSocket x) : (fdataSubSockets x) | x <- fdata]
 
@@ -424,7 +412,7 @@ dispatchCode fdata cdata = do
 
     elseClause = [idoc|fprintf(stderr, "Unrecognized command '%s'\n", cmd);|]
 
-    dispatchBlock cases socketDocs = indent 4 $ vsep
+    dispatchBlock = indent 4 $ vsep
        [ [idoc|uint32_t mid = 0;|]
        , [idoc|int retcode = 0;|]
        , [idoc|char buffer[256];|]
@@ -438,7 +426,7 @@ dispatchCode fdata cdata = do
        , [idoc|#{cIfElse (head cases) (tail cases) (Just elseClause)}|]
        ]
 
-    makeSocketDoc socket config = vsep
+    makeSocketDoc socket = vsep
       [ [idoc|morloc_socket_t #{varName} = { 0 };|]
       , [idoc|#{varName}.lang = strdup("#{pretty $ socketLang socket}");|]
       , [idoc|#{varName}.syscmd = (char**)calloc(5, sizeof(char*));|]
@@ -482,32 +470,29 @@ cIfElse (cond1, block1) ifelses elseBlock = vsep $
   [block 4 ("else if" <+> parens c) b | (c, b) <- ifelses] <>
   maybe [] (return . block 4 "else") elseBlock
 
-makeCaseDoc :: FData -> MorlocMonad (MDoc, (MDoc, MDoc))
-makeCaseDoc fdata@(FData socket sub _ midx t sockets schemas returnSchema cmdDocSet) = do
-    let cond = [idoc|strcmp(cmd, "#{sub}") == 0|]
+makeCaseDoc :: FData -> (MDoc, (MDoc, MDoc))
+makeCaseDoc fdata@(FData socket sub _ midx _ sockets schemas returnSchema cmdDocSet) = (dispatcher, (cond, body))
+    where
+    cond = [idoc|strcmp(cmd, "#{sub}") == 0|]
 
-        body = vsep
-          [ [idoc|morloc_socket_t* sockets[] = #{socketList};|]
-          , [idoc|dispatch_#{sub}(argc, argv, shm_basename, config, #{lang}_socket, sockets);|]
-          ]
+    body = vsep
+      [ [idoc|morloc_socket_t* sockets[] = #{socketList};|]
+      , [idoc|dispatch_#{sub}(argc, argv, shm_basename, config, #{lang}_socket, sockets);|]
+      ]
 
-        socketList = encloseSep "{ " " }" ", " $
-            [ "&" <> (pretty . ML.makeExtension $ socketLang s) <> "_socket" | s <- sockets] <>
-            ["(morloc_socket_t*)NULL"]
+    socketList = encloseSep "{ " " }" ", " $
+        [ "&" <> (pretty . ML.makeExtension $ socketLang s) <> "_socket" | s <- sockets] <>
+        ["(morloc_socket_t*)NULL"]
 
-        lang = pretty . ML.makeExtension $ socketLang socket
+    lang = pretty . ML.makeExtension $ socketLang socket
 
-        argSchemasList = createStructLong $ schemas <> ["(char*)NULL"]
+    argSchemasList = createStructLong $ schemas <> ["(char*)NULL"]
 
-        nargs = length schemas
+    (longOptVal, vardefs, longArgDecs, shortArgDec, argCases, argInits) = makeParameters (cmdDocArgs cmdDocSet)
+    usageQuiet = subcmdHelpQuietF fdata
+    usageVerbose = subcmdHelpVerboseF fdata
 
-    (longOptVal, vardefs, longArgDecs, shortArgDec, argCases, argInits) <-
-        makeParameters midx t (cmdDocArgs cmdDocSet)
-
-    usageQuiet <- subcmdHelpQuietF fdata
-    usageVerbose <- subcmdHelpVerboseF fdata
-
-    let dispatcher = [idoc|
+    dispatcher = [idoc|
 void dispatch_#{sub}(
     int argc,
     char* argv[],
@@ -551,7 +536,7 @@ void dispatch_#{sub}(
 
     char return_schema[] = #{returnSchema};
 
-    argument_t** args = (argument_t**)calloc(#{pretty $ nargs + 1}, sizeof(argument_t*));
+    argument_t** args = (argument_t**)calloc(#{pretty $ length schemas + 1}, sizeof(argument_t*));
 
     #{argInits}
 
@@ -564,27 +549,24 @@ void dispatch_#{sub}(
 }
 |]
 
-    return (dispatcher, (cond, body))
+makeGastCaseDoc :: GastData -> (MDoc, (MDoc, MDoc))
+makeGastCaseDoc gdata = (dispatcher, (cond, body))
+  where
+    func = pretty . unEVar . commandName $ gdata
+    returnSchema = dquotes . fst . commandSchemas $ gdata
+    (exprBody, exprVar) = commandExpr gdata
+    argSchemasList = createStructLong $ ((map dquotes . snd . commandSchemas $ gdata) <> ["NULL"])
 
-makeGastCaseDoc :: GastData -> MorlocMonad (MDoc, (MDoc, MDoc))
-makeGastCaseDoc gdata = do
-    let func = pretty . unEVar . commandName $ gdata
-        returnSchema = dquotes . fst . commandSchemas $ gdata
-        (exprBody, exprVar) = commandExpr gdata
-        argSchemasList = createStructLong $ ((map dquotes . snd . commandSchemas $ gdata) <> ["NULL"])
+    cond = [idoc|strcmp(cmd, "#{func}") == 0|]
+    body = [idoc|dispatch_#{func}(argc, argv, shm_basename, config);|]
 
-        cond = [idoc|strcmp(cmd, "#{func}") == 0|]
-        body = [idoc|dispatch_#{func}(argc, argv, shm_basename, config);|]
+    n = length . commandArgs $ gdata
 
-        nargs = length . commandArgs $ gdata
+    (longOptVal, vardefs, longArgDecs, shortArgDec, argCases, argInits) = makeParameters (cmdDocArgs (commandDocs gdata))
+    usageQuiet = subcmdHelpQuietG gdata
+    usageVerbose = subcmdHelpVerboseG gdata
 
-    (longOptVal, vardefs, longArgDecs, shortArgDec, argCases, argInits) <-
-        makeParameters (commandIndex gdata) (commandType gdata) (cmdDocArgs (commandDocs gdata))
-
-    usageQuiet <- subcmdHelpQuietG gdata
-    usageVerbose <- subcmdHelpVerboseG gdata
-
-    let dispatcher = [idoc|
+    dispatcher = [idoc|
 void dispatch_#{func}(
     int argc,
     char* argv[],
@@ -623,7 +605,7 @@ void dispatch_#{func}(
     char return_schema[] = #{returnSchema};
     #{vsep exprBody}
 
-    argument_t** args = (argument_t**)calloc(#{pretty $ nargs + 1}, sizeof(argument_t*));
+    argument_t** args = (argument_t**)calloc(#{pretty $ n + 1}, sizeof(argument_t*));
 
     #{argInits}
 
@@ -635,97 +617,88 @@ void dispatch_#{func}(
     run_pure_command(#{exprVar}, args, arg_schemas, return_schema, config);
 }
 |]
-    return (dispatcher, (cond, body))
+
 
 -- Make an argument string for a usage statement
 makeArg
-  :: Maybe Text -- metavar
-  -> Maybe Char -- short argument
-  -> Maybe Text -- long argument
-  -> Maybe MDoc -- argument string, such as "-h, --help"
-makeArg meta short long = case (shortDoc meta, longDoc meta) of
-  (Just s, Just l) -> Just $ s <> "," <+> l
-  (Just s, _) -> Just s
-  (_, Just l) -> Just l
-  _ -> Nothing
-  where
-    shortDoc Nothing = fmap (\c -> "-" <> pretty c) short
-    shortDoc (Just m) = fmap (\c -> "-" <> pretty c <+> pretty m) short
+  :: CliOpt
+  -> Maybe Text -- metavar
+  -> MDoc -- argument string, such as "-h, --help"
+makeArg (CliOptShort s) Nothing = "-" <> pretty s
+makeArg (CliOptShort s) (Just m) = "-" <> pretty s <+> pretty m
+makeArg (CliOptLong l) Nothing = "--" <> pretty l
+makeArg (CliOptLong l) (Just m) = "--" <> pretty l <+> pretty m
+makeArg (CliOptBoth s l) m
+  = makeArg (CliOptShort s) m <> "," <+> makeArg (CliOptLong l) m
 
-    longDoc Nothing = fmap (\t -> "--" <> pretty t) long
-    longDoc (Just m) = fmap (\t -> "--" <> pretty t <> "=" <> pretty m) long
 
 -- separate groups of elements by vertical space
 spaceOut :: [[MDoc]] -> [MDoc]
 spaceOut [] = []
 spaceOut (xs:xss) = concat $ xs : ["" : xs' | xs'@(_:_) <- xss]
 
-evalType :: Int -> Type -> MorlocMonad Type
-evalType midx t = do
-  -- fully evaluate the type
-  mayT <- Infer.evalGeneralStep midx (type2typeu t)
-  case mayT of
-    (Just t') -> return (typeOf t')
-    Nothing -> return t
+makeOption :: [MDoc] -> [MDoc] -> [MDoc]
+makeOption argstrs desc = map ((<>) "    ") $ argstrs <> (map ((<>) "    ") desc)
 
-makeOption :: MDoc -> [MDoc] -> [MDoc]
-makeOption argstr lines = map ((<>) "    ") $ argstr : (map ((<>) "    ") lines)
+subcmdHelpQuietF :: FData -> MDoc
+subcmdHelpQuietF f = subcmdHelpQuiet (fdataSubcommand f) (fdataType f) (fdataCmdDocSet f)
 
-subcmdHelpQuietF :: FData -> MorlocMonad MDoc
-subcmdHelpQuietF f = subcmdHelpQuiet (fdataMid f) (fdataSubcommand f) (fdataType f) (fdataCmdDocSet f)
+subcmdHelpVerboseF :: FData -> MDoc
+subcmdHelpVerboseF f = subcmdHelpVerbose (fdataSubcommand f) (fdataType f) (fdataCmdDocSet f)
 
-subcmdHelpVerboseF :: FData -> MorlocMonad MDoc
-subcmdHelpVerboseF f = subcmdHelpVerbose (fdataMid f) (fdataSubcommand f) (fdataType f) (fdataCmdDocSet f)
+subcmdHelpQuietG :: GastData -> MDoc
+subcmdHelpQuietG g = subcmdHelpQuiet (pretty $ commandName g) (commandType g) (commandDocs g)
 
-subcmdHelpQuietG :: GastData -> MorlocMonad MDoc
-subcmdHelpQuietG g = subcmdHelpQuiet (commandIndex g) (pretty $ commandName g) (commandType g) (commandDocs g)
-
-subcmdHelpVerboseG :: GastData -> MorlocMonad MDoc
-subcmdHelpVerboseG g = subcmdHelpVerbose (commandIndex g) (pretty $ commandName g) (commandType g) (commandDocs g)
+subcmdHelpVerboseG :: GastData -> MDoc
+subcmdHelpVerboseG g = subcmdHelpVerbose (pretty $ commandName g) (commandType g) (commandDocs g)
 
 
 linePrinter :: MDoc -> MDoc
 linePrinter doc =
   let txtLines = MT.lines $ render doc
-  in vsep [ [idoc|fprintf(stderr, "#{pretty line}\n");|] | line <- txtLines] where
+  in vsep [ [idoc|fprintf(stderr, "#{pretty l}\n");|] | l <- txtLines] where
 
-subcmdHelpQuiet :: Int -> MDoc -> Type -> CmdDocSet -> MorlocMonad MDoc
-subcmdHelpQuiet midx cmd t0 docs = do
-  argDocs <- makeArgHelp t0 (cmdDocArgs docs)
-  let retDocs = makeRetDocs t0 (cmdDocRet docs)
-  return . linePrinter . vsep . spaceOut $ [[usage t0], desc docs, argDocs, retDocs]
+subcmdHelpQuiet :: MDoc -> Type -> CmdDocSet -> MDoc
+subcmdHelpQuiet cmd t0 docs
+  = linePrinter . vsep . spaceOut $ [[usage docs], desc docs, argDocs, retDocs]
   where
+    argDocs = makeArgHelp (cmdDocArgs docs)
+    retDocs = makeRetDocs t0 (snd . cmdDocRet $ docs)
 
     makeRetDocs :: Type -> [Text] -> [MDoc]
     makeRetDocs (FunT _ t) ds = ["Return:" <+> pretty t] <> ["  " <> pretty d | d <- ds]
     makeRetDocs t ds = ["Return:" <+> pretty t] <> ["  " <> pretty d | d <- ds]
 
-    usage (FunT (length -> n) _) =
-      "Usage: ./nexus" <+> foldl (<+>) cmd ["ARG" <> pretty i | i <- take n ([1..] :: [Int])]
-    usage _ = "Usage: ./nexus" <+> cmd
+    usage (CmdDocSet _ _ cmdargs _) =
+      "Usage: ./nexus" <+> cmd <> optDoc <> posDoc
+      where
+        posDocs = [ maybe ("ARG" <> pretty i) pretty (argPosDocMetavar r)
+                  | (i, r) <- zip ([1..] :: [Int]) [r | (CmdArgPos r) <- cmdargs]
+                  ]
+        optDoc = if length posDocs == length cmdargs then "" else " [OPTION...]"
+        posDoc = if length posDocs == 0 then "" else " " <> hsep posDocs
 
     desc (CmdDocSet [] _ _ _) = []
     desc (CmdDocSet (x:[]) _ _ _) = [pretty x]
     desc (CmdDocSet (x:details) _ _ _) = spaceOut [[pretty x], map pretty details]
 
-    makeArgHelp :: Type -> [CmdArg] -> MorlocMonad [MDoc]
-    makeArgHelp (FunT ts _) args = do
-      posArgDocs <- makePosArgs (catMaybes $ zipWith toPositional ts args)
-      optArgDocs <- makeOptArgs [ (t', r) | (t', CmdArgOpt r) <- zip ts args]
-      grpArgDocs <- makeGrpArgs [ (t', r) | (t', CmdArgGrp r) <- zip ts args]
-      return . spaceOut $ [posArgDocs, optArgDocs, grpArgDocs]
-    makeArgHelp _ _ = return []
+    makeArgHelp :: [CmdArg] -> [MDoc]
+    makeArgHelp args = spaceOut $ [posArgDocs, optArgDocs, grpArgDocs]
+      where
+      posArgDocs = makePosArgs [ r | CmdArgPos r <- args]
+      optArgDocs = makeOptArgs . mapMaybe toOpts $ args
+      grpArgDocs = makeGrpArgs [ r | CmdArgGrp r <- args]
 
-    toPositional :: Type -> CmdArg -> Maybe (Type, ArgPosDocSet)
-    toPositional t (CmdArgPos r) = Just (t, r)
-    toPositional t CmdArgDef = Just (t, defaultValue)
-    toPositional _ _ = Nothing
+    toOpts :: CmdArg -> Maybe (Either ArgFlagDocSet ArgOptDocSet)
+    toOpts (CmdArgOpt r) = Just (Right r)
+    toOpts (CmdArgFlag r) = Just (Left r)
+    toOpts _ = Nothing
 
-    makePosArgs :: [(Type, ArgPosDocSet)] -> MorlocMonad [MDoc]
-    makePosArgs [] = return []
-    makePosArgs (unzip -> (ts, rs)) = do
-      args <- zipWith3M (makePosArg maxSpace) metavars ts rs
-      return $ "Positional arguments:" : concat args
+    makePosArgs :: [ArgPosDocSet] -> [MDoc]
+    makePosArgs [] = []
+    makePosArgs rs =
+      let args = zipWith (makePosArg maxSpace) metavars rs
+      in "Positional arguments:" : concat args
       where
         metavars = zipWith makeMeta [1..] (map argPosDocMetavar rs)
 
@@ -733,14 +706,13 @@ subcmdHelpQuiet midx cmd t0 docs = do
 
         makeMeta :: Int -> Maybe Text -> (MDoc, Int)
         makeMeta _ (Just metavar) = ("  " <> pretty metavar, 2 + MT.length metavar)
-        makeMeta i Nothing = ("  arg_" <> pretty i, 6 + length (show i))
+        makeMeta i Nothing = ("  ARG" <> pretty i, 5 + length (show i))
 
-    makePosArg :: Int -> (MDoc, Int) -> Type -> ArgPosDocSet -> MorlocMonad [MDoc]
-    makePosArg maxSpace (metavar, metavarLen) t r = do
-      t' <- evalType midx t
-      return [ metavar <> postMetSpace <> makeDesc (argPosDocDesc r)
-             , pretypeSpace <> "type:" <+> pretty t'
-             ]
+    makePosArg :: Int -> (MDoc, Int) -> ArgPosDocSet -> [MDoc]
+    makePosArg maxSpace (metavar, metavarLen) r =
+      [ metavar <> postMetSpace <> makeDesc (argPosDocDesc r)
+      , pretypeSpace <> "type:" <+> pretty (argPosDocType r)
+      ]
       where
         postMetSpace = pretty (take (maxSpace - metavarLen + 2) (repeat ' '))
         pretypeSpace = pretty (take (maxSpace + 2) (repeat ' '))
@@ -748,62 +720,53 @@ subcmdHelpQuiet midx cmd t0 docs = do
         makeDesc (x:_) = pretty x
         makeDesc [] = "No description given"
 
-    makeOptArgs :: [(Type, ArgOptDocSet)] -> MorlocMonad [MDoc]
-    makeOptArgs [] = return []
-    makeOptArgs rs = do
-      args <- mapM (uncurry makeOptArg) rs
-      return $ "Optional arguments:" : concat args
+    makeOptArgs :: [Either ArgFlagDocSet ArgOptDocSet] -> [MDoc]
+    makeOptArgs [] = []
+    makeOptArgs rs = "Optional arguments:" : concat (map makeOptArg rs)
 
-    makeOptArg :: Type -> ArgOptDocSet -> MorlocMonad [MDoc]
-    makeOptArg t r = do
-      t' <- evalType midx t
-      case makeArg (argOptDocMetavar r) (argOptDocShort r) (argOptDocLong r) of
-        (Just argstr) -> return $ makeOption argstr (desc (argOptDocDesc r) <> ["type:" <+> pretty t'])
-        Nothing -> error "Invalid ArgOptDocSet"
+    makeOptArg :: Either ArgFlagDocSet ArgOptDocSet -> [MDoc]
+    makeOptArg (Left flag)
+      = makeOption (argstr : revArgstr)
+      $  map pretty (argFlagDocDesc flag)
+      <> ["default:" <+> (pretty . escapeString) (argFlagDocDefault flag)]
       where
-        desc [] = []
-        desc (x:_) = [pretty x]
+        argstr = makeArg (argFlagDocOpt flag) Nothing
+        revArgstr = maybe [] (return . flip makeArg Nothing) (argFlagDocOptRev flag)
+    makeOptArg (Right opt) =
+      let argstr = makeArg (argOptDocArg opt) (Just $ argOptDocMetavar opt)
+      in makeOption [argstr]
+          $  map pretty (argOptDocDesc opt)
+          <> ["type:" <+> pretty (argOptDocType opt)
+             ,"default:" <+> (pretty . escapeString) (argOptDocDefault opt)
+             ]
 
-    makeGrpArgs :: [(Type, RecDocSet)] -> MorlocMonad [MDoc]
-    makeGrpArgs [] = return []
-    makeGrpArgs rs = do
-        args <- mapM (uncurry makeGrpArg) rs
-        return $ ["Group arguments:"] <> spaceOut args
+    makeGrpArgs :: [RecDocSet] -> [MDoc]
+    makeGrpArgs [] = []
+    makeGrpArgs rs = ["Group arguments:"] <> spaceOut (map makeGrpArg rs)
 
-    makeGrpArg :: Type -> RecDocSet -> MorlocMonad [MDoc]
-    makeGrpArg t0 r = do
-      t' <- evalType midx t0
-      case t' of
-        (NamT _ v _ es) -> do
-          let entries = zipWith3 makeEntry (map fst es) (map snd es) (map snd (recDocEntries r))
-          return $ [mainLine v] <> concat (recordEntry es) <> concat entries
-        _ -> error "Cannot handle non-record type"
+    makeGrpArg :: RecDocSet -> [MDoc]
+    makeGrpArg r = [mainLine] <> recordEntry <> entries
       where
+        mainLine = "  " <> pretty (recDocMetavar r) <> makeDesc (recDocDesc r)
 
-        mainLine v = "  " <> metavar v <> makeDesc (recDocDesc r)
+        entries = concatMap (makeOptArg . snd) (recDocEntries r)
 
-        metavar v = maybe (pretty v) pretty (recDocMetavar r)
-
-        makeDesc [] = ""
-        makeDesc (desc:_) = ":" <+> pretty desc
-
-        recordEntry es = case makeArg (recDocMetavar r) (recDocShort r) (recDocLong r) of
-          (Just argstr) ->
-            [ makeOption argstr $
+        recordEntry = case recDocOpt r of
+          (Just cliopt) ->
+            makeOption [makeArg cliopt (Just $ recDocMetavar r)] $
                 "Default values for this argument group" :
-                ["    " <> pretty k <+> "::" <+> pretty t | (k,t) <- es]
-            ]
+                ["    " <> pretty k <+> "::" <+> pretty (entryType x) | (k,x) <- recDocEntries r]
           Nothing -> []
 
-        makeEntry :: Key -> Type -> CmdArg -> [MDoc]
-        makeEntry k t (CmdArgOpt r) =
-          case makeArg (argOptDocMetavar r) (argOptDocShort r) (argOptDocLong r) of
-            (Just argstr) -> makeOption argstr (map pretty (argOptDocDesc r))
-            Nothing -> makeOption "???" (map pretty (argOptDocDesc r))
-        makeEntry _ _ r = error $ show r -- makeOption "???" ["!!!"]
+        makeDesc [] = ""
+        makeDesc (x:_) = ":" <+> pretty x
+
+        entryType :: Either ArgFlagDocSet ArgOptDocSet -> Type
+        entryType (Left _) = VarT MBT.bool
+        entryType (Right t) = argOptDocType t
 
 
-subcmdHelpVerbose :: Int -> MDoc -> Type -> CmdDocSet -> MorlocMonad MDoc
+subcmdHelpVerbose :: MDoc -> Type -> CmdDocSet -> MDoc
 subcmdHelpVerbose = subcmdHelpQuiet
 
 
@@ -815,50 +778,29 @@ toOptName varname = "OPT_" <> pretty (MT.map convertChar varname)
       | isAlphaNum c = toUpper c
       | otherwise    = '_'
 
-data VarCase = UserVar | DefaultVar
+data VarCase = UsrVar | DefVar
 
-toVarName :: VarCase -> Maybe Char -> Maybe Text -> MDoc
-toVarName varcase mayShort mayLong = [idoc|cliarg_#{short}_#{long}_#{makeSuffix varcase}|] where
+toVarName :: VarCase -> CliOpt -> MDoc
+toVarName varcase cliopt = [idoc|cliarg_#{short cliopt}_#{long cliopt}_#{makeSuffix varcase}|] where
   convertChar c
     | isAlphaNum c = c
-    | otherwise    = '_'
+    | otherwise = '_'
 
-  short = maybe "" (pretty . convertChar) mayShort
+  short :: CliOpt -> MDoc
+  short (CliOptShort c  ) = pretty (convertChar c)
+  short (CliOptBoth  c _) = pretty (convertChar c)
+  short _ = ""
 
-  long  = maybe "" (pretty . MT.map convertChar) mayLong
+  long :: CliOpt -> MDoc
+  long (CliOptLong   l) = pretty . MT.map convertChar $ l
+  long (CliOptBoth _ l) = pretty . MT.map convertChar $ l
+  long _ = ""
 
-  makeSuffix UserVar = "usr"
-  makeSuffix DefaultVar = "def"
+  makeSuffix UsrVar = "usr"
+  makeSuffix DefVar = "def"
 
-toVarNameCmdArg :: VarCase -> CmdArg -> MDoc
-toVarNameCmdArg _ (CmdArgPos _) = "";
-toVarNameCmdArg _ CmdArgDef = "";
-toVarNameCmdArg v (CmdArgOpt r) = toVarName v (argOptDocShort r) (argOptDocLong r);
-toVarNameCmdArg v (CmdArgGrp r) = toVarName v (recDocShort r) (recDocLong r);
 
-unrollArgs :: Int -> Type -> CmdArg -> MorlocMonad [(Type, ArgOptDocSet)]
-unrollArgs _ t (CmdArgOpt r) = return [(t, r)]
-unrollArgs i t (CmdArgGrp r) = do
-  t' <- evalType i t
-  case t' of
-    (NamT _ _ _ rs) -> do
-      unrolled <- concat <$> zipWithM (unrollArgs i) (map snd rs) (map snd (recDocEntries r))
-      return $ recOpt <> unrolled
-    _ -> error $ "Cannot unroll non-record type"
-  where
-    recOpt = case (recDocShort r, recDocLong r) of
-      (Nothing, Nothing) -> []
-      _ -> [(t, defaultValue
-        { argOptDocDesc = recDocDesc r
-        , argOptDocMetavar = recDocMetavar r
-        , argOptDocUnroll = recDocUnroll r
-        , argOptDocShort = recDocShort r
-        , argOptDocLong = recDocLong r
-        }
-        )]
-unrollArgs _ t r = return []
-
-makeParameters :: Int -> Type -> [CmdArg] -> MorlocMonad
+makeParameters :: [CmdArg] ->
   ( MDoc -- long optional index defintions
   , MDoc -- argument variable definitions (with defaults)
   , MDoc -- long argument declarations
@@ -866,132 +808,145 @@ makeParameters :: Int -> Type -> [CmdArg] -> MorlocMonad
   , MDoc -- switch-case case codes
   , MDoc -- write arguments to shared memory
   )
-makeParameters i (FunT ts _) args = do
-  optArgs <- concat <$> zipWithM (unrollArgs i) ts args
-
-  let longArgs = filter (isJust . argOptDocLong . snd) optArgs
-      shortArgs = filter (isJust . argOptDocShort . snd) optArgs
-      longOnly = filter (\r -> (isJust . argOptDocLong . snd $ r) &&
-                               (isNothing . argOptDocShort . snd $ r)) optArgs
-      allOpts = filter (\r -> (isJust . argOptDocLong . snd $ r) ||
-                              (isJust . argOptDocShort . snd $ r)) optArgs
-      defs = zipWith makeLongDef [0..] (map snd longOnly)
-      vars = map makeVarDef allOpts
-      argDefs = zipWith3 writeArgToSharedMemory [0..] ts args
-
-      longs = map makeLongOption longArgs
-      shorts = map makeShortOption shortArgs
-      cases = map makeCase optArgs
-
-  return $
-    ( vsep defs
-    , vsep vars
-    , vsep longs
-    , hcat shorts
-    , vsep cases
-    , vsep argDefs
+makeParameters args =
+    ( vsep $ makeLongDefs . concat $ [[c] <> maybe [] return cr | (c, _, cr, _) <- cliopts]
+    , vsep [makeVarDef c d | (c, d, _, _) <- cliopts]
+    , vsep . makeLongOptions  . concat $ [[(c, b)] <> maybe [] (\x -> [(x, b)]) cr | (c, _, cr, b) <- cliopts]
+    , hsep . makeShortOptions . concat $ [[(c, b)] <> maybe [] (\x -> [(x, b)]) cr | (c, _, cr, b) <- cliopts]
+    , vsep [makeCases c d cr b | (c, d, cr, b) <- cliopts]
+    , vsep $ zipWith makeArgDefs [0..] args
     )
-makeParameters _ _ _ = return ("", "", "", "", "", "")
 
-makeVarDef :: (Type, ArgOptDocSet) -> MDoc
-makeVarDef (_, r) =
-  let usrVarname = toVarName UserVar (argOptDocShort r) (argOptDocLong r)
-      defVarname = toVarName DefaultVar (argOptDocShort r) (argOptDocLong r)
-      defvalue = maybe "NULL" (dquotes . pretty . escapeString) (argOptDocDefault r)
-  in vsep
-    [ [idoc|char* #{usrVarname} = NULL;|]
-    , [idoc|char* #{defVarname} = #{defvalue};|]
+  where
+
+  cliopts = concatMap findCliOpts args
+
+  findCliOpts :: CmdArg -> [(CliOpt, Maybe Text, Maybe CliOpt, Bool)]
+  findCliOpts (CmdArgPos _) = []
+  findCliOpts (CmdArgOpt r) = [(argOptDocArg r, Just (argOptDocDefault r), Nothing, False)]
+  findCliOpts (CmdArgFlag r) = [(argFlagDocOpt r, Just (argFlagDocDefault r), argFlagDocOptRev r, True)]
+  findCliOpts (CmdArgGrp r) = grparg <> entryArgs
+    where
+    entryArgs = concatMap (either (findCliOpts . CmdArgFlag) (findCliOpts . CmdArgOpt) . snd) (recDocEntries r)
+
+    grparg = case recDocOpt r of
+      (Just cliopt) -> [(cliopt, Nothing, Nothing, False)]
+      Nothing -> []
+
+  makeLongDefs :: [CliOpt] -> [MDoc]
+  makeLongDefs = f 0 where
+    f :: Int -> [CliOpt] -> [MDoc]
+    f _ [] =  []
+    f i (CliOptShort _  : xs) = f i xs
+    f i (CliOptLong   l : xs) = longDef i l : f (i+1) xs
+    f i (CliOptBoth _ l : xs) = longDef i l : f (i+1) xs
+
+    optVal :: Int -> MDoc
+    optVal i = pretty $ 257 + i
+
+    longDef :: Int -> Text -> MDoc
+    longDef i l = [idoc|const int #{toOptName l} = #{optVal i};|]
+
+  makeVarDef :: CliOpt -> Maybe Text -> MDoc
+  makeVarDef cliopt mayDef =
+    let usrVarname = toVarName UsrVar cliopt
+        defVarname = toVarName DefVar cliopt
+        defValue = maybe "NULL" (dquotes . pretty . escapeString) mayDef
+    in vsep
+        [ [idoc|char* #{usrVarname} = NULL;|]
+        , [idoc|char* #{defVarname} = #{defValue};|]
+        ]
+
+  cliOptMaybes :: CliOpt -> (Maybe Char, Maybe Text)
+  cliOptMaybes (CliOptShort c) = (Just c, Nothing)
+  cliOptMaybes (CliOptLong t) = (Nothing, Just t)
+  cliOptMaybes (CliOptBoth c t) = (Just c, Just t)
+
+  makeLongOptions :: [(CliOpt, Bool)] -> [MDoc]
+  makeLongOptions = mapMaybe f where
+    f :: (CliOpt, Bool) -> Maybe MDoc
+    f (c, flag) = case cliOptMaybes c of
+      (_, Nothing) -> Nothing
+      (mayShort, Just long) ->
+        let argType = if flag then "no_argument" else "required_argument"
+            varname = maybe (toOptName long) (squotes . pretty) mayShort
+        in Just [idoc|{"#{pretty long}", #{argType}, 0, #{varname}},|]
+
+  makeShortOptions :: [(CliOpt, Bool)] -> [MDoc]
+  makeShortOptions = mapMaybe f where
+    f :: (CliOpt, Bool) -> Maybe MDoc
+    f (cliopt, flag) = case fst (cliOptMaybes cliopt) of
+      (Just c) ->
+        let argchar = if flag then "" else ":"
+        in Just $ pretty c <> argchar
+      Nothing -> Nothing
+
+  caseIdx :: CliOpt -> MDoc
+  caseIdx (CliOptLong txt) = toOptName txt
+  caseIdx (CliOptShort c  ) = squotes . pretty $ c
+  caseIdx (CliOptBoth  c _) = squotes . pretty $ c
+
+  makeCases :: CliOpt -> Maybe Text -> Maybe CliOpt -> Bool -> MDoc
+  makeCases cliopt _ _ False = vsep
+    [ [idoc|case #{caseIdx cliopt}:|]
+    , [idoc|  #{toVarName UsrVar cliopt} = optarg;|]
+    , [idoc|  break;|]
     ]
+  makeCases cliopt Nothing revCliopt True = makeCases cliopt (Just "false") revCliopt True
+  makeCases cliopt (Just def) mayRev True = vsep $ forCase <> maybe [] revCase mayRev
+    where
+      cliarg = toVarName UsrVar cliopt
+      valFor = dquotes . pretty $ if def == "true" then "false" else "true" :: Text
+      valRev = dquotes . pretty $ if def == "true" then "true"  else "false" :: Text
+      forCase =
+        [ [idoc|case #{caseIdx cliopt}:|]
+        , [idoc|  #{cliarg} = #{valFor};|]
+        , [idoc|  break;|]
+        ]
+      revCase revCliopt =
+        [ [idoc|case #{caseIdx revCliopt}:|]
+        , [idoc|  #{cliarg} = #{valRev};|]
+        , [idoc|  break;|]
+        ]
 
-makeLongDef :: Int -> ArgOptDocSet -> MDoc
-makeLongDef i r = [idoc|const int #{varname} = #{optVal};|]
-  where
-    optVal = pretty $ 257 + i
-    varname = toOptName . fromJust . argOptDocLong $ r
-
-makeLongOption :: (Type, ArgOptDocSet) -> MDoc
-makeLongOption (t, r) = [idoc|{"#{longVar}", #{argType t}, 0, #{varname}},|]
-  where
-    longVar = pretty . fromJust . argOptDocLong $ r
-
-    argType :: Type -> MDoc
-    argType (VarT v)
-      | v == MBT.bool = "no_argument"
-      | otherwise = "required_argument"
-    argType _ = "required_argument"
-
-    varname = maybe (toOptName . fromJust . argOptDocLong $ r) (squotes . pretty) (argOptDocShort r)
-
-makeShortOption :: (Type, ArgOptDocSet) -> MDoc
-makeShortOption (t@(VarT v), r)
-  | v == MBT.bool = extractShort t r
-  | otherwise = (extractShort t r) <> ":"
-makeShortOption (t, r) = extractShort t r <> ":"
-
-extractShort :: Type -> ArgOptDocSet -> MDoc
-extractShort t r = case argOptDocShort r of
-  (Just short) -> pretty short
-  Nothing -> "yolonoshorts" -- error $ "No short option where t=" <> show t <> " and r=" <> show r
-
-makeCase :: (Type, ArgOptDocSet) -> MDoc
-makeCase (t, r) = vsep
-  [ [idoc|case #{caseIdx}:|]
-  , [idoc|  #{varname} = #{value t};|]
-  , [idoc|  break;|]
-  ]
-  where
-    caseIdx = case (argOptDocShort r, argOptDocLong r) of
-      (Just v, _) -> squotes . pretty $ v
-      (_, Just v) -> toOptName v
-      _ -> "BAD"
-
-    value (VarT v)
-      -- if this is a flag, than invert relative to the default
-      | v == MBT.bool = case argOptDocDefault r of
-          (Just "true") -> dquotes "false"
-          _ -> dquotes "true"
-      | otherwise = "optarg"
-    value (VarT v) = "optarg"
-
-    varname = toVarName UserVar (argOptDocShort r) (argOptDocLong r)
-
-writeArgToSharedMemory :: Int -> Type -> CmdArg -> MDoc
-writeArgToSharedMemory i _ (CmdArgOpt r) =
-  let defVarname = toVarName DefaultVar (argOptDocShort r) (argOptDocLong r)
-      usrVarname = toVarName UserVar (argOptDocShort r) (argOptDocLong r)
-  in [idoc|if(#{usrVarname} == NULL){
-  if(#{defVarname} == NULL){
-    args[#{pretty i}] = initialize_positional(NULL);
+  makeArgDefs :: Int -> CmdArg -> MDoc
+  makeArgDefs i (CmdArgOpt r) =
+    let defVarname = toVarName DefVar (argOptDocArg r)
+        usrVarname = toVarName UsrVar (argOptDocArg r)
+    in [idoc|if(#{usrVarname} == NULL){
+    if(#{defVarname} == NULL){
+      args[#{pretty i}] = initialize_positional(NULL);
+    } else {
+      args[#{pretty i}] = initialize_positional(strdup(#{defVarname}));
+    }
   } else {
-    args[#{pretty i}] = initialize_positional(strdup(#{defVarname}));
-  }
-} else {
-  args[#{pretty i}] = initialize_positional(strdup(#{usrVarname}));
-}|]
-writeArgToSharedMemory i t (CmdArgGrp r) = vsep $ [fieldDef] <> fields <> [defFieldDef] <> defFields <> [argSet] <> [""]
-  where
-    size = pretty (length (recDocEntries r))
-    varname = toVarName UserVar (recDocShort r) (recDocLong r)
-    fieldArgName = [idoc|arg_#{pretty i}_fields|]
-    fieldDef = [idoc|char** #{fieldArgName} = (char**)calloc(#{size}, sizeof(char*));|]
-    fields = zipWith (\i v -> [idoc|#{fieldArgName}[#{i}] = #{v} == NULL ? NULL : strdup(#{v});|])
-                     (map pretty ([0..] :: [Int]))
-                     (map (toVarNameCmdArg UserVar . snd) (recDocEntries r))
-    defFieldArgName = [idoc|arg_#{pretty i}_def_fields|]
-    defFieldDef = [idoc|char** #{defFieldArgName} = (char**)calloc(#{size}, sizeof(char*));|]
-    defFields = zipWith (\i v -> [idoc|#{defFieldArgName}[#{i}] = #{v} == NULL? NULL : strdup(#{v});|])
-                     (map pretty ([0..] :: [Int]))
-                     (map (toVarNameCmdArg DefaultVar . snd) (recDocEntries r))
-    argSet = [idoc|args[#{pretty i}] = initialize_unrolled(#{size}, #{varname}, #{fieldArgName}, #{defFieldArgName});|]
-writeArgToSharedMemory i _ (CmdArgPos _) = initPositional i
-writeArgToSharedMemory i _ CmdArgDef = initPositional i
+    args[#{pretty i}] = initialize_positional(strdup(#{usrVarname}));
+  }|]
+  makeArgDefs _ (CmdArgFlag _) = "// flag stub"
+  makeArgDefs i (CmdArgGrp r) = vsep $ [fieldDef] <> fields <> [defFieldDef] <> defFields <> [argSet] <> [""]
+    where
+      size = pretty (length (recDocEntries r))
+      varname = maybe "NULL" (toVarName UsrVar) (recDocOpt r)
+      fieldArgName = [idoc|arg_#{pretty i}_fields|]
+      fieldDef = [idoc|char** #{fieldArgName} = (char**)calloc(#{size}, sizeof(char*));|]
+      fields = zipWith (\idx v -> [idoc|#{fieldArgName}[#{idx}] = #{v} == NULL ? NULL : strdup(#{v});|])
+                       (map pretty ([0..] :: [Int]))
+                       (map (toVarNameEntry UsrVar . snd) (recDocEntries r))
+      defFieldArgName = [idoc|arg_#{pretty i}_def_fields|]
+      defFieldDef = [idoc|char** #{defFieldArgName} = (char**)calloc(#{size}, sizeof(char*));|]
+      defFields = zipWith (\idx v -> [idoc|#{defFieldArgName}[#{idx}] = #{v} == NULL? NULL : strdup(#{v});|])
+                       (map pretty ([0..] :: [Int]))
+                       (map (toVarNameEntry DefVar . snd) (recDocEntries r))
+      argSet = [idoc|args[#{pretty i}] = initialize_unrolled(#{size}, #{varname}, #{fieldArgName}, #{defFieldArgName});|]
 
-initPositional :: Int -> MDoc
-initPositional i =
-  [idoc|if(argv[optind] == NULL){
-  fprintf(stderr, "Error: too few positional arguments\n");
-  clean_exit(EXIT_FAILURE);
-} else {
-  args[#{pretty i}] = initialize_positional(strdup(argv[optind]));
-  optind++;
-}|]
+      toVarNameEntry :: VarCase -> Either ArgFlagDocSet ArgOptDocSet -> MDoc
+      toVarNameEntry v (Left flag) = toVarName v (argFlagDocOpt flag)
+      toVarNameEntry v (Right opt) = toVarName v (argOptDocArg opt)
+  makeArgDefs i (CmdArgPos _) =
+    [idoc|if(argv[optind] == NULL){
+    fprintf(stderr, "Error: too few positional arguments\n");
+    clean_exit(EXIT_FAILURE);
+  } else {
+    args[#{pretty i}] = initialize_positional(strdup(argv[optind]));
+    optind++;
+  }|]

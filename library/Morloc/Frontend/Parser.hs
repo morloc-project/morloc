@@ -276,7 +276,7 @@ pTypedef =   try pTypedefType
 
   pTypedefType :: Parser ExprI
   pTypedefType = do
-    doc <- parseCmdArg
+    doc <- parseArgDocVars |>> ArgDocAlias
     _ <- reserved "type"
     mayLang <- optional (try pLangNamespace)
     (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
@@ -290,10 +290,11 @@ pTypedef =   try pTypedefType
         case (vs, mayT) of
           (_, Just (_, t)) -> exprI (TypE (ExprTypeE Nothing v vs t doc))
           ([], Nothing) -> exprI (TypE (ExprTypeE Nothing v vs (VarU v) doc))
-          (_, Nothing) -> exprI (TypE (ExprTypeE Nothing v vs (AppU (VarU v) (map (either (VarU) id) vs)) CmdArgDef))
+          (_, Nothing) -> exprI (TypE (ExprTypeE Nothing v vs (AppU (VarU v) (map (either (VarU) id) vs)) doc))
 
   pTypedefObjectLegacy :: Parser ExprI
   pTypedefObjectLegacy = do
+    doc <- parseArgDocVars
     o <- pNamType
     mayLang <- optional (try pLangNamespace)
     (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
@@ -305,32 +306,34 @@ pTypedef =   try pTypedefType
       Nothing -> do
         constructor <- freename
         return (constructor, Nothing)
-    entries <- option [] $ braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries o)
+    entries <- option [] (braces (sepBy1 pNamEntryU (symbol ",")))
+                         >>= mapM (secondM (desugarTableEntries o))
 
     -- The vs are the parameters of the object. In C++ they are the required
     -- template parameters (e.g., A and B in Obj<A,B>). I have to maintain them
     -- as an ordered list all the way to code generation.
-    let t = NamU o (TV con) (map (either VarU id) vs) (map (first Key) entries)
-    exprI (TypE (ExprTypeE k v vs t CmdArgDef))
+    let t = NamU o (TV con) (map (either VarU id) vs) (map snd entries)
+        objDoc = ArgDocRec doc [(fieldKey, arg) | (arg, (fieldKey, _)) <- entries]
+    exprI (TypE (ExprTypeE k v vs t objDoc))
 
   pTypedefObject :: Parser ExprI
   pTypedefObject = do
-    recDoc <- parseRecDocSet
+    recDoc <- parseArgDocVars
     o <- pNamType
     (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
     reserved "where"
-    entries <- alignInset ((,) <$> parseCmdArg <*> pNamEntryU) >>=
+    entries <- alignInset pNamEntryU >>=
                (mapM (secondM (desugarTableEntries o)))
-    let docEntries = zip (map (Key . fst . snd) entries) (map fst entries)
-    let grpArg = CmdArgGrp $ recDoc { recDocEntries = docEntries }
-    let t = NamU o v (map (either VarU id) vs) (map (first Key) (map snd entries))
+    let docEntries = [(k, r) | (r, (k, _)) <- entries]
+    let grpArg = ArgDocRec recDoc docEntries
+    let t = NamU o v (map (either VarU id) vs) (map snd entries)
     exprI (TypE (ExprTypeE Nothing v vs t grpArg))
 
   -- TODO: is this really the right place to be doing this?
   desugarTableEntries
     :: NamType
-    -> (Text, TypeU)
-    -> Parser (Text, TypeU)
+    -> (Key, TypeU)
+    -> Parser (Key, TypeU)
   desugarTableEntries NamRecord entry = return entry
   desugarTableEntries NamObject entry = return entry
   desugarTableEntries NamTable (k0, t0) = (,) k0 <$> f t0 where
@@ -413,7 +416,7 @@ pSigE = do
 
 pSignature :: Parser Signature
 pSignature = do
-  doc <- parseCmdDocSet
+  doc <- parseArgDocVars
   label' <- optional pTag
   v <- freenameL
   vs <- many freenameL |>> map TV
@@ -424,7 +427,7 @@ pSignature = do
 
   constraints <- option [] pConstraints
 
-  let cmdDoc = doc {cmdDocArgs = docs}
+  let cmdDoc = ArgDocSig doc (init docs) (last docs)
 
   let t = forallWrap vs t'
       et = EType { etype = t
@@ -457,82 +460,20 @@ pSignature = do
     pWord :: Parser Text
     pWord =  MT.pack <$> lexeme (many1 alphaNumChar)
 
--- A temporary data structure that stores any field from either a positional or
--- optional parameter
-data AnyArg = AnyArg
-  { anyLiteral :: Maybe Bool
-  , anyUnroll :: Maybe Bool
-  , anyDefault :: Maybe Text
-  , anyMetavar :: Maybe Text
-  , anyShort :: Maybe Char
-  , anyLong :: Maybe Text
-  , anyLines :: [Text]
-  }
+parseArgDocVars :: Parser ArgDocVars
+parseArgDocVars = indentFreeTerm $ foldMany defaultValue parseArgDocVar
 
-instance Defaultable AnyArg where
-  defaultValue = AnyArg
-    { anyLiteral = Nothing
-    , anyUnroll = Nothing
-    , anyDefault = Nothing
-    , anyMetavar = Nothing
-    , anyShort = Nothing
-    , anyLong = Nothing
-    , anyLines = []
-    }
-
-parseCmdArg :: Parser CmdArg
-parseCmdArg = option CmdArgDef $ do
-  r <- parseAnyArg
-  case (anyShort r, anyLong r) of
-    (Nothing, Nothing) ->
-      return . CmdArgPos $ ArgPosDocSet
-        { argPosDocDesc = anyLines r
-        , argPosDocMetavar = anyMetavar r
-        , argPosDocLiteral = anyLiteral r
-        , argPosDocUnroll = anyUnroll r
-        }
-    _ ->
-      return . CmdArgOpt $ ArgOptDocSet
-        { argOptDocDesc = anyLines r
-        , argOptDocMetavar = anyMetavar r
-        , argOptDocLiteral = anyLiteral r
-        , argOptDocUnroll = anyUnroll r
-        , argOptDocShort = anyShort r
-        , argOptDocLong = anyLong r
-        , argOptDocDefault = anyDefault r
-        }
-
-parseCmdDocSet :: Parser CmdDocSet
-parseCmdDocSet = indentFreeTerm $ foldMany defaultValue parseCmdDocSetLine
-
-parseRecDocSet :: Parser RecDocSet
-parseRecDocSet = indentFreeTerm $ foldMany defaultValue parseRecDocSetLine
-
-parseAnyArg :: Parser AnyArg
-parseAnyArg = indentFreeTerm $ foldMany1 defaultValue parseAnyArgLine
-
--- parse a top-level function definition (not the entries)
-parseCmdDocSetLine :: CmdDocSet -> Parser CmdDocSet
-parseCmdDocSetLine d
-  =   try (parseWordDocStr "name" |>> (\x -> d { cmdDocName = Just x }))
-  <|> (parseLineDocStr |>> (\x -> d { cmdDocDesc = cmdDocDesc d <> [x] }))
-
--- parse a top-level record definition (not the entries)
-parseRecDocSetLine :: RecDocSet -> Parser RecDocSet
-parseRecDocSetLine d =
-      try (parseWordDocStr "metavar" |>> (\x -> d { recDocMetavar = Just x }))
-  <|> try (parseFlagDocStr "unroll" |>> (\x -> d { recDocUnroll = Just x }))
-  <|> try (parseArgDocStr |>> (\(s, l) -> d { recDocShort = s, recDocLong = l }))
-  <|>     (parseLineDocStr |>> (\x -> d { recDocDesc = recDocDesc d <> [x] }))
-
-parseAnyArgLine :: AnyArg -> Parser AnyArg
-parseAnyArgLine d =
-        try (parseFlagDocStr "literal" |>> (\x -> d { anyLiteral = Just x }))
-    <|> try (parseFlagDocStr "unroll"  |>> (\x -> d { anyUnroll = Just x }))
-    <|> try (parseTextDocStr "default" |>> (\x -> d { anyDefault = Just x }))
-    <|> try (parseWordDocStr "metavar" |>> (\x -> d { anyMetavar = Just x }))
-    <|> try (parseArgDocStr |>> (\(s, l) -> d { anyShort = s, anyLong = l }))
-    <|>     (parseLineDocStr |>> (\x -> d { anyLines = anyLines d <> [x] }))
+parseArgDocVar :: ArgDocVars -> Parser ArgDocVars
+parseArgDocVar d =
+        try (parseWordDocStr "name"    |>> (\x -> d { docName    = Just x }))
+    <|> try (parseFlagDocStr "literal" |>> (\x -> d { docLiteral = Just x }))
+    <|> try (parseFlagDocStr "unroll"  |>> (\x -> d { docUnroll  = Just x }))
+    <|> try (parseTextDocStr "default" |>> (\x -> d { docDefault = Just x }))
+    <|> try (parseWordDocStr "metavar" |>> (\x -> d { docMetavar = Just x }))
+    <|> try (parseArgDocStr  "arg"     |>> (\x -> d { docArg     = Just x }))
+    <|> try (parseArgDocStr  "true"    |>> (\x -> d { docTrue    = Just x }))
+    <|> try (parseArgDocStr  "false"   |>> (\x -> d { docFalse   = Just x }))
+    <|>     (parseLineDocStr |>> (\x -> d { docLines = docLines d <> [x] }))
 
 pSrcE :: Parser [ExprI]
 pSrcE = do
@@ -781,13 +722,14 @@ pTermCon = do
   _ <- optional pTag
   TV <$> stringLiteral
 
-pTypeDoc :: Parser ([CmdArg], TypeU)
+pTypeDoc :: Parser ([ArgDocVars], TypeU)
 pTypeDoc = try pFunUDoc <|> (pType |>> first return)
 
-pType :: Parser (CmdArg, TypeU)
-pType = (,) <$> try parseCmdArg <*> (
+
+pType :: Parser (ArgDocVars, TypeU)
+pType = (,) <$> try parseArgDocVars <*> (
         try pExistential
-    <|> try (pFunUDoc |>> snd) -- discard argument docs (for now)
+    <|> try (pFunUDoc |>> snd) -- discard nested function argument docs (for now)
     <|> try pUniU
     <|> try pAppU
     <|> try parensType
@@ -815,12 +757,13 @@ pTupleU = do
   return $ BT.tupleU (map snd ts)
 
 
-pNamEntryU :: Parser (Text, TypeU)
+pNamEntryU :: Parser (ArgDocVars, (Key, TypeU))
 pNamEntryU = do
+  r <- parseArgDocVars
   n <- freename
   _ <- op "::"
   (_, t) <- pType
-  return (n, t)
+  return (r, (Key n, t))
 
 pExistential :: Parser TypeU
 pExistential = do
@@ -835,14 +778,14 @@ pAppU = do
   where
     pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU
 
-pFunUDoc :: Parser ([CmdArg], TypeU)
+pFunUDoc :: Parser ([ArgDocVars], TypeU)
 pFunUDoc = do
   ts <- sepBy2 pType' (op "->")
   case (init ts, last ts) of
     (inputs, output) -> return $
       (map fst inputs <> [fst output], FunU (map snd inputs) (snd output))
   where
-    pType' = (,) <$> option CmdArgDef parseCmdArg <*> pFunCompatibleType
+    pType' = (,) <$> parseArgDocVars <*> pFunCompatibleType
 
 
 pFunCompatibleType :: Parser TypeU

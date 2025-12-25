@@ -63,8 +63,8 @@ findSources _ = []
 -- find all top-level concrete and general type functions in a module
 findTypedefs
   :: ExprI
-  -> (               Map.Map TVar [([Either TVar TypeU], TypeU, CmdArg, Bool)]
-     , Map.Map Lang (Map.Map TVar [([Either TVar TypeU], TypeU, CmdArg, Bool)])
+  -> (               Map.Map TVar [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
+     , Map.Map Lang (Map.Map TVar [([Either TVar TypeU], TypeU, ArgDoc, Bool)])
      )
 findTypedefs (ExprI _ (TypE (ExprTypeE Nothing v vs t d))) = (Map.singleton v [(vs, t, d, False)], Map.empty)
 findTypedefs (ExprI _ (TypE (ExprTypeE (Just (lang, isTerminal)) v vs t d))) = (Map.empty, Map.singleton lang (Map.singleton v [(vs, t, d, isTerminal)]))
