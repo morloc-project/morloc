@@ -475,6 +475,7 @@ data ArgDocVars = ArgDocVars
   , docArg :: Maybe CliOpt
   , docTrue :: Maybe CliOpt
   , docFalse :: Maybe CliOpt
+  , docReturn :: Maybe Text
   }
   deriving (Show, Ord, Eq)
 
@@ -1064,6 +1065,7 @@ instance Defaultable ArgDocVars where
     , docArg = Nothing
     , docTrue = Nothing
     , docFalse = Nothing
+    , docReturn = Nothing
     }
 
 instance Defaultable PackageMeta where

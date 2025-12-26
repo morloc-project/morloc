@@ -473,6 +473,7 @@ parseArgDocVar d =
     <|> try (parseArgDocStr  "arg"     |>> (\x -> d { docArg     = Just x }))
     <|> try (parseArgDocStr  "true"    |>> (\x -> d { docTrue    = Just x }))
     <|> try (parseArgDocStr  "false"   |>> (\x -> d { docFalse   = Just x }))
+    <|> try (parseTextDocStr "return"  |>> (\x -> d { docReturn  = Just x }))
     <|>     (parseLineDocStr |>> (\x -> d { docLines = docLines d <> [x] }))
 
 pSrcE :: Parser [ExprI]

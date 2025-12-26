@@ -55,7 +55,7 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
     { cmdDocDesc = docLines cmddoc
     , cmdDocName = docName cmddoc
     , cmdDocArgs = cmdargs
-    , cmdDocRet = (t', getDesc retdoc')
+    , cmdDocRet = (t', getReturnDesc retdoc' (docReturn cmddoc))
     }
 processArgDoc i t (ArgDocSig cmddoc [] retdoc) = do
   (t', retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
@@ -63,7 +63,7 @@ processArgDoc i t (ArgDocSig cmddoc [] retdoc) = do
     { cmdDocDesc = docLines cmddoc
     , cmdDocName = docName cmddoc
     , cmdDocArgs = []
-    , cmdDocRet = (t', getDesc retdoc')
+    , cmdDocRet = (t', getReturnDesc retdoc' (docReturn cmddoc))
     }
 processArgDoc _ t (ArgDocAlias r) =
   return $ CmdDocSet
@@ -86,10 +86,11 @@ processArgDoc i t r = do
     _ -> error "Impossible - record type and argument expected"
 
 
-getDesc :: ArgDoc -> [Text]
-getDesc (ArgDocRec r _) = docLines r
-getDesc (ArgDocSig r _ _) = docLines r
-getDesc (ArgDocAlias r) = docLines r
+getReturnDesc :: ArgDoc -> Maybe Text -> [Text]
+getReturnDesc _ (Just ret) = [ret]
+getReturnDesc (ArgDocRec r _) _ = docLines r
+getReturnDesc (ArgDocSig r _ _) _ = docLines r
+getReturnDesc (ArgDocAlias r) _ = docLines r
 
 reduceArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad (Type, ArgDoc)
 reduceArgDoc i t@(VarT v) arg = do
@@ -117,6 +118,7 @@ reduceArgDoc i t@(VarT v) arg = do
     , docArg = docArg r1 <|> docArg r2
     , docTrue = docTrue r1 <|> docTrue r2
     , docFalse = docFalse r1 <|> docFalse r2
+    , docReturn = docReturn r1 <|> docReturn r2
     }
 reduceArgDoc _ t r = return (t, r)
 

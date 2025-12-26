@@ -123,10 +123,14 @@ type Distance = Real
 type Seconds = Real
 
 --' Calculate travel time
+--' return: Number of seconds in the air
 travelTime ::
   --' add five to the result
   --' true: --add-five
   Bool ->
+  --' arg: --nothin
+  --' default: 0
+  Int ->
   WindSpeed ->
   BaseSpeed ->
   Distance ->
