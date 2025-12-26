@@ -123,4 +123,11 @@ type Distance = Real
 type Seconds = Real
 
 --' Calculate travel time
-travelTime :: WindSpeed -> BaseSpeed -> Distance -> Seconds
+travelTime ::
+  --' add five to the result
+  --' true: --add-five
+  Bool ->
+  WindSpeed ->
+  BaseSpeed ->
+  Distance ->
+  Seconds

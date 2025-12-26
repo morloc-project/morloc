@@ -529,7 +529,6 @@ void dispatch_#{sub}(
     char return_schema[] = #{returnSchema};
 
     argument_t** args = (argument_t**)calloc(#{pretty $ length schemas + 1}, sizeof(argument_t*));
-
     #{argInits}
 
     if(argv[optind] != NULL){
@@ -670,9 +669,20 @@ subcmdHelpQuiet cmd t0 docs
         optDoc = if length posDocs == length cmdargs then "" else " [OPTION...]"
         posDoc = if length posDocs == 0 then "" else " " <> hsep posDocs
 
-    desc (CmdDocSet [] _ _ _) = []
-    desc (CmdDocSet (x:[]) _ _ _) = [pretty x]
-    desc (CmdDocSet (x:details) _ _ _) = spaceOut [[pretty x], map pretty details]
+    desc (CmdDocSet descLines _ _ _) = case stripLines descLines of
+      [] -> []
+      (oneLine:[]) -> [pretty oneLine]
+      (oneLine:details) -> case stripLines details of
+        [] -> [pretty oneLine]
+        xs -> spaceOut [[pretty oneLine], map pretty xs]
+
+    stripLines :: [Text] -> [Text]
+    stripLines = reverse . trimLines . reverse . trimLines
+
+    trimLines :: [Text] -> [Text]
+    trimLines [] = []
+    trimLines ("":ts) = trimLines ts
+    trimLines ts = ts
 
     makeArgHelp :: [CmdArg] -> [MDoc]
     makeArgHelp args = spaceOut $ [posArgDocs, optArgDocs, grpArgDocs]
@@ -811,7 +821,7 @@ makeParameters args =
     , vsep . makeLongOptions  . concat $ [[(c, b)] <> maybe [] (\x -> [(x, b)]) cr | (c, _, cr, b) <- cliopts]
     , hsep . makeShortOptions . concat $ [[(c, b)] <> maybe [] (\x -> [(x, b)]) cr | (c, _, cr, b) <- cliopts]
     , vsep [makeCases c d cr b | (c, d, cr, b) <- cliopts]
-    , vsep $ zipWith makeArgDefs [0..] args
+    , align . vsep $ zipWith makeArgDefs [0..] args
     )
 
   where
@@ -920,17 +930,30 @@ makeParameters args =
     let defVarname = toVarName DefVar (argOptDocArg r)
         usrVarname = toVarName UsrVar (argOptDocArg r)
         duplifier = makeDuplifier cmdarg
-    in [idoc|if(#{usrVarname} == NULL){
-    if(#{defVarname} == NULL){
-      args[#{pretty i}] = initialize_positional(NULL);
-    } else {
-      args[#{pretty i}] = initialize_positional(strdup(#{defVarname}));
-    }
-  } else {
-    args[#{pretty i}] = initialize_positional(#{duplifier}(#{usrVarname}));
-  }|]
-  makeArgDefs _ (CmdArgFlag _) = "// flag stub"
-  makeArgDefs i (CmdArgGrp r) = vsep $ [fieldDef] <> fields <> [defFieldDef] <> defFields <> [argSet] <> [""]
+    in align . vsep $
+      [ ""
+      , [idoc|if(#{usrVarname} == NULL){|]
+      , [idoc|    if(#{defVarname} == NULL){|]
+      , [idoc|        args[#{pretty i}] = initialize_positional(NULL);|]
+      , [idoc|    } else {|]
+      , [idoc|        args[#{pretty i}] = initialize_positional(strdup(#{defVarname}));|]
+      , [idoc|    }|]
+      , [idoc|} else {|]
+      , [idoc|    args[#{pretty i}] = initialize_positional(#{duplifier}(#{usrVarname}));|]
+      , [idoc|}|]
+      ]
+  makeArgDefs i (CmdArgFlag r) =
+    let defVarname = toVarName DefVar (argFlagDocOpt r)
+        usrVarname = toVarName UsrVar (argFlagDocOpt r)
+    in align . vsep $
+        [ ""
+        , [idoc|if(#{usrVarname} == NULL) {|]
+        , [idoc|    args[#{pretty i}] = initialize_positional(strdup(#{defVarname}));|]
+        , [idoc|} else {|]
+        , [idoc|    args[#{pretty i}] = initialize_positional(strdup(#{usrVarname}));|]
+        , [idoc|}|]
+        ]
+  makeArgDefs i (CmdArgGrp r) = align . vsep $ [fieldDef] <> fields <> [defFieldDef] <> defFields <> [argSet] <> [""]
     where
       size = pretty (length (recDocEntries r))
       varname = maybe "NULL" (toVarName UsrVar) (recDocOpt r)
@@ -952,10 +975,13 @@ makeParameters args =
       toVarNameEntry v (Right opt) = toVarName v (argOptDocArg opt)
   makeArgDefs i cmdarg@(CmdArgPos _) =
     let duplifier = makeDuplifier cmdarg
-    in [idoc|if(argv[optind] == NULL){
-    fprintf(stderr, "Error: too few positional arguments\n");
-    clean_exit(EXIT_FAILURE);
-  } else {
-    args[#{pretty i}] = initialize_positional(#{duplifier}(argv[optind]));
-    optind++;
-  }|]
+    in align . vsep $
+       [ ""
+       , [idoc|if(argv[optind] == NULL){|]
+       , [idoc|    fprintf(stderr, "Error: too few positional arguments\n");|]
+       , [idoc|    clean_exit(EXIT_FAILURE);|]
+       , [idoc|} else {|]
+       , [idoc|    args[#{pretty i}] = initialize_positional(#{duplifier}(argv[optind]));|]
+       , [idoc|    optind++;|]
+       , [idoc|}|]
+       ]

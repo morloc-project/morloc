@@ -4,8 +4,8 @@ def fooFun(algconf, xs):
 def barFun(sysconf, algconf, yolo, xs):
     return sum(xs) + len(yolo) + 100 * sysconf["numThreads"] + 1000 * algconf["m"]
 
-def travelTime(w,b,d):
-    return w * b * d
+def travelTime(v,w,b,d):
+    return w * b * d + 5 * v
 
 def bif(algconf):
     return str(algconf["removeCaches"])
