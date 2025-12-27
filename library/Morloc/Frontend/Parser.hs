@@ -372,7 +372,7 @@ pTypedef =   try pTypedefType
 pTypedefTerm :: Parser (TVar, [Either TVar TypeU])
 pTypedefTerm = do
   t <- freenameU
-  ts <- many (fmap (Left . TV) freenameL <|> fmap Right (pType |>> snd))
+  ts <- many (fmap (Left . TV) freenameL <|> fmap Right (try pType |>> snd))
   return (TV t, ts)
 
 
