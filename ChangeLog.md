@@ -1,3 +1,7 @@
+0.58.1 [2025-12-28]
+-------------------
+ * fix minor bug in record unrolling
+
 0.58.0 [2025-12-28]
 -------------------
  * add hex, octal, and binary numeric representations

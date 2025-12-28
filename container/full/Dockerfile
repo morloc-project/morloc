@@ -3,7 +3,7 @@ LABEL org.opencontainers.image.description="A morloc container intended for inte
 LABEL org.opencontainers.image.licenses=MIT
 
 FROM docker.io/library/ubuntu:22.04
-COPY --from=ghcr.io/morloc-project/morloc/morloc-tiny:0.57.1 /bin/morloc /bin/morloc
+COPY --from=ghcr.io/morloc-project/morloc/morloc-tiny:0.58.1 /bin/morloc /bin/morloc
 
 WORKDIR $HOME
 
