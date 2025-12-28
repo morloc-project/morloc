@@ -295,7 +295,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0 where
     | otherwise = case Map.lookup v cs of
         -- handle both monomorphic terms and polymorphic typeclass terms
         (Just (sigIdx, _)) ->  updateSigLinks v termIdx sigIdx
-        Nothing -> error $ "This should be unreachable: v=" <> show (unEVar v) <> " not found"
+        Nothing -> MM.throwError . ImportExportError m0 $ "Undefined term: " <> unEVar v
 
   linkLocal _ _ cs (ExprI _ (ExpE (ExportMany (Set.toList -> ss)))) =
     mapM_ linkExp [(v, termIdx, Map.lookup v cs) | (termIdx, TermSymbol v) <- ss]
