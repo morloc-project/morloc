@@ -1,16 +1,11 @@
-0.59.0 [2025-12-xx]
- [ ] slicer patterns
- [ ] filter pattern syntax
- [ ] pattern commands for voidstar exploration
- [ ] infix operators
- [ ] pure functions (arithmetic, conditionals, map, fold, voidstar functions)
- [ ] debug options and logging of failing inputs
-
-0.58.0 [2025-11-xx]
+0.58.0 [2025-12-28]
+-------------------
  * add hex, octal, and binary numeric representations
  * new record syntax
- [ ] record syntax docstrings
- [ ] records to argument option sets
+ * generate CLI from docstrings
+     * resolve records into groups of arguments
+     * allow literal strings without the extra JSON quoting
+ * change to Apache-2.0
 
 0.57.1 [2025-11-12]
 -------------------
