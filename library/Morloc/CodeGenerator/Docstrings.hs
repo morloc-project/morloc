@@ -133,7 +133,7 @@ makeCmdArg _ (ArgDocSig _ _ _) = MM.throwError . DocStrError $ "Illegal function
 resolveArgDocVars :: [(Key, (Type, ArgDocVars))] -> Type -> ArgDocVars -> MorlocMonad CmdArg
 resolveArgDocVars rs t r
   | docUnroll r == Just False = resolvePos t r |>> CmdArgPos
-  | length rs > 0 = resolveGrp t r rs
+  | length rs > 0 && docUnroll r == Just True = resolveGrp t r rs
   | t == VarT MBT.bool = resolveFlagCmdArg r
   | isJust (docArg r) = resolveOpt t r |>> CmdArgOpt
   | otherwise = resolvePos t r |>> CmdArgPos
