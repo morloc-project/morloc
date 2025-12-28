@@ -8,8 +8,7 @@ Module      : Module
 Description : Morloc module imports and paths
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
-Maintainer  : zbwrnz@gmail.com
-Stability   : experimental
+Maintainer  : z@morloc.io
 
 All information about morloc module structure should be defined here.
  * define package YAML metadata

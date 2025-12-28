@@ -5,8 +5,7 @@ Module      : Morloc.Monad
 Description : A great big stack of monads
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
-Maintainer  : zbwrnz@gmail.com
-Stability   : experimental
+Maintainer  : z@morloc.io
 
 MorlocMonad is a monad stack that is passed throughout the morloc codebase.
 Most functions that raise errors, perform IO, or access global configuration

@@ -9,8 +9,7 @@ Module      : Morloc.CodeGenerator.Namespace
 Description : All code generator types and datastructures
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
-Maintainer  : zbwrnz@gmail.com
-Stability   : experimental
+Maintainer  : z@morloc.io
 -}
 
 module Morloc.CodeGenerator.Namespace

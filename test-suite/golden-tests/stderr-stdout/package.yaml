@@ -6,7 +6,7 @@ description: test
 category: test
 license: MIT
 author: "Zebulun Arendsee"
-maintainer: "zbwrnz@gmail.com"
+maintainer: "z@morloc.io"
 github: https://github.com/morloc-lib/math
 bug-reports: "/dev/null"
 dependencies:

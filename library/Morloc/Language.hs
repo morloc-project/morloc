@@ -5,8 +5,7 @@ Module      : Language
 Description : Handling for specific languages
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
-Maintainer  : zbwrnz@gmail.com
-Stability   : experimental
+Maintainer  : z@morloc.io
 
 The purpose of this module currently is to 1) unify language naming conventions
 and 2) provide defaults for prioritizing languages.  This module should serve

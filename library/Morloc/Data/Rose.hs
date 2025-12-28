@@ -3,8 +3,7 @@ Module      : Morloc.Data.Rose
 Description : The Rose tree data structure used for scoping in the parser
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
-Maintainer  : zbwrnz@gmail.com
-Stability   : experimental
+Maintainer  : z@morloc.io
 -}
 
 module Morloc.Data.Rose

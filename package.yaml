@@ -7,7 +7,7 @@ category:         Language, Compiler, Code Generation
 license:          Apache-2.0
 license-file:     LICENSE
 author:           "Zebulun Arendsee" 
-maintainer:       "zbwrnz@gmail.com"
+maintainer:       "z@morloc.io"
 github:           "morloc-project/morloc"
 bug-reports:      https://github.com/morloc-project/morloc/issues
 copyright:        "2026 Zebulun Arendsee"

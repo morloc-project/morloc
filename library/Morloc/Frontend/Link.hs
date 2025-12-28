@@ -7,7 +7,6 @@ Description : Transfer all terms, types, typeclasses and sources to state
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
-Stability   : experimental
 -}
 
 module Morloc.Frontend.Link (link) where

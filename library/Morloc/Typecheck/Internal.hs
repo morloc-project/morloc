@@ -5,8 +5,7 @@ Module      : Morloc.Typecheck.Internal
 Description : Functions for type checking and type manipulation
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
-Maintainer  : zbwrnz@gmail.com
-Stability   : experimental
+Maintainer  : z@morloc.io
 
 This module exports any typechecking machinery that can be shared between the
 general typechecker in the frontend and the language specific typechecker(s) of

@@ -3,8 +3,7 @@ Module      : Morloc.Data.GMap
 Description : A general map datatype (non-injective and non-surjective)
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
-Maintainer  : zbwrnz@gmail.com
-Stability   : experimental
+Maintainer  : z@morloc.io
 -}
 
 module Morloc.Data.GMap

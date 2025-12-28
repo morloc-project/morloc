@@ -5,8 +5,7 @@ Module      : Morloc.Frontend.Merge
 Description : Merge various things
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
-Maintainer  : zbwrnz@gmail.com
-Stability   : experimental
+Maintainer  : z@morloc.io
 
 Since morloc allows co-existence of many different implementations, the ever
 new definition needs to be merged in with all the pre-existing ones. Further,

@@ -5,8 +5,7 @@ Module      : Morloc.Internal
 Description : Internal utility functions
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
-Maintainer  : zbwrnz@gmail.com
-Stability   : experimental
+Maintainer  : z@morloc.io
 
 This module serves as a proto-prelude. Eventually I will probably want to
 abandon the default prelude and create my own. But not just yet.
