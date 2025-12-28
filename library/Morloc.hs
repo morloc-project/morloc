@@ -1,3 +1,12 @@
+{-|
+Module      : Morloc
+Description : Top-level compiler layout
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+-}
+
 module Morloc
   ( writeProgram
   , typecheck
@@ -8,6 +17,7 @@ import Morloc.Namespace
 
 import qualified Morloc.Frontend.API as F
 import Morloc.Frontend.Restructure (restructure)
+import Morloc.CodeGenerator.Docstrings (processDocstrings)
 import Morloc.CodeGenerator.LambdaEval (applyLambdas)
 import Morloc.CodeGenerator.Generate (generate)
 import Morloc.CodeGenerator.Realize (realityCheck)
@@ -58,6 +68,8 @@ writeProgram path code
   = typecheck path code
   -- evaluate all applied lambdas in rasts and gasts
   >>= bimapM (mapM applyLambdas) (mapM applyLambdas)
+  -- process docstrings to determine how to build CLI
+  >>= bimapM (mapM processDocstrings) (mapM processDocstrings)
   -- prepare scripts
   >>= uncurry generate
   -- (Script, [Script]) -> IO ()

@@ -1,0 +1,137 @@
+-- desc: A module for doing foo
+-- author: Weena
+-- email: weena@nowhere.com
+-- github: ...
+-- bugs: ...
+-- website: ...
+-- maintainer: ...
+--
+-- Here are some details
+-- that span several lines
+module foobar (fooFun, barFun, baz, travelTime, bif)
+
+import root-py
+
+--' System configuration
+--' metavar: SYS_CONFIG
+--' arg: --sys-config
+record SysConfig where
+  --' tmp directory
+  --' arg: --tmp-dir
+  --' metavar: FILE
+  --' default: "/tmp"
+  --' literal: true
+  tmpDir :: Str
+
+  --' number of threads to use
+  --' arg: -t/--threads
+  --' metavar: INT
+  --' default: 1
+  numThreads :: Int
+
+  --' clean out caches before running?
+  --' true:  --clean
+  --' false: --no-clean
+  --' default: false
+  removeCaches :: Bool
+
+
+--' Algorithm configuration
+--' metavar: ALG_CONFIG
+--' arg: --alg-config
+record AlgConfig where
+  --' some hyper parameter
+  --' arg: -m
+  --' default: 0
+  m :: Int
+
+  --' some other hyper parameter
+  --' arg: -n/--nosy
+  --' default: 0
+  n :: Int
+
+record Py => SysConfig = "dict"
+record Py => AlgConfig = "dict"
+
+bif :: SysConfig -> Str
+
+--' Do some foo stuff
+--'
+--' Lalala more info
+--'
+--' name: foo
+fooFun ::
+    --' unroll: true
+    --' metavar: CONFIG
+    AlgConfig ->
+    --' large vector of integers
+    --' metavar: DATA
+    [Int] ->
+    --' the final metric thingy we wanted
+    --' metavar: RESULT
+    Int
+
+--' Do some bar stuff
+--'
+--' details details details
+--' more details details
+--'
+--' name: bar
+barFun ::
+    --' unroll: true
+    --' metavar: SYS_CONFIG
+    SysConfig ->
+    --' unroll: true
+    --' metavar: ALG_CONFIG
+    AlgConfig ->
+    --' the lone parameters
+    --' arg: -y/--yolo
+    --' literal: true
+    --' default: "yolo"
+    Str ->
+    --' larger vector of integers
+    --' metavar: DATA
+    [Int] ->
+    --' the final metric thingy we wanted
+    --' metavar: RESULT
+    Int
+
+source Py from "foo.py" ("fooFun", "barFun", "travelTime", "bif")
+
+--' baz is the dope
+baz ::
+  --' this is the
+  --' literal: true
+  Str ->
+  --' thing i like
+  [Str]
+baz x = [x,x]
+
+
+--' Speed of wind [m/s]
+--' arg: -w/--wind-speed
+--' default: 0
+type WindSpeed = Real
+
+--' Speed under ideal conditions on flat surface [m/s]
+type BaseSpeed = Real
+
+--' Final distance traveled in meters
+type Distance = Real
+
+--' Time in seconds
+type Seconds = Real
+
+--' Calculate travel time
+--' return: Number of seconds in the air
+travelTime ::
+  --' add five to the result
+  --' true: --add-five
+  Bool ->
+  --' arg: --nothin
+  --' default: 0
+  Int ->
+  WindSpeed ->
+  BaseSpeed ->
+  Distance ->
+  Seconds

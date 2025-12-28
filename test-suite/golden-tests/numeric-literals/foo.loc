@@ -1,0 +1,7 @@
+module main (test)
+
+test = (testInts, testFloats)
+
+testInts = [-42, 42, 0x2a, 0X2a, 0o755, 0O755, 0b0001, 0B0001]
+
+testFloats = [4.2, 4.2E5, 4.2e-2]

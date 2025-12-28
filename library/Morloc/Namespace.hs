@@ -3,8 +3,8 @@
 {-|
 Module      : Morloc.Namespace
 Description : All types and datastructures
-Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
@@ -80,6 +80,11 @@ module Morloc.Namespace
   , EType(..)
   , unresolvedType2type
   , Source(..)
+  -- * Docstring related types
+  , CliOpt(..)
+  , ArgDoc(..)
+  , ArgDocVars(..)
+  , ExprTypeE(..)
   -- * Typechecking
   , Gamma(..)
   , GammaIndex(..)
@@ -211,6 +216,7 @@ type DAG key edge node = Map key (node, [(key, edge)])
 type Scope = Map TVar
   [( [Either TVar TypeU]  -- type parameters (generic for left, specific for right)
    , TypeU
+   , ArgDoc
    , Bool -- True if this is a "terminal" type (won't be reduced further)
           --  * This is determined by the parser (see pTypedef)
           --  * A type is terminal it is NOT general AND it
@@ -450,20 +456,70 @@ data Pattern
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)
 
+-- a CLI option that takes an argument
+data CliOpt
+  = CliOptShort Char
+  | CliOptLong Text
+  | CliOptBoth Char Text
+  deriving (Show, Ord, Eq)
+
+-- A temporary data structure that stores any field from either a positional or
+-- optional parameter
+data ArgDocVars = ArgDocVars
+  { docLines :: [Text]
+  , docName :: Maybe Text
+  , docLiteral :: Maybe Bool
+  , docUnroll :: Maybe Bool
+  , docDefault :: Maybe Text
+  , docMetavar :: Maybe Text
+  , docArg :: Maybe CliOpt
+  , docTrue :: Maybe CliOpt
+  , docFalse :: Maybe CliOpt
+  , docReturn :: Maybe Text
+  }
+  deriving (Show, Ord, Eq)
+
+data ArgDoc
+  = ArgDocRec ArgDocVars [(Key, ArgDocVars)]
+    -- ^ docstring for a record declaration
+  | ArgDocSig ArgDocVars   -- leading docstrings
+              [ArgDocVars] -- argument docstrings
+              ArgDocVars   -- return docstrings
+    -- ^ docstrings for a function signature
+  | ArgDocAlias ArgDocVars
+    -- ^ type alias docstrings
+    -- example:
+    --   --' distance in meters
+    --   --' arg: -d/--distance
+    --   --' type Distance = Real
+    -- The right hand type does not need an annotation
+  deriving (Show, Ord, Eq)
+
+-- Wraps all inforamtion stored in a type definition
+-- Some of this data will be transferred to Morloc monad state
+data ExprTypeE = ExprTypeE
+  { exprTypeConcreteForm :: Maybe (Lang, Bool)
+  -- ^ the language:
+  --   If Nothing, then general
+  --   If Just, then the Bool specifies whether the definition is terminal
+  , exprTypeName :: TVar
+  -- ^ main type name
+  , exprTypeParams :: [Either TVar TypeU]
+  -- ^ parameters - these may be generic (TVar) or specific (TypeU)
+  , exprTypeType :: TypeU
+  -- ^ type
+  , exprTypeDoc :: ArgDoc
+  -- ^ docstring data for the full type
+  }
+  deriving (Show, Ord, Eq)
+
 -- | Terms, see Dunfield Figure 1
 data Expr
   = ModE MVar [ExprI]
   -- ^ the toplevel expression in a module
   | ClsE (Typeclass Signature)
   | IstE ClassName [TypeU] [ExprI]
-  | TypE (Maybe (Lang, Bool)) TVar [Either TVar TypeU] TypeU
-  -- ^ a type definition
-  --   1. the language:
-  --      If Nothing, then general
-  --      If Just, then the Bool specifies whether the definition is terminal
-  --   2. type name
-  --   3. parameters - these may be generic (TVar) or specific (TypeU)
-  --   4. type
+  | TypE ExprTypeE
   | ImpE Import
   -- ^ a morloc module import
   | ExpE Export
@@ -786,8 +842,7 @@ data EType =
     { etype :: TypeU
     , eprop :: Set.Set Property
     , econs :: Set.Set Constraint
-    , edocs :: Maybe [[Text]] -- Docstrings for each positional argument in a function
-    , sigDocs :: [Text] -- Docstrings for the signature
+    , edocs :: ArgDoc -- Docstrings for the signature
     }
   deriving (Show, Eq, Ord)
 
@@ -844,6 +899,8 @@ data MorlocError
   | MutuallyRecursiveTypeAlias [Text]
   | BadTypeAliasParameters TVar Int Int
   | ConflictingTypeAliases TypeU TypeU
+  -- | Raise for bad docstrings
+  | DocStrError Text
   -- | Problems with the directed acyclic graph datastructures
   | DagMissingKey Text
   -- | Raised when a branch is reached that should not be possible
@@ -995,6 +1052,20 @@ instance Defaultable ModuleConfig where
   defaultValue = ModuleConfig
     { moduleConfigDefaultGroup = Nothing
     , moduleConfigLabeledGroups = Map.empty
+    }
+
+instance Defaultable ArgDocVars where
+  defaultValue = ArgDocVars
+    { docLines = []
+    , docName = Nothing
+    , docLiteral = Nothing
+    , docUnroll = Nothing
+    , docDefault = Nothing
+    , docMetavar = Nothing
+    , docArg = Nothing
+    , docTrue = Nothing
+    , docFalse = Nothing
+    , docReturn = Nothing
     }
 
 instance Defaultable PackageMeta where
@@ -1326,7 +1397,7 @@ instance Pretty TypeU where
                       (vsep [pretty k <+> "::" <+> f True x | (k, x) <- rs])
 
 instance Pretty EType where
-  pretty (EType t (Set.toList -> ps) (Set.toList -> cs) _ _) = case (ps, cs) of
+  pretty (EType t (Set.toList -> ps) (Set.toList -> cs) _) = case (ps, cs) of
     ([], []) -> pretty t
     _ -> parens (psStr ps <> pretty t <> csStr cs)
     where
@@ -1453,7 +1524,7 @@ instance Pretty Expr where
   pretty (ModE v es) = align . vsep $ ("module" <+> pretty v) : map pretty es
   pretty (ClsE (Typeclass cls vs sigs)) = "class" <+> pretty cls <+> hsep (map pretty vs) <> (align . vsep . map pretty) sigs
   pretty (IstE cls ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
-  pretty (TypE lang v vs t)
+  pretty (TypE (ExprTypeE lang v vs t _))
     = "type" <+> pretty lang <> "@" <> pretty v
     <+> sep (map (either pretty (parens . pretty)) vs) <+> "=" <+> pretty t
   pretty (ImpE (Import m Nothing _ _)) = "import" <+> pretty m
@@ -1603,6 +1674,7 @@ instance Pretty MorlocError where
   pretty ConflictingSignatures = "ConflictingSignatures: currently a given term can have only one type per language"
   pretty CompositionsMustBeGeneral = "CompositionsMustBeGeneral"
   pretty IllegalConcreteAnnotation = "IllegalConcreteAnnotation"
+  pretty (DocStrError msg) = "Bad DocString: " <> pretty msg
   pretty (DagMissingKey msg) = "DagMissingKey: " <> pretty msg
   pretty TooManyRealizations = "TooManyRealizations"
   pretty (CannotSynthesizeConcreteType m src t [])

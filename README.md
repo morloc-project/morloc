@@ -5,9 +5,9 @@
   <a href="https://github.com/morloc-project/morloc/releases">
     <img src="https://img.shields.io/github/release/morloc-project/morloc.svg?label=current+release" alt="github release">
   </a>
-  <a href="https://www.gnu.org/licenses/gpl-3.0">
-    <img src="https://img.shields.io/badge/License-GPL%20v3-blue.svg" alt="license: GPL v3">
-  </a>
+  <a href="https://www.apache.org/licenses/LICENSE-2.0">
+      <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="license: Apache 2.0">
+</a>
 </p>
 
 <p align="center">

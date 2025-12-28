@@ -4,8 +4,8 @@
 {-|
 Module      : Morloc.CodeGenerator.Generate
 Description : Translate AST forests into target language source code
-Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
@@ -35,8 +35,8 @@ import qualified Morloc.CodeGenerator.Serial as Serial
 
 -- | Translate typed, abstract syntax forests into compilable code
 generate
-  :: [AnnoS (Indexed Type) One ()]
-  -> [AnnoS (Indexed Type) One (Indexed Lang)]
+  :: [(AnnoS (Indexed Type) One (), CmdDocSet)]
+  -> [(AnnoS (Indexed Type) One (Indexed Lang), CmdDocSet)]
   -> MorlocMonad (Script, [Script])
   -- ^ the nexus code and the source code for each language pool
 generate gASTs rASTs = do
@@ -51,15 +51,15 @@ generate gASTs rASTs = do
   MM.startCounter
 
   -- for each language, collect all functions into one "pool"
-  pools <- generatePools rASTs >>= mapM (uncurry encode)
+  pools <- generatePools (map fst rASTs) >>= mapM (uncurry encode)
 
   return (nexus, pools)
 
 -- Prep the data needed for each subcommand in the nexus
-makeFData :: AnnoS (Indexed Type) One (Indexed Lang) -> MorlocMonad (Type, Int, Lang, [Socket])
-makeFData e@(AnnoS (Idx i t) (Idx _ lang) _) = do
+makeFData :: (AnnoS (Indexed Type) One (Indexed Lang), CmdDocSet) -> MorlocMonad (Type, Int, Lang, CmdDocSet, [Socket])
+makeFData (e@(AnnoS (Idx i t) (Idx _ lang) _), d) = do
   sockets <- findSockets e
-  return (t, i, lang, sockets)
+  return (t, i, lang, d, sockets)
 
 findSockets :: AnnoS e One (Indexed Lang) -> MorlocMonad [Socket]
 findSockets rAST = do

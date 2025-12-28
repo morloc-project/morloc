@@ -1,8 +1,8 @@
 {-|
 Module      : Morloc.Frontend.AST
 Description : Functions for parsing the Expr abstract syntax trees
-Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
@@ -63,11 +63,11 @@ findSources _ = []
 -- find all top-level concrete and general type functions in a module
 findTypedefs
   :: ExprI
-  -> (               Map.Map TVar [([Either TVar TypeU], TypeU, Bool)]
-     , Map.Map Lang (Map.Map TVar [([Either TVar TypeU], TypeU, Bool)])
+  -> (               Map.Map TVar [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
+     , Map.Map Lang (Map.Map TVar [([Either TVar TypeU], TypeU, ArgDoc, Bool)])
      )
-findTypedefs (ExprI _ (TypE Nothing v vs t)) = (Map.singleton v [(vs, t, False)], Map.empty)
-findTypedefs (ExprI _ (TypE (Just (lang, isTerminal)) v vs t)) = (Map.empty, Map.singleton lang (Map.singleton v [(vs, t, isTerminal)]))
+findTypedefs (ExprI _ (TypE (ExprTypeE Nothing v vs t d))) = (Map.singleton v [(vs, t, d, False)], Map.empty)
+findTypedefs (ExprI _ (TypE (ExprTypeE (Just (lang, isTerminal)) v vs t d))) = (Map.empty, Map.singleton lang (Map.singleton v [(vs, t, d, isTerminal)]))
 findTypedefs (ExprI _ (ModE _ es)) = foldl combine (Map.empty, Map.empty) (map findTypedefs es) where
   combine (g1, c1) (g2, c2)
     = ( Map.unionWith (<>) g1 g2
@@ -79,7 +79,7 @@ findSignatureTypeTerms :: ExprI -> [TVar]
 findSignatureTypeTerms = unique . f where
   f :: ExprI -> [TVar]
   f (ExprI _ (ModE _ es)) = concatMap f es
-  f (ExprI _ (SigE (Signature _ _ (EType t _ _ _ _)))) = findTypeTerms t
+  f (ExprI _ (SigE (Signature _ _ (EType t _ _ _)))) = findTypeTerms t
   f (ExprI _ (AssE _ _ es)) = concatMap f es
   f _ = []
 

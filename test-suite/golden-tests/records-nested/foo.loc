@@ -7,19 +7,19 @@ import root-r
 import root-py
 import root-cpp
 
-record Foo = Foo
-  { bars :: [Bar]
-  , things :: [Str]
-  , size :: Int
-  }
+record Foo where
+  bars :: [Bar]
+  things :: [Str]
+  size :: Int
+
 record Cpp => Foo = "foo_t"
 record Py  => Foo = "dict"
 record R   => Foo = "list"
 
-record Bar = Bar
-  { things :: [Str] -- note that record names CAN be reused (not like in Haskell)
-  , size :: Int
-  }
+record Bar where
+  things :: [Str] -- note that record names CAN be reused (not like in Haskell)
+  size :: Int
+
 record Cpp => Bar = "bar_t"
 record Py  => Bar = "dict"
 record R   => Bar = "list"

@@ -46,7 +46,7 @@ bool shfree_cpp(absptr_t ptr){
 }
 
 
-Schema* parse_schema_cpp(const char** schema_ptr){
+Schema* parse_schema_cpp(const char* schema_ptr){
     char* errmsg = NULL;
     Schema* schema = parse_schema(schema_ptr, &errmsg);
     if(errmsg != NULL){
@@ -606,7 +606,7 @@ Tuple fromTupleAnythingHelper(
 template<typename T>
 std::vector<char> mpk_pack(const T& data, const std::string& schema_str) {
     const char* schema_ptr = schema_str.c_str();
-    Schema* schema = parse_schema_cpp(&schema_ptr);
+    Schema* schema = parse_schema_cpp(schema_ptr);
 
     // Create Anything* from schema and data
     void* voidstar = toAnything(schema, data);
@@ -626,7 +626,7 @@ template<typename T>
 T mpk_unpack(const std::vector<char>& packed_data, const std::string& schema_str) {
     char* errmsg = NULL;
     const char* schema_ptr = schema_str.c_str();
-    Schema* schema = parse_schema_cpp(&schema_ptr);
+    Schema* schema = parse_schema_cpp(schema_ptr);
 
     void* voidstar = nullptr;
     int unpack_result = unpack_with_schema_cpp(packed_data.data(), packed_data.size(), schema, &voidstar);

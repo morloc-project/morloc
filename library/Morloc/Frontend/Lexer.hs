@@ -4,8 +4,8 @@
 {-|
 Module      : Morloc.Frontend.Lexer
 Description : Lexing functions used in the parser Morloc
-Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
@@ -14,14 +14,14 @@ module Morloc.Frontend.Lexer
   ( Parser
   , ParserState(..)
   , align
+  , foldMany
+  , indentFreeTerm
   , alignInset
   , angles
   , appendGenerics
   , braces
   , brackets
   , comments
-  , preDoc
-  , postDoc
   , emptyState
   , lexeme
   , many1
@@ -49,6 +49,12 @@ module Morloc.Frontend.Lexer
   , pLang
   , exprId
   , exprI
+  -- * docstring parsers
+  , parseArgDocStr
+  , parseFlagDocStr
+  , parseLineDocStr
+  , parseTextDocStr
+  , parseWordDocStr
   ) where
 
 import Data.Void (Void)
@@ -74,6 +80,7 @@ data ParserState = ParserState {
                             -- you should reset the field before parsing a new type
   , stateMinPos :: Pos
   , stateAccepting :: Bool
+  , stateIgnoreAlignment :: Bool
   , stateModuleConfig :: ModuleConfig
 } deriving(Show)
 
@@ -85,6 +92,7 @@ emptyState = ParserState {
   , stateGenerics = []
   , stateMinPos = mkPos 1
   , stateAccepting = False
+  , stateIgnoreAlignment = False
   , stateModuleConfig = defaultValue
 }
 
@@ -104,23 +112,39 @@ setMinPos = do
   level <- L.indentLevel
   CMS.put (s { stateMinPos = level })
 
--- | Require elements all start on the same line as the first element. At least
--- one expression must match.
-align :: Parser a -> Parser [a]
-align p = do
+-- | A general function for parsing aligned things
+alignGen :: Bool -> (Parser () -> Parser a) -> Parser a
+alignGen flexibleStart p = do
   s <- CMS.get
   let minPos0 = stateMinPos s
       accept0 = stateAccepting s
-  curPos <- L.indentLevel
-  xs <- many1 (resetPos curPos True >> p)
+
+  minPos <- case flexibleStart of
+    True -> L.indentLevel
+    False -> return minPos0
+
+  x <- p (resetPos minPos True)
+
   -- put everything back the way it was
   resetPos minPos0 accept0
-  return xs
+  return x
   where
     resetPos :: Pos -> Bool -> Parser ()
     resetPos i r = do
       s' <- CMS.get
       CMS.put (s' {stateMinPos = i, stateAccepting = r})
+
+-- | Map over one or more aligned elements
+align :: Parser a -> Parser [a]
+align p = alignGen True (\reset -> many1 (reset >> try p))
+
+-- | Fold over 0 or more elements
+foldMany :: a -> (a -> Parser a) -> Parser a
+foldMany x p = do
+  mayX <- optional (p x)
+  case mayX of
+    (Just x') -> foldMany x' p
+    Nothing -> return x
 
 alignInset :: Parser a -> Parser [a]
 alignInset p = isInset >> align p
@@ -143,23 +167,43 @@ lexemeBase = L.lexeme sc
 lexeme :: Parser a -> Parser a
 lexeme p = do
   minPos <- CMS.gets stateMinPos
-  accepting <- CMS.gets stateAccepting
   s <- CMS.get
   curPos <- L.indentLevel
-  if accepting
-    then
-      if curPos == minPos
+
+  -- if indent doesn't matter at for this parse
+  if stateIgnoreAlignment s
+    -- then just handle terminal whitespace
+    then lexemeBase p
+    else
+      -- if we are awaiting exactly aligned input
+      if stateAccepting s
+      then
+        -- if we are exactly aligned
+        if curPos == minPos
         then
           CMS.put (s { stateAccepting = False }) >> lexemeBase p
+        -- otherwise die
         else
           L.incorrectIndent EQ minPos curPos
-    else
-      if minPos < curPos
+      -- if we are not waiting for aligned input
+      else
+        -- we are indented further than
+        if minPos < curPos
         then
           lexemeBase p
+        -- otherwise die
         else
           L.incorrectIndent LT minPos curPos
 
+indentFreeTerm :: Parser a -> Parser a
+indentFreeTerm p = do
+  s <- CMS.get
+  CMS.put (s { stateIgnoreAlignment = True })
+  xEither <- observing p
+  CMS.put s
+  case xEither of
+    (Left _) -> failure Nothing Set.empty
+    (Right x) -> return x
 
 resetGenerics :: Parser ()
 resetGenerics = do
@@ -200,41 +244,101 @@ comments = try lineComment
     _ <- takeWhileP Nothing (/= '\n')
     return ()
 
+docstr :: Parser ()
+docstr = do
+  _ <- string "--'"
+  _ <- hspace
+  return ()
 
-preDoc :: Parser Text
-preDoc = do
-    _ <- string "--'"
-    docstr <- takeWhileP Nothing (/= '\n')
-    _ <- sc
-    return docstr
+parseFlagDocStr :: Text -> Parser Bool
+parseFlagDocStr flag = lexeme $ do
+  _ <- docstr
+  _ <- string (flag <> ":")
+  _ <- hspace
+  value <- parseTrue <|> parseFalse
+  return value
+  where
+    parseTrue :: Parser Bool
+    parseTrue = do
+      string "true"
+      return True
 
-postDoc :: Parser Text
-postDoc = do
-    _ <- string "--^"
-    docstr <- takeWhileP Nothing (/= '\n')
-    _ <- sc
-    return docstr
+    parseFalse :: Parser Bool
+    parseFalse = do
+      string "false"
+      return False
 
+parseTextDocStr :: Text -> Parser Text
+parseTextDocStr flag = lexeme $ do
+  _ <- docstr
+  string (flag <> ":")
+  _ <- hspace
+  value <- takeWhileP Nothing (/= '\n')
+  return value
+
+parseWordDocStr :: Text -> Parser Text
+parseWordDocStr flag = lexeme $ do
+  _ <- docstr
+  string (flag <> ":")
+  _ <- hspace
+  value <- many1 (alphaNumChar <|> char '-' <|> char '_')
+  return $ MT.pack value
+
+parseLineDocStr :: Parser Text
+parseLineDocStr = lexeme $ do
+  _ <- docstr
+  text <- takeWhileP Nothing (/= '\n')
+  return text
+
+parseArgDocStr :: Text -> Parser CliOpt
+parseArgDocStr flag = lexeme $ do
+  _ <- docstr
+  string (flag <> ":")
+  _ <- hspace
+  mayShort <- optional (try parseShortDocStr)
+  case mayShort of
+    (Just short) -> do
+      mayLong <- optional (char '/' >> parseLongDocStr)
+      case mayLong of
+        (Just long) -> return $ CliOptBoth short long
+        Nothing -> return $ CliOptShort short
+    Nothing -> parseLongDocStr |>> CliOptLong
+  where
+
+  parseShortDocStr :: Parser Char
+  parseShortDocStr = do
+    char '-'
+    short <- alphaNumChar
+    return $ short
+
+  parseLongDocStr :: Parser Text
+  parseLongDocStr = do
+    char '-'
+    char '-'
+    longArgStart <- alphaNumChar
+    longArgRest <- many (alphaNumChar <|> char '-' <|> char '_')
+    let longArg = MT.pack $ longArgStart : longArgRest
+    return longArg
 
 data Sign = Pos | Neg
 
 number :: Parser (Either Integer DS.Scientific)
-number = lexeme number_
-
-number_ :: Parser (Either Integer DS.Scientific)
-number_ = do
-  x  <- try (fmap (Right . DS.fromFloatDigits) signedFloat) <|> fmap Left signedDecimal
+number = lexeme $ do
+  x  <- try (fmap (Right . DS.fromFloatDigits) signedFloat)
+    <|> try unsignedHex
+    <|> try unsignedOctal
+    <|> try unsignedBinary
+    <|> fmap Left signedDecimal
   e <- optional _exp
   return $ case (x, e) of
     (Left i,  Nothing) -> Left i
     (Right f, Nothing) -> Right f
     -- anything in scientific notation is cast as a real
-    (Left i,  Just (Neg, expval)) -> Right  $ DS.scientific i ((-1) * expval)
+    (Left i,  Just (Neg, expval)) -> Right $ DS.scientific i ((-1) * expval)
     (Left i,  Just (Pos, expval)) -> Right $ DS.scientific i expval
     (Right f, Just (Pos, expval)) -> Right $ f * (10 ^^ expval)
     (Right f, Just (Neg, expval)) -> Right $ f * (10 ^^ (-1 * expval))
   where
-
   _exp :: Parser (Sign, Int)
   _exp = do
     _ <- char 'e'
@@ -249,9 +353,29 @@ number_ = do
       (Just '-') -> return Neg
       _ -> return Pos
 
+  -- Hexadecimal: 0x or 0X prefix (unsigned only)
+  unsignedHex :: Parser (Either Integer DS.Scientific)
+  unsignedHex = do
+    _ <- string "0x" <|> string "0X"
+    fmap Left L.hexadecimal
+
+  -- Octal: 0o or 0O prefix (unsigned only)
+  unsignedOctal :: Parser (Either Integer DS.Scientific)
+  unsignedOctal = do
+    _ <- string "0o" <|> string "0O"
+    fmap Left L.octal
+
+  -- Binary: 0b or 0B prefix (unsigned only)
+  unsignedBinary :: Parser (Either Integer DS.Scientific)
+  unsignedBinary = do
+    _ <- string "0b" <|> string "0B"
+    fmap Left L.binary
+
+  -- Signed floating point
   signedFloat :: Parser Double
   signedFloat = L.signed sc L.float
 
+  -- Signed decimal integer
   signedDecimal :: Parser Integer
   signedDecimal = L.signed sc L.decimal
 
@@ -294,7 +418,7 @@ operatorChars :: String
 operatorChars = ":!$%&*+./<=>?@\\^|-~#"
 
 op :: Text -> Parser Text
-op o = (lexeme . try) (symbol o <* notFollowedBy (oneOf operatorChars))
+op o = (lexeme . try) (string o <* notFollowedBy (oneOf operatorChars))
 
 -- the rugged dot, free and alone
 dot :: Parser Text

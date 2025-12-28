@@ -3,14 +3,15 @@
 {-|
 Module      : Morloc.Internal
 Description : Internal utility functions
-Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 
 This module serves as a proto-prelude. Eventually I will probably want to
 abandon the default prelude and create my own. But not just yet.
 -}
+
 module Morloc.Internal
   ( ifelse
   , concatMapM
@@ -61,6 +62,7 @@ module Morloc.Internal
   , safeZip
   , safeZipWith
   , safeZipWithM
+  , zipWith3M
   ) where
 
 -- Don't import anything from Morloc here. This module should be VERY lowest
@@ -181,6 +183,13 @@ safeZipWithM :: Monad m => (a -> b -> m c) -> [a] -> [b] -> m (Maybe [c])
 safeZipWithM f xs ys
     | length xs == length ys = zipWithM f xs ys |>> Just
     | otherwise = return Nothing
+
+zipWith3M :: Monad m => (a -> b -> c -> m d) -> [a] -> [b] -> [c] -> m [d]
+zipWith3M f (a:as) (b:bs) (c:cs) = do
+  d <- f a b c
+  ds <- zipWith3M f as bs cs
+  return $ d:ds
+zipWith3M _ _ _ _ = return []
 
 -- | pipe the lhs functor into the rhs function
 infixl 1 |>>

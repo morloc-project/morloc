@@ -867,9 +867,9 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
         MORLOC_ERROR("schema must be a single string");
     }
 
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
-
-    Schema* schema = R_TRY(parse_schema, &schema_str);
+    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
+    Schema* schema = R_TRY(parse_schema, schema_str);
+    free(schema_str);
 
     void* voidstar = to_voidstar(obj_r, schema);
     if (!voidstar) {
@@ -901,9 +901,10 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
     // Extract arguments
     uint8_t* packet = RAW(packet_r);
     size_t packet_size = (size_t)LENGTH(packet_r);
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
 
-    Schema* schema = R_TRY(parse_schema, &schema_str);
+    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
+    Schema* schema = R_TRY(parse_schema, schema_str);
+    free(schema_str);
 
     uint8_t* voidstar = R_TRY(get_morloc_data_packet_value, packet, schema);
 

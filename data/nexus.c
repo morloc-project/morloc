@@ -263,23 +263,29 @@ void start_daemons(morloc_socket_t** all_sockets){
 
 void run_command(
     uint32_t mid,
-    char** args,
-    const char** arg_schema_strs,
+    argument_t** args,
+    char** arg_schema_strs,
     const char* return_schema_str,
     morloc_socket_t root_socket,
     config_t config
 ){
     char* errmsg = NULL;
 
-    Schema* return_schema = parse_schema(&return_schema_str, &errmsg);
+    Schema* return_schema = parse_schema(return_schema_str, &errmsg);
     if(errmsg != NULL){
         ERROR("Failed to parse return schema");
     }
 
-    uint8_t* call_packet = make_call_packet_from_cli(mid, args, arg_schema_strs, &errmsg);
+    uint8_t* call_packet = make_call_packet_from_cli(NULL, mid, args, arg_schema_strs, &errmsg);
     if(errmsg != NULL){
         ERROR("Failed to parse arguments:\n%s", errmsg);
     }
+
+    // free arguments
+    for(size_t i = 0; args[i] != NULL; i++){
+        free_argument_t(args[i]);
+    }
+    free(args);
 
     uint8_t* result_packet = send_and_receive_over_socket(root_socket.socket_filename, call_packet, &errmsg);
     if(errmsg != NULL){
@@ -291,8 +297,8 @@ void run_command(
 
 void run_pure_command(
     morloc_expression_t* expr,
-    char** args,
-    const char** arg_schema_strs,
+    argument_t** args,
+    char** arg_schema_strs,
     const char* return_schema_str,
     config_t config
 ){
@@ -305,11 +311,11 @@ void run_pure_command(
         // assert that there are an appropriate number of schemas
         // mismatch implies an input mistake on the users side
         if(arg_schema_strs == NULL){
-          ERROR("To many arguments provided");
+          ERROR("Too many arguments provided");
         }
     }
     if(arg_schema_strs[nargs] != NULL){
-        ERROR("To few arguments provided");
+        ERROR("Too few arguments provided");
     }
 
     Schema** arg_schemas = (Schema**)calloc(nargs, sizeof(Schema*));
@@ -317,12 +323,13 @@ void run_pure_command(
     uint8_t** arg_voidstars = (uint8_t**)calloc(nargs, sizeof(uint8_t*));
 
     for(size_t i = 0; i < nargs; i++){
-      arg_schemas[i] = parse_schema(&arg_schema_strs[i], &errmsg);
+      arg_schemas[i] = parse_schema(arg_schema_strs[i], &errmsg);
       if(errmsg != NULL){
           ERROR("Failed to parse arg schema: %s", errmsg);
       }
 
-      arg_packets[i] = parse_cli_data_argument(args[i], arg_schemas[i], &errmsg);
+      arg_packets[i] = parse_cli_data_argument(NULL, args[i], arg_schemas[i], &errmsg);
+
       if(errmsg != NULL){
           ERROR("Failed read argument: %s", errmsg);
       }
@@ -334,7 +341,7 @@ void run_pure_command(
 
     }
 
-    Schema* return_schema = parse_schema(&return_schema_str, &errmsg);
+    Schema* return_schema = parse_schema(return_schema_str, &errmsg);
     if(errmsg != NULL){
         ERROR("Failed to parse return schema");
     }
@@ -390,7 +397,7 @@ void run_call_packet(config_t config){
 
     // parse the schema from the response packet
     char* schema_str = ERROR_TRY_GOTO(read_schema_from_packet_meta, result_packet);
-    Schema* schema = ERROR_TRY_GOTO(parse_schema, (const char**)&schema_str);
+    Schema* schema = ERROR_TRY_GOTO(parse_schema, schema_str);
 
     uint8_t* mlc = ERROR_TRY_GOTO(get_morloc_data_packet_value, result_packet, schema)
     char* mpk_data = NULL; // MessagePack data point
@@ -443,13 +450,19 @@ void usage(){
     clean_exit(0);
 }
 
+// AUTO subcommand dispatchers
+// <<<BREAK>>>
+// AUTO subcommand dispatchers
 
 void dispatch(
-    const char* cmd,
-    char** args,
+    int argc,
+    char* argv[],
     const char* shm_basename,
     config_t config
 ){
+
+    char* cmd = argv[optind];
+    optind++;
 
 // AUTO dispatch
 // <<<BREAK>>>
@@ -548,17 +561,13 @@ int main(int argc, char *argv[]) {
             clean_exit(EXIT_FAILURE);
         }
 
-        // Extract subcommand and arguments
-        const char* subcommand = argv[optind];
-        char** command_arguments = &argv[optind + 1];
-
         // Validate we don't have conflicting options
         if (config.socket_base) {
             fprintf(stderr, "Error: socket-base can't be used with subcommands\n");
             clean_exit(EXIT_FAILURE);
         }
 
-        dispatch(subcommand, command_arguments, shm_basename, config);
+        dispatch(argc, argv, shm_basename, config);
     } else {
         // Validate no positional arguments when using call packet
         if (optind < argc) {
@@ -572,7 +581,7 @@ int main(int argc, char *argv[]) {
             clean_exit(EXIT_FAILURE);
         }
 
-        dispatch(NULL, NULL, shm_basename, config);
+        dispatch(argc, argv, shm_basename, config);
     }
 
     // unrechable

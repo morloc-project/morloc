@@ -3,8 +3,8 @@
 {-|
 Module      : Morloc.TypeEval
 Description : Functions for evaluating type expressions
-Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
@@ -112,7 +112,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
   f bnd (NamU o n ps rs) = do
     (n', o') <- case Map.lookup n scope of
         -- If the record type itself is aliased, substitute the name and record form
-        (Just [(_, NamU o'' n'' _ _, _)]) -> return (n'', o'')
+        (Just [(_, NamU o'' n'' _ _, _, _)]) -> return (n'', o'')
         -- Otherwise, keep the record name and form and recurse only into children
         _ -> return (n, o)
     ts' <- mapM (recurse bnd . snd) rs
@@ -125,7 +125,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     --   foo Cpp :: A D [B] -> X
     --   -----------------------------------
     --   foo :: "map<$1,$2>" D [B] -> X
-    --  
+    --
     --   type Foo a = (a, A)
     --   f :: Foo Int -> B
     --   -----------------
@@ -138,7 +138,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
           (Just ts') -> do
             mergedAliases <- foldlM (mergeAliases ts) Nothing (map Just ts') |>> fmap (renameTypedefs bnd)
             case mergedAliases of
-                (Just (vs, newType, isTerminal)) -> case isTerminal of
+                (Just (vs, newType, _, isTerminal)) -> case isTerminal of
                    True -> terminate bnd $ foldr parsub newType (zip vs ts)
                    -- substitute the head term and re-evaluate
                    False -> recurse bnd $ foldr parsub newType (zip vs ts)
@@ -163,7 +163,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
         -- new parameters may be added on the right that are not on the left
         mergedAliases <- foldlM (mergeAliases []) Nothing (map Just ts1)
         case mergedAliases of
-            (Just (_, t2, isTerminal)) ->
+            (Just (_, t2, _, isTerminal)) ->
                 if isTerminal
                   then terminate bnd t2
                   else recurse bnd t2
@@ -187,26 +187,26 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
   terminate bnd (NamU o v ts rs) = NamU o v <$> mapM (recurse bnd) ts <*> mapM (secondM (recurse bnd)) rs
   terminate _   (VarU v) = return (VarU v)
 
-  renameTypedefs :: Set.Set TVar -> ([Either TVar TypeU], TypeU, Bool) -> ([TVar], TypeU, Bool)
-  renameTypedefs _ ([], t, isTerminal) = ([], t, isTerminal)
-  renameTypedefs bnd (Left v@(TV x) : vs, t, isTerminal)
+  renameTypedefs :: Set.Set TVar -> ([Either TVar TypeU], TypeU, ArgDoc, Bool) -> ([TVar], TypeU, ArgDoc, Bool)
+  renameTypedefs _ ([], t, d, isTerminal) = ([], t, d, isTerminal)
+  renameTypedefs bnd (Left v@(TV x) : vs, t, d, isTerminal)
     | Set.member v bnd =
-        let (vs', t', isTerminal') = renameTypedefs bnd (vs, t, isTerminal)
+        let (vs', t', d', isTerminal') = renameTypedefs bnd (vs, t, d, isTerminal)
             v' = head [x' | x' <- [TV (MT.show' i <> x) | i <- [(0 :: Int) ..]], not (Set.member x' bnd), x' `notElem` vs']
             t'' = substituteTVar v (VarU v') t'
-        in (v':vs', t'', isTerminal')
+        in (v':vs', t'', d', isTerminal')
     | otherwise =
-        let (vs', t', isTerminal') = renameTypedefs bnd (vs, t, isTerminal)
-        in (v:vs', t', isTerminal')
-  renameTypedefs bnd (Right _ : vs, t, isTerminal)
-    = renameTypedefs bnd (vs, t, isTerminal)
+        let (vs', t', d', isTerminal') = renameTypedefs bnd (vs, t, d, isTerminal)
+        in (v:vs', t', d', isTerminal')
+  renameTypedefs bnd (Right _ : vs, t, d, isTerminal)
+    = renameTypedefs bnd (vs, t, d, isTerminal)
 
   -- When a type alias is imported from two places, this function reconciles them, if possible
   mergeAliases
     :: [TypeU]
-    -> Maybe ([Either TVar TypeU], TypeU, Bool)
-    -> Maybe ([Either TVar TypeU], TypeU, Bool)
-    -> Either MorlocError (Maybe ([Either TVar TypeU], TypeU, Bool))
+    -> Maybe ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+    -> Maybe ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+    -> Either MorlocError (Maybe ([Either TVar TypeU], TypeU, ArgDoc, Bool))
   mergeAliases _ Nothing Nothing = Right Nothing
   mergeAliases tsMain Nothing (Just b)
     | checkAlias tsMain b = Right (Just b)
@@ -214,14 +214,15 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
   mergeAliases tsMain (Just a) Nothing
     | checkAlias tsMain a = Right (Just a)
     | otherwise = Right Nothing
-  mergeAliases tsMain (Just a@(ts1, t1, isTerminal1)) (Just b@(ts2, t2, isTerminal2))
+  -- TODO: should the docstring args be considered here?
+  mergeAliases tsMain (Just a@(ts1, t1, _, isTerminal1)) (Just b@(ts2, t2, _, isTerminal2))
     -- if both are invalid, return nothing
     | not aIsValid && not bIsValid = Right Nothing
     -- if one is valid and the other isn't, return the valid one
     | aIsValid && not bIsValid = Right (Just a)
     | not aIsValid && bIsValid = Right (Just b)
     -- if they are both valid AND they are identical AND there is no specialization, return the first
-    | 
+    |
       -- the return types are the same
          isSubtypeOf t1 t2
       && isSubtypeOf t2 t1
@@ -241,10 +242,10 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
         (zip ts1 ts2)
 
   selectSpecialization
-    :: ([Either TVar TypeU], TypeU, Bool)
-    -> ([Either TVar TypeU], TypeU, Bool)
-    -> Maybe ([Either TVar TypeU], TypeU, Bool)
-  selectSpecialization a@(aps0, _, _) b@(bps0, _, _) = g aps0 bps0 where 
+    :: ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+    -> ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+    -> Maybe ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+  selectSpecialization a@(aps0, _, _, _) b@(bps0, _, _, _) = g aps0 bps0 where 
       g [] _ = Just a
       g _ [] = Just b
       g ((Right _):_) ((Left _):_) = Just a
@@ -254,13 +255,13 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
         | isSubtypeOf ta tb && isSubtypeOf tb ta = g aps bps
         | isSubtypeOf ta tb && not (isSubtypeOf tb ta) = Just b
         | not (isSubtypeOf ta tb) && isSubtypeOf tb ta = Just a
-        | otherwise = Nothing 
+        | otherwise = Nothing
 
   checkAlias
     :: [TypeU]
-    -> ([Either TVar TypeU], TypeU, Bool)
+    -> ([Either TVar TypeU], TypeU, ArgDoc, Bool)
     -> Bool
-  checkAlias ts1 (ts2, _, _) =
+  checkAlias ts1 (ts2, _, _, _) =
     length ts1 == length ts2 &&
     all (\(x, y) -> either (const True) (\ytype -> isSubtypeOf ytype x) y) (zip ts1 ts2)
 

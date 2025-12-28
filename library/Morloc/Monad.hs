@@ -3,8 +3,8 @@
 {-|
 Module      : Morloc.Monad
 Description : A great big stack of monads
-Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 
@@ -13,6 +13,7 @@ Most functions that raise errors, perform IO, or access global configuration
 will return `MorlocMonad a` types. The stack consists of a State, Writer,
 Except, and Reader monad.
 -}
+
 module Morloc.Monad
   ( MorlocReturn
   , runMorlocMonad
@@ -272,19 +273,14 @@ metaName i = gets (Map.lookup i . stateName)
 -- Get the docstrings associated with an item
 getDocStrings
     :: Int -- expression index
-    -> MorlocMonad
-        ( Maybe [[Text]] -- docstrings for each top-level argument and the return value
-        , [Text] -- docstrings for the entire expression
-        )
+    -> MorlocMonad ArgDoc
 getDocStrings i = do
   sgmap <- gets stateSignatures
-  docstrings <- case GMap.lookup i sgmap of
-    GMapNoFst -> return (Nothing, [])
+  case GMap.lookup i sgmap of
+    (GMapJust (Monomorphic (TermTypes (Just e) _ _))) -> return $ edocs e
+    (GMapJust (Polymorphic _ _ e _)) -> return $ edocs e
     GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
-    (GMapJust (Monomorphic (TermTypes (Just e) _ _))) -> return (edocs e, sigDocs e)
-    (GMapJust (Polymorphic _ _ e _)) -> return (edocs e, sigDocs e)
-    _ -> return (Nothing, [])
-  return docstrings
+    _ -> throwError . CallTheMonkeys $ "No entry found for index in stateSignatures"
 
 
 getConcreteScope :: Int -> Lang -> MorlocMonad Scope

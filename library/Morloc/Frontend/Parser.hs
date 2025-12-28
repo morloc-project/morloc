@@ -3,11 +3,12 @@
 {-|
 Module      : Morloc.Frontend.Parser
 Description : Full parser for Morloc
-Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
+
 module Morloc.Frontend.Parser
   ( readProgram
   , readType
@@ -254,7 +255,9 @@ pInstance = do
       <|> (pAssE |>> return)
 
 pTypedef :: Parser ExprI
-pTypedef = try pTypedefType <|> pTypedefObject where
+pTypedef =   try pTypedefType
+         <|> try pTypedefObjectLegacy
+         <|>     pTypedefObject where
 
   pConcreteType = do
     t <- pTypeCon
@@ -265,7 +268,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     return (v, True)
 
   pGeneralType = do
-    t <- pType
+    (_, t) <- pType
     return (t, False)
 
   pGeneralVar = do
@@ -274,6 +277,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
 
   pTypedefType :: Parser ExprI
   pTypedefType = do
+    doc <- parseArgDocVars |>> ArgDocAlias
     _ <- reserved "type"
     mayLang <- optional (try pLangNamespace)
     (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
@@ -281,16 +285,17 @@ pTypedef = try pTypedefType <|> pTypedefObject where
       (Just lang) -> do
         _ <- symbol "="
         (t, isTerminal) <- pConcreteType <|> pGeneralType
-        exprI (TypE (Just (lang, isTerminal)) v vs t)
+        exprI (TypE (ExprTypeE (Just (lang, isTerminal)) v vs t doc))
       Nothing -> do
         mayT <- optional (symbol "=" >> pType)
         case (vs, mayT) of
-          (_, Just t) -> exprI (TypE Nothing v vs t)
-          ([], Nothing) -> exprI (TypE Nothing v vs (VarU v))
-          (_, Nothing) -> exprI (TypE Nothing v vs (AppU (VarU v) (map (either (VarU) id) vs)))
+          (_, Just (_, t)) -> exprI (TypE (ExprTypeE Nothing v vs t doc))
+          ([], Nothing) -> exprI (TypE (ExprTypeE Nothing v vs (VarU v) doc))
+          (_, Nothing) -> exprI (TypE (ExprTypeE Nothing v vs (AppU (VarU v) (map (either (VarU) id) vs)) doc))
 
-  pTypedefObject :: Parser ExprI
-  pTypedefObject = do
+  pTypedefObjectLegacy :: Parser ExprI
+  pTypedefObjectLegacy = do
+    doc <- parseArgDocVars
     o <- pNamType
     mayLang <- optional (try pLangNamespace)
     (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
@@ -302,19 +307,34 @@ pTypedef = try pTypedefType <|> pTypedefObject where
       Nothing -> do
         constructor <- freename
         return (constructor, Nothing)
-    entries <- option [] $ braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries o)
+    entries <- option [] (braces (sepBy1 pNamEntryU (symbol ",")))
+                         >>= mapM (secondM (desugarTableEntries o))
 
     -- The vs are the parameters of the object. In C++ they are the required
     -- template parameters (e.g., A and B in Obj<A,B>). I have to maintain them
     -- as an ordered list all the way to code generation.
-    let t = NamU o (TV con) (map (either VarU id) vs) (map (first Key) entries)
-    exprI (TypE k v vs t)
+    let t = NamU o (TV con) (map (either VarU id) vs) (map snd entries)
+        objDoc = ArgDocRec doc [(fieldKey, arg) | (arg, (fieldKey, _)) <- entries]
+    exprI (TypE (ExprTypeE k v vs t objDoc))
+
+  pTypedefObject :: Parser ExprI
+  pTypedefObject = do
+    recDoc <- parseArgDocVars
+    o <- pNamType
+    (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
+    reserved "where"
+    entries <- alignInset pNamEntryU >>=
+               (mapM (secondM (desugarTableEntries o)))
+    let docEntries = [(k, r) | (r, (k, _)) <- entries]
+    let grpArg = ArgDocRec recDoc docEntries
+    let t = NamU o v (map (either VarU id) vs) (map snd entries)
+    exprI (TypE (ExprTypeE Nothing v vs t grpArg))
 
   -- TODO: is this really the right place to be doing this?
   desugarTableEntries
     :: NamType
-    -> (Text, TypeU)
-    -> Parser (Text, TypeU)
+    -> (Key, TypeU)
+    -> Parser (Key, TypeU)
   desugarTableEntries NamRecord entry = return entry
   desugarTableEntries NamObject entry = return entry
   desugarTableEntries NamTable (k0, t0) = (,) k0 <$> f t0 where
@@ -323,7 +343,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     f t = return $ BT.listU t
 
   pNamType :: Parser NamType
-  pNamType = choice [pNamObject, pNamTable, pNamRecord]
+  pNamType = pNamObject <|> pNamTable <|> pNamRecord
 
   pNamObject :: Parser NamType
   pNamObject = do
@@ -353,7 +373,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
 pTypedefTerm :: Parser (TVar, [Either TVar TypeU])
 pTypedefTerm = do
   t <- freenameU
-  ts <- many (fmap (Left . TV) freenameL <|> fmap Right pType)
+  ts <- many (fmap (Left . TV) freenameL <|> fmap Right (try pType |>> snd))
   return (TV t, ts)
 
 
@@ -397,27 +417,26 @@ pSigE = do
 
 pSignature :: Parser Signature
 pSignature = do
-  sigDocstrings <- many (try preDoc)
+  doc <- parseArgDocVars
   label' <- optional pTag
   v <- freenameL
   vs <- many freenameL |>> map TV
   _ <- op "::"
   props <- option [] (try pPropertyList)
 
-  -- TODO: undocument and fix this for argument-wise docstring support
-  -- (mayDocs, t') <- pDocumentedFunction <|> pUndocumentedFunction
-  (mayDocs, t') <- pUndocumentedFunction
+  (docs, t') <- pTypeDoc
 
   constraints <- option [] pConstraints
 
+  let cmdDoc = ArgDocSig doc (init docs) (last docs)
+
   let t = forallWrap vs t'
-  let et = EType { etype = t
+      et = EType { etype = t
                  , eprop = Set.fromList props
                  , econs = Set.fromList constraints
-                 , edocs = mayDocs
-                 , sigDocs = sigDocstrings
+                 , edocs = cmdDoc
                  }
-  let sig = Signature (EV v) (Label <$> label') et
+      sig = Signature (EV v) (Label <$> label') et
 
   return sig
   where
@@ -442,32 +461,21 @@ pSignature = do
     pWord :: Parser Text
     pWord =  MT.pack <$> lexeme (many1 alphaNumChar)
 
--- -- foo
--- --   :: A --' ladida description
--- --   -> B --' ladida description
--- pDocumentedFunction :: Parser (Maybe [[Text]], TypeU)
--- pDocumentedFunction = do
---   ts <- sepBy2 pDocumentedType (op "->")
---   case (init ts, last ts) of
---     (inputs, output) -> return
---       ( Just $ map fst inputs <> [fst output]
---       , FunU (map snd inputs) (snd output)
---       )
---   where
---     pDocumentedType :: Parser ([Text], TypeU)
---     pDocumentedType = do
---       t <- pType'
---       -- docstrs <- many doc
---       let docstrs = []
---       return (docstrs, t)
---       where
---         pType' = try pUniU <|> try parensType <|> try pAppU <|> pVarU <|> pListU <|> pTupleU
+parseArgDocVars :: Parser ArgDocVars
+parseArgDocVars = indentFreeTerm $ foldMany defaultValue parseArgDocVar
 
-pUndocumentedFunction :: Parser (Maybe [[Text]], TypeU)
-pUndocumentedFunction = do
-    t <- pType
-    return (Nothing, t)
-
+parseArgDocVar :: ArgDocVars -> Parser ArgDocVars
+parseArgDocVar d =
+        try (parseWordDocStr "name"    |>> (\x -> d { docName    = Just x }))
+    <|> try (parseFlagDocStr "literal" |>> (\x -> d { docLiteral = Just x }))
+    <|> try (parseFlagDocStr "unroll"  |>> (\x -> d { docUnroll  = Just x }))
+    <|> try (parseTextDocStr "default" |>> (\x -> d { docDefault = Just x }))
+    <|> try (parseWordDocStr "metavar" |>> (\x -> d { docMetavar = Just x }))
+    <|> try (parseArgDocStr  "arg"     |>> (\x -> d { docArg     = Just x }))
+    <|> try (parseArgDocStr  "true"    |>> (\x -> d { docTrue    = Just x }))
+    <|> try (parseArgDocStr  "false"   |>> (\x -> d { docFalse   = Just x }))
+    <|> try (parseTextDocStr "return"  |>> (\x -> d { docReturn  = Just x }))
+    <|>     (parseLineDocStr |>> (\x -> d { docLines = docLines d <> [x] }))
 
 pSrcE :: Parser [ExprI]
 pSrcE = do
@@ -529,7 +537,7 @@ pNamE = do
   -- FIXME - making records without constructors is a bit sketch, for now it is
   -- allowed (and heavily tested) and I will leave it for the moment. But
   -- eventually the syntax should be `Person {Age = 5, Name = "Juicebox"}` or
-  -- whatever.
+  -- whatever. The hell it should fucking dimwit. Constructors are shit.
   exprI $ NamE (map (first Key) rs)
 
 pNamEntryE :: Parser (Text, ExprI)
@@ -688,7 +696,7 @@ pEVar = fmap EV freenameL
 pTypeGen :: Parser TypeU
 pTypeGen = do
   resetGenerics
-  t <- pType
+  (_, t) <- pType
   s <- CMS.get
   return $ forallWrap (unique (reverse (stateGenerics s))) t
 
@@ -716,16 +724,21 @@ pTermCon = do
   _ <- optional pTag
   TV <$> stringLiteral
 
-pType :: Parser TypeU
-pType =
-      pExistential
-  <|> try pFunU
-  <|> try pUniU
-  <|> try pAppU
-  <|> try parensType
-  <|> pListU
-  <|> pTupleU
-  <|> pVarU
+pTypeDoc :: Parser ([ArgDocVars], TypeU)
+pTypeDoc = try pFunUDoc <|> (pType |>> first return)
+
+
+pType :: Parser (ArgDocVars, TypeU)
+pType = (,) <$> try parseArgDocVars <*> (
+        try pExistential
+    <|> try (pFunUDoc |>> snd) -- discard nested function argument docs (for now)
+    <|> try pUniU
+    <|> try pAppU
+    <|> try parensType
+    <|> try pListU
+    <|> try pTupleU
+    <|> pVarU
+  )
 
 pUniU :: Parser TypeU
 pUniU = do
@@ -736,21 +749,23 @@ pUniU = do
 parensType :: Parser TypeU
 parensType = do
     _ <- optional pTag
-    parens pType
+    (_, t) <- parens pType
+    return t
 
 pTupleU :: Parser TypeU
 pTupleU = do
   _ <- optional pTag
   ts <- parens (sepBy1 pType (symbol ","))
-  return $ BT.tupleU ts
+  return $ BT.tupleU (map snd ts)
 
 
-pNamEntryU :: Parser (Text, TypeU)
+pNamEntryU :: Parser (ArgDocVars, (Key, TypeU))
 pNamEntryU = do
+  r <- parseArgDocVars
   n <- freename
   _ <- op "::"
-  t <- pType
-  return (n, t)
+  (_, t) <- pType
+  return (r, (Key n, t))
 
 pExistential :: Parser TypeU
 pExistential = do
@@ -765,18 +780,23 @@ pAppU = do
   where
     pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU
 
-pFunU :: Parser TypeU
-pFunU = do
+pFunUDoc :: Parser ([ArgDocVars], TypeU)
+pFunUDoc = do
   ts <- sepBy2 pType' (op "->")
   case (init ts, last ts) of
-    (inputs, output) -> return $ FunU inputs output
+    (inputs, output) -> return $
+      (map fst inputs <> [fst output], FunU (map snd inputs) (snd output))
   where
-    pType' = try pUniU <|> try parensType <|> try pAppU <|> pVarU <|> pListU <|> pTupleU
+    pType' = (,) <$> parseArgDocVars <*> pFunCompatibleType
+
+
+pFunCompatibleType :: Parser TypeU
+pFunCompatibleType = try pUniU <|> try parensType <|> try pAppU <|> try pVarU <|> try pListU <|> pTupleU
 
 pListU :: Parser TypeU
 pListU = do
   _ <- optional pTag
-  t <- brackets pType
+  (_, t) <- brackets pType
   return $ BT.listU t
 
 pVarU :: Parser TypeU

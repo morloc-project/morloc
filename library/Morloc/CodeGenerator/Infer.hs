@@ -4,8 +4,8 @@
 {-|
 Module      : Morloc.CodeGenerator.Infer
 Description : Infer concrete types
-Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
@@ -136,12 +136,12 @@ inferConcreteVar lang t0@(Idx i v) = do
   localScope <- MM.getConcreteScope i lang
   globalScope <- MM.getConcreteUniversalScope lang
   case Map.lookup v localScope of
-    (Just ((_, t, True):_)) -> return $ FV v (CV . unTVar $ extractKey t)
-    (Just ((_, t, False):_)) -> error $ "Substituting the non-terminal " <> show (extractKey t) <> " into type " <> show t
+    (Just ((_, t, _, True):_)) -> return $ FV v (CV . unTVar $ extractKey t)
+    (Just ((_, t, _, False):_)) -> error $ "Substituting the non-terminal " <> show (extractKey t) <> " into type " <> show t
     _ -> case Map.lookup v globalScope of
-      (Just ((_, t, True):_)) -> do
+      (Just ((_, t, _, True):_)) -> do
         -- TODO fix this, the types should be in scope
         MM.sayVVV $ "WARNING: using global definition for v=" <> pretty v
         return $ FV v (CV . unTVar $ extractKey t)
-      (Just ((_, t, False):_)) -> error $ "Substituting the non-terminal " <> show (extractKey t) <> " into type " <> show t
+      (Just ((_, t, _, False):_)) -> error $ "Substituting the non-terminal " <> show (extractKey t) <> " into type " <> show t
       _ -> error $ "Concrete type var inference error for " <> show v <> " in scope " <> show globalScope

@@ -1,8 +1,8 @@
 {-|
 Module      : Morloc.Data.Map.Extra
 Description : Additional functions for the Map class
-Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}

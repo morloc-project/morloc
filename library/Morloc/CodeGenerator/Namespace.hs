@@ -7,8 +7,8 @@
 {-|
 Module      : Morloc.CodeGenerator.Namespace
 Description : All code generator types and datastructures
-Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
@@ -103,6 +103,13 @@ module Morloc.CodeGenerator.Namespace
   , asecond
   , abiappendM
   , abiappend
+  -- ** docstrings
+  , CmdArg(..)
+  , CmdDocSet(..)
+  , RecDocSet(..)
+  , ArgOptDocSet(..)
+  , ArgFlagDocSet(..)
+  , ArgPosDocSet(..)
   -- ** weird baby schemes
   , MonoidFold(..)
   , makeMonoidFoldDefault
@@ -1165,3 +1172,83 @@ instance (Pretty context, Pretty bound) => Pretty (ManifoldForm context bound) w
   pretty (ManifoldPart cargs bargs) = "ManifoldFull"
     <+> "{context:" <+> list (map pretty cargs) <> ","
     <+> "bound:" <+> list (map pretty bargs) <> "}"
+
+data CmdArg
+  = CmdArgPos ArgPosDocSet
+  -- positional argument
+  | CmdArgOpt ArgOptDocSet
+  -- optional argument
+  | CmdArgGrp RecDocSet
+  -- argument group (made from a record)
+  | CmdArgFlag ArgFlagDocSet
+  -- flag option
+  deriving (Show, Ord, Eq)
+
+data CmdDocSet = CmdDocSet
+  { cmdDocDesc :: [Text]
+  -- free description, the first line is used in the top-level help statement
+  , cmdDocName :: Maybe Text
+  -- an alternative name to give this subcommand (defaults to the function name)
+  , cmdDocArgs :: [CmdArg]
+  -- one element for each argument to the function
+  , cmdDocRet :: (Type, [Text])
+  -- description of the return data
+  }
+  deriving (Show, Ord, Eq)
+
+data RecDocSet = RecDocSet
+  { recDocType :: Type
+  -- fully resolved type
+  , recDocDesc :: [Text]
+  -- free description
+  , recDocMetavar :: Text
+  -- name of the record used in docs, with record type in uppercase as the default
+  , recDocOpt :: Maybe CliOpt
+  -- optional argument that expects the entire record
+  , recDocEntries :: [(Key, Either ArgFlagDocSet ArgOptDocSet)]
+  -- all options for this record
+  }
+  deriving (Show, Ord, Eq)
+
+data ArgOptDocSet = ArgOptDocSet
+  { argOptDocType :: Type
+    -- argument type
+  , argOptDocDesc :: [Text]
+    -- free description
+  , argOptDocMetavar :: Text
+    -- a variable used in the interface to refer to this argument term
+  , argOptDocLiteral :: Maybe Bool
+    -- if Just True, require an argument be literal rather than from a file
+    -- if Just False, require an argument be from a file
+    -- if Nothing, infer as usual
+  , argOptDocArg :: CliOpt
+    -- the option
+  , argOptDocDefault :: Text
+    -- the required default vale for an argument
+  }
+  deriving (Show, Ord, Eq)
+
+data ArgFlagDocSet = ArgFlagDocSet
+  { argFlagDocDesc :: [Text]
+    -- free description
+  , argFlagDocOpt :: CliOpt
+    -- invert the default value
+  , argFlagDocOptRev :: Maybe CliOpt
+    -- force the default value
+  , argFlagDocDefault :: Text
+    -- the possibly inferred default value
+  }
+  deriving (Show, Ord, Eq)
+
+data ArgPosDocSet = ArgPosDocSet
+  { argPosDocType :: Type
+  , argPosDocDesc :: [Text]
+    -- free description
+  , argPosDocMetavar :: Maybe Text
+    -- a variable used in the interface to refer to this argument term
+  , argPosDocLiteral :: Maybe Bool
+    -- if Just True, require an argument be literal rather than from a file
+    -- if Just False, require an argument be from a file
+    -- if Nothing, infer as usual
+  }
+  deriving (Show, Ord, Eq)

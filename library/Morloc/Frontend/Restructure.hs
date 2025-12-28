@@ -3,8 +3,8 @@
 {-|
 Module      : Morloc.Frontend.Restructure
 Description : Write Module objects to resolve type aliases and such
-Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
@@ -70,14 +70,14 @@ checkForSelfRecursion d = do
     -- A typedef is self-recursive if its name appears in its definition
     isExprSelfRecursive :: ExprI -> MorlocMonad ()
     -- Allow general type existence statements without parameters
-    isExprSelfRecursive (ExprI _ (TypE Nothing _ [] _)) = return ()
+    isExprSelfRecursive (ExprI _ (TypE (ExprTypeE Nothing _ [] _ _))) = return ()
     --  and also with parameters
-    isExprSelfRecursive (ExprI _ (TypE Nothing v vs t))
+    isExprSelfRecursive (ExprI _ (TypE (ExprTypeE Nothing v vs t _)))
       | t == AppU (VarU v) (map (either VarU id) vs) = return ()
       | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v
       | otherwise = return ()
     -- otherwise disallow self-recursion
-    isExprSelfRecursive (ExprI _ (TypE _ v ts t))
+    isExprSelfRecursive (ExprI _ (TypE (ExprTypeE _ v ts t _)))
       | any (hasTerm v) (t:(rights ts)) = MM.throwError . SelfRecursiveTypeAlias $ v
       | otherwise = return ()
     isExprSelfRecursive _ = return ()
@@ -280,7 +280,7 @@ resolveImports d0
 
   findSymbols :: ExprI -> Set Symbol
   findSymbols (ExprI _ (ModE _ es)) = Set.unions (map findSymbols es)
-  findSymbols (ExprI _ (TypE _ v _ _)) = Set.singleton $ TypeSymbol v
+  findSymbols (ExprI _ (TypE (ExprTypeE  _ v _ _ _))) = Set.singleton $ TypeSymbol v
   findSymbols (ExprI _ (AssE e _ _)) = Set.singleton $ TermSymbol e
   findSymbols (ExprI _ (ClsE (Typeclass cls _ _))) = Set.singleton $ ClassSymbol cls
   findSymbols (ExprI _ (SigE (Signature e _ _))) = Set.singleton $ TermSymbol e
@@ -314,8 +314,8 @@ handleTypeDeclarations = DAG.mapNode f where
   f e = e
 
   isNotSelfDef :: ExprI -> Bool
-  isNotSelfDef (ExprI _ (TypE Nothing v [] (VarU v'))) = v /= v'
-  isNotSelfDef (ExprI _ (TypE Nothing (VarU -> v) (map (either VarU id) -> vs) (AppU v' vs'))) =
+  isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing v [] (VarU v') _))) = v /= v'
+  isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing (VarU -> v) (map (either VarU id) -> vs) (AppU v' vs') _))) =
     v /= v' || length vs /= length vs' || not (all (\(x,y) -> x == y) (zip vs vs'))
   isNotSelfDef _ = True
 
@@ -423,17 +423,17 @@ collectTypes fullDag = do
   completeRecord
     :: Scope
     -> TVar
-    -> [([Either TVar TypeU], TypeU, Bool)]
-    -> [([Either TVar TypeU], TypeU, Bool)]
+    -> [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
+    -> [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
   completeRecord gscope v xs = case Map.lookup v gscope of
-    (Just ys) -> map (completeValue [(vs, t) | (vs, t, _) <- ys]) xs
+    (Just ys) -> map (completeValue [(vs, t) | (vs, t, _, _) <- ys]) xs
     Nothing -> xs
 
   completeValue
     :: [([Either TVar TypeU], TypeU)]
-    -> ([Either TVar TypeU], TypeU, Bool)
-    -> ([Either TVar TypeU], TypeU, Bool)
-  completeValue ((vs, NamU _ _ ps rs):_) (_, NamU o v _ [], terminal) = (vs, NamU o v ps rs, terminal)
+    -> ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+    -> ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+  completeValue ((vs, NamU _ _ ps rs):_) (_, NamU o v _ [], d, terminal) = (vs, NamU o v ps rs, d, terminal)
   completeValue _ x = x
 
   getUniversalGeneralScope :: MorlocMonad Scope
@@ -444,14 +444,14 @@ collectTypes fullDag = do
 
 -- merge type functions, names of generics do not matter
 mergeEntries
-    :: [([Either TVar TypeU], TypeU, Bool)]
-    -> [([Either TVar TypeU], TypeU, Bool)]
-    -> [([Either TVar TypeU], TypeU, Bool)]
+    :: [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
+    -> [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
+    -> [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
 mergeEntries xs0 ys0 = filter (isNovel ys0) xs0 <> ys0
   where
-  isNovel :: [([Either TVar TypeU], TypeU, Bool)] -> ([Either TVar TypeU], TypeU, Bool) -> Bool
+  isNovel :: [([Either TVar TypeU], TypeU, ArgDoc, Bool)] -> ([Either TVar TypeU], TypeU, ArgDoc, Bool) -> Bool
   isNovel [] _ =  True
-  isNovel ((vs2, t2, isTerminal1):ys) x@(vs1, t1, isTerminal2)
+  isNovel ((vs2, t2, _, isTerminal1):ys) x@(vs1, t1, _, isTerminal2)
     | (length vs1 == length vs2) &&
       t1 == foldl (\t (v1, v2) -> rename v2 v1 t) t2 [(v1, v2) | (Left v1, Left v2) <- zip vs1 vs2] &&
       isTerminal1 == isTerminal2 = False
@@ -471,7 +471,7 @@ filterAndSubstitute links typemap =
     -> Scope -- renamed map
   typeSubstitute typedefs (sourceName, localAlias)
     = case Map.lookup sourceName typedefs of
-      (Just xs) -> Map.insert localAlias (map (\(a,b,c) -> (a, rename sourceName localAlias b, c)) xs) (Map.delete sourceName typedefs)
+      (Just xs) -> Map.insert localAlias (map (\(a,b,c,d) -> (a, rename sourceName localAlias b, c, d)) xs) (Map.delete sourceName typedefs)
       Nothing -> typedefs
 
 collectSources :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()

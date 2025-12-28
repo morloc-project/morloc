@@ -1,0 +1,25 @@
+foo
+100106
+6
+6
+11
+211
+211
+11
+6
+bar
+110
+107
+6507
+6507
+travelTime
+24
+baz
+["foo","foo"]
+["foo bar","foo bar"]
+bif
+"False"
+"True"
+"True"
+"True"
+"False"

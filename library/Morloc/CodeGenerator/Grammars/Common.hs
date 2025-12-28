@@ -4,8 +4,8 @@
 {-|
 Module      : Morloc.CodeGenerator.Grammars.Common
 Description : A common set of utility functions for language templates
-Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}

@@ -2494,7 +2494,8 @@ static size_t calculate_voidstar_size(const void* data, const Schema* schema, ER
 
 // Prototypes
 
-Schema* parse_schema(const char** schema_ptr, ERRMSG);
+Schema* parse_schema(const char* schema, ERRMSG);
+Schema* parse_schema_r(char** schema_ptr, ERRMSG);
 
 // Helper function to create a schema with parameters
 static Schema* create_schema_with_params(morloc_serial_type type, size_t width, size_t size, Schema** params, char** keys) {
@@ -2610,7 +2611,7 @@ static Schema* map_schema(size_t size, char** keys, Schema** params) {
     return create_schema_with_params(MORLOC_MAP, width, size, params, keys);
 }
 
-static size_t parse_schema_size(const char** schema_ptr){
+static size_t parse_schema_size(char** schema_ptr){
   char c = **schema_ptr;
   size_t size =
     // characters 0-9 are integers 0-9
@@ -2627,7 +2628,7 @@ static size_t parse_schema_size(const char** schema_ptr){
   return size;
 }
 
-static char* parse_schema_key(const char** schema_ptr){
+static char* parse_schema_key(char** schema_ptr){
   size_t key_size = parse_schema_size(schema_ptr);
   char* key = (char*)calloc(key_size+1, sizeof(char));
   memcpy(key, *schema_ptr, key_size);
@@ -2636,7 +2637,7 @@ static char* parse_schema_key(const char** schema_ptr){
 }
 
 // This parser starts on the character **after** the initial '<'
-static char* parse_hint(const char** schema_ptr) {
+static char* parse_hint(char** schema_ptr) {
   char* hint = NULL;
 
   if (!schema_ptr || !*schema_ptr) {
@@ -2684,7 +2685,20 @@ static char* parse_hint(const char** schema_ptr) {
   return hint;
 }
 
-Schema* parse_schema(const char** schema_ptr, ERRMSG){
+Schema* parse_schema(const char* schema_str, ERRMSG){
+  PTR_RETURN_SETUP(Schema)
+
+  char* schema_copy = strdup(schema_str);
+  RAISE_IF(schema_copy == NULL, "Failed to allocate schema string")
+
+  char* parse_ptr = schema_copy;  // This pointer will be modified
+  Schema* schema = TRY(parse_schema_r, &parse_ptr);
+
+  free(schema_copy);
+  return schema;
+}
+
+Schema* parse_schema_r(char** schema_ptr, ERRMSG){
   PTR_RETURN_SETUP(Schema)
 
   Schema** params;
@@ -2699,7 +2713,7 @@ Schema* parse_schema(const char** schema_ptr, ERRMSG){
 
   switch(c){
     case SCHEMA_ARRAY:
-      child_schema = parse_schema(schema_ptr, &CHILD_ERRMSG);
+      child_schema = parse_schema_r(schema_ptr, &CHILD_ERRMSG);
       RAISE_IF(child_schema == NULL, "\n%s", CHILD_ERRMSG)
       schema = array_schema(child_schema);
       break;
@@ -2707,7 +2721,7 @@ Schema* parse_schema(const char** schema_ptr, ERRMSG){
       size = parse_schema_size(schema_ptr);
       params = (Schema**)calloc(size, sizeof(Schema*));
       for(size_t i = 0; i < size; i++){
-        params[i] = parse_schema(schema_ptr, &CHILD_ERRMSG);
+        params[i] = parse_schema_r(schema_ptr, &CHILD_ERRMSG);
         RAISE_IF(params[i] == NULL, "\n%s", CHILD_ERRMSG)
       }
       schema = tuple_schema(params, size);
@@ -2718,7 +2732,7 @@ Schema* parse_schema(const char** schema_ptr, ERRMSG){
       params = (Schema**)calloc(size, sizeof(Schema*));
       for(size_t i = 0; i < size; i++){
         keys[i] = parse_schema_key(schema_ptr);
-        params[i] = parse_schema(schema_ptr, &CHILD_ERRMSG);
+        params[i] = parse_schema_r(schema_ptr, &CHILD_ERRMSG);
         RAISE_IF(params[i] == NULL, "\n%s", CHILD_ERRMSG)
       }
       schema = map_schema(size, keys, params);
@@ -2747,7 +2761,7 @@ Schema* parse_schema(const char** schema_ptr, ERRMSG){
     case '<':
       {
           hint = parse_hint(schema_ptr);
-          schema = parse_schema(schema_ptr, &CHILD_ERRMSG);
+          schema = parse_schema_r(schema_ptr, &CHILD_ERRMSG);
           RAISE_IF(schema == NULL, "\n%s", CHILD_ERRMSG)
       }
       break;
@@ -3053,7 +3067,7 @@ int pack_with_schema(const void* mlc, const Schema* schema, char** packet, size_
 int pack(const void* mlc, const char* schema_str, char** mpk, size_t* mpk_size, ERRMSG) {
     INT_RETURN_SETUP
 
-    Schema* schema = parse_schema(&schema_str, &CHILD_ERRMSG);
+    Schema* schema = parse_schema(schema_str, &CHILD_ERRMSG);
     RAISE_IF(schema == NULL, "\n%s", CHILD_ERRMSG)
 
     int exit_code = pack_with_schema(mlc, schema, mpk, mpk_size, &CHILD_ERRMSG);
@@ -3420,7 +3434,7 @@ int unpack_with_schema(const char* mgk, size_t mgk_size, const Schema* schema, v
 // take MessagePack data and set a pointer to an in-memory data structure
 int unpack(const char* mpk, size_t mpk_size, const char* schema_str, void** mlcptr, ERRMSG) {
     INT_RETURN_SETUP
-    const Schema* schema = parse_schema(&schema_str, &CHILD_ERRMSG);
+    const Schema* schema = parse_schema(schema_str, &CHILD_ERRMSG);
     RAISE_IF(schema == NULL, "\n%s", CHILD_ERRMSG)
     int exit_code = unpack_with_schema(mpk, mpk_size, schema, mlcptr, &CHILD_ERRMSG);
     RAISE_IF(exit_code == EXIT_FAIL, "\n%s", CHILD_ERRMSG)
@@ -3430,6 +3444,16 @@ int unpack(const char* mpk, size_t mpk_size, const char* schema_str, void** mlcp
 // }}} end Morloc pack support
 
 // {{{ morloc JSON support
+
+// Allocate a new string that with double quotes around the input string
+char* quoted(const char* input){
+  size_t len = strlen(input);
+  char* quoted_string = (char*)calloc(len + 3, sizeof(char));
+  quoted_string[0] = '"';
+  quoted_string[len + 1] = '"';
+  memcpy(quoted_string + 1, input, len);
+  return quoted_string;
+}
 
 // Function to escape a JSON string
 static char* json_escape_string(const char* input, size_t input_len) {
@@ -3774,7 +3798,7 @@ static size_t json_array_size(char* ptr, ERRMSG) {
 }
 
 // input JSON data should be NULL terminated
-int read_json_with_schema_r(
+static int read_json_with_schema_r(
     uint8_t* voidstar, // pre-allocated and zeroed space that will be mutated
     char** json_ptr, // a pointer to the current location in the json string
     const Schema* schema,
@@ -4000,17 +4024,22 @@ int read_json_with_schema_r(
 }
 
 // Returns a pointer to voidstar data
-relptr_t read_json_with_schema(char* json_data, const Schema* schema, ERRMSG){
-    VAL_RETURN_SETUP(relptr_t, RELNULL)
+static uint8_t* read_json_with_schema(
+  uint8_t* voidstar, // the destination memory location, if NULL, allocate
+  char* json_data,
+  const Schema* schema,
+  ERRMSG
+){
+    PTR_RETURN_SETUP(uint8_t)
 
     char* json_ptr = json_data;
 
-    uint8_t* voidstar = (uint8_t*)TRY(shcalloc, 1, schema->width);
+    if(voidstar == NULL){
+        voidstar = (uint8_t*)TRY(shcalloc, 1, schema->width);
+    }
     TRY(read_json_with_schema_r, voidstar, &json_ptr, schema);
 
-    relptr_t ptr = TRY(abs2rel, (absptr_t)voidstar);
-
-    return ptr;
+    return voidstar;
 }
 
 static bool print_voidstar_r(const void* voidstar, const Schema* schema, ERRMSG) {
@@ -5796,6 +5825,55 @@ char* check_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
 
 // {{{ parsing CLI arguments
 
+typedef struct argument_s {
+    char* value;
+    char** fields;
+    char** default_fields;
+    size_t size;
+} argument_t;
+
+argument_t* initialize_positional(char* value){
+  argument_t* arg = (argument_t*)calloc(1, sizeof(argument_t));
+  arg->value = strdup(value);
+  arg->size = 0;
+  return arg;
+}
+
+argument_t* initialize_unrolled(size_t size, char* default_value, char** fields, char** default_fields){
+  argument_t* arg = (argument_t*)calloc(1, sizeof(argument_t));
+  if(default_value != NULL){
+    arg->value = strdup(default_value);
+  }
+  arg->size = size;
+  arg->fields = (char**)calloc(size, sizeof(char*));
+  for(size_t i = 0; i < size; i++){
+    if(fields[i] != NULL){
+      arg->fields[i] = strdup(fields[i]);
+    }
+  }
+  arg->default_fields = (char**)calloc(size, sizeof(char*));
+  for(size_t i = 0; i < size; i++){
+    if(default_fields[i] != NULL){
+      arg->default_fields[i] = strdup(default_fields[i]);
+    }
+  }
+  return arg;
+}
+
+// assumes argument_t owns all arguments
+// this will be true if the initializers above are used
+void free_argument_t(argument_t* arg){
+  FREE(arg->value)
+  if(arg != NULL && arg->fields != NULL){
+      for(size_t i = 0; i < arg->size; i++){
+          FREE(arg->fields[i]);
+      }
+      free(arg->fields);
+  }
+  FREE(arg);
+}
+
+
 // Check if the data may be MessagePack (and is not JSON)
 //
 // We look ONLY at the first character and the size
@@ -5820,57 +5898,86 @@ static bool maybe_msgpack(const uint8_t* data, size_t size) {
 }
 
 
-int rebase_relative_pointers(absptr_t mem, relptr_t rel, const Schema* schema, ERRMSG){
+static int upload_packet(
+  absptr_t dest,
+  const uint8_t* data,
+  size_t data_end, // value of data end pointer, used for checking
+  const Schema* schema,
+  ERRMSG
+){
     INT_RETURN_SETUP
 
     switch(schema->type){
         case MORLOC_STRING:
-            {
-                Array* arr = (Array*)mem;
-                arr->data += rel;
-            }
-            break;
-        case MORLOC_ARRAY:
-            {
-                Array* arr = (Array*)mem;
-                arr->data += rel;
-                if (!schema_is_fixed_width(schema->parameters[0])){
-                    absptr_t element_data = TRY(rel2abs, arr->data);
-                    for(size_t i = 0; i < arr->size; i++){
-                        absptr_t element_ptr = (absptr_t)((char*)element_data + i * schema->parameters[0]->width);
-                        TRY(rebase_relative_pointers, element_ptr, rel, schema->parameters[0]);
-                    }
+        case MORLOC_ARRAY: {
+            RAISE_IF(
+                ((size_t)data + schema->width - 1) <= data_end,
+                "Data is too small to store an array header"
+            )
+            memcpy(dest, data, schema->width);
+            // cast the destination memory as an Array
+            Array* arr = (Array*) dest;
+            uint8_t* arr_data = (uint8_t*)data + arr->data;
+            size_t arr_size = arr->size * schema->parameters[0]->width;
+
+            // mutate relative pointer to array contents
+            absptr_t data_ptr = TRY(shmemcpy, arr_data, arr_size);
+
+            RAISE_IF(
+                ((size_t)arr_data + arr_size - 1) > data_end,
+                "Data is too small to contain the values pointed to by this array"
+            )
+
+            if(!schema_is_fixed_width(schema)){
+                size_t width = schema->parameters[0]->width;
+                for(size_t i = 0; i < arr->size; i++){
+                    TRY( upload_packet,
+                         (absptr_t)((char*)data_ptr + i * width),
+                         arr_data + i * width,
+                         data_end,
+                         schema->parameters[0]
+                       )
                 }
             }
-            break;
+
+            arr->data = TRY(abs2rel, data_ptr)
+
+        }; break;
         case MORLOC_TUPLE:
-        case MORLOC_MAP:
-            {
-                if (! schema_is_fixed_width(schema)){
-                    for(size_t i = 0; i < schema->size; i++){
-                        if (! schema_is_fixed_width(schema->parameters[i])){
-                            absptr_t element_ptr = (absptr_t)((char*)mem + schema->offsets[i]);
-                            TRY(rebase_relative_pointers, element_ptr, rel, schema->parameters[i]);
-                        } else {
-                        }
-                    }
-                }
+        case MORLOC_MAP: {
+            for(size_t i = 0; i < schema->size; i++){
+               TRY( upload_packet,
+                    (absptr_t)((char*)dest + schema->offsets[i]),
+                    data + schema->offsets[i],
+                    data_end,
+                    schema->parameters[i]
+                  )
             }
-            break;
-        default:
-            break;
+        }; break;
+
+        // in all other cases, the type is of fixed width (e.g., a primitive)
+        default: {
+            // die if the given data is not large enough
+            if(((size_t)data + schema->width - 1) > data_end){
+                RAISE("Given data packet is too small to contain the expected data")
+            }
+            // otherwise, copy the main object to the destination
+            memcpy(dest, data, schema->width);
+        }
     }
 
     return EXIT_PASS;
 }
 
 // Parse a command line argument string that should contain data of a given type
-uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
+static uint8_t* parse_cli_data_argument_singular(uint8_t* dest, char* arg, const Schema* schema, ERRMSG){
     PTR_RETURN_SETUP(uint8_t)
 
     FILE* fd;
-    uint8_t* packet;
-    void* voidstar = NULL;
+
+    if(dest == NULL){
+        dest = (uint8_t*)TRY(shcalloc, 1, schema->width);
+    }
 
     // handle STDIN
     if(strcmp(arg, "/dev/stdin") == 0 || strcmp(arg, "-") == 0){
@@ -5887,10 +5994,9 @@ uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
     if(fd == NULL){
         // The argument is the data
         // JSON is currently the only supported option
-        relptr_t packet_ptr = read_json_with_schema(arg, schema, &CHILD_ERRMSG);
-        packet = make_standard_data_packet(packet_ptr, schema);
+        dest = read_json_with_schema(dest, arg, schema, &CHILD_ERRMSG);
         RAISE_IF(CHILD_ERRMSG != NULL, "Failed to read argument:\n%s", CHILD_ERRMSG)
-        return packet;
+        return dest;
     } else {
         // The argument is a file
         size_t data_size = 0;
@@ -5901,20 +6007,23 @@ uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
         RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "\n%s", CHILD_ERRMSG)
 
         if(has_suffix(arg, ".json")){
-            relptr_t packet_ptr = read_json_with_schema(data, schema, &CHILD_ERRMSG);
-            packet = make_standard_data_packet(packet_ptr, schema);
+            dest = read_json_with_schema(dest, data, schema, &CHILD_ERRMSG);
             // If this isn't a JSON file, but you say it is, then either you are
             // confused or evil. In either case, I'll just play it safe and die.
             RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "Failed to read json argument file '%s':\n%s", arg, CHILD_ERRMSG)
-            return packet;
+            return dest;
         }
 
-        if(has_suffix(arg, ".mpk") || has_suffix(arg, ".msgpack")){
-            unpack_with_schema(data, data_size, schema, &voidstar, &CHILD_ERRMSG);
-            RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "Failed to read MessagePack argument file '%s':\n%s", arg, CHILD_ERRMSG)
-            relptr_t relptr = TRY(abs2rel, voidstar);
-            packet = make_standard_data_packet(relptr, schema);
-            return packet;
+        else if(has_suffix(arg, ".mpk") || has_suffix(arg, ".msgpack")){
+            unpack_with_schema(data, data_size, schema, (void**)(&dest), &CHILD_ERRMSG);
+            RAISE_IF_WITH(
+              CHILD_ERRMSG != NULL,
+              free(data),
+              "Failed to read MessagePack argument file '%s':\n%s",
+              arg,
+              CHILD_ERRMSG
+            )
+            return dest;
         }
 
         // If the extension is not recognized
@@ -5929,59 +6038,166 @@ uint8_t* parse_cli_data_argument(char* arg, const Schema* schema, ERRMSG){
                 if (source == PACKET_SOURCE_RPTR) {
                     if (format == PACKET_FORMAT_VOIDSTAR) {
                         // get a pointer to the payload start
-                        void* voidstar_ptr = (void*)(data + sizeof(morloc_packet_header_t) + header->offset);
-
-                        // copy the data to shared memory
-                        absptr_t mem = TRY(shmemcpy, voidstar_ptr, header->length);
+                        uint8_t* voidstar_ptr = (uint8_t*)(data + sizeof(morloc_packet_header_t) + header->offset);
+                        TRY( upload_packet,
+                             dest,
+                             voidstar_ptr,
+                             (size_t)voidstar_ptr + data_size - 1,
+                             schema
+                        );
                         free(data);
-
-                        // Get the relative pointer to the beginning of the
-                        // loaded data. This will be the offset by which we need
-                        // to adjust all realtive pointers in the uploaded
-                        // voidstar.
-                        relptr_t relptr = TRY(abs2rel, mem);
-
-                        // set all relative pointers
-                        TRY(rebase_relative_pointers, mem, relptr, schema);
-
-                        packet = make_standard_data_packet(relptr, schema);
-
-                        return (uint8_t*)packet;
+                        return dest;
                     }
-                    RAISE("For RPTR source, expected voidstar format, found: 0x%02hhx", format);
+                    RAISE_WITH(free(data), "For RPTR source, expected voidstar format, found: 0x%02hhx", format);
                 }
-                return (uint8_t*)data;
             }
         }
 
         // Next check if it is MessagePack
         if(maybe_msgpack((uint8_t*)data, data_size)){
             // Try to parse as MessagePack
-            TRY(unpack_with_schema, data, data_size, schema, &voidstar);
-            relptr_t relptr = TRY(abs2rel, voidstar);
-            packet = make_standard_data_packet(relptr, schema);
-            free(data);
-            return (uint8_t*)packet;
+            unpack_with_schema(data, data_size, schema, (void**)(&dest), &CHILD_ERRMSG);
+            RAISE_IF_WITH(
+              CHILD_ERRMSG != NULL,
+              free(data),
+              "Failed to read MessagePack argument:\n%s",
+              CHILD_ERRMSG
+            )
         }
 
         // Try to parse as JSON
-        relptr_t packet_ptr = read_json_with_schema(data, schema, &CHILD_ERRMSG);
-        if(CHILD_ERRMSG == NULL){
-            free(data);
-            packet = make_standard_data_packet(packet_ptr, schema);
-            return packet;
-        }
-
+        dest = read_json_with_schema(dest, data, schema, &CHILD_ERRMSG);
         free(data);
-        RAISE("Failed to read argument from file '%s'", arg)
+
+        RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "Failed to read json argument: %s", CHILD_ERRMSG)
+
+        return dest;
     }
 }
 
+// recursively free any memory stored at the specified location
+// zero the location
+static bool shfree_by_schema(absptr_t ptr, const Schema* schema, ERRMSG){
+    BOOL_RETURN_SETUP
+
+    switch(schema->type) {
+        case MORLOC_STRING:
+        case MORLOC_ARRAY: {
+            Array* arr = (Array*)ptr;
+            if(arr->data > 0){
+              absptr_t arr_data = TRY(rel2abs, arr->data)
+              if(schema_is_fixed_width(schema->parameters[0])){
+                for(size_t i = 0; i < arr->size; i++){
+                  absptr_t element_ptr = (absptr_t)((char*)arr_data + i * schema->parameters[0]->width);
+                  TRY(shfree_by_schema, element_ptr, schema->parameters[0])
+                }
+              }
+              TRY(shfree, arr_data)
+            }
+          }
+          break;
+        case MORLOC_TUPLE:
+        case MORLOC_MAP: {
+          // free every element
+            for(size_t i = 0; i < schema->size; i++){
+              absptr_t element_ptr = (absptr_t)((char*)ptr + schema->offsets[i]);
+              TRY(shfree_by_schema, element_ptr, schema->parameters[i])
+            }
+          }
+          break;
+        default:
+          // fixed-size types will directly over-written
+          // no freeing needed
+          break;
+    }
+
+    // zero location
+    memset(ptr, 0, schema->width);
+
+    return true;
+}
+
+// Parse a command line argument unrolled record
+static uint8_t* parse_cli_data_argument_unrolled(uint8_t* dest, char* default_value, char** fields, char** default_fields, const Schema* schema, ERRMSG){
+    PTR_RETURN_SETUP(uint8_t)
+
+    bool using_record_default = false;
+    if(dest == NULL){
+        dest = (uint8_t*) TRY(shcalloc, 1, schema->width)
+    }
+
+    if(default_value != NULL){
+        dest = TRY(parse_cli_data_argument_singular, dest, default_value, schema)
+        using_record_default = true;
+    }
+
+    switch(schema->type) {
+        case MORLOC_TUPLE:
+        case MORLOC_MAP: {
+            for(size_t i = 0; i < schema->size; i++){
+                uint8_t* element_dest = dest + schema->offsets[i];
+
+                // if the user provided a value, use it
+                if(fields[i] != NULL){
+                    // free any memory written in the default record for this field
+                    TRY(shfree_by_schema, (absptr_t)element_dest, schema->parameters[i])
+
+                    TRY(
+                        parse_cli_data_argument_singular,
+                        element_dest,
+                        fields[i],
+                        schema->parameters[i]
+                    )
+                // if the user provided no specific value, but specified a
+                // default record, use that
+                } else if (using_record_default) {
+                    continue;
+                // otherwise use the hard-coded default
+                } else if (default_fields[i] != NULL) {
+                    TRY(
+                        parse_cli_data_argument_singular,
+                        element_dest,
+                        default_fields[i],
+                        schema->parameters[i]
+                    )
+                // if there isn't even a hard-coded default (an issue the
+                // compiler should catch), then die screaming
+                } else {
+                    RAISE("Field %zu missing with no default or default record", i)
+                }
+            }
+        }; break;
+        default: {
+            RAISE("Only record an tuple types may be unrolled")
+        }
+    }
+    return dest;
+}
+
+// Parse one CLI argument and return a data packet
+static uint8_t* parse_cli_data_argument(uint8_t* dest, const argument_t* arg, const Schema* schema, ERRMSG){
+    PTR_RETURN_SETUP(uint8_t)
+
+    // modify dest if it is not NULL, otherwise allocate it
+    if(arg->fields == NULL) {
+        dest = TRY(parse_cli_data_argument_singular, dest, arg->value, schema);
+    } else {
+        dest = TRY(parse_cli_data_argument_unrolled, dest, arg->value, arg->fields, arg->default_fields, schema);
+    }
+
+    relptr_t relptr = TRY(abs2rel, dest);
+    uint8_t* packet_arg = make_standard_data_packet(relptr, schema);
+
+    return packet_arg;
+}
+
+
 // Given the manifold ID and argument and schema strings, create a morloc call packet
 uint8_t* make_call_packet_from_cli(
+    uint8_t* dest,
     uint32_t mid,
-    char** args, // NULL terminated array of argument strings
-    const char** arg_schema_strs, // NULL terminated array of schema strings
+    argument_t** args, // NULL terminated array of arguments
+    char** arg_schema_strs, // NULL terminated array of schema strings
     ERRMSG
 ){
     PTR_RETURN_SETUP(uint8_t)
@@ -5995,7 +6211,7 @@ uint8_t* make_call_packet_from_cli(
     RAISE_IF(schemas == NULL, "Failed to allocate memory for schemas")
 
     for(size_t i = 0; arg_schema_strs[i] != NULL; i++){
-        schemas[i] = parse_schema(&arg_schema_strs[i], &CHILD_ERRMSG);
+        schemas[i] = parse_schema(arg_schema_strs[i], &CHILD_ERRMSG);
         RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(schemas), "Failed to parse argument %zu:\n%s", i, CHILD_ERRMSG)
     }
     schemas[nschemas] = NULL;
@@ -6009,11 +6225,11 @@ uint8_t* make_call_packet_from_cli(
     RAISE_IF_WITH(packet_args == NULL, free(schemas), "Failed to allocate packet_args");
 
     for(size_t i = 0; i < nargs; i++){
-        packet_args[i] = parse_cli_data_argument(args[i], schemas[i], &CHILD_ERRMSG);
+        packet_args[i] = parse_cli_data_argument(dest, args[i], schemas[i], &CHILD_ERRMSG);
         if(CHILD_ERRMSG != NULL){
             free(schemas);
             free(packet_args);
-            RAISE("Failed to parse argument %zu ('%s')\n%s", i, args[i], CHILD_ERRMSG);
+            RAISE("Failed to parse argument %zu\n%s", i, CHILD_ERRMSG);
         }
     }
 
@@ -6141,7 +6357,7 @@ typedef struct morloc_pattern_s {
 
 morloc_expression_t* make_morloc_bound_var(const char* schema_str, char* varname){
     char* error_msg = NULL;
-    Schema* schema = parse_schema(&schema_str, &error_msg);
+    Schema* schema = parse_schema(schema_str, &error_msg);
 
     morloc_expression_t* expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
     expr->type = MORLOC_X_BND;
@@ -6156,7 +6372,7 @@ morloc_expression_t* make_morloc_literal(
   primitive_t lit
 ){
     char* error_msg = NULL;
-    Schema* schema = parse_schema(&schema_str, &error_msg);
+    Schema* schema = parse_schema(schema_str, &error_msg);
     morloc_data_t* data = (morloc_data_t*)malloc(sizeof(morloc_data_t));
 
     data->is_voidstar = false;
@@ -6177,7 +6393,7 @@ morloc_expression_t* make_morloc_container(
     va_list value_list;
     va_start(value_list, nargs);
     char* error_msg = NULL;
-    Schema* schema = parse_schema(&schema_str, &error_msg);
+    Schema* schema = parse_schema(schema_str, &error_msg);
     morloc_data_t* data = (morloc_data_t*)malloc(sizeof(morloc_data_t));
     data->is_voidstar = false;
 
@@ -6224,7 +6440,7 @@ morloc_expression_t* make_morloc_app(
     va_start(args, nargs);
 
     char* error_msg = NULL;
-    Schema* schema = parse_schema(&schema_str, &error_msg);
+    Schema* schema = parse_schema(schema_str, &error_msg);
 
     morloc_app_expression_t* app = (morloc_app_expression_t*)malloc(sizeof(morloc_app_expression_t));
 
@@ -6293,7 +6509,7 @@ morloc_expression_t* make_morloc_lambda(
 
 morloc_expression_t* make_morloc_interpolation(const char* schema_str, size_t nargs, ...){
     char* error_msg = NULL;
-    Schema* schema = parse_schema(&schema_str, &error_msg);
+    Schema* schema = parse_schema(schema_str, &error_msg);
 
     va_list var_list;
     va_start(var_list, nargs);
@@ -6315,7 +6531,7 @@ morloc_expression_t* make_morloc_interpolation(const char* schema_str, size_t na
 
 morloc_expression_t* make_morloc_pattern(const char* schema_str, morloc_pattern_t* pattern){
     char* error_msg = NULL;
-    Schema* schema = parse_schema(&schema_str, &error_msg);
+    Schema* schema = parse_schema(schema_str, &error_msg);
     morloc_expression_t* expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
     expr->type = MORLOC_X_PAT;
     expr->schema = schema;
@@ -6640,7 +6856,7 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
 
                     char* cursor = (char*)new_string;
                     for(size_t i = 0; i < (app->nargs + 1); i++){
-                        memcpy((void*)cursor, strings[i], string_lengths[i]); 
+                        memcpy((void*)cursor, strings[i], string_lengths[i]);
                         cursor += string_lengths[i];
                         if(i < app->nargs){
                             Array* arr = (Array*)arg_results[i];
@@ -6823,7 +7039,7 @@ static absptr_t apply_setter_copy(
                           value_schema->parameters[i],
                           new_value
                         )
-                        changed = true; 
+                        changed = true;
                         break;
                     }
                 }
@@ -7193,7 +7409,7 @@ uint8_t* remote_call(
         // direct pointer to the packet string (do not free)
         char* arg_schema_str = TRY_GOTO(read_schema_from_packet_meta, arg_packets[i]);
 
-        arg_schemas[i] = TRY_GOTO(parse_schema, (const char**)&arg_schema_str);
+        arg_schemas[i] = TRY_GOTO(parse_schema, arg_schema_str);
 
         // get the raw data stored in the packet (after the header and metadata)
         // possibly heavy memory
