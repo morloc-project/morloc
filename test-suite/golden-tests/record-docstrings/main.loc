@@ -14,6 +14,7 @@ import root-py
 
 --' System configuration
 --' metavar: SYS_CONFIG
+--' unroll: true
 --' arg: --sys-config
 record SysConfig where
   --' tmp directory
@@ -38,6 +39,7 @@ record SysConfig where
 
 --' Algorithm configuration
 --' metavar: ALG_CONFIG
+--' unroll: true
 --' arg: --alg-config
 record AlgConfig where
   --' some hyper parameter
@@ -61,8 +63,6 @@ bif :: SysConfig -> Str
 --'
 --' name: foo
 fooFun ::
-    --' unroll: true
-    --' metavar: CONFIG
     AlgConfig ->
     --' large vector of integers
     --' metavar: DATA
@@ -78,11 +78,7 @@ fooFun ::
 --'
 --' name: bar
 barFun ::
-    --' unroll: true
-    --' metavar: SYS_CONFIG
     SysConfig ->
-    --' unroll: true
-    --' metavar: ALG_CONFIG
     AlgConfig ->
     --' the lone parameters
     --' arg: -y/--yolo

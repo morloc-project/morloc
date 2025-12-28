@@ -17,6 +17,7 @@ import qualified Data.Map as Map
 import Data.Text (Text)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.GMap as GMap
+import qualified Morloc.Data.Text as MT
 import qualified Morloc.BaseTypes as MBT
 
 -- Most of the transmogrification of docstrings occurs in the parser, but there
@@ -135,7 +136,7 @@ resolveArgDocVars rs t r
   | docUnroll r == Just False = resolvePos t r |>> CmdArgPos
   | length rs > 0 && docUnroll r == Just True = resolveGrp t r rs
   | t == VarT MBT.bool = resolveFlagCmdArg r
-  | isJust (docArg r) = resolveOpt t r |>> CmdArgOpt
+  | isJust (docArg r) && isJust (docDefault r) = resolveOpt t r |>> CmdArgOpt
   | otherwise = resolvePos t r |>> CmdArgPos
 
 resolveGrp :: Type -> ArgDocVars -> [(Key, (Type, ArgDocVars))] -> MorlocMonad CmdArg
@@ -210,7 +211,7 @@ resolveFlagCmdArg r = do
 resolveOpt :: Type -> ArgDocVars -> MorlocMonad ArgOptDocSet
 resolveOpt t r = case (docArg r, docDefault r) of
   (Nothing, _) -> MM.throwError . DocStrError $ "Optional argument missing tags"
-  (_, Nothing) -> MM.throwError . DocStrError $ "Optional arguments must have default values"
+  (Just opt, Nothing) -> MM.throwError . DocStrError $ "Optional argument " <> makeArg opt <> " must have default values"
   (Just opt, Just def) -> return $ ArgOptDocSet
     { argOptDocType = t
     , argOptDocDesc = docLines r
@@ -219,6 +220,13 @@ resolveOpt t r = case (docArg r, docDefault r) of
     , argOptDocArg = opt
     , argOptDocDefault = def
     }
+
+makeArg
+  :: CliOpt
+  -> Text -- argument string, such as "-h/--help"
+makeArg (CliOptShort s) = "-" <> MT.show' s
+makeArg (CliOptLong l) = "--" <> l
+makeArg (CliOptBoth s l) = "-" <> MT.show' s <> "/--" <> l
 
 makeOptMeta :: Type -> Text
 makeOptMeta (UnkT v) = unTVar v
