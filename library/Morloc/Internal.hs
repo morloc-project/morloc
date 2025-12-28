@@ -4,13 +4,14 @@
 Module      : Morloc.Internal
 Description : Internal utility functions
 Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 
 This module serves as a proto-prelude. Eventually I will probably want to
 abandon the default prelude and create my own. But not just yet.
 -}
+
 module Morloc.Internal
   ( ifelse
   , concatMapM

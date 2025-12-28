@@ -4,10 +4,11 @@
 Module      : Morloc.CodeGenerator.Nexus
 Description : Templates for generating the nexus
 Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
+
 module Morloc.CodeGenerator.Nexus
   ( generate
   ) where

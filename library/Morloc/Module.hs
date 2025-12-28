@@ -7,7 +7,7 @@
 Module      : Module
 Description : Morloc module imports and paths
 Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 
@@ -17,6 +17,7 @@ All information about morloc module structure should be defined here.
  * finding headers and shared libraries required by modules
  * installation of modules from github
 -}
+
 module Morloc.Module
   ( findModule
   , loadModuleMetadata

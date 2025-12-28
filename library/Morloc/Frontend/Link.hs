@@ -5,7 +5,7 @@
 Module      : Morloc.Frontend.Link
 Description : Transfer all terms, types, typeclasses and sources to state
 Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+License     : Apache-2.0
 Maintainer  : z@morloc.io
 Stability   : experimental
 -}

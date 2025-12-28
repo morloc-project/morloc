@@ -2,10 +2,11 @@
 Module      : Morloc.System
 Description : General file system functions
 Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
+
 module Morloc.System
   ( module System.Directory.Tree
   , module System.Directory

@@ -5,7 +5,7 @@
 Module      : Morloc.Frontend.Treeify
 Description : Translate from the frontend DAG to the backend AnnoS AST forest
 Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}

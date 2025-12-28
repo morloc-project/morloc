@@ -4,7 +4,7 @@
 Module      : Morloc.Monad
 Description : A great big stack of monads
 Copyright   : (c) Zebulun Arendsee, 2016-2025
-License     : GPL-3
+License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 
@@ -13,6 +13,7 @@ Most functions that raise errors, perform IO, or access global configuration
 will return `MorlocMonad a` types. The stack consists of a State, Writer,
 Except, and Reader monad.
 -}
+
 module Morloc.Monad
   ( MorlocReturn
   , runMorlocMonad
