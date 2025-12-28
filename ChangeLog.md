@@ -1,3 +1,7 @@
+0.58.2 [2025-12-29]
+-------------------
+ * fix minor bug optional versus positional
+
 0.58.1 [2025-12-28]
 -------------------
  * fix minor bug in record unrolling
