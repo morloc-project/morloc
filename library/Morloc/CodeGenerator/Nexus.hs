@@ -647,7 +647,7 @@ subcmdHelpVerboseG g = subcmdHelpVerbose (pretty $ commandName g) (commandType g
 linePrinter :: MDoc -> MDoc
 linePrinter doc =
   let txtLines = MT.lines $ render doc
-  in vsep [ [idoc|fprintf(stderr, "#{pretty l}\n");|] | l <- txtLines] where
+  in vsep [ [idoc|fprintf(stderr, "#{pretty . escapeString $ l}\n");|] | l <- txtLines] where
 
 subcmdHelpQuiet :: MDoc -> Type -> CmdDocSet -> MDoc
 subcmdHelpQuiet cmd t0 docs
@@ -735,7 +735,7 @@ subcmdHelpQuiet cmd t0 docs
     makeOptArg (Left flag)
       = makeOption (argstr : revArgstr)
       $  map pretty (argFlagDocDesc flag)
-      <> ["default:" <+> (pretty . escapeString) (argFlagDocDefault flag)]
+      <> ["default:" <+> pretty (argFlagDocDefault flag)]
       where
         argstr = makeArg (argFlagDocOpt flag) Nothing
         revArgstr = maybe [] (return . flip makeArg Nothing) (argFlagDocOptRev flag)
@@ -744,7 +744,7 @@ subcmdHelpQuiet cmd t0 docs
       in makeOption [argstr]
           $  map pretty (argOptDocDesc opt)
           <> ["type:" <+> showArgType (argOptDocType opt) (argOptDocLiteral opt)
-             ,"default:" <+> (pretty . escapeString) (argOptDocDefault opt)
+             ,"default:" <+> pretty (argOptDocDefault opt)
              ]
 
     makeGrpArgs :: [RecDocSet] -> [MDoc]
