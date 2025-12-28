@@ -1,7 +1,7 @@
 {-|
 Module      : Main
 Description : Executable main module
-Copyright   : (c) Zebulun Arendsee, 2016-2025
+Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
