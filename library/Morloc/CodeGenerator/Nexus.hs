@@ -699,7 +699,7 @@ subcmdHelpQuiet cmd t0 docs
 
     showArgType :: Type -> Maybe Bool -> MDoc
     showArgType t isLiteral
-      | t == VarT (MBT.str) && isLiteral /= Just True = "Str    (quoted JSON string)"
+      | t == VarT (MBT.str) && isLiteral /= Just True = "Str    (a filename or quoted JSON string)"
       | otherwise = pretty t
 
     makePosArgs :: [ArgPosDocSet] -> [MDoc]
