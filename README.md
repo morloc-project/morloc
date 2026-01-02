@@ -34,6 +34,13 @@
  * Polyglot without boilerplate: Use the best language for each task with no
    manual bindings or interop code.
 
+ * Type-directed CLI generation: Write concrete function signatures once and
+   automatically generate elegant command-line interfaces with argument
+   parsing, validation, help text, and documentation.
+
+ * Composable CLI tools: Morloc CLI programs can be composed by simply importing
+   them into a new Morloc module and re-exporting their functions.
+
  * Seamless benchmarking and testing: Swap implementations and run the same
    benchmarks/tests across languages with consistent type signatures and data
    representation.
@@ -42,8 +49,8 @@
    populate them with foreign language implementations, enabling rigorous code
    organization and reuse.
 
- * Smarter workflows: Replace brittle application/file-based pipelines with more
-   fast, more maintainable pipelines made from functions acting on structured
+ * Smarter workflows: Replace brittle application/file-based pipelines with
+   faster, more maintainable pipelines made from functions acting on structured
    data.
 
 
@@ -56,24 +63,31 @@ types, and compose new functions:
 
 ```morloc
 -- Morloc code, in "main.loc"
-module m (sumOfSums)
+module m (vsum)
 
-import types
+import root-py
+import root-cpp
 
 source Py from "foo.py" ("pmap")
 pmap a b :: (a -> b) -> [a] -> [b] 
 
 source Cpp from "foo.hpp" ("sum")
-sum :: [Int] -> Int
+sum :: [Real] -> Real
 
---' Sum a list of lists of numbers
-sumOfSums = sum . pmap sum 
+--' Input numeric vectors that will be summed in parallel
+--' metavar: VECTORS
+type Vectors = [[Real]]
+
+--' Sum a list of numeric vectors
+--' return: Final sum of all elements in all vectors
+vsum :: Vectors -> Real
+vsum = sum . pmap sum 
 ```
 
-The imported code is is natural code with no Morloc-specific dependencies.
+The imported code is natural code with no Morloc-specific dependencies.
 
 Below is the C++ code that defines `sum` as a function of a standard C++ vector
-of `int`s that returns an `int`:
+of `double`s that returns a `double`:
 
 ```C++
 // C++ code, in "foo.hpp"
@@ -83,9 +97,9 @@ of `int`s that returns an `int`:
 #include <vector>
 #include <numeric>
 
-int sum(std::vector<int> xs) {
+double sum(std::vector<double> xs) {
     return std::accumulate(
-       xs.begin(), xs.end(), 0);
+       xs.begin(), xs.end(), 0.0);
 }
 ```
 
@@ -108,19 +122,18 @@ This program can be compiled and run as below:
 ```
 $ menv morloc make main.loc
 
-$ menv ./nexus -h
-Usage: ./nexus [OPTION]... COMMAND [ARG]...
+$ menv ./nexus vsum -h
+Usage: ./nexus vsum VECTORS
 
-Nexus Options:
- -h, --help            Print this help message
- -o, --output-file     Print to this file instead of STDOUT
- -f, --output-format   Output format [json|mpk|voidstar]
+Sum a list of numeric vectors
 
-Exported Commands:
-  sumOfSums   Sum a list of lists of numbers
-                param 1: [[Int]]
-                return: Int
+Positional arguments:
+  VECTORS  Input numeric vectors that will be summed in parallel
+           type: [[Real]]
 
-$ menv ./nexus sumOfSums [[1,2,3],[4]]
-10
+Return: Real
+  Final sum of all elements in all vectors
+
+$ menv ./nexus vsum [[1.2],[0,0.1]]
+1.3
 ```
