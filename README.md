@@ -13,7 +13,7 @@
 <p align="center">
   <a href="https://morloc-project.github.io/docs">Manual</a> |
   <a href="https://discord.gg/dyhKd9sJfF">Discord</a> |
-  <a href="https://www.zebulun-arendsee.com/images/morloc-paper-001.pdf">Paper Draft</a> |
+  <a href="https://peerj.com/articles/cs-3435/">Paper</a> |
   <a href="https://x.com/morlocproject">X</a> |
   <a href="https://bsky.app/profile/morloc-project.bsky.social">BlueSky</a> |
   <a href= "mailto:z@morloc.io">Email</a>
