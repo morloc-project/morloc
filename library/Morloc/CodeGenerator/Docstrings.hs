@@ -120,6 +120,13 @@ reduceArgDoc i t@(VarT v) arg = do
     , docFalse = docFalse r1 <|> docFalse r2
     , docReturn = docReturn r1 <|> docReturn r2
     }
+
+reduceArgDoc i (NamT o v ps (map snd -> ts)) (ArgDocRec arg rs) = do
+  let args =  map (ArgDocAlias . snd) rs
+      keys = map fst rs
+  entries <- zipWithM (reduceArgDoc i) ts args 
+  let args' = [r | (ArgDocAlias r) <- map snd entries]
+  return (NamT o v ps (zip keys (map fst entries)), ArgDocRec arg (zip keys args')) 
 reduceArgDoc _ t r = return (t, r)
 
 makeCmdArg :: Type -> ArgDoc -> MorlocMonad CmdArg

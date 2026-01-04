@@ -698,7 +698,7 @@ subcmdHelpQuiet cmd t0 docs
 
     showArgType :: Type -> Maybe Bool -> MDoc
     showArgType t isLiteral
-      | t == VarT (MBT.str) && isLiteral /= Just True = "Str    (quoted JSON string)"
+      | t == VarT (MBT.str) && isLiteral /= Just True = "Str    (a filename or quoted JSON string)"
       | otherwise = pretty t
 
     makePosArgs :: [ArgPosDocSet] -> [MDoc]
@@ -965,8 +965,9 @@ makeParameters args =
                        (map (toVarNameEntry UsrVar . snd) (recDocEntries r))
       defFieldArgName = [idoc|arg_#{pretty i}_def_fields|]
       defFieldDef = [idoc|char** #{defFieldArgName} = (char**)calloc(#{size}, sizeof(char*));|]
-      defFields = zipWith (\idx v -> [idoc|#{defFieldArgName}[#{idx}] = #{v} == NULL? NULL : strdup(#{v});|])
+      defFields = zipWith3 (\idx dup v -> [idoc|#{defFieldArgName}[#{idx}] = #{v} == NULL? NULL : #{dup}(#{v});|])
                        (map pretty ([0..] :: [Int]))
+                       (map (makeDuplifier . either CmdArgFlag CmdArgOpt . snd) (recDocEntries r))
                        (map (toVarNameEntry DefVar . snd) (recDocEntries r))
       argSet = [idoc|args[#{pretty i}] = initialize_unrolled(#{size}, #{varname}, #{fieldArgName}, #{defFieldArgName});|]
 

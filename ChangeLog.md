@@ -1,3 +1,7 @@
+0.58.3 [2026-01-03]
+-------------------
+ * fix record docstring inheritance
+
 0.58.2 [2025-12-29]
 -------------------
  * fix minor bug optional versus positional
