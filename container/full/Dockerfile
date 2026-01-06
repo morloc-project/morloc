@@ -42,5 +42,7 @@ RUN git clone https://github.com/morloc-project/vimmorloc \
 
 RUN git clone https://github.com/morloc-project/morloc ~/morloc
 
+COPY assets/bashrc /etc/bash.bashrc
+
 # Cleanup to reduce image size
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*

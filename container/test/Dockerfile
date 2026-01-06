@@ -16,3 +16,5 @@ RUN Rscript -e 'install.packages(c("rlang"), repos  = "https://cloud.r-project.o
 
 # Cleanup to reduce image size
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
+
+COPY assets/bashrc /etc/bash.bashrc
