@@ -224,6 +224,10 @@ main = do
       , golden "records-complex-2" "records-complex-2"
       , golden "records-nested" "records-nested"
 
+      -- , golden "records-functional-1" "records-functional-1"
+      , golden "records-functional-2" "records-functional-2"
+      , golden "records-functional-3" "records-functional-3"
+
       , golden "selection-1" "selection-1"
       , golden "selection-2" "selection-2"
       , golden "selection-3" "selection-3"

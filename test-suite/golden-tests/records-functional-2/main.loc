@@ -1,0 +1,16 @@
+module m (foo)
+
+import root-py
+
+record Funs where
+  f :: Int -> Int
+  g :: Int -> Int
+record Py => Funs = "dict"
+
+funs = { f = add 4, g = add 1 }
+
+bar :: Funs -> Int -> Int
+
+foo = bar funs
+
+source Py from "foo.py" ("bar")

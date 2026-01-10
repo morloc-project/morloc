@@ -15,7 +15,7 @@ fung :: Bool -> Bool -> Int
 tools :: Tools
 tools = { f = funf, g = fung }
 
-source Py from "foo.py" ("foo")
-foo :: Tools -> Int -> Int
+source Py from "bar.py" ("bar")
+bar :: Tools -> Int -> Int
 
-foo = foo tools
+foo = bar tools
