@@ -39,7 +39,8 @@ main = do
 
       , golden "functional-data-1" "functional-data-1"
       , golden "functional-data-2" "functional-data-2"
-      , golden "functional-data-3" "functional-data-3"
+      , golden "functional-data-3a" "functional-data-3a"
+      , golden "functional-data-3b" "functional-data-3b"
       , golden "functional-data-4" "functional-data-4"
       , golden "functional-data-5" "functional-data-5"
 

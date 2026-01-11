@@ -1,0 +1,24 @@
+module m (foo)
+
+import root-py
+import root-cpp
+
+record Funs where
+  f :: Int -> Int
+  g :: Int -> Int
+record Py => Funs = "dict"
+record Cpp => Funs = "struct"
+
+source Cpp from "main.hpp" ("funf")
+funf :: Int -> Int
+
+source Py  from "main.py"  ("fung", "doit")
+fung :: Int -> Int
+doit :: (Int -> Int) -> Int -> Int
+
+funs :: Funs
+funs = { f = funf, g = fung }
+
+foo :: Int -> Int
+-- foo = doit (.f funs)
+foo = doit funf -- (.f funs)
