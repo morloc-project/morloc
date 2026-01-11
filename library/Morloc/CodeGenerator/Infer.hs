@@ -143,4 +143,4 @@ inferConcreteVar lang t0@(Idx i v) = do
         MM.sayVVV $ "WARNING: using global definition for v=" <> pretty v
         return $ FV v (CV . unTVar $ extractKey t)
       (Just ((_, t, _, False):_)) -> error $ "Substituting the non-terminal " <> show (extractKey t) <> " into type " <> show t
-      _ -> error $ "Concrete type var inference error for " <> show v <> " in scope " <> show globalScope
+      _ -> error $ "Cannot find type variable " <> show (unTVar v) <> " in scope"
