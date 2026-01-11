@@ -397,36 +397,36 @@ instantiate scope ta@(ExistU v1 (ps1, pc1) (rs1, rc1)) tb@(ExistU v2 (ps2, pc2) 
     (Open, Closed, GT)  -> Left $ InstantiationError ta tb "Right closed existential parameter list is less than left"
     (Open, Open, _)  -> Right $ extendList ps1 ps2
 
-  let keyset1 = Set.fromList rs1
-  let keyset2 = Set.fromList rs2
+  let keyset1 = Set.fromList (map fst rs1)
+  let keyset2 = Set.fromList (map fst rs2)
 
   -- check and expand open records
-  (rs1', rs2') <- case (rc1, rc2, Set.isSubsetOf keyset1 keyset2, Set.isSubsetOf keyset2 keyset1) of
+  (g2, rs1', rs2') <- case (rc1, rc2, Set.isSubsetOf keyset1 keyset2, Set.isSubsetOf keyset2 keyset1) of
     (Closed, Closed, False, _     ) -> Left $ InstantiationError ta tb "Right closed existential contains keys missing in left closed existential"
     (Closed, Closed, _,     False ) -> Left $ InstantiationError ta tb "Right closed existential contains keys missing in left closed existential"
-    (Closed, Open,   _,     False ) -> Left $ InstantiationError ta tb "Right existential contains keys missing in left closed existential"
-    (Open,   Closed, False, _     ) -> Left $ InstantiationError ta tb "Left existential contains keys missing in right closed existential"
-    _ -> Right $ extendRec rs1 rs2
+    (Closed, Open,   a,     False ) -> Left $ InstantiationError ta tb $ "Right existential contains keys missing in left closed existential " <> MT.show' a
+    (Open,   Closed, False, b     ) -> Left $ InstantiationError ta tb $ "Left existential contains keys missing in right closed existential " <> MT.show' b
+    _ -> extendRec scope g1 rs1 rs2
 
-  g2 <- foldM (\g (t1, t2) -> subtype scope t1 t2 g) g1 (zip ps1 ps2)
-  g3 <- foldM (\g' (t1, t2) -> subtype scope t1 t2 g') g2 [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
+  g3 <- foldM (\g (t1, t2) -> subtype scope t1 t2 g) g2 (zip ps1 ps2)
+  g4 <- foldM (\g' (t1, t2) -> subtype scope t1 t2 g') g3 [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
 
   -- define new types to insert
   let taExpanded = ExistU v1 (ps1', pc1) (rs1', rc1)
   let tbExpanded = ExistU v2 (ps2', pc1) (rs2', rc1)
 
-  case access2 v1 v2 (gammaContext g3) of
+  case access2 v1 v2 (gammaContext g4) of
     -- InstLReach
     (Just (lhs, _, ms, x, rhs)) -> do
         solved <- solve v1 tbExpanded
-        return $ g3 { gammaContext = lhs <> (solved : ms) <> (x : rhs) }
+        return $ g4 { gammaContext = lhs <> (solved : ms) <> (x : rhs) }
     Nothing ->
-      case access2 v2 v1 (gammaContext g3) of
+      case access2 v2 v1 (gammaContext g4) of
       -- InstRReach
         (Just (lhs, _, ms, x, rhs)) -> do
           solved <- solve v2 taExpanded
-          return $ g3 { gammaContext = lhs <> (solved : ms) <> (x : rhs) }
-        Nothing -> return g3
+          return $ g4 { gammaContext = lhs <> (solved : ms) <> (x : rhs) }
+        Nothing -> return g4
 
 --  g1[Ea],>Eb,Eb |- [Eb/x]B <=: Ea -| g2,>Eb,g3
 -- ----------------------------------------- InstRAllL
@@ -661,11 +661,23 @@ extendList (x:xs) (y:ys) =
   let (xs', ys') = extendList xs ys
   in (x:xs', y:ys')
 
-extendRec :: Ord k => [(k, a)] -> [(k, a)] -> ([(k, a)], [(k, a)])
-extendRec xs ys =
-  ( xs <> [y | y@(k, _) <- ys, Set.notMember k setX]
-  , ys <> [x | x@(k, _) <- xs, Set.notMember k setY]
-  )
+extendRec
+  :: Ord k
+  => Scope
+  -> Gamma
+  -> [(k, TypeU)]
+  -> [(k, TypeU)]
+  -> Either TypeError (Gamma, [(k, TypeU)], [(k, TypeU)])
+extendRec scope g0 xs ys = do
+  g1 <- foldlM ( \g (k, x) -> maybe (return g)
+                                    (\y -> subtype scope x y g)
+                                    (lookup k ys)
+               ) g0 xs
+  return $
+    ( g1
+    , xs <> [y | y@(k, _) <- ys, Set.notMember k setX]
+    , ys <> [x | x@(k, _) <- xs, Set.notMember k setY]
+    )
   where
     setX = Set.fromList (map fst xs)
     setY = Set.fromList (map fst ys)
