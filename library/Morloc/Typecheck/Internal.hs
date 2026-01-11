@@ -317,7 +317,7 @@ instantiate scope ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_:_), rc)) g1 = do
         return $ g2 {gammaContext = rhs ++ [solved] ++ lhs}
     Nothing -> Left $ InstantiationError ta tb "Error in NamU with existential keys"
 
-instantiate scope ta@(ExistU v ([], _) _) tb@(FunU as b) g1 = do
+instantiate scope (ExistU v ([], _) _) (FunU as b) g1 = do
   let (g2, veas) = statefulMap (\g _ -> tvarname g "ta") g1 as
       (g3, veb) = tvarname g2 "to"
       eas = [ExistU v' ([], Open) ([], Open) | v' <- veas]
@@ -326,7 +326,7 @@ instantiate scope ta@(ExistU v ([], _) _) tb@(FunU as b) g1 = do
       Just (rhs, _, lhs) -> do
         solved <- solve v (FunU eas eb)
         return $ g3 { gammaContext = rhs ++ [solved] ++ (index eb : map index eas) ++ lhs }
-      Nothing -> Left $ InstantiationError ta tb "Error in InstLApp"
+      Nothing -> return g3
   g5 <- foldlM (\g (e, t) -> instantiate scope e t g) g4 (zip eas as)
   instantiate scope eb (apply g5 b) g5
 
@@ -334,7 +334,7 @@ instantiate scope ta@(ExistU v ([], _) _) tb@(FunU as b) g1 = do
 --  g2 |- [g2]A2 <=: Ea2 -| g3
 -- ----------------------------------------- InstRApp
 --  g1[Ea] |- A1 -> A2 <=: Ea -| g3
-instantiate scope ta@(FunU as b) tb@(ExistU v ([], _) _) g1 = do
+instantiate scope (FunU as b) (ExistU v ([], _) _) g1 = do
   let (g2, veas) = statefulMap (\g _ -> tvarname g "ta") g1 as
       (g3, veb) = tvarname g2 "to"
       eas = [ExistU v' ([], Open) ([], Open) | v' <- veas]
@@ -343,7 +343,7 @@ instantiate scope ta@(FunU as b) tb@(ExistU v ([], _) _) g1 = do
     Just (rhs, _, lhs) -> do
         solved <- solve v (FunU eas eb)
         return $ g3 { gammaContext = rhs ++ [solved] ++ (index eb : map index eas) ++ lhs }
-    Nothing -> Left $ InstantiationError ta tb "Error in InstRApp"
+    Nothing -> return g3 -- Left $ InstantiationError ta tb $ "Error in InstRApp: " <> MT.show' (v, gammaContext g3)
   g5 <- foldlM (\g (e, t) -> instantiate scope t e g) g4 (zip eas as)
   instantiate scope eb (apply g5 b) g5
 
@@ -352,26 +352,26 @@ instantiate scope ta@(FunU as b) tb@(ExistU v ([], _) _) g1 = do
 -- This is terrible kludge, I am not close to having considered all the edge
 -- cases. I need to completely rewrite my type system. Argh. I also need to get
 -- rid of all default types. Defaults should be set explicitly in morloc code.
-instantiate _ ta@(ExistU _ _ (_:_, _)) tb@(ExistU v ([], _) ([], _)) g1 =
+instantiate _ ta@(ExistU _ _ (_:_, _)) (ExistU v ([], _) ([], _)) g1 =
   case access1 v (gammaContext g1) of
     (Just (lhs, _, rhs)) -> do
         solved <- solve v ta
         return $ g1 { gammaContext = lhs ++ solved : rhs }
-    Nothing ->
-      case lookupU v g1 of
-        (Just _) -> return g1
-        Nothing -> Left . InstantiationError ta tb . render
-          $ "Error in recordInstRSolve with gamma:\n" <> tupled (map pretty (gammaContext g1))
-instantiate _ ta@(ExistU v ([], _) ([], _)) tb@(ExistU _ _ (_:_, _)) g1 =
+    Nothing -> return g1
+      -- case lookupU v g1 of
+      --   (Just _) -> return g1
+      --   Nothing -> Left . InstantiationError ta tb . render
+      --     $ "Error in recordInstRSolve with gamma:\n" <> tupled (map pretty (gammaContext g1))
+instantiate _ (ExistU v ([], _) ([], _)) tb@(ExistU _ _ (_:_, _)) g1 =
   case access1 v (gammaContext g1) of
     (Just (lhs, _, rhs)) -> do
         solved <- solve v tb
         return $ g1 { gammaContext = lhs ++ solved : rhs }
-    Nothing ->
-      case lookupU v g1 of
-        (Just _) -> return g1
-        Nothing -> Left . InstantiationError ta tb . render
-          $ "Error in recordInstLSolve:" <+> tupled (map pretty (gammaContext g1))
+    Nothing -> return g1
+      -- case lookupU v g1 of
+      --   (Just _) -> return g1
+      --   Nothing -> Left . InstantiationError ta tb . render
+      --     $ "Error in recordInstLSolve:" <+> tupled (map pretty (gammaContext g1))
 
 
 --
@@ -441,31 +441,31 @@ instantiate scope (ForallU x b) tb@(ExistU _ ([], _) _) g1
 --  g1 |- t
 -- ----------------------------------------- InstRSolve
 --  g1,Ea,g2 |- t <=: Ea -| g1,Ea=t,g2
-instantiate _ ta tb@(ExistU v ([], _) ([], _)) g1 =
+instantiate _ ta (ExistU v ([], _) ([], _)) g1 =
   case access1 v (gammaContext g1) of
     (Just (lhs, _, rhs)) -> do
         solved <- solve v ta
         return $ g1 { gammaContext = lhs ++ solved : rhs }
-    Nothing ->
-      case lookupU v g1 of
-        (Just _) -> return g1
-        Nothing -> Left . InstantiationError ta tb . render
-          $ "Error in InstRSolve with gamma:\n" <> tupled (map pretty (gammaContext g1))
+    Nothing -> return g1
+      -- case lookupU v g1 of
+      --   (Just _) -> return g1
+      --   Nothing -> Left . InstantiationError ta tb . render
+      --     $ "Error in InstRSolve with gamma:\n" <> tupled (map pretty (gammaContext g1))
 
 
 --  g1 |- t
 -- ----------------------------------------- instLSolve
 --  g1,Ea,g2 |- Ea <=: t -| g1,Ea=t,g2
-instantiate _ ta@(ExistU v ([], _) ([], _)) tb g1 =
+instantiate _ (ExistU v ([], _) ([], _)) tb g1 =
   case access1 v (gammaContext g1) of
     (Just (lhs, _, rhs)) -> do
         solved <- solve v tb
         return $ g1 { gammaContext = lhs ++ solved : rhs }
-    Nothing ->
-      case lookupU v g1 of
-        (Just _) -> return g1
-        Nothing -> Left . InstantiationError ta tb . render
-          $ "Error in InstLSolve:" <+> tupled (map pretty (gammaContext g1))
+    Nothing -> return g1
+      -- case lookupU v g1 of
+      --   (Just _) -> return g1
+      --   Nothing -> Left . InstantiationError ta tb . render
+      --     $ "Error in InstLSolve:" <+> tupled (map pretty (gammaContext g1))
 
 instantiate _ ta tb _ = Left $ InstantiationError ta tb "Unexpected types"
 
@@ -648,7 +648,7 @@ selectorSetter setTypes0 s0 t0 = fst (f t0 setTypes0 s0) where
 
   subIdx :: ([TypeU], [TypeU]) -> (Int, Selector) -> ([TypeU], [TypeU])
   subIdx (ts, setTypesN) (i, s)
-    | i < length ts = 
+    | i < length ts =
         let (newType, setTypesN') = f (ts !! i) setTypesN s
         in (take i ts <> [newType] <> drop (i+1) ts, setTypesN')
     | otherwise = error $ "Bad pattern, index " <> show i <> " is greather than tuple length"
