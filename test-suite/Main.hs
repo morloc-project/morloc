@@ -37,6 +37,12 @@ main = do
 
       -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
+      , golden "functional-data-1" "functional-data-1"
+      , golden "functional-data-2" "functional-data-2"
+      , golden "functional-data-3" "functional-data-3"
+      , golden "functional-data-4" "functional-data-4"
+      , golden "functional-data-5" "functional-data-5"
+
       , golden "pattern-getters" "pattern-getters"
       , golden "pattern-setters" "pattern-setters"
 
@@ -223,10 +229,6 @@ main = do
       , golden "records-complex-1" "records-complex-1"
       , golden "records-complex-2" "records-complex-2"
       , golden "records-nested" "records-nested"
-
-      -- , golden "records-functional-1" "records-functional-1"
-      , golden "records-functional-2" "records-functional-2"
-      , golden "records-functional-3" "records-functional-3"
 
       , golden "selection-1" "selection-1"
       , golden "selection-2" "selection-2"
