@@ -1,0 +1,14 @@
+module m (foo)
+
+import root-py
+
+record Funs where
+  f :: Int -> Int
+  g :: Int -> Int
+record Py => Funs = "dict"
+
+bar :: Int -> Int -> Funs
+source Py from "main.py" ("bar")
+
+foo :: Int -> Int -> Int
+foo x y = (.f (bar x 9)) y
