@@ -1,0 +1,9 @@
+module m (foo)
+
+import root-py
+
+bar :: Bool -> [(Int -> Int)]
+source Py from "main.py" ("bar")
+
+foo :: Bool -> Int -> [Int]
+foo x y = map (\f -> f y) (bar x)

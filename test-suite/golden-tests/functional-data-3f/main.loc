@@ -1,0 +1,10 @@
+module m (foo)
+
+import root-py
+
+bar :: Bool -> (Int -> Int, Bool -> Int)
+source Py from "main.py" ("bar")
+
+foo :: Bool -> Int -> (Int, Int)
+foo x y = ((.1 fs) x, (.0 fs) y) where
+  fs = bar x

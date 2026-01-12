@@ -20,5 +20,4 @@ funs :: Funs
 funs = { f = funf, g = fung }
 
 foo :: Int -> Int
--- foo = doit (.f funs)
-foo = doit funf -- (.f funs)
+foo = doit (.f funs)
