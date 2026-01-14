@@ -752,15 +752,23 @@ expressPolyExpr _ _ parentType x@(AnnoS (Idx m t) _ _) = do
                <> "\n parentType:" <+> pretty parentType
                <> "\n x:" <+> pretty x
 
+
+-- evaluate an expression that has a functional type and is applied
 expressPolyApp
   :: Lang
   -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
   -> [PolyExpr]
   -> MorlocMonad PolyExpr
+
+-- handle directly sourced functions
 expressPolyApp _ (AnnoS g _ (ExeS (SrcCall src))) xs
   = return . PolyReturn $ PolyApp (PolyExe g (SrcCallP src)) xs
+
+-- handle functions extracted from data by patterns
 expressPolyApp _ (AnnoS g _ (ExeS (PatCall pat))) xs
   = return . PolyReturn $ PolyApp (PolyExe g (PatCallP pat)) xs
+
+-- handle functions returned from source functions
 expressPolyApp lang f@(AnnoS g@(Idx i _) _ (AppS _ _)) es = do
   fe <- expressPolyExprWrap lang g f
   return
@@ -768,7 +776,17 @@ expressPolyApp lang f@(AnnoS g@(Idx i _) _ (AppS _ _)) es = do
     . PolyReturn
     $ PolyApp (PolyLetVar g i) es
 
+-- handle functions passed as lambda-bound variables
+expressPolyApp _ (AnnoS g (_, args) (BndS v)) xs = do
+  case [j | (Arg j u) <- args, u == v] of
+    [j] -> return . PolyReturn $ PolyApp (PolyExe g (LocalCallP j)) xs
+    _ -> error "Unreachable? BndS value should have been wired uniquely to args previously"
+
+-- all other function sources are invalid
+expressPolyApp _ (AnnoS _ _ (LamS _ _)) _ = error "unexpected LamS - should have been handled"
+expressPolyApp _ (AnnoS _ _ (VarS _ _)) _ = error "unexpected VarS - should have been substituted"
 expressPolyApp _ _ _ = error "Unreachable? This does not seem to be applicable"
+
 
 expressContainer :: Indexed Type -> Indexed Lang -> Indexed Lang -> [Arg EVar] -> PolyExpr -> PolyExpr
 expressContainer pc (Idx midx parentLang) (Idx _ lang) args e
