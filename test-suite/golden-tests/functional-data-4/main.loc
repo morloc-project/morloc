@@ -9,4 +9,3 @@ source Py from "main.py" ("runAll")
 runAll a b :: a -> [(a -> b)] -> [b]
 
 foo x = runAll x funs
-bar x = runAll x funs

@@ -36,6 +36,7 @@ module Morloc.CodeGenerator.Namespace
   , ArgTypes(..)
   , argTypesToTypeM
   -- ** Manifold data types
+  , ExecutableExpressionPool(..)
   , RemoteForm(..)
   , PolyHead(..)
   , PolyExpr(..)
@@ -210,6 +211,16 @@ instance Pretty SerialAST where
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
   pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 
+data ExecutableExpressionPool
+  = SrcCallP Source -- source code
+  | PatCallP Pattern -- pattern function
+  | LocalCallP Int -- a locally defined function
+  deriving (Show, Ord, Eq)
+
+instance Pretty ExecutableExpressionPool where
+  pretty (SrcCallP src) = pretty src
+  pretty (PatCallP pat) = pretty pat
+  pretty (LocalCallP i) = "x" <> pretty i
 
 data TypePacker = TypePacker
   { typePackerPacked    :: TypeF
@@ -379,7 +390,7 @@ data PolyExpr
   -- The Let variables are generated only in partialExpress, where the type is known
   | PolyLetVar (Indexed Type) Int
   -- terms that map 1:1 versus SAnno; have defined types in one language
-  | PolyExe    (Indexed Type) ExecutableExpr
+  | PolyExe    (Indexed Type) ExecutableExpressionPool
   -- data types
   | PolyList   (Indexed TVar) (Indexed Type) [PolyExpr]
   | PolyTuple  (Indexed TVar) [(Indexed Type, PolyExpr)]
@@ -406,7 +417,7 @@ data MonoExpr
   | MonoReturn MonoExpr
   | MonoApp MonoExpr [MonoExpr]
   -- terms that map 1:1 versus SAnno; have defined types in one language
-  | MonoExe    (Indexed Type) ExecutableExpr
+  | MonoExe    (Indexed Type) ExecutableExpressionPool
   | MonoBndVar (Three None Type (Indexed Type)) Int -- (Three Lang Type (Indexed Type)) Int  -- (Maybe (Indexed Type))
   -- data types
   | MonoRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, MonoExpr))]
@@ -463,14 +474,14 @@ data NativeExpr
   -- The [TypeF] term stores solved generic terms. These map to the required
   -- template variables for C++ functions. These are NOT the arguments the
   -- function takes, rather these are the type parameters.
-  | AppExeN      TypeF ExecutableExpr [(Text, TypeF)] [NativeArg]
+  | AppExeN      TypeF ExecutableExpressionPool [(Text, TypeF)] [NativeArg]
   | ReturnN      NativeExpr
   | SerialLetN   Int SerialExpr NativeExpr
   | NativeLetN   Int NativeExpr NativeExpr
   | LetVarN      TypeF Int
   | BndVarN      TypeF Int
   | DeserializeN TypeF SerialAST SerialExpr
-  | ExeN         TypeF ExecutableExpr
+  | ExeN         TypeF ExecutableExpressionPool
   -- data types
   | ListN        FVar TypeF [NativeExpr]
   | TupleN       FVar [NativeExpr]
@@ -698,7 +709,7 @@ data SerialExpr_ sm se ne sr nr
   | SerializeS_ SerialAST ne
 
 data NativeExpr_ nm se ne sr nr
-  = AppExeN_      TypeF ExecutableExpr [(Text, TypeF)] [nr]
+  = AppExeN_      TypeF ExecutableExpressionPool [(Text, TypeF)] [nr]
   | ManN_         nm
   | ReturnN_      ne
   | SerialLetN_   Int se ne
@@ -706,7 +717,7 @@ data NativeExpr_ nm se ne sr nr
   | LetVarN_      TypeF Int
   | BndVarN_      TypeF Int
   | DeserializeN_ TypeF SerialAST se
-  | ExeN_         TypeF ExecutableExpr
+  | ExeN_         TypeF ExecutableExpressionPool
   -- data types
   | ListN_        FVar TypeF [ne]
   | TupleN_       FVar [ne]
@@ -1118,8 +1129,9 @@ instance Pretty PolyExpr where
     pretty (PolyApp e es) = "PolyApp" <+> list (map pretty (e:es))
     pretty (PolyBndVar _ _) = "PolyBndVar"
     pretty (PolyLetVar _ _) = "PolyLetVar"
-    pretty (PolyExe _ (SrcCall src)) = "PolyExe<" <> pretty (srcAlias src) <> ">"
-    pretty (PolyExe _ (PatCall _)) = "PolyExe<pattern>"
+    pretty (PolyExe _ (SrcCallP src)) = "PolyExe<" <> pretty (srcAlias src) <> ">"
+    pretty (PolyExe _ (PatCallP _)) = "PolyExe<pattern>"
+    pretty (PolyExe _ (LocalCallP _)) = "PolyExe<local>"
     pretty (PolyList _ _ _) = "PolyList"
     pretty (PolyTuple _ xs) = "PolyTuple" <+> pretty (length xs)
     pretty (PolyRecord _ _ _ _) = "PolyRecord"

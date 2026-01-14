@@ -273,10 +273,12 @@ translateSegment makeSrcName m0 =
       return $ e {poolExpr = serialized, poolPriorLines = poolPriorLines e <> assignments}
 
     makeNativeExpr :: NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
-    makeNativeExpr _ (AppExeN_ _ (SrcCall src) _ xs) =
+    makeNativeExpr _ (AppExeN_ _ (SrcCallP src) _ xs) =
         return $ mergePoolDocs ((<>) (makeSrcName src) . tupled) (map snd xs)
-    makeNativeExpr _ (AppExeN_ t (PatCall p) _ xs) =
+    makeNativeExpr _ (AppExeN_ t (PatCallP p) _ xs) =
         return $ mergePoolDocs (evaluatePattern t p) (map snd xs)
+    makeNativeExpr _ (AppExeN_ _ (LocalCallP idx) _ xs) =
+        return $ mergePoolDocs ((<>) (nvarNamer idx) . tupled) (map snd xs)
     makeNativeExpr _ (ManN_ call) = return call
     makeNativeExpr _ (ReturnN_ x) =
         return $ x { poolExpr = "return(" <> poolExpr x <> ")" }
@@ -290,8 +292,9 @@ translateSegment makeSrcName m0 =
           { poolExpr = deserialized
           , poolPriorLines = poolPriorLines x <> assignments
           }
-    makeNativeExpr _ (ExeN_ _ (SrcCall src)) = return $ defaultValue { poolExpr = makeSrcName src }
-    makeNativeExpr _ (ExeN_ _ (PatCall _)) = error "Unreachable: patterns are always used in applications"
+    makeNativeExpr _ (ExeN_ _ (SrcCallP src)) = return $ defaultValue { poolExpr = makeSrcName src }
+    makeNativeExpr _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
+    makeNativeExpr _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue { poolExpr = nvarNamer idx }
     makeNativeExpr _ (ListN_ _ _ xs) = return $ mergePoolDocs list xs
     makeNativeExpr _ (TupleN_ _ xs) = return $ mergePoolDocs tupled xs
     makeNativeExpr _ (RecordN_ _ _ _ rs)

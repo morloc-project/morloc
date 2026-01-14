@@ -519,12 +519,15 @@ PROPAGATE_ERROR(errmsg)|]
   makeSerialExpr _ _ = error "Unreachable"
 
   makeNativeExpr :: NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> CppTranslator PoolDocs
-  makeNativeExpr _ (AppExeN_ _ (SrcCall src) qs (map snd -> es)) = do
+  makeNativeExpr _ (AppExeN_ _ (SrcCallP src) qs (map snd -> es)) = do
     templateStr <- templateArguments qs
     return $ mergePoolDocs ((<>) (pretty (srcName src) <> templateStr) . tupled) es
-  makeNativeExpr _ (AppExeN_ t (PatCall p) _ xs) = do
+  makeNativeExpr _ (AppExeN_ t (PatCallP p) _ xs) = do
       state <- CMS.get
       return $ mergePoolDocs (evaluatePattern state t p) (map snd xs)
+  makeNativeExpr _ (AppExeN_ _ (LocalCallP idx) qs (map snd -> es)) = do
+    templateStr <- templateArguments qs
+    return $ mergePoolDocs ((<>) (nvarNamer idx <> templateStr) . tupled) es
   makeNativeExpr _ (ManN_ call) = return call
   makeNativeExpr _ (ReturnN_ e) =
     return $ e {poolExpr = "return" <> parens (poolExpr e) <> ";"}
@@ -554,7 +557,7 @@ PROPAGATE_ERROR(errmsg)|]
     let p = mergePoolDocs (const v') (map snd rs)
     return (p {poolPriorLines = poolPriorLines p <> [decl]})
 
-  makeNativeExpr _ (ExeN_ _ (PatCall _)) = error "Unreachable: patterns are always used in applications"
+  makeNativeExpr _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
 
   makeNativeExpr _ (LogN_         _ x) = return $ defaultValue { poolExpr = if x then "true" else "false" }
   makeNativeExpr _ (RealN_        _ x) = return $ defaultValue { poolExpr = viaShow x }

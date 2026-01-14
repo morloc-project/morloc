@@ -3,8 +3,13 @@ module m (foo)
 import root-py
 
 bar :: Bool -> (Int -> Int, Bool -> Int)
-source Py from "main.py" ("bar")
+source Py from "main.py" ("bar", "fst")
 
-foo :: Bool -> Int -> (Int, Int)
-foo x y = ((.1 fs) x, (.0 fs) y) where
+fst a b :: (a, b) -> a
+
+foo :: Bool -> Int -> Int
+foo x y = (fst (bar x)) y
+
+baz :: Bool -> Int -> (Int, Int)
+baz x y = ((.1 fs) x, (.0 fs) y) where
   fs = bar x
