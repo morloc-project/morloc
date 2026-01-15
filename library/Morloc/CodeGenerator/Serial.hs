@@ -30,14 +30,8 @@ import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
 import Morloc.Typecheck.Internal (subtype, apply, unqualify, qualify, substitute)
 import Morloc.CodeGenerator.Infer
+import qualified Morloc.Language as ML
 
-
--- The type of serialization data as JSON, currently
-serialType :: Lang -> CVar
-serialType Python3Lang = CV "str"
-serialType RLang = CV "character"
-serialType CppLang = CV "std::string"
-serialType _ = error "Ah hell, you know I don't know that language"
 
 serializerError :: MDoc -> MorlocMonad a
 serializerError = MM.throwError . SerializationError . render
@@ -50,6 +44,7 @@ serialAstToType (SerialTuple v ss) = AppF (VarF v) (map serialAstToType ss)
 serialAstToType (SerialObject o n ps rs) =
   let ts = map (serialAstToType . snd) rs
   in NamF o n ps (zip (map fst rs) ts)
+serialAstToType (SerialManifoldRef t) = t
 serialAstToType (SerialReal x) = VarF x
 serialAstToType (SerialFloat32 x) = VarF x
 serialAstToType (SerialFloat64 x) = VarF x
@@ -67,7 +62,7 @@ serialAstToType (SerialBool   x) = VarF x
 serialAstToType (SerialString x) = VarF x
 serialAstToType (SerialNull   x) = VarF x
 -- passthrough type, it cannot be deserialized or serialized, only passed in from a different language
-serialAstToType (SerialUnknown v) = UnkF v
+serialAstToType SerialUnknown = SerialF
 
 
 encode64 :: Int -> String
@@ -102,6 +97,7 @@ serialAstToMsgpackSchema (SerialTuple v ss) = addHint v <> "t" <> encode64D (len
 serialAstToMsgpackSchema (SerialObject _ v _ rs) = addHint v <> "m" <> encode64D (length rs) <> foldl (<>) "" (map keypair rs) where
   keypair :: (Key, SerialAST) -> MDoc
   keypair (k, s) = (encode64D . DT.length . unKey $ k) <> pretty (unKey k) <> serialAstToMsgpackSchema s
+serialAstToMsgpackSchema (SerialManifoldRef _) = "r8" -- 64 bit index
 serialAstToMsgpackSchema (SerialReal    v) = addHint v <> "f8" -- 64 bit float
 serialAstToMsgpackSchema (SerialFloat32 v) = addHint v <> "f4"
 serialAstToMsgpackSchema (SerialFloat64 v) = addHint v <> "f8"
@@ -118,7 +114,7 @@ serialAstToMsgpackSchema (SerialUInt64  v) = addHint v <> "u8"
 serialAstToMsgpackSchema (SerialBool    v) = addHint v <> "b"
 serialAstToMsgpackSchema (SerialString  v) = addHint v <> "s"
 serialAstToMsgpackSchema (SerialNull    v) = addHint v <> "z"
-serialAstToMsgpackSchema (SerialUnknown v) = addHint v <> "?" -- I guess this works as a general bad new character?
+serialAstToMsgpackSchema SerialUnknown = "?" -- I guess this works as a general bad new character?
 
 addHint :: FVar -> MDoc
 addHint (FV _ (CV "")) = "" -- no hint if no concrete type is defined
@@ -134,6 +130,7 @@ shallowType (SerialTuple v ss) = AppF (VarF v) $ map shallowType ss
 shallowType (SerialObject o n ps rs) =
   let ts = map (shallowType . snd) rs
   in NamF o n ps (zip (map fst rs) ts)
+shallowType (SerialManifoldRef t) = t
 shallowType (SerialReal x) = VarF x
 shallowType (SerialFloat32 x) = VarF x
 shallowType (SerialFloat64 x) = VarF x
@@ -150,7 +147,7 @@ shallowType (SerialUInt64 x) = VarF x
 shallowType (SerialBool   x) = VarF x
 shallowType (SerialString x) = VarF x
 shallowType (SerialNull   x) = VarF x
-shallowType (SerialUnknown v) = UnkF v
+shallowType SerialUnknown = SerialF
 
 findPackers :: Lang -> MorlocMonad
   ( [(([TVar], TypeU), Source)]
@@ -215,7 +212,7 @@ makeSerialAST m lang t0 = do
     -- If the type is unknown in this language, then it must be a passthrough
     -- type. So it will only be represented in the serialization form. As a
     -- string, for now.
-    makeSerialAST' _ _ (UnkF (FV gv _)) = return $ SerialUnknown (FV gv (serialType lang))
+    makeSerialAST' _ _ SerialF = return SerialUnknown
     makeSerialAST' gscope typepackers ft@(VarF v@(FV gv cv))
       | finalType == BT.unitU = return $ SerialNull v
       | finalType == BT.boolU = return $ SerialBool v
@@ -241,7 +238,7 @@ makeSerialAST m lang t0 = do
             return $ SerialPack v selection
           Nothing ->  serializerError $ "Cannot find constructor in VarF" <+> dquotes (pretty v) <+> " finalType=" <> pretty finalType
       where
-        finalType = let t = fst $ unweaveTypeF ft
+        finalType = let t = fst $ unweaveTypeF lang ft
                     in either (const t) id (TE.evaluateType gscope t)
 
         makeTypePacker :: (Int, TypeU, TypeU, Source, Source) -> MorlocMonad TypePacker
@@ -266,8 +263,7 @@ makeSerialAST m lang t0 = do
         selectPacker _ = serializerError "Two you say, oh, get out of here"
 
 
-    makeSerialAST' _ _ t@(FunF _ _)
-      = serializerError $ "Cannot serialize functions at" <+> pretty m <> ":" <+> pretty t
+    makeSerialAST' _ _ t@(FunF _ _) = return $ SerialManifoldRef t
     makeSerialAST' gscope typepackers ft@(AppF (VarF fv@(FV generalTypeName _)) ts@(firstType:_))
       | finalVar == Just BT.list = SerialList fv <$> makeSerialAST' gscope typepackers firstType
       | finalVar == Just (BT.tuple (length ts)) = SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers) ts
@@ -282,8 +278,8 @@ makeSerialAST m lang t0 = do
             <> "\n  ft:" <+> pretty ft
             <> "\n  finalVar:" <+> pretty finalVar
             <> "\n  gscope:" <+> viaShow gscope
-            <> "\n  general t:" <+> (viaShow . fst $ unweaveTypeF ft)
-            <> "\n  concrete t:" <+> (viaShow . snd $ unweaveTypeF ft)
+            <> "\n  general t:" <+> (viaShow . fst $ unweaveTypeF lang ft)
+            <> "\n  concrete t:" <+> (viaShow . snd $ unweaveTypeF lang ft)
             <> "\n  typepackers:" <+> viaShow typepackers
       where
          basevar :: TypeU -> Maybe TVar
@@ -294,7 +290,7 @@ makeSerialAST m lang t0 = do
          basevar (AppU t _) = basevar t
          basevar (NamU _ v _ _) = Just v
 
-         finalVar = let t = fst $ unweaveTypeF ft
+         finalVar = let t = fst $ unweaveTypeF lang ft
                     in basevar $ either (const t) id (TE.evaluateType gscope t)
 
          selectPacker :: [(TypePacker, SerialAST)] -> MorlocMonad (TypePacker, SerialAST)
@@ -366,7 +362,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
         -> (TypeU, TypeU) -- The general unresolved packed and unpacked types
         -> MorlocMonad (Maybe TypeF) -- the resolved unpacked types
     resolveP a b c generalTypes = do
-        let (ga, ca) = unweaveTypeF a
+        let (ga, ca) = unweaveTypeF lang a
         unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 []) of
             (Left typeErr) -> serializerError
                 $  "There was an error raised in subtyping while resolving serialization"
@@ -411,21 +407,22 @@ cv2tv (CV x) = TV x
 tv2cv :: TVar -> CVar
 tv2cv (TV x) = CV x
 
-unweaveTypeF :: TypeF -> (TypeU, TypeU)
-unweaveTypeF (UnkF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
-unweaveTypeF (VarF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
-unweaveTypeF (FunF ts t) =
-    let (gt, ct) = unweaveTypeF t
-        (gts, cts) = unzip $ map unweaveTypeF ts
+unweaveTypeF :: Lang -> TypeF -> (TypeU, TypeU)
+-- FIX: what is the general type of a serial? Is this even defined?
+unweaveTypeF lang SerialF = (VarU (TV ""), VarU (TV (ML.serialType lang)))
+unweaveTypeF _ (VarF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
+unweaveTypeF lang (FunF ts t) =
+    let (gt, ct) = unweaveTypeF lang t
+        (gts, cts) = unzip $ map (unweaveTypeF lang) ts
     in (FunU gts gt, FunU cts ct)
-unweaveTypeF (AppF t ts) =
-    let (gt, ct) = unweaveTypeF t
-        (gts, cts) = unzip $ map unweaveTypeF ts
+unweaveTypeF lang (AppF t ts) =
+    let (gt, ct) = unweaveTypeF lang t
+        (gts, cts) = unzip $ map (unweaveTypeF lang) ts
     in (AppU gt gts, AppU ct cts)
-unweaveTypeF (NamF n (FV gv cv) ps rs) =
-    let (psg, psc) = unzip $ map unweaveTypeF ps
+unweaveTypeF lang (NamF n (FV gv cv) ps rs) =
+    let (psg, psc) = unzip $ map (unweaveTypeF lang) ps
         keys = map fst rs
-        (vsg, vsc) = unzip $ map (unweaveTypeF . snd) rs
+        (vsg, vsc) = unzip $ map (unweaveTypeF lang . snd) rs
     in (NamU n gv psg (zip keys vsg), NamU n (cv2tv cv) psc (zip keys vsc))
 
 weaveTypeF :: TypeU -> TypeU -> TypeF
@@ -437,7 +434,7 @@ weaveTypeF (NamU n gv psg rsg) (NamU _ cv psc rsc) =
       zip (map fst rsg)
           (zipWith weaveTypeF (map snd rsg) (map snd rsc))
     )
-weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
+weaveTypeF ((ExistU _ _ _)) (ExistU _ _ _) = SerialF
 weaveTypeF gt ct = error . show $ (gt, ct)
 
 
@@ -458,6 +455,7 @@ isSerializable (SerialPack _ _) = False
 isSerializable (SerialList _ x) = isSerializable x
 isSerializable (SerialTuple _ xs) = all isSerializable xs
 isSerializable (SerialObject _ _ _ rs) = all (isSerializable . snd) rs
+isSerializable (SerialManifoldRef _) = True
 isSerializable (SerialReal _) = True
 isSerializable (SerialFloat32 _) = True
 isSerializable (SerialFloat64 _) = True
@@ -474,7 +472,7 @@ isSerializable (SerialUInt64 _) = True
 isSerializable (SerialBool   _) = True
 isSerializable (SerialString _) = True
 isSerializable (SerialNull   _) = True
-isSerializable (SerialUnknown _) = True -- are you feeling lucky?
+isSerializable SerialUnknown = True -- are you feeling lucky?
 
 prettySerialOne :: SerialAST -> MDoc
 prettySerialOne (SerialPack _ _) = "SerialPack"
@@ -483,6 +481,7 @@ prettySerialOne (SerialTuple v xs) = "SerialTuple" <> angles (pretty v) <> tuple
 prettySerialOne (SerialObject r _ _ rs)
   = block 4 ("SerialObject@" <> viaShow r)
   $ vsep (map (\(k,v) -> parens (viaShow k) <> "=" <> prettySerialOne v) rs)
+prettySerialOne (SerialManifoldRef _) = "SerialManifoldRef"
 prettySerialOne (SerialReal _) = "SerialReal"
 prettySerialOne (SerialFloat32 _) = "SerialFloat32"
 prettySerialOne (SerialFloat64 _) = "SerialFloat64"
@@ -499,4 +498,4 @@ prettySerialOne (SerialUInt64 _) = "SerialUInt64"
 prettySerialOne (SerialBool   _) = "SerialBool"
 prettySerialOne (SerialString _) = "SerialString"
 prettySerialOne (SerialNull   _) = "SerialNull"
-prettySerialOne (SerialUnknown _) = "SerialUnknown"
+prettySerialOne SerialUnknown = "SerialUnknown"

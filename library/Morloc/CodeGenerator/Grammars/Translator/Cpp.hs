@@ -86,7 +86,7 @@ instance HasCppType NativeManifold where
 
 instance {-# OVERLAPPABLE #-} HasTypeF e => HasCppType e where
   cppTypeOf = f . typeFof where
-    f (UnkF (FV _ x)) = return $ pretty x
+    f SerialF = return serialType
     f (VarF (FV _ x)) = return $ pretty x
     f (FunF ts t) = do
       t' <- f t
@@ -255,8 +255,8 @@ makeSignature = foldWithSerialManifoldM fm where
 
   serialManifold (SerialManifold m _ form _ _) _ = manifoldSignature m serialType form
 
-  nativeManifold e@(NativeManifold m _ form _) _ = do
-    typestr <- cppTypeOf e
+  nativeManifold (NativeManifold m _ form e) _ = do
+    typestr <- cppTypeOf e -- get the return type of the manifold
     manifoldSignature m typestr form
 
   manifoldSignature :: HasTypeM t => Int -> MDoc -> ManifoldForm (Or TypeS TypeF) t -> CppTranslator [MDoc]
@@ -418,7 +418,7 @@ deserialize varname0 typestr0 s0
       typestr <- cppTypeOf $ shallowType tup
       v' <- helperNamer <$> getCounter
       let x = [idoc|#{typestr} #{v'} = std::make_tuple#{tupled ss'};|]
-      return (v', concat befores ++ [x]);
+      return (v', concat befores ++ [x])
 
     construct v rec@(SerialObject NamRecord _ _ rs) = do
       (ss', befores) <- mapAndUnzipM
@@ -428,7 +428,7 @@ deserialize varname0 typestr0 s0
       v' <- helperNamer <$> getCounter
       let decl = encloseSep "{" "}" "," ss'
           x = [idoc|#{t} #{v'} = #{decl};|]
-      return (v', concat befores ++ [x]);
+      return (v', concat befores ++ [x])
 
     construct _ _ = undefined -- TODO add support for deserialization of remaining types (e.g. other records)
 
@@ -462,7 +462,8 @@ translateSegment m0 = do
   makeSerialManifold sm (SerialManifold_ i _ form headForm e) = makeManifold i form (Just headForm) (typeMof sm) e
 
   makeNativeManifold :: NativeManifold -> NativeManifold_ PoolDocs -> CppTranslator PoolDocs
-  makeNativeManifold nm (NativeManifold_ i _ form e) = makeManifold i form Nothing (typeMof nm) e
+  makeNativeManifold (NativeManifold _ _ _ nm) (NativeManifold_ i _ form e) =
+    makeManifold i form Nothing (typeMof nm) e
 
   makeSerialArg :: SerialArg -> SerialArg_ PoolDocs PoolDocs -> CppTranslator (TypeS, PoolDocs)
   makeSerialArg sr (SerialArgManifold_ x) = return (typeSof sr, x)
@@ -508,8 +509,8 @@ PROPAGATE_ERROR(errmsg)|]
 
   makeSerialExpr _ (ReturnS_ e) = return $ e {poolExpr = "return(" <> poolExpr e <> ");"}
   makeSerialExpr _ (SerialLetS_ letIndex sa sb) = return $ makeLet svarNamer letIndex serialType sa sb
-  makeSerialExpr (NativeLetS _ (typeFof -> t) _) (NativeLetS_ letIndex na sb) = do
-    typestr <- cppTypeOf t
+  makeSerialExpr (NativeLetS _ e _) (NativeLetS_ letIndex na sb) = do
+    typestr <- cppTypeOf (typeFof e)
     return $ makeLet nvarNamer letIndex typestr na sb
   makeSerialExpr _ (LetVarS_ _ i) = return $ defaultValue { poolExpr = svarNamer i }
   makeSerialExpr _ (BndVarS_ _ i) = return $ defaultValue { poolExpr = svarNamer i }
@@ -774,7 +775,7 @@ collectRecords e0@(SerialManifold i0 _ _ _ _)
     seekRecs m (NamF _ _ _ rs) = concatMap (seekRecs m . snd) rs
     seekRecs m (FunF ts t) = concatMap (seekRecs m) (t:ts)
     seekRecs m (AppF t ts) = concatMap (seekRecs m) (t:ts)
-    seekRecs _ (UnkF _) = []
+    seekRecs _ SerialF = []
     seekRecs _ (VarF _) = []
 
 
@@ -903,7 +904,7 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     showDefType ps (VarT v)
       | (Left v) `elem` ps = "T" <> pretty v
       | otherwise = pretty v
-    showDefType _ (FunT _ _) = error "Cannot serialize functions"
+    showDefType _ (FunT _ _) = "STUB_FUNCTION"
     showDefType _ (NamT _ v _ _) = pretty v
     showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
     showDefType _ (AppT _ _) = error "AppT is only OK with VarT, for now"
