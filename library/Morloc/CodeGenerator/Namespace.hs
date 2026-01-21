@@ -130,16 +130,11 @@ data FVar = FV TVar CVar
 
 -- The most minimal type that contains both general and concrete types
 data TypeF
-  = VarF FVar
+  = UnkF FVar -- this should be parameterized by `Type`, since the general type should be known
+  | VarF FVar
   | FunF [TypeF] TypeF
   | AppF TypeF [TypeF]
   | NamF NamType FVar [TypeF] [(Key, TypeF)]
-  -- The general type of a serialized morloc data object
-  -- TypeF stores native data, but in special cases these structures may need to
-  -- reference serialized data. For example, a record containing functions which
-  -- may be foreign. The function signature needs match the signature of the
-  -- manifold.
-  | SerialF
   deriving (Show, Ord, Eq)
 
 data TypeM
@@ -162,7 +157,6 @@ data SerialAST
   | SerialList FVar SerialAST
   | SerialTuple FVar [SerialAST]
   | SerialObject NamType FVar [TypeF] [(Key, SerialAST)]
-  | SerialManifoldRef TypeF
   -- ^ Make a record, table, or object. The parameters indicate
   --   1) NamType - record/table/object
   --   2) FVar - telling the name of the object (e.g., "Person")
@@ -184,7 +178,7 @@ data SerialAST
   | SerialBool FVar
   | SerialString FVar
   | SerialNull FVar
-  | SerialUnknown
+  | SerialUnknown FVar
   -- ^ depending on the language, this may or may not raise an error down the
   -- line, the parameter contains the variable name, which is useful only for
   -- source code comments.
@@ -199,7 +193,6 @@ instance Pretty SerialAST where
   pretty (SerialObject o _ vs rs) = parens
     $ "SerialObject" <+> pretty o <+> tupled (map pretty vs)
     <+> encloseSep "{" "}" "," [pretty k <+> "=" <+> pretty p | (k, p) <- rs]
-  pretty (SerialManifoldRef t) = parens ("SerialManifoldRef" <> ":" <+> pretty t)
   pretty (SerialReal v) = parens ("SerialReal" <+> pretty v)
   pretty (SerialFloat32 v) = parens ("SerialFloat32" <+> pretty v)
   pretty (SerialFloat64 v) = parens ("SerialFloat64" <+> pretty v)
@@ -216,7 +209,7 @@ instance Pretty SerialAST where
   pretty (SerialBool v) = parens ("SerialBool" <+> pretty v)
   pretty (SerialString v) = parens ("SerialString" <+> pretty v)
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
-  pretty SerialUnknown = "SerialUnknown"
+  pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 
 data ExecutableExpressionPool
   = SrcCallP Source -- source code
@@ -391,8 +384,7 @@ data PolyExpr
   -- but I also may need to generate passthrough terms
   | PolyBndVar (Three
         Lang -- no type information is known
-        Type -- the general type is known, but this is a passing
-             -- variable without a locally identifiable concrete index
+        Type -- the general type is known, but this is a passing variable without an locally identifiable concrete index
         (Indexed Type)
       ) Int
   -- The Let variables are generated only in partialExpress, where the type is known
@@ -426,7 +418,7 @@ data MonoExpr
   | MonoApp MonoExpr [MonoExpr]
   -- terms that map 1:1 versus SAnno; have defined types in one language
   | MonoExe    (Indexed Type) ExecutableExpressionPool
-  | MonoBndVar (Three None Type (Indexed Type)) Int
+  | MonoBndVar (Three None Type (Indexed Type)) Int -- (Three Lang Type (Indexed Type)) Int  -- (Maybe (Indexed Type))
   -- data types
   | MonoRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, MonoExpr))]
   | MonoList   (Indexed TVar) (Indexed Type) [MonoExpr]
@@ -927,7 +919,7 @@ instance HasTypeM TypeM where
 
 instance HasTypeM TypeF where
   typeMof (FunF ts t) = Function (map typeMof ts) (typeMof t)
-  typeMof SerialF = Passthrough
+  typeMof (UnkF _) = Passthrough
   typeMof t = Native t
 
 instance HasTypeM NativeExpr where
@@ -941,19 +933,10 @@ instance HasTypeS (Maybe TypeF) where
   typeSof (Just t) = typeSof t
   typeSof Nothing = PassthroughS
 
--- Get full the manifold type
--- * Note that manifolds may use arguments from the calling context, these are
---   not included in the function type, see notes on ManifoldForm
+-- TODO: fix this - the type of a native manifold should be the full function
+-- type, but the manifold function type may not be entirely native
 instance HasTypeF NativeManifold where
-  typeFof (NativeManifold _ _ form ne) =
-    case manifoldFormToTypeFs form of
-      [] -> typeFof ne
-      ts -> FunF ts (typeFof ne)
-    where
-      manifoldFormToTypeFs :: ManifoldForm (Or TypeS TypeF) TypeF -> [TypeF]
-      manifoldFormToTypeFs (ManifoldPass bnds) = [t | Arg _ t <- bnds]
-      manifoldFormToTypeFs (ManifoldFull _) = []
-      manifoldFormToTypeFs (ManifoldPart _ bnds) = manifoldFormToTypeFs (ManifoldPass bnds)
+  typeFof (NativeManifold _ _ _ ne) = typeFof ne
 
 instance HasTypeS SerialExpr where
   typeSof (ManS sm) = typeSof sm

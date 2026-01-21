@@ -576,7 +576,6 @@ expressPolyExpr findRemote parentLang pc (AnnoS (Idx midx _) (_, args)
   --          g m2(x, y, z)                                    |             |           |
   ----------------------------------------------------------------------------------------
   | isLocal = do
-      MM.sayVVV $ "case #1"
       -- There should be an equal number of input types and input arguments
       -- That is, the function should be fully applied. If it were partially
       -- applied, the lambda case would have been entered previously instead.
@@ -604,7 +603,6 @@ expressPolyExpr findRemote parentLang pc (AnnoS (Idx midx _) (_, args)
   --                                                           |             |           |
   ----------------------------------------------------------------------------------------
   | not isLocal = do
-        MM.sayVVV $ "case #5"
         let idxInputTypes = zipWith mkIdx xs inputs
         mayXs <- safeZipWithM (expressPolyExprWrap callLang) idxInputTypes xs
         func <- expressPolyApp parentLang f (fromJust mayXs)
@@ -639,7 +637,6 @@ expressPolyExpr findRemote parentLang
   --          g(m2, xs)                                        |             |           |
   ----------------------------------------------------------------------------------------
   | isLocal = do
-      MM.sayVVV $ "case #2"
       ids <- MM.takeFromCounter (length callInputs)
       let lambdaVals = bindVarIds ids (map (C . Idx cidx) callInputs)
           lambdaTypedArgs = fromJust $ safeZipWith annotate ids (map Just callInputs)
@@ -663,7 +660,6 @@ expressPolyExpr findRemote parentLang
   --          return g(m2, xs)                                 |             |           |
   ----------------------------------------------------------------------------------------
   | otherwise = do
-      MM.sayVVV $ "case #6"
       ids <- MM.takeFromCounter (length callInputs)
       let lambdaArgs = [Arg i None | i <- ids]
           lambdaTypedArgs = map (`Arg` Nothing) ids
@@ -718,7 +714,6 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx l
 
 -- records
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
-  MM.sayVVV $ "expressPolyExpr records"
   let tsIdx = zipWith mkIdx (map snd entries) (map snd rs)
   xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) tsIdx (map snd entries)
   let e = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip tsIdx xs'))
@@ -766,9 +761,8 @@ expressPolyApp
   -> MorlocMonad PolyExpr
 
 -- handle directly sourced functions
-expressPolyApp _ (AnnoS g _ (ExeS (SrcCall src))) xs = do
-  MM.sayVVV $ "expressPolyApp src g:" <+> pretty g
-  return . PolyReturn $ PolyApp (PolyExe g (SrcCallP src)) xs
+expressPolyApp _ (AnnoS g _ (ExeS (SrcCall src))) xs
+  = return . PolyReturn $ PolyApp (PolyExe g (SrcCallP src)) xs
 
 -- handle functions extracted from data by patterns
 expressPolyApp _ (AnnoS g _ (ExeS (PatCall pat))) xs
