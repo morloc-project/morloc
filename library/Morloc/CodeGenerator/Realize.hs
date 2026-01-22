@@ -93,6 +93,10 @@ realize s0 = do
   scoreExpr rstat (TupS xs, i) = do
     (xs', best) <- scoreMany rstat xs
     return (TupS xs', Idx i best)
+  scoreExpr rstat (NamS rs, i) = do
+    (xs, best) <- scoreMany rstat (map snd rs)
+    return (NamS (zip (map fst rs) xs), Idx i best)
+
   scoreExpr rstat (LamS vs x, i) = do
     x' <- scoreAnnoS (updateRState vs rstat) x
     return (LamS vs x', Idx i (scoresOf x'))
@@ -116,9 +120,6 @@ realize s0 = do
     let best = scoreApp scores pairss
 
     return (AppS f' xs', Idx i best)
-  scoreExpr rstat (NamS rs, i) = do
-    (xs, best) <- scoreMany rstat (map snd rs)
-    return (NamS (zip (map fst rs) xs), Idx i best)
   -- non-recursive expressions
   scoreExpr rstat (UniS, i) = return (UniS, zipLang i rstat)
 
@@ -256,8 +257,10 @@ realize s0 = do
       handleOne
         :: AnnoS (Indexed Type) Many (Indexed [(Lang, Int)])
         -> MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
-      handleOne x@(AnnoS _ (Idx _ ss) _) = do
-        let newLang = fmap fst (minBy (biasedCost l1) ss)
+      handleOne x@(AnnoS _ (Idx _ ss) e) = do
+        let newLang = if isFunctionalData e
+                        then l1
+                        else fmap fst (minBy (biasedCost l1) ss)
         x' <- collapseAnnoS newLang x
         return (x', newLang)
 
@@ -289,14 +292,6 @@ realize s0 = do
           --   <> indent 2 (vsep [ "*" <+> pretty t <+> ":" <+> pretty y | y@(AnnoS (Idx _ t) _ _, _)  <- xs'])
 
   -- Propagate downwards
-  collapseExpr _ l1 (LstS xs, Idx i ss) = do
-    lang <- chooseLanguage l1 ss
-    xs' <- mapM (collapseAnnoS lang) xs
-    return (LstS xs', Idx i lang)
-  collapseExpr _ l1 (TupS xs, Idx i ss) = do
-    lang <- chooseLanguage l1 ss
-    xs' <- mapM (collapseAnnoS lang) xs
-    return (TupS xs', Idx i lang)
   collapseExpr _ l1 (LamS vs x, Idx i ss) = do
     lang <- chooseLanguage l1 ss
     x' <- collapseAnnoS lang x
@@ -306,8 +301,17 @@ realize s0 = do
     f' <- collapseAnnoS lang f
     xs' <- mapM (collapseAnnoS lang) xs
     return (AppS f' xs', Idx i lang)
-  collapseExpr _ l1 (NamS rs, Idx i ss) = do
-    lang <- chooseLanguage l1 ss
+  -- Propagate data
+  collapseExpr _ l1 (e@(LstS xs), Idx i ss) = do
+    lang <- if isFunctionalData e then return l1 else chooseLanguage l1 ss
+    xs' <- mapM (collapseAnnoS lang) xs
+    return (LstS xs', Idx i lang)
+  collapseExpr _ l1 (e@(TupS xs), Idx i ss) = do
+    lang <- if isFunctionalData e then return l1 else chooseLanguage l1 ss
+    xs' <- mapM (collapseAnnoS lang) xs
+    return (TupS xs', Idx i lang)
+  collapseExpr _ l1 (e@(NamS rs), Idx i ss) = do
+    lang <- if isFunctionalData e then return l1 else chooseLanguage l1 ss
     xs' <- mapM (collapseAnnoS lang . snd) rs
     return (NamS (zip (map fst rs) xs'), Idx i lang)
   -- collapse leaf expressions
@@ -406,3 +410,18 @@ removeVarS (AnnoS g c (LstS xs)) = AnnoS g c (LstS (map removeVarS xs))
 removeVarS (AnnoS g c (TupS xs)) = AnnoS g c (TupS (map removeVarS xs))
 removeVarS (AnnoS g c (NamS rs)) = AnnoS g c (NamS (map (second removeVarS) rs))
 removeVarS x = x
+
+-- Check if this expression is a data structure that contains
+-- a function. If so, then the data structure is must be in the
+-- same language as the parent (since functions can't be serialized)
+isFunctionalData :: ExprS (Indexed Type) f a -> Bool
+isFunctionalData (LstS xs) = any isFunctionalDataAnnoS xs
+isFunctionalData (TupS xs) = any isFunctionalDataAnnoS xs
+isFunctionalData (NamS (map snd -> xs)) = any isFunctionalDataAnnoS xs
+isFunctionalData _ = False
+
+isFunctionalDataAnnoS :: AnnoS (Indexed Type) f a -> Bool
+isFunctionalDataAnnoS (AnnoS (Idx _ t) _ e) = handleType t || isFunctionalData e where
+  handleType :: Type -> Bool
+  handleType (FunT _ _) = True
+  handleType _ = False

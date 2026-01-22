@@ -4,6 +4,6 @@ bool funf(int x, int y){
 }
 
 // fung :: Bool -> Bool -> Int
-bool fung(bool x, bool y){
+int fung(bool x, bool y){
   return x + y;
 }
