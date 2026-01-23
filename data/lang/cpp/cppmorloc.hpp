@@ -445,6 +445,9 @@ void* createTupleAnythingHelper(void* dest, const Schema* schema, void** cursor,
 
 template<typename Primitive>
 Primitive fromAnything(const Schema* schema, const void* data, Primitive* dumby = nullptr) {
+    if(schema->type == MORLOC_BOOL){
+        return *(uint8_t*)data == 1;
+    }
     return *(Primitive*)data;
 }
 
