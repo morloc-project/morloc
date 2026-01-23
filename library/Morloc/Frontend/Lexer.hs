@@ -54,6 +54,7 @@ module Morloc.Frontend.Lexer
   , parseLineDocStr
   , parseTextDocStr
   , parseWordDocStr
+  , parseIntsDocStr
   ) where
 
 import Data.Void (Void)
@@ -273,6 +274,14 @@ parseTextDocStr flag = lexeme $ do
   string (flag <> ":")
   _ <- hspace
   value <- takeWhileP Nothing (/= '\n')
+  return value
+
+parseIntsDocStr :: Text -> Parser [Int]
+parseIntsDocStr flag = lexeme $ do
+  _ <- docstr
+  string (flag <> ":")
+  _ <- hspace
+  value <- many1 (lexeme L.decimal)
   return value
 
 parseWordDocStr :: Text -> Parser Text

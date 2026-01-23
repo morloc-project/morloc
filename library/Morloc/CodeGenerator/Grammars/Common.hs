@@ -20,6 +20,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , manNamer
   , patternSetter
   -- * Utilities
+  , provideClosure
   , makeManifoldIndexer
   , translateManifold
   ) where
@@ -61,6 +62,12 @@ mergePoolDocs f ms = PoolDocs
     , poolPriorExprs = concatMap poolPriorExprs ms
     }
 
+provideClosure :: Source -> [MDoc] -> [[MDoc]]
+provideClosure src args0 = f (srcRsize src) args0 where
+  f [] args = [args]
+  f (n:ns) args
+    | n < length args = take n args : f ns (drop n args)
+    | otherwise = error $ "Invalid rsize value for imported " <> show (srcLang src) <> " function " <> show (unEVar (srcAlias src))
 
 svarNamer :: Int -> MDoc
 svarNamer i = "s" <> viaShow i

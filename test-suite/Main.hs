@@ -37,6 +37,19 @@ main = do
 
       -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
+      , golden "functional-data-1" "functional-data-1"
+      , golden "functional-data-2" "functional-data-2"
+      , golden "functional-data-3a" "functional-data-3a"
+      , golden "functional-data-3b" "functional-data-3b"
+      , golden "functional-data-3c" "functional-data-3c"
+      , golden "functional-data-3d-py" "functional-data-3d-py"
+      , golden "functional-data-3d-c" "functional-data-3d-c"
+      , golden "functional-data-3d-r" "functional-data-3d-r"
+      , golden "functional-data-3e" "functional-data-3e"
+      , golden "functional-data-3f" "functional-data-3f"
+      , golden "functional-data-4" "functional-data-4"
+      , golden "functional-data-5" "functional-data-5"
+
       , golden "pattern-getters" "pattern-getters"
       , golden "pattern-setters" "pattern-setters"
 

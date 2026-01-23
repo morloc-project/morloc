@@ -1,3 +1,10 @@
+0.59.0 [2026-01-23]
+-------------------
+ * allow functions in data structures
+ * allow source functions to return functions
+ * allow application of expressions that evaluate to functions
+ * fix bug in C++ bool deserialization
+
 0.58.3 [2026-01-03]
 -------------------
  * fix record docstring inheritance

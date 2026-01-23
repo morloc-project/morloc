@@ -1,0 +1,84 @@
+# basic morloc bashrc
+
+# If not running interactively, don't do anything
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+
+# History Configuration
+HISTCONTROL=ignoreboth:erasedups
+HISTSIZE=10000
+HISTFILESIZE=20000
+shopt -s histappend
+
+# Shell Options
+shopt -s checkwinsize
+shopt -s globstar 2>/dev/null
+
+# Colors
+if [ -x /usr/bin/dircolors ]; then
+    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+fi
+
+# Prompt
+# Detect if we have color support
+if [ -x /usr/bin/tput ] && tput setaf 1 >&/dev/null; then
+    # Define colors
+    RESET='\[\033[0m\]'
+    BOLD='\[\033[1m\]'
+    DIM='\[\033[2m\]'
+    
+    # Color palette
+    BLUE='\[\033[38;5;75m\]'
+    GREEN='\[\033[38;5;114m\]'
+    YELLOW='\[\033[38;5;221m\]'
+    GRAY='\[\033[38;5;245m\]'
+    RED='\[\033[38;5;204m\]'
+
+    DEVNAME=""
+    if [ ! -z "$MORLOC_ENV_NAME" ]; then
+      DEVNAME="${DIM}${GRAY}(${MORLOC_ENV_NAME})${RESET} "
+    fi 
+
+    MORLOC_VERSION=$(morloc --version)
+    if [ $? -eq 0 ]; then
+      MORLOC_VERSION="-${MORLOC_VERSION}"
+    fi
+    
+    # Format: (container) morloc $
+    PS1="${DEVNAME}${YELLOW}morloc${MORLOC_VERSION}${RESET} $ "
+else
+    # Fallback for no color
+    PS1="morloc $ "
+fi
+
+# aliases
+alias ls='ls --color=auto'
+alias ll='ls -lh'
+alias la='ls -lah'
+alias l='ls -CF'
+
+# coloring
+alias grep='grep --color=auto'
+alias fgrep='fgrep --color=auto'
+alias egrep='egrep --color=auto'
+
+# fast navigation
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+alias .....='cd ../../../..'
+
+# setup path
+[ -d "$HOME/.local/bin" ] && PATH="$HOME/.local/bin:$PATH"
+[ -d "$HOME/bin" ] && PATH="$HOME/bin:$PATH"
+
+# completions
+if ! shopt -oq posix; then
+  if [ -f /usr/share/bash-completion/bash_completion ]; then
+    . /usr/share/bash-completion/bash_completion
+  elif [ -f /etc/bash_completion ]; then
+    . /etc/bash_completion
+  fi
+fi

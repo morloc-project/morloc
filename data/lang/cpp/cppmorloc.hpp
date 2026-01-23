@@ -448,6 +448,11 @@ Primitive fromAnything(const Schema* schema, const void* data, Primitive* dumby 
     return *(Primitive*)data;
 }
 
+bool fromAnything(const Schema* schema, const void* data, bool* dumby = nullptr) {
+    // NOTE: do NOT use bool here since its width is often not 1 byte
+    return *(uint8_t*)data == 1;
+}
+
 std::string fromAnything(const Schema* schema, const void* data, std::string* dumby = nullptr) {
     Array* array = (Array*)data;
     if(array->size > 0){

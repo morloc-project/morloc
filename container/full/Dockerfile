@@ -3,7 +3,7 @@ LABEL org.opencontainers.image.description="A morloc container intended for inte
 LABEL org.opencontainers.image.licenses=MIT
 
 FROM docker.io/library/ubuntu:22.04
-COPY --from=ghcr.io/morloc-project/morloc/morloc-tiny:0.58.3 /bin/morloc /bin/morloc
+COPY --from=ghcr.io/morloc-project/morloc/morloc-tiny:0.59.0 /bin/morloc /bin/morloc
 
 WORKDIR $HOME
 
@@ -41,6 +41,8 @@ RUN git clone https://github.com/morloc-project/vimmorloc \
   && rm -rf vimmorloc
 
 RUN git clone https://github.com/morloc-project/morloc ~/morloc
+
+COPY assets/bashrc /etc/bash.bashrc
 
 # Cleanup to reduce image size
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*

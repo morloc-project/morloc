@@ -1,0 +1,16 @@
+module m (foo, bar, baz)
+
+import root-cpp
+
+bar :: Bool -> Bool -> Int -> Int
+baz :: Bool -> Int -> Bool -> Int
+source Cpp from "main.hpp" where
+  --' takes two bools and returns a function of an integer
+  --' rsize: 2
+  bar
+  --' takes one bool and returns a fuction of an int that returns a function of a bool
+  --' rsize: 1 1
+  baz
+
+foo :: Bool -> Int -> Int
+foo x y = baz x (bar x x y) x

@@ -199,6 +199,25 @@ linkConfigIndex midx fidx = do
         MM.sayVVV $ "Copy manifold config from" <+> pretty fidx <+> "to" <+> pretty midx
         MM.put(s {stateManifoldConfig = Map.insert midx mconfig (stateManifoldConfig s)})
 
+-- express e@(AnnoS fi@(Idx midx (FunT inputs _)) (Idx cidx lang, _) exe) = do
+--   MM.sayVVV $ "express ExeS (midx=" <> pretty midx <> "," <+> "cidx=" <> pretty cidx <> "):"
+--   ids <- MM.takeFromCounter (length inputs)
+--   let lambdaVals = fromJust $ safeZipWith PolyBndVar (map (C . Idx cidx) inputs) ids
+--       headExpr = PolyHead lang midx [Arg i None | i <- ids]
+--   exeExpr <- case exe of
+--     (ExeS (SrcCall src)) -> return . PolyReturn $
+--         PolyApp (PolyExe fi (SrcCallP src)) lambdaVals
+--     (ExeS (PatCall pat)) -> return . PolyReturn $
+--         PolyApp (PolyExe fi (PatCallP pat)) lambdaVals
+--     _ -> do
+--       fe <- expressPolyExprWrap lang fi e
+--       return
+--         . PolyLet midx fe
+--         . PolyReturn
+--         $ PolyApp (PolyLetVar fi midx) lambdaVals
+--
+--   return (headExpr exeExpr)
+
 
 -- Conventions:
 --   midx: The general index, used for identifying manifolds since this index is
@@ -213,11 +232,14 @@ express :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad Po
 express (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) = do
   MM.sayVVV $ "express CallS (midx=" <> pretty midx <> "," <+> "cidx=" <> pretty cidx <> "):"
   ids <- MM.takeFromCounter (length inputs)
+  exe' <- case exe of
+    (SrcCall src) -> return $ SrcCallP src
+    (PatCall pat) -> return $ PatCallP pat
   let lambdaVals = fromJust $ safeZipWith PolyBndVar (map (C . Idx cidx) inputs) ids
   return
     . PolyHead lang midx [Arg i None | i <- ids]
     . PolyReturn
-    $ PolyApp (PolyExe (Idx midx c) exe) lambdaVals
+    $ PolyApp (PolyExe (Idx midx c) exe') lambdaVals
 
 -- *****************  EVIL INDEX REWRITE HACK WARNING ************************
 -- Move the index from the lambda to the application.
@@ -225,7 +247,7 @@ express (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) = do
 -- I do it here so that the nexus indices and pool indices match, but there
 -- should be a more elegant solution.
 -- ***************************************************************************
--- We pass the index and the arguments from the top-level lamda expression
+-- We pass the index and the arguments from the top-level lambda expression
 -- to the application. The arguments for the lambda will include the specific
 -- arguments the type signature and declaration specify, the arguments that
 -- the user expects to enter. However, the application will prune any
@@ -237,7 +259,7 @@ express (AnnoS (Idx midx _) (_, lambdaArgs) (LamS _ e@(AnnoS (Idx _ applicationT
   MM.sayVVV $ "express LamS (midx=" <> pretty midx <> "):"
   -- More evil, copy the manifold config from the top application to this lambda
   setManifoldConfig midx e
-  -- attatch the lamba index to the application ManifoldConfig from state
+  -- attach the lambda index to the application ManifoldConfig from state
   express (AnnoS (Idx midx applicationType) (c, lambdaArgs) x)
 
 express (AnnoS (Idx midx (AppT (VarT v) [t])) (Idx cidx lang, args) (LstS xs)) = do
@@ -339,8 +361,7 @@ expressPolyExpr findRemote parentLang _
     (LamS vs
       (AnnoS _ (Idx _ appLang, appArgs)
         (AppS
-          (AnnoS callTypeI@(Idx _ (FunT callInputTypes _)) (Idx _ callLang, _)
-            (ExeS exe)) xs))))
+          funExpr@(AnnoS (Idx _ (FunT callInputTypes _)) (Idx _ callLang, _) _) xs))))
 
   ----------------------------------------------------------------------------------------
   -- #4 cis partial lambda                                     | contextArgs | boundArgs |
@@ -361,10 +382,12 @@ expressPolyExpr findRemote parentLang _
             lamInputTypes
 
       xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap appLang) (zipWith mkIdx xs callInputTypes) xs
+
+      call <- expressPolyApp parentLang funExpr xs'
+
       return
         . PolyManifold parentLang midx (ManifoldPart contextArgs typedLambdaArgs)
-        . PolyReturn
-        $ PolyApp call xs'
+        $ call
 
 
   ----------------------------------------------------------------------------------------
@@ -435,6 +458,8 @@ expressPolyExpr findRemote parentLang _
           -- boundArgs = map unvalue (drop () appArgs)
           foreignForm = ManifoldFull [Arg i None | i <- passedParentArgs]
 
+      call <- expressPolyApp parentLang funExpr xs'
+
       return
         . PolyManifold parentLang midx localForm
         . chain lets
@@ -442,16 +467,13 @@ expressPolyExpr findRemote parentLang _
         . PolyApp
             ( PolyRemoteInterface callLang (Idx cidxLam lamOutType) passedParentArgs (fromJust remote)
             . PolyManifold callLang midx foreignForm
-            . PolyReturn
-            $ PolyApp call xs'
+            $ call
             )
         $ boundVars
 
   where
     remote = findRemote parentLang callLang
     isLocal = isNothing remote
-
-    call = PolyExe callTypeI exe
 
     chain :: [a -> a] -> a -> a
     chain [] x = x
@@ -542,7 +564,7 @@ expressPolyExpr _ _ _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manifoldArgume
 -- * These applications will be fully applied, the case of partially applied
 --   functions will have been handled previously by LamM
 expressPolyExpr findRemote parentLang pc (AnnoS (Idx midx _) (_, args)
-  (AppS (AnnoS (Idx gidxCall fc@(FunT inputs _)) (Idx cidxCall callLang, _) (ExeS exe)) xs))
+  (AppS f@(AnnoS (Idx _ (FunT inputs _)) (Idx cidxCall callLang, _) _) xs))
 
   ----------------------------------------------------------------------------------------
   -- #1 cis applied                                            | contextArgs | boundArgs |
@@ -557,13 +579,12 @@ expressPolyExpr findRemote parentLang pc (AnnoS (Idx midx _) (_, args)
       -- There should be an equal number of input types and input arguments
       -- That is, the function should be fully applied. If it were partially
       -- applied, the lambda case would have been entered previously instead.
-      mayxs <- safeZipWithM (expressPolyExprWrap callLang) (map (Idx cidxCall) inputs) xs
+      xsExpr <- zipWithM (expressPolyExprWrap callLang) (map (Idx cidxCall) inputs) xs
 
-      MM.sayVVV $ "  leaving case #1 for" <+> pretty midx
+      func <- expressPolyApp parentLang f xsExpr
       return
           . PolyManifold callLang midx (ManifoldFull (map unvalue args))
-          . PolyReturn
-          $ PolyApp f (fromJust mayxs)
+          $ func
 
   ----------------------------------------------------------------------------------------
   -- #5 trans applied                                          | contextArgs | boundArgs |
@@ -583,16 +604,15 @@ expressPolyExpr findRemote parentLang pc (AnnoS (Idx midx _) (_, args)
   ----------------------------------------------------------------------------------------
   | not isLocal = do
         let idxInputTypes = zipWith mkIdx xs inputs
-        xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap callLang) idxInputTypes xs
-
+        mayXs <- safeZipWithM (expressPolyExprWrap callLang) idxInputTypes xs
+        func <- expressPolyApp parentLang f (fromJust mayXs)
         return
           . PolyManifold parentLang midx (ManifoldFull (map unvalue args))
           . PolyReturn
           . PolyApp
               ( PolyRemoteInterface callLang pc [] (fromJust remote) -- no args are passed, so empty
               . PolyManifold callLang midx (ManifoldFull (map unvalue args))
-              . PolyReturn
-              $ PolyApp f xs'
+              $ func
               )
           -- non-native use, leave as passthrough
           -- the contextual language, though, is the same as the parent
@@ -601,10 +621,11 @@ expressPolyExpr findRemote parentLang pc (AnnoS (Idx midx _) (_, args)
   where
     remote = findRemote parentLang callLang
     isLocal = isNothing remote
-    f = PolyExe (Idx gidxCall fc) exe
 
 -- An un-applied source call
-expressPolyExpr findRemote parentLang (val -> FunT pinputs poutput) (AnnoS (Idx midx c@(FunT callInputs _)) (Idx cidx callLang, _) (ExeS exe))
+expressPolyExpr findRemote parentLang
+  (val -> FunT pinputs poutput)
+  e@(AnnoS (Idx midx (FunT callInputs _)) (Idx cidx callLang, _) _)
 
   ----------------------------------------------------------------------------------------
   -- #2 cis passed                                             | contextArgs | boundArgs |
@@ -619,10 +640,10 @@ expressPolyExpr findRemote parentLang (val -> FunT pinputs poutput) (AnnoS (Idx 
       ids <- MM.takeFromCounter (length callInputs)
       let lambdaVals = bindVarIds ids (map (C . Idx cidx) callInputs)
           lambdaTypedArgs = fromJust $ safeZipWith annotate ids (map Just callInputs)
+      retapp <- expressPolyApp parentLang e lambdaVals
       return
         . PolyManifold callLang midx (ManifoldPass lambdaTypedArgs)
-        . PolyReturn
-        $ PolyApp (PolyExe (Idx midx c) exe) lambdaVals
+        $ retapp
 
   ----------------------------------------------------------------------------------------
   -- #6 trans passed                                           | contextArgs | boundArgs |
@@ -643,14 +664,14 @@ expressPolyExpr findRemote parentLang (val -> FunT pinputs poutput) (AnnoS (Idx 
       let lambdaArgs = [Arg i None | i <- ids]
           lambdaTypedArgs = map (`Arg` Nothing) ids
           callVals = bindVarIds ids (map (C . Idx cidx) callInputs)
+      retapp <- expressPolyApp callLang e callVals
       return
        . PolyManifold parentLang midx (ManifoldPass lambdaTypedArgs)
        . PolyReturn
        . PolyApp
            ( PolyRemoteInterface callLang (Idx cidx poutput) (map ann lambdaArgs) (fromJust remote)
            . PolyManifold callLang midx (ManifoldFull lambdaArgs)
-           . PolyReturn
-           $ PolyApp (PolyExe (Idx midx c) exe) callVals
+           $ retapp
            )
        $ fromJust $ safeZipWith (PolyBndVar . C) (map (Idx cidx) pinputs) (map ann lambdaArgs)
     where
@@ -713,6 +734,7 @@ expressPolyExpr _ _ _ (AnnoS _ _ (AppS (AnnoS _ _ (BndS v)) _))
 -- catch all exception case - not very classy
 expressPolyExpr _ _ _ (AnnoS _ _ (AppS (AnnoS _ _ (LamS vs _)) _))
   = error $ "All applications of lambdas should have been eliminated of length " <> show (length vs)
+
 expressPolyExpr _ _ parentType x@(AnnoS (Idx m t) _ _) = do
   MM.sayVVV "Bad case"
   MM.sayVVV $ "  t :: " <> pretty t
@@ -729,6 +751,42 @@ expressPolyExpr _ _ parentType x@(AnnoS (Idx m t) _ _) = do
                <> "\n  t:" <+> pretty t
                <> "\n parentType:" <+> pretty parentType
                <> "\n x:" <+> pretty x
+
+
+-- evaluate an expression that has a functional type and is applied
+expressPolyApp
+  :: Lang
+  -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
+  -> [PolyExpr]
+  -> MorlocMonad PolyExpr
+
+-- handle directly sourced functions
+expressPolyApp _ (AnnoS g _ (ExeS (SrcCall src))) xs
+  = return . PolyReturn $ PolyApp (PolyExe g (SrcCallP src)) xs
+
+-- handle functions extracted from data by patterns
+expressPolyApp _ (AnnoS g _ (ExeS (PatCall pat))) xs
+  = return . PolyReturn $ PolyApp (PolyExe g (PatCallP pat)) xs
+
+-- handle functions returned from source functions
+expressPolyApp lang f@(AnnoS g@(Idx i _) _ (AppS _ _)) es = do
+  fe <- expressPolyExprWrap lang g f
+  return
+    . PolyLet i fe
+    . PolyReturn
+    $ PolyApp (PolyLetVar g i) es
+
+-- handle functions passed as lambda-bound variables
+expressPolyApp _ (AnnoS g (_, args) (BndS v)) xs = do
+  case [j | (Arg j u) <- args, u == v] of
+    [j] -> return . PolyReturn $ PolyApp (PolyExe g (LocalCallP j)) xs
+    _ -> error "Unreachable? BndS value should have been wired uniquely to args previously"
+
+-- all other function sources are invalid
+expressPolyApp _ (AnnoS _ _ (LamS _ _)) _ = error "unexpected LamS - should have been handled"
+expressPolyApp _ (AnnoS _ _ (VarS _ _)) _ = error "unexpected VarS - should have been substituted"
+expressPolyApp _ _ _ = error "Unreachable? This does not seem to be applicable"
+
 
 expressContainer :: Indexed Type -> Indexed Lang -> Indexed Lang -> [Arg EVar] -> PolyExpr -> PolyExpr
 expressContainer pc (Idx midx parentLang) (Idx _ lang) args e
@@ -1036,7 +1094,22 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     t' <- inferType t
     MM.sayVVV $ "nativeExpr MonoApp:" <+> pretty t'
     naturalizeN "nativeE MonoApp" m lang t' e'
-  nativeExpr _ (MonoApp _ _) = error "Illegal application"
+
+  -- covers functions generated at run-time from source functions or data
+  nativeExpr m (MonoApp (MonoLetVar (Idx idx (FunT inputTypes outputType)) i) es) = do
+    MM.sayVVV $ "MonoLetVar case"
+    args <- mapM (nativeArg m) es
+    appType <- case drop (length es) inputTypes of
+        [] -> inferType (Idx idx outputType)
+        remaining -> inferType $ Idx idx (FunT remaining outputType)
+    return $ AppExeN appType (LocalCallP i) [] args
+
+  nativeExpr _ (MonoApp e es) = do
+    MM.sayVVV "nativeExprr MonoApp"
+    MM.sayVVV $ "e:" <+> pretty e
+    MM.sayVVV $ "es:" <+> list (map pretty es)
+    error "Illegal application"
+
   nativeExpr _ (MonoExe t exe) = ExeN <$> inferType t <*> pure exe
   nativeExpr _ (MonoBndVar (A _) _) = error "MonoBndVar must have a type if used in native context"
   nativeExpr _ (MonoBndVar (B _) i) =
@@ -1346,8 +1419,8 @@ findSources ms = unique <$> concatMapM (foldSerialManifoldM fm) ms
     , opSerialManifoldM = nativeSerialSrcs
     }
 
-  nativeExprSrcs (AppExeN_ _ (SrcCall src) _ xss) = return (src : concat xss)
-  nativeExprSrcs (ExeN_ _ (SrcCall src)) = return [src]
+  nativeExprSrcs (AppExeN_ _ (SrcCallP src) _ xss) = return (src : concat xss)
+  nativeExprSrcs (ExeN_ _ (SrcCallP src)) = return [src]
   nativeExprSrcs (DeserializeN_ _ s xs) = return $ serialASTsources s <> xs
   nativeExprSrcs e = return $ foldlNE (<>) [] e
 

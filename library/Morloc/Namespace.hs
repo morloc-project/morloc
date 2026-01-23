@@ -707,6 +707,17 @@ data Source =
       -- this will be equal to the name
     , srcLabel :: Maybe Label
       -- ^ an additional label for distinguishing this term from its synonyms
+    , srcRsize :: [Int]
+      -- ^ A list of counts of arguments where the remaining arguments form a
+      -- returned function. This does not affect the general functional form,
+      -- but most languages distinguish between (a->(b->c)) and (a->b->c).
+      --
+      -- For example:
+      -- a -> b -> (c -> d)
+      -- A function that takes the arguments a and b and returns (c -> d) would
+      -- have srcRsize of [2]
+    , srcNote :: [Text]
+      -- ^ optional documentation of the particular source
     }
   deriving (Ord, Eq, Show)
 
@@ -1499,7 +1510,7 @@ instance Pretty GammaIndex where
     <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty pretty) rs)
   pretty (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> pretty t
   pretty (MarkG tv) = "MarkG:" <+> pretty tv
-  pretty (SrcG (Source ev1 lang _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
+  pretty (SrcG (Source ev1 lang _ _ _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
   pretty (AnnG v t) = pretty v <+> "::" <+> pretty t
 
 instance Pretty ExprI where
@@ -1542,13 +1553,17 @@ instance Pretty Expr where
   pretty (StrE x) = dquotes (pretty x)
   pretty (LogE x) = pretty x
   pretty (AssE v e es) = pretty v <+> "=" <+> pretty e <+> "where" <+> (align . vsep . map pretty) es
-  pretty (SrcE (Source srcname lang file' alias label))
+  pretty (SrcE (Source srcname lang file' alias _ rsizes _))
     = "source"
     <+> viaShow lang
     <> maybe "" (\f -> "from" <+> pretty f) file'
-    <+> "("
-    <> dquotes (pretty srcname) <+> "as" <+>  pretty alias <> maybe "" (\s -> ":" <> pretty s) label
-    <> ")"
+    <+> "where\n"
+    <> ( indent 2 (vsep
+           [ "--' srcname: " <> pretty srcname
+           , "--' rsize: " <> encloseSep "" "" " " (map pretty rsizes)
+           , pretty alias
+           ])
+       )
   pretty (SigE (Signature v _ e)) =
     pretty v <+> "::" <+> eprop' <> etype' <> econs'
     where
