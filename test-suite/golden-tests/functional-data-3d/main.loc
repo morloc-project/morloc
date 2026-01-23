@@ -1,9 +1,16 @@
-module m (foo)
+module m (foo, bar, baz)
 
 import root-py
 
-bar :: Bool -> (Int -> Int)
-source Py from "main.py" ("bar")
+bar :: Bool -> Bool -> Int -> Int
+baz :: Bool -> Int -> Bool -> Int
+source Py from "main.py" where
+  --' takes two bools and returns a function of an integer
+  --' rsize: 2
+  bar
+  --' takes one bool and returns a fuction of an int that returns a function of a bool
+  --' rsize: 1 1
+  baz
 
 foo :: Bool -> Int -> Int
-foo x y = (bar x) y
+foo x y = baz x (bar x x y) x

@@ -89,7 +89,6 @@ makeNamespace lib = pretty
               . MT.liftToText SF.dropExtensions
               . MT.pack
 
--- FIXME: should definitely use namespaces here, not `import *`
 translateSource :: Path -> MorlocMonad MDoc
 translateSource s = do
   lib <- MT.pack <$> asks configLibrary
@@ -273,8 +272,19 @@ translateSegment makeSrcName m0 =
       return $ e {poolExpr = serialized, poolPriorLines = poolPriorLines e <> assignments}
 
     makeNativeExpr :: NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> Index PoolDocs
-    makeNativeExpr _ (AppExeN_ _ (SrcCallP src) _ xs) =
-        return $ mergePoolDocs ((<>) (makeSrcName src) . tupled) (map snd xs)
+    makeNativeExpr _ (AppExeN_ _ (SrcCallP src) _ xs)
+      = return $ mergePoolDocs handleFunctionArgs (map snd xs)
+      where
+        handleFunctionArgs
+          = (<>) (makeSrcName src)
+          . hsep . map tupled
+          . provideClosure (srcRsize src)
+
+        provideClosure :: [Int] -> [MDoc] -> [[MDoc]]
+        provideClosure [] args = [args]
+        provideClosure (n:ns) args
+          | n < length args = take n args : provideClosure ns (drop n args)
+          | otherwise = error $ "Invalid rsize value for imported Python function " <> show (unEVar (srcAlias src))
     makeNativeExpr _ (AppExeN_ t (PatCallP p) _ xs) =
         return $ mergePoolDocs (evaluatePattern t p) (map snd xs)
     makeNativeExpr _ (AppExeN_ _ (LocalCallP idx) _ xs) =

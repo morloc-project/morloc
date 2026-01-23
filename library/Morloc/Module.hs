@@ -287,7 +287,7 @@ gccVersionFlag i
  | otherwise = "-std=c++" <> MT.show' i
 
 flagAndPath :: Source -> MorlocMonad (Source, [String], Maybe Path)
-flagAndPath src@(Source _ CppLang (Just p) _ _)
+flagAndPath src@(Source _ CppLang (Just p) _ _ _ _)
   = case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p), MS.takeExtensions p) of
     -- lookup up "<base>.h" and "lib<base>.so"
     (".", base, "") -> do
@@ -325,7 +325,7 @@ flagAndPath src@(Source _ CppLang (Just p) _ _)
             , "-l" <> libnamebase
             ]
         [] -> return []
-flagAndPath src@(Source _ CppLang Nothing _ _) = return (src, [], Nothing)
+flagAndPath src@(Source _ CppLang Nothing _ _ _ _) = return (src, [], Nothing)
 flagAndPath _ = MM.throwError . OtherError $ "flagAndPath should only be called for C++ functions"
 
 

@@ -482,29 +482,25 @@ pSrcE = do
   mapM (exprI . SrcE) srcs
 
 pSource :: Parser [Source]
-pSource = do
+pSource = try pSourceLegacy <|> pSourceNew
+
+pSourceLegacy :: Parser [Source]
+pSourceLegacy = do
   _ <- reserved "source"
   modulePath <- CMS.gets stateModulePath
   language <- pLang
-  srcfile <- optional (reserved "from" >> stringLiteral |>> MT.unpack)
+  maySrcfile <- optional (reserved "from" >> stringLiteral |>> MT.unpack)
   rs <- parens (sepBy1 pImportSourceTerm (symbol ","))
-  srcFile <- case (modulePath, srcfile) of
-    -- build a path to the source file by searching
-    -- > source "R" from "foo.R" ("Foo" as foo, "bar")
-    (Just f, Just srcfile') -> return . Just $ MS.combine (MS.takeDirectory f) srcfile'
-    -- we are sourcing from the language base
-    -- > source "R" ("sqrt", "t.test" as t_test)
-    (Just _, Nothing) -> return Nothing
-    -- this case SHOULD only occur in testing where the source file does not exist
-    -- file non-existence will be caught later
-    (Nothing, s) -> return s
+  let srcfile = getSourceFile modulePath maySrcfile
   return [
     Source
       { srcName = srcVar
       , srcLang = language
-      , srcPath = srcFile
+      , srcPath = srcfile
       , srcAlias = aliasVar
       , srcLabel = Label <$> label'
+      , srcRsize = []
+      , srcNote = []
       } | (srcVar, aliasVar, label') <- rs]
   where
 
@@ -515,6 +511,57 @@ pSource = do
     a <- option n (reserved "as" >> freename)
     return (SrcName n, EV a, t)
 
+
+pSourceNew :: Parser [Source]
+pSourceNew = do
+  modulePath <- CMS.gets stateModulePath
+  _ <- reserved "source"
+  language <- pLang
+  maySrcfile <- optional (reserved "from" >> stringLiteral |>> MT.unpack)
+  let srcfile = getSourceFile modulePath maySrcfile
+  sources <- option [] (reserved "where" >> alignInset (pImportSourceTerm language srcfile))
+  return sources
+  where
+
+  pImportSourceTerm :: Lang -> Maybe Path -> Parser Source
+  pImportSourceTerm language srcfile = do
+    src <- parseSourceDocstrs $ Source
+      { srcName = SrcName ""
+      , srcLang = language
+      , srcPath = srcfile
+      , srcAlias = EV ""
+      , srcLabel = Nothing
+      , srcRsize = []
+      , srcNote = []
+      }
+    n <- freename
+    let srcname = if srcName src == SrcName ""
+                  then SrcName n
+                  else srcName src
+    return $ src { srcName = srcname, srcAlias = EV n }
+
+  parseSourceDocstrs :: Source -> Parser Source
+  parseSourceDocstrs src = indentFreeTerm $ foldMany src parseSourceDocstr
+
+  parseSourceDocstr :: Source -> Parser Source
+  parseSourceDocstr src =
+          try (parseWordDocStr "name"  |>> (\x -> src { srcName = SrcName x }))
+      <|> try (parseIntsDocStr "rsize" |>> (\xs -> src { srcRsize = xs }))
+      <|>     (parseLineDocStr |>> (\x -> src { srcNote = srcNote src <> [x] }))
+
+
+getSourceFile :: Maybe Path -> Maybe Path -> Maybe Path
+getSourceFile modulePath srcFile =
+  case (modulePath, srcFile) of
+    -- build a path to the source file by searching
+    -- > source "R" from "foo.R" ("Foo" as foo, "bar")
+    (Just f, Just srcfile') -> Just $ MS.combine (MS.takeDirectory f) srcfile'
+    -- we are sourcing from the language base
+    -- > source "R" ("sqrt", "t.test" as t_test)
+    (Just _, Nothing) -> Nothing
+    -- this case SHOULD only occur in testing where the source file does not exist
+    -- file non-existence will be caught later
+    (Nothing, s) -> s
 
 pLstE :: Parser ExprI
 pLstE = brackets (sepBy pExpr (symbol ",")) >>= exprI . LstE
