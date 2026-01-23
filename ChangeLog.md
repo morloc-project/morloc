@@ -1,3 +1,6 @@
+0.59.0 [2026-01-xx]
+ * fix bug in C++ bool deserialization
+
 0.58.3 [2026-01-03]
 -------------------
  * fix record docstring inheritance

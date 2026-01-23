@@ -278,13 +278,7 @@ translateSegment makeSrcName m0 =
         handleFunctionArgs
           = (<>) (makeSrcName src)
           . hsep . map tupled
-          . provideClosure (srcRsize src)
-
-        provideClosure :: [Int] -> [MDoc] -> [[MDoc]]
-        provideClosure [] args = [args]
-        provideClosure (n:ns) args
-          | n < length args = take n args : provideClosure ns (drop n args)
-          | otherwise = error $ "Invalid rsize value for imported Python function " <> show (unEVar (srcAlias src))
+          . provideClosure src
     makeNativeExpr _ (AppExeN_ t (PatCallP p) _ xs) =
         return $ mergePoolDocs (evaluatePattern t p) (map snd xs)
     makeNativeExpr _ (AppExeN_ _ (LocalCallP idx) _ xs) =

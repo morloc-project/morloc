@@ -521,7 +521,12 @@ PROPAGATE_ERROR(errmsg)|]
   makeNativeExpr :: NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) -> CppTranslator PoolDocs
   makeNativeExpr _ (AppExeN_ _ (SrcCallP src) qs (map snd -> es)) = do
     templateStr <- templateArguments qs
-    return $ mergePoolDocs ((<>) (pretty (srcName src) <> templateStr) . tupled) es
+    return $ mergePoolDocs (handleFunctionArgs templateStr) es
+    where
+      handleFunctionArgs templateStr
+        = (<>) (pretty (srcName src) <> templateStr)
+        . hsep . map tupled
+        . provideClosure src
   makeNativeExpr _ (AppExeN_ t (PatCallP p) _ xs) = do
       state <- CMS.get
       return $ mergePoolDocs (evaluatePattern state t p) (map snd xs)
