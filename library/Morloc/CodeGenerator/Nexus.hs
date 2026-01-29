@@ -469,7 +469,8 @@ makeCaseDoc fdata@(FData socket sub _ midx _ sockets schemas returnSchema cmdDoc
 
     body = vsep
       [ [idoc|morloc_socket_t* sockets[] = #{socketList};|]
-      , [idoc|dispatch_#{sub}(argc, argv, shm_basename, config, #{lang}_socket, sockets);|]
+      , [idoc|// dispatch for subcommand "#{sub}"|]
+      , [idoc|dispatch_#{pretty midx}(argc, argv, shm_basename, config, #{lang}_socket, sockets);|]
       ]
 
     socketList = encloseSep "{ " " }" ", " $
@@ -485,7 +486,7 @@ makeCaseDoc fdata@(FData socket sub _ midx _ sockets schemas returnSchema cmdDoc
     usageVerbose = subcmdHelpVerboseF fdata
 
     dispatcher = [idoc|
-void dispatch_#{sub}(
+void dispatch_#{pretty midx}(
     int argc,
     char* argv[],
     const char* shm_basename,
@@ -547,9 +548,10 @@ makeGastCaseDoc gdata = (dispatcher, (cond, body))
     returnSchema = dquotes . fst . commandSchemas $ gdata
     (exprBody, exprVar) = commandExpr gdata
     argSchemasList = createStructLong $ ((map dquotes . snd . commandSchemas $ gdata) <> ["NULL"])
+    dispatchFun = [idoc|dispatch_#{pretty $ commandIndex gdata}|]
 
     cond = [idoc|strcmp(cmd, "#{func}") == 0|]
-    body = [idoc|dispatch_#{func}(argc, argv, shm_basename, config);|]
+    body = [idoc|#{dispatchFun}(argc, argv, shm_basename, config);|]
 
     n = length . commandArgs $ gdata
 
@@ -558,7 +560,7 @@ makeGastCaseDoc gdata = (dispatcher, (cond, body))
     usageVerbose = subcmdHelpVerboseG gdata
 
     dispatcher = [idoc|
-void dispatch_#{func}(
+void #{dispatchFun}(
     int argc,
     char* argv[],
     const char* shm_basename,
