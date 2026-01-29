@@ -38,7 +38,7 @@ import qualified Text.Pretty.Simple as Pretty
 import Data.Maybe (fromMaybe)
 
 show' :: Show a => a -> Text
-show' = pack . show
+show' = pack . Prelude.show
 
 read' :: Read a => Text -> a
 read' = read . unpack
