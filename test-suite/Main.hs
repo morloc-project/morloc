@@ -37,6 +37,17 @@ main = do
 
       -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
+      , golden "claude-test-1" "claude-test-1"
+      , golden "claude-test-2" "claude-test-2"
+      , golden "claude-test-3" "claude-test-3"
+      , golden "claude-test-4" "claude-test-4"
+      , golden "claude-test-5" "claude-test-5"
+      , golden "claude-test-6" "claude-test-6"
+      , golden "claude-test-7" "claude-test-7"
+      , golden "claude-test-8" "claude-test-8"
+      , golden "claude-test-9" "claude-test-9"
+      , golden "claude-test-10" "claude-test-10"
+
       , golden "functional-data-1" "functional-data-1"
       , golden "functional-data-2" "functional-data-2"
       , golden "functional-data-3a" "functional-data-3a"

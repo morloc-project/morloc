@@ -1,0 +1,141 @@
+-- desc: Monte Carlo Option Pricer - Quantitative Finance
+-- author: Claude
+--
+-- Demonstrates numerical computation with C++ for simulation,
+-- R for statistical analysis, and Python for I/O and formatting.
+module main (priceOption, analyzePriceDistribution, generatePaths)
+
+import root-py
+
+-- Type mappings
+type Cpp => List a = "std::vector<$1>" a
+type Py => List a = "list" a
+type R => List a = "list" a
+type Cpp => Int = "int"
+type Py => Int = "int"
+type R => Int = "int"
+type Cpp => Real = "double"
+type Py => Real = "float"
+type R => Real = "double"
+
+-- Market parameters
+record MarketParams where
+  spot :: Real
+  strike :: Real
+  volatility :: Real
+  riskFreeRate :: Real
+  timeToMaturity :: Real
+
+record Py => MarketParams = "dict"
+record Cpp => MarketParams = "MarketParams"
+record R => MarketParams = "list"
+
+-- Statistical summary
+record PriceDistribution where
+  mean :: Real
+  median :: Real
+  stddev :: Real
+  percentile5 :: Real
+  percentile95 :: Real
+  ciLower :: Real
+  ciUpper :: Real
+
+record Py => PriceDistribution = "dict"
+record Cpp => PriceDistribution = "PriceDistribution"
+record R => PriceDistribution = "list"
+
+-- Python I/O and formatting
+source Py from "market_io.py" ("createMarketParams", "formatResults")
+createMarketParams :: Real -> Real -> Real -> Real -> Real -> MarketParams
+formatResults :: Real -> Real -> Str
+
+-- C++ Monte Carlo simulation
+source Cpp from "monte_carlo.hpp" ("simulatePaths", "priceCallOption", "calculateStdError")
+simulatePaths :: MarketParams -> Int -> Int -> [[Real]]
+priceCallOption :: MarketParams -> [[Real]] -> Real
+calculateStdError :: [Real] -> Real
+
+-- R statistical analysis
+source R from "finance_stats.R" ("analyzeDistribution")
+analyzeDistribution :: [Real] -> PriceDistribution
+
+--' Price a European call option using Monte Carlo
+--'
+--' Simulates stock price paths and computes option price.
+--'
+--' name: price
+priceOption ::
+  --' Current stock price
+  --' arg: --spot
+  --' metavar: PRICE
+  --' default: 100.0
+  Real ->
+  --' Strike price
+  --' arg: --strike
+  --' metavar: STRIKE
+  --' default: 105.0
+  Real ->
+  --' Volatility (annual)
+  --' arg: --volatility
+  --' metavar: VOL
+  --' default: 0.2
+  Real ->
+  --' Number of simulation paths
+  --' arg: -n/--paths
+  --' metavar: N
+  --' default: 1000
+  Int ->
+  --' Number of time steps
+  --' arg: --steps
+  --' metavar: STEPS
+  --' default: 50
+  Int ->
+  --' return: Option price
+  Real
+priceOption spot strike vol nPaths nSteps = priceCallOption params paths where
+  params = createMarketParams spot strike vol 0.05 1.0
+  paths = simulatePaths params nPaths nSteps
+
+--' Analyze price distribution
+--'
+--' Runs Monte Carlo and analyzes the distribution of final prices using R.
+--'
+--' name: analyzeDist
+analyzePriceDistribution ::
+  --' Current stock price
+  --' arg: --spot
+  --' metavar: PRICE
+  --' default: 100.0
+  Real ->
+  --' Number of paths
+  --' arg: -n/--paths
+  --' metavar: N
+  --' default: 1000
+  Int ->
+  --' return: Distribution statistics
+  PriceDistribution
+analyzePriceDistribution spot nPaths = analyzeDistribution finalPrices where
+  params = createMarketParams spot 105.0 0.2 0.05 1.0
+  paths = simulatePaths params nPaths 50
+  finalPrices = map (\path -> last path) paths
+
+--' Generate and return price paths
+--'
+--' Generates Monte Carlo paths for visualization.
+--'
+--' name: paths
+generatePaths ::
+  --' Number of paths
+  --' arg: -n/--paths
+  --' metavar: N
+  --' default: 10
+  Int ->
+  --' Number of steps
+  --' arg: --steps
+  --' metavar: STEPS
+  --' default: 50
+  Int ->
+  --' return: Simulated paths
+  [[Real]]
+generatePaths nPaths nSteps = simulatePaths params nPaths nSteps where
+  params = createMarketParams 100.0 105.0 0.2 0.05 1.0

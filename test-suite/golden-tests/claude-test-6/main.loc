@@ -1,0 +1,135 @@
+-- desc: Image Filter Pipeline - Polyglot Image Processing
+-- author: Claude
+--
+-- Demonstrates cross-language image processing with Python for I/O,
+-- C++ for intensive filtering, and R for statistical analysis.
+module main (applyBlur, detectEdges, analyzeImage)
+
+-- Type mappings
+type Cpp => List a = "std::vector<$1>" a
+type Py => List a = "list" a
+type R => List a = "list" a
+type Cpp => Int = "int"
+type Py => Int = "int"
+type R => Int = "int"
+type Cpp => Real = "double"
+type Py => Real = "float"
+type R => Real = "double"
+
+-- Image metadata record
+record ImageMetadata where
+  width :: Int
+  height :: Int
+  channels :: Int
+
+record Py => ImageMetadata = "dict"
+record Cpp => ImageMetadata = "ImageMetadata"
+record R => ImageMetadata = "list"
+
+-- Color statistics record
+record ColorStats where
+  meanRed :: Real
+  meanGreen :: Real
+  meanBlue :: Real
+  stddevRed :: Real
+  stddevGreen :: Real
+  stddevBlue :: Real
+
+record Py => ColorStats = "dict"
+record Cpp => ColorStats = "struct"
+record R => ColorStats = "list"
+
+-- Filtered result with metadata
+record FilteredResult where
+  pixels :: [[Real]]
+  metadata :: ImageMetadata
+  stats :: ColorStats
+
+record Py => FilteredResult = "dict"
+record Cpp => FilteredResult = "struct"
+record R => FilteredResult = "list"
+
+-- Python I/O functions
+source Py from "image_io.py" ("createTestImage", "pixelsToDict")
+createTestImage :: Int -> Int -> [[Real]]
+pixelsToDict :: [[Real]] -> ImageMetadata -> ColorStats -> FilteredResult
+
+-- C++ filter functions
+source Cpp from "filters.hpp" ("blurFilter", "edgeDetect", "getMetadata")
+blurFilter :: [[Real]] -> [[Real]]
+edgeDetect :: [[Real]] -> [[Real]]
+getMetadata :: [[Real]] -> ImageMetadata
+
+-- R statistics functions
+source R from "stats.R" ("computeColorStats")
+computeColorStats :: [[Real]] -> ColorStats
+
+--' Apply blur filter to an image
+--'
+--' Creates a test image and applies Gaussian blur using C++.
+--' Returns the filtered result with metadata and statistics.
+--'
+--' name: blur
+applyBlur ::
+  --' Image width in pixels
+  --' arg: --width
+  --' metavar: WIDTH
+  --' default: 10
+  Int ->
+  --' Image height in pixels
+  --' arg: --height
+  --' metavar: HEIGHT
+  --' default: 10
+  Int ->
+  --' return: Filtered image with metadata
+  FilteredResult
+applyBlur width height = pixelsToDict blurred metadata stats where
+  pixels = createTestImage width height
+  blurred = blurFilter pixels
+  metadata = getMetadata blurred
+  stats = computeColorStats blurred
+
+--' Detect edges in an image
+--'
+--' Creates a test image and applies edge detection using C++.
+--'
+--' name: edges
+detectEdges ::
+  --' Image width in pixels
+  --' arg: --width
+  --' metavar: WIDTH
+  --' default: 10
+  Int ->
+  --' Image height in pixels
+  --' arg: --height
+  --' metavar: HEIGHT
+  --' default: 10
+  Int ->
+  --' return: Edge-detected image with metadata
+  FilteredResult
+detectEdges width height = pixelsToDict edges metadata stats where
+  pixels = createTestImage width height
+  edges = edgeDetect pixels
+  metadata = getMetadata edges
+  stats = computeColorStats edges
+
+--' Analyze image statistics
+--'
+--' Creates a test image and computes color channel statistics using R.
+--'
+--' name: analyze
+analyzeImage ::
+  --' Image width in pixels
+  --' arg: --width
+  --' metavar: WIDTH
+  --' default: 8
+  Int ->
+  --' Image height in pixels
+  --' arg: --height
+  --' metavar: HEIGHT
+  --' default: 8
+  Int ->
+  --' return: Image statistics
+  ColorStats
+analyzeImage width height = computeColorStats pixels where
+  pixels = createTestImage width height

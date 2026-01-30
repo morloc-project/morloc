@@ -17,4 +17,6 @@ run/
 .bash_history
 .local
 .stack
-.aider*
+CLAUDE.md
+claude-docs/
+.claude/

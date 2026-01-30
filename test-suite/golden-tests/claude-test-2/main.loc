@@ -1,0 +1,15 @@
+module main (pythonToCpp, cppToPython)
+
+import root-py
+import root-cpp
+
+-- These helper functions force language selection through identity functions
+-- idpy and idcpp come from root-py and root-cpp respectively
+pyAdd x = idpy . add x
+cppMul x = idcpp . mul x
+
+-- Compose Python add followed by C++ multiply
+pythonToCpp x y = cppMul y (pyAdd x (10.0 :: Real))
+
+-- Compose C++ multiply followed by Python add
+cppToPython x y = pyAdd y (cppMul x (5.0 :: Real))

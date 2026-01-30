@@ -1,0 +1,157 @@
+-- desc: DNA Sequence Analyzer - Bioinformatics
+-- author: Claude
+--
+-- Demonstrates bioinformatics workflows with Python for I/O,
+-- C++ for sequence alignment, and R for statistical analysis.
+module main (analyzeSequence, findMotifs, alignSequences, gcContent)
+
+-- Type mappings
+type Cpp => List a = "std::vector<$1>" a
+type Py => List a = "list" a
+type R => List a = "list" a
+type Cpp => Int = "int"
+type Py => Int = "int"
+type R => Int = "int"
+type Cpp => Real = "double"
+type Py => Real = "float"
+type R => Real = "double"
+type Cpp => Str = "std::string"
+type Py => Str = "str"
+type R => Str = "character"
+
+-- DNA sequence record
+record Sequence where
+  seqId :: Str
+  description :: Str
+  nucleotides :: Str
+  length :: Int
+
+record Py => Sequence = "dict"
+record Cpp => Sequence = "struct"
+record R => Sequence = "list"
+
+-- Alignment result
+record Alignment where
+  score :: Real
+  seq1 :: Str
+  seq2 :: Str
+  alignedSeq1 :: Str
+  alignedSeq2 :: Str
+  identity :: Real
+
+record Py => Alignment = "dict"
+record Cpp => Alignment = "Alignment"
+record R => Alignment = "list"
+
+-- K-mer profile
+record KmerProfile where
+  kmer :: Str
+  frequency :: Int
+  positions :: [Int]
+
+record Py => KmerProfile = "dict"
+record Cpp => KmerProfile = "struct"
+record R => KmerProfile = "list"
+
+-- Sequence statistics
+record SeqStats where
+  gcContent :: Real
+  atContent :: Real
+  length :: Int
+  complexity :: Real
+
+record Py => SeqStats = "dict"
+record Cpp => SeqStats = "struct"
+record R => SeqStats = "list"
+
+-- Python I/O
+source Py from "sequence_io.py" ("createSequence", "getSampleSequence", "formatAlignment")
+createSequence :: Str -> Str -> Str -> Sequence
+getSampleSequence :: Int -> Sequence
+formatAlignment :: Alignment -> Str
+
+-- C++ sequence algorithms
+source Cpp from "sequence_align.hpp" ("alignSmithWaterman", "findKmers", "countKmer", "validateSequence")
+alignSmithWaterman :: Str -> Str -> Alignment
+findKmers :: Str -> Int -> [Str]
+countKmer :: Str -> Str -> Int
+validateSequence :: Str -> Bool
+
+-- R statistics
+source R from "sequence_stats.R" ("calculateGC", "sequenceComplexity", "analyzeComposition")
+calculateGC :: Str -> Real
+sequenceComplexity :: Str -> Real
+analyzeComposition :: Str -> SeqStats
+
+--' Analyze a DNA sequence
+--'
+--' Computes GC content and complexity statistics using R.
+--'
+--' name: analyze
+analyzeSequence ::
+  --' Sample sequence ID (1-5)
+  --' arg: --sample
+  --' metavar: ID
+  --' default: 1
+  Int ->
+  --' return: Sequence statistics
+  SeqStats
+analyzeSequence sampleId = analyzeComposition (.nucleotides seq) where
+  seq = getSampleSequence sampleId
+
+--' Find motifs (k-mers) in sequence
+--'
+--' Finds all k-mers of specified length in the sequence.
+--'
+--' name: motifs
+findMotifs ::
+  --' Sample sequence ID
+  --' arg: --sample
+  --' metavar: ID
+  --' default: 1
+  Int ->
+  --' K-mer length
+  --' arg: -k/--kmer-length
+  --' metavar: K
+  --' default: 3
+  Int ->
+  --' return: List of k-mers
+  [Str]
+findMotifs sampleId k = findKmers (.nucleotides seq) k where
+  seq = getSampleSequence sampleId
+
+--' Align two sequences
+--'
+--' Performs Smith-Waterman local alignment on two sample sequences.
+--'
+--' name: align
+alignSequences ::
+  --' First sequence ID
+  --' arg: --seq1
+  --' metavar: ID1
+  --' default: 1
+  Int ->
+  --' Second sequence ID
+  --' arg: --seq2
+  --' metavar: ID2
+  --' default: 2
+  Int ->
+  --' return: Alignment result
+  Alignment
+alignSequences id1 id2 = alignSmithWaterman (.nucleotides seq1) (.nucleotides seq2) where
+  seq1 = getSampleSequence id1
+  seq2 = getSampleSequence id2
+
+--' Calculate GC content
+--'
+--' Computes the GC content percentage of a sequence.
+--'
+--' name: gcContent
+gcContent ::
+  --' Sample sequence ID
+  --' metavar: ID
+  Int ->
+  --' return: GC content (0-1)
+  Real
+gcContent sampleId = calculateGC (.nucleotides seq) where
+  seq = getSampleSequence sampleId
