@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{-|
+{- |
 Module      : Morloc.Data.Text
 Description : All things text
 Copyright   : (c) Zebulun Arendsee, 2016-2026
@@ -9,7 +9,6 @@ Maintainer  : z@morloc.io
 
 This is a general wrapper around all textual representations in Morloc.
 -}
-
 module Morloc.Data.Text
   ( module Data.Text
   , module Data.Text.IO
@@ -28,22 +27,22 @@ module Morloc.Data.Text
   , liftToText
   ) where
 
+import Data.Maybe (fromMaybe)
 import Data.Text hiding (map)
 import Data.Text.Encoding
 import Data.Text.IO
 import qualified Data.Text.Lazy as DL
-import Prelude hiding (concat, length, lines, unlines)
 import qualified Safe
 import qualified Text.Pretty.Simple as Pretty
-import Data.Maybe (fromMaybe)
+import Prelude hiding (concat, length, lines, unlines)
 
-show' :: Show a => a -> Text
+show' :: (Show a) => a -> Text
 show' = pack . Prelude.show
 
-read' :: Read a => Text -> a
+read' :: (Read a) => Text -> a
 read' = read . unpack
 
-readMay' :: Read a => Text -> Maybe a
+readMay' :: (Read a) => Text -> Maybe a
 readMay' = Safe.readMay . unpack
 
 stripPrefixIfPresent :: Text -> Text -> Text
@@ -52,11 +51,12 @@ stripPrefixIfPresent prefix text =
     (Just x) -> x
     Nothing -> text
 
-pretty :: Show a => a -> Text
+pretty :: (Show a) => a -> Text
 pretty = DL.toStrict . Pretty.pShowNoColor
 
--- | Parse a TSV, ignore first line (header). Cells are also unquoted and
--- wrapping angles are removed.
+{- | Parse a TSV, ignore first line (header). Cells are also unquoted and
+wrapping angles are removed.
+-}
 parseTSV :: Text -> [[Maybe Text]]
 parseTSV = map (map (nonZero . undquote . unangle) . split ('\t' ==)) . Prelude.tail . lines
 

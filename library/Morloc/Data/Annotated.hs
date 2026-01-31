@@ -1,14 +1,13 @@
 {-# LANGUAGE TypeFamilies #-}
 
-{-|
+{- |
 Module      : Morloc.Data.Annotated
 Description : Class of annotated entities
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 -}
-
-module Morloc.Data.Annotated (Annotated(..)) where
+module Morloc.Data.Annotated (Annotated (..)) where
 
 class Annotated f where
   ann :: f a b -> a
@@ -24,13 +23,13 @@ class Annotated f where
   reann :: (a -> b -> a') -> f a b -> f a' b
   reann f x = annotate (f (ann x) (val x)) (val x)
 
-  annappM :: (Monad m ) => (a -> b -> m c) -> f a b -> m c
+  annappM :: (Monad m) => (a -> b -> m c) -> f a b -> m c
   annappM f x = f (ann x) (val x)
 
-  revalM :: Monad m => (a -> b -> m b') -> f a b -> m (f a b')
+  revalM :: (Monad m) => (a -> b -> m b') -> f a b -> m (f a b')
   revalM f x = annotate (ann x) <$> f (ann x) (val x)
 
-  reannM :: Monad m => (a -> b -> m a') -> f a b -> m (f a' b)
+  reannM :: (Monad m) => (a -> b -> m a') -> f a b -> m (f a' b)
   reannM f x = annotate <$> f (ann x) (val x) <*> pure (val x)
 
 instance Annotated (,) where

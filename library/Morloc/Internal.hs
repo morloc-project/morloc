@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{-|
+{- |
 Module      : Morloc.Internal
 Description : Internal utility functions
 Copyright   : (c) Zebulun Arendsee, 2016-2026
@@ -10,7 +10,6 @@ Maintainer  : z@morloc.io
 This module serves as a proto-prelude. Eventually I will probably want to
 abandon the default prelude and create my own. But not just yet.
 -}
-
 module Morloc.Internal
   ( ifelse
   , concatMapM
@@ -29,33 +28,40 @@ module Morloc.Internal
   , isLower
   , isUpper
   , toLower
-  -- ** selected functions from Data.Foldable
+
+    -- ** selected functions from Data.Foldable
   , foldlM
   , foldrM
   , foldl1M
-  -- ** selected functions from Data.Tuple.Extra
+
+    -- ** selected functions from Data.Tuple.Extra
   , return2
   , uncurry3
   , curry3
   , third
-  -- ** operators
+
+    -- ** operators
   , (|>>) -- piped fmap
   , (</>) -- Filesystem utility operators from System.FilePath
   , (<|>) -- alternative operator
   , (&&&) -- (a -> a') -> (b -> b') -> (a, b) -> (a', b')
   , (***) -- (a -> b) -> (a -> c) -> a -> (b, c)
-  -- ** safe versions of errant functions
+
+    -- ** safe versions of errant functions
   , module Safe
   , maximumOnMay
   , minimumOnMay
   , maximumOnDef
   , minimumOnDef
-  -- ** other useful functions
+
+    -- ** other useful functions
   , statefulMap
   , statefulMapM
   , unfoldStateN
   , filterApart
-  -- ** Zip functions that fail on inputs of unequal length. These should be
+
+    -- ** Zip functions that fail on inputs of unequal length. These should be
+
   -- used when unequal lengths implies a compiler bug. In a better world, the
   -- typechecker would catch these issues before failing here.
   , safeZip
@@ -67,42 +73,47 @@ module Morloc.Internal
 -- Don't import anything from Morloc here. This module should be VERY lowest
 -- in the hierarchy, to avoid circular dependencies, since the lexer needs to
 -- access it.
-import Prelude hiding(mapM) -- replace Prelude mapM for lists with general traverable map
+-- replace Prelude mapM for lists with general traverable map
+
+import Control.Applicative ((<|>))
 import Control.Monad
 import Control.Monad.IO.Class
-import Control.Applicative ((<|>))
+
+-- 'list' conflicts with Doc
+
+import Data.Char (isLower, isUpper, toLower)
 import Data.Either
 import Data.Foldable (foldlM, foldrM)
-import Data.List.Extra hiding (list) -- 'list' conflicts with Doc
-import Data.Tuple.Extra ((***), (&&&))
+import Data.List.Extra hiding (list)
+import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.Monoid
-import Data.Traversable
-import Data.Char (isUpper, isLower, toLower)
-import Safe hiding (at, headDef, lastDef)
-import System.FilePath
-import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import Data.Traversable
+import Data.Tuple.Extra ((&&&), (***))
+import Morloc.Data.Annotated
 import Morloc.Data.Bifoldable
 import Morloc.Data.Bifunctor
-import Morloc.Data.Annotated
+import Safe hiding (at, headDef, lastDef)
+import System.FilePath
+import Prelude hiding (mapM)
 
-return2 :: Monad m => (a -> b -> c) -> (a -> b -> m c)
+return2 :: (Monad m) => (a -> b -> c) -> (a -> b -> m c)
 return2 f x y = return $ f x y
 
-maximumOnMay :: Ord b => (a -> b) -> [a] -> Maybe a
+maximumOnMay :: (Ord b) => (a -> b) -> [a] -> Maybe a
 maximumOnMay _ [] = Nothing
 maximumOnMay f xs = Just $ maximumOn f xs
 
-minimumOnMay :: Ord b => (a -> b) -> [a] -> Maybe a
+minimumOnMay :: (Ord b) => (a -> b) -> [a] -> Maybe a
 minimumOnMay _ [] = Nothing
 minimumOnMay f xs = Just $ minimumOn f xs
 
-maximumOnDef :: Ord b => a -> (a -> b) -> [a] -> a
+maximumOnDef :: (Ord b) => a -> (a -> b) -> [a] -> a
 maximumOnDef x _ [] = x
 maximumOnDef _ f xs = maximumOn f xs
 
-minimumOnDef :: Ord b => a -> (a -> b) -> [a] -> a
+minimumOnDef :: (Ord b) => a -> (a -> b) -> [a] -> a
 minimumOnDef x _ [] = x
 minimumOnDef _ f xs = minimumOn f xs
 
@@ -119,83 +130,85 @@ ifelse :: Bool -> a -> a -> a
 ifelse True x _ = x
 ifelse False _ y = y
 
-concatMapM :: Monad m => (a -> m [b]) -> [a] -> m [b]
+concatMapM :: (Monad m) => (a -> m [b]) -> [a] -> m [b]
 concatMapM f = fmap concat . mapM f
 
 -- | remove duplicated elements in a list while preserving order
-unique :: Ord a => [a] -> [a]
-unique = unique' Set.empty where
-  unique' _   [] = []
-  unique' set (x:xs)
-    | Set.member x set = unique' set xs
-    | otherwise = x : unique' (Set.insert x set) xs
+unique :: (Ord a) => [a] -> [a]
+unique = unique' Set.empty
+  where
+    unique' _ [] = []
+    unique' set (x : xs)
+      | Set.member x set = unique' set xs
+      | otherwise = x : unique' (Set.insert x set) xs
 
 -- | Build an ordered list of duplicated elements
-duplicates :: Ord a => [a] -> [a]
-duplicates xs = unique $ filter isDuplicated xs where
-  -- countMap :: Ord a => Map.Map a Int
-  countMap = Map.fromList . map (\ks -> (head ks, length ks)) . group . sort $ xs
+duplicates :: (Ord a) => [a] -> [a]
+duplicates xs = unique $ filter isDuplicated xs
+  where
+    -- countMap :: Ord a => Map.Map a Int
+    countMap = Map.fromList . map (\ks -> (head ks, length ks)) . group . sort $ xs
 
-  -- isDuplicated :: Ord a => a -> Bool
-  isDuplicated k = fromJust (Map.lookup k countMap) > 1
+    -- isDuplicated :: Ord a => a -> Bool
+    isDuplicated k = fromJust (Map.lookup k countMap) > 1
 
 statefulMap :: (s -> a -> (s, b)) -> s -> [a] -> (s, [b])
 statefulMap _ s [] = (s, [])
-statefulMap f s0 (x:xs) =
+statefulMap f s0 (x : xs) =
   let (s1, y) = f s0 x
-  in  let (sn, ys) = statefulMap f s1 xs
-      in (sn, y:ys)
+   in let (sn, ys) = statefulMap f s1 xs
+       in (sn, y : ys)
 
-statefulMapM :: Monad m => (s -> a -> m (s, b)) -> s -> [a] -> m (s, [b])
+statefulMapM :: (Monad m) => (s -> a -> m (s, b)) -> s -> [a] -> m (s, [b])
 statefulMapM _ s [] = return (s, [])
-statefulMapM f s (x:xs) = do
+statefulMapM f s (x : xs) = do
   (s', x') <- f s x
   (s'', xs') <- statefulMapM f s' xs
-  return (s'', x':xs')
+  return (s'', x' : xs')
 
 unfoldStateN :: Int -> (s -> (s, a)) -> s -> (s, [a])
 unfoldStateN 0 _ s = (s, [])
-unfoldStateN i f s = (s'', x:xs)
+unfoldStateN i f s = (s'', x : xs)
   where
     (s', x) = f s
-    (s'', xs) = unfoldStateN (i-1) f s'
+    (s'', xs) = unfoldStateN (i - 1) f s'
 
 -- pull one element from a list
 filterApart :: (a -> Bool) -> [a] -> (Maybe a, [a])
 filterApart _ [] = (Nothing, [])
-filterApart f (x:xs)
+filterApart f (x : xs)
   | f x = (Just x, xs)
   | otherwise = case filterApart f xs of
-    (r, xs') -> (r, x:xs')
+      (r, xs') -> (r, x : xs')
 
 safeZip :: [a] -> [b] -> Maybe [(a, b)]
-safeZip (x:xs) (y:ys) = (:) (x,y) <$> safeZip xs ys
+safeZip (x : xs) (y : ys) = (:) (x, y) <$> safeZip xs ys
 safeZip [] [] = Just []
 safeZip _ _ = Nothing
 
 safeZipWith :: (a -> b -> c) -> [a] -> [b] -> Maybe [c]
 safeZipWith f xs ys
-    | length xs == length ys = Just $ zipWith f xs ys
-    | otherwise = Nothing
+  | length xs == length ys = Just $ zipWith f xs ys
+  | otherwise = Nothing
 
-safeZipWithM :: Monad m => (a -> b -> m c) -> [a] -> [b] -> m (Maybe [c])
+safeZipWithM :: (Monad m) => (a -> b -> m c) -> [a] -> [b] -> m (Maybe [c])
 safeZipWithM f xs ys
-    | length xs == length ys = zipWithM f xs ys |>> Just
-    | otherwise = return Nothing
+  | length xs == length ys = zipWithM f xs ys |>> Just
+  | otherwise = return Nothing
 
-zipWith3M :: Monad m => (a -> b -> c -> m d) -> [a] -> [b] -> [c] -> m [d]
-zipWith3M f (a:as) (b:bs) (c:cs) = do
+zipWith3M :: (Monad m) => (a -> b -> c -> m d) -> [a] -> [b] -> [c] -> m [d]
+zipWith3M f (a : as) (b : bs) (c : cs) = do
   d <- f a b c
   ds <- zipWith3M f as bs cs
-  return $ d:ds
+  return $ d : ds
 zipWith3M _ _ _ _ = return []
 
 -- | pipe the lhs functor into the rhs function
 infixl 1 |>>
 
-(|>>) :: Functor f => f a -> (a -> b) -> f b
+(|>>) :: (Functor f) => f a -> (a -> b) -> f b
 (|>>) = flip fmap
 
 foldl1M :: (Monad m) => (a -> a -> m a) -> [a] -> m a
 foldl1M _ [] = error "foldl1M applied to empty list"
-foldl1M f (x:xs) = foldlM f x xs
+foldl1M f (x : xs) = foldlM f x xs

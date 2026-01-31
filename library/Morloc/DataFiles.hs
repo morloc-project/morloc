@@ -1,17 +1,16 @@
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 
-{-|
+{- |
 Module      : Morloc.DataFiles
 Description : Handle non-Haskell files such as foreign language sources files and configs
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 -}
-
 module Morloc.DataFiles
-  ( EmbededFile(..)
-  , LibMorloc(..)
+  ( EmbededFile (..)
+  , LibMorloc (..)
   , libmorloc
   , nexusTemplate
   , poolTemplate
@@ -22,10 +21,10 @@ module Morloc.DataFiles
   , librlang
   ) where
 
-import Morloc.Namespace
-import Data.Text.Encoding (decodeUtf8)
 import Data.FileEmbed (embedFileRelative)
-import Data.Text (Text) 
+import Data.Text (Text)
+import Data.Text.Encoding (decodeUtf8)
+import Morloc.Namespace
 
 data EmbededFile = EmbededFile
   { embededFileName :: String -- basename for the file
@@ -37,21 +36,21 @@ data LibMorloc = LibMorloc
   { libMorlocH :: EmbededFile
   , libHashH :: EmbededFile
   }
-libmorloc = LibMorloc
-  { libMorlocH = EmbededFile "morloc.h" (decodeUtf8 $ $(embedFileRelative "data/morloc.h"))
-  , libHashH = EmbededFile "xxhash.h" (decodeUtf8 $ $(embedFileRelative "data/third-party/xxhash.h"))
-  }
+libmorloc =
+  LibMorloc
+    { libMorlocH = EmbededFile "morloc.h" (decodeUtf8 $ $(embedFileRelative "data/morloc.h"))
+    , libHashH = EmbededFile "xxhash.h" (decodeUtf8 $ $(embedFileRelative "data/third-party/xxhash.h"))
+    }
 
 -- The nexus template
 nexusTemplate :: EmbededFile
 nexusTemplate = EmbededFile "nexus.c" (decodeUtf8 $ $(embedFileRelative "data/nexus.c"))
 
-
 -- Pool templates for all supported languages
 poolTemplate :: Lang -> EmbededFile
-poolTemplate CppLang     = EmbededFile "pool.cpp" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.cpp"))
+poolTemplate CppLang = EmbededFile "pool.cpp" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.cpp"))
 poolTemplate Python3Lang = EmbededFile "pool.py" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.py"))
-poolTemplate RLang       = EmbededFile "pool.R" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.R"))
+poolTemplate RLang = EmbededFile "pool.R" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.R"))
 poolTemplate _ = undefined
 
 -- R interface to morloc.h

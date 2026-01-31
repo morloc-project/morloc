@@ -1,56 +1,50 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{-|
+{- |
 Module      : Morloc.CodeGenerator.SystemConfig
 Description : Configure the system as needed for the given composition
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 -}
-
 module Morloc.CodeGenerator.SystemConfig
-(
-    configure
+  ( configure
   , configureAll
-) where
+  ) where
 
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.DataFiles as DF
-import Morloc.Module (OverwriteProtocol(..))
+import Morloc.Module (OverwriteProtocol (..))
 
-import qualified Morloc.Data.Text as MT
 import Data.Text (Text)
 import qualified Data.Text.IO as TIO
+import qualified Morloc.Data.Text as MT
 
+import Control.Exception (SomeException, displayException, try)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeFile)
+import System.IO (IOMode (WriteMode), hPutStrLn, stderr, withFile)
 import System.Process (callCommand, callProcess)
-import System.Directory (doesFileExist, removeFile, doesDirectoryExist, createDirectoryIfMissing)
-import System.IO (withFile, IOMode(WriteMode), hPutStrLn, stderr)
-import Control.Exception (SomeException, try, displayException)
-
 
 configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
 configure _ = return ()
 
-
 configureAll :: Bool -> OverwriteProtocol -> Bool -> Config -> IO Bool
-configureAll verbose force slurmSupport config = do 
+configureAll verbose force slurmSupport config = do
   -- Wrap the entire configuration process in exception handling
   result <- try (configureAllSteps verbose force slurmSupport config) :: IO (Either SomeException ())
   case result of
     Left e -> do
-        hPutStrLn stderr $ "\ESC[31mConfiguration failed: " ++ displayException e ++ "\ESC[0m"
-        return False
+      hPutStrLn stderr $ "\ESC[31mConfiguration failed: " ++ displayException e ++ "\ESC[0m"
+      return False
     Right _ -> return True
-
 
 -- | Configure for all languages
 configureAllSteps :: Bool -> OverwriteProtocol -> Bool -> Config -> IO ()
-configureAllSteps verbose force slurmSupport config = do 
-
+configureAllSteps verbose force slurmSupport config = do
   -- Setup Morloc home directory structure
   let homeDir = configHome config
       srcLibrary = configLibrary config
-      includeDir = configHome config </> "include" 
+      includeDir = configHome config </> "include"
       tmpDir = configTmpDir config
       optDir = configHome config </> "opt"
       libDir = configHome config </> "lib"
@@ -67,7 +61,9 @@ configureAllSteps verbose force slurmSupport config = do
   say $ "Writing build config file"
 
   -- currently SLURM support is the only build option
-  TIO.writeFile (configBuildConfig config) ( if slurmSupport then "slurm-support: true" else "slurm-support: false" )
+  TIO.writeFile
+    (configBuildConfig config)
+    (if slurmSupport then "slurm-support: true" else "slurm-support: false")
 
   say "Installing C++ extra types"
 
@@ -93,13 +89,19 @@ configureAllSteps verbose force slurmSupport config = do
   let tmpCFile = tmpDir </> "x.c"
 
       soPath = libDir </> "libmorloc.so"
-  TIO.writeFile tmpCFile (
-      "#include \"" <> MT.pack libmorlocPath <> "\"" <> "\n" <>
-      "#include \"" <> MT.pack libhashPath <> "\""
+  TIO.writeFile
+    tmpCFile
+    ( "#include \""
+        <> MT.pack libmorlocPath
+        <> "\""
+        <> "\n"
+        <> "#include \""
+        <> MT.pack libhashPath
+        <> "\""
     )
   -- special system-wide morloc build options
-  let morlocOptions = ( if slurmSupport then ["-DSLURM_SUPPORT"] else [] )
-  let gccArgs = [ "-O", "-shared", "-o", soPath, "-fPIC", tmpCFile ] <> morlocOptions
+  let morlocOptions = (if slurmSupport then ["-DSLURM_SUPPORT"] else [])
+  let gccArgs = ["-O", "-shared", "-o", soPath, "-fPIC", tmpCFile] <> morlocOptions
   callProcess "gcc" gccArgs
   removeFile tmpCFile
 
@@ -115,9 +117,8 @@ configureAllSteps verbose force slurmSupport config = do
   TIO.writeFile libpySetupPath $ DF.embededFileText DF.libpylangSetup
   TIO.writeFile libpyMakePath $ DF.embededFileText DF.libpylangMakefile
 
-  say "Generating libpymorloc.so" 
+  say "Generating libpymorloc.so"
   callCommand ("make -C " <> optDir <> " -f " <> DF.embededFileName DF.libpylangMakefile)
-
 
   say "Configuring R morloc API libraries"
   compileCCodeIfNeeded
@@ -126,48 +127,50 @@ configureAllSteps verbose force slurmSupport config = do
     (libDir </> "librmorloc.so")
     (includeDir </> "librmorloc.o")
   where
+    ok msg = "\ESC[32m" <> msg <> "\ESC[0m"
 
-  ok msg = "\ESC[32m" <> msg <> "\ESC[0m"
+    say :: String -> IO ()
+    say message =
+      if verbose
+        then do
+          hPutStrLn stderr (ok message)
+        else
+          return ()
 
-  say :: String -> IO ()
-  say message =
-    if verbose
-    then do
-      hPutStrLn stderr (ok message)
-    else
-      return ()
-
-  createDirectoryWithDescription :: String -> FilePath -> IO ()
-  createDirectoryWithDescription description path = do
+    createDirectoryWithDescription :: String -> FilePath -> IO ()
+    createDirectoryWithDescription description path = do
       exists <- doesDirectoryExist path
       if exists
-          then when verbose $
-              putStrLn $ "Checking " ++ description ++ " ... using existing path " ++ path
-          else do
-              createDirectoryIfMissing True path
-              when verbose $
-                  putStrLn $ "Checking " ++ description ++ " ... missing, creating at " ++ path
+        then
+          when verbose $
+            putStrLn $
+              "Checking " ++ description ++ " ... using existing path " ++ path
+        else do
+          createDirectoryIfMissing True path
+          when verbose $
+            putStrLn $
+              "Checking " ++ description ++ " ... missing, creating at " ++ path
 
-  compileCCodeIfNeeded :: Text -> Path -> Path -> Path -> IO ()
-  compileCCodeIfNeeded codeText sourcePath libPath objPath = do
+    compileCCodeIfNeeded :: Text -> Path -> Path -> Path -> IO ()
+    compileCCodeIfNeeded codeText sourcePath libPath objPath = do
       alreadyExists <- doesFileExist libPath
       if (alreadyExists && force == DoNotOverwrite)
-          then return ()
-          else do
-              -- Write the code to the temporary file
-              withFile sourcePath WriteMode $ \tempHandle -> do
-                  MT.hPutStr tempHandle codeText
+        then return ()
+        else do
+          -- Write the code to the temporary file
+          withFile sourcePath WriteMode $ \tempHandle -> do
+            MT.hPutStr tempHandle codeText
 
-             -- Compile the C code, will generate a .so file with same path and
-             -- basename as the source .c file
-              let compileCommand = "R CMD SHLIB " ++ sourcePath ++ " -o " ++ libPath 
+          -- Compile the C code, will generate a .so file with same path and
+          -- basename as the source .c file
+          let compileCommand = "R CMD SHLIB " ++ sourcePath ++ " -o " ++ libPath
 
-              callCommand compileCommand
+          callCommand compileCommand
 
-              -- Delete the source .c file
-              sourcePathExists <- doesFileExist sourcePath
-              when (sourcePathExists) (removeFile sourcePath)
+          -- Delete the source .c file
+          sourcePathExists <- doesFileExist sourcePath
+          when (sourcePathExists) (removeFile sourcePath)
 
-              -- Delete the source .o file
-              objPathExists <- doesFileExist objPath
-              when (objPathExists) (removeFile objPath)
+          -- Delete the source .o file
+          objPathExists <- doesFileExist objPath
+          when (objPathExists) (removeFile objPath)

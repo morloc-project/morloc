@@ -1,30 +1,29 @@
 {-# LANGUAGE TypeFamilies #-}
 
-{-|
+{- |
 Module      : Morloc.Data.Bifoldable
 Description : The Bifoldable typeclass with monadic instances
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 -}
+module Morloc.Data.Bifoldable (Bifoldable (..)) where
 
-module Morloc.Data.Bifoldable (Bifoldable(..)) where
-
-import Data.Foldable (foldlM, foldrM)
 import Control.Monad.Identity (runIdentity)
-import Morloc.Data.Bifunctor
+import Data.Foldable (foldlM, foldrM)
 import Data.Maybe (catMaybes)
+import Morloc.Data.Bifunctor
 
-return2 :: Monad m => (a -> b -> c) -> (a -> b -> m c)
+return2 :: (Monad m) => (a -> b -> c) -> (a -> b -> m c)
 return2 f x y = return $ f x y
 
 class (Bifunctor f) => Bifoldable f where
-  bilistM :: Monad m => (a -> m c) -> (b -> m c) -> f a b -> m [c]
+  bilistM :: (Monad m) => (a -> m c) -> (b -> m c) -> f a b -> m [c]
 
-  bilistsndM :: Monad m => (b -> m c) -> f a b -> m [c]
+  bilistsndM :: (Monad m) => (b -> m c) -> f a b -> m [c]
   bilistsndM f = fmap catMaybes . bilistM (return . const Nothing) (fmap Just . f)
 
-  bilistfstM :: Monad m => (a -> m c) -> f a b -> m [c]
+  bilistfstM :: (Monad m) => (a -> m c) -> f a b -> m [c]
   bilistfstM f = fmap catMaybes . bilistM (fmap Just . f) (return . const Nothing)
 
   biappendM :: (Monad m, Monoid c) => (a -> m c) -> (b -> m c) -> f a b -> m c
@@ -36,16 +35,20 @@ class (Bifunctor f) => Bifoldable f where
   bifoldMapM :: (Foldable t, Monoid c, Monad m) => (a -> m c) -> (b -> m c) -> t (f a b) -> m c
   bifoldMapM f g = fmap mconcat . bicatM f g
 
-  bifoldrM :: (Monoid c, Foldable t, Monad m) => (a -> c -> m c) -> (b -> c -> m c) -> c -> t (f a b) -> m c
+  bifoldrM ::
+    (Monoid c, Foldable t, Monad m) => (a -> c -> m c) -> (b -> c -> m c) -> c -> t (f a b) -> m c
   bifoldrM f g c xs = foldrM (\x c' -> biappendM (`f` c') (`g` c') x) c xs
 
-  bifoldlM :: (Monoid c, Foldable t, Monad m) => (c -> a -> m c) -> (c -> b -> m c) -> c -> t (f a b) -> m c
+  bifoldlM ::
+    (Monoid c, Foldable t, Monad m) => (c -> a -> m c) -> (c -> b -> m c) -> c -> t (f a b) -> m c
   bifoldlM f g c xs = foldlM (\c' x -> biappendM (f c') (g c') x) c xs
 
-  bifoldr1M :: (Monoid c, Foldable t, Monad m) => (a -> c -> m c) -> (b -> c -> m c) -> t (f a b) -> m c
+  bifoldr1M ::
+    (Monoid c, Foldable t, Monad m) => (a -> c -> m c) -> (b -> c -> m c) -> t (f a b) -> m c
   bifoldr1M f g xs = foldrM (\x c' -> biappendM (`f` c') (`g` c') x) mempty xs
 
-  bifoldl1M :: (Monoid c, Foldable t, Monad m) => (c -> a -> m c) -> (c -> b -> m c) -> t (f a b) -> m c
+  bifoldl1M ::
+    (Monoid c, Foldable t, Monad m) => (c -> a -> m c) -> (c -> b -> m c) -> t (f a b) -> m c
   bifoldl1M f g xs = foldlM (\c' x -> biappendM (f c') (g c') x) mempty xs
 
   ubimapM :: (a ~ b, Monad m) => (a -> m c) -> f a b -> m (f c c)
@@ -131,7 +134,6 @@ class (Bifunctor f) => Bifoldable f where
 
   ubifoldl1 :: (Monoid c, Foldable t, a ~ b) => (c -> a -> c) -> t (f a b) -> c
   ubifoldl1 f = runIdentity . ubifoldl1M (return2 f)
-
 
 instance Bifoldable Either where
   bilistM f _ (Left a) = do

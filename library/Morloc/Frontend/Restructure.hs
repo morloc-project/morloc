@@ -1,31 +1,31 @@
-{-# LANGUAGE ViewPatterns, OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
-{-|
+{- |
 Module      : Morloc.Frontend.Restructure
 Description : Write Module objects to resolve type aliases and such
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 -}
-
 module Morloc.Frontend.Restructure (restructure) where
 
-import Morloc.Frontend.Namespace
-import Morloc.Data.Doc
-import qualified Morloc.Frontend.AST as AST
-import qualified Morloc.Monad as MM
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.Text (Text)
 import qualified Morloc.Data.DAG as DAG
+import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
-import Data.Text (Text)
-import qualified Data.Set as Set
-import Data.Set (Set)
+import qualified Morloc.Frontend.AST as AST
+import Morloc.Frontend.Namespace
+import qualified Morloc.Monad as MM
 
 -- | Resolve type aliases, term aliases and import/exports
-restructure
-  :: DAG MVar Import ExprI
-  -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
+restructure ::
+  DAG MVar Import ExprI ->
+  MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
 restructure s = do
   -- Set the counter for reindexing expressions.
   --
@@ -38,29 +38,29 @@ restructure s = do
   checkForSelfRecursion s -- currently, do no not allow type self-recursion
     >>= resolveHoles
     >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
-    |>> handleTypeDeclarations
+      |>> handleTypeDeclarations
     >>= doM collectTags
     >>= doM collectTypes
     >>= doM collectSources
 
-
-doM :: Monad m => (a -> m ()) -> a -> m a
+doM :: (Monad m) => (a -> m ()) -> a -> m a
 doM f x = f x >> return x
 
--- | Check for infinitely expanding self-recursive types
---
--- There are cases were the defined term may appear on the right. For example:
---
---   type Py (Tree n e l) = "Tree" n e l
---
--- Here the general type Tree is mapped to the concrete type "Tree" in Python.
--- The fact that the general and concrete names are the same is fine. They are
--- different languages. But what about:
---
---   type (Tree n) = Node n [Tree n]
---
--- This type should be legal, but currently it is not supported. Which
--- is why I need to raise an explicit error to avoid infinite loops.
+{- | Check for infinitely expanding self-recursive types
+
+There are cases were the defined term may appear on the right. For example:
+
+  type Py (Tree n e l) = "Tree" n e l
+
+Here the general type Tree is mapped to the concrete type "Tree" in Python.
+The fact that the general and concrete names are the same is fine. They are
+different languages. But what about:
+
+  type (Tree n) = Node n [Tree n]
+
+This type should be legal, but currently it is not supported. Which
+is why I need to raise an explicit error to avoid infinite loops.
+-}
 checkForSelfRecursion :: DAG k e ExprI -> MorlocMonad (DAG k e ExprI)
 checkForSelfRecursion d = do
   _ <- DAG.mapNodeM (AST.checkExprI isExprSelfRecursive) d
@@ -77,7 +77,7 @@ checkForSelfRecursion d = do
       | otherwise = return ()
     -- otherwise disallow self-recursion
     isExprSelfRecursive (ExprI _ (TypE (ExprTypeE _ v ts t _)))
-      | any (hasTerm v) (t:(rights ts)) = MM.throwError . SelfRecursiveTypeAlias $ v
+      | any (hasTerm v) (t : (rights ts)) = MM.throwError . SelfRecursiveTypeAlias $ v
       | otherwise = return ()
     isExprSelfRecursive _ = return ()
 
@@ -85,376 +85,382 @@ checkForSelfRecursion d = do
     hasTerm :: TVar -> TypeU -> Bool
     hasTerm v (VarU v') = v == v'
     hasTerm v (ForallU _ t) = hasTerm v t
-
-    hasTerm v (FunU (t1:rs) t2) = hasTerm v t1 || hasTerm v (FunU rs t2)
+    hasTerm v (FunU (t1 : rs) t2) = hasTerm v t1 || hasTerm v (FunU rs t2)
     hasTerm v (FunU [] t) = hasTerm v t
-
-    hasTerm v (AppU t1 (t2:rs)) = hasTerm v t2 || hasTerm v (AppU t1 rs)
+    hasTerm v (AppU t1 (t2 : rs)) = hasTerm v t2 || hasTerm v (AppU t1 rs)
     hasTerm v (AppU t1 []) = hasTerm v t1
-
-    hasTerm v (NamU o n ps ((_, t):rs)) = hasTerm v t || hasTerm v (NamU o n ps rs)
-    hasTerm v (NamU o n (p:ps) []) = hasTerm v p || hasTerm v (NamU o n ps [])
+    hasTerm v (NamU o n ps ((_, t) : rs)) = hasTerm v t || hasTerm v (NamU o n ps rs)
+    hasTerm v (NamU o n (p : ps) []) = hasTerm v p || hasTerm v (NamU o n ps [])
     hasTerm _ (NamU _ _ [] []) = False
-
-    hasTerm _ ExistU{} = error "There should not be existentionals in typedefs"
+    hasTerm _ ExistU {} = error "There should not be existentionals in typedefs"
 
 maybeM :: MorlocError -> Maybe a -> MorlocMonad a
 maybeM _ (Just x) = return x
 maybeM e Nothing = MM.throwError e
 
-resolveHoles
-  :: DAG MVar Import ExprI
-  -> MorlocMonad (DAG MVar Import ExprI)
-resolveHoles = DAG.mapNodeM unhole where
-  unhole :: ExprI -> MorlocMonad ExprI
-  unhole e@(ExprI _ (LstE _)) = unholeContainer e
-  unhole e@(ExprI _ (TupE _)) = unholeContainer e
-  unhole e@(ExprI _ (NamE _)) = unholeContainer e
-  unhole (ExprI i (AppE e0 es0)) =
-    case length [HolE | (ExprI _ HolE) <- es0] of
-      0 -> AppE <$> unhole e0 <*> mapM unhole es0 |>> ExprI i
-      n -> do
-        lambdaIndex <- MM.getCounter
-        let vs = map (nameHole lambdaIndex) [1..n]
-            (_, es) = statefulMap insertHole vs es0
-        newApp <- AppE <$> unhole e0 <*> mapM unhole es
-        return $ ExprI lambdaIndex (LamE vs (ExprI i newApp))
-    where
-      insertHole :: [EVar] -> ExprI -> ([EVar], ExprI)
-      insertHole (v:vs) (ExprI j HolE) = (vs, ExprI j (VarE defaultValue v))
-      insertHole vs e = (vs, e)
-  -- simple recursion
-  unhole (ExprI i (ModE m es)) = ModE m <$> mapM unhole es |>> ExprI i
-  unhole (ExprI i (IstE c ts es)) = IstE c ts <$> mapM unhole es |>> ExprI i
-  unhole (ExprI i (AssE v e es)) = AssE v <$> unhole e <*> mapM unhole es |>> ExprI i
-  unhole (ExprI i (HolE)) = return HolE |>> ExprI i
-  unhole (ExprI i (LamE vs e)) = LamE vs <$> unhole e |>> ExprI i
-  unhole (ExprI i (AnnE e t)) = AnnE <$> unhole e <*> pure t |>> ExprI i
-  unhole e = return e
+resolveHoles ::
+  DAG MVar Import ExprI ->
+  MorlocMonad (DAG MVar Import ExprI)
+resolveHoles = DAG.mapNodeM unhole
+  where
+    unhole :: ExprI -> MorlocMonad ExprI
+    unhole e@(ExprI _ (LstE _)) = unholeContainer e
+    unhole e@(ExprI _ (TupE _)) = unholeContainer e
+    unhole e@(ExprI _ (NamE _)) = unholeContainer e
+    unhole (ExprI i (AppE e0 es0)) =
+      case length [HolE | (ExprI _ HolE) <- es0] of
+        0 -> AppE <$> unhole e0 <*> mapM unhole es0 |>> ExprI i
+        n -> do
+          lambdaIndex <- MM.getCounter
+          let vs = map (nameHole lambdaIndex) [1 .. n]
+              (_, es) = statefulMap insertHole vs es0
+          newApp <- AppE <$> unhole e0 <*> mapM unhole es
+          return $ ExprI lambdaIndex (LamE vs (ExprI i newApp))
+      where
+        insertHole :: [EVar] -> ExprI -> ([EVar], ExprI)
+        insertHole (v : vs) (ExprI j HolE) = (vs, ExprI j (VarE defaultValue v))
+        insertHole vs e = (vs, e)
+    -- simple recursion
+    unhole (ExprI i (ModE m es)) = ModE m <$> mapM unhole es |>> ExprI i
+    unhole (ExprI i (IstE c ts es)) = IstE c ts <$> mapM unhole es |>> ExprI i
+    unhole (ExprI i (AssE v e es)) = AssE v <$> unhole e <*> mapM unhole es |>> ExprI i
+    unhole (ExprI i (HolE)) = return HolE |>> ExprI i
+    unhole (ExprI i (LamE vs e)) = LamE vs <$> unhole e |>> ExprI i
+    unhole (ExprI i (AnnE e t)) = AnnE <$> unhole e <*> pure t |>> ExprI i
+    unhole e = return e
 
-  unholeContainer :: ExprI -> MorlocMonad ExprI
-  unholeContainer e0@(ExprI i0 _) =
-    case countHoles e0 of
-      0 -> descend e0
-      n -> do
-        let vs = map (nameHole i0) [1..n]
-        e <- descend . snd . insertHoles vs $ e0
-        MM.sayVVV $ "unholeContainer vs:" <+> list (map pretty vs)
-        MM.sayVVV $ "unholeContainer e:" <+> pretty e
-        return $ ExprI i0 (LamE vs e)
-        where
-          insertHoles :: [EVar] -> ExprI -> ([EVar], ExprI)
-          insertHoles (v:vs) (ExprI i HolE) = (vs, ExprI i (VarE defaultValue v))
-          insertHoles vs (ExprI i (LstE es)) =
-            let (vs', es') = statefulMap insertHoles vs es
-            in (vs', ExprI i (LstE es'))
-          insertHoles vs (ExprI i (TupE es)) =
-            let (vs', es') = statefulMap insertHoles vs es
-            in (vs', ExprI i (TupE es'))
-          insertHoles vs (ExprI i (NamE (unzip -> (ks, es)))) =
-            let (vs', es') = statefulMap insertHoles vs es
-            in (vs', ExprI i (NamE (zip ks es')))
-          insertHoles vs e = (vs, e)
+    unholeContainer :: ExprI -> MorlocMonad ExprI
+    unholeContainer e0@(ExprI i0 _) =
+      case countHoles e0 of
+        0 -> descend e0
+        n -> do
+          let vs = map (nameHole i0) [1 .. n]
+          e <- descend . snd . insertHoles vs $ e0
+          MM.sayVVV $ "unholeContainer vs:" <+> list (map pretty vs)
+          MM.sayVVV $ "unholeContainer e:" <+> pretty e
+          return $ ExprI i0 (LamE vs e)
+          where
+            insertHoles :: [EVar] -> ExprI -> ([EVar], ExprI)
+            insertHoles (v : vs) (ExprI i HolE) = (vs, ExprI i (VarE defaultValue v))
+            insertHoles vs (ExprI i (LstE es)) =
+              let (vs', es') = statefulMap insertHoles vs es
+               in (vs', ExprI i (LstE es'))
+            insertHoles vs (ExprI i (TupE es)) =
+              let (vs', es') = statefulMap insertHoles vs es
+               in (vs', ExprI i (TupE es'))
+            insertHoles vs (ExprI i (NamE (unzip -> (ks, es)))) =
+              let (vs', es') = statefulMap insertHoles vs es
+               in (vs', ExprI i (NamE (zip ks es')))
+            insertHoles vs e = (vs, e)
 
-  countHoles :: ExprI -> Int
-  countHoles (ExprI _ HolE) = 1
-  countHoles (ExprI _ (LstE xs)) = sum (map countHoles xs)
-  countHoles (ExprI _ (TupE xs)) = sum (map countHoles xs)
-  countHoles (ExprI _ (NamE (map snd -> xs))) = sum (map countHoles xs)
-  countHoles _ = 0
+    countHoles :: ExprI -> Int
+    countHoles (ExprI _ HolE) = 1
+    countHoles (ExprI _ (LstE xs)) = sum (map countHoles xs)
+    countHoles (ExprI _ (TupE xs)) = sum (map countHoles xs)
+    countHoles (ExprI _ (NamE (map snd -> xs))) = sum (map countHoles xs)
+    countHoles _ = 0
 
-  descend :: ExprI -> MorlocMonad ExprI
-  -- refresh
-  descend e@(ExprI _ (AppE _ _)) = unhole e
-  -- simple recurse
-  descend (ExprI i (LamE vs e)) = LamE vs <$> descend e |>> ExprI i
-  descend (ExprI i (LstE es)) = LstE <$> mapM descend es |>> ExprI i
-  descend (ExprI i (TupE es)) = TupE <$> mapM descend es |>> ExprI i
-  descend (ExprI i (NamE rs)) = NamE <$> mapM (\(k, e) -> (,) k <$> descend e) rs |>> ExprI i
-  descend (ExprI i (AnnE e t)) = AnnE <$> descend e <*> pure t |>> ExprI i
-  descend e = return e
+    descend :: ExprI -> MorlocMonad ExprI
+    -- refresh
+    descend e@(ExprI _ (AppE _ _)) = unhole e
+    -- simple recurse
+    descend (ExprI i (LamE vs e)) = LamE vs <$> descend e |>> ExprI i
+    descend (ExprI i (LstE es)) = LstE <$> mapM descend es |>> ExprI i
+    descend (ExprI i (TupE es)) = TupE <$> mapM descend es |>> ExprI i
+    descend (ExprI i (NamE rs)) = NamE <$> mapM (\(k, e) -> (,) k <$> descend e) rs |>> ExprI i
+    descend (ExprI i (AnnE e t)) = AnnE <$> descend e <*> pure t |>> ExprI i
+    descend e = return e
 
-  -- name a hole based on the index of the new lambda and the hole position
-  nameHole :: Int -> Int -> EVar
-  nameHole lidx aidx = EV ("_hole" <> MT.show' lidx <> "_" <> MT.show' aidx)
+    -- name a hole based on the index of the new lambda and the hole position
+    nameHole :: Int -> Int -> EVar
+    nameHole lidx aidx = EV ("_hole" <> MT.show' lidx <> "_" <> MT.show' aidx)
 
--- | Use export/import information to find which terms are imported into each module
--- * reduces the Import edge type to an alias map.
--- * replaces Export terms in expressions
-resolveImports
-  :: DAG MVar Import ExprI
-  -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
-resolveImports d0
-    = DAG.synthesize resolveExports resolveEdge d0
+{- | Use export/import information to find which terms are imported into each module
+* reduces the Import edge type to an alias map.
+* replaces Export terms in expressions
+-}
+resolveImports ::
+  DAG MVar Import ExprI ->
+  MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
+resolveImports d0 =
+  DAG.synthesize resolveExports resolveEdge d0
     >>= maybeM (CyclicDependency "cyclical import dependency in resolveImports")
   where
+    -- Collect all exported terms from a module (including those imported
+    -- without qualification. Then update the ExpE term
+    resolveExports :: MVar -> ExprI -> [(MVar, Import, ExprI)] -> MorlocMonad ExprI
+    resolveExports m e children = do
+      let allLocalSymbols = findSymbols e -- Set Symbol
+          export = AST.findExport e -- Export
+      allImportedSymbols <-
+        Set.unions <$> mapM (\(_, imp', expr') -> filterImports m imp' (AST.findExport expr')) children
 
-  -- Collect all exported terms from a module (including those imported
-  -- without qualification. Then update the ExpE term
-  resolveExports :: MVar -> ExprI -> [(MVar, Import, ExprI)] -> MorlocMonad ExprI
-  resolveExports m e children = do
-    let allLocalSymbols = findSymbols e -- Set Symbol
-        export = AST.findExport e       -- Export
+      let allSymbols = Set.union allLocalSymbols allImportedSymbols
 
-    allImportedSymbols <- Set.unions <$> mapM (\(_, imp', expr') -> filterImports m imp' (AST.findExport expr')) children
-
-    let allSymbols = Set.union allLocalSymbols allImportedSymbols
-
-    exports <- case export of
+      exports <- case export of
         ExportAll -> mapM addIndex (Set.toList allSymbols) |>> Set.fromList
         (ExportMany (resolveExplicitTypeclasses allSymbols -> explicitExports)) ->
-            let missing = (Set.map snd explicitExports) `Set.difference` allSymbols
-            in if Set.null missing
-               then
-                 return explicitExports  -- all things exported are defined
-               else
-                 MM.throwError . ImportExportError m . render
-                   $ "Module does not export the following terms or types:"
-                   <+> list (map viaShow (Set.toList missing))
+          let missing = (Set.map snd explicitExports) `Set.difference` allSymbols
+           in if Set.null missing
+                then
+                  return explicitExports -- all things exported are defined
+                else
+                  MM.throwError . ImportExportError m . render $
+                    "Module does not export the following terms or types:"
+                      <+> list (map viaShow (Set.toList missing))
 
-    return $ AST.setExport (ExportMany exports) e
+      return $ AST.setExport (ExportMany exports) e
 
-  resolveExplicitTypeclasses :: Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol)
-  resolveExplicitTypeclasses ss sis = Set.map f sis where
-    f :: (Int, Symbol) -> (Int, Symbol)
-    f (i, TypeSymbol (TV x))
-      | (ClassSymbol (ClassName x)) `Set.member` ss = (i, ClassSymbol (ClassName x))
-      | otherwise = (i, TypeSymbol (TV x))
-    f x = x
-
-  addIndex :: a -> MorlocMonad (Int, a)
-  addIndex x = (,) <$> MM.getCounter <*> pure x
-
-  -- TODO: distinguish between these expressions at the type-level
-  --       the contains unresolved imports, that later resolved
-  resolveEdge
-    :: Import
-    -> ExprI -- importing module expression (with resolved exports)
-    -> ExprI -- imported module expression  (with resolved exports)
-    -> MorlocMonad [AliasedSymbol]
-  resolveEdge imp _ childX = case (importInclude imp, AST.findExport childX) of
-    (_, ExportAll) -> error "This should have been resolved already"
-    (Nothing, ExportMany exps) -> return $ map (toAliasedSymbol . snd) (Set.toList exps)
-    (Just ass, ExportMany exps) -> return . catMaybes $ map (importAlias . unAliasedSymbol) ass
+    resolveExplicitTypeclasses :: Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol)
+    resolveExplicitTypeclasses ss sis = Set.map f sis
       where
-      exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList exps]
-      excludes = map unSymbol (importExclude imp)
+        f :: (Int, Symbol) -> (Int, Symbol)
+        f (i, TypeSymbol (TV x))
+          | (ClassSymbol (ClassName x)) `Set.member` ss = (i, ClassSymbol (ClassName x))
+          | otherwise = (i, TypeSymbol (TV x))
+        f x = x
 
-      importAlias :: (Text, Text) -> Maybe AliasedSymbol
-      importAlias (name, alias)
-          | name `elem` excludes = Nothing
-          | otherwise = case Map.lookup name exportMap of
-              Nothing -> Nothing
-              (Just (TermSymbol _)) -> Just $ AliasedTerm (EV name) (EV alias)
-              (Just (TypeSymbol _)) -> Just $ AliasedType (TV name) (TV alias)
-              (Just (ClassSymbol _)) -> Just $ AliasedClass (ClassName name)
+    addIndex :: a -> MorlocMonad (Int, a)
+    addIndex x = (,) <$> MM.getCounter <*> pure x
 
-  filterImports
-    :: MVar
-    -> Import -- the current node import list
-    -> Export -- the imported modules export list
-    -> MorlocMonad (Set Symbol)
-  -- Here we import everything outside the exclude set, no aliasing
-  filterImports _ (Import _ Nothing exclude _) (ExportMany exports) =
-    return $ (Set.map snd exports) `Set.difference` (Set.fromList exclude)
-  -- Here we need to carefully handle aliasing
-  filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) _) (ExportMany exports)
-    = case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
+    -- TODO: distinguish between these expressions at the type-level
+    --       the contains unresolved imports, that later resolved
+    resolveEdge ::
+      Import ->
+      ExprI -> -- importing module expression (with resolved exports)
+      ExprI -> -- imported module expression  (with resolved exports)
+      MorlocMonad [AliasedSymbol]
+    resolveEdge imp _ childX = case (importInclude imp, AST.findExport childX) of
+      (_, ExportAll) -> error "This should have been resolved already"
+      (Nothing, ExportMany exps) -> return $ map (toAliasedSymbol . snd) (Set.toList exps)
+      (Just ass, ExportMany exps) -> return . catMaybes $ map (importAlias . unAliasedSymbol) ass
+        where
+          exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList exps]
+          excludes = map unSymbol (importExclude imp)
+
+          importAlias :: (Text, Text) -> Maybe AliasedSymbol
+          importAlias (name, alias)
+            | name `elem` excludes = Nothing
+            | otherwise = case Map.lookup name exportMap of
+                Nothing -> Nothing
+                (Just (TermSymbol _)) -> Just $ AliasedTerm (EV name) (EV alias)
+                (Just (TypeSymbol _)) -> Just $ AliasedType (TV name) (TV alias)
+                (Just (ClassSymbol _)) -> Just $ AliasedClass (ClassName name)
+
+    filterImports ::
+      MVar ->
+      Import -> -- the current node import list
+      Export -> -- the imported modules export list
+      MorlocMonad (Set Symbol)
+    -- Here we import everything outside the exclude set, no aliasing
+    filterImports _ (Import _ Nothing exclude _) (ExportMany exports) =
+      return $ (Set.map snd exports) `Set.difference` (Set.fromList exclude)
+    -- Here we need to carefully handle aliasing
+    filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) _) (ExportMany exports) =
+      case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
         ([], imps) -> return $ Set.fromList imps
-        (missing, _) -> MM.throwError . ImportExportError m1
-           $ "The following imported terms are not exported from module '" <> unMVar m2 <> "': "
-           <> render (list $ map pretty missing)
-    where
+        (missing, _) ->
+          MM.throwError . ImportExportError m1 $
+            "The following imported terms are not exported from module '"
+              <> unMVar m2
+              <> "': "
+              <> render (list $ map pretty missing)
+      where
         exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList exports]
 
         importAlias :: (Text, Text) -> Maybe (Either Text Symbol)
         importAlias (name, alias)
-            | name `elem` exclude = Nothing
-            | otherwise = case Map.lookup name exportMap of
-                Nothing -> Just (Left name)
-                (Just (TermSymbol _)) -> Just . Right $ TermSymbol (EV alias)
-                (Just (TypeSymbol _)) -> Just . Right $ TypeSymbol (TV alias)
-                (Just (ClassSymbol _)) -> Just . Right $ ClassSymbol (ClassName alias)
-  filterImports _ _ _ = error "Unreachable -- all Export values should have been converted to ExportMany"
+          | name `elem` exclude = Nothing
+          | otherwise = case Map.lookup name exportMap of
+              Nothing -> Just (Left name)
+              (Just (TermSymbol _)) -> Just . Right $ TermSymbol (EV alias)
+              (Just (TypeSymbol _)) -> Just . Right $ TypeSymbol (TV alias)
+              (Just (ClassSymbol _)) -> Just . Right $ ClassSymbol (ClassName alias)
+    filterImports _ _ _ = error "Unreachable -- all Export values should have been converted to ExportMany"
 
-  findSymbols :: ExprI -> Set Symbol
-  findSymbols (ExprI _ (ModE _ es)) = Set.unions (map findSymbols es)
-  findSymbols (ExprI _ (TypE (ExprTypeE  _ v _ _ _))) = Set.singleton $ TypeSymbol v
-  findSymbols (ExprI _ (AssE e _ _)) = Set.singleton $ TermSymbol e
-  findSymbols (ExprI _ (ClsE (Typeclass cls _ _))) = Set.singleton $ ClassSymbol cls
-  findSymbols (ExprI _ (SigE (Signature e _ _))) = Set.singleton $ TermSymbol e
-  findSymbols (ExprI _ (SrcE src)) = Set.singleton $ TermSymbol (srcAlias src)
-  -- The definition of an instance does not automatically imply export or make
-  -- the values available. The instance is ALWAYS relative to the class
-  -- definition (either local or imported).
-  findSymbols (ExprI _ (IstE cls _ _)) = Set.singleton $ ClassSymbol cls
-  findSymbols _ = Set.empty
+    findSymbols :: ExprI -> Set Symbol
+    findSymbols (ExprI _ (ModE _ es)) = Set.unions (map findSymbols es)
+    findSymbols (ExprI _ (TypE (ExprTypeE _ v _ _ _))) = Set.singleton $ TypeSymbol v
+    findSymbols (ExprI _ (AssE e _ _)) = Set.singleton $ TermSymbol e
+    findSymbols (ExprI _ (ClsE (Typeclass cls _ _))) = Set.singleton $ ClassSymbol cls
+    findSymbols (ExprI _ (SigE (Signature e _ _))) = Set.singleton $ TermSymbol e
+    findSymbols (ExprI _ (SrcE src)) = Set.singleton $ TermSymbol (srcAlias src)
+    -- The definition of an instance does not automatically imply export or make
+    -- the values available. The instance is ALWAYS relative to the class
+    -- definition (either local or imported).
+    findSymbols (ExprI _ (IstE cls _ _)) = Set.singleton $ ClassSymbol cls
+    findSymbols _ = Set.empty
 
-  unSymbol :: Symbol -> Text
-  unSymbol (TypeSymbol (TV v)) = v
-  unSymbol (TermSymbol (EV v)) = v
-  unSymbol (ClassSymbol (ClassName v)) = v
+    unSymbol :: Symbol -> Text
+    unSymbol (TypeSymbol (TV v)) = v
+    unSymbol (TermSymbol (EV v)) = v
+    unSymbol (ClassSymbol (ClassName v)) = v
 
-  unAliasedSymbol :: AliasedSymbol -> (Text, Text)
-  unAliasedSymbol (AliasedType x y) = (unTVar x, unTVar y)
-  unAliasedSymbol (AliasedTerm x y) = (unEVar x, unEVar y)
-  unAliasedSymbol (AliasedClass x) = (unClassName x, unClassName x)
+    unAliasedSymbol :: AliasedSymbol -> (Text, Text)
+    unAliasedSymbol (AliasedType x y) = (unTVar x, unTVar y)
+    unAliasedSymbol (AliasedTerm x y) = (unEVar x, unEVar y)
+    unAliasedSymbol (AliasedClass x) = (unClassName x, unClassName x)
 
-  toAliasedSymbol :: Symbol -> AliasedSymbol
-  toAliasedSymbol (TypeSymbol x) = AliasedType x x
-  toAliasedSymbol (TermSymbol x) = AliasedTerm x x
-  toAliasedSymbol (ClassSymbol x) = AliasedClass x
+    toAliasedSymbol :: Symbol -> AliasedSymbol
+    toAliasedSymbol (TypeSymbol x) = AliasedType x x
+    toAliasedSymbol (TermSymbol x) = AliasedTerm x x
+    toAliasedSymbol (ClassSymbol x) = AliasedClass x
 
-handleTypeDeclarations
-  :: DAG k e ExprI
-  -> DAG k e ExprI
-handleTypeDeclarations = DAG.mapNode f where
-  f (ExprI i (ModE m es)) = ExprI i (ModE m (filter isNotSelfDef es))
-  f e = e
+handleTypeDeclarations ::
+  DAG k e ExprI ->
+  DAG k e ExprI
+handleTypeDeclarations = DAG.mapNode f
+  where
+    f (ExprI i (ModE m es)) = ExprI i (ModE m (filter isNotSelfDef es))
+    f e = e
 
-  isNotSelfDef :: ExprI -> Bool
-  isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing v [] (VarU v') _))) = v /= v'
-  isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing (VarU -> v) (map (either VarU id) -> vs) (AppU v' vs') _))) =
-    v /= v' || length vs /= length vs' || not (all (\(x,y) -> x == y) (zip vs vs'))
-  isNotSelfDef _ = True
-
+    isNotSelfDef :: ExprI -> Bool
+    isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing v [] (VarU v') _))) = v /= v'
+    isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing (VarU -> v) (map (either VarU id) -> vs) (AppU v' vs') _))) =
+      v /= v' || length vs /= length vs' || not (all (\(x, y) -> x == y) (zip vs vs'))
+    isNotSelfDef _ = True
 
 collectTags :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTags fullDag = do
-    _ <- DAG.mapNodeM f fullDag
-    return ()
-    where
-    -- * add ManifoldConfigs associated with VarE types to MorlocMonad state
-    -- * the configs store the metadata associated with the term tags
-    -- * later we use the manifold indices to lookup things like runtime info
+  _ <- DAG.mapNodeM f fullDag
+  return ()
+  where
+    -- \* add ManifoldConfigs associated with VarE types to MorlocMonad state
+    -- \* the configs store the metadata associated with the term tags
+    -- \* later we use the manifold indices to lookup things like runtime info
     --   (threads required and such)
     f :: ExprI -> MorlocMonad ()
     f (ExprI i (VarE config _)) = do
-        s <- MM.get
-        MM.put (s {stateManifoldConfig = Map.insert i config (stateManifoldConfig s) })
+      s <- MM.get
+      MM.put (s {stateManifoldConfig = Map.insert i config (stateManifoldConfig s)})
     f (ExprI _ (ModE _ es)) = mapM_ f es
     f (ExprI _ (IstE _ _ es)) = mapM_ f es
-    f (ExprI _ (AssE _ e es)) = mapM_ f (e:es)
+    f (ExprI _ (AssE _ e es)) = mapM_ f (e : es)
     f (ExprI _ (LstE es)) = mapM_ f es
     f (ExprI _ (TupE es)) = mapM_ f es
     f (ExprI _ (NamE rs)) = mapM_ (f . snd) rs
-    f (ExprI _ (AppE e es)) = mapM_ f (e:es)
+    f (ExprI _ (AppE e es)) = mapM_ f (e : es)
     f (ExprI _ (LamE _ e)) = f e
     f (ExprI _ (AnnE e _)) = f e
     f _ = return ()
-
 
 type GCMap = (Scope, Map.Map Lang Scope)
 
 collectTypes :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTypes fullDag = do
-  let typeDAG = DAG.mapEdge (\xs -> [(x,y) | AliasedType x y <- xs]) fullDag
+  let typeDAG = DAG.mapEdge (\xs -> [(x, y) | AliasedType x y <- xs]) fullDag
   _ <- DAG.synthesizeNodes formTypes typeDAG
 
   universalGeneralScope <- getUniversalGeneralScope
   universalConcreteScope <- getUniversalConcreteScope universalGeneralScope
 
   s <- MM.get
-  MM.put (s { stateUniversalGeneralTypedefs = universalGeneralScope
-            , stateUniversalConcreteTypedefs = universalConcreteScope
-            } )
+  MM.put
+    ( s
+        { stateUniversalGeneralTypedefs = universalGeneralScope
+        , stateUniversalConcreteTypedefs = universalConcreteScope
+        }
+    )
 
   return ()
   where
-
-  formTypes
-    :: MVar
-    -> ExprI
-    -> [( MVar -- child module name
+    formTypes ::
+      MVar ->
+      ExprI ->
+      [ ( MVar -- child module name
         , [(TVar, TVar)] -- alias map
         , GCMap
-        )]
-    -> MorlocMonad GCMap
-  formTypes m e0 childImports = do
+        )
+      ] ->
+      MorlocMonad GCMap
+    formTypes m e0 childImports = do
+      let (generalTypemap, concreteTypemapsIncomplete) = foldl inherit (AST.findTypedefs e0) childImports
 
-    let (generalTypemap, concreteTypemapsIncomplete) = foldl inherit (AST.findTypedefs e0) childImports
+      -- Here we are creating links from every indexed term in the module to the module
+      -- sources and aliases. When the module abstractions are factored out later,
+      -- this will be the only way to access module-specific info.
+      let indices = AST.getIndices e0
 
-    -- Here we are creating links from every indexed term in the module to the module
-    -- sources and aliases. When the module abstractions are factored out later,
-    -- this will be the only way to access module-specific info.
-    let indices = AST.getIndices e0
+      -- This step links the general entries from records to their abbreviated
+      -- concrete cousins. For example:
+      --   record (Person a) = Person {name :: Str, info a}
+      --   record Py => Person a = "dict"
+      -- This syntax avoids the need to duplicate the entire entry
+      let concreteTypemaps = Map.map (completeRecords generalTypemap) concreteTypemapsIncomplete
 
-    -- This step links the general entries from records to their abbreviated
-    -- concrete cousins. For example:
-    --   record (Person a) = Person {name :: Str, info a}
-    --   record Py => Person a = "dict"
-    -- This syntax avoids the need to duplicate the entire entry
-    let concreteTypemaps = Map.map (completeRecords generalTypemap) concreteTypemapsIncomplete
+      s <- MM.get
+      MM.put
+        ( s
+            { stateGeneralTypedefs = GMap.insertMany indices m generalTypemap (stateGeneralTypedefs s)
+            , stateConcreteTypedefs = GMap.insertMany indices m concreteTypemaps (stateConcreteTypedefs s)
+            }
+        )
 
-    s <- MM.get
-    MM.put (s { stateGeneralTypedefs = GMap.insertMany indices m generalTypemap (stateGeneralTypedefs s)
-              , stateConcreteTypedefs = GMap.insertMany indices m concreteTypemaps (stateConcreteTypedefs s)
-              } )
+      return (generalTypemap, concreteTypemaps)
 
-    return (generalTypemap, concreteTypemaps)
+    inherit :: GCMap -> (key, [(TVar, TVar)], GCMap) -> GCMap
+    inherit (thisGmap, thisCmap) (_, links, (gmap, cmap)) =
+      let gmap' = filterAndSubstitute links gmap
+          cmap' = Map.map (filterAndSubstitute links) cmap
+       in ( Map.unionWith mergeEntries gmap' thisGmap
+          , Map.unionWith (Map.unionWith mergeEntries) cmap' thisCmap
+          )
 
-  inherit :: GCMap -> (key, [(TVar, TVar)], GCMap) -> GCMap
-  inherit (thisGmap, thisCmap) (_, links, (gmap, cmap)) =
-    let gmap' = filterAndSubstitute links gmap
-        cmap' = Map.map (filterAndSubstitute links) cmap
-    in ( Map.unionWith mergeEntries gmap' thisGmap
-       , Map.unionWith (Map.unionWith mergeEntries) cmap' thisCmap
-       )
+    getUniversalConcreteScope :: Scope -> MorlocMonad (Map.Map Lang Scope)
+    getUniversalConcreteScope gscope = do
+      (GMap _ modMaps) <- MM.gets stateConcreteTypedefs
+      let langs = concatMap Map.keys . Map.elems $ modMaps
+      scopes <- mapM getLangScope langs
+      return . Map.fromList $ zip langs scopes
+      where
+        getLangScope :: Lang -> MorlocMonad Scope
+        getLangScope lang = do
+          (GMap _ (Map.elems -> langMaps)) <- MM.gets stateConcreteTypedefs
+          -- See note above, here we are completing any incomplete concrete
+          -- record/table/object types
+          let langMaps' = map (Map.map (completeRecords gscope)) langMaps
+          return . Map.unionsWith mergeEntries . mapMaybe (Map.lookup lang) $ langMaps'
 
-  getUniversalConcreteScope :: Scope -> MorlocMonad (Map.Map Lang Scope)
-  getUniversalConcreteScope gscope = do
-    (GMap _ modMaps) <- MM.gets stateConcreteTypedefs
-    let langs = concatMap Map.keys . Map.elems $ modMaps
-    scopes <- mapM getLangScope langs
-    return . Map.fromList $ zip langs scopes
-    where
-      getLangScope :: Lang -> MorlocMonad Scope
-      getLangScope lang = do
-        (GMap _ (Map.elems -> langMaps)) <- MM.gets stateConcreteTypedefs
-        -- See note above, here we are completing any incomplete concrete
-        -- record/table/object types
-        let langMaps' = map (Map.map (completeRecords gscope)) langMaps
-        return . Map.unionsWith mergeEntries . mapMaybe (Map.lookup lang) $ langMaps'
+    completeRecords :: Scope -> Scope -> Scope
+    completeRecords gscope cscope = Map.mapWithKey (completeRecord gscope) cscope
 
-  completeRecords :: Scope -> Scope -> Scope
-  completeRecords gscope cscope = Map.mapWithKey (completeRecord gscope) cscope
+    completeRecord ::
+      Scope ->
+      TVar ->
+      [([Either TVar TypeU], TypeU, ArgDoc, Bool)] ->
+      [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
+    completeRecord gscope v xs = case Map.lookup v gscope of
+      (Just ys) -> map (completeValue [(vs, t) | (vs, t, _, _) <- ys]) xs
+      Nothing -> xs
 
-  completeRecord
-    :: Scope
-    -> TVar
-    -> [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
-    -> [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
-  completeRecord gscope v xs = case Map.lookup v gscope of
-    (Just ys) -> map (completeValue [(vs, t) | (vs, t, _, _) <- ys]) xs
-    Nothing -> xs
+    completeValue ::
+      [([Either TVar TypeU], TypeU)] ->
+      ([Either TVar TypeU], TypeU, ArgDoc, Bool) ->
+      ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+    completeValue ((vs, NamU _ _ ps rs) : _) (_, NamU o v _ [], d, terminal) = (vs, NamU o v ps rs, d, terminal)
+    completeValue _ x = x
 
-  completeValue
-    :: [([Either TVar TypeU], TypeU)]
-    -> ([Either TVar TypeU], TypeU, ArgDoc, Bool)
-    -> ([Either TVar TypeU], TypeU, ArgDoc, Bool)
-  completeValue ((vs, NamU _ _ ps rs):_) (_, NamU o v _ [], d, terminal) = (vs, NamU o v ps rs, d, terminal)
-  completeValue _ x = x
-
-  getUniversalGeneralScope :: MorlocMonad Scope
-  getUniversalGeneralScope = do
-    (GMap _ (Map.elems -> scopes)) <- MM.gets stateGeneralTypedefs
-    return $ Map.unionsWith mergeEntries scopes
-
+    getUniversalGeneralScope :: MorlocMonad Scope
+    getUniversalGeneralScope = do
+      (GMap _ (Map.elems -> scopes)) <- MM.gets stateGeneralTypedefs
+      return $ Map.unionsWith mergeEntries scopes
 
 -- merge type functions, names of generics do not matter
-mergeEntries
-    :: [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
-    -> [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
-    -> [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
+mergeEntries ::
+  [([Either TVar TypeU], TypeU, ArgDoc, Bool)] ->
+  [([Either TVar TypeU], TypeU, ArgDoc, Bool)] ->
+  [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
 mergeEntries xs0 ys0 = filter (isNovel ys0) xs0 <> ys0
   where
-  isNovel :: [([Either TVar TypeU], TypeU, ArgDoc, Bool)] -> ([Either TVar TypeU], TypeU, ArgDoc, Bool) -> Bool
-  isNovel [] _ =  True
-  isNovel ((vs2, t2, _, isTerminal1):ys) x@(vs1, t1, _, isTerminal2)
-    | (length vs1 == length vs2) &&
-      t1 == foldl (\t (v1, v2) -> rename v2 v1 t) t2 [(v1, v2) | (Left v1, Left v2) <- zip vs1 vs2] &&
-      isTerminal1 == isTerminal2 = False
-    | otherwise = isNovel ys x
+    isNovel ::
+      [([Either TVar TypeU], TypeU, ArgDoc, Bool)] -> ([Either TVar TypeU], TypeU, ArgDoc, Bool) -> Bool
+    isNovel [] _ = True
+    isNovel ((vs2, t2, _, isTerminal1) : ys) x@(vs1, t1, _, isTerminal2)
+      | (length vs1 == length vs2)
+          && t1 == foldl (\t (v1, v2) -> rename v2 v1 t) t2 [(v1, v2) | (Left v1, Left v2) <- zip vs1 vs2]
+          && isTerminal1 == isTerminal2 =
+          False
+      | otherwise = isNovel ys x
 
 -- clean imports
 --   * only keep the exports of a module that are explicitly imported
@@ -462,41 +468,41 @@ mergeEntries xs0 ys0 = filter (isNovel ys0) xs0 <> ys0
 filterAndSubstitute :: [(TVar, TVar)] -> Scope -> Scope
 filterAndSubstitute links typemap =
   let importedTypes = Map.filterWithKey (\k _ -> k `elem` map fst links) typemap
-  in foldl typeSubstitute importedTypes links
+   in foldl typeSubstitute importedTypes links
   where
-  typeSubstitute
-    :: Scope -- imported map
-    -> (TVar, TVar) -- source name and local alias
-    -> Scope -- renamed map
-  typeSubstitute typedefs (sourceName, localAlias)
-    = case Map.lookup sourceName typedefs of
-      (Just xs) -> Map.insert localAlias (map (\(a,b,c,d) -> (a, rename sourceName localAlias b, c, d)) xs) (Map.delete sourceName typedefs)
-      Nothing -> typedefs
+    typeSubstitute ::
+      Scope -> -- imported map
+      (TVar, TVar) -> -- source name and local alias
+      Scope -- renamed map
+    typeSubstitute typedefs (sourceName, localAlias) =
+      case Map.lookup sourceName typedefs of
+        (Just xs) ->
+          Map.insert
+            localAlias
+            (map (\(a, b, c, d) -> (a, rename sourceName localAlias b, c, d)) xs)
+            (Map.delete sourceName typedefs)
+        Nothing -> typedefs
 
 collectSources :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectSources fullDag = do
-  let typeDag = DAG.mapEdge (\xs -> [(x,y) | AliasedType x y <- xs]) fullDag
+  let typeDag = DAG.mapEdge (\xs -> [(x, y) | AliasedType x y <- xs]) fullDag
   _ <- DAG.synthesizeNodes linkSources typeDag
   return ()
   where
+    linkSources :: MVar -> ExprI -> a -> MorlocMonad ()
+    linkSources m e0 _ = do
+      -- collect and store sources (should this be done here?)
+      let objSources = AST.findSources e0
 
-  linkSources :: MVar -> ExprI -> a -> MorlocMonad ()
-  linkSources m e0 _ = do
+      -- Here we are creating links from every indexed term in the module to the module
+      -- sources and aliases. When the module abstractions are factored out later,
+      -- this will be the only way to access module-specific info.
+      let indices = AST.getIndices e0
 
-    -- collect and store sources (should this be done here?)
-    let objSources = AST.findSources e0
+      s <- MM.get
+      MM.put (s {stateSources = GMap.insertManyWith (<>) indices m objSources (stateSources s)})
 
-    -- Here we are creating links from every indexed term in the module to the module
-    -- sources and aliases. When the module abstractions are factored out later,
-    -- this will be the only way to access module-specific info.
-    let indices = AST.getIndices e0
-
-    s <- MM.get
-    MM.put (s { stateSources = GMap.insertManyWith (<>) indices m objSources (stateSources s) } )
-
-    return ()
-
-
+      return ()
 
 -- Rename a variable. For example:
 --   import maps (Map as HashMap, foo, bar)
@@ -506,14 +512,15 @@ collectSources fullDag = do
 --   rename (TV "Map") (TV "HashMap") x
 -- where `x` is any term
 rename :: TVar -> TVar -> TypeU -> TypeU
-rename sourceName localAlias = f where
-  f (VarU v)
-    | v == sourceName = VarU localAlias
-    | otherwise = VarU v
-  f (ExistU v ts rs)
-    | v == sourceName = ExistU localAlias ts rs
-    | otherwise = ExistU v ts rs
-  f (ForallU v t) = ForallU v (f t)
-  f (FunU ts t) = FunU (map f ts) (f t)
-  f (AppU t ts) = AppU (f t) (map f ts)
-  f (NamU o v ts rs) = NamU o v (map f ts) (map (second f) rs)
+rename sourceName localAlias = f
+  where
+    f (VarU v)
+      | v == sourceName = VarU localAlias
+      | otherwise = VarU v
+    f (ExistU v ts rs)
+      | v == sourceName = ExistU localAlias ts rs
+      | otherwise = ExistU v ts rs
+    f (ForallU v t) = ForallU v (f t)
+    f (FunU ts t) = FunU (map f ts) (f t)
+    f (AppU t ts) = AppU (f t) (map f ts)
+    f (NamU o v ts rs) = NamU o v (map f ts) (map (second f) rs)

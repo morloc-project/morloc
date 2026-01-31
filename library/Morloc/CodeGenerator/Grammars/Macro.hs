@@ -1,40 +1,38 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{-|
+{- |
 Module      : Morloc.CodeGenerator.Grammars.Macro
 Description : Expand parameters in concrete types
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 -}
-
 module Morloc.CodeGenerator.Grammars.Macro
-(   expandMacro
-) where
+  ( expandMacro
+  ) where
 
+import qualified Control.Monad.State as CMS
+import Data.Text (Text)
+import Data.Void (Void)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.Text as MT
-import Data.Text (Text)
-import qualified Control.Monad.State as CMS
 import Text.Megaparsec
 import Text.Megaparsec.Char
-import Data.Void (Void)
 import qualified Text.Megaparsec.Char.Lexer as L
 
 type Parser a = CMS.StateT ParserState (Parsec Void Text) a
 
-newtype ParserState = ParserState { stateParameters :: [Text] }
+newtype ParserState = ParserState {stateParameters :: [Text]}
 
 expandMacro :: Text -> [Text] -> Text
 expandMacro t [] = t
 expandMacro t ps =
   case runParser
-         (CMS.runStateT (pBase <* eof) (ParserState ps))
-         "typemacro"
-         t of
+    (CMS.runStateT (pBase <* eof) (ParserState ps))
+    "typemacro"
+    t of
     Left err' -> error (show err')
     Right (es, _) -> es
-
 
 many1 :: Parser a -> Parser [a]
 many1 p = do

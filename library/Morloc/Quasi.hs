@@ -1,13 +1,13 @@
-{-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell #-}
 
-{-|
+{- |
 Module      : Morloc.Quasi
 Description : Define idoc quasiquotation for string interpolation
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 -}
-
 module Morloc.Quasi
   ( idoc
   ) where
@@ -54,9 +54,10 @@ idoc =
       case parse pIs "" txt of
         Left err -> error $ show err
         Right xs -> return $ AppE (VarE 'G.hcat) (ListE (map qI xs))
-          where qI :: I -> Exp
-                qI (S x) = LitE (StringL x)
-                qI (V x) =
-                  case MP.parseExp x of
-                    (Right hask) -> hask -- a Haskell expression
-                    (Left err) -> error err
+          where
+            qI :: I -> Exp
+            qI (S x) = LitE (StringL x)
+            qI (V x) =
+              case MP.parseExp x of
+                (Right hask) -> hask -- a Haskell expression
+                (Left err) -> error err
