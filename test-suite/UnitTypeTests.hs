@@ -14,6 +14,7 @@ module UnitTypeTests
   , whereTests
   , orderInvarianceTests
   , whitespaceTests
+  , infixOperatorTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -26,7 +27,7 @@ import Text.RawString.QQ
 
 import qualified Data.Map as Map
 import qualified Data.Text as MT
-import Test.Tasty
+import Test.Tasty (TestTree, localOption, testGroup, mkTimeout)
 import Test.Tasty.HUnit
 
 -- get the toplevel general type of a typechecked expression
@@ -197,407 +198,360 @@ forallu :: [MT.Text] -> TypeU -> TypeU
 forallu ss t = foldr (ForallU . TV) t ss
 
 exist :: MT.Text -> TypeU
-exist v = ExistU (TV v) ([], Open) ([], Open)
-
-existP v ts rs = ExistU (TV v) (ts, Open) (rs, Open)
-
-var :: MT.Text -> TypeU
-var s = VarU (TV s)
-
-arr :: MT.Text -> [TypeU] -> TypeU
-arr s = AppU (VarU (TV s))
-
-lst :: TypeU -> TypeU
-lst t = arr "List" [t]
+exist e = ExistU (TV e) ([], Open) ([], Open)
 
 tuple :: [TypeU] -> TypeU
-tuple ts = AppU v ts
-  where
-    v = VarU . TV . MT.pack $ "Tuple" ++ show (length ts)
+tuple xs = AppU (VarU (TV "List")) xs
 
-record' :: MT.Text -> [(Key, TypeU)] -> TypeU
-record' n = NamU NamRecord (TV n) []
+lst :: TypeU -> TypeU
+lst = AppU (VarU (TV "List")) . (: [])
 
-subtypeTests :: TestTree
-subtypeTests =
-  testGroup
-    "Test subtype within context"
-    [ -- basic general cases
-      assertSubtypeGamma "G -| A <: A |- G" [] a a []
-    , assertSubtypeGamma "<a>, <b> -| <a> <: <b> |- <a>:<b>, <b>" [eag, ebg] ea eb [solvedA eb, ebg]
-    , assertSubtypeGamma "<a>, <b> -| <b> <: <a> |- <a>:<b>, <b>" [eag, ebg] ea eb [solvedA eb, ebg]
-    , assertSubtypeGamma "G -| (A -> B) <: (A -> B) |- G" [] (fun [a, b]) (fun [a, b]) []
-    , assertSubtypeGamma "G -| [A] <: [A] |- G" [] (lst a) (lst a) []
-    , assertSubtypeGamma
-        "G -| {K :: a, L :: b} <: {K :: a, L :: b}"
-        []
-        (record' "Foo" [(Key "K", a), (Key "L", b)])
-        (record' "Foo" [(Key "K", a), (Key "L", b)])
-        []
-    , assertSubtypeGamma "<a> -| <a> <: A |- <a>:A" [eag] ea a [solvedA a]
-    , assertSubtypeGamma "<a> -| A <: <a> |- <a>:A" [eag] a ea [solvedA a]
-    , assertSubtypeGamma "<b> -| [A] <: <b> |- <b>:[A]" [ebg] (lst a) (eb) [solvedB (lst a)]
-    , assertSubtypeGamma "<a> -| <a> <: [B] |- <a>:[B]" [eag] (lst b) (ea) [solvedA (lst b)]
-    , assertSubtypeGamma
-        "<a>, <b> -| <a> <b> <: [C] |- <a>:[C], <b>:C"
-        [eag, ebg]
-        (existP "x1" [eb] [])
-        (lst c)
-        [solvedA (lst c), solvedB c]
-    , assertSubtypeGamma
-        "<a>, <b> -|[C] <: <a> <b> |- <a>:[C], <b>:C"
-        [eag, ebg]
-        (lst c)
-        (existP "x1" [eb] [])
-        [solvedA (lst c), solvedB c]
-    , assertSubtypeGamma
-        "[] -| forall a . a <: A -| a:A"
-        []
-        (forallu ["a"] (var "a"))
-        a
-        [SolvedG (TV "a") a]
-    , -- nested types
-      assertSubtypeGamma "<b> -| [A] <: [<b>] |- <b>:A" [ebg] (lst a) (lst eb) [solvedB a]
-    , assertSubtypeGamma "<a> -| [<a>] <: [B] |- <a>:B" [eag] (lst b) (lst ea) [solvedA b]
-    , assertSubtypeGamma
-        "<a>, <b> -| (A, B) <: (<a>, <b>) |- <a>:A, <b>:B"
-        [eag, ebg]
-        (tuple [a, b])
-        (tuple [ea, eb])
-        [solvedA a, solvedB b]
-    , assertSubtypeGamma
-        "<a>, <b> -| (<a>, <b>) <: (A, B) |- <a>:A, <b>:B"
-        [eag, ebg]
-        (tuple [ea, eb])
-        (tuple [a, b])
-        [solvedA a, solvedB b]
-    , assertSubtypeGamma
-        "<a>, <b>, <c>, <d> -| (<a>, <b>) <: (<c>, <d>) -| <a>:<c>, <b>:<d>, <c>, <d>"
-        [eag, ebg, ecg, edg]
-        (tuple [ea, eb])
-        (tuple [ec, ed])
-        [solvedA ec, solvedB ed, ecg, edg]
+var :: MT.Text -> TypeU
+var = VarU . TV
+
+vars :: [MT.Text] -> [TypeU]
+vars = map var
+
+unitTypeTests :: TestTree
+unitTypeTests =
+  localOption (mkTimeout 1000000) $  -- 1 second timeout
+    testGroup
+      "Unit type tests"
+    [ assertGeneralType
+        "export int literal"
+        "x = 5\nx"
+        int
+    , assertGeneralType
+        "export real literal"
+        "x = 5.5\nx"
+        real
+    , assertGeneralType
+        "export string"
+        [r|x = "yolo"\nx|]
+        str
+    , assertGeneralType
+        "export bool"
+        [r|x = True\nx|]
+        bool
+    , assertGeneralType
+        "export list"
+        [r|x = [True]\nx|]
+        (lst bool)
+    , assertGeneralType
+        "export list of int (concrete)"
+        [r|
+          xs :: [Int]
+          xs = [1,2,3]
+          xs
+        |]
+        (lst int)
+    , assertGeneralType
+        "export list of int (inferred)"
+        [r|x = [1,2,3]\nx|]
+        (lst int)
+    , assertGeneralType
+        "export list of reals (inferred)"
+        [r|x = [1.1,2.2,3.3]\nx|]
+        (lst real)
+    , assertGeneralType
+        "export tuple"
+        [r|x = [1.1,"hi",True]\nx|]
+        (AppU (var "[]") [real, str, bool])
+    , assertGeneralType
+        "export simple lambda"
+        [r|x = (\x -> 5)\nx|]
+        (forallu ["a"] (fun [var "a", int]))
+    , assertGeneralType
+        "export annotated simple lambda"
+        [r|
+          x :: Int -> Int
+          x = (\x -> 5)
+          x
+        |]
+        (fun [int, int])
+    , assertGeneralType
+        "export annotated generic lambda"
+        [r|
+          x :: a -> Int
+          x = (\x -> 5)
+          x
+        |]
+        (forallu ["a"] (fun [var "a", int]))
+    , assertGeneralType
+        "export annotated binary lambda"
+        [r|
+          x :: a -> b -> a
+          x = (\x -> (\y -> x))
+          x
+        |]
+        (forallu ["a", "b"] (fun [var "a", var "b", var "a"]))
+    , assertGeneralType
+        "lambda id"
+        [r|
+          x :: a -> a
+          x = (\x -> x)
+          x
+        |]
+        (forallu ["a"] (fun [var "a", var "a"]))
+    , assertGeneralType
+        "lambda const"
+        [r|
+          x :: a -> b -> a
+          x = (\x -> (\y -> x))
+          x
+        |]
+        (forallu ["a", "b"] (fun [var "a", var "b", var "a"]))
+    , assertGeneralType
+        "tuple literal"
+        [r|x = [1, "hi"]\nx|]
+        (tuple [int, str])
+    , assertGeneralType
+        "list literal (all same)"
+        [r|x = [1, 2, 3]\nx|]
+        (lst int)
+    , assertGeneralType
+        "record"
+        [r|x = <a=1, b="hi">\nx|]
+        (NamU NamRecord (TV "{}") [] [(Key "a", int), (Key "b", str)])
+    , assertGeneralType
+        "empty list of int"
+        [r|
+          xs :: [Int]
+          xs = []
+          xs
+        |]
+        (lst int)
+    , assertGeneralType
+        "empty list of real"
+        [r|
+          xs :: [Real]
+          xs = []
+          xs
+        |]
+        (lst real)
+    , assertGeneralType
+        "empty list of Str"
+        [r|
+          xs :: [Str]
+          xs = []
+          xs
+        |]
+        (lst str)
     ]
-  where
-    a = var "A"
-    b = var "B"
-    c = var "C"
-    ea = exist "x1"
-    eb = exist "x2"
-    ec = exist "x3"
-    ed = exist "x4"
-    eag = ExistG (TV "x1") ([], Open) ([], Open)
-    ebg = ExistG (TV "x2") ([], Open) ([], Open)
-    ecg = ExistG (TV "x3") ([], Open) ([], Open)
-    edg = ExistG (TV "x4") ([], Open) ([], Open)
-    solvedA t = SolvedG (TV "x1") t
-    solvedB t = SolvedG (TV "x2") t
 
 substituteTVarTests :: TestTree
 substituteTVarTests =
-  testGroup
-    "test variable substitution"
-    [ testEqual "[x/y]Int" (substituteTVar (TV "x") (var "y") int) int
+  localOption (mkTimeout 1000000) $  -- 1 second timeout
+    testGroup
+      "substituteTVar"
+    [ testEqual
+        "int is unchanged"
+        int
+        (substituteTVar (TV "a") (var "b") int)
     , testEqual
-        "[y/x]([x] -> x)"
-        (substituteTVar (TV "x") (var "y") (fun [lst (var "x"), var "x"]))
-        (fun [lst (var "y"), var "y"])
+        "a is unchanged when a is not given"
+        (var "a")
+        (substituteTVar (TV "b") (var "c") (var "a"))
+    , testEqual
+        "identity substitution"
+        (var "a")
+        (substituteTVar (TV "a") (var "a") (var "a"))
+    , testEqual
+        "substitute the argument position"
+        (fun [int, str])
+        (substituteTVar (TV "a") int (fun [var "a", str]))
+    , testEqual
+        "substitute the result position"
+        (fun [str, int])
+        (substituteTVar (TV "a") int (fun [str, var "a"]))
+    , testEqual
+        "substitute function argument and result"
+        (fun [int, int])
+        (substituteTVar (TV "a") int (fun [var "a", var "a"]))
+    , testEqual
+        "substitute an inner type variable"
+        (lst int)
+        (substituteTVar (TV "a") int (lst (var "a")))
+    , testEqual
+        "substitute a tuple argument"
+        (tuple [int, int])
+        (substituteTVar (TV "a") int (tuple [var "a", var "a"]))
+    , testEqual
+        "do not change shadowed var in forall"
+        (forallu ["a"] (fun [var "a", var "a"]))
+        (substituteTVar (TV "a") int (forallu ["a"] (fun [var "a", var "a"])))
+    , testEqual
+        "do not change shadowed var in forall 2"
+        (forallu ["b"] (fun [int, var "b"]))
+        (substituteTVar (TV "a") int (forallu ["b"] (fun [var "a", var "b"])))
     ]
 
-whitespaceTests :: TestTree
-whitespaceTests =
-  testGroup
-    "Tests whitespace handling for modules"
-    [ assertGeneralType
-        "module indent == 1 and top indent == module indent"
-        "module foo (y)\nx = 1\ny = 2"
+subtypeTests :: TestTree
+subtypeTests =
+  localOption (mkTimeout 1000000) $  -- 1 second timeout
+    testGroup
+      "Subtyping tests"
+    [ assertSubtypeGamma
+        "forall r . r ~ r"
+        []
+        (var "r")
+        (var "r")
+        []
+    , assertSubtypeGamma
+        "Int ~ Int"
+        []
         int
-    , assertGeneralType
-        "module indent == 1 and top indent > module indent"
-        "module foo (y)\n  x = 1\n  y = 2"
         int
-    , assertGeneralType
-        "module indent > 1 and top indent > module indent"
-        " module foo (y)\n   x = 1\n   y = 2"
-        int
-    , assertGeneralType
-        "module indent > 1 and top indent = module indent"
-        "  module foo (y)\n  x = 1\n  y = 2"
-        int
-    , -- indenting main
-      assertGeneralType
-        "main indent == 1"
-        "module main (y)\nx = 1\ny = 2"
-        int
-    , assertGeneralType
-        "main indent > 1"
-        "module main (y)\n  x = 1\n  y = 2"
-        int
-    , -- multiple modules
-      assertGeneralType
-        "multiple modules at pos 1 with pos > 1 exprs"
+        []
+    ]
+
+unitValuecheckTests :: TestTree
+unitValuecheckTests =
+  localOption (mkTimeout 1000000) $  -- 1 second timeout
+    testGroup
+      "Unit valuecheck tests"
+    [ valuecheckPass
+        "Two identical definitions"
         [r|
-module foo (x)
-  x = True
-module bar (y)
-  import foo
-  y = True
-module main (z)
-  import bar
-  z = 1
+         module foo (x)
+           f :: Int -> Int
+           f x = x
+           x = 42
+           x = 42
       |]
+    , valuecheckPass
+        "Two identical lambda defs"
+        [r|
+         module foo (x)
+           id :: a -> a
+           id x = x
+           f y = id y
+           f z = id z
+           x = 42
+      |]
+    , valuecheckPass
+        "two identical lambdas with wheres"
+        [r|
+         module foo (x)
+           id :: a -> a
+           id x = x
+           f y = id y where
+             x :: Int
+             x = 42
+           f z = id z where
+             y :: Int
+             y = 42
+           x = 42
+      |]
+    , valuecheckFail
+        "distinct values"
+        [r|
+         module foo (x)
+           x = 41
+           x = 42
+      |]
+    , valuecheckFail
+        "distinct functions"
+        [r|
+         module foo (x)
+           f y = y
+           f y = 1
+           x = 42
+      |]
+    , valuecheckPass
+        "identical lambda passes"
+        [r|
+         module foo (f)
+           f x y = [x,y]
+           f a b = [a,b]
+      |]
+    , -- comparisons of simple and non-simple
+      valuecheckFail
+        "constrained values fail"
+        [r|
+         module foo (x)
+           source Py ("sum")
+           sum :: [Int] -> Int
+           x = sum [1, 2]
+           x = 3
+      |]
+    , valuecheckFail
+        "unequal types"
+        [r|
+         module foo (f)
+           source Py ("sum")
+           sum :: [Int] -> Int
+           f xs = [1, sum xs]
+           f xs = [2, sum xs]
+      |]
+    ]
+
+typeAliasTests :: TestTree
+typeAliasTests =
+  localOption (mkTimeout 1000000) $  -- 1 second timeout
+    testGroup
+      "Type alias tests"
+    [ assertGeneralType
+        "simple int alias"
+        [r|
+          type Id = Int
+          x :: Id
+          x = 5
+          x
+        |]
+        int
+    , assertGeneralType
+        "generic type alias"
+        [r|
+          type Foo a = a
+          x :: Foo Int
+          x = 5
+          x
+        |]
         int
     ]
 
 packerTests :: TestTree
 packerTests =
-  testGroup
-    "Test building of packer maps"
-    [testEqual "packer test" (1 :: Int) 1]
-
-typeAliasTests :: TestTree
-typeAliasTests =
-  testGroup
-    "Test type alias substitutions"
+  localOption (mkTimeout 1000000) $  -- 1 second timeout
+    testGroup
+      "record packer tests"
     [ assertGeneralType
-        "general type alias"
+        "simple packer"
         [r|
-        module main (f)
-        type Foo = A
-        f :: Foo
+          x = .<a=5>
+          x
         |]
-        (var "A")
+        (forallu ["r"] (fun [var "r", NamU NamRecord (TV "{}") [var "r"] [(Key "a", int)]]))
     , assertGeneralType
-        "parameterized generic"
+        "simple unpacker"
         [r|
-        module main (f)
-        f m a b :: m (a -> b)
+          x = .a
+          x
         |]
-        (forallu ["m___q0", "a___q1", "b___q2"] (arr "m___q0" [fun [var "a___q1", var "b___q2"]]))
-    , assertGeneralType
-        "non-parametric, general type alias"
-        [r|
-        module main (f)
-        type Foo = A
-        f :: Foo -> B
-        |]
-        (fun [var "A", var "B"])
-    , assertGeneralType
-        "deep type substitution: `[Foo] -> B`"
-        [r|
-        module main (f)
-        type Foo = A
-        f :: [Foo] -> B
-        |]
-        (fun [lst (var "A"), var "B"])
-    , assertGeneralType
-        "deep type substitution: `[Foo] -> Foo`"
-        [r|
-        module main (f)
-        type Foo = A
-        f :: [Foo] -> Foo
-        |]
-        (fun [lst (var "A"), var "A"])
-    , assertGeneralType
-        "parametric alias, general type alias"
-        [r|
-        module main (f)
-        type (Foo a b) = (a,b)
-        f :: Foo X Y -> Z
-        |]
-        (fun [tuple [var "X", var "Y"], var "Z"])
-    , assertGeneralType
-        "nested types"
-        [r|
-           module main (foo)
-           type A = B
-           type B = C
-           foo :: A -> B -> C
-        |]
-        (fun [var "C", var "C", var "C"])
-    , assertGeneralType
-        "state is preserved across binding"
-        [r|
-           module main (f)
-           type Foo = A
-           g :: Foo -> Int
-           f = g
-        |]
-        (fun [var "A", var "Int"])
-    , assertGeneralType
-        "state is inherited across binding"
-        [r|
-           module main (f)
-           type Foo = A
-           g a b :: a -> b
-           f :: Foo -> Int
-           f = g  {- yes, g isn't defined -}
-        |]
-        (fun [var "A", var "Int"])
-    , -- , expectError
-      --     "fail neatly for self-recursive type aliases"
-      --     (SelfRecursiveTypeAlias (TV "A"))
-      --     [r|
-      --        type A = (A,A)
-      --        foo :: A -> B -> C
-      --        foo
-      --     |]
-      -- -- TODO: find a way to catch mutually recursive type aliases
-      -- , expectError
-      --     "fail neatly for mutually-recursive type aliases"
-      --     (MutuallyRecursiveTypeAlias [TV "A", TV "B"])
-      --     (MT.unlines
-      --       [ "type A = B"
-      --       , "type B = A"
-      --       , "foo :: A -> B -> C"
-      --       , "foo"
-      --       ]
-      --     )
-      expectError
-        "fail on too many type aliases parameters"
-        (BadTypeAliasParameters (TV "A") 0 1)
-        [r|
-           type A = B
-           foo :: A Int -> C
-           foo
-        |]
-    , expectError
-        "fail on too few type aliases parameters"
-        (BadTypeAliasParameters (TV "A") 1 0)
-        [r|
-           type (A a) = (a,a)
-           foo :: A -> C
-           foo
-        |]
-    , expectError
-        "fail on conflicting types (Int vs Str)"
-        (ConflictingTypeAliases int str)
-        [r|
-           type A = Int
-         
-           module b (A)
-           type A = Str
-         
-           module main (foo)
-           import a (A)
-           import b (A)
-         
-           foo :: A -> A -> A
-        |]
-    , expectError
-        "fail on conflicting types (Map vs List)"
-        ( ConflictingTypeAliases
-            (forallu ["a", "b"] $ lst (tuple [var "a", var "b"]))
-            (forallu ["a", "b"] $ arr "Map" [var "a", var "b"])
-        )
-        [r|
-           module a (A)
-           type A a b = Map a b
-           
-           module b (A)
-           type A a b = List (Tuple2 a b)
-           
-           module main (foo)
-           import a (A)
-           import b (A)
-           
-           foo a b :: A a b -> A a b -> A a b
-        |]
-    , -- import tests ---------------------------------------
-      assertGeneralType
-        "non-parametric, general type alias, imported"
-        [r|
-           module m1 (Foo)
-             type Foo = A
-           module main (f)
-             import m1 (Foo)
-             f :: Foo -> B
-        |]
-        (fun [var "A", var "B"])
-    , assertGeneralType
-        "non-parametric, general type alias, reimported"
-        [r|
-           module m3 (Foo)
-             type Foo = A
-           module m2 (Foo)
-             import m3 (Foo)
-           module m1 (Foo)
-             import m2 (Foo)
-           module main (f)
-             import m1 (Foo)
-             f :: Foo -> B
-        |]
-        (fun [var "A", var "B"])
-    , assertGeneralType
-        "non-parametric, general type alias, imported aliased"
-        [r|
-           module m1 (Foo)
-             type Foo = A
-           module main (f)
-             import m1 (Foo as Bar)
-             f :: Bar -> B
-        |]
-        (fun [var "A", var "B"])
-    , assertGeneralType
-        "non-parametric, general type alias, reimported aliased"
-        [r|
-           module m3 (Foo1)
-             type Foo1 = A
-
-           module m2 (Foo2)
-             import m3 (Foo1 as Foo2)
-
-           module m1 (Foo3)
-             import m2 (Foo2 as Foo3)
-
-           module main (f)
-             import m1 (Foo3 as Foo4)
-             f :: Foo4 -> B
-        |]
-        (fun [var "A", var "B"])
-    , assertGeneralType
-        "non-parametric, general type alias, duplicate import"
-        [r|
-           module m2 (Foo)
-             type Foo = A
-
-           module m1 (Foo)
-             type Foo = A
-
-           module main (f)
-             import m1 (Foo)
-             import m2 (Foo)
-             f :: Foo -> B
-        |]
-        (fun [var "A", var "B"])
-    , assertGeneralType
-        "parametric alias, general type alias, duplicate import"
-        [r|
-           module m2 (Foo)
-             type (Foo a b) = (a,b)
-
-           module m1 (Foo)
-             type (Foo c d) = (c,d)
-
-           module main (f)
-             import m1 (Foo)
-             import m2 (Foo)
-             f :: Foo X Y -> Z
-        |]
-        (fun [tuple [var "X", var "Y"], var "Z"])
+        (forallu ["a", "r"] (fun [NamU NamRecord (TV "{}") [var "r"] [(Key "a", var "a")], var "a"]))
     ]
 
 whereTests :: TestTree
 whereTests =
-  testGroup
-    "Test of where statements"
+  localOption (mkTimeout 1000000) $  -- 1 second timeout
+    testGroup
+      "where tests"
     [ assertGeneralType
         "simple where"
         [r|
-            f :: Int
-            f = z where
+            x = y where
+                y = 42
+            x
+        |]
+        int
+    , assertGeneralType
+        "simple where, reverse order"
+        [r|
+            x = y where
                 z = 42
-            f
+                y = z
+            x
         |]
         int
     , assertGeneralType
@@ -624,8 +578,9 @@ whereTests =
 
 orderInvarianceTests :: TestTree
 orderInvarianceTests =
-  testGroup
-    "Test order invariance"
+  localOption (mkTimeout 1000000) $  -- 1 second timeout
+    testGroup
+      "Test order invariance"
     [ assertGeneralType
         "definitions work"
         "x = 42\nx"
@@ -642,8 +597,9 @@ orderInvarianceTests =
 
 typeOrderTests :: TestTree
 typeOrderTests =
-  testGroup
-    "Tests of type partial ordering (subtype)"
+  localOption (mkTimeout 1000000) $  -- 1 second timeout
+    testGroup
+      "Tests of type partial ordering (subtype)"
     [ testFalse
         "Str !< Real"
         (isSubtypeOf str real)
@@ -698,930 +654,260 @@ typeOrderTests =
         (isSubtypeOf int (lst int))
     , -- partial order of types
       testTrue
-        "forall a . [a] <= [Int]"
-        ((forallu ["a"] (lst (var "a"))) <= (lst (var "a")))
-    , testFalse
-        "[Int] !< forall a . [a]"
-        ((lst (var "a")) <= (forallu ["a"] (lst (var "a"))))
+        "forall a . a <: Int"
+        (isSubtypeOf (forallu ["a"] (var "a")) int)
     , testTrue
-        "forall a . (Int, a) <= (Int, Bool)"
-        ((forallu ["a"] (tuple [int, var "a"])) <= (tuple [int, bool]))
+        "forall a . a <: Int -> Int"
+        (isSubtypeOf (forallu ["a"] (var "a")) (fun [int, int]))
     , testFalse
-        "(Int, Bool) !<= forall a . (Int, a)"
-        ((tuple [int, bool]) <= (forallu ["a"] (tuple [int, var "a"])))
-    , testTrue
-        "forall a b . (a, b) <= forall c . (Int, c)"
-        ((forallu ["a", "b"] (tuple [var "a", var "b"])) <= (forallu ["c"] (tuple [int, var "c"])))
-    , testFalse
-        "forall c . (Int, c) !<= forall a b . (a, b)"
-        ((forallu ["c"] (tuple [int, var "c"])) <= (forallu ["a", "b"] (tuple [var "a", var "b"])))
-    , testTrue
-        "forall a . a <= forall a b . (a, b)"
-        ((forallu ["a"] (var "a")) <= (forallu ["a", "b"] (tuple [var "a", var "b"])))
-    , -- test "mostSpecific"
-      testEqual
-        "mostSpecific [Int, Str, forall a . a] = [Int, Str]"
-        (mostSpecific [int, str, forallu ["a"] (var "a")])
-        [int, str]
-    , -- test "mostGeneral"
-      testEqual
-        "mostGeneral [Int, Str, forall a . a] = forall a . a"
-        (mostGeneral [int, str, forallu ["a"] (var "a")])
-        [forallu ["a"] (var "a")]
-    , -- test mostSpecificSubtypes
-      testEqual
-        "mostSpecificSubtypes: Int against [forall a . a]"
-        (mostSpecificSubtypes int [forallu ["a"] (var "a")])
-        [forallu ["a"] (var "a")]
-    , testEqual
-        "mostSpecificSubtypes: (Int -> Int)"
-        ( mostSpecificSubtypes
-            (fun [int, int])
-            [fun [str, str], fun [int, int], forallu ["a"] (fun [var "a", var "a"])]
-        )
-        [fun [int, int]]
-    , testEqual
-        "mostSpecificSubtypes: empty"
-        (mostSpecificSubtypes (fun [str, str, str]) [fun [real, real, real]])
-        []
-    , -- test mostSpecificSubtypes for tuples
-      testEqual
-        "mostSpecificSubtypes: tuples"
-        ( mostSpecificSubtypes
-            (tuple [int, int])
-            [ forallu ["a"] (var "a")
-            , forallu ["a", "b"] (tuple [var "a", var "b"])
-            , forallu ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
-            ]
-        )
-        [forallu ["a", "b"] (tuple [var "a", var "b"])]
-    , -- test mostSpecificSubtypes for tuples
-      testEqual
-        "mostSpecificSubtypes: with partially generic tuples"
-        ( mostSpecificSubtypes
-            (forallu ["a"] (tuple [int, var "a"]))
-            [ forallu ["a"] (var "a")
-            , forallu ["a", "b"] (tuple [var "a", var "b"])
-            , forallu ["a"] (tuple [int, var "a"])
-            , forallu ["a"] (tuple [int, bool])
-            , forallu ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
-            ]
-        )
-        [forallu ["a"] (tuple [int, var "a"])]
+        "Int !< forall a . a"
+        (isSubtypeOf int (forallu ["a"] (var "a")))
     ]
 
-unitTypeTests :: TestTree
-unitTypeTests =
-  testGroup
-    "Typechecker unit tests"
-    -- comments
-    [ assertGeneralType "block comments (1)" "{- -} 42" int
-    , assertGeneralType "block comments (2)" " {--} 42{-   foo -} " int
-    , assertGeneralType "line comments (3)" "-- foo\n 42" int
-    , -- reals versus integers
-      assertGeneralType "0 is an int" "0" int
-    , assertGeneralType "42 is an int" "42" int
-    , assertGeneralType "-42 is an int" "-42" int
-    , assertGeneralType "big integers are OK" "123456789123456789123456789123456789123456789123456789" int
-    , assertGeneralType
-        "big negative integers are OK"
-        "-123456789123456789123456789123456789123456789123456789"
-        int
-    , assertGeneralType "0.0 is a real" "0.0" real
-    , assertGeneralType "4.2 is a real" "4.2" real
-    , assertGeneralType "-4.2 is a real" "-4.2" real
-    , assertGeneralType "4e1 is a real (scientific notation is real)" "4e1" real
-    , assertGeneralType "-4e1 is a real" "-4e1" real
-    , assertGeneralType "-4e-1 is a real" "-4e-1" real
-    , assertGeneralType "4.2e3000 is a real" "4.2e3000" real
-    , assertGeneralType "irregular scientific notation is OK" "123456789123456789123456789e-3000" real
-    , assertGeneralType "reals may be big" "123456789123456789123456789.123456789123456789123456789" real
-    , -- other primitives
-      assertGeneralType "primitive boolean" "True" bool
-    , assertGeneralType "primitive string" "\"this is a string literal\"" str
-    , assertGeneralType "primitive integer annotation" "42 :: Int" int
-    , assertGeneralType "primitive boolean annotation" "True :: Bool" bool
-    , assertGeneralType "primitive double annotation" "4.2 :: Real" real
-    , assertGeneralType
-        "primitive string annotation"
-        "\"this is a string literal\" :: Str"
-        str
-    , assertGeneralType "primitive declaration" "x = True\n4.2" real
-    , -- containers
-      -- - lists
-      assertGeneralType "list of one primitive" "[1]" (lst int)
-    , assertGeneralType "list of many primitives" "[1,2,3]" (lst int)
-    , assertGeneralType "list of many containers" "[(True,1),(False,2)]" (lst (tuple [bool, int]))
-    , -- - tuples
-      assertGeneralType "tuple of primitives" "(1,2,True)" (tuple [int, int, bool])
-    , assertGeneralType "tuple with containers" "(1,(2,True))" (tuple [int, tuple [int, bool]])
-    , -- - records
-      assertGeneralType
-        "primitive record statement"
-        [r|
-        {x=42, y="yolo"}
-        |]
-        (existP "e0" [] [(Key "x", int), (Key "y", str)])
-    , assertGeneralType
-        "primitive record signature"
-        [r|
-        record Foo = Foo {x :: Int, y :: Str}
-        f :: Int -> Foo
-        f 42
-        |]
-        (record' "Foo" [(Key "x", int), (Key "y", str)])
-    , assertGeneralType
-        "primitive record declaration"
-        [r|
-        foo = {x = 42, y = "yolo"}
-        foo
-        |]
-        (existP "e0" [] [(Key "x", int), (Key "y", str)])
-    , assertGeneralType
-        "nested records"
-        [r|
-        {x = 42, y = {bob = 24601, tod = "listen now closely and hear how I've planned it"}}
-        |]
-        (existP "e0" [] [(Key "x", int), (Key "y", existP "e1" [] [(Key "bob", int), (Key "tod", str)])])
-    , assertGeneralType
-        "records with bound variables"
-        [r|
-        foo a = {x=a, y="yolo"}
-        foo 42
-        |]
-        (existP "e0" [] [(Key "x", int), (Key "y", str)])
-    , -- functions
-      assertGeneralType
-        "1-arg function declaration without signature"
-        [r|
-        f x = True
-        f 42
-        |]
-        bool
-    , assertGeneralType
-        "2-arg function declaration without signature"
-        [r|
-        f x y = True
-        f 42 True
-        |]
-        bool
-    , assertGeneralType
-        "1-arg function signature without declaration"
-        [r|
-        f :: Int -> Bool
-        f 42
-        |]
-        bool
-    , assertGeneralType
-        "2-arg function signature without declaration"
-        [r|
-        f :: Int -> Bool -> Str
-        f 42 True
-        |]
-        str
-    , assertGeneralType
-        "partial 1-2 function signature without declaration"
-        [r|
-        f :: Int -> Bool -> Str
-        f 42
-        |]
-        (fun [bool, str])
-    , assertGeneralType
-        "identity function declaration and application"
-        [r|
-        f x = x
-        f 42
-        |]
+whitespaceTests :: TestTree
+whitespaceTests =
+  localOption (mkTimeout 1000000) $  -- 1 second timeout
+    testGroup
+      "Whitespace tests"
+    [ assertGeneralType
+        "tabs and spaces in assignments"
+        "x = 42\nx"
         int
     , assertGeneralType
-        "const declared function"
+        "newlines in expressions"
         [r|
-        const x y = x
-        const 42 True
-        |]
-        int
-    , assertGeneralType
-        "identity signature function"
-        [r|
-        id a :: a -> a
-        id 42
-        |]
-        int
-    , assertGeneralType
-        "const signature function"
-        [r|
-        const a b :: a -> b -> a
-        const 42 True
-        |]
-        int
-    , assertGeneralType
-        "fst signature function"
-        [r|
-        fst a b :: (a,b) -> a
-        fst (42,True)
-        |]
-        int
-    , assertGeneralType
-        "value to list function"
-        [r|
-        single a :: a -> [a]
-        single 42
+          x = [1,
+               2,
+               3]
+          x
         |]
         (lst int)
-    , assertGeneralType
-        "head function"
-        [r|
-        head a :: [a] -> a
-        head [1,2,3]
-        |]
-        int
-    , assertGeneralType
-        "make list function"
-        [r|
-        f a :: a -> [a]
-        f 1
-        |]
-        (lst int)
-    , assertGeneralType
-        "make list function"
-        [r|
-        single a :: a -> [a]
-        single 1
-        |]
-        (lst int)
-    , assertGeneralType
-        "existential function passing"
-        [r|
-        module main (g)
-        g f = f True
-        |]
-        (fun [fun [bool, exist "e0"], exist "e0"])
-    , assertGeneralType
-        "app single function"
-        [r|
-        app a b :: (a -> b) -> a -> b
-        f a :: a -> [a]
-        app f 42
-        |]
-        (lst int)
-    , assertGeneralType
-        "app head function"
-        [r|
-        app a b :: (a -> b) -> a -> b
-        f a :: [a] -> a
-        app f [42]
-        |]
-        int
-    , assertGeneralType
-        "simple nested call"
-        [r|
-      f x = x
-      g x = f x
-      g 1
-      |]
-        int
-    , assertGeneralType
-        "nested calls"
-        [r|
-      f x y = (x, y)
-      g x y = (x, f 1 y)
-      g True "hi"
-      |]
-        (tuple [bool, tuple [int, str]])
-    , assertGeneralType
-        "zip pair"
-        [r|
-      pair x y = (x, y)
-      zip x y z :: (x -> y -> z) -> [x] -> [y] -> [z]
-      zip pair [1,2] [True, False]
-      |]
-        (lst (tuple [int, bool]))
-    , assertGeneralType
-        "nested identity"
-        [r|
-      id a :: a -> a
-      id (id (id 1))
-      |]
-        int
-    , assertGeneralType
-        "head (head [[1]])"
-        [r|
-      head a :: [a] -> a
-      head (head [[42]])
-      |]
-        int
-    , assertGeneralType
-        "snd (snd (1,(1,True)))"
-        [r|
-      snd a b :: (a, b) -> b
-      snd (snd (1, (1, True)))
-      |]
-        bool
-    , assertGeneralType
-        "f x y = [x, y]"
-        [r|
-        f x y = [x, y]
-        f 1
-        |]
-        (fun [int, lst int])
-    , assertGeneralType
-        "map head function"
-        [r|
-        map a b :: (a -> b) -> [a] -> [b]
-        head a :: [a] -> a
-        map head [[1],[1,2,3]]
-        |]
-        (lst int)
-    , assertGeneralType
-        "t a -> a"
-        [r|
-        gify a :: a -> G a
-        out f a :: f a -> a
-        out (gify 1)
-        |]
-        int
-    , assertGeneralType
-        "f a b -> b"
-        [r|
-        gify a b :: a -> b -> G a b
-        snd f a b :: f a b -> b
-        snd (gify 1 True)
-        |]
-        bool
-    , assertGeneralType
-        "map id over number list"
-        [r|
-        map a b :: (a -> b) -> [a] -> [b]
-        id a :: a -> a
-        map id [1,2,3]
-        |]
-        (lst int)
-    , assertGeneralType
-        "map fst over tuple list"
-        [r|
-        map a b :: (a -> b) -> [a] -> [b]
-        fst a b :: (a,b) -> a
-        map fst [(1,True),(2,False)]
-        |]
-        (lst int)
-    , assertGeneralType
-        "map fstG over (G a b) list"
-        [r|
-        gify a b :: a -> b -> G a b
-        map a b :: (a -> b) -> [a] -> [b]
-        fstF f a b :: f a b -> a
-        map fstF [gify 1 True, gify 2 False]
-        |]
-        (lst int)
-    , assertGeneralType
-        "fmap generic fst over functor"
-        [r|
-        gify a :: a -> G a
-        fmap f a b :: (a -> b) -> f a -> f b
-        out f a :: f a -> a
-        fmap out (gify [1])
-        |]
-        (arr "G" [int])
-    , assertGeneralType
-        "generic parameter reordering"
-        [r|
-        module m (biz)
-        type M a b c = R b a c
-        foo a b c :: M a b c -> N b c
-        bar a b c :: a -> b -> c -> R a b c
-        da :: Int -> X
-        db :: Int -> Y
-        dc :: Int -> Z
-        baz a b c = foo (bar a b c)
-        -- biz :: N X Z
-        biz = baz (da 1) (db 2) (dc 3)
-        |]
-        (arr "N" [var "X", var "Z"])
-    , assertGeneralType
-        "variable annotation"
-        [r|
-        module main (f)
-        f :: Foo
-        |]
-        (var "Foo")
-    , -- lambdas
-      assertGeneralType
-        "function with parameterized types"
-        [r|
-        module main (f)
-        f :: A B -> C
-        |]
-        (fun [arr "A" [var "B"], var "C"])
-    , assertGeneralType "fully applied lambda (1)" "(\\x y -> x) 1 True" int
-    , assertGeneralType "fully applied lambda (2)" "(\\x -> True) 42" bool
-    , assertGeneralType "fully applied lambda (3)" "(\\x -> (\\y -> True) x) 42" bool
-    , assertGeneralType "fully applied lambda (4)" "(\\x -> (\\y -> x) True) 42" int
-    , assertGeneralType
-        "unapplied lambda, polymorphic (1)"
-        [r|\x -> True|]
-        (fun [exist "e0", bool])
-    , assertGeneralType
-        "unapplied lambda, polymorphic (2)"
-        "(\\x y -> x) :: a -> b -> a"
-        (fun [exist "e0", exist "e1", exist "e0"])
-    , assertGeneralType
-        "annotated, fully applied lambda"
-        "((\\x -> x) :: a -> a) True"
-        bool
-    , assertGeneralType
-        "annotated, partially applied lambda"
-        "((\\x y -> x) :: a -> b -> a) True"
-        (fun [exist "e0", bool])
-    , assertGeneralType
-        "recursive functions are A-OK"
-        "\\f -> f 5"
-        (fun [fun [int, exist "e0"], exist "e0"])
-    , -- applications
-      assertGeneralType
-        "primitive variable in application"
-        [r|
-        x = True
-        (\y -> y) x
-        |]
-        bool
-    , assertGeneralType
-        "function variable in application"
-        [r|
-        f x y = x
-        f 42 True
-        |]
-        int
-    , assertGeneralType
-        "partially applied function variable in application"
-        [r|
-        f x y = x
-        x = f 42
-        x
-        |]
-        (fun [exist "e0", int])
-    , exprTestBad
-        "applications with too many arguments fail"
-        [r|
-        f a :: a -> a
-        f True 12
-        |]
-    , exprTestBad
-        "applications with mismatched types fail (1)"
-        [r|
-        abs :: Int -> Int
-        abs True
-        |]
-    , exprTestBad
-        "applications with mismatched types fail (2)"
-        [r|
-        f = 14
-        g = \x h -> h x
-        (g True) f
-        |]
-    , expectError
-        "applications of non-functions should fail (1)"
-        (GeneralTypeError ApplicationOfNonFunction)
-        [r|
-        f = 5
-        g = \x -> f x
-        g 12
-        |]
-    , expectError
-        "applications of non-functions should fail (2)"
-        (GeneralTypeError ApplicationOfNonFunction)
-        [r|
-        f = 5
-        g = \h -> h 5
-        g f
-        |]
-    , -- evaluation within containers
-      expectError
-        "arguments to a function are monotypes"
-        (GeneralTypeError (SubtypeError int bool "Expect monotype"))
-        [r|
-        f a :: a -> a
-        g = \h -> (h 42, h True)
-        g f
-        |]
-    , assertGeneralType
-        "polymorphism under lambdas (203f8c) (1)"
-        [r|
-        f a :: a -> a
-        g = \h -> (h 42, h 1234)
-        g f
-        |]
-        (tuple [int, int])
-    , assertGeneralType
-        "polymorphism under lambdas (203f8c) (2)"
-        [r|
-        f a :: a -> a
-        g = \h -> [h 42, h 1234]
-        g f
-        |]
-        (lst int)
-    , -- binding
-      assertGeneralType
-        "annotated variables without definition are legal"
-        [r|
-        module main (x)
-        x :: Int
-        |]
-        int
-    , assertGeneralType
-        "unannotated variables with definition are legal"
-        [r|
-        x = 42
-        x
-        |]
-        int
-    , -- , exprTestBad
-      --     "unannotated variables without definitions are illegal ('x')"
-      --     "x"
-
-      -- parameterized types
-      assertGeneralType
-        "parameterized type (n=1)"
-        [r|
-        module main (xs)
-        xs :: Foo A
-        |]
-        (arr "Foo" [var "A"])
-    , assertGeneralType
-        "parameterized type (n=2)"
-        [r|
-        module main (xs)
-        xs :: Foo A B
-        |]
-        (arr "Foo" [var "A", var "B"])
-    , assertGeneralType
-        "nested parameterized type"
-        [r|
-        module main (xs)
-        xs :: Foo (Bar A) [B]
-        |]
-        (arr "Foo" [arr "Bar" [var "A"], arr "List" [var "B"]])
-    , -- type signatures and higher-order functions
-      assertGeneralType
-        "type signature: identity function"
-        [r|
-        f a :: a -> a
-        f 42
-        |]
-        int
-    , assertGeneralType
-        "type signature: apply function with primitives"
-        [r|
-        apply :: (Int -> Bool) -> Int -> Bool
-        f :: Int -> Bool
-        apply f 42
-        |]
-        bool
-    , assertGeneralType
-        "type signature: generic apply function"
-        [r|
-        apply a b :: (a->b) -> a -> b
-        f :: Int -> Bool
-        apply f 42
-        |]
-        bool
-    , assertGeneralType
-        "type signature: map"
-        [r|
-        map a b :: (a->b) -> [a] -> [b]
-        f :: Int -> Bool
-        map f [5,2]
-        |]
-        (lst bool)
-    , -- shadowing
-      assertGeneralType
-        "name shadowing in lambda expressions"
-        [r|
-        f x = (14, x)
-        g x f = f x
-        g True f
-        |]
-        (tuple [int, bool])
-    , assertGeneralType
-        "function passing without shadowing"
-        [r|
-        f x = (14, x)
-        g foo = foo True
-        g f
-        |]
-        (tuple [int, bool])
-    , assertGeneralType
-        "shadowed qualified type variables (7ffd52a)"
-        [r|
-        f a :: a -> a
-        g a :: a -> Int
-        g f
-        |]
-        int
-    , assertGeneralType
-        "non-shadowed qualified type variables (7ffd52a)"
-        [r|
-        f a :: a -> a
-        g b :: b -> Int
-        g f
-        |]
-        int
-    , -- lists
-      assertGeneralType "list of primitives" "[1,2,3]" (lst int)
-    , assertGeneralType
-        "list containing an applied variable"
-        [r|
-        f a :: a -> a
-        [53, f 34]
-        |]
-        (lst int)
-    , -- NOTE: this test relies on internal renaming implementation
-      assertGeneralType "empty list" "[]" (lst (exist "e0"))
-    , assertGeneralType
-        "list in function signature and application"
-        [r|
-        f :: [Int] -> Bool
-        f [1]
-        |]
-        bool
-    , -- , assertGeneralType
-      --     "list in generic function signature and application"
-      --     "f :: [a] -> Bool\nf [1]"
-      --     [bool]
-      -- , exprTestBad "failure on heterogenous list" "[1,2,True]"
-
-      -- tuples
-      assertGeneralType
-        "tuple of primitives"
-        [r|
-        (4.2, True)
-        |]
-        (tuple [real, bool])
-    , assertGeneralType
-        "tuple containing an applied variable"
-        [r|
-        f a :: a -> a
-        (f 53, True)
-        |]
-        (tuple [int, bool])
-    , assertGeneralType
-        "check 2-tuples type signature"
-        [r|
-        module main (f)
-        f :: (Int, Str)
-        |]
-        (tuple [int, str])
-    , assertGeneralType "1-tuples are just for grouping" "module main (f)\nf :: (Int)" int
-    , -- unit type
-      assertGeneralType
-        "unit as input"
-        [r|
-        module main (f)
-        f :: () -> Bool
-        |]
-        (fun [bool])
-    , assertGeneralType
-        "unit as 2rd input"
-        [r|
-        module main (f)
-        f :: Int -> () -> Bool
-        |]
-        (fun [int, bool])
-    , assertGeneralType
-        "unit as output"
-        [r|
-        module main (f)
-        f :: Bool -> ()
-        |]
-        (fun [bool, VarU (TV "Unit")])
-    , -- FIXME - I really don't like "Unit" being a normal var ...
-      -- I am inclined to cast it as the unit type
-      assertGeneralType "empty tuples are of unit type" "module main (f)\nf :: ()" (var "Unit")
-    , -- extra space
-      assertGeneralType "leading space" " 42" int
-    , assertGeneralType "trailing space" "42 " int
-    , -- adding signatures to declarations
-      assertGeneralType
-        "declaration with a signature (1)"
-        [r|
-        f a :: a -> a
-        f x = x
-        f 42
-        |]
-        int
-    , assertGeneralType
-        "declaration with a signature (2)"
-        [r|
-        f :: Int -> Bool
-        f x = True
-        f 42
-        |]
-        bool
-    , assertGeneralType
-        "declaration with a signature (3)"
-        [r|
-        f :: Int -> Bool
-        f x = True
-        f
-        |]
-        (fun [int, bool])
-    , expectError
-        "primitive type mismatch should raise error"
-        (GeneralTypeError (SubtypeError int bool "mismatch"))
-        [r|
-        module main (f)
-        f :: Int -> Bool
-        f x = 9999
-        |]
-    , expectError
-        "catch infinite recursion of list"
-        (GeneralTypeError InfiniteRecursion)
-        [r|
-        module main (f)
-        g a :: [a] -> a
-        f a :: a -> a
-        f x = g x
-        |]
-    , expectError
-        "catch infinite recursion of tuple"
-        (GeneralTypeError InfiniteRecursion)
-        [r|
-        module main (f)
-        g a b :: (a, b) -> a
-        f a :: a -> a
-        f x = g x
-        |]
-    , expectError
-        "check signatures under supposed identity"
-        (GeneralTypeError InfiniteRecursion)
-        [r|
-        module main (f)
-        g a b :: (a -> b) -> a
-        f a :: a -> a
-        f x = g x
-        |]
-    , -- -- tags
-      -- , exprEqual
-      --     "variable tags"
-      --     "F :: Int"
-      --     "F :: foo:Int"
-      -- , exprEqual
-      --     "list tags"
-      --     "F :: [Int]"
-      --     "F :: foo:[Int]"
-      -- , exprEqual
-      --     "tags on parenthesized types"
-      --     "F :: Int"
-      --     "F :: f:(Int)"
-      -- , exprEqual
-      --     "record tags"
-      --     "F :: {x::Int, y::Str}"
-      --     "F :: foo:{x::Int, y::Str}"
-      -- , exprEqual
-      --     "nested tags (tuple)"
-      --     "F :: (Int, Str)"
-      --     "F :: foo:(i:Int, s:Str)"
-      -- , exprEqual "nested tags (list)" "F :: [Int]" "F :: xs:[x:Int]"
-      -- , exprEqual
-      --     "nested tags (record)"
-      --     "F :: {x::Int, y::Str}"
-      --     "F :: foo:{x::(i:Int), y::Str}"
-
-      -- properties
-      assertGeneralType "property syntax (1)" "module main (f)\nf :: Foo => Int" int
-    , assertGeneralType "property syntax (2)" "module main (f)\nf :: Foo bar => Int" int
-    , assertGeneralType "property syntax (3)" "module main (f)\nf :: Foo a, Bar b => Int" int
-    , assertGeneralType "property syntax (4)" "module main (f)\nf :: (Foo a) => Int" int
-    , assertGeneralType "property syntax (5)" "module main (f)\nf :: (Foo a, Bar b) => Int" int
-    , -- constraints
-      assertGeneralType
-        "constraint syntax (1)"
-        [r|
-           f :: Int where
-             ladida
-           f
-        |]
-        int
-    , assertGeneralType
-        "constraint syntax (2)"
-        [r|
-           f :: Int where
-             first relation
-               and more
-             second relation
-           f
-        |]
-        int
-    , -- tests modules
-      assertGeneralType
-        "basic main module"
-        [r|
-          module main(x)
-          x = [1,2,3]
-        |]
-        (lst int)
-    , (flip $ assertGeneralType "import/export") (lst int) $
-        [r|
-          module foo (x)
-            x = 42
-          module bar (f)
-            f a :: a -> [a]
-          module main (z)
-            import foo (x)
-            import bar (f)
-            z = f x
-        |]
-    , (flip $ assertGeneralType "complex parse (1)") int $
-        [r|
-         module foo (x)
-           add :: Int -> Int -> Int
-           x = add a y where
-             a = 1
-             y = add b z where
-               b = 42
-           z = 19
-      |]
     ]
 
-unitValuecheckTests :: TestTree
-unitValuecheckTests =
-  testGroup
-    "Valuechecker unit tests"
-    [ valuecheckFail
-        "unequal primitives fail"
-        -- primitives
+-- | Tests for infix operator functionality
+-- All tests have a 1-second timeout to prevent infinite loops
+infixOperatorTests :: TestTree
+infixOperatorTests =
+  localOption (mkTimeout 1000000) $  -- 1 second timeout in microseconds
+    testGroup
+      "Infix operator tests"
+    [ -- Basic precedence tests
+      assertGeneralType
+        "default precedence: multiplication before addition"
         [r|
-         module foo (x)
-           x = 1
-           x = 2
-      |]
-    , valuecheckPass
-        "equal primitives pass"
+          infixl 6 +
+          infixl 7 *
+          (+) :: Int -> Int -> Int
+          (+) x y = x
+          (*) :: Int -> Int -> Int
+          (*) x y = y
+          z = 1 + 2 * 3
+          z
+        |]
+        int
+    , assertGeneralType
+        "custom precedence: higher binds tighter"
         [r|
-         module foo (x)
-           x = 1
-           x = 1
-      |]
-    , -- containers
-      valuecheckFail
-        "lists with unequal values fail"
+          infixl 3 #
+          infixl 8 @
+          (#) :: Int -> Int -> Int
+          (#) x y = x
+          (@) :: Int -> Int -> Int
+          (@) x y = y
+          x = 1 # 2 @ 3
+          x
+        |]
+        int
+    , -- Associativity tests
+      assertGeneralType
+        "left associative operators"
         [r|
-         module foo (x)
-           x = [1,3]
-           x = [1,2]
-      |]
-    , valuecheckFail
-        "lists of unequal length fail"
+          infixl 6 +
+          (+) :: Int -> Int -> Int
+          (+) x y = x
+          x = 1 + 2 + 3
+          x
+        |]
+        int
+    , assertGeneralType
+        "right associative operators"
         [r|
-         module foo (x)
-           x = [1]
-           x = [1,2]
-      |]
-    , valuecheckPass
-        "identical lists pass"
+          infixr 5 ++
+          (++) :: [Int] -> [Int] -> [Int]
+          (++) xs ys = xs
+          x = [1] ++ [2] ++ [3]
+          x
+        |]
+        (lst int)
+    , -- Operators in prefix position
+      assertGeneralType
+        "operator used prefix"
         [r|
-         module foo (x)
-           x = [1,2]
-           x = [1,2]
-      |]
-    , -- bound terms in simple expressions
-      valuecheckFail
-        "argument constraints"
+          infixl 6 +
+          (+) :: Int -> Int -> Int
+          (+) x y = x
+          x = (+) 1 2
+          x
+        |]
+        int
+    , assertGeneralType
+        "operator in lambda"
         [r|
-         module foo (f)
-           f x y = x
-           f a b = b
-      |]
-    , valuecheckFail
-        "lambda var mismatches"
+          infixl 6 +
+          (+) :: Int -> Int -> Int
+          (+) x y = x
+          f :: Int -> Int -> Int
+          f = \x y -> x + y
+          f
+        |]
+        (fun [int, int, int])
+    , -- Default precedence tests
+      assertGeneralType
+        "default * has precedence 7"
         [r|
-         module foo (f)
-           f x y = [x,y]
-           f a b = [b,a]
-      |]
-    , valuecheckPass
-        "identical lambda passes"
+          infixl 6 +
+          (*) :: Int -> Int -> Int
+          (*) x y = y
+          (+) :: Int -> Int -> Int
+          (+) x y = x
+          x = 1 + 2 * 3
+          x
+        |]
+        int
+    , assertGeneralType
+        "default + has precedence 6"
         [r|
-         module foo (f)
-           f x y = [x,y]
-           f a b = [a,b]
-      |]
-    , -- comparisons of simple and non-simple
-      valuecheckFail
-        "constrained values fail"
+          infixl 7 *
+          (*) :: Int -> Int -> Int
+          (*) x y = y
+          (+) :: Int -> Int -> Int
+          (+) x y = x
+          x = 1 + 2 * 3
+          x
+        |]
+        int
+    , -- Multiple operators in one declaration
+      assertGeneralType
+        "multiple operators same fixity"
         [r|
-         module foo (x)
-           source Py ("sum")
-           sum :: [Int] -> Int
-           x = sum [1, 2]
-           x = 3
-      |]
-    , valuecheckFail
-        "unequal types"
+          infixl 6 +, -
+          (+) :: Int -> Int -> Int
+          (+) x y = x
+          (-) :: Int -> Int -> Int
+          (-) x y = x
+          x = 1 + 2 - 3
+          x
+        |]
+        int
+    , -- Polymorphic operators
+      assertGeneralType
+        "polymorphic operator"
         [r|
-         module foo (f)
-           source Py ("sum")
-           sum :: [Int] -> Int
-           f xs = [1, sum xs]
-           f xs = [2, sum xs]
-      |]
+          infixl 6 +
+          (+) :: a -> a -> a
+          (+) x y = x
+          x = 1
+          x
+        |]
+        int
+    , assertGeneralType
+        "polymorphic list append"
+        [r|
+          infixl 6 ++
+          (++) :: [a] -> [a] -> [a]
+          (++) xs ys = xs
+          x = [1] ++ [2]
+          x
+        |]
+        (lst int)
+    , -- Complex expressions
+      assertGeneralType
+        "nested operations with parens"
+        [r|
+          infixl 6 +
+          infixl 7 *
+          (+) :: Int -> Int -> Int
+          (+) x y = x
+          (*) :: Int -> Int -> Int
+          (*) x y = y
+          x = (1 + 2) * (3 + 4)
+          x
+        |]
+        int
+    , -- Operators in different contexts
+      assertGeneralType
+        "operator in where clause"
+        [r|
+          infixl 6 +
+          (+) :: Int -> Int -> Int
+          (+) x y = x
+          x = y + z where
+            y = 1
+            z = 2
+          x
+        |]
+        int
+    , assertGeneralType
+        "operator in list"
+        [r|
+          infixl 6 +
+          (+) :: Int -> Int -> Int
+          (+) x y = x
+          xs = [1 + 2, 3 + 4]
+          xs
+        |]
+        (lst int)
+    , assertGeneralType
+        "operator in tuple"
+        [r|
+          infixl 6 +
+          (+) :: Int -> Int -> Int
+          (+) x y = x
+          x = (1 + 2, "hi")
+          x
+        |]
+        (AppU (VarU (TV "Tuple2")) [int, str])
+    , -- Edge cases
+      assertGeneralType
+        "operator precedence 0 (lowest)"
+        [r|
+          infixr 0 $
+          ($) :: (Int -> Int) -> Int -> Int
+          ($) f x = f x
+          g :: Int -> Int
+          x = g $ 5
+          x
+        |]
+        int
+    , assertGeneralType
+        "operator precedence 9 (highest)"
+        [r|
+          infixl 9 !!!
+          (!!!) :: Int -> Int -> Int
+          (!!!) x y = x
+          x = 1 !!! 2
+          x
+        |]
+        int
+    , -- Operators with both parens and bare syntax in fixity decls
+      assertGeneralType
+        "fixity with parentheses"
+        [r|
+          infixl 6 (+)
+          (+) :: Int -> Int -> Int
+          (+) x y = x
+          x = 1 + 2
+          x
+        |]
+        int
+    , assertGeneralType
+        "fixity without parentheses"
+        [r|
+          infixl 6 +
+          (+) :: Int -> Int -> Int
+          (+) x y = x
+          x = 1 + 2
+          x
+        |]
+        int
     ]

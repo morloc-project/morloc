@@ -116,6 +116,8 @@ module Morloc.Namespace
   , Lit (..)
   , Import (..)
   , Export (..)
+  , Fixity (..)
+  , Associativity (..)
 
     -- ** Type extensions
   , Constraint (..)
@@ -557,6 +559,8 @@ data Expr
     -- 2. term
     -- 3. term where statements
     AssE EVar ExprI [ExprI]
+  | -- | Fixity declaration (infixl, infixr, infix)
+    FixE Fixity
   | -- | (())
     UniE
   | -- | (x)
@@ -594,6 +598,21 @@ data Import
   , importNamespace :: Maybe EVar -- currently not used
   }
   deriving (Ord, Eq, Show)
+
+-- | Operator associativity for infix declarations
+data Associativity
+  = InfixL -- ^ left-associative
+  | InfixR -- ^ right-associative
+  | InfixN -- ^ non-associative
+  deriving (Show, Ord, Eq, Enum)
+
+-- | Fixity declaration for infix operators
+data Fixity = Fixity
+  { fixityAssoc :: Associativity
+  , fixityPrecedence :: Int -- ^ 0-9, higher binds tighter
+  , fixityOperators :: [EVar]
+  }
+  deriving (Show, Ord, Eq)
 
 data NexusSource = NexusSource
   { nexusSourceUtility :: MDoc
@@ -1622,6 +1641,14 @@ instance Pretty Expr where
         case Set.toList (econs e) of
           [] -> ""
           xs -> " where" <+> tupled (map (\(Con x) -> pretty x) xs)
+  pretty (FixE (Fixity assoc prec ops)) =
+    assocStr <+> pretty prec <+> hsep (map pretty ops)
+    where
+      assocStr :: Doc ann
+      assocStr = case assoc of
+        InfixL -> "infixl"
+        InfixR -> "infixr"
+        InfixN -> "infix"
 
 instance (Foldable f) => Pretty (AnnoS a f b) where
   pretty (AnnoS _ _ e) = pretty e

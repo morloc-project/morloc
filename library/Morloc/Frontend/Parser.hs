@@ -13,6 +13,8 @@ module Morloc.Frontend.Parser
   ) where
 
 import qualified Control.Monad.State as CMS
+import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Void (Void)
@@ -25,6 +27,7 @@ import Morloc.Frontend.Namespace
 import qualified Morloc.System as MS
 import Text.Megaparsec hiding (Label)
 import Text.Megaparsec.Char hiding (eol)
+import qualified Text.Megaparsec.Char.Lexer as L
 
 {- | Parse a single file or string that may contain multiple modules. Each
 module is written written into the DAG of previously observed modules.
@@ -136,6 +139,7 @@ pTopExpr =
     <|> try (plural pTypedef)
     <|> try (plural pTypeclass)
     <|> try (plural pInstance)
+    <|> try (plural pFixity)
     <|> try (plural pAssE)
     <|> try (plural pSigE)
     <|> try pSrcE
@@ -145,22 +149,10 @@ pTopExpr =
 -- | Expressions that are allowed in function or data declarations
 pExpr :: Parser ExprI
 pExpr =
-  try pHolE
-    <|> try pUni
-    <|> try pAnn
-    <|> try pNumE
+  try pAnn
     <|> try pComposition
-    <|> try pApp
-    <|> try pSetter
-    <|> try pGetter
-    <|> try pNamE -- record
-    <|> try pTupE
-    <|> try pStrE
-    <|> try pLogE
-    <|> pLstE
-    <|> parens pExpr
-    <|> pLam
-    <|> pVar
+    <|> try pLam
+    <|> pInfixExpr -- infix-aware parser (handles all atoms and operators)
     <?> "expression"
 
 pComposition :: Parser ExprI
@@ -253,6 +245,35 @@ pInstance = do
     pInstanceExpr =
       try (pSource >>= mapM (exprI . SrcE))
         <|> (pAssE |>> return)
+
+-- | Parse fixity declaration: infixl 6 +, -
+pFixity :: Parser ExprI
+pFixity = do
+  assoc <- pAssociativity
+  prec <- lexeme L.decimal
+  when (prec > 9) $
+    fail "precedence must be between 0 and 9"
+
+  ops <- sepBy1 pOperatorName (symbol ",")
+
+  let fixity = Fixity assoc (fromIntegral prec) ops
+
+  -- Update parser state with new fixities
+  CMS.modify' (addFixities fixity)
+
+  exprI (FixE fixity)
+  where
+    pAssociativity :: Parser Associativity
+    pAssociativity =
+      (reserved "infixl" >> return InfixL)
+        <|> (reserved "infixr" >> return InfixR)
+        <|> (reserved "infix" >> return InfixN)
+
+    pOperatorName :: Parser EVar
+    pOperatorName =
+      try parenOperator -- symbolic operators in parens: (+)
+        <|> try (operatorName |>> EV) -- symbolic operators bare: +
+        <|> (freenameL |>> EV) -- alphanumeric operators: div
 
 pTypedef :: Parser ExprI
 pTypedef =
@@ -614,6 +635,73 @@ pAnn = do
   t <- pTypeGen
   exprI $ AnnE e t
 
+-- | Parse an expression that may contain infix operators
+pInfixExpr :: Parser ExprI
+pInfixExpr = pPrecedenceClimb 0
+
+-- | Precedence climbing algorithm
+pPrecedenceClimb :: Int -> Parser ExprI
+pPrecedenceClimb minPrec = do
+  lhs <- pAtom
+  pClimb lhs minPrec
+  where
+    pClimb :: ExprI -> Int -> Parser ExprI
+    pClimb lhs minPrec' = do
+      -- Look ahead to check if there's an operator with acceptable precedence
+      -- We use lookAhead so we don't consume the operator if precedence is too low
+      maybeOp <- optional $ try $ lookAhead $ do
+        opName <- pInfixOperator
+        s <- CMS.get
+        let (assoc, prec) = lookupFixity opName s
+        if prec < minPrec'
+          then fail "operator precedence too low"
+          else return (opName, assoc, prec)
+
+      case maybeOp of
+        Nothing -> return lhs
+        Just (opName, assoc, prec) -> do
+          -- Now actually consume the operator
+          _ <- pInfixOperator
+
+          -- Determine next minimum precedence based on associativity
+          let nextMinPrec = case assoc of
+                InfixL -> prec + 1 -- Left: parse right with higher precedence
+                InfixR -> prec -- Right: parse right with same precedence
+                InfixN -> prec + 1 -- Non-assoc: parse right with higher precedence
+
+          rhs <- pPrecedenceClimb nextMinPrec
+
+          -- Build application: op lhs rhs → AppE (VarE op) [lhs, rhs]
+          opVar <- exprI (VarE defaultValue opName)
+          appExpr <- exprI (AppE opVar [lhs, rhs])
+
+          -- Continue climbing with the new lhs
+          pClimb appExpr minPrec'
+
+-- | Parse an infix operator (not in parens)
+pInfixOperator :: Parser EVar
+pInfixOperator = do
+  opName <- operatorName
+  return (EV opName)
+
+-- | Parse an atomic expression (operand for operators)
+pAtom :: Parser ExprI
+pAtom =
+  try pUni
+    <|> try pHolE
+    <|> try pNumE
+    <|> try pLogE
+    <|> try pStrE
+    <|> try (parens pExpr) -- Full expressions in parens
+    <|> try pTupE
+    <|> try pLstE
+    <|> try pNamE
+    <|> try pSetter
+    <|> try pGetter
+    <|> try pApp -- Function application (atomic)
+    <|> pVar
+    <?> "operand"
+
 pApp :: Parser ExprI
 pApp = do
   f <- parseFun
@@ -738,7 +826,7 @@ pHolE :: Parser ExprI
 pHolE = hole >> exprI HolE
 
 pEVar :: Parser EVar
-pEVar = fmap EV freenameL
+pEVar = try parenOperator <|> fmap EV freenameL
 
 pTypeGen :: Parser TypeU
 pTypeGen = do

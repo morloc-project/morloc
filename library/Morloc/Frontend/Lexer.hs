@@ -32,6 +32,8 @@ module Morloc.Frontend.Lexer
   , number
   , op
   , dot
+  , operatorName
+  , parenOperator
   , parens
   , reserved
   , reservedWords
@@ -48,6 +50,11 @@ module Morloc.Frontend.Lexer
   , exprId
   , exprI
 
+    -- * fixity support
+  , defaultFixityTable
+  , addFixities
+  , lookupFixity
+
     -- * docstring parsers
   , parseArgDocStr
   , parseFlagDocStr
@@ -59,6 +66,7 @@ module Morloc.Frontend.Lexer
 
 import qualified Control.Monad.State as CMS
 import qualified Data.Char as DC
+import qualified Data.Map.Strict as Map
 import qualified Data.Scientific as DS
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -82,6 +90,7 @@ data ParserState = ParserState
   , stateAccepting :: Bool
   , stateIgnoreAlignment :: Bool
   , stateModuleConfig :: ModuleConfig
+  , stateFixityTable :: Map.Map EVar (Associativity, Int)
   }
   deriving (Show)
 
@@ -96,7 +105,49 @@ emptyState =
     , stateAccepting = False
     , stateIgnoreAlignment = False
     , stateModuleConfig = defaultValue
+    , stateFixityTable = defaultFixityTable
     }
+
+-- | Default fixities (Haskell-compatible)
+defaultFixityTable :: Map.Map EVar (Associativity, Int)
+defaultFixityTable =
+  Map.fromList
+    [ (EV "!!", (InfixL, 9))
+    , (EV "^", (InfixR, 8))
+    , (EV "*", (InfixL, 7))
+    , (EV "/", (InfixL, 7))
+    , (EV "div", (InfixL, 7))
+    , (EV "mod", (InfixL, 7))
+    , (EV "+", (InfixL, 6))
+    , (EV "-", (InfixL, 6))
+    , (EV ":", (InfixR, 5))
+    , (EV "++", (InfixR, 5))
+    , (EV "==", (InfixN, 4))
+    , (EV "/=", (InfixN, 4))
+    , (EV "<", (InfixN, 4))
+    , (EV "<=", (InfixN, 4))
+    , (EV ">", (InfixN, 4))
+    , (EV ">=", (InfixN, 4))
+    , (EV "&&", (InfixR, 3))
+    , (EV "||", (InfixR, 2))
+    , (EV "$", (InfixR, 0))
+    ]
+
+-- | Update fixity table with new declarations
+addFixities :: Fixity -> ParserState -> ParserState
+addFixities (Fixity assoc prec ops) s =
+  s
+    { stateFixityTable =
+        foldl
+          (\tbl opName -> Map.insert opName (assoc, prec) tbl)
+          (stateFixityTable s)
+          ops
+    }
+
+-- | Lookup fixity (with default for unknown operators)
+lookupFixity :: EVar -> ParserState -> (Associativity, Int)
+lookupFixity opName s =
+  Map.findWithDefault (InfixL, 9) opName (stateFixityTable s)
 
 exprId :: Parser Int
 exprId = do
@@ -422,6 +473,9 @@ reservedWords =
   , "type"
   , "instance"
   , "class"
+  , "infixl"
+  , "infixr"
+  , "infix"
   ]
 
 operatorChars :: String
@@ -435,6 +489,26 @@ dot :: Parser Text
 dot = lexeme $ do
   _ <- char '.' <* notFollowedBy (char '(' <|> char '[' <|> char '{' <|> alphaNumChar)
   return "."
+
+-- | Parse an operator name (sequence of operator characters)
+operatorName :: Parser Text
+operatorName = (lexeme . try) $ do
+  firstChar <- oneOf operatorChars
+  restChars <- many (oneOf operatorChars)
+  let opName = MT.pack (firstChar : restChars)
+  -- Special case: "." is reserved for composition
+  if opName == "."
+    then failure Nothing Set.empty
+    else return opName
+
+-- | Parse an operator in parentheses (for use as a variable)
+-- Example: (+), (*), (<$>)
+parenOperator :: Parser EVar
+parenOperator = lexeme $ do
+  _ <- char '('
+  opName <- operatorName
+  _ <- char ')'
+  return (EV opName)
 
 reserved :: Text -> Parser Text
 reserved w = try (symbol w)

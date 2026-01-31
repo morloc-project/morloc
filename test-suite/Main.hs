@@ -21,6 +21,7 @@ main = do
       , whereTests
       , orderInvarianceTests
       , whitespaceTests
+      , infixOperatorTests
       , substituteTVarTests
       , subtypeTests
       , -- -- These tests pass locally and when I run the same container that I
