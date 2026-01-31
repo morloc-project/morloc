@@ -1,0 +1,6 @@
+module complex (processRecords)
+
+type Record = {id :: Int, name :: Str, values :: [Real]}
+
+processRecords :: [Record] -> [Int]
+processRecords rs = map (\r -> r.id) rs
