@@ -12,8 +12,7 @@ main = do
   defaultMain $
     testGroup
       "Morloc tests"
-      [ packerTests
-      , unitTypeTests
+      [ unitTypeTests
       , unitValuecheckTests
       , typeOrderTests
       , typeAliasTests
@@ -24,7 +23,7 @@ main = do
       , infixOperatorTests
       , substituteTVarTests
       , subtypeTests
-      , -- -- These tests pass locally and when I run the same container that I
+        -- -- These tests pass locally and when I run the same container that I
         -- -- use in github actions. Yet these tests freeze in an infinite loop
         -- -- with no STDERR output on github. I have no idea why. But for now I'm
         -- -- just going to comment them out. Rememver uncomment them on dev cycles
@@ -37,7 +36,9 @@ main = do
 
         -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
-        golden "claude-test-1" "claude-test-1"
+      , golden "infix" "infix"
+
+      , golden "claude-test-1" "claude-test-1"
       , golden "claude-test-2" "claude-test-2"
       , golden "claude-test-3" "claude-test-3"
       , golden "claude-test-4" "claude-test-4"

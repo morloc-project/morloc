@@ -642,7 +642,7 @@ pInfixExpr = pPrecedenceClimb 0
 -- | Precedence climbing algorithm
 pPrecedenceClimb :: Int -> Parser ExprI
 pPrecedenceClimb minPrec = do
-  lhs <- pAtom
+  lhs <- try pApp <|> pAtom  -- Try function application first, then atoms
   pClimb lhs minPrec
   where
     pClimb :: ExprI -> Int -> Parser ExprI
@@ -685,6 +685,7 @@ pInfixOperator = do
   return (EV opName)
 
 -- | Parse an atomic expression (operand for operators)
+-- Note: pApp is NOT in here - it's handled at a higher level in pPrecedenceClimb
 pAtom :: Parser ExprI
 pAtom =
   try pUni
@@ -698,7 +699,6 @@ pAtom =
     <|> try pNamE
     <|> try pSetter
     <|> try pGetter
-    <|> try pApp -- Function application (atomic)
     <|> pVar
     <?> "operand"
 
