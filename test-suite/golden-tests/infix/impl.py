@@ -12,3 +12,9 @@ def cons(x, xs):
 
 def append(xs, ys):
     return xs + ys
+
+def cons(x, xs):
+    return [x] + xs
+
+def append(xs, ys):
+    return xs + ys

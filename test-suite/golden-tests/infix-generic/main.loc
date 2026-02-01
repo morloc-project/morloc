@@ -1,0 +1,29 @@
+module m (x,y,z,f)
+
+type Py => Str = "str"
+type Py => Int = "int"
+type Py => (List a) = "list" a
+
+infixl 8 .
+(.) a b c :: (b -> c) -> (a -> b) -> a -> c
+(.) g f x = \x -> g (f x)
+
+infixl 0 $
+($) a b :: (a -> b) -> a -> b
+($) f x = f x
+
+infixl 5 +
+(+) :: Int -> Int -> Int
+source Py from "foo.py"
+  ( "add" as (+)
+  , "morloc_str" as show
+  , "morloc_map" as map
+  )
+
+show a :: a -> Str
+map a b :: (a -> b) -> [a] -> [b]
+
+x = show ((+) 6 5)
+y = map  ((+) 6) [1,2,3]
+z = show ((+) 6 $ 7)
+f = show . (+) 42

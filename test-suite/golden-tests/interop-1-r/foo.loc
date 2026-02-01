@@ -1,5 +1,6 @@
 module main (r2c, c2r)
 
+import root ((.))
 import root-r (Real, Integral, idr)
 import root-cpp (Real, Numeric, idcpp)
 

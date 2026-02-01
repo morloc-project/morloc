@@ -1,5 +1,5 @@
 all:
-		morloc make main.loc > log
+		morloc make main.loc 
 		./nexus test > obs.txt
 
 clean:

@@ -1,6 +1,6 @@
 all:
 	rm -f obs.txt
-	morloc make main.loc > log
+	morloc make main.loc 
 	> obs.txt
 	./nexus bar true true 5 >> obs.txt # 10
 	./nexus bar false true 5 >> obs.txt # 16

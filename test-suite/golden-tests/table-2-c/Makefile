@@ -1,6 +1,6 @@
 all:
 	rm -f obs.txt
-	morloc make -v foo.loc > log
+	morloc make foo.loc 
 	./nexus foo '{"name":["alice","bob"],"info":[34,35]}' > obs.txt
 
 clean:

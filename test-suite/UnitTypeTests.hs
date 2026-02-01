@@ -1745,9 +1745,7 @@ infixOperatorTests =
         [r|
           infixl 6 +, -
           (+) :: Int -> Int -> Int
-          (+) x y = x
           (-) :: Int -> Int -> Int
-          (-) x y = x
           x = 1 + 2 - 3
           x
         |]
@@ -1756,10 +1754,14 @@ infixOperatorTests =
       assertGeneralType
         "polymorphic operator"
         [r|
-          infixl 6 +
-          (+) :: a -> a -> a
-          (+) x y = x
-          x = 1
+          infixl 9 .
+          infixl 5 +
+          infixl 0 $
+          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
+          ($) a b :: (a -> b) -> a -> b
+          (+) :: Int -> Int -> Int
+          show a :: a -> Str
+          x = show . (+) 9 $ 5
           x
         |]
         int
@@ -1767,7 +1769,7 @@ infixOperatorTests =
         "polymorphic list append"
         [r|
           infixl 6 ++
-          (++) :: [a] -> [a] -> [a]
+          (++) a :: [a] -> [a] -> [a]
           (++) xs ys = xs
           x = [1] ++ [2]
           x

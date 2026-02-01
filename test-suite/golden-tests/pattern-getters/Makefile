@@ -1,5 +1,5 @@
 all:
-	morloc make main.loc > log
+	morloc make main.loc 
 	./nexus testr   >  obs.txt
 	./nexus testpy  >> obs.txt
 	./nexus testcpp >> obs.txt

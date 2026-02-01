@@ -1,5 +1,7 @@
 module (cid, pid, rid, pfoo, rfoo, cfoo)
 
+import root ((.))
+
 source Cpp from "foo.h" ("cid")
 source Py from "foo.py" ("pid")
 source R from "foo.R" ("rid")

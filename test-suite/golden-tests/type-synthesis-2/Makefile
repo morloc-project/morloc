@@ -1,7 +1,6 @@
 all:
 	morloc make main.loc
 	rm -f obs.txt
-	morloc make -v main.loc > log
 	./nexus f '"hello"' > obs.txt
 
 clean:

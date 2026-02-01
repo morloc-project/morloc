@@ -1,5 +1,6 @@
 module m (foo)
 
+import root ((.))
 import root-r (Bool, List)
 import root-py (Bool, List)
 

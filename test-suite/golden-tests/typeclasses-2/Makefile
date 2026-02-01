@@ -1,6 +1,6 @@
 all:
 	rm -f obs.txt
-	morloc make -v main.loc > log
+	morloc make main.loc 
 	./nexus paste '["a","b"]' > obs.txt
 	./nexus sum '[1,2,3]' >> obs.txt
 

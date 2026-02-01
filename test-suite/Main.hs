@@ -37,6 +37,8 @@ main = do
         -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
       , golden "infix" "infix"
+      , golden "infix-import" "infix-import"
+      , golden "infix-generic" "infix-generic"
 
       , golden "claude-test-1" "claude-test-1"
       , golden "claude-test-2" "claude-test-2"

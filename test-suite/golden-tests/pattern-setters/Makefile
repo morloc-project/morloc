@@ -1,7 +1,7 @@
 all:
-	morloc make -o nexus-py main-py.loc > log
-	morloc make -o nexus-r main-r.loc > log
-	morloc make -o nexus-cpp main-cpp.loc > log
+	morloc make -o nexus-py main-py.loc 
+	morloc make -o nexus-r main-r.loc 
+	morloc make -o nexus-cpp main-cpp.loc 
 	./nexus-py test > obs.txt
 	./nexus-r test >> obs.txt
 	./nexus-cpp test >> obs.txt

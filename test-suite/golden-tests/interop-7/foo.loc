@@ -1,5 +1,6 @@
 module m (foo)
 
+import root((.))
 import root-r (Str, Int, Real, Bool, Tuple3)
 import root-cpp (Str, Int, Real, Bool, Tuple3)
 

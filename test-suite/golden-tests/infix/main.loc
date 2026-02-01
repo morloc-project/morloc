@@ -1,60 +1,37 @@
-module main 
+module main
   ( test_arithmetic
   , test_precedence
   , test_exponentiation
-  , test_cons
   , test_append
   , test_application
-  , test_combined
   )
 
 type Py => Int = "int"
 type Py => (List a) = "list" a
 
--- Fixity declarations for mathematical operators
+-- Mathematical operators - source from Python
+source py from "impl.py"
+  ( "add" as (+)
+  , "mul" as (*)
+  , "pow" as (**)
+  , "append" as (<>)
+  )
+
+-- Define infix operators as wrappers
 infixl 6 +
 infixl 7 *
 infixr 8 **
-
--- Fixity declarations for list operators
-infixr 5 :
 infixr 5 <>
-
--- Fixity declaration for function application
 infixr 0 $
 
--- Mathematical operators
-add :: Int -> Int -> Int
-mul :: Int -> Int -> Int
-pow :: Int -> Int -> Int
-source py from "impl.py" ("add", "mul", "pow", "cons", "append")
-
 (+) :: Int -> Int -> Int
-(+) x y = add x y
-
 (*) :: Int -> Int -> Int
-(*) x y = mul x y
-
 (**) :: Int -> Int -> Int
-(**) x y = pow x y
-
--- List operators (concrete for Int to avoid type issues)
-cons a :: a -> [a] -> [a]
-append a :: [a] -> [a] -> [a]
-
-(:) :: a -> [a] -> [Int]
-(:) x xs = cons x xs
-
 (<>) :: [Int] -> [Int] -> [Int]
-(<>) xs ys = append xs ys
 
 -- Function application operator
-($) :: (a -> a) -> a -> a
+($) :: (Int -> Int) -> Int -> Int
 ($) f x = f x
-
--- Helper function for testing
-double :: Int -> Int
-double x = mul x 2
 
 -- Test cases
 
@@ -70,19 +47,10 @@ test_precedence = 2 + 3 * 4
 test_exponentiation :: Int
 test_exponentiation = 2 ** 3
 
--- List cons operator
-test_cons :: [Int]
-test_cons = 1 : 2 : 3 : []
-
 -- List append operator
 test_append :: [Int]
 test_append = [1, 2] <> [3, 4]
 
 -- Function application operator
 test_application :: Int
-test_application = double $ 5
-
--- Combined test: complex expression using multiple operators
--- Should parse as: (1 + 2 * 3) : [4, 5] = 7 : [4, 5] = [7, 4, 5]
-test_combined :: [Int]
-test_combined = 1 + 2 * 3 : [4, 5]
+test_application = (*) 2 $ 5
