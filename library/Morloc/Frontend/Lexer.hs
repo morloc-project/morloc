@@ -31,7 +31,6 @@ module Morloc.Frontend.Lexer
   , moduleComponent
   , number
   , op
-  , dot
   , operatorName
   , parenOperator
   , parens
@@ -105,33 +104,29 @@ emptyState =
     , stateAccepting = False
     , stateIgnoreAlignment = False
     , stateModuleConfig = defaultValue
-    , stateFixityTable = defaultFixityTable
+    , stateFixityTable = Map.empty 
     }
 
--- | Default fixities (Haskell-compatible)
-defaultFixityTable :: Map.Map EVar (Associativity, Int)
-defaultFixityTable =
-  Map.fromList
-    [ (EV "!!", (InfixL, 9))
-    , (EV "^", (InfixR, 8))
-    , (EV "*", (InfixL, 7))
-    , (EV "/", (InfixL, 7))
-    , (EV "div", (InfixL, 7))
-    , (EV "mod", (InfixL, 7))
-    , (EV "+", (InfixL, 6))
-    , (EV "-", (InfixL, 6))
-    , (EV ":", (InfixR, 5))
-    , (EV "++", (InfixR, 5))
-    , (EV "==", (InfixN, 4))
-    , (EV "/=", (InfixN, 4))
-    , (EV "<", (InfixN, 4))
-    , (EV "<=", (InfixN, 4))
-    , (EV ">", (InfixN, 4))
-    , (EV ">=", (InfixN, 4))
-    , (EV "&&", (InfixR, 3))
-    , (EV "||", (InfixR, 2))
-    , (EV "$", (InfixR, 0))
-    ]
+-- -- Precedence examples
+-- !!  InfixL 9
+-- ^   InfixR 8
+-- *   InfixL 7
+-- /   InfixL 7
+-- div InfixL 7
+-- mod InfixL 7
+-- +   InfixL 6
+-- -   InfixL 6
+-- :   InfixR 5
+-- ++  InfixR 5
+-- ==  InfixN 4
+-- /=  InfixN 4
+-- <   InfixN 4
+-- <=  InfixN 4
+-- >   InfixN 4
+-- >=  InfixN 4
+-- &&  InfixR 3
+-- ||  InfixR 2
+-- $   InfixR 0
 
 -- | Update fixity table with new declarations
 addFixities :: Fixity -> ParserState -> ParserState
@@ -484,22 +479,13 @@ operatorChars = ":!$%&*+./<=>?@\\^|-~#"
 op :: Text -> Parser Text
 op o = (lexeme . try) (string o <* notFollowedBy (oneOf operatorChars))
 
--- the rugged dot, free and alone
-dot :: Parser Text
-dot = lexeme $ do
-  _ <- char '.' <* notFollowedBy (char '(' <|> char '[' <|> char '{' <|> alphaNumChar)
-  return "."
-
 -- | Parse an operator name (sequence of operator characters)
 operatorName :: Parser Text
 operatorName = (lexeme . try) $ do
   firstChar <- oneOf operatorChars
   restChars <- many (oneOf operatorChars)
   let opName = MT.pack (firstChar : restChars)
-  -- Special case: "." is reserved for composition
-  if opName == "."
-    then failure Nothing Set.empty
-    else return opName
+  return opName
 
 -- | Parse an operator in parentheses (for use as a variable)
 -- Example: (+), (*), (<$>)

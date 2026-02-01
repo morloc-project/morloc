@@ -13,8 +13,6 @@ module Morloc.Frontend.Parser
   ) where
 
 import qualified Control.Monad.State as CMS
-import Data.List.NonEmpty (NonEmpty (..))
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Void (Void)
@@ -150,40 +148,16 @@ pTopExpr =
 pExpr :: Parser ExprI
 pExpr =
   try pAnn
-    <|> try pComposition
     <|> try pLam
     <|> pInfixExpr -- infix-aware parser (handles all atoms and operators)
     <?> "expression"
 
-pComposition :: Parser ExprI
-pComposition = do
-  fs <- sepBy pFunction dot
-  case length fs of
-    0 -> failure Nothing Set.empty
-    1 -> failure Nothing Set.empty
-    _ -> do
-      s <- CMS.get
-      let v = EV ("x" <> MT.show' (stateExpIndex s + 1))
-
-      v' <- exprI (VarE defaultValue v)
-
-      inner <- case last fs of
-        (ExprI i (AppE x xs)) -> return $ ExprI i (AppE x (xs <> [v']))
-        e -> exprI $ AppE e [v']
-
-      composition <- foldM compose inner (reverse (init fs))
-
-      exprI $ LamE [v] composition
-  where
-    pFunction = parens pFunction <|> try pApp <|> try pVar <|> pLam
-
-    compose :: ExprI -> ExprI -> Parser ExprI
-    compose inner (ExprI i (AppE x xs)) = return $ ExprI i (AppE x (xs <> [inner]))
-    compose inner outer = exprI (AppE outer [inner])
-
 -- Either a lowercase term name or an uppercase type/class name
 pSymbol :: Parser Symbol
-pSymbol = (TermSymbol . EV <$> freenameL) <|> (TypeSymbol . TV <$> freenameU)
+pSymbol =
+  try (TermSymbol <$> parenOperator)  -- Operators in parens: (+), (*), etc.
+    <|> (TermSymbol . EV <$> freenameL)  -- Regular term names
+    <|> (TypeSymbol . TV <$> freenameU)  -- Type names
 
 pImport :: Parser ExprI
 pImport = do
@@ -206,7 +180,7 @@ pImport = do
 
     pImportTerm :: Parser AliasedSymbol
     pImportTerm = do
-      n <- freenameL
+      n <- try (parenOperator |>> unEVar) <|> freenameL
       a <- option n (reserved "as" >> freenameL)
       return (AliasedTerm (EV n) (EV a))
 
@@ -441,7 +415,7 @@ pSignature :: Parser Signature
 pSignature = do
   doc <- parseArgDocVars
   label' <- optional pTag
-  v <- freenameL
+  v <- freenameL <|> (parenOperator |>> unEVar)
   vs <- many freenameL |>> map TV
   _ <- op "::"
   props <- option [] (try pPropertyList)
@@ -534,7 +508,7 @@ pSourceLegacy = do
     pImportSourceTerm = do
       t <- optional pTag
       n <- stringLiteral
-      a <- option n (reserved "as" >> freename)
+      a <- option n (reserved "as" >> (freename <|> (parenOperator |>> unEVar)))
       return (SrcName n, EV a, t)
 
 pSourceNew :: Parser [Source]
