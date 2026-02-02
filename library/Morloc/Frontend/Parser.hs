@@ -224,18 +224,11 @@ pInstance = do
 pFixity :: Parser ExprI
 pFixity = do
   assoc <- pAssociativity
-  prec <- lexeme L.decimal
+  prec <- pPrecValue
   when (prec > 9) $
     fail "precedence must be between 0 and 9"
-
   ops <- sepBy1 pOperatorName (symbol ",")
-
-  let fixity = Fixity assoc (fromIntegral prec) ops
-
-  -- Update parser state with new fixities
-  CMS.modify' (addFixities fixity)
-
-  exprI (FixE fixity)
+  exprI . FixE $ Fixity assoc prec ops
   where
     pAssociativity :: Parser Associativity
     pAssociativity =
@@ -248,6 +241,13 @@ pFixity = do
       try parenOperator -- symbolic operators in parens: (+)
         <|> try (operatorName |>> EV) -- symbolic operators bare: +
         <|> (freenameL |>> EV) -- alphanumeric operators: div
+
+    pPrecValue :: Parser Int
+    pPrecValue = do
+      prec <- lexeme L.decimal
+      when (prec > 9) $
+        fail "precedence must be between 0 and 9"
+      return prec
 
 pTypedef :: Parser ExprI
 pTypedef =
@@ -610,59 +610,28 @@ pAnn = do
   exprI $ AnnE e t
 
 -- | Parse an expression that may contain infix operators
+-- Note that the fixity of the binops is not yet known, so they are merged into
+-- a left-associated temporary structure
 pInfixExpr :: Parser ExprI
-pInfixExpr = pPrecedenceClimb 0
-
--- | Precedence climbing algorithm
-pPrecedenceClimb :: Int -> Parser ExprI
-pPrecedenceClimb minPrec = do
-  lhs <- try pApp <|> pAtom  -- Try function application first, then atoms
-  pClimb lhs minPrec
-  where
-    pClimb :: ExprI -> Int -> Parser ExprI
-    pClimb lhs minPrec' = do
-      -- Look ahead to check if there's an operator with acceptable precedence
-      -- We use lookAhead so we don't consume the operator if precedence is too low
-      maybeOp <- optional $ try $ lookAhead $ do
-        opName <- pInfixOperator
-        s <- CMS.get
-        let (assoc, prec) = lookupFixity opName s
-        if prec < minPrec'
-          then fail "operator precedence too low"
-          else return (opName, assoc, prec)
-
-      case maybeOp of
-        Nothing -> return lhs
-        Just (opName, assoc, prec) -> do
-          -- Now actually consume the operator
-          _ <- pInfixOperator
-
-          -- Determine next minimum precedence based on associativity
-          let nextMinPrec = case assoc of
-                InfixL -> prec + 1 -- Left: parse right with higher precedence
-                InfixR -> prec -- Right: parse right with same precedence
-                InfixN -> prec + 1 -- Non-assoc: parse right with higher precedence
-
-          rhs <- pPrecedenceClimb nextMinPrec
-
-          -- Build application: op lhs rhs → AppE (VarE op) [lhs, rhs]
-          opVar <- exprI (VarE defaultValue opName)
-          appExpr <- exprI (AppE opVar [lhs, rhs])
-
-          -- Continue climbing with the new lhs
-          pClimb appExpr minPrec'
+pInfixExpr = do
+  lhs <- pOperand  -- Try function application first, then atoms
+  mayOp <- optional pInfixOperator
+  case mayOp of
+    (Just binop) -> do
+      rhs <- pExpr
+      i <- exprId
+      exprI $ BopE lhs i binop rhs 
+    Nothing -> return lhs
 
 -- | Parse an infix operator (not in parens)
 pInfixOperator :: Parser EVar
-pInfixOperator = do
-  opName <- operatorName
-  return (EV opName)
+pInfixOperator = EV <$> operatorName
 
--- | Parse an atomic expression (operand for operators)
--- Note: pApp is NOT in here - it's handled at a higher level in pPrecedenceClimb
-pAtom :: Parser ExprI
-pAtom =
+-- | Parse an operand
+pOperand :: Parser ExprI
+pOperand =
   try pUni
+    <|> try pApp
     <|> try pHolE
     <|> try pNumE
     <|> try pLogE

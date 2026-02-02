@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TupleSections #-}
 
 {- |
 Module      : Morloc.Frontend.Restructure
@@ -39,6 +40,7 @@ restructure s = do
     >>= resolveHoles
     >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
       |>> handleTypeDeclarations
+    >>= handleBinops
     >>= doM collectTags
     >>= doM collectTypes
     >>= doM collectSources
@@ -317,8 +319,72 @@ handleTypeDeclarations = DAG.mapNode f
     isNotSelfDef :: ExprI -> Bool
     isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing v [] (VarU v') _))) = v /= v'
     isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing (VarU -> v) (map (either VarU id) -> vs) (AppU v' vs') _))) =
-      v /= v' || length vs /= length vs' || not (all (\(x, y) -> x == y) (zip vs vs'))
+      v /= v' || length vs /= length vs' || not (all (uncurry (==)) (zip vs vs'))
     isNotSelfDef _ = True
+
+
+handleBinops :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
+handleBinops d0 = do
+  mayN <- DAG.synthesize updateNode (\e _ _ -> return e) d0
+  case mayN of
+    (Just e') -> return $ DAG.mapNode fst e'
+    Nothing -> error "fuck"
+  where
+    updateNode ::
+      MVar ->
+      ExprI ->
+      [(MVar, [AliasedSymbol], (ExprI, Map.Map EVar (Associativity, Int)))] ->
+      MorlocMonad (ExprI, Map.Map EVar (Associativity, Int))
+    updateNode _ e es = do
+      thisFixityMap <- AST.findFixityMap e
+      fixityMap <- mergeFixityMaps $ thisFixityMap : [filterTerms m ss | (_, ss, (_, m)) <- es]
+      e' <- updateBinopExprs fixityMap e
+      return (e', fixityMap)
+
+    filterTerms :: Map.Map EVar a -> [AliasedSymbol] -> Map.Map EVar a
+    filterTerms m ss =
+      let symMap = Map.fromList [(k, v) | (AliasedTerm k v) <- ss]
+       in Map.fromList . catMaybes $ [Map.lookup k symMap |>> (, v) | (k, v) <- Map.toList m]
+ 
+    mergeFixityMaps :: Eq a => [Map.Map EVar a] -> MorlocMonad (Map.Map EVar a)
+    mergeFixityMaps [] = return Map.empty  
+    mergeFixityMaps [e1] = return e1
+    mergeFixityMaps (e1:e2:es) = do
+      e' <- foldlM strictInsert e1 (Map.toList e2)
+      mergeFixityMaps (e':es)
+    
+    strictInsert :: Eq v => Map.Map EVar v -> (EVar, v) -> MorlocMonad (Map.Map EVar v)
+    strictInsert m (k, v) = case Map.lookup k m of
+      Nothing -> return $ Map.insert k v m
+      (Just v') -> if v == v'
+                   then return m
+                   else MM.throwError . ConflictingFixity $ k
+
+    updateBinopExprs :: Map.Map EVar (Associativity, Int) -> ExprI -> MorlocMonad ExprI
+    updateBinopExprs m0 = f where
+      f e@(ExprI _ BopE{}) = resolveBinop m0 e >>= f
+      f (ExprI i (ModE m es)) = ModE m <$> mapM f es |>> ExprI i
+      f (ExprI i (IstE cls ts es)) = IstE cls ts <$> mapM f es |>> ExprI i
+      f (ExprI i (AssE v e es)) = AssE v <$> f e <*> mapM f es |>> ExprI i 
+      f (ExprI i (LstE es)) = LstE <$> mapM f es |>> ExprI i
+      f (ExprI i (TupE es)) = TupE <$> mapM f es |>> ExprI i
+      f (ExprI i (NamE rs)) = do
+        es' <- mapM (f . snd) rs
+        return $ ExprI i (NamE (zip (map fst rs) es'))
+      f (ExprI i (AppE e es)) = AppE <$> f e <*> mapM f es |>> ExprI i
+      f (ExprI i (LamE vs e)) = LamE vs <$> f e |>> ExprI i
+      f (ExprI i (AnnE e t)) = AnnE <$> f e <*> pure t |>> ExprI i
+      f e = return e
+
+    -- Pratt parser algorithm
+    -- STUB: currently is purely right associative and ignores precedence
+    resolveBinop :: Map.Map EVar (Associativity, Int) -> ExprI -> MorlocMonad ExprI
+    resolveBinop fixMap = parseExpression 0 where
+      parseExpression :: Int -> ExprI -> MorlocMonad ExprI
+      parseExpression minPrec (ExprI i (BopE e1 j1 v1 e2)) = do
+        e2' <- parseExpression minPrec e2
+        return . ExprI i $ AppE (ExprI j1 (VarE defaultValue v1)) [e1, e2']
+      parseExpression _ e = return e
 
 collectTags :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTags fullDag = do

@@ -1,5 +1,7 @@
 module m (foo)
 
+import root ((.))
+
 toSnd f x = (x, f x)
 
 double x = (x, x)

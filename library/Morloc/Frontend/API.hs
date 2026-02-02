@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {- |
 Module      : Morloc.Frontend.API
 Description : Morloc frontend API

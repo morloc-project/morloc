@@ -9,6 +9,7 @@ module Morloc.Frontend.AST
   ( findEdges
   , findExport
   , findExportSet
+  , findFixityMap
   , setExport
   , findSignatures
   , findTypedefs
@@ -21,6 +22,7 @@ module Morloc.Frontend.AST
 
 import qualified Data.Set as Set
 import qualified Morloc.Data.Map as Map
+import qualified Morloc.Monad as MM
 import Morloc.Frontend.Namespace
 
 -- | In the DAG, the two MVar are the two keys, Import is the edge data, Expr is the node data
@@ -45,7 +47,7 @@ findExport e0 = case f e0 of
     f _ = Nothing
 
 setExport :: Export -> ExprI -> ExprI
-setExport export e0 = f e0
+setExport export = f
   where
     f (ExprI i (ExpE _)) = ExprI i (ExpE export)
     f (ExprI i (ModE m es)) = ExprI i (ModE m (map f es))
@@ -92,6 +94,23 @@ findTypeTerms (FunU ts t) = concatMap findTypeTerms ts <> findTypeTerms t
 findTypeTerms (AppU t ts) = findTypeTerms t <> concatMap findTypeTerms ts
 findTypeTerms (NamU _ _ ps rs) = concatMap findTypeTerms (map snd rs <> ps)
 
+findFixityMap :: ExprI -> MorlocMonad (Map.Map EVar (Associativity, Int))
+findFixityMap (ExprI _ (ModE _ es)) = do
+  -- collect all fixity terms.
+  -- these are allowed only at the top level, so no need for recursion.
+  let allTerms = concat [ [(op, (ass, pre)) | op <- ops]
+                        | (ExprI _ (FixE (Fixity ass pre ops))) <- es]
+
+  foldlM tryAddTerm Map.empty allTerms
+  where
+
+  tryAddTerm :: Map.Map EVar (Associativity, Int) -> (EVar, (Associativity, Int)) -> MorlocMonad (Map.Map EVar (Associativity, Int))
+  tryAddTerm m (k, v)
+    | Map.member k m = MM.throwError . ConflictingFixity $ k
+    | otherwise = return $ Map.insert k v m
+findFixityMap _ = return Map.empty
+
+
 {- | Find type signatures that are in the scope of the input expression. Do not
 descend recursively into declaration where statements except if the input
 expression is a declaration.
@@ -128,7 +147,7 @@ maxIndex (ExprI i (LstE es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (TupE es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (NamE rs)) = maximum (i : map (maxIndex . snd) rs)
 maxIndex (ExprI i (ExpE ExportAll)) = i
-maxIndex (ExprI i (ExpE (ExportMany ss))) = maximum (i : (map fst (Set.toList ss)))
+maxIndex (ExprI i (ExpE (ExportMany ss))) = maximum (i : map fst (Set.toList ss))
 maxIndex (ExprI i _) = i
 
 getIndices :: ExprI -> [Int]

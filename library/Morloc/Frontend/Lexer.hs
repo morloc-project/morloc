@@ -49,11 +49,6 @@ module Morloc.Frontend.Lexer
   , exprId
   , exprI
 
-    -- * fixity support
-  , defaultFixityTable
-  , addFixities
-  , lookupFixity
-
     -- * docstring parsers
   , parseArgDocStr
   , parseFlagDocStr
@@ -65,7 +60,6 @@ module Morloc.Frontend.Lexer
 
 import qualified Control.Monad.State as CMS
 import qualified Data.Char as DC
-import qualified Data.Map.Strict as Map
 import qualified Data.Scientific as DS
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -89,7 +83,6 @@ data ParserState = ParserState
   , stateAccepting :: Bool
   , stateIgnoreAlignment :: Bool
   , stateModuleConfig :: ModuleConfig
-  , stateFixityTable :: Map.Map EVar (Associativity, Int)
   }
   deriving (Show)
 
@@ -104,45 +97,7 @@ emptyState =
     , stateAccepting = False
     , stateIgnoreAlignment = False
     , stateModuleConfig = defaultValue
-    , stateFixityTable = Map.empty 
     }
-
--- -- Precedence examples
--- !!  InfixL 9
--- ^   InfixR 8
--- *   InfixL 7
--- /   InfixL 7
--- div InfixL 7
--- mod InfixL 7
--- +   InfixL 6
--- -   InfixL 6
--- :   InfixR 5
--- ++  InfixR 5
--- ==  InfixN 4
--- /=  InfixN 4
--- <   InfixN 4
--- <=  InfixN 4
--- >   InfixN 4
--- >=  InfixN 4
--- &&  InfixR 3
--- ||  InfixR 2
--- $   InfixR 0
-
--- | Update fixity table with new declarations
-addFixities :: Fixity -> ParserState -> ParserState
-addFixities (Fixity assoc prec ops) s =
-  s
-    { stateFixityTable =
-        foldl
-          (\tbl opName -> Map.insert opName (assoc, prec) tbl)
-          (stateFixityTable s)
-          ops
-    }
-
--- | Lookup fixity (with default for unknown operators)
-lookupFixity :: EVar -> ParserState -> (Associativity, Int)
-lookupFixity opName s =
-  Map.findWithDefault (InfixL, 9) opName (stateFixityTable s)
 
 exprId :: Parser Int
 exprId = do

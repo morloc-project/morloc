@@ -1,5 +1,7 @@
 module m (foo)
 
+import root ((.))
+
 type Py => Int = "int" 
 type Py => Tuple2 a b = "tuple" a b
 type Py => List a = "list" a

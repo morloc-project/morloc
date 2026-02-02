@@ -561,6 +561,12 @@ data Expr
     AssE EVar ExprI [ExprI]
   | -- | Fixity declaration (infixl, infixr, infix)
     FixE Fixity
+  | -- | A collection of expressions of binary operators.
+    --   These cannot be resolved at parse time since because their fixity is
+    --   not known. So they are collected in a temporary left associative
+    --   structure. These will be resolved after the local fixity table has been
+    --   created.
+    BopE ExprI Int EVar ExprI
   | -- | (())
     UniE
   | -- | (x)
@@ -982,6 +988,7 @@ data MorlocError
   | BadRealization
   | TooManyRealizations
   | MissingSource
+  | ConflictingFixity EVar
   | -- type extension errors
     UndefinedType TVar
   | AmbiguousPacker Text
@@ -1649,6 +1656,7 @@ instance Pretty Expr where
         InfixL -> "infixl"
         InfixR -> "infixr"
         InfixN -> "infix"
+  pretty (BopE e1 _ v e2) = pretty e1 <+> pretty v <+> pretty e2
 
 instance (Foldable f) => Pretty (AnnoS a f b) where
   pretty (AnnoS _ _ e) = pretty e
@@ -1739,6 +1747,7 @@ instance Pretty MorlocError where
   pretty (SelfImport _) = "SelfImport"
   pretty BadRealization = "BadRealization"
   pretty MissingSource = "MissingSource"
+  pretty (ConflictingFixity v) = "Conflicting fixity definitions for" <+> pretty v
   -- serialization errors
   pretty (CyclicPacker t1 t2) =
     "Error CyclicPacker - a term is described as both a packer and an unpacker:\n  "

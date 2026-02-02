@@ -1,5 +1,5 @@
 all:
-	morloc make main.loc 2
+	morloc make main.loc
 	./nexus foo '"asdf"' 3.14 > obs.txt
 
 .PHONY: clean

@@ -1,5 +1,7 @@
 module m (foo)
 
+import root ((.))
+
 toSnd f z = (double z, f (bar double z))
 
 double x = (x, x)
