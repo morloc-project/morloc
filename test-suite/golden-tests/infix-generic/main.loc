@@ -4,15 +4,15 @@ type Py => Str = "str"
 type Py => Int = "int"
 type Py => (List a) = "list" a
 
-infixl 8 .
+infixl 9 .
 (.) a b c :: (b -> c) -> (a -> b) -> a -> c
-(.) g f x = \x -> g (f x)
+(.) g f x = g (f x)
 
-infixl 0 $
+infixr 0 $
 ($) a b :: (a -> b) -> a -> b
 ($) f x = f x
 
-infixl 5 +
+infixl 6 +
 (+) :: Int -> Int -> Int
 source Py from "foo.py"
   ( "add" as (+)

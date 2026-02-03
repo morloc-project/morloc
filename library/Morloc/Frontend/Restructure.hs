@@ -328,7 +328,7 @@ handleBinops d0 = do
   mayN <- DAG.synthesize updateNode (\e _ _ -> return e) d0
   case mayN of
     (Just e') -> return $ DAG.mapNode fst e'
-    Nothing -> error "fuck"
+    Nothing -> error "Unreachable?"
   where
     updateNode ::
       MVar ->
@@ -376,15 +376,46 @@ handleBinops d0 = do
       f (ExprI i (AnnE e t)) = AnnE <$> f e <*> pure t |>> ExprI i
       f e = return e
 
-    -- Pratt parser algorithm
-    -- STUB: currently is purely right associative and ignores precedence
+    -- | Rewrite a right-nested BopE chain into a correctly-associated AppE tree.
+    -- Uses the Pratt (precedence climbing) algorithm.
+    -- Operators not in fixMap default to infixl 9.
     resolveBinop :: Map.Map EVar (Associativity, Int) -> ExprI -> MorlocMonad ExprI
-    resolveBinop fixMap = parseExpression 0 where
-      parseExpression :: Int -> ExprI -> MorlocMonad ExprI
-      parseExpression minPrec (ExprI i (BopE e1 j1 v1 e2)) = do
-        e2' <- parseExpression minPrec e2
-        return . ExprI i $ AppE (ExprI j1 (VarE defaultValue v1)) [e1, e2']
-      parseExpression _ e = return e
+    resolveBinop fixMap expr = do
+      let (lhs0, ops) = flatten expr
+      (result, _) <- pratt 0 lhs0 ops
+      return result
+      where
+        lookupFixity :: EVar -> (Associativity, Int)
+        lookupFixity v = Map.findWithDefault (InfixL, 9) v fixMap
+
+        -- Walk the right spine of BopE nodes into a flat list.
+        -- Each entry: (outerIdx, opIdx, opName, rightOperand)
+        flatten :: ExprI -> (ExprI, [(Int, Int, EVar, ExprI)])
+        flatten (ExprI outerI (BopE lhs opI op rhs)) =
+          let (rhsFirst, rhsRest) = flatten rhs
+           in (lhs, (outerI, opI, op, rhsFirst) : rhsRest)
+        flatten e = (e, [])
+
+        -- Pratt loop: consume operators with prec >= minPrec.
+        -- Returns the parsed lhs and the unconsumed tail.
+        pratt :: Int -> ExprI -> [(Int, Int, EVar, ExprI)] -> MorlocMonad (ExprI, [(Int, Int, EVar, ExprI)])
+        pratt _ lhs [] = return (lhs, [])
+        pratt minPrec lhs ((outerI, opI, op, rhs) : rest) = do
+          let (assoc, prec) = lookupFixity op
+          if prec < minPrec
+            then return (lhs, (outerI, opI, op, rhs) : rest)
+            else do
+              let nextMinPrec = if assoc == InfixR then prec else prec + 1
+              (rhsParsed, remaining) <- pratt nextMinPrec rhs rest
+              -- Ambiguity check: incompatible fixities at the same precedence
+              case remaining of
+                ((_, _, nextOp, _) : _) -> do
+                  let (nextAssoc, nextPrec) = lookupFixity nextOp
+                  when (nextPrec == prec && (assoc /= nextAssoc || assoc == InfixN))
+                       (MM.throwError $ AmbiguousOperators op nextOp)
+                [] -> return ()
+              let lhs' = ExprI outerI $ AppE (ExprI opI (VarE defaultValue op)) [lhs, rhsParsed]
+              pratt minPrec lhs' remaining
 
 collectTags :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTags fullDag = do

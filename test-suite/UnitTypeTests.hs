@@ -1755,8 +1755,8 @@ infixOperatorTests =
         "polymorphic operator"
         [r|
           infixl 9 .
-          infixl 5 +
-          infixl 0 $
+          infixl 6 +
+          infixr 0 $
           (.) a b c :: (b -> c) -> (a -> b) -> a -> c
           ($) a b :: (a -> b) -> a -> b
           (+) :: Int -> Int -> Int
@@ -1764,7 +1764,7 @@ infixOperatorTests =
           x = show . (+) 9 $ 5
           x
         |]
-        int
+        str
     , assertGeneralType
         "polymorphic list append"
         [r|

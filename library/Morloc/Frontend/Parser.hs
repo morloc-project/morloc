@@ -518,8 +518,7 @@ pSourceNew = do
   language <- pLang
   maySrcfile <- optional (reserved "from" >> stringLiteral |>> MT.unpack)
   let srcfile = getSourceFile modulePath maySrcfile
-  sources <- option [] (reserved "where" >> alignInset (pImportSourceTerm language srcfile))
-  return sources
+  option [] (reserved "where" >> alignInset (pImportSourceTerm language srcfile))
   where
     pImportSourceTerm :: Lang -> Maybe Path -> Parser Source
     pImportSourceTerm language srcfile = do

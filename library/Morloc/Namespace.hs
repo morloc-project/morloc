@@ -989,6 +989,7 @@ data MorlocError
   | TooManyRealizations
   | MissingSource
   | ConflictingFixity EVar
+  | AmbiguousOperators EVar EVar
   | -- type extension errors
     UndefinedType TVar
   | AmbiguousPacker Text
@@ -1748,6 +1749,9 @@ instance Pretty MorlocError where
   pretty BadRealization = "BadRealization"
   pretty MissingSource = "MissingSource"
   pretty (ConflictingFixity v) = "Conflicting fixity definitions for" <+> pretty v
+  pretty (AmbiguousOperators v1 v2) =
+    "Ambiguous use of" <+> pretty v1 <+> "and" <+> pretty v2
+      <> "; parenthesize or declare compatible fixities"
   -- serialization errors
   pretty (CyclicPacker t1 t2) =
     "Error CyclicPacker - a term is described as both a packer and an unpacker:\n  "
