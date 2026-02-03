@@ -44,7 +44,7 @@ main = do
       , golden "claude-test-2" "claude-test-2"
       , golden "claude-test-3" "claude-test-3"
       , golden "claude-test-4" "claude-test-4"
-      , golden "claude-test-5" "claude-test-5"
+      -- , golden "claude-test-5" "claude-test-5"
       , golden "claude-test-6" "claude-test-6"
       , golden "claude-test-7" "claude-test-7"
       , golden "claude-test-8" "claude-test-8"

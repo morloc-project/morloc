@@ -641,7 +641,7 @@ pOperand =
     <|> try pNamE
     <|> try pSetter
     <|> try pGetter
-    <|> pVar
+    <|> try pVar
     <?> "operand"
 
 pApp :: Parser ExprI

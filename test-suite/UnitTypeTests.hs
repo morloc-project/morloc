@@ -1865,4 +1865,310 @@ infixOperatorTests =
           x
         |]
         int
+    -- Type-verified precedence: asymmetric operator types ensure
+    -- only the correct parse tree typechecks
+    , assertGeneralType
+        "type-verified: * at 7 binds tighter than + at 6"
+        [r|
+          infixl 6 +
+          infixl 7 *
+          (+) :: Str -> Int -> Str
+          (*) :: Int -> Int -> Int
+          x = "a" + 1 * 2
+          x
+        |]
+        str
+    , assertGeneralType
+        "type-verified: @ at 8 binds tighter than # at 3"
+        [r|
+          infixl 3 #
+          infixl 8 @
+          (#) :: Str -> Int -> Str
+          (@) :: Int -> Int -> Int
+          x = "a" # 1 @ 2
+          x
+        |]
+        str
+    , assertGeneralType
+        "type-verified: three-operator precedence chain"
+        [r|
+          infixl 3 <$>
+          infixl 6 +
+          infixl 9 *
+          (<$>) :: Str -> Str -> Int
+          (+) :: Str -> Int -> Str
+          (*) :: Int -> Int -> Int
+          x = "a" <$> "b" + 1 * 2
+          x
+        |]
+        int
+    -- Type-verified associativity: asymmetric operator types ensure
+    -- only the correct associativity typechecks
+    , assertGeneralType
+        "type-verified: left-assoc chain"
+        [r|
+          infixl 6 +
+          (+) :: Int -> Str -> Int
+          x = 1 + "a" + "b"
+          x
+        |]
+        int
+    , assertGeneralType
+        "type-verified: right-assoc chain"
+        [r|
+          infixr 5 ++
+          (++) :: Str -> Int -> Int
+          x = "a" ++ "b" ++ 1
+          x
+        |]
+        int
+    -- Application operator ($)
+    , assertGeneralType
+        "$ applies function to argument"
+        [r|
+          infixr 0 $
+          ($) a b :: (a -> b) -> a -> b
+          f :: Int -> Str
+          x = f $ 1
+          x
+        |]
+        str
+    , assertGeneralType
+        "nested $ is right-associative (type-verified)"
+        [r|
+          infixr 0 $
+          ($) a b :: (a -> b) -> a -> b
+          f :: Int -> Str
+          g :: Str -> Int
+          x = g $ f $ 1
+          x
+        |]
+        int
+    , assertGeneralType
+        "$ binds looser than + (type-verified)"
+        [r|
+          infixr 0 $
+          infixl 6 +
+          ($) a b :: (a -> b) -> a -> b
+          (+) :: Int -> Int -> Int
+          f :: Int -> Str
+          x = f $ 1 + 2
+          x
+        |]
+        str
+    -- Composition operator (.)
+    , assertGeneralType
+        "composition of two functions"
+        [r|
+          infixr 9 .
+          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
+          g :: Str -> Int
+          f :: Int -> Str
+          x = g . f
+          x
+        |]
+        (fun [int, int])
+    , assertGeneralType
+        "composition chain of three functions"
+        [r|
+          infixr 9 .
+          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
+          h :: Str -> Int
+          g :: Int -> Str
+          f :: Bool -> Int
+          x = h . g . f
+          x
+        |]
+        (fun [bool, int])
+    , assertGeneralType
+        "composition binds tighter than $ (type-verified)"
+        [r|
+          infixr 9 .
+          infixr 0 $
+          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
+          ($) a b :: (a -> b) -> a -> b
+          f :: Int -> Int
+          g :: Int -> Str
+          x = g . f $ 5
+          x
+        |]
+        str
+    -- Position independence of fixity declarations
+    , assertGeneralType
+        "fixity declared after usage"
+        [r|
+          (+) :: Int -> Str -> Int
+          x = 1 + "a"
+          infixl 6 +
+          x
+        |]
+        int
+    , assertGeneralType
+        "fixity and type sig both declared after usage"
+        [r|
+          x = 1 + "a"
+          infixl 6 +
+          (+) :: Int -> Str -> Int
+          x
+        |]
+        int
+    , assertGeneralType
+        "both fixities at end, precedence still works"
+        [r|
+          (+) :: Str -> Int -> Str
+          (*) :: Int -> Int -> Int
+          x = "a" + 1 * 2
+          infixl 6 +
+          infixl 7 *
+          x
+        |]
+        str
+    -- Default fixity is infixl 9
+    , assertGeneralType
+        "undeclared operator defaults to prec 9 (type-verified)"
+        [r|
+          infixl 6 +
+          (+) :: Str -> Int -> Str
+          (*) :: Int -> Int -> Int
+          x = "a" + 1 * 2
+          x
+        |]
+        str
+    , assertGeneralType
+        "undeclared operator defaults to left-associative (type-verified)"
+        [r|
+          (+) :: Int -> Str -> Int
+          x = 1 + "a" + "b"
+          x
+        |]
+        int
+    -- Where-clause bindings with infix operators
+    , assertGeneralType
+        "infix operator in where binding (type-verified)"
+        [r|
+          infixl 6 +
+          (+) :: Int -> Str -> Int
+          x = y where
+            y = 1 + "a"
+          x
+        |]
+        int
+    , assertGeneralType
+        "multiple where bindings with different operators"
+        [r|
+          infixl 6 +
+          infixl 7 *
+          (+) :: Str -> Int -> Str
+          (*) :: Int -> Int -> Int
+          x = (y, z) where
+            y = "hello" + 3
+            z = 2 * 4
+          x
+        |]
+        (tuple [str, int])
+    -- Ambiguity and conflict errors
+    , exprTestBad
+        "non-associative operator chained"
+        [r|
+          infix 6 ~~
+          (~~) :: Int -> Int -> Int
+          x = 1 ~~ 2 ~~ 3
+          x
+        |]
+    , exprTestBad
+        "two non-associative operators at same precedence"
+        [r|
+          infix 6 ~~
+          infix 6 @@
+          (~~) :: Int -> Int -> Int
+          (@@) :: Int -> Int -> Int
+          x = 1 ~~ 2 @@ 3
+          x
+        |]
+    , exprTestBad
+        "left-assoc and right-assoc at same precedence"
+        [r|
+          infixl 6 +
+          infixr 6 ++
+          (+) :: Int -> Int -> Int
+          (++) :: Int -> Int -> Int
+          x = 1 + 2 ++ 3
+          x
+        |]
+    , exprTestBad
+        "conflicting fixity declarations for same operator"
+        [r|
+          infixl 6 +
+          infixr 7 +
+          (+) :: Int -> Int -> Int
+          x = 1 + 2
+          x
+        |]
+    -- Operators in various expression contexts
+    , assertGeneralType
+        "infix in parenthesized function argument"
+        [r|
+          infixl 6 +
+          (+) :: Int -> Int -> Int
+          f :: Int -> Str
+          x = f (1 + 2)
+          x
+        |]
+        str
+    , assertGeneralType
+        "infix in multiple function arguments"
+        [r|
+          infixl 6 +
+          infixl 7 *
+          (+) :: Int -> Int -> Int
+          (*) :: Int -> Int -> Int
+          f :: Int -> Int -> Str
+          x = f (1 + 2) (3 * 4)
+          x
+        |]
+        str
+    , assertGeneralType
+        "infix expressions as applied functions"
+        [r|
+          infixl 6 +
+          infixl 7 *
+          infixr 9 .
+          (+) :: Int -> Int -> Int
+          (*) :: Int -> Int -> Int
+          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
+          foo x = ((+) 1 . (*) 2) x
+          foo
+        |]
+        (fun [int, int])
+    , assertGeneralType
+        "infix in lambda body with asymmetric types"
+        [r|
+          infixl 6 +
+          (+) :: Int -> Str -> Int
+          f = \x y -> x + y
+          f
+        |]
+        (fun [int, str, int])
+    , assertGeneralType
+        "infix across tuple elements with different result types"
+        [r|
+          infixl 6 +
+          infixl 7 *
+          (+) :: Int -> Int -> Str
+          (*) :: Int -> Int -> Int
+          x = (1 + 2, 3 * 4)
+          x
+        |]
+        (tuple [str, int])
+    , assertGeneralType
+        "mixed infix operators across list elements"
+        [r|
+          infixl 6 +
+          infixl 7 *
+          (+) :: Int -> Int -> Int
+          (*) :: Int -> Int -> Int
+          xs = [1 + 2, 3 * 4, 5 + 6 * 7]
+          xs
+        |]
+        (lst int)
     ]

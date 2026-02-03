@@ -41,7 +41,7 @@ bar size = (.flooz fpy, .things fcpp, .size fr) where
       , size = size
       }
 
-    fcpp = addFloozPy 42
+    fcpp = addFloozCpp 42
       { flooz = []
       , things = ["b"]
       , size = size
