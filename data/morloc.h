@@ -1536,7 +1536,7 @@ absptr_t rel2abs(relptr_t ptr, ERRMSG) {
     for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
         shm_t* shm = TRY(shopen, i);
         if (shm == NULL) {
-            RAISE("Failed to find shared volume %zu while searching for relative pointer %zu in shm at '%s'", i, ptr, shm->volume_name)
+            RAISE("Failed to find shared volume %zu while searching for relative pointer %zu", i, ptr)
         }
         if ((size_t)ptr < shm->volume_size) {
             char* shm_start = (char*)shm;
