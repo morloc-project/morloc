@@ -4526,6 +4526,9 @@ bool packet_is_remote_call(const uint8_t* packet, ERRMSG){
 
 
 size_t morloc_packet_size_from_header(const morloc_packet_header_t* header){
+    if(header == NULL){
+      return 0;
+    }
     return sizeof(morloc_packet_header_t) + header->offset + header->length;
 }
 
