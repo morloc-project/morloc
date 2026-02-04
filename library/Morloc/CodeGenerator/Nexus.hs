@@ -434,7 +434,7 @@ dispatchCode config fdata cdata = (dispatchers, dispatchBlock)
       vsep
         [ [idoc|morloc_socket_t #{varName} = { 0 };|]
         , [idoc|#{varName}.lang = strdup("#{pretty $ socketLang socket}");|]
-        , [idoc|#{varName}.syscmd = (char**)calloc(5, sizeof(char*));|]
+        , [idoc|#{varName}.syscmd = (char**)calloc(#{syscmdLen}, sizeof(char*));|]
         , [idoc|#{execArgsDoc}|]
         , [idoc|// Use a fixed buffer, then strdup to allocate the final string|]
         , [idoc|snprintf(buffer, 256, "%s/#{socketBasename}", tmpdir);|]
@@ -445,6 +445,8 @@ dispatchCode config fdata cdata = (dispatchers, dispatchBlock)
         , [idoc|#{varName}.socket_filename = strdup(buffer);|]
         ]
       where
+        syscmdLen = pretty $ 4 + length execArgs
+
         varName = (pretty . ML.makeExtension $ socketLang socket) <> "_socket"
 
         socketBasename = "pipe-" <> pretty (ML.showLangName (socketLang socket))
