@@ -6067,9 +6067,10 @@ static uint8_t* parse_cli_data_argument_singular(uint8_t* dest, char* arg, const
 
         // Try to parse as JSON
         dest = read_json_with_schema(dest, data, schema, &CHILD_ERRMSG);
-        free(data);
 
         RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "Failed to read json argument: %s", CHILD_ERRMSG)
+
+        free(data);
 
         return dest;
     }
