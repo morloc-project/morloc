@@ -37,12 +37,13 @@ restructure s = do
   MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes s)) + 1
 
   checkForSelfRecursion s -- currently, do no not allow type self-recursion
-    >>= resolveHoles
     >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
+    >>= handleBinops -- first resolve binary operators
+    >>= resolveHoles -- then holes
       |>> handleTypeDeclarations
-    >>= handleBinops
     >>= doM collectTags
     >>= doM collectTypes
+    >>= (\x -> collectUniversalTypes >> return x)
     >>= doM collectSources
 
 doM :: (Monad m) => (a -> m ()) -> a -> m a
@@ -101,8 +102,8 @@ maybeM _ (Just x) = return x
 maybeM e Nothing = MM.throwError e
 
 resolveHoles ::
-  DAG MVar Import ExprI ->
-  MorlocMonad (DAG MVar Import ExprI)
+  DAG MVar [AliasedSymbol] ExprI ->
+  MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
 resolveHoles = DAG.mapNodeM unhole
   where
     unhole :: ExprI -> MorlocMonad ExprI
@@ -129,6 +130,7 @@ resolveHoles = DAG.mapNodeM unhole
     unhole (ExprI i (HolE)) = return HolE |>> ExprI i
     unhole (ExprI i (LamE vs e)) = LamE vs <$> unhole e |>> ExprI i
     unhole (ExprI i (AnnE e t)) = AnnE <$> unhole e <*> pure t |>> ExprI i
+    unhole (ExprI _ (BopE _ _ _ _)) = error "Bop should have been resolved"
     unhole e = return e
 
     unholeContainer :: ExprI -> MorlocMonad ExprI
@@ -345,14 +347,14 @@ handleBinops d0 = do
     filterTerms m ss =
       let symMap = Map.fromList [(k, v) | (AliasedTerm k v) <- ss]
        in Map.fromList . catMaybes $ [Map.lookup k symMap |>> (, v) | (k, v) <- Map.toList m]
- 
+
     mergeFixityMaps :: Eq a => [Map.Map EVar a] -> MorlocMonad (Map.Map EVar a)
-    mergeFixityMaps [] = return Map.empty  
+    mergeFixityMaps [] = return Map.empty
     mergeFixityMaps [e1] = return e1
     mergeFixityMaps (e1:e2:es) = do
       e' <- foldlM strictInsert e1 (Map.toList e2)
       mergeFixityMaps (e':es)
-    
+
     strictInsert :: Eq v => Map.Map EVar v -> (EVar, v) -> MorlocMonad (Map.Map EVar v)
     strictInsert m (k, v) = case Map.lookup k m of
       Nothing -> return $ Map.insert k v m
@@ -365,7 +367,7 @@ handleBinops d0 = do
       f e@(ExprI _ BopE{}) = resolveBinop m0 e >>= f
       f (ExprI i (ModE m es)) = ModE m <$> mapM f es |>> ExprI i
       f (ExprI i (IstE cls ts es)) = IstE cls ts <$> mapM f es |>> ExprI i
-      f (ExprI i (AssE v e es)) = AssE v <$> f e <*> mapM f es |>> ExprI i 
+      f (ExprI i (AssE v e es)) = AssE v <$> f e <*> mapM f es |>> ExprI i
       f (ExprI i (LstE es)) = LstE <$> mapM f es |>> ExprI i
       f (ExprI i (TupE es)) = TupE <$> mapM f es |>> ExprI i
       f (ExprI i (NamE rs)) = do
@@ -443,22 +445,13 @@ collectTags fullDag = do
 
 type GCMap = (Scope, Map.Map Lang Scope)
 
+-- | Add the following fields to state:
+--   * stateGeneralTypedefs           :: GMap Int MVar Scope
+--   * stateConcreteTypedefs          :: GMap Int MVar (Map Lang Scope)
 collectTypes :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTypes fullDag = do
-  let typeDAG = DAG.mapEdge (\xs -> [(x, y) | AliasedType x y <- xs]) fullDag
-  _ <- DAG.synthesizeNodes formTypes typeDAG
-
-  universalGeneralScope <- getUniversalGeneralScope
-  universalConcreteScope <- getUniversalConcreteScope universalGeneralScope
-
-  s <- MM.get
-  MM.put
-    ( s
-        { stateUniversalGeneralTypedefs = universalGeneralScope
-        , stateUniversalConcreteTypedefs = universalConcreteScope
-        }
-    )
-
+  let typeDag = DAG.mapEdge (\xs -> [(x, y) | AliasedType x y <- xs]) fullDag
+  _ <- DAG.synthesizeNodes formTypes typeDag
   return ()
   where
     formTypes ::
@@ -471,6 +464,7 @@ collectTypes fullDag = do
       ] ->
       MorlocMonad GCMap
     formTypes m e0 childImports = do
+
       let (generalTypemap, concreteTypemapsIncomplete) = foldl inherit (AST.findTypedefs e0) childImports
 
       -- Here we are creating links from every indexed term in the module to the module
@@ -478,11 +472,7 @@ collectTypes fullDag = do
       -- this will be the only way to access module-specific info.
       let indices = AST.getIndices e0
 
-      -- This step links the general entries from records to their abbreviated
-      -- concrete cousins. For example:
-      --   record (Person a) = Person {name :: Str, info a}
-      --   record Py => Person a = "dict"
-      -- This syntax avoids the need to duplicate the entire entry
+      -- link concrete records to their full general forms
       let concreteTypemaps = Map.map (completeRecords generalTypemap) concreteTypemapsIncomplete
 
       s <- MM.get
@@ -503,6 +493,31 @@ collectTypes fullDag = do
           , Map.unionWith (Map.unionWith mergeEntries) cmap' thisCmap
           )
 
+
+-- | collect type definitions globally
+--   define:
+--     * stateUniversalGeneralTypedefs
+--     * stateUniversalConcreteTypedefs
+collectUniversalTypes :: MorlocMonad ()
+collectUniversalTypes = do
+
+  universalGeneralScope <- getUniversalGeneralScope
+  universalConcreteScope <- getUniversalConcreteScope universalGeneralScope
+
+  s <- MM.get
+  MM.put
+    ( s
+        { stateUniversalGeneralTypedefs = universalGeneralScope
+        , stateUniversalConcreteTypedefs = universalConcreteScope
+        }
+    )
+  where
+
+    getUniversalGeneralScope :: MorlocMonad Scope
+    getUniversalGeneralScope = do
+      (GMap _ (Map.elems -> scopes)) <- MM.gets stateGeneralTypedefs
+      return $ Map.unionsWith mergeEntries scopes
+
     getUniversalConcreteScope :: Scope -> MorlocMonad (Map.Map Lang Scope)
     getUniversalConcreteScope gscope = do
       (GMap _ modMaps) <- MM.gets stateConcreteTypedefs
@@ -518,29 +533,33 @@ collectTypes fullDag = do
           let langMaps' = map (Map.map (completeRecords gscope)) langMaps
           return . Map.unionsWith mergeEntries . mapMaybe (Map.lookup lang) $ langMaps'
 
-    completeRecords :: Scope -> Scope -> Scope
-    completeRecords gscope cscope = Map.mapWithKey (completeRecord gscope) cscope
 
-    completeRecord ::
-      Scope ->
-      TVar ->
-      [([Either TVar TypeU], TypeU, ArgDoc, Bool)] ->
-      [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
-    completeRecord gscope v xs = case Map.lookup v gscope of
-      (Just ys) -> map (completeValue [(vs, t) | (vs, t, _, _) <- ys]) xs
-      Nothing -> xs
+-- | links the general entries from records to their abbreviated concrete cousins.
+-- For example:
+--   record (Person a) = Person {name :: Str, info a}
+--   record Py => Person a = "dict"
+-- This syntax avoids the need to duplicate the entire entry
+completeRecords :: Scope -> Scope -> Scope
+completeRecords gscope = Map.mapWithKey (completeRecord gscope)
+  where
+  completeRecord ::
+    Scope ->
+    TVar ->
+    [([Either TVar TypeU], TypeU, ArgDoc, Bool)] ->
+    [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
+  completeRecord g v xs = case Map.lookup v g of
+    (Just ys) -> map (completeValue [(vs, t) | (vs, t, _, _) <- ys]) xs
+    Nothing -> xs
 
-    completeValue ::
-      [([Either TVar TypeU], TypeU)] ->
-      ([Either TVar TypeU], TypeU, ArgDoc, Bool) ->
-      ([Either TVar TypeU], TypeU, ArgDoc, Bool)
-    completeValue ((vs, NamU _ _ ps rs) : _) (_, NamU o v _ [], d, terminal) = (vs, NamU o v ps rs, d, terminal)
-    completeValue _ x = x
+  completeValue ::
+    [([Either TVar TypeU], TypeU)] ->
+    ([Either TVar TypeU], TypeU, ArgDoc, Bool) ->
+    ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+  completeValue ((vs, NamU _ _ ps rs) : _) (_, NamU o v _ [], d, terminal) = (vs, NamU o v ps rs, d, terminal)
+  completeValue _ x = x
 
-    getUniversalGeneralScope :: MorlocMonad Scope
-    getUniversalGeneralScope = do
-      (GMap _ (Map.elems -> scopes)) <- MM.gets stateGeneralTypedefs
-      return $ Map.unionsWith mergeEntries scopes
+
+
 
 -- merge type functions, names of generics do not matter
 mergeEntries ::
