@@ -451,8 +451,10 @@ type GCMap = (Scope, Map.Map Lang Scope)
 collectTypes :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTypes fullDag = do
   let typeDag = DAG.mapEdge (\xs -> [(x, y) | AliasedType x y <- xs]) fullDag
-  _ <- DAG.synthesizeNodes formTypes typeDag
-  return ()
+  result <- DAG.synthesizeNodes formTypes typeDag
+  case result of
+    Nothing -> MM.throwError (CyclicDependency "stalled in collectTypes")
+    Just _ -> return ()
   where
     formTypes ::
       MVar ->
@@ -521,7 +523,7 @@ collectUniversalTypes = do
     getUniversalConcreteScope :: Scope -> MorlocMonad (Map.Map Lang Scope)
     getUniversalConcreteScope gscope = do
       (GMap _ modMaps) <- MM.gets stateConcreteTypedefs
-      let langs = concatMap Map.keys . Map.elems $ modMaps
+      let langs = unique $ concatMap Map.keys . Map.elems $ modMaps
       scopes <- mapM getLangScope langs
       return . Map.fromList $ zip langs scopes
       where
@@ -601,24 +603,16 @@ filterAndSubstitute links typemap =
 
 collectSources :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectSources fullDag = do
-  let typeDag = DAG.mapEdge (\xs -> [(x, y) | AliasedType x y <- xs]) fullDag
-  _ <- DAG.synthesizeNodes linkSources typeDag
+  _ <- DAG.mapNodeWithKeyM linkSources fullDag
   return ()
   where
-    linkSources :: MVar -> ExprI -> a -> MorlocMonad ()
-    linkSources m e0 _ = do
-      -- collect and store sources (should this be done here?)
+    linkSources :: MVar -> ExprI -> MorlocMonad ExprI
+    linkSources m e0 = do
       let objSources = AST.findSources e0
-
-      -- Here we are creating links from every indexed term in the module to the module
-      -- sources and aliases. When the module abstractions are factored out later,
-      -- this will be the only way to access module-specific info.
       let indices = AST.getIndices e0
-
       s <- MM.get
       MM.put (s {stateSources = GMap.insertManyWith (<>) indices m objSources (stateSources s)})
-
-      return ()
+      return e0
 
 -- Rename a variable. For example:
 --   import maps (Map as HashMap, foo, bar)
@@ -633,9 +627,9 @@ rename sourceName localAlias = f
     f (VarU v)
       | v == sourceName = VarU localAlias
       | otherwise = VarU v
-    f (ExistU v ts rs)
-      | v == sourceName = ExistU localAlias ts rs
-      | otherwise = ExistU v ts rs
+    f (ExistU v (ps, o1) (rs, o2)) =
+      let v' = if v == sourceName then localAlias else v
+       in ExistU v' (map f ps, o1) (map (second f) rs, o2)
     f (ForallU v t) = ForallU v (f t)
     f (FunU ts t) = FunU (map f ts) (f t)
     f (AppU t ts) = AppU (f t) (map f ts)
