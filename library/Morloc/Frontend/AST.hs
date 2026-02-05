@@ -134,6 +134,7 @@ checkExprI f e@(ExprI _ (AppE e' es)) = f e >> checkExprI f e' >> mapM_ (checkEx
 checkExprI f e@(ExprI _ (LstE es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (TupE es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (NamE rs)) = f e >> mapM_ (checkExprI f . snd) rs
+checkExprI f e@(ExprI _ (BopE e1 _ _ e2)) = f e >> mapM_ (checkExprI f) [e1, e2]
 checkExprI f e = f e
 
 maxIndex :: ExprI -> Int
@@ -148,6 +149,7 @@ maxIndex (ExprI i (TupE es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (NamE rs)) = maximum (i : map (maxIndex . snd) rs)
 maxIndex (ExprI i (ExpE ExportAll)) = i
 maxIndex (ExprI i (ExpE (ExportMany ss))) = maximum (i : map fst (Set.toList ss))
+maxIndex (ExprI i (BopE e1 j _ e2)) = maximum [i, j, maxIndex e1, maxIndex e2]
 maxIndex (ExprI i _) = i
 
 getIndices :: ExprI -> [Int]
@@ -162,4 +164,5 @@ getIndices (ExprI i (TupE es)) = i : concatMap getIndices es
 getIndices (ExprI i (NamE rs)) = i : concatMap (getIndices . snd) rs
 getIndices (ExprI i (ExpE ExportAll)) = [i]
 getIndices (ExprI i (ExpE (ExportMany ss))) = i : [j | (j, _) <- Set.toList ss]
+getIndices (ExprI i (BopE e1 j _ e2)) = [i, j] <> getIndices e1 <> getIndices e2
 getIndices (ExprI i _) = [i]
