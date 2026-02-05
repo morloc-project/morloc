@@ -20,6 +20,7 @@ import qualified Morloc.CodeGenerator.Nexus as Nexus
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
+import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
@@ -196,24 +197,12 @@ linkConfigIndex midx fidx = do
       MM.sayVVV $ "Copy manifold config from" <+> pretty fidx <+> "to" <+> pretty midx
       MM.put (s {stateManifoldConfig = Map.insert midx mconfig (stateManifoldConfig s)})
 
--- express e@(AnnoS fi@(Idx midx (FunT inputs _)) (Idx cidx lang, _) exe) = do
---   MM.sayVVV $ "express ExeS (midx=" <> pretty midx <> "," <+> "cidx=" <> pretty cidx <> "):"
---   ids <- MM.takeFromCounter (length inputs)
---   let lambdaVals = fromJust $ safeZipWith PolyBndVar (map (C . Idx cidx) inputs) ids
---       headExpr = PolyHead lang midx [Arg i None | i <- ids]
---   exeExpr <- case exe of
---     (ExeS (SrcCall src)) -> return . PolyReturn $
---         PolyApp (PolyExe fi (SrcCallP src)) lambdaVals
---     (ExeS (PatCall pat)) -> return . PolyReturn $
---         PolyApp (PolyExe fi (PatCallP pat)) lambdaVals
---     _ -> do
---       fe <- expressPolyExprWrap lang fi e
---       return
---         . PolyLet midx fe
---         . PolyReturn
---         $ PolyApp (PolyLetVar fi midx) lambdaVals
---
---   return (headExpr exeExpr)
+propagateScope :: Int -> Int -> MorlocMonad ()
+propagateScope calleeIdx appIdx = do
+  s <- MM.get
+  case GMap.yIsX calleeIdx appIdx (stateConcreteTypedefs s) of
+    (Just gmap') -> MM.put $ s { stateConcreteTypedefs = gmap' }
+    Nothing -> return ()
 
 -- Conventions:
 --   midx: The general index, used for identifying manifolds since this index is
@@ -359,7 +348,7 @@ expressPolyExpr
               _
               (Idx _ appLang, appArgs)
               ( AppS
-                  funExpr@(AnnoS (Idx _ (FunT callInputTypes _)) (Idx _ callLang, _) _)
+                  funExpr@(AnnoS (Idx gidxCall (FunT callInputTypes _)) (Idx _ callLang, _) _)
                   xs
                 )
             )
@@ -375,6 +364,7 @@ expressPolyExpr
     --                                                           |             |           |
     ----------------------------------------------------------------------------------------
     | isLocal = do
+        propagateScope gidxCall midx
         MM.sayVVV "case #4"
         let nContextArgs = length appArgs - length vs
             contextArgs = map unvalue (take nContextArgs appArgs)
@@ -427,6 +417,8 @@ expressPolyExpr
         --    (appArgs + letArgs)
         --
         -- 6. Fold let statements over local manifold
+
+        propagateScope gidxCall midx
 
         -- evaluate arguments and derive any required let bindings
         xsInfo <- mapM partialExpress xs
@@ -593,7 +585,7 @@ expressPolyExpr
   ( AnnoS
       (Idx midx _)
       (_, args)
-      (AppS f@(AnnoS (Idx _ (FunT inputs _)) (Idx cidxCall callLang, _) _) xs)
+      (AppS f@(AnnoS (Idx gidxCall (FunT inputs _)) (Idx cidxCall callLang, _) _) xs)
     )
     ----------------------------------------------------------------------------------------
     -- #1 cis applied                                            | contextArgs | boundArgs |
@@ -605,6 +597,7 @@ expressPolyExpr
     --          g m2(x, y, z)                                    |             |           |
     ----------------------------------------------------------------------------------------
     | isLocal = do
+        propagateScope gidxCall midx
         -- There should be an equal number of input types and input arguments
         -- That is, the function should be fully applied. If it were partially
         -- applied, the lambda case would have been entered previously instead.
@@ -632,6 +625,7 @@ expressPolyExpr
     --                                                           |             |           |
     ----------------------------------------------------------------------------------------
     | not isLocal = do
+        propagateScope gidxCall midx
         let idxInputTypes = zipWith mkIdx xs inputs
         mayXs <- safeZipWithM (expressPolyExprWrap callLang) idxInputTypes xs
         func <- expressPolyApp parentLang f (fromJust mayXs)

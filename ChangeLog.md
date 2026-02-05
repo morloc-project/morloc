@@ -1,3 +1,17 @@
+0.60.0 [2026-02-xx]
+-------------------
+ * add infix operator support
+
+Testing
+ * Generate many new tests with Claude
+
+Cleanup
+ * add formatting with fourmulo
+ * add metric and benchmarking
+
+Bug fixes
+ * Fixed indexing bug in Generator.hs
+
 0.59.0 [2026-01-23]
 -------------------
  * allow functions in data structures
