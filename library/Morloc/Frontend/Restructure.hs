@@ -639,4 +639,6 @@ rename sourceName localAlias = f
     f (ForallU v t) = ForallU v (f t)
     f (FunU ts t) = FunU (map f ts) (f t)
     f (AppU t ts) = AppU (f t) (map f ts)
-    f (NamU o v ts rs) = NamU o v (map f ts) (map (second f) rs)
+    f (NamU o v ts rs) =
+      let v' = if v == sourceName then localAlias else v
+      in NamU o v' (map f ts) (map (second f) rs)
