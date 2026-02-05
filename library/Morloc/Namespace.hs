@@ -1625,15 +1625,14 @@ instance Pretty Expr where
       <+> viaShow lang
       <> maybe "" (\f -> "from" <+> pretty f) file'
         <+> "where\n"
-      <> ( indent
-            2
-            ( vsep
-                [ "--' srcname: " <> pretty srcname
-                , "--' rsize: " <> encloseSep "" "" " " (map pretty rsizes)
-                , pretty alias
-                ]
-            )
-         )
+      <> indent
+           2
+           ( vsep
+               [ "--' srcname: " <> pretty srcname
+               , "--' rsize: " <> encloseSep "" "" " " (map pretty rsizes)
+               , pretty alias
+               ]
+           )
   pretty (SigE (Signature v _ e)) =
     pretty v <+> "::" <+> eprop' <> etype' <> econs'
     where
@@ -1665,7 +1664,7 @@ instance (Foldable f) => Pretty (AnnoS a f b) where
 instance (Foldable f) => Pretty (ExprS a f b) where
   pretty (AppS e es) = "(AppS" <+> list (map pretty (e : es)) <> ")"
   pretty (VarS v res) = "(VarS" <+> pretty v <+> "=" <+> list (map pretty (toList res)) <> ")"
-  pretty (LamS vs e) = "(LamS" <+> list (map pretty vs) <+> "->" <+> (pretty e) <> ")"
+  pretty (LamS vs e) = "(LamS" <+> list (map pretty vs) <+> "->" <+> pretty e <> ")"
   pretty (LstS es) = "(LstS" <+> list (map pretty es) <> ")"
   pretty (TupS es) = "(TupS" <+> list (map pretty es) <> ")"
   pretty (NamS rs) = "(NamS" <+> list [pretty k <> "=" <> pretty v | (k, v) <- rs] <> ")"
