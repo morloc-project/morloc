@@ -36,6 +36,8 @@ main = do
 
         -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
+      , golden "unit-1" "unit-1"
+
       , golden "infix" "infix"
       , golden "infix-import" "infix-import"
       , golden "infix-generic" "infix-generic"
@@ -217,6 +219,7 @@ main = do
       , golden "records-complex-1" "records-complex-1"
       , golden "records-complex-2" "records-complex-2"
       , golden "records-nested" "records-nested"
+      , golden "records-alias" "records-alias"
       , golden "selection-1" "selection-1"
       , golden "selection-2" "selection-2"
       , golden "selection-3" "selection-3"
