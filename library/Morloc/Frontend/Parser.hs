@@ -385,7 +385,7 @@ pAssE = try pFunctionAssE <|> pDataAssE
     -- expansion later.
     pDataAssE :: Parser ExprI
     pDataAssE = do
-      v <- pEVar
+      v <- pEVarOrOp
       _ <- symbol "="
       e <- pExpr
       subExpressions <- option [] $ reserved "where" >> alignInset whereTerm
@@ -393,7 +393,7 @@ pAssE = try pFunctionAssE <|> pDataAssE
 
     pFunctionAssE :: Parser ExprI
     pFunctionAssE = do
-      v <- pEVar
+      v <- pEVarOrOp
       args <- many1 pEVar
       _ <- symbol "="
       e <- pExpr
@@ -417,7 +417,7 @@ pSignature :: Parser Signature
 pSignature = do
   doc <- parseArgDocVars
   label' <- optional pTag
-  v <- freenameL <|> (parenOperator |>> unEVar)
+  v <- pEVarOrOp
   vs <- many freenameL |>> map TV
   _ <- op "::"
   props <- option [] (try pPropertyList)
@@ -436,7 +436,7 @@ pSignature = do
           , econs = Set.fromList constraints
           , edocs = cmdDoc
           }
-      sig = Signature (EV v) (Label <$> label') et
+      sig = Signature v (Label <$> label') et
 
   return sig
   where
@@ -621,7 +621,7 @@ pInfixExpr = do
     (Just binop) -> do
       rhs <- pExpr
       i <- exprId
-      exprI $ BopE lhs i binop rhs 
+      exprI $ BopE lhs i binop rhs
     Nothing -> return lhs
 
 -- | Parse an infix operator (not in parens)
@@ -638,12 +638,13 @@ pOperand =
     <|> try pLogE
     <|> try pStrE
     <|> try (parens pExpr) -- Full expressions in parens
+    <|> try (parenOperator |>> VarE defaultValue >>= exprI)
     <|> try pTupE
     <|> try pLstE
     <|> try pNamE
     <|> try pSetter
     <|> try pGetter
-    <|> try pVar
+    <|>     pVar
     <?> "operand"
 
 pApp :: Parser ExprI
@@ -653,26 +654,28 @@ pApp = do
   exprI $ AppE f es
   where
     parseFun =
-      pVar
+            try pVar
         <|> try pTupE -- only valid if wholy
         <|> try pLstE --  /
         <|> try pNamE -- /
         <|> try pSetter
         <|> try pGetter
         <|> try (parens pExpr)
+        <|>     (parenOperator |>> VarE defaultValue >>= exprI)
     parseArg =
-      try pUni
+            try pUni
         <|> try pTupE
         <|> try (parens pExpr)
+        <|> try (parenOperator |>> VarE defaultValue >>= exprI)
         <|> try pSetter
         <|> try pGetter
         <|> try pStrE
         <|> try pLogE
         <|> try pNumE
+        <|> try pLstE
+        <|> try pNamE
+        <|> try pVar
         <|> pHolE
-        <|> pLstE
-        <|> pNamE
-        <|> pVar
 
 pLogE :: Parser ExprI
 pLogE = do
@@ -769,8 +772,11 @@ pVar = do
 pHolE :: Parser ExprI
 pHolE = hole >> exprI HolE
 
+pEVarOrOp :: Parser EVar
+pEVarOrOp = try parenOperator <|> pEVar
+
 pEVar :: Parser EVar
-pEVar = try parenOperator <|> fmap EV freenameL
+pEVar = fmap EV freenameL
 
 pTypeGen :: Parser TypeU
 pTypeGen = do

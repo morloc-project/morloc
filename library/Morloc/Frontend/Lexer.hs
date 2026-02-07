@@ -428,6 +428,12 @@ reservedWords =
   , "infix"
   ]
 
+reservedOperators :: [Text]
+reservedOperators =
+  [ "="
+  , ":"
+  ]
+
 operatorChars :: String
 operatorChars = ":!$%&*+./<=>?@\\^|-~#"
 
