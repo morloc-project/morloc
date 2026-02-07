@@ -382,13 +382,17 @@ number = lexeme $ do
       _ <- string "0b" <|> string "0B"
       fmap Left L.binary
 
-    -- Signed floating point
-    signedFloat :: Parser Double
-    signedFloat = L.signed sc L.float
+    -- No space consumer - signs must be directly attached to numbers
+    noSpace :: Parser ()
+    noSpace = return ()
 
-    -- Signed decimal integer
+    -- Signed floating point (no space between sign and number)
+    signedFloat :: Parser Double
+    signedFloat = L.signed noSpace L.float
+
+    -- Signed decimal integer (no space between sign and number)
     signedDecimal :: Parser Integer
-    signedDecimal = L.signed sc L.decimal
+    signedDecimal = L.signed noSpace L.decimal
 
 surround :: Parser l -> Parser r -> Parser a -> Parser a
 surround l r v = do
@@ -446,7 +450,9 @@ operatorName = (lexeme . try) $ do
   firstChar <- oneOf operatorChars
   restChars <- many (oneOf operatorChars)
   let opName = MT.pack (firstChar : restChars)
-  return opName
+  if opName `elem` reservedOperators
+    then failure Nothing Set.empty -- TODO: error message
+    else return opName
 
 -- | Parse an operator in parentheses (for use as a variable)
 -- Example: (+), (*), (<$>)
