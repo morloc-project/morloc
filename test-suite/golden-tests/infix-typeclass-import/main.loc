@@ -1,0 +1,21 @@
+module main (test_comp, test_min, test_not_equal)
+
+import numops (Ord, (<), (>), (>=), min)
+
+type Py => Int = "int"
+type Py => Bool = "bool"
+
+instance Ord Int where
+  source Py from "foo.py" ("le" as (<=))
+
+-- Test imported infix operators
+test_comp :: Bool
+test_comp = 5 < 10
+
+-- Test method using infix operators
+test_min :: Int
+test_min = min 42 17
+
+-- Test combined expression
+test_not_equal :: Bool
+test_not_equal = 3 <= 5

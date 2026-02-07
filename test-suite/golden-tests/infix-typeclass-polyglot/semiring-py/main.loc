@@ -1,0 +1,10 @@
+module semiring-py (*)
+
+import semiring (Semiring)
+
+type Py => Int = "int"
+
+instance Semiring Int where
+  source Py from "ops.py" ("add" as (<+>), "mul" as (<*>))
+  zero = 0
+  one = 1

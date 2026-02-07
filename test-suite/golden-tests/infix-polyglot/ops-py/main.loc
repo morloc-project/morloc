@@ -1,0 +1,7 @@
+module ops-py (*)
+
+import ops
+
+type Py => Int = "int"
+
+source Py from "ops.py" ("add" as (<+>), "mul" as (<*>))

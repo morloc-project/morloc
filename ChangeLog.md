@@ -11,6 +11,8 @@ Cleanup
 
 Bug fixes
  * Fixed indexing bug in Generator.hs
+ * Fix missing space in git module cp
+ * Make missing folders in install path
 
 0.59.0 [2026-01-23]
 -------------------

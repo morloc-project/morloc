@@ -1,0 +1,32 @@
+module numops (Ord, (<), (>), (>=), min)
+
+type Py => Bool = "bool"
+
+class Ord a where
+  (<=) a :: a -> a -> Bool
+
+infixl 4 <
+infixl 4 >
+infixl 4 <=
+infixl 4 >=
+
+source Py from "ops.py"
+  ( "morloc_not" as not
+  , "morloc_and" as (&&)
+  , "morloc_if" as ifelse
+  )
+not :: Bool -> Bool
+(&&) :: Bool -> Bool -> Bool
+ifelse a :: Bool -> a -> a -> a
+
+(<) a :: a -> a -> Bool
+(<) x y = (x <= y) && not (y <= x)
+
+(>) a :: a -> a -> Bool
+(>) x y = y < x
+
+(>=) a :: a -> a -> Bool
+(>=) x y = y <= x
+
+min a :: a -> a -> a
+min x y = ifelse (x < y) x y

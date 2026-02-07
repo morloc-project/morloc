@@ -1,0 +1,32 @@
+module main (test_add, test_mul, test_expr, test_negate)
+
+type Py => Int = "int"
+
+-- Typeclass with infix operators
+class Num a where
+  zero a :: a
+  negate a :: a -> a
+  (+) a :: a -> a -> a
+  (*) a :: a -> a -> a
+
+infixl 6 +
+infixl 7 *
+
+instance Num Int where
+  source Py from "foo.py" ("add" as (+), "mul" as (*), "neg" as negate)
+  zero = 0
+
+-- Test basic infix usage
+test_add :: Int
+test_add = 5 + 3
+
+test_mul :: Int
+test_mul = 4 * 7
+
+-- Test precedence: should be 4 * 7 + 3 = 31
+test_expr :: Int
+test_expr = 4 * 7 + 3
+
+-- Test prefix method
+test_negate :: Int
+test_negate = negate 42

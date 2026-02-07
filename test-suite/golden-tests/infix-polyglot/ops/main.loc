@@ -1,0 +1,8 @@
+module ops (*)
+
+-- Language-agnostic operator signatures and fixity declarations
+(<+>) :: Int -> Int -> Int
+(<*>) :: Int -> Int -> Int
+
+infixl 6 <+>
+infixl 7 <*>

@@ -1,0 +1,23 @@
+module main (test_sum_py, test_sum_cpp, test_product_py, test_chain_py)
+
+import semiring-py (Semiring)
+import semiring-cpp (Semiring)
+
+type Py => Int = "int"
+type Cpp => Int = "int"
+
+-- Python tests
+test_sum_py :: Int
+test_sum_py = 10 <+> 5
+
+test_product_py :: Int
+test_product_py = 6 <*> 7
+
+-- Test precedence: <*> (infixl 7) > <+> (infixl 6)
+-- Should be: 2 <+> (3 <*> 4) = 2 + 12 = 14
+test_chain_py :: Int
+test_chain_py = 2 <+> 3 <*> 4
+
+-- C++ test
+test_sum_cpp :: Int
+test_sum_cpp = 100 <+> 23

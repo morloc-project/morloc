@@ -1,0 +1,11 @@
+module semiring (Semiring)
+
+-- Semiring typeclass with additive and multiplicative operators
+class Semiring a where
+  zero a :: a
+  one a :: a
+  (<+>) a :: a -> a -> a  -- additive operation
+  (<*>) a :: a -> a -> a  -- multiplicative operation
+
+infixl 6 <+>
+infixl 7 <*>
