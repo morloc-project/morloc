@@ -40,9 +40,6 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import Morloc.Namespace
 import qualified Morloc.System as MS
-
--- needed for github retrieval
-
 import Data.Aeson
 import System.Directory
 import System.Process (callCommand)
@@ -153,7 +150,7 @@ getModulePaths ::
 -- --  2. $MORLOC_LIB/src/bif/buf/main.loc
 getModulePaths lib plane (Nothing, _) (splitModuleName -> namePath) = map MS.joinPath paths
   where
-    -- either search the working directory for a life like "math.loc" or look
+    -- either search the working directory for a fife like "math.loc" or look
     -- for a folder named after the module with with a "main.loc" script
     localPaths =
       [ init namePath <> [last namePath <> ".loc"]
@@ -720,6 +717,9 @@ installLocal overwrite libpath maySelector modulePath = do
   let gitDir = sourceDir </> ".git"
   isGitRepo <- liftIO $ doesDirectoryExist gitDir
 
+  -- create the library path if it is missing
+  liftIO $ createDirectoryIfMissing True libpath
+
   if isGitRepo
     then installLocalGitRepo sourceDir targetDir (fromMaybe LatestDefaultBranch maySelector)
     else installLocalDirectory sourceDir targetDir
@@ -752,7 +752,7 @@ installLocalGitRepo sourceDir targetDir selector = do
 
 cpDir :: FilePath -> FilePath -> MorlocMonad ()
 cpDir fromDir toDir = do
-  let cmd = "cp -r " <> fromDir <> toDir
+  let cmd = "cp -r " <> fromDir <> " " <> toDir
   MM.sayVVV $ pretty cmd
   liftIO $ callCommand cmd
 
