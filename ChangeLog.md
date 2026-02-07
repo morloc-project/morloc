@@ -1,18 +1,24 @@
-0.60.0 [2026-02-xx]
+0.60.0 [2026-02-07]
 -------------------
  * add infix operator support
 
 Testing
  * Generate many new tests with Claude
+ * Extensive testing of infix operators and module inheritance
 
 Cleanup
  * add formatting with fourmulo
  * add metric and benchmarking
 
 Bug fixes
+ * Fix several memory issues in morloc.h and lang bindings
  * Fixed indexing bug in Generator.hs
  * Fix missing space in git module cp
  * Make missing folders in install path
+ * Fix `morloc install` deletion of mod folder when install has trailing '/' 
+
+Claude memory
+ * Added claude memory files
 
 0.59.0 [2026-01-23]
 -------------------
