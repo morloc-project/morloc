@@ -2,9 +2,9 @@ module main (foo)
 
 import root-cpp
 
-f = mul 20.0 2.0
+f = 20.0 * 2.0
 
 -- external 0 input argument
 -- cannot optimize out the manifold
 -- a better example would be a random number generator
-foo x = add x f
+foo x = x + f

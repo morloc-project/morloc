@@ -4,4 +4,4 @@ import root-cpp
 
 -- variable partially-applied function passed as argument
 foo :: Real -> [Real] -> [Real]
-foo x xs = map (mul x) xs
+foo x xs = map ((*) x) xs

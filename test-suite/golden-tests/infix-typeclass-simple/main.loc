@@ -17,11 +17,11 @@ instance Num Int where
   zero = 0
 
 -- Test basic infix usage
-test_add :: Int
-test_add = 5 + 3
+test_add :: Int -> Int
+test_add x = x + 3
 
-test_mul :: Int
-test_mul = 4 * 7
+test_mul :: Int -> Int
+test_mul x = 4 * x
 
 -- Test precedence: should be 4 * 7 + 3 = 31
 test_expr :: Int

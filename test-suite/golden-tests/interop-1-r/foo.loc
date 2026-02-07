@@ -4,8 +4,8 @@ import root ((.))
 import root-r (Real, Integral, idr)
 import root-cpp (Real, Numeric, idcpp)
 
-radd x = idr . add x
-cmul x = idcpp . mul x
+radd x = idr . (+) x
+cmul x = idcpp . (*) x
 
 r2c x y = radd (cmul x y) (100.0 :: Real)
 c2r x y = cmul (radd x y) (100.0 :: Real)

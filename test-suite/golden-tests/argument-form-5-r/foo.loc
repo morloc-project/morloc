@@ -4,4 +4,4 @@ import root-r
 
 -- literal function with constant application
 foo :: [Real] -> [Real]
-foo xs = map (mul 2.0) xs
+foo xs = map ((*) 2.0) xs

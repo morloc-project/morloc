@@ -4,4 +4,4 @@ import root-py
 
 -- full application with constants
 -- can potentially optimize out this manifold
-foo x = add x (mul 2.0 20.0)
+foo x = x + 2.0 * 20.0

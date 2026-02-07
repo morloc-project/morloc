@@ -5,9 +5,9 @@ import root-cpp
 import root-r
 
 -- Force language selection with identity functions
-pyAdd x = idpy . add x
-cppMul x = idcpp . mul x
-rSub x = idr . sub x
+pyAdd x = idpy . (+) x
+cppMul x = idcpp . (*) x
+rSub x = idr . (-) x
 
 -- Chain: Python add -> C++ multiply -> R subtract
 -- Input goes through all three languages

@@ -4,4 +4,4 @@ import root-cpp
 
 -- literal function with no application
 foo :: [Real] -> [Real] -> [Real]
-foo xs ys = zipWith mul xs ys
+foo xs ys = zipWith (*) xs ys

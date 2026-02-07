@@ -9,4 +9,4 @@ module main (foo)
 import root-py
 import root-cpp
 
-foo x y = add x (add y 42.0)
+foo x y = x + y + 42.0

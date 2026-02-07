@@ -2,4 +2,4 @@ module main (foo)
 
 import root-r
 
-foo x = (True, x, div 4.0 x)
+foo x = (True, x, 4.0 / x)

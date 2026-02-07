@@ -9,4 +9,4 @@ import root-cpp (Integral)
 
 module main (foo)
 import arithmetic (Integral)
-foo x y = add x (add y 42.0)
+foo x y = x + y + 42.0

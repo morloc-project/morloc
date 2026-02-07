@@ -5,4 +5,4 @@ import root-py (id)
 import root-cpp (Integral)
 
 foo :: Real -> Real
-foo x = id (add 1.0 x)
+foo x = id (1.0 + x)

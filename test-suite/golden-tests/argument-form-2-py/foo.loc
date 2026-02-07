@@ -4,4 +4,4 @@ import root-py
 
 -- full application with variable passing
 -- cannot optimize out this manifold
-foo x = add x (mul 20.0 x)
+foo x = x + 20.0 * x

@@ -3,9 +3,9 @@ module main (foo)
 import root-cpp
 import math (sqrt)
 
-sum = fold add zero
+sum = fold (+) zero
 
-square x = mul x x
+square x = x * x
 
 foo :: [Real] -> Real
 foo xs = sqrt (sum (map square xs))

@@ -3,10 +3,10 @@ module main (foo0, foo1, foo2)
 import root-cpp (zipWith, Integral, Real, List)
 
 foo0 :: [Real] -> [Real] -> [Real]
-foo0 = zipWith add
+foo0 = zipWith (+)
 
 foo1 :: [Real] -> [Real] -> [Real]
-foo1 xs = zipWith add xs
+foo1 xs = zipWith (+) xs
 
 foo2 :: [Real] -> [Real] -> [Real]
-foo2 xs ys = zipWith add xs ys
+foo2 xs ys = zipWith (+) xs ys

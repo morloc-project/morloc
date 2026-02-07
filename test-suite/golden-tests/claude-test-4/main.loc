@@ -6,14 +6,14 @@ import root-cpp
 -- Use map with lambda across languages
 -- Python map, C++ operations
 processNumbers :: [Int] -> [Int]
-processNumbers xs = map (\x -> idcpp (mul 2 (add x 5))) xs
+processNumbers xs = map (\x -> idcpp (2 * (x + 5))) xs
 
 -- Compose two map operations
 -- First map in Python, second map in C++
 composeMaps :: [Real] -> [Real]
-composeMaps xs = map (\x -> idcpp (mul x 3.0)) (map (\y -> idpy (add y 1.0)) xs)
+composeMaps xs = map (\x -> idcpp (x * 3.0)) (map (\y -> idpy (y + 1.0)) xs)
 
 -- Nested lambda with multiple arguments captured
 -- Tests closure and cross-language lambda evaluation
 nestedLambda :: Int -> [Int] -> [Int]
-nestedLambda offset xs = map (\x -> add offset (mul x 2)) xs
+nestedLambda offset xs = map (\x -> offset + x * 2) xs
