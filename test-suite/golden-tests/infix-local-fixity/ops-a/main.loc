@@ -1,0 +1,8 @@
+module ops-a (*)
+
+type Py => Int = "int"
+
+-- Left-associative &
+infixl 5 &
+(&) :: Int -> Int -> Int
+source Py from "ops.py" ("left_assoc" as (&))

@@ -1,0 +1,16 @@
+module main (test_a, test_b)
+
+import ops-a ((&) as (&~))
+import ops-b ((&))
+
+type Py => Int = "int"
+
+-- Test operator from ops-a with its fixity (infixl 5 &)
+-- 2 &~ 3 &~ 4 should be (2 & 3) & 4 = 14 (left-associative)
+test_a :: Int
+test_a = 2 &~ 3 &~ 4
+
+-- Test operator from ops-b with its fixity (infixr 7 &)
+-- 2 & 3 & 4 should be 2 & (3 & 4) = 18 (right-associative)
+test_b :: Int
+test_b = 2 & 3 & 4

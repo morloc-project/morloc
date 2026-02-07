@@ -6,4 +6,4 @@ all:
 	./nexus test_negate >> obs.txt
 
 clean:
-	rm -f nexus* pool* log obs.txt
+	rm -f nexus* pool* log

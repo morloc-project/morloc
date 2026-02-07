@@ -40,12 +40,12 @@ main = do
       -- , golden "unit-1" "unit-1"
 
       , golden "infix" "infix"
-      , golden "infix-import" "infix-import"
-      , golden "infix-generic" "infix-generic"
-      , golden "infix-polyglot" "infix-polyglot"
-      , golden "infix-typeclass-import" "infix-typeclass-import"
+      , golden "infix-import"             "infix-import"
+      , golden "infix-generic"            "infix-generic"
+      , golden "infix-polyglot"           "infix-polyglot"
+      , golden "infix-typeclass-import"   "infix-typeclass-import"
       , golden "infix-typeclass-polyglot" "infix-typeclass-polyglot"
-      , golden "infix-typeclass-simple" "infix-typeclass-simple"
+      , golden "infix-typeclass-simple"   "infix-typeclass-simple"
 
       , golden "claude-test-1" "claude-test-1"
       , golden "claude-test-2" "claude-test-2"

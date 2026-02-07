@@ -18,6 +18,7 @@ import qualified Morloc.Data.DAG as DAG
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
+import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Namespace
@@ -329,43 +330,59 @@ handleBinops :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [Aliased
 handleBinops d0 = do
   mayN <- DAG.synthesize updateNode (\e _ _ -> return e) d0
   case mayN of
-    (Just e') -> return $ DAG.mapNode fst e'
+    (Just e') -> return $ DAG.mapNode (\(e,_,_)->e) e'
     Nothing -> error "Unreachable?"
   where
     updateNode ::
       MVar ->
       ExprI ->
-      [(MVar, [AliasedSymbol], (ExprI, Map.Map EVar (Associativity, Int)))] ->
-      MorlocMonad (ExprI, Map.Map EVar (Associativity, Int))
+      [(MVar, [AliasedSymbol], (ExprI, Map ClassName [EVar], Map EVar (Associativity, Int)))] ->
+      MorlocMonad (ExprI, Map ClassName [EVar], Map EVar (Associativity, Int))
     updateNode _ e es = do
       thisFixityMap <- AST.findFixityMap e
-      fixityMap <- mergeFixityMaps $ thisFixityMap : [filterTerms m ss | (_, ss, (_, m)) <- es]
+
+      let clsOps = Map.unions $ findClassOps e : [filterClsOps ss cs | (_, ss, (_, cs, _)) <- es]
+          clsOpSet = Set.fromList . concat $ Map.elems clsOps
+
+      fixityMap <- mergeFixityMaps $ thisFixityMap : [filterTerms clsOpSet m ss | (_, ss, (_, _, m)) <- es]
       e' <- updateBinopExprs fixityMap e
-      return (e', fixityMap)
+      return (e', clsOps, fixityMap)
 
-    -- TODO - This should filter the inherited fixity definitions that are both
-    -- directly inherited and those from typeclasses. Currently I just inherit
-    -- everything.
-    filterTerms :: Map.Map EVar a -> [AliasedSymbol] -> Map.Map EVar a
-    filterTerms m ss = m
-      -- let symMap = Map.fromList [(k, v) | (AliasedTerm k v) <- ss]
-      --  in Map.fromList . catMaybes $ [Map.lookup k symMap |>> (, v) | (k, v) <- Map.toList m]
+    filterClsOps :: [AliasedSymbol] -> Map ClassName [EVar] -> Map ClassName [EVar]
+    filterClsOps ass clsmap =
+      let clss = [cls | (AliasedClass cls) <- ass]
+      in Map.filterWithKey (\k _ -> elem k clss) clsmap
 
-    mergeFixityMaps :: Eq a => [Map.Map EVar a] -> MorlocMonad (Map.Map EVar a)
+    findClassOps :: ExprI -> Map ClassName [EVar]
+    findClassOps (ExprI _ (ModE _ es)) = Map.unions (map findClassOps es)
+    findClassOps (ExprI _ (ClsE (Typeclass cls _ sigs))) = Map.singleton cls [v | (Signature v _ _) <- sigs]
+    findClassOps _ = Map.empty
+
+    filterTerms :: Set EVar -> Map EVar a -> [AliasedSymbol] -> Map EVar a
+    filterTerms cs m ss = Map.union unaliasedOps clsOps where
+      symMap = Map.fromList [(k, v) | (AliasedTerm k v) <- ss]
+
+      -- gather non-typeclass operator aliases
+      unaliasedOps = Map.fromList . catMaybes $ [Map.lookup k symMap |>> (, v) | (k, v) <- Map.toList m]
+
+      -- gather typeclass operators aliases
+      clsOps = Map.filterWithKey (\k _ -> Set.member k cs) m
+
+    mergeFixityMaps :: Eq a => [Map EVar a] -> MorlocMonad (Map EVar a)
     mergeFixityMaps [] = return Map.empty
     mergeFixityMaps [e1] = return e1
     mergeFixityMaps (e1:e2:es) = do
       e' <- foldlM strictInsert e1 (Map.toList e2)
       mergeFixityMaps (e':es)
 
-    strictInsert :: Eq v => Map.Map EVar v -> (EVar, v) -> MorlocMonad (Map.Map EVar v)
+    strictInsert :: Eq v => Map EVar v -> (EVar, v) -> MorlocMonad (Map EVar v)
     strictInsert m (k, v) = case Map.lookup k m of
       Nothing -> return $ Map.insert k v m
       (Just v') -> if v == v'
                    then return m
                    else MM.throwError . ConflictingFixity $ k
 
-    updateBinopExprs :: Map.Map EVar (Associativity, Int) -> ExprI -> MorlocMonad ExprI
+    updateBinopExprs :: Map EVar (Associativity, Int) -> ExprI -> MorlocMonad ExprI
     updateBinopExprs m0 = f where
       f e@(ExprI _ BopE{}) = resolveBinop m0 e >>= f
       f (ExprI i (ModE m es)) = ModE m <$> mapM f es |>> ExprI i
@@ -384,7 +401,7 @@ handleBinops d0 = do
     -- | Rewrite a right-nested BopE chain into a correctly-associated AppE tree.
     -- Uses the Pratt (precedence climbing) algorithm.
     -- Operators not in fixMap default to infixl 9.
-    resolveBinop :: Map.Map EVar (Associativity, Int) -> ExprI -> MorlocMonad ExprI
+    resolveBinop :: Map EVar (Associativity, Int) -> ExprI -> MorlocMonad ExprI
     resolveBinop fixMap expr = do
       let (lhs0, ops) = flatten expr
       (result, _) <- pratt 0 lhs0 ops
@@ -446,7 +463,7 @@ collectTags fullDag = do
     f (ExprI _ (AnnE e _)) = f e
     f _ = return ()
 
-type GCMap = (Scope, Map.Map Lang Scope)
+type GCMap = (Scope, Map Lang Scope)
 
 -- | Add the following fields to state:
 --   * stateGeneralTypedefs           :: GMap Int MVar Scope
@@ -523,7 +540,7 @@ collectUniversalTypes = do
       (GMap _ (Map.elems -> scopes)) <- MM.gets stateGeneralTypedefs
       return $ Map.unionsWith mergeEntries scopes
 
-    getUniversalConcreteScope :: Scope -> MorlocMonad (Map.Map Lang Scope)
+    getUniversalConcreteScope :: Scope -> MorlocMonad (Map Lang Scope)
     getUniversalConcreteScope gscope = do
       (GMap _ modMaps) <- MM.gets stateConcreteTypedefs
       let langs = unique $ concatMap Map.keys . Map.elems $ modMaps

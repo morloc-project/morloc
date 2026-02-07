@@ -1,7 +1,6 @@
 all:
-	rm -f obs.txt
 	morloc make main.loc 
-	./nexus x >> obs.txt
+	./nexus x > obs.txt
 	./nexus y >> obs.txt
 	./nexus z >> obs.txt
 	./nexus f 99 >> obs.txt

@@ -5,4 +5,4 @@ all:
 	./nexus test_not_equal >> obs.txt
 
 clean:
-	rm -f nexus* pool* log obs.txt
+	rm -f nexus* pool* log
