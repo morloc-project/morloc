@@ -689,7 +689,9 @@ installLocal ::
   Text ->
   MorlocMonad ()
 installLocal overwrite libpath maySelector modulePath = do
-  sourceDir <- liftIO $ MS.makeAbsolute (MT.unpack modulePath)
+  -- dropping the trailing path separator is important, otherwise
+  -- morloc will helpful delete all your modules
+  sourceDir <- liftIO . MS.makeAbsolute . MS.dropTrailingPathSeparator . MT.unpack $ modulePath
 
   -- Extract module name from path (last component)
   let moduleName = MS.takeFileName sourceDir
