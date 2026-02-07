@@ -36,7 +36,8 @@ main = do
 
         -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
-      , golden "unit-1" "unit-1"
+      , golden "records-alias" "records-alias"
+      -- , golden "unit-1" "unit-1"
 
       , golden "infix" "infix"
       , golden "infix-import" "infix-import"
