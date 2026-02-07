@@ -180,9 +180,11 @@ pImport = do
 
     pImportTerm :: Parser AliasedSymbol
     pImportTerm = do
-      n <- try (parenOperator |>> unEVar) <|> freenameL
-      a <- option n (reserved "as" >> freenameL)
+      n <- try pOpOrName
+      a <- option n (reserved "as" >> pOpOrName)
       return (AliasedTerm (EV n) (EV a))
+
+    pOpOrName = (parenOperator |>> unEVar) <|> freenameL
 
     pImportType :: Parser AliasedSymbol
     pImportType = do
