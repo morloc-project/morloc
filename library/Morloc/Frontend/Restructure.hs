@@ -343,10 +343,13 @@ handleBinops d0 = do
       e' <- updateBinopExprs fixityMap e
       return (e', fixityMap)
 
+    -- TODO - This should filter the inherited fixity definitions that are both
+    -- directly inherited and those from typeclasses. Currently I just inherit
+    -- everything.
     filterTerms :: Map.Map EVar a -> [AliasedSymbol] -> Map.Map EVar a
-    filterTerms m ss =
-      let symMap = Map.fromList [(k, v) | (AliasedTerm k v) <- ss]
-       in Map.fromList . catMaybes $ [Map.lookup k symMap |>> (, v) | (k, v) <- Map.toList m]
+    filterTerms m ss = m
+      -- let symMap = Map.fromList [(k, v) | (AliasedTerm k v) <- ss]
+      --  in Map.fromList . catMaybes $ [Map.lookup k symMap |>> (, v) | (k, v) <- Map.toList m]
 
     mergeFixityMaps :: Eq a => [Map.Map EVar a] -> MorlocMonad (Map.Map EVar a)
     mergeFixityMaps [] = return Map.empty
