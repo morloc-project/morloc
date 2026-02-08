@@ -185,10 +185,21 @@ subtype scope a@ExistU {} b@ExistU {} g
 --
 -- function subtypes are *contravariant* with respect to the input, that is,
 -- the subtypes are reversed so we have b1<:a1 instead of a1<:b1.
-subtype scope (FunU [] a2) (FunU [] b2) g = subtype scope a2 b2 g
-subtype scope (FunU (a1 : rs1) a2) (FunU (b1 : rs2) b2) g1 = do
-  g2 <- subtype scope b1 a1 g1
-  subtype scope (apply g2 (FunU rs1 a2)) (apply g2 (FunU rs2 b2)) g2
+--
+-- Optimization: Batch process all arguments before applying context to return
+-- types. This reduces complexity from O(n²) to O(n) for n-argument functions.
+-- The correctness is preserved because context applications are monotonic -
+-- once an existential is solved, later subtype calls can only add more
+-- solutions, not remove them.
+subtype scope (FunU as1 ret1) (FunU as2 ret2) g0
+  | length as1 /= length as2 =
+      Left $ SubtypeError (FunU as1 ret1) (FunU as2 ret2) "function arity mismatch"
+  | null as1 = subtype scope ret1 ret2 g0
+  | otherwise = do
+      -- Process all arguments (contravariant: b <: a), accumulating context
+      g1 <- foldlM (\g (b, a) -> subtype scope b a g) g0 (zip as2 as1)
+      -- Apply context once to return types, then subtype
+      subtype scope (apply g1 ret1) (apply g1 ret2) g1
 
 --  g1 |- A1 <: B1
 -- ----------------------------------------- <:App
