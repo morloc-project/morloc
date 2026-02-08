@@ -122,7 +122,7 @@ annotateGasts :: (AnnoS (Indexed Type) One (), CmdDocSet) -> MorlocMonad GastDat
 annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
   mayName <- MM.metaName i
   gname <- case mayName of
-    Nothing -> MM.throwError . OtherError $ "No name found for call-free function"
+    Nothing -> MM.throwSourcedError i $ "No name found for call-free function"
     (Just n') -> return n'
 
   let gargs = findArgs x0
@@ -274,7 +274,7 @@ getFData (t, i, lang, doc, sockets) = do
           , fdataReturnSchema = dquotes returnSchema
           , fdataCmdDocSet = doc
           }
-    Nothing -> MM.throwError . GeneratorError $ "No name in FData"
+    Nothing -> MM.throwSourcedError i $ "No name in FData"
 
 makeGastSchemas :: Type -> MorlocMonad (MDoc, [MDoc])
 makeGastSchemas (FunT ts t) = do

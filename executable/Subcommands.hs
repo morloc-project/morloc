@@ -69,7 +69,8 @@ readScript _ filename = do
 
 -- | Install a module
 cmdInstall :: InstallCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
-cmdInstall args verbosity conf buildConfig = MM.runMorlocMonad Nothing verbosity conf buildConfig cmdInstall' >>= MM.writeMorlocReturn
+cmdInstall args verbosity conf buildConfig
+  = MM.runMorlocMonad Nothing verbosity conf buildConfig cmdInstall' >>= MM.writeMorlocReturn
   where
     path = (configLibrary conf) </> (configPlane conf)
     cmdInstall' =
@@ -135,7 +136,7 @@ writeFrontendTypecheckOutput ::
   Int ->
   ((Either MorlocError [AnnoS (Indexed TypeU) Many Int], [MT.Text]), MorlocState) ->
   (Bool, MDoc)
-writeFrontendTypecheckOutput _ ((Left e, _), _) = (False, pretty e)
+writeFrontendTypecheckOutput _ ((Left e, _), st) = (False, MM.makeMorlocError st e)
 writeFrontendTypecheckOutput 0 ((Right xs, _), _) = (True, vsep (map writeFrontendTypes xs))
 writeFrontendTypecheckOutput 1 x = writeFrontendTypecheckOutput 0 x -- no difference in verbosity
 writeFrontendTypecheckOutput _ _ = (False, "I don't know how to be that verbose")
@@ -145,7 +146,7 @@ writeFrontendTypes (AnnoS (Idx _ t) _ e) = pretty e <+> "::" <+> pretty t
 
 writeTypecheckOutput ::
   Int -> ((Either MorlocError [(Lang, [SerialManifold])], [MT.Text]), MorlocState) -> (Bool, MDoc)
-writeTypecheckOutput _ ((Left e, _), _) = (False, pretty e)
+writeTypecheckOutput _ ((Left e, _), st) = (False, MM.makeMorlocError st e)
 writeTypecheckOutput _ ((Right pools, _), _) = (True, vsep $ map (uncurry writePool) pools)
 
 writePool :: Lang -> [SerialManifold] -> MDoc
@@ -155,10 +156,10 @@ cmdDump :: DumpCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
 cmdDump args _ config buildConfig = do
   (path, code) <- readScript (dumpExpression args) (dumpScript args)
   let verbosity = dumpVerbose args
-  ((x, _), _) <- MM.runMorlocMonad Nothing verbosity config buildConfig (F.parse path code)
+  ((x, _), st) <- MM.runMorlocMonad Nothing verbosity config buildConfig (F.parse path code)
   case x of
     (Left e) -> do
-      putDoc $ pretty e
+      putDoc $ MM.makeMorlocError st e
       return False
     (Right e) -> do
       putDoc $ prettyDAG e

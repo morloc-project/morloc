@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE CPP #-}
 
 {- |
 Module      : Morloc.Frontend.Treeify
@@ -53,12 +54,12 @@ treeify d
   | Map.size d == 0 = return []
   | otherwise = case DAG.roots d of
       -- if no parentless element exists, then the graph must be empty or cyclic
-      [] -> MM.throwError (CyclicDependency "cyclic import dependency in treeify")
+      [] -> MM.throwSystemError "cyclic import dependency in treeify"
       -- else if exactly one module name key (k) is found
       [k] -> do
         case DAG.lookupNode k d of
           -- if the key is not in the DAG, then something is dreadfully wrong codewise
-          Nothing -> MM.throwError . DagMissingKey . render $ pretty k
+          Nothing -> MM.throwSystemError $ "Compiler bug (__FILE__:__LINE__): Module DAG is missing key" <+> pretty k
           (Just (AST.findExport -> ExportMany symbols)) -> do
             d' <- DAG.mapNodeM linkAndRemoveAnnotations d |>> nullify
 
@@ -91,8 +92,7 @@ treeify d
       -- multiple projects in parallel with potentially shared information and
       -- constraints could be valuable.
       roots ->
-        MM.throwError . CallTheMonkeys . render $
-          "How did you end up with so many roots?" <+> tupled (map pretty roots)
+        MM.throwSystemError $ "Compiler bug (__FILE__:__LINE__): unsupported multi-rooted module DAG:" <+> tupled (map pretty roots)
 
 -- TODO: document
 nullify :: DAG m e ExprI -> DAG m e ExprI
@@ -205,7 +205,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
           MM.sayVVV $ "bound term" <+> pretty v
           case Map.lookup v (namerMap namer) of
             (Just v') -> return (namer, BndS v')
-            Nothing -> error $ "undefined term in namer map (" <> show v <> "): " <> show namer -- MM.throwError $ UndefinedVariable v
+            Nothing -> MM.throwSourcedError gi0 $ "Undefined term in namer map:" <+> pretty v
       where
         termtypesToAnnoS :: Int -> Namer -> TermTypes -> MorlocMonad (Namer, [AnnoS Int ManyPoly Int])
         termtypesToAnnoS gi n t = do

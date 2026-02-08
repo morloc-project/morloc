@@ -273,7 +273,7 @@ express (AnnoS (Idx midx t) (Idx cidx lang, args) (NamS entries)) = do
   mayT <- evalGeneralStep midx (type2typeu t)
   case mayT of
     (Just t') -> express (AnnoS (Idx midx (typeOf t')) (Idx cidx lang, args) (NamS entries))
-    Nothing -> MM.throwError . OtherError . render $ "Missing concrete:" <+> "t=" <> pretty t
+    Nothing -> MM.throwSourcedError midx $ "Missing concrete:" <+> "t=" <> pretty t
 
 -- In other cases, it doesn't matter whether we are at the top of the call
 express e = do
@@ -703,12 +703,12 @@ expressPolyExpr
       isLocal = isNothing remote
 
 -- bound variables
-expressPolyExpr _ _ _ (AnnoS (Idx _ c) (Idx cidx _, rs) (BndS v)) = do
+expressPolyExpr _ _ _ (AnnoS (Idx i c) (Idx cidx _, rs) (BndS v)) = do
   MM.sayVVV $ "express' VarS" <+> parens (pretty v) <+> "::" <+> pretty c
-  case [i | (Arg i v') <- rs, v == v'] of
+  case [j | (Arg j v') <- rs, v == v'] of
     [r] -> return $ PolyBndVar (C (Idx cidx c)) r
     rs' ->
-      MM.throwError . OtherError . render $
+      MM.throwSourcedError i $
         "Expected VarS"
           <+> dquotes (pretty v)
           <+> "of type"
@@ -752,8 +752,9 @@ expressPolyExpr _ pl pc (AnnoS (Idx i t) c e@(NamS _)) = do
   case reduceType scope t of
     (Just t') -> expressPolyExprWrap pl pc (AnnoS (Idx i t') c e)
     Nothing -> error "Expected a record type"
-expressPolyExpr _ _ _ (AnnoS _ _ (AppS (AnnoS _ _ (BndS v)) _)) =
-  MM.throwError . ConcreteTypeError $ FunctionSerialization v
+expressPolyExpr _ _ _ (AnnoS (Idx i _) _ (AppS (AnnoS _ _ (BndS v)) _)) =
+  MM.throwSourcedError i $ "Undefined function" <+> dquotes (pretty v) <> ", did you forget an import?"
+
 -- catch all exception case - not very classy
 expressPolyExpr _ _ _ (AnnoS _ _ (AppS (AnnoS _ _ (LamS vs _)) _)) =
   error $ "All applications of lambdas should have been eliminated of length " <> show (length vs)
@@ -763,14 +764,14 @@ expressPolyExpr _ _ parentType x@(AnnoS (Idx m t) _ _) = do
   name' <- MM.metaName m
   case name' of
     (Just v) ->
-      MM.throwError . OtherError . render $
+      MM.throwSourcedError m $
         "Missing concrete:"
           <> "\n  t:" <+> viaShow t
           <> "\n  v:" <+> pretty v
           <> "\n parentType:" <+> pretty parentType
           <> "\n x:" <+> pretty x
     Nothing ->
-      MM.throwError . OtherError . render $
+      MM.throwSourcedError m $
         "Missing concrete in unnamed function:"
           <> "\n  t:" <+> pretty t
           <> "\n parentType:" <+> pretty parentType
@@ -1484,17 +1485,13 @@ translate lang srcs es = do
     CppLang -> Cpp.translate srcs es
     RLang -> R.translate srcs es
     Python3Lang -> Python3.translate srcs es
-    x ->
-      MM.throwError . PoolBuildError . render $
-        "Language '" <> viaShow x <> "' has no translator"
+    x -> MM.throwSystemError $ "Language '" <> viaShow x <> "' has no translator"
 
 preprocess :: Lang -> SerialManifold -> MorlocMonad SerialManifold
 preprocess CppLang es = Cpp.preprocess es
 preprocess RLang es = R.preprocess es
 preprocess Python3Lang es = Python3.preprocess es
-preprocess l _ =
-  MM.throwError . PoolBuildError . render $
-    "Language '" <> viaShow l <> "' has no translator"
+preprocess l _ = MM.throwSystemError $ "Language '" <> viaShow l <> "' has no translator"
 
 sannoSnd :: AnnoS g One (a, b) -> b
 sannoSnd (AnnoS _ (_, x) _) = x

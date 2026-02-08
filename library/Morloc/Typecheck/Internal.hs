@@ -147,17 +147,23 @@ isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 []) of
   (Left _) -> False
   (Right _) -> True
 
-subtypeEvaluated :: Scope -> TypeU -> TypeU -> Gamma -> Either TypeError Gamma
+subtypeEvaluated :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
 subtypeEvaluated scope t1 t2 g =
   case (TE.reduceType scope t1, TE.reduceType scope t2) of
     (Just t1', _) -> subtype scope t1' t2 g
     (_, Just t2') -> subtype scope t1 t2' g
-    (_, _) ->
-      Left . TypeEvaluationError . render $
-        "Cannot compare types" <+> pretty t1 <+> "and" <+> pretty t2
+    (_, _) -> Left $ "Cannot compare types" <+> pretty t1 <+> "and" <+> pretty t2
+
+subtypeError :: TypeU -> TypeU -> MDoc -> Either MDoc a
+subtypeError t1 t2 msg = Left $
+    "Subtype error:" <+> msg
+      <> "\n  "
+      <> "("
+      <> pretty t1 <+> "<:" <+> pretty t2
+      <> ")"
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
-subtype :: Scope -> TypeU -> TypeU -> Gamma -> Either TypeError Gamma
+subtype :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
 -- VarU vs VarT
 subtype scope t1@(VarU a1) t2@(VarU a2) g
   -- If everything is the same, do nothing
@@ -178,6 +184,7 @@ subtype scope a@ExistU {} b@ExistU {} g
 -- types involved are all existentials, it will always pass, so I omit
 -- it.
 
+
 --  g1 |- B1 <: A1 -| g2
 --  g2 |- [g2]A2 <: [g2]B2 -| g3
 -- ----------------------------------------- <:-->
@@ -191,9 +198,8 @@ subtype scope a@ExistU {} b@ExistU {} g
 -- The correctness is preserved because context applications are monotonic -
 -- once an existential is solved, later subtype calls can only add more
 -- solutions, not remove them.
-subtype scope (FunU as1 ret1) (FunU as2 ret2) g0
-  | length as1 /= length as2 =
-      Left $ SubtypeError (FunU as1 ret1) (FunU as2 ret2) "function arity mismatch"
+subtype scope t1@(FunU as1 ret1) t2@(FunU as2 ret2) g0
+  | length as1 /= length as2 = subtypeError t1 t2 "function arity mismatch"
   | null as1 = subtype scope ret1 ret2 g0
   | otherwise = do
       -- Process all arguments (contravariant: b <: a), accumulating context
@@ -221,12 +227,12 @@ subtype scope (NamU _ v1 _ []) (NamU _ v2 _ []) g
   -- Otherwise subtype the variable names
   | otherwise = subtype scope (VarU v1) (VarU v2) g
 subtype _ t1@(NamU _ _ _ []) t2@(NamU _ _ _ _) _ =
-  Left $ SubtypeError t1 t2 "NamU - Unequal number of fields"
+  subtypeError t1 t2 "NamU - Unequal number of fields"
 subtype _ t1@(NamU _ _ _ _) t2@(NamU _ _ _ []) _ =
-  Left $ SubtypeError t1 t2 "NamU - Unequal number of fields"
+  subtypeError t1 t2 "NamU - Unequal number of fields"
 subtype scope t1@(NamU o1 v1 p1 ((k1, x1) : rs1)) t2@(NamU o2 v2 p2 es2) g0 =
   case filterApart (\(k2, _) -> k2 == k1) es2 of
-    (Nothing, _) -> Left $ SubtypeError t1 t2 "NamU - Unequal fields"
+    (Nothing, _) -> subtypeError t1 t2 "NamU - Unequal fields"
     (Just (_, x2), rs2) ->
       subtype scope x1 x2 g0
         >>= subtype scope (NamU o1 v1 p1 rs1) (NamU o2 v2 p2 rs2)
@@ -244,14 +250,14 @@ subtype scope a@(AppU _ _) b@(ExistU _ _ _) g = subtype scope b a g
 subtype scope t1@(ExistU v1 (ps1, pc1) rs@([], _)) t2@(AppU _ ps2) g1
   -- if the existential is closed and the parameter length is not equal, die
   | pc1 == Closed && length ps1 /= length ps2 =
-      Left $ SubtypeError t1 t2 "InstantiateL - Expected equal number of type parameters"
+      subtypeError t1 t2 "InstantiateL - Expected equal number of type parameters"
   -- if the exsistential is open and it has fewer parameters, extend the
   -- parameter list and retry
   | pc1 == Open && length ps1 < length ps2 = do
       let (ps1', _) = extendList ps1 ps2
       subtype scope (ExistU v1 (ps1', pc1) rs) t2 g1
   | length ps1 > length ps2 =
-      Left $ SubtypeError t1 t2 "InstantiateL - too many parameters in left existential"
+      subtypeError t1 t2 "InstantiateL - too many parameters in left existential"
   -- otherwise, do the thing
   | otherwise = do
       g2 <- foldM (\g (p1, p2) -> subtype scope p1 p2 g) g1 (zip ps1 ps2)
@@ -279,23 +285,23 @@ subtype scope a (ForallU v b) g = subtype scope a b (g +> VarG v) >>= cut (VarG 
 subtype scope t1@(VarU _) t2 g = subtypeEvaluated scope t1 t2 g
 subtype scope t1 t2@(VarU _) g = subtypeEvaluated scope t1 t2 g
 -- fall through
-subtype _ a b _ = Left $ SubtypeError a b "Type mismatch fall through"
+subtype _ a b _ = subtypeError a b "Type mismatch fall through"
 
-zipSubtype :: TypeU -> TypeU -> Scope -> [TypeU] -> [TypeU] -> Gamma -> Either TypeError Gamma
+zipSubtype :: TypeU -> TypeU -> Scope -> [TypeU] -> [TypeU] -> Gamma -> Either MDoc Gamma
 zipSubtype _ _ _ [] [] g' = return g'
 zipSubtype a b scope (t1' : ts1') (t2' : ts2') g' = do
   g'' <- subtype scope t1' t2' g'
   zipSubtype a b scope ts1' ts2' g''
-zipSubtype a b _ _ _ _ = Left $ SubtypeError a b "Parameter type mismatch"
+zipSubtype a b _ _ _ _ = subtypeError a b "Parameter type mismatch"
 
 -- | Dunfield Figure 10 -- type-level structural recursion
-instantiate :: Scope -> TypeU -> TypeU -> Gamma -> Either TypeError Gamma
+instantiate :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
 instantiate scope ta@(ExistU _ _ (_ : _, _)) tb@(NamU _ _ _ _) g1 = instantiate scope tb ta g1
 instantiate scope ta@(ExistU _ _ (_ : _, _)) tb@(VarU _) g1 = instantiate scope tb ta g1
 instantiate scope ta@(VarU _) tb@(ExistU _ _ (_ : _, _)) g1 = do
   case TE.reduceType scope ta of
     (Just ta') -> instantiate scope ta' tb g1
-    Nothing -> Left $ InstantiationError ta tb "Error in VarU versus NamU with existential keys"
+    Nothing -> subtypeError ta tb "Error in VarU versus NamU with existential keys"
 instantiate scope ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_ : _), rc)) g1 = do
   let keyset1 = Set.fromList $ map fst rs1
       keyset2 = Set.fromList $ map fst rs2
@@ -304,13 +310,13 @@ instantiate scope ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_ : _), rc)) g1 = do
     Closed ->
       if keyset1 == keyset2
         then return ()
-        else Left $ InstantiationError ta tb "Error in NamU with conflicting closed keysets"
+        else subtypeError ta tb "Error in NamU with conflicting closed keysets"
     -- if the existential keys are open, then all existential keys muts be in
     -- ta, but not vice versa
     Open ->
       if Set.isSubsetOf keyset2 keyset1
         then return ()
-        else Left $ InstantiationError ta tb "Error in NamU with conflicting open keysets"
+        else subtypeError ta tb "Error in NamU with conflicting open keysets"
 
   g2 <-
     foldM
@@ -321,7 +327,7 @@ instantiate scope ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_ : _), rc)) g1 = do
     (Just (rhs, _, lhs)) -> do
       solved <- solve v ta
       return $ g2 {gammaContext = rhs ++ [solved] ++ lhs}
-    Nothing -> Left $ InstantiationError ta tb "Error in NamU with existential keys"
+    Nothing -> subtypeError ta tb "Error in NamU with existential keys"
 instantiate scope (ExistU v ([], _) _) (FunU as b) g1 = do
   let (g2, veas) = statefulMap (\g _ -> tvarname g "ta") g1 as
       (g3, veb) = tvarname g2 "to"
@@ -391,11 +397,11 @@ instantiate scope ta@(ExistU v1 (ps1, pc1) (rs1, rc1)) tb@(ExistU v2 (ps2, pc2) 
   -- check and expand open parameters
   (ps1', ps2') <- case (pc1, pc2, compare (length ps1) (length ps2)) of
     (_, _, EQ) -> Right (ps1, ps2)
-    (Closed, Closed, _) -> Left $ InstantiationError ta tb "Unequal parameter length for closed existentials"
+    (Closed, Closed, _) -> subtypeError ta tb "Unequal parameter length for closed existentials"
     (Closed, Open, GT) -> Right $ extendList ps1 ps2
-    (Closed, Open, LT) -> Left $ InstantiationError ta tb "Left closed existential parameter list is less than right"
+    (Closed, Open, LT) -> subtypeError ta tb "Left closed existential parameter list is less than right"
     (Open, Closed, LT) -> Right $ extendList ps1 ps2
-    (Open, Closed, GT) -> Left $ InstantiationError ta tb "Right closed existential parameter list is less than left"
+    (Open, Closed, GT) -> subtypeError ta tb "Right closed existential parameter list is less than left"
     (Open, Open, _) -> Right $ extendList ps1 ps2
 
   let keyset1 = Set.fromList (map fst rs1)
@@ -403,20 +409,10 @@ instantiate scope ta@(ExistU v1 (ps1, pc1) (rs1, rc1)) tb@(ExistU v2 (ps2, pc2) 
 
   -- check and expand open records
   (g2, rs1', rs2') <- case (rc1, rc2, Set.isSubsetOf keyset1 keyset2, Set.isSubsetOf keyset2 keyset1) of
-    (Closed, Closed, False, _) ->
-      Left $
-        InstantiationError ta tb "Right closed existential contains keys missing in left closed existential"
-    (Closed, Closed, _, False) ->
-      Left $
-        InstantiationError ta tb "Right closed existential contains keys missing in left closed existential"
-    (Closed, Open, a, False) ->
-      Left $
-        InstantiationError ta tb $
-          "Right existential contains keys missing in left closed existential " <> MT.show' a
-    (Open, Closed, False, b) ->
-      Left $
-        InstantiationError ta tb $
-          "Left existential contains keys missing in right closed existential " <> MT.show' b
+    (Closed, Closed, False, _) -> subtypeError ta tb "Right closed existential contains keys missing in left closed existential"
+    (Closed, Closed, _, False) -> subtypeError ta tb "Right closed existential contains keys missing in left closed existential"
+    (Closed, Open, a, False)   -> subtypeError ta tb $ "Right existential contains keys missing in left closed existential " <> pretty a
+    (Open, Closed, False, b)   -> subtypeError ta tb $ "Left existential contains keys missing in right closed existential " <> pretty b
     _ -> extendRec scope g1 rs1 rs2
 
   g3 <- foldM (\g (t1, t2) -> subtype scope t1 t2 g) g2 (zip ps1 ps2)
@@ -481,11 +477,11 @@ instantiate _ (ExistU v ([], _) ([], _)) tb g1 =
 --   Nothing -> Left . InstantiationError ta tb . render
 --     $ "Error in InstLSolve:" <+> tupled (map pretty (gammaContext g1))
 
-instantiate _ ta tb _ = Left $ InstantiationError ta tb "Unexpected types"
+instantiate _ ta tb _ = subtypeError ta tb "Unexpected types"
 
-solve :: TVar -> TypeU -> Either TypeError GammaIndex
+solve :: TVar -> TypeU -> Either MDoc GammaIndex
 solve v t
-  | v `elem` (mapMaybe toTVar . Set.toList . free $ t) = Left InfiniteRecursion
+  | v `elem` (mapMaybe toTVar . Set.toList . free $ t) = Left  $ "Infinite recursion, cannot substitute" <+> pretty v <+> "into type" <+> pretty t
   | otherwise = Right (SolvedG v t)
   where
     toTVar :: TypeU -> Maybe TVar
@@ -493,10 +489,10 @@ solve v t
     toTVar (VarU v') = Just v'
     toTVar _ = Nothing
 
-occursCheck :: TypeU -> TypeU -> Text -> Either TypeError ()
+occursCheck :: TypeU -> TypeU -> Text -> Either MDoc ()
 occursCheck t1 t2 place =
   if Set.member t1 (free t2)
-    then Left $ OccursCheckFail t1 t2 place
+    then subtypeError t1 t2 $ "Occurs check at" <+> pretty place
     else Right ()
 
 {- | substitute all appearances of a given variable with an existential
@@ -551,12 +547,12 @@ lookupE v (gammaContext -> gs0) = f gs0
     f (_ : gs) = f gs
 
 -- | remove context up to a marker
-cut :: GammaIndex -> Gamma -> Either TypeError Gamma
+cut :: GammaIndex -> Gamma -> Either MDoc Gamma
 cut i g = do
   xs1 <- f (gammaContext g)
   return $ g {gammaContext = xs1}
   where
-    f [] = Left $ EmptyCut i
+    f [] = Left $ "Empty cut" <+> pretty i
     f (x : xs)
       | i == x = return xs
       | otherwise = f xs
@@ -599,7 +595,7 @@ weaveSelectors (s0 : ss0) = foldrM weavePair s0 ss0
       xs <- mapM (secondM weaveSelectors) (groupSort ((s1 : ss1) <> (s2 : ss2)))
       return $ SelectorKey (head xs) (tail xs)
     weavePair x@(SelectorKey _ _) y@(SelectorIdx _ _) = weavePair y x
-    weavePair (SelectorIdx _ _) (SelectorKey _ _) = MM.throwError . BadPattern $ "Cannot merge index and keyword patterns"
+    weavePair (SelectorIdx _ _) (SelectorKey _ _) = MM.throwSystemError $ "Bad pattern, cannot merge index and keyword patterns"
 
 selectorGetter :: TypeU -> Selector -> [TypeU]
 selectorGetter t SelectorEnd = [t]
@@ -674,7 +670,7 @@ extendRec ::
   Gamma ->
   [(k, TypeU)] ->
   [(k, TypeU)] ->
-  Either TypeError (Gamma, [(k, TypeU)], [(k, TypeU)])
+  Either MDoc (Gamma, [(k, TypeU)], [(k, TypeU)])
 extendRec scope g0 xs ys = do
   g1 <-
     foldlM

@@ -1,4 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {- |
 Module      : Morloc.Monad
@@ -16,6 +18,7 @@ module Morloc.Monad
   ( MorlocReturn
   , runMorlocMonad
   , writeMorlocReturn
+  , makeMorlocError
   , runCommand
   , runCommandWith
   , logFile
@@ -56,6 +59,11 @@ module Morloc.Monad
   , sayV
   , sayVV
   , sayVVV
+
+    -- * throwing errors
+  , throwSystemError
+  , throwSourcedError
+  , throwUnificationError
 
     -- * Indexing monad
   , Index
@@ -146,11 +154,47 @@ setDepth i = do
   return ()
 
 writeMorlocReturn :: MorlocReturn a -> IO Bool
-writeMorlocReturn ((Left err', msgs), _) = do
+writeMorlocReturn ((Left err', msgs), st) = do
   MT.hPutStrLn stderr (MT.unlines msgs) -- write messages
-  MT.hPutStrLn stderr (MT.show' err') -- write terminal failing message
+  MT.hPutStrLn stderr (render $ makeMorlocError st err')
   return False
 writeMorlocReturn ((Right _, _), _) = return True
+
+ -- Map.Map Int SrcLoc
+makeMorlocError :: MorlocState -> MorlocError -> MDoc
+makeMorlocError (stateSourceMap -> srcMap) (SourcedError i msg) = 
+  case Map.lookup i srcMap of
+    Just loc -> pretty loc <> ": error: " <> msg
+    Nothing -> "Compiler bug, broken index" <+> pretty i <+> "with attached error:" <+> msg
+makeMorlocError _ (SystemError msg) = msg
+makeMorlocError (stateSourceMap -> srcMap) (UnificationError lhs rhs context msg) = 
+  case (Map.lookup lhs srcMap, Map.lookup rhs srcMap, Map.lookup context srcMap) of
+    (Just lhsLoc, rhsLoc, contextLoc) ->
+      "Unification error:" <+> msg <> "\n" <>
+      "Found while unifying" <+> pretty contextLoc <> "\n" <>
+      "With values\n" <> pretty lhsLoc <> "\nand\n" <> pretty rhsLoc
+    _ -> "Compiler bug, broken indices" <+> pretty (lhs, rhs, context) <+> "with attached error:" <+> msg
+
+
+throwSystemError :: MonadError MorlocError m => MDoc -> m a
+throwSystemError = throwError . SystemError
+
+throwSourcedError :: MonadError MorlocError m => Int -> MDoc -> m a
+throwSourcedError i = throwError . SourcedError i
+
+throwUnificationError :: MonadError MorlocError m => Int -> Int -> Int -> MDoc -> m a
+throwUnificationError lhs rhs context msg = throwError $ UnificationError lhs rhs context msg
+
+systemCallError ::  Text -> Text -> String -> MorlocMonad a
+systemCallError cmd loc msg = throwSystemError $
+  "System call failed at ("
+    <> pretty loc
+    <> "):\n"
+    <> " cmd> "
+    <> pretty cmd
+    <> "\n"
+    <> " msg>\n"
+    <> pretty msg
 
 -- | Execute a system call
 runCommand ::
@@ -163,7 +207,7 @@ runCommand loc cmd = do
     liftIO $ SP.readCreateProcessWithExitCode (SP.shell . MT.unpack $ cmd) []
   case exitCode of
     SE.ExitSuccess -> tell [MT.pack err']
-    _ -> throwError (SystemCallError cmd loc (MT.pack err')) |>> const ()
+    _ -> systemCallError cmd loc err'
 
 sayIf :: Int -> MDoc -> MorlocMonad ()
 sayIf i d = do
@@ -205,7 +249,7 @@ runCommandWith loc f cmd = do
     liftIO $ SP.readCreateProcessWithExitCode (SP.shell . MT.unpack $ cmd) []
   case exitCode of
     SE.ExitSuccess -> return $ f (MT.pack out)
-    _ -> throwError (SystemCallError cmd loc (MT.pack err'))
+    _ -> systemCallError cmd loc err'
 
 -- | Write a object to a file in the Morloc temporary directory
 logFile ::
@@ -244,7 +288,7 @@ readLang :: Text -> MorlocMonad Lang
 readLang langStr =
   case ML.readLangName langStr of
     (Just x) -> return x
-    Nothing -> throwError $ UnknownLanguage langStr
+    Nothing -> throwSystemError $ "Unknown language" <> squotes (pretty langStr)
 
 {- | Return sources for constructing an object. These are used by `NamE NamObject`
 expressions. Sources here includes some that are not linked to signatures, such
@@ -256,7 +300,7 @@ metaSources i = do
   s <- gets stateSources
   case GMap.lookup i s of
     GMapNoFst -> return []
-    GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
+    GMapNoSnd -> error "Compiler bug: Internal GMap key missing"
     (GMapJust srcs) -> return srcs
 
 ----- TODO: metaName should no longer be required - remove
@@ -290,8 +334,8 @@ getDocStrings i = do
   case GMap.lookup i sgmap of
     (GMapJust (Monomorphic (TermTypes (Just e) _ _))) -> return $ edocs e
     (GMapJust (Polymorphic _ _ e _)) -> return $ edocs e
-    GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
-    _ -> throwError . CallTheMonkeys $ "No entry found for index in stateSignatures"
+    GMapNoSnd -> error "Compiler bug: Internal GMap key missing"
+    _ -> error "Compiler bug: No entry found for index in stateSignatures"
 
 getConcreteScope :: Int -> Lang -> MorlocMonad Scope
 getConcreteScope i lang = do

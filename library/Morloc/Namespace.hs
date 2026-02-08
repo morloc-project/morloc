@@ -59,9 +59,11 @@ module Morloc.Namespace
   , GMapRet (..)
   --------------------
 
+    -- ** Source locations
+  , SrcLoc (..)
+
     -- ** Error handling
   , MorlocError (..)
-  , TypeError (..)
 
     -- ** Configuration
   , Config (..)
@@ -176,12 +178,9 @@ import Data.Monoid
 import qualified Data.PartialOrd as P
 import Data.Scientific (Scientific)
 import Data.Text (Text)
-import Data.Void (Void)
 import GHC.Generics (Generic)
 import Morloc.Internal
 import System.Directory.Tree (AnchoredDirTree (..), DirTree (..))
-import Text.Megaparsec (ParseErrorBundle)
-import Text.Megaparsec.Error (errorBundlePretty)
 
 import Text.Read (readMaybe)
 
@@ -310,6 +309,12 @@ data BuildConfig = BuildConfig
   }
   deriving (Show, Generic)
 
+data SrcLoc = SrcLoc
+  { srcLocPath :: Maybe Path
+  , srcLocLine :: Int
+  , srcLocCol  :: Int
+  } deriving (Show, Ord, Eq)
+
 data MorlocState = MorlocState
   { statePackageMeta :: [PackageMeta]
   -- ^ The parsed contents of a package.yaml file
@@ -354,6 +359,8 @@ data MorlocState = MorlocState
   --       f :: List
   -- Note that `f` is a higher-kinded type, it takes one argument
   -- The int the qualifier triple stores the number of type arguments
+  , stateSourceMap :: Map Int SrcLoc
+  -- ^ Maps expression indices to source locations (file, line, column)
   , stateBuildConfig :: BuildConfig
   }
   deriving (Show)
@@ -916,115 +923,11 @@ newtype Constraint
   = Con Text
   deriving (Show, Eq, Ord)
 
-data TypeError
-  = SubtypeError TypeU TypeU Text
-  | InstantiationError TypeU TypeU Text
-  | EmptyCut GammaIndex
-  | -- | the msg should an identifier for the place where the occurs check failed
-    OccursCheckFail TypeU TypeU Text
-  | Mismatch TypeU TypeU Text
-  | UnboundVariable EVar
-  | KeyError Key TypeU
-  | ApplicationOfNonFunction
-  | InvalidApplication (AnnoS Int ManyPoly Int) [AnnoS Int ManyPoly Int] TypeU
-  | TooManyArguments
-  | InfiniteRecursion
-  | FunctionSerialization EVar
-  | TypeEvaluationError Text
-
 data MorlocError
-  = -- | An error that is associated with an expression index
-    IndexedError Int MorlocError
-  | -- | Raised for calls to unimplemented features
-    NotImplemented Text
-  | -- | Raised by parsec on parse errors
-    SyntaxError (ParseErrorBundle Text Void)
-  | -- | Raised when an unsupported language is encountered
-    UnknownLanguage Text
-  | -- | Raised when a module cannot be loaded
-    CannotLoadModule Text
-  | -- | Raised when a module cannot be installed
-    ModuleInstallError Text
-  | -- | System call failed
-    SystemCallError Text Text Text
-  | -- | Raised when there is an error in the code generators
-    GeneratorError Text
-  | -- | Missing a serialization or deserialization function
-    SerializationError Text
-  | -- | Error in building a pool (i.e., in a compiled language)
-    PoolBuildError Text
-  | -- | Undefined variable error
-    UndefinedVariable EVar
-  | -- | Raise when a type alias substitution fails
-    SelfRecursiveTypeAlias TVar
-  | MutuallyRecursiveTypeAlias [Text]
-  | BadTypeAliasParameters TVar Int Int
-  | ConflictingTypeAliases TypeU TypeU
-  | -- | Raise for bad docstrings
-    DocStrError Text
-  | -- | Problems with the directed acyclic graph datastructures
-    DagMissingKey Text
-  | -- | Raised when a branch is reached that should not be possible
-    CallTheMonkeys Text
-  | --------------- T Y P E   E R R O R S --------------------------------------
-    ConcreteTypeError TypeError
-  | GeneralTypeError TypeError
-  | ToplevelRedefinition
-  | IncompatibleGeneralType TypeU TypeU
-  | OtherError Text -- TODO: remove this option
-  -- container errors
-  | EmptyTuple
-  | TupleSingleton
-  | EmptyRecord
-  | BadPattern Text
-  | -- module errors
-    MultipleModuleDeclarations [MVar]
-  | NestedModule MVar
-  | NonSingularRoot [MVar]
-  | ImportExportError MVar Text
-  | CannotFindModule MVar
-  | CyclicDependency Text
-  | SelfImport MVar
-  | BadRealization
-  | TooManyRealizations
-  | MissingSource
-  | ConflictingFixity EVar
-  | AmbiguousOperators EVar EVar
-  | -- type extension errors
-    UndefinedType TVar
-  | AmbiguousPacker Text
-  | AmbiguousUnpacker Text
-  | AmbiguousCast Text Text
-  | IllegalPacker TypeU
-  | CyclicPacker TypeU TypeU
-  | ConflictingPackers TypeU TypeU
-  | IncompatibleRealization MVar
-  | MissingAbstractType
-  | ExpectedAbstractType
-  | CannotInferConcretePrimitiveType Type Text
-  | ToplevelStatementsHaveNoLanguage
-  | InconsistentWithinTypeLanguage
-  | CannotInferLanguageOfEmptyRecord
-  | ConflictingSignatures
-  | CompositionsMustBeGeneral
-  | IllegalConcreteAnnotation
-  | -- type synthesis errors
-    CannotSynthesizeConcreteType MVar Source TypeU [Text]
-  | -- typeclass errors
-    TypeclassError Text
-  | MissingTypeclassDefinition ClassName EVar
-  | ConflictingClasses ClassName ClassName EVar
-  | OverlappingClasses ClassName MVar MVar
-  | OverlappingClassesSameModule ClassName MVar
-  | ConflictingInstances Text Instance Instance
-  | InstanceSizeMismatch ClassName [TVar] [TypeU]
-  | IllegalExpressionInInstance ClassName [TypeU] Expr
-  | CannotUnifySignatures SignatureSet SignatureSet
-  | NoInstanceFound ClassName EVar
-  | AmbiguousInstances ClassName EVar
-  | -- valuecheck errors
-    ValueContradiction E E
-  | InseperableDefinitions Text
+  = SourcedError Int MDoc
+  | SystemError MDoc
+  | UnificationError Int Int Int MDoc
+  deriving (Show)
 
 ---- Fundamental class instances
 
@@ -1191,6 +1094,7 @@ instance Defaultable MorlocState where
       , stateName = Map.empty
       , stateManifoldConfig = Map.empty
       , stateTypeQualifier = Map.empty
+      , stateSourceMap = Map.empty
       , stateBuildConfig = defaultValue
       }
 
@@ -1371,6 +1275,10 @@ mostSpecific :: [TypeU] -> [TypeU]
 mostSpecific = P.maxima
 
 ----- Pretty instances -------------------------------------------------------
+
+instance Pretty SrcLoc where
+  pretty (SrcLoc path ln col) =
+    maybe "<unknown>" pretty path <> ":" <> pretty ln <> ":" <> pretty col
 
 instance Pretty Lit where
   pretty (MNum x) = viaShow x
@@ -1682,213 +1590,6 @@ instance Pretty ExecutableExpr where
 
 instance Pretty Signature where
   pretty (Signature v _ e) = pretty v <+> "::" <+> pretty (etype e)
-
-instance Show MorlocError where
-  show = DT.unpack . render . pretty
-
-instance Show TypeError where
-  show = DT.unpack . render . pretty
-
-instance Pretty MorlocError where
-  pretty (IndexedError i e) = "At index" <+> pretty i <> ":" <+> pretty e
-  pretty (NotImplemented msg) = "Not yet implemented: " <> pretty msg
-  pretty (UnknownLanguage lang) =
-    "'" <> pretty lang <> "' is not recognized as a supported language"
-  pretty (SyntaxError err') = "SyntaxError: " <> pretty (errorBundlePretty err')
-  pretty (SerializationError t) = "SerializationError: " <> pretty t
-  pretty (CannotLoadModule t) = "CannotLoadModule: " <> pretty t
-  pretty (ModuleInstallError t) = "ModuleInstallError: \n" <> pretty t
-  pretty (SystemCallError cmd loc msg) =
-    "System call failed at ("
-      <> pretty loc
-      <> "):\n"
-      <> " cmd> "
-      <> pretty cmd
-      <> "\n"
-      <> " msg>\n"
-      <> pretty msg
-  pretty (PoolBuildError msg) = "PoolBuildError: " <> pretty msg
-  pretty (UndefinedVariable v) = "Undefined variable" <+> squotes (pretty v)
-  pretty (SelfRecursiveTypeAlias v) = "SelfRecursiveTypeAlias: " <> pretty v
-  pretty (MutuallyRecursiveTypeAlias vs) = "MutuallyRecursiveTypeAlias: " <> tupled (map pretty vs)
-  pretty (BadTypeAliasParameters v exp' obs) =
-    "BadTypeAliasParameters: for type alias "
-      <> pretty v
-      <> " expected "
-      <> pretty exp'
-      <> " parameters but found "
-      <> pretty obs
-  pretty (ConflictingTypeAliases t1 t2) =
-    "ConflictingTypeAliases:"
-      <> "\n  t1:" <+> pretty t1
-      <> "\n  t2:" <+> pretty t2
-  pretty (CallTheMonkeys msg) =
-    "There is a bug in the code, send this message to the maintainer: " <> pretty msg
-  pretty (GeneratorError msg) = "GeneratorError: " <> pretty msg
-  pretty (ConcreteTypeError err') = "Concrete type error: " <> pretty err'
-  pretty (GeneralTypeError err') = "General type error: " <> pretty err'
-  pretty ToplevelRedefinition = "ToplevelRedefinition"
-  pretty (OtherError msg) = "OtherError: " <> pretty msg
-  -- TODO: this will be a common class of errors and needs an informative message
-  pretty (IncompatibleGeneralType a b) =
-    "Incompatible general types:" <+> parens (pretty a) <+> "vs" <+> parens (pretty b)
-  -- container errors
-  pretty EmptyTuple = "EmptyTuple"
-  pretty TupleSingleton = "TupleSingleton"
-  pretty EmptyRecord = "EmptyRecord"
-  pretty (BadPattern msg) = "Bad pattern:" <+> pretty msg
-  -- module errors
-  pretty (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations: " <> tupled (map pretty mv)
-  pretty (NestedModule name') = "Nested modules are currently illegal: " <> pretty name'
-  pretty (NonSingularRoot ms) = "Expected exactly one root module, found" <+> list (map pretty ms)
-  pretty (ImportExportError (MV m) msg) = "ImportExportError in module '" <> pretty m <> "': " <> pretty msg
-  pretty (CannotFindModule name') = "Cannot find morloc module '" <> pretty name' <> "'"
-  pretty (CyclicDependency msg) = "CyclicDependency:" <+> pretty msg
-  pretty (SelfImport _) = "SelfImport"
-  pretty BadRealization = "BadRealization"
-  pretty MissingSource = "MissingSource"
-  pretty (ConflictingFixity v) = "Conflicting fixity definitions for" <+> pretty v
-  pretty (AmbiguousOperators v1 v2) =
-    "Ambiguous use of" <+> pretty v1 <+> "and" <+> pretty v2
-      <> "; parenthesize or declare compatible fixities"
-  -- serialization errors
-  pretty (CyclicPacker t1 t2) =
-    "Error CyclicPacker - a term is described as both a packer and an unpacker:\n  "
-      <> pretty t1
-      <> "\n  "
-      <> pretty t2
-  -- type extension errors
-  pretty (ConflictingPackers t1 t2) =
-    "Error ConflictingPackers:"
-      <> "\n  t1:" <+> pretty t1
-      <> "\n  t2:" <+> pretty t2
-  pretty (UndefinedType v) =
-    "UndefinedType: could not resolve type" <+> squotes (pretty v)
-      <> ". You may be missing a language-specific type definition."
-  pretty (AmbiguousPacker _) = "AmbiguousPacker"
-  pretty (AmbiguousUnpacker _) = "AmbiguousUnpacker"
-  pretty (AmbiguousCast _ _) = "AmbiguousCast"
-  pretty (IllegalPacker t) = "IllegalPacker:" <+> pretty t
-  pretty (IncompatibleRealization _) = "IncompatibleRealization"
-  pretty MissingAbstractType = "MissingAbstractType"
-  pretty ExpectedAbstractType = "ExpectedAbstractType"
-  pretty (CannotInferConcretePrimitiveType t msg) =
-    "Cannot infer concrete primitive type for" <+> parens (pretty t)
-      <> ":" <+> pretty msg
-  pretty ToplevelStatementsHaveNoLanguage = "ToplevelStatementsHaveNoLanguage"
-  pretty InconsistentWithinTypeLanguage = "InconsistentWithinTypeLanguage"
-  pretty CannotInferLanguageOfEmptyRecord = "CannotInferLanguageOfEmptyRecord"
-  pretty ConflictingSignatures = "ConflictingSignatures: currently a given term can have only one type per language"
-  pretty CompositionsMustBeGeneral = "CompositionsMustBeGeneral"
-  pretty IllegalConcreteAnnotation = "IllegalConcreteAnnotation"
-  pretty (DocStrError msg) = "Bad DocString: " <> pretty msg
-  pretty (DagMissingKey msg) = "DagMissingKey: " <> pretty msg
-  pretty TooManyRealizations = "TooManyRealizations"
-  pretty (CannotSynthesizeConcreteType m src t []) =
-    "Cannot synthesize"
-      <+> pretty (srcLang src)
-      <+> "type for"
-      <+> squotes (pretty (srcAlias src))
-      <+> "in module"
-      <+> pretty m
-      <+> "from general type:"
-      <+> parens (pretty t)
-  pretty (CannotSynthesizeConcreteType m src t vs) =
-    pretty (CannotSynthesizeConcreteType m src t [])
-      <> "\n"
-      <> "  Cannot resolve concrete types for these general types:" <+> list (map pretty vs)
-      <> "\n"
-      <> "  Are you missing type alias imports?"
-  pretty (TypeclassError msg) = "TypeclassError:" <+> pretty msg
-  pretty (MissingTypeclassDefinition cls v) = "No definition found in typeclass" <+> dquotes (pretty cls) <+> "for term" <+> dquotes (pretty v)
-  pretty (ConflictingClasses cls1 cls2 v) =
-    "Conflicting typeclasses for"
-      <+> pretty v
-      <+> "found definitions in both"
-      <+> pretty cls1
-      <+> "and"
-      <+> pretty cls2
-  pretty (OverlappingClasses cls m1 m2) =
-    "Typeclass"
-      <+> pretty cls
-      <+> "has overlapping definitions in both"
-      <+> pretty m1
-      <+> "and"
-      <+> pretty m2
-  pretty (OverlappingClassesSameModule cls m) = "Typeclass" <+> pretty cls <+> "is defined multiple times in" <+> pretty m
-  pretty (ConflictingInstances msg inst1 inst2)
-    | inst1 == inst2 =
-        "Found conflict between overlapping instances for class"
-          <+> squotes (pretty (className inst1))
-          <> ":"
-            <+> pretty msg
-    | otherwise =
-        "Found conflict between overlapping instances for classes"
-          <+> squotes (pretty (className inst1))
-          <+> "and"
-          <+> squotes (pretty (className inst2))
-          <> ":"
-            <+> pretty msg
-  pretty (InstanceSizeMismatch cls vs ts) =
-    "For class"
-      <+> pretty cls
-      <+> "expected"
-      <+> pretty (length vs)
-      <+> "parameters"
-      <+> tupled (map pretty vs)
-      <+> "but found"
-      <+> pretty (length ts)
-      <+> tupled (map pretty ts)
-  pretty (IllegalExpressionInInstance cls ts e) =
-    "Illegal expression found in" <+> pretty cls <+> "instance for"
-      <> "\n   "
-      <> align (hsep (map pretty ts))
-      <> "\n   "
-      <> pretty e
-  pretty (CannotUnifySignatures s1 s2) =
-    "CannotUnifySignatures: cannot unify the polymorphic signature sets below:"
-      <> "\n  s1:" <+> pretty s1
-      <> "\n  s2:" <+> pretty s2
-  pretty (NoInstanceFound cls v) =
-    "No instance found for" <+> pretty cls
-      <> "::"
-      <> pretty v
-      <> "\n  Are you missing a top-level type signature?"
-  pretty (AmbiguousInstances cls v) = "Ambiguous instances found for" <+> pretty cls <> "::" <> pretty v
-  pretty (ValueContradiction x y) = "ValueContradiction" <+> pretty x <+> "!=" <+> pretty y
-  pretty (InseperableDefinitions msg) = "InseperableDefinitions" <+> pretty msg
-
-instance Pretty TypeError where
-  pretty (SubtypeError t1 t2 msg) =
-    "SubtypeError:" <+> pretty msg
-      <> "\n  "
-      <> "("
-      <> pretty t1 <+> "<:" <+> pretty t2
-      <> ")"
-  pretty (InstantiationError t1 t2 msg) =
-    "InstantiationError:" <+> "("
-      <> pretty t1 <+> "<:=" <+> pretty t2
-      <> ")"
-      <> "\n"
-      <> "   "
-      <> align (pretty msg)
-  pretty (EmptyCut gi) = "EmptyCut:" <+> pretty gi
-  pretty (OccursCheckFail t1 t2 msg) = "OccursCheckFail:" <+> parens (pretty t1) <+> parens (pretty t2) <+> ":" <+> pretty msg
-  pretty (Mismatch t1 t2 msg) =
-    "Mismatch"
-      <+> tupled ["t1=" <> pretty t1, "t2=" <> pretty t2]
-      <+> pretty msg
-  pretty (UnboundVariable v) = "UnboundVariable:" <+> pretty v
-  pretty (KeyError k t) = "KeyError:" <+> dquotes (pretty k) <+> "not found in record:" <+> pretty t
-  pretty ApplicationOfNonFunction = "ApplicationOfNonFunction"
-  pretty TooManyArguments = "TooManyArguments"
-  pretty InfiniteRecursion = "InfiniteRecursion"
-  pretty (FunctionSerialization v) = "Undefined function" <+> dquotes (pretty v) <> ", did you forget an import?"
-  pretty (InvalidApplication f xs t) =
-    "InvalidFunctionApplication:"
-      <> "\n  application:" <+> pretty f <+> hsep (map (parens . pretty) xs)
-      <> "\n  where" <+> pretty f <+> "::" <+> pretty t
-  pretty (TypeEvaluationError msg) = pretty msg
 
 ------- Helper functions
 

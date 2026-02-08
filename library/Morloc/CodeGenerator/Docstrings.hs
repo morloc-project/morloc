@@ -16,6 +16,7 @@ import qualified Morloc.BaseTypes as MBT
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Text as MT
+import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
 
 -- Most of the transmogrification of docstrings occurs in the parser, but there
@@ -137,7 +138,7 @@ makeCmdArg recType@(NamT _ _ _ rs) (ArgDocRec arg entries) = do
   resolveArgDocVars typedEntries recType arg
 makeCmdArg t (ArgDocRec r _) = resolveArgDocVars [] t r
 makeCmdArg t (ArgDocAlias r) = resolveArgDocVars [] t r
-makeCmdArg _ (ArgDocSig _ _ _) = MM.throwError . DocStrError $ "Illegal functional CLI parameter"
+makeCmdArg _ (ArgDocSig _ _ _) = MM.throwSystemError "Illegal functional CLI parameter"
 
 resolveArgDocVars :: [(Key, (Type, ArgDocVars))] -> Type -> ArgDocVars -> MorlocMonad CmdArg
 resolveArgDocVars rs t r
@@ -166,7 +167,7 @@ resolveGrp recType@(NamT _ v _ _) arg argEntries = do
           eitherFlag <- resolveFlag r
           case eitherFlag of
             (Right flag) -> return $ (k, Left flag)
-            (Left _) -> MM.throwError . DocStrError $ "Non-optional field found in unrolled record"
+            (Left _) -> MM.throwSystemError $ "Non-optional field found in unrolled record"
       | otherwise = do
           opt <- resolveOpt t r
           return (k, Right opt)
@@ -191,10 +192,10 @@ resolveFlag r =
     (Just rt, Nothing, Just False) -> flag rt Nothing False
     (Just rt, Just rf, Just False) -> flag rt (Just rf) False
     -- handle noop cases
-    (Just _, Nothing, Just True) -> MM.throwError . DocStrError $ "Noop flag"
-    (Nothing, Just _, Just False) -> MM.throwError . DocStrError $ "Noop flag"
+    (Just _, Nothing, Just True) -> MM.throwSystemError "Noop flag"
+    (Nothing, Just _, Just False) -> MM.throwSystemError "Noop flag"
     -- handle positional with a given default
-    (Nothing, Nothing, Just _) -> MM.throwError . DocStrError $ "Positional argument with default"
+    (Nothing, Nothing, Just _) -> MM.throwSystemError "Positional argument with default"
     -- handle positional
     (Nothing, Nothing, Nothing) ->
       return . Left $
@@ -224,8 +225,8 @@ resolveFlagCmdArg r = do
 
 resolveOpt :: Type -> ArgDocVars -> MorlocMonad ArgOptDocSet
 resolveOpt t r = case (docArg r, docDefault r) of
-  (Nothing, _) -> MM.throwError . DocStrError $ "Optional argument missing tags"
-  (Just opt, Nothing) -> MM.throwError . DocStrError $ "Optional argument " <> makeArg opt <> " must have default values"
+  (Nothing, _) -> MM.throwSystemError "Optional argument missing tags"
+  (Just opt, Nothing) -> MM.throwSystemError $ "Optional argument " <> pretty (makeArg opt) <> " must have default values"
   (Just opt, Just def) ->
     return $
       ArgOptDocSet

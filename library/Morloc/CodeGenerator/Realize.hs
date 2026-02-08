@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE CPP #-}
 
 {- |
 Module      : Morloc.CodeGenerator.Realize
@@ -258,9 +259,7 @@ realize s0 = do
     collapseExpr gt l1 (VarS v (Many xs), Idx i _) = do
       let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) xs
       (x, lang) <- case minXs of
-        [] ->
-          MM.throwError . GeneratorError . render $
-            "No implementation found for" <+> squotes (pretty v)
+        [] -> MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty v)
         [x] -> handleOne x
         choices -> mapM handleOne choices >>= handleMany gt
       return (VarS v (One x), Idx i lang)
@@ -290,8 +289,7 @@ realize s0 = do
               gscope <- MM.getGeneralScope i
               case TE.reduceType gscope (type2typeu gt') of
                 (Just gt'') -> handleMany (typeOf gt'') xs'
-                Nothing ->
-                  MM.throwError . GeneratorError . render $
+                Nothing -> MM.throwSourcedError i $
                     "I couldn't find implementation for" <+> squotes (pretty v) <+> "gt' = " <+> pretty gt'
             [x'] -> return x'
             (x' : _) -> return x'
@@ -299,7 +297,7 @@ realize s0 = do
     ----- NOTE: Some cases are inseperable, the code above does not
     ----- account for this, which may allow incorrect code to be
     ----- generated.
-    -- xs' ->  MM.throwError . InseperableDefinitions . render
+    -- xs' ->  MM.throwSystemError
     --   $ "no rule to separate the following sourced functions of type" <+> parens (pretty gt)":\n"
     --   <> indent 2 (vsep [ "*" <+> pretty t <+> ":" <+> pretty y | y@(AnnoS (Idx _ t) _ _, _)  <- xs'])
 
@@ -369,7 +367,8 @@ realize s0 = do
     propagateDown ::
       AnnoS (Indexed Type) One (Indexed (Maybe Lang)) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
-    propagateDown (AnnoS _ (Idx _ Nothing) _) = MM.throwError . CallTheMonkeys $ "Nothing is not OK"
+    propagateDown (AnnoS _ (Idx i Nothing) _) =
+      MM.throwSourcedError i $ "Compiler bug: (__FILE__:__LINE__) - Unexpected Nothing"
     propagateDown e@(AnnoS _ (Idx _ (Just lang0)) _) = f lang0 e
       where
         f ::

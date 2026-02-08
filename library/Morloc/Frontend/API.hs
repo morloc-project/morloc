@@ -26,6 +26,8 @@ import qualified Morloc.Frontend.Typecheck as Typecheck
 import qualified Morloc.Frontend.Valuecheck as Valuecheck
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
+import Morloc.Data.Doc
+import Text.Megaparsec.Error (errorBundlePretty)
 
 parse ::
   -- | path to the current module (if we are reading from a file)
@@ -40,7 +42,7 @@ parse f (Code code) = do
 
   -- MM.say $ "Parsing" <+> maybe "<stdin>" MD.viaShow f
   case Parser.readProgram Nothing f code (parserState {stateModuleConfig = moduleConfig}) mempty of
-    (Left e) -> MM.throwError $ SyntaxError e
+    (Left e) -> MM.throwSystemError $ pretty (errorBundlePretty e)
     (Right (mainDag, mainState)) -> parseImports mainDag mainState Map.empty
   where
     -- descend recursively into imports
@@ -50,7 +52,10 @@ parse f (Code code) = do
       Map.Map MVar Path ->
       MorlocMonad (DAG MVar Import ExprI)
     parseImports d s m = case unimported of
-      [] -> return d
+      [] -> do
+        -- transfer source positions from parser state into MorlocState
+        MM.modify (\st -> st { stateSourceMap = stateSourcePositions s <> stateSourceMap st })
+        return d
       ((mainModule, importedModule) : _) -> do
         importPath <- case Map.lookup mainModule m of
           (Just mainPath) -> Mod.findModule (Just mainPath, mainModule) importedModule
@@ -63,7 +68,7 @@ parse f (Code code) = do
         Mod.loadModuleMetadata importPath
         (childPath, code') <- openLocalModule importPath
         case Parser.readProgram (Just importedModule) childPath code' newState d of
-          (Left e) -> MM.throwError $ SyntaxError e
+          (Left e) -> MM.throwSystemError $ pretty (errorBundlePretty e)
           (Right (d', s')) -> parseImports d' s' (maybe m (\v -> Map.insert importedModule v m) childPath)
       where
         -- all modules that have already been parsed

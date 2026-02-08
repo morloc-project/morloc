@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {- |
 Module      : Morloc.Frontend.AST
 Description : Functions for parsing the Expr abstract syntax trees
@@ -22,6 +24,7 @@ module Morloc.Frontend.AST
 
 import qualified Data.Set as Set
 import qualified Morloc.Data.Map as Map
+import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
 import Morloc.Frontend.Namespace
 
@@ -106,7 +109,7 @@ findFixityMap (ExprI _ (ModE _ es)) = do
 
   tryAddTerm :: Map.Map EVar (Associativity, Int) -> (EVar, (Associativity, Int)) -> MorlocMonad (Map.Map EVar (Associativity, Int))
   tryAddTerm m (k, v)
-    | Map.member k m = MM.throwError . ConflictingFixity $ k
+    | Map.member k m = MM.throwSystemError $ "Conflicting fixity definitions for" <+> pretty k
     | otherwise = return $ Map.insert k v m
 findFixityMap _ = return Map.empty
 

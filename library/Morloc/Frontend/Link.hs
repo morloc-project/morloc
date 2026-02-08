@@ -73,6 +73,9 @@ realiasLinkState m1 (_, ss, s) = do
       [] -> return $ Map.fromList [(v, i) | (v, Just i) <- xs]
       missing -> error $ "Undefined " <> msg <> " imports:" <> show missing <> "\n  ss = " <> show ss
 
+throwInheritanceError :: MVar -> MDoc -> MorlocMonad a
+throwInheritanceError m msg = MM.throwSystemError $ "In module" <+> pretty m <> ":" <+> msg
+
 -- All LinkState objects whould have already been renamed by realiasLinkState.
 --
 -- will raise error if
@@ -106,27 +109,20 @@ mergeLinkStates m0 imps = do
     mergeTerms _ [(_, i)] = return i
     mergeTerms v ((_, i) : (m2, j) : xs)
       | i == j = mergeTerms v ((m2, j) : xs)
-      | otherwise =
-          MM.throwError . ImportExportError m0 . render $
-            "Illegal masking of term"
-              <+> squotes (pretty v)
-              <+> "imported from"
-              <+> pretty m2
+      | otherwise = throwInheritanceError m0 $ "Illegal masking of term" <+> squotes (pretty v) <+> "imported from" <+> pretty m2
 
     mergeClasses :: ClassName -> [(MVar, (Int, a, Map EVar Int))] -> MorlocMonad (Int, a, Map EVar Int)
     mergeClasses _ [] = error "This will never be empty"
     mergeClasses _ [(_, x)] = return x
     mergeClasses v ((m1, (i, _, _)) : (m2, y@(j, _, _)) : xs)
       | i == j = mergeClasses v ((m2, y) : xs)
-      | otherwise =
-          MM.throwError . ImportExportError m0 . render $
-            "Cannot merge non-eqivalent classes imported from modules" <+> pretty m1 <+> "and" <+> pretty m2
+      | otherwise = MM.throwSystemError $ "Cannot merge non-eqivalent classes imported from modules" <+> pretty m1 <+> "and" <+> pretty m2
 
     checkTermClassConflicts :: Map EVar Int -> Map ClassName (Int, a, Map EVar Int) -> MorlocMonad ()
     checkTermClassConflicts me mc = case catMaybes . map (checkTermClassConflict me) $ Map.toList mc of
       [] -> return ()
       ((cls, vs) : _) ->
-        MM.throwError . ImportExportError m0 . render $
+        throwInheritanceError m0 $
           "The following terms in the typeclass"
             <+> squotes (pretty cls)
             <+> "conflict with monomorphic terms in scope:"
@@ -189,7 +185,7 @@ addLocalState m0 e0 s0 = do
     insertWithCheck :: EVar -> Instance -> Map EVar Instance -> MorlocMonad (Map EVar Instance)
     insertWithCheck k v m = case Map.lookup k m of
       (Just inst2) ->
-        MM.throwError . ImportExportError m0 . render $
+        throwInheritanceError m0 $
           "Conflict between typeclasses over term"
             <+> squotes (pretty k)
             <+> "that is present the typeclasses"
@@ -240,7 +236,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
         -- its use will raise a dedicated error later. So we let it pass for now.
         Nothing -> return ()
         (Just (_, Just (Typeclass cls _ _))) ->
-          MM.throwError . TypeclassError . render $
+          MM.throwSourcedError i $
             "Source term"
               <+> squotes (pretty (srcAlias src))
               <+> " shadows the typeclass"
@@ -258,7 +254,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                   idmap' = Map.insert i termIdx idmap
               MM.modify (\s -> s {stateSignatures = GMap idmap' sigmap'})
             (Just (Polymorphic cls _ _ _)) ->
-              MM.throwError . TypeclassError . render $
+              MM.throwSourcedError i $
                 "Source term"
                   <+> squotes (pretty (srcAlias src))
                   <+> " overlaps a term in typeclass"
@@ -294,13 +290,11 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
               c'' <- foldrM (addLocalState m0) c' (e : es)
 
               mapM_ (linkLocal bnds' c'' (toCondensedState c'')) (e : es)
-            (Just (Polymorphic cls _ _ _)) ->
-              MM.throwError . TypeclassError . render $
+            (Just (Polymorphic cls _ _ _)) -> MM.throwSourcedError i $
                 "Declared term" <+> squotes (pretty v) <+> " overlaps a term in typeclass" <+> squotes (pretty cls)
-    linkLocal bnds c cs (ExprI _ (IstE cls ts es)) = do
+    linkLocal bnds c cs (ExprI i (IstE cls ts es)) = do
       case Map.lookup cls (linkClasses c) of
-        Nothing ->
-          MM.throwError . TypeclassError . render $
+        Nothing -> MM.throwSourcedError i $
             "There is no typeclass declaration for instance"
               <+> squotes (pretty cls)
               <+> "in the scope of module"
@@ -308,7 +302,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
         (Just (_, Typeclass _ vs sigs, emap)) ->
           if length vs /= length ts
             then
-              MM.throwError . TypeclassError . render $
+              MM.throwSourcedError i $
                 "In module" <+> squotes (pretty m0)
                   <> ": the instance and typeclass definitions for"
                     <+> squotes (pretty cls)
@@ -319,8 +313,8 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
       | otherwise = case Map.lookup v cs of
           -- handle both monomorphic terms and polymorphic typeclass terms
           (Just (sigIdx, _)) -> updateSigLinks v termIdx sigIdx
-          Nothing -> MM.throwError . ImportExportError m0 $ "Undefined term: " <> unEVar v
-    linkLocal _ _ cs (ExprI _ (ExpE (ExportMany (Set.toList -> ss)))) =
+          Nothing -> MM.throwSourcedError termIdx $ "Undefined term: " <> pretty v
+    linkLocal _ _ cs (ExprI i (ExpE (ExportMany (Set.toList -> ss)))) =
       mapM_ linkExp [(v, termIdx, Map.lookup v cs) | (termIdx, TermSymbol v) <- ss]
       where
         linkExp :: (EVar, Int, Maybe (Int, a)) -> MorlocMonad ()
@@ -329,12 +323,11 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
         -- Is raised when an exported term, such as a sourced function, is
         -- exported with no signature in scope.
         linkExp (v, _, Nothing) =
-          MM.throwError . ImportExportError m0 . render $
-            "Undefined export" <+> squotes (pretty v)
+          MM.throwSourcedError i $ "Undefined export" <+> squotes (pretty v)
     linkLocal _ _ _ (ExprI _ (ExpE ExportAll)) = error "Bug: ExportAll should no longer be present"
     -- Shadowing is allowed, so here all terms in `s` that are bound by the lambda
     -- need to be removed
-    linkLocal bnds c cs (ExprI _ (LamE vs e)) = do
+    linkLocal bnds c cs (ExprI i (LamE vs e)) = do
       (c', cs') <- foldlM shadow (c, cs) vs
       let bnds' = Set.union bnds (Set.fromList vs)
       linkLocal bnds' c' cs' e
@@ -347,14 +340,13 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
           Nothing -> return (ls, cs)
           (Just (_, Nothing)) -> return (ls {linkTerms = Map.delete v (linkTerms ls)}, Map.delete v cs')
           (Just (_, Just _)) ->
-            MM.throwError . TypeclassError . render $
-              "Illegal shadowing of typeclass term:" <+> pretty v
+            MM.throwSourcedError i $ "Illegal shadowing of typeclass term:" <+> pretty v
 
     -- The `m` should always be the same as `m0`, since modules don't next.
     -- Even if there are two modules defined in one file, they will still be
     -- unnested, same as if they were in different files.
-    linkLocal bnds c cs (ExprI _ (ModE m es))
-      | m /= m0 = MM.throwError . NestedModule $ m
+    linkLocal bnds c cs (ExprI i (ModE m es))
+      | m /= m0 = MM.throwSourcedError i $ "Nested modules are not currently supported"
       | otherwise = mapM_ (linkLocal bnds c cs) es
     -- simple recursive cases
     linkLocal bnds c cs (ExprI _ (LstE es)) = mapM_ (linkLocal bnds c cs) es
@@ -417,8 +409,7 @@ linkInstance linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
     lookupInfo v = case ([sig | sig@(Signature v' _ _) <- sigs0, v == v'], Map.lookup v emap0) of
       ([sig], Just i) -> return (sig, i)
       _ ->
-        MM.throwError . TypeclassError . render $
-          "Instance of class" <+> squotes (pretty cls0) <+> "contains undefined term" <+> squotes (pretty v)
+        MM.throwSystemError $ "In module" <+> pretty m0 <> ": Instance of class" <+> squotes (pretty cls0) <+> "contains undefined term" <+> squotes (pretty v)
 
     linkTermTypes :: EVar -> EType -> TermTypes -> Int -> MorlocMonad ()
     linkTermTypes v et tt stateIdx = do

@@ -156,10 +156,10 @@ valuecheckPass msg code =
       (Right _) -> return ()
       (Left _) -> assertFailure . MT.unpack $ "Expected '" <> code <> "' to pass"
 
--- FIXME: check that the correct error type is raised, but don't check message
--- (tweaking messages shouldn't break tests)
-expectError :: String -> MorlocError -> MT.Text -> TestTree
-expectError msg _ code =
+-- Don't test the type of error message, that would incur too much fiddly
+-- overhead as the messages and such are tweaked.
+expectError :: String -> MT.Text -> TestTree
+expectError msg code =
   testCase msg $ do
     result <- runFront code
     case result of
@@ -441,28 +441,8 @@ typeAliasTests =
            f = g  {- yes, g isn't defined -}
         |]
         (fun [var "A", var "Int"])
-    , -- , expectError
-      --     "fail neatly for self-recursive type aliases"
-      --     (SelfRecursiveTypeAlias (TV "A"))
-      --     [r|
-      --        type A = (A,A)
-      --        foo :: A -> B -> C
-      --        foo
-      --     |]
-      -- -- TODO: find a way to catch mutually recursive type aliases
-      -- , expectError
-      --     "fail neatly for mutually-recursive type aliases"
-      --     (MutuallyRecursiveTypeAlias [TV "A", TV "B"])
-      --     (MT.unlines
-      --       [ "type A = B"
-      --       , "type B = A"
-      --       , "foo :: A -> B -> C"
-      --       , "foo"
-      --       ]
-      --     )
-      expectError
+    , expectError
         "fail on too many type aliases parameters"
-        (BadTypeAliasParameters (TV "A") 0 1)
         [r|
            type A = B
            foo :: A Int -> C
@@ -470,7 +450,6 @@ typeAliasTests =
         |]
     , expectError
         "fail on too few type aliases parameters"
-        (BadTypeAliasParameters (TV "A") 1 0)
         [r|
            type (A a) = (a,a)
            foo :: A -> C
@@ -478,7 +457,6 @@ typeAliasTests =
         |]
     , expectError
         "fail on conflicting types (Int vs Str)"
-        (ConflictingTypeAliases int str)
         [r|
            type A = Int
          
@@ -493,10 +471,6 @@ typeAliasTests =
         |]
     , expectError
         "fail on conflicting types (Map vs List)"
-        ( ConflictingTypeAliases
-            (forallu ["a", "b"] $ lst (tuple [var "a", var "b"]))
-            (forallu ["a", "b"] $ arr "Map" [var "a", var "b"])
-        )
         [r|
            module a (A)
            type A a b = Map a b
@@ -1191,7 +1165,6 @@ unitTypeTests =
         |]
     , expectError
         "applications of non-functions should fail (1)"
-        (GeneralTypeError ApplicationOfNonFunction)
         [r|
         f = 5
         g = \x -> f x
@@ -1199,7 +1172,6 @@ unitTypeTests =
         |]
     , expectError
         "applications of non-functions should fail (2)"
-        (GeneralTypeError ApplicationOfNonFunction)
         [r|
         f = 5
         g = \h -> h 5
@@ -1208,7 +1180,6 @@ unitTypeTests =
     , -- evaluation within containers
       expectError
         "arguments to a function are monotypes"
-        (GeneralTypeError (SubtypeError int bool "Expect monotype"))
         [r|
         f a :: a -> a
         g = \h -> (h 42, h True)
@@ -1437,7 +1408,6 @@ unitTypeTests =
         (fun [int, bool])
     , expectError
         "primitive type mismatch should raise error"
-        (GeneralTypeError (SubtypeError int bool "mismatch"))
         [r|
         module main (f)
         f :: Int -> Bool
@@ -1445,7 +1415,6 @@ unitTypeTests =
         |]
     , expectError
         "catch infinite recursion of list"
-        (GeneralTypeError InfiniteRecursion)
         [r|
         module main (f)
         g a :: [a] -> a
@@ -1454,7 +1423,6 @@ unitTypeTests =
         |]
     , expectError
         "catch infinite recursion of tuple"
-        (GeneralTypeError InfiniteRecursion)
         [r|
         module main (f)
         g a b :: (a, b) -> a
@@ -1463,7 +1431,6 @@ unitTypeTests =
         |]
     , expectError
         "check signatures under supposed identity"
-        (GeneralTypeError InfiniteRecursion)
         [r|
         module main (f)
         g a b :: (a -> b) -> a

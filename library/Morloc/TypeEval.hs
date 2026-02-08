@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE CPP #-}
 
 {- |
 Module      : Morloc.TypeEval
@@ -78,16 +79,18 @@ resolveIgnore ::
   Either MorlocError TypeU
 resolveIgnore f bnd (AppU (VarU v) ts) = AppU (VarU v) <$> mapM (f bnd) ts
 resolveIgnore _ _ t@(VarU _) = return t
-resolveIgnore _ _ _ = error "Reached unexpected branch"
+resolveIgnore _ _ _ = MM.throwSystemError "Compiler bug (__FILE__:__LINE__): Reached unexpected branch"
 
 resolveFail ::
   (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
   Set.Set TVar ->
   TypeU ->
   Either MorlocError TypeU
-resolveFail _ _ (AppU (VarU v) _) = MM.throwError $ UndefinedType v
-resolveFail _ _ (VarU v) = MM.throwError $ UndefinedType v
-resolveFail _ _ _ = error "Reached unexpected branch"
+resolveFail _ _ (AppU (VarU v) _) = MM.throwSystemError $ 
+    "Could not resolve type applied variable" <+> squotes (pretty v) <> ". You may be missing a language-specific type definition."
+resolveFail _ _ (VarU v) = MM.throwSystemError $
+    "Could not resolve type for variable" <+> squotes (pretty v) <> ". You may be missing a language-specific type definition."
+resolveFail _ _ _ = MM.throwSystemError "Compiler bug (__FILE__:__LINE__): Reached unexpected branch"
 
 generalTransformType ::
   Set.Set TVar ->
@@ -148,7 +151,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                   -- substitute the head term and re-evaluate
                   False -> recurse bnd $ foldr parsub newType (zip vs ts)
                 Nothing ->
-                  MM.throwError . OtherError . render $
+                  MM.throwSystemError $
                     "No matching alias found for"
                       <+> viaShow t0
                       <+> "\n  scope"
@@ -175,7 +178,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                   then terminate bnd t2
                   else recurse bnd t2
               Nothing ->
-                MM.throwError . OtherError . render $
+                MM.throwSystemError $
                   "No matching alias found for" <+> viaShow t0
                     <> "\n  scope:" <+> viaShow scope
                     <> "\n  v:" <+> pretty v
@@ -243,7 +246,11 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
           return (Just a)
       -- handle specialization
       | not nonspecialized = return $ selectSpecialization a b
-      | otherwise = MM.throwError (ConflictingTypeAliases t1 t2)
+      | otherwise = MM.throwSystemError
+          $ "Cannot merge conflicting type aliases:"
+          <> "\n  t1:" <+> pretty t1
+          <> "\n  t2:" <+> pretty t2
+
       where
         aIsValid = checkAlias tsMain a
         bIsValid = checkAlias tsMain b

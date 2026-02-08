@@ -79,8 +79,8 @@ loadModuleConfig (Just configFile) = do
       result <- liftIO $ Y.decodeFileEither moduleConfigFile
       case result of
         Left errMsg ->
-          MM.throwError . OtherError . MT.pack $
-            "Failed to parse module config file '" <> configFile <> "': " <> Y.prettyPrintParseException errMsg
+          MM.throwSystemError $
+            "Failed to parse module config file '" <> pretty configFile <> "': " <> pretty (Y.prettyPrintParseException errMsg)
         Right config -> return config
     else
       return defaultValue

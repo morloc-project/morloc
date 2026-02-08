@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE CPP #-}
 
 {- |
 Module      : Morloc.Data.DAG
@@ -191,7 +192,7 @@ mapNodeWithEdge f d = Map.mapWithKey fkey d
   where
     fkey k1 (_, xs0) = case local k1 d of
       (Just (n1, xs1)) -> (f n1 xs1, xs0)
-      Nothing -> error "Bad DAG"
+      Nothing -> error "Compile bug"
 
 -- | map over edges given the nodes the edge connects
 mapEdgeWithNodeM ::
@@ -205,7 +206,7 @@ mapEdgeWithNodeM f d = Map.mapWithKeyM runit d
       (Just (n1, xs)) -> do
         e2s <- mapM (\(_, e, n2) -> f n1 e n2) xs
         return (n1, zip (map (\(x, _, _) -> x) xs) e2s)
-      Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, missing object"
+      Nothing -> MM.throwSystemError "Compiler bug (__FILE__:__LINE__): Incomplete DAG, missing object"
 
 -- | map over edges given the nodes the edge connects
 mapEdgeWithNodeAndKeyM ::
@@ -219,7 +220,7 @@ mapEdgeWithNodeAndKeyM f d = Map.mapWithKeyM runit d
       (Just (n1, xs)) -> do
         e2s <- mapM (\(_, e, n2) -> f k n1 e n2) xs
         return (n1, zip (map (\(x, _, _) -> x) xs) e2s)
-      Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, missing object"
+      Nothing -> MM.throwSystemError "Compiler bug (__FILE__:__LINE__): Incomplete DAG, missing object"
 
 synthesizeNodes ::
   (Ord k, Monad m) =>

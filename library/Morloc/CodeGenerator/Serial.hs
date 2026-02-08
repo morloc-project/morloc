@@ -38,9 +38,6 @@ serialType RLang = CV "character"
 serialType CppLang = CV "std::string"
 serialType _ = error "Ah hell, you know I don't know that language"
 
-serializerError :: MDoc -> MorlocMonad a
-serializerError = MM.throwError . SerializationError . render
-
 -- | recurse all the way to a serializable type
 serialAstToType :: SerialAST -> TypeF
 serialAstToType (SerialPack _ (_, s)) = serialAstToType s
@@ -241,8 +238,7 @@ makeSerialAST m lang t0 = do
             unpacked <- mapM (makeSerialAST' gscope typepackers . typePackerUnpacked) packers
             selection <- selectPacker (zip packers unpacked)
             return $ SerialPack v selection
-          Nothing ->
-            serializerError $
+          Nothing -> MM.throwSourcedError m $
               "Cannot find constructor in VarF" <+> dquotes (pretty v) <+> " finalType=" <> pretty finalType
       where
         finalType =
@@ -260,18 +256,19 @@ makeSerialAST m lang t0 = do
               , typePackerForward = forwardSource
               , typePackerReverse = reverseSource
               }
-        makeTypePacker (nparam, _, _, _, _) = serializerError $ "Unexpected parameters for atomic variable:" <+> pretty nparam
+        makeTypePacker (nparam, _, _, _, _) =
+          MM.throwSourcedError m $ "Unexpected parameters for atomic variable:" <+> pretty nparam
 
         -- Select the first packer we happen across. This is a very key step and
         -- eventually this function should be replaced with one more carefully
         -- considered. But for now, I don't have any great criterion for
         -- choosing.
         selectPacker :: [(TypePacker, SerialAST)] -> MorlocMonad (TypePacker, SerialAST)
-        selectPacker [] = serializerError $ "Cannot find constructor for" <+> pretty cv <+> "in selectPacker"
+        selectPacker [] = MM.throwSourcedError m $ "Cannot find constructor for" <+> pretty cv <+> "in selectPacker"
         selectPacker [x] = return x
-        selectPacker _ = serializerError "Two you say, oh, get out of here"
+        selectPacker _ = MM.throwSourcedError m "Two you say, oh, get out of here"
     makeSerialAST' _ _ t@(FunF _ _) =
-      serializerError $ "Cannot serialize functions at" <+> pretty m <> ":" <+> pretty t
+      MM.throwSourcedError m $ "Cannot serialize functions at" <+> pretty m <> ":" <+> pretty t
     makeSerialAST' gscope typepackers ft@(AppF (VarF fv@(FV generalTypeName _)) ts@(firstType : _))
       | finalVar == Just BT.list = SerialList fv <$> makeSerialAST' gscope typepackers firstType
       | finalVar == Just (BT.tuple (length ts)) =
@@ -283,7 +280,7 @@ makeSerialAST m lang t0 = do
             selection <- selectPacker (zip packers unpacked)
             return $ SerialPack fv selection
           Nothing ->
-            serializerError $
+            MM.throwSourcedError m $
               "Cannot find" <+> pretty generalTypeName <+> "from" <+> dquotes (pretty fv)
                 <> "\n  ft:" <+> pretty ft
                 <> "\n  finalVar:" <+> pretty finalVar
@@ -306,7 +303,7 @@ makeSerialAST m lang t0 = do
 
         selectPacker :: [(TypePacker, SerialAST)] -> MorlocMonad (TypePacker, SerialAST)
         selectPacker [] =
-          serializerError $
+          MM.throwSourcedError m $
             "Cannot find constructor in selectPacker for" <+> pretty ft
               <> "\n  ft:" <+> pretty ft
               <> "\n  generalTypeName (key):" <+> pretty generalTypeName
@@ -316,7 +313,7 @@ makeSerialAST m lang t0 = do
     makeSerialAST' gscope typepackers (NamF o n ps rs) = do
       ts <- mapM (makeSerialAST' gscope typepackers . snd) rs
       return $ SerialObject o n ps (zip (map fst rs) ts)
-    makeSerialAST' _ _ t = serializerError $ "makeSerialAST' error on type:" <+> pretty t
+    makeSerialAST' _ _ t = MM.throwSourcedError m $ "makeSerialAST' error on type:" <+> pretty t
 
 resolvePacker ::
   Lang ->
@@ -378,7 +375,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
       let (ga, ca) = unweaveTypeF a
       unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 []) of
         (Left typeErr) ->
-          serializerError $
+          MM.throwSourcedError m0 $
             "There was an error raised in subtyping while resolving serialization"
               <> "\nThe packer involved maps the type:"
               <> "\n  "
@@ -393,7 +390,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
               <> "\n\nThe generic terms in b should be resolved through subtyping and used to resolve the unpacked type:"
               <> "\n  c:" <+> pretty c
               <> "\n\nHowever, the b <: a step failed:\n"
-              <> pretty typeErr
+              <> typeErr
               <> "\n\nThe packer function may not be generic enough to pack the type you specify, if this is the case, you may need to simplify the datatype"
         (Right g) -> do
           return (apply g (existential c))
@@ -415,7 +412,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
     existential :: TypeU -> TypeU
     existential (ForallU v t0) = substitute v (existential t0)
     existential t0 = t0
-resolvePacker _ _ _ _ = serializerError "No packer found for this type"
+resolvePacker _ m0 _ _ = MM.throwSourcedError m0 $ "No packer found for this type"
 
 cv2tv :: CVar -> TVar
 cv2tv (CV x) = TV x

@@ -60,6 +60,7 @@ module Morloc.Frontend.Lexer
 
 import qualified Control.Monad.State as CMS
 import qualified Data.Char as DC
+import qualified Data.Map.Strict as Map
 import qualified Data.Scientific as DS
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -83,6 +84,7 @@ data ParserState = ParserState
   , stateAccepting :: Bool
   , stateIgnoreAlignment :: Bool
   , stateModuleConfig :: ModuleConfig
+  , stateSourcePositions :: Map.Map Int SrcLoc
   }
   deriving (Show)
 
@@ -97,6 +99,7 @@ emptyState =
     , stateAccepting = False
     , stateIgnoreAlignment = False
     , stateModuleConfig = defaultValue
+    , stateSourcePositions = Map.empty
     }
 
 exprId :: Parser Int
@@ -107,7 +110,19 @@ exprId = do
   return i
 
 exprI :: Expr -> Parser ExprI
-exprI e = ExprI <$> exprId <*> pure e
+exprI e = do
+  i <- exprId
+  pos <- getSourcePos
+  s <- CMS.get
+  CMS.put $ s { stateSourcePositions = Map.insert i (toSrcLoc pos) (stateSourcePositions s) }
+  return (ExprI i e)
+
+toSrcLoc :: SourcePos -> SrcLoc
+toSrcLoc pos = SrcLoc
+  { srcLocPath = Just (sourceName pos)
+  , srcLocLine = unPos (sourceLine pos)
+  , srcLocCol = unPos (sourceColumn pos)
+  }
 
 setMinPos :: Parser ()
 setMinPos = do

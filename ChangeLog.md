@@ -1,3 +1,24 @@
+0.63.0 [2026-02-xx]
+-------------------
+ [ ] Flexible table type
+ [ ] Flexible record type
+
+0.64.0 [2026-03-xx]
+-------------------
+ [ ] server mode
+ [ ] SLURM support
+
+0.62.0 [2026-02-xx]
+-------------------
+ [ ] Apache Arrow format support
+ [ ] streamline language binders
+ [ ] clean up backend architecture
+ [ ] more efficient compiling
+
+0.61.0 [2026-02-xx]
+-------------------
+ [ ] effect system
+
 0.60.0 [2026-02-07]
 -------------------
  * add infix operator support

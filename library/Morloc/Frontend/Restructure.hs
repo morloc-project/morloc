@@ -75,13 +75,13 @@ checkForSelfRecursion d = do
     -- Allow general type existence statements without parameters
     isExprSelfRecursive (ExprI _ (TypE (ExprTypeE Nothing _ [] _ _))) = return ()
     --  and also with parameters
-    isExprSelfRecursive (ExprI _ (TypE (ExprTypeE Nothing v vs t _)))
+    isExprSelfRecursive (ExprI i (TypE (ExprTypeE Nothing v vs t _)))
       | t == AppU (VarU v) (map (either VarU id) vs) = return ()
-      | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v
+      | hasTerm v t = MM.throwSourcedError i $ "Found unsupported self-recursive type alias:" <+> pretty v
       | otherwise = return ()
     -- otherwise disallow self-recursion
-    isExprSelfRecursive (ExprI _ (TypE (ExprTypeE _ v ts t _)))
-      | any (hasTerm v) (t : (rights ts)) = MM.throwError . SelfRecursiveTypeAlias $ v
+    isExprSelfRecursive (ExprI i (TypE (ExprTypeE _ v ts t _)))
+      | any (hasTerm v) (t : (rights ts)) = MM.throwSourcedError i $ "Found unsupported self-recursive type alias:" <+> pretty v
       | otherwise = return ()
     isExprSelfRecursive _ = return ()
 
@@ -97,10 +97,6 @@ checkForSelfRecursion d = do
     hasTerm v (NamU o n (p : ps) []) = hasTerm v p || hasTerm v (NamU o n ps [])
     hasTerm _ (NamU _ _ [] []) = False
     hasTerm _ ExistU {} = error "There should not be existentionals in typedefs"
-
-maybeM :: MorlocError -> Maybe a -> MorlocMonad a
-maybeM _ (Just x) = return x
-maybeM e Nothing = MM.throwError e
 
 resolveHoles ::
   DAG MVar [AliasedSymbol] ExprI ->
@@ -187,9 +183,9 @@ resolveHoles = DAG.mapNodeM unhole
 resolveImports ::
   DAG MVar Import ExprI ->
   MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
-resolveImports d0 =
-  DAG.synthesize resolveExports resolveEdge d0
-    >>= maybeM (CyclicDependency "cyclical import dependency in resolveImports")
+resolveImports d0
+  = DAG.synthesize resolveExports resolveEdge d0
+  >>= maybe (MM.throwSystemError "cyclical import dependency in resolveImports") return
   where
     -- Collect all exported terms from a module (including those imported
     -- without qualification. Then update the ExpE term
@@ -210,9 +206,9 @@ resolveImports d0 =
                 then
                   return explicitExports -- all things exported are defined
                 else
-                  MM.throwError . ImportExportError m . render $
-                    "Module does not export the following terms or types:"
-                      <+> list (map viaShow (Set.toList missing))
+                  MM.throwSystemError $
+                    "Module" <+> pretty m <+> "does not export the following terms or types:"
+                             <+> list (map viaShow (Set.toList missing))
 
       return $ AST.setExport (ExportMany exports) e
 
@@ -264,12 +260,9 @@ resolveImports d0 =
     filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) _) (ExportMany exports) =
       case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
         ([], imps) -> return $ Set.fromList imps
-        (missing, _) ->
-          MM.throwError . ImportExportError m1 $
-            "The following imported terms are not exported from module '"
-              <> unMVar m2
-              <> "': "
-              <> render (list $ map pretty missing)
+        (missing, _) -> MM.throwSystemError
+            $ "The terms imported from" <+> pretty m1 <+> "are not exported from module" <+> pretty m2 <+> ":"
+            <> list (map pretty missing)
       where
         exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList exports]
 
@@ -380,7 +373,7 @@ handleBinops d0 = do
       Nothing -> return $ Map.insert k v m
       (Just v') -> if v == v'
                    then return m
-                   else MM.throwError . ConflictingFixity $ k
+                   else MM.throwSystemError $ "Conflicting fixity definitions for" <+> pretty k
 
     updateBinopExprs :: Map EVar (Associativity, Int) -> ExprI -> MorlocMonad ExprI
     updateBinopExprs m0 = f where
@@ -433,8 +426,8 @@ handleBinops d0 = do
               case remaining of
                 ((_, _, nextOp, _) : _) -> do
                   let (nextAssoc, nextPrec) = lookupFixity nextOp
-                  when (nextPrec == prec && (assoc /= nextAssoc || assoc == InfixN))
-                       (MM.throwError $ AmbiguousOperators op nextOp)
+                  when (nextPrec == prec && (assoc /= nextAssoc || assoc == InfixN)) . MM.throwSourcedError opI $
+                    "Ambiguous use of" <+> pretty op <+> "and" <+> pretty nextOp <> ": parenthesize or declare compatible fixities"
                 [] -> return ()
               let lhs' = ExprI outerI $ AppE (ExprI opI (VarE defaultValue op)) [lhs, rhsParsed]
               pratt minPrec lhs' remaining
@@ -473,7 +466,7 @@ collectTypes fullDag = do
   let typeDag = DAG.mapEdge (\xs -> [(x, y) | AliasedType x y <- xs]) fullDag
   result <- DAG.synthesizeNodes formTypes typeDag
   case result of
-    Nothing -> MM.throwError (CyclicDependency "stalled in collectTypes")
+    Nothing -> MM.throwSystemError "Found cyclic module dependency"
     Just _ -> return ()
   where
     formTypes ::

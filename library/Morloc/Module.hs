@@ -51,6 +51,9 @@ instance FromJSON RepoInfo where
     RepoInfo
       <$> v .: "default_branch"
 
+moduleInstallError :: MDoc -> MorlocMonad a
+moduleInstallError msg = MM.throwSystemError $ "Failed to install module:" <+> msg
+
 -- | Look for a local morloc module.
 findModule :: (Maybe Path, MVar) -> MVar -> MorlocMonad Path
 findModule currentPathAndModule@(_, currentModule) importModule = do
@@ -73,7 +76,7 @@ findModule currentPathAndModule@(_, currentModule) importModule = do
           <> "\n  selecting path:" <+> pretty x
       return x
     [] ->
-      MM.throwError . CannotLoadModule . render $
+      MM.throwSystemError $
         "Within module" <+> squotes (pretty currentModule)
           <> ","
             <+> "failed to import module"
@@ -328,7 +331,7 @@ flagAndPath src@(Source _ CppLang (Just p) _ _ _ _) =
       existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
       case existingPaths of
         (x : _) -> return x
-        [] -> MM.throwError . OtherError $ "Header file " <> MT.pack base <> ".* not found"
+        [] -> MM.throwSystemError $ "Header file " <> pretty base <> ".* not found"
 
     lookupLib :: String -> MorlocMonad [String]
     lookupLib base = do
@@ -347,7 +350,7 @@ flagAndPath src@(Source _ CppLang (Just p) _ _ _ _) =
             ]
         [] -> return []
 flagAndPath src@(Source _ CppLang Nothing _ _ _ _) = return (src, [], Nothing)
-flagAndPath _ = MM.throwError . OtherError $ "flagAndPath should only be called for C++ functions"
+flagAndPath _ = MM.throwSystemError $ "flagAndPath should only be called for C++ functions"
 
 getFile :: Path -> IO (Maybe Path)
 getFile x = do
@@ -414,8 +417,8 @@ installModule ::
   MorlocMonad ()
 installModule overwrite gitprot libpath coreorg modstr =
   case parse (moduleInstallParser (MT.pack coreorg)) "" modstr of
-    (Left errstr) -> MM.throwError . ModuleInstallError . MT.pack . errorBundlePretty $ errstr
-    (Right (Left errstr)) -> MM.throwError . ModuleInstallError $ errstr
+    (Left errstr) -> moduleInstallError (pretty . errorBundlePretty $ errstr)
+    (Right (Left errstr)) -> moduleInstallError $ pretty errstr
     (Right (Right (ModuleSourceLocal path selector))) -> installLocal overwrite libpath selector path
     (Right (Right (ModuleSourceRemoteGit remote))) ->
       let targetDir = libpath </> MT.unpack (gitReponame remote)
@@ -699,16 +702,13 @@ installLocal overwrite libpath maySelector modulePath = do
 
   -- Check if source exists
   sourceExists <- liftIO $ doesDirectoryExist sourceDir
-  unless sourceExists $
-    MM.throwError . ModuleInstallError . render $
-      "Source directory does not exist: " <> pretty sourceDir
+  unless sourceExists . moduleInstallError $ "Source directory does not exist: " <> pretty sourceDir
 
   -- Check if target already exists
   targetExists <- liftIO $ doesDirectoryExist targetDir
 
   case (targetExists, overwrite) of
-    (True, DoNotOverwrite) ->
-      MM.throwError . ModuleInstallError . render $
+    (True, DoNotOverwrite) -> moduleInstallError $
         "Module already exists at" <+> pretty targetDir <+> "and overwrite is disabled"
     (True, ForceOverwrite) -> liftIO $ removeDirectoryRecursive targetDir
     (False, _) ->

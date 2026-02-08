@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE CPP #-}
 
 {- |
 Module      : Morloc.Frontend.Typecheck
@@ -177,13 +178,11 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       --  the general perspective, the evaluate to being equal.
       (g2, es1) <- case mostSpecific [t | (EType t _ _ _, _) <- rssSubtypes] of
         -- if there are no suitable instances, die
-        [] -> do
-          MM.sayVVV $
-            "resolveInstance empty"
-              <> "\n  rss:" <+> pretty rss
-              <> "\n  rssSubtypes:" <+> pretty rssSubtypes
-              <> "\n  gt:" <+> pretty gt
-          MM.throwError $ NoInstanceFound clsName v
+        [] -> throwTypeError genIndex $
+          "No instance found for" <+> pretty clsName
+            <> "::"
+            <> pretty v
+            <> "\n  Are you missing a top-level type signature?"
 
         -- There may be many suitable instances from the general type level,
         -- however, they may differ at the concrete level, so keep all for know
@@ -191,13 +190,6 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
         manyTypes -> do
           -- filter out just the instances that are in the most specific set
           let es0 = concat [rs | (t, rs) <- rssSubtypes, etype t `elem` manyTypes]
-
-          MM.sayVVV $
-            "resolveInstances:"
-              <> "\n  es0:" <+> encloseSep "{" "}" "," (map pretty es0)
-              <> "\n  manyTypes:" <+> pretty manyTypes
-              <> "\n  gt:" <+> pretty gt
-
           g1 <- connectInstance g0 es0
           return (g1, es0)
 
@@ -231,12 +223,12 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     connectInstance g0 (AnnoS (Idx i t) _ _ : es) = do
       scope <- MM.getGeneralScope i
       case subtype scope gt t g0 of
-        (Left e) -> MM.throwError $ GeneralTypeError e
+        (Left e) -> throwTypeError i e
         (Right g1) -> connectInstance g1 es
 
 -- prepare a general, indexed typechecking error
-gerr :: Int -> TypeError -> MorlocMonad a
-gerr i e = MM.throwError $ IndexedError i (GeneralTypeError e)
+throwTypeError :: Int -> MDoc -> MorlocMonad a
+throwTypeError i msg = MM.throwSourcedError i ("General type error:" <+> msg)
 
 checkG ::
   Gamma ->
@@ -595,7 +587,11 @@ etaExpand g0 f0 xs0 t0 = etaExpand' g0 f0 xs0 t0
       -- if there are fewer terms, then eta expand
       | termSize < typeSize = Just <$> etaExpandE (AppS f xs)
       -- if there are more terms than the type permits, then raise an error
-      | otherwise = gerr gidx $ InvalidApplication f xs t0
+      | otherwise = throwTypeError gidx $
+         "Invalid function application:"
+           <> "\n  application:" <+> pretty f <+> hsep (map (parens . pretty) xs)
+           <> "\n  where" <+> pretty f <+> "::" <+> pretty t0
+
       where
         etaExpandE :: ExprS Int ManyPoly Int -> MorlocMonad (Gamma, ExprS Int ManyPoly Int)
         etaExpandE e@(AppS _ _) = tryExpand (typeSize - termSize) e
@@ -679,9 +675,10 @@ application i g0 es (ExistU v@(TV s) ([], _) _) =
       (Just (FunU ts t)) -> do
         (g1, ts', es', _) <- zipCheck i g0 es ts
         return (g1, apply g1 (FunU ts' t), es')
-      _ -> gerr i ApplicationOfNonFunction
-application i _ _ _ = do
-  gerr i ApplicationOfNonFunction
+      (Just t) -> throwTypeError i $ "Application of term with non-functional type:" <+> pretty t
+      Nothing -> throwTypeError i $ "Expected function, but could not find type of term" <+> pretty v
+
+application i _ _ t = throwTypeError i $ "Application of non-functional expression of type:" <+> pretty t
 
 -- Tip together the arguments passed to an application
 zipCheck ::
@@ -703,7 +700,7 @@ zipCheck i g0 (x0 : xs0) (t0 : ts0) = do
 -- If there are fewer arguments than types, this may be OK, just partial application
 zipCheck _ g0 [] ts = return (g0, [], [], ts)
 -- If there are fewer types than arguments, then die
-zipCheck i _ _ [] = gerr i TooManyArguments
+zipCheck i _ _ [] = MM.throwSourcedError i "Compiler bug (__FILE__:__LINE__): too many arguments in zipCheck"
 
 foldCheck ::
   Gamma ->
@@ -760,7 +757,7 @@ subtype' i a b g = do
   scope <- MM.getGeneralScope i
   insetSay $ parens (pretty a) <+> "<:" <+> parens (pretty b)
   case subtype scope a b g of
-    (Left err') -> gerr i err'
+    (Left err') -> MM.throwSourcedError i err'
     (Right x) -> return x
 
 -- helpers
@@ -788,6 +785,7 @@ evaluateAnnoSTypes = mapAnnoSGM resolve
     resolve (Idx m t) = do
       scope <- getScope m
       case TE.evaluateType scope t of
+        (Left (SystemError e)) -> MM.throwSourcedError m e
         (Left e) -> MM.throwError e
         (Right tu) -> return (Idx m tu)
 
