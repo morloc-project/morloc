@@ -31,10 +31,15 @@ morloc make -o foo script.loc
 **Architecture & Systems:**
 - [[claude-memory/ARCHITECTURE.md]] - Compilation pipeline and major components
 - [[claude-memory/FRONTEND.md]] - Parser and lexer
-- [[claude-memory/TYPECHECKING.md]] - Type system and inference
+- [[claude-memory/TYPECHECKING-THEORY.md]] - Type system theory (Dunfield bidirectional)
+- [[claude-memory/TYPECHECKING-IMPLEMENTATION.md]] - Typechecker implementation details
 - [[claude-memory/CODEGEN.md]] - Code generation
 - [[claude-memory/RUNTIME.md]] - Nexus, pools, and language bindings
 - [[claude-memory/SYSGEN.md]] - Build system and program generation
+- [[claude-memory/BUILD-SYSTEM.md]] - Build system deep dive (morloc.h, pools, compilers)
+- [[claude-memory/BUILD-REFACTOR-PLAN.md]] - Plan to modularize morloc.h and improve compile time
+- [[claude-memory/COMPILER-INVOCATION.md]] - How compilers are detected and invoked
+- [[claude-memory/BUILD-TODO.md]] - Build system issues and improvements
 - [[claude-memory/MODULES.md]] - Module system and resolution
 - [[claude-memory/DATA-STRUCTURES.md]] - Core data types
 
