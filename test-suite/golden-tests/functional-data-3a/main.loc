@@ -8,7 +8,7 @@ record Funs where
 record Py => Funs = "dict"
 
 funs :: Funs
-funs = { f = add 4, g = add 1 }
+funs = { f = (+) 4, g = (+) 1 }
 
 foo :: Int -> Int
-foo x = (.f funs) (add 1 x)
+foo x = (.f funs) (1 + x)

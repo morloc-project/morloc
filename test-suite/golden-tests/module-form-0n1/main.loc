@@ -6,4 +6,4 @@ import fooroot
 import foopy (foo)
 import foor (foo)
 
-foo x y = add x (mul (-1) y)
+foo x y = x + -1 * y

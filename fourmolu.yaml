@@ -1,0 +1,44 @@
+# Fourmolu configuration for morloc compiler
+# https://github.com/fourmolu/fourmolu
+
+# Indentation
+indentation: 2
+
+# Maximum line length (soft limit for formatting decisions)
+column-limit: 100
+
+# How to format function arguments
+function-arrows: trailing
+
+# How to format record syntax
+record-brace-space: true
+
+# Indent where bindings
+indent-wheres: true
+
+# How to format haddock comments
+haddock-style: multi-line
+
+# How to format import lists
+import-export-style: leading
+
+# How to format record fields
+record-style: multi-line
+
+# How to format let expressions
+let-style: inline
+
+# How to format in expressions
+in-style: right-align
+
+# How to treat single constraint contexts
+single-constraint-parens: always
+
+# Unicode syntax (don't convert to unicode)
+unicode: never
+
+# Respect language pragmas in files
+respectful: true
+
+# Newlines between declarations
+newlines-between-decls: 1

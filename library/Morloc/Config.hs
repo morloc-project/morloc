@@ -1,15 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{-|
+{- |
 Module      : Morloc.Config
 Description : Handle local configuration
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 -}
-
 module Morloc.Config
-  ( Config(..)
+  ( Config (..)
   , loadMorlocConfig
   , loadModuleConfig
   , loadDefaultMorlocConfig
@@ -19,17 +18,16 @@ module Morloc.Config
   , getDefaultMorlocLibrary
   ) where
 
-import Morloc.Data.Doc
-import Morloc.Namespace
-import qualified Morloc.Language as ML
+import qualified Data.Aeson.KeyMap as K
+import Data.Text (Text)
 import qualified Data.Yaml as Y
 import qualified Data.Yaml.Config as YC
+import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
-import Data.Text (Text)
-import qualified Morloc.System as MS
+import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
-import qualified Data.Aeson.KeyMap as K
-
+import Morloc.Namespace
+import qualified Morloc.System as MS
 
 getDefaultConfigFilepath :: IO Path
 getDefaultConfigFilepath = MS.combine <$> getDefaultMorlocHome <*> pure "config"
@@ -49,8 +47,9 @@ loadDefaultMorlocConfig = do
       "python3" -- lang_python3
       "Rscript" -- lang_R
 
--- | Load a Morloc config file. If no file is given (i.e., Nothing), then the
--- default configuration will be used.
+{- | Load a Morloc config file. If no file is given (i.e., Nothing), then the
+default configuration will be used.
+-}
 loadMorlocConfig :: Maybe Path -> IO Config
 loadMorlocConfig Nothing = do
   defaults <- defaultFields
@@ -79,11 +78,12 @@ loadModuleConfig (Just configFile) = do
     then do
       result <- liftIO $ Y.decodeFileEither moduleConfigFile
       case result of
-        Left errMsg -> MM.throwError . OtherError . MT.pack $
+        Left errMsg ->
+          MM.throwError . OtherError . MT.pack $
             "Failed to parse module config file '" <> configFile <> "': " <> Y.prettyPrintParseException errMsg
         Right config -> return config
     else
-        return defaultValue
+      return defaultValue
 
 loadBuildConfig :: Config -> IO BuildConfig
 loadBuildConfig config = do
@@ -93,24 +93,26 @@ loadBuildConfig config = do
     then do
       result <- Y.decodeFileEither configFile
       case result of
-        Left errMsg -> error $ "Failed to parse build config file '" <> configFile <> "': " <> Y.prettyPrintParseException errMsg
+        Left errMsg ->
+          error $
+            "Failed to parse build config file '" <> configFile <> "': " <> Y.prettyPrintParseException errMsg
         Right buildConfig -> return buildConfig
     else
-        return defaultValue
+      return defaultValue
 
-setupServerAndSocket
-  :: Config
-  -> Lang
-  -> Socket 
-setupServerAndSocket c lang = Socket lang args socket where
-  args = case lang of
-    CLang -> ["./" <> pretty (ML.makeExecutablePoolName CLang)]
-    CppLang -> ["./" <> pretty (ML.makeExecutablePoolName CppLang)]
-    RLang -> [pretty (configLangR c), pretty (ML.makeExecutablePoolName RLang)]
-    Python3Lang -> [pretty (configLangPython3 c), pretty (ML.makeExecutablePoolName Python3Lang)]
+setupServerAndSocket ::
+  Config ->
+  Lang ->
+  Socket
+setupServerAndSocket c lang = Socket lang args socket
+  where
+    args = case lang of
+      CLang -> ["./" <> pretty (ML.makeExecutablePoolName CLang)]
+      CppLang -> ["./" <> pretty (ML.makeExecutablePoolName CppLang)]
+      RLang -> [pretty (configLangR c), pretty (ML.makeExecutablePoolName RLang)]
+      Python3Lang -> [pretty (configLangPython3 c), pretty (ML.makeExecutablePoolName Python3Lang)]
 
-  socket = "pipe-" <> pretty (ML.showLangName lang)
-
+    socket = "pipe-" <> pretty (ML.showLangName lang)
 
 -- This is where the default file organization of morloc is set
 defaultFields :: IO (K.KeyMap Text)
@@ -119,22 +121,24 @@ defaultFields = do
   lib <- MT.pack <$> getDefaultMorlocSource
   tmp <- MT.pack <$> getDefaultMorlocTmpDir
   buildConfig <- MT.pack <$> getDefaultMorlocBuildConfig
-  return $ K.fromList
-    [ ("home", home)
-    , ("source", lib)
-    , ("plane", "default")
-    , ("plane-core", "morloclib")
-    , ("tmpdir", tmp)
-    , ("build-config", buildConfig)
-    ]
+  return $
+    K.fromList
+      [ ("home", home)
+      , ("source", lib)
+      , ("plane", "default")
+      , ("plane-core", "morloclib")
+      , ("tmpdir", tmp)
+      , ("build-config", buildConfig)
+      ]
 
 -- | Get the Morloc home directory (absolute path)
 getDefaultMorlocHome :: IO Path
 getDefaultMorlocHome = MS.combine <$> MS.getHomeDirectory <*> pure ".local/share/morloc"
 
--- | Get the Morloc source directory (absolute path). Usually this will be a
--- folder inside the home directory. This is the path to the source data (often
--- a get repo).
+{- | Get the Morloc source directory (absolute path). Usually this will be a
+folder inside the home directory. This is the path to the source data (often
+a get repo).
+-}
 getDefaultMorlocSource :: IO Path
 getDefaultMorlocSource = MS.combine <$> getDefaultMorlocHome <*> pure "src/morloc/plane"
 
@@ -146,7 +150,8 @@ getDefaultMorlocLibrary = MS.combine <$> getDefaultMorlocHome <*> pure "lib"
 getDefaultMorlocTmpDir :: IO Path
 getDefaultMorlocTmpDir = MS.combine <$> getDefaultMorlocHome <*> pure "tmp"
 
--- | Get the Morloc default build config. This will store `morloc init` flags
--- that affect all builds
+{- | Get the Morloc default build config. This will store `morloc init` flags
+that affect all builds
+-}
 getDefaultMorlocBuildConfig :: IO Path
 getDefaultMorlocBuildConfig = MS.combine <$> getDefaultMorlocHome <*> pure ".build-config.yaml"

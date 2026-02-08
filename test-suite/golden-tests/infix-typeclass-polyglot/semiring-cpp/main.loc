@@ -1,0 +1,10 @@
+module semiring-cpp (*)
+
+import semiring (Semiring)
+
+type Cpp => Int = "int"
+
+instance Semiring Int where
+  source Cpp from "ops.hpp" ("add" as (<+>), "mul" as (<*>))
+  zero = 0
+  one = 1

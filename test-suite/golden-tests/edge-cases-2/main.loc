@@ -1,5 +1,7 @@
 module m (foo, bar)
 
+import root ((.))
+
 type R => Str = "character"
 type R => Int = "integer"
 type R => (Tuple2 a b) = "list" a b

@@ -5,5 +5,5 @@ import root-py
 -- terms in the function's where-scope are unordered and share scope
 f = x where
     a = 1.0
-    x = add a b
+    x = a + b
     b = 41.0

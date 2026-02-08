@@ -3,7 +3,7 @@ module m (foo)
 import root-py
 
 funs :: [(Int -> Int)]
-funs = [ add 1, add 2 ]
+funs = [ (+) 1, (+) 2 ]
 
 source Py from "main.py" ("runAll")
 runAll a b :: a -> [(a -> b)] -> [b]

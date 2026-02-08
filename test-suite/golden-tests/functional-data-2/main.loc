@@ -7,7 +7,7 @@ record Funs where
   g :: Int -> Int
 record Py => Funs = "dict"
 
-funs = { f = add 4, g = add 1 }
+funs = { f = (+) 4, g = (+) 1 }
 
 bar :: Funs -> Int -> Int
 

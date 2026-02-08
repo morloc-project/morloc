@@ -1,0 +1,35 @@
+module main
+  ( test_addition
+  , test_multiplication
+  , test_exponentiation
+  , test_concat
+  , test_combined
+  )
+
+-- Import infix operators from ops module
+import ops ((+), (*), (**), (<>))
+
+type Py => Int = "int"
+type Py => (List a) = "list" a
+
+-- Test cases using imported operators
+
+-- Basic addition
+test_addition :: Int
+test_addition = 5 + 3
+
+-- Multiplication
+test_multiplication :: Int
+test_multiplication = 4 * 7
+
+-- Exponentiation
+test_exponentiation :: Int
+test_exponentiation = 2 ** 10
+
+-- List concatenation
+test_concat :: [Int]
+test_concat = [1, 2] <> [3, 4]
+
+-- Combined: uses operator precedence
+test_combined :: Int
+test_combined = 2 + 3 * 2 ** 3 + 1

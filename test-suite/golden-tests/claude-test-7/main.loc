@@ -1,0 +1,111 @@
+-- desc: CSV Data Analysis Dashboard
+-- author: Claude
+--
+-- Demonstrates table types, statistical aggregation with R,
+-- fast C++ operations, and Python data I/O.
+module main (analyzeSales, summarizeStats, groupByCategory)
+
+import root-py
+import root-r
+import root-cpp
+
+-- Sales data record
+record SalesRecord where
+  product :: Str
+  category :: Str
+  quantity :: Int
+  price :: Real
+  region :: Str
+
+record Py => SalesRecord = "dict"
+record Cpp => SalesRecord = "SalesRecord"
+record R => SalesRecord = "list"
+
+-- Summary statistics record
+record Summary where
+  count :: Int
+  total :: Real
+  mean :: Real
+  stddev :: Real
+  minVal :: Real
+  maxVal :: Real
+
+record Py => Summary = "dict"
+record Cpp => Summary = "struct"
+record R => Summary = "list"
+
+-- Category summary
+record CategorySummary where
+  category :: Str
+  totalSales :: Real
+  itemCount :: Int
+  avgPrice :: Real
+
+record Py => CategorySummary = "dict"
+record Cpp => CategorySummary = "CategorySummary"
+record R => CategorySummary = "list"
+
+-- Python data generation and I/O
+source Py from "data_io.py" ("generateSalesData", "formatReport")
+generateSalesData :: Int -> [SalesRecord]
+formatReport :: [CategorySummary] -> Str
+
+-- C++ fast aggregations
+source Cpp from "aggregations.hpp" ("fastGroupBy", "calculateRevenue")
+fastGroupBy :: [SalesRecord] -> [CategorySummary]
+calculateRevenue :: [SalesRecord] -> Real
+
+-- R statistical functions
+source R from "statistics.R" ("computeSummary", "correlationAnalysis")
+computeSummary :: [Real] -> Summary
+correlationAnalysis :: [Real] -> [Real] -> Real
+
+--' Analyze sales data
+--'
+--' Generates sales data and computes total revenue using C++.
+--'
+--' name: analyze
+analyzeSales ::
+  --' Number of sales records to generate
+  --' arg: -n/--records
+  --' metavar: COUNT
+  --' default: 100
+  Int ->
+  --' return: Total revenue
+  Real
+analyzeSales n = calculateRevenue sales where
+  sales = generateSalesData n
+
+--' Compute summary statistics
+--'
+--' Generates sales data, extracts prices, and computes statistics using R.
+--'
+--' name: summary
+summarizeStats ::
+  --' Number of records to analyze
+  --' arg: -n/--records
+  --' metavar: COUNT
+  --' default: 50
+  Int ->
+  --' return: Statistical summary
+  Summary
+summarizeStats n = computeSummary prices where
+  sales = generateSalesData n
+  prices = map (\s -> .price s) sales
+
+--' Group sales by category
+--'
+--' Groups sales data by category using C++ and formats a report with Python.
+--'
+--' name: groupBy
+groupByCategory ::
+  --' Number of records to analyze
+  --' arg: -n/--records
+  --' metavar: COUNT
+  --' default: 100
+  Int ->
+  --' return: Formatted report
+  Str
+groupByCategory n = formatReport grouped where
+  sales = generateSalesData n
+  grouped = fastGroupBy sales

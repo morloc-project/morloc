@@ -1,5 +1,5 @@
 all:
-	morloc make -v w.loc > log
+	morloc make w.loc 
 	./nexus f 42 > obs.txt
 
 clean:

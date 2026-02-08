@@ -1,17 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
-{-|
+{- |
 Module      : Morloc.CodeGenerator.LambdaEval
 Description : Evaluate all applied lambdas
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 -}
-
-module Morloc.CodeGenerator.LambdaEval (
-    applyLambdas
-) where
+module Morloc.CodeGenerator.LambdaEval
+  ( applyLambdas
+  ) where
 
 import Morloc.CodeGenerator.Namespace
 
@@ -106,39 +105,41 @@ import Morloc.CodeGenerator.Namespace
 -- It also must be done BEFORE conversion to ExprM in `express`, where manifolds
 -- are resolved.
 -- -}
-applyLambdas
-  :: AnnoS (Indexed Type) One a
-  -> MorlocMonad (AnnoS (Indexed Type) One a)
+applyLambdas ::
+  AnnoS (Indexed Type) One a ->
+  MorlocMonad (AnnoS (Indexed Type) One a)
 -- eliminate empty lambdas
 applyLambdas (AnnoS g1 _ (AppS (AnnoS _ _ (LamS [] (AnnoS _ c2 e))) [])) = applyLambdas $ AnnoS g1 c2 e
-
 -- eliminate empty applications
 applyLambdas (AnnoS g1 _ (AppS (AnnoS _ c2 e) [])) = applyLambdas $ AnnoS g1 c2 e
-
 -- substitute applied lambdas
 applyLambdas
-  (AnnoS i1 tb1
-    ( AppS
-      ( AnnoS
-          (Idx i2 (FunT (_:tas) tb2))
-          c
-          (LamS (v:vs) e2)
-      )
-      ( e1:es )
-    )
-  ) = let e2' = substituteAnnoS v e1 e2
-      in applyLambdas
-          (AnnoS i1 tb1
-            ( AppS
-              ( AnnoS
-                  (Idx i2 (FunT tas tb2))
-                  c
-                  (LamS vs e2')
-              )
-              es
+  ( AnnoS
+      i1
+      tb1
+      ( AppS
+          ( AnnoS
+              (Idx i2 (FunT (_ : tas) tb2))
+              c
+              (LamS (v : vs) e2)
             )
+          (e1 : es)
+        )
+    ) =
+    let e2' = substituteAnnoS v e1 e2
+     in applyLambdas
+          ( AnnoS
+              i1
+              tb1
+              ( AppS
+                  ( AnnoS
+                      (Idx i2 (FunT tas tb2))
+                      c
+                      (LamS vs e2')
+                  )
+                  es
+              )
           )
-
 -- propagate the changes
 applyLambdas (AnnoS g c (AppS f es)) = do
   f' <- applyLambdas f
@@ -151,32 +152,33 @@ applyLambdas (AnnoS g c (NamS rs)) = AnnoS g c . NamS <$> mapM (secondM applyLam
 applyLambdas (AnnoS g c (VarS v (One e))) = AnnoS g c . VarS v . One <$> applyLambdas e
 applyLambdas x = return x
 
-substituteAnnoS
-  :: EVar
-  -> AnnoS (Indexed Type) One a
-  -> AnnoS (Indexed Type) One a
-  -> AnnoS (Indexed Type) One a
-substituteAnnoS v r = f where
-  f e@(AnnoS _ _ (BndS v'))
-    | v == v' = r
-    | otherwise = e
-  -- propagate the changes
-  f (AnnoS g c (AppS e es)) =
-    let f' = f e
-        es' = map f es
-    in AnnoS g c (AppS f' es')
-  f e0@(AnnoS g c (LamS vs e))
-    | v `elem` vs = e0 -- the replacement term is shadowed
-    | otherwise =
-        let e' = f e
-        in AnnoS g c (LamS vs e')
-  f (AnnoS g c (LstS es)) =
-    let es' = map f es
-    in AnnoS g c (LstS es')
-  f (AnnoS g c (TupS es)) =
-    let es' = map f es
-    in AnnoS g c (TupS es')
-  f (AnnoS g c (NamS rs)) =
-    let es' = map (f . snd) rs
-    in AnnoS g c (NamS (zip (map fst rs) es'))
-  f x = x
+substituteAnnoS ::
+  EVar ->
+  AnnoS (Indexed Type) One a ->
+  AnnoS (Indexed Type) One a ->
+  AnnoS (Indexed Type) One a
+substituteAnnoS v r = f
+  where
+    f e@(AnnoS _ _ (BndS v'))
+      | v == v' = r
+      | otherwise = e
+    -- propagate the changes
+    f (AnnoS g c (AppS e es)) =
+      let f' = f e
+          es' = map f es
+       in AnnoS g c (AppS f' es')
+    f e0@(AnnoS g c (LamS vs e))
+      | v `elem` vs = e0 -- the replacement term is shadowed
+      | otherwise =
+          let e' = f e
+           in AnnoS g c (LamS vs e')
+    f (AnnoS g c (LstS es)) =
+      let es' = map f es
+       in AnnoS g c (LstS es')
+    f (AnnoS g c (TupS es)) =
+      let es' = map f es
+       in AnnoS g c (TupS es')
+    f (AnnoS g c (NamS rs)) =
+      let es' = map (f . snd) rs
+       in AnnoS g c (NamS (zip (map fst rs) es'))
+    f x = x

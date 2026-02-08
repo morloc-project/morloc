@@ -1,0 +1,17 @@
+module main (threeLangChain, reverseChain)
+
+import root-py
+import root-cpp
+import root-r
+
+-- Force language selection with identity functions
+pyAdd x = idpy . (+) x
+cppMul x = idcpp . (*) x
+rSub x = idr . (-) x
+
+-- Chain: Python add -> C++ multiply -> R subtract
+-- Input goes through all three languages
+threeLangChain x = rSub 5.0 (cppMul 2.0 (pyAdd 3.0 (x :: Real)))
+
+-- Reverse chain: R subtract -> C++ multiply -> Python add
+reverseChain x = pyAdd 10.0 (cppMul 3.0 (rSub x (20.0 :: Real)))

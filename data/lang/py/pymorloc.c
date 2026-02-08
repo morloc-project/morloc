@@ -797,7 +797,11 @@ static PyObject*  pybinding__stream_from_client(PyObject* self, PyObject* args){
 
     size_t packet_size = PyTRY(morloc_packet_size, packet);
 
-    return PyBytes_FromStringAndSize((char*)packet, packet_size);
+    PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
+
+    free(packet);
+
+    return retval;
 
 error:
     return NULL;
@@ -943,7 +947,11 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
 
     result_length = PyTRY(morloc_packet_size, result);
 
-    return PyBytes_FromStringAndSize((char*)result, result_length);
+    PyObject* retval = PyBytes_FromStringAndSize((char*)result, result_length);
+
+    free(result);
+
+    return retval;
 
 error:
     FREE(arg_packets)

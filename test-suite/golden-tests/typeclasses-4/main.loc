@@ -1,5 +1,7 @@
 module main (foo)
 
+import root ((.))
+
 type Py => Int = "int"
 type Py => Str = "str"
 type Py => (List a) = "list" a

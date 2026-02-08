@@ -1,17 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
-{-|
+{- |
 Module      : Morloc.Frontend.Lexer
 Description : Lexing functions used in the parser Morloc
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 -}
-
 module Morloc.Frontend.Lexer
   ( Parser
-  , ParserState(..)
+  , ParserState (..)
   , align
   , foldMany
   , indentFreeTerm
@@ -32,7 +31,8 @@ module Morloc.Frontend.Lexer
   , moduleComponent
   , number
   , op
-  , dot
+  , operatorName
+  , parenOperator
   , parens
   , reserved
   , reservedWords
@@ -48,7 +48,8 @@ module Morloc.Frontend.Lexer
   , pLang
   , exprId
   , exprI
-  -- * docstring parsers
+
+    -- * docstring parsers
   , parseArgDocStr
   , parseFlagDocStr
   , parseLineDocStr
@@ -57,50 +58,52 @@ module Morloc.Frontend.Lexer
   , parseIntsDocStr
   ) where
 
-import Data.Void (Void)
-import Morloc.Frontend.Namespace
-import Text.Megaparsec
-import Text.Megaparsec.Char hiding (eol)
 import qualified Control.Monad.State as CMS
+import qualified Data.Char as DC
 import qualified Data.Scientific as DS
 import qualified Data.Set as Set
-import qualified Morloc.Data.Text as MT
 import Data.Text (Text)
-import qualified Text.Megaparsec.Char.Lexer as L
+import Data.Void (Void)
+import qualified Morloc.Data.Text as MT
+import Morloc.Frontend.Namespace
 import qualified Morloc.Language as ML
-import qualified Data.Char as DC
+import Text.Megaparsec
+import Text.Megaparsec.Char hiding (eol)
+import qualified Text.Megaparsec.Char.Lexer as L
 
 type Parser a = CMS.StateT ParserState (Parsec Void Text) a
 
-data ParserState = ParserState {
-    stateModulePath :: Maybe Path
+data ParserState = ParserState
+  { stateModulePath :: Maybe Path
   , stateVarIndex :: Int
   , stateExpIndex :: Int
   , stateGenerics :: [TVar] -- store the observed generic variables in the current type
-                            -- you should reset the field before parsing a new type
+  -- you should reset the field before parsing a new type
   , stateMinPos :: Pos
   , stateAccepting :: Bool
   , stateIgnoreAlignment :: Bool
   , stateModuleConfig :: ModuleConfig
-} deriving(Show)
+  }
+  deriving (Show)
 
 emptyState :: ParserState
-emptyState = ParserState {
-    stateModulePath = Nothing
-  , stateVarIndex = 1
-  , stateExpIndex = 1
-  , stateGenerics = []
-  , stateMinPos = mkPos 1
-  , stateAccepting = False
-  , stateIgnoreAlignment = False
-  , stateModuleConfig = defaultValue
-}
+emptyState =
+  ParserState
+    { stateModulePath = Nothing
+    , stateVarIndex = 1
+    , stateExpIndex = 1
+    , stateGenerics = []
+    , stateMinPos = mkPos 1
+    , stateAccepting = False
+    , stateIgnoreAlignment = False
+    , stateModuleConfig = defaultValue
+    }
 
 exprId :: Parser Int
 exprId = do
   s <- CMS.get
   let i = stateExpIndex s
-  CMS.put $ s { stateExpIndex = i + 1 }
+  CMS.put $ s {stateExpIndex = i + 1}
   return i
 
 exprI :: Expr -> Parser ExprI
@@ -110,7 +113,7 @@ setMinPos :: Parser ()
 setMinPos = do
   s <- CMS.get
   level <- L.indentLevel
-  CMS.put (s { stateMinPos = level })
+  CMS.put (s {stateMinPos = level})
 
 -- | A general function for parsing aligned things
 alignGen :: Bool -> (Parser () -> Parser a) -> Parser a
@@ -177,28 +180,28 @@ lexeme p = do
     else
       -- if we are awaiting exactly aligned input
       if stateAccepting s
-      then
-        -- if we are exactly aligned
-        if curPos == minPos
         then
-          CMS.put (s { stateAccepting = False }) >> lexemeBase p
-        -- otherwise die
+          -- if we are exactly aligned
+          if curPos == minPos
+            then
+              CMS.put (s {stateAccepting = False}) >> lexemeBase p
+            -- otherwise die
+            else
+              L.incorrectIndent EQ minPos curPos
+        -- if we are not waiting for aligned input
         else
-          L.incorrectIndent EQ minPos curPos
-      -- if we are not waiting for aligned input
-      else
-        -- we are indented further than
-        if minPos < curPos
-        then
-          lexemeBase p
-        -- otherwise die
-        else
-          L.incorrectIndent LT minPos curPos
+          -- we are indented further than
+          if minPos < curPos
+            then
+              lexemeBase p
+            -- otherwise die
+            else
+              L.incorrectIndent LT minPos curPos
 
 indentFreeTerm :: Parser a -> Parser a
 indentFreeTerm p = do
   s <- CMS.get
-  CMS.put (s { stateIgnoreAlignment = True })
+  CMS.put (s {stateIgnoreAlignment = True})
   xEither <- observing p
   CMS.put s
   case xEither of
@@ -208,7 +211,7 @@ indentFreeTerm p = do
 resetGenerics :: Parser ()
 resetGenerics = do
   s <- CMS.get
-  CMS.put (s { stateGenerics = [] })
+  CMS.put (s {stateGenerics = []})
 
 appendGenerics :: TVar -> Parser ()
 appendGenerics v = do
@@ -228,21 +231,21 @@ sepBy2 p s = do
   x <- p
   _ <- s
   xs <- sepBy1 p s
-  return (x:xs)
-
+  return (x : xs)
 
 comments :: Parser ()
-comments = try lineComment
-        <|> L.skipBlockCommentNested "{-" "-}"
-        <?> "comment"
+comments =
+  try lineComment
+    <|> L.skipBlockCommentNested "{-" "-}"
+    <?> "comment"
   where
-  lineComment :: Parser ()
-  lineComment = do
-    _ <- string "--"
-    -- ignore special comments
-    notFollowedBy (oneOf ['\'', '^'])
-    _ <- takeWhileP Nothing (/= '\n')
-    return ()
+    lineComment :: Parser ()
+    lineComment = do
+      _ <- string "--"
+      -- ignore special comments
+      notFollowedBy (oneOf ['\'', '^'])
+      _ <- takeWhileP Nothing (/= '\n')
+      return ()
 
 docstr :: Parser ()
 docstr = do
@@ -312,80 +315,84 @@ parseArgDocStr flag = lexeme $ do
         Nothing -> return $ CliOptShort short
     Nothing -> parseLongDocStr |>> CliOptLong
   where
+    parseShortDocStr :: Parser Char
+    parseShortDocStr = do
+      char '-'
+      short <- alphaNumChar
+      return $ short
 
-  parseShortDocStr :: Parser Char
-  parseShortDocStr = do
-    char '-'
-    short <- alphaNumChar
-    return $ short
-
-  parseLongDocStr :: Parser Text
-  parseLongDocStr = do
-    char '-'
-    char '-'
-    longArgStart <- alphaNumChar
-    longArgRest <- many (alphaNumChar <|> char '-' <|> char '_')
-    let longArg = MT.pack $ longArgStart : longArgRest
-    return longArg
+    parseLongDocStr :: Parser Text
+    parseLongDocStr = do
+      char '-'
+      char '-'
+      longArgStart <- alphaNumChar
+      longArgRest <- many (alphaNumChar <|> char '-' <|> char '_')
+      let longArg = MT.pack $ longArgStart : longArgRest
+      return longArg
 
 data Sign = Pos | Neg
 
 number :: Parser (Either Integer DS.Scientific)
 number = lexeme $ do
-  x  <- try (fmap (Right . DS.fromFloatDigits) signedFloat)
-    <|> try unsignedHex
-    <|> try unsignedOctal
-    <|> try unsignedBinary
-    <|> fmap Left signedDecimal
+  x <-
+    try (fmap (Right . DS.fromFloatDigits) signedFloat)
+      <|> try unsignedHex
+      <|> try unsignedOctal
+      <|> try unsignedBinary
+      <|> fmap Left signedDecimal
   e <- optional _exp
   return $ case (x, e) of
-    (Left i,  Nothing) -> Left i
+    (Left i, Nothing) -> Left i
     (Right f, Nothing) -> Right f
     -- anything in scientific notation is cast as a real
-    (Left i,  Just (Neg, expval)) -> Right $ DS.scientific i ((-1) * expval)
-    (Left i,  Just (Pos, expval)) -> Right $ DS.scientific i expval
+    (Left i, Just (Neg, expval)) -> Right $ DS.scientific i ((-1) * expval)
+    (Left i, Just (Pos, expval)) -> Right $ DS.scientific i expval
     (Right f, Just (Pos, expval)) -> Right $ f * (10 ^^ expval)
     (Right f, Just (Neg, expval)) -> Right $ f * (10 ^^ (-1 * expval))
   where
-  _exp :: Parser (Sign, Int)
-  _exp = do
-    _ <- char 'e'
-    expsign <- _sign
-    expval <- L.decimal
-    return (expsign, expval)
+    _exp :: Parser (Sign, Int)
+    _exp = do
+      _ <- char 'e'
+      expsign <- _sign
+      expval <- L.decimal
+      return (expsign, expval)
 
-  _sign :: Parser Sign
-  _sign = do
-    sign <- optional (char '-' <|> char '+')
-    case sign of
-      (Just '-') -> return Neg
-      _ -> return Pos
+    _sign :: Parser Sign
+    _sign = do
+      sign <- optional (char '-' <|> char '+')
+      case sign of
+        (Just '-') -> return Neg
+        _ -> return Pos
 
-  -- Hexadecimal: 0x or 0X prefix (unsigned only)
-  unsignedHex :: Parser (Either Integer DS.Scientific)
-  unsignedHex = do
-    _ <- string "0x" <|> string "0X"
-    fmap Left L.hexadecimal
+    -- Hexadecimal: 0x or 0X prefix (unsigned only)
+    unsignedHex :: Parser (Either Integer DS.Scientific)
+    unsignedHex = do
+      _ <- string "0x" <|> string "0X"
+      fmap Left L.hexadecimal
 
-  -- Octal: 0o or 0O prefix (unsigned only)
-  unsignedOctal :: Parser (Either Integer DS.Scientific)
-  unsignedOctal = do
-    _ <- string "0o" <|> string "0O"
-    fmap Left L.octal
+    -- Octal: 0o or 0O prefix (unsigned only)
+    unsignedOctal :: Parser (Either Integer DS.Scientific)
+    unsignedOctal = do
+      _ <- string "0o" <|> string "0O"
+      fmap Left L.octal
 
-  -- Binary: 0b or 0B prefix (unsigned only)
-  unsignedBinary :: Parser (Either Integer DS.Scientific)
-  unsignedBinary = do
-    _ <- string "0b" <|> string "0B"
-    fmap Left L.binary
+    -- Binary: 0b or 0B prefix (unsigned only)
+    unsignedBinary :: Parser (Either Integer DS.Scientific)
+    unsignedBinary = do
+      _ <- string "0b" <|> string "0B"
+      fmap Left L.binary
 
-  -- Signed floating point
-  signedFloat :: Parser Double
-  signedFloat = L.signed sc L.float
+    -- No space consumer - signs must be directly attached to numbers
+    noSpace :: Parser ()
+    noSpace = return ()
 
-  -- Signed decimal integer
-  signedDecimal :: Parser Integer
-  signedDecimal = L.signed sc L.decimal
+    -- Signed floating point (no space between sign and number)
+    signedFloat :: Parser Double
+    signedFloat = L.signed noSpace L.float
+
+    -- Signed decimal integer (no space between sign and number)
+    signedDecimal :: Parser Integer
+    signedDecimal = L.signed noSpace L.decimal
 
 surround :: Parser l -> Parser r -> Parser a -> Parser a
 surround l r v = do
@@ -420,6 +427,15 @@ reservedWords =
   , "type"
   , "instance"
   , "class"
+  , "infixl"
+  , "infixr"
+  , "infix"
+  ]
+
+reservedOperators :: [Text]
+reservedOperators =
+  [ "="
+  , ":"
   ]
 
 operatorChars :: String
@@ -428,11 +444,24 @@ operatorChars = ":!$%&*+./<=>?@\\^|-~#"
 op :: Text -> Parser Text
 op o = (lexeme . try) (string o <* notFollowedBy (oneOf operatorChars))
 
--- the rugged dot, free and alone
-dot :: Parser Text
-dot = lexeme $ do
-  _ <- char '.' <* notFollowedBy (char '(' <|> char '[' <|> char '{' <|> alphaNumChar)
-  return "."
+-- | Parse an operator name (sequence of operator characters)
+operatorName :: Parser Text
+operatorName = (lexeme . try) $ do
+  firstChar <- oneOf operatorChars
+  restChars <- many (oneOf operatorChars)
+  let opName = MT.pack (firstChar : restChars)
+  if opName `elem` reservedOperators
+    then failure Nothing Set.empty -- TODO: error message
+    else return opName
+
+-- | Parse an operator in parentheses (for use as a variable)
+-- Example: (+), (*), (<$>)
+parenOperator :: Parser EVar
+parenOperator = lexeme $ do
+  _ <- char '('
+  opName <- operatorName
+  _ <- char ')'
+  return (EV opName)
 
 reserved :: Text -> Parser Text
 reserved w = try (symbol w)
@@ -444,7 +473,6 @@ stringLiteral = lexeme $ do
   _ <- char '\"'
   return $ MT.pack s
 
-
 parsePatternSetter :: Parser a -> Parser (Selector, [a])
 parsePatternSetter parseValue = parsePattern (sc >> symbol "=" >> parseValue)
 
@@ -454,51 +482,49 @@ parsePatternGetter = fst <$> parsePattern (return True)
 parsePattern :: Parser a -> Parser (Selector, [a])
 parsePattern parseValue = lexeme $ try parseIdx <|> try parseKey <|> try parseGrpIdx <|> try parseGrpKey
   where
+    parseIdx = parseSegment L.decimal SelectorIdx
 
-  parseIdx = parseSegment L.decimal SelectorIdx
+    parseKey = parseSegment key SelectorKey
+      where
+        key = do
+          firstLetter <- lowerChar
+          remaining <- many (alphaNumChar <|> char '\'' <|> char '_')
+          return $ MT.pack (firstLetter : remaining)
 
-  parseKey = parseSegment key SelectorKey where
-    key = do
-      firstLetter <- lowerChar
-      remaining <- many (alphaNumChar <|> char '\'' <|> char '_')
-      return $ MT.pack (firstLetter : remaining)
+    -- parseSegment :: Parser p -> ((p, Selector) -> [(p, Selector)] -> Selector) -> Parser (Selector, [a])
+    parseSegment fieldParser constructor = do
+      _ <- char '.'
+      k <- fieldParser
+      mayS <- optional (parsePattern parseValue)
+      case mayS of
+        (Just (s, es)) -> return (constructor (k, s) [], es)
+        Nothing -> do
+          e <- parseValue
+          return (constructor (k, SelectorEnd) [], [e])
 
-  -- parseSegment :: Parser p -> ((p, Selector) -> [(p, Selector)] -> Selector) -> Parser (Selector, [a])
-  parseSegment fieldParser constructor = do
-    _ <- char '.'
-    k <- fieldParser
-    mayS <- optional (parsePattern parseValue)
-    case mayS of
-      (Just (s, es)) -> return (constructor (k, s) [], es)
-      Nothing -> do
-        e <- parseValue
-        return (constructor (k, SelectorEnd) [], [e])
+    parseGrpKey = parseGrp parseKey
 
-  parseGrpKey = parseGrp parseKey
+    parseGrpIdx = parseGrp parseIdx
 
-  parseGrpIdx = parseGrp parseIdx
+    parseGrp grpparser = lexeme $ do
+      _ <- char '.'
+      xs <- parens (sepBy1 grpparser (symbol ","))
+      let es = concat $ map snd xs
+      case flattenSelector (map fst xs) of
+        (s, SelectorEnd) -> return (s, es)
+        (SelectorEnd, s) -> return (s, es)
+        _ -> error "Unreachable - grpparser can only return on selector type"
 
-  parseGrp grpparser = lexeme $ do
-    _ <- char '.'
-    xs <- parens (sepBy1 grpparser (symbol ","))
-    let es = concat $ map snd xs
-    case flattenSelector (map fst xs) of
-      (s, SelectorEnd) -> return (s, es)
-      (SelectorEnd, s) -> return (s, es)
-      _ -> error "Unreachable - grpparser can only return on selector type"
+    flattenSelector :: [Selector] -> (Selector, Selector)
+    flattenSelector sss = (flatIdx, flatKey)
+      where
+        flatIdx = case concat [s : ss | (SelectorIdx s ss) <- sss] of
+          [] -> SelectorEnd
+          ss -> SelectorIdx (head ss) (tail ss)
 
-  flattenSelector :: [Selector] -> (Selector, Selector)
-  flattenSelector sss = (flatIdx, flatKey)
-    where
-    flatIdx = case concat [s:ss | (SelectorIdx s ss) <- sss] of
-      [] -> SelectorEnd
-      ss -> SelectorIdx (head ss) (tail ss)
-
-    flatKey = case concat [s:ss | (SelectorKey s ss) <- sss] of
-      [] -> SelectorEnd
-      ss -> SelectorKey (head ss) (tail ss)
-
-
+        flatKey = case concat [s : ss | (SelectorKey s ss) <- sss] of
+          [] -> SelectorEnd
+          ss -> SelectorKey (head ss) (tail ss)
 
 stringPatterned :: Parser a -> Parser (Either Text (Text, [(a, Text)]))
 stringPatterned exprParser = do
@@ -524,9 +550,9 @@ stringLiteralMultiline exprParser = lexeme $ do
     --  1. Remove zero or one leading newlines
     removeLeadingSpace :: Text -> Text
     removeLeadingSpace (MT.lines -> []) = ""
-    removeLeadingSpace (MT.lines -> (s:rs))
+    removeLeadingSpace (MT.lines -> (s : rs))
       | MT.null (MT.strip s) = MT.unlines rs
-      | otherwise = MT.unlines (s:rs)
+      | otherwise = MT.unlines (s : rs)
 
     --  2. Remove the final newline and preceding non-newline space
     removeTrailingSpace :: (Text, [(a, Text)]) -> (Text, [(a, Text)])
@@ -537,20 +563,20 @@ stringLiteralMultiline exprParser = lexeme $ do
     removeTrailingSpace (s, ss) = case (init ss, last ss) of
       (initLines, (e, MT.lines -> slines)) ->
         if MT.null . MT.strip . last $ slines
-        then (s, initLines <> [(e, MT.unlines (init slines))])
-        else (s, ss)
+          then (s, initLines <> [(e, MT.unlines (init slines))])
+          else (s, ss)
 
     --  3. Trim an initial number of space from each line equal to the minimum
     --     number of starting spaces
     reindent :: (Text, [(a, Text)]) -> (Text, [(a, Text)])
     reindent (MT.lines -> ss, []) = (MT.unlines $ map (MT.drop initSpaces) ss, [])
       where
-      initSpaces = minimum $ map (MT.length . MT.takeWhile DC.isSpace) ss
+        initSpaces = minimum $ map (MT.length . MT.takeWhile DC.isSpace) ss
     reindent (s, xs) = (replaceFun s, map (second replaceFun) xs)
       where
-      replaceFun = MT.replace replacePattern "\n"
-      replacePattern = MT.pack $ '\n' : take initSpace (repeat ' ')
-      initSpace = minimum $ map (MT.length . MT.takeWhile DC.isSpace) (MT.lines $ MT.concat (s : map snd xs))
+        replaceFun = MT.replace replacePattern "\n"
+        replacePattern = MT.pack $ '\n' : take initSpace (repeat ' ')
+        initSpace = minimum $ map (MT.length . MT.takeWhile DC.isSpace) (MT.lines $ MT.concat (s : map snd xs))
 
 -- | Parse an interpolated string with embedded expressions
 interpolatedStringParser :: Text -> Parser a -> Parser (Text, [(a, Text)])
@@ -572,11 +598,10 @@ literalText sep = MT.pack <$> many literalChar
 interpolatedExpr :: Parser a -> Parser a
 interpolatedExpr exprParser = string "#{" *> exprParser <* char '}'
 
-
 hole :: Parser ()
 hole = lexeme $ do
- _ <- char '_'
- return ()
+  _ <- char '_'
+  return ()
 
 mkFreename :: Parser Char -> Parser Text
 mkFreename firstLetter = (lexeme . try) (p >>= check)
@@ -594,9 +619,9 @@ freename = mkFreename letterChar
 -- may have uppercase or digits or dashes after the first letter
 moduleComponent :: Parser Text
 moduleComponent = lexeme $ do
-    firstLetter <- lowerChar
-    nextLetters <- many (alphaNumChar <|> char '-')
-    return $ MT.pack (firstLetter : nextLetters)
+  firstLetter <- lowerChar
+  nextLetters <- many (alphaNumChar <|> char '-')
+  return $ MT.pack (firstLetter : nextLetters)
 
 freenameL :: Parser Text
 freenameL = mkFreename lowerChar
@@ -610,5 +635,6 @@ pLang = do
   langStr <- freename
   case ML.readLangName langStr of
     (Just lang) -> return lang
-    Nothing -> fancyFailure . Set.singleton . ErrorFail
-      $ "Langage '" <> MT.unpack langStr <> "' is not supported"
+    Nothing ->
+      fancyFailure . Set.singleton . ErrorFail $
+        "Langage '" <> MT.unpack langStr <> "' is not supported"

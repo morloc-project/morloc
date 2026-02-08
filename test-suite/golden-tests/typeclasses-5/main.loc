@@ -3,7 +3,7 @@ module sos (square, sumOfSquares)
 import root-cpp
 
 square :: Real -> Real
-square x = mul x x
+square x = x * x
 
 sumOfSquares :: [Real] -> Real
-sumOfSquares xs = fold add 0.0 (map square xs)
+sumOfSquares xs = fold (+) 0.0 (map square xs)

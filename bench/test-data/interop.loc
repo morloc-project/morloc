@@ -1,0 +1,6 @@
+module interop (processList)
+
+import math (sqrt from python)
+
+processList :: [Real] -> [Real]
+processList xs = map sqrt xs

@@ -15,7 +15,7 @@
 # resolver:
 #  name: custom-snapshot
 #  location: "./custom-snapshot.yaml"
-resolver: lts-22.18
+resolver: lts-22.44
 
 # User packages to be built.
 # Various formats can be used as shown in the example below.
@@ -41,6 +41,10 @@ packages:
 # # (e.g., acme-missiles-0.3)
 # extra-deps:
 #  - partial-order-0.2.0.0@sha256:a0d6ddc9ebcfa965a5cbcff1d06d46a79d44ea5a0335c583c2a51bcb41334487,2275
+#  - containers-0.6.8@sha256:bb2bec1bbc6b39a7c97cd95e056a5698ec45beb5d8feb6caae12af64e4bd823c,2670
+#  - binary-0.8.9.3@sha256:8b03c7fd5a7f6803280fba87e38d534beb1dc92fec975de5bd36200633996ef2,6576
+#  - parsec-3.1.18.0@sha256:dfbb9835b8abc966b6bbd34340ef5122227b4cf4480062b85ca4c4704f054f98,4535
+#  - text-2.1.3@sha256:5094b1264f717da458c5fa6690ca5eea90e568e464e33a6defeddeb7810b8053,11202
 
 # Override default flag values for local packages and extra-deps
 # flags: {}

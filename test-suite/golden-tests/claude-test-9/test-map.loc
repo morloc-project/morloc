@@ -1,0 +1,7 @@
+module testmap (testMapWorks)
+
+import root-py
+
+-- Test that map is available through Functor typeclass
+testMapWorks :: [Int] -> [Int]
+testMapWorks xs = map (\x -> x + 1) xs

@@ -4,5 +4,5 @@ module main (foo)
 
 import fooroot
 
-foo x y = add x (mul (-1) y)
-foo x y = add 0 (add x (mul (-1) y))
+foo x y = x + -1 * y
+foo x y = 0 + x + -1 * y

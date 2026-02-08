@@ -6,7 +6,7 @@ import root-py
 f = x where
    x = y where
        y = z where
-           z = add c (add a b)
+           z = c + a + b
            a = 1.0
        b = 2.0
    c = 39.0

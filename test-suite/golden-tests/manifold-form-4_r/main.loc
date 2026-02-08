@@ -2,4 +2,4 @@ module main (foo)
 
 import root-r
 
-foo = ((True, 4.2), mul 1.0 4.0)
+foo = ((True, 4.2), 1.0 * 4.0)

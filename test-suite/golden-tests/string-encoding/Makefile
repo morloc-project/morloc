@@ -1,6 +1,6 @@
 all:
 	rm -f obs.txt
-	morloc make -v foo.loc > log
+	morloc make foo.loc 
 	>obs.txt
 	./nexus foop a.json >> obs.txt
 	./nexus foor a.json >> obs.txt

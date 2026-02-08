@@ -1,9 +1,9 @@
-import Test.Tasty
 import qualified System.Directory as SD
+import Test.Tasty
 
+import GoldenMakefileTests (goldenMakefileTest)
 import PropertyTests (propertyTests)
 import UnitTypeTests
-import GoldenMakefileTests (goldenMakefileTest)
 
 main :: IO ()
 main = do
@@ -12,8 +12,7 @@ main = do
   defaultMain $
     testGroup
       "Morloc tests"
-      [ packerTests
-      , unitTypeTests
+      [ unitTypeTests
       , unitValuecheckTests
       , typeOrderTests
       , typeAliasTests
@@ -21,22 +20,44 @@ main = do
       , whereTests
       , orderInvarianceTests
       , whitespaceTests
+      , infixOperatorTests
       , substituteTVarTests
       , subtypeTests
+      , complexityRegressionTests
+        -- -- These tests pass locally and when I run the same container that I
+        -- -- use in github actions. Yet these tests freeze in an infinite loop
+        -- -- with no STDERR output on github. I have no idea why. But for now I'm
+        -- -- just going to comment them out. Rememver uncomment them on dev cycles
+        -- -- so that they are tested somewhere, at least.
+        -- , golden "specialization-1-c" "specialization-1-c"
+        -- , golden "specialization-2-c" "specialization-2-c"
+        -- , golden "specialization-1-py - numpy" "specialization-1-py"
+        -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
+        -- , golden "specialization-1-r" "specialization-1-r"
 
-      -- -- These tests pass locally and when I run the same container that I
-      -- -- use in github actions. Yet these tests freeze in an infinite loop
-      -- -- with no STDERR output on github. I have no idea why. But for now I'm
-      -- -- just going to comment them out. Rememver uncomment them on dev cycles
-      -- -- so that they are tested somewhere, at least.
-      -- , golden "specialization-1-c" "specialization-1-c"
-      -- , golden "specialization-2-c" "specialization-2-c"
-      -- , golden "specialization-1-py - numpy" "specialization-1-py"
-      -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
-      -- , golden "specialization-1-r" "specialization-1-r"
+        -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
-      -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
+      , golden "records-alias" "records-alias"
+      -- , golden "unit-1" "unit-1"
 
+      , golden "infix" "infix"
+      , golden "infix-import"             "infix-import"
+      , golden "infix-generic"            "infix-generic"
+      , golden "infix-polyglot"           "infix-polyglot"
+      , golden "infix-typeclass-import"   "infix-typeclass-import"
+      , golden "infix-typeclass-polyglot" "infix-typeclass-polyglot"
+      , golden "infix-typeclass-simple"   "infix-typeclass-simple"
+
+      , golden "claude-test-1" "claude-test-1"
+      , golden "claude-test-2" "claude-test-2"
+      , golden "claude-test-3" "claude-test-3"
+      , golden "claude-test-4" "claude-test-4"
+      -- , golden "claude-test-5" "claude-test-5"
+      , golden "claude-test-6" "claude-test-6"
+      , golden "claude-test-7" "claude-test-7"
+      , golden "claude-test-8" "claude-test-8"
+      , golden "claude-test-9" "claude-test-9"
+      , golden "claude-test-10" "claude-test-10"
       , golden "functional-data-1" "functional-data-1"
       , golden "functional-data-2" "functional-data-2"
       , golden "functional-data-3a" "functional-data-3a"
@@ -49,16 +70,12 @@ main = do
       , golden "functional-data-3f" "functional-data-3f"
       , golden "functional-data-4" "functional-data-4"
       , golden "functional-data-5" "functional-data-5"
-
       , golden "pattern-getters" "pattern-getters"
       , golden "pattern-setters" "pattern-setters"
-
       , golden "holes-func" "holes-func"
       , golden "holes-record" "holes-record"
       , golden "holes-simple" "holes-simple"
-
       , golden "type-annotations-1" "type-annotations-1"
-
       , golden "native-morloc-1" "native-morloc-1"
       , golden "native-morloc-2" "native-morloc-2"
       , golden "native-morloc-3" "native-morloc-3"
@@ -68,62 +85,47 @@ main = do
       , golden "native-morloc-7" "native-morloc-7"
       , golden "native-morloc-8" "native-morloc-8"
       , golden "native-morloc-9" "native-morloc-9"
-
       , golden "demo-trimming" "demo-trimming"
-
       , golden "formatting" "formatting"
       , golden "record-docstrings" "record-docstrings"
-
       , golden "typeclasses-1" "typeclasses-1"
       , golden "typeclasses-2" "typeclasses-2"
       , golden "typeclasses-3" "typeclasses-3"
       , golden "typeclasses-4" "typeclasses-4"
       , golden "typeclasses-5" "typeclasses-5"
       , golden "typeclasses-6" "typeclasses-6"
-
       , golden "higher-kinded-types" "higher-kinded-types"
-
       , golden "string-encoding" "string-encoding"
       , golden "string-encoding-utf8" "string-encoding-utf8"
       , golden "string-json-parsing" "string-json-parsing"
       , golden "string-multiline" "string-multiline"
       , golden "string-interpolation" "string-interpolation"
-
-
       , golden "file-input-py" "file-input-py"
       , golden "file-input-c" "file-input-c"
       , golden "file-input-r" "file-input-r"
-
       , golden "packer-definitions-1" "packer-definitions-1"
       , golden "packer-definitions-2" "packer-definitions-2"
       , golden "packer-definitions-3" "packer-definitions-3"
       , golden "packer-definitions-4" "packer-definitions-4"
       , golden "packer-definitions-5" "packer-definitions-5"
-
       , golden "import-1" "import-1"
       , golden "import-2" "import-2"
-
-      -- tests the bug solved involving the lambdaScope function in
-      -- Generate.hs:reserialize. See that commit message.
-      , golden "edge-cases-1" "edge-cases-1"
+      , -- tests the bug solved involving the lambdaScope function in
+        -- Generate.hs:reserialize. See that commit message.
+        golden "edge-cases-1" "edge-cases-1"
       , golden "edge-cases-2" "edge-cases-2"
-
       , golden "type-synthesis-1" "type-synthesis-1"
       , golden "type-synthesis-2" "type-synthesis-2"
-
       , golden "argument-form-1-c" "argument-form-1-c"
       , golden "argument-form-1-py" "argument-form-1-py"
       , golden "argument-form-1-r" "argument-form-1-r"
-
       , golden "argument-form-2-c" "argument-form-2-c"
       , golden "argument-form-2-py" "argument-form-2-py"
       , golden "argument-form-2-r" "argument-form-2-r"
-
-      -- see github issue #7
-      , golden "argument-form-3-c" "argument-form-3-c"
+      , -- see github issue #7
+        golden "argument-form-3-c" "argument-form-3-c"
       , golden "argument-form-3-py" "argument-form-3-py"
       , golden "argument-form-3-r" "argument-form-3-r"
-
       , golden "composition" "composition"
       , golden "generic-hofs-1" "generic-hofs-1"
       , golden "generic-hofs-2" "generic-hofs-2"
@@ -136,69 +138,59 @@ main = do
       , golden "eta-reduction-7" "eta-reduction-7"
       , golden "eta-reduction-8-py" "eta-reduction-8-py"
       , golden "eta-reduction-8-cpp" "eta-reduction-8-cpp"
-
       , golden "path-shadowing-c" "path-shadowing-c"
       , golden "path-shadowing-py" "path-shadowing-py"
       , golden "path-shadowing-r" "path-shadowing-r"
-
       , golden "argument-form-4-c" "argument-form-4-c"
       , golden "argument-form-4-py" "argument-form-4-py"
       , golden "argument-form-4-r" "argument-form-4-r"
-
       , golden "argument-form-5-c" "argument-form-5-c"
       , golden "argument-form-5-py" "argument-form-5-py"
       , golden "argument-form-5-r" "argument-form-5-r"
-
       , golden "argument-form-6-c" "argument-form-6-c"
       , golden "argument-form-6-py" "argument-form-6-py"
       , golden "argument-form-6-r" "argument-form-6-r"
-
       , golden "argument-form-7-c" "argument-form-7-c"
       , golden "argument-form-7-py" "argument-form-7-py"
       , golden "argument-form-7-r" "argument-form-7-r"
-
       , golden "argument-form-8-c" "argument-form-8-c"
       , golden "argument-form-8-py" "argument-form-8-py"
       , golden "argument-form-8-r" "argument-form-8-r"
-
       , golden "argument-form-9-c" "argument-form-9-c"
       , golden "argument-form-9-py" "argument-form-9-py"
       , golden "argument-form-9-r" "argument-form-9-r"
-
       , golden "interop-1-py" "interop-1-py"
       , golden "interop-1-r" "interop-1-r"
       , golden "interop-2" "interop-2"
-      -- 3a
-      , golden "interop-3a-cp" "interop-3a-cp"
+      , -- 3a
+        golden "interop-3a-cp" "interop-3a-cp"
       , golden "interop-3a-pr" "interop-3a-pr"
       , golden "interop-3a-rc" "interop-3a-rc"
       , golden "interop-3a-pp" "interop-3a-pp"
-      -- 3b
-      , golden "interop-3b-cp" "interop-3b-cp"
+      , -- 3b
+        golden "interop-3b-cp" "interop-3b-cp"
       , golden "interop-3b-pr" "interop-3b-pr"
       , golden "interop-3b-rc" "interop-3b-rc"
       , golden "interop-3b-pp" "interop-3b-pp"
-      -- 3c
-      , golden "interop-3c-cp" "interop-3c-cp"
+      , -- 3c
+        golden "interop-3c-cp" "interop-3c-cp"
       , golden "interop-3c-pr" "interop-3c-pr"
       , golden "interop-3c-rc" "interop-3c-rc"
       , golden "interop-3c-pp" "interop-3c-pp"
-      -- 3d
-      , golden "interop-3d-cp" "interop-3d-cp"
+      , -- 3d
+        golden "interop-3d-cp" "interop-3d-cp"
       , golden "interop-3d-pr" "interop-3d-pr"
       , golden "interop-3d-rc" "interop-3d-rc"
       , golden "interop-3d-pp" "interop-3d-pp"
-      -- 3e
-      , golden "interop-3e-cp" "interop-3e-cp"
+      , -- 3e
+        golden "interop-3e-cp" "interop-3e-cp"
       , golden "interop-3e-pr" "interop-3e-pr"
       , golden "interop-3e-rc" "interop-3e-rc"
       , golden "interop-3e-pp" "interop-3e-pp"
-
-      -- 3f - test serialization type bug
-      , golden "interop-3f" "interop-3f"
-
-      -- other random interop tests (I should kill them)
-      , golden "interop-4" "interop-4"
+      , -- 3f - test serialization type bug
+        golden "interop-3f" "interop-3f"
+      , -- other random interop tests (I should kill them)
+        golden "interop-4" "interop-4"
       , golden "interop-5" "interop-5"
       , golden "interop-6" "interop-6"
       , golden "interop-7" "interop-7"
@@ -208,7 +200,6 @@ main = do
       , golden "interop-9" "interop-9"
       , golden "interop-10" "interop-10"
       , golden "interop-11" "interop-11"
-
       , golden "manifold-form-0" "manifold-form-0"
       , golden "manifold-form-0x" "manifold-form-0x"
       , golden "manifold-form-1" "manifold-form-1"
@@ -225,41 +216,38 @@ main = do
       , golden "manifold-form-6_c" "manifold-form-6_c"
       , golden "manifold-form-6_py" "manifold-form-6_py"
       , golden "manifold-form-6_r" "manifold-form-6_r"
-
-      -- see github issue #9
-      , golden "manifold-form-7_c" "manifold-form-7_c"
+      , -- see github issue #9
+        golden "manifold-form-7_c" "manifold-form-7_c"
       , golden "manifold-form-7_py" "manifold-form-7_py"
       , golden "manifold-form-7_r" "manifold-form-7_r"
-
-      -- test records
-      , golden "records-primitive" "records-primitive"
+      , -- test records
+        golden "records-primitive" "records-primitive"
       , golden "records-complex-1" "records-complex-1"
       , golden "records-complex-2" "records-complex-2"
       , golden "records-nested" "records-nested"
-
+      , golden "records-alias" "records-alias"
       , golden "selection-1" "selection-1"
       , golden "selection-2" "selection-2"
       , golden "selection-3" "selection-3"
       , golden "selection-4" "selection-4"
-
-      -- import two instances in one languages for a function
-      -- this is also a test of a function that is defind in a local file
-      -- -- With the new stricter implementation, these tests no longer pass
-      -- -- They can be reinstated when the morloc compiler learns to
-      -- -- distinguish the functions reasonably
-      -- , golden "multiple-instances-1-c" "multiple-instances-1-c"
-      -- , golden "multiple-instances-1-py" "multiple-instances-1-py"
-      -- , golden "multiple-instances-1-r" "multiple-instances-1-r"
-      -- multiple sources and a declaration
-      , golden "multiple-instances-2-c" "multiple-instances-2-c"
+      , -- import two instances in one languages for a function
+        -- this is also a test of a function that is defind in a local file
+        -- -- With the new stricter implementation, these tests no longer pass
+        -- -- They can be reinstated when the morloc compiler learns to
+        -- -- distinguish the functions reasonably
+        -- , golden "multiple-instances-1-c" "multiple-instances-1-c"
+        -- , golden "multiple-instances-1-py" "multiple-instances-1-py"
+        -- , golden "multiple-instances-1-r" "multiple-instances-1-r"
+        -- multiple sources and a declaration
+        golden "multiple-instances-2-c" "multiple-instances-2-c"
       , golden "multiple-instances-2-py" "multiple-instances-2-py"
       , golden "multiple-instances-2-r" "multiple-instances-2-r"
-      -- tests of module forms
-      -- where *-sid
-      --   s - number of sourced instances
-      --   i - number of imported instances
-      --   d - number of declared instances
-      , golden "module-form-00n" "module-form-00n"
+      , -- tests of module forms
+        -- where *-sid
+        --   s - number of sourced instances
+        --   i - number of imported instances
+        --   d - number of declared instances
+        golden "module-form-00n" "module-form-00n"
       , golden "module-form-011" "module-form-011"
       , golden "module-form-01n" "module-form-01n"
       , golden "module-form-0n0" "module-form-0n0"
@@ -272,19 +260,18 @@ main = do
       , golden "module-form-n00" "module-form-n00"
       , golden "module-form-n01" "module-form-n01"
       , golden "module-form-n10" "module-form-n10"
-
-      -- tests of serialization
-      -- , golden "c  S" "serial-form-1-c"
-      -- , golden "py S" "serial-form-1-py"
-      -- , golden "r  S" "serial-form-1-r"
-      , golden "C serial-form-2-c" "serial-form-2-c"
+      , -- tests of serialization
+        -- , golden "c  S" "serial-form-1-c"
+        -- , golden "py S" "serial-form-1-py"
+        -- , golden "r  S" "serial-form-1-r"
+        golden "C serial-form-2-c" "serial-form-2-c"
       , golden "C serial-form-2-py" "serial-form-2-py"
       , golden "C serial-form-2-r" "serial-form-2-r"
-      -- , golden "c  R" "serial-form-3-c"
-      -- , golden "py R" "serial-form-3-py"
-      -- , golden "r  R" "serial-form-3-r"
-      -- outer simple type
-      , golden "S(S) serial-form-4-c" "serial-form-4-c"
+      , -- , golden "c  R" "serial-form-3-c"
+        -- , golden "py R" "serial-form-3-py"
+        -- , golden "r  R" "serial-form-3-r"
+        -- outer simple type
+        golden "S(S) serial-form-4-c" "serial-form-4-c"
       , golden "S(S) serial-form-4-py" "serial-form-4-py"
       , golden "S(S) serial-form-4-r" "serial-form-4-r"
       , golden "S(C) serial-form-5-c" "serial-form-5-c"
@@ -293,18 +280,18 @@ main = do
       , golden "S(R) serial-form-6-c" "serial-form-6-c"
       , golden "S(R) serial-form-6-py" "serial-form-6-py"
       , golden "S(R) serial-form-6-r" "serial-form-6-r"
-      -- outer constructed type
-      , golden "C(S) serial-form-7-c" "serial-form-7-c"
+      , -- outer constructed type
+        golden "C(S) serial-form-7-c" "serial-form-7-c"
       , golden "C(S) serial-form-7-py" "serial-form-7-py"
       , golden "C(S) serial-form-7-r" "serial-form-7-r"
       , golden "C(C) serial-form-8-c" "serial-form-8-c"
-      -- , golden "C(C) serial-form-8-py" "serial-form-8-py"
-      , golden "C(C) serial-form-8-r" "serial-form-8-r"
+      , -- , golden "C(C) serial-form-8-py" "serial-form-8-py"
+        golden "C(C) serial-form-8-r" "serial-form-8-r"
       , golden "C(R) serial-form-9-c" "serial-form-9-c"
       , golden "C(R) serial-form-9-py" "serial-form-9-py"
       , golden "C(R) serial-form-9-r" "serial-form-9-r"
-      -- outer record type
-      , golden "R(S) serial-form-10-c" "serial-form-10-c"
+      , -- outer record type
+        golden "R(S) serial-form-10-c" "serial-form-10-c"
       , golden "R(S) serial-form-10-py" "serial-form-10-py"
       , golden "R(S) serial-form-10-r" "serial-form-10-r"
       , golden "R(C) serial-form-11-c" "serial-form-11-c"
@@ -313,20 +300,19 @@ main = do
       , golden "R(R) serial-form-12-c" "serial-form-12-c"
       , golden "R(R) serial-form-12-py" "serial-form-12-py"
       , golden "R(R) serial-form-12-r" "serial-form-12-r"
-
-      -- table handling
-      , golden "table-1-c"  "table-1-c"
+      , -- table handling
+        golden "table-1-c" "table-1-c"
       , golden "table-1-py" "table-1-py"
-      , golden "table-1-r"  "table-1-r"
-      , golden "table-2-c"  "table-2-c"
+      , golden "table-1-r" "table-1-r"
+      , golden "table-2-c" "table-2-c"
       , golden "table-2-py" "table-2-py"
-      , golden "table-2-r"  "table-2-r"
-      -- object handling
-      , golden "object-1-c"  "object-1-c"
+      , golden "table-2-r" "table-2-r"
+      , -- object handling
+        golden "object-1-c" "object-1-c"
       , golden "object-1-py" "object-1-py"
-      , golden "object-1-r"  "object-1-r"
-      -- scoping
-      , golden "scoping-1" "scoping-1"
+      , golden "object-1-r" "object-1-r"
+      , -- scoping
+        golden "scoping-1" "scoping-1"
       , golden "scoping-2" "scoping-2"
       , golden "scoping-3" "scoping-3"
       , golden "scoping-4" "scoping-4"
@@ -339,45 +325,39 @@ main = do
       , golden "scoping-11" "scoping-11"
       , golden "scoping-12" "scoping-12"
       , golden "scoping-13" "scoping-13"
-      -- type identities
-      , golden "type-identities-c" "type-identities-c"
-
-      -- testing packet transmission
-      , golden "packets-large (wait ~10s)" "packets-large"
+      , -- type identities
+        golden "type-identities-c" "type-identities-c"
+      , -- testing packet transmission
+        golden "packets-large (wait ~10s)" "packets-large"
       , golden "packets-interop (wait ~10s)" "packets-interop"
-
-      -- many tests of higher-order functions
-      , golden "hofs-1" "hofs-1"
-
-      -- test errors
-      , golden "errors (wait ~10s)" "errors"
-
-
-      -- , golden "argument-form-1-rs" "argument-form-1-rs"
-      -- , golden "argument-form-2-rs" "argument-form-2-rs"
-      -- , golden "argument-form-3-rs" "argument-form-3-rs"
-      -- , golden "argument-form-4-rs" "argument-form-4-rs"
-      -- , golden "argument-form-6-rs" "argument-form-6-rs"
-      -- , golden "argument-form-7-rs" "argument-form-7-rs"
-      -- , golden "argument-form-8-rs" "argument-form-8-rs"
-      -- , golden "argument-form-5-rs" "argument-form-5-rs"
-      -- , golden "records-1-rs" "records-1-rs"
-      -- , golden "multiple-instances-1-rs" "multiple-instances-1-rs"
-      -- , golden "multiple-instances-2-rs" "multiple-instances-2-rs"
-      -- , golden "C serial-form-2-rs" "serial-form-2-rs"
-      -- , golden "S(S) serial-form-4-rs" "serial-form-4-rs"
-      -- , golden "S(C) serial-form-5-rs" "serial-form-5-rs"
-      -- , golden "S(R) serial-form-6-rs" "serial-form-6-rs"
-      -- , golden "C(S) serial-form-7-rs" "serial-form-7-rs"
-      -- , golden "C(C) serial-form-8-rs" "serial-form-8-rs"
-      -- , golden "C(R) serial-form-9-rs" "serial-form-9-rs"
-      -- , golden "R(S) serial-form-10-rs" "serial-form-10-rs"
-      -- , golden "R(C) serial-form-11-rs" "serial-form-11-rs"
-      -- , golden "R(R) serial-form-12-rs" "serial-form-12-rs"
-      -- , golden "Rust table default" "table-1-rs"
-      -- , golden "Rust table object" "table-2-rs"
-      -- , golden "Rust object handling" "object-1-rs"
-      -- , golden "record-access-rs" "record-access-rs"
-      -- , golden "type-identities-rs" "type-identities-rs"
-
+      , -- many tests of higher-order functions
+        golden "hofs-1" "hofs-1"
+      , -- test errors
+        golden "errors (wait ~10s)" "errors"
+        -- , golden "argument-form-1-rs" "argument-form-1-rs"
+        -- , golden "argument-form-2-rs" "argument-form-2-rs"
+        -- , golden "argument-form-3-rs" "argument-form-3-rs"
+        -- , golden "argument-form-4-rs" "argument-form-4-rs"
+        -- , golden "argument-form-6-rs" "argument-form-6-rs"
+        -- , golden "argument-form-7-rs" "argument-form-7-rs"
+        -- , golden "argument-form-8-rs" "argument-form-8-rs"
+        -- , golden "argument-form-5-rs" "argument-form-5-rs"
+        -- , golden "records-1-rs" "records-1-rs"
+        -- , golden "multiple-instances-1-rs" "multiple-instances-1-rs"
+        -- , golden "multiple-instances-2-rs" "multiple-instances-2-rs"
+        -- , golden "C serial-form-2-rs" "serial-form-2-rs"
+        -- , golden "S(S) serial-form-4-rs" "serial-form-4-rs"
+        -- , golden "S(C) serial-form-5-rs" "serial-form-5-rs"
+        -- , golden "S(R) serial-form-6-rs" "serial-form-6-rs"
+        -- , golden "C(S) serial-form-7-rs" "serial-form-7-rs"
+        -- , golden "C(C) serial-form-8-rs" "serial-form-8-rs"
+        -- , golden "C(R) serial-form-9-rs" "serial-form-9-rs"
+        -- , golden "R(S) serial-form-10-rs" "serial-form-10-rs"
+        -- , golden "R(C) serial-form-11-rs" "serial-form-11-rs"
+        -- , golden "R(R) serial-form-12-rs" "serial-form-12-rs"
+        -- , golden "Rust table default" "table-1-rs"
+        -- , golden "Rust table object" "table-2-rs"
+        -- , golden "Rust object handling" "object-1-rs"
+        -- , golden "record-access-rs" "record-access-rs"
+        -- , golden "type-identities-rs" "type-identities-rs"
       ]

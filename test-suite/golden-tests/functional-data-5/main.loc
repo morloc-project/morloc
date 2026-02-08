@@ -5,7 +5,7 @@ import root-py
 import root-cpp
 
 funs :: [(Int -> Int)]
-funs = [ idcpp . add 1, idr . add 2 ]
+funs = [ idcpp . (+) 1, idr . (+) 2 ]
 
 source Py from "main.py" ("runAll")
 runAll a b :: a -> [(a -> b)] -> [b]

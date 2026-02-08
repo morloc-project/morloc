@@ -2,4 +2,4 @@ module main (foo)
 
 import root-r
 
-foo = fold add 0.0 [1.0, 2.0, 3.0, mul 1.0 4.0]
+foo = fold (+) 0.0 [1.0, 2.0, 3.0, 1.0 * 4.0]

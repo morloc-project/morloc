@@ -1,0 +1,120 @@
+-- desc: Text Mining Pipeline - NLP and Text Analytics
+-- author: Claude
+--
+-- Demonstrates string processing, tokenization, and text analysis
+-- across Python, C++, and R.
+module main (analyzeText, findTopWords, analyzeSentiment)
+
+-- Type mappings
+type Cpp => List a = "std::vector<$1>" a
+type Py => List a = "list" a
+type R => List a = "list" a
+type Cpp => Int = "int"
+type Py => Int = "int"
+type R => Int = "int"
+type Cpp => Real = "double"
+type Py => Real = "float"
+type R => Real = "double"
+type Cpp => Str = "std::string"
+type Py => Str = "str"
+type R => Str = "character"
+type Cpp => Tuple2 a b = "std::pair<$1,$2>" a b
+type Py => Tuple2 a b = "tuple" a b
+type R => Tuple2 a b = "list" a b
+
+-- Document record
+record Document where
+  docId :: Str
+  text :: Str
+  tokens :: [Str]
+  wordCount :: Int
+
+record Py => Document = "dict"
+record Cpp => Document = "struct"
+record R => Document = "list"
+
+-- Word frequency record
+record WordFreq where
+  word :: Str
+  count :: Int
+
+record Py => WordFreq = "dict"
+record Cpp => WordFreq = "WordFreq"
+record R => WordFreq = "list"
+
+-- Sentiment scores
+record Sentiment where
+  positive :: Real
+  negative :: Real
+  neutral :: Real
+  overall :: Real
+
+record Py => Sentiment = "dict"
+record Cpp => Sentiment = "struct"
+record R => Sentiment = "list"
+
+-- Python tokenization and I/O
+source Py from "text_processing.py" ("createDocument", "tokenizeText", "getSampleText")
+createDocument :: Str -> Str -> Document
+tokenizeText :: Str -> [Str]
+getSampleText :: Int -> Str
+
+-- C++ fast string operations
+source Cpp from "string_ops.hpp" ("countWords", "findNgrams")
+countWords :: [Str] -> [WordFreq]
+findNgrams :: [Str] -> Int -> [Str]
+
+-- R sentiment and statistics
+source R from "text_stats.R" ("computeSentiment", "wordDiversity")
+computeSentiment :: [Str] -> Sentiment
+wordDiversity :: [Str] -> Real
+
+--' Analyze text document
+--'
+--' Creates a document from sample text and tokenizes it.
+--'
+--' name: analyze
+analyzeText ::
+  --' Sample text ID (1-5)
+  --' arg: --sample
+  --' metavar: ID
+  --' default: 1
+  Int ->
+  --' return: Document with tokens
+  Document
+analyzeText sampleId = createDocument "doc1" text where
+  text = getSampleText sampleId
+
+--' Find top N most frequent words
+--'
+--' Tokenizes text and finds the most common words using C++.
+--'
+--' name: topWords
+findTopWords ::
+  --' Sample text ID
+  --' arg: --sample
+  --' metavar: ID
+  --' default: 1
+  Int ->
+  --' return: List of word frequencies
+  [WordFreq]
+findTopWords sampleId = countWords tokens where
+  text = getSampleText sampleId
+  tokens = tokenizeText text
+
+--' Compute sentiment analysis
+--'
+--' Analyzes the sentiment of sample text using R.
+--'
+--' name: sentiment
+analyzeSentiment ::
+  --' Sample text ID
+  --' arg: --sample
+  --' metavar: ID
+  --' default: 2
+  Int ->
+  --' return: Sentiment scores
+  Sentiment
+analyzeSentiment sampleId = computeSentiment tokens where
+  text = getSampleText sampleId
+  tokens = tokenizeText text

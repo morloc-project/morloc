@@ -2,4 +2,4 @@ module main (foo)
 
 import root-cpp
 
-foo = ((True, 42.0), mul 1.0 4.0)
+foo = ((True, 42.0), 1.0 * 4.0)

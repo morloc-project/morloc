@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{-|
+{- |
 Module      : Morloc.ProgramBuilder.Build
 Description : Manage system requirements and project building for pools
 Copyright   : (c) Zebulun Arendsee, 2016-2026
@@ -11,14 +11,14 @@ module Morloc.ProgramBuilder.Build
   ( buildProgram
   ) where
 
-import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
+import Morloc.Namespace
 import qualified Morloc.System as MS
 import qualified System.Directory as SD
 
 buildProgram :: (Script, [Script]) -> MorlocMonad ()
-buildProgram (nexus, pools) = mapM_ build (nexus:pools)
+buildProgram (nexus, pools) = mapM_ build (nexus : pools)
 
 build :: Script -> MorlocMonad ()
 build s = do

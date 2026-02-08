@@ -2,6 +2,7 @@
 
 module m (foo, bar)
 
+import root ((.))
 import root-py  (Str, Int, Tuple3, List)
 import root-cpp (Str, Int, Tuple3, List)
 import root-r   (Str, Int, Tuple3, List)
@@ -11,8 +12,8 @@ record Foo where
   things :: [Str]
   size :: Int
 record Cpp => Foo = "foo_t"
-record Py  => Foo = "dict"
 record R   => Foo = "list"
+record Py  => Foo = "dict"
 
 source Py from "foo.py" ("addFlooz" as addFloozPy)
 source Cpp from "foo.hpp" ("addFlooz" as addFloozCpp)
@@ -33,16 +34,10 @@ foo size =
     }
 
 -- test access
-bar size = (.flooz fpy, .things fcpp, .size fr) where
+bar size = (.flooz fpy, .size fr) where
     fpy = addFloozPy 42
       { flooz = []
       , things = ["a"]
-      , size = size
-      }
-
-    fcpp = addFloozPy 42
-      { flooz = []
-      , things = ["b"]
       , size = size
       }
 

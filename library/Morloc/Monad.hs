@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{-|
+{- |
 Module      : Morloc.Monad
 Description : A great big stack of monads
 Copyright   : (c) Zebulun Arendsee, 2016-2026
@@ -12,7 +12,6 @@ Most functions that raise errors, perform IO, or access global configuration
 will return `MorlocMonad a` types. The stack consists of a State, Writer,
 Except, and Reader monad.
 -}
-
 module Morloc.Monad
   ( MorlocReturn
   , runMorlocMonad
@@ -22,19 +21,22 @@ module Morloc.Monad
   , logFile
   , logFileWith
   , readLang
-  -- * re-exports
+
+    -- * re-exports
   , module Control.Monad.Trans
   , module Control.Monad.Except
   , module Control.Monad.Reader
   , module Control.Monad.State
   , module Control.Monad.Writer
   , module Control.Monad.Identity
-  -- * reusable counter
+
+    -- * reusable counter
   , startCounter
   , getCounter
   , setCounter
   , takeFromCounter
-  -- * metadata accessors
+
+    -- * metadata accessors
   , metaSources
   , metaName
   , getDocStrings
@@ -42,17 +44,20 @@ module Morloc.Monad
   , getGeneralScope
   , getConcreteUniversalScope
   , getGeneralUniversalScope
-  -- * handling tree depth
+
+    -- * handling tree depth
   , incDepth
   , getDepth
   , decDepth
   , setDepth
-  -- * messages
+
+    -- * messages
   , say
   , sayV
   , sayVV
   , sayVVV
-  -- * Indexing monad
+
+    -- * Indexing monad
   , Index
   , runIndex
   , newIndex
@@ -61,35 +66,36 @@ module Morloc.Monad
   ) where
 
 import Control.Monad.Except
+import Control.Monad.Identity
 import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Trans
 import Control.Monad.Writer
-import Control.Monad.Identity
-import Morloc.Namespace
-import Morloc.Data.Doc
-import System.IO (stderr)
-import qualified Morloc.Data.Text as MT
 import Data.Text (Text)
-import qualified Morloc.Data.Map as Map
+import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
+import qualified Morloc.Data.Map as Map
+import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
-import qualified System.Exit as SE
-import qualified System.Process as SP
+import Morloc.Namespace
 import qualified Morloc.System as MS
+import qualified System.Exit as SE
+import System.IO (stderr)
+import qualified System.Process as SP
 
 runMorlocMonad ::
-     Maybe Path -> Int -> Config -> BuildConfig -> MorlocMonad a -> IO (MorlocReturn a)
+  Maybe Path -> Int -> Config -> BuildConfig -> MorlocMonad a -> IO (MorlocReturn a)
 runMorlocMonad outfile v config buildConfig ev = do
   let state0 = emptyState outfile v
-      state1 = state0 { stateBuildConfig = buildConfig }
+      state1 = state0 {stateBuildConfig = buildConfig}
   runStateT (runWriterT (runExceptT (runReaderT ev config))) (state1)
 
 emptyState :: Maybe Path -> Int -> MorlocState
-emptyState path v = defaultValue
-  { stateVerbosity = v
-  , stateOutfile = path
-  }
+emptyState path v =
+  defaultValue
+    { stateVerbosity = v
+    , stateOutfile = path
+    }
 
 startCounter :: MorlocMonad ()
 startCounter = do
@@ -106,9 +112,9 @@ getCounter = do
 takeFromCounter :: Int -> MorlocMonad [Int]
 takeFromCounter 0 = return []
 takeFromCounter i = do
-    x <- getCounter
-    xs <- takeFromCounter (i-1)
-    return (x:xs)
+  x <- getCounter
+  xs <- takeFromCounter (i - 1)
+  return (x : xs)
 
 setCounter :: Int -> MorlocMonad ()
 setCounter i = do
@@ -146,12 +152,11 @@ writeMorlocReturn ((Left err', msgs), _) = do
   return False
 writeMorlocReturn ((Right _, _), _) = return True
 
-
 -- | Execute a system call
 runCommand ::
-     Text -- function making the call (used only in debugging messages on error)
-  -> Text -- system command
-  -> MorlocMonad ()
+  Text -> -- function making the call (used only in debugging messages on error)
+  Text -> -- system command
+  MorlocMonad ()
 runCommand loc cmd = do
   liftIO . MT.putStrLn $ "$ " <> cmd
   (exitCode, _, err') <-
@@ -185,13 +190,15 @@ sayVV = sayIf 2
 sayVVV :: MDoc -> MorlocMonad ()
 sayVVV = sayIf 3
 
-
 -- | Execute a system call and return a function of the STDOUT
 runCommandWith ::
-     Text -- function making the call (used only in debugging messages on error)
-  -> (Text -> a) -- ^ A function of the output (run on success)
-  -> Text -- ^ System command
-  -> MorlocMonad a
+  Text -> -- function making the call (used only in debugging messages on error)
+
+  -- | A function of the output (run on success)
+  (Text -> a) ->
+  -- | System command
+  Text ->
+  MorlocMonad a
 runCommandWith loc f cmd = do
   liftIO . MT.putStrLn $ "$ " <> cmd
   (exitCode, out, err') <-
@@ -202,10 +209,11 @@ runCommandWith loc f cmd = do
 
 -- | Write a object to a file in the Morloc temporary directory
 logFile ::
-     Show a
-  => String -- ^ A filename
-  -> a
-  -> MorlocMonad a
+  (Show a) =>
+  -- | A filename
+  String ->
+  a ->
+  MorlocMonad a
 logFile s m = do
   tmpdir <- asks configTmpDir
   liftIO $ MS.createDirectoryIfMissing True tmpdir
@@ -215,11 +223,13 @@ logFile s m = do
 
 -- | Write a object to a file in the Morloc temporary directory
 logFileWith ::
-     (Show b)
-  => String -- ^ A filename
-  -> (a -> b) -- ^ A function to convert a to something presentable
-  -> a
-  -> MorlocMonad a
+  (Show b) =>
+  -- | A filename
+  String ->
+  -- | A function to convert a to something presentable
+  (a -> b) ->
+  a ->
+  MorlocMonad a
 logFileWith s f m = do
   tmpdir <- asks configTmpDir
   liftIO $ MS.createDirectoryIfMissing True tmpdir
@@ -227,19 +237,20 @@ logFileWith s f m = do
   liftIO $ MT.writeFile path (MT.pretty (f m))
   return m
 
--- | Attempt to read a language name. This is a wrapper around the
--- @Morloc.Language::readLangName@ that appropriately handles error.
+{- | Attempt to read a language name. This is a wrapper around the
+@Morloc.Language::readLangName@ that appropriately handles error.
+-}
 readLang :: Text -> MorlocMonad Lang
 readLang langStr =
   case ML.readLangName langStr of
     (Just x) -> return x
     Nothing -> throwError $ UnknownLanguage langStr
 
-
--- | Return sources for constructing an object. These are used by `NamE NamObject`
--- expressions. Sources here includes some that are not linked to signatures, such
--- as language-specific imports of object constructors. So this supersets the
--- stateSignatures field's sources.
+{- | Return sources for constructing an object. These are used by `NamE NamObject`
+expressions. Sources here includes some that are not linked to signatures, such
+as language-specific imports of object constructors. So this supersets the
+stateSignatures field's sources.
+-}
 metaSources :: Int -> MorlocMonad [Source]
 metaSources i = do
   s <- gets stateSources
@@ -248,31 +259,32 @@ metaSources i = do
     GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
     (GMapJust srcs) -> return srcs
 
-
 ----- TODO: metaName should no longer be required - remove
--- | The name of a morloc composition. These names are stored in the monad
--- after they are resolved away. For example in:
---   import math
---   export foo
---   bar x y = add x (inc y)
---   foo x = add (bar x 5) 1
--- `foo` and `bar` are morloc composition. `foo` will be resolved to
---   add (add x (inc 5) 1
--- The terms "foo" and "bar" have disappeared. They aren't technically needed
--- anymore. However, the nexus needs a subcommand name to give the user for
--- calling "foo". In the generated code and in error messages, it is also nice
--- to keep the label "bar" attached to the second `add` function. `metaName`
--- can retrieve these names based on the index of the CallS expressions that
--- wrap the two `add` functions.
---
--- The name is linked to the SAnno general data structure.
+
+{- | The name of a morloc composition. These names are stored in the monad
+after they are resolved away. For example in:
+  import math
+  export foo
+  bar x y = add x (inc y)
+  foo x = add (bar x 5) 1
+`foo` and `bar` are morloc composition. `foo` will be resolved to
+  add (add x (inc 5) 1
+The terms "foo" and "bar" have disappeared. They aren't technically needed
+anymore. However, the nexus needs a subcommand name to give the user for
+calling "foo". In the generated code and in error messages, it is also nice
+to keep the label "bar" attached to the second `add` function. `metaName`
+can retrieve these names based on the index of the CallS expressions that
+wrap the two `add` functions.
+
+The name is linked to the SAnno general data structure.
+-}
 metaName :: Int -> MorlocMonad (Maybe EVar)
 metaName i = gets (Map.lookup i . stateName)
 
 -- Get the docstrings associated with an item
-getDocStrings
-    :: Int -- expression index
-    -> MorlocMonad ArgDoc
+getDocStrings ::
+  Int -> -- expression index
+  MorlocMonad ArgDoc
 getDocStrings i = do
   sgmap <- gets stateSignatures
   case GMap.lookup i sgmap of
@@ -281,14 +293,13 @@ getDocStrings i = do
     GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
     _ -> throwError . CallTheMonkeys $ "No entry found for index in stateSignatures"
 
-
 getConcreteScope :: Int -> Lang -> MorlocMonad Scope
 getConcreteScope i lang = do
   p <- gets stateConcreteTypedefs
   return $ case GMap.lookup i p of
     (GMapJust langmap) -> case Map.lookup lang langmap of
-        (Just scope) -> scope
-        Nothing -> Map.empty
+      (Just scope) -> scope
+      Nothing -> Map.empty
     _ -> Map.empty
 
 getGeneralScope :: Int -> MorlocMonad Scope
@@ -297,7 +308,6 @@ getGeneralScope i = do
   return $ case GMap.lookup i p of
     (GMapJust scope) -> scope
     _ -> Map.empty
-
 
 getConcreteUniversalScope :: Lang -> MorlocMonad Scope
 getConcreteUniversalScope lang = do
@@ -309,7 +319,7 @@ getConcreteUniversalScope lang = do
 getGeneralUniversalScope :: MorlocMonad Scope
 getGeneralUniversalScope = gets stateUniversalGeneralTypedefs
 
-newtype IndexState = IndexState { index :: Int }
+newtype IndexState = IndexState {index :: Int}
 type Index a = StateT IndexState Identity a
 
 runIndex :: Int -> Index a -> a
@@ -317,10 +327,10 @@ runIndex i x = evalState x (IndexState i)
 
 newIndex :: Index Int
 newIndex = do
-    s <- get
-    let i = index s
-    put $ s {index = index s + 1}
-    return i
+  s <- get
+  let i = index s
+  put $ s {index = index s + 1}
+  return i
 
 getIndex :: Index Int
 getIndex = gets index

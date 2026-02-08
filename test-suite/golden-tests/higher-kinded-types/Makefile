@@ -1,5 +1,5 @@
 all:
-	morloc make foo.loc > log
+	morloc make foo.loc 
 	>obs.txt
 	./nexus foo1 12 >> obs.txt
 	./nexus foo2 12 >> obs.txt

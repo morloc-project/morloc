@@ -1,6 +1,6 @@
 all:
 	rm -f obs.txt
-	morloc make -v foo.loc > log
+	morloc make foo.loc 
 	./nexus py2c 3 4 > obs.txt
 	./nexus c2py 3 4 >> obs.txt
 

@@ -1,0 +1,7 @@
+module ops-cpp (*)
+
+import ops
+
+type Cpp => Int = "int"
+
+source Cpp from "ops.hpp" ("add" as (<+>), "mul" as (<*>))

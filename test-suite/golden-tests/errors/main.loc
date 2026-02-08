@@ -4,6 +4,8 @@ module foo (
     , pcerr, pperr, prerr
   )
 
+import root ((.))
+
 source Cpp from "foo.hpp" ("cid", "cdiv")
 source R from "foo.R" ("rid", "rdiv")
 source Py from "foo.py" ("pid", "pdiv")

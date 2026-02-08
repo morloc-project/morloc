@@ -15,4 +15,4 @@ foo :: [Str] -> [Str]
 foo xs = map (paste "a" . paste "b" . paste "c") xs
 
 bar :: Real -> Real
-bar = abs . sub 1.0 . abs
+bar = abs . (-) 1.0 . abs

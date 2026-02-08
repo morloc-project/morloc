@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{-|
+{- |
 Module      : Language
 Description : Handling for specific languages
 Copyright   : (c) Zebulun Arendsee, 2016-2026
@@ -10,10 +10,9 @@ Maintainer  : z@morloc.io
 The purpose of this module currently is to 1) unify language naming conventions
 and 2) provide defaults for prioritizing languages.  This module should serve
 as the starting place for adding a new language.
-
 -}
 module Morloc.Language
-  ( Lang(..)
+  ( Lang (..)
   , mapLang
   , parseExtension
   , makeExtension
@@ -30,9 +29,10 @@ module Morloc.Language
 import Data.Text (Text, toLower)
 import Morloc.Data.Doc
 
--- | Programming languages in the Morloc ecosystem. This is the type that
--- should be used to refer to a language (don't use raw strings). Some of these
--- are languages that can be sourced (Python, R and C).
+{- | Programming languages in the Morloc ecosystem. This is the type that
+should be used to refer to a language (don't use raw strings). Some of these
+are languages that can be sourced (Python, R and C).
+-}
 data Lang
   = Python3Lang
   | RLang
@@ -61,19 +61,18 @@ mapLang f =
 -- | very rough function overhead costs that can be used when no benchmark info is available
 pairwiseCost :: Lang -> Lang -> Int
 -- functional overhead in each language
-pairwiseCost CLang       CLang       = 1
-pairwiseCost CppLang     CppLang     = 1
+pairwiseCost CLang CLang = 1
+pairwiseCost CppLang CppLang = 1
 pairwiseCost Python3Lang Python3Lang = 10
-pairwiseCost RLang       RLang       = 100
+pairwiseCost RLang RLang = 100
 -- pairs of languages for which foreign calls are optimized
 pairwiseCost CppLang CLang = 1
 -- cost of naive foreign function calls
-pairwiseCost _ CLang       = 5000 -- the cost of a system call
-pairwiseCost _ CppLang     = 5000
+pairwiseCost _ CLang = 5000 -- the cost of a system call
+pairwiseCost _ CppLang = 5000
 pairwiseCost _ Python3Lang = 500000 -- the cost of opening the python interpreter and loading modules
 -- this could be optimized by running R server
-pairwiseCost _ RLang       = 50000000 -- an arm and a leg
-
+pairwiseCost _ RLang = 50000000 -- an arm and a leg
 
 -- | hello flame wars - these costs are mostly intended to break ties
 languageCost :: Lang -> Int
@@ -100,8 +99,9 @@ makeExtension RLang = "R"
 makeExtension CLang = "c"
 makeExtension CppLang = "cpp"
 
--- | Create the name of a given language. This is the internal standard name
--- for the language and the string language name used in the RDF.
+{- | Create the name of a given language. This is the internal standard name
+for the language and the string language name used in the RDF.
+-}
 showLangName :: Lang -> Text
 showLangName Python3Lang = "python3"
 showLangName RLang = "r"
@@ -122,18 +122,23 @@ readLangName name = case toLower name of
 
 -- | Generate a name for a pool top-level source file given a language.
 makeSourceName ::
-     Lang
-  -> String -- ^ basename
-  -> String -- ^ source file basename
+  Lang ->
+  -- | basename
+  String ->
+  -- | source file basename
+  String
 makeSourceName lang base = base ++ "." ++ makeExtension lang
 
--- | Generate a name for a pool executable file given a language. For
--- interpreted languages this will be the same as the output of the
--- @makeSourceName@ function.
+{- | Generate a name for a pool executable file given a language. For
+interpreted languages this will be the same as the output of the
+@makeSourceName@ function.
+-}
 makeExecutableName ::
-     Lang
-  -> String -- ^ basename
-  -> String -- ^ executable file basename
+  Lang ->
+  -- | basename
+  String ->
+  -- | executable file basename
+  String
 makeExecutableName CLang base = base <> "-c.out"
 makeExecutableName CppLang base = base <> "-cpp.out"
 makeExecutableName lang base = makeSourceName lang base -- For interpreted languages
@@ -145,7 +150,9 @@ makeSourcePoolName :: Lang -> String
 makeSourcePoolName lang = makeSourceName lang "pool"
 
 -- TODO: Use this function at the parsing stage to standardize names
--- | Convert a given language name to the standard form of the name (e.g., "py"
--- to "python3")
+
+{- | Convert a given language name to the standard form of the name (e.g., "py"
+to "python3")
+-}
 standardizeLangName :: Text -> Maybe Text
 standardizeLangName = fmap showLangName . readLangName

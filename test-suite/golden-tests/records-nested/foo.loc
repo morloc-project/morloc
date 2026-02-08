@@ -51,7 +51,7 @@ bar size = (.bars fpy, .things fcpp, .size fr) where
       , size = size
       }
 
-    fcpp = addBarPy { things = ["stick"], size = 2}
+    fcpp = addBarCpp { things = ["stick"], size = 2}
       { bars = []
       , things = ["b"]
       , size = size

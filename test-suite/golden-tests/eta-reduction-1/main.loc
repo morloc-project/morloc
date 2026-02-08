@@ -2,7 +2,7 @@ module main (foo)
 
 import root-py
 
-bar y = mul (add 1.0 y)
+bar y = (*) (1.0 + y)
 
 foo x = bar 4.0 x
 

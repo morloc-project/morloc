@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.59.0
+version:          0.60.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
@@ -111,3 +111,19 @@ tests:
       - tasty-golden
       - tasty-hunit
       - tasty-quickcheck
+
+benchmarks:
+  morloc-bench:
+    main:          Bench.hs
+    source-dirs:   bench
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+      - -O2
+    dependencies:
+      - morloc
+      - base
+      - tasty-bench
+      - text
+      - filepath

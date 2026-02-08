@@ -1,0 +1,73 @@
+-- desc: Conway's Game of Life - Polyglot Implementation
+-- author: Claude
+--
+-- This module demonstrates cross-language composition by implementing
+-- Conway's Game of Life with C++ for computation and Python for display.
+module main (playGame, testStep)
+
+-- Type mappings
+type Cpp => List a = "std::vector<$1>" a
+type Py => List a = "list" a
+type Cpp => Int = "int"
+type Py => Int = "int"
+type Cpp => Real = "double"
+type Py => Real = "float"
+
+-- C++ game logic functions
+source Cpp from "game.hpp" ("initGame", "updateGame")
+initGame :: Int -> Int -> Int -> [[Int]]
+updateGame :: [[Int]] -> [[Int]]
+
+-- Python display and timing functions
+source Py from "game.py" ("drawGame", "doSleep", "gameLoop")
+drawGame :: [[Int]] -> [[Int]]
+doSleep :: [[Int]] -> Real -> [[Int]]
+gameLoop :: [[Int]] -> ([[Int]] -> [[Int]]) -> Real -> Int -> [[Int]]
+
+-- Compose one game step: draw -> sleep -> update
+-- This demonstrates the composition pattern requested
+oneStep :: Real -> [[Int]] -> [[Int]]
+oneStep sleepTime board = updateGame (doSleep (drawGame board) sleepTime)
+
+--' Test a single step of the game
+--'
+--' This function creates a small 20x10 board and runs one update cycle.
+--' Returns just the board state without drawing (for testing).
+--'
+--' name: testStep
+testStep ::
+  --' Random seed for board initialization
+  --' arg: --seed
+  --' metavar: SEED
+  --' default: 42
+  Int ->
+  --' return: The board state after one update
+  [[Int]]
+testStep seed = updateGame (initGame seed 20 10)
+
+--' Play Conway's Game of Life
+--'
+--' Runs an animated Game of Life simulation in the terminal.
+--' The board is initialized with random cells based on the seed.
+--' C++ handles the game logic while Python manages display and timing.
+--'
+--' name: play
+playGame ::
+  --' Random seed for initial board state
+  --' arg: -s/--seed
+  --' metavar: SEED
+  --' default: 12345
+  Int ->
+  --' Sleep duration in seconds between frames
+  --' arg: -t/--time
+  --' metavar: SECONDS
+  --' default: 0.5
+  Real ->
+  --' Number of simulation steps to run
+  --' arg: -n/--steps
+  --' metavar: STEPS
+  --' default: 50
+  Int ->
+  --' return: Final board state
+  [[Int]]
+playGame seed sleepTime steps = gameLoop (initGame seed 40 20) updateGame sleepTime steps

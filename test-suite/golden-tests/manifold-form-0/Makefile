@@ -1,5 +1,5 @@
 all:
-	morloc make -v t0.loc > log
+	morloc make t0.loc 
 	rm -f obs.txt
 	./nexus checkInt >> obs.txt
 	./nexus checkSInt8 >> obs.txt

@@ -1,5 +1,7 @@
 module main (foo)
 
+import root ((.))
+
 type Py => Str = "str"
 type R => Str = "character"
 type Cpp => Str = "std::string"

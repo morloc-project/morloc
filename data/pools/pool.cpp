@@ -318,13 +318,17 @@ void* worker_thread(void* arg) {
 
         // Pull data from the client
         uint8_t* client_data = stream_from_client(client_fd, &errmsg);
-        if(errmsg != NULL){
-            std::cerr << "Failed to read client data: " << errmsg << std::endl;
+
+        if(client_data == NULL){
+            std::cerr << "Retrieved NULL client result: " << std::endl;
             close_socket(client_fd);
             continue;
         }
-        if(client_data == NULL){
-            std::cerr << "Retrieved NULL client result: " << std::endl;
+
+        if(errmsg != NULL){
+            free(client_data);
+            client_data = NULL;
+            std::cerr << "Failed to read client data: " << errmsg << std::endl;
             close_socket(client_fd);
             continue;
         }
@@ -332,10 +336,14 @@ void* worker_thread(void* arg) {
         // Fail if no data was pulled
         length = morloc_packet_size(client_data, &errmsg);
         if(errmsg != NULL){
+            free(client_data);
+            client_data = NULL;
             std::cerr << "Malformed packet: " << errmsg << std::endl;
             close_socket(client_fd);
             continue;
         } else if (length == 0) {
+            free(client_data);
+            client_data = NULL;
             std::cerr << "Zero length packet received from client" << std::endl;
             close_socket(client_fd);
             continue;
@@ -348,6 +356,8 @@ void* worker_thread(void* arg) {
         } catch (const std::exception& e) {
             result = make_fail_packet(e.what());
         }
+        free(client_data);
+        client_data = NULL;
 
         // return the result to the client and move on
         // do not wait for the client to finish processing

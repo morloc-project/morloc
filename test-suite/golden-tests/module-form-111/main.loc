@@ -7,4 +7,4 @@ import foopy (foo)
 
 source Py from "foo.py" ("foo")
 
-foo x y = add x (mul (-1) y)
+foo x y = x + -1 * y

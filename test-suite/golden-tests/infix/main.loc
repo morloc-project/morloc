@@ -1,0 +1,56 @@
+module main
+  ( test_arithmetic
+  , test_precedence
+  , test_exponentiation
+  , test_append
+  , test_application
+  )
+
+type Py => Int = "int"
+type Py => (List a) = "list" a
+
+-- Mathematical operators - source from Python
+source py from "impl.py"
+  ( "add" as (+)
+  , "mul" as (*)
+  , "pow" as (**)
+  , "append" as (<>)
+  )
+
+-- Define infix operators as wrappers
+infixl 6 +
+infixl 7 *
+infixr 8 **
+infixr 5 <>
+infixr 0 $
+
+(+) :: Int -> Int -> Int
+(*) :: Int -> Int -> Int
+(**) :: Int -> Int -> Int
+(<>) :: [Int] -> [Int] -> [Int]
+
+-- Function application operator
+($) :: (Int -> Int) -> Int -> Int
+($) f x = f x
+
+-- Test cases
+
+-- Basic arithmetic
+test_arithmetic :: Int
+test_arithmetic = 5 + 3
+
+-- Precedence: multiplication before addition
+test_precedence :: Int
+test_precedence = 2 + 3 * 4
+
+-- Exponentiation (right associative, highest precedence)
+test_exponentiation :: Int
+test_exponentiation = 2 ** 3
+
+-- List append operator
+test_append :: [Int]
+test_append = [1, 2] <> [3, 4]
+
+-- Function application operator
+test_application :: Int
+test_application = (*) 2 $ 5

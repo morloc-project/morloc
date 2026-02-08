@@ -1,0 +1,3 @@
+624570.87
+{"count":50,"total":12875.4,"mean":257.508,"stddev":131.659373462007,"minVal":24.6,"maxVal":498.1}
+"Category Sales Report\n==================================================\nElectronics          | Total: $ 239557.13 | Items:    17 | Avg: $14091.60\nHardware             | Total: $  82341.63 | Items:     9 | Avg: $ 9149.07\nServices             | Total: $ 237477.21 | Items:    16 | Avg: $14842.33\nSoftware             | Total: $  65194.90 | Items:     8 | Avg: $ 8149.36\n=================================================="

@@ -1536,7 +1536,7 @@ absptr_t rel2abs(relptr_t ptr, ERRMSG) {
     for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
         shm_t* shm = TRY(shopen, i);
         if (shm == NULL) {
-            RAISE("Failed to find shared volume %zu while searching for relative pointer %zu in shm at '%s'", i, ptr, shm->volume_name)
+            RAISE("Failed to find shared volume %zu while searching for relative pointer %zu", i, ptr)
         }
         if ((size_t)ptr < shm->volume_size) {
             char* shm_start = (char*)shm;
@@ -4526,6 +4526,9 @@ bool packet_is_remote_call(const uint8_t* packet, ERRMSG){
 
 
 size_t morloc_packet_size_from_header(const morloc_packet_header_t* header){
+    if(header == NULL){
+      return 0;
+    }
     return sizeof(morloc_packet_header_t) + header->offset + header->length;
 }
 
@@ -6067,9 +6070,10 @@ static uint8_t* parse_cli_data_argument_singular(uint8_t* dest, char* arg, const
 
         // Try to parse as JSON
         dest = read_json_with_schema(dest, data, schema, &CHILD_ERRMSG);
-        free(data);
 
         RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "Failed to read json argument: %s", CHILD_ERRMSG)
+
+        free(data);
 
         return dest;
     }

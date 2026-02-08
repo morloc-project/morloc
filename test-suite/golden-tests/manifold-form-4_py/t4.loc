@@ -2,4 +2,4 @@ module main (foo)
 
 import root-py
 
-foo = ((42.0, True), mul 1.0 4.0)
+foo = ((42.0, True), 1.0 * 4.0)

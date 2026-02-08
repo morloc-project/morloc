@@ -1,6 +1,6 @@
 all:
 	rm -f obs.txt
-	morloc make -v t7.loc > log
+	morloc make t7.loc 
 	./nexus foo 16 > obs.txt
 
 clean:

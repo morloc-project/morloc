@@ -7,7 +7,7 @@ source cpp from "rms.h"
  ( "rms1" as rms
  )
 
-square x = mul x x
+square x = x * x
 rms xs = sqrt (mean (map square xs))
 
 rms :: [Real] -> Real

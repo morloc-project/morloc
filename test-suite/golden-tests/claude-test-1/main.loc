@@ -1,0 +1,11 @@
+module main (addTwo, doubleList)
+
+import root-py
+
+-- Simple function that adds 2 to a number
+addTwo :: Int -> Int
+addTwo x = x + 2
+
+-- Function that doubles all elements in a list
+doubleList :: [Int] -> [Int]
+doubleList xs = map ((*) 2) xs

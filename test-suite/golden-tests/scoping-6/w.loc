@@ -5,6 +5,6 @@ import root-py
 -- where-scopes inherit the scope of their parent
 f = x where
    x = y where
-       y = add a b
+       y = a + b
        a = 1.0
    b = 41.0

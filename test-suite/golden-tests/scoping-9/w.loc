@@ -5,7 +5,7 @@ import root-py
 -- functions with or without signatures may be defined in the where-scope
 f = bar (bif 2.0) where
 
-   bif x = add x 10.0
+   bif x = x + 10.0
 
    bar :: Real -> Real
-   bar x = add x 30.0
+   bar x = x + 30.0

@@ -1,21 +1,27 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{-|
+{- |
 Module      : Morloc.BaseTypes
 Description : Definitions and functions for handling base types
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 -}
-
 module Morloc.BaseTypes
   ( unit
   , real
-  , f32, f64
+  , f32
+  , f64
   , int
-  , i8, i16, i32, i64
+  , i8
+  , i16
+  , i32
+  , i64
   , uint
-  , u8, u16, u32, u64
+  , u8
+  , u16
+  , u32
+  , u64
   , bool
   , str
   , tuple
@@ -23,20 +29,27 @@ module Morloc.BaseTypes
   , record
   , unitU
   , realU
-  , f32U, f64U
+  , f32U
+  , f64U
   , intU
-  , i8U, i16U, i32U, i64U
+  , i8U
+  , i16U
+  , i32U
+  , i64U
   , uintU
-  , u8U, u16U, u32U, u64U
+  , u8U
+  , u16U
+  , u32U
+  , u64U
   , boolU
   , strU
   , tupleU
   , listU
   ) where
 
-import Prelude hiding(log)
-import Morloc.Namespace
 import Morloc.Data.Text (pretty)
+import Morloc.Namespace
+import Prelude hiding (log)
 
 unit :: TVar
 unit = TV "Unit"
@@ -94,7 +107,6 @@ tuple k = TV $ "Tuple" <> pretty k
 
 record :: TVar
 record = TV "Record"
-
 
 unitU :: TypeU
 unitU = VarU $ TV "Unit"

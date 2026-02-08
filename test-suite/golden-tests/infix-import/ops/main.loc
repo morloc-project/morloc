@@ -1,0 +1,28 @@
+module ops
+  ( (+)
+  , (*)
+  , (**)
+  , (<>)
+  )
+
+type Py => Int = "int"
+type Py => (List a) = "list" a
+
+source py from "ops.py"
+  ( "add" as (+)
+  , "mul" as (*)
+  , "pow" as (**)
+  , "concat" as (<>)
+  )
+
+infixl 6 +
+(+) :: Int -> Int -> Int
+
+infixl 7 *
+(*) :: Int -> Int -> Int
+
+infixr 8 **
+(**) :: Int -> Int -> Int
+
+infixr 5 <> 
+(<>) a :: [a] -> [a] -> [a]

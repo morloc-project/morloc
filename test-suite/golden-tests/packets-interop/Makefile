@@ -1,6 +1,6 @@
 all:
 	rm -f obs.txt
-	morloc make -v foo.loc > log
+	morloc make foo.loc 
 	# below buffer interop
 	python3 make_test_data.py 4065 > test-data.json
 	./nexus pfoo test-data.json | wc -c >> obs.txt
