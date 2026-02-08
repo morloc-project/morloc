@@ -373,27 +373,54 @@ synthE i g0 (AppS f xs0) = do
   etaExpandSynthE i g1 funType0 funExpr0 f xs0
 
 -- -->I==>
-synthE i g0 f@(LamS vs x) = do
-  (_, bodyType, _) <- synthG g0 x
+-- Synthesize lambda expressions. The key optimization here is to avoid
+-- re-synthesizing after eta expansion - we synthesize the body once with
+-- proper context, then construct the expanded form directly.
+synthE _ g0 (LamS vs x) = do
+  -- Create existentials for lambda-bound variables and add to context
+  let (g1, paramTypes) = statefulMap (\g' v -> newvar (unEVar v <> "_x") g') g0 vs
+      g2 = g1 ++> zipWith AnnG vs paramTypes
 
-  -- FIXME: Repeated inference here may lead to exponential runtime
-  -- There must be a better way to handle eta reduction ...
-  let n = nfargs bodyType
-  if n > 0
-    then do
-      (g1, f2) <- expand n g0 f
-      synthE' i g1 f2 -- <----- repeat inference -----------------------------
-    else do
-      -- create existentials for everything and pass it off to check
-      let (g1, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") g') g0 vs
-          (g2, ft) = newvar "o_" g1
-          finalType = FunU ts ft
-      checkE' i g2 f finalType -- <----- repeat inference --------------------
-  where
-    nfargs :: TypeU -> Int
-    nfargs (FunU ts _) = length ts
-    nfargs (ForallU _ f') = nfargs f'
-    nfargs _ = 0
+  -- Synthesize body ONCE with bound variables in context
+  (g3, bodyType, bodyExpr) <- synthG g2 x
+
+  -- Check if body returns a function (needs eta expansion)
+  let normalBody = normalizeType (apply g3 bodyType)
+  case normalBody of
+    FunU extraArgTypes retType -> do
+      -- Body returns a function: eta-expand WITHOUT re-synthesizing
+      -- Create new bound variables for the extra arguments
+      (g4, newVarsWithTypes) <- statefulMapM (\g' t -> do
+        let (g'', v) = evarname g' "v"
+        return (g'', (v, t))) g3 extraArgTypes
+
+      let newVars = map fst newVarsWithTypes
+          appliedExtraTypes = map (apply g4 . snd) newVarsWithTypes
+
+      -- Add type annotations for new bound variables
+      let g5 = g4 ++> zipWith AnnG newVars appliedExtraTypes
+
+      -- Create typed variable references for the new parameters
+      newVarExprs <- mapM (\(v, t) -> do
+        idx <- MM.getCounter
+        return $ AnnoS (Idx idx t) idx (BndS v)) (zip newVars appliedExtraTypes)
+
+      -- Create the application of body to new variables
+      appIdx <- MM.getCounter
+      let appliedRetType = apply g5 retType
+          appliedBodyExpr = AppS (applyGen g5 bodyExpr) newVarExprs
+          appliedBodyAnno = AnnoS (Idx appIdx appliedRetType) appIdx appliedBodyExpr
+
+      -- Construct the full function type
+      let allParamTypes = map (apply g5) paramTypes ++ appliedExtraTypes
+          fullType = FunU allParamTypes appliedRetType
+
+      return (g5, fullType, LamS (vs ++ newVars) appliedBodyAnno)
+
+    _ -> do
+      -- Body is not a function: just return the lambda as-is
+      let funType = apply g3 (FunU paramTypes bodyType)
+      return (g3, funType, LamS vs (applyGen g3 bodyExpr))
 
 --   List
 synthE _ g (LstS []) =
