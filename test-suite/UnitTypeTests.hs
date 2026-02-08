@@ -15,6 +15,7 @@ module UnitTypeTests
   , orderInvarianceTests
   , whitespaceTests
   , infixOperatorTests
+  , complexityRegressionTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -2171,4 +2172,71 @@ infixOperatorTests =
           xs
         |]
         (lst int)
+    ]
+
+-- | Tests for typechecker complexity - these would timeout with O(2^n) behavior
+-- All tests have a 0.1-second timeout to catch exponential blowup
+complexityRegressionTests :: TestTree
+complexityRegressionTests =
+  localOption (mkTimeout 100000) $  -- 0.1 second timeout
+    testGroup
+      "Complexity regression tests"
+    [ -- Deep function composition - tests batch subtype optimization
+      assertGeneralType
+        "deep identity composition"
+        [r|
+          id a :: a -> a
+          f = id (id (id (id (id (id (id (id (id (id 42)))))))))
+          f
+        |]
+        int
+    , assertGeneralType
+        "deep function composition chain"
+        [r|
+          id a :: a -> a
+          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
+          f = id . id . id . id . id . id . id . id . id . id
+          f 42
+        |]
+        int
+    , -- Eta expansion - tests avoiding re-inference
+      assertGeneralType
+        "nested lambdas returning functions"
+        [r|
+          add :: Int -> Int -> Int
+          f = \x -> add x
+          f
+        |]
+        (fun [int, int, int])
+    , assertGeneralType
+        "deeply nested partial application"
+        [r|
+          add3 :: Int -> Int -> Int -> Int
+          f = \x -> \y -> add3 x y
+          f
+        |]
+        (fun [int, int, int, int])
+    , assertGeneralType
+        "lambda with multi-arg function body"
+        [r|
+          add4 :: Int -> Int -> Int -> Int -> Int
+          g = \a -> \b -> add4 a b
+          g 1 2 3 4
+        |]
+        int
+    , -- Multi-argument function subtyping
+      assertGeneralType
+        "many-argument function"
+        [r|
+          f :: Int -> Int -> Int -> Int -> Int -> Int -> Int
+          f 1 2 3 4 5 6
+        |]
+        int
+    , assertGeneralType
+        "polymorphic many-argument function"
+        [r|
+          f a b c d e :: a -> b -> c -> d -> e -> (a, b, c, d, e)
+          f 1 True "x" 2.0 [1]
+        |]
+        (tuple [int, bool, str, real, lst int])
     ]
