@@ -16,6 +16,11 @@ Bug fixes
  * Fix missing space in git module cp
  * Make missing folders in install path
  * Fix `morloc install` deletion of mod folder when install has trailing '/' 
+ * Disallow space between sign and number
+
+Performance
+ * Fixed exponential case hit on eta resolution
+ * Fixed quadratic case in subtype algorithm
 
 Claude memory
  * Added claude memory files
