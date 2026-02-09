@@ -207,8 +207,8 @@ resolveImports d0
                   return explicitExports -- all things exported are defined
                 else
                   MM.throwSystemError $
-                    "Module" <+> pretty m <+> "does not export the following terms or types:"
-                             <+> list (map viaShow (Set.toList missing))
+                    "Module" <+> squotes (pretty m) <+> "does not export the following terms or types:"
+                             <+> list (map pretty (Set.toList missing))
 
       return $ AST.setExport (ExportMany exports) e
 
@@ -261,7 +261,7 @@ resolveImports d0
       case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
         ([], imps) -> return $ Set.fromList imps
         (missing, _) -> MM.throwSystemError
-            $ "The terms imported from" <+> pretty m1 <+> "are not exported from module" <+> pretty m2 <+> ":"
+            $ "The terms imported from" <+> squotes (pretty m1) <+> "are not exported from module" <+> squotes (pretty m2) <+> ":"
             <> list (map pretty missing)
       where
         exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList exports]

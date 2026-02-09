@@ -1435,9 +1435,9 @@ instance Pretty Source where
       <> maybe "" (\t -> ":" <> pretty t) (srcLabel s)
 
 instance Pretty Symbol where
-  pretty (TypeSymbol x) = viaShow x
-  pretty (TermSymbol x) = viaShow x
-  pretty (ClassSymbol x) = viaShow x
+  pretty (TypeSymbol x) = pretty x
+  pretty (TermSymbol x) = pretty x
+  pretty (ClassSymbol x) = pretty x
 
 instance Pretty TermTypes where
   pretty (TermTypes (Just t) cs es) = "TermTypes" <+> (align . vsep $ (parens (pretty t) : map pretty cs <> map pretty es))
