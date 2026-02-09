@@ -84,7 +84,7 @@ findModule currentPathAndModule@(_, currentModule) importModule = do
           <> "\n"
           <> "The following paths were searched:\n"
             <+> indent 4 (vsep (map pretty allPaths))
-          <> "\nPerhaps you need to install this module?"
+          <> "\nMaybe try running: morloc install" <+> pretty importModule
 
 {- | Give a module path (e.g. "/your/path/foo.loc") find the package metadata.
 It currently only looks for a file named "package.yaml" in the same folder

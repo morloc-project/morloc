@@ -185,7 +185,7 @@ resolveImports ::
   MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
 resolveImports d0
   = DAG.synthesize resolveExports resolveEdge d0
-  >>= maybe (MM.throwSystemError "cyclical import dependency in resolveImports") return
+  >>= maybe (MM.throwSystemError "Cyclical import dependency in resolveImports") return
   where
     -- Collect all exported terms from a module (including those imported
     -- without qualification. Then update the ExpE term
@@ -261,8 +261,9 @@ resolveImports d0
       case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
         ([], imps) -> return $ Set.fromList imps
         (missing, _) -> MM.throwSystemError
-            $ "The terms imported from" <+> squotes (pretty m1) <+> "are not exported from module" <+> squotes (pretty m2) <+> ":"
-            <> list (map pretty missing)
+            $ "The terms imported from" <+> squotes (pretty m1)
+            <+> "are not exported from module" <+> squotes (pretty m2) <> ":\n"
+            <+> indent 2 (vsep (map pretty missing))
       where
         exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList exports]
 

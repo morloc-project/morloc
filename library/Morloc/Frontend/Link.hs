@@ -59,14 +59,14 @@ synth k0 e0 edges = do
   return finalState
 
 -- Will raise error if any import term is absent in the linkstate list
-realiasLinkState :: MVar -> (MVar, [AliasedSymbol], LinkState) -> MorlocMonad (MVar, LinkState)
-realiasLinkState m1 (_, ss, s) = do
+realiasLinkState :: MVar -> (MVar, [AliasedSymbol], LinkState) -> MorlocMonad (MVar, MVar, LinkState)
+realiasLinkState m1 (m2, ss, s) = do
   termmap <-
     mergeValues "terms" $
       map (\(n, a) -> (a, Map.lookup n (linkTerms s))) [(n, a) | AliasedTerm n a <- ss]
   classmap <-
     mergeValues "classes" $ map (\n -> (n, Map.lookup n (linkClasses s))) [n | AliasedClass n <- ss]
-  return (m1, LinkState termmap classmap)
+  return (m1, m2, LinkState termmap classmap)
   where
     mergeValues :: (Ord k, Show k) => String -> [(k, Maybe v)] -> MorlocMonad (Map k v)
     mergeValues msg xs = case [v | (v, Nothing) <- xs] of
@@ -74,7 +74,7 @@ realiasLinkState m1 (_, ss, s) = do
       missing -> error $ "Undefined " <> msg <> " imports:" <> show missing <> "\n  ss = " <> show ss
 
 throwInheritanceError :: MVar -> MDoc -> MorlocMonad a
-throwInheritanceError m msg = MM.throwSystemError $ "In module" <+> pretty m <> ":" <+> msg
+throwInheritanceError m msg = MM.throwSystemError $ "In module" <+> squotes (pretty m) <> ":" <+> msg
 
 -- All LinkState objects whould have already been renamed by realiasLinkState.
 --
@@ -88,45 +88,48 @@ throwInheritanceError m msg = MM.throwSystemError $ "In module" <+> pretty m <> 
 -- imported terms are first pooled, then iterated through one-by-one checking
 -- for conflicts. Term identity is based on index, which maps one-to-one to type
 -- or class signature.
-mergeLinkStates :: MVar -> [(MVar, LinkState)] -> MorlocMonad LinkState
+mergeLinkStates :: MVar -> [(MVar, MVar, LinkState)] -> MorlocMonad LinkState
 mergeLinkStates m0 imps = do
   -- Set EVar
-  let terms = Set.unions $ [Map.keysSet s | (_, LinkState s _) <- imps]
+  let terms = Set.unions $ [Map.keysSet s | (_, _, LinkState s _) <- imps]
       -- Set ClassName
-      classes = Set.unions $ [Map.keysSet s | (_, LinkState _ s) <- imps]
+      classes = Set.unions $ [Map.keysSet s | (_, _, LinkState _ s) <- imps]
       -- Map EVar [(MVar, Int)]
-      termGroups = Map.fromSet (\k -> catMaybes [(,) m <$> Map.lookup k (linkTerms s) | (m, s) <- imps]) terms
+      termGroups = Map.fromSet (\k -> catMaybes [(,,) m1 m2 <$> Map.lookup k (linkTerms s) | (m1, m2, s) <- imps]) terms
       -- Map ClassName [(MVar, (Int, Map EVar Int))]
-      classGroups = Map.fromSet (\k -> catMaybes [(,) m <$> Map.lookup k (linkClasses s) | (m, s) <- imps]) classes
+      classGroups = Map.fromSet (\k -> catMaybes [(,,) m1 m2 <$> Map.lookup k (linkClasses s) | (m1, m2, s) <- imps]) classes
 
   termmap <- Map.mapWithKeyM mergeTerms termGroups
   classmap <- Map.mapWithKeyM mergeClasses classGroups
   _ <- checkTermClassConflicts termmap classmap
   return $ LinkState termmap classmap
   where
-    mergeTerms :: EVar -> [(MVar, Int)] -> MorlocMonad Int
-    mergeTerms _ [] = error "This will never be empty"
-    mergeTerms _ [(_, i)] = return i
-    mergeTerms v ((_, i) : (m2, j) : xs)
-      | i == j = mergeTerms v ((m2, j) : xs)
-      | otherwise = throwInheritanceError m0 $ "Illegal masking of term" <+> squotes (pretty v) <+> "imported from" <+> pretty m2
+    mergeTerms :: EVar -> [(MVar, MVar, Int)] -> MorlocMonad Int
+    mergeTerms _ [] = error "Compiler bug: This cannot be empty"
+    mergeTerms _ [(_, _, i)] = return i
+    mergeTerms v ((m1, importMod1, i) : (_, importMod2, j) : xs)
+      | i == j = mergeTerms v ((m1, importMod1, j) : xs)
+      | otherwise = throwInheritanceError m0
+          $ "Illegal masking of type signatures for" <+> squotes (pretty v)
+          <> "\n It is imported from modules" <+> squotes (pretty importMod1) <+> "and" <+> squotes (pretty importMod2)
+          <> "\n Terms may have multiple implementations but not multiple type signatures"
 
-    mergeClasses :: ClassName -> [(MVar, (Int, a, Map EVar Int))] -> MorlocMonad (Int, a, Map EVar Int)
+    mergeClasses :: ClassName -> [(MVar, MVar, (Int, a, Map EVar Int))] -> MorlocMonad (Int, a, Map EVar Int)
     mergeClasses _ [] = error "This will never be empty"
-    mergeClasses _ [(_, x)] = return x
-    mergeClasses v ((m1, (i, _, _)) : (m2, y@(j, _, _)) : xs)
-      | i == j = mergeClasses v ((m2, y) : xs)
-      | otherwise = MM.throwSystemError $ "Cannot merge non-eqivalent classes imported from modules" <+> pretty m1 <+> "and" <+> pretty m2
+    mergeClasses _ [(_, _, x)] = return x
+    mergeClasses v ((_, m1b, (i, _, _)) : (m2a, m2b, y@(j, _, _)) : xs)
+      | i == j = mergeClasses v ((m2a, m2b, y) : xs)
+      | otherwise = throwInheritanceError m0
+          $   "\n  Cannot merge non-eqivalent definitions of typeclass" <+> squotes (pretty v)
+          <+> "\n  Definitions are imported from modules" <+> squotes (pretty m1b) <+> "and" <+> squotes (pretty m2b)
 
     checkTermClassConflicts :: Map EVar Int -> Map ClassName (Int, a, Map EVar Int) -> MorlocMonad ()
     checkTermClassConflicts me mc = case catMaybes . map (checkTermClassConflict me) $ Map.toList mc of
       [] -> return ()
       ((cls, vs) : _) ->
-        throwInheritanceError m0 $
-          "The following terms in the typeclass"
-            <+> squotes (pretty cls)
-            <+> "conflict with monomorphic terms in scope:"
-            <+> list (map pretty vs)
+        throwInheritanceError m0
+          $ "\n  The following terms are defined both as polymorphic terms in typeclass" <+> squotes (pretty cls)
+          <+> "and as independent monomorphic terms:" <+> list (map pretty vs)
 
     checkTermClassConflict ::
       Map EVar Int -> (ClassName, (Int, a, Map EVar Int)) -> Maybe (ClassName, [EVar])
@@ -185,13 +188,11 @@ addLocalState m0 e0 s0 = do
     insertWithCheck :: EVar -> Instance -> Map EVar Instance -> MorlocMonad (Map EVar Instance)
     insertWithCheck k v m = case Map.lookup k m of
       (Just inst2) ->
-        throwInheritanceError m0 $
-          "Conflict between typeclasses over term"
-            <+> squotes (pretty k)
-            <+> "that is present the typeclasses"
-            <+> squotes (pretty (className inst2))
-            <+> "and"
-            <+> squotes (pretty (className v))
+        throwInheritanceError m0
+           $ "The typeclasses"
+           <+> (squotes . pretty . className $ inst2)
+           <+> "and" <+> (squotes . pretty . className $ v)
+           <+> "have conflicting definitions of the term" <+> squotes (pretty k)
       Nothing -> return $ Map.insert k v m
 
     -- Handle assignments that do not have signatures
@@ -409,7 +410,8 @@ linkInstance linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
     lookupInfo v = case ([sig | sig@(Signature v' _ _) <- sigs0, v == v'], Map.lookup v emap0) of
       ([sig], Just i) -> return (sig, i)
       _ ->
-        MM.throwSystemError $ "In module" <+> pretty m0 <> ": Instance of class" <+> squotes (pretty cls0) <+> "contains undefined term" <+> squotes (pretty v)
+        throwInheritanceError m0
+          $ "\n  Instance of class" <+> squotes (pretty cls0) <+> "contains undefined term" <+> squotes (pretty v)
 
     linkTermTypes :: EVar -> EType -> TermTypes -> Int -> MorlocMonad ()
     linkTermTypes v et tt stateIdx = do
