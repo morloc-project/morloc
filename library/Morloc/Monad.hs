@@ -166,9 +166,13 @@ setDepth i = do
 
 writeMorlocReturn :: MorlocReturn a -> IO Bool
 writeMorlocReturn ((Left err', msgs), st) = do
-  MT.hPutStrLn stderr (MT.unlines msgs) -- write messages
+  writeMessages
   MT.hPutStrLn stderr (render $ makeMorlocError st err')
   return False
+  where
+    writeMessages
+      | length msgs > 0 = MT.hPutStrLn stderr (MT.unlines msgs)
+      | otherwise = return ()
 writeMorlocReturn ((Right _, _), _) = return True
 
 makeMorlocError :: MorlocState -> MorlocError -> MDoc
