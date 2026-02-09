@@ -137,12 +137,15 @@ writeFrontendTypecheckOutput ::
   ((Either MorlocError [AnnoS (Indexed TypeU) Many Int], [MT.Text]), MorlocState) ->
   (Bool, MDoc)
 writeFrontendTypecheckOutput _ ((Left e, _), st) = (False, MM.makeMorlocError st e)
-writeFrontendTypecheckOutput 0 ((Right xs, _), _) = (True, vsep (map writeFrontendTypes xs))
+writeFrontendTypecheckOutput 0 ((Right xs, _), st) = (True, vsep (map (writeFrontendTypes st) xs))
 writeFrontendTypecheckOutput 1 x = writeFrontendTypecheckOutput 0 x -- no difference in verbosity
 writeFrontendTypecheckOutput _ _ = (False, "I don't know how to be that verbose")
 
-writeFrontendTypes :: AnnoS (Indexed TypeU) Many Int -> MDoc
-writeFrontendTypes (AnnoS (Idx _ t) _ e) = pretty e <+> "::" <+> pretty t
+writeFrontendTypes :: MorlocState -> AnnoS (Indexed TypeU) Many Int -> MDoc
+writeFrontendTypes st (AnnoS (Idx i t) _ _) = 
+  case Map.lookup i (stateName st) of
+    (Just v) -> pretty v <+> "::" <+> pretty t
+    Nothing -> "? ::" <+> pretty t
 
 writeTypecheckOutput ::
   Int -> ((Either MorlocError [(Lang, [SerialManifold])], [MT.Text]), MorlocState) -> (Bool, MDoc)
