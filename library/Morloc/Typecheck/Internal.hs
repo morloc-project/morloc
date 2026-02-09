@@ -36,6 +36,7 @@ module Morloc.Typecheck.Internal
   , cut
   , substitute
   , rename
+  , prettyTypeU
   , occursCheck
   , toExistential
 
@@ -156,11 +157,8 @@ subtypeEvaluated scope t1 t2 g =
 
 subtypeError :: TypeU -> TypeU -> MDoc -> Either MDoc a
 subtypeError t1 t2 msg = Left $
-    "Subtype error:" <+> msg
-      <> "\n  "
-      <> "("
-      <> pretty t1 <+> "<:" <+> pretty t2
-      <> ")"
+    "Subtype error:" <+> msg <> "\n  "
+      <> prettyTypeU t1 <+> "<:" <+> prettyTypeU t2
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
@@ -716,6 +714,21 @@ rename g0 (ForallU v@(TV s) t0) =
    in (g2, ForallU v' t2)
 -- Unless I add N-rank types, foralls can only be on top, so no need to recurse.
 rename g t = (g, t)
+
+cleanTypeName :: TypeU -> TypeU
+cleanTypeName (unqualify -> (vs0, t0)) = f 0 vs0 t0
+  where
+  f :: Int -> [TVar] -> TypeU -> TypeU
+  f _ [] t = t
+  f i vs@(v:rvs) t
+    | elem v' vs = f (i+1) vs t
+    | otherwise = f (i+1) rvs (ForallU v' $ substituteTVar v (VarU v') t)
+    where
+      v' = TV ("t" <> MT.show' i)
+
+-- Make pretty types
+prettyTypeU :: TypeU -> MDoc
+prettyTypeU = pretty . cleanTypeName
 
 tvarname :: Gamma -> Text -> (Gamma, TVar)
 tvarname g prefix =

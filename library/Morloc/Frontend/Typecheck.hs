@@ -587,7 +587,7 @@ etaExpand g0 f0 xs0 t0 = etaExpand' g0 f0 xs0 t0
       -- if there are fewer terms, then eta expand
       | termSize < typeSize = Just <$> etaExpandE (AppS f xs)
       -- if there are more terms than the type permits, then raise an error
-      | otherwise = throwTypeError gidx $ "Invalid function application of type:" <+> pretty t0
+      | otherwise = throwTypeError gidx $ "Invalid function application of type:\n  " <> prettyTypeU t0
 
       where
         etaExpandE :: ExprS Int ManyPoly Int -> MorlocMonad (Gamma, ExprS Int ManyPoly Int)
@@ -672,10 +672,11 @@ application i g0 es (ExistU v@(TV s) ([], _) _) =
       (Just (FunU ts t)) -> do
         (g1, ts', es', _) <- zipCheck i g0 es ts
         return (g1, apply g1 (FunU ts' t), es')
-      (Just t) -> throwTypeError i $ "Application of term with non-functional type:" <+> pretty t
-      Nothing -> throwTypeError i $ "Expected function, but could not find type of term" <+> pretty v
+      (Just t) -> throwTypeError i $ "Application of term with non-functional type:\n   " <+> prettyTypeU t
+      Nothing -> throwTypeError i $ "Expected function, but could not find type of term\n   " <+> pretty v
 
-application i _ _ t = throwTypeError i $ "Application of non-functional expression of type:" <+> pretty t
+application i _ _ t = throwTypeError i
+  $ "Application of non-functional expression of type:" <+> prettyTypeU t
 
 -- Tip together the arguments passed to an application
 zipCheck ::
