@@ -104,17 +104,17 @@ emptyState =
 
 exprId :: Parser Int
 exprId = do
+  pos <- getSourcePos
   s <- CMS.get
   let i = stateExpIndex s
-  CMS.put $ s {stateExpIndex = i + 1}
+  CMS.put $ s { stateExpIndex = i + 1
+              , stateSourcePositions = Map.insert i (toSrcLoc pos) (stateSourcePositions s)
+              }
   return i
 
 exprI :: Expr -> Parser ExprI
 exprI e = do
   i <- exprId
-  pos <- getSourcePos
-  s <- CMS.get
-  CMS.put $ s { stateSourcePositions = Map.insert i (toSrcLoc pos) (stateSourcePositions s) }
   return (ExprI i e)
 
 toSrcLoc :: SourcePos -> SrcLoc

@@ -368,7 +368,7 @@ synthE i g0 (AppS f xs0) = do
 -- Synthesize lambda expressions. The key optimization here is to avoid
 -- re-synthesizing after eta expansion - we synthesize the body once with
 -- proper context, then construct the expanded form directly.
-synthE _ g0 (LamS vs x) = do
+synthE parentIdx g0 (LamS vs x) = do
   -- Create existentials for lambda-bound variables and add to context
   let (g1, paramTypes) = statefulMap (\g' v -> newvar (unEVar v <> "_x") g') g0 vs
       g2 = g1 ++> zipWith AnnG vs paramTypes
@@ -394,11 +394,11 @@ synthE _ g0 (LamS vs x) = do
 
       -- Create typed variable references for the new parameters
       newVarExprs <- mapM (\(v, t) -> do
-        idx <- MM.getCounter
+        idx <- MM.getCounterWithPos parentIdx
         return $ AnnoS (Idx idx t) idx (BndS v)) (zip newVars appliedExtraTypes)
 
       -- Create the application of body to new variables
-      appIdx <- MM.getCounter
+      appIdx <- MM.getCounterWithPos parentIdx
       let appliedRetType = apply g5 retType
           appliedBodyExpr = AppS (applyGen g5 bodyExpr) newVarExprs
           appliedBodyAnno = AnnoS (Idx appIdx appliedRetType) appIdx appliedBodyExpr
@@ -587,10 +587,7 @@ etaExpand g0 f0 xs0 t0 = etaExpand' g0 f0 xs0 t0
       -- if there are fewer terms, then eta expand
       | termSize < typeSize = Just <$> etaExpandE (AppS f xs)
       -- if there are more terms than the type permits, then raise an error
-      | otherwise = throwTypeError gidx $
-         "Invalid function application:"
-           <> "\n  application:" <+> pretty f <+> hsep (map (parens . pretty) xs)
-           <> "\n  where" <+> pretty f <+> "::" <+> pretty t0
+      | otherwise = throwTypeError gidx $ "Invalid function application of type:" <+> pretty t0
 
       where
         etaExpandE :: ExprS Int ManyPoly Int -> MorlocMonad (Gamma, ExprS Int ManyPoly Int)
@@ -602,33 +599,33 @@ etaExpand g0 f0 xs0 t0 = etaExpand' g0 f0 xs0 t0
           -- A partially applied term intended to return a function (e.g., `(\x y -> add x y) x |- Real -> Real`)
           -- A fully applied term
           | n <= 0 = return (g, e)
-          | otherwise = expand n g e
+          | otherwise = expand gidx n g e
     -- If term that is applied is not a function, do nothing. The application is
     -- not correct, but the error will be caught later.
     etaExpand' _ _ _ _ = return Nothing
 
-expand :: Int -> Gamma -> ExprS Int f Int -> MorlocMonad (Gamma, ExprS Int f Int)
-expand 0 g x = return (g, x)
-expand n g e@(AppS _ _) = do
-  newIndex <- MM.getCounter
+expand :: Int -> Int -> Gamma -> ExprS Int f Int -> MorlocMonad (Gamma, ExprS Int f Int)
+expand _ 0 g x = return (g, x)
+expand parentIdx n g e@(AppS _ _) = do
+  newIndex <- MM.getCounterWithPos parentIdx
   let (g', v') = evarname g "v"
-  e' <- applyExistential v' e
+  e' <- applyExistential parentIdx v' e
   let x' = LamS [v'] (AnnoS newIndex newIndex e')
-  expand (n - 1) g' x'
-expand n g (LamS vs' (AnnoS t ci e)) = do
+  expand parentIdx (n - 1) g' x'
+expand parentIdx n g (LamS vs' (AnnoS t ci e)) = do
   let (g', v') = evarname g "v"
-  e' <- applyExistential v' e
-  expand (n - 1) g' (LamS (vs' <> [v']) (AnnoS t ci e'))
-expand _ g x = return (g, x)
+  e' <- applyExistential parentIdx v' e
+  expand parentIdx (n - 1) g' (LamS (vs' <> [v']) (AnnoS t ci e'))
+expand _ _ g x = return (g, x)
 
-applyExistential :: EVar -> ExprS Int f Int -> MorlocMonad (ExprS Int f Int)
-applyExistential v' (AppS f xs') = do
-  newIndex <- MM.getCounter
+applyExistential :: Int -> EVar -> ExprS Int f Int -> MorlocMonad (ExprS Int f Int)
+applyExistential parentIdx v' (AppS f xs') = do
+  newIndex <- MM.getCounterWithPos parentIdx
   return $ AppS f (xs' <> [AnnoS newIndex newIndex (BndS v')])
 -- possibly illegal application, will type check after expansion
-applyExistential v' e = do
-  appIndex <- MM.getCounter
-  varIndex <- MM.getCounter
+applyExistential parentIdx v' e = do
+  appIndex <- MM.getCounterWithPos parentIdx
+  varIndex <- MM.getCounterWithPos parentIdx
   return $ AppS (AnnoS appIndex appIndex e) [AnnoS varIndex varIndex (BndS v')]
 
 application ::
@@ -738,7 +735,7 @@ checkE i g0 e0@(LamS vs body) t@(FunU as b)
 
       return (g2, t3, e3)
   | otherwise = do
-      (g', e') <- expand (length as - length vs) g0 e0
+      (g', e') <- expand i (length as - length vs) g0 e0
       checkE' i g' e' t
 checkE i g1 e1 (ForallU v a) = do
   recordParameter i v a

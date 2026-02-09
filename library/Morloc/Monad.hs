@@ -36,6 +36,7 @@ module Morloc.Monad
     -- * reusable counter
   , startCounter
   , getCounter
+  , getCounterWithPos
   , setCounter
   , takeFromCounter
 
@@ -115,6 +116,16 @@ getCounter = do
   s <- get
   let i = stateCounter s
   put $ s {stateCounter = stateCounter s + 1}
+  return i
+
+-- | Create a new index that inherits the source position of a parent index
+getCounterWithPos :: Int -> MorlocMonad Int
+getCounterWithPos parentIdx = do
+  i <- getCounter
+  s <- get
+  case Map.lookup parentIdx (stateSourceMap s) of
+    Just loc -> put $ s {stateSourceMap = Map.insert i loc (stateSourceMap s)}
+    Nothing -> return ()
   return i
 
 takeFromCounter :: Int -> MorlocMonad [Int]
