@@ -361,6 +361,8 @@ data MorlocState = MorlocState
   -- The int the qualifier triple stores the number of type arguments
   , stateSourceMap :: Map Int SrcLoc
   -- ^ Maps expression indices to source locations (file, line, column)
+  , stateSourceText :: Map Path Text
+  -- ^ Stores source text for each parsed file, used for error snippet display
   , stateBuildConfig :: BuildConfig
   }
   deriving (Show)
@@ -1095,6 +1097,7 @@ instance Defaultable MorlocState where
       , stateManifoldConfig = Map.empty
       , stateTypeQualifier = Map.empty
       , stateSourceMap = Map.empty
+      , stateSourceText = Map.empty
       , stateBuildConfig = defaultValue
       }
 

@@ -40,7 +40,11 @@ parse f (Code code) = do
 
   let parserState = emptyState
 
-  -- MM.say $ "Parsing" <+> maybe "<stdin>" MD.viaShow f
+  -- store source text for the main file
+  case f of
+    Just path -> MM.modify (\st -> st { stateSourceText = Map.insert path code (stateSourceText st) })
+    Nothing -> return ()
+
   case Parser.readProgram Nothing f code (parserState {stateModuleConfig = moduleConfig}) mempty of
     (Left e) -> MM.throwSystemError $ pretty (errorBundlePretty e)
     (Right (mainDag, mainState)) -> parseImports mainDag mainState Map.empty
@@ -81,4 +85,5 @@ parse f (Code code) = do
 openLocalModule :: Path -> MorlocMonad (Maybe Path, Text)
 openLocalModule filename = do
   code <- liftIO $ MT.readFile filename
+  MM.modify (\st -> st { stateSourceText = Map.insert filename code (stateSourceText st) })
   return (Just filename, code)

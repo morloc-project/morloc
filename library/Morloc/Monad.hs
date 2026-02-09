@@ -171,20 +171,46 @@ writeMorlocReturn ((Left err', msgs), st) = do
   return False
 writeMorlocReturn ((Right _, _), _) = return True
 
- -- Map.Map Int SrcLoc
 makeMorlocError :: MorlocState -> MorlocError -> MDoc
-makeMorlocError (stateSourceMap -> srcMap) (SourcedError i msg) = 
-  case Map.lookup i srcMap of
-    Just loc -> pretty loc <> ": error: " <> msg
+makeMorlocError st (SourcedError i msg) =
+  case Map.lookup i (stateSourceMap st) of
+    Just loc -> pretty loc <> ": error:" <> line <> msg <> snippet st loc
     Nothing -> "Compiler bug, broken index" <+> pretty i <+> "with attached error:" <+> msg
 makeMorlocError _ (SystemError msg) = msg
-makeMorlocError (stateSourceMap -> srcMap) (UnificationError lhs rhs context msg) = 
+makeMorlocError st (UnificationError lhs rhs context msg) =
   case (Map.lookup lhs srcMap, Map.lookup rhs srcMap, Map.lookup context srcMap) of
     (Just lhsLoc, rhsLoc, contextLoc) ->
-      "Unification error:" <+> msg <> "\n" <>
-      "Found while unifying" <+> pretty contextLoc <> "\n" <>
-      "With values\n" <> pretty lhsLoc <> "\nand\n" <> pretty rhsLoc
+      "Unification error:" <+> msg <> line
+      <> "Found while unifying" <+> maybe mempty pretty contextLoc <> line
+      <> "With values" <> line <> snippet st lhsLoc
+      <> maybe mempty (\l -> "and" <> line <> snippet st l) rhsLoc
     _ -> "Compiler bug, broken indices" <+> pretty (lhs, rhs, context) <+> "with attached error:" <+> msg
+  where
+    srcMap = stateSourceMap st
+
+-- | Render a source code snippet with a pointer at the error location.
+-- Clamps to the last line if the error position is past the end of the file.
+snippet :: MorlocState -> SrcLoc -> MDoc
+snippet st (SrcLoc path ln col) =
+  case path >>= \p -> Map.lookup p (stateSourceText st) of
+    Nothing -> mempty
+    Just src ->
+      let srcLines = MT.lines src
+          n = length srcLines
+      in if n == 0 || ln < 1
+         then mempty
+         else
+           let lineNum = min ln n
+               errLine = srcLines !! (lineNum - 1)
+               gutterWidth = length (show lineNum)
+               gutter = pretty (MT.replicate gutterWidth " ")
+               pointer = if col > 1 && col <= MT.length errLine + 1
+                         then pretty (MT.replicate (col - 1) " ") <> "^"
+                         else pretty (MT.replicate (MT.length errLine) "~")
+           in line
+              <> gutter <+> "|" <> line
+              <> pretty lineNum <+> "|" <+> pretty errLine <> line
+              <> gutter <+> "|" <+> pointer <> line
 
 
 throwSystemError :: MonadError MorlocError m => MDoc -> m a
