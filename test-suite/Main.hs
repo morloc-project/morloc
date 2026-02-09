@@ -334,6 +334,7 @@ main = do
         golden "hofs-1" "hofs-1"
       , -- test errors
         golden "errors (wait ~10s)" "errors"
+      , golden "feature-integration-1" "feature-integration-1"
         -- , golden "argument-form-1-rs" "argument-form-1-rs"
         -- , golden "argument-form-2-rs" "argument-form-2-rs"
         -- , golden "argument-form-3-rs" "argument-form-3-rs"
