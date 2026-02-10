@@ -38,15 +38,24 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
 
     -- * Full lowering config
   , LowerConfig (..)
+
+    -- * Default serialize/deserialize (for Python/R)
+  , defaultSerialize
+  , defaultDeserialize
+
+    -- * Re-exported type alias
+  , IndexM
   ) where
 
+import Control.Monad.Identity (Identity)
+import qualified Control.Monad.State as CMS
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common (PoolDocs(..), mergePoolDocs, helperNamer, svarNamer, nvarNamer, argNamer, manNamer, provideClosure)
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Grammars.Translator.Syntax (genericMakeSerialArg, genericMakeNativeArg)
 import Morloc.CodeGenerator.Serial (isSerializable, serialAstToMsgpackSchema)
 import Morloc.Data.Doc
+import Morloc.Monad (IndexState)
 
 -- Statements
 data IStmt
@@ -406,6 +415,27 @@ defaultFoldRules cfg = FoldWithManifoldM
   , opFoldWithNativeManifoldM = lowerNativeManifold cfg
   , opFoldWithSerialExprM = lowerSerialExpr cfg
   , opFoldWithNativeExprM = lowerNativeExpr cfg
-  , opFoldWithSerialArgM = genericMakeSerialArg
-  , opFoldWithNativeArgM = genericMakeNativeArg
+  , opFoldWithSerialArgM = \sr sa -> return $ case sa of
+      SerialArgManifold_ x -> (typeSof sr, x)
+      SerialArgExpr_ x -> (typeSof sr, x)
+  , opFoldWithNativeArgM = \nr na -> return $ case na of
+      NativeArgManifold_ x -> (typeMof nr, x)
+      NativeArgExpr_ x -> (typeMof nr, x)
   }
+
+-- | Default serialization for languages without custom PoolDocs logic (Python, R).
+defaultSerialize :: (Monad m) => LowerConfig m -> MDoc -> SerialAST -> m PoolDocs
+defaultSerialize cfg v s = do
+  (expr, stmts) <- expandSerialize cfg v s
+  return $ defaultValue
+    { poolExpr = lcPrintExpr cfg expr
+    , poolPriorLines = map (lcPrintStmt cfg) stmts
+    }
+
+-- | Default deserialization for languages without custom logic (Python, R).
+defaultDeserialize :: (Monad m) => LowerConfig m -> MDoc -> SerialAST -> m (MDoc, [MDoc])
+defaultDeserialize cfg v s = do
+  (expr, stmts) <- expandDeserialize cfg v s
+  return (lcPrintExpr cfg expr, map (lcPrintStmt cfg) stmts)
+
+type IndexM = CMS.StateT IndexState Identity

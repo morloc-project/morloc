@@ -19,10 +19,9 @@ module Morloc.CodeGenerator.Grammars.Translator.Python3
 import qualified Data.Char as DC
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), expandSerialize, expandDeserialize, defaultFoldRules)
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), IndexM, defaultSerialize, defaultDeserialize, defaultFoldRules)
 import qualified Morloc.CodeGenerator.Grammars.Translator.Printer.Python3 as PP
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
-import Morloc.CodeGenerator.Grammars.Translator.Syntax (IndexM)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc
@@ -127,76 +126,66 @@ objectAccess :: MDoc -> MDoc -> MDoc
 objectAccess object field = object <> "." <> field
 
 pythonLowerConfig :: (Source -> MDoc) -> LowerConfig IndexM
-pythonLowerConfig makeSrcName = LowerConfig
-  { lcSrcName = makeSrcName
-  , lcTypeOf = \_ -> return Nothing
-  , lcSerialAstType = \_ -> return Nothing
-  , lcDeserialAstType = \_ -> return Nothing
-  , lcRawDeserialAstType = \_ -> return Nothing
-  , lcTemplateArgs = \_ -> return Nothing
-  , lcTypeMOf = \_ -> return Nothing
-  , lcPackerName = makeSrcName
-  , lcUnpackerName = makeSrcName
-  , lcRecordAccessor = \namType constructor -> selectAccessor namType constructor
-  , lcDeserialRecordAccessor = \_ k v -> recordAccess v (pretty k)
-  , lcTupleAccessor = tupleKey
-  , lcNewIndex = newIndex
-  , lcPrintExpr = PP.printExpr
-  , lcPrintStmt = PP.printStmt
-  , lcEvalPattern = \t p xs -> return $ evaluatePattern t p xs
-  , lcListConstructor = \_ _ es -> list es
-  , lcTupleConstructor = \_ -> tupled
-  , lcRecordConstructor = \_ _ _ _ rs -> return $ defaultValue
-      { poolExpr = "OrderedDict" <> tupled [pretty k <> "=" <> v | (k, v) <- rs] }
-  , lcForeignCall = \socketFile mid args ->
-      "morloc.foreign_call" <> tupled [makeSocketPath socketFile, pretty mid, list args]
-  , lcRemoteCall = \socketFile mid res args -> do
-      let resMem = pretty $ remoteResourcesMemory res
-          resTime = pretty $ remoteResourcesTime res
-          resCPU = pretty $ remoteResourcesThreads res
-          resGPU = pretty $ remoteResourcesGpus res
-          resStruct = "struct.pack" <> tupled [squotes "iiii", resMem, resTime, resCPU, resGPU]
-          call =
-            "morloc.remote_call"
-              <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resStruct, list args]
-      return $ defaultValue {poolExpr = call}
-  , lcMakeLet = \namer i _ e1 e2 -> return $ makeLet namer i e1 e2
-  , lcReturn = \e -> "return(" <> e <> ")"
-  , lcSerialize = \v s -> do
-      (serialized, assignments) <- serialize makeSrcName v s
-      return $ defaultValue {poolExpr = serialized, poolPriorLines = assignments}
-  , lcDeserialize = \_ v s -> deserialize makeSrcName v s
-  , lcMakeFunction = \mname args _ priorLines body headForm ->
-      let makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
-          makeExt _ = ""
-          def = "def" <+> mname <> makeExt headForm <> tupled (map argNamer args) <> ":"
-          tryCatch [] = ""
-          tryCatch xs =
-            let tryBlock = nest 4 (vsep ("try:" : xs))
-                exceptBlock =
-                  nest 4 ( vsep
-                    [ "except Exception as e:"
-                    , [idoc|raise RuntimeError(f"Error (Python daemon in #{mname}):\n{e!s}")|]
-                    ])
-             in vsep [tryBlock, exceptBlock]
-       in return . Just $ nest 4 (vsep [def, tryCatch priorLines, body])
-  , lcMakeLambda = \mname contextArgs _ -> "functools.partial" <> tupled (mname : contextArgs)
-  }
+pythonLowerConfig makeSrcName = cfg
   where
+    cfg = LowerConfig
+      { lcSrcName = makeSrcName
+      , lcTypeOf = \_ -> return Nothing
+      , lcSerialAstType = \_ -> return Nothing
+      , lcDeserialAstType = \_ -> return Nothing
+      , lcRawDeserialAstType = \_ -> return Nothing
+      , lcTemplateArgs = \_ -> return Nothing
+      , lcTypeMOf = \_ -> return Nothing
+      , lcPackerName = makeSrcName
+      , lcUnpackerName = makeSrcName
+      , lcRecordAccessor = \namType constructor -> selectAccessor namType constructor
+      , lcDeserialRecordAccessor = \_ k v -> recordAccess v (pretty k)
+      , lcTupleAccessor = tupleKey
+      , lcNewIndex = newIndex
+      , lcPrintExpr = PP.printExpr
+      , lcPrintStmt = PP.printStmt
+      , lcEvalPattern = \t p xs -> return $ evaluatePattern t p xs
+      , lcListConstructor = \_ _ es -> list es
+      , lcTupleConstructor = \_ -> tupled
+      , lcRecordConstructor = \_ _ _ _ rs -> return $ defaultValue
+          { poolExpr = "OrderedDict" <> tupled [pretty k <> "=" <> v | (k, v) <- rs] }
+      , lcForeignCall = \socketFile mid args ->
+          "morloc.foreign_call" <> tupled [makeSocketPath socketFile, pretty mid, list args]
+      , lcRemoteCall = \socketFile mid res args -> do
+          let resMem = pretty $ remoteResourcesMemory res
+              resTime = pretty $ remoteResourcesTime res
+              resCPU = pretty $ remoteResourcesThreads res
+              resGPU = pretty $ remoteResourcesGpus res
+              resStruct = "struct.pack" <> tupled [squotes "iiii", resMem, resTime, resCPU, resGPU]
+              call =
+                "morloc.remote_call"
+                  <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resStruct, list args]
+          return $ defaultValue {poolExpr = call}
+      , lcMakeLet = \namer i _ e1 e2 -> return $ makeLet namer i e1 e2
+      , lcReturn = \e -> "return(" <> e <> ")"
+      , lcSerialize = defaultSerialize cfg
+      , lcDeserialize = \_ -> defaultDeserialize cfg
+      , lcMakeFunction = \mname args _ priorLines body headForm ->
+          let makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
+              makeExt _ = ""
+              def = "def" <+> mname <> makeExt headForm <> tupled (map argNamer args) <> ":"
+              tryCatch [] = ""
+              tryCatch xs =
+                let tryBlock = nest 4 (vsep ("try:" : xs))
+                    exceptBlock =
+                      nest 4 ( vsep
+                        [ "except Exception as e:"
+                        , [idoc|raise RuntimeError(f"Error (Python daemon in #{mname}):\n{e!s}")|]
+                        ])
+                 in vsep [tryBlock, exceptBlock]
+           in return . Just $ nest 4 (vsep [def, tryCatch priorLines, body])
+      , lcMakeLambda = \mname contextArgs _ -> "functools.partial" <> tupled (mname : contextArgs)
+      }
+
     makeLet :: (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
     makeLet namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
       let rs = rs1 ++ [namer i <+> "=" <+> e1'] ++ rs2
        in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
-
-serialize :: (Source -> MDoc) -> MDoc -> SerialAST -> IndexM (MDoc, [MDoc])
-serialize makeSrcName v s = do
-  (expr, stmts) <- expandSerialize (pythonLowerConfig makeSrcName) v s
-  return (PP.printExpr expr, map PP.printStmt stmts)
-
-deserialize :: (Source -> MDoc) -> MDoc -> SerialAST -> IndexM (MDoc, [MDoc])
-deserialize makeSrcName v s = do
-  (expr, stmts) <- expandDeserialize (pythonLowerConfig makeSrcName) v s
-  return (PP.printExpr expr, map PP.printStmt stmts)
 
 makeSocketPath :: MDoc -> MDoc
 makeSocketPath socketFileBasename = [idoc|os.path.join(global_state["tmpdir"], #{dquotes socketFileBasename})|]
@@ -204,8 +193,7 @@ makeSocketPath socketFileBasename = [idoc|os.path.join(global_state["tmpdir"], #
 translateSegment :: (Source -> MDoc) -> SerialManifold -> MDoc
 translateSegment makeSrcName m0 =
   let cfg = pythonLowerConfig makeSrcName
-      e = runIndex 0 (foldWithSerialManifoldM (defaultFoldRules cfg) m0)
-   in vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
+   in renderPoolDocs $ runIndex 0 (foldWithSerialManifoldM (defaultFoldRules cfg) m0)
 
 evaluatePattern :: TypeF -> Pattern -> [MDoc] -> MDoc
 evaluatePattern _ (PatternText firstStr fragments) xs =

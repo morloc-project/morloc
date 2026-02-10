@@ -470,7 +470,7 @@ translateSegment :: SerialManifold -> CppTranslator MDoc
 translateSegment m0 = do
   resetCounter
   e <- surroundFoldSerialManifoldM manifoldIndexer (defaultFoldRules cppLowerConfig) m0
-  return $ vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
+  return $ renderPoolDocs e
   where
     manifoldIndexer =
       makeManifoldIndexer
