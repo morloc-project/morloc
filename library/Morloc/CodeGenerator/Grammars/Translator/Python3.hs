@@ -19,7 +19,10 @@ module Morloc.CodeGenerator.Grammars.Translator.Python3
 import qualified Data.Char as DC
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), expandSerialize, expandDeserialize, IExpr(..), IStmt(..))
+import qualified Morloc.CodeGenerator.Grammars.Translator.Printer.Python3 as PP
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
+import Morloc.CodeGenerator.Grammars.Translator.Syntax
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial (isSerializable, serialAstToMsgpackSchema)
 import qualified Morloc.Config as MC
@@ -27,7 +30,7 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
-import Morloc.Monad (Index, asks, gets, newIndex, runIndex)
+import Morloc.Monad (Index, asks, gets, newIndex)
 import qualified Morloc.Monad as MM
 import Morloc.Quasi
 import qualified System.FilePath as SF
@@ -124,217 +127,74 @@ recordAccess record field = record <> "[" <> dquotes field <> "]"
 objectAccess :: MDoc -> MDoc -> MDoc
 objectAccess object field = object <> "." <> field
 
-serialize :: (Source -> MDoc) -> MDoc -> SerialAST -> Index (MDoc, [MDoc])
-serialize makeSrcName v0 s0 = do
-  (ms, v1) <- serialize' v0 s0
-  let schema = serialAstToMsgpackSchema s0
-  let v2 = [idoc|morloc.put_value(#{v1}, "#{schema}")|]
-  return (v2, ms)
-  where
-    serialize' :: MDoc -> SerialAST -> Index ([MDoc], MDoc)
-    serialize' v s
-      | isSerializable s = return ([], v)
-      | otherwise = construct v s
+pythonLowerConfig :: (Source -> MDoc) -> LowerConfig IndexM
+pythonLowerConfig makeSrcName = LowerConfig
+  { lcSrcName = makeSrcName
+  , lcTypeOf = \_ -> return Nothing
+  , lcSerialAstType = \_ -> return Nothing
+  , lcDeserialAstType = \_ -> return Nothing
+  , lcRawDeserialAstType = \_ -> return Nothing
+  , lcTemplateArgs = \_ -> return Nothing
+  , lcTypeMOf = \_ -> return Nothing
+  , lcPackerName = makeSrcName
+  , lcUnpackerName = makeSrcName
+  , lcRecordAccessor = \namType constructor -> selectAccessor namType constructor
+  , lcDeserialRecordAccessor = \_ k v -> recordAccess v (pretty k)
+  , lcTupleAccessor = tupleKey
+  , lcNewIndex = newIndex
+  }
 
-    construct :: MDoc -> SerialAST -> Index ([MDoc], MDoc)
-    construct v (SerialPack _ (p, s)) =
-      let unpacker = makeSrcName . typePackerReverse $ p
-       in serialize' [idoc|#{unpacker}(#{v})|] s
-    construct v (SerialList _ s) = do
-      idx <- newIndex
-      let v' = helperNamer idx
-          idxStr = pretty idx
-      (before, x) <- serialize' [idoc|i#{idxStr}|] s
-      let push = [idoc|#{v'}.append(#{x})|]
-          lst =
-            vsep
-              [ [idoc|#{v'} = []|]
-              , nest 4 (vsep ([idoc|for i#{idxStr} in #{v}:|] : before ++ [push]))
-              ]
-      return ([lst], v')
-    construct v (SerialTuple _ ss) = do
-      (befores, ss') <- unzip <$> zipWithM (\i s -> serialize' (tupleKey i v) s) [0 ..] ss
-      v' <- helperNamer <$> newIndex
-      let x = [idoc|#{v'} = #{tupled ss'}|]
-      return (concat befores ++ [x], v')
-    construct v (SerialObject namType (FV _ constructor) _ rs) = do
-      let accessField = selectAccessor namType constructor
-      (befores, ss') <- mapAndUnzipM (\(key, s) -> serialize' (accessField v (pretty key)) s) rs
-      v' <- helperNamer <$> newIndex
-      let entries =
-            zipWith
-              (\key value -> pretty key <> "=" <> value)
-              (map fst rs)
-              ss'
-          decl = [idoc|#{v'} = dict#{tupled (entries)}|]
-      return (concat befores ++ [decl], v')
-    construct _ _ = error "Unreachable"
+serialize :: (Source -> MDoc) -> MDoc -> SerialAST -> IndexM (MDoc, [MDoc])
+serialize makeSrcName v s = do
+  (expr, stmts) <- expandSerialize (pythonLowerConfig makeSrcName) v s
+  return (PP.printExpr expr, map PP.printStmt stmts)
 
-deserialize :: (Source -> MDoc) -> MDoc -> SerialAST -> Index (MDoc, [MDoc])
-deserialize makeSrcName v0 s0
-  | isSerializable s0 = do
-      let schema = serialAstToMsgpackSchema s0
-      let deserializing = [idoc|morloc.get_value(#{v0}, "#{schema}")|]
-      return (deserializing, [])
-  | otherwise = do
-      rawvar <- helperNamer <$> newIndex
-      let schema = serialAstToMsgpackSchema s0
-      let deserializing = [idoc|#{rawvar} = morloc.get_value(#{v0}, "#{schema}")|]
-      (x, befores) <- check rawvar s0
-      return (x, deserializing : befores)
-  where
-    check :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
-    check v s
-      | isSerializable s = return (v, [])
-      | otherwise = construct v s
-
-    construct :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
-    construct v (SerialPack _ (p, s')) = do
-      (x, before) <- check v s'
-      let packer = makeSrcName . typePackerForward $ p
-          deserialized = [idoc|#{packer}(#{x})|]
-      return (deserialized, before)
-    construct v (SerialList _ s) = do
-      idx <- newIndex
-      let v' = helperNamer idx
-          idxStr = pretty idx
-      (x, before) <- check [idoc|i#{idxStr}|] s
-      let push = [idoc|#{v'}.append(#{x})|]
-          lst =
-            vsep
-              [ [idoc|#{v'} = []|]
-              , nest 4 (vsep ([idoc|for i#{idxStr} in #{v}:|] : before ++ [push]))
-              ]
-      return (v', [lst])
-    construct v (SerialTuple _ ss) = do
-      (ss', befores) <- unzip <$> zipWithM (\i s -> check (tupleKey i v) s) [0 ..] ss
-      v' <- helperNamer <$> newIndex
-      let x = [idoc|#{v'} = #{tupled ss'}|]
-      return (v', concat befores ++ [x])
-    construct v (SerialObject namType (FV _ constructor) _ rs) = do
-      let accessField = selectAccessor namType constructor
-      (ss', befores) <- mapAndUnzipM (\(k, s) -> check (accessField v (pretty k)) s) rs
-      v' <- helperNamer <$> newIndex
-      let entries =
-            zipWith
-              (\key value -> pretty key <> "=" <> value)
-              (map fst rs)
-              ss'
-          decl = [idoc|#{v'} = #{pretty constructor}#{tupled entries}|]
-      return (v', concat befores ++ [decl])
-    construct _ _ = error "Why is this OK? Well, I see that it never was."
+deserialize :: (Source -> MDoc) -> MDoc -> SerialAST -> IndexM (MDoc, [MDoc])
+deserialize makeSrcName v s = do
+  (expr, stmts) <- expandDeserialize (pythonLowerConfig makeSrcName) v s
+  return (PP.printExpr expr, map PP.printStmt stmts)
 
 makeSocketPath :: MDoc -> MDoc
 makeSocketPath socketFileBasename = [idoc|os.path.join(global_state["tmpdir"], #{dquotes socketFileBasename})|]
 
 translateSegment :: (Source -> MDoc) -> SerialManifold -> MDoc
-translateSegment makeSrcName m0 =
-  let e = runIndex 0 (foldWithSerialManifoldM fm m0)
-   in vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
-  where
-    fm =
-      FoldWithManifoldM
-        { opFoldWithSerialManifoldM = makeSerialManifold
-        , opFoldWithNativeManifoldM = makeNativeManifold
-        , opFoldWithSerialExprM = makeSerialExpr
-        , opFoldWithNativeExprM = makeNativeExpr
-        , opFoldWithSerialArgM = makeSerialArg
-        , opFoldWithNativeArgM = makeNativeArg
-        }
+translateSegment makeSrcName = genericTranslateSegment (pythonSyntax makeSrcName)
 
-    makeSerialManifold :: SerialManifold -> SerialManifold_ PoolDocs -> Index PoolDocs
-    makeSerialManifold _ (SerialManifold_ m _ form headForm x) =
-      return $ translateManifold makeFunction makeLambda m form (Just headForm) x
-
-    makeNativeManifold :: NativeManifold -> NativeManifold_ PoolDocs -> Index PoolDocs
-    makeNativeManifold _ (NativeManifold_ m _ form x) =
-      return $ translateManifold makeFunction makeLambda m form Nothing x
-
-    makeSerialExpr ::
-      SerialExpr ->
-      SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
-      Index PoolDocs
-    makeSerialExpr _ (ManS_ f) = return f
-    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) ForeignCall args) _) = do
-      -- I don't need to explicitly add single quoes to the arguments here as I
-      -- do in C++ and R because the subprocess module bypasses Bash dequoting.
-      let call = "morloc.foreign_call" <> tupled [makeSocketPath socketFile, pretty mid, list (map argNamer args)]
-      return $ defaultValue {poolExpr = call}
-    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) (RemoteCall res) args) _) = do
+pythonSyntax :: (Source -> MDoc) -> LangSyntax IndexM
+pythonSyntax makeSrcName = LangSyntax
+  { synTrue = "True"
+  , synFalse = "False"
+  , synNull = "None"
+  , synString = \x -> dquotes (pretty x)
+  , synList = \_ _ es -> list es
+  , synTuple = \_ -> tupled
+  , synRecord = \_ _ _ _ rs -> return $ defaultValue
+      { poolExpr = "OrderedDict" <> tupled [pretty k <> "=" <> v | (k, v) <- rs] }
+  , synMakeFunction = makeFunction
+  , synMakeLambda = makeLambda
+  , synMakeLet = \namer i _ e1 e2 -> return $ makeLet namer i e1 e2
+  , synReturn = \e -> "return(" <> e <> ")"
+  , synSerialize = \v s -> do
+      (serialized, assignments) <- serialize makeSrcName v s
+      return $ defaultValue {poolExpr = serialized, poolPriorLines = assignments}
+  , synDeserialize = \_ v s -> deserialize makeSrcName v s
+  , synSrcName = makeSrcName
+  , synTemplateArgs = \_ -> return ""
+  , synEvalPattern = \t p xs -> return $ evaluatePattern t p xs
+  , synForeignCall = \socketFile mid args ->
+      "morloc.foreign_call" <> tupled [makeSocketPath socketFile, pretty mid, list args]
+  , synRemoteCall = \socketFile mid res args -> do
       let resMem = pretty $ remoteResourcesMemory res
           resTime = pretty $ remoteResourcesTime res
           resCPU = pretty $ remoteResourcesThreads res
           resGPU = pretty $ remoteResourcesGpus res
           resStruct = "struct.pack" <> tupled [squotes "iiii", resMem, resTime, resCPU, resGPU]
-          argList = list (map argNamer args)
           call =
             "morloc.remote_call"
-              <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resStruct, argList]
+              <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resStruct, list args]
       return $ defaultValue {poolExpr = call}
-    makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
-    makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet svarNamer i e1 e2
-    makeSerialExpr _ (NativeLetS_ i e1 e2) = return $ makeLet nvarNamer i e1 e2
-    makeSerialExpr _ (LetVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
-    makeSerialExpr _ (BndVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
-    makeSerialExpr _ (SerializeS_ s e) = do
-      (serialized, assignments) <- serialize makeSrcName (poolExpr e) s
-      return $ e {poolExpr = serialized, poolPriorLines = poolPriorLines e <> assignments}
-
-    makeNativeExpr ::
-      NativeExpr ->
-      NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
-      Index PoolDocs
-    makeNativeExpr _ (AppExeN_ _ (SrcCallP src) _ xs) =
-      return $ mergePoolDocs handleFunctionArgs (map snd xs)
-      where
-        handleFunctionArgs =
-          (<>) (makeSrcName src)
-            . hsep
-            . map tupled
-            . provideClosure src
-    makeNativeExpr _ (AppExeN_ t (PatCallP p) _ xs) =
-      return $ mergePoolDocs (evaluatePattern t p) (map snd xs)
-    makeNativeExpr _ (AppExeN_ _ (LocalCallP idx) _ xs) =
-      return $ mergePoolDocs ((<>) (nvarNamer idx) . tupled) (map snd xs)
-    makeNativeExpr _ (ManN_ call) = return call
-    makeNativeExpr _ (ReturnN_ x) =
-      return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
-    makeNativeExpr _ (SerialLetN_ i x1 x2) = return $ makeLet svarNamer i x1 x2
-    makeNativeExpr _ (NativeLetN_ i x1 x2) = return $ makeLet nvarNamer i x1 x2
-    makeNativeExpr _ (LetVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
-    makeNativeExpr _ (BndVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
-    makeNativeExpr _ (DeserializeN_ _ s x) = do
-      (deserialized, assignments) <- deserialize makeSrcName (poolExpr x) s
-      return $
-        x
-          { poolExpr = deserialized
-          , poolPriorLines = poolPriorLines x <> assignments
-          }
-    makeNativeExpr _ (ExeN_ _ (SrcCallP src)) = return $ defaultValue {poolExpr = makeSrcName src}
-    makeNativeExpr _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
-    makeNativeExpr _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
-    makeNativeExpr _ (ListN_ _ _ xs) = return $ mergePoolDocs list xs
-    makeNativeExpr _ (TupleN_ _ xs) = return $ mergePoolDocs tupled xs
-    makeNativeExpr _ (RecordN_ _ _ _ rs) =
-      return $ mergePoolDocs pyDict (map snd rs)
-      where
-        pyDict es' =
-          let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) es'
-           in "OrderedDict" <> tupled entries'
-    makeNativeExpr _ (LogN_ _ v) = return $ defaultValue {poolExpr = if v then "True" else "False"}
-    makeNativeExpr _ (RealN_ _ v) = return $ defaultValue {poolExpr = viaShow v}
-    makeNativeExpr _ (IntN_ _ v) = return $ defaultValue {poolExpr = viaShow v}
-    makeNativeExpr _ (StrN_ _ v) = return $ defaultValue {poolExpr = dquotes (pretty v)}
-    makeNativeExpr _ (NullN_ _) = return $ defaultValue {poolExpr = "None"}
-
-    makeSerialArg :: SerialArg -> SerialArg_ PoolDocs PoolDocs -> Index (TypeS, PoolDocs)
-    makeSerialArg sr (SerialArgManifold_ x) = return (typeSof sr, x)
-    makeSerialArg sr (SerialArgExpr_ x) = return (typeSof sr, x)
-
-    makeNativeArg :: NativeArg -> NativeArg_ PoolDocs PoolDocs -> Index (TypeM, PoolDocs)
-    makeNativeArg nr (NativeArgManifold_ x) = return (typeMof nr, x)
-    makeNativeArg nr (NativeArgExpr_ x) = return (typeMof nr, x)
-
+  }
+  where
     makeLet :: (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
     makeLet namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
       let rs = rs1 ++ [namer i <+> "=" <+> e1'] ++ rs2

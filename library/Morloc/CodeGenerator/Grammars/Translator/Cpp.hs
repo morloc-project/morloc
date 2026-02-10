@@ -24,6 +24,9 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), IType(..), expandSerialize, expandDeserialize)
+import qualified Morloc.CodeGenerator.Grammars.Translator.Printer.Cpp as CP
+import Morloc.CodeGenerator.Grammars.Translator.Syntax
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial
   ( isSerializable
@@ -152,6 +155,7 @@ instance Defaultable CppTranslatorState where
       }
 
 type CppTranslator a = CMS.StateT CppTranslatorState Identity a
+type CppTranslatorM = CMS.StateT CppTranslatorState Identity
 
 getCounter :: CppTranslator Int
 getCounter = do
@@ -283,6 +287,32 @@ tupleKey i v = [idoc|std::get<#{pretty i}>(#{v})|]
 recordAccess :: MDoc -> MDoc -> MDoc
 recordAccess record field = record <> "." <> field
 
+cppLowerConfig :: LowerConfig CppTranslatorM
+cppLowerConfig = LowerConfig
+  { lcSrcName = \src -> pretty (srcName src)
+  , lcTypeOf = \t -> Just . IType <$> cppTypeOf t
+  , lcSerialAstType = serializeTypeOf
+  , lcDeserialAstType = \s -> Just . IType <$> cppTypeOf (shallowType s)
+  , lcRawDeserialAstType = rawTypeOf
+  , lcTemplateArgs = \_ -> return Nothing
+  , lcTypeMOf = \_ -> return Nothing
+  , lcPackerName = \src -> pretty (srcName src)
+  , lcUnpackerName = \src -> pretty (srcName src)
+  , lcRecordAccessor = \_ _ -> recordAccess
+  , lcDeserialRecordAccessor = \i _ v -> tupleKey i v
+  , lcTupleAccessor = tupleKey
+  , lcNewIndex = getCounter
+  }
+  where
+    -- For serialization, records become tuples (that's what _put_value/toAnything expects)
+    serializeTypeOf :: SerialAST -> CppTranslator (Maybe IType)
+    serializeTypeOf (SerialObject _ _ _ rs) = Just . IType <$> recordToCppTuple (map snd rs)
+    serializeTypeOf s = Just . IType <$> cppTypeOf (serialAstToType s)
+
+    rawTypeOf :: SerialAST -> CppTranslator (Maybe IType)
+    rawTypeOf (SerialObject _ _ _ rs) = Just . IType <$> recordToCppTuple (map snd rs)
+    rawTypeOf s = Just . IType <$> cppTypeOf (serialAstToType s)
+
 -- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
 -- Include statements in C can be either wrapped in angle brackets (e.g.,
 -- `<stdio.h>`) or in quotes (e.g., `"myfile.h"`). The difference between these
@@ -311,130 +341,27 @@ translateSource ::
 translateSource path = "#include" <+> (dquotes . pretty) path
 
 serialize :: MDoc -> SerialAST -> CppTranslator PoolDocs
-serialize nativeExpr s0 = do
-  (x, before) <- serialize' nativeExpr s0
-
-  let schema_str = serialAstToMsgpackSchema s0
-      putCommand = [idoc|_put_value(#{x}, "#{schema_str}")|]
+serialize v s = do
+  (expr, stmts) <- expandSerialize cppLowerConfig v s
   return $
     PoolDocs
       { poolCompleteManifolds = []
-      , poolExpr = putCommand
-      , poolPriorLines = before
+      , poolExpr = CP.printExpr expr
+      , poolPriorLines = map CP.printStmt stmts
       , poolPriorExprs = []
       }
-  where
-    serialize' ::
-      MDoc -> -- a variable name that stores the data described by the SerialAST object
-      SerialAST ->
-      CppTranslator (MDoc, [MDoc])
-    serialize' v s
-      | isSerializable s = return (v, [])
-      | otherwise = construct v s
-
-    construct :: MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])
-    construct v (SerialPack _ (p, s)) = do
-      let unpacker = pretty . srcName . typePackerReverse $ p
-      serialize' [idoc|#{unpacker}(#{v})|] s
-    construct v lst@(SerialList _ s) = do
-      idx <- getCounter
-      typestr <- cppTypeOf $ serialAstToType lst
-      let v' = helperNamer idx
-          idxStr = pretty idx
-          decl = [idoc|#{typestr} #{v'};|]
-      (x, before) <- serialize' [idoc|#{v}[i#{idxStr}]|] s
-      let push = [idoc|#{v'}.push_back(#{x});|]
-          loop =
-            block
-              4
-              [idoc|for(size_t i#{idxStr} = 0; i#{idxStr} < #{v}.size(); i#{idxStr}++)|]
-              (vsep (before ++ [push]))
-      return (v', [decl, loop])
-    construct v tup@(SerialTuple _ ss) = do
-      (ss', befores) <- unzip <$> zipWithM (\i s -> serialize' (tupleKey i v) s) [0 ..] ss
-      idx <- getCounter
-      typestr <- cppTypeOf $ serialAstToType tup
-      let v' = helperNamer idx
-          x = [idoc|#{typestr} #{v'} = std::make_tuple#{tupled ss'};|]
-      return (v', concat befores ++ [x])
-    construct v (SerialObject NamRecord _ _ rs) = do
-      (ss', befores) <- unzip <$> mapM (\(k, s) -> serialize' (recordAccess v (pretty k)) s) rs
-      idx <- getCounter
-
-      -- This should store the record as a tuple, the tuple will be serialized
-      t <- recordToCppTuple (map snd rs)
-      let v' = helperNamer idx
-          decl = encloseSep "{" "}" "," ss'
-          x = [idoc|#{t} #{v'} = #{decl};|]
-      return (v', concat befores ++ [x])
-    construct _ (SerialObject NamObject _ _ _) = error "C++ object serialization not yet implemented"
-    construct _ (SerialObject NamTable _ _ _) = error "C++ table serialization not yet implemented"
-    construct _ _ = error "Unreachable"
 
 -- reverse of serialize, parameters are the same
 deserialize :: MDoc -> MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])
-deserialize varname0 typestr0 s0
-  | isSerializable s0 = do
-      rawtype <- cppTypeOf $ serialAstToType s0
-      let schema = serialAstToMsgpackSchema s0
-          getCmd = [idoc|_get_value<#{rawtype}>(#{varname0}, "#{schema}")|]
-      return (getCmd, [])
-  | otherwise = do
+deserialize varname0 typestr0 s0 = do
+  (expr, stmts) <- expandDeserialize cppLowerConfig varname0 s0
+  let rendered = CP.printExpr expr
+  if null stmts
+    then return (rendered, [])
+    else do
       schemaVar <- helperNamer <$> getCounter
-      rawtype <- rawTypeOf s0
-      rawvar <- helperNamer <$> getCounter
-      let schema = serialAstToMsgpackSchema s0
-          getCmd = [idoc|#{rawtype} #{rawvar} = _get_value<#{rawtype}>(#{varname0}, "#{schema}");|]
-      (x, before) <- construct rawvar s0
-      let final = [idoc|#{typestr0} #{schemaVar} = #{x};|]
-      return (schemaVar, [getCmd] ++ before ++ [final])
-  where
-    rawTypeOf :: SerialAST -> CppTranslator MDoc
-    rawTypeOf (SerialObject _ _ _ rs) = recordToCppTuple (map snd rs)
-    rawTypeOf t = cppTypeOf . serialAstToType $ t
-
-    check :: MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])
-    check v s
-      | isSerializable s = return (v, [])
-      | otherwise = construct v s
-
-    construct :: MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])
-    construct v (SerialPack _ (p, s')) = do
-      (x, before) <- check v s'
-      let packer = pretty . srcName . typePackerForward $ p
-          deserialized = [idoc|#{packer}(#{x})|]
-      return (deserialized, before)
-    construct v lst@(SerialList _ s) = do
-      t <- cppTypeOf $ shallowType lst
-      idx <- getCounter
-      let v' = helperNamer idx
-          idxStr = pretty idx
-          decl = [idoc|#{t} #{v'};|]
-      (x, before) <- check [idoc|#{v}[i#{idxStr}]|] s
-      let push = [idoc|#{v'}.push_back(#{x});|]
-          loop =
-            block
-              4
-              [idoc|for(size_t i#{idxStr} = 0; i#{idxStr} < #{v}.size(); i#{idxStr}++)|]
-              (vsep (before ++ [push]))
-      return (v', [decl, loop])
-    construct v tup@(SerialTuple _ ss) = do
-      (ss', befores) <- unzip <$> zipWithM (\i s -> check (tupleKey i v) s) [0 ..] ss
-      typestr <- cppTypeOf $ shallowType tup
-      v' <- helperNamer <$> getCounter
-      let x = [idoc|#{typestr} #{v'} = std::make_tuple#{tupled ss'};|]
-      return (v', concat befores ++ [x])
-    construct v rec@(SerialObject NamRecord _ _ rs) = do
-      (ss', befores) <-
-        mapAndUnzipM
-          (\(i, (_, s)) -> check ("std::get<" <> pretty i <> ">(" <> v <> ")") s)
-          (zip ([0 ..] :: [Int]) rs)
-      t <- cppTypeOf (shallowType rec)
-      v' <- helperNamer <$> getCounter
-      let decl = encloseSep "{" "}" "," ss'
-          x = [idoc|#{t} #{v'} = #{decl};|]
-      return (v', concat befores ++ [x])
-    construct _ _ = undefined -- TODO add support for deserialization of remaining types (e.g. other records)
+      let final = [idoc|#{typestr0} #{schemaVar} = #{rendered};|]
+      return (schemaVar, map CP.printStmt stmts ++ [final])
 
 recordToCppTuple :: [SerialAST] -> CppTranslator MDoc
 recordToCppTuple ts = do
@@ -444,17 +371,18 @@ recordToCppTuple ts = do
 translateSegment :: SerialManifold -> CppTranslator MDoc
 translateSegment m0 = do
   resetCounter
-  e <- surroundFoldSerialManifoldM manifoldIndexer foldRules m0
+  syn <- cppSyntax
+  e <- surroundFoldSerialManifoldM manifoldIndexer (foldRules syn) m0
   return $ vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
   where
-    foldRules =
+    foldRules syn =
       FoldWithManifoldM
         { opFoldWithSerialManifoldM = makeSerialManifold
         , opFoldWithNativeManifoldM = makeNativeManifold
-        , opFoldWithSerialExprM = makeSerialExpr
-        , opFoldWithNativeExprM = makeNativeExpr
-        , opFoldWithSerialArgM = makeSerialArg
-        , opFoldWithNativeArgM = makeNativeArg
+        , opFoldWithSerialExprM = genericMakeSerialExpr syn
+        , opFoldWithNativeExprM = genericMakeNativeExpr syn
+        , opFoldWithSerialArgM = genericMakeSerialArg
+        , opFoldWithNativeArgM = genericMakeNativeArg
         }
 
     manifoldIndexer =
@@ -468,35 +396,47 @@ translateSegment m0 = do
     makeNativeManifold :: NativeManifold -> NativeManifold_ PoolDocs -> CppTranslator PoolDocs
     makeNativeManifold nm (NativeManifold_ i _ form e) = makeManifold i form Nothing (typeMof nm) e
 
-    makeSerialArg :: SerialArg -> SerialArg_ PoolDocs PoolDocs -> CppTranslator (TypeS, PoolDocs)
-    makeSerialArg sr (SerialArgManifold_ x) = return (typeSof sr, x)
-    makeSerialArg sr (SerialArgExpr_ x) = return (typeSof sr, x)
-
-    makeNativeArg :: NativeArg -> NativeArg_ PoolDocs PoolDocs -> CppTranslator (TypeM, PoolDocs)
-    makeNativeArg nr (NativeArgManifold_ x) = return (typeMof nr, x)
-    makeNativeArg nr (NativeArgExpr_ x) = return (typeMof nr, x)
-
-    makeSerialExpr ::
-      SerialExpr ->
-      SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
-      CppTranslator PoolDocs
-    makeSerialExpr _ (ManS_ e) = return e
-    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) ForeignCall args) _) = do
-      -- arguments sent to foreign_call:
-      --  * basename of socket, e.g., "pipe-python3"
-      --  * manifold id
-      --  * list of voidstar packets
-      --  * NULL sentinel
-      let argList = [dquotes socketFile, pretty mid] <> map argNamer args <> ["NULL"]
-          call = [idoc|foreign_call#{tupled argList}|]
-      return $ defaultValue {poolExpr = call}
-    makeSerialExpr _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) (RemoteCall res) args) _) = do
+cppSyntax :: CppTranslator (LangSyntax CppTranslatorM)
+cppSyntax = return $ LangSyntax
+  { synTrue = "true"
+  , synFalse = "false"
+  , synNull = "null"
+  , synString = \x -> [idoc|std::string("#{pretty x}")|]
+  , synList = \_ _ es -> encloseSep "{" "}" "," es
+  , synTuple = \_ -> ((<>) "std::make_tuple" . tupled)
+  , synRecord = \recType _ _ _ rs -> do
+      t <- cppTypeOf recType
+      idx <- getCounter
+      let v' = "a" <> pretty idx
+          decl = t <+> v' <+> "=" <+> encloseSep "{" "}" "," (map snd rs) <> ";"
+      return $ defaultValue {poolExpr = v', poolPriorLines = [decl]}
+  , synMakeFunction = error "C++ does not use generic manifold handlers"
+  , synMakeLambda = error "C++ does not use generic manifold handlers"
+  , synMakeLet = \namer letIndex mt e1 e2 -> do
+      typestr <- case mt of
+        (Just t) -> cppTypeOf t
+        Nothing -> return serialType
+      return $ makeLet namer letIndex typestr e1 e2
+  , synReturn = \e -> "return(" <> e <> ");"
+  , synSerialize = \v s -> serialize v s
+  , synDeserialize = \t v s -> do
+      typestr <- cppTypeOf t
+      deserialize v typestr s
+  , synSrcName = \src -> pretty (srcName src)
+  , synTemplateArgs = \qs -> templateArguments qs
+  , synEvalPattern = \t p xs -> do
+      state <- CMS.get
+      return $ evaluatePattern state t p xs
+  , synForeignCall = \socketFile mid args ->
+      let argList = [dquotes socketFile, pretty mid] <> args <> ["NULL"]
+       in [idoc|foreign_call#{tupled argList}|]
+  , synRemoteCall = \socketFile mid res args -> do
       let resMem = pretty $ remoteResourcesMemory res
           resTime = pretty $ remoteResourcesTime res
           resCPU = pretty $ remoteResourcesThreads res
           resGPU = pretty $ remoteResourcesGpus res
           cacheDir = ".morloc-cache"
-          argList = encloseSep "{" "}" "," (map argNamer args)
+          argList = encloseSep "{" "}" "," args
           setup =
             [idoc|resources_t resources = {#{resMem}, #{resTime}, #{resCPU}, #{resGPU}};
 const uint8_t* args[] = #{argList};
@@ -512,73 +452,9 @@ char* errmsg = NULL;|]
     &errmsg
 );
 PROPAGATE_ERROR(errmsg)|]
-
       return $ defaultValue {poolExpr = call, poolPriorLines = [setup]}
-    makeSerialExpr _ (ReturnS_ e) = return $ e {poolExpr = "return(" <> poolExpr e <> ");"}
-    makeSerialExpr _ (SerialLetS_ letIndex sa sb) = return $ makeLet svarNamer letIndex serialType sa sb
-    makeSerialExpr (NativeLetS _ (typeFof -> t) _) (NativeLetS_ letIndex na sb) = do
-      typestr <- cppTypeOf t
-      return $ makeLet nvarNamer letIndex typestr na sb
-    makeSerialExpr _ (LetVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
-    makeSerialExpr _ (BndVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
-    makeSerialExpr _ (SerializeS_ s e) = do
-      se <- serialize (poolExpr e) s
-      return $ mergePoolDocs (\_ -> poolExpr se) [e, se]
-    makeSerialExpr _ _ = error "Unreachable"
-
-    makeNativeExpr ::
-      NativeExpr ->
-      NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
-      CppTranslator PoolDocs
-    makeNativeExpr _ (AppExeN_ _ (SrcCallP src) qs (map snd -> es)) = do
-      templateStr <- templateArguments qs
-      return $ mergePoolDocs (handleFunctionArgs templateStr) es
-      where
-        handleFunctionArgs templateStr =
-          (<>) (pretty (srcName src) <> templateStr)
-            . hsep
-            . map tupled
-            . provideClosure src
-    makeNativeExpr _ (AppExeN_ t (PatCallP p) _ xs) = do
-      state <- CMS.get
-      return $ mergePoolDocs (evaluatePattern state t p) (map snd xs)
-    makeNativeExpr _ (AppExeN_ _ (LocalCallP idx) qs (map snd -> es)) = do
-      templateStr <- templateArguments qs
-      return $ mergePoolDocs ((<>) (nvarNamer idx <> templateStr) . tupled) es
-    makeNativeExpr _ (ManN_ call) = return call
-    makeNativeExpr _ (ReturnN_ e) =
-      return $ e {poolExpr = "return" <> parens (poolExpr e) <> ";"}
-    makeNativeExpr _ (SerialLetN_ i sa nb) = return $ makeLet svarNamer i serialType sa nb
-    makeNativeExpr (NativeLetN _ (typeFof -> t1) _) (NativeLetN_ i na nb) = makeLet nvarNamer i <$> cppTypeOf t1 <*> pure na <*> pure nb
-    makeNativeExpr _ (LetVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
-    makeNativeExpr _ (BndVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
-    makeNativeExpr _ (DeserializeN_ t s e) = do
-      typestr <- cppTypeOf t
-      (deserialized, assignments) <- deserialize (poolExpr e) typestr s
-      return $
-        e
-          { poolExpr = deserialized
-          , poolPriorLines = poolPriorLines e <> assignments
-          }
-    makeNativeExpr _ (ListN_ _ _ es) =
-      return $ mergePoolDocs (encloseSep "{" "}" ",") es
-    makeNativeExpr _ (TupleN_ _ es) =
-      return $ mergePoolDocs ((<>) "std::make_tuple" . tupled) es
-    makeNativeExpr e (RecordN_ _ _ _ rs) = do
-      t <- cppTypeOf e
-      idx <- getCounter
-      let v' = "a" <> pretty idx
-          decl = t <+> v' <+> "=" <+> encloseSep "{" "}" "," (map (poolExpr . snd) rs) <> ";"
-      let p = mergePoolDocs (const v') (map snd rs)
-      return (p {poolPriorLines = poolPriorLines p <> [decl]})
-    makeNativeExpr _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
-    makeNativeExpr _ (LogN_ _ x) = return $ defaultValue {poolExpr = if x then "true" else "false"}
-    makeNativeExpr _ (RealN_ _ x) = return $ defaultValue {poolExpr = viaShow x}
-    makeNativeExpr _ (IntN_ _ x) = return $ defaultValue {poolExpr = viaShow x}
-    makeNativeExpr _ (StrN_ _ x) = return $ defaultValue {poolExpr = [idoc|std::string("#{pretty x}")|]}
-    makeNativeExpr _ (NullN_ _) = return $ defaultValue {poolExpr = "null"}
-    makeNativeExpr _ _ = error "Unreachable"
-
+  }
+  where
     templateArguments :: [(Text, TypeF)] -> CppTranslator MDoc
     templateArguments [] = return ""
     templateArguments qs = do
