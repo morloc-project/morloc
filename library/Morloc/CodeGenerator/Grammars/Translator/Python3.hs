@@ -19,7 +19,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Python3
 import qualified Data.Char as DC
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), IndexM, defaultSerialize, defaultDeserialize, defaultFoldRules)
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), IndexM, defaultSerialize, defaultDeserialize, defaultFoldRules, buildProgram)
 import qualified Morloc.CodeGenerator.Grammars.Translator.Printer.Python3 as PP
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.CodeGenerator.Namespace
@@ -52,13 +52,11 @@ translate srcs es = do
   -- diagnostics
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
-  -- translate each manifold tree, rooted on a call from nexus or another pool
+  -- translate each manifold tree and build the program
   let mDocs = map (translateSegment (qualifiedSrcName lib)) es
+      program = buildProgram includeDocs mDocs es
 
-  -- make code for dispatching to manifolds
-  let dispatch = PP.printDispatch (extractLocalDispatch es) (extractRemoteDispatch es)
-
-  let code = PP.printPool [opt, pretty lib] includeDocs mDocs dispatch
+  let code = PP.printProgram [opt, pretty lib] program
   let exefile = ML.makeExecutablePoolName Python3Lang
 
   return $

@@ -17,7 +17,7 @@ module Morloc.CodeGenerator.Grammars.Translator.R
 
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), IndexM, defaultSerialize, defaultDeserialize, defaultFoldRules)
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), IndexM, defaultSerialize, defaultDeserialize, defaultFoldRules, buildProgram)
 import qualified Morloc.CodeGenerator.Grammars.Translator.Printer.R as RP
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.CodeGenerator.Namespace
@@ -45,10 +45,11 @@ translate srcs es = do
   -- diagnostics
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
-  -- translate each manifold tree, rooted on a call from nexus or another pool
+  -- translate each manifold tree and build the program
   let mDocs = map translateSegment es
+      program = buildProgram includeDocs mDocs es
 
-  let code = RP.printPool includeDocs dynlibDocs mDocs
+  let code = RP.printProgram dynlibDocs program
       exefile = ML.makeExecutablePoolName RLang
 
   return $

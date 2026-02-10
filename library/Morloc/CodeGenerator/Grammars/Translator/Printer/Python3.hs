@@ -14,8 +14,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Printer.Python3
   , printStmt
   , printStmts
     -- * Pool-level rendering
-  , printDispatch
-  , printPool
+  , printProgram
   ) where
 
 import Morloc.CodeGenerator.Grammars.Common (DispatchEntry(..), manNamer)
@@ -71,32 +70,30 @@ printStmt (IFunDef _ _ _ _) = error "IFunDef not yet implemented for Python prin
 printStmts :: [IStmt] -> [MDoc]
 printStmts = map printStmt
 
--- | Render Python dispatch dicts from structured dispatch entries.
-printDispatch :: [DispatchEntry] -> [DispatchEntry] -> MDoc
-printDispatch locals remotes = vsep [localDispatch, remoteDispatch]
-  where
-    localDispatch = align . vsep $
-      [ "dispatch = {"
-      , indent 4 (vsep [pretty i <> ":" <+> manNamer i <> "," | DispatchEntry i _ <- locals])
-      , "}"
-      ]
-
-    remoteDispatch = align . vsep $
-      [ "remote_dispatch = {"
-      , indent 4 (vsep [pretty i <> ":" <+> manNamer i <> "_remote" <> "," | DispatchEntry i _ <- remotes])
-      , "}"
-      ]
-
--- | Assemble a complete Python pool file from its sections.
-printPool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
-printPool libs includeDocs manifolds dispatch =
+-- | Assemble a complete Python pool file from an IProgram and lib paths.
+printProgram :: [MDoc] -> IProgram -> MDoc
+printProgram libs prog =
   format
     (DF.embededFileText (DF.poolTemplate Python3Lang))
     "# <<<BREAK>>>"
-    [path, includeStatements includeDocs, vsep manifolds, dispatch]
+    [path, includeStatements (ipSources prog), vsep (ipManifolds prog), dispatch]
   where
     path = [idoc|sys.path = #{list (map makePath libs)} + sys.path|]
     makePath filename = [idoc|os.path.expanduser(#{dquotes(filename)})|]
 
     includeStatements [] = ""
-    includeStatements _ = vsep ("import importlib" : includeDocs)
+    includeStatements _ = vsep ("import importlib" : ipSources prog)
+
+    dispatch = vsep [localDispatch, remoteDispatch]
+
+    localDispatch = align . vsep $
+      [ "dispatch = {"
+      , indent 4 (vsep [pretty i <> ":" <+> manNamer i <> "," | DispatchEntry i _ <- ipLocalDispatch prog])
+      , "}"
+      ]
+
+    remoteDispatch = align . vsep $
+      [ "remote_dispatch = {"
+      , indent 4 (vsep [pretty i <> ":" <+> manNamer i <> "_remote" <> "," | DispatchEntry i _ <- ipRemoteDispatch prog])
+      , "}"
+      ]

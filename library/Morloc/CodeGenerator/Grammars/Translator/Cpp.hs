@@ -24,7 +24,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), IType(..), expandSerialize, expandDeserialize, defaultFoldRules)
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), IType(..), expandSerialize, expandDeserialize, defaultFoldRules, buildProgramM)
 import qualified Morloc.CodeGenerator.Grammars.Translator.Printer.Cpp as CP
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial
@@ -183,18 +183,16 @@ makeCppCode srcs es univeralScopeMap scopeMap = do
   -- write include statements for sources
   let includeDocs = map translateSource (unique . mapMaybe srcPath $ srcs)
 
-  let dispatch = CP.printDispatch (extractLocalDispatch es) (extractRemoteDispatch es)
-
   signatures <- concat <$> mapM makeSignature es
 
   (autoDecl, autoSerial) <- generateAnonymousStructs
   let serializationCode = autoDecl ++ srcDecl ++ autoSerial ++ srcSerial
 
-  -- translate each manifold tree, rooted on a call from nexus or another pool
-  mDocs <- mapM translateSegment es
+  -- build the program (translates each manifold tree)
+  program <- buildProgramM includeDocs es translateSegment
 
   -- create and return complete pool script
-  return $ CP.printPool includeDocs serializationCode signatures mDocs dispatch
+  return $ CP.printProgram serializationCode signatures program
 
 metaTypedefs ::
   GMap Int MVar (Map.Map Lang Scope) ->

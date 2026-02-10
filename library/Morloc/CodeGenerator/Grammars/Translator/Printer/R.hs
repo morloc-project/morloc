@@ -14,7 +14,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Printer.R
   , printStmt
   , printStmts
     -- * Pool-level rendering
-  , printPool
+  , printProgram
   ) where
 
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
@@ -66,10 +66,10 @@ printStmt (IFunDef _ _ _ _) = error "IFunDef not yet implemented for R printer"
 printStmts :: [IStmt] -> [MDoc]
 printStmts = map printStmt
 
--- | Assemble a complete R pool file from its sections.
-printPool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc
-printPool sources dynlibs manifolds =
+-- | Assemble a complete R pool file from an IProgram and dynlib docs.
+printProgram :: [MDoc] -> IProgram -> MDoc
+printProgram dynlibs prog =
   format
     (DF.embededFileText (DF.poolTemplate RLang))
     "# <<<BREAK>>>"
-    [vsep sources, vsep dynlibs, vsep manifolds]
+    [vsep (ipSources prog), vsep dynlibs, vsep (ipManifolds prog)]

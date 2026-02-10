@@ -16,12 +16,14 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( -- * IR types
     IStmt (..)
   , IExpr (..)
-  , IParam (..)
   , IType (..)
   , IAccessor (..)
   , IFunMeta (..)
   , IProgram (..)
-  , IStructDef (..)
+
+    -- * Program construction
+  , buildProgram
+  , buildProgramM
 
     -- * Lowering: serialize/deserialize expansion
   , expandSerialize
@@ -51,7 +53,7 @@ import Control.Monad.Identity (Identity)
 import qualified Control.Monad.State as CMS
 import Data.Scientific (Scientific)
 import Data.Text (Text)
-import Morloc.CodeGenerator.Grammars.Common (PoolDocs(..), mergePoolDocs, helperNamer, svarNamer, nvarNamer, argNamer, manNamer, provideClosure)
+import Morloc.CodeGenerator.Grammars.Common (PoolDocs(..), mergePoolDocs, helperNamer, svarNamer, nvarNamer, argNamer, manNamer, provideClosure, DispatchEntry(..), extractLocalDispatch, extractRemoteDispatch)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial (isSerializable, serialAstToMsgpackSchema)
 import Morloc.Data.Doc
@@ -105,19 +107,26 @@ data IFunMeta = IFunMeta
   }
 
 data IProgram = IProgram
-  { ipStructDefs :: [IStructDef]
-  , ipSignatures :: [(MDoc, [IParam], Maybe IType)]
-  , ipManifolds  :: [IStmt]
-  , ipDispatch   :: [(Int, MDoc, Maybe HeadManifoldForm)]
+  { ipSources :: [MDoc]
+  , ipManifolds :: [MDoc]
+  , ipLocalDispatch :: [DispatchEntry]
+  , ipRemoteDispatch :: [DispatchEntry]
   }
 
-data IStructDef = IStructDef
-  { isdName :: MDoc
-  , isdTemplateParams :: [MDoc]
-  , isdFields :: [(Key, IType)]
-  , isdSerializer :: Maybe IStmt
-  , isdDeserializer :: Maybe IStmt
+-- | Build an IProgram from pre-rendered sources and manifolds (pure, for Python/R).
+buildProgram :: [MDoc] -> [MDoc] -> [SerialManifold] -> IProgram
+buildProgram sources manifolds es = IProgram
+  { ipSources = sources
+  , ipManifolds = manifolds
+  , ipLocalDispatch = extractLocalDispatch es
+  , ipRemoteDispatch = extractRemoteDispatch es
   }
+
+-- | Build an IProgram monadically (for C++ where translateSegment runs in a monad).
+buildProgramM :: (Monad m) => [MDoc] -> [SerialManifold] -> (SerialManifold -> m MDoc) -> m IProgram
+buildProgramM sources es translateSeg = do
+  manifolds <- mapM translateSeg es
+  return $ buildProgram sources manifolds es
 
 -- | Per-language configuration for lowering
 data LowerConfig m = LowerConfig

@@ -15,7 +15,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Printer.Cpp
   , printStmts
     -- * Pool-level rendering
   , printDispatch
-  , printPool
+  , printProgram
     -- * Struct/serializer rendering
   , printStructTypedef
   , printSerializer
@@ -122,17 +122,17 @@ uint8_t* remote_dispatch(uint32_t mid, const uint8_t** args){
         <> tupled ["args[" <> pretty j <> "]" | j <- take n ([0 ..] :: [Int])]
         <> ";"
 
--- | Assemble a complete C++ pool file from its sections.
-printPool :: [MDoc] -> [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
-printPool includes serialization signatures manifolds dispatch =
+-- | Assemble a complete C++ pool file from an IProgram and C++-specific extras.
+printProgram :: [MDoc] -> [MDoc] -> IProgram -> MDoc
+printProgram serialization signatures prog =
   format
     (DF.embededFileText (DF.poolTemplate CppLang))
     "// <<<BREAK>>>"
-    [ vsep includes
+    [ vsep (ipSources prog)
     , vsep serialization
     , vsep signatures
-    , vsep manifolds
-    , dispatch
+    , vsep (ipManifolds prog)
+    , printDispatch (ipLocalDispatch prog) (ipRemoteDispatch prog)
     ]
 
 printTemplateHeader :: [MDoc] -> MDoc
