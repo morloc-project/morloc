@@ -36,13 +36,11 @@ prettyFoldManifold =
   where
     makeSerialManifold :: (Monad m) => SerialManifold -> SerialManifold_ PoolDocs -> m PoolDocs
     makeSerialManifold _ (SerialManifold_ m _ form headForm x) =
-      return $
-        translateManifold (makeFunction "SerialManifold") makeLambda m form (Just headForm) x
+      return $ pseudoManifold (makeFunction "SerialManifold") makeLambda m form (Just headForm) x
 
     makeNativeManifold :: (Monad m) => NativeManifold -> NativeManifold_ PoolDocs -> m PoolDocs
     makeNativeManifold _ (NativeManifold_ m _ form x) =
-      return $
-        translateManifold (makeFunction "NativeManifold") makeLambda m form Nothing x
+      return $ pseudoManifold (makeFunction "NativeManifold") makeLambda m form Nothing x
 
     makeSerialExpr ::
       (Monad m) => SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs
@@ -140,6 +138,34 @@ prettyFoldManifold =
     argName :: Arg TypeM -> MDoc
     argName (Arg i (Native _)) = bndNamerN i
     argName (Arg i _) = bndNamerS i
+
+pseudoManifold ::
+  (HasTypeM t) =>
+  (MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> MDoc) ->
+  (MDoc -> [MDoc] -> [MDoc] -> MDoc) ->
+  Int ->
+  ManifoldForm (Or TypeS TypeF) t ->
+  Maybe HeadManifoldForm ->
+  PoolDocs ->
+  PoolDocs
+pseudoManifold makeFunc makeLam m form headForm (PoolDocs completeManifolds body priorLines priorExprs) =
+  let args = typeMofForm form
+      mname = manNamer m
+      newManifold = makeFunc mname args priorLines body headForm
+      call = case form of
+        (ManifoldPass _) -> mname
+        (ManifoldFull rs) -> mname <> tupled (map argNamer (typeMofRs rs))
+        (ManifoldPart rs vs) ->
+          makeLam
+            mname
+            (map argNamer (typeMofRs rs))
+            [argNamer (Arg i (typeMof t)) | Arg i t <- vs]
+   in PoolDocs
+        { poolCompleteManifolds = newManifold : completeManifolds
+        , poolExpr = call
+        , poolPriorLines = []
+        , poolPriorExprs = priorExprs
+        }
 
 prettyThing :: (p -> MI.Identity PoolDocs) -> p -> Doc ()
 prettyThing f a =

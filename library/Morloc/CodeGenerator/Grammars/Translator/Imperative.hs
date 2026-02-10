@@ -31,14 +31,20 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , lowerSerialExpr
   , lowerNativeExpr
 
+    -- * Manifold lowering (Stage 3)
+  , lowerSerialManifold
+  , lowerNativeManifold
+  , defaultFoldRules
+
     -- * Full lowering config
   , LowerConfig (..)
   ) where
 
 import Data.Scientific (Scientific)
 import Data.Text (Text)
-import Morloc.CodeGenerator.Grammars.Common (PoolDocs(..), mergePoolDocs, helperNamer, svarNamer, nvarNamer, argNamer, provideClosure)
+import Morloc.CodeGenerator.Grammars.Common (PoolDocs(..), mergePoolDocs, helperNamer, svarNamer, nvarNamer, argNamer, manNamer, provideClosure)
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Grammars.Translator.Syntax (genericMakeSerialArg, genericMakeNativeArg)
 import Morloc.CodeGenerator.Serial (isSerializable, serialAstToMsgpackSchema)
 import Morloc.Data.Doc
 
@@ -144,6 +150,13 @@ data LowerConfig m = LowerConfig
   , lcReturn :: MDoc -> MDoc
   , lcSerialize :: MDoc -> SerialAST -> m PoolDocs
   , lcDeserialize :: TypeF -> MDoc -> SerialAST -> m (MDoc, [MDoc])
+    -- Stage 3: manifold lowering fields
+  , lcMakeFunction :: MDoc -> [Arg TypeM] -> TypeM -> [MDoc] -> MDoc
+                   -> Maybe HeadManifoldForm -> m (Maybe MDoc)
+    -- ^ name, all args, manifold type, priorLines, body, headForm
+    -- Returns Nothing if dedup'd (C++), Just funcDef otherwise
+  , lcMakeLambda :: MDoc -> [MDoc] -> [MDoc] -> MDoc
+    -- ^ name, contextArgs, boundArgs → partial application expression
   }
 
 -- | Expand serialization into IR statements.
@@ -332,3 +345,67 @@ lowerNativeExpr cfg _ (RealN_ _ v) = return $ defaultValue {poolExpr = lcPrintEx
 lowerNativeExpr cfg _ (IntN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IIntLit v)}
 lowerNativeExpr cfg _ (StrN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit v)}
 lowerNativeExpr cfg _ (NullN_ _) = return $ defaultValue {poolExpr = lcPrintExpr cfg INullLit}
+
+-- | Lower a serial manifold to PoolDocs.
+-- Replaces translateManifold from Common.hs for serial manifolds.
+lowerSerialManifold ::
+  (Monad m) =>
+  LowerConfig m ->
+  SerialManifold ->
+  SerialManifold_ PoolDocs ->
+  m PoolDocs
+lowerSerialManifold cfg sm (SerialManifold_ m _ form headForm e) =
+  lowerManifold cfg m form (Just headForm) (typeMof sm) e
+
+-- | Lower a native manifold to PoolDocs.
+-- Replaces translateManifold from Common.hs for native manifolds.
+lowerNativeManifold ::
+  (Monad m) =>
+  LowerConfig m ->
+  NativeManifold ->
+  NativeManifold_ PoolDocs ->
+  m PoolDocs
+lowerNativeManifold cfg nm (NativeManifold_ m _ form e) =
+  lowerManifold cfg m form Nothing (typeMof nm) e
+
+lowerManifold ::
+  (Monad m, HasTypeM t) =>
+  LowerConfig m ->
+  Int ->
+  ManifoldForm (Or TypeS TypeF) t ->
+  Maybe HeadManifoldForm ->
+  TypeM ->
+  PoolDocs ->
+  m PoolDocs
+lowerManifold cfg m form headForm manifoldType (PoolDocs completeManifolds body priorLines priorExprs) = do
+  let args = typeMofForm form
+      mname = manNamer m
+  maybeNewManifold <- lcMakeFunction cfg mname args manifoldType priorLines body headForm
+  let call = case form of
+        (ManifoldPass _) -> mname
+        (ManifoldFull rs) -> mname <> tupled (map argNamer (typeMofRs rs))
+        (ManifoldPart rs vs) ->
+          lcMakeLambda cfg
+            mname
+            (map argNamer (typeMofRs rs))
+            [argNamer (Arg i (typeMof t)) | Arg i t <- vs]
+  return $ PoolDocs
+    { poolCompleteManifolds = completeManifolds <> maybeToList maybeNewManifold
+    , poolExpr = call
+    , poolPriorLines = []
+    , poolPriorExprs = priorExprs
+    }
+
+-- | Bundle all six fold callbacks into a single FoldWithManifoldM record.
+defaultFoldRules ::
+  (Monad m) =>
+  LowerConfig m ->
+  FoldWithManifoldM m PoolDocs PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs)
+defaultFoldRules cfg = FoldWithManifoldM
+  { opFoldWithSerialManifoldM = lowerSerialManifold cfg
+  , opFoldWithNativeManifoldM = lowerNativeManifold cfg
+  , opFoldWithSerialExprM = lowerSerialExpr cfg
+  , opFoldWithNativeExprM = lowerNativeExpr cfg
+  , opFoldWithSerialArgM = genericMakeSerialArg
+  , opFoldWithNativeArgM = genericMakeNativeArg
+  }

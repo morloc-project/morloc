@@ -17,10 +17,10 @@ module Morloc.CodeGenerator.Grammars.Translator.R
 
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), expandSerialize, expandDeserialize, lowerSerialExpr, lowerNativeExpr)
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), expandSerialize, expandDeserialize, defaultFoldRules)
 import qualified Morloc.CodeGenerator.Grammars.Translator.Printer.R as RP
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
-import Morloc.CodeGenerator.Grammars.Translator.Syntax (IndexM, genericMakeSerialArg, genericMakeNativeArg)
+import Morloc.CodeGenerator.Grammars.Translator.Syntax (IndexM)
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
@@ -123,6 +123,14 @@ rLowerConfig = LowerConfig
       (serialized, assignments) <- serialize v s
       return $ defaultValue {poolExpr = serialized, poolPriorLines = assignments}
   , lcDeserialize = \_ v s -> deserialize v s
+  , lcMakeFunction = \mname args _ priorLines body headForm ->
+      let makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
+          makeExt _ = ""
+          def = mname <> makeExt headForm <+> "<-" <+> "function" <> tupled (map argNamer args)
+       in return . Just $ block 4 def (vsep $ priorLines <> [body])
+  , lcMakeLambda = \mname contextArgs boundArgs ->
+      let functionCall = mname <> tupled (contextArgs <> boundArgs)
+       in "function" <+> tupled boundArgs <> "{" <> functionCall <> "}"
   }
   where
     makeLet :: (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
@@ -145,34 +153,8 @@ makeSocketPath socketFileBasename = [idoc|paste0(global_state$tmpdir, "/", #{dqu
 
 translateSegment :: SerialManifold -> MDoc
 translateSegment m0 =
-  let e = runIndex 0 (foldWithSerialManifoldM fm m0)
+  let e = runIndex 0 (foldWithSerialManifoldM (defaultFoldRules rLowerConfig) m0)
    in vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
-  where
-    fm =
-      FoldWithManifoldM
-        { opFoldWithSerialManifoldM = \_ (SerialManifold_ m _ form headForm x) ->
-            return $ translateManifold makeFunction makeLambda m form (Just headForm) x
-        , opFoldWithNativeManifoldM = \_ (NativeManifold_ m _ form x) ->
-            return $ translateManifold makeFunction makeLambda m form Nothing x
-        , opFoldWithSerialExprM = lowerSerialExpr rLowerConfig
-        , opFoldWithNativeExprM = lowerNativeExpr rLowerConfig
-        , opFoldWithSerialArgM = genericMakeSerialArg
-        , opFoldWithNativeArgM = genericMakeNativeArg
-        }
-
-    makeFunction :: MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> MDoc
-    makeFunction mname args priorLines body headForm =
-      block 4 def (vsep $ priorLines <> [body])
-      where
-        makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
-        makeExt _ = ""
-
-        def = mname <> makeExt headForm <+> "<-" <+> "function" <> tupled (map argNamer args)
-
-    makeLambda :: MDoc -> [MDoc] -> [MDoc] -> MDoc
-    makeLambda mname contextArgs boundArgs =
-      let functionCall = mname <> tupled (contextArgs <> boundArgs)
-       in "function" <+> tupled boundArgs <> "{" <> functionCall <> "}"
 
 evaluatePattern :: TypeF -> Pattern -> [MDoc] -> MDoc
 evaluatePattern _ (PatternText firstStr fragments) xs =

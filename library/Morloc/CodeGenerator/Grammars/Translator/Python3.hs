@@ -19,10 +19,10 @@ module Morloc.CodeGenerator.Grammars.Translator.Python3
 import qualified Data.Char as DC
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), expandSerialize, expandDeserialize, lowerSerialExpr, lowerNativeExpr)
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), expandSerialize, expandDeserialize, defaultFoldRules)
 import qualified Morloc.CodeGenerator.Grammars.Translator.Printer.Python3 as PP
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
-import Morloc.CodeGenerator.Grammars.Translator.Syntax (IndexM, genericMakeSerialArg, genericMakeNativeArg)
+import Morloc.CodeGenerator.Grammars.Translator.Syntax (IndexM)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc
@@ -166,6 +166,21 @@ pythonLowerConfig makeSrcName = LowerConfig
       (serialized, assignments) <- serialize makeSrcName v s
       return $ defaultValue {poolExpr = serialized, poolPriorLines = assignments}
   , lcDeserialize = \_ v s -> deserialize makeSrcName v s
+  , lcMakeFunction = \mname args _ priorLines body headForm ->
+      let makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
+          makeExt _ = ""
+          def = "def" <+> mname <> makeExt headForm <> tupled (map argNamer args) <> ":"
+          tryCatch [] = ""
+          tryCatch xs =
+            let tryBlock = nest 4 (vsep ("try:" : xs))
+                exceptBlock =
+                  nest 4 ( vsep
+                    [ "except Exception as e:"
+                    , [idoc|raise RuntimeError(f"Error (Python daemon in #{mname}):\n{e!s}")|]
+                    ])
+             in vsep [tryBlock, exceptBlock]
+       in return . Just $ nest 4 (vsep [def, tryCatch priorLines, body])
+  , lcMakeLambda = \mname contextArgs _ -> "functools.partial" <> tupled (mname : contextArgs)
   }
   where
     makeLet :: (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
@@ -189,46 +204,8 @@ makeSocketPath socketFileBasename = [idoc|os.path.join(global_state["tmpdir"], #
 translateSegment :: (Source -> MDoc) -> SerialManifold -> MDoc
 translateSegment makeSrcName m0 =
   let cfg = pythonLowerConfig makeSrcName
-      e = runIndex 0 (foldWithSerialManifoldM (fm cfg) m0)
+      e = runIndex 0 (foldWithSerialManifoldM (defaultFoldRules cfg) m0)
    in vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
-  where
-    fm cfg =
-      FoldWithManifoldM
-        { opFoldWithSerialManifoldM = \_ (SerialManifold_ m _ form headForm x) ->
-            return $ translateManifold makeFunction makeLambda m form (Just headForm) x
-        , opFoldWithNativeManifoldM = \_ (NativeManifold_ m _ form x) ->
-            return $ translateManifold makeFunction makeLambda m form Nothing x
-        , opFoldWithSerialExprM = lowerSerialExpr cfg
-        , opFoldWithNativeExprM = lowerNativeExpr cfg
-        , opFoldWithSerialArgM = genericMakeSerialArg
-        , opFoldWithNativeArgM = genericMakeNativeArg
-        }
-
-    makeFunction :: MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> MDoc
-    makeFunction mname args priorLines body headForm =
-      nest 4 (vsep [def, tryCatch priorLines, body])
-      where
-        makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
-        makeExt _ = ""
-
-        def = "def" <+> mname <> makeExt headForm <> tupled (map argNamer args) <> ":"
-
-        tryCatch :: [MDoc] -> MDoc
-        tryCatch [] = "" where
-        tryCatch xs = vsep [tryBlock, exceptBlock]
-          where
-            tryBlock = nest 4 (vsep ("try:" : xs))
-            exceptBlock =
-              nest
-                4
-                ( vsep
-                    [ "except Exception as e:"
-                    , [idoc|raise RuntimeError(f"Error (Python daemon in #{mname}):\n{e!s}")|]
-                    ]
-                )
-
-    makeLambda :: MDoc -> [MDoc] -> [MDoc] -> MDoc
-    makeLambda mname contextArgs _ = "functools.partial" <> tupled (mname : contextArgs)
 
 evaluatePattern :: TypeF -> Pattern -> [MDoc] -> MDoc
 evaluatePattern _ (PatternText firstStr fragments) xs =

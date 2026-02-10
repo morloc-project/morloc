@@ -24,9 +24,8 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), IType(..), expandSerialize, expandDeserialize, lowerSerialExpr, lowerNativeExpr)
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), IType(..), expandSerialize, expandDeserialize, defaultFoldRules)
 import qualified Morloc.CodeGenerator.Grammars.Translator.Printer.Cpp as CP
-import Morloc.CodeGenerator.Grammars.Translator.Syntax (genericMakeSerialArg, genericMakeNativeArg)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
@@ -349,6 +348,35 @@ PROPAGATE_ERROR(errmsg)|]
   , lcDeserialize = \t v s -> do
       typestr <- cppTypeOf t
       deserialize v typestr s
+  , lcMakeFunction = \mname args manifoldType priorLines body headForm -> do
+      callIndex <- CMS.gets translatorCurrentManifold
+      state <- CMS.get
+      let alreadyDone = case headForm of
+            (Just HeadManifoldFormRemoteWorker) -> Set.member callIndex (translatorRemoteManifoldSet state)
+            _ -> Set.member callIndex (translatorLocalManifoldSet state)
+      if alreadyDone then return Nothing
+      else do
+        case headForm of
+          (Just HeadManifoldFormRemoteWorker) ->
+            CMS.modify (\s -> s {translatorRemoteManifoldSet = Set.insert callIndex (translatorRemoteManifoldSet s)})
+          _ ->
+            CMS.modify (\s -> s {translatorLocalManifoldSet = Set.insert callIndex (translatorLocalManifoldSet s)})
+        returnTypeStr <- returnType manifoldType
+        typedArgs <- mapM (\r@(Arg _ t) -> cppArgOf (chooseCallSemantics t) r) args
+        let fullName = mname <> mnameExt headForm
+            decl = returnTypeStr <+> fullName <> tupled typedArgs
+            tryBody = block 4 "try" (vsep $ priorLines <> [body])
+            throwStatement =
+              vsep
+                [ [idoc|std::string error_message = "Error raised in C++ pool by #{mname}:\n" + std::string(e.what());|]
+                , [idoc|throw std::runtime_error(error_message);|]
+                ]
+            catchBody = block 4 "catch (const std::exception& e)" throwStatement
+            tryCatchBody = tryBody <+> catchBody
+        return . Just . block 4 decl . vsep $ [tryCatchBody]
+  , lcMakeLambda = \mname contextArgs boundArgs ->
+      let vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
+       in [idoc|std::bind(#{cat (punctuate "," (mname : (contextArgs ++ vs')))})|]
   }
   where
     -- For serialization, records become tuples (that's what _put_value/toAnything expects)
@@ -374,6 +402,14 @@ PROPAGATE_ERROR(errmsg)|]
             , poolPriorLines = []
             , poolPriorExprs = pes1 <> pes2
             }
+
+    mnameExt :: Maybe HeadManifoldForm -> MDoc
+    mnameExt (Just HeadManifoldFormRemoteWorker) = "_remote"
+    mnameExt _ = ""
+
+    returnType :: TypeM -> CppTranslator MDoc
+    returnType (Function _ t) = cppTypeOf t
+    returnType t = cppTypeOf t
 
 -- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
 -- Include statements in C can be either wrapped in angle brackets (e.g.,
@@ -433,29 +469,13 @@ recordToCppTuple ts = do
 translateSegment :: SerialManifold -> CppTranslator MDoc
 translateSegment m0 = do
   resetCounter
-  e <- surroundFoldSerialManifoldM manifoldIndexer foldRules m0
+  e <- surroundFoldSerialManifoldM manifoldIndexer (defaultFoldRules cppLowerConfig) m0
   return $ vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
   where
-    foldRules =
-      FoldWithManifoldM
-        { opFoldWithSerialManifoldM = makeSerialManifold
-        , opFoldWithNativeManifoldM = makeNativeManifold
-        , opFoldWithSerialExprM = lowerSerialExpr cppLowerConfig
-        , opFoldWithNativeExprM = lowerNativeExpr cppLowerConfig
-        , opFoldWithSerialArgM = genericMakeSerialArg
-        , opFoldWithNativeArgM = genericMakeNativeArg
-        }
-
     manifoldIndexer =
       makeManifoldIndexer
         (CMS.gets translatorCurrentManifold)
         (\i -> CMS.modify (\s -> s {translatorCurrentManifold = i}))
-
-    makeSerialManifold :: SerialManifold -> SerialManifold_ PoolDocs -> CppTranslator PoolDocs
-    makeSerialManifold sm (SerialManifold_ i _ form headForm e) = makeManifold i form (Just headForm) (typeMof sm) e
-
-    makeNativeManifold :: NativeManifold -> NativeManifold_ PoolDocs -> CppTranslator PoolDocs
-    makeNativeManifold nm (NativeManifold_ i _ form e) = makeManifold i form Nothing (typeMof nm) e
 
 -- handle string interpolation
 evaluatePattern :: CppTranslatorState -> TypeF -> Pattern -> [MDoc] -> MDoc
@@ -487,93 +507,6 @@ writeSelector :: MDoc -> [Either Int Text] -> MDoc
 writeSelector d [] = d
 writeSelector d (Right k : rs) = writeSelector (d <> "." <> pretty k) rs
 writeSelector d (Left i : rs) = writeSelector ("std::get<" <> pretty i <> ">" <> parens d) rs
-
-makeManifold ::
-  (HasTypeM t) =>
-  -- | The index of the manifold that is being created
-  Int ->
-  ManifoldForm (Or TypeS TypeF) t ->
-  Maybe HeadManifoldForm ->
-  -- | The type of the manifold (usually a function, serialized terms are of general type "Str" and C++ type "std::string"
-  TypeM ->
-  -- | Generated content for the manifold body
-  PoolDocs ->
-  CppTranslator PoolDocs
-makeManifold callIndex form headForm manifoldType e = do
-  state <- CMS.get
-  let alreadyDone = manifoldHasBeenGenerated headForm state
-  completeManifold <- case alreadyDone of
-    True -> return $ Nothing
-    False -> Just <$> makeManifoldBody (poolExpr e)
-  call <- makeManifoldCall form
-  return $
-    e
-      { poolExpr = call
-      , poolCompleteManifolds = poolCompleteManifolds e <> maybeToList completeManifold
-      , poolPriorLines = poolPriorLines e
-      }
-  where
-    manifoldHasBeenGenerated :: Maybe HeadManifoldForm -> CppTranslatorState -> Bool
-    manifoldHasBeenGenerated (Just HeadManifoldFormRemoteWorker) state = Set.member callIndex (translatorRemoteManifoldSet state)
-    manifoldHasBeenGenerated _ state = Set.member callIndex (translatorLocalManifoldSet state)
-
-    updateCounts :: Maybe HeadManifoldForm -> CppTranslator ()
-    updateCounts (Just HeadManifoldFormRemoteWorker) = do
-      state <- CMS.get
-      CMS.put $
-        state {translatorRemoteManifoldSet = Set.insert callIndex (translatorRemoteManifoldSet state)}
-    updateCounts _ = do
-      state <- CMS.get
-      CMS.put $
-        state {translatorLocalManifoldSet = Set.insert callIndex (translatorLocalManifoldSet state)}
-
-    mnameExt (Just HeadManifoldFormRemoteWorker) = "_remote"
-    mnameExt _ = ""
-
-    mname = manNamer callIndex <> mnameExt headForm
-
-    makeManifoldCall :: ManifoldForm (Or TypeS TypeF) t -> CppTranslator MDoc
-    makeManifoldCall (ManifoldFull rs) = do
-      let args = map argNamer (typeMofRs rs)
-      return $ mname <> tupled args
-    makeManifoldCall (ManifoldPass _) = return mname
-    makeManifoldCall (ManifoldPart rs vs) = do
-      let vs' =
-            take
-              (length vs)
-              (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
-          rs' = map argNamer (typeMofRs rs)
-          bindStr = stdBind $ mname : (rs' ++ vs')
-      return bindStr
-
-    makeManifoldBody :: MDoc -> CppTranslator MDoc
-    makeManifoldBody body = do
-      updateCounts headForm
-      returnTypeStr <- returnType manifoldType
-      let argList = typeMofForm form
-      args <- mapM (\r@(Arg _ t) -> cppArgOf (chooseCallSemantics t) r) argList
-      let decl = returnTypeStr <+> mname <> tupled args
-      let tryBody = block 4 "try" body
-          throwStatement =
-            vsep
-              [ [idoc|std::string error_message = "Error raised in C++ pool by m#{pretty callIndex}:\n" + std::string(e.what());|]
-              , [idoc|throw std::runtime_error(error_message);|]
-              ]
-          catchBody = block 4 "catch (const std::exception& e)" throwStatement
-          tryCatchBody = tryBody <+> catchBody
-      return . block 4 decl . vsep $
-        [ {- can add diagnostic statements here -}
-          tryCatchBody
-        ]
-
-    returnType :: TypeM -> CppTranslator MDoc
-    returnType (Function _ t) = cppTypeOf t
-    returnType t = cppTypeOf t
-
-stdBind :: [MDoc] -> MDoc
-stdBind xs = [idoc|std::bind(#{args})|]
-  where
-    args = cat (punctuate "," xs)
 
 makeDispatch :: [SerialManifold] -> MDoc
 makeDispatch ms =
