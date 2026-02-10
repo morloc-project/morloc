@@ -34,7 +34,6 @@ import Morloc.CodeGenerator.Serial
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
-import Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
@@ -104,32 +103,11 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
           Nothing -> error $ "Record missing from recmap: " <> show t <> " from map: " <> show recmap
       f (NamF _ (FV _ s) ps _) = do
         ps' <- mapM f ps
-        return $ pretty s <> recordTemplate ps'
+        return $ pretty s <> CP.printRecordTemplate ps'
 
   cppArgOf s (Arg i t) = do
     t' <- cppTypeOf (typeFof t)
     return $ setCallSemantics s t' <+> nvarNamer i
-
-{- | @RecEntry@ stores the common name, keys, and types of records that are not
-imported from C++ source. These records are generated as structs in the C++
-pool. @unifyRecords@ takes all such records and "unifies" ones with the same
-name and keys. The unified records may have different types, but they will
-all be instances of the same generic struct. That is, any fields that differ
-between instances will be made generic.
--}
-data RecEntry = RecEntry
-  { recName :: MDoc
-  -- ^ the automatically generated name for this anonymous type
-  , recFields ::
-      [ ( Key -- The field key
-        , Maybe TypeF -- The field type if not generic
-        )
-      ]
-  }
-  deriving (Show)
-
--- | @RecMap@ is used to lookup up the struct name shared by all records that are not imported from C++ source.
-type RecMap = [((FVar, [Key]), RecEntry)]
 
 data CppTranslatorState = CppTranslatorState
   { translatorCounter :: Int
@@ -205,7 +183,7 @@ makeCppCode srcs es univeralScopeMap scopeMap = do
   -- write include statements for sources
   let includeDocs = map translateSource (unique . mapMaybe srcPath $ srcs)
 
-  let dispatch = makeDispatch es
+  let dispatch = CP.printDispatch (extractLocalDispatch es) (extractRemoteDispatch es)
 
   signatures <- concat <$> mapM makeSignature es
 
@@ -216,7 +194,7 @@ makeCppCode srcs es univeralScopeMap scopeMap = do
   mDocs <- mapM translateSegment es
 
   -- create and return complete pool script
-  return $ makeMain includeDocs signatures serializationCode mDocs dispatch
+  return $ CP.printPool includeDocs serializationCode signatures mDocs dispatch
 
 metaTypedefs ::
   GMap Int MVar (Map.Map Lang Scope) ->
@@ -508,121 +486,8 @@ writeSelector d [] = d
 writeSelector d (Right k : rs) = writeSelector (d <> "." <> pretty k) rs
 writeSelector d (Left i : rs) = writeSelector ("std::get<" <> pretty i <> ">" <> parens d) rs
 
-makeDispatch :: [SerialManifold] -> MDoc
-makeDispatch ms =
-  [idoc|uint8_t* local_dispatch(uint32_t mid, const uint8_t** args){
-    switch(mid){
-        #{align (vsep localCases)}
-        default:
-            std::ostringstream oss;
-            oss << "Invalid local manifold id: " << mid;
-            throw std::runtime_error(oss.str());
-    }
-}
-
-uint8_t* remote_dispatch(uint32_t mid, const uint8_t** args){
-    switch(mid){
-        #{align (vsep remoteCases)}
-        default:
-            std::ostringstream oss;
-            oss << "Invalid remote manifold id: " << mid;
-            throw std::runtime_error(oss.str());
-    }
-}|]
-  where
-    localCases = catMaybes $ map localCase ms
-
-    localCase :: SerialManifold -> Maybe MDoc
-    localCase (SerialManifold _ _ _ HeadManifoldFormRemoteWorker _) = Nothing
-    localCase (SerialManifold i _ form _ _) = Just $ makeCase "" (i, getSize form)
-
-    getSize :: ManifoldForm (Or TypeS TypeF) TypeS -> Int
-    getSize = sum . abilist (\_ _ -> 1) (\_ _ -> 1)
-
-    remoteCases :: [MDoc]
-    remoteCases = map (makeCase "_remote") . unique . concat $ map getRemotes ms
-
-    makeCase :: MDoc -> (Int, Int) -> MDoc
-    makeCase suffix (i, n) =
-      "case" <+> pretty i
-        <> ":"
-          <+> "return"
-          <+> manNamer i
-        <> suffix
-        <> tupled ["args[" <> pretty j <> "]" | j <- take n ([0 ..] :: [Int])]
-        <> ";"
-
-    getRemotes :: SerialManifold -> [(Int, Int)]
-    getRemotes = MM.runIdentity . foldSerialManifoldM (defaultValue {opSerialExprM = getRemoteSE})
-
-    getRemoteSE ::
-      SerialExpr_ [(Int, Int)] [(Int, Int)] [(Int, Int)] [(Int, Int)] [(Int, Int)] ->
-      MM.Identity [(Int, Int)]
-    getRemoteSE (AppPoolS_ _ (PoolCall i _ (RemoteCall _) _) xss) = return $ (i, length xss) : concat xss
-    getRemoteSE x = return $ foldlSE mappend mempty x
-
 typeParams :: [(Maybe TypeF, TypeF)] -> CppTranslator MDoc
-typeParams ts = recordTemplate <$> mapM cppTypeOf [t | (Nothing, t) <- ts]
-
-collectRecords :: SerialManifold -> [(FVar, Int, [(Key, TypeF)])]
-collectRecords e0@(SerialManifold i0 _ _ _ _) =
-  unique $ CMS.evalState (surroundFoldSerialManifoldM manifoldIndexer fm e0) i0
-  where
-    fm = defaultValue {opFoldWithNativeExprM = nativeExpr, opFoldWithSerialExprM = serialExpr}
-
-    manifoldIndexer = makeManifoldIndexer CMS.get CMS.put
-
-    nativeExpr _ (DeserializeN_ t s xs) = do
-      manifoldIndex <- CMS.get
-      let tRecs = seekRecs manifoldIndex t
-          sRecs = seekRecs manifoldIndex (serialAstToType s)
-      return $ xs <> tRecs <> sRecs
-    nativeExpr efull e = do
-      manifoldIndex <- CMS.get
-      let newRecs = seekRecs manifoldIndex (typeFof efull)
-      return $ foldlNE (<>) newRecs e
-
-    serialExpr _ (SerializeS_ s xs) = do
-      manifoldIndex <- CMS.get
-      return $ seekRecs manifoldIndex (serialAstToType s) <> xs
-    serialExpr _ e = return $ foldlSE (<>) [] e
-
-    seekRecs :: Int -> TypeF -> [(FVar, Int, [(Key, TypeF)])]
-    seekRecs m (NamF _ v@(FV _ (CV "struct")) _ rs) = [(v, m, rs)] <> concatMap (seekRecs m . snd) rs
-    seekRecs m (NamF _ _ _ rs) = concatMap (seekRecs m . snd) rs
-    seekRecs m (FunF ts t) = concatMap (seekRecs m) (t : ts)
-    seekRecs m (AppF t ts) = concatMap (seekRecs m) (t : ts)
-    seekRecs _ (UnkF _) = []
-    seekRecs _ (VarF _) = []
-
--- unify records with the same name/keys
-unifyRecords ::
-  [ ( FVar -- The "v" in (NamP _ v@(PV _ _ "struct") _ rs)
-    , Int -- general index
-    , [(Key, TypeF)] -- key/type terms for this record
-    )
-  ] ->
-  RecMap
-unifyRecords xs =
-  zipWith (\i ((v, ks), es) -> ((v, ks), RecEntry (structName i v) es)) [1 ..]
-    . map (\((v, ks), rss) -> ((v, ks), map unifyField (transpose (map snd rss))))
-    -- associate unique pairs of record name and keys with their edge types
-    . groupSort
-    . unique
-    $ [((v, map fst es), (m, es)) | (v, m, es) <- xs]
-
-structName :: Int -> FVar -> MDoc
-structName i (FV v (CV "struct")) = "mlc_" <> pretty v <> "_" <> pretty i
-structName _ (FV _ v) = pretty v
-
-unifyField :: [(Key, TypeF)] -> (Key, Maybe TypeF)
-unifyField [] = error "Empty field"
-unifyField rs@((v, _) : _)
-  | not (all ((== v) . fst) rs) =
-      error $ "Bad record - unequal fields: " <> show (unique rs)
-  | otherwise = case unique (map snd rs) of
-      [t] -> (v, Just t)
-      _ -> (v, Nothing)
+typeParams ts = CP.printRecordTemplate <$> mapM cppTypeOf [t | (Nothing, t) <- ts]
 
 generateAnonymousStructs :: CppTranslator ([MDoc], [MDoc])
 generateAnonymousStructs = do
@@ -639,7 +504,7 @@ generateAnonymousStructs = do
 
       let params = [t | (t, (_, Nothing)) <- rs']
           rname = recName rec
-          rtype = rname <> recordTemplate [v | (v, (_, Nothing)) <- rs']
+          rtype = rname <> CP.printRecordTemplate [v | (v, (_, Nothing)) <- rs']
 
       let fieldNames = [k | (_, (k, _)) <- rs']
 
@@ -647,9 +512,9 @@ generateAnonymousStructs = do
 
       let fields = [(pretty k, v) | (k, v) <- zip fieldNames fieldTypes]
 
-      let structDecl = structTypedefTemplate params rname fields
-          serializer = serializerTemplate params rtype fields
-          deserializer = deserializerTemplate False params rtype fields
+      let structDecl = CP.printStructTypedef params rname fields
+          serializer = CP.printSerializer params rtype fields
+          deserializer = CP.printDeserializer False params rtype fields
 
       return ([structDecl], [serializer, deserializer])
 
@@ -700,11 +565,11 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     makeSerial scope _ (ps, NamU r (TV v) _ rs, _, _) = do
       params <- mapM (either (\p -> return $ "T" <> pretty p) (\_ -> return "XXX_FIXME")) ps
       let templateTerms = ["T" <> pretty p | Left p <- ps]
-          rtype = pretty v <> recordTemplate templateTerms
+          rtype = pretty v <> CP.printRecordTemplate templateTerms
           rs' = map (second (evaluateTypeU scope)) rs
           fields = [(pretty k, showDefType ps (typeOf t)) | (k, t) <- rs']
-          serializer = serializerTemplate params rtype fields
-          deserializer = deserializerTemplate (r == NamObject) params rtype fields
+          serializer = CP.printSerializer params rtype fields
+          deserializer = CP.printDeserializer (r == NamObject) params rtype fields
       return $ Just (serializer, deserializer)
     makeSerial _ _ _ = return Nothing
 
@@ -725,108 +590,3 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
     showDefType _ (AppT _ _) = error "AppT is only OK with VarT, for now"
 
-makeTemplateHeader :: [MDoc] -> MDoc
-makeTemplateHeader [] = ""
-makeTemplateHeader ts = "template" <+> encloseSep "<" ">" "," ["class" <+> t | t <- ts]
-
-recordTemplate :: [MDoc] -> MDoc
-recordTemplate [] = ""
-recordTemplate ts = encloseSep "<" ">" "," ts
-
--- Example
--- > template <class T>
--- > struct Person
--- > {
--- >     std::vector<std::string> name;
--- >     std::vector<T> info;
--- > };
-structTypedefTemplate ::
-  [MDoc] -> -- template parameters (e.g., ["T"])
-  MDoc -> -- the name of the structure (e.g., "Person")
-  [(MDoc, MDoc)] -> -- key and type for all fields
-  MDoc -- structure definition
-structTypedefTemplate params rname fields = vsep [template, struct]
-  where
-    template = makeTemplateHeader params
-    struct =
-      block
-        4
-        ("struct" <+> rname)
-        (vsep [t <+> k <> ";" | (k, t) <- fields])
-        <> ";"
-
-serializerTemplate ::
-  [MDoc] -> -- template parameters
-  MDoc -> -- type of thing being serialized
-  [(MDoc, MDoc)] -> -- key and type for all fields
-  MDoc -- output serializer function
-serializerTemplate params rtype fields =
-  [idoc|
-#{makeTemplateHeader params}
-void* toAnything(void* dest, void** cursor, const Schema* schema, const #{rtype}& obj)
-{
-    return toAnything(dest, cursor, schema, std::make_tuple#{arguments});
-}
-|]
-  where
-    arguments = tupled ["obj." <> key | (key, _) <- fields]
-
-deserializerTemplate ::
-  Bool -> -- build object with constructor -- TODO: isObj, bring this back
-
-  -- | template parameters
-  [MDoc] ->
-  -- | type of thing being deserialized
-  MDoc ->
-  -- | key and type for all fields
-  [(MDoc, MDoc)] ->
-  -- | output deserializer function
-  MDoc
-deserializerTemplate _ params rtype fields =
-  [idoc|
-#{makeTemplateHeader params}
-#{block 4 header body}
-
-#{makeTemplateHeader params}
-#{block 4 headerGetSize bodyGetSize}
-|]
-  where
-    header =
-      [idoc|#{rtype} fromAnything(const Schema* schema, const void * anything, #{rtype}* dummy = nullptr)|]
-    body =
-      vsep $
-        [[idoc|#{rtype} obj;|]]
-          <> zipWith assignFields [0 ..] fields
-          <> ["return obj;"]
-
-    assignFields :: Int -> (MDoc, MDoc) -> MDoc
-    assignFields idx (keyName, keyType) =
-      vsep
-        [ [idoc|#{keyType}* elemental_dumby_#{keyName} = nullptr;|]
-        , [idoc|obj.#{keyName} = fromAnything(schema->parameters[#{pretty idx}], (char*)anything + schema->offsets[#{pretty idx}], elemental_dumby_#{keyName});|]
-        ]
-
-    headerGetSize = [idoc|size_t get_shm_size(const Schema* schema, const #{rtype}& data)|]
-    bodyGetSize =
-      vsep $
-        ["size_t size = 0;"]
-          <> [getSize idx key | (idx, (key, _)) <- zip [0 ..] fields]
-          <> ["return size;"]
-
-    getSize :: Int -> MDoc -> MDoc
-    getSize idx key = [idoc|size += get_shm_size(schema->parameters[#{pretty idx}], data.#{key});|]
-
--- XXX: here need to add back the isObj handling, if is object, need to call
--- the constructor rather than directly assigning to fields
-
-makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
-makeMain includes signatures serialization manifolds dispatch =
-  format
-    (DF.embededFileText (DF.poolTemplate CppLang))
-    "// <<<BREAK>>>"
-    [ vsep includes
-    , vsep serialization
-    , vsep signatures
-    , vsep manifolds
-    , dispatch
-    ]

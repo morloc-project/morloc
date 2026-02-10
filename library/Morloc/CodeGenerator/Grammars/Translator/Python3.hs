@@ -26,10 +26,8 @@ import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
-import Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
 import Morloc.Monad (asks, gets, newIndex, runIndex)
-import qualified Morloc.Monad as MM
 import Morloc.Quasi
 import qualified System.FilePath as SF
 
@@ -58,9 +56,9 @@ translate srcs es = do
   let mDocs = map (translateSegment (qualifiedSrcName lib)) es
 
   -- make code for dispatching to manifolds
-  let dispatch = makeDispatch es
+  let dispatch = PP.printDispatch (extractLocalDispatch es) (extractRemoteDispatch es)
 
-  let code = makePool [opt, pretty lib] includeDocs mDocs dispatch
+  let code = PP.printPool [opt, pretty lib] includeDocs mDocs dispatch
   let exefile = ML.makeExecutablePoolName Python3Lang
 
   return $
@@ -223,39 +221,3 @@ writeBasicSelector :: Either Int Text -> MDoc
 writeBasicSelector (Right k) = "[" <> dquotes (pretty k) <> "]"
 writeBasicSelector (Left i) = "[" <> pretty i <> "]"
 
-makeDispatch :: [SerialManifold] -> MDoc
-makeDispatch ms = vsep [localDispatch, remoteDispatch]
-  where
-    localDispatch = align . vsep $ ["dispatch = {", indent 4 (vsep . catMaybes $ map entry ms), "}"]
-
-    entry :: SerialManifold -> Maybe MDoc
-    entry (SerialManifold _ _ _ HeadManifoldFormRemoteWorker _) = Nothing
-    entry (SerialManifold i _ _ _ _) = Just $ pretty i <> ":" <+> manNamer i <> ","
-
-    remoteDispatch = align . vsep $ ["remote_dispatch = {", indent 4 (vsep remotes), "}"]
-
-    remotes :: [MDoc]
-    remotes = map entryInt . unique . concat $ map getRemotes ms
-
-    entryInt :: Int -> MDoc
-    entryInt i = pretty i <> ":" <+> manNamer i <> "_remote" <> ","
-
-    getRemotes :: SerialManifold -> [Int]
-    getRemotes = MM.runIdentity . foldSerialManifoldM (defaultValue {opSerialExprM = getRemoteSE})
-
-    getRemoteSE :: SerialExpr_ [Int] [Int] [Int] [Int] [Int] -> MM.Identity [Int]
-    getRemoteSE (AppPoolS_ _ (PoolCall i _ (RemoteCall _) _) xss) = return $ i : concat xss
-    getRemoteSE x = return $ foldlSE mappend mempty x
-
-makePool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
-makePool libs includeDocs manifolds dispatch =
-  format
-    (DF.embededFileText (DF.poolTemplate Python3Lang))
-    "# <<<BREAK>>>"
-    [path, includeStatements includeDocs, vsep manifolds, dispatch]
-  where
-    path = [idoc|sys.path = #{list (map makePath libs)} + sys.path|]
-    makePath filename = [idoc|os.path.expanduser(#{dquotes(filename)})|]
-
-    includeStatements [] = ""
-    includeStatements _ = vsep ("import importlib" : includeDocs)

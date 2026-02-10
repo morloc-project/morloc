@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 {- |
 Module      : Morloc.CodeGenerator.Grammars.Translator.Printer.R
@@ -12,11 +13,14 @@ module Morloc.CodeGenerator.Grammars.Translator.Printer.R
   ( printExpr
   , printStmt
   , printStmts
+    -- * Pool-level rendering
+  , printPool
   ) where
 
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-import Morloc.CodeGenerator.Namespace (NamType(..), Key(..), MDoc)
+import Morloc.CodeGenerator.Namespace (MDoc, Lang(..))
 import Morloc.Data.Doc
+import Morloc.DataFiles as DF
 import Morloc.Quasi
 
 printExpr :: IExpr -> MDoc
@@ -61,3 +65,11 @@ printStmt (IFunDef _ _ _ _) = error "IFunDef not yet implemented for R printer"
 
 printStmts :: [IStmt] -> [MDoc]
 printStmts = map printStmt
+
+-- | Assemble a complete R pool file from its sections.
+printPool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc
+printPool sources dynlibs manifolds =
+  format
+    (DF.embededFileText (DF.poolTemplate RLang))
+    "# <<<BREAK>>>"
+    [vsep sources, vsep dynlibs, vsep manifolds]

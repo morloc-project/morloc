@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -21,16 +22,30 @@ module Morloc.CodeGenerator.Grammars.Common
   , manNamer
   , patternSetter
 
+    -- * Record collection/unification
+  , RecEntry (..)
+  , RecMap
+  , collectRecords
+  , unifyRecords
+  , structName
+
+    -- * Dispatch extraction
+  , DispatchEntry (..)
+  , extractLocalDispatch
+  , extractRemoteDispatch
+
     -- * Utilities
   , provideClosure
   , makeManifoldIndexer
   , renderPoolDocs
   ) where
 
+import qualified Control.Monad.State as CMS
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Serial (serialAstToType)
 import Morloc.Data.Doc
 import Morloc.Data.Text (Text)
-import Morloc.Monad (Index, newIndex, runIdentity, runIndex)
+import Morloc.Monad (Identity, Index, newIndex, runIdentity, runIndex)
 
 -- Stores pieces of code made while building a pool
 data PoolDocs = PoolDocs
@@ -321,4 +336,112 @@ maxIndex = (+ 1) . runIdentity . foldSerialManifoldM fm
     findNativeIndices (LetVarN_ _ i) = return i
     findNativeIndices (BndVarN_ _ i) = return i
     findNativeIndices e = return $ foldlNE max 0 e
+
+-- | A record entry stores the common name, keys, and types of records that are
+-- not imported from source. These records are generated as structs (or
+-- equivalent) in the pool. 'unifyRecords' takes all such records and "unifies"
+-- ones with the same name and keys. The unified records may have different
+-- types, but they will all be instances of the same generic struct. Fields that
+-- differ between instances are made generic.
+data RecEntry = RecEntry
+  { recName :: MDoc
+  , recFields ::
+      [ ( Key
+        , Maybe TypeF
+        )
+      ]
+  }
+  deriving (Show)
+
+-- | Lookup table mapping (FVar, keys) to their unified RecEntry.
+type RecMap = [((FVar, [Key]), RecEntry)]
+
+collectRecords :: SerialManifold -> [(FVar, Int, [(Key, TypeF)])]
+collectRecords e0@(SerialManifold i0 _ _ _ _) =
+  unique $ CMS.evalState (surroundFoldSerialManifoldM manifoldIndexer fm e0) i0
+  where
+    fm = defaultValue {opFoldWithNativeExprM = nativeExpr, opFoldWithSerialExprM = serialExpr}
+
+    manifoldIndexer = makeManifoldIndexer CMS.get CMS.put
+
+    nativeExpr _ (DeserializeN_ t s xs) = do
+      manifoldIndex <- CMS.get
+      let tRecs = seekRecs manifoldIndex t
+          sRecs = seekRecs manifoldIndex (serialAstToType s)
+      return $ xs <> tRecs <> sRecs
+    nativeExpr efull e = do
+      manifoldIndex <- CMS.get
+      let newRecs = seekRecs manifoldIndex (typeFof efull)
+      return $ foldlNE (<>) newRecs e
+
+    serialExpr _ (SerializeS_ s xs) = do
+      manifoldIndex <- CMS.get
+      return $ seekRecs manifoldIndex (serialAstToType s) <> xs
+    serialExpr _ e = return $ foldlSE (<>) [] e
+
+    seekRecs :: Int -> TypeF -> [(FVar, Int, [(Key, TypeF)])]
+    seekRecs m (NamF _ v@(FV _ (CV "struct")) _ rs) = [(v, m, rs)] <> concatMap (seekRecs m . snd) rs
+    seekRecs m (NamF _ _ _ rs) = concatMap (seekRecs m . snd) rs
+    seekRecs m (FunF ts t) = concatMap (seekRecs m) (t : ts)
+    seekRecs m (AppF t ts) = concatMap (seekRecs m) (t : ts)
+    seekRecs _ (UnkF _) = []
+    seekRecs _ (VarF _) = []
+
+unifyRecords ::
+  [ ( FVar
+    , Int
+    , [(Key, TypeF)]
+    )
+  ] ->
+  RecMap
+unifyRecords xs =
+  zipWith (\i ((v, ks), es) -> ((v, ks), RecEntry (structName i v) es)) [1 ..]
+    . map (\((v, ks), rss) -> ((v, ks), map unifyField (transpose (map snd rss))))
+    . groupSort
+    . unique
+    $ [((v, map fst es), (m, es)) | (v, m, es) <- xs]
+
+structName :: Int -> FVar -> MDoc
+structName i (FV v (CV "struct")) = "mlc_" <> pretty v <> "_" <> pretty i
+structName _ (FV _ v) = pretty v
+
+unifyField :: [(Key, TypeF)] -> (Key, Maybe TypeF)
+unifyField [] = error "Empty field"
+unifyField rs@((v, _) : _)
+  | not (all ((== v) . fst) rs) =
+      error $ "Bad record - unequal fields: " <> show (unique rs)
+  | otherwise = case unique (map snd rs) of
+      [t] -> (v, Just t)
+      _ -> (v, Nothing)
+
+-- | A dispatch table entry: manifold ID and argument count.
+data DispatchEntry = DispatchEntry
+  { dispatchId :: Int
+  , dispatchArgCount :: Int
+  }
+  deriving (Show, Eq, Ord)
+
+-- | Extract local dispatch entries from serial manifolds.
+-- Skips manifolds marked as remote workers.
+extractLocalDispatch :: [SerialManifold] -> [DispatchEntry]
+extractLocalDispatch = catMaybes . map localEntry
+  where
+    localEntry (SerialManifold _ _ _ HeadManifoldFormRemoteWorker _) = Nothing
+    localEntry (SerialManifold i _ form _ _) = Just $ DispatchEntry i (getSize form)
+
+    getSize :: ManifoldForm (Or TypeS TypeF) TypeS -> Int
+    getSize = sum . abilist (\_ _ -> 1) (\_ _ -> 1)
+
+-- | Extract remote dispatch entries by walking the AST.
+extractRemoteDispatch :: [SerialManifold] -> [DispatchEntry]
+extractRemoteDispatch = map (uncurry DispatchEntry) . unique . concatMap getRemotes
+  where
+    getRemotes :: SerialManifold -> [(Int, Int)]
+    getRemotes = runIdentity . foldSerialManifoldM (defaultValue {opSerialExprM = getRemoteSE})
+
+    getRemoteSE ::
+      SerialExpr_ [(Int, Int)] [(Int, Int)] [(Int, Int)] [(Int, Int)] [(Int, Int)] ->
+      Identity [(Int, Int)]
+    getRemoteSE (AppPoolS_ _ (PoolCall i _ (RemoteCall _) _) xss) = return $ (i, length xss) : concat xss
+    getRemoteSE x = return $ foldlSE mappend mempty x
 

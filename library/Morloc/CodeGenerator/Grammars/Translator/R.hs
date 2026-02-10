@@ -23,7 +23,6 @@ import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialMani
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
-import Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
 import Morloc.Monad (asks, gets, newIndex, runIndex)
 import Morloc.Quasi
@@ -49,7 +48,7 @@ translate srcs es = do
   -- translate each manifold tree, rooted on a call from nexus or another pool
   let mDocs = map translateSegment es
 
-  let code = makePool includeDocs dynlibDocs mDocs
+  let code = RP.printPool includeDocs dynlibDocs mDocs
       exefile = ML.makeExecutablePoolName RLang
 
   return $
@@ -163,10 +162,3 @@ evaluatePattern _ (PatternStruct _) [] = error "Unreachable empty pattern"
 writeBasicSelector :: Either Int Text -> MDoc
 writeBasicSelector (Right k) = "[[" <> dquotes (pretty k) <> "]]"
 writeBasicSelector (Left i) = "[[" <> pretty (i + 1) <> "]]"
-
-makePool :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc
-makePool sources dynlibs manifolds =
-  format
-    (DF.embededFileText (DF.poolTemplate RLang))
-    "# <<<BREAK>>>"
-    [vsep sources, vsep dynlibs, vsep manifolds]

@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 {- |
 Module      : Morloc.CodeGenerator.Grammars.Translator.Printer.Cpp
@@ -12,11 +13,22 @@ module Morloc.CodeGenerator.Grammars.Translator.Printer.Cpp
   ( printExpr
   , printStmt
   , printStmts
+    -- * Pool-level rendering
+  , printDispatch
+  , printPool
+    -- * Struct/serializer rendering
+  , printStructTypedef
+  , printSerializer
+  , printDeserializer
+  , printTemplateHeader
+  , printRecordTemplate
   ) where
 
+import Morloc.CodeGenerator.Grammars.Common (DispatchEntry(..), manNamer)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-import Morloc.CodeGenerator.Namespace (NamType(..), Key(..), MDoc)
+import Morloc.CodeGenerator.Namespace (MDoc, Lang(..))
 import Morloc.Data.Doc
+import Morloc.DataFiles as DF
 import Morloc.Quasi
 
 printExpr :: IExpr -> MDoc
@@ -73,3 +85,134 @@ printStmt (IFunDef _ _ _ _) = error "IFunDef not yet implemented for C++ printer
 
 printStmts :: [IStmt] -> [MDoc]
 printStmts = map printStmt
+
+-- | Render C++ dispatch functions from structured dispatch entries.
+printDispatch :: [DispatchEntry] -> [DispatchEntry] -> MDoc
+printDispatch locals remotes =
+  [idoc|uint8_t* local_dispatch(uint32_t mid, const uint8_t** args){
+    switch(mid){
+        #{align (vsep localCases)}
+        default:
+            std::ostringstream oss;
+            oss << "Invalid local manifold id: " << mid;
+            throw std::runtime_error(oss.str());
+    }
+}
+
+uint8_t* remote_dispatch(uint32_t mid, const uint8_t** args){
+    switch(mid){
+        #{align (vsep remoteCases)}
+        default:
+            std::ostringstream oss;
+            oss << "Invalid remote manifold id: " << mid;
+            throw std::runtime_error(oss.str());
+    }
+}|]
+  where
+    localCases = map (makeCase "") locals
+    remoteCases = map (makeCase "_remote") remotes
+
+    makeCase :: MDoc -> DispatchEntry -> MDoc
+    makeCase suffix (DispatchEntry i n) =
+      "case" <+> pretty i
+        <> ":"
+          <+> "return"
+          <+> manNamer i
+        <> suffix
+        <> tupled ["args[" <> pretty j <> "]" | j <- take n ([0 ..] :: [Int])]
+        <> ";"
+
+-- | Assemble a complete C++ pool file from its sections.
+printPool :: [MDoc] -> [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
+printPool includes serialization signatures manifolds dispatch =
+  format
+    (DF.embededFileText (DF.poolTemplate CppLang))
+    "// <<<BREAK>>>"
+    [ vsep includes
+    , vsep serialization
+    , vsep signatures
+    , vsep manifolds
+    , dispatch
+    ]
+
+printTemplateHeader :: [MDoc] -> MDoc
+printTemplateHeader [] = ""
+printTemplateHeader ts = "template" <+> encloseSep "<" ">" "," ["class" <+> t | t <- ts]
+
+printRecordTemplate :: [MDoc] -> MDoc
+printRecordTemplate [] = ""
+printRecordTemplate ts = encloseSep "<" ">" "," ts
+
+-- | Render a C++ struct definition.
+printStructTypedef ::
+  [MDoc] -> -- template parameters (e.g., ["T"])
+  MDoc -> -- the name of the structure (e.g., "Person")
+  [(MDoc, MDoc)] -> -- key and type for all fields
+  MDoc
+printStructTypedef params rname fields = vsep [template, struct]
+  where
+    template = printTemplateHeader params
+    struct =
+      block
+        4
+        ("struct" <+> rname)
+        (vsep [t <+> k <> ";" | (k, t) <- fields])
+        <> ";"
+
+-- | Render a C++ serializer (toAnything) for a struct.
+printSerializer ::
+  [MDoc] -> -- template parameters
+  MDoc -> -- type of thing being serialized
+  [(MDoc, MDoc)] -> -- key and type for all fields
+  MDoc
+printSerializer params rtype fields =
+  [idoc|
+#{printTemplateHeader params}
+void* toAnything(void* dest, void** cursor, const Schema* schema, const #{rtype}& obj)
+{
+    return toAnything(dest, cursor, schema, std::make_tuple#{arguments});
+}
+|]
+  where
+    arguments = tupled ["obj." <> key | (key, _) <- fields]
+
+-- | Render a C++ deserializer (fromAnything + get_shm_size) for a struct.
+printDeserializer ::
+  Bool -> -- build object with constructor
+  [MDoc] -> -- template parameters
+  MDoc -> -- type of thing being deserialized
+  [(MDoc, MDoc)] -> -- key and type for all fields
+  MDoc
+printDeserializer _ params rtype fields =
+  [idoc|
+#{printTemplateHeader params}
+#{block 4 header body}
+
+#{printTemplateHeader params}
+#{block 4 headerGetSize bodyGetSize}
+|]
+  where
+    header =
+      [idoc|#{rtype} fromAnything(const Schema* schema, const void * anything, #{rtype}* dummy = nullptr)|]
+    body =
+      vsep $
+        [[idoc|#{rtype} obj;|]]
+          <> zipWith assignFields [0 ..] fields
+          <> ["return obj;"]
+
+    assignFields :: Int -> (MDoc, MDoc) -> MDoc
+    assignFields idx (keyName, keyType) =
+      vsep
+        [ [idoc|#{keyType}* elemental_dumby_#{keyName} = nullptr;|]
+        , [idoc|obj.#{keyName} = fromAnything(schema->parameters[#{pretty idx}], (char*)anything + schema->offsets[#{pretty idx}], elemental_dumby_#{keyName});|]
+        ]
+
+    headerGetSize = [idoc|size_t get_shm_size(const Schema* schema, const #{rtype}& data)|]
+    bodyGetSize =
+      vsep $
+        ["size_t size = 0;"]
+          <> [getSize idx key | (idx, (key, _)) <- zip [0 ..] fields]
+          <> ["return size;"]
+
+    getSize :: Int -> MDoc -> MDoc
+    getSize idx key = [idoc|size += get_shm_size(schema->parameters[#{pretty idx}], data.#{key});|]
