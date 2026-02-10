@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {- |
 Module      : Morloc.CodeGenerator.Grammars.Translator.Imperative
@@ -26,13 +27,17 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , expandSerialize
   , expandDeserialize
 
+    -- * Expression lowering (Stage 2)
+  , lowerSerialExpr
+  , lowerNativeExpr
+
     -- * Full lowering config
   , LowerConfig (..)
   ) where
 
 import Data.Scientific (Scientific)
 import Data.Text (Text)
-import Morloc.CodeGenerator.Grammars.Common (helperNamer)
+import Morloc.CodeGenerator.Grammars.Common (PoolDocs(..), mergePoolDocs, helperNamer, svarNamer, nvarNamer, argNamer, provideClosure)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial (isSerializable, serialAstToMsgpackSchema)
 import Morloc.Data.Doc
@@ -121,6 +126,24 @@ data LowerConfig m = LowerConfig
     -- For C++: uses tuple indexing since records are deserialized as tuples
   , lcTupleAccessor :: Int -> MDoc -> MDoc
   , lcNewIndex :: m Int
+    -- Stage 2: expression/arg lowering fields
+  , lcPrintExpr :: IExpr -> MDoc
+  , lcPrintStmt :: IStmt -> MDoc
+  , lcEvalPattern :: TypeF -> Pattern -> [MDoc] -> m MDoc
+    -- ^ Pattern evaluation (language-specific because patterns use
+    -- language-specific constructors for tuples/records)
+  , lcListConstructor :: FVar -> TypeF -> [MDoc] -> MDoc
+    -- ^ Build a list literal from rendered elements. R needs FVar to choose c() vs list().
+  , lcTupleConstructor :: FVar -> [MDoc] -> MDoc
+  , lcRecordConstructor :: TypeF -> NamType -> FVar -> [TypeF] -> [(Key, MDoc)] -> m PoolDocs
+    -- ^ Build a record literal. C++ needs type lookup + counter for temp var.
+  , lcForeignCall :: MDoc -> Int -> [MDoc] -> MDoc
+  , lcRemoteCall :: MDoc -> Int -> RemoteResources -> [MDoc] -> m PoolDocs
+  , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> PoolDocs -> PoolDocs -> m PoolDocs
+    -- ^ Let binding assembly at the PoolDocs level
+  , lcReturn :: MDoc -> MDoc
+  , lcSerialize :: MDoc -> SerialAST -> m PoolDocs
+  , lcDeserialize :: TypeF -> MDoc -> SerialAST -> m (MDoc, [MDoc])
   }
 
 -- | Expand serialization into IR statements.
@@ -219,3 +242,93 @@ expandDeserialize cfg v0 s0
       return (IVar v', concat befores ++ [IAssign v' typeM (IRecordLit namType fv (zip (map fst rs) exprs))])
 
     construct _ _ = error "Unreachable in expandDeserialize"
+
+-- | Lower a serial expression to PoolDocs via the IR.
+-- Replaces genericMakeSerialExpr from Syntax.hs.
+lowerSerialExpr ::
+  (Monad m) =>
+  LowerConfig m ->
+  SerialExpr ->
+  SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
+  m PoolDocs
+lowerSerialExpr _ _ (ManS_ f) = return f
+lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) ForeignCall args) _) =
+  return $ defaultValue {poolExpr = lcForeignCall cfg socketFile mid (map argNamer args)}
+lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) (RemoteCall res) args) _) =
+  lcRemoteCall cfg socketFile mid res (map argNamer args)
+lowerSerialExpr cfg _ (ReturnS_ x) = return $ x {poolExpr = lcReturn cfg (poolExpr x)}
+lowerSerialExpr cfg _ (SerialLetS_ i e1 e2) = lcMakeLet cfg svarNamer i Nothing e1 e2
+lowerSerialExpr cfg (NativeLetS _ (typeFof -> t) _) (NativeLetS_ i e1 e2) = lcMakeLet cfg nvarNamer i (Just t) e1 e2
+lowerSerialExpr cfg _ (NativeLetS_ i e1 e2) = lcMakeLet cfg nvarNamer i Nothing e1 e2
+lowerSerialExpr _ _ (LetVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
+lowerSerialExpr _ _ (BndVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
+lowerSerialExpr cfg _ (SerializeS_ s e) = do
+  se <- lcSerialize cfg (poolExpr e) s
+  return $ e {poolExpr = poolExpr se, poolPriorLines = poolPriorLines e <> poolPriorLines se}
+
+-- | Lower a native expression to PoolDocs via the IR.
+-- Replaces genericMakeNativeExpr from Syntax.hs.
+lowerNativeExpr ::
+  (Monad m) =>
+  LowerConfig m ->
+  NativeExpr ->
+  NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
+  m PoolDocs
+lowerNativeExpr cfg _ (AppExeN_ _ (SrcCallP src) qs (map snd -> es)) = do
+  templateArgs <- lcTemplateArgs cfg qs
+  let handleFunctionArgs ts =
+        (<>) (lcSrcName cfg src <> printTemplateArgs ts)
+          . hsep
+          . map tupled
+          . provideClosure src
+      printTemplateArgs Nothing = ""
+      printTemplateArgs (Just ts) = encloseSep "<" ">" "," [t' | IType t' <- ts]
+  return $ mergePoolDocs (handleFunctionArgs templateArgs) es
+lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) _ xs) = do
+  let es = map snd xs
+  patResult <- lcEvalPattern cfg t p (map poolExpr es)
+  return $ PoolDocs
+    { poolCompleteManifolds = concatMap poolCompleteManifolds es
+    , poolExpr = patResult
+    , poolPriorLines = concatMap poolPriorLines es
+    , poolPriorExprs = concatMap poolPriorExprs es
+    }
+lowerNativeExpr cfg _ (AppExeN_ _ (LocalCallP idx) qs (map snd -> es)) = do
+  templateArgs <- lcTemplateArgs cfg qs
+  let printTemplateArgs Nothing = ""
+      printTemplateArgs (Just ts) = encloseSep "<" ">" "," [t' | IType t' <- ts]
+  return $ mergePoolDocs ((<>) (nvarNamer idx <> printTemplateArgs templateArgs) . tupled) es
+lowerNativeExpr _ _ (ManN_ call) = return call
+lowerNativeExpr cfg _ (ReturnN_ x) =
+  return $ x {poolExpr = lcReturn cfg (poolExpr x)}
+lowerNativeExpr cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothing x1 x2
+lowerNativeExpr cfg (NativeLetN _ (typeFof -> t) _) (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i (Just t) x1 x2
+lowerNativeExpr cfg _ (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i Nothing x1 x2
+lowerNativeExpr _ _ (LetVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
+lowerNativeExpr _ _ (BndVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
+lowerNativeExpr cfg _ (DeserializeN_ t s x) = do
+  (deserialized, assignments) <- lcDeserialize cfg t (poolExpr x) s
+  return $
+    x
+      { poolExpr = deserialized
+      , poolPriorLines = poolPriorLines x <> assignments
+      }
+lowerNativeExpr cfg _ (ExeN_ _ (SrcCallP src)) = return $ defaultValue {poolExpr = lcSrcName cfg src}
+lowerNativeExpr _ _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
+lowerNativeExpr _ _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
+lowerNativeExpr cfg _ (ListN_ v t xs) = return $ mergePoolDocs (lcListConstructor cfg v t) xs
+lowerNativeExpr cfg _ (TupleN_ v xs) = return $ mergePoolDocs (lcTupleConstructor cfg v) xs
+lowerNativeExpr cfg origExpr (RecordN_ o v ps rs) = do
+  let es = map snd rs
+      recType = typeFof origExpr
+  rec' <- lcRecordConstructor cfg recType o v ps (zip (map fst rs) (map poolExpr es))
+  return $ rec'
+    { poolCompleteManifolds = concatMap poolCompleteManifolds es <> poolCompleteManifolds rec'
+    , poolPriorLines = concatMap poolPriorLines es <> poolPriorLines rec'
+    , poolPriorExprs = concatMap poolPriorExprs es <> poolPriorExprs rec'
+    }
+lowerNativeExpr cfg _ (LogN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IBoolLit v)}
+lowerNativeExpr cfg _ (RealN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IRealLit v)}
+lowerNativeExpr cfg _ (IntN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IIntLit v)}
+lowerNativeExpr cfg _ (StrN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit v)}
+lowerNativeExpr cfg _ (NullN_ _) = return $ defaultValue {poolExpr = lcPrintExpr cfg INullLit}

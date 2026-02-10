@@ -19,18 +19,17 @@ module Morloc.CodeGenerator.Grammars.Translator.Python3
 import qualified Data.Char as DC
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), expandSerialize, expandDeserialize, IExpr(..), IStmt(..))
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), expandSerialize, expandDeserialize, lowerSerialExpr, lowerNativeExpr)
 import qualified Morloc.CodeGenerator.Grammars.Translator.Printer.Python3 as PP
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
-import Morloc.CodeGenerator.Grammars.Translator.Syntax
+import Morloc.CodeGenerator.Grammars.Translator.Syntax (IndexM, genericMakeSerialArg, genericMakeNativeArg)
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (isSerializable, serialAstToMsgpackSchema)
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
-import Morloc.Monad (Index, asks, gets, newIndex)
+import Morloc.Monad (asks, gets, newIndex, runIndex)
 import qualified Morloc.Monad as MM
 import Morloc.Quasi
 import qualified System.FilePath as SF
@@ -142,7 +141,37 @@ pythonLowerConfig makeSrcName = LowerConfig
   , lcDeserialRecordAccessor = \_ k v -> recordAccess v (pretty k)
   , lcTupleAccessor = tupleKey
   , lcNewIndex = newIndex
+  , lcPrintExpr = PP.printExpr
+  , lcPrintStmt = PP.printStmt
+  , lcEvalPattern = \t p xs -> return $ evaluatePattern t p xs
+  , lcListConstructor = \_ _ es -> list es
+  , lcTupleConstructor = \_ -> tupled
+  , lcRecordConstructor = \_ _ _ _ rs -> return $ defaultValue
+      { poolExpr = "OrderedDict" <> tupled [pretty k <> "=" <> v | (k, v) <- rs] }
+  , lcForeignCall = \socketFile mid args ->
+      "morloc.foreign_call" <> tupled [makeSocketPath socketFile, pretty mid, list args]
+  , lcRemoteCall = \socketFile mid res args -> do
+      let resMem = pretty $ remoteResourcesMemory res
+          resTime = pretty $ remoteResourcesTime res
+          resCPU = pretty $ remoteResourcesThreads res
+          resGPU = pretty $ remoteResourcesGpus res
+          resStruct = "struct.pack" <> tupled [squotes "iiii", resMem, resTime, resCPU, resGPU]
+          call =
+            "morloc.remote_call"
+              <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resStruct, list args]
+      return $ defaultValue {poolExpr = call}
+  , lcMakeLet = \namer i _ e1 e2 -> return $ makeLet namer i e1 e2
+  , lcReturn = \e -> "return(" <> e <> ")"
+  , lcSerialize = \v s -> do
+      (serialized, assignments) <- serialize makeSrcName v s
+      return $ defaultValue {poolExpr = serialized, poolPriorLines = assignments}
+  , lcDeserialize = \_ v s -> deserialize makeSrcName v s
   }
+  where
+    makeLet :: (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
+    makeLet namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
+      let rs = rs1 ++ [namer i <+> "=" <+> e1'] ++ rs2
+       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
 serialize :: (Source -> MDoc) -> MDoc -> SerialAST -> IndexM (MDoc, [MDoc])
 serialize makeSrcName v s = do
@@ -158,47 +187,22 @@ makeSocketPath :: MDoc -> MDoc
 makeSocketPath socketFileBasename = [idoc|os.path.join(global_state["tmpdir"], #{dquotes socketFileBasename})|]
 
 translateSegment :: (Source -> MDoc) -> SerialManifold -> MDoc
-translateSegment makeSrcName = genericTranslateSegment (pythonSyntax makeSrcName)
-
-pythonSyntax :: (Source -> MDoc) -> LangSyntax IndexM
-pythonSyntax makeSrcName = LangSyntax
-  { synTrue = "True"
-  , synFalse = "False"
-  , synNull = "None"
-  , synString = \x -> dquotes (pretty x)
-  , synList = \_ _ es -> list es
-  , synTuple = \_ -> tupled
-  , synRecord = \_ _ _ _ rs -> return $ defaultValue
-      { poolExpr = "OrderedDict" <> tupled [pretty k <> "=" <> v | (k, v) <- rs] }
-  , synMakeFunction = makeFunction
-  , synMakeLambda = makeLambda
-  , synMakeLet = \namer i _ e1 e2 -> return $ makeLet namer i e1 e2
-  , synReturn = \e -> "return(" <> e <> ")"
-  , synSerialize = \v s -> do
-      (serialized, assignments) <- serialize makeSrcName v s
-      return $ defaultValue {poolExpr = serialized, poolPriorLines = assignments}
-  , synDeserialize = \_ v s -> deserialize makeSrcName v s
-  , synSrcName = makeSrcName
-  , synTemplateArgs = \_ -> return ""
-  , synEvalPattern = \t p xs -> return $ evaluatePattern t p xs
-  , synForeignCall = \socketFile mid args ->
-      "morloc.foreign_call" <> tupled [makeSocketPath socketFile, pretty mid, list args]
-  , synRemoteCall = \socketFile mid res args -> do
-      let resMem = pretty $ remoteResourcesMemory res
-          resTime = pretty $ remoteResourcesTime res
-          resCPU = pretty $ remoteResourcesThreads res
-          resGPU = pretty $ remoteResourcesGpus res
-          resStruct = "struct.pack" <> tupled [squotes "iiii", resMem, resTime, resCPU, resGPU]
-          call =
-            "morloc.remote_call"
-              <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resStruct, list args]
-      return $ defaultValue {poolExpr = call}
-  }
+translateSegment makeSrcName m0 =
+  let cfg = pythonLowerConfig makeSrcName
+      e = runIndex 0 (foldWithSerialManifoldM (fm cfg) m0)
+   in vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
   where
-    makeLet :: (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
-    makeLet namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
-      let rs = rs1 ++ [namer i <+> "=" <+> e1'] ++ rs2
-       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
+    fm cfg =
+      FoldWithManifoldM
+        { opFoldWithSerialManifoldM = \_ (SerialManifold_ m _ form headForm x) ->
+            return $ translateManifold makeFunction makeLambda m form (Just headForm) x
+        , opFoldWithNativeManifoldM = \_ (NativeManifold_ m _ form x) ->
+            return $ translateManifold makeFunction makeLambda m form Nothing x
+        , opFoldWithSerialExprM = lowerSerialExpr cfg
+        , opFoldWithNativeExprM = lowerNativeExpr cfg
+        , opFoldWithSerialArgM = genericMakeSerialArg
+        , opFoldWithNativeArgM = genericMakeNativeArg
+        }
 
     makeFunction :: MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> MDoc
     makeFunction mname args priorLines body headForm =

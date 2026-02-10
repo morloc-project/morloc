@@ -68,6 +68,7 @@ module Morloc.Monad
 
     -- * Indexing monad
   , Index
+  , IndexState (..)
   , runIndex
   , newIndex
   , getIndex

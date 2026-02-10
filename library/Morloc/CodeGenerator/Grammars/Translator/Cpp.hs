@@ -24,14 +24,12 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), IType(..), expandSerialize, expandDeserialize)
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), IType(..), expandSerialize, expandDeserialize, lowerSerialExpr, lowerNativeExpr)
 import qualified Morloc.CodeGenerator.Grammars.Translator.Printer.Cpp as CP
-import Morloc.CodeGenerator.Grammars.Translator.Syntax
+import Morloc.CodeGenerator.Grammars.Translator.Syntax (genericMakeSerialArg, genericMakeNativeArg)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial
-  ( isSerializable
-  , serialAstToMsgpackSchema
-  , serialAstToType
+  ( serialAstToType
   , shallowType
   )
 import Morloc.Data.Doc
@@ -294,7 +292,7 @@ cppLowerConfig = LowerConfig
   , lcSerialAstType = serializeTypeOf
   , lcDeserialAstType = \s -> Just . IType <$> cppTypeOf (shallowType s)
   , lcRawDeserialAstType = rawTypeOf
-  , lcTemplateArgs = \_ -> return Nothing
+  , lcTemplateArgs = templateArgs
   , lcTypeMOf = \_ -> return Nothing
   , lcPackerName = \src -> pretty (srcName src)
   , lcUnpackerName = \src -> pretty (srcName src)
@@ -302,6 +300,55 @@ cppLowerConfig = LowerConfig
   , lcDeserialRecordAccessor = \i _ v -> tupleKey i v
   , lcTupleAccessor = tupleKey
   , lcNewIndex = getCounter
+  , lcPrintExpr = CP.printExpr
+  , lcPrintStmt = CP.printStmt
+  , lcEvalPattern = \t p xs -> do
+      state <- CMS.get
+      return $ evaluatePattern state t p xs
+  , lcListConstructor = \_ _ es -> encloseSep "{" "}" "," es
+  , lcTupleConstructor = \_ -> ((<>) "std::make_tuple" . tupled)
+  , lcRecordConstructor = \recType _ _ _ rs -> do
+      t <- cppTypeOf recType
+      idx <- getCounter
+      let v' = "a" <> pretty idx
+          decl = t <+> v' <+> "=" <+> encloseSep "{" "}" "," (map snd rs) <> ";"
+      return $ defaultValue {poolExpr = v', poolPriorLines = [decl]}
+  , lcForeignCall = \socketFile mid args ->
+      let argList = [dquotes socketFile, pretty mid] <> args <> ["NULL"]
+       in [idoc|foreign_call#{tupled argList}|]
+  , lcRemoteCall = \socketFile mid res args -> do
+      let resMem = pretty $ remoteResourcesMemory res
+          resTime = pretty $ remoteResourcesTime res
+          resCPU = pretty $ remoteResourcesThreads res
+          resGPU = pretty $ remoteResourcesGpus res
+          cacheDir = ".morloc-cache"
+          argList = encloseSep "{" "}" "," args
+          setup =
+            [idoc|resources_t resources = {#{resMem}, #{resTime}, #{resCPU}, #{resGPU}};
+const uint8_t* args[] = #{argList};
+char* errmsg = NULL;|]
+          call =
+            [idoc|remote_call(
+    #{pretty mid},
+    #{dquotes socketFile},
+    #{dquotes cacheDir},
+    &resources,
+    args,
+    #{pretty (length args)},
+    &errmsg
+);
+PROPAGATE_ERROR(errmsg)|]
+      return $ defaultValue {poolExpr = call, poolPriorLines = [setup]}
+  , lcMakeLet = \namer letIndex mt e1 e2 -> do
+      typestr <- case mt of
+        (Just t) -> cppTypeOf t
+        Nothing -> return serialType
+      return $ makeLet namer letIndex typestr e1 e2
+  , lcReturn = \e -> "return(" <> e <> ");"
+  , lcSerialize = \v s -> serialize v s
+  , lcDeserialize = \t v s -> do
+      typestr <- cppTypeOf t
+      deserialize v typestr s
   }
   where
     -- For serialization, records become tuples (that's what _put_value/toAnything expects)
@@ -312,6 +359,21 @@ cppLowerConfig = LowerConfig
     rawTypeOf :: SerialAST -> CppTranslator (Maybe IType)
     rawTypeOf (SerialObject _ _ _ rs) = Just . IType <$> recordToCppTuple (map snd rs)
     rawTypeOf s = Just . IType <$> cppTypeOf (serialAstToType s)
+
+    templateArgs :: [(Text, TypeF)] -> CppTranslator (Maybe [IType])
+    templateArgs [] = return Nothing
+    templateArgs qs = Just . map IType <$> mapM (cppTypeOf . snd) qs
+
+    makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
+    makeLet namer letIndex typestr (PoolDocs ms1 e1 rs1 pes1) (PoolDocs ms2 e2 rs2 pes2) =
+      let letAssignment = [idoc|#{typestr} #{namer letIndex} = #{e1};|]
+          rs = rs1 <> [letAssignment] <> rs2 <> [e2]
+       in PoolDocs
+            { poolCompleteManifolds = ms1 <> ms2
+            , poolExpr = vsep rs
+            , poolPriorLines = []
+            , poolPriorExprs = pes1 <> pes2
+            }
 
 -- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
 -- Include statements in C can be either wrapped in angle brackets (e.g.,
@@ -371,16 +433,15 @@ recordToCppTuple ts = do
 translateSegment :: SerialManifold -> CppTranslator MDoc
 translateSegment m0 = do
   resetCounter
-  syn <- cppSyntax
-  e <- surroundFoldSerialManifoldM manifoldIndexer (foldRules syn) m0
+  e <- surroundFoldSerialManifoldM manifoldIndexer foldRules m0
   return $ vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
   where
-    foldRules syn =
+    foldRules =
       FoldWithManifoldM
         { opFoldWithSerialManifoldM = makeSerialManifold
         , opFoldWithNativeManifoldM = makeNativeManifold
-        , opFoldWithSerialExprM = genericMakeSerialExpr syn
-        , opFoldWithNativeExprM = genericMakeNativeExpr syn
+        , opFoldWithSerialExprM = lowerSerialExpr cppLowerConfig
+        , opFoldWithNativeExprM = lowerNativeExpr cppLowerConfig
         , opFoldWithSerialArgM = genericMakeSerialArg
         , opFoldWithNativeArgM = genericMakeNativeArg
         }
@@ -395,82 +456,6 @@ translateSegment m0 = do
 
     makeNativeManifold :: NativeManifold -> NativeManifold_ PoolDocs -> CppTranslator PoolDocs
     makeNativeManifold nm (NativeManifold_ i _ form e) = makeManifold i form Nothing (typeMof nm) e
-
-cppSyntax :: CppTranslator (LangSyntax CppTranslatorM)
-cppSyntax = return $ LangSyntax
-  { synTrue = "true"
-  , synFalse = "false"
-  , synNull = "null"
-  , synString = \x -> [idoc|std::string("#{pretty x}")|]
-  , synList = \_ _ es -> encloseSep "{" "}" "," es
-  , synTuple = \_ -> ((<>) "std::make_tuple" . tupled)
-  , synRecord = \recType _ _ _ rs -> do
-      t <- cppTypeOf recType
-      idx <- getCounter
-      let v' = "a" <> pretty idx
-          decl = t <+> v' <+> "=" <+> encloseSep "{" "}" "," (map snd rs) <> ";"
-      return $ defaultValue {poolExpr = v', poolPriorLines = [decl]}
-  , synMakeFunction = error "C++ does not use generic manifold handlers"
-  , synMakeLambda = error "C++ does not use generic manifold handlers"
-  , synMakeLet = \namer letIndex mt e1 e2 -> do
-      typestr <- case mt of
-        (Just t) -> cppTypeOf t
-        Nothing -> return serialType
-      return $ makeLet namer letIndex typestr e1 e2
-  , synReturn = \e -> "return(" <> e <> ");"
-  , synSerialize = \v s -> serialize v s
-  , synDeserialize = \t v s -> do
-      typestr <- cppTypeOf t
-      deserialize v typestr s
-  , synSrcName = \src -> pretty (srcName src)
-  , synTemplateArgs = \qs -> templateArguments qs
-  , synEvalPattern = \t p xs -> do
-      state <- CMS.get
-      return $ evaluatePattern state t p xs
-  , synForeignCall = \socketFile mid args ->
-      let argList = [dquotes socketFile, pretty mid] <> args <> ["NULL"]
-       in [idoc|foreign_call#{tupled argList}|]
-  , synRemoteCall = \socketFile mid res args -> do
-      let resMem = pretty $ remoteResourcesMemory res
-          resTime = pretty $ remoteResourcesTime res
-          resCPU = pretty $ remoteResourcesThreads res
-          resGPU = pretty $ remoteResourcesGpus res
-          cacheDir = ".morloc-cache"
-          argList = encloseSep "{" "}" "," args
-          setup =
-            [idoc|resources_t resources = {#{resMem}, #{resTime}, #{resCPU}, #{resGPU}};
-const uint8_t* args[] = #{argList};
-char* errmsg = NULL;|]
-          call =
-            [idoc|remote_call(
-    #{pretty mid},
-    #{dquotes socketFile},
-    #{dquotes cacheDir},
-    &resources,
-    args,
-    #{pretty (length args)},
-    &errmsg
-);
-PROPAGATE_ERROR(errmsg)|]
-      return $ defaultValue {poolExpr = call, poolPriorLines = [setup]}
-  }
-  where
-    templateArguments :: [(Text, TypeF)] -> CppTranslator MDoc
-    templateArguments [] = return ""
-    templateArguments qs = do
-      ts <- mapM (cppTypeOf . snd) qs
-      return $ recordTemplate ts
-
-    makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
-    makeLet namer letIndex typestr (PoolDocs ms1 e1 rs1 pes1) (PoolDocs ms2 e2 rs2 pes2) =
-      let letAssignment = [idoc|#{typestr} #{namer letIndex} = #{e1};|]
-          rs = rs1 <> [letAssignment] <> rs2 <> [e2]
-       in PoolDocs
-            { poolCompleteManifolds = ms1 <> ms2
-            , poolExpr = vsep rs
-            , poolPriorLines = []
-            , poolPriorExprs = pes1 <> pes2
-            }
 
 -- handle string interpolation
 evaluatePattern :: CppTranslatorState -> TypeF -> Pattern -> [MDoc] -> MDoc
