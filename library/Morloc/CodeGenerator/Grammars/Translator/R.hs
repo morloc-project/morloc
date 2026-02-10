@@ -70,12 +70,6 @@ translateSource p = do
   let p' = MT.stripPrefixIfPresent "./" (MT.pack p)
   return $ "source(" <> dquotes (pretty p') <> ")"
 
-tupleKey :: Int -> MDoc -> MDoc
-tupleKey i v = [idoc|#{v}[[#{pretty i}]]|]
-
-recordAccess :: MDoc -> MDoc -> MDoc
-recordAccess record field = record <> "$" <> field
-
 rLowerConfig :: LowerConfig IndexM
 rLowerConfig = cfg
   where

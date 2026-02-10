@@ -24,7 +24,7 @@ module Morloc.CodeGenerator.Grammars.Common
     -- * Utilities
   , provideClosure
   , makeManifoldIndexer
-  , translateManifold
+  , renderPoolDocs
   ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -97,6 +97,9 @@ argNamer (Arg i _) = svarNamer i
 -- create a name for a manifold based on a unique id
 manNamer :: Int -> MDoc
 manNamer i = "m" <> viaShow i
+
+renderPoolDocs :: PoolDocs -> MDoc
+renderPoolDocs e = vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
 
 -- The surround rules control the setting of manifold ids across the recursion
 makeManifoldIndexer :: (Monad m) => m Int -> (Int -> m ()) -> SurroundManifoldM m sm nm se ne sr nr
@@ -319,37 +322,3 @@ maxIndex = (+ 1) . runIdentity . foldSerialManifoldM fm
     findNativeIndices (BndVarN_ _ i) = return i
     findNativeIndices e = return $ foldlNE max 0 e
 
-translateManifold ::
-  (HasTypeM t) =>
-  (MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> MDoc) -> -- make function
-  (MDoc -> [MDoc] -> [MDoc] -> MDoc) ->
-  Int ->
-  ManifoldForm (Or TypeS TypeF) t ->
-  Maybe HeadManifoldForm ->
-  PoolDocs ->
-  PoolDocs
-translateManifold makeFunction makeLambda m form headForm (PoolDocs completeManifolds body priorLines priorExprs) =
-  let args =
-        abiappend
-          (\i r -> [Arg i t | t <- bilist typeMof typeMof r])
-          (\i t -> [Arg i (typeMof t)])
-          form
-      mname = manNamer m
-      newManifold = makeFunction mname args priorLines body headForm
-      call = case form of
-        (ManifoldPass _) -> mname
-        (ManifoldFull rs) -> mname <> tupled (map argNamer (asArgs rs))
-        (ManifoldPart rs vs) ->
-          makeLambda
-            mname
-            (map argNamer (asArgs rs))
-            [argNamer (Arg i (typeMof t)) | Arg i t <- vs]
-   in PoolDocs
-        { poolCompleteManifolds = newManifold : completeManifolds
-        , poolExpr = call
-        , poolPriorLines = []
-        , poolPriorExprs = priorExprs
-        }
-  where
-    asArgs :: [Arg (Or TypeS TypeF)] -> [Arg TypeM]
-    asArgs rs = concat [[Arg i t | t <- bilist typeMof typeMof orT] | (Arg i orT) <- rs]

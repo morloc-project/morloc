@@ -266,7 +266,6 @@ expandDeserialize cfg v0 s0
     construct _ _ = error "Unreachable in expandDeserialize"
 
 -- | Lower a serial expression to PoolDocs via the IR.
--- Replaces genericMakeSerialExpr from Syntax.hs.
 lowerSerialExpr ::
   (Monad m) =>
   LowerConfig m ->
@@ -289,7 +288,6 @@ lowerSerialExpr cfg _ (SerializeS_ s e) = do
   return $ e {poolExpr = poolExpr se, poolPriorLines = poolPriorLines e <> poolPriorLines se}
 
 -- | Lower a native expression to PoolDocs via the IR.
--- Replaces genericMakeNativeExpr from Syntax.hs.
 lowerNativeExpr ::
   (Monad m) =>
   LowerConfig m ->
