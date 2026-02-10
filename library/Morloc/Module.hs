@@ -38,7 +38,9 @@ import qualified Morloc.Config as Config
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
+import Morloc.Namespace.Prim
+import Morloc.Namespace.Expr
+import Morloc.Namespace.State
 import qualified Morloc.System as MS
 import Data.Aeson
 import System.Directory

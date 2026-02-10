@@ -21,7 +21,9 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
+import Morloc.Namespace.Prim
+import Morloc.Namespace.Type
+import Morloc.Namespace.State (MorlocError(..))
 
 -- Evaluate a type expression with both the concrete and general scopes
 --

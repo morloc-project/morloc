@@ -6,7 +6,10 @@ License     : Apache-2.0
 Maintainer  : z@morloc.io
 -}
 module Morloc.Frontend.Namespace
-  ( module Morloc.Namespace
+  ( module Morloc.Namespace.Prim
+  , module Morloc.Namespace.Type
+  , module Morloc.Namespace.Expr
+  , module Morloc.Namespace.State
   , mapExpr
   , mapExprM
   -- rifraf
@@ -22,7 +25,10 @@ import qualified Data.Text as DT
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
-import Morloc.Namespace hiding (name)
+import Morloc.Namespace.Prim hiding (name)
+import Morloc.Namespace.Type
+import Morloc.Namespace.Expr
+import Morloc.Namespace.State
 
 -- | Determine if a type term is generic (i.e., is the first letter lowercase?)
 isGeneric :: Text -> Bool

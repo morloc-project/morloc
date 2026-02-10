@@ -86,7 +86,10 @@ import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
-import Morloc.Namespace
+import Morloc.Namespace.Prim
+import Morloc.Namespace.Type
+import Morloc.Namespace.Expr
+import Morloc.Namespace.State
 import qualified Morloc.System as MS
 import qualified System.Exit as SE
 import System.IO (stderr)

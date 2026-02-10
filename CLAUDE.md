@@ -8,6 +8,27 @@ For details, follow links like [[path/to/file]]. Ask before writing to doc files
 
 Morloc is a multi-lingual typed workflow language enabling function composition across Python, C++, and R under a unified type system. The compiler parses `.loc` files, performs type checking, and generates a C nexus executable that orchestrates cross-language calls via msgpack serialization.
 
+## Haskell Coding Style
+- comments should be sparse and succinct
+- comments should explain complex code and a rationale
+- avoid non-total functions when possible
+
+## Testing Conventions
+- tests should be written for all new features
+- tests may be unit tests or integrated golden-tests
+- test strategies, and justification for why they cover the new feature, should be provided
+
+## Morloc Coding Style
+
+All morloc signatures should have a one-line docstring (--' prefix), e.g.:
+
+```
+--' this function doubles a value
+double :: Int -> Int
+```
+
+Use the . and $ operators as in Haskell
+
 ## Quick Start
 
 ```bash

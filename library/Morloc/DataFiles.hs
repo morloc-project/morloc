@@ -24,7 +24,7 @@ module Morloc.DataFiles
 import Data.FileEmbed (embedFileRelative)
 import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
-import Morloc.Namespace
+import Morloc.Namespace.Prim (Lang(..))
 
 data EmbededFile = EmbededFile
   { embededFileName :: String -- basename for the file

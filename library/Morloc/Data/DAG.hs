@@ -44,7 +44,8 @@ module Morloc.Data.DAG
 import qualified Data.Set as Set
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
+import Morloc.Namespace.Prim
+import Morloc.Namespace.State (MorlocMonad)
 
 edgelist :: DAG k e n -> [(k, k)]
 edgelist d = concat [[(k, j) | (j, _) <- xs] | (k, (_, xs)) <- Map.toList d]

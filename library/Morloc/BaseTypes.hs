@@ -48,7 +48,8 @@ module Morloc.BaseTypes
   ) where
 
 import Morloc.Data.Text (pretty)
-import Morloc.Namespace
+import Morloc.Namespace.Prim (TVar(..))
+import Morloc.Namespace.Type (TypeU(..))
 import Prelude hiding (log)
 
 unit :: TVar

@@ -13,7 +13,8 @@ module Morloc.ProgramBuilder.Build
 
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
+import Morloc.Namespace.Prim
+import Morloc.Namespace.State
 import qualified Morloc.System as MS
 import qualified System.Directory as SD
 

@@ -26,7 +26,9 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
+import Morloc.Namespace.Prim
+import Morloc.Namespace.Expr
+import Morloc.Namespace.State
 import qualified Morloc.System as MS
 
 getDefaultConfigFilepath :: IO Path

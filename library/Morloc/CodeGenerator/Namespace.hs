@@ -12,7 +12,10 @@ License     : Apache-2.0
 Maintainer  : z@morloc.io
 -}
 module Morloc.CodeGenerator.Namespace
-  ( module Morloc.Namespace
+  ( module Morloc.Namespace.Prim
+  , module Morloc.Namespace.Type
+  , module Morloc.Namespace.Expr
+  , module Morloc.Namespace.State
 
     -- ** Types used in final translations
   , TypeM (..)
@@ -127,7 +130,10 @@ import Control.Monad.Identity (runIdentity)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 import Morloc.Data.Doc
-import Morloc.Namespace
+import Morloc.Namespace.Prim
+import Morloc.Namespace.Type
+import Morloc.Namespace.Expr
+import Morloc.Namespace.State
 
 -- The final types used in code generation. The language annotation is removed,
 -- since the language for all types within a pool are the same.

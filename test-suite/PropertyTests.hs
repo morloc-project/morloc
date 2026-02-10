@@ -2,7 +2,7 @@ module PropertyTests
   ( propertyTests
   ) where
 
-import Morloc.Namespace
+import Morloc.Namespace.Prim
 
 import qualified Data.Set as Set
 import Test.Tasty

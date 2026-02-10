@@ -11,7 +11,10 @@ module Morloc
   , typecheckFrontend
   ) where
 
-import Morloc.Namespace
+import Morloc.Namespace.Prim
+import Morloc.Namespace.Type
+import Morloc.Namespace.Expr
+import Morloc.Namespace.State
 
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
 import Morloc.CodeGenerator.Generate (generate)

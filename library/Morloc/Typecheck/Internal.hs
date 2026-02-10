@@ -66,7 +66,10 @@ import qualified Morloc.BaseTypes as BT
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
+import Morloc.Namespace.Prim
+import Morloc.Namespace.Type
+import Morloc.Namespace.Expr
+import Morloc.Namespace.State
 import qualified Morloc.TypeEval as TE
 
 qualify :: [TVar] -> TypeU -> TypeU

@@ -27,7 +27,7 @@ module Morloc.Data.GMap
 
 import qualified Data.Set as Set
 import qualified Morloc.Data.Map as Map
-import Morloc.Namespace hiding (insert, lookup)
+import Morloc.Namespace.Prim hiding (insert, lookup)
 import Prelude hiding (lookup)
 
 mapVals :: (c -> c') -> GMap a b c -> GMap a b c'

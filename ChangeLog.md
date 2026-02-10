@@ -13,11 +13,13 @@
  [ ] Apache Arrow format support
  [ ] streamline language binders
  [ ] clean up backend architecture
- [ ] more efficient compiling
+ [ ] more efficient C/C++ compiling
+ [ ] effect system
 
 0.61.0 [2026-02-xx]
 -------------------
- [ ] effect system
+ * better error messages
+ * clean `morloc typecheck` output
 
 0.60.0 [2026-02-07]
 -------------------

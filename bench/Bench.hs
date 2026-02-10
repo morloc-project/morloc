@@ -22,7 +22,8 @@ import System.FilePath ((</>))
 import qualified System.Directory as SD
 
 import Morloc (typecheckFrontend, typecheck)
-import Morloc.Namespace (Code(..), Config(..), MorlocMonad, MorlocError, defaultValue)
+import Morloc.Namespace.Prim (Code(..), Defaultable(..))
+import Morloc.Namespace.State (Config(..), MorlocMonad, MorlocError)
 import qualified Morloc.Monad as MM
 
 -- | Helper to read benchmark test files

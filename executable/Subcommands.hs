@@ -21,7 +21,10 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.API as F
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
+import Morloc.Namespace.Prim
+import Morloc.Namespace.Type
+import Morloc.Namespace.Expr
+import Morloc.Namespace.State
 import System.Exit (exitFailure, exitSuccess)
 import Text.Megaparsec.Error (errorBundlePretty)
 import UI

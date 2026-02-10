@@ -12,7 +12,7 @@ module Morloc.System
   , loadYamlConfig
   ) where
 
-import Morloc.Namespace
+import Morloc.Namespace.Prim
 
 import Data.Aeson (FromJSON (..))
 import qualified Data.Yaml.Config as YC
