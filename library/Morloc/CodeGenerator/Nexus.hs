@@ -79,11 +79,35 @@ data NexusExpr
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX
 
+-- Prep the data needed for each subcommand in the nexus
+makeFData ::
+  (AnnoS (Indexed Type) One (Indexed Lang), CmdDocSet) ->
+  MorlocMonad (Type, Int, Lang, CmdDocSet, [Socket])
+makeFData (e@(AnnoS (Idx i t) (Idx _ lang) _), d) = do
+  sockets <- findSockets e
+  return (t, i, lang, d, sockets)
+
+findSockets :: AnnoS e One (Indexed Lang) -> MorlocMonad [Socket]
+findSockets rAST = do
+  config <- MM.ask
+  return . map (MC.setupServerAndSocket config) . unique $ findAllLangsSAnno rAST
+
+findAllLangsSAnno :: AnnoS e One (Indexed Lang) -> [Lang]
+findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e
+  where
+    findAllLangsExpr (VarS _ (One x)) = findAllLangsSAnno x
+    findAllLangsExpr (AppS x xs) = concatMap findAllLangsSAnno (x : xs)
+    findAllLangsExpr (LamS _ x) = findAllLangsSAnno x
+    findAllLangsExpr (LstS xs) = concatMap findAllLangsSAnno xs
+    findAllLangsExpr (TupS xs) = concatMap findAllLangsSAnno xs
+    findAllLangsExpr (NamS rs) = concatMap (findAllLangsSAnno . snd) rs
+    findAllLangsExpr _ = []
+
 generate ::
   [(AnnoS (Indexed Type) One (), CmdDocSet)] ->
-  [(Type, Int, Lang, CmdDocSet, [Socket])] ->
+  [(AnnoS (Indexed Type) One (Indexed Lang), CmdDocSet)] ->
   MorlocMonad Script
-generate cs xs = do
+generate cs rASTs = do
   config <- MM.ask
 
   gasts <- mapM annotateGasts cs
@@ -94,6 +118,7 @@ generate cs xs = do
       includeDir = home </> "include"
       libDir = home </> "lib"
 
+  xs <- mapM makeFData rASTs
   fdata <- CM.mapM getFData xs -- [FData]
 
   -- get the length of the longest subcommand name (needed for alignment)

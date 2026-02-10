@@ -9,6 +9,7 @@ module Morloc
   ( writeProgram
   , typecheck
   , typecheckFrontend
+  , generatePools
   ) where
 
 import Morloc.Namespace.Prim
@@ -17,12 +18,19 @@ import Morloc.Namespace.Expr
 import Morloc.Namespace.State
 
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
-import Morloc.CodeGenerator.Generate (generate)
+import Morloc.CodeGenerator.Emit (pool, emit)
+import Morloc.CodeGenerator.Namespace (SerialManifold)
+import Morloc.CodeGenerator.Express (express)
 import Morloc.CodeGenerator.LambdaEval (applyLambdas)
+import Morloc.CodeGenerator.Parameterize (parameterize)
 import Morloc.CodeGenerator.Realize (realityCheck)
+import Morloc.CodeGenerator.Segment (segment)
+import Morloc.CodeGenerator.Serialize (serialize)
+import qualified Morloc.CodeGenerator.Nexus as Nexus
 import qualified Morloc.Frontend.API as F
 import Morloc.Frontend.Restructure (restructure)
 import Morloc.Frontend.Treeify (treeify)
+import qualified Morloc.Monad as MM
 import Morloc.ProgramBuilder.Build (buildProgram)
 
 -- | Check the general types only
@@ -58,6 +66,15 @@ typecheck path code =
     -- check for value contradictions between implementations
     >>= realityCheck
 
+-- | Do everything except language specific code generation.
+generatePools :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [(Lang, [SerialManifold])]
+generatePools rASTs =
+  mapM parameterize rASTs
+    >>= mapM express
+    >>= mapM segment |>> concat
+    >>= mapM serialize
+    |>> pool
+
 -- | Build a program as a local executable
 writeProgram ::
   -- | source code filename (for debugging messages)
@@ -71,8 +88,17 @@ writeProgram path code =
     >>= bimapM (mapM applyLambdas) (mapM applyLambdas)
     -- process docstrings to determine how to build CLI
     >>= bimapM (mapM processDocstrings) (mapM processDocstrings)
-    -- prepare scripts
-    >>= uncurry generate
-    -- (Script, [Script]) -> IO ()
+    -- generate nexus and pools
+    >>= \(gASTs, rASTs) -> do
+      nexus <- Nexus.generate gASTs rASTs
+      MM.startCounter
+      pools <-
+        mapM parameterize (map fst rASTs)
+          >>= mapM express
+          >>= mapM segment |>> concat
+          >>= mapM serialize
+          |>> pool
+          >>= mapM (uncurry emit)
+      return (nexus, pools)
     -- write the code and compile as needed
     >>= buildProgram

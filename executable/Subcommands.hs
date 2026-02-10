@@ -11,7 +11,7 @@ module Subcommands (runMorloc) where
 
 import qualified Data.Map as Map
 import qualified Morloc as M
-import Morloc.CodeGenerator.Generate (generatePools)
+import Morloc (generatePools)
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.CodeGenerator.Namespace (SerialManifold (..))
 import qualified Morloc.CodeGenerator.SystemConfig as MSC
