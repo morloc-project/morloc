@@ -295,12 +295,13 @@ handleFlagsAndPaths CppLang srcs = do
   -- this should store the mlccpptypes library that defines Unit
   home <- MM.asks configHome
   let mlcInclude = ["-I" <> home <> "/include"]
+      mlcLib = ["-L" <> home <> "/lib", "-Wl,-rpath," <> home <> "/lib", "-lmorloc", "-lpthread"]
 
   return
     ( -- all sources that have a defined path (import something)
       filter (isJust . srcPath) srcs'
     , -- compiler flags and shared libraries
-      [gccversion] <> explicitLibs ++ (map MT.pack . concat) (mlcInclude : libflags)
+      [gccversion] <> explicitLibs ++ (map MT.pack . concat) (mlcInclude : mlcLib : libflags)
     , -- paths to files to include
       unique (catMaybes paths)
     )

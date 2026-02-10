@@ -92,6 +92,7 @@ generate cs xs = do
   -- this includes the mlcmpack module needed for MessagePack handling
   let home = MC.configHome config
       includeDir = home </> "include"
+      libDir = home </> "lib"
 
   fdata <- CM.mapM getFData xs -- [FData]
 
@@ -114,7 +115,9 @@ generate cs xs = do
       , scriptCode = "." :/ File nexusfile (Code . render $ mainDoc)
       , scriptMake =
           [ SysRun . Code $
-              "gcc -o " <> MT.pack outfile <> " -O -I" <> MT.pack includeDir <> " " <> MT.pack nexusfile
+              "gcc -o " <> MT.pack outfile <> " -O -I" <> MT.pack includeDir
+              <> " " <> MT.pack nexusfile
+              <> " -L" <> MT.pack libDir <> " -Wl,-rpath," <> MT.pack libDir <> " -lmorloc -lpthread"
           ]
       }
 

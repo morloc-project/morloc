@@ -77,33 +77,28 @@ configureAllSteps verbose force slurmSupport config = do
     say "installing mlccpptypes"
     callCommand cmd
 
-  let libmorlocPath = includeDir </> DF.embededFileName (DF.libMorlocH DF.libmorloc)
+  let libmorlocHPath = includeDir </> DF.embededFileName (DF.libMorlocH DF.libmorloc)
+      libmorlocCPath = includeDir </> DF.embededFileName (DF.libMorlocC DF.libmorloc)
       libhashPath = includeDir </> DF.embededFileName (DF.libHashH DF.libmorloc)
 
-  say "Creating morloc.h"
-  TIO.writeFile libmorlocPath $ DF.embededFileText (DF.libMorlocH DF.libmorloc)
+  say "Writing morloc.h, morloc.c, xxhash.h"
+  TIO.writeFile libmorlocHPath $ DF.embededFileText (DF.libMorlocH DF.libmorloc)
+  TIO.writeFile libmorlocCPath $ DF.embededFileText (DF.libMorlocC DF.libmorloc)
   TIO.writeFile libhashPath $ DF.embededFileText (DF.libHashH DF.libmorloc)
 
-  say "Generating libmorloc.so"
-  -- this is a stupid hack to make gcc compile a header to a shared object
-  let tmpCFile = tmpDir </> "x.c"
-
-      soPath = libDir </> "libmorloc.so"
-  TIO.writeFile
-    tmpCFile
-    ( "#include \""
-        <> MT.pack libmorlocPath
-        <> "\""
-        <> "\n"
-        <> "#include \""
-        <> MT.pack libhashPath
-        <> "\""
-    )
-  -- special system-wide morloc build options
+  say "Compiling libmorloc.a and libmorloc.so"
   let morlocOptions = (if slurmSupport then ["-DSLURM_SUPPORT"] else [])
-  let gccArgs = ["-O", "-shared", "-o", soPath, "-fPIC", tmpCFile] <> morlocOptions
-  callProcess "gcc" gccArgs
-  removeFile tmpCFile
+      objPath = tmpDir </> "morloc.o"
+      soPath = libDir </> "libmorloc.so"
+      aPath = libDir </> "libmorloc.a"
+  -- Compile morloc.c to object file
+  callProcess "gcc" $ ["-c", "-O2", "-fPIC", "-I" <> includeDir, "-o", objPath, libmorlocCPath] <> morlocOptions
+  -- Create static library
+  callProcess "ar" ["rcs", aPath, objPath]
+  -- Create shared library
+  callProcess "gcc" ["-shared", "-o", soPath, objPath]
+  -- Clean up object file
+  removeFile objPath
 
   say "Configuring C++ morloc api header"
   TIO.writeFile (includeDir </> DF.embededFileName DF.libcpplang) (DF.embededFileText DF.libcpplang)
@@ -121,7 +116,7 @@ configureAllSteps verbose force slurmSupport config = do
   callCommand ("make -C " <> optDir <> " -f " <> DF.embededFileName DF.libpylangMakefile)
 
   say "Configuring R morloc API libraries"
-  compileCCodeIfNeeded
+  compileCCodeIfNeeded libDir
     (DF.embededFileText DF.librlang)
     (includeDir </> DF.embededFileName DF.librlang)
     (libDir </> "librmorloc.so")
@@ -151,8 +146,8 @@ configureAllSteps verbose force slurmSupport config = do
             putStrLn $
               "Checking " ++ description ++ " ... missing, creating at " ++ path
 
-    compileCCodeIfNeeded :: Text -> Path -> Path -> Path -> IO ()
-    compileCCodeIfNeeded codeText sourcePath libPath objPath = do
+    compileCCodeIfNeeded :: Path -> Text -> Path -> Path -> Path -> IO ()
+    compileCCodeIfNeeded libDir' codeText sourcePath libPath objPath = do
       alreadyExists <- doesFileExist libPath
       if (alreadyExists && force == DoNotOverwrite)
         then return ()
@@ -164,6 +159,7 @@ configureAllSteps verbose force slurmSupport config = do
           -- Compile the C code, will generate a .so file with same path and
           -- basename as the source .c file
           let compileCommand = "R CMD SHLIB " ++ sourcePath ++ " -o " ++ libPath
+                ++ " -L" ++ libDir' ++ " -Wl,-rpath," ++ libDir' ++ " -lmorloc -lpthread"
 
           callCommand compileCommand
 

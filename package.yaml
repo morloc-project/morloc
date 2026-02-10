@@ -21,7 +21,9 @@ extra-source-files:
   - data/pools/pool.cpp
   - data/pools/pool.py
   # universal c library
-  - data/morloc.h
+  - data/morloc/morloc.h
+  - data/morloc/morloc.c
+  - data/morloc/third-party/xxhash.h
   # msgpack langs
   - data/lang/cpp/cppmorloc.hpp
   - data/lang/r/rmorloc.c

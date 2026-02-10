@@ -17,6 +17,7 @@ module = Extension(
         np_include_path  # Add numpy include directory
     ],
     library_dirs=[os.path.expanduser('~/.local/share/morloc/lib')],
+    runtime_library_dirs=[os.path.expanduser('~/.local/share/morloc/lib')],
     libraries=['morloc']
 )
 

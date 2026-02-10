@@ -34,12 +34,14 @@ data EmbededFile = EmbededFile
 -- C library for universal binary formatting, serialization, and everything
 data LibMorloc = LibMorloc
   { libMorlocH :: EmbededFile
+  , libMorlocC :: EmbededFile
   , libHashH :: EmbededFile
   }
 libmorloc =
   LibMorloc
-    { libMorlocH = EmbededFile "morloc.h" (decodeUtf8 $ $(embedFileRelative "data/morloc.h"))
-    , libHashH = EmbededFile "xxhash.h" (decodeUtf8 $ $(embedFileRelative "data/third-party/xxhash.h"))
+    { libMorlocH = EmbededFile "morloc.h" (decodeUtf8 $ $(embedFileRelative "data/morloc/morloc.h"))
+    , libMorlocC = EmbededFile "morloc.c" (decodeUtf8 $ $(embedFileRelative "data/morloc/morloc.c"))
+    , libHashH = EmbededFile "xxhash.h" (decodeUtf8 $ $(embedFileRelative "data/morloc/third-party/xxhash.h"))
     }
 
 -- The nexus template

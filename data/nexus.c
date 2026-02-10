@@ -109,7 +109,7 @@ uint64_t make_job_hash(uint64_t seed) {
             "%" PRIu64 ":%" PRIu64 ":%" PRIu64,
             pid, epoch_ns, uptime_ns);
 
-    return XXH64(buffer, strlen(buffer), seed);
+    return morloc_xxh64(buffer, strlen(buffer), seed);
 }
 
 
