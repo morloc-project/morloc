@@ -55,6 +55,7 @@ morloc make -o foo script.loc
 - [[claude-memory/TYPECHECKING-THEORY.md]] - Type system theory (Dunfield bidirectional)
 - [[claude-memory/TYPECHECKING-IMPLEMENTATION.md]] - Typechecker implementation details
 - [[claude-memory/CODEGEN.md]] - Code generation
+- [[claude-memory/TRANSLATOR-IR.md]] - Translator IR architecture (LowerConfig, IProgram, printers)
 - [[claude-memory/RUNTIME.md]] - Nexus, pools, and language bindings
 - [[claude-memory/SYSGEN.md]] - Build system and program generation
 - [[claude-memory/BUILD-SYSTEM.md]] - Build system deep dive (morloc.h, pools, compilers)

@@ -40,22 +40,42 @@ Located in `library/Morloc/CodeGenerator/`:
 
 ## Language Translators
 
+See [[TRANSLATOR-IR.md]] for the full IR architecture.
+
+Located in `library/Morloc/CodeGenerator/Grammars/`:
+
+- **Common.hs** — Shared infrastructure: `PoolDocs`, naming conventions, record collection/unification, dispatch extraction, AST inversion
+- **Macro.hs** — Template macro expansion
+
 Located in `library/Morloc/CodeGenerator/Grammars/Translator/`:
 
-**Python Translator**
-- Generates Python pool code
-- Maps morloc types to Python types
-- Handles Python-specific idioms
+- **Imperative.hs** — Shared imperative IR (`IStmt`/`IExpr`), lowering functions, `LowerConfig`, `IProgram`, `buildProgram`/`buildProgramM`
+- **Cpp.hs** — C++ translator (~592 lines). Monadic (`CppTranslator` state monad). Handles C++ types, struct generation, forward declarations.
+- **Python3.hs** — Python translator (~223 lines). Pure (uses `IndexM`). Handles Python imports, namespacing.
+- **R.hs** — R translator (~165 lines). Pure (uses `IndexM`). Handles R source loading, dynlib linking.
+- **PseudoCode.hs** — Debug pseudocode renderer for diagnostics
 
-**C++ Translator**
-- Generates C++ pool code
-- Maps morloc types to C++ types
-- Manages memory and templates
+Located in `library/Morloc/CodeGenerator/Grammars/Translator/Printer/`:
 
-**R Translator**
-- Generates R pool code
-- Maps morloc types to R types
-- Handles R vector semantics
+- **Cpp.hs** — C++ syntax printer (`printExpr`/`printStmt`/`printProgram`, struct/serializer templates, dispatch)
+- **Python3.hs** — Python syntax printer (`printExpr`/`printStmt`/`printProgram`)
+- **R.hs** — R syntax printer (`printExpr`/`printStmt`/`printProgram`)
+
+### Translation Architecture
+
+Each language translator follows the same pattern:
+
+```
+SerialManifold AST
+  → preprocess (invertSerialManifold)
+  → fold with defaultFoldRules(langLowerConfig)  -- shared IR lowering
+  → PoolDocs (rendered MDoc fragments)
+  → buildProgram/buildProgramM                    -- assemble IProgram
+  → Printer.printProgram                          -- fill pool template
+  → Script
+```
+
+The `LowerConfig` record (~30 fields) parameterizes all language-specific behavior: type rendering, accessors, constructors, let-binding syntax, function/lambda forms. The fold itself (`defaultFoldRules`) is written once in Imperative.hs.
 
 ## Generated Output
 
@@ -86,14 +106,14 @@ Type-checked AST
 
 ## Key Data Flow
 
-1. Function call in morloc → nexus dispatch
-2. Nexus serializes arguments → msgpack
-3. Nexus sends message → appropriate pool
-4. Pool deserializes → calls native function
-5. Pool serializes result → msgpack
-6. Nexus receives → deserializes → returns
+1. Function call in morloc -> nexus dispatch
+2. Nexus serializes arguments -> msgpack
+3. Nexus sends message -> appropriate pool
+4. Pool deserializes -> calls native function
+5. Pool serializes result -> msgpack
+6. Nexus receives -> deserializes -> returns
 
 See [[RUNTIME.md]] for runtime execution details.
 
 ---
-*See also: [[ARCHITECTURE.md]], [[RUNTIME.md]], [[SYSGEN.md]]*
+*See also: [[ARCHITECTURE.md]], [[TRANSLATOR-IR.md]], [[RUNTIME.md]], [[SYSGEN.md]]*
