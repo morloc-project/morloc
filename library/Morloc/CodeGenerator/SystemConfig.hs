@@ -22,6 +22,7 @@ import qualified Morloc.Data.Text as MT
 
 import Control.Exception (SomeException, displayException, try)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeFile)
+import System.FilePath (takeFileName, replaceExtension)
 import System.IO (IOMode (WriteMode), hPutStrLn, stderr, withFile)
 import System.Process (callCommand, callProcess)
 
@@ -77,28 +78,31 @@ configureAllSteps verbose force slurmSupport config = do
     say "installing mlccpptypes"
     callCommand cmd
 
-  let libmorlocHPath = includeDir </> DF.embededFileName (DF.libMorlocH DF.libmorloc)
-      libmorlocCPath = includeDir </> DF.embededFileName (DF.libMorlocC DF.libmorloc)
-      libhashPath = includeDir </> DF.embededFileName (DF.libHashH DF.libmorloc)
+  let buildDir = tmpDir </> "libmorloc-build"
+  createDirectoryIfMissing True buildDir
 
-  say "Writing morloc.h, morloc.c, xxhash.h"
-  TIO.writeFile libmorlocHPath $ DF.embededFileText (DF.libMorlocH DF.libmorloc)
-  TIO.writeFile libmorlocCPath $ DF.embededFileText (DF.libMorlocC DF.libmorloc)
-  TIO.writeFile libhashPath $ DF.embededFileText (DF.libHashH DF.libmorloc)
+  say "Writing morloc C library source files"
+  forM_ DF.libmorlocFiles $ \ef ->
+    TIO.writeFile (buildDir </> DF.embededFileName ef) (DF.embededFileText ef)
 
-  say "Compiling libmorloc.a and libmorloc.so"
-  let morlocOptions = (if slurmSupport then ["-DSLURM_SUPPORT"] else [])
-      objPath = tmpDir </> "morloc.o"
+  say "Compiling libmorloc.so"
+  let morlocOptions = if slurmSupport then ["-DSLURM_SUPPORT"] else []
+      cFiles = [buildDir </> DF.embededFileName ef | ef <- DF.libmorlocFiles, ".c" `isSuffixOf` DF.embededFileName ef]
       soPath = libDir </> "libmorloc.so"
-      aPath = libDir </> "libmorloc.a"
-  -- Compile morloc.c to object file
-  callProcess "gcc" $ ["-c", "-O2", "-fPIC", "-I" <> includeDir, "-o", objPath, libmorlocCPath] <> morlocOptions
-  -- Create static library
-  callProcess "ar" ["rcs", aPath, objPath]
+      objPaths = [buildDir </> replaceExtension (takeFileName f) "o" | f <- cFiles]
+  -- Compile each .c file to an object file
+  forM_ (zip cFiles objPaths) $ \(cFile, objPath) -> do
+    let args = ["-c", "-Wall", "-Werror", "-O2", "-fPIC", "-I" <> buildDir, "-o", objPath, cFile] <> morlocOptions
+    run "gcc" args
   -- Create shared library
-  callProcess "gcc" ["-shared", "-o", soPath, objPath]
-  -- Clean up object file
-  removeFile objPath
+  let soArgs = ["-shared", "-o", soPath] <> objPaths <> ["-lpthread"]
+  run "gcc" soArgs
+  -- Clean up build directory
+  forM_ DF.libmorlocFiles $ \ef -> removeFile (buildDir </> DF.embededFileName ef)
+  forM_ objPaths removeFile
+
+  say "Installing morloc.h"
+  TIO.writeFile (includeDir </> "morloc.h") DF.libmorlocHeader
 
   say "Configuring C++ morloc api header"
   TIO.writeFile (includeDir </> DF.embededFileName DF.libcpplang) (DF.embededFileText DF.libcpplang)
@@ -127,10 +131,13 @@ configureAllSteps verbose force slurmSupport config = do
     say :: String -> IO ()
     say message =
       if verbose
-        then do
-          hPutStrLn stderr (ok message)
-        else
-          return ()
+        then hPutStrLn stderr (ok message)
+        else return ()
+
+    run :: String -> [String] -> IO ()
+    run cmd args = do
+      when verbose $ hPutStrLn stderr (cmd <> " " <> unwords args)
+      callProcess cmd args
 
     createDirectoryWithDescription :: String -> FilePath -> IO ()
     createDirectoryWithDescription description path = do

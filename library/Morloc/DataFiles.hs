@@ -10,8 +10,8 @@ Maintainer  : z@morloc.io
 -}
 module Morloc.DataFiles
   ( EmbededFile (..)
-  , LibMorloc (..)
-  , libmorloc
+  , libmorlocFiles
+  , libmorlocHeader
   , nexusTemplate
   , poolTemplate
   , libcpplang
@@ -22,7 +22,12 @@ module Morloc.DataFiles
   ) where
 
 import Data.FileEmbed (embedFileRelative)
+import Data.Map (Map)
+import qualified Data.Map as Map
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8)
 import Morloc.Namespace.Prim (Lang(..))
 
@@ -31,18 +36,61 @@ data EmbededFile = EmbededFile
   , embededFileText :: Text -- full text the file contained at compile time
   }
 
--- C library for universal binary formatting, serialization, and everything
-data LibMorloc = LibMorloc
-  { libMorlocH :: EmbededFile
-  , libMorlocC :: EmbededFile
-  , libHashH :: EmbededFile
-  }
-libmorloc =
-  LibMorloc
-    { libMorlocH = EmbededFile "morloc.h" (decodeUtf8 $ $(embedFileRelative "data/morloc/morloc.h"))
-    , libMorlocC = EmbededFile "morloc.c" (decodeUtf8 $ $(embedFileRelative "data/morloc/morloc.c"))
-    , libHashH = EmbededFile "xxhash.h" (decodeUtf8 $ $(embedFileRelative "data/morloc/third-party/xxhash.h"))
-    }
+-- C library split into modular source files
+libmorlocFiles :: [EmbededFile]
+libmorlocFiles =
+  [ EmbededFile "morloc.h"     (decodeUtf8 $(embedFileRelative "data/morloc/morloc.h"))
+  , EmbededFile "macros.h"     (decodeUtf8 $(embedFileRelative "data/morloc/macros.h"))
+  , EmbededFile "memory.h"     (decodeUtf8 $(embedFileRelative "data/morloc/memory.h"))
+  , EmbededFile "call.h"       (decodeUtf8 $(embedFileRelative "data/morloc/call.h"))
+  , EmbededFile "packet.h"     (decodeUtf8 $(embedFileRelative "data/morloc/packet.h"))
+  , EmbededFile "schema.h"     (decodeUtf8 $(embedFileRelative "data/morloc/schema.h"))
+  , EmbededFile "eval.h"       (decodeUtf8 $(embedFileRelative "data/morloc/eval.h"))
+  , EmbededFile "slurm.h"      (decodeUtf8 $(embedFileRelative "data/morloc/slurm.h"))
+  , EmbededFile "utility.h"    (decodeUtf8 $(embedFileRelative "data/morloc/utility.h"))
+  , EmbededFile "mpack.h"      (decodeUtf8 $(embedFileRelative "data/morloc/mpack.h"))
+  , EmbededFile "json.h"       (decodeUtf8 $(embedFileRelative "data/morloc/json.h"))
+  , EmbededFile "cache.h"      (decodeUtf8 $(embedFileRelative "data/morloc/cache.h"))
+  , EmbededFile "xxhash.h"     (decodeUtf8 $(embedFileRelative "data/morloc/xxhash.h"))
+  , EmbededFile "cache.c"      (decodeUtf8 $(embedFileRelative "data/morloc/cache.c"))
+  , EmbededFile "cli.c"        (decodeUtf8 $(embedFileRelative "data/morloc/cli.c"))
+  , EmbededFile "eval.c"       (decodeUtf8 $(embedFileRelative "data/morloc/eval.c"))
+  , EmbededFile "ipc.c"        (decodeUtf8 $(embedFileRelative "data/morloc/ipc.c"))
+  , EmbededFile "json.c"       (decodeUtf8 $(embedFileRelative "data/morloc/json.c"))
+  , EmbededFile "mpack.c"      (decodeUtf8 $(embedFileRelative "data/morloc/mpack.c"))
+  , EmbededFile "packet.c"     (decodeUtf8 $(embedFileRelative "data/morloc/packet.c"))
+  , EmbededFile "schema.c"     (decodeUtf8 $(embedFileRelative "data/morloc/schema.c"))
+  , EmbededFile "serialize.c"  (decodeUtf8 $(embedFileRelative "data/morloc/serialize.c"))
+  , EmbededFile "shm.c"        (decodeUtf8 $(embedFileRelative "data/morloc/shm.c"))
+  , EmbededFile "slurm.c"      (decodeUtf8 $(embedFileRelative "data/morloc/slurm.c"))
+  , EmbededFile "utility.c"    (decodeUtf8 $(embedFileRelative "data/morloc/utility.c"))
+  ]
+
+-- | Produce a single self-contained morloc.h by recursively inlining local includes
+libmorlocHeader :: Text
+libmorlocHeader =
+  let fileMap = Map.fromList [(T.pack (embededFileName ef), embededFileText ef) | ef <- libmorlocFiles]
+  in inlineIncludes fileMap Set.empty (fileMap Map.! "morloc.h")
+
+-- Replace each #include "xxx.h" with the file contents, tracking visited files
+inlineIncludes :: Map Text Text -> Set Text -> Text -> Text
+inlineIncludes fileMap seen content = T.unlines $ concatMap processLine (T.lines content)
+  where
+    processLine line = case parseLocalInclude line of
+      Just filename
+        | filename `Set.member` seen -> []
+        | Just fileContent <- Map.lookup filename fileMap ->
+            T.lines $ inlineIncludes fileMap (Set.insert filename seen) fileContent
+        | otherwise -> [line]
+      Nothing -> [line]
+
+    parseLocalInclude line =
+      let stripped = T.stripStart line
+      in case T.stripPrefix "#include \"" stripped of
+        Just rest -> case T.stripSuffix "\"" rest of
+          Just filename -> Just filename
+          Nothing -> Nothing
+        Nothing -> Nothing
 
 -- The nexus template
 nexusTemplate :: EmbededFile
