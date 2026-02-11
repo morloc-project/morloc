@@ -149,9 +149,6 @@ uint8_t* stream_from_client_wait(int client_fd, int pselect_timeout_us, int recv
 
     RAISE_IF_WITH(ready == 0, free(buffer), "Timeout waiting for initial data");
     RAISE_IF(ready < 0, "pselect error: %s", strerror(errno));
-    RAISE_IF_WITH(FD_ISSET(client_fd, &read_fds) && (errno == EBADF || errno == ECONNRESET),
-                  free(buffer), "Socket error (%d): %s", client_fd, strerror(errno));
-
     RAISE_IF(!FD_ISSET(client_fd, &read_fds), "Bad client file descriptor")
     ssize_t recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);
 

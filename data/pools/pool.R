@@ -7,7 +7,6 @@
 # AUTO load dynamic libraries
 
 library(rlang)
-library(mirai)
 
 morloc_is_ping                       <- function(...){ .Call("morloc_is_ping",                       ...) }
 morloc_pong                          <- function(...){ .Call("morloc_pong",                          ...) }
@@ -24,6 +23,12 @@ morloc_shinit                        <- function(...){ .Call("morloc_shinit",   
 morloc_foreign_call                  <- function(...){ .Call("morloc_foreign_call",                  ...) }
 morloc_get_value                     <- function(...){ .Call("morloc_get_value",                     ...) }
 morloc_put_value                     <- function(...){ .Call("morloc_put_value",                     ...) }
+morloc_socketpair                    <- function(...){ .Call("morloc_socketpair",                    ...) }
+morloc_fork                          <- function(...){ .Call("morloc_fork",                          ...) }
+morloc_send_fd                       <- function(...){ .Call("morloc_send_fd",                       ...) }
+morloc_recv_fd                       <- function(...){ .Call("morloc_recv_fd",                       ...) }
+morloc_kill                          <- function(...){ .Call("morloc_kill",                          ...) }
+morloc_waitpid                       <- function(...){ .Call("morloc_waitpid",                       ...) }
 
 global_state <- list()
 
@@ -32,14 +37,15 @@ global_state <- list()
 # AUTO include manifolds end
 
 
-# Pure computation on raw vectors - runs in mirai worker
-compute_job <- function(client_data) {
+run_job <- function(client_fd) {
   tryCatch({
+    client_data <- morloc_stream_from_client(client_fd)
+
     is_local <- morloc_is_local_call(client_data)
     is_remote <- morloc_is_remote_call(client_data)
 
     if(morloc_is_ping(client_data)){
-      morloc_pong(client_data)
+      result <- morloc_pong(client_data)
     }
     else if(is_local || is_remote){
       ext <- if(is_remote) { "_remote" } else { "" }
@@ -50,7 +56,7 @@ compute_job <- function(client_data) {
       mlc_pool_function_name <- paste0("m", midx, ext)
 
       if(exists(mlc_pool_function_name)){
-        tryCatch({
+        result <- tryCatch({
           mlc_pool_function <- get(mlc_pool_function_name)
           do.call(mlc_pool_function, args)
         }, error = function(e) {
@@ -59,102 +65,86 @@ compute_job <- function(client_data) {
           }
         })
       } else {
-        morloc_make_fail_packet(paste("Function not found:", mlc_pool_function_name))
+        result <- morloc_make_fail_packet(paste("Function not found:", mlc_pool_function_name))
       }
     } else {
-      morloc_make_fail_packet("Unexpected packet type")
+      result <- morloc_make_fail_packet("Unexpected packet type")
     }
+
+    morloc_send_packet_to_foreign_server(client_fd, result)
   }, error = function(e) {
-    morloc_make_fail_packet(paste("Job failed:", e$message))
+    tryCatch(
+      morloc_send_packet_to_foreign_server(client_fd, morloc_make_fail_packet(paste("Job failed:", e$message))),
+      error = function(e2) {}
+    )
+  }, finally = {
+    morloc_close_socket(client_fd)
   })
 }
 
-# Main event loop
+worker_loop <- function(pipe_fd) {
+  while (TRUE) {
+    client_fd <- morloc_recv_fd(pipe_fd)
+    if (client_fd < 0L) break
+    run_job(client_fd)
+  }
+}
+
 main <- function(socket_path, tmpdir, shm_basename) {
   daemon <- morloc_start_daemon(socket_path, tmpdir, shm_basename, 0xffff)
-
   n_workers <- max(1L, parallel::detectCores() - 1L)
-  daemons(n = n_workers)
 
-  file_args <- grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
-  script_path <- normalizePath(sub("^--file=", "", file_args[1]))
+  pipes <- lapply(seq_len(n_workers), function(i) morloc_socketpair())
 
-  everywhere(
-    {
-      .morloc_worker_mode <<- TRUE
-      source(script_path, local = FALSE)
-      morloc_shinit(shm_basename, 0L, as.integer(0xffff))
-      global_state$tmpdir <<- tmpdir
-    },
-    script_path = script_path,
-    shm_basename = shm_basename,
-    tmpdir = tmpdir
-  )
-
-  pending <- list()
-
-  while (TRUE) {
-    # Accept new client connections
-    client_fd <- morloc_wait_for_client(daemon)
-    if(client_fd > 0L) {
-      client_data <- morloc_stream_from_client(client_fd)
-      m <- mirai(compute_job(client_data), client_data = client_data)
-      pending[[length(pending) + 1L]] <- list(mirai = m, client_fd = client_fd)
-    }
-
-    # Poll completed tasks and send responses
-    keep <- rep(TRUE, length(pending))
-    for(i in seq_along(pending)) {
-      if(!unresolved(pending[[i]]$mirai)) {
-        fd <- pending[[i]]$client_fd
-        tryCatch({
-          result <- pending[[i]]$mirai$data
-          if(is_error_value(result)) {
-            response <- morloc_make_fail_packet(as.character(result))
-          } else {
-            response <- result
-          }
-          morloc_send_packet_to_foreign_server(fd, response)
-        }, error = function(e) {
-          tryCatch(
-            morloc_send_packet_to_foreign_server(fd, morloc_make_fail_packet(paste("Send failed:", e$message))),
-            error = function(e2) {}
-          )
-        }, finally = {
-          morloc_close_socket(fd)
-        })
-        keep[i] <- FALSE
+  pids <- integer(n_workers)
+  for (i in seq_len(n_workers)) {
+    pid <- morloc_fork()
+    if (pid == 0L) {
+      # Child: close all parent-side fds
+      for (j in seq_len(n_workers)) morloc_close_socket(pipes[[j]][1L])
+      # Close child-side fds for other workers
+      for (j in seq_len(n_workers)) {
+        if (j != i) morloc_close_socket(pipes[[j]][2L])
       }
+      worker_loop(pipes[[i]][2L])
+      quit(status = 0, save = "no")
     }
-
-    if(!all(keep)) {
-      pending <- pending[keep]
-    }
+    pids[i] <- pid
+    morloc_close_socket(pipes[[i]][2L])  # Parent closes child end
   }
 
-  daemons(0)
-  return(0)
-}
-
-
-if (!exists(".morloc_worker_mode") || !isTRUE(.morloc_worker_mode)) {
-  args <- commandArgs(trailingOnly = TRUE)
-  if (length(args) != 3) {
-    cat("Usage: Rscript pool.R <socket_path> <tmpdir> <shm_basename>\n", file=stderr())
-    quit(status = 1)
+  # Main dispatch loop - round-robin
+  current <- 1L
+  while (TRUE) {
+    client_fd <- morloc_wait_for_client(daemon)
+    if (client_fd > 0L) {
+      tryCatch({
+        morloc_send_fd(pipes[[current]][1L], client_fd)
+        current <- (current %% n_workers) + 1L
+      }, error = function(e) {
+        cat(paste("Failed to dispatch job:", e$message, "\n"), file = stderr())
+      }, finally = {
+        morloc_close_socket(client_fd)  # Close parent's copy
+      })
+    }
   }
-
-  socket_path <- args[1]
-  tmpdir <- args[2]
-  shm_basename <- args[3]
-
-  global_state$tmpdir <- tmpdir
-
-  tryCatch(
-    {
-      exit_code <- main(socket_path, tmpdir, shm_basename)
-      quit(status = exit_code)
-    },  error = function(e) {
-        stop(paste("Pool failed:", e$message))
-    })
 }
+
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) != 3) {
+  cat("Usage: Rscript pool.R <socket_path> <tmpdir> <shm_basename>\n", file=stderr())
+  quit(status = 1)
+}
+
+socket_path <- args[1]
+tmpdir <- args[2]
+shm_basename <- args[3]
+
+global_state$tmpdir <- tmpdir
+
+tryCatch(
+  {
+    main(socket_path, tmpdir, shm_basename)
+  },  error = function(e) {
+      stop(paste("Pool failed:", e$message))
+  })

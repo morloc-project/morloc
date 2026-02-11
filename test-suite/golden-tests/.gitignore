@@ -10,3 +10,4 @@ nexus
 *.gdb
 .Rhistory
 .RData
+*.err

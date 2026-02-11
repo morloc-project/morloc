@@ -7,6 +7,11 @@
 #include <stdbool.h>
 #include <limits.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <unistd.h>
 
 #include "morloc.h"
 
@@ -775,7 +780,7 @@ SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
     }
     language_daemon_t* daemon = (language_daemon_t*)R_ExternalPtrAddr(daemon_r);
 
-    int client_fd = R_TRY(wait_for_client_with_timeout, daemon, 100);
+    int client_fd = R_TRY(wait_for_client_with_timeout, daemon, 10000);
 
     return ScalarInteger(client_fd);
 }
@@ -1133,6 +1138,103 @@ SEXP morloc_remote_call(SEXP midx, SEXP socket_path, SEXP cache_path, SEXP resou
 }
 
 
+// {{{ fork and fd-passing functions
+
+SEXP morloc_socketpair(void) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+        error("socketpair failed: %s", strerror(errno));
+    }
+    SEXP result = PROTECT(allocVector(INTSXP, 2));
+    INTEGER(result)[0] = sv[0];
+    INTEGER(result)[1] = sv[1];
+    UNPROTECT(1);
+    return result;
+}
+
+SEXP morloc_fork(void) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        error("fork failed: %s", strerror(errno));
+    }
+    return ScalarInteger((int)pid);
+}
+
+SEXP morloc_send_fd(SEXP pipe_fd_r, SEXP client_fd_r) {
+    int pipe_fd = INTEGER(pipe_fd_r)[0];
+    int client_fd = INTEGER(client_fd_r)[0];
+
+    struct msghdr msg = {0};
+    struct iovec iov;
+    char buf[1] = {0};
+    char cmsgbuf[CMSG_SPACE(sizeof(int))];
+
+    iov.iov_base = buf;
+    iov.iov_len = 1;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsgbuf;
+    msg.msg_controllen = sizeof(cmsgbuf);
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cmsg), &client_fd, sizeof(int));
+
+    ssize_t n = sendmsg(pipe_fd, &msg, 0);
+    if (n < 0) {
+        error("sendmsg SCM_RIGHTS failed: %s", strerror(errno));
+    }
+    return R_NilValue;
+}
+
+SEXP morloc_recv_fd(SEXP pipe_fd_r) {
+    int pipe_fd = INTEGER(pipe_fd_r)[0];
+
+    struct msghdr msg = {0};
+    struct iovec iov;
+    char buf[1];
+    char cmsgbuf[CMSG_SPACE(sizeof(int))];
+
+    iov.iov_base = buf;
+    iov.iov_len = 1;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsgbuf;
+    msg.msg_controllen = sizeof(cmsgbuf);
+
+    ssize_t n = recvmsg(pipe_fd, &msg, 0);
+    if (n <= 0) {
+        return ScalarInteger(-1);
+    }
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    if (cmsg == NULL || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
+        return ScalarInteger(-1);
+    }
+
+    int fd;
+    memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
+    return ScalarInteger(fd);
+}
+
+SEXP morloc_kill(SEXP pid_r, SEXP sig_r) {
+    pid_t pid = (pid_t)INTEGER(pid_r)[0];
+    int sig = INTEGER(sig_r)[0];
+    int ret = kill(pid, sig);
+    return ScalarInteger(ret);
+}
+
+SEXP morloc_waitpid(SEXP pid_r) {
+    pid_t pid = (pid_t)INTEGER(pid_r)[0];
+    int status;
+    pid_t result = waitpid(pid, &status, WNOHANG);
+    return ScalarInteger((int)result);
+}
+
+// }}} fork and fd-passing functions
+
 // }}} exported functions
 
 
@@ -1154,6 +1256,12 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_pong", (DL_FUNC) &morloc_pong, 1},
         {"morloc_make_fail_packet", (DL_FUNC) &morloc_make_fail_packet, 1},
         {"morloc_shinit", (DL_FUNC) &morloc_shinit, 3},
+        {"morloc_socketpair", (DL_FUNC) &morloc_socketpair, 0},
+        {"morloc_fork", (DL_FUNC) &morloc_fork, 0},
+        {"morloc_send_fd", (DL_FUNC) &morloc_send_fd, 2},
+        {"morloc_recv_fd", (DL_FUNC) &morloc_recv_fd, 1},
+        {"morloc_kill", (DL_FUNC) &morloc_kill, 2},
+        {"morloc_waitpid", (DL_FUNC) &morloc_waitpid, 1},
         {NULL, NULL, 0}
     };
 
