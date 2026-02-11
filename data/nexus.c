@@ -1,5 +1,6 @@
 #include "morloc.h"
 
+#include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
 #include <signal.h>
@@ -50,26 +51,74 @@ typedef struct config_s {
 } config_t;
 
 // global pid list of language daemons
-int pids[MAX_DAEMONS] = { 0 };
+// a pid of 0 means unused, -1 means already reaped
+pid_t pids[MAX_DAEMONS] = { 0 };
 
 // global temporary file
 char* tmpdir = NULL;
 
-
-void clean_exit(int exit_code){
-    // Kill all daemon processes
-    for (size_t i = 0; i < MAX_DAEMONS; i++) {
-        if (pids[i] > 0) { // Ensure pid is valid
-            if (kill(pids[i], SIGTERM) == -1) { // Send SIGTERM to gracefully terminate
-                perror("Failed to kill process");
+// SIGCHLD handler: reap terminated children immediately to prevent zombies
+void sigchld_handler(int sig) {
+    (void)sig;
+    int saved_errno = errno;
+    pid_t pid;
+    int status;
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        for (size_t i = 0; i < MAX_DAEMONS; i++) {
+            if (pids[i] == pid) {
+                pids[i] = -1; // mark as reaped
+                break;
             }
         }
     }
+    errno = saved_errno;
+}
 
-    // Delete the temporary directory and its contents
+void clean_exit(int exit_code){
+    // Block SIGCHLD during cleanup to avoid races with the handler
+    sigset_t block_chld, old_mask;
+    sigemptyset(&block_chld);
+    sigaddset(&block_chld, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &block_chld, &old_mask);
+
+    // Phase 1: Send SIGTERM to all live pools
+    for (size_t i = 0; i < MAX_DAEMONS; i++) {
+        if (pids[i] > 0) {
+            kill(pids[i], SIGTERM);
+        }
+    }
+
+    // Phase 2: Wait for pools to exit (up to 500ms per pool, then SIGKILL)
+    for (size_t i = 0; i < MAX_DAEMONS; i++) {
+        if (pids[i] <= 0) continue; // unused or already reaped
+
+        // Poll with non-blocking waitpid, sleeping 10ms between checks
+        int reaped = 0;
+        for (int attempt = 0; attempt < 50; attempt++) {
+            int status;
+            pid_t result = waitpid(pids[i], &status, WNOHANG);
+            if (result == pids[i] || result == -1) {
+                pids[i] = -1;
+                reaped = 1;
+                break;
+            }
+            struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000000 }; // 10ms
+            nanosleep(&ts, NULL);
+        }
+
+        // Escalate to SIGKILL if still alive
+        if (!reaped) {
+            kill(pids[i], SIGKILL);
+            waitpid(pids[i], NULL, 0); // blocking reap after SIGKILL
+            pids[i] = -1;
+        }
+    }
+
+    // Phase 3: Clean up resources (all pools are dead now)
     if (tmpdir != NULL) {
         delete_directory(tmpdir);
-        tmpdir = NULL; // Clear the pointer
+        free(tmpdir);
+        tmpdir = NULL;
     }
 
     char* errmsg = NULL;
@@ -79,7 +128,7 @@ void clean_exit(int exit_code){
         exit(1);
     }
 
-    exit(exit_code); // Exit with the provided code
+    exit(exit_code);
 }
 
 typedef struct morloc_socket_s{
@@ -116,15 +165,16 @@ uint64_t make_job_hash(uint64_t seed) {
 char* make_tmpdir(ERRMSG) {
     PTR_RETURN_SETUP(char)
 
-    // set to static so that the value can be used after exit
-    static char template[] = "/tmp/morloc.XXXXXX";
+    char template[] = "/tmp/morloc.XXXXXX";
 
-    // note that this is a pointer to template after mkdtemp mutates it
-    // so it is still on the stack and needn't be freed
     char* temp_dir = mkdtemp(template);
     RAISE_IF(temp_dir == NULL, "Failed to create temporary directory")
 
-    return temp_dir;
+    // strdup since template is stack-local
+    char* result = strdup(temp_dir);
+    RAISE_IF(result == NULL, "Failed to allocate temporary directory path")
+
+    return result;
 }
 
 
@@ -199,7 +249,6 @@ end:
 
 
 void start_daemons(morloc_socket_t** all_sockets){
-    int pid = 0;
     char* errmsg = NULL;
 
     size_t npids = 0;
@@ -214,27 +263,37 @@ void start_daemons(morloc_socket_t** all_sockets){
     }
 
     // wait for everything to wake up
-    for(morloc_socket_t** socket_ptr = all_sockets; *socket_ptr != NULL; socket_ptr++){
+    for(size_t si = 0; all_sockets[si] != NULL; si++){
+        morloc_socket_t* sock = all_sockets[si];
         uint8_t* ping_packet = make_ping_packet();
         double retry_time = INITIAL_RETRY_DELAY;
         int ping_timeout = INITIAL_PING_TIMEOUT_MICROSECONDS;
         uint8_t* return_data;
-        pid_t child_pid = (*socket_ptr)->pid;
+        pid_t child_pid = sock->pid;
 
         for(int attempt = 0; attempt <= MAX_RETRIES; attempt++){
+
+            // Check if SIGCHLD handler already reaped this child
+            if (pids[si] == -1) {
+                ERROR("Child process with pid %d for socket '%s' died unexpectedly (reaped by signal handler).", child_pid, sock->socket_filename);
+            }
 
             int status = 0;
             pid_t wait_result = waitpid(child_pid, &status, WNOHANG);
             if (wait_result == child_pid) {
-                ERROR("Child process with pid %d for socket '%s' died unexpectedly (status: %d).", child_pid, (*socket_ptr)->socket_filename, status);
+                pids[si] = -1;
+                ERROR("Child process with pid %d for socket '%s' died unexpectedly (status: %d).", child_pid, sock->socket_filename, status);
+            } else if (wait_result == -1 && errno == ECHILD) {
+                // Already reaped by SIGCHLD handler
+                ERROR("Child process with pid %d for socket '%s' died unexpectedly.", child_pid, sock->socket_filename);
             } else if (wait_result != 0){
-                ERROR("Child process with pid %d for socket '%s' ended with weird error (status: %d).", child_pid, (*socket_ptr)->socket_filename, status);
+                ERROR("Child process with pid %d for socket '%s' ended with weird error (status: %d).", child_pid, sock->socket_filename, status);
             }
 
-            return_data = send_and_receive_over_socket_wait((*socket_ptr)->socket_filename, ping_packet, ping_timeout, ping_timeout, &errmsg);
+            return_data = send_and_receive_over_socket_wait(sock->socket_filename, ping_packet, ping_timeout, ping_timeout, &errmsg);
             if(errmsg != NULL || return_data == NULL){
                 if(attempt == MAX_RETRIES){
-                    ERROR("Failed to ping '%s':\n%s", (*socket_ptr)->socket_filename, errmsg);
+                    ERROR("Failed to ping '%s':\n%s", sock->socket_filename, errmsg);
                 }
 
                 // Sleep using exponential backoff
@@ -552,6 +611,13 @@ int main(int argc, char *argv[]) {
     if(errmsg != NULL){
         ERROR("%s", errmsg);
     }
+
+    // Register SIGCHLD handler to reap child processes promptly
+    struct sigaction sa_chld;
+    sa_chld.sa_handler = sigchld_handler;
+    sigemptyset(&sa_chld.sa_mask);
+    sa_chld.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa_chld, NULL);
 
     // Command logic routing
     if (config.packet_path == NULL) {

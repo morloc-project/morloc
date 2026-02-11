@@ -445,7 +445,7 @@ void* createTupleAnythingHelper(void* dest, const Schema* schema, void** cursor,
 
 template<typename Primitive>
 Primitive fromAnything(const Schema* schema, const void* data, Primitive* dumby = nullptr) {
-    printf("line %d: %s\n", __LINE__, schema_to_string(schema));
+
     if(data == NULL){
         throw std::runtime_error("Void error in fromAnything");
     }
@@ -453,13 +453,13 @@ Primitive fromAnything(const Schema* schema, const void* data, Primitive* dumby 
 }
 
 bool fromAnything(const Schema* schema, const void* data, bool* dumby = nullptr) {
-    printf("line %d: %s\n", __LINE__, schema_to_string(schema));
+
     // NOTE: do NOT use bool here since its width is often not 1 byte
     return *(uint8_t*)data == 1;
 }
 
 std::string fromAnything(const Schema* schema, const void* data, std::string* dumby = nullptr) {
-    printf("line %d: %s\n", __LINE__, schema_to_string(schema));
+
     Array* array = (Array*)data;
     if(array->size > 0){
         return std::string((char*)cpp_rel2abs(array->data), array->size);
@@ -470,7 +470,6 @@ std::string fromAnything(const Schema* schema, const void* data, std::string* du
 
 template<typename T>
 std::vector<T> fromAnything(const Schema* schema, const void* data, std::vector<T>* dumby = nullptr){
-  printf("line %d: %s\n", __LINE__, schema_to_string(schema));
   std::vector<T> result;
   Array* array = (Array*) data;
 
@@ -511,7 +510,7 @@ std::vector<T> fromAnything(const Schema* schema, const void* data, std::vector<
 
 template<typename T>
 std::stack<T> fromAnything(const Schema* schema, const void* data, std::stack<T>* dumby = nullptr) {
-    printf("line %d: %s\n", __LINE__, schema_to_string(schema));
+
     Array* array = (Array*)data;
     std::stack<T> result;
     if(array->size > 0){
@@ -529,7 +528,7 @@ std::stack<T> fromAnything(const Schema* schema, const void* data, std::stack<T>
 
 template<typename T>
 std::list<T> fromAnything(const Schema* schema, const void* data, std::list<T>* dumby = nullptr) {
-    printf("line %d: %s\n", __LINE__, schema_to_string(schema));
+
     Array* array = (Array*)data;
     std::list<T> result;
     if(array->size > 0){
@@ -546,7 +545,7 @@ std::list<T> fromAnything(const Schema* schema, const void* data, std::list<T>* 
 
 template<typename T>
 std::forward_list<T> fromAnything(const Schema* schema, const void* data, std::forward_list<T>* dumby = nullptr) {
-    printf("line %d: %s\n", __LINE__, schema_to_string(schema));
+
     Array* array = (Array*)data;
     std::forward_list<T> result;
     if(array->size > 0){
@@ -564,7 +563,7 @@ std::forward_list<T> fromAnything(const Schema* schema, const void* data, std::f
 
 template<typename T>
 std::queue<T> fromAnything(const Schema* schema, const void* data, std::queue<T>* dumby = nullptr) {
-    printf("line %d: %s\n", __LINE__, schema_to_string(schema));
+
     Array* array = (Array*)data;
     std::queue<T> result;
     if(array->size > 0){
@@ -581,7 +580,7 @@ std::queue<T> fromAnything(const Schema* schema, const void* data, std::queue<T>
 
 template<typename T>
 std::deque<T> fromAnything(const Schema* schema, const void* data, std::deque<T>* dumby = nullptr) {
-    printf("line %d: %s\n", __LINE__, schema_to_string(schema));
+
     Array* array = (Array*)data;
     std::deque<T> result;
     if(array->size > 0){
@@ -598,7 +597,7 @@ std::deque<T> fromAnything(const Schema* schema, const void* data, std::deque<T>
 
 template<typename... Args>
 std::tuple<Args...> fromAnything(const Schema* schema, const void* anything, std::tuple<Args...>* = nullptr) {
-    printf("line %d: %s\n", __LINE__, schema_to_string(schema));
+
     return fromTupleAnythingHelper(
       schema,
       anything,

@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# valgrind-check.sh - Check for memory leaks and leaked file descriptors
+#
+# Runs the nexus under valgrind with leak checking and fd tracking.
+# Requires valgrind to be installed; skips gracefully if not available.
+#
+# Usage: ./valgrind-check.sh <golden-test-dir> <call>
+#   e.g. ./valgrind-check.sh ../golden-tests/interop-3a-cp "foo '[1,2,3]'"
+
+source "$(dirname "$0")/common.sh"
+
+parse_args "$@"
+
+echo "=== Valgrind Memory/FD Leak Check ==="
+
+if ! command -v valgrind &>/dev/null; then
+    echo "SKIP: valgrind not found"
+    exit 0
+fi
+
+compile_workload
+
+VALGRIND_LOG="/tmp/morloc-valgrind-$$.log"
+
+# Use first call only for valgrind (deterministic)
+CALL="${CALLS[0]}"
+echo "Running under valgrind: ./nexus $CALL"
+eval timeout 60 valgrind \
+    --leak-check=full \
+    --show-leak-kinds=definite,indirect \
+    --track-fds=yes \
+    --log-file="$VALGRIND_LOG" \
+    ./nexus $CALL > /dev/null 2>&1
+EXIT_CODE=$?
+
+echo ""
+if [ ! -f "$VALGRIND_LOG" ]; then
+    echo "FAIL: No valgrind log produced"
+    exit 1
+fi
+
+if (( EXIT_CODE == 124 )); then
+    echo "FAIL: Timed out under valgrind"
+    rm -f "$VALGRIND_LOG"
+    exit 1
+fi
+
+# Extract definite leak count
+DEFINITELY_LOST=$(grep 'definitely lost:' "$VALGRIND_LOG" | grep -oP '\d+(?= bytes)' | head -1)
+DEFINITELY_LOST=${DEFINITELY_LOST:-0}
+FD_LEAK=$(grep 'FILE DESCRIPTORS:' "$VALGRIND_LOG" | grep -oP '\d+(?= open)' | head -1)
+FD_LEAK=${FD_LEAK:-3}
+EXTRA_FDS=$((FD_LEAK - 3))  # subtract stdin/stdout/stderr
+
+echo "Definitely lost: ${DEFINITELY_LOST} bytes"
+echo "Extra file descriptors at exit: ${EXTRA_FDS}"
+
+# Fail on large leaks (>4KB) or many leaked fds (>3)
+if (( DEFINITELY_LOST > 4096 )); then
+    echo ""
+    echo "FAIL: Large memory leak detected (log: $VALGRIND_LOG)"
+    cat "$VALGRIND_LOG"
+    exit 1
+fi
+if (( EXTRA_FDS > 3 )); then
+    echo ""
+    echo "FAIL: File descriptor leak detected (log: $VALGRIND_LOG)"
+    cat "$VALGRIND_LOG"
+    exit 1
+fi
+
+rm -f "$VALGRIND_LOG"
+echo "PASS"

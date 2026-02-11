@@ -170,21 +170,35 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
 // AUTO dispatch end
 
 
-pthread_mutex_t shutting_down_mutex = PTHREAD_MUTEX_INITIALIZER;
-int shutting_down = 0;
+typedef struct job_s {
+    int client_fd;
+    struct job_s* next;
+} job_t;
+
+typedef struct job_queue_s {
+    job_t* head;
+    job_t* tail;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+} job_queue_t;
+
+volatile sig_atomic_t shutting_down = 0;
+job_queue_t* g_queue = NULL;
 
 int is_shutting_down() {
-    int value;
-    pthread_mutex_lock(&shutting_down_mutex);
-    value = shutting_down;
-    pthread_mutex_unlock(&shutting_down_mutex);
-    return value;
+    return shutting_down;
 }
 
 void set_shutting_down(int value) {
-    pthread_mutex_lock(&shutting_down_mutex);
     shutting_down = value;
-    pthread_mutex_unlock(&shutting_down_mutex);
+}
+
+void sigterm_handler(int sig) {
+    (void)sig;
+    shutting_down = 1;
+    if (g_queue != NULL) {
+        pthread_cond_broadcast(&g_queue->cond);
+    }
 }
 
 uint8_t* dispatch(const uint8_t* msg){
@@ -240,19 +254,6 @@ uint8_t* dispatch(const uint8_t* msg){
 
     return make_fail_packet("No manifold found");
 }
-
-
-typedef struct job_s {
-    int client_fd;
-    struct job_s* next;
-} job_t;
-
-typedef struct job_queue_s {
-    job_t* head;
-    job_t* tail;
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
-} job_queue_t;
 
 
 // start an empty job queue
@@ -400,6 +401,14 @@ int main(int argc, char* argv[]) {
 
     job_queue_t queue;
     job_queue_init(&queue);
+    g_queue = &queue;
+
+    // Register SIGTERM handler for graceful shutdown
+    struct sigaction sa;
+    sa.sa_handler = sigterm_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGTERM, &sa, NULL);
 
     long nthreads = sysconf(_SC_NPROCESSORS_ONLN);
     pthread_t threads[nthreads];
@@ -419,9 +428,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // set_shutting_down(1);
-    // // tell all the workers that it is time to die
-    // pthread_cond_broadcast(&q->cond);
+    set_shutting_down(1);
+    pthread_cond_broadcast(&queue.cond);
 
     if(daemon != NULL){
         close_daemon(&daemon);
