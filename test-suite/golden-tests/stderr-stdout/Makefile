@@ -1,9 +1,9 @@
 all:
 	rm -f obs.txt
-	morloc make main.loc
-	./nexus pfoo '"wena"' 2> obs.txt >> obs.txt
-	./nexus rfoo '"wena"' 2>> obs.txt >> obs.txt
-	./nexus cfoo '"wena"' 2>> obs.txt >> obs.txt
+	morloc make main.loc 2> build.err
+	./nexus pfoo '"wena"' 2> obs.txt 2>> obs.err  >> obs.txt
+	./nexus rfoo '"wena"' 2>> obs.txt 2>> obs.err  >> obs.txt
+	./nexus cfoo '"wena"' 2>> obs.txt 2>> obs.err  >> obs.txt
 
 
 clean:

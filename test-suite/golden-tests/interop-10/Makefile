@@ -1,6 +1,6 @@
 all:
-	morloc make main.loc
-	./nexus foo '"asdf"' 3.14 > obs.txt
+	morloc make main.loc 2> build.err
+	./nexus foo '"asdf"' 3.14 > obs.txt 2> obs.err
 
 .PHONY: clean
 clean:

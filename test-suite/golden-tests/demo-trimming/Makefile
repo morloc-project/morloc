@@ -1,5 +1,5 @@
 all:
-	morloc make foo.loc
+	morloc make foo.loc 2> build.err
 	./nexus readFASTQ '"example.fastq"' | \
 		./nexus trim config.json /dev/stdin | \
 		./nexus writeFASTA '"obs.txt"' /dev/stdin

@@ -1,9 +1,9 @@
 all:
 	rm -f obs.txt
-	morloc make main.loc
-	./nexus analyze -n 50 > obs.txt
-	./nexus summary >> obs.txt
-	./nexus groupBy -n 50 >> obs.txt
+	morloc make main.loc 2> build.err
+	./nexus analyze -n 50 > obs.txt 2> obs.err
+	./nexus summary 2>> obs.err  >> obs.txt
+	./nexus groupBy -n 50 2>> obs.err  >> obs.txt
 
 clean:
 	rm -rf nexus* pool* __pycache__
