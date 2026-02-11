@@ -758,13 +758,24 @@ SEXP morloc_start_daemon(
 
 
 
+SEXP morloc_shinit(SEXP shm_basename_r, SEXP volume_index_r, SEXP shm_size_r) { MAYFAIL
+    const char* shm_basename = CHAR(STRING_ELT(shm_basename_r, 0));
+    size_t volume_index = (size_t)asInteger(volume_index_r);
+    size_t shm_size = (size_t)asInteger(shm_size_r);
+
+    R_TRY(shinit, shm_basename, volume_index, shm_size);
+
+    return R_NilValue;
+}
+
+
 SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
     if (!R_ExternalPtrAddr(daemon_r)) {
         MORLOC_ERROR("Expected a daemon pointer");
     }
     language_daemon_t* daemon = (language_daemon_t*)R_ExternalPtrAddr(daemon_r);
 
-    int client_fd = R_TRY(wait_for_client_with_timeout, daemon, 10000);
+    int client_fd = R_TRY(wait_for_client_with_timeout, daemon, 100);
 
     return ScalarInteger(client_fd);
 }
@@ -1139,9 +1150,10 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_is_ping", (DL_FUNC) &morloc_is_ping, 1},
         {"morloc_is_local_call", (DL_FUNC) &morloc_is_local_call, 1},
         {"morloc_is_remote_call", (DL_FUNC) &morloc_is_remote_call, 1},
-        {"morloc_remote_call", (DL_FUNC) &morloc_is_remote_call, 1},
+        {"morloc_remote_call", (DL_FUNC) &morloc_remote_call, 5},
         {"morloc_pong", (DL_FUNC) &morloc_pong, 1},
         {"morloc_make_fail_packet", (DL_FUNC) &morloc_make_fail_packet, 1},
+        {"morloc_shinit", (DL_FUNC) &morloc_shinit, 3},
         {NULL, NULL, 0}
     };
 

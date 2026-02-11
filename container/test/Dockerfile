@@ -20,11 +20,11 @@ ENV PATH="/root/.ghcup/bin:${PATH}"
 # Set the timezone, this avoids hanging later on
 RUN DEBIAN_FRONTEND=noninteractive TZ=Antarctica/Troll apt-get -y install tzdata
 
-RUN apt-get install -y r-base python3.10 libgsl-dev git pip python3-numpy
+RUN apt-get install -y r-base python3.10 libgsl-dev git pip python3-numpy cmake
 RUN python3 -m pip install --upgrade --break-system-packages setuptools
 
 # Set up R environment
-RUN Rscript -e 'install.packages(c("rlang"), repos  = "https://cloud.r-project.org")'
+RUN Rscript -e 'install.packages(c("rlang", "mirai"), repos  = "https://cloud.r-project.org")'
 
 # Cleanup to reduce image size
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
