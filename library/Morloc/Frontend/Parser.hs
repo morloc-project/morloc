@@ -226,8 +226,8 @@ pInstance = do
   where
     pInstanceExpr :: Parser [ExprI]
     pInstanceExpr
-      =   try pSourceNew
-      <|> try pSourceLegacy
+      =   try pSourceLegacy
+      <|> try pSourceNew
       <|> (pAssE |>> return)
 
 -- | Parse fixity declaration: infixl 6 +, -

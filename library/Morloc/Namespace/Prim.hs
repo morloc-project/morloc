@@ -109,6 +109,8 @@ data SrcLoc = SrcLoc
   { srcLocPath :: Maybe Path
   , srcLocLine :: Int
   , srcLocCol  :: Int
+  , srcLocEndLine :: Int
+  , srcLocEndCol  :: Int
   } deriving (Show, Ord, Eq)
 
 -- ================ T Y P E C H E C K I N G  =================================
@@ -233,8 +235,13 @@ parseHMS hms = case splitOn ":" hms of
 ----- Pretty instances -------------------------------------------------------
 
 instance Pretty SrcLoc where
-  pretty (SrcLoc path ln col) =
-    maybe "<unknown>" pretty path <> ":" <> pretty ln <> ":" <> pretty col
+  pretty (SrcLoc path ln col endLn endCol)
+    | ln == endLn && col == endCol =
+        maybe "<unknown>" pretty path <> ":" <> pretty ln <> ":" <> pretty col
+    | ln == endLn =
+        maybe "<unknown>" pretty path <> ":" <> pretty ln <> ":" <> pretty col <> "-" <> pretty endCol
+    | otherwise =
+        maybe "<unknown>" pretty path <> ":" <> pretty ln <> ":" <> pretty col <> "-" <> pretty endLn <> ":" <> pretty endCol
 
 instance (Pretty a, Pretty b) => Pretty (Or a b) where
   pretty (L x) = parens ("L" <+> pretty x)

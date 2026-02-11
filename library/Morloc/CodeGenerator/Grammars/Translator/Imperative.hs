@@ -29,11 +29,11 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , expandSerialize
   , expandDeserialize
 
-    -- * Expression lowering (Stage 2)
+    -- * Expression lowering
   , lowerSerialExpr
   , lowerNativeExpr
 
-    -- * Manifold lowering (Stage 3)
+    -- * Manifold lowering
   , lowerSerialManifold
   , lowerNativeManifold
   , defaultFoldRules
@@ -150,7 +150,8 @@ data LowerConfig m = LowerConfig
     -- For C++: uses tuple indexing since records are deserialized as tuples
   , lcTupleAccessor :: Int -> MDoc -> MDoc
   , lcNewIndex :: m Int
-    -- Stage 2: expression/arg lowering fields
+
+    -- expression/arg lowering fields
   , lcPrintExpr :: IExpr -> MDoc
   , lcPrintStmt :: IStmt -> MDoc
   , lcEvalPattern :: TypeF -> Pattern -> [MDoc] -> m MDoc
@@ -168,7 +169,8 @@ data LowerConfig m = LowerConfig
   , lcReturn :: MDoc -> MDoc
   , lcSerialize :: MDoc -> SerialAST -> m PoolDocs
   , lcDeserialize :: TypeF -> MDoc -> SerialAST -> m (MDoc, [MDoc])
-    -- Stage 3: manifold lowering fields
+
+    -- manifold lowering fields
   , lcMakeFunction :: MDoc -> [Arg TypeM] -> TypeM -> [MDoc] -> MDoc
                    -> Maybe HeadManifoldForm -> m (Maybe MDoc)
     -- ^ name, all args, manifold type, priorLines, body, headForm

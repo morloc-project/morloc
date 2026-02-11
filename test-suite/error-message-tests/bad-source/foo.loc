@@ -1,0 +1,8 @@
+module main (foo)
+
+source Py from "badthing" ("foo" as bar)
+
+class Dohicky where
+  bar :: Int
+
+foo = 1

@@ -196,10 +196,12 @@ makeMorlocError st (UnificationError lhs rhs context msg) =
   where
     srcMap = stateSourceMap st
 
--- | Render a source code snippet with a pointer at the error location.
--- Clamps to the last line if the error position is past the end of the file.
+-- | Render a source code snippet with error location markers.
+-- For single-line spans: ^~~~^ underline from start to end column.
+-- For multi-line spans: Elm-style vertical bar in the gutter with ^ at start and end.
+-- Spans > 10 lines are truncated to first 5 and last 5 lines.
 snippet :: MorlocState -> SrcLoc -> MDoc
-snippet st (SrcLoc path ln col) =
+snippet st (SrcLoc path ln col endLn endCol) =
   case path >>= \p -> Map.lookup p (stateSourceText st) of
     Nothing -> mempty
     Just src ->
@@ -208,17 +210,68 @@ snippet st (SrcLoc path ln col) =
       in if n == 0 || ln < 1
          then mempty
          else
-           let lineNum = min ln n
-               errLine = srcLines !! (lineNum - 1)
-               gutterWidth = length (show lineNum)
-               gutter = pretty (MT.replicate gutterWidth " ")
-               pointer = if col > 1 && col <= MT.length errLine + 1
-                         then pretty (MT.replicate (col - 1) " ") <> "^"
-                         else pretty (MT.replicate (MT.length errLine) "~")
-           in line
-              <> gutter <+> "|" <> line
-              <> pretty lineNum <+> "|" <+> pretty errLine <> line
-              <> gutter <+> "|" <+> pointer <> line
+           let startLine = min ln n
+               finishLine = min endLn n
+               gw = length (show finishLine)
+               gutter = pretty (MT.replicate gw " ")
+               fmtLineNum num = let s = MT.show' num
+                                in pretty (MT.replicate (gw - MT.length s) " ") <> pretty s
+           in if startLine == finishLine
+              then snippetSingleLine srcLines startLine col endCol gutter fmtLineNum
+              else snippetMultiLine srcLines startLine col finishLine endCol gutter fmtLineNum
+  where
+    snippetSingleLine srcLines lineNum startCol eCol gutter fmtNum =
+      let errLine = srcLines !! (lineNum - 1)
+          sc = max 1 (min startCol (MT.length errLine + 1))
+          ec = max sc (min eCol (MT.length errLine + 1))
+          pointer
+            | sc == ec  = pretty (MT.replicate (sc - 1) " ") <> "^"
+            | ec > sc + 1 = pretty (MT.replicate (sc - 1) " ") <> "^"
+                         <> pretty (MT.replicate (ec - sc - 2) "~") <> "^"
+            | otherwise = pretty (MT.replicate (sc - 1) " ") <> "^^"
+      in line
+         <> gutter <+> "|" <> line
+         <> fmtNum lineNum <+> "|" <+> pretty errLine <> line
+         <> gutter <+> "|" <+> pointer <> line
+
+    snippetMultiLine srcLines startLine startCol finishLine eCol gutter fmtNum =
+      let totalLines = finishLine - startLine + 1
+          lineNums
+            | totalLines <= 10 = [startLine .. finishLine]
+            | otherwise = [startLine .. startLine + 4] ++ [finishLine - 4 .. finishLine]
+          needsElision = totalLines > 10
+          elisionPoint = startLine + 5
+
+          renderLine num =
+            let srcLine = srcLines !! (num - 1)
+            in fmtNum num <+> "| |" <+> pretty srcLine
+
+          renderStartPointer =
+            let sc = max 1 startCol
+            in gutter <+> "| |" <+> pretty (MT.replicate (sc - 1) " ") <> "^"
+
+          renderEndPointer =
+            let endLine = srcLines !! (finishLine - 1)
+                ec = max 1 (min eCol (MT.length endLine + 1))
+            in gutter <+> "| |" <+> pretty (MT.replicate (ec - 1) " ") <> "^"
+
+          elisionLine = gutter <+> "  ..."
+
+          renderLines [] = mempty
+          renderLines (num:rest)
+            | needsElision && num == elisionPoint =
+                elisionLine <> line <> renderLines (dropWhile (< finishLine - 4) rest)
+            | num == startLine =
+                renderLine num <> line
+                <> renderStartPointer <> line
+                <> renderLines rest
+            | otherwise =
+                renderLine num <> line
+                <> renderLines rest
+      in line
+         <> gutter <+> "|" <> line
+         <> renderLines lineNums
+         <> renderEndPointer <> line
 
 
 throwSystemError :: MonadError MorlocError m => MDoc -> m a

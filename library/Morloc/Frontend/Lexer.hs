@@ -110,7 +110,7 @@ exprId = do
   s <- CMS.get
   let i = stateExpIndex s
   CMS.put $ s { stateExpIndex = i + 1
-              , stateSourcePositions = Map.insert i (toSrcLoc pos) (stateSourcePositions s)
+              , stateSourcePositions = Map.insert i (toSrcLoc pos pos) (stateSourcePositions s)
               }
   return i
 
@@ -120,24 +120,27 @@ exprI e = do
   return (ExprI i e)
 
 exprIdAt :: SourcePos -> Parser Int
-exprIdAt pos = do
+exprIdAt startPos = do
+  endPos <- getSourcePos
   s <- CMS.get
   let i = stateExpIndex s
   CMS.put $ s { stateExpIndex = i + 1
-              , stateSourcePositions = Map.insert i (toSrcLoc pos) (stateSourcePositions s)
+              , stateSourcePositions = Map.insert i (toSrcLoc startPos endPos) (stateSourcePositions s)
               }
   return i
 
 exprIAt :: SourcePos -> Expr -> Parser ExprI
-exprIAt pos e = do
-  i <- exprIdAt pos
+exprIAt startPos e = do
+  i <- exprIdAt startPos
   return (ExprI i e)
 
-toSrcLoc :: SourcePos -> SrcLoc
-toSrcLoc pos = SrcLoc
-  { srcLocPath = Just (sourceName pos)
-  , srcLocLine = unPos (sourceLine pos)
-  , srcLocCol = unPos (sourceColumn pos)
+toSrcLoc :: SourcePos -> SourcePos -> SrcLoc
+toSrcLoc startPos endPos = SrcLoc
+  { srcLocPath = Just (sourceName startPos)
+  , srcLocLine = unPos (sourceLine startPos)
+  , srcLocCol = unPos (sourceColumn startPos)
+  , srcLocEndLine = unPos (sourceLine endPos)
+  , srcLocEndCol = unPos (sourceColumn endPos)
   }
 
 setMinPos :: Parser ()

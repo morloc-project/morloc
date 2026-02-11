@@ -1,0 +1,6 @@
+module main (foo)
+
+import root-py
+
+foo :: Real -> Str
+foo y = (\x -> 32) y

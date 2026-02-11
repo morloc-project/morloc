@@ -1,0 +1,6 @@
+module main (foo)
+
+type Py => Real = "float"
+
+foo :: [Real]
+foo = [2.0, "yolo", 5.6]

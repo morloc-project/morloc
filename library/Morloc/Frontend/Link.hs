@@ -240,7 +240,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
           MM.throwSourcedError i $
             "Source term"
               <+> squotes (pretty (srcAlias src))
-              <+> " shadows the typeclass"
+              <+> "conflicts with the same term in typeclass"
               <+> squotes (pretty cls)
         (Just (termIdx, Nothing)) -> do
           (GMap idmap sigmap) <- MM.gets stateSignatures

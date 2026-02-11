@@ -77,19 +77,6 @@ debugLog d = do
   verbosity <- gets stateVerbosity
   when (verbosity > 0) $ (liftIO . putDoc) d
 
-makeNamespace :: Text -> Path -> MDoc
-makeNamespace lib =
-  pretty
-    . MT.liftToText (map DC.toLower)
-    . MT.replace "/" "_"
-    . MT.replace "-" "_"
-    . MT.replace "." "_"
-    . MT.stripPrefixIfPresent "/" -- strip the leading slash (if present)
-    . MT.stripPrefixIfPresent "./" -- no path if relative to here
-    . MT.stripPrefixIfPresent lib -- make the path relative to the library
-    . MT.liftToText SF.dropExtensions
-    . MT.pack
-
 translateSource :: Path -> MorlocMonad MDoc
 translateSource s = do
   lib <- MT.pack <$> asks configLibrary
@@ -106,20 +93,20 @@ translateSource s = do
 
   return $ makeNamespace lib s <+> "=" <+> "importlib.import_module(" <> dquotes importStr <> ")"
 
-tupleKey :: Int -> MDoc -> MDoc
-tupleKey i v = [idoc|#{v}[#{pretty i}]|]
+makeNamespace :: Text -> Path -> MDoc
+makeNamespace lib =
+  pretty
+    . MT.liftToText (map DC.toLower)
+    . MT.replace "/" "_"
+    . MT.replace "-" "_"
+    . MT.replace "." "_"
+    . MT.stripPrefixIfPresent "/" -- strip the leading slash (if present)
+    . MT.stripPrefixIfPresent "./" -- no path if relative to here
+    . MT.stripPrefixIfPresent lib -- make the path relative to the library
+    . MT.liftToText SF.dropExtensions
+    . MT.pack
 
-selectAccessor :: NamType -> CVar -> (MDoc -> MDoc -> MDoc)
-selectAccessor NamTable (CV "dict") = recordAccess
-selectAccessor NamRecord _ = recordAccess
-selectAccessor NamTable _ = objectAccess
-selectAccessor NamObject _ = objectAccess
 
-recordAccess :: MDoc -> MDoc -> MDoc
-recordAccess record field = record <> "[" <> dquotes field <> "]"
-
-objectAccess :: MDoc -> MDoc -> MDoc
-objectAccess object field = object <> "." <> field
 
 pythonLowerConfig :: (Source -> MDoc) -> LowerConfig IndexM
 pythonLowerConfig makeSrcName = cfg
@@ -178,10 +165,25 @@ pythonLowerConfig makeSrcName = cfg
       , lcMakeLambda = \mname contextArgs _ -> "functools.partial" <> tupled (mname : contextArgs)
       }
 
-    makeLet :: (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
-    makeLet namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
-      let rs = rs1 ++ [namer i <+> "=" <+> e1'] ++ rs2
-       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
+makeLet :: (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
+makeLet namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
+  let rs = rs1 ++ [namer i <+> "=" <+> e1'] ++ rs2
+   in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
+
+tupleKey :: Int -> MDoc -> MDoc
+tupleKey i v = [idoc|#{v}[#{pretty i}]|]
+
+selectAccessor :: NamType -> CVar -> (MDoc -> MDoc -> MDoc)
+selectAccessor NamTable (CV "dict") = recordAccess
+selectAccessor NamRecord _ = recordAccess
+selectAccessor NamTable _ = objectAccess
+selectAccessor NamObject _ = objectAccess
+
+recordAccess :: MDoc -> MDoc -> MDoc
+recordAccess record field = record <> "[" <> dquotes field <> "]"
+
+objectAccess :: MDoc -> MDoc -> MDoc
+objectAccess object field = object <> "." <> field
 
 makeSocketPath :: MDoc -> MDoc
 makeSocketPath socketFileBasename = [idoc|os.path.join(global_state["tmpdir"], #{dquotes socketFileBasename})|]
@@ -218,4 +220,3 @@ evaluatePattern _ (PatternStruct _) [] = error "Unreachable empty pattern"
 writeBasicSelector :: Either Int Text -> MDoc
 writeBasicSelector (Right k) = "[" <> dquotes (pretty k) <> "]"
 writeBasicSelector (Left i) = "[" <> pretty i <> "]"
-
