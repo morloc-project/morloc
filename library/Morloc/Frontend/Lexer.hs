@@ -48,6 +48,8 @@ module Morloc.Frontend.Lexer
   , pLang
   , exprId
   , exprI
+  , exprIdAt
+  , exprIAt
 
     -- * docstring parsers
   , parseArgDocStr
@@ -115,6 +117,20 @@ exprId = do
 exprI :: Expr -> Parser ExprI
 exprI e = do
   i <- exprId
+  return (ExprI i e)
+
+exprIdAt :: SourcePos -> Parser Int
+exprIdAt pos = do
+  s <- CMS.get
+  let i = stateExpIndex s
+  CMS.put $ s { stateExpIndex = i + 1
+              , stateSourcePositions = Map.insert i (toSrcLoc pos) (stateSourcePositions s)
+              }
+  return i
+
+exprIAt :: SourcePos -> Expr -> Parser ExprI
+exprIAt pos e = do
+  i <- exprIdAt pos
   return (ExprI i e)
 
 toSrcLoc :: SourcePos -> SrcLoc

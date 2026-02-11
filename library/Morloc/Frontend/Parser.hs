@@ -81,6 +81,7 @@ pModule ::
   Maybe MVar ->
   Parser ExprI
 pModule expModuleName = do
+  pos <- getSourcePos
   _ <- reserved "module"
 
   moduleName <- case expModuleName of
@@ -93,24 +94,26 @@ pModule expModuleName = do
           <|> (sepBy pIndexedSymbol (symbol ",") |>> ExportMany . Set.fromList)
       )
 
-  expE <- exprI (ExpE export)
+  expE <- exprIAt pos (ExpE export)
 
   es <- align pTopExpr |>> concat
 
-  exprI $ ModE (MV moduleName) (expE : es)
+  exprIAt pos $ ModE (MV moduleName) (expE : es)
 
 pIndexedSymbol :: Parser (Int, Symbol)
 pIndexedSymbol = do
+  pos <- getSourcePos
   sym <- pSymbol
-  i <- exprId
+  i <- exprIdAt pos
   return (i, sym)
 
 -- | match an implicit Main module
 pMain :: Parser ExprI
 pMain = do
+  pos <- getSourcePos
   setMinPos
   es <- align pTopExpr |>> concat >>= createMainFunction
-  exprI $ ModE (MV "main") es
+  exprIAt pos $ ModE (MV "main") es
 
 plural :: (Functor m) => m a -> m [a]
 plural = fmap return
@@ -140,7 +143,8 @@ pTopExpr =
     <|> try (plural pFixity)
     <|> try (plural pAssE)
     <|> try (plural pSigE)
-    <|> try pSrcE
+    <|> try pSourceLegacy
+    <|> try pSourceNew
     <|> plural pExpr
     <?> "statement"
 
@@ -161,13 +165,14 @@ pSymbol =
 
 pImport :: Parser ExprI
 pImport = do
+  pos <- getSourcePos
   _ <- reserved "import"
   -- There may be '.' in import names, these represent folders/namespaces of modules
   n <- MT.intercalate "." <$> sepBy moduleComponent (symbol ".")
   imports <-
     optional $
       parens (sepBy pImportItem (symbol ","))
-  exprI . ImpE $
+  exprIAt pos . ImpE $
     Import
       { importModuleName = MV n
       , importInclude = imports
@@ -197,10 +202,11 @@ pImport = do
 --     show a :: a -> Str
 pTypeclass :: Parser ExprI
 pTypeclass = do
+  pos <- getSourcePos
   _ <- reserved "class"
   (TV v, vs) <- pTypedefTerm' <|> parens pTypedefTerm'
   sigs <- option [] (reserved "where" >> alignInset pSignature)
-  exprI . ClsE $ Typeclass (ClassName v) vs sigs
+  exprIAt pos . ClsE $ Typeclass (ClassName v) vs sigs
   where
     -- parses "Show a" from above example
     pTypedefTerm' :: Parser (TVar, [TVar])
@@ -211,26 +217,29 @@ pTypeclass = do
 
 pInstance :: Parser ExprI
 pInstance = do
+  pos <- getSourcePos
   _ <- reserved "instance"
   v <- freenameU
   ts <- many1 pTypeGen
   es <- option [] (reserved "where" >> alignInset pInstanceExpr) |>> concat
-  exprI $ IstE (ClassName v) ts es
+  exprIAt pos $ IstE (ClassName v) ts es
   where
     pInstanceExpr :: Parser [ExprI]
-    pInstanceExpr =
-      try (pSource >>= mapM (exprI . SrcE))
-        <|> (pAssE |>> return)
+    pInstanceExpr
+      =   try pSourceNew
+      <|> try pSourceLegacy
+      <|> (pAssE |>> return)
 
 -- | Parse fixity declaration: infixl 6 +, -
 pFixity :: Parser ExprI
 pFixity = do
+  pos <- getSourcePos
   assoc <- pAssociativity
   prec <- pPrecValue
   when (prec > 9) $
     fail "precedence must be between 0 and 9"
   ops <- sepBy1 pOperatorName (symbol ",")
-  exprI . FixE $ Fixity assoc prec ops
+  exprIAt pos . FixE $ Fixity assoc prec ops
   where
     pAssociativity :: Parser Associativity
     pAssociativity =
@@ -275,6 +284,7 @@ pTypedef =
 
     pTypedefType :: Parser ExprI
     pTypedefType = do
+      pos <- getSourcePos
       doc <- parseArgDocVars |>> ArgDocAlias
       _ <- reserved "type"
       mayLang <- optional (try pLangNamespace)
@@ -283,16 +293,17 @@ pTypedef =
         (Just lang) -> do
           _ <- symbol "="
           (t, isTerminal) <- pConcreteType <|> pGeneralType
-          exprI (TypE (ExprTypeE (Just (lang, isTerminal)) v vs t doc))
+          exprIAt pos (TypE (ExprTypeE (Just (lang, isTerminal)) v vs t doc))
         Nothing -> do
           mayT <- optional (symbol "=" >> pType)
           case (vs, mayT) of
-            (_, Just (_, t)) -> exprI (TypE (ExprTypeE Nothing v vs t doc))
-            ([], Nothing) -> exprI (TypE (ExprTypeE Nothing v vs (VarU v) doc))
-            (_, Nothing) -> exprI (TypE (ExprTypeE Nothing v vs (AppU (VarU v) (map (either (VarU) id) vs)) doc))
+            (_, Just (_, t)) -> exprIAt pos (TypE (ExprTypeE Nothing v vs t doc))
+            ([], Nothing) -> exprIAt pos (TypE (ExprTypeE Nothing v vs (VarU v) doc))
+            (_, Nothing) -> exprIAt pos (TypE (ExprTypeE Nothing v vs (AppU (VarU v) (map (either (VarU) id) vs)) doc))
 
     pTypedefObjectLegacy :: Parser ExprI
     pTypedefObjectLegacy = do
+      pos <- getSourcePos
       doc <- parseArgDocVars
       o <- pNamType
       mayLang <- optional (try pLangNamespace)
@@ -314,10 +325,11 @@ pTypedef =
       -- as an ordered list all the way to code generation.
       let t = NamU o (TV con) (map (either VarU id) vs) (map snd entries)
           objDoc = ArgDocRec doc [(fieldKey, arg) | (arg, (fieldKey, _)) <- entries]
-      exprI (TypE (ExprTypeE k v vs t objDoc))
+      exprIAt pos (TypE (ExprTypeE k v vs t objDoc))
 
     pTypedefObject :: Parser ExprI
     pTypedefObject = do
+      pos <- getSourcePos
       recDoc <- parseArgDocVars
       o <- pNamType
       (v, vs) <- pTypedefTerm <|> parens pTypedefTerm
@@ -328,7 +340,7 @@ pTypedef =
       let docEntries = [(k, r) | (r, (k, _)) <- entries]
       let grpArg = ArgDocRec recDoc docEntries
       let t = NamU o v (map (either VarU id) vs) (map snd entries)
-      exprI (TypE (ExprTypeE Nothing v vs t grpArg))
+      exprIAt pos (TypE (ExprTypeE Nothing v vs t grpArg))
 
     -- TODO: is this really the right place to be doing this?
     desugarTableEntries ::
@@ -385,21 +397,24 @@ pAssE = try pFunctionAssE <|> pDataAssE
     -- expansion later.
     pDataAssE :: Parser ExprI
     pDataAssE = do
+      pos <- getSourcePos
       v <- pEVarOrOp
       _ <- symbol "="
       e <- pExpr
       subExpressions <- option [] $ reserved "where" >> alignInset whereTerm
-      exprI $ AssE v e subExpressions
+      exprIAt pos $ AssE v e subExpressions
 
     pFunctionAssE :: Parser ExprI
     pFunctionAssE = do
+      pos <- getSourcePos
       v <- pEVarOrOp
+      posArgs <- getSourcePos
       args <- many1 pEVar
       _ <- symbol "="
       e <- pExpr
       subExpressions <- option [] $ reserved "where" >> alignInset whereTerm
-      f <- exprI (LamE args e)
-      exprI $ AssE v f subExpressions
+      f <- exprIAt posArgs (LamE args e)
+      exprIAt pos $ AssE v f subExpressions
 
     -- \| For now, only type signatures and declarations are allowed in function
     -- where statements. There is no particularly reason why source and imports
@@ -410,8 +425,9 @@ pAssE = try pFunctionAssE <|> pDataAssE
 
 pSigE :: Parser ExprI
 pSigE = do
+  pos <- getSourcePos
   signature <- pSignature
-  exprI . SigE $ signature
+  exprIAt pos . SigE $ signature
 
 pSignature :: Parser Signature
 pSignature = do
@@ -477,15 +493,7 @@ parseArgDocVar d =
     <|> try (parseTextDocStr "return" |>> (\x -> d {docReturn = Just x}))
     <|> (parseLineDocStr |>> (\x -> d {docLines = docLines d <> [x]}))
 
-pSrcE :: Parser [ExprI]
-pSrcE = do
-  srcs <- pSource
-  mapM (exprI . SrcE) srcs
-
-pSource :: Parser [Source]
-pSource = try pSourceLegacy <|> pSourceNew
-
-pSourceLegacy :: Parser [Source]
+pSourceLegacy :: Parser [ExprI]
 pSourceLegacy = do
   _ <- reserved "source"
   modulePath <- CMS.gets stateModulePath
@@ -493,8 +501,8 @@ pSourceLegacy = do
   maySrcfile <- optional (reserved "from" >> stringLiteral |>> MT.unpack)
   rs <- parens (sepBy1 pImportSourceTerm (symbol ","))
   let srcfile = getSourceFile modulePath maySrcfile
-  return
-    [ Source
+  mapM (\ (pos, srcVar, aliasVar, label') -> exprIAt pos . SrcE $
+      Source
       { srcName = srcVar
       , srcLang = language
       , srcPath = srcfile
@@ -503,17 +511,20 @@ pSourceLegacy = do
       , srcRsize = []
       , srcNote = []
       }
-    | (srcVar, aliasVar, label') <- rs
-    ]
+    ) rs
   where
-    pImportSourceTerm :: Parser (SrcName, EVar, Maybe Text)
+    pImportSourceTerm :: Parser (SourcePos, SrcName, EVar, Maybe Text)
     pImportSourceTerm = do
       t <- optional pTag
+      posSrc <- getSourcePos
       n <- stringLiteral
-      a <- option n (reserved "as" >> (freename <|> (parenOperator |>> unEVar)))
-      return (SrcName n, EV a, t)
+      (posAlias, a) <- option (posSrc, n) (
+        reserved "as" >>
+          ( (,) <$> getSourcePos
+                <*> (freename <|> (parenOperator |>> unEVar))))
+      return (posAlias, SrcName n, EV a, t)
 
-pSourceNew :: Parser [Source]
+pSourceNew :: Parser [ExprI]
 pSourceNew = do
   modulePath <- CMS.gets stateModulePath
   _ <- reserved "source"
@@ -522,7 +533,7 @@ pSourceNew = do
   let srcfile = getSourceFile modulePath maySrcfile
   option [] (reserved "where" >> alignInset (pImportSourceTerm language srcfile))
   where
-    pImportSourceTerm :: Lang -> Maybe Path -> Parser Source
+    pImportSourceTerm :: Lang -> Maybe Path -> Parser ExprI
     pImportSourceTerm language srcfile = do
       src <-
         parseSourceDocstrs $
@@ -535,12 +546,13 @@ pSourceNew = do
             , srcRsize = []
             , srcNote = []
             }
+      pos <- getSourcePos
       n <- freename
       let srcname =
             if srcName src == SrcName ""
               then SrcName n
               else srcName src
-      return $ src {srcName = srcname, srcAlias = EV n}
+      exprIAt pos . SrcE $ src {srcName = srcname, srcAlias = EV n}
 
     parseSourceDocstrs :: Source -> Parser Source
     parseSourceDocstrs src = indentFreeTerm $ foldMany src parseSourceDocstr
@@ -565,25 +577,29 @@ getSourceFile modulePath srcFile =
     (Nothing, s) -> s
 
 pLstE :: Parser ExprI
-pLstE = brackets (sepBy pExpr (symbol ",")) >>= exprI . LstE
+pLstE = do
+  pos <- getSourcePos
+  brackets (sepBy pExpr (symbol ",")) >>= exprIAt pos . LstE
 
 pTupE :: Parser ExprI
 pTupE = do
+  pos <- getSourcePos
   _ <- symbol "("
   e <- pExpr
   _ <- symbol ","
   es <- sepBy1 pExpr (symbol ",")
   _ <- symbol ")"
-  exprI $ TupE (e : es)
+  exprIAt pos $ TupE (e : es)
 
 pNamE :: Parser ExprI
 pNamE = do
+  pos <- getSourcePos
   rs <- braces (sepBy1 pNamEntryE (symbol ","))
   -- FIXME - making records without constructors is a bit sketch, for now it is
   -- allowed (and heavily tested) and I will leave it for the moment. But
   -- eventually the syntax should be `Person {Age = 5, Name = "Juicebox"}` or
   -- whatever. The hell it should fucking dimwit. Constructors are shit.
-  exprI $ NamE (map (first Key) rs)
+  exprIAt pos $ NamE (map (first Key) rs)
 
 pNamEntryE :: Parser (Text, ExprI)
 pNamEntryE = do
@@ -593,10 +609,15 @@ pNamEntryE = do
   return (n, e)
 
 pUni :: Parser ExprI
-pUni = symbol "(" >> symbol ")" >> exprI UniE
+pUni = do
+  pos <- getSourcePos
+  _ <- symbol "("
+  _ <- symbol ")"
+  exprIAt pos UniE
 
 pAnn :: Parser ExprI
 pAnn = do
+  pos <- getSourcePos
   e <-
     try (parens pExpr)
       <|> try pTupE
@@ -608,25 +629,34 @@ pAnn = do
       <|> pStrE
   _ <- op "::"
   t <- pTypeGen
-  exprI $ AnnE e t
+  exprIAt pos $ AnnE e t
 
 -- | Parse an expression that may contain infix operators
 -- Note that the fixity of the binops is not yet known, so they are merged into
 -- a left-associated temporary structure
 pInfixExpr :: Parser ExprI
 pInfixExpr = do
+  pos <- getSourcePos
   lhs <- pOperand  -- Try function application first, then atoms
+  opPos <- getSourcePos
   mayOp <- optional pInfixOperator
   case mayOp of
     (Just binop) -> do
       rhs <- pExpr
-      i <- exprId
-      exprI $ BopE lhs i binop rhs
+      i <- exprIdAt opPos
+      exprIAt pos $ BopE lhs i binop rhs
     Nothing -> return lhs
 
 -- | Parse an infix operator (not in parens)
 pInfixOperator :: Parser EVar
 pInfixOperator = EV <$> operatorName
+
+-- | Parse a parenthesized operator as a variable expression, capturing position at start
+pParenOpVar :: Parser ExprI
+pParenOpVar = do
+  pos <- getSourcePos
+  v <- parenOperator
+  exprIAt pos $ VarE defaultValue v
 
 -- | Parse an operand
 pOperand :: Parser ExprI
@@ -638,7 +668,7 @@ pOperand =
     <|> try pLogE
     <|> try pStrE
     <|> try (parens pExpr) -- Full expressions in parens
-    <|> try (parenOperator |>> VarE defaultValue >>= exprI)
+    <|> try pParenOpVar
     <|> try pTupE
     <|> try pLstE
     <|> try pNamE
@@ -649,9 +679,10 @@ pOperand =
 
 pApp :: Parser ExprI
 pApp = do
+  pos <- getSourcePos
   f <- parseFun
   es <- many1 parseArg
-  exprI $ AppE f es
+  exprIAt pos $ AppE f es
   where
     parseFun =
             try pVar
@@ -661,12 +692,12 @@ pApp = do
         <|> try pSetter
         <|> try pGetter
         <|> try (parens pExpr)
-        <|>     (parenOperator |>> VarE defaultValue >>= exprI)
+        <|>     pParenOpVar
     parseArg =
             try pUni
         <|> try pTupE
         <|> try (parens pExpr)
-        <|> try (parenOperator |>> VarE defaultValue >>= exprI)
+        <|> try pParenOpVar
         <|> try pSetter
         <|> try pGetter
         <|> try pStrE
@@ -679,68 +710,75 @@ pApp = do
 
 pLogE :: Parser ExprI
 pLogE = do
+  pos <- getSourcePos
   e <- pTrue <|> pFalse
-  exprI e
+  exprIAt pos e
   where
     pTrue = reserved "True" >> return (LogE True)
     pFalse = reserved "False" >> return (LogE False)
 
 pStrE :: Parser ExprI
 pStrE = do
+  pos <- getSourcePos
   -- (Either Text (Text, [(a, Text)]))
   eitherS <- stringPatterned pExpr
   case eitherS of
-    (Left txt) -> exprI . StrE $ txt
+    (Left txt) -> exprIAt pos . StrE $ txt
     (Right (s, es)) -> do
-      pattern <- exprI . PatE $ PatternText s (map snd es)
-      exprI $ AppE pattern (map fst es)
+      pattern <- exprIAt pos . PatE $ PatternText s (map snd es)
+      exprIAt pos $ AppE pattern (map fst es)
 
 pSetter :: Parser ExprI
 pSetter = do
+  pos <- getSourcePos
   -- parse the setter pattern
   -- for example: .(x.0 = 1, y.a = 2, z = 3)
   --  ss: the selectors, in this case the pattern .(x.0, y.a, z)
   --  es: a list of expressions: [1,2,3]
   (s, es) <- parsePatternSetter pExpr
-  setter <- exprI $ PatE (PatternStruct s)
+  setter <- exprIAt pos $ PatE (PatternStruct s)
 
   -- fresh indices for the lambda and application expressions we'll create
-  idxLam <- exprId
+  idxLam <- exprIdAt pos
 
   -- a unique name for the lambda-bound datastructure variable
   let v = EV (".setter_" <> MT.show' idxLam)
 
   -- a variable to store the datastructure that will be passed to the lambda
-  vArg <- exprI $ VarE defaultValue v
+  vArg <- exprIAt pos $ VarE defaultValue v
 
   -- apply arguments to the setter
   -- first the datastructure and then all setting values
-  setterApp <- exprI $ AppE setter (vArg : es)
+  setterApp <- exprIAt pos $ AppE setter (vArg : es)
 
   return $ ExprI idxLam (LamE [v] setterApp)
 
 pGetter :: Parser ExprI
 pGetter = do
+  pos <- getSourcePos
   s <- parsePatternGetter
-  exprI $ PatE (PatternStruct s)
+  exprIAt pos $ PatE (PatternStruct s)
 
 pNumE :: Parser ExprI
 pNumE = do
+  pos <- getSourcePos
   x <- number
-  exprI $ case x of
+  exprIAt pos $ case x of
     (Left i) -> IntE i
     (Right f) -> RealE f
 
 pLam :: Parser ExprI
 pLam = do
+  pos <- getSourcePos
   _ <- symbol "\\"
   vs <- many1 pEVar
   _ <- symbol "->"
   e <- pExpr
-  exprI $ LamE vs e
+  exprIAt pos $ LamE vs e
 
 pVar :: Parser ExprI
 pVar = do
+  pos <- getSourcePos
   labels <- pTags
 
   s <- CMS.get
@@ -751,7 +789,7 @@ pVar = do
       manifoldConfig = foldl mergeConfigs baseConfig varConfigs
 
   v <- pEVar
-  exprI $ VarE manifoldConfig v
+  exprIAt pos $ VarE manifoldConfig v
   where
     -- The the rightmost (the newer) value
     useRight :: Maybe a -> Maybe a -> Maybe a
@@ -770,7 +808,10 @@ pVar = do
       Just $ RemoteResources (useRight r1 r2) (useRight m1 m2) (useRight t1 t2) (useRight g1 g2)
 
 pHolE :: Parser ExprI
-pHolE = hole >> exprI HolE
+pHolE = do
+  pos <- getSourcePos
+  hole
+  exprIAt pos HolE
 
 pEVarOrOp :: Parser EVar
 pEVarOrOp = try parenOperator <|> pEVar
