@@ -148,6 +148,7 @@ if __name__ == "__main__":
         parent_conn, child_conn = Pipe()
         worker = Process(target=worker_process, args=(parent_conn, shm_basename, shutdown_flag))
         worker.start()
+        parent_conn.close()  # Close main's copy; worker inherited the FD via fork
         workers.append(worker)
         worker_pipes.append(child_conn)  # Store listener-side ends
 
@@ -157,6 +158,11 @@ if __name__ == "__main__":
         args=(worker_pipes, socket_path, tmpdir, shm_basename, shutdown_flag)  # Pass ALL pipes
     )
     listener_process.start()
+
+    # Close main's copies of listener-side pipe ends; listener inherited them via fork
+    for pipe in worker_pipes:
+        pipe.close()
+    worker_pipes = []
 
     while not shutdown_flag.value:
         time.sleep(0.1)  # Keep main thread alive and responsive to signals
@@ -170,16 +176,7 @@ if __name__ == "__main__":
     listener_process.join()  # Final blocking reap
     listener_process.close()
 
-    # 2. Drain and close worker pipes
-    for pipe in worker_pipes:
-        while pipe.poll():
-            try:
-                pipe.recv()  # Clear buffers
-            except (EOFError, OSError):
-                break
-        pipe.close()
-
-    # 3. Terminate workers with escalating force
+    # 2. Terminate workers with escalating force
     for p in workers:
         if p.is_alive():
             p.kill()

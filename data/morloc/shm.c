@@ -1,9 +1,15 @@
 #include "morloc.h"
 
 // Global state
-static size_t current_volume = 0;
+static _Thread_local size_t current_volume = 0;
 static char common_basename[MAX_FILENAME_SIZE];
 static shm_t* volumes[MAX_VOLUME_NUMBER] = {NULL};
+
+// Protects all allocation/deallocation operations on the shared memory pool.
+// Conversion functions (rel2abs, abs2rel, etc.) are safe without the mutex
+// because volumes[] entries are written atomically and only transition from
+// NULL to a valid pointer (monotonic creation).
+static pthread_mutex_t alloc_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 volptr_t rel2vol(relptr_t ptr, ERRMSG) {
     VAL_RETURN_SETUP(volptr_t, VOLNULL)
@@ -210,12 +216,18 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ER
         // volume size does not count the shm header
         shm->volume_size = shm_size;
 
-        // Initialize the read-write lock
-        if (pthread_rwlock_init(&shm->rwlock, NULL) != 0){
+        // Initialize the read-write lock with process-shared attribute
+        // so it works across processes (Python/R pools use multiprocessing)
+        pthread_rwlockattr_t rwattr;
+        pthread_rwlockattr_init(&rwattr);
+        pthread_rwlockattr_setpshared(&rwattr, PTHREAD_PROCESS_SHARED);
+        if (pthread_rwlock_init(&shm->rwlock, &rwattr) != 0){
+            pthread_rwlockattr_destroy(&rwattr);
             munmap(volumes[volume_index], full_size);
             close(fd);
             RAISE("Failed initialize read-write lock on '%s'", shm_name)
         }
+        pthread_rwlockattr_destroy(&rwattr);
 
         shm->cursor = 0;
 
@@ -286,7 +298,7 @@ shm_t* shopen(size_t volume_index, ERRMSG) {
     return shm;
 }
 
-bool shclose(ERRMSG) {
+static bool shclose_unlocked(ERRMSG) {
     bool success = true;
 
     VAL_RETURN_SETUP(bool, false)
@@ -306,6 +318,9 @@ bool shclose(ERRMSG) {
         char shm_name[MAX_FILENAME_SIZE];
         strncpy(shm_name, shm->volume_name, MAX_FILENAME_SIZE);
 
+        // Destroy the rwlock before unmapping
+        pthread_rwlock_destroy(&shm->rwlock);
+
         // Unmap the shared memory
         size_t full_size = shm->volume_size + sizeof(shm_t);
         if (munmap(shm, full_size) == -1) {
@@ -324,6 +339,13 @@ bool shclose(ERRMSG) {
     RAISE_IF(!success, "Failed to close all shared memory volumes")
 
     return success;
+}
+
+bool shclose(ERRMSG) {
+    pthread_mutex_lock(&alloc_mutex);
+    bool result = shclose_unlocked(errmsg_);
+    pthread_mutex_unlock(&alloc_mutex);
+    return result;
 }
 
 static bool get_available_memory(size_t* memory, ERRMSG) {
@@ -417,14 +439,14 @@ static block_header_t* scan_volume(block_header_t* blk, size_t size, char* end, 
         while (blk->reference_count == 0) {
             block_header_t* next_blk = (block_header_t*)((char*)blk + sizeof(block_header_t) + blk->size);
 
-            if ((char*)next_blk >= end || next_blk->reference_count != 0) {
+            if ((char*)next_blk >= end || next_blk->magic != BLK_MAGIC || next_blk->reference_count != 0) {
                 break;
             }
 
-            // merge the blocks
-            blk->size += sizeof(block_header_t) + next_blk->size;
-            // set the merged block to 0, this step could be skipped
-            memset(next_blk, 0, sizeof(block_header_t) + next_blk->size);
+            // Save size before modifying blk, then merge
+            size_t next_size = next_blk->size;
+            blk->size += sizeof(block_header_t) + next_size;
+            memset(next_blk, 0, sizeof(block_header_t) + next_size);
         }
 
         // if this block is suitable, return it
@@ -444,21 +466,22 @@ static block_header_t* find_free_block_in_volume(shm_t* shm, size_t size, ERRMSG
     RAISE_IF(shm == NULL, "NULL pointer to shared memory volume")
     RAISE_IF(size == 0, "Cannot access empty shared memory volume")
 
+    char* shm_end = (char*)shm + sizeof(shm_t) + shm->volume_size;
+
+    // Lock this pool while searching. This is necessary since adjacent free
+    // blocks will be merged, and the returned block must remain valid until
+    // split_block processes it.
+    if (pthread_rwlock_wrlock(&shm->rwlock) != 0) {
+        RAISE("Failed to acquire write lock")
+    }
+
     // try to get the current block at the cursor
     block_header_t* blk = get_block(shm, shm->cursor, &CHILD_ERRMSG);
     FREE(CHILD_ERRMSG)
 
     if (blk != NULL && blk->size >= size + sizeof(block_header_t) && blk->reference_count == 0) {
+        pthread_rwlock_unlock(&shm->rwlock);
         return blk;
-    }
-
-    char* shm_end = (char*)shm + sizeof(shm_t) + shm->volume_size;
-
-    // Lock this pool while searching for a non-cursor block. This is necessary
-    // since adjacent free blocks will be merged, which could potentially lead to
-    // conflicts.
-    if (pthread_rwlock_wrlock(&shm->rwlock) != 0) {
-        RAISE("Failed to acquire write lock")
     }
 
     block_header_t* new_blk = scan_volume(blk, size, shm_end, &CHILD_ERRMSG);
@@ -584,7 +607,7 @@ static block_header_t* split_block(shm_t* shm, block_header_t* old_block, size_t
     return old_block;
 }
 
-void* shmalloc(size_t size, ERRMSG) {
+static void* shmalloc_unlocked(size_t size, ERRMSG) {
     PTR_RETURN_SETUP(void)
 
     RAISE_IF(size == 0, "Cannot (or will not) allocate 0-length block")
@@ -598,12 +621,19 @@ void* shmalloc(size_t size, ERRMSG) {
         // trim the block down to size and reset the cursor to the next free block
         block_header_t* final_blk = split_block(shm, blk, size, &CHILD_ERRMSG);
         if(final_blk){
-            final_blk->reference_count++;
+            final_blk->reference_count = 1;
             return (void*)(final_blk + 1);
         }
     }
 
     RAISE("Failed to allocate shared memory block of size %zu:\n%s", size, CHILD_ERRMSG);
+}
+
+void* shmalloc(size_t size, ERRMSG) {
+    pthread_mutex_lock(&alloc_mutex);
+    void* result = shmalloc_unlocked(size, errmsg_);
+    pthread_mutex_unlock(&alloc_mutex);
+    return result;
 }
 
 void* shmemcpy(void* src, size_t size, ERRMSG){
@@ -626,13 +656,16 @@ void* shcalloc(size_t nmemb, size_t size, ERRMSG) {
     return data;
 }
 
-void* shrealloc(void* ptr, size_t size, ERRMSG) {
+static bool shfree_unlocked(absptr_t ptr, ERRMSG);
+
+static void* shrealloc_unlocked(void* ptr, size_t size, ERRMSG) {
     PTR_RETURN_SETUP(void)
 
     RAISE_IF(size == 0, "Cannot reallocate to size 0")
 
+    // Match realloc(NULL, size) semantics
     if (ptr == NULL){
-        ptr = TRY(shmalloc, size);
+        return shmalloc_unlocked(size, errmsg_);
     }
 
     block_header_t* blk = (block_header_t*)((char*)ptr - sizeof(block_header_t));
@@ -642,27 +675,42 @@ void* shrealloc(void* ptr, size_t size, ERRMSG) {
     void* new_ptr;
 
     if (blk->size >= size) {
-        // The current block is large enough
-        new_ptr = split_block(shm, blk, size, &CHILD_ERRMSG);
-        RAISE_IF(new_ptr == NULL, "Failed to split block\n%s", CHILD_ERRMSG)
+        // The current block is large enough -- shrink in place
+        // Temporarily mark as free so split_block can operate on it
+        blk->reference_count = 0;
+        block_header_t* result = split_block(shm, blk, size, &CHILD_ERRMSG);
+        if (result == NULL) {
+            blk->reference_count = 1; // restore on failure
+            RAISE("Failed to split block\n%s", CHILD_ERRMSG)
+        }
+        result->reference_count = 1;
+        new_ptr = (void*)((char*)result + sizeof(block_header_t));
     } else {
         // Need to allocate a new block
-        new_ptr = TRY(shmalloc, size);
+        new_ptr = shmalloc_unlocked(size, &CHILD_ERRMSG);
+        if (new_ptr == NULL) {
+            RAISE("Failed to allocate new block\n%s", CHILD_ERRMSG)
+        }
 
         pthread_rwlock_wrlock(&shm->rwlock);
         memcpy(new_ptr, ptr, blk->size);
         pthread_rwlock_unlock(&shm->rwlock);
 
-        bool freed = shfree(ptr, &CHILD_ERRMSG);
+        bool freed = shfree_unlocked(ptr, &CHILD_ERRMSG);
         RAISE_IF(!freed, "\n%s", CHILD_ERRMSG)
-
-        return new_ptr;
     }
 
     return new_ptr;
 }
 
-bool shfree(absptr_t ptr, ERRMSG) {
+void* shrealloc(void* ptr, size_t size, ERRMSG) {
+    pthread_mutex_lock(&alloc_mutex);
+    void* result = shrealloc_unlocked(ptr, size, errmsg_);
+    pthread_mutex_unlock(&alloc_mutex);
+    return result;
+}
+
+static bool shfree_unlocked(absptr_t ptr, ERRMSG) {
     BOOL_RETURN_SETUP
     RAISE_IF(ptr == NULL, "Invalid or inaccessible shared memory pool pointer - perhaps the pool is closed?");
 
@@ -672,17 +720,22 @@ bool shfree(absptr_t ptr, ERRMSG) {
     RAISE_IF(blk->magic != BLK_MAGIC, "Corrupted memory");
     RAISE_IF(blk->reference_count == 0, "Cannot free memory, reference count is already 0");
 
-    // This is an atomic operation, so no need to lock
-    blk->reference_count--;
+    // Atomic decrement: postfix -- on _Atomic returns previous value
+    unsigned int prev = blk->reference_count--;
 
-    if (blk->reference_count == 0) {
-        // Set memory to 0, this may be perhaps be removed in the future for
-        // performance sake, but for now it helps with diagnostics. Note that the
-        // head remains, it may be used to merge free blocks in the future.
+    if (prev == 1) {
+        // We were the last reference -- safe to zero the data
         memset(blk + 1, 0, blk->size);
     }
 
     return true;
+}
+
+bool shfree(absptr_t ptr, ERRMSG) {
+    pthread_mutex_lock(&alloc_mutex);
+    bool result = shfree_unlocked(ptr, errmsg_);
+    pthread_mutex_unlock(&alloc_mutex);
+    return result;
 }
 
 size_t total_shm_size(){

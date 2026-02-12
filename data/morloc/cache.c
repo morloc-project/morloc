@@ -76,11 +76,13 @@ bool hash_morloc_packet(const uint8_t* packet, const Schema* schema, uint64_t se
         const uint8_t* arg_data = packet + sizeof(morloc_packet_header_t) + (size_t)header->offset;
         size_t arg_start = 0;
         while(arg_start < header->length){
-            uint64_t arg_hash = TRY(hash_voidstar, (void*)(arg_data + arg_start), schema, 0);
-            *hash = mix(*hash, arg_hash);
+            // Each arg is a complete sub-packet; hash its raw bytes
+            size_t arg_size = TRY(morloc_packet_size, arg_data + arg_start);
+            *hash = mix(*hash, morloc_xxh64(arg_data + arg_start, arg_size, *hash));
+            arg_start += arg_size;
         }
     } else if (command_type == PACKET_TYPE_DATA){
-        uint8_t* voidstar = TRY(get_morloc_data_packet_value, packet + sizeof(morloc_packet_header_t) + header->offset, schema);
+        uint8_t* voidstar = TRY(get_morloc_data_packet_value, packet, schema);
         *hash = TRY(hash_voidstar, (void*)voidstar, schema, seed);
     } else {
         RAISE("Cannot hash packet with command 0x%02hhxh", command_type)

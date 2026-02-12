@@ -8,6 +8,8 @@
 #include <limits.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <signal.h>
@@ -774,15 +776,103 @@ SEXP morloc_shinit(SEXP shm_basename_r, SEXP volume_index_r, SEXP shm_size_r) { 
 }
 
 
+// {{{ signal handling for graceful shutdown
+
+static volatile sig_atomic_t r_shutting_down = 0;
+
+static void r_sigterm_handler(int sig) {
+    (void)sig;
+    r_shutting_down = 1;
+}
+
+SEXP morloc_install_sigterm_handler(void) {
+    struct sigaction sa;
+    sa.sa_handler = r_sigterm_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGTERM, &sa, NULL);
+    return R_NilValue;
+}
+
+SEXP morloc_is_shutting_down(void) {
+    return ScalarLogical(r_shutting_down != 0);
+}
+
+// }}} signal handling
+
 SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
     if (!R_ExternalPtrAddr(daemon_r)) {
         MORLOC_ERROR("Expected a daemon pointer");
     }
+
+    // Return immediately if shutdown was requested
+    if (r_shutting_down) {
+        return ScalarInteger(-1);
+    }
+
     language_daemon_t* daemon = (language_daemon_t*)R_ExternalPtrAddr(daemon_r);
 
-    int client_fd = R_TRY(wait_for_client_with_timeout, daemon, 10000);
+    // Use pselect directly (not wait_for_client_with_timeout) so we can
+    // return immediately on EINTR from SIGTERM instead of retrying via WAIT
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(daemon->server_fd, &read_fds);
+    int max_fd = daemon->server_fd;
 
-    return ScalarInteger(client_fd);
+    for (client_list_t* cl = daemon->client_fds; cl != NULL; cl = cl->next) {
+        FD_SET(cl->fd, &read_fds);
+        if (cl->fd > max_fd) max_fd = cl->fd;
+    }
+
+    // 100ms timeout -- short enough for responsive SIGTERM handling
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000000 };
+    sigset_t emptymask;
+    sigemptyset(&emptymask);
+
+    int ready = pselect(max_fd + 1, &read_fds, NULL, NULL, &ts, &emptymask);
+
+    // Check shutdown after pselect (signal may have arrived during the call)
+    if (r_shutting_down) {
+        return ScalarInteger(-1);
+    }
+
+    // Timeout or interrupted -- return 0 (no client)
+    if (ready <= 0) {
+        return ScalarInteger(0);
+    }
+
+    // Accept new connection if server_fd is ready
+    if (FD_ISSET(daemon->server_fd, &read_fds)) {
+        int fd = accept(daemon->server_fd, NULL, NULL);
+        if (fd > 0) {
+            fcntl(fd, F_SETFL, O_NONBLOCK);
+            client_list_t* new_client = (client_list_t*)calloc(1, sizeof(client_list_t));
+            if (new_client == NULL) {
+                close(fd);
+                MORLOC_ERROR("calloc failed");
+            }
+            new_client->fd = fd;
+            new_client->next = NULL;
+            if (daemon->client_fds == NULL) {
+                daemon->client_fds = new_client;
+            } else {
+                client_list_t* last = daemon->client_fds;
+                while (last->next) last = last->next;
+                last->next = new_client;
+            }
+        }
+    }
+
+    // Return first ready client fd
+    if (daemon->client_fds != NULL) {
+        client_list_t* first = daemon->client_fds;
+        int client_fd = first->fd;
+        daemon->client_fds = first->next;
+        free(first);
+        return ScalarInteger(client_fd);
+    }
+
+    return ScalarInteger(0);
 }
 
 
@@ -1233,6 +1323,13 @@ SEXP morloc_waitpid(SEXP pid_r) {
     return ScalarInteger((int)result);
 }
 
+SEXP morloc_waitpid_blocking(SEXP pid_r) {
+    pid_t pid = (pid_t)INTEGER(pid_r)[0];
+    int status;
+    pid_t result = waitpid(pid, &status, 0);
+    return ScalarInteger((int)result);
+}
+
 // }}} fork and fd-passing functions
 
 // }}} exported functions
@@ -1262,6 +1359,9 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_recv_fd", (DL_FUNC) &morloc_recv_fd, 1},
         {"morloc_kill", (DL_FUNC) &morloc_kill, 2},
         {"morloc_waitpid", (DL_FUNC) &morloc_waitpid, 1},
+        {"morloc_waitpid_blocking", (DL_FUNC) &morloc_waitpid_blocking, 1},
+        {"morloc_install_sigterm_handler", (DL_FUNC) &morloc_install_sigterm_handler, 0},
+        {"morloc_is_shutting_down", (DL_FUNC) &morloc_is_shutting_down, 0},
         {NULL, NULL, 0}
     };
 

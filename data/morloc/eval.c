@@ -54,9 +54,11 @@ static dict_t* dict_delete(char* name, dict_t* dict){
     ptr = dict;
     while(ptr != NULL){
         if(ptr->next != NULL && strcmp(ptr->next->name, name) == 0){
-            ptr->next = ptr->next->next;
-            free(ptr->next->name);
-            free(ptr->next);
+            dict_t* to_delete = ptr->next;
+            ptr->next = to_delete->next;
+            free(to_delete->name);
+            free(to_delete);
+            // Don't advance ptr -- check the new ptr->next
         } else {
             ptr = ptr->next;
         }
@@ -365,6 +367,18 @@ absptr_t morloc_eval(
 
     absptr_t result = TRY(morloc_eval_r, new_expr, NULL, 0, NULL);
 
+    // Free the wrapper expression nodes allocated above (not the original lambda)
+    if (expr->type == MORLOC_X_LAM && new_expr != NULL) {
+        morloc_app_expression_t* app_expr = new_expr->expr.app_expr;
+        for (size_t i = 0; i < nargs; i++) {
+            free(app_expr->args[i]->expr.data_expr);
+            free(app_expr->args[i]);
+        }
+        free(app_expr->args);
+        free(app_expr);
+        free(new_expr);
+    }
+
     return result;
 }
 
@@ -531,6 +545,11 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
 
                     // evaluate the lambda body with the new variable table
                     TRY(morloc_eval_r, lam->body, dest, width, bndvars);
+
+                    // clean up bindings added in this scope
+                    for(size_t i = 0; i < app->nargs; i++){
+                        bndvars = dict_delete(lam->args[i], bndvars);
+                    }
                 } break;
 
                 case APPLY_FORMAT: {

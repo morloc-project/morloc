@@ -1,6 +1,13 @@
 #ifndef __MORLOC_MEMORY_H__
 #define __MORLOC_MEMORY_H__
 
+#ifdef __cplusplus
+#include <atomic>
+#define _MORLOC_ATOMIC(T) std::atomic<T>
+#else
+#include <stdatomic.h>
+#define _MORLOC_ATOMIC(T) _Atomic T
+#endif
 #include <stddef.h>
 #include <pthread.h>
 #include <stdlib.h> // for ssize_t
@@ -82,8 +89,8 @@ typedef struct shm_s {
 typedef struct __attribute__((packed)) block_header_s {
     // a constant magic number identifying a block header
     unsigned int magic;
-    // the number of references to this block
-    unsigned int reference_count;
+    // the number of references to this block (atomic for thread safety)
+    _MORLOC_ATOMIC(unsigned int) reference_count;
     // the amount of memory that is stored in the header
     size_t size;
 } block_header_t;

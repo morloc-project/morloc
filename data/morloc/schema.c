@@ -284,7 +284,7 @@ static Schema* string_schema() {
     // This parameter is needed for compatibility with arrays
     params[0] = uint_schema(1);
 
-    return create_schema_with_params(MORLOC_STRING, sizeof(Array), 0, params, NULL);
+    return create_schema_with_params(MORLOC_STRING, sizeof(Array), 1, params, NULL);
 }
 
 static Schema* tuple_schema(Schema** params, size_t size) {

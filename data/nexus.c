@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -81,14 +82,14 @@ void clean_exit(int exit_code){
     sigaddset(&block_chld, SIGCHLD);
     sigprocmask(SIG_BLOCK, &block_chld, &old_mask);
 
-    // Phase 1: Send SIGTERM to all live pools
+    // Phase 1: Send SIGTERM to all live pool process groups
     for (size_t i = 0; i < MAX_DAEMONS; i++) {
         if (pids[i] > 0) {
-            kill(pids[i], SIGTERM);
+            kill(-pids[i], SIGTERM); // negative PID = entire process group
         }
     }
 
-    // Phase 2: Wait for pools to exit (up to 500ms per pool, then SIGKILL)
+    // Phase 2: Wait for pool leaders to exit (up to 500ms per pool, then SIGKILL)
     for (size_t i = 0; i < MAX_DAEMONS; i++) {
         if (pids[i] <= 0) continue; // unused or already reaped
 
@@ -106,15 +107,19 @@ void clean_exit(int exit_code){
             nanosleep(&ts, NULL);
         }
 
-        // Escalate to SIGKILL if still alive
+        // Escalate to SIGKILL for entire process group if still alive
         if (!reaped) {
-            kill(pids[i], SIGKILL);
-            waitpid(pids[i], NULL, 0); // blocking reap after SIGKILL
+            kill(-pids[i], SIGKILL); // kill entire process group
+            waitpid(pids[i], NULL, 0); // blocking reap of group leader
             pids[i] = -1;
         }
     }
 
-    // Phase 3: Clean up resources (all pools are dead now)
+    // Phase 3: Reap any remaining descendant processes (e.g., R pool workers)
+    // As subreaper, orphaned grandchildren are reparented to us
+    while (waitpid(-1, NULL, WNOHANG) > 0) { /* reap */ }
+
+    // Phase 4: Clean up resources (all pools are dead now)
     if (tmpdir != NULL) {
         delete_directory(tmpdir);
         free(tmpdir);
@@ -184,9 +189,11 @@ int start_language_server(const morloc_socket_t* socket, ERRMSG){
     pid_t pid = fork();
 
     if (pid == 0) { // Child process
+        setpgid(0, 0); // New process group so we can kill all children
         execvp(socket->syscmd[0], socket->syscmd);
         RAISE("execvp failed: %s", strerror(errno)) // Only reached if exec fails
     } else if (pid > 0) { // Parent process
+        setpgid(pid, pid); // ensure child is in its own group (races with child's setpgid)
         return pid;
     } else {
         RAISE("fork failed: %s", strerror(errno));
@@ -295,6 +302,8 @@ void start_daemons(morloc_socket_t** all_sockets){
                 if(attempt == MAX_RETRIES){
                     ERROR("Failed to ping '%s':\n%s", sock->socket_filename, errmsg);
                 }
+                free(errmsg);
+                errmsg = NULL;
 
                 // Sleep using exponential backoff
                 struct timespec sleep_time = {
@@ -352,6 +361,11 @@ void run_command(
     }
 
     print_return(result_packet, return_schema, config);
+
+    // cleanup (currently unreachable since print_return calls clean_exit)
+    free_schema(return_schema);
+    free(call_packet);
+    free(result_packet);
 }
 
 void run_pure_command(
@@ -418,6 +432,17 @@ void run_pure_command(
     uint8_t* result_packet = make_standard_data_packet(result_rel, return_schema);
 
     print_return(result_packet, return_schema, config);
+
+    // cleanup (currently unreachable since print_return calls clean_exit)
+    for(size_t i = 0; i < nargs; i++){
+        free_schema(arg_schemas[i]);
+        free(arg_packets[i]);
+    }
+    free(arg_schemas);
+    free(arg_packets);
+    free(arg_voidstars);
+    free_schema(return_schema);
+    free(result_packet);
 }
 
 
@@ -430,6 +455,8 @@ void run_call_packet(config_t config){
     uint8_t* result_packet = NULL;
     uint8_t* cache_result_packet = NULL;
     char* run_errmsg = NULL;
+    char* schema_str = NULL;
+    Schema* schema = NULL;
 
     uint8_t* call_packet = read_binary_file(config.packet_path, &call_packet_size, &errmsg);
 
@@ -455,8 +482,8 @@ void run_call_packet(config_t config){
     }
 
     // parse the schema from the response packet
-    char* schema_str = ERROR_TRY_GOTO(read_schema_from_packet_meta, result_packet);
-    Schema* schema = ERROR_TRY_GOTO(parse_schema, schema_str);
+    schema_str = ERROR_TRY_GOTO(read_schema_from_packet_meta, result_packet);
+    schema = ERROR_TRY_GOTO(parse_schema, schema_str);
 
     uint8_t* mlc = ERROR_TRY_GOTO(get_morloc_data_packet_value, result_packet, schema)
     char* mpk_data = NULL; // MessagePack data point
@@ -482,6 +509,10 @@ void run_call_packet(config_t config){
     ERROR_TRY_GOTO(write_atomic, config.output_path, cache_result_packet, cache_result_packet_size);
 
 end:
+    if(schema != NULL){
+        free_schema(schema);
+    }
+    free(schema_str);
     if(mpk_data != NULL){
         free(mpk_data);
     }
@@ -611,6 +642,10 @@ int main(int argc, char *argv[]) {
     if(errmsg != NULL){
         ERROR("%s", errmsg);
     }
+
+    // Become subreaper so orphaned grandchildren (e.g., R pool workers)
+    // get reparented to us instead of init, allowing us to reap them
+    prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
 
     // Register SIGCHLD handler to reap child processes promptly
     struct sigaction sa_chld;

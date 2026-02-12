@@ -138,27 +138,33 @@ uint8_t* stream_from_client_wait(int client_fd, int pselect_timeout_us, int recv
     sigset_t mask, origmask;
     sigemptyset(&mask);
     sigaddset(&mask, SIGINT); // do we need to add more masks here?
-    sigprocmask(SIG_SETMASK, &mask, &origmask);
+    pthread_sigmask(SIG_SETMASK, &mask, &origmask);
 
     // Initial receive with timeout
     FD_ZERO(&read_fds);
     FD_SET(client_fd, &read_fds);
-    // int ready = pselect(max_fd + 1, &read_fds, NULL, NULL, timeout_loop_ptr, &origmask);
     int ready = pselect(max_fd + 1, &read_fds, NULL, NULL, timeout_loop_ptr, &origmask);
-    sigprocmask(SIG_SETMASK, &origmask, NULL);
+    pthread_sigmask(SIG_SETMASK, &origmask, NULL);
 
     RAISE_IF_WITH(ready == 0, free(buffer), "Timeout waiting for initial data");
-    RAISE_IF(ready < 0, "pselect error: %s", strerror(errno));
-    RAISE_IF(!FD_ISSET(client_fd, &read_fds), "Bad client file descriptor")
+    RAISE_IF_WITH(ready < 0, free(buffer), "pselect error: %s", strerror(errno));
+    RAISE_IF_WITH(!FD_ISSET(client_fd, &read_fds), free(buffer), "Bad client file descriptor")
     ssize_t recv_length = recv(client_fd, buffer, BUFFER_SIZE, 0);
 
     RAISE_IF_WITH(recv_length == 0, free(buffer), "Connection closed by peer: %s", strerror(errno));
     RAISE_IF_WITH(recv_length < 0 && errno != EWOULDBLOCK && errno != EAGAIN,
                   free(buffer), "Recv error: %s", strerror(errno));
 
-    size_t packet_length = TRY(morloc_packet_size, (uint8_t*)buffer);
+    size_t packet_length = morloc_packet_size((uint8_t*)buffer, &CHILD_ERRMSG);
+    if (CHILD_ERRMSG != NULL) {
+        free(buffer);
+        RAISE("Failed to get packet size: %s", CHILD_ERRMSG);
+    }
     uint8_t* result = (uint8_t*)calloc(packet_length, sizeof(uint8_t));
-    RAISE_IF(result == NULL, "calloc failure: %s", strerror(errno))
+    if (result == NULL) {
+        free(buffer);
+        RAISE("calloc failure: %s", strerror(errno));
+    }
 
     uint8_t* data_ptr = result;
     memcpy(data_ptr, buffer, recv_length);
@@ -182,12 +188,12 @@ uint8_t* stream_from_client_wait(int client_fd, int pselect_timeout_us, int recv
                 timeout_loop_ptr = &ts_loop;
             }
 
-            sigprocmask(SIG_SETMASK, &mask, NULL);
+            pthread_sigmask(SIG_SETMASK, &mask, NULL);
             ready = pselect(max_fd + 1, &read_fds, NULL, NULL, timeout_loop_ptr, &origmask);
-            sigprocmask(SIG_SETMASK, &origmask, NULL);
+            pthread_sigmask(SIG_SETMASK, &origmask, NULL);
 
             RAISE_IF_WITH(ready == 0, free(result), "Timeout waiting for remaining data");
-            RAISE_IF(ready < 0 && errno != EINTR, "pselect error: %s", strerror(errno));
+            RAISE_IF_WITH(ready < 0 && errno != EINTR, free(result), "pselect error: %s", strerror(errno));
             if (ready <= 0) continue;
 
             if (FD_ISSET(client_fd, &read_fds)) {
@@ -202,7 +208,7 @@ uint8_t* stream_from_client_wait(int client_fd, int pselect_timeout_us, int recv
                               free(result), "Recv error: %s", strerror(errno));
             }
         }
-        RAISE_IF(!packet_received, "Failed to retrieve packet")
+        RAISE_IF_WITH(!packet_received, free(result), "Failed to retrieve packet")
     }
 
     return result;
@@ -340,6 +346,10 @@ int wait_for_client_with_timeout(language_daemon_t* daemon, int timeout_us, ERRM
         } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
             RAISE("Error accepting client connection");
         }
+    }
+
+    if (daemon->client_fds == NULL) {
+        return 0; // no client ready (spurious wakeup), caller should retry
     }
 
     client_fds = daemon->client_fds;

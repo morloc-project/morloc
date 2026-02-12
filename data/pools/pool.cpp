@@ -96,6 +96,7 @@ uint8_t* _put_value(const T& value, const std::string& schema_str) {
 
     uint8_t* packet = make_standard_data_packet(relptr, schema);
 
+    free_schema(schema);
     return packet;
 }
 
@@ -109,10 +110,15 @@ T _get_value(const uint8_t* packet, const std::string& schema_str){
 
     char* errmsg = NULL;
     uint8_t* voidstar = get_morloc_data_packet_value(packet, schema, &errmsg);
-    PROPAGATE_ERROR(errmsg)
+    if(errmsg != NULL) {
+        free_schema(schema);
+        PROPAGATE_ERROR(errmsg)
+    }
 
     T* dumby = nullptr;
-    return fromAnything(schema, (void*)voidstar, dumby);
+    T result = fromAnything(schema, (void*)voidstar, dumby);
+    free_schema(schema);
+    return result;
 }
 
 
@@ -142,10 +148,17 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
 
     // Original logic with variadic args converted to array
     uint8_t* packet = make_morloc_local_call_packet((uint32_t)mid, args_array, nargs, &errmsg);
-    PROPAGATE_ERROR(errmsg)
+    if (errmsg != NULL) {
+        free(args_array);
+        PROPAGATE_ERROR(errmsg)
+    }
 
     uint8_t* result = send_and_receive_over_socket(socket_path, packet, &errmsg);
-    PROPAGATE_ERROR(errmsg)
+    free(packet);
+    if (errmsg != NULL) {
+        free(args_array);
+        PROPAGATE_ERROR(errmsg)
+    }
 
     free(args_array);
     return result;
@@ -218,34 +231,48 @@ uint8_t* dispatch(const uint8_t* msg){
     }
 
     bool is_local_call = packet_is_local_call(msg, &errmsg);
+    free(errmsg);
+    errmsg = NULL;
     bool is_remote_call = packet_is_remote_call(msg, &errmsg);
+    free(errmsg);
     errmsg = NULL;
 
 
     if(is_local_call || is_remote_call){
         call_packet = read_morloc_call_packet(msg, &errmsg);
+        PROPAGATE_FAIL_PACKET(errmsg)
         mid = call_packet->midx;
         args = (const uint8_t**)call_packet->args;
+        size_t nargs = call_packet->nargs;
         free(call_packet);
+        call_packet = NULL;
+
+        uint8_t* result = NULL;
         try {
             if(is_local_call){
-                return local_dispatch(mid, args);
+                result = local_dispatch(mid, args);
             } else {
-                return remote_dispatch(mid, args);
+                result = remote_dispatch(mid, args);
             }
         } catch (const std::exception& e) {
-            // Wrap any exceptions in a failing data packet
-            return make_fail_packet(e.what());
+            result = make_fail_packet(e.what());
         } catch (...) {
-            // Wrap any unexpected exceptions in failing data packet
-            return make_fail_packet("An unknown error occurred");
+            result = make_fail_packet("An unknown error occurred");
         }
 
+        for (size_t i = 0; i < nargs; i++) {
+            free((void*)args[i]);
+        }
+        free((void*)args);
+
+        return result;
     }
 
     if(!is_local_call){
         if(errmsg != NULL) {
-            return make_fail_packet(errmsg);
+            uint8_t* fail = make_fail_packet(errmsg);
+            free(errmsg);
+            return fail;
         } else {
             return make_fail_packet("In C++ pool, call failed due to inappropriate packet");
         }
@@ -330,6 +357,8 @@ void* worker_thread(void* arg) {
             free(client_data);
             client_data = NULL;
             std::cerr << "Failed to read client data: " << errmsg << std::endl;
+            free(errmsg);
+            errmsg = NULL;
             close_socket(client_fd);
             continue;
         }
@@ -340,6 +369,8 @@ void* worker_thread(void* arg) {
             free(client_data);
             client_data = NULL;
             std::cerr << "Malformed packet: " << errmsg << std::endl;
+            free(errmsg);
+            errmsg = NULL;
             close_socket(client_fd);
             continue;
         } else if (length == 0) {
@@ -363,8 +394,12 @@ void* worker_thread(void* arg) {
         // return the result to the client and move on
         // do not wait for the client to finish processing
         bytes_sent = send_packet_to_foreign_server(client_fd, result, &errmsg);
+        free(result);
+        result = NULL;
         if(errmsg != NULL){
             std::cerr << "Failed to send data: " << errmsg << std::endl;
+            free(errmsg);
+            errmsg = NULL;
             close_socket(client_fd);
             continue;
         }
@@ -396,6 +431,7 @@ int main(int argc, char* argv[]) {
 
     if(errmsg != NULL){
         std::cerr << "Failed to start language server:\n" << errmsg << std::endl;
+        free(errmsg);
         return 1;
     }
 
@@ -421,6 +457,7 @@ int main(int argc, char* argv[]) {
         if (errmsg != NULL){
 
             std::cerr << "Failed to read client:\n" << errmsg << std::endl;
+            free(errmsg);
             errmsg = NULL;
         }
         if( client_fd > 0 ){
@@ -431,15 +468,20 @@ int main(int argc, char* argv[]) {
     set_shutting_down(1);
     pthread_cond_broadcast(&queue.cond);
 
+    // Join all worker threads before freeing any resources they may reference
+    for (int i = 0; i < nthreads; ++i) {
+        pthread_join(threads[i], NULL);
+    }
+
+    // Now safe to free resources -- all workers have exited
     if(daemon != NULL){
         close_daemon(&daemon);
     }
 
     free(g_tmpdir);
 
-    for (int i = 0; i < nthreads; ++i) {
-        pthread_join(threads[i], NULL);
-    }
+    pthread_mutex_destroy(&queue.mutex);
+    pthread_cond_destroy(&queue.cond);
 
     return 0;
 }

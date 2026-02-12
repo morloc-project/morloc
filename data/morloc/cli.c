@@ -235,7 +235,7 @@ static bool shfree_by_schema(absptr_t ptr, const Schema* schema, ERRMSG){
             Array* arr = (Array*)ptr;
             if(arr->data > 0){
               absptr_t arr_data = TRY(rel2abs, arr->data)
-              if(schema_is_fixed_width(schema->parameters[0])){
+              if(!schema_is_fixed_width(schema->parameters[0])){
                 for(size_t i = 0; i < arr->size; i++){
                   absptr_t element_ptr = (absptr_t)((char*)arr_data + i * schema->parameters[0]->width);
                   TRY(shfree_by_schema, element_ptr, schema->parameters[0])

@@ -29,6 +29,9 @@ morloc_send_fd                       <- function(...){ .Call("morloc_send_fd",  
 morloc_recv_fd                       <- function(...){ .Call("morloc_recv_fd",                       ...) }
 morloc_kill                          <- function(...){ .Call("morloc_kill",                          ...) }
 morloc_waitpid                       <- function(...){ .Call("morloc_waitpid",                       ...) }
+morloc_install_sigterm_handler       <- function(...){ .Call("morloc_install_sigterm_handler",       ...) }
+morloc_is_shutting_down              <- function(...){ .Call("morloc_is_shutting_down",              ...) }
+morloc_waitpid_blocking              <- function(...){ .Call("morloc_waitpid_blocking",              ...) }
 
 global_state <- list()
 
@@ -90,7 +93,24 @@ worker_loop <- function(pipe_fd) {
   }
 }
 
+cleanup_workers <- function(pids, pipes) {
+  # Close pipe ends to signal EOF to workers (causes worker_loop to break)
+  for (i in seq_along(pipes)) {
+    tryCatch(morloc_close_socket(pipes[[i]][1L]), error = function(e) NULL)
+  }
+
+  # SIGKILL all workers and blocking-reap to prevent zombies
+  for (pid in pids) {
+    if (pid > 0L) {
+      tryCatch(morloc_kill(pid, 9L), error = function(e) NULL)  # SIGKILL
+      tryCatch(morloc_waitpid_blocking(pid), error = function(e) NULL)
+    }
+  }
+}
+
 main <- function(socket_path, tmpdir, shm_basename) {
+  morloc_install_sigterm_handler()
+
   daemon <- morloc_start_daemon(socket_path, tmpdir, shm_basename, 0xffff)
   n_workers <- max(1L, parallel::detectCores() - 1L)
 
@@ -113,9 +133,11 @@ main <- function(socket_path, tmpdir, shm_basename) {
     morloc_close_socket(pipes[[i]][2L])  # Parent closes child end
   }
 
+  on.exit(cleanup_workers(pids, pipes))
+
   # Main dispatch loop - round-robin
   current <- 1L
-  while (TRUE) {
+  while (!morloc_is_shutting_down()) {
     client_fd <- morloc_wait_for_client(daemon)
     if (client_fd > 0L) {
       tryCatch({
