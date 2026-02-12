@@ -35,6 +35,13 @@ FAILED=0
 SKIPPED=0
 FAILURES=()
 
+# Colors (disabled if stdout is not a terminal)
+if [[ -t 1 ]]; then
+    GREEN=$'\033[32m' RED=$'\033[31m' YELLOW=$'\033[33m' BOLD=$'\033[1m' RESET=$'\033[0m'
+else
+    GREEN='' RED='' YELLOW='' BOLD='' RESET=''
+fi
+
 run_test() {
     local test_script="$1"
     local test_name="$2"
@@ -44,18 +51,25 @@ run_test() {
 
     printf "%-20s %-8s ... " "$test_name" "[$workload]"
 
-    local output
+    local output start_time elapsed
+    start_time=$(date +%s%N)
     if output=$("$SCRIPT_DIR/$test_script" "$dir" "$call" 2>&1); then
-        echo "PASS"
+        elapsed=$(( ($(date +%s%N) - start_time) / 1000000 ))
+        if (( elapsed >= 1000 )); then
+            printf "%sPASS%s (%d.%01ds)\n" "$GREEN" "$RESET" "$((elapsed/1000))" "$(( (elapsed%1000) / 100 ))"
+        else
+            echo "${GREEN}PASS${RESET} (${elapsed}ms)"
+        fi
         PASSED=$((PASSED + 1))
     else
+        elapsed=$(( ($(date +%s%N) - start_time) / 1000000 ))
         local last_line
         last_line=$(echo "$output" | tail -1)
         if [[ "$last_line" == SKIP* ]]; then
-            echo "SKIP"
+            echo "${YELLOW}SKIP${RESET}"
             SKIPPED=$((SKIPPED + 1))
         else
-            echo "FAIL"
+            echo "${RED}FAIL${RESET}"
             FAILED=$((FAILED + 1))
             FAILURES+=("$test_name [$workload]")
             # Print last 5 lines of output for context
@@ -94,14 +108,14 @@ done
 
 echo ""
 echo "=== Results ==="
-echo "Passed: $PASSED, Failed: $FAILED, Skipped: $SKIPPED"
+echo "${GREEN}Passed: $PASSED${RESET}, ${RED}Failed: $FAILED${RESET}, ${YELLOW}Skipped: $SKIPPED${RESET}"
 
 if (( FAILED > 0 )); then
     echo ""
-    echo "Failures:"
+    echo "${RED}Failures:${RESET}"
     for f in "${FAILURES[@]}"; do
-        echo "  - $f"
+        echo "  ${RED}-${RESET} $f"
     done
     exit 1
 fi
-echo "ALL PASSED"
+echo "${GREEN}${BOLD}ALL PASSED${RESET}"
