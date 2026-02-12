@@ -129,25 +129,28 @@ char* put_cache_packet(const uint8_t* voidstar, const Schema* schema, uint64_t k
     char* packet_filename = TRY(make_cache_filename, key, cache_path)
 
     // Generate the data filename
-    char* data_filename = TRY(make_cache_data_filename, key, cache_path)
+    char* data_filename = TRY_WITH(free(packet_filename), make_cache_data_filename, key, cache_path)
 
     uint8_t* data_packet = make_mpk_data_packet(data_filename, schema);
 
-    size_t data_packet_size = TRY(morloc_packet_size, data_packet);
+    size_t data_packet_size = TRY_WITH((free(packet_filename), free(data_filename)), morloc_packet_size, data_packet);
 
     // convert voidstar data to MessagePack
     char* mpk_data = NULL;
     size_t mpk_size = 0;
-    TRY(pack_with_schema, voidstar, schema, &mpk_data, &mpk_size);
+    TRY_WITH((free(packet_filename), free(data_filename)), pack_with_schema, voidstar, schema, &mpk_data, &mpk_size);
 
     // write packet
-    TRY_WITH(free(data_packet), write_atomic, packet_filename, data_packet, data_packet_size);
+    TRY_WITH((free(data_packet), free(packet_filename), free(data_filename)), write_atomic, packet_filename, data_packet, data_packet_size);
     free(data_packet);
 
-    TRY_WITH(free(mpk_data), write_atomic, data_filename, (uint8_t*)mpk_data, mpk_size);
+    TRY_WITH((free(mpk_data), free(packet_filename), free(data_filename)), write_atomic, data_filename, (uint8_t*)mpk_data, mpk_size);
     free(mpk_data);
 
-    return strdup(packet_filename);
+    char* result = strdup(packet_filename);
+    free(packet_filename);
+    free(data_filename);
+    return result;
 }
 
 uint8_t* get_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
@@ -157,8 +160,9 @@ uint8_t* get_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
 
     // Read the binary file into memory
     size_t file_size;
-    uint8_t* data = TRY(read_binary_file, filename, &file_size);
+    uint8_t* data = TRY_WITH(free(filename), read_binary_file, filename, &file_size);
 
+    free(filename);
     return data;
 }
 
@@ -169,12 +173,14 @@ bool del_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
     char* filename = TRY(make_cache_filename, key, cache_path)
 
     // Attempt to delete the file
-    RAISE_IF(
+    RAISE_IF_WITH(
         unlink(filename) != 0,
+        free(filename),
         "Failed to delete cache file '%s'",
         filename
     )
 
+    free(filename);
     return true; // deletion success
 }
 
@@ -187,9 +193,12 @@ char* check_cache_packet(uint64_t key, const char* cache_path, ERRMSG) {
     // check if the file exists
     struct stat file_stat;
     if (stat(filename, &file_stat) == 0) {
-        return strdup(filename); // File exists
+        char* result = strdup(filename);
+        free(filename);
+        return result; // File exists
     } else {
         // NOTE, this is NOT an error, it just means that no cache file exists
+        free(filename);
         return NULL;
     }
 }

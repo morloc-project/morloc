@@ -284,7 +284,7 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
     format = header->command.data.format;
 
     char* packet_error = TRY(get_morloc_data_packet_error_message, data);
-    RAISE_IF(packet_error != NULL, "\n%s", packet_error)
+    RAISE_IF_WITH(packet_error != NULL, free(packet_error), "\n%s", packet_error)
 
     switch (source) {
         case PACKET_SOURCE_MESG:
@@ -569,7 +569,7 @@ int print_morloc_data_packet(const uint8_t* packet, const Schema* schema, ERRMSG
     format = header->command.data.format;
 
     char* packet_error = TRY(get_morloc_data_packet_error_message, packet);
-    RAISE_IF(packet_error != NULL, "\n%s", packet_error)
+    RAISE_IF_WITH(packet_error != NULL, free(packet_error), "\n%s", packet_error)
 
     switch (source) {
         case PACKET_SOURCE_MESG:

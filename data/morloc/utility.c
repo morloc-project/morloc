@@ -229,6 +229,7 @@ int write_atomic(const char* filename, const uint8_t* data, size_t size, ERRMSG)
 cleanup:
     last_errno = errno;
     FREE(file_dirpath)
+    if (fd >= 0) close(fd);
     if (file) fclose(file);
     if (ret == -1) unlink(tmp_path);
     RAISE_IF(ret == -1, "Atomic write to '%s' failed: %s", filename, strerror(last_errno))

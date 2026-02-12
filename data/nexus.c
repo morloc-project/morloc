@@ -55,7 +55,7 @@ typedef struct config_s {
 // a pid of 0 means unused, -1 means already reaped
 pid_t pids[MAX_DAEMONS] = { 0 };
 
-// process group IDs of language daemons — never modified by signal handler
+// process group IDs of language daemons - never modified by signal handler
 // used in clean_exit() to kill entire process groups even if the leader is already dead
 pid_t pgids[MAX_DAEMONS] = { 0 };
 
@@ -307,10 +307,13 @@ void start_daemons(morloc_socket_t** all_sockets){
             return_data = send_and_receive_over_socket_wait(sock->socket_filename, ping_packet, ping_timeout, ping_timeout, &errmsg);
             if(errmsg != NULL || return_data == NULL){
                 if(attempt == MAX_RETRIES){
+                    free(ping_packet);
                     ERROR("Failed to ping '%s':\n%s", sock->socket_filename, errmsg);
                 }
                 free(errmsg);
                 errmsg = NULL;
+                free(return_data);
+                return_data = NULL;
 
                 // Sleep using exponential backoff
                 struct timespec sleep_time = {
@@ -331,8 +334,10 @@ void start_daemons(morloc_socket_t** all_sockets){
                 ping_timeout = 2 * ping_timeout;
                 continue;
             }
+            free(return_data);
             break;
         }
+        free(ping_packet);
     }
 }
 
@@ -519,7 +524,7 @@ end:
     if(schema != NULL){
         free_schema(schema);
     }
-    free(schema_str);
+    // schema_str points into result_packet, not a separate allocation
     if(mpk_data != NULL){
         free(mpk_data);
     }

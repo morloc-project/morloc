@@ -37,6 +37,12 @@ void free_argument_t(argument_t* arg){
       }
       free(arg->fields);
   }
+  if(arg != NULL && arg->default_fields != NULL){
+      for(size_t i = 0; i < arg->size; i++){
+          FREE(arg->default_fields[i]);
+      }
+      free(arg->default_fields);
+  }
   FREE(arg);
 }
 

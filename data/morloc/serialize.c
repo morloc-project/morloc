@@ -262,6 +262,7 @@ int pack(const void* mlc, const char* schema_str, char** mpk, size_t* mpk_size, 
     RAISE_IF(schema == NULL, "\n%s", CHILD_ERRMSG)
 
     int exit_code = pack_with_schema(mlc, schema, mpk, mpk_size, &CHILD_ERRMSG);
+    free_schema(schema);
     RAISE_IF(exit_code == EXIT_FAIL, "\n%s", CHILD_ERRMSG);
 
     return exit_code;
@@ -603,6 +604,7 @@ int unpack(const char* mpk, size_t mpk_size, const char* schema_str, void** mlcp
     const Schema* schema = parse_schema(schema_str, &CHILD_ERRMSG);
     RAISE_IF(schema == NULL, "\n%s", CHILD_ERRMSG)
     int exit_code = unpack_with_schema(mpk, mpk_size, schema, mlcptr, &CHILD_ERRMSG);
+    free_schema((Schema*)schema);
     RAISE_IF(exit_code == EXIT_FAIL, "\n%s", CHILD_ERRMSG)
     return exit_code;
 }
