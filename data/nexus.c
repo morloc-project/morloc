@@ -55,6 +55,10 @@ typedef struct config_s {
 // a pid of 0 means unused, -1 means already reaped
 pid_t pids[MAX_DAEMONS] = { 0 };
 
+// process group IDs of language daemons — never modified by signal handler
+// used in clean_exit() to kill entire process groups even if the leader is already dead
+pid_t pgids[MAX_DAEMONS] = { 0 };
+
 // global temporary file
 char* tmpdir = NULL;
 
@@ -82,44 +86,46 @@ void clean_exit(int exit_code){
     sigaddset(&block_chld, SIGCHLD);
     sigprocmask(SIG_BLOCK, &block_chld, &old_mask);
 
-    // Phase 1: Send SIGTERM to all live pool process groups
+    // Send SIGTERM to all pool process groups
+    // Uses pgids[] (never modified by SIGCHLD handler) so this works even
+    // when the group leader has already been reaped (pids[i] == -1).
     for (size_t i = 0; i < MAX_DAEMONS; i++) {
-        if (pids[i] > 0) {
-            kill(-pids[i], SIGTERM); // negative PID = entire process group
+        if (pgids[i] > 0) {
+            kill(-pgids[i], SIGTERM);
         }
     }
 
-    // Phase 2: Wait for pool leaders to exit (up to 500ms per pool, then SIGKILL)
+    // Wait for process groups to exit (up to 500ms per group, then SIGKILL)
+    // Must reap zombies with waitpid() inside the loop because kill(-pgid, 0)
+    // returns 0 for zombies (they still exist in the process table).
     for (size_t i = 0; i < MAX_DAEMONS; i++) {
-        if (pids[i] <= 0) continue; // unused or already reaped
+        if (pgids[i] <= 0) continue;
 
-        // Poll with non-blocking waitpid, sleeping 10ms between checks
-        int reaped = 0;
+        while (waitpid(-1, NULL, WNOHANG) > 0) {}
+        if (kill(-pgids[i], 0) == -1) continue;
+
+        int group_dead = 0;
         for (int attempt = 0; attempt < 50; attempt++) {
-            int status;
-            pid_t result = waitpid(pids[i], &status, WNOHANG);
-            if (result == pids[i] || result == -1) {
-                pids[i] = -1;
-                reaped = 1;
+            while (waitpid(-1, NULL, WNOHANG) > 0) {}
+            if (kill(-pgids[i], 0) == -1) {
+                group_dead = 1;
                 break;
             }
             struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000000 }; // 10ms
             nanosleep(&ts, NULL);
         }
 
-        // Escalate to SIGKILL for entire process group if still alive
-        if (!reaped) {
-            kill(-pids[i], SIGKILL); // kill entire process group
-            waitpid(pids[i], NULL, 0); // blocking reap of group leader
-            pids[i] = -1;
+        if (!group_dead) {
+            kill(-pgids[i], SIGKILL);
+            struct timespec ts = { .tv_sec = 0, .tv_nsec = 50000000 }; // 50ms
+            nanosleep(&ts, NULL);
         }
     }
 
-    // Phase 3: Reap any remaining descendant processes (e.g., R pool workers)
-    // As subreaper, orphaned grandchildren are reparented to us
-    while (waitpid(-1, NULL, WNOHANG) > 0) { /* reap */ }
+    // Final reap of any remaining descendants
+    while (waitpid(-1, NULL, WNOHANG) > 0) {}
 
-    // Phase 4: Clean up resources (all pools are dead now)
+    // Clean up resources (all pools are dead now)
     if (tmpdir != NULL) {
         delete_directory(tmpdir);
         free(tmpdir);
@@ -129,7 +135,7 @@ void clean_exit(int exit_code){
     char* errmsg = NULL;
     shclose(&errmsg);
     if(errmsg != NULL){
-        fprintf(stderr, "%s", errmsg);
+        fprintf(stderr, "shclose error: %s\n", errmsg);
         exit(1);
     }
 
@@ -264,6 +270,7 @@ void start_daemons(morloc_socket_t** all_sockets){
         all_sockets[i]->pid = start_language_server(all_sockets[i], &errmsg);
         // add pid to global list for later cleanup
         pids[i] = all_sockets[i]->pid;
+        pgids[i] = all_sockets[i]->pid; // pgid == pid due to setpgid(0, 0)
         if(errmsg != NULL){
             ERROR("%s", errmsg);
         }

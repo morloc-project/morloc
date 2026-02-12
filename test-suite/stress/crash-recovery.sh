@@ -33,7 +33,8 @@ FAILURES=0
 for i in $(seq 1 "$ITERATIONS"); do
     # Start nexus in background with a random call
     local_call="${CALLS[RANDOM % ${#CALLS[@]}]}"
-    eval ./nexus $local_call > /dev/null 2>&1 &
+    iter_err="$WORK_DIR/iter-${i}.err"
+    eval exec ./nexus $local_call 2>"$iter_err" > /dev/null &
     NEXUS_PID=$!
 
     # Wait for pools to start
@@ -59,6 +60,17 @@ for i in $(seq 1 "$ITERATIONS"); do
         ELAPSED=$((ELAPSED + 1))
     done
     wait "$NEXUS_PID" 2>/dev/null || true
+
+    # Log any nexus stderr
+    if [ -s "$iter_err" ]; then
+        {
+            printf "=== %s | %s | iteration %d | call: %s | %s ===\n" \
+                "$STRESS_SCRIPT" "$(basename "$TEST_DIR")" "$i" "$local_call" "$(date '+%H:%M:%S')"
+            cat "$iter_err"
+            echo ""
+        } >> "$STDERR_LOG"
+    fi
+    rm -f "$iter_err"
 
     SHM=$(( $(count_shm) - INITIAL_SHM ))
     TMP=$(( $(count_tmp) - INITIAL_TMP ))

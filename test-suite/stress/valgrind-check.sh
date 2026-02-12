@@ -25,13 +25,25 @@ VALGRIND_LOG="/tmp/morloc-valgrind-$$.log"
 # Use first call only for valgrind (deterministic)
 CALL="${CALLS[0]}"
 echo "Running under valgrind: ./nexus $CALL"
+NEXUS_ERR="$WORK_DIR/valgrind-nexus.err"
 eval timeout 60 valgrind \
     --leak-check=full \
     --show-leak-kinds=definite,indirect \
     --track-fds=yes \
     --log-file="$VALGRIND_LOG" \
-    ./nexus $CALL > /dev/null 2>&1
+    ./nexus $CALL > /dev/null 2>"$NEXUS_ERR"
 EXIT_CODE=$?
+
+# Log any nexus/valgrind stderr
+if [ -s "$NEXUS_ERR" ]; then
+    {
+        printf "=== %s | %s | call: %s | %s ===\n" \
+            "$STRESS_SCRIPT" "$(basename "$TEST_DIR")" "$CALL" "$(date '+%H:%M:%S')"
+        cat "$NEXUS_ERR"
+        echo ""
+    } >> "$STDERR_LOG"
+fi
+rm -f "$NEXUS_ERR"
 
 echo ""
 if [ ! -f "$VALGRIND_LOG" ]; then

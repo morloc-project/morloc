@@ -15,6 +15,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR=$(mktemp -d)
 NEXUS_TIMEOUT=15
+STDERR_LOG="$SCRIPT_DIR/stress-test.log"
+STRESS_SCRIPT="$(basename "${0}")"
 
 cleanup() {
     jobs -p 2>/dev/null | xargs -r kill -9 2>/dev/null || true
@@ -77,8 +79,21 @@ compile_workload() {
     echo "Done. Calls: ${CALLS[*]}"
 }
 
-# Run a random call from CALLS[@]
+# Run a random call from CALLS[@], logging stderr to STDERR_LOG
 run_nexus() {
     local call="${CALLS[RANDOM % ${#CALLS[@]}]}"
-    eval timeout "$NEXUS_TIMEOUT" ./nexus $call > /dev/null 2>&1
+    local _tmp_err
+    _tmp_err=$(mktemp)
+    eval timeout "$NEXUS_TIMEOUT" ./nexus $call > /dev/null 2>"$_tmp_err"
+    local _rc=$?
+    if [ -s "$_tmp_err" ]; then
+        {
+            printf "=== %s | %s | call: %s | %s ===\n" \
+                "$STRESS_SCRIPT" "$(basename "$TEST_DIR")" "$call" "$(date '+%H:%M:%S')"
+            cat "$_tmp_err"
+            echo ""
+        } >> "$STDERR_LOG"
+    fi
+    rm -f "$_tmp_err"
+    return $_rc
 }

@@ -88,7 +88,11 @@ should_run() {
     return 1
 }
 
+STDERR_LOG="$SCRIPT_DIR/stress-test.log"
+> "$STDERR_LOG"
+
 echo "=== Morloc Stress Test Suite ==="
+echo "Stderr log: $STDERR_LOG"
 echo ""
 
 for workload in "${WORKLOAD_ORDER[@]}"; do
@@ -109,6 +113,10 @@ done
 echo ""
 echo "=== Results ==="
 echo "${GREEN}Passed: $PASSED${RESET}, ${RED}Failed: $FAILED${RESET}, ${YELLOW}Skipped: $SKIPPED${RESET}"
+
+if [ -s "$STDERR_LOG" ]; then
+    echo "Nexus stderr logged to: $STDERR_LOG"
+fi
 
 if (( FAILED > 0 )); then
     echo ""
