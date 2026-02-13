@@ -728,14 +728,46 @@ error:
 
 // {{{ exported morloc API functions
 
+// PID of the process that created the daemon (set in morloc_start_daemon)
+static pid_t daemon_creator_pid = 0;
+
 // Close the daemon when the R object dies
 static void daemon_finalizer(SEXP ptr) {
     if (!R_ExternalPtrAddr(ptr)) return;
+    // Skip cleanup in forked children -- they must not unlink the socket file
+    if (daemon_creator_pid != 0 && getpid() != daemon_creator_pid) {
+        R_ClearExternalPtr(ptr);
+        return;
+    }
     language_daemon_t* daemon = (language_daemon_t*)R_ExternalPtrAddr(ptr);
     if(daemon != NULL){
         close_daemon(&daemon);
     }
     R_ClearExternalPtr(ptr);
+}
+
+// Release daemon resources in a forked child WITHOUT unlinking the socket file.
+// Workers call this after fork so they don't hold the server_fd or accidentally
+// destroy the socket when they exit.
+SEXP morloc_detach_daemon(SEXP daemon_r) {
+    if (!R_ExternalPtrAddr(daemon_r)) return R_NilValue;
+    language_daemon_t* daemon = (language_daemon_t*)R_ExternalPtrAddr(daemon_r);
+    if (daemon != NULL) {
+        close_socket(daemon->server_fd);
+        client_list_t *current = daemon->client_fds;
+        while (current) {
+            client_list_t *next = current->next;
+            close(current->fd);
+            free(current);
+            current = next;
+        }
+        free(daemon->socket_path);
+        free(daemon->tmpdir);
+        free(daemon->shm_basename);
+        free(daemon);
+    }
+    R_ClearExternalPtr(daemon_r);
+    return R_NilValue;
 }
 
 SEXP morloc_start_daemon(
@@ -759,6 +791,9 @@ SEXP morloc_start_daemon(
 
     // Wrap pointer in external pointer
     SEXP result = PROTECT(R_MakeExternalPtr(daemon, R_NilValue, R_NilValue));
+
+    // Record which process owns the daemon (for the PID guard in daemon_finalizer)
+    daemon_creator_pid = getpid();
 
     // Register finalizer with wrapper
     R_RegisterCFinalizerEx(result, daemon_finalizer, TRUE);
@@ -852,7 +887,7 @@ SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
     // Accept new connection if server_fd is ready
     if (FD_ISSET(daemon->server_fd, &read_fds)) {
         int fd = accept(daemon->server_fd, NULL, NULL);
-        if (fd > 0) {
+        if (fd >= 0) {
             fcntl(fd, F_SETFL, O_NONBLOCK);
             client_list_t* new_client = (client_list_t*)calloc(1, sizeof(client_list_t));
             if (new_client == NULL) {
@@ -1390,6 +1425,7 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_waitpid_blocking", (DL_FUNC) &morloc_waitpid_blocking, 1},
         {"morloc_install_sigterm_handler", (DL_FUNC) &morloc_install_sigterm_handler, 0},
         {"morloc_is_shutting_down", (DL_FUNC) &morloc_is_shutting_down, 0},
+        {"morloc_detach_daemon", (DL_FUNC) &morloc_detach_daemon, 1},
         {NULL, NULL, 0}
     };
 

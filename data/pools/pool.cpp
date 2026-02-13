@@ -463,7 +463,7 @@ int main(int argc, char* argv[]) {
             free(errmsg);
             errmsg = NULL;
         }
-        if( client_fd > 0 ){
+        if( client_fd >= 0 ){
             job_queue_push(&queue, client_fd);
         }
     }

@@ -32,6 +32,7 @@ morloc_waitpid                       <- function(...){ .Call("morloc_waitpid",  
 morloc_install_sigterm_handler       <- function(...){ .Call("morloc_install_sigterm_handler",       ...) }
 morloc_is_shutting_down              <- function(...){ .Call("morloc_is_shutting_down",              ...) }
 morloc_waitpid_blocking              <- function(...){ .Call("morloc_waitpid_blocking",              ...) }
+morloc_detach_daemon                 <- function(...){ .Call("morloc_detach_daemon",                 ...) }
 
 global_state <- list()
 
@@ -120,7 +121,10 @@ main <- function(socket_path, tmpdir, shm_basename) {
   for (i in seq_len(n_workers)) {
     pid <- morloc_fork()
     if (pid == 0L) {
-      # Child: close all parent-side fds
+      # Child: release inherited daemon (close server_fd, free memory)
+      # without unlinking the socket file
+      morloc_detach_daemon(daemon)
+      # Close all parent-side fds
       for (j in seq_len(n_workers)) morloc_close_socket(pipes[[j]][1L])
       # Close child-side fds for other workers
       for (j in seq_len(n_workers)) {

@@ -67,7 +67,7 @@ static int new_server(const char* socket_path, ERRMSG){
     )
 
     RAISE_IF_WITH(
-        listen(server_fd, 1) == EXIT_FAIL,
+        listen(server_fd, 16) == EXIT_FAIL,
         close_socket(server_fd),
         "Error listening on socket"
     )
@@ -329,7 +329,7 @@ int wait_for_client_with_timeout(language_daemon_t* daemon, int timeout_us, ERRM
     // get the new client that select found and add it to the end of the client list
     if (FD_ISSET(daemon->server_fd, &daemon->read_fds)) {
         selected_fd = accept(daemon->server_fd, NULL, NULL);
-        if (selected_fd > 0) {
+        if (selected_fd >= 0) {
             fcntl(selected_fd, F_SETFL, O_NONBLOCK);
 
             // Create the new client
