@@ -587,7 +587,7 @@ static block_header_t* split_block(shm_t* shm, block_header_t* old_block, size_t
 
     block_header_t* new_free_block = (block_header_t*)((char*)old_block + sizeof(block_header_t) + size);
     ssize_t new_cursor = abs2vol(new_free_block, shm, &CHILD_ERRMSG);
-    RAISE_IF(new_cursor == VOLNULL, "\n%s", CHILD_ERRMSG)
+    RAISE_IF_WITH(new_cursor == VOLNULL, pthread_rwlock_unlock(&shm->rwlock), "\n%s", CHILD_ERRMSG)
 
     // if there is enough free space remaining to create a new block, do so
     if (remaining_free_space > sizeof(block_header_t)){
