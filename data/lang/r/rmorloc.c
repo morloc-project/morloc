@@ -320,7 +320,7 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                     start = R_TRY(rel2abs, array->data);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarLogical(LOGICAL(obj)[i]));
-                        to_voidstar_r(start + i, cursor, elem, element_schema);
+                        to_voidstar_r(start + i * element_schema->width, cursor, elem, element_schema);
                         UNPROTECT(1);
                     }
                     break;
@@ -897,7 +897,7 @@ SEXP morloc_read_morloc_call_packet(SEXP packet_r) { MAYFAIL
     SEXP r_args = PROTECT(allocVector(VECSXP, call_packet->nargs));
 
     for(size_t i = 0; i < call_packet->nargs; i++) {
-        size_t arg_packet_size = R_TRY(morloc_packet_size, call_packet->args[i]);
+        size_t arg_packet_size = R_TRY_WITH(UNPROTECT(3), morloc_packet_size, call_packet->args[i]);
         SEXP r_arg = PROTECT(allocVector(RAWSXP, arg_packet_size));
         memcpy(RAW(r_arg), call_packet->args[i], arg_packet_size);
         SET_VECTOR_ELT(r_args, i, r_arg);
@@ -987,14 +987,15 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 
     void* voidstar = to_voidstar(obj_r, schema);
     if (!voidstar) {
+        free_schema(schema);
         MORLOC_ERROR("Failed to convert R object to internal representation");
     }
 
-    relptr_t relptr = R_TRY(abs2rel, voidstar);
+    relptr_t relptr = R_TRY_WITH(free_schema(schema), abs2rel, voidstar);
 
     uint8_t* packet = make_standard_data_packet(relptr, schema);
 
-    size_t packet_size = R_TRY(morloc_packet_size, packet);
+    size_t packet_size = R_TRY_WITH({free(packet); free_schema(schema);}, morloc_packet_size, packet);
 
     SEXP result = PROTECT(allocVector(RAWSXP, packet_size));
     memcpy(RAW(result), packet, packet_size);
@@ -1022,10 +1023,11 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
     Schema* schema = R_TRY(parse_schema, schema_str);
     free(schema_str);
 
-    uint8_t* voidstar = R_TRY(get_morloc_data_packet_value, packet, schema);
+    uint8_t* voidstar = R_TRY_WITH(free_schema(schema), get_morloc_data_packet_value, packet, schema);
 
     SEXP obj_r = from_voidstar(voidstar, schema);
     if (obj_r == NULL) {
+        free_schema(schema);
         MORLOC_ERROR("Failed to convert internal representation to R object");
     }
 
@@ -1167,6 +1169,7 @@ SEXP extract_element_by_name(SEXP list, const char* key) {
 
   // Get list names attribute
   SEXP names = Rf_getAttrib(list, R_NamesSymbol);
+  if (names == R_NilValue) MORLOC_ERROR("List must have names");
 
   // Iterate through list elements
   for (int i = 0; i < Rf_length(list); i++) {
@@ -1193,28 +1196,36 @@ SEXP morloc_remote_call(SEXP midx, SEXP socket_path, SEXP cache_path, SEXP resou
     const char* c_socket_path = CHAR(STRING_ELT(socket_path, 0));
     const char* c_cache_path = CHAR(STRING_ELT(cache_path, 0));
 
-    // Extract resources using safe macro
+    // Extract resources with validation
     resources_t c_resources;
-    c_resources.memory = INTEGER(extract_element_by_name(resources, "memory"))[0];
-    c_resources.time = INTEGER(extract_element_by_name(resources, "time"))[0];
-    c_resources.cpus = INTEGER(extract_element_by_name(resources, "cpus"))[0];
-    c_resources.gpus = INTEGER(extract_element_by_name(resources, "gpus"))[0];
+    SEXP mem = extract_element_by_name(resources, "memory");
+    SEXP tim = extract_element_by_name(resources, "time");
+    SEXP cpu = extract_element_by_name(resources, "cpus");
+    SEXP gpu = extract_element_by_name(resources, "gpus");
+    if (mem == R_NilValue || tim == R_NilValue || cpu == R_NilValue || gpu == R_NilValue) {
+        UNPROTECT(4);
+        MORLOC_ERROR("Missing required resource field (memory, time, cpus, or gpus)");
+    }
+    c_resources.memory = INTEGER(mem)[0];
+    c_resources.time = INTEGER(tim)[0];
+    c_resources.cpus = INTEGER(cpu)[0];
+    c_resources.gpus = INTEGER(gpu)[0];
 
     // Process argument packets with type checking
     size_t nargs = LENGTH(arg_packets);
     const uint8_t** c_arg_packets = (const uint8_t**) R_alloc(nargs, sizeof(uint8_t*));
 
     for(size_t i = 0; i < nargs; i++) {
-        SEXP raw_vec = PROTECT(VECTOR_ELT(arg_packets, i));
+        SEXP raw_vec = VECTOR_ELT(arg_packets, i);
         if(TYPEOF(raw_vec) != RAWSXP) {
+            UNPROTECT(4);
             MORLOC_ERROR("arg_packets must contain only raw vectors");
         }
         c_arg_packets[i] = (uint8_t*)RAW(raw_vec);
-        UNPROTECT(1);
     }
 
     // Execute remote call
-    uint8_t* result_packet = R_TRY(
+    uint8_t* result_packet = R_TRY_WITH(UNPROTECT(4),
         remote_call,
         c_midx,
         c_socket_path,
@@ -1225,9 +1236,10 @@ SEXP morloc_remote_call(SEXP midx, SEXP socket_path, SEXP cache_path, SEXP resou
     );
 
     // Validate and copy result
-    size_t packet_size = R_TRY(morloc_packet_size, result_packet);
+    size_t packet_size = R_TRY_WITH(UNPROTECT(4), morloc_packet_size, result_packet);
     if(!result_packet || packet_size == 0) {
         if(result_packet) free(result_packet);
+        UNPROTECT(4);
         MORLOC_ERROR("Invalid result packet from remote call");
     }
 
@@ -1236,8 +1248,7 @@ SEXP morloc_remote_call(SEXP midx, SEXP socket_path, SEXP cache_path, SEXP resou
     free(result_packet);
 
     // Cleanup and return
-    UNPROTECT(4);  // socket_path, cache_path, resources, arg_packets
-    UNPROTECT(1);  // result_packet_r
+    UNPROTECT(5);  // socket_path, cache_path, resources, arg_packets, result_packet_r
     return result_packet_r;
 }
 

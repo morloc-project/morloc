@@ -16,8 +16,9 @@
 #define MAYFAIL \
     char* child_errmsg_ = NULL; \
 
-const char* get_prior_err(){
-    const char* prior_err = NULL;
+// Returns a strdup'd string that the caller must free, or NULL.
+char* get_prior_err(){
+    char* prior_err = NULL;
     if (PyErr_Occurred()) {
         // Fetch existing exception
         PyObject *type, *value, *traceback;
@@ -25,7 +26,10 @@ const char* get_prior_err(){
 
         // Extract error message
         PyObject* str = PyObject_Str(value);  // Convert exception to string
-        prior_err = PyUnicode_AsUTF8(str);
+        const char* raw = PyUnicode_AsUTF8(str);
+        if (raw) {
+            prior_err = strdup(raw);
+        }
 
         // Cleanup
         Py_XDECREF(str);
@@ -40,29 +44,33 @@ const char* get_prior_err(){
 #define PyTRY(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
-        const char* prior_err = get_prior_err(); \
+        char* prior_err = get_prior_err(); \
         if(prior_err == NULL){ \
             PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
         } else { \
             PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_); \
+            free(prior_err); \
         } \
         goto error; \
     }
 
-#define PyRAISE(msg, ...) \
-    const char* prior_err = get_prior_err(); \
-    if(prior_err == NULL){ \
+#define PyRAISE(msg, ...) { \
+    char* prior_err_ = get_prior_err(); \
+    if(prior_err_ == NULL){ \
         PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n" msg "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
     } else { \
-        PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n" msg "\n", prior_err, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+        PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n" msg "\n", prior_err_, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+        free(prior_err_); \
     } \
-    goto error;
+    goto error; \
+    }
 
 #define PyTRACE(cond) \
     if(cond){ \
-        const char* prior_err = get_prior_err(); \
+        char* prior_err = get_prior_err(); \
         if(prior_err != NULL){ \
             PyErr_Format(PyExc_TypeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, prior_err); \
+            free(prior_err); \
             goto error; \
         } \
     }
