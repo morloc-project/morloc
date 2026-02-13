@@ -665,6 +665,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             for (size_t i = 0; i < array->size; i++) {
                                 SEXP item = from_voidstar(start + width * i, element_schema);
                                 if (item == R_NilValue) {
+                                    UNPROTECT(1);
                                     obj = R_NilValue;
                                     goto error;
                                 }
@@ -677,25 +678,28 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
             }
             break;
         case MORLOC_TUPLE: {
-            obj = allocVector(VECSXP, schema->size);
+            obj = PROTECT(allocVector(VECSXP, schema->size));
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
                 SEXP item = from_voidstar(item_ptr, schema->parameters[i]);
                 if (item == R_NilValue) {
+                    UNPROTECT(1);
                     obj = R_NilValue;
                     goto error;
                 }
                 SET_VECTOR_ELT(obj, i, item);
             }
+            UNPROTECT(1);
             break;
         }
         case MORLOC_MAP: {
-            obj = allocVector(VECSXP, schema->size);
-            SEXP names = allocVector(STRSXP, schema->size);
+            obj = PROTECT(allocVector(VECSXP, schema->size));
+            SEXP names = PROTECT(allocVector(STRSXP, schema->size));
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
                 SEXP value = from_voidstar(item_ptr, schema->parameters[i]);
                 if (value == R_NilValue) {
+                    UNPROTECT(2);
                     obj = R_NilValue;
                     goto error;
                 }
@@ -703,6 +707,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                 SET_STRING_ELT(names, i, mkChar(schema->keys[i]));
             }
             setAttrib(obj, R_NamesSymbol, names);
+            UNPROTECT(2);
             break;
         }
         default:
@@ -903,6 +908,8 @@ SEXP morloc_read_morloc_call_packet(SEXP packet_r) { MAYFAIL
     SET_VECTOR_ELT(r_list, 0, r_mid);
     SET_VECTOR_ELT(r_list, 1, r_args);
 
+    free_morloc_call(call_packet);
+
     UNPROTECT(3);  // r_list, r_mid, r_args
     return r_list;
 }
@@ -949,6 +956,7 @@ SEXP morloc_stream_from_client(SEXP client_fd_r) { MAYFAIL
     // Create raw vector for result
     SEXP result = PROTECT(allocVector(RAWSXP, packet_size));
     memcpy(RAW(result), packet, packet_size);
+    free(packet);
 
     UNPROTECT(1);
     return result;
@@ -990,6 +998,8 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 
     SEXP result = PROTECT(allocVector(RAWSXP, packet_size));
     memcpy(RAW(result), packet, packet_size);
+    free(packet);
+    free_schema(schema);
 
     UNPROTECT(1);
     return result;
@@ -1075,6 +1085,8 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
     // Create result raw vector
     SEXP result_r = PROTECT(allocVector(RAWSXP, result_length));
     memcpy(RAW(result_r), result, result_length);
+    free(packet);
+    free(result);
 
     // Cleanup
     UNPROTECT(1);
@@ -1121,12 +1133,13 @@ SEXP morloc_pong(SEXP packet_r) { MAYFAIL
     }
 
     // Generate a response to ping
-    const uint8_t* pong = R_TRY(return_ping, RAW(packet_r));
+    uint8_t* pong = R_TRY(return_ping, RAW(packet_r));
 
     size_t pong_size = R_TRY(morloc_packet_size, pong);
 
     SEXP result_r = PROTECT(allocVector(RAWSXP, pong_size));
     memcpy(RAW(result_r), pong, pong_size);
+    free(pong);
 
     UNPROTECT(1);
     return result_r;
@@ -1141,6 +1154,7 @@ SEXP morloc_make_fail_packet(SEXP failure_message_r) { MAYFAIL
 
     SEXP packet_r = PROTECT(allocVector(RAWSXP, packet_size));
     memcpy(RAW(packet_r), fail_packet, packet_size);
+    free(fail_packet);
 
     UNPROTECT(1);
     return packet_r;

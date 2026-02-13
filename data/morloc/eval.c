@@ -520,20 +520,21 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
             absptr_t* arg_results = (absptr_t*)calloc(app->nargs, sizeof(absptr_t));
             // evaluate all arguments outside the new lambda scope
             for(size_t i = 0; i < app->nargs; i++){
-                arg_results[i] = TRY(morloc_eval_r, app->args[i], NULL, 0, bndvars);
+                arg_results[i] = TRY_WITH(free(arg_results), morloc_eval_r, app->args[i], NULL, 0, bndvars);
             }
 
             switch(app->type) {
                 case APPLY_PATTERN: {
                     if(app->nargs == 1){
                         size_t return_index = 0;
-                        TRY(apply_getter, dest, &return_index, schema, app->function.pattern, app->args[0]->schema, arg_results[0])
+                        TRY_WITH(free(arg_results), apply_getter, dest, &return_index, schema, app->function.pattern, app->args[0]->schema, arg_results[0])
                     } else if(app->nargs > 1) {
                         Schema** arg_schemas = (Schema**)calloc(app->nargs-1, sizeof(Schema*));
                         for(size_t i = 1; i < app->nargs; i++){
                             arg_schemas[i-1] = app->args[i]->schema;
                         }
-                        TRY(
+                        TRY_WITH(
+                          (free(arg_schemas), free(arg_results)),
                           apply_setter,
                           dest,
                           schema,
@@ -545,7 +546,7 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
                         )
                         free(arg_schemas);
                     } else {
-                        RAISE("No arguments provided to pattern, this should be unreachable")
+                        RAISE_WITH(free(arg_results), "No arguments provided to pattern, this should be unreachable")
                     }
                 } break;
 
@@ -562,7 +563,7 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
                     }
 
                     // evaluate the lambda body with the new variable table
-                    TRY(morloc_eval_r, lam->body, dest, width, bndvars);
+                    TRY_WITH(free(arg_results), morloc_eval_r, lam->body, dest, width, bndvars);
 
                     // clean up bindings added in this scope
                     for(size_t i = 0; i < app->nargs; i++){
@@ -586,10 +587,10 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
                         result_size += arr->size;
                     }
 
-                    absptr_t new_string = TRY(shmalloc, result_size);
+                    absptr_t new_string = TRY_WITH((free(string_lengths), free(arg_results)), shmalloc, result_size);
                     Array* result_array = (Array*)dest;
                     result_array->size = result_size;
-                    result_array->data = TRY(abs2rel, new_string);
+                    result_array->data = TRY_WITH((free(string_lengths), free(arg_results)), abs2rel, new_string);
 
                     char* cursor = (char*)new_string;
                     for(size_t i = 0; i < (app->nargs + 1); i++){
@@ -597,7 +598,7 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
                         cursor += string_lengths[i];
                         if(i < app->nargs){
                             Array* arr = (Array*)arg_results[i];
-                            absptr_t arr_data = TRY(rel2abs, arr->data);
+                            absptr_t arr_data = TRY_WITH((free(string_lengths), free(arg_results)), rel2abs, arr->data);
                             memcpy(cursor, arr_data, arr->size);
                             cursor += arr->size;
                         }
@@ -608,7 +609,7 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
                 } break;
 
                 default:
-                    RAISE("Invalid functional term")
+                    RAISE_WITH(free(arg_results), "Invalid functional term")
             }
             free(arg_results);
         } break;

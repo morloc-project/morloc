@@ -243,9 +243,6 @@ uint8_t* dispatch(const uint8_t* msg){
         PROPAGATE_FAIL_PACKET(errmsg)
         mid = call_packet->midx;
         args = (const uint8_t**)call_packet->args;
-        size_t nargs = call_packet->nargs;
-        free(call_packet);
-        call_packet = NULL;
 
         uint8_t* result = NULL;
         try {
@@ -260,10 +257,7 @@ uint8_t* dispatch(const uint8_t* msg){
             result = make_fail_packet("An unknown error occurred");
         }
 
-        for (size_t i = 0; i < nargs; i++) {
-            free((void*)args[i]);
-        }
-        free((void*)args);
+        free_morloc_call(call_packet);
 
         return result;
     }

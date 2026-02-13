@@ -762,6 +762,8 @@ static PyObject*  pybinding__read_morloc_call_packet(PyObject* self, PyObject* a
     PyTuple_SetItem(py_tuple, 0, py_mid);
     PyTuple_SetItem(py_tuple, 1, py_args);
 
+    free_morloc_call(call_packet);
+
     return py_tuple;
 
 error:
@@ -850,7 +852,12 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
 
     packet_size = PyTRY(morloc_packet_size, packet);
 
-    return PyBytes_FromStringAndSize((char*)packet, packet_size);
+    {
+        PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
+        free(packet);
+        free_schema(schema);
+        return retval;
+    }
 
 error:
     FREE(packet)
@@ -1093,11 +1100,15 @@ static PyObject* pybinding__pong(PyObject* self, PyObject* args) { MAYFAIL
         PyRAISE("Failed to parse arguments");
     }
 
-    const uint8_t* pong = PyTRY(return_ping, (uint8_t*)packet);
+    uint8_t* pong = PyTRY(return_ping, (uint8_t*)packet);
 
     size_t pong_size = PyTRY(morloc_packet_size, pong);
 
-    return PyBytes_FromStringAndSize((char*)pong, pong_size);
+    {
+        PyObject* retval = PyBytes_FromStringAndSize((char*)pong, pong_size);
+        free(pong);
+        return retval;
+    }
 
 error:
     return NULL;
@@ -1140,9 +1151,14 @@ static PyObject* pybinding__make_fail_packetg(PyObject* self, PyObject* args) { 
 
     size_t packet_size = PyTRY(morloc_packet_size, packet);
 
-    return PyBytes_FromStringAndSize((char*)packet, packet_size);
+    {
+        PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
+        free(packet);
+        return retval;
+    }
 
 error:
+    FREE(packet)
     return NULL;
 }
 

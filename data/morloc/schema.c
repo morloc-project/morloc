@@ -422,7 +422,11 @@ Schema* parse_schema_r(char** schema_ptr, ERRMSG){
       params = (Schema**)calloc(size, sizeof(Schema*));
       for(size_t i = 0; i < size; i++){
         params[i] = parse_schema_r(schema_ptr, &CHILD_ERRMSG);
-        RAISE_IF(params[i] == NULL, "\n%s", CHILD_ERRMSG)
+        if(params[i] == NULL){
+          for(size_t j = 0; j < i; j++) free_schema(params[j]);
+          free(params);
+          RAISE("\n%s", CHILD_ERRMSG)
+        }
       }
       schema = tuple_schema(params, size);
       break;
@@ -433,7 +437,13 @@ Schema* parse_schema_r(char** schema_ptr, ERRMSG){
       for(size_t i = 0; i < size; i++){
         keys[i] = parse_schema_key(schema_ptr);
         params[i] = parse_schema_r(schema_ptr, &CHILD_ERRMSG);
-        RAISE_IF(params[i] == NULL, "\n%s", CHILD_ERRMSG)
+        if(params[i] == NULL){
+          for(size_t j = 0; j < i; j++) free_schema(params[j]);
+          for(size_t j = 0; j <= i; j++) free(keys[j]);
+          free(params);
+          free(keys);
+          RAISE("\n%s", CHILD_ERRMSG)
+        }
       }
       schema = map_schema(size, keys, params);
       break;
