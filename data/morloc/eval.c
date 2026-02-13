@@ -146,8 +146,11 @@ morloc_expression_t* make_morloc_container(
             data->data.tuple_val = values;
             break;
         default:
-            // Schema type is not a container type
-            return NULL;
+            va_end(value_list);
+            free(values);
+            free(data);
+            free_schema(schema);
+            RAISE("Schema type is not a container type")
     }
     morloc_expression_t* expr = (morloc_expression_t*)malloc(sizeof(morloc_expression_t));
     expr->type = MORLOC_X_DAT;
@@ -193,8 +196,10 @@ morloc_expression_t* make_morloc_app(
             app->function.fmt = func->expr.interpolation;
             break;
         default:
-            // Can only apply pattern or lambda
-            return NULL;
+            va_end(args);
+            free(app);
+            free_schema(schema);
+            RAISE("Can only apply pattern, lambda, or format")
     }
 
     app->args = (morloc_expression_t**)calloc(nargs, sizeof(morloc_expression_t*));
