@@ -49,38 +49,25 @@ morloc make -o foo script.loc
 
 ## Documentation Index
 
-**Architecture & Systems:**
-- [[claude-memory/ARCHITECTURE.md]] - Compilation pipeline and major components
-- [[claude-memory/FRONTEND.md]] - Parser and lexer
-- [[claude-memory/TYPECHECKING-THEORY.md]] - Type system theory (Dunfield bidirectional)
-- [[claude-memory/TYPECHECKING-IMPLEMENTATION.md]] - Typechecker implementation details
-- [[claude-memory/CODEGEN.md]] - Code generation
-- [[claude-memory/TRANSLATOR-IR.md]] - Translator IR architecture (LowerConfig, IProgram, printers)
-- [[claude-memory/RUNTIME.md]] - Nexus, pools, and language bindings
-- [[claude-memory/SYSGEN.md]] - Build system and program generation
-- [[claude-memory/BUILD-SYSTEM.md]] - Build system deep dive (morloc.h, pools, compilers)
-- [[claude-memory/BUILD-REFACTOR-PLAN.md]] - Plan to modularize morloc.h and improve compile time
-- [[claude-memory/COMPILER-INVOCATION.md]] - How compilers are detected and invoked
-- [[claude-memory/BUILD-TODO.md]] - Build system issues and improvements
-- [[claude-memory/MODULES.md]] - Module system and resolution
-- [[claude-memory/DATA-STRUCTURES.md]] - Core data types
+**Formal Specification** -- [[spec/SPEC.md]] (master table of contents)
 
-**Language & Syntax:**
-- [[claude-memory/MORLOC_SYNTAX.md]] - Morloc syntax reference
-- [[claude-memory/IMPLEMENTATION-POLYMORPHISM.md]] - Multi-language implementations
-- [[claude-memory/INFIX-OPERATORS.md]] - Operator syntax and fixity
-- [[claude-memory/RECORDS.md]] - Record types
-- [[claude-memory/TYPECLASSES.md]] - Typeclass system
+- [[spec/language/LANGUAGE.md]] - Language reference (syntax, expressions, declarations)
+- [[spec/types/TYPES.md]] - Type system (inference, subtyping, records, typeclasses)
+- [[spec/modules/MODULES.md]] - Module system (imports, resolution, packages)
+- [[spec/interop/INTEROP.md]] - Cross-language interop (FFI, type mappings, serialization)
+- [[spec/runtime/RUNTIME.md]] - Runtime system (nexus, pools, IPC, CLI generation)
+- [[spec/compiler/COMPILER.md]] - Compiler architecture (pipeline, parsing, codegen, build)
 
-**Parser Details:**
-- [[claude-memory/PARSING-ALGORITHMS.md]] - Precedence climbing
-- [[claude-memory/FIXITY-BUGS.md]] - Known fixity system issues
+**Internal Notes** (implementation-level, in `claude-memory/`):
 
-**Development:**
-- [[claude-memory/TESTS.md]] - Test suite structure and usage
 - [[claude-memory/DEBUGGING.md]] - Debugging tips and techniques
-- [[claude-memory/QC.md]] - Code quality workflow (before pushing to master)
+- [[claude-memory/TESTS.md]] - Test suite structure and usage
+- [[claude-memory/QC.md]] - Code quality workflow
 - [[claude-memory/QC-TOOLS.md]] - Detailed tool documentation
+- [[claude-memory/BUILD-TODO.md]] - Build system issues and improvements
+- [[claude-memory/FIXITY-BUGS.md]] - Known fixity system issues
+- [[claude-memory/DATA-STRUCTURES.md]] - Core Haskell data types
+- [[claude-memory/TRANSLATOR-IR.md]] - Translator IR internals (LowerConfig, IProgram)
 
 ## Development Commands
 

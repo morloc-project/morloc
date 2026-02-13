@@ -18,5 +18,5 @@ run/
 .local
 .stack
 CLAUDE.md
-claude-docs/
 .claude/
+claude-memory/
