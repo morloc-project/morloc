@@ -94,63 +94,50 @@ worker_loop <- function(pipe_fd) {
   }
 }
 
-cleanup_workers <- function(pids, pipes) {
-  # Close pipe ends to signal EOF to workers (causes worker_loop to break)
-  for (i in seq_along(pipes)) {
-    tryCatch(morloc_close_socket(pipes[[i]][1L]), error = function(e) NULL)
-  }
-
-  # SIGKILL all workers and blocking-reap to prevent zombies
-  for (pid in pids) {
-    if (pid > 0L) {
-      tryCatch(morloc_kill(pid, 9L), error = function(e) NULL)  # SIGKILL
-      tryCatch(morloc_waitpid_blocking(pid), error = function(e) NULL)
-    }
-  }
-}
-
 main <- function(socket_path, tmpdir, shm_basename) {
   morloc_install_sigterm_handler()
 
   daemon <- morloc_start_daemon(socket_path, tmpdir, shm_basename, 0xffff)
   n_workers <- max(1L, parallel::detectCores() - 1L)
 
-  pipes <- lapply(seq_len(n_workers), function(i) morloc_socketpair())
+  # Shared job queue: dispatcher writes fds to fd[1], workers read from fd[2].
+  # Only idle workers (blocked in recvmsg) pick up jobs, preventing the
+  # round-robin deadlock where a callback gets dispatched to a busy worker.
+  job_queue <- morloc_socketpair()
 
   pids <- integer(n_workers)
   for (i in seq_len(n_workers)) {
     pid <- morloc_fork()
     if (pid == 0L) {
-      # Child: release inherited daemon (close server_fd, free memory)
-      # without unlinking the socket file
       morloc_detach_daemon(daemon)
-      # Close all parent-side fds
-      for (j in seq_len(n_workers)) morloc_close_socket(pipes[[j]][1L])
-      # Close child-side fds for other workers
-      for (j in seq_len(n_workers)) {
-        if (j != i) morloc_close_socket(pipes[[j]][2L])
-      }
-      worker_loop(pipes[[i]][2L])
+      morloc_close_socket(job_queue[1L])  # child doesn't write
+      worker_loop(job_queue[2L])
       quit(status = 0, save = "no")
     }
     pids[i] <- pid
-    morloc_close_socket(pipes[[i]][2L])  # Parent closes child end
   }
+  morloc_close_socket(job_queue[2L])  # parent doesn't read
 
-  on.exit(cleanup_workers(pids, pipes))
+  on.exit({
+    tryCatch(morloc_close_socket(job_queue[1L]), error = function(e) NULL)
+    for (pid in pids) {
+      if (pid > 0L) {
+        tryCatch(morloc_kill(pid, 9L), error = function(e) NULL)
+        tryCatch(morloc_waitpid_blocking(pid), error = function(e) NULL)
+      }
+    }
+  })
 
-  # Main dispatch loop - round-robin
-  current <- 1L
+  # Dispatch loop - idle workers pull from shared queue
   while (!morloc_is_shutting_down()) {
     client_fd <- morloc_wait_for_client(daemon)
     if (client_fd > 0L) {
       tryCatch({
-        morloc_send_fd(pipes[[current]][1L], client_fd)
-        current <- (current %% n_workers) + 1L
+        morloc_send_fd(job_queue[1L], client_fd)
       }, error = function(e) {
         cat(paste("Failed to dispatch job:", e$message, "\n"), file = stderr())
       }, finally = {
-        morloc_close_socket(client_fd)  # Close parent's copy
+        morloc_close_socket(client_fd)
       })
     }
   }

@@ -1,0 +1,35 @@
+module concurrentUni (testPyToR15, testRToPy15, testPyToR20)
+
+import root-r
+import root-py
+
+--' R identity on integers
+rId :: Int -> Int
+source R from "r_funcs.R" ("r_id" as rId)
+
+--' Python identity on integers
+pyId :: Int -> Int
+source Py from "py_funcs.py" ("py_id" as pyId)
+
+--' Python collectors
+pyCollect15 :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> [Int]
+source Py from "py_funcs.py" ("py_collect" as pyCollect15)
+
+pyCollect20 :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> [Int]
+source Py from "py_funcs.py" ("py_collect" as pyCollect20)
+
+--' R collectors
+rCollect15 :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> [Int]
+source R from "r_funcs.R" ("r_collect" as rCollect15)
+
+--' 15 unidirectional Python->R calls
+testPyToR15 :: [Int]
+testPyToR15 = pyCollect15 (rId 1) (rId 2) (rId 3) (rId 4) (rId 5) (rId 6) (rId 7) (rId 8) (rId 9) (rId 10) (rId 11) (rId 12) (rId 13) (rId 14) (rId 15)
+
+--' 15 unidirectional R->Python calls
+testRToPy15 :: [Int]
+testRToPy15 = rCollect15 (pyId 1) (pyId 2) (pyId 3) (pyId 4) (pyId 5) (pyId 6) (pyId 7) (pyId 8) (pyId 9) (pyId 10) (pyId 11) (pyId 12) (pyId 13) (pyId 14) (pyId 15)
+
+--' 20 unidirectional Python->R calls
+testPyToR20 :: [Int]
+testPyToR20 = pyCollect20 (rId 1) (rId 2) (rId 3) (rId 4) (rId 5) (rId 6) (rId 7) (rId 8) (rId 9) (rId 10) (rId 11) (rId 12) (rId 13) (rId 14) (rId 15) (rId 16) (rId 17) (rId 18) (rId 19) (rId 20)
