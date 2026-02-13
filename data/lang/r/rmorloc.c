@@ -405,6 +405,9 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
 }
 
 
+// NOTE: If to_voidstar_r calls error() (via MORLOC_ERROR or R_TRY), the shared
+// memory at dest leaks. This only happens on type mismatches (a development-time
+// bug) and the memory is reclaimed when the pool process exits.
 static void* to_voidstar(SEXP obj, const Schema* schema) {
     MAYFAIL
 
@@ -950,8 +953,8 @@ SEXP morloc_stream_from_client(SEXP client_fd_r) { MAYFAIL
     // Read packet from socket
     uint8_t* packet = R_TRY(stream_from_client, client_fd);
 
-    // Read the packet size from the header
-    size_t packet_size = R_TRY(morloc_packet_size, packet);
+    // Read the packet size from the header (free packet before longjmp on error)
+    size_t packet_size = R_TRY_WITH(free(packet), morloc_packet_size, packet);
 
     // Create raw vector for result
     SEXP result = PROTECT(allocVector(RAWSXP, packet_size));
@@ -982,7 +985,7 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     }
 
     char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY(parse_schema, schema_str);
+    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
     void* voidstar = to_voidstar(obj_r, schema);
@@ -1020,7 +1023,7 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
     size_t packet_size = (size_t)LENGTH(packet_r);
 
     char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY(parse_schema, schema_str);
+    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
     uint8_t* voidstar = R_TRY_WITH(free_schema(schema), get_morloc_data_packet_value, packet, schema);
@@ -1082,7 +1085,7 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
     );
 
     // Get result size
-    size_t result_length = R_TRY(morloc_packet_size, result);
+    size_t result_length = R_TRY_WITH({free(packet); free(result);}, morloc_packet_size, result);
 
     // Create result raw vector
     SEXP result_r = PROTECT(allocVector(RAWSXP, result_length));
@@ -1137,7 +1140,7 @@ SEXP morloc_pong(SEXP packet_r) { MAYFAIL
     // Generate a response to ping
     uint8_t* pong = R_TRY(return_ping, RAW(packet_r));
 
-    size_t pong_size = R_TRY(morloc_packet_size, pong);
+    size_t pong_size = R_TRY_WITH(free(pong), morloc_packet_size, pong);
 
     SEXP result_r = PROTECT(allocVector(RAWSXP, pong_size));
     memcpy(RAW(result_r), pong, pong_size);
@@ -1236,7 +1239,7 @@ SEXP morloc_remote_call(SEXP midx, SEXP socket_path, SEXP cache_path, SEXP resou
     );
 
     // Validate and copy result
-    size_t packet_size = R_TRY_WITH(UNPROTECT(4), morloc_packet_size, result_packet);
+    size_t packet_size = R_TRY_WITH({free(result_packet); UNPROTECT(4);}, morloc_packet_size, result_packet);
     if(!result_packet || packet_size == 0) {
         if(result_packet) free(result_packet);
         UNPROTECT(4);

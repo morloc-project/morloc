@@ -262,7 +262,7 @@ static char* read_json_key(char** json_ptr, ERRMSG){
     }
     // Otherwise we need to loop through the string and handle escapees
     else {
-        TRY(write_json_string, json_ptr, key);
+        TRY_WITH(free(key), write_json_string, json_ptr, key);
     }
 
     return key;

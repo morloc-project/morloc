@@ -365,7 +365,7 @@ static uint8_t* make_morloc_call_packet_gen(uint32_t midx, uint8_t entrypoint, c
 
     size_t arg_start = sizeof(morloc_packet_header_t) + offset;
     for(size_t i = 0; i < nargs; i++){
-      morloc_packet_header_t* arg = TRY(read_morloc_packet_header, arg_packets[i]);
+      morloc_packet_header_t* arg = TRY_WITH(free(data), read_morloc_packet_header, arg_packets[i]);
       size_t arg_length = morloc_packet_size_from_header(arg);
       memcpy(data + arg_start, arg, arg_length);
       arg_start += arg_length;

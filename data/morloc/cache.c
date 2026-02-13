@@ -133,12 +133,12 @@ char* put_cache_packet(const uint8_t* voidstar, const Schema* schema, uint64_t k
 
     uint8_t* data_packet = make_mpk_data_packet(data_filename, schema);
 
-    size_t data_packet_size = TRY_WITH((free(packet_filename), free(data_filename)), morloc_packet_size, data_packet);
+    size_t data_packet_size = TRY_WITH((free(data_packet), free(packet_filename), free(data_filename)), morloc_packet_size, data_packet);
 
     // convert voidstar data to MessagePack
     char* mpk_data = NULL;
     size_t mpk_size = 0;
-    TRY_WITH((free(packet_filename), free(data_filename)), pack_with_schema, voidstar, schema, &mpk_data, &mpk_size);
+    TRY_WITH((free(data_packet), free(packet_filename), free(data_filename)), pack_with_schema, voidstar, schema, &mpk_data, &mpk_size);
 
     // write packet
     TRY_WITH((free(data_packet), free(packet_filename), free(data_filename)), write_atomic, packet_filename, data_packet, data_packet_size);

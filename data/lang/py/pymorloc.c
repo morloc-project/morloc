@@ -26,13 +26,13 @@ char* get_prior_err(){
 
         // Extract error message
         PyObject* str = PyObject_Str(value);  // Convert exception to string
-        const char* raw = PyUnicode_AsUTF8(str);
-        if (raw) {
-            prior_err = strdup(raw);
+        if (str) {
+            const char* raw = PyUnicode_AsUTF8(str);
+            if (raw) {
+                prior_err = strdup(raw);
+            }
+            Py_DECREF(str);
         }
-
-        // Cleanup
-        Py_XDECREF(str);
         Py_XDECREF(type);
         Py_XDECREF(value);
         Py_XDECREF(traceback);
@@ -591,7 +591,9 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                     Schema* element_schema = schema->parameters[0];
                     for (Py_ssize_t i = 0; i < size; i++) {
                         PyObject* item = PyList_GetItem(obj, i);
-                        to_voidstar_r(start + width * i, cursor, element_schema, item);
+                        if (to_voidstar_r(start + width * i, cursor, element_schema, item) != 0) {
+                            goto error;
+                        }
                     }
 
                 } else if (PyBytes_Check(obj) || PyByteArray_Check(obj)){
@@ -626,7 +628,9 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                 }
                 for (Py_ssize_t i = 0; i < size; ++i) {
                     PyObject* item = PyTuple_Check(obj) ? PyTuple_GetItem(obj, i) : PyList_GetItem(obj, i);
-                    to_voidstar_r((char*)dest + schema->offsets[i], cursor, schema->parameters[i], item);
+                    if (to_voidstar_r((char*)dest + schema->offsets[i], cursor, schema->parameters[i], item) != 0) {
+                        goto error;
+                    }
                 }
             }
             break;
@@ -642,7 +646,9 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                     PyObject* value = PyDict_GetItem(obj, key);
                     Py_DECREF(key);
                     if (value) {
-                        to_voidstar_r((char*)dest + schema->offsets[i], cursor, schema->parameters[i], value);
+                        if (to_voidstar_r((char*)dest + schema->offsets[i], cursor, schema->parameters[i], value) != 0) {
+                            goto error;
+                        }
                     }
                 }
             }
@@ -659,6 +665,8 @@ error:
 }
 
 void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
+  void* dest = NULL;
+
   // calculate the required size of the shared memory object
   ssize_t shm_size = get_shm_size(schema, obj);
   if(shm_size == -1){
@@ -666,18 +674,25 @@ void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
   }
 
   // allocate the required memory as a single block
-  void* dest = PyTRY(shmalloc, (size_t)shm_size);
+  dest = PyTRY(shmalloc, (size_t)shm_size);
 
   // set the write location of variable size chunks
   void* cursor = (void*)((char*)dest + schema->width);
 
   // write the data to the block
   int result = to_voidstar_r(dest, &cursor, schema, obj);
-  PyTRACE(result != 0)
+  if (result != 0) {
+      goto error;
+  }
 
   return dest;
 
 error:
+  if (dest != NULL) {
+      char* free_errmsg = NULL;
+      shfree(dest, &free_errmsg);
+      free(free_errmsg);
+  }
   return NULL;
 }
 
@@ -749,15 +764,22 @@ error:
 static PyObject*  pybinding__read_morloc_call_packet(PyObject* self, PyObject* args){ MAYFAIL
     char* packet;
     size_t packet_size;
+    morloc_call_t* call_packet = NULL;
+    PyObject* py_tuple = NULL;
+    PyObject* py_args = NULL;
+    PyObject* py_mid = NULL;
 
     if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
         PyRAISE("Failed to parse arguments");
     }
-    morloc_call_t* call_packet = PyTRY(read_morloc_call_packet, (const uint8_t*)packet);
+    call_packet = PyTRY(read_morloc_call_packet, (const uint8_t*)packet);
 
-    PyObject* py_tuple = PyTuple_New(2);
-    PyObject* py_args = PyList_New(call_packet->nargs);
-    PyObject* py_mid = PyLong_FromLong((long)call_packet->midx);
+    py_tuple = PyTuple_New(2);
+    if (!py_tuple) { PyRAISE("Allocation failed"); }
+    py_args = PyList_New(call_packet->nargs);
+    if (!py_args) { PyRAISE("Allocation failed"); }
+    py_mid = PyLong_FromLong((long)call_packet->midx);
+    if (!py_mid) { PyRAISE("Allocation failed"); }
     for(size_t i = 0; i < call_packet->nargs; i++){
         size_t arg_packet_size = PyTRY(morloc_packet_size, call_packet->args[i]);
         PyObject* py_arg = PyBytes_FromStringAndSize(
@@ -769,12 +791,18 @@ static PyObject*  pybinding__read_morloc_call_packet(PyObject* self, PyObject* a
 
     PyTuple_SetItem(py_tuple, 0, py_mid);
     PyTuple_SetItem(py_tuple, 1, py_args);
+    py_mid = NULL;  // stolen by PyTuple_SetItem
+    py_args = NULL;  // stolen by PyTuple_SetItem
 
     free_morloc_call(call_packet);
 
     return py_tuple;
 
 error:
+    if (call_packet) free_morloc_call(call_packet);
+    Py_XDECREF(py_mid);
+    Py_XDECREF(py_args);
+    Py_XDECREF(py_tuple);
     return NULL;
 }
 
@@ -798,12 +826,13 @@ error:
 
 static PyObject*  pybinding__stream_from_client(PyObject* self, PyObject* args){ MAYFAIL
     int client_fd = 0;
+    uint8_t* packet = NULL;
 
     if (!PyArg_ParseTuple(args, "i", &client_fd)) {
         PyRAISE("Failed to parse arguments");
     }
 
-    uint8_t* packet = PyTRY(stream_from_client, client_fd);
+    packet = PyTRY(stream_from_client, client_fd);
 
     size_t packet_size = PyTRY(morloc_packet_size, packet);
 
@@ -814,6 +843,7 @@ static PyObject*  pybinding__stream_from_client(PyObject* self, PyObject* args){
     return retval;
 
 error:
+    FREE(packet)
     return NULL;
 }
 
@@ -936,7 +966,6 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     nargs = PySequence_Size(py_args);
     arg_packets = (const uint8_t**)calloc(nargs, sizeof(uint8_t*));
     if (!arg_packets) {
-        free(arg_packets);
         PyErr_NoMemory();
         goto error;
     }
@@ -1028,7 +1057,8 @@ static PyObject* pybinding__remote_call(PyObject* self, PyObject* args) { MAYFAI
     free(arg_packets);
 
     if (result == NULL) Py_RETURN_NONE;
-    PyObject* py_result = PyBytes_FromString((char*)result);
+    size_t result_length = PyTRY(morloc_packet_size, result);
+    PyObject* py_result = PyBytes_FromStringAndSize((char*)result, result_length);
     free(result);
     return py_result;
 
@@ -1103,12 +1133,13 @@ error:
 static PyObject* pybinding__pong(PyObject* self, PyObject* args) { MAYFAIL
     char* packet;
     size_t packet_size;
+    uint8_t* pong = NULL;
 
     if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
         PyRAISE("Failed to parse arguments");
     }
 
-    uint8_t* pong = PyTRY(return_ping, (uint8_t*)packet);
+    pong = PyTRY(return_ping, (uint8_t*)packet);
 
     size_t pong_size = PyTRY(morloc_packet_size, pong);
 
@@ -1119,6 +1150,7 @@ static PyObject* pybinding__pong(PyObject* self, PyObject* args) { MAYFAIL
     }
 
 error:
+    FREE(pong)
     return NULL;
 }
 
@@ -1150,12 +1182,13 @@ error:
 
 static PyObject* pybinding__make_fail_packetg(PyObject* self, PyObject* args) { MAYFAIL
     const char* packet_errmsg;
+    uint8_t* packet = NULL;
 
     if (!PyArg_ParseTuple(args, "s", &packet_errmsg)) {
         PyRAISE("Failed to parse arguments");
     }
 
-    uint8_t* packet = make_fail_packet(packet_errmsg);
+    packet = make_fail_packet(packet_errmsg);
 
     size_t packet_size = PyTRY(morloc_packet_size, packet);
 

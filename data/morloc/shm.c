@@ -179,7 +179,7 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ER
     struct stat sb;
     RAISE_IF_WITH(
         fstat(fd, &sb) == -1,
-        close(fd),
+        (munmap(volumes[volume_index], full_size), volumes[volume_index] = NULL, close(fd)),
         "Failed to fstat '%s'",
         shm_name
     )
@@ -188,7 +188,7 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ER
     bool created = (sb.st_size == 0);
     RAISE_IF_WITH(
         created && ftruncate(fd, full_size) == -1,
-        close(fd),
+        (munmap(volumes[volume_index], full_size), volumes[volume_index] = NULL, close(fd)),
         "Failed to set the size of the shared memory object '%s'",
         shm_name
     )

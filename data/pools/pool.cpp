@@ -47,8 +47,10 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) __attribute_
 
 #define PROPAGATE_FAIL_PACKET(errmsg) \
     if(errmsg != NULL){ \
-        return make_fail_packet(errmsg); \
-    } \
+        uint8_t* fail_packet_ = make_fail_packet(errmsg); \
+        free(errmsg); \
+        return fail_packet_; \
+    }
 
 
 // AUTO serialization statements start
@@ -88,16 +90,23 @@ uint8_t* _put_value(const T& value, const std::string& schema_str) {
     const char* schema_ptr = schema_str.c_str();
     Schema* schema = parse_schema_cpp(schema_ptr);
 
-    // toAnything writes to the shared memory volume
-    void* voidstar = toAnything(schema, value);
+    void* voidstar = nullptr;
+    try {
+        // toAnything writes to the shared memory volume
+        voidstar = toAnything(schema, value);
 
-    // convert to a relative pointer conserved between language servers
-    relptr_t relptr = abs2rel_cpp(voidstar);
+        // convert to a relative pointer conserved between language servers
+        relptr_t relptr = abs2rel_cpp(voidstar);
 
-    uint8_t* packet = make_standard_data_packet(relptr, schema);
+        uint8_t* packet = make_standard_data_packet(relptr, schema);
 
-    free_schema(schema);
-    return packet;
+        free_schema(schema);
+        return packet;
+    } catch (...) {
+        if (voidstar) shfree_cpp(voidstar);
+        free_schema(schema);
+        throw;
+    }
 }
 
 
@@ -116,9 +125,14 @@ T _get_value(const uint8_t* packet, const std::string& schema_str){
     }
 
     T* dumby = nullptr;
-    T result = fromAnything(schema, (void*)voidstar, dumby);
-    free_schema(schema);
-    return result;
+    try {
+        T result = fromAnything(schema, (void*)voidstar, dumby);
+        free_schema(schema);
+        return result;
+    } catch (...) {
+        free_schema(schema);
+        throw;
+    }
 }
 
 
@@ -137,7 +151,7 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
 
     // Allocate and populate args array
     const uint8_t** args_array = (const uint8_t**)malloc((nargs + 1) * sizeof(uint8_t*));
-    if (!args_array) return NULL;
+    if (!args_array) throw std::runtime_error("malloc failed in foreign_call");
 
     va_start(args, mid);
     for (size_t i = 0; i < nargs; i++) {
@@ -209,9 +223,8 @@ void set_shutting_down(int value) {
 void sigterm_handler(int sig) {
     (void)sig;
     shutting_down = 1;
-    if (g_queue != NULL) {
-        pthread_cond_broadcast(&g_queue->cond);
-    }
+    // Do not call pthread_cond_broadcast here - it is not async-signal-safe.
+    // Workers use pthread_cond_timedwait and will notice the flag within 100ms.
 }
 
 uint8_t* dispatch(const uint8_t* msg){
@@ -231,12 +244,10 @@ uint8_t* dispatch(const uint8_t* msg){
     }
 
     bool is_local_call = packet_is_local_call(msg, &errmsg);
-    free(errmsg);
-    errmsg = NULL;
-    bool is_remote_call = packet_is_remote_call(msg, &errmsg);
-    free(errmsg);
-    errmsg = NULL;
+    PROPAGATE_FAIL_PACKET(errmsg)
 
+    bool is_remote_call = packet_is_remote_call(msg, &errmsg);
+    PROPAGATE_FAIL_PACKET(errmsg)
 
     if(is_local_call || is_remote_call){
         call_packet = read_morloc_call_packet(msg, &errmsg);
@@ -262,18 +273,7 @@ uint8_t* dispatch(const uint8_t* msg){
         return result;
     }
 
-    if(!is_local_call){
-        if(errmsg != NULL) {
-            uint8_t* fail = make_fail_packet(errmsg);
-            free(errmsg);
-            return fail;
-        } else {
-            return make_fail_packet("In C++ pool, call failed due to inappropriate packet");
-        }
-    }
-
-
-    return make_fail_packet("No manifold found");
+    return make_fail_packet("In C++ pool, call failed due to inappropriate packet");
 }
 
 
@@ -288,6 +288,11 @@ void job_queue_init(job_queue_t* q) {
 // add a new client socket fd to the queue
 void job_queue_push(job_queue_t* q, int client_fd) {
     job_t* job = (job_t*)malloc(sizeof(job_t));
+    if (!job) {
+        std::cerr << "malloc failed in job_queue_push, dropping client" << std::endl;
+        close_socket(client_fd);
+        return;
+    }
     job->client_fd = client_fd;
     job->next = NULL;
     pthread_mutex_lock(&q->mutex);
@@ -309,9 +314,17 @@ int job_queue_pop(job_queue_t* q) {
     pthread_mutex_lock(&q->mutex);
 
     while (!q->head && !is_shutting_down()) {
-        // wati for job_queue_push to add a new job (this releases the mutex
-        // until the condition is met)
-        pthread_cond_wait(&q->cond, &q->mutex);
+        // Wait for job_queue_push to add a new job (this releases the mutex
+        // until the condition is met). Use timedwait so shutdown is noticed
+        // promptly without needing pthread_cond_broadcast in the signal handler.
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 100000000; // 100ms
+        if (ts.tv_nsec >= 1000000000) {
+            ts.tv_sec += 1;
+            ts.tv_nsec -= 1000000000;
+        }
+        pthread_cond_timedwait(&q->cond, &q->mutex, &ts);
     }
     if (is_shutting_down()) {
         pthread_mutex_unlock(&q->mutex);
@@ -341,18 +354,16 @@ void* worker_thread(void* arg) {
         // Pull data from the client
         uint8_t* client_data = stream_from_client(client_fd, &errmsg);
 
-        if(client_data == NULL){
-            std::cerr << "Retrieved NULL client result: " << std::endl;
-            close_socket(client_fd);
-            continue;
-        }
-
-        if(errmsg != NULL){
+        if(client_data == NULL || errmsg != NULL){
+            if (errmsg != NULL) {
+                std::cerr << "Failed to read client data: " << errmsg << std::endl;
+                free(errmsg);
+                errmsg = NULL;
+            } else {
+                std::cerr << "Retrieved NULL client result" << std::endl;
+            }
             free(client_data);
             client_data = NULL;
-            std::cerr << "Failed to read client data: " << errmsg << std::endl;
-            free(errmsg);
-            errmsg = NULL;
             close_socket(client_fd);
             continue;
         }
@@ -421,13 +432,13 @@ int main(int argc, char* argv[]) {
         &errmsg
     );
 
-    g_tmpdir = strdup(argv[2]);
-
     if(errmsg != NULL){
         std::cerr << "Failed to start language server:\n" << errmsg << std::endl;
         free(errmsg);
         return 1;
     }
+
+    g_tmpdir = strdup(argv[2]);
 
     job_queue_t queue;
     job_queue_init(&queue);
@@ -441,9 +452,15 @@ int main(int argc, char* argv[]) {
     sigaction(SIGTERM, &sa, NULL);
 
     long nthreads = sysconf(_SC_NPROCESSORS_ONLN);
-    pthread_t threads[nthreads];
+    std::vector<pthread_t> threads(nthreads);
+    int nstarted = 0;
     for (int i = 0; i < nthreads; ++i) {
-        pthread_create(&threads[i], NULL, worker_thread, &queue);
+        int rc = pthread_create(&threads[i], NULL, worker_thread, &queue);
+        if (rc != 0) {
+            std::cerr << "pthread_create failed: " << strerror(rc) << std::endl;
+            break;
+        }
+        nstarted++;
     }
 
     while (!is_shutting_down()) {
@@ -460,11 +477,19 @@ int main(int argc, char* argv[]) {
     }
 
     set_shutting_down(1);
-    pthread_cond_broadcast(&queue.cond);
 
-    // Join all worker threads before freeing any resources they may reference
-    for (int i = 0; i < nthreads; ++i) {
+    // Join all worker threads before freeing any resources they may reference.
+    // Workers use pthread_cond_timedwait and will notice shutting_down within 100ms.
+    for (int i = 0; i < nstarted; ++i) {
         pthread_join(threads[i], NULL);
+    }
+
+    // Drain any remaining jobs in the queue
+    while (queue.head != NULL) {
+        job_t* job = queue.head;
+        queue.head = job->next;
+        close_socket(job->client_fd);
+        free(job);
     }
 
     // Now safe to free resources -- all workers have exited

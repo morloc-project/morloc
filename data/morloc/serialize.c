@@ -43,8 +43,13 @@ static void upsize(
     }
 
     // allocate memory for the new data
-    *data = (char*)realloc(*data, buffer_size);
+    char* new_data = (char*)realloc(*data, buffer_size);
+    if (new_data == NULL) {
+        fprintf(stderr, "Out of memory in upsize (requested %zu bytes)\n", buffer_size);
+        abort();
+    }
 
+    *data = new_data;
     // point old pointer to the same offset in the new data
     *data_ptr = *data + used_size;
 }

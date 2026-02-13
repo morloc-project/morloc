@@ -208,6 +208,7 @@ static uint8_t* parse_cli_data_argument_singular(uint8_t* dest, char* arg, const
                 }
             }
         }
+        FREE(CHILD_ERRMSG);
 
         // Next check if it is MessagePack
         if(maybe_msgpack((uint8_t*)data, data_size)){
@@ -219,6 +220,8 @@ static uint8_t* parse_cli_data_argument_singular(uint8_t* dest, char* arg, const
               "Failed to read MessagePack argument:\n%s",
               CHILD_ERRMSG
             )
+            free(data);
+            return dest;
         }
 
         // Try to parse as JSON
@@ -386,6 +389,7 @@ uint8_t* make_call_packet_from_cli(
     for(size_t i = 0; i < nargs; i++){
         packet_args[i] = parse_cli_data_argument(dest, args[i], schemas[i], &CHILD_ERRMSG);
         if(CHILD_ERRMSG != NULL){
+            for(size_t j = 0; j < i; j++) free((void*)packet_args[j]);
             for(size_t j = 0; j < nschemas; j++) free_schema((Schema*)schemas[j]);
             free(schemas);
             free(packet_args);
@@ -394,15 +398,13 @@ uint8_t* make_call_packet_from_cli(
     }
 
     uint8_t* call_packet = make_morloc_local_call_packet(mid, packet_args, nargs, &CHILD_ERRMSG);
-    if(CHILD_ERRMSG != NULL){
-        for(size_t j = 0; j < nschemas; j++) free_schema((Schema*)schemas[j]);
-        free(schemas);
-        free(packet_args);
-        RAISE("Failed to make call packet:\n%s", CHILD_ERRMSG);
-    }
 
+    for(size_t j = 0; j < nargs; j++) free((void*)packet_args[j]);
     for(size_t j = 0; j < nschemas; j++) free_schema((Schema*)schemas[j]);
     free(schemas);
     free(packet_args);
+
+    RAISE_IF(CHILD_ERRMSG != NULL, "Failed to make call packet:\n%s", CHILD_ERRMSG);
+
     return call_packet;
 }

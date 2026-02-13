@@ -25,7 +25,12 @@ static char schema_size_to_string(size_t size) {
 static char* resize_schema_buffer(char* schema_str, size_t pos, size_t* buffer_size, size_t requirement){
     if(pos + requirement + 1 >= *buffer_size){
         *buffer_size += 32 * (1 + (*buffer_size - pos + requirement) / 32);
-        schema_str = (char*)realloc(schema_str, *buffer_size);
+        char* new_str = (char*)realloc(schema_str, *buffer_size);
+        if(new_str == NULL){
+            fprintf(stderr, "Out of memory in resize_schema_buffer (requested %zu bytes)\n", *buffer_size);
+            abort();
+        }
+        schema_str = new_str;
     }
     return schema_str;
 }
@@ -332,6 +337,7 @@ static size_t parse_schema_size(char** schema_ptr){
 static char* parse_schema_key(char** schema_ptr){
   size_t key_size = parse_schema_size(schema_ptr);
   char* key = (char*)calloc(key_size+1, sizeof(char));
+  if(key == NULL) return NULL;
   memcpy(key, *schema_ptr, key_size);
   *schema_ptr += key_size;
   return key;
@@ -392,7 +398,7 @@ Schema* parse_schema(const char* schema_str, ERRMSG){
   RAISE_IF(schema_copy == NULL, "Failed to allocate schema string")
 
   char* parse_ptr = schema_copy;  // This pointer will be modified
-  Schema* schema = TRY(parse_schema_r, &parse_ptr);
+  Schema* schema = TRY_WITH(free(schema_copy), parse_schema_r, &parse_ptr);
 
   free(schema_copy);
   return schema;
@@ -436,6 +442,12 @@ Schema* parse_schema_r(char** schema_ptr, ERRMSG){
       params = (Schema**)calloc(size, sizeof(Schema*));
       for(size_t i = 0; i < size; i++){
         keys[i] = parse_schema_key(schema_ptr);
+        if(keys[i] == NULL){
+          for(size_t j = 0; j < i; j++){ free_schema(params[j]); free(keys[j]); }
+          free(params);
+          free(keys);
+          RAISE("Failed to allocate schema key")
+        }
         params[i] = parse_schema_r(schema_ptr, &CHILD_ERRMSG);
         if(params[i] == NULL){
           for(size_t j = 0; j < i; j++) free_schema(params[j]);

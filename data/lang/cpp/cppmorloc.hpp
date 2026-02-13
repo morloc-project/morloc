@@ -638,18 +638,21 @@ std::vector<char> mpk_pack(const T& data, const std::string& schema_str) {
     const char* schema_ptr = schema_str.c_str();
     Schema* schema = parse_schema_cpp(schema_ptr);
 
-    // Create Anything* from schema and data
-    void* voidstar = toAnything(schema, data);
+    void* voidstar = nullptr;
     char* msgpack_data = NULL;
     size_t msg_size = 0;
 
-    int pack_result = pack_with_schema_cpp(voidstar, schema, &msgpack_data, &msg_size);
-    shfree_cpp(voidstar);
-    if (pack_result != 0) {
+    try {
+        voidstar = toAnything(schema, data);
+        pack_with_schema_cpp(voidstar, schema, &msgpack_data, &msg_size);
+    } catch (...) {
+        if (voidstar) shfree_cpp(voidstar);
         free(msgpack_data);
         free_schema(schema);
-        throw std::runtime_error("Packing failed");
+        throw;
     }
+
+    shfree_cpp(voidstar);
 
     std::vector<char> result(msgpack_data, msgpack_data + msg_size);
     free(msgpack_data);
@@ -660,7 +663,6 @@ std::vector<char> mpk_pack(const T& data, const std::string& schema_str) {
 
 template<typename T>
 T mpk_unpack(const std::vector<char>& packed_data, const std::string& schema_str) {
-    char* errmsg = NULL;
     const char* schema_ptr = schema_str.c_str();
     Schema* schema = parse_schema_cpp(schema_ptr);
 
@@ -671,7 +673,14 @@ T mpk_unpack(const std::vector<char>& packed_data, const std::string& schema_str
         throw std::runtime_error("Unpacking failed");
     }
 
-    T x = fromAnything(schema, voidstar, static_cast<T*>(nullptr));
+    T x;
+    try {
+        x = fromAnything(schema, voidstar, static_cast<T*>(nullptr));
+    } catch (...) {
+        free_schema(schema);
+        shfree_cpp(voidstar);
+        throw;
+    }
 
     free_schema(schema);
     shfree_cpp(voidstar);

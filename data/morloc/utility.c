@@ -285,7 +285,7 @@ uint8_t* read_binary_fd(FILE* file, size_t* file_size, ERRMSG) {
 
     while (1) {
         uint8_t* new_buf = (uint8_t*)realloc(msg, allocated_size + chunk_size);
-        RAISE_IF(new_buf == NULL, "Failed to allocate %zu bytes", allocated_size + chunk_size)
+        RAISE_IF_WITH(new_buf == NULL, free(msg), "Failed to allocate %zu bytes", allocated_size + chunk_size)
         msg = new_buf;
 
         read_size = fread(msg + allocated_size, 1, chunk_size, file);

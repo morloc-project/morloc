@@ -383,7 +383,7 @@ absptr_t morloc_eval(
         new_expr = expr;
     }
 
-    absptr_t result = TRY(morloc_eval_r, new_expr, NULL, 0, NULL);
+    absptr_t result = morloc_eval_r(new_expr, NULL, 0, NULL, &CHILD_ERRMSG);
 
     // Free the wrapper expression nodes allocated above (not the original lambda)
     if (expr->type == MORLOC_X_LAM && new_expr != NULL) {
@@ -396,6 +396,8 @@ absptr_t morloc_eval(
         free(app_expr);
         free(new_expr);
     }
+
+    RAISE_IF(CHILD_ERRMSG != NULL, "\n%s", CHILD_ERRMSG)
 
     return result;
 }
@@ -651,7 +653,7 @@ static bool convert_keys_to_indices(morloc_pattern_t* pattern, Schema* schema, E
                 }
             }
             if(!found){
-                RAISE_WITH(free(pattern_key), "Pattern contains key that is missing in schema: %s", pattern_key)
+                RAISE_WITH((free(pattern_key), free(indices)), "Pattern contains key that is missing in schema: %s", pattern_key)
             }
             free(pattern_key);
         }

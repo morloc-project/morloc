@@ -351,8 +351,8 @@ uint8_t* remote_call(
 
     call_packet = NULL;
     result_cache_filename = check_cache_packet(function_hash, cache_path, &CHILD_ERRMSG);
-    CHILD_ERRMSG = NULL; // ignore error
-                         //
+    FREE(CHILD_ERRMSG); // ignore error
+
     // If a cached result already exists, return it
     if(result_cache_filename != NULL){
         // return result is cached, so load the cache and go
@@ -367,7 +367,7 @@ uint8_t* remote_call(
     for(size_t i = 0; i < nargs; i++){
         cached_arg_filenames[i] = check_cache_packet(arg_hashes[i], cache_path, &CHILD_ERRMSG);
         if(cached_arg_filenames[i] == NULL){
-            CHILD_ERRMSG = NULL; // ignore error, if it failed, remake the cache
+            FREE(CHILD_ERRMSG); // ignore error, if it failed, remake the cache
             cached_arg_filenames[i] = TRY_GOTO(put_cache_packet, arg_voidstars[i], arg_schemas[i], arg_hashes[i], cache_path);
         }
     }
@@ -433,7 +433,8 @@ uint8_t* remote_call(
 end:
     for(size_t i = 0; i < nargs; i++){
         if(arg_schemas != NULL){
-            FREE(arg_schemas[i])
+            free_schema(arg_schemas[i]);
+            arg_schemas[i] = NULL;
         }
         if(cached_arg_filenames != NULL){
             FREE(cached_arg_filenames[i])
@@ -447,9 +448,11 @@ end:
     FREE(arg_voidstars)
     FREE(arg_schemas)
     FREE(result_cache_filename)
+    FREE(call_packet)
     FREE(call_packet_filename)
     FREE(output_filename)
     FREE(error_filename)
+    FREE(failure)
     FREE(cached_arg_filenames)
     FREE(cached_arg_packets)
 
