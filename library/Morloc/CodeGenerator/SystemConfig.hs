@@ -107,6 +107,24 @@ configureAllSteps verbose force slurmSupport config = do
   say "Configuring C++ morloc api header"
   TIO.writeFile (includeDir </> DF.embededFileName DF.libcpplang) (DF.embededFileText DF.libcpplang)
 
+  -- Compile C++ wrapper functions into a static library
+  say "Compiling libcppmorloc.a"
+  let cppImplPath = buildDir </> DF.embededFileName DF.libcpplangImpl
+      cppObjPath = buildDir </> "cppmorloc.o"
+      cppLibPath = libDir </> "libcppmorloc.a"
+  TIO.writeFile cppImplPath (DF.embededFileText DF.libcpplangImpl)
+  run "g++" ["-c", "--std=c++17", "-O2", "-I" <> includeDir, "-o", cppObjPath, cppImplPath]
+  run "ar" ["rcs", cppLibPath, cppObjPath]
+  removeFile cppImplPath
+  removeFile cppObjPath
+
+  -- Compile precompiled header for C++ pools
+  say "Compiling C++ precompiled header"
+  let pchSrcPath = includeDir </> DF.embededFileName DF.libcpplangPch
+      pchOutPath = pchSrcPath <> ".gch"
+  TIO.writeFile pchSrcPath (DF.embededFileText DF.libcpplangPch)
+  run "g++" ["--std=c++17", "-O2", "-I" <> includeDir, "-x", "c++-header", pchSrcPath, "-o", pchOutPath]
+
   say "Configuring python MessagePack libraries"
   let libpyPath = optDir </> DF.embededFileName DF.libpylang
       libpySetupPath = optDir </> DF.embededFileName DF.libpylangSetup

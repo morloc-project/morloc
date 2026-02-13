@@ -12,97 +12,84 @@
 #include <tuple>
 #include <stdexcept>
 #include <cstring>
-#include <iostream>
 #include <string>
-#include <cstring>
+#include <type_traits>
 
 #include "morloc.h"
 
-absptr_t cpp_rel2abs(relptr_t ptr){
-    char* errmsg = NULL;
-    absptr_t absptr = rel2abs(ptr, &errmsg);
-    if(errmsg != NULL){
-        std::string msg(errmsg); free(errmsg);
-        throw std::runtime_error(msg);
+// ============================================================
+// Type traits for container dispatch
+// ============================================================
+
+template<typename T> struct is_std_vector : std::false_type {};
+template<typename T, typename A> struct is_std_vector<std::vector<T, A>> : std::true_type {};
+
+template<typename T> struct is_std_list : std::false_type {};
+template<typename T, typename A> struct is_std_list<std::list<T, A>> : std::true_type {};
+
+template<typename T> struct is_std_forward_list : std::false_type {};
+template<typename T, typename A> struct is_std_forward_list<std::forward_list<T, A>> : std::true_type {};
+
+template<typename T> struct is_std_deque : std::false_type {};
+template<typename T, typename A> struct is_std_deque<std::deque<T, A>> : std::true_type {};
+
+template<typename T> struct is_std_stack : std::false_type {};
+template<typename T, typename C> struct is_std_stack<std::stack<T, C>> : std::true_type {};
+
+template<typename T> struct is_std_queue : std::false_type {};
+template<typename T, typename C> struct is_std_queue<std::queue<T, C>> : std::true_type {};
+
+template<typename T> struct is_std_tuple : std::false_type {};
+template<typename... Args> struct is_std_tuple<std::tuple<Args...>> : std::true_type {};
+
+template<typename T>
+inline constexpr bool is_non_vector_container_v =
+    is_std_list<T>::value || is_std_forward_list<T>::value ||
+    is_std_deque<T>::value || is_std_stack<T>::value ||
+    is_std_queue<T>::value;
+
+
+// ============================================================
+// Container-to-vector conversion
+// ============================================================
+
+template<typename Container>
+auto to_vector(const Container& c) {
+    using T = typename Container::value_type;
+    if constexpr (is_std_stack<Container>::value) {
+        std::vector<T> v;
+        auto copy = c;
+        while (!copy.empty()) { v.push_back(copy.top()); copy.pop(); }
+        std::reverse(v.begin(), v.end());
+        return v;
+    } else if constexpr (is_std_queue<Container>::value) {
+        std::vector<T> v;
+        auto copy = c;
+        while (!copy.empty()) { v.push_back(copy.front()); copy.pop(); }
+        return v;
+    } else {
+        return std::vector<T>(c.begin(), c.end());
     }
-    return absptr;
 }
 
-relptr_t abs2rel_cpp(absptr_t ptr){
-    char* errmsg = NULL;
-    relptr_t relptr = abs2rel(ptr, &errmsg);
-    if(errmsg != NULL){
-        std::string msg(errmsg); free(errmsg);
-        throw std::runtime_error(msg);
-    }
-    return relptr;
-}
 
-bool shfree_cpp(absptr_t ptr){
-    char* errmsg = NULL;
-    bool success = shfree(ptr, &errmsg);
-    if(errmsg != NULL){
-        std::string msg(errmsg); free(errmsg);
-        throw std::runtime_error(msg);
-    }
-    return success;
-}
+// ============================================================
+// C runtime wrappers (implementations in cppmorloc.cpp)
+// ============================================================
+
+absptr_t cpp_rel2abs(relptr_t ptr);
+relptr_t abs2rel_cpp(absptr_t ptr);
+bool shfree_cpp(absptr_t ptr);
+Schema* parse_schema_cpp(const char* schema_ptr);
+void* shmalloc_cpp(size_t size);
+shm_t* shinit_cpp(const char* shm_basename, size_t volume_index, size_t shm_size);
+int pack_with_schema_cpp(const void* mlc, const Schema* schema, char** mpk, size_t* mpk_size);
+int unpack_with_schema_cpp(const char* mgk, size_t mgk_size, const Schema* schema, void** mlcptr);
 
 
-Schema* parse_schema_cpp(const char* schema_ptr){
-    char* errmsg = NULL;
-    Schema* schema = parse_schema(schema_ptr, &errmsg);
-    if(errmsg != NULL){
-        std::string msg(errmsg); free(errmsg);
-        throw std::runtime_error(msg);
-    }
-    return schema;
-}
-
-void* shmalloc_cpp(size_t size){
-    char* errmsg = NULL;
-    void* new_ptr = shmalloc(size, &errmsg);
-    if(errmsg != NULL){
-        std::string msg(errmsg); free(errmsg);
-        throw std::runtime_error(msg);
-    }
-    return new_ptr;
-
-}
-
-shm_t* shinit_cpp(const char* shm_basename, size_t volume_index, size_t shm_size) {
-    char* errmsg = NULL;
-    shm_t* new_ptr = shinit(shm_basename, volume_index, shm_size, &errmsg);
-    if(errmsg != NULL){
-        std::string msg(errmsg); free(errmsg);
-        throw std::runtime_error(msg);
-    }
-    return new_ptr;
-
-}
-
-int pack_with_schema_cpp(const void* mlc, const Schema* schema, char** mpk, size_t* mpk_size){
-    char* errmsg = NULL;
-    int exitcode = pack_with_schema(mlc, schema, mpk, mpk_size, &errmsg);
-    if(errmsg != NULL){
-        std::string msg(errmsg); free(errmsg);
-        throw std::runtime_error(msg);
-    }
-    return exitcode;
-}
-
-int unpack_with_schema_cpp(const char* mgk, size_t mgk_size, const Schema* schema, void** mlcptr){
-    char* errmsg = NULL;
-    int exitcode = unpack_with_schema(mgk, mgk_size, schema, mlcptr, &errmsg);
-    if(errmsg != NULL){
-        std::string msg(errmsg); free(errmsg);
-        throw std::runtime_error(msg);
-    }
-    return exitcode;
-}
-
-// The two main exported functions are mpk_pack and mpk_unpack. These translate
-// to and from MessagePack format given a schema.
+// ============================================================
+// mpk_pack / mpk_unpack declarations
+// ============================================================
 
 template<typename T>
 std::vector<char> mpk_pack(const T& data, const std::string& schema_str);
@@ -111,12 +98,14 @@ template<typename T>
 T mpk_unpack(const std::vector<char>& packed_data, const std::string& schema_str);
 
 
+// ============================================================
+// get_shm_size
+// ============================================================
 
-// Forward declarations
+// Forward declaration
 template<typename T>
 size_t get_shm_size(const Schema* schema, const T& data);
 
-// Specialization for nullptr_t (NIL)
 size_t get_shm_size(const Schema* schema, const std::nullptr_t&) {
     return sizeof(int8_t);
 }
@@ -127,7 +116,6 @@ size_t get_shm_size(const Schema* schema, const Primitive& data) {
     return schema->width;
 }
 
-// Specialization for std::vector (array)
 template<typename T>
 size_t get_shm_size(const Schema* schema, const std::vector<T>& data) {
     size_t total_size = schema->width;
@@ -151,7 +139,7 @@ size_t get_shm_size(const Schema* schema, const std::vector<T>& data) {
         case MORLOC_TUPLE:
         case MORLOC_MAP:
             for(size_t i = 0; i < data.size(); i++){
-               total_size += get_shm_size(schema->parameters[0], data[i]); 
+               total_size += get_shm_size(schema->parameters[0], data[i]);
             }
             break;
     }
@@ -166,11 +154,6 @@ size_t get_shm_size(void* dest, const Schema* schema, const char* data) {
     return schema->width + strlen(data);
 }
 
-template<typename... Args>
-size_t get_shm_size(const Schema* schema, const std::tuple<Args...>& data) {
-    return createTupleShmSizeHelper(schema, data, std::index_sequence_for<Args...>{});
-}
-
 template<typename Tuple, size_t... Is>
 size_t createTupleShmSizeHelper(const Schema* schema, const Tuple& data, std::index_sequence<Is...>) {
     size_t total_size = 0;
@@ -181,19 +164,48 @@ size_t createTupleShmSizeHelper(const Schema* schema, const Tuple& data, std::in
     return total_size;
 }
 
+template<typename... Args>
+size_t get_shm_size(const Schema* schema, const std::tuple<Args...>& data) {
+    return createTupleShmSizeHelper(schema, data, std::index_sequence_for<Args...>{});
+}
 
+// Non-vector containers: convert to vector and delegate
+template<typename T>
+size_t get_shm_size(const Schema* schema, const std::list<T>& data) {
+    return get_shm_size(schema, to_vector(data));
+}
 
 template<typename T>
+size_t get_shm_size(const Schema* schema, const std::forward_list<T>& data) {
+    return get_shm_size(schema, to_vector(data));
+}
+
+template<typename T>
+size_t get_shm_size(const Schema* schema, const std::deque<T>& data) {
+    return get_shm_size(schema, to_vector(data));
+}
+
+template<typename T>
+size_t get_shm_size(const Schema* schema, const std::stack<T>& data) {
+    return get_shm_size(schema, to_vector(data));
+}
+
+template<typename T>
+size_t get_shm_size(const Schema* schema, const std::queue<T>& data) {
+    return get_shm_size(schema, to_vector(data));
+}
+
+
+// ============================================================
+// toAnything - top-level (allocating)
+// ============================================================
+
+// Generic top-level: compute size, allocate, serialize
+template<typename T>
 void* toAnything(const Schema* schema, const T& data){
-    // Calculate the total required memory space
     size_t total_size = get_shm_size(schema, data);
-
-    // Allocate this space in shared memory
     void* dest = shmalloc_cpp(total_size);
-
     void* cursor = (void*)((char*)dest + schema->width);
-
-    // Recurse, freeing shared memory if the recursive call throws
     try {
         return toAnything(dest, &cursor, schema, data);
     } catch (...) {
@@ -202,92 +214,60 @@ void* toAnything(const Schema* schema, const T& data){
     }
 }
 
-// Convert STL type isomorphic to vectors to vectors
-template <typename T>
+// Non-vector containers: convert to vector and delegate
+template<typename T>
 void* toAnything(const Schema* schema, const std::stack<T>& data) {
-    std::vector<T> temp;
-    std::stack<T> tempStack = data;
-    while (!tempStack.empty()) {
-        temp.push_back(tempStack.top());
-        tempStack.pop();
-    }
-
-    std::reverse(temp.begin(), temp.end());
-
-    // Use the vector implementation to write the data
-    return toAnything(schema, temp);
+    return toAnything(schema, to_vector(data));
 }
 
-template <typename T>
+template<typename T>
 void* toAnything(const Schema* schema, const std::forward_list<T>& data) {
-    std::vector<T> temp(data.begin(), data.end()); // Copy to vector
-
-    return toAnything(schema, temp);
+    return toAnything(schema, to_vector(data));
 }
 
-template <typename T>
+template<typename T>
 void* toAnything(const Schema* schema, const std::queue<T>& data) {
-    std::vector<T> temp;
-    std::queue<T> tempQueue = data; // Copy the queue
-    while (!tempQueue.empty()) {
-        temp.push_back(tempQueue.front()); // Note: front() for queue
-        tempQueue.pop();
-    }
-
-    return toAnything(schema, temp);
+    return toAnything(schema, to_vector(data));
 }
 
-template <typename T>
+template<typename T>
 void* toAnything(const Schema* schema, const std::deque<T>& data) {
-    std::vector<T> temp(data.begin(), data.end()); // Directly copy to vector
-
-    return toAnything(schema, temp);
+    return toAnything(schema, to_vector(data));
 }
 
-template <typename T>
+template<typename T>
 void* toAnything(const Schema* schema, const std::list<T>& data) {
-    std::vector<T> temp(data.begin(), data.end()); // Directly copy to vector
-
-    return toAnything(schema, temp);
+    return toAnything(schema, to_vector(data));
 }
 
 
-// Forward declarations
+// ============================================================
+// toAnything - cursor-based (recursive)
+// ============================================================
+
+// Forward declaration
 template<typename T>
 void* toAnything(void* dest, void** cursor, const Schema* schema, const T& data);
 
-// write a raw data array
+// Write raw binary data as an array
 void* binarytoAnything(void* dest, void** cursor, const Schema* schema, const uint8_t* data, size_t size) {
-    // The fixed length array wrapper is written to the destination
     Array* result = static_cast<Array*>(dest);
     result->size = size;
-
     if(size == 0){
         result->data = RELNULL;
         return dest;
     }
-
     absptr_t data_ptr = static_cast<absptr_t>(*cursor);
-
-    // The array data is written to the cursor location
-    // The N fixed-size elements will be written here
     result->data = abs2rel_cpp(data_ptr);
-
-    // The cursor is mutated to point to the location after the children
     *cursor = static_cast<char*>(*cursor) + size * schema->parameters[0]->width;
-
     memcpy(data_ptr, data, size);
-
     return dest;
 }
 
-
-// Specialization for nullptr_t (NIL)
 void* toAnything(void* dest, void** cursor, const Schema* schema, const std::nullptr_t&) {
-    *((int8_t*)dest) = (int8_t)0; 
+    *((int8_t*)dest) = (int8_t)0;
     return dest;
 }
-
 
 // Primitives
 template<typename Primitive>
@@ -296,155 +276,82 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const Primitiv
     return dest;
 }
 
-
-// Specialization for std::vector (array)
+// Vector (primary array implementation)
 template<typename T>
 void* toAnything(void* dest, void** cursor, const Schema* schema, const std::vector<T>& data) {
-    // The fixed length array wrapper is written to the destincation
     Array* result = static_cast<Array*>(dest);
     result->size = data.size();
-
     if(data.size() == 0){
         result->data = RELNULL;
         return dest;
     }
-
-    // The array data is written to the cursor location
-    // The N fixed-size elements will be written here
     result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
-
-    // The cursor is mutated to point to the location after the children
     *cursor = static_cast<char*>(*cursor) + data.size() * schema->parameters[0]->width;
-
     char* start = (char*)cpp_rel2abs(result->data);
     size_t width = schema->parameters[0]->width;
     for (size_t i = 0; i < data.size(); ++i) {
-        // Any child variable data will be written to the cursor
          toAnything(start + width * i, cursor, schema->parameters[0], data[i]);
     }
+    return dest;
+}
 
+// Shared helper for iterable containers (list, forward_list, deque)
+template<typename Container>
+void* toAnything_seq(void* dest, void** cursor, const Schema* schema, const Container& data, size_t size) {
+    Array* result = static_cast<Array*>(dest);
+    result->size = size;
+    if(size == 0){
+        result->data = RELNULL;
+        return dest;
+    }
+    result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
+    *cursor = static_cast<char*>(*cursor) + size * schema->parameters[0]->width;
+    char* start = (char*)cpp_rel2abs(result->data);
+    size_t width = schema->parameters[0]->width;
+    size_t i = 0;
+    for (const auto& item : data) {
+        toAnything(start + width * i, cursor, schema->parameters[0], item);
+        ++i;
+    }
     return dest;
 }
 
 template<typename T>
 void* toAnything(void* dest, void** cursor, const Schema* schema, const std::list<T>& data) {
-    // The fixed length array wrapper is written to the destination
-    Array* result = static_cast<Array*>(dest);
-    result->size = data.size();
-
-    if(data.size() == 0){
-        result->data = RELNULL;
-        return dest;
-    }
-
-    // The array data is written to the cursor location
-    result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
-
-    // The cursor is mutated to point to the location after the children
-    *cursor = static_cast<char*>(*cursor) + data.size() * schema->parameters[0]->width;
-
-    char* start = (char*)cpp_rel2abs(result->data);
-    size_t width = schema->parameters[0]->width;
-    size_t i = 0;
-    for (const auto& item : data) {
-        // Any child variable data will be written to the cursor
-        toAnything(start + width * i, cursor, schema->parameters[0], item);
-        ++i;
-    }
-
-    return dest;
+    return toAnything_seq(dest, cursor, schema, data, data.size());
 }
 
 template<typename T>
 void* toAnything(void* dest, void** cursor, const Schema* schema, const std::forward_list<T>& data) {
-    // Count the elements in the forward_list
-    size_t size = std::distance(data.begin(), data.end());
-
-    // The fixed length array wrapper is written to the destination
-    Array* result = static_cast<Array*>(dest);
-    result->size = size;
-
-    if(size == 0){
-        result->data = RELNULL;
-        return dest;
-    }
-
-    // The array data is written to the cursor location
-    result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
-
-    // The cursor is mutated to point to the location after the children
-    *cursor = static_cast<char*>(*cursor) + size * schema->parameters[0]->width;
-
-    char* start = (char*)cpp_rel2abs(result->data);
-    size_t width = schema->parameters[0]->width;
-    size_t i = 0;
-    for (const auto& item : data) {
-        // Any child variable data will be written to the cursor
-        toAnything(start + width * i, cursor, schema->parameters[0], item);
-        ++i;
-    }
-
-    return dest;
-}
-
-template<typename T>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const std::queue<T>& data) {
-    // Create a temporary vector to store the queue elements
-    std::vector<T> temp;
-    std::queue<T> tempQueue = data;
-    while (!tempQueue.empty()) {
-        temp.push_back(tempQueue.front());
-        tempQueue.pop();
-    }
-
-    // Use the vector implementation to write the data
-    return toAnything(dest, cursor, schema, temp);
+    return toAnything_seq(dest, cursor, schema, data, std::distance(data.begin(), data.end()));
 }
 
 template<typename T>
 void* toAnything(void* dest, void** cursor, const Schema* schema, const std::deque<T>& data) {
-    // The fixed length array wrapper is written to the destination
-    Array* result = static_cast<Array*>(dest);
-    result->size = data.size();
-
-    if(data.size() == 0){
-        result->data = RELNULL;
-        return dest;
-    }
-
-    // The array data is written to the cursor location
-    result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
-
-    // The cursor is mutated to point to the location after the children
-    *cursor = static_cast<char*>(*cursor) + data.size() * schema->parameters[0]->width;
-
-    char* start = (char*)cpp_rel2abs(result->data);
-    size_t width = schema->parameters[0]->width;
-    for (size_t i = 0; i < data.size(); ++i) {
-        // Any child variable data will be written to the cursor
-        toAnything(start + width * i, cursor, schema->parameters[0], data[i]);
-    }
-
-    return dest;
+    return toAnything_seq(dest, cursor, schema, data, data.size());
 }
 
-// Specialization for string, casts a string to a uint8_t vector and recalls
+// Stack and queue: convert to vector and delegate
+template<typename T>
+void* toAnything(void* dest, void** cursor, const Schema* schema, const std::queue<T>& data) {
+    return toAnything(dest, cursor, schema, to_vector(data));
+}
+
+template<typename T>
+void* toAnything(void* dest, void** cursor, const Schema* schema, const std::stack<T>& data) {
+    return toAnything(dest, cursor, schema, to_vector(data));
+}
+
+// String and C string
 void* toAnything(void* dest, void** cursor, const Schema* schema, const std::string& data) {
     return binarytoAnything(dest, cursor, schema, (const uint8_t*)data.c_str(), data.size());
 }
 
-// Specialization for C strings, casts to uint8_t vector and recalls
 void* toAnything(void* dest, void** cursor, const Schema* schema, const char* data) {
     return binarytoAnything(dest, cursor, schema, (const uint8_t*)data, strlen(data));
 }
 
-// Specialization for std::tuple
-template<typename... Args>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const std::tuple<Args...>& data) {
-    return createTupleAnythingHelper(dest, schema, cursor, data, std::index_sequence_for<Args...>{});
-}
-
-// Helper function for tuple creation
+// Tuple
 template<typename Tuple, size_t... Is>
 void* createTupleAnythingHelper(void* dest, const Schema* schema, void** cursor, const Tuple& data, std::index_sequence<Is...>) {
     (void)std::initializer_list<int>{(
@@ -454,172 +361,21 @@ void* createTupleAnythingHelper(void* dest, const Schema* schema, void** cursor,
     return dest;
 }
 
-
-
-template<typename Primitive>
-Primitive fromAnything(const Schema* schema, const void* data, Primitive* dumby = nullptr) {
-
-    if(data == NULL){
-        throw std::runtime_error("Void error in fromAnything");
-    }
-    return *(Primitive*)data;
-}
-
-bool fromAnything(const Schema* schema, const void* data, bool* dumby = nullptr) {
-
-    // NOTE: do NOT use bool here since its width is often not 1 byte
-    return *(uint8_t*)data == 1;
-}
-
-std::string fromAnything(const Schema* schema, const void* data, std::string* dumby = nullptr) {
-
-    Array* array = (Array*)data;
-    if(array->size > 0){
-        return std::string((char*)cpp_rel2abs(array->data), array->size);
-    } else {
-        return std::string("");
-    }
-}
-
-template<typename T>
-std::vector<T> fromAnything(const Schema* schema, const void* data, std::vector<T>* dumby = nullptr){
-  std::vector<T> result;
-  Array* array = (Array*) data;
-
-  if(array->size == 0){
-      return result;
-  }
-
-  // Directly use memory for constant width primitives arrays
-  switch(schema->parameters[0]->type){
-    case MORLOC_NIL:
-    case MORLOC_BOOL:
-    case MORLOC_SINT8:
-    case MORLOC_SINT16:
-    case MORLOC_SINT32:
-    case MORLOC_SINT64:
-    case MORLOC_UINT8:
-    case MORLOC_UINT16:
-    case MORLOC_UINT32:
-    case MORLOC_UINT64:
-    case MORLOC_FLOAT32:
-    case MORLOC_FLOAT64:
-      std::vector<T> primitive_vector((T*)(cpp_rel2abs(array->data)), (T*)(cpp_rel2abs(array->data)) + array->size);
-      return primitive_vector;
-  }
-
-  // Other data types require some rearrangement
-  result.reserve(array->size);
-  if(array->size > 0){
-      const Schema* elemental_schema = schema->parameters[0];
-      T* elemental_dumby = nullptr;
-      char* start = (char*)cpp_rel2abs(array->data);
-      for(size_t i = 0; i < array->size; i++){
-        result.push_back(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
-      }
-  }
-  return result;
-}
-
-template<typename T>
-std::stack<T> fromAnything(const Schema* schema, const void* data, std::stack<T>* dumby = nullptr) {
-
-    Array* array = (Array*)data;
-    std::stack<T> result;
-    if(array->size > 0){
-        const Schema* elemental_schema = schema->parameters[0];
-        T* elemental_dumby = nullptr;
-        char* start = (char*)cpp_rel2abs(array->data);
-        
-        // We need to push elements in reverse order to maintain the original stack order
-        for (size_t i = array->size; i > 0; --i) {
-            result.push(fromAnything(elemental_schema, (void*)(start + (i-1) * elemental_schema->width), elemental_dumby));
-        }
-    }
-    return result;
-}
-
-template<typename T>
-std::list<T> fromAnything(const Schema* schema, const void* data, std::list<T>* dumby = nullptr) {
-
-    Array* array = (Array*)data;
-    std::list<T> result;
-    if(array->size > 0){
-        const Schema* elemental_schema = schema->parameters[0];
-        T* elemental_dumby = nullptr;
-        char* start = (char*)cpp_rel2abs(array->data);
-        
-        for (size_t i = 0; i < array->size; ++i) {
-            result.push_back(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
-        }
-    }
-    return result;
-}
-
-template<typename T>
-std::forward_list<T> fromAnything(const Schema* schema, const void* data, std::forward_list<T>* dumby = nullptr) {
-
-    Array* array = (Array*)data;
-    std::forward_list<T> result;
-    if(array->size > 0){
-        const Schema* elemental_schema = schema->parameters[0];
-        T* elemental_dumby = nullptr;
-        char* start = (char*)cpp_rel2abs(array->data);
-        
-        // We need to insert elements in reverse order to maintain the original list order
-        for (size_t i = array->size; i > 0; --i) {
-            result.push_front(fromAnything(elemental_schema, (void*)(start + (i-1) * elemental_schema->width), elemental_dumby));
-        }
-    }
-    return result;
-}
-
-template<typename T>
-std::queue<T> fromAnything(const Schema* schema, const void* data, std::queue<T>* dumby = nullptr) {
-
-    Array* array = (Array*)data;
-    std::queue<T> result;
-    if(array->size > 0){
-        const Schema* elemental_schema = schema->parameters[0];
-        T* elemental_dumby = nullptr;
-        char* start = (char*)cpp_rel2abs(array->data);
-        
-        for (size_t i = 0; i < array->size; ++i) {
-            result.push(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
-        }
-    }
-    return result;
-}
-
-template<typename T>
-std::deque<T> fromAnything(const Schema* schema, const void* data, std::deque<T>* dumby = nullptr) {
-
-    Array* array = (Array*)data;
-    std::deque<T> result;
-    if(array->size > 0){
-        const Schema* elemental_schema = schema->parameters[0];
-        T* elemental_dumby = nullptr;
-        char* start = (char*)cpp_rel2abs(array->data);
-        
-        for (size_t i = 0; i < array->size; ++i) {
-            result.push_back(fromAnything(elemental_schema, (void*)(start + i * elemental_schema->width), elemental_dumby));
-        }
-    }
-    return result;
-}
-
 template<typename... Args>
-std::tuple<Args...> fromAnything(const Schema* schema, const void* anything, std::tuple<Args...>* = nullptr) {
-
-    return fromTupleAnythingHelper(
-      schema,
-      anything,
-      std::index_sequence_for<Args...>{},
-      static_cast<std::tuple<Args...>*>(nullptr)
-    );
+void* toAnything(void* dest, void** cursor, const Schema* schema, const std::tuple<Args...>& data) {
+    return createTupleAnythingHelper(dest, schema, cursor, data, std::index_sequence_for<Args...>{});
 }
 
-// Helper function for tuple conversion
+
+// ============================================================
+// fromAnything - single template with if constexpr dispatch
+// ============================================================
+
+// Forward declaration for recursive calls
+template<typename T>
+T fromAnything(const Schema* schema, const void* data, T* = nullptr);
+
+// Tuple helper (needs forward declaration of fromAnything)
 template<typename Tuple, size_t... Is>
 Tuple fromTupleAnythingHelper(
   const Schema* schema,
@@ -632,6 +388,105 @@ Tuple fromTupleAnythingHelper(
                               static_cast<std::tuple_element_t<Is, Tuple>*>(nullptr))...);
 }
 
+template<typename T>
+T fromAnything(const Schema* schema, const void* data, T*) {
+    if(data == NULL){
+        throw std::runtime_error("Void error in fromAnything");
+    }
+
+    if constexpr (std::is_same_v<T, bool>) {
+        // NOTE: do NOT use bool here since its width is often not 1 byte
+        return *(uint8_t*)data == 1;
+    }
+    else if constexpr (std::is_same_v<T, std::string>) {
+        Array* array = (Array*)data;
+        if(array->size > 0){
+            return std::string((char*)cpp_rel2abs(array->data), array->size);
+        }
+        return std::string("");
+    }
+    else if constexpr (is_std_vector<T>::value) {
+        using ElemT = typename T::value_type;
+        std::vector<ElemT> result;
+        Array* array = (Array*)data;
+        if(array->size == 0) return result;
+
+        // Fast path for primitive arrays
+        switch(schema->parameters[0]->type){
+            case MORLOC_NIL:
+            case MORLOC_BOOL:
+            case MORLOC_SINT8:
+            case MORLOC_SINT16:
+            case MORLOC_SINT32:
+            case MORLOC_SINT64:
+            case MORLOC_UINT8:
+            case MORLOC_UINT16:
+            case MORLOC_UINT32:
+            case MORLOC_UINT64:
+            case MORLOC_FLOAT32:
+            case MORLOC_FLOAT64: {
+                std::vector<ElemT> pv(
+                    (ElemT*)(cpp_rel2abs(array->data)),
+                    (ElemT*)(cpp_rel2abs(array->data)) + array->size
+                );
+                return pv;
+            }
+        }
+
+        // Complex element types
+        result.reserve(array->size);
+        const Schema* elem_schema = schema->parameters[0];
+        char* start = (char*)cpp_rel2abs(array->data);
+        for(size_t i = 0; i < array->size; i++){
+            result.push_back(fromAnything(elem_schema, (void*)(start + i * elem_schema->width), static_cast<ElemT*>(nullptr)));
+        }
+        return result;
+    }
+    else if constexpr (is_non_vector_container_v<T>) {
+        using ElemT = typename T::value_type;
+        Array* array = (Array*)data;
+        T result;
+        if(array->size == 0) return result;
+
+        const Schema* elem_schema = schema->parameters[0];
+        char* start = (char*)cpp_rel2abs(array->data);
+
+        constexpr bool reverse = is_std_stack<T>::value || is_std_forward_list<T>::value;
+
+        if constexpr (reverse) {
+            for (size_t i = array->size; i > 0; --i) {
+                auto elem = fromAnything(elem_schema, (void*)(start + (i-1) * elem_schema->width), static_cast<ElemT*>(nullptr));
+                if constexpr (is_std_stack<T>::value) result.push(std::move(elem));
+                else result.push_front(std::move(elem));
+            }
+        } else {
+            for (size_t i = 0; i < array->size; ++i) {
+                auto elem = fromAnything(elem_schema, (void*)(start + i * elem_schema->width), static_cast<ElemT*>(nullptr));
+                if constexpr (is_std_queue<T>::value) result.push(std::move(elem));
+                else result.push_back(std::move(elem));
+            }
+        }
+        return result;
+    }
+    else if constexpr (is_std_tuple<T>::value) {
+        return fromTupleAnythingHelper(
+            schema, data,
+            std::make_index_sequence<std::tuple_size_v<T>>{},
+            static_cast<T*>(nullptr)
+        );
+    }
+    else {
+        // Primitives (int, double, float, etc.)
+        // Record types are handled by generated overloads which are preferred
+        // by overload resolution over this template.
+        return *(T*)data;
+    }
+}
+
+
+// ============================================================
+// mpk_pack / mpk_unpack
+// ============================================================
 
 template<typename T>
 std::vector<char> mpk_pack(const T& data, const std::string& schema_str) {

@@ -15,6 +15,8 @@ module Morloc.DataFiles
   , nexusTemplate
   , poolTemplate
   , libcpplang
+  , libcpplangImpl
+  , libcpplangPch
   , libpylang
   , libpylangMakefile
   , libpylangSetup
@@ -110,6 +112,14 @@ librlang = EmbededFile "rmorloc.c" (decodeUtf8 $ $(embedFileRelative "data/lang/
 -- C++ interface to morloc.h
 libcpplang :: EmbededFile
 libcpplang = EmbededFile "cppmorloc.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc.hpp"))
+
+-- C++ wrapper implementations (compiled once during morloc init)
+libcpplangImpl :: EmbededFile
+libcpplangImpl = EmbededFile "cppmorloc.cpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc.cpp"))
+
+-- Precompiled header (compiled once during morloc init)
+libcpplangPch :: EmbededFile
+libcpplangPch = EmbededFile "morloc_pch.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/morloc_pch.hpp"))
 
 -- Python interface to morloc.h
 -- built as a module and imported into python pools and the nexus

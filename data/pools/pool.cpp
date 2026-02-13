@@ -3,10 +3,11 @@
 #include <sstream>
 #include <functional>
 #include <vector>
-#include <algorithm> // for std::transform
+#include <algorithm>
 #include <stdexcept>
 #include <fstream>
 #include <system_error>
+#include <unordered_map>
 #include <sys/stat.h>
 #include <sys/mman.h>
 
@@ -84,27 +85,28 @@ std::string interweave_strings(const std::vector<std::string>& first, const std:
     return result;
 }
 
+// Thread-local schema cache: avoids re-parsing the same schema strings
+Schema* get_cached_schema(const char* schema_str) {
+    thread_local std::unordered_map<std::string, Schema*> cache;
+    auto it = cache.find(schema_str);
+    if (it != cache.end()) return it->second;
+    Schema* schema = parse_schema_cpp(schema_str);
+    cache[schema_str] = schema;
+    return schema;
+}
+
 // Transforms a serialized value into a message ready for the socket
 template <typename T>
 uint8_t* _put_value(const T& value, const std::string& schema_str) {
-    const char* schema_ptr = schema_str.c_str();
-    Schema* schema = parse_schema_cpp(schema_ptr);
+    Schema* schema = get_cached_schema(schema_str.c_str());
 
     void* voidstar = nullptr;
     try {
-        // toAnything writes to the shared memory volume
         voidstar = toAnything(schema, value);
-
-        // convert to a relative pointer conserved between language servers
         relptr_t relptr = abs2rel_cpp(voidstar);
-
-        uint8_t* packet = make_standard_data_packet(relptr, schema);
-
-        free_schema(schema);
-        return packet;
+        return make_standard_data_packet(relptr, schema);
     } catch (...) {
         if (voidstar) shfree_cpp(voidstar);
-        free_schema(schema);
         throw;
     }
 }
@@ -113,26 +115,16 @@ uint8_t* _put_value(const T& value, const std::string& schema_str) {
 // Use a key to retrieve a value
 template <typename T>
 T _get_value(const uint8_t* packet, const std::string& schema_str){
-
-    const char* schema_ptr = schema_str.c_str();
-    Schema* schema = parse_schema_cpp(schema_ptr);
+    Schema* schema = get_cached_schema(schema_str.c_str());
 
     char* errmsg = NULL;
     uint8_t* voidstar = get_morloc_data_packet_value(packet, schema, &errmsg);
     if(errmsg != NULL) {
-        free_schema(schema);
         PROPAGATE_ERROR(errmsg)
     }
 
     T* dumby = nullptr;
-    try {
-        T result = fromAnything(schema, (void*)voidstar, dumby);
-        free_schema(schema);
-        return result;
-    } catch (...) {
-        free_schema(schema);
-        throw;
-    }
+    return fromAnything(schema, (void*)voidstar, dumby);
 }
 
 

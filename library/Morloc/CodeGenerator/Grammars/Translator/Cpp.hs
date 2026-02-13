@@ -216,10 +216,9 @@ makeTheMaker srcs = do
   let incs = [pretty ("-I" <> i) | i <- includes]
   let flags' = map pretty flags
 
-  -- TODO: This is garbage - the C++ version should NOT be specified here
   let cmd =
         SysRun . Code . render $
-          [idoc|g++ -O3 --std=c++17 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
+          [idoc|g++ -O2 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
 
   return [cmd]
 
