@@ -87,6 +87,7 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
 uint8_t* make_morloc_local_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG);
 uint8_t* make_morloc_remote_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG);
 morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG);
+void free_morloc_call(morloc_call_t* call);
 int print_morloc_data_packet(const uint8_t* packet, const Schema* schema, ERRMSG);
 void close_socket(int socket_id);
 void close_daemon(language_daemon_t** daemon_ptr);

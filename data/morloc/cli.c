@@ -363,7 +363,11 @@ uint8_t* make_call_packet_from_cli(
 
     for(size_t i = 0; arg_schema_strs[i] != NULL; i++){
         schemas[i] = parse_schema(arg_schema_strs[i], &CHILD_ERRMSG);
-        RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(schemas), "Failed to parse argument %zu:\n%s", i, CHILD_ERRMSG)
+        if(CHILD_ERRMSG != NULL){
+            for(size_t j = 0; j < i; j++) free_schema((Schema*)schemas[j]);
+            free(schemas);
+            RAISE("Failed to parse argument %zu:\n%s", i, CHILD_ERRMSG)
+        }
     }
     schemas[nschemas] = NULL;
 
@@ -373,11 +377,16 @@ uint8_t* make_call_packet_from_cli(
     }
 
     const uint8_t** packet_args = (const uint8_t**)calloc(nargs, sizeof(uint8_t*));
-    RAISE_IF_WITH(packet_args == NULL, free(schemas), "Failed to allocate packet_args");
+    if(packet_args == NULL){
+        for(size_t j = 0; j < nschemas; j++) free_schema((Schema*)schemas[j]);
+        free(schemas);
+        RAISE("Failed to allocate packet_args");
+    }
 
     for(size_t i = 0; i < nargs; i++){
         packet_args[i] = parse_cli_data_argument(dest, args[i], schemas[i], &CHILD_ERRMSG);
         if(CHILD_ERRMSG != NULL){
+            for(size_t j = 0; j < nschemas; j++) free_schema((Schema*)schemas[j]);
             free(schemas);
             free(packet_args);
             RAISE("Failed to parse argument %zu\n%s", i, CHILD_ERRMSG);
@@ -386,11 +395,13 @@ uint8_t* make_call_packet_from_cli(
 
     uint8_t* call_packet = make_morloc_local_call_packet(mid, packet_args, nargs, &CHILD_ERRMSG);
     if(CHILD_ERRMSG != NULL){
+        for(size_t j = 0; j < nschemas; j++) free_schema((Schema*)schemas[j]);
         free(schemas);
         free(packet_args);
         RAISE("Failed to make call packet:\n%s", CHILD_ERRMSG);
     }
 
+    for(size_t j = 0; j < nschemas; j++) free_schema((Schema*)schemas[j]);
     free(schemas);
     free(packet_args);
     return call_packet;

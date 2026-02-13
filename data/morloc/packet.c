@@ -386,14 +386,25 @@ uint8_t* make_morloc_remote_call_packet(uint32_t midx, const uint8_t** arg_packe
     return packet;
 }
 
+void free_morloc_call(morloc_call_t* call){
+    if(call == NULL) return;
+    if(call->args != NULL){
+        for(size_t i = 0; i < call->nargs; i++){
+            free(call->args[i]);
+        }
+        free(call->args);
+    }
+    free(call);
+}
+
 morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
     PTR_RETURN_SETUP(morloc_call_t)
 
     morloc_call_t* call = (morloc_call_t*)calloc(1, sizeof(morloc_call_t));
     RAISE_IF(call == NULL, "calloc failed: %s", strerror(errno))
 
-    morloc_packet_header_t* header = TRY(read_morloc_packet_header, packet);
-    RAISE_IF(header->command.cmd_type.type != PACKET_TYPE_CALL, "Expected packet to be a call")
+    morloc_packet_header_t* header = TRY_WITH(free(call), read_morloc_packet_header, packet);
+    RAISE_IF_WITH(header->command.cmd_type.type != PACKET_TYPE_CALL, free(call), "Expected packet to be a call")
 
     call->midx = header->command.call.midx;
     call->nargs = 0;
@@ -403,7 +414,7 @@ morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
     size_t end_pos = start_pos + header->length;
     size_t pos = start_pos;
     while (pos < end_pos) {
-        pos += TRY(morloc_packet_size, packet + pos);
+        pos += TRY_WITH(free(call), morloc_packet_size, packet + pos);
         call->nargs++;
     }
 
@@ -411,9 +422,10 @@ morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
     pos = sizeof(morloc_packet_header_t) + header->offset;
     for(size_t i = 0; i < call->nargs; i++){
         morloc_packet_header_t* arg_header = read_morloc_packet_header(packet + pos, &CHILD_ERRMSG);
-        RAISE_IF(CHILD_ERRMSG != NULL, "Failed to read call argument #%zu:\n%s", i, CHILD_ERRMSG)
-        RAISE_IF(
+        RAISE_IF_WITH(CHILD_ERRMSG != NULL, free_morloc_call(call), "Failed to read call argument #%zu:\n%s", i, CHILD_ERRMSG)
+        RAISE_IF_WITH(
             arg_header->command.cmd_type.type != PACKET_TYPE_DATA,
+            free_morloc_call(call),
             "Argument #%zu is not a DATA packet (type=%d)",
             i,
             arg_header->command.cmd_type.type
