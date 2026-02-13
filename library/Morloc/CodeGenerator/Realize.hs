@@ -252,9 +252,8 @@ realize s0 = do
       (ExprS (Indexed Type) Many (Indexed [(Lang, Int)]), Indexed [(Lang, Int)]) ->
       MorlocMonad (ExprS (Indexed Type) One (Indexed (Maybe Lang)), Indexed (Maybe Lang))
 
-    -- This case should be caught earlier
-    collapseExpr _ _ (VarS v (Many []), _) =
-      error $ "Unreachable case found - no implementations for '" <> show v <> "'"
+    collapseExpr _ _ (VarS v (Many []), Idx i _) =
+      MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty v)
     -- Select one implementation for the given term
     collapseExpr gt l1 (VarS v (Many xs), Idx i _) = do
       let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) xs
