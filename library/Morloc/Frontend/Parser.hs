@@ -150,11 +150,17 @@ pTopExpr =
 
 -- | Expressions that are allowed in function or data declarations
 pExpr :: Parser ExprI
-pExpr =
-  try pAnn
-    <|> try pLam
-    <|> pInfixExpr -- infix-aware parser (handles all atoms and operators)
-    <?> "expression"
+pExpr = (do
+  pos <- getSourcePos
+  e <- try pLam <|> pInfixExpr
+  -- optional type annotation suffix: e :: Type
+  mayAnn <- optional (op "::")
+  case mayAnn of
+    Just _ -> do
+      t <- pTypeGen
+      exprIAt pos $ AnnE e t
+    Nothing -> return e
+  ) <?> "expression"
 
 -- Either a lowercase term name or an uppercase type/class name
 pSymbol :: Parser Symbol
@@ -581,16 +587,6 @@ pLstE = do
   pos <- getSourcePos
   brackets (sepBy pExpr (symbol ",")) >>= exprIAt pos . LstE
 
-pTupE :: Parser ExprI
-pTupE = do
-  pos <- getSourcePos
-  _ <- symbol "("
-  e <- pExpr
-  _ <- symbol ","
-  es <- sepBy1 pExpr (symbol ",")
-  _ <- symbol ")"
-  exprIAt pos $ TupE (e : es)
-
 pNamE :: Parser ExprI
 pNamE = do
   pos <- getSourcePos
@@ -608,28 +604,30 @@ pNamEntryE = do
   e <- pExpr
   return (n, e)
 
-pUni :: Parser ExprI
-pUni = do
+-- | Parse any parenthesized expression: (), (e), (e, e, ...), or (op)
+-- This avoids exponential backtracking by parsing ( once and then deciding.
+pParenExpr :: Parser ExprI
+pParenExpr = do
   pos <- getSourcePos
   _ <- symbol "("
-  _ <- symbol ")"
-  exprIAt pos UniE
-
-pAnn :: Parser ExprI
-pAnn = do
-  pos <- getSourcePos
-  e <-
-    try (parens pExpr)
-      <|> try pTupE
-      <|> pVar
-      <|> pLstE
-      <|> pNamE
-      <|> pNumE
-      <|> pLogE
-      <|> pStrE
-  _ <- op "::"
-  t <- pTypeGen
-  exprIAt pos $ AnnE e t
+  -- Unit: ()
+  try (symbol ")" >> exprIAt pos UniE)
+    -- Operator in parens: (+)
+    <|> try (do
+      v <- operatorName
+      _ <- symbol ")"
+      exprIAt pos $ VarE defaultValue (EV v))
+    -- Expression, then check for tuple or grouping
+    <|> do
+      e <- pExpr
+      -- Tuple: (e, e, ...)
+      try (do
+        _ <- symbol ","
+        es <- sepBy1 pExpr (symbol ",")
+        _ <- symbol ")"
+        exprIAt pos $ TupE (e : es))
+        -- Grouping: (e)
+        <|> (symbol ")" >> return e)
 
 -- | Parse an expression that may contain infix operators
 -- Note that the fixity of the binops is not yet known, so they are merged into
@@ -651,25 +649,15 @@ pInfixExpr = do
 pInfixOperator :: Parser EVar
 pInfixOperator = EV <$> operatorName
 
--- | Parse a parenthesized operator as a variable expression, capturing position at start
-pParenOpVar :: Parser ExprI
-pParenOpVar = do
-  pos <- getSourcePos
-  v <- parenOperator
-  exprIAt pos $ VarE defaultValue v
-
 -- | Parse an operand
 pOperand :: Parser ExprI
 pOperand =
-  try pUni
-    <|> try pApp
+      try pApp
     <|> try pHolE
     <|> try pNumE
     <|> try pLogE
     <|> try pStrE
-    <|> try (parens pExpr) -- Full expressions in parens
-    <|> try pParenOpVar
-    <|> try pTupE
+    <|> try pParenExpr -- handles (), (e), (e,e,..), (+)
     <|> try pLstE
     <|> try pNamE
     <|> try pSetter
@@ -686,18 +674,13 @@ pApp = do
   where
     parseFun =
             try pVar
-        <|> try pTupE -- only valid if wholy
-        <|> try pLstE --  /
-        <|> try pNamE -- /
+        <|> try pLstE
+        <|> try pNamE
         <|> try pSetter
         <|> try pGetter
-        <|> try (parens pExpr)
-        <|>     pParenOpVar
+        <|> try pParenExpr -- handles (), (e), (e,e,..), (+)
     parseArg =
-            try pUni
-        <|> try pTupE
-        <|> try (parens pExpr)
-        <|> try pParenOpVar
+            try pParenExpr -- handles (), (e), (e,e,..), (+)
         <|> try pSetter
         <|> try pGetter
         <|> try pStrE

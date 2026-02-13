@@ -36,7 +36,7 @@ typecheck = mapM run
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let g0 = Gamma {gammaCounter = 0, gammaContext = []}
+      let g0 = Gamma {gammaCounter = 0, gammaContext = [], gammaSolved = Map.empty}
       (g1, _, e1) <- synthG g0 e0
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g1:"
@@ -544,31 +544,50 @@ etaExpandSynthE ::
     , TypeU
     , ExprS (Indexed TypeU) ManyPoly Int
     )
-etaExpandSynthE i g1 funType0 funExpr0 f xs0 = do
-  -- eta expand
-  mayExpanded <- etaExpand g1 f xs0 funType0
+etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
+  let normalType = normalizeType funType0
+      numArgs = length xs0
 
-  case mayExpanded of
-    -- If the term was eta-expanded, retypecheck it
-    (Just (g', x')) -> synthE' i g' x'
-    -- Otherwise proceed
-    Nothing -> do
-      -- extend the function type with the type of the expressions it is applied to
-      (g2, funType1, inputExprs) <- application' i g1 xs0 (normalizeType funType0)
+  -- Check for arity errors before proceeding
+  case normalType of
+    FunU (length -> numParams) _ | numArgs > numParams ->
+      throwTypeError i $ "Invalid function application of type:\n  " <> prettyTypeU funType0
+    _ -> return ()
 
-      MM.sayVVV $
-        "  funType1:" <+> pretty funType1
-          <> "\n  inputExprs:" <+> list (map pretty inputExprs)
+  -- Process available args through application (no re-synthesis)
+  (g2, funType1, inputExprs) <- application' i g1 xs0 normalType
 
-      -- determine the type after application
-      appliedType <- case funType1 of
-        (FunU ts t) -> case drop (length inputExprs) ts of
-          [] -> return t -- full application
-          rs -> return $ FunU rs t -- partial application
-        _ -> error "impossible"
+  MM.sayVVV $
+    "  funType1:" <+> pretty funType1
+      <> "\n  inputExprs:" <+> list (map pretty inputExprs)
 
-      -- put the AppS back together with the synthesized function and input expressions
-      return (g2, apply g2 appliedType, AppS (applyGen g2 funExpr0) inputExprs)
+  case funType1 of
+    FunU ts t -> case drop numArgs ts of
+      -- full application
+      [] -> return (g2, apply g2 t, AppS funExpr0 inputExprs)
+      -- partial application: eta-expand without re-synthesis
+      remainingParams -> do
+        (g3, newVarsWithTypes) <- statefulMapM (\g' tp -> do
+          let (g'', v) = evarname g' "v"
+          return (g'', (v, apply g2 tp))) g2 remainingParams
+
+        let newVars = map fst newVarsWithTypes
+            newTypes = map snd newVarsWithTypes
+            g4 = g3 ++> zipWith AnnG newVars newTypes
+
+        -- Create typed variable references for the new params
+        newVarExprs <- mapM (\(v, tp) -> do
+          idx <- MM.getCounterWithPos i
+          return $ AnnoS (Idx idx tp) idx (BndS v)) newVarsWithTypes
+
+        -- Build the application and lambda directly
+        appIdx <- MM.getCounterWithPos i
+        let retType = apply g4 t
+            bodyExpr = AppS funExpr0 (inputExprs ++ newVarExprs)
+            bodyAnno = AnnoS (Idx appIdx retType) appIdx bodyExpr
+            fullType = FunU newTypes retType
+        return (g4, fullType, LamS newVars bodyAnno)
+    _ -> error "impossible"
 
 etaExpand ::
   Gamma ->
@@ -643,10 +662,9 @@ application ::
 --  g1 |- A->C o e =>> C -| g2
 application i g0 es0 (FunU as0 b0) = do
   (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
-  let es2 = map (applyGen g1) es1
-      funType = apply g1 $ FunU (as1 <> remainder) b0
+  let funType = apply g1 $ FunU (as1 <> remainder) b0
   insetSay $ "remainder:" <+> vsep (map pretty remainder)
-  return (g1, funType, es2)
+  return (g1, funType, es1)
 
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
 -- ----------------------------------------- Forall App
@@ -664,9 +682,9 @@ application i g0 es (ExistU v@(TV s) ([], _) _) =
           eas = [ExistU v' ([], Open) ([], Open) | v' <- veas]
           ea = ExistU vea ([], Open) ([], Open)
           f = FunU eas ea
-          g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
+          g3 = cacheSolved v f $ g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
       (g4, _, es', _) <- zipCheck i g3 es eas
-      return (g4, apply g4 f, map (applyGen g4) es')
+      return (g4, apply g4 f, es')
     -- if the variable has already been solved, use solved value
     Nothing -> case lookupU v g0 of
       (Just (FunU ts t)) -> do

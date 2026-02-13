@@ -174,6 +174,7 @@ data GammaIndex
 data Gamma = Gamma
   { gammaCounter :: Int
   , gammaContext :: [GammaIndex]
+  , gammaSolved :: Map TVar TypeU
   }
 
 ---- Data files and system

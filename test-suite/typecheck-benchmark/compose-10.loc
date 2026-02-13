@@ -1,0 +1,8 @@
+module m (foo)
+
+import root ((.))
+
+id_ :: Int -> Int
+id_ x = x
+
+foo = id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_

@@ -127,10 +127,10 @@ closeExistentials = f
 
 assertSubtypeGamma :: String -> [GammaIndex] -> TypeU -> TypeU -> [GammaIndex] -> TestTree
 assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do
-  let g0 = Gamma {gammaCounter = 0, gammaContext = gs1}
+  let g0 = Gamma {gammaCounter = 0, gammaContext = gs1, gammaSolved = Map.empty}
   case MTI.subtype Map.empty a b g0 of
     Left e -> error $ show e
-    Right (Gamma _ gs2') -> assertEqual "" gs2 gs2'
+    Right (Gamma _ gs2' _) -> assertEqual "" gs2 gs2'
 
 exprTestBad :: String -> MT.Text -> TestTree
 exprTestBad msg code =

@@ -1,0 +1,11 @@
+module m (foo)
+
+import root ((.))
+
+add :: Int -> Int -> Int
+add x y = x
+
+inc :: Int -> Int
+inc = add 1
+
+foo = inc . inc . inc . inc . inc . inc . inc . inc . inc . inc . inc . inc . inc . inc . inc . inc . inc . inc . inc . inc

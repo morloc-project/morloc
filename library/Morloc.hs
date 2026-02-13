@@ -39,14 +39,9 @@ typecheckFrontend ::
   Code ->
   MorlocMonad [AnnoS (Indexed TypeU) Many Int]
 typecheckFrontend path code =
-  -- Maybe Path -> Text -> [Module]
-  -- parse code into unannotated modules
   F.parse path code
-    -- resolve type aliases and such
     >>= restructure
-    -- convert to Sanno
     >>= treeify
-    -- add type annotations to sub-expressions and raise type errors
     >>= F.typecheck
 
 -- | Check general types and also resolve implementations

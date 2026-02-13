@@ -470,6 +470,7 @@ reservedOperators :: [Text]
 reservedOperators =
   [ "="
   , ":"
+  , "::"
   ]
 
 operatorChars :: String

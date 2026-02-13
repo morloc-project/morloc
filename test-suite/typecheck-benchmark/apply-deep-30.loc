@@ -1,0 +1,7 @@
+module m (foo)
+
+f :: Int -> Int
+f x = x
+
+foo :: Int -> Int
+foo x = f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f x)))))))))))))))))))))))))))))
