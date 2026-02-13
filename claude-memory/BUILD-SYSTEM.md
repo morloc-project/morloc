@@ -32,25 +32,25 @@ Morloc generates multi-language executables: a C **nexus** orchestrator and lang
                               ↓
               ┌───────────────┴───────────────┐
               ↓                               ↓
-         Script{nexus}                  Script{pools}
+         Script{manifest}              Script{pools}
               ↓                               ↓
-    scriptCode: AnchoredDirTree          scriptCode: Files
-    scriptMake: [SysCommand]             scriptMake: [gcc/g++/copy]
+    scriptCode: .manifest file          scriptCode: Files
+    scriptMake: [cp nexus, chmod]       scriptMake: [g++/copy]
               ↓                               ↓
-       Write files + Compile            Write files + Compile
+    Write manifest + copy binary       Write files + Compile
               ↓                               ↓
-         nexus (C binary)               pool binaries/scripts
+    nexus binary + .manifest           pool binaries/scripts
 ```
 
 ## Key Files
 
 - `library/Morloc/ProgramBuilder/Build.hs` - Writes files, runs compilers
 - `library/Morloc/CodeGenerator/Generate.hs` - Orchestrates code generation
-- `library/Morloc/CodeGenerator/Nexus.hs` - Generates nexus.c
+- `library/Morloc/CodeGenerator/Nexus.hs` - Generates JSON manifest
 - `library/Morloc/CodeGenerator/Grammars/Translator/Cpp.hs` - Generates pool.cpp
 - `library/Morloc/CodeGenerator/Grammars/Translator/Python3.hs` - Generates pool.py
 - `library/Morloc/CodeGenerator/Grammars/Translator/R.hs` - Generates pool.R
-- `library/Morloc/CodeGenerator/SystemConfig.hs` - `morloc init` setup
+- `library/Morloc/CodeGenerator/SystemConfig.hs` - `morloc init` setup (compiles nexus + libmorloc)
 
 ## Script Data Structure
 
@@ -73,18 +73,20 @@ data SysCommand
 ## Directory Structure
 
 **~/.local/share/morloc/**:
-- `include/` - morloc.h, cppmorloc.hpp, xxhash.h, mlccpptypes/
-- `lib/` - libmorloc.so, libpymorloc.so, librmorloc.so
+- `bin/` - morloc-nexus (pre-compiled static nexus binary)
+- `include/` - morloc.h, cppmorloc.hpp, morloc_pch.hpp, mlccpptypes/
+- `lib/` - libmorloc.so, libcppmorloc.a, libpymorloc.so, librmorloc.so
 - `opt/` - pymorloc.c, setup.py, Makefile (build artifacts)
 - `tmp/` - Temporary compilation files
 - `src/morloc/plane/` - Installed modules
 - `.build-config.yaml` - SLURM support flag
 
 **Working directory** (after `morloc make -o foo script.loc`):
-- `nexus` - C orchestrator executable
-- `pool-py` - Python pool script
-- `pool` - C++ pool executable
-- `pool.cpp` - C++ source (if kept)
+- `foo` - Copy of morloc-nexus binary
+- `foo.manifest` - JSON manifest (commands, pools, schemas)
+- `pool.py` - Python pool script
+- `pool-cpp.out` - C++ pool executable
+- `pool.cpp` - C++ source
 
 **Runtime** (`/tmp/morloc.XXXXXX/`):
 - `pipe-py`, `pipe-cpp`, `pipe-r` - Unix domain sockets
@@ -109,14 +111,14 @@ format template "// <<<BREAK>>>" [generated0, generated1, ...]
 
 ## Compilation Commands
 
-**Nexus** (`Nexus.hs:117`):
+**Nexus** (compiled once during `morloc init` in `SystemConfig.hs`):
 ```bash
-gcc -o nexus -O -I~/.local/share/morloc/include nexus.c
+gcc -O2 -I~/.local/share/morloc/include -o morloc-nexus nexus.c -L<libDir> -Wl,-rpath,<libDir> -lmorloc -lpthread
 ```
 
-**C++ Pool** (`Cpp.hs:244`):
+**C++ Pool** (`Cpp.hs`):
 ```bash
-g++ -O3 --std=c++17 -o pool pool.cpp [flags] -I[includes]
+g++ -O2 --std=c++17 -o pool-cpp.out pool.cpp [flags] -I[includes] -L[libdir] -lmorloc -lcppmorloc -lpthread
 ```
 
 **Python Pool**: No compilation, copied with executable bit

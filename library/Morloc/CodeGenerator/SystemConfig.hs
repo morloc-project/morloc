@@ -104,6 +104,17 @@ configureAllSteps verbose force slurmSupport config = do
   say "Installing morloc.h"
   TIO.writeFile (includeDir </> "morloc.h") DF.libmorlocHeader
 
+  -- Compile static nexus binary
+  say "Compiling morloc-nexus"
+  let binDir = homeDir </> "bin"
+      nexusSrcPath = buildDir </> "nexus.c"
+      nexusBinPath = binDir </> "morloc-nexus"
+  createDirectoryIfMissing True binDir
+  TIO.writeFile nexusSrcPath (DF.embededFileText DF.nexusSource)
+  run "gcc" ["-O2", "-I" <> includeDir, "-o", nexusBinPath, nexusSrcPath,
+             "-L" <> libDir, "-Wl,-rpath," <> libDir, "-lmorloc", "-lpthread"]
+  removeFile nexusSrcPath
+
   say "Configuring C++ morloc api header"
   TIO.writeFile (includeDir </> DF.embededFileName DF.libcpplang) (DF.embededFileText DF.libcpplang)
 

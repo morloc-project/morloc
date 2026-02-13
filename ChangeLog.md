@@ -18,8 +18,24 @@
 
 0.61.0 [2026-02-xx]
 -------------------
- * better error messages
+ * cleaner error messages
+ * error message localization
  * clean `morloc typecheck` output
+
+Bug fixes
+ * cleaned up memory issues in all C code
+ * replaced mcparallel in R with forked pool of workers
+
+Testing
+ * added stress test for zombies and memory issues
+
+Performance
+ * Split the monolithic (~7000 line) morloc.h file
+ * Use a libmorloc.so shared library rather than importing all as header
+ * Removed all the zombie swarms that where killing heavy morloc projects
+
+Language onboarding
+ * Added codegen IR that greatly simplifies new language addition
 
 0.60.0 [2026-02-07]
 -------------------

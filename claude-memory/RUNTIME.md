@@ -17,19 +17,22 @@ User calls ./nexus foo --arg=42
 
 ## Nexus (C Orchestrator)
 
-**Template:** `data/nexus.c`
+**Source:** `data/nexus.c` (static program, compiled once during `morloc init`)
+**Binary:** `~/.local/share/morloc/bin/morloc-nexus`
+**Manifest reader:** `data/morloc/manifest.h` + `data/morloc/manifest.c`
 
 **Responsibilities:**
-- Parse command-line arguments (auto-generated from docstrings)
+- Load JSON manifest from `argv[0] + ".manifest"` at startup
+- Parse command-line arguments (data-driven from manifest)
 - Dispatch function calls to appropriate language pools
 - Serialize/deserialize data via msgpack
 - Manage pool processes (spawn, communicate, terminate)
 
-**Generated Sections:**
-- Argument parser (from function docstrings)
-- Dispatch table (maps function names to pool IDs)
-- Serialization calls (type-specific)
-- Main function (CLI entry point)
+**Manifest contents (per-program JSON):**
+- Pool definitions (language, exec args, socket names)
+- Command definitions (name, type, mid, pool index, arg schemas)
+- Argument metadata (positional, optional, flag, group)
+- Pure expression trees (for commands without pool dispatch)
 
 ## Language Pools
 
@@ -92,12 +95,15 @@ User calls ./nexus foo --arg=42
 
 ## Initialization
 
-`morloc init` builds language bindings:
-1. Compiles `pymorloc.c` → Python C extension
-2. Copies `cppmorloc.hpp` to morloc home
-3. Compiles `rmorloc.c` → R shared library
+`morloc init` builds runtime components:
+1. Compiles `libmorloc.so` (C runtime library)
+2. Compiles `morloc-nexus` static binary → `~/.local/share/morloc/bin/`
+3. Compiles `libcppmorloc.a` and precompiled header
+4. Compiles `pymorloc.c` → Python C extension
+5. Copies `cppmorloc.hpp` to morloc home
+6. Compiles `rmorloc.c` → R shared library
 
-Location: `~/.local/share/morloc/lib/`
+Location: `~/.local/share/morloc/lib/` and `~/.local/share/morloc/bin/`
 
 ## CLI Generation
 

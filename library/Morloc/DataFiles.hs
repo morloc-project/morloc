@@ -12,7 +12,7 @@ module Morloc.DataFiles
   ( EmbededFile (..)
   , libmorlocFiles
   , libmorlocHeader
-  , nexusTemplate
+  , nexusSource
   , poolTemplate
   , libcpplang
   , libcpplangImpl
@@ -66,6 +66,8 @@ libmorlocFiles =
   , EmbededFile "shm.c"        (decodeUtf8 $(embedFileRelative "data/morloc/shm.c"))
   , EmbededFile "slurm.c"      (decodeUtf8 $(embedFileRelative "data/morloc/slurm.c"))
   , EmbededFile "utility.c"    (decodeUtf8 $(embedFileRelative "data/morloc/utility.c"))
+  , EmbededFile "manifest.h"  (decodeUtf8 $(embedFileRelative "data/morloc/manifest.h"))
+  , EmbededFile "manifest.c"  (decodeUtf8 $(embedFileRelative "data/morloc/manifest.c"))
   ]
 
 -- | Produce a single self-contained morloc.h by recursively inlining local includes
@@ -94,9 +96,9 @@ inlineIncludes fileMap seen content = T.unlines $ concatMap processLine (T.lines
           Nothing -> Nothing
         Nothing -> Nothing
 
--- The nexus template
-nexusTemplate :: EmbededFile
-nexusTemplate = EmbededFile "nexus.c" (decodeUtf8 $ $(embedFileRelative "data/nexus.c"))
+-- The static nexus source (compiled once during morloc init)
+nexusSource :: EmbededFile
+nexusSource = EmbededFile "nexus.c" (decodeUtf8 $ $(embedFileRelative "data/nexus.c"))
 
 -- Pool templates for all supported languages
 poolTemplate :: Lang -> EmbededFile

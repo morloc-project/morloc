@@ -33,7 +33,7 @@ See [[TYPECHECKING.md]] for details.
 - **Realize.hs** - Reality checking (validates implementations exist)
 - **LambdaEval.hs** - Lambda evaluation and application
 - **Docstrings.hs** - Processes docstrings for CLI generation
-- **Nexus.hs** - Generates C nexus orchestrator
+- **Nexus.hs** - Generates JSON manifest for the static nexus binary
 - **Serial.hs** - Cross-language serialization (msgpack)
 - **Grammars/Translator/** - Language-specific code translators (Python, C++, R)
 
@@ -50,9 +50,9 @@ See [[SYSGEN.md]] for details.
 .loc files
   → Frontend: parse, link, typecheck
   → TypeU (general types) resolved to Type (language-specific)
-  → Code Generator: realize, generate nexus + pools
-  → Program Builder: write files, compile C/C++, link
-  → Executable (nexus + pools)
+  → Code Generator: realize, generate manifest + pools
+  → Program Builder: write files, copy nexus binary, compile C++ pools
+  → Executable (nexus binary + .manifest + pools)
 ```
 
 ## Major Components
@@ -61,7 +61,7 @@ See [[SYSGEN.md]] for details.
 |-----------|---------|-----------|
 | Frontend | Parsing, type checking | Parser.hs, Typecheck.hs |
 | Type System | Type inference, resolution | TypeEval.hs, Typecheck/Internal.hs |
-| Code Generator | Generate nexus + pools | Generate.hs, Nexus.hs, Serial.hs |
+| Code Generator | Generate manifest + pools | Generate.hs, Nexus.hs, Serial.hs |
 | Runtime | Execute across languages | nexus.c, pool.py, pool.cpp, pool.R |
 | Module System | Load and resolve modules | Module.hs, Link.hs |
 
@@ -83,7 +83,8 @@ See [[DATA-STRUCTURES.md]] for details.
 ## Runtime Architecture
 
 Generated programs consist of:
-- **Nexus** (C) - Orchestrator that dispatches function calls
+- **Nexus** (C) - Pre-compiled static binary (built during `morloc init`) that reads a JSON manifest for dispatch
+- **Manifest** (JSON) - Per-program file describing commands, pools, argument schemas, and pure expressions
 - **Pools** (Python/C++/R) - Language-specific implementations
 - **Message passing** - Msgpack serialization between nexus and pools
 

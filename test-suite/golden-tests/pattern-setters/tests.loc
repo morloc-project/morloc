@@ -37,21 +37,21 @@ defaultWorker =
 test = -- map .(.1 = 9) [(1,2), (2,3)]
   [
     -- getters
-    eq (.(.1 = "Sally") (42, "Jim"))
+    (==) (.(.1 = "Sally") (42, "Jim"))
        (42, "Sally")
-  , eq (.1.(.0 = "Sally", .2 = 70) (42, ("Jim", True, 69)))
+  , (==) (.1.(.0 = "Sally", .2 = 70) (42, ("Jim", True, 69)))
        (42, ("Sally", True, 70))
-  , eq (map .(.1 = 9) [(1,2), (2,3)])
+  , (==) (map .(.1 = 9) [(1,2), (2,3)])
        [(1,9), (2,9)]
-  , eq (.latitude defaultLocation)
+  , (==) (.latitude defaultLocation)
        (42.03 :: Real)
-  , eq (.(.age, .job.1.altitude, .age) defaultWorker)
+  , (==) (.(.age, .job.1.altitude, .age) defaultWorker)
        (12, 942.0, 12)
     -- setters
-  , eq (.latitude ((.latitude = 0.7) defaultLocation)) 0.7
-  , eq (.(.latitude, .longitude) (.(.latitude = 0.7, .longitude = -100.0) defaultLocation))
+  , (==) (.latitude ((.latitude = 0.7) defaultLocation)) 0.7
+  , (==) (.(.latitude, .longitude) (.(.latitude = 0.7, .longitude = -100.0) defaultLocation))
        ( 0.7, -100.0 )
-  , eq (   .(.home.altitude,         .job.1.altitude)
+  , (==) (   .(.home.altitude,         .job.1.altitude)
          ( .(.home.altitude = 936.0, .job.1.altitude = 666.0) defaultWorker ))
        (936.0, 666.0)
   ]

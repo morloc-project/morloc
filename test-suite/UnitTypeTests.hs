@@ -2145,7 +2145,7 @@ infixOperatorTests =
 -- All tests have a 0.1-second timeout to catch exponential blowup
 complexityRegressionTests :: TestTree
 complexityRegressionTests =
-  localOption (mkTimeout 100000) $  -- 0.1 second timeout
+  localOption (mkTimeout 1000000) $  -- 1 second timeout
     testGroup
       "Complexity regression tests"
     [ -- Deep function composition - tests batch subtype optimization

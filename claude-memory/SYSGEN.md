@@ -2,16 +2,16 @@
 
 ## Overview
 
-The program builder writes generated code to disk and invokes compilers to create the final executable.
+The program builder writes generated code to disk and invokes compilers to create the final executable. The nexus binary is pre-compiled during `morloc init`; `morloc make` only writes a JSON manifest and copies the binary.
 
 ## Build.hs
 
 Located in `library/Morloc/ProgramBuilder/Build.hs`
 
 **Responsibilities:**
-- Write generated nexus.c to disk
-- Write pool files (pool_py_0.py, pool_cpp_1.cpp, pool_r_2.R)
-- Invoke C compiler for nexus
+- Write manifest JSON file to disk
+- Copy pre-compiled nexus binary to output path
+- Write pool files (pool.py, pool.cpp, pool.R)
 - Invoke C++ compiler for C++ pools
 - Copy Python and R pools to output directory
 - Set executable permissions
@@ -20,16 +20,14 @@ Located in `library/Morloc/ProgramBuilder/Build.hs`
 
 ```
 Code Generator output
-  → Write nexus.c
+  → Write <name>.manifest (JSON)
+  → Copy morloc-nexus binary to <name>
   → Write pool files for each language
-  → Compile nexus.c with gcc/clang
-    - Link with msgpack library
-    - Link with morloc runtime
   → Compile C++ pools with g++/clang++
-    - Link with cppmorloc.hpp
+    - Link with libcppmorloc.a and libmorloc.so
   → Copy Python pools (no compilation)
   → Copy R pools (no compilation)
-  → Result: executable nexus + pool files
+  → Result: nexus binary + manifest + pool files
 ```
 
 ## Output Structure
@@ -37,24 +35,20 @@ Code Generator output
 After `morloc make -o foo script.loc`:
 
 ```
-foo/              (or current directory if -o not specified)
-  nexus           (C executable)
-  pool_py_0.py    (Python pool)
-  pool_cpp_1.cpp  (C++ source, if needed)
-  pool_cpp_1      (C++ executable, if compiled)
-  pool_r_2.R      (R pool)
+./
+  foo               (copy of ~/.local/share/morloc/bin/morloc-nexus)
+  foo.manifest      (JSON manifest with commands, pools, schemas)
+  pool.py           (Python pool script, if needed)
+  pool.cpp          (C++ source)
+  pool-cpp.out      (C++ executable, if compiled)
+  pool.R            (R pool script, if needed)
 ```
 
 ## Compiler Invocation
 
-**Nexus (C):**
-```bash
-gcc nexus.c -o nexus -lmsgpackc -I$MORLOC_HOME/include
-```
-
 **C++ Pool:**
 ```bash
-g++ pool_cpp_1.cpp -o pool_cpp_1 -I$MORLOC_HOME/include
+g++ -O2 --std=c++17 -o pool-cpp.out pool.cpp [flags] -I[includes] -L[libdir] -lmorloc -lcppmorloc -lpthread
 ```
 
 **Python Pool:** No compilation (interpreted)
@@ -64,8 +58,8 @@ g++ pool_cpp_1.cpp -o pool_cpp_1 -I$MORLOC_HOME/include
 ## Dependencies
 
 **Required:**
-- C compiler (gcc or clang)
-- msgpack C library
+- C compiler (gcc or clang) -- for `morloc init` only
+- libmorloc.so (built during `morloc init`)
 
 **Optional (if using those languages):**
 - C++ compiler (g++ or clang++)
@@ -77,7 +71,6 @@ g++ pool_cpp_1.cpp -o pool_cpp_1 -I$MORLOC_HOME/include
 Build.hs handles:
 - Missing compilers (reports helpful error)
 - Compilation failures (shows compiler output)
-- Missing msgpack library
 - Permission issues
 
 ---

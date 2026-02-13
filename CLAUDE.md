@@ -6,7 +6,7 @@ For details, follow links like [[path/to/file]]. Ask before writing to doc files
 
 ## Project Overview
 
-Morloc is a multi-lingual typed workflow language enabling function composition across Python, C++, and R under a unified type system. The compiler parses `.loc` files, performs type checking, and generates a C nexus executable that orchestrates cross-language calls via msgpack serialization.
+Morloc is a multi-lingual typed workflow language enabling function composition across Python, C++, and R under a unified type system. The compiler parses `.loc` files, performs type checking, and generates a JSON manifest and language-specific pools. A pre-compiled static nexus binary (built once during `morloc init`) reads the manifest at runtime to orchestrate cross-language calls via msgpack serialization.
 
 ## Haskell Coding Style
 - comments should be sparse and succinct
@@ -33,7 +33,7 @@ Use the . and $ operators as in Haskell
 
 ```bash
 # Build compiler
-stack build && stack install
+stack install --no-run-tests 
 
 # Initialize environment (REQUIRED before tests)
 morloc init -f
@@ -101,3 +101,4 @@ stack test --test-arguments="--pattern='native-morloc'"
 - Build tool: Stack
 - Module naming: `Morloc.CodeGenerator.Generate`
 - Morloc syntax: Functional, ML-style
+- **ASCII only** in all source files (C, C++, Haskell, Python, R, templates). No Unicode characters (em-dashes, smart quotes, etc). Non-ASCII in Template Haskell-embedded files causes silent truncation under POSIX locale.

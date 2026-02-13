@@ -36,6 +36,7 @@
 #include "call.h"
 #include "slurm.h"
 #include "utility.h"
+#include "manifest.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -172,6 +173,11 @@ uint8_t* remote_call(
 
 // xxhash wrapper - avoids exposing xxhash.h in public header
 uint64_t morloc_xxh64(const void* input, size_t length, uint64_t seed);
+
+// manifest reader
+manifest_t* read_manifest(const char* path, ERRMSG);
+void free_manifest(manifest_t* manifest);
+morloc_expression_t* build_manifest_expr(const char* json_str, ERRMSG);
 
 #ifdef __cplusplus
 }

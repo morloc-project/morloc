@@ -2,23 +2,22 @@
 
 ## Current Implementation
 
-### Nexus Compilation
-**File**: `library/Morloc/CodeGenerator/Nexus.hs:110-119`
+### Nexus Compilation (during `morloc init`)
+**File**: `library/Morloc/CodeGenerator/SystemConfig.hs`
+
+The nexus is compiled once during `morloc init`, not per-program. `Nexus.hs` now emits a JSON manifest and copies the pre-compiled binary:
 
 ```haskell
-return $
-  Script
-    { scriptBase = nexusfile
-    , scriptLang = ML.CLang
-    , scriptCode = "." :/ File nexusfile (Code . render $ mainDoc)
-    , scriptMake =
-        [ SysRun . Code $
-            "gcc -o " <> MT.pack outfile <> " -O -I" <> MT.pack includeDir <> " " <> MT.pack nexusfile
-        ]
-    }
+return $ Script
+  { scriptBase = manifestFile
+  , scriptLang = ML.CLang
+  , scriptCode = "." :/ File manifestFile (Code manifestJson)
+  , scriptMake = [ SysRun . Code $ "cp " <> nexusBin <> " " <> outfile
+                 , SysExe outfile ]
+  }
 ```
 
-**Command**: `gcc -o nexus -O -I~/.local/share/morloc/include nexus.c`
+**Init command**: `gcc -O2 -I<includeDir> -o morloc-nexus nexus.c -L<libDir> -Wl,-rpath,<libDir> -lmorloc -lpthread`
 
 ### C++ Pool Compilation
 **File**: `library/Morloc/CodeGenerator/Grammars/Translator/Cpp.hs:231-247`
@@ -137,17 +136,9 @@ data Config = Config
   }
 ```
 
-### Update Nexus.hs to Use Config
+### Update SystemConfig.hs to Use Config
 
-```haskell
--- OLD
-"gcc -o " <> outfile <> " -O -I" <> includeDir <> " " <> nexusfile
-
--- NEW
-config <- MM.ask
-let cc = MT.pack (MC.configCCompiler config)
-let cmd = cc <> " -o " <> outfile <> " -O -I" <> includeDir <> " " <> nexusfile
-```
+Nexus.hs no longer invokes compilers (it just writes JSON). Compiler detection would apply to `SystemConfig.hs` (for `morloc init`) and `Cpp.hs` (for C++ pool compilation).
 
 ### Update Cpp.hs to Use Config
 

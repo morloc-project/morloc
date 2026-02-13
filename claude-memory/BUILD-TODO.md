@@ -3,13 +3,14 @@
 ## Critical Issues
 
 ### 1. Compiler Hardcoding
-**Location**: `Nexus.hs:117`, `Cpp.hs:244`, `SystemConfig.hs:105`
+**Location**: `Cpp.hs`, `SystemConfig.hs`
 
 **Problem**:
 - Hardcoded `gcc` and `g++` with no fallback
 - No clang support
 - No compiler version detection
 - No cross-platform support (Windows, BSD)
+- Note: nexus is now compiled during `morloc init` (not per-program), so gcc is only needed at init time
 
 **Impact**: Fails if gcc/g++ not in PATH
 

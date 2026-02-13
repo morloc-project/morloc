@@ -2,7 +2,7 @@
 
 ## Overview
 
-Code generation transforms type-checked morloc expressions into a C nexus executable and language-specific pool files (Python, C++, R).
+Code generation transforms type-checked morloc expressions into a JSON manifest (for the pre-compiled nexus binary) and language-specific pool files (Python, C++, R).
 
 ## Pipeline
 
@@ -28,10 +28,10 @@ Located in `library/Morloc/CodeGenerator/`:
    - Generates command-line argument parsers
    - Creates help text
 
-5. **Nexus.hs** - Nexus generation
-   - Generates C orchestrator code
-   - Creates dispatch tables
-   - Manages inter-pool communication
+5. **Nexus.hs** - Manifest generation
+   - Serializes command metadata to JSON manifest
+   - Encodes pool info, argument schemas, dispatch tables, pure expression trees
+   - The pre-compiled nexus binary (from `morloc init`) reads this manifest at runtime
 
 6. **Serial.hs** - Serialization
    - Handles msgpack serialization/deserialization
@@ -79,13 +79,16 @@ The `LowerConfig` record (~30 fields) parameterizes all language-specific behavi
 
 ## Generated Output
 
-**Nexus** (`nexus.c`)
-- C executable that orchestrates execution
-- CLI argument parsing (from docstrings)
-- Function dispatch to appropriate pools
-- Msgpack serialization/deserialization
+**Manifest** (`<name>.manifest`)
+- JSON file describing commands, pools, argument schemas, pure expressions
+- Read at startup by the pre-compiled nexus binary
 
-**Pools** (e.g., `pool_py_0.py`, `pool_cpp_1.cpp`, `pool_r_2.R`)
+**Nexus** (copy of `~/.local/share/morloc/bin/morloc-nexus`)
+- Static C binary compiled once during `morloc init`
+- Data-driven CLI parsing, dispatch, and help from manifest
+- Copied per-program by `morloc make`
+
+**Pools** (e.g., `pool.py`, `pool.cpp`, `pool.R`)
 - Language-specific implementations
 - Receive msgpack messages from nexus
 - Execute native functions
@@ -99,9 +102,9 @@ Type-checked AST
   → LambdaEval: evaluate lambdas
   → Docstrings: extract CLI info
   → Generate pools for each language
-  → Generate nexus orchestrator
+  → Generate JSON manifest (Nexus.hs)
   → Serial: add serialization code
-  → Output: write .c, .py, .cpp, .R files
+  → Output: write .manifest, .py, .cpp, .R files + copy nexus binary
 ```
 
 ## Key Data Flow

@@ -2,8 +2,8 @@ module foo (test)
 
 import root-py
 
-test = fold and True
-  [ eq (map (sub _ 1) [1,2,3]) [0,1,2]
-  , eq ((sub _ 1) 8) 7
-  , eq ((sub _ _) 8 1) 7
+test = fold (&&) True
+  [ (==) (map ((-) _ 1) [1,2,3]) [0,1,2]
+  , (==) (((-) _ 1) 8) 7
+  , (==) (((-) _ _) 8 1) 7
   ]

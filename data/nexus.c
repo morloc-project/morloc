@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +21,9 @@
 #define MAX_RETRIES 16
 
 #define MAX_DAEMONS 32
+
+// Max getopt options per command (opts + flags + group entries)
+#define MAX_OPTIONS 128
 
 #define ERROR(msg, ...) \
     fprintf(stderr, "Error (%s:%d in %s): " msg "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
@@ -87,8 +91,6 @@ void clean_exit(int exit_code){
     sigprocmask(SIG_BLOCK, &block_chld, &old_mask);
 
     // Send SIGTERM to all pool process groups
-    // Uses pgids[] (never modified by SIGCHLD handler) so this works even
-    // when the group leader has already been reaped (pids[i] == -1).
     for (size_t i = 0; i < MAX_DAEMONS; i++) {
         if (pgids[i] > 0) {
             kill(-pgids[i], SIGTERM);
@@ -96,8 +98,6 @@ void clean_exit(int exit_code){
     }
 
     // Wait for process groups to exit (up to 500ms per group, then SIGKILL)
-    // Must reap zombies with waitpid() inside the loop because kill(-pgid, 0)
-    // returns 0 for zombies (they still exist in the process table).
     for (size_t i = 0; i < MAX_DAEMONS; i++) {
         if (pgids[i] <= 0) continue;
 
@@ -324,13 +324,6 @@ void start_daemons(morloc_socket_t** all_sockets){
 
                 retry_time *= RETRY_MULTIPLIER;
 
-                // Increase the ping timeout
-                //
-                // An infinite timeout, of course, would hang on unresponsive
-                // daemons. But if the timeout is too short, the daemon may not have
-                // time to respond. And response time decreases when the system is
-                // under heavy load, which in the past caused non-deterministic
-                // freezes.
                 ping_timeout = 2 * ping_timeout;
                 continue;
             }
@@ -390,11 +383,7 @@ void run_pure_command(
     char* errmsg = NULL;
 
     size_t nargs = 0;
-    // args are the remaining char pointers from argv, these are guaranteed to
-    // end with a NULL pointer
     for(; args[nargs] != NULL; nargs++){
-        // assert that there are an appropriate number of schemas
-        // mismatch implies an input mistake on the users side
         if(arg_schema_strs == NULL){
           ERROR("Too many arguments provided");
         }
@@ -524,7 +513,6 @@ end:
     if(schema != NULL){
         free_schema(schema);
     }
-    // schema_str points into result_packet, not a separate allocation
     if(mpk_data != NULL){
         free(mpk_data);
     }
@@ -545,32 +533,520 @@ end:
 }
 
 
-void usage(){
-    // AUTO general usage statement
-    // <<<BREAK>>>
-    // AUTO usage
+// ======================================================================
+// Manifest-driven socket setup
+// ======================================================================
+
+morloc_socket_t* setup_sockets(
+    const manifest_t* manifest,
+    const char* tmpdir_path,
+    const char* shm_basename
+){
+    morloc_socket_t* sockets = (morloc_socket_t*)calloc(manifest->n_pools, sizeof(morloc_socket_t));
+
+    for (size_t i = 0; i < manifest->n_pools; i++) {
+        manifest_pool_t* pool = &manifest->pools[i];
+        sockets[i].lang = strdup(pool->lang);
+
+        // Count exec args
+        size_t nexec = 0;
+        while (pool->exec[nexec]) nexec++;
+
+        // Build syscmd: exec_args... socket_path tmpdir shm_basename NULL
+        sockets[i].syscmd = (char**)calloc(nexec + 4, sizeof(char*));
+        for (size_t j = 0; j < nexec; j++) {
+            sockets[i].syscmd[j] = strdup(pool->exec[j]);
+        }
+
+        char buffer[256];
+        snprintf(buffer, sizeof(buffer), "%s/%s", tmpdir_path, pool->socket);
+        sockets[i].syscmd[nexec] = strdup(buffer);
+        sockets[i].syscmd[nexec + 1] = strdup(tmpdir_path);
+        sockets[i].syscmd[nexec + 2] = strdup(shm_basename);
+        sockets[i].syscmd[nexec + 3] = NULL;
+        sockets[i].socket_filename = strdup(buffer);
+    }
+
+    return sockets;
+}
+
+// ======================================================================
+// Manifest-driven help text
+// ======================================================================
+
+void print_usage(const manifest_t* manifest) {
+    fprintf(stderr, "Usage: ./nexus [OPTION...] COMMAND [ARG...]\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Nexus Options:\n");
+    fprintf(stderr, " -h, --help            Print this help message\n");
+    fprintf(stderr, " -o, --output-file     Print to this file instead of STDOUT\n");
+    fprintf(stderr, " -f, --output-format   Output format [json|mpk|voidstar]\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Exported commands (call with -h/--help for more info):\n");
+
+    // Find longest command name for alignment
+    size_t longest = 0;
+    for (size_t i = 0; i < manifest->n_commands; i++) {
+        size_t len = strlen(manifest->commands[i].name);
+        if (len > longest) longest = len;
+    }
+
+    for (size_t i = 0; i < manifest->n_commands; i++) {
+        manifest_command_t* cmd = &manifest->commands[i];
+        size_t namelen = strlen(cmd->name);
+        size_t padding = longest - namelen + 2;
+
+        fprintf(stderr, "  %s", cmd->name);
+        if (cmd->desc && cmd->desc[0]) {
+            for (size_t p = 0; p < padding; p++) fputc(' ', stderr);
+            fprintf(stderr, "%s", cmd->desc[0]);
+        }
+        fprintf(stderr, "\n");
+    }
     clean_exit(0);
 }
 
-// AUTO subcommand dispatchers
-// <<<BREAK>>>
-// AUTO subcommand dispatchers
+// Print help for a specific subcommand
+void print_command_help(const manifest_command_t* cmd) {
+    // Usage line
+    fprintf(stderr, "Usage: ./nexus %s", cmd->name);
+    // Check if there are non-positional args
+    bool has_opts = false;
+    for (size_t i = 0; i < cmd->n_args; i++) {
+        if (cmd->args[i].kind != MARG_POS) { has_opts = true; break; }
+    }
+    if (has_opts) fprintf(stderr, " [OPTION...]");
+    for (size_t i = 0; i < cmd->n_args; i++) {
+        if (cmd->args[i].kind == MARG_POS)
+            fprintf(stderr, " %s", cmd->args[i].metavar ? cmd->args[i].metavar : "ARG");
+    }
+    fprintf(stderr, "\n");
+
+    // Description
+    if (cmd->desc) {
+        for (size_t i = 0; cmd->desc[i]; i++) {
+            if (i == 0 && cmd->desc[i][0] == '\0') continue; // skip leading blank
+            fprintf(stderr, "%s\n", cmd->desc[i]);
+        }
+    }
+
+    // Positional arguments
+    bool has_pos = false;
+    for (size_t i = 0; i < cmd->n_args; i++) {
+        if (cmd->args[i].kind == MARG_POS) {
+            if (!has_pos) { fprintf(stderr, "\nPositional arguments:\n"); has_pos = true; }
+            manifest_arg_t* a = &cmd->args[i];
+            fprintf(stderr, "  %s", a->metavar ? a->metavar : "ARG");
+            if (a->desc && a->desc[0]) fprintf(stderr, "  %s", a->desc[0]);
+            fprintf(stderr, "\n");
+            if (a->type_desc) fprintf(stderr, "      type: %s\n", a->type_desc);
+        }
+    }
+
+    // Optional arguments
+    bool has_opt = false;
+    for (size_t i = 0; i < cmd->n_args; i++) {
+        manifest_arg_t* a = &cmd->args[i];
+        if (a->kind == MARG_OPT) {
+            if (!has_opt) { fprintf(stderr, "\nOptional arguments:\n"); has_opt = true; }
+            fprintf(stderr, "    ");
+            if (a->short_opt && a->long_opt) fprintf(stderr, "-%c, --%s %s", a->short_opt, a->long_opt, a->metavar);
+            else if (a->short_opt) fprintf(stderr, "-%c %s", a->short_opt, a->metavar);
+            else if (a->long_opt) fprintf(stderr, "--%s %s", a->long_opt, a->metavar);
+            fprintf(stderr, "\n");
+            if (a->desc) for (size_t d = 0; a->desc[d]; d++) fprintf(stderr, "        %s\n", a->desc[d]);
+            if (a->type_desc) fprintf(stderr, "        type: %s\n", a->type_desc);
+            if (a->default_val) fprintf(stderr, "        default: %s\n", a->default_val);
+        } else if (a->kind == MARG_FLAG) {
+            if (!has_opt) { fprintf(stderr, "\nOptional arguments:\n"); has_opt = true; }
+            fprintf(stderr, "    ");
+            if (a->short_opt && a->long_opt) fprintf(stderr, "-%c, --%s", a->short_opt, a->long_opt);
+            else if (a->short_opt) fprintf(stderr, "-%c", a->short_opt);
+            else if (a->long_opt) fprintf(stderr, "--%s", a->long_opt);
+            fprintf(stderr, "\n");
+            if (a->long_rev) fprintf(stderr, "    --%s\n", a->long_rev);
+            if (a->desc) for (size_t d = 0; a->desc[d]; d++) fprintf(stderr, "        %s\n", a->desc[d]);
+            if (a->default_val) fprintf(stderr, "        default: %s\n", a->default_val);
+        }
+    }
+
+    // Group arguments
+    for (size_t i = 0; i < cmd->n_args; i++) {
+        manifest_arg_t* a = &cmd->args[i];
+        if (a->kind == MARG_GRP) {
+            fprintf(stderr, "\nGroup arguments:\n");
+            fprintf(stderr, "  %s", a->metavar);
+            if (a->desc && a->desc[0]) fprintf(stderr, ": %s", a->desc[0]);
+            fprintf(stderr, "\n");
+            if (a->grp_long) {
+                fprintf(stderr, "    ");
+                if (a->grp_short) fprintf(stderr, "-%c, ", a->grp_short);
+                fprintf(stderr, "--%s %s\n", a->grp_long, a->metavar);
+            }
+            for (size_t e = 0; e < a->n_entries; e++) {
+                manifest_arg_t* ea = a->entries[e].arg;
+                fprintf(stderr, "    ");
+                if (ea->short_opt && ea->long_opt) {
+                    fprintf(stderr, "-%c, --%s", ea->short_opt, ea->long_opt);
+                    if (ea->kind == MARG_OPT && ea->metavar) fprintf(stderr, " %s", ea->metavar);
+                } else if (ea->long_opt) {
+                    fprintf(stderr, "--%s", ea->long_opt);
+                    if (ea->kind == MARG_OPT && ea->metavar) fprintf(stderr, " %s", ea->metavar);
+                }
+                fprintf(stderr, "\n");
+                if (ea->desc) for (size_t d = 0; ea->desc[d]; d++) fprintf(stderr, "        %s\n", ea->desc[d]);
+            }
+        }
+    }
+
+    // Return type
+    fprintf(stderr, "\nReturn: %s\n", cmd->return_type);
+    if (cmd->return_desc) {
+        for (size_t i = 0; cmd->return_desc[i]; i++)
+            fprintf(stderr, "  %s\n", cmd->return_desc[i]);
+    }
+    clean_exit(0);
+}
+
+// ======================================================================
+// Mapping structure for data-driven getopt
+// ======================================================================
+
+typedef struct {
+    int getopt_val;       // character or long-only int
+    size_t arg_idx;       // index into cmd->args
+    size_t entry_idx;     // for grp entries; SIZE_MAX for direct opt/flag
+    bool is_flag;         // if true, set flag_val instead of optarg
+    const char* flag_val; // value to assign for flags
+    bool is_grp_opt;      // if true, this is the group-level option
+} opt_mapping_t;
+
+// ======================================================================
+// Data-driven command dispatch
+// ======================================================================
+
+void dispatch_command(
+    int argc,
+    char* argv[],
+    const char* shm_basename,
+    config_t config,
+    manifest_t* manifest,
+    manifest_command_t* cmd,
+    morloc_socket_t* sockets
+){
+    // ---- Phase 1: Build getopt options and slot mapping ----
+
+    struct option long_options[MAX_OPTIONS];
+    opt_mapping_t mappings[MAX_OPTIONS];
+    char short_opts_buf[MAX_OPTIONS * 3]; // worst case: each short + ':'
+    size_t n_long = 0;
+    size_t n_map = 0;
+    int next_long_val = 257; // 256 reserved for OPT_HELP_VERBOSE
+    const int OPT_HELP_VERBOSE = 256;
+
+    // Pre-allocate user-value slots: one per opt/flag/grp_opt/grp_entry
+    // We'll index by mapping index
+    char* usr_vals[MAX_OPTIONS];
+    memset(usr_vals, 0, sizeof(usr_vals));
+
+    // Start building short options: 'h' for help
+    short_opts_buf[0] = 'h';
+    size_t short_idx = 1;
+
+    // Add --help long option
+    long_options[n_long++] = (struct option){"help", no_argument, 0, OPT_HELP_VERBOSE};
+
+    // Helper macro: add a mapping
+    #define ADD_MAP(gv, ai, ei, fl, fv, go) do { \
+        mappings[n_map].getopt_val = gv; \
+        mappings[n_map].arg_idx = ai; \
+        mappings[n_map].entry_idx = ei; \
+        mappings[n_map].is_flag = fl; \
+        mappings[n_map].flag_val = fv; \
+        mappings[n_map].is_grp_opt = go; \
+        n_map++; \
+    } while(0)
+
+    // Helper: register a single opt/flag arg
+    #define REG_OPT_FLAG(a, arg_i, ent_i) do { \
+        int gval = 0; \
+        bool is_flg = (a)->kind == MARG_FLAG; \
+        const char* fwd_val = NULL; \
+        const char* rev_val = NULL; \
+        if (is_flg && (a)->default_val) { \
+            fwd_val = (strcmp((a)->default_val, "true") == 0) ? "false" : "true"; \
+            rev_val = (strcmp((a)->default_val, "true") == 0) ? "true" : "false"; \
+        } \
+        if ((a)->short_opt) { \
+            gval = (a)->short_opt; \
+            short_opts_buf[short_idx++] = (a)->short_opt; \
+            if (!is_flg) short_opts_buf[short_idx++] = ':'; \
+        } else if ((a)->long_opt) { \
+            gval = next_long_val++; \
+        } \
+        if ((a)->long_opt) { \
+            long_options[n_long++] = (struct option){ \
+                (a)->long_opt, \
+                is_flg ? no_argument : required_argument, \
+                0, \
+                (a)->short_opt ? (int)(a)->short_opt : gval \
+            }; \
+            if (!(a)->short_opt) gval = gval; /* already set */ \
+        } \
+        ADD_MAP(gval, arg_i, ent_i, is_flg, fwd_val, false); \
+        if (is_flg && (a)->long_rev) { \
+            int rev_gval = next_long_val++; \
+            long_options[n_long++] = (struct option){(a)->long_rev, no_argument, 0, rev_gval}; \
+            ADD_MAP(rev_gval, arg_i, ent_i, true, rev_val, false); \
+        } \
+    } while(0)
+
+    for (size_t i = 0; i < cmd->n_args; i++) {
+        manifest_arg_t* a = &cmd->args[i];
+        if (a->kind == MARG_OPT || a->kind == MARG_FLAG) {
+            REG_OPT_FLAG(a, i, SIZE_MAX);
+        } else if (a->kind == MARG_GRP) {
+            // Group-level option
+            if (a->grp_long) {
+                int gval = 0;
+                if (a->grp_short) {
+                    gval = a->grp_short;
+                    short_opts_buf[short_idx++] = a->grp_short;
+                    short_opts_buf[short_idx++] = ':';
+                } else {
+                    gval = next_long_val++;
+                }
+                long_options[n_long++] = (struct option){
+                    a->grp_long,
+                    required_argument,
+                    0,
+                    a->grp_short ? (int)a->grp_short : gval
+                };
+                ADD_MAP(gval, i, SIZE_MAX, false, NULL, true);
+            }
+            // Group entries
+            for (size_t e = 0; e < a->n_entries; e++) {
+                REG_OPT_FLAG(a->entries[e].arg, i, e);
+            }
+        }
+    }
+
+    #undef ADD_MAP
+    #undef REG_OPT_FLAG
+
+    short_opts_buf[short_idx] = '\0';
+    // Terminate long options
+    long_options[n_long] = (struct option){0, 0, 0, 0};
+
+    // ---- Phase 2: Run getopt_long ----
+
+    // Prepend '+' to short options to stop at first non-option (POSIX mode)
+    char posix_short[MAX_OPTIONS * 3 + 1];
+    posix_short[0] = '+';
+    memcpy(posix_short + 1, short_opts_buf, short_idx + 1);
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, posix_short, long_options, NULL)) != -1) {
+        if (opt == 'h') {
+            print_command_help(cmd);
+        }
+        if (opt == OPT_HELP_VERBOSE) {
+            print_command_help(cmd);
+        }
+        // Find matching mapping
+        bool found = false;
+        for (size_t m = 0; m < n_map; m++) {
+            if (mappings[m].getopt_val == opt) {
+                if (mappings[m].is_flag) {
+                    usr_vals[m] = (char*)mappings[m].flag_val;
+                } else {
+                    usr_vals[m] = optarg;
+                }
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            fprintf(stderr, "Unknown option\n");
+            clean_exit(EXIT_FAILURE);
+        }
+    }
+
+    // ---- Phase 3: Start daemons (remote commands only) ----
+
+    if (!cmd->is_pure) {
+        morloc_socket_t** needed = (morloc_socket_t**)calloc(cmd->n_needed_pools + 1, sizeof(morloc_socket_t*));
+        for (size_t i = 0; i < cmd->n_needed_pools; i++) {
+            needed[i] = &sockets[cmd->needed_pools[i]];
+        }
+        needed[cmd->n_needed_pools] = NULL;
+        start_daemons(needed);
+        free(needed);
+    }
+
+    // ---- Phase 4: Build argument_t** array ----
+
+    argument_t** args = (argument_t**)calloc(cmd->n_args + 1, sizeof(argument_t*));
+    size_t map_cursor = 0; // cursor into mappings array
+
+    for (size_t i = 0; i < cmd->n_args; i++) {
+        manifest_arg_t* a = &cmd->args[i];
+
+        if (a->kind == MARG_POS) {
+            if (argv[optind] == NULL) {
+                fprintf(stderr, "Error: too few positional arguments\n");
+                clean_exit(EXIT_FAILURE);
+            }
+            char* val;
+            if (a->quoted) {
+                val = quoted(argv[optind]);
+            } else {
+                val = strdup(argv[optind]);
+            }
+            args[i] = initialize_positional(val);
+            free(val);
+            optind++;
+        } else if (a->kind == MARG_OPT) {
+            // Find the mapping for this arg
+            char* usr = NULL;
+            char* def = a->default_val;
+            for (size_t m = map_cursor; m < n_map; m++) {
+                if (mappings[m].arg_idx == i && mappings[m].entry_idx == SIZE_MAX && !mappings[m].is_grp_opt) {
+                    usr = usr_vals[m];
+                    map_cursor = m + 1;
+                    break;
+                }
+            }
+            if (usr == NULL) {
+                if (def == NULL) {
+                    args[i] = initialize_positional(NULL);
+                } else {
+                    args[i] = initialize_positional(strdup(def));
+                }
+            } else {
+                if (a->quoted) {
+                    char* q = quoted(usr);
+                    args[i] = initialize_positional(q);
+                    free(q);
+                } else {
+                    args[i] = initialize_positional(strdup(usr));
+                }
+            }
+        } else if (a->kind == MARG_FLAG) {
+            char* usr = NULL;
+            char* def = a->default_val;
+            for (size_t m = map_cursor; m < n_map; m++) {
+                if (mappings[m].arg_idx == i && mappings[m].entry_idx == SIZE_MAX) {
+                    if (usr_vals[m] != NULL) usr = usr_vals[m];
+                    // Don't break - also check reverse mapping
+                    if (!mappings[m].is_flag || usr != NULL) { map_cursor = m + 1; break; }
+                }
+            }
+            if (usr == NULL) {
+                args[i] = initialize_positional(strdup(def ? def : "false"));
+            } else {
+                args[i] = initialize_positional(strdup(usr));
+            }
+        } else if (a->kind == MARG_GRP) {
+            size_t size = a->n_entries;
+            // Find group-level option value
+            char* grp_val = NULL;
+            for (size_t m = 0; m < n_map; m++) {
+                if (mappings[m].arg_idx == i && mappings[m].is_grp_opt && usr_vals[m]) {
+                    grp_val = usr_vals[m];
+                    break;
+                }
+            }
+
+            char** fields = (char**)calloc(size, sizeof(char*));
+            char** def_fields = (char**)calloc(size, sizeof(char*));
+
+            for (size_t e = 0; e < size; e++) {
+                manifest_arg_t* ea = a->entries[e].arg;
+                char* entry_usr = NULL;
+                char* entry_def = ea->default_val;
+
+                // Find mapping for this entry
+                for (size_t m = 0; m < n_map; m++) {
+                    if (mappings[m].arg_idx == i && mappings[m].entry_idx == e && usr_vals[m]) {
+                        entry_usr = usr_vals[m];
+                        break;
+                    }
+                }
+
+                if (entry_usr != NULL) {
+                    if (ea->quoted) {
+                        fields[e] = quoted(entry_usr);
+                    } else {
+                        fields[e] = strdup(entry_usr);
+                    }
+                }
+                if (entry_def != NULL) {
+                    def_fields[e] = strdup(entry_def);
+                }
+            }
+
+            args[i] = initialize_unrolled(size, grp_val, fields, def_fields);
+
+            for (size_t e = 0; e < size; e++) {
+                free(fields[e]);
+                free(def_fields[e]);
+            }
+            free(fields);
+            free(def_fields);
+        }
+    }
+    args[cmd->n_args] = NULL;
+
+    // Check for extra positional args
+    if (argv[optind] != NULL) {
+        fprintf(stderr, "Error: too many positional arguments given\n");
+        clean_exit(EXIT_FAILURE);
+    }
+
+    // ---- Phase 5: Dispatch ----
+
+    if (cmd->is_pure) {
+        run_pure_command(cmd->expr, args, cmd->arg_schemas, cmd->return_schema, config);
+    } else {
+        run_command(cmd->mid, args, cmd->arg_schemas, cmd->return_schema,
+                    sockets[cmd->pool_index], config);
+    }
+}
+
 
 void dispatch(
     int argc,
     char* argv[],
     const char* shm_basename,
-    config_t config
+    config_t config,
+    manifest_t* manifest,
+    morloc_socket_t* sockets
 ){
+    // Handle call-packet mode
+    if (config.packet_path != NULL) {
+        morloc_socket_t** all = (morloc_socket_t**)calloc(manifest->n_pools + 1, sizeof(morloc_socket_t*));
+        for (size_t i = 0; i < manifest->n_pools; i++) all[i] = &sockets[i];
+        all[manifest->n_pools] = NULL;
+        start_daemons(all);
+        free(all);
+        run_call_packet(config);
+        clean_exit(0);
+    }
 
     char* cmd = argv[optind];
     optind++;
 
-// AUTO dispatch
-// <<<BREAK>>>
-// AUTO dispatch
+    for (size_t i = 0; i < manifest->n_commands; i++) {
+        if (strcmp(cmd, manifest->commands[i].name) == 0) {
+            dispatch_command(argc, argv, shm_basename, config,
+                             manifest, &manifest->commands[i], sockets);
+            return; // dispatch_command calls clean_exit
+        }
+    }
 
-    clean_exit(0);
+    fprintf(stderr, "Unrecognized command '%s'\n", cmd);
+    clean_exit(1);
 }
 
 int main(int argc, char *argv[]) {
@@ -628,14 +1104,22 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Handle help flag immediately
-    if (config.help_flag) {
-        usage();
-        exit(EXIT_SUCCESS);
+    // Load manifest from argv[0] + ".manifest"
+    char* errmsg = NULL;
+    char manifest_path[PATH_MAX];
+    snprintf(manifest_path, sizeof(manifest_path), "%s.manifest", argv[0]);
+
+    manifest_t* manifest = read_manifest(manifest_path, &errmsg);
+    if (errmsg != NULL) {
+        fprintf(stderr, "Failed to load manifest '%s':\n%s\n", manifest_path, errmsg);
+        exit(EXIT_FAILURE);
     }
 
-
-    char* errmsg = NULL;
+    // Handle help flag immediately
+    if (config.help_flag) {
+        print_usage(manifest);
+        exit(EXIT_SUCCESS);
+    }
 
     // set the global temporary directory
     tmpdir = make_tmpdir(&errmsg);
@@ -666,11 +1150,14 @@ int main(int argc, char *argv[]) {
     sa_chld.sa_flags = SA_RESTART | SA_NOCLDSTOP;
     sigaction(SIGCHLD, &sa_chld, NULL);
 
+    // Setup sockets from manifest
+    morloc_socket_t* sockets = setup_sockets(manifest, tmpdir, shm_basename);
+
     // Command logic routing
     if (config.packet_path == NULL) {
         // Require subcommand when not using call packets
         if (optind >= argc) {
-            usage();
+            print_usage(manifest);
             clean_exit(EXIT_FAILURE);
         }
 
@@ -680,7 +1167,7 @@ int main(int argc, char *argv[]) {
             clean_exit(EXIT_FAILURE);
         }
 
-        dispatch(argc, argv, shm_basename, config);
+        dispatch(argc, argv, shm_basename, config, manifest, sockets);
     } else {
         // Validate no positional arguments when using call packet
         if (optind < argc) {
@@ -694,9 +1181,9 @@ int main(int argc, char *argv[]) {
             clean_exit(EXIT_FAILURE);
         }
 
-        dispatch(argc, argv, shm_basename, config);
+        dispatch(argc, argv, shm_basename, config, manifest, sockets);
     }
 
-    // unrechable
+    // unreachable
     clean_exit(EXIT_SUCCESS);
 }
