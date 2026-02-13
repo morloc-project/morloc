@@ -118,6 +118,40 @@ bool slurm_job_is_complete(uint32_t job_id) {
     return done;
 }
 
+// Shell-escape a string by wrapping in single quotes.
+// Any embedded single quotes become '\'' (end quote, escaped quote, start quote).
+// Returns a newly allocated string that must be freed.
+static char* shell_escape(const char* input) {
+    if (input == NULL) return NULL;
+
+    size_t len = strlen(input);
+    size_t nquotes = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (input[i] == '\'') nquotes++;
+    }
+
+    // Each ' becomes '\'' (4 chars), plus 2 for outer quotes, plus NUL
+    char* out = (char*)malloc(len + nquotes * 3 + 3);
+    if (!out) return NULL;
+
+    char* p = out;
+    *p++ = '\'';
+    for (size_t i = 0; i < len; i++) {
+        if (input[i] == '\'') {
+            *p++ = '\'';
+            *p++ = '\\';
+            *p++ = '\'';
+            *p++ = '\'';
+        } else {
+            *p++ = input[i];
+        }
+    }
+    *p++ = '\'';
+    *p = '\0';
+
+    return out;
+}
+
 uint32_t submit_morloc_slurm_job(
     const char* nexus_path,
     const char* socket_basename,
@@ -137,49 +171,86 @@ uint32_t submit_morloc_slurm_job(
     RAISE_IF(output_filename == NULL, "slurm output filename undefined")
     RAISE_IF(error_filename == NULL, "slurm error filename undefined")
 
-    char cmd[MAX_SLURM_COMMAND_LENGTH];
-    FILE *slurm;
-    uint32_t job_id = 0;
+    // Build resource argument strings (from safe integer formatting)
+    char mem_arg[32];
+    snprintf(mem_arg, sizeof(mem_arg), "--mem=%dG", resources->memory);
 
-    // Build resource parameters
-    char* time_str = write_slurm_time(resources->time); // DD-HH:MM:SS
-    char resources_spec[256];
-    snprintf(resources_spec, sizeof(resources_spec),
-        "--mem=%dG --time=%s --cpus-per-task=%d --gres=gpu:%d",
-        resources->memory,
-        time_str,
-        resources->cpus,
-        resources->gpus
-    );
+    char* time_str = write_slurm_time(resources->time);
+    char time_arg[48];
+    snprintf(time_arg, sizeof(time_arg), "--time=%s", time_str);
     free(time_str);
 
-    // Build submission command
-    int written = snprintf(
-        cmd,
-        MAX_SLURM_COMMAND_LENGTH,
-        "sbatch --parsable -o %s -e %s %s --wrap='%s --call-packet %s --socket-base %s --output-file %s --output-form packet",
-        output_filename,
-        error_filename,
-        resources_spec,
-        nexus_path,
-        call_packet_filename,
-        socket_basename,
-        result_cache_filename
-    );
+    char cpus_arg[48];
+    snprintf(cpus_arg, sizeof(cpus_arg), "--cpus-per-task=%d", resources->cpus);
 
-    RAISE_IF(written >= MAX_SLURM_COMMAND_LENGTH, "Command too long")
+    char gpus_arg[48];
+    snprintf(gpus_arg, sizeof(gpus_arg), "--gres=gpu:%d", resources->gpus);
 
-    // Submit job and capture output
-    slurm = popen(cmd, "r");
-    RAISE_IF(!slurm, "Failed to execute sbatch")
-
-    // Parse job ID from first line
-    if (fscanf(slurm, "%u", &job_id) != 1) {
-        pclose(slurm);
-        RAISE("Failed to parse job ID from sbatch output");
+    // Shell-escape values interpolated into --wrap (sbatch passes it to sh -c)
+    char* esc_nexus = shell_escape(nexus_path);
+    char* esc_call = shell_escape(call_packet_filename);
+    char* esc_socket = shell_escape(socket_basename);
+    char* esc_result = shell_escape(result_cache_filename);
+    if (!esc_nexus || !esc_call || !esc_socket || !esc_result) {
+        free(esc_nexus); free(esc_call); free(esc_socket); free(esc_result);
+        RAISE("Failed to allocate memory for shell escaping")
     }
 
-    pclose(slurm);
+    char wrap_cmd[MAX_SLURM_COMMAND_LENGTH];
+    int written = snprintf(wrap_cmd, sizeof(wrap_cmd),
+        "%s --call-packet %s --socket-base %s --output-file %s --output-form packet",
+        esc_nexus, esc_call, esc_socket, esc_result);
+    free(esc_nexus); free(esc_call); free(esc_socket); free(esc_result);
+    RAISE_IF(written >= (int)sizeof(wrap_cmd), "Wrap command too long")
+
+    char wrap_arg[MAX_SLURM_COMMAND_LENGTH + 8];
+    snprintf(wrap_arg, sizeof(wrap_arg), "--wrap=%s", wrap_cmd);
+
+    // Use fork/exec instead of popen to avoid shell interpretation
+    int pipefd[2];
+    RAISE_IF(pipe(pipefd) == -1, "Failed to create pipe for sbatch")
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        RAISE("Failed to fork for sbatch")
+    }
+
+    if (pid == 0) {
+        // Child: redirect stdout to pipe, exec sbatch directly
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+        execlp("sbatch", "sbatch",
+            "--parsable",
+            "-o", output_filename,
+            "-e", error_filename,
+            mem_arg, time_arg, cpus_arg, gpus_arg,
+            wrap_arg,
+            (char*)NULL);
+        _exit(127);
+    }
+
+    // Parent: read job ID from pipe
+    close(pipefd[1]);
+
+    char buf[64];
+    ssize_t nread = read(pipefd[0], buf, sizeof(buf) - 1);
+    close(pipefd[0]);
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    RAISE_IF(!WIFEXITED(status) || WEXITSTATUS(status) != 0,
+        "sbatch exited with error")
+    RAISE_IF(nread <= 0, "Failed to read sbatch output")
+    buf[nread] = '\0';
+
+    uint32_t job_id = 0;
+    RAISE_IF(sscanf(buf, "%u", &job_id) != 1,
+        "Failed to parse job ID from sbatch output")
+
     return job_id;
 }
 
