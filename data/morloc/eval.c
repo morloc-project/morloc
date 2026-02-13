@@ -77,9 +77,9 @@ static void dict_free(dict_t* list){
     }
 }
 
-morloc_expression_t* make_morloc_bound_var(const char* schema_str, char* varname){
-    char* error_msg = NULL;
-    Schema* schema = parse_schema(schema_str, &error_msg);
+morloc_expression_t* make_morloc_bound_var(const char* schema_str, char* varname, ERRMSG){
+    PTR_RETURN_SETUP(morloc_expression_t)
+    Schema* schema = TRY(parse_schema, schema_str);
 
     morloc_expression_t* expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
     expr->type = MORLOC_X_BND;
@@ -91,12 +91,13 @@ morloc_expression_t* make_morloc_bound_var(const char* schema_str, char* varname
 
 morloc_expression_t* make_morloc_literal(
   const char* schema_str,
-  primitive_t lit
+  primitive_t lit,
+  ERRMSG
 ){
-    char* error_msg = NULL;
-    Schema* schema = parse_schema(schema_str, &error_msg);
-    morloc_data_t* data = (morloc_data_t*)malloc(sizeof(morloc_data_t));
+    PTR_RETURN_SETUP(morloc_expression_t)
+    Schema* schema = TRY(parse_schema, schema_str);
 
+    morloc_data_t* data = (morloc_data_t*)malloc(sizeof(morloc_data_t));
     data->is_voidstar = false;
     data->data.lit_val = lit;
 
@@ -109,13 +110,19 @@ morloc_expression_t* make_morloc_literal(
 
 morloc_expression_t* make_morloc_container(
   const char* schema_str,
+  ERRMSG,
   size_t nargs,
   ... // list of container elements
 ){
+    PTR_RETURN_SETUP(morloc_expression_t)
     va_list value_list;
     va_start(value_list, nargs);
-    char* error_msg = NULL;
-    Schema* schema = parse_schema(schema_str, &error_msg);
+    Schema* schema = parse_schema(schema_str, &CHILD_ERRMSG);
+    if(CHILD_ERRMSG != NULL){
+        va_end(value_list);
+        RAISE("\n%s", CHILD_ERRMSG)
+    }
+
     morloc_data_t* data = (morloc_data_t*)malloc(sizeof(morloc_data_t));
     data->is_voidstar = false;
 
@@ -155,14 +162,19 @@ morloc_expression_t* make_morloc_container(
 morloc_expression_t* make_morloc_app(
   const char* schema_str,
   morloc_expression_t* func,
+  ERRMSG,
   size_t nargs,
   ... // list of input arguments
 ){
+    PTR_RETURN_SETUP(morloc_expression_t)
     va_list args;
     va_start(args, nargs);
 
-    char* error_msg = NULL;
-    Schema* schema = parse_schema(schema_str, &error_msg);
+    Schema* schema = parse_schema(schema_str, &CHILD_ERRMSG);
+    if(CHILD_ERRMSG != NULL){
+        va_end(args);
+        RAISE("\n%s", CHILD_ERRMSG)
+    }
 
     morloc_app_expression_t* app = (morloc_app_expression_t*)malloc(sizeof(morloc_app_expression_t));
 
@@ -229,9 +241,9 @@ morloc_expression_t* make_morloc_lambda(
     return lam_expr;
 }
 
-morloc_expression_t* make_morloc_interpolation(const char* schema_str, size_t nargs, ...){
-    char* error_msg = NULL;
-    Schema* schema = parse_schema(schema_str, &error_msg);
+morloc_expression_t* make_morloc_interpolation(const char* schema_str, ERRMSG, size_t nargs, ...){
+    PTR_RETURN_SETUP(morloc_expression_t)
+    Schema* schema = TRY(parse_schema, schema_str);
 
     va_list var_list;
     va_start(var_list, nargs);
@@ -251,9 +263,10 @@ morloc_expression_t* make_morloc_interpolation(const char* schema_str, size_t na
     return expr;
 }
 
-morloc_expression_t* make_morloc_pattern(const char* schema_str, morloc_pattern_t* pattern){
-    char* error_msg = NULL;
-    Schema* schema = parse_schema(schema_str, &error_msg);
+morloc_expression_t* make_morloc_pattern(const char* schema_str, morloc_pattern_t* pattern, ERRMSG){
+    PTR_RETURN_SETUP(morloc_expression_t)
+    Schema* schema = TRY(parse_schema, schema_str);
+
     morloc_expression_t* expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
     expr->type = MORLOC_X_PAT;
     expr->schema = schema;

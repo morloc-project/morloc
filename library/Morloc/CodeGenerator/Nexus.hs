@@ -225,32 +225,70 @@ escapeString = MT.concatMap escapeChar
       | otherwise = MT.singleton c
 
 makePureExpression :: Int -> NexusExpr -> ([MDoc], MDoc)
-makePureExpression index e0 = (code, varName)
+makePureExpression _ e0 = (["char* errmsg = NULL;"] ++ stmts, lastVar)
   where
-    finalExpr = makeExpr e0
-    varName = "expr_" <> pretty index
-    code = ["morloc_expression_t*" <+> varName <+> "=" <+> finalExpr <> ";"]
+    (stmts, lastVar) = CMS.evalState (makeExpr e0) 0
 
-makeExpr :: NexusExpr -> MDoc
-makeExpr (LstX s es) =
-  let args = hsep ["," <+> (makeExpr e) | e <- es]
-   in [idoc|make_morloc_container(#{s}, #{pretty (length es)}#{args})|]
-makeExpr (TupX s es) =
-  let args = hsep ["," <+> (makeExpr e) | e <- es]
-   in [idoc|make_morloc_container(#{s}, #{pretty (length es)}#{args})|]
-makeExpr (NamX s rs) =
-  let args = hsep ["," <+> (makeExpr e) | (_, e) <- rs]
-   in [idoc|make_morloc_container(#{s}, #{pretty (length rs)}#{args})|]
-makeExpr (AppX s e es) =
-  let args = punctuate ", " (map makeExpr es)
-   in [idoc|make_morloc_app(#{s}, #{makeExpr e}, #{pretty (length es)}, #{hsep args})|]
-makeExpr (LamX vs e) =
-  let vars = punctuate ", " ["strdup" <> (parens . dquotes $ v) | v <- vs]
-   in [idoc|make_morloc_lambda(#{makeExpr e}, #{pretty (length vs)}, #{hsep vars})|]
-makeExpr (PatX s (PatternText p ps)) =
-  let vars = punctuate ", " ["strdup" <> (parens . dquotes . pretty $ v) | v <- (p : ps)]
-   in [idoc|make_morloc_interpolation(#{s}, #{pretty (1 + length ps)}, #{hsep vars})|]
-makeExpr (PatX s (PatternStruct p)) = [idoc|make_morloc_pattern(#{s}, #{makePatternExpr p})|]
+freshVar :: CMS.State Int MDoc
+freshVar = do
+  n <- CMS.get
+  CMS.put (n + 1)
+  return $ "expr_" <> pretty n
+
+-- emit a call that takes ERRMSG, assign to temp var, check for error
+emitChecked :: [MDoc] -> MDoc -> CMS.State Int ([MDoc], MDoc)
+emitChecked priorStmts call = do
+  var <- freshVar
+  let stmts = priorStmts ++
+        [ "morloc_expression_t*" <+> var <+> "=" <+> call <> ";"
+        , "if(errmsg != NULL){ ERROR(\"Failed to build expression:\\n%s\", errmsg) }"
+        ]
+  return (stmts, var)
+
+-- emit a call without ERRMSG, assign to temp var
+emitUnchecked :: [MDoc] -> MDoc -> CMS.State Int ([MDoc], MDoc)
+emitUnchecked priorStmts call = do
+  var <- freshVar
+  let stmts = priorStmts ++
+        [ "morloc_expression_t*" <+> var <+> "=" <+> call <> ";"
+        ]
+  return (stmts, var)
+
+unzipAccum :: [([MDoc], MDoc)] -> ([MDoc], [MDoc])
+unzipAccum results = (concatMap fst results, map snd results)
+
+makeExpr :: NexusExpr -> CMS.State Int ([MDoc], MDoc)
+makeExpr (LstX s es) = do
+  results <- mapM makeExpr es
+  let (allStmts, refs) = unzipAccum results
+      args = hsep ["," <+> r | r <- refs]
+  emitChecked allStmts [idoc|make_morloc_container(#{s}, &errmsg, #{pretty (length es)}#{args})|]
+makeExpr (TupX s es) = do
+  results <- mapM makeExpr es
+  let (allStmts, refs) = unzipAccum results
+      args = hsep ["," <+> r | r <- refs]
+  emitChecked allStmts [idoc|make_morloc_container(#{s}, &errmsg, #{pretty (length es)}#{args})|]
+makeExpr (NamX s rs) = do
+  results <- mapM (makeExpr . snd) rs
+  let (allStmts, refs) = unzipAccum results
+      args = hsep ["," <+> r | r <- refs]
+  emitChecked allStmts [idoc|make_morloc_container(#{s}, &errmsg, #{pretty (length rs)}#{args})|]
+makeExpr (AppX s e es) = do
+  (funcStmts, funcRef) <- makeExpr e
+  results <- mapM makeExpr es
+  let (argStmts, argRefs) = unzipAccum results
+      args = hsep ["," <+> r | r <- argRefs]
+  emitChecked (funcStmts ++ argStmts) [idoc|make_morloc_app(#{s}, #{funcRef}, &errmsg, #{pretty (length es)}#{args})|]
+makeExpr (LamX vs e) = do
+  (bodyStmts, bodyRef) <- makeExpr e
+  let vars = hsep ["," <+> "strdup" <> (parens . dquotes $ v) | v <- vs]
+  emitUnchecked bodyStmts [idoc|make_morloc_lambda(#{bodyRef}, #{pretty (length vs)}#{vars})|]
+makeExpr (PatX s (PatternText p ps)) = do
+  let allVars = p : ps
+      vars = hsep ["," <+> "strdup" <> (parens . dquotes . pretty $ v) | v <- allVars]
+  emitChecked [] [idoc|make_morloc_interpolation(#{s}, &errmsg, #{pretty (length allVars)}#{vars})|]
+makeExpr (PatX s (PatternStruct p)) =
+  emitChecked [] [idoc|make_morloc_pattern(#{s}, #{makePatternExpr p}, &errmsg)|]
   where
     makePatternExpr :: Selector -> MDoc
     makePatternExpr (SelectorIdx t ts) =
@@ -263,9 +301,12 @@ makeExpr (PatX s (PatternStruct p)) = [idoc|make_morloc_pattern(#{s}, #{makePatt
               ["strdup" <> (parens . dquotes . pretty $ k) <> "," <+> makePatternExpr v | (k, v) <- (t : ts)]
        in [idoc|make_morloc_pattern_key(#{pretty (length (t:ts))}, #{hsep vars})|]
     makePatternExpr SelectorEnd = [idoc|make_morloc_pattern_end()|]
-makeExpr (BndX s v) = [idoc|make_morloc_bound_var(#{s}, strdup(#{dquotes v}))|]
-makeExpr (StrX s x) = [idoc|make_morloc_literal(#{s}, (primitive_t){.s = strdup(#{x})})|]
-makeExpr (LitX t x) = [idoc|make_morloc_literal(#{dquotes (litSchema t)}, (primitive_t){.#{litSchema t} = #{x}})|]
+makeExpr (BndX s v) =
+  emitChecked [] [idoc|make_morloc_bound_var(#{s}, strdup(#{dquotes v}), &errmsg)|]
+makeExpr (StrX s x) =
+  emitChecked [] [idoc|make_morloc_literal(#{s}, (primitive_t){.s = strdup(#{x})}, &errmsg)|]
+makeExpr (LitX t x) =
+  emitChecked [] [idoc|make_morloc_literal(#{dquotes (litSchema t)}, (primitive_t){.#{litSchema t} = #{x}}, &errmsg)|]
 
 litSchema :: LitType -> MDoc
 litSchema F32X = "f4"
