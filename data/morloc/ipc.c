@@ -1,7 +1,7 @@
 #include "morloc.h"
 
 void close_socket(int socket_id){
-    close(socket_id);
+    if(socket_id >= 0) close(socket_id);
 }
 
 void close_daemon(language_daemon_t** daemon_ptr) {
@@ -87,6 +87,7 @@ language_daemon_t* start_daemon(
     language_daemon_t* daemon = (language_daemon_t*)calloc(1, sizeof(language_daemon_t));
     RAISE_IF(daemon == NULL, "Calloc for language_daemon_t failed")
 
+    daemon->server_fd = -1; // prevent close_daemon from closing fd 0 on early error
     daemon->socket_path = strdup(socket_path);
     daemon->tmpdir = strdup(tmpdir);
     daemon->shm_basename = strdup(shm_basename);
@@ -97,15 +98,15 @@ language_daemon_t* start_daemon(
     FD_ZERO(&daemon->read_fds); // Initialize descriptor set
 
     // create the shared memory mappings
-    daemon->shm = TRY(shinit, shm_basename, 0, shm_default_size);
+    daemon->shm = TRY_WITH(close_daemon(&daemon), shinit, shm_basename, 0, shm_default_size);
 
     // Setup a new daemon that uses a given path for the socket address
-    daemon->server_fd = TRY(new_server, socket_path);
+    daemon->server_fd = TRY_WITH(close_daemon(&daemon), new_server, socket_path);
 
     // Set the daemon socket to non-blocking mode (critical for pselect safety)
     int flags = fcntl(daemon->server_fd, F_GETFL);
     if (flags == -1 || fcntl(daemon->server_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-        free(daemon);
+        close_daemon(&daemon);
         RAISE("Failed to set non-blocking mode: %s", strerror(errno));
     }
 
