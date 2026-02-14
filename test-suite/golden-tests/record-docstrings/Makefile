@@ -1,4 +1,5 @@
 all:
+	rm -f obs.txt
 	morloc make main.loc > /dev/null 2> build.err
 	echo foo > obs.txt 2> obs.err
 	./nexus foo --alg-config=algconf.json [1,2,3] 2>> obs.err  >> obs.txt

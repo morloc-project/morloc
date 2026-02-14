@@ -1,4 +1,5 @@
 all:
+	rm -f obs.txt
 	morloc make foo.loc 2> build.err
 	./nexus foo > obs.txt 2> obs.err
 

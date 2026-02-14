@@ -1,4 +1,5 @@
 all:
+	rm -f obs.txt *.err
 	morloc make foo.loc 2> build.err
 	./nexus readFASTQ '"example.fastq"' | \
 		./nexus trim config.json /dev/stdin | \

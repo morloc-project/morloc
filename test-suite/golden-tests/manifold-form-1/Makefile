@@ -1,4 +1,3 @@
-
 all:
 	rm -f obs.txt
 	morloc make t1.loc 2> build.err
