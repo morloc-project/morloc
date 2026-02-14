@@ -74,6 +74,7 @@ typedef struct {
 
 typedef struct {
     int version;
+    char* build_dir;
     manifest_pool_t* pools;
     size_t n_pools;
     manifest_command_t* commands;

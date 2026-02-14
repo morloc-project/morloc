@@ -4,4 +4,4 @@ all:
 	./nexus foo 6 > obs.txt 2> obs.err
 
 clean:
-	rm -f nexusgc
+	rm -rf nexus poolsgc

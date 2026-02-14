@@ -4,4 +4,4 @@ all:
 	./nexus foo > obs.txt 2> obs.err
 
 clean:
-	rm -f nexus *out
+	rm -rf nexus pools *out

@@ -6,4 +6,4 @@ all:
 	./nexus analyze --width 8 --height 8 2>> obs.err  >> obs.txt
 
 clean:
-	rm -rf nexus __pycache__
+	rm -rf nexus pools __pycache__

@@ -4,4 +4,4 @@ all:
 	./nexus foo 38 > obs.txt 2> obs.err
 
 clean:
-	rm -rf nexus __pycache__
+	rm -rf nexus pools __pycache__

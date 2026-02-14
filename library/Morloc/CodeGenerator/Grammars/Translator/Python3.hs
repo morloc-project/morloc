@@ -43,8 +43,6 @@ translate srcs es = do
   home <- pretty <$> asks MC.configHome
   let opt = home <> "/opt"
 
-  exeDir <- gets (fromMaybe "." . stateExeDir)
-
   -- translate sources
   includeDocs <-
     mapM
@@ -58,14 +56,14 @@ translate srcs es = do
   let mDocs = map (translateSegment (qualifiedSrcName lib)) es
       program = buildProgram includeDocs mDocs es
 
-  let code = PP.printProgram [opt, pretty lib] program
+  let code = PP.printProgram [".", opt, pretty lib] program
   let exefile = ML.makeExecutablePoolName Python3Lang
 
   return $
     Script
       { scriptBase = "pool"
       , scriptLang = Python3Lang
-      , scriptCode = exeDir :/ File exefile (Code . render $ code)
+      , scriptCode = "." :/ Dir "pools" [File exefile (Code . render $ code)]
       , scriptMake = []
       }
   where

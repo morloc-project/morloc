@@ -7,4 +7,4 @@ all:
 
 
 clean:
-	rm -rf nexus log __pycache__
+	rm -rf nexus pools log __pycache__

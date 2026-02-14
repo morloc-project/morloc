@@ -42,8 +42,6 @@ translate srcs es = do
   homeDir <- asks configHome
   let dynlibDocs = [[idoc|dyn.load("#{pretty $ homeDir </> "lib" </> "librmorloc.so"}")|]]
 
-  exeDir <- gets (fromMaybe "." . stateExeDir)
-
   -- diagnostics
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
@@ -58,7 +56,7 @@ translate srcs es = do
     Script
       { scriptBase = "pool"
       , scriptLang = RLang
-      , scriptCode = exeDir :/ File exefile (Code . render $ code)
+      , scriptCode = "." :/ Dir "pools" [File exefile (Code . render $ code)]
       , scriptMake = []
       }
 

@@ -6,4 +6,4 @@ all:
 	./nexus test_not_equal 2>> obs.err  >> obs.txt
 
 clean:
-	rm -f nexus log
+	rm -rf nexus pools log

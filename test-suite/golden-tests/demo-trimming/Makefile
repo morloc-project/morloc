@@ -6,4 +6,4 @@ all:
 		./nexus writeFASTA '"obs.txt"' /dev/stdin
 
 clean:
-	rm -rf nexus __pycache__
+	rm -rf nexus pools __pycache__

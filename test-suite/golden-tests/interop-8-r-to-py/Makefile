@@ -5,4 +5,4 @@ all:
 	diff exp.txt obs.txt
 
 clean:
-	rm -rf nexus __pycache__
+	rm -rf nexus pools __pycache__

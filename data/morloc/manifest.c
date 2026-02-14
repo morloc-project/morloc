@@ -617,6 +617,7 @@ manifest_t* parse_manifest(const char* text, ERRMSG) {
 
     manifest_t* m = (manifest_t*)calloc(1, sizeof(manifest_t));
     m->version = (int)jnum(jget(root, "version"));
+    m->build_dir = nullable_strdup(jgets(root, "build_dir"));
 
     const jval_t* jpools = jget(root, "pools");
     m->n_pools = jlen(jpools);
@@ -653,6 +654,7 @@ manifest_t* read_manifest(const char* path, ERRMSG) {
 
 void free_manifest(manifest_t* manifest) {
     if (!manifest) return;
+    free(manifest->build_dir);
     for (size_t i = 0; i < manifest->n_pools; i++) {
         free(manifest->pools[i].lang);
         if (manifest->pools[i].exec) {

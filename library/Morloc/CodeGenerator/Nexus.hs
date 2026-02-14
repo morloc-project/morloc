@@ -14,12 +14,10 @@ module Morloc.CodeGenerator.Nexus
 
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
-import Data.Bits (xor)
 import Data.Char (ord)
 import qualified Data.Map as Map
 import Data.Text (Text)
 import qualified Data.Text as MT
-import Data.Word (Word64)
 import Numeric (showHex)
 import qualified Morloc.BaseTypes as MBT
 import qualified Morloc.CodeGenerator.Infer as Infer
@@ -29,8 +27,8 @@ import qualified Morloc.Config as MC
 import Morloc.Data.Doc (render, pretty)
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
-import qualified System.Directory as SD
 import qualified Data.Time.Clock.POSIX as Time
+import qualified System.Directory as Dir
 
 
 -- ======================================================================
@@ -468,8 +466,9 @@ litSchemaStr NullX = "z"
 -- ======================================================================
 
 buildManifest :: Config -> String -> Int -> [(Lang, Socket)] -> [FData] -> [GastData] -> (Lang -> Int) -> Text
-buildManifest config exeDir buildTime daemonSets fdata gasts langToPool = jsonObj
+buildManifest config buildDir buildTime daemonSets fdata gasts langToPool = jsonObj
   [ ("version", "1")
+  , ("build_dir", jsonStr (MT.pack buildDir))
   , ("build_time", jsonInt buildTime)
   , ("pools", jsonArr (map poolJson daemonSets))
   , ("commands", jsonArr (map remoteCmdJson fdata ++ map pureCmdJson gasts))
@@ -483,10 +482,10 @@ buildManifest config exeDir buildTime daemonSets fdata gasts langToPool = jsonOb
       ]
 
     makeExecArgs :: Lang -> [String]
-    makeExecArgs CppLang = [exeDir </> ML.makeExecutablePoolName CppLang]
-    makeExecArgs CLang = [exeDir </> ML.makeExecutablePoolName CLang]
-    makeExecArgs Python3Lang = [MC.configLangPython3 config, exeDir </> ML.makeExecutablePoolName Python3Lang]
-    makeExecArgs RLang = [MC.configLangR config, exeDir </> ML.makeExecutablePoolName RLang]
+    makeExecArgs CppLang = ["pools" </> ML.makeExecutablePoolName CppLang]
+    makeExecArgs CLang = ["pools" </> ML.makeExecutablePoolName CLang]
+    makeExecArgs Python3Lang = [MC.configLangPython3 config, "pools" </> ML.makeExecutablePoolName Python3Lang]
+    makeExecArgs RLang = [MC.configLangR config, "pools" </> ML.makeExecutablePoolName RLang]
 
     remoteCmdJson :: FData -> Text
     remoteCmdJson fd = jsonObj
@@ -540,24 +539,9 @@ generate cs rASTs = do
   -- Extract data for pure commands
   gasts <- mapM annotateGasts cs
 
-  -- Determine module name
-  let moduleName = maybe "main" (MT.unpack . unMVar) (stateModuleName st)
-      install = stateInstall st
-
-  -- Compute exeDir
-  cwd <- liftIO SD.getCurrentDirectory
-  let confHome = MC.configHome config
-  exeDir <- if install
-    then return $ confHome </> "exe" </> moduleName
-    else do
-      let pathHash = shortHash cwd
-      return $ confHome </> "exe" </> moduleName <> "-" <> pathHash
-
-  -- Store exeDir in state for pool translators
-  CMS.modify (\s -> s { stateExeDir = Just exeDir })
-
-  -- Get build time
+  -- Get build time and working directory
   buildTime <- liftIO $ floor <$> Time.getPOSIXTime
+  buildDir <- liftIO Dir.getCurrentDirectory
 
   -- Build pool list (deduplicated by language)
   let allSockets = concatMap (\x -> fdataSocket x : fdataSubSockets x) fdata
@@ -569,52 +553,23 @@ generate cs rASTs = do
           Just idx -> idx
           Nothing -> error $ "Pool not found for language: " <> show lang
 
-  -- Build manifest JSON
-  let manifestJson = buildManifest config exeDir buildTime daemonSets fdata gasts langToPoolIndex
+  -- Build manifest JSON with relative pool paths
+  let manifestJson = buildManifest config buildDir buildTime daemonSets fdata gasts langToPoolIndex
+      outfile = fromMaybe "nexus" (stateOutfile st)
+      wrapperScript = makeWrapperScript manifestJson
 
-  -- Determine output based on mode
-  if install
-    then do
-      userHome <- liftIO SD.getHomeDirectory
-      let binPath = userHome </> ".local" </> "bin" </> moduleName
-          wrapperScript = makeWrapperScript manifestJson
-      return $
-        Script
-          { scriptBase = moduleName
-          , scriptLang = ML.CLang
-          , scriptCode =
-              userHome :/
-                Dir ".local"
-                  [ Dir "bin" [File moduleName (Code wrapperScript)]
-                  , Dir "share" [Dir "morloc" [Dir "fdb"
-                      [File (moduleName <> ".manifest") (Code manifestJson)]]]
-                  ]
-          , scriptMake = [SysExe binPath]
-          }
-    else do
-      let outfile = fromMaybe moduleName (stateOutfile st)
-          wrapperScript = makeWrapperScript manifestJson
-      return $
-        Script
-          { scriptBase = outfile
-          , scriptLang = ML.CLang
-          , scriptCode = "." :/ File outfile (Code wrapperScript)
-          , scriptMake = [SysExe outfile]
-          }
+  return $
+    Script
+      { scriptBase = outfile
+      , scriptLang = ML.CLang
+      , scriptCode = "." :/ File outfile (Code wrapperScript)
+      , scriptMake = [SysExe outfile]
+      }
 
 -- Build a self-contained wrapper script with embedded manifest
 makeWrapperScript :: Text -> Text
 makeWrapperScript manifestJson =
   "#!/bin/sh\nexec mim \"$0\" \"$@\"\n### MANIFEST ###\n" <> manifestJson
-
--- Simple hash: FNV-1a on the path string, output as 8-char hex
-shortHash :: String -> String
-shortHash s = showHex (fnv1a s) ""
-  where
-    fnv1a :: String -> Word64
-    fnv1a = foldl' step 0xcbf29ce484222325
-    step :: Word64 -> Char -> Word64
-    step h c = (h `xor` fromIntegral (ord c)) * 0x100000001b3
 
 
 

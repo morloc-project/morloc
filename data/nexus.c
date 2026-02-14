@@ -1255,6 +1255,15 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
+    // chdir to the build directory so relative pool paths resolve correctly
+    if (manifest->build_dir) {
+        if (chdir(manifest->build_dir) != 0) {
+            fprintf(stderr, "Cannot chdir to build_dir '%s': %s\n",
+                    manifest->build_dir, strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+    }
+
     // Validate pool executables exist
     validate_pools(manifest);
 

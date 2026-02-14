@@ -6,4 +6,4 @@ all:
 	./nexus baz 4.3 -5 2>> obs.err  >> obs.txt
 
 clean:
-	rm -f nexus
+	rm -rf nexus pools

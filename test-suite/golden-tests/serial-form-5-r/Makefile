@@ -4,4 +4,4 @@ all:
 	./nexus foo '[[["a","b"],[1,5]],[["c","d"],[2,6]]]' | sed 's/ //g' > obs.txt 2> obs.err
 
 clean:
-	rm -f nexus
+	rm -rf nexus pools

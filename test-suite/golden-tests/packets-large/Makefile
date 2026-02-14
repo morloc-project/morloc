@@ -18,4 +18,4 @@ all:
 	./nexus rid test-data.json | wc -c 2>> obs.err  >> obs.txt
 
 clean:
-	rm -rf nexus __pycache__ data* 
+	rm -rf nexus pools __pycache__ data* 

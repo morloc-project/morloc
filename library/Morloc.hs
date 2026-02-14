@@ -33,8 +33,6 @@ import Morloc.Frontend.Restructure (restructure)
 import Morloc.Frontend.Treeify (treeify)
 import qualified Morloc.Monad as MM
 import Morloc.ProgramBuilder.Build (buildProgram)
-import qualified System.Directory as SD
-import System.FilePath (takeDirectory)
 
 -- | Check the general types only
 typecheckFrontend ::
@@ -84,11 +82,6 @@ writeProgram ::
   Code ->
   MorlocMonad ()
 writeProgram path code = do
-  case path of
-    Just p -> do
-      absDir <- liftIO $ SD.canonicalizePath (takeDirectory p)
-      MM.modify (\s -> s { stateSourceDir = Just absDir })
-    Nothing -> return ()
   typecheck path code
     -- evaluate all applied lambdas in rasts and gasts
     >>= bimapM (mapM applyLambdas) (mapM applyLambdas)

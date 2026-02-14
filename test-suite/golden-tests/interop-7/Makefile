@@ -5,4 +5,4 @@ all:
 	diff exp.txt obs.txt
 
 clean:
-	rm -f nexus
+	rm -rf nexus pools

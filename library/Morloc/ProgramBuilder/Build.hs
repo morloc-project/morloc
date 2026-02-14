@@ -17,21 +17,9 @@ import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import qualified Morloc.System as MS
 import qualified System.Directory as SD
-import System.Process (callProcess)
 
 buildProgram :: (Script, [Script]) -> MorlocMonad ()
-buildProgram (nexus, pools) = do
-  -- ensure exeDir exists and copy source directory into it
-  exeDir <- MM.gets stateExeDir
-  srcDir <- MM.gets stateSourceDir
-  case exeDir of
-    Just d -> do
-      liftIO $ SD.createDirectoryIfMissing True d
-      case srcDir of
-        Just s -> liftIO $ callProcess "cp" ["-rT", s, d]
-        Nothing -> return ()
-    Nothing -> return ()
-  mapM_ build (nexus : pools)
+buildProgram (nexus, pools) = mapM_ build (nexus : pools)
 
 build :: Script -> MorlocMonad ()
 build s = do

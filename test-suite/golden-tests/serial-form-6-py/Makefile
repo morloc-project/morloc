@@ -4,4 +4,4 @@ all:
 	./nexus foo '[{"name":"alice","info":42},{"name":"bob","info":43}]' | sed 's/ //g' > obs.txt 2> obs.err
 
 clean:
-	rm -f nexus
+	rm -rf nexus pools

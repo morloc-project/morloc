@@ -33,4 +33,4 @@ all:
 	./nexus f5 z5.mpk 2>> obs.err  >> obs.txt
 
 clean:
-	rm -rf nexus z* __pycache__
+	rm -rf nexus pools z* __pycache__

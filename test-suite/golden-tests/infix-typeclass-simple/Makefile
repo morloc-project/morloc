@@ -7,4 +7,4 @@ all:
 	./nexus test_negate 2>> obs.err  >> obs.txt
 
 clean:
-	rm -f nexus log
+	rm -rf nexus pools log

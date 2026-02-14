@@ -5,4 +5,4 @@ all:
 	./nexus c2r 3 4 2>> obs.err  >> obs.txt
 
 clean:
-	rm -f nexus
+	rm -rf nexus pools

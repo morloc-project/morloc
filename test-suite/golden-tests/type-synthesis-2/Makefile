@@ -4,4 +4,4 @@ all:
 	./nexus f '"hello"' > obs.txt 2> obs.err
 
 clean:
-	rm -rf nexus nexus.cpy lib/foo/__pycache__
+	rm -rf nexus pools nexus.cpy lib/foo/__pycache__

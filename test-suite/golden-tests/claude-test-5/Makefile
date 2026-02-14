@@ -5,4 +5,4 @@ all:
 	./nexus play --seed 12345 --time 0.0 --steps 1 2>> obs.err  >> obs.txt
 
 clean:
-	rm -rf nexus __pycache__
+	rm -rf nexus pools __pycache__

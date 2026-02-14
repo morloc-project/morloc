@@ -6,4 +6,4 @@ all:
 	./nexus foo2 "[1.0,2.0]" "[3.0,4.0]" 2>> obs.err  >> obs.txt
 
 clean:
-	rm -f nexus
+	rm -rf nexus pools

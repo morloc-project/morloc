@@ -5,4 +5,4 @@ all:
 
 .PHONY: clean
 clean:
-	rm -rf nexus *pdf *rda __pycache__
+	rm -rf nexus pools *pdf *rda __pycache__

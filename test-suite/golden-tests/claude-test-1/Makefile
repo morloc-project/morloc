@@ -5,4 +5,4 @@ all:
 	./nexus doubleList '[1,2,3,4]' 2>> obs.err  >> obs.txt
 
 clean:
-	rm -f nexus *err
+	rm -rf nexus pools *err

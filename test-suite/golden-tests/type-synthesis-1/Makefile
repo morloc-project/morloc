@@ -7,4 +7,4 @@ all:
 	./nexus bar 42 2>> obs.err  >> obs.txt
 
 clean:
-	rm -rf nexus
+	rm -rf nexus pools
