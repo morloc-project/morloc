@@ -53,6 +53,13 @@ typedef struct config_s {
     char* socket_base;
     char* output_path;
     format_enum output_format;
+    // daemon/router mode
+    int daemon_flag;
+    int router_flag;
+    char* unix_socket_path;
+    int tcp_port;
+    int http_port;
+    char* fdb_path;
 } config_t;
 
 // global pid list of language daemons
@@ -141,14 +148,6 @@ void clean_exit(int exit_code){
 
     exit(exit_code);
 }
-
-typedef struct morloc_socket_s{
-    char* lang;
-    char** syscmd;
-    char* socket_filename;
-    int pid; // language server pid
-} morloc_socket_t;
-
 
 // make a hash from a seed, the process id, nanoseconds since the epoch
 uint64_t make_job_hash(uint64_t seed) {
@@ -586,6 +585,16 @@ void print_mim_usage(void) {
     fprintf(stderr, "  -h, --help           Print this help message\n");
     fprintf(stderr, "  -o, --output-file    Print to this file instead of STDOUT\n");
     fprintf(stderr, "  -f, --output-format  Output format [json|mpk|voidstar]\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Daemon mode:\n");
+    fprintf(stderr, "  --daemon             Run as a long-lived daemon\n");
+    fprintf(stderr, "  --socket <path>      Listen on Unix socket\n");
+    fprintf(stderr, "  --port <n>           Listen on TCP port (length-prefixed JSON)\n");
+    fprintf(stderr, "  --http-port <n>      Listen on HTTP port\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Router mode:\n");
+    fprintf(stderr, "  --router             Run as a multi-program router\n");
+    fprintf(stderr, "  --fdb <path>         Path to fdb manifest directory\n");
     clean_exit(0);
 }
 
@@ -1154,59 +1163,100 @@ void validate_pools(const manifest_t* manifest) {
     }
 }
 
-int main(int argc, char *argv[]) {
+// Long-only option codes
+enum {
+    OPT_DAEMON    = 300,
+    OPT_ROUTER    = 301,
+    OPT_SOCKET    = 302,
+    OPT_PORT      = 303,
+    OPT_HTTP_PORT = 304,
+    OPT_FDB       = 305
+};
 
-    config_t config = { 0, NULL, NULL, NULL, JSON };
-
-    struct option long_options[] = {
+static void parse_nexus_options(int argc, char* argv[], config_t* config) {
+    static struct option long_options[] = {
         {"help",        no_argument,       0, 'h'},
         {"call-packet", required_argument, 0, 'c'},
         {"socket-base", required_argument, 0, 's'},
         {"output-file", required_argument, 0, 'o'},
         {"output-form", required_argument, 0, 'f'},
+        {"daemon",      no_argument,       0, OPT_DAEMON},
+        {"router",      no_argument,       0, OPT_ROUTER},
+        {"socket",      required_argument, 0, OPT_SOCKET},
+        {"port",        required_argument, 0, OPT_PORT},
+        {"http-port",   required_argument, 0, OPT_HTTP_PORT},
+        {"fdb",         required_argument, 0, OPT_FDB},
         {NULL, 0, NULL, 0}
     };
 
     int opt;
     while ((opt = getopt_long(argc, argv, "+hc:s:o:f:", long_options, NULL)) != -1) {
         switch (opt) {
-            case 'h':
-                config.help_flag = 1;
-                break;
-
-            case 'c':
-                config.packet_path = optarg;
-                break;
-
-            case 's':
-                config.socket_base = optarg;
-                break;
-
-            case 'o':
-                config.output_path = optarg;
-                break;
-
+            case 'h': config->help_flag = 1; break;
+            case 'c': config->packet_path = optarg; break;
+            case 's': config->socket_base = optarg; break;
+            case 'o': config->output_path = optarg; break;
             case 'f':
-                if (strcmp(optarg, "json") == 0) {
-                    config.output_format = JSON;
-                } else if (strcmp(optarg, "mpk") == 0) {
-                    config.output_format = MessagePack;
-                } else if (strcmp(optarg, "voidstar") == 0) {
-                    config.output_format = VoidStar;
-                } else {
-                    fprintf(stderr, "Invalid output format: %s\n", optarg);
-                    exit(EXIT_FAILURE);
-                }
+                if (strcmp(optarg, "json") == 0) config->output_format = JSON;
+                else if (strcmp(optarg, "mpk") == 0) config->output_format = MessagePack;
+                else if (strcmp(optarg, "voidstar") == 0) config->output_format = VoidStar;
+                else { fprintf(stderr, "Invalid output format: %s\n", optarg); exit(EXIT_FAILURE); }
                 break;
-
+            case OPT_DAEMON:    config->daemon_flag = 1; break;
+            case OPT_ROUTER:    config->router_flag = 1; break;
+            case OPT_SOCKET:    config->unix_socket_path = optarg; break;
+            case OPT_PORT:      config->tcp_port = atoi(optarg); break;
+            case OPT_HTTP_PORT: config->http_port = atoi(optarg); break;
+            case OPT_FDB:       config->fdb_path = optarg; break;
             case '?':
                 fprintf(stderr, "Unknown option: %c\n", optopt);
                 exit(EXIT_FAILURE);
-
             case ':':
                 fprintf(stderr, "Option %c requires an argument\n", optopt);
                 exit(EXIT_FAILURE);
         }
+    }
+}
+
+int main(int argc, char *argv[]) {
+
+    config_t config = {0};
+    config.output_format = JSON;
+
+    // First pass: parse options before the manifest path
+    parse_nexus_options(argc, argv, &config);
+
+    // Handle --router mode (no manifest needed)
+    if (config.router_flag) {
+        char fdb_path_buf[512];
+        const char* fdb_path;
+        if (config.fdb_path) {
+            fdb_path = config.fdb_path;
+        } else {
+            const char* home = getenv("HOME");
+            if (!home) {
+                fprintf(stderr, "Error: HOME not set\n");
+                exit(EXIT_FAILURE);
+            }
+            snprintf(fdb_path_buf, sizeof(fdb_path_buf), "%s/.local/share/morloc/fdb", home);
+            fdb_path = fdb_path_buf;
+        }
+
+        char* errmsg = NULL;
+        router_t* router = router_init(fdb_path, &errmsg);
+        if (errmsg) {
+            fprintf(stderr, "Failed to initialize router: %s\n", errmsg);
+            exit(EXIT_FAILURE);
+        }
+
+        daemon_config_t dc = {
+            .unix_socket_path = config.unix_socket_path,
+            .tcp_port = config.tcp_port,
+            .http_port = config.http_port
+        };
+        router_run(&dc, router);
+        router_free(router);
+        exit(EXIT_SUCCESS);
     }
 
     // If -h with no manifest argument, show mim's own help
@@ -1223,22 +1273,7 @@ int main(int argc, char *argv[]) {
     optind++;
 
     // Second pass: parse options that appear after the manifest path
-    // (e.g., `mim ./main -h` or `./main -h` via wrapper script)
-    while ((opt = getopt_long(argc, argv, "+hc:s:o:f:", long_options, NULL)) != -1) {
-        switch (opt) {
-            case 'h': config.help_flag = 1; break;
-            case 'c': config.packet_path = optarg; break;
-            case 's': config.socket_base = optarg; break;
-            case 'o': config.output_path = optarg; break;
-            case 'f':
-                if (strcmp(optarg, "json") == 0) config.output_format = JSON;
-                else if (strcmp(optarg, "mpk") == 0) config.output_format = MessagePack;
-                else if (strcmp(optarg, "voidstar") == 0) config.output_format = VoidStar;
-                else { fprintf(stderr, "Invalid output format: %s\n", optarg); exit(EXIT_FAILURE); }
-                break;
-            default: break;
-        }
-    }
+    parse_nexus_options(argc, argv, &config);
 
     // Read manifest payload (handles both wrapper scripts and plain files)
     char* errmsg = NULL;
@@ -1305,7 +1340,25 @@ int main(int argc, char *argv[]) {
     // Setup sockets from manifest
     morloc_socket_t* sockets = setup_sockets(manifest, tmpdir, shm_basename);
 
-    // Command logic routing
+    // Daemon mode: start all pools and run the daemon event loop
+    if (config.daemon_flag) {
+        // Start all language pools
+        morloc_socket_t** all = (morloc_socket_t**)calloc(manifest->n_pools + 1, sizeof(morloc_socket_t*));
+        for (size_t i = 0; i < manifest->n_pools; i++) all[i] = &sockets[i];
+        all[manifest->n_pools] = NULL;
+        start_daemons(all);
+        free(all);
+
+        daemon_config_t dc = {
+            .unix_socket_path = config.unix_socket_path,
+            .tcp_port = config.tcp_port,
+            .http_port = config.http_port
+        };
+        daemon_run(&dc, manifest, sockets, shm_basename);
+        clean_exit(0);
+    }
+
+    // Command logic routing (normal CLI mode)
     if (config.packet_path == NULL) {
         // Require subcommand when not using call packets
         if (optind >= argc) {

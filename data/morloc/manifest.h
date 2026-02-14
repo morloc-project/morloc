@@ -74,11 +74,15 @@ typedef struct {
 
 typedef struct {
     int version;
+    char* name;       // program name (may be NULL for older manifests)
     char* build_dir;
     manifest_pool_t* pools;
     size_t n_pools;
     manifest_command_t* commands;
     size_t n_commands;
 } manifest_t;
+
+// Serialize manifest to a JSON discovery response (caller must free result)
+char* manifest_to_discovery_json(const manifest_t* manifest);
 
 #endif

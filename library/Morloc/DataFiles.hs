@@ -68,6 +68,12 @@ libmorlocFiles =
   , EmbededFile "utility.c"    (decodeUtf8 $(embedFileRelative "data/morloc/utility.c"))
   , EmbededFile "manifest.h"  (decodeUtf8 $(embedFileRelative "data/morloc/manifest.h"))
   , EmbededFile "manifest.c"  (decodeUtf8 $(embedFileRelative "data/morloc/manifest.c"))
+  , EmbededFile "daemon.h"    (decodeUtf8 $(embedFileRelative "data/morloc/daemon.h"))
+  , EmbededFile "daemon.c"    (decodeUtf8 $(embedFileRelative "data/morloc/daemon.c"))
+  , EmbededFile "http.h"      (decodeUtf8 $(embedFileRelative "data/morloc/http.h"))
+  , EmbededFile "http.c"      (decodeUtf8 $(embedFileRelative "data/morloc/http.c"))
+  , EmbededFile "router.h"    (decodeUtf8 $(embedFileRelative "data/morloc/router.h"))
+  , EmbededFile "router.c"    (decodeUtf8 $(embedFileRelative "data/morloc/router.c"))
   ]
 
 -- | Produce a single self-contained morloc.h by recursively inlining local includes

@@ -1,4 +1,5 @@
 #include "morloc.h"
+#include "json.h"
 
 char* quoted(const char* input){
   size_t len = strlen(input);
@@ -699,4 +700,309 @@ bool print_voidstar(const void* voidstar, const Schema* schema, ERRMSG) {
     printf("\n");
 
     return success;
+}
+
+// ======================================================================
+// JSON writer
+// ======================================================================
+
+#define JSON_BUF_INITIAL_CAP 256
+
+static void json_buf_grow(json_buf_t* buf, size_t needed) {
+    if (buf->len + needed < buf->cap) return;
+    while (buf->len + needed >= buf->cap) {
+        buf->cap *= 2;
+    }
+    buf->data = (char*)realloc(buf->data, buf->cap);
+}
+
+static void json_buf_append(json_buf_t* buf, const char* s, size_t n) {
+    json_buf_grow(buf, n + 1);
+    memcpy(buf->data + buf->len, s, n);
+    buf->len += n;
+    buf->data[buf->len] = '\0';
+}
+
+static void json_buf_append_str(json_buf_t* buf, const char* s) {
+    json_buf_append(buf, s, strlen(s));
+}
+
+static void json_buf_maybe_comma(json_buf_t* buf) {
+    if (buf->needs_comma) {
+        json_buf_append(buf, ",", 1);
+    }
+}
+
+json_buf_t* json_buf_new(void) {
+    json_buf_t* buf = (json_buf_t*)calloc(1, sizeof(json_buf_t));
+    buf->cap = JSON_BUF_INITIAL_CAP;
+    buf->data = (char*)calloc(buf->cap, 1);
+    buf->len = 0;
+    buf->needs_comma = false;
+    return buf;
+}
+
+void json_buf_free(json_buf_t* buf) {
+    if (!buf) return;
+    free(buf->data);
+    free(buf);
+}
+
+char* json_buf_finish(json_buf_t* buf) {
+    char* result = buf->data;
+    buf->data = NULL;
+    free(buf);
+    return result;
+}
+
+void json_write_obj_start(json_buf_t* buf) {
+    json_buf_maybe_comma(buf);
+    json_buf_append(buf, "{", 1);
+    buf->needs_comma = false;
+}
+
+void json_write_obj_end(json_buf_t* buf) {
+    json_buf_append(buf, "}", 1);
+    buf->needs_comma = true;
+}
+
+void json_write_arr_start(json_buf_t* buf) {
+    json_buf_maybe_comma(buf);
+    json_buf_append(buf, "[", 1);
+    buf->needs_comma = false;
+}
+
+void json_write_arr_end(json_buf_t* buf) {
+    json_buf_append(buf, "]", 1);
+    buf->needs_comma = true;
+}
+
+void json_write_key(json_buf_t* buf, const char* key) {
+    json_buf_maybe_comma(buf);
+    json_buf_append(buf, "\"", 1);
+    char* escaped = json_escape_string(key, strlen(key));
+    if (escaped) {
+        json_buf_append_str(buf, escaped);
+        free(escaped);
+    }
+    json_buf_append(buf, "\":", 2);
+    buf->needs_comma = false;
+}
+
+void json_write_string(json_buf_t* buf, const char* val) {
+    json_buf_maybe_comma(buf);
+    json_buf_append(buf, "\"", 1);
+    if (val) {
+        char* escaped = json_escape_string(val, strlen(val));
+        if (escaped) {
+            json_buf_append_str(buf, escaped);
+            free(escaped);
+        }
+    }
+    json_buf_append(buf, "\"", 1);
+    buf->needs_comma = true;
+}
+
+void json_write_int(json_buf_t* buf, int val) {
+    json_buf_maybe_comma(buf);
+    char tmp[32];
+    int n = snprintf(tmp, sizeof(tmp), "%d", val);
+    json_buf_append(buf, tmp, (size_t)n);
+    buf->needs_comma = true;
+}
+
+void json_write_uint(json_buf_t* buf, unsigned int val) {
+    json_buf_maybe_comma(buf);
+    char tmp[32];
+    int n = snprintf(tmp, sizeof(tmp), "%u", val);
+    json_buf_append(buf, tmp, (size_t)n);
+    buf->needs_comma = true;
+}
+
+void json_write_bool(json_buf_t* buf, bool val) {
+    json_buf_maybe_comma(buf);
+    if (val) {
+        json_buf_append(buf, "true", 4);
+    } else {
+        json_buf_append(buf, "false", 5);
+    }
+    buf->needs_comma = true;
+}
+
+void json_write_null(json_buf_t* buf) {
+    json_buf_maybe_comma(buf);
+    json_buf_append(buf, "null", 4);
+    buf->needs_comma = true;
+}
+
+void json_write_raw(json_buf_t* buf, const char* raw) {
+    json_buf_maybe_comma(buf);
+    json_buf_append_str(buf, raw);
+    buf->needs_comma = true;
+}
+
+// ======================================================================
+// voidstar to JSON string (buffer-based, no stdout)
+// ======================================================================
+
+static bool voidstar_to_json_buf_r(json_buf_t* jb, const void* voidstar, const Schema* schema, ERRMSG) {
+    BOOL_RETURN_SETUP
+
+    Array* array;
+    const char* data;
+
+    switch (schema->type) {
+        case MORLOC_NIL:
+            json_buf_append(jb, "null", 4);
+            break;
+        case MORLOC_BOOL:
+            if (*(uint8_t*)voidstar)
+                json_buf_append(jb, "true", 4);
+            else
+                json_buf_append(jb, "false", 5);
+            break;
+        case MORLOC_UINT8: {
+            char tmp[32];
+            int n = snprintf(tmp, sizeof(tmp), "%u", *(uint8_t*)voidstar);
+            json_buf_append(jb, tmp, (size_t)n);
+            break;
+        }
+        case MORLOC_UINT16: {
+            char tmp[32];
+            int n = snprintf(tmp, sizeof(tmp), "%u", *(uint16_t*)voidstar);
+            json_buf_append(jb, tmp, (size_t)n);
+            break;
+        }
+        case MORLOC_UINT32: {
+            char tmp[32];
+            int n = snprintf(tmp, sizeof(tmp), "%u", *(uint32_t*)voidstar);
+            json_buf_append(jb, tmp, (size_t)n);
+            break;
+        }
+        case MORLOC_UINT64: {
+            char tmp[32];
+            int n = snprintf(tmp, sizeof(tmp), "%lu", *(uint64_t*)voidstar);
+            json_buf_append(jb, tmp, (size_t)n);
+            break;
+        }
+        case MORLOC_SINT8: {
+            char tmp[32];
+            int n = snprintf(tmp, sizeof(tmp), "%d", *(int8_t*)voidstar);
+            json_buf_append(jb, tmp, (size_t)n);
+            break;
+        }
+        case MORLOC_SINT16: {
+            char tmp[32];
+            int n = snprintf(tmp, sizeof(tmp), "%d", *(int16_t*)voidstar);
+            json_buf_append(jb, tmp, (size_t)n);
+            break;
+        }
+        case MORLOC_SINT32: {
+            char tmp[32];
+            int n = snprintf(tmp, sizeof(tmp), "%d", *(int32_t*)voidstar);
+            json_buf_append(jb, tmp, (size_t)n);
+            break;
+        }
+        case MORLOC_SINT64: {
+            char tmp[32];
+            int n = snprintf(tmp, sizeof(tmp), "%ld", *(int64_t*)voidstar);
+            json_buf_append(jb, tmp, (size_t)n);
+            break;
+        }
+        case MORLOC_FLOAT32: {
+            char tmp[32];
+            int n = snprintf(tmp, sizeof(tmp), "%.7g", *(float*)voidstar);
+            json_buf_append(jb, tmp, (size_t)n);
+            break;
+        }
+        case MORLOC_FLOAT64: {
+            char tmp[32];
+            int n = snprintf(tmp, sizeof(tmp), "%.15g", *(double*)voidstar);
+            json_buf_append(jb, tmp, (size_t)n);
+            break;
+        }
+        case MORLOC_STRING: {
+            array = (Array*)voidstar;
+            if (array->size == 0) {
+                json_buf_append(jb, "\"\"", 2);
+                break;
+            }
+            data = TRY((const char*)rel2abs, array->data);
+            char* escaped = json_escape_string(data, array->size);
+            if (escaped) {
+                json_buf_append(jb, "\"", 1);
+                json_buf_append_str(jb, escaped);
+                json_buf_append(jb, "\"", 1);
+                free(escaped);
+            } else {
+                RAISE("Memory allocation failed for string escaping");
+            }
+            break;
+        }
+        case MORLOC_ARRAY: {
+            array = (Array*)voidstar;
+            if (array->size == 0) {
+                json_buf_append(jb, "[]", 2);
+                break;
+            }
+            data = TRY((const char*)rel2abs, array->data);
+            json_buf_append(jb, "[", 1);
+            for (size_t i = 0; i < array->size; i++) {
+                if (i > 0) json_buf_append(jb, ",", 1);
+                TRY(voidstar_to_json_buf_r, jb,
+                    data + i * schema->parameters[0]->width,
+                    schema->parameters[0]);
+            }
+            json_buf_append(jb, "]", 1);
+            break;
+        }
+        case MORLOC_TUPLE: {
+            json_buf_append(jb, "[", 1);
+            for (size_t i = 0; i < schema->size; i++) {
+                if (i > 0) json_buf_append(jb, ",", 1);
+                TRY(voidstar_to_json_buf_r, jb,
+                    (char*)voidstar + schema->offsets[i],
+                    schema->parameters[i]);
+            }
+            json_buf_append(jb, "]", 1);
+            break;
+        }
+        case MORLOC_MAP: {
+            json_buf_append(jb, "{", 1);
+            for (size_t i = 0; i < schema->size; i++) {
+                if (i > 0) json_buf_append(jb, ",", 1);
+                // write key
+                json_buf_append(jb, "\"", 1);
+                char* escaped_key = json_escape_string(schema->keys[i], strlen(schema->keys[i]));
+                if (escaped_key) {
+                    json_buf_append_str(jb, escaped_key);
+                    free(escaped_key);
+                }
+                json_buf_append(jb, "\":", 2);
+                // write value
+                TRY(voidstar_to_json_buf_r, jb,
+                    (char*)voidstar + schema->offsets[i],
+                    schema->parameters[i]);
+            }
+            json_buf_append(jb, "}", 1);
+            break;
+        }
+        default:
+            RAISE("Unexpected morloc type");
+    }
+
+    return true;
+}
+
+char* voidstar_to_json_string(const void* voidstar, const Schema* schema, ERRMSG) {
+    PTR_RETURN_SETUP(char)
+
+    json_buf_t* jb = json_buf_new();
+    bool ok = voidstar_to_json_buf_r(jb, voidstar, schema, &CHILD_ERRMSG);
+    if (!ok) {
+        json_buf_free(jb);
+        RAISE("Failed to serialize voidstar to JSON:\n%s", CHILD_ERRMSG);
+    }
+
+    return json_buf_finish(jb);
 }

@@ -26,4 +26,12 @@ typedef struct language_daemon_s {
     client_list_t* client_fds;
 } language_daemon_t;
 
+// Nexus socket descriptor for a language pool
+typedef struct morloc_socket_s {
+    char* lang;
+    char** syscmd;
+    char* socket_filename;
+    int pid;
+} morloc_socket_t;
+
 #endif // __MORLOC_CALL_H__

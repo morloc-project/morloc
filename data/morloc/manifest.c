@@ -1,4 +1,5 @@
 #include "morloc.h"
+#include "json.h"
 
 // ======================================================================
 // Internal JSON value types
@@ -617,6 +618,7 @@ manifest_t* parse_manifest(const char* text, ERRMSG) {
 
     manifest_t* m = (manifest_t*)calloc(1, sizeof(manifest_t));
     m->version = (int)jnum(jget(root, "version"));
+    m->name = nullable_strdup(jgets(root, "name"));
     m->build_dir = nullable_strdup(jgets(root, "build_dir"));
 
     const jval_t* jpools = jget(root, "pools");
@@ -654,6 +656,7 @@ manifest_t* read_manifest(const char* path, ERRMSG) {
 
 void free_manifest(manifest_t* manifest) {
     if (!manifest) return;
+    free(manifest->name);
     free(manifest->build_dir);
     for (size_t i = 0; i < manifest->n_pools; i++) {
         free(manifest->pools[i].lang);
@@ -669,4 +672,106 @@ void free_manifest(manifest_t* manifest) {
     // the manifest lives for the program lifetime.
     free(manifest->commands);
     free(manifest);
+}
+
+char* manifest_to_discovery_json(const manifest_t* manifest) {
+    json_buf_t* jb = json_buf_new();
+
+    json_write_obj_start(jb);
+
+    json_write_key(jb, "name");
+    json_write_string(jb, manifest->name ? manifest->name : "unknown");
+
+    json_write_key(jb, "version");
+    json_write_int(jb, manifest->version);
+
+    json_write_key(jb, "commands");
+    json_write_arr_start(jb);
+
+    for (size_t i = 0; i < manifest->n_commands; i++) {
+        manifest_command_t* cmd = &manifest->commands[i];
+        json_write_obj_start(jb);
+
+        json_write_key(jb, "name");
+        json_write_string(jb, cmd->name);
+
+        json_write_key(jb, "type");
+        json_write_string(jb, cmd->is_pure ? "pure" : "remote");
+
+        json_write_key(jb, "return_type");
+        json_write_string(jb, cmd->return_type);
+
+        json_write_key(jb, "return_schema");
+        json_write_string(jb, cmd->return_schema);
+
+        // argument info
+        json_write_key(jb, "args");
+        json_write_arr_start(jb);
+        for (size_t a = 0; a < cmd->n_args; a++) {
+            manifest_arg_t* arg = &cmd->args[a];
+            json_write_obj_start(jb);
+
+            json_write_key(jb, "kind");
+            switch (arg->kind) {
+                case MARG_POS:  json_write_string(jb, "pos"); break;
+                case MARG_OPT:  json_write_string(jb, "opt"); break;
+                case MARG_FLAG: json_write_string(jb, "flag"); break;
+                case MARG_GRP:  json_write_string(jb, "grp"); break;
+            }
+
+            if (arg->metavar) {
+                json_write_key(jb, "metavar");
+                json_write_string(jb, arg->metavar);
+            }
+
+            if (arg->type_desc) {
+                json_write_key(jb, "type");
+                json_write_string(jb, arg->type_desc);
+            }
+
+            // schema for positional/opt args
+            if ((arg->kind == MARG_POS || arg->kind == MARG_OPT) &&
+                cmd->arg_schemas && cmd->arg_schemas[a]) {
+                json_write_key(jb, "schema");
+                json_write_string(jb, cmd->arg_schemas[a]);
+            }
+
+            if (arg->default_val) {
+                json_write_key(jb, "default");
+                json_write_string(jb, arg->default_val);
+            }
+
+            if (arg->long_opt) {
+                json_write_key(jb, "long");
+                json_write_string(jb, arg->long_opt);
+            }
+
+            if (arg->short_opt) {
+                char short_str[2] = { arg->short_opt, '\0' };
+                json_write_key(jb, "short");
+                json_write_string(jb, short_str);
+            }
+
+            if (arg->desc && arg->desc[0] && arg->desc[0][0]) {
+                json_write_key(jb, "desc");
+                json_write_string(jb, arg->desc[0]);
+            }
+
+            json_write_obj_end(jb);
+        }
+        json_write_arr_end(jb);
+
+        // command description
+        if (cmd->desc && cmd->desc[0] && cmd->desc[0][0]) {
+            json_write_key(jb, "desc");
+            json_write_string(jb, cmd->desc[0]);
+        }
+
+        json_write_obj_end(jb);
+    }
+
+    json_write_arr_end(jb);
+    json_write_obj_end(jb);
+
+    return json_buf_finish(jb);
 }

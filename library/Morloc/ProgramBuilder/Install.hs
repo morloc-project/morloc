@@ -72,6 +72,12 @@ installProgram configHome installDir installName includes force = do
       copyFile localWrapper binPath
       makeExecutable binPath
 
+      -- Copy manifest to fdb/ for daemon discovery
+      let fdbDir = configHome </> "fdb"
+          fdbPath = fdbDir </> (installName ++ ".manifest")
+      createDirectoryIfMissing True fdbDir
+      extractAndWriteManifest binPath fdbPath
+
       -- Clean up local build artifacts
       if poolsExist then removeDirectoryRecursive "pools" else return ()
       removeFile localWrapper
@@ -164,3 +170,18 @@ makeExecutable :: FilePath -> IO ()
 makeExecutable path = do
   p <- getPermissions path
   setPermissions path (setOwnerExecutable True p)
+
+-- | Extract the manifest JSON from a wrapper script and write it to a file.
+-- The wrapper script has the format:
+--   #!/bin/sh
+--   exec mim "$0" "$@"
+--   ### MANIFEST ###
+--   <json>
+extractAndWriteManifest :: FilePath -> FilePath -> IO ()
+extractAndWriteManifest wrapperPath manifestPath = do
+  contents <- readFile wrapperPath
+  let marker = "### MANIFEST ###"
+      afterMarker = drop 1 $ dropWhile (/= marker) (lines contents)
+  case afterMarker of
+    [] -> return ()  -- no manifest found, skip silently
+    _  -> writeFile manifestPath (unlines afterMarker)

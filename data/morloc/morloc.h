@@ -37,6 +37,9 @@
 #include "slurm.h"
 #include "utility.h"
 #include "manifest.h"
+#include "daemon.h"
+#include "http.h"
+#include "router.h"
 
 #ifdef __cplusplus
 extern "C" {

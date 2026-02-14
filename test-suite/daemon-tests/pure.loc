@@ -1,0 +1,7 @@
+module pure (checkInt, checkReal, checkBool, checkStr, checkTuple)
+
+checkInt = 42 :: Int
+checkReal = 3.14 :: Real
+checkBool = True
+checkStr = "hello"
+checkTuple = (1 :: Int, True, "abc")

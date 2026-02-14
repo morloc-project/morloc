@@ -465,9 +465,10 @@ litSchemaStr NullX = "z"
 -- Manifest builder
 -- ======================================================================
 
-buildManifest :: Config -> String -> Int -> [(Lang, Socket)] -> [FData] -> [GastData] -> (Lang -> Int) -> Text
-buildManifest config buildDir buildTime daemonSets fdata gasts langToPool = jsonObj
+buildManifest :: Config -> String -> String -> Int -> [(Lang, Socket)] -> [FData] -> [GastData] -> (Lang -> Int) -> Text
+buildManifest config programName buildDir buildTime daemonSets fdata gasts langToPool = jsonObj
   [ ("version", "1")
+  , ("name", jsonStr (MT.pack programName))
   , ("build_dir", jsonStr (MT.pack buildDir))
   , ("build_time", jsonInt buildTime)
   , ("pools", jsonArr (map poolJson daemonSets))
@@ -561,11 +562,11 @@ generate cs rASTs = do
           Nothing -> error $ "Pool not found for language: " <> show lang
 
   -- Build manifest JSON with relative pool paths
-  let manifestJson = buildManifest config buildDir buildTime daemonSets fdata gasts langToPoolIndex
-      outfile = fromMaybe "nexus"
+  let outfile = fromMaybe "nexus"
         (stateOutfile st <|> if stateInstall st
           then fmap (\(MV n) -> MT.unpack n) (stateModuleName st)
           else Nothing)
+      manifestJson = buildManifest config outfile buildDir buildTime daemonSets fdata gasts langToPoolIndex
       wrapperScript = makeWrapperScript manifestJson
 
   return $
