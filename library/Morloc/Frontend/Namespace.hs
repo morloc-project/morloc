@@ -93,6 +93,7 @@ copyState oldIndex newIndex = do
       , stateBuildConfig = stateBuildConfig s
       , stateModuleName = stateModuleName s
       , stateInstall = stateInstall s
+      , stateInstallDir = stateInstallDir s
       }
   where
     updateGMap g = case GMap.yIsX oldIndex newIndex g of

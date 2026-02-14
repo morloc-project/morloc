@@ -539,9 +539,16 @@ generate cs rASTs = do
   -- Extract data for pure commands
   gasts <- mapM annotateGasts cs
 
-  -- Get build time and working directory
+  -- Get build time and compute build directory
   buildTime <- liftIO $ floor <$> Time.getPOSIXTime
-  buildDir <- liftIO Dir.getCurrentDirectory
+  buildDir <- if stateInstall st
+    then do
+      let name = fromMaybe "nexus"
+            (stateOutfile st <|> fmap (\(MV n) -> MT.unpack n) (stateModuleName st))
+          installDir = configHome config </> "exe" </> name
+      CMS.modify (\s -> s { stateInstallDir = Just installDir })
+      return installDir
+    else liftIO Dir.getCurrentDirectory
 
   -- Build pool list (deduplicated by language)
   let allSockets = concatMap (\x -> fdataSocket x : fdataSubSockets x) fdata
@@ -555,7 +562,10 @@ generate cs rASTs = do
 
   -- Build manifest JSON with relative pool paths
   let manifestJson = buildManifest config buildDir buildTime daemonSets fdata gasts langToPoolIndex
-      outfile = fromMaybe "nexus" (stateOutfile st)
+      outfile = fromMaybe "nexus"
+        (stateOutfile st <|> if stateInstall st
+          then fmap (\(MV n) -> MT.unpack n) (stateModuleName st)
+          else Nothing)
       wrapperScript = makeWrapperScript manifestJson
 
   return $

@@ -53,6 +53,8 @@ data MakeCommand = MakeCommand
   , makeVanilla :: Bool
   , makeOutfile :: String
   , makeInstall :: Bool
+  , makeForce :: Bool
+  , makeInclude :: [String]
   , makeScript :: String
   }
 
@@ -65,6 +67,8 @@ makeCommandParser =
     <*> optVanilla
     <*> optOutfile
     <*> optMakeInstall
+    <*> optMakeForce
+    <*> optMakeInclude
     <*> optScript
 
 makeSubcommand :: Mod CommandFields CliCommand
@@ -262,6 +266,24 @@ optMakeInstall =
   switch
     ( long "install"
         <> help "Install module to PATH"
+    )
+
+optMakeForce :: Parser Bool
+optMakeForce =
+  switch
+    ( long "force"
+        <> short 'f'
+        <> help "Overwrite existing install"
+    )
+
+optMakeInclude :: Parser [String]
+optMakeInclude =
+  many
+    ( strOption
+        ( long "include"
+            <> metavar "PATTERN"
+            <> help "File pattern to include in install"
+        )
     )
 
 optScript :: Parser String

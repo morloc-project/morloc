@@ -89,6 +89,7 @@ data MorlocState = MorlocState
   , stateBuildConfig :: BuildConfig
   , stateModuleName :: Maybe MVar
   , stateInstall :: Bool
+  , stateInstallDir :: Maybe Path
   }
   deriving (Show)
 
@@ -156,6 +157,7 @@ data PackageMeta
   , packageBugReports :: !Text
   , packageCppVersion :: !Int
   , packageDependencies :: [Text]
+  , packageInclude :: [Text]
   }
   deriving (Show, Ord, Eq)
 
@@ -237,6 +239,7 @@ instance Defaultable MorlocState where
       , stateBuildConfig = defaultValue
       , stateModuleName = Nothing
       , stateInstall = False
+      , stateInstallDir = Nothing
       }
 
 instance Defaultable PackageMeta where
@@ -255,6 +258,7 @@ instance Defaultable PackageMeta where
       , packageBugReports = ""
       , packageCppVersion = 17
       , packageDependencies = []
+      , packageInclude = []
       }
 
 instance FromJSON Config where
@@ -286,6 +290,7 @@ instance FromJSON PackageMeta where
       <*> o .:? "bug-reports" .!= ""
       <*> o .:? "cpp-version" .!= 0
       <*> o .:? "dependencies" .!= []
+      <*> o .:? "include" .!= []
 
 ----- Pretty instances -------------------------------------------------------
 

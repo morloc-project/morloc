@@ -10,6 +10,7 @@ Maintainer  : z@morloc.io
 module Subcommands (runMorloc) where
 
 import qualified Data.Map as Map
+import qualified Data.Text as T
 import qualified Morloc as M
 import Morloc (generatePools)
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
@@ -25,7 +26,9 @@ import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
 import Morloc.Namespace.Expr
 import Morloc.Namespace.State
+import qualified Morloc.ProgramBuilder.Install as Install
 import System.Exit (exitFailure, exitSuccess)
+import System.FilePath (takeFileName)
 import Text.Megaparsec.Error (errorBundlePretty)
 import UI
 
@@ -97,8 +100,23 @@ cmdMake args verbosity config buildConfig = do
       action = do
         MM.modify (\s -> s { stateInstall = install })
         M.writeProgram path code
-  MM.runMorlocMonad outfile verbosity config buildConfig action
-    >>= MM.writeMorlocReturn
+  result <- MM.runMorlocMonad outfile verbosity config buildConfig action
+  passed <- MM.writeMorlocReturn result
+  if passed && install
+    then do
+      let (_, finalState) = result
+          cliIncludes = map T.pack (makeInclude args)
+          pkgIncludes = concatMap packageInclude (statePackageMeta finalState)
+          allIncludes = pkgIncludes ++ cliIncludes
+      case stateInstallDir finalState of
+        Nothing -> do
+          putStrLn "Error: install directory was not set during compilation"
+          return False
+        Just installDir -> do
+          let installName = takeFileName installDir
+          Install.installProgram (configHome config) installDir installName allIncludes (makeForce args)
+          return True
+    else return passed
 
 cmdTypecheck :: TypecheckCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
 cmdTypecheck args _ config buildConfig = do
