@@ -836,6 +836,94 @@ static void handle_http_connection(
 }
 
 // ======================================================================
+// Thread pool
+// ======================================================================
+
+typedef struct daemon_job_s {
+    int client_fd;
+    int conn_type;          // 0 = length-prefixed (unix/tcp), 2 = http
+    struct daemon_job_s* next;
+} daemon_job_t;
+
+typedef struct daemon_job_queue_s {
+    daemon_job_t* head;
+    daemon_job_t* tail;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+} daemon_job_queue_t;
+
+// Read-only context shared by all workers
+typedef struct daemon_worker_ctx_s {
+    daemon_job_queue_t* queue;
+    manifest_t* manifest;
+    morloc_socket_t* sockets;
+    const char* shm_basename;
+} daemon_worker_ctx_t;
+
+static void queue_init(daemon_job_queue_t* q) {
+    q->head = NULL;
+    q->tail = NULL;
+    pthread_mutex_init(&q->mutex, NULL);
+    pthread_cond_init(&q->cond, NULL);
+}
+
+static void queue_push(daemon_job_queue_t* q, int fd, int type) {
+    daemon_job_t* job = (daemon_job_t*)malloc(sizeof(daemon_job_t));
+    job->client_fd = fd;
+    job->conn_type = type;
+    job->next = NULL;
+
+    pthread_mutex_lock(&q->mutex);
+    if (q->tail) {
+        q->tail->next = job;
+    } else {
+        q->head = job;
+    }
+    q->tail = job;
+    pthread_cond_signal(&q->cond);
+    pthread_mutex_unlock(&q->mutex);
+}
+
+// Returns NULL when shutdown_requested and queue is empty.
+static daemon_job_t* queue_pop(daemon_job_queue_t* q) {
+    pthread_mutex_lock(&q->mutex);
+    while (!q->head && !shutdown_requested) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 100000000; // 100ms
+        if (ts.tv_nsec >= 1000000000) {
+            ts.tv_sec += 1;
+            ts.tv_nsec -= 1000000000;
+        }
+        pthread_cond_timedwait(&q->cond, &q->mutex, &ts);
+    }
+    daemon_job_t* job = q->head;
+    if (job) {
+        q->head = job->next;
+        if (!q->head) q->tail = NULL;
+    }
+    pthread_mutex_unlock(&q->mutex);
+    return job;
+}
+
+static void* daemon_worker(void* arg) {
+    daemon_worker_ctx_t* ctx = (daemon_worker_ctx_t*)arg;
+    while (!shutdown_requested) {
+        daemon_job_t* job = queue_pop(ctx->queue);
+        if (!job) continue;
+        if (job->conn_type == 2) {
+            handle_http_connection(job->client_fd, ctx->manifest,
+                                   ctx->sockets, ctx->shm_basename);
+        } else {
+            handle_lp_connection(job->client_fd, ctx->manifest,
+                                 ctx->sockets, ctx->shm_basename);
+        }
+        free(job);
+    }
+    return NULL;
+}
+
+// ======================================================================
 // Main daemon event loop
 // ======================================================================
 
@@ -884,7 +972,7 @@ void daemon_run(
             close(sock_fd);
             return;
         }
-        listen(sock_fd, 16);
+        listen(sock_fd, 64);
 
         fds[nfds].fd = sock_fd;
         fds[nfds].events = POLLIN;
@@ -914,7 +1002,7 @@ void daemon_run(
             close(tcp_fd);
             return;
         }
-        listen(tcp_fd, 16);
+        listen(tcp_fd, 64);
 
         fds[nfds].fd = tcp_fd;
         fds[nfds].events = POLLIN;
@@ -944,7 +1032,7 @@ void daemon_run(
             close(http_fd);
             return;
         }
-        listen(http_fd, 16);
+        listen(http_fd, 64);
 
         fds[nfds].fd = http_fd;
         fds[nfds].events = POLLIN;
@@ -957,6 +1045,27 @@ void daemon_run(
         fprintf(stderr, "daemon: no listeners configured, exiting\n");
         return;
     }
+
+    // Start worker thread pool
+    daemon_job_queue_t queue;
+    queue_init(&queue);
+
+    daemon_worker_ctx_t worker_ctx = {
+        .queue = &queue,
+        .manifest = manifest,
+        .sockets = sockets,
+        .shm_basename = shm_basename
+    };
+
+    size_t n_workers = n_pools + 4;
+    if (n_workers < 4)  n_workers = 4;
+    if (n_workers > 32) n_workers = 32;
+
+    pthread_t* workers = (pthread_t*)calloc(n_workers, sizeof(pthread_t));
+    for (size_t i = 0; i < n_workers; i++) {
+        pthread_create(&workers[i], NULL, daemon_worker, &worker_ctx);
+    }
+    fprintf(stderr, "daemon: %zu worker threads\n", n_workers);
 
     fprintf(stderr, "daemon: ready\n");
 
@@ -987,18 +1096,31 @@ void daemon_run(
             }
 
             set_socket_timeouts(client_fd, 30);
-
-            if (fd_types[i] == 2) {
-                // HTTP
-                handle_http_connection(client_fd, manifest, sockets, shm_basename);
-            } else {
-                // Unix or TCP: length-prefixed JSON
-                handle_lp_connection(client_fd, manifest, sockets, shm_basename);
-            }
+            queue_push(&queue, client_fd, fd_types[i]);
         }
     }
 
     fprintf(stderr, "daemon: shutting down\n");
+
+    // Wake all workers and join
+    pthread_mutex_lock(&queue.mutex);
+    pthread_cond_broadcast(&queue.cond);
+    pthread_mutex_unlock(&queue.mutex);
+
+    for (size_t i = 0; i < n_workers; i++) {
+        pthread_join(workers[i], NULL);
+    }
+    free(workers);
+
+    // Drain any remaining jobs (close pending fds)
+    daemon_job_t* job;
+    while ((job = queue.head) != NULL) {
+        queue.head = job->next;
+        close(job->client_fd);
+        free(job);
+    }
+    pthread_mutex_destroy(&queue.mutex);
+    pthread_cond_destroy(&queue.cond);
 
     // Close listener sockets
     for (int i = 0; i < nfds; i++) {
