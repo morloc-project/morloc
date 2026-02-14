@@ -9,6 +9,7 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -1395,6 +1396,78 @@ SEXP morloc_waitpid_blocking(SEXP pid_r) {
 
 // }}} fork and fd-passing functions
 
+// {{{ shared counter functions (for dynamic worker spawning)
+
+static void shared_counter_finalizer(SEXP ptr) {
+    int* p = (int*)R_ExternalPtrAddr(ptr);
+    if (p != NULL) {
+        munmap(p, sizeof(int));
+        R_ClearExternalPtr(ptr);
+    }
+}
+
+SEXP morloc_shared_counter_create(void) {
+    int* p = (int*)mmap(NULL, sizeof(int),
+                        PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        error("mmap failed for shared counter: %s", strerror(errno));
+    }
+    *p = 0;
+    SEXP ptr = PROTECT(R_MakeExternalPtr(p, R_NilValue, R_NilValue));
+    R_RegisterCFinalizerEx(ptr, shared_counter_finalizer, TRUE);
+    UNPROTECT(1);
+    return ptr;
+}
+
+SEXP morloc_shared_counter_inc(SEXP ptr_r) {
+    int* p = (int*)R_ExternalPtrAddr(ptr_r);
+    if (p == NULL) error("shared counter is NULL");
+    int val = __atomic_add_fetch(p, 1, __ATOMIC_RELAXED);
+    return ScalarInteger(val);
+}
+
+SEXP morloc_shared_counter_dec(SEXP ptr_r) {
+    int* p = (int*)R_ExternalPtrAddr(ptr_r);
+    if (p == NULL) error("shared counter is NULL");
+    int val = __atomic_sub_fetch(p, 1, __ATOMIC_RELAXED);
+    return ScalarInteger(val);
+}
+
+SEXP morloc_shared_counter_read(SEXP ptr_r) {
+    int* p = (int*)R_ExternalPtrAddr(ptr_r);
+    if (p == NULL) error("shared counter is NULL");
+    int val = __atomic_load_n(p, __ATOMIC_RELAXED);
+    return ScalarInteger(val);
+}
+
+SEXP morloc_pipe(void) {
+    int fds[2];
+    if (pipe(fds) != 0) {
+        error("pipe failed: %s", strerror(errno));
+    }
+    SEXP result = PROTECT(allocVector(INTSXP, 2));
+    INTEGER(result)[0] = fds[0];  /* read end */
+    INTEGER(result)[1] = fds[1];  /* write end */
+    UNPROTECT(1);
+    return result;
+}
+
+SEXP morloc_write_byte(SEXP fd_r, SEXP byte_r) {
+    int fd = INTEGER(fd_r)[0];
+    unsigned char b = (unsigned char)RAW(byte_r)[0];
+    ssize_t n = write(fd, &b, 1);
+    return ScalarInteger((int)n);
+}
+
+SEXP morloc_close_fd(SEXP fd_r) {
+    int fd = INTEGER(fd_r)[0];
+    close(fd);
+    return R_NilValue;
+}
+
+// }}} shared counter functions
+
 // }}} exported functions
 
 
@@ -1426,6 +1499,13 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_install_sigterm_handler", (DL_FUNC) &morloc_install_sigterm_handler, 0},
         {"morloc_is_shutting_down", (DL_FUNC) &morloc_is_shutting_down, 0},
         {"morloc_detach_daemon", (DL_FUNC) &morloc_detach_daemon, 1},
+        {"morloc_shared_counter_create", (DL_FUNC) &morloc_shared_counter_create, 0},
+        {"morloc_shared_counter_inc", (DL_FUNC) &morloc_shared_counter_inc, 1},
+        {"morloc_shared_counter_dec", (DL_FUNC) &morloc_shared_counter_dec, 1},
+        {"morloc_shared_counter_read", (DL_FUNC) &morloc_shared_counter_read, 1},
+        {"morloc_pipe", (DL_FUNC) &morloc_pipe, 0},
+        {"morloc_write_byte", (DL_FUNC) &morloc_write_byte, 2},
+        {"morloc_close_fd", (DL_FUNC) &morloc_close_fd, 1},
         {NULL, NULL, 0}
     };
 

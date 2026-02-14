@@ -35,6 +35,33 @@ Each pool is a long-running process that:
 
 Pools are created in a temporary directory (`/tmp/morloc.XXXXXX/`) with socket files named by language (e.g., `pipe-py`, `pipe-cpp`).
 
+## Worker Dispatch Strategy
+
+Each pool forks multiple worker processes (typically `nproc - 1`) to handle requests concurrently. The dispatcher must route incoming client connections to an available worker.
+
+### Shared Queue (Current Approach)
+
+The Python and R pools use a single Unix socketpair as a shared job queue. The dispatcher writes client file descriptors (via `SCM_RIGHTS` / `sendmsg`) to one end; all workers block on `recvmsg` on the other end. The kernel delivers each fd to exactly one waiting worker.
+
+This design handles re-entrant callbacks correctly. When a worker makes a `foreign_call` to another pool and that pool calls back, the callback arrives as a new client connection. Since the blocked worker never calls `recvmsg`, the callback is picked up by an idle worker. Busy workers are invisible to the dispatch mechanism.
+
+The C++ pool achieves equivalent semantics using a shared queue protected by a mutex and condition variable, with threads instead of processes.
+
+### Why Not Round-Robin
+
+A naive round-robin dispatcher assigns connections to workers in fixed order (W0, W1, ..., W0, ...). This works for unidirectional calls but deadlocks under re-entrant callbacks:
+
+1. Worker W0 receives a job and makes a `foreign_call` to Pool B.
+2. Pool B processes the call and issues callbacks back to Pool A. Each callback is a new connection.
+3. The round-robin dispatcher sends callbacks to W1, W2, ..., Wn in order.
+4. When all N workers are blocked in `foreign_call`, the (N+1)th callback wraps around to W0 -- which is still blocked. The callback sits unread in W0's pipe while Pool B waits for the response.
+
+This circular dependency hangs all workers. The failure threshold is exactly N simultaneous bidirectional calls where N equals the worker count.
+
+### Depth Limitation
+
+Even with the shared queue, deep cross-language call chains are limited by the worker count. Each hop in a chain like `rId (pyId (rId (pyId ...)))` blocks a worker until the deeper computation returns. A depth-D chain (D alternating cross-language calls) requires roughly D/2 workers in each pool simultaneously. Chains deeper than `2 * (nproc - 1)` will deadlock due to worker exhaustion.
+
 ## Dispatch Flow
 
 ```

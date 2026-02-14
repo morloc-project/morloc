@@ -19,6 +19,7 @@
 
 #include <limits>
 #include <utility>
+#include <atomic>
 
 // needed for the thread pool
 #include <pthread.h>
@@ -28,6 +29,10 @@
 using namespace std;
 
 char* g_tmpdir;
+
+// Dynamic worker spawning: track how many threads are blocked in foreign_call
+static std::atomic<int> g_busy_count{0};
+static std::atomic<int> g_total_threads{0};
 
 uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) __attribute__((sentinel));
 
@@ -159,7 +164,10 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
         PROPAGATE_ERROR(errmsg)
     }
 
+    g_busy_count.fetch_add(1, std::memory_order_relaxed);
     uint8_t* result = send_and_receive_over_socket(socket_path, packet, &errmsg);
+    g_busy_count.fetch_sub(1, std::memory_order_relaxed);
+
     free(packet);
     if (errmsg != NULL) {
         free(args_array);
@@ -444,16 +452,18 @@ int main(int argc, char* argv[]) {
     sigaction(SIGTERM, &sa, NULL);
 
     long nthreads = sysconf(_SC_NPROCESSORS_ONLN);
-    std::vector<pthread_t> threads(nthreads);
-    int nstarted = 0;
-    for (int i = 0; i < nthreads; ++i) {
-        int rc = pthread_create(&threads[i], NULL, worker_thread, &queue);
+    std::vector<pthread_t> threads;
+    threads.reserve(nthreads);
+    for (long i = 0; i < nthreads; ++i) {
+        pthread_t t;
+        int rc = pthread_create(&t, NULL, worker_thread, &queue);
         if (rc != 0) {
             std::cerr << "pthread_create failed: " << strerror(rc) << std::endl;
             break;
         }
-        nstarted++;
+        threads.push_back(t);
     }
+    g_total_threads.store((int)threads.size(), std::memory_order_relaxed);
 
     while (!is_shutting_down()) {
         int client_fd = wait_for_client_with_timeout(daemon, 10000, &errmsg);
@@ -463,8 +473,19 @@ int main(int argc, char* argv[]) {
             free(errmsg);
             errmsg = NULL;
         }
-        if( client_fd >= 0 ){
+        if( client_fd > 0 ){
             job_queue_push(&queue, client_fd);
+        }
+
+        // Dynamic worker spawning: if all threads are blocked in foreign_call,
+        // spawn a new one so incoming callbacks can still be served.
+        if (g_busy_count.load(std::memory_order_relaxed) >= g_total_threads.load(std::memory_order_relaxed)) {
+            pthread_t t;
+            int rc = pthread_create(&t, NULL, worker_thread, &queue);
+            if (rc == 0) {
+                threads.push_back(t);
+                g_total_threads.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
 
@@ -472,7 +493,7 @@ int main(int argc, char* argv[]) {
 
     // Join all worker threads before freeing any resources they may reference.
     // Workers use pthread_cond_timedwait and will notice shutting_down within 100ms.
-    for (int i = 0; i < nstarted; ++i) {
+    for (size_t i = 0; i < threads.size(); ++i) {
         pthread_join(threads[i], NULL);
     }
 
