@@ -93,7 +93,11 @@ cmdMake args verbosity config buildConfig = do
   outfile <- case makeOutfile args of
     "" -> return Nothing
     x -> return . Just $ x
-  MM.runMorlocMonad outfile verbosity config buildConfig (M.writeProgram path code)
+  let install = makeInstall args
+      action = do
+        MM.modify (\s -> s { stateInstall = install })
+        M.writeProgram path code
+  MM.runMorlocMonad outfile verbosity config buildConfig action
     >>= MM.writeMorlocReturn
 
 cmdTypecheck :: TypecheckCommand -> Int -> Config.Config -> BuildConfig -> IO Bool

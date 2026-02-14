@@ -1,6 +1,6 @@
 all:
-	rm -f obs.txt
-	morloc make foo.loc 2> build.err
+	rm -f *.err obs.txt
+	morloc make -o nexus foo.loc 2> build.err
 	# below buffer interop
 	python3 make_test_data.py 4065 > test-data.json
 	./nexus pfoo test-data.json | wc -c 2>> obs.err  >> obs.txt
@@ -28,4 +28,4 @@ all:
 	./nexus rfoo test-data.json | wc -c 2>> obs.err  >> obs.txt
 
 clean:
-	rm -rf nexus* pool* __pycache__ data* test-data*
+	rm -rf nexus __pycache__ data* test-data*

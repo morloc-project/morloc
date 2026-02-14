@@ -21,7 +21,7 @@ import qualified Data.Text.IO as TIO
 import qualified Morloc.Data.Text as MT
 
 import Control.Exception (SomeException, displayException, try)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeFile)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getHomeDirectory, removeFile)
 import System.FilePath (takeFileName, replaceExtension)
 import System.IO (IOMode (WriteMode), hPutStrLn, stderr, withFile)
 import System.Process (callCommand, callProcess)
@@ -104,16 +104,23 @@ configureAllSteps verbose force slurmSupport config = do
   say "Installing morloc.h"
   TIO.writeFile (includeDir </> "morloc.h") DF.libmorlocHeader
 
-  -- Compile static nexus binary
-  say "Compiling morloc-nexus"
-  let binDir = homeDir </> "bin"
+  -- Compile mim (morloc install manager) dispatcher
+  say "Compiling mim"
+  userHome <- getHomeDirectory
+  let localBinDir = userHome </> ".local" </> "bin"
       nexusSrcPath = buildDir </> "nexus.c"
-      nexusBinPath = binDir </> "morloc-nexus"
-  createDirectoryIfMissing True binDir
+      mimBinPath = localBinDir </> "mim"
+  createDirectoryIfMissing True localBinDir
   TIO.writeFile nexusSrcPath (DF.embededFileText DF.nexusSource)
-  run "gcc" ["-O2", "-I" <> includeDir, "-o", nexusBinPath, nexusSrcPath,
+  run "gcc" ["-O2", "-I" <> includeDir, "-o", mimBinPath, nexusSrcPath,
              "-L" <> libDir, "-Wl,-rpath," <> libDir, "-lmorloc", "-lpthread"]
   removeFile nexusSrcPath
+
+  -- Create exe/ and fdb/ directories for build artifacts and installed manifests
+  let exeDir = homeDir </> "exe"
+      fdbDir = homeDir </> "fdb"
+  createDirectoryWithDescription "morloc exe directory" exeDir
+  createDirectoryWithDescription "morloc fdb directory" fdbDir
 
   say "Configuring C++ morloc api header"
   TIO.writeFile (includeDir </> DF.embededFileName DF.libcpplang) (DF.embededFileText DF.libcpplang)

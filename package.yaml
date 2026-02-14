@@ -81,6 +81,7 @@ dependencies:
   - scientific
   - template-haskell
   - text
+  - time
   - unordered-containers
   - yaml
   - zip-archive

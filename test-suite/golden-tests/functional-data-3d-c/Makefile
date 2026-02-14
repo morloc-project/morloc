@@ -1,6 +1,6 @@
 all:
-	rm -f obs.txt
-	morloc make main.loc 2> build.err
+	rm -f *.err obs.txt
+	morloc make -o nexus main.loc 2> build.err
 	> obs.txt
 	./nexus bar true true 5 2>> obs.err  >> obs.txt # 10
 	./nexus bar false true 5 2>> obs.err  >> obs.txt # 16
@@ -9,4 +9,4 @@ all:
 	./nexus foo true 5 2>> obs.err  >> obs.txt # 14
 
 clean:
-	rm -rf pool* nexus* __pycache__
+	rm -rf nexus __pycache__

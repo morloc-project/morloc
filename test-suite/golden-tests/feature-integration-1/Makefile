@@ -1,6 +1,6 @@
 all:
-	morloc make main.loc
+	morloc make -o nexus main.loc
 	./nexus test > obs.txt
 
 clean:
-	rm -rf __pycache__ pool* nexus* log
+	rm -rf __pycache__ nexus log

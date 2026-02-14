@@ -156,17 +156,19 @@ translate srcs es = do
   -- universalScopeMap :: GMap Int MVar Scope
   universalScopeMap <- MM.gets stateUniversalConcreteTypedefs
 
+  exeDir <- MM.gets (fromMaybe "." . stateExeDir)
+
   let recmap = unifyRecords . concatMap collectRecords $ es
       translatorState = defaultValue {translatorRecmap = recmap}
       code = CMS.evalState (makeCppCode srcs es universalScopeMap scopeMap) translatorState
 
-  maker <- makeTheMaker srcs
+  maker <- makeTheMaker exeDir srcs
 
   return $
     Script
       { scriptBase = "pool"
       , scriptLang = CppLang
-      , scriptCode = "." :/ File "pool.cpp" (Code . render $ code)
+      , scriptCode = exeDir :/ File "pool.cpp" (Code . render $ code)
       , scriptMake = maker
       }
 
@@ -205,10 +207,10 @@ metaTypedefs tmap i =
       Nothing -> Map.empty
     _ -> Map.empty
 
-makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
-makeTheMaker srcs = do
-  let outfile = pretty $ ML.makeExecutablePoolName CppLang
-  let src = pretty (ML.makeSourcePoolName CppLang)
+makeTheMaker :: String -> [Source] -> MorlocMonad [SysCommand]
+makeTheMaker exeDir srcs = do
+  let outfile = pretty $ exeDir </> ML.makeExecutablePoolName CppLang
+  let src = pretty $ exeDir </> ML.makeSourcePoolName CppLang
 
   -- this function cleans up source names (if needed) and generates compiler flags and paths to search
   (_, flags, includes) <- Mod.handleFlagsAndPaths CppLang srcs

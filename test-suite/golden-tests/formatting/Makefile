@@ -1,6 +1,6 @@
 all:
-	rm -f obs.txt z*
-	morloc make foo.loc 2> build.err
+	rm -f *.err obs.txt z*
+	morloc make -o nexus foo.loc 2> build.err
 	# 0
 	./nexus -f json f0 '[1,2,3,4,5,6]' > z0.json
 	./nexus -f mpk f0 z0.json > z0.mpk
@@ -33,4 +33,4 @@ all:
 	./nexus f5 z5.mpk 2>> obs.err  >> obs.txt
 
 clean:
-	rm -rf nexus* pool* z* __pycache__
+	rm -rf nexus z* __pycache__

@@ -574,8 +574,23 @@ morloc_socket_t* setup_sockets(
 // Manifest-driven help text
 // ======================================================================
 
+void print_mim_usage(void) {
+    fprintf(stderr, "Usage: mim <manifest> [OPTION...] COMMAND [ARG...]\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "mim is the morloc install manager and dispatcher.\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Arguments:\n");
+    fprintf(stderr, "  <manifest>           Path to a .manifest file or wrapper script\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "  -h, --help           Print this help message\n");
+    fprintf(stderr, "  -o, --output-file    Print to this file instead of STDOUT\n");
+    fprintf(stderr, "  -f, --output-format  Output format [json|mpk|voidstar]\n");
+    clean_exit(0);
+}
+
 void print_usage(const manifest_t* manifest) {
-    fprintf(stderr, "Usage: ./nexus [OPTION...] COMMAND [ARG...]\n");
+    fprintf(stderr, "Usage: mim <manifest> [OPTION...] COMMAND [ARG...]\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Nexus Options:\n");
     fprintf(stderr, " -h, --help            Print this help message\n");
@@ -609,7 +624,7 @@ void print_usage(const manifest_t* manifest) {
 // Print help for a specific subcommand
 void print_command_help(const manifest_command_t* cmd) {
     // Usage line
-    fprintf(stderr, "Usage: ./nexus %s", cmd->name);
+    fprintf(stderr, "Usage: mim <manifest> %s", cmd->name);
     // Check if there are non-positional args
     bool has_opts = false;
     for (size_t i = 0; i < cmd->n_args; i++) {
@@ -1049,6 +1064,96 @@ void dispatch(
     clean_exit(1);
 }
 
+// Read manifest payload from a file. If the file starts with "#!", scan for
+// the "### MANIFEST ###" marker and read the payload after it. Otherwise read
+// the entire file as the payload.
+char* read_manifest_payload(const char* path, char** errmsg) {
+    FILE* f = fopen(path, "r");
+    if (!f) {
+        *errmsg = strdup("Cannot open manifest file");
+        return NULL;
+    }
+
+    // Check for shebang
+    int c1 = fgetc(f);
+    int c2 = fgetc(f);
+    if (c1 == '#' && c2 == '!') {
+        // Scan for "### MANIFEST ###\n"
+        char line[4096];
+        // finish reading the shebang line
+        if (!fgets(line, sizeof(line), f)) {
+            fclose(f);
+            *errmsg = strdup("Unexpected EOF in wrapper script");
+            return NULL;
+        }
+        int found = 0;
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "### MANIFEST ###", 16) == 0) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            fclose(f);
+            *errmsg = strdup("No ### MANIFEST ### marker found in wrapper script");
+            return NULL;
+        }
+        // Read rest of file as payload
+        long start = ftell(f);
+        fseek(f, 0, SEEK_END);
+        long end = ftell(f);
+        long size = end - start;
+        fseek(f, start, SEEK_SET);
+        char* payload = (char*)malloc(size + 1);
+        if (!payload) {
+            fclose(f);
+            *errmsg = strdup("Out of memory reading manifest payload");
+            return NULL;
+        }
+        size_t nread = fread(payload, 1, size, f);
+        payload[nread] = '\0';
+        fclose(f);
+        return payload;
+    } else {
+        // Regular manifest file - read entire contents
+        rewind(f);
+        fseek(f, 0, SEEK_END);
+        long size = ftell(f);
+        rewind(f);
+        char* payload = (char*)malloc(size + 1);
+        if (!payload) {
+            fclose(f);
+            *errmsg = strdup("Out of memory reading manifest");
+            return NULL;
+        }
+        size_t nread = fread(payload, 1, size, f);
+        payload[nread] = '\0';
+        fclose(f);
+        return payload;
+    }
+}
+
+// Validate that all pool executables listed in the manifest exist
+void validate_pools(const manifest_t* manifest) {
+    for (size_t i = 0; i < manifest->n_pools; i++) {
+        manifest_pool_t* pool = &manifest->pools[i];
+        if (pool->exec && pool->exec[0]) {
+            // For interpreted languages the first arg is the interpreter,
+            // the second is the script. For compiled languages, the first
+            // arg is the executable itself. Check the last non-NULL arg.
+            size_t last = 0;
+            while (pool->exec[last + 1]) last++;
+            struct stat st;
+            if (stat(pool->exec[last], &st) != 0) {
+                fprintf(stderr, "Error: Build artifacts missing or stale. "
+                    "Pool file '%s' not found. Re-run `morloc make`.\n",
+                    pool->exec[last]);
+                exit(EXIT_FAILURE);
+            }
+        }
+    }
+}
+
 int main(int argc, char *argv[]) {
 
     config_t config = { 0, NULL, NULL, NULL, JSON };
@@ -1057,7 +1162,7 @@ int main(int argc, char *argv[]) {
         {"help",        no_argument,       0, 'h'},
         {"call-packet", required_argument, 0, 'c'},
         {"socket-base", required_argument, 0, 's'},
-        {"output-file", required_argument, 0, 'o'}, // where to write nexus final output
+        {"output-file", required_argument, 0, 'o'},
         {"output-form", required_argument, 0, 'f'},
         {NULL, 0, NULL, 0}
     };
@@ -1104,18 +1209,56 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Load manifest from argv[0] + ".manifest"
-    char* errmsg = NULL;
-    char manifest_path[PATH_MAX];
-    snprintf(manifest_path, sizeof(manifest_path), "%s.manifest", argv[0]);
+    // If -h with no manifest argument, show mim's own help
+    if (config.help_flag && optind >= argc) {
+        print_mim_usage();
+    }
 
-    manifest_t* manifest = read_manifest(manifest_path, &errmsg);
+    // Require a manifest path as the first positional argument
+    if (optind >= argc) {
+        print_mim_usage();
+    }
+
+    const char* manifest_path = argv[optind];
+    optind++;
+
+    // Second pass: parse options that appear after the manifest path
+    // (e.g., `mim ./main -h` or `./main -h` via wrapper script)
+    while ((opt = getopt_long(argc, argv, "+hc:s:o:f:", long_options, NULL)) != -1) {
+        switch (opt) {
+            case 'h': config.help_flag = 1; break;
+            case 'c': config.packet_path = optarg; break;
+            case 's': config.socket_base = optarg; break;
+            case 'o': config.output_path = optarg; break;
+            case 'f':
+                if (strcmp(optarg, "json") == 0) config.output_format = JSON;
+                else if (strcmp(optarg, "mpk") == 0) config.output_format = MessagePack;
+                else if (strcmp(optarg, "voidstar") == 0) config.output_format = VoidStar;
+                else { fprintf(stderr, "Invalid output format: %s\n", optarg); exit(EXIT_FAILURE); }
+                break;
+            default: break;
+        }
+    }
+
+    // Read manifest payload (handles both wrapper scripts and plain files)
+    char* errmsg = NULL;
+    char* payload = read_manifest_payload(manifest_path, &errmsg);
     if (errmsg != NULL) {
         fprintf(stderr, "Failed to load manifest '%s':\n%s\n", manifest_path, errmsg);
         exit(EXIT_FAILURE);
     }
 
-    // Handle help flag immediately
+    manifest_t* manifest = parse_manifest(payload, &errmsg);
+    free(payload);
+    if (errmsg != NULL) {
+        fprintf(stderr, "Failed to parse manifest '%s':\n%s\n", manifest_path, errmsg);
+        exit(EXIT_FAILURE);
+    }
+
+    // Validate pool executables exist
+    validate_pools(manifest);
+
+    // Handle help flag with manifest loaded (show module help)
     if (config.help_flag) {
         print_usage(manifest);
         exit(EXIT_SUCCESS);

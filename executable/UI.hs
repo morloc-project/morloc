@@ -52,6 +52,7 @@ data MakeCommand = MakeCommand
   , makeVerbose :: Int
   , makeVanilla :: Bool
   , makeOutfile :: String
+  , makeInstall :: Bool
   , makeScript :: String
   }
 
@@ -63,6 +64,7 @@ makeCommandParser =
     <*> optVerbose
     <*> optVanilla
     <*> optOutfile
+    <*> optMakeInstall
     <*> optScript
 
 makeSubcommand :: Mod CommandFields CliCommand
@@ -253,6 +255,13 @@ optOutfile =
         <> value ""
         <> showDefault
         <> help "The name of the generated executable"
+    )
+
+optMakeInstall :: Parser Bool
+optMakeInstall =
+  switch
+    ( long "install"
+        <> help "Install module to PATH"
     )
 
 optScript :: Parser String

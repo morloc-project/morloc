@@ -1,7 +1,7 @@
 all:
-	rm -f obs.txt
-	morloc make foo.loc 2> build.err
+	rm -f *.err obs.txt
+	morloc make -o nexus foo.loc 2> build.err
 	./nexus foo [1,2,3] [2,3,4] 2>> obs.err  >> obs.txt
 
 clean:
-	rm -f nexus* pool*
+	rm -f nexus

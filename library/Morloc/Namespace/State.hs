@@ -87,6 +87,10 @@ data MorlocState = MorlocState
   , stateSourceMap :: Map Int SrcLoc
   , stateSourceText :: Map Path Text
   , stateBuildConfig :: BuildConfig
+  , stateModuleName :: Maybe MVar
+  , stateInstall :: Bool
+  , stateExeDir :: Maybe Path
+  , stateSourceDir :: Maybe Path
   }
   deriving (Show)
 
@@ -233,6 +237,10 @@ instance Defaultable MorlocState where
       , stateSourceMap = Map.empty
       , stateSourceText = Map.empty
       , stateBuildConfig = defaultValue
+      , stateModuleName = Nothing
+      , stateInstall = False
+      , stateExeDir = Nothing
+      , stateSourceDir = Nothing
       }
 
 instance Defaultable PackageMeta where

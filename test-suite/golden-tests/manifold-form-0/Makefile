@@ -1,6 +1,6 @@
 all:
-	rm -f obs.txt
-	morloc make t0.loc 2> build.err
+	rm -f *.err obs.txt
+	morloc make -o nexus t0.loc 2> build.err
 	./nexus checkInt 2>> obs.err  >> obs.txt
 	./nexus checkSInt8 2>> obs.err  >> obs.txt
 	./nexus checkSInt16 2>> obs.err  >> obs.txt
@@ -15,4 +15,4 @@ all:
 	./nexus checkStr 2>> obs.err  >> obs.txt
 
 clean:
-	rm -f nexus*
+	rm -f nexus

@@ -1,6 +1,6 @@
 all:
-	rm -f obs.txt
-	morloc make main.loc > /dev/null 2> build.err
+	rm -f *.err obs.txt
+	morloc make -o nexus main.loc > /dev/null 2> build.err
 	echo foo > obs.txt 2> obs.err
 	./nexus foo --alg-config=algconf.json [1,2,3] 2>> obs.err  >> obs.txt
 	./nexus foo --alg-config=algconf.json -m 0 -n 0 [1,2,3] 2>> obs.err  >> obs.txt
@@ -28,4 +28,4 @@ all:
 	./nexus bif --sys-config sysconf.json --no-clean 2>> obs.err  >> obs.txt
 
 clean:
-	rm -rf nexus* __pycache__ pool*
+	rm -rf nexus __pycache__

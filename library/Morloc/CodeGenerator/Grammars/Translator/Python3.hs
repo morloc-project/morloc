@@ -43,6 +43,8 @@ translate srcs es = do
   home <- pretty <$> asks MC.configHome
   let opt = home <> "/opt"
 
+  exeDir <- gets (fromMaybe "." . stateExeDir)
+
   -- translate sources
   includeDocs <-
     mapM
@@ -63,7 +65,7 @@ translate srcs es = do
     Script
       { scriptBase = "pool"
       , scriptLang = Python3Lang
-      , scriptCode = "." :/ File exefile (Code . render $ code)
+      , scriptCode = exeDir :/ File exefile (Code . render $ code)
       , scriptMake = []
       }
   where

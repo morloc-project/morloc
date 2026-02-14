@@ -606,19 +606,14 @@ static manifest_command_t read_command(const jval_t* jc, ERRMSG) {
     return cmd;
 }
 
-manifest_t* read_manifest(const char* path, ERRMSG) {
+manifest_t* parse_manifest(const char* text, ERRMSG) {
     PTR_RETURN_SETUP(manifest_t)
-
-    size_t file_size = 0;
-    char* text = (char*)TRY(read_binary_file, path, &file_size);
 
     const char* p = text;
     jval_t* root = jparse(&p, &CHILD_ERRMSG);
     if (CHILD_ERRMSG != NULL) {
-        free(text);
-        RAISE("Failed to parse manifest JSON: %s\n%s", path, CHILD_ERRMSG)
+        RAISE("Failed to parse manifest JSON:\n%s", CHILD_ERRMSG)
     }
-    free(text);
 
     manifest_t* m = (manifest_t*)calloc(1, sizeof(manifest_t));
     m->version = (int)jnum(jget(root, "version"));
@@ -642,6 +637,17 @@ manifest_t* read_manifest(const char* path, ERRMSG) {
     }
 
     jfree(root);
+    return m;
+}
+
+manifest_t* read_manifest(const char* path, ERRMSG) {
+    PTR_RETURN_SETUP(manifest_t)
+
+    size_t file_size = 0;
+    char* text = (char*)TRY(read_binary_file, path, &file_size);
+
+    manifest_t* m = TRY(parse_manifest, text);
+    free(text);
     return m;
 }
 

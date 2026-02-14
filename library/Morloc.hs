@@ -27,20 +27,26 @@ import Morloc.CodeGenerator.Realize (realityCheck)
 import Morloc.CodeGenerator.Segment (segment)
 import Morloc.CodeGenerator.Serialize (serialize)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
+import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Frontend.API as F
 import Morloc.Frontend.Restructure (restructure)
 import Morloc.Frontend.Treeify (treeify)
 import qualified Morloc.Monad as MM
 import Morloc.ProgramBuilder.Build (buildProgram)
+import qualified System.Directory as SD
+import System.FilePath (takeDirectory)
 
 -- | Check the general types only
 typecheckFrontend ::
   Maybe Path ->
   Code ->
   MorlocMonad [AnnoS (Indexed TypeU) Many Int]
-typecheckFrontend path code =
-  F.parse path code
-    >>= restructure
+typecheckFrontend path code = do
+  dag <- F.parse path code
+  case DAG.roots dag of
+    (r:_) -> MM.modify (\s -> s { stateModuleName = Just r })
+    _ -> return ()
+  restructure dag
     >>= treeify
     >>= F.typecheck
 
@@ -77,7 +83,12 @@ writeProgram ::
   -- | source code text
   Code ->
   MorlocMonad ()
-writeProgram path code =
+writeProgram path code = do
+  case path of
+    Just p -> do
+      absDir <- liftIO $ SD.canonicalizePath (takeDirectory p)
+      MM.modify (\s -> s { stateSourceDir = Just absDir })
+    Nothing -> return ()
   typecheck path code
     -- evaluate all applied lambdas in rasts and gasts
     >>= bimapM (mapM applyLambdas) (mapM applyLambdas)
