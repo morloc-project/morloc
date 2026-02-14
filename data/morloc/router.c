@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 // Shutdown flag (shared with daemon.c via extern or separate instance)
@@ -200,6 +201,12 @@ daemon_response_t* router_forward(
     int sock = socket(AF_UNIX, SOCK_STREAM, 0);
     RAISE_IF(sock < 0, "Failed to create socket: %s", strerror(errno))
 
+    {
+        struct timeval tv = { .tv_sec = 60, .tv_usec = 0 };
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
+
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
@@ -213,6 +220,12 @@ daemon_response_t* router_forward(
 
         sock = socket(AF_UNIX, SOCK_STREAM, 0);
         RAISE_IF(sock < 0, "Failed to create socket: %s", strerror(errno))
+
+        {
+            struct timeval tv = { .tv_sec = 60, .tv_usec = 0 };
+            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        }
 
         if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
             close(sock);
@@ -309,71 +322,8 @@ daemon_response_t* router_forward(
     resp_json[resp_len] = '\0';
     close(sock);
 
-    // Parse response JSON
-    daemon_response_t* resp = (daemon_response_t*)calloc(1, sizeof(daemon_response_t));
-    // Simple extraction: look for "status", "result", "error", "id" keys
-    const char* status_val = strstr(resp_json, "\"status\"");
-    if (status_val) {
-        resp->success = (strstr(status_val, "\"ok\"") != NULL);
-    }
-
-    // Extract result (raw JSON value after "result":)
-    const char* result_key = strstr(resp_json, "\"result\":");
-    if (result_key) {
-        result_key += 9;
-        while (*result_key == ' ') result_key++;
-        // Find end of value
-        const char* val_start = result_key;
-        if (*result_key == '{' || *result_key == '[') {
-            int depth = 1;
-            char open = *result_key;
-            char close_ch = (open == '[') ? ']' : '}';
-            result_key++;
-            bool in_str = false;
-            while (*result_key && depth > 0) {
-                if (in_str) {
-                    if (*result_key == '\\') { result_key++; if (*result_key) result_key++; continue; }
-                    if (*result_key == '"') in_str = false;
-                } else {
-                    if (*result_key == '"') in_str = true;
-                    else if (*result_key == open) depth++;
-                    else if (*result_key == close_ch) depth--;
-                }
-                result_key++;
-            }
-            resp->result_json = strndup(val_start, (size_t)(result_key - val_start));
-        } else if (*result_key == '"') {
-            result_key++;
-            while (*result_key && *result_key != '"') {
-                if (*result_key == '\\') result_key++;
-                result_key++;
-            }
-            // Include quotes
-            resp->result_json = strndup(val_start, (size_t)(result_key + 1 - val_start));
-        } else {
-            // Number, bool, null
-            const char* num_start = result_key;
-            while (*result_key && *result_key != ',' && *result_key != '}') result_key++;
-            resp->result_json = strndup(num_start, (size_t)(result_key - num_start));
-        }
-    }
-
-    // Extract error string
-    const char* error_key = strstr(resp_json, "\"error\":");
-    if (error_key && !resp->success) {
-        error_key += 8;
-        while (*error_key == ' ') error_key++;
-        if (*error_key == '"') {
-            error_key++;
-            const char* err_start = error_key;
-            while (*error_key && *error_key != '"') {
-                if (*error_key == '\\') error_key++;
-                error_key++;
-            }
-            resp->error = strndup(err_start, (size_t)(error_key - err_start));
-        }
-    }
-
+    // Parse response JSON using proper parser
+    daemon_response_t* resp = daemon_parse_response(resp_json, resp_len, errmsg_);
     free(resp_json);
     return resp;
 }
@@ -397,7 +347,7 @@ char* router_build_discovery(router_t* router) {
         json_write_string(jb, prog->name);
 
         json_write_key(jb, "running");
-        json_write_bool(jb, prog->daemon_pid > 0);
+        json_write_bool(jb, prog->daemon_pid > 0 && kill(prog->daemon_pid, 0) == 0);
 
         if (prog->manifest) {
             json_write_key(jb, "commands");
@@ -632,6 +582,12 @@ void router_run(daemon_config_t* config, router_t* router) {
             int client_fd = accept(fds[i].fd, NULL, NULL);
             if (client_fd < 0) continue;
 
+            {
+                struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
+                setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            }
+
             char* errmsg = NULL;
 
             http_request_t* http_req = http_parse_request(client_fd, &errmsg);
@@ -699,8 +655,18 @@ void router_run(daemon_config_t* config, router_t* router) {
                 }
             } else {
                 // Forward call to program daemon
+                struct timespec t_start, t_end;
+                clock_gettime(CLOCK_MONOTONIC, &t_start);
+
                 daemon_response_t* resp = router_forward(router, target_program, dreq, &errmsg);
+
+                clock_gettime(CLOCK_MONOTONIC, &t_end);
+                double duration_ms = (t_end.tv_sec - t_start.tv_sec) * 1000.0
+                                   + (t_end.tv_nsec - t_start.tv_nsec) / 1e6;
+
                 if (errmsg) {
+                    fprintf(stderr, "router: %s/%s error %.1fms\n",
+                            target_program, dreq->command ? dreq->command : "-", duration_ms);
                     json_buf_t* jb = json_buf_new();
                     json_write_obj_start(jb);
                     json_write_key(jb, "status");
@@ -713,6 +679,9 @@ void router_run(daemon_config_t* config, router_t* router) {
                     free(body);
                     free(errmsg);
                 } else {
+                    fprintf(stderr, "router: %s/%s %s %.1fms\n",
+                            target_program, dreq->command ? dreq->command : "-",
+                            resp->success ? "ok" : "error", duration_ms);
                     size_t resp_len = 0;
                     char* resp_json = daemon_serialize_response(resp, &resp_len);
                     http_write_response(client_fd, resp->success ? 200 : 500,

@@ -14,14 +14,26 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 // Global shutdown flag, set by signal handlers
 static volatile sig_atomic_t shutdown_requested = 0;
 
+// Pool health callback, set by daemon_run()
+static pool_alive_fn_t g_pool_alive_fn = NULL;
+static size_t g_n_pools = 0;
+
 static void daemon_signal_handler(int sig) {
     (void)sig;
     shutdown_requested = 1;
+}
+
+// Set recv/send timeouts on a socket fd
+static void set_socket_timeouts(int fd, int timeout_sec) {
+    struct timeval tv = { .tv_sec = timeout_sec, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
 // ======================================================================
@@ -141,6 +153,125 @@ daemon_request_t* daemon_parse_request(const char* json, size_t len, ERRMSG) {
     }
 
     return req;
+}
+
+// Helper: skip a JSON value (string, number, bool, null, array, or object).
+// Returns pointer past the end of the value.
+static const char* skip_json_value(const char* p, const char* end) {
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+    if (p >= end) return p;
+
+    if (*p == '"') {
+        p++;
+        while (p < end && *p != '"') { if (*p == '\\') p++; p++; }
+        if (p < end) p++;
+        return p;
+    }
+    if (*p == '[' || *p == '{') {
+        int depth = 1;
+        char open = *p;
+        char close_ch = (open == '[') ? ']' : '}';
+        p++;
+        bool in_str = false;
+        while (p < end && depth > 0) {
+            if (in_str) {
+                if (*p == '\\') { p++; if (p < end) p++; continue; }
+                if (*p == '"') in_str = false;
+            } else {
+                if (*p == '"') in_str = true;
+                else if (*p == open) depth++;
+                else if (*p == close_ch) depth--;
+            }
+            p++;
+        }
+        return p;
+    }
+    // number, bool, null
+    while (p < end && *p != ',' && *p != '}' && *p != ']' &&
+           *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+    return p;
+}
+
+// Helper: extract the raw text of a JSON value starting at p.
+// Returns a newly allocated string, and advances *pp past the value.
+static char* extract_json_value(const char** pp, const char* end) {
+    const char* start = *pp;
+    while (start < end && (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r')) start++;
+    const char* val_end = skip_json_value(start, end);
+    char* result = strndup(start, (size_t)(val_end - start));
+    *pp = val_end;
+    return result;
+}
+
+daemon_response_t* daemon_parse_response(const char* json, size_t len, ERRMSG) {
+    PTR_RETURN_SETUP(daemon_response_t)
+
+    daemon_response_t* resp = (daemon_response_t*)calloc(1, sizeof(daemon_response_t));
+    RAISE_IF(!resp, "Failed to allocate daemon_response_t")
+
+    const char* p = json;
+    const char* end = json + len;
+
+    // Skip whitespace and opening brace
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+    if (p < end && *p == '{') p++;
+
+    while (p < end && *p != '}') {
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',')) p++;
+        if (p >= end || *p == '}') break;
+
+        // Read key
+        if (*p != '"') { daemon_free_response(resp); RAISE("Expected '\"' in response JSON"); }
+        p++;
+        const char* key_start = p;
+        while (p < end && *p != '"') p++;
+        size_t key_len = (size_t)(p - key_start);
+        p++; // closing quote
+
+        // Skip colon
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+        if (p < end && *p == ':') p++;
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+
+        if (key_len == 2 && strncmp(key_start, "id", 2) == 0) {
+            if (*p == '"') {
+                p++;
+                const char* val_start = p;
+                while (p < end && *p != '"') { if (*p == '\\') p++; p++; }
+                resp->id = strndup(val_start, (size_t)(p - val_start));
+                p++;
+            } else {
+                p = skip_json_value(p, end);
+            }
+        } else if (key_len == 6 && strncmp(key_start, "status", 6) == 0) {
+            if (*p == '"') {
+                p++;
+                const char* val_start = p;
+                while (p < end && *p != '"') p++;
+                size_t val_len = (size_t)(p - val_start);
+                resp->success = (val_len == 2 && strncmp(val_start, "ok", 2) == 0);
+                p++;
+            } else {
+                p = skip_json_value(p, end);
+            }
+        } else if (key_len == 6 && strncmp(key_start, "result", 6) == 0) {
+            resp->result_json = extract_json_value(&p, end);
+        } else if (key_len == 5 && strncmp(key_start, "error", 5) == 0) {
+            if (*p == '"') {
+                p++;
+                const char* val_start = p;
+                while (p < end && *p != '"') { if (*p == '\\') p++; p++; }
+                resp->error = strndup(val_start, (size_t)(p - val_start));
+                p++;
+            } else {
+                p = skip_json_value(p, end);
+            }
+        } else {
+            p = skip_json_value(p, end);
+        }
+    }
+
+    return resp;
 }
 
 void daemon_free_request(daemon_request_t* req) {
@@ -290,7 +421,22 @@ daemon_response_t* daemon_dispatch(
 
     if (request->method == DAEMON_HEALTH) {
         resp->success = true;
-        resp->result_json = strdup("{\"status\":\"ok\"}");
+        if (g_pool_alive_fn && g_n_pools > 0) {
+            json_buf_t* jb = json_buf_new();
+            json_write_obj_start(jb);
+            json_write_key(jb, "status");
+            json_write_string(jb, "ok");
+            json_write_key(jb, "pools");
+            json_write_arr_start(jb);
+            for (size_t i = 0; i < g_n_pools; i++) {
+                json_write_bool(jb, g_pool_alive_fn(i));
+            }
+            json_write_arr_end(jb);
+            json_write_obj_end(jb);
+            resp->result_json = json_buf_finish(jb);
+        } else {
+            resp->result_json = strdup("{\"status\":\"ok\"}");
+        }
         return resp;
     }
 
@@ -557,6 +703,27 @@ static bool write_lp_message(int fd, const char* data, size_t len, ERRMSG) {
     return true;
 }
 
+static void log_request(const char* protocol, const daemon_request_t* req,
+                        const daemon_response_t* resp, double duration_ms) {
+    const char* method_str = "unknown";
+    if (req) {
+        switch (req->method) {
+            case DAEMON_CALL:     method_str = "call"; break;
+            case DAEMON_DISCOVER: method_str = "discover"; break;
+            case DAEMON_HEALTH:   method_str = "health"; break;
+        }
+    }
+    const char* cmd = (req && req->command) ? req->command : "-";
+    const char* status = (resp && resp->success) ? "ok" : "error";
+
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    fprintf(stderr, "daemon: %ld.%03ld %s %s %s %s %.1fms\n",
+            (long)now.tv_sec, now.tv_nsec / 1000000,
+            protocol, method_str, cmd, status, duration_ms);
+}
+
 // Handle one connection on a socket/TCP listener
 static void handle_lp_connection(
     int client_fd,
@@ -592,7 +759,15 @@ static void handle_lp_connection(
         return;
     }
 
+    struct timespec t_start, t_end;
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
+
     daemon_response_t* resp = daemon_dispatch(manifest, req, sockets, shm_basename);
+
+    clock_gettime(CLOCK_MONOTONIC, &t_end);
+    double duration_ms = (t_end.tv_sec - t_start.tv_sec) * 1000.0
+                       + (t_end.tv_nsec - t_start.tv_nsec) / 1e6;
+    log_request("lp", req, resp, duration_ms);
 
     size_t resp_len = 0;
     char* resp_json = daemon_serialize_response(resp, &resp_len);
@@ -638,7 +813,15 @@ static void handle_http_connection(
     }
     http_free_request(http_req);
 
+    struct timespec t_start, t_end;
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
+
     daemon_response_t* resp = daemon_dispatch(manifest, req, sockets, shm_basename);
+
+    clock_gettime(CLOCK_MONOTONIC, &t_end);
+    double duration_ms = (t_end.tv_sec - t_start.tv_sec) * 1000.0
+                       + (t_end.tv_nsec - t_start.tv_nsec) / 1e6;
+    log_request("http", req, resp, duration_ms);
 
     size_t resp_len = 0;
     char* resp_json = daemon_serialize_response(resp, &resp_len);
@@ -663,8 +846,13 @@ void daemon_run(
     daemon_config_t* config,
     manifest_t* manifest,
     morloc_socket_t* sockets,
+    size_t n_pools,
     const char* shm_basename
 ) {
+    // Set pool health globals for daemon_dispatch
+    g_pool_alive_fn = config->pool_alive_fn;
+    g_n_pools = n_pools;
+
     // Install signal handlers for graceful shutdown
     struct sigaction sa;
     sa.sa_handler = daemon_signal_handler;
@@ -780,6 +968,12 @@ void daemon_run(
             fprintf(stderr, "daemon: poll error: %s\n", strerror(errno));
             break;
         }
+
+        // Check and restart any crashed pools
+        if (config->pool_check_fn) {
+            config->pool_check_fn(sockets, n_pools);
+        }
+
         if (ready == 0) continue;
 
         for (int i = 0; i < nfds; i++) {
@@ -791,6 +985,8 @@ void daemon_run(
                 fprintf(stderr, "daemon: accept error: %s\n", strerror(errno));
                 continue;
             }
+
+            set_socket_timeouts(client_fd, 30);
 
             if (fd_types[i] == 2) {
                 // HTTP

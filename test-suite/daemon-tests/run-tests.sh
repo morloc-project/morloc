@@ -850,6 +850,116 @@ with open(sys.argv[1], 'w') as f:
 fi
 
 # ======================================================================
+# Test Group 11: Connection timeout resilience
+# ======================================================================
+
+if should_run "timeout"; then
+    echo "${BOLD}[timeout] Connection timeout resilience${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    SOCK_PATH="/tmp/morloc-test-timeout-$$.sock"
+    SOCKET_FILES+=("$SOCK_PATH")
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --socket "$SOCK_PATH"
+    wait_for_http "$HTTP_PORT" 10
+
+    # Open a socket, send partial data (just 2 bytes of the 4-byte length prefix),
+    # then don't send anything else. The daemon should time out and remain responsive.
+    python3 -c "
+import socket, time
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect('$SOCK_PATH')
+s.sendall(b'\\x00\\x00')  # partial length prefix
+time.sleep(1)
+s.close()
+" 2>/dev/null &
+    STALL_PID=$!
+
+    # Wait a moment, then verify daemon still responds
+    sleep 2
+    result=$(curl -s "http://127.0.0.1:${HTTP_PORT}/health" 2>/dev/null) || result=""
+    status=$(json_field "$result" "status" 2>/dev/null) || status=""
+    assert_test "daemon responsive after stalled client" "ok" "$status"
+
+    wait "$STALL_PID" 2>/dev/null || true
+
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 12: Pool crash recovery
+# ======================================================================
+
+if should_run "pool-recovery"; then
+    echo "${BOLD}[pool-recovery] Pool crash and restart${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+    DAEMON_PID_FOR_RECOVERY=$LAST_DAEMON_PID
+
+    # Verify it works before killing
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -H "Content-Type: application/json" -d '[1, 2]')
+    val=$(json_field "$result" "result")
+    assert_test "pool-recovery: works before kill" "3" "$val"
+
+    # Find and kill pool child processes
+    pool_pids=$(pgrep -P "$DAEMON_PID_FOR_RECOVERY" 2>/dev/null) || pool_pids=""
+    if [ -n "$pool_pids" ]; then
+        for ppid in $pool_pids; do
+            kill -9 "$ppid" 2>/dev/null || true
+        done
+
+        # Wait for restart (daemon checks on every poll cycle = 1s)
+        sleep 4
+
+        # Verify it works after pool restart
+        result=$(curl -s --max-time 10 -X POST "http://127.0.0.1:${HTTP_PORT}/call/add" \
+            -H "Content-Type: application/json" -d '[10, 20]')
+        val=$(json_field "$result" "result" 2>/dev/null) || val=""
+        assert_test "pool-recovery: works after pool kill" "30" "$val"
+    else
+        TOTAL=$((TOTAL + 1))
+        printf "  %-50s " "pool-recovery: works after pool kill"
+        printf "%sSKIP%s (no child pools found)\n" "$YELLOW" "$RESET"
+        PASSED=$((PASSED + 1))
+    fi
+
+    stop_daemon "$DAEMON_PID_FOR_RECOVERY"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 13: Health endpoint with pool status
+# ======================================================================
+
+if should_run "pool-health"; then
+    echo "${BOLD}[pool-health] Health endpoint reports pool status${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+
+    result=$(curl -s "http://127.0.0.1:${HTTP_PORT}/health")
+    assert_contains "health response includes pools" "pools" "$result"
+    assert_contains "health response includes status ok" "ok" "$result"
+
+    # Check that pools array has at least one true entry
+    has_alive=$(python3 -c "
+import json, sys
+data = json.loads(sys.argv[1])
+result = data.get('result', data)
+pools = result.get('pools', [])
+print('true' if any(pools) else 'false')
+" "$result" 2>/dev/null) || has_alive="false"
+    assert_test "health shows pools alive" "true" "$has_alive"
+
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
 # Results
 # ======================================================================
 

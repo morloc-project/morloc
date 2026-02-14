@@ -333,6 +333,79 @@ void start_daemons(morloc_socket_t** all_sockets){
     }
 }
 
+// Check for crashed pools (pids[i] == -1) and restart them.
+// Called from the daemon event loop on every poll cycle.
+void check_and_restart_pools(morloc_socket_t* sockets, size_t n_pools) {
+    char* errmsg = NULL;
+
+    for (size_t i = 0; i < n_pools; i++) {
+        if (pids[i] != -1) continue;
+
+        fprintf(stderr, "daemon: pool %zu died, restarting...\n", i);
+
+        pid_t new_pid = start_language_server(&sockets[i], &errmsg);
+        if (errmsg) {
+            fprintf(stderr, "daemon: failed to restart pool %zu: %s\n", i, errmsg);
+            free(errmsg);
+            errmsg = NULL;
+            continue;
+        }
+
+        pids[i] = new_pid;
+        pgids[i] = new_pid;
+        sockets[i].pid = new_pid;
+
+        // Ping with exponential backoff to wait for pool to be ready
+        uint8_t* ping_packet = make_ping_packet();
+        double retry_time = INITIAL_RETRY_DELAY;
+        int ping_timeout = INITIAL_PING_TIMEOUT_MICROSECONDS;
+        bool started = false;
+
+        for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            if (pids[i] == -1) {
+                fprintf(stderr, "daemon: restarted pool %zu died immediately\n", i);
+                break;
+            }
+
+            uint8_t* return_data = send_and_receive_over_socket_wait(
+                sockets[i].socket_filename, ping_packet,
+                ping_timeout, ping_timeout, &errmsg);
+
+            if (errmsg == NULL && return_data != NULL) {
+                free(return_data);
+                started = true;
+                break;
+            }
+            free(errmsg);
+            errmsg = NULL;
+            free(return_data);
+
+            struct timespec sleep_time = {
+                .tv_sec = (time_t)retry_time,
+                .tv_nsec = (long)((retry_time - (time_t)retry_time) * 1e9)
+            };
+            nanosleep(&sleep_time, NULL);
+            retry_time *= RETRY_MULTIPLIER;
+            ping_timeout = 2 * ping_timeout;
+        }
+        free(ping_packet);
+
+        if (started) {
+            fprintf(stderr, "daemon: pool %zu restarted (pid %d)\n", i, (int)new_pid);
+        } else {
+            fprintf(stderr, "daemon: pool %zu failed to restart\n", i);
+        }
+    }
+}
+
+// Check if a pool at given index is alive
+bool pool_is_alive(size_t pool_index) {
+    if (pool_index >= MAX_DAEMONS) return false;
+    pid_t pid = pids[pool_index];
+    if (pid <= 0) return false;
+    return (kill(pid, 0) == 0);
+}
+
 void run_command(
     uint32_t mid,
     argument_t** args,
@@ -1352,9 +1425,12 @@ int main(int argc, char *argv[]) {
         daemon_config_t dc = {
             .unix_socket_path = config.unix_socket_path,
             .tcp_port = config.tcp_port,
-            .http_port = config.http_port
+            .http_port = config.http_port,
+            .pool_check_fn = check_and_restart_pools,
+            .pool_alive_fn = pool_is_alive,
+            .n_pools = manifest->n_pools
         };
-        daemon_run(&dc, manifest, sockets, shm_basename);
+        daemon_run(&dc, manifest, sockets, manifest->n_pools, shm_basename);
         clean_exit(0);
     }
 
