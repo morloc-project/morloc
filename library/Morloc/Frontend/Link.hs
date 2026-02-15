@@ -209,6 +209,9 @@ addLocalState m0 e0 s0 = do
           MM.modify (\s -> s {stateSignatures = GMap idmap sigmap'})
           let lstate' = lstate {linkTerms = Map.insert v idx (linkTerms lstate)}
           return (terms', lstate')
+    findFreeDefs (ExprI _ (LetE bindings body)) s = do
+      s' <- foldrM (\(_, e) s0 -> findFreeDefs e s0) s bindings
+      findFreeDefs body s'
     findFreeDefs (ExprI _ (ModE _ es)) s = foldrM findFreeDefs s es
     findFreeDefs _ s = return s
 
@@ -349,6 +352,12 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
     linkLocal bnds c cs (ExprI i (ModE m es))
       | m /= m0 = MM.throwSourcedError i $ "Nested modules are not currently supported"
       | otherwise = mapM_ (linkLocal bnds c cs) es
+    -- let-bound variables are local, like lambda-bound
+    linkLocal bnds c cs (ExprI _ (LetE bindings body)) = do
+      bnds' <- foldlM (\b (v, e) -> do
+        linkLocal b c cs e
+        return (Set.insert v b)) bnds bindings
+      linkLocal bnds' c cs body
     -- simple recursive cases
     linkLocal bnds c cs (ExprI _ (LstE es)) = mapM_ (linkLocal bnds c cs) es
     linkLocal bnds c cs (ExprI _ (TupE es)) = mapM_ (linkLocal bnds c cs) es

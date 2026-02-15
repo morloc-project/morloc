@@ -405,6 +405,21 @@ expressPolyExpr _ _ _ (AnnoS (Idx i c) (Idx cidx _, rs) (BndS v)) = do
           <> "\n  gidx:" <+> pretty cidx
           <> "\n  rs:" <+> list (map pretty rs)
 
+expressPolyExpr _ _ _ (AnnoS (Idx i c) (Idx cidx _, rs) (LetBndS v)) = do
+  case [j | (Arg j v') <- rs, v == v'] of
+    [r] -> return $ PolyLetVar (Idx cidx c) r
+    _ -> MM.throwSourcedError i $ "Undefined let-bound variable:" <+> pretty v
+
+expressPolyExpr findRemote parentLang parentType
+    (AnnoS _ (Idx cidx lang, _) (LetS v e1 e2)) = do
+  let bodyArgs = case e2 of AnnoS _ (_, args) _ -> args
+      letId = case [j | Arg j v' <- bodyArgs, v' == v] of
+                [j] -> j
+                _   -> error "Bug: let-bound variable not found in body annotation"
+  e1' <- expressPolyExprWrap lang parentType e1
+  e2' <- expressPolyExprWrap lang parentType e2
+  return $ PolyLet letId e1' e2'
+
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (RealS x)) = return $ PolyReal (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (IntS x)) = return $ PolyInt (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (LogS x)) = return $ PolyLog (Idx cidx v) x

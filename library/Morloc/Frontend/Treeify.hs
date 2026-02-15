@@ -27,9 +27,12 @@ import qualified Morloc.Monad as MM
 data TermOrigin = Declared ExprI | Sourced Source
   deriving (Show, Ord, Eq)
 
+data BindKind = LambdaBound | LetBound
+  deriving (Show, Eq)
+
 -- Manage unique naming in each tree
 data Namer = Namer
-  { namerMap :: Map.Map EVar EVar
+  { namerMap :: Map.Map EVar (EVar, BindKind)
   , namerIndex :: Int
   }
   deriving (Show)
@@ -135,6 +138,7 @@ linkAndRemoveAnnotations = f
       return . ExprI i $ NamE (zip (map fst rs) es')
     f (ExprI i (AppE e es)) = ExprI i <$> (AppE <$> f e <*> mapM f es)
     f (ExprI i (LamE vs e)) = ExprI i <$> (LamE vs <$> f e)
+    f (ExprI i (LetE bindings body)) = ExprI i <$> (LetE <$> mapM (\(v, e) -> (,) v <$> f e) bindings <*> f body)
     f e@(ExprI _ _) = return e
 
 {- | Build the call tree for a single nexus command. The result is ambiguous,
@@ -199,12 +203,13 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
           let etypes = map (fromJust . termGeneral) ts
           return $ (namer', VarS v (PolymorphicExpr cls clsName t (zip etypes ess)))
 
-        -- Terms not associated with TermTypes objects must be lambda-bound
+        -- Terms not associated with TermTypes objects must be lambda-bound or let-bound
         -- These terms will be renamed for uniqueness
         _ -> do
           MM.sayVVV $ "bound term" <+> pretty v
           case Map.lookup v (namerMap namer) of
-            (Just v') -> return (namer, BndS v')
+            (Just (v', LambdaBound)) -> return (namer, BndS v')
+            (Just (v', LetBound)) -> return (namer, LetBndS v')
             Nothing -> MM.throwSourcedError gi0 $ "Undefined term in namer map:" <+> pretty v
       where
         termtypesToAnnoS :: Int -> Namer -> TermTypes -> MorlocMonad (Namer, [AnnoS Int ManyPoly Int])
@@ -225,19 +230,21 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
       let keys = map fst rs
       return (namer', NamS (zip keys vals))
     f namer (LamE vs e) = do
-      let namer' = foldr updateRenamer namer vs
-          vs' = map (fromJust . (flip Map.lookup) (namerMap namer')) vs
+      let namer' = foldr (updateRenamer LambdaBound) namer vs
+          vs' = map (fst . fromJust . (flip Map.lookup) (namerMap namer')) vs
       (_, e') <- collectAnnoS namer' e
       -- return the original name, the lambda bound terms are defined only below
       return (namer, LamS vs' e')
-      where
-        updateRenamer :: EVar -> Namer -> Namer
-        updateRenamer v (Namer rmap ridx) =
-          let v' = EV (unEVar v <> "@" <> MT.show' ridx)
-           in Namer
-                { namerMap = Map.insert v v' rmap
-                , namerIndex = ridx + 1
-                }
+    f namer (LetE ((v, e1) : rest) body) = do
+      (namer1, e1') <- collectAnnoS namer e1
+      let namer2 = updateRenamer LetBound v namer1
+          v' = fst $ fromJust $ Map.lookup v (namerMap namer2)
+          innerBody = case rest of
+            [] -> body
+            _  -> ExprI (exprIIdx body) (LetE rest body)
+      (_, body') <- collectAnnoS namer2 innerBody
+      return (namer, LetS v' e1' body')
+    f _ (LetE [] _) = error "Bug in collectExprS: empty let bindings"
     f namer (AppE e es) = do
       (namer', e') <- collectAnnoS namer e
       (namer'', es') <- statefulMapM collectAnnoS namer' es
@@ -251,6 +258,17 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     -- all other expressions are strictly illegal here and represent compiler bugs
     f _ e = error $ "Bug in collectExprS: " <> show (render (pretty e))
 
+updateRenamer :: BindKind -> EVar -> Namer -> Namer
+updateRenamer kind v (Namer rmap ridx) =
+  let v' = EV (unEVar v <> "@" <> MT.show' ridx)
+   in Namer
+        { namerMap = Map.insert v (v', kind) rmap
+        , namerIndex = ridx + 1
+        }
+
+exprIIdx :: ExprI -> Int
+exprIIdx (ExprI i _) = i
+
 reindexExprI :: ExprI -> MorlocMonad ExprI
 reindexExprI (ExprI i e) = ExprI <$> newIndex i <*> reindexExpr e
 
@@ -263,6 +281,7 @@ reindexExpr (LamE vs e) = LamE vs <$> reindexExprI e
 reindexExpr (LstE es) = LstE <$> mapM reindexExprI es
 reindexExpr (NamE rs) = NamE <$> mapM (\(k, e) -> (,) k <$> reindexExprI e) rs
 reindexExpr (TupE es) = TupE <$> mapM reindexExprI es
+reindexExpr (LetE bindings body) = LetE <$> mapM (\(v, e) -> (,) v <$> reindexExprI e) bindings <*> reindexExprI body
 reindexExpr e = return e
 
 -- FIXME: when I add linking to line numbers, I'll need to update that map

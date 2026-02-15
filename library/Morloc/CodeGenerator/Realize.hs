@@ -139,6 +139,12 @@ realize s0 = do
     scoreExpr rstat (IntS x, i) = return (IntS x, zipLang i rstat)
     scoreExpr rstat (LogS x, i) = return (LogS x, zipLang i rstat)
     scoreExpr rstat (StrS x, i) = return (StrS x, zipLang i rstat)
+    scoreExpr rstat (LetS v e1 e2, i) = do
+      e1' <- scoreAnnoS rstat e1
+      e2' <- scoreAnnoS rstat e2
+      let best = minPairs (scoresOf e2')
+      return (LetS v e1' e2', Idx i best)
+    scoreExpr rstat (LetBndS v, i) = return (LetBndS v, zipLang i rstat)
 
     -- calculate the score for an application based on the score of the function
     -- and the scores of the arguments
@@ -332,6 +338,12 @@ realize s0 = do
     collapseExpr _ lang (IntS x, Idx i _) = return (IntS x, Idx i lang)
     collapseExpr _ lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
     collapseExpr _ lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
+    collapseExpr _ l1 (LetS v e1 e2, Idx i ss) = do
+      lang <- chooseLanguage l1 ss
+      e1' <- collapseAnnoS lang e1
+      e2' <- collapseAnnoS lang e2
+      return (LetS v e1' e2', Idx i lang)
+    collapseExpr _ lang (LetBndS v, Idx i _) = return (LetBndS v, Idx i lang)
 
     chooseLanguage :: Maybe Lang -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
     chooseLanguage l1 ss = do
@@ -390,6 +402,8 @@ realize s0 = do
             (LogS x) -> return (LogS x)
             (StrS x) -> return (StrS x)
             (ExeS x) -> return (ExeS x)
+            (LetS v e1 e2) -> LetS v <$> f lang e1 <*> f lang e2
+            (LetBndS v) -> return (LetBndS v)
           return (AnnoS g (Idx i lang) e'')
 
 {- | This function is called on trees that contain no language-specific
@@ -424,6 +438,7 @@ removeVarS (AnnoS g c (LamS vs x)) = AnnoS g c (LamS vs (removeVarS x))
 removeVarS (AnnoS g c (LstS xs)) = AnnoS g c (LstS (map removeVarS xs))
 removeVarS (AnnoS g c (TupS xs)) = AnnoS g c (TupS (map removeVarS xs))
 removeVarS (AnnoS g c (NamS rs)) = AnnoS g c (NamS (map (second removeVarS) rs))
+removeVarS (AnnoS g c (LetS v e1 e2)) = AnnoS g c (LetS v (removeVarS e1) (removeVarS e2))
 removeVarS x = x
 
 -- Check if this expression is a data structure that contains

@@ -85,11 +85,13 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     serialExpr _ (MonoManifold m form e) = do
       MM.sayVVV $ "serialExpr MonoManifold m" <> pretty m <> parens (pretty form)
       serialExpr m e
-    serialExpr m (MonoLet i e1 e2) = case inferState e1 of
-      Serialized -> SerialLetS i <$> serialExpr m e1 <*> serialExpr m e2
-      Unserialized -> do
-        ne1 <- nativeExpr m e1
-        NativeLetS i ne1 <$> serialExpr m e2
+    serialExpr m (MonoLet i e1 e2) =
+      let (m1, e1') = unwrapLetDef m e1
+      in case inferState e1 of
+        Serialized -> SerialLetS i <$> serialExpr m1 e1' <*> serialExpr m e2
+        Unserialized -> do
+          ne1 <- nativeExpr m1 e1'
+          NativeLetS i ne1 <$> serialExpr m e2
     serialExpr _ (MonoLetVar t i) = do
       t' <- inferType t
       return $ LetVarS (Just t') i
@@ -151,14 +153,16 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       form' <- abimapM (\i _ -> contextArg i) (\i _ -> boundArg i) form
       return . ManN $ NativeManifold m lang form' ne
     nativeExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to NativeExpr"
-    nativeExpr m (MonoLet i e1 e2) = case inferState e1 of
-      Serialized -> do
-        ne2 <- nativeExpr m e2
-        SerialLetN i <$> serialExpr m e1 <*> pure ne2
-      Unserialized -> do
-        ne1 <- nativeExpr m e1
-        ne2 <- nativeExpr m e2
-        return $ NativeLetN i ne1 ne2
+    nativeExpr m (MonoLet i e1 e2) =
+      let (m1, e1') = unwrapLetDef m e1
+      in case inferState e1 of
+        Serialized -> do
+          ne2 <- nativeExpr m e2
+          SerialLetN i <$> serialExpr m1 e1' <*> pure ne2
+        Unserialized -> do
+          ne1 <- nativeExpr m1 e1'
+          ne2 <- nativeExpr m e2
+          return $ NativeLetN i ne1 ne2
     nativeExpr _ (MonoLetVar t i) = LetVarN <$> inferType t <*> pure i
     nativeExpr m (MonoReturn e) = ReturnN <$> nativeExpr m e
     nativeExpr m (MonoApp (MonoExe (Idx idx (FunT inputTypes outputType)) exe) es) = do
@@ -289,6 +293,15 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     inferState MonoBndVar {} = error "Ambiguous bound term"
     inferState _ = Unserialized
 
+-- | Unwrap structural MonoManifold/MonoReturn wrappers from a let definition.
+-- MonoManifold contributes its index (for type lookups); MonoReturn is the
+-- manifold's return semantics, which is meaningless in a let-binding context.
+unwrapLetDef :: Int -> MonoExpr -> (Int, MonoExpr)
+unwrapLetDef _ (MonoManifold m _ (MonoReturn e)) = (m, e)
+unwrapLetDef _ (MonoManifold m _ e) = (m, e)
+unwrapLetDef m (MonoReturn e) = (m, e)
+unwrapLetDef m e = (m, e)
+
 naturalizeN :: MDoc -> Int -> Lang -> TypeF -> SerialExpr -> MorlocMonad NativeExpr
 naturalizeN msg m lang t se = do
   MM.sayVVV $ "naturalizeN at" <+> msg
@@ -350,15 +363,26 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
       e' <- case Map.lookup i req2 of
         (Just NativeContent) -> case typeSof se1 of
           (SerialS tf) -> NativeLetS i <$> naturalizeN "a" m0 lang tf se1 <*> pure se2
+          (FunctionS _ (SerialS tf)) -> NativeLetS i <$> naturalizeN "a" m0 lang tf se1 <*> pure se2
           _ -> error "Unuseable let definition"
-        (Just NativeAndSerialContent) -> error "Unsupported dual use let definition"
+        (Just NativeAndSerialContent) -> case typeSof se1 of
+          (SerialS tf) -> do
+            ne1 <- naturalizeN "a" m0 lang tf (LetVarS (Just tf) i)
+            return $ SerialLetS i se1 (NativeLetS i ne1 se2)
+          (FunctionS _ (SerialS tf)) -> do
+            ne1 <- naturalizeN "a" m0 lang tf (LetVarS (Just tf) i)
+            return $ SerialLetS i se1 (NativeLetS i ne1 se2)
+          _ -> error "Unuseable let definition"
         _ -> return $ SerialLetS i se1 se2
       return (req', e')
     wireSerialExpr (NativeLetS_ i (req1, ne1) (req2, se2)) = do
       let req' = Map.unionWith (<>) req1 req2
       e' <- case Map.lookup i req2 of
         (Just SerialContent) -> SerialLetS i <$> serializeS "b" m0 (typeFof ne1) ne1 <*> pure se2
-        (Just NativeAndSerialContent) -> error "Unsupported dual use let definition"
+        (Just NativeAndSerialContent) -> do
+          let tf = typeFof ne1
+          sv <- serializeS "b" m0 tf (LetVarN tf i)
+          return $ NativeLetS i ne1 (SerialLetS i sv se2)
         _ -> return $ NativeLetS i ne1 se2
       return (req', e')
     wireSerialExpr e = monoidSerialExpr defs e
@@ -373,15 +397,26 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
       e' <- case Map.lookup i req2 of
         (Just NativeContent) -> case typeSof se1 of
           (SerialS tf) -> NativeLetN i <$> naturalizeN "a" m0 lang tf se1 <*> pure ne2
+          (FunctionS _ (SerialS tf)) -> NativeLetN i <$> naturalizeN "a" m0 lang tf se1 <*> pure ne2
           _ -> error "Unuseable let definition"
-        (Just NativeAndSerialContent) -> error "Unsupported dual use let definition"
+        (Just NativeAndSerialContent) -> case typeSof se1 of
+          (SerialS tf) -> do
+            ne1 <- naturalizeN "a" m0 lang tf (LetVarS (Just tf) i)
+            return $ SerialLetN i se1 (NativeLetN i ne1 ne2)
+          (FunctionS _ (SerialS tf)) -> do
+            ne1 <- naturalizeN "a" m0 lang tf (LetVarS (Just tf) i)
+            return $ SerialLetN i se1 (NativeLetN i ne1 ne2)
+          _ -> error "Unuseable let definition"
         _ -> return $ SerialLetN i se1 ne2
       return (req', e')
     wireNativeExpr (NativeLetN_ i (req1, ne1) (req2, ne2)) = do
       let req' = Map.unionWith (<>) req1 req2
       e' <- case Map.lookup i req2 of
         (Just SerialContent) -> SerialLetN i <$> serializeS "b" m0 (typeFof ne1) ne1 <*> pure ne2
-        (Just NativeAndSerialContent) -> error "Unsupported dual use let definition"
+        (Just NativeAndSerialContent) -> do
+          let tf = typeFof ne1
+          sv <- serializeS "b" m0 tf (LetVarN tf i)
+          return $ NativeLetN i ne1 (SerialLetN i sv ne2)
         _ -> return $ NativeLetN i ne1 ne2
       return (req', e')
     wireNativeExpr e = monoidNativeExpr defs e
@@ -400,7 +435,8 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
       Map.Map Int Request ->
       e ->
       MorlocMonad e
-    letWrap m form0 req0 e0 = foldlM wrapAsNeeded e0 (Map.toList req0)
+    letWrap m form0 req0 e0 = do
+      foldlM wrapAsNeeded e0 (Map.toList req0)
       where
         formMap = manifoldToMap form0
 

@@ -152,7 +152,7 @@ pTopExpr =
 pExpr :: Parser ExprI
 pExpr = (do
   pos <- getSourcePos
-  e <- try pLam <|> pInfixExpr
+  e <- try pLetE <|> try pLam <|> pInfixExpr
   -- optional type annotation suffix: e :: Type
   mayAnn <- optional (op "::")
   case mayAnn of
@@ -749,6 +749,22 @@ pNumE = do
   exprIAt pos $ case x of
     (Left i) -> IntE i
     (Right f) -> RealE f
+
+pLetE :: Parser ExprI
+pLetE = do
+  pos <- getSourcePos
+  bindings <- many1 pLetBinding
+  _ <- reserved "in"
+  body <- pExpr
+  exprIAt pos $ LetE bindings body
+
+pLetBinding :: Parser (EVar, ExprI)
+pLetBinding = do
+  _ <- reserved "let"
+  v <- pEVar
+  _ <- symbol "="
+  e <- pExpr
+  return (v, e)
 
 pLam :: Parser ExprI
 pLam = do

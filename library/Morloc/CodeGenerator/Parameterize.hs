@@ -81,6 +81,17 @@ parameterize' args (AnnoS g c (AppS x xs)) = do
   xs' <- mapM (parameterize' args) xs
   let args' = pruneArgs args (x' : xs')
   return $ AnnoS g (c, args') (AppS x' xs')
+parameterize' args (AnnoS g c (LetBndS v)) = do
+  let args' = [r | r@(Arg _ v') <- args, v' == v]
+  return $ AnnoS g (c, args') (LetBndS v)
+parameterize' args (AnnoS g c (LetS v e1 e2)) = do
+  e1' <- parameterize' args e1
+  idx <- MM.getCounter
+  let letArg = Arg idx v
+      bodyArgs = letArg : [r | r@(Arg _ v') <- args, v' /= v]
+  e2' <- parameterize' bodyArgs e2
+  let args' = pruneArgs args [e1', e2']
+  return $ AnnoS g (c, args') (LetS v e1' e2')
 parameterize' _ (AnnoS _ _ (VarS _ _)) = undefined
 
 pruneArgs :: [Arg a] -> [AnnoS c One (g, [Arg a])] -> [Arg a]

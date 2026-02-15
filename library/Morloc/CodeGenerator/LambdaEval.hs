@@ -150,6 +150,10 @@ applyLambdas (AnnoS g c (LstS es)) = AnnoS g c . LstS <$> mapM applyLambdas es
 applyLambdas (AnnoS g c (TupS es)) = AnnoS g c . TupS <$> mapM applyLambdas es
 applyLambdas (AnnoS g c (NamS rs)) = AnnoS g c . NamS <$> mapM (secondM applyLambdas) rs
 applyLambdas (AnnoS g c (VarS v (One e))) = AnnoS g c . VarS v . One <$> applyLambdas e
+applyLambdas (AnnoS g c (LetS v e1 e2)) = do
+  e1' <- applyLambdas e1
+  e2' <- applyLambdas e2
+  return (AnnoS g c (LetS v e1' e2'))
 applyLambdas x = return x
 
 substituteAnnoS ::
@@ -181,4 +185,10 @@ substituteAnnoS v r = f
     f (AnnoS g c (NamS rs)) =
       let es' = map (f . snd) rs
        in AnnoS g c (NamS (zip (map fst rs) es'))
+    f e@(AnnoS _ _ (LetBndS v'))
+      | v == v' = r
+      | otherwise = e
+    f e0@(AnnoS g c (LetS v' e1 e2))
+      | v == v' = e0 -- shadowed by let binding
+      | otherwise = AnnoS g c (LetS v' (f e1) (f e2))
     f x = x

@@ -34,6 +34,8 @@ toE (AnnoS g _ (ExeS (SrcCall s))) = SrcP g s
 toE (AnnoS g _ (ExeS (PatCall (PatternText s ss)))) =
   LitP g (MStr (s <> DT.concat ["#{}" <> s' | s' <- ss]))
 toE (AnnoS g _ (ExeS (PatCall (PatternStruct s)))) = PatP g s
+toE (AnnoS g _ (LetBndS v)) = BndP g v
+toE (AnnoS _ _ (LetS _ _ body)) = toE body
 
 indexOfE :: E -> Int
 indexOfE (BndP (Idx i _) _) = i

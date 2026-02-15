@@ -177,6 +177,7 @@ data Expr
   | AppE ExprI [ExprI]
   | LamE [EVar] ExprI
   | AnnE ExprI TypeU
+  | LetE [(EVar, ExprI)] ExprI
   | RealE Scientific
   | IntE Integer
   | LogE Bool
@@ -246,6 +247,8 @@ data ExprS g f c
   | LogS Bool
   | StrS Text
   | ExeS ExecutableExpr
+  | LetS EVar (AnnoS g f c) (AnnoS g f c)
+  | LetBndS EVar
 
 data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr ClassName EVar EType [(EType, [a])]
   deriving (Show, Eq, Ord)
@@ -354,6 +357,8 @@ mapExprSM _ (IntS x) = return $ IntS x
 mapExprSM _ (LogS x) = return $ LogS x
 mapExprSM _ (StrS x) = return $ StrS x
 mapExprSM _ (ExeS x) = return $ ExeS x
+mapExprSM f (LetS v e1 e2) = LetS v <$> f e1 <*> f e2
+mapExprSM _ (LetBndS v) = return $ LetBndS v
 
 mapAnnoSM ::
   (Traversable f, Monad m) =>
@@ -487,6 +492,7 @@ instance Pretty Expr where
   pretty (IntE x) = pretty (show x)
   pretty (StrE x) = dquotes (pretty x)
   pretty (LogE x) = pretty x
+  pretty (LetE bindings body) = vsep [pretty v <+> "=" <+> pretty e | (v, e) <- bindings] <+> "in" <+> pretty body
   pretty (AssE v e es) = pretty v <+> "=" <+> pretty e <+> "where" <+> (align . vsep . map pretty) es
   pretty (SrcE (Source srcname lang file' alias _ rsizes _)) =
     "source"
@@ -543,6 +549,8 @@ instance (Foldable f) => Pretty (ExprS a f b) where
   pretty (LogS x) = viaShow x
   pretty (StrS x) = viaShow x
   pretty (ExeS x) = pretty x
+  pretty (LetS v e1 e2) = "(LetS" <+> pretty v <+> "=" <+> pretty e1 <+> "in" <+> pretty e2 <> ")"
+  pretty (LetBndS x) = "(LetBndS" <+> pretty x <> ")"
 
 instance Pretty ExecutableExpr where
   pretty (SrcCall src) = pretty src

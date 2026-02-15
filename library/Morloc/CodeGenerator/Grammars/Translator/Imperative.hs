@@ -289,9 +289,12 @@ lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) Foreign
 lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) (RemoteCall res) args) _) =
   lcRemoteCall cfg socketFile mid res (map argNamer args)
 lowerSerialExpr cfg _ (ReturnS_ x) = return $ x {poolExpr = lcReturn cfg (poolExpr x)}
-lowerSerialExpr cfg _ (SerialLetS_ i e1 e2) = lcMakeLet cfg svarNamer i Nothing e1 e2
-lowerSerialExpr cfg (NativeLetS _ (typeFof -> t) _) (NativeLetS_ i e1 e2) = lcMakeLet cfg nvarNamer i (Just t) e1 e2
-lowerSerialExpr cfg _ (NativeLetS_ i e1 e2) = lcMakeLet cfg nvarNamer i Nothing e1 e2
+lowerSerialExpr cfg _ (SerialLetS_ i e1 e2) =
+  lcMakeLet cfg svarNamer i Nothing e1 e2
+lowerSerialExpr cfg (NativeLetS _ (typeFof -> t) _) (NativeLetS_ i e1 e2) =
+  lcMakeLet cfg nvarNamer i (Just t) e1 e2
+lowerSerialExpr cfg _ (NativeLetS_ i e1 e2) =
+  lcMakeLet cfg nvarNamer i Nothing e1 e2
 lowerSerialExpr _ _ (LetVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
 lowerSerialExpr _ _ (BndVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
 lowerSerialExpr cfg _ (SerializeS_ s e) = do

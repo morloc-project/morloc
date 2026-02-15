@@ -464,6 +464,8 @@ reservedWords =
   , "infixl"
   , "infixr"
   , "infix"
+  , "let"
+  , "in"
   ]
 
 reservedOperators :: [Text]

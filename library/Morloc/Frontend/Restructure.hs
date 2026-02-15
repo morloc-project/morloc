@@ -127,6 +127,10 @@ resolveHoles = DAG.mapNodeM unhole
     unhole (ExprI i (HolE)) = return HolE |>> ExprI i
     unhole (ExprI i (LamE vs e)) = LamE vs <$> unhole e |>> ExprI i
     unhole (ExprI i (AnnE e t)) = AnnE <$> unhole e <*> pure t |>> ExprI i
+    unhole (ExprI i (LetE bindings body)) = do
+      bindings' <- mapM (\(v, e) -> (,) v <$> unhole e) bindings
+      body' <- unhole body
+      return $ ExprI i (LetE bindings' body')
     unhole (ExprI _ (BopE _ _ _ _)) = error "Bop should have been resolved"
     unhole e = return e
 
@@ -390,6 +394,10 @@ handleBinops d0 = do
       f (ExprI i (AppE e es)) = AppE <$> f e <*> mapM f es |>> ExprI i
       f (ExprI i (LamE vs e)) = LamE vs <$> f e |>> ExprI i
       f (ExprI i (AnnE e t)) = AnnE <$> f e <*> pure t |>> ExprI i
+      f (ExprI i (LetE bindings body)) = do
+        bindings' <- mapM (\(v, e) -> (,) v <$> f e) bindings
+        body' <- f body
+        return $ ExprI i (LetE bindings' body')
       f e = return e
 
     -- | Rewrite a right-nested BopE chain into a correctly-associated AppE tree.
@@ -455,6 +463,7 @@ collectTags fullDag = do
     f (ExprI _ (AppE e es)) = mapM_ f (e : es)
     f (ExprI _ (LamE _ e)) = f e
     f (ExprI _ (AnnE e _)) = f e
+    f (ExprI _ (LetE bindings body)) = mapM_ (f . snd) bindings >> f body
     f _ = return ()
 
 type GCMap = (Scope, Map Lang Scope)
