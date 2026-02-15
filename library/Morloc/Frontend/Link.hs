@@ -159,7 +159,7 @@ addLocalState m0 e0 s0 = do
       -- update the map between term names and signature indices
       return $ lstate {linkTerms = Map.insert v sigIndex (linkTerms lstate)}
     -- create new entries for class definitions and type signatures
-    findDefs (ExprI clsIndex (ClsE tcls@(Typeclass cls vs sigs))) lstate = do
+    findDefs (ExprI clsIndex (ClsE tcls@(Typeclass constraints cls vs sigs))) lstate = do
       -- get sigmap
       (GMap idmap sigmap) <- MM.gets stateSignatures
       -- generate an index for each signature in this typeclass
@@ -173,7 +173,10 @@ addLocalState m0 e0 s0 = do
       tmap' <- foldlM (\m (k, v) -> insertWithCheck k v m) tmap xs
 
       -- update morloc state
-      MM.modify (\s -> s {stateSignatures = GMap idmap sigmap', stateTypeclasses = tmap'})
+      MM.modify (\s -> s { stateSignatures = GMap idmap sigmap'
+                         , stateTypeclasses = tmap'
+                         , stateClassDefs = Map.insert cls constraints (stateClassDefs s)
+                         })
 
       -- generate the (Map EVar Int) list for LinkedState
       let vmap = Map.fromList [(v, i) | (i, Signature v _ _) <- sigsIdx]
@@ -239,7 +242,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
         -- If it is a term, then it must have a signature if it is to be used, but
         -- its use will raise a dedicated error later. So we let it pass for now.
         Nothing -> return ()
-        (Just (_, Just (Typeclass cls _ _))) ->
+        (Just (_, Just (Typeclass _ cls _ _))) ->
           MM.throwSourcedError i $
             "Source term"
               <+> squotes (pretty (srcAlias src))
@@ -303,7 +306,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
               <+> squotes (pretty cls)
               <+> "in the scope of module"
               <+> squotes (pretty m0)
-        (Just (_, Typeclass _ vs sigs, emap)) ->
+        (Just (_, Typeclass superConstraints _ vs sigs, emap)) ->
           if length vs /= length ts
             then
               MM.throwSourcedError i $
@@ -311,7 +314,9 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                   <> ": the instance and typeclass definitions for"
                     <+> squotes (pretty cls)
                     <+> "differ in number of terms"
-            else mapM_ (linkInstance (linkLocal bnds c cs) m0 cls (zip vs ts) sigs emap) es
+            else do
+              checkSuperclassConstraints i cls (zip vs ts) superConstraints
+              mapM_ (linkInstance (linkLocal bnds c cs) m0 cls (zip vs ts) sigs emap) es
     linkLocal bnds _ cs (ExprI termIdx (VarE _ v))
       | Set.member v bnds = return ()
       | otherwise = case Map.lookup v cs of
@@ -513,3 +518,35 @@ substituteInstanceTypes (unzip -> (clsVars, instanceParameters)) clsType = do
     substituteQualifiers :: TypeU -> [TypeU] -> TypeU
     substituteQualifiers (ForallU v t) (r : rs) = substituteQualifiers (substituteTVar v r t) rs
     substituteQualifiers t _ = t
+
+-- Check that all superclass constraints are satisfied for an instance declaration.
+-- For example, if `class Eq a => Ord a`, then `instance Ord Int` requires `instance Eq Int`.
+checkSuperclassConstraints :: Int -> ClassName -> [(TVar, TypeU)] -> [Constraint] -> MorlocMonad ()
+checkSuperclassConstraints _ _ _ [] = return ()
+checkSuperclassConstraints i cls params constraints = do
+  classDefs <- MM.gets stateClassDefs
+  mapM_ (checkOne classDefs) constraints
+  where
+    checkOne :: Map ClassName [Constraint] -> Constraint -> MorlocMonad ()
+    checkOne classDefs (Constraint superCls superTypeArgs) = do
+      let substArgs = applyParams superTypeArgs params
+      case Map.lookup superCls classDefs of
+        Nothing -> MM.throwSourcedError i $
+          "Superclass" <+> squotes (pretty superCls) <+> "is not defined"
+        Just _ -> do
+          tcls <- MM.gets stateTypeclasses
+          let methodsOfSuper = [inst | (_, inst) <- Map.toList tcls, className inst == superCls]
+              hasMatchingInstance = any (matchesSuperInstance substArgs) methodsOfSuper
+          if not hasMatchingInstance
+            then MM.throwSourcedError i $
+              "Instance" <+> pretty cls <+> hsep (map pretty (map snd params))
+                <+> "requires" <+> pretty superCls <+> hsep (map pretty substArgs)
+                <+> "but no such instance exists"
+            else return ()
+
+    applyParams :: [TypeU] -> [(TVar, TypeU)] -> [TypeU]
+    applyParams ts [] = ts
+    applyParams ts ((v, r) : ps) = applyParams (map (substituteTVar v r) ts) ps
+
+    matchesSuperInstance :: [TypeU] -> Instance -> Bool
+    matchesSuperInstance _ inst = not (null (instanceTerms inst))

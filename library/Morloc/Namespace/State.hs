@@ -90,6 +90,7 @@ data MorlocState = MorlocState
   , stateModuleName :: Maybe MVar
   , stateInstall :: Bool
   , stateInstallDir :: Maybe Path
+  , stateClassDefs :: Map ClassName [Constraint]
   }
   deriving (Show)
 
@@ -240,6 +241,7 @@ instance Defaultable MorlocState where
       , stateModuleName = Nothing
       , stateInstall = False
       , stateInstallDir = Nothing
+      , stateClassDefs = Map.empty
       }
 
 instance Defaultable PackageMeta where

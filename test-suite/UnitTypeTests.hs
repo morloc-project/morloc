@@ -1464,31 +1464,10 @@ unitTypeTests =
       --     "F :: {x::Int, y::Str}"
       --     "F :: foo:{x::(i:Int), y::Str}"
 
-      -- properties
-      assertGeneralType "property syntax (1)" "module main (f)\nf :: Foo => Int" int
-    , assertGeneralType "property syntax (2)" "module main (f)\nf :: Foo bar => Int" int
-    , assertGeneralType "property syntax (3)" "module main (f)\nf :: Foo a, Bar b => Int" int
-    , assertGeneralType "property syntax (4)" "module main (f)\nf :: (Foo a) => Int" int
-    , assertGeneralType "property syntax (5)" "module main (f)\nf :: (Foo a, Bar b) => Int" int
-    , -- constraints
-      assertGeneralType
-        "constraint syntax (1)"
-        [r|
-           f :: Int where
-             ladida
-           f
-        |]
-        int
-    , assertGeneralType
-        "constraint syntax (2)"
-        [r|
-           f :: Int where
-             first relation
-               and more
-             second relation
-           f
-        |]
-        int
+      -- constraint syntax
+      assertGeneralType "constraint syntax (1)" "module main (f)\nf :: (Ord a) => a -> a -> a" (fun [var "a", var "a", var "a"])
+    , assertGeneralType "constraint syntax (2)" "module main (f)\nf :: Ord a => a -> a -> a" (fun [var "a", var "a", var "a"])
+    , assertGeneralType "constraint syntax (3)" "module main (f)\nf :: (Ord a, Eq b) => a -> b -> Bool" (fun [var "a", var "b", VarU (TV "Bool")])
     , -- tests modules
       assertGeneralType
         "basic main module"

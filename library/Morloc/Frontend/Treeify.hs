@@ -102,7 +102,7 @@ nullify :: DAG m e ExprI -> DAG m e ExprI
 nullify = DAG.mapNode f
   where
     f :: ExprI -> ExprI
-    f (ExprI i (SigE (Signature v n (EType t ps cs docs)))) = ExprI i (SigE (Signature v n (EType (nullifyT t) ps cs docs)))
+    f (ExprI i (SigE (Signature v n (EType t cs docs)))) = ExprI i (SigE (Signature v n (EType (nullifyT t) cs docs)))
     f (ExprI i (ModE m es)) = ExprI i (ModE m (map f es))
     f (ExprI i (AssE v e es)) = ExprI i (AssE v (f e) (map f es))
     f e = e

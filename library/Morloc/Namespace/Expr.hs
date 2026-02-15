@@ -132,7 +132,7 @@ data AliasedSymbol
 data Signature = Signature EVar (Maybe Label) EType
   deriving (Show, Ord, Eq)
 
-data Typeclass a = Typeclass ClassName [TVar] [a]
+data Typeclass a = Typeclass [Constraint] ClassName [TVar] [a]
   deriving (Show, Ord, Eq)
 
 data Selector
@@ -468,7 +468,13 @@ instance Pretty Expr where
   pretty (PatE pat) = "pattern:" <+> pretty pat
   pretty UniE = "()"
   pretty (ModE v es) = align . vsep $ ("module" <+> pretty v) : map pretty es
-  pretty (ClsE (Typeclass cls vs sigs)) = "class" <+> pretty cls <+> hsep (map pretty vs) <> (align . vsep . map pretty) sigs
+  pretty (ClsE (Typeclass constraints cls vs sigs)) =
+    "class" <+> consStr <> pretty cls <+> hsep (map pretty vs) <> (align . vsep . map pretty) sigs
+    where
+      consStr = case constraints of
+        [] -> ""
+        [c] -> pretty c <+> "=> "
+        _ -> tupled (map pretty constraints) <+> "=> "
   pretty (IstE cls ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
   pretty (TypE (ExprTypeE lang v vs t _)) =
     "type" <+> pretty lang
@@ -508,20 +514,7 @@ instance Pretty Expr where
                ]
            )
   pretty (SigE (Signature v _ e)) =
-    pretty v <+> "::" <+> eprop' <> etype' <> econs'
-    where
-      eprop' :: Doc ann
-      eprop' =
-        case Set.toList (eprop e) of
-          [] -> ""
-          xs -> tupled (map pretty xs) <+> "=> "
-      etype' :: Doc ann
-      etype' = pretty (etype e)
-      econs' :: Doc ann
-      econs' =
-        case Set.toList (econs e) of
-          [] -> ""
-          xs -> " where" <+> tupled (map (\(Con x) -> pretty x) xs)
+    pretty v <+> "::" <+> pretty e
   pretty (FixE (Fixity assoc prec ops)) =
     assocStr <+> pretty prec <+> hsep (map pretty ops)
     where

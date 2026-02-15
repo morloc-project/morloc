@@ -82,7 +82,7 @@ findSignatureTypeTerms = unique . f
   where
     f :: ExprI -> [TVar]
     f (ExprI _ (ModE _ es)) = concatMap f es
-    f (ExprI _ (SigE (Signature _ _ (EType t _ _ _)))) = findTypeTerms t
+    f (ExprI _ (SigE (Signature _ _ (EType t _ _)))) = findTypeTerms t
     f (ExprI _ (AssE _ _ es)) = concatMap f es
     f _ = []
 

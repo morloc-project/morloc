@@ -30,7 +30,6 @@ module Morloc.Namespace.Type
 
     -- * Type extensions
   , Constraint (..)
-  , Property (..)
 
     -- * Typeclasses
   , Typelike (..)
@@ -107,17 +106,12 @@ of properties and constrains.
 data EType
   = EType
   { etype :: TypeU
-  , eprop :: Set.Set Property
   , econs :: Set.Set Constraint
   , edocs :: ArgDoc
   }
   deriving (Show, Eq, Ord)
 
-newtype Property = Property [Text]
-  deriving (Show, Eq, Ord)
-
-newtype Constraint
-  = Con Text
+data Constraint = Constraint ClassName [TypeU]
   deriving (Show, Eq, Ord)
 
 -- a CLI option that takes an argument
@@ -447,19 +441,10 @@ instance Pretty TypeU where
           (vsep [pretty k <+> "::" <+> f True x | (k, x) <- rs])
 
 instance Pretty EType where
-  pretty (EType t (Set.toList -> ps) (Set.toList -> cs) _) = case (ps, cs) of
-    ([], []) -> pretty t
-    _ -> parens (psStr ps <> pretty t <> csStr cs)
-    where
-      psStr [] = ""
-      psStr [x] = pretty x <+> "=> "
-      psStr xs = tupled (map pretty xs) <+> "=> "
-
-      csStr [] = ""
-      csStr xs = " |" <+> hsep (punctuate semi (map pretty xs))
-
-instance Pretty Property where
-  pretty (Property ts) = hsep (map pretty ts)
+  pretty (EType t (Set.toList -> cs) _) = case cs of
+    [] -> pretty t
+    [c] -> pretty c <+> "=>" <+> pretty t
+    _ -> tupled (map pretty cs) <+> "=>" <+> pretty t
 
 instance Pretty Constraint where
-  pretty (Con x) = pretty x
+  pretty (Constraint cls ts) = pretty cls <+> hsep (map pretty ts)

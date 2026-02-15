@@ -118,7 +118,11 @@ instance Applicable TypeU where
   apply g (NamU o n ps rs) = NamU o n ps [(k, apply g t) | (k, t) <- rs]
 
 instance Applicable EType where
-  apply g e = e {etype = apply g (etype e)}
+  apply g e = e { etype = apply g (etype e)
+                , econs = Set.map (applyConstraint g) (econs e)
+                }
+    where
+      applyConstraint g' (Constraint cls ts) = Constraint cls (map (apply g') ts)
 
 instance Applicable Gamma where
   apply g1 g2 = g2

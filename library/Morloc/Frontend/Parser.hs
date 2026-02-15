@@ -210,9 +210,10 @@ pTypeclass :: Parser ExprI
 pTypeclass = do
   pos <- getSourcePos
   _ <- reserved "class"
+  constraints <- option [] (try pConstraintList)
   (TV v, vs) <- pTypedefTerm' <|> parens pTypedefTerm'
   sigs <- option [] (reserved "where" >> alignInset pSignature)
-  exprIAt pos . ClsE $ Typeclass (ClassName v) vs sigs
+  exprIAt pos . ClsE $ Typeclass constraints (ClassName v) vs sigs
   where
     -- parses "Show a" from above example
     pTypedefTerm' :: Parser (TVar, [TVar])
@@ -442,11 +443,9 @@ pSignature = do
   v <- pEVarOrOp
   vs <- many freenameL |>> map TV
   _ <- op "::"
-  props <- option [] (try pPropertyList)
+  constraints <- option [] (try pConstraintList)
 
   (docs, t') <- pTypeDoc
-
-  constraints <- option [] pConstraints
 
   let cmdDoc = ArgDocSig doc (init docs) (last docs)
 
@@ -454,34 +453,28 @@ pSignature = do
       et =
         EType
           { etype = t
-          , eprop = Set.fromList props
           , econs = Set.fromList constraints
           , edocs = cmdDoc
           }
       sig = Signature v (Label <$> label') et
 
   return sig
-  where
-    pPropertyList :: Parser [Property]
-    pPropertyList = do
-      ps <-
-        parens (sepBy1 pProperty (symbol ","))
-          <|> sepBy1 pProperty (symbol ",")
-      _ <- op "=>"
-      return ps
 
-    pProperty :: Parser Property
-    pProperty = Property <$> many1 freename
+pConstraintList :: Parser [Constraint]
+pConstraintList = do
+  cs <- try (parens (sepBy1 pSingleConstraint (symbol ",")))
+          <|> (pSingleConstraint |>> return)
+  _ <- op "=>"
+  return cs
 
-    pConstraints :: Parser [Constraint]
-    pConstraints = reserved "where" >> alignInset pConstraint
-      where
-        -- FIXME: this is a stub
-        pConstraint :: Parser Constraint
-        pConstraint = fmap (Con . MT.unwords) (many1 pWord)
+pSingleConstraint :: Parser Constraint
+pSingleConstraint = do
+  cls <- freenameU
+  ts <- many1 pConstraintTypeArg
+  return $ Constraint (ClassName cls) ts
 
-        pWord :: Parser Text
-        pWord = MT.pack <$> lexeme (many1 alphaNumChar)
+pConstraintTypeArg :: Parser TypeU
+pConstraintTypeArg = try pUniU <|> try parensType <|> try pVarU <|> try pListU <|> pTupleU
 
 parseArgDocVars :: Parser ArgDocVars
 parseArgDocVars = indentFreeTerm $ foldMany defaultValue parseArgDocVar

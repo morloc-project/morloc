@@ -285,7 +285,7 @@ resolveImports d0
     findSymbols (ExprI _ (ModE _ es)) = Set.unions (map findSymbols es)
     findSymbols (ExprI _ (TypE (ExprTypeE _ v _ _ _))) = Set.singleton $ TypeSymbol v
     findSymbols (ExprI _ (AssE e _ _)) = Set.singleton $ TermSymbol e
-    findSymbols (ExprI _ (ClsE (Typeclass cls _ _))) = Set.singleton $ ClassSymbol cls
+    findSymbols (ExprI _ (ClsE (Typeclass _ cls _ _))) = Set.singleton $ ClassSymbol cls
     findSymbols (ExprI _ (SigE (Signature e _ _))) = Set.singleton $ TermSymbol e
     findSymbols (ExprI _ (SrcE src)) = Set.singleton $ TermSymbol (srcAlias src)
     -- The definition of an instance does not automatically imply export or make
@@ -353,7 +353,7 @@ handleBinops d0 = do
 
     findClassOps :: ExprI -> Map ClassName [EVar]
     findClassOps (ExprI _ (ModE _ es)) = Map.unions (map findClassOps es)
-    findClassOps (ExprI _ (ClsE (Typeclass cls _ sigs))) = Map.singleton cls [v | (Signature v _ _) <- sigs]
+    findClassOps (ExprI _ (ClsE (Typeclass _ cls _ sigs))) = Map.singleton cls [v | (Signature v _ _) <- sigs]
     findClassOps _ = Map.empty
 
     filterTerms :: Set EVar -> Map EVar a -> [AliasedSymbol] -> Map EVar a
