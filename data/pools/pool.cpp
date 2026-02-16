@@ -451,7 +451,7 @@ int main(int argc, char* argv[]) {
     sa.sa_flags = 0;
     sigaction(SIGTERM, &sa, NULL);
 
-    long nthreads = sysconf(_SC_NPROCESSORS_ONLN);
+    long nthreads = 1;
     std::vector<pthread_t> threads;
     threads.reserve(nthreads);
     for (long i = 0; i < nthreads; ++i) {

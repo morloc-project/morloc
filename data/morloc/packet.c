@@ -391,8 +391,10 @@ uint8_t* make_morloc_remote_call_packet(uint32_t midx, const uint8_t** arg_packe
 void free_morloc_call(morloc_call_t* call){
     if(call == NULL) return;
     if(call->args != NULL){
-        for(size_t i = 0; i < call->nargs; i++){
-            free(call->args[i]);
+        if(call->owns_args){
+            for(size_t i = 0; i < call->nargs; i++){
+                free(call->args[i]);
+            }
         }
         free(call->args);
     }
@@ -435,12 +437,9 @@ morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
 
         size_t arg_packet_size = morloc_packet_size_from_header(arg_header);
 
-        // Copy the argument
-        // We alternatively we could avoid this copy and pass the pointer to the
-        // original memory. This would improve performance, but would be less
-        // safe. I'll leave this optimization for later.
-        call->args[i] = (uint8_t*)calloc(arg_packet_size, sizeof(uint8_t));
-        memcpy(call->args[i], packet + pos, arg_packet_size);
+        // Borrow pointer into the original packet buffer (avoids copy).
+        // Caller must ensure packet outlives the morloc_call_t.
+        call->args[i] = (uint8_t*)(packet + pos);
 
         pos += arg_packet_size;
     }

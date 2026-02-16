@@ -8,6 +8,7 @@ typedef struct morloc_call_s {
     uint32_t midx;
     uint8_t** args;
     size_t nargs;
+    int owns_args;
 } morloc_call_t;
 
 typedef struct client_list_s {
