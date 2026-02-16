@@ -315,8 +315,8 @@ int job_queue_pop(job_queue_t* q) {
 
     while (!q->head && !is_shutting_down()) {
         // Wait for job_queue_push to add a new job (this releases the mutex
-        // until the condition is met). Use timedwait so shutdown is noticed
-        // promptly without needing pthread_cond_broadcast in the signal handler.
+        // until the condition is met). Timedwait is a fallback; shutdown
+        // normally wakes workers via pthread_cond_broadcast.
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_nsec += 100000000; // 100ms
@@ -490,9 +490,9 @@ int main(int argc, char* argv[]) {
     }
 
     set_shutting_down(1);
+    pthread_cond_broadcast(&queue.cond);
 
     // Join all worker threads before freeing any resources they may reference.
-    // Workers use pthread_cond_timedwait and will notice shutting_down within 100ms.
     for (size_t i = 0; i < threads.size(); ++i) {
         pthread_join(threads[i], NULL);
     }

@@ -324,10 +324,11 @@ int wait_for_client_with_timeout(language_daemon_t* daemon, int timeout_us, ERRM
     // file has not yet been written), then select dies immediately, for this
     // reason it is wrapped in WAIT to retry for a few minutes for giving up the
     // ghost for good.
-    WAIT( { ready = pselect(max_fd + 1, &daemon->read_fds, NULL, NULL, timeout_ptr, &emptymask); },
-          ready >= 0,
-          RAISE("Failed to read data")
-        )
+    ready = pselect(max_fd + 1, &daemon->read_fds, NULL, NULL, timeout_ptr, &emptymask);
+    if (ready < 0) {
+        if (errno == EINTR) return 0;
+        RAISE("pselect error: %s", strerror(errno));
+    }
 
     // if pselect timed out, return 0
     if(ready == 0){

@@ -118,7 +118,7 @@ void clean_exit(int exit_code){
                 group_dead = 1;
                 break;
             }
-            struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000000 }; // 10ms
+            struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 }; // 1ms
             nanosleep(&ts, NULL);
         }
 
