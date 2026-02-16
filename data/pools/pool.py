@@ -7,7 +7,7 @@ import copy
 import array
 import socket as _socket
 from collections import OrderedDict
-from multiprocessing import Process, cpu_count, Value, RawValue
+from multiprocessing import Process, Value, RawValue
 import ctypes
 import functools
 
@@ -123,22 +123,28 @@ def _recv_fd(sock):
     raise RuntimeError("No fd received in ancillary data")
 
 
+WORKER_IDLE_TIMEOUT = 5.0  # seconds before an idle worker exits
+
 def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, total_workers, wakeup_w):
     morloc.set_fallback_dir(tmpdir)
     morloc.shinit(shm_basename, 0, 0xffff)
     _init_worker_tracking(busy_count, total_workers, wakeup_w)
     sock = _socket.fromfd(job_fd, _socket.AF_UNIX, _socket.SOCK_STREAM)
     os.close(job_fd)  # sock owns a dup'd copy
+    last_activity = time.monotonic()
     while not shutdown_flag.value:
-        rlist, _, _ = select.select([sock.fileno()], [], [], 0.1)
+        rlist, _, _ = select.select([sock.fileno()], [], [], 0.01)
         if shutdown_flag.value:
             break
         if rlist:
             try:
                 client_fd = _recv_fd(sock)
                 run_job(client_fd)
+                last_activity = time.monotonic()
             except (EOFError, OSError):
                 break
+        elif total_workers.value > 1 and time.monotonic() - last_activity > WORKER_IDLE_TIMEOUT:
+            break
     sock.close()
 
 
@@ -199,7 +205,7 @@ if __name__ == "__main__":
     # deadlock where a callback gets dispatched to a busy worker.
     read_sock, write_sock = _socket.socketpair(_socket.AF_UNIX, _socket.SOCK_STREAM)
 
-    num_workers = max(1, cpu_count() - 1)
+    num_workers = 1
     workers = []
 
     # Shared counters for dynamic worker spawning.
@@ -230,21 +236,35 @@ if __name__ == "__main__":
     listener_process.start()
     write_sock.close()  # main doesn't need the write end
 
-    # Main loop: monitor wake-up pipe and spawn new workers when all are busy.
+    # Main loop: monitor wake-up pipe, spawn new workers when all are busy,
+    # and reap idle workers that have exited.
     while not shutdown_flag.value:
-        rlist, _, _ = select.select([wakeup_r], [], [], 0.1)
+        rlist, _, _ = select.select([wakeup_r], [], [], 0.01)
         if rlist:
             try:
                 os.read(wakeup_r, 4096)  # drain pipe
             except OSError:
                 pass
-        if busy_count.value >= total_workers.value:
+
+        # Reap dead workers (idle timeout or error exit)
+        alive = []
+        for w in workers:
+            if w.is_alive():
+                alive.append(w)
+            else:
+                w.join(timeout=0)
+                w.close()
+        workers = alive
+        total_workers.value = max(1, len(workers))
+
+        # Spawn a new worker if all are busy (or all have exited)
+        if len(workers) == 0 or busy_count.value >= total_workers.value:
             w = Process(target=worker_process,
                         args=(spare_read_fd, tmpdir, shm_basename, shutdown_flag,
                               busy_count, total_workers, wakeup_w))
             w.start()
             workers.append(w)
-            total_workers.value += 1
+            total_workers.value = len(workers)
 
     # Shutdown sequence
     os.close(wakeup_r)
@@ -253,7 +273,7 @@ if __name__ == "__main__":
 
     # 1. Stop listener first
     listener_process.terminate()
-    listener_process.join(timeout=0.01)
+    listener_process.join(timeout=0.001)
     listener_process.kill()
     listener_process.join()  # Final blocking reap
     listener_process.close()
