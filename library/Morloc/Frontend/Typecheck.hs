@@ -624,40 +624,6 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
         return (g4, fullType, LamS newVars bodyAnno)
     _ -> error "impossible"
 
-etaExpand ::
-  Gamma ->
-  AnnoS Int ManyPoly Int ->
-  [AnnoS Int ManyPoly Int] ->
-  TypeU ->
-  MorlocMonad (Maybe (Gamma, ExprS Int ManyPoly Int))
-etaExpand g0 f0 xs0 t0 = etaExpand' g0 f0 xs0 t0
-  where
-    -- ignore qualification
-    etaExpand' g f xs (ForallU _ t) = etaExpand' g f xs t
-    -- find the number of applied terms for the term and the type
-    etaExpand' g f@(AnnoS gidx _ _) xs@(length -> termSize) (normalizeType -> FunU (length -> typeSize) _)
-      -- if they are equal, then the function is fully applied, do nothing
-      | termSize == typeSize = return Nothing
-      -- if there are fewer terms, then eta expand
-      | termSize < typeSize = Just <$> etaExpandE (AppS f xs)
-      -- if there are more terms than the type permits, then raise an error
-      | otherwise = throwTypeError gidx $ "Invalid function application of type:\n  " <> prettyTypeU t0
-
-      where
-        etaExpandE :: ExprS Int ManyPoly Int -> MorlocMonad (Gamma, ExprS Int ManyPoly Int)
-        etaExpandE e@(AppS _ _) = tryExpand (typeSize - termSize) e
-        etaExpandE e@(LamS vs _) = tryExpand (typeSize - termSize - length vs) e
-        etaExpandE e = return (g, e)
-
-        tryExpand n e
-          -- A partially applied term intended to return a function (e.g., `(\x y -> add x y) x |- Real -> Real`)
-          -- A fully applied term
-          | n <= 0 = return (g, e)
-          | otherwise = expand gidx n g e
-    -- If term that is applied is not a function, do nothing. The application is
-    -- not correct, but the error will be caught later.
-    etaExpand' _ _ _ _ = return Nothing
-
 expand :: Int -> Int -> Gamma -> ExprS Int f Int -> MorlocMonad (Gamma, ExprS Int f Int)
 expand _ 0 g x = return (g, x)
 expand parentIdx n g e@(AppS _ _) = do
