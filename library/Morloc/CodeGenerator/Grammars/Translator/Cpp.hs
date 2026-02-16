@@ -104,6 +104,9 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       f (NamF _ (FV _ s) ps _) = do
         ps' <- mapM f ps
         return $ pretty s <> CP.printRecordTemplate ps'
+      f (ThunkF t) = do
+        t' <- f t
+        return $ "std::function<" <> t' <> "()" <> ">"
 
   cppArgOf s (Arg i t) = do
     t' <- cppTypeOf (typeFof t)
@@ -319,6 +322,9 @@ PROPAGATE_ERROR(errmsg)|]
         Nothing -> return serialType
       return $ makeLet namer letIndex typestr e1 e2
   , lcReturn = \e -> "return(" <> e <> ");"
+  , lcMakeSuspend = \stmts expr -> case stmts of
+      [] -> "[&](){return " <> expr <> ";}"
+      _ -> "[&](){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"
   , lcSerialize = \v s -> serialize v s
   , lcDeserialize = \t v s -> do
       typestr <- cppTypeOf t
@@ -370,11 +376,11 @@ PROPAGATE_ERROR(errmsg)|]
     makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
     makeLet namer letIndex typestr (PoolDocs ms1 e1 rs1 pes1) (PoolDocs ms2 e2 rs2 pes2) =
       let letAssignment = [idoc|#{typestr} #{namer letIndex} = #{e1};|]
-          rs = rs1 <> [letAssignment] <> rs2 <> [e2]
+          rs = rs1 <> [letAssignment] <> rs2
        in PoolDocs
             { poolCompleteManifolds = ms1 <> ms2
-            , poolExpr = vsep rs
-            , poolPriorLines = []
+            , poolExpr = e2
+            , poolPriorLines = rs
             , poolPriorExprs = pes1 <> pes2
             }
 

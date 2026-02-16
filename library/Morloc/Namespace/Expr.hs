@@ -183,6 +183,8 @@ data Expr
   | LogE Bool
   | StrE Text
   | PatE Pattern
+  | SuspendE ExprI
+  | ForceE ExprI
   deriving (Show, Ord, Eq)
 
 data Import
@@ -226,6 +228,8 @@ data E
   | LitP (Indexed Type) Lit
   | SrcP (Indexed Type) Source
   | PatP (Indexed Type) Selector
+  | SuspendP (Indexed Type) E
+  | ForceP (Indexed Type) E
   deriving (Ord, Eq, Show)
 
 data ExecutableExpr = SrcCall Source | PatCall Pattern
@@ -249,6 +253,8 @@ data ExprS g f c
   | ExeS ExecutableExpr
   | LetS EVar (AnnoS g f c) (AnnoS g f c)
   | LetBndS EVar
+  | SuspendS (AnnoS g f c)
+  | ForceS (AnnoS g f c)
 
 data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr ClassName EVar EType [(EType, [a])]
   deriving (Show, Eq, Ord)
@@ -359,6 +365,8 @@ mapExprSM _ (StrS x) = return $ StrS x
 mapExprSM _ (ExeS x) = return $ ExeS x
 mapExprSM f (LetS v e1 e2) = LetS v <$> f e1 <*> f e2
 mapExprSM _ (LetBndS v) = return $ LetBndS v
+mapExprSM f (SuspendS e) = SuspendS <$> f e
+mapExprSM f (ForceS e) = ForceS <$> f e
 
 mapAnnoSM ::
   (Traversable f, Monad m) =>
@@ -425,6 +433,8 @@ instance Pretty E where
   pretty (LitP _ l) = pretty l
   pretty (SrcP _ src) = pretty src
   pretty (PatP _ s) = pretty (PatternStruct s)
+  pretty (SuspendP _ e) = "{" <> pretty e <> "}"
+  pretty (ForceP _ e) = "!" <> pretty e
 
 instance Pretty Source where
   pretty s =
@@ -524,6 +534,8 @@ instance Pretty Expr where
         InfixR -> "infixr"
         InfixN -> "infix"
   pretty (BopE e1 _ v e2) = pretty e1 <+> pretty v <+> pretty e2
+  pretty (SuspendE e) = "{" <> pretty e <> "}"
+  pretty (ForceE e) = "!" <> pretty e
 
 instance (Foldable f) => Pretty (AnnoS a f b) where
   pretty (AnnoS _ _ e) = pretty e
@@ -544,6 +556,8 @@ instance (Foldable f) => Pretty (ExprS a f b) where
   pretty (ExeS x) = pretty x
   pretty (LetS v e1 e2) = "(LetS" <+> pretty v <+> "=" <+> pretty e1 <+> "in" <+> pretty e2 <> ")"
   pretty (LetBndS x) = "(LetBndS" <+> pretty x <> ")"
+  pretty (SuspendS e) = "(SuspendS" <+> pretty e <> ")"
+  pretty (ForceS e) = "(ForceS" <+> pretty e <> ")"
 
 instance Pretty ExecutableExpr where
   pretty (SrcCall src) = pretty src

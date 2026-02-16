@@ -12,7 +12,6 @@ Maintainer  : z@morloc.io
 module Morloc.Frontend.Treeify (treeify) where
 
 import qualified Data.Set as Set
-import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.DAG as DAG
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -64,7 +63,7 @@ treeify d
           -- if the key is not in the DAG, then something is dreadfully wrong codewise
           Nothing -> MM.throwSystemError $ "Compiler bug (__FILE__:__LINE__): Module DAG is missing key" <+> pretty k
           (Just (AST.findExport -> ExportMany symbols)) -> do
-            d' <- DAG.mapNodeM linkAndRemoveAnnotations d |>> nullify
+            d' <- DAG.mapNodeM linkAndRemoveAnnotations d
 
             -- move all to state, after this the DAG will no longer be needed
             _ <- MFL.link d'
@@ -97,27 +96,6 @@ treeify d
       roots ->
         MM.throwSystemError $ "Compiler bug (__FILE__:__LINE__): unsupported multi-rooted module DAG:" <+> tupled (map pretty roots)
 
--- TODO: document
-nullify :: DAG m e ExprI -> DAG m e ExprI
-nullify = DAG.mapNode f
-  where
-    f :: ExprI -> ExprI
-    f (ExprI i (SigE (Signature v n (EType t cs docs)))) = ExprI i (SigE (Signature v n (EType (nullifyT t) cs docs)))
-    f (ExprI i (ModE m es)) = ExprI i (ModE m (map f es))
-    f (ExprI i (AssE v e es)) = ExprI i (AssE v (f e) (map f es))
-    f e = e
-
-    nullifyT :: TypeU -> TypeU
-    nullifyT (FunU ts t) = FunU (filter (not . isNull) (map nullifyT ts)) (nullifyT t)
-    nullifyT (ExistU v (ts, tc) (rs, rc)) = ExistU v (map nullifyT ts, tc) (map (second nullifyT) rs, rc)
-    nullifyT (ForallU v t) = ForallU v (nullifyT t)
-    nullifyT (AppU t ts) = AppU (nullifyT t) (map nullifyT ts)
-    nullifyT (NamU o v ds rs) = NamU o v (map nullifyT ds) (map (second nullifyT) rs)
-    nullifyT t = t
-
-    isNull :: TypeU -> Bool
-    isNull t = t == BT.unitU
-
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
 linkAndRemoveAnnotations = f
   where
@@ -139,6 +117,8 @@ linkAndRemoveAnnotations = f
     f (ExprI i (AppE e es)) = ExprI i <$> (AppE <$> f e <*> mapM f es)
     f (ExprI i (LamE vs e)) = ExprI i <$> (LamE vs <$> f e)
     f (ExprI i (LetE bindings body)) = ExprI i <$> (LetE <$> mapM (\(v, e) -> (,) v <$> f e) bindings <*> f body)
+    f (ExprI i (SuspendE e)) = ExprI i <$> (SuspendE <$> f e)
+    f (ExprI i (ForceE e)) = ExprI i <$> (ForceE <$> f e)
     f e@(ExprI _ _) = return e
 
 {- | Build the call tree for a single nexus command. The result is ambiguous,
@@ -255,6 +235,12 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (LogE x) = return (namer, LogS x)
     f namer (StrE x) = return (namer, StrS x)
     f namer (PatE p) = return (namer, ExeS (PatCall p))
+    f namer (SuspendE e) = do
+      (namer', e') <- collectAnnoS namer e
+      return (namer', SuspendS e')
+    f namer (ForceE e) = do
+      (namer', e') <- collectAnnoS namer e
+      return (namer', ForceS e')
     -- all other expressions are strictly illegal here and represent compiler bugs
     f _ e = error $ "Bug in collectExprS: " <> show (render (pretty e))
 
@@ -282,6 +268,8 @@ reindexExpr (LstE es) = LstE <$> mapM reindexExprI es
 reindexExpr (NamE rs) = NamE <$> mapM (\(k, e) -> (,) k <$> reindexExprI e) rs
 reindexExpr (TupE es) = TupE <$> mapM reindexExprI es
 reindexExpr (LetE bindings body) = LetE <$> mapM (\(v, e) -> (,) v <$> reindexExprI e) bindings <*> reindexExprI body
+reindexExpr (SuspendE e) = SuspendE <$> reindexExprI e
+reindexExpr (ForceE e) = ForceE <$> reindexExprI e
 reindexExpr e = return e
 
 -- FIXME: when I add linking to line numbers, I'll need to update that map

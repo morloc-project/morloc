@@ -50,6 +50,8 @@ printExpr (IRemoteCall _ _ _ _) = error "use IRawExpr for R remote calls"
 printExpr (ILambda args body) =
   "function" <+> tupled args <> "{" <> printExpr body <> "}"
 printExpr (IRawExpr d) = d
+printExpr (ISuspend e) = "function()" <+> printExpr e
+printExpr (IForce e) = printExpr e <> "()"
 
 printStmt :: IStmt -> MDoc
 printStmt (IAssign v Nothing e) = v <+> "<-" <+> printExpr e

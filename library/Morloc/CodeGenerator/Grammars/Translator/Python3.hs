@@ -146,6 +146,9 @@ pythonLowerConfig makeSrcName = cfg
           return $ defaultValue {poolExpr = call}
       , lcMakeLet = \namer i _ e1 e2 -> return $ makeLet namer i e1 e2
       , lcReturn = \e -> "return(" <> e <> ")"
+      , lcMakeSuspend = \stmts expr -> case stmts of
+          [] -> "lambda:" <+> expr
+          _ -> error "Multi-statement Python suspends not yet supported"
       , lcSerialize = defaultSerialize cfg
       , lcDeserialize = \_ -> defaultDeserialize cfg
       , lcMakeFunction = \mname args _ priorLines body headForm ->

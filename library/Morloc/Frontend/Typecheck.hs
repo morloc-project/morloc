@@ -119,6 +119,7 @@ findTypeKindSize v = head . catMaybes . f
     f (NamU _ v' ts1 (map snd -> ts2))
       | v == v' = [Just (1 + (length ts1))]
       | otherwise = concat $ map f (ts1 <> ts2)
+    f (ThunkU t) = f t
 
 -- TypeU --> Type
 resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int
@@ -141,6 +142,8 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (LogS x) = LogS x
     f (StrS x) = StrS x
     f UniS = UniS
+    f (SuspendS e') = SuspendS (resolveTypes e')
+    f (ForceS e') = ForceS (resolveTypes e')
 
 resolveInstances ::
   Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
@@ -225,6 +228,8 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f _ g0 (LogS x) = return (g0, LogS x)
     f _ g0 (StrS x) = return (g0, StrS x)
     f _ g0 (ExeS x) = return (g0, ExeS x)
+    f _ g0 (SuspendS e) = resolveInstances g0 e |>> second SuspendS
+    f _ g0 (ForceS e) = resolveInstances g0 e |>> second ForceS
 
     connectInstance :: Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
     connectInstance g0 [] = return g0
@@ -546,6 +551,21 @@ synthE _ g (LetS v e1 e2) = do
   let g2 = g1 ++> [AnnG v t1]
   (g3, t2, e2') <- synthG g2 e2
   return (g3, t2, LetS v e1' e2')
+synthE _ g (SuspendS e) = do
+  (g1, t1, e1) <- synthG g e
+  return (g1, ThunkU t1, SuspendS e1)
+synthE i g (ForceS e) = do
+  (g1, t1, e1) <- synthG g e
+  case apply g1 t1 of
+    ThunkU a -> return (g1, a, ForceS e1)
+    ExistU _ _ _ -> do
+      -- solve ?v = {?b} for fresh ?b
+      let (g2, bv) = tvarname g1 "thunkInner_"
+          bt = ExistU bv ([], Open) ([], Open)
+          thunkT = ThunkU bt
+      g3 <- subtype' i (apply g2 t1) thunkT g2
+      return (g3, apply g3 bt, ForceS (applyGen g3 e1))
+    t -> throwTypeError i $ "Cannot force non-thunk type:" <+> pretty t
 
 etaExpandSynthE ::
   Int ->
@@ -774,6 +794,14 @@ checkE i g0 e0@(LamS vs body) t@(FunU as b)
 checkE i g1 e1 (ForallU v a) = do
   recordParameter i v a
   checkE' i (g1 +> v) e1 (substitute v a)
+checkE _ g (SuspendS e) (ThunkU t) = do
+  (g1, t1, e1) <- checkG g e t
+  return (g1, ThunkU t1, SuspendS e1)
+checkE i g (ForceS e) t = do
+  (g1, t1, e1) <- checkG g e (ThunkU t)
+  case apply g1 t1 of
+    ThunkU a -> return (g1, a, ForceS e1)
+    _ -> throwTypeError i $ "Expected thunk type in force expression"
 
 --   Sub
 checkE i g1 e1 b = do
@@ -905,3 +933,5 @@ peakSExpr (StrS x) = "StrS" <+> pretty x
 peakSExpr (ExeS exe) = "ExeS" <+> pretty exe
 peakSExpr (LetS v _ _) = "LetS" <+> pretty v
 peakSExpr (LetBndS v) = "LetBndS" <+> pretty v
+peakSExpr (SuspendS _) = "SuspendS"
+peakSExpr (ForceS _) = "ForceS"

@@ -154,6 +154,13 @@ applyLambdas (AnnoS g c (LetS v e1 e2)) = do
   e1' <- applyLambdas e1
   e2' <- applyLambdas e2
   return (AnnoS g c (LetS v e1' e2'))
+applyLambdas (AnnoS g c (SuspendS e)) = AnnoS g c . SuspendS <$> applyLambdas e
+-- cancel force-suspend: !{e} --> e, preserving outer annotation
+applyLambdas (AnnoS g c (ForceS (AnnoS _ _ (SuspendS e)))) = do
+  e' <- applyLambdas e
+  let AnnoS _ _ inner = e'
+  return (AnnoS g c inner)
+applyLambdas (AnnoS g c (ForceS e)) = AnnoS g c . ForceS <$> applyLambdas e
 applyLambdas x = return x
 
 substituteAnnoS ::
@@ -191,4 +198,6 @@ substituteAnnoS v r = f
     f e0@(AnnoS g c (LetS v' e1 e2))
       | v == v' = e0 -- shadowed by let binding
       | otherwise = AnnoS g c (LetS v' (f e1) (f e2))
+    f (AnnoS g c (SuspendS e)) = AnnoS g c (SuspendS (f e))
+    f (AnnoS g c (ForceS e)) = AnnoS g c (ForceS (f e))
     f x = x

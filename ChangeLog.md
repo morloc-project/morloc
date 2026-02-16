@@ -1,23 +1,33 @@
-0.63.0 [2026-02-xx]
--------------------
- [ ] Flexible table type
- [ ] Flexible record type
-
-0.64.0 [2026-03-xx]
--------------------
- [ ] server mode
- [ ] SLURM support
-
 0.62.0 [2026-02-xx]
 -------------------
+ [ ] SLURM support
  [ ] Apache Arrow format support
+ [ ] Apache Arrow format support
+ [ ] Flexible table type
+ [ ] Flexible record type
+ [ ] Flexible tensor type
  [ ] streamline language binders
- [ ] clean up backend architecture
- [ ] more efficient C/C++ compiling
- [ ] effect system
+ [ ] Add VLang
+ [ ] Add Julia 
+ [ ] Add JavaScript 
+ [ ] Add Rust
 
 0.61.0 [2026-02-xx]
 -------------------
+
+Build updates
+ * make nexus a constant binary (not recreated and recompiled)
+ * add install handling and portable scripts
+ * add morloc daemon mode accessible through HTTP/TCP and sockets
+
+Typesystem updates
+ * add let syntax that enforces execution order
+ * class constraints (e.g., unique :: Eq a => [a] -> [a])
+ * superclasses (e.g., class Semigroup => Monoid a where ...)
+ * effect system
+ * add do-syntax
+
+Better errors and UI
  * cleaner error messages
  * error message localization
  * clean `morloc typecheck` output

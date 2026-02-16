@@ -1,0 +1,17 @@
+--- doReturn ---
+42
+--- doBind ---
+EVAL 5
+11
+--- doBare ---
+EVAL 3
+42
+--- doChain ---
+EVAL 3
+EVAL 6
+18
+--- doMixed ---
+EVAL 1
+EVAL 5
+EVAL 10
+11

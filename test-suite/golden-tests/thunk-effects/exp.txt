@@ -1,0 +1,10 @@
+--- forceOnce ---
+EVAL 5
+10
+--- forceTwice ---
+EVAL 5
+EVAL 5
+20
+--- forceShared ---
+EVAL 5
+20

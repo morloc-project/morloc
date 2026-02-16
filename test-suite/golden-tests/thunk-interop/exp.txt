@@ -1,0 +1,17 @@
+--- cppForce ---
+EVAL_CPP 5
+10
+--- pyForce ---
+EVAL_PY 5
+10
+--- rForce ---
+EVAL_R 5
+10
+--- crossCppPy ---
+EVAL_CPP 3
+EVAL_PY 6
+18
+--- crossPyR ---
+EVAL_PY 4
+EVAL_R 8
+24

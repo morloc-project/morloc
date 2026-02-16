@@ -45,6 +45,7 @@ module Morloc.BaseTypes
   , strU
   , tupleU
   , listU
+  , thunkU
   ) where
 
 import Morloc.Data.Text (pretty)
@@ -162,3 +163,6 @@ listU t = AppU (VarU list) [t]
 
 tupleU :: [TypeU] -> TypeU
 tupleU ts = AppU (VarU $ tuple (length ts)) ts
+
+thunkU :: TypeU -> TypeU
+thunkU = ThunkU

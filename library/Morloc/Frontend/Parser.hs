@@ -27,6 +27,9 @@ import Text.Megaparsec hiding (Label)
 import Text.Megaparsec.Char hiding (eol)
 import qualified Text.Megaparsec.Char.Lexer as L
 
+-- | Internal type for do-block statement parsing
+data DoStmt = DoBind EVar ExprI | DoBare ExprI | DoReturn ExprI
+
 {- | Parse a single file or string that may contain multiple modules. Each
 module is written written into the DAG of previously observed modules.
 -}
@@ -474,7 +477,7 @@ pSingleConstraint = do
   return $ Constraint (ClassName cls) ts
 
 pConstraintTypeArg :: Parser TypeU
-pConstraintTypeArg = try pUniU <|> try parensType <|> try pVarU <|> try pListU <|> pTupleU
+pConstraintTypeArg = try pUniU <|> try pThunkU <|> try parensType <|> try pVarU <|> try pListU <|> pTupleU
 
 parseArgDocVars :: Parser ArgDocVars
 parseArgDocVars = indentFreeTerm $ foldMany defaultValue parseArgDocVar
@@ -646,12 +649,15 @@ pInfixOperator = EV <$> operatorName
 pOperand :: Parser ExprI
 pOperand =
       try pApp
+    <|> try pForceE
+    <|> try pDoBlock
     <|> try pHolE
     <|> try pNumE
     <|> try pLogE
     <|> try pStrE
     <|> try pParenExpr -- handles (), (e), (e,e,..), (+)
     <|> try pLstE
+    <|> try pSuspendE
     <|> try pNamE
     <|> try pSetter
     <|> try pGetter
@@ -666,20 +672,24 @@ pApp = do
   exprIAt pos $ AppE f es
   where
     parseFun =
-            try pVar
+            try pForceE
+        <|> try pVar
         <|> try pLstE
+        <|> try pSuspendE
         <|> try pNamE
         <|> try pSetter
         <|> try pGetter
         <|> try pParenExpr -- handles (), (e), (e,e,..), (+)
     parseArg =
-            try pParenExpr -- handles (), (e), (e,e,..), (+)
+            try pForceE
+        <|> try pParenExpr -- handles (), (e), (e,e,..), (+)
         <|> try pSetter
         <|> try pGetter
         <|> try pStrE
         <|> try pLogE
         <|> try pNumE
         <|> try pLstE
+        <|> try pSuspendE
         <|> try pNamE
         <|> try pVar
         <|> pHolE
@@ -754,7 +764,7 @@ pLetE = do
 pLetBinding :: Parser (EVar, ExprI)
 pLetBinding = do
   _ <- reserved "let"
-  v <- pEVar
+  v <- try (hole >> return (EV "_")) <|> pEVar
   _ <- symbol "="
   e <- pExpr
   return (v, e)
@@ -799,6 +809,108 @@ pVar = do
     mergeResources (Just (RemoteResources r1 m1 t1 g1)) (Just (RemoteResources r2 m2 t2 g2)) =
       Just $ RemoteResources (useRight r1 r2) (useRight m1 m2) (useRight t1 t2) (useRight g1 g2)
 
+-- | Parse a force expression: !e
+-- The ! binds tighter than any infix operator (parsed at operand level).
+-- Allow !! for chained force but disallow other operator chars after ! (e.g. !=).
+pForceE :: Parser ExprI
+pForceE = do
+  pos <- getSourcePos
+  _ <- try (char '!' <* notFollowedBy (oneOf (filter (/= '!') operatorChars)))
+  sc  -- consume whitespace after !
+  e <- pForceArg
+  exprIAt pos $ ForceE e
+  where
+    -- force argument: same as parseArg but also allows force (for !!x)
+    pForceArg =
+          try pForceE
+      <|> try pDoBlock
+      <|> try pParenExpr
+      <|> try pSetter
+      <|> try pGetter
+      <|> try pStrE
+      <|> try pLogE
+      <|> try pNumE
+      <|> try pLstE
+      <|> try pNamE
+      <|> try pSuspendE
+      <|> try pVar
+      <|> pHolE
+
+-- | Parse a suspend expression: {e}
+-- Disambiguated from record expressions by checking that the content after {
+-- is not "name = expr".
+pSuspendE :: Parser ExprI
+pSuspendE = do
+  pos <- getSourcePos
+  _ <- symbol "{"
+  -- fail if this looks like a record: identifier followed by =
+  notFollowedBy (try (freenameL >> symbol "="))
+  e <- pExpr
+  _ <- symbol "}"
+  exprIAt pos $ SuspendE e
+
+-- | Parse a do-block, desugared to suspend + let + force
+-- do
+--   print "start"       -- bare statement: let _ = !(print "start")
+--   x <- rnorm 0 1      -- bind: let x = !(rnorm 0 1)
+--   return (x + 1)       -- return: x + 1 (no force, becomes body)
+-- The whole block is wrapped in SuspendE.
+pDoBlock :: Parser ExprI
+pDoBlock = do
+  pos <- getSourcePos
+  _ <- reserved "do"
+  stmts <- alignInset pDoStmt
+  case stmts of
+    [] -> fail "empty do block"
+    _ -> do
+      body <- desugarDo pos stmts
+      exprIAt pos $ SuspendE body
+  where
+    pDoStmt :: Parser DoStmt
+    pDoStmt =
+          try pDoBind
+      <|> try pDoReturn
+      <|> pDoBare
+
+    pDoBind :: Parser DoStmt
+    pDoBind = do
+      v <- pEVar
+      _ <- symbol "<-"
+      e <- pExpr
+      return $ DoBind v e
+
+    pDoReturn :: Parser DoStmt
+    pDoReturn = do
+      _ <- reserved "return"
+      e <- pExpr
+      return $ DoReturn e
+
+    pDoBare :: Parser DoStmt
+    pDoBare = DoBare <$> pExpr
+
+    desugarDo :: SourcePos -> [DoStmt] -> Parser ExprI
+    -- final bare expression: force it
+    desugarDo p [DoBare e] = exprIAt p $ ForceE e
+    -- final return expression: no force
+    desugarDo _ [DoReturn e] = return e
+    -- final bind: error
+    desugarDo _ [DoBind _ _] = fail "do block cannot end with a bind (<-)"
+    -- non-final bind: let x = !e in rest
+    desugarDo p (DoBind v e : rest) = do
+      forceE <- exprIAt p $ ForceE e
+      restE <- desugarDo p rest
+      exprIAt p $ LetE [(v, forceE)] restE
+    -- non-final bare: let _ = !e in rest (use fresh discard name)
+    desugarDo p (DoBare e : rest) = do
+      idx <- exprIdAt p
+      let discardVar = EV ("_do_" <> MT.show' idx)
+      forceE <- exprIAt p $ ForceE e
+      restE <- desugarDo p rest
+      exprIAt p $ LetE [(discardVar, forceE)] restE
+    -- non-final return: error
+    desugarDo _ (DoReturn _ : _) = fail "return must be the last statement in a do block"
+    desugarDo _ [] = fail "empty do block"
+
 pHolE :: Parser ExprI
 pHolE = do
   pos <- getSourcePos
@@ -831,7 +943,7 @@ pAppUCon = do
   args <- many1 pType'
   return $ AppU t args
   where
-    pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU
+    pType' = try pUniU <|> try pThunkU <|> try parensType <|> pVarU <|> pListU <|> pTupleU
 
 pVarUCon :: Parser TypeU
 pVarUCon = VarU <$> pTermCon
@@ -851,6 +963,7 @@ pType =
     <*> ( try pExistential
             <|> try (pFunUDoc |>> snd) -- discard nested function argument docs (for now)
             <|> try pUniU
+            <|> try pThunkU
             <|> try pAppU
             <|> try parensType
             <|> try pListU
@@ -895,7 +1008,7 @@ pAppU = do
   args <- many1 pType'
   return $ AppU (VarU t) args
   where
-    pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU
+    pType' = try pUniU <|> try pThunkU <|> try parensType <|> pVarU <|> pListU <|> pTupleU
 
 pFunUDoc :: Parser ([ArgDocVars], TypeU)
 pFunUDoc = do
@@ -908,13 +1021,25 @@ pFunUDoc = do
     pType' = (,) <$> parseArgDocVars <*> pFunCompatibleType
 
 pFunCompatibleType :: Parser TypeU
-pFunCompatibleType = try pUniU <|> try parensType <|> try pAppU <|> try pVarU <|> try pListU <|> pTupleU
+pFunCompatibleType = try pUniU <|> try pThunkU <|> try parensType <|> try pAppU <|> try pVarU <|> try pListU <|> pTupleU
 
 pListU :: Parser TypeU
 pListU = do
   _ <- optional pTag
   (_, t) <- brackets pType
   return $ BT.listU t
+
+-- | Parse a thunk type: {A}
+-- Disambiguated from record types by checking that the content after { is not
+-- a record field (i.e., not "name :: Type").
+pThunkU :: Parser TypeU
+pThunkU = try $ do
+  _ <- symbol "{"
+  -- fail if this looks like a record type: identifier followed by ::
+  notFollowedBy (try (freename >> op "::"))
+  (_, t) <- pType
+  _ <- symbol "}"
+  return $ ThunkU t
 
 pVarU :: Parser TypeU
 pVarU = VarU <$> pTerm

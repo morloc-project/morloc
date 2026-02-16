@@ -1,0 +1,32 @@
+-- Test core thunk use cases:
+--   1. Effectful function forced once
+--   2. Two independent force sites evaluate independently (no CSE)
+--   3. Let-bound force evaluates once, result shared across uses
+-- sideEffect :: Int -> {Int} captures the side effect in the type.
+-- Each sideEffect call prints "EVAL <input>" to stderr and returns input * 2.
+
+module main (forceOnce, forceTwice, forceShared)
+
+import root-cpp
+
+source Cpp from "foo.hpp" ("sideEffect", "add")
+
+type Cpp => Int = "int"
+
+sideEffect :: Int -> {Int}
+add :: Int -> Int -> Int
+
+-- Single force: evaluated exactly once
+-- sideEffect 5 prints "EVAL 5", returns 10
+forceOnce :: Int
+forceOnce = !(sideEffect 5)
+
+-- Two independent force sites: each evaluates independently
+-- sideEffect 5 called twice: "EVAL 5" appears twice, 10 + 10 = 20
+forceTwice :: Int
+forceTwice = add !(sideEffect 5) !(sideEffect 5)
+
+-- Let-binding forces once, shares the concrete result
+-- sideEffect 5 called once: "EVAL 5" appears once, 10 + 10 = 20
+forceShared :: Int
+forceShared = let x = !(sideEffect 5) in add x x

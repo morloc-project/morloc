@@ -31,6 +31,8 @@ setManifoldConfig midx (AnnoS _ _ (AppS (AnnoS (Idx fidx _) _ (VarS _ _)) _)) = 
 setManifoldConfig midx (AnnoS _ _ (AppS (AnnoS (Idx fidx _) _ (ExeS _)) _)) = linkConfigIndex midx fidx
 setManifoldConfig midx (AnnoS _ _ (AppS e _)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (LamS _ e)) = setManifoldConfig midx e
+setManifoldConfig midx (AnnoS _ _ (SuspendS e)) = setManifoldConfig midx e
+setManifoldConfig midx (AnnoS _ _ (ForceS e)) = setManifoldConfig midx e
 setManifoldConfig _ _ = return ()
 
 linkConfigIndex :: Int -> Int -> MorlocMonad ()
@@ -106,7 +108,13 @@ reduceType scope t0 =
 
 expressDefault :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
 expressDefault e@(AnnoS (Idx midx t) (Idx cidx lang, args) _) =
-  PolyHead lang midx [Arg i None | Arg i _ <- args] <$> expressPolyExprWrap lang (Idx cidx t) e
+  PolyHead lang midx [Arg i None | Arg i _ <- args] . ensurePolyReturn <$> expressPolyExprWrap lang (Idx cidx t) e
+  where
+    -- ensure the manifold body has PolyReturn at the return position
+    ensurePolyReturn (PolyReturn x) = PolyReturn x
+    ensurePolyReturn (PolyLet i e1 e2) = PolyLet i e1 (ensurePolyReturn e2)
+    ensurePolyReturn (PolyManifold l m f e) = PolyManifold l m f (ensurePolyReturn e)
+    ensurePolyReturn x = PolyReturn x
 
 expressPolyExprWrap ::
   Lang ->
@@ -413,11 +421,13 @@ expressPolyExpr _ _ _ (AnnoS (Idx i c) (Idx cidx _, rs) (LetBndS v)) = do
 expressPolyExpr findRemote parentLang parentType
     (AnnoS _ (Idx cidx lang, _) (LetS v e1 e2)) = do
   let bodyArgs = case e2 of AnnoS _ (_, args) _ -> args
+      -- unused let-bound variables (e.g. from do-block bare statements) won't
+      -- appear in body args; use cidx as a unique dummy ID in that case
       letId = case [j | Arg j v' <- bodyArgs, v' == v] of
                 [j] -> j
-                _   -> error "Bug: let-bound variable not found in body annotation"
-  e1' <- expressPolyExprWrap lang parentType e1
-  e2' <- expressPolyExprWrap lang parentType e2
+                _   -> cidx
+  e1' <- expressPolyExprWrap parentLang parentType e1
+  e2' <- expressPolyExprWrap parentLang parentType e2
   return $ PolyLet letId e1' e2'
 
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (RealS x)) = return $ PolyReal (Idx cidx v) x
@@ -452,6 +462,45 @@ expressPolyExpr _ _ _ (AnnoS (Idx i _) _ (AppS (AnnoS _ _ (BndS v)) _)) =
 
 expressPolyExpr _ _ _ (AnnoS _ _ (AppS (AnnoS _ _ (LamS vs _)) _)) =
   error $ "All applications of lambdas should have been eliminated of length " <> show (length vs)
+
+expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (SuspendS x)) = do
+  x' <- expressPolyExprWrap lang (mkIdx x t) x
+  return $ PolySuspend (Idx cidx t) x'
+expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (ForceS x)) = do
+  -- Use parentLang (not lang) so cross-language thunk forces create proper
+  -- manifold boundaries. When the thunk's language differs from the context,
+  -- this ensures Express treats the call as foreign.
+  x' <- expressPolyExprWrap parentLang (Idx cidx t) x
+  if parentLang /= lang
+    then return $ pushForceIntoRemote (Idx cidx t) x'
+    else return $ PolyForce (Idx cidx t) x'
+
+-- Nullary source/pattern call (e.g., clockResNs :: {Int})
+expressPolyExpr
+  findRemote
+  parentLang
+  pc
+  f@(AnnoS (Idx midx _) (Idx _ callLang, args) (ExeS _))
+    | isLocal = do
+        call <- expressPolyApp parentLang f []
+        return
+          . PolyManifold callLang midx (ManifoldFull (map unvalue args))
+          $ call
+    | otherwise = do
+        call <- expressPolyApp callLang f []
+        return
+          . PolyManifold parentLang midx (ManifoldFull (map unvalue args))
+          . PolyReturn
+          . PolyApp
+            ( PolyRemoteInterface callLang pc [] (fromJust remote)
+                . PolyManifold callLang midx (ManifoldFull (map unvalue args))
+                $ call
+            )
+          $ [PolyBndVar (A parentLang) i | Arg i _ <- args]
+    where
+      remote = findRemote parentLang callLang
+      isLocal = isNothing remote
+
 expressPolyExpr _ _ parentType x@(AnnoS (Idx m t) _ _) = do
   MM.sayVVV "Bad case"
   MM.sayVVV $ "  t :: " <> pretty t
@@ -511,6 +560,35 @@ expressContainer pc (Idx midx parentLang) (Idx _ lang) args e
 
 unvalue :: Arg a -> Arg None
 unvalue (Arg i _) = Arg i None
+
+-- | Handle cross-language force by stripping ThunkT from the callee's function
+-- return type. The source function actually returns the unwrapped type; the
+-- ThunkT wrapper is a type-system abstraction. By removing it, Common.hs won't
+-- auto-wrap in SuspendN, so the raw value is serialized directly.
+-- If no PolyRemoteInterface is found, falls back to wrapping in PolyForce.
+pushForceIntoRemote :: Indexed Type -> PolyExpr -> PolyExpr
+pushForceIntoRemote t = go
+  where
+    go (PolyManifold l m f e) = PolyManifold l m f (go e)
+    go (PolyReturn e) = PolyReturn (go e)
+    go (PolyLet i e1 e2) = PolyLet i e1 (go e2)
+    go (PolyApp (PolyRemoteInterface lang _ args remote callee) xs) =
+      PolyApp (PolyRemoteInterface lang t args remote (stripThunkReturn callee)) xs
+    go e = PolyForce t e -- fallback for local expressions
+
+    -- Strip ThunkT from the function's return type inside the callee manifold
+    stripThunkReturn (PolyManifold l m f body) = PolyManifold l m f (stripInBody body)
+    stripThunkReturn e = stripInBody e
+
+    stripInBody (PolyReturn e) = PolyReturn (stripInExe e)
+    stripInBody (PolyLet i e1 e2) = PolyLet i e1 (stripInBody e2)
+    stripInBody e = stripInExe e
+
+    stripInExe (PolyApp (PolyExe (Idx gidx (FunT inputs (ThunkT out))) exe) xs) =
+      PolyApp (PolyExe (Idx gidx (FunT inputs out)) exe) xs
+    stripInExe (PolyApp (PolyExe (Idx gidx (ThunkT out)) exe) xs) =
+      PolyApp (PolyExe (Idx gidx out) exe) xs
+    stripInExe e = e
 
 bindVarIds :: [Int] -> [Three Lang Type (Indexed Type)] -> [PolyExpr]
 bindVarIds [] [] = []

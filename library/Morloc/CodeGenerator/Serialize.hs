@@ -165,8 +165,11 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
           return $ NativeLetN i ne1 ne2
     nativeExpr _ (MonoLetVar t i) = LetVarN <$> inferType t <*> pure i
     nativeExpr m (MonoReturn e) = ReturnN <$> nativeExpr m e
-    nativeExpr m (MonoApp (MonoExe (Idx idx (FunT inputTypes outputType)) exe) es) = do
+    nativeExpr m (MonoApp (MonoExe (Idx idx t0) exe) es) = do
       args <- mapM (nativeArg m) es
+      let (inputTypes, outputType) = case t0 of
+            FunT its ot -> (its, ot)
+            _ -> ([], t0)
       appType <- case drop (length es) inputTypes of
         [] -> inferType (Idx idx outputType)
         remaining -> inferType $ Idx idx (FunT remaining outputType)
@@ -234,6 +237,8 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoInt v x) = IntN <$> inferVar v <*> pure x
     nativeExpr _ (MonoStr v x) = StrN <$> inferVar v <*> pure x
     nativeExpr _ (MonoNull v) = NullN <$> inferVar v
+    nativeExpr m (MonoSuspend t e) = SuspendN <$> inferType t <*> nativeExpr m e
+    nativeExpr m (MonoForce t e) = ForceN <$> inferType t <*> nativeExpr m e
 
     typeArg ::
       SerializationState ->

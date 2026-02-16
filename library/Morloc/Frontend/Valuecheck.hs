@@ -36,6 +36,8 @@ toE (AnnoS g _ (ExeS (PatCall (PatternText s ss)))) =
 toE (AnnoS g _ (ExeS (PatCall (PatternStruct s)))) = PatP g s
 toE (AnnoS g _ (LetBndS v)) = BndP g v
 toE (AnnoS _ _ (LetS _ _ body)) = toE body
+toE (AnnoS g _ (SuspendS e)) = SuspendP g (toE e)
+toE (AnnoS g _ (ForceS e)) = ForceP g (toE e)
 
 indexOfE :: E -> Int
 indexOfE (BndP (Idx i _) _) = i
@@ -48,6 +50,8 @@ indexOfE (NamP (Idx i _) _) = i
 indexOfE (LitP (Idx i _) _) = i
 indexOfE (SrcP (Idx i _) _) = i
 indexOfE (PatP (Idx i _) _) = i
+indexOfE (SuspendP (Idx i _) _) = i
+indexOfE (ForceP (Idx i _) _) = i
 
 -- Check the harmony of typed implementations.
 --
@@ -71,6 +75,8 @@ check (LamP _ _ e) = check e
 check (LstP _ es) = mapM_ check es
 check (TupP _ es) = mapM_ check es
 check (NamP _ (map snd -> es)) = mapM_ check es
+check (SuspendP _ e) = check e
+check (ForceP _ e) = check e
 check _ = return ()
 
 -- check for contradictions in one pair of expressions
@@ -145,6 +151,8 @@ checkPair i e1 e2@SrcP {}
     isSimple LamP {} = False
     isSimple SrcP {} = False
     isSimple PatP {} = False
+    isSimple (SuspendP _ e) = isSimple e
+    isSimple (ForceP _ e) = isSimple e
 
 -- reduce empty lambdas
 --
@@ -250,6 +258,8 @@ substituteEVar oldVar newVar e0
     f used idx (LstP g es) = LstP g $ map (f used idx) es
     f used idx (TupP g es) = TupP g $ map (f used idx) es
     f used idx (NamP g rs) = NamP g $ map (second (f used idx)) rs
+    f used idx (SuspendP g e) = SuspendP g (f used idx e)
+    f used idx (ForceP g e) = ForceP g (f used idx e)
     f _ _ e = e
 
     relabelLam :: Set.Set EVar -> Int -> [EVar] -> E -> (Set.Set EVar, Int, [EVar], E)
@@ -288,6 +298,8 @@ freeTerms = f Set.empty
     f boundterms (LstP _ es) = Set.unions . map (f boundterms) $ es
     f boundterms (TupP _ es) = Set.unions . map (f boundterms) $ es
     f boundterms (NamP _ (map snd -> es)) = Set.unions . map (f boundterms) $ es
+    f boundterms (SuspendP _ e) = f boundterms e
+    f boundterms (ForceP _ e) = f boundterms e
     f _ _ = Set.empty
 
 substituteExpr :: EVar -> E -> E -> E
@@ -309,3 +321,5 @@ substituteExpr oldVar replacementExpr = f
     f e@LitP {} = e
     f e@SrcP {} = e
     f e@PatP {} = e
+    f (SuspendP g e) = SuspendP g (f e)
+    f (ForceP g e) = ForceP g (f e)

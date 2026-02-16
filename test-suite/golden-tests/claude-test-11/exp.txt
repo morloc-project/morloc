@@ -1,0 +1,25 @@
+--- sysReport ---
+CLOCK_QUERY
+PID_QUERY
+UPTIME_QUERY
+"[Jan-86400] code=524550 pid=1234"
+--- envCal ---
+PID_QUERY
+"Oct-2025"
+--- cpuLoad ---
+CPU_QUERY
+UPTIME_QUERY
+904710
+--- multiQuery ---
+CPU_QUERY
+CPU_QUERY
+476269
+--- sharedQuery ---
+CPU_QUERY
+476269
+--- pipeline ---
+ENV_QUERY
+CLOCK_QUERY
+UPTIME_QUERY
+PID_QUERY
+"[\/home\/user] code=904707 pid=1234"

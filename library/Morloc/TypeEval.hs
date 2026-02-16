@@ -187,6 +187,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                     <> "\n  ts1:" <+> list (map viaShow ts1)
           Nothing -> resolve bnd t0
     f bnd (ForallU v t) = ForallU v <$> recurse (Set.insert v bnd) t
+    f bnd (ThunkU t) = ThunkU <$> recurse bnd t
 
     terminate :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
     terminate bnd (ExistU v (ts, tc) (rs, rc)) = do
@@ -198,6 +199,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     terminate bnd (AppU t ts) = AppU t <$> mapM (recurse bnd) ts
     terminate bnd (NamU o v ts rs) = NamU o v <$> mapM (recurse bnd) ts <*> mapM (secondM (recurse bnd)) rs
     terminate _ (VarU v) = return (VarU v)
+    terminate bnd (ThunkU t) = ThunkU <$> recurse bnd t
 
     renameTypedefs ::
       Set.Set TVar -> ([Either TVar TypeU], TypeU, ArgDoc, Bool) -> ([TVar], TypeU, ArgDoc, Bool)
@@ -298,3 +300,4 @@ parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
 parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
 parsub pair (AppU t ts) = AppU (parsub pair t) (map (parsub pair) ts)
 parsub pair (NamU o n ps rs) = NamU o n (map (parsub pair) ps) [(k', parsub pair t) | (k', t) <- rs]
+parsub pair (ThunkU t) = ThunkU (parsub pair t)

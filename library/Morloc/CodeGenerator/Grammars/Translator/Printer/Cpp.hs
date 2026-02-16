@@ -59,6 +59,8 @@ printExpr (IRemoteCall _ _ _ _) = error "use IRawExpr for C++ remote calls"
 printExpr (ILambda args body) =
   "[&](" <> hsep (punctuate "," ["auto" <+> a | a <- args]) <> "){return " <> printExpr body <> ";}"
 printExpr (IRawExpr d) = d
+printExpr (ISuspend e) = "[&](){return " <> printExpr e <> ";}"
+printExpr (IForce e) = printExpr e <> "()"
 
 printStmt :: IStmt -> MDoc
 printStmt (IAssign v Nothing e) = "auto" <+> v <+> "=" <+> printExpr e <> ";"

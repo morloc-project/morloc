@@ -114,6 +114,9 @@ renameExistentials = snd . f (0 :: Int, Map.empty)
     f s (NamU o n vs rs) =
       let (s', ts') = statefulMap f s (map snd rs)
        in (s', NamU o n vs (zip (map fst rs) ts'))
+    f s (ThunkU t) =
+      let (s', t') = f s t
+       in (s', ThunkU t')
 
 closeExistentials :: TypeU -> TypeU
 closeExistentials = f
@@ -124,6 +127,7 @@ closeExistentials = f
     f (FunU ts t) = FunU (map f ts) (f t)
     f (AppU t ts) = AppU (f t) (map f ts)
     f (NamU o v ts rs) = NamU o v (map f ts) (map (second f) rs)
+    f (ThunkU t) = ThunkU (f t)
 
 assertSubtypeGamma :: String -> [GammaIndex] -> TypeU -> TypeU -> [GammaIndex] -> TestTree
 assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do
@@ -1360,14 +1364,14 @@ unitTypeTests =
         module main (f)
         f :: () -> Bool
         |]
-        (fun [bool])
+        (fun [VarU (TV "Unit"), bool])
     , assertGeneralType
         "unit as 2rd input"
         [r|
         module main (f)
         f :: Int -> () -> Bool
         |]
-        (fun [int, bool])
+        (fun [int, VarU (TV "Unit"), bool])
     , assertGeneralType
         "unit as output"
         [r|

@@ -1,0 +1,17 @@
+module main (forceConst, forceFun)
+
+import root-cpp
+
+source Cpp from "foo.hpp" ("add")
+
+type Cpp => Int = "int"
+
+add :: Int -> Int -> Int
+
+-- basic: !{42} == 42
+forceConst :: Int
+forceConst = !{42}
+
+-- force a thunk containing a function call
+forceFun :: Int
+forceFun = !{add 40 2}

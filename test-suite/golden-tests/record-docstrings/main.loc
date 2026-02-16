@@ -1,14 +1,25 @@
--- desc: A module for doing foo
+-- A module for doing foo
+--
+-- Here is a multi-lined
+-- doc about this thing
+--
 -- author: Weena
 -- email: weena@nowhere.com
 -- github: ...
 -- bugs: ...
 -- website: ...
 -- maintainer: ...
---
--- Here are some details
--- that span several lines
-module foobar (fooFun, barFun, baz, travelTime, bif)
+module foobar (
+  -- name: fun
+  -- desc: A fun group of functions
+  fooFun,
+  barFun,
+  -- name: biffy
+  -- desc: A biffy group of functions
+  baz,
+  travelTime,
+  bif
+  )
 
 import root-py
 

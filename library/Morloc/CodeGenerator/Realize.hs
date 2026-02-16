@@ -142,9 +142,17 @@ realize s0 = do
     scoreExpr rstat (LetS v e1 e2, i) = do
       e1' <- scoreAnnoS rstat e1
       e2' <- scoreAnnoS rstat e2
-      let best = minPairs (scoresOf e2')
+      -- include RHS scores so unused let bindings (e.g. from do-block bare
+      -- statements) still propagate their language requirement
+      let best = minPairs (scoresOf e1' ++ scoresOf e2')
       return (LetS v e1' e2', Idx i best)
     scoreExpr rstat (LetBndS v, i) = return (LetBndS v, zipLang i rstat)
+    scoreExpr rstat (SuspendS x, i) = do
+      x' <- scoreAnnoS rstat x
+      return (SuspendS x', Idx i (scoresOf x'))
+    scoreExpr rstat (ForceS x, i) = do
+      x' <- scoreAnnoS rstat x
+      return (ForceS x', Idx i (scoresOf x'))
 
     -- calculate the score for an application based on the score of the function
     -- and the scores of the arguments
@@ -344,6 +352,14 @@ realize s0 = do
       e2' <- collapseAnnoS lang e2
       return (LetS v e1' e2', Idx i lang)
     collapseExpr _ lang (LetBndS v, Idx i _) = return (LetBndS v, Idx i lang)
+    collapseExpr _ l1 (SuspendS x, Idx i ss) = do
+      lang <- chooseLanguage l1 ss
+      x' <- collapseAnnoS lang x
+      return (SuspendS x', Idx i lang)
+    collapseExpr _ l1 (ForceS x, Idx i ss) = do
+      lang <- chooseLanguage l1 ss
+      x' <- collapseAnnoS lang x
+      return (ForceS x', Idx i lang)
 
     chooseLanguage :: Maybe Lang -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
     chooseLanguage l1 ss = do
@@ -404,6 +420,8 @@ realize s0 = do
             (ExeS x) -> return (ExeS x)
             (LetS v e1 e2) -> LetS v <$> f lang e1 <*> f lang e2
             (LetBndS v) -> return (LetBndS v)
+            (SuspendS x) -> SuspendS <$> f lang x
+            (ForceS x) -> ForceS <$> f lang x
           return (AnnoS g (Idx i lang) e'')
 
 {- | This function is called on trees that contain no language-specific
@@ -439,6 +457,8 @@ removeVarS (AnnoS g c (LstS xs)) = AnnoS g c (LstS (map removeVarS xs))
 removeVarS (AnnoS g c (TupS xs)) = AnnoS g c (TupS (map removeVarS xs))
 removeVarS (AnnoS g c (NamS rs)) = AnnoS g c (NamS (map (second removeVarS) rs))
 removeVarS (AnnoS g c (LetS v e1 e2)) = AnnoS g c (LetS v (removeVarS e1) (removeVarS e2))
+removeVarS (AnnoS g c (SuspendS e)) = AnnoS g c (SuspendS (removeVarS e))
+removeVarS (AnnoS g c (ForceS e)) = AnnoS g c (ForceS (removeVarS e))
 removeVarS x = x
 
 -- Check if this expression is a data structure that contains

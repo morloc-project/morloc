@@ -96,6 +96,7 @@ checkForSelfRecursion d = do
     hasTerm v (NamU o n ps ((_, t) : rs)) = hasTerm v t || hasTerm v (NamU o n ps rs)
     hasTerm v (NamU o n (p : ps) []) = hasTerm v p || hasTerm v (NamU o n ps [])
     hasTerm _ (NamU _ _ [] []) = False
+    hasTerm v (ThunkU t) = hasTerm v t
     hasTerm _ ExistU {} = error "There should not be existentionals in typedefs"
 
 resolveHoles ::
@@ -131,6 +132,8 @@ resolveHoles = DAG.mapNodeM unhole
       bindings' <- mapM (\(v, e) -> (,) v <$> unhole e) bindings
       body' <- unhole body
       return $ ExprI i (LetE bindings' body')
+    unhole (ExprI i (SuspendE e)) = SuspendE <$> unhole e |>> ExprI i
+    unhole (ExprI i (ForceE e)) = ForceE <$> unhole e |>> ExprI i
     unhole (ExprI _ (BopE _ _ _ _)) = error "Bop should have been resolved"
     unhole e = return e
 
@@ -174,6 +177,8 @@ resolveHoles = DAG.mapNodeM unhole
     descend (ExprI i (TupE es)) = TupE <$> mapM descend es |>> ExprI i
     descend (ExprI i (NamE rs)) = NamE <$> mapM (\(k, e) -> (,) k <$> descend e) rs |>> ExprI i
     descend (ExprI i (AnnE e t)) = AnnE <$> descend e <*> pure t |>> ExprI i
+    descend (ExprI i (SuspendE e)) = SuspendE <$> descend e |>> ExprI i
+    descend (ExprI i (ForceE e)) = ForceE <$> descend e |>> ExprI i
     descend e = return e
 
     -- name a hole based on the index of the new lambda and the hole position
@@ -659,3 +664,4 @@ rename sourceName localAlias = f
     f (NamU o v ts rs) =
       let v' = if v == sourceName then localAlias else v
       in NamU o v' (map f ts) (map (second f) rs)
+    f (ThunkU t) = ThunkU (f t)

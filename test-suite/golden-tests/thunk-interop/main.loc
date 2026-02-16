@@ -1,0 +1,60 @@
+-- Test thunks across C++, Python, and R:
+--   1-3. Force thunk in each language independently
+--   4-5. Cross-language: do-blocks chaining thunk forces across languages
+-- Each sideEffect prints "EVAL_<LANG> <input>" to stderr, returns input * 2.
+
+module main (cppForce, pyForce, rForce, crossCppPy, crossPyR)
+
+import root-cpp
+import root-py
+import root-r
+
+source Cpp from "foo.hpp" ("sideEffectCpp", "addCpp")
+source Py from "foo.py" ("sideEffectPy", "addPy")
+source R from "foo.R" ("sideEffectR", "addR")
+
+type Cpp => Int = "int"
+type Py => Int = "int"
+type R => Int = "integer"
+
+sideEffectCpp :: Int -> {Int}
+sideEffectPy :: Int -> {Int}
+sideEffectR :: Int -> {Int}
+addCpp :: Int -> Int -> Int
+addPy :: Int -> Int -> Int
+addR :: Int -> Int -> Int
+
+-- Force a C++ thunk
+-- sideEffectCpp 5 -> "EVAL_CPP 5", returns 10
+cppForce :: Int
+cppForce = !(sideEffectCpp 5)
+
+-- Force a Python thunk
+-- sideEffectPy 5 -> "EVAL_PY 5", returns 10
+pyForce :: Int
+pyForce = !(sideEffectPy 5)
+
+-- Force an R thunk
+-- sideEffectR 5 -> "EVAL_R 5", returns 10
+rForce :: Int
+rForce = !(sideEffectR 5)
+
+-- Cross-language do-block: C++ thunk feeds Python thunk, result via C++ add
+-- sideEffectCpp 3 -> "EVAL_CPP 3", x = 6
+-- sideEffectPy 6 -> "EVAL_PY 6", y = 12
+-- addCpp 6 12 = 18
+crossCppPy :: Int
+crossCppPy = !do
+    x <- sideEffectCpp 3
+    y <- sideEffectPy x
+    return (addCpp x y)
+
+-- Cross-language do-block: Python thunk feeds R thunk, result via Python add
+-- sideEffectPy 4 -> "EVAL_PY 4", x = 8
+-- sideEffectR 8 -> "EVAL_R 8", y = 16
+-- addPy 8 16 = 24
+crossPyR :: Int
+crossPyR = !do
+    x <- sideEffectPy 4
+    y <- sideEffectR x
+    return (addPy x y)

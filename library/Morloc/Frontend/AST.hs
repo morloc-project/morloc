@@ -96,6 +96,7 @@ findTypeTerms (ForallU _ e) = findTypeTerms e
 findTypeTerms (FunU ts t) = concatMap findTypeTerms ts <> findTypeTerms t
 findTypeTerms (AppU t ts) = findTypeTerms t <> concatMap findTypeTerms ts
 findTypeTerms (NamU _ _ ps rs) = concatMap findTypeTerms (map snd rs <> ps)
+findTypeTerms (ThunkU t) = findTypeTerms t
 
 findFixityMap :: ExprI -> MorlocMonad (Map.Map EVar (Associativity, Int))
 findFixityMap (ExprI _ (ModE _ es)) = do
@@ -139,6 +140,8 @@ checkExprI f e@(ExprI _ (TupE es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (NamE rs)) = f e >> mapM_ (checkExprI f . snd) rs
 checkExprI f e@(ExprI _ (BopE e1 _ _ e2)) = f e >> mapM_ (checkExprI f) [e1, e2]
 checkExprI f e@(ExprI _ (LetE bindings body)) = f e >> mapM_ (checkExprI f . snd) bindings >> checkExprI f body
+checkExprI f e@(ExprI _ (SuspendE e')) = f e >> checkExprI f e'
+checkExprI f e@(ExprI _ (ForceE e')) = f e >> checkExprI f e'
 checkExprI f e = f e
 
 maxIndex :: ExprI -> Int
@@ -155,6 +158,8 @@ maxIndex (ExprI i (ExpE ExportAll)) = i
 maxIndex (ExprI i (ExpE (ExportMany ss))) = maximum (i : map fst (Set.toList ss))
 maxIndex (ExprI i (BopE e1 j _ e2)) = maximum [i, j, maxIndex e1, maxIndex e2]
 maxIndex (ExprI i (LetE bindings body)) = maximum (i : maxIndex body : map (maxIndex . snd) bindings)
+maxIndex (ExprI i (SuspendE e)) = max i (maxIndex e)
+maxIndex (ExprI i (ForceE e)) = max i (maxIndex e)
 maxIndex (ExprI i _) = i
 
 getIndices :: ExprI -> [Int]
@@ -171,4 +176,6 @@ getIndices (ExprI i (ExpE ExportAll)) = [i]
 getIndices (ExprI i (ExpE (ExportMany ss))) = i : [j | (j, _) <- Set.toList ss]
 getIndices (ExprI i (BopE e1 j _ e2)) = [i, j] <> getIndices e1 <> getIndices e2
 getIndices (ExprI i (LetE bindings body)) = i : concatMap (getIndices . snd) bindings <> getIndices body
+getIndices (ExprI i (SuspendE e)) = i : getIndices e
+getIndices (ExprI i (ForceE e)) = i : getIndices e
 getIndices (ExprI i _) = [i]

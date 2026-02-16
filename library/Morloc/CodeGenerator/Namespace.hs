@@ -149,6 +149,7 @@ data TypeF
   | FunF [TypeF] TypeF
   | AppF TypeF [TypeF]
   | NamF NamType FVar [TypeF] [(Key, TypeF)]
+  | ThunkF TypeF
   deriving (Show, Ord, Eq)
 
 data TypeM
@@ -436,6 +437,8 @@ data PolyExpr
   | PolyInt (Indexed TVar) Integer
   | PolyStr (Indexed TVar) Text
   | PolyNull (Indexed TVar)
+  | PolySuspend (Indexed Type) PolyExpr
+  | PolyForce (Indexed Type) PolyExpr
 
 data MonoHead = MonoHead Lang Int [Arg None] HeadManifoldForm MonoExpr
 
@@ -464,6 +467,8 @@ data MonoExpr
   | MonoInt (Indexed TVar) Integer
   | MonoStr (Indexed TVar) Text
   | MonoNull (Indexed TVar)
+  | MonoSuspend (Indexed Type) MonoExpr
+  | MonoForce (Indexed Type) MonoExpr
 
 data PoolCall
   = PoolCall
@@ -530,6 +535,8 @@ data NativeExpr
   | IntN FVar Integer
   | StrN FVar Text
   | NullN FVar
+  | SuspendN TypeF NativeExpr
+  | ForceN TypeF NativeExpr
   deriving (Show)
 
 foldlSM :: (b -> a -> b) -> b -> SerialManifold_ a -> b
@@ -574,6 +581,8 @@ foldlNE _ b (RealN_ _ _) = b
 foldlNE _ b (IntN_ _ _) = b
 foldlNE _ b (StrN_ _ _) = b
 foldlNE _ b (NullN_ _) = b
+foldlNE f b (SuspendN_ _ x) = f b x
+foldlNE f b (ForceN_ _ x) = f b x
 
 data MonoidFold m a = MonoidFold
   { monoidSerialManifold :: SerialManifold_ (a, SerialExpr) -> m (a, SerialManifold)
@@ -641,6 +650,8 @@ makeMonoidFoldDefault mempty' mappend' =
     monoidNativeExpr' (IntN_ v x) = return (mempty', IntN v x)
     monoidNativeExpr' (StrN_ v x) = return (mempty', StrN v x)
     monoidNativeExpr' (NullN_ v) = return (mempty', NullN v)
+    monoidNativeExpr' (SuspendN_ t (a, ne)) = return (a, SuspendN t ne)
+    monoidNativeExpr' (ForceN_ t (a, ne)) = return (a, ForceN t ne)
 
 -- where
 --  * m - monad
@@ -776,6 +787,8 @@ data NativeExpr_ nm se ne sr nr
   | IntN_ FVar Integer
   | StrN_ FVar Text
   | NullN_ FVar
+  | SuspendN_ TypeF ne
+  | ForceN_ TypeF ne
 
 manifoldFoldToFoldWith :: FoldManifoldM m sm nm se ne sr nr -> FoldWithManifoldM m sm nm se ne sr nr
 manifoldFoldToFoldWith fm =
@@ -959,6 +972,12 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
     f full@(IntN t x) = opFoldWithNativeExprM fm full (IntN_ t x)
     f full@(StrN t x) = opFoldWithNativeExprM fm full (StrN_ t x)
     f full@(NullN t) = opFoldWithNativeExprM fm full (NullN_ t)
+    f full@(SuspendN t ne) = do
+      ne' <- surroundFoldNativeExprM sfm fm ne
+      opFoldWithNativeExprM fm full (SuspendN_ t ne')
+    f full@(ForceN t ne) = do
+      ne' <- surroundFoldNativeExprM sfm fm ne
+      opFoldWithNativeExprM fm full (ForceN_ t ne')
 
 class HasTypeF a where
   typeFof :: a -> TypeF
@@ -984,6 +1003,8 @@ instance HasTypeF NativeExpr where
   typeFof (IntN v _) = VarF v
   typeFof (StrN v _) = VarF v
   typeFof (NullN v) = VarF v
+  typeFof (SuspendN t _) = t
+  typeFof (ForceN t _) = t
 
 class HasTypeM e where
   typeMof :: e -> TypeM
@@ -1172,6 +1193,8 @@ instance MFunctor NativeExpr where
         e@(IntN _ _) -> mapNativeExpr f e
         e@(StrN _ _) -> mapNativeExpr f e
         e@(NullN _) -> mapNativeExpr f e
+        (SuspendN t ne) -> mapNativeExpr f $ SuspendN t (mgatedMap g f ne)
+        (ForceN t ne) -> mapNativeExpr f $ ForceN t (mgatedMap g f ne)
     | otherwise = mapNativeExpr f ne0
 
 instance (Pretty a) => Pretty (Arg a) where
@@ -1215,6 +1238,8 @@ instance Pretty PolyExpr where
   pretty (PolyInt _ _) = "PolyInt"
   pretty (PolyStr _ _) = "PolyStr"
   pretty (PolyNull _) = "PolyNull"
+  pretty (PolySuspend _ e) = "PolySuspend" <+> pretty e
+  pretty (PolyForce _ e) = "PolyForce" <+> pretty e
 
 instance Pretty MonoExpr where
   pretty (MonoManifold i form e) =
@@ -1240,6 +1265,8 @@ instance Pretty MonoExpr where
   pretty (MonoInt _ x) = viaShow x
   pretty (MonoStr _ x) = viaShow x
   pretty (MonoNull _) = "NULL"
+  pretty (MonoSuspend _ e) = "{" <> pretty e <> "}"
+  pretty (MonoForce _ e) = "!" <> pretty e
 
 instance Pretty MonoHead where
   pretty (MonoHead lang i args headForm e) =

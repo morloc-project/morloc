@@ -116,6 +116,7 @@ instance Applicable TypeU where
       (Just t') -> apply g t' -- reduce an existential; strictly smaller term
       Nothing -> ExistU v (map (apply g) ts, tc) (map (second (apply g)) rs, rc)
   apply g (NamU o n ps rs) = NamU o n ps [(k, apply g t) | (k, t) <- rs]
+  apply g (ThunkU t) = ThunkU (apply g t)
 
 instance Applicable EType where
   apply g e = e { etype = apply g (etype e)
@@ -194,6 +195,9 @@ subtype scope a@ExistU {} b@ExistU {} g
 -- types involved are all existentials, it will always pass, so I omit
 -- it.
 
+
+-- ThunkU: covariant subtyping
+subtype scope (ThunkU t1) (ThunkU t2) g = subtype scope t1 t2 g
 
 --  g1 |- B1 <: A1 -| g2
 --  g2 |- [g2]A2 <: [g2]B2 -| g3
@@ -338,6 +342,26 @@ instantiate scope ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_ : _), rc)) g1 = do
       solved <- solve v ta
       return $ cacheSolved v ta $ g2 {gammaContext = rhs ++ [solved] ++ lhs}
     Nothing -> subtypeError ta tb "Error in NamU with existential keys"
+-- ExistU vs ThunkU: solve ?a = {?b}, then ?b <: inner
+instantiate scope (ExistU v ([], _) _) (ThunkU inner) g1 = do
+  let (g2, veb) = tvarname g1 "thk"
+      eb = ExistU veb ([], Open) ([], Open)
+  g3 <- case access1 v (gammaContext g2) of
+    Just (rhs, _, lhs) -> do
+      solved <- solve v (ThunkU eb)
+      return $ cacheSolved v (ThunkU eb) $ g2 {gammaContext = rhs ++ [solved, index eb] ++ lhs}
+    Nothing -> return g2
+  instantiate scope eb (apply g3 inner) g3
+instantiate scope (ThunkU inner) (ExistU v ([], _) _) g1 = do
+  let (g2, veb) = tvarname g1 "thk"
+      eb = ExistU veb ([], Open) ([], Open)
+  g3 <- case access1 v (gammaContext g2) of
+    Just (rhs, _, lhs) -> do
+      solved <- solve v (ThunkU eb)
+      return $ cacheSolved v (ThunkU eb) $ g2 {gammaContext = rhs ++ [solved, index eb] ++ lhs}
+    Nothing -> return g2
+  instantiate scope (apply g3 inner) eb g3
+
 instantiate scope (ExistU v ([], _) _) (FunU as b) g1 = do
   let (g2, veas) = statefulMap (\g _ -> tvarname g "ta") g1 as
       (g3, veb) = tvarname g2 "to"
@@ -501,6 +525,7 @@ solve v t
     occursIn v' (FunU ts t') = any (occursIn v') ts || occursIn v' t'
     occursIn v' (AppU t' ts) = occursIn v' t' || any (occursIn v') ts
     occursIn v' (NamU _ _ ps rs) = any (occursIn v') ps || any (occursIn v' . snd) rs
+    occursIn v' (ThunkU t') = occursIn v' t'
 
 -- | Record a solved variable in the gamma map cache
 cacheSolved :: TVar -> TypeU -> Gamma -> Gamma

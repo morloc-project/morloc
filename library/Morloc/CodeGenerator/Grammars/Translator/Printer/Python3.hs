@@ -50,6 +50,8 @@ printExpr (IForeignCall _ _ _) = error "use IRawExpr for Python foreign calls"
 printExpr (IRemoteCall _ _ _ _) = error "use IRawExpr for Python remote calls"
 printExpr (ILambda args body) = "lambda" <+> hsep (punctuate "," args) <> ":" <+> printExpr body
 printExpr (IRawExpr d) = d
+printExpr (ISuspend e) = "lambda:" <+> printExpr e
+printExpr (IForce e) = printExpr e <> "()"
 
 printStmt :: IStmt -> MDoc
 printStmt (IAssign v Nothing e) = v <+> "=" <+> printExpr e

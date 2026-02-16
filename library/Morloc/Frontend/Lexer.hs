@@ -50,6 +50,7 @@ module Morloc.Frontend.Lexer
   , exprI
   , exprIdAt
   , exprIAt
+  , operatorChars
 
     -- * docstring parsers
   , parseArgDocStr
@@ -466,6 +467,8 @@ reservedWords =
   , "infix"
   , "let"
   , "in"
+  , "do"
+  , "return"
   ]
 
 reservedOperators :: [Text]

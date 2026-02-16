@@ -1,0 +1,69 @@
+-- Test thunks, do-notation, cross-language composition, and let-sharing
+-- with OS-introspection-style functions returning deterministic fake values.
+-- Each effectful call prints a trace message to stdout for evaluation verification.
+
+module main (sysReport, envCal, cpuLoad, multiQuery, sharedQuery, pipeline)
+
+import root-cpp
+import root-py
+import root-r
+
+source Cpp from "sysinfo.hpp" ("clockResNs", "cpuCount", "hashStr")
+source Py from "sysinfo.py" ("procId", "envHome", "calMonth")
+source R from "sysinfo.R" ("uptimeSec", "fmtReport")
+
+type Cpp => Int = "int"
+type Cpp => Str = "std::string"
+
+type Py => Int = "int"
+type Py => Str = "str"
+
+type R => Int = "integer"
+type R => Str = "character"
+
+clockResNs :: {Int}
+cpuCount :: {Int}
+hashStr :: Str -> Int
+
+procId :: {Int}
+envHome :: {Str}
+calMonth :: Int -> Int -> Str
+
+uptimeSec :: {Int}
+fmtReport :: Str -> Int -> Int -> Str
+
+-- Cross-language do-block: C++, Python, R thunks; pure functions on results
+sysReport :: Str
+sysReport = !do
+    clk <- clockResNs
+    pid <- procId
+    up <- uptimeSec
+    return (fmtReport (calMonth up clk) (hashStr "/home/user") pid)
+
+-- Inline force as argument to pure function
+envCal :: Str
+envCal = calMonth 2025 !procId
+
+-- Effectful results feeding into pure functions across languages
+cpuLoad :: Int
+cpuLoad = !do
+    c <- cpuCount
+    u <- uptimeSec
+    return (hashStr (calMonth c u))
+
+-- Two independent forces of same thunk (no sharing, 2x trace)
+multiQuery :: Int
+multiQuery = hashStr (calMonth !cpuCount !cpuCount)
+
+-- Let-bound force (shared, 1x trace), same final value as multiQuery
+sharedQuery :: Int
+sharedQuery = let c = !cpuCount in hashStr (calMonth c c)
+
+-- Long cross-language chain: 4-step do-block, 3 languages
+pipeline :: Str
+pipeline = !do
+    home <- envHome
+    clk <- clockResNs
+    up <- uptimeSec
+    pid <- procId
+    return (fmtReport home (hashStr (calMonth clk up)) pid)

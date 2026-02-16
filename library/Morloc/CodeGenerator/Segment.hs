@@ -113,3 +113,9 @@ segmentExpr _ _ (PolyReal v x) = return ([], (Nothing, MonoReal v x))
 segmentExpr _ _ (PolyInt v x) = return ([], (Nothing, MonoInt v x))
 segmentExpr _ _ (PolyStr v x) = return ([], (Nothing, MonoStr v x))
 segmentExpr _ _ (PolyNull v) = return ([], (Nothing, MonoNull v))
+segmentExpr m args (PolySuspend t e) = do
+  (ms, (_, e')) <- segmentExpr m args e
+  return (ms, (Nothing, MonoSuspend t e'))
+segmentExpr m args (PolyForce t e) = do
+  (ms, (_, e')) <- segmentExpr m args e
+  return (ms, (Nothing, MonoForce t e'))

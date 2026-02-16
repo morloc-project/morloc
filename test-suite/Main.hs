@@ -37,8 +37,14 @@ main = do
 
         -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
 
+      , golden "thunk-basic" "thunk-basic"
+      , golden "thunk-effects" "thunk-effects"
+      , golden "thunk-do" "thunk-do"
+      , golden "thunk-let" "thunk-let"
+      , golden "thunk-interop" "thunk-interop"
+      , golden "thunk-force" "thunk-force"
+
       , golden "records-alias" "records-alias"
-      -- , golden "unit-1" "unit-1"
 
       , golden "infix" "infix"
       , golden "infix-import"             "infix-import"
@@ -58,6 +64,7 @@ main = do
       , golden "claude-test-8" "claude-test-8"
       , golden "claude-test-9" "claude-test-9"
       , golden "claude-test-10" "claude-test-10"
+      , golden "claude-test-11" "claude-test-11"
       , golden "functional-data-1" "functional-data-1"
       , golden "functional-data-2" "functional-data-2"
       , golden "functional-data-3a" "functional-data-3a"
@@ -157,9 +164,6 @@ main = do
       , golden "argument-form-8-c" "argument-form-8-c"
       , golden "argument-form-8-py" "argument-form-8-py"
       , golden "argument-form-8-r" "argument-form-8-r"
-      , golden "argument-form-9-c" "argument-form-9-c"
-      , golden "argument-form-9-py" "argument-form-9-py"
-      , golden "argument-form-9-r" "argument-form-9-r"
       , golden "interop-1-py" "interop-1-py"
       , golden "interop-1-r" "interop-1-r"
       , golden "interop-2" "interop-2"

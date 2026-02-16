@@ -296,6 +296,7 @@ makeSerialAST m lang t0 = do
         basevar (FunU _ _) = Nothing
         basevar (AppU t _) = basevar t
         basevar (NamU _ v _ _) = Just v
+        basevar (ThunkU _) = Nothing
 
         finalVar =
           let t = fst $ unweaveTypeF ft
@@ -313,6 +314,7 @@ makeSerialAST m lang t0 = do
     makeSerialAST' gscope typepackers (NamF o n ps rs) = do
       ts <- mapM (makeSerialAST' gscope typepackers . snd) rs
       return $ SerialObject o n ps (zip (map fst rs) ts)
+    makeSerialAST' gscope typepackers (ThunkF t) = makeSerialAST' gscope typepackers t
     makeSerialAST' _ _ t = MM.throwSourcedError m $ "makeSerialAST' error on type:" <+> pretty t
 
 resolvePacker ::
@@ -436,6 +438,9 @@ unweaveTypeF (NamF n (FV gv cv) ps rs) =
       keys = map fst rs
       (vsg, vsc) = unzip $ map (unweaveTypeF . snd) rs
    in (NamU n gv psg (zip keys vsg), NamU n (cv2tv cv) psc (zip keys vsc))
+unweaveTypeF (ThunkF t) =
+  let (gt, ct) = unweaveTypeF t
+   in (ThunkU gt, ThunkU ct)
 
 weaveTypeF :: TypeU -> TypeU -> TypeF
 weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv (tv2cv cv))
@@ -450,6 +455,7 @@ weaveTypeF (NamU n gv psg rsg) (NamU _ cv psc rsc) =
         (map fst rsg)
         (zipWith weaveTypeF (map snd rsg) (map snd rsc))
     )
+weaveTypeF (ThunkU gt) (ThunkU ct) = ThunkF (weaveTypeF gt ct)
 weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
 weaveTypeF gt ct = error . show $ (gt, ct)
 

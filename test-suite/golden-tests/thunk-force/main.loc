@@ -1,0 +1,13 @@
+module main (forceOnce)
+
+source Cpp from "foo.hpp" ("sideEffect")
+
+type Cpp => Int = "int"
+
+sideEffect :: Int -> {Int}
+
+force a :: {a} -> a
+force x = !x
+
+forceOnce :: Int
+forceOnce = force (sideEffect 5)
