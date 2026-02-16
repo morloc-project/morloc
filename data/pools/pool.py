@@ -123,7 +123,8 @@ def _recv_fd(sock):
     raise RuntimeError("No fd received in ancillary data")
 
 
-def worker_process(job_fd, shm_basename, shutdown_flag, busy_count, total_workers, wakeup_w):
+def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, total_workers, wakeup_w):
+    morloc.set_fallback_dir(tmpdir)
     morloc.shinit(shm_basename, 0, 0xffff)
     _init_worker_tracking(busy_count, total_workers, wakeup_w)
     sock = _socket.fromfd(job_fd, _socket.AF_UNIX, _socket.SOCK_STREAM)
@@ -215,7 +216,7 @@ if __name__ == "__main__":
 
     for i in range(num_workers):
         worker = Process(target=worker_process,
-                         args=(read_sock.fileno(), shm_basename, shutdown_flag,
+                         args=(read_sock.fileno(), tmpdir, shm_basename, shutdown_flag,
                                busy_count, total_workers, wakeup_w))
         worker.start()
         workers.append(worker)
@@ -239,7 +240,7 @@ if __name__ == "__main__":
                 pass
         if busy_count.value >= total_workers.value:
             w = Process(target=worker_process,
-                        args=(spare_read_fd, shm_basename, shutdown_flag,
+                        args=(spare_read_fd, tmpdir, shm_basename, shutdown_flag,
                               busy_count, total_workers, wakeup_w))
             w.start()
             workers.append(w)

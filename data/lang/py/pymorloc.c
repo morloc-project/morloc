@@ -976,6 +976,7 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
         if (!PyBytes_Check(item)) {
             Py_DECREF(item);
             free(arg_packets);
+            arg_packets = NULL;
             PyRAISE("All arguments must be bytes objects");
         }
         arg_packets[i] = (const uint8_t*)PyBytes_AsString(item);
@@ -985,9 +986,11 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     packet = PyTRY(make_morloc_local_call_packet, (uint32_t)mid, arg_packets, (size_t)nargs);
 
     free(arg_packets);
+    arg_packets = NULL;
 
     result = PyTRY(send_and_receive_over_socket, socket_path, packet);
     free(packet);
+    packet = NULL;
 
     result_length = PyTRY(morloc_packet_size, result);
 
@@ -1154,6 +1157,15 @@ error:
     return NULL;
 }
 
+static PyObject* pybinding__set_fallback_dir(PyObject* self, PyObject* args) {
+    const char* dir;
+    if (!PyArg_ParseTuple(args, "s", &dir)) {
+        return NULL;
+    }
+    shm_set_fallback_dir(dir);
+    Py_RETURN_NONE;
+}
+
 static PyObject* pybinding__shinit(PyObject* self, PyObject* args) { MAYFAIL
     shm_t* shm = NULL;
     
@@ -1204,6 +1216,7 @@ error:
 }
 
 static PyMethodDef Methods[] = {
+    {"set_fallback_dir", pybinding__set_fallback_dir, METH_VARARGS, "Set fallback directory for file-backed shared memory"},
     {"shinit", pybinding__shinit, METH_VARARGS, "Open the shared memory pool"},
     {"start_daemon", pybinding__start_daemon, METH_VARARGS, "Initialize the shared memory and socket for the python daemon"},
     {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},

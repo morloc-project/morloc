@@ -48,6 +48,7 @@ extern "C" {
 shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ERRMSG);
 shm_t* shopen(size_t volume_index, ERRMSG);
 bool shclose(ERRMSG);
+void shm_set_fallback_dir(const char* dir);
 void* shmalloc(size_t size, ERRMSG);
 void* shmemcpy(void* src, size_t size, ERRMSG);
 bool shfree(absptr_t ptr, ERRMSG);

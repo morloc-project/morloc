@@ -3,6 +3,7 @@
 // Global state
 static _Thread_local size_t current_volume = 0;
 static char common_basename[MAX_FILENAME_SIZE];
+static char fallback_dir[MAX_FILENAME_SIZE] = {0};
 static shm_t* volumes[MAX_VOLUME_NUMBER] = {NULL};
 
 // Protects all allocation/deallocation operations on the shared memory pool.
@@ -10,6 +11,13 @@ static shm_t* volumes[MAX_VOLUME_NUMBER] = {NULL};
 // because volumes[] entries are written atomically and only transition from
 // NULL to a valid pointer (monotonic creation).
 static pthread_mutex_t alloc_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void shm_set_fallback_dir(const char* dir) {
+    if (dir) {
+        strncpy(fallback_dir, dir, MAX_FILENAME_SIZE - 1);
+        fallback_dir[MAX_FILENAME_SIZE - 1] = '\0';
+    }
+}
 
 volptr_t rel2vol(relptr_t ptr, ERRMSG) {
     VAL_RETURN_SETUP(volptr_t, VOLNULL)
@@ -153,48 +161,88 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ER
     // Prepare the shared memory name
     char shm_name[MAX_FILENAME_SIZE];
     snprintf(shm_name, sizeof(shm_name), "%s_%zu", shm_basename, volume_index);
-    shm_name[MAX_FILENAME_SIZE - 1] = '\0'; // ensure the name is NULL terminated
+    shm_name[MAX_FILENAME_SIZE - 1] = '\0';
 
     // Set the global basename, this will be used to name future volumes
     strncpy(common_basename, shm_basename, MAX_FILENAME_SIZE - 1);
 
-    // Create or open a shared memory object
-    // O_RDWR: Open for reading and writing
-    // O_CREAT: Create if it doesn't exist
-    // 0666: Set permissions (rw-rw-rw-)
-    int fd = shm_open(shm_name, O_RDWR | O_CREAT, 0666);
-    RAISE_IF(fd == -1, "Failed to open shared volume '%s'", shm_name)
+    // Try POSIX shared memory first (/dev/shm), fall back to file-backed
+    // if /dev/shm is too small (common in Docker containers).
+    // volume_name records what was used: bare name = shm, path = file-backed.
+    char volume_label[MAX_FILENAME_SIZE];
+    int fd = -1;
+    bool created = false;
 
-    // Map the shared memory object into the process's address space
+    // Attempt 1: POSIX shared memory
+    fd = shm_open(shm_name, O_RDWR | O_CREAT, 0666);
+    if (fd >= 0) {
+        struct stat sb;
+        if (fstat(fd, &sb) == -1) {
+            close(fd);
+            RAISE("Failed to fstat '%s'", shm_name);
+        }
+        created = (sb.st_size == 0);
+        if (created) {
+            int falloc_err = posix_fallocate(fd, 0, full_size);
+            if (falloc_err != 0) {
+                // /dev/shm too small, clean up and try file-backed
+                close(fd);
+                shm_unlink(shm_name);
+                fd = -1;
+            }
+        } else {
+            full_size = (size_t)sb.st_size;
+        }
+        if (fd >= 0) {
+            strncpy(volume_label, shm_name, MAX_FILENAME_SIZE - 1);
+            volume_label[MAX_FILENAME_SIZE - 1] = '\0';
+        }
+    }
+
+    // Attempt 2: file-backed shared memory in the fallback directory
+    if (fd < 0) {
+        RAISE_IF(fallback_dir[0] == '\0',
+            "Failed to allocate shared memory '%s' (%zu bytes): "
+            "/dev/shm too small and no fallback directory configured",
+            shm_name, full_size);
+
+        char file_path[MAX_PATH_SIZE];
+        snprintf(file_path, sizeof(file_path), "%s/%s", fallback_dir, shm_name);
+        file_path[MAX_PATH_SIZE - 1] = '\0';
+
+        fd = open(file_path, O_RDWR | O_CREAT, 0666);
+        RAISE_IF(fd == -1, "Failed to create file-backed volume '%s'", file_path);
+
+        struct stat sb;
+        if (fstat(fd, &sb) == -1) {
+            close(fd);
+            RAISE("Failed to fstat '%s'", file_path);
+        }
+        created = (sb.st_size == 0);
+        if (created) {
+            int falloc_err = posix_fallocate(fd, 0, full_size);
+            if (falloc_err != 0) {
+                close(fd);
+                unlink(file_path);
+                RAISE("Failed to allocate file-backed volume '%s' (%zu bytes): %s",
+                      file_path, full_size, strerror(falloc_err));
+            }
+        } else {
+            full_size = (size_t)sb.st_size;
+        }
+        // Store full path so shclose/shopen can distinguish file-backed volumes
+        strncpy(volume_label, file_path, MAX_FILENAME_SIZE - 1);
+        volume_label[MAX_FILENAME_SIZE - 1] = '\0';
+    }
+
+    // Map the volume into the process's address space
     volumes[volume_index] = (shm_t*)mmap(NULL, full_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    RAISE_IF_WITH(
-        volumes[volume_index] == MAP_FAILED,
-        close(fd),
-        "Failed to memory map file '%s' to volume index %zu",
-        shm_name,
-        volume_index
-    )
+    if (volumes[volume_index] == MAP_FAILED) {
+        volumes[volume_index] = NULL;
+        close(fd);
+        RAISE("Failed to mmap volume '%s' (%zu bytes)", volume_label, full_size);
+    }
 
-    // Get information about the shared memory object
-    struct stat sb;
-    RAISE_IF_WITH(
-        fstat(fd, &sb) == -1,
-        (munmap(volumes[volume_index], full_size), volumes[volume_index] = NULL, close(fd)),
-        "Failed to fstat '%s'",
-        shm_name
-    )
-
-    // Check if we've just created the shared memory object
-    bool created = (sb.st_size == 0);
-    RAISE_IF_WITH(
-        created && ftruncate(fd, full_size) == -1,
-        (munmap(volumes[volume_index], full_size), volumes[volume_index] = NULL, close(fd)),
-        "Failed to set the size of the shared memory object '%s'",
-        shm_name
-    )
-
-    // Adjust sizes based on whether we created a new object or opened an existing one
-    full_size = created ? full_size : (size_t)sb.st_size;
     shm_size = full_size - sizeof(shm_t);
 
     // Cast the mapped memory to our shared memory structure
@@ -202,7 +250,7 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ER
     if (created) {
         // Initialize the shared memory structure
         shm->magic = SHM_MAGIC;
-        strncpy(shm->volume_name, shm_name, sizeof(shm->volume_name) - 1);
+        strncpy(shm->volume_name, volume_label, sizeof(shm->volume_name) - 1);
         shm->volume_name[sizeof(shm->volume_name) - 1] = '\0';
         shm->volume_index = volume_index;
         shm->relative_offset = 0;
@@ -263,12 +311,15 @@ shm_t* shopen(size_t volume_index, ERRMSG) {
 
     shm_name[MAX_FILENAME_SIZE - 1] = '\0'; // ensure the name is NULL terminated
 
-    // Create or open a shared memory object
-    // O_RDWR: Open for reading and writing
-    // 0666: Set permissions (rw-rw-rw-)
+    // Try POSIX shared memory first, then file-backed fallback
     int fd = shm_open(shm_name, O_RDWR, 0666);
+    if (fd == -1 && fallback_dir[0] != '\0') {
+        char file_path[MAX_PATH_SIZE];
+        snprintf(file_path, sizeof(file_path), "%s/%s", fallback_dir, shm_name);
+        fd = open(file_path, O_RDWR);
+    }
     if (fd == -1) {
-        // This is OK, the volume doesn't exist
+        // Volume doesn't exist in either location
         return NULL;
     }
 
@@ -327,9 +378,13 @@ static bool shclose_unlocked(ERRMSG) {
             success = false;
         }
 
-        // Mark the shared memory object for deletion
-        if (shm_unlink(shm_name) == -1) {
-            success = false;
+        // Mark the shared memory object for deletion.
+        // File-backed volumes (path starts with '/') use unlink,
+        // POSIX shared memory volumes use shm_unlink.
+        if (shm_name[0] == '/') {
+            if (unlink(shm_name) == -1) success = false;
+        } else {
+            if (shm_unlink(shm_name) == -1) success = false;
         }
 
         // Set the pointer to NULL to indicate it's no longer valid

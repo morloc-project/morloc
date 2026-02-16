@@ -1394,6 +1394,7 @@ int main(int argc, char *argv[]) {
     char shm_basename[MAX_FILENAME_SIZE] = { '\0' };
     snprintf(shm_basename, sizeof(shm_basename), "morloc-%" PRIu64, job_hash);
 
+    shm_set_fallback_dir(tmpdir);
     shm_t* shm = shinit(shm_basename, 0, shm_initial_size, &errmsg);
     if(errmsg != NULL){
         ERROR("%s", errmsg);

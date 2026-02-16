@@ -163,7 +163,9 @@ static uint8_t* make_morloc_data_packet_with_schema(
   memcpy(metadata + sizeof(morloc_metadata_header_t), schema_str, metadata_length);
   FREE(schema_str);
 
-  return make_morloc_data_packet(data, data_length, metadata, metadata_length_total, src, fmt, cmpr, encr, status);
+  uint8_t* result = make_morloc_data_packet(data, data_length, metadata, metadata_length_total, src, fmt, cmpr, encr, status);
+  free(metadata);
+  return result;
 }
 
 uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema){

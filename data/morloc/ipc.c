@@ -97,6 +97,9 @@ language_daemon_t* start_daemon(
     daemon->client_fds = NULL;  // Explicit NULL initialization
     FD_ZERO(&daemon->read_fds); // Initialize descriptor set
 
+    // Set fallback directory for file-backed shared memory when /dev/shm is too small
+    shm_set_fallback_dir(tmpdir);
+
     // create the shared memory mappings
     daemon->shm = TRY_WITH(close_daemon(&daemon), shinit, shm_basename, 0, shm_default_size);
 
@@ -141,10 +144,13 @@ uint8_t* stream_from_client_wait(int client_fd, int pselect_timeout_us, int recv
     sigaddset(&mask, SIGINT); // do we need to add more masks here?
     pthread_sigmask(SIG_SETMASK, &mask, &origmask);
 
-    // Initial receive with timeout
-    FD_ZERO(&read_fds);
-    FD_SET(client_fd, &read_fds);
-    int ready = pselect(max_fd + 1, &read_fds, NULL, NULL, timeout_loop_ptr, &origmask);
+    // Initial receive with timeout (retry on EINTR)
+    int ready;
+    do {
+        FD_ZERO(&read_fds);
+        FD_SET(client_fd, &read_fds);
+        ready = pselect(max_fd + 1, &read_fds, NULL, NULL, timeout_loop_ptr, &origmask);
+    } while (ready < 0 && errno == EINTR);
     pthread_sigmask(SIG_SETMASK, &origmask, NULL);
 
     RAISE_IF_WITH(ready == 0, free(buffer), "Timeout waiting for initial data");
@@ -240,13 +246,16 @@ uint8_t* send_and_receive_over_socket_wait(const char* socket_path, const uint8_
 
     size_t packet_size = TRY(morloc_packet_size, packet);
 
-    // Send a message and wait for a reply from the nexus
-    ssize_t bytes_sent = 0;
-
-    WAIT( { bytes_sent = send(client_fd, packet, packet_size, MSG_NOSIGNAL); },
-          (size_t)bytes_sent == packet_size,
-          RAISE_WITH(close_socket(client_fd), "Failed to send data to '%s', ran out of time", socket_path)
-        )
+    // Send data in a loop to handle partial sends for large packets
+    size_t total_sent = 0;
+    while (total_sent < packet_size) {
+        ssize_t bytes_sent = send(client_fd, packet + total_sent, packet_size - total_sent, MSG_NOSIGNAL);
+        if (bytes_sent <= 0) {
+            close_socket(client_fd);
+            RAISE("Failed to send data to '%s': %s", socket_path, strerror(errno));
+        }
+        total_sent += (size_t)bytes_sent;
+    }
 
     result = stream_from_client_wait(client_fd, pselect_timeout_us, recv_timeout_us, &CHILD_ERRMSG);
     RAISE_IF_WITH(CHILD_ERRMSG != NULL, close_socket(client_fd), "Failed to read data returned from pipe '%s'\n%s", socket_path, CHILD_ERRMSG);
@@ -267,13 +276,14 @@ size_t send_packet_to_foreign_server(int client_fd, uint8_t* packet, ERRMSG){
 
     size_t size = TRY(morloc_packet_size, packet);
 
-    ssize_t bytes_sent = 0;
-    bytes_sent = send(client_fd, packet, size, MSG_NOSIGNAL);
+    size_t total_sent = 0;
+    while (total_sent < size) {
+        ssize_t bytes_sent = send(client_fd, packet + total_sent, size - total_sent, MSG_NOSIGNAL);
+        RAISE_IF(bytes_sent <= 0, "Failed to send over client %d: %s", client_fd, strerror(errno))
+        total_sent += (size_t)bytes_sent;
+    }
 
-    RAISE_IF(bytes_sent < 0, "Failed to send over client %d: %s", client_fd, strerror(errno))
-    RAISE_IF((size_t)bytes_sent != size, "Partial send over client %d, only sent %zd of %zu bytes: %s", client_fd, bytes_sent, size, strerror(errno))
-
-    return bytes_sent;
+    return total_sent;
 }
 
 int wait_for_client_with_timeout(language_daemon_t* daemon, int timeout_us, ERRMSG) {

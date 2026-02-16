@@ -78,8 +78,8 @@ http_request_t* http_parse_request(int fd, ERRMSG) {
 
     // Find Content-Length header
     size_t content_length = 0;
-    const char* cl_header = strcasestr(header_buf, "Content-Length:");
-    if (!cl_header) cl_header = strcasestr(header_buf, "content-length:");
+    const char* cl_header = strstr(header_buf, "Content-Length:");
+    if (!cl_header) cl_header = strstr(header_buf, "content-length:");
     if (cl_header) {
         cl_header += 15; // skip "Content-Length:"
         while (*cl_header == ' ') cl_header++;

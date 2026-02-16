@@ -7,6 +7,7 @@
 
 #define MAX_FILENAME_SIZE 128
 #define MAX_ERRMSG_SIZE 1024
+#define MAX_PATH_SIZE 512
 
 // With these parameters, the max wait time is around 6s
 #define WAIT_RETY_INITIAL_TIME 0.001
