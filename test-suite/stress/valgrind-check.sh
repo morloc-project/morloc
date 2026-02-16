@@ -24,14 +24,28 @@ VALGRIND_LOG="/tmp/morloc-valgrind-$$.log"
 
 # Use first call only for valgrind (deterministic)
 CALL="${CALLS[0]}"
-echo "Running under valgrind: ./nexus $CALL"
+
+# The nexus file may be a shell wrapper (#!/bin/sh + exec mim "$0" "$@").
+# Valgrind can't instrument through exec, so unwrap to call mim directly.
+if head -1 ./nexus | grep -q '^#!'; then
+    MIM_BIN=$(sed -n '2s/^exec \([^ ]*\) .*/\1/p' ./nexus)
+    if [ -z "$MIM_BIN" ] || ! command -v "$MIM_BIN" &>/dev/null; then
+        echo "FAIL: Cannot find mim binary from nexus wrapper"
+        exit 1
+    fi
+    VALGRIND_CMD="$MIM_BIN ./nexus $CALL"
+else
+    VALGRIND_CMD="./nexus $CALL"
+fi
+
+echo "Running under valgrind: $VALGRIND_CMD"
 NEXUS_ERR="$WORK_DIR/valgrind-nexus.err"
 eval timeout 60 valgrind \
     --leak-check=full \
     --show-leak-kinds=definite,indirect \
     --track-fds=yes \
     --log-file="$VALGRIND_LOG" \
-    ./nexus $CALL > /dev/null 2>"$NEXUS_ERR"
+    $VALGRIND_CMD > /dev/null 2>"$NEXUS_ERR"
 EXIT_CODE=$?
 
 # Log any nexus/valgrind stderr
