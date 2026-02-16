@@ -17,6 +17,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Printer.R
   , printProgram
   ) where
 
+import Morloc.CodeGenerator.Grammars.Common (DispatchEntry(..), manNamer)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
 import Morloc.CodeGenerator.Namespace (MDoc, Lang(..))
 import Morloc.Data.Doc
@@ -74,4 +75,16 @@ printProgram dynlibs prog =
   format
     (DF.embededFileText (DF.poolTemplate RLang))
     "# <<<BREAK>>>"
-    [vsep (ipSources prog), vsep dynlibs, vsep (ipManifolds prog)]
+    [vsep (ipSources prog), vsep dynlibs, vsep (ipManifolds prog), dispatch]
+  where
+    dispatch = vsep [localDispatch, remoteDispatch]
+
+    localDispatch = align . vsep $
+      [ ".dispatch <- list()"
+      , vsep [".dispatch[[" <> pretty i <> "L]] <-" <+> manNamer i | DispatchEntry i _ <- ipLocalDispatch prog]
+      ]
+
+    remoteDispatch = align . vsep $
+      [ ".remote_dispatch <- list()"
+      , vsep [".remote_dispatch[[" <> pretty i <> "L]] <-" <+> manNamer i <> "_remote" | DispatchEntry i _ <- ipRemoteDispatch prog]
+      ]

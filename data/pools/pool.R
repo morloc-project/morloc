@@ -6,8 +6,6 @@
 # <<<BREAK>>>
 # AUTO load dynamic libraries
 
-library(rlang)
-
 morloc_is_ping                       <- function(...){ .Call("morloc_is_ping",                       ...) }
 morloc_pong                          <- function(...){ .Call("morloc_pong",                          ...) }
 morloc_is_local_call                 <- function(...){ .Call("morloc_is_local_call",                 ...) }
@@ -40,6 +38,7 @@ morloc_shared_counter_read           <- function(...){ .Call("morloc_shared_coun
 morloc_pipe                          <- function(...){ .Call("morloc_pipe",                          ...) }
 morloc_write_byte                    <- function(...){ .Call("morloc_write_byte",                    ...) }
 morloc_close_fd                      <- function(...){ .Call("morloc_close_fd",                      ...) }
+morloc_worker_loop_c                 <- function(...){ .Call("morloc_worker_loop_c",                 ...) }
 
 global_state <- list()
 
@@ -65,65 +64,19 @@ morloc_foreign_call <- function(...) {
 # <<<BREAK>>>
 # AUTO include manifolds end
 
-
-run_job <- function(client_fd) {
-  tryCatch({
-    client_data <- morloc_stream_from_client(client_fd)
-
-    is_local <- morloc_is_local_call(client_data)
-    is_remote <- morloc_is_remote_call(client_data)
-
-    if(morloc_is_ping(client_data)){
-      result <- morloc_pong(client_data)
-    }
-    else if(is_local || is_remote){
-      ext <- if(is_remote) { "_remote" } else { "" }
-      call_packet <- morloc_read_morloc_call_packet(client_data)
-      midx <- call_packet[[1]]
-      args <- call_packet[[2]]
-
-      mlc_pool_function_name <- paste0("m", midx, ext)
-
-      if(exists(mlc_pool_function_name)){
-        result <- tryCatch({
-          mlc_pool_function <- get(mlc_pool_function_name)
-          do.call(mlc_pool_function, args)
-        }, error = function(e) {
-          if(!is.null(e$fail_packet)) e$fail_packet else {
-            morloc_make_fail_packet(e$message)
-          }
-        })
-      } else {
-        result <- morloc_make_fail_packet(paste("Function not found:", mlc_pool_function_name))
-      }
-    } else {
-      result <- morloc_make_fail_packet("Unexpected packet type")
-    }
-
-    morloc_send_packet_to_foreign_server(client_fd, result)
-  }, error = function(e) {
-    tryCatch(
-      morloc_send_packet_to_foreign_server(client_fd, morloc_make_fail_packet(paste("Job failed:", e$message))),
-      error = function(e2) {}
-    )
-  }, finally = {
-    morloc_close_socket(client_fd)
-  })
-}
+# AUTO include dispatch start
+# <<<BREAK>>>
+# AUTO include dispatch end
 
 worker_loop <- function(pipe_fd) {
-  while (TRUE) {
-    client_fd <- morloc_recv_fd(pipe_fd)
-    if (client_fd < 0L) break
-    run_job(client_fd)
-  }
+  morloc_worker_loop_c(pipe_fd, .dispatch, .remote_dispatch)
 }
 
 main <- function(socket_path, tmpdir, shm_basename) {
   morloc_install_sigterm_handler()
 
   daemon <- morloc_start_daemon(socket_path, tmpdir, shm_basename, 0xffff)
-  n_workers <- max(1L, parallel::detectCores() - 1L)
+  n_workers <- 1L
 
   # Shared job queue: dispatcher writes fds to fd[1], workers read from fd[2].
   # Only idle workers (blocked in recvmsg) pick up jobs, preventing the

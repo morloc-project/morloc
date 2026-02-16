@@ -1468,6 +1468,165 @@ SEXP morloc_close_fd(SEXP fd_r) {
 
 // }}} shared counter functions
 
+// {{{ C-level worker loop
+
+// Receive a file descriptor over a Unix domain socket (C-level helper).
+static int recv_fd_c(int pipe_fd) {
+    struct msghdr msg = {0};
+    struct iovec iov;
+    char buf[1];
+    char cmsgbuf[CMSG_SPACE(sizeof(int))];
+
+    iov.iov_base = buf;
+    iov.iov_len = 1;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsgbuf;
+    msg.msg_controllen = sizeof(cmsgbuf);
+
+    ssize_t n = recvmsg(pipe_fd, &msg, 0);
+    if (n <= 0) return -1;
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    if (!cmsg || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS)
+        return -1;
+
+    int fd;
+    memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
+    return fd;
+}
+
+// Send a fail packet to the client (best-effort, ignores send errors).
+static void send_fail_to_client(int client_fd, const char* msg) {
+    char* errmsg = NULL;
+    uint8_t* fail = make_fail_packet(msg);
+    send_packet_to_foreign_server(client_fd, fail, &errmsg);
+    free(fail);
+}
+
+// Dispatch a call to a manifold function. All packet handling is in C;
+// only the manifold evaluation crosses into R via R_tryEval.
+static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
+                                SEXP dispatch, const char* label) {
+    char* errmsg = NULL;
+
+    morloc_call_t* call = read_morloc_call_packet(packet, &errmsg);
+    if (errmsg) {
+        send_fail_to_client(client_fd, errmsg);
+        return;
+    }
+
+    int midx = (int)call->midx;
+    SEXP fn = (midx >= 1 && midx <= LENGTH(dispatch))
+              ? VECTOR_ELT(dispatch, midx - 1) : R_NilValue;
+
+    if (fn == R_NilValue) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "%s function not found: m%d", label, midx);
+        send_fail_to_client(client_fd, msg);
+        free_morloc_call(call);
+        return;
+    }
+
+    // Build R pairlist of raw-vector arguments: fn(arg1, arg2, ...)
+    int nprotect = 0;
+    SEXP pairlist = R_NilValue;
+    for (int i = (int)call->nargs - 1; i >= 0; i--) {
+        size_t arg_size = morloc_packet_size(call->args[i], &errmsg);
+        if (errmsg) {
+            UNPROTECT(nprotect);
+            send_fail_to_client(client_fd, errmsg);
+            free_morloc_call(call);
+            return;
+        }
+        SEXP r_arg = PROTECT(allocVector(RAWSXP, arg_size));
+        nprotect++;
+        memcpy(RAW(r_arg), call->args[i], arg_size);
+        pairlist = PROTECT(Rf_cons(r_arg, pairlist));
+        nprotect++;
+    }
+    free_morloc_call(call);
+
+    SEXP r_call = PROTECT(Rf_lcons(fn, pairlist));
+    nprotect++;
+
+    // Single crossing into R: evaluate the manifold
+    int eval_err = 0;
+    SEXP result = R_tryEvalSilent(r_call, R_GlobalEnv, &eval_err);
+
+    if (eval_err || result == R_NilValue || TYPEOF(result) != RAWSXP) {
+        UNPROTECT(nprotect);
+        send_fail_to_client(client_fd,
+            eval_err ? R_curErrorBuf() : "manifold returned non-raw result");
+        return;
+    }
+
+    PROTECT(result);
+    nprotect++;
+
+    send_packet_to_foreign_server(client_fd, RAW(result), &errmsg);
+    UNPROTECT(nprotect);
+}
+
+// Process one client job entirely in C. Only crosses into R for
+// the actual manifold evaluation.
+static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
+    char* errmsg = NULL;
+
+    uint8_t* packet = stream_from_client(client_fd, &errmsg);
+    if (errmsg) {
+        close_socket(client_fd);
+        return;
+    }
+
+    bool is_local = packet_is_local_call(packet, &errmsg);
+    if (!errmsg && is_local) {
+        dispatch_manifold_c(client_fd, packet, dispatch, "Local");
+    } else if (!errmsg) {
+        bool is_remote = packet_is_remote_call(packet, &errmsg);
+        if (!errmsg && is_remote) {
+            dispatch_manifold_c(client_fd, packet, remote_dispatch, "Remote");
+        } else if (!errmsg) {
+            bool is_ping_pkt = packet_is_ping(packet, &errmsg);
+            if (!errmsg && is_ping_pkt) {
+                uint8_t* pong = return_ping(packet, &errmsg);
+                if (!errmsg) {
+                    send_packet_to_foreign_server(client_fd, pong, &errmsg);
+                    free(pong);
+                }
+            } else if (!errmsg) {
+                send_fail_to_client(client_fd, "Unexpected packet type");
+            }
+        }
+    }
+
+    if (errmsg) {
+        send_fail_to_client(client_fd, errmsg);
+    }
+
+    free(packet);
+    close_socket(client_fd);
+}
+
+// Tight C worker loop. Receives fds from the job queue and processes them,
+// crossing into R only for manifold evaluation.
+SEXP morloc_worker_loop_c(SEXP pipe_fd_r, SEXP dispatch_r, SEXP remote_dispatch_r) {
+    int pipe_fd = INTEGER(pipe_fd_r)[0];
+    PROTECT(dispatch_r);
+    PROTECT(remote_dispatch_r);
+
+    while (!r_shutting_down) {
+        int client_fd = recv_fd_c(pipe_fd);
+        if (client_fd < 0) break;
+        run_job_c(client_fd, dispatch_r, remote_dispatch_r);
+    }
+
+    UNPROTECT(2);
+    return R_NilValue;
+}
+
+// }}} C-level worker loop
+
 // }}} exported functions
 
 
@@ -1506,6 +1665,7 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_pipe", (DL_FUNC) &morloc_pipe, 0},
         {"morloc_write_byte", (DL_FUNC) &morloc_write_byte, 2},
         {"morloc_close_fd", (DL_FUNC) &morloc_close_fd, 1},
+        {"morloc_worker_loop_c", (DL_FUNC) &morloc_worker_loop_c, 3},
         {NULL, NULL, 0}
     };
 
