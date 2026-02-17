@@ -54,14 +54,44 @@ propagateScope calleeIdx appIdx = do
 express :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
 express e@(AnnoS (Idx _ t) (Idx cidx _, _) _) = forceExportThunks cidx t <$> expressCore e
 
--- Auto-force thunk return types at the export boundary so closures are
--- never serialized across process boundaries.
+-- At the export boundary, thunks cannot be serialized. This function:
+--   1. Wraps thunk-typed args in PolySuspend so they are received as plain
+--      values from the CLI and suspended inside the pool.
+--   2. Wraps thunk return types in PolyForce so they are evaluated before
+--      serialization back to the user.
 forceExportThunks :: Int -> Type -> PolyHead -> PolyHead
 forceExportThunks cidx t (PolyHead lang midx args body) =
-  PolyHead lang midx args (forceAtReturn cidx (returnType t) body)
+  let inputTs = case t of FunT inputs _ -> inputs; _ -> []
+      thunkArgIds = [ann a | (a, ThunkT _) <- zip args inputTs]
+      retT = case t of FunT _ ret -> ret; t' -> t'
+      body' = suspendThunkArgs thunkArgIds body
+      body'' = forceAtReturn cidx retT body'
+  in PolyHead lang midx args body''
   where
-    returnType (FunT _ ret) = ret
-    returnType t' = t'
+    -- Wrap BndVar references to thunk-typed args in PolySuspend.
+    -- The arg is deserialized as the inner type; the suspend creates the thunk.
+    suspendThunkArgs [] e = e
+    suspendThunkArgs ids e = goExpr ids e
+
+    goExpr ids (PolyBndVar (C (Idx ci (ThunkT inner))) i)
+      | i `elem` ids = wrapSuspends ci (ThunkT inner) i
+    goExpr ids (PolyManifold l m f e) = PolyManifold l m f (goExpr ids e)
+    goExpr ids (PolyLet i e1 e2) = PolyLet i (goExpr ids e1) (goExpr ids e2)
+    goExpr ids (PolyReturn e) = PolyReturn (goExpr ids e)
+    goExpr ids (PolyApp e es) = PolyApp (goExpr ids e) (map (goExpr ids) es)
+    goExpr ids (PolyForce ti e) = PolyForce ti (goExpr ids e)
+    goExpr ids (PolySuspend ti e) = PolySuspend ti (goExpr ids e)
+    goExpr ids (PolyList v ti es) = PolyList v ti (map (goExpr ids) es)
+    goExpr ids (PolyTuple v es) = PolyTuple v (map (fmap (goExpr ids)) es)
+    goExpr ids (PolyRecord o v ps rs) = PolyRecord o v ps (map (fmap (fmap (goExpr ids))) rs)
+    goExpr ids (PolyRemoteInterface l ti is rf e) = PolyRemoteInterface l ti is rf (goExpr ids e)
+    goExpr _ e = e
+
+    -- Peel ThunkT layers, wrapping each in PolySuspend, with the innermost
+    -- BndVar carrying the fully-unwrapped type.
+    wrapSuspends ci (ThunkT inner) i =
+      PolySuspend (Idx ci (ThunkT inner)) (wrapSuspends ci inner i)
+    wrapSuspends ci inner i = PolyBndVar (C (Idx ci inner)) i
 
     forceAtReturn c rt (PolyReturn e) = PolyReturn (wrapForces c rt e)
     forceAtReturn c rt (PolyManifold l m f e) = PolyManifold l m f (forceAtReturn c rt e)
