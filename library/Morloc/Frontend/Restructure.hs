@@ -403,6 +403,8 @@ handleBinops d0 = do
         bindings' <- mapM (\(v, e) -> (,) v <$> f e) bindings
         body' <- f body
         return $ ExprI i (LetE bindings' body')
+      f (ExprI i (SuspendE e)) = SuspendE <$> f e |>> ExprI i
+      f (ExprI i (ForceE e)) = ForceE <$> f e |>> ExprI i
       f e = return e
 
     -- | Rewrite a right-nested BopE chain into a correctly-associated AppE tree.
