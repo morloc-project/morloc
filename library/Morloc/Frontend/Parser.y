@@ -8,23 +8,19 @@ module Morloc.Frontend.Parser
   , emptyPState
   ) where
 
-import qualified Control.Monad.State.Strict as State
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
 import qualified Data.Scientific as DS
-import Data.Char (isLower)
-import Data.List (intercalate, nub)
-import Data.Maybe (mapMaybe)
+import qualified Control.Monad.State.Strict as State
 import Morloc.Frontend.Token
 import Morloc.Frontend.Lexer (lexMorloc, showLexError)
+import Morloc.Frontend.CST
+import Morloc.Frontend.Desugar (DState(..), D, ParseError(..), showParseError, desugarProgram, desugarExpr)
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
 import Morloc.Namespace.Expr
 import qualified Morloc.BaseTypes as BT
-import qualified Morloc.Language as ML
-import System.FilePath (takeDirectory, combine)
 }
 
 %name parseProgram program
@@ -110,36 +106,34 @@ import System.FilePath (takeDirectory, combine)
 -- Program
 --------------------------------------------------------------------
 
-program :: { [ExprI] }
-  : modules EOF             { $1 }
-  | top_body EOF            {% mkImplicitMain $1 }
+program :: { ([Loc CstExpr], Bool) }
+  : modules EOF             { ($1, False) }
+  | top_body EOF            { ($1, True) }
 
 -- Standalone entry points with explicit EOF
 type_eof :: { TypeU }
   : type EOF                { $1 }
 
-expr_eof :: { ExprI }
+expr_eof :: { Loc CstExpr }
   : expr EOF                { $1 }
 
-modules :: { [ExprI] }
+modules :: { [Loc CstExpr] }
   : module                   { [$1] }
   | modules module           { $1 ++ [$2] }
 
-module :: { ExprI }
+module :: { Loc CstExpr }
   : 'module' module_name '(' exports ')' top_body
-      {% do { i <- freshId $1
-            ; expI <- freshExprI $1 (ExpE $4)
-            ; return (ExprI i (ModE (MV $2) (expI : $6))) } }
+      { at $1 (CModE $2 $4 $6) }
 
-top_body :: { [ExprI] }
+top_body :: { [Loc CstExpr] }
   : VLBRACE top_decls VRBRACE   { $2 }
   | VLBRACE VRBRACE              { [] }
 
-top_decls :: { [ExprI] }
+top_decls :: { [Loc CstExpr] }
   : top_decl                     { $1 }
   | top_decls VSEMI top_decl     { $1 ++ $3 }
 
-top_decl :: { [ExprI] }
+top_decl :: { [Loc CstExpr] }
   : import_decl       { [$1] }
   | typedef_decl      { [$1] }
   | typeclass_decl    { [$1] }
@@ -148,25 +142,11 @@ top_decl :: { [ExprI] }
   | source_decl       { $1 }
   | sig_or_ass        { $1 }
 
--- Disambiguate signature vs assignment:
--- Both start with LOWER (or paren-op). Signature has :: after optional params.
--- Assignment has = after optional params.
-sig_or_ass :: { [ExprI] }
+sig_or_ass :: { [Loc CstExpr] }
   : evar_or_op lower_names '::' sig_type
-      {% do { docs <- lookupDocs $1
-            ; let cmdDoc = processArgDocLines docs
-            ; let (cs, argDocs, t) = $4
-            ; let t' = forallWrap (map TV $2) t
-            ; let doc = ArgDocSig cmdDoc (init argDocs) (last argDocs)
-            ; let et = EType t' (Set.fromList cs) doc
-            ; e <- freshExprI $1 (SigE (Signature (toEVar $1) Nothing et))
-            ; return [e] } }
+      { [at $1 (CSigE (toEVar $1) $2 $4)] }
   | evar_or_op lower_names '=' expr opt_where_decls
-      {% do { e <- case $2 of
-                [] -> freshExprI $1 (AssE (toEVar $1) $4 $5)
-                vs -> do { lam <- freshExprI $3 (LamE (map EV vs) $4)
-                         ; freshExprI $1 (AssE (toEVar $1) lam $5) }
-            ; return [e] } }
+      { [at $1 (CAssE (toEVar $1) $2 $4 $5)] }
 
 --------------------------------------------------------------------
 -- Module names
@@ -188,16 +168,16 @@ module_comp :: { Text }
 -- Exports
 --------------------------------------------------------------------
 
-exports :: { Export }
-  : '*'                     { ExportAll }
-  | export_list             { ExportMany (Set.fromList $1) }
+exports :: { CstExport }
+  : '*'                     { CstExportAll }
+  | export_list             { CstExportMany $1 }
 
-export_list :: { [(Int, Symbol)] }
+export_list :: { [Located] }
   : export_item                      { [$1] }
   | export_list ',' export_item      { $1 ++ [$3] }
 
-export_item :: { (Int, Symbol) }
-  : symbol              {% do { i <- freshId $1; return (i, symVal $1) } }
+export_item :: { Located }
+  : symbol              { $1 }
 
 symbol :: { Located }
   : LOWER               { $1 }
@@ -210,9 +190,9 @@ symbol :: { Located }
 -- Imports
 --------------------------------------------------------------------
 
-import_decl :: { ExprI }
+import_decl :: { Loc CstExpr }
   : 'import' module_name opt_import_list
-      {% freshExprI $1 (ImpE (Import (MV $2) $3 [] Nothing)) }
+      { at $1 (CImpE (Import (MV $2) $3 [] Nothing)) }
 
 opt_import_list :: { Maybe [AliasedSymbol] }
   : {- empty -}                            { Nothing }
@@ -238,43 +218,33 @@ import_item :: { AliasedSymbol }
 -- Type definitions
 --------------------------------------------------------------------
 
-typedef_decl :: { ExprI }
-  -- After 'type', the first UPPER could be a language name (followed by =>)
-  -- or the type name itself. We consume UPPER first and let the next token
-  -- (=> vs = vs LOWER vs end) disambiguate -- no shift/reduce conflict.
+typedef_decl :: { Loc CstExpr }
   : 'type' UPPER '=>' typedef_term '=' concrete_rhs
-      {% do { lang <- parseLang (getName $2)
-            ; let (t, isTerminal) = $6
-            ; mkTypedef $1 (Just (lang, isTerminal)) $4 t } }
+      { at $1 (CTypE (CstTypeAlias (Just $2) $4 $6)) }
   | 'type' LOWER '=>' typedef_term '=' concrete_rhs
-      {% do { lang <- parseLang (getName $2)
-            ; let (t, isTerminal) = $6
-            ; mkTypedef $1 (Just (lang, isTerminal)) $4 t } }
+      { at $1 (CTypE (CstTypeAlias (Just $2) $4 $6)) }
   | 'type' UPPER typedef_params '=' type
-      {% mkTypedef $1 Nothing (TV (getName $2), $3) $5 }
+      { at $1 (CTypE (CstTypeAlias Nothing (TV (getName $2), $3) ($5, False))) }
   | 'type' UPPER typedef_params
-      {% mkTypedefAlias $1 (TV (getName $2), $3) }
+      { at $1 (CTypE (CstTypeAliasForward (TV (getName $2), $3))) }
   | 'type' '(' UPPER typedef_params ')' '=' type
-      {% mkTypedef $1 Nothing (TV (getName $3), $4) $7 }
+      { at $1 (CTypE (CstTypeAlias Nothing (TV (getName $3), $4) ($7, False))) }
   | 'type' '(' UPPER typedef_params ')'
-      {% mkTypedefAlias $1 (TV (getName $3), $4) }
+      { at $1 (CTypE (CstTypeAliasForward (TV (getName $3), $4))) }
   | nam_type typedef_term 'where' VLBRACE nam_entry_list_loc VRBRACE
-      {% mkNamTypeWhereWithDocs (fst $1) $3 (snd $1) $2 $5 }
+      { at (fst $1) (CTypE (CstNamTypeWhere (snd $1) $2 $5)) }
   | nam_type typedef_term '=' nam_constructor opt_nam_entries
-      {% mkNamTypeLegacy $3 (snd $1) $2 (Just (fst $4)) Nothing $5 }
+      { at (fst $1) (CTypE (CstNamTypeLegacy Nothing (snd $1) $2 $4 $5)) }
   | nam_type UPPER '=>' typedef_term '=' nam_constructor opt_nam_entries
-      {% do { lang <- parseLang (getName $2)
-            ; mkNamTypeLegacy $5 (snd $1) $4 (Just (fst $6)) (Just (lang, snd $6)) $7 } }
+      { at (fst $1) (CTypE (CstNamTypeLegacy (Just $2) (snd $1) $4 $6 $7)) }
   | nam_type LOWER '=>' typedef_term '=' nam_constructor opt_nam_entries
-      {% do { lang <- parseLang (getName $2)
-            ; mkNamTypeLegacy $5 (snd $1) $4 (Just (fst $6)) (Just (lang, snd $6)) $7 } }
+      { at (fst $1) (CTypE (CstNamTypeLegacy (Just $2) (snd $1) $4 $6 $7)) }
 
 nam_type :: { (Located, NamType) }
   : 'record'   { ($1, NamRecord) }
   | 'object'   { ($1, NamObject) }
   | 'table'    { ($1, NamTable) }
 
--- Constructor name and whether it's a concrete (terminal) type
 nam_constructor :: { (Text, Bool) }
   : STRING                    { (getString $1, True) }
   | UPPER                     { (getName $1, False) }
@@ -284,9 +254,9 @@ opt_nam_entries :: { [(Key, TypeU)] }
   : {- empty -}              { [] }
   | '{' nam_entries '}'       { $2 }
 
-lang_name :: { Lang }
-  : UPPER                    {% parseLang (getName $1) }
-  | LOWER                    {% parseLang (getName $1) }
+lang_token :: { Located }
+  : UPPER                    { $1 }
+  | LOWER                    { $1 }
 
 typedef_term :: { (TVar, [Either TVar TypeU]) }
   : UPPER typedef_params              { (TV (getName $1), $2) }
@@ -300,11 +270,9 @@ typedef_params :: { [Either TVar TypeU] }
 nam_entry :: { (Key, TypeU) }
   : LOWER '::' type          { (Key (getName $1), $3) }
 
--- | Record field entry with docstring position tracking
 nam_entry_loc :: { (Located, Key, TypeU) }
   : LOWER '::' type          { ($1, Key (getName $1), $3) }
 
--- | Record field entries with docstring position tracking
 nam_entry_list_loc :: { [(Located, Key, TypeU)] }
   : nam_entry_loc                              { [$1] }
   | nam_entry_list_loc VSEMI nam_entry_loc     { $1 ++ [$3] }
@@ -313,11 +281,6 @@ nam_entries :: { [(Key, TypeU)] }
   : nam_entry                          { [$1] }
   | nam_entries ',' nam_entry          { $1 ++ [$3] }
 
--- | RHS of a concrete (language-specific) typedef.
--- STRING-headed types are terminal (won't be resolved further).
--- Other types are non-terminal (will be resolved via the scope).
--- The two alternatives are disjoint: STRING can only match the first
--- (non_string_atom excludes STRING), so there are no LR conflicts.
 concrete_rhs :: { (TypeU, Bool) }
   : STRING concrete_rhs_args    { (case $2 of { [] -> VarU (TV (getString $1)); ts -> AppU (VarU (TV (getString $1))) ts }, True) }
   | non_string_type             { ($1, False) }
@@ -326,8 +289,6 @@ concrete_rhs_args :: { [TypeU] }
   : {- empty -}                       { [] }
   | concrete_rhs_args atom_type       { $1 ++ [$2] }
 
--- | Type that does NOT start with a STRING token.
--- Used in concrete_rhs to avoid reduce/reduce conflicts with STRING.
 non_string_type :: { TypeU }
   : non_string_non_fun '->' type  { case $3 of { FunU args ret -> FunU ($1 : args) ret; t -> FunU [$1] t } }
   | non_string_non_fun            { $1 }
@@ -337,7 +298,7 @@ non_string_non_fun :: { TypeU }
   | non_string_app            { $1 }
 
 non_string_app :: { TypeU }
-  : non_string_app atom_type  {% return (applyType $1 $2) }
+  : non_string_app atom_type  { applyType $1 $2 }
   | non_string_atom           { $1 }
 
 non_string_atom :: { TypeU }
@@ -354,56 +315,47 @@ non_string_atom :: { TypeU }
 -- Typeclasses
 --------------------------------------------------------------------
 
-typeclass_decl :: { ExprI }
+typeclass_decl :: { Loc CstExpr }
   : 'class' class_head 'where' VLBRACE sig_list VRBRACE
-      {% do { let (cs, cn, vs) = $2
-            ; freshExprI $1 (ClsE (Typeclass cs cn vs $5)) } }
+      { at $1 (CClsE $2 $5) }
   | 'class' class_head
-      {% do { let (cs, cn, vs) = $2
-            ; freshExprI $1 (ClsE (Typeclass cs cn vs [])) } }
+      { at $1 (CClsE $2 []) }
 
--- Parse class header, handling constraints via type reinterpretation.
--- Everything is parsed as app_type first, then reinterpreted.
--- If '=>' follows, the app_type was a constraint; otherwise it's the class head.
-class_head :: { ([Constraint], ClassName, [TVar]) }
+class_head :: { CstClassHead }
   : app_type '=>' app_type
-      {% do { cs <- extractConstraints $1
-            ; (cn, vs) <- extractClassDef $3
-            ; return (cs, cn, vs) } }
+      { CCHConstrained $1 $3 }
   | '(' class_constraints ')' '=>' app_type
-      {% do { (cn, vs) <- extractClassDef $5
-            ; return ($2, cn, vs) } }
+      { CCHMultiConstrained $2 $5 }
   | app_type
-      {% do { (cn, vs) <- extractClassDef $1
-            ; return ([], cn, vs) } }
+      { CCHSimple $1 }
 
 class_constraints :: { [Constraint] }
   : single_constraint                            { [$1] }
   | class_constraints ',' single_constraint      { $1 ++ [$3] }
 
-sig_list :: { [Signature] }
+sig_list :: { [CstSigItem] }
   : signature                     { [$1] }
   | sig_list VSEMI signature      { $1 ++ [$3] }
 
-signature :: { Signature }
+signature :: { CstSigItem }
   : evar_or_op lower_names '::' sig_type
-      {% let (cs, argDocs, t) = $4 in mkSignatureWithDocs $1 $2 cs argDocs t }
+      { CstSigItem (toEVar $1) $2 $4 }
 
 --------------------------------------------------------------------
 -- Instances
 --------------------------------------------------------------------
 
-instance_decl :: { ExprI }
+instance_decl :: { Loc CstExpr }
   : 'instance' UPPER types1 'where' VLBRACE instance_items VRBRACE
-      {% freshExprI $1 (IstE (ClassName (getName $2)) (map quantifyType $3) (concat $6)) }
+      { at $1 (CIstE (ClassName (getName $2)) $3 (concat $6)) }
   | 'instance' UPPER types1
-      {% freshExprI $1 (IstE (ClassName (getName $2)) (map quantifyType $3) []) }
+      { at $1 (CIstE (ClassName (getName $2)) $3 []) }
 
-instance_items :: { [[ExprI]] }
+instance_items :: { [[Loc CstExpr]] }
   : instance_item                        { [$1] }
   | instance_items VSEMI instance_item   { $1 ++ [$3] }
 
-instance_item :: { [ExprI] }
+instance_item :: { [Loc CstExpr] }
   : source_decl             { $1 }
   | sig_or_ass              { $1 }
 
@@ -411,13 +363,13 @@ instance_item :: { [ExprI] }
 -- Fixity declarations
 --------------------------------------------------------------------
 
-fixity_decl :: { ExprI }
+fixity_decl :: { Loc CstExpr }
   : 'infixl' INTEGER operator_names
-      {% freshExprI $1 (FixE (Fixity InfixL (fromInteger (getInt $2)) $3)) }
+      { at $1 (CFixE InfixL (fromInteger (getInt $2)) $3) }
   | 'infixr' INTEGER operator_names
-      {% freshExprI $1 (FixE (Fixity InfixR (fromInteger (getInt $2)) $3)) }
+      { at $1 (CFixE InfixR (fromInteger (getInt $2)) $3) }
   | 'infix' INTEGER operator_names
-      {% freshExprI $1 (FixE (Fixity InfixN (fromInteger (getInt $2)) $3)) }
+      { at $1 (CFixE InfixN (fromInteger (getInt $2)) $3) }
 
 operator_names :: { [EVar] }
   : operator_ref                         { [$1] }
@@ -436,11 +388,11 @@ operator_ref :: { EVar }
 -- Source declarations
 --------------------------------------------------------------------
 
-source_decl :: { [ExprI] }
-  : 'source' lang_name opt_from '(' source_items ')'
-      {% mapM (mkSource $1 $2 $3) $5 }
-  | 'source' lang_name opt_from 'where' VLBRACE source_new_items VRBRACE
-      {% mapM (mkSourceNewWithDocs $1 $2 $3) $6 }
+source_decl :: { [Loc CstExpr] }
+  : 'source' lang_token opt_from '(' source_items ')'
+      { [at $1 (CSrcOldE $2 $3 $5)] }
+  | 'source' lang_token opt_from 'where' VLBRACE source_new_items VRBRACE
+      { [at $1 (CSrcNewE $2 $3 $6)] }
 
 opt_from :: { Maybe Text }
   : {- empty -}                    { Nothing }
@@ -469,55 +421,51 @@ source_new_item :: { Located }
 -- Expressions
 --------------------------------------------------------------------
 
-expr :: { ExprI }
+expr :: { Loc CstExpr }
   : let_expr                { $1 }
   | lambda_expr             { $1 }
   | infix_expr              { $1 }
-  | infix_expr '::' type    {% freshExprI $2 (AnnE $1 (quantifyType $3)) }
+  | infix_expr '::' type    { at $2 (CAnnE $1 $3) }
 
-let_expr :: { ExprI }
+let_expr :: { Loc CstExpr }
   : let_bindings 'in' expr
-      {% freshExprI $2 (LetE $1 $3) }
+      { at $2 (CLetE $1 $3) }
 
-let_bindings :: { [(EVar, ExprI)] }
+let_bindings :: { [(EVar, Loc CstExpr)] }
   : let_binding                        { [$1] }
   | let_bindings let_binding           { $1 ++ [$2] }
 
-let_binding :: { (EVar, ExprI) }
+let_binding :: { (EVar, Loc CstExpr) }
   : 'let' LOWER '=' expr              { (EV (getName $2), $4) }
   | 'let' '_' '=' expr                { (EV "_", $4) }
 
-lambda_expr :: { ExprI }
+lambda_expr :: { Loc CstExpr }
   : '\\' lower_names1 '->' expr
-      {% freshExprI $1 (LamE (map EV $2) $4) }
+      { at $1 (CLamE (map EV $2) $4) }
 
-infix_expr :: { ExprI }
+infix_expr :: { Loc CstExpr }
   : operand                  { $1 }
   | operand operator_name expr
-      {% do { opI <- freshId $2
-            ; freshExprI $2 (BopE $1 opI (EV (getOp $2)) $3) } }
+      { at $2 (CBopE $1 $2 $3) }
   | operand '-' expr
-      {% do { opI <- freshId $2
-            ; freshExprI $2 (BopE $1 opI (EV "-") $3) } }
+      { at $2 (CBopE $1 $2 $3) }
   | operand '.' expr
-      {% do { opI <- freshId $2
-            ; freshExprI $2 (BopE $1 opI (EV ".") $3) } }
+      { at $2 (CBopE $1 $2 $3) }
 
-operand :: { ExprI }
+operand :: { Loc CstExpr }
   : app_expr                 { $1 }
-  | '-' INTEGER              {% freshExprI $1 (IntE (negate (getInt $2))) }
-  | '-' FLOAT                {% freshExprI $1 (RealE (DS.fromFloatDigits (negate (getFloat $2)))) }
+  | '-' INTEGER              { at $1 (CIntE (negate (getInt $2))) }
+  | '-' FLOAT                { at $1 (CRealE (DS.fromFloatDigits (negate (getFloat $2)))) }
 
--- Function application: function followed by one or more arguments
-app_expr :: { ExprI }
+app_expr :: { Loc CstExpr }
   : atom_expr                      { $1 }
-  | atom_expr atom_exprs1          {% freshExprIFrom $1 (AppE $1 $2) }
+  | atom_expr atom_exprs1          { Loc ($1 <-> last $2) (CAppE $1 $2) }
 
-atom_exprs1 :: { [ExprI] }
+atom_exprs1 :: { [Loc CstExpr] }
   : atom_expr                      { [$1] }
   | atom_exprs1 atom_expr          { $1 ++ [$2] }
 
-atom_expr :: { ExprI }
+atom_expr :: { Loc CstExpr }
   : force_expr                { $1 }
   | paren_expr                { $1 }
   | getter_expr               { $1 }
@@ -531,99 +479,92 @@ atom_expr :: { ExprI }
   | hole_expr                 { $1 }
   | do_expr                   { $1 }
 
-force_expr :: { ExprI }
-  : '!' atom_expr             {% freshExprI $1 (ForceE $2) }
+force_expr :: { Loc CstExpr }
+  : '!' atom_expr             { at $1 (CForceE $2) }
 
-paren_expr :: { ExprI }
-  : '(' ')'                   {% freshExprI $1 UniE }
-  | '(' operator_name ')'     {% freshExprI $1 (VarE defaultValue (EV (getOp $2))) }
-  | '(' '-' ')'               {% freshExprI $1 (VarE defaultValue (EV "-")) }
-  | '(' '.' ')'               {% freshExprI $1 (VarE defaultValue (EV ".")) }
+paren_expr :: { Loc CstExpr }
+  : '(' ')'                   { at $1 CUniE }
+  | '(' operator_name ')'     { at $1 (CVarE (EV (getOp $2))) }
+  | '(' '-' ')'               { at $1 (CVarE (EV "-")) }
+  | '(' '.' ')'               { at $1 (CVarE (EV ".")) }
   | '(' expr ')'              { $2 }
-  | '(' expr ',' expr_list1 ')' {% freshExprI $1 (TupE ($2 : $4)) }
+  | '(' expr ',' expr_list1 ')' { Loc ($1 <-> $5) (CTupE ($2 : $4)) }
 
-expr_list1 :: { [ExprI] }
+expr_list1 :: { [Loc CstExpr] }
   : expr                       { [$1] }
   | expr_list1 ',' expr        { $1 ++ [$3] }
 
--- Suspend and record both use real braces {}.
--- Disambiguated by LR(1): record entries start with LOWER '='.
--- Since '=' is not a valid infix operator, the parser can distinguish.
-suspend_expr :: { ExprI }
-  : '{' expr '}'              {% freshExprI $1 (SuspendE $2) }
+suspend_expr :: { Loc CstExpr }
+  : '{' expr '}'              { Loc ($1 <-> $3) (CSuspendE $2) }
 
-record_expr :: { ExprI }
-  : '{' record_entries '}'    {% freshExprI $1 (NamE $2) }
+record_expr :: { Loc CstExpr }
+  : '{' record_entries '}'    { Loc ($1 <-> $3) (CNamE $2) }
 
-record_entries :: { [(Key, ExprI)] }
+record_entries :: { [(Key, Loc CstExpr)] }
   : record_entry                         { [$1] }
   | record_entries ',' record_entry      { $1 ++ [$3] }
 
-record_entry :: { (Key, ExprI) }
+record_entry :: { (Key, Loc CstExpr) }
   : LOWER '=' expr                       { (Key (getName $1), $3) }
 
-list_expr :: { ExprI }
-  : '[' ']'                   {% freshExprI $1 (LstE []) }
-  | '[' expr_list1 ']'        {% freshExprI $1 (LstE $2) }
+list_expr :: { Loc CstExpr }
+  : '[' ']'                   { Loc ($1 <-> $2) (CLstE []) }
+  | '[' expr_list1 ']'        { Loc ($1 <-> $3) (CLstE $2) }
 
-do_expr :: { ExprI }
-  : 'do' VLBRACE do_stmts VRBRACE     {% do { body <- desugarDo $1 $3; freshExprI $1 (SuspendE body) } }
+do_expr :: { Loc CstExpr }
+  : 'do' VLBRACE do_stmts VRBRACE     { Loc ($1 <-> $4) (CDoE $3) }
 
-do_stmts :: { [DoStmt] }
+do_stmts :: { [CstDoStmt] }
   : do_stmt                   { [$1] }
   | do_stmts VSEMI do_stmt    { $1 ++ [$3] }
 
-do_stmt :: { DoStmt }
-  : LOWER '<-' expr            { DoBind (EV (getName $1)) $3 }
-  | expr                       { DoBare $1 }
+do_stmt :: { CstDoStmt }
+  : LOWER '<-' expr            { CstDoBind (EV (getName $1)) $3 }
+  | expr                       { CstDoBare $1 }
 
-getter_expr :: { ExprI }
-  : GDOT accessor_body    {% buildAccessor $1 $2 }
+getter_expr :: { Loc CstExpr }
+  : GDOT accessor_body    { at $1 (CAccessorE $2) }
 
--- After the initial GDOT, an accessor body is a field name, index, or group
-accessor_body :: { AccessorBody }
-  : LOWER accessor_tail           { ABKey (getName $1) $2 }
-  | INTEGER accessor_tail         { ABIdx (fromInteger (getInt $1)) $2 }
-  | '(' grouped_accessors ')'    { ABGroup $2 }
+accessor_body :: { CstAccessorBody }
+  : LOWER accessor_tail           { CABKey (getName $1) $2 }
+  | INTEGER accessor_tail         { CABIdx (fromInteger (getInt $1)) $2 }
+  | '(' grouped_accessors ')'    { CABGroup $2 }
 
--- What follows a field name/index: nothing (getter), = expr (setter), or chain
-accessor_tail :: { AccessorTail }
-  : {- empty -}                   { ATEnd }
-  | '=' expr                      { ATSet $2 }
-  | GDOT accessor_body            { ATChain $2 }
+accessor_tail :: { CstAccessorTail }
+  : {- empty -}                   { CATEnd }
+  | '=' expr                      { CATSet $2 }
+  | GDOT accessor_body            { CATChain $2 }
 
--- Comma-separated entries inside .()
-grouped_accessors :: { [AccessorBody] }
+grouped_accessors :: { [CstAccessorBody] }
   : grouped_accessor                          { [$1] }
   | grouped_accessors ',' grouped_accessor   { $1 ++ [$3] }
 
--- Each entry inside .() starts with GDOT
-grouped_accessor :: { AccessorBody }
+grouped_accessor :: { CstAccessorBody }
   : GDOT accessor_body   { $2 }
 
-var_expr :: { ExprI }
-  : LOWER                     {% freshExprI $1 (VarE defaultValue (EV (getName $1))) }
+var_expr :: { Loc CstExpr }
+  : LOWER                     { at $1 (CVarE (EV (getName $1))) }
 
-hole_expr :: { ExprI }
-  : '_'                        {% freshExprI $1 HolE }
+hole_expr :: { Loc CstExpr }
+  : '_'                        { at $1 CHolE }
 
-bool_expr :: { ExprI }
-  : 'True'                     {% freshExprI $1 (LogE True) }
-  | 'False'                    {% freshExprI $1 (LogE False) }
+bool_expr :: { Loc CstExpr }
+  : 'True'                     { at $1 (CLogE True) }
+  | 'False'                    { at $1 (CLogE False) }
 
-num_expr :: { ExprI }
-  : INTEGER                    {% freshExprI $1 (IntE (getInt $1)) }
-  | FLOAT                      {% freshExprI $1 (RealE (DS.fromFloatDigits (getFloat $1))) }
+num_expr :: { Loc CstExpr }
+  : INTEGER                    { at $1 (CIntE (getInt $1)) }
+  | FLOAT                      { at $1 (CRealE (DS.fromFloatDigits (getFloat $1))) }
 
-string_expr :: { ExprI }
-  : STRING                     {% freshExprI $1 (StrE (getString $1)) }
+string_expr :: { Loc CstExpr }
+  : STRING                     { at $1 (CStrE (getString $1)) }
   | interp_string              { $1 }
 
-interp_string :: { ExprI }
+interp_string :: { Loc CstExpr }
   : STRSTART interp_body STREND
-      {% mkInterpString $1 $2 $3 }
+      { Loc ($1 <-> $3) (CInterpE (getString $1) (fst $2) (snd $2) (getString $3)) }
 
-interp_body :: { ([ExprI], [Text]) }
+interp_body :: { ([Loc CstExpr], [Text]) }
   : INTERPOPEN expr INTERPCLOSE
       { ([$2], []) }
   | interp_body STRMID INTERPOPEN expr INTERPCLOSE
@@ -644,12 +585,8 @@ non_fun_type :: { TypeU }
   : '<' LOWER '>'            { ExistU (TV (getName $2)) ([], Open) ([], Open) }
   | app_type                  { $1 }
 
--- Left-recursive type application (like expr application).
--- This avoids the shift/reduce conflict that UPPER atom_types1 causes:
--- after seeing UPPER, the parser can't tell if it's a standalone type
--- or the head of a type application without arbitrary lookahead.
 app_type :: { TypeU }
-  : app_type atom_type        {% return (applyType $1 $2) }
+  : app_type atom_type        { applyType $1 $2 }
   | atom_type                 { $1 }
 
 atom_type :: { TypeU }
@@ -659,7 +596,7 @@ atom_type :: { TypeU }
   | '[' type ']'              { BT.listU $2 }
   | '{' type '}'              { ThunkU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
-  | LOWER ':' non_fun_type   { $3 }  -- tag (e.g., x:Real), discard the tag
+  | LOWER ':' non_fun_type   { $3 }
   | LOWER                     { VarU (TV (getName $1)) }
   | STRING                    { VarU (TV (getString $1)) }
 
@@ -675,36 +612,24 @@ types1 :: { [TypeU] }
 -- Constraints and signature types
 --------------------------------------------------------------------
 
--- | A type with optional leading constraints, returning per-arg doc positions.
--- Both alternatives start with sig_fun_args to avoid reduce/reduce conflicts
--- between pos_atom_type and atom_type. When '=>' follows, the first sig_fun_args
--- is reinterpreted as constraints.
-sig_type :: { ([Constraint], [ArgDocVars], TypeU) }
+sig_type :: { CstSigType }
   : sig_fun_args '=>' sig_fun_args
-      {% do { cs <- extractConstraints (argsToType $1)
-            ; argDocs <- mapM (\(pos, _) -> lookupDocsPos pos) $3
-            ; return (cs, map processArgDocLines argDocs, argsToType $3) } }
+      { CstSigType (Just $1) $3 }
   | sig_fun_args
-      {% do { argDocs <- mapM (\(pos, _) -> lookupDocsPos pos) $1
-            ; return ([], map processArgDocLines argDocs, argsToType $1) } }
+      { CstSigType Nothing $1 }
 
--- | Parse a function type as a list of positioned arrow-separated types.
--- Each entry is (position of first token, type).
 sig_fun_args :: { [(Pos, TypeU)] }
   : pos_non_fun_type '->' sig_fun_args  { $1 : $3 }
   | pos_non_fun_type                     { [$1] }
 
--- | Non-function type with position of first token.
 pos_non_fun_type :: { (Pos, TypeU) }
   : '<' LOWER '>'     { (locPos $1, ExistU (TV (getName $2)) ([], Open) ([], Open)) }
   | pos_app_type       { $1 }
 
--- | Type application with position of first token.
 pos_app_type :: { (Pos, TypeU) }
-  : pos_app_type atom_type  {% return (fst $1, applyType (snd $1) $2) }
+  : pos_app_type atom_type  { (fst $1, applyType (snd $1) $2) }
   | pos_atom_type            { $1 }
 
--- | Atom type with position of first token.
 pos_atom_type :: { (Pos, TypeU) }
   : '(' ')'                     { (locPos $1, BT.unitU) }
   | '(' type ')'                { (locPos $1, $2) }
@@ -723,32 +648,27 @@ single_constraint :: { Constraint }
 -- Helpers
 --------------------------------------------------------------------
 
--- Operator token (returns the Located for position tracking)
--- Note: '-' is NOT included here because it conflicts with unary negation
--- and infix subtraction. It's handled specifically in operator_ref,
--- evar_or_op, and paren_expr.
 operator_name :: { Located }
   : OPERATOR                  { $1 }
   | '*'                       { $1 }
   | '<'                       { $1 }
   | '>'                       { $1 }
 
--- Located token that is evar or op (for sig_or_ass disambiguation)
 evar_or_op :: { Located }
   : LOWER                     { $1 }
   | '(' operator_name ')'     { $2 }
   | '(' '-' ')'               { $2 }
   | '(' '.' ')'               { $2 }
 
-opt_where_decls :: { [ExprI] }
+opt_where_decls :: { [Loc CstExpr] }
   : {- empty -}                               { [] }
   | 'where' VLBRACE where_items VRBRACE       { $3 }
 
-where_items :: { [ExprI] }
+where_items :: { [Loc CstExpr] }
   : where_item                      { $1 }
   | where_items VSEMI where_item    { $1 ++ $3 }
 
-where_item :: { [ExprI] }
+where_item :: { [Loc CstExpr] }
   : sig_or_ass                { $1 }
 
 lower_names :: { [Text] }
@@ -764,54 +684,6 @@ lower_names1 :: { [Text] }
 --------------------------------------------------------------------
 -- Parser monad
 --------------------------------------------------------------------
-
-data ParseError = ParseError
-  { pePos      :: !Pos
-  , peMsg      :: !String
-  , peExpected :: ![String]
-  , peSourceLines :: ![Text]
-  }
-  deriving (Show)
-
-showParseError :: String -> ParseError -> String
-showParseError filename (ParseError pos msg expected srcLines) =
-  let ln = posLine pos
-      col = posCol pos
-      header = filename ++ ":" ++ show ln ++ ":" ++ show col ++ ": " ++ msg
-      context = formatSourceContext srcLines ln col
-      expectMsg = case cleanExpected expected of
-        [] -> ""
-        [x] -> "\n  expected " ++ x
-        xs -> "\n  expected one of: " ++ intercalate ", " xs
-  in header ++ context ++ expectMsg
-
-formatSourceContext :: [Text] -> Int -> Int -> String
-formatSourceContext srcLines ln col
-  | ln < 1 || ln > length srcLines = ""
-  | otherwise =
-    let srcLine = srcLines !! (ln - 1)
-        lineNum = show ln
-        pad = replicate (length lineNum) ' '
-        pointer = replicate (col - 1) ' ' ++ "^"
-    in "\n  " ++ pad ++ " |\n  " ++ lineNum ++ " | " ++ T.unpack srcLine ++ "\n  " ++ pad ++ " | " ++ pointer
-
-cleanExpected :: [String] -> [String]
-cleanExpected = filter (not . isInternal) . nub . map friendlyName
-  where
-    isInternal s = s `elem` ["VLBRACE", "VRBRACE", "VSEMI", "EOF"]
-    friendlyName "LOWER"      = "identifier"
-    friendlyName "UPPER"      = "type name"
-    friendlyName "OPERATOR"   = "operator"
-    friendlyName "INTEGER"    = "integer"
-    friendlyName "FLOAT"      = "number"
-    friendlyName "STRING"     = "string"
-    friendlyName "STRSTART"   = "string"
-    friendlyName "STRMID"     = "string"
-    friendlyName "STREND"     = "string"
-    friendlyName "INTERPOPEN" = "'#{'"
-    friendlyName "INTERPCLOSE" = "'}'"
-    friendlyName "GDOT"       = "'.'"
-    friendlyName s            = s
 
 data PState = PState
   { psExpIndex    :: !Int
@@ -832,23 +704,19 @@ type P a = State.StateT PState (Either ParseError) a
 -- Token extraction helpers
 --------------------------------------------------------------------
 
--- | Extract name from identifier tokens
 getName :: Located -> Text
 getName (Located _ (TokLowerName n) _) = n
 getName (Located _ (TokUpperName n) _) = n
 getName (Located _ _ t) = t
 
--- | Extract integer value
 getInt :: Located -> Integer
 getInt (Located _ (TokInteger n) _) = n
 getInt _ = 0
 
--- | Extract float value
 getFloat :: Located -> Double
 getFloat (Located _ (TokFloat d) _) = d
 getFloat _ = 0
 
--- | Extract string value
 getString :: Located -> Text
 getString (Located _ (TokString s) _) = s
 getString (Located _ (TokStringStart s) _) = s
@@ -856,7 +724,6 @@ getString (Located _ (TokStringMid s) _) = s
 getString (Located _ (TokStringEnd s) _) = s
 getString (Located _ _ t) = t
 
--- | Extract operator text from operator-like tokens
 getOp :: Located -> Text
 getOp (Located _ (TokOperator t) _) = t
 getOp (Located _ TokMinus _) = "-"
@@ -866,19 +733,6 @@ getOp (Located _ TokLAngle _) = "<"
 getOp (Located _ TokRAngle _) = ">"
 getOp (Located _ _ t) = t
 
--- | Get the name from a Located token as a Symbol
-symVal :: Located -> Symbol
-symVal (Located _ (TokLowerName n) _) = TermSymbol (EV n)
-symVal (Located _ (TokUpperName n) _) = TypeSymbol (TV n)
-symVal (Located _ (TokOperator n) _) = TermSymbol (EV n)
-symVal (Located _ TokMinus _) = TermSymbol (EV "-")
-symVal (Located _ TokStar _) = TermSymbol (EV "*")
-symVal (Located _ TokDot _) = TermSymbol (EV ".")
-symVal (Located _ TokLAngle _) = TermSymbol (EV "<")
-symVal (Located _ TokRAngle _) = TermSymbol (EV ">")
-symVal _ = TermSymbol (EV "?")
-
--- | Convert Located to EVar
 toEVar :: Located -> EVar
 toEVar (Located _ (TokLowerName n) _) = EV n
 toEVar (Located _ (TokOperator n) _) = EV n
@@ -890,387 +744,12 @@ toEVar (Located _ TokRAngle _) = EV ">"
 toEVar _ = EV "?"
 
 --------------------------------------------------------------------
--- Expression ID generation
+-- Type helper
 --------------------------------------------------------------------
 
--- | Generate a fresh expression ID and record source position
-freshId :: Located -> P Int
-freshId tok = do
-  s <- State.get
-  let i = psExpIndex s
-      p = locPos tok
-      loc = SrcLoc (Just (posFile p)) (posLine p) (posCol p) (posLine p) (posCol p)
-  State.put s { psExpIndex = i + 1
-              , psSourceMap = Map.insert i loc (psSourceMap s) }
-  return i
-
--- | Create a fresh ExprI with position from a Located token
-freshExprI :: Located -> Expr -> P ExprI
-freshExprI tok e = do
-  i <- freshId tok
-  return (ExprI i e)
-
--- | Create a fresh ExprI copying position from an existing ExprI
-freshExprIFrom :: ExprI -> Expr -> P ExprI
-freshExprIFrom (ExprI refId _) e = do
-  s <- State.get
-  let i = psExpIndex s
-      loc = Map.findWithDefault noSrcLoc refId (psSourceMap s)
-  State.put s { psExpIndex = i + 1
-              , psSourceMap = Map.insert i loc (psSourceMap s) }
-  return (ExprI i e)
-
-noSrcLoc :: SrcLoc
-noSrcLoc = SrcLoc Nothing 0 0 0 0
-
---------------------------------------------------------------------
--- Helper functions
---------------------------------------------------------------------
-
--- | Look up docstrings for a token's position from the doc map
-lookupDocs :: Located -> P [Text]
-lookupDocs (Located pos _ _) = lookupDocsPos pos
-
--- | Look up docstrings by position
-lookupDocsPos :: Pos -> P [Text]
-lookupDocsPos pos = do
-  docMap <- State.gets psDocMap
-  return (Map.findWithDefault [] pos docMap)
-
--- | Parse a single docstring line like " name: foo" into key-value pairs
-parseDocKV :: Text -> (Text, Text)
-parseDocKV txt =
-  let stripped = T.strip txt
-  in case T.breakOn ":" stripped of
-    (key, rest)
-      | not (T.null rest) && not (T.any (== ' ') (T.strip key)) ->
-        (T.strip key, T.strip (T.drop 1 rest))
-    _ -> ("", stripped)
-
--- | Parse a CLI option string like "-n/--records" or "--verbose" or "-t"
-parseCliOpt :: Text -> Maybe CliOpt
-parseCliOpt txt = case T.unpack (T.strip txt) of
-  '-' : '-' : rest@(_:_) -> Just (CliOptLong (T.pack rest))
-  '-' : c : '/' : '-' : '-' : rest@(_:_) -> Just (CliOptBoth c (T.pack rest))
-  '-' : c : [] -> Just (CliOptShort c)
-  _ -> Nothing
-
--- | Parse docstring lines into ArgDocVars
-processArgDocLines :: [Text] -> ArgDocVars
-processArgDocLines = foldl processLine defaultValue
-  where
-    processLine d line = case parseDocKV line of
-      ("name", val) -> d { docName = Just val }
-      ("literal", val) -> d { docLiteral = Just (val == "true" || val == "True") }
-      ("unroll", val) -> d { docUnroll = Just (val == "true" || val == "True") }
-      ("default", val) -> d { docDefault = Just val }
-      ("metavar", val) -> d { docMetavar = Just val }
-      ("arg", val) -> d { docArg = parseCliOpt val }
-      ("true", val) -> d { docTrue = parseCliOpt val }
-      ("false", val) -> d { docFalse = parseCliOpt val }
-      ("return", val) -> d { docReturn = Just val }
-      (_, val) | not (T.null val) -> d { docLines = docLines d <> [val] }
-      _ -> d
-
--- | Apply docstrings to a Source record
-applySourceDocs :: [Text] -> Source -> Source
-applySourceDocs docLines' src = foldl processLine src docLines'
-  where
-    processLine s line = case parseDocKV line of
-      ("name", val) -> s { srcName = SrcName val }
-      ("rsize", val) -> s { srcRsize = mapMaybe readMaybeInt (T.words val) }
-      (_, val) | not (T.null val) -> s { srcNote = srcNote s <> [val] }
-      _ -> s
-    readMaybeInt t = case reads (T.unpack t) of
-      [(n, "")] -> Just n
-      _ -> Nothing
-
--- | Wrap type variables in forall
-forallWrap :: [TVar] -> TypeU -> TypeU
-forallWrap [] t = t
-forallWrap (v : vs) t = ForallU v (forallWrap vs t)
-
--- | Wrap free lowercase type variables in ForallU (like pTypeGen in old parser)
-quantifyType :: TypeU -> TypeU
-quantifyType t = forallWrap (nub (collectGenVars t)) t
-  where
-    collectGenVars :: TypeU -> [TVar]
-    collectGenVars (VarU v@(TV name))
-      | not (T.null name), isLower (T.head name) = [v]
-      | otherwise = []
-    collectGenVars (ForallU v inner) = filter (/= v) (collectGenVars inner)
-    collectGenVars (AppU f args) = collectGenVars f ++ concatMap collectGenVars args
-    collectGenVars (FunU args ret) = concatMap collectGenVars args ++ collectGenVars ret
-    collectGenVars (NamU _ _ ts entries) = concatMap collectGenVars ts ++ concatMap (collectGenVars . snd) entries
-    collectGenVars (ThunkU inner) = collectGenVars inner
-    collectGenVars _ = []
-
--- | Parse a language name
-parseLang :: Text -> P Lang
-parseLang t = case ML.readLangName t of
-  Just lang -> return lang
-  Nothing -> pfail (Pos 0 0 "") ("unknown language: " ++ T.unpack t)
-
-pfail :: Pos -> String -> P a
-pfail pos msg = do
-  srcLines <- State.gets psSourceLines
-  State.lift (Left (ParseError pos msg [] srcLines))
-
--- | Build interpolated string expression
-mkInterpString :: Located -> ([ExprI], [Text]) -> Located -> P ExprI
-mkInterpString startTok (exprs, mids) endTok = do
-  let tails = mids ++ [getString endTok]
-  patI <- freshExprI startTok (PatE (PatternText (getString startTok) tails))
-  freshExprI startTok (AppE patI exprs)
-
--- | Flatten left-recursive application into AppE f [args]
-
--- | Flatten left-recursive type application into AppU head [args]
 applyType :: TypeU -> TypeU -> TypeU
 applyType (AppU f args) x = AppU f (args ++ [x])
 applyType f x = AppU f [x]
-
--- | Reinterpret a type that was parsed before '=>' as constraints.
--- Handles: Ord a, (Ord a, Show a), (Ord a)
-extractConstraints :: TypeU -> P [Constraint]
-extractConstraints (AppU (VarU (TV name)) args) =
-  return [Constraint (ClassName name) args]
-extractConstraints (VarU (TV name)) =
-  return [Constraint (ClassName name) []]
-extractConstraints (NamU NamRecord _ _ entries) =
-  -- Tuple types parsed as (A a, B b) become tuple-like structures.
-  -- We need to handle tuples which use BT.tupleU.
-  pfail (Pos 0 0 "") "invalid constraint syntax"
-extractConstraints t =
-  -- Try to extract from tuple representation (Tuple2 (Ord a) (Show a) etc.)
-  case flattenTupleConstraint t of
-    Just cs -> return cs
-    Nothing -> pfail (Pos 0 0 "") ("invalid constraint: " ++ show t)
-
-flattenTupleConstraint :: TypeU -> Maybe [Constraint]
-flattenTupleConstraint (AppU (VarU (TV name)) args)
-  | T.isPrefixOf "Tuple" name = mapM typeToConstraint args
-  | otherwise = Just [Constraint (ClassName name) args]
-flattenTupleConstraint (VarU (TV name)) =
-  Just [Constraint (ClassName name) []]
-flattenTupleConstraint _ = Nothing
-
--- | Extract class name and type variables from a type parsed as app_type
-extractClassDef :: TypeU -> P (ClassName, [TVar])
-extractClassDef (AppU (VarU (TV name)) args) = do
-  tvs <- mapM typeToTVar args
-  return (ClassName name, tvs)
-extractClassDef (VarU (TV name)) =
-  return (ClassName name, [])
-extractClassDef _ = pfail (Pos 0 0 "") "invalid class head"
-
-typeToTVar :: TypeU -> P TVar
-typeToTVar (VarU tv) = return tv
-typeToTVar _ = pfail (Pos 0 0 "") "expected type variable in class head"
-
-typeToConstraint :: TypeU -> Maybe Constraint
-typeToConstraint (AppU (VarU (TV name)) args) =
-  Just (Constraint (ClassName name) args)
-typeToConstraint (VarU (TV name)) =
-  Just (Constraint (ClassName name) [])
-typeToConstraint _ = Nothing
-
---------------------------------------------------------------------
--- Semantic action helpers
---------------------------------------------------------------------
-
-mkSignatureWithDocs :: Located -> [Text] -> [Constraint] -> [ArgDocVars] -> TypeU -> P Signature
-mkSignatureWithDocs nameTok vs cs argDocs t = do
-  let wrappedT = forallWrap (map TV vs) t
-      doc = ArgDocSig defaultValue (init argDocs) (last argDocs)
-      et = EType wrappedT (Set.fromList cs) doc
-  return (Signature (toEVar nameTok) Nothing et)
-
--- | Convert a list of positioned types to a TypeU (FunU or single type)
-argsToType :: [(Pos, TypeU)] -> TypeU
-argsToType [] = BT.unitU
-argsToType [(_, t)] = t
-argsToType ts = FunU (map snd (init ts)) (snd (last ts))
-
-mkTypedef :: Located -> Maybe (Lang, Bool) -> (TVar, [Either TVar TypeU]) -> TypeU -> P ExprI
-mkTypedef tok lang (v, vs) t = do
-  docs <- lookupDocs tok
-  let docVars = if null docs then defaultValue else processArgDocLines docs
-  freshExprI tok (TypE (ExprTypeE lang v vs t (ArgDocAlias docVars)))
-
-mkTypedefAlias :: Located -> (TVar, [Either TVar TypeU]) -> P ExprI
-mkTypedefAlias tok (v, vs) =
-  let t = if null vs then VarU v else AppU (VarU v) (map (either VarU id) vs)
-  in freshExprI tok (TypE (ExprTypeE Nothing v vs t (ArgDocAlias defaultValue)))
-
-mkNamTypeWhereWithDocs :: Located -> Located -> NamType -> (TVar, [Either TVar TypeU]) -> [(Located, Key, TypeU)] -> P ExprI
-mkNamTypeWhereWithDocs recTok tok nt (v, vs) locEntries = do
-  recDocs <- lookupDocs recTok
-  let recDocVars = processArgDocLines recDocs
-  fieldDocs <- mapM (\(loc, _, _) -> do { dl <- lookupDocs loc; return (processArgDocLines dl) }) locEntries
-  let entries = [(k, t) | (_, k, t) <- locEntries]
-      entries' = desugarTableEntries nt entries
-      doc = ArgDocRec recDocVars (zip (map fst entries') fieldDocs)
-      t = NamU nt v (map (either VarU id) vs) entries'
-  freshExprI tok (TypE (ExprTypeE Nothing v vs t doc))
-
-mkNamTypeLegacy :: Located -> NamType -> (TVar, [Either TVar TypeU]) -> Maybe Text -> Maybe (Lang, Bool) -> [(Key, TypeU)] -> P ExprI
-mkNamTypeLegacy tok nt (v, vs) mayCon lang entries =
-  let con = maybe v TV mayCon
-      entries' = desugarTableEntries nt entries
-      t = NamU nt con (map (either VarU id) vs) entries'
-      doc = ArgDocRec defaultValue [(k, defaultValue) | (k, _) <- entries']
-  in freshExprI tok (TypE (ExprTypeE lang v vs t doc))
-
--- | For table types, wrap each field type in a list type
-desugarTableEntries :: NamType -> [(Key, TypeU)] -> [(Key, TypeU)]
-desugarTableEntries NamTable entries = [(k, wrapList t) | (k, t) <- entries]
-  where
-    wrapList (ForallU v t) = ForallU v (wrapList t)
-    wrapList t = BT.listU t
-desugarTableEntries _ entries = entries
-
-
--- | Resolve a source file path relative to the current module's directory
-resolveSourceFile :: Maybe Path -> Maybe Text -> Maybe Path
-resolveSourceFile modulePath srcFile =
-  case (modulePath, srcFile) of
-    (Just f, Just srcfile') -> Just $ combine (takeDirectory f) (T.unpack srcfile')
-    (Just _, Nothing) -> Nothing
-    (Nothing, s) -> fmap T.unpack s
-
-mkSource :: Located -> Lang -> Maybe Text -> (Text, Maybe Text) -> P ExprI
-mkSource tok lang srcfile (name, mayAlias) = do
-  modPath <- State.gets psModulePath
-  let alias = maybe name id mayAlias
-      path = resolveSourceFile modPath srcfile
-  freshExprI tok (SrcE Source
-    { srcName = SrcName name
-    , srcLang = lang
-    , srcPath = path
-    , srcAlias = EV alias
-    , srcLabel = Nothing
-    , srcRsize = []
-    , srcNote = []
-    })
-
-mkSourceNewWithDocs :: Located -> Lang -> Maybe Text -> Located -> P ExprI
-mkSourceNewWithDocs tok lang srcfile nameTok = do
-  modPath <- State.gets psModulePath
-  docLines' <- lookupDocs nameTok
-  let name = getName nameTok
-      path = resolveSourceFile modPath srcfile
-      baseSrc = Source
-        { srcName = SrcName name
-        , srcLang = lang
-        , srcPath = path
-        , srcAlias = EV name
-        , srcLabel = Nothing
-        , srcRsize = []
-        , srcNote = []
-        }
-      src = applySourceDocs docLines' baseSrc
-  freshExprI tok (SrcE src)
-
--- | Accessor tree types
-data AccessorBody
-  = ABKey Text AccessorTail    -- .name<tail>
-  | ABIdx Int AccessorTail     -- .0<tail>
-  | ABGroup [AccessorBody]     -- .(<entries>)
-
-data AccessorTail
-  = ATEnd                      -- nothing after field (getter)
-  | ATSet ExprI                -- = expr (setter)
-  | ATChain AccessorBody       -- .next (continue chain)
-
--- | Result of resolving an accessor tree
-data AccessorResult
-  = ARGetter Selector
-  | ARSetter Selector [ExprI]  -- selector (with group structure) + values
-
--- | Build a getter or setter expression from an accessor tree
-buildAccessor :: Located -> AccessorBody -> P ExprI
-buildAccessor tok body = do
-  result <- resolveBody body
-  case result of
-    ARGetter sel -> freshExprI tok (PatE (PatternStruct sel))
-    ARSetter sel vals -> do
-      patI <- freshExprI tok (PatE (PatternStruct sel))
-      lamI <- freshId tok
-      let v = EV (".setter_" <> T.pack (show lamI))
-      vArg <- freshExprI tok (VarE defaultValue v)
-      appI <- freshExprI tok (AppE patI (vArg : vals))
-      return (ExprI lamI (LamE [v] appI))
-
-resolveBody :: AccessorBody -> P AccessorResult
-resolveBody (ABKey name tail') = do
-  inner <- resolveTail tail'
-  return (wrapKey name inner)
-resolveBody (ABIdx idx tail') = do
-  inner <- resolveTail tail'
-  return (wrapIdx idx inner)
-resolveBody (ABGroup entries) = resolveGroup entries
-
-resolveTail :: AccessorTail -> P AccessorResult
-resolveTail ATEnd = return (ARGetter SelectorEnd)
-resolveTail (ATSet expr) = return (ARSetter SelectorEnd [expr])
-resolveTail (ATChain body) = resolveBody body
-
-wrapKey :: Text -> AccessorResult -> AccessorResult
-wrapKey name (ARGetter sel) = ARGetter (SelectorKey (name, sel) [])
-wrapKey name (ARSetter sel vals) = ARSetter (SelectorKey (name, sel) []) vals
-
-wrapIdx :: Int -> AccessorResult -> AccessorResult
-wrapIdx idx (ARGetter sel) = ARGetter (SelectorIdx (idx, sel) [])
-wrapIdx idx (ARSetter sel vals) = ARSetter (SelectorIdx (idx, sel) []) vals
-
-resolveGroup :: [AccessorBody] -> P AccessorResult
-resolveGroup bodies = do
-  results <- mapM resolveBody bodies
-  let getters = [s | ARGetter s <- results]
-      setterPairs = [(s, vs) | ARSetter s vs <- results]
-  case (getters, setterPairs) of
-    (gs, []) -> return (ARGetter (mergeSelectors gs))
-    ([], ss) -> return (ARSetter (mergeSelectors (map fst ss)) (concatMap snd ss))
-    _ -> pfail (Pos 0 0 "") "cannot mix getter and setter entries in .()"
-
--- | Merge multiple selectors into one with extras (for groups)
-mergeSelectors :: [Selector] -> Selector
-mergeSelectors [] = SelectorEnd
-mergeSelectors [s] = s
-mergeSelectors sels =
-  let idxEntries = concat [s : ss | SelectorIdx s ss <- sels]
-      keyEntries = concat [s : ss | SelectorKey s ss <- sels]
-  in case (idxEntries, keyEntries) of
-    (is, []) -> case is of { [] -> SelectorEnd; (x:xs) -> SelectorIdx x xs }
-    ([], ks) -> case ks of { [] -> SelectorEnd; (x:xs) -> SelectorKey x xs }
-    _ -> error "Cannot mix key and index selectors in getter"
-
-data DoStmt = DoBind EVar ExprI | DoBare ExprI
-
-desugarDo :: Located -> [DoStmt] -> P ExprI
-desugarDo tok [] = pfail (locPos tok) "empty do block"
-desugarDo tok [DoBare e] = freshExprI tok (ForceE e)
-desugarDo tok [DoBind _ _] = pfail (locPos tok) "do block cannot end with a bind (<-)"
-desugarDo tok (DoBind v e : rest) = do
-  forceE <- freshExprI tok (ForceE e)
-  restE <- desugarDo tok rest
-  freshExprI tok (LetE [(v, forceE)] restE)
-desugarDo tok (DoBare e : rest) = do
-  idx <- freshId tok
-  let discardVar = EV ("_do_" <> T.pack (show idx))
-  forceE <- freshExprI tok (ForceE e)
-  restE <- desugarDo tok rest
-  freshExprI tok (LetE [(discardVar, forceE)] restE)
-
--- | Wrap top-level declarations (without explicit module keyword) in an
--- implicit "main" module. Bare expressions are not supported at the top
--- level; use explicit assignments instead.
-mkImplicitMain :: [ExprI] -> P [ExprI]
-mkImplicitMain es = do
-  let tok = Located (Pos 0 0 "") TokEOF ""
-  modI <- freshId tok
-  return [ExprI modI (ModE (MV "main") es)]
 
 --------------------------------------------------------------------
 -- Error handling
@@ -1283,6 +762,50 @@ parseError ([], expected) = do
 parseError (Located pos tok _ : _, expected) = do
   srcLines <- State.gets psSourceLines
   State.lift (Left (ParseError pos ("unexpected " ++ showToken tok) expected srcLines))
+
+--------------------------------------------------------------------
+-- Desugar bridge
+--------------------------------------------------------------------
+
+toDState :: PState -> DState
+toDState ps = DState
+  { dsExpIndex = psExpIndex ps
+  , dsSourceMap = psSourceMap ps
+  , dsDocMap = psDocMap ps
+  , dsModulePath = psModulePath ps
+  , dsModuleConfig = psModuleConfig ps
+  , dsSourceLines = psSourceLines ps
+  }
+
+fromDState :: PState -> DState -> PState
+fromDState ps ds = ps
+  { psExpIndex = dsExpIndex ds
+  , psSourceMap = dsSourceMap ds
+  }
+
+-- | Run parse + desugar
+parseAndDesugar :: PState -> [Located] -> Either ParseError ([ExprI], PState)
+parseAndDesugar pstate tokens =
+  case State.runStateT (parseProgram tokens) pstate of
+    Left err -> Left err
+    Right ((cstNodes, isImplicitMain), _parseState) ->
+      let dstate = toDState pstate
+      in case State.runStateT (desugarProgram isImplicitMain cstNodes) dstate of
+        Left err -> Left err
+        Right (exprIs, finalDState) ->
+          Right (exprIs, fromDState pstate finalDState)
+
+-- | Parse and desugar a single expression
+parseAndDesugarExpr :: PState -> [Located] -> Either ParseError (ExprI, PState)
+parseAndDesugarExpr pstate tokens =
+  case State.runStateT (parseExprOnly tokens) pstate of
+    Left err -> Left err
+    Right (cstExpr, _parseState) ->
+      let dstate = toDState pstate
+      in case State.runStateT (desugarExpr cstExpr) dstate of
+        Left err -> Left err
+        Right (exprI, finalDState) ->
+          Right (exprI, fromDState pstate finalDState)
 
 --------------------------------------------------------------------
 -- Public API
@@ -1303,29 +826,24 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
   let srcLines = T.lines sourceCode
       pstate' = pstate { psModulePath = modulePath, psDocMap = docMap, psSourceLines = srcLines }
   -- Strategy 1: parse as-is (code with module declarations)
-  case State.runStateT (parseProgram tokens) pstate' of
+  case parseAndDesugar pstate' tokens of
     Right (result, finalState) ->
       let dag' = foldl addModule dag result
       in return (dag', finalState)
     Left err ->
       -- Strategy 2: wrap in module, patch trailing expr as __expr__ assignment.
-      -- Handles bare code like "f x = True\nf 42" where the last statement
-      -- is an expression (not a declaration).
       let wrappedCode = "module main (*)\n" <> sourceCode
       in case lexMorloc filename wrappedCode of
         Right (wrappedTokens, wrappedDocMap) ->
-          -- First try parsing the wrapped code directly (pure declarations)
           let pstate'' = pstate' { psDocMap = wrappedDocMap, psSourceLines = T.lines wrappedCode }
-          in case State.runStateT (parseProgram wrappedTokens) pstate'' of
+          in case parseAndDesugar pstate'' wrappedTokens of
             Right (result, finalState) ->
               let dag' = foldl addModule dag result
               in return (dag', finalState)
             Left _ ->
-              -- Patch: change export (*) to (__expr__) and insert __expr__ =
-              -- before the last top-level statement
               case patchForTrailingExpr wrappedTokens of
                 Just patchedTokens ->
-                  case State.runStateT (parseProgram patchedTokens) pstate'' of
+                  case parseAndDesugar pstate'' patchedTokens of
                     Right (result, finalState) ->
                       let dag' = foldl addModule dag result
                       in return (dag', finalState)
@@ -1334,9 +852,8 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
         Left _ -> tryExprFallback tokens pstate' dag filename err
   where
     tryExprFallback tokens' ps dag' filename' origErr =
-      -- Last resort: parse as a bare expression (e.g., "42", "True", "f 42").
       let exprTokens = stripLayoutTokens tokens'
-      in case State.runStateT (parseExprOnly exprTokens) ps of
+      in case parseAndDesugarExpr ps exprTokens of
         Right (exprI, exprState) -> do
           let s = exprState
               i1 = psExpIndex s
@@ -1358,22 +875,17 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
       in Map.insert n (e, imports) d
     addModule _ _ = error "expected a module"
 
--- | Patch module-wrapped tokens to handle trailing bare expressions.
--- Changes export from (*) to (__expr__) and inserts "__expr__ =" before
--- the last top-level statement.
 patchForTrailingExpr :: [Located] -> Maybe [Located]
 patchForTrailingExpr tokens = do
   let tokens' = patchExport tokens
   patchLastStmt tokens'
 
--- | Replace (*) with (__expr__) in the export list
 patchExport :: [Located] -> [Located]
 patchExport [] = []
 patchExport (t@(Located _ TokLParen _) : Located p TokStar _ : rest) =
   t : Located p (TokLowerName "__expr__") "__expr__" : rest
 patchExport (t : rest) = t : patchExport rest
 
--- | Insert "__expr__ =" after the last top-level VSEMI
 patchLastStmt :: [Located] -> Maybe [Located]
 patchLastStmt tokens =
   case findLastTopVSemi tokens 0 0 Nothing of
@@ -1396,7 +908,6 @@ patchLastStmt tokens =
     findLastTopVSemi (_ : rest) depth pos lastIdx =
       findLastTopVSemi rest depth (pos + 1) lastIdx
 
--- | Strip virtual layout tokens for expression fallback parsing
 stripLayoutTokens :: [Located] -> [Located]
 stripLayoutTokens = filter (not . isLayoutToken)
   where
