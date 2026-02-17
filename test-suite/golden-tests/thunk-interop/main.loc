@@ -47,7 +47,7 @@ crossCppPy :: Int
 crossCppPy = !do
     x <- sideEffectCpp 3
     y <- sideEffectPy x
-    return (addCpp x y)
+    {addCpp x y}
 
 -- Cross-language do-block: Python thunk feeds R thunk, result via Python add
 -- sideEffectPy 4 -> "EVAL_PY 4", x = 8
@@ -57,4 +57,4 @@ crossPyR :: Int
 crossPyR = !do
     x <- sideEffectPy 4
     y <- sideEffectR x
-    return (addPy x y)
+    {addPy x y}

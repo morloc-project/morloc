@@ -28,7 +28,7 @@ import Text.Megaparsec.Char hiding (eol)
 import qualified Text.Megaparsec.Char.Lexer as L
 
 -- | Internal type for do-block statement parsing
-data DoStmt = DoBind EVar ExprI | DoBare ExprI | DoReturn ExprI
+data DoStmt = DoBind EVar ExprI | DoBare ExprI
 
 {- | Parse a single file or string that may contain multiple modules. Each
 module is written written into the DAG of previously observed modules.
@@ -853,8 +853,10 @@ pSuspendE = do
 -- do
 --   print "start"       -- bare statement: let _ = !(print "start")
 --   x <- rnorm 0 1      -- bind: let x = !(rnorm 0 1)
---   return (x + 1)       -- return: x + 1 (no force, becomes body)
+--   {x + 1}             -- final: force {x+1}, i.e. !{x+1} = x+1
 -- The whole block is wrapped in SuspendE.
+-- The final statement is always forced, so to end with a pure value,
+-- wrap it in {}: the force and suspend cancel out (!{e} = e).
 pDoBlock :: Parser ExprI
 pDoBlock = do
   pos <- getSourcePos
@@ -869,7 +871,6 @@ pDoBlock = do
     pDoStmt :: Parser DoStmt
     pDoStmt =
           try pDoBind
-      <|> try pDoReturn
       <|> pDoBare
 
     pDoBind :: Parser DoStmt
@@ -879,20 +880,12 @@ pDoBlock = do
       e <- pExpr
       return $ DoBind v e
 
-    pDoReturn :: Parser DoStmt
-    pDoReturn = do
-      _ <- reserved "return"
-      e <- pExpr
-      return $ DoReturn e
-
     pDoBare :: Parser DoStmt
     pDoBare = DoBare <$> pExpr
 
     desugarDo :: SourcePos -> [DoStmt] -> Parser ExprI
     -- final bare expression: force it
     desugarDo p [DoBare e] = exprIAt p $ ForceE e
-    -- final return expression: no force
-    desugarDo _ [DoReturn e] = return e
     -- final bind: error
     desugarDo _ [DoBind _ _] = fail "do block cannot end with a bind (<-)"
     -- non-final bind: let x = !e in rest
@@ -907,8 +900,6 @@ pDoBlock = do
       forceE <- exprIAt p $ ForceE e
       restE <- desugarDo p rest
       exprIAt p $ LetE [(discardVar, forceE)] restE
-    -- non-final return: error
-    desugarDo _ (DoReturn _ : _) = fail "return must be the last statement in a do block"
     desugarDo _ [] = fail "empty do block"
 
 pHolE :: Parser ExprI

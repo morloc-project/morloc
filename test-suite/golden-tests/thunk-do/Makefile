@@ -1,8 +1,8 @@
 all:
 	rm -f *.err obs.txt
 	morloc make -o nexus main.loc 2> build.err
-	echo "--- doReturn ---" > obs.txt
-	./nexus doReturn >> obs.txt 2>> obs.err
+	echo "--- doPure ---" > obs.txt
+	./nexus doPure >> obs.txt 2>> obs.err
 	echo "--- doBind ---" >> obs.txt
 	./nexus doBind >> obs.txt 2>> obs.err
 	echo "--- doBare ---" >> obs.txt

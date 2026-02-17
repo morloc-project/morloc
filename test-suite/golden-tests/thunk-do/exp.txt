@@ -1,4 +1,4 @@
---- doReturn ---
+--- doPure ---
 42
 --- doBind ---
 EVAL 5

@@ -468,7 +468,6 @@ reservedWords =
   , "let"
   , "in"
   , "do"
-  , "return"
   ]
 
 reservedOperators :: [Text]

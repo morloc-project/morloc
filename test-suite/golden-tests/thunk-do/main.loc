@@ -1,8 +1,10 @@
 -- Test do-notation, which desugars to suspend + let + force:
---   do { x <- e1; e2; return e3 }  -->  { let x = !e1 in let _ = !e2 in e3 }
+--   do { x <- e1; e2; {e3} }  -->  { let x = !e1 in let _ = !e2 in e3 }
+-- The final statement is always forced. To end with a pure value,
+-- wrap it in {} so the force and suspend cancel: !{e} = e.
 --
 -- Cases tested:
---   1. doReturn: do-block with only return (trivial, no effects)
+--   1. doPure: do-block with only a pure value (trivial, no effects)
 --   2. doBind: bind a forced thunk to a variable
 --   3. doBare: bare statement forced and discarded
 --   4. doChain: multiple binds feeding into each other
@@ -10,7 +12,7 @@
 -- sideEffect :: Int -> {Int} captures the side effect in the type.
 -- Each sideEffect call prints "EVAL <input>" to stderr and returns input * 2.
 
-module main (doReturn, doBind, doBare, doChain, doMixed)
+module main (doPure, doBind, doBare, doChain, doMixed)
 
 import root-cpp
 
@@ -21,24 +23,24 @@ type Cpp => Int = "int"
 sideEffect :: Int -> {Int}
 add :: Int -> Int -> Int
 
--- do-block with only return: desugars to !{42} = 42
-doReturn :: Int
-doReturn = !do
-    return 42
+-- do-block with only a pure value: desugars to !{42} = 42
+doPure :: Int
+doPure = !do
+    {42}
 
 -- do-block with bind: x <- sideEffect 5 forces thunk, binds x = 10
--- then return (add x 1) = 11
+-- then {add x 1} is forced: !{add x 1} = add x 1 = 11
 doBind :: Int
 doBind = !do
     x <- sideEffect 5
-    return (add x 1)
+    {add x 1}
 
 -- do-block with bare statement: forces and discards result
--- sideEffect 3 called (prints "EVAL 3"), result discarded, returns 42
+-- sideEffect 3 called (prints "EVAL 3"), result discarded, then !{42} = 42
 doBare :: Int
 doBare = !do
     sideEffect 3
-    return 42
+    {42}
 
 -- chained binds: result of first feeds into second
 -- sideEffect 3 -> "EVAL 3", x = 6
@@ -48,7 +50,7 @@ doChain :: Int
 doChain = !do
     x <- sideEffect 3
     y <- sideEffect x
-    return (add x y)
+    {add x y}
 
 -- mix of bare statements and binds
 -- sideEffect 1 -> "EVAL 1", discarded
@@ -60,4 +62,4 @@ doMixed = !do
     sideEffect 1
     x <- sideEffect 5
     sideEffect x
-    return (add x 1)
+    {add x 1}

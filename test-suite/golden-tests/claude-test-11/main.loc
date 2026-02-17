@@ -38,7 +38,7 @@ sysReport = !do
     clk <- clockResNs
     pid <- procId
     up <- uptimeSec
-    return (fmtReport (calMonth up clk) (hashStr "/home/user") pid)
+    {fmtReport (calMonth up clk) (hashStr "/home/user") pid}
 
 -- Inline force as argument to pure function
 envCal :: Str
@@ -49,7 +49,7 @@ cpuLoad :: Int
 cpuLoad = !do
     c <- cpuCount
     u <- uptimeSec
-    return (hashStr (calMonth c u))
+    {hashStr (calMonth c u)}
 
 -- Two independent forces of same thunk (no sharing, 2x trace)
 multiQuery :: Int
@@ -66,4 +66,4 @@ pipeline = !do
     clk <- clockResNs
     up <- uptimeSec
     pid <- procId
-    return (fmtReport home (hashStr (calMonth clk up)) pid)
+    {fmtReport home (hashStr (calMonth clk up)) pid}
