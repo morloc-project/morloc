@@ -52,7 +52,27 @@ propagateScope calleeIdx appIdx = do
     Nothing -> return ()
 
 express :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
-express (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) = do
+express e@(AnnoS (Idx _ t) (Idx cidx _, _) _) = forceExportThunks cidx t <$> expressCore e
+
+-- Auto-force thunk return types at the export boundary so closures are
+-- never serialized across process boundaries.
+forceExportThunks :: Int -> Type -> PolyHead -> PolyHead
+forceExportThunks cidx t (PolyHead lang midx args body) =
+  PolyHead lang midx args (forceAtReturn cidx (returnType t) body)
+  where
+    returnType (FunT _ ret) = ret
+    returnType t' = t'
+
+    forceAtReturn c rt (PolyReturn e) = PolyReturn (wrapForces c rt e)
+    forceAtReturn c rt (PolyManifold l m f e) = PolyManifold l m f (forceAtReturn c rt e)
+    forceAtReturn c rt (PolyLet i e1 e2) = PolyLet i e1 (forceAtReturn c rt e2)
+    forceAtReturn c rt e = wrapForces c rt e
+
+    wrapForces c (ThunkT inner) e = wrapForces c inner (PolyForce (Idx c inner) e)
+    wrapForces _ _ e = e
+
+expressCore :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
+expressCore (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) = do
   MM.sayVVV $ "express CallS (midx=" <> pretty midx <> "," <+> "cidx=" <> pretty cidx <> "):"
   ids <- MM.takeFromCounter (length inputs)
   exe' <- case exe of
@@ -64,38 +84,38 @@ express (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) = do
     . PolyReturn
     $ PolyApp (PolyExe (Idx midx c) exe') lambdaVals
 
-express (AnnoS (Idx midx _) (_, lambdaArgs) (LamS _ e@(AnnoS (Idx _ applicationType) (c, _) x))) = do
+expressCore (AnnoS (Idx midx _) (_, lambdaArgs) (LamS _ e@(AnnoS (Idx _ applicationType) (c, _) x))) = do
   MM.sayVVV $ "express LamS (midx=" <> pretty midx <> "):"
   setManifoldConfig midx e
-  express (AnnoS (Idx midx applicationType) (c, lambdaArgs) x)
-express (AnnoS (Idx midx (AppT (VarT v) [t])) (Idx cidx lang, args) (LstS xs)) = do
+  expressCore (AnnoS (Idx midx applicationType) (c, lambdaArgs) x)
+expressCore (AnnoS (Idx midx (AppT (VarT v) [t])) (Idx cidx lang, args) (LstS xs)) = do
   MM.sayVVV $ "express LstS"
   xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
   let x = PolyList (Idx cidx v) (Idx cidx t) xs'
   return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
-express (AnnoS (Idx _ t) _ (LstS _)) = error $ "Invalid list form: " <> show t
-express (AnnoS t@(Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs)) = do
+expressCore (AnnoS (Idx _ t) _ (LstS _)) = error $ "Invalid list form: " <> show t
+expressCore (AnnoS t@(Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs)) = do
   MM.sayVVV $ "express TupS:" <+> pretty t
   let idxTs = zipWith mkIdx xs ts
   xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) idxTs xs
   let x = PolyTuple (Idx cidx v) (fromJust $ safeZip idxTs xs')
   return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
-express (AnnoS g _ (TupS _)) = error $ "Invalid tuple form: " <> show g
-express (AnnoS (Idx midx t@(NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
+expressCore (AnnoS g _ (TupS _)) = error $ "Invalid tuple form: " <> show g
+expressCore (AnnoS (Idx midx t@(NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
   MM.sayVVV $ "express NamT:" <+> pretty t
   let idxTypes = zipWith mkIdx (map snd entries) (map snd rs)
   xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) idxTypes (map snd entries)
   let x = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip idxTypes xs'))
   return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
 
-express (AnnoS (Idx midx t) (Idx cidx lang, args) (NamS entries)) = do
+expressCore (AnnoS (Idx midx t) (Idx cidx lang, args) (NamS entries)) = do
   MM.sayVVV $ "express NamT expand:" <+> pretty t
   mayT <- evalGeneralStep midx (type2typeu t)
   case mayT of
-    (Just t') -> express (AnnoS (Idx midx (typeOf t')) (Idx cidx lang, args) (NamS entries))
+    (Just t') -> expressCore (AnnoS (Idx midx (typeOf t')) (Idx cidx lang, args) (NamS entries))
     Nothing -> MM.throwSourcedError midx $ "Missing concrete:" <+> "t=" <> pretty t
 
-express e = do
+expressCore e = do
   MM.sayVVV "express default"
   expressDefault e
 

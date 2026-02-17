@@ -1,4 +1,4 @@
-FROM ubuntu:24.04 as morloc-build
+FROM docker.io/library/ubuntu:22.04
 
 RUN apt-get update && apt-get install -y \
   git \
@@ -20,11 +20,13 @@ ENV PATH="/root/.ghcup/bin:${PATH}"
 # Set the timezone, this avoids hanging later on
 RUN DEBIAN_FRONTEND=noninteractive TZ=Antarctica/Troll apt-get -y install tzdata
 
-RUN apt-get install -y r-base python3.10 libgsl-dev git pip python3-numpy
-RUN python3 -m pip install --upgrade --break-system-packages setuptools
+# hyperfine is needed for shell benchmarks
+RUN apt-get install -y r-base python3.10 libgsl-dev git pip hyperfine
+RUN python3 -m pip install --upgrade setuptools numpy
 
 # Set up R environment
-RUN Rscript -e 'install.packages("rlang", repos  = "https://cloud.r-project.org")'
+# stringi is needed for benchmarks
+RUN Rscript -e 'install.packages("stringi", repos  = "https://cloud.r-project.org")'
 
 # Cleanup to reduce image size
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*

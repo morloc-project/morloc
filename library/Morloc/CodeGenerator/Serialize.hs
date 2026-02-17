@@ -270,6 +270,8 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Map.union (Map.fromList [(i, Left t) | (Arg i (Just t)) <- ys]) (makeTypemap midx e)
     makeTypemap parentIdx (MonoLet _ e1 e2) = Map.union (makeTypemap parentIdx e1) (makeTypemap parentIdx e2)
     makeTypemap parentIdx (MonoReturn e) = makeTypemap parentIdx e
+    makeTypemap parentIdx (MonoForce _ e) = makeTypemap parentIdx e
+    makeTypemap parentIdx (MonoSuspend _ e) = makeTypemap parentIdx e
     makeTypemap _ (MonoApp (MonoExe (ann -> idx) _) es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap parentIdx (MonoApp e es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) (e : es))
     makeTypemap _ (MonoList (ann -> idx) _ es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)

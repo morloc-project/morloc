@@ -115,7 +115,7 @@ rLowerConfig = cfg
       , lcMakeLet = \namer i _ e1 e2 -> return $ makeLet namer i e1 e2
       , lcReturn = \e -> "return(" <> e <> ")"
       , lcMakeSuspend = \stmts expr -> case stmts of
-          [] -> "function()" <+> expr
+          [] -> "(function()" <+> expr <> ")"
           _ -> "function(){" <> nest 4 (line <> vsep (stmts <> [expr])) <> line <> "}"
       , lcSerialize = defaultSerialize cfg
       , lcDeserialize = \_ -> defaultDeserialize cfg

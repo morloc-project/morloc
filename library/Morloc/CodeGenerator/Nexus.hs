@@ -185,6 +185,7 @@ generalTypeToSerialAST (AppT (VarT v) ts)
   | otherwise = do
       insts <- MM.gets stateTypeclasses
       error $ show insts
+generalTypeToSerialAST (ThunkT t) = generalTypeToSerialAST t
 generalTypeToSerialAST (NamT o v [] rs) =
   SerialObject o (FV v (CV "")) []
     <$> mapM (secondM generalTypeToSerialAST) rs
@@ -524,8 +525,12 @@ buildManifest config programName buildDir buildTime daemonSets fdata gasts langT
       ]
 
     returnTypeStr :: Type -> Text
-    returnTypeStr (FunT _ t) = render (pretty t)
-    returnTypeStr t = render (pretty t)
+    returnTypeStr (FunT _ t) = render (pretty (stripThunks t))
+    returnTypeStr t = render (pretty (stripThunks t))
+
+    stripThunks :: Type -> Type
+    stripThunks (ThunkT t') = stripThunks t'
+    stripThunks t' = t'
 
 
 -- ======================================================================
