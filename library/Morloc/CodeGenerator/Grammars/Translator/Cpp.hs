@@ -322,7 +322,7 @@ PROPAGATE_ERROR(errmsg)|]
         Nothing -> return serialType
       return $ makeLet namer letIndex typestr e1 e2
   , lcReturn = \e -> "return(" <> e <> ");"
-  , lcMakeSuspend = \stmts expr -> case stmts of
+  , lcMakeSuspend = \stmts expr -> (,) [] $ case stmts of
       [] -> "[&](){return " <> expr <> ";}"
       _ -> "[&](){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"
   , lcSerialize = \v s -> serialize v s

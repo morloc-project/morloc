@@ -44,6 +44,7 @@ main = do
       , golden "thunk-interop" "thunk-interop"
       , golden "thunk-force" "thunk-force"
       , golden "thunk-export" "thunk-export"
+      , golden "thunk-choose" "thunk-choose"
 
       , golden "records-alias" "records-alias"
 

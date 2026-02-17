@@ -169,8 +169,8 @@ data LowerConfig m = LowerConfig
   , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> PoolDocs -> PoolDocs -> m PoolDocs
     -- ^ Let binding assembly at the PoolDocs level
   , lcReturn :: MDoc -> MDoc
-  , lcMakeSuspend :: [MDoc] -> MDoc -> MDoc
-    -- ^ prior statements -> return expression -> thunk expression
+  , lcMakeSuspend :: [MDoc] -> MDoc -> ([MDoc], MDoc)
+    -- ^ prior statements -> return expression -> (hoisted statements, thunk expression)
   , lcSerialize :: MDoc -> SerialAST -> m PoolDocs
   , lcDeserialize :: TypeF -> MDoc -> SerialAST -> m (MDoc, [MDoc])
 
@@ -370,11 +370,14 @@ lowerNativeExpr cfg _ (RealN_ _ v) = return $ defaultValue {poolExpr = lcPrintEx
 lowerNativeExpr cfg _ (IntN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IIntLit v)}
 lowerNativeExpr cfg _ (StrN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit v)}
 lowerNativeExpr cfg _ (NullN_ _) = return $ defaultValue {poolExpr = lcPrintExpr cfg INullLit}
-lowerNativeExpr cfg _ (SuspendN_ _ x) = return defaultValue
-  { poolExpr = lcMakeSuspend cfg (poolPriorLines x) (poolExpr x)
-  , poolCompleteManifolds = poolCompleteManifolds x
-  , poolPriorExprs = poolPriorExprs x
-  }
+lowerNativeExpr cfg _ (SuspendN_ _ x) =
+  let (hoisted, thunkExpr) = lcMakeSuspend cfg (poolPriorLines x) (poolExpr x)
+   in return defaultValue
+        { poolExpr = thunkExpr
+        , poolCompleteManifolds = poolCompleteManifolds x
+        , poolPriorLines = hoisted
+        , poolPriorExprs = poolPriorExprs x
+        }
 lowerNativeExpr cfg _ (ForceN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IForce (IRawExpr (poolExpr x)))}
 
 -- | Lower a serial manifold to PoolDocs.

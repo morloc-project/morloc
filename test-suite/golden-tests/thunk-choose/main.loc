@@ -1,0 +1,10 @@
+module m (foo)
+
+import root-py
+
+source Py from "foo.py" ("choose")
+
+choose a :: [a] -> {a}
+
+foo :: {Str}
+foo = choose ["a", "b"]

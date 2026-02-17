@@ -1,0 +1,9 @@
+--- rollOnce ---
+EVAL 5
+10
+--- rollArg ---
+EVAL 3
+6
+--- rollPy ---
+EVAL 7
+14
