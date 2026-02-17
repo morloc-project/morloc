@@ -592,4 +592,5 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     showDefType _ (NamT _ v _ _) = pretty v
     showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
     showDefType _ (AppT _ _) = error "AppT is only OK with VarT, for now"
+    showDefType _ (ThunkT _) = error "Cannot show ThunkT"
 

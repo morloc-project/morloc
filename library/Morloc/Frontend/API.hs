@@ -19,7 +19,7 @@ import qualified Morloc.Config as Config
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
-import Morloc.Frontend.Lexer (ParserState (..), emptyState)
+import Morloc.Frontend.Parser (PState (..), emptyPState)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Frontend.Parser as Parser
 import qualified Morloc.Frontend.Typecheck as Typecheck
@@ -27,7 +27,6 @@ import qualified Morloc.Frontend.Valuecheck as Valuecheck
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import Morloc.Data.Doc
-import Text.Megaparsec.Error (errorBundlePretty)
 
 parse ::
   -- | path to the current module (if we are reading from a file)
@@ -38,27 +37,27 @@ parse ::
 parse f (Code code) = do
   moduleConfig <- Config.loadModuleConfig f
 
-  let parserState = emptyState
+  let parserState = emptyPState { psModuleConfig = moduleConfig }
 
   -- store source text for the main file
   case f of
     Just path -> MM.modify (\st -> st { stateSourceText = Map.insert path code (stateSourceText st) })
     Nothing -> return ()
 
-  case Parser.readProgram Nothing f code (parserState {stateModuleConfig = moduleConfig}) mempty of
-    (Left e) -> MM.throwSystemError $ pretty (errorBundlePretty e)
+  case Parser.readProgram Nothing f code parserState mempty of
+    (Left e) -> MM.throwSystemError $ pretty e
     (Right (mainDag, mainState)) -> parseImports mainDag mainState Map.empty
   where
     -- descend recursively into imports
     parseImports ::
       DAG MVar Import ExprI ->
-      ParserState ->
+      PState ->
       Map.Map MVar Path ->
       MorlocMonad (DAG MVar Import ExprI)
     parseImports d s m = case unimported of
       [] -> do
         -- transfer source positions from parser state into MorlocState
-        MM.modify (\st -> st { stateSourceMap = stateSourcePositions s <> stateSourceMap st })
+        MM.modify (\st -> st { stateSourceMap = psSourceMap s <> stateSourceMap st })
         return d
       ((mainModule, importedModule) : _) -> do
         importPath <- case Map.lookup mainModule m of
@@ -67,12 +66,12 @@ parse f (Code code) = do
 
         -- Load the <main>.yaml file associated with the main morloc package file
         moduleConfig <- Config.loadModuleConfig (Just importPath)
-        let newState = s {stateModuleConfig = moduleConfig}
+        let newState = s { psModuleConfig = moduleConfig }
 
         Mod.loadModuleMetadata importPath
         (childPath, code') <- openLocalModule importPath
         case Parser.readProgram (Just importedModule) childPath code' newState d of
-          (Left e) -> MM.throwSystemError $ pretty (errorBundlePretty e)
+          (Left e) -> MM.throwSystemError $ pretty e
           (Right (d', s')) -> parseImports d' s' (maybe m (\v -> Map.insert importedModule v m) childPath)
       where
         -- all modules that have already been parsed

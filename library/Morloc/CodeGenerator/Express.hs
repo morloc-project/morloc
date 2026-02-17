@@ -157,8 +157,8 @@ reduceType scope t0 =
         Nothing -> Nothing
 
 expressDefault :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
-expressDefault e@(AnnoS (Idx midx t) (Idx cidx lang, args) _) =
-  PolyHead lang midx [Arg i None | Arg i _ <- args] . ensurePolyReturn <$> expressPolyExprWrap lang (Idx cidx t) e
+expressDefault e0@(AnnoS (Idx midx t) (Idx cidx lang, args) _) =
+  PolyHead lang midx [Arg i None | Arg i _ <- args] . ensurePolyReturn <$> expressPolyExprWrap lang (Idx cidx t) e0
   where
     -- ensure the manifold body has PolyReturn at the return position
     ensurePolyReturn (PolyReturn x) = PolyReturn x
@@ -468,8 +468,8 @@ expressPolyExpr _ _ _ (AnnoS (Idx i c) (Idx cidx _, rs) (LetBndS v)) = do
     [r] -> return $ PolyLetVar (Idx cidx c) r
     _ -> MM.throwSourcedError i $ "Undefined let-bound variable:" <+> pretty v
 
-expressPolyExpr findRemote parentLang parentType
-    (AnnoS _ (Idx cidx lang, _) (LetS v e1 e2)) = do
+expressPolyExpr _ parentLang parentType
+    (AnnoS _ (Idx cidx _, _) (LetS v e1 e2)) = do
   let bodyArgs = case e2 of AnnoS _ (_, args) _ -> args
       -- unused let-bound variables (e.g. from do-block bare statements) won't
       -- appear in body args; use cidx as a unique dummy ID in that case
@@ -513,7 +513,7 @@ expressPolyExpr _ _ _ (AnnoS (Idx i _) _ (AppS (AnnoS _ _ (BndS v)) _)) =
 expressPolyExpr _ _ _ (AnnoS _ _ (AppS (AnnoS _ _ (LamS vs _)) _)) =
   error $ "All applications of lambdas should have been eliminated of length " <> show (length vs)
 
-expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (SuspendS x)) = do
+expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx cidx lang, _) (SuspendS x)) = do
   x' <- expressPolyExprWrap lang (mkIdx x t) x
   return $ PolySuspend (Idx cidx t) x'
 expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (ForceS x)) = do

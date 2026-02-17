@@ -1,679 +1,767 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE BangPatterns #-}
 
 {- |
 Module      : Morloc.Frontend.Lexer
-Description : Lexing functions used in the parser Morloc
+Description : Hand-written lexer for Morloc with layout token insertion
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Tokenizes morloc source code and inserts virtual layout tokens
+({, }, ;) for indentation-sensitive blocks (module bodies, where clauses,
+class/instance bodies, do-blocks).
 -}
 module Morloc.Frontend.Lexer
-  ( Parser
-  , ParserState (..)
-  , align
-  , foldMany
-  , indentFreeTerm
-  , alignInset
-  , angles
-  , appendGenerics
-  , braces
-  , brackets
-  , comments
-  , emptyState
-  , lexeme
-  , many1
-  , sepBy2
-  , hole
-  , freename
-  , freenameU
-  , freenameL
-  , moduleComponent
-  , number
-  , op
-  , operatorName
-  , parenOperator
-  , parens
-  , reserved
-  , reservedWords
-  , resetGenerics
-  , sc
-  , setMinPos
-  , stringLiteral
-  , stringPatterned
-  , parsePatternSetter
-  , parsePatternGetter
-  , surround
-  , symbol
-  , pLang
-  , exprId
-  , exprI
-  , exprIdAt
-  , exprIAt
-  , operatorChars
-
-    -- * docstring parsers
-  , parseArgDocStr
-  , parseFlagDocStr
-  , parseLineDocStr
-  , parseTextDocStr
-  , parseWordDocStr
-  , parseIntsDocStr
+  ( lexMorloc
+  , LexError (..)
+  , showLexError
   ) where
 
-import qualified Control.Monad.State as CMS
-import qualified Data.Char as DC
-import qualified Data.Map.Strict as Map
-import qualified Data.Scientific as DS
-import qualified Data.Set as Set
+import Data.Char (isAlpha, isAlphaNum, isDigit, isHexDigit, isOctDigit, isLower, isUpper)
 import Data.Text (Text)
-import Data.Void (Void)
-import qualified Morloc.Data.Text as MT
-import Morloc.Frontend.Namespace
-import qualified Morloc.Language as ML
-import Text.Megaparsec
-import Text.Megaparsec.Char hiding (eol)
-import qualified Text.Megaparsec.Char.Lexer as L
+import qualified Data.Text as T
+import qualified Data.Map.Strict as Map
+import Morloc.Frontend.Token
 
-type Parser a = CMS.StateT ParserState (Parsec Void Text) a
+data LexError = LexError !Pos !String
+  deriving (Show, Eq)
 
-data ParserState = ParserState
-  { stateModulePath :: Maybe Path
-  , stateVarIndex :: Int
-  , stateExpIndex :: Int
-  , stateGenerics :: [TVar] -- store the observed generic variables in the current type
-  -- you should reset the field before parsing a new type
-  , stateMinPos :: Pos
-  , stateAccepting :: Bool
-  , stateIgnoreAlignment :: Bool
-  , stateModuleConfig :: ModuleConfig
-  , stateSourcePositions :: Map.Map Int SrcLoc
-  }
-  deriving (Show)
+showLexError :: LexError -> String
+showLexError (LexError pos msg) =
+  posFile pos ++ ":" ++ show (posLine pos) ++ ":" ++ show (posCol pos) ++ ": " ++ msg
 
-emptyState :: ParserState
-emptyState =
-  ParserState
-    { stateModulePath = Nothing
-    , stateVarIndex = 1
-    , stateExpIndex = 1
-    , stateGenerics = []
-    , stateMinPos = mkPos 1
-    , stateAccepting = False
-    , stateIgnoreAlignment = False
-    , stateModuleConfig = defaultValue
-    , stateSourcePositions = Map.empty
-    }
+-- | Lex morloc source code into a token stream with layout tokens inserted,
+-- plus a map from positions to associated docstring lines.
+lexMorloc :: String -> Text -> Either LexError ([Located], Map.Map Pos [Text])
+lexMorloc filename input = do
+  rawTokens <- lexRaw filename (T.unpack input) (startPos filename)
+  -- Extract docstrings before layout insertion: collect TokDocLine sequences
+  -- and associate them with the position of the following non-doc token.
+  let (docMap, filtered) = extractDocstrings rawTokens
+  return (insertLayout filtered, docMap)
 
-exprId :: Parser Int
-exprId = do
-  pos <- getSourcePos
-  s <- CMS.get
-  let i = stateExpIndex s
-  CMS.put $ s { stateExpIndex = i + 1
-              , stateSourcePositions = Map.insert i (toSrcLoc pos pos) (stateSourcePositions s)
-              }
-  return i
+-- | Extract docstring tokens, associating each group with the next real token.
+extractDocstrings :: [Located] -> (Map.Map Pos [Text], [Located])
+extractDocstrings = go [] Map.empty []
+  where
+    go _acc docMap accToks [] = (docMap, reverse accToks)
+    go acc docMap accToks (Located _ (TokDocLine txt) _ : rest) =
+      go (acc ++ [txt]) docMap accToks rest
+    go acc docMap accToks (tok@(Located pos _ _) : rest) =
+      let docMap' = if null acc then docMap else Map.insert pos acc docMap
+      in go [] docMap' (tok : accToks) rest
 
-exprI :: Expr -> Parser ExprI
-exprI e = do
-  i <- exprId
-  return (ExprI i e)
-
-exprIdAt :: SourcePos -> Parser Int
-exprIdAt startPos = do
-  endPos <- getSourcePos
-  s <- CMS.get
-  let i = stateExpIndex s
-  CMS.put $ s { stateExpIndex = i + 1
-              , stateSourcePositions = Map.insert i (toSrcLoc startPos endPos) (stateSourcePositions s)
-              }
-  return i
-
-exprIAt :: SourcePos -> Expr -> Parser ExprI
-exprIAt startPos e = do
-  i <- exprIdAt startPos
-  return (ExprI i e)
-
-toSrcLoc :: SourcePos -> SourcePos -> SrcLoc
-toSrcLoc startPos endPos = SrcLoc
-  { srcLocPath = Just (sourceName startPos)
-  , srcLocLine = unPos (sourceLine startPos)
-  , srcLocCol = unPos (sourceColumn startPos)
-  , srcLocEndLine = unPos (sourceLine endPos)
-  , srcLocEndCol = unPos (sourceColumn endPos)
+-- Raw lexer state
+data LexState = LexState
+  { lsInput  :: !String    -- remaining input
+  , lsPos    :: !Pos       -- current position
+  , lsTokens :: ![Located] -- accumulated tokens (reversed)
   }
 
-setMinPos :: Parser ()
-setMinPos = do
-  s <- CMS.get
-  level <- L.indentLevel
-  CMS.put (s {stateMinPos = level})
-
--- | A general function for parsing aligned things
-alignGen :: Bool -> (Parser () -> Parser a) -> Parser a
-alignGen flexibleStart p = do
-  s <- CMS.get
-  let minPos0 = stateMinPos s
-      accept0 = stateAccepting s
-
-  minPos <- case flexibleStart of
-    True -> L.indentLevel
-    False -> return minPos0
-
-  x <- p (resetPos minPos True)
-
-  -- put everything back the way it was
-  resetPos minPos0 accept0
-  return x
+-- | Lex into raw tokens (no layout processing)
+lexRaw :: String -> String -> Pos -> Either LexError [Located]
+lexRaw _filename input pos0 = go (LexState input pos0 [])
   where
-    resetPos :: Pos -> Bool -> Parser ()
-    resetPos i r = do
-      s' <- CMS.get
-      CMS.put (s' {stateMinPos = i, stateAccepting = r})
+    go :: LexState -> Either LexError [Located]
+    go st = case lsInput st of
+      [] -> Right (reverse (Located (lsPos st) TokEOF "" : lsTokens st))
+      _  -> do
+        st' <- lexOne st
+        go st'
 
--- | Map over one or more aligned elements
-align :: Parser a -> Parser [a]
-align p = alignGen True (\reset -> many1 (reset >> try p))
+-- | Lex a single token, advancing the state
+lexOne :: LexState -> Either LexError LexState
+lexOne st@(LexState input pos toks) = case input of
+  -- Whitespace
+  '\n' : rest -> Right st { lsInput = rest, lsPos = nextLine pos }
+  c : rest | c == ' ' || c == '\t' || c == '\r' ->
+    Right st { lsInput = rest, lsPos = advanceCol pos 1 }
 
--- | Fold over 0 or more elements
-foldMany :: a -> (a -> Parser a) -> Parser a
-foldMany x p = do
-  mayX <- optional (p x)
-  case mayX of
-    (Just x') -> foldMany x' p
-    Nothing -> return x
+  -- Block comments {- ... -}
+  '{' : '-' : rest -> skipBlockComment (advanceCol pos 2) rest (1 :: Int)
+    where
+      skipBlockComment p s 0 = Right st { lsInput = s, lsPos = p }
+      skipBlockComment p ('{' : '-' : s) n = skipBlockComment (advanceCol p 2) s (n + 1)
+      skipBlockComment p ('-' : '}' : s) n = skipBlockComment (advanceCol p 2) s (n - 1)
+      skipBlockComment p ('\n' : s) n = skipBlockComment (nextLine p) s n
+      skipBlockComment p (_ : s) n = skipBlockComment (advanceCol p 1) s n
+      skipBlockComment p [] _ = Left (LexError p "unterminated block comment")
 
-alignInset :: Parser a -> Parser [a]
-alignInset p = isInset >> align p
+  -- Docstring comments: --' ...
+  '-' : '-' : '\'' : rest ->
+    let (line, rest') = span (/= '\n') rest
+        txt = T.pack line
+        len = 3 + length line
+    in Right st { lsInput = rest', lsPos = advanceCol pos len
+                , lsTokens = Located pos (TokDocLine txt) (T.pack ("--'" ++ line)) : toks }
 
-isInset :: Parser ()
-isInset = do
-  minPos <- CMS.gets stateMinPos
-  curPos <- L.indentLevel
-  when (curPos <= minPos) (L.incorrectIndent GT minPos curPos)
+  -- Line comments: -- (but not --' or --^)
+  '-' : '-' : rest
+    | not (null rest) && head rest `elem` ['\'', '^'] ->
+        Left (LexError pos "unexpected docstring marker")
+    | otherwise ->
+        let (_, rest') = span (/= '\n') rest
+        in Right st { lsInput = rest', lsPos = advanceCol pos (2 + length (takeWhile (/= '\n') rest)) }
 
-sc :: Parser ()
-sc = L.space space1 comments empty
+  -- Triple-quoted strings
+  '\'' : '\'' : '\'' : rest -> lexMultilineString pos "'''" rest st
+  '"' : '"' : '"' : rest -> lexMultilineString pos "\"\"\"" rest st
 
-symbol :: Text -> Parser Text
-symbol = lexeme . L.symbol sc
+  -- Double-quoted strings (with interpolation support)
+  '"' : rest -> lexDoubleString pos rest st
 
-lexemeBase :: Parser a -> Parser a
-lexemeBase = L.lexeme sc
+  -- Numbers: try hex, octal, binary first, then decimal/float
+  '0' : 'x' : rest -> lexHexNumber pos rest st
+  '0' : 'X' : rest -> lexHexNumber pos rest st
+  '0' : 'o' : rest -> lexOctalNumber pos rest st
+  '0' : 'O' : rest -> lexOctalNumber pos rest st
+  '0' : 'b' : rest -> lexBinaryNumber pos rest st
+  '0' : 'B' : rest -> lexBinaryNumber pos rest st
+  c : _ | isDigit c -> lexDecNumber pos input st
 
-lexeme :: Parser a -> Parser a
-lexeme p = do
-  minPos <- CMS.gets stateMinPos
-  s <- CMS.get
-  curPos <- L.indentLevel
+  -- Delimiters and punctuation
+  '(' : rest -> emit1 TokLParen "(" rest
+  ')' : rest -> emit1 TokRParen ")" rest
+  '[' : rest -> emit1 TokLBracket "[" rest
+  ']' : rest -> emit1 TokRBracket "]" rest
+  '{' : rest -> emit1 TokLBrace "{" rest
+  '}' : rest -> emit1 TokRBrace "}" rest
+  ',' : rest -> emit1 TokComma "," rest
+  ';' : rest -> emit1 TokSemicolon ";" rest
 
-  -- if indent doesn't matter at for this parse
-  if stateIgnoreAlignment s
-    -- then just handle terminal whitespace
-    then lexemeBase p
-    else
-      -- if we are awaiting exactly aligned input
-      if stateAccepting s
-        then
-          -- if we are exactly aligned
-          if curPos == minPos
-            then
-              CMS.put (s {stateAccepting = False}) >> lexemeBase p
-            -- otherwise die
-            else
-              L.incorrectIndent EQ minPos curPos
-        -- if we are not waiting for aligned input
-        else
-          -- we are indented further than
-          if minPos < curPos
-            then
-              lexemeBase p
-            -- otherwise die
-            else
-              L.incorrectIndent LT minPos curPos
+  -- Underscore: standalone '_' is a hole, '_var' is an identifier
+  '_' : c : rest | isAlphaNum c || c == '\'' || c == '_' ->
+    -- identifier starting with underscore (e.g., _do_5)
+    lexIdent pos ('_' : c : rest) st
+  '_' : rest ->
+    emit1 TokUnderscore "_" rest
 
-indentFreeTerm :: Parser a -> Parser a
-indentFreeTerm p = do
-  s <- CMS.get
-  CMS.put (s {stateIgnoreAlignment = True})
-  xEither <- observing p
-  CMS.put s
-  case xEither of
-    (Left _) -> failure Nothing Set.empty
-    (Right x) -> return x
+  -- Backslash (lambda)
+  '\\' : rest -> emit1 TokBackslash "\\" rest
 
-resetGenerics :: Parser ()
-resetGenerics = do
-  s <- CMS.get
-  CMS.put (s {stateGenerics = []})
+  -- Dot: TokGetterDot when immediately followed by lowercase letter, digit, or '(' (getter/setter),
+  -- TokDot otherwise (composition operator, module separator).
+  -- When followed by an operator char (e.g., '..' or '.='), falls through to the operator lexer.
+  -- When followed by a digit, emit both TokGetterDot and TokInteger to prevent float parsing
+  -- (e.g., .1.2 should be getter .1 then getter .2, not getter then float 1.2)
+  '.' : c : rest | isDigit c ->
+    let (digits, rest') = span isDigit (c : rest)
+        val = read digits :: Integer
+        dotPos = pos
+        numPos = advanceCol pos 1
+    in Right st { lsInput = rest', lsPos = advanceCol numPos (length digits)
+                , lsTokens = Located numPos (TokInteger val) (T.pack digits)
+                           : Located dotPos TokGetterDot "."
+                           : toks }
+  '.' : c : rest | isLower c || c == '(' ->
+    emit1 TokGetterDot "." (c : rest)
+  '.' : c : rest | not (isOperatorChar c) ->
+    emit1 TokDot "." (c : rest)
+  '.' : [] ->
+    emit1 TokDot "." []
 
-appendGenerics :: TVar -> Parser ()
-appendGenerics v = do
-  s <- CMS.get
-  let gs = stateGenerics s
-      gs' = if isGeneric (unTVar v) then v : gs else gs
-  CMS.put (s {stateGenerics = gs'})
+  -- Bang -- special: ! is force operator, !! is chained force
+  -- But !!! or != etc. are user-defined operators (fall through to operator lexer)
+  '!' : '!' : c : rest | not (isOperatorChar c) ->
+    Right st { lsInput = c : rest, lsPos = advanceCol pos 2
+             , lsTokens = Located (advanceCol pos 1) TokBang "!"
+                        : Located pos TokBang "!" : toks }
+  '!' : '!' : [] ->
+    Right st { lsInput = [], lsPos = advanceCol pos 2
+             , lsTokens = Located (advanceCol pos 1) TokBang "!"
+                        : Located pos TokBang "!" : toks }
+  '!' : c : rest | not (isOperatorChar c) ->
+    emit1 TokBang "!" (c : rest)
+  '!' : [] ->
+    emit1 TokBang "!" []
 
-many1 :: Parser a -> Parser [a]
-many1 p = do
-  x <- p
-  xs <- many p
-  return (x : xs)
+  -- Operators and reserved operator sequences
+  c : rest | isOperatorChar c -> lexOperator pos (c : rest) st
 
-sepBy2 :: Parser a -> Parser s -> Parser [a]
-sepBy2 p s = do
-  x <- p
-  _ <- s
-  xs <- sepBy1 p s
-  return (x : xs)
+  -- Identifiers and keywords
+  c : rest | isAlpha c -> lexIdent pos (c : rest) st
 
-comments :: Parser ()
-comments =
-  try lineComment
-    <|> L.skipBlockCommentNested "{-" "-}"
-    <?> "comment"
+  -- Negative numbers: sign directly attached
+  -- This is handled in the parser by parsing - as a unary operator
+
+  -- Unknown character
+  c : _ -> Left (LexError pos ("unexpected character: " ++ show c))
+  [] -> Right st -- handled by go
+
   where
-    lineComment :: Parser ()
-    lineComment = do
-      _ <- string "--"
-      -- ignore special comments
-      notFollowedBy (oneOf ['\'', '^'])
-      _ <- takeWhileP Nothing (/= '\n')
-      return ()
+    emit1 tok txt rest =
+      Right st { lsInput = rest, lsPos = advanceCol pos (T.length txt)
+               , lsTokens = Located pos tok txt : toks }
 
-docstr :: Parser ()
-docstr = do
-  _ <- string "--'"
-  _ <- hspace
-  return ()
+-- | Lex an identifier or keyword. The first character may be a letter or underscore.
+lexIdent :: Pos -> String -> LexState -> Either LexError LexState
+lexIdent pos input st =
+  let (word, rest) = spanIdent input
+      txt = T.pack word
+      tok = classifyWord txt
+      len = length word
+  in Right st { lsInput = rest, lsPos = advanceCol pos len
+              , lsTokens = Located pos tok txt : lsTokens st }
 
-parseFlagDocStr :: Text -> Parser Bool
-parseFlagDocStr flag = lexeme $ do
-  _ <- docstr
-  _ <- string (flag <> ":")
-  _ <- hspace
-  value <- parseTrue <|> parseFalse
-  return value
+spanIdent :: String -> (String, String)
+spanIdent [] = ([], [])
+spanIdent (c : cs)
+  | isAlpha c || c == '_' =
+      let (rest, remaining) = span (\x -> isAlphaNum x || x == '\'' || x == '_') cs
+      in (c : rest, remaining)
+  | otherwise = ([], c : cs)
+
+-- | Module component: lowercase start, may contain dashes
+-- We handle dashes in module names in the parser by combining tokens.
+-- The lexer just produces normal identifiers.
+
+classifyWord :: Text -> Token
+classifyWord "module"   = TokModule
+classifyWord "import"   = TokImport
+classifyWord "export"   = TokExport
+classifyWord "source"   = TokSource
+classifyWord "from"     = TokFrom
+classifyWord "where"    = TokWhere
+classifyWord "as"       = TokAs
+classifyWord "True"     = TokTrue
+classifyWord "False"    = TokFalse
+classifyWord "type"     = TokType
+classifyWord "record"   = TokRecord
+classifyWord "object"   = TokObject
+classifyWord "table"    = TokTable
+classifyWord "class"    = TokClass
+classifyWord "instance" = TokInstance
+classifyWord "infixl"   = TokInfixl
+classifyWord "infixr"   = TokInfixr
+classifyWord "infix"    = TokInfix
+classifyWord "let"      = TokLet
+classifyWord "in"       = TokIn
+classifyWord "do"       = TokDo
+classifyWord t
+  | isUpper (T.head t) = TokUpperName t
+  | otherwise           = TokLowerName t
+
+-- | Lex an operator
+lexOperator :: Pos -> String -> LexState -> Either LexError LexState
+lexOperator pos input st =
+  let (opStr, rest) = span isOperatorChar input
+      txt = T.pack opStr
+      tok = classifyOp txt
+      len = length opStr
+  in Right st { lsInput = rest, lsPos = advanceCol pos len
+              , lsTokens = Located pos tok txt : lsTokens st }
+
+classifyOp :: Text -> Token
+classifyOp "::" = TokDColon
+classifyOp "->" = TokArrow
+classifyOp "=>" = TokFatArrow
+classifyOp "<-" = TokBind
+classifyOp "="  = TokEquals
+classifyOp ":"  = TokColon
+classifyOp "*"  = TokStar
+classifyOp "-"  = TokMinus
+-- < and > are also operators but we need them as angle brackets in some contexts
+-- The parser handles disambiguation
+classifyOp "<"  = TokLAngle
+classifyOp ">"  = TokRAngle
+classifyOp t    = TokOperator t
+
+isOperatorChar :: Char -> Bool
+isOperatorChar c = c `elem` (":!$%&*+./<=>?@\\^|-~#" :: String)
+
+-- | Lex a double-quoted string, handling interpolation
+lexDoubleString :: Pos -> String -> LexState -> Either LexError LexState
+lexDoubleString start input st = go (advanceCol start 1) input []
   where
-    parseTrue :: Parser Bool
-    parseTrue = do
-      string "true"
-      return True
+    go pos ('"' : rest) acc =
+      let txt = T.pack (reverse acc)
+          fullTxt = "\"" <> txt <> "\""
+      in Right st { lsInput = rest, lsPos = advanceCol pos 1
+                  , lsTokens = Located start (TokString txt) fullTxt : lsTokens st }
+    go pos ('#' : '{' : rest) acc =
+      -- start of interpolation
+      let prefix = T.pack (reverse acc)
+          tok = if null (lsTokens st) || not (isStringContinuation (lsTokens st))
+                then TokStringStart prefix
+                else TokStringMid prefix
+          prefixTxt = "\"" <> prefix <> "#{"
+      in lexInterpBody (advanceCol pos 2) rest 1
+           st { lsTokens = Located (advanceCol pos 0) TokInterpOpen "#{" : Located start tok prefixTxt : lsTokens st }
+           start
+    go pos ('\\' : c : rest) acc =
+      let escaped = case c of
+            'n'  -> '\n'
+            't'  -> '\t'
+            '\\' -> '\\'
+            '"'  -> '"'
+            _    -> c
+      in go (advanceCol pos 2) rest (escaped : acc)
+    go pos ('\n' : _) _ = Left (LexError pos "unterminated string literal (use triple quotes for multi-line strings)")
+    go pos (c : rest) acc = go (advanceCol pos 1) rest (c : acc)
+    go pos [] _ = Left (LexError pos "unterminated string literal")
 
-    parseFalse :: Parser Bool
-    parseFalse = do
-      string "false"
-      return False
+    isStringContinuation (Located _ (TokStringStart _) _ : _) = True
+    isStringContinuation (Located _ (TokStringMid _) _ : _) = True
+    isStringContinuation _ = False
 
-parseTextDocStr :: Text -> Parser Text
-parseTextDocStr flag = lexeme $ do
-  _ <- docstr
-  string (flag <> ":")
-  _ <- hspace
-  value <- takeWhileP Nothing (/= '\n')
-  return value
-
-parseIntsDocStr :: Text -> Parser [Int]
-parseIntsDocStr flag = lexeme $ do
-  _ <- docstr
-  string (flag <> ":")
-  _ <- hspace
-  value <- many1 (lexeme L.decimal)
-  return value
-
-parseWordDocStr :: Text -> Parser Text
-parseWordDocStr flag = lexeme $ do
-  _ <- docstr
-  string (flag <> ":")
-  _ <- hspace
-  value <- many1 (alphaNumChar <|> char '-' <|> char '_')
-  return $ MT.pack value
-
-parseLineDocStr :: Parser Text
-parseLineDocStr = lexeme $ do
-  _ <- docstr
-  text <- takeWhileP Nothing (/= '\n')
-  return text
-
-parseArgDocStr :: Text -> Parser CliOpt
-parseArgDocStr flag = lexeme $ do
-  _ <- docstr
-  string (flag <> ":")
-  _ <- hspace
-  mayShort <- optional (try parseShortDocStr)
-  case mayShort of
-    (Just short) -> do
-      mayLong <- optional (char '/' >> parseLongDocStr)
-      case mayLong of
-        (Just long) -> return $ CliOptBoth short long
-        Nothing -> return $ CliOptShort short
-    Nothing -> parseLongDocStr |>> CliOptLong
+-- | Lex the body of an interpolation #{...}, tracking brace depth
+lexInterpBody :: Pos -> String -> Int -> LexState -> Pos -> Either LexError LexState
+lexInterpBody pos ('}' : rest) 1 st stringStartPos =
+  -- end of interpolation, resume string lexing
+  let st' = st { lsTokens = Located pos TokInterpClose "}" : lsTokens st }
+  in lexStringAfterInterp (advanceCol pos 1) rest st' stringStartPos
+lexInterpBody pos ('}' : rest) depth st strPos =
+  lexInterpBody (advanceCol pos 1) rest (depth - 1) st strPos
+lexInterpBody pos ('{' : rest) depth st strPos =
+  lexInterpBody (advanceCol pos 1) rest (depth + 1) st strPos
+lexInterpBody pos input _ st _ = do
+  -- lex one token from the interpolated expression
+  st' <- lexOne st { lsInput = input, lsPos = pos }
+  -- continue lexing the interpolation body
+  case lsInput st' of
+    [] -> Left (LexError pos "unterminated string interpolation")
+    _ -> case lsTokens st' of
+      (Located _ TokEOF _ : _) -> Left (LexError pos "unterminated string interpolation")
+      _ -> do
+        -- figure out remaining brace depth from what was consumed
+        let consumed = length input - length (lsInput st')
+            braceChange = countBraces (take consumed input)
+        lexInterpBody (lsPos st') (lsInput st') (1 + braceChange) st' (Pos 0 0 "")
   where
-    parseShortDocStr :: Parser Char
-    parseShortDocStr = do
-      char '-'
-      short <- alphaNumChar
-      return $ short
+    countBraces = foldl (\n c -> case c of '{' -> n + 1; '}' -> n - 1; _ -> n) 0
 
-    parseLongDocStr :: Parser Text
-    parseLongDocStr = do
-      char '-'
-      char '-'
-      longArgStart <- alphaNumChar
-      longArgRest <- many (alphaNumChar <|> char '-' <|> char '_')
-      let longArg = MT.pack $ longArgStart : longArgRest
-      return longArg
-
-data Sign = Pos | Neg
-
-number :: Parser (Either Integer DS.Scientific)
-number = lexeme $ do
-  x <-
-    try (fmap (Right . DS.fromFloatDigits) signedFloat)
-      <|> try unsignedHex
-      <|> try unsignedOctal
-      <|> try unsignedBinary
-      <|> fmap Left signedDecimal
-  e <- optional _exp
-  return $ case (x, e) of
-    (Left i, Nothing) -> Left i
-    (Right f, Nothing) -> Right f
-    -- anything in scientific notation is cast as a real
-    (Left i, Just (Neg, expval)) -> Right $ DS.scientific i ((-1) * expval)
-    (Left i, Just (Pos, expval)) -> Right $ DS.scientific i expval
-    (Right f, Just (Pos, expval)) -> Right $ f * (10 ^^ expval)
-    (Right f, Just (Neg, expval)) -> Right $ f * (10 ^^ (-1 * expval))
+-- | After interpolation closes, resume lexing the string
+lexStringAfterInterp :: Pos -> String -> LexState -> Pos -> Either LexError LexState
+lexStringAfterInterp pos ('"' : rest) st _ =
+  let txt = T.empty
+  in Right st { lsInput = rest, lsPos = advanceCol pos 1
+              , lsTokens = Located pos (TokStringEnd txt) "\"" : lsTokens st }
+lexStringAfterInterp pos ('#' : '{' : rest) st strStartPos =
+  -- another interpolation immediately
+  let tok = TokStringMid T.empty
+  in lexInterpBody (advanceCol pos 2) rest 1
+       st { lsTokens = Located pos TokInterpOpen "#{" : Located pos tok "" : lsTokens st }
+       strStartPos
+lexStringAfterInterp pos input st _ = go pos input []
   where
-    _exp :: Parser (Sign, Int)
-    _exp = do
-      _ <- char 'e'
-      expsign <- _sign
-      expval <- L.decimal
-      return (expsign, expval)
+    go p ('"' : rest) acc =
+      let txt = T.pack (reverse acc)
+      in Right st { lsInput = rest, lsPos = advanceCol p 1
+                  , lsTokens = Located pos (TokStringEnd txt) ("" <> txt <> "\"") : lsTokens st }
+    go p ('#' : '{' : rest) acc =
+      let txt = T.pack (reverse acc)
+      in lexInterpBody (advanceCol p 2) rest 1
+           st { lsTokens = Located p TokInterpOpen "#{" : Located pos (TokStringMid txt) "" : lsTokens st }
+           pos
+    go p ('\\' : c : rest) acc =
+      let escaped = case c of
+            'n'  -> '\n'
+            't'  -> '\t'
+            '\\' -> '\\'
+            '"'  -> '"'
+            _    -> c
+      in go (advanceCol p 2) rest (escaped : acc)
+    go p ('\n' : _) _ = Left (LexError p "unterminated string literal")
+    go p (c : rest) acc = go (advanceCol p 1) rest (c : acc)
+    go p [] _ = Left (LexError p "unterminated string literal")
 
-    _sign :: Parser Sign
-    _sign = do
-      sign <- optional (char '-' <|> char '+')
-      case sign of
-        (Just '-') -> return Neg
-        _ -> return Pos
-
-    -- Hexadecimal: 0x or 0X prefix (unsigned only)
-    unsignedHex :: Parser (Either Integer DS.Scientific)
-    unsignedHex = do
-      _ <- string "0x" <|> string "0X"
-      fmap Left L.hexadecimal
-
-    -- Octal: 0o or 0O prefix (unsigned only)
-    unsignedOctal :: Parser (Either Integer DS.Scientific)
-    unsignedOctal = do
-      _ <- string "0o" <|> string "0O"
-      fmap Left L.octal
-
-    -- Binary: 0b or 0B prefix (unsigned only)
-    unsignedBinary :: Parser (Either Integer DS.Scientific)
-    unsignedBinary = do
-      _ <- string "0b" <|> string "0B"
-      fmap Left L.binary
-
-    -- No space consumer - signs must be directly attached to numbers
-    noSpace :: Parser ()
-    noSpace = return ()
-
-    -- Signed floating point (no space between sign and number)
-    signedFloat :: Parser Double
-    signedFloat = L.signed noSpace L.float
-
-    -- Signed decimal integer (no space between sign and number)
-    signedDecimal :: Parser Integer
-    signedDecimal = L.signed noSpace L.decimal
-
-surround :: Parser l -> Parser r -> Parser a -> Parser a
-surround l r v = do
-  _ <- l
-  v' <- v
-  _ <- r
-  return v'
-
-brackets :: Parser a -> Parser a
-brackets = surround (symbol "[") (symbol "]")
-
-parens :: Parser a -> Parser a
-parens = surround (symbol "(") (symbol ")")
-
-braces :: Parser a -> Parser a
-braces = surround (symbol "{") (symbol "}")
-
-angles :: Parser a -> Parser a
-angles = surround (symbol "<") (symbol ">")
-
-reservedWords :: [Text]
-reservedWords =
-  [ "module"
-  , "source"
-  , "from"
-  , "where"
-  , "import"
-  , "export"
-  , "as"
-  , "True"
-  , "False"
-  , "type"
-  , "instance"
-  , "class"
-  , "infixl"
-  , "infixr"
-  , "infix"
-  , "let"
-  , "in"
-  , "do"
-  ]
-
-reservedOperators :: [Text]
-reservedOperators =
-  [ "="
-  , ":"
-  , "::"
-  ]
-
-operatorChars :: String
-operatorChars = ":!$%&*+./<=>?@\\^|-~#"
-
-op :: Text -> Parser Text
-op o = (lexeme . try) (string o <* notFollowedBy (oneOf operatorChars))
-
--- | Parse an operator name (sequence of operator characters)
-operatorName :: Parser Text
-operatorName = (lexeme . try) $ do
-  firstChar <- oneOf operatorChars
-  restChars <- many (oneOf operatorChars)
-  let opName = MT.pack (firstChar : restChars)
-  if opName `elem` reservedOperators
-    then failure Nothing Set.empty -- TODO: error message
-    else return opName
-
--- | Parse an operator in parentheses (for use as a variable)
--- Example: (+), (*), (<$>)
-parenOperator :: Parser EVar
-parenOperator = lexeme $ do
-  _ <- char '('
-  opName <- operatorName
-  _ <- char ')'
-  return (EV opName)
-
-reserved :: Text -> Parser Text
-reserved w = try (symbol w)
-
-stringLiteral :: Parser Text
-stringLiteral = lexeme $ do
-  _ <- char '\"'
-  s <- many (noneOf ['"'])
-  _ <- char '\"'
-  return $ MT.pack s
-
-parsePatternSetter :: Parser a -> Parser (Selector, [a])
-parsePatternSetter parseValue = parsePattern (sc >> symbol "=" >> parseValue)
-
-parsePatternGetter :: Parser Selector
-parsePatternGetter = fst <$> parsePattern (return True)
-
-parsePattern :: Parser a -> Parser (Selector, [a])
-parsePattern parseValue = lexeme $ try parseIdx <|> try parseKey <|> try parseGrpIdx <|> try parseGrpKey
+-- | Lex a multiline (triple-quoted) string with interpolation
+lexMultilineString :: Pos -> String -> String -> LexState -> Either LexError LexState
+lexMultilineString start delim input st = go (advanceCol start 3) input []
   where
-    parseIdx = parseSegment L.decimal SelectorIdx
+    delimLen = length delim
 
-    parseKey = parseSegment key SelectorKey
-      where
-        key = do
-          firstLetter <- lowerChar
-          remaining <- many (alphaNumChar <|> char '\'' <|> char '_')
-          return $ MT.pack (firstLetter : remaining)
+    go pos s acc
+      | take delimLen s == delim =
+          let rawTxt = T.pack (reverse acc)
+              txt = processMultilineString rawTxt
+              fullTxt = T.pack delim <> rawTxt <> T.pack delim
+          in Right st { lsInput = drop delimLen s, lsPos = advanceCol pos delimLen
+                      , lsTokens = Located start (TokString txt) fullTxt : lsTokens st }
+    go pos ('#' : '{' : rest) acc =
+      -- interpolation inside multiline string
+      let prefix = T.pack (reverse acc)
+          tok = TokStringStart prefix
+      in lexMultilineInterpBody (advanceCol pos 2) rest 1
+           st { lsTokens = Located pos TokInterpOpen "#{" : Located start tok "" : lsTokens st }
+           start delim
+    go pos ('\\' : c : rest) acc =
+      let escaped = case c of
+            'n'  -> '\n'
+            't'  -> '\t'
+            '\\' -> '\\'
+            '\'' -> '\''
+            '"'  -> '"'
+            _    -> c
+      in go (advanceCol pos 2) rest (escaped : acc)
+    go pos ('\n' : rest) acc = go (nextLine pos) rest ('\n' : acc)
+    go pos (c : rest) acc = go (advanceCol pos 1) rest (c : acc)
+    go pos [] _ = Left (LexError pos "unterminated multiline string literal")
 
-    -- parseSegment :: Parser p -> ((p, Selector) -> [(p, Selector)] -> Selector) -> Parser (Selector, [a])
-    parseSegment fieldParser constructor = do
-      _ <- char '.'
-      k <- fieldParser
-      mayS <- optional (parsePattern parseValue)
-      case mayS of
-        (Just (s, es)) -> return (constructor (k, s) [], es)
-        Nothing -> do
-          e <- parseValue
-          return (constructor (k, SelectorEnd) [], [e])
+-- | Lex interpolation body inside a multiline string
+lexMultilineInterpBody :: Pos -> String -> Int -> LexState -> Pos -> String -> Either LexError LexState
+lexMultilineInterpBody pos ('}' : rest) 1 st strStartPos delim =
+  -- end of interpolation, resume multiline string
+  let st' = st { lsTokens = Located pos TokInterpClose "}" : lsTokens st }
+  in lexMultilineAfterInterp (advanceCol pos 1) rest st' strStartPos delim
+lexMultilineInterpBody pos input _ st _ _ = do
+  st' <- lexOne st { lsInput = input, lsPos = pos }
+  case lsInput st' of
+    [] -> Left (LexError pos "unterminated string interpolation")
+    ('}' : rest) ->
+      let st'' = st' { lsTokens = Located (lsPos st') TokInterpClose "}" : lsTokens st' }
+      in lexMultilineAfterInterp (advanceCol (lsPos st') 1) rest st'' pos ""
+    _ -> lexMultilineInterpBody (lsPos st') (lsInput st') 1 st' pos ""
 
-    parseGrpKey = parseGrp parseKey
-
-    parseGrpIdx = parseGrp parseIdx
-
-    parseGrp grpparser = lexeme $ do
-      _ <- char '.'
-      xs <- parens (sepBy1 grpparser (symbol ","))
-      let es = concat $ map snd xs
-      case flattenSelector (map fst xs) of
-        (s, SelectorEnd) -> return (s, es)
-        (SelectorEnd, s) -> return (s, es)
-        _ -> error "Unreachable - grpparser can only return on selector type"
-
-    flattenSelector :: [Selector] -> (Selector, Selector)
-    flattenSelector sss = (flatIdx, flatKey)
-      where
-        flatIdx = case concat [s : ss | (SelectorIdx s ss) <- sss] of
-          [] -> SelectorEnd
-          ss -> SelectorIdx (head ss) (tail ss)
-
-        flatKey = case concat [s : ss | (SelectorKey s ss) <- sss] of
-          [] -> SelectorEnd
-          ss -> SelectorKey (head ss) (tail ss)
-
-stringPatterned :: Parser a -> Parser (Either Text (Text, [(a, Text)]))
-stringPatterned exprParser = do
-  x <- stringLiteralMultiline exprParser <|> stringLiteralDoubleQuote exprParser
-  case x of
-    (s, []) -> return $ Left s
-    (s, es) -> return $ Right (s, es)
-
-stringLiteralDoubleQuote :: Parser a -> Parser (Text, [(a, Text)])
-stringLiteralDoubleQuote exprParser = lexeme $ do
-  _ <- char '\"'
-  s <- interpolatedStringParser "\"" exprParser
-  _ <- char '\"'
-  return $ s
-
-stringLiteralMultiline :: Parser a -> Parser (Text, [(a, Text)])
-stringLiteralMultiline exprParser = lexeme $ do
-  sep <- string "'''" <|> string "\"\"\""
-  (s, exprs) <- interpolatedStringParser sep exprParser
-  _ <- string sep
-  return . reindent . removeTrailingSpace $ (removeLeadingSpace s, exprs)
+-- | Resume multiline string after interpolation
+lexMultilineAfterInterp :: Pos -> String -> LexState -> Pos -> String -> Either LexError LexState
+lexMultilineAfterInterp pos input st _ delim = go pos input []
   where
-    --  1. Remove zero or one leading newlines
+    delimLen = length delim
+
+    go p s acc
+      | delimLen > 0 && take delimLen s == delim =
+          let txt = T.pack (reverse acc)
+          in Right st { lsInput = drop delimLen s, lsPos = advanceCol p delimLen
+                      , lsTokens = Located pos (TokStringEnd txt) "" : lsTokens st }
+    go p ('#' : '{' : rest) acc =
+      let txt = T.pack (reverse acc)
+      in lexMultilineInterpBody (advanceCol p 2) rest 1
+           st { lsTokens = Located p TokInterpOpen "#{" : Located pos (TokStringMid txt) "" : lsTokens st }
+           pos delim
+    go p ('\n' : rest) acc = go (nextLine p) rest ('\n' : acc)
+    go p (c : rest) acc = go (advanceCol p 1) rest (c : acc)
+    go p [] _ = Left (LexError p "unterminated multiline string literal")
+
+-- | Lex a hexadecimal number after 0x prefix
+lexHexNumber :: Pos -> String -> LexState -> Either LexError LexState
+lexHexNumber pos input st =
+  let (digits, rest) = span isHexDigit input
+  in if null digits
+     then Left (LexError pos "expected hexadecimal digits after 0x")
+     else let val = foldl (\n d -> n * 16 + fromIntegral (hexVal d)) 0 digits
+              len = 2 + length digits
+              txt = T.pack ("0x" ++ digits)
+          in Right st { lsInput = rest, lsPos = advanceCol pos len
+                      , lsTokens = Located pos (TokInteger val) txt : lsTokens st }
+  where
+    hexVal c
+      | c >= '0' && c <= '9' = fromEnum c - fromEnum '0'
+      | c >= 'a' && c <= 'f' = fromEnum c - fromEnum 'a' + 10
+      | c >= 'A' && c <= 'F' = fromEnum c - fromEnum 'A' + 10
+      | otherwise = 0
+
+-- | Lex an octal number after 0o prefix
+lexOctalNumber :: Pos -> String -> LexState -> Either LexError LexState
+lexOctalNumber pos input st =
+  let (digits, rest) = span isOctDigit input
+  in if null digits
+     then Left (LexError pos "expected octal digits after 0o")
+     else let val = foldl (\n d -> n * 8 + fromIntegral (fromEnum d - fromEnum '0')) 0 digits
+              len = 2 + length digits
+              txt = T.pack ("0o" ++ digits)
+          in Right st { lsInput = rest, lsPos = advanceCol pos len
+                      , lsTokens = Located pos (TokInteger val) txt : lsTokens st }
+
+-- | Lex a binary number after 0b prefix
+lexBinaryNumber :: Pos -> String -> LexState -> Either LexError LexState
+lexBinaryNumber pos input st =
+  let (digits, rest) = span (\c -> c == '0' || c == '1') input
+  in if null digits
+     then Left (LexError pos "expected binary digits after 0b")
+     else let val = foldl (\n d -> n * 2 + fromIntegral (fromEnum d - fromEnum '0')) 0 digits
+              len = 2 + length digits
+              txt = T.pack ("0b" ++ digits)
+          in Right st { lsInput = rest, lsPos = advanceCol pos len
+                      , lsTokens = Located pos (TokInteger val) txt : lsTokens st }
+
+-- | Lex a decimal integer or float, with optional scientific notation
+lexDecNumber :: Pos -> String -> LexState -> Either LexError LexState
+lexDecNumber pos input st =
+  let (intPart, rest1) = span isDigit input
+  in case rest1 of
+    -- Float: digits.digits
+    '.' : c : rest2 | isDigit c ->
+      let (fracPart, rest3) = span isDigit (c : rest2)
+          (expPart, rest4) = lexExponent rest3
+          numStr = intPart ++ "." ++ fracPart ++ expPart
+          val = read numStr :: Double
+          len = length numStr
+      in Right st { lsInput = rest4, lsPos = advanceCol pos len
+                  , lsTokens = Located pos (TokFloat val) (T.pack numStr) : lsTokens st }
+    -- Integer with exponent (e.g., 5e10) -- treated as float
+    'e' : _ ->
+      let (expPart, rest3) = lexExponent rest1
+      in if null expPart
+         then mkInt intPart rest1
+         else let numStr = intPart ++ expPart
+                  val = read numStr :: Double
+                  len = length numStr
+              in Right st { lsInput = rest3, lsPos = advanceCol pos len
+                          , lsTokens = Located pos (TokFloat val) (T.pack numStr) : lsTokens st }
+    'E' : _ ->
+      let (expPart, rest3) = lexExponent rest1
+      in if null expPart
+         then mkInt intPart rest1
+         else let numStr = intPart ++ expPart
+                  val = read numStr :: Double
+                  len = length numStr
+              in Right st { lsInput = rest3, lsPos = advanceCol pos len
+                          , lsTokens = Located pos (TokFloat val) (T.pack numStr) : lsTokens st }
+    -- Plain integer
+    _ -> mkInt intPart rest1
+  where
+    mkInt digits rest =
+      let val = read digits :: Integer
+          len = length digits
+      in Right st { lsInput = rest, lsPos = advanceCol pos len
+                  , lsTokens = Located pos (TokInteger val) (T.pack digits) : lsTokens st }
+
+-- | Try to lex a scientific notation exponent (e.g., e10, e-3, E+5)
+-- Returns the exponent string and remaining input. Empty string if no exponent.
+lexExponent :: String -> (String, String)
+lexExponent ('e' : '+' : rest) =
+  let (digits, rest') = span isDigit rest
+  in if null digits then ("", 'e' : '+' : rest)
+     else ("e+" ++ digits, rest')
+lexExponent ('e' : '-' : rest) =
+  let (digits, rest') = span isDigit rest
+  in if null digits then ("", 'e' : '-' : rest)
+     else ("e-" ++ digits, rest')
+lexExponent ('e' : rest) =
+  let (digits, rest') = span isDigit rest
+  in if null digits then ("", 'e' : rest)
+     else ("e" ++ digits, rest')
+lexExponent ('E' : '+' : rest) =
+  let (digits, rest') = span isDigit rest
+  in if null digits then ("", 'E' : '+' : rest)
+     else ("E+" ++ digits, rest')
+lexExponent ('E' : '-' : rest) =
+  let (digits, rest') = span isDigit rest
+  in if null digits then ("", 'E' : '-' : rest)
+     else ("E-" ++ digits, rest')
+lexExponent ('E' : rest) =
+  let (digits, rest') = span isDigit rest
+  in if null digits then ("", 'E' : rest)
+     else ("E" ++ digits, rest')
+lexExponent rest = ("", rest)
+
+-- | Process a multiline (triple-quoted) string: strip leading/trailing blank
+-- lines and remove common indentation.
+processMultilineString :: Text -> Text
+processMultilineString txt =
+  let stripped = removeTrailingSpace (removeLeadingSpace txt)
+  in reindent stripped
+  where
     removeLeadingSpace :: Text -> Text
-    removeLeadingSpace (MT.lines -> []) = ""
-    removeLeadingSpace (MT.lines -> (s : rs))
-      | MT.null (MT.strip s) = MT.unlines rs
-      | otherwise = MT.unlines (s : rs)
+    removeLeadingSpace s = case T.lines s of
+      [] -> ""
+      (first : rest)
+        | T.null (T.strip first) -> T.unlines rest
+        | otherwise -> T.unlines (first : rest)
 
-    --  2. Remove the final newline and preceding non-newline space
-    removeTrailingSpace :: (Text, [(a, Text)]) -> (Text, [(a, Text)])
-    removeTrailingSpace (MT.lines -> [], []) = ("", [])
-    removeTrailingSpace x@(MT.lines -> ss, [])
-      | MT.null . MT.strip . last $ ss = (MT.unlines (init ss), [])
-      | otherwise = x
-    removeTrailingSpace (s, ss) = case (init ss, last ss) of
-      (initLines, (e, MT.lines -> slines)) ->
-        if MT.null . MT.strip . last $ slines
-          then (s, initLines <> [(e, MT.unlines (init slines))])
-          else (s, ss)
+    removeTrailingSpace :: Text -> Text
+    removeTrailingSpace s = case T.lines s of
+      [] -> ""
+      ls | T.null (T.strip (last ls)) -> T.unlines (init ls)
+         | otherwise -> T.unlines ls
 
-    --  3. Trim an initial number of space from each line equal to the minimum
-    --     number of starting spaces
-    reindent :: (Text, [(a, Text)]) -> (Text, [(a, Text)])
-    reindent (MT.lines -> ss, []) = (MT.unlines $ map (MT.drop initSpaces) ss, [])
-      where
-        initSpaces = minimum $ map (MT.length . MT.takeWhile DC.isSpace) ss
-    reindent (s, xs) = (replaceFun s, map (second replaceFun) xs)
-      where
-        replaceFun = MT.replace replacePattern "\n"
-        replacePattern = MT.pack $ '\n' : take initSpace (repeat ' ')
-        initSpace = minimum $ map (MT.length . MT.takeWhile DC.isSpace) (MT.lines $ MT.concat (s : map snd xs))
+    reindent :: Text -> Text
+    reindent s = case T.lines s of
+      [] -> ""
+      ls ->
+        let nonEmpty = filter (not . T.null . T.strip) ls
+            spaces = map (T.length . T.takeWhile (== ' ')) nonEmpty
+            minSpaces = if null spaces then 0 else minimum spaces
+        in T.unlines (map (T.drop minSpaces) ls)
 
--- | Parse an interpolated string with embedded expressions
-interpolatedStringParser :: Text -> Parser a -> Parser (Text, [(a, Text)])
-interpolatedStringParser sep exprParser = do
-  initial <- literalText sep
-  parts <- many $ do
-    expr <- interpolatedExpr exprParser
-    text <- literalText sep
-    pure (expr, text)
-  pure (initial, parts)
+-- Position helpers
+advanceCol :: Pos -> Int -> Pos
+advanceCol (Pos l c f) n = Pos l (c + n) f
 
--- | Parse literal text until we hit an interpolation or end
-literalText :: Text -> Parser Text
-literalText sep = MT.pack <$> many literalChar
+nextLine :: Pos -> Pos
+nextLine (Pos l _ f) = Pos (l + 1) 1 f
+
+--------------------------------------------------------------------
+-- Layout token insertion
+--------------------------------------------------------------------
+
+-- | Insert virtual braces and semicolons based on indentation.
+--
+-- Layout contexts:
+--   1. Top-level: the body of a module (or implicit main)
+--   2. After 'where' keyword (function where, class/instance bodies)
+--   3. After 'do' keyword
+--
+-- Algorithm (GHC-inspired):
+--   - When we see a layout keyword (where, do), the next token's column
+--     defines a new layout context. Emit virtual {.
+--   - For the top-level, the first declaration's column starts the context.
+--   - When the next token aligns with the context column, emit ;.
+--   - When the next token is left of the context column, emit } and pop.
+--   - Explicit { after a layout keyword enters a non-indentation context.
+
+data LayoutContext
+  = IndentCtx !Int   -- ^ virtual { at this column
+  | ExplicitCtx      -- ^ real {, no indentation tracking
+  deriving (Show, Eq)
+
+-- | Is the token a layout keyword (introduces an indented block)?
+isLayoutKeyword :: Token -> Bool
+isLayoutKeyword TokWhere = True
+isLayoutKeyword TokDo    = True
+isLayoutKeyword _        = False
+
+insertLayout :: [Located] -> [Located]
+insertLayout [] = []
+insertLayout toks = beginTopLevel toks
   where
-    literalChar = notFollowedBy (string "#{" <|> string sep) >> anySingle
+    -- Handle the top-level layout. The top-level body (after module header
+    -- or at the start for implicit main) gets a layout context.
+    beginTopLevel :: [Located] -> [Located]
+    beginTopLevel ts = case ts of
+      -- File starts with 'module': skip the header, then start layout
+      (Located p TokModule _ : rest) ->
+        Located p TokModule "" : skipModuleHeader rest
+      -- File starts with something else: implicit main, start layout immediately
+      (_ : _) -> startLayoutCtx [] ts
+      [] -> []
 
--- | Parse an interpolated expression: #{...}
-interpolatedExpr :: Parser a -> Parser a
-interpolatedExpr exprParser = string "#{" *> exprParser <* char '}'
+    -- Skip past 'module Name (exports)' to find where the body starts.
+    -- We need to find the opening '(' of the export list, then track
+    -- paren depth to find the matching ')'.
+    skipModuleHeader :: [Located] -> [Located]
+    skipModuleHeader [] = []
+    skipModuleHeader (t@(Located _ TokLParen _) : rest) =
+      -- Found the opening ( of exports, now track depth starting at 1
+      t : skipExportList 1 rest
+    skipModuleHeader (t : rest) = t : skipModuleHeader rest
 
-hole :: Parser ()
-hole = lexeme $ do
-  _ <- char '_'
-  return ()
+    -- Track paren depth inside the export list
+    skipExportList :: Int -> [Located] -> [Located]
+    skipExportList _ [] = []
+    skipExportList depth (t@(Located _ TokLParen _) : rest) =
+      t : skipExportList (depth + 1) rest
+    skipExportList depth (t@(Located _ TokRParen _) : rest)
+      | depth <= 1 = t : startLayoutCtx [] rest  -- closing ) of export list
+      | otherwise  = t : skipExportList (depth - 1) rest
+    skipExportList depth (t : rest) = t : skipExportList depth rest
 
-mkFreename :: Parser Char -> Parser Text
-mkFreename firstLetter = (lexeme . try) (p >>= check)
-  where
-    p = fmap MT.pack $ (:) <$> firstLetter <*> many (alphaNumChar <|> char '\'' <|> char '_')
-    check x =
-      if x `elem` reservedWords
-        then failure Nothing Set.empty -- TODO: error message
-        else return x
+    -- Skip module header during processing (for multi-module files).
+    -- Same as skipModuleHeader/skipExportList but preserves existing contexts.
+    skipModuleHeaderInBody :: [LayoutContext] -> [Located] -> [Located]
+    skipModuleHeaderInBody ctxs [] = closingBraces ctxs []
+    skipModuleHeaderInBody ctxs (t@(Located _ TokLParen _) : rest) =
+      t : skipExportListInBody ctxs 1 rest
+    skipModuleHeaderInBody ctxs (t : rest) = t : skipModuleHeaderInBody ctxs rest
 
-freename :: Parser Text
-freename = mkFreename letterChar
+    skipExportListInBody :: [LayoutContext] -> Int -> [Located] -> [Located]
+    skipExportListInBody ctxs _ [] = closingBraces ctxs []
+    skipExportListInBody ctxs depth (t@(Located _ TokLParen _) : rest) =
+      t : skipExportListInBody ctxs (depth + 1) rest
+    skipExportListInBody ctxs depth (t@(Located _ TokRParen _) : rest)
+      | depth <= 1 = t : startLayoutCtx ctxs rest
+      | otherwise  = t : skipExportListInBody ctxs (depth - 1) rest
+    skipExportListInBody ctxs depth (t : rest) = t : skipExportListInBody ctxs depth rest
 
--- part of a module path, must start with a lower-case letter
--- may have uppercase or digits or dashes after the first letter
-moduleComponent :: Parser Text
-moduleComponent = lexeme $ do
-  firstLetter <- lowerChar
-  nextLetters <- many (alphaNumChar <|> char '-')
-  return $ MT.pack (firstLetter : nextLetters)
+    -- Start a new layout context at the column of the next token
+    startLayoutCtx :: [LayoutContext] -> [Located] -> [Located]
+    startLayoutCtx ctxs [] = closingBraces ctxs []
+    startLayoutCtx ctxs [eof@(Located _ TokEOF _)] =
+      -- empty body
+      Located (locPos eof) TokVLBrace "" :
+      Located (locPos eof) TokVRBrace "" :
+      closingBraces ctxs [eof]
+    startLayoutCtx ctxs (t : rest)
+      | otherwise =
+          let col = posCol (locPos t)
+              newCtxs = IndentCtx col : ctxs
+              vopen = Located (locPos t) TokVLBrace ""
+          -- The first token of a layout block must not get a VSEMI before it
+          -- (indentCheck would emit one since col == n). So we handle it
+          -- specially, bypassing indentation checking.
+          in vopen : emitFirstToken newCtxs t rest
 
-freenameL :: Parser Text
-freenameL = mkFreename lowerChar
+    -- Emit the first token of a layout block. Like processToken but
+    -- without indentation checking (the first token defines the column,
+    -- it should not receive a VSEMI).
+    emitFirstToken :: [LayoutContext] -> Located -> [Located] -> [Located]
+    emitFirstToken ctxs tok rest
+      | locToken tok == TokEOF = closingBraces ctxs [tok]
+      | otherwise = emitToken ctxs tok rest
 
-freenameU :: Parser Text
-freenameU = mkFreename upperChar
+    -- Main processing loop
+    process :: [LayoutContext] -> [Located] -> [Located]
+    process ctxs [] = closingBraces ctxs []
+    process ctxs (t : rest) = processToken ctxs t rest
 
--- | match the name of a supported language
-pLang :: Parser Lang
-pLang = do
-  langStr <- freename
-  case ML.readLangName langStr of
-    (Just lang) -> return lang
-    Nothing ->
-      fancyFailure . Set.singleton . ErrorFail $
-        "Langage '" <> MT.unpack langStr <> "' is not supported"
+    -- Process a single token with the current context stack
+    processToken :: [LayoutContext] -> Located -> [Located] -> [Located]
+    processToken ctxs tok rest
+      -- EOF: close all contexts
+      | locToken tok == TokEOF = closingBraces ctxs [tok]
+      -- Regular token: check indentation first (may emit VSEMI/VRBRACE)
+      | otherwise = indentCheck ctxs tok rest
+
+    -- Check indentation of a regular token against the context stack
+    indentCheck :: [LayoutContext] -> Located -> [Located] -> [Located]
+    indentCheck [] tok rest = emitToken [] tok rest
+    indentCheck (ExplicitCtx : ctxs) tok rest = emitToken (ExplicitCtx : ctxs) tok rest
+    indentCheck ctxs@(IndentCtx n : cs) tok rest
+      | col == n && isBlockCloser (locToken tok) =
+          -- 'module' at layout column closes the current block
+          Located (locPos tok) TokVRBrace "" : indentCheck cs tok rest
+      | col == n =
+          -- aligned: emit semicolon before this token
+          Located (locPos tok) TokVSemi "" : emitToken ctxs tok rest
+      | col > n =
+          -- indented further: continuation of previous item
+          emitToken ctxs tok rest
+      | otherwise =
+          -- dedented: close this context, then re-check
+          Located (locPos tok) TokVRBrace "" : indentCheck cs tok rest
+      where
+        col = posCol (locPos tok)
+
+    -- Tokens that close a layout block even when at the same indentation level
+    isBlockCloser :: Token -> Bool
+    isBlockCloser TokModule = True
+    isBlockCloser _ = False
+
+    -- Emit a token with special handling for keywords
+    emitToken :: [LayoutContext] -> Located -> [Located] -> [Located]
+    emitToken ctxs tok rest
+      -- Module keyword: emit it and skip the header, then start layout
+      | locToken tok == TokModule =
+          tok : skipModuleHeaderInBody ctxs rest
+      -- Layout keywords: emit the keyword, then start a new layout context
+      | isLayoutKeyword (locToken tok) =
+          tok : startLayoutCtx ctxs rest
+      -- Explicit open brace
+      | locToken tok == TokLBrace =
+          tok : process (ExplicitCtx : ctxs) rest
+      -- Explicit close brace
+      | locToken tok == TokRBrace =
+          closeToExplicit ctxs tok rest
+      -- Regular token
+      | otherwise = tok : process ctxs rest
+
+    -- Close layout contexts until we find an explicit brace context
+    closeToExplicit :: [LayoutContext] -> Located -> [Located] -> [Located]
+    closeToExplicit (ExplicitCtx : ctxs) tok rest =
+      tok : process ctxs rest
+    closeToExplicit (IndentCtx _ : ctxs) tok rest =
+      Located (locPos tok) TokVRBrace "" : closeToExplicit ctxs tok rest
+    closeToExplicit [] tok rest =
+      -- unbalanced }, let the parser report the error
+      tok : process [] rest
+
+    -- Emit closing braces for all remaining contexts
+    closingBraces :: [LayoutContext] -> [Located] -> [Located]
+    closingBraces [] rest = rest
+    closingBraces (_ : cs) rest =
+      let p = case rest of
+            (Located pp _ _ : _) -> pp
+            [] -> Pos 1 1 ""
+      in Located p TokVRBrace "" : closingBraces cs rest

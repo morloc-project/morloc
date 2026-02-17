@@ -29,7 +29,6 @@ import Morloc.Namespace.State
 import qualified Morloc.ProgramBuilder.Install as Install
 import System.Exit (exitFailure, exitSuccess)
 import System.FilePath (takeFileName)
-import Text.Megaparsec.Error (errorBundlePretty)
 import UI
 
 runMorloc :: CliCommand -> IO ()
@@ -125,7 +124,7 @@ cmdTypecheck args _ config buildConfig = do
   if typecheckType args
     then case F.readType (unCode code) of
       (Left err') -> do
-        print (errorBundlePretty err')
+        putStrLn err'
         return False
       (Right x) -> do
         print x

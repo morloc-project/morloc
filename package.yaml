@@ -59,6 +59,7 @@ default-extensions:
 dependencies:
   - base
   - aeson
+  - array
   - bytestring
   - containers
   - directory
@@ -102,6 +103,8 @@ ghc-options:
 
 library:
   source-dirs: library
+  build-tools:
+    - happy
 
 executables:
   morloc:

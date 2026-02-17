@@ -1,0 +1,4 @@
+#!/bin/sh
+exec mim "$0" "$@"
+### MANIFEST ###
+{"version":1,"name":"test","build_dir":"/home/z/projects/morloc-core/morloc-workspace/compiler/morloc/test-suite/golden-tests/claude-test-1","build_time":1771352524,"pools":[{"lang":"python3","exec":["python3","pools/pool.py"],"socket":"pipe-python3"}],"commands":[{"name":"addTwo","type":"remote","mid":1,"pool":0,"needed_pools":[0],"arg_schemas":["<int>i4"],"return_schema":"<int>i4","desc":[],"return_type":"Int","return_desc":[],"args":[]},{"name":"doubleList","type":"remote","mid":2,"pool":0,"needed_pools":[0],"arg_schemas":["<list>a<int>i4"],"return_schema":"<list>a<int>i4","desc":[],"return_type":"[Int]","return_desc":[],"args":[]}]}

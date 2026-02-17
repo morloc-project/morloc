@@ -1,4 +1,4 @@
-module (cid, pid, rid, pfoo, rfoo, cfoo)
+module m (cid, pid, rid, pfoo, rfoo, cfoo)
 
 import root ((.))
 
