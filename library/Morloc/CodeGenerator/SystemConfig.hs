@@ -161,6 +161,23 @@ configureAllSteps verbose force slurmSupport config = do
     (includeDir </> DF.embededFileName DF.librlang)
     (libDir </> "librmorloc.so")
     (includeDir </> "librmorloc.o")
+
+  say "Configuring Julia morloc API"
+  let juliaLangDir = homeDir </> "lang" </> "julia"
+  createDirectoryIfMissing True juliaLangDir
+  -- Write lang.yaml (language descriptor)
+  TIO.writeFile (juliaLangDir </> "lang.yaml") (DF.embededFileText DF.libjuliadesc)
+  -- Write pool template
+  TIO.writeFile (juliaLangDir </> "pool.jl") (DF.embededFileText DF.juliaPoolTemplate)
+  -- Write MorlocRuntime.jl
+  TIO.writeFile (juliaLangDir </> "MorlocRuntime.jl") (DF.embededFileText DF.libjuliaruntime)
+  -- Compile juliabridge.c -> libjuliamorloc.so
+  let juliaBridgeSrc = buildDir </> "juliabridge.c"
+      juliaBridgeSo = libDir </> "libjuliamorloc.so"
+  TIO.writeFile juliaBridgeSrc (DF.embededFileText DF.libjulialang)
+  run "gcc" ["-shared", "-fPIC", "-O2", "-I" <> includeDir, "-o", juliaBridgeSo,
+             juliaBridgeSrc, "-L" <> libDir, "-Wl,-rpath," <> libDir, "-lmorloc", "-lpthread"]
+  removeFile juliaBridgeSrc
   where
     ok msg = "\ESC[32m" <> msg <> "\ESC[0m"
 

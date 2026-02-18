@@ -30,7 +30,6 @@ import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import Morloc.Data.Doc
 import System.Directory (doesDirectoryExist, listDirectory, doesFileExist)
-import System.FilePath ((</>))
 
 parse ::
   -- | path to the current module (if we are reading from a file)

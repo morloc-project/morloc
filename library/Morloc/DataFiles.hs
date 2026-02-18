@@ -21,6 +21,10 @@ module Morloc.DataFiles
   , libpylangMakefile
   , libpylangSetup
   , librlang
+  , libjulialang
+  , libjuliaruntime
+  , libjuliadesc
+  , juliaPoolTemplate
   ) where
 
 import Data.FileEmbed (embedFileRelative)
@@ -144,3 +148,16 @@ libpylangSetup = EmbededFile "setup.py" (decodeUtf8 $ $(embedFileRelative "data/
 
 libpylangMakefile :: EmbededFile
 libpylangMakefile = EmbededFile "Makefile" (decodeUtf8 $ $(embedFileRelative "data/lang/py/Makefile"))
+
+-- Julia interface
+libjulialang :: EmbededFile
+libjulialang = EmbededFile "juliabridge.c" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/juliabridge.c"))
+
+libjuliaruntime :: EmbededFile
+libjuliaruntime = EmbededFile "MorlocRuntime.jl" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/MorlocRuntime.jl"))
+
+libjuliadesc :: EmbededFile
+libjuliadesc = EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/lang.yaml"))
+
+juliaPoolTemplate :: EmbededFile
+juliaPoolTemplate = EmbededFile "pool.jl" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.jl"))

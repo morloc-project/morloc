@@ -78,6 +78,7 @@ data PartialAppStyle
 data DispatchTableStyle
   = PythonDictDispatch  -- dispatch = { mid: fn, ... }
   | RListDispatch       -- .dispatch <- list(); .dispatch[[i]] <- fn
+  | ArrowDictDispatch   -- dispatch = Dict(mid => fn, ...) (Julia)
   deriving (Eq, Show, Generic)
 
 -- | List iteration / map style
@@ -123,6 +124,7 @@ data LangDescriptor = LangDescriptor
   , ldListStyle :: !ListConstructorStyle
   , ldTupleConstructor :: !Text  -- "tuple" or "list" or ""
   , ldRecordConstructor :: !Text -- "dict" or "OrderedDict" or "list"
+  , ldRecordSeparator :: !Text   -- "=" for Python/R, "=>" for Julia
 
     -- Access styles
   , ldIndexStyle :: !IndexStyle
@@ -150,6 +152,7 @@ data LangDescriptor = LangDescriptor
 
     -- Import syntax
   , ldImportPrefix :: !Text  -- "import " or "source(" etc.
+  , ldIncludeRelToFile :: !Bool  -- True if include() resolves relative to file (Julia), False for CWD (R)
 
     -- Pool template
   , ldPoolTemplate :: !Text    -- pool template content
@@ -206,6 +209,7 @@ instance Y.FromJSON DispatchTableStyle where
   parseJSON = Y.withText "DispatchTableStyle" $ \t -> case t of
     "python_dict" -> pure PythonDictDispatch
     "r_list" -> pure RListDispatch
+    "arrow_dict" -> pure ArrowDictDispatch
     _ -> fail $ "Unknown DispatchTableStyle: " <> T.unpack t
 
 instance Y.FromJSON MapListStyle where
@@ -257,6 +261,7 @@ defaultLangDescriptor name ext = LangDescriptor
   , ldListStyle = BracketList
   , ldTupleConstructor = ""
   , ldRecordConstructor = "dict"
+  , ldRecordSeparator = "="
   , ldIndexStyle = ZeroBracket
   , ldKeyAccess = "bracket"
   , ldFieldAccess = DotAccess
@@ -274,6 +279,7 @@ defaultLangDescriptor name ext = LangDescriptor
   , ldPattern = PythonFString
   , ldDispatchTable = PythonDictDispatch
   , ldImportPrefix = "import "
+  , ldIncludeRelToFile = False
   , ldPoolTemplate = ""
   , ldBreakMarker = "# <<<BREAK>>>"
   , ldCommentMarker = "#"
