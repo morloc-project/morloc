@@ -18,7 +18,7 @@ import Morloc.Namespace.Expr
 import Morloc.Namespace.State
 
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
-import Morloc.CodeGenerator.Emit (pool, emit)
+import Morloc.CodeGenerator.Emit (pool, emit, TranslateFn)
 import Morloc.CodeGenerator.Namespace (SerialManifold)
 import Morloc.CodeGenerator.Express (express)
 import Morloc.CodeGenerator.LambdaEval (applyLambdas)
@@ -76,12 +76,14 @@ generatePools rASTs =
 
 -- | Build a program as a local executable
 writeProgram ::
+  -- | language-specific translator callback
+  TranslateFn ->
   -- | source code filename (for debugging messages)
   Maybe Path ->
   -- | source code text
   Code ->
   MorlocMonad ()
-writeProgram path code = do
+writeProgram translateFn path code = do
   typecheck path code
     -- evaluate all applied lambdas in rasts and gasts
     >>= bimapM (mapM applyLambdas) (mapM applyLambdas)
@@ -97,7 +99,7 @@ writeProgram path code = do
           >>= mapM segment |>> concat
           >>= mapM serialize
           |>> pool
-          >>= mapM (uncurry emit)
+          >>= mapM (uncurry (emit translateFn))
       return (nexus, pools)
     -- write the code and compile as needed
     >>= buildProgram

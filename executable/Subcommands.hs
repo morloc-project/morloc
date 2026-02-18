@@ -13,10 +13,13 @@ import qualified Data.Map as Map
 import qualified Data.Text as T
 import qualified Morloc as M
 import Morloc (generatePools)
+import Morloc.CodeGenerator.Emit (TranslateFn)
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
+import qualified Morloc.CodeGenerator.Grammars.Translator.Generic as Generic
 import Morloc.CodeGenerator.Namespace (SerialManifold (..))
 import qualified Morloc.CodeGenerator.SystemConfig as MSC
 import qualified Morloc.Config as Config
+import qualified CppTranslator
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.API as F
@@ -30,6 +33,11 @@ import qualified Morloc.ProgramBuilder.Install as Install
 import System.Exit (exitFailure, exitSuccess)
 import System.FilePath (takeFileName)
 import UI
+
+-- | Route each language to its translator.
+translator :: TranslateFn
+translator CppLang srcs es = CppTranslator.translate srcs es
+translator lang srcs es = Generic.translate lang srcs es
 
 runMorloc :: CliCommand -> IO ()
 runMorloc args = do
@@ -98,7 +106,7 @@ cmdMake args verbosity config buildConfig = do
   let install = makeInstall args
       action = do
         MM.modify (\s -> s { stateInstall = install })
-        M.writeProgram path code
+        M.writeProgram translator path code
   result <- MM.runMorlocMonad outfile verbosity config buildConfig action
   passed <- MM.writeMorlocReturn result
   if passed && install

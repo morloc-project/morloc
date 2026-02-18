@@ -17,9 +17,7 @@ extra-source-files:
   - ChangeLog.md
   # libraries
   - data/nexus.c # nexus template
-  - data/pools/pool.R
-  - data/pools/pool.cpp
-  - data/pools/pool.py
+  - data/lang/cpp/pool.cpp
   # universal c library (split into modules)
   - data/morloc/morloc.h
   - data/morloc/macros.h
@@ -46,12 +44,25 @@ extra-source-files:
   - data/morloc/shm.c
   - data/morloc/slurm.c
   - data/morloc/utility.c
-  # msgpack langs
+  # per-language files
   - data/lang/cpp/cppmorloc.hpp
-  - data/lang/r/rmorloc.c
+  - data/lang/cpp/cppmorloc.cpp
+  - data/lang/cpp/morloc_pch.hpp
+  - data/lang/cpp/pool.cpp
+  - data/lang/cpp/init.sh
   - data/lang/py/pymorloc.c
   - data/lang/py/setup.py
   - data/lang/py/Makefile
+  - data/lang/py/pool.py
+  - data/lang/py/init.sh
+  - data/lang/r/rmorloc.c
+  - data/lang/r/pool.R
+  - data/lang/r/init.sh
+  - data/lang/julia/juliabridge.c
+  - data/lang/julia/MorlocRuntime.jl
+  - data/lang/julia/lang.yaml
+  - data/lang/julia/pool.jl
+  - data/lang/julia/init.sh
 
 default-extensions:
   - TypeOperators
@@ -59,6 +70,7 @@ default-extensions:
 dependencies:
   - base
   - aeson
+  - binary
   - array
   - bytestring
   - containers
@@ -118,10 +130,25 @@ executables:
       - -O2
       - -haddock
     dependencies:
-      - morloc 
+      - morloc
       - base
       - optparse-applicative
       - text
+
+  morloc-codegen-generic:
+    main:          Main.hs
+    source-dirs:   exe/morloc-codegen-generic
+    ghc-options:
+      - -Wall
+      - -O2
+    dependencies:
+      - morloc
+      - base
+      - aeson
+      - binary
+      - bytestring
+      - text
+      - yaml
 
 tests:
   morloc-test:

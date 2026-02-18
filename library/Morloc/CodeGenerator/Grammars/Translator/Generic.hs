@@ -5,22 +5,28 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Grammars.Translator.Generic
-Description : Descriptor-driven translator for plugin languages
+Description : Descriptor-driven translator for dynamically-typed languages
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 
 Generic translator that generates pool code for dynamically-typed interpreted
-languages based on a LangDescriptor. Handles Tier 1 (easy) languages that
-have Python/R-like semantics: dynamic typing, no templates, simple modules.
+languages based on a LangDescriptor. Handles Python, R, Julia, and other
+languages with Python/R-like semantics.
 -}
 module Morloc.CodeGenerator.Grammars.Translator.Generic
   ( translate
   , preprocess
+  , CodegenManifest(..)
+  , printProgram
   ) where
 
+import qualified Data.Aeson as Aeson
+import qualified Data.Binary as Binary
+import qualified Data.ByteString.Lazy as BL
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( LowerConfig(..), IndexM, defaultSerialize, defaultDeserialize
@@ -33,10 +39,15 @@ import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
 import Morloc.Monad (asks, gets, liftIO, newIndex, runIndex)
 import qualified Morloc.Monad as MM
 import Morloc.Quasi
+import qualified System.Directory as Dir
+import qualified System.Exit as Exit
+import System.IO (hClose, openBinaryTempFile)
+import qualified System.Process as Proc
 
 preprocess :: SerialManifold -> MorlocMonad SerialManifold
 preprocess = return . invertSerialManifold
@@ -44,10 +55,18 @@ preprocess = return . invertSerialManifold
 translate :: Lang -> [Source] -> [SerialManifold] -> MorlocMonad Script
 translate lang srcs es = do
   desc <- loadDescriptorForLang lang
+  case ldCodegenCommand desc of
+    Just cmd -> translateExternal cmd lang desc srcs es
+    Nothing -> translateBuiltin lang desc srcs es
 
+-- | Translate using the built-in generic renderer.
+translateBuiltin :: Lang -> LangDescriptor -> [Source] -> [SerialManifold] -> MorlocMonad Script
+translateBuiltin lang desc srcs es = do
   home <- pretty <$> asks MC.configHome
+  lib <- MT.pack <$> asks MC.configLibrary
   let opt = home <> "/opt"
 
+  -- translate source imports
   includeDocs <-
     mapM
       (translateSource desc)
@@ -55,8 +74,24 @@ translate lang srcs es = do
 
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
-  let mDocs = map (translateSegment desc) es
-      program = buildProgram includeDocs mDocs es
+  -- build src name function (Python needs qualified names)
+  let srcNamer = if ldQualifiedImports desc
+        then qualifiedSrcName lib
+        else \src -> pretty (srcName src)
+
+  -- add language-specific preamble to sources
+  preambleDocs <- case lang of
+    Python3Lang -> do
+      let sysPath = [idoc|sys.path = #{list (map makePath [pretty ("." :: Text), opt, pretty lib])} + sys.path|]
+      return [sysPath, "import importlib", "import pymorloc as morloc"]
+    RLang -> do
+      homeDir <- asks MC.configHome
+      return [[idoc|dyn.load("#{pretty $ homeDir </> "lib" </> "librmorloc.so"}")|]]
+    _ -> return []
+
+  let allSources = preambleDocs ++ includeDocs
+      mDocs = map (translateSegment desc srcNamer) es
+      program = buildProgram allSources mDocs es
 
   let code = printProgram desc program
   let exefile = ML.makeExecutablePoolName lang
@@ -68,11 +103,99 @@ translate lang srcs es = do
       , scriptCode = "." :/ Dir "pools" [File exefile (Code . render $ code)]
       , scriptMake = []
       }
+  where
+    makePath filename = [idoc|os.path.expanduser(#{dquotes filename})|]
 
--- | Load the language descriptor for a plugin language.
--- If the descriptor's pool template is empty, load it from a pool.<ext> file
--- in the same directory as lang.yaml.
+-- | Translate using an external codegen tool.
+translateExternal :: Text -> Lang -> LangDescriptor -> [Source] -> [SerialManifold] -> MorlocMonad Script
+translateExternal cmd lang desc srcs es = do
+  home <- asks MC.configHome
+  lib <- MT.pack <$> asks MC.configLibrary
+
+  includeDocs <-
+    mapM
+      (translateSource desc)
+      (unique . mapMaybe srcPath $ srcs)
+
+  debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
+
+  let srcNamer = if ldQualifiedImports desc
+        then qualifiedSrcName lib
+        else \src -> pretty (srcName src)
+
+  let mDocs = map (translateSegment desc srcNamer) es
+      program = buildProgram includeDocs mDocs es
+
+  -- find the lang.yaml path for the codegen tool
+  let langName = case lang of
+        PluginLang pli -> MT.unpack (ML.pliName pli)
+        _ -> T.unpack (ldName desc)
+      langYamlPath = home </> "lang" </> langName </> "lang.yaml"
+
+  -- serialize IProgram to a temp file
+  tmpDir <- liftIO Dir.getTemporaryDirectory
+  (tmpPath, tmpHandle) <- liftIO $ openBinaryTempFile tmpDir "iprogram.bin"
+  liftIO $ do
+    BL.hPut tmpHandle (Binary.encode program)
+    hClose tmpHandle
+
+  -- invoke the codegen command: cmd lang.yaml iprogram.bin
+  let cmdStr = T.unpack cmd
+  (exitCode, stdoutStr, stderrStr) <- liftIO $
+    Proc.readCreateProcessWithExitCode
+      (Proc.proc cmdStr [langYamlPath, tmpPath])
+      ""
+
+  -- clean up temp file
+  liftIO $ Dir.removeFile tmpPath
+
+  case exitCode of
+    Exit.ExitFailure code' ->
+      MM.throwSystemError $
+        "External codegen '" <> pretty cmd <> "' failed with exit code "
+        <> pretty code' <> ":\n" <> pretty stderrStr
+    Exit.ExitSuccess -> do
+      -- parse the codegen manifest from stdout
+      let manifest = Aeson.decodeStrict (TE.encodeUtf8 (T.pack stdoutStr)) :: Maybe CodegenManifest
+      case manifest of
+        Nothing ->
+          MM.throwSystemError $
+            "External codegen '" <> pretty cmd
+            <> "' produced invalid manifest on stdout"
+        Just m -> do
+          let exefile = ML.makeExecutablePoolName lang
+              poolContent = cgmPoolCode m
+              buildCmds = map (SysRun . Code) (cgmBuildCommands m)
+          return $
+            Script
+              { scriptBase = "pool"
+              , scriptLang = lang
+              , scriptCode = "." :/ Dir "pools" [File exefile (Code poolContent)]
+              , scriptMake = buildCmds
+              }
+
+-- | Manifest returned by an external codegen tool on stdout.
+data CodegenManifest = CodegenManifest
+  { cgmPoolCode :: Text       -- ^ rendered pool file content
+  , cgmBuildCommands :: [Text] -- ^ build commands to run after writing files
+  } deriving (Show)
+
+instance Aeson.FromJSON CodegenManifest where
+  parseJSON = Aeson.withObject "CodegenManifest" $ \v ->
+    CodegenManifest
+      <$> v Aeson..: "pool_code"
+      <*> (v Aeson..:? "build_commands" Aeson..!= [])
+
+instance Aeson.ToJSON CodegenManifest where
+  toJSON m = Aeson.object
+    [ "pool_code" Aeson..= cgmPoolCode m
+    , "build_commands" Aeson..= cgmBuildCommands m
+    ]
+
+-- | Load the language descriptor for a language.
 loadDescriptorForLang :: Lang -> MorlocMonad LangDescriptor
+loadDescriptorForLang Python3Lang = return pythonDescriptor
+loadDescriptorForLang RLang = return rDescriptor
 loadDescriptorForLang (PluginLang pli) = do
   home <- asks MC.configHome
   let langName = MT.unpack (ML.pliName pli)
@@ -84,7 +207,6 @@ loadDescriptorForLang (PluginLang pli) = do
       "Failed to load language descriptor for " <> pretty (ML.pliName pli)
       <> ": " <> pretty err
     Right desc -> do
-      -- Load pool template from disk if not inline in the descriptor
       desc' <- if T.null (ldPoolTemplate desc)
         then do
           let poolPath = langDir </> "pool." <> ML.pliExtension pli
@@ -93,7 +215,93 @@ loadDescriptorForLang (PluginLang pli) = do
         else return desc
       return desc'
 loadDescriptorForLang lang =
-  MM.throwSystemError $ "loadDescriptorForLang called for non-plugin language: " <> viaShow lang
+  MM.throwSystemError $ "loadDescriptorForLang called for unsupported language: " <> viaShow lang
+
+-- | Python3 descriptor (inline, uses embedded 3-section pool template)
+pythonDescriptor :: LangDescriptor
+pythonDescriptor = LangDescriptor
+  { ldName = "python3"
+  , ldExtension = "py"
+  , ldBoolTrue = "True"
+  , ldBoolFalse = "False"
+  , ldNullLiteral = "None"
+  , ldListStyle = BracketList
+  , ldTupleConstructor = ""
+  , ldRecordConstructor = "OrderedDict"
+  , ldRecordSeparator = "="
+  , ldIndexStyle = ZeroBracket
+  , ldKeyAccess = "bracket"
+  , ldFieldAccess = DotAccess
+  , ldSerializeFn = "morloc.put_value"
+  , ldDeserializeFn = "morloc.get_value"
+  , ldForeignCallFn = "morloc.foreign_call"
+  , ldForeignCallSocketPath = "os.path.join"
+  , ldForeignCallIntSuffix = ""
+  , ldRemoteCallFn = "morloc.remote_call"
+  , ldResourcePackStyle = StructPackResources
+  , ldAssignment = EqualsAssign
+  , ldFunctionDef = PythonDef
+  , ldLambda = PythonLambda
+  , ldPartialApp = FunctoolsPartial
+  , ldSuspend = PythonSuspend
+  , ldMapList = PythonForAppend
+  , ldPattern = PythonFString
+  , ldDispatchTable = PythonDictDispatch
+  , ldDictStyleRecords = True
+  , ldQuoteRecordKeys = False
+  , ldQualifiedImports = True
+  , ldImportPrefix = "import "
+  , ldIncludeRelToFile = False
+  , ldPoolTemplate = DF.embededFileText (DF.poolTemplateGeneric Python3Lang)
+  , ldBreakMarker = "# <<<BREAK>>>"
+  , ldCommentMarker = "#"
+  , ldRunCommand = ["python3"]
+  , ldIsCompiled = False
+  , ldCodegenCommand = Nothing
+  }
+
+-- | R descriptor (inline, uses embedded 3-section pool template)
+rDescriptor :: LangDescriptor
+rDescriptor = LangDescriptor
+  { ldName = "R"
+  , ldExtension = "R"
+  , ldBoolTrue = "TRUE"
+  , ldBoolFalse = "FALSE"
+  , ldNullLiteral = "NULL"
+  , ldListStyle = RAtomicList
+  , ldTupleConstructor = "list"
+  , ldRecordConstructor = "list"
+  , ldRecordSeparator = "="
+  , ldIndexStyle = OneDoubleBracket
+  , ldKeyAccess = "double_bracket"
+  , ldFieldAccess = DollarAccess
+  , ldSerializeFn = "morloc_put_value"
+  , ldDeserializeFn = "morloc_get_value"
+  , ldForeignCallFn = "morloc_foreign_call"
+  , ldForeignCallSocketPath = "paste0"
+  , ldForeignCallIntSuffix = "L"
+  , ldRemoteCallFn = "morloc_remote_call"
+  , ldResourcePackStyle = NamedListResources
+  , ldAssignment = ArrowAssign
+  , ldFunctionDef = RAssignDef
+  , ldLambda = RFunction
+  , ldPartialApp = AnonymousWrapper
+  , ldSuspend = RSuspend
+  , ldMapList = RLapply
+  , ldPattern = RPaste0
+  , ldDispatchTable = RListDispatch
+  , ldDictStyleRecords = False
+  , ldQuoteRecordKeys = False
+  , ldQualifiedImports = False
+  , ldImportPrefix = "source("
+  , ldIncludeRelToFile = False
+  , ldPoolTemplate = DF.embededFileText (DF.poolTemplateGeneric RLang)
+  , ldBreakMarker = "# <<<BREAK>>>"
+  , ldCommentMarker = "#"
+  , ldRunCommand = ["Rscript"]
+  , ldIsCompiled = False
+  , ldCodegenCommand = Nothing
+  }
 
 debugLog :: Doc ann -> MorlocMonad ()
 debugLog d = do
@@ -103,8 +311,6 @@ debugLog d = do
 translateSource :: LangDescriptor -> Path -> MorlocMonad MDoc
 translateSource desc p = do
   let p' = MT.stripPrefixIfPresent "./" (MT.pack p)
-      -- Pool files live in pools/ subdirectory; if the language's include
-      -- resolves relative to the file (not CWD), we need to go up one level
       p'' = if ldIncludeRelToFile desc then "../" <> p' else p'
   case ldFunctionDef desc of
     RAssignDef -> return $ "source(" <> dquotes (pretty p'') <> ")"
@@ -113,6 +319,12 @@ translateSource desc p = do
       lib <- MT.pack <$> asks MC.configLibrary
       return $ makeNamespace lib p <+> "=" <+> "importlib.import_module("
         <> dquotes (makeImportPath lib p) <> ")"
+
+-- | Qualify a source function name with its module path (Python).
+qualifiedSrcName :: Text -> Source -> MDoc
+qualifiedSrcName lib src = case srcPath src of
+  Nothing -> pretty $ srcName src
+  (Just path) -> makeNamespace lib path <> "." <> pretty (srcName src)
 
 makeNamespace :: Text -> Path -> MDoc
 makeNamespace lib =
@@ -144,28 +356,26 @@ makeImportPath lib =
     toLower' c = if c >= 'A' && c <= 'Z' then toEnum (fromEnum c + 32) else c
     dropExtensions = reverse . drop 1 . dropWhile (/= '.') . reverse
 
-translateSegment :: LangDescriptor -> SerialManifold -> MDoc
-translateSegment desc m0 =
-  let cfg = genericLowerConfig desc
+translateSegment :: LangDescriptor -> (Source -> MDoc) -> SerialManifold -> MDoc
+translateSegment desc srcNamer m0 =
+  let cfg = genericLowerConfig desc srcNamer
    in renderPoolDocs $ runIndex 0 (foldWithSerialManifoldM (defaultFoldRules cfg) m0)
 
--- | Build a LowerConfig from a LangDescriptor
-genericLowerConfig :: LangDescriptor -> LowerConfig IndexM
-genericLowerConfig desc = cfg
+-- | Build a LowerConfig from a LangDescriptor and a source name function
+genericLowerConfig :: LangDescriptor -> (Source -> MDoc) -> LowerConfig IndexM
+genericLowerConfig desc srcNamer = cfg
   where
     cfg = LowerConfig
-      { lcSrcName = \src -> pretty (srcName src)
+      { lcSrcName = srcNamer
       , lcTypeOf = \_ -> return Nothing
       , lcSerialAstType = \_ -> return Nothing
       , lcDeserialAstType = \_ -> return Nothing
       , lcRawDeserialAstType = \_ -> return Nothing
       , lcTemplateArgs = \_ -> return Nothing
       , lcTypeMOf = \_ -> return Nothing
-      , lcPackerName = \src -> pretty (srcName src)
-      , lcUnpackerName = \src -> pretty (srcName src)
-      , lcRecordAccessor = \_ _ record field -> case ldFieldAccess desc of
-          DotAccess -> record <> "." <> field
-          DollarAccess -> record <> "$" <> field
+      , lcPackerName = srcNamer
+      , lcUnpackerName = srcNamer
+      , lcRecordAccessor = genericRecordAccessor desc
       , lcDeserialRecordAccessor = \_ k v -> case ldFieldAccess desc of
           DotAccess -> v <> "[" <> dquotes (pretty k) <> "]"
           DollarAccess -> v <> "$" <> pretty k
@@ -192,7 +402,7 @@ genericLowerConfig desc = cfg
           name -> \es -> pretty name <> tupled es
       , lcRecordConstructor = \_ _ _ _ rs -> return $ defaultValue
           { poolExpr = pretty (ldRecordConstructor desc)
-              <> tupled [dquotes (pretty k) <+> pretty (ldRecordSeparator desc) <+> v | (k, v) <- rs] }
+              <> tupled [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> v | (k, v) <- rs] }
       , lcForeignCall = \socketFile mid args ->
           let midDoc = pretty mid <> pretty (ldForeignCallIntSuffix desc)
               argsDoc = case ldListStyle desc of
@@ -200,15 +410,7 @@ genericLowerConfig desc = cfg
                 _ -> "list" <> tupled args
            in pretty (ldForeignCallFn desc)
               <> tupled [makeGenericSocketPath desc socketFile, midDoc, argsDoc]
-      , lcRemoteCall = \socketFile mid res args -> do
-          let resMem = pretty $ remoteResourcesMemory res
-              resTime = pretty $ remoteResourcesTime res
-              resCPU = pretty $ remoteResourcesThreads res
-              resGPU = pretty $ remoteResourcesGpus res
-              call = pretty (ldForeignCallFn desc)
-                <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache"
-                          , list [resMem, resTime, resCPU, resGPU], list args]
-          return $ defaultValue {poolExpr = call}
+      , lcRemoteCall = genericRemoteCall desc
       , lcMakeLet = \namer i _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
       , lcReturn = \e -> "return(" <> e <> ")"
       , lcMakeSuspend = \stmts expr -> case ldSuspend desc of
@@ -251,6 +453,45 @@ genericLowerConfig desc = cfg
              in tupled boundArgs <+> "->" <+> functionCall
       }
 
+-- | Record access: for Python-like languages with ldDictStyleRecords=True,
+-- use bracket access for dict/NamRecord and dot access for others.
+genericRecordAccessor :: LangDescriptor -> NamType -> CVar -> MDoc -> MDoc -> MDoc
+genericRecordAccessor desc namType constructor record field
+  | ldDictStyleRecords desc = case (namType, constructor) of
+      (NamTable, CV "dict") -> record <> "[" <> dquotes field <> "]"
+      (NamRecord, _)        -> record <> "[" <> dquotes field <> "]"
+      _                     -> record <> "." <> field
+  | otherwise = case ldFieldAccess desc of
+      DotAccess -> record <> "." <> field
+      DollarAccess -> record <> "$" <> field
+
+-- | Remote call with per-language resource packing
+genericRemoteCall :: LangDescriptor -> MDoc -> Int -> RemoteResources -> [MDoc] -> IndexM PoolDocs
+genericRemoteCall desc socketFile mid res args = do
+  let resMem = pretty $ remoteResourcesMemory res
+      resTime = pretty $ remoteResourcesTime res
+      resCPU = pretty $ remoteResourcesThreads res
+      resGPU = pretty $ remoteResourcesGpus res
+      remoteFn = if T.null (ldRemoteCallFn desc)
+                   then pretty (ldForeignCallFn desc)
+                   else pretty (ldRemoteCallFn desc)
+      resPacked = case ldResourcePackStyle desc of
+        StructPackResources ->
+          "struct.pack" <> tupled [squotes "iiii", resMem, resTime, resCPU, resGPU]
+        NamedListResources ->
+          [idoc|list(mem=#{resMem}L, time=#{resTime}L, cpus=#{resCPU}L, gpus=#{resGPU}L)|]
+        PlainListResources ->
+          list [resMem, resTime, resCPU, resGPU]
+      call = remoteFn
+        <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resPacked, list args]
+  return $ defaultValue {poolExpr = call}
+
+-- | Format a record key: bare identifier or quoted string
+makeRecordKey :: LangDescriptor -> Key -> MDoc
+makeRecordKey desc k
+  | ldQuoteRecordKeys desc = dquotes (pretty k)
+  | otherwise = pretty k
+
 makeGenericSocketPath :: LangDescriptor -> MDoc -> MDoc
 makeGenericSocketPath desc socketFileBasename =
   case ldForeignCallSocketPath desc of
@@ -270,7 +511,7 @@ genericMakeLet desc namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 
 genericPrintExpr :: LangDescriptor -> IExpr -> MDoc
 genericPrintExpr desc = go
   where
-    go (IVar v) = v
+    go (IVar v) = pretty v
     go (IBoolLit True) = pretty (ldBoolTrue desc)
     go (IBoolLit False) = pretty (ldBoolFalse desc)
     go INullLit = pretty (ldNullLiteral desc)
@@ -286,7 +527,7 @@ genericPrintExpr desc = go
       name -> pretty name <> tupled (map go es)
     go (IRecordLit _ _ entries) =
       pretty (ldRecordConstructor desc)
-        <> tupled [dquotes (pretty k) <+> pretty (ldRecordSeparator desc) <+> go e | (k, e) <- entries]
+        <> tupled [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> go e | (k, e) <- entries]
     go (IAccess e (IIdx i)) = case ldIndexStyle desc of
       ZeroBracket -> go e <> "[" <> pretty i <> "]"
       OneBracket -> go e <> "[" <> pretty (i + 1) <> "]"
@@ -295,24 +536,24 @@ genericPrintExpr desc = go
       "double_bracket" -> go e <> "[[" <> dquotes (pretty k) <> "]]"
       _ -> go e <> "[" <> dquotes (pretty k) <> "]"
     go (IAccess e (IField f)) = case ldFieldAccess desc of
-      DotAccess -> go e <> "." <> f
-      DollarAccess -> go e <> "$" <> f
+      DotAccess -> go e <> "." <> pretty f
+      DollarAccess -> go e <> "$" <> pretty f
     go (ISerCall schema e) =
-      pretty (ldSerializeFn desc) <> "(" <> go e <> ", " <> dquotes schema <> ")"
+      pretty (ldSerializeFn desc) <> "(" <> go e <> ", " <> dquotes (pretty schema) <> ")"
     go (IDesCall schema _ e) =
-      pretty (ldDeserializeFn desc) <> "(" <> go e <> ", " <> dquotes schema <> ")"
-    go (IPack packer e) = packer <> parens (go e)
+      pretty (ldDeserializeFn desc) <> "(" <> go e <> ", " <> dquotes (pretty schema) <> ")"
+    go (IPack packer e) = pretty packer <> parens (go e)
     go (ICall f Nothing argGroups) =
-      f <> hsep (map (tupled . map go) argGroups)
+      pretty f <> hsep (map (tupled . map go) argGroups)
     go (ICall f (Just _) argGroups) =
-      f <> hsep (map (tupled . map go) argGroups)
+      pretty f <> hsep (map (tupled . map go) argGroups)
     go (IForeignCall _ _ _) = error "use IRawExpr for generic foreign calls"
     go (IRemoteCall _ _ _ _) = error "use IRawExpr for generic remote calls"
     go (ILambda args body) = case ldLambda desc of
-      PythonLambda -> "lambda" <+> hsep (punctuate "," args) <> ":" <+> go body
-      RFunction -> "function" <+> tupled args <> "{" <> go body <> "}"
-      ArrowLambda -> tupled args <+> "->" <+> go body
-    go (IRawExpr d) = d
+      PythonLambda -> "lambda" <+> hsep (punctuate "," (map pretty args)) <> ":" <+> go body
+      RFunction -> "function" <+> tupled (map pretty args) <> "{" <> go body <> "}"
+      ArrowLambda -> tupled (map pretty args) <+> "->" <+> go body
+    go (IRawExpr d) = pretty d
     go (ISuspend e) = case ldSuspend desc of
       PythonSuspend -> "lambda:" <+> go e
       RSuspend -> "function()" <+> go e
@@ -328,26 +569,26 @@ genericPrintStmt desc = go
       EqualsAssign -> "="
       ArrowAssign -> "<-"
 
-    go (IAssign v Nothing e) = v <+> assignOp <+> printE e
-    go (IAssign v (Just _) e) = v <+> assignOp <+> printE e
+    go (IAssign v Nothing e) = pretty v <+> assignOp <+> printE e
+    go (IAssign v (Just _) e) = pretty v <+> assignOp <+> printE e
     go (IMapList resultVar _ iterVar collection bodyStmts yieldExpr) =
       case ldMapList desc of
         PythonForAppend -> vsep
-          [ [idoc|#{resultVar} = []|]
+          [ [idoc|#{pretty resultVar} = []|]
           , nest 4 (vsep
-              ( [idoc|for #{iterVar} in #{collection}:|]
+              ( [idoc|for #{pretty iterVar} in #{printE collection}:|]
               : map go bodyStmts
-              ++ [[idoc|#{resultVar}.append(#{printE yieldExpr})|]]
+              ++ [[idoc|#{pretty resultVar}.append(#{printE yieldExpr})|]]
               ))
           ]
         RLapply ->
           block 4
-            [idoc|#{resultVar} <- lapply(#{collection}, function(#{iterVar})|]
+            [idoc|#{pretty resultVar} <- lapply(#{printE collection}, function(#{pretty iterVar})|]
             (vsep (map go bodyStmts ++ [printE yieldExpr]))
             <> ")"
         Comprehension -> vsep
-          [ resultVar <+> assignOp <+> "[" <> printE yieldExpr
-              <+> "for" <+> iterVar <+> "in" <+> collection <> "]"
+          [ pretty resultVar <+> assignOp <+> "[" <> printE yieldExpr
+              <+> "for" <+> pretty iterVar <+> "in" <+> printE collection <> "]"
           ]
     go (IReturn e) = "return(" <> printE e <> ")"
     go (IExprStmt e) = printE e
@@ -363,18 +604,18 @@ printProgram desc prog =
   where
     sections = case ldDispatchTable desc of
       PythonDictDispatch ->
-        [ vsep (ipSources prog)
-        , vsep (ipManifolds prog)
+        [ vsep (map pretty (ipSources prog))
+        , vsep (map pretty (ipManifolds prog))
         , pythonDispatch
         ]
       RListDispatch ->
-        [ vsep (ipSources prog)
-        , vsep (ipManifolds prog)
+        [ vsep (map pretty (ipSources prog))
+        , vsep (map pretty (ipManifolds prog))
         , rDispatch
         ]
       ArrowDictDispatch ->
-        [ vsep (ipSources prog)
-        , vsep (ipManifolds prog)
+        [ vsep (map pretty (ipSources prog))
+        , vsep (map pretty (ipManifolds prog))
         , arrowDictDispatch
         ]
 
@@ -441,7 +682,7 @@ genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
       name -> pretty name <> tupled xs
 
     makeRecord (NamF _ _ _ rs) xs =
-      pretty (ldRecordConstructor desc) <> tupled [dquotes (pretty k) <+> pretty (ldRecordSeparator desc) <+> x | (k, x) <- zip (map fst rs) xs]
+      pretty (ldRecordConstructor desc) <> tupled [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> x | (k, x) <- zip (map fst rs) xs]
     makeRecord _ _ = error "Incorrectly typed record setter"
 
     accessTuple _ m i = case ldIndexStyle desc of
@@ -449,9 +690,8 @@ genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
       OneBracket -> m <> "[" <> pretty (i + 1) <> "]"
       OneDoubleBracket -> m <> "[[" <> pretty (i + 1) <> "]]"
 
-    accessRecord (NamF o (FV _ _) _ _) d k = case ldFieldAccess desc of
-      DotAccess -> d <> "[" <> dquotes (pretty k) <> "]"
-      DollarAccess -> d <> "[[" <> dquotes (pretty k) <> "]]"
+    accessRecord (NamF o (FV _ cname) _ _) d k =
+      genericRecordAccessor desc o cname d (pretty k)
     accessRecord t _ _ = error $ "Invalid record type: " <> show t
 genericEvalPattern _ _ (PatternStruct _) [] = error "Unreachable empty pattern"
 

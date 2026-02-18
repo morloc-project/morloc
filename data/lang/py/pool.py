@@ -18,11 +18,9 @@ workers = []
 global_state = dict()
 _shutdown_wakeup_fd = -1
 
-# AUTO include imports start
+# AUTO include sources start
 # <<<BREAK>>>
-# AUTO include imports end
-
-import pymorloc as morloc
+# AUTO include sources end
 
 # Dynamic worker spawning: monkey-patch foreign_call to track busy workers.
 # Workers atomically increment busy_count before a foreign_call and decrement
@@ -52,10 +50,6 @@ def _tracked_foreign_call(*args):
         return _original_foreign_call(*args)
     finally:
         _busy_ref.value -= 1
-
-# AUTO include serialization start
-# <<<BREAK>>>
-# AUTO include serialization end
 
 # AUTO include manifolds start
 # <<<BREAK>>>

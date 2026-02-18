@@ -7,15 +7,14 @@
 {-# LANGUAGE ViewPatterns #-}
 
 {- |
-Module      : Morloc.CodeGenerator.Grammars.Translator.Cpp
+Module      : CppTranslator
 Description : C++ translator
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 -}
-module Morloc.CodeGenerator.Grammars.Translator.Cpp
+module CppTranslator
   ( translate
-  , preprocess
   ) where
 
 import Control.Monad.Identity (Identity)
@@ -24,8 +23,8 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), IType(..), expandSerialize, expandDeserialize, defaultFoldRules, buildProgramM)
-import qualified Morloc.CodeGenerator.Grammars.Translator.Printer.Cpp as CP
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), IType(..), toIType, expandSerialize, expandDeserialize, defaultFoldRules, buildProgramM)
+import qualified CppPrinter as CP
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
@@ -147,10 +146,6 @@ resetCounter = do
   s <- CMS.get
   CMS.put $ s {translatorCounter = 0}
 
--- tree rewrites
-preprocess :: SerialManifold -> MorlocMonad SerialManifold
-preprocess = return . invertSerialManifold
-
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate srcs es = do
   -- scopeMap :: GMap Int MVar (Map.Map Lang Scope)
@@ -265,9 +260,9 @@ recordAccess record field = record <> "." <> field
 cppLowerConfig :: LowerConfig CppTranslatorM
 cppLowerConfig = LowerConfig
   { lcSrcName = \src -> pretty (srcName src)
-  , lcTypeOf = \t -> Just . IType <$> cppTypeOf t
+  , lcTypeOf = \t -> Just . toIType <$> cppTypeOf t
   , lcSerialAstType = serializeTypeOf
-  , lcDeserialAstType = \s -> Just . IType <$> cppTypeOf (shallowType s)
+  , lcDeserialAstType = \s -> Just . toIType <$> cppTypeOf (shallowType s)
   , lcRawDeserialAstType = rawTypeOf
   , lcTemplateArgs = templateArgs
   , lcTypeMOf = \_ -> return Nothing
@@ -362,16 +357,16 @@ PROPAGATE_ERROR(errmsg)|]
   where
     -- For serialization, records become tuples (that's what _put_value/toAnything expects)
     serializeTypeOf :: SerialAST -> CppTranslator (Maybe IType)
-    serializeTypeOf (SerialObject _ _ _ rs) = Just . IType <$> recordToCppTuple (map snd rs)
-    serializeTypeOf s = Just . IType <$> cppTypeOf (serialAstToType s)
+    serializeTypeOf (SerialObject _ _ _ rs) = Just . toIType <$> recordToCppTuple (map snd rs)
+    serializeTypeOf s = Just . toIType <$> cppTypeOf (serialAstToType s)
 
     rawTypeOf :: SerialAST -> CppTranslator (Maybe IType)
-    rawTypeOf (SerialObject _ _ _ rs) = Just . IType <$> recordToCppTuple (map snd rs)
-    rawTypeOf s = Just . IType <$> cppTypeOf (serialAstToType s)
+    rawTypeOf (SerialObject _ _ _ rs) = Just . toIType <$> recordToCppTuple (map snd rs)
+    rawTypeOf s = Just . toIType <$> cppTypeOf (serialAstToType s)
 
     templateArgs :: [(Text, TypeF)] -> CppTranslator (Maybe [IType])
     templateArgs [] = return Nothing
-    templateArgs qs = Just . map IType <$> mapM (cppTypeOf . snd) qs
+    templateArgs qs = Just . map toIType <$> mapM (cppTypeOf . snd) qs
 
     makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
     makeLet namer letIndex typestr (PoolDocs ms1 e1 rs1 pes1) (PoolDocs ms2 e2 rs2 pes2) =
@@ -393,26 +388,6 @@ PROPAGATE_ERROR(errmsg)|]
     returnType t = cppTypeOf t
 
 -- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
--- Include statements in C can be either wrapped in angle brackets (e.g.,
--- `<stdio.h>`) or in quotes (e.g., `"myfile.h"`). The difference between these
--- is implementation specific. I currently use the GCC compiler. For quoted
--- strings, it first searches relative to the working directory and then, if
--- nothing is found, searches system files. For angle brackets, it searches
--- only system files: <https://gcc.gnu.org/onlinedocs/cpp/Search-Path.html>. So
--- quoting seems more reasonable, for now. This might change only if I start
--- loading the morloc libraries into the system directories (which might be
--- reasonable), though still, quotes would work.
---
--- UPDATE: The build system will now read the source paths from the Script
--- object and write an `-I${MORLOC_HOME}/lib/${MORLOC_PACKAGE}` argument for
--- g++. This will tell g++ where to look for headers. So now in the generated
--- source code I can just write the basename. This makes the generated code
--- neater (no hard-coded local paths), but now the g++ compiler will search
--- through all the module paths for each file, which introduces the possibility
--- of name conflicts.
---
--- UPDATE: And now those naming conflicts have bitten me. Simply including every
--- module directory is a wretched idea.
 translateSource ::
   -- | Path to a header (e.g., `$MORLOC_HOME/src/foo.h`)
   Path ->
@@ -593,4 +568,3 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
     showDefType _ (AppT _ _) = error "AppT is only OK with VarT, for now"
     showDefType _ (ThunkT _) = error "Cannot show ThunkT"
-

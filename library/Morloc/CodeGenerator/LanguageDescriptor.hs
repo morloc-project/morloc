@@ -25,10 +25,14 @@ module Morloc.CodeGenerator.LanguageDescriptor
   , SuspendStyle(..)
   , PatternInterpStyle(..)
   , ListConstructorStyle(..)
+  , ResourcePackStyle(..)
   , loadLangDescriptor
   , defaultLangDescriptor
   ) where
 
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as AesonKey
+import qualified Data.Aeson.KeyMap as KM
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Yaml as Y
@@ -109,6 +113,13 @@ data ListConstructorStyle
   | RAtomicList    -- c(a,b) for atomic, list(a,b) for complex
   deriving (Eq, Show, Generic)
 
+-- | How to pack remote call resources
+data ResourcePackStyle
+  = StructPackResources   -- struct.pack('iiii', m, t, c, g) (Python)
+  | NamedListResources    -- list(mem=m, time=t, cpus=c, gpus=g) (R)
+  | PlainListResources    -- [m, t, c, g] (default)
+  deriving (Eq, Show, Generic)
+
 -- | Complete language descriptor
 data LangDescriptor = LangDescriptor
   { -- Identity
@@ -140,6 +151,10 @@ data LangDescriptor = LangDescriptor
   , ldForeignCallSocketPath :: !Text -- how to construct socket path
   , ldForeignCallIntSuffix :: !Text  -- "L" for R, "" for others
 
+    -- Remote call
+  , ldRemoteCallFn :: !Text              -- "morloc.remote_call" or "morloc_remote_call"
+  , ldResourcePackStyle :: !ResourcePackStyle -- how to format resources
+
     -- Syntax styles
   , ldAssignment :: !AssignmentStyle
   , ldFunctionDef :: !FunctionDefStyle
@@ -150,7 +165,12 @@ data LangDescriptor = LangDescriptor
   , ldPattern :: !PatternInterpStyle
   , ldDispatchTable :: !DispatchTableStyle
 
+    -- Record access
+  , ldDictStyleRecords :: !Bool   -- True: NamRecord/dict use bracket access, others use dot (Python)
+  , ldQuoteRecordKeys :: !Bool    -- True: "k" => v (Julia), False: k=v (Python, R)
+
     -- Import syntax
+  , ldQualifiedImports :: !Bool   -- True: qualify source names with module path (Python)
   , ldImportPrefix :: !Text  -- "import " or "source(" etc.
   , ldIncludeRelToFile :: !Bool  -- True if include() resolves relative to file (Julia), False for CWD (R)
 
@@ -162,6 +182,9 @@ data LangDescriptor = LangDescriptor
     -- Execution
   , ldRunCommand :: ![Text]    -- command to run pool, e.g. ["python3"]
   , ldIsCompiled :: !Bool
+
+    -- External codegen (optional)
+  , ldCodegenCommand :: !(Maybe Text)  -- e.g. "morloc-codegen-generic"
   } deriving (Eq, Show, Generic)
 
 -- YAML instances (using generic deriving + custom FromJSON)
@@ -240,7 +263,26 @@ instance Y.FromJSON ListConstructorStyle where
     "r_atomic" -> pure RAtomicList
     _ -> fail $ "Unknown ListConstructorStyle: " <> T.unpack t
 
-instance Y.FromJSON LangDescriptor
+instance Y.FromJSON ResourcePackStyle where
+  parseJSON = Y.withText "ResourcePackStyle" $ \t -> case t of
+    "struct_pack" -> pure StructPackResources
+    "named_list" -> pure NamedListResources
+    "plain_list" -> pure PlainListResources
+    _ -> fail $ "Unknown ResourcePackStyle: " <> T.unpack t
+
+-- | Custom FromJSON that treats new optional fields as absent-safe.
+-- Injects defaults for optional fields before delegating to generic parsing.
+instance Y.FromJSON LangDescriptor where
+  parseJSON = Y.withObject "LangDescriptor" $ \obj -> do
+    let ins k v = KM.insertWith (\_ old -> old) (AesonKey.fromText k) v
+        withDefaults = ins "ldCodegenCommand" Y.Null
+                     . ins "ldRemoteCallFn" (Y.String "")
+                     . ins "ldResourcePackStyle" (Y.String "plain_list")
+                     . ins "ldDictStyleRecords" (Y.Bool False)
+                     . ins "ldQuoteRecordKeys" (Y.Bool True)
+                     . ins "ldQualifiedImports" (Y.Bool False)
+                     $ obj
+    Aeson.genericParseJSON Aeson.defaultOptions (Y.Object withDefaults)
 
 -- | Load a language descriptor from a YAML file
 loadLangDescriptor :: FilePath -> IO (Either String LangDescriptor)
@@ -270,6 +312,8 @@ defaultLangDescriptor name ext = LangDescriptor
   , ldForeignCallFn = "morloc.foreign_call"
   , ldForeignCallSocketPath = "os.path.join(global_state[\"tmpdir\"], \"{socket}\")"
   , ldForeignCallIntSuffix = ""
+  , ldRemoteCallFn = ""
+  , ldResourcePackStyle = PlainListResources
   , ldAssignment = EqualsAssign
   , ldFunctionDef = PythonDef
   , ldLambda = PythonLambda
@@ -278,6 +322,9 @@ defaultLangDescriptor name ext = LangDescriptor
   , ldMapList = PythonForAppend
   , ldPattern = PythonFString
   , ldDispatchTable = PythonDictDispatch
+  , ldDictStyleRecords = False
+  , ldQuoteRecordKeys = True
+  , ldQualifiedImports = False
   , ldImportPrefix = "import "
   , ldIncludeRelToFile = False
   , ldPoolTemplate = ""
@@ -285,4 +332,5 @@ defaultLangDescriptor name ext = LangDescriptor
   , ldCommentMarker = "#"
   , ldRunCommand = []
   , ldIsCompiled = False
+  , ldCodegenCommand = Nothing
   }

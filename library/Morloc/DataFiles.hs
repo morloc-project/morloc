@@ -10,21 +10,13 @@ Maintainer  : z@morloc.io
 -}
 module Morloc.DataFiles
   ( EmbededFile (..)
+  , LangSetup (..)
   , libmorlocFiles
   , libmorlocHeader
   , nexusSource
   , poolTemplate
-  , libcpplang
-  , libcpplangImpl
-  , libcpplangPch
-  , libpylang
-  , libpylangMakefile
-  , libpylangSetup
-  , librlang
-  , libjulialang
-  , libjuliaruntime
-  , libjuliadesc
-  , juliaPoolTemplate
+  , poolTemplateGeneric
+  , langSetups
   ) where
 
 import Data.FileEmbed (embedFileRelative)
@@ -40,6 +32,13 @@ import Morloc.Namespace.Prim (Lang(..))
 data EmbededFile = EmbededFile
   { embededFileName :: String -- basename for the file
   , embededFileText :: Text -- full text the file contained at compile time
+  }
+
+-- | Per-language init setup: an init script and associated data files.
+data LangSetup = LangSetup
+  { lsName :: String
+  , lsInitScript :: EmbededFile
+  , lsFiles :: [EmbededFile]
   }
 
 -- C library split into modular source files
@@ -112,52 +111,50 @@ inlineIncludes fileMap seen content = T.unlines $ concatMap processLine (T.lines
 nexusSource :: EmbededFile
 nexusSource = EmbededFile "nexus.c" (decodeUtf8 $ $(embedFileRelative "data/nexus.c"))
 
--- Pool templates for all supported languages
+-- Pool template for C++ (used by CppPrinter in executable)
 poolTemplate :: Lang -> EmbededFile
-poolTemplate CppLang = EmbededFile "pool.cpp" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.cpp"))
-poolTemplate Python3Lang = EmbededFile "pool.py" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.py"))
-poolTemplate RLang = EmbededFile "pool.R" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.R"))
--- PluginLang templates are loaded from disk at runtime, not embedded
+poolTemplate CppLang = EmbededFile "pool.cpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/pool.cpp"))
 poolTemplate (PluginLang _) = error "Plugin language templates are loaded dynamically"
-poolTemplate _ = undefined
+poolTemplate lang = error $ "No embedded pool template for " <> show lang
 
--- R interface to morloc.h
-librlang :: EmbededFile
-librlang = EmbededFile "rmorloc.c" (decodeUtf8 $ $(embedFileRelative "data/lang/r/rmorloc.c"))
+-- | 3-section pool templates for the generic translator (sources, manifolds, dispatch)
+poolTemplateGeneric :: Lang -> EmbededFile
+poolTemplateGeneric Python3Lang = EmbededFile "pool.py" (decodeUtf8 $ $(embedFileRelative "data/lang/py/pool.py"))
+poolTemplateGeneric RLang = EmbededFile "pool.R" (decodeUtf8 $ $(embedFileRelative "data/lang/r/pool.R"))
+poolTemplateGeneric lang = poolTemplate lang
 
--- C++ interface to morloc.h
-libcpplang :: EmbededFile
-libcpplang = EmbededFile "cppmorloc.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc.hpp"))
+-- | Per-language init setups. Each bundles an init.sh script with
+-- the data files that should be written to the build dir before running it.
+langSetups :: [LangSetup]
+langSetups = [cppSetup, pythonSetup, rSetup, juliaSetup]
 
--- C++ wrapper implementations (compiled once during morloc init)
-libcpplangImpl :: EmbededFile
-libcpplangImpl = EmbededFile "cppmorloc.cpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc.cpp"))
+cppSetup :: LangSetup
+cppSetup = LangSetup "C++"
+  (EmbededFile "init.sh" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/init.sh")))
+  [ EmbededFile "cppmorloc.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc.hpp"))
+  , EmbededFile "cppmorloc.cpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc.cpp"))
+  , EmbededFile "morloc_pch.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/morloc_pch.hpp"))
+  ]
 
--- Precompiled header (compiled once during morloc init)
-libcpplangPch :: EmbededFile
-libcpplangPch = EmbededFile "morloc_pch.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/morloc_pch.hpp"))
+pythonSetup :: LangSetup
+pythonSetup = LangSetup "python"
+  (EmbededFile "init.sh" (decodeUtf8 $ $(embedFileRelative "data/lang/py/init.sh")))
+  [ EmbededFile "pymorloc.c" (decodeUtf8 $ $(embedFileRelative "data/lang/py/pymorloc.c"))
+  , EmbededFile "setup.py" (decodeUtf8 $ $(embedFileRelative "data/lang/py/setup.py"))
+  , EmbededFile "Makefile" (decodeUtf8 $ $(embedFileRelative "data/lang/py/Makefile"))
+  ]
 
--- Python interface to morloc.h
--- built as a module and imported into python pools and the nexus
--- requires libmlcmpack.so
-libpylang :: EmbededFile
-libpylang = EmbededFile "pymorloc.c" (decodeUtf8 $ $(embedFileRelative "data/lang/py/pymorloc.c"))
+rSetup :: LangSetup
+rSetup = LangSetup "R"
+  (EmbededFile "init.sh" (decodeUtf8 $ $(embedFileRelative "data/lang/r/init.sh")))
+  [ EmbededFile "rmorloc.c" (decodeUtf8 $ $(embedFileRelative "data/lang/r/rmorloc.c"))
+  ]
 
-libpylangSetup :: EmbededFile
-libpylangSetup = EmbededFile "setup.py" (decodeUtf8 $ $(embedFileRelative "data/lang/py/setup.py"))
-
-libpylangMakefile :: EmbededFile
-libpylangMakefile = EmbededFile "Makefile" (decodeUtf8 $ $(embedFileRelative "data/lang/py/Makefile"))
-
--- Julia interface
-libjulialang :: EmbededFile
-libjulialang = EmbededFile "juliabridge.c" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/juliabridge.c"))
-
-libjuliaruntime :: EmbededFile
-libjuliaruntime = EmbededFile "MorlocRuntime.jl" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/MorlocRuntime.jl"))
-
-libjuliadesc :: EmbededFile
-libjuliadesc = EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/lang.yaml"))
-
-juliaPoolTemplate :: EmbededFile
-juliaPoolTemplate = EmbededFile "pool.jl" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.jl"))
+juliaSetup :: LangSetup
+juliaSetup = LangSetup "Julia"
+  (EmbededFile "init.sh" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/init.sh")))
+  [ EmbededFile "juliabridge.c" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/juliabridge.c"))
+  , EmbededFile "MorlocRuntime.jl" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/MorlocRuntime.jl"))
+  , EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/lang.yaml"))
+  , EmbededFile "pool.jl" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/pool.jl"))
+  ]

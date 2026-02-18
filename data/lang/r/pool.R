@@ -1,10 +1,6 @@
-# AUTO include morloc imports start
+# AUTO include sources start
 # <<<BREAK>>>
-# AUTO include morloc imports end
-
-# AUTO load dynamic libraries
-# <<<BREAK>>>
-# AUTO load dynamic libraries
+# AUTO include sources end
 
 morloc_is_ping                       <- function(...){ .Call("morloc_is_ping",                       ...) }
 morloc_pong                          <- function(...){ .Call("morloc_pong",                          ...) }

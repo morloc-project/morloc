@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -20,6 +21,11 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , IAccessor (..)
   , IFunMeta (..)
   , IProgram (..)
+
+    -- * IType rendering and conversion
+  , renderIType
+  , renderITypeText
+  , toIType
 
     -- * Program construction
   , buildProgram
@@ -51,8 +57,10 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
 
 import Control.Monad.Identity (Identity)
 import qualified Control.Monad.State as CMS
+import Data.Binary (Binary)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
+import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Grammars.Common (PoolDocs(..), mergePoolDocs, helperNamer, svarNamer, nvarNamer, argNamer, manNamer, provideClosure, DispatchEntry(..), extractLocalDispatch, extractRemoteDispatch)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial (isSerializable, serialAstToMsgpackSchema)
@@ -62,8 +70,8 @@ import Morloc.Monad (IndexState)
 -- Statements
 data IStmt
   = IFunDef IFunMeta [IParam] [IStmt] IExpr
-  | IAssign MDoc (Maybe IType) IExpr
-  | IMapList MDoc (Maybe IType) MDoc MDoc [IStmt] IExpr
+  | IAssign Text (Maybe IType) IExpr
+  | IMapList Text (Maybe IType) Text IExpr [IStmt] IExpr
     -- ^ resultVar, resultType, iterVar, collection, bodyStmts, yieldExpr
     -- Python/C++: resultVar = []; for iterVar in collection: bodyStmts; resultVar.append(yieldExpr)
     -- R: resultVar <- lapply(collection, function(iterVar) { bodyStmts; yieldExpr })
@@ -73,8 +81,8 @@ data IStmt
 
 -- Expressions
 data IExpr
-  = ICall MDoc (Maybe [IType]) [[IExpr]]
-  | IVar MDoc
+  = ICall Text (Maybe [IType]) [[IExpr]]
+  | IVar Text
   | IBoolLit Bool
   | IIntLit Integer
   | IRealLit Scientific
@@ -84,42 +92,84 @@ data IExpr
   | ITupleLit [IExpr]
   | IRecordLit NamType FVar [(Key, IExpr)]
   | IAccess IExpr IAccessor
-  | ISerCall MDoc IExpr             -- put_value(schema, expr)
-  | IDesCall MDoc (Maybe IType) IExpr -- get_value[<T>](schema, expr); type used by C++ template
-  | IForeignCall MDoc Int [IExpr]
-  | IRemoteCall MDoc Int RemoteResources [IExpr]
-  | ILambda [MDoc] IExpr
-  | IPack MDoc IExpr          -- packer(expr)
-  | IRawExpr MDoc
+  | ISerCall Text IExpr             -- put_value(schema, expr)
+  | IDesCall Text (Maybe IType) IExpr -- get_value[<T>](schema, expr); type used by C++ template
+  | IForeignCall Text Int [IExpr]
+  | IRemoteCall Text Int RemoteResources [IExpr]
+  | ILambda [Text] IExpr
+  | IPack Text IExpr          -- packer(expr)
+  | IRawExpr Text
   | ISuspend IExpr            -- thunk: lambda wrapping expression
   | IForce IExpr              -- force: call thunk with no args
 
-data IParam = IParam MDoc (Maybe IType)
-newtype IType = IType MDoc
+data IParam = IParam Text (Maybe IType)
+
+-- | Structured type representation for the IR.
+-- Carries enough information for any language's printer to render typed declarations.
+data IType
+  = ITyPrim Text              -- ^ Primitive type: "int", "double", "std::string", "bool", etc.
+  | ITyList IType             -- ^ List/vector type
+  | ITyTuple [IType]          -- ^ Tuple type
+  | ITyRecord Text [IType] [(Key, IType)]  -- ^ Record: name, type params, fields
+  | ITyFunction [IType] IType -- ^ Function type
+  | ITyUnit                   -- ^ Unit/void type
+  | ITyNamed Text [IType]     -- ^ Named type with parameters (e.g., Map k v)
+  | ITySerial                 -- ^ Serialized data (e.g., const uint8_t* in C++)
+  | ITyUnknown                -- ^ Type not known or not needed (Python, R)
+  deriving (Show, Eq, Ord, Generic)
+
+instance Binary IType
+
+-- | Render an IType to an MDoc for use in code generation output.
+-- This is used by printers that need the type as rendered text.
+renderIType :: IType -> MDoc
+renderIType (ITyPrim t) = pretty t
+renderIType (ITyList t) = "std::vector<" <> renderIType t <> ">"
+renderIType (ITyTuple ts) = "std::tuple<" <> hcat (punctuate ", " (map renderIType ts)) <> ">"
+renderIType (ITyRecord name [] _) = pretty name
+renderIType (ITyRecord name params _) = pretty name <> encloseSep "<" ">" "," (map renderIType params)
+renderIType (ITyFunction args ret) = "std::function<" <> renderIType ret <> tupled (map renderIType args) <> ">"
+renderIType ITyUnit = "void"
+renderIType (ITyNamed name []) = pretty name
+renderIType (ITyNamed name params) = pretty name <> encloseSep "<" ">" "," (map renderIType params)
+renderIType ITySerial = "const uint8_t*"
+renderIType ITyUnknown = "auto"
+
+-- | Render an IType to Text (for macro expansion, etc.)
+renderITypeText :: IType -> Text
+renderITypeText = render . renderIType
+
+-- | Convert a rendered MDoc type to an opaque IType.
+-- This is a transitional bridge: preserves the rendered form as ITyNamed.
+-- C++ currently produces rendered MDoc types; this wraps them for the new IR.
+toIType :: MDoc -> IType
+toIType d = ITyNamed (render d) []
 
 data IAccessor
   = IIdx Int
   | IKey Key
-  | IField MDoc
+  | IField Text
 
 data IFunMeta = IFunMeta
-  { ifName :: MDoc
+  { ifName :: Text
   , ifReturnType :: Maybe IType
   , ifHeadForm :: Maybe HeadManifoldForm
   }
 
 data IProgram = IProgram
-  { ipSources :: [MDoc]
-  , ipManifolds :: [MDoc]
+  { ipSources :: [Text]
+  , ipManifolds :: [Text]
   , ipLocalDispatch :: [DispatchEntry]
   , ipRemoteDispatch :: [DispatchEntry]
-  }
+  } deriving (Generic)
+
+instance Binary IProgram
 
 -- | Build an IProgram from pre-rendered sources and manifolds (pure, for Python/R).
 buildProgram :: [MDoc] -> [MDoc] -> [SerialManifold] -> IProgram
 buildProgram sources manifolds es = IProgram
-  { ipSources = sources
-  , ipManifolds = manifolds
+  { ipSources = map render sources
+  , ipManifolds = map render manifolds
   , ipLocalDispatch = extractLocalDispatch es
   , ipRemoteDispatch = extractRemoteDispatch es
   }
@@ -188,11 +238,11 @@ data LowerConfig m = LowerConfig
 expandSerialize :: (Monad m) => LowerConfig m -> MDoc -> SerialAST -> m (IExpr, [IStmt])
 expandSerialize cfg v0 s0 = do
   (stmts, vExpr) <- go v0 s0
-  let schema = serialAstToMsgpackSchema s0
+  let schema = render $ serialAstToMsgpackSchema s0
   return (ISerCall schema vExpr, stmts)
   where
     go v s
-      | isSerializable s = return ([], IVar v)
+      | isSerializable s = return ([], IRawExpr (render v))
       | otherwise = construct v s
 
     construct v (SerialPack _ (p, s)) =
@@ -202,17 +252,17 @@ expandSerialize cfg v0 s0 = do
     construct v lst@(SerialList _ s) = do
       idx <- lcNewIndex cfg
       resultType <- lcSerialAstType cfg lst
-      let v' = helperNamer idx
-          iterVar = "i" <> pretty idx
-      (before, x) <- go iterVar s
-      return ([IMapList v' resultType iterVar v before x], IVar v')
+      let v' = render $ helperNamer idx
+          iterVar = render $ "i" <> pretty idx
+      (before, x) <- go ("i" <> pretty idx) s
+      return ([IMapList v' resultType iterVar (IRawExpr (render v)) before x], IVar v')
 
     construct v tup@(SerialTuple _ ss) = do
       results <- zipWithM (\i s -> go (lcTupleAccessor cfg i v) s) [0..] ss
       let (befores, exprs) = unzip results
       idx <- lcNewIndex cfg
       typeM <- lcSerialAstType cfg tup
-      let v' = helperNamer idx
+      let v' = render $ helperNamer idx
       return (concat befores ++ [IAssign v' typeM (ITupleLit exprs)], IVar v')
 
     construct v obj@(SerialObject namType fv@(FV _ constructor) _ rs) = do
@@ -221,7 +271,7 @@ expandSerialize cfg v0 s0 = do
       let (befores, exprs) = unzip results
       idx <- lcNewIndex cfg
       typeM <- lcSerialAstType cfg obj
-      let v' = helperNamer idx
+      let v' = render $ helperNamer idx
       return
         ( concat befores ++ [IAssign v' typeM (IRecordLit namType fv (zip (map fst rs) exprs))]
         , IVar v'
@@ -234,39 +284,39 @@ expandSerialize cfg v0 s0 = do
 expandDeserialize :: (Monad m) => LowerConfig m -> MDoc -> SerialAST -> m (IExpr, [IStmt])
 expandDeserialize cfg v0 s0
   | isSerializable s0 = do
-      let schema = serialAstToMsgpackSchema s0
+      let schema = render $ serialAstToMsgpackSchema s0
       desType <- lcDeserialAstType cfg s0
-      return (IDesCall schema desType (IVar v0), [])
+      return (IDesCall schema desType (IRawExpr (render v0)), [])
   | otherwise = do
       idx <- lcNewIndex cfg
       rawType <- lcRawDeserialAstType cfg s0
-      let rawvar = helperNamer idx
-          schema = serialAstToMsgpackSchema s0
-      (x, befores) <- check rawvar s0
-      return (x, IAssign rawvar rawType (IDesCall schema rawType (IVar v0)) : befores)
+      let rawvar = render $ helperNamer idx
+          schema = render $ serialAstToMsgpackSchema s0
+      (x, befores) <- check (helperNamer idx) s0
+      return (x, IAssign rawvar rawType (IDesCall schema rawType (IRawExpr (render v0))) : befores)
   where
     check v s
-      | isSerializable s = return (IVar v, [])
+      | isSerializable s = return (IRawExpr (render v), [])
       | otherwise = construct v s
 
     construct v (SerialPack _ (p, s')) = do
       (x, before) <- check v s'
-      let packer = lcPackerName cfg (typePackerForward p)
+      let packer = render $ lcPackerName cfg (typePackerForward p)
       return (IPack packer x, before)
 
     construct v lst@(SerialList _ s) = do
       idx <- lcNewIndex cfg
       resultType <- lcDeserialAstType cfg lst
-      let v' = helperNamer idx
-          iterVar = "i" <> pretty idx
-      (x, before) <- check iterVar s
-      return (IVar v', [IMapList v' resultType iterVar v before x])
+      let v' = render $ helperNamer idx
+          iterVar = render $ "i" <> pretty idx
+      (x, before) <- check ("i" <> pretty idx) s
+      return (IVar v', [IMapList v' resultType iterVar (IRawExpr (render v)) before x])
 
     construct v tup@(SerialTuple _ ss) = do
       results <- zipWithM (\i s -> check (lcTupleAccessor cfg i v) s) [0..] ss
       let (exprs, befores) = unzip results
       typeM <- lcDeserialAstType cfg tup
-      v' <- helperNamer <$> lcNewIndex cfg
+      v' <- (render . helperNamer) <$> lcNewIndex cfg
       return (IVar v', concat befores ++ [IAssign v' typeM (ITupleLit exprs)])
 
     construct v (SerialObject namType fv@(FV _ constructor) _ rs) = do
@@ -275,7 +325,7 @@ expandDeserialize cfg v0 s0
       let (exprs, befores) = unzip results
       typeM <- lcDeserialAstType cfg (SerialObject namType fv [] rs)
       idx <- lcNewIndex cfg
-      let v' = helperNamer idx
+      let v' = render $ helperNamer idx
       return (IVar v', concat befores ++ [IAssign v' typeM (IRecordLit namType fv (zip (map fst rs) exprs))])
 
     construct _ _ = error "Unreachable in expandDeserialize"
@@ -315,12 +365,10 @@ lowerNativeExpr ::
 lowerNativeExpr cfg _ (AppExeN_ _ (SrcCallP src) qs (map snd -> es)) = do
   templateArgs <- lcTemplateArgs cfg qs
   let handleFunctionArgs ts =
-        (<>) (lcSrcName cfg src <> printTemplateArgs ts)
+        (<>) (lcSrcName cfg src <> printTemplateArgs' ts)
           . hsep
           . map tupled
           . provideClosure src
-      printTemplateArgs Nothing = ""
-      printTemplateArgs (Just ts) = encloseSep "<" ">" "," [t' | IType t' <- ts]
   return $ mergePoolDocs (handleFunctionArgs templateArgs) es
 lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) _ xs) = do
   let es = map snd xs
@@ -333,9 +381,7 @@ lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) _ xs) = do
     }
 lowerNativeExpr cfg _ (AppExeN_ _ (LocalCallP idx) qs (map snd -> es)) = do
   templateArgs <- lcTemplateArgs cfg qs
-  let printTemplateArgs Nothing = ""
-      printTemplateArgs (Just ts) = encloseSep "<" ">" "," [t' | IType t' <- ts]
-  return $ mergePoolDocs ((<>) (nvarNamer idx <> printTemplateArgs templateArgs) . tupled) es
+  return $ mergePoolDocs ((<>) (nvarNamer idx <> printTemplateArgs' templateArgs) . tupled) es
 lowerNativeExpr _ _ (ManN_ call) = return call
 lowerNativeExpr cfg _ (ReturnN_ x) =
   return $ x {poolExpr = lcReturn cfg (poolExpr x)}
@@ -378,7 +424,7 @@ lowerNativeExpr cfg _ (SuspendN_ _ x) =
         , poolPriorLines = hoisted
         , poolPriorExprs = poolPriorExprs x
         }
-lowerNativeExpr cfg _ (ForceN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IForce (IRawExpr (poolExpr x)))}
+lowerNativeExpr cfg _ (ForceN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IForce (IRawExpr (render (poolExpr x))))}
 
 -- | Lower a serial manifold to PoolDocs.
 -- Replaces translateManifold from Common.hs for serial manifolds.
@@ -464,3 +510,8 @@ defaultDeserialize cfg v s = do
   return (lcPrintExpr cfg expr, map (lcPrintStmt cfg) stmts)
 
 type IndexM = CMS.StateT IndexState Identity
+
+-- | Render template type arguments as MDoc (used by the fold for source/local calls)
+printTemplateArgs' :: Maybe [IType] -> MDoc
+printTemplateArgs' Nothing = ""
+printTemplateArgs' (Just ts) = encloseSep "<" ">" "," (map renderIType ts)

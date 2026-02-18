@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -41,6 +42,8 @@ module Morloc.CodeGenerator.Grammars.Common
   ) where
 
 import qualified Control.Monad.State as CMS
+import Data.Binary (Binary)
+import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial (serialAstToType)
 import Morloc.Data.Doc
@@ -427,7 +430,9 @@ data DispatchEntry = DispatchEntry
   { dispatchId :: Int
   , dispatchArgCount :: Int
   }
-  deriving (Show, Eq, Ord)
+  deriving (Show, Eq, Ord, Generic)
+
+instance Binary DispatchEntry
 
 -- | Extract local dispatch entries from serial manifolds.
 -- Skips manifolds marked as remote workers.

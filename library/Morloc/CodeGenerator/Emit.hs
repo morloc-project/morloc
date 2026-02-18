@@ -11,17 +11,17 @@ Maintainer  : z@morloc.io
 module Morloc.CodeGenerator.Emit
   ( pool
   , emit
+  , TranslateFn
   ) where
 
+import Morloc.CodeGenerator.Grammars.Common (invertSerialManifold)
 import Morloc.CodeGenerator.Namespace
-import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 
-import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
-import qualified Morloc.CodeGenerator.Grammars.Translator.Python3 as Python3
-import qualified Morloc.CodeGenerator.Grammars.Translator.R as R
-import qualified Morloc.CodeGenerator.Grammars.Translator.Generic as Generic
+-- | Callback type for language-specific translation.
+-- The executable provides concrete implementations for each language.
+type TranslateFn = Lang -> [Source] -> [SerialManifold] -> MorlocMonad Script
 
 -- | Sort manifolds into pools. Within pools, group manifolds into call sets.
 pool :: [SerialManifold] -> [(Lang, [SerialManifold])]
@@ -32,13 +32,14 @@ pool es =
 
 -- | Translate a pool of serialized manifolds to target language source code
 emit ::
+  TranslateFn ->
   Lang ->
   [SerialManifold] ->
   MorlocMonad Script
-emit lang xs = do
+emit translateFn lang xs = do
   srcs' <- findSources xs
-  xs' <- mapM (preprocess lang) xs
-  translate lang srcs' xs'
+  let xs' = map invertSerialManifold xs
+  translateFn lang srcs' xs'
 
 findSources :: [SerialManifold] -> MorlocMonad [Source]
 findSources ms = unique <$> concatMapM (foldSerialManifoldM fm) ms
@@ -71,19 +72,3 @@ findSources ms = unique <$> concatMapM (foldSerialManifoldM fm) ms
 
     lookupConstructors :: Lang -> Int -> MorlocMonad [Source]
     lookupConstructors lang i = MM.metaSources i |>> filter ((==) lang . srcLang)
-
-translate :: Lang -> [Source] -> [SerialManifold] -> MorlocMonad Script
-translate lang srcs es = do
-  case lang of
-    CppLang -> Cpp.translate srcs es
-    RLang -> R.translate srcs es
-    Python3Lang -> Python3.translate srcs es
-    PluginLang _ -> Generic.translate lang srcs es
-    x -> MM.throwSystemError $ "Language '" <> viaShow x <> "' has no translator"
-
-preprocess :: Lang -> SerialManifold -> MorlocMonad SerialManifold
-preprocess CppLang es = Cpp.preprocess es
-preprocess RLang es = R.preprocess es
-preprocess Python3Lang es = Python3.preprocess es
-preprocess (PluginLang _) es = Generic.preprocess es
-preprocess l _ = MM.throwSystemError $ "Language '" <> viaShow l <> "' has no translator"
