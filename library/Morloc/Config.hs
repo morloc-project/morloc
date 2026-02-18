@@ -113,6 +113,8 @@ setupServerAndSocket c lang = Socket lang args socket
       CppLang -> ["./" <> pretty (ML.makeExecutablePoolName CppLang)]
       RLang -> [pretty (configLangR c), pretty (ML.makeExecutablePoolName RLang)]
       Python3Lang -> [pretty (configLangPython3 c), pretty (ML.makeExecutablePoolName Python3Lang)]
+      -- Plugin languages are assumed to be interpreted with a run command
+      ML.PluginLang _ -> [pretty (ML.makeExecutablePoolName lang)]
 
     socket = "pipe-" <> pretty (ML.showLangName lang)
 

@@ -70,6 +70,8 @@ libmorlocFiles =
   , EmbededFile "manifest.c"  (decodeUtf8 $(embedFileRelative "data/morloc/manifest.c"))
   , EmbededFile "daemon.h"    (decodeUtf8 $(embedFileRelative "data/morloc/daemon.h"))
   , EmbededFile "daemon.c"    (decodeUtf8 $(embedFileRelative "data/morloc/daemon.c"))
+  , EmbededFile "pool.h"      (decodeUtf8 $(embedFileRelative "data/morloc/pool.h"))
+  , EmbededFile "pool.c"      (decodeUtf8 $(embedFileRelative "data/morloc/pool.c"))
   , EmbededFile "http.h"      (decodeUtf8 $(embedFileRelative "data/morloc/http.h"))
   , EmbededFile "http.c"      (decodeUtf8 $(embedFileRelative "data/morloc/http.c"))
   , EmbededFile "router.h"    (decodeUtf8 $(embedFileRelative "data/morloc/router.h"))
@@ -111,6 +113,8 @@ poolTemplate :: Lang -> EmbededFile
 poolTemplate CppLang = EmbededFile "pool.cpp" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.cpp"))
 poolTemplate Python3Lang = EmbededFile "pool.py" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.py"))
 poolTemplate RLang = EmbededFile "pool.R" (decodeUtf8 $ $(embedFileRelative "data/pools/pool.R"))
+-- PluginLang templates are loaded from disk at runtime, not embedded
+poolTemplate (PluginLang _) = error "Plugin language templates are loaded dynamically"
 poolTemplate _ = undefined
 
 -- R interface to morloc.h

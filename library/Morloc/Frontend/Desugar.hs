@@ -82,6 +82,7 @@ data DState = DState
   , dsModulePath  :: !(Maybe Path)
   , dsModuleConfig :: !ModuleConfig
   , dsSourceLines :: ![Text]
+  , dsPluginLangs :: !(Map.Map Text String) -- name -> extension for registered plugins
   }
   deriving (Show)
 
@@ -201,9 +202,15 @@ quantifyType t = forallWrap (nub (collectGenVars t)) t
     collectGenVars _ = []
 
 parseLang :: Located -> D Lang
-parseLang tok = case ML.readLangName (getName' tok) of
+parseLang tok = case ML.readLangName name of
   Just lang -> return lang
-  Nothing -> dfail (locPos tok) ("unknown language: " ++ T.unpack (getName' tok))
+  Nothing -> do
+    plugins <- State.gets dsPluginLangs
+    case Map.lookup (T.toLower name) plugins of
+      Just ext -> return $ ML.PluginLang (ML.PluginLangInfo (T.toLower name) ext)
+      Nothing -> dfail (locPos tok) ("unknown language: " ++ T.unpack name)
+  where
+    name = getName' tok
 
 getName' :: Located -> Text
 getName' (Located _ (TokLowerName n) _) = n

@@ -200,6 +200,60 @@ uint8_t* make_mpk_data_packet(const char* mpk_filename, const Schema* schema){
     return packet;
 }
 
+uint8_t* make_data_packet_from_mpk(const char* mpk, size_t mpk_size, const Schema* schema){
+    return make_morloc_data_packet_with_schema(
+        (const uint8_t*)mpk,
+        mpk_size,
+        schema,
+        PACKET_SOURCE_MESG,
+        PACKET_FORMAT_MSGPACK,
+        PACKET_COMPRESSION_NONE,
+        PACKET_ENCRYPTION_NONE,
+        PACKET_STATUS_PASS
+    );
+}
+
+int get_data_packet_as_mpk(const uint8_t* packet, const Schema* schema,
+                            char** mpk_out, size_t* mpk_size_out, ERRMSG) {
+    BOOL_RETURN_SETUP
+
+    morloc_packet_header_t* header = TRY(read_morloc_packet_header, packet);
+    RAISE_IF(header->command.cmd_type.type != PACKET_TYPE_DATA, "Expected a data packet");
+
+    char* packet_error = TRY(get_morloc_data_packet_error_message, packet);
+    RAISE_IF_WITH(packet_error != NULL, free(packet_error), "\n%s", packet_error)
+
+    uint8_t source = header->command.data.source;
+    uint8_t format = header->command.data.format;
+    const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
+    size_t payload_size = header->length;
+
+    if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_MSGPACK) {
+        // Inline msgpack: copy directly
+        *mpk_out = (char*)malloc(payload_size);
+        RAISE_IF(*mpk_out == NULL, "malloc failed");
+        memcpy(*mpk_out, payload, payload_size);
+        *mpk_size_out = payload_size;
+    } else if (source == PACKET_SOURCE_FILE && format == PACKET_FORMAT_MSGPACK) {
+        // File-based msgpack: read the file
+        char* filename = strndup((char*)payload, MAX_FILENAME_SIZE);
+        size_t file_size;
+        uint8_t* file_data = TRY_WITH(free(filename), read_binary_file, filename, &file_size);
+        free(filename);
+        *mpk_out = (char*)file_data;
+        *mpk_size_out = file_size;
+    } else if (source == PACKET_SOURCE_RPTR && format == PACKET_FORMAT_VOIDSTAR) {
+        // Voidstar: convert to msgpack via pack_with_schema
+        size_t relptr = *(size_t*)(payload);
+        void* voidstar = TRY(rel2abs, relptr);
+        TRY(pack_with_schema, voidstar, schema, mpk_out, mpk_size_out);
+    } else {
+        RAISE("Unsupported packet source/format: 0x%02hhx/0x%02hhx", source, format);
+    }
+
+    return true;
+}
+
 morloc_metadata_header_t* as_morloc_metadata_header(const uint8_t* ptr){
 
     morloc_metadata_header_t* metadata_header = (morloc_metadata_header_t*)(ptr);

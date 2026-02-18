@@ -13,6 +13,7 @@ as the starting place for adding a new language.
 -}
 module Morloc.Language
   ( Lang (..)
+  , PluginLangInfo (..)
   , mapLang
   , parseExtension
   , makeExtension
@@ -24,10 +25,24 @@ module Morloc.Language
   , pairwiseCost
   , languageCost
   , serialType
+  , isPluginLang
   ) where
 
 import Data.Text (Text, toLower)
 import Morloc.Data.Doc
+
+-- | Lightweight info carried in the PluginLang constructor.
+-- The full language descriptor (syntax, templates) is loaded separately.
+data PluginLangInfo = PluginLangInfo
+  { pliName :: !Text
+  , pliExtension :: !String
+  } deriving (Show)
+
+instance Eq PluginLangInfo where
+  a == b = pliName a == pliName b
+
+instance Ord PluginLangInfo where
+  compare a b = compare (pliName a) (pliName b)
 
 {- | Programming languages in the Morloc ecosystem. This is the type that
 should be used to refer to a language (don't use raw strings). Some of these
@@ -38,16 +53,22 @@ data Lang
   | RLang
   | CLang
   | CppLang
+  | PluginLang !PluginLangInfo
   deriving (Ord, Eq, Show)
 
 instance Pretty Lang where
   pretty = viaShow
+
+isPluginLang :: Lang -> Bool
+isPluginLang (PluginLang _) = True
+isPluginLang _ = False
 
 serialType :: Lang -> Text
 serialType CppLang = "uint8_t*"
 serialType RLang = "character"
 serialType Python3Lang = "str"
 serialType CLang = error "C is not yet supported"
+serialType (PluginLang _) = "bytes" -- msgpack bridge uses raw bytes
 
 -- | Map a function over each supported language
 mapLang :: (Lang -> a) -> [a]
@@ -73,6 +94,10 @@ pairwiseCost _ CppLang = 5000
 pairwiseCost _ Python3Lang = 500000 -- the cost of opening the python interpreter and loading modules
 -- this could be optimized by running R server
 pairwiseCost _ RLang = 50000000 -- an arm and a leg
+-- plugin languages: assume similar to Python (interpreted, daemon-based)
+pairwiseCost (PluginLang a) (PluginLang b)
+  | a == b = 10
+pairwiseCost _ (PluginLang _) = 5000
 
 -- | hello flame wars - these costs are mostly intended to break ties
 languageCost :: Lang -> Int
@@ -80,6 +105,7 @@ languageCost CppLang = 0
 languageCost CLang = 1
 languageCost Python3Lang = 3
 languageCost RLang = 4
+languageCost (PluginLang _) = 5
 
 -- | Try to determine the source language for a file from its extension
 parseExtension :: Text -> Maybe Lang
@@ -98,6 +124,7 @@ makeExtension Python3Lang = "py"
 makeExtension RLang = "R"
 makeExtension CLang = "c"
 makeExtension CppLang = "cpp"
+makeExtension (PluginLang pli) = pliExtension pli
 
 {- | Create the name of a given language. This is the internal standard name
 for the language and the string language name used in the RDF.
@@ -107,6 +134,7 @@ showLangName Python3Lang = "python3"
 showLangName RLang = "r"
 showLangName CLang = "c"
 showLangName CppLang = "cpp"
+showLangName (PluginLang pli) = pliName pli
 
 -- | Read the name of a given language and try to translate it
 readLangName :: Text -> Maybe Lang

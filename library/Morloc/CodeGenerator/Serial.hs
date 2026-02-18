@@ -36,6 +36,7 @@ serialType :: Lang -> CVar
 serialType Python3Lang = CV "str"
 serialType RLang = CV "character"
 serialType CppLang = CV "std::string"
+serialType (PluginLang _) = CV "bytes" -- msgpack bridge uses raw bytes
 serialType _ = error "Ah hell, you know I don't know that language"
 
 -- | recurse all the way to a serializable type

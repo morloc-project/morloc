@@ -692,11 +692,12 @@ data PState = PState
   , psModuleConfig :: !ModuleConfig
   , psDocMap      :: !(Map.Map Pos [Text])
   , psSourceLines :: ![Text]
+  , psPluginLangs :: !(Map.Map T.Text String) -- name -> extension for registered plugins
   }
   deriving (Show)
 
 emptyPState :: PState
-emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty []
+emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty
 
 type P a = State.StateT PState (Either ParseError) a
 
@@ -775,6 +776,7 @@ toDState ps = DState
   , dsModulePath = psModulePath ps
   , dsModuleConfig = psModuleConfig ps
   , dsSourceLines = psSourceLines ps
+  , dsPluginLangs = psPluginLangs ps
   }
 
 fromDState :: PState -> DState -> PState

@@ -495,6 +495,8 @@ buildManifest config programName buildDir buildTime daemonSets fdata gasts langT
     makeExecArgs CLang = ["pools" </> ML.makeExecutablePoolName CLang]
     makeExecArgs Python3Lang = [MC.configLangPython3 config, "pools" </> ML.makeExecutablePoolName Python3Lang]
     makeExecArgs RLang = [MC.configLangR config, "pools" </> ML.makeExecutablePoolName RLang]
+    -- Plugin languages: assumed interpreted, pool file run directly
+    makeExecArgs l@(ML.PluginLang _) = ["pools" </> ML.makeExecutablePoolName l]
 
     remoteCmdJson :: FData -> Text
     remoteCmdJson fd = jsonObj

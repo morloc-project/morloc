@@ -19,20 +19,11 @@
 
 #include <limits>
 #include <utility>
-#include <atomic>
-
-// needed for the thread pool
-#include <pthread.h>
-#include <signal.h>
 
 
 using namespace std;
 
 char* g_tmpdir;
-
-// Dynamic worker spawning: track how many threads are blocked in foreign_call
-static std::atomic<int> g_busy_count{0};
-static std::atomic<int> g_total_threads{0};
 
 uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) __attribute__((sentinel));
 
@@ -164,9 +155,9 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
         PROPAGATE_ERROR(errmsg)
     }
 
-    g_busy_count.fetch_add(1, std::memory_order_relaxed);
+    pool_mark_busy();
     uint8_t* result = send_and_receive_over_socket(socket_path, packet, &errmsg);
-    g_busy_count.fetch_sub(1, std::memory_order_relaxed);
+    pool_mark_idle();
 
     free(packet);
     if (errmsg != NULL) {
@@ -197,323 +188,51 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
 // AUTO dispatch end
 
 
-typedef struct job_s {
-    int client_fd;
-    struct job_s* next;
-} job_t;
-
-typedef struct job_queue_s {
-    job_t* head;
-    job_t* tail;
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
-} job_queue_t;
-
-volatile sig_atomic_t shutting_down = 0;
-job_queue_t* g_queue = NULL;
-
-int is_shutting_down() {
-    return shutting_down;
+// Wrappers to adapt compiler-generated dispatch functions to pool_dispatch_fn_t.
+// These catch C++ exceptions so the C pool_main never sees them.
+static uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
+                                    size_t nargs, void* ctx) {
+    (void)nargs; (void)ctx;
+    try {
+        return local_dispatch(mid, args);
+    } catch (const std::exception& e) {
+        return make_fail_packet(e.what());
+    } catch (...) {
+        return make_fail_packet("An unknown error occurred");
+    }
 }
 
-void set_shutting_down(int value) {
-    shutting_down = value;
-}
-
-void sigterm_handler(int sig) {
-    (void)sig;
-    shutting_down = 1;
-    // Do not call pthread_cond_broadcast here - it is not async-signal-safe.
-    // Workers use pthread_cond_timedwait and will notice the flag within 100ms.
-}
-
-uint8_t* dispatch(const uint8_t* msg){
-    char* errmsg = NULL;
-
-    morloc_call_t* call_packet = NULL;
-    uint32_t mid = 0;
-    const uint8_t** args;
-
-    bool is_ping = packet_is_ping(msg, &errmsg);
-    PROPAGATE_FAIL_PACKET(errmsg)
-
-    if(is_ping){
-        uint8_t* pong = return_ping(msg, &errmsg);
-        PROPAGATE_FAIL_PACKET(errmsg)
-        return pong;
+static uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
+                                     size_t nargs, void* ctx) {
+    (void)nargs; (void)ctx;
+    try {
+        return remote_dispatch(mid, args);
+    } catch (const std::exception& e) {
+        return make_fail_packet(e.what());
+    } catch (...) {
+        return make_fail_packet("An unknown error occurred");
     }
-
-    bool is_local_call = packet_is_local_call(msg, &errmsg);
-    PROPAGATE_FAIL_PACKET(errmsg)
-
-    bool is_remote_call = packet_is_remote_call(msg, &errmsg);
-    PROPAGATE_FAIL_PACKET(errmsg)
-
-    if(is_local_call || is_remote_call){
-        call_packet = read_morloc_call_packet(msg, &errmsg);
-        PROPAGATE_FAIL_PACKET(errmsg)
-        mid = call_packet->midx;
-        args = (const uint8_t**)call_packet->args;
-
-        uint8_t* result = NULL;
-        try {
-            if(is_local_call){
-                result = local_dispatch(mid, args);
-            } else {
-                result = remote_dispatch(mid, args);
-            }
-        } catch (const std::exception& e) {
-            result = make_fail_packet(e.what());
-        } catch (...) {
-            result = make_fail_packet("An unknown error occurred");
-        }
-
-        free_morloc_call(call_packet);
-
-        return result;
-    }
-
-    return make_fail_packet("In C++ pool, call failed due to inappropriate packet");
-}
-
-
-// start an empty job queue
-void job_queue_init(job_queue_t* q) {
-    q->head = q->tail = NULL;
-    pthread_mutex_init(&q->mutex, NULL);
-    pthread_cond_init(&q->cond, NULL);
-}
-
-
-// add a new client socket fd to the queue
-void job_queue_push(job_queue_t* q, int client_fd) {
-    job_t* job = (job_t*)malloc(sizeof(job_t));
-    if (!job) {
-        std::cerr << "malloc failed in job_queue_push, dropping client" << std::endl;
-        close_socket(client_fd);
-        return;
-    }
-    job->client_fd = client_fd;
-    job->next = NULL;
-    pthread_mutex_lock(&q->mutex);
-    if (q->tail) {
-        q->tail->next = job;
-        q->tail = job;
-    } else {
-        q->head = job;
-        q->tail = job;
-    }
-    // signal that a job is ready, one worker will be awoken
-    pthread_cond_signal(&q->cond);
-    pthread_mutex_unlock(&q->mutex);
-}
-
-
-// remove and return the oldest element as soon as one is available
-int job_queue_pop(job_queue_t* q) {
-    pthread_mutex_lock(&q->mutex);
-
-    while (!q->head && !is_shutting_down()) {
-        // Wait for job_queue_push to add a new job (this releases the mutex
-        // until the condition is met). Timedwait is a fallback; shutdown
-        // normally wakes workers via pthread_cond_broadcast.
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_nsec += 100000000; // 100ms
-        if (ts.tv_nsec >= 1000000000) {
-            ts.tv_sec += 1;
-            ts.tv_nsec -= 1000000000;
-        }
-        pthread_cond_timedwait(&q->cond, &q->mutex, &ts);
-    }
-    if (is_shutting_down()) {
-        pthread_mutex_unlock(&q->mutex);
-        pthread_exit(NULL);
-    }
-    job_t* job = q->head;
-    q->head = job->next;
-    if (!q->head) q->tail = NULL;
-    int fd = job->client_fd;
-    free(job);
-    pthread_mutex_unlock(&q->mutex);
-    return fd;
-}
-
-
-void* worker_thread(void* arg) {
-    job_queue_t* q = (job_queue_t*)arg;
-    while (!is_shutting_down()) {
-        // takes a job from the queue as soon as one is available
-        int client_fd = job_queue_pop(q);
-
-        char* errmsg = NULL;
-        uint8_t* result = NULL;
-        size_t bytes_sent = 0;
-        size_t length = 0;
-
-        // Pull data from the client
-        uint8_t* client_data = stream_from_client(client_fd, &errmsg);
-
-        if(client_data == NULL || errmsg != NULL){
-            if (errmsg != NULL) {
-                std::cerr << "Failed to read client data: " << errmsg << std::endl;
-                free(errmsg);
-                errmsg = NULL;
-            } else {
-                std::cerr << "Retrieved NULL client result" << std::endl;
-            }
-            free(client_data);
-            client_data = NULL;
-            close_socket(client_fd);
-            continue;
-        }
-
-        // Fail if no data was pulled
-        length = morloc_packet_size(client_data, &errmsg);
-        if(errmsg != NULL){
-            free(client_data);
-            client_data = NULL;
-            std::cerr << "Malformed packet: " << errmsg << std::endl;
-            free(errmsg);
-            errmsg = NULL;
-            close_socket(client_fd);
-            continue;
-        } else if (length == 0) {
-            free(client_data);
-            client_data = NULL;
-            std::cerr << "Zero length packet received from client" << std::endl;
-            close_socket(client_fd);
-            continue;
-        }
-
-        // Run the job
-        try {
-            // failure in the user code must be caught gracefully and passed forward
-            result = dispatch(client_data);
-        } catch (const std::exception& e) {
-            result = make_fail_packet(e.what());
-        }
-        free(client_data);
-        client_data = NULL;
-
-        // return the result to the client and move on
-        // do not wait for the client to finish processing
-        bytes_sent = send_packet_to_foreign_server(client_fd, result, &errmsg);
-        free(result);
-        result = NULL;
-        if(errmsg != NULL){
-            std::cerr << "Failed to send data: " << errmsg << std::endl;
-            free(errmsg);
-            errmsg = NULL;
-            close_socket(client_fd);
-            continue;
-        }
-
-        // close the child file descriptor
-        close_socket(client_fd);
-    }
-    return NULL;
 }
 
 
 int main(int argc, char* argv[]) {
     if (argc != 4) {
-        std::cerr << "Usage: " << argv[0] << " <socket_path>" << " <tmpdir>" << "<shm_basename>\n";
-        return 1;
-    }
-
-    char* errmsg = NULL;
-
-    language_daemon_t* daemon = start_daemon(
-        argv[1], // path to the socket file
-        argv[2], // main temporary directory
-        argv[3], // basename for the shared memory files (i.e., in /dev/shm)
-        0xffff,  // default shm size
-        &errmsg
-    );
-
-    if(errmsg != NULL){
-        std::cerr << "Failed to start language server:\n" << errmsg << std::endl;
-        free(errmsg);
+        std::cerr << "Usage: " << argv[0] << " <socket_path> <tmpdir> <shm_basename>\n";
         return 1;
     }
 
     g_tmpdir = strdup(argv[2]);
 
-    job_queue_t queue;
-    job_queue_init(&queue);
-    g_queue = &queue;
+    pool_config_t config = {};
+    config.local_dispatch = cpp_local_dispatch;
+    config.remote_dispatch = cpp_remote_dispatch;
+    config.dispatch_ctx = NULL;
+    config.concurrency = POOL_THREADS;
+    config.initial_workers = 1;
+    config.dynamic_scaling = true;
 
-    // Register SIGTERM handler for graceful shutdown
-    struct sigaction sa;
-    sa.sa_handler = sigterm_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGTERM, &sa, NULL);
-
-    long nthreads = 1;
-    std::vector<pthread_t> threads;
-    threads.reserve(nthreads);
-    for (long i = 0; i < nthreads; ++i) {
-        pthread_t t;
-        int rc = pthread_create(&t, NULL, worker_thread, &queue);
-        if (rc != 0) {
-            std::cerr << "pthread_create failed: " << strerror(rc) << std::endl;
-            break;
-        }
-        threads.push_back(t);
-    }
-    g_total_threads.store((int)threads.size(), std::memory_order_relaxed);
-
-    while (!is_shutting_down()) {
-        int client_fd = wait_for_client_with_timeout(daemon, 10000, &errmsg);
-        if (errmsg != NULL){
-
-            std::cerr << "Failed to read client:\n" << errmsg << std::endl;
-            free(errmsg);
-            errmsg = NULL;
-        }
-        if( client_fd > 0 ){
-            job_queue_push(&queue, client_fd);
-        }
-
-        // Dynamic worker spawning: if all threads are blocked in foreign_call,
-        // spawn a new one so incoming callbacks can still be served.
-        if (g_busy_count.load(std::memory_order_relaxed) >= g_total_threads.load(std::memory_order_relaxed)) {
-            pthread_t t;
-            int rc = pthread_create(&t, NULL, worker_thread, &queue);
-            if (rc == 0) {
-                threads.push_back(t);
-                g_total_threads.fetch_add(1, std::memory_order_relaxed);
-            }
-        }
-    }
-
-    set_shutting_down(1);
-    pthread_cond_broadcast(&queue.cond);
-
-    // Join all worker threads before freeing any resources they may reference.
-    for (size_t i = 0; i < threads.size(); ++i) {
-        pthread_join(threads[i], NULL);
-    }
-
-    // Drain any remaining jobs in the queue
-    while (queue.head != NULL) {
-        job_t* job = queue.head;
-        queue.head = job->next;
-        close_socket(job->client_fd);
-        free(job);
-    }
-
-    // Now safe to free resources -- all workers have exited
-    if(daemon != NULL){
-        close_daemon(&daemon);
-    }
+    int result = pool_main(argc, argv, &config);
 
     free(g_tmpdir);
-
-    pthread_mutex_destroy(&queue.mutex);
-    pthread_cond_destroy(&queue.cond);
-
-    return 0;
+    return result;
 }
