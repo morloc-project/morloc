@@ -11,8 +11,8 @@ License     : Apache-2.0
 Maintainer  : z@morloc.io
 
 Generic translator that generates pool code for dynamically-typed interpreted
-languages based on a LangDescriptor. Handles Python, R, Julia, and other
-languages with Python/R-like semantics.
+languages based on a LangDescriptor. All language-specific behavior is driven
+by descriptor fields -- no hardcoded language-specific code.
 -}
 module Morloc.CodeGenerator.Grammars.Translator.Generic
   ( translate
@@ -50,6 +50,10 @@ import qualified System.Exit as Exit
 import System.IO (hClose, openBinaryTempFile)
 import qualified System.Process as Proc
 
+-- | Simple template substitution: replace {{key}} with value
+substituteT :: Text -> [(Text, Text)] -> Text
+substituteT = foldl (\t (k, v) -> T.replace ("{{" <> k <> "}}") v t)
+
 preprocess :: SerialManifold -> MorlocMonad SerialManifold
 preprocess = return . invertSerialManifold
 
@@ -75,7 +79,7 @@ translateBuiltin lang desc srcs es = do
 
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
-  -- build src name function (Python needs qualified names)
+  -- build src name function
   let srcNamer = if ldQualifiedImports desc
         then qualifiedSrcName lib
         else \src -> pretty (srcName src)
@@ -86,7 +90,7 @@ translateBuiltin lang desc srcs es = do
         Just entry -> LR.lrePreamble entry
         Nothing -> []
   homeDir <- asks MC.configHome
-  let preambleDocs = map (substituteTemplate home lib opt homeDir) preambleTemplates
+  let preambleDocs = map (substitutePreamble home lib opt homeDir) preambleTemplates
 
   let allSources = preambleDocs ++ includeDocs
       mDocs = map (translateSegment desc srcNamer) es
@@ -103,10 +107,8 @@ translateBuiltin lang desc srcs es = do
       , scriptMake = []
       }
   where
-    makePath filename = [idoc|os.path.expanduser(#{dquotes filename})|]
-
-    substituteTemplate :: MDoc -> Text -> MDoc -> Path -> Text -> MDoc
-    substituteTemplate homeDoc libText optDoc homeDir t =
+    substitutePreamble :: MDoc -> Text -> MDoc -> Path -> Text -> MDoc
+    substitutePreamble homeDoc libText optDoc _homeDir t =
       pretty
         . T.replace "{{home}}" (render homeDoc)
         . T.replace "{{lib}}" libText
@@ -254,15 +256,21 @@ translateSource :: LangDescriptor -> Path -> MorlocMonad MDoc
 translateSource desc p = do
   let p' = MT.stripPrefixIfPresent "./" (MT.pack p)
       p'' = if ldIncludeRelToFile desc then "../" <> p' else p'
-  case ldFunctionDef desc of
-    RAssignDef -> return $ "source(" <> dquotes (pretty p'') <> ")"
-    EndBlockDef -> return $ "include(" <> dquotes (pretty p'') <> ")"
-    _ -> do
+  if ldQualifiedImports desc
+    then do
       lib <- MT.pack <$> asks MC.configLibrary
-      return $ makeNamespace lib p <+> "=" <+> "importlib.import_module("
-        <> dquotes (makeImportPath lib p) <> ")"
+      let tmpl = ldImportTemplate desc
+          ns = render (makeNamespace lib p)
+          modPath = render (makeImportPath lib p)
+      return . pretty $ substituteT tmpl
+        [ ("namespace", ns)
+        , ("module_path", modPath)
+        ]
+    else do
+      let tmpl = ldImportTemplate desc
+      return . pretty $ substituteT tmpl [("path", p'')]
 
--- | Qualify a source function name with its module path (Python).
+-- | Qualify a source function name with its module path.
 qualifiedSrcName :: Text -> Source -> MDoc
 qualifiedSrcName lib src = case srcPath src of
   Nothing -> pretty $ srcName src
@@ -318,9 +326,9 @@ genericLowerConfig desc srcNamer = cfg
       , lcPackerName = srcNamer
       , lcUnpackerName = srcNamer
       , lcRecordAccessor = genericRecordAccessor desc
-      , lcDeserialRecordAccessor = \_ k v -> case ldFieldAccess desc of
-          DotAccess -> v <> "[" <> dquotes (pretty k) <> "]"
-          DollarAccess -> v <> "$" <> pretty k
+      , lcDeserialRecordAccessor = \_ k v -> case ldKeyAccess desc of
+          "double_bracket" -> v <> "[[" <> dquotes (pretty k) <> "]]"
+          _ -> v <> "[" <> dquotes (pretty k) <> "]"
       , lcTupleAccessor = \i v -> case ldIndexStyle desc of
           ZeroBracket -> v <> "[" <> pretty i <> "]"
           OneBracket -> v <> "[" <> pretty (i + 1) <> "]"
@@ -331,14 +339,11 @@ genericLowerConfig desc srcNamer = cfg
       , lcEvalPattern = \t p xs -> return $ genericEvalPattern desc t p xs
       , lcListConstructor = \v _ es -> case ldListStyle desc of
           BracketList -> list es
-          FunctionList -> "list" <> tupled es
-          RAtomicList -> case v of
-            (FV _ (CV "integer"))   -> "c" <> tupled es
-            (FV _ (CV "numeric"))   -> "c" <> tupled es
-            (FV _ (CV "double"))    -> "c" <> tupled es
-            (FV _ (CV "logical"))   -> "c" <> tupled es
-            (FV _ (CV "character")) -> "c" <> tupled es
-            _ -> "list" <> tupled es
+          FunctionCallList -> pretty (ldGenericListFn desc) <> tupled es
+          TypeDependentList -> case v of
+            (FV _ (CV typeName))
+              | typeName `elem` ldAtomicTypes desc -> pretty (ldAtomicListFn desc) <> tupled es
+            _ -> pretty (ldGenericListFn desc) <> tupled es
       , lcTupleConstructor = \_ -> case ldTupleConstructor desc of
           "" -> tupled
           name -> \es -> pretty name <> tupled es
@@ -349,53 +354,75 @@ genericLowerConfig desc srcNamer = cfg
           let midDoc = pretty mid <> pretty (ldForeignCallIntSuffix desc)
               argsDoc = case ldListStyle desc of
                 BracketList -> list args
-                _ -> "list" <> tupled args
+                _ -> pretty (ldGenericListFn desc) <> tupled args
            in pretty (ldForeignCallFn desc)
               <> tupled [makeGenericSocketPath desc socketFile, midDoc, argsDoc]
       , lcRemoteCall = genericRemoteCall desc
       , lcMakeLet = \namer i _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
-      , lcReturn = \e -> "return(" <> e <> ")"
-      , lcMakeSuspend = \stmts expr -> case ldSuspend desc of
-          PythonSuspend -> (stmts, "(lambda:" <+> expr <> ")")
-          RSuspend -> (,) [] $ case stmts of
-            [] -> "(function()" <+> expr <> ")"
-            _ -> "function(){" <> nest 4 (line <> vsep (stmts <> [expr])) <> line <> "}"
-          ArrowSuspend -> (stmts, "(() ->" <+> expr <> ")")
+      , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
+      , lcMakeSuspend = \stmts expr ->
+          let suspendBlock = ldSuspendBlock desc
+          in if T.null suspendBlock
+             then
+               -- pass stmts through, wrap expr only
+               let wrapped = pretty $ substituteT (ldSuspendExpr desc) [("expr", render expr)]
+               in (stmts, wrapped)
+             else
+               -- absorb stmts into block
+               case stmts of
+                 [] ->
+                   let wrapped = pretty $ substituteT (ldSuspendExpr desc) [("expr", render expr)]
+                   in ([], wrapped)
+                 _ ->
+                   let body = render (vsep (stmts <> [expr]))
+                       wrapped = pretty $ substituteT suspendBlock [("body", body)]
+                   in ([], wrapped)
       , lcSerialize = defaultSerialize cfg
       , lcDeserialize = \_ -> defaultDeserialize cfg
       , lcMakeFunction = \mname args _ priorLines body headForm ->
           let makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
               makeExt _ = ""
-           in return . Just $ case ldFunctionDef desc of
-                PythonDef ->
-                  let def = "def" <+> mname <> makeExt headForm <> tupled (map argNamer args) <> ":"
-                      tryCatch [] = ""
-                      tryCatch xs =
-                        let tryBlock = nest 4 (vsep ("try:" : xs))
-                            exceptBlock =
-                              nest 4 (vsep
-                                [ "except Exception as e:"
-                                , [idoc|raise RuntimeError(f"Error (pool daemon in #{mname}):\n{e!s}")|]
-                                ])
-                         in vsep [tryBlock, exceptBlock]
-                   in nest 4 (vsep [def, tryCatch priorLines, body])
-                RAssignDef ->
-                  let def = mname <> makeExt headForm <+> "<-" <+> "function" <> tupled (map argNamer args)
-                   in block 4 def (vsep $ priorLines <> [body])
-                EndBlockDef ->
-                  let def = "function" <+> mname <> makeExt headForm <> tupled (map argNamer args)
-                   in vsep [def, indent 4 (vsep $ priorLines <> [body]), "end"]
-      , lcMakeLambda = \mname contextArgs boundArgs -> case ldPartialApp desc of
-          FunctoolsPartial -> "functools.partial" <> tupled (mname : contextArgs)
-          AnonymousWrapper ->
-            let functionCall = mname <> tupled (contextArgs <> boundArgs)
-             in "function" <+> tupled boundArgs <> "{" <> functionCall <> "}"
-          ArrowWrapper ->
-            let functionCall = mname <> tupled (contextArgs <> boundArgs)
-             in tupled boundArgs <+> "->" <+> functionCall
+              fullName = render (mname <> makeExt headForm)
+              argsText = render (hsep (punctuate "," (map argNamer args)))
+              header = pretty $ substituteT (ldFuncDefHeader desc)
+                [ ("name", fullName)
+                , ("args", argsText)
+                ]
+              wrapError [] = []
+              wrapError xs =
+                let openLine = ldErrorWrapOpen desc
+                    closeLines = ldErrorWrapClose desc
+                in if T.null openLine then xs
+                   else
+                     let tryBlock = nest 4 (vsep (pretty openLine : xs))
+                         exceptBlock = nest 4 . vsep $
+                           map (\l -> pretty $ substituteT l [("name", fullName)]) closeLines
+                     in [vsep [tryBlock, exceptBlock]]
+           in return . Just $ case ldBlockStyle desc of
+                IndentBlock ->
+                  nest 4 (vsep [header, vsep (wrapError priorLines), body])
+                BraceBlock ->
+                  block 4 header (vsep $ priorLines <> [body])
+                EndKeywordBlock ->
+                  let endKw = ldBlockEnd desc
+                  in vsep [header, indent 4 (vsep $ priorLines <> [body]), pretty endKw]
+      , lcMakeLambda = \mname contextArgs boundArgs ->
+          let tmpl = ldPartialTemplate desc
+              fnText = render mname
+              allArgsList = contextArgs <> boundArgs
+              fnWithCtxList = mname : contextArgs
+              fnWithCtx = render (hsep (punctuate "," fnWithCtxList))
+              allArgs = render (hsep (punctuate "," allArgsList))
+              boundArgsText = render (hsep (punctuate "," boundArgs))
+          in pretty $ substituteT tmpl
+               [ ("fn", fnText)
+               , ("fn_with_context", fnWithCtx)
+               , ("all_args", allArgs)
+               , ("bound_args", boundArgsText)
+               ]
       }
 
--- | Record access: for Python-like languages with ldDictStyleRecords=True,
+-- | Record access: for languages with ldDictStyleRecords=True,
 -- use bracket access for dict/NamRecord and dot access for others.
 genericRecordAccessor :: LangDescriptor -> NamType -> CVar -> MDoc -> MDoc -> MDoc
 genericRecordAccessor desc namType constructor record field
@@ -407,23 +434,22 @@ genericRecordAccessor desc namType constructor record field
       DotAccess -> record <> "." <> field
       DollarAccess -> record <> "$" <> field
 
--- | Remote call with per-language resource packing
+-- | Remote call with template-driven resource packing
 genericRemoteCall :: LangDescriptor -> MDoc -> Int -> RemoteResources -> [MDoc] -> IndexM PoolDocs
 genericRemoteCall desc socketFile mid res args = do
-  let resMem = pretty $ remoteResourcesMemory res
-      resTime = pretty $ remoteResourcesTime res
-      resCPU = pretty $ remoteResourcesThreads res
-      resGPU = pretty $ remoteResourcesGpus res
+  let resMem = T.pack . show $ remoteResourcesMemory res
+      resTime = T.pack . show $ remoteResourcesTime res
+      resCPU = T.pack . show $ remoteResourcesThreads res
+      resGPU = T.pack . show $ remoteResourcesGpus res
       remoteFn = if T.null (ldRemoteCallFn desc)
                    then pretty (ldForeignCallFn desc)
                    else pretty (ldRemoteCallFn desc)
-      resPacked = case ldResourcePackStyle desc of
-        StructPackResources ->
-          "struct.pack" <> tupled [squotes "iiii", resMem, resTime, resCPU, resGPU]
-        NamedListResources ->
-          [idoc|list(mem=#{resMem}L, time=#{resTime}L, cpus=#{resCPU}L, gpus=#{resGPU}L)|]
-        PlainListResources ->
-          list [resMem, resTime, resCPU, resGPU]
+      resPacked = pretty $ substituteT (ldResourcePackTemplate desc)
+        [ ("mem", resMem)
+        , ("time", resTime)
+        , ("cpus", resCPU)
+        , ("gpus", resGPU)
+        ]
       call = remoteFn
         <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resPacked, list args]
   return $ defaultValue {poolExpr = call}
@@ -436,17 +462,13 @@ makeRecordKey desc k
 
 makeGenericSocketPath :: LangDescriptor -> MDoc -> MDoc
 makeGenericSocketPath desc socketFileBasename =
-  case ldForeignCallSocketPath desc of
-    "paste0" -> [idoc|paste0(global_state$tmpdir, "/", #{dquotes socketFileBasename})|]
-    "joinpath" -> [idoc|joinpath(global_state["tmpdir"], #{dquotes socketFileBasename})|]
-    _ -> [idoc|os.path.join(global_state["tmpdir"], #{dquotes socketFileBasename})|]
+  let tmpl = ldSocketPathTemplate desc
+      socketText = render (dquotes socketFileBasename)
+  in pretty $ substituteT tmpl [("socket", socketText)]
 
 genericMakeLet :: LangDescriptor -> (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
 genericMakeLet desc namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
-  let assignOp = case ldAssignment desc of
-        EqualsAssign -> "="
-        ArrowAssign -> "<-"
-      rs = rs1 ++ [namer i <+> assignOp <+> e1'] ++ rs2
+  let rs = rs1 ++ [namer i <+> pretty (ldAssignOp desc) <+> e1'] ++ rs2
    in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
 -- | Generic expression printer driven by descriptor
@@ -462,8 +484,8 @@ genericPrintExpr desc = go
     go (IStrLit s) = dquotes (pretty s)
     go (IListLit es) = case ldListStyle desc of
       BracketList -> list (map go es)
-      FunctionList -> "list" <> tupled (map go es)
-      RAtomicList -> "list" <> tupled (map go es)
+      FunctionCallList -> pretty (ldGenericListFn desc) <> tupled (map go es)
+      TypeDependentList -> pretty (ldGenericListFn desc) <> tupled (map go es)
     go (ITupleLit es) = case ldTupleConstructor desc of
       "" -> tupled (map go es)
       name -> pretty name <> tupled (map go es)
@@ -491,15 +513,16 @@ genericPrintExpr desc = go
       pretty f <> hsep (map (tupled . map go) argGroups)
     go (IForeignCall _ _ _) = error "use IRawExpr for generic foreign calls"
     go (IRemoteCall _ _ _ _) = error "use IRawExpr for generic remote calls"
-    go (ILambda args body) = case ldLambda desc of
-      PythonLambda -> "lambda" <+> hsep (punctuate "," (map pretty args)) <> ":" <+> go body
-      RFunction -> "function" <+> tupled (map pretty args) <> "{" <> go body <> "}"
-      ArrowLambda -> tupled (map pretty args) <+> "->" <+> go body
+    go (ILambda args body) =
+      let argsText = render (hsep (punctuate "," (map pretty args)))
+          bodyText = render (go body)
+      in pretty $ substituteT (ldLambdaTemplate desc)
+           [ ("args", argsText)
+           , ("body", bodyText)
+           ]
     go (IRawExpr d) = pretty d
-    go (ISuspend e) = case ldSuspend desc of
-      PythonSuspend -> "lambda:" <+> go e
-      RSuspend -> "function()" <+> go e
-      ArrowSuspend -> "() ->" <+> go e
+    go (ISuspend e) =
+      pretty $ substituteT (ldSuspendExpr desc) [("expr", render (go e))]
     go (IForce e) = go e <> "()"
 
 -- | Generic statement printer driven by descriptor
@@ -507,32 +530,29 @@ genericPrintStmt :: LangDescriptor -> IStmt -> MDoc
 genericPrintStmt desc = go
   where
     printE = genericPrintExpr desc
-    assignOp = case ldAssignment desc of
-      EqualsAssign -> "="
-      ArrowAssign -> "<-"
 
-    go (IAssign v Nothing e) = pretty v <+> assignOp <+> printE e
-    go (IAssign v (Just _) e) = pretty v <+> assignOp <+> printE e
+    go (IAssign v Nothing e) = pretty v <+> pretty (ldAssignOp desc) <+> printE e
+    go (IAssign v (Just _) e) = pretty v <+> pretty (ldAssignOp desc) <+> printE e
     go (IMapList resultVar _ iterVar collection bodyStmts yieldExpr) =
-      case ldMapList desc of
-        PythonForAppend -> vsep
-          [ [idoc|#{pretty resultVar} = []|]
+      case ldMapStyle desc of
+        LoopAppend -> vsep
+          [ pretty resultVar <+> pretty (ldAssignOp desc) <+> "[]"
           , nest 4 (vsep
-              ( [idoc|for #{pretty iterVar} in #{printE collection}:|]
+              ( ("for" <+> pretty iterVar <+> "in" <+> printE collection <> ":")
               : map go bodyStmts
-              ++ [[idoc|#{pretty resultVar}.append(#{printE yieldExpr})|]]
+              ++ [pretty resultVar <> ".append(" <> printE yieldExpr <> ")"]
               ))
           ]
-        RLapply ->
+        ApplyCallback ->
           block 4
-            [idoc|#{pretty resultVar} <- lapply(#{printE collection}, function(#{pretty iterVar})|]
+            (pretty resultVar <+> pretty (ldAssignOp desc) <+> "lapply(" <> printE collection <> "," <+> "function(" <> pretty iterVar <> ")")
             (vsep (map go bodyStmts ++ [printE yieldExpr]))
             <> ")"
-        Comprehension -> vsep
-          [ pretty resultVar <+> assignOp <+> "[" <> printE yieldExpr
+        ListComprehension -> vsep
+          [ pretty resultVar <+> pretty (ldAssignOp desc) <+> "[" <> printE yieldExpr
               <+> "for" <+> pretty iterVar <+> "in" <+> printE collection <> "]"
           ]
-    go (IReturn e) = "return(" <> printE e <> ")"
+    go (IReturn e) = pretty $ substituteT (ldReturnTemplate desc) [("expr", render (printE e))]
     go (IExprStmt e) = printE e
     go (IFunDef _ _ _ _) = error "IFunDef not yet implemented for generic printer"
 
@@ -544,70 +564,58 @@ printProgram desc prog =
     (ldBreakMarker desc)
     sections
   where
-    sections = case ldDispatchTable desc of
-      PythonDictDispatch ->
-        [ vsep (map pretty (ipSources prog))
-        , vsep (map pretty (ipManifolds prog))
-        , pythonDispatch
-        ]
-      RListDispatch ->
-        [ vsep (map pretty (ipSources prog))
-        , vsep (map pretty (ipManifolds prog))
-        , rDispatch
-        ]
-      ArrowDictDispatch ->
-        [ vsep (map pretty (ipSources prog))
-        , vsep (map pretty (ipManifolds prog))
-        , arrowDictDispatch
-        ]
+    sections =
+      [ vsep (map pretty (ipSources prog))
+      , vsep (map pretty (ipManifolds prog))
+      , templateDispatch
+      ]
 
-    pythonDispatch = vsep [localD, remoteD]
+    templateDispatch = vsep [localD, remoteD]
       where
-        localD = align . vsep $
-          [ "dispatch = {"
-          , indent 4 (vsep [pretty i <> ":" <+> manNamer i <> "," | DispatchEntry i _ <- ipLocalDispatch prog])
-          , "}"
-          ]
-        remoteD = align . vsep $
-          [ "remote_dispatch = {"
-          , indent 4 (vsep [pretty i <> ":" <+> manNamer i <> "_remote" <> "," | DispatchEntry i _ <- ipRemoteDispatch prog])
-          , "}"
-          ]
+        localD =
+          let hdr = ldDispatchLocalHeader desc
+              entryTmpl = ldDispatchLocalEntry desc
+              ftr = ldDispatchLocalFooter desc
+              entries = map (\(DispatchEntry i _) ->
+                pretty $ substituteT entryTmpl
+                  [ ("mid", T.pack (show i))
+                  , ("name", render (manNamer i))
+                  ]) (ipLocalDispatch prog)
+          in if T.null hdr && T.null entryTmpl
+             then mempty
+             else align . vsep $ filter (not . isEmpty)
+               [ pretty hdr
+               , vsep entries
+               , pretty ftr
+               ]
 
-    rDispatch = vsep [localD, remoteD]
-      where
-        localD = align . vsep $
-          [ ".dispatch <- list()"
-          , vsep [".dispatch[[" <> pretty i <> "L]] <-" <+> manNamer i | DispatchEntry i _ <- ipLocalDispatch prog]
-          ]
-        remoteD = align . vsep $
-          [ ".remote_dispatch <- list()"
-          , vsep [".remote_dispatch[[" <> pretty i <> "L]] <-" <+> manNamer i <> "_remote" | DispatchEntry i _ <- ipRemoteDispatch prog]
-          ]
+        remoteD =
+          let hdr = ldDispatchRemoteHeader desc
+              entryTmpl = ldDispatchRemoteEntry desc
+              ftr = ldDispatchRemoteFooter desc
+              entries = map (\(DispatchEntry i _) ->
+                pretty $ substituteT entryTmpl
+                  [ ("mid", T.pack (show i))
+                  , ("name", render (manNamer i))
+                  ]) (ipRemoteDispatch prog)
+          in if T.null hdr && T.null entryTmpl
+             then mempty
+             else align . vsep $ filter (not . isEmpty)
+               [ pretty hdr
+               , vsep entries
+               , pretty ftr
+               ]
 
-    arrowDictDispatch = vsep [localD, remoteD]
-      where
-        localD = align . vsep $
-          [ "dispatch = Dict("
-          , indent 4 (vsep [pretty i <+> "=>" <+> manNamer i <> "," | DispatchEntry i _ <- ipLocalDispatch prog])
-          , ")"
-          ]
-        remoteD = align . vsep $
-          [ "remote_dispatch = Dict("
-          , indent 4 (vsep [pretty i <+> "=>" <+> manNamer i <> "_remote" <> "," | DispatchEntry i _ <- ipRemoteDispatch prog])
-          , ")"
-          ]
+    isEmpty d = T.null (render d)
 
 -- | Generic pattern evaluation
 genericEvalPattern :: LangDescriptor -> TypeF -> Pattern -> [MDoc] -> MDoc
 genericEvalPattern desc _ (PatternText firstStr fragments) xs =
-  case ldPattern desc of
-    PythonFString ->
+  case ldPatternStyle desc of
+    FStringPattern ->
       "f" <> (dquotes . hcat) (pretty firstStr : [("{" <> x <> "}" <> pretty s) | (x, s) <- zip xs fragments])
-    RPaste0 ->
-      "paste0" <> tupled (dquotes (pretty firstStr) : concat [[x, dquotes (pretty s)] | (x, s) <- zip xs fragments])
-    DollarInterp ->
-      "string" <> tupled (dquotes (pretty firstStr) : concat [[x, dquotes (pretty s)] | (x, s) <- zip xs fragments])
+    ConcatCall ->
+      pretty (ldConcatFn desc) <> tupled (dquotes (pretty firstStr) : concat [[x, dquotes (pretty s)] | (x, s) <- zip xs fragments])
 -- getters (always have exactly one argument)
 genericEvalPattern desc _ (PatternStruct (ungroup -> [ss])) [m] =
   hcat (m : map (writeSelector desc) ss)
@@ -638,9 +646,9 @@ genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
 genericEvalPattern _ _ (PatternStruct _) [] = error "Unreachable empty pattern"
 
 writeSelector :: LangDescriptor -> Either Int Text -> MDoc
-writeSelector desc (Right k) = case ldFieldAccess desc of
-  DotAccess -> "[" <> dquotes (pretty k) <> "]"
-  DollarAccess -> "[[" <> dquotes (pretty k) <> "]]"
+writeSelector desc (Right k) = case ldKeyAccess desc of
+  "double_bracket" -> "[[" <> dquotes (pretty k) <> "]]"
+  _ -> "[" <> dquotes (pretty k) <> "]"
 writeSelector desc (Left i) = case ldIndexStyle desc of
   ZeroBracket -> "[" <> pretty i <> "]"
   OneBracket -> "[" <> pretty (i + 1) <> "]"

@@ -36,22 +36,10 @@ ldDeserializeFn: "morloc.get_value"
 
 # Foreign call
 ldForeignCallFn: "morloc.foreign_call"
-ldForeignCallSocketPath: "os.path.join"
 ldForeignCallIntSuffix: ""
 
 # Remote call
 ldRemoteCallFn: "morloc.remote_call"
-ldResourcePackStyle: struct_pack
-
-# Syntax styles
-ldAssignment: equals
-ldFunctionDef: python_def
-ldLambda: python_lambda
-ldPartialApp: functools_partial
-ldSuspend: python
-ldMapList: python_for
-ldPattern: python_fstring
-ldDispatchTable: python_dict
 
 # Record handling
 ldDictStyleRecords: true
@@ -59,8 +47,33 @@ ldQuoteRecordKeys: false
 
 # Import syntax
 ldQualifiedImports: true
-ldImportPrefix: "import "
 ldIncludeRelToFile: false
+
+# Template fields
+ldAssignOp: "="
+ldLambdaTemplate: "lambda {{args}}: {{body}}"
+ldSuspendExpr: "(lambda: {{expr}})"
+ldSuspendBlock: ""
+ldPartialTemplate: "functools.partial({{fn_with_context}})"
+ldImportTemplate: "{{namespace}} = importlib.import_module(\"{{module_path}}\")"
+ldSocketPathTemplate: "os.path.join(global_state[\"tmpdir\"], {{socket}})"
+ldResourcePackTemplate: "struct.pack('iiii', {{mem}}, {{time}}, {{cpus}}, {{gpus}})"
+ldReturnTemplate: "return({{expr}})"
+ldFuncDefHeader: "def {{name}}({{args}}):"
+ldBlockStyle: indent
+ldBlockEnd: ""
+ldErrorWrapOpen: "try:"
+ldErrorWrapClose:
+  - "except Exception as e:"
+  - "    raise RuntimeError(f\"Error (pool daemon in {{name}}):\\n{e!s}\")"
+ldPatternStyle: fstring
+ldMapStyle: loop_append
+ldDispatchLocalHeader: "dispatch = {"
+ldDispatchLocalEntry: "    {{mid}}: {{name}},"
+ldDispatchLocalFooter: "}"
+ldDispatchRemoteHeader: "remote_dispatch = {"
+ldDispatchRemoteEntry: "    {{mid}}: {{name}}_remote,"
+ldDispatchRemoteFooter: "}"
 
 # Pool template (loaded from pool.py, left empty here)
 ldPoolTemplate: ""

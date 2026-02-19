@@ -16,16 +16,10 @@ module Morloc.CodeGenerator.LanguageDescriptor
   ( LangDescriptor(..)
   , IndexStyle(..)
   , FieldAccessStyle(..)
-  , AssignmentStyle(..)
-  , FunctionDefStyle(..)
-  , LambdaStyle(..)
-  , PartialAppStyle(..)
-  , DispatchTableStyle(..)
-  , MapListStyle(..)
-  , SuspendStyle(..)
-  , PatternInterpStyle(..)
-  , ListConstructorStyle(..)
-  , ResourcePackStyle(..)
+  , BlockStyle(..)
+  , MapStyle(..)
+  , ListStyle(..)
+  , PatternStyle(..)
   , loadLangDescriptor
   , loadLangDescriptorFromText
   , defaultLangDescriptor
@@ -53,73 +47,31 @@ data FieldAccessStyle
   | DollarAccess -- e$field  (R)
   deriving (Eq, Show, Generic)
 
--- | Assignment operator
-data AssignmentStyle
-  = EqualsAssign  -- x = e
-  | ArrowAssign   -- x <- e
-  deriving (Eq, Show, Generic)
-
--- | Function definition syntax
-data FunctionDefStyle
-  = PythonDef     -- def f(args): body
-  | RAssignDef    -- f <- function(args) { body }
-  | EndBlockDef   -- function f(args) body end (Julia, Lua, Ruby)
-  deriving (Eq, Show, Generic)
-
--- | Lambda expression syntax
-data LambdaStyle
-  = PythonLambda  -- lambda args: body
-  | RFunction     -- function(args) { body }
-  | ArrowLambda   -- (args) -> body  (Julia, JS)
-  deriving (Eq, Show, Generic)
-
--- | Partial application style
-data PartialAppStyle
-  = FunctoolsPartial  -- functools.partial(f, ctx_args) (Python)
-  | AnonymousWrapper  -- function(bound) { f(ctx, bound) } (R)
-  | ArrowWrapper      -- (bound...) -> f(ctx..., bound...) (Julia, JS)
-  deriving (Eq, Show, Generic)
-
--- | Dispatch table construction
-data DispatchTableStyle
-  = PythonDictDispatch  -- dispatch = { mid: fn, ... }
-  | RListDispatch       -- .dispatch <- list(); .dispatch[[i]] <- fn
-  | ArrowDictDispatch   -- dispatch = Dict(mid => fn, ...) (Julia)
+-- | Block structure for function definitions
+data BlockStyle
+  = IndentBlock      -- Python-style: header + indented body
+  | BraceBlock       -- R/JS-style: header { body }
+  | EndKeywordBlock  -- Julia/Ruby-style: header body end
   deriving (Eq, Show, Generic)
 
 -- | List iteration / map style
-data MapListStyle
-  = PythonForAppend  -- for x in col: result.append(...)
-  | RLapply          -- lapply(col, function(x) ...)
-  | Comprehension    -- [body for x in col] (Julia, Python alternative)
-  deriving (Eq, Show, Generic)
-
--- | Suspend (thunk) style
-data SuspendStyle
-  = PythonSuspend  -- lambda: expr
-  | RSuspend       -- function() expr
-  | ArrowSuspend   -- () -> expr
-  deriving (Eq, Show, Generic)
-
--- | String interpolation / pattern style
-data PatternInterpStyle
-  = PythonFString     -- f"prefix{var}suffix"
-  | RPaste0           -- paste0("prefix", var, "suffix")
-  | DollarInterp      -- "prefix${var}suffix" or "prefix$var suffix"
+data MapStyle
+  = LoopAppend       -- for x in col: result.append(...)
+  | ApplyCallback    -- lapply(col, function(x) ...)
+  | ListComprehension -- [body for x in col]
   deriving (Eq, Show, Generic)
 
 -- | List constructor style
-data ListConstructorStyle
-  = BracketList    -- [a, b, c]
-  | FunctionList   -- list(a, b, c)
-  | RAtomicList    -- c(a,b) for atomic, list(a,b) for complex
+data ListStyle
+  = BracketList        -- [a, b, c]
+  | FunctionCallList   -- list(a, b, c)
+  | TypeDependentList  -- c(a,b) for atomic types, list(a,b) for complex
   deriving (Eq, Show, Generic)
 
--- | How to pack remote call resources
-data ResourcePackStyle
-  = StructPackResources   -- struct.pack('iiii', m, t, c, g) (Python)
-  | NamedListResources    -- list(mem=m, time=t, cpus=c, gpus=g) (R)
-  | PlainListResources    -- [m, t, c, g] (default)
+-- | String interpolation / pattern style
+data PatternStyle
+  = FStringPattern  -- f"prefix{var}suffix"
+  | ConcatCall      -- paste0("prefix", var, "suffix") or string(...)
   deriving (Eq, Show, Generic)
 
 -- | Complete language descriptor
@@ -134,7 +86,7 @@ data LangDescriptor = LangDescriptor
   , ldNullLiteral :: !Text
 
     -- Constructors
-  , ldListStyle :: !ListConstructorStyle
+  , ldListStyle :: !ListStyle
   , ldTupleConstructor :: !Text  -- "tuple" or "list" or ""
   , ldRecordConstructor :: !Text -- "dict" or "OrderedDict" or "list"
   , ldRecordSeparator :: !Text   -- "=" for Python/R, "=>" for Julia
@@ -150,22 +102,10 @@ data LangDescriptor = LangDescriptor
 
     -- Foreign call template
   , ldForeignCallFn :: !Text   -- "morloc.foreign_call" or "morloc_foreign_call"
-  , ldForeignCallSocketPath :: !Text -- how to construct socket path
   , ldForeignCallIntSuffix :: !Text  -- "L" for R, "" for others
 
     -- Remote call
   , ldRemoteCallFn :: !Text              -- "morloc.remote_call" or "morloc_remote_call"
-  , ldResourcePackStyle :: !ResourcePackStyle -- how to format resources
-
-    -- Syntax styles
-  , ldAssignment :: !AssignmentStyle
-  , ldFunctionDef :: !FunctionDefStyle
-  , ldLambda :: !LambdaStyle
-  , ldPartialApp :: !PartialAppStyle
-  , ldSuspend :: !SuspendStyle
-  , ldMapList :: !MapListStyle
-  , ldPattern :: !PatternInterpStyle
-  , ldDispatchTable :: !DispatchTableStyle
 
     -- Record access
   , ldDictStyleRecords :: !Bool   -- True: NamRecord/dict use bracket access, others use dot (Python)
@@ -173,7 +113,6 @@ data LangDescriptor = LangDescriptor
 
     -- Import syntax
   , ldQualifiedImports :: !Bool   -- True: qualify source names with module path (Python)
-  , ldImportPrefix :: !Text  -- "import " or "source(" etc.
   , ldIncludeRelToFile :: !Bool  -- True if include() resolves relative to file (Julia), False for CWD (R)
 
     -- Pool template
@@ -187,9 +126,66 @@ data LangDescriptor = LangDescriptor
 
     -- External codegen (optional)
   , ldCodegenCommand :: !(Maybe Text)  -- e.g. "morloc-codegen-generic"
+
+    -- == Template fields (Layer 1 & 2) ==
+
+    -- Assignment
+  , ldAssignOp :: !Text            -- "=" or "<-"
+
+    -- Lambda
+  , ldLambdaTemplate :: !Text      -- e.g. "lambda {{args}}: {{body}}"
+
+    -- Suspend (thunk)
+  , ldSuspendExpr :: !Text         -- e.g. "(lambda: {{expr}})"
+  , ldSuspendBlock :: !Text        -- e.g. "function(){\n{{body}}\n}" or "" for pass-through
+
+    -- Partial application
+  , ldPartialTemplate :: !Text     -- e.g. "functools.partial({{fn_with_context}})"
+
+    -- Import
+  , ldImportTemplate :: !Text      -- e.g. "{{namespace}} = importlib.import_module(\"{{module_path}}\")"
+
+    -- Socket path
+  , ldSocketPathTemplate :: !Text  -- e.g. "os.path.join(global_state[\"tmpdir\"], {{socket}})"
+
+    -- Resource packing for remote calls
+  , ldResourcePackTemplate :: !Text -- e.g. "struct.pack('iiii', {{mem}}, {{time}}, {{cpus}}, {{gpus}})"
+
+    -- Return statement
+  , ldReturnTemplate :: !Text      -- e.g. "return({{expr}})"
+
+    -- Function definition
+  , ldFuncDefHeader :: !Text       -- e.g. "def {{name}}({{args}}):"
+  , ldBlockStyle :: !BlockStyle
+  , ldBlockEnd :: !Text            -- "" or "end"
+
+    -- Error wrapping
+  , ldErrorWrapOpen :: !Text       -- "try:" for Python, "" for others
+  , ldErrorWrapClose :: ![Text]    -- Except block lines with {{name}} template var
+
+    -- Pattern/string interpolation support
+  , ldPatternStyle :: !PatternStyle
+  , ldConcatFn :: !Text            -- For ConcatCall: "paste0", "string"
+
+    -- List constructor support
+  , ldAtomicTypes :: ![Text]       -- For TypeDependentList: ["integer", "numeric", ...]
+  , ldAtomicListFn :: !Text        -- For TypeDependentList: "c"
+  , ldGenericListFn :: !Text       -- For FunctionCallList/TypeDependentList: "list"
+
+    -- Map iteration style (kept as enum - needs different code structure)
+  , ldMapStyle :: !MapStyle
+
+    -- Dispatch table templates
+  , ldDispatchLocalHeader :: !Text  -- e.g. "dispatch = {"
+  , ldDispatchLocalEntry :: !Text   -- e.g. "    {{mid}}: {{name}},"
+  , ldDispatchLocalFooter :: !Text  -- e.g. "}"
+  , ldDispatchRemoteHeader :: !Text -- e.g. "remote_dispatch = {"
+  , ldDispatchRemoteEntry :: !Text  -- e.g. "    {{mid}}: {{name}}_remote,"
+  , ldDispatchRemoteFooter :: !Text -- e.g. "}"
   } deriving (Eq, Show, Generic)
 
--- YAML instances (using generic deriving + custom FromJSON)
+-- YAML instances
+
 instance Y.FromJSON IndexStyle where
   parseJSON = Y.withText "IndexStyle" $ \t -> case t of
     "zero_bracket" -> pure ZeroBracket
@@ -203,77 +199,34 @@ instance Y.FromJSON FieldAccessStyle where
     "dollar" -> pure DollarAccess
     _ -> fail $ "Unknown FieldAccessStyle: " <> T.unpack t
 
-instance Y.FromJSON AssignmentStyle where
-  parseJSON = Y.withText "AssignmentStyle" $ \t -> case t of
-    "equals" -> pure EqualsAssign
-    "arrow" -> pure ArrowAssign
-    _ -> fail $ "Unknown AssignmentStyle: " <> T.unpack t
+instance Y.FromJSON BlockStyle where
+  parseJSON = Y.withText "BlockStyle" $ \t -> case t of
+    "indent" -> pure IndentBlock
+    "braces" -> pure BraceBlock
+    "end_keyword" -> pure EndKeywordBlock
+    _ -> fail $ "Unknown BlockStyle: " <> T.unpack t
 
-instance Y.FromJSON FunctionDefStyle where
-  parseJSON = Y.withText "FunctionDefStyle" $ \t -> case t of
-    "python_def" -> pure PythonDef
-    "r_assign" -> pure RAssignDef
-    "end_block" -> pure EndBlockDef
-    _ -> fail $ "Unknown FunctionDefStyle: " <> T.unpack t
+instance Y.FromJSON MapStyle where
+  parseJSON = Y.withText "MapStyle" $ \t -> case t of
+    "loop_append" -> pure LoopAppend
+    "apply_callback" -> pure ApplyCallback
+    "list_comprehension" -> pure ListComprehension
+    _ -> fail $ "Unknown MapStyle: " <> T.unpack t
 
-instance Y.FromJSON LambdaStyle where
-  parseJSON = Y.withText "LambdaStyle" $ \t -> case t of
-    "python_lambda" -> pure PythonLambda
-    "r_function" -> pure RFunction
-    "arrow" -> pure ArrowLambda
-    _ -> fail $ "Unknown LambdaStyle: " <> T.unpack t
-
-instance Y.FromJSON PartialAppStyle where
-  parseJSON = Y.withText "PartialAppStyle" $ \t -> case t of
-    "functools_partial" -> pure FunctoolsPartial
-    "anonymous_wrapper" -> pure AnonymousWrapper
-    "arrow_wrapper" -> pure ArrowWrapper
-    _ -> fail $ "Unknown PartialAppStyle: " <> T.unpack t
-
-instance Y.FromJSON DispatchTableStyle where
-  parseJSON = Y.withText "DispatchTableStyle" $ \t -> case t of
-    "python_dict" -> pure PythonDictDispatch
-    "r_list" -> pure RListDispatch
-    "arrow_dict" -> pure ArrowDictDispatch
-    _ -> fail $ "Unknown DispatchTableStyle: " <> T.unpack t
-
-instance Y.FromJSON MapListStyle where
-  parseJSON = Y.withText "MapListStyle" $ \t -> case t of
-    "python_for" -> pure PythonForAppend
-    "r_lapply" -> pure RLapply
-    "comprehension" -> pure Comprehension
-    _ -> fail $ "Unknown MapListStyle: " <> T.unpack t
-
-instance Y.FromJSON SuspendStyle where
-  parseJSON = Y.withText "SuspendStyle" $ \t -> case t of
-    "python" -> pure PythonSuspend
-    "r" -> pure RSuspend
-    "arrow" -> pure ArrowSuspend
-    _ -> fail $ "Unknown SuspendStyle: " <> T.unpack t
-
-instance Y.FromJSON PatternInterpStyle where
-  parseJSON = Y.withText "PatternInterpStyle" $ \t -> case t of
-    "python_fstring" -> pure PythonFString
-    "r_paste0" -> pure RPaste0
-    "dollar_interp" -> pure DollarInterp
-    _ -> fail $ "Unknown PatternInterpStyle: " <> T.unpack t
-
-instance Y.FromJSON ListConstructorStyle where
-  parseJSON = Y.withText "ListConstructorStyle" $ \t -> case t of
+instance Y.FromJSON ListStyle where
+  parseJSON = Y.withText "ListStyle" $ \t -> case t of
     "bracket" -> pure BracketList
-    "function" -> pure FunctionList
-    "r_atomic" -> pure RAtomicList
-    _ -> fail $ "Unknown ListConstructorStyle: " <> T.unpack t
+    "function_call" -> pure FunctionCallList
+    "type_dependent" -> pure TypeDependentList
+    _ -> fail $ "Unknown ListStyle: " <> T.unpack t
 
-instance Y.FromJSON ResourcePackStyle where
-  parseJSON = Y.withText "ResourcePackStyle" $ \t -> case t of
-    "struct_pack" -> pure StructPackResources
-    "named_list" -> pure NamedListResources
-    "plain_list" -> pure PlainListResources
-    _ -> fail $ "Unknown ResourcePackStyle: " <> T.unpack t
+instance Y.FromJSON PatternStyle where
+  parseJSON = Y.withText "PatternStyle" $ \t -> case t of
+    "fstring" -> pure FStringPattern
+    "concat_call" -> pure ConcatCall
+    _ -> fail $ "Unknown PatternStyle: " <> T.unpack t
 
--- | Custom FromJSON that treats new optional fields as absent-safe.
--- Injects defaults for optional fields before delegating to generic parsing.
+-- | Custom FromJSON that injects defaults for optional fields.
 instance Y.FromJSON LangDescriptor where
   parseJSON = Y.withObject "LangDescriptor" $ \obj -> do
     let ins k v = KM.insertWith (\_ old -> old) (AesonKey.fromText k) v
@@ -289,12 +242,38 @@ instance Y.FromJSON LangDescriptor where
                      . maybe id (ins "ldIsCompiled") isCompiledVal
                      . ins "ldCodegenCommand" Y.Null
                      . ins "ldRemoteCallFn" (Y.String "")
-                     . ins "ldResourcePackStyle" (Y.String "plain_list")
                      . ins "ldDictStyleRecords" (Y.Bool False)
                      . ins "ldQuoteRecordKeys" (Y.Bool True)
                      . ins "ldQualifiedImports" (Y.Bool False)
                      . ins "ldRunCommand" (Y.Array mempty)
                      . ins "ldIsCompiled" (Y.Bool False)
+                     -- Template field defaults
+                     . ins "ldAssignOp" (Y.String "=")
+                     . ins "ldLambdaTemplate" (Y.String "({{args}}) -> {{body}}")
+                     . ins "ldSuspendExpr" (Y.String "(() -> {{expr}})")
+                     . ins "ldSuspendBlock" (Y.String "")
+                     . ins "ldPartialTemplate" (Y.String "({{bound_args}}) -> {{fn}}({{all_args}})")
+                     . ins "ldImportTemplate" (Y.String "")
+                     . ins "ldSocketPathTemplate" (Y.String "")
+                     . ins "ldResourcePackTemplate" (Y.String "[{{mem}}, {{time}}, {{cpus}}, {{gpus}}]")
+                     . ins "ldReturnTemplate" (Y.String "return({{expr}})")
+                     . ins "ldFuncDefHeader" (Y.String "")
+                     . ins "ldBlockStyle" (Y.String "indent")
+                     . ins "ldBlockEnd" (Y.String "")
+                     . ins "ldErrorWrapOpen" (Y.String "")
+                     . ins "ldErrorWrapClose" (Y.Array mempty)
+                     . ins "ldPatternStyle" (Y.String "fstring")
+                     . ins "ldConcatFn" (Y.String "")
+                     . ins "ldAtomicTypes" (Y.Array mempty)
+                     . ins "ldAtomicListFn" (Y.String "")
+                     . ins "ldGenericListFn" (Y.String "list")
+                     . ins "ldMapStyle" (Y.String "loop_append")
+                     . ins "ldDispatchLocalHeader" (Y.String "")
+                     . ins "ldDispatchLocalEntry" (Y.String "")
+                     . ins "ldDispatchLocalFooter" (Y.String "")
+                     . ins "ldDispatchRemoteHeader" (Y.String "")
+                     . ins "ldDispatchRemoteEntry" (Y.String "")
+                     . ins "ldDispatchRemoteFooter" (Y.String "")
                      $ obj
     Aeson.genericParseJSON Aeson.defaultOptions (Y.Object withDefaults)
 
@@ -313,7 +292,7 @@ loadLangDescriptorFromText content =
     Left err -> Left $ Y.prettyPrintParseException err
     Right desc -> Right desc
 
--- | Default descriptor with Python-like syntax (good base for many languages)
+-- | Default descriptor
 defaultLangDescriptor :: Text -> String -> LangDescriptor
 defaultLangDescriptor name ext = LangDescriptor
   { ldName = name
@@ -331,22 +310,11 @@ defaultLangDescriptor name ext = LangDescriptor
   , ldSerializeFn = "morloc.put_value"
   , ldDeserializeFn = "morloc.get_value"
   , ldForeignCallFn = "morloc.foreign_call"
-  , ldForeignCallSocketPath = "os.path.join(global_state[\"tmpdir\"], \"{socket}\")"
   , ldForeignCallIntSuffix = ""
   , ldRemoteCallFn = ""
-  , ldResourcePackStyle = PlainListResources
-  , ldAssignment = EqualsAssign
-  , ldFunctionDef = PythonDef
-  , ldLambda = PythonLambda
-  , ldPartialApp = FunctoolsPartial
-  , ldSuspend = PythonSuspend
-  , ldMapList = PythonForAppend
-  , ldPattern = PythonFString
-  , ldDispatchTable = PythonDictDispatch
   , ldDictStyleRecords = False
   , ldQuoteRecordKeys = True
   , ldQualifiedImports = False
-  , ldImportPrefix = "import "
   , ldIncludeRelToFile = False
   , ldPoolTemplate = ""
   , ldBreakMarker = "# <<<BREAK>>>"
@@ -354,4 +322,31 @@ defaultLangDescriptor name ext = LangDescriptor
   , ldRunCommand = []
   , ldIsCompiled = False
   , ldCodegenCommand = Nothing
+  -- Template fields
+  , ldAssignOp = "="
+  , ldLambdaTemplate = "({{args}}) -> {{body}}"
+  , ldSuspendExpr = "(() -> {{expr}})"
+  , ldSuspendBlock = ""
+  , ldPartialTemplate = "({{bound_args}}) -> {{fn}}({{all_args}})"
+  , ldImportTemplate = ""
+  , ldSocketPathTemplate = ""
+  , ldResourcePackTemplate = "[{{mem}}, {{time}}, {{cpus}}, {{gpus}}]"
+  , ldReturnTemplate = "return({{expr}})"
+  , ldFuncDefHeader = ""
+  , ldBlockStyle = IndentBlock
+  , ldBlockEnd = ""
+  , ldErrorWrapOpen = ""
+  , ldErrorWrapClose = []
+  , ldPatternStyle = FStringPattern
+  , ldConcatFn = ""
+  , ldAtomicTypes = []
+  , ldAtomicListFn = ""
+  , ldGenericListFn = "list"
+  , ldMapStyle = LoopAppend
+  , ldDispatchLocalHeader = ""
+  , ldDispatchLocalEntry = ""
+  , ldDispatchLocalFooter = ""
+  , ldDispatchRemoteHeader = ""
+  , ldDispatchRemoteEntry = ""
+  , ldDispatchRemoteFooter = ""
   }

@@ -20,15 +20,15 @@ ldBoolFalse: "false"
 ldNullLiteral: "nothing"
 
 # Constructors
-ldListStyle: bracket             # [a, b, c]
-ldTupleConstructor: ""           # (a, b, c) -- bare tuples
-ldRecordConstructor: "Dict"      # Dict("k" => v, ...)
-ldRecordSeparator: "=>"          # Dict("k" => v)
+ldListStyle: bracket
+ldTupleConstructor: ""
+ldRecordConstructor: "Dict"
+ldRecordSeparator: "=>"
 
 # Access styles
-ldIndexStyle: one_bracket        # a[1] (1-indexed)
-ldKeyAccess: bracket             # d["key"]
-ldFieldAccess: dot               # obj.field
+ldIndexStyle: one_bracket
+ldKeyAccess: bracket
+ldFieldAccess: dot
 
 # Serialize/deserialize function names (from juliamorloc.jl)
 ldSerializeFn: "MorlocRuntime.put_value"
@@ -36,29 +36,38 @@ ldDeserializeFn: "MorlocRuntime.get_value"
 
 # Foreign call
 ldForeignCallFn: "MorlocRuntime.foreign_call"
-ldForeignCallSocketPath: "joinpath"
 ldForeignCallIntSuffix: ""
 
-# Syntax styles
-ldAssignment: equals             # x = expr
-ldFunctionDef: end_block         # function f(args) ... end
-ldLambda: arrow                  # (args) -> body
-ldPartialApp: arrow_wrapper      # (bound...) -> f(ctx..., bound...)
-ldSuspend: arrow                 # () -> expr
-ldMapList: comprehension         # [body for x in col]
-ldPattern: dollar_interp         # string("prefix", var, "suffix")
-ldDispatchTable: arrow_dict      # Dict(mid => fn, ...)
-
 # Import syntax
-ldImportPrefix: "include("
-ldIncludeRelToFile: true          # Julia's include() resolves relative to the file, not CWD
+ldQualifiedImports: false
+ldIncludeRelToFile: true
+
+# Template fields
+ldAssignOp: "="
+ldLambdaTemplate: "({{args}}) -> {{body}}"
+ldSuspendExpr: "(() -> {{expr}})"
+ldSuspendBlock: ""
+ldPartialTemplate: "({{bound_args}}) -> {{fn}}({{all_args}})"
+ldImportTemplate: "include(\"{{path}}\")"
+ldSocketPathTemplate: "joinpath(global_state[\"tmpdir\"], {{socket}})"
+ldResourcePackTemplate: "[{{mem}}, {{time}}, {{cpus}}, {{gpus}}]"
+ldReturnTemplate: "return({{expr}})"
+ldFuncDefHeader: "function {{name}}({{args}})"
+ldBlockStyle: end_keyword
+ldBlockEnd: "end"
+ldErrorWrapOpen: ""
+ldErrorWrapClose: []
+ldPatternStyle: concat_call
+ldConcatFn: "string"
+ldMapStyle: list_comprehension
+ldDispatchLocalHeader: "dispatch = Dict("
+ldDispatchLocalEntry: "    {{mid}} => {{name}},"
+ldDispatchLocalFooter: ")"
+ldDispatchRemoteHeader: "remote_dispatch = Dict("
+ldDispatchRemoteEntry: "    {{mid}} => {{name}}_remote,"
+ldDispatchRemoteFooter: ")"
 
 # Pool template (loaded from pool.jl at runtime, left empty here)
 ldPoolTemplate: ""
 ldBreakMarker: "# <<<BREAK>>>"
 ldCommentMarker: "#"
-
-# Execution
-ldRunCommand:
-  - "julia"
-ldIsCompiled: false

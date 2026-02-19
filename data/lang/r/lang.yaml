@@ -18,7 +18,7 @@ ldBoolFalse: "FALSE"
 ldNullLiteral: "NULL"
 
 # Constructors
-ldListStyle: r_atomic
+ldListStyle: type_dependent
 ldTupleConstructor: "list"
 ldRecordConstructor: "list"
 ldRecordSeparator: "="
@@ -34,22 +34,10 @@ ldDeserializeFn: "morloc_get_value"
 
 # Foreign call
 ldForeignCallFn: "morloc_foreign_call"
-ldForeignCallSocketPath: "paste0"
 ldForeignCallIntSuffix: "L"
 
 # Remote call
 ldRemoteCallFn: "morloc_remote_call"
-ldResourcePackStyle: named_list
-
-# Syntax styles
-ldAssignment: arrow
-ldFunctionDef: r_assign
-ldLambda: r_function
-ldPartialApp: anonymous_wrapper
-ldSuspend: r
-ldMapList: r_lapply
-ldPattern: r_paste0
-ldDispatchTable: r_list
 
 # Record handling
 ldDictStyleRecords: false
@@ -57,8 +45,35 @@ ldQuoteRecordKeys: false
 
 # Import syntax
 ldQualifiedImports: false
-ldImportPrefix: "source("
 ldIncludeRelToFile: false
+
+# Template fields
+ldAssignOp: "<-"
+ldLambdaTemplate: "function({{args}}) { {{body}} }"
+ldSuspendExpr: "(function() {{expr}})"
+ldSuspendBlock: "function(){\n{{body}}\n}"
+ldPartialTemplate: "function({{bound_args}}) { {{fn}}({{all_args}}) }"
+ldImportTemplate: "source(\"{{path}}\")"
+ldSocketPathTemplate: "paste0(global_state$tmpdir, \"/\", {{socket}})"
+ldResourcePackTemplate: "list(mem={{mem}}L, time={{time}}L, cpus={{cpus}}L, gpus={{gpus}}L)"
+ldReturnTemplate: "return({{expr}})"
+ldFuncDefHeader: "{{name}} <- function({{args}})"
+ldBlockStyle: braces
+ldBlockEnd: "}"
+ldErrorWrapOpen: ""
+ldErrorWrapClose: []
+ldPatternStyle: concat_call
+ldConcatFn: "paste0"
+ldAtomicTypes: ["integer", "numeric", "double", "logical", "character"]
+ldAtomicListFn: "c"
+ldGenericListFn: "list"
+ldMapStyle: apply_callback
+ldDispatchLocalHeader: ".dispatch <- list()"
+ldDispatchLocalEntry: ".dispatch[[{{mid}}L]] <- {{name}}"
+ldDispatchLocalFooter: ""
+ldDispatchRemoteHeader: ".remote_dispatch <- list()"
+ldDispatchRemoteEntry: ".remote_dispatch[[{{mid}}L]] <- {{name}}_remote"
+ldDispatchRemoteFooter: ""
 
 # Pool template (loaded from pool.R, left empty here)
 ldPoolTemplate: ""
