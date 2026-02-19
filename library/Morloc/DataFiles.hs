@@ -17,6 +17,8 @@ module Morloc.DataFiles
   , poolTemplate
   , poolTemplateGeneric
   , langSetups
+  , langRegistryFiles
+  , languagesYaml
   ) where
 
 import Data.FileEmbed (embedFileRelative)
@@ -27,7 +29,6 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8)
-import Morloc.Namespace.Prim (Lang(..))
 
 data EmbededFile = EmbededFile
   { embededFileName :: String -- basename for the file
@@ -111,17 +112,16 @@ inlineIncludes fileMap seen content = T.unlines $ concatMap processLine (T.lines
 nexusSource :: EmbededFile
 nexusSource = EmbededFile "nexus.c" (decodeUtf8 $ $(embedFileRelative "data/nexus.c"))
 
--- Pool template for C++ (used by CppPrinter in executable)
-poolTemplate :: Lang -> EmbededFile
-poolTemplate CppLang = EmbededFile "pool.cpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/pool.cpp"))
-poolTemplate (PluginLang _) = error "Plugin language templates are loaded dynamically"
-poolTemplate lang = error $ "No embedded pool template for " <> show lang
+-- | Pool template lookup by canonical language name
+poolTemplate :: Text -> EmbededFile
+poolTemplate "cpp" = EmbededFile "pool.cpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/pool.cpp"))
+poolTemplate name = error $ "No embedded pool template for " <> T.unpack name
 
 -- | 3-section pool templates for the generic translator (sources, manifolds, dispatch)
-poolTemplateGeneric :: Lang -> EmbededFile
-poolTemplateGeneric Python3Lang = EmbededFile "pool.py" (decodeUtf8 $ $(embedFileRelative "data/lang/py/pool.py"))
-poolTemplateGeneric RLang = EmbededFile "pool.R" (decodeUtf8 $ $(embedFileRelative "data/lang/r/pool.R"))
-poolTemplateGeneric lang = poolTemplate lang
+poolTemplateGeneric :: Text -> EmbededFile
+poolTemplateGeneric "py" = EmbededFile "pool.py" (decodeUtf8 $ $(embedFileRelative "data/lang/py/pool.py"))
+poolTemplateGeneric "r" = EmbededFile "pool.R" (decodeUtf8 $ $(embedFileRelative "data/lang/r/pool.R"))
+poolTemplateGeneric name = poolTemplate name
 
 -- | Per-language init setups. Each bundles an init.sh script with
 -- the data files that should be written to the build dir before running it.
@@ -158,3 +158,17 @@ juliaSetup = LangSetup "Julia"
   , EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/lang.yaml"))
   , EmbededFile "pool.jl" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/pool.jl"))
   ]
+
+-- | Per-language lang.yaml files keyed by canonical name
+langRegistryFiles :: [(String, EmbededFile)]
+langRegistryFiles =
+  [ ("c",   EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/c/lang.yaml")))
+  , ("cpp", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/lang.yaml")))
+  , ("py",  EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/py/lang.yaml")))
+  , ("r",   EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/r/lang.yaml")))
+  , ("jl",  EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/lang.yaml")))
+  ]
+
+-- | Shared languages.yaml with pairwise costs
+languagesYaml :: EmbededFile
+languagesYaml = EmbededFile "languages.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/languages.yaml"))

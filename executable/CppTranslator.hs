@@ -19,6 +19,7 @@ module CppTranslator
 
 import Control.Monad.Identity (Identity)
 import qualified Control.Monad.State as CMS
+import qualified Data.Char as DC
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common
@@ -34,9 +35,10 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Language as ML
-import qualified Morloc.Module as Mod
+import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import Morloc.Quasi
+import qualified Morloc.System as MS
 import qualified Morloc.TypeEval as TE
 
 data CallSemantics = Copy | Reference | ConstPtr
@@ -163,7 +165,7 @@ translate srcs es = do
   return $
     Script
       { scriptBase = "pool"
-      , scriptLang = CppLang
+      , scriptLang = ML.cppLang
       , scriptCode = "." :/ Dir "pools" [File "pool.cpp" (Code . render $ code)]
       , scriptMake = maker
       }
@@ -198,18 +200,17 @@ metaTypedefs ::
   Scope
 metaTypedefs tmap i =
   case GMap.lookup i tmap of
-    (GMapJust langmap) -> case Map.lookup CppLang langmap of
+    (GMapJust langmap) -> case Map.lookup ML.cppLang langmap of
       (Just scope) -> Map.filter (not . null) scope
       Nothing -> Map.empty
     _ -> Map.empty
 
 makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
 makeTheMaker srcs = do
-  let outfile = pretty $ "pools" </> ML.makeExecutablePoolName CppLang
-  let src = pretty $ "pools" </> ML.makeSourcePoolName CppLang
+  let outfile = pretty $ "pools" </> ML.makeExecutablePoolName ML.cppLang
+  let src = pretty $ "pools" </> ML.makeSourcePoolName ML.cppLang
 
-  -- this function cleans up source names (if needed) and generates compiler flags and paths to search
-  (_, flags, includes) <- Mod.handleFlagsAndPaths CppLang srcs
+  (_, flags, includes) <- handleFlagsAndPaths srcs
 
   let incs = "-I." : [pretty ("-I" <> i) | i <- includes]
   let flags' = map pretty flags
@@ -221,7 +222,7 @@ makeTheMaker srcs = do
   return [cmd]
 
 serialType :: MDoc
-serialType = pretty $ ML.serialType CppLang
+serialType = pretty $ ML.serialType ML.cppLang
 
 makeSignature :: SerialManifold -> CppTranslator [MDoc]
 makeSignature = foldWithSerialManifoldM fm
@@ -514,7 +515,7 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
   -- we need to generate (de)serializers for all records
   typedef <- Map.unions <$> mapM (foldSerialManifoldM fm) es0
 
-  scope <- case Map.lookup CppLang univeralScopeMap of
+  scope <- case Map.lookup ML.cppLang univeralScopeMap of
     (Just scope) -> return scope
     Nothing -> return Map.empty
 
@@ -568,3 +569,106 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
     showDefType _ (AppT _ _) = error "AppT is only OK with VarT, for now"
     showDefType _ (ThunkT _) = error "Cannot show ThunkT"
+
+-- C++ specific source handling (flags, headers, libraries)
+
+handleFlagsAndPaths :: [Source] -> MorlocMonad ([Source], [Text], [Path])
+handleFlagsAndPaths srcs = do
+  state <- MM.get
+  let gccversion = gccVersionFlag . foldl max 0 . map packageCppVersion $ statePackageMeta state
+  let explicitLibs = map ("-l" <>) . unique . concatMap packageDependencies $ statePackageMeta state
+  (srcs', libflags, paths) <-
+    fmap unzip3
+      . mapM flagAndPath
+      . unique
+      $ [s | s <- srcs, srcLang s == ML.cppLang]
+
+  home <- MM.asks configHome
+  let mlcInclude = ["-I" <> home <> "/include"]
+      mlcPch = ["-include", "morloc_pch.hpp"]
+      mlcLib = ["-L" <> home <> "/lib", "-Wl,-rpath," <> home <> "/lib", "-lmorloc", "-lcppmorloc", "-lpthread"]
+
+  return
+    ( filter (isJust . srcPath) srcs'
+    , [gccversion] <> explicitLibs ++ (map MT.pack . concat) (mlcPch : mlcInclude : mlcLib : libflags)
+    , unique (catMaybes paths)
+    )
+
+gccVersionFlag :: Int -> Text
+gccVersionFlag i
+  | i <= 17 = "-std=c++17"
+  | otherwise = "-std=c++" <> MT.show' i
+
+flagAndPath :: Source -> MorlocMonad (Source, [String], Maybe Path)
+flagAndPath src@(Source _ srcL (Just p) _ _ _ _) | srcL == ML.cppLang =
+  case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p), MS.takeExtensions p) of
+    (".", base, "") -> do
+      header <- lookupHeader base
+      libFlags <- lookupLib base
+      return (src {srcPath = Just header}, libFlags, Just (MS.takeDirectory header))
+    (dir, base, _) -> do
+      libFlags <- lookupLib base
+      return (src, libFlags, Just dir)
+  where
+    lookupHeader :: String -> MorlocMonad Path
+    lookupHeader base = do
+      home <- MM.asks configHome
+      let allPaths = getHeaderPaths home base [".h", ".hpp", ".hxx"]
+      existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
+      case existingPaths of
+        (x : _) -> return x
+        [] -> MM.throwSystemError $ "Header file " <> pretty base <> ".* not found"
+
+    lookupLib :: String -> MorlocMonad [String]
+    lookupLib base = do
+      home <- MM.asks configHome
+      let libnamebase = filter DC.isAlphaNum (map DC.toLower base)
+      let libname = "lib" <> libnamebase <> ".so"
+      let allPaths = getLibraryPaths home base libname
+      existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
+      case existingPaths of
+        (libpath : _) -> do
+          libdir <- liftIO . MS.canonicalizePath . MS.takeDirectory $ libpath
+          return
+            [ "-Wl,-rpath=" <> libdir
+            , "-L" <> libdir
+            , "-l" <> libnamebase
+            ]
+        [] -> return []
+flagAndPath src@(Source _ srcL Nothing _ _ _ _) | srcL == ML.cppLang = return (src, [], Nothing)
+flagAndPath _ = MM.throwSystemError $ "flagAndPath should only be called for C++ functions"
+
+getFile :: Path -> IO (Maybe Path)
+getFile x = do
+  exists <- MS.doesFileExist x
+  return $
+    if exists
+      then Just x
+      else Nothing
+
+getHeaderPaths :: Path -> String -> [String] -> [Path]
+getHeaderPaths lib base exts = [path <> ext | path <- paths, ext <- exts]
+  where
+    paths =
+      map
+        MS.joinPath
+        [ [base]
+        , ["include", base]
+        , [base, base]
+        , [lib, "include", base]
+        , [lib, "src", base, base]
+        , ["/usr/include", base]
+        , ["/usr/local/include", base]
+        ]
+
+getLibraryPaths :: Path -> String -> String -> [Path]
+getLibraryPaths lib base sofile =
+  map
+    MS.joinPath
+    [ [sofile]
+    , ["lib", sofile]
+    , [base, sofile]
+    , [lib, "lib", sofile]
+    , [lib, "src", base, sofile]
+    , [lib, "src", base, "lib", sofile]
+    ]

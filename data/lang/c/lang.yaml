@@ -1,0 +1,8 @@
+# C language metadata for morloc compiler
+name: c
+extension: c
+aliases: []
+is_compiled: true
+run_command: []
+serial_type: ""
+cost: 1

@@ -692,7 +692,7 @@ data PState = PState
   , psModuleConfig :: !ModuleConfig
   , psDocMap      :: !(Map.Map Pos [Text])
   , psSourceLines :: ![Text]
-  , psPluginLangs :: !(Map.Map T.Text String) -- name -> extension for registered plugins
+  , psLangMap :: !(Map.Map T.Text Lang) -- alias -> Lang for all known languages
   }
   deriving (Show)
 
@@ -776,7 +776,7 @@ toDState ps = DState
   , dsModulePath = psModulePath ps
   , dsModuleConfig = psModuleConfig ps
   , dsSourceLines = psSourceLines ps
-  , dsPluginLangs = psPluginLangs ps
+  , dsLangMap = psLangMap ps
   }
 
 fromDState :: PState -> DState -> PState

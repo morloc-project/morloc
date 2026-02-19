@@ -86,7 +86,9 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
+import qualified Morloc.LangRegistry as LR
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
 import Morloc.Namespace.Expr
@@ -99,9 +101,15 @@ import qualified System.Process as SP
 runMorlocMonad ::
   Maybe Path -> Int -> Config -> BuildConfig -> MorlocMonad a -> IO (MorlocReturn a)
 runMorlocMonad outfile v config buildConfig ev = do
-  let state0 = emptyState outfile v
-      state1 = state0 {stateBuildConfig = buildConfig}
-  runStateT (runWriterT (runExceptT (runReaderT ev config))) (state1)
+  let langFiles = [(n, DF.embededFileText f) | (n, f) <- DF.langRegistryFiles]
+      languagesText = DF.embededFileText DF.languagesYaml
+      registry = case LR.buildDefaultRegistry langFiles languagesText of
+        Right r -> r
+        Left err -> error $ "Failed to build language registry: " ++ err
+      state0 = emptyState outfile v
+      state1 = state0 { stateBuildConfig = buildConfig
+                       , stateLangRegistry = registry }
+  runStateT (runWriterT (runExceptT (runReaderT ev config))) state1
 
 emptyState :: Maybe Path -> Int -> MorlocState
 emptyState path v =
@@ -379,13 +387,12 @@ logFileWith s f m = do
   liftIO $ MT.writeFile path (MT.pretty (f m))
   return m
 
-{- | Attempt to read a language name. This is a wrapper around the
-@Morloc.Language::readLangName@ that appropriately handles error.
--}
+-- | Look up a language by name or alias using the registry.
 readLang :: Text -> MorlocMonad Lang
-readLang langStr =
-  case ML.readLangName langStr of
-    (Just x) -> return x
+readLang langStr = do
+  reg <- gets stateLangRegistry
+  case LR.lookupByAlias langStr reg of
+    Just (name, entry) -> return (ML.makeLang name (LR.lreExtension entry))
     Nothing -> throwSystemError $ "Unknown language" <> squotes (pretty langStr)
 
 {- | Return sources for constructing an object. These are used by `NamE NamObject`

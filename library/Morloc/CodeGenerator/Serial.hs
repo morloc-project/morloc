@@ -33,11 +33,11 @@ import Morloc.Typecheck.Internal (apply, qualify, substitute, subtype, unqualify
 
 -- The type of serialization data as JSON, currently
 serialType :: Lang -> CVar
-serialType Python3Lang = CV "str"
-serialType RLang = CV "character"
-serialType CppLang = CV "std::string"
-serialType (PluginLang _) = CV "bytes" -- msgpack bridge uses raw bytes
-serialType _ = error "Ah hell, you know I don't know that language"
+serialType lang = case langName lang of
+  "py"  -> CV "str"
+  "r"   -> CV "character"
+  "cpp" -> CV "std::string"
+  _     -> CV "bytes"
 
 -- | recurse all the way to a serializable type
 serialAstToType :: SerialAST -> TypeF

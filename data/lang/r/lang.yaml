@@ -1,0 +1,66 @@
+# R language descriptor for morloc compiler
+# Metadata fields (read by LangRegistry) + descriptor fields (read by generic translator)
+
+# Identity and metadata
+name: r
+extension: R
+aliases: []
+is_compiled: false
+run_command: ["Rscript"]
+serial_type: "character"
+cost: 4
+preamble:
+  - 'dyn.load("{{home}}/lib/librmorloc.so")'
+
+# Literals
+ldBoolTrue: "TRUE"
+ldBoolFalse: "FALSE"
+ldNullLiteral: "NULL"
+
+# Constructors
+ldListStyle: r_atomic
+ldTupleConstructor: "list"
+ldRecordConstructor: "list"
+ldRecordSeparator: "="
+
+# Access styles
+ldIndexStyle: one_double_bracket
+ldKeyAccess: "double_bracket"
+ldFieldAccess: dollar
+
+# Serialize/deserialize
+ldSerializeFn: "morloc_put_value"
+ldDeserializeFn: "morloc_get_value"
+
+# Foreign call
+ldForeignCallFn: "morloc_foreign_call"
+ldForeignCallSocketPath: "paste0"
+ldForeignCallIntSuffix: "L"
+
+# Remote call
+ldRemoteCallFn: "morloc_remote_call"
+ldResourcePackStyle: named_list
+
+# Syntax styles
+ldAssignment: arrow
+ldFunctionDef: r_assign
+ldLambda: r_function
+ldPartialApp: anonymous_wrapper
+ldSuspend: r
+ldMapList: r_lapply
+ldPattern: r_paste0
+ldDispatchTable: r_list
+
+# Record handling
+ldDictStyleRecords: false
+ldQuoteRecordKeys: false
+
+# Import syntax
+ldQualifiedImports: false
+ldImportPrefix: "source("
+ldIncludeRelToFile: false
+
+# Pool template (loaded from pool.R, left empty here)
+ldPoolTemplate: ""
+ldBreakMarker: "# <<<BREAK>>>"
+ldCommentMarker: "#"

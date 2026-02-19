@@ -1,0 +1,68 @@
+# Python language descriptor for morloc compiler
+# Metadata fields (read by LangRegistry) + descriptor fields (read by generic translator)
+
+# Identity and metadata
+name: py
+extension: py
+aliases: ["python", "python3"]
+is_compiled: false
+run_command: ["python3"]
+serial_type: "str"
+cost: 3
+preamble:
+  - 'sys.path = [os.path.expanduser("."), os.path.expanduser("{{opt}}"), os.path.expanduser("{{lib}}")] + sys.path'
+  - "import importlib"
+  - "import pymorloc as morloc"
+
+# Literals
+ldBoolTrue: "True"
+ldBoolFalse: "False"
+ldNullLiteral: "None"
+
+# Constructors
+ldListStyle: bracket
+ldTupleConstructor: ""
+ldRecordConstructor: "OrderedDict"
+ldRecordSeparator: "="
+
+# Access styles
+ldIndexStyle: zero_bracket
+ldKeyAccess: "bracket"
+ldFieldAccess: dot
+
+# Serialize/deserialize
+ldSerializeFn: "morloc.put_value"
+ldDeserializeFn: "morloc.get_value"
+
+# Foreign call
+ldForeignCallFn: "morloc.foreign_call"
+ldForeignCallSocketPath: "os.path.join"
+ldForeignCallIntSuffix: ""
+
+# Remote call
+ldRemoteCallFn: "morloc.remote_call"
+ldResourcePackStyle: struct_pack
+
+# Syntax styles
+ldAssignment: equals
+ldFunctionDef: python_def
+ldLambda: python_lambda
+ldPartialApp: functools_partial
+ldSuspend: python
+ldMapList: python_for
+ldPattern: python_fstring
+ldDispatchTable: python_dict
+
+# Record handling
+ldDictStyleRecords: true
+ldQuoteRecordKeys: false
+
+# Import syntax
+ldQualifiedImports: true
+ldImportPrefix: "import "
+ldIncludeRelToFile: false
+
+# Pool template (loaded from pool.py, left empty here)
+ldPoolTemplate: ""
+ldBreakMarker: "# <<<BREAK>>>"
+ldCommentMarker: "#"

@@ -4970,7 +4970,7 @@ data PState = PState
   , psSourceMap   :: !(Map.Map Int SrcLoc)
   , psModulePath  :: !(Maybe Path)
   , psModuleConfig :: !ModuleConfig
-  , psPluginLangs :: !(Map.Map T.Text String) -- name -> extension for registered plugins
+  , psLangMap :: !(Map.Map T.Text Lang) -- alias -> Lang for all known languages
   }
   deriving (Show)
 
@@ -5085,13 +5085,11 @@ forallWrap (v : vs) t = ForallU v (forallWrap vs t)
 
 -- | Parse a language name, checking both built-in and registered plugin languages
 parseLang :: Text -> P Lang
-parseLang t = case ML.readLangName t of
-  Just lang -> return lang
-  Nothing -> do
-    plugins <- State.gets psPluginLangs
-    case Map.lookup (T.toLower t) plugins of
-      Just ext -> return $ ML.PluginLang (ML.PluginLangInfo (T.toLower t) ext)
-      Nothing -> pfail (Pos 0 0 "") ("unknown language: " ++ T.unpack t)
+parseLang t = do
+  langs <- State.gets psLangMap
+  case Map.lookup (T.toLower t) langs of
+    Just lang -> return lang
+    Nothing -> pfail (Pos 0 0 "") ("unknown language: " ++ T.unpack t)
 
 pfail :: Pos -> String -> P a
 pfail pos msg = State.lift (Left (ParseError pos msg))

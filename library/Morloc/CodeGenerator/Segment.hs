@@ -57,7 +57,8 @@ segmentExpr
       (RemoteCall _) -> return HeadManifoldFormRemoteWorker
     let foreignHead = MonoHead lang m foreignArgs headForm e'
     config <- MM.ask
-    let socket = MC.setupServerAndSocket config lang
+    reg <- MM.gets stateLangRegistry
+    let socket = MC.setupServerAndSocket config reg lang
     return (foreignHead : ms, (Nothing, MonoPoolCall callingType m socket remoteCall foreignArgs))
 segmentExpr m _ (PolyRemoteInterface lang callingType args remoteCall e) = do
   MM.sayVVV $
@@ -73,7 +74,8 @@ segmentExpr m _ (PolyRemoteInterface lang callingType args remoteCall e) = do
       es' = map (MonoBndVar (A None)) args
 
   config <- MM.ask
-  let socket = MC.setupServerAndSocket config lang
+  reg <- MM.gets stateLangRegistry
+  let socket = MC.setupServerAndSocket config reg lang
       localFun = MonoApp (MonoPoolCall callingType m socket remoteCall [Arg i None | i <- args]) es'
 
   return (foreignHead : ms, (Nothing, localFun))

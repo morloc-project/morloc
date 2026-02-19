@@ -1,0 +1,25 @@
+# Pairwise language costs for the morloc optimizer
+#
+# Same-language function overhead (intra-language call cost)
+same_language_costs:
+  c: 1
+  cpp: 1
+  py: 10
+  r: 100
+
+# Cost of calling INTO a language from a different language (IPC overhead)
+cross_language_costs:
+  c: 5000
+  cpp: 5000
+  py: 10000
+  r: 40000
+
+# Special optimized pairs (from -> to) that bypass normal IPC
+optimized_pairs:
+  - from: cpp
+    to: c
+    cost: 1
+
+# Defaults for unknown/plugin languages
+default_same_language: 10
+default_cross_language: 10000

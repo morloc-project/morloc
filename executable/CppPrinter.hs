@@ -26,7 +26,7 @@ module CppPrinter
 
 import Morloc.CodeGenerator.Grammars.Common (DispatchEntry(..), manNamer)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-import Morloc.CodeGenerator.Namespace (MDoc, Lang(..))
+import Morloc.CodeGenerator.Namespace (MDoc)
 import Morloc.Data.Doc
 import Morloc.DataFiles as DF
 import Morloc.Quasi
@@ -128,7 +128,7 @@ uint8_t* remote_dispatch(uint32_t mid, const uint8_t** args){
 printProgram :: [MDoc] -> [MDoc] -> IProgram -> MDoc
 printProgram serialization signatures prog =
   format
-    (DF.embededFileText (DF.poolTemplate CppLang))
+    (DF.embededFileText (DF.poolTemplate "cpp"))
     "// <<<BREAK>>>"
     [ vsep (map pretty (ipSources prog))
     , vsep serialization

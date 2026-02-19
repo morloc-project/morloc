@@ -44,17 +44,23 @@ extra-source-files:
   - data/morloc/shm.c
   - data/morloc/slurm.c
   - data/morloc/utility.c
+  # shared language config
+  - data/lang/languages.yaml
   # per-language files
+  - data/lang/c/lang.yaml
+  - data/lang/cpp/lang.yaml
   - data/lang/cpp/cppmorloc.hpp
   - data/lang/cpp/cppmorloc.cpp
   - data/lang/cpp/morloc_pch.hpp
   - data/lang/cpp/pool.cpp
   - data/lang/cpp/init.sh
+  - data/lang/py/lang.yaml
   - data/lang/py/pymorloc.c
   - data/lang/py/setup.py
   - data/lang/py/Makefile
   - data/lang/py/pool.py
   - data/lang/py/init.sh
+  - data/lang/r/lang.yaml
   - data/lang/r/rmorloc.c
   - data/lang/r/pool.R
   - data/lang/r/init.sh

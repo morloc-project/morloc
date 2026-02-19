@@ -19,12 +19,14 @@ module Morloc.Config
   ) where
 
 import qualified Data.Aeson.KeyMap as K
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Yaml as Y
 import qualified Data.Yaml.Config as YC
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
+import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Expr
@@ -46,8 +48,7 @@ loadDefaultMorlocConfig = do
       (MT.unpack . fromJust $ defaults K.!? "plane-core")
       (MT.unpack . fromJust $ defaults K.!? "tmpdir")
       (MT.unpack . fromJust $ defaults K.!? "build-config")
-      "python3" -- lang_python3
-      "Rscript" -- lang_R
+      Map.empty -- configLangOverrides
 
 {- | Load a Morloc config file. If no file is given (i.e., Nothing), then the
 default configuration will be used.
@@ -104,17 +105,23 @@ loadBuildConfig config = do
 
 setupServerAndSocket ::
   Config ->
+  LangRegistry ->
   Lang ->
   Socket
-setupServerAndSocket c lang = Socket lang args socket
+setupServerAndSocket c reg lang = Socket lang args socket
   where
-    args = case lang of
-      CLang -> ["./" <> pretty (ML.makeExecutablePoolName CLang)]
-      CppLang -> ["./" <> pretty (ML.makeExecutablePoolName CppLang)]
-      RLang -> [pretty (configLangR c), pretty (ML.makeExecutablePoolName RLang)]
-      Python3Lang -> [pretty (configLangPython3 c), pretty (ML.makeExecutablePoolName Python3Lang)]
-      -- Plugin languages: use language name as interpreter command
-      ML.PluginLang pli -> [pretty (ML.pliName pli), pretty (ML.makeExecutablePoolName lang)]
+    name = ML.langName lang
+    -- Look up run command: config overrides take precedence over registry defaults
+    runCmd = case Map.lookup name (configLangOverrides c) of
+      Just cmd -> cmd
+      Nothing -> LR.registryRunCommand reg name
+    isCompiled = LR.registryIsCompiled reg name
+    poolExe = ML.makeExecutablePoolName lang
+
+    args
+      | isCompiled = ["./" <> pretty poolExe]
+      | null runCmd = [pretty name, pretty poolExe]
+      | otherwise = map pretty runCmd ++ [pretty poolExe]
 
     socket = "pipe-" <> pretty (ML.showLangName lang)
 

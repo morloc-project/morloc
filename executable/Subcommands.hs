@@ -21,6 +21,7 @@ import qualified Morloc.CodeGenerator.SystemConfig as MSC
 import qualified Morloc.Config as Config
 import qualified CppTranslator
 import Morloc.Data.Doc
+import qualified Morloc.Language as ML
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.API as F
 import qualified Morloc.Module as Mod
@@ -36,8 +37,9 @@ import UI
 
 -- | Route each language to its translator.
 translator :: TranslateFn
-translator CppLang srcs es = CppTranslator.translate srcs es
-translator lang srcs es = Generic.translate lang srcs es
+translator lang srcs es
+  | lang == ML.cppLang = CppTranslator.translate srcs es
+  | otherwise = Generic.translate lang srcs es
 
 runMorloc :: CliCommand -> IO ()
 runMorloc args = do

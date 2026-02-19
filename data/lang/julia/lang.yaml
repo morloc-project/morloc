@@ -1,7 +1,16 @@
-# Julia language descriptor for morloc generic translator
-# This file is read by the compiler to generate Julia pool code.
+# Julia language descriptor for morloc compiler
+# Metadata fields (read by LangRegistry) + descriptor fields (read by generic translator)
 
-# Identity
+# Identity and metadata
+name: jl
+extension: jl
+aliases: ["julia"]
+is_compiled: false
+run_command: ["julia"]
+serial_type: "bytes"
+cost: 5
+
+# Descriptor identity (kept for compatibility with generic translator)
 ldName: julia
 ldExtension: jl
 

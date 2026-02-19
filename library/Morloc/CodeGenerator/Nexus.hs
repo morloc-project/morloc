@@ -26,6 +26,7 @@ import qualified Morloc.CodeGenerator.Serial as Serial
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc (render, pretty)
 import qualified Morloc.Language as ML
+import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
 import qualified Data.Time.Clock.POSIX as Time
 import qualified System.Directory as Dir
@@ -83,7 +84,8 @@ makeFData (e@(AnnoS (Idx i t) (Idx _ lang) _), d) = do
 findSockets :: AnnoS e One (Indexed Lang) -> MorlocMonad [Socket]
 findSockets rAST = do
   config <- MM.ask
-  return . map (MC.setupServerAndSocket config) . unique $ findAllLangsSAnno rAST
+  registry <- MM.gets stateLangRegistry
+  return . map (MC.setupServerAndSocket config registry) . unique $ findAllLangsSAnno rAST
 
 findAllLangsSAnno :: AnnoS e One (Indexed Lang) -> [Lang]
 findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e
@@ -107,7 +109,8 @@ getFData (t, i, lang, doc, sockets) = do
   case mayName of
     (Just name') -> do
       config <- MM.ask
-      let socket = MC.setupServerAndSocket config lang
+      registry <- MM.gets stateLangRegistry
+      let socket = MC.setupServerAndSocket config registry lang
       return $
         FData
           { fdataSocket = socket
@@ -473,8 +476,8 @@ litSchemaStr NullX = "z"
 -- Manifest builder
 -- ======================================================================
 
-buildManifest :: Config -> String -> String -> Int -> [(Lang, Socket)] -> [FData] -> [GastData] -> (Lang -> Int) -> Text
-buildManifest config programName buildDir buildTime daemonSets fdata gasts langToPool = jsonObj
+buildManifest :: Config -> LangRegistry -> String -> String -> Int -> [(Lang, Socket)] -> [FData] -> [GastData] -> (Lang -> Int) -> Text
+buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPool = jsonObj
   [ ("version", "1")
   , ("name", jsonStr (MT.pack programName))
   , ("build_dir", jsonStr (MT.pack buildDir))
@@ -491,12 +494,18 @@ buildManifest config programName buildDir buildTime daemonSets fdata gasts langT
       ]
 
     makeExecArgs :: Lang -> [String]
-    makeExecArgs CppLang = ["pools" </> ML.makeExecutablePoolName CppLang]
-    makeExecArgs CLang = ["pools" </> ML.makeExecutablePoolName CLang]
-    makeExecArgs Python3Lang = [MC.configLangPython3 config, "pools" </> ML.makeExecutablePoolName Python3Lang]
-    makeExecArgs RLang = [MC.configLangR config, "pools" </> ML.makeExecutablePoolName RLang]
-    -- Plugin languages: use language name as interpreter command
-    makeExecArgs l@(ML.PluginLang pli) = [MT.unpack (ML.pliName pli), "pools" </> ML.makeExecutablePoolName l]
+    makeExecArgs lang =
+      let name = ML.langName lang
+          isCompiled = LR.registryIsCompiled registry name
+          runCmd = case Map.lookup name (MC.configLangOverrides config) of
+            Just cmd -> map MT.unpack cmd
+            Nothing -> map MT.unpack (LR.registryRunCommand registry name)
+          poolExe = "pools" </> ML.makeExecutablePoolName lang
+      in if isCompiled
+         then [poolExe]
+         else if null runCmd
+              then [MT.unpack name, poolExe]
+              else runCmd ++ [poolExe]
 
     remoteCmdJson :: FData -> Text
     remoteCmdJson fd = jsonObj
@@ -580,13 +589,15 @@ generate cs rASTs = do
         (stateOutfile st <|> if stateInstall st
           then fmap (\(MV n) -> MT.unpack n) (stateModuleName st)
           else Nothing)
-      manifestJson = buildManifest config outfile buildDir buildTime daemonSets fdata gasts langToPoolIndex
+  registry <- MM.gets stateLangRegistry
+
+  let manifestJson = buildManifest config registry outfile buildDir buildTime daemonSets fdata gasts langToPoolIndex
       wrapperScript = makeWrapperScript manifestJson
 
   return $
     Script
       { scriptBase = outfile
-      , scriptLang = ML.CLang
+      , scriptLang = ML.cLang
       , scriptCode = "." :/ File outfile (Code wrapperScript)
       , scriptMake = [SysExe outfile]
       }

@@ -25,7 +25,7 @@ import Morloc.Frontend.Namespace
 import qualified Morloc.Frontend.Parser as Parser
 import qualified Morloc.Frontend.Typecheck as Typecheck
 import qualified Morloc.Frontend.Valuecheck as Valuecheck
-import qualified Morloc.CodeGenerator.LanguageDescriptor as LD
+import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import Morloc.Data.Doc
@@ -39,10 +39,10 @@ parse ::
   MorlocMonad (DAG MVar Import ExprI)
 parse f (Code code) = do
   moduleConfig <- Config.loadModuleConfig f
-  plugins <- discoverPluginLangs
+  langMap <- buildLangMap'
 
   let parserState = emptyPState { psModuleConfig = moduleConfig
-                                , psPluginLangs = plugins }
+                                , psLangMap = langMap }
 
   -- store source text for the main file
   case f of
@@ -92,28 +92,36 @@ openLocalModule filename = do
   MM.modify (\st -> st { stateSourceText = Map.insert filename code (stateSourceText st) })
   return (Just filename, code)
 
--- | Scan configHome/lang/ for plugin language descriptors (lang.yaml files).
--- Returns a map from language name to file extension.
-discoverPluginLangs :: MorlocMonad (Map.Map T.Text String)
-discoverPluginLangs = do
+-- | Build a map from language aliases to Lang values, combining the
+-- registry (built-in languages) with filesystem-discovered plugins.
+buildLangMap' :: MorlocMonad (Map.Map T.Text Lang)
+buildLangMap' = do
+  -- Get the registry-based lang map (all built-in languages)
+  reg <- MM.gets stateLangRegistry
+  let registryMap = LR.buildLangMap reg
+
+  -- Discover additional plugin languages on the filesystem
   home <- MM.asks configHome
   let langDir = home </> "lang"
   exists <- liftIO $ doesDirectoryExist langDir
-  if not exists
+  pluginMap <- if not exists
     then return Map.empty
     else do
       dirs <- liftIO $ listDirectory langDir
       results <- liftIO $ mapM (scanLangDir langDir) dirs
-      return $ Map.fromList [(n, e) | Just (n, e) <- results]
+      return $ Map.fromList [(n, lang) | Just (n, lang) <- results]
+
+  -- Registry entries take precedence over filesystem discoveries
+  return $ Map.union registryMap pluginMap
   where
-    scanLangDir :: FilePath -> String -> IO (Maybe (T.Text, String))
+    scanLangDir :: FilePath -> String -> IO (Maybe (T.Text, Lang))
     scanLangDir langDir dirName = do
       let descPath = langDir </> dirName </> "lang.yaml"
       hasDesc <- doesFileExist descPath
       if not hasDesc
         then return Nothing
         else do
-          result <- LD.loadLangDescriptor descPath
+          result <- LR.parseLangYamlFile descPath
           case result of
             Left _ -> return Nothing
-            Right desc -> return $ Just (T.toLower (LD.ldName desc), LD.ldExtension desc)
+            Right (name, ext) -> return $ Just (name, Lang name ext)

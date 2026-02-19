@@ -43,8 +43,7 @@ emptyConfig = do
     , configPlaneCore   = "morloclib"
     , configTmpDir      = home <> "/.morloc/tmp"
     , configBuildConfig = home <> "/.morloc/.build-config.yaml"
-    , configLangPython3 = "python3"
-    , configLangR       = "Rscript"
+    , configLangOverrides = mempty
     }
 
 -- | Run a MorlocMonad action for benchmarking

@@ -27,6 +27,7 @@ module Morloc.CodeGenerator.LanguageDescriptor
   , ListConstructorStyle(..)
   , ResourcePackStyle(..)
   , loadLangDescriptor
+  , loadLangDescriptorFromText
   , defaultLangDescriptor
   ) where
 
@@ -35,6 +36,7 @@ import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as KM
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import qualified Data.Yaml as Y
 import GHC.Generics (Generic)
 
@@ -275,12 +277,24 @@ instance Y.FromJSON ResourcePackStyle where
 instance Y.FromJSON LangDescriptor where
   parseJSON = Y.withObject "LangDescriptor" $ \obj -> do
     let ins k v = KM.insertWith (\_ old -> old) (AesonKey.fromText k) v
-        withDefaults = ins "ldCodegenCommand" Y.Null
+        -- Map registry metadata fields to descriptor fields if not already present
+        nameVal = KM.lookup (AesonKey.fromText "name") obj
+        extVal = KM.lookup (AesonKey.fromText "extension") obj
+        runCmdVal = KM.lookup (AesonKey.fromText "run_command") obj
+        isCompiledVal = KM.lookup (AesonKey.fromText "is_compiled") obj
+        -- ins keeps old value if key exists, so insert specific overrides first
+        withDefaults = maybe id (ins "ldName") nameVal
+                     . maybe id (ins "ldExtension") extVal
+                     . maybe id (ins "ldRunCommand") runCmdVal
+                     . maybe id (ins "ldIsCompiled") isCompiledVal
+                     . ins "ldCodegenCommand" Y.Null
                      . ins "ldRemoteCallFn" (Y.String "")
                      . ins "ldResourcePackStyle" (Y.String "plain_list")
                      . ins "ldDictStyleRecords" (Y.Bool False)
                      . ins "ldQuoteRecordKeys" (Y.Bool True)
                      . ins "ldQualifiedImports" (Y.Bool False)
+                     . ins "ldRunCommand" (Y.Array mempty)
+                     . ins "ldIsCompiled" (Y.Bool False)
                      $ obj
     Aeson.genericParseJSON Aeson.defaultOptions (Y.Object withDefaults)
 
@@ -289,6 +303,13 @@ loadLangDescriptor :: FilePath -> IO (Either String LangDescriptor)
 loadLangDescriptor path = do
   result <- Y.decodeFileEither path
   return $ case result of
+    Left err -> Left $ Y.prettyPrintParseException err
+    Right desc -> Right desc
+
+-- | Load a language descriptor from YAML text
+loadLangDescriptorFromText :: Text -> Either String LangDescriptor
+loadLangDescriptorFromText content =
+  case Y.decodeEither' (TE.encodeUtf8 content) of
     Left err -> Left $ Y.prettyPrintParseException err
     Right desc -> Right desc
 

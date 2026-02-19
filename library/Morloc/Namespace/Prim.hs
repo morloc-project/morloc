@@ -70,7 +70,7 @@ import qualified Data.Text as DT
 import GHC.Generics (Generic)
 import Morloc.Data.Doc
 import Morloc.Internal
-import Morloc.Language (Lang (..))
+import Morloc.Language (Lang(..))
 import System.Directory.Tree (AnchoredDirTree (..), DirTree (..))
 import Text.Read (readMaybe)
 

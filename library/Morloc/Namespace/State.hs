@@ -39,6 +39,10 @@ module Morloc.Namespace.State
     -- * System
   , SysCommand (..)
   , Script (..)
+
+    -- * Language registry
+  , LangRegistry (..)
+  , LangRegistryEntry (..)
   ) where
 
 import Control.Monad.Except (ExceptT)
@@ -51,6 +55,8 @@ import Data.Map.Strict (Map)
 import qualified Data.Map as Map
 import Data.Text (Text)
 import Morloc.Data.Doc
+import Morloc.LangRegistry (LangRegistry(..), LangRegistryEntry(..))
+import qualified Morloc.LangRegistry as LR
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
 import Morloc.Namespace.Expr
@@ -91,6 +97,7 @@ data MorlocState = MorlocState
   , stateInstall :: Bool
   , stateInstallDir :: Maybe Path
   , stateClassDefs :: Map ClassName [Constraint]
+  , stateLangRegistry :: LangRegistry
   }
   deriving (Show)
 
@@ -136,8 +143,7 @@ data Config
   , configPlaneCore :: !Path
   , configTmpDir :: !Path
   , configBuildConfig :: !Path
-  , configLangPython3 :: !Path
-  , configLangR :: !Path
+  , configLangOverrides :: !(Map Text [Text])
   }
   deriving (Show, Ord, Eq)
 
@@ -242,6 +248,7 @@ instance Defaultable MorlocState where
       , stateInstall = False
       , stateInstallDir = Nothing
       , stateClassDefs = Map.empty
+      , stateLangRegistry = LR.emptyRegistry
       }
 
 instance Defaultable PackageMeta where
@@ -265,16 +272,23 @@ instance Defaultable PackageMeta where
 
 instance FromJSON Config where
   parseJSON =
-    Aeson.withObject "object" $ \o ->
-      Config
-        <$> o .:? "home" .!= "~/.local/share/morloc"
-        <*> o .:? "source" .!= "~/.local/share/morloc/src/morloc"
-        <*> o .:? "plane" .!= "default"
-        <*> o .:? "plane-core" .!= "morloclib"
-        <*> o .:? "tmpdir" .!= "~/.local/share/morloc/tmp"
-        <*> o .:? "build-config" .!= "~/.local/share/morloc/build-config.yaml"
-        <*> o .:? "lang_python3" .!= "python3"
-        <*> o .:? "lang_R" .!= "Rscript"
+    Aeson.withObject "object" $ \o -> do
+      home' <- o .:? "home" .!= "~/.local/share/morloc"
+      source' <- o .:? "source" .!= "~/.local/share/morloc/src/morloc"
+      plane' <- o .:? "plane" .!= "default"
+      planeCore' <- o .:? "plane-core" .!= "morloclib"
+      tmpdir' <- o .:? "tmpdir" .!= "~/.local/share/morloc/tmp"
+      buildConfig' <- o .:? "build-config" .!= "~/.local/share/morloc/build-config.yaml"
+      -- Parse legacy lang_python3/lang_R fields into langOverrides
+      pyCmd <- o .:? "lang_python3" .!= ("" :: Text)
+      rCmd <- o .:? "lang_R" .!= ("" :: Text)
+      overrides <- o .:? "lang_overrides" .!= Map.empty
+      let legacyOverrides = Map.fromList $ filter (not . null . snd)
+            [ ("py", if pyCmd == "" then [] else [pyCmd])
+            , ("r", if rCmd == "" then [] else [rCmd])
+            ]
+          allOverrides = Map.union overrides legacyOverrides
+      return $ Config home' source' plane' planeCore' tmpdir' buildConfig' allOverrides
 
 instance FromJSON PackageMeta where
   parseJSON = Aeson.withObject "object" $ \o ->

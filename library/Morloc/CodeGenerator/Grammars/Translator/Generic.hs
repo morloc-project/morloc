@@ -41,6 +41,7 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
+import qualified Morloc.LangRegistry as LR
 import Morloc.Monad (asks, gets, liftIO, newIndex, runIndex)
 import qualified Morloc.Monad as MM
 import Morloc.Quasi
@@ -79,15 +80,13 @@ translateBuiltin lang desc srcs es = do
         then qualifiedSrcName lib
         else \src -> pretty (srcName src)
 
-  -- add language-specific preamble to sources
-  preambleDocs <- case lang of
-    Python3Lang -> do
-      let sysPath = [idoc|sys.path = #{list (map makePath [pretty ("." :: Text), opt, pretty lib])} + sys.path|]
-      return [sysPath, "import importlib", "import pymorloc as morloc"]
-    RLang -> do
-      homeDir <- asks MC.configHome
-      return [[idoc|dyn.load("#{pretty $ homeDir </> "lib" </> "librmorloc.so"}")|]]
-    _ -> return []
+  -- add language-specific preamble from registry
+  registry <- gets stateLangRegistry
+  let preambleTemplates = case LR.lookupLang (ML.langName lang) registry of
+        Just entry -> LR.lrePreamble entry
+        Nothing -> []
+  homeDir <- asks MC.configHome
+  let preambleDocs = map (substituteTemplate home lib opt homeDir) preambleTemplates
 
   let allSources = preambleDocs ++ includeDocs
       mDocs = map (translateSegment desc srcNamer) es
@@ -105,6 +104,14 @@ translateBuiltin lang desc srcs es = do
       }
   where
     makePath filename = [idoc|os.path.expanduser(#{dquotes filename})|]
+
+    substituteTemplate :: MDoc -> Text -> MDoc -> Path -> Text -> MDoc
+    substituteTemplate homeDoc libText optDoc homeDir t =
+      pretty
+        . T.replace "{{home}}" (render homeDoc)
+        . T.replace "{{lib}}" libText
+        . T.replace "{{opt}}" (render optDoc)
+        $ t
 
 -- | Translate using an external codegen tool.
 translateExternal :: Text -> Lang -> LangDescriptor -> [Source] -> [SerialManifold] -> MorlocMonad Script
@@ -127,10 +134,7 @@ translateExternal cmd lang desc srcs es = do
       program = buildProgram includeDocs mDocs es
 
   -- find the lang.yaml path for the codegen tool
-  let langName = case lang of
-        PluginLang pli -> MT.unpack (ML.pliName pli)
-        _ -> T.unpack (ldName desc)
-      langYamlPath = home </> "lang" </> langName </> "lang.yaml"
+  let langYamlPath = home </> "lang" </> T.unpack (ML.langName lang) </> "lang.yaml"
 
   -- serialize IProgram to a temp file
   tmpDir <- liftIO Dir.getTemporaryDirectory
@@ -193,115 +197,53 @@ instance Aeson.ToJSON CodegenManifest where
     ]
 
 -- | Load the language descriptor for a language.
+-- Tries embedded lang.yaml first, then falls back to filesystem.
+-- If the pool template is empty, loads it from the embedded or filesystem pool file.
 loadDescriptorForLang :: Lang -> MorlocMonad LangDescriptor
-loadDescriptorForLang Python3Lang = return pythonDescriptor
-loadDescriptorForLang RLang = return rDescriptor
-loadDescriptorForLang (PluginLang pli) = do
-  home <- asks MC.configHome
-  let langName = MT.unpack (ML.pliName pli)
-      langDir = home </> "lang" </> langName
-      descPath = langDir </> "lang.yaml"
-  result <- liftIO $ loadLangDescriptor descPath
-  case result of
-    Left err -> MM.throwSystemError $
-      "Failed to load language descriptor for " <> pretty (ML.pliName pli)
-      <> ": " <> pretty err
-    Right desc -> do
-      desc' <- if T.null (ldPoolTemplate desc)
-        then do
-          let poolPath = langDir </> "pool." <> ML.pliExtension pli
-          poolText <- liftIO $ MT.readFile poolPath
-          return desc { ldPoolTemplate = poolText }
-        else return desc
-      return desc'
-loadDescriptorForLang lang =
-  MM.throwSystemError $ "loadDescriptorForLang called for unsupported language: " <> viaShow lang
+loadDescriptorForLang lang = do
+  let name = ML.langName lang
+      ext = ML.langExtension lang
+  desc <- loadDescriptorByName name
+  -- if pool template is empty, load from embedded or filesystem pool file
+  if T.null (ldPoolTemplate desc)
+    then do
+      poolText <- loadPoolTemplate name ext
+      return desc { ldPoolTemplate = poolText }
+    else return desc
+  where
+    loadDescriptorByName :: T.Text -> MorlocMonad LangDescriptor
+    loadDescriptorByName name =
+      case lookup (T.unpack name) [(n, DF.embededFileText ef) | (n, ef) <- DF.langRegistryFiles] of
+        Just yamlText -> case loadLangDescriptorFromText yamlText of
+          Left err -> MM.throwSystemError $
+            "Failed to parse embedded lang.yaml for " <> pretty name <> ": " <> pretty err
+          Right desc -> return desc
+        Nothing -> do
+          -- try filesystem
+          home <- asks MC.configHome
+          let descPath = home </> "lang" </> T.unpack name </> "lang.yaml"
+          result <- liftIO $ loadLangDescriptor descPath
+          case result of
+            Left err -> MM.throwSystemError $
+              "Failed to load language descriptor for " <> pretty name <> ": " <> pretty err
+            Right desc -> return desc
 
--- | Python3 descriptor (inline, uses embedded 3-section pool template)
-pythonDescriptor :: LangDescriptor
-pythonDescriptor = LangDescriptor
-  { ldName = "python3"
-  , ldExtension = "py"
-  , ldBoolTrue = "True"
-  , ldBoolFalse = "False"
-  , ldNullLiteral = "None"
-  , ldListStyle = BracketList
-  , ldTupleConstructor = ""
-  , ldRecordConstructor = "OrderedDict"
-  , ldRecordSeparator = "="
-  , ldIndexStyle = ZeroBracket
-  , ldKeyAccess = "bracket"
-  , ldFieldAccess = DotAccess
-  , ldSerializeFn = "morloc.put_value"
-  , ldDeserializeFn = "morloc.get_value"
-  , ldForeignCallFn = "morloc.foreign_call"
-  , ldForeignCallSocketPath = "os.path.join"
-  , ldForeignCallIntSuffix = ""
-  , ldRemoteCallFn = "morloc.remote_call"
-  , ldResourcePackStyle = StructPackResources
-  , ldAssignment = EqualsAssign
-  , ldFunctionDef = PythonDef
-  , ldLambda = PythonLambda
-  , ldPartialApp = FunctoolsPartial
-  , ldSuspend = PythonSuspend
-  , ldMapList = PythonForAppend
-  , ldPattern = PythonFString
-  , ldDispatchTable = PythonDictDispatch
-  , ldDictStyleRecords = True
-  , ldQuoteRecordKeys = False
-  , ldQualifiedImports = True
-  , ldImportPrefix = "import "
-  , ldIncludeRelToFile = False
-  , ldPoolTemplate = DF.embededFileText (DF.poolTemplateGeneric Python3Lang)
-  , ldBreakMarker = "# <<<BREAK>>>"
-  , ldCommentMarker = "#"
-  , ldRunCommand = ["python3"]
-  , ldIsCompiled = False
-  , ldCodegenCommand = Nothing
-  }
+    loadPoolTemplate :: T.Text -> String -> MorlocMonad T.Text
+    loadPoolTemplate name ext =
+      -- try embedded pool template first
+      case lookupEmbeddedPool name of
+        Just t -> return t
+        Nothing -> do
+          -- try filesystem
+          home <- asks MC.configHome
+          let poolPath = home </> "lang" </> T.unpack name </> "pool." <> ext
+          liftIO $ MT.readFile poolPath
 
--- | R descriptor (inline, uses embedded 3-section pool template)
-rDescriptor :: LangDescriptor
-rDescriptor = LangDescriptor
-  { ldName = "R"
-  , ldExtension = "R"
-  , ldBoolTrue = "TRUE"
-  , ldBoolFalse = "FALSE"
-  , ldNullLiteral = "NULL"
-  , ldListStyle = RAtomicList
-  , ldTupleConstructor = "list"
-  , ldRecordConstructor = "list"
-  , ldRecordSeparator = "="
-  , ldIndexStyle = OneDoubleBracket
-  , ldKeyAccess = "double_bracket"
-  , ldFieldAccess = DollarAccess
-  , ldSerializeFn = "morloc_put_value"
-  , ldDeserializeFn = "morloc_get_value"
-  , ldForeignCallFn = "morloc_foreign_call"
-  , ldForeignCallSocketPath = "paste0"
-  , ldForeignCallIntSuffix = "L"
-  , ldRemoteCallFn = "morloc_remote_call"
-  , ldResourcePackStyle = NamedListResources
-  , ldAssignment = ArrowAssign
-  , ldFunctionDef = RAssignDef
-  , ldLambda = RFunction
-  , ldPartialApp = AnonymousWrapper
-  , ldSuspend = RSuspend
-  , ldMapList = RLapply
-  , ldPattern = RPaste0
-  , ldDispatchTable = RListDispatch
-  , ldDictStyleRecords = False
-  , ldQuoteRecordKeys = False
-  , ldQualifiedImports = False
-  , ldImportPrefix = "source("
-  , ldIncludeRelToFile = False
-  , ldPoolTemplate = DF.embededFileText (DF.poolTemplateGeneric RLang)
-  , ldBreakMarker = "# <<<BREAK>>>"
-  , ldCommentMarker = "#"
-  , ldRunCommand = ["Rscript"]
-  , ldIsCompiled = False
-  , ldCodegenCommand = Nothing
-  }
+    lookupEmbeddedPool :: T.Text -> Maybe T.Text
+    lookupEmbeddedPool "py" = Just $ DF.embededFileText (DF.poolTemplateGeneric "py")
+    lookupEmbeddedPool "r" = Just $ DF.embededFileText (DF.poolTemplateGeneric "r")
+    lookupEmbeddedPool "cpp" = Just $ DF.embededFileText (DF.poolTemplate "cpp")
+    lookupEmbeddedPool _ = Nothing
 
 debugLog :: Doc ann -> MorlocMonad ()
 debugLog d = do
