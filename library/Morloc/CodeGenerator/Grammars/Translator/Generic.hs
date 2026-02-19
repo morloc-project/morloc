@@ -24,6 +24,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Generic
 import qualified Data.Aeson as Aeson
 import qualified Data.Binary as Binary
 import qualified Data.ByteString.Lazy as BL
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -99,11 +100,13 @@ translateBuiltin lang desc srcs es = do
   let code = printProgram desc program
   let exefile = ML.makeExecutablePoolName lang
 
+  poolSubdir <- getPoolSubdir
+
   return $
     Script
       { scriptBase = "pool"
       , scriptLang = lang
-      , scriptCode = "." :/ Dir "pools" [File exefile (Code . render $ code)]
+      , scriptCode = "." :/ Dir "pools" [Dir poolSubdir [File exefile (Code . render $ code)]]
       , scriptMake = []
       }
   where
@@ -172,11 +175,12 @@ translateExternal cmd lang desc srcs es = do
           let exefile = ML.makeExecutablePoolName lang
               poolContent = cgmPoolCode m
               buildCmds = map (SysRun . Code) (cgmBuildCommands m)
+          poolSubdir <- getPoolSubdir
           return $
             Script
               { scriptBase = "pool"
               , scriptLang = lang
-              , scriptCode = "." :/ Dir "pools" [File exefile (Code poolContent)]
+              , scriptCode = "." :/ Dir "pools" [Dir poolSubdir [File exefile (Code poolContent)]]
               , scriptMake = buildCmds
               }
 
@@ -246,6 +250,13 @@ loadDescriptorForLang lang = do
     lookupEmbeddedPool "r" = Just $ DF.embededFileText (DF.poolTemplateGeneric "r")
     lookupEmbeddedPool "cpp" = Just $ DF.embededFileText (DF.poolTemplate "cpp")
     lookupEmbeddedPool _ = Nothing
+
+-- | Get the pool subdirectory name from the program output name.
+-- This ensures each program gets its own pool directory (e.g., pools/tavern/).
+getPoolSubdir :: MorlocMonad String
+getPoolSubdir = do
+  st <- MM.get
+  return $ fromMaybe "nexus" (stateOutfile st <|> fmap (\(MV n) -> MT.unpack n) (stateModuleName st))
 
 debugLog :: Doc ann -> MorlocMonad ()
 debugLog d = do

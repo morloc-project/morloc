@@ -1,0 +1,6 @@
+module combat (rollDice)
+
+import util (roll)
+
+rollDice :: {[Int]}
+rollDice = roll 2 1

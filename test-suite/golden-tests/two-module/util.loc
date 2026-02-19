@@ -1,0 +1,12 @@
+module util (roll, choose)
+
+import root-py
+
+source Py from "util.py"
+  ( "roll" as roll
+  , "choose" as choose
+  )
+
+roll :: Int -> Int -> {[Int]}
+
+choose a :: [a] -> {a}

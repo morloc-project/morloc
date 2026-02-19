@@ -504,7 +504,7 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
           runCmd = case Map.lookup name (MC.configLangOverrides config) of
             Just cmd -> map MT.unpack cmd
             Nothing -> map MT.unpack (LR.registryRunCommand registry name)
-          poolExe = "pools" </> ML.makeExecutablePoolName lang
+          poolExe = "pools" </> programName </> ML.makeExecutablePoolName lang
       in if isCompiled
          then [poolExe]
          else if null runCmd

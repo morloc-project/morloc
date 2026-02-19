@@ -46,6 +46,8 @@ main = do
       , golden "thunk-export" "thunk-export"
       , golden "thunk-choose" "thunk-choose"
 
+      , golden "two-module" "two-module"
+
       , golden "records-alias" "records-alias"
 
       , golden "infix" "infix"

@@ -221,17 +221,23 @@ void print_return(uint8_t* packet, Schema* schema, config_t config){
         ERROR("Internal error")
     }
 
-    char* schema_str = schema_to_string(schema);
-    fprintf(stderr, "DEBUG print_return: schema=%s, schema->type=%d, schema->width=%zu\n",
-            schema_str ? schema_str : "(null)", schema->type, schema->width);
-    free(schema_str);
+    // Validate that the pool's schema matches what the manifest expects
+    char* packet_schema_str = read_schema_from_packet_meta(packet, &child_errmsg);
+    if(child_errmsg == NULL && packet_schema_str != NULL){
+        char* expected_schema_str = schema_to_string(schema);
+        if(expected_schema_str != NULL && strcmp(packet_schema_str, expected_schema_str) != 0){
+            ERROR("Schema mismatch: expected '%s' but pool returned '%s'.\n"
+                  "Build artifacts may be stale or corrupted. Re-run `morloc make`.",
+                  expected_schema_str, packet_schema_str)
+        }
+        free(expected_schema_str);
+    }
+    child_errmsg = NULL;
 
     uint8_t* packet_value = get_morloc_data_packet_value(packet, schema, &child_errmsg);
     if(child_errmsg != NULL){
         ERROR("%s", child_errmsg);
     }
-
-    fprintf(stderr, "DEBUG print_return: packet_value=%p\n", (void*)packet_value);
 
     if(config.output_format == JSON){
         // print result

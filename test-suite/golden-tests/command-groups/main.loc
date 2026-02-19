@@ -1,0 +1,24 @@
+module m (
+  --* name: math
+  --* desc: Mathematical operations
+  double, triple,
+
+  --* name: text
+  --* desc: Text utilities
+  greet,
+
+  --*
+  version
+)
+
+double :: Int -> (Int, Int)
+double x = (x, x)
+
+triple :: Int -> (Int, Int, Int)
+triple x = (x, x, x)
+
+greet :: Str -> [Str]
+greet x = [x, x]
+
+version :: Int
+version = 42
