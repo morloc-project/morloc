@@ -62,14 +62,31 @@ treeify d
         case DAG.lookupNode k d of
           -- if the key is not in the DAG, then something is dreadfully wrong codewise
           Nothing -> MM.throwSystemError $ "Compiler bug (__FILE__:__LINE__): Module DAG is missing key" <+> pretty k
-          (Just (AST.findExport -> ExportMany symbols)) -> do
+          (Just (AST.findExport -> ExportMany symbols groups)) -> do
             d' <- DAG.mapNodeM linkAndRemoveAnnotations d
 
             -- move all to state, after this the DAG will no longer be needed
             _ <- MFL.link d'
 
-            -- find all term exports (do not include type exports)
-            let exports = [(i, v) | (i, TermSymbol v) <- Set.toList symbols]
+            -- find all term exports (ungrouped + grouped)
+            let allSymbols = Set.unions (symbols : [exportGroupMembers g | g <- groups])
+                exports = [(i, v) | (i, TermSymbol v) <- Set.toList allSymbols]
+
+            -- Build export group info for the state
+            let exportGroupInfo = Map.fromList
+                  [ (exportGroupName g, (exportGroupDesc g, [i | (i, TermSymbol _) <- Set.toList (exportGroupMembers g)]))
+                  | g <- groups
+                  ]
+
+            -- Validate command groups
+            let ungroupedNames = Set.fromList [v | (_, TermSymbol v) <- Set.toList symbols]
+                groupNames = Set.fromList [exportGroupName g | g <- groups]
+                collisions = Set.intersection (Set.map unEVar ungroupedNames) groupNames
+            -- group names must not collide with ungrouped command names
+            if not (Set.null collisions)
+              then MM.throwSystemError $
+                "Command group names collide with ungrouped command names:" <+> list (map pretty (Set.toList collisions))
+              else return ()
 
             -- - store all exported indices in state
             -- - Add the export name to state. Failing to do so here, will lose
@@ -80,6 +97,7 @@ treeify d
                   s
                     { stateExports = map fst exports
                     , stateName = Map.union (stateName s) (Map.fromList exports)
+                    , stateExportGroups = exportGroupInfo
                     }
               )
 

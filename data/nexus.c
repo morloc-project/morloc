@@ -221,10 +221,17 @@ void print_return(uint8_t* packet, Schema* schema, config_t config){
         ERROR("Internal error")
     }
 
+    char* schema_str = schema_to_string(schema);
+    fprintf(stderr, "DEBUG print_return: schema=%s, schema->type=%d, schema->width=%zu\n",
+            schema_str ? schema_str : "(null)", schema->type, schema->width);
+    free(schema_str);
+
     uint8_t* packet_value = get_morloc_data_packet_value(packet, schema, &child_errmsg);
     if(child_errmsg != NULL){
         ERROR("%s", child_errmsg);
     }
+
+    fprintf(stderr, "DEBUG print_return: packet_value=%p\n", (void*)packet_value);
 
     if(config.output_format == JSON){
         // print result
@@ -671,25 +678,37 @@ void print_mim_usage(void) {
     clean_exit(0);
 }
 
-void print_usage(const manifest_t* manifest) {
-    fprintf(stderr, "Usage: mim <manifest> [OPTION...] COMMAND [ARG...]\n");
-    fprintf(stderr, "\n");
-    fprintf(stderr, "Nexus Options:\n");
-    fprintf(stderr, " -h, --help            Print this help message\n");
-    fprintf(stderr, " -o, --output-file     Print to this file instead of STDOUT\n");
-    fprintf(stderr, " -f, --output-format   Output format [json|mpk|voidstar]\n");
-    fprintf(stderr, "\n");
-    fprintf(stderr, "Exported commands (call with -h/--help for more info):\n");
+void print_group_usage(const manifest_t* manifest, const char* group_name) {
+    // Find the group descriptor
+    const manifest_cmd_group_t* grp = NULL;
+    for (size_t i = 0; i < manifest->n_groups; i++) {
+        if (strcmp(manifest->groups[i].name, group_name) == 0) {
+            grp = &manifest->groups[i];
+            break;
+        }
+    }
 
-    // Find longest command name for alignment
+    fprintf(stderr, "Usage: mim <manifest> %s COMMAND [ARG...]\n", group_name);
+    if (grp && grp->desc) {
+        fprintf(stderr, "\n");
+        for (size_t i = 0; grp->desc[i]; i++) {
+            fprintf(stderr, "%s\n", grp->desc[i]);
+        }
+    }
+    fprintf(stderr, "\nCommands:\n");
+
+    // Find longest command name in this group for alignment
     size_t longest = 0;
     for (size_t i = 0; i < manifest->n_commands; i++) {
-        size_t len = strlen(manifest->commands[i].name);
-        if (len > longest) longest = len;
+        if (manifest->commands[i].group && strcmp(manifest->commands[i].group, group_name) == 0) {
+            size_t len = strlen(manifest->commands[i].name);
+            if (len > longest) longest = len;
+        }
     }
 
     for (size_t i = 0; i < manifest->n_commands; i++) {
         manifest_command_t* cmd = &manifest->commands[i];
+        if (!cmd->group || strcmp(cmd->group, group_name) != 0) continue;
         size_t namelen = strlen(cmd->name);
         size_t padding = longest - namelen + 2;
 
@@ -703,10 +722,81 @@ void print_usage(const manifest_t* manifest) {
     clean_exit(0);
 }
 
+void print_usage(const manifest_t* manifest) {
+    fprintf(stderr, "Usage: mim <manifest> [OPTION...] COMMAND [ARG...]\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Nexus Options:\n");
+    fprintf(stderr, " -h, --help            Print this help message\n");
+    fprintf(stderr, " -o, --output-file     Print to this file instead of STDOUT\n");
+    fprintf(stderr, " -f, --output-format   Output format [json|mpk|voidstar]\n");
+    fprintf(stderr, "\n");
+
+    // Check if there are any ungrouped commands
+    bool has_ungrouped = false;
+    for (size_t i = 0; i < manifest->n_commands; i++) {
+        if (!manifest->commands[i].group) { has_ungrouped = true; break; }
+    }
+
+    if (has_ungrouped) {
+        fprintf(stderr, "Commands (call with -h/--help for more info):\n");
+
+        size_t longest = 0;
+        for (size_t i = 0; i < manifest->n_commands; i++) {
+            if (manifest->commands[i].group) continue;
+            size_t len = strlen(manifest->commands[i].name);
+            if (len > longest) longest = len;
+        }
+
+        for (size_t i = 0; i < manifest->n_commands; i++) {
+            manifest_command_t* cmd = &manifest->commands[i];
+            if (cmd->group) continue;
+            size_t namelen = strlen(cmd->name);
+            size_t padding = longest - namelen + 2;
+
+            fprintf(stderr, "  %s", cmd->name);
+            if (cmd->desc && cmd->desc[0]) {
+                for (size_t p = 0; p < padding; p++) fputc(' ', stderr);
+                fprintf(stderr, "%s", cmd->desc[0]);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+
+    if (manifest->n_groups > 0) {
+        if (has_ungrouped) fprintf(stderr, "\n");
+        fprintf(stderr, "Command groups (call with -h/--help for more info):\n");
+
+        size_t longest = 0;
+        for (size_t i = 0; i < manifest->n_groups; i++) {
+            size_t len = strlen(manifest->groups[i].name);
+            if (len > longest) longest = len;
+        }
+
+        for (size_t i = 0; i < manifest->n_groups; i++) {
+            manifest_cmd_group_t* grp = &manifest->groups[i];
+            size_t namelen = strlen(grp->name);
+            size_t padding = longest - namelen + 2;
+
+            fprintf(stderr, "  %s", grp->name);
+            if (grp->desc && grp->desc[0]) {
+                for (size_t p = 0; p < padding; p++) fputc(' ', stderr);
+                fprintf(stderr, "%s", grp->desc[0]);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+
+    clean_exit(0);
+}
+
 // Print help for a specific subcommand
 void print_command_help(const manifest_command_t* cmd) {
     // Usage line
-    fprintf(stderr, "Usage: mim <manifest> %s", cmd->name);
+    if (cmd->group) {
+        fprintf(stderr, "Usage: mim <manifest> %s %s", cmd->group, cmd->name);
+    } else {
+        fprintf(stderr, "Usage: mim <manifest> %s", cmd->name);
+    }
     // Check if there are non-positional args
     bool has_opts = false;
     for (size_t i = 0; i < cmd->n_args; i++) {
@@ -1134,11 +1224,40 @@ void dispatch(
     char* cmd = argv[optind];
     optind++;
 
+    // Check if cmd matches a group name
+    for (size_t g = 0; g < manifest->n_groups; g++) {
+        if (strcmp(cmd, manifest->groups[g].name) == 0) {
+            // Group matched - need a subcommand
+            if (optind >= argc) {
+                print_group_usage(manifest, cmd);
+            }
+            char* subcmd = argv[optind];
+            // Check for help flag
+            if (strcmp(subcmd, "-h") == 0 || strcmp(subcmd, "--help") == 0) {
+                print_group_usage(manifest, cmd);
+            }
+            optind++;
+            // Find command within this group
+            for (size_t i = 0; i < manifest->n_commands; i++) {
+                if (manifest->commands[i].group
+                    && strcmp(manifest->commands[i].group, cmd) == 0
+                    && strcmp(manifest->commands[i].name, subcmd) == 0) {
+                    dispatch_command(argc, argv, shm_basename, config,
+                                     manifest, &manifest->commands[i], sockets);
+                    return;
+                }
+            }
+            fprintf(stderr, "Unrecognized command '%s' in group '%s'\n", subcmd, cmd);
+            clean_exit(1);
+        }
+    }
+
+    // Try ungrouped commands
     for (size_t i = 0; i < manifest->n_commands; i++) {
-        if (strcmp(cmd, manifest->commands[i].name) == 0) {
+        if (strcmp(cmd, manifest->commands[i].name) == 0 && !manifest->commands[i].group) {
             dispatch_command(argc, argv, shm_basename, config,
                              manifest, &manifest->commands[i], sockets);
-            return; // dispatch_command calls clean_exit
+            return;
         }
     }
 

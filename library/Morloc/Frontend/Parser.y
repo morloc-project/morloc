@@ -11,7 +11,9 @@ module Morloc.Frontend.Parser
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Data.Scientific as DS
+import Data.List (sortBy, foldl')
 import qualified Control.Monad.State.Strict as State
 import Morloc.Frontend.Token
 import Morloc.Frontend.Lexer (lexMorloc, showLexError)
@@ -822,7 +824,7 @@ readProgram ::
   Either String (DAG MVar Import ExprI, PState)
 readProgram _moduleName modulePath sourceCode pstate dag = do
   let filename = maybe "<expr>" id modulePath
-  (tokens, docMap) <- case lexMorloc filename sourceCode of
+  (tokens, docMap, groupToks) <- case lexMorloc filename sourceCode of
     Left err -> Left (showLexError err)
     Right r -> Right r
   let srcLines = T.lines sourceCode
@@ -831,24 +833,27 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
   case parseAndDesugar pstate' tokens of
     Right (result, finalState) ->
       let dag' = foldl addModule dag result
-      in return (dag', finalState)
+          dag'' = attachGroupAnnotations tokens groupToks dag'
+      in return (dag'', finalState)
     Left err ->
       -- Strategy 2: wrap in module, patch trailing expr as __expr__ assignment.
       let wrappedCode = "module main (*)\n" <> sourceCode
       in case lexMorloc filename wrappedCode of
-        Right (wrappedTokens, wrappedDocMap) ->
+        Right (wrappedTokens, wrappedDocMap, wrappedGroupToks) ->
           let pstate'' = pstate' { psDocMap = wrappedDocMap, psSourceLines = T.lines wrappedCode }
           in case parseAndDesugar pstate'' wrappedTokens of
             Right (result, finalState) ->
               let dag' = foldl addModule dag result
-              in return (dag', finalState)
+                  dag'' = attachGroupAnnotations wrappedTokens wrappedGroupToks dag'
+              in return (dag'', finalState)
             Left _ ->
               case patchForTrailingExpr wrappedTokens of
                 Just patchedTokens ->
                   case parseAndDesugar pstate'' patchedTokens of
                     Right (result, finalState) ->
                       let dag' = foldl addModule dag result
-                      in return (dag', finalState)
+                          dag'' = attachGroupAnnotations patchedTokens wrappedGroupToks dag'
+                      in return (dag'', finalState)
                     Left _ -> tryExprFallback tokens pstate' dag filename err
                 Nothing -> tryExprFallback tokens pstate' dag filename err
         Left _ -> tryExprFallback tokens pstate' dag filename err
@@ -921,11 +926,101 @@ stripLayoutTokens = filter (not . isLayoutToken)
 readType :: Text -> Either String TypeU
 readType typeStr = do
   let initState = emptyPState
-  (tokens, _) <- case lexMorloc "<type>" typeStr of
+  (tokens, _, _) <- case lexMorloc "<type>" typeStr of
     Left err -> Left (showLexError err)
     Right r -> Right r
   (result, _) <- case State.runStateT (parseTypeOnly tokens) initState of
     Left err -> Left (showParseError "<type>" err)
     Right r -> Right r
   return result
+
+-- | Post-process the DAG to attach group annotations from --* tokens.
+attachGroupAnnotations :: [Located] -> [Located] -> DAG MVar Import ExprI -> DAG MVar Import ExprI
+attachGroupAnnotations _ [] dag = dag
+attachGroupAnnotations tokens groupToks dag =
+  let groupHeaders = parseGroupHeaders groupToks
+      exportSymPositions = findExportSymbolPositions tokens
+      membership = buildMembership groupHeaders exportSymPositions
+      ghdrMap = Map.fromList [(n, d) | (n, d, _) <- groupHeaders]
+  in Map.map (\(e, es) -> (attachToExpr membership ghdrMap e, es)) dag
+  where
+    attachToExpr :: Map.Map T.Text T.Text -> Map.Map T.Text [T.Text] -> ExprI -> ExprI
+    attachToExpr mem ghdrs (ExprI i (ModE m es)) =
+      ExprI i (ModE m (map (attachToExpr mem ghdrs) es))
+    attachToExpr mem ghdrs (ExprI i (ExpE (ExportMany symbols _))) =
+      let groupedSymNames = Map.keysSet mem
+          groupNames = nubText [gn | (_, gn) <- Map.toList mem]
+          exportGroups =
+            [ ExportGroup gn (maybe [] id (Map.lookup gn ghdrs))
+                (Set.filter (\(_, sym) -> Map.lookup (symText sym) mem == Just gn) symbols)
+            | gn <- groupNames
+            ]
+          ungrouped = Set.filter (\(_, sym) -> not (Set.member (symText sym) groupedSymNames)) symbols
+      in ExprI i (ExpE (ExportMany ungrouped exportGroups))
+    attachToExpr _ _ e = e
+
+    nubText :: [T.Text] -> [T.Text]
+    nubText [] = []
+    nubText (x:xs) = x : nubText (filter (/= x) xs)
+
+    symText :: Symbol -> T.Text
+    symText (TermSymbol (EV n)) = n
+    symText (TypeSymbol (TV n)) = n
+    symText (ClassSymbol (ClassName n)) = n
+
+parseGroupHeaders :: [Located] -> [(T.Text, [T.Text], Pos)]
+parseGroupHeaders = foldl' accum [] . map extractLine
+  where
+    extractLine (Located pos (TokGroupLine txt) _) = (pos, T.strip txt)
+    extractLine (Located pos _ _) = (pos, T.empty)
+
+    accum :: [(T.Text, [T.Text], Pos)] -> (Pos, T.Text) -> [(T.Text, [T.Text], Pos)]
+    accum gs (pos, line)
+      | T.null line = gs ++ [(T.empty, [], pos)]  -- bare --* = group terminator
+      | otherwise = case T.stripPrefix "name:" line of
+          Just name -> gs ++ [(T.strip name, [], pos)]
+          Nothing -> case T.stripPrefix "desc:" line of
+            Just desc -> case gs of
+              [] -> gs
+              _ -> init gs ++ [let (n, ds, p) = last gs in (n, ds ++ [T.strip desc], p)]
+            Nothing -> gs
+
+findExportSymbolPositions :: [Located] -> [(T.Text, Pos)]
+findExportSymbolPositions = findModule
+  where
+    findModule (Located _ TokModule _ : rest) = findLParen rest
+    findModule (_ : rest) = findModule rest
+    findModule [] = []
+
+    findLParen (Located _ TokLParen _ : rest) = scanExports 1 rest
+    findLParen (Located _ TokStar _ : _) = []
+    findLParen (_ : rest) = findLParen rest
+    findLParen [] = []
+
+    scanExports :: Int -> [Located] -> [(T.Text, Pos)]
+    scanExports 0 _ = []
+    scanExports depth (Located _ TokLParen _ : rest) = scanExports (depth + 1) rest
+    scanExports depth (Located _ TokRParen _ : rest)
+      | depth <= 1 = []
+      | otherwise = scanExports (depth - 1) rest
+    scanExports depth (Located pos (TokLowerName n) _ : rest) = (n, pos) : scanExports depth rest
+    scanExports depth (Located pos (TokUpperName n) _ : rest) = (n, pos) : scanExports depth rest
+    scanExports depth (_ : rest) = scanExports depth rest
+    scanExports _ [] = []
+
+buildMembership :: [(T.Text, [T.Text], Pos)] -> [(T.Text, Pos)] -> Map.Map T.Text T.Text
+buildMembership groupHeaders exportSyms = Map.fromList
+  [ (sym, gname)
+  | (sym, symPos) <- exportSyms
+  , Just gname <- [findGroup symPos]
+  ]
+  where
+    sortedGroups = sortBy (\(_,_,p1) (_,_,p2) -> compare p1 p2) groupHeaders
+
+    findGroup :: Pos -> Maybe T.Text
+    findGroup symPos = case filter (\(_,_,gpos) -> gpos < symPos) (reverse sortedGroups) of
+      ((gname,_,_):_)
+        | T.null gname -> Nothing  -- empty name = group terminator
+        | otherwise -> Just gname
+      [] -> Nothing
 }

@@ -604,6 +604,14 @@ static manifest_command_t read_command(const jval_t* jc, ERRMSG) {
         cmd.expr = TRY(build_expr, jget(jc, "expr"));
     }
 
+    // Parse optional group field (null if ungrouped)
+    const jval_t* jgroup = jget(jc, "group");
+    if (jgroup && jgroup->type == JV_STR) {
+        cmd.group = strdup(jgroup->s);
+    } else {
+        cmd.group = NULL;
+    }
+
     return cmd;
 }
 
@@ -639,6 +647,21 @@ manifest_t* parse_manifest(const char* text, ERRMSG) {
         }
     }
 
+    // Parse optional groups array
+    const jval_t* jgroups = jget(root, "groups");
+    if (jgroups && jgroups->type == JV_ARR) {
+        m->n_groups = jlen(jgroups);
+        m->groups = (manifest_cmd_group_t*)calloc(m->n_groups, sizeof(manifest_cmd_group_t));
+        for (size_t i = 0; i < m->n_groups; i++) {
+            const jval_t* jg = jidx(jgroups, i);
+            m->groups[i].name = strdup(jgets(jg, "name"));
+            m->groups[i].desc = read_str_array(jget(jg, "desc"));
+        }
+    } else {
+        m->n_groups = 0;
+        m->groups = NULL;
+    }
+
     jfree(root);
     return m;
 }
@@ -671,6 +694,15 @@ void free_manifest(manifest_t* manifest) {
     // Commands own complex state; for now we don't free them since
     // the manifest lives for the program lifetime.
     free(manifest->commands);
+    for (size_t i = 0; i < manifest->n_groups; i++) {
+        free(manifest->groups[i].name);
+        if (manifest->groups[i].desc) {
+            for (size_t j = 0; manifest->groups[i].desc[j]; j++)
+                free(manifest->groups[i].desc[j]);
+            free(manifest->groups[i].desc);
+        }
+    }
+    free(manifest->groups);
     free(manifest);
 }
 
@@ -767,10 +799,32 @@ char* manifest_to_discovery_json(const manifest_t* manifest) {
             json_write_string(jb, cmd->desc[0]);
         }
 
+        if (cmd->group) {
+            json_write_key(jb, "group");
+            json_write_string(jb, cmd->group);
+        }
+
         json_write_obj_end(jb);
     }
 
     json_write_arr_end(jb);
+
+    if (manifest->n_groups > 0) {
+        json_write_key(jb, "groups");
+        json_write_arr_start(jb);
+        for (size_t i = 0; i < manifest->n_groups; i++) {
+            json_write_obj_start(jb);
+            json_write_key(jb, "name");
+            json_write_string(jb, manifest->groups[i].name);
+            if (manifest->groups[i].desc && manifest->groups[i].desc[0]) {
+                json_write_key(jb, "desc");
+                json_write_string(jb, manifest->groups[i].desc[0]);
+            }
+            json_write_obj_end(jb);
+        }
+        json_write_arr_end(jb);
+    }
+
     json_write_obj_end(jb);
 
     return json_buf_finish(jb);

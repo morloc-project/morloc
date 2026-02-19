@@ -115,6 +115,9 @@ data Token
   -- Docstrings
   | TokDocLine !Text             -- ^ --' followed by text
 
+  -- Group annotations
+  | TokGroupLine !Text           -- ^ --* followed by text
+
   -- Special
   | TokEOF
   deriving (Show, Eq, Ord)
@@ -180,4 +183,5 @@ showToken (TokStringEnd _)   = "string end"
 showToken TokInterpOpen    = "'#{'"
 showToken TokInterpClose   = "'}' (interpolation)"
 showToken (TokDocLine _)   = "docstring"
+showToken (TokGroupLine _) = "group annotation"
 showToken TokEOF           = "end of input"

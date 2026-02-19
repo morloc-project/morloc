@@ -35,13 +35,13 @@ findEdges _ = error "Expected a module"
 
 findExportSet :: ExprI -> Set.Set Symbol
 findExportSet e = case findExport e of
-  (ExportMany ss) -> Set.map snd ss
+  (ExportMany ss gs) -> Set.map snd ss `Set.union` Set.unions [Set.map snd (exportGroupMembers g) | g <- gs]
   _ -> Set.empty
 
 findExport :: ExprI -> Export
 findExport e0 = case f e0 of
   (Just export) -> export
-  Nothing -> ExportMany Set.empty
+  Nothing -> ExportMany Set.empty []
   where
     f (ExprI _ (ExpE export)) = Just export
     f (ExprI i (ModE j (e : es))) = case f e of
@@ -155,7 +155,7 @@ maxIndex (ExprI i (LstE es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (TupE es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (NamE rs)) = maximum (i : map (maxIndex . snd) rs)
 maxIndex (ExprI i (ExpE ExportAll)) = i
-maxIndex (ExprI i (ExpE (ExportMany ss))) = maximum (i : map fst (Set.toList ss))
+maxIndex (ExprI i (ExpE (ExportMany ss gs))) = maximum (i : map fst (Set.toList ss) ++ concatMap (map fst . Set.toList . exportGroupMembers) gs)
 maxIndex (ExprI i (BopE e1 j _ e2)) = maximum [i, j, maxIndex e1, maxIndex e2]
 maxIndex (ExprI i (LetE bindings body)) = maximum (i : maxIndex body : map (maxIndex . snd) bindings)
 maxIndex (ExprI i (SuspendE e)) = max i (maxIndex e)
@@ -173,7 +173,7 @@ getIndices (ExprI i (LstE es)) = i : concatMap getIndices es
 getIndices (ExprI i (TupE es)) = i : concatMap getIndices es
 getIndices (ExprI i (NamE rs)) = i : concatMap (getIndices . snd) rs
 getIndices (ExprI i (ExpE ExportAll)) = [i]
-getIndices (ExprI i (ExpE (ExportMany ss))) = i : [j | (j, _) <- Set.toList ss]
+getIndices (ExprI i (ExpE (ExportMany ss gs))) = i : [j | (j, _) <- Set.toList ss] ++ concatMap (\g -> [j | (j, _) <- Set.toList (exportGroupMembers g)]) gs
 getIndices (ExprI i (BopE e1 j _ e2)) = [i, j] <> getIndices e1 <> getIndices e2
 getIndices (ExprI i (LetE bindings body)) = i : concatMap (getIndices . snd) bindings <> getIndices body
 getIndices (ExprI i (SuspendE e)) = i : getIndices e

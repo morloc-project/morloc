@@ -325,8 +325,9 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
           -- handle both monomorphic terms and polymorphic typeclass terms
           (Just (sigIdx, _)) -> updateSigLinks v termIdx sigIdx
           Nothing -> MM.throwSourcedError termIdx $ "Undefined term: " <> pretty v
-    linkLocal _ _ cs (ExprI i (ExpE (ExportMany (Set.toList -> ss)))) =
-      mapM_ linkExp [(v, termIdx, Map.lookup v cs) | (termIdx, TermSymbol v) <- ss]
+    linkLocal _ _ cs (ExprI i (ExpE (ExportMany (Set.toList -> ss) gs))) =
+      let allSs = ss ++ concatMap (Set.toList . exportGroupMembers) gs
+      in mapM_ linkExp [(v, termIdx, Map.lookup v cs) | (termIdx, TermSymbol v) <- allSs]
       where
         linkExp :: (EVar, Int, Maybe (Int, a)) -> MorlocMonad ()
         linkExp (v, termIdx, Just (sigIdx, _)) = updateSigLinks v termIdx sigIdx

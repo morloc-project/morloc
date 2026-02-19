@@ -207,19 +207,24 @@ resolveImports d0
 
       let allSymbols = Set.union allLocalSymbols allImportedSymbols
 
-      exports <- case export of
-        ExportAll -> mapM addIndex (Set.toList allSymbols) |>> Set.fromList
-        (ExportMany (resolveExplicitTypeclasses allSymbols -> explicitExports)) ->
-          let missing = (Set.map snd explicitExports) `Set.difference` allSymbols
+      case export of
+        ExportAll -> do
+          exports <- mapM addIndex (Set.toList allSymbols) |>> Set.fromList
+          return $ AST.setExport (ExportMany exports []) e
+        (ExportMany ungroupedExports groups) ->
+          let allExplicit = Set.unions (ungroupedExports : [exportGroupMembers g | g <- groups])
+              resolved = resolveExplicitTypeclasses allSymbols allExplicit
+              missing = Set.map snd resolved `Set.difference` allSymbols
            in if Set.null missing
-                then
-                  return explicitExports -- all things exported are defined
+                then do
+                  -- Rebuild groups with resolved typeclasses
+                  let resolvedGroups = map (\g -> g { exportGroupMembers = resolveExplicitTypeclasses allSymbols (exportGroupMembers g) }) groups
+                      resolvedUngrouped = resolveExplicitTypeclasses allSymbols ungroupedExports
+                  return $ AST.setExport (ExportMany resolvedUngrouped resolvedGroups) e
                 else
                   MM.throwSystemError $
                     "Module" <+> squotes (pretty m) <+> "does not export the following terms or types:"
                              <+> list (map pretty (Set.toList missing))
-
-      return $ AST.setExport (ExportMany exports) e
 
     resolveExplicitTypeclasses :: Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol)
     resolveExplicitTypeclasses ss sis = Set.map f sis
@@ -242,10 +247,13 @@ resolveImports d0
       MorlocMonad [AliasedSymbol]
     resolveEdge imp _ childX = case (importInclude imp, AST.findExport childX) of
       (_, ExportAll) -> error "This should have been resolved already"
-      (Nothing, ExportMany exps) -> return $ map (toAliasedSymbol . snd) (Set.toList exps)
-      (Just ass, ExportMany exps) -> return . catMaybes $ map (importAlias . unAliasedSymbol) ass
+      (Nothing, ExportMany exps gs) ->
+        let allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
+        in return $ map (toAliasedSymbol . snd) (Set.toList allExps)
+      (Just ass, ExportMany exps gs) -> return . catMaybes $ map (importAlias . unAliasedSymbol) ass
         where
-          exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList exps]
+          allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
+          exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExps]
           excludes = map unSymbol (importExclude imp)
 
           importAlias :: (Text, Text) -> Maybe AliasedSymbol
@@ -263,10 +271,10 @@ resolveImports d0
       Export -> -- the imported modules export list
       MorlocMonad (Set Symbol)
     -- Here we import everything outside the exclude set, no aliasing
-    filterImports _ (Import _ Nothing exclude _) (ExportMany exports) =
-      return $ (Set.map snd exports) `Set.difference` (Set.fromList exclude)
-    -- Here we need to carefully handle aliasing
-    filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) _) (ExportMany exports) =
+    filterImports _ (Import _ Nothing exclude _) (ExportMany exports gs) =
+      let allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
+      in return $ (Set.map snd allExports) `Set.difference` (Set.fromList exclude)
+    filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) _) (ExportMany exports gs) =
       case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
         ([], imps) -> return $ Set.fromList imps
         (missing, _) -> MM.throwSystemError
@@ -274,7 +282,8 @@ resolveImports d0
             <+> "are not exported from module" <+> squotes (pretty m2) <> ":\n"
             <+> indent 2 (vsep (map pretty missing))
       where
-        exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList exports]
+        allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
+        exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExports]
 
         importAlias :: (Text, Text) -> Maybe (Either Text Symbol)
         importAlias (name, alias)

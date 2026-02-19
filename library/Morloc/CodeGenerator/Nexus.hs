@@ -479,14 +479,15 @@ litSchemaStr NullX = "z"
 -- Manifest builder
 -- ======================================================================
 
-buildManifest :: Config -> LangRegistry -> String -> String -> Int -> [(Lang, Socket)] -> [FData] -> [GastData] -> (Lang -> Int) -> Text
-buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPool = jsonObj
+buildManifest :: Config -> LangRegistry -> String -> String -> Int -> [(Lang, Socket)] -> [FData] -> [GastData] -> (Lang -> Int) -> Map.Map Text Text -> Map.Map Text [Text] -> Text
+buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPool nameToGroup groupDescs = jsonObj
   [ ("version", "1")
   , ("name", jsonStr (MT.pack programName))
   , ("build_dir", jsonStr (MT.pack buildDir))
   , ("build_time", jsonInt buildTime)
   , ("pools", jsonArr (map poolJson daemonSets))
   , ("commands", jsonArr (map remoteCmdJson fdata ++ map pureCmdJson gasts))
+  , ("groups", jsonArr (map groupJson (Map.toList groupDescs)))
   ]
   where
     poolJson :: (Lang, Socket) -> Text
@@ -510,6 +511,17 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
               then [MT.unpack name, poolExe]
               else runCmd ++ [poolExe]
 
+    groupJson :: (Text, [Text]) -> Text
+    groupJson (gname, desc) = jsonObj
+      [ ("name", jsonStr gname)
+      , ("desc", jsonStrArr desc)
+      ]
+
+    cmdGroupField :: Text -> (Text, Text)
+    cmdGroupField cmdName = case Map.lookup cmdName nameToGroup of
+      Just gname -> ("group", jsonStr gname)
+      Nothing -> ("group", "null")
+
     remoteCmdJson :: FData -> Text
     remoteCmdJson fd = jsonObj
       [ ("name", jsonStr (fdataSubcommand fd))
@@ -523,6 +535,7 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
       , ("return_type", jsonStr (returnTypeStr (fdataType fd)))
       , ("return_desc", jsonStrArr (snd (cmdDocRet (fdataCmdDocSet fd))))
       , ("args", jsonArr (map argToJson (cmdDocArgs (fdataCmdDocSet fd))))
+      , cmdGroupField (fdataSubcommand fd)
       ]
 
     pureCmdJson :: GastData -> Text
@@ -536,6 +549,7 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
       , ("return_desc", jsonStrArr (snd (cmdDocRet (commandDocs g))))
       , ("args", jsonArr (map argToJson (cmdDocArgs (commandDocs g))))
       , ("expr", exprToJson (commandExpr g))
+      , cmdGroupField (commandName g)
       ]
 
     returnTypeStr :: Type -> Text
@@ -594,7 +608,25 @@ generate cs rASTs = do
           else Nothing)
   registry <- MM.gets stateLangRegistry
 
-  let manifestJson = buildManifest config registry outfile buildDir buildTime daemonSets fdata gasts langToPoolIndex
+  -- Build group info for manifest
+  exportGroups <- MM.gets stateExportGroups
+  nameMap <- MM.gets stateName
+  let indexToGroup = Map.fromList
+        [ (idx, gname)
+        | (gname, (_, indices)) <- Map.toList exportGroups
+        , idx <- indices
+        ]
+      nameToGroup = Map.fromList
+        [ (unEVar ename, gname)
+        | (idx, ename) <- Map.toList nameMap
+        , Just gname <- [Map.lookup idx indexToGroup]
+        ]
+      groupDescs = Map.fromList
+        [ (gname, desc)
+        | (gname, (desc, _)) <- Map.toList exportGroups
+        ]
+
+  let manifestJson = buildManifest config registry outfile buildDir buildTime daemonSets fdata gasts langToPoolIndex nameToGroup groupDescs
       wrapperScript = makeWrapperScript manifestJson
 
   return $

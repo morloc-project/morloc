@@ -96,6 +96,7 @@ copyState oldIndex newIndex = do
       , stateInstallDir = stateInstallDir s
       , stateClassDefs = stateClassDefs s
       , stateLangRegistry = stateLangRegistry s
+      , stateExportGroups = stateExportGroups s
       }
   where
     updateGMap g = case GMap.yIsX oldIndex newIndex g of

@@ -32,6 +32,7 @@ module Morloc.Namespace.Expr
   , Lit (..)
   , Import (..)
   , Export (..)
+  , ExportGroup (..)
   , Fixity (..)
   , Associativity (..)
 
@@ -120,7 +121,16 @@ data Symbol
   | ClassSymbol ClassName
   deriving (Show, Ord, Eq)
 
-data Export = ExportMany (Set.Set (Int, Symbol)) | ExportAll
+data ExportGroup = ExportGroup
+  { exportGroupName :: !Text
+  , exportGroupDesc :: [Text]
+  , exportGroupMembers :: Set.Set (Int, Symbol)
+  }
+  deriving (Show, Ord, Eq)
+
+data Export
+  = ExportMany (Set.Set (Int, Symbol)) [ExportGroup]
+  | ExportAll
   deriving (Show, Ord, Eq)
 
 data AliasedSymbol
@@ -445,6 +455,14 @@ instance Pretty Source where
         <+> pretty (srcAlias s)
       <> maybe "" (\t -> ":" <> pretty t) (srcLabel s)
 
+instance Pretty ExportGroup where
+  pretty (ExportGroup name desc members) =
+    "--*" <+> pretty name <> maybe "" (\d -> ":" <+> pretty d) (listToMaybe desc)
+    <+> tupled (map pretty (Set.toList members))
+    where
+      listToMaybe [] = Nothing
+      listToMaybe (x:_) = Just x
+
 instance Pretty Symbol where
   pretty (TypeSymbol x) = pretty x
   pretty (TermSymbol x) = pretty x
@@ -496,7 +514,9 @@ instance Pretty Expr where
   pretty (ImpE (Import m Nothing _ _)) = "import" <+> pretty m
   pretty (ImpE (Import m (Just xs) _ _)) = "import" <+> pretty m <+> tupled (map pretty xs)
   pretty (ExpE ExportAll) = "export *"
-  pretty (ExpE (ExportMany symbols)) = "export" <+> tupled (map pretty (Set.toList symbols))
+  pretty (ExpE (ExportMany symbols groups)) =
+    "export" <+> tupled (map pretty (Set.toList symbols)
+                        ++ [pretty g | g <- groups])
   pretty (VarE _ s) = pretty s
   pretty (LamE v e) = "\\" <+> pretty v <+> "->" <+> pretty e
   pretty (AnnE e t) = parens (pretty e <+> "::" <+> pretty t)

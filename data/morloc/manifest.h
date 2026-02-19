@@ -54,6 +54,11 @@ struct manifest_arg_s {
 
 typedef struct {
     char* name;
+    char** desc;     // NULL-terminated description lines
+} manifest_cmd_group_t;
+
+typedef struct {
+    char* name;
     bool is_pure;
     // remote-only fields
     uint32_t mid;
@@ -70,6 +75,8 @@ typedef struct {
     size_t n_args;
     // pure-only field
     morloc_expression_t* expr;
+    // command group (NULL if ungrouped)
+    char* group;
 } manifest_command_t;
 
 typedef struct {
@@ -80,6 +87,8 @@ typedef struct {
     size_t n_pools;
     manifest_command_t* commands;
     size_t n_commands;
+    manifest_cmd_group_t* groups;
+    size_t n_groups;
 } manifest_t;
 
 // Serialize manifest to a JSON discovery response (caller must free result)

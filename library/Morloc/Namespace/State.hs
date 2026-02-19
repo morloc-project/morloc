@@ -98,6 +98,8 @@ data MorlocState = MorlocState
   , stateInstallDir :: Maybe Path
   , stateClassDefs :: Map ClassName [Constraint]
   , stateLangRegistry :: LangRegistry
+  , stateExportGroups :: Map Text ([Text], [Int])
+    -- ^ Map from group name to (description lines, member export indices)
   }
   deriving (Show)
 
@@ -249,6 +251,7 @@ instance Defaultable MorlocState where
       , stateInstallDir = Nothing
       , stateClassDefs = Map.empty
       , stateLangRegistry = LR.emptyRegistry
+      , stateExportGroups = Map.empty
       }
 
 instance Defaultable PackageMeta where

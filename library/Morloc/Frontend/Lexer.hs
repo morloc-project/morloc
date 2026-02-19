@@ -32,25 +32,30 @@ showLexError (LexError pos msg) =
   posFile pos ++ ":" ++ show (posLine pos) ++ ":" ++ show (posCol pos) ++ ": " ++ msg
 
 -- | Lex morloc source code into a token stream with layout tokens inserted,
--- plus a map from positions to associated docstring lines.
-lexMorloc :: String -> Text -> Either LexError ([Located], Map.Map Pos [Text])
+-- plus a map from positions to associated docstring lines, and a list of
+-- group annotation tokens (for command group support in export lists).
+lexMorloc :: String -> Text -> Either LexError ([Located], Map.Map Pos [Text], [Located])
 lexMorloc filename input = do
   rawTokens <- lexRaw filename (T.unpack input) (startPos filename)
-  -- Extract docstrings before layout insertion: collect TokDocLine sequences
-  -- and associate them with the position of the following non-doc token.
-  let (docMap, filtered) = extractDocstrings rawTokens
-  return (insertLayout filtered, docMap)
+  let (docMap, groupToks, filtered) = extractDocstrings rawTokens
+  return (insertLayout filtered, docMap, groupToks)
 
--- | Extract docstring tokens, associating each group with the next real token.
-extractDocstrings :: [Located] -> (Map.Map Pos [Text], [Located])
-extractDocstrings = go [] Map.empty []
+-- | Extract docstring and group annotation tokens. Docstrings are associated
+-- with the position of the following non-doc token. Group annotation tokens
+-- are returned in order for post-processing.
+extractDocstrings :: [Located] -> (Map.Map Pos [Text], [Located], [Located])
+extractDocstrings = go [] Map.empty [] []
   where
-    go _acc docMap accToks [] = (docMap, reverse accToks)
-    go acc docMap accToks (Located _ (TokDocLine txt) _ : rest) =
-      go (acc ++ [txt]) docMap accToks rest
-    go acc docMap accToks (tok@(Located pos _ _) : rest) =
+    go _acc docMap groupToks accToks [] = (docMap, reverse groupToks, reverse accToks)
+    go acc docMap groupToks accToks (Located _ (TokDocLine txt) _ : rest) =
+      go (acc ++ [txt]) docMap groupToks accToks rest
+    go acc docMap groupToks accToks (tok@(Located _ (TokGroupLine _) _) : rest) =
+      -- Flush pending docstrings to the group annotation position, then record the group token
+      let docMap' = if null acc then docMap else Map.insert (locPos tok) acc docMap
+      in go [] docMap' (tok : groupToks) accToks rest
+    go acc docMap groupToks accToks (tok@(Located pos _ _) : rest) =
       let docMap' = if null acc then docMap else Map.insert pos acc docMap
-      in go [] docMap' (tok : accToks) rest
+      in go [] docMap' groupToks (tok : accToks) rest
 
 -- Raw lexer state
 data LexState = LexState
@@ -87,6 +92,14 @@ lexOne st@(LexState input pos toks) = case input of
       skipBlockComment p ('\n' : s) n = skipBlockComment (nextLine p) s n
       skipBlockComment p (_ : s) n = skipBlockComment (advanceCol p 1) s n
       skipBlockComment p [] _ = Left (LexError p "unterminated block comment")
+
+  -- Group annotation comments: --* ...
+  '-' : '-' : '*' : rest ->
+    let (line, rest') = span (/= '\n') rest
+        txt = T.pack line
+        len = 3 + length line
+    in Right st { lsInput = rest', lsPos = advanceCol pos len
+                , lsTokens = Located pos (TokGroupLine txt) (T.pack ("--*" ++ line)) : toks }
 
   -- Docstring comments: --' ...
   '-' : '-' : '\'' : rest ->

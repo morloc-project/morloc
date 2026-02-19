@@ -21,6 +21,7 @@ import Morloc.Namespace.Type
 import Morloc.Namespace.Expr
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Language as ML
+import Data.List (sortBy, foldl')
 import qualified Data.Array as Happy_Data_Array
 import qualified Data.Bits as Bits
 import Control.Applicative(Applicative(..))
@@ -3371,9 +3372,9 @@ happyReduction_28 _
 happyReduce_29 = happySpecReduce_1  18 happyReduction_29
 happyReduction_29 (HappyAbsSyn19  happy_var_1)
 	 =  HappyAbsSyn18
-		 (ExportMany (Set.fromList happy_var_1)
+		 (ExportMany (Set.fromList happy_var_1) []
 	)
-happyReduction_29 _  = notHappyAtAll 
+happyReduction_29 _  = notHappyAtAll
 
 happyReduce_30 = happySpecReduce_1  19 happyReduction_30
 happyReduction_30 (HappyAbsSyn20  happy_var_1)
@@ -5276,22 +5277,18 @@ readProgram ::
   Either String (DAG MVar Import ExprI, PState)
 readProgram _moduleName modulePath sourceCode pstate dag = do
   let filename = maybe "<expr>" id modulePath
-  tokens <- case lexMorloc filename sourceCode of
+  (tokens, _docMap, groupToks) <- case lexMorloc filename sourceCode of
     Left err -> Left (showLexError err)
-    Right toks -> Right toks
+    Right result -> Right result
   case State.runStateT (parseProgram tokens) pstate of
     Right (result, finalState) ->
       let dag' = foldl addModule dag result
-      in return (dag', finalState)
+          dag'' = attachGroupAnnotations tokens groupToks dag'
+      in return (dag'', finalState)
     Left err ->
-      -- If normal parsing fails, try parsing as a bare expression.
-      -- This supports the common pattern of passing bare expressions
-      -- for typechecking (e.g., "42", "True", "f x").
-      -- Strip layout tokens since parseExprOnly expects raw expression tokens.
       let exprTokens = stripLayoutTokens tokens
       in case State.runStateT (parseExprOnly exprTokens) pstate of
         Right (exprI, exprState) -> do
-          -- Wrap the expression as: module main (*) __expr__ = <expr>
           let s = exprState
               i1 = psExpIndex s
               assI = ExprI i1 (AssE (EV "__expr__") exprI [])
@@ -5305,7 +5302,6 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
               dag' = Map.insert (MV "main") (modI, []) dag
           return (dag', finalState)
         Left _ ->
-          -- Expression parsing also failed; report the original error
           Left (showParseError filename err)
   where
     addModule d e@(ExprI _ (ModE n es)) =
@@ -5322,12 +5318,108 @@ stripLayoutTokens = filter (not . isLayoutToken)
     isLayoutToken (Located _ TokVSemi _) = True
     isLayoutToken _ = False
 
+-- | Post-process the DAG to attach group annotations from --* tokens.
+-- Scans the token stream to find export list symbols and their positions,
+-- then uses group annotation positions to determine membership.
+attachGroupAnnotations :: [Located] -> [Located] -> DAG MVar Import ExprI -> DAG MVar Import ExprI
+attachGroupAnnotations _ [] dag = dag
+attachGroupAnnotations tokens groupToks dag =
+  let groupHeaders = parseGroupHeaders groupToks
+      exportSymPositions = findExportSymbolPositions tokens
+      membership = buildMembership groupHeaders exportSymPositions
+      ghdrMap = Map.fromList [(n, d) | (n, d, _) <- groupHeaders]
+  in Map.map (\(e, es) -> (attachToExpr membership ghdrMap e, es)) dag
+  where
+    attachToExpr :: Map.Map T.Text T.Text -> Map.Map T.Text [T.Text] -> ExprI -> ExprI
+    attachToExpr mem ghdrs (ExprI i (ModE m es)) =
+      ExprI i (ModE m (map (attachToExpr mem ghdrs) es))
+    attachToExpr mem ghdrs (ExprI i (ExpE (ExportMany symbols _))) =
+      let groupedSymNames = Map.keysSet mem
+          -- preserve order of groups from source
+          groupNames = nubOrd [gn | (_, gn) <- Map.toList mem]
+          exportGroups =
+            [ ExportGroup gn (maybe [] id (Map.lookup gn ghdrs))
+                (Set.filter (\(_, sym) -> Map.lookup (symText sym) mem == Just gn) symbols)
+            | gn <- groupNames
+            ]
+          ungrouped = Set.filter (\(_, sym) -> not (Set.member (symText sym) groupedSymNames)) symbols
+      in ExprI i (ExpE (ExportMany ungrouped exportGroups))
+    attachToExpr _ _ e = e
+
+    nubOrd :: (Eq a) => [a] -> [a]
+    nubOrd [] = []
+    nubOrd (x:xs) = x : nubOrd (filter (/= x) xs)
+
+    symText :: Symbol -> T.Text
+    symText (TermSymbol (EV n)) = n
+    symText (TypeSymbol (TV n)) = n
+    symText (ClassSymbol (ClassName n)) = n
+
+-- | Parse --* tokens into ordered (name, desc, position) triples
+parseGroupHeaders :: [Located] -> [(T.Text, [T.Text], Pos)]
+parseGroupHeaders = foldl' accum [] . map extractLine
+  where
+    extractLine (Located pos (TokGroupLine txt) _) = (pos, T.strip txt)
+    extractLine (Located pos _ _) = (pos, T.empty)
+
+    accum :: [(T.Text, [T.Text], Pos)] -> (Pos, T.Text) -> [(T.Text, [T.Text], Pos)]
+    accum gs (pos, line) = case T.stripPrefix "name:" line of
+      Just name -> gs ++ [(T.strip name, [], pos)]
+      Nothing -> case T.stripPrefix "desc:" line of
+        Just desc -> case gs of
+          [] -> gs
+          _ -> init gs ++ [let (n, ds, p) = last gs in (n, ds ++ [T.strip desc], p)]
+        Nothing -> gs
+
+-- | Find symbol names and positions in the export list by scanning tokens.
+findExportSymbolPositions :: [Located] -> [(T.Text, Pos)]
+findExportSymbolPositions = findModule
+  where
+    findModule (Located _ TokModule _ : rest) = findLParen rest
+    findModule (_ : rest) = findModule rest
+    findModule [] = []
+
+    findLParen (Located _ TokLParen _ : rest) = scanExports 1 rest
+    findLParen (Located _ TokStar _ : _) = []
+    findLParen (_ : rest) = findLParen rest
+    findLParen [] = []
+
+    scanExports :: Int -> [Located] -> [(T.Text, Pos)]
+    scanExports 0 _ = []
+    scanExports depth (Located _ TokLParen _ : rest) = scanExports (depth + 1) rest
+    scanExports depth (Located _ TokRParen _ : rest)
+      | depth <= 1 = []
+      | otherwise = scanExports (depth - 1) rest
+    scanExports depth (Located pos (TokLowerName n) _ : rest) = (n, pos) : scanExports depth rest
+    scanExports depth (Located pos (TokUpperName n) _ : rest) = (n, pos) : scanExports depth rest
+    scanExports depth (_ : rest) = scanExports depth rest
+    scanExports _ [] = []
+
+-- | Build symbol name -> group name map using positions.
+-- For each export symbol, find the most recent group annotation that
+-- precedes it (by source position). Symbols before any group are ungrouped.
+buildMembership :: [(T.Text, [T.Text], Pos)] -> [(T.Text, Pos)] -> Map.Map T.Text T.Text
+buildMembership groupHeaders exportSyms = Map.fromList
+  [ (sym, gname)
+  | (sym, symPos) <- exportSyms
+  , Just gname <- [findGroup symPos]
+  ]
+  where
+    -- Groups sorted by position
+    sortedGroups = sortBy (\(_,_,p1) (_,_,p2) -> compare p1 p2) groupHeaders
+
+    -- Find the group that a symbol at the given position belongs to
+    findGroup :: Pos -> Maybe T.Text
+    findGroup symPos = case filter (\(_,_,gpos) -> gpos < symPos) (reverse sortedGroups) of
+      ((gname,_,_):_) -> Just gname
+      [] -> Nothing
+
 readType :: Text -> Either String TypeU
 readType typeStr = do
   let initState = emptyPState
-  tokens <- case lexMorloc "<type>" typeStr of
+  (tokens, _, _) <- case lexMorloc "<type>" typeStr of
     Left err -> Left (showLexError err)
-    Right toks -> Right toks
+    Right result -> Right result
   (result, _) <- case State.runStateT (parseTypeOnly tokens) initState of
     Left err -> Left (showParseError "<type>" err)
     Right r -> Right r

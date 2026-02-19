@@ -578,7 +578,7 @@ desugarExport :: Span -> CstExport -> D ExprI
 desugarExport sp CstExportAll = freshExprSpan sp (ExpE ExportAll)
 desugarExport sp (CstExportMany locs) = do
   items <- mapM (\tok -> do { i <- freshIdPos (locPos tok); return (i, symVal' tok) }) locs
-  freshExprSpan sp (ExpE (ExportMany (Set.fromList items)))
+  freshExprSpan sp (ExpE (ExportMany (Set.fromList items) []))
 
 symVal' :: Located -> Symbol
 symVal' (Located _ (TokLowerName n) _) = TermSymbol (EV n)
