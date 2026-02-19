@@ -38,7 +38,7 @@ import UI
 -- | Route each language to its translator.
 translator :: TranslateFn
 translator lang srcs es
-  | lang == ML.cppLang = CppTranslator.translate srcs es
+  | lang == CppTranslator.cppLang = CppTranslator.translate srcs es
   | otherwise = Generic.translate lang srcs es
 
 runMorloc :: CliCommand -> IO ()

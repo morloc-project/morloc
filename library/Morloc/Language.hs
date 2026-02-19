@@ -16,15 +16,6 @@ module Morloc.Language
   , showLangName
   , makeExecutablePoolName
   , makeSourcePoolName
-  , pairwiseCost
-  , languageCost
-  , serialType
-  -- * Smart constructors for built-in languages
-  , pyLang
-  , rLang
-  , cLang
-  , cppLang
-  -- * Construction from name + extension
   , makeLang
   ) where
 
@@ -46,19 +37,6 @@ instance Ord Lang where
 
 instance Pretty Lang where
   pretty = pretty . langName
-
--- Smart constructors for built-in languages
-pyLang :: Lang
-pyLang = Lang "py" "py"
-
-rLang :: Lang
-rLang = Lang "r" "R"
-
-cLang :: Lang
-cLang = Lang "c" "c"
-
-cppLang :: Lang
-cppLang = Lang "cpp" "cpp"
 
 -- | Construct a Lang from canonical name and extension
 makeLang :: Text -> String -> Lang
@@ -86,41 +64,3 @@ makeExecutablePoolName lang = makeExecutableName lang "pool"
 
 makeSourcePoolName :: Lang -> String
 makeSourcePoolName lang = makeSourceName lang "pool"
-
--- | Pairwise cost of calling from one language to another.
--- These are used by the optimizer to select implementations.
-pairwiseCost :: Lang -> Lang -> Int
-pairwiseCost from to
-  | from == to = sameLangCost (langName from)
-  | langName from == "cpp" && langName to == "c" = 1
-  | otherwise = crossLangCost (langName to)
-  where
-    sameLangCost "c"   = 1
-    sameLangCost "cpp" = 1
-    sameLangCost "py"  = 10
-    sameLangCost "r"   = 100
-    sameLangCost _     = 10
-
-    crossLangCost "c"   = 5000
-    crossLangCost "cpp" = 5000
-    crossLangCost "py"  = 10000
-    crossLangCost "r"   = 40000
-    crossLangCost _     = 10000
-
--- | Preference cost for tie-breaking between languages
-languageCost :: Lang -> Int
-languageCost lang = case langName lang of
-  "cpp" -> 0
-  "c"   -> 1
-  "py"  -> 3
-  "r"   -> 4
-  _     -> 5
-
--- | The serialization type for a language
-serialType :: Lang -> Text
-serialType lang = case langName lang of
-  "cpp" -> "uint8_t*"
-  "r"   -> "character"
-  "py"  -> "str"
-  "c"   -> error "C is not yet supported as a pool language"
-  _     -> "bytes"

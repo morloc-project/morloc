@@ -23,6 +23,8 @@ module Morloc.CodeGenerator.Serial
 import qualified Data.Char as C
 import qualified Data.Text as DT
 import qualified Morloc.BaseTypes as BT
+import qualified Morloc.Language as Lang
+import Morloc.Language (Lang)
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
@@ -30,14 +32,6 @@ import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Typecheck.Internal (apply, qualify, substitute, subtype, unqualify)
-
--- The type of serialization data as JSON, currently
-serialType :: Lang -> CVar
-serialType lang = case langName lang of
-  "py"  -> CV "str"
-  "r"   -> CV "character"
-  "cpp" -> CV "std::string"
-  _     -> CV "bytes"
 
 -- | recurse all the way to a serializable type
 serialAstToType :: SerialAST -> TypeF
@@ -215,7 +209,12 @@ makeSerialAST m lang t0 = do
     -- If the type is unknown in this language, then it must be a passthrough
     -- type. So it will only be represented in the serialization form. As a
     -- string, for now.
-    makeSerialAST' _ _ (UnkF (FV gv _)) = return $ SerialUnknown (FV gv (serialType lang))
+    makeSerialAST' _ _ (UnkF (FV gv _)) = do
+      registry <- MM.gets stateLangRegistry |>> lrEntries
+      serialType <- case Map.lookup (Lang.langName lang) registry of
+        Nothing -> MM.throwSourcedError m "Unsupported language"
+        (Just langRegistry) -> return $ CV (lreSerialType langRegistry)
+      return $ SerialUnknown (FV gv serialType)
     makeSerialAST' gscope typepackers ft@(VarF v@(FV gv cv))
       | finalType == BT.unitU = return $ SerialNull v
       | finalType == BT.boolU = return $ SerialBool v

@@ -5,12 +5,12 @@ same_language_costs:
   c: 1
   cpp: 1
   py: 10
-  r: 100
+  r:  20
 
 # Cost of calling INTO a language from a different language (IPC overhead)
 cross_language_costs:
-  c: 5000
-  cpp: 5000
+  c: 1001
+  cpp: 1000
   py: 10000
   r: 40000
 

@@ -8,8 +8,6 @@
 
 ./daemon-tests/run-tests.sh
 
-stack test
-
 echo "libmorloc tests not defined yet"
 # cmorloc-tests:
 

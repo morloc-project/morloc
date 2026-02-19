@@ -15,6 +15,7 @@ Maintainer  : z@morloc.io
 -}
 module CppTranslator
   ( translate
+  , cppLang
   ) where
 
 import Control.Monad.Identity (Identity)
@@ -40,6 +41,15 @@ import qualified Morloc.Monad as MM
 import Morloc.Quasi
 import qualified Morloc.System as MS
 import qualified Morloc.TypeEval as TE
+
+-- HACK: repeating these here is hacky
+-- This same data is repeated in cpp/lang.yaml
+cppLang :: ML.Lang
+cppLang = ML.Lang "cpp" "cpp"
+
+serialType :: MDoc
+serialType = "uint8_t*"
+
 
 data CallSemantics = Copy | Reference | ConstPtr
 
@@ -165,7 +175,7 @@ translate srcs es = do
   return $
     Script
       { scriptBase = "pool"
-      , scriptLang = ML.cppLang
+      , scriptLang = cppLang
       , scriptCode = "." :/ Dir "pools" [File "pool.cpp" (Code . render $ code)]
       , scriptMake = maker
       }
@@ -200,15 +210,15 @@ metaTypedefs ::
   Scope
 metaTypedefs tmap i =
   case GMap.lookup i tmap of
-    (GMapJust langmap) -> case Map.lookup ML.cppLang langmap of
+    (GMapJust langmap) -> case Map.lookup cppLang langmap of
       (Just scope) -> Map.filter (not . null) scope
       Nothing -> Map.empty
     _ -> Map.empty
 
 makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
 makeTheMaker srcs = do
-  let outfile = pretty $ "pools" </> ML.makeExecutablePoolName ML.cppLang
-  let src = pretty $ "pools" </> ML.makeSourcePoolName ML.cppLang
+  let outfile = pretty $ "pools" </> ML.makeExecutablePoolName cppLang
+  let src = pretty $ "pools" </> ML.makeSourcePoolName cppLang
 
   (_, flags, includes) <- handleFlagsAndPaths srcs
 
@@ -220,9 +230,6 @@ makeTheMaker srcs = do
           [idoc|g++ -O2 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
 
   return [cmd]
-
-serialType :: MDoc
-serialType = pretty $ ML.serialType ML.cppLang
 
 makeSignature :: SerialManifold -> CppTranslator [MDoc]
 makeSignature = foldWithSerialManifoldM fm
@@ -388,7 +395,7 @@ PROPAGATE_ERROR(errmsg)|]
     returnType (Function _ t) = cppTypeOf t
     returnType t = cppTypeOf t
 
--- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
+-- Use `#include "foo.h"` rather than `#include <foo.h>`
 translateSource ::
   -- | Path to a header (e.g., `$MORLOC_HOME/src/foo.h`)
   Path ->
@@ -515,7 +522,7 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
   -- we need to generate (de)serializers for all records
   typedef <- Map.unions <$> mapM (foldSerialManifoldM fm) es0
 
-  scope <- case Map.lookup ML.cppLang univeralScopeMap of
+  scope <- case Map.lookup cppLang univeralScopeMap of
     (Just scope) -> return scope
     Nothing -> return Map.empty
 
@@ -581,7 +588,7 @@ handleFlagsAndPaths srcs = do
     fmap unzip3
       . mapM flagAndPath
       . unique
-      $ [s | s <- srcs, srcLang s == ML.cppLang]
+      $ [s | s <- srcs, srcLang s == cppLang]
 
   home <- MM.asks configHome
   let mlcInclude = ["-I" <> home <> "/include"]
@@ -600,7 +607,7 @@ gccVersionFlag i
   | otherwise = "-std=c++" <> MT.show' i
 
 flagAndPath :: Source -> MorlocMonad (Source, [String], Maybe Path)
-flagAndPath src@(Source _ srcL (Just p) _ _ _ _) | srcL == ML.cppLang =
+flagAndPath src@(Source _ srcL (Just p) _ _ _ _) | srcL == cppLang =
   case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p), MS.takeExtensions p) of
     (".", base, "") -> do
       header <- lookupHeader base
@@ -635,7 +642,7 @@ flagAndPath src@(Source _ srcL (Just p) _ _ _ _) | srcL == ML.cppLang =
             , "-l" <> libnamebase
             ]
         [] -> return []
-flagAndPath src@(Source _ srcL Nothing _ _ _ _) | srcL == ML.cppLang = return (src, [], Nothing)
+flagAndPath src@(Source _ srcL Nothing _ _ _ _) | srcL == cppLang = return (src, [], Nothing)
 flagAndPath _ = MM.throwSystemError $ "flagAndPath should only be called for C++ functions"
 
 getFile :: Path -> IO (Maybe Path)

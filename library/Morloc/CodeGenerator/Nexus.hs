@@ -36,6 +36,9 @@ import qualified System.Directory as Dir
 -- Data types
 -- ======================================================================
 
+cLang :: ML.Lang
+cLang = Lang "c" "c"
+
 data FData = FData
   { fdataSocket :: Socket
   , fdataSubcommand :: Text
@@ -597,7 +600,7 @@ generate cs rASTs = do
   return $
     Script
       { scriptBase = outfile
-      , scriptLang = ML.cLang
+      , scriptLang = cLang
       , scriptCode = "." :/ File outfile (Code wrapperScript)
       , scriptMake = [SysExe outfile]
       }

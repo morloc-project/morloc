@@ -17,6 +17,7 @@ import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.SystemConfig as MCS
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
+import Morloc.Data.Map (Map)
 import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
@@ -46,7 +47,7 @@ realityCheck es = do
 data RState = RState
   { rLangs :: [Lang]
   , rApplied :: [AnnoS (Indexed Type) Many Int]
-  , rBndVars :: Map.Map EVar (AnnoS (Indexed Type) Many Int)
+  , rBndVars :: Map EVar (AnnoS (Indexed Type) Many Int)
   }
 
 emptyRState =
@@ -70,11 +71,37 @@ realize ::
         (AnnoS (Indexed Type) One (Indexed Lang))
     )
 realize s0 = do
+  registry <- MM.gets stateLangRegistry
+  realizeWithRegistry registry s0 
+
+realizeWithRegistry
+  :: LangRegistry
+  -> AnnoS (Indexed Type) Many Int
+  -> MorlocMonad
+    ( Either
+        (AnnoS (Indexed Type) One ())
+        (AnnoS (Indexed Type) One (Indexed Lang))
+    )
+realizeWithRegistry registry s0 = do
   e@(AnnoS _ li _) <- scoreAnnoS emptyRState s0 >>= collapseAnnoS Nothing |>> removeVarS
   case li of
     (Idx _ Nothing) -> makeGAST e |>> Left
-    (Idx _ _) -> Right <$> propagateDown e
+    (Idx _ _) -> propagateDown e |>> Right
   where
+    pairwiseCost :: Lang -> Lang -> Int
+    pairwiseCost l1 l2
+      | l1 == l2 = case Map.lookup (langName l2) (lrSameLangCosts registry) of
+          Nothing -> lrDefaultSameCost registry
+          (Just score) -> score
+      | l1 /= l2 = case Map.lookup (langName l1, langName l2) (lrOptimizedPairs registry) of
+          Nothing -> case Map.lookup (langName l2) (lrCrossLangCosts registry) of
+            Nothing -> lrDefaultCrossCost registry
+            (Just score) -> score
+          (Just score) -> score
+
+    languageCost :: Lang -> Int
+    languageCost lang = pairwiseCost lang lang
+
     -- \| Depth first pass calculating scores for each language. Alternates with
     -- scoresSExpr.
     scoreAnnoS ::
@@ -183,7 +210,7 @@ realize s0 = do
       [ ( l1
         , s1
             + sum
-              [ minimumDef 999999999 [s2 + Lang.pairwiseCost l1 l2 | (l2, s2) <- pairs]
+              [ minimumDef 999999999 [s2 + pairwiseCost l1 l2 | (l2, s2) <- pairs]
               | pairs <- pairss
               ]
         )
@@ -221,7 +248,7 @@ realize s0 = do
                 , sum
                     [ minimumDef
                       999999999
-                      [ score + Lang.pairwiseCost l1 l2
+                      [ score + pairwiseCost l1 l2
                       | (l2, score) <- pairs
                       ]
                     | pairs <- pairss
@@ -252,13 +279,13 @@ realize s0 = do
       Lang -> -- child lang (should always be given if we are working from scored pairs)
       Int -> -- score
       Int
-    cost (Just l1) l2 score = score + Lang.pairwiseCost l1 l2
+    cost (Just l1) l2 score = score + pairwiseCost l1 l2
     cost _ _ score = score
 
     -- FIXME: in the future, this function should be replaced by an estimate of
     -- the function runtime, for now I will just base it off languages.
     callCost :: Source -> Int
-    callCost src = Lang.languageCost (srcLang src)
+    callCost src = languageCost (srcLang src)
 
     collapseExpr ::
       Type ->
