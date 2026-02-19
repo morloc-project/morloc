@@ -13,6 +13,7 @@ module Morloc.CodeGenerator.SystemConfig
   ) where
 
 import Morloc.CodeGenerator.Namespace
+import qualified Morloc.Completion as Completion
 import qualified Morloc.DataFiles as DF
 import Morloc.Module (OverwriteProtocol(..))
 
@@ -115,6 +116,10 @@ configureAllSteps verbose slurmSupport config = do
     removeFile initPath
     forM_ (DF.lsFiles ls) $ \ef ->
       removeFileSafe (buildDir </> DF.embededFileName ef)
+
+  -- Generate shell completions
+  say verbose "Generating shell completions"
+  Completion.regenerateCompletions verbose homeDir
 
 say :: Bool -> String -> IO ()
 say verbose message =

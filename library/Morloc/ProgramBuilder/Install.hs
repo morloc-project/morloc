@@ -14,6 +14,7 @@ module Morloc.ProgramBuilder.Install
 import Data.List (isSuffixOf, isInfixOf)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Morloc.Completion as Completion
 import System.Directory
   ( createDirectoryIfMissing
   , doesFileExist
@@ -90,6 +91,9 @@ installProgram configHome installDir installName includes force = do
         else return ()
 
       putStrLn $ "Installed '" <> installName <> "' to " <> binPath
+
+      -- Regenerate shell completions
+      Completion.regenerateCompletions False configHome
 
 -- | Recursively copy a directory
 copyDirectoryRecursive :: FilePath -> FilePath -> IO ()
