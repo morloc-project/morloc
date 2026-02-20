@@ -1,9 +1,14 @@
 {- |
 Module      : Morloc.Frontend.API
-Description : Morloc frontend API
+Description : Entry point for the frontend pipeline (parse, typecheck, valuecheck)
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Orchestrates the full frontend pipeline: parsing source files into a module
+DAG, recursively resolving imports, and re-exporting the typechecker and
+valuechecker entry points. This is the primary interface consumed by the
+top-level compiler driver ('Morloc').
 -}
 module Morloc.Frontend.API
   ( parse
@@ -31,6 +36,8 @@ import qualified Morloc.Monad as MM
 import Morloc.Data.Doc
 import System.Directory (doesDirectoryExist, listDirectory, doesFileExist)
 
+-- | Parse a morloc source file and all its imports into a module DAG.
+-- Recursively discovers and parses imported modules.
 parse ::
   -- | path to the current module (if we are reading from a file)
   Maybe Path ->

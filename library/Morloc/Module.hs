@@ -2,17 +2,18 @@
 {-# LANGUAGE ViewPatterns #-}
 
 {- |
-Module      : Module
-Description : Morloc module imports and paths
+Module      : Morloc.Module
+Description : Module discovery, metadata loading, and installation
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 
-All information about morloc module structure should be defined here.
- * define package YAML metadata
- * finding modules on the local filesystem
+Handles all aspects of the morloc module system:
+
+ * finding modules on the local filesystem (by name or path)
+ * loading package YAML metadata
  * finding headers and shared libraries required by modules
- * installation of modules from github
+ * installing modules from GitHub via @morloc install@
 -}
 module Morloc.Module
   ( findModule

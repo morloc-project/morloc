@@ -2,10 +2,14 @@
 
 {- |
 Module      : Morloc.Config
-Description : Handle local configuration
+Description : Configuration loading and default paths
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Loads the morloc configuration from @~\/.local\/share\/morloc\/config@ (YAML),
+module-level configs from @\<module\>.yaml@, and build configs. Also sets up
+per-language server sockets for IPC during pool execution.
 -}
 module Morloc.Config
   ( Config (..)

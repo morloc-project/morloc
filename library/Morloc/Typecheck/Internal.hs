@@ -3,14 +3,15 @@
 
 {- |
 Module      : Morloc.Typecheck.Internal
-Description : Functions for type checking and type manipulation
+Description : Shared typechecking machinery (unification, substitution, context)
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 
-This module exports any typechecking machinery that can be shared between the
-general typechecker in the frontend and the language specific typechecker(s) of
-the backend.
+Exports typechecking primitives shared between the frontend general
+typechecker ('Morloc.Frontend.Typecheck') and any backend-specific
+typecheckers: unification, context operations, substitution, fresh
+variable generation, and type quantification\/unquantification.
 -}
 module Morloc.Typecheck.Internal
   ( (+>)

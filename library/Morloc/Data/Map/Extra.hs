@@ -4,11 +4,12 @@ Description : Additional functions for the Map class
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Monadic extensions to "Data.Map.Strict" that are not provided by the standard
+library: monadic union, map, and three-way merge operations.
 -}
 module Morloc.Data.Map.Extra
   ( mergeMaps
-
-    -- * monadic versions functions
   , mergeMapsM
   , mapKeysWithM
   , mapM
@@ -24,11 +25,10 @@ import qualified Data.Map.Strict as Map
 import Prelude hiding (mapM)
 import qualified Prelude
 
--- A local utility function
 onSndM :: (Monad m) => (b -> m c) -> (a, b) -> m (a, c)
 onSndM f (x, y) = (,) x <$> f y
 
--- | monadic version of Data.Map unionWith
+-- | Monadic version of @Data.Map.unionWith@
 unionWithM :: (Monad m, Ord a) => (b -> b -> m b) -> Map.Map a b -> Map.Map a b -> m (Map.Map a b)
 unionWithM f m1 m2 = do
   pairs <- Prelude.mapM (onSndM (uncurry f)) (Map.toList $ Map.intersectionWith (,) m1 m2)
@@ -40,11 +40,11 @@ unionWithM f m1 m2 = do
       , Map.difference m2 m1
       ]
 
--- | monadic version of Data.Map unionsWith
+-- | Monadic version of @Data.Map.unionsWith@
 unionsWithM :: (Monad m, Ord a) => (b -> b -> m b) -> [Map.Map a b] -> m (Map.Map a b)
 unionsWithM f = foldM (unionWithM f) Map.empty
 
--- | monadic version of Data.Map mapKeysWith
+-- | Monadic version of @Data.Map.mapKeysWith@, merging values when keys collide
 mapKeysWithM ::
   (Monad m, Ord k2) =>
   (a -> a -> m a) ->
@@ -58,16 +58,18 @@ mapKeysWithM f g m =
       (groupSort $ map (first g) (Map.toList m))
   where
     foldValues (k, v : vs) = (,) k <$> foldM f v vs
-    foldValues _ = undefined -- there will never be empty values
+    foldValues _ = undefined -- groupSort never produces empty value lists
 
--- | monadic version of Data.Map.map
+-- | Monadic version of @Data.Map.map@
 mapM :: (Monad m) => (a -> m b) -> Map.Map k a -> m (Map.Map k b)
 mapM f = Map.traverseWithKey (\_ a -> f a)
 
--- | monadic version of Data.Map mapWithKey
+-- | Monadic version of @Data.Map.mapWithKey@
 mapWithKeyM :: (Monad m) => (k -> a -> m b) -> Map.Map k a -> m (Map.Map k b)
 mapWithKeyM = Map.traverseWithKey
 
+-- | Three-way merge of two maps: apply @fb@ to left-only, @fc@ to right-only,
+-- and @fbc@ to entries present in both
 mergeMaps ::
   (Ord a) =>
   (b -> d) ->
@@ -83,6 +85,7 @@ mergeMaps fb fc fbc m1 m2 =
     , Map.map fc (Map.difference m2 m1)
     ]
 
+-- | Monadic version of 'mergeMaps'
 mergeMapsM ::
   (Ord a, Monad m) =>
   (b -> m d) ->

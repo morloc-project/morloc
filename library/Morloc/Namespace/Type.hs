@@ -7,6 +7,14 @@ Description : Type system types and partial order logic
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Core type representations. 'Type' is the ground type (no quantifiers) used
+after type erasure. 'TypeU' is the full type with existentials ('ExistU') and
+universals ('ForallU'), used during typechecking and in type signatures.
+'EType' extends 'TypeU' with typeclass constraints and documentation.
+
+A partial order is defined on 'TypeU' via "Data.PartialOrd" where @t1 <= t2@
+means t1 is at least as specific as t2 (t1 is a subtype of t2).
 -}
 module Morloc.Namespace.Type
   ( -- * Types
@@ -58,7 +66,9 @@ import Morloc.Namespace.Prim
 
 ---- Type definitions
 
--- | Stores a list of types that are present in the scope of each type variable
+-- | Scope maps each type name to its definitions: the type parameters, the
+-- body type, documentation, and whether the definition is terminal (won't be
+-- expanded further during type resolution).
 type Scope =
   Map
     TVar
@@ -69,13 +79,15 @@ type Scope =
       )
     ]
 
+-- | Flavors of named (keyed) types
 data NamType
-  = NamRecord
-  | NamObject
-  | NamTable
+  = NamRecord  -- ^ Structural record with named fields
+  | NamObject  -- ^ Nominal object type
+  | NamTable   -- ^ Tabular type (columns as fields)
   deriving (Show, Ord, Eq)
 
--- | A basic type
+-- | Ground type with no quantifiers. Produced after type erasure and used in
+-- code generation where all type variables have been resolved.
 data Type
   = UnkT TVar
   | VarT TVar
@@ -88,7 +100,9 @@ data Type
 data OpenOrClosed = Open | Closed
   deriving (Show, Ord, Eq)
 
--- | A type with existentials and universals
+-- | Full type with quantifiers. 'ExistU' represents existential variables
+-- (solved during unification), 'ForallU' represents universally quantified
+-- variables. This is the primary type representation during typechecking.
 data TypeU
   = VarU TVar
   | ExistU

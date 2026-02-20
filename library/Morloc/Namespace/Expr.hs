@@ -8,6 +8,16 @@ Description : Frontend AST, source/config types, post-typecheck tree
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Expression types at three stages of the compiler pipeline:
+
+* 'Expr' \/ 'ExprI' -- parser output (untyped AST with integer indices)
+* 'E' -- intermediate typed tree used during typechecking
+* 'AnnoS' \/ 'ExprS' -- post-typecheck annotated tree passed to code generation
+
+Also defines 'Source' (foreign function binding), config types
+('ManifoldConfig', 'ModuleConfig', 'BuildConfig'), and mapping combinators
+over the 'AnnoS' tree.
 -}
 
 module Morloc.Namespace.Expr

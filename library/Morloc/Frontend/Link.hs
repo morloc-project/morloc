@@ -3,10 +3,15 @@
 
 {- |
 Module      : Morloc.Frontend.Link
-Description : Transfer all terms, types, typeclasses and sources to state
+Description : Link terms, sources, and typeclasses into 'MorlocState'
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Walks the module DAG bottom-up and populates 'MorlocState' with signatures
+('stateSignatures'), typeclass instances ('stateTypeclasses'), and name
+mappings ('stateName'). This is the bridge between the parsed AST and the
+state-based representation consumed by 'Treeify'.
 -}
 module Morloc.Frontend.Link (link) where
 
@@ -40,6 +45,8 @@ data LinkState = LinkState
   -- ^ maps class methods into stateSignatures index 2
   }
 
+-- | Synthesize the module DAG bottom-up, linking all terms, sources,
+-- typeclass instances, and declarations into 'MorlocState'.
 link :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 link d0 = do
   mayResult <- DAG.synthesizeNodes synth d0

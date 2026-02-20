@@ -4,10 +4,16 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Realize
-Description : Resolve all implementation polymorphism
+Description : Select concrete implementations for each polymorphic call site
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+When a term has multiple candidate implementations (different languages,
+different source files), this pass selects the best one at each call site
+based on language affinity and minimizing cross-language transitions. The
+result is a fully-realized tree where every node has exactly one
+implementation.
 -}
 module Morloc.CodeGenerator.Realize
   ( realityCheck

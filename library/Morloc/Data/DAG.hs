@@ -1,6 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE CPP #-}
 
 {- |
 Module      : Morloc.Data.DAG
@@ -8,96 +6,44 @@ Description : Functions for working with directed acyclic graphs
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Operations on DAGs represented as @Map k (n, [(k, e)])@ where @k@ is the
+node key, @n@ is node data, and @e@ is edge data. Used throughout the
+compiler to represent module dependency graphs.
 -}
 module Morloc.Data.DAG
   ( edgelist
-  , insertEdge
-  , edges
   , nodes
   , lookupNode
-  , lookupEdge
-  , lookupEdgeTriple
-  , local
-  , inherit
   , roots
-  , shake
-  , leafs
-  , findCycle
   , mapNode
   , mapNodeM
-  , mapNodeWithKey
   , mapNodeWithKeyM
   , mapEdge
-  , filterEdge
-  , mapEdgeWithNode
-  , mapEdgeWithNodeM
-  , mapEdgeWithNodeAndKey
-  , mapNodeWithEdge
-  , mapEdgeWithNodeAndKeyM
-  , lookupAliasedTerm
-  , lookupAliasedTermM
   , synthesize
   , synthesizeNodes
-  , foldDAG
   ) where
 
 import qualified Data.Set as Set
 import qualified Morloc.Data.Map as Map
-import qualified Morloc.Monad as MM
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State (MorlocMonad)
 
+-- | Get all edges as @(source, target)@ pairs
 edgelist :: DAG k e n -> [(k, k)]
 edgelist d = concat [[(k, j) | (j, _) <- xs] | (k, (_, xs)) <- Map.toList d]
 
-insertEdge :: (Ord k) => k -> k -> e -> DAG k e n -> DAG k e n
-insertEdge k1 k2 e = Map.alter f k1
-  where
-    -- f :: Maybe [(k, e)] -> Maybe [(k, e)]
-    f Nothing = error "Cannot add edge to non-existant node"
-    f (Just (n, xs)) = Just (n, (k2, e) : xs)
-
--- | Get all edges
-edges :: DAG k e n -> [e]
-edges = map snd . concatMap snd . Map.elems
-
--- | Get all nodes
+-- | Get all node values
 nodes :: DAG k e n -> [n]
 nodes = map fst . Map.elems
 
+-- | Look up the node data for a given key
 lookupNode :: (Ord k) => k -> DAG k e n -> Maybe n
 lookupNode k d = case Map.lookup k d of
   (Just (n, _)) -> Just n
   Nothing -> Nothing
 
-lookupEdge :: (Ord k) => k -> k -> DAG k e n -> Maybe e
-lookupEdge k1 k2 d = case Map.lookup k1 d of
-  (Just (_, xs)) -> lookup k2 xs
-  Nothing -> Nothing
-
-lookupEdgeTriple :: (Ord k) => k -> k -> DAG k e n -> Maybe (n, e, n)
-lookupEdgeTriple k1 k2 d = do
-  (n1, xs) <- Map.lookup k1 d
-  e <- lookup k2 xs
-  (n2, _) <- Map.lookup k2 d
-  return (n1, e, n2)
-
-local ::
-  (Ord k) =>
-  k ->
-  DAG k e n ->
-  Maybe (n, [(k, e, n)])
-local k d = do
-  (pareNode, children) <- Map.lookup k d
-  childNodes <- mapM ((`lookupNode` d) . fst) children
-  return
-    ( pareNode
-    , [ (childKey, childEdge, childNode)
-      | (childNode, (childKey, childEdge)) <- zip childNodes children
-      ]
-    )
-
--- | Get all roots
+-- | Get all root keys (nodes with no incoming edges)
 roots :: (Ord k) => DAG k e n -> [k]
 roots d = Set.toList $ Set.difference parents children
   where
@@ -105,124 +51,23 @@ roots d = Set.toList $ Set.difference parents children
     parents = Map.keysSet d
     children = Set.fromList (map snd g)
 
--- | Get all leaves that have no children
-leafs :: DAG k e n -> [k]
-leafs d = [k | (k, (_, [])) <- Map.toList d]
-
-{- | Searches a DAG for a cycle, stops on the first observed cycle and returns
-the path.
--}
-findCycle :: (Ord k) => DAG k e n -> Maybe [k]
-findCycle d = case mapMaybe (findCycle' []) (roots d) of
-  [] -> Nothing
-  (x : _) -> Just x
-  where
-    -- findCycle' :: [k] -> k -> Maybe [k]
-    findCycle' seen k
-      | k `elem` seen = Just seen
-      | otherwise = case Map.lookup k d of
-          Nothing -> Nothing -- we have reached a leaf
-          (Just (_, xs)) -> case mapMaybe (findCycle' (k : seen) . fst) xs of
-            [] -> Nothing
-            (x : _) -> Just x
-
--- | Map function over nodes independent of the edge data
+-- | Map a pure function over node data, leaving edges unchanged
 mapNode :: (n1 -> n2) -> DAG k e n1 -> DAG k e n2
 mapNode f = Map.map (first f)
 
-mapNodeWithKey :: (k -> n1 -> n2) -> DAG k e n1 -> DAG k e n2
-mapNodeWithKey f = Map.mapWithKey (\k (n, xs) -> (f k n, xs))
-
--- | Map function over nodes independent of the edge data
+-- | Map a monadic function over node data, leaving edges unchanged
 mapNodeM :: (n1 -> MorlocMonad n2) -> DAG k e n1 -> MorlocMonad (DAG k e n2)
 mapNodeM f = Map.mapM (\(n, xs) -> f n >>= (\n' -> return (n', xs)))
 
--- | Map function over nodes independent of the edge data
+-- | Map a monadic function over node data with access to the key
 mapNodeWithKeyM :: (k -> n1 -> MorlocMonad n2) -> DAG k e n1 -> MorlocMonad (DAG k e n2)
 mapNodeWithKeyM f = Map.mapWithKeyM (\k (n, xs) -> f k n >>= (\n' -> return (n', xs)))
 
--- | Map function over edges independent of the node data
+-- | Map a pure function over edge data, leaving nodes unchanged
 mapEdge :: (e1 -> e2) -> DAG k e1 n -> DAG k e2 n
 mapEdge f = Map.map (\(n, xs) -> (n, [(k, f e) | (k, e) <- xs]))
 
--- | Filter the edges in a DAG
-filterEdge :: (k -> n -> k -> e -> Bool) -> DAG k e n -> DAG k e n
-filterEdge f = Map.mapWithKey (\k (n, xs) -> (n, filter (uncurry (f k n)) xs))
-
--- | Removes everything not connected to the root
-shake :: (Ord k) => k -> DAG k e n -> DAG k e n
-shake rootKey d =
-  let children = rootChildren rootKey
-   in Map.filterWithKey (\k _ -> Set.member k children) d
-  where
-    rootChildren localRootKey = case Map.lookup localRootKey d of
-      Nothing -> Set.singleton localRootKey
-      (Just (_, map fst -> children)) -> Set.insert localRootKey $ Set.unions (map rootChildren children)
-
--- | map over edges given the nodes the edge connects
-mapEdgeWithNode ::
-  (Ord k) =>
-  (n -> e1 -> n -> e2) ->
-  DAG k e1 n ->
-  DAG k e2 n
-mapEdgeWithNode f d = Map.mapWithKey runit d
-  where
-    runit k _ = case local k d of
-      (Just (n1, xs)) -> (n1, [(k2, f n1 e n2) | (k2, e, n2) <- xs])
-      Nothing -> error "Bad DAG"
-
--- | map over edges given the nodes the edge connects
-mapEdgeWithNodeAndKey ::
-  (Ord k) =>
-  (k -> n -> e1 -> n -> e2) ->
-  DAG k e1 n ->
-  DAG k e2 n
-mapEdgeWithNodeAndKey f d = Map.mapWithKey runit d
-  where
-    runit k _ = case local k d of
-      (Just (n1, xs)) -> (n1, [(k2, f k n1 e n2) | (k2, e, n2) <- xs])
-      Nothing -> error "Bad DAG"
-
--- | Map node data given edges and child data
-mapNodeWithEdge ::
-  (Ord k) =>
-  (n1 -> [(k, e, n1)] -> n2) ->
-  DAG k e n1 ->
-  DAG k e n2
-mapNodeWithEdge f d = Map.mapWithKey fkey d
-  where
-    fkey k1 (_, xs0) = case local k1 d of
-      (Just (n1, xs1)) -> (f n1 xs1, xs0)
-      Nothing -> error "Compile bug"
-
--- | map over edges given the nodes the edge connects
-mapEdgeWithNodeM ::
-  (Ord k) =>
-  (n -> e1 -> n -> MorlocMonad e2) ->
-  DAG k e1 n ->
-  MorlocMonad (DAG k e2 n)
-mapEdgeWithNodeM f d = Map.mapWithKeyM runit d
-  where
-    runit k _ = case local k d of
-      (Just (n1, xs)) -> do
-        e2s <- mapM (\(_, e, n2) -> f n1 e n2) xs
-        return (n1, zip (map (\(x, _, _) -> x) xs) e2s)
-      Nothing -> MM.throwSystemError "Compiler bug (__FILE__:__LINE__): Incomplete DAG, missing object"
-
--- | map over edges given the nodes the edge connects
-mapEdgeWithNodeAndKeyM ::
-  (Ord k) =>
-  (k -> n -> e1 -> n -> MorlocMonad e2) ->
-  DAG k e1 n ->
-  MorlocMonad (DAG k e2 n)
-mapEdgeWithNodeAndKeyM f d = Map.mapWithKeyM runit d
-  where
-    runit k _ = case local k d of
-      (Just (n1, xs)) -> do
-        e2s <- mapM (\(_, e, n2) -> f k n1 e n2) xs
-        return (n1, zip (map (\(x, _, _) -> x) xs) e2s)
-      Nothing -> MM.throwSystemError "Compiler bug (__FILE__:__LINE__): Incomplete DAG, missing object"
-
+-- | Like 'synthesize' but keeps original edge data unchanged
 synthesizeNodes ::
   (Ord k, Monad m) =>
   (k -> n1 -> [(k, e, n2)] -> m n2) ->
@@ -230,125 +75,43 @@ synthesizeNodes ::
   m (Maybe (DAG k e n2))
 synthesizeNodes f = synthesize f (\e _ _ -> return e)
 
-{- | Map a monadic function over a DAG yielding a new DAG with the same
-topology but new node values. If the DAG contains cycles, Nothing is
-returned.
+{- | Bottom-up synthesis over a DAG: compute new node and edge values where
+each node's new value depends on its children's already-computed values.
+Returns 'Nothing' if the DAG contains cycles (detected by fixed-point
+stall).
 -}
 synthesize ::
   (Ord k, Monad m) =>
   (k -> n1 -> [(k, e1, n2)] -> m n2) ->
-  (e1 -> n2 {- parent -} -> n2 {- child -} -> m e2) ->
+  (e1 -> n2 -> n2 -> m e2) ->
   DAG k e1 n1 ->
   m (Maybe (DAG k e2 n2))
-synthesize f fe d0 = synthesizeNodes' (Just Map.empty)
+synthesize f fe d0 = go (Just Map.empty)
   where
-    -- iteratively synthesize all nodes that have met dependencies
-    synthesizeNodes' Nothing = return Nothing
-    synthesizeNodes' (Just dn)
-      -- stop, we have completed the mapping. Jubilation.
-      | Map.size d0 == Map.size dn = return (Just dn)
+    -- Iteratively process nodes whose children are all resolved
+    go Nothing = return Nothing
+    go (Just processed)
+      | Map.size d0 == Map.size processed = return (Just processed)
       | otherwise = do
-          -- traverse the original making any nodes that now have met dependencies
-          dn' <- foldlM addIfPossible dn (Map.toList d0)
-          if Map.size dn' == Map.size dn
-            -- if map size hasn't changed, then nothing was added and we are stuck
+          processed' <- foldlM addIfReady processed (Map.toList d0)
+          if Map.size processed' == Map.size processed
+            -- No progress means a cycle
             then return Nothing
-            -- otherwise move on to the next iteration
-            else synthesizeNodes' (Just dn')
+            else go (Just processed')
 
-    -- add leaves
-    addIfPossible dn (k1, (n1, []))
-      | Map.member k1 dn = return dn
+    -- Leaf nodes: no children to wait for
+    addIfReady processed (key, (nodeVal, []))
+      | Map.member key processed = return processed
       | otherwise = do
-          n2 <- f k1 n1 []
-          return $ Map.insert k1 (n2, []) dn
-    -- add nodes where all children have been processed
-    addIfPossible dn (k1, (n1, xs1))
-      | Map.member k1 dn = return dn
-      | otherwise = case mapM ((`Map.lookup` dn) . fst) xs1 of
-          Nothing -> return dn
-          (Just children) -> do
-            let augmented = [(k, e, n2) | ((k, e), (n2, _)) <- zip xs1 children]
-            n2 <- f k1 n1 augmented
-            xs2 <- mapM (\((k2, e), (n2child, _)) -> (,) k2 <$> fe e n2 n2child) (zip xs1 children)
-            return $ Map.insert k1 (n2, xs2) dn
-
-foldDAG ::
-  (Ord k, Monad m) =>
-  k -> -- initial key
-  Maybe e -> -- the edge to this node if not root
-  (k -> Maybe e -> n -> a -> m a) -> -- aggregation function
-  a -> -- initial accumulator
-  DAG k e n -> -- DAG folded over
-  m a
-foldDAG k e f b d =
-  case Map.lookup k d of
-    (Just (n, es)) -> do
-      a <- foldlM (\b' (k', e') -> foldDAG k' (Just e') f b' d) b es
-      f k e n a
-    Nothing -> undefined
-
--- Inherit all imported values and their terminal aliases
-inherit ::
-  (Ord k, Eq v) =>
-  k ->
-  (n -> a) ->
-  DAG k [(v, v)] n ->
-  [ ( v -- the local alias for an imported value
-    , DAG
-        k
-        None -- the tree showing imports for this alias
-        ( v -- the descendent's name for the value
-        , a -- the data extracted with f from the child n
-        )
-    )
-  ]
-inherit k f d = case local k d of
-  -- if k has no children, return empty list
-  Nothing -> []
-  -- else if k has children
-  -- then
-  (Just (_, xs)) -> concat [[(v, lookupAliasedTerm v k' f d) | (v, _) <- vs] | (k', vs, _) <- xs]
-
-lookupAliasedTerm ::
-  (Ord k, Eq v) =>
-  -- | look up this term
-  v ->
-  -- | starting from this node
-  k ->
-  -- | extract the desired data with this function
-  (n -> a) ->
-  -- | original DAG where edges are "import as" statements
-  DAG k [(v, v)] n ->
-  -- | The final DAG with no edge attribute
-  DAG k None (v, a)
-lookupAliasedTerm v0 k0 f d0 = fromJust $ lookupAliasedTermM v0 k0 (Just . f) d0
-
-lookupAliasedTermM ::
-  (Monad m, Ord k, Eq v) =>
-  -- | look up this term
-  v ->
-  -- | starting from this node
-  k ->
-  -- | extract the desired data with this function
-  (n -> m a) ->
-  DAG k [(v, v)] n ->
-  m (DAG k None (v, a))
-lookupAliasedTermM v0 k0 f d0 = lookupAliasedTerm' v0 k0 mempty
-  where
-    lookupAliasedTerm' v k d
-      | Map.member k d = return d
-      | otherwise = case Map.lookup k d0 of
-          Nothing -> error "Could not find module"
-          (Just (n, xs)) -> do
-            let xs' =
-                  [ (k', [(v1, v2) | (v1, v2) <- vs, v2 == v])
-                  | (k', vs) <- xs
-                  , v `elem` map snd vs
-                  ]
-                edges' = map (\(k', _) -> (k', None)) xs'
-            n' <- f n
-            foldlM
-              (\d2 (k2, v2) -> lookupAliasedTerm' v2 k2 d2)
-              (Map.insert k ((v, n'), edges') d)
-              (concat [zip (repeat k') (map fst vs) | (k', vs) <- xs'])
+          newNode <- f key nodeVal []
+          return $ Map.insert key (newNode, []) processed
+    -- Interior nodes: all children must be processed first
+    addIfReady processed (key, (nodeVal, childEdges))
+      | Map.member key processed = return processed
+      | otherwise = case mapM ((`Map.lookup` processed) . fst) childEdges of
+          Nothing -> return processed
+          (Just resolvedChildren) -> do
+            let augmented = [(k, e, n2) | ((k, e), (n2, _)) <- zip childEdges resolvedChildren]
+            newNode <- f key nodeVal augmented
+            newEdges <- mapM (\((k2, e), (childNode, _)) -> (,) k2 <$> fe e newNode childNode) (zip childEdges resolvedChildren)
+            return $ Map.insert key (newNode, newEdges) processed

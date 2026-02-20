@@ -3,10 +3,16 @@
 
 {- |
 Module      : Morloc.DataFiles
-Description : Handle non-Haskell files such as foreign language sources files and configs
+Description : Template-Haskell-embedded data files for runtime and codegen
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+All non-Haskell data files (C library sources, pool templates, init scripts,
+lang.yaml configs, nexus source) are embedded at compile time via
+'Data.FileEmbed.embedFileRelative'. This module provides typed access to
+these files for use by 'Morloc.CodeGenerator.SystemConfig' (init) and the
+translators (codegen).
 -}
 module Morloc.DataFiles
   ( EmbededFile (..)

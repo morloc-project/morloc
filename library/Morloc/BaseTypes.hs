@@ -2,10 +2,15 @@
 
 {- |
 Module      : Morloc.BaseTypes
-Description : Definitions and functions for handling base types
+Description : Predefined base type names and constructors
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Smart constructors for the built-in morloc types (Unit, Int, Real, Bool, Str,
+List, Tuple, etc.) as both 'TVar' names and 'TypeU' values. These correspond
+to the types that are hardwired into the type system and have special
+serialization\/deserialization support.
 -}
 module Morloc.BaseTypes
   ( unit

@@ -4,15 +4,19 @@
 
 {- |
 Module      : Morloc.Monad
-Description : A great big stack of monads
+Description : Compiler monad runner and accessors
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 
-MorlocMonad is a monad stack that is passed throughout the morloc codebase.
-Most functions that raise errors, perform IO, or access global configuration
-will return `MorlocMonad a` types. The stack consists of a State, Writer,
-Except, and Reader monad.
+'MorlocMonad' is the main effect stack used throughout the compiler:
+
+@Reader Config (Except MorlocError (Writer [Text] (State MorlocState IO)))@
+
+This module provides the runner ('runMorlocMonad'), error formatting
+('makeMorlocError' with source snippets), state accessors (counter,
+depth, metadata lookups), logging ('say'\/'sayV'\/'sayVV'), system call
+wrappers, and an independent 'Index' monad for local re-indexing passes.
 -}
 module Morloc.Monad
   ( MorlocReturn

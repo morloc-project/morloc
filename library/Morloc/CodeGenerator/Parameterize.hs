@@ -2,10 +2,15 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Parameterize
-Description : Thread arguments through expression trees
+Description : Propagate function arguments down through the AnnoS tree
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Threads the top-level function parameters through the expression tree
+so that each manifold node knows which arguments it needs. This is
+necessary because the tree may contain multiple alternative implementations
+that share the same parameter interface.
 -}
 module Morloc.CodeGenerator.Parameterize
   ( parameterize

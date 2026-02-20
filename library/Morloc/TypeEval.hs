@@ -3,10 +3,15 @@
 
 {- |
 Module      : Morloc.TypeEval
-Description : Functions for evaluating type expressions
+Description : Expand type aliases and reduce type applications
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Evaluates type expressions by expanding type aliases from the scope
+(general and concrete), applying type arguments, and reducing applications.
+Used by the typechecker and code generator to resolve user-defined types
+to their canonical forms.
 -}
 module Morloc.TypeEval
   ( evaluateType

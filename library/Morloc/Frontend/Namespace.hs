@@ -1,9 +1,13 @@
 {- |
 Module      : Morloc.Frontend.Namespace
-Description : All frontend types and datastructures
+Description : Re-exports of core namespace types plus frontend-specific helpers
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Aggregates all core namespace modules ('Prim', 'Type', 'Expr', 'State') into
+a single import for frontend code. Also provides expression tree traversals
+('mapExpr', 'mapExprM') and state-index copying ('copyState').
 -}
 module Morloc.Frontend.Namespace
   ( module Morloc.Namespace.Prim
@@ -12,10 +16,7 @@ module Morloc.Frontend.Namespace
   , module Morloc.Namespace.State
   , mapExpr
   , mapExprM
-  -- rifraf
   , isGeneric
-
-    -- * accessing state
   , copyState
   ) where
 
@@ -34,6 +35,7 @@ import Morloc.Namespace.State
 isGeneric :: Text -> Bool
 isGeneric typeStr = maybe False (DC.isLower . fst) (DT.uncons typeStr)
 
+-- | Bottom-up map over the 'Expr' layer of an 'ExprI' tree.
 mapExpr :: (Expr -> Expr) -> ExprI -> ExprI
 mapExpr f = g
   where
@@ -47,6 +49,7 @@ mapExpr f = g
     g (ExprI i (AnnE e ts)) = ExprI i . f $ AnnE (g e) ts
     g (ExprI i e) = ExprI i (f e)
 
+-- | Monadic bottom-up map over the 'Expr' layer of an 'ExprI' tree.
 mapExprM :: (Monad m) => (Expr -> m Expr) -> ExprI -> m ExprI
 mapExprM f = g
   where
@@ -62,6 +65,8 @@ mapExprM f = g
     g (ExprI i (AnnE e ts)) = ExprI i <$> ((AnnE <$> g e <*> pure ts) >>= f)
     g (ExprI i e) = ExprI i <$> f e
 
+-- | Copy all index-keyed state entries from @oldIndex@ to @newIndex@.
+-- Used when a module is re-indexed (e.g., after merging duplicate imports).
 copyState :: Int -> Int -> MorlocMonad ()
 copyState oldIndex newIndex = do
   s <- MM.get

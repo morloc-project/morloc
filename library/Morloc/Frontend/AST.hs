@@ -2,10 +2,15 @@
 
 {- |
 Module      : Morloc.Frontend.AST
-Description : Functions for parsing the Expr abstract syntax trees
+Description : Query and traversal functions over the indexed 'ExprI' AST
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Provides structural queries over the indexed expression tree ('ExprI'):
+extracting module edges, exports, type definitions, signatures, sources,
+fixity declarations, and index ranges. Used by 'Restructure', 'Link',
+and 'Treeify' to inspect and manipulate the AST before code generation.
 -}
 module Morloc.Frontend.AST
   ( findEdges
@@ -33,11 +38,13 @@ findEdges :: ExprI -> (MVar, [(MVar, Import)], ExprI)
 findEdges e@(ExprI _ (ModE n es)) = (n, [(importModuleName i, i) | (ExprI _ (ImpE i)) <- es], e)
 findEdges _ = error "Expected a module"
 
+-- | Collect all exported symbols into a flat set (ignoring indices).
 findExportSet :: ExprI -> Set.Set Symbol
 findExportSet e = case findExport e of
   (ExportMany ss gs) -> Set.map snd ss `Set.union` Set.unions [Set.map snd (exportGroupMembers g) | g <- gs]
   _ -> Set.empty
 
+-- | Extract the 'Export' declaration from a module expression.
 findExport :: ExprI -> Export
 findExport e0 = case f e0 of
   (Just export) -> export
@@ -49,6 +56,7 @@ findExport e0 = case f e0 of
       Nothing -> f (ExprI i (ModE j es))
     f _ = Nothing
 
+-- | Replace the 'Export' declaration in a module expression.
 setExport :: Export -> ExprI -> ExprI
 setExport export = f
   where
@@ -56,12 +64,14 @@ setExport export = f
     f (ExprI i (ModE m es)) = ExprI i (ModE m (map f es))
     f e = e
 
+-- | Collect all 'Source' declarations from a module.
 findSources :: ExprI -> [Source]
 findSources (ExprI _ (SrcE ss)) = [ss]
 findSources (ExprI _ (ModE _ es)) = concatMap findSources es
 findSources _ = []
 
--- find all top-level concrete and general type functions in a module
+-- | Find all top-level type aliases in a module, split into general
+-- (language-independent) and concrete (language-specific) maps.
 findTypedefs ::
   ExprI ->
   ( Map.Map TVar [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
@@ -77,6 +87,7 @@ findTypedefs (ExprI _ (ModE _ es)) = foldl combine (Map.empty, Map.empty) (map f
       )
 findTypedefs _ = (Map.empty, Map.empty)
 
+-- | Collect all non-generic type names used in signatures.
 findSignatureTypeTerms :: ExprI -> [TVar]
 findSignatureTypeTerms = unique . f
   where
@@ -98,6 +109,7 @@ findTypeTerms (AppU t ts) = findTypeTerms t <> concatMap findTypeTerms ts
 findTypeTerms (NamU _ _ ps rs) = concatMap findTypeTerms (map snd rs <> ps)
 findTypeTerms (ThunkU t) = findTypeTerms t
 
+-- | Build the fixity map from top-level fixity declarations.
 findFixityMap :: ExprI -> MorlocMonad (Map.Map EVar (Associativity, Int))
 findFixityMap (ExprI _ (ModE _ es)) = do
   -- collect all fixity terms.
@@ -128,6 +140,7 @@ findSignatures (ExprI _ (AssE _ _ es)) = [(v, l, t) | (ExprI _ (SigE (Signature 
 findSignatures (ExprI _ (SigE (Signature v l t))) = [(v, l, t)]
 findSignatures _ = []
 
+-- | Apply a monadic check function to every node in an 'ExprI' tree.
 checkExprI :: (Monad m) => (ExprI -> m ()) -> ExprI -> m ()
 checkExprI f e@(ExprI _ (ModE _ es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (AnnE e' _)) = f e >> checkExprI f e'
@@ -144,6 +157,7 @@ checkExprI f e@(ExprI _ (SuspendE e')) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (ForceE e')) = f e >> checkExprI f e'
 checkExprI f e = f e
 
+-- | Find the largest index used in an 'ExprI' tree.
 maxIndex :: ExprI -> Int
 maxIndex (ExprI i (ModE _ es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (AnnE e _)) = max i (maxIndex e)
@@ -162,6 +176,7 @@ maxIndex (ExprI i (SuspendE e)) = max i (maxIndex e)
 maxIndex (ExprI i (ForceE e)) = max i (maxIndex e)
 maxIndex (ExprI i _) = i
 
+-- | Collect all indices from an 'ExprI' tree.
 getIndices :: ExprI -> [Int]
 getIndices (ExprI i (ModE _ es)) = i : concatMap getIndices es
 getIndices (ExprI i (AnnE e _)) = i : getIndices e

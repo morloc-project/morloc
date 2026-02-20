@@ -2,10 +2,14 @@
 
 {- |
 Module      : Morloc.CodeGenerator.SystemConfig
-Description : Configure the system as needed for the given composition
+Description : Write runtime files and compile shared libraries during @morloc init@
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Handles the @morloc init@ system setup: writing embedded C library sources,
+compiling @libmorloc.so@, building the static nexus binary, and running
+per-language @init.sh@ scripts to compile language extensions.
 -}
 module Morloc.CodeGenerator.SystemConfig
   ( configure

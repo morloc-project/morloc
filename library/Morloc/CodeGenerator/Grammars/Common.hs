@@ -5,10 +5,14 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Grammars.Common
-Description : A common set of utility functions for language templates
+Description : Shared codegen utilities: manifold inversion, naming, pool doc merging
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Provides 'invertSerialManifold' (the preprocessing step that all translators
+run), 'PoolDocs' (the accumulator for the lowering fold), naming convention
+helpers, and the fold framework ('FoldRules', 'foldWithSerialManifoldM').
 -}
 module Morloc.CodeGenerator.Grammars.Common
   ( invertSerialManifold

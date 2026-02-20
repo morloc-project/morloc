@@ -4,10 +4,15 @@
 
 {- |
 Module      : Morloc.Frontend.Typecheck
-Description : Core inference module
+Description : Bidirectional type inference and checking for general types
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Implements bidirectional type inference over the 'AnnoS' trees produced by
+'Treeify'. Checks general (language-independent) types and resolves type
+aliases. Concrete (language-specific) types are checked later after language
+segregation in the code generator.
 -}
 module Morloc.Frontend.Typecheck (typecheck, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 

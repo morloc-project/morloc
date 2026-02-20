@@ -4,10 +4,15 @@
 
 {- |
 Module      : Morloc.Frontend.Treeify
-Description : Translate from the frontend DAG to the backend AnnoS AST forest
+Description : Dissolve the module DAG into per-export 'AnnoS' call trees
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+After linking populates 'MorlocState', this module builds one 'AnnoS' tree
+per exported function by inlining declarations, resolving sources, and
+renaming lambda-bound variables for uniqueness. The resulting trees are the
+input to the typechecker and code generator.
 -}
 module Morloc.Frontend.Treeify (treeify) where
 

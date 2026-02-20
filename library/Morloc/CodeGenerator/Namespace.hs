@@ -6,10 +6,15 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Namespace
-Description : All code generator types and datastructures
+Description : Types and re-exports for the code generation pipeline
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Aggregates core namespace modules and defines code-generator-specific types:
+'SerialManifold' (the serialization-annotated call tree), 'SerialAST'
+(serialization plans), pool/nexus configuration records, and the 'Script'
+output type. This is the prelude import for all codegen modules.
 -}
 module Morloc.CodeGenerator.Namespace
   ( module Morloc.Namespace.Prim

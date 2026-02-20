@@ -3,10 +3,15 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Express
-Description : Convert parameterized AST to polymorphic manifold trees
+Description : Resolve type aliases and infer concrete types in manifold trees
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Transforms the parameterized 'AnnoS' trees into a form where every
+node carries both its general type and inferred concrete type. This is
+the step where language-specific type aliases are resolved and type
+parameters are fully instantiated.
 -}
 module Morloc.CodeGenerator.Express
   ( express

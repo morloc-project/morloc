@@ -1,9 +1,14 @@
 {- |
 Module      : Morloc
-Description : Top-level compiler layout
+Description : Top-level compiler pipeline: parse, typecheck, generate, build
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Entry point for the morloc compiler library. Orchestrates the full pipeline:
+parsing source into a module DAG, typechecking, code generation (pools +
+manifest), and building executables. The 'writeProgram' function is the
+main API consumed by the CLI.
 -}
 module Morloc
   ( writeProgram

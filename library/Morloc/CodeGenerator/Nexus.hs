@@ -3,10 +3,14 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Nexus
-Description : Generate a JSON manifest for the static nexus binary
+Description : Generate the @.manifest@ JSON file consumed by the pre-compiled nexus
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Produces the JSON manifest that the static nexus binary reads at startup.
+The manifest describes all exported subcommands, their argument types,
+help text, and which pool executables to dispatch to.
 -}
 module Morloc.CodeGenerator.Nexus
   ( generate

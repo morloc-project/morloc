@@ -2,10 +2,15 @@
 
 {- |
 Module      : Subcommands
-Description : Morloc executable subcommands
+Description : Dispatch CLI subcommands and inject the translator callback
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Implements each CLI subcommand (make, typecheck, install, init, dump) and
+defines the 'TranslateFn' callback that routes C++ to 'CppTranslator' and
+other languages to the generic translator. This is the dependency injection
+point that keeps translator code out of the library.
 -}
 module Subcommands (runMorloc) where
 

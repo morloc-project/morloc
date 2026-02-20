@@ -2,10 +2,14 @@
 
 {- |
 Module      : Morloc.ProgramBuilder.Build
-Description : Manage system requirements and project building for pools
+Description : Compile pool source files and assemble the final executable
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Orchestrates the @morloc make@ build step: writes generated pool source
+files, compiles them with the appropriate language toolchain, copies the
+pre-compiled nexus binary, and writes the manifest file.
 -}
 module Morloc.ProgramBuilder.Build
   ( buildProgram

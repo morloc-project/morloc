@@ -6,6 +6,15 @@ Description : Compiler state, monad stack, config, errors
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+The compiler monad ('MorlocMonad') and its components:
+
+* 'Config' -- read-only configuration loaded from @~\/.local\/share\/morloc\/config@
+* 'MorlocError' -- all compiler error types
+* 'MorlocState' -- mutable state threading type info, sources, and metadata
+  through the pipeline
+* 'Gamma' \/ 'GammaIndex' -- typechecking context (ordered list of assumptions)
+* 'Script' -- a generated pool file with its build commands
 -}
 module Morloc.Namespace.State
   ( -- * Morloc monad
@@ -63,15 +72,22 @@ import Morloc.Namespace.Expr
 
 ---- Monad types
 
+-- | The general monad transformer stack: Reader for config, Except for errors,
+-- Writer for log messages, State for mutable compiler state, over IO.
 type MorlocMonadGen c e l s a =
   ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
 
+-- | The full result of running a MorlocMonad computation
 type MorlocReturn a = ((Either MorlocError a, [Text]), MorlocState)
 
+-- | The concrete compiler monad used throughout the pipeline
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
 ---- State
 
+-- | Mutable compiler state threaded through the entire pipeline.
+-- Accumulates type signatures, source bindings, typedefs, and metadata
+-- as modules are parsed, linked, and typechecked.
 data MorlocState = MorlocState
   { statePackageMeta :: [PackageMeta]
   , stateVerbosity :: Int
@@ -129,14 +145,16 @@ data TermTypes = TermTypes
 
 ---- Error types
 
+-- | All compiler errors
 data MorlocError
-  = SourcedError Int MDoc
-  | SystemError MDoc
-  | UnificationError Int Int Int MDoc
+  = SourcedError Int MDoc       -- ^ Error tied to a specific AST node index
+  | SystemError MDoc            -- ^ Internal compiler error (bug)
+  | UnificationError Int Int Int MDoc -- ^ Type unification failure
   deriving (Show)
 
 ---- Configuration
 
+-- | Read-only configuration loaded from the morloc config file
 data Config
   = Config
   { configHome :: !Path
@@ -172,6 +190,8 @@ data PackageMeta
 
 ---- Typechecking context
 
+-- | Entries in the typechecking context (an ordered list of assumptions).
+-- The context is manipulated as a stack during bidirectional typechecking.
 data GammaIndex
   = VarG TVar
   | AnnG EVar TypeU

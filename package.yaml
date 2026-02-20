@@ -2,8 +2,15 @@ name:             morloc
 version:          0.60.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
-description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
+description: |
+  Morloc is a typed, multi-lingual workflow language that composes functions
+  across Python, C++, R, and other languages under a unified type system.
+  The compiler generates interprocess communication code, serialization
+  logic, and a dispatch binary from a single morloc source file.
+  See the GitHub README <https://github.com/morloc-project/morloc#readme>
+  for full documentation.
 category:         Language, Compiler, Code Generation
+tested-with:      GHC == 9.6.6
 license:          Apache-2.0
 license-file:     LICENSE
 author:           "Zebulun Arendsee" 

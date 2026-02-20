@@ -8,10 +8,15 @@
 
 {- |
 Module      : CppTranslator
-Description : C++ translator
+Description : Translate 'SerialManifold' trees into C++ pool source code
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Stateful C++ translator using the two-phase IR architecture: lower the
+'SerialManifold' tree into 'IStmt'/'IExpr' via 'LowerConfig', then print
+via 'CppPrinter'. Handles C++-specific concerns like compilation flags,
+include paths, struct generation, and template instantiation.
 -}
 module CppTranslator
   ( translate

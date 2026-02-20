@@ -3,10 +3,15 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Serialize
-Description : Insert serialization/deserialization operations at language boundaries
+Description : Insert pack\/unpack operations at cross-language call boundaries
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Walks the segmented manifold tree and inserts serialization\/deserialization
+calls wherever data crosses a language boundary (interprocess communication).
+Uses 'Serial.makeSerialAST' to determine the packing strategy for each type.
+The result is the 'SerialManifold' tree consumed by the translators.
 -}
 module Morloc.CodeGenerator.Serialize
   ( serialize

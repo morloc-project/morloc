@@ -1,5 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+{- |
+Module      : Morloc.Frontend.CST
+Description : Concrete syntax tree types for the Happy parser
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
+Maintainer  : z@morloc.io
+
+Types for the concrete syntax tree produced by the Happy-generated parser
+(@Parser.y@). These preserve source spans and syntactic structure before
+desugaring into the internal 'Expr' AST.
+-}
 module Morloc.Frontend.CST
   ( Span(..)
   , Loc(..)

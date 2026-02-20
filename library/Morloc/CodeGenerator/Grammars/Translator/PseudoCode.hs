@@ -3,10 +3,14 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Grammars.Translator.PseudoCode
-Description : Python3 translator
+Description : Pseudocode renderer for diagnostic output of manifold trees
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Renders 'SerialManifold' and 'NativeManifold' trees as human-readable
+pseudocode for debugging and diagnostic dumps. Not a real translator --
+produces no executable output.
 -}
 module Morloc.CodeGenerator.Grammars.Translator.PseudoCode
   ( pseudocodeNativeManifold

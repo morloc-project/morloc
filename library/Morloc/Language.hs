@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {- |
-Module      : Language
+Module      : Morloc.Language
 Description : Language type and utilities
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0

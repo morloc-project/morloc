@@ -4,10 +4,14 @@
 
 {- |
 Module      : CppPrinter
-Description : C++ IR printer
+Description : Pretty-print the imperative IR as C++ source code
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Converts 'IStmt' and 'IExpr' IR nodes into C++ source text. Handles
+type rendering, struct definitions, forward declarations, and C++
+idioms (templates, shared_ptr, std::variant).
 -}
 module CppPrinter
   ( printExpr

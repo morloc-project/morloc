@@ -3,10 +3,14 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Infer
-Description : Infer concrete types
+Description : Infer concrete (language-specific) types from type aliases
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Maps general types to their concrete counterparts by evaluating type
+aliases in the language-specific scope. Used by 'Express' and 'Serialize'
+to determine how values are represented in each target language.
 -}
 module Morloc.CodeGenerator.Infer
   ( getScope

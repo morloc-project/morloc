@@ -3,10 +3,16 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Serial
-Description : Process serialization trees
+Description : Build serialization ASTs that describe how to pack\/unpack types
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Constructs 'SerialAST' trees that describe the serialization and
+deserialization plan for each type. Handles format selection (JSON
+vs MessagePack), packer resolution via typeclass instances, and
+serializability checking. Distinct from 'Serialize' which inserts
+pack\/unpack calls into the manifold tree.
 -}
 module Morloc.CodeGenerator.Serial
   ( makeSerialAST

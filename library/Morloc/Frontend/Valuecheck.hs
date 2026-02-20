@@ -3,10 +3,15 @@
 
 {- |
 Module      : Morloc.Frontend.Valuecheck
-Description : Check for contradictions between implementations
+Description : Detect contradictions between alternative implementations
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+When a term has multiple implementations (e.g. a declaration and a source,
+or multiple sources), this module checks that they are not provably
+contradictory. For instance, two constant expressions that return different
+literal values for the same type are flagged as errors.
 -}
 module Morloc.Frontend.Valuecheck (valuecheck, checkPair) where
 

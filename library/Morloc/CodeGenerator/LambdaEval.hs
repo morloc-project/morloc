@@ -3,10 +3,14 @@
 
 {- |
 Module      : Morloc.CodeGenerator.LambdaEval
-Description : Evaluate all applied lambdas
+Description : Beta-reduce applied lambdas in the codegen AST
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Performs beta-reduction on lambda applications in the 'AnnoS' tree so
+that the code generator sees only fully-applied function calls or
+unapplied lambdas, never @(\\x -> body) arg@.
 -}
 module Morloc.CodeGenerator.LambdaEval
   ( applyLambdas

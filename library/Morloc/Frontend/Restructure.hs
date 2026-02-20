@@ -4,10 +4,17 @@
 
 {- |
 Module      : Morloc.Frontend.Restructure
-Description : Write Module objects to resolve type aliases and such
+Description : Resolve imports, exports, binary operators, holes, and type aliases
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Transforms the raw module DAG into the form expected by 'Link' and 'Treeify'.
+This pass resolves import\/export edges to alias maps, converts binary
+operator chains into correctly-associated application trees (via Pratt
+parsing), expands hole expressions into lambdas, removes self-referential
+type declarations, and collects type definitions and source mappings into
+'MorlocState'.
 -}
 module Morloc.Frontend.Restructure (restructure) where
 

@@ -7,6 +7,10 @@ Description : Foundation types with zero dependency on other Namespace modules
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Primitive types (newtypes for names, keys, paths) and small data structures
+(DAG, GMap, Or, None, etc.) used across the compiler. Re-exports
+"Morloc.Internal" so that downstream modules get the proto-prelude for free.
 -}
 
 module Morloc.Namespace.Prim
@@ -76,6 +80,7 @@ import Text.Read (readMaybe)
 
 ---- Typeclasses
 
+-- | Types that are associated with exactly one language
 class HasOneLanguage a where
   langOf :: a -> Maybe Lang
   langOf' :: a -> Lang
@@ -83,31 +88,33 @@ class HasOneLanguage a where
   langOf x = Just (langOf' x)
   langOf' x = fromJust (langOf x)
 
+-- | Types with a sensible default (used for initial state, config, etc.)
 class Defaultable a where
   defaultValue :: a
 
 ---- Type definitions
 
--- | no annotations for now
+-- | Unannotated pretty-printer document
 type MDoc = Doc ()
 
-{- | A general purpose Directed Acyclic Graph (DAG). Technically this structure
-needn't be acyclic. You can use `findCycle` to check whether a given stucture
-has cycles.
--}
+-- | A directed acyclic graph. Each key maps to a node value and a list of
+-- @(child-key, edge-data)@ pairs. The structure is not enforced to be acyclic;
+-- 'Morloc.Data.DAG.synthesize' detects cycles at runtime.
 type DAG key edge node = Map key (node, [(key, edge)])
 
+-- | A two-level map: outer keys -> inner keys -> values. Multiple outer keys
+-- may share the same inner key. See "Morloc.Data.GMap" for operations.
 data GMap a b c = GMap (Map a b) (Map b c)
   deriving (Show, Ord, Eq)
 
+-- | Result of a 'GMap' lookup
 data GMapRet c
-  = -- | Failure on the first key
-    GMapNoFst
-  | -- | Failure on the internal key (possible bug)
-    GMapNoSnd
-  | GMapJust c
+  = GMapNoFst  -- ^ Outer key not found
+  | GMapNoSnd  -- ^ Inner key not found (possible bug)
+  | GMapJust c -- ^ Successful lookup
   deriving (Show, Ord, Eq)
 
+-- | Source location span for error reporting
 data SrcLoc = SrcLoc
   { srcLocPath :: Maybe Path
   , srcLocLine :: Int
@@ -116,55 +123,65 @@ data SrcLoc = SrcLoc
   , srcLocEndCol  :: Int
   } deriving (Show, Ord, Eq)
 
--- ================ T Y P E C H E C K I N G  =================================
-
--- A module name
+-- | Module name (e.g., @\"math\"@, @\"bio.algo\"@)
 newtype MVar = MV {unMVar :: Text} deriving (Show, Eq, Ord)
 
--- A term name
+-- | Term\/expression variable name
 newtype EVar = EV {unEVar :: Text} deriving (Show, Eq, Ord)
 
--- A type general name
+-- | Type variable name
 newtype TVar = TV {unTVar :: Text} deriving (Show, Eq, Ord)
 
+-- | Typeclass name
 newtype ClassName = ClassName {unClassName :: Text} deriving (Show, Eq, Ord)
 
--- A concrete type name
+-- | Concrete type name (language-specific)
 newtype CVar = CV {unCVar :: Text} deriving (Show, Eq, Ord)
 
+-- | Record field key
 newtype Key = Key {unKey :: Text} deriving (Show, Eq, Ord, Generic)
 instance Binary Key
 
+-- | Source label for grouping manifold configurations
 newtype Label = Label {unLabel :: Text} deriving (Show, Eq, Ord)
 
--- The name of a source function, this is text which may be illegal in morloc
--- (such as the R function "file.exists")
+-- | Name of a foreign function (may contain characters illegal in morloc,
+-- e.g., the R function @file.exists@)
 newtype SrcName = SrcName {unSrcName :: Text} deriving (Show, Eq, Ord)
 
+-- | A blob of generated code
 newtype Code = Code {unCode :: Text} deriving (Show, Eq, Ord)
 
+-- | Duration in seconds (parsed from SLURM time format)
 newtype TimeInSeconds = TimeInSeconds {unTimeInSeconds :: Int} deriving (Show, Eq, Ord)
 
--- this is a string because the path libraries want strings
+-- | Filesystem path (String because filepath libraries expect String)
 type Path = String
 
+-- | A three-way sum type
 data Three a b c = A a | B b | C c
   deriving (Ord, Eq, Show)
 
+-- | A type carrying no information (used as a placeholder edge type in DAGs)
 data None = None
   deriving (Show)
 
+-- | A single wrapped value
 newtype One a = One {unOne :: a}
   deriving (Show)
 
+-- | A wrapped list
 newtype Many a = Many {unMany :: [a]}
   deriving (Show)
 
+-- | A value that may be left, right, or both
 data Or a b = L a | R b | LR a b
   deriving (Ord, Eq, Show)
 
+-- | 'IndexedGeneral' specialized to 'Int' keys
 type Indexed = IndexedGeneral Int
 
+-- | A value paired with an index
 data IndexedGeneral k a = Idx k a
   deriving (Show, Ord, Eq)
 

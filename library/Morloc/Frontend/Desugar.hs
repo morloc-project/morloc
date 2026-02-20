@@ -1,5 +1,18 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+{- |
+Module      : Morloc.Frontend.Desugar
+Description : Transform the concrete syntax tree (CST) into the internal ExprI AST
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
+Maintainer  : z@morloc.io
+
+Desugars CST nodes produced by the Happy parser into the indexed 'ExprI'
+AST used by later compiler passes. Handles: binary operator insertion,
+hole-to-lambda expansion, do-notation lowering, string interpolation,
+accessor patterns, type quantification, source resolution, and implicit
+main wrapping.
+-}
 module Morloc.Frontend.Desugar
   ( desugarProgram
   , desugarExpr

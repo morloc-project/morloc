@@ -27,9 +27,11 @@ data Pos = Pos
   }
   deriving (Show, Eq, Ord)
 
+-- | Initial position (line 1, column 1) for a given filename.
 startPos :: String -> Pos
 startPos f = Pos 1 1 f
 
+-- | Build a 'Pos' from the line and column reported by the lexer.
 alexPos :: String -> Int -> Int -> Pos
 alexPos f l c = Pos l c f
 

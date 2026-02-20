@@ -1,9 +1,13 @@
 {- |
 Module      : UI
-Description : Define the Morloc CLI
+Description : CLI argument parsing with optparse-applicative
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Defines the command-line interface for the @morloc@ executable using
+optparse-applicative: subcommands (make, typecheck, install, init, dump,
+completion), their options, and help text.
 -}
 module UI
   ( opts

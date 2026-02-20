@@ -3,10 +3,14 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Docstrings
-Description : Generate the final docstring records
+Description : Generate CLI help text and argument documentation for exported functions
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Processes docstring annotations from type signatures into the final
+'MDoc' records used by the nexus for @--help@ output, including argument
+names, default values, metavars, and CLI option flags.
 -}
 module Morloc.CodeGenerator.Docstrings (processDocstrings) where
 
