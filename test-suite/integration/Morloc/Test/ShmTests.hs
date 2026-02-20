@@ -145,7 +145,7 @@ rapidFireCleanup getWorkDir = testCase "rapidFireCleanup" $ do
       runIterations wd (remaining - 1) (if failed then failures + 1 else failures)
 
 -- ======================================================================
--- Test 3: SIGTERM behavior (informational)
+-- Test 3: SIGTERM triggers clean SHM cleanup
 -- ======================================================================
 
 sigtermBehavior :: IO FilePath -> TestTree
@@ -182,13 +182,15 @@ sigtermBehavior getWorkDir = testCase "sigtermBehavior" $ do
   afterSegs <- listShmWithAge
   let shmDelta = after - before
 
-  -- Informational: CLI mode has no SIGTERM handler, so we expect leaks.
-  -- Once a signal handler is added, this can become a hard assertion.
-  when (shmDelta > 0) $ do
-    putStrLn $ "  [INFO] SIGTERM caused " ++ show shmDelta
-      ++ " SHM segment leak(s) (known gap: no SIGTERM handler in CLI mode)"
-    putStrLn $ "  leaked: " ++ intercalate ", "
-      [seg ++ " (" ++ show age ++ "s old)" | (seg, age) <- afterSegs]
+  when (shmDelta > 0) $
+    assertFailure $ unlines $
+      [ "sigtermBehavior: SHM leak after SIGTERM"
+      , "  workDir: " ++ workDir
+      , "  before: " ++ show before ++ " segments"
+      , "  after:  " ++ show after ++ " segments (after 1s settle)"
+      , "  leaked: " ++ intercalate "\n          "
+          [seg ++ " (" ++ show age ++ "s old)" | (seg, age) <- afterSegs]
+      ]
 
   -- Clean up leaked segments so they don't affect other tests
   cleanupMorlocResources

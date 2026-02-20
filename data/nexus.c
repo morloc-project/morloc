@@ -73,6 +73,9 @@ pid_t pgids[MAX_DAEMONS] = { 0 };
 // global temporary file
 char* tmpdir = NULL;
 
+// re-entrancy guard for clean_exit (signal handler may fire during cleanup)
+static volatile sig_atomic_t cleaning_up = 0;
+
 // SIGCHLD handler: reap terminated children immediately to prevent zombies
 void sigchld_handler(int sig) {
     (void)sig;
@@ -90,7 +93,15 @@ void sigchld_handler(int sig) {
     errno = saved_errno;
 }
 
+// SIGTERM/SIGINT handler: clean shutdown
+void signal_exit_handler(int sig) {
+    if (cleaning_up) _exit(128 + sig);
+    clean_exit(128 + sig);
+}
+
 void clean_exit(int exit_code){
+    cleaning_up = 1;
+
     // Block SIGCHLD during cleanup to avoid races with the handler
     sigset_t block_chld, old_mask;
     sigemptyset(&block_chld);
@@ -1535,6 +1546,14 @@ int main(int argc, char *argv[]) {
     sigemptyset(&sa_chld.sa_mask);
     sa_chld.sa_flags = SA_RESTART | SA_NOCLDSTOP;
     sigaction(SIGCHLD, &sa_chld, NULL);
+
+    // Register SIGTERM/SIGINT handlers for clean shutdown
+    struct sigaction sa_exit;
+    sa_exit.sa_handler = signal_exit_handler;
+    sigemptyset(&sa_exit.sa_mask);
+    sa_exit.sa_flags = 0;
+    sigaction(SIGTERM, &sa_exit, NULL);
+    sigaction(SIGINT, &sa_exit, NULL);
 
     // Setup sockets from manifest
     morloc_socket_t* sockets = setup_sockets(manifest, tmpdir, shm_basename);
