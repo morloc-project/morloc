@@ -1,0 +1,8 @@
+module main (stress)
+
+import types (Int, Real, List)
+import pyfuncs (make_list)
+import cppfuncs (sum_list)
+
+stress :: Int -> Real -> Int
+stress n delay = sum_list (make_list n delay)

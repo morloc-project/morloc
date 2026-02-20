@@ -1,0 +1,7 @@
+module pyfuncs (*)
+
+import types
+
+make_list :: Int -> Real -> [Int]
+
+source Py from "stress.py" ("make_list")

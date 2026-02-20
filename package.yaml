@@ -189,6 +189,7 @@ tests:
       - -with-rtsopts=-N
     dependencies:
       - base
+      - async
       - directory
       - filepath
       - process
@@ -196,6 +197,7 @@ tests:
       - tasty-hunit
       - temporary
       - text
+      - time
 
 benchmarks:
   morloc-bench:

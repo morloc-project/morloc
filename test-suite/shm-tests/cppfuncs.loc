@@ -1,0 +1,7 @@
+module cppfuncs (*)
+
+import types
+
+sum_list :: [Int] -> Int
+
+source Cpp from "stress.hpp" ("sum_list")

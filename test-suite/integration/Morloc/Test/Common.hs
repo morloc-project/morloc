@@ -27,6 +27,7 @@ module Morloc.Test.Common
   , countShm
   , countTmp
   , listShm
+  , listShmWithAge
   -- Utilities
   , strip
   , readDef
@@ -36,10 +37,12 @@ module Morloc.Test.Common
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, bracket, try)
 import Data.List (isInfixOf)
+import Data.Maybe (catMaybes)
+import Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
 import GHC.Stack (HasCallStack)
 import System.Directory (doesFileExist, doesDirectoryExist, doesPathExist,
-                         copyFile, createDirectoryIfMissing, listDirectory,
-                         removeDirectoryRecursive)
+                         copyFile, createDirectoryIfMissing, getModificationTime,
+                         listDirectory, removeDirectoryRecursive)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeDirectory)
 import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
@@ -286,6 +289,19 @@ listShm = do
   (_, out, _) <- readProcessWithExitCode "sh"
     ["-c", "ls -1 /dev/shm/morloc-* 2>/dev/null || true"] ""
   return (filter (not . null) (lines out))
+
+-- | List SHM segments with age in seconds (from stat mtime)
+listShmWithAge :: IO [(String, Double)]
+listShmWithAge = do
+  segs <- listShm
+  now <- getCurrentTime
+  catMaybes <$> mapM (getAge now) segs
+  where
+    getAge now seg = do
+      result <- try (getModificationTime seg) :: IO (Either SomeException UTCTime)
+      return $ case result of
+        Right mtime -> Just (seg, realToFrac (diffUTCTime now mtime))
+        Left _ -> Nothing
 
 -- ======================================================================
 -- Assertions
