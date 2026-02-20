@@ -14,17 +14,16 @@ module Morloc.CodeGenerator.Nexus
 
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
-import Data.Char (ord)
 import qualified Data.Map as Map
 import Data.Text (Text)
 import qualified Data.Text as MT
-import Numeric (showHex)
 import qualified Morloc.BaseTypes as MBT
 import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Serial as Serial
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc (render, pretty)
+import Morloc.Data.Json
 import qualified Morloc.Language as ML
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
@@ -262,52 +261,6 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS _ _ (SuspendS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (ForceS e)) = toNexusExpr e
     toNexusExpr _ = error $ "Unreachable value of type reached"
-
-
--- ======================================================================
--- JSON helpers
--- ======================================================================
-
-jsonEscape :: Text -> Text
-jsonEscape = MT.concatMap esc
-  where
-    esc '"' = "\\\""
-    esc '\\' = "\\\\"
-    esc '\n' = "\\n"
-    esc '\r' = "\\r"
-    esc '\t' = "\\t"
-    esc '\b' = "\\b"
-    esc '\f' = "\\f"
-    esc c | c < ' ' = "\\u" <> MT.pack (pad4 (showHex (ord c) ""))
-    esc c = MT.singleton c
-
-    pad4 s = replicate (4 - length s) '0' ++ s
-
-jsonStr :: Text -> Text
-jsonStr t = "\"" <> jsonEscape t <> "\""
-
-jsonInt :: Int -> Text
-jsonInt = MT.pack . show
-
-jsonBool :: Bool -> Text
-jsonBool True = "true"
-jsonBool False = "false"
-
-jsonNull :: Text
-jsonNull = "null"
-
-jsonArr :: [Text] -> Text
-jsonArr xs = "[" <> MT.intercalate "," xs <> "]"
-
-jsonObj :: [(Text, Text)] -> Text
-jsonObj pairs = "{" <> MT.intercalate "," [jsonStr k <> ":" <> v | (k, v) <- pairs] <> "}"
-
-jsonStrArr :: [Text] -> Text
-jsonStrArr = jsonArr . map jsonStr
-
-jsonMaybeStr :: Maybe Text -> Text
-jsonMaybeStr Nothing = jsonNull
-jsonMaybeStr (Just t) = jsonStr t
 
 
 -- ======================================================================

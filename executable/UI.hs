@@ -13,6 +13,9 @@ module UI
   , InstallCommand (..)
   , TypecheckCommand (..)
   , DumpCommand (..)
+  , ListCommand (..)
+  , ListKind (..)
+  , UninstallCommand (..)
   ) where
 
 import Morloc.Module (GitProtocol (..), OverwriteProtocol (..))
@@ -35,6 +38,8 @@ data CliCommand
   | CmdInstall InstallCommand
   | CmdTypecheck TypecheckCommand
   | CmdDump DumpCommand
+  | CmdList ListCommand
+  | CmdUninstall UninstallCommand
 
 cliParser :: Parser CliCommand
 cliParser =
@@ -44,6 +49,8 @@ cliParser =
         <> typecheckSubcommand
         <> initSubcommand
         <> dumpSubcommand
+        <> listSubcommand
+        <> uninstallSubcommand
     )
 
 data MakeCommand = MakeCommand
@@ -100,6 +107,7 @@ data InstallCommand = InstallCommand
   , installVerbose :: Int
   , installForce :: OverwriteProtocol
   , installUseSSH :: GitProtocol
+  , installNoTypecheck :: Bool
   , installModuleStrings :: [String]
   }
 
@@ -111,6 +119,7 @@ makeInstallParser =
     <*> optVerbose
     <*> optForce
     <*> optUseSSH
+    <*> optNoTypecheck
     <*> optModuleStrings
 
 installSubcommand :: Mod CommandFields CliCommand
@@ -166,6 +175,51 @@ makeDumpParser =
     <*> optExpression
     <*> optScript
 
+data ListKind = ListModules | ListPrograms
+  deriving (Show, Eq)
+
+data ListCommand = ListCommand
+  { listPattern :: Maybe String
+  , listConfig  :: String
+  , listVanilla :: Bool
+  , listVerbose :: Int
+  , listKind    :: Maybe ListKind
+  }
+
+makeListParser :: Parser ListCommand
+makeListParser =
+  ListCommand
+    <$> optListPattern
+    <*> optConfig
+    <*> optVanilla
+    <*> optVerbose
+    <*> optListKind
+
+listSubcommand :: Mod CommandFields CliCommand
+listSubcommand =
+  command "list" (info (CmdList <$> makeListParser) (progDesc "List installed modules and programs"))
+
+data UninstallCommand = UninstallCommand
+  { uninstallNames   :: [String]
+  , uninstallConfig  :: String
+  , uninstallVanilla :: Bool
+  , uninstallKind    :: Maybe ListKind
+  , uninstallDryRun  :: Bool
+  }
+
+makeUninstallParser :: Parser UninstallCommand
+makeUninstallParser =
+  UninstallCommand
+    <$> optUninstallNames
+    <*> optConfig
+    <*> optVanilla
+    <*> optUninstallKind
+    <*> optDryRun
+
+uninstallSubcommand :: Mod CommandFields CliCommand
+uninstallSubcommand =
+  command "uninstall" (info (CmdUninstall <$> makeUninstallParser) (progDesc "Uninstall a module or program"))
+
 optExpression :: Parser Bool
 optExpression =
   switch
@@ -198,6 +252,13 @@ optUseSSH =
     SshProtocol
     ( long "ssh"
         <> help "Use SSH protocol for remote git access"
+    )
+
+optNoTypecheck :: Parser Bool
+optNoTypecheck =
+  switch
+    ( long "no-typecheck"
+        <> help "Skip typechecking during install"
     )
 
 optModuleStrings :: Parser [String]
@@ -295,4 +356,38 @@ optType =
     ( long "type"
         <> short 't'
         <> help "Parse a typestring instread of an expression"
+    )
+
+optListKind :: Parser (Maybe ListKind)
+optListKind =
+  flag' (Just ListModules) (long "modules" <> help "List only modules")
+    <|> flag' (Just ListPrograms) (long "programs" <> help "List only programs")
+    <|> pure Nothing
+
+optListPattern :: Parser (Maybe String)
+optListPattern =
+  optional . strArgument
+    $ ( metavar "PATTERN"
+          <> help "Filter by subsequence match on name"
+      )
+
+optUninstallNames :: Parser [String]
+optUninstallNames =
+  some
+    . strArgument
+    $ ( metavar "NAME"
+          <> help "Names of modules or programs to uninstall"
+      )
+
+optUninstallKind :: Parser (Maybe ListKind)
+optUninstallKind =
+  flag' (Just ListModules) (long "module" <> help "Uninstall only the module")
+    <|> flag' (Just ListPrograms) (long "program" <> help "Uninstall only the program")
+    <|> pure Nothing
+
+optDryRun :: Parser Bool
+optDryRun =
+  switch
+    ( long "dry-run"
+        <> help "Show what would be removed without removing"
     )
