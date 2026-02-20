@@ -39,7 +39,7 @@ import Morloc.Namespace.Expr
 import Morloc.Namespace.State
 import qualified Morloc.ProgramBuilder.Install as Install
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist,
-                         listDirectory, removeDirectoryRecursive, removeFile)
+                         getCurrentDirectory, listDirectory, removeDirectoryRecursive, removeFile)
 import System.Exit (exitFailure, exitSuccess)
 import System.FilePath (takeFileName, dropExtension, (</>))
 import UI
@@ -66,6 +66,7 @@ runMorloc args = do
     (CmdInit g) -> cmdInit g config
     (CmdList g) -> cmdList g config
     (CmdUninstall g) -> cmdUninstall g config
+    (CmdNew g) -> cmdNew g
   case runPassed of
     True -> exitSuccess
     False -> exitFailure
@@ -79,6 +80,7 @@ getConfig (CmdDump g) = getConfig' (dumpConfig g) (dumpVanilla g)
 getConfig (CmdInit g) = getConfig' (initConfig g) (initVanilla g)
 getConfig (CmdList g) = getConfig' (listConfig g) (listVanilla g)
 getConfig (CmdUninstall g) = getConfig' (uninstallConfig g) (uninstallVanilla g)
+getConfig (CmdNew _) = getConfig' "" False
 
 getConfig' :: String -> Bool -> IO Config.Config
 getConfig' _ True = Config.loadMorlocConfig Nothing
@@ -93,6 +95,7 @@ getVerbosity (CmdDump g) = dumpVerbose g
 getVerbosity (CmdInit g) = if initQuiet g then 0 else 1
 getVerbosity (CmdList g) = listVerbose g
 getVerbosity (CmdUninstall _) = 0
+getVerbosity (CmdNew _) = 0
 
 readScript :: Bool -> String -> IO (Maybe Path, Code)
 readScript True code = return (Nothing, Code (MT.pack code))
@@ -258,6 +261,37 @@ cmdDump args _ config buildConfig = do
 
 cmdInit :: InitCommand -> Config.Config -> IO Bool
 cmdInit ic config = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSlurmSupport ic) config
+
+cmdNew :: NewCommand -> IO Bool
+cmdNew args = do
+  let pkgFile = "package.yaml"
+  exists <- doesFileExist pkgFile
+  if exists
+    then do
+      putStrLn "package.yaml already exists"
+      return True
+    else do
+      name <- if null (newName args)
+        then takeFileName <$> getCurrentDirectory
+        else return (newName args)
+      writeFile pkgFile $ unlines
+        [ "name: " ++ name
+        , "version: 0.1.0"
+        , "homepage: null"
+        , "synopsis: null"
+        , "description: null"
+        , "category: null"
+        , "license: MIT"
+        , "author: null"
+        , "maintainer: null"
+        , "github: null"
+        , "bug-reports: null"
+        , "dependencies: []"
+        , "# Files to include when installing with `morloc make --install`"
+        , "include: []"
+        ]
+      putStrLn $ "Created package.yaml for '" ++ name ++ "'"
+      return True
 
 prettyDAG :: DAG MVar e ExprI -> MDoc
 prettyDAG m0 = vsep (map prettyEntry (Map.toList m0))
@@ -506,7 +540,7 @@ discoverModules libDir fdbDir = do
                       , mmVersion = packageVersion meta
                       , mmSynopsis = packageSynopsis meta
                       , mmExports = []
-                      , mmMorlocDeps = packageMorlocDependencies meta
+                      , mmMorlocDeps = []
                       , mmReason = ""
                       }
                   Nothing -> return (Just (minimalManifest name))

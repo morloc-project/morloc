@@ -382,11 +382,8 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
           then YC.loadYamlSettings [pkgYaml] [] YC.ignoreEnv
           else return defaultValue
 
-      -- Determine morloc dependencies
-      morlocDeps <- if not (null (packageMorlocDependencies meta))
-        then return (packageMorlocDependencies meta)
-        else do
-          -- Fallback: scan .loc file for import statements
+      -- Determine morloc dependencies by scanning .loc imports
+      morlocDeps <- do
           mainFile <- liftIO $ findMainLocFile targetDir (MT.unpack name)
           case mainFile of
             Nothing -> return []

@@ -165,7 +165,6 @@ data PackageMeta
   , packageGithub :: !Text
   , packageBugReports :: !Text
   , packageCppVersion :: !Int
-  , packageMorlocDependencies :: [Text]
   , packageDependencies :: [Text]
   , packageInclude :: [Text]
   }
@@ -270,7 +269,6 @@ instance Defaultable PackageMeta where
       , packageGithub = ""
       , packageBugReports = ""
       , packageCppVersion = 17
-      , packageMorlocDependencies = []
       , packageDependencies = []
       , packageInclude = []
       }
@@ -310,7 +308,6 @@ instance FromJSON PackageMeta where
       <*> o .:? "github" .!= ""
       <*> o .:? "bug-reports" .!= ""
       <*> o .:? "cpp-version" .!= 0
-      <*> o .:? "morloc-dependencies" .!= []
       <*> o .:? "dependencies" .!= []
       <*> o .:? "include" .!= []
 

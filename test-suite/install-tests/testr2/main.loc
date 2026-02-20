@@ -1,0 +1,7 @@
+module testr2 (rtriple)
+
+import root-r
+
+source R from "src/triple.R" ("rtriple")
+
+rtriple :: Int -> Int

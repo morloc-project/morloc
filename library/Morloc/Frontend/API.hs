@@ -44,9 +44,11 @@ parse f (Code code) = do
   let parserState = emptyPState { psModuleConfig = moduleConfig
                                 , psLangMap = langMap }
 
-  -- store source text for the main file
+  -- store source text and load package metadata for the main file
   case f of
-    Just path -> MM.modify (\st -> st { stateSourceText = Map.insert path code (stateSourceText st) })
+    Just path -> do
+      MM.modify (\st -> st { stateSourceText = Map.insert path code (stateSourceText st) })
+      Mod.loadModuleMetadata path
     Nothing -> return ()
 
   case Parser.readProgram Nothing f code parserState mempty of

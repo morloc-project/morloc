@@ -1,0 +1,7 @@
+module testr3 (rpaste)
+
+import root-r
+
+source R from "glue.R" ("rpaste")
+
+rpaste :: Str -> Str -> Str

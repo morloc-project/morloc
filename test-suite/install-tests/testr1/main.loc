@@ -1,0 +1,7 @@
+module testr1 (rnegate)
+
+import root-r
+
+source R from "negate.R" ("rnegate")
+
+rnegate :: Real -> Real

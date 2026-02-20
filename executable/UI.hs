@@ -16,6 +16,7 @@ module UI
   , ListCommand (..)
   , ListKind (..)
   , UninstallCommand (..)
+  , NewCommand (..)
   ) where
 
 import Morloc.Module (GitProtocol (..), OverwriteProtocol (..))
@@ -40,6 +41,7 @@ data CliCommand
   | CmdTypecheck TypecheckCommand
   | CmdDump DumpCommand
   | CmdInit InitCommand
+  | CmdNew NewCommand
 
 cliParser :: Parser CliCommand
 cliParser =
@@ -51,6 +53,7 @@ cliParser =
         <> typecheckSubcommand
         <> dumpSubcommand
         <> initSubcommand
+        <> newSubcommand
     )
 
 data MakeCommand = MakeCommand
@@ -100,6 +103,22 @@ initCommandParser =
 
 initSubcommand :: Mod CommandFields CliCommand
 initSubcommand = command "init" (info (CmdInit <$> initCommandParser) (progDesc "Initialize morloc environment"))
+
+data NewCommand = NewCommand
+  { newName :: String
+  }
+
+newCommandParser :: Parser NewCommand
+newCommandParser =
+  NewCommand
+    <$> strArgument
+          ( metavar "NAME"
+              <> value ""
+              <> help "Package name (defaults to current directory name)"
+          )
+
+newSubcommand :: Mod CommandFields CliCommand
+newSubcommand = command "new" (info (CmdNew <$> newCommandParser) (progDesc "Create a new morloc package"))
 
 data InstallCommand = InstallCommand
   { installConfig :: String

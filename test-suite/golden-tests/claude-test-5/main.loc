@@ -3,7 +3,7 @@
 --
 -- This module demonstrates cross-language composition by implementing
 -- Conway's Game of Life with C++ for computation and Python for display.
-module main (playGame, testStep)
+module conway (playGame, testStep)
 
 -- Type mappings
 type Cpp => List a = "std::vector<$1>" a
