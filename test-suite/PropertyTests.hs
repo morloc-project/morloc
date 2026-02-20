@@ -1,3 +1,7 @@
+{- |
+Module      : PropertyTests
+Description : QuickCheck property tests for internal utility functions
+-}
 module PropertyTests
   ( propertyTests
   ) where

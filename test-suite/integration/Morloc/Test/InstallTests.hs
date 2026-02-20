@@ -57,9 +57,6 @@ installTest env name spec = testCase name $ do
     morlocUninstall name
     assertNotExists (name ++ ": binary removed after uninstall") binPath
 
-  where
-    strip = reverse . dropWhile (== '\n') . reverse
-
 installTests :: TestEnv -> TestTree
 installTests env = testGroup "Install"
   [ testGroup "Python"

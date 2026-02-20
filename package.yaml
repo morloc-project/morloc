@@ -180,6 +180,23 @@ tests:
       - tasty-hunit
       - tasty-quickcheck
 
+  morloc-integration-test:
+    main:          Main.hs
+    source-dirs:   test-suite/integration
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - base
+      - directory
+      - filepath
+      - process
+      - tasty
+      - tasty-hunit
+      - temporary
+      - text
+
 benchmarks:
   morloc-bench:
     main:          Bench.hs

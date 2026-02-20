@@ -1,12 +1,15 @@
 module Main (main) where
 
 import System.Directory (makeAbsolute, getHomeDirectory)
-import System.Environment (lookupEnv)
+import System.Environment (getArgs, lookupEnv, withArgs)
 import System.FilePath ((</>))
 import Test.Tasty (defaultMain, testGroup)
 
 import Morloc.Test.Common (TestEnv(..))
 import Morloc.Test.InstallTests (installTests)
+import Morloc.Test.ConcurrencyTests (concurrencyTests)
+import Morloc.Test.DaemonTests (daemonTests)
+import Morloc.Test.StressTests (stressTests)
 
 main :: IO ()
 main = do
@@ -17,6 +20,16 @@ main = do
         { teSuiteDir   = suiteDir
         , teMorlocHome = morlocHome
         }
-  defaultMain $ testGroup "Integration Tests"
+  -- Default to sequential execution: stress tests measure global resources
+  -- (SHM segments in /dev/shm) and cannot run concurrently with other tests.
+  -- Override with: --test-arguments="--num-threads N"
+  args <- getArgs
+  let hasNumThreads = any (\a -> "--num-threads" == a || "-j" == a
+                                 || take 14 a == "--num-threads=" || take 3 a == "-j=") args
+      args' = if hasNumThreads then args else "--num-threads" : "1" : args
+  withArgs args' $ defaultMain $ testGroup "Integration Tests"
     [ installTests env
+    , concurrencyTests env
+    , daemonTests env
+    , stressTests env
     ]

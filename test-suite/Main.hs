@@ -1,3 +1,7 @@
+{- |
+Module      : Main
+Description : Test suite entry point combining unit, property, and golden tests
+-}
 import qualified System.Directory as SD
 import Test.Tasty
 

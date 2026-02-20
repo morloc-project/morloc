@@ -3,6 +3,10 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE ViewPatterns #-}
 
+{- |
+Module      : UnitTypeTests
+Description : Unit tests for type operations, subtyping, typechecking, and codegen
+-}
 module UnitTypeTests
   ( subtypeTests
   , substituteTVarTests
