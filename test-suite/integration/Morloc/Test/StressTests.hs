@@ -1,14 +1,16 @@
 module Morloc.Test.StressTests (stressTests) where
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (mapConcurrently)
 import Control.Exception (try, SomeException)
 import Data.List (intercalate)
-import System.Directory (copyFile, doesFileExist, listDirectory)
+import System.Directory (copyFile, doesFileExist, listDirectory,
+                         removeDirectoryRecursive)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeExtension)
 import System.IO.Temp (getCanonicalTemporaryDirectory, createTempDirectory)
 import System.Process (readProcessWithExitCode)
-import Test.Tasty (TestTree, testGroup)
+import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (testCase, assertFailure)
 
 import Morloc.Test.Common
@@ -101,21 +103,22 @@ formatDelta label before after = unlines $
        else ["  segments: " ++ intercalate ", " (rsShmList after)]
 
 -- ======================================================================
--- Zombie stress test
+-- Zombie stress test: 50 concurrent nexus invocations, check for leaks
 -- ======================================================================
 
-zombieTest :: TestEnv -> Workload -> TestTree
-zombieTest env wl = testCase ("zombie [" ++ wlName wl ++ "]") $ do
-  workDir <- compileWorkload env wl
+zombieTest :: Workload -> IO FilePath -> TestTree
+zombieTest wl getWorkDir = testCase "zombie" $ do
+  workDir <- getWorkDir
   cleanupMorlocResources
-  let iterations = 50
+  let iterations = 50 :: Int
+      (subcmd, args) = head (wlCalls wl)
   before <- takeSnapshot
 
-  -- Track per-iteration leak appearances
-  leakIterations <- go workDir 0 1 iterations before
+  _ <- mapConcurrently (\_ ->
+    try (runNexusQuiet workDir subcmd args) :: IO (Either SomeException ExitCode)
+    ) [1..iterations]
 
-  -- Allow time for async cleanup
-  threadDelay 2000000  -- 2s
+  threadDelay 2000000  -- 2s settle
 
   after <- takeSnapshot
   let newShm = rsShm after - rsShm before
@@ -123,43 +126,30 @@ zombieTest env wl = testCase ("zombie [" ++ wlName wl ++ "]") $ do
       problems = concat
         [ ["shm leaked: " ++ show newShm | newShm > 0]
         , ["tmp leaked: " ++ show newTmp | newTmp > 0]
-        , ["leaks observed during " ++ show leakIterations
-           ++ "/" ++ show iterations ++ " iterations" | leakIterations > 0]
         ]
 
   if null problems then return ()
   else assertFailure $ unlines
     [ "workDir: " ++ workDir
-    , formatDelta ("after " ++ show iterations ++ " iterations + 2s settle") before after
+    , formatDelta ("after " ++ show iterations ++ " concurrent + 2s settle") before after
     , intercalate "; " problems
     ]
 
-  where
-    go _ leakIters _ 0 _ = return leakIters
-    go wd leakIters i remaining before0 = do
-      let (subcmd, args) = head (wlCalls wl)
-      _ <- try (runNexusQuiet wd subcmd args) :: IO (Either SomeException ExitCode)
-      threadDelay 20000  -- 20ms
-      cur <- takeSnapshot
-      let leaked = rsShm cur - rsShm before0 > 0 || rsTmp cur - rsTmp before0 > 0
-      go wd (if leaked then leakIters + 1 else leakIters) (i + 1) (remaining - 1) before0
-
 -- ======================================================================
--- Concurrent stress test
+-- Concurrent stress test: 10 rounds x 10 concurrent, check for leaks
 -- ======================================================================
 
-concurrentStressTest :: TestEnv -> Workload -> TestTree
-concurrentStressTest env wl = testCase ("concurrent [" ++ wlName wl ++ "]") $ do
-  workDir <- compileWorkload env wl
+concurrentStressTest :: Workload -> IO FilePath -> TestTree
+concurrentStressTest wl getWorkDir = testCase "concurrent" $ do
+  workDir <- getWorkDir
   cleanupMorlocResources
-  let concurrent = 10
-      rounds = 10
+  let concurrent = 10 :: Int
+      rounds = 10 :: Int
   before <- takeSnapshot
 
-  leakRounds <- goRounds workDir 0 1 rounds concurrent before
+  leakRounds <- goRounds workDir (0 :: Int) rounds concurrent before
 
-  -- Allow time for async cleanup
-  threadDelay 2000000  -- 2s
+  threadDelay 2000000  -- 2s settle
 
   after <- takeSnapshot
   let newShm = rsShm after - rsShm before
@@ -180,42 +170,60 @@ concurrentStressTest env wl = testCase ("concurrent [" ++ wlName wl ++ "]") $ do
     ]
 
   where
-    goRounds _ leakR _ 0 _ _ = return leakR
-    goRounds wd leakR rnd remaining conc before0 = do
+    goRounds _ leakR 0 _ _ = return leakR
+    goRounds wd leakR remaining conc before0 = do
       let (subcmd, args) = head (wlCalls wl)
-      mapM_ (\_ -> do
-        _ <- try (runNexusQuiet wd subcmd args) :: IO (Either SomeException ExitCode)
-        return ()
+      _ <- mapConcurrently (\_ ->
+        try (runNexusQuiet wd subcmd args) :: IO (Either SomeException ExitCode)
         ) [1..conc :: Int]
       threadDelay 50000  -- 50ms between rounds
       cur <- takeSnapshot
       let leaked = rsShm cur - rsShm before0 > 0 || rsTmp cur - rsTmp before0 > 0
       goRounds wd (if leaked then leakR + 1 else leakR)
-               (rnd + 1) (remaining - 1) conc before0
+               (remaining - 1) conc before0
 
 -- ======================================================================
--- Crash recovery test
+-- Crash recovery: 10 concurrent crash-and-recover cycles
 -- ======================================================================
 
-crashRecoveryTest :: TestEnv -> Workload -> TestTree
-crashRecoveryTest env wl = testCase ("crash-recovery [" ++ wlName wl ++ "]") $ do
-  workDir <- compileWorkload env wl
+crashRecoveryTest :: Workload -> IO FilePath -> TestTree
+crashRecoveryTest wl getWorkDir = testCase "crash-recovery" $ do
+  workDir <- getWorkDir
   cleanupMorlocResources
-  let iterations = 10
+  let iterations = 10 :: Int
+      (subcmd, args) = head (wlCalls wl)
   before <- takeSnapshot
-  (hangs, leaks) <- go workDir 0 0 iterations before
 
-  threadDelay 2000000  -- 2s settling time
+  results <- mapConcurrently (\_ -> do
+    (_, out, _) <- readProcessWithExitCode "sh"
+      [ "-c"
+      , "cd " ++ show workDir ++ " && "
+        ++ "./nexus " ++ subcmd ++ " " ++ unwords args
+        ++ " > /dev/null 2>&1 &"
+        ++ " NPID=$!; sleep 0.1;"
+        ++ " CPID=$(ps -o pid= --ppid $NPID 2>/dev/null | head -1 | tr -d ' ');"
+        ++ " if [ -n \"$CPID\" ]; then kill -9 $CPID 2>/dev/null; fi;"
+        ++ " HUNG=0; for i in $(seq 1 50); do"
+        ++ "   if ! kill -0 $NPID 2>/dev/null; then break; fi;"
+        ++ "   sleep 0.1;"
+        ++ "   if [ $i -eq 50 ]; then HUNG=1; kill -9 $NPID 2>/dev/null; fi;"
+        ++ " done;"
+        ++ " wait $NPID 2>/dev/null;"
+        ++ " echo $HUNG"
+      ] ""
+    return (strip out == "1")
+    ) [1..iterations]
+
+  threadDelay 2000000  -- 2s settle
 
   after <- takeSnapshot
-  let newShm = rsShm after - rsShm before
+  let hangs = length (filter id results)
+      newShm = rsShm after - rsShm before
       newTmp = rsTmp after - rsTmp before
       problems = concat
         [ ["hung: " ++ show hangs ++ "/" ++ show iterations
            ++ " (nexus did not exit after child kill)" | hangs > 0]
-        , ["shm leaked: " ++ show newShm
-           ++ " (" ++ show leaks ++ "/" ++ show iterations
-           ++ " iterations had mid-run leaks)" | newShm > 0]
+        , ["shm leaked: " ++ show newShm | newShm > 0]
         , ["tmp leaked: " ++ show newTmp | newTmp > 0]
         ]
 
@@ -226,43 +234,19 @@ crashRecoveryTest env wl = testCase ("crash-recovery [" ++ wlName wl ++ "]") $ d
     , intercalate "\n" problems
     ]
 
-  where
-    go _ hangs leakIters 0 _ = return (hangs, leakIters)
-    go wd hangs leakIters remaining before0 = do
-      let (subcmd, args) = head (wlCalls wl)
-      (_, out, _) <- readProcessWithExitCode "sh"
-        [ "-c"
-        , "cd " ++ show wd ++ " && "
-          ++ "./nexus " ++ subcmd ++ " " ++ unwords args
-          ++ " > /dev/null 2>&1 &"
-          ++ " NPID=$!; sleep 0.1;"
-          ++ " CPID=$(ps -o pid= --ppid $NPID 2>/dev/null | head -1 | tr -d ' ');"
-          ++ " if [ -n \"$CPID\" ]; then kill -9 $CPID 2>/dev/null; fi;"
-          ++ " HUNG=0; for i in $(seq 1 50); do"
-          ++ "   if ! kill -0 $NPID 2>/dev/null; then break; fi;"
-          ++ "   sleep 0.1;"
-          ++ "   if [ $i -eq 50 ]; then HUNG=1; kill -9 $NPID 2>/dev/null; fi;"
-          ++ " done;"
-          ++ " wait $NPID 2>/dev/null;"
-          ++ " echo $HUNG"
-        ] ""
-      let hung = strip out == "1"
-      cur <- takeSnapshot
-      let leaked = rsShm cur - rsShm before0 > 0
-      go wd (if hung then hangs + 1 else hangs)
-             (if leaked then leakIters + 1 else leakIters)
-             (remaining - 1) before0
+-- ======================================================================
+-- Top-level: compile each workload once, share across test types
+-- ======================================================================
 
--- ======================================================================
--- Top-level
--- ======================================================================
+workloadGroup :: TestEnv -> Workload -> TestTree
+workloadGroup env wl =
+  withResource (compileWorkload env wl) removeDirectoryRecursive $ \getWorkDir ->
+    testGroup (wlName wl)
+      [ zombieTest wl getWorkDir
+      , concurrentStressTest wl getWorkDir
+      , crashRecoveryTest wl getWorkDir
+      ]
 
 stressTests :: TestEnv -> TestTree
 stressTests env = testGroup "Stress"
-  [ testGroup "Zombie"
-    [ zombieTest env wl | wl <- workloads ]
-  , testGroup "Concurrent"
-    [ concurrentStressTest env wl | wl <- workloads ]
-  , testGroup "CrashRecovery"
-    [ crashRecoveryTest env wl | wl <- workloads ]
-  ]
+  [ workloadGroup env wl | wl <- workloads ]
