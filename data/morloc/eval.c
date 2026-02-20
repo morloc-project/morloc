@@ -22,7 +22,12 @@ static absptr_t apply_getter(absptr_t, size_t*, Schema*, morloc_pattern_t*, Sche
 // inserting an element into an empty dict creates a dict singleton
 static dict_t* dict_insert(char* name, void* thing, dict_t* dict){
     dict_t* dict_new = (dict_t*)malloc(sizeof(dict_t));
+    if (dict_new == NULL) return dict;
     dict_new->name = strdup(name);
+    if (dict_new->name == NULL) {
+        free(dict_new);
+        return dict;
+    }
     dict_new->thing = thing;
     dict_new->next = dict;
     return dict_new;
@@ -66,7 +71,9 @@ static dict_t* dict_delete(char* name, dict_t* dict){
     return dict;
 }
 
-// Free the list spine AND the names, but not the elements
+// Free the list spine AND the names, but not the elements.
+// Currently unused: cleanup is handled by paired dict_delete calls in lambda scopes.
+// Retained for future use if bulk cleanup is needed on error paths.
 __attribute__((unused))
 static void dict_free(dict_t* list){
     while(list != NULL){
@@ -82,6 +89,7 @@ morloc_expression_t* make_morloc_bound_var(const char* schema_str, char* varname
     Schema* schema = TRY(parse_schema, schema_str);
 
     morloc_expression_t* expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
+    RAISE_IF(expr == NULL, "Failed to allocate bound variable expression")
     expr->type = MORLOC_X_BND;
     expr->schema = schema;
     expr->expr.bnd_expr = varname;
@@ -98,10 +106,12 @@ morloc_expression_t* make_morloc_literal(
     Schema* schema = TRY(parse_schema, schema_str);
 
     morloc_data_t* data = (morloc_data_t*)malloc(sizeof(morloc_data_t));
+    RAISE_IF(data == NULL, "Failed to allocate literal data")
     data->is_voidstar = false;
     data->data.lit_val = lit;
 
     morloc_expression_t* expr = (morloc_expression_t*)malloc(sizeof(morloc_expression_t));
+    RAISE_IF_WITH(expr == NULL, free(data), "Failed to allocate literal expression")
     expr->schema = schema;
     expr->type = MORLOC_X_DAT;
     expr->expr.data_expr = data;
@@ -124,9 +134,20 @@ morloc_expression_t* make_morloc_container(
     }
 
     morloc_data_t* data = (morloc_data_t*)malloc(sizeof(morloc_data_t));
+    if (data == NULL) {
+        va_end(value_list);
+        free_schema(schema);
+        RAISE("Failed to allocate container data")
+    }
     data->is_voidstar = false;
 
     morloc_expression_t** values = (morloc_expression_t**)calloc(nargs, sizeof(morloc_expression_t*));
+    if (values == NULL) {
+        va_end(value_list);
+        free(data);
+        free_schema(schema);
+        RAISE("Failed to allocate container values")
+    }
     for(size_t i = 0; i < nargs; i++){
         values[i] = va_arg(value_list, morloc_expression_t*);
     }
@@ -135,6 +156,13 @@ morloc_expression_t* make_morloc_container(
     switch(schema->type) {
         case MORLOC_ARRAY: {
             morloc_data_array_t* array = (morloc_data_array_t*)malloc(sizeof(morloc_data_array_t));
+            if (array == NULL) {
+                va_end(value_list);
+                free(values);
+                free(data);
+                free_schema(schema);
+                RAISE("Failed to allocate array data")
+            }
             array->schema = schema->parameters[0];
             array->size = nargs;
             array->values = values;
@@ -153,6 +181,12 @@ morloc_expression_t* make_morloc_container(
             RAISE("Schema type is not a container type")
     }
     morloc_expression_t* expr = (morloc_expression_t*)malloc(sizeof(morloc_expression_t));
+    if (expr == NULL) {
+        va_end(value_list);
+        free(data);
+        free_schema(schema);
+        RAISE("Failed to allocate container expression")
+    }
     expr->type = MORLOC_X_DAT;
     expr->schema = schema;
     expr->expr.data_expr = data;
@@ -180,6 +214,11 @@ morloc_expression_t* make_morloc_app(
     }
 
     morloc_app_expression_t* app = (morloc_app_expression_t*)malloc(sizeof(morloc_app_expression_t));
+    if (app == NULL) {
+        va_end(args);
+        free_schema(schema);
+        RAISE("Failed to allocate application expression")
+    }
 
     // Determine application type based on func
     switch(func->type) {
@@ -203,12 +242,25 @@ morloc_expression_t* make_morloc_app(
     }
 
     app->args = (morloc_expression_t**)calloc(nargs, sizeof(morloc_expression_t*));
+    if (app->args == NULL) {
+        va_end(args);
+        free(app);
+        free_schema(schema);
+        RAISE("Failed to allocate application arguments")
+    }
     for(size_t i = 0; i < nargs; i++){
         app->args[i] = va_arg(args, morloc_expression_t*);
     }
     app->nargs = nargs;
 
     morloc_expression_t* expr = (morloc_expression_t*)malloc(sizeof(morloc_expression_t));
+    if (expr == NULL) {
+        va_end(args);
+        free(app->args);
+        free(app);
+        free_schema(schema);
+        RAISE("Failed to allocate application expression wrapper")
+    }
     expr->type = MORLOC_X_APP;
     expr->schema = schema;
     expr->expr.app_expr = app;
@@ -227,11 +279,20 @@ morloc_expression_t* make_morloc_lambda(
     va_start(var_list, nvars);
 
     char** vars = (char**)calloc(nvars, sizeof(char*));
+    if (vars == NULL) {
+        va_end(var_list);
+        return NULL;
+    }
     for(size_t i = 0; i < nvars; i++){
         vars[i] = va_arg(var_list, char*);
     }
 
     morloc_lam_expression_t* lam = (morloc_lam_expression_t*)malloc(sizeof(morloc_lam_expression_t));
+    if (lam == NULL) {
+        va_end(var_list);
+        free(vars);
+        return NULL;
+    }
     lam->nargs = nvars;
     lam->args = vars;
     lam->body = body;
@@ -239,6 +300,11 @@ morloc_expression_t* make_morloc_lambda(
     va_end(var_list);
 
     morloc_expression_t* lam_expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
+    if (lam_expr == NULL) {
+        free(vars);
+        free(lam);
+        return NULL;
+    }
     lam_expr->type = MORLOC_X_LAM;
     lam_expr->schema = NULL;
     lam_expr->expr.lam_expr = lam;
@@ -254,6 +320,11 @@ morloc_expression_t* make_morloc_interpolation(const char* schema_str, ERRMSG, s
     va_start(var_list, nargs);
 
     char** strings = (char**)calloc(nargs+1, sizeof(char*)); // include terminal NULL
+    if (strings == NULL) {
+        va_end(var_list);
+        free_schema(schema);
+        RAISE("Failed to allocate interpolation strings")
+    }
 
     for(size_t i = 0; i < nargs; i++){
         strings[i] = va_arg(var_list, char*);
@@ -262,6 +333,11 @@ morloc_expression_t* make_morloc_interpolation(const char* schema_str, ERRMSG, s
     va_end(var_list);
 
     morloc_expression_t* expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
+    if (expr == NULL) {
+        free(strings);
+        free_schema(schema);
+        RAISE("Failed to allocate interpolation expression")
+    }
     expr->type = MORLOC_X_FMT;
     expr->schema = schema;
     expr->expr.interpolation = strings;
@@ -273,6 +349,7 @@ morloc_expression_t* make_morloc_pattern(const char* schema_str, morloc_pattern_
     Schema* schema = TRY(parse_schema, schema_str);
 
     morloc_expression_t* expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
+    RAISE_IF(expr == NULL, "Failed to allocate pattern expression")
     expr->type = MORLOC_X_PAT;
     expr->schema = schema;
     expr->expr.pattern_expr = pattern;
@@ -281,6 +358,7 @@ morloc_expression_t* make_morloc_pattern(const char* schema_str, morloc_pattern_
 
 morloc_pattern_t* make_morloc_pattern_end(){
     morloc_pattern_t* pattern = (morloc_pattern_t*)calloc(1, sizeof(morloc_pattern_t));
+    if (pattern == NULL) return NULL;
     pattern->type = SELECT_END;
     pattern->size = 0;
     pattern->fields.indices = NULL;
@@ -291,6 +369,11 @@ morloc_pattern_t* make_morloc_pattern_end(){
 morloc_pattern_t* make_morloc_pattern_idx(size_t nargs, ...){
     size_t* indices = (size_t*)calloc(nargs, sizeof(size_t));
     morloc_pattern_t** selectors = (morloc_pattern_t**)calloc(nargs, sizeof(morloc_pattern_t*));
+    if (indices == NULL || selectors == NULL) {
+        free(indices);
+        free(selectors);
+        return NULL;
+    }
 
     va_list var_list;
     va_start(var_list, nargs);
@@ -306,6 +389,11 @@ morloc_pattern_t* make_morloc_pattern_idx(size_t nargs, ...){
     va_end(var_list);
 
     morloc_pattern_t* pattern = (morloc_pattern_t*)calloc(1, sizeof(morloc_pattern_t));
+    if (pattern == NULL) {
+        free(indices);
+        free(selectors);
+        return NULL;
+    }
     pattern->type = SELECT_BY_INDEX;
     pattern->size = nargs;
     pattern->fields.indices = indices;
@@ -317,6 +405,11 @@ morloc_pattern_t* make_morloc_pattern_idx(size_t nargs, ...){
 morloc_pattern_t* make_morloc_pattern_key(size_t nargs, ...){
     char** keys = (char**)calloc(nargs, sizeof(char*));
     morloc_pattern_t** selectors = (morloc_pattern_t**)calloc(nargs, sizeof(morloc_pattern_t*));
+    if (keys == NULL || selectors == NULL) {
+        free(keys);
+        free(selectors);
+        return NULL;
+    }
 
     va_list var_list;
     va_start(var_list, nargs);
@@ -332,6 +425,11 @@ morloc_pattern_t* make_morloc_pattern_key(size_t nargs, ...){
     va_end(var_list);
 
     morloc_pattern_t* pattern = (morloc_pattern_t*)calloc(1, sizeof(morloc_pattern_t));
+    if (pattern == NULL) {
+        free(keys);
+        free(selectors);
+        return NULL;
+    }
     pattern->type = SELECT_BY_KEY;
     pattern->size = nargs;
     pattern->fields.keys = keys;

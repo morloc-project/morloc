@@ -39,7 +39,7 @@ volptr_t rel2vol(relptr_t ptr, ERRMSG) {
 absptr_t rel2abs(relptr_t ptr, ERRMSG) {
     VAL_RETURN_SETUP(absptr_t, NULL)
 
-    RAISE_IF(ptr < 0, "Illegal relptr_t value of %zu", ptr)
+    RAISE_IF(ptr < 0, "Illegal relptr_t value of %zd", ptr)
 
     for (size_t i = 0; i < MAX_VOLUME_NUMBER; i++) {
         shm_t* shm = TRY(shopen, i);
@@ -240,6 +240,12 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ER
     if (volumes[volume_index] == MAP_FAILED) {
         volumes[volume_index] = NULL;
         close(fd);
+        // Clean up the backing store to avoid orphaned shm objects or files
+        if (volume_label[0] == '/') {
+            unlink(volume_label);
+        } else {
+            shm_unlink(volume_label);
+        }
         RAISE("Failed to mmap volume '%s' (%zu bytes)", volume_label, full_size);
     }
 

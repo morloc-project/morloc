@@ -247,14 +247,21 @@ int pack_with_schema(const void* mlc, const Schema* schema, char** packet, size_
     mpack_tokbuf_t tokbuf = MPACK_TOKBUF_INITIAL_VALUE;
 
     int pack_result = pack_data(mlc, schema, packet, &packet_ptr, &packet_remaining, &tokbuf, &CHILD_ERRMSG);
-    RAISE_IF(pack_result == EXIT_FAIL, "\n%s", CHILD_ERRMSG)
+    if (pack_result == EXIT_FAIL) {
+        free(*packet);
+        *packet = NULL;
+        RAISE("\n%s", CHILD_ERRMSG)
+    }
 
     // mutate packet_size (will be used outside)
     *packet_size = packet_ptr - *packet;
 
     // Trim the output buffer to the exact size needed
     if (packet_remaining > 0) {
-        *packet = (char*)realloc(*packet, *packet_size);
+        char* tmp = (char*)realloc(*packet, *packet_size);
+        if (tmp != NULL) {
+            *packet = tmp;
+        }
     }
 
     return pack_result;

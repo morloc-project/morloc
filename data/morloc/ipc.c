@@ -91,6 +91,10 @@ language_daemon_t* start_daemon(
     daemon->socket_path = strdup(socket_path);
     daemon->tmpdir = strdup(tmpdir);
     daemon->shm_basename = strdup(shm_basename);
+    if (daemon->socket_path == NULL || daemon->tmpdir == NULL || daemon->shm_basename == NULL) {
+        close_daemon(&daemon);
+        RAISE("strdup failed in start_daemon")
+    }
     daemon->shm_default_size = shm_default_size;
 
     // Initialize thread-shared resources
@@ -179,7 +183,6 @@ uint8_t* stream_from_client_wait(int client_fd, int pselect_timeout_us, int recv
     free(buffer);
 
     int attempts = 10;
-    int initial_timeout = 10000;
     // Receive remaining data with per-operation timeout
     while ((size_t)(data_ptr - result) < packet_length) {
         bool packet_received = false;
@@ -187,11 +190,12 @@ uint8_t* stream_from_client_wait(int client_fd, int pselect_timeout_us, int recv
             FD_ZERO(&read_fds);
             FD_SET(client_fd, &read_fds);
 
-            // Reset timeout for each iteration
+            // Reset timeout for each iteration with linear backoff
             struct timespec ts_loop;
             if(recv_timeout_us > 0) {
-                ts_loop.tv_sec = recv_timeout_us / 1000000;
-                ts_loop.tv_nsec = (recv_timeout_us % 1000000) * initial_timeout * (packet_attempts + 1);
+                long total_us = (long)recv_timeout_us * (packet_attempts + 1);
+                ts_loop.tv_sec = total_us / 1000000;
+                ts_loop.tv_nsec = (total_us % 1000000) * 1000L;
                 timeout_loop_ptr = &ts_loop;
             }
 

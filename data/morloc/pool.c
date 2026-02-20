@@ -45,7 +45,8 @@ struct pool_state_s {
 };
 
 // Global pool state for pool_mark_busy/idle and signal handler
-static pool_state_t* g_pool_state = NULL;
+// volatile pointer: read from signal handler, must not be optimized away
+static pool_state_t* volatile g_pool_state = NULL;
 
 // ---- Busy tracking ----
 

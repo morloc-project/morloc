@@ -53,6 +53,7 @@ uint8_t* return_ping(const uint8_t* packet, ERRMSG){
     size_t size = TRY(morloc_packet_size, packet);
 
     uint8_t* pong = (uint8_t*)calloc(size, sizeof(uint8_t));
+    RAISE_IF(pong == NULL, "Failed to allocate ping response")
     memcpy(pong, packet, size);
 
     return pong;
@@ -86,6 +87,7 @@ static void set_morloc_metadata_header(uint8_t* metadata, uint8_t metadata_type,
 
 uint8_t* make_ping_packet(){
     uint8_t* packet = (uint8_t*)calloc(1, sizeof(morloc_packet_header_t));
+    if (packet == NULL) return NULL;
 
     packet_command_t cmd = {
         .ping = {
@@ -113,6 +115,7 @@ static uint8_t* make_morloc_data_packet(
 
   size_t packet_length = sizeof(morloc_packet_header_t) + metadata_length + data_length;
   uint8_t* packet = (uint8_t*)calloc(packet_length, sizeof(uint8_t));
+  if (packet == NULL) return NULL;
 
   packet_command_t cmd = {
     .data = {
@@ -155,9 +158,14 @@ static uint8_t* make_morloc_data_packet_with_schema(
   }
 
   char* schema_str = schema_to_string(schema);
+  if (schema_str == NULL) return NULL;
   size_t metadata_length = strlen(schema_str) + 1; // +1 for null byte
   size_t metadata_length_total = (1 + (sizeof(morloc_metadata_header_t) + metadata_length) / 32) * 32;
   uint8_t* metadata = (uint8_t*)calloc(metadata_length_total, sizeof(char));
+  if (metadata == NULL) {
+      free(schema_str);
+      return NULL;
+  }
 
   set_morloc_metadata_header(metadata, MORLOC_METADATA_TYPE_SCHEMA_STRING, metadata_length);
   memcpy(metadata + sizeof(morloc_metadata_header_t), schema_str, metadata_length);
@@ -407,6 +415,7 @@ static uint8_t* make_morloc_call_packet_gen(uint32_t midx, uint8_t entrypoint, c
     size_t packet_length = data_length + offset + sizeof(morloc_packet_header_t);
 
     uint8_t* data = (uint8_t*)calloc(packet_length, sizeof(uint8_t));
+    RAISE_IF(data == NULL, "Failed to allocate call packet")
 
     packet_command_t cmd = {
       .call = {
