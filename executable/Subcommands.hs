@@ -33,6 +33,7 @@ import qualified Morloc.Completion as Completion
 import qualified Morloc.Config as Config
 import qualified CppTranslator
 import Morloc.Data.Doc
+import Morloc.Typecheck.Internal (prettyTypeU)
 import qualified Morloc.Language as ML
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.API as F
@@ -240,8 +241,8 @@ writeFrontendTypecheckOutput _ _ = (False, "I don't know how to be that verbose"
 writeFrontendTypes :: MorlocState -> AnnoS (Indexed TypeU) Many Int -> MDoc
 writeFrontendTypes st (AnnoS (Idx i t) _ _) =
   case Map.lookup i (stateName st) of
-    (Just v) -> pretty v <+> "::" <+> pretty t
-    Nothing -> "? ::" <+> pretty t
+    (Just v) -> pretty v <+> "::" <+> prettyTypeU t
+    Nothing -> "? ::" <+> prettyTypeU t
 
 writeTypecheckOutput ::
   Int -> ((Either MorlocError [(Lang, [SerialManifold])], [MT.Text]), MorlocState) -> (Bool, MDoc)

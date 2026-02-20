@@ -38,6 +38,7 @@ module Morloc.Typecheck.Internal
   , cut
   , substitute
   , rename
+  , cleanTypeName
   , prettyTypeU
   , occursCheck
   , toExistential
@@ -62,6 +63,7 @@ module Morloc.Typecheck.Internal
   , seeType
   ) where
 
+import Data.List (nub)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -766,18 +768,66 @@ rename g0 (ForallU v@(TV s) t0) =
 -- Unless I add N-rank types, foralls can only be on top, so no need to recurse.
 rename g t = (g, t)
 
+-- | Rename all generic type variables (ForallU-bound and ExistU) to clean
+-- letters from a lazy pool: a, b, c, ..., z, a1, b1, ..., z1, a2, ...
+-- Avoids names already used by concrete types in the expression.
 cleanTypeName :: TypeU -> TypeU
-cleanTypeName (unqualify -> (vs0, t0)) = f 0 vs0 t0
-  where
-  f :: Int -> [TVar] -> TypeU -> TypeU
-  f _ [] t = t
-  f i vs@(v:rvs) t
-    | elem v' vs = f (i+1) vs t
-    | otherwise = f (i+1) rvs (ForallU v' $ substituteTVar v (VarU v') t)
-    where
-      v' = TV ("t" <> MT.show' i)
+cleanTypeName t0 =
+  let (vs, body) = unqualify t0
+      evs = collectExistVars body
+      allGeneric = nub (vs ++ evs)
+      fixed = collectFixedNames (Set.fromList allGeneric) body
+      pool = filter (\(TV n) -> Set.notMember n fixed) letterPool
+      renameMap = Map.fromList (zip allGeneric pool)
+      renamedBody = applyVarRenaming renameMap body
+      renamedVs = map (\v -> Map.findWithDefault v v renameMap) vs
+  in foldr ForallU renamedBody renamedVs
 
--- Make pretty types
+letterPool :: [TVar]
+letterPool =
+  [ TV (MT.singleton c <> suffix)
+  | suffix <- "" : map MT.show' [1 :: Int ..]
+  , c <- ['a' .. 'z']
+  ]
+
+collectExistVars :: TypeU -> [TVar]
+collectExistVars = go
+  where
+    go (VarU _) = []
+    go (ExistU v (ts, _) (rs, _)) = v : concatMap go ts ++ concatMap (go . snd) rs
+    go (ForallU _ t) = go t
+    go (FunU ts t) = concatMap go (t : ts)
+    go (AppU t ts) = concatMap go (t : ts)
+    go (NamU _ _ ps rs) = concatMap go ps ++ concatMap (go . snd) rs
+    go (ThunkU t) = go t
+
+collectFixedNames :: Set.Set TVar -> TypeU -> Set.Set Text
+collectFixedNames generics = go
+  where
+    go (VarU v)
+      | Set.member v generics = Set.empty
+      | otherwise = Set.singleton (unTVar v)
+    go (ExistU _ (ts, _) (rs, _)) = Set.unions (map go ts ++ map (go . snd) rs)
+    go (ForallU _ t) = go t
+    go (FunU ts t) = Set.unions $ map go (t : ts)
+    go (AppU t ts) = Set.unions $ map go (t : ts)
+    go (NamU _ (TV n) ps rs) =
+      Set.insert n $ Set.unions (map go ps ++ map (go . snd) rs)
+    go (ThunkU t) = go t
+
+applyVarRenaming :: Map.Map TVar TVar -> TypeU -> TypeU
+applyVarRenaming m = go
+  where
+    ren v = Map.findWithDefault v v m
+    go (VarU v) = VarU (ren v)
+    go (ExistU v (ts, tc) (rs, rc)) =
+      ExistU (ren v) (map go ts, tc) ([(k, go t) | (k, t) <- rs], rc)
+    go (ForallU v t) = ForallU (ren v) (go t)
+    go (FunU ts t) = FunU (map go ts) (go t)
+    go (AppU t ts) = AppU (go t) (map go ts)
+    go (NamU n o ps rs) = NamU n o (map go ps) [(k, go t) | (k, t) <- rs]
+    go (ThunkU t) = ThunkU (go t)
+
 prettyTypeU :: TypeU -> MDoc
 prettyTypeU = pretty . cleanTypeName
 
