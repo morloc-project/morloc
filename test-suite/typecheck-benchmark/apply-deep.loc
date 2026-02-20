@@ -1,4 +1,4 @@
-module m (foo)
+module ad (foo)
 
 f :: Int -> Int
 f x = x

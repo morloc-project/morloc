@@ -535,11 +535,10 @@ generate cs rASTs = do
 
   -- Get build time and compute build directory
   buildTime <- liftIO $ floor <$> Time.getPOSIXTime
+  programName <- MM.getModuleName
   buildDir <- if stateInstall st
     then do
-      let name = fromMaybe "nexus"
-            (stateOutfile st <|> fmap (\(MV n) -> MT.unpack n) (stateModuleName st))
-          installDir = configHome config </> "exe" </> name
+      let installDir = configHome config </> "exe" </> programName
       CMS.modify (\s -> s { stateInstallDir = Just installDir })
       return installDir
     else liftIO Dir.getCurrentDirectory
@@ -555,10 +554,7 @@ generate cs rASTs = do
           Nothing -> error $ "Pool not found for language: " <> show lang
 
   -- Build manifest JSON with relative pool paths
-  let outfile = fromMaybe "nexus"
-        (stateOutfile st <|> if stateInstall st
-          then fmap (\(MV n) -> MT.unpack n) (stateModuleName st)
-          else Nothing)
+  outfileName <- MM.getOutfileName
   registry <- MM.gets stateLangRegistry
 
   -- Build group info for manifest
@@ -579,15 +575,15 @@ generate cs rASTs = do
         | (gname, (desc, _)) <- Map.toList exportGroups
         ]
 
-  let manifestJson = buildManifest config registry outfile buildDir buildTime daemonSets fdata gasts langToPoolIndex nameToGroup groupDescs
+  let manifestJson = buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPoolIndex nameToGroup groupDescs
       wrapperScript = makeWrapperScript manifestJson
 
   return $
     Script
-      { scriptBase = outfile
+      { scriptBase = outfileName
       , scriptLang = cLang
-      , scriptCode = "." :/ File outfile (Code wrapperScript)
-      , scriptMake = [SysExe outfile]
+      , scriptCode = "." :/ File outfileName (Code wrapperScript)
+      , scriptMake = [SysExe outfileName]
       }
 
 -- Build a self-contained wrapper script with embedded manifest

@@ -75,7 +75,7 @@ compile_workload() {
 
     cd "$WORK_DIR"
     echo "Compiling $test_name ($loc_file)..."
-    morloc make "$loc_file" > /dev/null 2>&1
+    morloc make -o nexus "$loc_file" > /dev/null 2>&1
     echo "Done. Calls: ${CALLS[*]}"
 }
 

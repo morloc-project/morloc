@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 
-./concurrency-tests/run-tests.sh
-
-./stress/run-all.sh
-
 ./typecheck-benchmark/run-benchmarks.sh
 
+./concurrency-tests/run-tests.sh
+
 ./daemon-tests/run-tests.sh
+
+./stress/run-all.sh
 
 echo "libmorloc tests not defined yet"
 # cmorloc-tests:

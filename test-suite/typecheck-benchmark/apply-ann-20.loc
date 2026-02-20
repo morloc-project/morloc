@@ -1,4 +1,4 @@
-module m (foo)
+module aa20 (foo)
 
 f :: Int -> Int
 f x = x

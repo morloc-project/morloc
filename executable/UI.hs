@@ -34,23 +34,23 @@ opts =
 
 data CliCommand
   = CmdMake MakeCommand
-  | CmdInit InitCommand
   | CmdInstall InstallCommand
+  | CmdUninstall UninstallCommand
+  | CmdList ListCommand
   | CmdTypecheck TypecheckCommand
   | CmdDump DumpCommand
-  | CmdList ListCommand
-  | CmdUninstall UninstallCommand
+  | CmdInit InitCommand
 
 cliParser :: Parser CliCommand
 cliParser =
   hsubparser
     ( makeSubcommand
         <> installSubcommand
-        <> typecheckSubcommand
-        <> initSubcommand
-        <> dumpSubcommand
-        <> listSubcommand
         <> uninstallSubcommand
+        <> listSubcommand
+        <> typecheckSubcommand
+        <> dumpSubcommand
+        <> initSubcommand
     )
 
 data MakeCommand = MakeCommand

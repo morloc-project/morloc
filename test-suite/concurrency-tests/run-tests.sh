@@ -83,7 +83,7 @@ compile_and_run() {
     cp "$SCRIPT_DIR/helpers"/* "$work_dir/" 2>/dev/null || true
 
     # Compile
-    if ! (cd "$work_dir" && morloc make "$loc_basename" > /dev/null 2>&1); then
+    if ! (cd "$work_dir" && morloc make -o nexus "$loc_basename" > /dev/null 2>&1); then
         printf "  %-35s %sCOMPILE FAIL%s\n" "$test_name" "$RED" "$RESET"
         local exports
         exports=$(get_exports "$loc_file")

@@ -66,6 +66,10 @@ module Morloc.Monad
   , throwSourcedError
   , throwUnificationError
 
+    -- * naming helpers
+  , getModuleName
+  , getOutfileName
+
     -- * Indexing monad
   , Index
   , IndexState (..)
@@ -467,6 +471,24 @@ getConcreteUniversalScope lang = do
 
 getGeneralUniversalScope :: MorlocMonad Scope
 getGeneralUniversalScope = gets stateUniversalGeneralTypedefs
+
+-- | Get the module name from state, falling back to "nexus" if unset.
+-- This is the canonical name for pool subdirectories and manifest references.
+getModuleName :: MorlocMonad String
+getModuleName = do
+  st <- get
+  return $ case stateModuleName st of
+    Just (MV n) -> MT.unpack n
+    Nothing -> "nexus"
+
+-- | Get the output file name: the -o value if given, else the module name.
+-- This controls only the wrapper script filename.
+getOutfileName :: MorlocMonad String
+getOutfileName = do
+  st <- get
+  case stateOutfile st of
+    Just name -> return name
+    Nothing -> getModuleName
 
 newtype IndexState = IndexState {index :: Int}
 type Index a = StateT IndexState Identity a

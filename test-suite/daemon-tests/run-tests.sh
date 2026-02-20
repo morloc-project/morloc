@@ -245,7 +245,7 @@ compile_program() {
     cp "$SCRIPT_DIR/$loc_file" "$work_dir/"
     cp "$SCRIPT_DIR"/*.py "$work_dir/" 2>/dev/null || true
 
-    if ! (cd "$work_dir" && morloc make "$loc_file" > /dev/null 2>"$work_dir/build-${name}.err"); then
+    if ! (cd "$work_dir" && morloc make -o nexus "$loc_file" > /dev/null 2>"$work_dir/build-${name}.err"); then
         echo "COMPILE FAIL: $loc_file" >&2
         cat "$work_dir/build-${name}.err" >&2
         return 1

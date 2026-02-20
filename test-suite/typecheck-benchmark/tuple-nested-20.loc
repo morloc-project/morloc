@@ -1,4 +1,4 @@
-module m (foo)
+module tn20 (foo)
 
 f :: (Int, Int) -> Int
 f x = 1

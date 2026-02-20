@@ -1,4 +1,4 @@
-module m (foo)
+module c10 (foo)
 
 import root ((.))
 

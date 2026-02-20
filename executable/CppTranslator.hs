@@ -21,7 +21,6 @@ module CppTranslator
 import Control.Monad.Identity (Identity)
 import qualified Control.Monad.State as CMS
 import qualified Data.Char as DC
-import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common
@@ -173,8 +172,7 @@ translate srcs es = do
 
   maker <- makeTheMaker srcs
 
-  st <- MM.get
-  let poolSubdir = fromMaybe "nexus" (stateOutfile st <|> fmap (\(MV n) -> MT.unpack n) (stateModuleName st))
+  poolSubdir <- MM.getModuleName
 
   return $
     Script
@@ -221,8 +219,7 @@ metaTypedefs tmap i =
 
 makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
 makeTheMaker srcs = do
-  st <- MM.get
-  let poolSubdir = fromMaybe "nexus" (stateOutfile st <|> fmap (\(MV n) -> MT.unpack n) (stateModuleName st))
+  poolSubdir <- MM.getModuleName
   let outfile = pretty $ "pools" </> poolSubdir </> ML.makeExecutablePoolName cppLang
   let src = pretty $ "pools" </> poolSubdir </> ML.makeSourcePoolName cppLang
 
