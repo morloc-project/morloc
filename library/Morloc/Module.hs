@@ -80,7 +80,24 @@ findModule currentPathAndModule@(_, currentModule) importModule = do
           <> pretty xs
           <> "\n  selecting path:" <+> pretty x
       return x
-    [] ->
+    [] -> do
+      -- Check if <name>/<name>.loc exists (should be <name>/main.loc)
+      let namePath = splitModuleName importModule
+          nameNameLoc = namePath <> [last namePath <> ".loc"]
+          hintPaths = map MS.joinPath
+            [ nameNameLoc
+            , lib : nameNameLoc
+            , [lib, plane] <> nameNameLoc
+            ]
+      existingHints <- liftIO . fmap catMaybes . mapM getFile $ hintPaths
+      let hintMsg = case existingHints of
+            (found:_) ->
+              let expected = MS.combine (MS.takeDirectory found) "main.loc"
+              in "\n\nFound" <+> squotes (pretty found)
+                  <+> "but expected" <+> squotes (pretty expected)
+                  <> "\n  Rename the entry point: mv"
+                    <+> pretty found <+> pretty expected
+            [] -> mempty
       MM.throwSystemError $
         "Within module" <+> squotes (pretty currentModule)
           <> ","
@@ -90,6 +107,7 @@ findModule currentPathAndModule@(_, currentModule) importModule = do
           <> "The following paths were searched:\n"
             <+> indent 4 (vsep (map pretty allPaths))
           <> "\nMaybe try running: morloc install" <+> pretty importModule
+          <> hintMsg
 
 {- | Give a module path (e.g. "/your/path/foo.loc") find the package metadata.
 It currently only looks for a file named "package.yaml" in the same folder
@@ -166,9 +184,8 @@ getModulePaths lib plane (Nothing, _) (splitModuleName -> namePath) = map MS.joi
       ]
 
     -- if nothing is local, look for system libraries. The system libraries MUST
-    -- be in a folder named after the module. The main script may either have
-    -- the name of the final import feild (e.g., "math" in the imports "math" or
-    -- "alice.math") or by "main.loc"
+    -- be in a folder named after the module. The entry point for directory
+    -- modules must be "main.loc".
     systemPaths =
       [ lib : init namePath <> [last namePath <> ".loc"]
       , lib : namePath <> ["main.loc"]
@@ -236,8 +253,8 @@ getModulePaths lib plane (Just (MS.splitPath -> modulePath), splitModuleName -> 
               else removePathSuffix (init moduleName) (init modulePath)
        in map
             MS.joinPath
-            [ rootPath <> importName <> ["main.loc"]
-            , rootPath <> init importName <> [last importName <> ".loc"]
+            [ rootPath <> init importName <> [last importName <> ".loc"]
+            , rootPath <> importName <> ["main.loc"]
             ]
 
 getFile :: Path -> IO (Maybe Path)

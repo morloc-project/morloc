@@ -371,7 +371,7 @@ optMakeInclude =
     )
 
 optScript :: Parser String
-optScript = argument str (metavar "<script>")
+optScript = argument str (metavar "<script>" <> value "main.loc")
 
 optType :: Parser Bool
 optType =
