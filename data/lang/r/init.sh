@@ -14,4 +14,4 @@ R CMD SHLIB "$INCLUDE_DIR/rmorloc.c" -o "$LIB_DIR/librmorloc.so" \
     -L"$LIB_DIR" -Wl,-rpath,"$LIB_DIR" -lmorloc -lpthread
 
 # Clean up
-rm -f "$INCLUDE_DIR/rmorloc.c" "$INCLUDE_DIR/librmorloc.o"
+rm -f "$INCLUDE_DIR/rmorloc.c" "$INCLUDE_DIR/rmorloc.o"

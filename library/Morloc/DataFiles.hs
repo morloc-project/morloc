@@ -44,6 +44,7 @@ data EmbededFile = EmbededFile
 -- | Per-language init setup: an init script and associated data files.
 data LangSetup = LangSetup
   { lsName :: String
+  , lsRequiredTools :: [String]
   , lsInitScript :: EmbededFile
   , lsFiles :: [EmbededFile]
   }
@@ -139,6 +140,7 @@ cppSetup :: LangSetup
 cppSetup =
   LangSetup
     "C++"
+    ["g++", "git"]
     (EmbededFile "init.sh" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/init.sh")))
     [ EmbededFile "cppmorloc.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc.hpp"))
     , EmbededFile "cppmorloc.cpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc.cpp"))
@@ -149,6 +151,7 @@ pythonSetup :: LangSetup
 pythonSetup =
   LangSetup
     "python"
+    ["python3"]
     (EmbededFile "init.sh" (decodeUtf8 $ $(embedFileRelative "data/lang/py/init.sh")))
     [ EmbededFile "pymorloc.c" (decodeUtf8 $ $(embedFileRelative "data/lang/py/pymorloc.c"))
     , EmbededFile "setup.py" (decodeUtf8 $ $(embedFileRelative "data/lang/py/setup.py"))
@@ -159,6 +162,7 @@ rSetup :: LangSetup
 rSetup =
   LangSetup
     "R"
+    ["R"]
     (EmbededFile "init.sh" (decodeUtf8 $ $(embedFileRelative "data/lang/r/init.sh")))
     [ EmbededFile "rmorloc.c" (decodeUtf8 $ $(embedFileRelative "data/lang/r/rmorloc.c"))
     ]
@@ -167,6 +171,7 @@ juliaSetup :: LangSetup
 juliaSetup =
   LangSetup
     "Julia"
+    ["julia"]
     (EmbededFile "init.sh" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/init.sh")))
     [ EmbededFile "juliabridge.c" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/juliabridge.c"))
     , EmbededFile

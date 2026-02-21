@@ -24,7 +24,7 @@ import Morloc.Module (OverwriteProtocol (..))
 import qualified Data.Text.IO as TIO
 
 import Control.Exception (SomeException, displayException, try)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, getHomeDirectory, removeFile)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, findExecutable, getHomeDirectory, listDirectory, removeDirectoryRecursive, removeFile)
 import System.FilePath (replaceExtension, takeFileName)
 import System.IO (hPutStrLn, stderr)
 import System.Process (callProcess)
@@ -33,16 +33,16 @@ configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
 configure _ = return ()
 
 configureAll :: Bool -> OverwriteProtocol -> Bool -> Config -> IO Bool
-configureAll verbose _force slurmSupport config = do
-  result <- try (configureAllSteps verbose slurmSupport config) :: IO (Either SomeException ())
+configureAll verbose force slurmSupport config = do
+  result <- try (configureAllSteps verbose force slurmSupport config) :: IO (Either SomeException ())
   case result of
     Left e -> do
-      hPutStrLn stderr $ "\ESC[31mConfiguration failed: " ++ displayException e ++ "\ESC[0m"
+      sayError $ "Configuration failed: " ++ displayException e
       return False
     Right _ -> return True
 
-configureAllSteps :: Bool -> Bool -> Config -> IO ()
-configureAllSteps verbose slurmSupport config = do
+configureAllSteps :: Bool -> OverwriteProtocol -> Bool -> Config -> IO ()
+configureAllSteps verbose force slurmSupport config = do
   let homeDir = configHome config
       srcLibrary = configLibrary config
       includeDir = homeDir </> "include"
@@ -50,29 +50,41 @@ configureAllSteps verbose slurmSupport config = do
       optDir = homeDir </> "opt"
       libDir = homeDir </> "lib"
 
-  createDirectoryWithDescription verbose "morloc home directory" homeDir
-  createDirectoryWithDescription verbose "morloc lib directory" libDir
-  createDirectoryWithDescription verbose "morloc include directory" includeDir
-  createDirectoryWithDescription verbose "morloc tmp directory" tmpDir
-  createDirectoryWithDescription verbose "morloc opt directory" optDir
-  createDirectoryWithDescription verbose "morloc module directory" srcLibrary
+  -- When force is set, clean build output directories
+  when (force == ForceOverwrite) $ do
+    sayInfo verbose "Force rebuild: cleaning stale artifacts"
+    cleanDirectory libDir
+    cleanDirectoryExcept includeDir ["mlccpptypes"]
+    cleanDirectory optDir
 
-  say verbose $ "Slurm support ... " <> show slurmSupport
+  ensureDirectory verbose "morloc home directory" homeDir
+  ensureDirectory verbose "morloc lib directory" libDir
+  ensureDirectory verbose "morloc include directory" includeDir
+  ensureDirectory verbose "morloc tmp directory" tmpDir
+  ensureDirectory verbose "morloc opt directory" optDir
+  ensureDirectory verbose "morloc module directory" srcLibrary
 
-  say verbose "Writing build config file"
+  sayInfo verbose $ "Slurm support ... " <> show slurmSupport
+
+  sayInfo verbose "Writing build config file"
   TIO.writeFile
     (configBuildConfig config)
     (if slurmSupport then "slurm-support: true" else "slurm-support: false")
 
-  -- Build libmorloc.so
+  -- Clean and create build directory
   let buildDir = tmpDir </> "libmorloc-build"
+  buildDirExists <- doesDirectoryExist buildDir
+  when buildDirExists $ removeDirectoryRecursive buildDir
   createDirectoryIfMissing True buildDir
 
-  say verbose "Writing morloc C library source files"
+  -- Check for gcc (required for core)
+  requireTool "gcc" "gcc is required to compile libmorloc.so and morloc-nexus"
+
+  sayInfo verbose "Writing morloc C library source files"
   forM_ DF.libmorlocFiles $ \ef ->
     TIO.writeFile (buildDir </> DF.embededFileName ef) (DF.embededFileText ef)
 
-  say verbose "Compiling libmorloc.so"
+  sayInfo verbose "Compiling libmorloc.so"
   let morlocOptions = if slurmSupport then ["-DSLURM_SUPPORT"] else []
       cFiles =
         [ buildDir </> DF.embededFileName ef | ef <- DF.libmorlocFiles, ".c" `isSuffixOf` DF.embededFileName ef
@@ -88,16 +100,17 @@ configureAllSteps verbose slurmSupport config = do
   forM_ DF.libmorlocFiles $ \ef -> removeFile (buildDir </> DF.embededFileName ef)
   forM_ objPaths removeFile
 
-  say verbose "Installing morloc.h"
+  sayInfo verbose "Installing morloc.h"
   TIO.writeFile (includeDir </> "morloc.h") DF.libmorlocHeader
 
-  -- Compile morloc-nexus
-  say verbose "Compiling morloc-nexus"
+  -- Compile morloc-nexus (installed to ~/.local/bin alongside the morloc binary,
+  -- since wrapper scripts invoke it by bare name via PATH)
+  sayInfo verbose "Compiling morloc-nexus"
   userHome <- getHomeDirectory
-  let localBinDir = userHome </> ".local" </> "bin"
+  let nexusBinDir = userHome </> ".local" </> "bin"
       nexusSrcPath = buildDir </> "nexus.c"
-      nexusBinPath = localBinDir </> "morloc-nexus"
-  createDirectoryIfMissing True localBinDir
+      nexusBinPath = nexusBinDir </> "morloc-nexus"
+  createDirectoryIfMissing True nexusBinDir
   TIO.writeFile nexusSrcPath (DF.embededFileText DF.nexusSource)
   run
     verbose
@@ -117,55 +130,112 @@ configureAllSteps verbose slurmSupport config = do
   -- Create exe/ and fdb/ directories
   let exeDir = homeDir </> "exe"
       fdbDir = homeDir </> "fdb"
-  createDirectoryWithDescription verbose "morloc exe directory" exeDir
-  createDirectoryWithDescription verbose "morloc fdb directory" fdbDir
+  ensureDirectory verbose "morloc exe directory" exeDir
+  ensureDirectory verbose "morloc fdb directory" fdbDir
 
   -- Configure each language via its init.sh script
   forM_ DF.langSetups $ \ls -> do
-    say verbose $ "Configuring " <> DF.lsName ls <> " morloc API libraries"
-    -- Write data files to build dir
-    forM_ (DF.lsFiles ls) $ \ef ->
-      TIO.writeFile (buildDir </> DF.embededFileName ef) (DF.embededFileText ef)
-    -- Write and run init script
-    let initPath = buildDir </> "init.sh"
-    TIO.writeFile initPath (DF.embededFileText (DF.lsInitScript ls))
-    run verbose "bash" [initPath, homeDir, buildDir]
-    -- Clean up
-    removeFile initPath
-    forM_ (DF.lsFiles ls) $ \ef ->
-      removeFileSafe (buildDir </> DF.embededFileName ef)
+    missing <- checkTools (DF.lsRequiredTools ls)
+    if null missing
+      then do
+        sayInfo verbose $ "Configuring " <> DF.lsName ls <> " language support"
+        -- Write data files to build dir
+        forM_ (DF.lsFiles ls) $ \ef ->
+          TIO.writeFile (buildDir </> DF.embededFileName ef) (DF.embededFileText ef)
+        -- Write and run init script
+        let initPath = buildDir </> "init.sh"
+        TIO.writeFile initPath (DF.embededFileText (DF.lsInitScript ls))
+        result <- try (run verbose "bash" [initPath, homeDir, buildDir]) :: IO (Either SomeException ())
+        case result of
+          Left e -> sayWarning $ DF.lsName ls <> " setup failed: " <> displayException e
+          Right _ -> return ()
+        -- Clean up
+        removeFileSafe initPath
+        forM_ (DF.lsFiles ls) $ \ef ->
+          removeFileSafe (buildDir </> DF.embededFileName ef)
+      else
+        sayWarning $ "Skipping " <> DF.lsName ls <> " setup (missing: " <> unwords missing <> ")"
 
   -- Generate shell completions
-  say verbose "Generating shell completions"
+  sayInfo verbose "Generating shell completions"
   Completion.regenerateCompletions verbose homeDir
 
-say :: Bool -> String -> IO ()
-say verbose message =
-  when verbose $ hPutStrLn stderr ("\ESC[32m" <> message <> "\ESC[0m")
+-- ANSI color codes
+colorReset, colorRed, colorYellow, colorBlue, colorDim :: String
+colorReset  = "\ESC[0m"
+colorRed    = "\ESC[31m"
+colorYellow = "\ESC[33m"
+colorBlue   = "\ESC[34m"
+colorDim    = "\ESC[2m"
+
+sayInfo :: Bool -> String -> IO ()
+sayInfo verbose message =
+  when verbose $ hPutStrLn stderr (colorBlue <> "[INFO] " <> message <> colorReset)
+
+sayWarning :: String -> IO ()
+sayWarning message =
+  hPutStrLn stderr (colorYellow <> "[WARNING] " <> message <> colorReset)
+
+sayError :: String -> IO ()
+sayError message =
+  hPutStrLn stderr (colorRed <> "[ERROR] " <> message <> colorReset)
 
 run :: Bool -> String -> [String] -> IO ()
 run verbose cmd args = do
-  when verbose $ hPutStrLn stderr (cmd <> " " <> unwords args)
+  when verbose $ hPutStrLn stderr (colorDim <> cmd <> " " <> unwords args <> colorReset)
   callProcess cmd args
 
-createDirectoryWithDescription :: Bool -> String -> FilePath -> IO ()
-createDirectoryWithDescription verbose description path = do
+ensureDirectory :: Bool -> String -> FilePath -> IO ()
+ensureDirectory verbose description path = do
   exists <- doesDirectoryExist path
   if exists
-    then
-      when verbose $
-        putStrLn $
-          "Checking " ++ description ++ " ... using existing path " ++ path
+    then sayInfo verbose $ description ++ " ... " ++ path
     else do
       createDirectoryIfMissing True path
-      when verbose $
-        putStrLn $
-          "Checking " ++ description ++ " ... missing, creating at " ++ path
+      sayInfo verbose $ description ++ " ... created " ++ path
 
--- | Remove a file, ignoring errors if it was already cleaned up by init.sh
+-- | Remove a file, ignoring errors if it doesn't exist
 removeFileSafe :: FilePath -> IO ()
 removeFileSafe path = do
   result <- try (removeFile path) :: IO (Either SomeException ())
   case result of
     Left _ -> return ()
     Right _ -> return ()
+
+-- | Remove all contents of a directory (but keep the directory itself)
+cleanDirectory :: FilePath -> IO ()
+cleanDirectory dir = do
+  exists <- doesDirectoryExist dir
+  when exists $ do
+    removeDirectoryRecursive dir
+    createDirectoryIfMissing True dir
+
+-- | Remove all contents of a directory except entries in the keep list
+cleanDirectoryExcept :: FilePath -> [String] -> IO ()
+cleanDirectoryExcept dir keep = do
+  exists <- doesDirectoryExist dir
+  when exists $ do
+    entries <- listDirectory dir
+    forM_ entries $ \entry -> do
+      unless (entry `elem` keep) $ do
+        let path = dir </> entry
+        isDir <- doesDirectoryExist path
+        if isDir
+          then removeDirectoryRecursive path
+          else removeFile path
+
+-- | Check that a tool exists on PATH, error if not
+requireTool :: String -> String -> IO ()
+requireTool tool msg = do
+  found <- findExecutable tool
+  case found of
+    Nothing -> ioError . userError $ tool <> " not found on PATH. " <> msg
+    Just _ -> return ()
+
+-- | Check which tools from a list are missing. Returns list of missing tool names.
+checkTools :: [String] -> IO [String]
+checkTools tools = do
+  results <- forM tools $ \tool -> do
+    found <- findExecutable tool
+    return (tool, found)
+  return [t | (t, Nothing) <- results]

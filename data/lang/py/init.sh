@@ -1,9 +1,13 @@
 #!/bin/bash
 set -e
 
-MORLOC_HOME="$1"
+export MORLOC_HOME="$1"
 BUILD_DIR="$2"
 OPT_DIR="$MORLOC_HOME/opt"
+
+# Clean stale build artifacts
+rm -f "$OPT_DIR"/pymorloc.cpython* "$OPT_DIR/pymorloc"
+rm -rf "$OPT_DIR/build"
 
 # Copy files to opt dir
 cp "$BUILD_DIR/pymorloc.c" "$OPT_DIR/"
