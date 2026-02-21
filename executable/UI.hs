@@ -131,6 +131,7 @@ data InstallCommand = InstallCommand
   , installForce :: OverwriteProtocol
   , installUseSSH :: GitProtocol
   , installNoTypecheck :: Bool
+  , installBuild :: Bool
   , installModuleStrings :: [String]
   }
 
@@ -143,6 +144,7 @@ makeInstallParser =
     <*> optForce
     <*> optUseSSH
     <*> optNoTypecheck
+    <*> optInstallBuild
     <*> optModuleStrings
 
 installSubcommand :: Mod CommandFields CliCommand
@@ -282,6 +284,14 @@ optNoTypecheck =
   switch
     ( long "no-typecheck"
         <> help "Skip typechecking during install"
+    )
+
+optInstallBuild :: Parser Bool
+optInstallBuild =
+  switch
+    ( long "build"
+        <> short 'b'
+        <> help "Build and install executable after module install"
     )
 
 optModuleStrings :: Parser [String]

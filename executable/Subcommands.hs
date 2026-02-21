@@ -14,7 +14,7 @@ point that keeps translator code out of the library.
 -}
 module Subcommands (runMorloc) where
 
-import Control.Exception (SomeException, try)
+import Control.Exception (SomeException, finally, try)
 import qualified Data.Aeson as JSON
 import qualified Data.ByteString.Lazy as BL
 import Data.List (isSuffixOf)
@@ -44,8 +44,10 @@ import Morloc.Namespace.Type
 import Morloc.Namespace.Expr
 import Morloc.Namespace.State
 import qualified Morloc.ProgramBuilder.Install as Install
+import Morloc.Module (OverwriteProtocol(..))
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist,
-                         getCurrentDirectory, listDirectory, removeDirectoryRecursive, removeFile)
+                         getCurrentDirectory, setCurrentDirectory, listDirectory,
+                         removeDirectoryRecursive, removeFile)
 import System.Exit (exitFailure, exitSuccess)
 import System.FilePath (takeFileName, dropExtension, (</>))
 import UI
@@ -131,10 +133,13 @@ typecheckModuleFn mainFile = do
 
 -- | Install a module
 cmdInstall :: InstallCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
-cmdInstall args verbosity conf buildConfig
-  = MM.runMorlocMonad Nothing verbosity conf buildConfig cmdInstall' >>= MM.writeMorlocReturn
+cmdInstall args verbosity conf buildConfig = do
+  passed <- MM.runMorlocMonad Nothing verbosity conf buildConfig cmdInstall' >>= MM.writeMorlocReturn
+  if passed && installBuild args
+    then buildInstalledModules args verbosity conf buildConfig moduleTexts libpath
+    else return passed
   where
-    path = Config.configLibrary conf </> Config.configPlane conf
+    libpath = Config.configLibrary conf </> Config.configPlane conf
     moduleTexts = map MT.pack (installModuleStrings args)
 
     userSources = Map.fromList
@@ -151,7 +156,7 @@ cmdInstall args verbosity conf buildConfig
         (\modstr -> Mod.installModule
             (installForce args)
             (installUseSSH args)
-            path
+            libpath
             (Config.configPlaneCore conf)
             mayTypecheck
             userSources
@@ -160,6 +165,50 @@ cmdInstall args verbosity conf buildConfig
             modstr
         )
         moduleTexts
+
+-- | Build and install executables for installed modules
+buildInstalledModules :: InstallCommand -> Int -> Config.Config -> BuildConfig -> [T.Text] -> FilePath -> IO Bool
+buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
+  results <- mapM buildOne moduleTexts
+  return (and results)
+  where
+    force = installForce args == ForceOverwrite
+
+    buildOne modstr = do
+      let name = T.unpack (Mod.extractModuleName modstr)
+          moduleDir = libpath </> name
+      mainFile <- findMainLocFile moduleDir name
+      case mainFile of
+        Nothing -> do
+          putStrLn $ "Warning: no main.loc found for '" <> name <> "', skipping build"
+          return True
+        Just locFile -> do
+          origDir <- getCurrentDirectory
+          setCurrentDirectory moduleDir
+          buildResult <- buildModuleExecutable locFile name verbosity conf buildConfig force
+            `finally` setCurrentDirectory origDir
+          return buildResult
+
+    buildModuleExecutable locFile name verbosity' config buildConfig' forceOverwrite = do
+      code <- MT.readFile locFile
+      let action = do
+            MM.modify (\s -> s { stateInstall = True })
+            M.writeProgram translator (Just locFile) (Code code)
+      result <- MM.runMorlocMonad Nothing verbosity' config buildConfig' action
+      passed <- MM.writeMorlocReturn result
+      if passed
+        then do
+          let (_, finalState) = result
+              pkgIncludes = concatMap packageInclude (statePackageMeta finalState)
+          case stateInstallDir finalState of
+            Nothing -> do
+              putStrLn $ "Error: install directory was not set during compilation of '" <> name <> "'"
+              return False
+            Just installDir -> do
+              let installName = takeFileName installDir
+              Install.installProgram (Config.configHome config) installDir installName pkgIncludes forceOverwrite
+              return True
+        else return False
 
 -- | build a Morloc program, generating the nexus and pool files
 cmdMake :: MakeCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
