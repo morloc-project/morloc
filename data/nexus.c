@@ -661,10 +661,10 @@ morloc_socket_t* setup_sockets(
 // Manifest-driven help text
 // ======================================================================
 
-void print_mim_usage(void) {
-    fprintf(stderr, "Usage: mim <manifest> [OPTION...] COMMAND [ARG...]\n");
+void print_nexus_usage(void) {
+    fprintf(stderr, "Usage: morloc-nexus <manifest> [OPTION...] COMMAND [ARG...]\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "mim is the morloc install manager and dispatcher.\n");
+    fprintf(stderr, "morloc-nexus is the morloc program dispatcher.\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Arguments:\n");
     fprintf(stderr, "  <manifest>           Path to a .manifest file or wrapper script\n");
@@ -696,7 +696,7 @@ void print_group_usage(const manifest_t* manifest, const char* group_name) {
         }
     }
 
-    fprintf(stderr, "Usage: mim <manifest> %s COMMAND [ARG...]\n", group_name);
+    fprintf(stderr, "Usage: morloc-nexus <manifest> %s COMMAND [ARG...]\n", group_name);
     if (grp && grp->desc) {
         fprintf(stderr, "\n");
         for (size_t i = 0; grp->desc[i]; i++) {
@@ -731,7 +731,7 @@ void print_group_usage(const manifest_t* manifest, const char* group_name) {
 }
 
 void print_usage(const manifest_t* manifest) {
-    fprintf(stderr, "Usage: mim <manifest> [OPTION...] COMMAND [ARG...]\n");
+    fprintf(stderr, "Usage: morloc-nexus <manifest> [OPTION...] COMMAND [ARG...]\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Nexus Options:\n");
     fprintf(stderr, " -h, --help            Print this help message\n");
@@ -801,9 +801,9 @@ void print_usage(const manifest_t* manifest) {
 void print_command_help(const manifest_command_t* cmd) {
     // Usage line
     if (cmd->group) {
-        fprintf(stderr, "Usage: mim <manifest> %s %s", cmd->group, cmd->name);
+        fprintf(stderr, "Usage: morloc-nexus <manifest> %s %s", cmd->group, cmd->name);
     } else {
-        fprintf(stderr, "Usage: mim <manifest> %s", cmd->name);
+        fprintf(stderr, "Usage: morloc-nexus <manifest> %s", cmd->name);
     }
     // Check if there are non-positional args
     bool has_opts = false;
@@ -1459,14 +1459,14 @@ int main(int argc, char *argv[]) {
         exit(EXIT_SUCCESS);
     }
 
-    // If -h with no manifest argument, show mim's own help
+    // If -h with no manifest argument, show morloc-nexus's own help
     if (config.help_flag && optind >= argc) {
-        print_mim_usage();
+        print_nexus_usage();
     }
 
     // Require a manifest path as the first positional argument
     if (optind >= argc) {
-        print_mim_usage();
+        print_nexus_usage();
     }
 
     const char* manifest_path = argv[optind];

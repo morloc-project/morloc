@@ -88,15 +88,15 @@ configureAllSteps verbose slurmSupport config = do
   say verbose "Installing morloc.h"
   TIO.writeFile (includeDir </> "morloc.h") DF.libmorlocHeader
 
-  -- Compile mim (morloc install manager)
-  say verbose "Compiling mim"
+  -- Compile morloc-nexus
+  say verbose "Compiling morloc-nexus"
   userHome <- getHomeDirectory
   let localBinDir = userHome </> ".local" </> "bin"
       nexusSrcPath = buildDir </> "nexus.c"
-      mimBinPath = localBinDir </> "mim"
+      nexusBinPath = localBinDir </> "morloc-nexus"
   createDirectoryIfMissing True localBinDir
   TIO.writeFile nexusSrcPath (DF.embededFileText DF.nexusSource)
-  run verbose "gcc" ["-O2", "-I" <> includeDir, "-o", mimBinPath, nexusSrcPath,
+  run verbose "gcc" ["-O2", "-I" <> includeDir, "-o", nexusBinPath, nexusSrcPath,
              "-L" <> libDir, "-Wl,-rpath," <> libDir, "-lmorloc", "-lpthread"]
   removeFile nexusSrcPath
 

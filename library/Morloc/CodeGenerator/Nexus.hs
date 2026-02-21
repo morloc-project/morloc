@@ -593,7 +593,7 @@ generate cs rASTs = do
 -- Build a self-contained wrapper script with embedded manifest
 makeWrapperScript :: Text -> Text
 makeWrapperScript manifestJson =
-  "#!/bin/sh\nexec mim \"$0\" \"$@\"\n### MANIFEST ###\n" <> manifestJson
+  "#!/bin/sh\nexec morloc-nexus \"$0\" \"$@\"\n### MANIFEST ###\n" <> manifestJson
 
 
 

@@ -123,28 +123,28 @@ void router_free(router_t* router) {
 bool router_start_program(router_program_t* prog, ERRMSG) {
     BOOL_RETURN_SETUP
 
-    // Find the mim binary path
-    char mim_path[512];
+    // Find the morloc-nexus binary path
+    char nexus_path[512];
     const char* home = getenv("HOME");
     RAISE_IF(!home, "HOME environment variable not set")
 
-    snprintf(mim_path, sizeof(mim_path), "%s/.local/bin/mim", home);
+    snprintf(nexus_path, sizeof(nexus_path), "%s/.local/bin/morloc-nexus", home);
 
-    // Check mim exists
-    RAISE_IF(access(mim_path, X_OK) != 0,
-             "mim binary not found at %s", mim_path)
+    // Check morloc-nexus exists
+    RAISE_IF(access(nexus_path, X_OK) != 0,
+             "morloc-nexus binary not found at %s", nexus_path)
 
     pid_t pid = fork();
     if (pid == 0) {
-        // Child: exec mim with --daemon
+        // Child: exec morloc-nexus with --daemon
         setpgid(0, 0);
-        execl(mim_path, "mim",
+        execl(nexus_path, "morloc-nexus",
               prog->manifest_path,
               "--daemon",
               "--socket", prog->daemon_socket,
               NULL);
         // If exec fails
-        fprintf(stderr, "router: failed to exec mim for %s: %s\n",
+        fprintf(stderr, "router: failed to exec morloc-nexus for %s: %s\n",
                 prog->name, strerror(errno));
         _exit(1);
     } else if (pid > 0) {

@@ -178,7 +178,7 @@ makeExecutable path = do
 -- | Extract the manifest JSON from a wrapper script and write it to a file.
 -- The wrapper script has the format:
 --   #!/bin/sh
---   exec mim "$0" "$@"
+--   exec morloc-nexus "$0" "$@"
 --   ### MANIFEST ###
 --   <json>
 extractAndWriteManifest :: FilePath -> FilePath -> IO ()

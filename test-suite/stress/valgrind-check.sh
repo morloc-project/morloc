@@ -25,15 +25,15 @@ VALGRIND_LOG="/tmp/morloc-valgrind-$$.log"
 # Use first call only for valgrind (deterministic)
 CALL="${CALLS[0]}"
 
-# The nexus file may be a shell wrapper (#!/bin/sh + exec mim "$0" "$@").
-# Valgrind can't instrument through exec, so unwrap to call mim directly.
+# The nexus file may be a shell wrapper (#!/bin/sh + exec morloc-nexus "$0" "$@").
+# Valgrind can't instrument through exec, so unwrap to call morloc-nexus directly.
 if head -1 ./nexus | grep -q '^#!'; then
-    MIM_BIN=$(sed -n '2s/^exec \([^ ]*\) .*/\1/p' ./nexus)
-    if [ -z "$MIM_BIN" ] || ! command -v "$MIM_BIN" &>/dev/null; then
-        echo "FAIL: Cannot find mim binary from nexus wrapper"
+    NEXUS_BIN=$(sed -n '2s/^exec \([^ ]*\) .*/\1/p' ./nexus)
+    if [ -z "$NEXUS_BIN" ] || ! command -v "$NEXUS_BIN" &>/dev/null; then
+        echo "FAIL: Cannot find morloc-nexus binary from nexus wrapper"
         exit 1
     fi
-    VALGRIND_CMD="$MIM_BIN ./nexus $CALL"
+    VALGRIND_CMD="$NEXUS_BIN ./nexus $CALL"
 else
     VALGRIND_CMD="./nexus $CALL"
 fi

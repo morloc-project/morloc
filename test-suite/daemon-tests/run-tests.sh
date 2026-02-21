@@ -757,7 +757,7 @@ if should_run "router"; then
     WORK_DIRS+=("$FDB_DIR")
 
     # Extract manifest JSON from the nexus wrapper script
-    # Format is: #!/bin/sh\nexec mim ...\n### MANIFEST ###\n<json>
+    # Format is: #!/bin/sh\nexec morloc-nexus ...\n### MANIFEST ###\n<json>
     if [ -f "$ARITH_DIR/nexus" ]; then
         sed -n '/^### MANIFEST ###$/,$ { /^### MANIFEST ###$/d; p; }' \
             "$ARITH_DIR/nexus" > "$FDB_DIR/arithmetic.manifest"
@@ -783,9 +783,9 @@ with open(sys.argv[1], 'w') as f:
     if [ -s "$FDB_DIR/arithmetic.manifest" ]; then
         ROUTER_PORT=$(pick_port)
 
-        # Start router (use the morloc-nexus binary = mim)
-        MIM_PATH="$(which mim 2>/dev/null || echo "$HOME/.local/bin/mim")"
-        (exec "$MIM_PATH" --router --http-port "$ROUTER_PORT" --fdb "$FDB_DIR" 2>"$FDB_DIR/router.log") &
+        # Start router (use the morloc-nexus binary)
+        NEXUS_PATH="$(which morloc-nexus 2>/dev/null || echo "$HOME/.local/bin/morloc-nexus")"
+        (exec "$NEXUS_PATH" --router --http-port "$ROUTER_PORT" --fdb "$FDB_DIR" 2>"$FDB_DIR/router.log") &
         ROUTER_PID=$!
         DAEMON_PIDS+=("$ROUTER_PID")
 
