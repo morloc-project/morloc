@@ -73,6 +73,9 @@ pid_t pgids[MAX_DAEMONS] = { 0 };
 // global temporary file
 char* tmpdir = NULL;
 
+// forward declaration (used by ERROR macro and signal handler before definition)
+void clean_exit(int exit_code);
+
 // re-entrancy guard for clean_exit (signal handler may fire during cleanup)
 static volatile sig_atomic_t cleaning_up = 0;
 

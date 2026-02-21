@@ -84,9 +84,10 @@ typedef struct shm_s {
   volptr_t cursor;
 } shm_t;
 
-// Packed because block headers live at arbitrary offsets in mmap'd shared
-// memory and the binary layout must be stable across compilation units.
-typedef struct __attribute__((packed)) block_header_s {
+// Block headers live at arbitrary offsets in mmap'd shared memory and the
+// binary layout must be stable across compilation units. Natural alignment
+// produces no padding here (verified by static assert below).
+typedef struct block_header_s {
     // a constant magic number identifying a block header
     unsigned int magic;
     // the number of references to this block (atomic for thread safety)
@@ -94,5 +95,13 @@ typedef struct __attribute__((packed)) block_header_s {
     // the amount of memory that is stored in the header
     size_t size;
 } block_header_t;
+
+#ifdef __cplusplus
+static_assert(
+#else
+_Static_assert(
+#endif
+    sizeof(block_header_t) == sizeof(unsigned int) + sizeof(_MORLOC_ATOMIC(unsigned int)) + sizeof(size_t),
+    "block_header_t has unexpected padding; shared memory layout would be unstable");
 
 #endif
