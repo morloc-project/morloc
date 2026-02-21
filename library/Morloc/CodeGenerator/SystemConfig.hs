@@ -26,8 +26,9 @@ import qualified Data.Text.IO as TIO
 import Control.Exception (SomeException, displayException, try)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, findExecutable, getHomeDirectory, listDirectory, removeDirectoryRecursive, removeFile)
 import System.FilePath (replaceExtension, takeFileName)
-import System.IO (hPutStrLn, stderr)
-import System.Process (callProcess)
+import System.IO (hIsTerminalDevice, hPutStrLn, stderr)
+import System.Exit (ExitCode(..))
+import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, waitForProcess)
 
 configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
 configure _ = return ()
@@ -160,30 +161,38 @@ configureAllSteps verbose force slurmSupport config = do
   sayInfo verbose "Generating shell completions"
   Completion.regenerateCompletions verbose homeDir
 
--- ANSI color codes
-colorReset, colorRed, colorYellow, colorBlue, colorDim :: String
-colorReset  = "\ESC[0m"
-colorRed    = "\ESC[31m"
-colorYellow = "\ESC[33m"
-colorBlue   = "\ESC[34m"
-colorDim    = "\ESC[2m"
+-- ANSI color wrapping, disabled when stderr is not a terminal
+withColor :: String -> String -> IO String
+withColor code msg = do
+  isTty <- hIsTerminalDevice stderr
+  return $ if isTty then code <> msg <> "\ESC[0m" else msg
 
 sayInfo :: Bool -> String -> IO ()
-sayInfo verbose message =
-  when verbose $ hPutStrLn stderr (colorBlue <> "[INFO] " <> message <> colorReset)
+sayInfo verbose message = when verbose $ do
+  line <- withColor "\ESC[34m" ("[INFO] " <> message)
+  hPutStrLn stderr line
 
 sayWarning :: String -> IO ()
-sayWarning message =
-  hPutStrLn stderr (colorYellow <> "[WARNING] " <> message <> colorReset)
+sayWarning message = do
+  line <- withColor "\ESC[33m" ("[WARNING] " <> message)
+  hPutStrLn stderr line
 
 sayError :: String -> IO ()
-sayError message =
-  hPutStrLn stderr (colorRed <> "[ERROR] " <> message <> colorReset)
+sayError message = do
+  line <- withColor "\ESC[31m" ("[ERROR] " <> message)
+  hPutStrLn stderr line
 
 run :: Bool -> String -> [String] -> IO ()
 run verbose cmd args = do
-  when verbose $ hPutStrLn stderr (colorDim <> cmd <> " " <> unwords args <> colorReset)
-  callProcess cmd args
+  when verbose $ do
+    line <- withColor "\ESC[2m" (cmd <> " " <> unwords args)
+    hPutStrLn stderr line
+  let cp = (proc cmd args) { std_out = UseHandle stderr }
+  (_, _, _, ph) <- createProcess cp
+  exitCode <- waitForProcess ph
+  case exitCode of
+    ExitSuccess -> return ()
+    ExitFailure code -> ioError . userError $ cmd <> " exited with code " <> show code
 
 ensureDirectory :: Bool -> String -> FilePath -> IO ()
 ensureDirectory verbose description path = do

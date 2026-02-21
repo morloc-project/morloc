@@ -12,6 +12,7 @@ module Morloc.Completion
   ( regenerateCompletions
   ) where
 
+import Control.Monad (when)
 import Control.Exception (SomeException, try)
 import Data.Aeson ((.!=), (.:), (.:?))
 import qualified Data.Aeson as JSON
@@ -24,7 +25,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import System.Directory (createDirectoryIfMissing, listDirectory)
 import System.FilePath (dropExtension, takeFileName, (</>))
-import System.IO (hPutStrLn, stderr)
+import System.IO (hIsTerminalDevice, hPutStrLn, stderr)
 
 -- Lightweight manifest types for completion generation
 
@@ -125,12 +126,12 @@ regenerateCompletions printInstructions configHome = do
   writeFile bashPath bashScript
   writeFile zshPath zshScript
 
-  if printInstructions
-    then do
-      putStrLn $ "Shell completions written to " ++ compDir ++ "/"
-      putStrLn $ "  Bash: add to ~/.bashrc:  source " ++ bashPath
-      putStrLn $ "  Zsh:  add to ~/.zshrc:   source " ++ zshPath
-    else return ()
+  when printInstructions $ do
+      isTty <- hIsTerminalDevice stderr
+      let info msg = if isTty then "\ESC[34m[INFO] " ++ msg ++ "\ESC[0m" else "[INFO] " ++ msg
+      hPutStrLn stderr $ info $ "Shell completions written to " ++ compDir ++ "/"
+      hPutStrLn stderr $ info $ "  Bash: add to ~/.bashrc:  source " ++ bashPath
+      hPutStrLn stderr $ info $ "  Zsh:  add to ~/.zshrc:   source " ++ zshPath
 
 -- | Load all .manifest files from the fdb directory
 loadManifests :: FilePath -> IO [ManifestInfo]
