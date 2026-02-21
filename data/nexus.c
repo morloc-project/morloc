@@ -365,8 +365,6 @@ void check_and_restart_pools(morloc_socket_t* sockets, size_t n_pools) {
     for (size_t i = 0; i < n_pools; i++) {
         if (pids[i] != -1) continue;
 
-        fprintf(stderr, "daemon: pool %zu died, restarting...\n", i);
-
         pid_t new_pid = start_language_server(&sockets[i], &errmsg);
         if (errmsg) {
             fprintf(stderr, "daemon: failed to restart pool %zu: %s\n", i, errmsg);
@@ -386,10 +384,7 @@ void check_and_restart_pools(morloc_socket_t* sockets, size_t n_pools) {
         bool started = false;
 
         for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-            if (pids[i] == -1) {
-                fprintf(stderr, "daemon: restarted pool %zu died immediately\n", i);
-                break;
-            }
+            if (pids[i] == -1) break;
 
             uint8_t* return_data = send_and_receive_over_socket_wait(
                 sockets[i].socket_filename, ping_packet,
@@ -414,11 +409,7 @@ void check_and_restart_pools(morloc_socket_t* sockets, size_t n_pools) {
         }
         free(ping_packet);
 
-        if (started) {
-            fprintf(stderr, "daemon: pool %zu restarted (pid %d)\n", i, (int)new_pid);
-        } else {
-            fprintf(stderr, "daemon: pool %zu failed to restart\n", i);
-        }
+        (void)started;
     }
 }
 

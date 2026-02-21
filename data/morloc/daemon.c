@@ -423,19 +423,12 @@ daemon_response_t* daemon_dispatch(
         resp->success = true;
         if (g_pool_alive_fn && g_n_pools > 0) {
             json_buf_t* jb = json_buf_new();
-            json_write_obj_start(jb);
-            json_write_key(jb, "status");
-            json_write_string(jb, "ok");
-            json_write_key(jb, "pools");
             json_write_arr_start(jb);
             for (size_t i = 0; i < g_n_pools; i++) {
                 json_write_bool(jb, g_pool_alive_fn(i));
             }
             json_write_arr_end(jb);
-            json_write_obj_end(jb);
             resp->result_json = json_buf_finish(jb);
-        } else {
-            resp->result_json = strdup("{\"status\":\"ok\"}");
         }
         return resp;
     }
@@ -703,27 +696,6 @@ static bool write_lp_message(int fd, const char* data, size_t len, ERRMSG) {
     return true;
 }
 
-static void log_request(const char* protocol, const daemon_request_t* req,
-                        const daemon_response_t* resp, double duration_ms) {
-    const char* method_str = "unknown";
-    if (req) {
-        switch (req->method) {
-            case DAEMON_CALL:     method_str = "call"; break;
-            case DAEMON_DISCOVER: method_str = "discover"; break;
-            case DAEMON_HEALTH:   method_str = "health"; break;
-        }
-    }
-    const char* cmd = (req && req->command) ? req->command : "-";
-    const char* status = (resp && resp->success) ? "ok" : "error";
-
-    struct timespec now;
-    clock_gettime(CLOCK_REALTIME, &now);
-
-    fprintf(stderr, "daemon: %ld.%03ld %s %s %s %s %.1fms\n",
-            (long)now.tv_sec, now.tv_nsec / 1000000,
-            protocol, method_str, cmd, status, duration_ms);
-}
-
 // Handle one connection on a socket/TCP listener
 static void handle_lp_connection(
     int client_fd,
@@ -759,15 +731,7 @@ static void handle_lp_connection(
         return;
     }
 
-    struct timespec t_start, t_end;
-    clock_gettime(CLOCK_MONOTONIC, &t_start);
-
     daemon_response_t* resp = daemon_dispatch(manifest, req, sockets, shm_basename);
-
-    clock_gettime(CLOCK_MONOTONIC, &t_end);
-    double duration_ms = (t_end.tv_sec - t_start.tv_sec) * 1000.0
-                       + (t_end.tv_nsec - t_start.tv_nsec) / 1e6;
-    log_request("lp", req, resp, duration_ms);
 
     size_t resp_len = 0;
     char* resp_json = daemon_serialize_response(resp, &resp_len);
@@ -813,21 +777,21 @@ static void handle_http_connection(
     }
     http_free_request(http_req);
 
-    struct timespec t_start, t_end;
-    clock_gettime(CLOCK_MONOTONIC, &t_start);
-
     daemon_response_t* resp = daemon_dispatch(manifest, req, sockets, shm_basename);
-
-    clock_gettime(CLOCK_MONOTONIC, &t_end);
-    double duration_ms = (t_end.tv_sec - t_start.tv_sec) * 1000.0
-                       + (t_end.tv_nsec - t_start.tv_nsec) / 1e6;
-    log_request("http", req, resp, duration_ms);
 
     size_t resp_len = 0;
     char* resp_json = daemon_serialize_response(resp, &resp_len);
 
+    // Append newline for terminal-friendly output
+    char* resp_body = (char*)malloc(resp_len + 2);
+    memcpy(resp_body, resp_json, resp_len);
+    resp_body[resp_len] = '\n';
+    resp_body[resp_len + 1] = '\0';
+
     int status = resp->success ? 200 : 500;
-    http_write_response(client_fd, status, "application/json", resp_json, resp_len);
+    http_write_response(client_fd, status, "application/json", resp_body, resp_len + 1);
+
+    free(resp_body);
 
     free(resp_json);
     daemon_free_request(req);
@@ -978,7 +942,6 @@ void daemon_run(
         fds[nfds].events = POLLIN;
         fd_types[nfds] = 0;
         nfds++;
-        fprintf(stderr, "daemon: listening on unix socket %s\n", config->unix_socket_path);
     }
 
     // Setup TCP listener
@@ -1008,7 +971,6 @@ void daemon_run(
         fds[nfds].events = POLLIN;
         fd_types[nfds] = 1;
         nfds++;
-        fprintf(stderr, "daemon: listening on tcp port %d\n", config->tcp_port);
     }
 
     // Setup HTTP listener
@@ -1038,7 +1000,6 @@ void daemon_run(
         fds[nfds].events = POLLIN;
         fd_types[nfds] = 2;
         nfds++;
-        fprintf(stderr, "daemon: listening on http port %d\n", config->http_port);
     }
 
     if (nfds == 0) {
@@ -1065,9 +1026,6 @@ void daemon_run(
     for (size_t i = 0; i < n_workers; i++) {
         pthread_create(&workers[i], NULL, daemon_worker, &worker_ctx);
     }
-    fprintf(stderr, "daemon: %zu worker threads\n", n_workers);
-
-    fprintf(stderr, "daemon: ready\n");
 
     // Main event loop
     while (!shutdown_requested) {
@@ -1099,8 +1057,6 @@ void daemon_run(
             queue_push(&queue, client_fd, fd_types[i]);
         }
     }
-
-    fprintf(stderr, "daemon: shutting down\n");
 
     // Wake all workers and join
     pthread_mutex_lock(&queue.mutex);

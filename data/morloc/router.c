@@ -524,7 +524,6 @@ void router_run(daemon_config_t* config, router_t* router) {
         fds[nfds].fd = http_fd;
         fds[nfds].events = POLLIN;
         nfds++;
-        fprintf(stderr, "router: listening on http port %d\n", config->http_port);
     }
 
     // Unix socket for router
@@ -551,21 +550,12 @@ void router_run(daemon_config_t* config, router_t* router) {
         fds[nfds].fd = sock_fd;
         fds[nfds].events = POLLIN;
         nfds++;
-        fprintf(stderr, "router: listening on unix socket %s\n", config->unix_socket_path);
     }
 
     if (nfds == 0) {
         fprintf(stderr, "router: no listeners configured\n");
         return;
     }
-
-    fprintf(stderr, "router: %zu programs registered\n", router->n_programs);
-    for (size_t i = 0; i < router->n_programs; i++) {
-        fprintf(stderr, "router:   - %s (%zu commands)\n",
-                router->programs[i].name,
-                router->programs[i].manifest ? router->programs[i].manifest->n_commands : 0);
-    }
-    fprintf(stderr, "router: ready\n");
 
     while (!router_shutdown_requested) {
         int ready = poll(fds, (nfds_t)nfds, 1000);
@@ -655,18 +645,9 @@ void router_run(daemon_config_t* config, router_t* router) {
                 }
             } else {
                 // Forward call to program daemon
-                struct timespec t_start, t_end;
-                clock_gettime(CLOCK_MONOTONIC, &t_start);
-
                 daemon_response_t* resp = router_forward(router, target_program, dreq, &errmsg);
 
-                clock_gettime(CLOCK_MONOTONIC, &t_end);
-                double duration_ms = (t_end.tv_sec - t_start.tv_sec) * 1000.0
-                                   + (t_end.tv_nsec - t_start.tv_nsec) / 1e6;
-
                 if (errmsg) {
-                    fprintf(stderr, "router: %s/%s error %.1fms\n",
-                            target_program, dreq->command ? dreq->command : "-", duration_ms);
                     json_buf_t* jb = json_buf_new();
                     json_write_obj_start(jb);
                     json_write_key(jb, "status");
@@ -679,9 +660,6 @@ void router_run(daemon_config_t* config, router_t* router) {
                     free(body);
                     free(errmsg);
                 } else {
-                    fprintf(stderr, "router: %s/%s %s %.1fms\n",
-                            target_program, dreq->command ? dreq->command : "-",
-                            resp->success ? "ok" : "error", duration_ms);
                     size_t resp_len = 0;
                     char* resp_json = daemon_serialize_response(resp, &resp_len);
                     http_write_response(client_fd, resp->success ? 200 : 500,
@@ -696,8 +674,6 @@ void router_run(daemon_config_t* config, router_t* router) {
             close(client_fd);
         }
     }
-
-    fprintf(stderr, "router: shutting down\n");
 
     // Kill all program daemons
     for (size_t i = 0; i < router->n_programs; i++) {
