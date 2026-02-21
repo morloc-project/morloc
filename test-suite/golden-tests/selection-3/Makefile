@@ -1,6 +1,6 @@
 all:
 	rm -f *.err obs.txt
-	morloc make -o nexus foo.loc 2> build.err
+	morloc make -o nexus main.loc 2> build.err
 	./nexus foo [1,3,6] [7,7,7] > obs.txt 2> obs.err
 
 clean:

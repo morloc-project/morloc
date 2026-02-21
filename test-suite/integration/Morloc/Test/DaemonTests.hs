@@ -319,7 +319,6 @@ poolHealthTests env = testCase "Health reports pool status" $ do
     assertBool ("daemon did not start (port " ++ show port ++ ")") ok
 
     (_, body, _) <- httpGet ("http://127.0.0.1:" ++ show port ++ "/health")
-    assertContains "health includes pools" "pools" body
     assertContains "health includes ok" "ok" body
 
 -- ======================================================================

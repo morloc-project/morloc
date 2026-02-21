@@ -1,4 +1,4 @@
-module high (foo)
+module main (foo)
 
 type Py => Int = "int"
 type Py => Tuple2 a b = "tuple" a b

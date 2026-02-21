@@ -1,4 +1,4 @@
-module foo (s1, s2, s3, s4)
+module main (s1, s2, s3, s4)
 
 s1 =
   """

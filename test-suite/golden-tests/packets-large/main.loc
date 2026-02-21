@@ -1,0 +1,25 @@
+module main (cid, pid, rid, pfoo, rfoo, cfoo)
+
+import root ((.))
+
+source Cpp from "foo.h" ("cid")
+source Py from "foo.py" ("pid")
+source R from "foo.R" ("rid")
+
+
+type Cpp => Str = "std::string"
+type Py => Str = "str"
+type R => Str = "character"
+
+cid :: Str -> Str
+pid :: Str -> Str
+rid :: Str -> Str
+
+cfoo :: Str -> Str
+cfoo = cid . pid . cid
+
+pfoo :: Str -> Str
+pfoo = pid . cid . pid
+
+rfoo :: Str -> Str
+rfoo = rid . pid . rid

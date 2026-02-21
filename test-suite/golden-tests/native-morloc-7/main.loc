@@ -1,0 +1,33 @@
+module main (foo)
+
+test1 = (67,True,3.14)
+test2 = (67, (True, "Nessie", 6.7))
+
+record Thing = Thing { a :: Int, b :: (Bool, Int, Str)  }
+
+test3 :: Thing
+test3 = { a = 67, b = (True, 42, "Alice") }
+
+test4 :: (Int, Thing)
+test4 = (42, { a = 67, b = (True, 420, "Bob") })
+
+test5 :: (Thing, Int, Thing)
+test5 = ({ a = 67, b = (True, 420, "Alice") }, 42, { a = 68, b = (False, 421, "Bob") })
+
+foo =
+  ( .0 test1                             -- 67,
+  , .1 test1                             -- true,
+  , .2 test1                             -- 3.14,
+  , .1.2 test2                           -- 6.7,
+  , .(.0, .1.1) test2                    -- [67,"Nessie"],
+  , .1.(.0, .2) test2                    -- [true,6.7],
+  , .1.(.2, .0) test2                    -- [6.7,true],
+  , .(.0, .1.(.0, .2)) test2             -- [67,true,6.7],
+  , .a test3                             -- 67,
+  , .(.b, .a) test3                      -- [[true,42,"Alice"],67],
+  , .(.a, .b.0) test3                    -- [67,true],
+  , .(.a, .b.(.0, .2)) test3             -- [67,true,"Alice"]
+  , .1.b.1 test4                         -- 420
+  , .1.b.(.1,.0) test4                   -- [420,true]
+  , .(.0.b.(.1,.2), .2.b.(.1,.2)) test5  -- [420,"Alice",421,"Bob"]
+  )

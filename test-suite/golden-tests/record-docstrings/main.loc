@@ -1,4 +1,4 @@
--- A module for doing foo
+-- A module main doing foo
 --
 -- Here is a multi-lined
 -- doc about this thing
@@ -9,7 +9,7 @@
 -- bugs: ...
 -- website: ...
 -- maintainer: ...
-module foobar (
+module main (
   -- name: fun
   -- desc: A fun group of functions
   fooFun,

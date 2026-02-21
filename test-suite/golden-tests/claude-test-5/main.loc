@@ -1,9 +1,9 @@
 -- desc: Conway's Game of Life - Polyglot Implementation
 -- author: Claude
 --
--- This module demonstrates cross-language composition by implementing
+-- This module main cross-language composition by implementing
 -- Conway's Game of Life with C++ for computation and Python for display.
-module conway (playGame, testStep)
+module main (playGame, testStep)
 
 -- Type mappings
 type Cpp => List a = "std::vector<$1>" a

@@ -1,4 +1,0 @@
-#!/bin/sh
-exec mim "$0" "$@"
-### MANIFEST ###
-{"version":1,"build_time":1771049183,"pools":[{"lang":"cpp","exec":["/home/z/.local/share/morloc/exe/main-eb512608b4b0a34d/pool-cpp.out"],"socket":"pipe-cpp"}],"commands":[{"name":"test_sum_py","type":"remote","mid":1,"pool":0,"needed_pools":[0],"arg_schemas":[],"return_schema":"<int>i4","desc":[],"return_type":"Int","return_desc":[],"args":[]},{"name":"test_sum_cpp","type":"remote","mid":2,"pool":0,"needed_pools":[0],"arg_schemas":[],"return_schema":"<int>i4","desc":[],"return_type":"Int","return_desc":[],"args":[]},{"name":"test_product_py","type":"remote","mid":3,"pool":0,"needed_pools":[0],"arg_schemas":[],"return_schema":"<int>i4","desc":[],"return_type":"Int","return_desc":[],"args":[]},{"name":"test_chain_py","type":"remote","mid":4,"pool":0,"needed_pools":[0],"arg_schemas":[],"return_schema":"<int>i4","desc":[],"return_type":"Int","return_desc":[],"args":[]}]}

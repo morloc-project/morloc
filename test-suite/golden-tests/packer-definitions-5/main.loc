@@ -1,4 +1,4 @@
-module m (foo)
+module main (foo)
 
 type Cpp => Map a b = "std::map<$1,$2>" a b
 type Cpp => List a = "std::vector<$1>" a

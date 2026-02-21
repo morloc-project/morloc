@@ -1,5 +1,5 @@
 -- This fails
-module m (foo)
+module main (foo)
 
 type Cpp => Real = "double"
 type Cpp => (Tuple2 a b) = "std::tuple<$1,$2>" a b

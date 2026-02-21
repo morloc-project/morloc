@@ -1,6 +1,6 @@
 all:
 	rm -f *.err obs.txt z*
-	morloc make -o nexus foo.loc 2> build.err
+	morloc make -o nexus main.loc 2> build.err
 	# 0
 	./nexus -f json f0 '[1,2,3,4,5,6]' > z0.json
 	./nexus -f mpk f0 z0.json > z0.mpk

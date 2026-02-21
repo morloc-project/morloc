@@ -1,4 +1,0 @@
-#!/bin/sh
-exec mim "$0" "$@"
-### MANIFEST ###
-{"version":1,"build_time":1771049183,"pools":[{"lang":"python3","exec":["python3","/home/z/.local/share/morloc/exe/main-5b6bb4ad0723a1e0/pool.py"],"socket":"pipe-python3"}],"commands":[{"name":"test","type":"remote","mid":1,"pool":0,"needed_pools":[0],"arg_schemas":["<int>i4"],"return_schema":"<dict>m11x<int>i4","desc":[],"return_type":"Bar","return_desc":[],"args":[{"kind":"pos","metavar":null,"type_desc":"Int","quoted":false,"desc":[]}]}]}

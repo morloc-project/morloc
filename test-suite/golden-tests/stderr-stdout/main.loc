@@ -1,4 +1,4 @@
-module foo (cfoo, pfoo, rfoo)
+module main (cfoo, pfoo, rfoo)
 
 import root-cpp
 

@@ -6,8 +6,9 @@ __pycache__/
 pool-rust
 good-*
 log
-nexus
 *.gdb
 .Rhistory
 .RData
 *.err
+main
+nexus

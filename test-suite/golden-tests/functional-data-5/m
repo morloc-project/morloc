@@ -1,4 +1,0 @@
-#!/bin/sh
-exec mim "$0" "$@"
-### MANIFEST ###
-{"version":1,"build_time":1771049184,"pools":[{"lang":"python3","exec":["python3","/home/z/.local/share/morloc/exe/m-f8af58dd4b872b11/pool.py"],"socket":"pipe-python3"},{"lang":"cpp","exec":["/home/z/.local/share/morloc/exe/m-f8af58dd4b872b11/pool-cpp.out"],"socket":"pipe-cpp"},{"lang":"r","exec":["Rscript","/home/z/.local/share/morloc/exe/m-f8af58dd4b872b11/pool.R"],"socket":"pipe-r"}],"commands":[{"name":"foo","type":"remote","mid":1,"pool":0,"needed_pools":[0,1,2],"arg_schemas":["<int>i4"],"return_schema":"<list>a<int>i4","desc":[],"return_type":"[Int]","return_desc":[],"args":[{"kind":"pos","metavar":null,"type_desc":"Int","quoted":false,"desc":[]}]}]}

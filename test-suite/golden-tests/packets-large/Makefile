@@ -1,6 +1,6 @@
 all:
 	rm -f *.err obs.txt
-	morloc make -o nexus foo.loc 2> build.err
+	morloc make -o nexus main.loc 2> build.err
 	# below buffer
 	python3 make_test_data.py 4065 > test-data.json
 	./nexus pid test-data.json | wc -c 2>> obs.err  >> obs.txt

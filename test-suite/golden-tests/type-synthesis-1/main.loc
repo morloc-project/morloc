@@ -1,4 +1,4 @@
-module foosy (foo, foos, sfoos, bar)
+module main (foo, foos, sfoos, bar)
 
 source Py from "foo.py" ("foo", "foos", "sfoos", "toPair", "swapPair")
 

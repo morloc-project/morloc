@@ -1,0 +1,45 @@
+module main (trim, readFASTQ, writeFASTA)
+
+source Cpp from "foo.hpp" ("trimRead", "readFASTQ", "writeFASTA")
+
+import root-cpp
+
+record Config = Config
+    { minLength :: Int
+    , minQuality :: Int 
+    }
+record Cpp => Config = "Config"
+
+--' Read a FASTQ file
+readFASTQ
+    :: Str -- FASTQ filename
+    -> [ ( ( Str -- FASTQ header
+           , Str -- quality reads as phred scores
+           )
+         , Str -- read sequence
+         ) ]
+
+--' Write a annotated sequence data to a FASTA file
+writeFASTA
+    :: Str -- output filename
+    -> [(Str, Str)] -- list of headers and sequences
+    -> Int -- exit code, 0 for success, 1 for failure
+
+--' Trim a single read
+trimRead
+    :: Config
+    -> Str -- quality scores
+    -> Str -- sequence
+    -> Str -- trimmed sequence
+
+wrapRead :: Config -> ((Str, Str), Str) -> (Str, Str) 
+wrapRead config x = ( .0 (.0 x)
+             , trimRead config (.1 (.0 x)) (.1 x)
+             )
+
+--' Trim a list of reads with phred quality scores
+trim
+    :: Config
+    -> [((Str, Str), Str)]
+    -> [(Str, Str)]
+trim config = map (wrapRead config) 

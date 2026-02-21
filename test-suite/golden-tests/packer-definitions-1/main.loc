@@ -1,4 +1,4 @@
-module m (foo)
+module main (foo)
 
 source Py from "foo.py" ("foo")
 
