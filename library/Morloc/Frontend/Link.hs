@@ -45,8 +45,9 @@ data LinkState = LinkState
   -- ^ maps class methods into stateSignatures index 2
   }
 
--- | Synthesize the module DAG bottom-up, linking all terms, sources,
--- typeclass instances, and declarations into 'MorlocState'.
+{- | Synthesize the module DAG bottom-up, linking all terms, sources,
+typeclass instances, and declarations into 'MorlocState'.
+-}
 link :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 link d0 = do
   mayResult <- DAG.synthesizeNodes synth d0
@@ -66,7 +67,8 @@ synth k0 e0 edges = do
   return finalState
 
 -- Will raise error if any import term is absent in the linkstate list
-realiasLinkState :: MVar -> (MVar, [AliasedSymbol], LinkState) -> MorlocMonad (MVar, MVar, LinkState)
+realiasLinkState ::
+  MVar -> (MVar, [AliasedSymbol], LinkState) -> MorlocMonad (MVar, MVar, LinkState)
 realiasLinkState m1 (m2, ss, s) = do
   termmap <-
     mergeValues "terms" $
@@ -102,9 +104,15 @@ mergeLinkStates m0 imps = do
       -- Set ClassName
       classes = Set.unions $ [Map.keysSet s | (_, _, LinkState _ s) <- imps]
       -- Map EVar [(MVar, Int)]
-      termGroups = Map.fromSet (\k -> catMaybes [(,,) m1 m2 <$> Map.lookup k (linkTerms s) | (m1, m2, s) <- imps]) terms
+      termGroups =
+        Map.fromSet
+          (\k -> catMaybes [(,,) m1 m2 <$> Map.lookup k (linkTerms s) | (m1, m2, s) <- imps])
+          terms
       -- Map ClassName [(MVar, (Int, Map EVar Int))]
-      classGroups = Map.fromSet (\k -> catMaybes [(,,) m1 m2 <$> Map.lookup k (linkClasses s) | (m1, m2, s) <- imps]) classes
+      classGroups =
+        Map.fromSet
+          (\k -> catMaybes [(,,) m1 m2 <$> Map.lookup k (linkClasses s) | (m1, m2, s) <- imps])
+          classes
 
   termmap <- Map.mapWithKeyM mergeTerms termGroups
   classmap <- Map.mapWithKeyM mergeClasses classGroups
@@ -116,27 +124,39 @@ mergeLinkStates m0 imps = do
     mergeTerms _ [(_, _, i)] = return i
     mergeTerms v ((m1, importMod1, i) : (_, importMod2, j) : xs)
       | i == j = mergeTerms v ((m1, importMod1, j) : xs)
-      | otherwise = throwInheritanceError m0
-          $ "Illegal masking of type signatures for" <+> squotes (pretty v)
-          <> "\n It is imported from modules" <+> squotes (pretty importMod1) <+> "and" <+> squotes (pretty importMod2)
-          <> "\n Terms may have multiple implementations but not multiple type signatures"
+      | otherwise =
+          throwInheritanceError m0 $
+            "Illegal masking of type signatures for" <+> squotes (pretty v)
+              <> "\n It is imported from modules"
+                <+> squotes (pretty importMod1)
+                <+> "and"
+                <+> squotes (pretty importMod2)
+              <> "\n Terms may have multiple implementations but not multiple type signatures"
 
-    mergeClasses :: ClassName -> [(MVar, MVar, (Int, a, Map EVar Int))] -> MorlocMonad (Int, a, Map EVar Int)
+    mergeClasses ::
+      ClassName -> [(MVar, MVar, (Int, a, Map EVar Int))] -> MorlocMonad (Int, a, Map EVar Int)
     mergeClasses _ [] = error "This will never be empty"
     mergeClasses _ [(_, _, x)] = return x
     mergeClasses v ((_, m1b, (i, _, _)) : (m2a, m2b, y@(j, _, _)) : xs)
       | i == j = mergeClasses v ((m2a, m2b, y) : xs)
-      | otherwise = throwInheritanceError m0
-          $   "\n  Cannot merge non-eqivalent definitions of typeclass" <+> squotes (pretty v)
-          <+> "\n  Definitions are imported from modules" <+> squotes (pretty m1b) <+> "and" <+> squotes (pretty m2b)
+      | otherwise =
+          throwInheritanceError m0 $
+            "\n  Cannot merge non-eqivalent definitions of typeclass"
+              <+> squotes (pretty v)
+              <+> "\n  Definitions are imported from modules"
+              <+> squotes (pretty m1b)
+              <+> "and"
+              <+> squotes (pretty m2b)
 
     checkTermClassConflicts :: Map EVar Int -> Map ClassName (Int, a, Map EVar Int) -> MorlocMonad ()
     checkTermClassConflicts me mc = case catMaybes . map (checkTermClassConflict me) $ Map.toList mc of
       [] -> return ()
       ((cls, vs) : _) ->
-        throwInheritanceError m0
-          $ "\n  The following terms are defined both as polymorphic terms in typeclass" <+> squotes (pretty cls)
-          <+> "and as independent monomorphic terms:" <+> list (map pretty vs)
+        throwInheritanceError m0 $
+          "\n  The following terms are defined both as polymorphic terms in typeclass"
+            <+> squotes (pretty cls)
+            <+> "and as independent monomorphic terms:"
+            <+> list (map pretty vs)
 
     checkTermClassConflict ::
       Map EVar Int -> (ClassName, (Int, a, Map EVar Int)) -> Maybe (ClassName, [EVar])
@@ -180,10 +200,14 @@ addLocalState m0 e0 s0 = do
       tmap' <- foldlM (\m (k, v) -> insertWithCheck k v m) tmap xs
 
       -- update morloc state
-      MM.modify (\s -> s { stateSignatures = GMap idmap sigmap'
-                         , stateTypeclasses = tmap'
-                         , stateClassDefs = Map.insert cls constraints (stateClassDefs s)
-                         })
+      MM.modify
+        ( \s ->
+            s
+              { stateSignatures = GMap idmap sigmap'
+              , stateTypeclasses = tmap'
+              , stateClassDefs = Map.insert cls constraints (stateClassDefs s)
+              }
+        )
 
       -- generate the (Map EVar Int) list for LinkedState
       let vmap = Map.fromList [(v, i) | (i, Signature v _ _) <- sigsIdx]
@@ -198,11 +222,13 @@ addLocalState m0 e0 s0 = do
     insertWithCheck :: EVar -> Instance -> Map EVar Instance -> MorlocMonad (Map EVar Instance)
     insertWithCheck k v m = case Map.lookup k m of
       (Just inst2) ->
-        throwInheritanceError m0
-           $ "The typeclasses"
-           <+> (squotes . pretty . className $ inst2)
-           <+> "and" <+> (squotes . pretty . className $ v)
-           <+> "have conflicting definitions of the term" <+> squotes (pretty k)
+        throwInheritanceError m0 $
+          "The typeclasses"
+            <+> (squotes . pretty . className $ inst2)
+            <+> "and"
+            <+> (squotes . pretty . className $ v)
+            <+> "have conflicting definitions of the term"
+            <+> squotes (pretty k)
       Nothing -> return $ Map.insert k v m
 
     -- Handle assignments that do not have signatures
@@ -220,7 +246,7 @@ addLocalState m0 e0 s0 = do
           let lstate' = lstate {linkTerms = Map.insert v idx (linkTerms lstate)}
           return (terms', lstate')
     findFreeDefs (ExprI _ (LetE bindings body)) s = do
-      s' <- foldrM (\(_, e) s0 -> findFreeDefs e s0) s bindings
+      s' <- foldrM (\(_, e) s0' -> findFreeDefs e s0') s bindings
       findFreeDefs body s'
     findFreeDefs (ExprI _ (ModE _ es)) s = foldrM findFreeDefs s es
     findFreeDefs (ExprI _ (SuspendE e)) s = findFreeDefs e s
@@ -306,11 +332,13 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
               c'' <- foldrM (addLocalState m0) c' (e : es)
 
               mapM_ (linkLocal bnds' c'' (toCondensedState c'')) (e : es)
-            (Just (Polymorphic cls _ _ _)) -> MM.throwSourcedError i $
+            (Just (Polymorphic cls _ _ _)) ->
+              MM.throwSourcedError i $
                 "Declared term" <+> squotes (pretty v) <+> " overlaps a term in typeclass" <+> squotes (pretty cls)
     linkLocal bnds c cs (ExprI i (IstE cls ts es)) = do
       case Map.lookup cls (linkClasses c) of
-        Nothing -> MM.throwSourcedError i $
+        Nothing ->
+          MM.throwSourcedError i $
             "There is no typeclass declaration for instance"
               <+> squotes (pretty cls)
               <+> "in the scope of module"
@@ -334,7 +362,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
           Nothing -> MM.throwSourcedError termIdx $ "Undefined term: " <> pretty v
     linkLocal _ _ cs (ExprI i (ExpE (ExportMany (Set.toList -> ss) gs))) =
       let allSs = ss ++ concatMap (Set.toList . exportGroupMembers) gs
-      in mapM_ linkExp [(v, termIdx, Map.lookup v cs) | (termIdx, TermSymbol v) <- allSs]
+       in mapM_ linkExp [(v, termIdx, Map.lookup v cs) | (termIdx, TermSymbol v) <- allSs]
       where
         linkExp :: (EVar, Int, Maybe (Int, a)) -> MorlocMonad ()
         linkExp (v, termIdx, Just (sigIdx, _)) = updateSigLinks v termIdx sigIdx
@@ -369,9 +397,14 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
       | otherwise = mapM_ (linkLocal bnds c cs) es
     -- let-bound variables are local, like lambda-bound
     linkLocal bnds c cs (ExprI _ (LetE bindings body)) = do
-      bnds' <- foldlM (\b (v, e) -> do
-        linkLocal b c cs e
-        return (Set.insert v b)) bnds bindings
+      bnds' <-
+        foldlM
+          ( \b (v, e) -> do
+              linkLocal b c cs e
+              return (Set.insert v b)
+          )
+          bnds
+          bindings
       linkLocal bnds' c cs body
     -- simple recursive cases
     linkLocal bnds c cs (ExprI _ (LstE es)) = mapM_ (linkLocal bnds c cs) es
@@ -436,8 +469,11 @@ linkInstance linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
     lookupInfo v = case ([sig | sig@(Signature v' _ _) <- sigs0, v == v'], Map.lookup v emap0) of
       ([sig], Just i) -> return (sig, i)
       _ ->
-        throwInheritanceError m0
-          $ "\n  Instance of class" <+> squotes (pretty cls0) <+> "contains undefined term" <+> squotes (pretty v)
+        throwInheritanceError m0 $
+          "\n  Instance of class"
+            <+> squotes (pretty cls0)
+            <+> "contains undefined term"
+            <+> squotes (pretty v)
 
     linkTermTypes :: EVar -> EType -> TermTypes -> Int -> MorlocMonad ()
     linkTermTypes v et tt stateIdx = do
@@ -544,17 +580,23 @@ checkSuperclassConstraints i cls params constraints = do
     checkOne classDefs (Constraint superCls superTypeArgs) = do
       let substArgs = applyParams superTypeArgs params
       case Map.lookup superCls classDefs of
-        Nothing -> MM.throwSourcedError i $
-          "Superclass" <+> squotes (pretty superCls) <+> "is not defined"
+        Nothing ->
+          MM.throwSourcedError i $
+            "Superclass" <+> squotes (pretty superCls) <+> "is not defined"
         Just _ -> do
           tcls <- MM.gets stateTypeclasses
           let methodsOfSuper = [inst | (_, inst) <- Map.toList tcls, className inst == superCls]
               hasMatchingInstance = any (matchesSuperInstance substArgs) methodsOfSuper
           if not hasMatchingInstance
-            then MM.throwSourcedError i $
-              "Instance" <+> pretty cls <+> hsep (map pretty (map snd params))
-                <+> "requires" <+> pretty superCls <+> hsep (map pretty substArgs)
-                <+> "but no such instance exists"
+            then
+              MM.throwSourcedError i $
+                "Instance"
+                  <+> pretty cls
+                  <+> hsep (map pretty (map snd params))
+                  <+> "requires"
+                  <+> pretty superCls
+                  <+> hsep (map pretty substArgs)
+                  <+> "but no such instance exists"
             else return ()
 
     applyParams :: [TypeU] -> [(TVar, TypeU)] -> [TypeU]

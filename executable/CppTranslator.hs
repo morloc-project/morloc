@@ -25,13 +25,21 @@ module CppTranslator
 
 import Control.Monad.Identity (Identity)
 import qualified Control.Monad.State as CMS
+import qualified CppPrinter as CP
 import qualified Data.Char as DC
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (LowerConfig(..), IType(..), toIType, expandSerialize, expandDeserialize, defaultFoldRules, buildProgramM)
-import qualified CppPrinter as CP
+import Morloc.CodeGenerator.Grammars.Translator.Imperative
+  ( IType (..)
+  , LowerConfig (..)
+  , buildProgramM
+  , defaultFoldRules
+  , expandDeserialize
+  , expandSerialize
+  , toIType
+  )
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
@@ -40,8 +48,8 @@ import Morloc.CodeGenerator.Serial
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
-import qualified Morloc.Language as ML
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import Morloc.Quasi
 import qualified Morloc.System as MS
@@ -54,7 +62,6 @@ cppLang = ML.Lang "cpp" "cpp"
 
 serialType :: MDoc
 serialType = "uint8_t*"
-
 
 data CallSemantics = Copy | Reference | ConstPtr
 
@@ -274,49 +281,50 @@ recordAccess :: MDoc -> MDoc -> MDoc
 recordAccess record field = record <> "." <> field
 
 cppLowerConfig :: LowerConfig CppTranslatorM
-cppLowerConfig = LowerConfig
-  { lcSrcName = \src -> pretty (srcName src)
-  , lcTypeOf = \t -> Just . toIType <$> cppTypeOf t
-  , lcSerialAstType = serializeTypeOf
-  , lcDeserialAstType = \s -> Just . toIType <$> cppTypeOf (shallowType s)
-  , lcRawDeserialAstType = rawTypeOf
-  , lcTemplateArgs = templateArgs
-  , lcTypeMOf = \_ -> return Nothing
-  , lcPackerName = \src -> pretty (srcName src)
-  , lcUnpackerName = \src -> pretty (srcName src)
-  , lcRecordAccessor = \_ _ -> recordAccess
-  , lcDeserialRecordAccessor = \i _ v -> tupleKey i v
-  , lcTupleAccessor = tupleKey
-  , lcNewIndex = getCounter
-  , lcPrintExpr = CP.printExpr
-  , lcPrintStmt = CP.printStmt
-  , lcEvalPattern = \t p xs -> do
-      state <- CMS.get
-      return $ evaluatePattern state t p xs
-  , lcListConstructor = \_ _ es -> encloseSep "{" "}" "," es
-  , lcTupleConstructor = \_ -> ((<>) "std::make_tuple" . tupled)
-  , lcRecordConstructor = \recType _ _ _ rs -> do
-      t <- cppTypeOf recType
-      idx <- getCounter
-      let v' = "a" <> pretty idx
-          decl = t <+> v' <+> "=" <+> encloseSep "{" "}" "," (map snd rs) <> ";"
-      return $ defaultValue {poolExpr = v', poolPriorLines = [decl]}
-  , lcForeignCall = \socketFile mid args ->
-      let argList = [dquotes socketFile, pretty mid] <> args <> ["NULL"]
-       in [idoc|foreign_call#{tupled argList}|]
-  , lcRemoteCall = \socketFile mid res args -> do
-      let resMem = pretty $ remoteResourcesMemory res
-          resTime = pretty $ remoteResourcesTime res
-          resCPU = pretty $ remoteResourcesThreads res
-          resGPU = pretty $ remoteResourcesGpus res
-          cacheDir = ".morloc-cache"
-          argList = encloseSep "{" "}" "," args
-          setup =
-            [idoc|resources_t resources = {#{resMem}, #{resTime}, #{resCPU}, #{resGPU}};
+cppLowerConfig =
+  LowerConfig
+    { lcSrcName = \src -> pretty (srcName src)
+    , lcTypeOf = \t -> Just . toIType <$> cppTypeOf t
+    , lcSerialAstType = serializeTypeOf
+    , lcDeserialAstType = \s -> Just . toIType <$> cppTypeOf (shallowType s)
+    , lcRawDeserialAstType = rawTypeOf
+    , lcTemplateArgs = templateArgs
+    , lcTypeMOf = \_ -> return Nothing
+    , lcPackerName = \src -> pretty (srcName src)
+    , lcUnpackerName = \src -> pretty (srcName src)
+    , lcRecordAccessor = \_ _ -> recordAccess
+    , lcDeserialRecordAccessor = \i _ v -> tupleKey i v
+    , lcTupleAccessor = tupleKey
+    , lcNewIndex = getCounter
+    , lcPrintExpr = CP.printExpr
+    , lcPrintStmt = CP.printStmt
+    , lcEvalPattern = \t p xs -> do
+        state <- CMS.get
+        return $ evaluatePattern state t p xs
+    , lcListConstructor = \_ _ es -> encloseSep "{" "}" "," es
+    , lcTupleConstructor = \_ -> ((<>) "std::make_tuple" . tupled)
+    , lcRecordConstructor = \recType _ _ _ rs -> do
+        t <- cppTypeOf recType
+        idx <- getCounter
+        let v' = "a" <> pretty idx
+            decl = t <+> v' <+> "=" <+> encloseSep "{" "}" "," (map snd rs) <> ";"
+        return $ defaultValue {poolExpr = v', poolPriorLines = [decl]}
+    , lcForeignCall = \socketFile mid args ->
+        let argList = [dquotes socketFile, pretty mid] <> args <> ["NULL"]
+         in [idoc|foreign_call#{tupled argList}|]
+    , lcRemoteCall = \socketFile mid res args -> do
+        let resMem = pretty $ remoteResourcesMemory res
+            resTime = pretty $ remoteResourcesTime res
+            resCPU = pretty $ remoteResourcesThreads res
+            resGPU = pretty $ remoteResourcesGpus res
+            cacheDir = ".morloc-cache"
+            argList = encloseSep "{" "}" "," args
+            setup =
+              [idoc|resources_t resources = {#{resMem}, #{resTime}, #{resCPU}, #{resGPU}};
 const uint8_t* args[] = #{argList};
 char* errmsg = NULL;|]
-          call =
-            [idoc|remote_call(
+            call =
+              [idoc|remote_call(
     #{pretty mid},
     #{dquotes socketFile},
     #{dquotes cacheDir},
@@ -326,50 +334,53 @@ char* errmsg = NULL;|]
     &errmsg
 );
 PROPAGATE_ERROR(errmsg)|]
-      return $ defaultValue {poolExpr = call, poolPriorLines = [setup]}
-  , lcMakeLet = \namer letIndex mt e1 e2 -> do
-      typestr <- case mt of
-        (Just t) -> cppTypeOf t
-        Nothing -> return serialType
-      return $ makeLet namer letIndex typestr e1 e2
-  , lcReturn = \e -> "return(" <> e <> ");"
-  , lcMakeSuspend = \stmts expr -> (,) [] $ case stmts of
-      [] -> "[&](){return " <> expr <> ";}"
-      _ -> "[&](){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"
-  , lcSerialize = \v s -> serialize v s
-  , lcDeserialize = \t v s -> do
-      typestr <- cppTypeOf t
-      deserialize v typestr s
-  , lcMakeFunction = \mname args manifoldType priorLines body headForm -> do
-      callIndex <- CMS.gets translatorCurrentManifold
-      state <- CMS.get
-      let alreadyDone = case headForm of
-            (Just HeadManifoldFormRemoteWorker) -> Set.member callIndex (translatorRemoteManifoldSet state)
-            _ -> Set.member callIndex (translatorLocalManifoldSet state)
-      if alreadyDone then return Nothing
-      else do
-        case headForm of
-          (Just HeadManifoldFormRemoteWorker) ->
-            CMS.modify (\s -> s {translatorRemoteManifoldSet = Set.insert callIndex (translatorRemoteManifoldSet s)})
-          _ ->
-            CMS.modify (\s -> s {translatorLocalManifoldSet = Set.insert callIndex (translatorLocalManifoldSet s)})
-        returnTypeStr <- returnType manifoldType
-        typedArgs <- mapM (\r@(Arg _ t) -> cppArgOf (chooseCallSemantics t) r) args
-        let fullName = mname <> mnameExt headForm
-            decl = returnTypeStr <+> fullName <> tupled typedArgs
-            tryBody = block 4 "try" (vsep $ priorLines <> [body])
-            throwStatement =
-              vsep
-                [ [idoc|std::string error_message = "Error raised in C++ pool by #{mname}:\n" + std::string(e.what());|]
-                , [idoc|throw std::runtime_error(error_message);|]
-                ]
-            catchBody = block 4 "catch (const std::exception& e)" throwStatement
-            tryCatchBody = tryBody <+> catchBody
-        return . Just . block 4 decl . vsep $ [tryCatchBody]
-  , lcMakeLambda = \mname contextArgs boundArgs ->
-      let vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
-       in [idoc|std::bind(#{cat (punctuate "," (mname : (contextArgs ++ vs')))})|]
-  }
+        return $ defaultValue {poolExpr = call, poolPriorLines = [setup]}
+    , lcMakeLet = \namer letIndex mt e1 e2 -> do
+        typestr <- case mt of
+          (Just t) -> cppTypeOf t
+          Nothing -> return serialType
+        return $ makeLet namer letIndex typestr e1 e2
+    , lcReturn = \e -> "return(" <> e <> ");"
+    , lcMakeSuspend = \stmts expr -> (,) [] $ case stmts of
+        [] -> "[&](){return " <> expr <> ";}"
+        _ -> "[&](){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"
+    , lcSerialize = \v s -> serialize v s
+    , lcDeserialize = \t v s -> do
+        typestr <- cppTypeOf t
+        deserialize v typestr s
+    , lcMakeFunction = \mname args manifoldType priorLines body headForm -> do
+        callIndex <- CMS.gets translatorCurrentManifold
+        state <- CMS.get
+        let alreadyDone = case headForm of
+              (Just HeadManifoldFormRemoteWorker) -> Set.member callIndex (translatorRemoteManifoldSet state)
+              _ -> Set.member callIndex (translatorLocalManifoldSet state)
+        if alreadyDone
+          then return Nothing
+          else do
+            case headForm of
+              (Just HeadManifoldFormRemoteWorker) ->
+                CMS.modify
+                  (\s -> s {translatorRemoteManifoldSet = Set.insert callIndex (translatorRemoteManifoldSet s)})
+              _ ->
+                CMS.modify
+                  (\s -> s {translatorLocalManifoldSet = Set.insert callIndex (translatorLocalManifoldSet s)})
+            returnTypeStr <- returnType manifoldType
+            typedArgs <- mapM (\r@(Arg _ t) -> cppArgOf (chooseCallSemantics t) r) args
+            let fullName = mname <> mnameExt headForm
+                decl = returnTypeStr <+> fullName <> tupled typedArgs
+                tryBody = block 4 "try" (vsep $ priorLines <> [body])
+                throwStatement =
+                  vsep
+                    [ [idoc|std::string error_message = "Error raised in C++ pool by #{mname}:\n" + std::string(e.what());|]
+                    , [idoc|throw std::runtime_error(error_message);|]
+                    ]
+                catchBody = block 4 "catch (const std::exception& e)" throwStatement
+                tryCatchBody = tryBody <+> catchBody
+            return . Just . block 4 decl . vsep $ [tryCatchBody]
+    , lcMakeLambda = \mname contextArgs boundArgs ->
+        let vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
+         in [idoc|std::bind(#{cat (punctuate "," (mname : (contextArgs ++ vs')))})|]
+    }
   where
     -- For serialization, records become tuples (that's what _put_value/toAnything expects)
     serializeTypeOf :: SerialAST -> CppTranslator (Maybe IType)

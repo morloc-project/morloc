@@ -22,12 +22,14 @@ module Morloc.Language
 import Data.Text (Text)
 import Morloc.Data.Doc
 
--- | A programming language in the Morloc ecosystem.
--- Identity is determined solely by the canonical name.
+{- | A programming language in the Morloc ecosystem.
+Identity is determined solely by the canonical name.
+-}
 data Lang = Lang
-  { langName :: !Text        -- canonical lowercase name: "py", "r", "cpp", etc.
+  { langName :: !Text -- canonical lowercase name: "py", "r", "cpp", etc.
   , langExtension :: !String -- file extension: "py", "R", "cpp", etc.
-  } deriving (Show)
+  }
+  deriving (Show)
 
 instance Eq Lang where
   a == b = langName a == langName b
@@ -55,7 +57,7 @@ makeSourceName lang base = base ++ "." ++ makeExtension lang
 
 makeExecutableName :: Lang -> String -> String
 makeExecutableName lang base
-  | langName lang == "c"   = base <> "-c.out"
+  | langName lang == "c" = base <> "-c.out"
   | langName lang == "cpp" = base <> "-cpp.out"
   | otherwise = makeSourceName lang base
 

@@ -26,10 +26,10 @@ import qualified Data.Text as DT
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
-import Morloc.Namespace.Prim hiding (name)
-import Morloc.Namespace.Type
 import Morloc.Namespace.Expr
+import Morloc.Namespace.Prim
 import Morloc.Namespace.State
+import Morloc.Namespace.Type
 
 -- | Determine if a type term is generic (i.e., is the first letter lowercase?)
 isGeneric :: Text -> Bool
@@ -65,8 +65,9 @@ mapExprM f = g
     g (ExprI i (AnnE e ts)) = ExprI i <$> ((AnnE <$> g e <*> pure ts) >>= f)
     g (ExprI i e) = ExprI i <$> f e
 
--- | Copy all index-keyed state entries from @oldIndex@ to @newIndex@.
--- Used when a module is re-indexed (e.g., after merging duplicate imports).
+{- | Copy all index-keyed state entries from @oldIndex@ to @newIndex@.
+Used when a module is re-indexed (e.g., after merging duplicate imports).
+-}
 copyState :: Int -> Int -> MorlocMonad ()
 copyState oldIndex newIndex = do
   s <- MM.get

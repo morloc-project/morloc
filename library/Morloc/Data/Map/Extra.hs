@@ -68,8 +68,9 @@ mapM f = Map.traverseWithKey (\_ a -> f a)
 mapWithKeyM :: (Monad m) => (k -> a -> m b) -> Map.Map k a -> m (Map.Map k b)
 mapWithKeyM = Map.traverseWithKey
 
--- | Three-way merge of two maps: apply @fb@ to left-only, @fc@ to right-only,
--- and @fbc@ to entries present in both
+{- | Three-way merge of two maps: apply @fb@ to left-only, @fc@ to right-only,
+and @fbc@ to entries present in both
+-}
 mergeMaps ::
   (Ord a) =>
   (b -> d) ->

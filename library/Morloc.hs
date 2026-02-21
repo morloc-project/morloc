@@ -19,24 +19,23 @@ module Morloc
   , generatePools
   ) where
 
-import Morloc.Namespace.Prim
-import Morloc.Namespace.Type
 import Morloc.Namespace.Expr
+import Morloc.Namespace.Prim
 import Morloc.Namespace.State
+import Morloc.Namespace.Type
 
-import Data.List (partition)
 import Morloc.Data.Doc (pretty)
 
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
-import Morloc.CodeGenerator.Emit (pool, emit, TranslateFn)
-import Morloc.CodeGenerator.Namespace (SerialManifold)
+import Morloc.CodeGenerator.Emit (TranslateFn, emit, pool)
 import Morloc.CodeGenerator.Express (express)
 import Morloc.CodeGenerator.LambdaEval (applyLambdas)
+import Morloc.CodeGenerator.Namespace (SerialManifold)
+import qualified Morloc.CodeGenerator.Nexus as Nexus
 import Morloc.CodeGenerator.Parameterize (parameterize)
 import Morloc.CodeGenerator.Realize (realityCheck)
 import Morloc.CodeGenerator.Segment (segment)
 import Morloc.CodeGenerator.Serialize (serialize)
-import qualified Morloc.CodeGenerator.Nexus as Nexus
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Frontend.API as F
 import Morloc.Frontend.Restructure (restructure)
@@ -52,7 +51,7 @@ typecheckFrontend ::
 typecheckFrontend path code = do
   dag <- F.parse path code
   case DAG.roots dag of
-    (r:_) -> MM.modify (\s -> s { stateModuleName = Just r })
+    (r : _) -> MM.modify (\s -> s {stateModuleName = Just r})
     _ -> return ()
   restructure dag
     >>= treeify
@@ -82,7 +81,7 @@ generatePools rASTs =
     >>= mapM express
     >>= mapM segment |>> concat
     >>= mapM serialize
-    |>> pool
+      |>> pool
 
 -- | Build a program as a local executable
 writeProgram ::
@@ -100,27 +99,28 @@ writeProgram translateFn path code = do
     -- process docstrings to determine how to build CLI
     >>= bimapM (mapM processDocstrings) (mapM processDocstrings)
     -- generate nexus and pools
-    >>= \(gASTs, rASTs) -> do
-      -- Filter out generic (polymorphic) exports -- they can't become CLI subcommands
-      let isConcreteExport (AnnoS (Idx _ t) _ _, _) = not (containsUnk t)
-          (concreteGASTs, genericGASTs) = partition isConcreteExport gASTs
-          (concreteRASTs, genericRASTs) = partition isConcreteExport rASTs
-          warnSkip (AnnoS (Idx i _) _ _) = do
-            name <- MM.metaName i
-            case name of
-              Just (EV n) -> MM.say $ "Warning: skipping generic export '" <> pretty n <> "'"
-              Nothing -> return ()
-      mapM_ (warnSkip . fst) genericGASTs
-      mapM_ (warnSkip . fst) genericRASTs
-      nexus <- Nexus.generate concreteGASTs concreteRASTs
-      MM.startCounter
-      pools <-
-        mapM parameterize (map fst concreteRASTs)
-          >>= mapM express
-          >>= mapM segment |>> concat
-          >>= mapM serialize
-          |>> pool
-          >>= mapM (uncurry (emit translateFn))
-      return (nexus, pools)
-    -- write the code and compile as needed
-    >>= buildProgram
+    >>= \(gASTs, rASTs) ->
+      do
+        -- Filter out generic (polymorphic) exports -- they can't become CLI subcommands
+        let isConcreteExport (AnnoS (Idx _ t) _ _, _) = not (containsUnk t)
+            (concreteGASTs, genericGASTs) = partition isConcreteExport gASTs
+            (concreteRASTs, genericRASTs) = partition isConcreteExport rASTs
+            warnSkip (AnnoS (Idx i _) _ _) = do
+              name <- MM.metaName i
+              case name of
+                Just (EV n) -> MM.say $ "Warning: skipping generic export '" <> pretty n <> "'"
+                Nothing -> return ()
+        mapM_ (warnSkip . fst) genericGASTs
+        mapM_ (warnSkip . fst) genericRASTs
+        nexus <- Nexus.generate concreteGASTs concreteRASTs
+        MM.startCounter
+        pools <-
+          mapM parameterize (map fst concreteRASTs)
+            >>= mapM express
+            >>= mapM segment |>> concat
+            >>= mapM serialize
+              |>> pool
+            >>= mapM (uncurry (emit translateFn))
+        return (nexus, pools)
+        -- write the code and compile as needed
+        >>= buildProgram

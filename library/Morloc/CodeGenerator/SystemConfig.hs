@@ -19,13 +19,13 @@ module Morloc.CodeGenerator.SystemConfig
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Completion as Completion
 import qualified Morloc.DataFiles as DF
-import Morloc.Module (OverwriteProtocol(..))
+import Morloc.Module (OverwriteProtocol (..))
 
 import qualified Data.Text.IO as TIO
 
 import Control.Exception (SomeException, displayException, try)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, getHomeDirectory, removeFile)
-import System.FilePath (takeFileName, replaceExtension)
+import System.FilePath (replaceExtension, takeFileName)
 import System.IO (hPutStrLn, stderr)
 import System.Process (callProcess)
 
@@ -74,11 +74,14 @@ configureAllSteps verbose slurmSupport config = do
 
   say verbose "Compiling libmorloc.so"
   let morlocOptions = if slurmSupport then ["-DSLURM_SUPPORT"] else []
-      cFiles = [buildDir </> DF.embededFileName ef | ef <- DF.libmorlocFiles, ".c" `isSuffixOf` DF.embededFileName ef]
+      cFiles =
+        [ buildDir </> DF.embededFileName ef | ef <- DF.libmorlocFiles, ".c" `isSuffixOf` DF.embededFileName ef
+        ]
       soPath = libDir </> "libmorloc.so"
       objPaths = [buildDir </> replaceExtension (takeFileName f) "o" | f <- cFiles]
   forM_ (zip cFiles objPaths) $ \(cFile, objPath) -> do
-    let args = ["-c", "-Wall", "-Werror", "-O2", "-fPIC", "-I" <> buildDir, "-o", objPath, cFile] <> morlocOptions
+    let args =
+          ["-c", "-Wall", "-Werror", "-O2", "-fPIC", "-I" <> buildDir, "-o", objPath, cFile] <> morlocOptions
     run verbose "gcc" args
   let soArgs = ["-shared", "-o", soPath] <> objPaths <> ["-lpthread"]
   run verbose "gcc" soArgs
@@ -96,8 +99,19 @@ configureAllSteps verbose slurmSupport config = do
       nexusBinPath = localBinDir </> "morloc-nexus"
   createDirectoryIfMissing True localBinDir
   TIO.writeFile nexusSrcPath (DF.embededFileText DF.nexusSource)
-  run verbose "gcc" ["-O2", "-I" <> includeDir, "-o", nexusBinPath, nexusSrcPath,
-             "-L" <> libDir, "-Wl,-rpath," <> libDir, "-lmorloc", "-lpthread"]
+  run
+    verbose
+    "gcc"
+    [ "-O2"
+    , "-I" <> includeDir
+    , "-o"
+    , nexusBinPath
+    , nexusSrcPath
+    , "-L" <> libDir
+    , "-Wl,-rpath," <> libDir
+    , "-lmorloc"
+    , "-lpthread"
+    ]
   removeFile nexusSrcPath
 
   -- Create exe/ and fdb/ directories
@@ -140,11 +154,13 @@ createDirectoryWithDescription verbose description path = do
   if exists
     then
       when verbose $
-        putStrLn $ "Checking " ++ description ++ " ... using existing path " ++ path
+        putStrLn $
+          "Checking " ++ description ++ " ... using existing path " ++ path
     else do
       createDirectoryIfMissing True path
       when verbose $
-        putStrLn $ "Checking " ++ description ++ " ... missing, creating at " ++ path
+        putStrLn $
+          "Checking " ++ description ++ " ... missing, creating at " ++ path
 
 -- | Remove a file, ignoring errors if it was already cleaned up by init.sh
 removeFileSafe :: FilePath -> IO ()

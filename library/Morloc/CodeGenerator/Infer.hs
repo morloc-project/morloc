@@ -55,9 +55,9 @@ inferConcreteTypeU lang (Idx i t0) = do
 inferConcreteTypeU' :: TypeU -> (Scope, Scope) -> Either MorlocError TypeU
 inferConcreteTypeU' generalType (cscope, gscope) = T.pairEval cscope gscope generalType
 
-
 inferConcreteType :: Lang -> Indexed Type -> MorlocMonad TypeF
-inferConcreteType _ (Idx i (UnkT _)) = MM.throwSourcedError i "Cannot infer concrete type for UnkT. This may be an unsolved generic term"
+inferConcreteType _ (Idx i (UnkT _)) =
+  MM.throwSourcedError i "Cannot infer concrete type for UnkT. This may be an unsolved generic term"
 inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
   concreteType <- inferConcreteTypeU lang (Idx i generalType)
   (_, gscope) <- getScope i lang
@@ -78,8 +78,9 @@ inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
           mayReducedGType <- evalGeneralStep i generalType
           case mayReducedGType of
             (Just reducedGType) -> inferConcreteType lang (Idx i (typeOf reducedGType))
-            Nothing -> MM.throwSourcedError i $
-              "Cannot infer concrete type for" <+> pretty generalType <> "\nCould not reduce type"
+            Nothing ->
+              MM.throwSourcedError i $
+                "Cannot infer concrete type for" <+> pretty generalType <> "\nCould not reduce type"
 
 inferConcreteTypeUniversal :: Lang -> Type -> MorlocMonad TypeF
 inferConcreteTypeUniversal lang t@(type2typeu -> generalType) = do
@@ -92,11 +93,16 @@ inferConcreteTypeUniversal lang t@(type2typeu -> generalType) = do
       case T.evaluateStep gscopeUni generalType of
         (Just reducedGType) ->
           if reducedGType == generalType
-            then MM.throwSystemError $
-              "Failed to resolve concrete type for" <+> pretty t <+> "and cannot evaluate any further"
-            else MM.throwSystemError $
-              "Failed to infer concrete type for" <+> pretty generalType <> ": Cannot unify with" <+> pretty reducedGType
-        Nothing -> MM.throwSystemError $ "Failed to infer concrete type for" <+> pretty t <+> ": Could not reduce type in broadest scope"
+            then
+              MM.throwSystemError $
+                "Failed to resolve concrete type for" <+> pretty t <+> "and cannot evaluate any further"
+            else
+              MM.throwSystemError $
+                "Failed to infer concrete type for" <+> pretty generalType
+                  <> ": Cannot unify with" <+> pretty reducedGType
+        Nothing ->
+          MM.throwSystemError $
+            "Failed to infer concrete type for" <+> pretty t <+> ": Could not reduce type in broadest scope"
 
 inferConcreteTypeUUniversal :: Lang -> TypeU -> MorlocMonad TypeU
 inferConcreteTypeUUniversal lang generalType = do
@@ -105,8 +111,13 @@ inferConcreteTypeUUniversal lang generalType = do
   let attemptUni = inferConcreteTypeU' generalType (cscopeUni, gscopeUni)
   case attemptUni of
     (Right t) -> return t
-    (Left (SystemError e2)) -> MM.throwSystemError $ "Failed to infer concrete universal type for lang"
-        <+> pretty lang <+> "for type" <+> pretty generalType <> ":" <+> e2
+    (Left (SystemError e2)) ->
+      MM.throwSystemError $
+        "Failed to infer concrete universal type for lang"
+          <+> pretty lang
+          <+> "for type"
+          <+> pretty generalType
+          <> ":" <+> e2
     (Left e) -> MM.throwError e
 
 weave :: Scope -> TypeU -> TypeU -> Either MDoc TypeF

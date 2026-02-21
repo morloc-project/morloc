@@ -23,6 +23,10 @@ across Python, C++, and R under a unified type system.
 After making a substantial change to the Haskell code, run:
 
 $ stack install --no-run-tests 
+$ stack test morloc:morloc-test
+
+To run the full heavy integrated test suite, run:
+
 $ stack test
 
 If you make any change to the non-haskell code in data/, then you MUST run

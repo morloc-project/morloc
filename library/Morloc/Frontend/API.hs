@@ -23,21 +23,22 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.Config as Config
 import qualified Morloc.Data.DAG as MDD
+import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
-import Morloc.Frontend.Parser (PState (..), emptyPState)
 import Morloc.Frontend.Namespace
+import Morloc.Frontend.Parser (PState (..), emptyPState)
 import qualified Morloc.Frontend.Parser as Parser
 import qualified Morloc.Frontend.Typecheck as Typecheck
 import qualified Morloc.Frontend.Valuecheck as Valuecheck
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
-import Morloc.Data.Doc
-import System.Directory (doesDirectoryExist, listDirectory, doesFileExist)
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 
--- | Parse a morloc source file and all its imports into a module DAG.
--- Recursively discovers and parses imported modules.
+{- | Parse a morloc source file and all its imports into a module DAG.
+Recursively discovers and parses imported modules.
+-}
 parse ::
   -- | path to the current module (if we are reading from a file)
   Maybe Path ->
@@ -48,13 +49,16 @@ parse f (Code code) = do
   moduleConfig <- Config.loadModuleConfig f
   langMap <- buildLangMap'
 
-  let parserState = emptyPState { psModuleConfig = moduleConfig
-                                , psLangMap = langMap }
+  let parserState =
+        emptyPState
+          { psModuleConfig = moduleConfig
+          , psLangMap = langMap
+          }
 
   -- store source text and load package metadata for the main file
   case f of
     Just path -> do
-      MM.modify (\st -> st { stateSourceText = Map.insert path code (stateSourceText st) })
+      MM.modify (\st -> st {stateSourceText = Map.insert path code (stateSourceText st)})
       Mod.loadModuleMetadata path
     Nothing -> return ()
 
@@ -71,7 +75,7 @@ parse f (Code code) = do
     parseImports d s m = case unimported of
       [] -> do
         -- transfer source positions from parser state into MorlocState
-        MM.modify (\st -> st { stateSourceMap = psSourceMap s <> stateSourceMap st })
+        MM.modify (\st -> st {stateSourceMap = psSourceMap s <> stateSourceMap st})
         return d
       ((mainModule, importedModule) : _) -> do
         importPath <- case Map.lookup mainModule m of
@@ -80,7 +84,7 @@ parse f (Code code) = do
 
         -- Load the <main>.yaml file associated with the main morloc package file
         moduleConfig <- Config.loadModuleConfig (Just importPath)
-        let newState = s { psModuleConfig = moduleConfig }
+        let newState = s {psModuleConfig = moduleConfig}
 
         Mod.loadModuleMetadata importPath
         (childPath, code') <- openLocalModule importPath
@@ -98,11 +102,12 @@ parse f (Code code) = do
 openLocalModule :: Path -> MorlocMonad (Maybe Path, Text)
 openLocalModule filename = do
   code <- liftIO $ MT.readFile filename
-  MM.modify (\st -> st { stateSourceText = Map.insert filename code (stateSourceText st) })
+  MM.modify (\st -> st {stateSourceText = Map.insert filename code (stateSourceText st)})
   return (Just filename, code)
 
--- | Build a map from language aliases to Lang values, combining the
--- registry (built-in languages) with filesystem-discovered plugins.
+{- | Build a map from language aliases to Lang values, combining the
+registry (built-in languages) with filesystem-discovered plugins.
+-}
 buildLangMap' :: MorlocMonad (Map.Map T.Text Lang)
 buildLangMap' = do
   -- Get the registry-based lang map (all built-in languages)
@@ -113,12 +118,13 @@ buildLangMap' = do
   home <- MM.asks configHome
   let langDir = home </> "lang"
   exists <- liftIO $ doesDirectoryExist langDir
-  pluginMap <- if not exists
-    then return Map.empty
-    else do
-      dirs <- liftIO $ listDirectory langDir
-      results <- liftIO $ mapM (scanLangDir langDir) dirs
-      return $ Map.fromList [(n, lang) | Just (n, lang) <- results]
+  pluginMap <-
+    if not exists
+      then return Map.empty
+      else do
+        dirs <- liftIO $ listDirectory langDir
+        results <- liftIO $ mapM (scanLangDir langDir) dirs
+        return $ Map.fromList [(n, lang) | Just (n, lang) <- results]
 
   -- Registry entries take precedence over filesystem discoveries
   return $ Map.union registryMap pluginMap

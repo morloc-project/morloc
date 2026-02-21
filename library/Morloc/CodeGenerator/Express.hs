@@ -53,7 +53,7 @@ propagateScope :: Int -> Int -> MorlocMonad ()
 propagateScope calleeIdx appIdx = do
   s <- MM.get
   case GMap.yIsX calleeIdx appIdx (stateConcreteTypedefs s) of
-    (Just gmap') -> MM.put $ s { stateConcreteTypedefs = gmap' }
+    (Just gmap') -> MM.put $ s {stateConcreteTypedefs = gmap'}
     Nothing -> return ()
 
 express :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
@@ -71,7 +71,7 @@ forceExportThunks cidx t (PolyHead lang midx args body) =
       retT = case t of FunT _ ret -> ret; t' -> t'
       body' = suspendThunkArgs thunkArgIds body
       body'' = forceAtReturn cidx retT body'
-  in PolyHead lang midx args body''
+   in PolyHead lang midx args body''
   where
     -- Wrap BndVar references to thunk-typed args in PolySuspend.
     -- The arg is deserialized as the inner type; the suspend creates the thunk.
@@ -118,7 +118,6 @@ expressCore (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) =
     . PolyHead lang midx [Arg i None | i <- ids]
     . PolyReturn
     $ PolyApp (PolyExe (Idx midx c) exe') lambdaVals
-
 expressCore (AnnoS (Idx midx _) (_, lambdaArgs) (LamS _ e@(AnnoS (Idx _ applicationType) (c, _) x))) = do
   MM.sayVVV $ "express LamS (midx=" <> pretty midx <> "):"
   setManifoldConfig midx e
@@ -142,14 +141,12 @@ expressCore (AnnoS (Idx midx t@(NamT o v ps rs)) (Idx cidx lang, args) (NamS ent
   xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) idxTypes (map snd entries)
   let x = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip idxTypes xs'))
   return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
-
 expressCore (AnnoS (Idx midx t) (Idx cidx lang, args) (NamS entries)) = do
   MM.sayVVV $ "express NamT expand:" <+> pretty t
   mayT <- evalGeneralStep midx (type2typeu t)
   case mayT of
     (Just t') -> expressCore (AnnoS (Idx midx (typeOf t')) (Idx cidx lang, args) (NamS entries))
     Nothing -> MM.throwSourcedError midx $ "Missing concrete:" <+> "t=" <> pretty t
-
 expressCore e = do
   MM.sayVVV "express default"
   expressDefault e
@@ -163,7 +160,8 @@ reduceType scope t0 =
 
 expressDefault :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
 expressDefault e0@(AnnoS (Idx midx t) (Idx cidx lang, args) _) =
-  PolyHead lang midx [Arg i None | Arg i _ <- args] . ensurePolyReturn <$> expressPolyExprWrap lang (Idx cidx t) e0
+  PolyHead lang midx [Arg i None | Arg i _ <- args] . ensurePolyReturn
+    <$> expressPolyExprWrap lang (Idx cidx t) e0
   where
     -- ensure the manifold body has PolyReturn at the return position
     ensurePolyReturn (PolyReturn x) = PolyReturn x
@@ -250,7 +248,6 @@ expressPolyExpr
         return
           . PolyManifold parentLang midx (ManifoldPart contextArgs typedLambdaArgs)
           $ call
-
     | not isLocal = do
         propagateScope gidxCall midx
 
@@ -380,7 +377,6 @@ expressPolyExpr _ _ _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manifoldArgume
     . PolyManifold lang midx (ManifoldPart contextArguments typeBoundArguments)
     . PolyReturn
     $ body'
-
 expressPolyExpr
   findRemote
   parentLang
@@ -398,7 +394,6 @@ expressPolyExpr
         return
           . PolyManifold callLang midx (ManifoldFull (map unvalue args))
           $ func
-
     | not isLocal = do
         propagateScope gidxCall midx
         let idxInputTypes = zipWith mkIdx xs inputs
@@ -416,7 +411,6 @@ expressPolyExpr
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
-
 expressPolyExpr
   findRemote
   parentLang
@@ -430,7 +424,6 @@ expressPolyExpr
         return
           . PolyManifold callLang midx (ManifoldPass lambdaTypedArgs)
           $ retapp
-
     | otherwise = do
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaArgs = [Arg i None | i <- ids]
@@ -450,7 +443,6 @@ expressPolyExpr
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
-
 expressPolyExpr _ _ _ (AnnoS (Idx i c) (Idx cidx _, rs) (BndS v)) = do
   MM.sayVVV $ "express' VarS" <+> parens (pretty v) <+> "::" <+> pretty c
   case [j | (Arg j v') <- rs, v == v'] of
@@ -467,24 +459,24 @@ expressPolyExpr _ _ _ (AnnoS (Idx i c) (Idx cidx _, rs) (BndS v)) = do
           <> "\n  cidx:" <+> pretty cidx
           <> "\n  gidx:" <+> pretty cidx
           <> "\n  rs:" <+> list (map pretty rs)
-
 expressPolyExpr _ _ _ (AnnoS (Idx i c) (Idx cidx _, rs) (LetBndS v)) = do
   case [j | (Arg j v') <- rs, v == v'] of
     [r] -> return $ PolyLetVar (Idx cidx c) r
     _ -> MM.throwSourcedError i $ "Undefined let-bound variable:" <+> pretty v
-
-expressPolyExpr _ parentLang parentType
-    (AnnoS _ (Idx cidx _, _) (LetS v e1 e2)) = do
-  let bodyArgs = case e2 of AnnoS _ (_, args) _ -> args
-      -- unused let-bound variables (e.g. from do-block bare statements) won't
-      -- appear in body args; use cidx as a unique dummy ID in that case
-      letId = case [j | Arg j v' <- bodyArgs, v' == v] of
-                [j] -> j
-                _   -> cidx
-  e1' <- expressPolyExprWrap parentLang parentType e1
-  e2' <- expressPolyExprWrap parentLang parentType e2
-  return $ PolyLet letId e1' e2'
-
+expressPolyExpr
+  _
+  parentLang
+  parentType
+  (AnnoS _ (Idx cidx _, _) (LetS v e1 e2)) = do
+    let bodyArgs = case e2 of AnnoS _ (_, args) _ -> args
+        -- unused let-bound variables (e.g. from do-block bare statements) won't
+        -- appear in body args; use cidx as a unique dummy ID in that case
+        letId = case [j | Arg j v' <- bodyArgs, v' == v] of
+          [j] -> j
+          _ -> cidx
+    e1' <- expressPolyExprWrap parentLang parentType e1
+    e2' <- expressPolyExprWrap parentLang parentType e2
+    return $ PolyLet letId e1' e2'
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (RealS x)) = return $ PolyReal (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (IntS x)) = return $ PolyInt (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (LogS x)) = return $ PolyLog (Idx cidx v) x
@@ -500,24 +492,21 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx l
   xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) idxTs xs
   let e = PolyTuple (Idx cidx v) (fromJust $ safeZip idxTs xs')
   return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
-
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
   let tsIdx = zipWith mkIdx (map snd entries) (map snd rs)
   xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) tsIdx (map snd entries)
   let e = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip tsIdx xs'))
   return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
-
 expressPolyExpr _ pl pc (AnnoS (Idx i t) c e@(NamS _)) = do
   scope <- MM.getGeneralScope i
   case reduceType scope t of
     (Just t') -> expressPolyExprWrap pl pc (AnnoS (Idx i t') c e)
     Nothing -> error "Expected a record type"
 expressPolyExpr _ _ _ (AnnoS (Idx i _) _ (AppS (AnnoS _ _ (BndS v)) _)) =
-  MM.throwSourcedError i $ "Undefined function" <+> dquotes (pretty v) <> ", did you forget an import?"
-
+  MM.throwSourcedError i $
+    "Undefined function" <+> dquotes (pretty v) <> ", did you forget an import?"
 expressPolyExpr _ _ _ (AnnoS _ _ (AppS (AnnoS _ _ (LamS vs _)) _)) =
   error $ "All applications of lambdas should have been eliminated of length " <> show (length vs)
-
 expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx cidx lang, _) (SuspendS x)) = do
   x' <- expressPolyExprWrap lang (mkIdx x t) x
   return $ PolySuspend (Idx cidx t) x'
@@ -555,7 +544,6 @@ expressPolyExpr
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
-
 expressPolyExpr _ _ parentType x@(AnnoS (Idx m t) _ _) = do
   MM.sayVVV "Bad case"
   MM.sayVVV $ "  t :: " <> pretty t
@@ -590,12 +578,10 @@ expressPolyApp lang f@(AnnoS g@(Idx i _) _ (AppS _ _)) es = do
     . PolyLet i fe
     . PolyReturn
     $ PolyApp (PolyLetVar g i) es
-
 expressPolyApp _ (AnnoS g (_, args) (BndS v)) xs = do
   case [j | (Arg j u) <- args, u == v] of
     [j] -> return . PolyReturn $ PolyApp (PolyExe g (LocalCallP j)) xs
     _ -> error "Unreachable? BndS value should have been wired uniquely to args previously"
-
 expressPolyApp _ (AnnoS _ _ (LamS _ _)) _ = error "unexpected LamS - should have been handled"
 expressPolyApp _ (AnnoS _ _ (VarS _ _)) _ = error "unexpected VarS - should have been substituted"
 expressPolyApp _ _ _ = error "Unreachable? This does not seem to be applicable"
@@ -616,11 +602,12 @@ expressContainer pc (Idx midx parentLang) (Idx _ lang) args e
 unvalue :: Arg a -> Arg None
 unvalue (Arg i _) = Arg i None
 
--- | Handle cross-language force by stripping ThunkT from the callee's function
--- return type. The source function actually returns the unwrapped type; the
--- ThunkT wrapper is a type-system abstraction. By removing it, Common.hs won't
--- auto-wrap in SuspendN, so the raw value is serialized directly.
--- If no PolyRemoteInterface is found, falls back to wrapping in PolyForce.
+{- | Handle cross-language force by stripping ThunkT from the callee's function
+return type. The source function actually returns the unwrapped type; the
+ThunkT wrapper is a type-system abstraction. By removing it, Common.hs won't
+auto-wrap in SuspendN, so the raw value is serialized directly.
+If no PolyRemoteInterface is found, falls back to wrapping in PolyForce.
+-}
 pushForceIntoRemote :: Indexed Type -> PolyExpr -> PolyExpr
 pushForceIntoRemote t = go
   where

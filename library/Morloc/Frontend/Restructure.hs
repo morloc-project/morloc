@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {- |
 Module      : Morloc.Frontend.Restructure
@@ -24,8 +24,8 @@ import Data.Text (Text)
 import qualified Morloc.Data.DAG as DAG
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
-import qualified Morloc.Data.Map as Map
 import Morloc.Data.Map (Map)
+import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Namespace
@@ -88,7 +88,8 @@ checkForSelfRecursion d = do
       | otherwise = return ()
     -- otherwise disallow self-recursion
     isExprSelfRecursive (ExprI i (TypE (ExprTypeE _ v ts t _)))
-      | any (hasTerm v) (t : (rights ts)) = MM.throwSourcedError i $ "Found unsupported self-recursive type alias:" <+> pretty v
+      | any (hasTerm v) (t : (rights ts)) =
+          MM.throwSourcedError i $ "Found unsupported self-recursive type alias:" <+> pretty v
       | otherwise = return ()
     isExprSelfRecursive _ = return ()
 
@@ -199,9 +200,9 @@ resolveHoles = DAG.mapNodeM unhole
 resolveImports ::
   DAG MVar Import ExprI ->
   MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
-resolveImports d0
-  = DAG.synthesize resolveExports resolveEdge d0
-  >>= maybe (MM.throwSystemError "Cyclical import dependency in resolveImports") return
+resolveImports d0 =
+  DAG.synthesize resolveExports resolveEdge d0
+    >>= maybe (MM.throwSystemError "Cyclical import dependency in resolveImports") return
   where
     -- Collect all exported terms from a module (including those imported
     -- without qualification. Then update the ExpE term
@@ -225,13 +226,18 @@ resolveImports d0
            in if Set.null missing
                 then do
                   -- Rebuild groups with resolved typeclasses
-                  let resolvedGroups = map (\g -> g { exportGroupMembers = resolveExplicitTypeclasses allSymbols (exportGroupMembers g) }) groups
+                  let resolvedGroups =
+                        map
+                          (\g -> g {exportGroupMembers = resolveExplicitTypeclasses allSymbols (exportGroupMembers g)})
+                          groups
                       resolvedUngrouped = resolveExplicitTypeclasses allSymbols ungroupedExports
                   return $ AST.setExport (ExportMany resolvedUngrouped resolvedGroups) e
                 else
                   MM.throwSystemError $
-                    "Module" <+> squotes (pretty m) <+> "does not export the following terms or types:"
-                             <+> list (map pretty (Set.toList missing))
+                    "Module"
+                      <+> squotes (pretty m)
+                      <+> "does not export the following terms or types:"
+                      <+> list (map pretty (Set.toList missing))
 
     resolveExplicitTypeclasses :: Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol)
     resolveExplicitTypeclasses ss sis = Set.map f sis
@@ -256,7 +262,7 @@ resolveImports d0
       (_, ExportAll) -> error "This should have been resolved already"
       (Nothing, ExportMany exps gs) ->
         let allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
-        in return $ map (toAliasedSymbol . snd) (Set.toList allExps)
+         in return $ map (toAliasedSymbol . snd) (Set.toList allExps)
       (Just ass, ExportMany exps gs) -> return . catMaybes $ map (importAlias . unAliasedSymbol) ass
         where
           allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
@@ -280,14 +286,18 @@ resolveImports d0
     -- Here we import everything outside the exclude set, no aliasing
     filterImports _ (Import _ Nothing exclude _) (ExportMany exports gs) =
       let allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
-      in return $ (Set.map snd allExports) `Set.difference` (Set.fromList exclude)
+       in return $ (Set.map snd allExports) `Set.difference` (Set.fromList exclude)
     filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) _) (ExportMany exports gs) =
       case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
         ([], imps) -> return $ Set.fromList imps
-        (missing, _) -> MM.throwSystemError
-            $ "The terms imported from" <+> squotes (pretty m1)
-            <+> "are not exported from module" <+> squotes (pretty m2) <> ":\n"
-            <+> indent 2 (vsep (map pretty missing))
+        (missing, _) ->
+          MM.throwSystemError $
+            "The terms imported from"
+              <+> squotes (pretty m1)
+              <+> "are not exported from module"
+              <+> squotes (pretty m2)
+              <> ":\n"
+                <+> indent 2 (vsep (map pretty missing))
       where
         allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
         exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExports]
@@ -344,12 +354,11 @@ handleTypeDeclarations = DAG.mapNode f
       v /= v' || length vs /= length vs' || not (all (uncurry (==)) (zip vs vs'))
     isNotSelfDef _ = True
 
-
 handleBinops :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
 handleBinops d0 = do
   mayN <- DAG.synthesize updateNode (\e _ _ -> return e) d0
   case mayN of
-    (Just e') -> return $ DAG.mapNode (\(e,_,_)->e) e'
+    (Just e') -> return $ DAG.mapNode (\(e, _, _) -> e) e'
     Nothing -> error "Unreachable?"
   where
     updateNode ::
@@ -363,14 +372,15 @@ handleBinops d0 = do
       let clsOps = Map.unions $ findClassOps e : [filterClsOps ss cs | (_, ss, (_, cs, _)) <- es]
           clsOpSet = Set.fromList . concat $ Map.elems clsOps
 
-      fixityMap <- mergeFixityMaps $ thisFixityMap : [filterTerms clsOpSet m ss | (_, ss, (_, _, m)) <- es]
+      fixityMap <-
+        mergeFixityMaps $ thisFixityMap : [filterTerms clsOpSet m ss | (_, ss, (_, _, m)) <- es]
       e' <- updateBinopExprs fixityMap e
       return (e', clsOps, fixityMap)
 
     filterClsOps :: [AliasedSymbol] -> Map ClassName [EVar] -> Map ClassName [EVar]
     filterClsOps ass clsmap =
       let clss = [cls | (AliasedClass cls) <- ass]
-      in Map.filterWithKey (\k _ -> elem k clss) clsmap
+       in Map.filterWithKey (\k _ -> elem k clss) clsmap
 
     findClassOps :: ExprI -> Map ClassName [EVar]
     findClassOps (ExprI _ (ModE _ es)) = Map.unions (map findClassOps es)
@@ -378,52 +388,55 @@ handleBinops d0 = do
     findClassOps _ = Map.empty
 
     filterTerms :: Set EVar -> Map EVar a -> [AliasedSymbol] -> Map EVar a
-    filterTerms cs m ss = Map.union unaliasedOps clsOps where
-      symMap = Map.fromList [(k, v) | (AliasedTerm k v) <- ss]
+    filterTerms cs m ss = Map.union unaliasedOps clsOps
+      where
+        symMap = Map.fromList [(k, v) | (AliasedTerm k v) <- ss]
 
-      -- gather non-typeclass operator aliases
-      unaliasedOps = Map.fromList . catMaybes $ [Map.lookup k symMap |>> (, v) | (k, v) <- Map.toList m]
+        -- gather non-typeclass operator aliases
+        unaliasedOps = Map.fromList . catMaybes $ [Map.lookup k symMap |>> (,v) | (k, v) <- Map.toList m]
 
-      -- gather typeclass operators aliases
-      clsOps = Map.filterWithKey (\k _ -> Set.member k cs) m
+        -- gather typeclass operators aliases
+        clsOps = Map.filterWithKey (\k _ -> Set.member k cs) m
 
-    mergeFixityMaps :: Eq a => [Map EVar a] -> MorlocMonad (Map EVar a)
+    mergeFixityMaps :: (Eq a) => [Map EVar a] -> MorlocMonad (Map EVar a)
     mergeFixityMaps [] = return Map.empty
     mergeFixityMaps [e1] = return e1
-    mergeFixityMaps (e1:e2:es) = do
+    mergeFixityMaps (e1 : e2 : es) = do
       e' <- foldlM strictInsert e1 (Map.toList e2)
-      mergeFixityMaps (e':es)
+      mergeFixityMaps (e' : es)
 
-    strictInsert :: Eq v => Map EVar v -> (EVar, v) -> MorlocMonad (Map EVar v)
+    strictInsert :: (Eq v) => Map EVar v -> (EVar, v) -> MorlocMonad (Map EVar v)
     strictInsert m (k, v) = case Map.lookup k m of
       Nothing -> return $ Map.insert k v m
-      (Just v') -> if v == v'
-                   then return m
-                   else MM.throwSystemError $ "Conflicting fixity definitions for" <+> pretty k
+      (Just v') ->
+        if v == v'
+          then return m
+          else MM.throwSystemError $ "Conflicting fixity definitions for" <+> pretty k
 
     updateBinopExprs :: Map EVar (Associativity, Int) -> ExprI -> MorlocMonad ExprI
-    updateBinopExprs m0 = f where
-      f e@(ExprI _ BopE{}) = resolveBinop m0 e >>= f
-      f (ExprI i (ModE m es)) = ModE m <$> mapM f es |>> ExprI i
-      f (ExprI i (IstE cls ts es)) = IstE cls ts <$> mapM f es |>> ExprI i
-      f (ExprI i (AssE v e es)) = AssE v <$> f e <*> mapM f es |>> ExprI i
-      f (ExprI i (LstE es)) = LstE <$> mapM f es |>> ExprI i
-      f (ExprI i (TupE es)) = TupE <$> mapM f es |>> ExprI i
-      f (ExprI i (NamE rs)) = do
-        es' <- mapM (f . snd) rs
-        return $ ExprI i (NamE (zip (map fst rs) es'))
-      f (ExprI i (AppE e es)) = AppE <$> f e <*> mapM f es |>> ExprI i
-      f (ExprI i (LamE vs e)) = LamE vs <$> f e |>> ExprI i
-      f (ExprI i (AnnE e t)) = AnnE <$> f e <*> pure t |>> ExprI i
-      f (ExprI i (LetE bindings body)) = do
-        bindings' <- mapM (\(v, e) -> (,) v <$> f e) bindings
-        body' <- f body
-        return $ ExprI i (LetE bindings' body')
-      f (ExprI i (SuspendE e)) = SuspendE <$> f e |>> ExprI i
-      f (ExprI i (ForceE e)) = ForceE <$> f e |>> ExprI i
-      f e = return e
+    updateBinopExprs m0 = f
+      where
+        f e@(ExprI _ BopE {}) = resolveBinop m0 e >>= f
+        f (ExprI i (ModE m es)) = ModE m <$> mapM f es |>> ExprI i
+        f (ExprI i (IstE cls ts es)) = IstE cls ts <$> mapM f es |>> ExprI i
+        f (ExprI i (AssE v e es)) = AssE v <$> f e <*> mapM f es |>> ExprI i
+        f (ExprI i (LstE es)) = LstE <$> mapM f es |>> ExprI i
+        f (ExprI i (TupE es)) = TupE <$> mapM f es |>> ExprI i
+        f (ExprI i (NamE rs)) = do
+          es' <- mapM (f . snd) rs
+          return $ ExprI i (NamE (zip (map fst rs) es'))
+        f (ExprI i (AppE e es)) = AppE <$> f e <*> mapM f es |>> ExprI i
+        f (ExprI i (LamE vs e)) = LamE vs <$> f e |>> ExprI i
+        f (ExprI i (AnnE e t)) = AnnE <$> f e <*> pure t |>> ExprI i
+        f (ExprI i (LetE bindings body)) = do
+          bindings' <- mapM (\(v, e) -> (,) v <$> f e) bindings
+          body' <- f body
+          return $ ExprI i (LetE bindings' body')
+        f (ExprI i (SuspendE e)) = SuspendE <$> f e |>> ExprI i
+        f (ExprI i (ForceE e)) = ForceE <$> f e |>> ExprI i
+        f e = return e
 
-    -- | Rewrite a right-nested BopE chain into a correctly-associated AppE tree.
+    -- \| Rewrite a right-nested BopE chain into a correctly-associated AppE tree.
     -- Uses the Pratt (precedence climbing) algorithm.
     -- Operators not in fixMap default to infixl 9.
     resolveBinop :: Map EVar (Associativity, Int) -> ExprI -> MorlocMonad ExprI
@@ -459,7 +472,8 @@ handleBinops d0 = do
                 ((_, _, nextOp, _) : _) -> do
                   let (nextAssoc, nextPrec) = lookupFixity nextOp
                   when (nextPrec == prec && (assoc /= nextAssoc || assoc == InfixN)) . MM.throwSourcedError opI $
-                    "Ambiguous use of" <+> pretty op <+> "and" <+> pretty nextOp <> ": parenthesize or declare compatible fixities"
+                    "Ambiguous use of" <+> pretty op <+> "and" <+> pretty nextOp
+                      <> ": parenthesize or declare compatible fixities"
                 [] -> return ()
               let lhs' = ExprI outerI $ AppE (ExprI opI (VarE defaultValue op)) [lhs, rhsParsed]
               pratt minPrec lhs' remaining
@@ -491,9 +505,10 @@ collectTags fullDag = do
 
 type GCMap = (Scope, Map Lang Scope)
 
--- | Add the following fields to state:
---   * stateGeneralTypedefs           :: GMap Int MVar Scope
---   * stateConcreteTypedefs          :: GMap Int MVar (Map Lang Scope)
+{- | Add the following fields to state:
+  * stateGeneralTypedefs           :: GMap Int MVar Scope
+  * stateConcreteTypedefs          :: GMap Int MVar (Map Lang Scope)
+-}
 collectTypes :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTypes fullDag = do
   let typeDag = DAG.mapEdge (\xs -> [(x, y) | AliasedType x y <- xs]) fullDag
@@ -512,7 +527,6 @@ collectTypes fullDag = do
       ] ->
       MorlocMonad GCMap
     formTypes m e0 childImports = do
-
       let (generalTypemap, concreteTypemapsIncomplete) = foldl inherit (AST.findTypedefs e0) childImports
 
       -- Here we are creating links from every indexed term in the module to the module
@@ -541,14 +555,13 @@ collectTypes fullDag = do
           , Map.unionWith (Map.unionWith mergeEntries) cmap' thisCmap
           )
 
-
--- | collect type definitions globally
---   define:
---     * stateUniversalGeneralTypedefs
---     * stateUniversalConcreteTypedefs
+{- | collect type definitions globally
+  define:
+    * stateUniversalGeneralTypedefs
+    * stateUniversalConcreteTypedefs
+-}
 collectUniversalTypes :: MorlocMonad ()
 collectUniversalTypes = do
-
   universalGeneralScope <- getUniversalGeneralScope
   universalConcreteScope <- getUniversalConcreteScope universalGeneralScope
 
@@ -560,7 +573,6 @@ collectUniversalTypes = do
         }
     )
   where
-
     getUniversalGeneralScope :: MorlocMonad Scope
     getUniversalGeneralScope = do
       (GMap _ (Map.elems -> scopes)) <- MM.gets stateGeneralTypedefs
@@ -581,33 +593,30 @@ collectUniversalTypes = do
           let langMaps' = map (Map.map (completeRecords gscope)) langMaps
           return . Map.unionsWith mergeEntries . mapMaybe (Map.lookup lang) $ langMaps'
 
-
--- | links the general entries from records to their abbreviated concrete cousins.
--- For example:
---   record (Person a) = Person {name :: Str, info a}
---   record Py => Person a = "dict"
--- This syntax avoids the need to duplicate the entire entry
+{- | links the general entries from records to their abbreviated concrete cousins.
+For example:
+  record (Person a) = Person {name :: Str, info a}
+  record Py => Person a = "dict"
+This syntax avoids the need to duplicate the entire entry
+-}
 completeRecords :: Scope -> Scope -> Scope
 completeRecords gscope = Map.mapWithKey (completeRecord gscope)
   where
-  completeRecord ::
-    Scope ->
-    TVar ->
-    [([Either TVar TypeU], TypeU, ArgDoc, Bool)] ->
-    [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
-  completeRecord g v xs = case Map.lookup v g of
-    (Just ys) -> map (completeValue [(vs, t) | (vs, t, _, _) <- ys]) xs
-    Nothing -> xs
+    completeRecord ::
+      Scope ->
+      TVar ->
+      [([Either TVar TypeU], TypeU, ArgDoc, Bool)] ->
+      [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
+    completeRecord g v xs = case Map.lookup v g of
+      (Just ys) -> map (completeValue [(vs, t) | (vs, t, _, _) <- ys]) xs
+      Nothing -> xs
 
-  completeValue ::
-    [([Either TVar TypeU], TypeU)] ->
-    ([Either TVar TypeU], TypeU, ArgDoc, Bool) ->
-    ([Either TVar TypeU], TypeU, ArgDoc, Bool)
-  completeValue ((vs, NamU _ _ ps rs) : _) (_, NamU o v _ [], d, terminal) = (vs, NamU o v ps rs, d, terminal)
-  completeValue _ x = x
-
-
-
+    completeValue ::
+      [([Either TVar TypeU], TypeU)] ->
+      ([Either TVar TypeU], TypeU, ArgDoc, Bool) ->
+      ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+    completeValue ((vs, NamU _ _ ps rs) : _) (_, NamU o v _ [], d, terminal) = (vs, NamU o v ps rs, d, terminal)
+    completeValue _ x = x
 
 -- merge type functions, names of generics do not matter
 mergeEntries ::
@@ -681,5 +690,5 @@ rename sourceName localAlias = f
     f (AppU t ts) = AppU (f t) (map f ts)
     f (NamU o v ts rs) =
       let v' = if v == sourceName then localAlias else v
-      in NamU o v' (map f ts) (map (second f) rs)
+       in NamU o v' (map f ts) (map (second f) rs)
     f (ThunkU t) = ThunkU (f t)

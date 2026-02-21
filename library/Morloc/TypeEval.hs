@@ -1,5 +1,5 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {- |
 Module      : Morloc.TypeEval
@@ -27,8 +27,8 @@ import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import Morloc.Namespace.Prim
+import Morloc.Namespace.State (MorlocError (..))
 import Morloc.Namespace.Type
-import Morloc.Namespace.State (MorlocError(..))
 
 -- Evaluate a type expression with both the concrete and general scopes
 --
@@ -93,10 +93,14 @@ resolveFail ::
   Set.Set TVar ->
   TypeU ->
   Either MorlocError TypeU
-resolveFail _ _ (AppU (VarU v) _) = MM.throwSystemError $ 
-    "Could not resolve type applied variable" <+> squotes (pretty v) <> ". You may be missing a language-specific type definition."
-resolveFail _ _ (VarU v) = MM.throwSystemError $
-    "Could not resolve type for variable" <+> squotes (pretty v) <> ". You may be missing a language-specific type definition."
+resolveFail _ _ (AppU (VarU v) _) =
+  MM.throwSystemError $
+    "Could not resolve type applied variable" <+> squotes (pretty v)
+      <> ". You may be missing a language-specific type definition."
+resolveFail _ _ (VarU v) =
+  MM.throwSystemError $
+    "Could not resolve type for variable" <+> squotes (pretty v)
+      <> ". You may be missing a language-specific type definition."
 resolveFail _ _ _ = MM.throwSystemError "Compiler bug (__FILE__:__LINE__): Reached unexpected branch"
 
 generalTransformType ::
@@ -255,11 +259,11 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
           return (Just a)
       -- handle specialization
       | not nonspecialized = return $ selectSpecialization a b
-      | otherwise = MM.throwSystemError
-          $ "Cannot merge conflicting type aliases:"
-          <> "\n  t1:" <+> pretty t1
-          <> "\n  t2:" <+> pretty t2
-
+      | otherwise =
+          MM.throwSystemError $
+            "Cannot merge conflicting type aliases:"
+              <> "\n  t1:" <+> pretty t1
+              <> "\n  t2:" <+> pretty t2
       where
         aIsValid = checkAlias tsMain a
         bIsValid = checkAlias tsMain b

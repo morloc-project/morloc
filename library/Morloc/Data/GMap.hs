@@ -117,8 +117,9 @@ insertManyWith f ks k2 x (GMap m1 m2) = GMap m1' m2'
     m1' = Map.union (Map.fromList (zip ks (repeat k2))) m1
     m2' = Map.insertWith f k2 x m2
 
--- | Make @newKey@ point to the same inner key as @oldKey@. Returns 'Nothing'
--- if @oldKey@ is absent.
+{- | Make @newKey@ point to the same inner key as @oldKey@. Returns 'Nothing'
+if @oldKey@ is absent.
+-}
 yIsX :: (Ord a) => a -> a -> GMap a b c -> Maybe (GMap a b c)
 yIsX oldKey newKey (GMap m x) = do
   i <- Map.lookup oldKey m

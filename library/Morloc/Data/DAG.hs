@@ -113,5 +113,8 @@ synthesize f fe d0 = go (Just Map.empty)
           (Just resolvedChildren) -> do
             let augmented = [(k, e, n2) | ((k, e), (n2, _)) <- zip childEdges resolvedChildren]
             newNode <- f key nodeVal augmented
-            newEdges <- mapM (\((k2, e), (childNode, _)) -> (,) k2 <$> fe e newNode childNode) (zip childEdges resolvedChildren)
+            newEdges <-
+              mapM
+                (\((k2, e), (childNode, _)) -> (,) k2 <$> fe e newNode childNode)
+                (zip childEdges resolvedChildren)
             return $ Map.insert key (newNode, newEdges) processed

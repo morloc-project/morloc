@@ -15,41 +15,45 @@ point that keeps translator code out of the library.
 module Subcommands (runMorloc) where
 
 import Control.Exception (SomeException, finally, try)
+import qualified CppTranslator
 import qualified Data.Aeson as JSON
 import qualified Data.ByteString.Lazy as BL
-import Data.List (isSuffixOf)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import qualified Morloc as M
 import Morloc (generatePools)
+import qualified Morloc as M
 import Morloc.CodeGenerator.Emit (TranslateFn)
-import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import qualified Morloc.CodeGenerator.Grammars.Translator.Generic as Generic
+import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.CodeGenerator.Namespace (SerialManifold (..))
 import qualified Morloc.CodeGenerator.SystemConfig as MSC
 import qualified Morloc.Completion as Completion
 import qualified Morloc.Config as Config
-import qualified CppTranslator
 import Morloc.Data.Doc
-import Morloc.Typecheck.Internal (prettyTypeU)
-import qualified Morloc.Language as ML
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.API as F
+import Morloc.Module (OverwriteProtocol (..))
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
-import Morloc.Namespace.Prim
-import Morloc.Namespace.Type
 import Morloc.Namespace.Expr
+import Morloc.Namespace.Prim
 import Morloc.Namespace.State
+import Morloc.Namespace.Type
 import qualified Morloc.ProgramBuilder.Install as Install
-import Morloc.Module (OverwriteProtocol(..))
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist,
-                         getCurrentDirectory, setCurrentDirectory, listDirectory,
-                         removeDirectoryRecursive, removeFile)
+import Morloc.Typecheck.Internal (prettyTypeU)
+import System.Directory
+  ( doesDirectoryExist
+  , doesFileExist
+  , getCurrentDirectory
+  , listDirectory
+  , removeDirectoryRecursive
+  , removeFile
+  , setCurrentDirectory
+  )
 import System.Exit (exitFailure, exitSuccess)
-import System.FilePath (takeFileName, dropExtension, (</>))
+import System.FilePath (dropExtension, takeFileName)
 import UI
 
 decodePackageMeta :: BL.ByteString -> Maybe PackageMeta
@@ -117,16 +121,18 @@ typecheckModuleFn mainFile = do
   code <- liftIO $ MT.readFile mainFile
   -- Save current state, run typecheck in a clean sub-state
   savedState <- MM.get
-  result <- MM.catchError
-    (do
-      xs <- M.typecheckFrontend (Just mainFile) (Code code)
-      st <- MM.get
-      return
-        [ (render (pretty v), render (pretty t))
-        | AnnoS (Idx i t) _ _ <- xs
-        , Just v <- [Map.lookup i (stateName st)]
-        ])
-    (\_ -> return [])
+  result <-
+    MM.catchError
+      ( do
+          xs <- M.typecheckFrontend (Just mainFile) (Code code)
+          st <- MM.get
+          return
+            [ (render (pretty v), render (pretty t))
+            | AnnoS (Idx i t) _ _ <- xs
+            , Just v <- [Map.lookup i (stateName st)]
+            ]
+      )
+      (\_ -> return [])
   -- Restore state so module typechecking doesn't pollute the parent state
   MM.put savedState
   return result
@@ -142,32 +148,36 @@ cmdInstall args verbosity conf buildConfig = do
     libpath = Config.configLibrary conf </> Config.configPlane conf
     moduleTexts = map MT.pack (installModuleStrings args)
 
-    userSources = Map.fromList
-      [ (Mod.extractModuleName modstr, modstr)
-      | modstr <- moduleTexts
-      ]
+    userSources =
+      Map.fromList
+        [ (Mod.extractModuleName modstr, modstr)
+        | modstr <- moduleTexts
+        ]
 
-    mayTypecheck = if installNoTypecheck args
-      then Nothing
-      else Just typecheckModuleFn
+    mayTypecheck =
+      if installNoTypecheck args
+        then Nothing
+        else Just typecheckModuleFn
 
     cmdInstall' =
       mapM
-        (\modstr -> Mod.installModule
-            (installForce args)
-            (installUseSSH args)
-            libpath
-            (Config.configPlaneCore conf)
-            mayTypecheck
-            userSources
-            Set.empty
-            Mod.ExplicitInstall
-            modstr
+        ( \modstr ->
+            Mod.installModule
+              (installForce args)
+              (installUseSSH args)
+              libpath
+              (Config.configPlaneCore conf)
+              mayTypecheck
+              userSources
+              Set.empty
+              Mod.ExplicitInstall
+              modstr
         )
         moduleTexts
 
 -- | Build and install executables for installed modules
-buildInstalledModules :: InstallCommand -> Int -> Config.Config -> BuildConfig -> [T.Text] -> FilePath -> IO Bool
+buildInstalledModules ::
+  InstallCommand -> Int -> Config.Config -> BuildConfig -> [T.Text] -> FilePath -> IO Bool
 buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
   results <- mapM buildOne moduleTexts
   return (and results)
@@ -185,14 +195,15 @@ buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
         Just locFile -> do
           origDir <- getCurrentDirectory
           setCurrentDirectory moduleDir
-          buildResult <- buildModuleExecutable locFile name verbosity conf buildConfig force
-            `finally` setCurrentDirectory origDir
+          buildResult <-
+            buildModuleExecutable locFile name verbosity conf buildConfig force
+              `finally` setCurrentDirectory origDir
           return buildResult
 
     buildModuleExecutable locFile name verbosity' config buildConfig' forceOverwrite = do
       code <- MT.readFile locFile
       let action = do
-            MM.modify (\s -> s { stateInstall = True })
+            MM.modify (\s -> s {stateInstall = True})
             M.writeProgram translator (Just locFile) (Code code)
       result <- MM.runMorlocMonad Nothing verbosity' config buildConfig' action
       passed <- MM.writeMorlocReturn result
@@ -219,7 +230,7 @@ cmdMake args verbosity config buildConfig = do
     x -> return . Just $ x
   let install = makeInstall args
       action = do
-        MM.modify (\s -> s { stateInstall = install })
+        MM.modify (\s -> s {stateInstall = install})
         M.writeProgram translator path code
   result <- MM.runMorlocMonad outfile verbosity config buildConfig action
   passed <- MM.writeMorlocReturn result
@@ -235,7 +246,12 @@ cmdMake args verbosity config buildConfig = do
           return False
         Just installDir -> do
           let installName = takeFileName installDir
-          Install.installProgram (Config.configHome config) installDir installName allIncludes (makeForce args)
+          Install.installProgram
+            (Config.configHome config)
+            installDir
+            installName
+            allIncludes
+            (makeForce args)
           return True
     else return passed
 
@@ -326,25 +342,27 @@ cmdNew args = do
       putStrLn "package.yaml already exists"
       return True
     else do
-      name <- if null (newName args)
-        then takeFileName <$> getCurrentDirectory
-        else return (newName args)
-      writeFile pkgFile $ unlines
-        [ "name: " ++ name
-        , "version: 0.1.0"
-        , "homepage: null"
-        , "synopsis: null"
-        , "description: null"
-        , "category: null"
-        , "license: MIT"
-        , "author: null"
-        , "maintainer: null"
-        , "github: null"
-        , "bug-reports: null"
-        , "dependencies: []"
-        , "# Files to include when installing with `morloc make --install`"
-        , "include: []"
-        ]
+      name <-
+        if null (newName args)
+          then takeFileName <$> getCurrentDirectory
+          else return (newName args)
+      writeFile pkgFile $
+        unlines
+          [ "name: " ++ name
+          , "version: 0.1.0"
+          , "homepage: null"
+          , "synopsis: null"
+          , "description: null"
+          , "category: null"
+          , "license: MIT"
+          , "author: null"
+          , "maintainer: null"
+          , "github: null"
+          , "bug-reports: null"
+          , "dependencies: []"
+          , "# Files to include when installing with `morloc make --install`"
+          , "include: []"
+          ]
       putStrLn $ "Created package.yaml for '" ++ name ++ "'"
       return True
 
@@ -354,7 +372,6 @@ prettyDAG m0 = vsep (map prettyEntry (Map.toList m0))
     prettyEntry :: (MVar, (ExprI, [(MVar, e)])) -> MDoc
     prettyEntry (k, (n, _)) = block 4 (pretty k) (vsep [pretty n])
 
-
 -- ======================================================================
 -- List command
 -- ======================================================================
@@ -362,23 +379,23 @@ prettyDAG m0 = vsep (map prettyEntry (Map.toList m0))
 -- Lightweight JSON types for reading manifests
 
 data ModuleManifest = ModuleManifest
-  { mmName     :: T.Text
-  , mmVersion  :: T.Text
+  { mmName :: T.Text
+  , mmVersion :: T.Text
   , mmSynopsis :: T.Text
-  , mmExports  :: [(T.Text, T.Text)]
+  , mmExports :: [(T.Text, T.Text)]
   , mmMorlocDeps :: [T.Text]
-  , mmReason   :: T.Text
+  , mmReason :: T.Text
   }
 
 data ProgramManifest = ProgramManifest
-  { pmName     :: T.Text
+  { pmName :: T.Text
   , pmCommands :: [ProgramCommand]
   }
 
 data ProgramCommand = ProgramCommand
   { pcName :: T.Text
   , pcReturnType :: T.Text
-  , pcArgSchemas :: [T.Text]
+  , _pcArgSchemas :: [T.Text]
   }
 
 instance JSON.FromJSON ModuleManifest where
@@ -411,13 +428,9 @@ instance JSON.FromJSON ProgramCommand where
 subsequenceMatch :: String -> String -> Bool
 subsequenceMatch [] _ = True
 subsequenceMatch _ [] = False
-subsequenceMatch (p:ps) (t:ts)
+subsequenceMatch (p : ps) (t : ts)
   | toLower p == toLower t = subsequenceMatch ps ts
-  | otherwise = subsequenceMatch (p:ps) ts
-  where
-    toLower c
-      | c >= 'A' && c <= 'Z' = toEnum (fromEnum c + 32)
-      | otherwise = c
+  | otherwise = subsequenceMatch (p : ps) ts
 
 cmdList :: ListCommand -> Config.Config -> IO Bool
 cmdList args config = do
@@ -428,17 +441,19 @@ cmdList args config = do
       pat = listPattern args
 
   -- Load module manifests
-  allModules <- if kind /= Just ListPrograms
-    then do
-      mods <- loadModuleManifests fdbDir
-      discovered <- discoverModules libDir fdbDir
-      return (mods ++ discovered)
-    else return []
+  allModules <-
+    if kind /= Just ListPrograms
+      then do
+        mods <- loadModuleManifests fdbDir
+        discovered <- discoverModules libDir fdbDir
+        return (mods ++ discovered)
+      else return []
 
   -- Load program manifests
-  allPrograms <- if kind /= Just ListModules
-    then loadProgramManifests fdbDir
-    else return []
+  allPrograms <-
+    if kind /= Just ListModules
+      then loadProgramManifests fdbDir
+      else return []
 
   -- Filter by pattern
   let modules = case pat of
@@ -449,9 +464,10 @@ cmdList args config = do
         Just p -> filter (\m -> subsequenceMatch p (T.unpack (pmName m))) allPrograms
 
   -- For verbose mode, fill in exports from .loc files when manifest has none
-  modules' <- if verbose > 0
-    then mapM (fillModuleExports libDir) modules
-    else return modules
+  modules' <-
+    if verbose > 0
+      then mapM (fillModuleExports libDir) modules
+      else return modules
 
   -- Print results
   if null modules' && null programs
@@ -483,21 +499,23 @@ fillModuleExports libDir m
         Nothing -> return m
         Just f -> do
           sigs <- extractTypeSignatures f
-          return m { mmExports = sigs }
+          return m {mmExports = sigs}
 
 -- | Find the main .loc file in a module directory
 findMainLocFile :: FilePath -> String -> IO (Maybe FilePath)
 findMainLocFile dir name = do
   dirExists <- doesDirectoryExist dir
-  if not dirExists then return Nothing else do
-    let mainLoc = dir </> "main.loc"
-        nameLoc = dir </> name ++ ".loc"
-    mainExists <- doesFileExist mainLoc
-    if mainExists
-      then return (Just mainLoc)
-      else do
-        nameExists <- doesFileExist nameLoc
-        return $ if nameExists then Just nameLoc else Nothing
+  if not dirExists
+    then return Nothing
+    else do
+      let mainLoc = dir </> "main.loc"
+          nameLoc = dir </> name ++ ".loc"
+      mainExists <- doesFileExist mainLoc
+      if mainExists
+        then return (Just mainLoc)
+        else do
+          nameExists <- doesFileExist nameLoc
+          return $ if nameExists then Just nameLoc else Nothing
 
 -- | Extract top-level type signatures from a .loc file
 extractTypeSignatures :: FilePath -> IO [(T.Text, T.Text)]
@@ -512,23 +530,23 @@ extractTypeSignatures path = do
         . T.lines
         $ content
   where
-    isTypeSig line =
-      let stripped = T.stripStart line
-      in not (T.null stripped)
-        && T.head stripped /= '-'  -- not a comment
-        && T.head stripped /= '{'  -- not a block comment
-        && T.isInfixOf " :: " stripped
-        && not (T.isPrefixOf "type " stripped)
-        && not (T.isPrefixOf "source " stripped)
-        && not (T.isPrefixOf "import " stripped)
-        && not (T.isPrefixOf "module " stripped)
-        && not (T.isPrefixOf "class " stripped)
-        && not (T.isPrefixOf "instance " stripped)
+    isTypeSig ln =
+      let stripped = T.stripStart ln
+       in not (T.null stripped)
+            && T.head stripped /= '-' -- not a comment
+            && T.head stripped /= '{' -- not a block comment
+            && T.isInfixOf " :: " stripped
+            && not (T.isPrefixOf "type " stripped)
+            && not (T.isPrefixOf "source " stripped)
+            && not (T.isPrefixOf "import " stripped)
+            && not (T.isPrefixOf "module " stripped)
+            && not (T.isPrefixOf "class " stripped)
+            && not (T.isPrefixOf "instance " stripped)
 
-    parseSig line =
-      let (name, rest) = T.breakOn " :: " (T.stripStart line)
-          typ = T.strip (T.drop 4 rest)  -- drop " :: "
-      in (T.strip name, typ)
+    parseSig ln =
+      let (sigName, rest) = T.breakOn " :: " (T.stripStart ln)
+          typ = T.strip (T.drop 4 rest) -- drop " :: "
+       in (T.strip sigName, typ)
 
 loadModuleManifests :: FilePath -> IO [ModuleManifest]
 loadModuleManifests fdbDir = do
@@ -537,14 +555,17 @@ loadModuleManifests fdbDir = do
     Left _ -> return []
     Right entries -> do
       let moduleFiles = filter (".module" `isSuffixOf`) entries
-      catMaybes <$> mapM (\f -> do
-        r <- try (BL.readFile (fdbDir </> f)) :: IO (Either SomeException BL.ByteString)
-        case r of
-          Left _ -> return Nothing
-          Right bs -> case JSON.eitherDecode bs of
-            Right m -> return (Just m)
-            Left _ -> return Nothing
-        ) moduleFiles
+      catMaybes
+        <$> mapM
+          ( \f -> do
+              r <- try (BL.readFile (fdbDir </> f)) :: IO (Either SomeException BL.ByteString)
+              case r of
+                Left _ -> return Nothing
+                Right bs -> case JSON.eitherDecode bs of
+                  Right m -> return (Just m)
+                  Left _ -> return Nothing
+          )
+          moduleFiles
 
 loadProgramManifests :: FilePath -> IO [ProgramManifest]
 loadProgramManifests fdbDir = do
@@ -553,63 +574,74 @@ loadProgramManifests fdbDir = do
     Left _ -> return []
     Right entries -> do
       let manifestFiles = filter (".manifest" `isSuffixOf`) entries
-      catMaybes <$> mapM (\f -> do
-        r <- try (BL.readFile (fdbDir </> f)) :: IO (Either SomeException BL.ByteString)
-        case r of
-          Left _ -> return Nothing
-          Right bs -> case JSON.eitherDecode bs of
-            Right m ->
-              let m' = if T.null (pmName m)
-                       then m { pmName = T.pack (dropExtension (takeFileName f)) }
-                       else m
-              in return (Just m')
-            Left _ -> return Nothing
-        ) manifestFiles
+      catMaybes
+        <$> mapM
+          ( \f -> do
+              r <- try (BL.readFile (fdbDir </> f)) :: IO (Either SomeException BL.ByteString)
+              case r of
+                Left _ -> return Nothing
+                Right bs -> case JSON.eitherDecode bs of
+                  Right m ->
+                    let m' =
+                          if T.null (pmName m)
+                            then m {pmName = T.pack (dropExtension (takeFileName f))}
+                            else m
+                     in return (Just m')
+                  Left _ -> return Nothing
+          )
+          manifestFiles
 
 -- | Discover modules in the library that lack manifests
 discoverModules :: FilePath -> FilePath -> IO [ModuleManifest]
 discoverModules libDir fdbDir = do
   libExists <- doesDirectoryExist libDir
-  if not libExists then return [] else do
-    entries <- listDirectory libDir
-    catMaybes <$> mapM (\name -> do
-      let manifestPath = fdbDir </> name ++ ".module"
-          moduleDir = libDir </> name
-      hasManifest <- doesFileExist manifestPath
-      isDir <- doesDirectoryExist moduleDir
-      if hasManifest || not isDir
-        then return Nothing
-        else do
-          -- Try to read package.yaml for basic info
-          let pkgYaml = moduleDir </> "package.yaml"
-          pkgExists <- doesFileExist pkgYaml
-          if pkgExists
-            then do
-              r <- try (BL.readFile pkgYaml) :: IO (Either SomeException BL.ByteString)
-              case r of
-                Left _ -> return (Just (minimalManifest name))
-                Right bs -> case decodePackageMeta bs of
-                  Just meta ->
-                    return . Just $ ModuleManifest
-                      { mmName = if T.null (packageName meta) then T.pack name else packageName meta
-                      , mmVersion = packageVersion meta
-                      , mmSynopsis = packageSynopsis meta
-                      , mmExports = []
-                      , mmMorlocDeps = []
-                      , mmReason = ""
-                      }
-                  Nothing -> return (Just (minimalManifest name))
-            else return (Just (minimalManifest name))
-      ) entries
+  if not libExists
+    then return []
+    else do
+      entries <- listDirectory libDir
+      catMaybes
+        <$> mapM
+          ( \name -> do
+              let manifestPath = fdbDir </> name ++ ".module"
+                  moduleDir = libDir </> name
+              hasManifest <- doesFileExist manifestPath
+              isDir <- doesDirectoryExist moduleDir
+              if hasManifest || not isDir
+                then return Nothing
+                else do
+                  -- Try to read package.yaml for basic info
+                  let pkgYaml = moduleDir </> "package.yaml"
+                  pkgExists <- doesFileExist pkgYaml
+                  if pkgExists
+                    then do
+                      r <- try (BL.readFile pkgYaml) :: IO (Either SomeException BL.ByteString)
+                      case r of
+                        Left _ -> return (Just (minimalManifest name))
+                        Right bs -> case decodePackageMeta bs of
+                          Just meta ->
+                            return . Just $
+                              ModuleManifest
+                                { mmName = if T.null (packageName meta) then T.pack name else packageName meta
+                                , mmVersion = packageVersion meta
+                                , mmSynopsis = packageSynopsis meta
+                                , mmExports = []
+                                , mmMorlocDeps = []
+                                , mmReason = ""
+                                }
+                          Nothing -> return (Just (minimalManifest name))
+                    else return (Just (minimalManifest name))
+          )
+          entries
   where
-    minimalManifest name = ModuleManifest
-      { mmName = T.pack name
-      , mmVersion = ""
-      , mmSynopsis = ""
-      , mmExports = []
-      , mmMorlocDeps = []
-      , mmReason = ""
-      }
+    minimalManifest name =
+      ModuleManifest
+        { mmName = T.pack name
+        , mmVersion = ""
+        , mmSynopsis = ""
+        , mmExports = []
+        , mmMorlocDeps = []
+        , mmReason = ""
+        }
 
 printModule :: Int -> ModuleManifest -> IO ()
 printModule verbose m = do
@@ -629,9 +661,9 @@ printProgram verbose p = do
       summary = show cmdCount <> " command" <> (if cmdCount /= 1 then "s" else "")
   putStrLn $ "  " <> T.unpack name <> "  " <> summary
   if verbose > 0
-    then mapM_ (\c -> putStrLn $ "    " <> T.unpack (pcName c) <> " :: " <> T.unpack (pcReturnType c)) cmds
+    then
+      mapM_ (\c -> putStrLn $ "    " <> T.unpack (pcName c) <> " :: " <> T.unpack (pcReturnType c)) cmds
     else return ()
-
 
 -- ======================================================================
 -- Uninstall command
@@ -657,7 +689,8 @@ cmdUninstall args config = do
 
   return True
 
-uninstallOne :: FilePath -> FilePath -> FilePath -> FilePath -> Bool -> Maybe ListKind -> String -> IO Bool
+uninstallOne ::
+  FilePath -> FilePath -> FilePath -> FilePath -> Bool -> Maybe ListKind -> String -> IO Bool
 uninstallOne fdbDir libDir binDir exeDir dryRun kind name = do
   let moduleManifest = fdbDir </> name ++ ".module"
       programManifest = fdbDir </> name ++ ".manifest"
@@ -724,13 +757,15 @@ uninstallOne fdbDir libDir binDir exeDir dryRun kind name = do
 findExeDir :: FilePath -> String -> IO (Maybe FilePath)
 findExeDir exeDir name = do
   exists <- doesDirectoryExist exeDir
-  if not exists then return Nothing else do
-    entries <- listDirectory exeDir
-    -- Look for name or name-<hash>
-    let matches = filter (\e -> e == name || (name ++ "-") `isPrefixOf'` e) entries
-    case matches of
-      (m:_) -> return (Just (exeDir </> m))
-      [] -> return Nothing
+  if not exists
+    then return Nothing
+    else do
+      entries <- listDirectory exeDir
+      -- Look for name or name-<hash>
+      let matches = filter (\e -> e == name || (name ++ "-") `isPrefixOf'` e) entries
+      case matches of
+        (m : _) -> return (Just (exeDir </> m))
+        [] -> return Nothing
   where
     isPrefixOf' prefix str = take (length prefix) str == prefix
 
@@ -748,6 +783,7 @@ checkReverseDeps fdbDir name = do
         case r of
           Left _ -> return ()
           Right bs -> case JSON.eitherDecode bs :: Either String ModuleManifest of
-            Right m | nameT `elem` mmMorlocDeps m && mmName m /= nameT ->
-              putStrLn $ "Warning: module '" <> T.unpack (mmName m) <> "' depends on '" <> name <> "'"
+            Right m
+              | nameT `elem` mmMorlocDeps m && mmName m /= nameT ->
+                  putStrLn $ "Warning: module '" <> T.unpack (mmName m) <> "' depends on '" <> name <> "'"
             _ -> return ()

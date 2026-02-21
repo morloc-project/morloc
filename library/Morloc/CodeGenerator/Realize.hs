@@ -1,6 +1,6 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE CPP #-}
 
 {- |
 Module      : Morloc.CodeGenerator.Realize
@@ -22,9 +22,8 @@ module Morloc.CodeGenerator.Realize
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.SystemConfig as MCS
 import Morloc.Data.Doc
-import qualified Morloc.Data.Map as Map
 import Morloc.Data.Map (Map)
-import qualified Morloc.Language as Lang
+import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 
@@ -78,12 +77,12 @@ realize ::
     )
 realize s0 = do
   registry <- MM.gets stateLangRegistry
-  realizeWithRegistry registry s0 
+  realizeWithRegistry registry s0
 
-realizeWithRegistry
-  :: LangRegistry
-  -> AnnoS (Indexed Type) Many Int
-  -> MorlocMonad
+realizeWithRegistry ::
+  LangRegistry ->
+  AnnoS (Indexed Type) Many Int ->
+  MorlocMonad
     ( Either
         (AnnoS (Indexed Type) One ())
         (AnnoS (Indexed Type) One (Indexed Lang))
@@ -99,7 +98,7 @@ realizeWithRegistry registry s0 = do
       | l1 == l2 = case Map.lookup (langName l2) (lrSameLangCosts registry) of
           Nothing -> lrDefaultSameCost registry
           (Just score) -> score
-      | l1 /= l2 = case Map.lookup (langName l1, langName l2) (lrOptimizedPairs registry) of
+      | otherwise = case Map.lookup (langName l1, langName l2) (lrOptimizedPairs registry) of
           Nothing -> case Map.lookup (langName l2) (lrCrossLangCosts registry) of
             Nothing -> lrDefaultCrossCost registry
             (Just score) -> score
@@ -335,7 +334,8 @@ realizeWithRegistry registry s0 = do
               gscope <- MM.getGeneralScope i
               case TE.reduceType gscope (type2typeu gt') of
                 (Just gt'') -> handleMany (typeOf gt'') xs'
-                Nothing -> MM.throwSourcedError i $
+                Nothing ->
+                  MM.throwSourcedError i $
                     "I couldn't find implementation for" <+> squotes (pretty v) <+> "gt' = " <+> pretty gt'
             [x'] -> return x'
             (x' : _) -> return x'

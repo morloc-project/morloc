@@ -197,8 +197,8 @@ checkPair i (LamP _ vs1 s1) (LamP _ vs2 s2) = checkPair i s1' s2'
 
     s1' = foldr (\(v, r) s -> substituteEVar v r s) s1 (zip vs1 newvars)
     s2' = foldr (\(v, r) s -> substituteEVar v r s) s2 (zip vs2 newvars)
-checkPair _ _ (LamP{}) = error "Illegal empty lambda"
-checkPair _ (LamP{}) _ = error "Illegal empty lambda"
+checkPair _ _ (LamP {}) = error "Illegal empty lambda"
+checkPair _ (LamP {}) _ = error "Illegal empty lambda"
 -- check all container elements
 --  * their sizes must agree
 --  * their pairwise elements must agree
@@ -216,11 +216,11 @@ checkPair i (NamP g1 ((k, x) : rs1)) (NamP g2 rs2) =
 -- Primitives must be equal
 checkPair i e1@(LitP _ x) e2@(LitP _ y)
   | x == y = return ()
-  | otherwise = valueError i e1 e2
-    $ "Cannot equate non-equal primitives:\n"
-    <> "a:" <+> pretty x
-    <> "b:" <+> pretty y
-
+  | otherwise =
+      valueError i e1 e2 $
+        "Cannot equate non-equal primitives:\n"
+          <> "a:" <+> pretty x
+          <> "b:" <+> pretty y
 -- All other cases should fail.
 --
 -- Actually, all other cases should already have failed while typechecking.
@@ -239,7 +239,6 @@ compareForeignFunctions _ _ _ _ = return ()
 
 valueError :: Int -> E -> E -> MDoc -> MorlocMonad ()
 valueError i e1 e2 msg = MM.throwUnificationError (indexOfE e1) (indexOfE e2) i ("Error in value checker:" <+> msg)
-
 
 substituteEVar :: EVar -> EVar -> E -> E
 substituteEVar oldVar newVar e0

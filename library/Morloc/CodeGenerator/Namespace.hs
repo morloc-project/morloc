@@ -135,10 +135,10 @@ import Control.Monad.Identity (runIdentity)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 import Morloc.Data.Doc
-import Morloc.Namespace.Prim
-import Morloc.Namespace.Type
 import Morloc.Namespace.Expr
+import Morloc.Namespace.Prim
 import Morloc.Namespace.State
+import Morloc.Namespace.Type
 
 -- The final types used in code generation. The language annotation is removed,
 -- since the language for all types within a pool are the same.

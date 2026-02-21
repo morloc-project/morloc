@@ -95,6 +95,7 @@ prettyFoldManifold =
     makeNativeExpr _ (IntN_ _ v) = return $ defaultValue {poolExpr = viaShow v}
     makeNativeExpr _ (StrN_ _ v) = return $ defaultValue {poolExpr = dquotes $ pretty v}
     makeNativeExpr _ (NullN_ _) = return $ defaultValue {poolExpr = "None"}
+    makeNativeExpr _ _ = return $ defaultValue {poolExpr = "<unhandled>"}
 
     makeSerialArg :: (Monad m) => SerialArg -> SerialArg_ PoolDocs PoolDocs -> m PoolDocs
     makeSerialArg _ (SerialArgManifold_ x) = return x

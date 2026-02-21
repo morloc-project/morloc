@@ -19,14 +19,15 @@ module Morloc.CodeGenerator.Serialize
 
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
+import qualified Morloc.CodeGenerator.Serial as Serial
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
-import qualified Morloc.CodeGenerator.Serial as Serial
 
--- | This step is performed after segmentation, so all terms are in the same
--- language. Here we need to determine where inputs are (de)serialized and the
--- serialization states of arguments and variables.
+{- | This step is performed after segmentation, so all terms are in the same
+language. Here we need to determine where inputs are (de)serialized and the
+serialization states of arguments and variables.
+-}
 serialize :: MonoHead -> MorlocMonad SerialManifold
 serialize (MonoHead lang m0 args0 headForm0 e0) = do
   form0 <- ManifoldFull <$> mapM prepareArg args0
@@ -92,11 +93,11 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       serialExpr m e
     serialExpr m (MonoLet i e1 e2) =
       let (m1, e1') = unwrapLetDef m e1
-      in case inferState e1 of
-        Serialized -> SerialLetS i <$> serialExpr m1 e1' <*> serialExpr m e2
-        Unserialized -> do
-          ne1 <- nativeExpr m1 e1'
-          NativeLetS i ne1 <$> serialExpr m e2
+       in case inferState e1 of
+            Serialized -> SerialLetS i <$> serialExpr m1 e1' <*> serialExpr m e2
+            Unserialized -> do
+              ne1 <- nativeExpr m1 e1'
+              NativeLetS i ne1 <$> serialExpr m e2
     serialExpr _ (MonoLetVar t i) = do
       t' <- inferType t
       return $ LetVarS (Just t') i
@@ -160,14 +161,14 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     nativeExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to NativeExpr"
     nativeExpr m (MonoLet i e1 e2) =
       let (m1, e1') = unwrapLetDef m e1
-      in case inferState e1 of
-        Serialized -> do
-          ne2 <- nativeExpr m e2
-          SerialLetN i <$> serialExpr m1 e1' <*> pure ne2
-        Unserialized -> do
-          ne1 <- nativeExpr m1 e1'
-          ne2 <- nativeExpr m e2
-          return $ NativeLetN i ne1 ne2
+       in case inferState e1 of
+            Serialized -> do
+              ne2 <- nativeExpr m e2
+              SerialLetN i <$> serialExpr m1 e1' <*> pure ne2
+            Unserialized -> do
+              ne1 <- nativeExpr m1 e1'
+              ne2 <- nativeExpr m e2
+              return $ NativeLetN i ne1 ne2
     nativeExpr _ (MonoLetVar t i) = LetVarN <$> inferType t <*> pure i
     nativeExpr m (MonoReturn e) = ReturnN <$> nativeExpr m e
     nativeExpr m (MonoApp (MonoExe (Idx idx t0) exe) es) = do
@@ -203,7 +204,6 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       t' <- inferType t
       MM.sayVVV $ "nativeExpr MonoApp:" <+> pretty t'
       naturalizeN "nativeE MonoApp" m lang t' e'
-
     nativeExpr m (MonoApp (MonoLetVar (Idx idx (FunT inputTypes outputType)) i) es) = do
       MM.sayVVV $ "MonoLetVar case"
       args <- mapM (nativeArg m) es
@@ -305,9 +305,10 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     inferState MonoBndVar {} = error "Ambiguous bound term"
     inferState _ = Unserialized
 
--- | Unwrap structural MonoManifold/MonoReturn wrappers from a let definition.
--- MonoManifold contributes its index (for type lookups); MonoReturn is the
--- manifold's return semantics, which is meaningless in a let-binding context.
+{- | Unwrap structural MonoManifold/MonoReturn wrappers from a let definition.
+MonoManifold contributes its index (for type lookups); MonoReturn is the
+manifold's return semantics, which is meaningless in a let-binding context.
+-}
 unwrapLetDef :: Int -> MonoExpr -> (Int, MonoExpr)
 unwrapLetDef _ (MonoManifold m _ (MonoReturn e)) = (m, e)
 unwrapLetDef _ (MonoManifold m _ e) = (m, e)
@@ -369,7 +370,6 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
           req2 = Map.fromList [(i, requestOf tm) | Arg i tm <- pargs]
           req3 = Map.unionWith (<>) req1 req2
       return (req3, AppPoolS t p (map snd args))
-
     wireSerialExpr (SerialLetS_ i (req1, se1) (req2, se2)) = do
       let req' = Map.unionWith (<>) req1 req2
       e' <- case Map.lookup i req2 of

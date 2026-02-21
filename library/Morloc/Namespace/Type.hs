@@ -61,17 +61,18 @@ module Morloc.Namespace.Type
 import qualified Data.List as DL
 import Data.Map.Strict (Map)
 import qualified Data.PartialOrd as P
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as DT
-import qualified Data.Set as Set
 import Morloc.Data.Doc
 import Morloc.Namespace.Prim
 
 ---- Type definitions
 
--- | Scope maps each type name to its definitions: the type parameters, the
--- body type, documentation, and whether the definition is terminal (won't be
--- expanded further during type resolution).
+{- | Scope maps each type name to its definitions: the type parameters, the
+body type, documentation, and whether the definition is terminal (won't be
+expanded further during type resolution).
+-}
 type Scope =
   Map
     TVar
@@ -84,13 +85,17 @@ type Scope =
 
 -- | Flavors of named (keyed) types
 data NamType
-  = NamRecord  -- ^ Structural record with named fields
-  | NamObject  -- ^ Nominal object type
-  | NamTable   -- ^ Tabular type (columns as fields)
+  = -- | Structural record with named fields
+    NamRecord
+  | -- | Nominal object type
+    NamObject
+  | -- | Tabular type (columns as fields)
+    NamTable
   deriving (Show, Ord, Eq)
 
--- | Ground type with no quantifiers. Produced after type erasure and used in
--- code generation where all type variables have been resolved.
+{- | Ground type with no quantifiers. Produced after type erasure and used in
+code generation where all type variables have been resolved.
+-}
 data Type
   = UnkT TVar
   | VarT TVar
@@ -103,9 +108,10 @@ data Type
 data OpenOrClosed = Open | Closed
   deriving (Show, Ord, Eq)
 
--- | Full type with quantifiers. 'ExistU' represents existential variables
--- (solved during unification), 'ForallU' represents universally quantified
--- variables. This is the primary type representation during typechecking.
+{- | Full type with quantifiers. 'ExistU' represents existential variables
+(solved during unification), 'ForallU' represents universally quantified
+variables. This is the primary type representation during typechecking.
+-}
 data TypeU
   = VarU TVar
   | ExistU
@@ -415,8 +421,9 @@ newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
     allVars (ThunkU t) = allVars t
     allVars t = free t
 
--- | Check whether a ground type contains any unknown (unresolved) type variables.
--- These arise from erasing 'ForallU' during 'typeOf', indicating a polymorphic type.
+{- | Check whether a ground type contains any unknown (unresolved) type variables.
+These arise from erasing 'ForallU' during 'typeOf', indicating a polymorphic type.
+-}
 containsUnk :: Type -> Bool
 containsUnk (UnkT _) = True
 containsUnk (VarT _) = False

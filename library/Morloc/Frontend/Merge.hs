@@ -32,9 +32,9 @@ module Morloc.Frontend.Merge
 -- weave :: a -> [a] -> Either MorlocError [a]
 -- merge :: a -> a -> Either MorlocError a
 
+import Morloc.Data.Doc
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
-import Morloc.Data.Doc
 
 -- | Merge two 'Indexed' values, keeping the index from the first.
 mergeFirstIndexM :: (Monad m) => (a -> a -> m a) -> Indexed a -> Indexed a -> m (Indexed a)
@@ -55,8 +55,9 @@ mergeTermTypes (TermTypes g1 cs1 es1) (TermTypes g2 cs2 es2) =
     maybeCombine _ _ (Just b) = return $ Just b
     maybeCombine _ _ _ = return Nothing
 
--- | Insert a 'TermTypes' into a list, merging with an existing entry
--- if they share an equivalent general type.
+{- | Insert a 'TermTypes' into a list, merging with an existing entry
+if they share an equivalent general type.
+-}
 weaveTermTypes :: TermTypes -> [TermTypes] -> [TermTypes]
 weaveTermTypes t1@(TermTypes (Just gt1) srcs1 es1) (t2@(TermTypes (Just gt2) srcs2 es2) : ts)
   | equivalent (etype gt1) (etype gt2) =
@@ -86,24 +87,28 @@ mergeEType (EType t1 cs1 edoc1) (EType t2 cs2 edoc2) =
 mergeTypeUs :: TypeU -> TypeU -> MorlocMonad TypeU
 mergeTypeUs t1 t2
   | equivalent t1 t2 = return t1
-  | otherwise = MM.throwSystemError $ "Incompatible general types:" <+> parens (pretty t1) <+> "vs" <+> parens (pretty t2)
-
+  | otherwise =
+      MM.throwSystemError $
+        "Incompatible general types:" <+> parens (pretty t1) <+> "vs" <+> parens (pretty t2)
 
 throwConflictingInstancesError :: MDoc -> Instance -> Instance -> MorlocMonad a
 throwConflictingInstancesError msg inst1 inst2
-  | inst1 == inst2 = MM.throwSystemError $
-      "Found conflict between overlapping instances for class"
-        <+> squotes (pretty (className inst1))
-        <> ":" <+> msg
-  | otherwise = MM.throwSystemError $
-      "Found conflict between overlapping instances for classes"
-        <+> squotes (pretty (className inst1))
-        <+> "and"
-        <+> squotes (pretty (className inst2))
-        <> ":" <+> msg
+  | inst1 == inst2 =
+      MM.throwSystemError $
+        "Found conflict between overlapping instances for class"
+          <+> squotes (pretty (className inst1))
+          <> ":" <+> msg
+  | otherwise =
+      MM.throwSystemError $
+        "Found conflict between overlapping instances for classes"
+          <+> squotes (pretty (className inst1))
+          <+> "and"
+          <+> squotes (pretty (className inst2))
+          <> ":" <+> msg
 
--- | Merge two typeclass instances, checking for conflicting class names,
--- types, and parameter counts.
+{- | Merge two typeclass instances, checking for conflicting class names,
+types, and parameter counts.
+-}
 mergeTypeclasses :: Instance -> Instance -> MorlocMonad Instance
 mergeTypeclasses inst1@(Instance cls1 vs1 t1 ts1) inst2@(Instance cls2 vs2 t2 ts2)
   | cls1 /= cls2 = throwConflictingInstancesError "Mismatched class names" inst1 inst2
@@ -122,7 +127,8 @@ mergeIndexedInstances ::
 mergeIndexedInstances = mergeFirstIndexM mergeTypeclasses
 
 throwSignatureUnificationError :: SignatureSet -> SignatureSet -> MorlocMonad a
-throwSignatureUnificationError s1 s2 = MM.throwSystemError $
+throwSignatureUnificationError s1 s2 =
+  MM.throwSystemError $
     "Cannot unify signatures for the polymorphic signature sets below:"
       <> "\n  s1:" <+> pretty s1
       <> "\n  s2:" <+> pretty s2
@@ -134,7 +140,7 @@ mergeSignatureSet s1@(Polymorphic cls1 v1 t1 ts1) s2@(Polymorphic cls2 v2 t2 ts2
       return $ Polymorphic cls1 v1 t1 (unionTermTypes ts1 ts2)
   | otherwise = throwSignatureUnificationError s1 s2
 mergeSignatureSet (Monomorphic ts1) (Monomorphic ts2) = Monomorphic <$> mergeTermTypes ts1 ts2
-mergeSignatureSet s1 s2 = throwSignatureUnificationError  s1 s2
+mergeSignatureSet s1 s2 = throwSignatureUnificationError s1 s2
 
 -- | Union two lists of 'TermTypes' by weaving each element from the first list.
 unionTermTypes :: [TermTypes] -> [TermTypes] -> [TermTypes]

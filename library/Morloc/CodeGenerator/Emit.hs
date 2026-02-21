@@ -19,8 +19,9 @@ import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 
--- | Callback type for language-specific translation.
--- The executable provides concrete implementations for each language.
+{- | Callback type for language-specific translation.
+The executable provides concrete implementations for each language.
+-}
 type TranslateFn = Lang -> [Source] -> [SerialManifold] -> MorlocMonad Script
 
 -- | Sort manifolds into pools. Within pools, group manifolds into call sets.

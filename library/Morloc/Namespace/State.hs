@@ -60,20 +60,21 @@ import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
 import Data.Aeson (FromJSON (..), (.!=), (.:?))
 import qualified Data.Aeson as Aeson
-import Data.Map.Strict (Map)
 import qualified Data.Map as Map
+import Data.Map.Strict (Map)
 import Data.Text (Text)
 import Morloc.Data.Doc
-import Morloc.LangRegistry (LangRegistry(..), LangRegistryEntry(..))
+import Morloc.LangRegistry (LangRegistry (..), LangRegistryEntry (..))
 import qualified Morloc.LangRegistry as LR
+import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
-import Morloc.Namespace.Expr
 
 ---- Monad types
 
--- | The general monad transformer stack: Reader for config, Except for errors,
--- Writer for log messages, State for mutable compiler state, over IO.
+{- | The general monad transformer stack: Reader for config, Except for errors,
+Writer for log messages, State for mutable compiler state, over IO.
+-}
 type MorlocMonadGen c e l s a =
   ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
 
@@ -85,9 +86,10 @@ type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
 ---- State
 
--- | Mutable compiler state threaded through the entire pipeline.
--- Accumulates type signatures, source bindings, typedefs, and metadata
--- as modules are parsed, linked, and typechecked.
+{- | Mutable compiler state threaded through the entire pipeline.
+Accumulates type signatures, source bindings, typedefs, and metadata
+as modules are parsed, linked, and typechecked.
+-}
 data MorlocState = MorlocState
   { statePackageMeta :: [PackageMeta]
   , stateVerbosity :: Int
@@ -115,7 +117,7 @@ data MorlocState = MorlocState
   , stateClassDefs :: Map ClassName [Constraint]
   , stateLangRegistry :: LangRegistry
   , stateExportGroups :: Map Text ([Text], [Int])
-    -- ^ Map from group name to (description lines, member export indices)
+  -- ^ Map from group name to (description lines, member export indices)
   }
   deriving (Show)
 
@@ -147,9 +149,12 @@ data TermTypes = TermTypes
 
 -- | All compiler errors
 data MorlocError
-  = SourcedError Int MDoc       -- ^ Error tied to a specific AST node index
-  | SystemError MDoc            -- ^ Internal compiler error (bug)
-  | UnificationError Int Int Int MDoc -- ^ Type unification failure
+  = -- | Error tied to a specific AST node index
+    SourcedError Int MDoc
+  | -- | Internal compiler error (bug)
+    SystemError MDoc
+  | -- | Type unification failure
+    UnificationError Int Int Int MDoc
   deriving (Show)
 
 ---- Configuration
@@ -190,8 +195,9 @@ data PackageMeta
 
 ---- Typechecking context
 
--- | Entries in the typechecking context (an ordered list of assumptions).
--- The context is manipulated as a stack during bidirectional typechecking.
+{- | Entries in the typechecking context (an ordered list of assumptions).
+The context is manipulated as a stack during bidirectional typechecking.
+-}
 data GammaIndex
   = VarG TVar
   | AnnG EVar TypeU
@@ -306,10 +312,13 @@ instance FromJSON Config where
       pyCmd <- o .:? "lang_python3" .!= ("" :: Text)
       rCmd <- o .:? "lang_R" .!= ("" :: Text)
       overrides <- o .:? "lang_overrides" .!= Map.empty
-      let legacyOverrides = Map.fromList $ filter (not . null . snd)
-            [ ("py", if pyCmd == "" then [] else [pyCmd])
-            , ("r", if rCmd == "" then [] else [rCmd])
-            ]
+      let legacyOverrides =
+            Map.fromList $
+              filter
+                (not . null . snd)
+                [ ("py", if pyCmd == "" then [] else [pyCmd])
+                , ("r", if rCmd == "" then [] else [rCmd])
+                ]
           allOverrides = Map.union overrides legacyOverrides
       return $ Config home' source' plane' planeCore' tmpdir' buildConfig' allOverrides
 

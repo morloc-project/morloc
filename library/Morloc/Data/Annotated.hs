@@ -15,8 +15,10 @@ module Morloc.Data.Annotated (Annotated (..)) where
 class Annotated f where
   -- | Extract the annotation
   ann :: f a b -> a
+
   -- | Extract the value
   val :: f a b -> b
+
   -- | Pair an annotation with a value
   annotate :: a -> b -> f a b
 

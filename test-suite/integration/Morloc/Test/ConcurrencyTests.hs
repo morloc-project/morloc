@@ -1,24 +1,26 @@
 module Morloc.Test.ConcurrencyTests (concurrencyTests) where
 
-import System.Directory (copyFile, doesDirectoryExist, doesFileExist, listDirectory)
-import System.Exit (ExitCode(..))
+import System.Directory (copyFile, doesDirectoryExist, listDirectory)
+import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (testCase, assertFailure)
+import Test.Tasty.HUnit (assertFailure, testCase)
 
 import Morloc.Test.Common
 
 -- | A concurrency test spec: compile a .loc file, run each subcommand
 data ConcSpec = ConcSpec
-  { csLocFile    :: String    -- .loc filename (relative to concurrency-tests/)
+  { csLocFile :: String -- .loc filename (relative to concurrency-tests/)
   , csSubcommands :: [String] -- exported functions to run
   }
 
 concurrencyTest :: TestEnv -> String -> ConcSpec -> TestTree
-concurrencyTest env name spec = testGroup name
-  [ testCase subcmd $ runSubcmd env spec subcmd
-  | subcmd <- csSubcommands spec
-  ]
+concurrencyTest env name spec =
+  testGroup
+    name
+    [ testCase subcmd $ runSubcmd env spec subcmd
+    | subcmd <- csSubcommands spec
+    ]
 
 runSubcmd :: TestEnv -> ConcSpec -> String -> IO ()
 runSubcmd env spec subcmd = do
@@ -31,15 +33,17 @@ runSubcmd env spec subcmd = do
     (ec, _, err) <- morlocMake workDir "nexus" (csLocFile spec)
     case ec of
       ExitSuccess -> return ()
-      ExitFailure c -> assertFailure $
-        csLocFile spec ++ ": compile failed (exit " ++ show c ++ "):\n" ++ err
+      ExitFailure c ->
+        assertFailure $
+          csLocFile spec ++ ": compile failed (exit " ++ show c ++ "):\n" ++ err
 
     -- Run with timeout (handled by tasty's timeout mechanism)
     (rc, _, stderr) <- runNexus workDir subcmd []
     case rc of
       ExitSuccess -> return ()
-      ExitFailure c -> assertFailure $
-        csLocFile spec ++ ":" ++ subcmd ++ " failed (exit " ++ show c ++ "):\n" ++ stderr
+      ExitFailure c ->
+        assertFailure $
+          csLocFile spec ++ ":" ++ subcmd ++ " failed (exit " ++ show c ++ "):\n" ++ stderr
 
 copyLocAndHelpers :: FilePath -> String -> FilePath -> IO ()
 copyLocAndHelpers srcDir locFile workDir = do
@@ -53,21 +57,28 @@ copyLocAndHelpers srcDir locFile workDir = do
     else return ()
 
 concurrencyTests :: TestEnv -> TestTree
-concurrencyTests env = testGroup "Concurrency"
-  [ concurrencyTest env "bidi-py-r" $ ConcSpec
-      { csLocFile     = "bidi-py-r.loc"
-      , csSubcommands = ["testUni", "testBidi1", "testBidi5", "testBidi10", "testBidi11", "testBidi15"]
-      }
-  , concurrencyTest env "bidi-r-py" $ ConcSpec
-      { csLocFile     = "bidi-r-py.loc"
-      , csSubcommands = ["testBidi1", "testBidi5", "testBidi10", "testBidi11", "testBidi15"]
-      }
-  , concurrencyTest env "concurrent-uni" $ ConcSpec
-      { csLocFile     = "concurrent-uni.loc"
-      , csSubcommands = ["testPyToR15", "testRToPy15", "testPyToR20"]
-      }
-  , concurrencyTest env "deep-callback" $ ConcSpec
-      { csLocFile     = "deep-callback.loc"
-      , csSubcommands = ["testDepth2", "testDepth4", "testDepth6", "testDepth12", "testDeep4x5", "testDeep6x5"]
-      }
-  ]
+concurrencyTests env =
+  testGroup
+    "Concurrency"
+    [ concurrencyTest env "bidi-py-r" $
+        ConcSpec
+          { csLocFile = "bidi-py-r.loc"
+          , csSubcommands = ["testUni", "testBidi1", "testBidi5", "testBidi10", "testBidi11", "testBidi15"]
+          }
+    , concurrencyTest env "bidi-r-py" $
+        ConcSpec
+          { csLocFile = "bidi-r-py.loc"
+          , csSubcommands = ["testBidi1", "testBidi5", "testBidi10", "testBidi11", "testBidi15"]
+          }
+    , concurrencyTest env "concurrent-uni" $
+        ConcSpec
+          { csLocFile = "concurrent-uni.loc"
+          , csSubcommands = ["testPyToR15", "testRToPy15", "testPyToR20"]
+          }
+    , concurrencyTest env "deep-callback" $
+        ConcSpec
+          { csLocFile = "deep-callback.loc"
+          , csSubcommands =
+              ["testDepth2", "testDepth4", "testDepth6", "testDepth12", "testDeep4x5", "testDeep6x5"]
+          }
+    ]

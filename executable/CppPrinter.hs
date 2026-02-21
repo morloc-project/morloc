@@ -17,9 +17,11 @@ module CppPrinter
   ( printExpr
   , printStmt
   , printStmts
+
     -- * Pool-level rendering
   , printDispatch
   , printProgram
+
     -- * Struct/serializer rendering
   , printStructTypedef
   , printSerializer
@@ -28,7 +30,7 @@ module CppPrinter
   , printRecordTemplate
   ) where
 
-import Morloc.CodeGenerator.Grammars.Common (DispatchEntry(..), manNamer)
+import Morloc.CodeGenerator.Grammars.Common (DispatchEntry (..), manNamer)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
 import Morloc.CodeGenerator.Namespace (MDoc)
 import Morloc.Data.Doc
@@ -57,11 +59,17 @@ printExpr (IPack packer e) = pretty packer <> parens (printExpr e)
 printExpr (ICall f Nothing argGroups) =
   pretty f <> hsep (map (tupled . map printExpr) argGroups)
 printExpr (ICall f (Just ts) argGroups) =
-  pretty f <> encloseSep "<" ">" "," (map renderIType ts) <> hsep (map (tupled . map printExpr) argGroups)
+  pretty f
+    <> encloseSep "<" ">" "," (map renderIType ts)
+    <> hsep (map (tupled . map printExpr) argGroups)
 printExpr (IForeignCall _ _ _) = error "use IRawExpr for C++ foreign calls"
 printExpr (IRemoteCall _ _ _ _) = error "use IRawExpr for C++ remote calls"
 printExpr (ILambda args body) =
-  "[&](" <> hsep (punctuate "," ["auto" <+> pretty a | a <- args]) <> "){return " <> printExpr body <> ";}"
+  "[&]("
+    <> hsep (punctuate "," ["auto" <+> pretty a | a <- args])
+    <> "){return "
+    <> printExpr body
+    <> ";}"
 printExpr (IRawExpr d) = pretty d
 printExpr (ISuspend e) = "[&](){return " <> printExpr e <> ";}"
 printExpr (IForce e) = printExpr e <> "()"
@@ -73,13 +81,15 @@ printStmt (IAssign v (Just t) e) = renderIType t <+> pretty v <+> "=" <+> printE
 printStmt (IMapList resultVar resultType iterVar collection bodyStmts yieldExpr) =
   vsep
     [ resultDecl
-    , block 4
+    , block
+        4
         [idoc|for(size_t #{pretty iterVar}_idx = 0; #{pretty iterVar}_idx < #{printExpr collection}.size(); #{pretty iterVar}_idx++)|]
-        (vsep
-          ( [idoc|auto #{pretty iterVar} = #{printExpr collection}[#{pretty iterVar}_idx];|]
-          : map printStmt bodyStmts
-          ++ [[idoc|#{pretty resultVar}.push_back(#{printExpr yieldExpr});|]]
-          ))
+        ( vsep
+            ( [idoc|auto #{pretty iterVar} = #{printExpr collection}[#{pretty iterVar}_idx];|]
+                : map printStmt bodyStmts
+                ++ [[idoc|#{pretty resultVar}.push_back(#{printExpr yieldExpr});|]]
+            )
+        )
     ]
   where
     resultDecl = case resultType of

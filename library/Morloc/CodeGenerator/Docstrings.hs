@@ -18,9 +18,9 @@ import qualified Data.Map as Map
 import Data.Text (Text)
 import qualified Morloc.BaseTypes as MBT
 import Morloc.CodeGenerator.Namespace
+import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Text as MT
-import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
 
 -- Most of the transmogrification of docstrings occurs in the parser, but there
@@ -230,7 +230,8 @@ resolveFlagCmdArg r = do
 resolveOpt :: Type -> ArgDocVars -> MorlocMonad ArgOptDocSet
 resolveOpt t r = case (docArg r, docDefault r) of
   (Nothing, _) -> MM.throwSystemError "Optional argument missing tags"
-  (Just opt, Nothing) -> MM.throwSystemError $ "Optional argument " <> pretty (makeArg opt) <> " must have default values"
+  (Just opt, Nothing) ->
+    MM.throwSystemError $ "Optional argument " <> pretty (makeArg opt) <> " must have default values"
   (Just opt, Just def) ->
     return $
       ArgOptDocSet

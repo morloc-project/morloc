@@ -84,19 +84,24 @@ findModule currentPathAndModule@(_, currentModule) importModule = do
       -- Check if <name>/<name>.loc exists (should be <name>/main.loc)
       let namePath = splitModuleName importModule
           nameNameLoc = namePath <> [last namePath <> ".loc"]
-          hintPaths = map MS.joinPath
-            [ nameNameLoc
-            , lib : nameNameLoc
-            , [lib, plane] <> nameNameLoc
-            ]
+          hintPaths =
+            map
+              MS.joinPath
+              [ nameNameLoc
+              , lib : nameNameLoc
+              , [lib, plane] <> nameNameLoc
+              ]
       existingHints <- liftIO . fmap catMaybes . mapM getFile $ hintPaths
       let hintMsg = case existingHints of
-            (found:_) ->
+            (found : _) ->
               let expected = MS.combine (MS.takeDirectory found) "main.loc"
-              in "\n\nFound" <+> squotes (pretty found)
-                  <+> "but expected" <+> squotes (pretty expected)
-                  <> "\n  Rename the entry point: mv"
-                    <+> pretty found <+> pretty expected
+               in "\n\nFound"
+                    <+> squotes (pretty found)
+                    <+> "but expected"
+                    <+> squotes (pretty expected)
+                    <> "\n  Rename the entry point: mv"
+                      <+> pretty found
+                      <+> pretty expected
             [] -> mempty
       MM.throwSystemError $
         "Within module" <+> squotes (pretty currentModule)
@@ -308,9 +313,10 @@ data ModuleSource
 
 -- }}}
 
--- | Extract the module name from an install string.
--- For "github:user/repo" -> "repo", for "math" -> "math",
--- for "./path/to/foo" -> "foo"
+{- | Extract the module name from an install string.
+For "github:user/repo" -> "repo", for "math" -> "math",
+for "./path/to/foo" -> "foo"
+-}
 extractModuleName :: Text -> Text
 extractModuleName modstr =
   case parse (moduleInstallParser "morloclib") "" modstr of
@@ -320,8 +326,9 @@ extractModuleName modstr =
       gitReponame remote
     _ -> modstr
 
--- | Typecheck callback: takes a filepath, returns list of (name, type) exports.
--- Passed in from the executable layer to avoid circular imports.
+{- | Typecheck callback: takes a filepath, returns list of (name, type) exports.
+Passed in from the executable layer to avoid circular imports.
+-}
 type TypecheckFn = FilePath -> MorlocMonad [(Text, Text)]
 
 installModule ::
@@ -402,10 +409,10 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
 
       -- Determine morloc dependencies by scanning .loc imports
       morlocDeps <- do
-          mainFile <- liftIO $ findMainLocFile targetDir (MT.unpack name)
-          case mainFile of
-            Nothing -> return []
-            Just f -> liftIO $ extractMorlocDeps f
+        mainFile <- liftIO $ findMainLocFile targetDir (MT.unpack name)
+        case mainFile of
+          Nothing -> return []
+          Just f -> liftIO $ extractMorlocDeps f
 
       -- Recursively install dependencies
       forM_ morlocDeps $ \dep -> do
@@ -417,9 +424,15 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
                 Nothing -> dep
           MM.say $ "Auto-installing dependency:" <+> pretty dep
           installModule
-            DoNotOverwrite gitprot libpath coreorg
-            mayTypecheck userSources inProgress'
-            AutoDependency depModstr
+            DoNotOverwrite
+            gitprot
+            libpath
+            coreorg
+            mayTypecheck
+            userSources
+            inProgress'
+            AutoDependency
+            depModstr
 
       -- Typecheck the module (if callback provided)
       exports <- case mayTypecheck of
@@ -436,8 +449,16 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
       liftIO $ createDirectoryIfMissing True fdbDir
       installTime <- liftIO $ floor <$> Time.getPOSIXTime
       let manifestPath = fdbDir </> MT.unpack name ++ ".module"
-          manifestJson = buildModuleManifest meta name morlocDeps exports
-            targetDir modstr reason installTime
+          manifestJson =
+            buildModuleManifest
+              meta
+              name
+              morlocDeps
+              exports
+              targetDir
+              modstr
+              reason
+              installTime
       liftIO $ TIO.writeFile manifestPath manifestJson
       MM.say $ "Installed module" <+> squotes (pretty name)
 
@@ -455,8 +476,15 @@ findMainLocFile dir name = do
 
 -- | Build a module manifest JSON string
 buildModuleManifest ::
-  PackageMeta -> Text -> [Text] -> [(Text, Text)] ->
-  FilePath -> Text -> InstallReason -> Int -> Text
+  PackageMeta ->
+  Text ->
+  [Text] ->
+  [(Text, Text)] ->
+  FilePath ->
+  Text ->
+  InstallReason ->
+  Int ->
+  Text
 buildModuleManifest meta name morlocDeps exports installPath installSource reason installTime =
   jsonObj
     [ ("kind", jsonStr "module")
@@ -468,10 +496,13 @@ buildModuleManifest meta name morlocDeps exports installPath installSource reaso
     , ("homepage", jsonStr (packageHomepage meta))
     , ("c_dependencies", jsonStrArr (packageDependencies meta))
     , ("morloc_dependencies", jsonStrArr morlocDeps)
-    , ("exports", jsonArr
-        [ jsonObj [("name", jsonStr n), ("type", jsonStr t)]
-        | (n, t) <- exports
-        ])
+    ,
+      ( "exports"
+      , jsonArr
+          [ jsonObj [("name", jsonStr n), ("type", jsonStr t)]
+          | (n, t) <- exports
+          ]
+      )
     , ("install_path", jsonStr (MT.pack installPath))
     , ("install_source", jsonStr installSource)
     , ("install_reason", jsonStr (reasonText reason))
@@ -481,8 +512,9 @@ buildModuleManifest meta name morlocDeps exports installPath installSource reaso
     reasonText ExplicitInstall = "explicit"
     reasonText AutoDependency = "auto"
 
--- | Extract morloc module dependencies by scanning a .loc file for import statements.
--- This is a lightweight text scan, not using the full parser.
+{- | Extract morloc module dependencies by scanning a .loc file for import statements.
+This is a lightweight text scan, not using the full parser.
+-}
 extractMorlocDeps :: FilePath -> IO [Text]
 extractMorlocDeps path = do
   content <- TIO.readFile path
@@ -491,23 +523,23 @@ extractMorlocDeps path = do
   return (unique imports)
   where
     extractImport :: Text -> [Text]
-    extractImport line =
-      let stripped = MT.stripStart line
-      in case MT.stripPrefix "import " stripped of
-        Nothing -> []
-        Just rest ->
-          let modName = MT.strip (MT.takeWhile (\c -> c /= '(' && c /= ' ') rest)
-              topLevel = head (MT.splitOn "." modName)
-          in if MT.null topLevel then [] else [topLevel]
+    extractImport ln =
+      let stripped = MT.stripStart ln
+       in case MT.stripPrefix "import " stripped of
+            Nothing -> []
+            Just rest ->
+              let modName = MT.strip (MT.takeWhile (\c -> c /= '(' && c /= ' ') rest)
+                  topLevel = head (MT.splitOn "." modName)
+               in if MT.null topLevel then [] else [topLevel]
 
     removeComments :: [Text] -> [Text]
     removeComments = go False
       where
         go _ [] = []
-        go True (l:ls)
+        go True (l : ls)
           | MT.isInfixOf "-}" l = go False ls
           | otherwise = go True ls
-        go False (l:ls)
+        go False (l : ls)
           | MT.isPrefixOf "--" (MT.stripStart l) = go False ls
           | MT.isPrefixOf "{-" (MT.stripStart l) = go True ls
           | otherwise = l : go False ls
@@ -779,7 +811,8 @@ installLocalIO libpath maySelector modulePath = do
 
   sourceExists <- doesDirectoryExist sourceDir
   unless sourceExists $
-    error $ "Source directory does not exist: " ++ sourceDir
+    error $
+      "Source directory does not exist: " ++ sourceDir
 
   createDirectoryIfMissing True libpath
 

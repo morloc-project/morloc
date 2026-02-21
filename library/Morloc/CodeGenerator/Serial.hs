@@ -29,8 +29,6 @@ module Morloc.CodeGenerator.Serial
 import qualified Data.Char as C
 import qualified Data.Text as DT
 import qualified Morloc.BaseTypes as BT
-import qualified Morloc.Language as Lang
-import Morloc.Language (Lang)
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
@@ -217,7 +215,7 @@ makeSerialAST m lang t0 = do
     -- string, for now.
     makeSerialAST' _ _ (UnkF (FV gv _)) = do
       registry <- MM.gets stateLangRegistry |>> lrEntries
-      serialType <- case Map.lookup (Lang.langName lang) registry of
+      serialType <- case Map.lookup (langName lang) registry of
         Nothing -> MM.throwSourcedError m "Unsupported language"
         (Just langRegistry) -> return $ CV (lreSerialType langRegistry)
       return $ SerialUnknown (FV gv serialType)
@@ -244,7 +242,8 @@ makeSerialAST m lang t0 = do
             unpacked <- mapM (makeSerialAST' gscope typepackers . typePackerUnpacked) packers
             selection <- selectPacker (zip packers unpacked)
             return $ SerialPack v selection
-          Nothing -> MM.throwSourcedError m $
+          Nothing ->
+            MM.throwSourcedError m $
               "Cannot find constructor in VarF" <+> dquotes (pretty v) <+> " finalType=" <> pretty finalType
       where
         finalType =

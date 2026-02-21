@@ -11,34 +11,39 @@ module Morloc.ProgramBuilder.Install
   ( installProgram
   ) where
 
-import Data.List (isSuffixOf, isInfixOf)
+import Data.List (isInfixOf, isSuffixOf)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.Completion as Completion
 import System.Directory
-  ( createDirectoryIfMissing
-  , doesFileExist
+  ( copyFile
+  , createDirectoryIfMissing
   , doesDirectoryExist
+  , doesFileExist
+  , getPermissions
+  , listDirectory
   , removeDirectoryRecursive
   , removeFile
-  , copyFile
-  , listDirectory
-  , getPermissions
-  , setPermissions
   , setOwnerExecutable
+  , setPermissions
   )
 import System.Environment (lookupEnv)
 import System.Exit (die)
-import System.FilePath ((</>), takeDirectory, makeRelative)
+import System.FilePath (makeRelative, takeDirectory, (</>))
 
 -- | After a successful local build, copy artifacts to the install location.
-installProgram
-  :: String    -- ^ configHome (e.g. ~/.local/share/morloc)
-  -> String    -- ^ installDir (e.g. <configHome>/exe/<name>)
-  -> String    -- ^ installName
-  -> [Text]    -- ^ include patterns
-  -> Bool      -- ^ force overwrite
-  -> IO ()
+installProgram ::
+  -- | configHome (e.g. ~/.local/share/morloc)
+  String ->
+  -- | installDir (e.g. <configHome>/exe/<name>)
+  String ->
+  -- | installName
+  String ->
+  -- | include patterns
+  [Text] ->
+  -- | force overwrite
+  Bool ->
+  IO ()
 installProgram configHome installDir installName includes force = do
   let binDir = configHome </> "bin"
       binPath = binDir </> installName
@@ -50,7 +55,6 @@ installProgram configHome installDir installName includes force = do
   if (binExists || exeExists) && not force
     then die $ "'" <> installName <> "' is already installed. Use --force to overwrite."
     else do
-
       -- Remove old install if forcing
       if force
         then do
@@ -100,19 +104,22 @@ copyDirectoryRecursive :: FilePath -> FilePath -> IO ()
 copyDirectoryRecursive src dst = do
   createDirectoryIfMissing True dst
   entries <- listDirectory src
-  mapM_ (\entry -> do
-    let srcPath = src </> entry
-        dstPath = dst </> entry
-    isDir <- doesDirectoryExist srcPath
-    if isDir
-      then copyDirectoryRecursive srcPath dstPath
-      else copyFile srcPath dstPath
-    ) entries
+  mapM_
+    ( \entry -> do
+        let srcPath = src </> entry
+            dstPath = dst </> entry
+        isDir <- doesDirectoryExist srcPath
+        if isDir
+          then copyDirectoryRecursive srcPath dstPath
+          else copyFile srcPath dstPath
+    )
+    entries
 
--- | Copy files matching an include pattern, preserving relative paths.
--- Trailing "/" means copy a directory recursively.
--- "*" in a pattern means glob match.
--- Otherwise treated as an exact file/directory path.
+{- | Copy files matching an include pattern, preserving relative paths.
+Trailing "/" means copy a directory recursively.
+"*" in a pattern means glob match.
+Otherwise treated as an exact file/directory path.
+-}
 copyIncludePattern :: String -> FilePath -> FilePath -> IO ()
 copyIncludePattern pattern srcRoot dstRoot
   | "/" `isSuffixOf` pattern = do
@@ -125,48 +132,59 @@ copyIncludePattern pattern srcRoot dstRoot
   | '*' `elem` pattern = do
       files <- listDirectoryRecursive srcRoot
       let matching = filter (matchGlob pattern . makeRelative srcRoot) files
-      mapM_ (\f -> do
-        let rel = makeRelative srcRoot f
-            dst = dstRoot </> rel
-        createDirectoryIfMissing True (takeDirectory dst)
-        copyFile f dst
-        ) matching
+      mapM_
+        ( \f -> do
+            let rel = makeRelative srcRoot f
+                dst = dstRoot </> rel
+            createDirectoryIfMissing True (takeDirectory dst)
+            copyFile f dst
+        )
+        matching
   | otherwise = do
       let srcPath = srcRoot </> pattern
       isFile <- doesFileExist srcPath
       isDir <- doesDirectoryExist srcPath
-      if isFile then do
-        let dst = dstRoot </> pattern
-        createDirectoryIfMissing True (takeDirectory dst)
-        copyFile srcPath dst
-      else if isDir then
-        copyDirectoryRecursive srcPath (dstRoot </> pattern)
-      else
-        return ()
+      if isFile
+        then do
+          let dst = dstRoot </> pattern
+          createDirectoryIfMissing True (takeDirectory dst)
+          copyFile srcPath dst
+        else
+          if isDir
+            then
+              copyDirectoryRecursive srcPath (dstRoot </> pattern)
+            else
+              return ()
 
 -- | Recursively list all files in a directory
 listDirectoryRecursive :: FilePath -> IO [FilePath]
 listDirectoryRecursive dir = do
   entries <- listDirectory dir
-  paths <- mapM (\entry -> do
-    let path = dir </> entry
-    isDir <- doesDirectoryExist path
-    if isDir
-      then listDirectoryRecursive path
-      else return [path]
-    ) entries
+  paths <-
+    mapM
+      ( \entry -> do
+          let path = dir </> entry
+          isDir <- doesDirectoryExist path
+          if isDir
+            then listDirectoryRecursive path
+            else return [path]
+      )
+      entries
   return (concat paths)
 
--- | Simple glob pattern matching supporting * (any sequence within a segment)
--- and ** (any path segments). Matches against relative paths.
+{- | Simple glob pattern matching supporting * (any sequence within a segment)
+and ** (any path segments). Matches against relative paths.
+-}
 matchGlob :: String -> FilePath -> Bool
 matchGlob [] [] = True
-matchGlob ('*':'*':'/':rest) path = matchGlob rest path || case break (== '/') path of
-  (_, '/':remaining) -> matchGlob ('*':'*':'/':rest) remaining
-  _ -> False
-matchGlob ('*':rest) path = any (\i -> matchGlob rest (drop i path)) [0..length segment]
-  where segment = takeWhile (/= '/') path
-matchGlob (p:rest) (c:cs) | p == c = matchGlob rest cs
+matchGlob ('*' : '*' : '/' : rest) path =
+  matchGlob rest path || case break (== '/') path of
+    (_, '/' : remaining) -> matchGlob ('*' : '*' : '/' : rest) remaining
+    _ -> False
+matchGlob ('*' : rest) path = any (\i -> matchGlob rest (drop i path)) [0 .. length segment]
+  where
+    segment = takeWhile (/= '/') path
+matchGlob (p : rest) (c : cs) | p == c = matchGlob rest cs
 matchGlob _ _ = False
 
 -- | Make a file executable
@@ -175,17 +193,18 @@ makeExecutable path = do
   p <- getPermissions path
   setPermissions path (setOwnerExecutable True p)
 
--- | Extract the manifest JSON from a wrapper script and write it to a file.
--- The wrapper script has the format:
---   #!/bin/sh
---   exec morloc-nexus "$0" "$@"
---   ### MANIFEST ###
---   <json>
+{- | Extract the manifest JSON from a wrapper script and write it to a file.
+The wrapper script has the format:
+  #!/bin/sh
+  exec morloc-nexus "$0" "$@"
+  ### MANIFEST ###
+  <json>
+-}
 extractAndWriteManifest :: FilePath -> FilePath -> IO ()
 extractAndWriteManifest wrapperPath manifestPath = do
   contents <- readFile wrapperPath
   let marker = "### MANIFEST ###"
       afterMarker = drop 1 $ dropWhile (/= marker) (lines contents)
   case afterMarker of
-    [] -> return ()  -- no manifest found, skip silently
-    _  -> writeFile manifestPath (unlines afterMarker)
+    [] -> return () -- no manifest found, skip silently
+    _ -> writeFile manifestPath (unlines afterMarker)

@@ -1,5 +1,5 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
 {- |
@@ -95,12 +95,12 @@ import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.DataFiles as DF
-import qualified Morloc.Language as ML
 import qualified Morloc.LangRegistry as LR
-import Morloc.Namespace.Prim
-import Morloc.Namespace.Type
+import qualified Morloc.Language as ML
 import Morloc.Namespace.Expr
+import Morloc.Namespace.Prim
 import Morloc.Namespace.State
+import Morloc.Namespace.Type
 import qualified Morloc.System as MS
 import qualified System.Exit as SE
 import System.IO (stderr)
@@ -115,8 +115,11 @@ runMorlocMonad outfile v config buildConfig ev = do
         Right r -> r
         Left err -> error $ "Failed to build language registry: " ++ err
       state0 = emptyState outfile v
-      state1 = state0 { stateBuildConfig = buildConfig
-                       , stateLangRegistry = registry }
+      state1 =
+        state0
+          { stateBuildConfig = buildConfig
+          , stateLangRegistry = registry
+          }
   runStateT (runWriterT (runExceptT (runReaderT ev config))) state1
 
 emptyState :: Maybe Path -> Int -> MorlocState
@@ -204,18 +207,23 @@ makeMorlocError _ (SystemError msg) = msg
 makeMorlocError st (UnificationError lhs rhs context msg) =
   case (Map.lookup lhs srcMap, Map.lookup rhs srcMap, Map.lookup context srcMap) of
     (Just lhsLoc, rhsLoc, contextLoc) ->
-      "Unification error:" <+> msg <> line
-      <> "Found while unifying" <+> maybe mempty pretty contextLoc <> line
-      <> "With values" <> line <> snippet st lhsLoc
-      <> maybe mempty (\l -> "and" <> line <> snippet st l) rhsLoc
+      "Unification error:" <+> msg
+        <> line
+        <> "Found while unifying" <+> maybe mempty pretty contextLoc
+        <> line
+        <> "With values"
+        <> line
+        <> snippet st lhsLoc
+        <> maybe mempty (\l -> "and" <> line <> snippet st l) rhsLoc
     _ -> "Compiler bug, broken indices" <+> pretty (lhs, rhs, context) <+> "with attached error:" <+> msg
   where
     srcMap = stateSourceMap st
 
--- | Render a source code snippet with error location markers.
--- For single-line spans: ^~~~^ underline from start to end column.
--- For multi-line spans: Elm-style vertical bar in the gutter with ^ at start and end.
--- Spans > 10 lines are truncated to first 5 and last 5 lines.
+{- | Render a source code snippet with error location markers.
+For single-line spans: ^~~~^ underline from start to end column.
+For multi-line spans: Elm-style vertical bar in the gutter with ^ at start and end.
+Spans > 10 lines are truncated to first 5 and last 5 lines.
+-}
 snippet :: MorlocState -> SrcLoc -> MDoc
 snippet st (SrcLoc path ln col endLn endCol) =
   case path >>= \p -> Map.lookup p (stateSourceText st) of
@@ -223,32 +231,39 @@ snippet st (SrcLoc path ln col endLn endCol) =
     Just src ->
       let srcLines = MT.lines src
           n = length srcLines
-      in if n == 0 || ln < 1
-         then mempty
-         else
-           let startLine = min ln n
-               finishLine = min endLn n
-               gw = length (show finishLine)
-               gutter = pretty (MT.replicate gw " ")
-               fmtLineNum num = let s = MT.show' num
-                                in pretty (MT.replicate (gw - MT.length s) " ") <> pretty s
-           in if startLine == finishLine
-              then snippetSingleLine srcLines startLine col endCol gutter fmtLineNum
-              else snippetMultiLine srcLines startLine col finishLine endCol gutter fmtLineNum
+       in if n == 0 || ln < 1
+            then mempty
+            else
+              let startLine = min ln n
+                  finishLine = min endLn n
+                  gw = length (show finishLine)
+                  gutter = pretty (MT.replicate gw " ")
+                  fmtLineNum num =
+                    let s = MT.show' num
+                     in pretty (MT.replicate (gw - MT.length s) " ") <> pretty s
+               in if startLine == finishLine
+                    then snippetSingleLine srcLines startLine col endCol gutter fmtLineNum
+                    else snippetMultiLine srcLines startLine col finishLine endCol gutter fmtLineNum
   where
     snippetSingleLine srcLines lineNum startCol eCol gutter fmtNum =
       let errLine = srcLines !! (lineNum - 1)
           sc = max 1 (min startCol (MT.length errLine + 1))
           ec = max sc (min eCol (MT.length errLine + 1))
           pointer
-            | sc == ec  = pretty (MT.replicate (sc - 1) " ") <> "^"
-            | ec > sc + 1 = pretty (MT.replicate (sc - 1) " ") <> "^"
-                         <> pretty (MT.replicate (ec - sc - 2) "~") <> "^"
+            | sc == ec = pretty (MT.replicate (sc - 1) " ") <> "^"
+            | ec > sc + 1 =
+                pretty (MT.replicate (sc - 1) " ")
+                  <> "^"
+                  <> pretty (MT.replicate (ec - sc - 2) "~")
+                  <> "^"
             | otherwise = pretty (MT.replicate (sc - 1) " ") <> "^^"
-      in line
-         <> gutter <+> "|" <> line
-         <> fmtNum lineNum <+> "|" <+> pretty errLine <> line
-         <> gutter <+> "|" <+> pointer <> line
+       in line
+            <> gutter <+> "|"
+            <> line
+            <> fmtNum lineNum <+> "|" <+> pretty errLine
+            <> line
+            <> gutter <+> "|" <+> pointer
+            <> line
 
     snippetMultiLine srcLines startLine startCol finishLine eCol gutter fmtNum =
       let totalLines = finishLine - startLine + 1
@@ -260,55 +275,60 @@ snippet st (SrcLoc path ln col endLn endCol) =
 
           renderLine num =
             let srcLine = srcLines !! (num - 1)
-            in fmtNum num <+> "| |" <+> pretty srcLine
+             in fmtNum num <+> "| |" <+> pretty srcLine
 
           renderStartPointer =
             let sc = max 1 startCol
-            in gutter <+> "| |" <+> pretty (MT.replicate (sc - 1) " ") <> "^"
+             in gutter <+> "| |" <+> pretty (MT.replicate (sc - 1) " ") <> "^"
 
           renderEndPointer =
             let endLine = srcLines !! (finishLine - 1)
                 ec = max 1 (min eCol (MT.length endLine + 1))
-            in gutter <+> "| |" <+> pretty (MT.replicate (ec - 1) " ") <> "^"
+             in gutter <+> "| |" <+> pretty (MT.replicate (ec - 1) " ") <> "^"
 
           elisionLine = gutter <+> "  ..."
 
           renderLines [] = mempty
-          renderLines (num:rest)
+          renderLines (num : rest)
             | needsElision && num == elisionPoint =
                 elisionLine <> line <> renderLines (dropWhile (< finishLine - 4) rest)
             | num == startLine =
-                renderLine num <> line
-                <> renderStartPointer <> line
-                <> renderLines rest
+                renderLine num
+                  <> line
+                  <> renderStartPointer
+                  <> line
+                  <> renderLines rest
             | otherwise =
-                renderLine num <> line
-                <> renderLines rest
-      in line
-         <> gutter <+> "|" <> line
-         <> renderLines lineNums
-         <> renderEndPointer <> line
+                renderLine num
+                  <> line
+                  <> renderLines rest
+       in line
+            <> gutter <+> "|"
+            <> line
+            <> renderLines lineNums
+            <> renderEndPointer
+            <> line
 
-
-throwSystemError :: MonadError MorlocError m => MDoc -> m a
+throwSystemError :: (MonadError MorlocError m) => MDoc -> m a
 throwSystemError = throwError . SystemError
 
-throwSourcedError :: MonadError MorlocError m => Int -> MDoc -> m a
+throwSourcedError :: (MonadError MorlocError m) => Int -> MDoc -> m a
 throwSourcedError i = throwError . SourcedError i
 
-throwUnificationError :: MonadError MorlocError m => Int -> Int -> Int -> MDoc -> m a
+throwUnificationError :: (MonadError MorlocError m) => Int -> Int -> Int -> MDoc -> m a
 throwUnificationError lhs rhs context msg = throwError $ UnificationError lhs rhs context msg
 
-systemCallError ::  Text -> Text -> String -> MorlocMonad a
-systemCallError cmd loc msg = throwSystemError $
-  "System call failed at ("
-    <> pretty loc
-    <> "):\n"
-    <> " cmd> "
-    <> pretty cmd
-    <> "\n"
-    <> " msg>\n"
-    <> pretty msg
+systemCallError :: Text -> Text -> String -> MorlocMonad a
+systemCallError cmd loc msg =
+  throwSystemError $
+    "System call failed at ("
+      <> pretty loc
+      <> "):\n"
+      <> " cmd> "
+      <> pretty cmd
+      <> "\n"
+      <> " msg>\n"
+      <> pretty msg
 
 -- | Execute a system call
 runCommand ::
@@ -476,8 +496,9 @@ getConcreteUniversalScope lang = do
 getGeneralUniversalScope :: MorlocMonad Scope
 getGeneralUniversalScope = gets stateUniversalGeneralTypedefs
 
--- | Get the module name from state, falling back to "nexus" if unset.
--- This is the canonical name for pool subdirectories and manifest references.
+{- | Get the module name from state, falling back to "nexus" if unset.
+This is the canonical name for pool subdirectories and manifest references.
+-}
 getModuleName :: MorlocMonad String
 getModuleName = do
   st <- get
@@ -485,8 +506,9 @@ getModuleName = do
     Just (MV n) -> MT.unpack n
     Nothing -> "nexus"
 
--- | Get the output file name: the -o value if given, else the module name.
--- This controls only the wrapper script filename.
+{- | Get the output file name: the -o value if given, else the module name.
+This controls only the wrapper script filename.
+-}
 getOutfileName :: MorlocMonad String
 getOutfileName = do
   st <- get

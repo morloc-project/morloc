@@ -12,7 +12,6 @@ Primitive types (newtypes for names, keys, paths) and small data structures
 (DAG, GMap, Or, None, etc.) used across the compiler. Re-exports
 "Morloc.Internal" so that downstream modules get the proto-prelude for free.
 -}
-
 module Morloc.Namespace.Prim
   ( -- ** re-exports
     module Morloc.Internal
@@ -47,8 +46,9 @@ module Morloc.Namespace.Prim
   , Path
   , Code (..)
   , TimeInSeconds (..)
-  , DirTree (..)
-  , AnchoredDirTree (..)
+  , DirTree (File, Dir, Failed)
+  , AnchoredDirTree ((:/))
+  , writeDirectoryWith
 
     -- ** Data
   , GMap (..)
@@ -74,8 +74,8 @@ import qualified Data.Text as DT
 import GHC.Generics (Generic)
 import Morloc.Data.Doc
 import Morloc.Internal
-import Morloc.Language (Lang(..))
-import System.Directory.Tree (AnchoredDirTree (..), DirTree (..))
+import Morloc.Language (Lang (..))
+import System.Directory.Tree (AnchoredDirTree ((:/)), DirTree (Dir, Failed, File), writeDirectoryWith)
 import Text.Read (readMaybe)
 
 ---- Typeclasses
@@ -97,31 +97,37 @@ class Defaultable a where
 -- | Unannotated pretty-printer document
 type MDoc = Doc ()
 
--- | A directed acyclic graph. Each key maps to a node value and a list of
--- @(child-key, edge-data)@ pairs. The structure is not enforced to be acyclic;
--- 'Morloc.Data.DAG.synthesize' detects cycles at runtime.
+{- | A directed acyclic graph. Each key maps to a node value and a list of
+@(child-key, edge-data)@ pairs. The structure is not enforced to be acyclic;
+'Morloc.Data.DAG.synthesize' detects cycles at runtime.
+-}
 type DAG key edge node = Map key (node, [(key, edge)])
 
--- | A two-level map: outer keys -> inner keys -> values. Multiple outer keys
--- may share the same inner key. See "Morloc.Data.GMap" for operations.
+{- | A two-level map: outer keys -> inner keys -> values. Multiple outer keys
+may share the same inner key. See "Morloc.Data.GMap" for operations.
+-}
 data GMap a b c = GMap (Map a b) (Map b c)
   deriving (Show, Ord, Eq)
 
 -- | Result of a 'GMap' lookup
 data GMapRet c
-  = GMapNoFst  -- ^ Outer key not found
-  | GMapNoSnd  -- ^ Inner key not found (possible bug)
-  | GMapJust c -- ^ Successful lookup
+  = -- | Outer key not found
+    GMapNoFst
+  | -- | Inner key not found (possible bug)
+    GMapNoSnd
+  | -- | Successful lookup
+    GMapJust c
   deriving (Show, Ord, Eq)
 
 -- | Source location span for error reporting
 data SrcLoc = SrcLoc
   { srcLocPath :: Maybe Path
   , srcLocLine :: Int
-  , srcLocCol  :: Int
+  , srcLocCol :: Int
   , srcLocEndLine :: Int
-  , srcLocEndCol  :: Int
-  } deriving (Show, Ord, Eq)
+  , srcLocEndCol :: Int
+  }
+  deriving (Show, Ord, Eq)
 
 -- | Module name (e.g., @\"math\"@, @\"bio.algo\"@)
 newtype MVar = MV {unMVar :: Text} deriving (Show, Eq, Ord)
@@ -140,13 +146,15 @@ newtype CVar = CV {unCVar :: Text} deriving (Show, Eq, Ord)
 
 -- | Record field key
 newtype Key = Key {unKey :: Text} deriving (Show, Eq, Ord, Generic)
+
 instance Binary Key
 
 -- | Source label for grouping manifold configurations
 newtype Label = Label {unLabel :: Text} deriving (Show, Eq, Ord)
 
--- | Name of a foreign function (may contain characters illegal in morloc,
--- e.g., the R function @file.exists@)
+{- | Name of a foreign function (may contain characters illegal in morloc,
+e.g., the R function @file.exists@)
+-}
 newtype SrcName = SrcName {unSrcName :: Text} deriving (Show, Eq, Ord)
 
 -- | A blob of generated code
@@ -262,7 +270,15 @@ instance Pretty SrcLoc where
     | ln == endLn =
         maybe "<unknown>" pretty path <> ":" <> pretty ln <> ":" <> pretty col <> "-" <> pretty endCol
     | otherwise =
-        maybe "<unknown>" pretty path <> ":" <> pretty ln <> ":" <> pretty col <> "-" <> pretty endLn <> ":" <> pretty endCol
+        maybe "<unknown>" pretty path
+          <> ":"
+          <> pretty ln
+          <> ":"
+          <> pretty col
+          <> "-"
+          <> pretty endLn
+          <> ":"
+          <> pretty endCol
 
 instance (Pretty a, Pretty b) => Pretty (Or a b) where
   pretty (L x) = parens ("L" <+> pretty x)

@@ -63,7 +63,6 @@ module Morloc.Typecheck.Internal
   , seeType
   ) where
 
-import Data.List (nub)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -71,10 +70,10 @@ import qualified Morloc.BaseTypes as BT
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import Morloc.Namespace.Prim
-import Morloc.Namespace.Type
 import Morloc.Namespace.Expr
+import Morloc.Namespace.Prim
 import Morloc.Namespace.State
+import Morloc.Namespace.Type
 import qualified Morloc.TypeEval as TE
 
 qualify :: [TVar] -> TypeU -> TypeU
@@ -122,17 +121,20 @@ instance Applicable TypeU where
   apply g (ThunkU t) = ThunkU (apply g t)
 
 instance Applicable EType where
-  apply g e = e { etype = apply g (etype e)
-                , econs = Set.map (applyConstraint g) (econs e)
-                }
+  apply g e =
+    e
+      { etype = apply g (etype e)
+      , econs = Set.map (applyConstraint g) (econs e)
+      }
     where
       applyConstraint g' (Constraint cls ts) = Constraint cls (map (apply g') ts)
 
 instance Applicable Gamma where
-  apply g1 g2 = g2
-    { gammaContext = map f (gammaContext g2)
-    , gammaSolved = Map.map (apply g1) (gammaSolved g2)
-    }
+  apply g1 g2 =
+    g2
+      { gammaContext = map f (gammaContext g2)
+      , gammaSolved = Map.map (apply g1) (gammaSolved g2)
+      }
     where
       f :: GammaIndex -> GammaIndex
       f (AnnG v t) = AnnG v (apply g1 t)
@@ -172,8 +174,10 @@ subtypeEvaluated scope t1 t2 g =
     (_, _) -> Left $ "Cannot compare types" <+> pretty t1 <+> "and" <+> pretty t2
 
 subtypeError :: TypeU -> TypeU -> MDoc -> Either MDoc a
-subtypeError t1 t2 msg = Left $
-    "Subtype error:" <+> msg <> "\n  "
+subtypeError t1 t2 msg =
+  Left $
+    "Subtype error:" <+> msg
+      <> "\n  "
       <> prettyTypeU t1 <+> "<:" <+> prettyTypeU t2
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
@@ -198,10 +202,8 @@ subtype scope a@ExistU {} b@ExistU {} g
 -- types involved are all existentials, it will always pass, so I omit
 -- it.
 
-
 -- ThunkU: covariant subtyping
 subtype scope (ThunkU t1) (ThunkU t2) g = subtype scope t1 t2 g
-
 --  g1 |- B1 <: A1 -| g2
 --  g2 |- [g2]A2 <: [g2]B2 -| g3
 -- ----------------------------------------- <:-->
@@ -364,7 +366,6 @@ instantiate scope (ThunkU inner) (ExistU v ([], _) _) g1 = do
       return $ cacheSolved v (ThunkU eb) $ g2 {gammaContext = rhs ++ [solved, index eb] ++ lhs}
     Nothing -> return g2
   instantiate scope (apply g3 inner) eb g3
-
 instantiate scope (ExistU v ([], _) _) (FunU as b) g1 = do
   let (g2, veas) = statefulMap (\g _ -> tvarname g "ta") g1 as
       (g3, veb) = tvarname g2 "to"
@@ -373,7 +374,9 @@ instantiate scope (ExistU v ([], _) _) (FunU as b) g1 = do
   g4 <- case access1 v (gammaContext g3) of
     Just (rhs, _, lhs) -> do
       solved <- solve v (FunU eas eb)
-      return $ cacheSolved v (FunU eas eb) $ g3 {gammaContext = rhs ++ [solved] ++ (index eb : map index eas) ++ lhs}
+      return $
+        cacheSolved v (FunU eas eb) $
+          g3 {gammaContext = rhs ++ [solved] ++ (index eb : map index eas) ++ lhs}
     Nothing -> return g3
   g5 <- foldlM (\g (e, t) -> instantiate scope e t g) g4 (zip eas as)
   instantiate scope eb (apply g5 b) g5
@@ -390,7 +393,9 @@ instantiate scope (FunU as b) (ExistU v ([], _) _) g1 = do
   g4 <- case access1 v (gammaContext g3) of
     Just (rhs, _, lhs) -> do
       solved <- solve v (FunU eas eb)
-      return $ cacheSolved v (FunU eas eb) $ g3 {gammaContext = rhs ++ [solved] ++ (index eb : map index eas) ++ lhs}
+      return $
+        cacheSolved v (FunU eas eb) $
+          g3 {gammaContext = rhs ++ [solved] ++ (index eb : map index eas) ++ lhs}
     Nothing -> return g3 -- Left $ InstantiationError ta tb $ "Error in InstRApp: " <> MT.show' (v, gammaContext g3)
   g5 <- foldlM (\g (e, t) -> instantiate scope t e g) g4 (zip eas as)
   instantiate scope eb (apply g5 b) g5
@@ -448,8 +453,12 @@ instantiate scope ta@(ExistU v1 (ps1, pc1) (rs1, rc1)) tb@(ExistU v2 (ps2, pc2) 
   (g2, rs1', rs2') <- case (rc1, rc2, Set.isSubsetOf keyset1 keyset2, Set.isSubsetOf keyset2 keyset1) of
     (Closed, Closed, False, _) -> subtypeError ta tb "Right closed existential contains keys missing in left closed existential"
     (Closed, Closed, _, False) -> subtypeError ta tb "Right closed existential contains keys missing in left closed existential"
-    (Closed, Open, a, False)   -> subtypeError ta tb $ "Right existential contains keys missing in left closed existential " <> pretty a
-    (Open, Closed, False, b)   -> subtypeError ta tb $ "Left existential contains keys missing in right closed existential " <> pretty b
+    (Closed, Open, a, False) ->
+      subtypeError ta tb $
+        "Right existential contains keys missing in left closed existential " <> pretty a
+    (Open, Closed, False, b) ->
+      subtypeError ta tb $
+        "Left existential contains keys missing in right closed existential " <> pretty b
     _ -> extendRec scope g1 rs1 rs2
 
   g3 <- foldM (\g (t1, t2) -> subtype scope t1 t2 g) g2 (zip ps1 ps2)
@@ -518,7 +527,8 @@ instantiate _ ta tb _ = subtypeError ta tb "Unexpected types"
 
 solve :: TVar -> TypeU -> Either MDoc GammaIndex
 solve v t
-  | occursIn v t = Left $ "Infinite recursion, cannot substitute" <+> pretty v <+> "into type" <+> pretty t
+  | occursIn v t =
+      Left $ "Infinite recursion, cannot substitute" <+> pretty v <+> "into type" <+> pretty t
   | otherwise = Right (SolvedG v t)
   where
     occursIn :: TVar -> TypeU -> Bool
@@ -532,7 +542,7 @@ solve v t
 
 -- | Record a solved variable in the gamma map cache
 cacheSolved :: TVar -> TypeU -> Gamma -> Gamma
-cacheSolved v t g = g { gammaSolved = Map.insert v t (gammaSolved g) }
+cacheSolved v t g = g {gammaSolved = Map.insert v t (gammaSolved g)}
 
 occursCheck :: TypeU -> TypeU -> Text -> Either MDoc ()
 occursCheck t1 t2 place =
@@ -768,9 +778,10 @@ rename g0 (ForallU v@(TV s) t0) =
 -- Unless I add N-rank types, foralls can only be on top, so no need to recurse.
 rename g t = (g, t)
 
--- | Rename all generic type variables (ForallU-bound and ExistU) to clean
--- letters from a lazy pool: a, b, c, ..., z, a1, b1, ..., z1, a2, ...
--- Avoids names already used by concrete types in the expression.
+{- | Rename all generic type variables (ForallU-bound and ExistU) to clean
+letters from a lazy pool: a, b, c, ..., z, a1, b1, ..., z1, a2, ...
+Avoids names already used by concrete types in the expression.
+-}
 cleanTypeName :: TypeU -> TypeU
 cleanTypeName t0 =
   let (vs, body) = unqualify t0
@@ -781,7 +792,7 @@ cleanTypeName t0 =
       renameMap = Map.fromList (zip allGeneric pool)
       renamedBody = applyVarRenaming renameMap body
       renamedVs = map (\v -> Map.findWithDefault v v renameMap) vs
-  in foldr ForallU renamedBody renamedVs
+   in foldr ForallU renamedBody renamedVs
 
 letterPool :: [TVar]
 letterPool =

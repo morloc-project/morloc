@@ -29,11 +29,11 @@ import qualified Data.Yaml as Y
 import qualified Data.Yaml.Config as YC
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Language as ML
 import qualified Morloc.LangRegistry as LR
+import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
-import Morloc.Namespace.Prim
 import Morloc.Namespace.Expr
+import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import qualified Morloc.System as MS
 
@@ -87,7 +87,10 @@ loadModuleConfig (Just configFile) = do
       case result of
         Left errMsg ->
           MM.throwSystemError $
-            "Failed to parse module config file '" <> pretty configFile <> "': " <> pretty (Y.prettyPrintParseException errMsg)
+            "Failed to parse module config file '"
+              <> pretty configFile
+              <> "': "
+              <> pretty (Y.prettyPrintParseException errMsg)
         Right config -> return config
     else
       return defaultValue

@@ -116,10 +116,10 @@ newCommandParser :: Parser NewCommand
 newCommandParser =
   NewCommand
     <$> strArgument
-          ( metavar "NAME"
-              <> value ""
-              <> help "Package name (defaults to current directory name)"
-          )
+      ( metavar "NAME"
+          <> value ""
+          <> help "Package name (defaults to current directory name)"
+      )
 
 newSubcommand :: Mod CommandFields CliCommand
 newSubcommand = command "new" (info (CmdNew <$> newCommandParser) (progDesc "Create a new morloc package"))
@@ -205,10 +205,10 @@ data ListKind = ListModules | ListPrograms
 
 data ListCommand = ListCommand
   { listPattern :: Maybe String
-  , listConfig  :: String
+  , listConfig :: String
   , listVanilla :: Bool
   , listVerbose :: Int
-  , listKind    :: Maybe ListKind
+  , listKind :: Maybe ListKind
   }
 
 makeListParser :: Parser ListCommand
@@ -225,11 +225,11 @@ listSubcommand =
   command "list" (info (CmdList <$> makeListParser) (progDesc "List installed modules and programs"))
 
 data UninstallCommand = UninstallCommand
-  { uninstallNames   :: [String]
-  , uninstallConfig  :: String
+  { uninstallNames :: [String]
+  , uninstallConfig :: String
   , uninstallVanilla :: Bool
-  , uninstallKind    :: Maybe ListKind
-  , uninstallDryRun  :: Bool
+  , uninstallKind :: Maybe ListKind
+  , uninstallDryRun :: Bool
   }
 
 makeUninstallParser :: Parser UninstallCommand
@@ -243,7 +243,9 @@ makeUninstallParser =
 
 uninstallSubcommand :: Mod CommandFields CliCommand
 uninstallSubcommand =
-  command "uninstall" (info (CmdUninstall <$> makeUninstallParser) (progDesc "Uninstall a module or program"))
+  command
+    "uninstall"
+    (info (CmdUninstall <$> makeUninstallParser) (progDesc "Uninstall a module or program"))
 
 optExpression :: Parser Bool
 optExpression =
@@ -399,10 +401,10 @@ optListKind =
 
 optListPattern :: Parser (Maybe String)
 optListPattern =
-  optional . strArgument
-    $ ( metavar "PATTERN"
-          <> help "Filter by subsequence match on name"
-      )
+  optional . strArgument $
+    ( metavar "PATTERN"
+        <> help "Filter by subsequence match on name"
+    )
 
 optUninstallNames :: Parser [String]
 optUninstallNames =

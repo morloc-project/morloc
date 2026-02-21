@@ -1,13 +1,13 @@
 module Morloc.Test.DaemonTests (daemonTests) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (try, SomeException)
+import Control.Exception (SomeException, try)
 import System.Directory (copyFile, doesFileExist, listDirectory, removeFile)
-import System.Exit (ExitCode(..))
+import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.IO.Temp (getCanonicalTemporaryDirectory, createTempDirectory)
+import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (testCase, assertBool, assertFailure)
+import Test.Tasty.HUnit (assertBool, assertFailure, testCase)
 
 import Morloc.Test.Common
 
@@ -23,13 +23,15 @@ compileDaemonProgram env locFile = do
     createTempDirectory tmpBase "morloc-daemon"
   copyFile (srcDir </> locFile) (tmpDir </> locFile)
   entries <- listDirectory srcDir
-  mapM_ (\f -> do
-    let src = srcDir </> f
-    isFile <- doesFileExist src
-    if isFile && (hasSuffix ".py" f || hasSuffix ".R" f || hasSuffix ".hpp" f)
-      then copyFile src (tmpDir </> f)
-      else return ()
-    ) entries
+  mapM_
+    ( \f -> do
+        let src = srcDir </> f
+        isFile <- doesFileExist src
+        if isFile && (hasSuffix ".py" f || hasSuffix ".R" f || hasSuffix ".hpp" f)
+          then copyFile src (tmpDir </> f)
+          else return ()
+    )
+    entries
   (ec, _, err) <- morlocMake tmpDir "nexus" locFile
   case ec of
     ExitSuccess -> return tmpDir
@@ -48,8 +50,9 @@ waitForDaemonReady port maxWaitMs = go 0
     go elapsed
       | elapsed >= maxWaitMs = return False
       | otherwise = do
-          result <- try $ httpGet ("http://127.0.0.1:" ++ show port ++ "/discover")
-            :: IO (Either SomeException (ExitCode, String, String))
+          result <-
+            try $ httpGet ("http://127.0.0.1:" ++ show port ++ "/discover") ::
+              IO (Either SomeException (ExitCode, String, String))
           case result of
             Right (ExitSuccess, body, _)
               | length body > 10 -> return True
@@ -65,8 +68,9 @@ waitForSocket target maxWaitMs = go 0
     go elapsed
       | elapsed >= maxWaitMs = return False
       | otherwise = do
-          result <- try $ lpRequest target "{\"method\":\"health\"}"
-            :: IO (Either SomeException String)
+          result <-
+            try $ lpRequest target "{\"method\":\"health\"}" ::
+              IO (Either SomeException String)
           case result of
             Right r | length r > 2 -> return True
             _ -> do
@@ -187,7 +191,8 @@ socketTests env = testCase "Unix socket API" $ do
     assertJsonEq "socket add" r3 "status" "ok"
     assertJsonEq "socket add" r3 "result" "30"
 
-    r4 <- lpRequest sockPath "{\"id\":\"req-42\",\"method\":\"call\",\"command\":\"mul\",\"args\":[3,7]}"
+    r4 <-
+      lpRequest sockPath "{\"id\":\"req-42\",\"method\":\"call\",\"command\":\"mul\",\"args\":[3,7]}"
     assertJsonEq "socket mul" r4 "id" "req-42"
     assertJsonEq "socket mul" r4 "result" "21"
 
@@ -211,13 +216,17 @@ tcpTests env = testCase "TCP API" $ do
     r1 <- lpRequest ("127.0.0.1:" ++ show port) "{\"method\":\"health\"}"
     assertJsonEq "tcp health" r1 "status" "ok"
 
-    r2 <- lpRequest ("127.0.0.1:" ++ show port)
-      "{\"method\":\"call\",\"command\":\"add\",\"args\":[100,200]}"
+    r2 <-
+      lpRequest
+        ("127.0.0.1:" ++ show port)
+        "{\"method\":\"call\",\"command\":\"add\",\"args\":[100,200]}"
     assertJsonEq "tcp add" r2 "status" "ok"
     assertJsonEq "tcp add" r2 "result" "300"
 
-    r3 <- lpRequest ("127.0.0.1:" ++ show port)
-      "{\"method\":\"call\",\"command\":\"square\",\"args\":[9]}"
+    r3 <-
+      lpRequest
+        ("127.0.0.1:" ++ show port)
+        "{\"method\":\"call\",\"command\":\"square\",\"args\":[9]}"
     assertJsonEq "tcp square" r3 "result" "81"
 
 -- ======================================================================
@@ -233,13 +242,22 @@ multiListenerTests env = testCase "Multi-listener (HTTP+TCP+socket)" $ do
   tcpPort <- pickFreePort
   withDaemon arithDir ["--socket", sockPath, "--port", show tcpPort, "--http-port", show httpPort] $ \_ -> do
     ok <- waitForDaemonReady httpPort 15000
-    assertBool ("multi daemon did not start (http=" ++ show httpPort
-                ++ ", tcp=" ++ show tcpPort ++ ", dir " ++ arithDir ++ ")") ok
+    assertBool
+      ( "multi daemon did not start (http="
+          ++ show httpPort
+          ++ ", tcp="
+          ++ show tcpPort
+          ++ ", dir "
+          ++ arithDir
+          ++ ")"
+      )
+      ok
 
     (_, r1, _) <- httpPost ("http://127.0.0.1:" ++ show httpPort ++ "/call/add") "[1, 2]"
     assertJsonEq "multi HTTP" r1 "result" "3"
 
-    r2 <- lpRequest ("127.0.0.1:" ++ show tcpPort) "{\"method\":\"call\",\"command\":\"add\",\"args\":[1,2]}"
+    r2 <-
+      lpRequest ("127.0.0.1:" ++ show tcpPort) "{\"method\":\"call\",\"command\":\"add\",\"args\":[1,2]}"
     assertJsonEq "multi TCP" r2 "result" "3"
 
     r3 <- lpRequest sockPath "{\"method\":\"call\",\"command\":\"add\",\"args\":[1,2]}"
@@ -259,11 +277,15 @@ sequentialTests env = testCase "Sequential requests" $ do
     ok <- waitForDaemonReady port 15000
     assertBool ("daemon did not start (port " ++ show port ++ ", dir " ++ arithDir ++ ")") ok
 
-    mapM_ (\i -> do
-      (_, r, _) <- httpPost ("http://127.0.0.1:" ++ show port ++ "/call/add")
-        ("[" ++ show i ++ ", " ++ show i ++ "]")
-      assertJsonEq ("sequential add " ++ show i) r "result" (show (i + i))
-      ) [1..10 :: Int]
+    mapM_
+      ( \i -> do
+          (_, r, _) <-
+            httpPost
+              ("http://127.0.0.1:" ++ show port ++ "/call/add")
+              ("[" ++ show i ++ ", " ++ show i ++ "]")
+          assertJsonEq ("sequential add " ++ show i) r "result" (show (i + i))
+      )
+      [1 .. 10 :: Int]
 
 -- ======================================================================
 -- Concurrent requests tests
@@ -277,11 +299,15 @@ concurrentHttpTests env = testCase "Concurrent HTTP requests" $ do
     ok <- waitForDaemonReady port 15000
     assertBool ("daemon did not start (port " ++ show port ++ ", dir " ++ arithDir ++ ")") ok
 
-    mapM_ (\i -> do
-      (_, r, _) <- httpPost ("http://127.0.0.1:" ++ show port ++ "/call/square")
-        ("[" ++ show i ++ "]")
-      assertJsonEq ("concurrent square " ++ show i) r "result" (show (i * i))
-      ) [1..5 :: Int]
+    mapM_
+      ( \i -> do
+          (_, r, _) <-
+            httpPost
+              ("http://127.0.0.1:" ++ show port ++ "/call/square")
+              ("[" ++ show i ++ "]")
+          assertJsonEq ("concurrent square " ++ show i) r "result" (show (i * i))
+      )
+      [1 .. 5 :: Int]
 
 -- ======================================================================
 -- Graceful shutdown tests
@@ -335,15 +361,17 @@ removeIfExists path = do
 -- ======================================================================
 
 daemonTests :: TestEnv -> TestTree
-daemonTests env = testGroup "Daemon"
-  [ httpTests env
-  , httpPyTests env
-  , httpPureTests env
-  , socketTests env
-  , tcpTests env
-  , multiListenerTests env
-  , sequentialTests env
-  , concurrentHttpTests env
-  , shutdownTests env
-  , poolHealthTests env
-  ]
+daemonTests env =
+  testGroup
+    "Daemon"
+    [ httpTests env
+    , httpPyTests env
+    , httpPureTests env
+    , socketTests env
+    , tcpTests env
+    , multiListenerTests env
+    , sequentialTests env
+    , concurrentHttpTests env
+    , shutdownTests env
+    , poolHealthTests env
+    ]

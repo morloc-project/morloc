@@ -19,7 +19,6 @@ Also defines 'Source' (foreign function binding), config types
 ('ManifoldConfig', 'ModuleConfig', 'BuildConfig'), and mapping combinators
 over the 'AnnoS' tree.
 -}
-
 module Morloc.Namespace.Expr
   ( -- * Source and config types
     Source (..)
@@ -71,8 +70,8 @@ module Morloc.Namespace.Expr
 
 import Control.Monad.Identity (runIdentity)
 import Data.Aeson (FromJSON (..))
-import Data.Aeson.Types (Options (..), defaultOptions)
 import qualified Data.Aeson as Aeson
+import Data.Aeson.Types (Options (..), defaultOptions)
 import Data.Foldable (toList)
 import qualified Data.Map as Map
 import Data.Scientific (Scientific)
@@ -467,11 +466,9 @@ instance Pretty Source where
 
 instance Pretty ExportGroup where
   pretty (ExportGroup name desc members) =
-    "--*" <+> pretty name <> maybe "" (\d -> ":" <+> pretty d) (listToMaybe desc)
-    <+> tupled (map pretty (Set.toList members))
-    where
-      listToMaybe [] = Nothing
-      listToMaybe (x:_) = Just x
+    "--*" <+> pretty name
+      <> maybe "" (\d -> ":" <+> pretty d) (listToMaybe desc)
+        <+> tupled (map pretty (Set.toList members))
 
 instance Pretty Symbol where
   pretty (TypeSymbol x) = pretty x
@@ -525,8 +522,11 @@ instance Pretty Expr where
   pretty (ImpE (Import m (Just xs) _ _)) = "import" <+> pretty m <+> tupled (map pretty xs)
   pretty (ExpE ExportAll) = "export *"
   pretty (ExpE (ExportMany symbols groups)) =
-    "export" <+> tupled (map pretty (Set.toList symbols)
-                        ++ [pretty g | g <- groups])
+    "export"
+      <+> tupled
+        ( map pretty (Set.toList symbols)
+            ++ [pretty g | g <- groups]
+        )
   pretty (VarE _ s) = pretty s
   pretty (LamE v e) = "\\" <+> pretty v <+> "->" <+> pretty e
   pretty (AnnE e t) = parens (pretty e <+> "::" <+> pretty t)
@@ -546,13 +546,13 @@ instance Pretty Expr where
       <> maybe "" (\f -> "from" <+> pretty f) file'
         <+> "where\n"
       <> indent
-           2
-           ( vsep
-               [ "--' srcname: " <> pretty srcname
-               , "--' rsize: " <> encloseSep "" "" " " (map pretty rsizes)
-               , pretty alias
-               ]
-           )
+        2
+        ( vsep
+            [ "--' srcname: " <> pretty srcname
+            , "--' rsize: " <> encloseSep "" "" " " (map pretty rsizes)
+            , pretty alias
+            ]
+        )
   pretty (SigE (Signature v _ e)) =
     pretty v <+> "::" <+> pretty e
   pretty (FixE (Fixity assoc prec ops)) =

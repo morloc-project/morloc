@@ -31,26 +31,27 @@ module Morloc.LangRegistry
   , parseLangYamlFile
   ) where
 
+import Data.Aeson ((.!=), (.:), (.:?))
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as BS
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Yaml as Y
-import Data.Aeson ((.:), (.:?), (.!=))
-import qualified Data.Aeson as Aeson
-import qualified Data.ByteString as BS
-import Morloc.Language (Lang(..))
+import Morloc.Language (Lang (..))
 
 data LangRegistry = LangRegistry
-  { lrEntries :: Map Text LangRegistryEntry  -- keyed by canonical name
-  , lrAliases :: Map Text Text               -- alias -> canonical name
+  { lrEntries :: Map Text LangRegistryEntry -- keyed by canonical name
+  , lrAliases :: Map Text Text -- alias -> canonical name
   , lrSameLangCosts :: Map Text Int
   , lrCrossLangCosts :: Map Text Int
   , lrOptimizedPairs :: Map (Text, Text) Int
   , lrDefaultSameCost :: Int
   , lrDefaultCrossCost :: Int
-  } deriving (Show)
+  }
+  deriving (Show)
 
 data LangRegistryEntry = LangRegistryEntry
   { lreExtension :: !String
@@ -59,7 +60,8 @@ data LangRegistryEntry = LangRegistryEntry
   , lreSerialType :: !Text
   , lreCost :: !Int
   , lrePreamble :: ![Text]
-  } deriving (Show)
+  }
+  deriving (Show)
 
 emptyRegistry :: LangRegistry
 emptyRegistry = LangRegistry Map.empty Map.empty Map.empty Map.empty Map.empty 10 10000
@@ -70,18 +72,22 @@ buildDefaultRegistry langFiles languagesText = do
   langs <- mapM parseLangYaml langFiles
   costs <- parseLanguagesYaml languagesText
   let entries = Map.fromList [(lymName ly, entryFromYaml ly) | ly <- langs]
-      aliases = Map.fromList $ concatMap (\ly -> [(a, lymName ly) | a <- lymAliases ly] ++ [(lymName ly, lymName ly)]) langs
-  return costs
-    { lrEntries = entries
-    , lrAliases = aliases
-    }
+      aliases =
+        Map.fromList $
+          concatMap (\ly -> [(a, lymName ly) | a <- lymAliases ly] ++ [(lymName ly, lymName ly)]) langs
+  return
+    costs
+      { lrEntries = entries
+      , lrAliases = aliases
+      }
 
 -- | Extend the registry with a new language entry (for plugins)
 extendRegistry :: Text -> LangRegistryEntry -> [Text] -> LangRegistry -> LangRegistry
-extendRegistry name entry newAliases reg = reg
-  { lrEntries = Map.insert name entry (lrEntries reg)
-  , lrAliases = Map.union (Map.fromList $ (name, name) : [(a, name) | a <- newAliases]) (lrAliases reg)
-  }
+extendRegistry name entry newAliases reg =
+  reg
+    { lrEntries = Map.insert name entry (lrEntries reg)
+    , lrAliases = Map.union (Map.fromList $ (name, name) : [(a, name) | a <- newAliases]) (lrAliases reg)
+    }
 
 lookupLang :: Text -> LangRegistry -> Maybe LangRegistryEntry
 lookupLang name reg = Map.lookup name (lrEntries reg)
@@ -93,14 +99,16 @@ lookupByAlias alias reg = do
   entry <- Map.lookup canonical (lrEntries reg)
   return (canonical, entry)
 
--- | Build a map from all aliases (lowercased) to Lang values.
--- Used by the parser to resolve language names.
+{- | Build a map from all aliases (lowercased) to Lang values.
+Used by the parser to resolve language names.
+-}
 buildLangMap :: LangRegistry -> Map Text Lang
-buildLangMap reg = Map.fromList
-  [ (alias, Lang canonical (lreExtension entry))
-  | (alias, canonical) <- Map.toList (lrAliases reg)
-  , Just entry <- [Map.lookup canonical (lrEntries reg)]
-  ]
+buildLangMap reg =
+  Map.fromList
+    [ (alias, Lang canonical (lreExtension entry))
+    | (alias, canonical) <- Map.toList (lrAliases reg)
+    , Just entry <- [Map.lookup canonical (lrEntries reg)]
+    ]
 
 registryPairwiseCost :: LangRegistry -> Text -> Text -> Int
 registryPairwiseCost reg from to
@@ -159,7 +167,8 @@ data LangYamlMeta = LangYamlMeta
   , lymSerialType :: Text
   , lymCost :: Int
   , lymPreamble :: [Text]
-  } deriving (Show)
+  }
+  deriving (Show)
 
 instance Aeson.FromJSON LangYamlMeta where
   parseJSON = Aeson.withObject "LangYamlMeta" $ \o ->
@@ -179,7 +188,8 @@ data LanguagesYaml = LanguagesYaml
   , lysOptimizedPairs :: [(Text, Text, Int)]
   , lysDefaultSame :: Int
   , lysDefaultCross :: Int
-  } deriving (Show)
+  }
+  deriving (Show)
 
 instance Aeson.FromJSON LanguagesYaml where
   parseJSON = Aeson.withObject "LanguagesYaml" $ \o -> do
@@ -195,14 +205,15 @@ instance Aeson.FromJSON LanguagesYaml where
         (,,) <$> o .: "from" <*> o .: "to" <*> o .: "cost"
 
 entryFromYaml :: LangYamlMeta -> LangRegistryEntry
-entryFromYaml ly = LangRegistryEntry
-  { lreExtension = lymExtension ly
-  , lreIsCompiled = lymIsCompiled ly
-  , lreRunCommand = lymRunCommand ly
-  , lreSerialType = lymSerialType ly
-  , lreCost = lymCost ly
-  , lrePreamble = lymPreamble ly
-  }
+entryFromYaml ly =
+  LangRegistryEntry
+    { lreExtension = lymExtension ly
+    , lreIsCompiled = lymIsCompiled ly
+    , lreRunCommand = lymRunCommand ly
+    , lreSerialType = lymSerialType ly
+    , lreCost = lymCost ly
+    , lrePreamble = lymPreamble ly
+    }
 
 -- | Parse a lang.yaml file from the filesystem, returning (canonical name, extension)
 parseLangYamlFile :: FilePath -> IO (Either String (Text, String))
@@ -222,12 +233,14 @@ parseLanguagesYaml :: Text -> Either String LangRegistry
 parseLanguagesYaml content =
   case Y.decodeEither' (TE.encodeUtf8 content) of
     Left err -> Left $ "Failed to parse languages.yaml: " ++ Y.prettyPrintParseException err
-    Right lys -> Right $ LangRegistry
-      { lrEntries = Map.empty
-      , lrAliases = Map.empty
-      , lrSameLangCosts = lysSameLangCosts lys
-      , lrCrossLangCosts = lysCrossLangCosts lys
-      , lrOptimizedPairs = Map.fromList [((f, t), c) | (f, t, c) <- lysOptimizedPairs lys]
-      , lrDefaultSameCost = lysDefaultSame lys
-      , lrDefaultCrossCost = lysDefaultCross lys
-      }
+    Right lys ->
+      Right $
+        LangRegistry
+          { lrEntries = Map.empty
+          , lrAliases = Map.empty
+          , lrSameLangCosts = lysSameLangCosts lys
+          , lrCrossLangCosts = lysCrossLangCosts lys
+          , lrOptimizedPairs = Map.fromList [((f, t), c) | (f, t, c) <- lysOptimizedPairs lys]
+          , lrDefaultSameCost = lysDefaultSame lys
+          , lrDefaultCrossCost = lysDefaultCross lys
+          }

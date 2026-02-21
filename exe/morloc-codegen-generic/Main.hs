@@ -26,12 +26,12 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
-import System.FilePath (takeDirectory, (</>), takeExtension)
+import System.FilePath (takeDirectory, (</>))
 import System.IO (hPutStrLn, stderr)
 
-import Morloc.CodeGenerator.Grammars.Translator.Generic (CodegenManifest(..), printProgram)
+import Morloc.CodeGenerator.Grammars.Translator.Generic (CodegenManifest (..), printProgram)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative (IProgram)
-import Morloc.CodeGenerator.LanguageDescriptor (LangDescriptor(..), loadLangDescriptor)
+import Morloc.CodeGenerator.LanguageDescriptor (LangDescriptor (..), loadLangDescriptor)
 import Morloc.Data.Doc (render)
 
 main :: IO ()
@@ -54,14 +54,15 @@ run langYamlPath iprogramPath = do
     Right d -> return d
 
   -- load pool template from disk if not inline
-  desc' <- if T.null (ldPoolTemplate desc)
-    then do
-      let langDir = takeDirectory langYamlPath
-          ext = ldExtension desc
-          poolPath = langDir </> "pool." ++ ext
-      poolText <- TIO.readFile poolPath
-      return desc { ldPoolTemplate = poolText }
-    else return desc
+  desc' <-
+    if T.null (ldPoolTemplate desc)
+      then do
+        let langDir = takeDirectory langYamlPath
+            ext = ldExtension desc
+            poolPath = langDir </> "pool." ++ ext
+        poolText <- TIO.readFile poolPath
+        return desc {ldPoolTemplate = poolText}
+      else return desc
 
   -- deserialize IProgram
   binaryData <- BL.readFile iprogramPath
@@ -71,8 +72,9 @@ run langYamlPath iprogramPath = do
   let poolCode = render (printProgram desc' program)
 
   -- output manifest as JSON
-  let manifest = CodegenManifest
-        { cgmPoolCode = poolCode
-        , cgmBuildCommands = []
-        }
+  let manifest =
+        CodegenManifest
+          { cgmPoolCode = poolCode
+          , cgmBuildCommands = []
+          }
   BL.putStr (Aeson.encode manifest)

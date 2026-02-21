@@ -17,7 +17,7 @@ by descriptor fields -- no hardcoded language-specific code.
 module Morloc.CodeGenerator.Grammars.Translator.Generic
   ( translate
   , preprocess
-  , CodegenManifest(..)
+  , CodegenManifest (..)
   , printProgram
   ) where
 
@@ -29,20 +29,27 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( LowerConfig(..), IndexM, defaultSerialize, defaultDeserialize
-  , defaultFoldRules, buildProgram, IProgram(..), IExpr(..), IStmt(..)
-  , IAccessor(..)
+  ( IAccessor (..)
+  , IExpr (..)
+  , IProgram (..)
+  , IStmt (..)
+  , IndexM
+  , LowerConfig (..)
+  , buildProgram
+  , defaultDeserialize
+  , defaultFoldRules
+  , defaultSerialize
   )
-import Morloc.CodeGenerator.LanguageDescriptor
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
+import Morloc.CodeGenerator.LanguageDescriptor
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.DataFiles as DF
-import qualified Morloc.Language as ML
 import qualified Morloc.LangRegistry as LR
-import Morloc.Monad (asks, gets, liftIO, newIndex, runIndex)
+import qualified Morloc.Language as ML
+import Morloc.Monad (asks, gets, newIndex, runIndex)
 import qualified Morloc.Monad as MM
 import Morloc.Quasi
 import qualified System.Directory as Dir
@@ -80,9 +87,10 @@ translateBuiltin lang desc srcs es = do
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
   -- build src name function
-  let srcNamer = if ldQualifiedImports desc
-        then qualifiedSrcName lib
-        else \src -> pretty (srcName src)
+  let srcNamer =
+        if ldQualifiedImports desc
+          then qualifiedSrcName lib
+          else \src -> pretty (srcName src)
 
   -- add language-specific preamble from registry
   registry <- gets stateLangRegistry
@@ -118,7 +126,8 @@ translateBuiltin lang desc srcs es = do
         $ t
 
 -- | Translate using an external codegen tool.
-translateExternal :: Text -> Lang -> LangDescriptor -> [Source] -> [SerialManifold] -> MorlocMonad Script
+translateExternal ::
+  Text -> Lang -> LangDescriptor -> [Source] -> [SerialManifold] -> MorlocMonad Script
 translateExternal cmd lang desc srcs es = do
   home <- asks MC.configHome
   lib <- MT.pack <$> asks MC.configLibrary
@@ -130,9 +139,10 @@ translateExternal cmd lang desc srcs es = do
 
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
-  let srcNamer = if ldQualifiedImports desc
-        then qualifiedSrcName lib
-        else \src -> pretty (srcName src)
+  let srcNamer =
+        if ldQualifiedImports desc
+          then qualifiedSrcName lib
+          else \src -> pretty (srcName src)
 
   let mDocs = map (translateSegment desc srcNamer) es
       program = buildProgram includeDocs mDocs es
@@ -149,10 +159,11 @@ translateExternal cmd lang desc srcs es = do
 
   -- invoke the codegen command: cmd lang.yaml iprogram.bin
   let cmdStr = T.unpack cmd
-  (exitCode, stdoutStr, stderrStr) <- liftIO $
-    Proc.readCreateProcessWithExitCode
-      (Proc.proc cmdStr [langYamlPath, tmpPath])
-      ""
+  (exitCode, stdoutStr, stderrStr) <-
+    liftIO $
+      Proc.readCreateProcessWithExitCode
+        (Proc.proc cmdStr [langYamlPath, tmpPath])
+        ""
 
   -- clean up temp file
   liftIO $ Dir.removeFile tmpPath
@@ -160,16 +171,21 @@ translateExternal cmd lang desc srcs es = do
   case exitCode of
     Exit.ExitFailure code' ->
       MM.throwSystemError $
-        "External codegen '" <> pretty cmd <> "' failed with exit code "
-        <> pretty code' <> ":\n" <> pretty stderrStr
+        "External codegen '"
+          <> pretty cmd
+          <> "' failed with exit code "
+          <> pretty code'
+          <> ":\n"
+          <> pretty stderrStr
     Exit.ExitSuccess -> do
       -- parse the codegen manifest from stdout
       let manifest = Aeson.decodeStrict (TE.encodeUtf8 (T.pack stdoutStr)) :: Maybe CodegenManifest
       case manifest of
         Nothing ->
           MM.throwSystemError $
-            "External codegen '" <> pretty cmd
-            <> "' produced invalid manifest on stdout"
+            "External codegen '"
+              <> pretty cmd
+              <> "' produced invalid manifest on stdout"
         Just m -> do
           let exefile = ML.makeExecutablePoolName lang
               poolContent = cgmPoolCode m
@@ -185,9 +201,12 @@ translateExternal cmd lang desc srcs es = do
 
 -- | Manifest returned by an external codegen tool on stdout.
 data CodegenManifest = CodegenManifest
-  { cgmPoolCode :: Text       -- ^ rendered pool file content
-  , cgmBuildCommands :: [Text] -- ^ build commands to run after writing files
-  } deriving (Show)
+  { cgmPoolCode :: Text
+  -- ^ rendered pool file content
+  , cgmBuildCommands :: [Text]
+  -- ^ build commands to run after writing files
+  }
+  deriving (Show)
 
 instance Aeson.FromJSON CodegenManifest where
   parseJSON = Aeson.withObject "CodegenManifest" $ \v ->
@@ -196,14 +215,16 @@ instance Aeson.FromJSON CodegenManifest where
       <*> (v Aeson..:? "build_commands" Aeson..!= [])
 
 instance Aeson.ToJSON CodegenManifest where
-  toJSON m = Aeson.object
-    [ "pool_code" Aeson..= cgmPoolCode m
-    , "build_commands" Aeson..= cgmBuildCommands m
-    ]
+  toJSON m =
+    Aeson.object
+      [ "pool_code" Aeson..= cgmPoolCode m
+      , "build_commands" Aeson..= cgmBuildCommands m
+      ]
 
--- | Load the language descriptor for a language.
--- Tries embedded lang.yaml first, then falls back to filesystem.
--- If the pool template is empty, loads it from the embedded or filesystem pool file.
+{- | Load the language descriptor for a language.
+Tries embedded lang.yaml first, then falls back to filesystem.
+If the pool template is empty, loads it from the embedded or filesystem pool file.
+-}
 loadDescriptorForLang :: Lang -> MorlocMonad LangDescriptor
 loadDescriptorForLang lang = do
   let name = ML.langName lang
@@ -213,15 +234,16 @@ loadDescriptorForLang lang = do
   if T.null (ldPoolTemplate desc)
     then do
       poolText <- loadPoolTemplate name ext
-      return desc { ldPoolTemplate = poolText }
+      return desc {ldPoolTemplate = poolText}
     else return desc
   where
     loadDescriptorByName :: T.Text -> MorlocMonad LangDescriptor
     loadDescriptorByName name =
       case lookup (T.unpack name) [(n, DF.embededFileText ef) | (n, ef) <- DF.langRegistryFiles] of
         Just yamlText -> case loadLangDescriptorFromText yamlText of
-          Left err -> MM.throwSystemError $
-            "Failed to parse embedded lang.yaml for " <> pretty name <> ": " <> pretty err
+          Left err ->
+            MM.throwSystemError $
+              "Failed to parse embedded lang.yaml for " <> pretty name <> ": " <> pretty err
           Right desc -> return desc
         Nothing -> do
           -- try filesystem
@@ -229,8 +251,9 @@ loadDescriptorForLang lang = do
           let descPath = home </> "lang" </> T.unpack name </> "lang.yaml"
           result <- liftIO $ loadLangDescriptor descPath
           case result of
-            Left err -> MM.throwSystemError $
-              "Failed to load language descriptor for " <> pretty name <> ": " <> pretty err
+            Left err ->
+              MM.throwSystemError $
+                "Failed to load language descriptor for " <> pretty name <> ": " <> pretty err
             Right desc -> return desc
 
     loadPoolTemplate :: T.Text -> String -> MorlocMonad T.Text
@@ -250,8 +273,9 @@ loadDescriptorForLang lang = do
     lookupEmbeddedPool "cpp" = Just $ DF.embededFileText (DF.poolTemplate "cpp")
     lookupEmbeddedPool _ = Nothing
 
--- | Get the pool subdirectory name from the module name.
--- This ensures each program gets its own pool directory (e.g., pools/foo/).
+{- | Get the pool subdirectory name from the module name.
+This ensures each program gets its own pool directory (e.g., pools/foo/).
+-}
 getPoolSubdir :: MorlocMonad String
 getPoolSubdir = MM.getModuleName
 
@@ -270,10 +294,12 @@ translateSource desc p = do
       let tmpl = ldImportTemplate desc
           ns = render (makeNamespace lib p)
           modPath = render (makeImportPath lib p)
-      return . pretty $ substituteT tmpl
-        [ ("namespace", ns)
-        , ("module_path", modPath)
-        ]
+      return . pretty $
+        substituteT
+          tmpl
+          [ ("namespace", ns)
+          , ("module_path", modPath)
+          ]
     else do
       let tmpl = ldImportTemplate desc
       return . pretty $ substituteT tmpl [("path", p'')]
@@ -323,121 +349,134 @@ translateSegment desc srcNamer m0 =
 genericLowerConfig :: LangDescriptor -> (Source -> MDoc) -> LowerConfig IndexM
 genericLowerConfig desc srcNamer = cfg
   where
-    cfg = LowerConfig
-      { lcSrcName = srcNamer
-      , lcTypeOf = \_ -> return Nothing
-      , lcSerialAstType = \_ -> return Nothing
-      , lcDeserialAstType = \_ -> return Nothing
-      , lcRawDeserialAstType = \_ -> return Nothing
-      , lcTemplateArgs = \_ -> return Nothing
-      , lcTypeMOf = \_ -> return Nothing
-      , lcPackerName = srcNamer
-      , lcUnpackerName = srcNamer
-      , lcRecordAccessor = genericRecordAccessor desc
-      , lcDeserialRecordAccessor = \_ k v -> case ldKeyAccess desc of
-          "double_bracket" -> v <> "[[" <> dquotes (pretty k) <> "]]"
-          _ -> v <> "[" <> dquotes (pretty k) <> "]"
-      , lcTupleAccessor = \i v -> case ldIndexStyle desc of
-          ZeroBracket -> v <> "[" <> pretty i <> "]"
-          OneBracket -> v <> "[" <> pretty (i + 1) <> "]"
-          OneDoubleBracket -> [idoc|#{v}[[#{pretty (i + 1)}]]|]
-      , lcNewIndex = newIndex
-      , lcPrintExpr = genericPrintExpr desc
-      , lcPrintStmt = genericPrintStmt desc
-      , lcEvalPattern = \t p xs -> return $ genericEvalPattern desc t p xs
-      , lcListConstructor = \v _ es -> case ldListStyle desc of
-          BracketList -> list es
-          FunctionCallList -> pretty (ldGenericListFn desc) <> tupled es
-          TypeDependentList -> case v of
-            (FV _ (CV typeName))
-              | typeName `elem` ldAtomicTypes desc -> pretty (ldAtomicListFn desc) <> tupled es
-            _ -> pretty (ldGenericListFn desc) <> tupled es
-      , lcTupleConstructor = \_ -> case ldTupleConstructor desc of
-          "" -> tupled
-          name -> \es -> pretty name <> tupled es
-      , lcRecordConstructor = \_ _ _ _ rs -> return $ defaultValue
-          { poolExpr = pretty (ldRecordConstructor desc)
-              <> tupled [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> v | (k, v) <- rs] }
-      , lcForeignCall = \socketFile mid args ->
-          let midDoc = pretty mid <> pretty (ldForeignCallIntSuffix desc)
-              argsDoc = case ldListStyle desc of
-                BracketList -> list args
-                _ -> pretty (ldGenericListFn desc) <> tupled args
-           in pretty (ldForeignCallFn desc)
-              <> tupled [makeGenericSocketPath desc socketFile, midDoc, argsDoc]
-      , lcRemoteCall = genericRemoteCall desc
-      , lcMakeLet = \namer i _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
-      , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
-      , lcMakeSuspend = \stmts expr ->
-          let suspendBlock = ldSuspendBlock desc
-          in if T.null suspendBlock
-             then
-               -- pass stmts through, wrap expr only
-               let wrapped = pretty $ substituteT (ldSuspendExpr desc) [("expr", render expr)]
-               in (stmts, wrapped)
-             else
-               -- absorb stmts into block
-               case stmts of
-                 [] ->
-                   let wrapped = pretty $ substituteT (ldSuspendExpr desc) [("expr", render expr)]
-                   in ([], wrapped)
-                 _ ->
-                   let body = render (vsep (stmts <> [expr]))
-                       wrapped = pretty $ substituteT suspendBlock [("body", body)]
-                   in ([], wrapped)
-      , lcSerialize = defaultSerialize cfg
-      , lcDeserialize = \_ -> defaultDeserialize cfg
-      , lcMakeFunction = \mname args _ priorLines body headForm ->
-          let makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
-              makeExt _ = ""
-              fullName = render (mname <> makeExt headForm)
-              argsText = render (hsep (punctuate "," (map argNamer args)))
-              header = pretty $ substituteT (ldFuncDefHeader desc)
-                [ ("name", fullName)
-                , ("args", argsText)
-                ]
-              wrapError [] = []
-              wrapError xs =
-                let openLine = ldErrorWrapOpen desc
-                    closeLines = ldErrorWrapClose desc
-                in if T.null openLine then xs
-                   else
-                     let tryBlock = nest 4 (vsep (pretty openLine : xs))
-                         exceptBlock = nest 4 . vsep $
-                           map (\l -> pretty $ substituteT l [("name", fullName)]) closeLines
-                     in [vsep [tryBlock, exceptBlock]]
-           in return . Just $ case ldBlockStyle desc of
-                IndentBlock ->
-                  nest 4 (vsep [header, vsep (wrapError priorLines), body])
-                BraceBlock ->
-                  block 4 header (vsep $ priorLines <> [body])
-                EndKeywordBlock ->
-                  let endKw = ldBlockEnd desc
-                  in vsep [header, indent 4 (vsep $ priorLines <> [body]), pretty endKw]
-      , lcMakeLambda = \mname contextArgs boundArgs ->
-          let tmpl = ldPartialTemplate desc
-              fnText = render mname
-              allArgsList = contextArgs <> boundArgs
-              fnWithCtxList = mname : contextArgs
-              fnWithCtx = render (hsep (punctuate "," fnWithCtxList))
-              allArgs = render (hsep (punctuate "," allArgsList))
-              boundArgsText = render (hsep (punctuate "," boundArgs))
-          in pretty $ substituteT tmpl
-               [ ("fn", fnText)
-               , ("fn_with_context", fnWithCtx)
-               , ("all_args", allArgs)
-               , ("bound_args", boundArgsText)
-               ]
-      }
+    cfg =
+      LowerConfig
+        { lcSrcName = srcNamer
+        , lcTypeOf = \_ -> return Nothing
+        , lcSerialAstType = \_ -> return Nothing
+        , lcDeserialAstType = \_ -> return Nothing
+        , lcRawDeserialAstType = \_ -> return Nothing
+        , lcTemplateArgs = \_ -> return Nothing
+        , lcTypeMOf = \_ -> return Nothing
+        , lcPackerName = srcNamer
+        , lcUnpackerName = srcNamer
+        , lcRecordAccessor = genericRecordAccessor desc
+        , lcDeserialRecordAccessor = \_ k v -> case ldKeyAccess desc of
+            "double_bracket" -> v <> "[[" <> dquotes (pretty k) <> "]]"
+            _ -> v <> "[" <> dquotes (pretty k) <> "]"
+        , lcTupleAccessor = \i v -> case ldIndexStyle desc of
+            ZeroBracket -> v <> "[" <> pretty i <> "]"
+            OneBracket -> v <> "[" <> pretty (i + 1) <> "]"
+            OneDoubleBracket -> [idoc|#{v}[[#{pretty (i + 1)}]]|]
+        , lcNewIndex = newIndex
+        , lcPrintExpr = genericPrintExpr desc
+        , lcPrintStmt = genericPrintStmt desc
+        , lcEvalPattern = \t p xs -> return $ genericEvalPattern desc t p xs
+        , lcListConstructor = \v _ es -> case ldListStyle desc of
+            BracketList -> list es
+            FunctionCallList -> pretty (ldGenericListFn desc) <> tupled es
+            TypeDependentList -> case v of
+              (FV _ (CV typeName))
+                | typeName `elem` ldAtomicTypes desc -> pretty (ldAtomicListFn desc) <> tupled es
+              _ -> pretty (ldGenericListFn desc) <> tupled es
+        , lcTupleConstructor = \_ -> case ldTupleConstructor desc of
+            "" -> tupled
+            name -> \es -> pretty name <> tupled es
+        , lcRecordConstructor = \_ _ _ _ rs ->
+            return $
+              defaultValue
+                { poolExpr =
+                    pretty (ldRecordConstructor desc)
+                      <> tupled [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> v | (k, v) <- rs]
+                }
+        , lcForeignCall = \socketFile mid args ->
+            let midDoc = pretty mid <> pretty (ldForeignCallIntSuffix desc)
+                argsDoc = case ldListStyle desc of
+                  BracketList -> list args
+                  _ -> pretty (ldGenericListFn desc) <> tupled args
+             in pretty (ldForeignCallFn desc)
+                  <> tupled [makeGenericSocketPath desc socketFile, midDoc, argsDoc]
+        , lcRemoteCall = genericRemoteCall desc
+        , lcMakeLet = \namer i _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
+        , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
+        , lcMakeSuspend = \stmts expr ->
+            let suspendBlock = ldSuspendBlock desc
+             in if T.null suspendBlock
+                  then
+                    -- pass stmts through, wrap expr only
+                    let wrapped = pretty $ substituteT (ldSuspendExpr desc) [("expr", render expr)]
+                     in (stmts, wrapped)
+                  else
+                    -- absorb stmts into block
+                    case stmts of
+                      [] ->
+                        let wrapped = pretty $ substituteT (ldSuspendExpr desc) [("expr", render expr)]
+                         in ([], wrapped)
+                      _ ->
+                        let body = render (vsep (stmts <> [expr]))
+                            wrapped = pretty $ substituteT suspendBlock [("body", body)]
+                         in ([], wrapped)
+        , lcSerialize = defaultSerialize cfg
+        , lcDeserialize = \_ -> defaultDeserialize cfg
+        , lcMakeFunction = \mname args _ priorLines body headForm ->
+            let makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
+                makeExt _ = ""
+                fullName = render (mname <> makeExt headForm)
+                argsText = render (hsep (punctuate "," (map argNamer args)))
+                header =
+                  pretty $
+                    substituteT
+                      (ldFuncDefHeader desc)
+                      [ ("name", fullName)
+                      , ("args", argsText)
+                      ]
+                wrapError [] = []
+                wrapError xs =
+                  let openLine = ldErrorWrapOpen desc
+                      closeLines = ldErrorWrapClose desc
+                   in if T.null openLine
+                        then xs
+                        else
+                          let tryBlock = nest 4 (vsep (pretty openLine : xs))
+                              exceptBlock =
+                                nest 4 . vsep $
+                                  map (\l -> pretty $ substituteT l [("name", fullName)]) closeLines
+                           in [vsep [tryBlock, exceptBlock]]
+             in return . Just $ case ldBlockStyle desc of
+                  IndentBlock ->
+                    nest 4 (vsep [header, vsep (wrapError priorLines), body])
+                  BraceBlock ->
+                    block 4 header (vsep $ priorLines <> [body])
+                  EndKeywordBlock ->
+                    let endKw = ldBlockEnd desc
+                     in vsep [header, indent 4 (vsep $ priorLines <> [body]), pretty endKw]
+        , lcMakeLambda = \mname contextArgs boundArgs ->
+            let tmpl = ldPartialTemplate desc
+                fnText = render mname
+                allArgsList = contextArgs <> boundArgs
+                fnWithCtxList = mname : contextArgs
+                fnWithCtx = render (hsep (punctuate "," fnWithCtxList))
+                allArgs = render (hsep (punctuate "," allArgsList))
+                boundArgsText = render (hsep (punctuate "," boundArgs))
+             in pretty $
+                  substituteT
+                    tmpl
+                    [ ("fn", fnText)
+                    , ("fn_with_context", fnWithCtx)
+                    , ("all_args", allArgs)
+                    , ("bound_args", boundArgsText)
+                    ]
+        }
 
--- | Record access: for languages with ldDictStyleRecords=True,
--- use bracket access for dict/NamRecord and dot access for others.
+{- | Record access: for languages with ldDictStyleRecords=True,
+use bracket access for dict/NamRecord and dot access for others.
+-}
 genericRecordAccessor :: LangDescriptor -> NamType -> CVar -> MDoc -> MDoc -> MDoc
 genericRecordAccessor desc namType constructor record field
   | ldDictStyleRecords desc = case (namType, constructor) of
       (NamTable, CV "dict") -> record <> "[" <> dquotes field <> "]"
-      (NamRecord, _)        -> record <> "[" <> dquotes field <> "]"
-      _                     -> record <> "." <> field
+      (NamRecord, _) -> record <> "[" <> dquotes field <> "]"
+      _ -> record <> "." <> field
   | otherwise = case ldFieldAccess desc of
       DotAccess -> record <> "." <> field
       DollarAccess -> record <> "$" <> field
@@ -449,17 +488,22 @@ genericRemoteCall desc socketFile mid res args = do
       resTime = T.pack . show $ remoteResourcesTime res
       resCPU = T.pack . show $ remoteResourcesThreads res
       resGPU = T.pack . show $ remoteResourcesGpus res
-      remoteFn = if T.null (ldRemoteCallFn desc)
-                   then pretty (ldForeignCallFn desc)
-                   else pretty (ldRemoteCallFn desc)
-      resPacked = pretty $ substituteT (ldResourcePackTemplate desc)
-        [ ("mem", resMem)
-        , ("time", resTime)
-        , ("cpus", resCPU)
-        , ("gpus", resGPU)
-        ]
-      call = remoteFn
-        <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resPacked, list args]
+      remoteFn =
+        if T.null (ldRemoteCallFn desc)
+          then pretty (ldForeignCallFn desc)
+          else pretty (ldRemoteCallFn desc)
+      resPacked =
+        pretty $
+          substituteT
+            (ldResourcePackTemplate desc)
+            [ ("mem", resMem)
+            , ("time", resTime)
+            , ("cpus", resCPU)
+            , ("gpus", resGPU)
+            ]
+      call =
+        remoteFn
+          <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resPacked, list args]
   return $ defaultValue {poolExpr = call}
 
 -- | Format a record key: bare identifier or quoted string
@@ -472,7 +516,7 @@ makeGenericSocketPath :: LangDescriptor -> MDoc -> MDoc
 makeGenericSocketPath desc socketFileBasename =
   let tmpl = ldSocketPathTemplate desc
       socketText = render (dquotes socketFileBasename)
-  in pretty $ substituteT tmpl [("socket", socketText)]
+   in pretty $ substituteT tmpl [("socket", socketText)]
 
 genericMakeLet :: LangDescriptor -> (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
 genericMakeLet desc namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
@@ -524,10 +568,12 @@ genericPrintExpr desc = go
     go (ILambda args body) =
       let argsText = render (hsep (punctuate "," (map pretty args)))
           bodyText = render (go body)
-      in pretty $ substituteT (ldLambdaTemplate desc)
-           [ ("args", argsText)
-           , ("body", bodyText)
-           ]
+       in pretty $
+            substituteT
+              (ldLambdaTemplate desc)
+              [ ("args", argsText)
+              , ("body", bodyText)
+              ]
     go (IRawExpr d) = pretty d
     go (ISuspend e) =
       pretty $ substituteT (ldSuspendExpr desc) [("expr", render (go e))]
@@ -543,23 +589,39 @@ genericPrintStmt desc = go
     go (IAssign v (Just _) e) = pretty v <+> pretty (ldAssignOp desc) <+> printE e
     go (IMapList resultVar _ iterVar collection bodyStmts yieldExpr) =
       case ldMapStyle desc of
-        LoopAppend -> vsep
-          [ pretty resultVar <+> pretty (ldAssignOp desc) <+> "[]"
-          , nest 4 (vsep
-              ( ("for" <+> pretty iterVar <+> "in" <+> printE collection <> ":")
-              : map go bodyStmts
-              ++ [pretty resultVar <> ".append(" <> printE yieldExpr <> ")"]
-              ))
-          ]
+        LoopAppend ->
+          vsep
+            [ pretty resultVar <+> pretty (ldAssignOp desc) <+> "[]"
+            , nest
+                4
+                ( vsep
+                    ( ("for" <+> pretty iterVar <+> "in" <+> printE collection <> ":")
+                        : map go bodyStmts
+                        ++ [pretty resultVar <> ".append(" <> printE yieldExpr <> ")"]
+                    )
+                )
+            ]
         ApplyCallback ->
-          block 4
-            (pretty resultVar <+> pretty (ldAssignOp desc) <+> "lapply(" <> printE collection <> "," <+> "function(" <> pretty iterVar <> ")")
+          block
+            4
+            ( pretty resultVar <+> pretty (ldAssignOp desc) <+> "lapply("
+                <> printE collection
+                <> "," <+> "function("
+                <> pretty iterVar
+                <> ")"
+            )
             (vsep (map go bodyStmts ++ [printE yieldExpr]))
             <> ")"
-        ListComprehension -> vsep
-          [ pretty resultVar <+> pretty (ldAssignOp desc) <+> "[" <> printE yieldExpr
-              <+> "for" <+> pretty iterVar <+> "in" <+> printE collection <> "]"
-          ]
+        ListComprehension ->
+          vsep
+            [ pretty resultVar <+> pretty (ldAssignOp desc) <+> "["
+                <> printE yieldExpr
+                  <+> "for"
+                  <+> pretty iterVar
+                  <+> "in"
+                  <+> printE collection
+                <> "]"
+            ]
     go (IReturn e) = pretty $ substituteT (ldReturnTemplate desc) [("expr", render (printE e))]
     go (IExprStmt e) = printE e
     go (IFunDef _ _ _ _) = error "IFunDef not yet implemented for generic printer"
@@ -584,35 +646,53 @@ printProgram desc prog =
           let hdr = ldDispatchLocalHeader desc
               entryTmpl = ldDispatchLocalEntry desc
               ftr = ldDispatchLocalFooter desc
-              entries = map (\(DispatchEntry i _) ->
-                pretty $ substituteT entryTmpl
-                  [ ("mid", T.pack (show i))
-                  , ("name", render (manNamer i))
-                  ]) (ipLocalDispatch prog)
-          in if T.null hdr && T.null entryTmpl
-             then mempty
-             else align . vsep $ filter (not . isEmpty)
-               [ pretty hdr
-               , vsep entries
-               , pretty ftr
-               ]
+              entries =
+                map
+                  ( \(DispatchEntry i _) ->
+                      pretty $
+                        substituteT
+                          entryTmpl
+                          [ ("mid", T.pack (show i))
+                          , ("name", render (manNamer i))
+                          ]
+                  )
+                  (ipLocalDispatch prog)
+           in if T.null hdr && T.null entryTmpl
+                then mempty
+                else
+                  align . vsep $
+                    filter
+                      (not . isEmpty)
+                      [ pretty hdr
+                      , vsep entries
+                      , pretty ftr
+                      ]
 
         remoteD =
           let hdr = ldDispatchRemoteHeader desc
               entryTmpl = ldDispatchRemoteEntry desc
               ftr = ldDispatchRemoteFooter desc
-              entries = map (\(DispatchEntry i _) ->
-                pretty $ substituteT entryTmpl
-                  [ ("mid", T.pack (show i))
-                  , ("name", render (manNamer i))
-                  ]) (ipRemoteDispatch prog)
-          in if T.null hdr && T.null entryTmpl
-             then mempty
-             else align . vsep $ filter (not . isEmpty)
-               [ pretty hdr
-               , vsep entries
-               , pretty ftr
-               ]
+              entries =
+                map
+                  ( \(DispatchEntry i _) ->
+                      pretty $
+                        substituteT
+                          entryTmpl
+                          [ ("mid", T.pack (show i))
+                          , ("name", render (manNamer i))
+                          ]
+                  )
+                  (ipRemoteDispatch prog)
+           in if T.null hdr && T.null entryTmpl
+                then mempty
+                else
+                  align . vsep $
+                    filter
+                      (not . isEmpty)
+                      [ pretty hdr
+                      , vsep entries
+                      , pretty ftr
+                      ]
 
     isEmpty d = T.null (render d)
 
@@ -621,9 +701,11 @@ genericEvalPattern :: LangDescriptor -> TypeF -> Pattern -> [MDoc] -> MDoc
 genericEvalPattern desc _ (PatternText firstStr fragments) xs =
   case ldPatternStyle desc of
     FStringPattern ->
-      "f" <> (dquotes . hcat) (pretty firstStr : [("{" <> x <> "}" <> pretty s) | (x, s) <- zip xs fragments])
+      "f"
+        <> (dquotes . hcat) (pretty firstStr : [("{" <> x <> "}" <> pretty s) | (x, s) <- zip xs fragments])
     ConcatCall ->
-      pretty (ldConcatFn desc) <> tupled (dquotes (pretty firstStr) : concat [[x, dquotes (pretty s)] | (x, s) <- zip xs fragments])
+      pretty (ldConcatFn desc)
+        <> tupled (dquotes (pretty firstStr) : concat [[x, dquotes (pretty s)] | (x, s) <- zip xs fragments])
 -- getters (always have exactly one argument)
 genericEvalPattern desc _ (PatternStruct (ungroup -> [ss])) [m] =
   hcat (m : map (writeSelector desc) ss)
@@ -640,7 +722,9 @@ genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
       name -> pretty name <> tupled xs
 
     makeRecord (NamF _ _ _ rs) xs =
-      pretty (ldRecordConstructor desc) <> tupled [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> x | (k, x) <- zip (map fst rs) xs]
+      pretty (ldRecordConstructor desc)
+        <> tupled
+          [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> x | (k, x) <- zip (map fst rs) xs]
     makeRecord _ _ = error "Incorrectly typed record setter"
 
     accessTuple _ m i = case ldIndexStyle desc of

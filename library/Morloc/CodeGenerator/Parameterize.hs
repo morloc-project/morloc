@@ -22,8 +22,9 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 
--- | Add arguments that are required for each term. Unneeded arguments are
--- removed at each step.
+{- | Add arguments that are required for each term. Unneeded arguments are
+removed at each step.
+-}
 parameterize ::
   AnnoS (Indexed Type) One (Indexed Lang) ->
   MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]))

@@ -1,6 +1,6 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE CPP #-}
 
 {- |
 Module      : Morloc.Frontend.Treeify
@@ -78,10 +78,13 @@ treeify d
                 exports = [(i, v) | (i, TermSymbol v) <- Set.toList allSymbols]
 
             -- Build export group info for the state
-            let exportGroupInfo = Map.fromList
-                  [ (exportGroupName g, (exportGroupDesc g, [i | (i, TermSymbol _) <- Set.toList (exportGroupMembers g)]))
-                  | g <- groups
-                  ]
+            let exportGroupInfo =
+                  Map.fromList
+                    [ ( exportGroupName g
+                      , (exportGroupDesc g, [i | (i, TermSymbol _) <- Set.toList (exportGroupMembers g)])
+                      )
+                    | g <- groups
+                    ]
 
             -- Validate command groups
             let ungroupedNames = Set.fromList [v | (_, TermSymbol v) <- Set.toList symbols]
@@ -89,8 +92,10 @@ treeify d
                 collisions = Set.intersection (Set.map unEVar ungroupedNames) groupNames
             -- group names must not collide with ungrouped command names
             if not (Set.null collisions)
-              then MM.throwSystemError $
-                "Command group names collide with ungrouped command names:" <+> list (map pretty (Set.toList collisions))
+              then
+                MM.throwSystemError $
+                  "Command group names collide with ungrouped command names:"
+                    <+> list (map pretty (Set.toList collisions))
               else return ()
 
             -- - store all exported indices in state
@@ -117,7 +122,9 @@ treeify d
       -- multiple projects in parallel with potentially shared information and
       -- constraints could be valuable.
       roots ->
-        MM.throwSystemError $ "Compiler bug (__FILE__:__LINE__): unsupported multi-rooted module DAG:" <+> tupled (map pretty roots)
+        MM.throwSystemError $
+          "Compiler bug (__FILE__:__LINE__): unsupported multi-rooted module DAG:"
+            <+> tupled (map pretty roots)
 
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
 linkAndRemoveAnnotations = f
@@ -244,7 +251,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
           v' = fst $ fromJust $ Map.lookup v (namerMap namer2)
           innerBody = case rest of
             [] -> body
-            _  -> ExprI (exprIIdx body) (LetE rest body)
+            _ -> ExprI (exprIIdx body) (LetE rest body)
       (_, body') <- collectAnnoS namer2 innerBody
       return (namer, LetS v' e1' body')
     f _ (LetE [] _) = error "Bug in collectExprS: empty let bindings"

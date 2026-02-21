@@ -1,6 +1,6 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE CPP #-}
 
 {- |
 Module      : Morloc.Frontend.Typecheck
@@ -188,12 +188,12 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       --  the general perspective, the evaluate to being equal.
       (g2, es1) <- case mostSpecific [t | (EType t _ _, _) <- rssSubtypes] of
         -- if there are no suitable instances, die
-        [] -> throwTypeError genIndex $
-          "No instance found for" <+> pretty clsName
-            <> "::"
-            <> pretty v
-            <> "\n  Are you missing a top-level type signature?"
-
+        [] ->
+          throwTypeError genIndex $
+            "No instance found for" <+> pretty clsName
+              <> "::"
+              <> pretty v
+              <> "\n  Are you missing a top-level type signature?"
         -- There may be many suitable instances from the general type level,
         -- however, they may differ at the concrete level, so keep all for know
         -- and let the concrete inference code sort things out later.
@@ -400,9 +400,14 @@ synthE parentIdx g0 (LamS vs x) = do
     FunU extraArgTypes retType -> do
       -- Body returns a function: eta-expand WITHOUT re-synthesizing
       -- Create new bound variables for the extra arguments
-      (g4, newVarsWithTypes) <- statefulMapM (\g' t -> do
-        let (g'', v) = evarname g' "v"
-        return (g'', (v, t))) g3 extraArgTypes
+      (g4, newVarsWithTypes) <-
+        statefulMapM
+          ( \g' t -> do
+              let (g'', v) = evarname g' "v"
+              return (g'', (v, t))
+          )
+          g3
+          extraArgTypes
 
       let newVars = map fst newVarsWithTypes
           appliedExtraTypes = map (apply g4 . snd) newVarsWithTypes
@@ -411,9 +416,13 @@ synthE parentIdx g0 (LamS vs x) = do
       let g5 = g4 ++> zipWith AnnG newVars appliedExtraTypes
 
       -- Create typed variable references for the new parameters
-      newVarExprs <- mapM (\(v, t) -> do
-        idx <- MM.getCounterWithPos parentIdx
-        return $ AnnoS (Idx idx t) idx (BndS v)) (zip newVars appliedExtraTypes)
+      newVarExprs <-
+        mapM
+          ( \(v, t) -> do
+              idx <- MM.getCounterWithPos parentIdx
+              return $ AnnoS (Idx idx t) idx (BndS v)
+          )
+          (zip newVars appliedExtraTypes)
 
       -- Create the application of body to new variables
       appIdx <- MM.getCounterWithPos parentIdx
@@ -426,7 +435,6 @@ synthE parentIdx g0 (LamS vs x) = do
           fullType = FunU allParamTypes appliedRetType
 
       return (g5, fullType, LamS (vs ++ newVars) appliedBodyAnno)
-
     _ -> do
       -- Body is not a function: just return the lambda as-is
       let funType = apply g3 (FunU paramTypes bodyType)
@@ -590,8 +598,9 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
 
   -- Check for arity errors before proceeding
   case normalType of
-    FunU (length -> numParams) _ | numArgs > numParams ->
-      throwTypeError i $ "Invalid function application of type:\n  " <> prettyTypeU funType0
+    FunU (length -> numParams) _
+      | numArgs > numParams ->
+          throwTypeError i $ "Invalid function application of type:\n  " <> prettyTypeU funType0
     _ -> return ()
 
   -- Process available args through application (no re-synthesis)
@@ -607,18 +616,27 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
       [] -> return (g2, apply g2 t, AppS funExpr0 inputExprs)
       -- partial application: eta-expand without re-synthesis
       remainingParams -> do
-        (g3, newVarsWithTypes) <- statefulMapM (\g' tp -> do
-          let (g'', v) = evarname g' "v"
-          return (g'', (v, apply g2 tp))) g2 remainingParams
+        (g3, newVarsWithTypes) <-
+          statefulMapM
+            ( \g' tp -> do
+                let (g'', v) = evarname g' "v"
+                return (g'', (v, apply g2 tp))
+            )
+            g2
+            remainingParams
 
         let newVars = map fst newVarsWithTypes
             newTypes = map snd newVarsWithTypes
             g4 = g3 ++> zipWith AnnG newVars newTypes
 
         -- Create typed variable references for the new params
-        newVarExprs <- mapM (\(v, tp) -> do
-          idx <- MM.getCounterWithPos i
-          return $ AnnoS (Idx idx tp) idx (BndS v)) newVarsWithTypes
+        newVarExprs <-
+          mapM
+            ( \(v, tp) -> do
+                idx <- MM.getCounterWithPos i
+                return $ AnnoS (Idx idx tp) idx (BndS v)
+            )
+            newVarsWithTypes
 
         -- Build the application and lambda directly
         appIdx <- MM.getCounterWithPos i
@@ -698,9 +716,9 @@ application i g0 es (ExistU v@(TV s) ([], _) _) =
         return (g1, apply g1 (FunU ts' t), es')
       (Just t) -> throwTypeError i $ "Application of term with non-functional type:\n   " <+> prettyTypeU t
       Nothing -> throwTypeError i $ "Expected function, but could not find type of term\n   " <+> pretty v
-
-application i _ _ t = throwTypeError i
-  $ "Application of non-functional expression of type:" <+> prettyTypeU t
+application i _ _ t =
+  throwTypeError i $
+    "Application of non-functional expression of type:" <+> prettyTypeU t
 
 -- Tip together the arguments passed to an application
 zipCheck ::

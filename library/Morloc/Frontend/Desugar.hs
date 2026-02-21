@@ -16,33 +16,32 @@ main wrapping.
 module Morloc.Frontend.Desugar
   ( desugarProgram
   , desugarExpr
-  , DState(..)
+  , DState (..)
   , D
-  , ParseError(..)
+  , ParseError (..)
   , showParseError
   ) where
 
 import qualified Control.Monad.State.Strict as State
-import Data.Text (Text)
-import qualified Data.Text as T
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as T
+import qualified Morloc.BaseTypes as BT
 import Morloc.Frontend.CST
 import Morloc.Frontend.Token hiding (startPos)
+import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
-import Morloc.Namespace.Expr
-import qualified Morloc.BaseTypes as BT
-import qualified Morloc.Language as ML
-import System.FilePath (takeDirectory, combine)
+import System.FilePath (combine, takeDirectory)
 
 --------------------------------------------------------------------
 -- Desugar state and monad
 --------------------------------------------------------------------
 
 data ParseError = ParseError
-  { pePos      :: !Pos
-  , peMsg      :: !String
+  { pePos :: !Pos
+  , peMsg :: !String
   , peExpected :: ![String]
   , peSourceLines :: ![Text]
   }
@@ -58,41 +57,50 @@ showParseError filename (ParseError pos msg expected srcLines) =
         [] -> ""
         [x] -> "\n  expected " ++ x
         xs -> "\n  expected one of: " ++ intercalate ", " xs
-  in header ++ context ++ expectMsg
+   in header ++ context ++ expectMsg
 
 formatSourceContext :: [Text] -> Int -> Int -> String
 formatSourceContext srcLines ln col
   | ln < 1 || ln > length srcLines = ""
   | otherwise =
-    let srcLine = srcLines !! (ln - 1)
-        lineNum = show ln
-        pad = replicate (length lineNum) ' '
-        pointer = replicate (col - 1) ' ' ++ "^"
-    in "\n  " ++ pad ++ " |\n  " ++ lineNum ++ " | " ++ T.unpack srcLine ++ "\n  " ++ pad ++ " | " ++ pointer
+      let srcLine = srcLines !! (ln - 1)
+          lineNum = show ln
+          pad = replicate (length lineNum) ' '
+          pointer = replicate (col - 1) ' ' ++ "^"
+       in "\n  "
+            ++ pad
+            ++ " |\n  "
+            ++ lineNum
+            ++ " | "
+            ++ T.unpack srcLine
+            ++ "\n  "
+            ++ pad
+            ++ " | "
+            ++ pointer
 
 cleanExpected :: [String] -> [String]
 cleanExpected = filter (not . isInternal) . nub . map friendlyName
   where
     isInternal s = s `elem` ["VLBRACE", "VRBRACE", "VSEMI", "EOF"]
-    friendlyName "LOWER"      = "identifier"
-    friendlyName "UPPER"      = "type name"
-    friendlyName "OPERATOR"   = "operator"
-    friendlyName "INTEGER"    = "integer"
-    friendlyName "FLOAT"      = "number"
-    friendlyName "STRING"     = "string"
-    friendlyName "STRSTART"   = "string"
-    friendlyName "STRMID"     = "string"
-    friendlyName "STREND"     = "string"
+    friendlyName "LOWER" = "identifier"
+    friendlyName "UPPER" = "type name"
+    friendlyName "OPERATOR" = "operator"
+    friendlyName "INTEGER" = "integer"
+    friendlyName "FLOAT" = "number"
+    friendlyName "STRING" = "string"
+    friendlyName "STRSTART" = "string"
+    friendlyName "STRMID" = "string"
+    friendlyName "STREND" = "string"
     friendlyName "INTERPOPEN" = "'#{'"
     friendlyName "INTERPCLOSE" = "'}'"
-    friendlyName "GDOT"       = "'.'"
-    friendlyName s            = s
+    friendlyName "GDOT" = "'.'"
+    friendlyName s = s
 
 data DState = DState
-  { dsExpIndex    :: !Int
-  , dsSourceMap   :: !(Map.Map Int SrcLoc)
-  , dsDocMap      :: !(Map.Map Pos [Text])
-  , dsModulePath  :: !(Maybe Path)
+  { dsExpIndex :: !Int
+  , dsSourceMap :: !(Map.Map Int SrcLoc)
+  , dsDocMap :: !(Map.Map Pos [Text])
+  , dsModulePath :: !(Maybe Path)
   , dsModuleConfig :: !ModuleConfig
   , dsSourceLines :: ![Text]
   , dsLangMap :: !(Map.Map Text Lang) -- alias -> Lang for all known languages
@@ -115,8 +123,11 @@ freshIdSpan (Span start end) = do
   s <- State.get
   let i = dsExpIndex s
       loc = SrcLoc (Just (posFile start)) (posLine start) (posCol start) (posLine end) (posCol end)
-  State.put s { dsExpIndex = i + 1
-              , dsSourceMap = Map.insert i loc (dsSourceMap s) }
+  State.put
+    s
+      { dsExpIndex = i + 1
+      , dsSourceMap = Map.insert i loc (dsSourceMap s)
+      }
   return i
 
 freshIdPos :: Pos -> D Int
@@ -135,8 +146,11 @@ freshExprFrom (ExprI refId _) e = do
   s <- State.get
   let i = dsExpIndex s
       loc = Map.findWithDefault noSrcLoc refId (dsSourceMap s)
-  State.put s { dsExpIndex = i + 1
-              , dsSourceMap = Map.insert i loc (dsSourceMap s) }
+  State.put
+    s
+      { dsExpIndex = i + 1
+      , dsSourceMap = Map.insert i loc (dsSourceMap s)
+      }
   return (ExprI i e)
 
 --------------------------------------------------------------------
@@ -151,16 +165,16 @@ lookupDocsAt pos = do
 parseDocKV :: Text -> (Text, Text)
 parseDocKV txt =
   let stripped = T.strip txt
-  in case T.breakOn ":" stripped of
-    (key, rest)
-      | not (T.null rest) && not (T.any (== ' ') (T.strip key)) ->
-        (T.strip key, T.strip (T.drop 1 rest))
-    _ -> ("", stripped)
+   in case T.breakOn ":" stripped of
+        (key, rest)
+          | not (T.null rest) && not (T.any (== ' ') (T.strip key)) ->
+              (T.strip key, T.strip (T.drop 1 rest))
+        _ -> ("", stripped)
 
 parseCliOpt :: Text -> Maybe CliOpt
 parseCliOpt txt = case T.unpack (T.strip txt) of
-  '-' : '-' : rest@(_:_) -> Just (CliOptLong (T.pack rest))
-  '-' : c : '/' : '-' : '-' : rest@(_:_) -> Just (CliOptBoth c (T.pack rest))
+  '-' : '-' : rest@(_ : _) -> Just (CliOptLong (T.pack rest))
+  '-' : c : '/' : '-' : '-' : rest@(_ : _) -> Just (CliOptBoth c (T.pack rest))
   '-' : c : [] -> Just (CliOptShort c)
   _ -> Nothing
 
@@ -168,25 +182,25 @@ processArgDocLines :: [Text] -> ArgDocVars
 processArgDocLines = foldl processLine defaultValue
   where
     processLine d line = case parseDocKV line of
-      ("name", val) -> d { docName = Just val }
-      ("literal", val) -> d { docLiteral = Just (val == "true" || val == "True") }
-      ("unroll", val) -> d { docUnroll = Just (val == "true" || val == "True") }
-      ("default", val) -> d { docDefault = Just val }
-      ("metavar", val) -> d { docMetavar = Just val }
-      ("arg", val) -> d { docArg = parseCliOpt val }
-      ("true", val) -> d { docTrue = parseCliOpt val }
-      ("false", val) -> d { docFalse = parseCliOpt val }
-      ("return", val) -> d { docReturn = Just val }
-      (_, val) | not (T.null val) -> d { docLines = docLines d <> [val] }
+      ("name", v) -> d {docName = Just v}
+      ("literal", v) -> d {docLiteral = Just (v == "true" || v == "True")}
+      ("unroll", v) -> d {docUnroll = Just (v == "true" || v == "True")}
+      ("default", v) -> d {docDefault = Just v}
+      ("metavar", v) -> d {docMetavar = Just v}
+      ("arg", v) -> d {docArg = parseCliOpt v}
+      ("true", v) -> d {docTrue = parseCliOpt v}
+      ("false", v) -> d {docFalse = parseCliOpt v}
+      ("return", v) -> d {docReturn = Just v}
+      (_, v) | not (T.null v) -> d {docLines = docLines d <> [v]}
       _ -> d
 
 applySourceDocs :: [Text] -> Source -> Source
 applySourceDocs docLines' src = foldl processLine src docLines'
   where
     processLine s line = case parseDocKV line of
-      ("name", val) -> s { srcName = SrcName val }
-      ("rsize", val) -> s { srcRsize = mapMaybe readMaybeInt (T.words val) }
-      (_, val) | not (T.null val) -> s { srcNote = srcNote s <> [val] }
+      ("name", v) -> s {srcName = SrcName v}
+      ("rsize", v) -> s {srcRsize = mapMaybe readMaybeInt (T.words v)}
+      (_, v) | not (T.null v) -> s {srcNote = srcNote s <> [v]}
       _ -> s
     readMaybeInt t = case reads (T.unpack t) of
       [(n, "")] -> Just n
@@ -384,10 +398,10 @@ mergeSelectors [s] = s
 mergeSelectors sels =
   let idxEntries = concat [s : ss | SelectorIdx s ss <- sels]
       keyEntries = concat [s : ss | SelectorKey s ss <- sels]
-  in case (idxEntries, keyEntries) of
-    (is, []) -> case is of { [] -> SelectorEnd; (x:xs) -> SelectorIdx x xs }
-    ([], ks) -> case ks of { [] -> SelectorEnd; (x:xs) -> SelectorKey x xs }
-    _ -> error "Cannot mix key and index selectors in getter"
+   in case (idxEntries, keyEntries) of
+        (is, []) -> case is of [] -> SelectorEnd; (x : xs) -> SelectorIdx x xs
+        ([], (x : xs)) -> SelectorKey x xs
+        _ -> error "Cannot mix key and index selectors in getter"
 
 --------------------------------------------------------------------
 -- Do-notation desugaring
@@ -418,8 +432,8 @@ desugarDo sp (CstDoBare e : rest) = do
 
 mkInterpString :: Span -> Text -> [ExprI] -> [Text] -> Text -> D ExprI
 mkInterpString sp startText exprs mids endText = do
-  let tails = mids ++ [endText]
-  patI <- freshExprSpan sp (PatE (PatternText startText tails))
+  let suffixes = mids ++ [endText]
+  patI <- freshExprSpan sp (PatE (PatternText startText suffixes))
   freshExprSpan sp (AppE patI exprs)
 
 --------------------------------------------------------------------
@@ -436,7 +450,6 @@ mkImplicitMain es = do
 --------------------------------------------------------------------
 
 desugarExpr :: Loc CstExpr -> D ExprI
-
 -- Variables and literals
 desugarExpr (Loc sp (CVarE v)) = freshExprSpan sp (VarE defaultValue v)
 desugarExpr (Loc sp (CIntE n)) = freshExprSpan sp (IntE n)
@@ -445,58 +458,45 @@ desugarExpr (Loc sp (CStrE s)) = freshExprSpan sp (StrE s)
 desugarExpr (Loc sp (CLogE b)) = freshExprSpan sp (LogE b)
 desugarExpr (Loc sp CUniE) = freshExprSpan sp UniE
 desugarExpr (Loc sp CHolE) = freshExprSpan sp HolE
-
 -- Compound expressions
-desugarExpr (Loc sp (CAppE f args)) = do
+desugarExpr (Loc _ (CAppE f args)) = do
   f' <- desugarExpr f
   args' <- mapM desugarExpr args
   freshExprFrom f' (AppE f' args')
-
 desugarExpr (Loc sp (CLamE vs body)) = do
   body' <- desugarExpr body
   freshExprSpan sp (LamE vs body')
-
 desugarExpr (Loc sp (CLetE bindings body)) = do
-  bindings' <- mapM (\(v, e) -> do { e' <- desugarExpr e; return (v, e') }) bindings
+  bindings' <- mapM (\(v, e) -> do e' <- desugarExpr e; return (v, e')) bindings
   body' <- desugarExpr body
   freshExprSpan sp (LetE bindings' body')
-
-desugarExpr (Loc sp (CBopE lhs opTok rhs)) = do
+desugarExpr (Loc _ (CBopE lhs opTok rhs)) = do
   lhs' <- desugarExpr lhs
   rhs' <- desugarExpr rhs
   opI <- freshIdSpan (Span (locPos opTok) (locPos opTok))
   freshExprSpan (Span (locPos opTok) (locPos opTok)) (BopE lhs' opI (tokToEVar opTok) rhs')
-
 desugarExpr (Loc sp (CLstE es)) = do
   es' <- mapM desugarExpr es
   freshExprSpan sp (LstE es')
-
 desugarExpr (Loc sp (CTupE es)) = do
   es' <- mapM desugarExpr es
   freshExprSpan sp (TupE es')
-
 desugarExpr (Loc sp (CNamE entries)) = do
-  entries' <- mapM (\(k, e) -> do { e' <- desugarExpr e; return (k, e') }) entries
+  entries' <- mapM (\(k, e) -> do e' <- desugarExpr e; return (k, e')) entries
   freshExprSpan sp (NamE entries')
-
 desugarExpr (Loc sp (CSuspendE e)) = do
   e' <- desugarExpr e
   freshExprSpan sp (SuspendE e')
-
 desugarExpr (Loc sp (CForceE e)) = do
   e' <- desugarExpr e
   freshExprSpan sp (ForceE e')
-
 desugarExpr (Loc sp (CAnnE e t)) = do
   e' <- desugarExpr e
   freshExprSpan sp (AnnE e' (quantifyType t))
-
 desugarExpr (Loc sp (CDoE stmts)) = do
   body <- desugarDo sp stmts
   freshExprSpan sp (SuspendE body)
-
 desugarExpr (Loc sp (CAccessorE body)) = buildAccessor sp body
-
 desugarExpr (Loc sp (CInterpE startText exprs mids endText)) = do
   exprs' <- mapM desugarExpr exprs
   mkInterpString sp startText exprs' mids endText
@@ -518,17 +518,14 @@ desugarExpr (Loc _ (CSrcNewE {})) = error "desugarExpr: unexpected CSrcNewE in e
 --------------------------------------------------------------------
 
 desugarTopLevel :: Loc CstExpr -> D [ExprI]
-
 desugarTopLevel (Loc sp (CModE name export body)) = do
   expExprI <- desugarExport sp export
   bodyExprs <- concatMapM desugarTopLevel body
   modI <- freshIdSpan sp
   return [ExprI modI (ModE (MV name) (expExprI : bodyExprs))]
-
 desugarTopLevel (Loc sp (CImpE imp)) = do
   e <- freshExprSpan sp (ImpE imp)
   return [e]
-
 desugarTopLevel (Loc sp (CSigE name forallVars sigType)) = do
   docs <- lookupDocsAt (startPos sp)
   let cmdDoc = processArgDocLines docs
@@ -538,7 +535,6 @@ desugarTopLevel (Loc sp (CSigE name forallVars sigType)) = do
       et = EType t' (Set.fromList cs) doc
   e <- freshExprSpan sp (SigE (Signature name Nothing et))
   return [e]
-
 desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
   body' <- desugarExpr body
   whereDecls' <- concatMapM desugarTopLevel whereDecls
@@ -548,30 +544,24 @@ desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
       lam <- freshExprSpan sp (LamE (map EV vs) body')
       freshExprSpan sp (AssE name lam whereDecls')
   return [e]
-
 desugarTopLevel (Loc sp (CTypE td)) = desugarTypeDef sp td
-
 desugarTopLevel (Loc sp (CClsE classHead sigs)) = do
   (cs, cn, vs) <- desugarClassHead classHead
   sigs' <- mapM desugarSigItem sigs
   e <- freshExprSpan sp (ClsE (Typeclass cs cn vs sigs'))
   return [e]
-
 desugarTopLevel (Loc sp (CIstE cn types body)) = do
   bodyExprs <- concatMapM desugarTopLevel body
   e <- freshExprSpan sp (IstE cn (map quantifyType types) bodyExprs)
   return [e]
-
 desugarTopLevel (Loc sp (CFixE assoc prec ops)) = do
   e <- freshExprSpan sp (FixE (Fixity assoc prec ops))
   return [e]
-
 desugarTopLevel (Loc sp (CSrcOldE langTok srcFile items)) = do
   lang <- parseLang langTok
   modPath <- State.gets dsModulePath
   let path = resolveSourceFile modPath srcFile
   mapM (mkOldSource sp lang path) items
-
 desugarTopLevel (Loc sp (CSrcNewE langTok srcFile nameToks)) = do
   lang <- parseLang langTok
   modPath <- State.gets dsModulePath
@@ -590,7 +580,7 @@ desugarTopLevel node = do
 desugarExport :: Span -> CstExport -> D ExprI
 desugarExport sp CstExportAll = freshExprSpan sp (ExpE ExportAll)
 desugarExport sp (CstExportMany locs) = do
-  items <- mapM (\tok -> do { i <- freshIdPos (locPos tok); return (i, symVal' tok) }) locs
+  items <- mapM (\tok -> do i <- freshIdPos (locPos tok); return (i, symVal' tok)) locs
   freshExprSpan sp (ExpE (ExportMany (Set.fromList items) []))
 
 symVal' :: Located -> Symbol
@@ -618,7 +608,6 @@ tokToEVar _ = EV "?"
 --------------------------------------------------------------------
 
 desugarTypeDef :: Span -> CstTypeDef -> D [ExprI]
-
 desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
   lang <- case maybeLangTok of
     Nothing -> return Nothing
@@ -629,23 +618,23 @@ desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
   let docVars = if null docs then defaultValue else processArgDocLines docs
   e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t (ArgDocAlias docVars)))
   return [e]
-
 desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
   let t = if null vs then VarU v else AppU (VarU v) (map (either VarU id) vs)
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias defaultValue)))
   return [e]
-
 desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
   recDocs <- lookupDocsAt (startPos sp)
   let recDocVars = processArgDocLines recDocs
-  fieldDocs <- mapM (\(loc, _, _) -> do { dl <- lookupDocsAt (locPos loc); return (processArgDocLines dl) }) locEntries
-  let entries = [(k, t) | (_, k, t) <- locEntries]
+  fieldDocs <-
+    mapM
+      (\(loc, _, _) -> do dl <- lookupDocsAt (locPos loc); return (processArgDocLines dl))
+      locEntries
+  let entries = [(k, ty) | (_, k, ty) <- locEntries]
       entries' = desugarTableEntries nt entries
       doc = ArgDocRec recDocVars (zip (map fst entries') fieldDocs)
       t = NamU nt v (map (either VarU id) vs) entries'
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t doc))
   return [e]
-
 desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal) entries) = do
   lang <- case maybeLangTok of
     Nothing -> return Nothing
@@ -690,29 +679,34 @@ desugarSigItem (CstSigItem name forallVars sigType) = do
 mkOldSource :: Span -> Lang -> Maybe Path -> (Text, Maybe Text) -> D ExprI
 mkOldSource sp lang path (name, mayAlias) = do
   let alias = maybe name id mayAlias
-  freshExprSpan sp (SrcE Source
-    { srcName = SrcName name
-    , srcLang = lang
-    , srcPath = path
-    , srcAlias = EV alias
-    , srcLabel = Nothing
-    , srcRsize = []
-    , srcNote = []
-    })
+  freshExprSpan
+    sp
+    ( SrcE
+        Source
+          { srcName = SrcName name
+          , srcLang = lang
+          , srcPath = path
+          , srcAlias = EV alias
+          , srcLabel = Nothing
+          , srcRsize = []
+          , srcNote = []
+          }
+    )
 
 mkNewSource :: Span -> Lang -> Maybe Path -> Located -> D ExprI
 mkNewSource sp lang path nameTok = do
   docLines' <- lookupDocsAt (locPos nameTok)
   let name = getName' nameTok
-      baseSrc = Source
-        { srcName = SrcName name
-        , srcLang = lang
-        , srcPath = path
-        , srcAlias = EV name
-        , srcLabel = Nothing
-        , srcRsize = []
-        , srcNote = []
-        }
+      baseSrc =
+        Source
+          { srcName = SrcName name
+          , srcLang = lang
+          , srcPath = path
+          , srcAlias = EV name
+          , srcLabel = Nothing
+          , srcRsize = []
+          , srcNote = []
+          }
       src = applySourceDocs docLines' baseSrc
   freshExprSpan sp (SrcE src)
 
@@ -720,8 +714,9 @@ mkNewSource sp lang path nameTok = do
 -- Program entry point
 --------------------------------------------------------------------
 
--- | Desugar a list of CST nodes into ExprI nodes.
--- Handles implicit main wrapping for bare declarations.
+{- | Desugar a list of CST nodes into ExprI nodes.
+Handles implicit main wrapping for bare declarations.
+-}
 desugarProgram :: Bool -> [Loc CstExpr] -> D [ExprI]
 desugarProgram isImplicitMain cstNodes = do
   exprIs <- concatMapM desugarTopLevel cstNodes

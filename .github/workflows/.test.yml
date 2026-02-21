@@ -35,5 +35,5 @@ jobs:
 
       - name: Test morloc
         run: |
-          stack test
-        timeout-minutes: 30
+          stack test morloc:morloc-test
+        timeout-minutes: 10

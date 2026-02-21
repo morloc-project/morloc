@@ -351,12 +351,13 @@ maxIndex = (+ 1) . runIdentity . foldSerialManifoldM fm
     findNativeIndices (BndVarN_ _ i) = return i
     findNativeIndices e = return $ foldlNE max 0 e
 
--- | A record entry stores the common name, keys, and types of records that are
--- not imported from source. These records are generated as structs (or
--- equivalent) in the pool. 'unifyRecords' takes all such records and "unifies"
--- ones with the same name and keys. The unified records may have different
--- types, but they will all be instances of the same generic struct. Fields that
--- differ between instances are made generic.
+{- | A record entry stores the common name, keys, and types of records that are
+not imported from source. These records are generated as structs (or
+equivalent) in the pool. 'unifyRecords' takes all such records and "unifies"
+ones with the same name and keys. The unified records may have different
+types, but they will all be instances of the same generic struct. Fields that
+differ between instances are made generic.
+-}
 data RecEntry = RecEntry
   { recName :: MDoc
   , recFields ::
@@ -438,8 +439,9 @@ data DispatchEntry = DispatchEntry
 
 instance Binary DispatchEntry
 
--- | Extract local dispatch entries from serial manifolds.
--- Skips manifolds marked as remote workers.
+{- | Extract local dispatch entries from serial manifolds.
+Skips manifolds marked as remote workers.
+-}
 extractLocalDispatch :: [SerialManifold] -> [DispatchEntry]
 extractLocalDispatch = catMaybes . map localEntry
   where
@@ -461,4 +463,3 @@ extractRemoteDispatch = map (uncurry DispatchEntry) . unique . concatMap getRemo
       Identity [(Int, Int)]
     getRemoteSE (AppPoolS_ _ (PoolCall i _ (RemoteCall _) _) xss) = return $ (i, length xss) : concat xss
     getRemoteSE x = return $ foldlSE mappend mempty x
-

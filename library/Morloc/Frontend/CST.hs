@@ -12,29 +12,29 @@ Types for the concrete syntax tree produced by the Happy-generated parser
 desugaring into the internal 'Expr' AST.
 -}
 module Morloc.Frontend.CST
-  ( Span(..)
-  , Loc(..)
-  , HasPos(..)
-  , CstExpr(..)
-  , CstExport(..)
-  , CstSigType(..)
-  , CstTypeDef(..)
-  , CstClassHead(..)
-  , CstSigItem(..)
-  , CstDoStmt(..)
-  , CstAccessorBody(..)
-  , CstAccessorTail(..)
+  ( Span (..)
+  , Loc (..)
+  , HasPos (..)
+  , CstExpr (..)
+  , CstExport (..)
+  , CstSigType (..)
+  , CstTypeDef (..)
+  , CstClassHead (..)
+  , CstSigItem (..)
+  , CstDoStmt (..)
+  , CstAccessorBody (..)
+  , CstAccessorTail (..)
   , at
   , (<->)
   , valOf
   ) where
 
-import Data.Text (Text)
 import Data.Scientific (Scientific)
-import Morloc.Frontend.Token (Located(..), Pos(..))
+import Data.Text (Text)
+import Morloc.Frontend.Token (Located (..), Pos (..))
+import Morloc.Namespace.Expr (Associativity (..), Import (..))
 import Morloc.Namespace.Prim
-import Morloc.Namespace.Type (TypeU(..), NamType(..), Constraint(..))
-import Morloc.Namespace.Expr (Import(..), Associativity(..))
+import Morloc.Namespace.Type (Constraint (..), NamType (..), TypeU (..))
 
 -- | Source span: start position to end position
 data Span = Span !Pos !Pos
@@ -51,8 +51,9 @@ valOf (Loc _ x) = x
 at :: Located -> a -> Loc a
 at tok x = Loc (Span p p) x where p = locPos tok
 
--- | Build a span between any two things that have positions.
--- Works with Located tokens and Loc-wrapped values.
+{- | Build a span between any two things that have positions.
+Works with Located tokens and Loc-wrapped values.
+-}
 class HasPos a where
   startPos :: a -> Pos
   endPos :: a -> Pos
@@ -80,8 +81,8 @@ infixl 5 <->
 --------------------------------------------------------------------
 
 data CstExpr
-  -- Top-level declarations
-  = CModE Text CstExport [Loc CstExpr]
+  = -- Top-level declarations
+    CModE Text CstExport [Loc CstExpr]
   | CImpE Import
   | CSigE EVar [Text] CstSigType
   | CAssE EVar [Text] (Loc CstExpr) [Loc CstExpr]
@@ -91,8 +92,8 @@ data CstExpr
   | CFixE Associativity Int [EVar]
   | CSrcOldE Located (Maybe Text) [(Text, Maybe Text)]
   | CSrcNewE Located (Maybe Text) [Located]
-  -- Expressions
-  | CAppE (Loc CstExpr) [Loc CstExpr]
+  | -- Expressions
+    CAppE (Loc CstExpr) [Loc CstExpr]
   | CLamE [EVar] (Loc CstExpr)
   | CLetE [(EVar, Loc CstExpr)] (Loc CstExpr)
   | CBopE (Loc CstExpr) Located (Loc CstExpr)

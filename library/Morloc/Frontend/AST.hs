@@ -28,10 +28,10 @@ module Morloc.Frontend.AST
   ) where
 
 import qualified Data.Set as Set
-import qualified Morloc.Data.Map as Map
 import Morloc.Data.Doc
-import qualified Morloc.Monad as MM
+import qualified Morloc.Data.Map as Map
 import Morloc.Frontend.Namespace
+import qualified Morloc.Monad as MM
 
 -- | In the DAG, the two MVar are the two keys, Import is the edge data, Expr is the node data
 findEdges :: ExprI -> (MVar, [(MVar, Import)], ExprI)
@@ -70,8 +70,9 @@ findSources (ExprI _ (SrcE ss)) = [ss]
 findSources (ExprI _ (ModE _ es)) = concatMap findSources es
 findSources _ = []
 
--- | Find all top-level type aliases in a module, split into general
--- (language-independent) and concrete (language-specific) maps.
+{- | Find all top-level type aliases in a module, split into general
+(language-independent) and concrete (language-specific) maps.
+-}
 findTypedefs ::
   ExprI ->
   ( Map.Map TVar [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
@@ -114,18 +115,22 @@ findFixityMap :: ExprI -> MorlocMonad (Map.Map EVar (Associativity, Int))
 findFixityMap (ExprI _ (ModE _ es)) = do
   -- collect all fixity terms.
   -- these are allowed only at the top level, so no need for recursion.
-  let allTerms = concat [ [(op, (ass, pre)) | op <- ops]
-                        | (ExprI _ (FixE (Fixity ass pre ops))) <- es]
+  let allTerms =
+        concat
+          [ [(op, (ass, pre)) | op <- ops]
+          | (ExprI _ (FixE (Fixity ass pre ops))) <- es
+          ]
 
   foldlM tryAddTerm Map.empty allTerms
   where
-
-  tryAddTerm :: Map.Map EVar (Associativity, Int) -> (EVar, (Associativity, Int)) -> MorlocMonad (Map.Map EVar (Associativity, Int))
-  tryAddTerm m (k, v)
-    | Map.member k m = MM.throwSystemError $ "Conflicting fixity definitions for" <+> pretty k
-    | otherwise = return $ Map.insert k v m
+    tryAddTerm ::
+      Map.Map EVar (Associativity, Int) ->
+      (EVar, (Associativity, Int)) ->
+      MorlocMonad (Map.Map EVar (Associativity, Int))
+    tryAddTerm m (k, v)
+      | Map.member k m = MM.throwSystemError $ "Conflicting fixity definitions for" <+> pretty k
+      | otherwise = return $ Map.insert k v m
 findFixityMap _ = return Map.empty
-
 
 {- | Find type signatures that are in the scope of the input expression. Do not
 descend recursively into declaration where statements except if the input
@@ -188,7 +193,10 @@ getIndices (ExprI i (LstE es)) = i : concatMap getIndices es
 getIndices (ExprI i (TupE es)) = i : concatMap getIndices es
 getIndices (ExprI i (NamE rs)) = i : concatMap (getIndices . snd) rs
 getIndices (ExprI i (ExpE ExportAll)) = [i]
-getIndices (ExprI i (ExpE (ExportMany ss gs))) = i : [j | (j, _) <- Set.toList ss] ++ concatMap (\g -> [j | (j, _) <- Set.toList (exportGroupMembers g)]) gs
+getIndices (ExprI i (ExpE (ExportMany ss gs))) =
+  i
+    : [j | (j, _) <- Set.toList ss]
+    ++ concatMap (\g -> [j | (j, _) <- Set.toList (exportGroupMembers g)]) gs
 getIndices (ExprI i (BopE e1 j _ e2)) = [i, j] <> getIndices e1 <> getIndices e2
 getIndices (ExprI i (LetE bindings body)) = i : concatMap (getIndices . snd) bindings <> getIndices body
 getIndices (ExprI i (SuspendE e)) = i : getIndices e
