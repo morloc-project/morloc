@@ -34,7 +34,7 @@ import qualified Morloc.Config as Config
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.API as F
-import Morloc.Module (OverwriteProtocol (..))
+import Morloc.Module (OverwriteProtocol (..), findMainLocFile)
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import Morloc.Namespace.Expr
@@ -496,22 +496,6 @@ fillModuleExports libDir m
         Just f -> do
           sigs <- extractTypeSignatures f
           return m {mmExports = sigs}
-
--- | Find the main .loc file in a module directory
-findMainLocFile :: FilePath -> String -> IO (Maybe FilePath)
-findMainLocFile dir name = do
-  dirExists <- doesDirectoryExist dir
-  if not dirExists
-    then return Nothing
-    else do
-      let mainLoc = dir </> "main.loc"
-          nameLoc = dir </> name ++ ".loc"
-      mainExists <- doesFileExist mainLoc
-      if mainExists
-        then return (Just mainLoc)
-        else do
-          nameExists <- doesFileExist nameLoc
-          return $ if nameExists then Just nameLoc else Nothing
 
 -- | Extract top-level type signatures from a .loc file
 extractTypeSignatures :: FilePath -> IO [(T.Text, T.Text)]

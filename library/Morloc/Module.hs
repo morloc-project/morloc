@@ -18,6 +18,7 @@ Handles all aspects of the morloc module system:
 module Morloc.Module
   ( findModule
   , loadModuleMetadata
+  , findMainLocFile
 
     -- * Module installation
   , OverwriteProtocol (..)
@@ -313,18 +314,32 @@ data ModuleSource
 
 -- }}}
 
+-- | Check that a resolved module name is a valid identifier
+validateModuleName :: Text -> Text -> Either Text Text
+validateModuleName modstr name
+  | MT.null name =
+      Left $ "Could not determine module name from '" <> modstr <> "'"
+  | not (DC.isAlphaNum (MT.head name)) =
+      Left $ "Module name '" <> name <> "' (from '" <> modstr <> "') must start with an alphanumeric character"
+  | MT.any (\c -> not (DC.isAlphaNum c) && c /= '-') name =
+      Left $ "Module name '" <> name <> "' (from '" <> modstr <> "') contains invalid characters (only alphanumeric and hyphens allowed)"
+  | otherwise = Right name
+
 {- | Extract the module name from an install string.
 For "github:user/repo" -> "repo", for "math" -> "math",
 for "./path/to/foo" -> "foo", for "." -> current directory name
 -}
 extractModuleName :: Text -> IO Text
-extractModuleName modstr =
-  case parse (moduleInstallParser "morloclib") "" modstr of
+extractModuleName modstr = do
+  name <- case parse (moduleInstallParser "morloclib") "" modstr of
     Right (Right (ModuleSourceLocal path _)) ->
       MT.pack . MS.takeFileName <$> (MS.makeAbsolute . MS.dropTrailingPathSeparator . MT.unpack $ path)
     Right (Right (ModuleSourceRemoteGit remote)) ->
       return $ gitReponame remote
     _ -> return modstr
+  case validateModuleName modstr name of
+    Left err -> ioError . userError $ MT.unpack err
+    Right n -> return n
 
 {- | Typecheck callback: takes a filepath, returns list of (name, type) exports.
 Passed in from the executable layer to avoid circular imports.
@@ -356,14 +371,14 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
     (Left errstr) -> moduleInstallError (pretty . errorBundlePretty $ errstr)
     (Right (Left errstr)) -> moduleInstallError $ pretty errstr
     (Right (Right source)) -> do
-      name <- case source of
+      rawName <- case source of
             ModuleSourceLocal path _ ->
               liftIO $ MT.pack . MS.takeFileName <$> (MS.makeAbsolute . MS.dropTrailingPathSeparator . MT.unpack $ path)
             ModuleSourceRemoteGit remote -> return $ gitReponame remote
+      name <- case validateModuleName modstr rawName of
+        Left err -> moduleInstallError $ pretty err
+        Right n -> return n
       let targetDir = libpath </> MT.unpack name
-
-      -- Cycle detection
-      when (Set.member name inProgress) $ return ()
 
       if Set.member name inProgress
         then return ()
@@ -391,7 +406,7 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
       liftIO $ createDirectoryIfMissing True (MS.takeDirectory targetDir)
       let ioAction = case source of
             ModuleSourceLocal path selector ->
-              installLocalIO libpath selector path
+              installLocalIO targetDir selector path
             ModuleSourceRemoteGit remote ->
               installRemoteIO gitprot targetDir remote
           cleanup = do
@@ -465,14 +480,18 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
 -- | Find the main .loc file in a module directory
 findMainLocFile :: FilePath -> String -> IO (Maybe FilePath)
 findMainLocFile dir name = do
-  let mainLoc = dir </> "main.loc"
-      nameLoc = dir </> name ++ ".loc"
-  mainExists <- doesFileExist mainLoc
-  if mainExists
-    then return (Just mainLoc)
+  dirExists <- doesDirectoryExist dir
+  if not dirExists
+    then return Nothing
     else do
-      nameExists <- doesFileExist nameLoc
-      return $ if nameExists then Just nameLoc else Nothing
+      let mainLoc = dir </> "main.loc"
+          nameLoc = dir </> name ++ ".loc"
+      mainExists <- doesFileExist mainLoc
+      if mainExists
+        then return (Just mainLoc)
+        else do
+          nameExists <- doesFileExist nameLoc
+          return $ if nameExists then Just nameLoc else Nothing
 
 -- | Build a module manifest JSON string
 buildModuleManifest ::
@@ -529,8 +548,9 @@ extractMorlocDeps path = do
             Nothing -> []
             Just rest ->
               let modName = MT.strip (MT.takeWhile (\c -> c /= '(' && c /= ' ') rest)
-                  topLevel = head (MT.splitOn "." modName)
-               in if MT.null topLevel then [] else [topLevel]
+               in case MT.splitOn "." modName of
+                    (topLevel : _) | not (MT.null topLevel) -> [topLevel]
+                    _ -> []
 
     removeComments :: [Text] -> [Text]
     removeComments = go False
@@ -626,10 +646,10 @@ parseModuleSegment :: Parser Text
 parseModuleSegment = do
   firstChar <- alphaNumChar
   rest <- many (alphaNumChar <|> char '-')
-  -- Ensure we don't end with dash if there are rest chars
-  if last rest == '-'
-    then fail "Module name cannot end with a dash"
-    else return (MT.pack (firstChar : rest))
+  case rest of
+    [] -> return (MT.pack [firstChar])
+    _ | last rest == '-' -> fail "Module name cannot end with a dash"
+      | otherwise -> return (MT.pack (firstChar : rest))
 
 -- parse a local file
 --   .
@@ -692,19 +712,15 @@ parseVersion = do
       -- Optional 'v' prefix
       v <- optional (string "v")
 
-      -- Parse major version
+      -- Parse major.minor
       major <- MT.show' <$> (L.decimal :: Parser Int)
       _ <- char '.'
-
-      -- Parse minor version
       minor <- MT.show' <$> (L.decimal :: Parser Int)
-      _ <- char '.'
 
-      -- Optional patch version
-      patchMay <- optional $ do
-        p <- MT.show' <$> (L.decimal :: Parser Int)
+      -- Optional .patch
+      patchMay <- optional . try $ do
         _ <- char '.'
-        return p
+        MT.show' <$> (L.decimal :: Parser Int)
 
       -- Optional pre-release (after '-')
       preRelease <- optional $ do
@@ -803,18 +819,14 @@ parseBranch = do
 
 -- | Install from a local source (pure IO, no MorlocMonad)
 installLocalIO ::
-  Path -> Maybe GitSnapshotSelector -> Text -> IO ()
-installLocalIO libpath maySelector modulePath = do
+  FilePath -> Maybe GitSnapshotSelector -> Text -> IO ()
+installLocalIO targetDir maySelector modulePath = do
   sourceDir <- MS.makeAbsolute . MS.dropTrailingPathSeparator . MT.unpack $ modulePath
-  let moduleName = MS.takeFileName sourceDir
-      targetDir = libpath </> moduleName
 
   sourceExists <- doesDirectoryExist sourceDir
   unless sourceExists $
-    error $
+    ioError $ userError $
       "Source directory does not exist: " ++ sourceDir
-
-  createDirectoryIfMissing True libpath
 
   let gitDir = sourceDir </> ".git"
   isGitRepo <- doesDirectoryExist gitDir
@@ -826,16 +838,17 @@ installLocalIO libpath maySelector modulePath = do
 installLocalGitRepoIO :: FilePath -> FilePath -> GitSnapshotSelector -> IO ()
 installLocalGitRepoIO sourceDir targetDir selector = do
   case selector of
-    LatestDefaultBranch -> callProcess "cp" ["-r", sourceDir, targetDir]
-    _ -> callProcess "git" ["clone", "-q", sourceDir, targetDir]
-
-  case selector of
-    LatestDefaultBranch -> return ()
-    LatestOnBranch branch ->
+    LatestDefaultBranch ->
+      -- Just copy the working tree, then strip .git
+      callProcess "cp" ["-r", sourceDir, targetDir]
+    LatestOnBranch branch -> do
+      callProcess "git" ["clone", "-q", sourceDir, targetDir]
       callProcess "git" ["-C", targetDir, "checkout", "refs/heads/" ++ MT.unpack branch]
-    CommitHash hash ->
+    CommitHash hash -> do
+      callProcess "git" ["clone", "-q", sourceDir, targetDir]
       callProcess "git" ["-C", targetDir, "checkout", "--detach", MT.unpack hash]
-    ReleaseTag tag ->
+    ReleaseTag tag -> do
+      callProcess "git" ["clone", "-q", sourceDir, targetDir]
       callProcess "git" ["-C", targetDir, "checkout", "refs/tags/" ++ MT.unpack tag]
 
   -- Remove .git directory from installed copy
