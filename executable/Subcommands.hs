@@ -140,6 +140,24 @@ typecheckModuleFn mainFile = do
 -- | Install a module
 cmdInstall :: InstallCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
 cmdInstall args verbosity conf buildConfig = do
+  userSources <- Map.fromList <$> mapM (\modstr -> do
+    name <- Mod.extractModuleName modstr
+    return (name, modstr)) moduleTexts
+  let cmdInstall' =
+        mapM
+          ( \modstr ->
+              Mod.installModule
+                (installForce args)
+                (installUseSSH args)
+                libpath
+                (Config.configPlaneCore conf)
+                mayTypecheck
+                userSources
+                Set.empty
+                Mod.ExplicitInstall
+                modstr
+          )
+          moduleTexts
   passed <- MM.runMorlocMonad Nothing verbosity conf buildConfig cmdInstall' >>= MM.writeMorlocReturn
   if passed && installBuild args
     then buildInstalledModules args verbosity conf buildConfig moduleTexts libpath
@@ -148,32 +166,10 @@ cmdInstall args verbosity conf buildConfig = do
     libpath = Config.configLibrary conf </> Config.configPlane conf
     moduleTexts = map MT.pack (installModuleStrings args)
 
-    userSources =
-      Map.fromList
-        [ (Mod.extractModuleName modstr, modstr)
-        | modstr <- moduleTexts
-        ]
-
     mayTypecheck =
       if installNoTypecheck args
         then Nothing
         else Just typecheckModuleFn
-
-    cmdInstall' =
-      mapM
-        ( \modstr ->
-            Mod.installModule
-              (installForce args)
-              (installUseSSH args)
-              libpath
-              (Config.configPlaneCore conf)
-              mayTypecheck
-              userSources
-              Set.empty
-              Mod.ExplicitInstall
-              modstr
-        )
-        moduleTexts
 
 -- | Build and install executables for installed modules
 buildInstalledModules ::
@@ -185,8 +181,8 @@ buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
     force = installForce args == ForceOverwrite
 
     buildOne modstr = do
-      let name = T.unpack (Mod.extractModuleName modstr)
-          moduleDir = libpath </> name
+      name <- T.unpack <$> Mod.extractModuleName modstr
+      let moduleDir = libpath </> name
       mainFile <- findMainLocFile moduleDir name
       case mainFile of
         Nothing -> do

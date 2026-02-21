@@ -315,16 +315,16 @@ data ModuleSource
 
 {- | Extract the module name from an install string.
 For "github:user/repo" -> "repo", for "math" -> "math",
-for "./path/to/foo" -> "foo"
+for "./path/to/foo" -> "foo", for "." -> current directory name
 -}
-extractModuleName :: Text -> Text
+extractModuleName :: Text -> IO Text
 extractModuleName modstr =
   case parse (moduleInstallParser "morloclib") "" modstr of
     Right (Right (ModuleSourceLocal path _)) ->
-      MT.pack . MS.takeFileName . MS.dropTrailingPathSeparator . MT.unpack $ path
+      MT.pack . MS.takeFileName <$> (MS.makeAbsolute . MS.dropTrailingPathSeparator . MT.unpack $ path)
     Right (Right (ModuleSourceRemoteGit remote)) ->
-      gitReponame remote
-    _ -> modstr
+      return $ gitReponame remote
+    _ -> return modstr
 
 {- | Typecheck callback: takes a filepath, returns list of (name, type) exports.
 Passed in from the executable layer to avoid circular imports.
@@ -356,11 +356,11 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
     (Left errstr) -> moduleInstallError (pretty . errorBundlePretty $ errstr)
     (Right (Left errstr)) -> moduleInstallError $ pretty errstr
     (Right (Right source)) -> do
-      let name = case source of
+      name <- case source of
             ModuleSourceLocal path _ ->
-              MT.pack . MS.takeFileName . MS.dropTrailingPathSeparator . MT.unpack $ path
-            ModuleSourceRemoteGit remote -> gitReponame remote
-          targetDir = libpath </> MT.unpack name
+              liftIO $ MT.pack . MS.takeFileName <$> (MS.makeAbsolute . MS.dropTrailingPathSeparator . MT.unpack $ path)
+            ModuleSourceRemoteGit remote -> return $ gitReponame remote
+      let targetDir = libpath </> MT.unpack name
 
       -- Cycle detection
       when (Set.member name inProgress) $ return ()
