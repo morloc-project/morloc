@@ -39,6 +39,9 @@ module Morloc.Namespace.Type
     -- * Type extensions
   , Constraint (..)
 
+    -- * Predicates
+  , containsUnk
+
     -- * Typeclasses
   , Typelike (..)
 
@@ -411,6 +414,16 @@ newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
     allVars (ForallU v t) = Set.union (Set.singleton (VarU v)) (allVars t)
     allVars (ThunkU t) = allVars t
     allVars t = free t
+
+-- | Check whether a ground type contains any unknown (unresolved) type variables.
+-- These arise from erasing 'ForallU' during 'typeOf', indicating a polymorphic type.
+containsUnk :: Type -> Bool
+containsUnk (UnkT _) = True
+containsUnk (VarT _) = False
+containsUnk (FunT ts t) = any containsUnk ts || containsUnk t
+containsUnk (AppT t ts) = containsUnk t || any containsUnk ts
+containsUnk (NamT _ _ ps rs) = any containsUnk ps || any (containsUnk . snd) rs
+containsUnk (ThunkT t) = containsUnk t
 
 ----- Pretty instances -------------------------------------------------------
 

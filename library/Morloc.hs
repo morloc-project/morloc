@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {- |
 Module      : Morloc
 Description : Top-level compiler pipeline: parse, typecheck, generate, build
@@ -21,6 +23,9 @@ import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
 import Morloc.Namespace.Expr
 import Morloc.Namespace.State
+
+import Data.List (partition)
+import Morloc.Data.Doc (pretty)
 
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
 import Morloc.CodeGenerator.Emit (pool, emit, TranslateFn)
@@ -96,10 +101,21 @@ writeProgram translateFn path code = do
     >>= bimapM (mapM processDocstrings) (mapM processDocstrings)
     -- generate nexus and pools
     >>= \(gASTs, rASTs) -> do
-      nexus <- Nexus.generate gASTs rASTs
+      -- Filter out generic (polymorphic) exports -- they can't become CLI subcommands
+      let isConcreteExport (AnnoS (Idx _ t) _ _, _) = not (containsUnk t)
+          (concreteGASTs, genericGASTs) = partition isConcreteExport gASTs
+          (concreteRASTs, genericRASTs) = partition isConcreteExport rASTs
+          warnSkip (AnnoS (Idx i _) _ _) = do
+            name <- MM.metaName i
+            case name of
+              Just (EV n) -> MM.say $ "Warning: skipping generic export '" <> pretty n <> "'"
+              Nothing -> return ()
+      mapM_ (warnSkip . fst) genericGASTs
+      mapM_ (warnSkip . fst) genericRASTs
+      nexus <- Nexus.generate concreteGASTs concreteRASTs
       MM.startCounter
       pools <-
-        mapM parameterize (map fst rASTs)
+        mapM parameterize (map fst concreteRASTs)
           >>= mapM express
           >>= mapM segment |>> concat
           >>= mapM serialize
