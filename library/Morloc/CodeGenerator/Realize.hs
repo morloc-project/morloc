@@ -180,6 +180,12 @@ realizeWithRegistry registry s0 = do
       return (LetS v e1' e2', Idx i best)
     scoreExpr rstat (LetBndS v, i) = return (LetBndS v, zipLang i rstat)
     scoreExpr rstat (CallS v, i) = return (CallS v, zipLang i rstat)
+    scoreExpr rstat (IfS c t e, i) = do
+      c' <- scoreAnnoS rstat c
+      t' <- scoreAnnoS rstat t
+      e' <- scoreAnnoS rstat e
+      let best = minPairs (scoresOf c' ++ scoresOf t' ++ scoresOf e')
+      return (IfS c' t' e', Idx i best)
     scoreExpr rstat (SuspendS x, i) = do
       x' <- scoreAnnoS rstat x
       return (SuspendS x', Idx i (scoresOf x'))
@@ -387,6 +393,12 @@ realizeWithRegistry registry s0 = do
       return (LetS v e1' e2', Idx i lang)
     collapseExpr _ lang (LetBndS v, Idx i _) = return (LetBndS v, Idx i lang)
     collapseExpr _ lang (CallS v, Idx i _) = return (CallS v, Idx i lang)
+    collapseExpr _ l1 (IfS c t e, Idx i ss) = do
+      lang <- chooseLanguage l1 ss
+      c' <- collapseAnnoS lang c
+      t' <- collapseAnnoS lang t
+      e' <- collapseAnnoS lang e
+      return (IfS c' t' e', Idx i lang)
     collapseExpr _ l1 (SuspendS x, Idx i ss) = do
       lang <- chooseLanguage l1 ss
       x' <- collapseAnnoS lang x
@@ -456,6 +468,7 @@ realizeWithRegistry registry s0 = do
             (LetS v e1 e2) -> LetS v <$> f lang e1 <*> f lang e2
             (LetBndS v) -> return (LetBndS v)
             (CallS v) -> return (CallS v)
+            (IfS c t e) -> IfS <$> f lang c <*> f lang t <*> f lang e
             (SuspendS x) -> SuspendS <$> f lang x
             (ForceS x) -> ForceS <$> f lang x
           return (AnnoS g (Idx i lang) e'')
@@ -493,6 +506,7 @@ removeVarS (AnnoS g c (LstS xs)) = AnnoS g c (LstS (map removeVarS xs))
 removeVarS (AnnoS g c (TupS xs)) = AnnoS g c (TupS (map removeVarS xs))
 removeVarS (AnnoS g c (NamS rs)) = AnnoS g c (NamS (map (second removeVarS) rs))
 removeVarS (AnnoS g c (LetS v e1 e2)) = AnnoS g c (LetS v (removeVarS e1) (removeVarS e2))
+removeVarS (AnnoS g c (IfS cond thenE elseE)) = AnnoS g c (IfS (removeVarS cond) (removeVarS thenE) (removeVarS elseE))
 removeVarS (AnnoS g c (SuspendS e)) = AnnoS g c (SuspendS (removeVarS e))
 removeVarS (AnnoS g c (ForceS e)) = AnnoS g c (ForceS (removeVarS e))
 removeVarS x = x

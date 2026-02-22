@@ -249,6 +249,7 @@ addLocalState m0 e0 s0 = do
       s' <- foldrM (\(_, e) s0' -> findFreeDefs e s0') s bindings
       findFreeDefs body s'
     findFreeDefs (ExprI _ (ModE _ es)) s = foldrM findFreeDefs s es
+    findFreeDefs (ExprI _ (IfE c t e)) s = findFreeDefs c s >>= findFreeDefs t >>= findFreeDefs e
     findFreeDefs (ExprI _ (SuspendE e)) s = findFreeDefs e s
     findFreeDefs (ExprI _ (ForceE e)) s = findFreeDefs e s
     findFreeDefs _ s = return s
@@ -412,6 +413,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
     linkLocal bnds c cs (ExprI _ (NamE (map snd -> es))) = mapM_ (linkLocal bnds c cs) es
     linkLocal bnds c cs (ExprI _ (AppE e es)) = mapM_ (linkLocal bnds c cs) (e : es)
     linkLocal bnds c cs (ExprI _ (AnnE e _)) = linkLocal bnds c cs e
+    linkLocal bnds c cs (ExprI _ (IfE cond thenE elseE)) = mapM_ (linkLocal bnds c cs) [cond, thenE, elseE]
     linkLocal bnds c cs (ExprI _ (SuspendE e)) = linkLocal bnds c cs e
     linkLocal bnds c cs (ExprI _ (ForceE e)) = linkLocal bnds c cs e
     -- terminal cases

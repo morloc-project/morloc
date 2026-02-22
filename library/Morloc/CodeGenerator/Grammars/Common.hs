@@ -214,6 +214,7 @@ instance Dependable NativeExpr where
   isAtomic ListN {} = False
   isAtomic TupleN {} = False
   isAtomic RecordN {} = False
+  isAtomic IfN {} = False
   isAtomic _ = True
 
 instance Dependable SerialExpr where
@@ -313,6 +314,9 @@ invertSerialManifold sm0 =
     -- keep dependencies inside suspend so thunk body stays lazy
     invertNativeExprM (SuspendN_ t (D ne lets)) = return $ D (SuspendN t (weave (D ne lets))) []
     invertNativeExprM (ForceN_ t (D ne lets)) = atomize (ForceN t ne) lets
+    -- keep dependencies inside if branches (like suspend)
+    invertNativeExprM (IfN_ t (D condNe condLets) (D thenNe thenLets) (D elseNe elseLets)) =
+      atomize (IfN t (weave (D condNe condLets)) (weave (D thenNe thenLets)) (weave (D elseNe elseLets))) []
 
     invertSerialArgM :: SerialArg_ (D SerialManifold) (D SerialExpr) -> Index (D SerialArg)
     invertSerialArgM (SerialArgManifold_ (D sm deps)) = return $ D (SerialArgManifold sm) deps

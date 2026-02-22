@@ -38,6 +38,7 @@ setManifoldConfig midx (AnnoS _ _ (AppS e _)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (LamS _ e)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (SuspendS e)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (ForceS e)) = setManifoldConfig midx e
+setManifoldConfig midx (AnnoS _ _ (IfS _ t _)) = setManifoldConfig midx t
 setManifoldConfig _ (AnnoS _ _ (CallS _)) = return ()
 setManifoldConfig _ _ = return ()
 
@@ -90,6 +91,7 @@ forceExportThunks cidx t (PolyHead lang midx args body) =
     goExpr ids (PolyList v ti es) = PolyList v ti (map (goExpr ids) es)
     goExpr ids (PolyTuple v es) = PolyTuple v (map (fmap (goExpr ids)) es)
     goExpr ids (PolyRecord o v ps rs) = PolyRecord o v ps (map (fmap (fmap (goExpr ids))) rs)
+    goExpr ids (PolyIf c t e) = PolyIf (goExpr ids c) (goExpr ids t) (goExpr ids e)
     goExpr ids (PolyRemoteInterface l ti is rf e) = PolyRemoteInterface l ti is rf (goExpr ids e)
     goExpr _ e = e
 
@@ -512,6 +514,12 @@ expressPolyExpr _ _ _ (AnnoS (Idx i _) _ (AppS (AnnoS _ _ (BndS v)) _)) =
     "Undefined function" <+> dquotes (pretty v) <> ", did you forget an import?"
 expressPolyExpr _ _ _ (AnnoS _ _ (AppS (AnnoS _ _ (LamS vs _)) _)) =
   error $ "All applications of lambdas should have been eliminated of length " <> show (length vs)
+expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx _ lang, _) (IfS cond thenE elseE)) = do
+  let boolType = VarT (TV "Bool")
+  cond' <- expressPolyExprWrap lang (mkIdx cond boolType) cond
+  thenE' <- expressPolyExprWrap lang (mkIdx thenE t) thenE
+  elseE' <- expressPolyExprWrap lang (mkIdx elseE t) elseE
+  return $ PolyIf cond' thenE' elseE'
 expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx cidx lang, _) (SuspendS x)) = do
   x' <- expressPolyExprWrap lang (mkIdx x t) x
   return $ PolySuspend (Idx cidx t) x'

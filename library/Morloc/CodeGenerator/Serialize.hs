@@ -114,6 +114,9 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
         (Just (Right t)) -> BndVarS <$> fmap Just (inferType t) <*> pure i
         _ -> return $ BndVarS Nothing i
     serialExpr _ (MonoBndVar (C t) i) = BndVarS <$> fmap Just (inferType t) <*> pure i
+    serialExpr m (MonoIf cond thenE elseE) = do
+      ne <- nativeExpr m (MonoIf cond thenE elseE)
+      serializeS "serialE MonoIf" m ne
     serialExpr _ (MonoExe _ _) = error "Can represent MonoSrc as SerialExpr"
     serialExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to a SerialExpr"
     serialExpr _ (MonoApp MonoManifold {} _) = error "Illegal?"
@@ -256,6 +259,11 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoInt v x) = IntN <$> inferVar v <*> pure x
     nativeExpr _ (MonoStr v x) = StrN <$> inferVar v <*> pure x
     nativeExpr _ (MonoNull v) = NullN <$> inferVar v
+    nativeExpr m (MonoIf cond thenE elseE) = do
+      condNe <- nativeExpr m cond
+      thenNe <- nativeExpr m thenE
+      elseNe <- nativeExpr m elseE
+      return $ IfN (typeFof thenNe) condNe thenNe elseNe
     nativeExpr m (MonoSuspend t e) = SuspendN <$> inferType t <*> nativeExpr m e
     nativeExpr m (MonoForce t e) = ForceN <$> inferType t <*> nativeExpr m e
 
@@ -291,6 +299,8 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     makeTypemap parentIdx (MonoReturn e) = makeTypemap parentIdx e
     makeTypemap parentIdx (MonoForce _ e) = makeTypemap parentIdx e
     makeTypemap parentIdx (MonoSuspend _ e) = makeTypemap parentIdx e
+    makeTypemap parentIdx (MonoIf cond thenE elseE) =
+      Map.unionsWith mergeTypes [makeTypemap parentIdx cond, makeTypemap parentIdx thenE, makeTypemap parentIdx elseE]
     makeTypemap _ (MonoApp (MonoExe (ann -> idx) _) es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap parentIdx (MonoApp e es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) (e : es))
     makeTypemap _ (MonoList (ann -> idx) _ es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
@@ -315,6 +325,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     inferState (MonoLet _ _ e) = inferState e
     inferState (MonoReturn e) = inferState e
     inferState (MonoManifold _ _ e) = inferState e
+    inferState (MonoIf _ thenE _) = inferState thenE
     inferState MonoPoolCall {} = Unserialized
     inferState MonoBndVar {} = error "Ambiguous bound term"
     inferState _ = Unserialized

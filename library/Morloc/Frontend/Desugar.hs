@@ -517,6 +517,7 @@ desugarExpr (Loc _ (CIstE {})) = error "desugarExpr: unexpected CIstE in express
 desugarExpr (Loc _ (CFixE {})) = error "desugarExpr: unexpected CFixE in expression position"
 desugarExpr (Loc _ (CSrcOldE {})) = error "desugarExpr: unexpected CSrcOldE in expression position"
 desugarExpr (Loc _ (CSrcNewE {})) = error "desugarExpr: unexpected CSrcNewE in expression position"
+desugarExpr (Loc _ (CGuardedAssE {})) = error "desugarExpr: unexpected CGuardedAssE in expression position"
 
 --------------------------------------------------------------------
 -- Top-level declaration desugaring
@@ -542,6 +543,15 @@ desugarTopLevel (Loc sp (CSigE name forallVars sigType)) = do
   return [e]
 desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
   body' <- desugarExpr body
+  whereDecls' <- concatMapM desugarTopLevel whereDecls
+  e <- case params of
+    [] -> freshExprSpan sp (AssE name body' whereDecls')
+    vs -> do
+      lam <- freshExprSpan sp (LamE (map EV vs) body')
+      freshExprSpan sp (AssE name lam whereDecls')
+  return [e]
+desugarTopLevel (Loc sp (CGuardedAssE name params guards whereDecls)) = do
+  body' <- desugarGuards sp guards
   whereDecls' <- concatMapM desugarTopLevel whereDecls
   e <- case params of
     [] -> freshExprSpan sp (AssE name body' whereDecls')
@@ -577,6 +587,39 @@ desugarTopLevel (Loc sp (CSrcNewE langTok srcFile nameToks)) = do
 desugarTopLevel node = do
   e <- desugarExpr node
   return [e]
+
+--------------------------------------------------------------------
+-- Guard desugaring
+--------------------------------------------------------------------
+
+-- | Desugar a list of guard clauses into nested IfE expressions.
+-- ? cond1 = body1 ? cond2 = body2 ? _ = body3
+-- becomes: IfE cond1 body1 (IfE cond2 body2 body3)
+desugarGuards :: Span -> [(Loc CstExpr, Loc CstExpr)] -> D ExprI
+desugarGuards _ [] = error "desugarGuards: empty guard list"
+desugarGuards sp [(cond, body)] = do
+  cond' <- desugarGuardCond cond
+  body' <- desugarExpr body
+  -- Last clause: if no default, wrap in if with error
+  -- If condition is True (from _ wildcard), just return body
+  case cond' of
+    ExprI _ (LogE True) -> return body'
+    _ -> do
+      -- Generate an error expression for the else branch
+      errBody <- freshExprSpan sp (StrE "Non-exhaustive guards")
+      freshExprSpan sp (IfE cond' body' errBody)
+desugarGuards sp ((cond, body) : rest) = do
+  cond' <- desugarGuardCond cond
+  body' <- desugarExpr body
+  elseE <- desugarGuards sp rest
+  case cond' of
+    ExprI _ (LogE True) -> return body'
+    _ -> freshExprSpan sp (IfE cond' body' elseE)
+
+-- | Desugar a guard condition, converting _ (hole) to True
+desugarGuardCond :: Loc CstExpr -> D ExprI
+desugarGuardCond (Loc sp CHolE) = freshExprSpan sp (LogE True)
+desugarGuardCond e = desugarExpr e
 
 --------------------------------------------------------------------
 -- Export desugaring

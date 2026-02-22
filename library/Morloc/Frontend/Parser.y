@@ -41,7 +41,8 @@ import qualified Morloc.BaseTypes as BT
 -- - 6 from class_constraints (UPPER could be constraint arg or end of constraint)
 -- - 3 from original grammar
 -- - 4 from accessor_tail (GDOT/= could continue chain or end it)
-%expect 49
+-- - 2 from guard_clauses ('?' could start guard or be part of next decl)
+%expect 51
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -59,6 +60,7 @@ import qualified Morloc.BaseTypes as BT
   '\\'       { Located _ TokBackslash _ }
   '_'        { Located _ TokUnderscore _ }
   '!'        { Located _ TokBang _ }
+  '?'        { Located _ TokQuestion _ }
   '.'        { Located _ TokDot _ }
   GDOT       { Located _ TokGetterDot _ }
   '='        { Located _ TokEquals _ }
@@ -149,6 +151,15 @@ sig_or_ass :: { [Loc CstExpr] }
       { [at $1 (CSigE (toEVar $1) $2 $4)] }
   | evar_or_op lower_names '=' expr opt_where_decls
       { [at $1 (CAssE (toEVar $1) $2 $4 $5)] }
+  | evar_or_op lower_names guard_clauses opt_where_decls
+      { [at $1 (CGuardedAssE (toEVar $1) $2 $3 $4)] }
+
+guard_clauses :: { [(Loc CstExpr, Loc CstExpr)] }
+  : guard_clause                    { [$1] }
+  | guard_clauses guard_clause      { $1 ++ [$2] }
+
+guard_clause :: { (Loc CstExpr, Loc CstExpr) }
+  : '?' expr '=' expr              { ($2, $4) }
 
 --------------------------------------------------------------------
 -- Module names

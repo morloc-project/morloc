@@ -150,6 +150,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f UniS = UniS
     f (SuspendS e') = SuspendS (resolveTypes e')
     f (ForceS e') = ForceS (resolveTypes e')
+    f (IfS c t e) = IfS (resolveTypes c) (resolveTypes t) (resolveTypes e)
 
 resolveInstances ::
   Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
@@ -237,6 +238,11 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f _ g0 (ExeS x) = return (g0, ExeS x)
     f _ g0 (SuspendS e) = resolveInstances g0 e |>> second SuspendS
     f _ g0 (ForceS e) = resolveInstances g0 e |>> second ForceS
+    f _ g0 (IfS c t e) = do
+      (g1, c') <- resolveInstances g0 c
+      (g2, t') <- resolveInstances g1 t
+      (g3, e') <- resolveInstances g2 e
+      return (g3, IfS c' t' e')
 
     connectInstance :: Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
     connectInstance g0 [] = return g0
@@ -574,6 +580,13 @@ synthE _ g (LetS v e1 e2) = do
   let g2 = g1 ++> [AnnG v t1]
   (g3, t2, e2') <- synthG g2 e2
   return (g3, t2, LetS v e1' e2')
+synthE i g (IfS cond thenE elseE) = do
+  (g1, condType, cond') <- synthG g cond
+  g2 <- subtype' i condType (VarU (TV "Bool")) g1
+  (g3, t2, thenE') <- synthG g2 thenE
+  (g4, t3, elseE') <- synthG g3 elseE
+  g5 <- subtype' i t3 t2 g4
+  return (g5, apply g5 t2, IfS cond' thenE' elseE')
 synthE _ g (SuspendS e) = do
   (g1, t1, e1) <- synthG g e
   return (g1, ThunkU t1, SuspendS e1)
@@ -793,6 +806,12 @@ checkE i g0 e0@(LamS vs body) t@(FunU as b)
 checkE i g1 e1 (ForallU v a) = do
   recordParameter i v a
   checkE' i (g1 +> v) e1 (substitute v a)
+checkE i g (IfS cond thenE elseE) t = do
+  (g1, condType, cond') <- synthG g cond
+  g2 <- subtype' i condType (VarU (TV "Bool")) g1
+  (g3, t2, thenE') <- checkG g2 thenE t
+  (g4, _, elseE') <- checkG g3 elseE (apply g3 t2)
+  return (g4, apply g4 t2, IfS cond' thenE' elseE')
 checkE _ g (SuspendS e) (ThunkU t) = do
   (g1, t1, e1) <- checkG g e t
   return (g1, ThunkU t1, SuspendS e1)
@@ -935,3 +954,4 @@ peakSExpr (LetBndS v) = "LetBndS" <+> pretty v
 peakSExpr (CallS v) = "CallS" <+> pretty v
 peakSExpr (SuspendS _) = "SuspendS"
 peakSExpr (ForceS _) = "ForceS"
+peakSExpr (IfS _ _ _) = "IfS"

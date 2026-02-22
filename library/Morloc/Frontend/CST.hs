@@ -86,6 +86,7 @@ data CstExpr
   | CImpE Import
   | CSigE EVar [Text] CstSigType
   | CAssE EVar [Text] (Loc CstExpr) [Loc CstExpr]
+  | CGuardedAssE EVar [Text] [(Loc CstExpr, Loc CstExpr)] [Loc CstExpr]
   | CTypE CstTypeDef
   | CClsE CstClassHead [CstSigItem]
   | CIstE ClassName [TypeU] [Loc CstExpr]

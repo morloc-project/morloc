@@ -1,0 +1,23 @@
+module main (myabs, clamp, classify)
+
+import root-r
+
+myabs :: Int -> Int
+myabs x
+  ? x >= 0 = x
+  ? _ = neg x
+
+clamp :: Int -> Int -> Int -> Int
+clamp lo hi x
+  ? x < lo = lo
+  ? x > hi = hi
+  ? _ = x
+
+classify :: Int -> Str
+classify x
+  ? x > big = "big"
+  ? x > small = "medium"
+  ? _ = "small"
+  where
+    big = 100
+    small = 10

@@ -148,6 +148,7 @@ linkAndRemoveAnnotations = f
     f (ExprI i (AppE e es)) = ExprI i <$> (AppE <$> f e <*> mapM f es)
     f (ExprI i (LamE vs e)) = ExprI i <$> (LamE vs <$> f e)
     f (ExprI i (LetE bindings body)) = ExprI i <$> (LetE <$> mapM (\(v, e) -> (,) v <$> f e) bindings <*> f body)
+    f (ExprI i (IfE c t e)) = ExprI i <$> (IfE <$> f c <*> f t <*> f e)
     f (ExprI i (SuspendE e)) = ExprI i <$> (SuspendE <$> f e)
     f (ExprI i (ForceE e)) = ExprI i <$> (ForceE <$> f e)
     f e@(ExprI _ _) = return e
@@ -277,6 +278,11 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (ForceE e) = do
       (namer', e') <- collectAnnoS namer e
       return (namer', ForceS e')
+    f namer (IfE c t e) = do
+      (namer1, c') <- collectAnnoS namer c
+      (namer2, t') <- collectAnnoS namer1 t
+      (namer3, e') <- collectAnnoS namer2 e
+      return (namer3, IfS c' t' e')
     -- all other expressions are strictly illegal here and represent compiler bugs
     f _ e = error $ "Bug in collectExprS: " <> show (render (pretty e))
 
@@ -304,6 +310,7 @@ reindexExpr (LstE es) = LstE <$> mapM reindexExprI es
 reindexExpr (NamE rs) = NamE <$> mapM (\(k, e) -> (,) k <$> reindexExprI e) rs
 reindexExpr (TupE es) = TupE <$> mapM reindexExprI es
 reindexExpr (LetE bindings body) = LetE <$> mapM (\(v, e) -> (,) v <$> reindexExprI e) bindings <*> reindexExprI body
+reindexExpr (IfE c t e) = IfE <$> reindexExprI c <*> reindexExprI t <*> reindexExprI e
 reindexExpr (SuspendE e) = SuspendE <$> reindexExprI e
 reindexExpr (ForceE e) = ForceE <$> reindexExprI e
 reindexExpr e = return e

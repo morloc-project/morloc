@@ -140,6 +140,7 @@ resolveHoles = DAG.mapNodeM unhole
       bindings' <- mapM (\(v, e) -> (,) v <$> unhole e) bindings
       body' <- unhole body
       return $ ExprI i (LetE bindings' body')
+    unhole (ExprI i (IfE c t e)) = IfE <$> unhole c <*> unhole t <*> unhole e |>> ExprI i
     unhole (ExprI i (SuspendE e)) = SuspendE <$> unhole e |>> ExprI i
     unhole (ExprI i (ForceE e)) = ForceE <$> unhole e |>> ExprI i
     unhole (ExprI _ (BopE _ _ _ _)) = error "Bop should have been resolved"
@@ -185,6 +186,7 @@ resolveHoles = DAG.mapNodeM unhole
     descend (ExprI i (TupE es)) = TupE <$> mapM descend es |>> ExprI i
     descend (ExprI i (NamE rs)) = NamE <$> mapM (\(k, e) -> (,) k <$> descend e) rs |>> ExprI i
     descend (ExprI i (AnnE e t)) = AnnE <$> descend e <*> pure t |>> ExprI i
+    descend (ExprI i (IfE c t e)) = IfE <$> descend c <*> descend t <*> descend e |>> ExprI i
     descend (ExprI i (SuspendE e)) = SuspendE <$> descend e |>> ExprI i
     descend (ExprI i (ForceE e)) = ForceE <$> descend e |>> ExprI i
     descend e = return e
@@ -432,6 +434,7 @@ handleBinops d0 = do
           bindings' <- mapM (\(v, e) -> (,) v <$> f e) bindings
           body' <- f body
           return $ ExprI i (LetE bindings' body')
+        f (ExprI i (IfE c t e)) = IfE <$> f c <*> f t <*> f e |>> ExprI i
         f (ExprI i (SuspendE e)) = SuspendE <$> f e |>> ExprI i
         f (ExprI i (ForceE e)) = ForceE <$> f e |>> ExprI i
         f e = return e

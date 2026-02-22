@@ -95,6 +95,18 @@ printStmt (IMapList resultVar resultType iterVar collection bodyStmts yieldExpr)
     resultDecl = case resultType of
       Just t -> [idoc|#{renderIType t} #{pretty resultVar};|]
       Nothing -> printStmt (IAssign resultVar Nothing (IListLit []))
+printStmt (IIf resultVar resultType condExpr thenStmts thenExpr elseStmts elseExpr) =
+  vsep
+    [ resultDecl
+    , block 4 [idoc|if(#{printExpr condExpr})|]
+        (vsep (map printStmt thenStmts ++ [[idoc|#{pretty resultVar} = #{printExpr thenExpr};|]]))
+    , block 4 "else"
+        (vsep (map printStmt elseStmts ++ [[idoc|#{pretty resultVar} = #{printExpr elseExpr};|]]))
+    ]
+  where
+    resultDecl = case resultType of
+      Just t -> [idoc|#{renderIType t} #{pretty resultVar};|]
+      Nothing -> [idoc|auto #{pretty resultVar};|]
 printStmt (IReturn e) = "return(" <> printExpr e <> ");"
 printStmt (IExprStmt e) = printExpr e <> ";"
 printStmt (IFunDef _ _ _ _) = error "IFunDef not yet implemented for C++ printer"

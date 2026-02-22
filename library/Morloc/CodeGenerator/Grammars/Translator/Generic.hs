@@ -33,6 +33,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , IExpr (..)
   , IProgram (..)
   , IStmt (..)
+  , IType (..)
   , IndexM
   , LowerConfig (..)
   , buildProgram
@@ -397,6 +398,7 @@ genericLowerConfig desc srcNamer = cfg
              in pretty (ldForeignCallFn desc)
                   <> tupled [makeGenericSocketPath desc socketFile, midDoc, argsDoc]
         , lcRemoteCall = genericRemoteCall desc
+        , lcMakeIf = genericMakeIf desc cfg
         , lcMakeLet = \namer i _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
         , lcMakeSuspend = \stmts expr ->
@@ -518,6 +520,49 @@ makeGenericSocketPath desc socketFileBasename =
       socketText = render (dquotes socketFileBasename)
    in pretty $ substituteT tmpl [("socket", socketText)]
 
+-- | Generic if/else rendering for descriptor-driven languages
+genericMakeIf :: LangDescriptor -> LowerConfig IndexM -> NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> IndexM PoolDocs
+genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
+  idx <- lcNewIndex cfg
+  let v = helperNamer idx
+      condE = poolExpr condDocs
+      thenE = poolExpr thenDocs
+      elseE = poolExpr elseDocs
+      thenBlock = poolPriorLines thenDocs <> [v <+> pretty (ldAssignOp desc) <+> thenE]
+      elseBlock = poolPriorLines elseDocs <> [v <+> pretty (ldAssignOp desc) <+> elseE]
+      ifStmt = case ldBlockStyle desc of
+        IndentBlock ->
+          vsep
+            [ v <+> pretty (ldAssignOp desc) <+> pretty (ldNullLiteral desc)
+            , nest 4 (vsep ("if" <+> condE <> ":" : thenBlock))
+            , nest 4 (vsep ("else:" : elseBlock))
+            ]
+        BraceBlock ->
+          vsep
+            [ v <+> pretty (ldAssignOp desc) <+> pretty (ldNullLiteral desc) <> ";"
+            , "if" <+> parens condE <+> "{"
+            , indent 4 (vsep thenBlock)
+            , "} else {"
+            , indent 4 (vsep elseBlock)
+            , "}"
+            ]
+        EndKeywordBlock ->
+          let endKw = ldBlockEnd desc
+           in vsep
+                [ v <+> "<-" <+> "if" <+> parens condE <+> "{"
+                , indent 4 (vsep (poolPriorLines thenDocs <> [thenE]))
+                , "} else {"
+                , indent 4 (vsep (poolPriorLines elseDocs <> [elseE]))
+                , "}" <+> pretty endKw
+                ]
+  return $
+    PoolDocs
+      { poolCompleteManifolds = poolCompleteManifolds condDocs <> poolCompleteManifolds thenDocs <> poolCompleteManifolds elseDocs
+      , poolExpr = v
+      , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
+      , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
+      }
+
 genericMakeLet :: LangDescriptor -> (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
 genericMakeLet desc namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
   let rs = rs1 ++ [namer i <+> pretty (ldAssignOp desc) <+> e1'] ++ rs2
@@ -624,6 +669,32 @@ genericPrintStmt desc = go
             ]
     go (IReturn e) = pretty $ substituteT (ldReturnTemplate desc) [("expr", render (printE e))]
     go (IExprStmt e) = printE e
+    go (IIf resultVar _ condExpr thenStmts thenExpr elseStmts elseExpr) =
+      case ldBlockStyle desc of
+        IndentBlock ->
+          vsep
+            [ pretty resultVar <+> pretty (ldAssignOp desc) <+> pretty (ldNullLiteral desc)
+            , nest 4 (vsep ("if" <+> printE condExpr <> ":" : map go thenStmts ++ [pretty resultVar <+> pretty (ldAssignOp desc) <+> printE thenExpr]))
+            , nest 4 (vsep ("else:" : map go elseStmts ++ [pretty resultVar <+> pretty (ldAssignOp desc) <+> printE elseExpr]))
+            ]
+        BraceBlock ->
+          vsep
+            [ pretty resultVar <+> pretty (ldAssignOp desc) <+> pretty (ldNullLiteral desc) <> ";"
+            , "if" <+> parens (printE condExpr) <+> "{"
+            , indent 4 (vsep (map go thenStmts ++ [pretty resultVar <+> pretty (ldAssignOp desc) <+> printE thenExpr <> ";"]))
+            , "} else {"
+            , indent 4 (vsep (map go elseStmts ++ [pretty resultVar <+> pretty (ldAssignOp desc) <+> printE elseExpr <> ";"]))
+            , "}"
+            ]
+        EndKeywordBlock ->
+          let endKw = ldBlockEnd desc
+           in vsep
+                [ pretty resultVar <+> "<-" <+> "if" <+> parens (printE condExpr) <+> "{"
+                , indent 4 (vsep (map go thenStmts ++ [printE thenExpr]))
+                , "} else {"
+                , indent 4 (vsep (map go elseStmts ++ [printE elseExpr]))
+                , "}"
+                ]
     go (IFunDef _ _ _ _) = error "IFunDef not yet implemented for generic printer"
 
 -- | Assemble a complete pool file from descriptor, template, and IProgram

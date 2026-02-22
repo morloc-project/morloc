@@ -341,6 +341,30 @@ PROPAGATE_ERROR(errmsg)|]
           Nothing -> return serialType
         return $ makeLet namer letIndex typestr e1 e2
     , lcReturn = \e -> "return(" <> e <> ");"
+    , lcMakeIf = \origExpr condDocs thenDocs elseDocs -> do
+        idx <- getCounter
+        let v = helperNamer idx
+        typeStr <- cppTypeOf origExpr
+        let condE = poolExpr condDocs
+            thenE = poolExpr thenDocs
+            elseE = poolExpr elseDocs
+            thenBlock = poolPriorLines thenDocs <> [v <+> "=" <+> thenE <> ";"]
+            elseBlock = poolPriorLines elseDocs <> [v <+> "=" <+> elseE <> ";"]
+            decl = typeStr <+> v <> ";"
+            ifStmt = vsep
+              [ decl
+              , "if" <+> parens condE <+> "{"
+              , indent 4 (vsep thenBlock)
+              , "} else {"
+              , indent 4 (vsep elseBlock)
+              , "}"
+              ]
+        return $ PoolDocs
+          { poolCompleteManifolds = poolCompleteManifolds condDocs <> poolCompleteManifolds thenDocs <> poolCompleteManifolds elseDocs
+          , poolExpr = v
+          , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
+          , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
+          }
     , lcMakeSuspend = \stmts expr -> (,) [] $ case stmts of
         [] -> "[&](){return " <> expr <> ";}"
         _ -> "[&](){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"

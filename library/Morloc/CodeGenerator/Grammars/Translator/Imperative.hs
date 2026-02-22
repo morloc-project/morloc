@@ -89,6 +89,10 @@ data IStmt
     -- R: resultVar <- lapply(collection, function(iterVar) { bodyStmts; yieldExpr })
     -- resultType is used by C++ for typed declarations; Python/R pass Nothing
     IMapList Text (Maybe IType) Text IExpr [IStmt] IExpr
+  | -- | resultVar, resultType, condition, thenStmts, thenExpr, elseStmts, elseExpr
+    -- Semantics: declare resultVar; if cond { thenStmts; resultVar = thenExpr } else { elseStmts; resultVar = elseExpr }
+    -- For elif chains, elseStmts contains another IIf and elseExpr is unused (IVar resultVar)
+    IIf Text (Maybe IType) IExpr [IStmt] IExpr [IStmt] IExpr
   | IReturn IExpr
   | IExprStmt IExpr
 
@@ -245,6 +249,9 @@ data LowerConfig m = LowerConfig
   , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ Let binding assembly at the PoolDocs level
   , lcReturn :: MDoc -> MDoc
+  , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
+  -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
+  -- Produces language-specific if/else structure using a temp result variable
   , lcMakeSuspend :: [MDoc] -> MDoc -> ([MDoc], MDoc)
   -- ^ prior statements -> return expression -> (hoisted statements, thunk expression)
   , lcSerialize :: MDoc -> SerialAST -> m PoolDocs
@@ -459,6 +466,8 @@ lowerNativeExpr cfg _ (SuspendN_ _ x) =
           , poolPriorExprs = poolPriorExprs x
           }
 lowerNativeExpr cfg _ (ForceN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IForce (IRawExpr (render (poolExpr x))))}
+lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
+  lcMakeIf cfg origExpr condDocs thenDocs elseDocs
 
 {- | Lower a serial manifold to PoolDocs.
 Replaces translateManifold from Common.hs for serial manifolds.
