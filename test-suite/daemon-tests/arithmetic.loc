@@ -1,0 +1,15 @@
+module arithmetic (add, mul, neg, square)
+
+import root-cpp
+
+add :: Real -> Real -> Real
+add x y = x + y
+
+mul :: Real -> Real -> Real
+mul x y = x * y
+
+neg :: Real -> Real
+neg x = 0.0 - x
+
+square :: Real -> Real
+square x = x * x

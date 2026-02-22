@@ -6,3 +6,6 @@ def pid(x):
 
 def addp(x, y):
     return x + y
+
+def morloc_len(xs):
+    return len(xs)

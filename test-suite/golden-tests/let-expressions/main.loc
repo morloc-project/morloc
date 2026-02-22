@@ -1,0 +1,64 @@
+module main
+  ( testCppOnce
+  , testPyOnce
+  , testROnce
+  , testCppSeq
+  , testPySeq
+  , testRSeq
+  , testShadow
+  )
+
+import root-cpp
+import root-py
+import root-r
+
+-- Each sideEffect function prints "EVAL <input>" to stderr and returns input * 2.
+-- This lets us verify: (1) how many times it is called, and (2) in what order.
+
+source Cpp from "foo.hpp" ("sideEffectCpp")
+source Py from "foo.py" ("sideEffectPy")
+source R from "foo.R" ("sideEffectR")
+
+sideEffectCpp :: Int -> Int
+sideEffectPy :: Int -> Int
+sideEffectR :: Int -> Int
+
+-- Single let, value used twice: side effect should happen exactly once.
+-- With input 5: sideEffect 5 prints "EVAL 5", a = 10, result = 10 + 10 = 20.
+testCppOnce :: Int -> Int
+testCppOnce x = let a = sideEffectCpp x in a + a
+
+testPyOnce :: Int -> Int
+testPyOnce x = let a = sideEffectPy x in a + a
+
+testROnce :: Int -> Int
+testROnce x = let a = sideEffectR x in a + a
+
+-- Sequential lets: first binding evaluated before second, each exactly once.
+-- With input 5: sideEffect 5 prints "EVAL 5", a = 10,
+--               sideEffect 10 prints "EVAL 10", b = 20,
+--               result = 10 + 20 = 30.
+testCppSeq :: Int -> Int
+testCppSeq x =
+  let a = sideEffectCpp x
+  let b = sideEffectCpp a
+  in a + b
+
+testPySeq :: Int -> Int
+testPySeq x =
+  let a = sideEffectPy x
+  let b = sideEffectPy a
+  in a + b
+
+testRSeq :: Int -> Int
+testRSeq x =
+  let a = sideEffectR x
+  let b = sideEffectR a
+  in a + b
+
+-- Shadowing: let-bound variable shadows the lambda parameter.
+-- The `x` in `sideEffectCpp x` refers to the lambda parameter (5).
+-- The `x` in `x + x` refers to the let-bound variable (10).
+-- Result: 10 + 10 = 20.
+testShadow :: Int -> Int
+testShadow x = let x = sideEffectCpp x in x + x

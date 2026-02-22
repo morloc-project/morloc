@@ -7,6 +7,14 @@
 #include <stdbool.h>
 #include <limits.h>
 #include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <unistd.h>
 
 #include "morloc.h"
 
@@ -313,7 +321,7 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                     start = R_TRY(rel2abs, array->data);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarLogical(LOGICAL(obj)[i]));
-                        to_voidstar_r(start + i, cursor, elem, element_schema);
+                        to_voidstar_r(start + i * element_schema->width, cursor, elem, element_schema);
                         UNPROTECT(1);
                     }
                     break;
@@ -398,6 +406,9 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
 }
 
 
+// NOTE: If to_voidstar_r calls error() (via MORLOC_ERROR or R_TRY), the shared
+// memory at dest leaks. This only happens on type mismatches (a development-time
+// bug) and the memory is reclaimed when the pool process exits.
 static void* to_voidstar(SEXP obj, const Schema* schema) {
     MAYFAIL
 
@@ -658,6 +669,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             for (size_t i = 0; i < array->size; i++) {
                                 SEXP item = from_voidstar(start + width * i, element_schema);
                                 if (item == R_NilValue) {
+                                    UNPROTECT(1);
                                     obj = R_NilValue;
                                     goto error;
                                 }
@@ -670,25 +682,28 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
             }
             break;
         case MORLOC_TUPLE: {
-            obj = allocVector(VECSXP, schema->size);
+            obj = PROTECT(allocVector(VECSXP, schema->size));
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
                 SEXP item = from_voidstar(item_ptr, schema->parameters[i]);
                 if (item == R_NilValue) {
+                    UNPROTECT(1);
                     obj = R_NilValue;
                     goto error;
                 }
                 SET_VECTOR_ELT(obj, i, item);
             }
+            UNPROTECT(1);
             break;
         }
         case MORLOC_MAP: {
-            obj = allocVector(VECSXP, schema->size);
-            SEXP names = allocVector(STRSXP, schema->size);
+            obj = PROTECT(allocVector(VECSXP, schema->size));
+            SEXP names = PROTECT(allocVector(STRSXP, schema->size));
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
                 SEXP value = from_voidstar(item_ptr, schema->parameters[i]);
                 if (value == R_NilValue) {
+                    UNPROTECT(2);
                     obj = R_NilValue;
                     goto error;
                 }
@@ -696,6 +711,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                 SET_STRING_ELT(names, i, mkChar(schema->keys[i]));
             }
             setAttrib(obj, R_NamesSymbol, names);
+            UNPROTECT(2);
             break;
         }
         default:
@@ -713,14 +729,46 @@ error:
 
 // {{{ exported morloc API functions
 
+// PID of the process that created the daemon (set in morloc_start_daemon)
+static pid_t daemon_creator_pid = 0;
+
 // Close the daemon when the R object dies
 static void daemon_finalizer(SEXP ptr) {
     if (!R_ExternalPtrAddr(ptr)) return;
+    // Skip cleanup in forked children -- they must not unlink the socket file
+    if (daemon_creator_pid != 0 && getpid() != daemon_creator_pid) {
+        R_ClearExternalPtr(ptr);
+        return;
+    }
     language_daemon_t* daemon = (language_daemon_t*)R_ExternalPtrAddr(ptr);
     if(daemon != NULL){
         close_daemon(&daemon);
     }
     R_ClearExternalPtr(ptr);
+}
+
+// Release daemon resources in a forked child WITHOUT unlinking the socket file.
+// Workers call this after fork so they don't hold the server_fd or accidentally
+// destroy the socket when they exit.
+SEXP morloc_detach_daemon(SEXP daemon_r) {
+    if (!R_ExternalPtrAddr(daemon_r)) return R_NilValue;
+    language_daemon_t* daemon = (language_daemon_t*)R_ExternalPtrAddr(daemon_r);
+    if (daemon != NULL) {
+        close_socket(daemon->server_fd);
+        client_list_t *current = daemon->client_fds;
+        while (current) {
+            client_list_t *next = current->next;
+            close(current->fd);
+            free(current);
+            current = next;
+        }
+        free(daemon->socket_path);
+        free(daemon->tmpdir);
+        free(daemon->shm_basename);
+        free(daemon);
+    }
+    R_ClearExternalPtr(daemon_r);
+    return R_NilValue;
 }
 
 SEXP morloc_start_daemon(
@@ -745,6 +793,9 @@ SEXP morloc_start_daemon(
     // Wrap pointer in external pointer
     SEXP result = PROTECT(R_MakeExternalPtr(daemon, R_NilValue, R_NilValue));
 
+    // Record which process owns the daemon (for the PID guard in daemon_finalizer)
+    daemon_creator_pid = getpid();
+
     // Register finalizer with wrapper
     R_RegisterCFinalizerEx(result, daemon_finalizer, TRUE);
 
@@ -758,15 +809,114 @@ SEXP morloc_start_daemon(
 
 
 
+SEXP morloc_shinit(SEXP shm_basename_r, SEXP volume_index_r, SEXP shm_size_r) { MAYFAIL
+    const char* shm_basename = CHAR(STRING_ELT(shm_basename_r, 0));
+    size_t volume_index = (size_t)asInteger(volume_index_r);
+    size_t shm_size = (size_t)asInteger(shm_size_r);
+
+    R_TRY(shinit, shm_basename, volume_index, shm_size);
+
+    return R_NilValue;
+}
+
+
+// {{{ signal handling for graceful shutdown
+
+static volatile sig_atomic_t r_shutting_down = 0;
+
+static void r_sigterm_handler(int sig) {
+    (void)sig;
+    r_shutting_down = 1;
+}
+
+SEXP morloc_install_sigterm_handler(void) {
+    struct sigaction sa;
+    sa.sa_handler = r_sigterm_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGTERM, &sa, NULL);
+    return R_NilValue;
+}
+
+SEXP morloc_is_shutting_down(void) {
+    return ScalarLogical(r_shutting_down != 0);
+}
+
+// }}} signal handling
+
 SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
     if (!R_ExternalPtrAddr(daemon_r)) {
         MORLOC_ERROR("Expected a daemon pointer");
     }
+
+    // Return immediately if shutdown was requested
+    if (r_shutting_down) {
+        return ScalarInteger(-1);
+    }
+
     language_daemon_t* daemon = (language_daemon_t*)R_ExternalPtrAddr(daemon_r);
 
-    int client_fd = R_TRY(wait_for_client_with_timeout, daemon, 10000);
+    // Use pselect directly (not wait_for_client_with_timeout) so we can
+    // return immediately on EINTR from SIGTERM instead of retrying via WAIT
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(daemon->server_fd, &read_fds);
+    int max_fd = daemon->server_fd;
 
-    return ScalarInteger(client_fd);
+    for (client_list_t* cl = daemon->client_fds; cl != NULL; cl = cl->next) {
+        FD_SET(cl->fd, &read_fds);
+        if (cl->fd > max_fd) max_fd = cl->fd;
+    }
+
+    // 100ms timeout -- short enough for responsive SIGTERM handling
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000000 };
+    sigset_t emptymask;
+    sigemptyset(&emptymask);
+
+    int ready = pselect(max_fd + 1, &read_fds, NULL, NULL, &ts, &emptymask);
+
+    // Check shutdown after pselect (signal may have arrived during the call)
+    if (r_shutting_down) {
+        return ScalarInteger(-1);
+    }
+
+    // Timeout or interrupted -- return 0 (no client)
+    if (ready <= 0) {
+        return ScalarInteger(0);
+    }
+
+    // Accept new connection if server_fd is ready
+    if (FD_ISSET(daemon->server_fd, &read_fds)) {
+        int fd = accept(daemon->server_fd, NULL, NULL);
+        if (fd >= 0) {
+            fcntl(fd, F_SETFL, O_NONBLOCK);
+            client_list_t* new_client = (client_list_t*)calloc(1, sizeof(client_list_t));
+            if (new_client == NULL) {
+                close(fd);
+                MORLOC_ERROR("calloc failed");
+            }
+            new_client->fd = fd;
+            new_client->next = NULL;
+            if (daemon->client_fds == NULL) {
+                daemon->client_fds = new_client;
+            } else {
+                client_list_t* last = daemon->client_fds;
+                while (last->next) last = last->next;
+                last->next = new_client;
+            }
+        }
+    }
+
+    // Return first ready client fd
+    if (daemon->client_fds != NULL) {
+        client_list_t* first = daemon->client_fds;
+        int client_fd = first->fd;
+        daemon->client_fds = first->next;
+        free(first);
+        return ScalarInteger(client_fd);
+    }
+
+    return ScalarInteger(0);
 }
 
 
@@ -786,7 +936,7 @@ SEXP morloc_read_morloc_call_packet(SEXP packet_r) { MAYFAIL
     SEXP r_args = PROTECT(allocVector(VECSXP, call_packet->nargs));
 
     for(size_t i = 0; i < call_packet->nargs; i++) {
-        size_t arg_packet_size = R_TRY(morloc_packet_size, call_packet->args[i]);
+        size_t arg_packet_size = R_TRY_WITH(UNPROTECT(3), morloc_packet_size, call_packet->args[i]);
         SEXP r_arg = PROTECT(allocVector(RAWSXP, arg_packet_size));
         memcpy(RAW(r_arg), call_packet->args[i], arg_packet_size);
         SET_VECTOR_ELT(r_args, i, r_arg);
@@ -796,6 +946,8 @@ SEXP morloc_read_morloc_call_packet(SEXP packet_r) { MAYFAIL
     // Assemble final list
     SET_VECTOR_ELT(r_list, 0, r_mid);
     SET_VECTOR_ELT(r_list, 1, r_args);
+
+    free_morloc_call(call_packet);
 
     UNPROTECT(3);  // r_list, r_mid, r_args
     return r_list;
@@ -837,12 +989,13 @@ SEXP morloc_stream_from_client(SEXP client_fd_r) { MAYFAIL
     // Read packet from socket
     uint8_t* packet = R_TRY(stream_from_client, client_fd);
 
-    // Read the packet size from the header
-    size_t packet_size = R_TRY(morloc_packet_size, packet);
+    // Read the packet size from the header (free packet before longjmp on error)
+    size_t packet_size = R_TRY_WITH(free(packet), morloc_packet_size, packet);
 
     // Create raw vector for result
     SEXP result = PROTECT(allocVector(RAWSXP, packet_size));
     memcpy(RAW(result), packet, packet_size);
+    free(packet);
 
     UNPROTECT(1);
     return result;
@@ -868,22 +1021,25 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     }
 
     char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY(parse_schema, schema_str);
+    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
     void* voidstar = to_voidstar(obj_r, schema);
     if (!voidstar) {
+        free_schema(schema);
         MORLOC_ERROR("Failed to convert R object to internal representation");
     }
 
-    relptr_t relptr = R_TRY(abs2rel, voidstar);
+    relptr_t relptr = R_TRY_WITH(free_schema(schema), abs2rel, voidstar);
 
     uint8_t* packet = make_standard_data_packet(relptr, schema);
 
-    size_t packet_size = R_TRY(morloc_packet_size, packet);
+    size_t packet_size = R_TRY_WITH({free(packet); free_schema(schema);}, morloc_packet_size, packet);
 
     SEXP result = PROTECT(allocVector(RAWSXP, packet_size));
     memcpy(RAW(result), packet, packet_size);
+    free(packet);
+    free_schema(schema);
 
     UNPROTECT(1);
     return result;
@@ -903,13 +1059,14 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
     size_t packet_size = (size_t)LENGTH(packet_r);
 
     char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY(parse_schema, schema_str);
+    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
-    uint8_t* voidstar = R_TRY(get_morloc_data_packet_value, packet, schema);
+    uint8_t* voidstar = R_TRY_WITH(free_schema(schema), get_morloc_data_packet_value, packet, schema);
 
     SEXP obj_r = from_voidstar(voidstar, schema);
     if (obj_r == NULL) {
+        free_schema(schema);
         MORLOC_ERROR("Failed to convert internal representation to R object");
     }
 
@@ -964,11 +1121,13 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
     );
 
     // Get result size
-    size_t result_length = R_TRY(morloc_packet_size, result);
+    size_t result_length = R_TRY_WITH({free(packet); free(result);}, morloc_packet_size, result);
 
     // Create result raw vector
     SEXP result_r = PROTECT(allocVector(RAWSXP, result_length));
     memcpy(RAW(result_r), result, result_length);
+    free(packet);
+    free(result);
 
     // Cleanup
     UNPROTECT(1);
@@ -1015,12 +1174,13 @@ SEXP morloc_pong(SEXP packet_r) { MAYFAIL
     }
 
     // Generate a response to ping
-    const uint8_t* pong = R_TRY(return_ping, RAW(packet_r));
+    uint8_t* pong = R_TRY(return_ping, RAW(packet_r));
 
-    size_t pong_size = R_TRY(morloc_packet_size, pong);
+    size_t pong_size = R_TRY_WITH(free(pong), morloc_packet_size, pong);
 
     SEXP result_r = PROTECT(allocVector(RAWSXP, pong_size));
     memcpy(RAW(result_r), pong, pong_size);
+    free(pong);
 
     UNPROTECT(1);
     return result_r;
@@ -1035,6 +1195,7 @@ SEXP morloc_make_fail_packet(SEXP failure_message_r) { MAYFAIL
 
     SEXP packet_r = PROTECT(allocVector(RAWSXP, packet_size));
     memcpy(RAW(packet_r), fail_packet, packet_size);
+    free(fail_packet);
 
     UNPROTECT(1);
     return packet_r;
@@ -1047,6 +1208,7 @@ SEXP extract_element_by_name(SEXP list, const char* key) {
 
   // Get list names attribute
   SEXP names = Rf_getAttrib(list, R_NamesSymbol);
+  if (names == R_NilValue) MORLOC_ERROR("List must have names");
 
   // Iterate through list elements
   for (int i = 0; i < Rf_length(list); i++) {
@@ -1073,28 +1235,36 @@ SEXP morloc_remote_call(SEXP midx, SEXP socket_path, SEXP cache_path, SEXP resou
     const char* c_socket_path = CHAR(STRING_ELT(socket_path, 0));
     const char* c_cache_path = CHAR(STRING_ELT(cache_path, 0));
 
-    // Extract resources using safe macro
+    // Extract resources with validation
     resources_t c_resources;
-    c_resources.memory = INTEGER(extract_element_by_name(resources, "memory"))[0];
-    c_resources.time = INTEGER(extract_element_by_name(resources, "time"))[0];
-    c_resources.cpus = INTEGER(extract_element_by_name(resources, "cpus"))[0];
-    c_resources.gpus = INTEGER(extract_element_by_name(resources, "gpus"))[0];
+    SEXP mem = extract_element_by_name(resources, "memory");
+    SEXP tim = extract_element_by_name(resources, "time");
+    SEXP cpu = extract_element_by_name(resources, "cpus");
+    SEXP gpu = extract_element_by_name(resources, "gpus");
+    if (mem == R_NilValue || tim == R_NilValue || cpu == R_NilValue || gpu == R_NilValue) {
+        UNPROTECT(4);
+        MORLOC_ERROR("Missing required resource field (memory, time, cpus, or gpus)");
+    }
+    c_resources.memory = INTEGER(mem)[0];
+    c_resources.time = INTEGER(tim)[0];
+    c_resources.cpus = INTEGER(cpu)[0];
+    c_resources.gpus = INTEGER(gpu)[0];
 
     // Process argument packets with type checking
     size_t nargs = LENGTH(arg_packets);
     const uint8_t** c_arg_packets = (const uint8_t**) R_alloc(nargs, sizeof(uint8_t*));
 
     for(size_t i = 0; i < nargs; i++) {
-        SEXP raw_vec = PROTECT(VECTOR_ELT(arg_packets, i));
+        SEXP raw_vec = VECTOR_ELT(arg_packets, i);
         if(TYPEOF(raw_vec) != RAWSXP) {
+            UNPROTECT(4);
             MORLOC_ERROR("arg_packets must contain only raw vectors");
         }
         c_arg_packets[i] = (uint8_t*)RAW(raw_vec);
-        UNPROTECT(1);
     }
 
     // Execute remote call
-    uint8_t* result_packet = R_TRY(
+    uint8_t* result_packet = R_TRY_WITH(UNPROTECT(4),
         remote_call,
         c_midx,
         c_socket_path,
@@ -1105,9 +1275,10 @@ SEXP morloc_remote_call(SEXP midx, SEXP socket_path, SEXP cache_path, SEXP resou
     );
 
     // Validate and copy result
-    size_t packet_size = R_TRY(morloc_packet_size, result_packet);
+    size_t packet_size = R_TRY_WITH({free(result_packet); UNPROTECT(4);}, morloc_packet_size, result_packet);
     if(!result_packet || packet_size == 0) {
         if(result_packet) free(result_packet);
+        UNPROTECT(4);
         MORLOC_ERROR("Invalid result packet from remote call");
     }
 
@@ -1116,11 +1287,345 @@ SEXP morloc_remote_call(SEXP midx, SEXP socket_path, SEXP cache_path, SEXP resou
     free(result_packet);
 
     // Cleanup and return
-    UNPROTECT(4);  // socket_path, cache_path, resources, arg_packets
-    UNPROTECT(1);  // result_packet_r
+    UNPROTECT(5);  // socket_path, cache_path, resources, arg_packets, result_packet_r
     return result_packet_r;
 }
 
+
+// {{{ fork and fd-passing functions
+
+SEXP morloc_socketpair(void) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+        error("socketpair failed: %s", strerror(errno));
+    }
+    SEXP result = PROTECT(allocVector(INTSXP, 2));
+    INTEGER(result)[0] = sv[0];
+    INTEGER(result)[1] = sv[1];
+    UNPROTECT(1);
+    return result;
+}
+
+SEXP morloc_fork(void) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        error("fork failed: %s", strerror(errno));
+    }
+    return ScalarInteger((int)pid);
+}
+
+SEXP morloc_send_fd(SEXP pipe_fd_r, SEXP client_fd_r) {
+    int pipe_fd = INTEGER(pipe_fd_r)[0];
+    int client_fd = INTEGER(client_fd_r)[0];
+
+    struct msghdr msg = {0};
+    struct iovec iov;
+    char buf[1] = {0};
+    char cmsgbuf[CMSG_SPACE(sizeof(int))];
+
+    iov.iov_base = buf;
+    iov.iov_len = 1;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsgbuf;
+    msg.msg_controllen = sizeof(cmsgbuf);
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cmsg), &client_fd, sizeof(int));
+
+    ssize_t n = sendmsg(pipe_fd, &msg, 0);
+    if (n < 0) {
+        error("sendmsg SCM_RIGHTS failed: %s", strerror(errno));
+    }
+    return R_NilValue;
+}
+
+SEXP morloc_recv_fd(SEXP pipe_fd_r) {
+    int pipe_fd = INTEGER(pipe_fd_r)[0];
+
+    struct msghdr msg = {0};
+    struct iovec iov;
+    char buf[1];
+    char cmsgbuf[CMSG_SPACE(sizeof(int))];
+
+    iov.iov_base = buf;
+    iov.iov_len = 1;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsgbuf;
+    msg.msg_controllen = sizeof(cmsgbuf);
+
+    ssize_t n = recvmsg(pipe_fd, &msg, 0);
+    if (n <= 0) {
+        return ScalarInteger(-1);
+    }
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    if (cmsg == NULL || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
+        return ScalarInteger(-1);
+    }
+
+    int fd;
+    memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
+    return ScalarInteger(fd);
+}
+
+SEXP morloc_kill(SEXP pid_r, SEXP sig_r) {
+    pid_t pid = (pid_t)INTEGER(pid_r)[0];
+    int sig = INTEGER(sig_r)[0];
+    int ret = kill(pid, sig);
+    return ScalarInteger(ret);
+}
+
+SEXP morloc_waitpid(SEXP pid_r) {
+    pid_t pid = (pid_t)INTEGER(pid_r)[0];
+    int status;
+    pid_t result = waitpid(pid, &status, WNOHANG);
+    return ScalarInteger((int)result);
+}
+
+SEXP morloc_waitpid_blocking(SEXP pid_r) {
+    pid_t pid = (pid_t)INTEGER(pid_r)[0];
+    int status;
+    pid_t result = waitpid(pid, &status, 0);
+    return ScalarInteger((int)result);
+}
+
+// }}} fork and fd-passing functions
+
+// {{{ shared counter functions (for dynamic worker spawning)
+
+static void shared_counter_finalizer(SEXP ptr) {
+    int* p = (int*)R_ExternalPtrAddr(ptr);
+    if (p != NULL) {
+        munmap(p, sizeof(int));
+        R_ClearExternalPtr(ptr);
+    }
+}
+
+SEXP morloc_shared_counter_create(void) {
+    int* p = (int*)mmap(NULL, sizeof(int),
+                        PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        error("mmap failed for shared counter: %s", strerror(errno));
+    }
+    *p = 0;
+    SEXP ptr = PROTECT(R_MakeExternalPtr(p, R_NilValue, R_NilValue));
+    R_RegisterCFinalizerEx(ptr, shared_counter_finalizer, TRUE);
+    UNPROTECT(1);
+    return ptr;
+}
+
+SEXP morloc_shared_counter_inc(SEXP ptr_r) {
+    int* p = (int*)R_ExternalPtrAddr(ptr_r);
+    if (p == NULL) error("shared counter is NULL");
+    int val = __atomic_add_fetch(p, 1, __ATOMIC_RELAXED);
+    return ScalarInteger(val);
+}
+
+SEXP morloc_shared_counter_dec(SEXP ptr_r) {
+    int* p = (int*)R_ExternalPtrAddr(ptr_r);
+    if (p == NULL) error("shared counter is NULL");
+    int val = __atomic_sub_fetch(p, 1, __ATOMIC_RELAXED);
+    return ScalarInteger(val);
+}
+
+SEXP morloc_shared_counter_read(SEXP ptr_r) {
+    int* p = (int*)R_ExternalPtrAddr(ptr_r);
+    if (p == NULL) error("shared counter is NULL");
+    int val = __atomic_load_n(p, __ATOMIC_RELAXED);
+    return ScalarInteger(val);
+}
+
+SEXP morloc_pipe(void) {
+    int fds[2];
+    if (pipe(fds) != 0) {
+        error("pipe failed: %s", strerror(errno));
+    }
+    SEXP result = PROTECT(allocVector(INTSXP, 2));
+    INTEGER(result)[0] = fds[0];  /* read end */
+    INTEGER(result)[1] = fds[1];  /* write end */
+    UNPROTECT(1);
+    return result;
+}
+
+SEXP morloc_write_byte(SEXP fd_r, SEXP byte_r) {
+    int fd = INTEGER(fd_r)[0];
+    unsigned char b = (unsigned char)RAW(byte_r)[0];
+    ssize_t n = write(fd, &b, 1);
+    return ScalarInteger((int)n);
+}
+
+SEXP morloc_close_fd(SEXP fd_r) {
+    int fd = INTEGER(fd_r)[0];
+    close(fd);
+    return R_NilValue;
+}
+
+// }}} shared counter functions
+
+// {{{ C-level worker loop
+
+// Receive a file descriptor over a Unix domain socket (C-level helper).
+static int recv_fd_c(int pipe_fd) {
+    struct msghdr msg = {0};
+    struct iovec iov;
+    char buf[1];
+    char cmsgbuf[CMSG_SPACE(sizeof(int))];
+
+    iov.iov_base = buf;
+    iov.iov_len = 1;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsgbuf;
+    msg.msg_controllen = sizeof(cmsgbuf);
+
+    ssize_t n = recvmsg(pipe_fd, &msg, 0);
+    if (n <= 0) return -1;
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    if (!cmsg || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS)
+        return -1;
+
+    int fd;
+    memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
+    return fd;
+}
+
+// Send a fail packet to the client (best-effort, ignores send errors).
+static void send_fail_to_client(int client_fd, const char* msg) {
+    char* errmsg = NULL;
+    uint8_t* fail = make_fail_packet(msg);
+    send_packet_to_foreign_server(client_fd, fail, &errmsg);
+    free(fail);
+}
+
+// Dispatch a call to a manifold function. All packet handling is in C;
+// only the manifold evaluation crosses into R via R_tryEval.
+static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
+                                SEXP dispatch, const char* label) {
+    char* errmsg = NULL;
+
+    morloc_call_t* call = read_morloc_call_packet(packet, &errmsg);
+    if (errmsg) {
+        send_fail_to_client(client_fd, errmsg);
+        return;
+    }
+
+    int midx = (int)call->midx;
+    SEXP fn = (midx >= 1 && midx <= LENGTH(dispatch))
+              ? VECTOR_ELT(dispatch, midx - 1) : R_NilValue;
+
+    if (fn == R_NilValue) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "%s function not found: m%d", label, midx);
+        send_fail_to_client(client_fd, msg);
+        free_morloc_call(call);
+        return;
+    }
+
+    // Build R pairlist of raw-vector arguments: fn(arg1, arg2, ...)
+    int nprotect = 0;
+    SEXP pairlist = R_NilValue;
+    for (int i = (int)call->nargs - 1; i >= 0; i--) {
+        size_t arg_size = morloc_packet_size(call->args[i], &errmsg);
+        if (errmsg) {
+            UNPROTECT(nprotect);
+            send_fail_to_client(client_fd, errmsg);
+            free_morloc_call(call);
+            return;
+        }
+        SEXP r_arg = PROTECT(allocVector(RAWSXP, arg_size));
+        nprotect++;
+        memcpy(RAW(r_arg), call->args[i], arg_size);
+        pairlist = PROTECT(Rf_cons(r_arg, pairlist));
+        nprotect++;
+    }
+    free_morloc_call(call);
+
+    SEXP r_call = PROTECT(Rf_lcons(fn, pairlist));
+    nprotect++;
+
+    // Single crossing into R: evaluate the manifold
+    int eval_err = 0;
+    SEXP result = R_tryEvalSilent(r_call, R_GlobalEnv, &eval_err);
+
+    if (eval_err || result == R_NilValue || TYPEOF(result) != RAWSXP) {
+        UNPROTECT(nprotect);
+        send_fail_to_client(client_fd,
+            eval_err ? R_curErrorBuf() : "manifold returned non-raw result");
+        return;
+    }
+
+    PROTECT(result);
+    nprotect++;
+
+    send_packet_to_foreign_server(client_fd, RAW(result), &errmsg);
+    UNPROTECT(nprotect);
+}
+
+// Process one client job entirely in C. Only crosses into R for
+// the actual manifold evaluation.
+static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
+    char* errmsg = NULL;
+
+    uint8_t* packet = stream_from_client(client_fd, &errmsg);
+    if (errmsg) {
+        close_socket(client_fd);
+        return;
+    }
+
+    bool is_local = packet_is_local_call(packet, &errmsg);
+    if (!errmsg && is_local) {
+        dispatch_manifold_c(client_fd, packet, dispatch, "Local");
+    } else if (!errmsg) {
+        bool is_remote = packet_is_remote_call(packet, &errmsg);
+        if (!errmsg && is_remote) {
+            dispatch_manifold_c(client_fd, packet, remote_dispatch, "Remote");
+        } else if (!errmsg) {
+            bool is_ping_pkt = packet_is_ping(packet, &errmsg);
+            if (!errmsg && is_ping_pkt) {
+                uint8_t* pong = return_ping(packet, &errmsg);
+                if (!errmsg) {
+                    send_packet_to_foreign_server(client_fd, pong, &errmsg);
+                    free(pong);
+                }
+            } else if (!errmsg) {
+                send_fail_to_client(client_fd, "Unexpected packet type");
+            }
+        }
+    }
+
+    if (errmsg) {
+        send_fail_to_client(client_fd, errmsg);
+    }
+
+    free(packet);
+    close_socket(client_fd);
+}
+
+// Tight C worker loop. Receives fds from the job queue and processes them,
+// crossing into R only for manifold evaluation.
+SEXP morloc_worker_loop_c(SEXP pipe_fd_r, SEXP dispatch_r, SEXP remote_dispatch_r) {
+    int pipe_fd = INTEGER(pipe_fd_r)[0];
+    PROTECT(dispatch_r);
+    PROTECT(remote_dispatch_r);
+
+    while (!r_shutting_down) {
+        int client_fd = recv_fd_c(pipe_fd);
+        if (client_fd < 0) break;
+        run_job_c(client_fd, dispatch_r, remote_dispatch_r);
+    }
+
+    UNPROTECT(2);
+    return R_NilValue;
+}
+
+// }}} C-level worker loop
 
 // }}} exported functions
 
@@ -1139,9 +1644,28 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_is_ping", (DL_FUNC) &morloc_is_ping, 1},
         {"morloc_is_local_call", (DL_FUNC) &morloc_is_local_call, 1},
         {"morloc_is_remote_call", (DL_FUNC) &morloc_is_remote_call, 1},
-        {"morloc_remote_call", (DL_FUNC) &morloc_is_remote_call, 1},
+        {"morloc_remote_call", (DL_FUNC) &morloc_remote_call, 5},
         {"morloc_pong", (DL_FUNC) &morloc_pong, 1},
         {"morloc_make_fail_packet", (DL_FUNC) &morloc_make_fail_packet, 1},
+        {"morloc_shinit", (DL_FUNC) &morloc_shinit, 3},
+        {"morloc_socketpair", (DL_FUNC) &morloc_socketpair, 0},
+        {"morloc_fork", (DL_FUNC) &morloc_fork, 0},
+        {"morloc_send_fd", (DL_FUNC) &morloc_send_fd, 2},
+        {"morloc_recv_fd", (DL_FUNC) &morloc_recv_fd, 1},
+        {"morloc_kill", (DL_FUNC) &morloc_kill, 2},
+        {"morloc_waitpid", (DL_FUNC) &morloc_waitpid, 1},
+        {"morloc_waitpid_blocking", (DL_FUNC) &morloc_waitpid_blocking, 1},
+        {"morloc_install_sigterm_handler", (DL_FUNC) &morloc_install_sigterm_handler, 0},
+        {"morloc_is_shutting_down", (DL_FUNC) &morloc_is_shutting_down, 0},
+        {"morloc_detach_daemon", (DL_FUNC) &morloc_detach_daemon, 1},
+        {"morloc_shared_counter_create", (DL_FUNC) &morloc_shared_counter_create, 0},
+        {"morloc_shared_counter_inc", (DL_FUNC) &morloc_shared_counter_inc, 1},
+        {"morloc_shared_counter_dec", (DL_FUNC) &morloc_shared_counter_dec, 1},
+        {"morloc_shared_counter_read", (DL_FUNC) &morloc_shared_counter_read, 1},
+        {"morloc_pipe", (DL_FUNC) &morloc_pipe, 0},
+        {"morloc_write_byte", (DL_FUNC) &morloc_write_byte, 2},
+        {"morloc_close_fd", (DL_FUNC) &morloc_close_fd, 1},
+        {"morloc_worker_loop_c", (DL_FUNC) &morloc_worker_loop_c, 3},
         {NULL, NULL, 0}
     };
 

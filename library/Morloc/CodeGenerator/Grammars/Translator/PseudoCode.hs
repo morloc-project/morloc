@@ -3,10 +3,14 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Grammars.Translator.PseudoCode
-Description : Python3 translator
+Description : Pseudocode renderer for diagnostic output of manifold trees
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Renders 'SerialManifold' and 'NativeManifold' trees as human-readable
+pseudocode for debugging and diagnostic dumps. Not a real translator --
+produces no executable output.
 -}
 module Morloc.CodeGenerator.Grammars.Translator.PseudoCode
   ( pseudocodeNativeManifold
@@ -36,13 +40,11 @@ prettyFoldManifold =
   where
     makeSerialManifold :: (Monad m) => SerialManifold -> SerialManifold_ PoolDocs -> m PoolDocs
     makeSerialManifold _ (SerialManifold_ m _ form headForm x) =
-      return $
-        translateManifold (makeFunction "SerialManifold") makeLambda m form (Just headForm) x
+      return $ pseudoManifold (makeFunction "SerialManifold") makeLambda m form (Just headForm) x
 
     makeNativeManifold :: (Monad m) => NativeManifold -> NativeManifold_ PoolDocs -> m PoolDocs
     makeNativeManifold _ (NativeManifold_ m _ form x) =
-      return $
-        translateManifold (makeFunction "NativeManifold") makeLambda m form Nothing x
+      return $ pseudoManifold (makeFunction "NativeManifold") makeLambda m form Nothing x
 
     makeSerialExpr ::
       (Monad m) => SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs
@@ -93,6 +95,7 @@ prettyFoldManifold =
     makeNativeExpr _ (IntN_ _ v) = return $ defaultValue {poolExpr = viaShow v}
     makeNativeExpr _ (StrN_ _ v) = return $ defaultValue {poolExpr = dquotes $ pretty v}
     makeNativeExpr _ (NullN_ _) = return $ defaultValue {poolExpr = "None"}
+    makeNativeExpr _ _ = return $ defaultValue {poolExpr = "<unhandled>"}
 
     makeSerialArg :: (Monad m) => SerialArg -> SerialArg_ PoolDocs PoolDocs -> m PoolDocs
     makeSerialArg _ (SerialArgManifold_ x) = return x
@@ -140,6 +143,34 @@ prettyFoldManifold =
     argName :: Arg TypeM -> MDoc
     argName (Arg i (Native _)) = bndNamerN i
     argName (Arg i _) = bndNamerS i
+
+pseudoManifold ::
+  (HasTypeM t) =>
+  (MDoc -> [Arg TypeM] -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> MDoc) ->
+  (MDoc -> [MDoc] -> [MDoc] -> MDoc) ->
+  Int ->
+  ManifoldForm (Or TypeS TypeF) t ->
+  Maybe HeadManifoldForm ->
+  PoolDocs ->
+  PoolDocs
+pseudoManifold makeFunc makeLam m form headForm (PoolDocs completeManifolds body priorLines priorExprs) =
+  let args = typeMofForm form
+      mname = manNamer m
+      newManifold = makeFunc mname args priorLines body headForm
+      call = case form of
+        (ManifoldPass _) -> mname
+        (ManifoldFull rs) -> mname <> tupled (map argNamer (typeMofRs rs))
+        (ManifoldPart rs vs) ->
+          makeLam
+            mname
+            (map argNamer (typeMofRs rs))
+            [argNamer (Arg i (typeMof t)) | Arg i t <- vs]
+   in PoolDocs
+        { poolCompleteManifolds = newManifold : completeManifolds
+        , poolExpr = call
+        , poolPriorLines = []
+        , poolPriorExprs = priorExprs
+        }
 
 prettyThing :: (p -> MI.Identity PoolDocs) -> p -> Doc ()
 prettyThing f a =

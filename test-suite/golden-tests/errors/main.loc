@@ -1,4 +1,4 @@
-module foo (
+module main (
       ccerr, cperr, crerr
     , rcerr, rperr, rrerr
     , pcerr, pperr, prerr

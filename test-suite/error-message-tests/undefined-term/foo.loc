@@ -1,0 +1,4 @@
+module main (foo)
+
+foo :: Real -> Real
+foo x = x + "2.0" * 20.0

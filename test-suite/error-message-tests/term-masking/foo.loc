@@ -1,4 +1,4 @@
-module foo (foo) 
+module m (foo) 
 
 import foo2 (foo)
 import foo3 (foo)

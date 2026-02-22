@@ -1,0 +1,7 @@
+module testpy3 (pyformat)
+
+import root-py
+
+source Py from "formatter.py" ("pyformat")
+
+pyformat :: Str -> Int -> Str

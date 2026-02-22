@@ -1,0 +1,95 @@
+module main (foo)
+
+-- base types
+type Cpp => Int = "int"
+type Cpp => List a = "std::vector<$1>" a
+type Cpp => Tuple2 a b = "std::tuple<$1,$2>" a b
+
+type Py => Int = "int"
+type Py => List a = "list" a
+type Py => Tuple2 a b = "tuple" a b
+
+
+-- aliases at the general level
+type Stack'       a = List a
+type List'        a = List a
+type ForwardList' a = List a
+type Deque'       a = List a
+type Queue'       a = List a
+type Vector'      a = List a
+
+
+-- define a C++ specialization for each type
+type Cpp => Stack' a = "std::stack<$1>" a
+type Cpp => List' a = "std::list<$1>" a
+type Cpp => ForwardList' a = "std::forward_list<$1>" a
+type Cpp => Deque' a = "std::deque<$1>" a
+type Cpp => Queue' a = "std::queue<$1>" a
+-- note Vector' does not need a definition, it resolves to List and then "std::vector"
+
+
+-- a typeclass for orderd containers
+class Listlike f where
+    -- add a new element to the end of a list
+    append f a :: a -> f a -> f a
+
+    -- convert to the canonical list type
+    toList f a :: f a -> List a
+
+
+-- define instances for each data structure, `append` and `toVector` have overloaded C++ definitions
+instance Listlike Stack' where
+    source Cpp from "foo.hpp" ("append", "toVector" as toList)
+
+instance Listlike List' where
+    source Cpp from "foo.hpp" ("append", "toVector" as toList)
+
+instance Listlike ForwardList' where
+    source Cpp from "foo.hpp" ("append", "toVector" as toList)
+
+instance Listlike Deque' where
+    source Cpp from "foo.hpp" ("append", "toVector" as toList)
+
+instance Listlike Queue' where
+    source Cpp from "foo.hpp" ("append", "toVector" as toList)
+
+instance Listlike List where
+    source Cpp from "foo.hpp" ("append", "id" as toList)
+
+
+source Cpp from "foo.hpp"
+    ( "vectorToDeque"
+    , "vectorToForwardList"
+    , "vectorToList"
+    , "vectorToQueue"
+    , "vectorToStack"
+    )
+
+source Py from "foo.py" ("ident" as id)
+id a :: a -> a 
+
+vectorToDeque a :: List a -> Deque' a
+vectorToForwardList a :: List a -> ForwardList' a
+vectorToList a :: List a -> List' a
+vectorToQueue a :: List a -> Queue' a
+vectorToStack a :: List a -> Stack' a
+
+foo = id
+    . append 18
+    . vectorToList
+    . toList
+    . id
+    . append 16
+    . vectorToQueue
+    . toList
+    . id
+    . append 14
+    . vectorToDeque
+    . toList
+    . id
+    . append 12
+    . vectorToStack
+    . toList
+    . id
+    . append 10
+    . vectorToForwardList

@@ -1,55 +1,64 @@
-{-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
 {- |
-Module      : Module
-Description : Morloc module imports and paths
+Module      : Morloc.Module
+Description : Module discovery, metadata loading, and installation
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 
-All information about morloc module structure should be defined here.
- * define package YAML metadata
- * finding modules on the local filesystem
+Handles all aspects of the morloc module system:
+
+ * finding modules on the local filesystem (by name or path)
+ * loading package YAML metadata
  * finding headers and shared libraries required by modules
- * installation of modules from github
+ * installing modules from GitHub via @morloc install@
 -}
 module Morloc.Module
   ( findModule
   , loadModuleMetadata
-  , handleFlagsAndPaths
+  , findMainLocFile
 
     -- * Module installation
   , OverwriteProtocol (..)
   , GitProtocol (..)
+  , InstallReason (..)
+  , TypecheckFn
   , installModule
+  , extractMorlocDeps
+  , extractModuleName
   ) where
 
+import Control.Exception (onException)
 import Data.Void (Void)
 import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 
 import qualified Data.Char as DC
+import qualified Data.Map as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text.IO as TIO
+import qualified Data.Time.Clock.POSIX as Time
 import qualified Data.Yaml.Config as YC
 import qualified Morloc.Config as Config
 import Morloc.Data.Doc
+import Morloc.Data.Json
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
+import Morloc.Namespace.Prim
+import Morloc.Namespace.State
 import qualified Morloc.System as MS
-import Data.Aeson
 import System.Directory
-import System.Process (callCommand)
+import System.Process (callProcess)
 
-data RepoInfo = RepoInfo {defaultBranch :: Text} deriving (Show)
+data InstallReason = ExplicitInstall | AutoDependency
+  deriving (Show, Eq)
 
-instance FromJSON RepoInfo where
-  parseJSON = withObject "RepoInfo" $ \v ->
-    RepoInfo
-      <$> v .: "default_branch"
+moduleInstallError :: MDoc -> MorlocMonad a
+moduleInstallError msg = MM.throwSystemError $ "Failed to install module:" <+> msg
 
 -- | Look for a local morloc module.
 findModule :: (Maybe Path, MVar) -> MVar -> MorlocMonad Path
@@ -72,8 +81,30 @@ findModule currentPathAndModule@(_, currentModule) importModule = do
           <> pretty xs
           <> "\n  selecting path:" <+> pretty x
       return x
-    [] ->
-      MM.throwError . CannotLoadModule . render $
+    [] -> do
+      -- Check if <name>/<name>.loc exists (should be <name>/main.loc)
+      let namePath = splitModuleName importModule
+          nameNameLoc = namePath <> [last namePath <> ".loc"]
+          hintPaths =
+            map
+              MS.joinPath
+              [ nameNameLoc
+              , lib : nameNameLoc
+              , [lib, plane] <> nameNameLoc
+              ]
+      existingHints <- liftIO . fmap catMaybes . mapM getFile $ hintPaths
+      let hintMsg = case existingHints of
+            (found : _) ->
+              let expected = MS.combine (MS.takeDirectory found) "main.loc"
+               in "\n\nFound"
+                    <+> squotes (pretty found)
+                    <+> "but expected"
+                    <+> squotes (pretty expected)
+                    <> "\n  Rename the entry point: mv"
+                      <+> pretty found
+                      <+> pretty expected
+            [] -> mempty
+      MM.throwSystemError $
         "Within module" <+> squotes (pretty currentModule)
           <> ","
             <+> "failed to import module"
@@ -81,7 +112,8 @@ findModule currentPathAndModule@(_, currentModule) importModule = do
           <> "\n"
           <> "The following paths were searched:\n"
             <+> indent 4 (vsep (map pretty allPaths))
-          <> "\nPerhaps you need to install this module?"
+          <> "\nMaybe try running: morloc install" <+> pretty importModule
+          <> hintMsg
 
 {- | Give a module path (e.g. "/your/path/foo.loc") find the package metadata.
 It currently only looks for a file named "package.yaml" in the same folder
@@ -158,9 +190,8 @@ getModulePaths lib plane (Nothing, _) (splitModuleName -> namePath) = map MS.joi
       ]
 
     -- if nothing is local, look for system libraries. The system libraries MUST
-    -- be in a folder named after the module. The main script may either have
-    -- the name of the final import feild (e.g., "math" in the imports "math" or
-    -- "alice.math") or by "main.loc"
+    -- be in a folder named after the module. The entry point for directory
+    -- modules must be "main.loc".
     systemPaths =
       [ lib : init namePath <> [last namePath <> ".loc"]
       , lib : namePath <> ["main.loc"]
@@ -228,126 +259,9 @@ getModulePaths lib plane (Just (MS.splitPath -> modulePath), splitModuleName -> 
               else removePathSuffix (init moduleName) (init modulePath)
        in map
             MS.joinPath
-            [ rootPath <> importName <> ["main.loc"]
-            , rootPath <> init importName <> [last importName <> ".loc"]
+            [ rootPath <> init importName <> [last importName <> ".loc"]
+            , rootPath <> importName <> ["main.loc"]
             ]
-
--- | An ordered list of where to search for C/C++ header files
-getHeaderPaths ::
-  -- | the path the morloc home ("~/.morloc" be default)
-  Path ->
-  -- | the base header name without an extension
-  String ->
-  -- | a list of header options (e.g., ".h", ".hpp")
-  [String] ->
-  -- | an ordered list of paths to search (foo.h, foo.hpp, include/foo.h ...)
-  [Path]
-getHeaderPaths lib base exts = [path <> ext | path <- paths, ext <- exts]
-  where
-    paths =
-      map
-        MS.joinPath
-        [ [base]
-        , ["include", base]
-        , [base, base]
-        , [lib, "include", base]
-        , [lib, "src", base, base]
-        , ["/usr/include", base]
-        , ["/usr/local/include", base]
-        ]
-
--- | An ordered list of where to search for shared libraries
-getLibraryPaths ::
-  -- | the path the morloc home ("~/.morloc" be default)
-  Path ->
-  -- | the base source name, e.g., "SimplexNoise"
-  String ->
-  -- | the shared library name, e.g., "libsimplexnoise.so"
-  String ->
-  -- | an ordered list of paths to search
-  [Path]
-getLibraryPaths lib base sofile =
-  map
-    MS.joinPath
-    [ [sofile]
-    , ["lib", sofile]
-    , [base, sofile]
-    , [lib, "lib", sofile]
-    , [lib, "src", base, sofile]
-    , [lib, "src", base, "lib", sofile]
-    ]
-
-handleFlagsAndPaths :: Lang -> [Source] -> MorlocMonad ([Source], [Text], [Path])
-handleFlagsAndPaths CppLang srcs = do
-  state <- MM.get
-  let gccversion = gccVersionFlag . foldl max 0 . map packageCppVersion $ statePackageMeta state
-  let explicitLibs = map ("-l" <>) . unique . concatMap packageDependencies $ statePackageMeta state
-  (srcs', libflags, paths) <-
-    fmap unzip3
-      . mapM flagAndPath
-      . unique
-      $ [s | s <- srcs, srcLang s == CppLang]
-
-  -- include the morloc home directory include folder
-  -- this should store the mlccpptypes library that defines Unit
-  home <- MM.asks configHome
-  let mlcInclude = ["-I" <> home <> "/include"]
-
-  return
-    ( -- all sources that have a defined path (import something)
-      filter (isJust . srcPath) srcs'
-    , -- compiler flags and shared libraries
-      [gccversion] <> explicitLibs ++ (map MT.pack . concat) (mlcInclude : libflags)
-    , -- paths to files to include
-      unique (catMaybes paths)
-    )
-handleFlagsAndPaths _ srcs = return (srcs, [], [])
-
-gccVersionFlag :: Int -> Text
-gccVersionFlag i
-  | i <= 17 = "-std=c++17"
-  | otherwise = "-std=c++" <> MT.show' i
-
-flagAndPath :: Source -> MorlocMonad (Source, [String], Maybe Path)
-flagAndPath src@(Source _ CppLang (Just p) _ _ _ _) =
-  case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p), MS.takeExtensions p) of
-    -- lookup up "<base>.h" and "lib<base>.so"
-    (".", base, "") -> do
-      header <- lookupHeader base
-      libFlags <- lookupLib base
-      return (src {srcPath = Just header}, libFlags, Just (MS.takeDirectory header))
-    -- use "<base>.h" and lookup "lib<base>.so"
-    (dir, base, _) -> do
-      libFlags <- lookupLib base
-      return (src, libFlags, Just dir)
-  where
-    lookupHeader :: String -> MorlocMonad Path
-    lookupHeader base = do
-      home <- MM.asks configHome
-      let allPaths = getHeaderPaths home base [".h", ".hpp", ".hxx"]
-      existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
-      case existingPaths of
-        (x : _) -> return x
-        [] -> MM.throwError . OtherError $ "Header file " <> MT.pack base <> ".* not found"
-
-    lookupLib :: String -> MorlocMonad [String]
-    lookupLib base = do
-      home <- MM.asks configHome
-      let libnamebase = filter DC.isAlphaNum (map DC.toLower base)
-      let libname = "lib" <> libnamebase <> ".so"
-      let allPaths = getLibraryPaths home base libname
-      existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
-      case existingPaths of
-        (libpath : _) -> do
-          libdir <- liftIO . MS.canonicalizePath . MS.takeDirectory $ libpath
-          return
-            [ "-Wl,-rpath=" <> libdir
-            , "-L" <> libdir
-            , "-l" <> libnamebase
-            ]
-        [] -> return []
-flagAndPath src@(Source _ CppLang Nothing _ _ _ _) = return (src, [], Nothing)
-flagAndPath _ = MM.throwError . OtherError $ "flagAndPath should only be called for C++ functions"
 
 getFile :: Path -> IO (Maybe Path)
 getFile x = do
@@ -400,6 +314,38 @@ data ModuleSource
 
 -- }}}
 
+-- | Check that a resolved module name is a valid identifier
+validateModuleName :: Text -> Text -> Either Text Text
+validateModuleName modstr name
+  | MT.null name =
+      Left $ "Could not determine module name from '" <> modstr <> "'"
+  | not (DC.isAlphaNum (MT.head name)) =
+      Left $ "Module name '" <> name <> "' (from '" <> modstr <> "') must start with an alphanumeric character"
+  | MT.any (\c -> not (DC.isAlphaNum c) && c /= '-') name =
+      Left $ "Module name '" <> name <> "' (from '" <> modstr <> "') contains invalid characters (only alphanumeric and hyphens allowed)"
+  | otherwise = Right name
+
+{- | Extract the module name from an install string.
+For "github:user/repo" -> "repo", for "math" -> "math",
+for "./path/to/foo" -> "foo", for "." -> current directory name
+-}
+extractModuleName :: Text -> IO Text
+extractModuleName modstr = do
+  name <- case parse (moduleInstallParser "morloclib") "" modstr of
+    Right (Right (ModuleSourceLocal path _)) ->
+      MT.pack . MS.takeFileName <$> (MS.makeAbsolute . MS.dropTrailingPathSeparator . MT.unpack $ path)
+    Right (Right (ModuleSourceRemoteGit remote)) ->
+      return $ gitReponame remote
+    _ -> return modstr
+  case validateModuleName modstr name of
+    Left err -> ioError . userError $ MT.unpack err
+    Right n -> return n
+
+{- | Typecheck callback: takes a filepath, returns list of (name, type) exports.
+Passed in from the executable layer to avoid circular imports.
+-}
+type TypecheckFn = FilePath -> MorlocMonad [(Text, Text)]
+
 installModule ::
   -- | How should overwrites be handled
   OverwriteProtocol ->
@@ -409,17 +355,214 @@ installModule ::
   Path ->
   -- | Default github org for the given plane for pulling core modules
   Path ->
+  -- | Optional typecheck callback (Nothing = skip typecheck)
+  Maybe TypecheckFn ->
+  -- | User-specified module sources from the CLI batch (name -> install-string)
+  Map.Map Text Text ->
+  -- | Modules currently being installed (cycle detection)
+  Set.Set Text ->
+  -- | Why this module is being installed
+  InstallReason ->
   -- | Installation string, such as "github:weena/math@version:0.1.0"
   Text ->
   MorlocMonad ()
-installModule overwrite gitprot libpath coreorg modstr =
+installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgress reason modstr =
   case parse (moduleInstallParser (MT.pack coreorg)) "" modstr of
-    (Left errstr) -> MM.throwError . ModuleInstallError . MT.pack . errorBundlePretty $ errstr
-    (Right (Left errstr)) -> MM.throwError . ModuleInstallError $ errstr
-    (Right (Right (ModuleSourceLocal path selector))) -> installLocal overwrite libpath selector path
-    (Right (Right (ModuleSourceRemoteGit remote))) ->
-      let targetDir = libpath </> MT.unpack (gitReponame remote)
-       in installRemote overwrite gitprot targetDir remote
+    (Left errstr) -> moduleInstallError (pretty . errorBundlePretty $ errstr)
+    (Right (Left errstr)) -> moduleInstallError $ pretty errstr
+    (Right (Right source)) -> do
+      rawName <- case source of
+            ModuleSourceLocal path _ ->
+              liftIO $ MT.pack . MS.takeFileName <$> (MS.makeAbsolute . MS.dropTrailingPathSeparator . MT.unpack $ path)
+            ModuleSourceRemoteGit remote -> return $ gitReponame remote
+      name <- case validateModuleName modstr rawName of
+        Left err -> moduleInstallError $ pretty err
+        Right n -> return n
+      let targetDir = libpath </> MT.unpack name
+
+      if Set.member name inProgress
+        then return ()
+        else do
+          -- Check if already installed
+          targetExists <- liftIO $ doesDirectoryExist targetDir
+          case (targetExists, overwrite) of
+            (True, DoNotOverwrite) -> do
+              MM.sayVVV $ "Module" <+> pretty name <+> "already installed, skipping"
+              return ()
+            (True, ForceOverwrite) -> do
+              liftIO $ removeDirectoryRecursive targetDir
+              doInstall source name targetDir
+            (False, _) ->
+              doInstall source name targetDir
+  where
+    doInstall :: ModuleSource -> Text -> FilePath -> MorlocMonad ()
+    doInstall source name targetDir = do
+      let inProgress' = Set.insert name inProgress
+
+      -- create the library path if it is missing
+      liftIO $ createDirectoryIfMissing True libpath
+
+      -- Copy/clone files, with cleanup on exception
+      liftIO $ createDirectoryIfMissing True (MS.takeDirectory targetDir)
+      let ioAction = case source of
+            ModuleSourceLocal path selector ->
+              installLocalIO targetDir selector path
+            ModuleSourceRemoteGit remote ->
+              installRemoteIO gitprot targetDir remote
+          cleanup = do
+            exists <- doesDirectoryExist targetDir
+            when exists $ removeDirectoryRecursive targetDir
+      liftIO $ ioAction `onException` cleanup
+
+      -- Read package.yaml for metadata and dependencies
+      meta <- liftIO $ do
+        let pkgYaml = targetDir </> "package.yaml"
+        exists <- doesFileExist pkgYaml
+        if exists
+          then YC.loadYamlSettings [pkgYaml] [] YC.ignoreEnv
+          else return defaultValue
+
+      -- Determine morloc dependencies by scanning .loc imports
+      morlocDeps <- do
+        mainFile <- liftIO $ findMainLocFile targetDir (MT.unpack name)
+        case mainFile of
+          Nothing -> return []
+          Just f -> liftIO $ extractMorlocDeps f
+
+      -- Recursively install dependencies
+      forM_ morlocDeps $ \dep -> do
+        let depDir = libpath </> MT.unpack dep
+        depExists <- liftIO $ doesDirectoryExist depDir
+        unless (depExists || Set.member dep inProgress') $ do
+          let depModstr = case Map.lookup dep userSources of
+                Just s -> s
+                Nothing -> dep
+          MM.say $ "Auto-installing dependency:" <+> pretty dep
+          installModule
+            DoNotOverwrite
+            gitprot
+            libpath
+            coreorg
+            mayTypecheck
+            userSources
+            inProgress'
+            AutoDependency
+            depModstr
+
+      -- Typecheck the module (if callback provided)
+      exports <- case mayTypecheck of
+        Nothing -> return []
+        Just typecheckFn -> do
+          mainFile <- liftIO $ findMainLocFile targetDir (MT.unpack name)
+          case mainFile of
+            Nothing -> return []
+            Just f -> typecheckFn f
+
+      -- Write module manifest to fdb/
+      config <- MM.ask
+      let fdbDir = Config.configHome config </> "fdb"
+      liftIO $ createDirectoryIfMissing True fdbDir
+      installTime <- liftIO $ floor <$> Time.getPOSIXTime
+      let manifestPath = fdbDir </> MT.unpack name ++ ".module"
+          manifestJson =
+            buildModuleManifest
+              meta
+              name
+              morlocDeps
+              exports
+              targetDir
+              modstr
+              reason
+              installTime
+      liftIO $ TIO.writeFile manifestPath manifestJson
+      MM.say $ "Installed module" <+> squotes (pretty name)
+
+-- | Find the main .loc file in a module directory
+findMainLocFile :: FilePath -> String -> IO (Maybe FilePath)
+findMainLocFile dir name = do
+  dirExists <- doesDirectoryExist dir
+  if not dirExists
+    then return Nothing
+    else do
+      let mainLoc = dir </> "main.loc"
+          nameLoc = dir </> name ++ ".loc"
+      mainExists <- doesFileExist mainLoc
+      if mainExists
+        then return (Just mainLoc)
+        else do
+          nameExists <- doesFileExist nameLoc
+          return $ if nameExists then Just nameLoc else Nothing
+
+-- | Build a module manifest JSON string
+buildModuleManifest ::
+  PackageMeta ->
+  Text ->
+  [Text] ->
+  [(Text, Text)] ->
+  FilePath ->
+  Text ->
+  InstallReason ->
+  Int ->
+  Text
+buildModuleManifest meta name morlocDeps exports installPath installSource reason installTime =
+  jsonObj
+    [ ("kind", jsonStr "module")
+    , ("name", jsonStr name)
+    , ("version", jsonStr (packageVersion meta))
+    , ("synopsis", jsonStr (packageSynopsis meta))
+    , ("author", jsonStr (packageAuthor meta))
+    , ("license", jsonStr (packageLicense meta))
+    , ("homepage", jsonStr (packageHomepage meta))
+    , ("c_dependencies", jsonStrArr (packageDependencies meta))
+    , ("morloc_dependencies", jsonStrArr morlocDeps)
+    ,
+      ( "exports"
+      , jsonArr
+          [ jsonObj [("name", jsonStr n), ("type", jsonStr t)]
+          | (n, t) <- exports
+          ]
+      )
+    , ("install_path", jsonStr (MT.pack installPath))
+    , ("install_source", jsonStr installSource)
+    , ("install_reason", jsonStr (reasonText reason))
+    , ("install_time", jsonInt installTime)
+    ]
+  where
+    reasonText ExplicitInstall = "explicit"
+    reasonText AutoDependency = "auto"
+
+{- | Extract morloc module dependencies by scanning a .loc file for import statements.
+This is a lightweight text scan, not using the full parser.
+-}
+extractMorlocDeps :: FilePath -> IO [Text]
+extractMorlocDeps path = do
+  content <- TIO.readFile path
+  let ls = MT.lines content
+      imports = concatMap extractImport (removeComments ls)
+  return (unique imports)
+  where
+    extractImport :: Text -> [Text]
+    extractImport ln =
+      let stripped = MT.stripStart ln
+       in case MT.stripPrefix "import " stripped of
+            Nothing -> []
+            Just rest ->
+              let modName = MT.strip (MT.takeWhile (\c -> c /= '(' && c /= ' ') rest)
+               in case MT.splitOn "." modName of
+                    (topLevel : _) | not (MT.null topLevel) -> [topLevel]
+                    _ -> []
+
+    removeComments :: [Text] -> [Text]
+    removeComments = go False
+      where
+        go _ [] = []
+        go True (l : ls)
+          | MT.isInfixOf "-}" l = go False ls
+          | otherwise = go True ls
+        go False (l : ls)
+          | MT.isPrefixOf "--" (MT.stripStart l) = go False ls
+          | MT.isPrefixOf "{-" (MT.stripStart l) = go True ls
+          | otherwise = l : go False ls
 
 -- {{{ parse module source
 
@@ -503,10 +646,10 @@ parseModuleSegment :: Parser Text
 parseModuleSegment = do
   firstChar <- alphaNumChar
   rest <- many (alphaNumChar <|> char '-')
-  -- Ensure we don't end with dash if there are rest chars
-  if last rest == '-'
-    then fail "Module name cannot end with a dash"
-    else return (MT.pack (firstChar : rest))
+  case rest of
+    [] -> return (MT.pack [firstChar])
+    _ | last rest == '-' -> fail "Module name cannot end with a dash"
+      | otherwise -> return (MT.pack (firstChar : rest))
 
 -- parse a local file
 --   .
@@ -569,19 +712,15 @@ parseVersion = do
       -- Optional 'v' prefix
       v <- optional (string "v")
 
-      -- Parse major version
+      -- Parse major.minor
       major <- MT.show' <$> (L.decimal :: Parser Int)
       _ <- char '.'
-
-      -- Parse minor version
       minor <- MT.show' <$> (L.decimal :: Parser Int)
-      _ <- char '.'
 
-      -- Optional patch version
-      patchMay <- optional $ do
-        p <- MT.show' <$> (L.decimal :: Parser Int)
+      -- Optional .patch
+      patchMay <- optional . try $ do
         _ <- char '.'
-        return p
+        MT.show' <$> (L.decimal :: Parser Int)
 
       -- Optional pre-release (after '-')
       preRelease <- optional $ do
@@ -676,132 +815,53 @@ parseBranch = do
 
 -- }}}
 
--- {{{ install from module source
+-- {{{ install from module source (IO-level helpers)
 
-installLocal ::
-  -- | whether to overwrite the existing module in libpath if it existss
-  OverwriteProtocol ->
-  -- | path to the morloc module installation folder
-  Path ->
-  -- | if this is a local git repo, what version should be installed?
-  Maybe GitSnapshotSelector ->
-  -- | path to the module to be installed
-  Text ->
-  MorlocMonad ()
-installLocal overwrite libpath maySelector modulePath = do
-  -- dropping the trailing path separator is important, otherwise
-  -- morloc will helpful delete all your modules
-  sourceDir <- liftIO . MS.makeAbsolute . MS.dropTrailingPathSeparator . MT.unpack $ modulePath
+-- | Install from a local source (pure IO, no MorlocMonad)
+installLocalIO ::
+  FilePath -> Maybe GitSnapshotSelector -> Text -> IO ()
+installLocalIO targetDir maySelector modulePath = do
+  sourceDir <- MS.makeAbsolute . MS.dropTrailingPathSeparator . MT.unpack $ modulePath
 
-  -- Extract module name from path (last component)
-  let moduleName = MS.takeFileName sourceDir
-  let targetDir = libpath </> moduleName
-
-  -- Check if source exists
-  sourceExists <- liftIO $ doesDirectoryExist sourceDir
+  sourceExists <- doesDirectoryExist sourceDir
   unless sourceExists $
-    MM.throwError . ModuleInstallError . render $
-      "Source directory does not exist: " <> pretty sourceDir
+    ioError $ userError $
+      "Source directory does not exist: " ++ sourceDir
 
-  -- Check if target already exists
-  targetExists <- liftIO $ doesDirectoryExist targetDir
-
-  case (targetExists, overwrite) of
-    (True, DoNotOverwrite) ->
-      MM.throwError . ModuleInstallError . render $
-        "Module already exists at" <+> pretty targetDir <+> "and overwrite is disabled"
-    (True, ForceOverwrite) -> liftIO $ removeDirectoryRecursive targetDir
-    (False, _) ->
-      -- do nothing, all is well
-      return ()
-
-  -- Check if source is a git repo
   let gitDir = sourceDir </> ".git"
-  isGitRepo <- liftIO $ doesDirectoryExist gitDir
-
-  -- create the library path if it is missing
-  liftIO $ createDirectoryIfMissing True libpath
+  isGitRepo <- doesDirectoryExist gitDir
 
   if isGitRepo
-    then installLocalGitRepo sourceDir targetDir (fromMaybe LatestDefaultBranch maySelector)
-    else installLocalDirectory sourceDir targetDir
+    then installLocalGitRepoIO sourceDir targetDir (fromMaybe LatestDefaultBranch maySelector)
+    else callProcess "cp" ["-r", sourceDir, targetDir]
 
--- | Install from a local git repository
-installLocalGitRepo :: FilePath -> FilePath -> GitSnapshotSelector -> MorlocMonad ()
-installLocalGitRepo sourceDir targetDir selector = do
+installLocalGitRepoIO :: FilePath -> FilePath -> GitSnapshotSelector -> IO ()
+installLocalGitRepoIO sourceDir targetDir selector = do
   case selector of
-    -- If not ref is given, treat the repo like a folder
-    LatestDefaultBranch -> cpDir sourceDir targetDir
-    -- Otherwise, clone the repository, ignoring un-committed changes
-    _ -> cloneRepo sourceDir targetDir
-
-  -- Checkout the appropriate ref
-  case selector of
-    LatestDefaultBranch -> do
-      MM.sayVVV "Using default branch, exactly mirror parent code with local changes"
+    LatestDefaultBranch ->
+      -- Just copy the working tree, then strip .git
+      callProcess "cp" ["-r", sourceDir, targetDir]
     LatestOnBranch branch -> do
-      MM.sayVVV $ "Checking out branch:" <+> pretty branch
-      liftIO $ callCommand $ "cd " ++ targetDir ++ " && git checkout refs/heads/" ++ MT.unpack branch
+      callProcess "git" ["clone", "-q", sourceDir, targetDir]
+      callProcess "git" ["-C", targetDir, "checkout", "refs/heads/" ++ MT.unpack branch]
     CommitHash hash -> do
-      MM.sayVVV $ "Checking out commit:" <+> pretty hash
-      liftIO $ callCommand $ "cd " ++ targetDir ++ " && git checkout --detach " ++ MT.unpack hash
+      callProcess "git" ["clone", "-q", sourceDir, targetDir]
+      callProcess "git" ["-C", targetDir, "checkout", "--detach", MT.unpack hash]
     ReleaseTag tag -> do
-      MM.sayVVV $ "Checking out tag:" <+> pretty tag
-      liftIO $ callCommand $ "cd " ++ targetDir ++ " && git checkout refs/tags/" ++ MT.unpack tag
+      callProcess "git" ["clone", "-q", sourceDir, targetDir]
+      callProcess "git" ["-C", targetDir, "checkout", "refs/tags/" ++ MT.unpack tag]
 
-  MM.sayVVV $ "Removing history in the installed folder"
-  liftIO $ callCommand $ "cd " ++ targetDir ++ " && rm -rf .git/"
+  -- Remove .git directory from installed copy
+  let gitDir = targetDir </> ".git"
+  gitExists <- doesDirectoryExist gitDir
+  when gitExists $ removeDirectoryRecursive gitDir
 
-cpDir :: FilePath -> FilePath -> MorlocMonad ()
-cpDir fromDir toDir = do
-  let cmd = "cp -r " <> fromDir <> " " <> toDir
-  MM.sayVVV $ pretty cmd
-  liftIO $ callCommand cmd
-
-cloneRepo :: String -> FilePath -> MorlocMonad ()
-cloneRepo repoURL targetDir = do
-  let cmd = "git clone -q " <> repoURL <> " " <> targetDir
-  MM.sayVVV $ pretty cmd
-  liftIO $ callCommand cmd
-
--- | Install from a local directory (non-git)
-installLocalDirectory :: FilePath -> FilePath -> MorlocMonad ()
-installLocalDirectory sourceDir targetDir = do
-  MM.sayVVV $ "Copying directory from" <+> pretty sourceDir <+> "to" <+> pretty targetDir
-  liftIO . callCommand $ "cp -r " ++ sourceDir ++ " " ++ targetDir
-
--- TODO: Download directly from the archive with hashes, this will be MUCH faster
-installRemote ::
-  -- | whether to overwrite existing modules
-  OverwriteProtocol ->
-  -- | whether to use SSH or HTTPS protocols for cloning remote git repos
-  GitProtocol ->
-  -- | path to the morloc module that will be installed
-  Path ->
-  -- | git repo info
-  GitRemote ->
-  MorlocMonad ()
-installRemote overwrite gitprot targetDir remote = do
-  -- Check if target already exists
-  targetExists <- liftIO $ doesDirectoryExist targetDir
-
-  case (targetExists, overwrite) of
-    (True, DoNotOverwrite) ->
-      error $ "Module already exists at " ++ targetDir ++ " and overwrite is disabled"
-    (True, ForceOverwrite) -> do
-      MM.sayVVV $ "Removing existing module at" <+> pretty targetDir
-      liftIO $ removeDirectoryRecursive targetDir
-    (False, _) ->
-      return ()
-
-  -- Build the git URL
+-- | Install from a remote git source (pure IO)
+installRemoteIO :: GitProtocol -> FilePath -> GitRemote -> IO ()
+installRemoteIO gitprot targetDir remote = do
   let gitUrl = buildGitUrl gitprot remote
-
-  -- Clone the repository
-  cloneRepo gitUrl targetDir
-
-  -- Checkout the appropriate ref
-  checkoutRef targetDir (gitReference remote)
+  callProcess "git" ["clone", "-q", gitUrl, targetDir]
+  checkoutRefIO targetDir (gitReference remote)
 
 -- | Build a git URL from protocol and remote info
 buildGitUrl :: GitProtocol -> GitRemote -> String
@@ -822,20 +882,16 @@ getBaseUrl RemoteBitbucket = "bitbucket.org"
 getBaseUrl RemoteCodeberg = "codeberg.org"
 getBaseUrl RemoteAzure = "dev.azure.com"
 
--- | Checkout a specific git reference
-checkoutRef :: FilePath -> GitSnapshotSelector -> MorlocMonad ()
-checkoutRef targetDir selector = case selector of
-  LatestDefaultBranch ->
-    MM.sayVVV "Using default branch"
+-- | Checkout a specific git reference (pure IO)
+checkoutRefIO :: FilePath -> GitSnapshotSelector -> IO ()
+checkoutRefIO targetDir selector = case selector of
+  LatestDefaultBranch -> return ()
   LatestOnBranch branch -> do
-    MM.sayVVV $ "Checking out branch:" <+> pretty branch
-    liftIO . callCommand $ "cd " ++ targetDir ++ " && git checkout " ++ MT.unpack branch
-    liftIO . callCommand $ "cd " ++ targetDir ++ " && git pull"
-  CommitHash hash -> do
-    MM.sayVVV $ "Checking out commit:" <+> pretty hash
-    liftIO . callCommand $ "cd " ++ targetDir ++ " && git checkout " ++ MT.unpack hash
-  ReleaseTag tag -> do
-    MM.sayVVV $ "Checking out tag:" <+> pretty tag
-    liftIO . callCommand $ "cd " ++ targetDir ++ " && git checkout tags/" ++ MT.unpack tag
+    callProcess "git" ["-C", targetDir, "checkout", MT.unpack branch]
+    callProcess "git" ["-C", targetDir, "pull"]
+  CommitHash hash ->
+    callProcess "git" ["-C", targetDir, "checkout", MT.unpack hash]
+  ReleaseTag tag ->
+    callProcess "git" ["-C", targetDir, "checkout", "tags/" ++ MT.unpack tag]
 
 -- }}}

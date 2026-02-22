@@ -1,0 +1,19 @@
+--- letShared ---
+EVAL 5
+20
+--- letIndep ---
+EVAL 5
+EVAL 5
+20
+--- letChain ---
+EVAL 3
+EVAL 6
+18
+--- letMultiForce ---
+EVAL 5
+EVAL 5
+20
+--- letNested ---
+EVAL 2
+EVAL 4
+24

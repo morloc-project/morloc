@@ -2,10 +2,14 @@
 
 {- |
 Module      : Morloc.CodeGenerator.SystemConfig
-Description : Configure the system as needed for the given composition
+Description : Write runtime files and compile shared libraries during @morloc init@
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Handles the @morloc init@ system setup: writing embedded C library sources,
+compiling @libmorloc.so@, building the static nexus binary, and running
+per-language @init.sh@ scripts to compile language extensions.
 -}
 module Morloc.CodeGenerator.SystemConfig
   ( configure
@@ -13,164 +17,234 @@ module Morloc.CodeGenerator.SystemConfig
   ) where
 
 import Morloc.CodeGenerator.Namespace
+import qualified Morloc.Completion as Completion
 import qualified Morloc.DataFiles as DF
 import Morloc.Module (OverwriteProtocol (..))
 
-import Data.Text (Text)
 import qualified Data.Text.IO as TIO
-import qualified Morloc.Data.Text as MT
 
 import Control.Exception (SomeException, displayException, try)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeFile)
-import System.IO (IOMode (WriteMode), hPutStrLn, stderr, withFile)
-import System.Process (callCommand, callProcess)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, findExecutable, getHomeDirectory, listDirectory, removeDirectoryRecursive, removeFile)
+import System.FilePath (replaceExtension, takeFileName)
+import System.IO (hIsTerminalDevice, hPutStrLn, stderr)
+import System.Exit (ExitCode(..))
+import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, waitForProcess)
 
 configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
 configure _ = return ()
 
 configureAll :: Bool -> OverwriteProtocol -> Bool -> Config -> IO Bool
 configureAll verbose force slurmSupport config = do
-  -- Wrap the entire configuration process in exception handling
   result <- try (configureAllSteps verbose force slurmSupport config) :: IO (Either SomeException ())
   case result of
     Left e -> do
-      hPutStrLn stderr $ "\ESC[31mConfiguration failed: " ++ displayException e ++ "\ESC[0m"
+      sayError $ "Configuration failed: " ++ displayException e
       return False
     Right _ -> return True
 
--- | Configure for all languages
 configureAllSteps :: Bool -> OverwriteProtocol -> Bool -> Config -> IO ()
 configureAllSteps verbose force slurmSupport config = do
-  -- Setup Morloc home directory structure
   let homeDir = configHome config
       srcLibrary = configLibrary config
-      includeDir = configHome config </> "include"
+      includeDir = homeDir </> "include"
       tmpDir = configTmpDir config
-      optDir = configHome config </> "opt"
-      libDir = configHome config </> "lib"
+      optDir = homeDir </> "opt"
+      libDir = homeDir </> "lib"
 
-  createDirectoryWithDescription "morloc home directory" homeDir
-  createDirectoryWithDescription "morloc lib directory" libDir
-  createDirectoryWithDescription "morloc include directory" includeDir
-  createDirectoryWithDescription "morloc tmp directory" tmpDir
-  createDirectoryWithDescription "morloc opt directory" optDir
-  createDirectoryWithDescription "morloc module directory" srcLibrary
+  -- When force is set, clean build output directories
+  when (force == ForceOverwrite) $ do
+    sayInfo verbose "Force rebuild: cleaning stale artifacts"
+    cleanDirectory libDir
+    cleanDirectoryExcept includeDir ["mlccpptypes"]
+    cleanDirectory optDir
 
-  say $ "Slurm support ... " <> show slurmSupport
+  ensureDirectory verbose "morloc home directory" homeDir
+  ensureDirectory verbose "morloc lib directory" libDir
+  ensureDirectory verbose "morloc include directory" includeDir
+  ensureDirectory verbose "morloc tmp directory" tmpDir
+  ensureDirectory verbose "morloc opt directory" optDir
+  ensureDirectory verbose "morloc module directory" srcLibrary
 
-  say $ "Writing build config file"
+  sayInfo verbose $ "Slurm support ... " <> show slurmSupport
 
-  -- currently SLURM support is the only build option
+  sayInfo verbose "Writing build config file"
   TIO.writeFile
     (configBuildConfig config)
     (if slurmSupport then "slurm-support: true" else "slurm-support: false")
 
-  say "Installing C++ extra types"
+  -- Clean and create build directory
+  let buildDir = tmpDir </> "libmorloc-build"
+  buildDirExists <- doesDirectoryExist buildDir
+  when buildDirExists $ removeDirectoryRecursive buildDir
+  createDirectoryIfMissing True buildDir
 
-  let mlccpptypesPath = includeDir </> "mlccpptypes"
-  mlccpptypesExists <- doesDirectoryExist mlccpptypesPath
+  -- Check for gcc (required for core)
+  requireTool "gcc" "gcc is required to compile libmorloc.so and morloc-nexus"
 
-  unless mlccpptypesExists $ do
-    let mlccpptypesRepoUrl = "https://github.com/morloclib/mlccpptypes"
-        cmd = unwords ["git clone", mlccpptypesRepoUrl, mlccpptypesPath]
+  sayInfo verbose "Writing morloc C library source files"
+  forM_ DF.libmorlocFiles $ \ef ->
+    TIO.writeFile (buildDir </> DF.embededFileName ef) (DF.embededFileText ef)
 
-    say "installing mlccpptypes"
-    callCommand cmd
-
-  let libmorlocPath = includeDir </> DF.embededFileName (DF.libMorlocH DF.libmorloc)
-      libhashPath = includeDir </> DF.embededFileName (DF.libHashH DF.libmorloc)
-
-  say "Creating morloc.h"
-  TIO.writeFile libmorlocPath $ DF.embededFileText (DF.libMorlocH DF.libmorloc)
-  TIO.writeFile libhashPath $ DF.embededFileText (DF.libHashH DF.libmorloc)
-
-  say "Generating libmorloc.so"
-  -- this is a stupid hack to make gcc compile a header to a shared object
-  let tmpCFile = tmpDir </> "x.c"
-
+  sayInfo verbose "Compiling libmorloc.so"
+  let morlocOptions = if slurmSupport then ["-DSLURM_SUPPORT"] else []
+      cFiles =
+        [ buildDir </> DF.embededFileName ef | ef <- DF.libmorlocFiles, ".c" `isSuffixOf` DF.embededFileName ef
+        ]
       soPath = libDir </> "libmorloc.so"
-  TIO.writeFile
-    tmpCFile
-    ( "#include \""
-        <> MT.pack libmorlocPath
-        <> "\""
-        <> "\n"
-        <> "#include \""
-        <> MT.pack libhashPath
-        <> "\""
-    )
-  -- special system-wide morloc build options
-  let morlocOptions = (if slurmSupport then ["-DSLURM_SUPPORT"] else [])
-  let gccArgs = ["-O", "-shared", "-o", soPath, "-fPIC", tmpCFile] <> morlocOptions
-  callProcess "gcc" gccArgs
-  removeFile tmpCFile
+      objPaths = [buildDir </> replaceExtension (takeFileName f) "o" | f <- cFiles]
+  forM_ (zip cFiles objPaths) $ \(cFile, objPath) -> do
+    let args =
+          ["-c", "-Wall", "-Werror", "-O2", "-fPIC", "-I" <> buildDir, "-o", objPath, cFile] <> morlocOptions
+    run verbose "gcc" args
+  let soArgs = ["-shared", "-o", soPath] <> objPaths <> ["-lpthread"]
+  run verbose "gcc" soArgs
+  forM_ DF.libmorlocFiles $ \ef -> removeFile (buildDir </> DF.embededFileName ef)
+  forM_ objPaths removeFile
 
-  say "Configuring C++ morloc api header"
-  TIO.writeFile (includeDir </> DF.embededFileName DF.libcpplang) (DF.embededFileText DF.libcpplang)
+  sayInfo verbose "Installing morloc.h"
+  TIO.writeFile (includeDir </> "morloc.h") DF.libmorlocHeader
 
-  say "Configuring python MessagePack libraries"
-  let libpyPath = optDir </> DF.embededFileName DF.libpylang
-      libpySetupPath = optDir </> DF.embededFileName DF.libpylangSetup
-      libpyMakePath = optDir </> DF.embededFileName DF.libpylangMakefile
+  -- Compile morloc-nexus (installed to ~/.local/bin alongside the morloc binary,
+  -- since wrapper scripts invoke it by bare name via PATH)
+  sayInfo verbose "Compiling morloc-nexus"
+  userHome <- getHomeDirectory
+  let nexusBinDir = userHome </> ".local" </> "bin"
+      nexusSrcPath = buildDir </> "nexus.c"
+      nexusBinPath = nexusBinDir </> "morloc-nexus"
+  createDirectoryIfMissing True nexusBinDir
+  TIO.writeFile nexusSrcPath (DF.embededFileText DF.nexusSource)
+  run
+    verbose
+    "gcc"
+    [ "-O2"
+    , "-I" <> includeDir
+    , "-o"
+    , nexusBinPath
+    , nexusSrcPath
+    , "-L" <> libDir
+    , "-Wl,-rpath," <> libDir
+    , "-lmorloc"
+    , "-lpthread"
+    ]
+  removeFile nexusSrcPath
 
-  TIO.writeFile libpyPath $ DF.embededFileText DF.libpylang
-  TIO.writeFile libpySetupPath $ DF.embededFileText DF.libpylangSetup
-  TIO.writeFile libpyMakePath $ DF.embededFileText DF.libpylangMakefile
+  -- Create exe/ and fdb/ directories
+  let exeDir = homeDir </> "exe"
+      fdbDir = homeDir </> "fdb"
+  ensureDirectory verbose "morloc exe directory" exeDir
+  ensureDirectory verbose "morloc fdb directory" fdbDir
 
-  say "Generating libpymorloc.so"
-  callCommand ("make -C " <> optDir <> " -f " <> DF.embededFileName DF.libpylangMakefile)
+  -- Configure each language via its init.sh script
+  forM_ DF.langSetups $ \ls -> do
+    missing <- checkTools (DF.lsRequiredTools ls)
+    if null missing
+      then do
+        sayInfo verbose $ "Configuring " <> DF.lsName ls <> " language support"
+        -- Write data files to build dir
+        forM_ (DF.lsFiles ls) $ \ef ->
+          TIO.writeFile (buildDir </> DF.embededFileName ef) (DF.embededFileText ef)
+        -- Write and run init script
+        let initPath = buildDir </> "init.sh"
+        TIO.writeFile initPath (DF.embededFileText (DF.lsInitScript ls))
+        result <- try (run verbose "bash" [initPath, homeDir, buildDir]) :: IO (Either SomeException ())
+        case result of
+          Left e -> sayWarning $ DF.lsName ls <> " setup failed: " <> displayException e
+          Right _ -> return ()
+        -- Clean up
+        removeFileSafe initPath
+        forM_ (DF.lsFiles ls) $ \ef ->
+          removeFileSafe (buildDir </> DF.embededFileName ef)
+      else
+        sayWarning $ "Skipping " <> DF.lsName ls <> " setup (missing: " <> unwords missing <> ")"
 
-  say "Configuring R morloc API libraries"
-  compileCCodeIfNeeded
-    (DF.embededFileText DF.librlang)
-    (includeDir </> DF.embededFileName DF.librlang)
-    (libDir </> "librmorloc.so")
-    (includeDir </> "librmorloc.o")
-  where
-    ok msg = "\ESC[32m" <> msg <> "\ESC[0m"
+  -- Generate shell completions
+  sayInfo verbose "Generating shell completions"
+  Completion.regenerateCompletions verbose homeDir
 
-    say :: String -> IO ()
-    say message =
-      if verbose
-        then do
-          hPutStrLn stderr (ok message)
-        else
-          return ()
+-- ANSI color wrapping, disabled when stderr is not a terminal
+withColor :: String -> String -> IO String
+withColor code msg = do
+  isTty <- hIsTerminalDevice stderr
+  return $ if isTty then code <> msg <> "\ESC[0m" else msg
 
-    createDirectoryWithDescription :: String -> FilePath -> IO ()
-    createDirectoryWithDescription description path = do
-      exists <- doesDirectoryExist path
-      if exists
-        then
-          when verbose $
-            putStrLn $
-              "Checking " ++ description ++ " ... using existing path " ++ path
-        else do
-          createDirectoryIfMissing True path
-          when verbose $
-            putStrLn $
-              "Checking " ++ description ++ " ... missing, creating at " ++ path
+sayInfo :: Bool -> String -> IO ()
+sayInfo verbose message = when verbose $ do
+  line <- withColor "\ESC[34m" ("[INFO] " <> message)
+  hPutStrLn stderr line
 
-    compileCCodeIfNeeded :: Text -> Path -> Path -> Path -> IO ()
-    compileCCodeIfNeeded codeText sourcePath libPath objPath = do
-      alreadyExists <- doesFileExist libPath
-      if (alreadyExists && force == DoNotOverwrite)
-        then return ()
-        else do
-          -- Write the code to the temporary file
-          withFile sourcePath WriteMode $ \tempHandle -> do
-            MT.hPutStr tempHandle codeText
+sayWarning :: String -> IO ()
+sayWarning message = do
+  line <- withColor "\ESC[33m" ("[WARNING] " <> message)
+  hPutStrLn stderr line
 
-          -- Compile the C code, will generate a .so file with same path and
-          -- basename as the source .c file
-          let compileCommand = "R CMD SHLIB " ++ sourcePath ++ " -o " ++ libPath
+sayError :: String -> IO ()
+sayError message = do
+  line <- withColor "\ESC[31m" ("[ERROR] " <> message)
+  hPutStrLn stderr line
 
-          callCommand compileCommand
+run :: Bool -> String -> [String] -> IO ()
+run verbose cmd args = do
+  when verbose $ do
+    line <- withColor "\ESC[2m" (cmd <> " " <> unwords args)
+    hPutStrLn stderr line
+  let cp = (proc cmd args) { std_out = UseHandle stderr }
+  (_, _, _, ph) <- createProcess cp
+  exitCode <- waitForProcess ph
+  case exitCode of
+    ExitSuccess -> return ()
+    ExitFailure code -> ioError . userError $ cmd <> " exited with code " <> show code
 
-          -- Delete the source .c file
-          sourcePathExists <- doesFileExist sourcePath
-          when (sourcePathExists) (removeFile sourcePath)
+ensureDirectory :: Bool -> String -> FilePath -> IO ()
+ensureDirectory verbose description path = do
+  exists <- doesDirectoryExist path
+  if exists
+    then sayInfo verbose $ description ++ " ... " ++ path
+    else do
+      createDirectoryIfMissing True path
+      sayInfo verbose $ description ++ " ... created " ++ path
 
-          -- Delete the source .o file
-          objPathExists <- doesFileExist objPath
-          when (objPathExists) (removeFile objPath)
+-- | Remove a file, ignoring errors if it doesn't exist
+removeFileSafe :: FilePath -> IO ()
+removeFileSafe path = do
+  result <- try (removeFile path) :: IO (Either SomeException ())
+  case result of
+    Left _ -> return ()
+    Right _ -> return ()
+
+-- | Remove all contents of a directory (but keep the directory itself)
+cleanDirectory :: FilePath -> IO ()
+cleanDirectory dir = do
+  exists <- doesDirectoryExist dir
+  when exists $ do
+    removeDirectoryRecursive dir
+    createDirectoryIfMissing True dir
+
+-- | Remove all contents of a directory except entries in the keep list
+cleanDirectoryExcept :: FilePath -> [String] -> IO ()
+cleanDirectoryExcept dir keep = do
+  exists <- doesDirectoryExist dir
+  when exists $ do
+    entries <- listDirectory dir
+    forM_ entries $ \entry -> do
+      unless (entry `elem` keep) $ do
+        let path = dir </> entry
+        isDir <- doesDirectoryExist path
+        if isDir
+          then removeDirectoryRecursive path
+          else removeFile path
+
+-- | Check that a tool exists on PATH, error if not
+requireTool :: String -> String -> IO ()
+requireTool tool msg = do
+  found <- findExecutable tool
+  case found of
+    Nothing -> ioError . userError $ tool <> " not found on PATH. " <> msg
+    Just _ -> return ()
+
+-- | Check which tools from a list are missing. Returns list of missing tool names.
+checkTools :: [String] -> IO [String]
+checkTools tools = do
+  results <- forM tools $ \tool -> do
+    found <- findExecutable tool
+    return (tool, found)
+  return [t | (t, Nothing) <- results]

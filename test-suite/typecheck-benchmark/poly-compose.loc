@@ -1,0 +1,7 @@
+module pc (foo)
+
+import root ((.))
+
+id_ x = x
+
+foo = id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_

@@ -1,0 +1,7 @@
+module testcpp1 (cppsquare)
+
+import root-cpp
+
+source Cpp from "square.hpp" ("cppsquare")
+
+cppsquare :: Int -> Int

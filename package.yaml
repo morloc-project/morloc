@@ -1,9 +1,16 @@
 name:             morloc
-version:          0.60.0
+version:          0.61.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
-description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
+description: |
+  Morloc is a typed, multi-lingual workflow language that composes functions
+  across Python, C++, R, and other languages under a unified type system.
+  The compiler generates interprocess communication code, serialization
+  logic, and a dispatch binary from a single morloc source file.
+  See the GitHub README <https://github.com/morloc-project/morloc#readme>
+  for full documentation.
 category:         Language, Compiler, Code Generation
+tested-with:      GHC == 9.6.6
 license:          Apache-2.0
 license-file:     LICENSE
 author:           "Zebulun Arendsee" 
@@ -17,17 +24,58 @@ extra-source-files:
   - ChangeLog.md
   # libraries
   - data/nexus.c # nexus template
-  - data/pools/pool.R
-  - data/pools/pool.cpp
-  - data/pools/pool.py
-  # universal c library
-  - data/morloc.h
-  # msgpack langs
+  - data/lang/cpp/pool.cpp
+  # universal c library (split into modules)
+  - data/morloc/morloc.h
+  - data/morloc/macros.h
+  - data/morloc/memory.h
+  - data/morloc/call.h
+  - data/morloc/packet.h
+  - data/morloc/schema.h
+  - data/morloc/eval.h
+  - data/morloc/slurm.h
+  - data/morloc/utility.h
+  - data/morloc/mpack.h
+  - data/morloc/json.h
+  - data/morloc/cache.h
+  - data/morloc/xxhash.h
+  - data/morloc/cache.c
+  - data/morloc/cli.c
+  - data/morloc/eval.c
+  - data/morloc/ipc.c
+  - data/morloc/json.c
+  - data/morloc/mpack.c
+  - data/morloc/packet.c
+  - data/morloc/schema.c
+  - data/morloc/serialize.c
+  - data/morloc/shm.c
+  - data/morloc/slurm.c
+  - data/morloc/utility.c
+  # shared language config
+  - data/lang/languages.yaml
+  # per-language files
+  - data/lang/c/lang.yaml
+  - data/lang/cpp/lang.yaml
   - data/lang/cpp/cppmorloc.hpp
-  - data/lang/r/rmorloc.c
+  - data/lang/cpp/cppmorloc.cpp
+  - data/lang/cpp/morloc_pch.hpp
+  - data/lang/cpp/pool.cpp
+  - data/lang/cpp/init.sh
+  - data/lang/py/lang.yaml
   - data/lang/py/pymorloc.c
   - data/lang/py/setup.py
   - data/lang/py/Makefile
+  - data/lang/py/pool.py
+  - data/lang/py/init.sh
+  - data/lang/r/lang.yaml
+  - data/lang/r/rmorloc.c
+  - data/lang/r/pool.R
+  - data/lang/r/init.sh
+  - data/lang/julia/juliabridge.c
+  - data/lang/julia/MorlocRuntime.jl
+  - data/lang/julia/lang.yaml
+  - data/lang/julia/pool.jl
+  - data/lang/julia/init.sh
 
 default-extensions:
   - TypeOperators
@@ -35,6 +83,8 @@ default-extensions:
 dependencies:
   - base
   - aeson
+  - binary
+  - array
   - bytestring
   - containers
   - directory
@@ -57,6 +107,7 @@ dependencies:
   - scientific
   - template-haskell
   - text
+  - time
   - unordered-containers
   - yaml
   - zip-archive
@@ -77,6 +128,8 @@ ghc-options:
 
 library:
   source-dirs: library
+  build-tools:
+    - happy
 
 executables:
   morloc:
@@ -90,10 +143,25 @@ executables:
       - -O2
       - -haddock
     dependencies:
-      - morloc 
+      - morloc
       - base
       - optparse-applicative
       - text
+
+  morloc-codegen-generic:
+    main:          Main.hs
+    source-dirs:   exe/morloc-codegen-generic
+    ghc-options:
+      - -Wall
+      - -O2
+    dependencies:
+      - morloc
+      - base
+      - aeson
+      - binary
+      - bytestring
+      - text
+      - yaml
 
 tests:
   morloc-test:
@@ -111,6 +179,25 @@ tests:
       - tasty-golden
       - tasty-hunit
       - tasty-quickcheck
+
+  morloc-integration-test:
+    main:          Main.hs
+    source-dirs:   test-suite/integration
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - base
+      - async
+      - directory
+      - filepath
+      - process
+      - tasty
+      - tasty-hunit
+      - temporary
+      - text
+      - time
 
 benchmarks:
   morloc-bench:

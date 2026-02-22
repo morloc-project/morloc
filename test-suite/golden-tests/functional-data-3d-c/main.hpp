@@ -2,10 +2,8 @@
 
 std::function<int(int)> bar(bool cond1, bool cond2) {
     if (cond1) {
-        printf("cond1 %d\n", cond1);
         return [](int x) { return 2 * x; };
     } else {
-        printf("cond1\n");
         return [cond2](int x) { return 3 * x + (int)cond2; };
     }
 }

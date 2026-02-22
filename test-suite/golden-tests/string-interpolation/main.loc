@@ -1,4 +1,4 @@
-module foo (sr, spy, scpp)
+module main (sr, spy, scpp)
 
 import root
 import root-r

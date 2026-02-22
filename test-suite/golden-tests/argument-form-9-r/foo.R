@@ -1,3 +1,0 @@
-makeValue <- function(){
-    42
-}

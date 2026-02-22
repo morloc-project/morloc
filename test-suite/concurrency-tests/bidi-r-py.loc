@@ -1,0 +1,48 @@
+module bidiRPy (testBidi1, testBidi5, testBidi10, testBidi11, testBidi15)
+
+import root-r
+import root-py
+
+--' R identity on integers
+rId :: Int -> Int
+source R from "r_funcs.R" ("r_id" as rId)
+
+--' Python identity on integers
+pyId :: Int -> Int
+source Py from "py_funcs.py" ("py_id" as pyId)
+
+--' R collectors of various arities
+rCollect1 :: Int -> [Int]
+source R from "r_funcs.R" ("r_collect" as rCollect1)
+
+rCollect5 :: Int -> Int -> Int -> Int -> Int -> [Int]
+source R from "r_funcs.R" ("r_collect" as rCollect5)
+
+rCollect10 :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> [Int]
+source R from "r_funcs.R" ("r_collect" as rCollect10)
+
+rCollect11 :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> [Int]
+source R from "r_funcs.R" ("r_collect" as rCollect11)
+
+rCollect15 :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> [Int]
+source R from "r_funcs.R" ("r_collect" as rCollect15)
+
+--' Bidirectional: R calls Python, Python calls back to R
+pyViaR :: Int -> Int
+pyViaR x = pyId (rId x)
+
+--' Bidirectional with increasing callback counts (R entry point)
+testBidi1 :: [Int]
+testBidi1 = rCollect1 (pyViaR 1)
+
+testBidi5 :: [Int]
+testBidi5 = rCollect5 (pyViaR 1) (pyViaR 2) (pyViaR 3) (pyViaR 4) (pyViaR 5)
+
+testBidi10 :: [Int]
+testBidi10 = rCollect10 (pyViaR 1) (pyViaR 2) (pyViaR 3) (pyViaR 4) (pyViaR 5) (pyViaR 6) (pyViaR 7) (pyViaR 8) (pyViaR 9) (pyViaR 10)
+
+testBidi11 :: [Int]
+testBidi11 = rCollect11 (pyViaR 1) (pyViaR 2) (pyViaR 3) (pyViaR 4) (pyViaR 5) (pyViaR 6) (pyViaR 7) (pyViaR 8) (pyViaR 9) (pyViaR 10) (pyViaR 11)
+
+testBidi15 :: [Int]
+testBidi15 = rCollect15 (pyViaR 1) (pyViaR 2) (pyViaR 3) (pyViaR 4) (pyViaR 5) (pyViaR 6) (pyViaR 7) (pyViaR 8) (pyViaR 9) (pyViaR 10) (pyViaR 11) (pyViaR 12) (pyViaR 13) (pyViaR 14) (pyViaR 15)

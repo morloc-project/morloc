@@ -1,12 +1,8 @@
 all:
-	rm -f obs.txt
-	morloc make foo.loc 
-	./nexus foo 42 > obs.txt
-	./nexus bar 42 >> obs.txt
-
-build:
-	gcc -o nexus -O -I/home/z/.local/share/morloc/include nexus.c
-	g++ -O3 --std=c++17 -o pool-cpp.out pool.cpp -std=c++17 -I/home/z/.local/share/morloc/include -I.
+	rm -f *.err obs.txt
+	morloc make -o nexus main.loc 2> build.err
+	./nexus foo 42 > obs.txt 2> obs.err
+	./nexus bar 42 2>> obs.err  >> obs.txt
 
 clean:
-	rm -rf pool* nexus* __pycache__
+	rm -rf nexus pools __pycache__

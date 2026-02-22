@@ -1,0 +1,6 @@
+module tavern (randomClass)
+
+import util (choose)
+
+randomClass :: {Str}
+randomClass = choose ["Fighter"]

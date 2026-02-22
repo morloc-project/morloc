@@ -1,0 +1,6 @@
+module main (foo)
+
+import root-py
+
+foo :: Real -> Real
+foo x = x + "2.0" * 20.0

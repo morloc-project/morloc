@@ -1,0 +1,73 @@
+# Julia language descriptor for morloc compiler
+# Metadata fields (read by LangRegistry) + descriptor fields (read by generic translator)
+
+# Identity and metadata
+name: jl
+extension: jl
+aliases: ["julia"]
+is_compiled: false
+run_command: ["julia"]
+serial_type: "bytes"
+cost: 5
+
+# Descriptor identity (kept for compatibility with generic translator)
+ldName: julia
+ldExtension: jl
+
+# Literals
+ldBoolTrue: "true"
+ldBoolFalse: "false"
+ldNullLiteral: "nothing"
+
+# Constructors
+ldListStyle: bracket
+ldTupleConstructor: ""
+ldRecordConstructor: "Dict"
+ldRecordSeparator: "=>"
+
+# Access styles
+ldIndexStyle: one_bracket
+ldKeyAccess: bracket
+ldFieldAccess: dot
+
+# Serialize/deserialize function names (from juliamorloc.jl)
+ldSerializeFn: "MorlocRuntime.put_value"
+ldDeserializeFn: "MorlocRuntime.get_value"
+
+# Foreign call
+ldForeignCallFn: "MorlocRuntime.foreign_call"
+ldForeignCallIntSuffix: ""
+
+# Import syntax
+ldQualifiedImports: false
+ldIncludeRelToFile: true
+
+# Template fields
+ldAssignOp: "="
+ldLambdaTemplate: "({{args}}) -> {{body}}"
+ldSuspendExpr: "(() -> {{expr}})"
+ldSuspendBlock: ""
+ldPartialTemplate: "({{bound_args}}) -> {{fn}}({{all_args}})"
+ldImportTemplate: "include(\"{{path}}\")"
+ldSocketPathTemplate: "joinpath(global_state[\"tmpdir\"], {{socket}})"
+ldResourcePackTemplate: "[{{mem}}, {{time}}, {{cpus}}, {{gpus}}]"
+ldReturnTemplate: "return({{expr}})"
+ldFuncDefHeader: "function {{name}}({{args}})"
+ldBlockStyle: end_keyword
+ldBlockEnd: "end"
+ldErrorWrapOpen: ""
+ldErrorWrapClose: []
+ldPatternStyle: concat_call
+ldConcatFn: "string"
+ldMapStyle: list_comprehension
+ldDispatchLocalHeader: "dispatch = Dict("
+ldDispatchLocalEntry: "    {{mid}} => {{name}},"
+ldDispatchLocalFooter: ")"
+ldDispatchRemoteHeader: "remote_dispatch = Dict("
+ldDispatchRemoteEntry: "    {{mid}} => {{name}}_remote,"
+ldDispatchRemoteFooter: ")"
+
+# Pool template (loaded from pool.jl at runtime, left empty here)
+ldPoolTemplate: ""
+ldBreakMarker: "# <<<BREAK>>>"
+ldCommentMarker: "#"

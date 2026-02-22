@@ -1,0 +1,58 @@
+-- Tests passing records of primitives across languages and accessing fields
+
+module main (foo, bar)
+
+import root
+import root-r
+import root-py
+import root-cpp
+
+record Foo = Foo
+  { shitlists :: Map Str (Map Str Int)
+  , things :: [Str]
+  , size :: Int
+  }
+record Cpp => Foo = "foo_t"
+record Py  => Foo = "dict"
+record R   => Foo = "list"
+
+source Py from "foo.py" ("addShit" as addShitPy)
+source Cpp from "foo.hpp" ("addShit" as addShitCpp)
+source R from "foo.R" ("addShit" as addShitR)
+addShitCpp :: Str -> Int -> Foo -> Foo
+addShitPy  :: Str -> Int -> Foo -> Foo
+addShitR   :: Str -> Int -> Foo -> Foo
+
+emptyMap :: Map Str (Map Str Int)
+emptyMap = pack ([],[])
+
+-- test interop
+foo size =
+  ( addShitPy  "nextflow" 3
+  . addShitCpp "earwigs" 2
+  . addShitR   "tollroads" 1
+  . addShitPy  "campers who play load music" 0
+  ) { shitlists = emptyMap
+    , things = ["spiders"]
+    , size = size
+    }
+
+-- test access
+bar size = (.shitlists fpy, .things fcpp, .size fr) where
+    fpy = addShitPy "aa" 42
+      { shitlists = emptyMap
+      , things = ["a"]
+      , size = size
+      }
+
+    fcpp = addShitPy "bb" 42
+      { shitlists = emptyMap
+      , things = ["b"]
+      , size = size
+      }
+
+    fr = addShitR "cc" 42
+      { shitlists = emptyMap
+      , things = ["c"]
+      , size = size
+      }

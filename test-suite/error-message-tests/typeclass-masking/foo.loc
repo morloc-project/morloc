@@ -1,4 +1,7 @@
-module foo (foo) 
+module foo (*) 
 
-import foo2 (foo)
+instance Marcy a where
+  source Py ("foo")
+
+import foo2 (Marcy)
 import foo3 (Marcy)

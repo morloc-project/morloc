@@ -1,7 +1,0 @@
-module main (makeValue)
-
-source Cpp from "foo.hpp" ("makeValue")
-
-type Cpp => Int = "int" 
-
-makeValue :: () -> Int

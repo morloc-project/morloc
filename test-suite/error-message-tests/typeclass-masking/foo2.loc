@@ -1,5 +1,4 @@
-module foo2 (foo)
+module foo2 (Marcy)
 
-source Py ("foo")
-
-foo a :: a -> a -> a
+class Marcy a where
+  bar a :: a -> a -> a

@@ -1,0 +1,26 @@
+--- doPure ---
+42
+--- doBind ---
+EVAL 5
+11
+--- doBare ---
+EVAL 3
+42
+--- doChain ---
+EVAL 3
+EVAL 6
+18
+--- doMixed ---
+EVAL 1
+EVAL 5
+EVAL 10
+11
+--- doLet ---
+8
+--- doLetBind ---
+EVAL 5
+21
+--- doLetThunk ---
+EVAL 1
+EVAL 3
+8

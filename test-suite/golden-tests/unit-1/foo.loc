@@ -1,9 +1,0 @@
-module m (foo)
-
-import root-py
-
-source Py from "foo.py" ("urand")
-
-urand :: () -> Int
-
-foo = urand ()

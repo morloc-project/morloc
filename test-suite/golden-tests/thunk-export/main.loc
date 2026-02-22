@@ -1,0 +1,22 @@
+module main (rollOnce, rollArg, rollPy)
+
+source Cpp from "foo.hpp" ("sideEffect")
+source Py from "foo.py" ("pySideEffect")
+
+type Cpp => Int = "int"
+type Py => Int = "int"
+
+sideEffect :: Int -> {Int}
+pySideEffect :: Int -> {Int}
+
+-- Export a nullary thunk: should auto-force
+rollOnce :: {Int}
+rollOnce = sideEffect 5
+
+-- Export a function returning a thunk: should auto-force
+rollArg :: Int -> {Int}
+rollArg x = sideEffect x
+
+-- Export a nullary Python thunk: should auto-force
+rollPy :: {Int}
+rollPy = pySideEffect 7

@@ -1,0 +1,24 @@
+--- testCppOnce ---
+EVAL 5
+20
+--- testPyOnce ---
+EVAL 5
+20
+--- testROnce ---
+EVAL 5
+20
+--- testCppSeq ---
+EVAL 5
+EVAL 10
+30
+--- testPySeq ---
+EVAL 5
+EVAL 10
+30
+--- testRSeq ---
+EVAL 5
+EVAL 10
+30
+--- testShadow ---
+EVAL 5
+20

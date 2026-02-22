@@ -1,0 +1,57 @@
+-- Test let-binding semantics with thunks:
+--   - let x = !(e) in ... evaluates e once, x is shared (no re-evaluation)
+--   - !(e) + !(e) without let: evaluates e independently each time
+--   - Sequential let-bindings evaluate in order, each exactly once
+--   - Thunk can be let-bound without forcing, then forced multiple times
+-- sideEffect :: Int -> {Int} captures the side effect in the type.
+-- Each sideEffect call prints "EVAL <input>" to stderr and returns input * 2.
+
+module main (letShared, letIndep, letChain, letMultiForce, letNested)
+
+import root-cpp
+
+source Cpp from "foo.hpp" ("sideEffect", "add")
+
+type Cpp => Int = "int"
+
+sideEffect :: Int -> {Int}
+add :: Int -> Int -> Int
+
+-- Let-bound force: evaluates once, result shared in both uses
+-- sideEffect 5 -> "EVAL 5" once, x = 10, 10 + 10 = 20
+letShared :: Int
+letShared = let x = !(sideEffect 5) in add x x
+
+-- No let: each force site evaluates independently
+-- sideEffect 5 called twice -> "EVAL 5" twice, 10 + 10 = 20
+letIndep :: Int
+letIndep = add !(sideEffect 5) !(sideEffect 5)
+
+-- Sequential let-bindings: first result feeds into second
+-- sideEffect 3 -> "EVAL 3", x = 6
+-- sideEffect 6 -> "EVAL 6", y = 12
+-- 6 + 12 = 18
+letChain :: Int
+letChain =
+    let x = !(sideEffect 3)
+    let y = !(sideEffect x)
+    in add x y
+
+-- Thunk bound to variable without forcing, then forced twice independently
+-- sideEffect 5 called twice -> "EVAL 5" twice, 10 + 10 = 20
+letMultiForce :: Int
+letMultiForce =
+    let t = sideEffect 5
+    in add !t !t
+
+-- Nested let with sharing at each level
+-- sideEffect 2 -> "EVAL 2", a = 4
+-- sideEffect 4 -> "EVAL 4", b = 8
+-- c = 4 + 8 = 12
+-- 12 + 12 = 24
+letNested :: Int
+letNested =
+    let a = !(sideEffect 2)
+    let b = !(sideEffect a)
+    let c = add a b
+    in add c c

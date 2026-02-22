@@ -6,26 +6,36 @@ Description : The Bifunctor typeclass, with monadic instances
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+A custom Bifunctor class that provides monadic variants ('bimapM', 'firstM',
+'secondM') alongside the standard pure operations. The monadic variants are
+the primary interface; pure operations are derived via 'Identity'.
 -}
 module Morloc.Data.Bifunctor (Bifunctor (..)) where
 
 import Control.Monad.Identity (runIdentity)
 
 class Bifunctor f where
+  -- | Map monadically over both components
   bimapM :: (Monad m) => (a -> m a') -> (b -> m b') -> f a b -> m (f a' b')
 
+  -- | Map monadically over the first component
   firstM :: (Monad m) => (a -> m a') -> f a b -> m (f a' b)
   firstM f = bimapM f return
 
+  -- | Map monadically over the second component
   secondM :: (Monad m) => (b -> m b') -> f a b -> m (f a b')
   secondM g = bimapM return g
 
+  -- | Map over both components
   bimap :: (a -> a') -> (b -> b') -> f a b -> f a' b'
   bimap f g = runIdentity . bimapM (return . f) (return . g)
 
+  -- | Map over the first component
   first :: (a -> a') -> f a b -> f a' b
   first f = runIdentity . firstM (return . f)
 
+  -- | Map over the second component
   second :: (b -> b') -> f a b -> f a b'
   second f = runIdentity . secondM (return . f)
 

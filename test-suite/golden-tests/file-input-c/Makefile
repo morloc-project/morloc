@@ -1,7 +1,7 @@
 all:
-	rm -f obs.txt
-	morloc make foo.loc 
-	bash run.sh > obs.txt
+	rm -f *.err obs.txt
+	morloc make -o nexus main.loc 2> build.err
+	bash run.sh > obs.txt 2> obs.err
 
 clean:
-	rm -rf nexus* pool* a.json b.json
+	rm -rf nexus pools a.json b.json

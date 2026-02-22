@@ -1,0 +1,7 @@
+module testcpp2 (cppdouble)
+
+import root-cpp
+
+source Cpp from "src/dbl.hpp" ("cppdouble")
+
+cppdouble :: Int -> Int

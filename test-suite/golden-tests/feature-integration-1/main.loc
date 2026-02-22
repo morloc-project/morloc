@@ -1,0 +1,53 @@
+module main (test)
+
+import root-py
+
+-- No-argument declarations combining features
+
+val1 = .1 (10, 20)
+val2 = .(.1, .0) (10, 20)
+val3 = (_, 42) 7
+val4 = .1 ((_, 42) 7)
+add5 = (+) 5
+neg_add5 = neg . (+) 5
+get_fst = .0
+inc = (+) _ 1
+neg_snd = neg . .1
+add10_fst = (+) 10 . .0
+
+-- Declarations with arguments combining features
+
+get_second x = .1 x
+set_first v pair = .(.0 = v) pair
+pair_with x = (_, x)
+extract_neg x = neg (g x) where g = .1
+apply_template x = f 10 where f = (_, x)
+transform x = h x where h = neg . .0
+
+-- Map/fold with combined features
+
+neg_seconds xs = map (neg . .1) xs
+
+test =
+  [ val1 == 20
+  , val2 == (20, 10)
+  , val3 == (7, 42)
+  , val4 == 42
+  , add5 3 == 8
+  , neg_add5 3 == neg 8
+  , get_fst (100, 200) == 100
+  , inc 5 == 6
+  , neg_snd (3, 7) == neg 7
+  , add10_fst (5, 20) == 15
+  , get_second (1, 2) == 2
+  , set_first 99 (1, 2) == (99, 2)
+  , pair_with 42 7 == (7, 42)
+  , extract_neg (3, 7) == neg 7
+  , apply_template 42 == (10, 42)
+  , transform (5, 20) == neg 5
+  , neg_seconds [(1, 2), (3, 4)] == [neg 2, neg 4]
+  , map (_, 0) [1, 2, 3] == [(1, 0), (2, 0), (3, 0)]
+  , map .(.1 = 0) [(1, 2), (3, 4)] == [(1, 0), (3, 0)]
+  , map ((+) _ 1) [1, 2, 3] == [2, 3, 4]
+  , fold (\acc x -> acc + .1 x) 0 [(1, 10), (2, 20), (3, 30)] == 60
+  ]

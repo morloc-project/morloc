@@ -22,7 +22,8 @@ import System.FilePath ((</>))
 import qualified System.Directory as SD
 
 import Morloc (typecheckFrontend, typecheck)
-import Morloc.Namespace (Code(..), Config(..), MorlocMonad, MorlocError, defaultValue)
+import Morloc.Namespace.Prim (Code(..), Defaultable(..))
+import Morloc.Namespace.State (Config(..), MorlocMonad, MorlocError)
 import qualified Morloc.Monad as MM
 
 -- | Helper to read benchmark test files
@@ -42,8 +43,7 @@ emptyConfig = do
     , configPlaneCore   = "morloclib"
     , configTmpDir      = home <> "/.morloc/tmp"
     , configBuildConfig = home <> "/.morloc/.build-config.yaml"
-    , configLangPython3 = "python3"
-    , configLangR       = "Rscript"
+    , configLangOverrides = mempty
     }
 
 -- | Run a MorlocMonad action for benchmarking

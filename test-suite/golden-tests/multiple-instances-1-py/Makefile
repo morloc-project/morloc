@@ -1,7 +1,7 @@
 all:
-	rm -f obs.txt
-	morloc make foo.loc 
-	./nexus rms [1,2,3] > obs.txt
+	rm -f *.err obs.txt
+	morloc make -o nexus main.loc 2> build.err
+	./nexus rms [1,2,3] > obs.txt 2> obs.err
 
 clean:
-	rm -rf nexus* pool* __pycache__
+	rm -rf nexus pools __pycache__

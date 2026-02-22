@@ -1,0 +1,41 @@
+module main (appendAllInt, appendAllStr, showAppend)
+
+type Cpp => Int = "int"
+type Cpp => Str = "std::string"
+
+type Py => Int = "int"
+type Py => Str = "str"
+
+class Semigroup a where
+  append a :: a -> a -> a
+
+class Semigroup a => Showable a where
+  toStr a :: a -> Str
+
+instance Semigroup Int where
+  source Cpp from "foo.hpp" ("appendInt" as append)
+  source Py from "foo.py" ("appendInt" as append)
+
+instance Showable Int where
+  source Cpp from "foo.hpp" ("showInt" as toStr)
+  source Py from "foo.py" ("showInt" as toStr)
+
+instance Semigroup Str where
+  source Cpp from "foo.hpp" ("appendStr" as append)
+  source Py from "foo.py" ("appendStr" as append)
+
+instance Showable Str where
+  source Cpp from "foo.hpp" ("showStr" as toStr)
+  source Py from "foo.py" ("showStr" as toStr)
+
+-- single constraint, concrete Int
+appendAllInt :: Semigroup a => Int -> Int -> Int -> Int
+appendAllInt x y z = append x (append y z)
+
+-- single constraint, concrete Str
+appendAllStr :: Semigroup a => Str -> Str -> Str -> Str
+appendAllStr x y z = append x (append y z)
+
+-- multiple constraints, uses methods from both Showable and Semigroup
+showAppend :: (Semigroup a, Showable a) => Int -> Int -> Str
+showAppend x y = toStr (append x y)

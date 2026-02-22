@@ -1,0 +1,8 @@
+module strings (greet, strlen)
+
+import root-py
+
+source Py from "helpers.py" ("greet", "strlen")
+
+greet :: Str -> Str
+strlen :: Str -> Int

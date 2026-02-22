@@ -1,11 +1,11 @@
-module m (testpy, testr, testcpp)
+module main (testpy, testr, testcpp)
 
 import root
 import root-py
 import root-r
 import root-cpp
 
--- module m (foo)
+-- module main (foo)
 -- foo = idr ( (==) (map .1 [(1,True), (2,False)]) [True,False] )
 
 testr = idr

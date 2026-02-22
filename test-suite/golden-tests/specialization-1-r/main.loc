@@ -1,0 +1,12 @@
+module main (length, upper)
+
+type Bytes = Str
+
+type R => Str = "character"
+type R => Bytes = "raw" 
+type R => Int = "integer" 
+
+source R from "foo.R" ("length", "upper")
+
+length :: Bytes -> Int 
+upper :: Bytes -> Bytes

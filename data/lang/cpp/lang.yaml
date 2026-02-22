@@ -1,0 +1,8 @@
+# C++ language metadata for morloc compiler
+name: cpp
+extension: cpp
+aliases: ["c++"]
+is_compiled: true
+run_command: []
+serial_type: "uint8_t*"
+cost: 0

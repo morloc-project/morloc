@@ -1,0 +1,7 @@
+module testpy2 (pyadd)
+
+import root-py
+
+source Py from "src/mathutil.py" ("pyadd")
+
+pyadd :: Int -> Int -> Int

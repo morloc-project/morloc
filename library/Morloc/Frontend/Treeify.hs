@@ -1,17 +1,22 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
 {- |
 Module      : Morloc.Frontend.Treeify
-Description : Translate from the frontend DAG to the backend AnnoS AST forest
+Description : Dissolve the module DAG into per-export 'AnnoS' call trees
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+After linking populates 'MorlocState', this module builds one 'AnnoS' tree
+per exported function by inlining declarations, resolving sources, and
+renaming lambda-bound variables for uniqueness. The resulting trees are the
+input to the typechecker and code generator.
 -}
 module Morloc.Frontend.Treeify (treeify) where
 
 import qualified Data.Set as Set
-import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.DAG as DAG
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -26,9 +31,12 @@ import qualified Morloc.Monad as MM
 data TermOrigin = Declared ExprI | Sourced Source
   deriving (Show, Ord, Eq)
 
+data BindKind = LambdaBound | LetBound
+  deriving (Show, Eq)
+
 -- Manage unique naming in each tree
 data Namer = Namer
-  { namerMap :: Map.Map EVar EVar
+  { namerMap :: Map.Map EVar (EVar, BindKind)
   , namerIndex :: Int
   }
   deriving (Show)
@@ -53,20 +61,42 @@ treeify d
   | Map.size d == 0 = return []
   | otherwise = case DAG.roots d of
       -- if no parentless element exists, then the graph must be empty or cyclic
-      [] -> MM.throwError (CyclicDependency "cyclic import dependency in treeify")
+      [] -> MM.throwSystemError "cyclic import dependency in treeify"
       -- else if exactly one module name key (k) is found
       [k] -> do
         case DAG.lookupNode k d of
           -- if the key is not in the DAG, then something is dreadfully wrong codewise
-          Nothing -> MM.throwError . DagMissingKey . render $ pretty k
-          (Just (AST.findExport -> ExportMany symbols)) -> do
-            d' <- DAG.mapNodeM linkAndRemoveAnnotations d |>> nullify
+          Nothing -> MM.throwSystemError $ "Compiler bug (__FILE__:__LINE__): Module DAG is missing key" <+> pretty k
+          (Just (AST.findExport -> ExportMany symbols groups)) -> do
+            d' <- DAG.mapNodeM linkAndRemoveAnnotations d
 
             -- move all to state, after this the DAG will no longer be needed
             _ <- MFL.link d'
 
-            -- find all term exports (do not include type exports)
-            let exports = [(i, v) | (i, TermSymbol v) <- Set.toList symbols]
+            -- find all term exports (ungrouped + grouped)
+            let allSymbols = Set.unions (symbols : [exportGroupMembers g | g <- groups])
+                exports = [(i, v) | (i, TermSymbol v) <- Set.toList allSymbols]
+
+            -- Build export group info for the state
+            let exportGroupInfo =
+                  Map.fromList
+                    [ ( exportGroupName g
+                      , (exportGroupDesc g, [i | (i, TermSymbol _) <- Set.toList (exportGroupMembers g)])
+                      )
+                    | g <- groups
+                    ]
+
+            -- Validate command groups
+            let ungroupedNames = Set.fromList [v | (_, TermSymbol v) <- Set.toList symbols]
+                groupNames = Set.fromList [exportGroupName g | g <- groups]
+                collisions = Set.intersection (Set.map unEVar ungroupedNames) groupNames
+            -- group names must not collide with ungrouped command names
+            if not (Set.null collisions)
+              then
+                MM.throwSystemError $
+                  "Command group names collide with ungrouped command names:"
+                    <+> list (map pretty (Set.toList collisions))
+              else return ()
 
             -- - store all exported indices in state
             -- - Add the export name to state. Failing to do so here, will lose
@@ -77,6 +107,7 @@ treeify d
                   s
                     { stateExports = map fst exports
                     , stateName = Map.union (stateName s) (Map.fromList exports)
+                    , stateExportGroups = exportGroupInfo
                     }
               )
 
@@ -91,29 +122,9 @@ treeify d
       -- multiple projects in parallel with potentially shared information and
       -- constraints could be valuable.
       roots ->
-        MM.throwError . CallTheMonkeys . render $
-          "How did you end up with so many roots?" <+> tupled (map pretty roots)
-
--- TODO: document
-nullify :: DAG m e ExprI -> DAG m e ExprI
-nullify = DAG.mapNode f
-  where
-    f :: ExprI -> ExprI
-    f (ExprI i (SigE (Signature v n (EType t ps cs docs)))) = ExprI i (SigE (Signature v n (EType (nullifyT t) ps cs docs)))
-    f (ExprI i (ModE m es)) = ExprI i (ModE m (map f es))
-    f (ExprI i (AssE v e es)) = ExprI i (AssE v (f e) (map f es))
-    f e = e
-
-    nullifyT :: TypeU -> TypeU
-    nullifyT (FunU ts t) = FunU (filter (not . isNull) (map nullifyT ts)) (nullifyT t)
-    nullifyT (ExistU v (ts, tc) (rs, rc)) = ExistU v (map nullifyT ts, tc) (map (second nullifyT) rs, rc)
-    nullifyT (ForallU v t) = ForallU v (nullifyT t)
-    nullifyT (AppU t ts) = AppU (nullifyT t) (map nullifyT ts)
-    nullifyT (NamU o v ds rs) = NamU o v (map nullifyT ds) (map (second nullifyT) rs)
-    nullifyT t = t
-
-    isNull :: TypeU -> Bool
-    isNull t = t == BT.unitU
+        MM.throwSystemError $
+          "Compiler bug (__FILE__:__LINE__): unsupported multi-rooted module DAG:"
+            <+> tupled (map pretty roots)
 
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
 linkAndRemoveAnnotations = f
@@ -135,6 +146,9 @@ linkAndRemoveAnnotations = f
       return . ExprI i $ NamE (zip (map fst rs) es')
     f (ExprI i (AppE e es)) = ExprI i <$> (AppE <$> f e <*> mapM f es)
     f (ExprI i (LamE vs e)) = ExprI i <$> (LamE vs <$> f e)
+    f (ExprI i (LetE bindings body)) = ExprI i <$> (LetE <$> mapM (\(v, e) -> (,) v <$> f e) bindings <*> f body)
+    f (ExprI i (SuspendE e)) = ExprI i <$> (SuspendE <$> f e)
+    f (ExprI i (ForceE e)) = ExprI i <$> (ForceE <$> f e)
     f e@(ExprI _ _) = return e
 
 {- | Build the call tree for a single nexus command. The result is ambiguous,
@@ -199,13 +213,14 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
           let etypes = map (fromJust . termGeneral) ts
           return $ (namer', VarS v (PolymorphicExpr cls clsName t (zip etypes ess)))
 
-        -- Terms not associated with TermTypes objects must be lambda-bound
+        -- Terms not associated with TermTypes objects must be lambda-bound or let-bound
         -- These terms will be renamed for uniqueness
         _ -> do
           MM.sayVVV $ "bound term" <+> pretty v
           case Map.lookup v (namerMap namer) of
-            (Just v') -> return (namer, BndS v')
-            Nothing -> error $ "undefined term in namer map (" <> show v <> "): " <> show namer -- MM.throwError $ UndefinedVariable v
+            (Just (v', LambdaBound)) -> return (namer, BndS v')
+            (Just (v', LetBound)) -> return (namer, LetBndS v')
+            Nothing -> MM.throwSourcedError gi0 $ "Undefined term in namer map:" <+> pretty v
       where
         termtypesToAnnoS :: Int -> Namer -> TermTypes -> MorlocMonad (Namer, [AnnoS Int ManyPoly Int])
         termtypesToAnnoS gi n t = do
@@ -225,19 +240,21 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
       let keys = map fst rs
       return (namer', NamS (zip keys vals))
     f namer (LamE vs e) = do
-      let namer' = foldr updateRenamer namer vs
-          vs' = map (fromJust . (flip Map.lookup) (namerMap namer')) vs
+      let namer' = foldr (updateRenamer LambdaBound) namer vs
+          vs' = map (fst . fromJust . (flip Map.lookup) (namerMap namer')) vs
       (_, e') <- collectAnnoS namer' e
       -- return the original name, the lambda bound terms are defined only below
       return (namer, LamS vs' e')
-      where
-        updateRenamer :: EVar -> Namer -> Namer
-        updateRenamer v (Namer rmap ridx) =
-          let v' = EV (unEVar v <> "@" <> MT.show' ridx)
-           in Namer
-                { namerMap = Map.insert v v' rmap
-                , namerIndex = ridx + 1
-                }
+    f namer (LetE ((v, e1) : rest) body) = do
+      (namer1, e1') <- collectAnnoS namer e1
+      let namer2 = updateRenamer LetBound v namer1
+          v' = fst $ fromJust $ Map.lookup v (namerMap namer2)
+          innerBody = case rest of
+            [] -> body
+            _ -> ExprI (exprIIdx body) (LetE rest body)
+      (_, body') <- collectAnnoS namer2 innerBody
+      return (namer, LetS v' e1' body')
+    f _ (LetE [] _) = error "Bug in collectExprS: empty let bindings"
     f namer (AppE e es) = do
       (namer', e') <- collectAnnoS namer e
       (namer'', es') <- statefulMapM collectAnnoS namer' es
@@ -248,8 +265,25 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (LogE x) = return (namer, LogS x)
     f namer (StrE x) = return (namer, StrS x)
     f namer (PatE p) = return (namer, ExeS (PatCall p))
+    f namer (SuspendE e) = do
+      (namer', e') <- collectAnnoS namer e
+      return (namer', SuspendS e')
+    f namer (ForceE e) = do
+      (namer', e') <- collectAnnoS namer e
+      return (namer', ForceS e')
     -- all other expressions are strictly illegal here and represent compiler bugs
     f _ e = error $ "Bug in collectExprS: " <> show (render (pretty e))
+
+updateRenamer :: BindKind -> EVar -> Namer -> Namer
+updateRenamer kind v (Namer rmap ridx) =
+  let v' = EV (unEVar v <> "@" <> MT.show' ridx)
+   in Namer
+        { namerMap = Map.insert v (v', kind) rmap
+        , namerIndex = ridx + 1
+        }
+
+exprIIdx :: ExprI -> Int
+exprIIdx (ExprI i _) = i
 
 reindexExprI :: ExprI -> MorlocMonad ExprI
 reindexExprI (ExprI i e) = ExprI <$> newIndex i <*> reindexExpr e
@@ -263,6 +297,9 @@ reindexExpr (LamE vs e) = LamE vs <$> reindexExprI e
 reindexExpr (LstE es) = LstE <$> mapM reindexExprI es
 reindexExpr (NamE rs) = NamE <$> mapM (\(k, e) -> (,) k <$> reindexExprI e) rs
 reindexExpr (TupE es) = TupE <$> mapM reindexExprI es
+reindexExpr (LetE bindings body) = LetE <$> mapM (\(v, e) -> (,) v <$> reindexExprI e) bindings <*> reindexExprI body
+reindexExpr (SuspendE e) = SuspendE <$> reindexExprI e
+reindexExpr (ForceE e) = ForceE <$> reindexExprI e
 reindexExpr e = return e
 
 -- FIXME: when I add linking to line numbers, I'll need to update that map

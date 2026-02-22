@@ -1,4 +1,4 @@
-module testmap (testMapWorks)
+module main (testMapWorks)
 
 import root-py
 

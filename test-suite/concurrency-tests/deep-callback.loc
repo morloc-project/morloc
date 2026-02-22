@@ -1,0 +1,63 @@
+module deepCallback (testDepth2, testDepth4, testDepth6, testDepth12, testDeep4x5, testDeep6x5)
+
+import root-r
+import root-py
+
+--' R identity on integers
+rId :: Int -> Int
+source R from "r_funcs.R" ("r_id" as rId)
+
+--' Python identity on integers
+pyId :: Int -> Int
+source Py from "py_funcs.py" ("py_id" as pyId)
+
+--' Python collectors
+pyCollect1 :: Int -> [Int]
+source Py from "py_funcs.py" ("py_collect" as pyCollect1)
+
+pyCollect5 :: Int -> Int -> Int -> Int -> Int -> [Int]
+source Py from "py_funcs.py" ("py_collect" as pyCollect5)
+
+--' Depth-2 chain: Py -> R -> Py
+depth2 :: Int -> Int
+depth2 x = rId (pyId x)
+
+--' Depth-4 chain: Py -> R -> Py -> R -> Py
+depth4 :: Int -> Int
+depth4 x = rId (pyId (rId (pyId x)))
+
+--' Depth-6 chain: Py -> R -> Py -> R -> Py -> R -> Py
+depth6 :: Int -> Int
+depth6 x = rId (pyId (rId (pyId (rId (pyId x)))))
+
+--' Depth-12 chain: 6 round trips
+depth12 :: Int -> Int
+depth12 x = rId (pyId (rId (pyId (rId (pyId (rId (pyId (rId (pyId (rId (pyId x)))))))))))
+
+-- NOTE: Depth beyond 2*(nproc-1) will deadlock because each cross-language
+-- hop blocks a worker. Depth-24 (12 round trips) needs ~12 workers per pool,
+-- exceeding the typical nproc-1 = 11 on a 12-core system.
+
+--' Single depth-2 call
+testDepth2 :: [Int]
+testDepth2 = pyCollect1 (depth2 42)
+
+--' Single depth-4 call
+testDepth4 :: [Int]
+testDepth4 = pyCollect1 (depth4 42)
+
+--' Single depth-6 call
+testDepth6 :: [Int]
+testDepth6 = pyCollect1 (depth6 42)
+
+--' Single depth-12 call (6 round trips, sequential)
+testDepth12 :: [Int]
+testDepth12 = pyCollect1 (depth12 42)
+
+--' 5 parallel depth-4 calls
+testDeep4x5 :: [Int]
+testDeep4x5 = pyCollect5 (depth4 1) (depth4 2) (depth4 3) (depth4 4) (depth4 5)
+
+--' 5 parallel depth-6 calls
+testDeep6x5 :: [Int]
+testDeep6x5 = pyCollect5 (depth6 1) (depth6 2) (depth6 3) (depth6 4) (depth6 5)

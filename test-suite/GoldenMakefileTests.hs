@@ -1,3 +1,7 @@
+{- |
+Module      : GoldenMakefileTests
+Description : Run golden tests that build and execute full morloc programs
+-}
 module GoldenMakefileTests
   ( goldenMakefileTest
   ) where

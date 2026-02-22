@@ -1,9 +1,13 @@
 {- |
 Module      : UI
-Description : Define the Morloc CLI
+Description : CLI argument parsing with optparse-applicative
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Defines the command-line interface for the @morloc@ executable using
+optparse-applicative: subcommands (make, typecheck, install, init, dump,
+completion), their options, and help text.
 -}
 module UI
   ( opts
@@ -13,6 +17,10 @@ module UI
   , InstallCommand (..)
   , TypecheckCommand (..)
   , DumpCommand (..)
+  , ListCommand (..)
+  , ListKind (..)
+  , UninstallCommand (..)
+  , NewCommand (..)
   ) where
 
 import Morloc.Module (GitProtocol (..), OverwriteProtocol (..))
@@ -31,19 +39,25 @@ opts =
 
 data CliCommand
   = CmdMake MakeCommand
-  | CmdInit InitCommand
   | CmdInstall InstallCommand
+  | CmdUninstall UninstallCommand
+  | CmdList ListCommand
   | CmdTypecheck TypecheckCommand
   | CmdDump DumpCommand
+  | CmdInit InitCommand
+  | CmdNew NewCommand
 
 cliParser :: Parser CliCommand
 cliParser =
   hsubparser
     ( makeSubcommand
         <> installSubcommand
+        <> uninstallSubcommand
+        <> listSubcommand
         <> typecheckSubcommand
-        <> initSubcommand
         <> dumpSubcommand
+        <> initSubcommand
+        <> newSubcommand
     )
 
 data MakeCommand = MakeCommand
@@ -52,6 +66,9 @@ data MakeCommand = MakeCommand
   , makeVerbose :: Int
   , makeVanilla :: Bool
   , makeOutfile :: String
+  , makeInstall :: Bool
+  , makeForce :: Bool
+  , makeInclude :: [String]
   , makeScript :: String
   }
 
@@ -63,6 +80,9 @@ makeCommandParser =
     <*> optVerbose
     <*> optVanilla
     <*> optOutfile
+    <*> optMakeInstall
+    <*> optMakeForce
+    <*> optMakeInclude
     <*> optScript
 
 makeSubcommand :: Mod CommandFields CliCommand
@@ -88,12 +108,30 @@ initCommandParser =
 initSubcommand :: Mod CommandFields CliCommand
 initSubcommand = command "init" (info (CmdInit <$> initCommandParser) (progDesc "Initialize morloc environment"))
 
+data NewCommand = NewCommand
+  { newName :: String
+  }
+
+newCommandParser :: Parser NewCommand
+newCommandParser =
+  NewCommand
+    <$> strArgument
+      ( metavar "NAME"
+          <> value ""
+          <> help "Package name (defaults to current directory name)"
+      )
+
+newSubcommand :: Mod CommandFields CliCommand
+newSubcommand = command "new" (info (CmdNew <$> newCommandParser) (progDesc "Create a new morloc package"))
+
 data InstallCommand = InstallCommand
   { installConfig :: String
   , installVanilla :: Bool
   , installVerbose :: Int
   , installForce :: OverwriteProtocol
   , installUseSSH :: GitProtocol
+  , installNoTypecheck :: Bool
+  , installBuild :: Bool
   , installModuleStrings :: [String]
   }
 
@@ -105,6 +143,8 @@ makeInstallParser =
     <*> optVerbose
     <*> optForce
     <*> optUseSSH
+    <*> optNoTypecheck
+    <*> optInstallBuild
     <*> optModuleStrings
 
 installSubcommand :: Mod CommandFields CliCommand
@@ -160,6 +200,53 @@ makeDumpParser =
     <*> optExpression
     <*> optScript
 
+data ListKind = ListModules | ListPrograms
+  deriving (Show, Eq)
+
+data ListCommand = ListCommand
+  { listPattern :: Maybe String
+  , listConfig :: String
+  , listVanilla :: Bool
+  , listVerbose :: Int
+  , listKind :: Maybe ListKind
+  }
+
+makeListParser :: Parser ListCommand
+makeListParser =
+  ListCommand
+    <$> optListPattern
+    <*> optConfig
+    <*> optVanilla
+    <*> optVerbose
+    <*> optListKind
+
+listSubcommand :: Mod CommandFields CliCommand
+listSubcommand =
+  command "list" (info (CmdList <$> makeListParser) (progDesc "List installed modules and programs"))
+
+data UninstallCommand = UninstallCommand
+  { uninstallNames :: [String]
+  , uninstallConfig :: String
+  , uninstallVanilla :: Bool
+  , uninstallKind :: Maybe ListKind
+  , uninstallDryRun :: Bool
+  }
+
+makeUninstallParser :: Parser UninstallCommand
+makeUninstallParser =
+  UninstallCommand
+    <$> optUninstallNames
+    <*> optConfig
+    <*> optVanilla
+    <*> optUninstallKind
+    <*> optDryRun
+
+uninstallSubcommand :: Mod CommandFields CliCommand
+uninstallSubcommand =
+  command
+    "uninstall"
+    (info (CmdUninstall <$> makeUninstallParser) (progDesc "Uninstall a module or program"))
+
 optExpression :: Parser Bool
 optExpression =
   switch
@@ -192,6 +279,21 @@ optUseSSH =
     SshProtocol
     ( long "ssh"
         <> help "Use SSH protocol for remote git access"
+    )
+
+optNoTypecheck :: Parser Bool
+optNoTypecheck =
+  switch
+    ( long "no-typecheck"
+        <> help "Skip typechecking during install"
+    )
+
+optInstallBuild :: Parser Bool
+optInstallBuild =
+  switch
+    ( long "build"
+        <> short 'b'
+        <> help "Build and install executable after module install"
     )
 
 optModuleStrings :: Parser [String]
@@ -255,8 +357,33 @@ optOutfile =
         <> help "The name of the generated executable"
     )
 
+optMakeInstall :: Parser Bool
+optMakeInstall =
+  switch
+    ( long "install"
+        <> help "Install module to PATH"
+    )
+
+optMakeForce :: Parser Bool
+optMakeForce =
+  switch
+    ( long "force"
+        <> short 'f'
+        <> help "Overwrite existing install"
+    )
+
+optMakeInclude :: Parser [String]
+optMakeInclude =
+  many
+    ( strOption
+        ( long "include"
+            <> metavar "PATTERN"
+            <> help "File pattern to include in install"
+        )
+    )
+
 optScript :: Parser String
-optScript = argument str (metavar "<script>")
+optScript = argument str (metavar "<script>" <> value "main.loc")
 
 optType :: Parser Bool
 optType =
@@ -264,4 +391,38 @@ optType =
     ( long "type"
         <> short 't'
         <> help "Parse a typestring instread of an expression"
+    )
+
+optListKind :: Parser (Maybe ListKind)
+optListKind =
+  flag' (Just ListModules) (long "modules" <> help "List only modules")
+    <|> flag' (Just ListPrograms) (long "programs" <> help "List only programs")
+    <|> pure Nothing
+
+optListPattern :: Parser (Maybe String)
+optListPattern =
+  optional . strArgument $
+    ( metavar "PATTERN"
+        <> help "Filter by subsequence match on name"
+    )
+
+optUninstallNames :: Parser [String]
+optUninstallNames =
+  some
+    . strArgument
+    $ ( metavar "NAME"
+          <> help "Names of modules or programs to uninstall"
+      )
+
+optUninstallKind :: Parser (Maybe ListKind)
+optUninstallKind =
+  flag' (Just ListModules) (long "module" <> help "Uninstall only the module")
+    <|> flag' (Just ListPrograms) (long "program" <> help "Uninstall only the program")
+    <|> pure Nothing
+
+optDryRun :: Parser Bool
+optDryRun =
+  switch
+    ( long "dry-run"
+        <> help "Show what would be removed without removing"
     )

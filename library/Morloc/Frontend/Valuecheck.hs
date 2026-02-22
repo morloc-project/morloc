@@ -3,15 +3,21 @@
 
 {- |
 Module      : Morloc.Frontend.Valuecheck
-Description : Check for contradictions between implementations
+Description : Detect contradictions between alternative implementations
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+When a term has multiple implementations (e.g. a declaration and a source,
+or multiple sources), this module checks that they are not provably
+contradictory. For instance, two constant expressions that return different
+literal values for the same type are flagged as errors.
 -}
 module Morloc.Frontend.Valuecheck (valuecheck, checkPair) where
 
 import qualified Data.Set as Set
 import qualified Data.Text as DT
+import Morloc.Data.Doc
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 
@@ -33,6 +39,24 @@ toE (AnnoS g _ (ExeS (SrcCall s))) = SrcP g s
 toE (AnnoS g _ (ExeS (PatCall (PatternText s ss)))) =
   LitP g (MStr (s <> DT.concat ["#{}" <> s' | s' <- ss]))
 toE (AnnoS g _ (ExeS (PatCall (PatternStruct s)))) = PatP g s
+toE (AnnoS g _ (LetBndS v)) = BndP g v
+toE (AnnoS _ _ (LetS _ _ body)) = toE body
+toE (AnnoS g _ (SuspendS e)) = SuspendP g (toE e)
+toE (AnnoS g _ (ForceS e)) = ForceP g (toE e)
+
+indexOfE :: E -> Int
+indexOfE (BndP (Idx i _) _) = i
+indexOfE (VarP (Idx i _) _ _) = i
+indexOfE (AppP (Idx i _) _ _) = i
+indexOfE (LamP (Idx i _) _ _) = i
+indexOfE (LstP (Idx i _) _) = i
+indexOfE (TupP (Idx i _) _) = i
+indexOfE (NamP (Idx i _) _) = i
+indexOfE (LitP (Idx i _) _) = i
+indexOfE (SrcP (Idx i _) _) = i
+indexOfE (PatP (Idx i _) _) = i
+indexOfE (SuspendP (Idx i _) _) = i
+indexOfE (ForceP (Idx i _) _) = i
 
 -- Check the harmony of typed implementations.
 --
@@ -46,20 +70,22 @@ valuecheck e0 = check (toE e0) >> return e0
 -- find the sets of implementations in VarS expressions
 -- compare all pairs of implementations
 check :: E -> MorlocMonad ()
-check (VarP _ _ es) = mapM_ (uncurry checkPair) (pairwise es)
+check (VarP (Idx i _) _ es) = mapM_ (uncurry (checkPair i)) (pairwise es)
   where
     -- find all unique pairs
     pairwise :: [a] -> [(a, a)]
-    pairwise xs = [(xs !! i, xs !! j) | i <- [0 .. length xs - 1], j <- [0 .. length xs - 1], j > i]
+    pairwise xs = [(xs !! i', xs !! j') | i' <- [0 .. length xs - 1], j' <- [0 .. length xs - 1], j' > i']
 check (AppP _ e es) = mapM_ check (e : es)
 check (LamP _ _ e) = check e
 check (LstP _ es) = mapM_ check es
 check (TupP _ es) = mapM_ check es
 check (NamP _ (map snd -> es)) = mapM_ check es
+check (SuspendP _ e) = check e
+check (ForceP _ e) = check e
 check _ = return ()
 
 -- check for contradictions in one pair of expressions
-checkPair :: E -> E -> MorlocMonad ()
+checkPair :: Int -> E -> E -> MorlocMonad ()
 -- These pass
 --   foo x y = (x, y)
 --   foo a b = (a, b)
@@ -69,10 +95,10 @@ checkPair :: E -> E -> MorlocMonad ()
 --   foo a b = (b, a)
 --
 -- This requires unified names (see LamS case)
-checkPair e1@(BndP _ v1) e2@(BndP _ v2)
+checkPair i e1@(BndP _ v1) e2@(BndP _ v2)
   | v1 == v2 = return ()
-  | otherwise = valueError e1 e2
-checkPair e1@(VarP g v1 es1) (VarP _ v2 es2)
+  | otherwise = valueError i e1 e2 "Non-equivalent variable patterns"
+checkPair _ e1@(VarP g v1 es1) (VarP _ v2 es2)
   -- Same term, so es1 and es2 must be identical
   | v1 == v2 = check e1
   -- If the terms are different all the instances must still be the same and the
@@ -80,15 +106,15 @@ checkPair e1@(VarP g v1 es1) (VarP _ v2 es2)
   | otherwise = check (VarP g v1 (es1 <> es2))
 -- evaluate all applications of lambdas
 --  case #1 remove an empty lambda
-checkPair (AppP _ (LamP _ [] e1) _) e2 = checkPair e1 e2
+checkPair i (AppP _ (LamP _ [] e1) _) e2 = checkPair i e1 e2
 --  case #2 remove an empty application
-checkPair (AppP _ f@LamP {} []) e2 = checkPair f e2
+checkPair i (AppP _ f@LamP {} []) e2 = checkPair i f e2
 --  case #3 substitute on argument into the lambda
-checkPair (AppP g1 (LamP g2 (v : vs) e1) (x : xs)) e2 =
+checkPair i (AppP g1 (LamP g2 (v : vs) e1) (x : xs)) e2 =
   let e1' = substituteExpr v x e1
-   in checkPair (AppP g1 (LamP g2 vs e1') xs) e2
+   in checkPair i (AppP g1 (LamP g2 vs e1') xs) e2
 --  if there is an applied lambda on the other side, reverse
-checkPair e1 e2@(AppP _ LamP {} _) = checkPair e2 e1
+checkPair i e1 e2@(AppP _ LamP {} _) = checkPair i e2 e1
 -- No value checking is possible between applications
 --
 -- If the function applied is not the same in both terms, we can
@@ -107,15 +133,15 @@ checkPair e1 e2@(AppP _ LamP {} _) = checkPair e2 e1
 -- In general, a function is free to map different inputs to the same
 -- output. Without further information, we can conclude nothing. So all
 -- applications must pass.
-checkPair AppP {} AppP {} = return ()
-checkPair e1@AppP {} e2 = valueError e1 e2
-checkPair e1 e2@AppP {} = valueError e1 e2
+checkPair _ AppP {} AppP {} = return ()
+checkPair i e1@AppP {} e2 = valueError i e1 e2 "Cannot check beyond source boundary"
+checkPair i e1 e2@AppP {} = valueError i e1 e2 "Cannot check beyond source boundary"
 -- Not that SrcP is something sourced, not necessarily a function, it may be a
 -- constant.
-checkPair (SrcP (Idx _ t) src1) (SrcP _ src2) = compareForeignFunctions t src1 src2
-checkPair e1@(SrcP _ _) e2 = checkPair e2 e1
-checkPair e1 e2@SrcP {}
-  | isSimple e1 = valueError e1 e2
+checkPair i (SrcP (Idx _ t) src1) (SrcP _ src2) = compareForeignFunctions i t src1 src2
+checkPair i e1@(SrcP _ _) e2 = checkPair i e2 e1
+checkPair i e1 e2@SrcP {}
+  | isSimple e1 = valueError i e1 e2 "Cannot compare source value to non-source expression"
   | otherwise = return ()
   where
     -- For VarP, simplicity of ANY instance indicates an error
@@ -130,6 +156,8 @@ checkPair e1 e2@SrcP {}
     isSimple LamP {} = False
     isSimple SrcP {} = False
     isSimple PatP {} = False
+    isSimple (SuspendP _ e) = isSimple e
+    isSimple (ForceP _ e) = isSimple e
 
 -- reduce empty lambdas
 --
@@ -152,7 +180,7 @@ checkPair e1 e2@SrcP {}
 -- -- compare arguments, starting with first
 -- n
 -- m
-checkPair (LamP _ vs1 s1) (LamP _ vs2 s2) = checkPair s1' s2'
+checkPair i (LamP _ vs1 s1) (LamP _ vs2 s2) = checkPair i s1' s2'
   where
     used =
       Set.unions
@@ -165,36 +193,40 @@ checkPair (LamP _ vs1 s1) (LamP _ vs2 s2) = checkPair s1' s2'
     newvars =
       filter
         (\v -> not $ Set.member v used)
-        [EV $ DT.pack ("x" <> show i) | i <- [(0 :: Int) ..]]
+        [EV $ DT.pack ("x" <> show j) | j <- [(0 :: Int) ..]]
 
     s1' = foldr (\(v, r) s -> substituteEVar v r s) s1 (zip vs1 newvars)
     s2' = foldr (\(v, r) s -> substituteEVar v r s) s2 (zip vs2 newvars)
-checkPair _ LamP {} = undefined
-checkPair LamP {} _ = undefined
+checkPair _ _ (LamP {}) = error "Illegal empty lambda"
+checkPair _ (LamP {}) _ = error "Illegal empty lambda"
 -- check all container elements
 --  * their sizes must agree
 --  * their pairwise elements must agree
-checkPair e1@(LstP _ xs) e2@(LstP _ ys)
-  | length xs /= length ys = valueError e1 e2
-  | otherwise = mapM_ (uncurry checkPair) (zip xs ys)
-checkPair (TupP _ xs) (TupP _ ys) =
-  mapM_ (uncurry checkPair) (zip xs ys)
+checkPair i e1@(LstP _ xs) e2@(LstP _ ys)
+  | length xs /= length ys = valueError i e1 e2 "Containers of unequal length"
+  | otherwise = mapM_ (uncurry (checkPair i)) (zip xs ys)
+checkPair i (TupP _ xs) (TupP _ ys) =
+  mapM_ (uncurry (checkPair i)) (zip xs ys)
 -- check records, no assumption of order
-checkPair (NamP _ []) (NamP _ _) = return ()
-checkPair (NamP g1 ((k, x) : rs1)) (NamP g2 rs2) =
+checkPair _ (NamP _ []) (NamP _ _) = return ()
+checkPair i (NamP g1 ((k, x) : rs1)) (NamP g2 rs2) =
   case lookup k rs2 of
-    (Just y) -> checkPair x y >> checkPair (NamP g1 rs1) (NamP g2 rs2)
+    (Just y) -> checkPair i x y >> checkPair i (NamP g1 rs1) (NamP g2 rs2)
     Nothing -> error "Unreachable if typechecker has passed"
 -- Primitives must be equal
-checkPair e1@(LitP _ x) e2@(LitP _ y)
+checkPair i e1@(LitP _ x) e2@(LitP _ y)
   | x == y = return ()
-  | otherwise = valueError e1 e2
+  | otherwise =
+      valueError i e1 e2 $
+        "Cannot equate non-equal primitives:\n"
+          <> "a:" <+> pretty x
+          <> "b:" <+> pretty y
 -- All other cases should fail.
 --
 -- Actually, all other cases should already have failed while typechecking.
 --
 -- It should not be possible to reach this case, should it?
-checkPair e1 e2 = valueError e1 e2
+checkPair i e1 e2 = valueError i e1 e2 "Non-equivalent forms"
 
 -- Currently we do not check the equivalence of sourced terms
 --
@@ -202,11 +234,11 @@ checkPair e1 e2 = valueError e1 e2
 -- checking source code
 --
 -- This operation may be expensive (if we are doing it right)
-compareForeignFunctions :: Type -> Source -> Source -> MorlocMonad ()
-compareForeignFunctions _ _ _ = return ()
+compareForeignFunctions :: Int -> Type -> Source -> Source -> MorlocMonad ()
+compareForeignFunctions _ _ _ _ = return ()
 
-valueError :: E -> E -> MorlocMonad ()
-valueError e1 e2 = MM.throwError $ ValueContradiction e1 e2
+valueError :: Int -> E -> E -> MDoc -> MorlocMonad ()
+valueError i e1 e2 msg = MM.throwUnificationError (indexOfE e1) (indexOfE e2) i ("Error in value checker:" <+> msg)
 
 substituteEVar :: EVar -> EVar -> E -> E
 substituteEVar oldVar newVar e0
@@ -230,6 +262,8 @@ substituteEVar oldVar newVar e0
     f used idx (LstP g es) = LstP g $ map (f used idx) es
     f used idx (TupP g es) = TupP g $ map (f used idx) es
     f used idx (NamP g rs) = NamP g $ map (second (f used idx)) rs
+    f used idx (SuspendP g e) = SuspendP g (f used idx e)
+    f used idx (ForceP g e) = ForceP g (f used idx e)
     f _ _ e = e
 
     relabelLam :: Set.Set EVar -> Int -> [EVar] -> E -> (Set.Set EVar, Int, [EVar], E)
@@ -268,6 +302,8 @@ freeTerms = f Set.empty
     f boundterms (LstP _ es) = Set.unions . map (f boundterms) $ es
     f boundterms (TupP _ es) = Set.unions . map (f boundterms) $ es
     f boundterms (NamP _ (map snd -> es)) = Set.unions . map (f boundterms) $ es
+    f boundterms (SuspendP _ e) = f boundterms e
+    f boundterms (ForceP _ e) = f boundterms e
     f _ _ = Set.empty
 
 substituteExpr :: EVar -> E -> E -> E
@@ -289,3 +325,5 @@ substituteExpr oldVar replacementExpr = f
     f e@LitP {} = e
     f e@SrcP {} = e
     f e@PatP {} = e
+    f (SuspendP g e) = SuspendP g (f e)
+    f (ForceP g e) = ForceP g (f e)

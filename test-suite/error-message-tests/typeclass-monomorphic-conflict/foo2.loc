@@ -1,0 +1,5 @@
+module foo2 (foo)
+
+source Py ("foo")
+
+foo a :: a -> a -> a

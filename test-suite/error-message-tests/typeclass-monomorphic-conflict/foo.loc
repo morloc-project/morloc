@@ -1,0 +1,4 @@
+module foo (foo) 
+
+import foo2 (foo)
+import foo3 (Marcy)

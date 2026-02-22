@@ -1,0 +1,4 @@
+--- forceConst ---
+42
+--- forceFun ---
+42

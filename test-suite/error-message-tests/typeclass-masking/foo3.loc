@@ -2,6 +2,3 @@ module foo3 (Marcy)
 
 class Marcy a where
   foo a :: a -> a -> a
-
-instance Marcy a where
-  source Py ("foo")

@@ -1,4 +1,4 @@
-module m (foo)
+module main (foo)
 
 type Cpp => Real = "double"
 type Cpp => Str = "std::string"

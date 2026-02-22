@@ -1,0 +1,22 @@
+all:
+	rm -f *.err obs.txt
+	morloc make -o nexus main.loc 2> build.err
+	echo "--- doPure ---" > obs.txt
+	./nexus doPure >> obs.txt 2>> obs.err
+	echo "--- doBind ---" >> obs.txt
+	./nexus doBind >> obs.txt 2>> obs.err
+	echo "--- doBare ---" >> obs.txt
+	./nexus doBare >> obs.txt 2>> obs.err
+	echo "--- doChain ---" >> obs.txt
+	./nexus doChain >> obs.txt 2>> obs.err
+	echo "--- doMixed ---" >> obs.txt
+	./nexus doMixed >> obs.txt 2>> obs.err
+	echo "--- doLet ---" >> obs.txt
+	./nexus doLet >> obs.txt 2>> obs.err
+	echo "--- doLetBind ---" >> obs.txt
+	./nexus doLetBind >> obs.txt 2>> obs.err
+	echo "--- doLetThunk ---" >> obs.txt
+	./nexus doLetThunk >> obs.txt 2>> obs.err
+
+clean:
+	rm -rf nexus pools log __pycache__

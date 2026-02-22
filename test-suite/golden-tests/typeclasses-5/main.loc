@@ -1,4 +1,4 @@
-module sos (square, sumOfSquares)
+module main (square, sumOfSquares)
 
 import root-cpp
 

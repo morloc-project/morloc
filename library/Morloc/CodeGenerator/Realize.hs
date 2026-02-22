@@ -1,12 +1,19 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
 {- |
 Module      : Morloc.CodeGenerator.Realize
-Description : Resolve all implementation polymorphism
+Description : Select concrete implementations for each polymorphic call site
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+When a term has multiple candidate implementations (different languages,
+different source files), this pass selects the best one at each call site
+based on language affinity and minimizing cross-language transitions. The
+result is a fully-realized tree where every node has exactly one
+implementation.
 -}
 module Morloc.CodeGenerator.Realize
   ( realityCheck
@@ -15,8 +22,8 @@ module Morloc.CodeGenerator.Realize
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.SystemConfig as MCS
 import Morloc.Data.Doc
+import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
-import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 
@@ -45,7 +52,7 @@ realityCheck es = do
 data RState = RState
   { rLangs :: [Lang]
   , rApplied :: [AnnoS (Indexed Type) Many Int]
-  , rBndVars :: Map.Map EVar (AnnoS (Indexed Type) Many Int)
+  , rBndVars :: Map EVar (AnnoS (Indexed Type) Many Int)
   }
 
 emptyRState =
@@ -69,11 +76,37 @@ realize ::
         (AnnoS (Indexed Type) One (Indexed Lang))
     )
 realize s0 = do
+  registry <- MM.gets stateLangRegistry
+  realizeWithRegistry registry s0
+
+realizeWithRegistry ::
+  LangRegistry ->
+  AnnoS (Indexed Type) Many Int ->
+  MorlocMonad
+    ( Either
+        (AnnoS (Indexed Type) One ())
+        (AnnoS (Indexed Type) One (Indexed Lang))
+    )
+realizeWithRegistry registry s0 = do
   e@(AnnoS _ li _) <- scoreAnnoS emptyRState s0 >>= collapseAnnoS Nothing |>> removeVarS
   case li of
     (Idx _ Nothing) -> makeGAST e |>> Left
-    (Idx _ _) -> Right <$> propagateDown e
+    (Idx _ _) -> propagateDown e |>> Right
   where
+    pairwiseCost :: Lang -> Lang -> Int
+    pairwiseCost l1 l2
+      | l1 == l2 = case Map.lookup (langName l2) (lrSameLangCosts registry) of
+          Nothing -> lrDefaultSameCost registry
+          (Just score) -> score
+      | otherwise = case Map.lookup (langName l1, langName l2) (lrOptimizedPairs registry) of
+          Nothing -> case Map.lookup (langName l2) (lrCrossLangCosts registry) of
+            Nothing -> lrDefaultCrossCost registry
+            (Just score) -> score
+          (Just score) -> score
+
+    languageCost :: Lang -> Int
+    languageCost lang = pairwiseCost lang lang
+
     -- \| Depth first pass calculating scores for each language. Alternates with
     -- scoresSExpr.
     scoreAnnoS ::
@@ -138,6 +171,20 @@ realize s0 = do
     scoreExpr rstat (IntS x, i) = return (IntS x, zipLang i rstat)
     scoreExpr rstat (LogS x, i) = return (LogS x, zipLang i rstat)
     scoreExpr rstat (StrS x, i) = return (StrS x, zipLang i rstat)
+    scoreExpr rstat (LetS v e1 e2, i) = do
+      e1' <- scoreAnnoS rstat e1
+      e2' <- scoreAnnoS rstat e2
+      -- include RHS scores so unused let bindings (e.g. from do-block bare
+      -- statements) still propagate their language requirement
+      let best = minPairs (scoresOf e1' ++ scoresOf e2')
+      return (LetS v e1' e2', Idx i best)
+    scoreExpr rstat (LetBndS v, i) = return (LetBndS v, zipLang i rstat)
+    scoreExpr rstat (SuspendS x, i) = do
+      x' <- scoreAnnoS rstat x
+      return (SuspendS x', Idx i (scoresOf x'))
+    scoreExpr rstat (ForceS x, i) = do
+      x' <- scoreAnnoS rstat x
+      return (ForceS x', Idx i (scoresOf x'))
 
     -- calculate the score for an application based on the score of the function
     -- and the scores of the arguments
@@ -168,7 +215,7 @@ realize s0 = do
       [ ( l1
         , s1
             + sum
-              [ minimumDef 999999999 [s2 + Lang.pairwiseCost l1 l2 | (l2, s2) <- pairs]
+              [ minimumDef 999999999 [s2 + pairwiseCost l1 l2 | (l2, s2) <- pairs]
               | pairs <- pairss
               ]
         )
@@ -206,7 +253,7 @@ realize s0 = do
                 , sum
                     [ minimumDef
                       999999999
-                      [ score + Lang.pairwiseCost l1 l2
+                      [ score + pairwiseCost l1 l2
                       | (l2, score) <- pairs
                       ]
                     | pairs <- pairss
@@ -237,13 +284,13 @@ realize s0 = do
       Lang -> -- child lang (should always be given if we are working from scored pairs)
       Int -> -- score
       Int
-    cost (Just l1) l2 score = score + Lang.pairwiseCost l1 l2
+    cost (Just l1) l2 score = score + pairwiseCost l1 l2
     cost _ _ score = score
 
     -- FIXME: in the future, this function should be replaced by an estimate of
     -- the function runtime, for now I will just base it off languages.
     callCost :: Source -> Int
-    callCost src = Lang.languageCost (srcLang src)
+    callCost src = languageCost (srcLang src)
 
     collapseExpr ::
       Type ->
@@ -251,16 +298,13 @@ realize s0 = do
       (ExprS (Indexed Type) Many (Indexed [(Lang, Int)]), Indexed [(Lang, Int)]) ->
       MorlocMonad (ExprS (Indexed Type) One (Indexed (Maybe Lang)), Indexed (Maybe Lang))
 
-    -- This case should be caught earlier
-    collapseExpr _ _ (VarS v (Many []), _) =
-      error $ "Unreachable case found - no implementations for '" <> show v <> "'"
+    collapseExpr _ _ (VarS v (Many []), Idx i _) =
+      MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty v)
     -- Select one implementation for the given term
     collapseExpr gt l1 (VarS v (Many xs), Idx i _) = do
       let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) xs
       (x, lang) <- case minXs of
-        [] ->
-          MM.throwError . GeneratorError . render $
-            "No implementation found for" <+> squotes (pretty v)
+        [] -> MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty v)
         [x] -> handleOne x
         choices -> mapM handleOne choices >>= handleMany gt
       return (VarS v (One x), Idx i lang)
@@ -291,7 +335,7 @@ realize s0 = do
               case TE.reduceType gscope (type2typeu gt') of
                 (Just gt'') -> handleMany (typeOf gt'') xs'
                 Nothing ->
-                  MM.throwError . GeneratorError . render $
+                  MM.throwSourcedError i $
                     "I couldn't find implementation for" <+> squotes (pretty v) <+> "gt' = " <+> pretty gt'
             [x'] -> return x'
             (x' : _) -> return x'
@@ -299,7 +343,7 @@ realize s0 = do
     ----- NOTE: Some cases are inseperable, the code above does not
     ----- account for this, which may allow incorrect code to be
     ----- generated.
-    -- xs' ->  MM.throwError . InseperableDefinitions . render
+    -- xs' ->  MM.throwSystemError
     --   $ "no rule to separate the following sourced functions of type" <+> parens (pretty gt)":\n"
     --   <> indent 2 (vsep [ "*" <+> pretty t <+> ":" <+> pretty y | y@(AnnoS (Idx _ t) _ _, _)  <- xs'])
 
@@ -335,6 +379,20 @@ realize s0 = do
     collapseExpr _ lang (IntS x, Idx i _) = return (IntS x, Idx i lang)
     collapseExpr _ lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
     collapseExpr _ lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
+    collapseExpr _ l1 (LetS v e1 e2, Idx i ss) = do
+      lang <- chooseLanguage l1 ss
+      e1' <- collapseAnnoS lang e1
+      e2' <- collapseAnnoS lang e2
+      return (LetS v e1' e2', Idx i lang)
+    collapseExpr _ lang (LetBndS v, Idx i _) = return (LetBndS v, Idx i lang)
+    collapseExpr _ l1 (SuspendS x, Idx i ss) = do
+      lang <- chooseLanguage l1 ss
+      x' <- collapseAnnoS lang x
+      return (SuspendS x', Idx i lang)
+    collapseExpr _ l1 (ForceS x, Idx i ss) = do
+      lang <- chooseLanguage l1 ss
+      x' <- collapseAnnoS lang x
+      return (ForceS x', Idx i lang)
 
     chooseLanguage :: Maybe Lang -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
     chooseLanguage l1 ss = do
@@ -369,7 +427,8 @@ realize s0 = do
     propagateDown ::
       AnnoS (Indexed Type) One (Indexed (Maybe Lang)) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
-    propagateDown (AnnoS _ (Idx _ Nothing) _) = MM.throwError . CallTheMonkeys $ "Nothing is not OK"
+    propagateDown (AnnoS _ (Idx i Nothing) _) =
+      MM.throwSourcedError i $ "Compiler bug: (__FILE__:__LINE__) - Unexpected Nothing"
     propagateDown e@(AnnoS _ (Idx _ (Just lang0)) _) = f lang0 e
       where
         f ::
@@ -392,6 +451,10 @@ realize s0 = do
             (LogS x) -> return (LogS x)
             (StrS x) -> return (StrS x)
             (ExeS x) -> return (ExeS x)
+            (LetS v e1 e2) -> LetS v <$> f lang e1 <*> f lang e2
+            (LetBndS v) -> return (LetBndS v)
+            (SuspendS x) -> SuspendS <$> f lang x
+            (ForceS x) -> ForceS <$> f lang x
           return (AnnoS g (Idx i lang) e'')
 
 {- | This function is called on trees that contain no language-specific
@@ -426,6 +489,9 @@ removeVarS (AnnoS g c (LamS vs x)) = AnnoS g c (LamS vs (removeVarS x))
 removeVarS (AnnoS g c (LstS xs)) = AnnoS g c (LstS (map removeVarS xs))
 removeVarS (AnnoS g c (TupS xs)) = AnnoS g c (TupS (map removeVarS xs))
 removeVarS (AnnoS g c (NamS rs)) = AnnoS g c (NamS (map (second removeVarS) rs))
+removeVarS (AnnoS g c (LetS v e1 e2)) = AnnoS g c (LetS v (removeVarS e1) (removeVarS e2))
+removeVarS (AnnoS g c (SuspendS e)) = AnnoS g c (SuspendS (removeVarS e))
+removeVarS (AnnoS g c (ForceS e)) = AnnoS g c (ForceS (removeVarS e))
 removeVarS x = x
 
 -- Check if this expression is a data structure that contains

@@ -1,0 +1,7 @@
+module testpy1 (pygreet)
+
+import root-py
+
+source Py from "helpers.py" ("pygreet")
+
+pygreet :: Str -> Str

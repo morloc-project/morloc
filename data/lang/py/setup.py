@@ -1,22 +1,26 @@
 import os
 from setuptools import setup, Extension
-import numpy as np  # Import numpy
+import numpy as np
 
-# Ensure numpy is installed before running setup
 try:
     np_include_path = np.get_include()
 except AttributeError:
     raise RuntimeError("Numpy is required to build this extension")
 
+morloc_home = os.environ.get(
+    'MORLOC_HOME',
+    os.path.expanduser('~/.local/share/morloc')
+)
 
 module = Extension(
     'pymorloc',
     sources=['pymorloc.c'],
     include_dirs=[
-        os.path.expanduser('~/.local/share/morloc/include'),
-        np_include_path  # Add numpy include directory
+        os.path.join(morloc_home, 'include'),
+        np_include_path
     ],
-    library_dirs=[os.path.expanduser('~/.local/share/morloc/lib')],
+    library_dirs=[os.path.join(morloc_home, 'lib')],
+    runtime_library_dirs=[os.path.join(morloc_home, 'lib')],
     libraries=['morloc']
 )
 

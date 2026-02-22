@@ -1,12 +1,18 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
 {- |
 Module      : Morloc.Frontend.Typecheck
-Description : Core inference module
+Description : Bidirectional type inference and checking for general types
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Implements bidirectional type inference over the 'AnnoS' trees produced by
+'Treeify'. Checks general (language-independent) types and resolves type
+aliases. Concrete (language-specific) types are checked later after language
+segregation in the code generator.
 -}
 module Morloc.Frontend.Typecheck (typecheck, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
@@ -35,7 +41,7 @@ typecheck = mapM run
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let g0 = Gamma {gammaCounter = 0, gammaContext = []}
+      let g0 = Gamma {gammaCounter = 0, gammaContext = [], gammaSolved = Map.empty}
       (g1, _, e1) <- synthG g0 e0
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g1:"
@@ -118,6 +124,7 @@ findTypeKindSize v = head . catMaybes . f
     f (NamU _ v' ts1 (map snd -> ts2))
       | v == v' = [Just (1 + (length ts1))]
       | otherwise = concat $ map f (ts1 <> ts2)
+    f (ThunkU t) = f t
 
 -- TypeU --> Type
 resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int
@@ -126,6 +133,8 @@ resolveTypes (AnnoS (Idx i t) ci e) =
   where
     f :: ExprS (Indexed TypeU) Many Int -> ExprS (Indexed Type) Many Int
     f (BndS x) = BndS x
+    f (LetBndS x) = LetBndS x
+    f (LetS v e1 e2) = LetS v (resolveTypes e1) (resolveTypes e2)
     f (VarS v xs) = VarS v (fmap resolveTypes xs)
     f (ExeS exe) = ExeS exe
     f (AppS x xs) = AppS (resolveTypes x) (map resolveTypes xs)
@@ -138,6 +147,8 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (LogS x) = LogS x
     f (StrS x) = StrS x
     f UniS = UniS
+    f (SuspendS e') = SuspendS (resolveTypes e')
+    f (ForceS e') = ForceS (resolveTypes e')
 
 resolveInstances ::
   Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
@@ -156,7 +167,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f scope g0 (VarS v (PolymorphicExpr clsName _ _ rss)) = do
       -- find all instances that are a subtype of the inferred type
       -- this resolve general aliases all the way to the general termini
-      let rssSubtypes = [x | x@(EType t _ _ _, _) <- rss, isSubtypeOf2 scope t gt]
+      let rssSubtypes = [x | x@(EType t _ _, _) <- rss, isSubtypeOf2 scope t gt]
 
       -- find the most specific instance at the general level, this does not
       -- consider a type to be more specific it is more evaluated.
@@ -175,29 +186,20 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       --
       --  They will be separated later when concrete types are considered. From
       --  the general perspective, the evaluate to being equal.
-      (g2, es1) <- case mostSpecific [t | (EType t _ _ _, _) <- rssSubtypes] of
+      (g2, es1) <- case mostSpecific [t | (EType t _ _, _) <- rssSubtypes] of
         -- if there are no suitable instances, die
-        [] -> do
-          MM.sayVVV $
-            "resolveInstance empty"
-              <> "\n  rss:" <+> pretty rss
-              <> "\n  rssSubtypes:" <+> pretty rssSubtypes
-              <> "\n  gt:" <+> pretty gt
-          MM.throwError $ NoInstanceFound clsName v
-
+        [] ->
+          throwTypeError genIndex $
+            "No instance found for" <+> pretty clsName
+              <> "::"
+              <> pretty v
+              <> "\n  Are you missing a top-level type signature?"
         -- There may be many suitable instances from the general type level,
         -- however, they may differ at the concrete level, so keep all for know
         -- and let the concrete inference code sort things out later.
         manyTypes -> do
           -- filter out just the instances that are in the most specific set
           let es0 = concat [rs | (t, rs) <- rssSubtypes, etype t `elem` manyTypes]
-
-          MM.sayVVV $
-            "resolveInstances:"
-              <> "\n  es0:" <+> encloseSep "{" "}" "," (map pretty es0)
-              <> "\n  manyTypes:" <+> pretty manyTypes
-              <> "\n  gt:" <+> pretty gt
-
           g1 <- connectInstance g0 es0
           return (g1, es0)
 
@@ -217,6 +219,12 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       (g1, es') <- statefulMapM resolveInstances g0 (map snd rs)
       return (g1, NamS (zip (map fst rs) es'))
 
+    -- let expressions
+    f _ g0 (LetBndS v) = return (g0, LetBndS v)
+    f _ g0 (LetS v e1 e2) = do
+      (g1, e1') <- resolveInstances g0 e1
+      (g2, e2') <- resolveInstances g1 e2
+      return (g2, LetS v e1' e2')
     -- primitives
     f _ g0 UniS = return (g0, UniS)
     f _ g0 (BndS v) = return (g0, BndS v)
@@ -225,18 +233,20 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f _ g0 (LogS x) = return (g0, LogS x)
     f _ g0 (StrS x) = return (g0, StrS x)
     f _ g0 (ExeS x) = return (g0, ExeS x)
+    f _ g0 (SuspendS e) = resolveInstances g0 e |>> second SuspendS
+    f _ g0 (ForceS e) = resolveInstances g0 e |>> second ForceS
 
     connectInstance :: Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
     connectInstance g0 [] = return g0
     connectInstance g0 (AnnoS (Idx i t) _ _ : es) = do
       scope <- MM.getGeneralScope i
       case subtype scope gt t g0 of
-        (Left e) -> MM.throwError $ GeneralTypeError e
+        (Left e) -> throwTypeError i e
         (Right g1) -> connectInstance g1 es
 
 -- prepare a general, indexed typechecking error
-gerr :: Int -> TypeError -> MorlocMonad a
-gerr i e = MM.throwError $ IndexedError i (GeneralTypeError e)
+throwTypeError :: Int -> MDoc -> MorlocMonad a
+throwTypeError i msg = MM.throwSourcedError i ("General type error:" <+> msg)
 
 checkG ::
   Gamma ->
@@ -376,7 +386,7 @@ synthE i g0 (AppS f xs0) = do
 -- Synthesize lambda expressions. The key optimization here is to avoid
 -- re-synthesizing after eta expansion - we synthesize the body once with
 -- proper context, then construct the expanded form directly.
-synthE _ g0 (LamS vs x) = do
+synthE parentIdx g0 (LamS vs x) = do
   -- Create existentials for lambda-bound variables and add to context
   let (g1, paramTypes) = statefulMap (\g' v -> newvar (unEVar v <> "_x") g') g0 vs
       g2 = g1 ++> zipWith AnnG vs paramTypes
@@ -390,9 +400,14 @@ synthE _ g0 (LamS vs x) = do
     FunU extraArgTypes retType -> do
       -- Body returns a function: eta-expand WITHOUT re-synthesizing
       -- Create new bound variables for the extra arguments
-      (g4, newVarsWithTypes) <- statefulMapM (\g' t -> do
-        let (g'', v) = evarname g' "v"
-        return (g'', (v, t))) g3 extraArgTypes
+      (g4, newVarsWithTypes) <-
+        statefulMapM
+          ( \g' t -> do
+              let (g'', v) = evarname g' "v"
+              return (g'', (v, t))
+          )
+          g3
+          extraArgTypes
 
       let newVars = map fst newVarsWithTypes
           appliedExtraTypes = map (apply g4 . snd) newVarsWithTypes
@@ -401,12 +416,16 @@ synthE _ g0 (LamS vs x) = do
       let g5 = g4 ++> zipWith AnnG newVars appliedExtraTypes
 
       -- Create typed variable references for the new parameters
-      newVarExprs <- mapM (\(v, t) -> do
-        idx <- MM.getCounter
-        return $ AnnoS (Idx idx t) idx (BndS v)) (zip newVars appliedExtraTypes)
+      newVarExprs <-
+        mapM
+          ( \(v, t) -> do
+              idx <- MM.getCounterWithPos parentIdx
+              return $ AnnoS (Idx idx t) idx (BndS v)
+          )
+          (zip newVars appliedExtraTypes)
 
       -- Create the application of body to new variables
-      appIdx <- MM.getCounter
+      appIdx <- MM.getCounterWithPos parentIdx
       let appliedRetType = apply g5 retType
           appliedBodyExpr = AppS (applyGen g5 bodyExpr) newVarExprs
           appliedBodyAnno = AnnoS (Idx appIdx appliedRetType) appIdx appliedBodyExpr
@@ -416,7 +435,6 @@ synthE _ g0 (LamS vs x) = do
           fullType = FunU allParamTypes appliedRetType
 
       return (g5, fullType, LamS (vs ++ newVars) appliedBodyAnno)
-
     _ -> do
       -- Body is not a function: just return the lambda as-is
       let funType = apply g3 (FunU paramTypes bodyType)
@@ -533,12 +551,34 @@ synthE _ g (ExeS exe) = do
   return (g', t, ExeS exe)
 synthE _ g (BndS v) = do
   (g', t') <- case lookupE v g of
-    -- yes, return the solved type
     (Just t) -> return (g, t)
-    -- no, then I don't know what it is and will return an existential
-    -- if this existential is never solved, then it will become universal later
     Nothing -> return $ newvar (unEVar v <> "_u") g
   return (g', t', BndS v)
+synthE _ g (LetBndS v) = do
+  (g', t') <- case lookupE v g of
+    (Just t) -> return (g, t)
+    Nothing -> return $ newvar (unEVar v <> "_u") g
+  return (g', t', LetBndS v)
+synthE _ g (LetS v e1 e2) = do
+  (g1, t1, e1') <- synthG g e1
+  let g2 = g1 ++> [AnnG v t1]
+  (g3, t2, e2') <- synthG g2 e2
+  return (g3, t2, LetS v e1' e2')
+synthE _ g (SuspendS e) = do
+  (g1, t1, e1) <- synthG g e
+  return (g1, ThunkU t1, SuspendS e1)
+synthE i g (ForceS e) = do
+  (g1, t1, e1) <- synthG g e
+  case apply g1 t1 of
+    ThunkU a -> return (g1, a, ForceS e1)
+    ExistU _ _ _ -> do
+      -- solve ?v = {?b} for fresh ?b
+      let (g2, bv) = tvarname g1 "thunkInner_"
+          bt = ExistU bv ([], Open) ([], Open)
+          thunkT = ThunkU bt
+      g3 <- subtype' i (apply g2 t1) thunkT g2
+      return (g3, apply g3 bt, ForceS (applyGen g3 e1))
+    t -> throwTypeError i $ "Cannot force non-thunk type:" <+> pretty t
 
 etaExpandSynthE ::
   Int ->
@@ -552,87 +592,83 @@ etaExpandSynthE ::
     , TypeU
     , ExprS (Indexed TypeU) ManyPoly Int
     )
-etaExpandSynthE i g1 funType0 funExpr0 f xs0 = do
-  -- eta expand
-  mayExpanded <- etaExpand g1 f xs0 funType0
+etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
+  let normalType = normalizeType funType0
+      numArgs = length xs0
 
-  case mayExpanded of
-    -- If the term was eta-expanded, retypecheck it
-    (Just (g', x')) -> synthE' i g' x'
-    -- Otherwise proceed
-    Nothing -> do
-      -- extend the function type with the type of the expressions it is applied to
-      (g2, funType1, inputExprs) <- application' i g1 xs0 (normalizeType funType0)
+  -- Check for arity errors before proceeding
+  case normalType of
+    FunU (length -> numParams) _
+      | numArgs > numParams ->
+          throwTypeError i $ "Invalid function application of type:\n  " <> prettyTypeU funType0
+    _ -> return ()
 
-      MM.sayVVV $
-        "  funType1:" <+> pretty funType1
-          <> "\n  inputExprs:" <+> list (map pretty inputExprs)
+  -- Process available args through application (no re-synthesis)
+  (g2, funType1, inputExprs) <- application' i g1 xs0 normalType
 
-      -- determine the type after application
-      appliedType <- case funType1 of
-        (FunU ts t) -> case drop (length inputExprs) ts of
-          [] -> return t -- full application
-          rs -> return $ FunU rs t -- partial application
-        _ -> error "impossible"
+  MM.sayVVV $
+    "  funType1:" <+> pretty funType1
+      <> "\n  inputExprs:" <+> list (map pretty inputExprs)
 
-      -- put the AppS back together with the synthesized function and input expressions
-      return (g2, apply g2 appliedType, AppS (applyGen g2 funExpr0) inputExprs)
+  case funType1 of
+    FunU ts t -> case drop numArgs ts of
+      -- full application
+      [] -> return (g2, apply g2 t, AppS funExpr0 inputExprs)
+      -- partial application: eta-expand without re-synthesis
+      remainingParams -> do
+        (g3, newVarsWithTypes) <-
+          statefulMapM
+            ( \g' tp -> do
+                let (g'', v) = evarname g' "v"
+                return (g'', (v, apply g2 tp))
+            )
+            g2
+            remainingParams
 
-etaExpand ::
-  Gamma ->
-  AnnoS Int ManyPoly Int ->
-  [AnnoS Int ManyPoly Int] ->
-  TypeU ->
-  MorlocMonad (Maybe (Gamma, ExprS Int ManyPoly Int))
-etaExpand g0 f0 xs0 t0 = etaExpand' g0 f0 xs0 t0
-  where
-    -- ignore qualification
-    etaExpand' g f xs (ForallU _ t) = etaExpand' g f xs t
-    -- find the number of applied terms for the term and the type
-    etaExpand' g f@(AnnoS gidx _ _) xs@(length -> termSize) (normalizeType -> FunU (length -> typeSize) _)
-      -- if they are equal, then the function is fully applied, do nothing
-      | termSize == typeSize = return Nothing
-      -- if there are fewer terms, then eta expand
-      | termSize < typeSize = Just <$> etaExpandE (AppS f xs)
-      -- if there are more terms than the type permits, then raise an error
-      | otherwise = gerr gidx $ InvalidApplication f xs t0
-      where
-        etaExpandE :: ExprS Int ManyPoly Int -> MorlocMonad (Gamma, ExprS Int ManyPoly Int)
-        etaExpandE e@(AppS _ _) = tryExpand (typeSize - termSize) e
-        etaExpandE e@(LamS vs _) = tryExpand (typeSize - termSize - length vs) e
-        etaExpandE e = return (g, e)
+        let newVars = map fst newVarsWithTypes
+            newTypes = map snd newVarsWithTypes
+            g4 = g3 ++> zipWith AnnG newVars newTypes
 
-        tryExpand n e
-          -- A partially applied term intended to return a function (e.g., `(\x y -> add x y) x |- Real -> Real`)
-          -- A fully applied term
-          | n <= 0 = return (g, e)
-          | otherwise = expand n g e
-    -- If term that is applied is not a function, do nothing. The application is
-    -- not correct, but the error will be caught later.
-    etaExpand' _ _ _ _ = return Nothing
+        -- Create typed variable references for the new params
+        newVarExprs <-
+          mapM
+            ( \(v, tp) -> do
+                idx <- MM.getCounterWithPos i
+                return $ AnnoS (Idx idx tp) idx (BndS v)
+            )
+            newVarsWithTypes
 
-expand :: Int -> Gamma -> ExprS Int f Int -> MorlocMonad (Gamma, ExprS Int f Int)
-expand 0 g x = return (g, x)
-expand n g e@(AppS _ _) = do
-  newIndex <- MM.getCounter
+        -- Build the application and lambda directly
+        appIdx <- MM.getCounterWithPos i
+        let retType = apply g4 t
+            bodyExpr = AppS funExpr0 (inputExprs ++ newVarExprs)
+            bodyAnno = AnnoS (Idx appIdx retType) appIdx bodyExpr
+            fullType = FunU newTypes retType
+        return (g4, fullType, LamS newVars bodyAnno)
+    _ -> error "impossible"
+
+expand :: Int -> Int -> Gamma -> ExprS Int f Int -> MorlocMonad (Gamma, ExprS Int f Int)
+expand _ 0 g x = return (g, x)
+expand parentIdx n g e@(AppS _ _) = do
+  newIndex <- MM.getCounterWithPos parentIdx
   let (g', v') = evarname g "v"
-  e' <- applyExistential v' e
+  e' <- applyExistential parentIdx v' e
   let x' = LamS [v'] (AnnoS newIndex newIndex e')
-  expand (n - 1) g' x'
-expand n g (LamS vs' (AnnoS t ci e)) = do
+  expand parentIdx (n - 1) g' x'
+expand parentIdx n g (LamS vs' (AnnoS t ci e)) = do
   let (g', v') = evarname g "v"
-  e' <- applyExistential v' e
-  expand (n - 1) g' (LamS (vs' <> [v']) (AnnoS t ci e'))
-expand _ g x = return (g, x)
+  e' <- applyExistential parentIdx v' e
+  expand parentIdx (n - 1) g' (LamS (vs' <> [v']) (AnnoS t ci e'))
+expand _ _ g x = return (g, x)
 
-applyExistential :: EVar -> ExprS Int f Int -> MorlocMonad (ExprS Int f Int)
-applyExistential v' (AppS f xs') = do
-  newIndex <- MM.getCounter
+applyExistential :: Int -> EVar -> ExprS Int f Int -> MorlocMonad (ExprS Int f Int)
+applyExistential parentIdx v' (AppS f xs') = do
+  newIndex <- MM.getCounterWithPos parentIdx
   return $ AppS f (xs' <> [AnnoS newIndex newIndex (BndS v')])
 -- possibly illegal application, will type check after expansion
-applyExistential v' e = do
-  appIndex <- MM.getCounter
-  varIndex <- MM.getCounter
+applyExistential parentIdx v' e = do
+  appIndex <- MM.getCounterWithPos parentIdx
+  varIndex <- MM.getCounterWithPos parentIdx
   return $ AppS (AnnoS appIndex appIndex e) [AnnoS varIndex varIndex (BndS v')]
 
 application ::
@@ -650,10 +686,9 @@ application ::
 --  g1 |- A->C o e =>> C -| g2
 application i g0 es0 (FunU as0 b0) = do
   (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
-  let es2 = map (applyGen g1) es1
-      funType = apply g1 $ FunU (as1 <> remainder) b0
+  let funType = apply g1 $ FunU (as1 <> remainder) b0
   insetSay $ "remainder:" <+> vsep (map pretty remainder)
-  return (g1, funType, es2)
+  return (g1, funType, es1)
 
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
 -- ----------------------------------------- Forall App
@@ -671,17 +706,19 @@ application i g0 es (ExistU v@(TV s) ([], _) _) =
           eas = [ExistU v' ([], Open) ([], Open) | v' <- veas]
           ea = ExistU vea ([], Open) ([], Open)
           f = FunU eas ea
-          g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
+          g3 = cacheSolved v f $ g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
       (g4, _, es', _) <- zipCheck i g3 es eas
-      return (g4, apply g4 f, map (applyGen g4) es')
+      return (g4, apply g4 f, es')
     -- if the variable has already been solved, use solved value
     Nothing -> case lookupU v g0 of
       (Just (FunU ts t)) -> do
         (g1, ts', es', _) <- zipCheck i g0 es ts
         return (g1, apply g1 (FunU ts' t), es')
-      _ -> gerr i ApplicationOfNonFunction
-application i _ _ _ = do
-  gerr i ApplicationOfNonFunction
+      (Just t) -> throwTypeError i $ "Application of term with non-functional type:\n   " <+> prettyTypeU t
+      Nothing -> throwTypeError i $ "Expected function, but could not find type of term\n   " <+> pretty v
+application i _ _ t =
+  throwTypeError i $
+    "Application of non-functional expression of type:" <+> prettyTypeU t
 
 -- Tip together the arguments passed to an application
 zipCheck ::
@@ -703,7 +740,7 @@ zipCheck i g0 (x0 : xs0) (t0 : ts0) = do
 -- If there are fewer arguments than types, this may be OK, just partial application
 zipCheck _ g0 [] ts = return (g0, [], [], ts)
 -- If there are fewer types than arguments, then die
-zipCheck i _ _ [] = gerr i TooManyArguments
+zipCheck i _ _ [] = MM.throwSourcedError i "Compiler bug (__FILE__:__LINE__): too many arguments in zipCheck"
 
 foldCheck ::
   Gamma ->
@@ -741,11 +778,19 @@ checkE i g0 e0@(LamS vs body) t@(FunU as b)
 
       return (g2, t3, e3)
   | otherwise = do
-      (g', e') <- expand (length as - length vs) g0 e0
+      (g', e') <- expand i (length as - length vs) g0 e0
       checkE' i g' e' t
 checkE i g1 e1 (ForallU v a) = do
   recordParameter i v a
   checkE' i (g1 +> v) e1 (substitute v a)
+checkE _ g (SuspendS e) (ThunkU t) = do
+  (g1, t1, e1) <- checkG g e t
+  return (g1, ThunkU t1, SuspendS e1)
+checkE i g (ForceS e) t = do
+  (g1, t1, e1) <- checkG g e (ThunkU t)
+  case apply g1 t1 of
+    ThunkU a -> return (g1, a, ForceS e1)
+    _ -> throwTypeError i $ "Expected thunk type in force expression"
 
 --   Sub
 checkE i g1 e1 b = do
@@ -760,7 +805,7 @@ subtype' i a b g = do
   scope <- MM.getGeneralScope i
   insetSay $ parens (pretty a) <+> "<:" <+> parens (pretty b)
   case subtype scope a b g of
-    (Left err') -> gerr i err'
+    (Left err') -> MM.throwSourcedError i err'
     (Right x) -> return x
 
 -- helpers
@@ -788,6 +833,7 @@ evaluateAnnoSTypes = mapAnnoSGM resolve
     resolve (Idx m t) = do
       scope <- getScope m
       case TE.evaluateType scope t of
+        (Left (SystemError e)) -> MM.throwSourcedError m e
         (Left e) -> MM.throwError e
         (Right tu) -> return (Idx m tu)
 
@@ -874,3 +920,7 @@ peakSExpr (IntS x) = "IntS" <+> pretty x
 peakSExpr (LogS x) = "LogS" <+> pretty x
 peakSExpr (StrS x) = "StrS" <+> pretty x
 peakSExpr (ExeS exe) = "ExeS" <+> pretty exe
+peakSExpr (LetS v _ _) = "LetS" <+> pretty v
+peakSExpr (LetBndS v) = "LetBndS" <+> pretty v
+peakSExpr (SuspendS _) = "SuspendS"
+peakSExpr (ForceS _) = "ForceS"

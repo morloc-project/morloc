@@ -1,4 +1,4 @@
-module m (foo)
+module main (foo)
 
 import root-r
 import root-py

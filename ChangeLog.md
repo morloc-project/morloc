@@ -1,3 +1,55 @@
+0.61.0 [2026-02-21]
+-------------------
+
+Build updates
+ * make nexus a constant binary (not recreated and recompiled)
+ * add install handling and portable scripts
+ * add morloc daemon mode accessible through HTTP/TCP and sockets
+ * add `morloc install --build` option for installing both executable modules
+ * add `morloc uninstall`
+ * add `morloc list` with -v option for listing types of all exports
+
+Typesystem updates
+ * add let syntax that enforces execution order
+ * class constraints (e.g., unique :: Eq a => [a] -> [a])
+ * superclasses (e.g., class Semigroup => Monoid a where ...)
+ * add effect system for delayed execution
+ * add do-syntax for imperative programming with effects
+
+Better errors and UI
+ * cleaner error messages
+ * error message localization
+ * clean `morloc typecheck` output
+ * add CLI subcommand tested grouping
+ * Add shell TAB-completion
+ * fix haddock for future hackage release
+
+Bug fixes
+ * cleaned up memory issues in all C code
+ * replaced mcparallel in R with forked pool of workers
+ * fix bug in `morloc install .`
+
+Testing
+ * added stress test for zombies and memory issues
+ * added daemon tests
+
+Performance
+ * Split the monolithic (~7000 line) morloc.h file
+ * Use a libmorloc.so shared library rather than importing all as header
+ * Removed all the zombie swarms that where killing heavy morloc projects
+ * Remove mcparallel from R, move most of the pool to C, 4X interop speed
+ * Compile and reuse a single nexus (reduce compile costs)
+
+Language onboarding
+ * Added codegen IR that greatly simplifies new language addition
+ * Factor all language-specific material out of main Haskell codebase
+ * Move all grammar into template yaml specs
+ * Created MessagePack bridge to bypass voidstar, making lang onboard almost
+   trivial (at a performance penalty).
+
+Other
+ * Transitioned parser from recursive descent to LR1
+
 0.60.0 [2026-02-07]
 -------------------
  * add infix operator support

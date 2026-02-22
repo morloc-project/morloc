@@ -26,10 +26,12 @@ module foo
   , memtest
   )
 
-import types (List, Str, Int, Tuple2)
-import cppbase (map)
+import root ((.))
+import root-py (Int, Str, List)
+import root-cpp (Int, Str, List, Functor)
+import root-r (Int, Str, List)
 
-source py from "foo.py" ("nmb" as pnmb, "pid", "len" as plen, "addp")
+source py from "foo.py" ("nmb" as pnmb, "pid", "morloc_len" as plen, "addp")
 source R from "foo.R" ("nmb" as rnmb, "rid", "nchar" as rlen, "addr")
 source Cpp from "foo.hpp" ("nmb" as cnmb, "cid", "strlen" as clen)
 

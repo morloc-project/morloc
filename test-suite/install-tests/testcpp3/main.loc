@@ -1,0 +1,7 @@
+module testcpp3 (cppinc)
+
+import root-cpp
+
+source Cpp from "inc.hpp" ("cppinc")
+
+cppinc :: Int -> Int

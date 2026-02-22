@@ -3,7 +3,7 @@ LABEL org.opencontainers.image.description="A morloc container intended for inte
 LABEL org.opencontainers.image.licenses=MIT
 
 FROM docker.io/library/ubuntu:22.04
-COPY --from=ghcr.io/morloc-project/morloc/morloc-tiny:0.60.0 /bin/morloc /bin/morloc
+COPY --from=ghcr.io/morloc-project/morloc/morloc-tiny:0.61.0 /bin/morloc /bin/morloc
 
 WORKDIR $HOME
 
@@ -14,10 +14,6 @@ RUN DEBIAN_FRONTEND=noninteractive TZ=Antarctica/Troll apt-get -y install tzdata
 
 RUN apt-get install -y r-base python3.10 libgsl-dev git pip python3-numpy
 RUN python3 -m pip install --upgrade pip setuptools
-
-
-# Set up R environment
-RUN Rscript -e 'install.packages(c("rlang"), repos  = "https://cloud.r-project.org")'
 
 # Setup the morloc home
 RUN morloc init

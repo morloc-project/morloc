@@ -1,0 +1,52 @@
+module bidiPyR (testUni, testBidi1, testBidi5, testBidi10, testBidi11, testBidi15)
+
+import root-r
+import root-py
+
+--' R identity on integers
+rId :: Int -> Int
+source R from "r_funcs.R" ("r_id" as rId)
+
+--' Python identity on integers
+pyId :: Int -> Int
+source Py from "py_funcs.py" ("py_id" as pyId)
+
+--' Python collectors of various arities
+pyCollect1 :: Int -> [Int]
+source Py from "py_funcs.py" ("py_collect" as pyCollect1)
+
+pyCollect5 :: Int -> Int -> Int -> Int -> Int -> [Int]
+source Py from "py_funcs.py" ("py_collect" as pyCollect5)
+
+pyCollect10 :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> [Int]
+source Py from "py_funcs.py" ("py_collect" as pyCollect10)
+
+pyCollect11 :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> [Int]
+source Py from "py_funcs.py" ("py_collect" as pyCollect11)
+
+pyCollect15 :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> [Int]
+source Py from "py_funcs.py" ("py_collect" as pyCollect15)
+
+--' Bidirectional: Python calls R, R calls back to Python
+rViaPy :: Int -> Int
+rViaPy x = rId (pyId x)
+
+--' Unidirectional control: Python->R only, no callbacks
+testUni :: [Int]
+testUni = pyCollect15 (rId 1) (rId 2) (rId 3) (rId 4) (rId 5) (rId 6) (rId 7) (rId 8) (rId 9) (rId 10) (rId 11) (rId 12) (rId 13) (rId 14) (rId 15)
+
+--' Bidirectional with increasing callback counts
+testBidi1 :: [Int]
+testBidi1 = pyCollect1 (rViaPy 1)
+
+testBidi5 :: [Int]
+testBidi5 = pyCollect5 (rViaPy 1) (rViaPy 2) (rViaPy 3) (rViaPy 4) (rViaPy 5)
+
+testBidi10 :: [Int]
+testBidi10 = pyCollect10 (rViaPy 1) (rViaPy 2) (rViaPy 3) (rViaPy 4) (rViaPy 5) (rViaPy 6) (rViaPy 7) (rViaPy 8) (rViaPy 9) (rViaPy 10)
+
+testBidi11 :: [Int]
+testBidi11 = pyCollect11 (rViaPy 1) (rViaPy 2) (rViaPy 3) (rViaPy 4) (rViaPy 5) (rViaPy 6) (rViaPy 7) (rViaPy 8) (rViaPy 9) (rViaPy 10) (rViaPy 11)
+
+testBidi15 :: [Int]
+testBidi15 = pyCollect15 (rViaPy 1) (rViaPy 2) (rViaPy 3) (rViaPy 4) (rViaPy 5) (rViaPy 6) (rViaPy 7) (rViaPy 8) (rViaPy 9) (rViaPy 10) (rViaPy 11) (rViaPy 12) (rViaPy 13) (rViaPy 14) (rViaPy 15)

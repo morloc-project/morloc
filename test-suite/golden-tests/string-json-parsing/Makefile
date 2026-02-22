@@ -1,15 +1,12 @@
 all:
-	rm -f obs.txt
-	morloc make foo.loc 
-	./nexus pfoo a.json > obs.txt
-	./nexus pfoo b.json >> obs.txt
-	./nexus cfoo a.json >> obs.txt
-	./nexus cfoo b.json >> obs.txt
-	./nexus rfoo a.json >> obs.txt
-	./nexus rfoo b.json >> obs.txt
-
-build:
-	gcc -g -o nexus -I/home/z/.morloc/include nexus.c
+	rm -f *.err obs.txt
+	morloc make -o nexus main.loc 2> build.err
+	./nexus pfoo a.json > obs.txt 2> obs.err
+	./nexus pfoo b.json 2>> obs.err  >> obs.txt
+	./nexus cfoo a.json 2>> obs.err  >> obs.txt
+	./nexus cfoo b.json 2>> obs.err  >> obs.txt
+	./nexus rfoo a.json 2>> obs.err  >> obs.txt
+	./nexus rfoo b.json 2>> obs.err  >> obs.txt
 
 clean:
-	rm -rf nexus* pool* __pycache__
+	rm -rf nexus pools __pycache__

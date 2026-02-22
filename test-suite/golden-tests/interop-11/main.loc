@@ -1,4 +1,4 @@
-module m (foo, foo2, foo3)
+module main (foo, foo2, foo3)
 
 type Py => Int = "int"
 type Py => List a = "list" a

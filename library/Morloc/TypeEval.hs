@@ -1,11 +1,17 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- |
 Module      : Morloc.TypeEval
-Description : Functions for evaluating type expressions
+Description : Expand type aliases and reduce type applications
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Evaluates type expressions by expanding type aliases from the scope
+(general and concrete), applying type arguments, and reducing applications.
+Used by the typechecker and code generator to resolve user-defined types
+to their canonical forms.
 -}
 module Morloc.TypeEval
   ( evaluateType
@@ -20,7 +26,9 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
+import Morloc.Namespace.Prim
+import Morloc.Namespace.State (MorlocError (..))
+import Morloc.Namespace.Type
 
 -- Evaluate a type expression with both the concrete and general scopes
 --
@@ -78,16 +86,22 @@ resolveIgnore ::
   Either MorlocError TypeU
 resolveIgnore f bnd (AppU (VarU v) ts) = AppU (VarU v) <$> mapM (f bnd) ts
 resolveIgnore _ _ t@(VarU _) = return t
-resolveIgnore _ _ _ = error "Reached unexpected branch"
+resolveIgnore _ _ _ = MM.throwSystemError "Compiler bug (__FILE__:__LINE__): Reached unexpected branch"
 
 resolveFail ::
   (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
   Set.Set TVar ->
   TypeU ->
   Either MorlocError TypeU
-resolveFail _ _ (AppU (VarU v) _) = MM.throwError $ UndefinedType v
-resolveFail _ _ (VarU v) = MM.throwError $ UndefinedType v
-resolveFail _ _ _ = error "Reached unexpected branch"
+resolveFail _ _ (AppU (VarU v) _) =
+  MM.throwSystemError $
+    "Could not resolve type applied variable" <+> squotes (pretty v)
+      <> ". You may be missing a language-specific type definition."
+resolveFail _ _ (VarU v) =
+  MM.throwSystemError $
+    "Could not resolve type for variable" <+> squotes (pretty v)
+      <> ". You may be missing a language-specific type definition."
+resolveFail _ _ _ = MM.throwSystemError "Compiler bug (__FILE__:__LINE__): Reached unexpected branch"
 
 generalTransformType ::
   Set.Set TVar ->
@@ -148,7 +162,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                   -- substitute the head term and re-evaluate
                   False -> recurse bnd $ foldr parsub newType (zip vs ts)
                 Nothing ->
-                  MM.throwError . OtherError . render $
+                  MM.throwSystemError $
                     "No matching alias found for"
                       <+> viaShow t0
                       <+> "\n  scope"
@@ -175,13 +189,14 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                   then terminate bnd t2
                   else recurse bnd t2
               Nothing ->
-                MM.throwError . OtherError . render $
+                MM.throwSystemError $
                   "No matching alias found for" <+> viaShow t0
                     <> "\n  scope:" <+> viaShow scope
                     <> "\n  v:" <+> pretty v
                     <> "\n  ts1:" <+> list (map viaShow ts1)
           Nothing -> resolve bnd t0
     f bnd (ForallU v t) = ForallU v <$> recurse (Set.insert v bnd) t
+    f bnd (ThunkU t) = ThunkU <$> recurse bnd t
 
     terminate :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
     terminate bnd (ExistU v (ts, tc) (rs, rc)) = do
@@ -193,6 +208,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     terminate bnd (AppU t ts) = AppU t <$> mapM (recurse bnd) ts
     terminate bnd (NamU o v ts rs) = NamU o v <$> mapM (recurse bnd) ts <*> mapM (secondM (recurse bnd)) rs
     terminate _ (VarU v) = return (VarU v)
+    terminate bnd (ThunkU t) = ThunkU <$> recurse bnd t
 
     renameTypedefs ::
       Set.Set TVar -> ([Either TVar TypeU], TypeU, ArgDoc, Bool) -> ([TVar], TypeU, ArgDoc, Bool)
@@ -243,7 +259,11 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
           return (Just a)
       -- handle specialization
       | not nonspecialized = return $ selectSpecialization a b
-      | otherwise = MM.throwError (ConflictingTypeAliases t1 t2)
+      | otherwise =
+          MM.throwSystemError $
+            "Cannot merge conflicting type aliases:"
+              <> "\n  t1:" <+> pretty t1
+              <> "\n  t2:" <+> pretty t2
       where
         aIsValid = checkAlias tsMain a
         bIsValid = checkAlias tsMain b
@@ -289,3 +309,4 @@ parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
 parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
 parsub pair (AppU t ts) = AppU (parsub pair t) (map (parsub pair) ts)
 parsub pair (NamU o n ps rs) = NamU o n (map (parsub pair) ps) [(k', parsub pair t) | (k', t) <- rs]
+parsub pair (ThunkU t) = ThunkU (parsub pair t)

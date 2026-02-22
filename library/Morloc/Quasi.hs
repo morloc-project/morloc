@@ -3,10 +3,14 @@
 
 {- |
 Module      : Morloc.Quasi
-Description : Define idoc quasiquotation for string interpolation
+Description : String-interpolating quasiquoter for Doc values
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Provides the @[idoc|...|]@ quasiquoter for building 'Doc' values with
+embedded Haskell expressions via @#\{expr\}@ syntax. Used in translators
+to generate code with interpolated variable names and types.
 -}
 module Morloc.Quasi
   ( idoc

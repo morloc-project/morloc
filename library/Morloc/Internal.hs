@@ -2,17 +2,21 @@
 
 {- |
 Module      : Morloc.Internal
-Description : Internal utility functions
+Description : Proto-prelude re-exporting common utilities
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 
-This module serves as a proto-prelude. Eventually I will probably want to
-abandon the default prelude and create my own. But not just yet.
+A project-wide prelude that re-exports commonly used modules (Data.Maybe,
+Data.Either, Control.Monad, etc.) along with custom Bifunctor\/Bifoldable
+typeclasses and utility functions. Imported transitively by nearly every
+module via "Morloc.Namespace.Prim".
+
+This module must NOT import anything from Morloc (other than Data.*) to
+avoid circular dependencies, since the lexer depends on it.
 -}
 module Morloc.Internal
-  ( ifelse
-  , concatMapM
+  ( concatMapM
   , unique
   , duplicates
   , module Data.Maybe
@@ -29,58 +33,37 @@ module Morloc.Internal
   , isUpper
   , toLower
 
-    -- ** selected functions from Data.Foldable
+    -- * Data.Foldable re-exports
   , foldlM
   , foldrM
-  , foldl1M
 
-    -- ** selected functions from Data.Tuple.Extra
+    -- * Tuple utilities
   , return2
-  , uncurry3
-  , curry3
-  , third
 
-    -- ** operators
-  , (|>>) -- piped fmap
-  , (</>) -- Filesystem utility operators from System.FilePath
-  , (<|>) -- alternative operator
-  , (&&&) -- (a -> a') -> (b -> b') -> (a, b) -> (a', b')
-  , (***) -- (a -> b) -> (a -> c) -> a -> (b, c)
+    -- * Operators
+  , (|>>)
+  , (</>)
+  , (<|>)
+  , (&&&)
+  , (***)
 
-    -- ** safe versions of errant functions
+    -- * Safe re-exports
   , module Safe
-  , maximumOnMay
-  , minimumOnMay
-  , maximumOnDef
-  , minimumOnDef
 
-    -- ** other useful functions
+    -- * Stateful mapping
   , statefulMap
   , statefulMapM
-  , unfoldStateN
   , filterApart
 
-    -- ** Zip functions that fail on inputs of unequal length. These should be
-
-  -- used when unequal lengths implies a compiler bug. In a better world, the
-  -- typechecker would catch these issues before failing here.
+    -- * Length-checked zips (fail on mismatched lengths, indicating compiler bugs)
   , safeZip
   , safeZipWith
   , safeZipWithM
-  , zipWith3M
   ) where
-
--- Don't import anything from Morloc here. This module should be VERY lowest
--- in the hierarchy, to avoid circular dependencies, since the lexer needs to
--- access it.
--- replace Prelude mapM for lists with general traverable map
 
 import Control.Applicative ((<|>))
 import Control.Monad
 import Control.Monad.IO.Class
-
--- 'list' conflicts with Doc
-
 import Data.Char (isLower, isUpper, toLower)
 import Data.Either
 import Data.Foldable (foldlM, foldrM)
@@ -98,42 +81,15 @@ import Safe hiding (at, headDef, lastDef)
 import System.FilePath
 import Prelude hiding (mapM)
 
+-- | Lift a binary function into a monadic return
 return2 :: (Monad m) => (a -> b -> c) -> (a -> b -> m c)
 return2 f x y = return $ f x y
 
-maximumOnMay :: (Ord b) => (a -> b) -> [a] -> Maybe a
-maximumOnMay _ [] = Nothing
-maximumOnMay f xs = Just $ maximumOn f xs
-
-minimumOnMay :: (Ord b) => (a -> b) -> [a] -> Maybe a
-minimumOnMay _ [] = Nothing
-minimumOnMay f xs = Just $ minimumOn f xs
-
-maximumOnDef :: (Ord b) => a -> (a -> b) -> [a] -> a
-maximumOnDef x _ [] = x
-maximumOnDef _ f xs = maximumOn f xs
-
-minimumOnDef :: (Ord b) => a -> (a -> b) -> [a] -> a
-minimumOnDef x _ [] = x
-minimumOnDef _ f xs = minimumOn f xs
-
-uncurry3 :: (a -> b -> c -> d) -> (a, b, c) -> d
-uncurry3 f (x, y, z) = f x y z
-
-curry3 :: ((a, b, c) -> d) -> a -> b -> c -> d
-curry3 f x y z = f (x, y, z)
-
-third :: (a, b, c) -> c
-third (_, _, x) = x
-
-ifelse :: Bool -> a -> a -> a
-ifelse True x _ = x
-ifelse False _ y = y
-
+-- | Concatenate the results of a monadic map
 concatMapM :: (Monad m) => (a -> m [b]) -> [a] -> m [b]
 concatMapM f = fmap concat . mapM f
 
--- | remove duplicated elements in a list while preserving order
+-- | Remove duplicate elements while preserving first-occurrence order
 unique :: (Ord a) => [a] -> [a]
 unique = unique' Set.empty
   where
@@ -142,16 +98,14 @@ unique = unique' Set.empty
       | Set.member x set = unique' set xs
       | otherwise = x : unique' (Set.insert x set) xs
 
--- | Build an ordered list of duplicated elements
+-- | Return elements that appear more than once, in first-occurrence order
 duplicates :: (Ord a) => [a] -> [a]
 duplicates xs = unique $ filter isDuplicated xs
   where
-    -- countMap :: Ord a => Map.Map a Int
     countMap = Map.fromList . map (\ks -> (head ks, length ks)) . group . sort $ xs
-
-    -- isDuplicated :: Ord a => a -> Bool
     isDuplicated k = fromJust (Map.lookup k countMap) > 1
 
+-- | Map with threaded state
 statefulMap :: (s -> a -> (s, b)) -> s -> [a] -> (s, [b])
 statefulMap _ s [] = (s, [])
 statefulMap f s0 (x : xs) =
@@ -159,6 +113,7 @@ statefulMap f s0 (x : xs) =
    in let (sn, ys) = statefulMap f s1 xs
        in (sn, y : ys)
 
+-- | Monadic 'statefulMap'
 statefulMapM :: (Monad m) => (s -> a -> m (s, b)) -> s -> [a] -> m (s, [b])
 statefulMapM _ s [] = return (s, [])
 statefulMapM f s (x : xs) = do
@@ -166,14 +121,7 @@ statefulMapM f s (x : xs) = do
   (s'', xs') <- statefulMapM f s' xs
   return (s'', x' : xs')
 
-unfoldStateN :: Int -> (s -> (s, a)) -> s -> (s, [a])
-unfoldStateN 0 _ s = (s, [])
-unfoldStateN i f s = (s'', x : xs)
-  where
-    (s', x) = f s
-    (s'', xs) = unfoldStateN (i - 1) f s'
-
--- pull one element from a list
+-- | Extract the first element matching a predicate, returning it and the rest
 filterApart :: (a -> Bool) -> [a] -> (Maybe a, [a])
 filterApart _ [] = (Nothing, [])
 filterApart f (x : xs)
@@ -181,34 +129,26 @@ filterApart f (x : xs)
   | otherwise = case filterApart f xs of
       (r, xs') -> (r, x : xs')
 
+-- | Zip two lists, returning 'Nothing' if lengths differ
 safeZip :: [a] -> [b] -> Maybe [(a, b)]
 safeZip (x : xs) (y : ys) = (:) (x, y) <$> safeZip xs ys
 safeZip [] [] = Just []
 safeZip _ _ = Nothing
 
+-- | 'zipWith' returning 'Nothing' if lengths differ
 safeZipWith :: (a -> b -> c) -> [a] -> [b] -> Maybe [c]
 safeZipWith f xs ys
   | length xs == length ys = Just $ zipWith f xs ys
   | otherwise = Nothing
 
+-- | Monadic 'safeZipWith'
 safeZipWithM :: (Monad m) => (a -> b -> m c) -> [a] -> [b] -> m (Maybe [c])
 safeZipWithM f xs ys
   | length xs == length ys = zipWithM f xs ys |>> Just
   | otherwise = return Nothing
 
-zipWith3M :: (Monad m) => (a -> b -> c -> m d) -> [a] -> [b] -> [c] -> m [d]
-zipWith3M f (a : as) (b : bs) (c : cs) = do
-  d <- f a b c
-  ds <- zipWith3M f as bs cs
-  return $ d : ds
-zipWith3M _ _ _ _ = return []
-
--- | pipe the lhs functor into the rhs function
+-- | Piped fmap: @x |>> f == fmap f x@
 infixl 1 |>>
 
 (|>>) :: (Functor f) => f a -> (a -> b) -> f b
 (|>>) = flip fmap
-
-foldl1M :: (Monad m) => (a -> a -> m a) -> [a] -> m a
-foldl1M _ [] = error "foldl1M applied to empty list"
-foldl1M f (x : xs) = foldlM f x xs

@@ -3,10 +3,14 @@
 
 {- |
 Module      : Morloc.CodeGenerator.LambdaEval
-Description : Evaluate all applied lambdas
+Description : Beta-reduce applied lambdas in the codegen AST
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Performs beta-reduction on lambda applications in the 'AnnoS' tree so
+that the code generator sees only fully-applied function calls or
+unapplied lambdas, never @(\\x -> body) arg@.
 -}
 module Morloc.CodeGenerator.LambdaEval
   ( applyLambdas
@@ -150,6 +154,17 @@ applyLambdas (AnnoS g c (LstS es)) = AnnoS g c . LstS <$> mapM applyLambdas es
 applyLambdas (AnnoS g c (TupS es)) = AnnoS g c . TupS <$> mapM applyLambdas es
 applyLambdas (AnnoS g c (NamS rs)) = AnnoS g c . NamS <$> mapM (secondM applyLambdas) rs
 applyLambdas (AnnoS g c (VarS v (One e))) = AnnoS g c . VarS v . One <$> applyLambdas e
+applyLambdas (AnnoS g c (LetS v e1 e2)) = do
+  e1' <- applyLambdas e1
+  e2' <- applyLambdas e2
+  return (AnnoS g c (LetS v e1' e2'))
+applyLambdas (AnnoS g c (SuspendS e)) = AnnoS g c . SuspendS <$> applyLambdas e
+-- cancel force-suspend: !{e} --> e, preserving outer annotation
+applyLambdas (AnnoS g c (ForceS (AnnoS _ _ (SuspendS e)))) = do
+  e' <- applyLambdas e
+  let AnnoS _ _ inner = e'
+  return (AnnoS g c inner)
+applyLambdas (AnnoS g c (ForceS e)) = AnnoS g c . ForceS <$> applyLambdas e
 applyLambdas x = return x
 
 substituteAnnoS ::
@@ -181,4 +196,12 @@ substituteAnnoS v r = f
     f (AnnoS g c (NamS rs)) =
       let es' = map (f . snd) rs
        in AnnoS g c (NamS (zip (map fst rs) es'))
+    f e@(AnnoS _ _ (LetBndS v'))
+      | v == v' = r
+      | otherwise = e
+    f e0@(AnnoS g c (LetS v' e1 e2))
+      | v == v' = e0 -- shadowed by let binding
+      | otherwise = AnnoS g c (LetS v' (f e1) (f e2))
+    f (AnnoS g c (SuspendS e)) = AnnoS g c (SuspendS (f e))
+    f (AnnoS g c (ForceS e)) = AnnoS g c (ForceS (f e))
     f x = x

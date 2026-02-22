@@ -1,0 +1,15 @@
+name: conway
+version: 0.1.0
+homepage: null
+synopsis: null
+description: null
+category: null
+license: MIT
+author: null
+maintainer: null
+github: null
+bug-reports: null
+dependencies: []
+# Files to include when installing with `morloc make --install`
+include: ["game.hpp", "game.py"]
+

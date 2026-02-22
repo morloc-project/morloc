@@ -1,0 +1,81 @@
+# R language descriptor for morloc compiler
+# Metadata fields (read by LangRegistry) + descriptor fields (read by generic translator)
+
+# Identity and metadata
+name: r
+extension: R
+aliases: []
+is_compiled: false
+run_command: ["Rscript"]
+serial_type: "character"
+cost: 4
+preamble:
+  - 'dyn.load("{{home}}/lib/librmorloc.so")'
+
+# Literals
+ldBoolTrue: "TRUE"
+ldBoolFalse: "FALSE"
+ldNullLiteral: "NULL"
+
+# Constructors
+ldListStyle: type_dependent
+ldTupleConstructor: "list"
+ldRecordConstructor: "list"
+ldRecordSeparator: "="
+
+# Access styles
+ldIndexStyle: one_double_bracket
+ldKeyAccess: "double_bracket"
+ldFieldAccess: dollar
+
+# Serialize/deserialize
+ldSerializeFn: "morloc_put_value"
+ldDeserializeFn: "morloc_get_value"
+
+# Foreign call
+ldForeignCallFn: "morloc_foreign_call"
+ldForeignCallIntSuffix: "L"
+
+# Remote call
+ldRemoteCallFn: "morloc_remote_call"
+
+# Record handling
+ldDictStyleRecords: false
+ldQuoteRecordKeys: false
+
+# Import syntax
+ldQualifiedImports: false
+ldIncludeRelToFile: false
+
+# Template fields
+ldAssignOp: "<-"
+ldLambdaTemplate: "function({{args}}) { {{body}} }"
+ldSuspendExpr: "(function() {{expr}})"
+ldSuspendBlock: "function(){\n{{body}}\n}"
+ldPartialTemplate: "function({{bound_args}}) { {{fn}}({{all_args}}) }"
+ldImportTemplate: "source(\"{{path}}\")"
+ldSocketPathTemplate: "paste0(global_state$tmpdir, \"/\", {{socket}})"
+ldResourcePackTemplate: "list(mem={{mem}}L, time={{time}}L, cpus={{cpus}}L, gpus={{gpus}}L)"
+ldReturnTemplate: "return({{expr}})"
+ldFuncDefHeader: "{{name}} <- function({{args}})"
+ldBlockStyle: braces
+ldBlockEnd: "}"
+ldErrorWrapOpen: ""
+ldErrorWrapClose: []
+ldPatternStyle: concat_call
+ldConcatFn: "paste0"
+ldAtomicTypes: ["integer", "numeric", "double", "logical", "character"]
+ldAtomicListFn: "c"
+ldGenericListFn: "list"
+ldMapStyle: apply_callback
+ldDispatchLocalHeader: ".dispatch <- list()"
+ldDispatchLocalEntry: ".dispatch[[{{mid}}L]] <- {{name}}"
+ldDispatchLocalFooter: ""
+ldDispatchRemoteHeader: ".remote_dispatch <- list()"
+ldDispatchRemoteEntry: ".remote_dispatch[[{{mid}}L]] <- {{name}}_remote"
+ldDispatchRemoteFooter: ""
+
+# Pool template (loaded from pool.R, left empty here)
+ldPoolTemplate: ""
+ldBreakMarker: "# <<<BREAK>>>"
+ldCommentMarker: "#"
