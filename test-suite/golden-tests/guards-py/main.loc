@@ -5,19 +5,19 @@ import root-py
 myabs :: Int -> Int
 myabs x
   ? x >= 0 = x
-  ? _ = neg x
+  : neg x
 
 clamp :: Int -> Int -> Int -> Int
 clamp lo hi x
   ? x < lo = lo
   ? x > hi = hi
-  ? _ = x
+  : x
 
 classify :: Int -> Str
 classify x
   ? x > big = "big"
   ? x > small = "medium"
-  ? _ = "small"
+  : "small"
   where
     big = 100
     small = 10

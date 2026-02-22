@@ -351,6 +351,7 @@ main = do
       , golden "guards-let-py" "guards-let-py"
       , golden "guards-let-cpp" "guards-let-cpp"
       , golden "guards-let-r" "guards-let-r"
+      , golden "guards-inline-cpp" "guards-inline-cpp"
       , golden "recursion-direct-py" "recursion-direct-py"
       , golden "recursion-direct-cpp" "recursion-direct-cpp"
       , golden "recursion-direct-r" "recursion-direct-r"

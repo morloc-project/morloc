@@ -5,9 +5,9 @@ import root-cpp
 isEven :: Int -> Bool
 isEven n
   ? n == 0 = True
-  ? _ = isOdd (n - 1)
+  : isOdd (n - 1)
 
 isOdd :: Int -> Bool
 isOdd n
   ? n == 0 = False
-  ? _ = isEven (n - 1)
+  : isEven (n - 1)

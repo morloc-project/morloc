@@ -5,4 +5,4 @@ import root-py
 fact :: Int -> Int
 fact n
   ? n == 0 = 1
-  ? _ = n * fact (n - 1)
+  : n * fact (n - 1)

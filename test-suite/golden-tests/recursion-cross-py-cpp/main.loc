@@ -12,4 +12,4 @@ sub :: Int -> Int -> Int
 fact :: Int -> Int
 fact n
   ? n == 0 = 1
-  ? _ = mul n (fact (sub n 1))
+  : mul n (fact (sub n 1))

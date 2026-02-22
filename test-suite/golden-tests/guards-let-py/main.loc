@@ -5,12 +5,12 @@ import root-py
 absLet :: Int -> Int
 absLet x =
   let result ? x >= 0 = x
-             ? _ = neg x
+             : neg x
   in result
 
 classifyDo :: Int -> {Str}
 classifyDo x = do
   let label ? x > 100 = "big"
             ? x > 10 = "medium"
-            ? _ = "small"
+            : "small"
   {label}
