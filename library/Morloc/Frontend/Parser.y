@@ -451,6 +451,7 @@ let_bindings :: { [(EVar, Loc CstExpr)] }
 let_binding :: { (EVar, Loc CstExpr) }
   : 'let' LOWER '=' expr              { (EV (getName $2), $4) }
   | 'let' '_' '=' expr                { (EV "_", $4) }
+  | 'let' LOWER guard_clauses         { (EV (getName $2), Loc ($1 <-> snd (last $3)) (CGuardExprE $3)) }
 
 lambda_expr :: { Loc CstExpr }
   : '\\' lower_names1 '->' expr
@@ -534,6 +535,7 @@ do_stmts :: { [CstDoStmt] }
 do_stmt :: { CstDoStmt }
   : LOWER '<-' expr            { CstDoBind (EV (getName $1)) $3 }
   | 'let' LOWER '=' expr       { CstDoLet (EV (getName $2)) $4 }
+  | 'let' LOWER guard_clauses  { CstDoLet (EV (getName $2)) (Loc ($1 <-> snd (last $3)) (CGuardExprE $3)) }
   | expr                       { CstDoBare $1 }
 
 getter_expr :: { Loc CstExpr }

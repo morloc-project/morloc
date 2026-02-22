@@ -114,6 +114,7 @@ data CstExpr
   | CDoE [CstDoStmt]
   | CAccessorE CstAccessorBody
   | CInterpE Text [Loc CstExpr] [Text] Text
+  | CGuardExprE [(Loc CstExpr, Loc CstExpr)]
   deriving (Show, Eq)
 
 data CstExport

@@ -327,7 +327,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     inferState (MonoManifold _ _ e) = inferState e
     inferState (MonoIf _ thenE _) = inferState thenE
     inferState MonoPoolCall {} = Unserialized
-    inferState MonoBndVar {} = error "Ambiguous bound term"
+    inferState MonoBndVar {} = Unserialized
     inferState _ = Unserialized
 
 {- | Unwrap structural MonoManifold/MonoReturn wrappers from a let definition.

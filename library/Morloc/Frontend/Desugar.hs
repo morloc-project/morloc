@@ -505,6 +505,7 @@ desugarExpr (Loc sp (CAccessorE body)) = buildAccessor sp body
 desugarExpr (Loc sp (CInterpE startText exprs mids endText)) = do
   exprs' <- mapM desugarExpr exprs
   mkInterpString sp startText exprs' mids endText
+desugarExpr (Loc sp (CGuardExprE guards)) = desugarGuards sp guards
 
 -- Top-level declarations should not appear inside expressions
 desugarExpr (Loc _ (CModE {})) = error "desugarExpr: unexpected CModE in expression position"

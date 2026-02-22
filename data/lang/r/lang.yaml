@@ -51,7 +51,7 @@ ldIncludeRelToFile: false
 ldAssignOp: "<-"
 ldLambdaTemplate: "function({{args}}) { {{body}} }"
 ldSuspendExpr: "(function() {{expr}})"
-ldSuspendBlock: "function(){\n{{body}}\n}"
+ldSuspendBlock: "(function(){\n{{body}}\n})"
 ldPartialTemplate: "function({{bound_args}}) { {{fn}}({{all_args}}) }"
 ldImportTemplate: "source(\"{{path}}\")"
 ldSocketPathTemplate: "paste0(global_state$tmpdir, \"/\", {{socket}})"
