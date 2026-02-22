@@ -11,7 +11,7 @@ RUN curl -SL https://get.haskellstack.org/ | sh
 RUN git clone https://github.com/morloc-project/morloc
 
 # Build morloc
-RUN cd morloc && stack install
+RUN cd morloc && stack install --no-run-tests
 
 
 ###############################################################################
