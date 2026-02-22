@@ -106,6 +106,8 @@ parameterize' args (AnnoS g c (ForceS e)) = do
   e' <- parameterize' args e
   let args' = pruneArgs args [e']
   return $ AnnoS g (c, args') (ForceS e')
+parameterize' _ (AnnoS g c (CallS v)) = do
+  return $ AnnoS g (c, []) (CallS v)
 parameterize' _ (AnnoS _ _ (VarS _ _)) = undefined
 
 pruneArgs :: [Arg a] -> [AnnoS c One (g, [Arg a])] -> [Arg a]

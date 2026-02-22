@@ -245,12 +245,14 @@ data ExecutableExpressionPool
   = SrcCallP Source -- source code
   | PatCallP Pattern -- pattern function
   | LocalCallP Int -- a locally defined function
+  | RecCallP Int -- recursive call to manifold with given ID
   deriving (Show, Ord, Eq)
 
 instance Pretty ExecutableExpressionPool where
   pretty (SrcCallP src) = pretty src
   pretty (PatCallP pat) = pretty pat
   pretty (LocalCallP i) = "x" <> pretty i
+  pretty (RecCallP i) = "rec_m" <> pretty i
 
 data TypePacker = TypePacker
   { typePackerPacked :: TypeF
@@ -510,6 +512,8 @@ data NativeArg = NativeArgManifold NativeManifold | NativeArgExpr NativeExpr
 data SerialExpr
   = ManS SerialManifold
   | AppPoolS TypeF PoolCall [SerialArg]
+  | AppRecS TypeF Int [SerialExpr]
+    -- ^ Recursive call to serial manifold: return type, manifold ID, serialized args
   | ReturnS SerialExpr
   | SerialLetS Int SerialExpr SerialExpr
   | NativeLetS Int NativeExpr SerialExpr
@@ -561,6 +565,7 @@ foldlNA f b (NativeArgExpr_ ne) = f b ne
 foldlSE :: (b -> a -> b) -> b -> SerialExpr_ a a a a a -> b
 foldlSE f b (ManS_ x) = f b x
 foldlSE f b (AppPoolS_ _ _ xs) = foldl f b xs
+foldlSE f b (AppRecS_ _ _ xs) = foldl f b xs
 foldlSE f b (ReturnS_ x) = f b x
 foldlSE f b (SerialLetS_ _ x1 x2) = foldl f b [x1, x2]
 foldlSE f b (NativeLetS_ _ x1 x2) = foldl f b [x1, x2]
@@ -627,6 +632,7 @@ makeMonoidFoldDefault mempty' mappend' =
 
     monoidSerialExpr' (ManS_ (req, sm)) = return (req, ManS sm)
     monoidSerialExpr' (AppPoolS_ t p (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppPoolS t p es)
+    monoidSerialExpr' (AppRecS_ t m (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppRecS t m es)
     monoidSerialExpr' (ReturnS_ (req, se)) = return (req, ReturnS se)
     monoidSerialExpr' (SerialLetS_ i (req1, se1) (req2, se2)) = return (mappend' req1 req2, SerialLetS i se1 se2)
     monoidSerialExpr' (NativeLetS_ i (req1, ne) (req2, se)) = return (mappend' req1 req2, NativeLetS i ne se)
@@ -766,6 +772,7 @@ typeMofForm =
 data SerialExpr_ sm se ne sr nr
   = ManS_ sm
   | AppPoolS_ TypeF PoolCall [sr]
+  | AppRecS_ TypeF Int [se]
   | ReturnS_ se
   | SerialLetS_ Int se se
   | NativeLetS_ Int ne se
@@ -912,6 +919,9 @@ surroundFoldSerialExprM sfm fm = surroundSerialExprM sfm f
     f full@(AppPoolS t pool es) = do
       es' <- mapM (surroundFoldSerialArgM sfm fm) es
       opFoldWithSerialExprM fm full $ AppPoolS_ t pool es'
+    f full@(AppRecS t m es) = do
+      es' <- mapM (surroundFoldSerialExprM sfm fm) es
+      opFoldWithSerialExprM fm full $ AppRecS_ t m es'
     f full@(ReturnS e) = do
       e' <- surroundFoldSerialExprM sfm fm e
       opFoldWithSerialExprM fm full $ ReturnS_ e'
@@ -1041,6 +1051,7 @@ instance HasTypeF NativeManifold where
 instance HasTypeS SerialExpr where
   typeSof (ManS sm) = typeSof sm
   typeSof (AppPoolS t _ sargs) = FunctionS (map typeMof sargs) (SerialS t)
+  typeSof (AppRecS t _ _) = SerialS t
   typeSof (ReturnS e) = typeSof e
   typeSof (SerialLetS _ _ e) = typeSof e
   typeSof (NativeLetS _ _ e) = typeSof e
@@ -1169,6 +1180,7 @@ instance MFunctor SerialExpr where
     | gateSerialExpr g se0 = case se0 of
         (ManS sm) -> mapSerialExpr f $ ManS (mgatedMap g f sm)
         (AppPoolS t p serialArgs) -> mapSerialExpr f $ AppPoolS t p (map (mgatedMap g f) serialArgs)
+        (AppRecS t m es) -> mapSerialExpr f $ AppRecS t m (map (mgatedMap g f) es)
         (ReturnS se) -> mapSerialExpr f $ ReturnS (mgatedMap g f se)
         (SerialLetS i se1 se2) -> mapSerialExpr f $ SerialLetS i (mgatedMap g f se1) (mgatedMap g f se2)
         (NativeLetS i ne1 se2) -> mapSerialExpr f $ NativeLetS i (mgatedMap g f ne1) (mgatedMap g f se2)
@@ -1235,6 +1247,7 @@ instance Pretty PolyExpr where
   pretty (PolyExe _ (SrcCallP src)) = "PolyExe<" <> pretty (srcAlias src) <> ">"
   pretty (PolyExe _ (PatCallP _)) = "PolyExe<pattern>"
   pretty (PolyExe _ (LocalCallP _)) = "PolyExe<local>"
+  pretty (PolyExe _ (RecCallP i)) = "PolyExe<rec_m" <> pretty i <> ">"
   pretty (PolyList _ _ _) = "PolyList"
   pretty (PolyTuple _ xs) = "PolyTuple" <+> pretty (length xs)
   pretty (PolyRecord _ _ _ _) = "PolyRecord"

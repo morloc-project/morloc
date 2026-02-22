@@ -261,6 +261,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS _ _ (LetS _ _ body)) = toNexusExpr body
     toNexusExpr (AnnoS _ _ (SuspendS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (ForceS e)) = toNexusExpr e
+    toNexusExpr (AnnoS (Idx _ t) _ (CallS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr _ = error $ "Unreachable value of type reached"
 
 -- ======================================================================

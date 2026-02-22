@@ -40,6 +40,7 @@ toE (AnnoS g _ (ExeS (PatCall (PatternText s ss)))) =
   LitP g (MStr (s <> DT.concat ["#{}" <> s' | s' <- ss]))
 toE (AnnoS g _ (ExeS (PatCall (PatternStruct s)))) = PatP g s
 toE (AnnoS g _ (LetBndS v)) = BndP g v
+toE (AnnoS g _ (CallS v)) = BndP g v
 toE (AnnoS _ _ (LetS _ _ body)) = toE body
 toE (AnnoS g _ (SuspendS e)) = SuspendP g (toE e)
 toE (AnnoS g _ (ForceS e)) = ForceP g (toE e)

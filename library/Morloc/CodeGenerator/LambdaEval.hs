@@ -165,6 +165,7 @@ applyLambdas (AnnoS g c (ForceS (AnnoS _ _ (SuspendS e)))) = do
   let AnnoS _ _ inner = e'
   return (AnnoS g c inner)
 applyLambdas (AnnoS g c (ForceS e)) = AnnoS g c . ForceS <$> applyLambdas e
+applyLambdas (AnnoS g c (CallS v)) = return (AnnoS g c (CallS v))
 applyLambdas x = return x
 
 substituteAnnoS ::
@@ -204,4 +205,5 @@ substituteAnnoS v r = f
       | otherwise = AnnoS g c (LetS v' (f e1) (f e2))
     f (AnnoS g c (SuspendS e)) = AnnoS g c (SuspendS (f e))
     f (AnnoS g c (ForceS e)) = AnnoS g c (ForceS (f e))
+    -- CallS is a recursive back-edge, not a variable reference to substitute
     f x = x

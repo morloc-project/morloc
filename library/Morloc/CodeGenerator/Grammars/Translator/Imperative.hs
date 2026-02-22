@@ -368,6 +368,8 @@ lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) Foreign
   return $ defaultValue {poolExpr = lcForeignCall cfg socketFile mid (map argNamer args)}
 lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) (RemoteCall res) args) _) =
   lcRemoteCall cfg socketFile mid res (map argNamer args)
+lowerSerialExpr _ _ (AppRecS_ _ mid es) = do
+  return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
 lowerSerialExpr cfg _ (ReturnS_ x) = return $ x {poolExpr = lcReturn cfg (poolExpr x)}
 lowerSerialExpr cfg _ (SerialLetS_ i e1 e2) =
   lcMakeLet cfg svarNamer i Nothing e1 e2
@@ -409,6 +411,8 @@ lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) _ xs) = do
 lowerNativeExpr cfg _ (AppExeN_ _ (LocalCallP idx) qs (map snd -> es)) = do
   templateArgs <- lcTemplateArgs cfg qs
   return $ mergePoolDocs ((<>) (nvarNamer idx <> printTemplateArgs' templateArgs) . tupled) es
+lowerNativeExpr _ _ (AppExeN_ _ (RecCallP mid) _ (map snd -> es)) = do
+  return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
 lowerNativeExpr _ _ (ManN_ call) = return call
 lowerNativeExpr cfg _ (ReturnN_ x) =
   return $ x {poolExpr = lcReturn cfg (poolExpr x)}
@@ -427,6 +431,7 @@ lowerNativeExpr cfg _ (DeserializeN_ t s x) = do
 lowerNativeExpr cfg _ (ExeN_ _ (SrcCallP src)) = return $ defaultValue {poolExpr = lcSrcName cfg src}
 lowerNativeExpr _ _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
 lowerNativeExpr _ _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
+lowerNativeExpr _ _ (ExeN_ _ (RecCallP mid)) = return $ defaultValue {poolExpr = manNamer mid}
 lowerNativeExpr cfg _ (ListN_ v t xs) = return $ mergePoolDocs (lcListConstructor cfg v t) xs
 lowerNativeExpr cfg _ (TupleN_ v xs) = return $ mergePoolDocs (lcTupleConstructor cfg v) xs
 lowerNativeExpr cfg origExpr (RecordN_ o v ps rs) = do

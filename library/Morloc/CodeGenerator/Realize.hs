@@ -179,6 +179,7 @@ realizeWithRegistry registry s0 = do
       let best = minPairs (scoresOf e1' ++ scoresOf e2')
       return (LetS v e1' e2', Idx i best)
     scoreExpr rstat (LetBndS v, i) = return (LetBndS v, zipLang i rstat)
+    scoreExpr rstat (CallS v, i) = return (CallS v, zipLang i rstat)
     scoreExpr rstat (SuspendS x, i) = do
       x' <- scoreAnnoS rstat x
       return (SuspendS x', Idx i (scoresOf x'))
@@ -385,6 +386,7 @@ realizeWithRegistry registry s0 = do
       e2' <- collapseAnnoS lang e2
       return (LetS v e1' e2', Idx i lang)
     collapseExpr _ lang (LetBndS v, Idx i _) = return (LetBndS v, Idx i lang)
+    collapseExpr _ lang (CallS v, Idx i _) = return (CallS v, Idx i lang)
     collapseExpr _ l1 (SuspendS x, Idx i ss) = do
       lang <- chooseLanguage l1 ss
       x' <- collapseAnnoS lang x
@@ -453,6 +455,7 @@ realizeWithRegistry registry s0 = do
             (ExeS x) -> return (ExeS x)
             (LetS v e1 e2) -> LetS v <$> f lang e1 <*> f lang e2
             (LetBndS v) -> return (LetBndS v)
+            (CallS v) -> return (CallS v)
             (SuspendS x) -> SuspendS <$> f lang x
             (ForceS x) -> ForceS <$> f lang x
           return (AnnoS g (Idx i lang) e'')

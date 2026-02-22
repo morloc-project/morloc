@@ -171,6 +171,20 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
               return $ NativeLetN i ne1 ne2
     nativeExpr _ (MonoLetVar t i) = LetVarN <$> inferType t <*> pure i
     nativeExpr m (MonoReturn e) = ReturnN <$> nativeExpr m e
+    -- Recursive call: serialize args, call serial manifold, deserialize result
+    nativeExpr m (MonoApp (MonoExe (Idx idx t0) (RecCallP mid)) es) = do
+      let (inputTypes, outputType) = case t0 of
+            FunT its ot -> (its, ot)
+            _ -> ([], t0)
+      -- Build native args, then serialize each one
+      nativeArgs <- mapM (nativeExpr m) es
+      serializedArgs <- mapM (serializeS "recArg" m) nativeArgs
+      -- Return type of the serial manifold call
+      resultType <- inferType (Idx idx outputType)
+      -- Create serial expression: call the serial manifold with serialized args
+      let serialCall = AppRecS resultType mid serializedArgs
+      -- Deserialize the result back to native
+      naturalizeN "recCall" m lang resultType serialCall
     nativeExpr m (MonoApp (MonoExe (Idx idx t0) exe) es) = do
       args <- mapM (nativeArg m) es
       let (inputTypes, outputType) = case t0 of
@@ -370,6 +384,9 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
           req2 = Map.fromList [(i, requestOf tm) | Arg i tm <- pargs]
           req3 = Map.unionWith (<>) req1 req2
       return (req3, AppPoolS t p (map snd args))
+    wireSerialExpr (AppRecS_ t mid args) = do
+      let req = Map.unionsWith (<>) (map fst args)
+      return (req, AppRecS t mid (map snd args))
     wireSerialExpr (SerialLetS_ i (req1, se1) (req2, se2)) = do
       let req' = Map.unionWith (<>) req1 req2
       e' <- case Map.lookup i req2 of

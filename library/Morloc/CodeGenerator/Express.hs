@@ -38,6 +38,7 @@ setManifoldConfig midx (AnnoS _ _ (AppS e _)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (LamS _ e)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (SuspendS e)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (ForceS e)) = setManifoldConfig midx e
+setManifoldConfig _ (AnnoS _ _ (CallS _)) = return ()
 setManifoldConfig _ _ = return ()
 
 linkConfigIndex :: Int -> Int -> MorlocMonad ()
@@ -502,6 +503,10 @@ expressPolyExpr _ pl pc (AnnoS (Idx i t) c e@(NamS _)) = do
   case reduceType scope t of
     (Just t') -> expressPolyExprWrap pl pc (AnnoS (Idx i t') c e)
     Nothing -> error "Expected a record type"
+-- Recursive call used as a value (not applied via AppS)
+expressPolyExpr _ _ _ (AnnoS (Idx i c) (Idx cidx _, _) (CallS v)) = do
+  mid <- lookupRecursiveManifoldId v
+  return $ PolyExe (Idx i c) (RecCallP mid)
 expressPolyExpr _ _ _ (AnnoS (Idx i _) _ (AppS (AnnoS _ _ (BndS v)) _)) =
   MM.throwSourcedError i $
     "Undefined function" <+> dquotes (pretty v) <> ", did you forget an import?"
@@ -582,6 +587,9 @@ expressPolyApp _ (AnnoS g (_, args) (BndS v)) xs = do
   case [j | (Arg j u) <- args, u == v] of
     [j] -> return . PolyReturn $ PolyApp (PolyExe g (LocalCallP j)) xs
     _ -> error "Unreachable? BndS value should have been wired uniquely to args previously"
+expressPolyApp _ (AnnoS g _ (CallS v)) xs = do
+  mid <- lookupRecursiveManifoldId v
+  return . PolyReturn $ PolyApp (PolyExe g (RecCallP mid)) xs
 expressPolyApp _ (AnnoS _ _ (LamS _ _)) _ = error "unexpected LamS - should have been handled"
 expressPolyApp _ (AnnoS _ _ (VarS _ _)) _ = error "unexpected VarS - should have been substituted"
 expressPolyApp _ _ _ = error "Unreachable? This does not seem to be applicable"
@@ -631,6 +639,16 @@ pushForceIntoRemote t = go
     stripInExe (PolyApp (PolyExe (Idx gidx (ThunkT out)) exe) xs) =
       PolyApp (PolyExe (Idx gidx out) exe) xs
     stripInExe e = e
+
+-- | Resolve a function name to its manifold ID for recursive calls
+lookupRecursiveManifoldId :: EVar -> MorlocMonad Int
+lookupRecursiveManifoldId v = do
+  exports <- MM.gets stateExports
+  nameMap <- MM.gets stateName
+  let reverseMap = Map.fromList [(name, idx) | idx <- exports, Just name <- [Map.lookup idx nameMap]]
+  case Map.lookup v reverseMap of
+    (Just mid) -> return mid
+    Nothing -> MM.throwSystemError $ "Cannot resolve recursive call to" <+> pretty v
 
 bindVarIds :: [Int] -> [Three Lang Type (Indexed Type)] -> [PolyExpr]
 bindVarIds [] [] = []

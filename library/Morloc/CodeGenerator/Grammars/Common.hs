@@ -275,6 +275,10 @@ invertSerialManifold sm0 =
       return $ D se2 (lets2 <> ((i, Right ne1) : lets1))
     invertSerialExprM (LetVarS_ t i) = atomize (LetVarS t i) []
     invertSerialExprM (BndVarS_ t i) = atomize (BndVarS t i) []
+    invertSerialExprM (AppRecS_ t mid serialExprs) = do
+      let serialExprs' = map unD serialExprs
+          deps = concatMap getDeps serialExprs
+      atomize (AppRecS t mid serialExprs') deps
     invertSerialExprM (SerializeS_ s (D ne lets)) = atomize (SerializeS s ne) lets
 
     invertNativeExprM ::

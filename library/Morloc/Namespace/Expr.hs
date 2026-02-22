@@ -272,6 +272,7 @@ data ExprS g f c
   | ExeS ExecutableExpr
   | LetS EVar (AnnoS g f c) (AnnoS g f c)
   | LetBndS EVar
+  | CallS EVar  -- recursive call back-edge
   | SuspendS (AnnoS g f c)
   | ForceS (AnnoS g f c)
 
@@ -384,6 +385,7 @@ mapExprSM _ (StrS x) = return $ StrS x
 mapExprSM _ (ExeS x) = return $ ExeS x
 mapExprSM f (LetS v e1 e2) = LetS v <$> f e1 <*> f e2
 mapExprSM _ (LetBndS v) = return $ LetBndS v
+mapExprSM _ (CallS v) = return $ CallS v
 mapExprSM f (SuspendS e) = SuspendS <$> f e
 mapExprSM f (ForceS e) = ForceS <$> f e
 
@@ -586,6 +588,7 @@ instance (Foldable f) => Pretty (ExprS a f b) where
   pretty (ExeS x) = pretty x
   pretty (LetS v e1 e2) = "(LetS" <+> pretty v <+> "=" <+> pretty e1 <+> "in" <+> pretty e2 <> ")"
   pretty (LetBndS x) = "(LetBndS" <+> pretty x <> ")"
+  pretty (CallS v) = "(CallS" <+> pretty v <> ")"
   pretty (SuspendS e) = "(SuspendS" <+> pretty e <> ")"
   pretty (ForceS e) = "(ForceS" <+> pretty e <> ")"
 
