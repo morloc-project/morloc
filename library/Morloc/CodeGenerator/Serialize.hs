@@ -20,6 +20,7 @@ module Morloc.CodeGenerator.Serialize
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Serial as Serial
+import qualified Morloc.Config as MC
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
@@ -174,9 +175,22 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
               return $ NativeLetN i ne1 ne2
     nativeExpr _ (MonoLetVar t i) = LetVarN <$> inferType t <*> pure i
     nativeExpr m (MonoReturn e) = ReturnN <$> nativeExpr m e
-    -- Recursive call: serialize args, call serial manifold, deserialize result
-    nativeExpr m (MonoApp (MonoExe (Idx idx t0) (RecCallP mid)) es) = do
-      let (inputTypes, outputType) = case t0 of
+    -- Cross-language recursive call: serialize args, call via socket, deserialize result
+    nativeExpr m (MonoApp (MonoExe (Idx idx t0) (RecCallP mid (Just targetLang))) es) = do
+      let (_, outputType) = case t0 of
+            FunT its ot -> (its, ot)
+            _ -> ([], t0)
+      nativeArgs <- mapM (nativeExpr m) es
+      serializedArgs <- mapM (serializeS "foreignRecArg" m) nativeArgs
+      resultType <- inferType (Idx idx outputType)
+      config <- MM.ask
+      reg <- MM.gets stateLangRegistry
+      let socket = MC.setupServerAndSocket config reg targetLang
+          serialCall = AppForeignRecS resultType mid socket serializedArgs
+      naturalizeN "foreignRecCall" m lang resultType serialCall
+    -- Same-language recursive call: serialize args, call serial manifold, deserialize result
+    nativeExpr m (MonoApp (MonoExe (Idx idx t0) (RecCallP mid Nothing)) es) = do
+      let (_, outputType) = case t0 of
             FunT its ot -> (its, ot)
             _ -> ([], t0)
       -- Build native args, then serialize each one
@@ -398,6 +412,9 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
     wireSerialExpr (AppRecS_ t mid args) = do
       let req = Map.unionsWith (<>) (map fst args)
       return (req, AppRecS t mid (map snd args))
+    wireSerialExpr (AppForeignRecS_ t mid socket args) = do
+      let req = Map.unionsWith (<>) (map fst args)
+      return (req, AppForeignRecS t mid socket (map snd args))
     wireSerialExpr (SerialLetS_ i (req1, se1) (req2, se2)) = do
       let req' = Map.unionWith (<>) req1 req2
       e' <- case Map.lookup i req2 of

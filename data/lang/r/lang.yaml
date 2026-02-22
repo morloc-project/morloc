@@ -35,6 +35,7 @@ ldDeserializeFn: "morloc_get_value"
 # Foreign call
 ldForeignCallFn: "morloc_foreign_call"
 ldForeignCallIntSuffix: "L"
+ldIntLiteralSuffix: "L"
 
 # Remote call
 ldRemoteCallFn: "morloc_remote_call"

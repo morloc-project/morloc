@@ -98,6 +98,7 @@ data LangDescriptor = LangDescriptor
   , -- Foreign call template
     ldForeignCallFn :: !Text -- "morloc.foreign_call" or "morloc_foreign_call"
   , ldForeignCallIntSuffix :: !Text -- "L" for R, "" for others
+  , ldIntLiteralSuffix :: !Text -- "L" for R, "" for others
   , -- Remote call
     ldRemoteCallFn :: !Text -- "morloc.remote_call" or "morloc_remote_call"
   , -- Record access
@@ -218,6 +219,7 @@ instance Y.FromJSON LangDescriptor where
             . maybe id (ins "ldRunCommand") runCmdVal
             . maybe id (ins "ldIsCompiled") isCompiledVal
             . ins "ldCodegenCommand" Y.Null
+            . ins "ldIntLiteralSuffix" (Y.String "")
             . ins "ldRemoteCallFn" (Y.String "")
             . ins "ldDictStyleRecords" (Y.Bool False)
             . ins "ldQuoteRecordKeys" (Y.Bool True)
@@ -289,6 +291,7 @@ defaultLangDescriptor name ext =
     , ldDeserializeFn = "morloc.get_value"
     , ldForeignCallFn = "morloc.foreign_call"
     , ldForeignCallIntSuffix = ""
+    , ldIntLiteralSuffix = ""
     , ldRemoteCallFn = ""
     , ldDictStyleRecords = False
     , ldQuoteRecordKeys = True

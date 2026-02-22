@@ -103,6 +103,7 @@ copyState oldIndex newIndex = do
       , stateClassDefs = stateClassDefs s
       , stateLangRegistry = stateLangRegistry s
       , stateExportGroups = stateExportGroups s
+      , stateManifoldLang = stateManifoldLang s
       }
   where
     updateGMap g = case GMap.yIsX oldIndex newIndex g of

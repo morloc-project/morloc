@@ -1,0 +1,15 @@
+module main (fact)
+
+import root-r
+import root-cpp
+
+source R from "r_helpers.R" ("r_mul" as mul)
+mul :: Int -> Int -> Int
+
+source Cpp from "cpp_helpers.hpp" ("cpp_sub" as sub)
+sub :: Int -> Int -> Int
+
+fact :: Int -> Int
+fact n
+  ? n == 0 = 1
+  ? _ = mul n (fact (sub n 1))

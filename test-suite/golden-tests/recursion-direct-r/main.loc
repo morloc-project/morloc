@@ -1,0 +1,8 @@
+module main (fact)
+
+import root-r
+
+fact :: Int -> Int
+fact n
+  ? n == 0 = 1
+  ? _ = n * fact (n - 1)

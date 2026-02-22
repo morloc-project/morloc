@@ -280,6 +280,10 @@ invertSerialManifold sm0 =
       let serialExprs' = map unD serialExprs
           deps = concatMap getDeps serialExprs
       atomize (AppRecS t mid serialExprs') deps
+    invertSerialExprM (AppForeignRecS_ t mid socket serialExprs) = do
+      let serialExprs' = map unD serialExprs
+          deps = concatMap getDeps serialExprs
+      atomize (AppForeignRecS t mid socket serialExprs') deps
     invertSerialExprM (SerializeS_ s (D ne lets)) = atomize (SerializeS s ne) lets
 
     invertNativeExprM ::
