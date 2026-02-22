@@ -522,6 +522,7 @@ do_stmts :: { [CstDoStmt] }
 
 do_stmt :: { CstDoStmt }
   : LOWER '<-' expr            { CstDoBind (EV (getName $1)) $3 }
+  | 'let' LOWER '=' expr       { CstDoLet (EV (getName $2)) $4 }
   | expr                       { CstDoBare $1 }
 
 getter_expr :: { Loc CstExpr }

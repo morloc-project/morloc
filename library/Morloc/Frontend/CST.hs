@@ -145,6 +145,7 @@ data CstSigItem = CstSigItem EVar [Text] CstSigType
 data CstDoStmt
   = CstDoBind EVar (Loc CstExpr)
   | CstDoBare (Loc CstExpr)
+  | CstDoLet EVar (Loc CstExpr)
   deriving (Show, Eq)
 
 data CstAccessorBody

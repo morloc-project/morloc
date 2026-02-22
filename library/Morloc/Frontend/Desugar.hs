@@ -413,6 +413,11 @@ desugarDo sp [CstDoBare e] = do
   e' <- desugarExpr e
   freshExprSpan sp (ForceE e')
 desugarDo sp [CstDoBind _ _] = dfail (startPos sp) "do block cannot end with a bind (<-)"
+desugarDo sp [CstDoLet _ _] = dfail (startPos sp) "do block cannot end with a let binding"
+desugarDo sp (CstDoLet v e : rest) = do
+  e' <- desugarExpr e
+  restE <- desugarDo sp rest
+  freshExprSpan sp (LetE [(v, e')] restE)
 desugarDo sp (CstDoBind v e : rest) = do
   e' <- desugarExpr e
   forceE <- freshExprSpan sp (ForceE e')
