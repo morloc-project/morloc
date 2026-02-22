@@ -18,6 +18,11 @@ jobs:
       - name: Checkout Morloc code
         uses: actions/checkout@v4
 
+      - name: Add morloc bin folders to PATH
+        run: |
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/share/morloc/bin" >> $GITHUB_PATH
+
       - name: Diagnostics
         run: |
           pwd
