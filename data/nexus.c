@@ -664,8 +664,10 @@ morloc_socket_t* setup_sockets(
 // Manifest-driven help text
 // ======================================================================
 
+static const char* prog_name = "morloc-nexus";
+
 void print_nexus_usage(void) {
-    fprintf(stderr, "Usage: morloc-nexus <manifest> [OPTION...] COMMAND [ARG...]\n");
+    fprintf(stderr, "Usage: %s [OPTION...] COMMAND [ARG...]\n", prog_name);
     fprintf(stderr, "\n");
     fprintf(stderr, "morloc-nexus is the morloc program dispatcher.\n");
     fprintf(stderr, "\n");
@@ -699,7 +701,7 @@ void print_group_usage(const manifest_t* manifest, const char* group_name) {
         }
     }
 
-    fprintf(stderr, "Usage: morloc-nexus <manifest> %s COMMAND [ARG...]\n", group_name);
+    fprintf(stderr, "Usage: %s %s COMMAND [ARG...]\n", prog_name, group_name);
     if (grp && grp->desc) {
         fprintf(stderr, "\n");
         for (size_t i = 0; grp->desc[i]; i++) {
@@ -734,7 +736,7 @@ void print_group_usage(const manifest_t* manifest, const char* group_name) {
 }
 
 void print_usage(const manifest_t* manifest) {
-    fprintf(stderr, "Usage: morloc-nexus <manifest> [OPTION...] COMMAND [ARG...]\n");
+    fprintf(stderr, "Usage: %s [OPTION...] COMMAND [ARG...]\n", prog_name);
     fprintf(stderr, "\n");
     fprintf(stderr, "Nexus Options:\n");
     fprintf(stderr, " -h, --help            Print this help message\n");
@@ -804,9 +806,9 @@ void print_usage(const manifest_t* manifest) {
 void print_command_help(const manifest_command_t* cmd) {
     // Usage line
     if (cmd->group) {
-        fprintf(stderr, "Usage: morloc-nexus <manifest> %s %s", cmd->group, cmd->name);
+        fprintf(stderr, "Usage: %s %s %s", prog_name, cmd->group, cmd->name);
     } else {
-        fprintf(stderr, "Usage: morloc-nexus <manifest> %s", cmd->name);
+        fprintf(stderr, "Usage: %s %s", prog_name, cmd->name);
     }
     // Check if there are non-positional args
     bool has_opts = false;
@@ -852,9 +854,9 @@ void print_command_help(const manifest_command_t* cmd) {
             else if (a->short_opt) fprintf(stderr, "-%c %s", a->short_opt, a->metavar);
             else if (a->long_opt) fprintf(stderr, "--%s %s", a->long_opt, a->metavar);
             fprintf(stderr, "\n");
+            if (a->default_val) fprintf(stderr, "        default: %s\n", a->default_val);
             if (a->desc) for (size_t d = 0; a->desc[d]; d++) fprintf(stderr, "        %s\n", a->desc[d]);
             if (a->type_desc) fprintf(stderr, "        type: %s\n", a->type_desc);
-            if (a->default_val) fprintf(stderr, "        default: %s\n", a->default_val);
         } else if (a->kind == MARG_FLAG) {
             if (!has_opt) { fprintf(stderr, "\nOptional arguments:\n"); has_opt = true; }
             fprintf(stderr, "    ");
@@ -863,8 +865,8 @@ void print_command_help(const manifest_command_t* cmd) {
             else if (a->long_opt) fprintf(stderr, "--%s", a->long_opt);
             fprintf(stderr, "\n");
             if (a->long_rev) fprintf(stderr, "    --%s\n", a->long_rev);
-            if (a->desc) for (size_t d = 0; a->desc[d]; d++) fprintf(stderr, "        %s\n", a->desc[d]);
             if (a->default_val) fprintf(stderr, "        default: %s\n", a->default_val);
+            if (a->desc) for (size_t d = 0; a->desc[d]; d++) fprintf(stderr, "        %s\n", a->desc[d]);
         }
     }
 
@@ -887,11 +889,15 @@ void print_command_help(const manifest_command_t* cmd) {
                 if (ea->short_opt && ea->long_opt) {
                     fprintf(stderr, "-%c, --%s", ea->short_opt, ea->long_opt);
                     if (ea->kind == MARG_OPT && ea->metavar) fprintf(stderr, " %s", ea->metavar);
+                } else if (ea->short_opt) {
+                    fprintf(stderr, "-%c", ea->short_opt);
+                    if (ea->kind == MARG_OPT && ea->metavar) fprintf(stderr, " %s", ea->metavar);
                 } else if (ea->long_opt) {
                     fprintf(stderr, "--%s", ea->long_opt);
                     if (ea->kind == MARG_OPT && ea->metavar) fprintf(stderr, " %s", ea->metavar);
                 }
                 fprintf(stderr, "\n");
+                if (ea->default_val) fprintf(stderr, "        default: %s\n", ea->default_val);
                 if (ea->desc) for (size_t d = 0; ea->desc[d]; d++) fprintf(stderr, "        %s\n", ea->desc[d]);
             }
         }
@@ -1473,6 +1479,7 @@ int main(int argc, char *argv[]) {
     }
 
     const char* manifest_path = argv[optind];
+    prog_name = manifest_path;
     optind++;
 
     // Second pass: parse options that appear after the manifest path
