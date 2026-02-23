@@ -26,6 +26,7 @@ import Morloc.Namespace.Type
 
 import Morloc.Data.Doc (pretty)
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
 import Morloc.CodeGenerator.Emit (TranslateFn, emit, pool)
@@ -116,7 +117,12 @@ writeProgram translateFn path code = do
                 Nothing -> return ()
         mapM_ (warnSkip . fst) genericGASTs
         mapM_ (warnSkip . fst) genericRASTs
-        nexus <- Nexus.generate concreteGASTs concreteRASTs
+        -- Only pass exported rASTs to the nexus (not recursive helpers)
+        exports <- MM.gets stateExports
+        let exportSet = Set.fromList exports
+            isExported (AnnoS (Idx midx _) _ _, _) = Set.member midx exportSet
+            exportedRASTs = filter isExported concreteRASTs
+        nexus <- Nexus.generate concreteGASTs exportedRASTs
         MM.startCounter
         paramRASTs <- mapM parameterize (map fst concreteRASTs)
         let langMap = Map.fromList

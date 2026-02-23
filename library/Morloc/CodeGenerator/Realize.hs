@@ -17,6 +17,7 @@ implementation.
 -}
 module Morloc.CodeGenerator.Realize
   ( realityCheck
+  , removeVarS
   ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -24,6 +25,7 @@ import qualified Morloc.CodeGenerator.SystemConfig as MCS
 import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
+import qualified Data.Set as Set
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 
@@ -36,11 +38,19 @@ realityCheck ::
     )
 realityCheck es = do
   -- translate modules into bitrees
-  (gASTs, rASTs) <-
+  (gASTs0, rASTs0) <-
     -- select a single instance at each node in the tree
     mapM realize es
       -- separate unrealized (general) ASTs (uASTs) from realized ASTs (rASTs)
       |>> partitionEithers
+
+  -- Extract non-exported recursive helpers into their own rASTs.
+  -- This must happen before removeVarS so we can find the VarS wrappers.
+  rASTs1 <- extractRecursiveHelpers rASTs0
+
+  -- Now dissolve remaining (non-recursive) VarS wrappers
+  let gASTs = map removeVarS gASTs0
+      rASTs = map removeVarS rASTs1
 
   -- check and configure the system
   -- in the future, the results of this step may be used to winnow the build
@@ -88,7 +98,7 @@ realizeWithRegistry ::
         (AnnoS (Indexed Type) One (Indexed Lang))
     )
 realizeWithRegistry registry s0 = do
-  e@(AnnoS _ li _) <- scoreAnnoS emptyRState s0 >>= collapseAnnoS Nothing |>> removeVarS
+  e@(AnnoS _ li _) <- scoreAnnoS emptyRState s0 >>= collapseAnnoS Nothing
   case li of
     (Idx _ Nothing) -> makeGAST e |>> Left
     (Idx _ _) -> propagateDown e |>> Right
@@ -510,6 +520,108 @@ removeVarS (AnnoS g c (IfS cond thenE elseE)) = AnnoS g c (IfS (removeVarS cond)
 removeVarS (AnnoS g c (SuspendS e)) = AnnoS g c (SuspendS (removeVarS e))
 removeVarS (AnnoS g c (ForceS e)) = AnnoS g c (ForceS (removeVarS e))
 removeVarS x = x
+
+-- | Extract non-exported recursive helpers from rASTs into their own top-level
+-- rASTs. A recursive helper is a VarS node whose body contains a CallS
+-- back-edge to its own name. These must become separate manifolds so the
+-- generated code can call them recursively. This runs before removeVarS.
+extractRecursiveHelpers ::
+  [AnnoS (Indexed Type) One (Indexed Lang)] ->
+  MorlocMonad [AnnoS (Indexed Type) One (Indexed Lang)]
+extractRecursiveHelpers rASTs = do
+  exports <- MM.gets stateExports
+  let exportSet = Set.fromList exports
+  results <- mapM (extractFromTree exportSet) rASTs
+  let (modified, helperLists) = unzip results
+      helpers = concat helperLists
+  -- Register extracted helpers in stateName if not already present (they
+  -- should be from the Link phase, but ensure it for safety).
+  nameMap <- MM.gets stateName
+  mapM_ (\(AnnoS (Idx midx _) _ _) ->
+    case Map.lookup midx nameMap of
+      Just _ -> return ()
+      Nothing -> MM.sayVVV $ "Warning: recursive helper manifold" <+> pretty midx <+> "not in stateName"
+    ) helpers
+  return (modified ++ helpers)
+
+-- | Walk an rAST and extract recursive VarS nodes into separate rASTs.
+-- Returns the modified tree and the list of extracted helper rASTs.
+extractFromTree ::
+  Set.Set Int ->
+  AnnoS (Indexed Type) One (Indexed Lang) ->
+  MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang), [AnnoS (Indexed Type) One (Indexed Lang)])
+extractFromTree exports (AnnoS g c e) = do
+  (e', helpers) <- extractExpr exports e
+  return (AnnoS g c e', helpers)
+
+extractExpr ::
+  Set.Set Int ->
+  ExprS (Indexed Type) One (Indexed Lang) ->
+  MorlocMonad (ExprS (Indexed Type) One (Indexed Lang), [AnnoS (Indexed Type) One (Indexed Lang)])
+extractExpr exports (VarS v (One child@(AnnoS (Idx midx _) _ _)))
+  -- Only extract if the function is recursive AND not already an export
+  -- (exports already have their own manifolds)
+  | not (Set.member midx exports) && containsCallS v child = do
+      -- Recursively extract from the child's body first
+      (child', innerHelpers) <- extractFromTree exports child
+      return (CallS v, child' : innerHelpers)
+extractExpr exports (VarS v (One child)) = do
+  (child', helpers) <- extractFromTree exports child
+  return (VarS v (One child'), helpers)
+extractExpr exports (AppS f xs) = do
+  (f', fHelpers) <- extractFromTree exports f
+  results <- mapM (extractFromTree exports) xs
+  let (xs', xHelperLists) = unzip results
+  return (AppS f' xs', fHelpers ++ concat xHelperLists)
+extractExpr exports (LamS vs e) = do
+  (e', helpers) <- extractFromTree exports e
+  return (LamS vs e', helpers)
+extractExpr exports (LstS xs) = do
+  results <- mapM (extractFromTree exports) xs
+  let (xs', helperLists) = unzip results
+  return (LstS xs', concat helperLists)
+extractExpr exports (TupS xs) = do
+  results <- mapM (extractFromTree exports) xs
+  let (xs', helperLists) = unzip results
+  return (TupS xs', concat helperLists)
+extractExpr exports (NamS rs) = do
+  results <- mapM (extractFromTree exports . snd) rs
+  let (vals', helperLists) = unzip results
+  return (NamS (zip (map fst rs) vals'), concat helperLists)
+extractExpr exports (LetS v e1 e2) = do
+  (e1', h1) <- extractFromTree exports e1
+  (e2', h2) <- extractFromTree exports e2
+  return (LetS v e1' e2', h1 ++ h2)
+extractExpr exports (IfS c t e) = do
+  (c', h1) <- extractFromTree exports c
+  (t', h2) <- extractFromTree exports t
+  (e', h3) <- extractFromTree exports e
+  return (IfS c' t' e', h1 ++ h2 ++ h3)
+extractExpr exports (SuspendS e) = do
+  (e', helpers) <- extractFromTree exports e
+  return (SuspendS e', helpers)
+extractExpr exports (ForceS e) = do
+  (e', helpers) <- extractFromTree exports e
+  return (ForceS e', helpers)
+extractExpr _ e = return (e, [])
+
+-- | Check if an AnnoS tree contains a CallS node targeting the given name
+containsCallS :: EVar -> AnnoS g One c -> Bool
+containsCallS target (AnnoS _ _ e) = go e
+  where
+    go (CallS v) = v == target
+    go (AppS f xs) = containsCallS target f || any (containsCallS target) xs
+    go (LamS _ x) = containsCallS target x
+    go (LstS xs) = any (containsCallS target) xs
+    go (TupS xs) = any (containsCallS target) xs
+    go (NamS rs) = any (containsCallS target . snd) rs
+    go (VarS _ (One x)) = containsCallS target x
+    go (LetS _ e1 e2) = containsCallS target e1 || containsCallS target e2
+    go (LetBndS _) = False
+    go (IfS c t e) = containsCallS target c || containsCallS target t || containsCallS target e
+    go (SuspendS x) = containsCallS target x
+    go (ForceS x) = containsCallS target x
+    go _ = False
 
 -- Check if this expression is a data structure that contains
 -- a function. If so, then the data structure is must be in the

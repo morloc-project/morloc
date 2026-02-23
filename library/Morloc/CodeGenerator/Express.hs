@@ -508,7 +508,13 @@ expressPolyExpr _ pl pc (AnnoS (Idx i t) c e@(NamS _)) = do
 -- Recursive call used as a value (not applied via AppS)
 expressPolyExpr _ parentLang _ (AnnoS (Idx i c) (Idx cidx _, _) (CallS v)) = do
   (mid, crossLang) <- lookupRecursiveTarget parentLang v
-  return $ PolyExe (Idx i c) (RecCallP mid crossLang)
+  -- Strip ThunkT from return type (serial manifolds force thunks)
+  case c of
+    FunT inputs (ThunkT out) ->
+      return . PolySuspend (Idx i (ThunkT out))
+        $ PolyExe (Idx i (FunT inputs out)) (RecCallP mid crossLang)
+    _ ->
+      return $ PolyExe (Idx i c) (RecCallP mid crossLang)
 expressPolyExpr _ _ _ (AnnoS (Idx i _) _ (AppS (AnnoS _ _ (BndS v)) _)) =
   MM.throwSourcedError i $
     "Undefined function" <+> dquotes (pretty v) <> ", did you forget an import?"
@@ -595,9 +601,17 @@ expressPolyApp _ (AnnoS g (_, args) (BndS v)) xs = do
   case [j | (Arg j u) <- args, u == v] of
     [j] -> return . PolyReturn $ PolyApp (PolyExe g (LocalCallP j)) xs
     _ -> error "Unreachable? BndS value should have been wired uniquely to args previously"
-expressPolyApp parentLang (AnnoS g _ (CallS v)) xs = do
+expressPolyApp parentLang (AnnoS (Idx i t) _ (CallS v)) xs = do
   (mid, crossLang) <- lookupRecursiveTarget parentLang v
-  return . PolyReturn $ PolyApp (PolyExe g (RecCallP mid crossLang)) xs
+  -- Serial manifolds force thunks before serializing, so strip ThunkT from the
+  -- return type and wrap in PolySuspend to reconstruct the thunk after deserializing.
+  case t of
+    FunT inputs (ThunkT out) ->
+      return . PolyReturn
+        . PolySuspend (Idx i (ThunkT out))
+        $ PolyApp (PolyExe (Idx i (FunT inputs out)) (RecCallP mid crossLang)) xs
+    _ ->
+      return . PolyReturn $ PolyApp (PolyExe (Idx i t) (RecCallP mid crossLang)) xs
 expressPolyApp _ (AnnoS _ _ (LamS _ _)) _ = error "unexpected LamS - should have been handled"
 expressPolyApp _ (AnnoS _ _ (VarS _ _)) _ = error "unexpected VarS - should have been substituted"
 expressPolyApp _ _ _ = error "Unreachable? This does not seem to be applicable"
@@ -650,12 +664,14 @@ pushForceIntoRemote t = go
 
 -- | Resolve a function name to its manifold ID and determine if the call is cross-language.
 -- Returns (manifold ID, Nothing) for same-pool calls, (manifold ID, Just targetLang) for foreign calls.
+-- Searches all manifolds in stateName, not just exports, to support non-exported recursive helpers.
 lookupRecursiveTarget :: Lang -> EVar -> MorlocMonad (Int, Maybe Lang)
 lookupRecursiveTarget parentLang v = do
-  exports <- MM.gets stateExports
   nameMap <- MM.gets stateName
   langMap <- MM.gets stateManifoldLang
-  let reverseMap = Map.fromList [(name, idx) | idx <- exports, Just name <- [Map.lookup idx nameMap]]
+  -- Filter to concrete manifolds only (those in langMap) to avoid picking up
+  -- general/polymorphic indices that don't have serial manifold definitions
+  let reverseMap = Map.fromList [(name, idx) | (idx, name) <- Map.toList nameMap, Map.member idx langMap]
   case Map.lookup v reverseMap of
     (Just mid) -> do
       let crossLang = case Map.lookup mid langMap of
