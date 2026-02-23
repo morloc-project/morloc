@@ -155,4 +155,12 @@ inferConcreteVar lang t0@(Idx i v) = do
         MM.sayVVV $ "WARNING: using global definition for v=" <> pretty v
         return $ FV v (CV . unTVar $ extractKey t)
       (Just ((_, t, _, False) : _)) -> error $ "Substituting the non-terminal " <> show (extractKey t) <> " into type " <> show t
-      _ -> error $ "Cannot find type variable " <> show (unTVar v) <> " in scope"
+      _ -> do
+        -- Try transitive resolution: expand through general scope
+        (cscope, gscope) <- getScope i lang
+        case T.pairEval cscope gscope (VarU v) of
+          Right (VarU v') -> return $ FV v (CV (unTVar v'))
+          Right _ -> error $ "Transitive resolution of " <> show (unTVar v)
+                          <> " yielded non-variable type"
+          Left _ -> error $ "Cannot find type variable "
+                         <> show (unTVar v) <> " in scope"

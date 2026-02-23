@@ -106,6 +106,7 @@ main = do
       , golden "typeclasses-5" "typeclasses-5"
       , golden "typeclasses-6" "typeclasses-6"
       , golden "typeclasses-7" "typeclasses-7"
+      , golden "typeclasses-8" "typeclasses-8"
       , golden "higher-kinded-types" "higher-kinded-types"
       , golden "string-encoding" "string-encoding"
       , golden "string-encoding-utf8" "string-encoding-utf8"
@@ -334,6 +335,8 @@ main = do
       , golden "scoping-11" "scoping-11"
       , golden "scoping-12" "scoping-12"
       , golden "scoping-13" "scoping-13"
+      , -- type alias transitive resolution
+        golden "type-alias-transitive" "type-alias-transitive"
       , -- type identities
         golden "type-identities-c" "type-identities-c"
       , -- testing packet transmission

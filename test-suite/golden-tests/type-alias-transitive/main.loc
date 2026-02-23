@@ -1,0 +1,6 @@
+module main (test)
+
+import types-cpp
+
+test :: MyStr
+test = myConcat "hello" " world"
