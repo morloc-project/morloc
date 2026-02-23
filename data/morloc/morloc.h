@@ -75,6 +75,7 @@ void* get_ptr(const Schema* schema, ERRMSG);
 void free_schema(Schema* schema);
 char* quoted(const char* input);
 bool print_voidstar(const void* voidstar, const Schema* schema, ERRMSG);
+bool pretty_print_voidstar(const void* voidstar, const Schema* schema, ERRMSG);
 morloc_packet_header_t* read_morloc_packet_header(const uint8_t* msg, ERRMSG);
 bool packet_is_ping(const uint8_t* packet, ERRMSG);
 bool packet_is_local_call(const uint8_t* packet, ERRMSG);

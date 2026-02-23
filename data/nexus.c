@@ -49,6 +49,7 @@ typedef enum {
 
 typedef struct config_s {
     int help_flag;
+    int print_flag;
     char* packet_path;
     char* socket_base;
     char* output_path;
@@ -254,8 +255,11 @@ void print_return(uint8_t* packet, Schema* schema, config_t config){
     }
 
     if(config.output_format == JSON){
-        // print result
-        print_voidstar(packet_value, schema, &child_errmsg);
+        if(config.print_flag){
+            pretty_print_voidstar(packet_value, schema, &child_errmsg);
+        } else {
+            print_voidstar(packet_value, schema, &child_errmsg);
+        }
     } else if (config.output_format == MessagePack) {
 
         char* mpk_ptr = NULL; // MessagePack data point
@@ -264,13 +268,24 @@ void print_return(uint8_t* packet, Schema* schema, config_t config){
         // translate returned data to MessagePack format
         ERROR_TRY_GOTO(pack_with_schema, (void*)packet_value, schema, &mpk_ptr, &mpk_size);
 
-        // print MessagePack data to STDOUT
-        ERROR_TRY_GOTO(print_binary, mpk_ptr, mpk_size);
+        if(config.print_flag){
+            // hex dump for human-readable MessagePack output
+            ERROR_TRY_GOTO(print_hex_dump, (const uint8_t*)mpk_ptr, mpk_size);
+        } else {
+            // print MessagePack data to STDOUT
+            ERROR_TRY_GOTO(print_binary, mpk_ptr, mpk_size);
+        }
 
     } else if (config.output_format == VoidStar) {
 
-        // print Morloc packet
-        ERROR_TRY_GOTO(print_morloc_data_packet, packet, schema);
+        if(config.print_flag){
+            // hex dump of the raw packet
+            size_t pkt_size = ERROR_TRY_GOTO(morloc_packet_size, packet);
+            ERROR_TRY_GOTO(print_hex_dump, packet, pkt_size);
+        } else {
+            // print Morloc packet
+            ERROR_TRY_GOTO(print_morloc_data_packet, packet, schema);
+        }
 
     } else {
         ERROR("Unsupported output_format specified (this should be impossible, this error message indicates a bug in the code).");
@@ -676,6 +691,7 @@ void print_nexus_usage(void) {
     fprintf(stderr, "\n");
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -h, --help           Print this help message\n");
+    fprintf(stderr, "  -p, --print          Pretty-print output for human consumption\n");
     fprintf(stderr, "  -o, --output-file    Print to this file instead of STDOUT\n");
     fprintf(stderr, "  -f, --output-format  Output format [json|mpk|voidstar]\n");
     fprintf(stderr, "\n");
@@ -740,6 +756,7 @@ void print_usage(const manifest_t* manifest) {
     fprintf(stderr, "\n");
     fprintf(stderr, "Nexus Options:\n");
     fprintf(stderr, " -h, --help            Print this help message\n");
+    fprintf(stderr, " -p, --print           Pretty-print output for human consumption\n");
     fprintf(stderr, " -o, --output-file     Print to this file instead of STDOUT\n");
     fprintf(stderr, " -f, --output-format   Output format [json|mpk|voidstar]\n");
     fprintf(stderr, "\n");
@@ -1385,6 +1402,7 @@ enum {
 static void parse_nexus_options(int argc, char* argv[], config_t* config) {
     static struct option long_options[] = {
         {"help",        no_argument,       0, 'h'},
+        {"print",       no_argument,       0, 'p'},
         {"call-packet", required_argument, 0, 'c'},
         {"socket-base", required_argument, 0, 's'},
         {"output-file", required_argument, 0, 'o'},
@@ -1399,9 +1417,10 @@ static void parse_nexus_options(int argc, char* argv[], config_t* config) {
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "+hc:s:o:f:", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "+hpc:s:o:f:", long_options, NULL)) != -1) {
         switch (opt) {
             case 'h': config->help_flag = 1; break;
+            case 'p': config->print_flag = 1; break;
             case 'c': config->packet_path = optarg; break;
             case 's': config->socket_base = optarg; break;
             case 'o': config->output_path = optarg; break;

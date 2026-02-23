@@ -236,6 +236,30 @@ cleanup:
     return ret;
 }
 
+bool print_hex_dump(const uint8_t* data, size_t size, ERRMSG) {
+    BOOL_RETURN_SETUP
+
+    RAISE_IF(data == NULL && size > 0, "NULL data pointer with non-zero size")
+
+    for (size_t i = 0; i < size; i++) {
+        // Word boundary: space between 4-byte words (but not before the first byte)
+        if (i > 0 && i % 4 == 0) {
+            // Line boundary: newline every 24 bytes (6 words)
+            if (i % 24 == 0) {
+                putchar('\n');
+            } else {
+                putchar(' ');
+            }
+        }
+        printf("%02X", data[i]);
+    }
+    if (size > 0) {
+        putchar('\n');
+    }
+
+    return true;
+}
+
 int print_binary(const char *buf, size_t count, ERRMSG) {
     VAL_RETURN_SETUP(int, -1)
     size_t total_written = 0;

@@ -703,6 +703,158 @@ bool print_voidstar(const void* voidstar, const Schema* schema, ERRMSG) {
 }
 
 // ======================================================================
+// Pretty-print (human-readable output)
+// ======================================================================
+
+static bool pretty_print_r(const void* voidstar, const Schema* schema, int indent, bool is_top_level, ERRMSG) {
+    BOOL_RETURN_SETUP
+
+    Array* array;
+    const char* data;
+
+    switch (schema->type) {
+        case MORLOC_NIL:
+            printf("null");
+            break;
+        case MORLOC_BOOL:
+            printf(*(uint8_t*)voidstar ? "true" : "false");
+            break;
+        case MORLOC_UINT8:
+            printf("%u", *(uint8_t*)voidstar);
+            break;
+        case MORLOC_UINT16:
+            printf("%u", *(uint16_t*)voidstar);
+            break;
+        case MORLOC_UINT32:
+            printf("%u", *(uint32_t*)voidstar);
+            break;
+        case MORLOC_UINT64:
+            printf("%lu", *(uint64_t*)voidstar);
+            break;
+        case MORLOC_SINT8:
+            printf("%d", *(int8_t*)voidstar);
+            break;
+        case MORLOC_SINT16:
+            printf("%d", *(int16_t*)voidstar);
+            break;
+        case MORLOC_SINT32:
+            printf("%d", *(int32_t*)voidstar);
+            break;
+        case MORLOC_SINT64:
+            printf("%ld", *(int64_t*)voidstar);
+            break;
+        case MORLOC_FLOAT32:
+            printf("%.7g", *(float*)voidstar);
+            break;
+        case MORLOC_FLOAT64:
+            printf("%.15g", *(double*)voidstar);
+            break;
+        case MORLOC_STRING:
+            {
+                array = (Array*)voidstar;
+
+                if (array->size == 0) {
+                    if (is_top_level) {
+                        // empty string: print nothing
+                    } else {
+                        printf("\"\"");
+                    }
+                    break;
+                }
+
+                data = TRY((const char*)rel2abs, array->data);
+
+                if (is_top_level) {
+                    // raw output: no quotes, no escaping
+                    fwrite(data, 1, array->size, stdout);
+                } else {
+                    char* escaped = json_escape_string(data, array->size);
+                    if (escaped) {
+                        printf("\"%s\"", escaped);
+                        FREE(escaped);
+                    } else {
+                        RAISE("Memory allocation failed for string escaping");
+                    }
+                }
+            }
+            break;
+        case MORLOC_ARRAY:
+            {
+                array = (Array*)voidstar;
+
+                if (array->size == 0) {
+                    printf("[]");
+                    break;
+                }
+
+                data = TRY((const char*)rel2abs, array->data);
+
+                printf("[\n");
+                for (size_t i = 0; i < array->size; i++) {
+                    if (i > 0) printf(",\n");
+                    for (int s = 0; s < indent + 2; s++) putchar(' ');
+                    TRY(pretty_print_r,
+                        data + i * schema->parameters[0]->width,
+                        schema->parameters[0],
+                        indent + 2, false);
+                }
+                printf("\n");
+                for (int s = 0; s < indent; s++) putchar(' ');
+                printf("]");
+            }
+            break;
+        case MORLOC_TUPLE:
+            {
+                printf("[\n");
+                for (size_t i = 0; i < schema->size; i++) {
+                    if (i > 0) printf(",\n");
+                    for (int s = 0; s < indent + 2; s++) putchar(' ');
+                    TRY(pretty_print_r,
+                        (char*)voidstar + schema->offsets[i],
+                        schema->parameters[i],
+                        indent + 2, false);
+                }
+                printf("\n");
+                for (int s = 0; s < indent; s++) putchar(' ');
+                printf("]");
+            }
+            break;
+        case MORLOC_MAP:
+            {
+                printf("{\n");
+                for (size_t i = 0; i < schema->size; i++) {
+                    if (i > 0) printf(",\n");
+                    for (int s = 0; s < indent + 2; s++) putchar(' ');
+                    printf("\"%s\": ", schema->keys[i]);
+                    TRY(pretty_print_r,
+                        (char*)voidstar + schema->offsets[i],
+                        schema->parameters[i],
+                        indent + 2, false);
+                }
+                printf("\n");
+                for (int s = 0; s < indent; s++) putchar(' ');
+                printf("}");
+            }
+            break;
+        default:
+            RAISE("Unexpected morloc type");
+    }
+
+    return true;
+}
+
+bool pretty_print_voidstar(const void* voidstar, const Schema* schema, ERRMSG) {
+    BOOL_RETURN_SETUP
+
+    bool success = pretty_print_r(voidstar, schema, 0, true, &CHILD_ERRMSG);
+    RAISE_IF(!success, "\n%s", CHILD_ERRMSG)
+
+    printf("\n");
+
+    return success;
+}
+
+// ======================================================================
 // JSON writer
 // ======================================================================
 
