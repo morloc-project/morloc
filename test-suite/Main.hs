@@ -45,6 +45,7 @@ main = do
       , golden "thunk-do" "thunk-do"
       , golden "thunk-let" "thunk-let"
       , golden "thunk-interop" "thunk-interop"
+      , golden "thunk-nullary-interop" "thunk-nullary-interop"
       , golden "thunk-force" "thunk-force"
       , golden "thunk-export" "thunk-export"
       , golden "thunk-choose" "thunk-choose"

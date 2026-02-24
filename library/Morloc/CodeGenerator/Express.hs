@@ -530,13 +530,15 @@ expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx cidx lang, _) (SuspendS x)) = do
   x' <- expressPolyExprWrap lang (mkIdx x t) x
   return $ PolySuspend (Idx cidx t) x'
 expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (ForceS x)) = do
-  -- Use parentLang (not lang) so cross-language thunk forces create proper
-  -- manifold boundaries. When the thunk's language differs from the context,
-  -- this ensures Express treats the call as foreign.
+  -- Always use pushForceIntoRemote: if the inner expression contains a
+  -- PolyRemoteInterface (cross-language call), it strips ThunkT so the remote
+  -- pool forces the thunk and serializes the concrete result. If no
+  -- PolyRemoteInterface is found (same-language), it falls back to PolyForce.
+  -- We cannot rely on parentLang /= lang because Realize.hs assigns both to
+  -- the same language when the ForceS node lives in a same-language context,
+  -- even if the inner expression calls into a foreign language.
   x' <- expressPolyExprWrap parentLang (Idx cidx t) x
-  if parentLang /= lang
-    then return $ pushForceIntoRemote (Idx cidx t) x'
-    else return $ PolyForce (Idx cidx t) x'
+  return $ pushForceIntoRemote (Idx cidx t) x'
 
 -- Nullary source/pattern call (e.g., clockResNs :: {Int})
 expressPolyExpr
