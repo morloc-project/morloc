@@ -250,7 +250,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       scope <- MM.getGeneralScope i
       case subtype scope gt t g0 of
         (Left e) -> throwTypeError i e
-        (Right _) -> connectInstance g0 es
+        (Right g1) -> connectInstance g1 es
 
 -- prepare a general, indexed typechecking error
 throwTypeError :: Int -> MDoc -> MorlocMonad a
