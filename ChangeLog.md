@@ -1,3 +1,11 @@
+0.62.0 [2026-02-24]
+-------------------
+ * term recursion support
+ * conditional guards
+ * nexus pretty printing option (-p/--print)
+ * print defaults in usage statements
+ * more bug fixes
+
 0.61.0 [2026-02-21]
 -------------------
 
