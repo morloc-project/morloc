@@ -1,0 +1,6 @@
+module main (classify)
+
+import root-cpp
+
+classify :: Int -> Str
+classify x = (? x > 100 = "big" ? x > 10 = "medium" : "small")

@@ -1,0 +1,5 @@
+module types (*)
+
+type MyStr = Str
+
+myConcat :: MyStr -> MyStr -> MyStr

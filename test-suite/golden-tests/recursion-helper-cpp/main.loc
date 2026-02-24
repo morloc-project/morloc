@@ -1,0 +1,12 @@
+module main (fact)
+
+import root-cpp
+
+-- exported wrapper delegates to non-exported recursive helper
+fact :: Int -> Int
+fact n = factHelper n 1
+
+factHelper :: Int -> Int -> Int
+factHelper n acc
+  ? n == 0 = acc
+  : factHelper (n - 1) (acc * n)

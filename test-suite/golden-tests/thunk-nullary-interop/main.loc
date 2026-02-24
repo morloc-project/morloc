@@ -1,0 +1,48 @@
+-- Test nullary (zero-argument) foreign thunks forced in a cross-language
+-- do-block. This is the pattern where a source function takes no arguments
+-- and returns a thunk (e.g., getHostname :: {Str}). The ForceS node in
+-- Express.hs must use pushForceIntoRemote even when parentLang == lang,
+-- because the inner nullary call crosses a language boundary.
+--
+-- Cases tested:
+--   1. pyThunkInCpp: force a single nullary Python thunk in C++ context
+--   2. multiPyThunkInCpp: force multiple nullary Python thunks in C++ do-block
+--   3. mixedThunkInCpp: mix nullary Python thunks with a C++ function in do-block
+
+module main (pyThunkInCpp, multiPyThunkInCpp, mixedThunkInCpp)
+
+import root-cpp
+import root-py
+
+source Py from "foo.py" ("get_value", "get_name")
+source Cpp from "foo.hpp" ("combine", "add")
+
+type Cpp => Int = "int"
+type Py => Int = "int"
+type Cpp => Str = "std::string"
+type Py => Str = "str"
+
+get_value :: {Int}
+get_name :: {Str}
+combine :: Str -> Int -> Str
+add :: Int -> Int -> Int
+
+-- Force a single nullary Python thunk from C++ context
+pyThunkInCpp :: Str
+pyThunkInCpp = !do
+    n <- get_name
+    {n}
+
+-- Force multiple nullary Python thunks in a C++ do-block
+multiPyThunkInCpp :: Str
+multiPyThunkInCpp = !do
+    n <- get_name
+    v <- get_value
+    {combine n v}
+
+-- Mix nullary Python thunks with C++ computation in do-block
+mixedThunkInCpp :: Int
+mixedThunkInCpp = !do
+    v1 <- get_value
+    v2 <- get_value
+    {add v1 v2}

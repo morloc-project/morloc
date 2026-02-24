@@ -1,0 +1,9 @@
+module types-cpp (*)
+
+import types
+import root-cpp
+
+-- No explicit `type Cpp => MyStr = "std::string"` mapping.
+-- The compiler should transitively resolve: MyStr -> Str -> "std::string"
+
+source Cpp from "foo.hpp" ("my_concat" as myConcat)

@@ -25,6 +25,8 @@ import Morloc.Namespace.State
 import Morloc.Namespace.Type
 
 import Morloc.Data.Doc (pretty)
+import qualified Data.Map as Map
+import qualified Data.Set as Set
 
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
 import Morloc.CodeGenerator.Emit (TranslateFn, emit, pool)
@@ -76,9 +78,12 @@ typecheck path code =
 
 -- | Do everything except language specific code generation.
 generatePools :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [(Lang, [SerialManifold])]
-generatePools rASTs =
-  mapM parameterize rASTs
-    >>= mapM express
+generatePools rASTs = do
+  paramRASTs <- mapM parameterize rASTs
+  let langMap = Map.fromList
+        [(midx, lang) | AnnoS (Idx midx _) (Idx _ lang, _) _ <- paramRASTs]
+  MM.modify (\s -> s { stateManifoldLang = langMap })
+  mapM express paramRASTs
     >>= mapM segment |>> concat
     >>= mapM serialize
       |>> pool
@@ -112,11 +117,19 @@ writeProgram translateFn path code = do
                 Nothing -> return ()
         mapM_ (warnSkip . fst) genericGASTs
         mapM_ (warnSkip . fst) genericRASTs
-        nexus <- Nexus.generate concreteGASTs concreteRASTs
+        -- Only pass exported rASTs to the nexus (not recursive helpers)
+        exports <- MM.gets stateExports
+        let exportSet = Set.fromList exports
+            isExported (AnnoS (Idx midx _) _ _, _) = Set.member midx exportSet
+            exportedRASTs = filter isExported concreteRASTs
+        nexus <- Nexus.generate concreteGASTs exportedRASTs
         MM.startCounter
+        paramRASTs <- mapM parameterize (map fst concreteRASTs)
+        let langMap = Map.fromList
+              [(midx, lang) | AnnoS (Idx midx _) (Idx _ lang, _) _ <- paramRASTs]
+        MM.modify (\s -> s { stateManifoldLang = langMap })
         pools <-
-          mapM parameterize (map fst concreteRASTs)
-            >>= mapM express
+          mapM express paramRASTs
             >>= mapM segment |>> concat
             >>= mapM serialize
               |>> pool

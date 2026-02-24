@@ -1,0 +1,6 @@
+5
+3
+0
+"small"
+"medium"
+"big"

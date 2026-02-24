@@ -505,6 +505,7 @@ desugarExpr (Loc sp (CAccessorE body)) = buildAccessor sp body
 desugarExpr (Loc sp (CInterpE startText exprs mids endText)) = do
   exprs' <- mapM desugarExpr exprs
   mkInterpString sp startText exprs' mids endText
+desugarExpr (Loc sp (CGuardExprE guards defaultExpr)) = desugarGuards sp guards defaultExpr
 
 -- Top-level declarations should not appear inside expressions
 desugarExpr (Loc _ (CModE {})) = error "desugarExpr: unexpected CModE in expression position"
@@ -517,6 +518,7 @@ desugarExpr (Loc _ (CIstE {})) = error "desugarExpr: unexpected CIstE in express
 desugarExpr (Loc _ (CFixE {})) = error "desugarExpr: unexpected CFixE in expression position"
 desugarExpr (Loc _ (CSrcOldE {})) = error "desugarExpr: unexpected CSrcOldE in expression position"
 desugarExpr (Loc _ (CSrcNewE {})) = error "desugarExpr: unexpected CSrcNewE in expression position"
+desugarExpr (Loc _ (CGuardedAssE {})) = error "desugarExpr: unexpected CGuardedAssE in expression position"
 
 --------------------------------------------------------------------
 -- Top-level declaration desugaring
@@ -542,6 +544,15 @@ desugarTopLevel (Loc sp (CSigE name forallVars sigType)) = do
   return [e]
 desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
   body' <- desugarExpr body
+  whereDecls' <- concatMapM desugarTopLevel whereDecls
+  e <- case params of
+    [] -> freshExprSpan sp (AssE name body' whereDecls')
+    vs -> do
+      lam <- freshExprSpan sp (LamE (map EV vs) body')
+      freshExprSpan sp (AssE name lam whereDecls')
+  return [e]
+desugarTopLevel (Loc sp (CGuardedAssE name params guards defaultExpr whereDecls)) = do
+  body' <- desugarGuards sp guards defaultExpr
   whereDecls' <- concatMapM desugarTopLevel whereDecls
   e <- case params of
     [] -> freshExprSpan sp (AssE name body' whereDecls')
@@ -577,6 +588,21 @@ desugarTopLevel (Loc sp (CSrcNewE langTok srcFile nameToks)) = do
 desugarTopLevel node = do
   e <- desugarExpr node
   return [e]
+
+--------------------------------------------------------------------
+-- Guard desugaring
+--------------------------------------------------------------------
+
+-- | Desugar guard clauses with an explicit default into nested IfE expressions.
+-- ? cond1 = body1 ? cond2 = body2 : defaultBody
+-- becomes: IfE cond1 body1 (IfE cond2 body2 defaultBody)
+desugarGuards :: Span -> [(Loc CstExpr, Loc CstExpr)] -> Loc CstExpr -> D ExprI
+desugarGuards _ [] defaultExpr = desugarExpr defaultExpr
+desugarGuards sp ((cond, body) : rest) defaultExpr = do
+  cond' <- desugarExpr cond
+  body' <- desugarExpr body
+  elseE <- desugarGuards sp rest defaultExpr
+  freshExprSpan sp (IfE cond' body' elseE)
 
 --------------------------------------------------------------------
 -- Export desugaring

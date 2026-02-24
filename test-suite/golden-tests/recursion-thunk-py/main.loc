@@ -1,0 +1,21 @@
+-- Test exported recursive function returning a thunk type.
+-- The recursive call target has return type {Int} (ThunkT Int).
+-- The serial manifold forces thunks before serializing, so the
+-- recursive call must strip ThunkT and wrap in PolySuspend.
+-- sumDown n = 0 + 1 + 2 + ... + n
+
+module main (sumDown)
+
+import root-py
+
+source Py from "foo.py" ("double")
+
+double :: Int -> {Int}
+
+sumDown :: Int -> {Int}
+sumDown n
+  ? n <= 0 = double 0
+  : do
+      x <- double n
+      rest <- sumDown (n - 1)
+      {x + rest}

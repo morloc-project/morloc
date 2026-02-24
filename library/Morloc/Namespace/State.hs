@@ -118,6 +118,8 @@ data MorlocState = MorlocState
   , stateLangRegistry :: LangRegistry
   , stateExportGroups :: Map Text ([Text], [Int])
   -- ^ Map from group name to (description lines, member export indices)
+  , stateManifoldLang :: Map Int Lang
+  -- ^ Map from export manifold ID to its pool language
   }
   deriving (Show)
 
@@ -278,6 +280,7 @@ instance Defaultable MorlocState where
       , stateClassDefs = Map.empty
       , stateLangRegistry = LR.emptyRegistry
       , stateExportGroups = Map.empty
+      , stateManifoldLang = Map.empty
       }
 
 instance Defaultable PackageMeta where

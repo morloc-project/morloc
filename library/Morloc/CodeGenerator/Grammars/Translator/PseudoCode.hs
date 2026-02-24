@@ -56,6 +56,11 @@ prettyFoldManifold =
             parens (pretty t) <+> "__foreign_call__"
               <> tupled [dquotes socketFile, dquotes (pretty mid), list xs']
           (RemoteCall _) -> "REMOTE_CALL"
+    makeSerialExpr _ (AppRecS_ _ mid es) = return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
+    makeSerialExpr _ (AppForeignRecS_ _ mid (Socket _ _ socketFile) es) = return $ mergePoolDocs makeForeignRecCall es
+      where
+        makeForeignRecCall xs' =
+          "__foreign_rec_call__" <> tupled [dquotes socketFile, dquotes (pretty mid), list xs']
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "ReturnS(" <> poolExpr x <> ")"}
     makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet letNamerS "SerialLetS" i e1 e2
     makeSerialExpr _ (NativeLetS_ i e1 e2) = return $ makeLet letNamerN "NativeLetS" i e1 e2
@@ -71,6 +76,8 @@ prettyFoldManifold =
       return $ mergePoolDocs ((<>) (pretty pat) . tupled) xs
     makeNativeExpr _ (AppExeN_ _ (LocalCallP idx) _ xs) =
       return $ mergePoolDocs ((<>) (letNamerN idx) . tupled) xs
+    makeNativeExpr _ (AppExeN_ _ (RecCallP mid _) _ xs) =
+      return $ mergePoolDocs ((<>) (manNamer mid) . tupled) xs
     makeNativeExpr _ (ManN_ call) = return call
     makeNativeExpr _ (ReturnN_ x) =
       return $ x {poolExpr = "ReturnN(" <> poolExpr x <> ")"}
@@ -82,6 +89,7 @@ prettyFoldManifold =
     makeNativeExpr _ (ExeN_ _ (SrcCallP src)) = return $ defaultValue {poolExpr = pretty (srcName src)}
     makeNativeExpr _ (ExeN_ _ (PatCallP pat)) = return $ defaultValue {poolExpr = pretty pat}
     makeNativeExpr _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = letNamerN idx}
+    makeNativeExpr _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = manNamer mid}
     makeNativeExpr _ (ListN_ _ _ xs) = return $ mergePoolDocs list xs
     makeNativeExpr _ (TupleN_ _ xs) = return $ mergePoolDocs tupled xs
     makeNativeExpr _ (RecordN_ _ _ _ rs) =

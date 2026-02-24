@@ -118,6 +118,11 @@ segmentExpr _ _ (PolyNull v) = return ([], (Nothing, MonoNull v))
 segmentExpr m args (PolySuspend t e) = do
   (ms, (_, e')) <- segmentExpr m args e
   return (ms, (Nothing, MonoSuspend t e'))
+segmentExpr m args (PolyIf cond thenE elseE) = do
+  (ms1, (_, cond')) <- segmentExpr m args cond
+  (ms2, (_, thenE')) <- segmentExpr m args thenE
+  (ms3, (_, elseE')) <- segmentExpr m args elseE
+  return (ms1 ++ ms2 ++ ms3, (Nothing, MonoIf cond' thenE' elseE'))
 segmentExpr m args (PolyForce t e) = do
   (ms, (_, e')) <- segmentExpr m args e
   return (ms, (Nothing, MonoForce t e'))

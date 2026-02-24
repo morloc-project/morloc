@@ -1,0 +1,32 @@
+-- Test cross-language nullary thunk force as function argument (not in do-block).
+-- This is a different code path from thunk-nullary-interop which uses do-blocks.
+-- The ForceS appears as an argument to AppS, exercising pushForceIntoRemote
+-- when the force is an argument expression rather than a do-block statement.
+--
+-- Cases tested:
+--   1. combined: force two nullary Python thunks as C++ function arguments
+--   2. addForced: force two nullary Python thunks as C++ arithmetic arguments
+
+module main (combined, addForced)
+
+import root-cpp
+import root-py
+
+source Py from "foo.py" ("get_name", "get_value")
+source Cpp from "foo.hpp" ("combine", "add")
+
+type Cpp => Int = "int"
+type Py => Int = "int"
+type Cpp => Str = "std::string"
+type Py => Str = "str"
+
+get_name :: {Str}
+get_value :: {Int}
+combine :: Str -> Int -> Str
+add :: Int -> Int -> Int
+
+combined :: Str
+combined = combine !(get_name) !(get_value)
+
+addForced :: Int
+addForced = add !(get_value) !(get_value)

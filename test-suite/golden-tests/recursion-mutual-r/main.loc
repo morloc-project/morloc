@@ -1,0 +1,13 @@
+module main (isEven, isOdd)
+
+import root-r
+
+isEven :: Int -> Bool
+isEven n
+  ? n == 0 = True
+  : isOdd (n - 1)
+
+isOdd :: Int -> Bool
+isOdd n
+  ? n == 0 = False
+  : isEven (n - 1)

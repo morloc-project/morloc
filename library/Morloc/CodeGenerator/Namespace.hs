@@ -245,12 +245,16 @@ data ExecutableExpressionPool
   = SrcCallP Source -- source code
   | PatCallP Pattern -- pattern function
   | LocalCallP Int -- a locally defined function
+  | RecCallP Int (Maybe Lang)
+  -- ^ Recursive call to manifold. Nothing = same pool, Just lang = foreign pool.
   deriving (Show, Ord, Eq)
 
 instance Pretty ExecutableExpressionPool where
   pretty (SrcCallP src) = pretty src
   pretty (PatCallP pat) = pretty pat
   pretty (LocalCallP i) = "x" <> pretty i
+  pretty (RecCallP i Nothing) = "rec_m" <> pretty i
+  pretty (RecCallP i (Just lang)) = "rec_foreign_m" <> pretty i <> "@" <> pretty lang
 
 data TypePacker = TypePacker
   { typePackerPacked :: TypeF
@@ -444,6 +448,7 @@ data PolyExpr
   | PolyNull (Indexed TVar)
   | PolySuspend (Indexed Type) PolyExpr
   | PolyForce (Indexed Type) PolyExpr
+  | PolyIf PolyExpr PolyExpr PolyExpr
 
 data MonoHead = MonoHead Lang Int [Arg None] HeadManifoldForm MonoExpr
 
@@ -474,6 +479,7 @@ data MonoExpr
   | MonoNull (Indexed TVar)
   | MonoSuspend (Indexed Type) MonoExpr
   | MonoForce (Indexed Type) MonoExpr
+  | MonoIf MonoExpr MonoExpr MonoExpr
 
 data PoolCall
   = PoolCall
@@ -510,6 +516,10 @@ data NativeArg = NativeArgManifold NativeManifold | NativeArgExpr NativeExpr
 data SerialExpr
   = ManS SerialManifold
   | AppPoolS TypeF PoolCall [SerialArg]
+  | AppRecS TypeF Int [SerialExpr]
+    -- ^ Same-language recursive call: return type, manifold ID, serialized args
+  | AppForeignRecS TypeF Int Socket [SerialExpr]
+    -- ^ Cross-language recursive call: return type, manifold ID, socket, serialized args
   | ReturnS SerialExpr
   | SerialLetS Int SerialExpr SerialExpr
   | NativeLetS Int NativeExpr SerialExpr
@@ -542,6 +552,7 @@ data NativeExpr
   | NullN FVar
   | SuspendN TypeF NativeExpr
   | ForceN TypeF NativeExpr
+  | IfN TypeF NativeExpr NativeExpr NativeExpr
   deriving (Show)
 
 foldlSM :: (b -> a -> b) -> b -> SerialManifold_ a -> b
@@ -561,6 +572,8 @@ foldlNA f b (NativeArgExpr_ ne) = f b ne
 foldlSE :: (b -> a -> b) -> b -> SerialExpr_ a a a a a -> b
 foldlSE f b (ManS_ x) = f b x
 foldlSE f b (AppPoolS_ _ _ xs) = foldl f b xs
+foldlSE f b (AppRecS_ _ _ xs) = foldl f b xs
+foldlSE f b (AppForeignRecS_ _ _ _ xs) = foldl f b xs
 foldlSE f b (ReturnS_ x) = f b x
 foldlSE f b (SerialLetS_ _ x1 x2) = foldl f b [x1, x2]
 foldlSE f b (NativeLetS_ _ x1 x2) = foldl f b [x1, x2]
@@ -588,6 +601,7 @@ foldlNE _ b (StrN_ _ _) = b
 foldlNE _ b (NullN_ _) = b
 foldlNE f b (SuspendN_ _ x) = f b x
 foldlNE f b (ForceN_ _ x) = f b x
+foldlNE f b (IfN_ _ c t e) = foldl f b [c, t, e]
 
 data MonoidFold m a = MonoidFold
   { monoidSerialManifold :: SerialManifold_ (a, SerialExpr) -> m (a, SerialManifold)
@@ -627,6 +641,8 @@ makeMonoidFoldDefault mempty' mappend' =
 
     monoidSerialExpr' (ManS_ (req, sm)) = return (req, ManS sm)
     monoidSerialExpr' (AppPoolS_ t p (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppPoolS t p es)
+    monoidSerialExpr' (AppRecS_ t m (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppRecS t m es)
+    monoidSerialExpr' (AppForeignRecS_ t m s (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppForeignRecS t m s es)
     monoidSerialExpr' (ReturnS_ (req, se)) = return (req, ReturnS se)
     monoidSerialExpr' (SerialLetS_ i (req1, se1) (req2, se2)) = return (mappend' req1 req2, SerialLetS i se1 se2)
     monoidSerialExpr' (NativeLetS_ i (req1, ne) (req2, se)) = return (mappend' req1 req2, NativeLetS i ne se)
@@ -657,6 +673,8 @@ makeMonoidFoldDefault mempty' mappend' =
     monoidNativeExpr' (NullN_ v) = return (mempty', NullN v)
     monoidNativeExpr' (SuspendN_ t (a, ne)) = return (a, SuspendN t ne)
     monoidNativeExpr' (ForceN_ t (a, ne)) = return (a, ForceN t ne)
+    monoidNativeExpr' (IfN_ t (a1, c) (a2, thenE) (a3, elseE)) =
+      return (foldl mappend' mempty' [a1, a2, a3], IfN t c thenE elseE)
 
 -- where
 --  * m - monad
@@ -766,6 +784,8 @@ typeMofForm =
 data SerialExpr_ sm se ne sr nr
   = ManS_ sm
   | AppPoolS_ TypeF PoolCall [sr]
+  | AppRecS_ TypeF Int [se]
+  | AppForeignRecS_ TypeF Int Socket [se]
   | ReturnS_ se
   | SerialLetS_ Int se se
   | NativeLetS_ Int ne se
@@ -794,6 +814,7 @@ data NativeExpr_ nm se ne sr nr
   | NullN_ FVar
   | SuspendN_ TypeF ne
   | ForceN_ TypeF ne
+  | IfN_ TypeF ne ne ne
 
 manifoldFoldToFoldWith :: FoldManifoldM m sm nm se ne sr nr -> FoldWithManifoldM m sm nm se ne sr nr
 manifoldFoldToFoldWith fm =
@@ -912,6 +933,12 @@ surroundFoldSerialExprM sfm fm = surroundSerialExprM sfm f
     f full@(AppPoolS t pool es) = do
       es' <- mapM (surroundFoldSerialArgM sfm fm) es
       opFoldWithSerialExprM fm full $ AppPoolS_ t pool es'
+    f full@(AppRecS t m es) = do
+      es' <- mapM (surroundFoldSerialExprM sfm fm) es
+      opFoldWithSerialExprM fm full $ AppRecS_ t m es'
+    f full@(AppForeignRecS t m s es) = do
+      es' <- mapM (surroundFoldSerialExprM sfm fm) es
+      opFoldWithSerialExprM fm full $ AppForeignRecS_ t m s es'
     f full@(ReturnS e) = do
       e' <- surroundFoldSerialExprM sfm fm e
       opFoldWithSerialExprM fm full $ ReturnS_ e'
@@ -983,6 +1010,11 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
     f full@(ForceN t ne) = do
       ne' <- surroundFoldNativeExprM sfm fm ne
       opFoldWithNativeExprM fm full (ForceN_ t ne')
+    f full@(IfN t cond thenE elseE) = do
+      cond' <- surroundFoldNativeExprM sfm fm cond
+      thenE' <- surroundFoldNativeExprM sfm fm thenE
+      elseE' <- surroundFoldNativeExprM sfm fm elseE
+      opFoldWithNativeExprM fm full (IfN_ t cond' thenE' elseE')
 
 class HasTypeF a where
   typeFof :: a -> TypeF
@@ -1010,6 +1042,7 @@ instance HasTypeF NativeExpr where
   typeFof (NullN v) = VarF v
   typeFof (SuspendN t _) = t
   typeFof (ForceN t _) = t
+  typeFof (IfN t _ _ _) = t
 
 class HasTypeM e where
   typeMof :: e -> TypeM
@@ -1041,6 +1074,8 @@ instance HasTypeF NativeManifold where
 instance HasTypeS SerialExpr where
   typeSof (ManS sm) = typeSof sm
   typeSof (AppPoolS t _ sargs) = FunctionS (map typeMof sargs) (SerialS t)
+  typeSof (AppRecS t _ _) = SerialS t
+  typeSof (AppForeignRecS t _ _ _) = SerialS t
   typeSof (ReturnS e) = typeSof e
   typeSof (SerialLetS _ _ e) = typeSof e
   typeSof (NativeLetS _ _ e) = typeSof e
@@ -1169,6 +1204,8 @@ instance MFunctor SerialExpr where
     | gateSerialExpr g se0 = case se0 of
         (ManS sm) -> mapSerialExpr f $ ManS (mgatedMap g f sm)
         (AppPoolS t p serialArgs) -> mapSerialExpr f $ AppPoolS t p (map (mgatedMap g f) serialArgs)
+        (AppRecS t m es) -> mapSerialExpr f $ AppRecS t m (map (mgatedMap g f) es)
+        (AppForeignRecS t m s es) -> mapSerialExpr f $ AppForeignRecS t m s (map (mgatedMap g f) es)
         (ReturnS se) -> mapSerialExpr f $ ReturnS (mgatedMap g f se)
         (SerialLetS i se1 se2) -> mapSerialExpr f $ SerialLetS i (mgatedMap g f se1) (mgatedMap g f se2)
         (NativeLetS i ne1 se2) -> mapSerialExpr f $ NativeLetS i (mgatedMap g f ne1) (mgatedMap g f se2)
@@ -1200,6 +1237,7 @@ instance MFunctor NativeExpr where
         e@(NullN _) -> mapNativeExpr f e
         (SuspendN t ne) -> mapNativeExpr f $ SuspendN t (mgatedMap g f ne)
         (ForceN t ne) -> mapNativeExpr f $ ForceN t (mgatedMap g f ne)
+        (IfN t c thenE elseE) -> mapNativeExpr f $ IfN t (mgatedMap g f c) (mgatedMap g f thenE) (mgatedMap g f elseE)
     | otherwise = mapNativeExpr f ne0
 
 instance (Pretty a) => Pretty (Arg a) where
@@ -1235,6 +1273,7 @@ instance Pretty PolyExpr where
   pretty (PolyExe _ (SrcCallP src)) = "PolyExe<" <> pretty (srcAlias src) <> ">"
   pretty (PolyExe _ (PatCallP _)) = "PolyExe<pattern>"
   pretty (PolyExe _ (LocalCallP _)) = "PolyExe<local>"
+  pretty (PolyExe _ (RecCallP i _)) = "PolyExe<rec_m" <> pretty i <> ">"
   pretty (PolyList _ _ _) = "PolyList"
   pretty (PolyTuple _ xs) = "PolyTuple" <+> pretty (length xs)
   pretty (PolyRecord _ _ _ _) = "PolyRecord"
@@ -1245,6 +1284,7 @@ instance Pretty PolyExpr where
   pretty (PolyNull _) = "PolyNull"
   pretty (PolySuspend _ e) = "PolySuspend" <+> pretty e
   pretty (PolyForce _ e) = "PolyForce" <+> pretty e
+  pretty (PolyIf c t e) = "PolyIf" <+> pretty c <+> pretty t <+> pretty e
 
 instance Pretty MonoExpr where
   pretty (MonoManifold i form e) =
@@ -1272,6 +1312,7 @@ instance Pretty MonoExpr where
   pretty (MonoNull _) = "NULL"
   pretty (MonoSuspend _ e) = "{" <> pretty e <> "}"
   pretty (MonoForce _ e) = "!" <> pretty e
+  pretty (MonoIf c t e) = "if" <+> pretty c <+> "then" <+> pretty t <+> "else" <+> pretty e
 
 instance Pretty MonoHead where
   pretty (MonoHead lang i args headForm e) =

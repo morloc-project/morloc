@@ -89,6 +89,10 @@ data IStmt
     -- R: resultVar <- lapply(collection, function(iterVar) { bodyStmts; yieldExpr })
     -- resultType is used by C++ for typed declarations; Python/R pass Nothing
     IMapList Text (Maybe IType) Text IExpr [IStmt] IExpr
+  | -- | resultVar, resultType, condition, thenStmts, thenExpr, elseStmts, elseExpr
+    -- Semantics: declare resultVar; if cond { thenStmts; resultVar = thenExpr } else { elseStmts; resultVar = elseExpr }
+    -- For elif chains, elseStmts contains another IIf and elseExpr is unused (IVar resultVar)
+    IIf Text (Maybe IType) IExpr [IStmt] IExpr [IStmt] IExpr
   | IReturn IExpr
   | IExprStmt IExpr
 
@@ -245,6 +249,9 @@ data LowerConfig m = LowerConfig
   , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ Let binding assembly at the PoolDocs level
   , lcReturn :: MDoc -> MDoc
+  , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
+  -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
+  -- Produces language-specific if/else structure using a temp result variable
   , lcMakeSuspend :: [MDoc] -> MDoc -> ([MDoc], MDoc)
   -- ^ prior statements -> return expression -> (hoisted statements, thunk expression)
   , lcSerialize :: MDoc -> SerialAST -> m PoolDocs
@@ -368,6 +375,10 @@ lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) Foreign
   return $ defaultValue {poolExpr = lcForeignCall cfg socketFile mid (map argNamer args)}
 lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) (RemoteCall res) args) _) =
   lcRemoteCall cfg socketFile mid res (map argNamer args)
+lowerSerialExpr _ _ (AppRecS_ _ mid es) = do
+  return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
+lowerSerialExpr cfg _ (AppForeignRecS_ _ mid (Socket _ _ socketFile) es) = do
+  return $ mergePoolDocs (\args -> lcForeignCall cfg socketFile mid args) es
 lowerSerialExpr cfg _ (ReturnS_ x) = return $ x {poolExpr = lcReturn cfg (poolExpr x)}
 lowerSerialExpr cfg _ (SerialLetS_ i e1 e2) =
   lcMakeLet cfg svarNamer i Nothing e1 e2
@@ -409,6 +420,8 @@ lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) _ xs) = do
 lowerNativeExpr cfg _ (AppExeN_ _ (LocalCallP idx) qs (map snd -> es)) = do
   templateArgs <- lcTemplateArgs cfg qs
   return $ mergePoolDocs ((<>) (nvarNamer idx <> printTemplateArgs' templateArgs) . tupled) es
+lowerNativeExpr _ _ (AppExeN_ _ (RecCallP mid _) _ (map snd -> es)) = do
+  return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
 lowerNativeExpr _ _ (ManN_ call) = return call
 lowerNativeExpr cfg _ (ReturnN_ x) =
   return $ x {poolExpr = lcReturn cfg (poolExpr x)}
@@ -427,6 +440,7 @@ lowerNativeExpr cfg _ (DeserializeN_ t s x) = do
 lowerNativeExpr cfg _ (ExeN_ _ (SrcCallP src)) = return $ defaultValue {poolExpr = lcSrcName cfg src}
 lowerNativeExpr _ _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
 lowerNativeExpr _ _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
+lowerNativeExpr _ _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = manNamer mid}
 lowerNativeExpr cfg _ (ListN_ v t xs) = return $ mergePoolDocs (lcListConstructor cfg v t) xs
 lowerNativeExpr cfg _ (TupleN_ v xs) = return $ mergePoolDocs (lcTupleConstructor cfg v) xs
 lowerNativeExpr cfg origExpr (RecordN_ o v ps rs) = do
@@ -454,6 +468,8 @@ lowerNativeExpr cfg _ (SuspendN_ _ x) =
           , poolPriorExprs = poolPriorExprs x
           }
 lowerNativeExpr cfg _ (ForceN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IForce (IRawExpr (render (poolExpr x))))}
+lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
+  lcMakeIf cfg origExpr condDocs thenDocs elseDocs
 
 {- | Lower a serial manifold to PoolDocs.
 Replaces translateManifold from Common.hs for serial manifolds.

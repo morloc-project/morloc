@@ -38,6 +38,7 @@ data BindKind = LambdaBound | LetBound
 data Namer = Namer
   { namerMap :: Map.Map EVar (EVar, BindKind)
   , namerIndex :: Int
+  , namerExpanding :: Set.Set EVar  -- functions currently being expanded (recursion detection)
   }
   deriving (Show)
 
@@ -112,7 +113,7 @@ treeify d
               )
 
             -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
-            statefulMapM collect (Namer Map.empty 0) exports |>> snd
+            statefulMapM collect (Namer Map.empty 0 Set.empty) exports |>> snd
           (Just _) ->
             error "This should not be possible, all ExportAll cases should have been removed in Restructure.hs"
 
@@ -147,6 +148,7 @@ linkAndRemoveAnnotations = f
     f (ExprI i (AppE e es)) = ExprI i <$> (AppE <$> f e <*> mapM f es)
     f (ExprI i (LamE vs e)) = ExprI i <$> (LamE vs <$> f e)
     f (ExprI i (LetE bindings body)) = ExprI i <$> (LetE <$> mapM (\(v, e) -> (,) v <$> f e) bindings <*> f body)
+    f (ExprI i (IfE c t e)) = ExprI i <$> (IfE <$> f c <*> f t <*> f e)
     f (ExprI i (SuspendE e)) = ExprI i <$> (SuspendE <$> f e)
     f (ExprI i (ForceE e)) = ExprI i <$> (ForceE <$> f e)
     f e@(ExprI _ _) = return e
@@ -160,10 +162,8 @@ Rewrite all lambda-bound variables to the unique names
 auto-incrementing integer. This solves naming conflicts while avoiding
 excessive traversal of the tree.
 
-Recursion
-  [ ] handle recursion and mutual recursion
-      - to detect recursion, I need to remember every term that has been expanded,
-collect v declarations or sources
+Recursion is handled via namerExpanding: when a function is being expanded,
+recursive references to it emit CallS back-edge nodes instead of re-expanding.
 -}
 collect ::
   Namer ->
@@ -172,7 +172,6 @@ collect ::
   ) ->
   MorlocMonad (Namer, AnnoS Int ManyPoly Int)
 collect namer0 (gi, v) = do
-  -- FIXME: this macro expansion strategy needs to be replaced
   MM.sayVVV $
     "collect"
       <> "\n  gi:" <+> pretty gi
@@ -187,40 +186,48 @@ collectAnnoS namer e@(ExprI gi _) = collectExprS namer e |>> second (AnnoS gi gi
 collectExprS :: Namer -> ExprI -> MorlocMonad (Namer, ExprS Int ManyPoly Int)
 collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
   where
-    f namer (VarE _ v) = do
-      MM.sayVVV $
-        "collectExprS VarE"
-          <> "\n  gi:" <+> pretty gi0
-          <> "\n  v:" <+> pretty v
-      sigs <- MM.gets stateSignatures
-
-      case GMap.lookup gi0 sigs of
-        -- A monomorphic term will have a type if it is linked to any source
-        -- since sources require signatures. But if it associated only with a
-        -- declaration, then it will have no type.
-        (GMapJust (Monomorphic t)) -> do
-          MM.sayVVV $ "  searchged gi " <+> pretty gi0 <+> "for" <+> pretty v
-
-          MM.sayVVV $ "  monomorphic term" <+> pretty v <> ":" <+> maybe "?" pretty (termGeneral t)
-          (namer', es) <- termtypesToAnnoS gi0 namer t
-          return $ (namer', VarS v (MonomorphicExpr (termGeneral t) es))
-
-        -- A polymorphic term should always have a type.
-        (GMapJust (Polymorphic cls clsName t ts)) -> do
+    f namer (VarE _ v)
+      | Set.member v (namerExpanding namer)
+      , Nothing <- Map.lookup v (namerMap namer) = do
+          -- Recursive reference detected (not shadowed by local binding)
+          MM.sayVVV $ "collectExprS: recursive call to" <+> pretty v
+          return (namer, CallS v)
+      | otherwise = do
           MM.sayVVV $
-            "  polymorphic term" <+> pretty v <> ":" <+> list (map (maybe "?" pretty . termGeneral) ts)
-          (namer', ess) <- statefulMapM (termtypesToAnnoS gi0) namer ts
-          let etypes = map (fromJust . termGeneral) ts
-          return $ (namer', VarS v (PolymorphicExpr cls clsName t (zip etypes ess)))
+            "collectExprS VarE"
+              <> "\n  gi:" <+> pretty gi0
+              <> "\n  v:" <+> pretty v
+          sigs <- MM.gets stateSignatures
 
-        -- Terms not associated with TermTypes objects must be lambda-bound or let-bound
-        -- These terms will be renamed for uniqueness
-        _ -> do
-          MM.sayVVV $ "bound term" <+> pretty v
-          case Map.lookup v (namerMap namer) of
-            (Just (v', LambdaBound)) -> return (namer, BndS v')
-            (Just (v', LetBound)) -> return (namer, LetBndS v')
-            Nothing -> MM.throwSourcedError gi0 $ "Undefined term in namer map:" <+> pretty v
+          case GMap.lookup gi0 sigs of
+            -- A monomorphic term will have a type if it is linked to any source
+            -- since sources require signatures. But if it associated only with a
+            -- declaration, then it will have no type.
+            (GMapJust (Monomorphic t)) -> do
+              MM.sayVVV $ "  searchged gi " <+> pretty gi0 <+> "for" <+> pretty v
+
+              MM.sayVVV $ "  monomorphic term" <+> pretty v <> ":" <+> maybe "?" pretty (termGeneral t)
+              let namer' = namer { namerExpanding = Set.insert v (namerExpanding namer) }
+              (namer'', es) <- termtypesToAnnoS gi0 namer' t
+              return $ (namer'' { namerExpanding = namerExpanding namer }, VarS v (MonomorphicExpr (termGeneral t) es))
+
+            -- A polymorphic term should always have a type.
+            (GMapJust (Polymorphic cls clsName t ts)) -> do
+              MM.sayVVV $
+                "  polymorphic term" <+> pretty v <> ":" <+> list (map (maybe "?" pretty . termGeneral) ts)
+              let namer' = namer { namerExpanding = Set.insert v (namerExpanding namer) }
+              (namer'', ess) <- statefulMapM (termtypesToAnnoS gi0) namer' ts
+              let etypes = map (fromJust . termGeneral) ts
+              return $ (namer'' { namerExpanding = namerExpanding namer }, VarS v (PolymorphicExpr cls clsName t (zip etypes ess)))
+
+            -- Terms not associated with TermTypes objects must be lambda-bound or let-bound
+            -- These terms will be renamed for uniqueness
+            _ -> do
+              MM.sayVVV $ "bound term" <+> pretty v
+              case Map.lookup v (namerMap namer) of
+                (Just (v', LambdaBound)) -> return (namer, BndS v')
+                (Just (v', LetBound)) -> return (namer, LetBndS v')
+                Nothing -> MM.throwSourcedError gi0 $ "Undefined term in namer map:" <+> pretty v
       where
         termtypesToAnnoS :: Int -> Namer -> TermTypes -> MorlocMonad (Namer, [AnnoS Int ManyPoly Int])
         termtypesToAnnoS gi n t = do
@@ -271,15 +278,20 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (ForceE e) = do
       (namer', e') <- collectAnnoS namer e
       return (namer', ForceS e')
+    f namer (IfE c t e) = do
+      (namer1, c') <- collectAnnoS namer c
+      (namer2, t') <- collectAnnoS namer1 t
+      (namer3, e') <- collectAnnoS namer2 e
+      return (namer3, IfS c' t' e')
     -- all other expressions are strictly illegal here and represent compiler bugs
     f _ e = error $ "Bug in collectExprS: " <> show (render (pretty e))
 
 updateRenamer :: BindKind -> EVar -> Namer -> Namer
-updateRenamer kind v (Namer rmap ridx) =
-  let v' = EV (unEVar v <> "@" <> MT.show' ridx)
-   in Namer
-        { namerMap = Map.insert v (v', kind) rmap
-        , namerIndex = ridx + 1
+updateRenamer kind v namer =
+  let v' = EV (unEVar v <> "@" <> MT.show' (namerIndex namer))
+   in namer
+        { namerMap = Map.insert v (v', kind) (namerMap namer)
+        , namerIndex = namerIndex namer + 1
         }
 
 exprIIdx :: ExprI -> Int
@@ -298,6 +310,7 @@ reindexExpr (LstE es) = LstE <$> mapM reindexExprI es
 reindexExpr (NamE rs) = NamE <$> mapM (\(k, e) -> (,) k <$> reindexExprI e) rs
 reindexExpr (TupE es) = TupE <$> mapM reindexExprI es
 reindexExpr (LetE bindings body) = LetE <$> mapM (\(v, e) -> (,) v <$> reindexExprI e) bindings <*> reindexExprI body
+reindexExpr (IfE c t e) = IfE <$> reindexExprI c <*> reindexExprI t <*> reindexExprI e
 reindexExpr (SuspendE e) = SuspendE <$> reindexExprI e
 reindexExpr (ForceE e) = ForceE <$> reindexExprI e
 reindexExpr e = return e

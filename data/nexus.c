@@ -49,6 +49,7 @@ typedef enum {
 
 typedef struct config_s {
     int help_flag;
+    int print_flag;
     char* packet_path;
     char* socket_base;
     char* output_path;
@@ -254,8 +255,11 @@ void print_return(uint8_t* packet, Schema* schema, config_t config){
     }
 
     if(config.output_format == JSON){
-        // print result
-        print_voidstar(packet_value, schema, &child_errmsg);
+        if(config.print_flag){
+            pretty_print_voidstar(packet_value, schema, &child_errmsg);
+        } else {
+            print_voidstar(packet_value, schema, &child_errmsg);
+        }
     } else if (config.output_format == MessagePack) {
 
         char* mpk_ptr = NULL; // MessagePack data point
@@ -264,13 +268,24 @@ void print_return(uint8_t* packet, Schema* schema, config_t config){
         // translate returned data to MessagePack format
         ERROR_TRY_GOTO(pack_with_schema, (void*)packet_value, schema, &mpk_ptr, &mpk_size);
 
-        // print MessagePack data to STDOUT
-        ERROR_TRY_GOTO(print_binary, mpk_ptr, mpk_size);
+        if(config.print_flag){
+            // hex dump for human-readable MessagePack output
+            ERROR_TRY_GOTO(print_hex_dump, (const uint8_t*)mpk_ptr, mpk_size);
+        } else {
+            // print MessagePack data to STDOUT
+            ERROR_TRY_GOTO(print_binary, mpk_ptr, mpk_size);
+        }
 
     } else if (config.output_format == VoidStar) {
 
-        // print Morloc packet
-        ERROR_TRY_GOTO(print_morloc_data_packet, packet, schema);
+        if(config.print_flag){
+            // hex dump of the raw packet
+            size_t pkt_size = ERROR_TRY_GOTO(morloc_packet_size, packet);
+            ERROR_TRY_GOTO(print_hex_dump, packet, pkt_size);
+        } else {
+            // print Morloc packet
+            ERROR_TRY_GOTO(print_morloc_data_packet, packet, schema);
+        }
 
     } else {
         ERROR("Unsupported output_format specified (this should be impossible, this error message indicates a bug in the code).");
@@ -664,8 +679,10 @@ morloc_socket_t* setup_sockets(
 // Manifest-driven help text
 // ======================================================================
 
+static const char* prog_name = "morloc-nexus";
+
 void print_nexus_usage(void) {
-    fprintf(stderr, "Usage: morloc-nexus <manifest> [OPTION...] COMMAND [ARG...]\n");
+    fprintf(stderr, "Usage: %s [OPTION...] COMMAND [ARG...]\n", prog_name);
     fprintf(stderr, "\n");
     fprintf(stderr, "morloc-nexus is the morloc program dispatcher.\n");
     fprintf(stderr, "\n");
@@ -674,6 +691,7 @@ void print_nexus_usage(void) {
     fprintf(stderr, "\n");
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -h, --help           Print this help message\n");
+    fprintf(stderr, "  -p, --print          Pretty-print output for human consumption\n");
     fprintf(stderr, "  -o, --output-file    Print to this file instead of STDOUT\n");
     fprintf(stderr, "  -f, --output-format  Output format [json|mpk|voidstar]\n");
     fprintf(stderr, "\n");
@@ -699,7 +717,7 @@ void print_group_usage(const manifest_t* manifest, const char* group_name) {
         }
     }
 
-    fprintf(stderr, "Usage: morloc-nexus <manifest> %s COMMAND [ARG...]\n", group_name);
+    fprintf(stderr, "Usage: %s %s COMMAND [ARG...]\n", prog_name, group_name);
     if (grp && grp->desc) {
         fprintf(stderr, "\n");
         for (size_t i = 0; grp->desc[i]; i++) {
@@ -734,10 +752,11 @@ void print_group_usage(const manifest_t* manifest, const char* group_name) {
 }
 
 void print_usage(const manifest_t* manifest) {
-    fprintf(stderr, "Usage: morloc-nexus <manifest> [OPTION...] COMMAND [ARG...]\n");
+    fprintf(stderr, "Usage: %s [OPTION...] COMMAND [ARG...]\n", prog_name);
     fprintf(stderr, "\n");
     fprintf(stderr, "Nexus Options:\n");
     fprintf(stderr, " -h, --help            Print this help message\n");
+    fprintf(stderr, " -p, --print           Pretty-print output for human consumption\n");
     fprintf(stderr, " -o, --output-file     Print to this file instead of STDOUT\n");
     fprintf(stderr, " -f, --output-format   Output format [json|mpk|voidstar]\n");
     fprintf(stderr, "\n");
@@ -804,9 +823,9 @@ void print_usage(const manifest_t* manifest) {
 void print_command_help(const manifest_command_t* cmd) {
     // Usage line
     if (cmd->group) {
-        fprintf(stderr, "Usage: morloc-nexus <manifest> %s %s", cmd->group, cmd->name);
+        fprintf(stderr, "Usage: %s %s %s", prog_name, cmd->group, cmd->name);
     } else {
-        fprintf(stderr, "Usage: morloc-nexus <manifest> %s", cmd->name);
+        fprintf(stderr, "Usage: %s %s", prog_name, cmd->name);
     }
     // Check if there are non-positional args
     bool has_opts = false;
@@ -852,9 +871,9 @@ void print_command_help(const manifest_command_t* cmd) {
             else if (a->short_opt) fprintf(stderr, "-%c %s", a->short_opt, a->metavar);
             else if (a->long_opt) fprintf(stderr, "--%s %s", a->long_opt, a->metavar);
             fprintf(stderr, "\n");
+            if (a->default_val) fprintf(stderr, "        default: %s\n", a->default_val);
             if (a->desc) for (size_t d = 0; a->desc[d]; d++) fprintf(stderr, "        %s\n", a->desc[d]);
             if (a->type_desc) fprintf(stderr, "        type: %s\n", a->type_desc);
-            if (a->default_val) fprintf(stderr, "        default: %s\n", a->default_val);
         } else if (a->kind == MARG_FLAG) {
             if (!has_opt) { fprintf(stderr, "\nOptional arguments:\n"); has_opt = true; }
             fprintf(stderr, "    ");
@@ -863,8 +882,8 @@ void print_command_help(const manifest_command_t* cmd) {
             else if (a->long_opt) fprintf(stderr, "--%s", a->long_opt);
             fprintf(stderr, "\n");
             if (a->long_rev) fprintf(stderr, "    --%s\n", a->long_rev);
-            if (a->desc) for (size_t d = 0; a->desc[d]; d++) fprintf(stderr, "        %s\n", a->desc[d]);
             if (a->default_val) fprintf(stderr, "        default: %s\n", a->default_val);
+            if (a->desc) for (size_t d = 0; a->desc[d]; d++) fprintf(stderr, "        %s\n", a->desc[d]);
         }
     }
 
@@ -887,11 +906,15 @@ void print_command_help(const manifest_command_t* cmd) {
                 if (ea->short_opt && ea->long_opt) {
                     fprintf(stderr, "-%c, --%s", ea->short_opt, ea->long_opt);
                     if (ea->kind == MARG_OPT && ea->metavar) fprintf(stderr, " %s", ea->metavar);
+                } else if (ea->short_opt) {
+                    fprintf(stderr, "-%c", ea->short_opt);
+                    if (ea->kind == MARG_OPT && ea->metavar) fprintf(stderr, " %s", ea->metavar);
                 } else if (ea->long_opt) {
                     fprintf(stderr, "--%s", ea->long_opt);
                     if (ea->kind == MARG_OPT && ea->metavar) fprintf(stderr, " %s", ea->metavar);
                 }
                 fprintf(stderr, "\n");
+                if (ea->default_val) fprintf(stderr, "        default: %s\n", ea->default_val);
                 if (ea->desc) for (size_t d = 0; ea->desc[d]; d++) fprintf(stderr, "        %s\n", ea->desc[d]);
             }
         }
@@ -1379,6 +1402,7 @@ enum {
 static void parse_nexus_options(int argc, char* argv[], config_t* config) {
     static struct option long_options[] = {
         {"help",        no_argument,       0, 'h'},
+        {"print",       no_argument,       0, 'p'},
         {"call-packet", required_argument, 0, 'c'},
         {"socket-base", required_argument, 0, 's'},
         {"output-file", required_argument, 0, 'o'},
@@ -1393,9 +1417,10 @@ static void parse_nexus_options(int argc, char* argv[], config_t* config) {
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "+hc:s:o:f:", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "+hpc:s:o:f:", long_options, NULL)) != -1) {
         switch (opt) {
             case 'h': config->help_flag = 1; break;
+            case 'p': config->print_flag = 1; break;
             case 'c': config->packet_path = optarg; break;
             case 's': config->socket_base = optarg; break;
             case 'o': config->output_path = optarg; break;
@@ -1473,6 +1498,7 @@ int main(int argc, char *argv[]) {
     }
 
     const char* manifest_path = argv[optind];
+    prog_name = manifest_path;
     optind++;
 
     // Second pass: parse options that appear after the manifest path

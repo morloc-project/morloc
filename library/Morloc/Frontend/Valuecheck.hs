@@ -40,7 +40,9 @@ toE (AnnoS g _ (ExeS (PatCall (PatternText s ss)))) =
   LitP g (MStr (s <> DT.concat ["#{}" <> s' | s' <- ss]))
 toE (AnnoS g _ (ExeS (PatCall (PatternStruct s)))) = PatP g s
 toE (AnnoS g _ (LetBndS v)) = BndP g v
+toE (AnnoS g _ (CallS v)) = BndP g v
 toE (AnnoS _ _ (LetS _ _ body)) = toE body
+toE (AnnoS g _ (IfS c t e)) = IfP g (toE c) (toE t) (toE e)
 toE (AnnoS g _ (SuspendS e)) = SuspendP g (toE e)
 toE (AnnoS g _ (ForceS e)) = ForceP g (toE e)
 
@@ -55,6 +57,7 @@ indexOfE (NamP (Idx i _) _) = i
 indexOfE (LitP (Idx i _) _) = i
 indexOfE (SrcP (Idx i _) _) = i
 indexOfE (PatP (Idx i _) _) = i
+indexOfE (IfP (Idx i _) _ _ _) = i
 indexOfE (SuspendP (Idx i _) _) = i
 indexOfE (ForceP (Idx i _) _) = i
 
@@ -80,6 +83,7 @@ check (LamP _ _ e) = check e
 check (LstP _ es) = mapM_ check es
 check (TupP _ es) = mapM_ check es
 check (NamP _ (map snd -> es)) = mapM_ check es
+check (IfP _ c t e) = mapM_ check [c, t, e]
 check (SuspendP _ e) = check e
 check (ForceP _ e) = check e
 check _ = return ()
@@ -156,6 +160,7 @@ checkPair i e1 e2@SrcP {}
     isSimple LamP {} = False
     isSimple SrcP {} = False
     isSimple PatP {} = False
+    isSimple (IfP _ _ _ _) = False
     isSimple (SuspendP _ e) = isSimple e
     isSimple (ForceP _ e) = isSimple e
 
@@ -262,6 +267,7 @@ substituteEVar oldVar newVar e0
     f used idx (LstP g es) = LstP g $ map (f used idx) es
     f used idx (TupP g es) = TupP g $ map (f used idx) es
     f used idx (NamP g rs) = NamP g $ map (second (f used idx)) rs
+    f used idx (IfP g c t e) = IfP g (f used idx c) (f used idx t) (f used idx e)
     f used idx (SuspendP g e) = SuspendP g (f used idx e)
     f used idx (ForceP g e) = ForceP g (f used idx e)
     f _ _ e = e
@@ -302,6 +308,7 @@ freeTerms = f Set.empty
     f boundterms (LstP _ es) = Set.unions . map (f boundterms) $ es
     f boundterms (TupP _ es) = Set.unions . map (f boundterms) $ es
     f boundterms (NamP _ (map snd -> es)) = Set.unions . map (f boundterms) $ es
+    f boundterms (IfP _ c t e) = Set.unions [f boundterms c, f boundterms t, f boundterms e]
     f boundterms (SuspendP _ e) = f boundterms e
     f boundterms (ForceP _ e) = f boundterms e
     f _ _ = Set.empty
@@ -325,5 +332,6 @@ substituteExpr oldVar replacementExpr = f
     f e@LitP {} = e
     f e@SrcP {} = e
     f e@PatP {} = e
+    f (IfP g c t e) = IfP g (f c) (f t) (f e)
     f (SuspendP g e) = SuspendP g (f e)
     f (ForceP g e) = ForceP g (f e)

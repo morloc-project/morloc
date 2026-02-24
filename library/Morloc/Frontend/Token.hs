@@ -82,6 +82,8 @@ data Token
     TokUnderscore
   | -- | !
     TokBang
+  | -- | ?
+    TokQuestion
   | -- | . (operator position, e.g., f . g)
     TokDot
   | -- | . (getter prefix, e.g., .name)
@@ -178,6 +180,7 @@ showToken TokSemicolon = "';'"
 showToken TokBackslash = "'\\'"
 showToken TokUnderscore = "'_'"
 showToken TokBang = "'!'"
+showToken TokQuestion = "'?'"
 showToken TokDot = "'.'"
 showToken TokGetterDot = "'.'"
 showToken TokEquals = "'='"

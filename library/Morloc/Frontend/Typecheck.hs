@@ -134,6 +134,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f :: ExprS (Indexed TypeU) Many Int -> ExprS (Indexed Type) Many Int
     f (BndS x) = BndS x
     f (LetBndS x) = LetBndS x
+    f (CallS x) = CallS x
     f (LetS v e1 e2) = LetS v (resolveTypes e1) (resolveTypes e2)
     f (VarS v xs) = VarS v (fmap resolveTypes xs)
     f (ExeS exe) = ExeS exe
@@ -149,6 +150,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f UniS = UniS
     f (SuspendS e') = SuspendS (resolveTypes e')
     f (ForceS e') = ForceS (resolveTypes e')
+    f (IfS c t e) = IfS (resolveTypes c) (resolveTypes t) (resolveTypes e)
 
 resolveInstances ::
   Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
@@ -228,6 +230,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     -- primitives
     f _ g0 UniS = return (g0, UniS)
     f _ g0 (BndS v) = return (g0, BndS v)
+    f _ g0 (CallS v) = return (g0, CallS v)
     f _ g0 (RealS x) = return (g0, RealS x)
     f _ g0 (IntS x) = return (g0, IntS x)
     f _ g0 (LogS x) = return (g0, LogS x)
@@ -235,6 +238,11 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f _ g0 (ExeS x) = return (g0, ExeS x)
     f _ g0 (SuspendS e) = resolveInstances g0 e |>> second SuspendS
     f _ g0 (ForceS e) = resolveInstances g0 e |>> second ForceS
+    f _ g0 (IfS c t e) = do
+      (g1, c') <- resolveInstances g0 c
+      (g2, t') <- resolveInstances g1 t
+      (g3, e') <- resolveInstances g2 e
+      return (g3, IfS c' t' e')
 
     connectInstance :: Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
     connectInstance g0 [] = return g0
@@ -483,11 +491,14 @@ synthE _ g0 (NamS rs) = do
 -- variables should be checked against. I think (this needs formalization).
 synthE _ g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
   let (g1, t1) = rename g0 (etype t0)
-  (g2, t2, xs1) <- foldCheck g1 xs0 t1
+      g1' = g1 ++> [AnnG v t1]  -- add function type for recursive CallS references
+  (g2, t2, xs1) <- foldCheck g1' xs0 t1
   let xs2 = applyCon g2 $ VarS v (MonomorphicExpr (Just t0) xs1)
   return (g2, t2, xs2)
 synthE _ g (VarS v (MonomorphicExpr Nothing (x : xs))) = do
-  (g', t', x') <- synthG g x
+  let (g0', freshT) = newvar (unEVar v <> "_rec") g
+      g0'' = g0' ++> [AnnG v freshT]  -- add fresh type for recursive CallS references
+  (g', t', x') <- synthG g0'' x
   (g'', t'', xs') <- foldCheck g' xs t'
   let xs'' = applyCon g'' $ VarS v (MonomorphicExpr Nothing (x' : xs'))
   return (g'', t'', xs'')
@@ -559,11 +570,23 @@ synthE _ g (LetBndS v) = do
     (Just t) -> return (g, t)
     Nothing -> return $ newvar (unEVar v <> "_u") g
   return (g', t', LetBndS v)
+synthE _ g (CallS v) = do
+  (g', t') <- case lookupE v g of
+    (Just t) -> return (g, t)
+    Nothing -> return $ newvar (unEVar v <> "_rec") g
+  return (g', t', CallS v)
 synthE _ g (LetS v e1 e2) = do
   (g1, t1, e1') <- synthG g e1
   let g2 = g1 ++> [AnnG v t1]
   (g3, t2, e2') <- synthG g2 e2
   return (g3, t2, LetS v e1' e2')
+synthE i g (IfS cond thenE elseE) = do
+  (g1, condType, cond') <- synthG g cond
+  g2 <- subtype' i condType (VarU (TV "Bool")) g1
+  (g3, t2, thenE') <- synthG g2 thenE
+  (g4, t3, elseE') <- synthG g3 elseE
+  g5 <- subtype' i t3 t2 g4
+  return (g5, apply g5 t2, IfS cond' thenE' elseE')
 synthE _ g (SuspendS e) = do
   (g1, t1, e1) <- synthG g e
   return (g1, ThunkU t1, SuspendS e1)
@@ -783,6 +806,12 @@ checkE i g0 e0@(LamS vs body) t@(FunU as b)
 checkE i g1 e1 (ForallU v a) = do
   recordParameter i v a
   checkE' i (g1 +> v) e1 (substitute v a)
+checkE i g (IfS cond thenE elseE) t = do
+  (g1, condType, cond') <- synthG g cond
+  g2 <- subtype' i condType (VarU (TV "Bool")) g1
+  (g3, t2, thenE') <- checkG g2 thenE t
+  (g4, _, elseE') <- checkG g3 elseE (apply g3 t2)
+  return (g4, apply g4 t2, IfS cond' thenE' elseE')
 checkE _ g (SuspendS e) (ThunkU t) = do
   (g1, t1, e1) <- checkG g e t
   return (g1, ThunkU t1, SuspendS e1)
@@ -922,5 +951,7 @@ peakSExpr (StrS x) = "StrS" <+> pretty x
 peakSExpr (ExeS exe) = "ExeS" <+> pretty exe
 peakSExpr (LetS v _ _) = "LetS" <+> pretty v
 peakSExpr (LetBndS v) = "LetBndS" <+> pretty v
+peakSExpr (CallS v) = "CallS" <+> pretty v
 peakSExpr (SuspendS _) = "SuspendS"
 peakSExpr (ForceS _) = "ForceS"
+peakSExpr (IfS _ _ _) = "IfS"

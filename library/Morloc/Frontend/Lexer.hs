@@ -211,6 +211,12 @@ lexOne st@(LexState input pos toks) = case input of
         emit1 TokBang "!" (c : rest)
   '!' : [] ->
     emit1 TokBang "!" []
+  -- Question mark -- standalone ? is guard token, multi-char like ?= are operators
+  '?' : c : rest
+    | not (isOperatorChar c) ->
+        emit1 TokQuestion "?" (c : rest)
+  '?' : [] ->
+    emit1 TokQuestion "?" []
   -- Operators and reserved operator sequences
   c : rest | isOperatorChar c -> lexOperator pos (c : rest) st
   -- Identifiers and keywords

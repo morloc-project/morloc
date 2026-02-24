@@ -20,6 +20,7 @@ module Morloc.CodeGenerator.Serialize
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Serial as Serial
+import qualified Morloc.Config as MC
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
@@ -114,6 +115,9 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
         (Just (Right t)) -> BndVarS <$> fmap Just (inferType t) <*> pure i
         _ -> return $ BndVarS Nothing i
     serialExpr _ (MonoBndVar (C t) i) = BndVarS <$> fmap Just (inferType t) <*> pure i
+    serialExpr m (MonoIf cond thenE elseE) = do
+      ne <- nativeExpr m (MonoIf cond thenE elseE)
+      serializeS "serialE MonoIf" m ne
     serialExpr _ (MonoExe _ _) = error "Can represent MonoSrc as SerialExpr"
     serialExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to a SerialExpr"
     serialExpr _ (MonoApp MonoManifold {} _) = error "Illegal?"
@@ -171,6 +175,33 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
               return $ NativeLetN i ne1 ne2
     nativeExpr _ (MonoLetVar t i) = LetVarN <$> inferType t <*> pure i
     nativeExpr m (MonoReturn e) = ReturnN <$> nativeExpr m e
+    -- Cross-language recursive call: serialize args, call via socket, deserialize result
+    nativeExpr m (MonoApp (MonoExe (Idx idx t0) (RecCallP mid (Just targetLang))) es) = do
+      let (_, outputType) = case t0 of
+            FunT its ot -> (its, ot)
+            _ -> ([], t0)
+      nativeArgs <- mapM (nativeExpr m) es
+      serializedArgs <- mapM (serializeS "foreignRecArg" m) nativeArgs
+      resultType <- inferType (Idx idx outputType)
+      config <- MM.ask
+      reg <- MM.gets stateLangRegistry
+      let socket = MC.setupServerAndSocket config reg targetLang
+          serialCall = AppForeignRecS resultType mid socket serializedArgs
+      naturalizeN "foreignRecCall" m lang resultType serialCall
+    -- Same-language recursive call: serialize args, call serial manifold, deserialize result
+    nativeExpr m (MonoApp (MonoExe (Idx idx t0) (RecCallP mid Nothing)) es) = do
+      let (_, outputType) = case t0 of
+            FunT its ot -> (its, ot)
+            _ -> ([], t0)
+      -- Build native args, then serialize each one
+      nativeArgs <- mapM (nativeExpr m) es
+      serializedArgs <- mapM (serializeS "recArg" m) nativeArgs
+      -- Return type of the serial manifold call
+      resultType <- inferType (Idx idx outputType)
+      -- Create serial expression: call the serial manifold with serialized args
+      let serialCall = AppRecS resultType mid serializedArgs
+      -- Deserialize the result back to native
+      naturalizeN "recCall" m lang resultType serialCall
     nativeExpr m (MonoApp (MonoExe (Idx idx t0) exe) es) = do
       args <- mapM (nativeArg m) es
       let (inputTypes, outputType) = case t0 of
@@ -242,6 +273,11 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoInt v x) = IntN <$> inferVar v <*> pure x
     nativeExpr _ (MonoStr v x) = StrN <$> inferVar v <*> pure x
     nativeExpr _ (MonoNull v) = NullN <$> inferVar v
+    nativeExpr m (MonoIf cond thenE elseE) = do
+      condNe <- nativeExpr m cond
+      thenNe <- nativeExpr m thenE
+      elseNe <- nativeExpr m elseE
+      return $ IfN (typeFof thenNe) condNe thenNe elseNe
     nativeExpr m (MonoSuspend t e) = SuspendN <$> inferType t <*> nativeExpr m e
     nativeExpr m (MonoForce t e) = ForceN <$> inferType t <*> nativeExpr m e
 
@@ -277,6 +313,8 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     makeTypemap parentIdx (MonoReturn e) = makeTypemap parentIdx e
     makeTypemap parentIdx (MonoForce _ e) = makeTypemap parentIdx e
     makeTypemap parentIdx (MonoSuspend _ e) = makeTypemap parentIdx e
+    makeTypemap parentIdx (MonoIf cond thenE elseE) =
+      Map.unionsWith mergeTypes [makeTypemap parentIdx cond, makeTypemap parentIdx thenE, makeTypemap parentIdx elseE]
     makeTypemap _ (MonoApp (MonoExe (ann -> idx) _) es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap parentIdx (MonoApp e es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) (e : es))
     makeTypemap _ (MonoList (ann -> idx) _ es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
@@ -301,8 +339,9 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     inferState (MonoLet _ _ e) = inferState e
     inferState (MonoReturn e) = inferState e
     inferState (MonoManifold _ _ e) = inferState e
+    inferState (MonoIf _ thenE _) = inferState thenE
     inferState MonoPoolCall {} = Unserialized
-    inferState MonoBndVar {} = error "Ambiguous bound term"
+    inferState MonoBndVar {} = Unserialized
     inferState _ = Unserialized
 
 {- | Unwrap structural MonoManifold/MonoReturn wrappers from a let definition.
@@ -370,6 +409,12 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
           req2 = Map.fromList [(i, requestOf tm) | Arg i tm <- pargs]
           req3 = Map.unionWith (<>) req1 req2
       return (req3, AppPoolS t p (map snd args))
+    wireSerialExpr (AppRecS_ t mid args) = do
+      let req = Map.unionsWith (<>) (map fst args)
+      return (req, AppRecS t mid (map snd args))
+    wireSerialExpr (AppForeignRecS_ t mid socket args) = do
+      let req = Map.unionsWith (<>) (map fst args)
+      return (req, AppForeignRecS t mid socket (map snd args))
     wireSerialExpr (SerialLetS_ i (req1, se1) (req2, se2)) = do
       let req' = Map.unionWith (<>) req1 req2
       e' <- case Map.lookup i req2 of

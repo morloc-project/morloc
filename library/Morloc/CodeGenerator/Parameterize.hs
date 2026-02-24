@@ -98,6 +98,12 @@ parameterize' args (AnnoS g c (LetS v e1 e2)) = do
   e2' <- parameterize' bodyArgs e2
   let args' = pruneArgs args [e1', e2']
   return $ AnnoS g (c, args') (LetS v e1' e2')
+parameterize' args (AnnoS g c (IfS cond thenE elseE)) = do
+  cond' <- parameterize' args cond
+  thenE' <- parameterize' args thenE
+  elseE' <- parameterize' args elseE
+  let args' = pruneArgs args [cond', thenE', elseE']
+  return $ AnnoS g (c, args') (IfS cond' thenE' elseE')
 parameterize' args (AnnoS g c (SuspendS e)) = do
   e' <- parameterize' args e
   let args' = pruneArgs args [e']
@@ -106,6 +112,8 @@ parameterize' args (AnnoS g c (ForceS e)) = do
   e' <- parameterize' args e
   let args' = pruneArgs args [e']
   return $ AnnoS g (c, args') (ForceS e')
+parameterize' _ (AnnoS g c (CallS v)) = do
+  return $ AnnoS g (c, []) (CallS v)
 parameterize' _ (AnnoS _ _ (VarS _ _)) = undefined
 
 pruneArgs :: [Arg a] -> [AnnoS c One (g, [Arg a])] -> [Arg a]

@@ -38,6 +38,8 @@ setManifoldConfig midx (AnnoS _ _ (AppS e _)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (LamS _ e)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (SuspendS e)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (ForceS e)) = setManifoldConfig midx e
+setManifoldConfig midx (AnnoS _ _ (IfS _ t _)) = setManifoldConfig midx t
+setManifoldConfig _ (AnnoS _ _ (CallS _)) = return ()
 setManifoldConfig _ _ = return ()
 
 linkConfigIndex :: Int -> Int -> MorlocMonad ()
@@ -89,6 +91,7 @@ forceExportThunks cidx t (PolyHead lang midx args body) =
     goExpr ids (PolyList v ti es) = PolyList v ti (map (goExpr ids) es)
     goExpr ids (PolyTuple v es) = PolyTuple v (map (fmap (goExpr ids)) es)
     goExpr ids (PolyRecord o v ps rs) = PolyRecord o v ps (map (fmap (fmap (goExpr ids))) rs)
+    goExpr ids (PolyIf c t e) = PolyIf (goExpr ids c) (goExpr ids t) (goExpr ids e)
     goExpr ids (PolyRemoteInterface l ti is rf e) = PolyRemoteInterface l ti is rf (goExpr ids e)
     goExpr _ e = e
 
@@ -502,22 +505,40 @@ expressPolyExpr _ pl pc (AnnoS (Idx i t) c e@(NamS _)) = do
   case reduceType scope t of
     (Just t') -> expressPolyExprWrap pl pc (AnnoS (Idx i t') c e)
     Nothing -> error "Expected a record type"
+-- Recursive call used as a value (not applied via AppS)
+expressPolyExpr _ parentLang _ (AnnoS (Idx i c) (Idx cidx _, _) (CallS v)) = do
+  (mid, crossLang) <- lookupRecursiveTarget parentLang v
+  -- Strip ThunkT from return type (serial manifolds force thunks)
+  case c of
+    FunT inputs (ThunkT out) ->
+      return . PolySuspend (Idx i (ThunkT out))
+        $ PolyExe (Idx i (FunT inputs out)) (RecCallP mid crossLang)
+    _ ->
+      return $ PolyExe (Idx i c) (RecCallP mid crossLang)
 expressPolyExpr _ _ _ (AnnoS (Idx i _) _ (AppS (AnnoS _ _ (BndS v)) _)) =
   MM.throwSourcedError i $
     "Undefined function" <+> dquotes (pretty v) <> ", did you forget an import?"
 expressPolyExpr _ _ _ (AnnoS _ _ (AppS (AnnoS _ _ (LamS vs _)) _)) =
   error $ "All applications of lambdas should have been eliminated of length " <> show (length vs)
+expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx _ lang, _) (IfS cond thenE elseE)) = do
+  let boolType = VarT (TV "Bool")
+  cond' <- expressPolyExprWrap lang (mkIdx cond boolType) cond
+  thenE' <- expressPolyExprWrap lang (mkIdx thenE t) thenE
+  elseE' <- expressPolyExprWrap lang (mkIdx elseE t) elseE
+  return $ PolyIf cond' thenE' elseE'
 expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx cidx lang, _) (SuspendS x)) = do
   x' <- expressPolyExprWrap lang (mkIdx x t) x
   return $ PolySuspend (Idx cidx t) x'
 expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (ForceS x)) = do
-  -- Use parentLang (not lang) so cross-language thunk forces create proper
-  -- manifold boundaries. When the thunk's language differs from the context,
-  -- this ensures Express treats the call as foreign.
+  -- Always use pushForceIntoRemote: if the inner expression contains a
+  -- PolyRemoteInterface (cross-language call), it strips ThunkT so the remote
+  -- pool forces the thunk and serializes the concrete result. If no
+  -- PolyRemoteInterface is found (same-language), it falls back to PolyForce.
+  -- We cannot rely on parentLang /= lang because Realize.hs assigns both to
+  -- the same language when the ForceS node lives in a same-language context,
+  -- even if the inner expression calls into a foreign language.
   x' <- expressPolyExprWrap parentLang (Idx cidx t) x
-  if parentLang /= lang
-    then return $ pushForceIntoRemote (Idx cidx t) x'
-    else return $ PolyForce (Idx cidx t) x'
+  return $ pushForceIntoRemote (Idx cidx t) x'
 
 -- Nullary source/pattern call (e.g., clockResNs :: {Int})
 expressPolyExpr
@@ -582,6 +603,17 @@ expressPolyApp _ (AnnoS g (_, args) (BndS v)) xs = do
   case [j | (Arg j u) <- args, u == v] of
     [j] -> return . PolyReturn $ PolyApp (PolyExe g (LocalCallP j)) xs
     _ -> error "Unreachable? BndS value should have been wired uniquely to args previously"
+expressPolyApp parentLang (AnnoS (Idx i t) _ (CallS v)) xs = do
+  (mid, crossLang) <- lookupRecursiveTarget parentLang v
+  -- Serial manifolds force thunks before serializing, so strip ThunkT from the
+  -- return type and wrap in PolySuspend to reconstruct the thunk after deserializing.
+  case t of
+    FunT inputs (ThunkT out) ->
+      return . PolyReturn
+        . PolySuspend (Idx i (ThunkT out))
+        $ PolyApp (PolyExe (Idx i (FunT inputs out)) (RecCallP mid crossLang)) xs
+    _ ->
+      return . PolyReturn $ PolyApp (PolyExe (Idx i t) (RecCallP mid crossLang)) xs
 expressPolyApp _ (AnnoS _ _ (LamS _ _)) _ = error "unexpected LamS - should have been handled"
 expressPolyApp _ (AnnoS _ _ (VarS _ _)) _ = error "unexpected VarS - should have been substituted"
 expressPolyApp _ _ _ = error "Unreachable? This does not seem to be applicable"
@@ -631,6 +663,24 @@ pushForceIntoRemote t = go
     stripInExe (PolyApp (PolyExe (Idx gidx (ThunkT out)) exe) xs) =
       PolyApp (PolyExe (Idx gidx out) exe) xs
     stripInExe e = e
+
+-- | Resolve a function name to its manifold ID and determine if the call is cross-language.
+-- Returns (manifold ID, Nothing) for same-pool calls, (manifold ID, Just targetLang) for foreign calls.
+-- Searches all manifolds in stateName, not just exports, to support non-exported recursive helpers.
+lookupRecursiveTarget :: Lang -> EVar -> MorlocMonad (Int, Maybe Lang)
+lookupRecursiveTarget parentLang v = do
+  nameMap <- MM.gets stateName
+  langMap <- MM.gets stateManifoldLang
+  -- Filter to concrete manifolds only (those in langMap) to avoid picking up
+  -- general/polymorphic indices that don't have serial manifold definitions
+  let reverseMap = Map.fromList [(name, idx) | (idx, name) <- Map.toList nameMap, Map.member idx langMap]
+  case Map.lookup v reverseMap of
+    (Just mid) -> do
+      let crossLang = case Map.lookup mid langMap of
+            Just tl | tl /= parentLang -> Just tl
+            _ -> Nothing
+      return (mid, crossLang)
+    Nothing -> MM.throwSystemError $ "Cannot resolve recursive call to" <+> pretty v
 
 bindVarIds :: [Int] -> [Three Lang Type (Indexed Type)] -> [PolyExpr]
 bindVarIds [] [] = []

@@ -1,0 +1,6 @@
+--- pyThunkInCpp ---
+"hello"
+--- multiPyThunkInCpp ---
+"hello_42"
+--- mixedThunkInCpp ---
+84

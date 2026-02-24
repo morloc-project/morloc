@@ -41,7 +41,9 @@ import qualified Morloc.BaseTypes as BT
 -- - 6 from class_constraints (UPPER could be constraint arg or end of constraint)
 -- - 3 from original grammar
 -- - 4 from accessor_tail (GDOT/= could continue chain or end it)
-%expect 49
+-- - 2 from guard_clauses ('?' could start guard or be part of next decl)
+-- - 1 from guard_expr ('?' in expr could be nested guard_expr or next guard_clause)
+%expect 52
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -59,6 +61,7 @@ import qualified Morloc.BaseTypes as BT
   '\\'       { Located _ TokBackslash _ }
   '_'        { Located _ TokUnderscore _ }
   '!'        { Located _ TokBang _ }
+  '?'        { Located _ TokQuestion _ }
   '.'        { Located _ TokDot _ }
   GDOT       { Located _ TokGetterDot _ }
   '='        { Located _ TokEquals _ }
@@ -149,6 +152,15 @@ sig_or_ass :: { [Loc CstExpr] }
       { [at $1 (CSigE (toEVar $1) $2 $4)] }
   | evar_or_op lower_names '=' expr opt_where_decls
       { [at $1 (CAssE (toEVar $1) $2 $4 $5)] }
+  | evar_or_op lower_names guard_clauses ':' expr opt_where_decls
+      { [at $1 (CGuardedAssE (toEVar $1) $2 $3 $5 $6)] }
+
+guard_clauses :: { [(Loc CstExpr, Loc CstExpr)] }
+  : guard_clause                    { [$1] }
+  | guard_clauses guard_clause      { $1 ++ [$2] }
+
+guard_clause :: { (Loc CstExpr, Loc CstExpr) }
+  : '?' expr '=' expr              { ($2, $4) }
 
 --------------------------------------------------------------------
 -- Module names
@@ -426,8 +438,13 @@ source_new_item :: { Located }
 expr :: { Loc CstExpr }
   : let_expr                { $1 }
   | lambda_expr             { $1 }
+  | guard_expr              { $1 }
   | infix_expr              { $1 }
   | infix_expr '::' type    { at $2 (CAnnE $1 $3) }
+
+guard_expr :: { Loc CstExpr }
+  : guard_clauses ':' expr
+      { Loc (fst (head $1) <-> $3) (CGuardExprE $1 $3) }
 
 let_expr :: { Loc CstExpr }
   : let_bindings 'in' expr
@@ -440,6 +457,8 @@ let_bindings :: { [(EVar, Loc CstExpr)] }
 let_binding :: { (EVar, Loc CstExpr) }
   : 'let' LOWER '=' expr              { (EV (getName $2), $4) }
   | 'let' '_' '=' expr                { (EV "_", $4) }
+  | 'let' LOWER guard_clauses ':' expr
+      { (EV (getName $2), Loc ($1 <-> $5) (CGuardExprE $3 $5)) }
 
 lambda_expr :: { Loc CstExpr }
   : '\\' lower_names1 '->' expr
@@ -523,6 +542,8 @@ do_stmts :: { [CstDoStmt] }
 do_stmt :: { CstDoStmt }
   : LOWER '<-' expr            { CstDoBind (EV (getName $1)) $3 }
   | 'let' LOWER '=' expr       { CstDoLet (EV (getName $2)) $4 }
+  | 'let' LOWER guard_clauses ':' expr
+      { CstDoLet (EV (getName $2)) (Loc ($1 <-> $5) (CGuardExprE $3 $5)) }
   | expr                       { CstDoBare $1 }
 
 getter_expr :: { Loc CstExpr }

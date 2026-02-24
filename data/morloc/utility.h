@@ -26,6 +26,7 @@ void delete_directory(const char* path);
 bool has_suffix(const char* x, const char* suffix);
 char* dirname(char* path);
 int write_atomic(const char* filename, const uint8_t* data, size_t size, ERRMSG);
+bool print_hex_dump(const uint8_t* data, size_t size, ERRMSG);
 int print_binary(const char *buf, size_t count, ERRMSG);
 uint8_t* read_binary_fd(FILE* file, size_t* file_size, ERRMSG);
 uint8_t* read_binary_file(const char* filename, size_t* file_size, ERRMSG);
