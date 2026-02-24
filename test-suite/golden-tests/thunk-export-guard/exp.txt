@@ -1,0 +1,7 @@
+--- guardThunk 5 ---
+EVAL 5
+10
+--- guardThunk 0 ---
+0
+--- guardThunk -3 ---
+0

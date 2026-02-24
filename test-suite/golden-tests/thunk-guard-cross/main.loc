@@ -1,0 +1,26 @@
+-- Test cross-language thunk force inside guard branches.
+-- Branches contain expressions that force a Python thunk in C++ context.
+-- This exercises the IfS handler's use of `lang` for branch processing
+-- with ForceS + pushForceIntoRemote nested inside IfS branches.
+--
+-- Cases tested:
+--   1. guardCross: guard branch forces Python thunk, uses result in C++ add
+
+module main (guardCross)
+
+import root-cpp
+import root-py
+
+source Py from "foo.py" ("py_double")
+source Cpp from "foo.hpp" ("add")
+
+type Cpp => Int = "int"
+type Py => Int = "int"
+
+py_double :: Int -> {Int}
+add :: Int -> Int -> Int
+
+guardCross :: Int -> Int
+guardCross x
+  ? x > 0 = add !(py_double x) 1
+  : 0

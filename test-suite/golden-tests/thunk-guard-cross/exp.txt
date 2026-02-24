@@ -1,0 +1,6 @@
+--- guardCross 5 ---
+11
+--- guardCross 0 ---
+0
+--- guardCross -3 ---
+0

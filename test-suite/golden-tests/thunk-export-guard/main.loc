@@ -1,0 +1,23 @@
+-- Test exported function returning {Int} through guards.
+-- Guards compile to PolyIf. The forceAtReturn default case wraps the
+-- entire PolyIf in PolyForce. This exercises forceExportThunks on
+-- a guard-based expression with thunk return type.
+--
+-- Cases tested:
+--   1. guardThunk: guards with C++ source returning {Int} in true branch
+--   2. guardSuspend: guards with literal suspend {0} in else branch
+
+module main (guardThunk)
+
+import root-cpp
+
+source Cpp from "foo.hpp" ("sideEffect")
+
+type Cpp => Int = "int"
+
+sideEffect :: Int -> {Int}
+
+guardThunk :: Int -> {Int}
+guardThunk x
+  ? x > 0 = sideEffect x
+  : {0}
