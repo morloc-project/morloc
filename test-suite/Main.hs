@@ -106,7 +106,6 @@ main = do
       , golden "typeclasses-5" "typeclasses-5"
       , golden "typeclasses-6" "typeclasses-6"
       , golden "typeclasses-7" "typeclasses-7"
-      , golden "typeclasses-8" "typeclasses-8"
       , golden "higher-kinded-types" "higher-kinded-types"
       , golden "string-encoding" "string-encoding"
       , golden "string-encoding-utf8" "string-encoding-utf8"

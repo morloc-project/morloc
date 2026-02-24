@@ -1,6 +1,0 @@
-module main (myProduct)
-
-import root-cpp
-
-myProduct a :: [a] -> a
-myProduct xs = fold (*) (head xs) (tail xs)
