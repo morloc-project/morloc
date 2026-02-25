@@ -689,7 +689,7 @@ void print_nexus_usage(void) {
     fprintf(stderr, "Arguments:\n");
     fprintf(stderr, "  <manifest>           Path to a .manifest file or wrapper script\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "Nexus options:\n");
     fprintf(stderr, "  -h, --help           Print this help message\n");
     fprintf(stderr, "  -p, --print          Pretty-print output for human consumption\n");
     fprintf(stderr, "  -o, --output-file    Print to this file instead of STDOUT\n");
@@ -697,9 +697,9 @@ void print_nexus_usage(void) {
     fprintf(stderr, "\n");
     fprintf(stderr, "Daemon mode:\n");
     fprintf(stderr, "  --daemon             Run as a long-lived daemon\n");
-    fprintf(stderr, "  --socket <path>      Listen on Unix socket\n");
-    fprintf(stderr, "  --port <n>           Listen on TCP port (length-prefixed JSON)\n");
-    fprintf(stderr, "  --http-port <n>      Listen on HTTP port\n");
+    fprintf(stderr, "  --http-port PORT     Listen on HTTP port\n");
+    fprintf(stderr, "  --port PORT          Listen on TCP port\n");
+    fprintf(stderr, "  --socket PATH        Listen on Unix socket\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Router mode:\n");
     fprintf(stderr, "  --router             Run as a multi-program router\n");
@@ -754,11 +754,17 @@ void print_group_usage(const manifest_t* manifest, const char* group_name) {
 void print_usage(const manifest_t* manifest) {
     fprintf(stderr, "Usage: %s [OPTION...] COMMAND [ARG...]\n", prog_name);
     fprintf(stderr, "\n");
-    fprintf(stderr, "Nexus Options:\n");
-    fprintf(stderr, " -h, --help            Print this help message\n");
-    fprintf(stderr, " -p, --print           Pretty-print output for human consumption\n");
-    fprintf(stderr, " -o, --output-file     Print to this file instead of STDOUT\n");
-    fprintf(stderr, " -f, --output-format   Output format [json|mpk|voidstar]\n");
+    fprintf(stderr, "Nexus options:\n");
+    fprintf(stderr, "  -h, --help           Print this help message\n");
+    fprintf(stderr, "  -p, --print          Pretty-print output for human consumption\n");
+    fprintf(stderr, "  -o, --output-file    Print to this file instead of STDOUT\n");
+    fprintf(stderr, "  -f, --output-format  Output format [json|mpk|voidstar]\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Daemon mode:\n");
+    fprintf(stderr, "  --daemon             Run as a long-lived daemon\n");
+    fprintf(stderr, "  --http-port PORT     Listen on HTTP port\n");
+    fprintf(stderr, "  --port PORT          Listen on TCP port\n");
+    fprintf(stderr, "  --socket PATH        Listen on Unix socket\n");
     fprintf(stderr, "\n");
 
     // Check if there are any ungrouped commands
@@ -953,10 +959,15 @@ void print_command_help_single(const manifest_command_t* cmd) {
     }
 
     // Nexus options
-    fprintf(stderr, "\nNexus Options:\n");
-    fprintf(stderr, "    --print          Pretty-print output for human consumption\n");
-    fprintf(stderr, "    --output-file    Print to this file instead of STDOUT\n");
-    fprintf(stderr, "    --output-form    Output format [json|mpk|voidstar]\n");
+    fprintf(stderr, "\nNexus options:\n");
+    fprintf(stderr, "  --print          Pretty-print output for human consumption\n");
+    fprintf(stderr, "  --output-file    Print to this file instead of STDOUT\n");
+    fprintf(stderr, "  --output-form    Output format [json|mpk|voidstar]\n");
+    fprintf(stderr, "\nDaemon mode:\n");
+    fprintf(stderr, "  --daemon         Run as a long-lived daemon\n");
+    fprintf(stderr, "  --http-port PORT Listen on HTTP port\n");
+    fprintf(stderr, "  --port PORT      Listen on TCP port\n");
+    fprintf(stderr, "  --socket PATH    Listen on UNIX socket\n");
 
     // Positional arguments
     bool has_pos = false;
@@ -1601,6 +1612,70 @@ static void parse_nexus_options(int argc, char* argv[], config_t* config) {
     }
 }
 
+// Manual argv scanner for daemon/server long options.
+// Used in single-command mode where the second getopt pass is skipped
+// to avoid stealing the command's short options (e.g., -o, -f).
+void extract_global_options(int* argc, char** argv, config_t* config) {
+    int i = 1;
+    while (i < *argc) {
+        // Stop at end-of-options sentinel
+        if (strcmp(argv[i], "--") == 0) break;
+
+        char* arg = argv[i];
+        char* value = NULL;
+        int consumed = 1; // how many argv entries this option uses
+        bool matched = false;
+
+        // Check for --key=value form
+        char* eq = strchr(arg, '=');
+
+        if (strcmp(arg, "--daemon") == 0) {
+            config->daemon_flag = 1;
+            matched = true;
+        } else if (eq && strncmp(arg, "--socket=", 9) == 0) {
+            config->unix_socket_path = eq + 1;
+            matched = true;
+        } else if (strcmp(arg, "--socket") == 0 && i + 1 < *argc) {
+            config->unix_socket_path = argv[i + 1];
+            consumed = 2;
+            matched = true;
+        } else if (eq && strncmp(arg, "--port=", 7) == 0) {
+            config->tcp_port = atoi(eq + 1);
+            matched = true;
+        } else if (strcmp(arg, "--port") == 0 && i + 1 < *argc) {
+            config->tcp_port = atoi(argv[i + 1]);
+            consumed = 2;
+            matched = true;
+        } else if (eq && strncmp(arg, "--http-port=", 12) == 0) {
+            config->http_port = atoi(eq + 1);
+            matched = true;
+        } else if (strcmp(arg, "--http-port") == 0 && i + 1 < *argc) {
+            config->http_port = atoi(argv[i + 1]);
+            consumed = 2;
+            matched = true;
+        } else if (eq && strncmp(arg, "--fdb=", 6) == 0) {
+            config->fdb_path = eq + 1;
+            matched = true;
+        } else if (strcmp(arg, "--fdb") == 0 && i + 1 < *argc) {
+            config->fdb_path = argv[i + 1];
+            consumed = 2;
+            matched = true;
+        }
+
+        if (matched) {
+            // Shift remaining argv entries down
+            for (int j = i; j + consumed < *argc; j++) {
+                argv[j] = argv[j + consumed];
+            }
+            *argc -= consumed;
+            argv[*argc] = NULL;
+            // Don't increment i; the next arg slid into this slot
+        } else {
+            i++;
+        }
+    }
+}
+
 int main(int argc, char *argv[]) {
 
     config_t config = {0};
@@ -1677,6 +1752,12 @@ int main(int argc, char *argv[]) {
     // Skip in single-command mode to avoid stealing the command's short options
     if (!single_command) {
         parse_nexus_options(argc, argv, &config);
+    }
+
+    // In single-command mode, extract daemon/server long options manually
+    // (the second getopt pass was skipped to avoid short-option conflicts)
+    if (single_command) {
+        extract_global_options(&argc, argv, &config);
     }
 
     // chdir to the build directory so relative pool paths resolve correctly
