@@ -230,10 +230,26 @@ resolveFlagCmdArg r = do
 resolveOpt :: Type -> ArgDocVars -> MorlocMonad ArgOptDocSet
 resolveOpt t r = case (docArg r, docDefault r) of
   (Nothing, _) -> MM.throwSystemError "Optional argument missing tags"
-  (Just opt, Nothing) ->
-    MM.throwSystemError $ "Optional argument " <> pretty (makeArg opt) <> " must have default values"
-  (Just opt, Just def) ->
-    return $
+  (Just opt, Nothing)
+    -- literal ?Str: auto-default to null (the only way to get null is to omit the flag)
+    | isLiteralOptStr -> makeOpt opt "null"
+    | otherwise ->
+        MM.throwSystemError $ "Optional argument " <> pretty (makeArg opt) <> " must have default values"
+  (Just opt, Just def)
+    -- literal ?Str with non-null default is an error
+    | isLiteralOptStr && def /= "null" ->
+        MM.throwSystemError $
+          "Optional argument " <> pretty (makeArg opt)
+          <> " has type ?Str with literal: true, so default must be null (got \""
+          <> pretty def <> "\")"
+    | otherwise -> makeOpt opt def
+  where
+    isLiteralOptStr = docLiteral r == Just True && isOptionalStrType t
+
+    isOptionalStrType (OptionalT (VarT v)) = v == MBT.str
+    isOptionalStrType _ = False
+
+    makeOpt opt def = return $
       ArgOptDocSet
         { argOptDocType = t
         , argOptDocDesc = docLines r

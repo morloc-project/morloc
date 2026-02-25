@@ -282,7 +282,7 @@ argToJson (CmdArgPos r) =
     [ ("kind", jsonStr "pos")
     , ("metavar", jsonMaybeStr (argPosDocMetavar r))
     , ("type_desc", jsonStr (typeDescStr (argPosDocType r) (argPosDocLiteral r)))
-    , ("quoted", jsonBool (argPosDocLiteral r == Just True && argPosDocType r == VarT MBT.str))
+    , ("quoted", jsonBool (argPosDocLiteral r == Just True && isStrType (argPosDocType r)))
     , ("desc", jsonStrArr (argPosDocDesc r))
     ]
 argToJson (CmdArgOpt r) =
@@ -290,7 +290,7 @@ argToJson (CmdArgOpt r) =
     [ ("kind", jsonStr "opt")
     , ("metavar", jsonStr (argOptDocMetavar r))
     , ("type_desc", jsonStr (typeDescStr (argOptDocType r) (argOptDocLiteral r)))
-    , ("quoted", jsonBool (argOptDocLiteral r == Just True && argOptDocType r == VarT MBT.str))
+    , ("quoted", jsonBool (argOptDocLiteral r == Just True && isStrType (argOptDocType r)))
     , ("short", cliOptShortJson (argOptDocArg r))
     , ("long", cliOptLongJson (argOptDocArg r))
     , ("default", jsonStr (argOptDocDefault r))
@@ -327,9 +327,15 @@ argToJson (CmdArgGrp r) =
         , ("arg", argToJson (either CmdArgFlag CmdArgOpt entry))
         ]
 
+-- Check if a type is Str or ?Str (for literal string handling)
+isStrType :: Type -> Bool
+isStrType (VarT v) = v == MBT.str
+isStrType (OptionalT t) = isStrType t
+isStrType _ = False
+
 typeDescStr :: Type -> Maybe Bool -> Text
 typeDescStr t isLiteral
-  | t == VarT MBT.str && isLiteral /= Just True = "Str    (a filename or quoted JSON string)"
+  | isStrType t && isLiteral /= Just True = "Str    (a filename or quoted JSON string)"
   | otherwise = render (pretty t)
 
 cliOptShortJson :: CliOpt -> Text
