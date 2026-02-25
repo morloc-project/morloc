@@ -929,6 +929,117 @@ void print_command_help(const manifest_command_t* cmd) {
     clean_exit(0);
 }
 
+// Print help for a single-command program (no subcommand name in usage)
+void print_command_help_single(const manifest_command_t* cmd) {
+    // Usage line - omit command name
+    fprintf(stderr, "Usage: %s", prog_name);
+    bool has_opts = false;
+    for (size_t i = 0; i < cmd->n_args; i++) {
+        if (cmd->args[i].kind != MARG_POS) { has_opts = true; break; }
+    }
+    if (has_opts) fprintf(stderr, " [OPTION...]");
+    for (size_t i = 0; i < cmd->n_args; i++) {
+        if (cmd->args[i].kind == MARG_POS)
+            fprintf(stderr, " %s", cmd->args[i].metavar ? cmd->args[i].metavar : "ARG");
+    }
+    fprintf(stderr, "\n");
+
+    // Description
+    if (cmd->desc) {
+        for (size_t i = 0; cmd->desc[i]; i++) {
+            if (i == 0 && cmd->desc[i][0] == '\0') continue;
+            fprintf(stderr, "%s\n", cmd->desc[i]);
+        }
+    }
+
+    // Nexus options
+    fprintf(stderr, "\nNexus Options:\n");
+    fprintf(stderr, "    --print          Pretty-print output for human consumption\n");
+    fprintf(stderr, "    --output-file    Print to this file instead of STDOUT\n");
+    fprintf(stderr, "    --output-form    Output format [json|mpk|voidstar]\n");
+
+    // Positional arguments
+    bool has_pos = false;
+    for (size_t i = 0; i < cmd->n_args; i++) {
+        if (cmd->args[i].kind == MARG_POS) {
+            if (!has_pos) { fprintf(stderr, "\nPositional arguments:\n"); has_pos = true; }
+            manifest_arg_t* a = &cmd->args[i];
+            fprintf(stderr, "  %s", a->metavar ? a->metavar : "ARG");
+            if (a->desc && a->desc[0]) fprintf(stderr, "  %s", a->desc[0]);
+            fprintf(stderr, "\n");
+            if (a->type_desc) fprintf(stderr, "      type: %s\n", a->type_desc);
+        }
+    }
+
+    // Optional arguments
+    bool has_opt = false;
+    for (size_t i = 0; i < cmd->n_args; i++) {
+        manifest_arg_t* a = &cmd->args[i];
+        if (a->kind == MARG_OPT) {
+            if (!has_opt) { fprintf(stderr, "\nOptional arguments:\n"); has_opt = true; }
+            fprintf(stderr, "    ");
+            if (a->short_opt && a->long_opt) fprintf(stderr, "-%c, --%s %s", a->short_opt, a->long_opt, a->metavar);
+            else if (a->short_opt) fprintf(stderr, "-%c %s", a->short_opt, a->metavar);
+            else if (a->long_opt) fprintf(stderr, "--%s %s", a->long_opt, a->metavar);
+            fprintf(stderr, "\n");
+            if (a->default_val) fprintf(stderr, "        default: %s\n", a->default_val);
+            if (a->desc) for (size_t d = 0; a->desc[d]; d++) fprintf(stderr, "        %s\n", a->desc[d]);
+            if (a->type_desc) fprintf(stderr, "        type: %s\n", a->type_desc);
+        } else if (a->kind == MARG_FLAG) {
+            if (!has_opt) { fprintf(stderr, "\nOptional arguments:\n"); has_opt = true; }
+            fprintf(stderr, "    ");
+            if (a->short_opt && a->long_opt) fprintf(stderr, "-%c, --%s", a->short_opt, a->long_opt);
+            else if (a->short_opt) fprintf(stderr, "-%c", a->short_opt);
+            else if (a->long_opt) fprintf(stderr, "--%s", a->long_opt);
+            fprintf(stderr, "\n");
+            if (a->long_rev) fprintf(stderr, "    --%s\n", a->long_rev);
+            if (a->default_val) fprintf(stderr, "        default: %s\n", a->default_val);
+            if (a->desc) for (size_t d = 0; a->desc[d]; d++) fprintf(stderr, "        %s\n", a->desc[d]);
+        }
+    }
+
+    // Group arguments
+    for (size_t i = 0; i < cmd->n_args; i++) {
+        manifest_arg_t* a = &cmd->args[i];
+        if (a->kind == MARG_GRP) {
+            fprintf(stderr, "\nGroup arguments:\n");
+            fprintf(stderr, "  %s", a->metavar);
+            if (a->desc && a->desc[0]) fprintf(stderr, ": %s", a->desc[0]);
+            fprintf(stderr, "\n");
+            if (a->grp_long) {
+                fprintf(stderr, "    ");
+                if (a->grp_short) fprintf(stderr, "-%c, ", a->grp_short);
+                fprintf(stderr, "--%s %s\n", a->grp_long, a->metavar);
+            }
+            for (size_t e = 0; e < a->n_entries; e++) {
+                manifest_arg_t* ea = a->entries[e].arg;
+                fprintf(stderr, "    ");
+                if (ea->short_opt && ea->long_opt) {
+                    fprintf(stderr, "-%c, --%s", ea->short_opt, ea->long_opt);
+                    if (ea->kind == MARG_OPT && ea->metavar) fprintf(stderr, " %s", ea->metavar);
+                } else if (ea->short_opt) {
+                    fprintf(stderr, "-%c", ea->short_opt);
+                    if (ea->kind == MARG_OPT && ea->metavar) fprintf(stderr, " %s", ea->metavar);
+                } else if (ea->long_opt) {
+                    fprintf(stderr, "--%s", ea->long_opt);
+                    if (ea->kind == MARG_OPT && ea->metavar) fprintf(stderr, " %s", ea->metavar);
+                }
+                fprintf(stderr, "\n");
+                if (ea->default_val) fprintf(stderr, "        default: %s\n", ea->default_val);
+                if (ea->desc) for (size_t d = 0; ea->desc[d]; d++) fprintf(stderr, "        %s\n", ea->desc[d]);
+            }
+        }
+    }
+
+    // Return type
+    fprintf(stderr, "\nReturn: %s\n", cmd->return_type);
+    if (cmd->return_desc) {
+        for (size_t i = 0; cmd->return_desc[i]; i++)
+            fprintf(stderr, "  %s\n", cmd->return_desc[i]);
+    }
+    clean_exit(0);
+}
+
 // ======================================================================
 // Mapping structure for data-driven getopt
 // ======================================================================
@@ -950,7 +1061,7 @@ void dispatch_command(
     int argc,
     char* argv[],
     const char* shm_basename,
-    config_t config,
+    config_t* config,
     manifest_t* manifest,
     manifest_command_t* cmd,
     morloc_socket_t* sockets
@@ -1056,6 +1167,22 @@ void dispatch_command(
     #undef REG_OPT_FLAG
 
     short_opts_buf[short_idx] = '\0';
+
+    // In single-command mode, register nexus options as long-only entries
+    bool single_cmd = (manifest->n_commands == 1 && manifest->n_groups == 0);
+    int nexus_print_val = 0, nexus_outfile_val = 0, nexus_outform_val = 0;
+
+    if (single_cmd) {
+        nexus_print_val = next_long_val++;
+        long_options[n_long++] = (struct option){"print", no_argument, 0, nexus_print_val};
+
+        nexus_outfile_val = next_long_val++;
+        long_options[n_long++] = (struct option){"output-file", required_argument, 0, nexus_outfile_val};
+
+        nexus_outform_val = next_long_val++;
+        long_options[n_long++] = (struct option){"output-form", required_argument, 0, nexus_outform_val};
+    }
+
     // Terminate long options
     long_options[n_long] = (struct option){0, 0, 0, 0};
 
@@ -1069,22 +1196,50 @@ void dispatch_command(
     int opt;
     while ((opt = getopt_long(argc, argv, posix_short, long_options, NULL)) != -1) {
         if (opt == 'h') {
-            print_command_help(cmd);
+            if (single_cmd) {
+                print_command_help_single(cmd);
+            } else {
+                print_command_help(cmd);
+            }
         }
         if (opt == OPT_HELP_VERBOSE) {
-            print_command_help(cmd);
+            if (single_cmd) {
+                print_command_help_single(cmd);
+            } else {
+                print_command_help(cmd);
+            }
         }
-        // Find matching mapping
+
+        // Check nexus options in single-command mode
         bool found = false;
-        for (size_t m = 0; m < n_map; m++) {
-            if (mappings[m].getopt_val == opt) {
-                if (mappings[m].is_flag) {
-                    usr_vals[m] = (char*)mappings[m].flag_val;
-                } else {
-                    usr_vals[m] = optarg;
-                }
+        if (single_cmd) {
+            if (opt == nexus_print_val) {
+                config->print_flag = 1;
                 found = true;
-                break;
+            } else if (opt == nexus_outfile_val) {
+                config->output_path = optarg;
+                found = true;
+            } else if (opt == nexus_outform_val) {
+                if (strcmp(optarg, "json") == 0) config->output_format = JSON;
+                else if (strcmp(optarg, "mpk") == 0) config->output_format = MessagePack;
+                else if (strcmp(optarg, "voidstar") == 0) config->output_format = VoidStar;
+                else { fprintf(stderr, "Invalid output format: %s\n", optarg); exit(EXIT_FAILURE); }
+                found = true;
+            }
+        }
+
+        // Find matching command mapping
+        if (!found) {
+            for (size_t m = 0; m < n_map; m++) {
+                if (mappings[m].getopt_val == opt) {
+                    if (mappings[m].is_flag) {
+                        usr_vals[m] = (char*)mappings[m].flag_val;
+                    } else {
+                        usr_vals[m] = optarg;
+                    }
+                    found = true;
+                    break;
+                }
             }
         }
         if (!found) {
@@ -1228,10 +1383,10 @@ void dispatch_command(
     // ---- Phase 5: Dispatch ----
 
     if (cmd->is_pure) {
-        run_pure_command(cmd->expr, args, cmd->arg_schemas, cmd->return_schema, config);
+        run_pure_command(cmd->expr, args, cmd->arg_schemas, cmd->return_schema, *config);
     } else {
         run_command(cmd->mid, args, cmd->arg_schemas, cmd->return_schema,
-                    sockets[cmd->pool_index], config);
+                    sockets[cmd->pool_index], *config);
     }
 }
 
@@ -1276,7 +1431,7 @@ void dispatch(
                 if (manifest->commands[i].group
                     && strcmp(manifest->commands[i].group, cmd) == 0
                     && strcmp(manifest->commands[i].name, subcmd) == 0) {
-                    dispatch_command(argc, argv, shm_basename, config,
+                    dispatch_command(argc, argv, shm_basename, &config,
                                      manifest, &manifest->commands[i], sockets);
                     return;
                 }
@@ -1289,7 +1444,7 @@ void dispatch(
     // Try ungrouped commands
     for (size_t i = 0; i < manifest->n_commands; i++) {
         if (strcmp(cmd, manifest->commands[i].name) == 0 && !manifest->commands[i].group) {
-            dispatch_command(argc, argv, shm_basename, config,
+            dispatch_command(argc, argv, shm_basename, &config,
                              manifest, &manifest->commands[i], sockets);
             return;
         }
@@ -1501,9 +1656,6 @@ int main(int argc, char *argv[]) {
     prog_name = manifest_path;
     optind++;
 
-    // Second pass: parse options that appear after the manifest path
-    parse_nexus_options(argc, argv, &config);
-
     // Read manifest payload (handles both wrapper scripts and plain files)
     char* errmsg = NULL;
     char* payload = read_manifest_payload(manifest_path, &errmsg);
@@ -1519,6 +1671,14 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
+    bool single_command = (manifest->n_commands == 1 && manifest->n_groups == 0);
+
+    // Second pass: parse options that appear after the manifest path
+    // Skip in single-command mode to avoid stealing the command's short options
+    if (!single_command) {
+        parse_nexus_options(argc, argv, &config);
+    }
+
     // chdir to the build directory so relative pool paths resolve correctly
     if (manifest->build_dir) {
         if (chdir(manifest->build_dir) != 0) {
@@ -1531,9 +1691,13 @@ int main(int argc, char *argv[]) {
     // Validate pool executables exist
     validate_pools(manifest);
 
-    // Handle help flag with manifest loaded (show module help)
+    // Handle help flag with manifest loaded
     if (config.help_flag) {
-        print_usage(manifest);
+        if (single_command) {
+            print_command_help_single(&manifest->commands[0]);
+        } else {
+            print_usage(manifest);
+        }
         exit(EXIT_SUCCESS);
     }
 
@@ -1601,19 +1765,30 @@ int main(int argc, char *argv[]) {
 
     // Command logic routing (normal CLI mode)
     if (config.packet_path == NULL) {
-        // Require subcommand when not using call packets
-        if (optind >= argc) {
-            print_usage(manifest);
-            clean_exit(EXIT_FAILURE);
-        }
+        if (single_command) {
+            // Single-command: dispatch directly, no subcommand name needed
+            // For backward compatibility, skip argv[optind] if it matches
+            // the command name (allows both ./prog arg and ./prog cmd arg)
+            if (optind < argc
+                && strcmp(argv[optind], manifest->commands[0].name) == 0) {
+                optind++;
+            }
+            dispatch_command(argc, argv, shm_basename, &config,
+                             manifest, &manifest->commands[0], sockets);
+        } else {
+            // Multi-command: require subcommand name
+            if (optind >= argc) {
+                print_usage(manifest);
+                clean_exit(EXIT_FAILURE);
+            }
 
-        // Validate we don't have conflicting options
-        if (config.socket_base) {
-            fprintf(stderr, "Error: socket-base can't be used with subcommands\n");
-            clean_exit(EXIT_FAILURE);
-        }
+            if (config.socket_base) {
+                fprintf(stderr, "Error: socket-base can't be used with subcommands\n");
+                clean_exit(EXIT_FAILURE);
+            }
 
-        dispatch(argc, argv, shm_basename, config, manifest, sockets);
+            dispatch(argc, argv, shm_basename, config, manifest, sockets);
+        }
     } else {
         // Validate no positional arguments when using call packet
         if (optind < argc) {
