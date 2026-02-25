@@ -1,0 +1,7 @@
+module cppfuncs (*)
+
+import types
+
+cAddOne :: Int -> Int
+
+source Cpp from "cfoo.hpp" ("cAddOne")

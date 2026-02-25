@@ -126,3 +126,6 @@ segmentExpr m args (PolyIf cond thenE elseE) = do
 segmentExpr m args (PolyForce t e) = do
   (ms, (_, e')) <- segmentExpr m args e
   return (ms, (Nothing, MonoForce t e'))
+segmentExpr m args (PolyCoerce c t e) = do
+  (ms, (_, e')) <- segmentExpr m args e
+  return (ms, (Nothing, MonoCoerce c t e'))

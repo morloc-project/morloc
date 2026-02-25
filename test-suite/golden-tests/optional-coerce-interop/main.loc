@@ -1,0 +1,13 @@
+module main
+  ( testCppIntToPyOpt
+  )
+
+import types
+import cppfuncs (cAddOne)
+import pyfuncs (pUnwrapOr)
+
+-- C++ returns Int, Python expects ?Int via coercion at cross-pool boundary.
+-- cAddOne returns Int (=42), pUnwrapOr's 2nd arg expects ?Int.
+-- The serialization schema at the boundary must be ?i4 for correct handling.
+testCppIntToPyOpt :: Int
+testCppIntToPyOpt = pUnwrapOr 0 (cAddOne 41)

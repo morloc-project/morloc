@@ -104,6 +104,7 @@ findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e
     findAllLangsExpr (IfS c t e) = concatMap findAllLangsSAnno [c, t, e]
     findAllLangsExpr (SuspendS x) = findAllLangsSAnno x
     findAllLangsExpr (ForceS x) = findAllLangsSAnno x
+    findAllLangsExpr (CoerceS _ x) = findAllLangsSAnno x
     findAllLangsExpr _ = []
 
 getFData :: (Type, Int, Lang, CmdDocSet, [Socket]) -> MorlocMonad FData
@@ -267,6 +268,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS _ _ (IfS _ t _)) = toNexusExpr t
     toNexusExpr (AnnoS _ _ (SuspendS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (ForceS e)) = toNexusExpr e
+    toNexusExpr (AnnoS _ _ (CoerceS _ e)) = toNexusExpr e
     toNexusExpr (AnnoS (Idx _ t) _ (CallS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr _ = error $ "Unreachable value of type reached"
 

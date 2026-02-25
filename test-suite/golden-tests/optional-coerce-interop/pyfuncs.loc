@@ -1,0 +1,7 @@
+module pyfuncs (*)
+
+import types
+
+pUnwrapOr a :: a -> ?a -> a
+
+source Py from "pfoo.py" ("pUnwrapOr")

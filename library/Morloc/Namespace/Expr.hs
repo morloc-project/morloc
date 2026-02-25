@@ -49,6 +49,9 @@ module Morloc.Namespace.Expr
   , ExecutableExpr (..)
   , AnnoS (..)
   , ExprS (..)
+  , Coercion (..)
+  , applyCoercion
+  , unapplyCoercion
   , ManyPoly (..)
   , mapAnnoSM
   , mapExprSM
@@ -253,7 +256,22 @@ data E
   | IfP (Indexed Type) E E E
   | SuspendP (Indexed Type) E
   | ForceP (Indexed Type) E
+  | CoerceP Coercion (Indexed Type) E
   deriving (Ord, Eq, Show)
+
+-- | Coercion tag for implicit type conversions inserted by the typechecker.
+-- Extensible: future coercions (e.g., numeric widening) add constructors here.
+data Coercion = CoerceToOptional
+  deriving (Show, Eq, Ord)
+
+-- | Apply a coercion to a type, returning the coerced type.
+applyCoercion :: Coercion -> TypeU -> TypeU
+applyCoercion CoerceToOptional t = OptionalU t
+
+-- | Invert a coercion on a resolved Type.
+unapplyCoercion :: Coercion -> Type -> Type
+unapplyCoercion CoerceToOptional (OptionalT t) = t
+unapplyCoercion CoerceToOptional t = t  -- defensive fallback
 
 data ExecutableExpr = SrcCall Source | PatCall Pattern
   deriving (Ord, Eq, Show)
@@ -281,6 +299,7 @@ data ExprS g f c
   | IfS (AnnoS g f c) (AnnoS g f c) (AnnoS g f c)
   | SuspendS (AnnoS g f c)
   | ForceS (AnnoS g f c)
+  | CoerceS Coercion (AnnoS g f c)
 
 data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr ClassName EVar EType [(EType, [a])]
   deriving (Show, Eq, Ord)
@@ -396,6 +415,7 @@ mapExprSM _ (CallS v) = return $ CallS v
 mapExprSM f (IfS c t e) = IfS <$> f c <*> f t <*> f e
 mapExprSM f (SuspendS e) = SuspendS <$> f e
 mapExprSM f (ForceS e) = ForceS <$> f e
+mapExprSM f (CoerceS c e) = CoerceS c <$> f e
 
 mapAnnoSM ::
   (Traversable f, Monad m) =>
@@ -466,6 +486,7 @@ instance Pretty E where
   pretty (IfP _ c t e) = "if" <+> pretty c <+> "then" <+> pretty t <+> "else" <+> pretty e
   pretty (SuspendP _ e) = "{" <> pretty e <> "}"
   pretty (ForceP _ e) = "!" <> pretty e
+  pretty (CoerceP _ _ e) = "coerce(" <> pretty e <> ")"
 
 instance Pretty Source where
   pretty s =
@@ -605,6 +626,7 @@ instance (Foldable f) => Pretty (ExprS a f b) where
   pretty (IfS c t e) = "(IfS" <+> pretty c <+> pretty t <+> pretty e <> ")"
   pretty (SuspendS e) = "(SuspendS" <+> pretty e <> ")"
   pretty (ForceS e) = "(ForceS" <+> pretty e <> ")"
+  pretty (CoerceS c e) = "(CoerceS" <+> viaShow c <+> pretty e <> ")"
 
 instance Pretty ExecutableExpr where
   pretty (SrcCall src) = pretty src

@@ -152,6 +152,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f NullS = NullS
     f (SuspendS e') = SuspendS (resolveTypes e')
     f (ForceS e') = ForceS (resolveTypes e')
+    f (CoerceS c e') = CoerceS c (resolveTypes e')
     f (IfS c t e) = IfS (resolveTypes c) (resolveTypes t) (resolveTypes e)
 
 resolveInstances ::
@@ -241,6 +242,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f _ g0 (ExeS x) = return (g0, ExeS x)
     f _ g0 (SuspendS e) = resolveInstances g0 e |>> second SuspendS
     f _ g0 (ForceS e) = resolveInstances g0 e |>> second ForceS
+    f _ g0 (CoerceS c e) = resolveInstances g0 e |>> second (CoerceS c)
     f _ g0 (IfS c t e) = do
       (g1, c') <- resolveInstances g0 c
       (g2, t') <- resolveInstances g1 t
@@ -596,6 +598,9 @@ synthE i g (IfS cond thenE elseE) = do
 synthE _ g (SuspendS e) = do
   (g1, t1, e1) <- synthG g e
   return (g1, ThunkU t1, SuspendS e1)
+synthE _ g (CoerceS coercion e) = do
+  (g1, t1, e1) <- synthG g e
+  return (g1, applyCoercion coercion t1, CoerceS coercion e1)
 synthE i g (ForceS e) = do
   (g1, t1, e1) <- synthG g e
   case apply g1 t1 of
@@ -827,13 +832,25 @@ checkE i g (ForceS e) t = do
     ThunkU a -> return (g1, a, ForceS e1)
     _ -> throwTypeError i $ "Expected thunk type in force expression"
 
---   Sub
+--   Sub (with coercion fallback)
 checkE i g1 e1 b = do
   (g2, a, e2) <- synthE' i g1 e1
   let a' = apply g2 a
       b' = apply g2 b
-  g3 <- subtype' i a' b' g2
-  return (g3, apply g3 b', e2)
+  scope <- MM.getGeneralScope i
+  case subtype scope a' b' g2 of
+    Right g3 -> return (g3, apply g3 b', e2)
+    Left err -> case tryCoerce scope a' b' g2 of
+      Just (coercions, g3) -> do
+        (finalExpr, _) <- foldlM
+          (\(expr, currentType) coercion -> do
+            idx <- MM.getCounterWithPos i
+            let wrappedAnno = AnnoS (Idx idx currentType) i expr
+            return (CoerceS coercion wrappedAnno, applyCoercion coercion currentType))
+          (e2, apply g3 a')
+          coercions
+        return (g3, apply g3 b', finalExpr)
+      Nothing -> MM.throwSourcedError i err
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do
@@ -842,6 +859,18 @@ subtype' i a b g = do
   case subtype scope a b g of
     (Left err') -> MM.throwSourcedError i err'
     (Right x) -> return x
+
+-- | Try to find a coercion chain from type a to type b.
+-- Returns a list of coercions (inside-out) and the resulting gamma.
+-- Recursion terminates when the target is not OptionalU.
+tryCoerce :: Scope -> TypeU -> TypeU -> Gamma -> Maybe ([Coercion], Gamma)
+tryCoerce scope a (OptionalU b) g =
+  case subtype scope a b g of
+    Right g' -> Just ([CoerceToOptional], g')
+    Left _ -> case tryCoerce scope a b g of
+      Just (cs, g') -> Just (CoerceToOptional : cs, g')
+      Nothing -> Nothing
+tryCoerce _ _ _ _ = Nothing
 
 -- helpers
 
@@ -961,4 +990,5 @@ peakSExpr (LetBndS v) = "LetBndS" <+> pretty v
 peakSExpr (CallS v) = "CallS" <+> pretty v
 peakSExpr (SuspendS _) = "SuspendS"
 peakSExpr (ForceS _) = "ForceS"
+peakSExpr (CoerceS _ _) = "CoerceS"
 peakSExpr (IfS _ _ _) = "IfS"

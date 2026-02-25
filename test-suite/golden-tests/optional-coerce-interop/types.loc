@@ -1,0 +1,4 @@
+module types (*)
+
+type Py => Int = "int"
+type Cpp => Int = "int"

@@ -471,6 +471,8 @@ lowerNativeExpr cfg _ (SuspendN_ _ x) =
           , poolPriorExprs = poolPriorExprs x
           }
 lowerNativeExpr cfg _ (ForceN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IForce (IRawExpr (render (poolExpr x))))}
+-- CoerceToOptional is a noop in all target languages: T is a valid ?T
+lowerNativeExpr _ _ (CoerceN_ _ _ x) = return x
 lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
 

@@ -280,6 +280,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       return $ IfN (typeFof thenNe) condNe thenNe elseNe
     nativeExpr m (MonoSuspend t e) = SuspendN <$> inferType t <*> nativeExpr m e
     nativeExpr m (MonoForce t e) = ForceN <$> inferType t <*> nativeExpr m e
+    nativeExpr m (MonoCoerce c t e) = CoerceN c <$> inferType t <*> nativeExpr m e
 
     typeArg ::
       SerializationState ->
@@ -313,6 +314,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     makeTypemap parentIdx (MonoReturn e) = makeTypemap parentIdx e
     makeTypemap parentIdx (MonoForce _ e) = makeTypemap parentIdx e
     makeTypemap parentIdx (MonoSuspend _ e) = makeTypemap parentIdx e
+    makeTypemap parentIdx (MonoCoerce _ _ e) = makeTypemap parentIdx e
     makeTypemap parentIdx (MonoIf cond thenE elseE) =
       Map.unionsWith mergeTypes [makeTypemap parentIdx cond, makeTypemap parentIdx thenE, makeTypemap parentIdx elseE]
     makeTypemap _ (MonoApp (MonoExe (ann -> idx) _) es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)

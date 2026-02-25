@@ -46,6 +46,7 @@ toE (AnnoS _ _ (LetS _ _ body)) = toE body
 toE (AnnoS g _ (IfS c t e)) = IfP g (toE c) (toE t) (toE e)
 toE (AnnoS g _ (SuspendS e)) = SuspendP g (toE e)
 toE (AnnoS g _ (ForceS e)) = ForceP g (toE e)
+toE (AnnoS g _ (CoerceS c e)) = CoerceP c g (toE e)
 
 indexOfE :: E -> Int
 indexOfE (BndP (Idx i _) _) = i
@@ -61,6 +62,7 @@ indexOfE (PatP (Idx i _) _) = i
 indexOfE (IfP (Idx i _) _ _ _) = i
 indexOfE (SuspendP (Idx i _) _) = i
 indexOfE (ForceP (Idx i _) _) = i
+indexOfE (CoerceP _ (Idx i _) _) = i
 
 -- Check the harmony of typed implementations.
 --
@@ -87,6 +89,7 @@ check (NamP _ (map snd -> es)) = mapM_ check es
 check (IfP _ c t e) = mapM_ check [c, t, e]
 check (SuspendP _ e) = check e
 check (ForceP _ e) = check e
+check (CoerceP _ _ e) = check e
 check _ = return ()
 
 -- check for contradictions in one pair of expressions
@@ -164,6 +167,7 @@ checkPair i e1 e2@SrcP {}
     isSimple (IfP _ _ _ _) = False
     isSimple (SuspendP _ e) = isSimple e
     isSimple (ForceP _ e) = isSimple e
+    isSimple (CoerceP _ _ e) = isSimple e
 
 -- reduce empty lambdas
 --
@@ -271,6 +275,7 @@ substituteEVar oldVar newVar e0
     f used idx (IfP g c t e) = IfP g (f used idx c) (f used idx t) (f used idx e)
     f used idx (SuspendP g e) = SuspendP g (f used idx e)
     f used idx (ForceP g e) = ForceP g (f used idx e)
+    f used idx (CoerceP c g e) = CoerceP c g (f used idx e)
     f _ _ e = e
 
     relabelLam :: Set.Set EVar -> Int -> [EVar] -> E -> (Set.Set EVar, Int, [EVar], E)
@@ -312,6 +317,7 @@ freeTerms = f Set.empty
     f boundterms (IfP _ c t e) = Set.unions [f boundterms c, f boundterms t, f boundterms e]
     f boundterms (SuspendP _ e) = f boundterms e
     f boundterms (ForceP _ e) = f boundterms e
+    f boundterms (CoerceP _ _ e) = f boundterms e
     f _ _ = Set.empty
 
 substituteExpr :: EVar -> E -> E -> E
@@ -336,3 +342,4 @@ substituteExpr oldVar replacementExpr = f
     f (IfP g c t e) = IfP g (f c) (f t) (f e)
     f (SuspendP g e) = SuspendP g (f e)
     f (ForceP g e) = ForceP g (f e)
+    f (CoerceP c g e) = CoerceP c g (f e)

@@ -1,0 +1,30 @@
+module main
+  ( testCoerceArg
+  , testCoerceFromNull
+  , testCoerceAddOpt
+  , testCoerceReturn
+  )
+
+type Cpp => Int = "int"
+
+fromNull a :: a -> ?a -> a
+addOpt :: ?Int -> ?Int -> ?Int
+identity :: ?Int -> ?Int
+
+source Cpp from "foo.hpp" ("fromNull", "addOpt", "identity")
+
+-- Pass Int where ?Int expected (coerce arg)
+testCoerceArg :: Int
+testCoerceArg = fromNull 0 42
+
+-- Pass Int literal where ?Int expected in fromNull default
+testCoerceFromNull :: Int
+testCoerceFromNull = fromNull (-1) null
+
+-- Pass Int where ?Int expected (both args coerced)
+testCoerceAddOpt :: ?Int
+testCoerceAddOpt = addOpt 3 4
+
+-- Pass Int where ?Int expected, return ?Int
+testCoerceReturn :: ?Int
+testCoerceReturn = identity 99

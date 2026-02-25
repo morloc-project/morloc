@@ -38,6 +38,7 @@ setManifoldConfig midx (AnnoS _ _ (AppS e _)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (LamS _ e)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (SuspendS e)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (ForceS e)) = setManifoldConfig midx e
+setManifoldConfig midx (AnnoS _ _ (CoerceS _ e)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (IfS _ t _)) = setManifoldConfig midx t
 setManifoldConfig _ (AnnoS _ _ (CallS _)) = return ()
 setManifoldConfig _ _ = return ()
@@ -88,6 +89,7 @@ forceExportThunks cidx t (PolyHead lang midx args body) =
     goExpr ids (PolyApp e es) = PolyApp (goExpr ids e) (map (goExpr ids) es)
     goExpr ids (PolyForce ti e) = PolyForce ti (goExpr ids e)
     goExpr ids (PolySuspend ti e) = PolySuspend ti (goExpr ids e)
+    goExpr ids (PolyCoerce c ti e) = PolyCoerce c ti (goExpr ids e)
     goExpr ids (PolyList v ti es) = PolyList v ti (map (goExpr ids) es)
     goExpr ids (PolyTuple v es) = PolyTuple v (map (fmap (goExpr ids)) es)
     goExpr ids (PolyRecord o v ps rs) = PolyRecord o v ps (map (fmap (fmap (goExpr ids))) rs)
@@ -530,6 +532,10 @@ expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx _ lang, _) (IfS cond thenE elseE)) =
 expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx cidx lang, _) (SuspendS x)) = do
   x' <- expressPolyExprWrap lang (mkIdx x t) x
   return $ PolySuspend (Idx cidx t) x'
+expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _, _) (CoerceS coercion x)) = do
+  let innerType = unapplyCoercion coercion t
+  x' <- expressPolyExprWrap parentLang (Idx cidx innerType) x
+  return $ PolyCoerce coercion (Idx cidx t) x'
 expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (ForceS x)) = do
   -- Always use pushForceIntoRemote: if the inner expression contains a
   -- PolyRemoteInterface (cross-language call), it strips ThunkT so the remote

@@ -381,6 +381,10 @@ main = do
       , golden "optional-records-py" "optional-records-py"
       , golden "optional-records-cpp" "optional-records-cpp"
       , golden "optional-records-r" "optional-records-r"
+      , -- optional coercion tests (a -> ?a)
+        golden "optional-coerce-py" "optional-coerce-py"
+      , golden "optional-coerce-cpp" "optional-coerce-cpp"
+      , golden "optional-coerce-interop" "optional-coerce-interop"
       -- , golden "argument-form-1-rs" "argument-form-1-rs"
       -- , golden "argument-form-2-rs" "argument-form-2-rs"
       -- , golden "argument-form-3-rs" "argument-form-3-rs"

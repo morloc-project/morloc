@@ -203,6 +203,9 @@ realizeWithRegistry registry s0 = do
     scoreExpr rstat (ForceS x, i) = do
       x' <- scoreAnnoS rstat x
       return (ForceS x', Idx i (scoresOf x'))
+    scoreExpr rstat (CoerceS c x, i) = do
+      x' <- scoreAnnoS rstat x
+      return (CoerceS c x', Idx i (scoresOf x'))
 
     -- calculate the score for an application based on the score of the function
     -- and the scores of the arguments
@@ -419,6 +422,10 @@ realizeWithRegistry registry s0 = do
       lang <- chooseLanguage l1 ss
       x' <- collapseAnnoS lang x
       return (ForceS x', Idx i lang)
+    collapseExpr _ l1 (CoerceS c x, Idx i ss) = do
+      lang <- chooseLanguage l1 ss
+      x' <- collapseAnnoS lang x
+      return (CoerceS c x', Idx i lang)
 
     chooseLanguage :: Maybe Lang -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
     chooseLanguage l1 ss = do
@@ -484,6 +491,7 @@ realizeWithRegistry registry s0 = do
             (IfS c t e) -> IfS <$> f lang c <*> f lang t <*> f lang e
             (SuspendS x) -> SuspendS <$> f lang x
             (ForceS x) -> ForceS <$> f lang x
+            (CoerceS c x) -> CoerceS c <$> f lang x
           return (AnnoS g (Idx i lang) e'')
 
 {- | This function is called on trees that contain no language-specific
@@ -522,6 +530,7 @@ removeVarS (AnnoS g c (LetS v e1 e2)) = AnnoS g c (LetS v (removeVarS e1) (remov
 removeVarS (AnnoS g c (IfS cond thenE elseE)) = AnnoS g c (IfS (removeVarS cond) (removeVarS thenE) (removeVarS elseE))
 removeVarS (AnnoS g c (SuspendS e)) = AnnoS g c (SuspendS (removeVarS e))
 removeVarS (AnnoS g c (ForceS e)) = AnnoS g c (ForceS (removeVarS e))
+removeVarS (AnnoS g c (CoerceS co e)) = AnnoS g c (CoerceS co (removeVarS e))
 removeVarS x = x
 
 -- | Extract non-exported recursive helpers from rASTs into their own top-level
@@ -606,6 +615,9 @@ extractExpr exports (SuspendS e) = do
 extractExpr exports (ForceS e) = do
   (e', helpers) <- extractFromTree exports e
   return (ForceS e', helpers)
+extractExpr exports (CoerceS c e) = do
+  (e', helpers) <- extractFromTree exports e
+  return (CoerceS c e', helpers)
 extractExpr _ e = return (e, [])
 
 -- | Check if an AnnoS tree contains a CallS node targeting the given name
@@ -624,6 +636,7 @@ containsCallS target (AnnoS _ _ e) = go e
     go (IfS c t e) = containsCallS target c || containsCallS target t || containsCallS target e
     go (SuspendS x) = containsCallS target x
     go (ForceS x) = containsCallS target x
+    go (CoerceS _ x) = containsCallS target x
     go _ = False
 
 -- Check if this expression is a data structure that contains
