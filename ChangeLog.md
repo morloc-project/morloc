@@ -1,3 +1,9 @@
+0.63.0 [2026-02-25]
+-------------------
+ * add optionals with implicit coercion
+ * for `?Str` with `literal: true`, force `default: null`
+ * add daemon args to nexus
+
 0.62.0 [2026-02-24]
 -------------------
  * term recursion support
