@@ -166,6 +166,7 @@ realizeWithRegistry registry s0 = do
       return (AppS f' xs', Idx i best)
     -- non-recursive expressions
     scoreExpr rstat (UniS, i) = return (UniS, zipLang i rstat)
+    scoreExpr rstat (NullS, i) = return (NullS, zipLang i rstat)
     scoreExpr rstat (VarS v (Many xs), i) = do
       (xs', best) <- scoreMany rstat xs
       return (VarS v (Many xs'), Idx i best)
@@ -392,6 +393,7 @@ realizeWithRegistry registry s0 = do
     collapseExpr _ lang (ExeS x@(PatCall _), Idx i _) = return (ExeS x, Idx i lang)
     collapseExpr _ lang (BndS v, Idx i _) = return (BndS v, Idx i lang)
     collapseExpr _ lang (UniS, Idx i _) = return (UniS, Idx i lang)
+    collapseExpr _ lang (NullS, Idx i _) = return (NullS, Idx i lang)
     collapseExpr _ lang (RealS x, Idx i _) = return (RealS x, Idx i lang)
     collapseExpr _ lang (IntS x, Idx i _) = return (IntS x, Idx i lang)
     collapseExpr _ lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
@@ -468,6 +470,7 @@ realizeWithRegistry registry s0 = do
             (TupS xs) -> TupS <$> mapM (f lang) xs
             (NamS rs) -> NamS <$> (zip (map fst rs) <$> mapM (f lang . snd) rs)
             UniS -> return UniS
+            NullS -> return NullS
             (VarS v (One x)) -> VarS v . One <$> f lang x
             (BndS v) -> return (BndS v)
             (RealS x) -> return (RealS x)

@@ -485,6 +485,7 @@ expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (IntS x)) = return
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (LogS x)) = return $ PolyLog (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (StrS x)) = return $ PolyStr (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) UniS) = return $ PolyNull (Idx cidx v)
+expressPolyExpr _ _ _ (AnnoS _ (Idx cidx _, _) NullS) = return $ PolyNull (Idx cidx (TV "Unit"))
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) [t])) (Idx cidx lang, args) (LstS xs)) = do
   xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
   let e = PolyList (Idx cidx v) (Idx cidx t) xs'

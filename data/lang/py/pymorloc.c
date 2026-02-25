@@ -287,6 +287,17 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
             }
             break;
         }
+        case MORLOC_OPTIONAL: {
+            uint8_t tag = *(const uint8_t*)data;
+            if (tag == 0) {
+                Py_RETURN_NONE;
+            }
+            obj = fromAnything(schema->parameters[0], (const char*)data + 1);
+            if (!obj) {
+                PyRAISE("Failed to deserialize optional inner value");
+            }
+            break;
+        }
         default:
             PyRAISE("Unsupported schema type");
     }
@@ -378,6 +389,7 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                         case MORLOC_ARRAY:
                         case MORLOC_TUPLE:
                         case MORLOC_MAP:
+                        case MORLOC_OPTIONAL:
                             for(size_t i = 0; i < (size_t)list_size; i++){
                                required_size += get_shm_size(schema->parameters[0], PyList_GetItem(obj, i));
                             }
@@ -453,6 +465,16 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                     }
                 }
                 return required_size;
+            }
+
+        case MORLOC_OPTIONAL:
+            if (obj == Py_None) {
+                return 1 + schema->parameters[0]->width;
+            }
+            {
+                ssize_t inner_size = get_shm_size(schema->parameters[0], obj);
+                if (inner_size == -1) return -1;
+                return 1 + inner_size;
             }
 
         default:
@@ -650,6 +672,18 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                             goto error;
                         }
                     }
+                }
+            }
+            break;
+
+        case MORLOC_OPTIONAL:
+            if (obj == Py_None) {
+                *((uint8_t*)dest) = 0;
+                memset((char*)dest + 1, 0, schema->parameters[0]->width);
+            } else {
+                *((uint8_t*)dest) = 1;
+                if (to_voidstar_r((char*)dest + 1, cursor, schema->parameters[0], obj) != 0) {
+                    goto error;
                 }
             }
             break;

@@ -1,0 +1,6 @@
+module types (*)
+
+type Py => Int = "int"
+type R => Int = "integer"
+type Py => List a = "list" a
+type R => List a = "list" a

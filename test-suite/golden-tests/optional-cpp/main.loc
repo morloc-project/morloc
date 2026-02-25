@@ -1,0 +1,61 @@
+module main
+  ( testNull
+  , testValue
+  , testFromNull
+  , testSafeHead
+  , testSafeHeadEmpty
+  , testOptionalAdd
+  , testOptionalAddNull
+  , testOptionalList
+  , testCountNulls
+  )
+
+type Cpp => Int = "int"
+type Cpp => Bool = "bool"
+type Cpp => Str = "std::string"
+type Cpp => List a = "std::vector<$1>" a
+
+isNull a :: ?a -> Bool
+fromNull a :: a -> ?a -> a
+toNull a :: a -> ?a
+safeHead :: [Int] -> ?Int
+optionalAdd :: ?Int -> ?Int -> ?Int
+optionalList :: [Int] -> [?Int]
+countNulls :: [?Int] -> Int
+
+source Cpp from "foo.hpp"
+  ( "isNull"
+  , "fromNull"
+  , "toNull"
+  , "safeHead"
+  , "optionalAdd"
+  , "optionalList"
+  , "countNulls"
+  )
+
+testNull :: ?Int
+testNull = null
+
+testValue :: ?Int
+testValue = toNull 42
+
+testFromNull :: Int
+testFromNull = fromNull 0 null
+
+testSafeHead :: ?Int
+testSafeHead = safeHead [10, 20, 30]
+
+testSafeHeadEmpty :: ?Int
+testSafeHeadEmpty = safeHead []
+
+testOptionalAdd :: ?Int
+testOptionalAdd = optionalAdd (toNull 3) (toNull 4)
+
+testOptionalAddNull :: ?Int
+testOptionalAddNull = optionalAdd null (toNull 4)
+
+testOptionalList :: [?Int]
+testOptionalList = optionalList [1, -2, 3, -4, 5]
+
+testCountNulls :: Int
+testCountNulls = countNulls (optionalList [1, -2, 3, -4, 5])

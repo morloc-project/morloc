@@ -1,0 +1,6 @@
+module types (*)
+
+type Py => Int = "int"
+type Cpp => Int = "int"
+type Py => List a = "list" a
+type Cpp => List a = "std::vector<$1>" a

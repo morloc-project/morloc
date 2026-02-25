@@ -1,0 +1,9 @@
+module pyfuncs (*)
+
+import types
+
+pSafeDiv :: Int -> Int -> ?Int
+pFromNull :: Int -> ?Int -> Int
+pDouble :: ?Int -> ?Int
+
+source Py from "foo.py" ("pSafeDiv", "pFromNull", "pDouble")

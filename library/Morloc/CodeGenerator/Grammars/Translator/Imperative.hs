@@ -141,6 +141,8 @@ data IType
     ITyNamed Text [IType]
   | -- | Serialized data (e.g., const uint8_t* in C++)
     ITySerial
+  | -- | Optional type (e.g., std::optional<T> in C++)
+    ITyOptional IType
   | -- | Type not known or not needed (Python, R)
     ITyUnknown
   deriving (Show, Eq, Ord, Generic)
@@ -160,6 +162,7 @@ renderIType (ITyFunction args ret) = "std::function<" <> renderIType ret <> tupl
 renderIType ITyUnit = "void"
 renderIType (ITyNamed name []) = pretty name
 renderIType (ITyNamed name params) = pretty name <> encloseSep "<" ">" "," (map renderIType params)
+renderIType (ITyOptional t) = "std::optional<" <> renderIType t <> ">"
 renderIType ITySerial = "const uint8_t*"
 renderIType ITyUnknown = "auto"
 

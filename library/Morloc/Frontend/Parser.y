@@ -43,7 +43,8 @@ import qualified Morloc.BaseTypes as BT
 -- - 4 from accessor_tail (GDOT/= could continue chain or end it)
 -- - 2 from guard_clauses ('?' could start guard or be part of next decl)
 -- - 1 from guard_expr ('?' in expr could be nested guard_expr or next guard_clause)
-%expect 52
+-- - 4 from optional type syntax ('?' could start optional type or guard)
+%expect 56
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -92,6 +93,7 @@ import qualified Morloc.BaseTypes as BT
   'let'      { Located _ TokLet _ }
   'in'       { Located _ TokIn _ }
   'do'       { Located _ TokDo _ }
+  'null'     { Located _ TokNull _ }
   LOWER      { Located _ (TokLowerName _) _ }
   UPPER      { Located _ (TokUpperName _) _ }
   OPERATOR   { Located _ (TokOperator _) _ }
@@ -321,6 +323,7 @@ non_string_atom :: { TypeU }
   | '(' type ',' type_list1 ')' { BT.tupleU ($2 : $4) }
   | '[' type ']'              { BT.listU $2 }
   | '{' type '}'              { ThunkU $2 }
+  | '?' non_string_atom       { OptionalU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
   | LOWER ':' non_fun_type   { $3 }
   | LOWER                     { VarU (TV (getName $1)) }
@@ -499,6 +502,10 @@ atom_expr :: { Loc CstExpr }
   | var_expr                  { $1 }
   | hole_expr                 { $1 }
   | do_expr                   { $1 }
+  | null_expr                 { $1 }
+
+null_expr :: { Loc CstExpr }
+  : 'null'                    { at $1 CNullE }
 
 force_expr :: { Loc CstExpr }
   : '!' atom_expr             { at $1 (CForceE $2) }
@@ -619,6 +626,7 @@ atom_type :: { TypeU }
   | '(' type ',' type_list1 ')' { BT.tupleU ($2 : $4) }
   | '[' type ']'              { BT.listU $2 }
   | '{' type '}'              { ThunkU $2 }
+  | '?' atom_type             { OptionalU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
   | LOWER ':' non_fun_type   { $3 }
   | LOWER                     { VarU (TV (getName $1)) }
@@ -660,6 +668,7 @@ pos_atom_type :: { (Pos, TypeU) }
   | '(' type ',' type_list1 ')' { (locPos $1, BT.tupleU ($2 : $4)) }
   | '[' type ']'                { (locPos $1, BT.listU $2) }
   | '{' type '}'                { (locPos $1, ThunkU $2) }
+  | '?' pos_atom_type            { (locPos $1, OptionalU (snd $2)) }
   | UPPER                       { (locPos $1, VarU (TV (getName $1))) }
   | LOWER ':' non_fun_type      { (locPos $1, $3) }
   | LOWER                       { (locPos $1, VarU (TV (getName $1))) }

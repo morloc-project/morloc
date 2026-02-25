@@ -1,0 +1,9 @@
+null
+42
+0
+10
+null
+7
+null
+[1,null,3,null,5]
+2

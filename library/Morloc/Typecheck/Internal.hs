@@ -119,6 +119,7 @@ instance Applicable TypeU where
       Nothing -> ExistU v (map (apply g) ts, tc) (map (second (apply g)) rs, rc)
   apply g (NamU o n ps rs) = NamU o n ps [(k, apply g t) | (k, t) <- rs]
   apply g (ThunkU t) = ThunkU (apply g t)
+  apply g (OptionalU t) = OptionalU (apply g t)
 
 instance Applicable EType where
   apply g e =
@@ -204,6 +205,8 @@ subtype scope a@ExistU {} b@ExistU {} g
 
 -- ThunkU: covariant subtyping
 subtype scope (ThunkU t1) (ThunkU t2) g = subtype scope t1 t2 g
+-- OptionalU: covariant subtyping
+subtype scope (OptionalU t1) (OptionalU t2) g = subtype scope t1 t2 g
 --  g1 |- B1 <: A1 -| g2
 --  g2 |- [g2]A2 <: [g2]B2 -| g3
 -- ----------------------------------------- <:-->
@@ -364,6 +367,25 @@ instantiate scope (ThunkU inner) (ExistU v ([], _) _) g1 = do
     Just (rhs, _, lhs) -> do
       solved <- solve v (ThunkU eb)
       return $ cacheSolved v (ThunkU eb) $ g2 {gammaContext = rhs ++ [solved, index eb] ++ lhs}
+    Nothing -> return g2
+  instantiate scope (apply g3 inner) eb g3
+-- ExistU vs OptionalU: solve ?a = ??b, then ?b <: inner
+instantiate scope (ExistU v ([], _) _) (OptionalU inner) g1 = do
+  let (g2, veb) = tvarname g1 "opt"
+      eb = ExistU veb ([], Open) ([], Open)
+  g3 <- case access1 v (gammaContext g2) of
+    Just (rhs, _, lhs) -> do
+      solved <- solve v (OptionalU eb)
+      return $ cacheSolved v (OptionalU eb) $ g2 {gammaContext = rhs ++ [solved, index eb] ++ lhs}
+    Nothing -> return g2
+  instantiate scope eb (apply g3 inner) g3
+instantiate scope (OptionalU inner) (ExistU v ([], _) _) g1 = do
+  let (g2, veb) = tvarname g1 "opt"
+      eb = ExistU veb ([], Open) ([], Open)
+  g3 <- case access1 v (gammaContext g2) of
+    Just (rhs, _, lhs) -> do
+      solved <- solve v (OptionalU eb)
+      return $ cacheSolved v (OptionalU eb) $ g2 {gammaContext = rhs ++ [solved, index eb] ++ lhs}
     Nothing -> return g2
   instantiate scope (apply g3 inner) eb g3
 instantiate scope (ExistU v ([], _) _) (FunU as b) g1 = do
@@ -539,6 +561,7 @@ solve v t
     occursIn v' (AppU t' ts) = occursIn v' t' || any (occursIn v') ts
     occursIn v' (NamU _ _ ps rs) = any (occursIn v') ps || any (occursIn v' . snd) rs
     occursIn v' (ThunkU t') = occursIn v' t'
+    occursIn v' (OptionalU t') = occursIn v' t'
 
 -- | Record a solved variable in the gamma map cache
 cacheSolved :: TVar -> TypeU -> Gamma -> Gamma
@@ -811,6 +834,7 @@ collectExistVars = go
     go (AppU t ts) = concatMap go (t : ts)
     go (NamU _ _ ps rs) = concatMap go ps ++ concatMap (go . snd) rs
     go (ThunkU t) = go t
+    go (OptionalU t) = go t
 
 collectFixedNames :: Set.Set TVar -> TypeU -> Set.Set Text
 collectFixedNames generics = go
@@ -825,6 +849,7 @@ collectFixedNames generics = go
     go (NamU _ (TV n) ps rs) =
       Set.insert n $ Set.unions (map go ps ++ map (go . snd) rs)
     go (ThunkU t) = go t
+    go (OptionalU t) = go t
 
 applyVarRenaming :: Map.Map TVar TVar -> TypeU -> TypeU
 applyVarRenaming m = go
@@ -838,6 +863,7 @@ applyVarRenaming m = go
     go (AppU t ts) = AppU (go t) (map go ts)
     go (NamU n o ps rs) = NamU n o (map go ps) [(k, go t) | (k, t) <- rs]
     go (ThunkU t) = ThunkU (go t)
+    go (OptionalU t) = OptionalU (go t)
 
 prettyTypeU :: TypeU -> MDoc
 prettyTypeU = pretty . cleanTypeName

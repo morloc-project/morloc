@@ -51,6 +51,7 @@ module Morloc.BaseTypes
   , tupleU
   , listU
   , thunkU
+  , optionalU
   ) where
 
 import Morloc.Data.Text (pretty)
@@ -171,3 +172,6 @@ tupleU ts = AppU (VarU $ tuple (length ts)) ts
 
 thunkU :: TypeU -> TypeU
 thunkU = ThunkU
+
+optionalU :: TypeU -> TypeU
+optionalU = OptionalU

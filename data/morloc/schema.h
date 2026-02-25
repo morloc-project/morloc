@@ -19,7 +19,8 @@ typedef enum {
   MORLOC_STRING,
   MORLOC_ARRAY,
   MORLOC_TUPLE,
-  MORLOC_MAP
+  MORLOC_MAP,
+  MORLOC_OPTIONAL
 } morloc_serial_type;
 
 #define SCHEMA_NIL    'z'
@@ -31,6 +32,7 @@ typedef enum {
 #define SCHEMA_ARRAY  'a'
 #define SCHEMA_TUPLE  't'
 #define SCHEMA_MAP    'm'
+#define SCHEMA_OPTIONAL '?'
 
 // Schema definition
 //  * Primitives have no parameters

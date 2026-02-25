@@ -194,6 +194,9 @@ generalTypeToSerialAST (AppT (VarT v) ts)
       insts <- MM.gets stateTypeclasses
       error $ show insts
 generalTypeToSerialAST (ThunkT t) = generalTypeToSerialAST t
+generalTypeToSerialAST (OptionalT t) = do
+  inner <- generalTypeToSerialAST t
+  return $ SerialOptional (FV (TV "Optional") (CV "")) inner
 generalTypeToSerialAST (NamT o v [] rs) =
   SerialObject o (FV v (CV "")) []
     <$> mapM (secondM generalTypeToSerialAST) rs
@@ -258,6 +261,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS _ _ (LogS True)) = return $ LitX BoolX "1"
     toNexusExpr (AnnoS _ _ (LogS False)) = return $ LitX BoolX "0"
     toNexusExpr (AnnoS _ _ UniS) = return $ LitX NullX "0"
+    toNexusExpr (AnnoS _ _ NullS) = return $ LitX NullX "0"
     toNexusExpr (AnnoS (Idx _ t) _ (LetBndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr (AnnoS _ _ (LetS _ _ body)) = toNexusExpr body
     toNexusExpr (AnnoS _ _ (IfS _ t _)) = toNexusExpr t

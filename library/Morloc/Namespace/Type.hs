@@ -103,6 +103,7 @@ data Type
   | AppT Type [Type]
   | NamT NamType TVar [Type] [(Key, Type)]
   | ThunkT Type
+  | OptionalT Type
   deriving (Show, Ord, Eq)
 
 data OpenOrClosed = Open | Closed
@@ -123,6 +124,7 @@ data TypeU
   | AppU TypeU [TypeU]
   | NamU NamType TVar [TypeU] [(Key, TypeU)]
   | ThunkU TypeU
+  | OptionalU TypeU
   deriving (Show, Ord, Eq)
 
 {- | Extended Type that may represent a language specific type as well as sets
@@ -224,6 +226,7 @@ instance Typelike Type where
       sub (AppT v ts) = AppT (sub v) (map sub ts)
       sub (NamT r n ps es) = NamT r n ps [(k, sub t) | (k, t) <- es]
       sub (ThunkT t) = ThunkT (sub t)
+      sub (OptionalT t) = OptionalT (sub t)
 
   free (UnkT _) = Set.empty
   free v@(VarT _) = Set.singleton v
@@ -231,11 +234,13 @@ instance Typelike Type where
   free (AppT t ts) = Set.unions (map free (t : ts))
   free (NamT _ _ _ es) = Set.unions (map (free . snd) es)
   free (ThunkT t) = free t
+  free (OptionalT t) = free t
 
   normalizeType (FunT ts1 (FunT ts2 ft)) = normalizeType $ FunT (ts1 <> ts2) ft
   normalizeType (AppT t ts) = AppT (normalizeType t) (map normalizeType ts)
   normalizeType (NamT n v ds ks) = NamT n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
   normalizeType (ThunkT t) = ThunkT (normalizeType t)
+  normalizeType (OptionalT t) = OptionalT (normalizeType t)
   normalizeType t = t
 
 instance Typelike TypeU where
@@ -247,6 +252,7 @@ instance Typelike TypeU where
   typeOf (AppU t ts) = AppT (typeOf t) (map typeOf ts)
   typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
   typeOf (ThunkU t) = ThunkT (typeOf t)
+  typeOf (OptionalU t) = OptionalT (typeOf t)
 
   free v@(VarU _) = Set.singleton v
   free v@(ExistU _ ([], _) (rs, _)) = Set.unions $ Set.singleton v : map (free . snd) rs
@@ -256,6 +262,7 @@ instance Typelike TypeU where
   free (AppU t ts) = Set.unions $ map free (t : ts)
   free (NamU _ _ ps rs) = Set.unions $ map free (map snd rs <> ps)
   free (ThunkU t) = free t
+  free (OptionalU t) = free t
 
   substituteTVar v (ForallU q r) t =
     if Set.member (VarU q) (free t)
@@ -278,6 +285,7 @@ instance Typelike TypeU where
       sub (AppU t ts) = AppU (sub t) (map sub ts)
       sub (NamU r n ps rs) = NamU r n (map sub ps) [(k, sub t) | (k, t) <- rs]
       sub (ThunkU t) = ThunkU (sub t)
+      sub (OptionalU t) = OptionalU (sub t)
 
   normalizeType (FunU ts1 (FunU ts2 ft)) = normalizeType $ FunU (ts1 <> ts2) ft
   normalizeType (AppU t ts) = AppU (normalizeType t) (map normalizeType ts)
@@ -285,6 +293,7 @@ instance Typelike TypeU where
   normalizeType (ForallU v t) = ForallU v (normalizeType t)
   normalizeType (ExistU v (map normalizeType -> ps, pc) (map (second normalizeType) -> rs, rc)) = ExistU v (ps, pc) (rs, rc)
   normalizeType (ThunkU t) = ThunkU (normalizeType t)
+  normalizeType (OptionalU t) = OptionalU (normalizeType t)
   normalizeType t = t
 
 ----- Partial order logic
@@ -310,6 +319,7 @@ instance P.PartialOrd TypeU where
   (<=) (NamU o1 n1 ps1 []) (NamU o2 n2 ps2 []) =
     o1 == o2 && n1 == n2 && length ps1 == length ps2
   (<=) (ThunkU t1) (ThunkU t2) = t1 P.<= t2
+  (<=) (OptionalU t1) (OptionalU t2) = t1 P.<= t2
   (<=) _ _ = False
 
   (==) (ForallU v1 t1) (ForallU v2 t2) =
@@ -346,6 +356,7 @@ findFirst v = f
         ([(_, e2)], rs2) -> firstOf (f e1 e2) (f (NamU o1 n1 ps1 rs1) (NamU o2 n2 ps2 rs2))
         _ -> Nothing
     f (ThunkU t1) (ThunkU t2) = f t1 t2
+    f (OptionalU t1) (OptionalU t2) = f t1 t2
     f _ _ = Nothing
 
     firstOf :: Maybe a -> Maybe a -> Maybe a
@@ -383,6 +394,7 @@ extractKey (AppU t _) = extractKey t
 extractKey (NamU _ v _ _) = v
 extractKey (ExistU v _ _) = v
 extractKey (ThunkU t) = extractKey t
+extractKey (OptionalU t) = extractKey t
 extractKey t = error $ "Cannot currently handle functional type imports: " <> show t
 
 type2typeu :: Type -> TypeU
@@ -392,6 +404,7 @@ type2typeu (FunT ts t) = FunU (map type2typeu ts) (type2typeu t)
 type2typeu (AppT v ts) = AppU (type2typeu v) (map type2typeu ts)
 type2typeu (NamT o n ps rs) = NamU o n (map type2typeu ps) [(k, type2typeu x) | (k, x) <- rs]
 type2typeu (ThunkT t) = ThunkU (type2typeu t)
+type2typeu (OptionalT t) = OptionalU (type2typeu t)
 
 unresolvedType2type :: TypeU -> Type
 unresolvedType2type (VarU v) = VarT v
@@ -401,6 +414,7 @@ unresolvedType2type (FunU ts t) = FunT (map unresolvedType2type ts) (unresolvedT
 unresolvedType2type (AppU v ts) = AppT (unresolvedType2type v) (map unresolvedType2type ts)
 unresolvedType2type (NamU t n ps rs) = NamT t n (map unresolvedType2type ps) [(k, unresolvedType2type e) | (k, e) <- rs]
 unresolvedType2type (ThunkU t) = ThunkT (unresolvedType2type t)
+unresolvedType2type (OptionalU t) = OptionalT (unresolvedType2type t)
 
 -- | get a fresh variable name that is not used in t1 or t2
 newVariable :: TypeU -> TypeU -> TVar
@@ -419,6 +433,7 @@ newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
     allVars :: TypeU -> Set.Set TypeU
     allVars (ForallU v t) = Set.union (Set.singleton (VarU v)) (allVars t)
     allVars (ThunkU t) = allVars t
+    allVars (OptionalU t) = allVars t
     allVars t = free t
 
 {- | Check whether a ground type contains any unknown (unresolved) type variables.
@@ -431,6 +446,7 @@ containsUnk (FunT ts t) = any containsUnk ts || containsUnk t
 containsUnk (AppT t ts) = containsUnk t || any containsUnk ts
 containsUnk (NamT _ _ ps rs) = any containsUnk ps || any (containsUnk . snd) rs
 containsUnk (ThunkT t) = containsUnk t
+containsUnk (OptionalT t) = containsUnk t
 
 ----- Pretty instances -------------------------------------------------------
 
@@ -451,6 +467,7 @@ instance Pretty Type where
       f _ (AppT (VarT (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppT (VarT (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (ThunkT t) = "{" <> f True t <> "}"
+      f _ (OptionalT t) = "?" <> f False t
       f False t = parens (f True t)
       f _ (FunT [] t) = "() -> " <> f False t
       f _ (FunT ts t) = hsep $ punctuate " -> " (map (f False) (ts <> [t]))
@@ -475,6 +492,7 @@ instance Pretty TypeU where
       f _ (AppU (VarU (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppU (VarU (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (ThunkU t) = "{" <> f True t <> "}"
+      f _ (OptionalU t) = "?" <> f False t
       f False t = parens (f True t)
       f _ (ExistU v (ts, _) (rs, _)) =
         angles $

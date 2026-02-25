@@ -1,0 +1,36 @@
+module main
+  ( testCppToPy
+  , testCppToPyNull
+  , testPyToCpp
+  , testPyToCppNull
+  , testChainCppPy
+  , testChainPyCpp
+  )
+
+import types
+import cppfuncs (cSafeDiv, cFromNull, cDouble)
+import pyfuncs (pSafeDiv, pFromNull, pDouble)
+
+-- C++ produces optional, Python consumes it
+testCppToPy :: Int
+testCppToPy = pFromNull (-1) (cSafeDiv 10 3)
+
+-- C++ produces null, Python consumes it
+testCppToPyNull :: Int
+testCppToPyNull = pFromNull (-1) (cSafeDiv 10 0)
+
+-- Python produces optional, C++ consumes it
+testPyToCpp :: Int
+testPyToCpp = cFromNull (-1) (pSafeDiv 10 2)
+
+-- Python produces null, C++ consumes it
+testPyToCppNull :: Int
+testPyToCppNull = cFromNull (-1) (pSafeDiv 10 0)
+
+-- Chain: C++ safeDiv -> Python double -> C++ fromNull
+testChainCppPy :: Int
+testChainCppPy = cFromNull 0 (pDouble (cSafeDiv 10 3))
+
+-- Chain: Python safeDiv -> C++ double -> Python fromNull
+testChainPyCpp :: Int
+testChainPyCpp = pFromNull 0 (cDouble (pSafeDiv 10 2))

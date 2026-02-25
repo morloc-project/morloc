@@ -130,6 +130,9 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       f (ThunkF t) = do
         t' <- f t
         return $ "std::function<" <> t' <> "()" <> ">"
+      f (OptionalF t) = do
+        t' <- f t
+        return $ "std::optional<" <> t' <> ">"
 
   cppArgOf s (Arg i t) = do
     t' <- cppTypeOf (typeFof t)
@@ -619,6 +622,7 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
     showDefType _ (AppT _ _) = error "AppT is only OK with VarT, for now"
     showDefType _ (ThunkT _) = error "Cannot show ThunkT"
+    showDefType ps (OptionalT t) = "std::optional<" <> showDefType ps t <> ">"
 
 -- C++ specific source handling (flags, headers, libraries)
 

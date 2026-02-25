@@ -1,0 +1,30 @@
+module main
+  ( testRToCpp
+  , testRToCppNull
+  , testCppToR
+  , testCppToRNull
+  , testChainRCpp
+  , testChainCppR
+  )
+
+import types
+import cppfuncs (cSafeDiv, cFromNull, cDouble)
+import rfuncs (rSafeDiv, rFromNull, rDouble)
+
+testRToCpp :: Int
+testRToCpp = cFromNull (-1) (rSafeDiv 10 2)
+
+testRToCppNull :: Int
+testRToCppNull = cFromNull (-1) (rSafeDiv 10 0)
+
+testCppToR :: Int
+testCppToR = rFromNull (-1) (cSafeDiv 10 3)
+
+testCppToRNull :: Int
+testCppToRNull = rFromNull (-1) (cSafeDiv 10 0)
+
+testChainRCpp :: Int
+testChainRCpp = cFromNull 0 (cDouble (rSafeDiv 10 2))
+
+testChainCppR :: Int
+testChainCppR = rFromNull 0 (rDouble (cSafeDiv 10 3))

@@ -296,6 +296,8 @@ invertSerialManifold sm0 =
         -- Source functions return the unwrapped type; the compiler wraps in suspend
         (ThunkF innerT, SrcCallP _) ->
           return $ D (SuspendN t (weave (D (AppExeN innerT exe qs nativeArgs') deps))) []
+        (OptionalF _, SrcCallP _) ->
+          atomize (AppExeN t exe qs nativeArgs') deps
         _ -> atomize (AppExeN t exe qs nativeArgs') deps
     invertNativeExprM (ManN_ (D nm lets)) = atomize (ManN nm) lets
     invertNativeExprM (ReturnN_ (D ne lets)) = atomize (ReturnN ne) lets
@@ -414,6 +416,7 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     seekRecs _ (UnkF _) = []
     seekRecs _ (VarF _) = []
     seekRecs m (ThunkF t) = seekRecs m t
+    seekRecs m (OptionalF t) = seekRecs m t
 
 unifyRecords ::
   [ ( FVar

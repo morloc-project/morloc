@@ -126,6 +126,7 @@ data Token
   | TokLet
   | TokIn
   | TokDo
+  | TokNull
   | -- Identifiers and literals
 
     -- | lowercase identifier
@@ -211,6 +212,7 @@ showToken TokInfix = "'infix'"
 showToken TokLet = "'let'"
 showToken TokIn = "'in'"
 showToken TokDo = "'do'"
+showToken TokNull = "'null'"
 showToken (TokLowerName n) = "identifier '" ++ T.unpack n ++ "'"
 showToken (TokUpperName n) = "type name '" ++ T.unpack n ++ "'"
 showToken (TokOperator n) = "operator '" ++ T.unpack n ++ "'"

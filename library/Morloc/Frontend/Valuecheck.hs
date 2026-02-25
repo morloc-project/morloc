@@ -24,6 +24,7 @@ import qualified Morloc.Monad as MM
 -- Convert AnnoS objects to a simple intermediate type
 toE :: AnnoS (Indexed Type) Many Int -> E
 toE (AnnoS g _ UniS) = LitP g MUni
+toE (AnnoS g _ NullS) = LitP g MNull
 toE (AnnoS g _ (BndS v)) = BndP g v
 toE (AnnoS g _ (VarS v (Many es))) = VarP g v (map toE es)
 toE (AnnoS g _ (AppS e es)) = AppP g (toE e) (map toE es)

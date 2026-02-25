@@ -1,0 +1,6 @@
+module types (*)
+
+type Cpp => Int = "int"
+type R => Int = "integer"
+type Cpp => List a = "std::vector<$1>" a
+type R => List a = "list" a

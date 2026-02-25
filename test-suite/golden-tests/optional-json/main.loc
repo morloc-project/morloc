@@ -1,0 +1,33 @@
+module main
+  ( echoOptInt
+  , echoOptStr
+  , echoOptList
+  , fromNullInt
+  , isNullInt
+  )
+
+type Py => Int = "int"
+type Py => Bool = "bool"
+type Py => Str = "str"
+type Py => List a = "list" a
+
+identity a :: a -> a
+fromNull a :: a -> ?a -> a
+isNull a :: ?a -> Bool
+
+source Py from "foo.py" ("identity", "fromNull", "isNull")
+
+echoOptInt :: ?Int -> ?Int
+echoOptInt x = identity x
+
+echoOptStr :: ?Str -> ?Str
+echoOptStr x = identity x
+
+echoOptList :: ?[Int] -> ?[Int]
+echoOptList x = identity x
+
+fromNullInt :: ?Int -> Int
+fromNullInt x = fromNull 0 x
+
+isNullInt :: ?Int -> Bool
+isNullInt x = isNull x

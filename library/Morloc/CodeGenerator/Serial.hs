@@ -61,6 +61,7 @@ serialAstToType (SerialUInt64 x) = VarF x
 serialAstToType (SerialBool x) = VarF x
 serialAstToType (SerialString x) = VarF x
 serialAstToType (SerialNull x) = VarF x
+serialAstToType (SerialOptional _ s) = OptionalF (serialAstToType s)
 -- passthrough type, it cannot be deserialized or serialized, only passed in from a different language
 serialAstToType (SerialUnknown v) = UnkF v
 
@@ -112,7 +113,8 @@ serialAstToMsgpackSchema (SerialUInt64 v) = addHint v <> "u8"
 serialAstToMsgpackSchema (SerialBool v) = addHint v <> "b"
 serialAstToMsgpackSchema (SerialString v) = addHint v <> "s"
 serialAstToMsgpackSchema (SerialNull v) = addHint v <> "z"
-serialAstToMsgpackSchema (SerialUnknown v) = addHint v <> "?" -- I guess this works as a general bad new character?
+serialAstToMsgpackSchema (SerialOptional v s) = addHint v <> "?" <> serialAstToMsgpackSchema s
+serialAstToMsgpackSchema (SerialUnknown v) = addHint v <> "*"
 
 addHint :: FVar -> MDoc
 addHint (FV _ (CV "")) = "" -- no hint if no concrete type is defined
@@ -143,6 +145,7 @@ shallowType (SerialUInt64 x) = VarF x
 shallowType (SerialBool x) = VarF x
 shallowType (SerialString x) = VarF x
 shallowType (SerialNull x) = VarF x
+shallowType (SerialOptional _ s) = OptionalF (shallowType s)
 shallowType (SerialUnknown v) = UnkF v
 
 findPackers ::
@@ -302,6 +305,7 @@ makeSerialAST m lang t0 = do
         basevar (AppU t _) = basevar t
         basevar (NamU _ v _ _) = Just v
         basevar (ThunkU _) = Nothing
+        basevar (OptionalU _) = Nothing
 
         finalVar =
           let t = fst $ unweaveTypeF ft
@@ -320,6 +324,14 @@ makeSerialAST m lang t0 = do
       ts <- mapM (makeSerialAST' gscope typepackers . snd) rs
       return $ SerialObject o n ps (zip (map fst rs) ts)
     makeSerialAST' gscope typepackers (ThunkF t) = makeSerialAST' gscope typepackers t
+    makeSerialAST' gscope typepackers (OptionalF t) = do
+      inner <- makeSerialAST' gscope typepackers t
+      let v = case t of
+                VarF fv -> fv
+                AppF (VarF fv) _ -> fv
+                NamF _ fv _ _ -> fv
+                _ -> FV (TV "Optional") (CV "optional")
+      return $ SerialOptional v inner
     makeSerialAST' _ _ t = MM.throwSourcedError m $ "makeSerialAST' error on type:" <+> pretty t
 
 resolvePacker ::
@@ -446,6 +458,9 @@ unweaveTypeF (NamF n (FV gv cv) ps rs) =
 unweaveTypeF (ThunkF t) =
   let (gt, ct) = unweaveTypeF t
    in (ThunkU gt, ThunkU ct)
+unweaveTypeF (OptionalF t) =
+  let (gt, ct) = unweaveTypeF t
+   in (OptionalU gt, OptionalU ct)
 
 weaveTypeF :: TypeU -> TypeU -> TypeF
 weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv (tv2cv cv))
@@ -461,6 +476,7 @@ weaveTypeF (NamU n gv psg rsg) (NamU _ cv psc rsc) =
         (zipWith weaveTypeF (map snd rsg) (map snd rsc))
     )
 weaveTypeF (ThunkU gt) (ThunkU ct) = ThunkF (weaveTypeF gt ct)
+weaveTypeF (OptionalU gt) (OptionalU ct) = OptionalF (weaveTypeF gt ct)
 weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
 weaveTypeF gt ct = error . show $ (gt, ct)
 
@@ -499,6 +515,7 @@ isSerializable (SerialUInt64 _) = True
 isSerializable (SerialBool _) = True
 isSerializable (SerialString _) = True
 isSerializable (SerialNull _) = True
+isSerializable (SerialOptional _ x) = isSerializable x
 isSerializable (SerialUnknown _) = True -- are you feeling lucky?
 
 prettySerialOne :: SerialAST -> MDoc
@@ -524,4 +541,5 @@ prettySerialOne (SerialUInt64 _) = "SerialUInt64"
 prettySerialOne (SerialBool _) = "SerialBool"
 prettySerialOne (SerialString _) = "SerialString"
 prettySerialOne (SerialNull _) = "SerialNull"
+prettySerialOne (SerialOptional _ x) = "SerialOptional" <> parens (prettySerialOne x)
 prettySerialOne (SerialUnknown _) = "SerialUnknown"

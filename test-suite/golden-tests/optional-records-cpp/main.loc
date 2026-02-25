@@ -1,0 +1,41 @@
+module main
+  ( testMakePerson
+  , testOptionalField
+  , testFindPerson
+  , testFindPersonMissing
+  )
+
+type Cpp => Int = "int"
+type Cpp => Str = "std::string"
+type Cpp => List a = "std::vector<$1>" a
+
+record Person where
+  name :: Str
+  age :: ?Int
+record Cpp => Person = "person_t"
+
+makePerson :: Str -> ?Int -> Person
+getName :: Person -> Str
+getAge :: Person -> ?Int
+toNull a :: a -> ?a
+findPerson :: Str -> [Person] -> ?Person
+
+source Cpp from "foo.hpp" ("makePerson", "getName", "getAge", "toNull", "findPerson")
+
+alice :: Person
+alice = makePerson "Alice" (toNull 30)
+
+bob :: Person
+bob = makePerson "Bob" null
+
+testMakePerson :: Person
+testMakePerson = alice
+
+testOptionalField :: ?Int
+testOptionalField = getAge bob
+
+testFindPerson :: ?Person
+testFindPerson = findPerson "Alice" [alice, bob]
+
+testFindPersonMissing :: ?Person
+testFindPersonMissing = findPerson "Charlie" [alice, bob]

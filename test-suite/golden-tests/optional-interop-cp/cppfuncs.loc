@@ -1,0 +1,9 @@
+module cppfuncs (*)
+
+import types
+
+cSafeDiv :: Int -> Int -> ?Int
+cFromNull :: Int -> ?Int -> Int
+cDouble :: ?Int -> ?Int
+
+source Cpp from "foo.hpp" ("cSafeDiv", "cFromNull", "cDouble")

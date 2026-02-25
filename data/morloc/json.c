@@ -549,6 +549,21 @@ static int read_json_with_schema_r(
             break;
         }
 
+        case MORLOC_OPTIONAL: {
+            consume_whitespace(json_ptr);
+            if (strncmp(*json_ptr, "null", 4) == 0
+                && !isalnum((unsigned char)(*json_ptr)[4])
+                && (*json_ptr)[4] != '_') {
+                *json_ptr += 4;
+                *((uint8_t*)voidstar) = 0;
+                memset(voidstar + 1, 0, schema->parameters[0]->width);
+            } else {
+                *((uint8_t*)voidstar) = 1;
+                TRY(read_json_with_schema_r, voidstar + 1, json_ptr, schema->parameters[0]);
+            }
+            break;
+        }
+
         default:
             RAISE("Unhandled schema type %c", **json_ptr)
             break;
@@ -679,6 +694,17 @@ static bool print_voidstar_r(const void* voidstar, const Schema* schema, ERRMSG)
                     RAISE_IF(!success, "\n%s", CHILD_ERRMSG)
                 }
                 printf("}");
+            }
+            break;
+        case MORLOC_OPTIONAL:
+            {
+                uint8_t tag = *(const uint8_t*)voidstar;
+                if (tag == 0) {
+                    printf("null");
+                } else {
+                    bool success = print_voidstar_r((const char*)voidstar + 1, schema->parameters[0], &CHILD_ERRMSG);
+                    RAISE_IF(!success, "\n%s", CHILD_ERRMSG)
+                }
             }
             break;
         default:
@@ -834,6 +860,16 @@ static bool pretty_print_r(const void* voidstar, const Schema* schema, int inden
                 printf("\n");
                 for (int s = 0; s < indent; s++) putchar(' ');
                 printf("}");
+            }
+            break;
+        case MORLOC_OPTIONAL:
+            {
+                uint8_t tag = *(const uint8_t*)voidstar;
+                if (tag == 0) {
+                    printf("null");
+                } else {
+                    TRY(pretty_print_r, (const char*)voidstar + 1, schema->parameters[0], indent, false);
+                }
             }
             break;
         default:
@@ -1137,6 +1173,15 @@ static bool voidstar_to_json_buf_r(json_buf_t* jb, const void* voidstar, const S
                     schema->parameters[i]);
             }
             json_buf_append(jb, "}", 1);
+            break;
+        }
+        case MORLOC_OPTIONAL: {
+            uint8_t tag = *(const uint8_t*)voidstar;
+            if (tag == 0) {
+                json_buf_append(jb, "null", 4);
+            } else {
+                TRY(voidstar_to_json_buf_r, jb, (const char*)voidstar + 1, schema->parameters[0]);
+            }
             break;
         }
         default:

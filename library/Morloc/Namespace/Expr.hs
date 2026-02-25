@@ -188,6 +188,7 @@ data Expr
   | FixE Fixity
   | BopE ExprI Int EVar ExprI
   | UniE
+  | NullE
   | VarE ManifoldConfig EVar
   | HolE
   | LstE [ExprI]
@@ -235,6 +236,7 @@ data Lit
   | MLog Bool
   | MStr Text
   | MUni
+  | MNull
   deriving (Ord, Eq, Show)
 
 data E
@@ -260,6 +262,7 @@ data AnnoS g f c = AnnoS g c (ExprS g f c)
 
 data ExprS g f c
   = UniS
+  | NullS
   | BndS EVar
   | VarS EVar (f (AnnoS g f c))
   | AppS (AnnoS g f c) [AnnoS g f c]
@@ -380,6 +383,7 @@ mapExprSM f (LstS xs) = LstS <$> mapM f xs
 mapExprSM f (TupS xs) = TupS <$> mapM f xs
 mapExprSM f (NamS rs) = NamS <$> mapM (secondM f) rs
 mapExprSM _ UniS = return UniS
+mapExprSM _ NullS = return NullS
 mapExprSM _ (BndS v) = return $ BndS v
 mapExprSM _ (RealS x) = return $ RealS x
 mapExprSM _ (IntS x) = return $ IntS x
@@ -441,6 +445,7 @@ instance Pretty Lit where
   pretty (MLog x) = pretty x
   pretty (MStr x) = pretty x
   pretty MUni = "Unit"
+  pretty MNull = "null"
 
 instance Pretty E where
   pretty (BndP _ v) = pretty v
@@ -572,6 +577,7 @@ instance Pretty Expr where
         InfixN -> "infix"
   pretty (BopE e1 _ v e2) = pretty e1 <+> pretty v <+> pretty e2
   pretty (IfE c t e) = "if" <+> pretty c <+> "then" <+> pretty t <+> "else" <+> pretty e
+  pretty NullE = "null"
   pretty (SuspendE e) = "{" <> pretty e <> "}"
   pretty (ForceE e) = "!" <> pretty e
 
@@ -586,6 +592,7 @@ instance (Foldable f) => Pretty (ExprS a f b) where
   pretty (TupS es) = "(TupS" <+> list (map pretty es) <> ")"
   pretty (NamS rs) = "(NamS" <+> list [pretty k <> "=" <> pretty v | (k, v) <- rs] <> ")"
   pretty UniS = "UniS"
+  pretty NullS = "NullS"
   pretty (BndS x) = "(BndS" <+> pretty x <> ")"
   pretty (RealS x) = viaShow x
   pretty (IntS x) = viaShow x

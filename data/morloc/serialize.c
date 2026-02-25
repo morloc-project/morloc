@@ -101,6 +101,25 @@ static EXIT_CODE pack_data(
 ) {
     INT_RETURN_SETUP
 
+    // Optional doesn't follow the token-then-data pattern, handle it separately
+    if (schema->type == MORLOC_OPTIONAL) {
+        if (*((const uint8_t*)mlc) == 0) {
+            // null: write msgpack nil
+            mpack_token_t nil_token = mpack_pack_nil();
+            dynamic_mpack_write(tokbuf, packet, packet_ptr, packet_remaining, &nil_token, 0);
+        } else {
+            // present: serialize the inner value (skip tag byte)
+            int exit_code = pack_data(
+                (const char*)mlc + 1,
+                schema->parameters[0],
+                packet, packet_ptr, packet_remaining,
+                tokbuf, &CHILD_ERRMSG
+            );
+            RAISE_IF(exit_code == EXIT_FAIL, "\n%s", CHILD_ERRMSG)
+        }
+        return EXIT_PASS;
+    }
+
     mpack_token_t token;
     Array* array;
 
@@ -151,6 +170,9 @@ static EXIT_CODE pack_data(
         case MORLOC_MAP:
         case MORLOC_TUPLE:
             token = mpack_pack_array(schema->size);
+            break;
+        case MORLOC_OPTIONAL:
+            // handled by early return above; unreachable
             break;
         default:
             RAISE("Unexpected morloc type")
@@ -226,7 +248,8 @@ static EXIT_CODE pack_data(
       case MORLOC_UINT64:
       case MORLOC_FLOAT32:
       case MORLOC_FLOAT64:
-        // no further processing needed
+      case MORLOC_OPTIONAL:
+        // no further processing needed (optional handled by early return above)
         break;
     }
 
@@ -336,6 +359,16 @@ static size_t msg_size_r(const Schema* schema, mpack_tokbuf_t* tokbuf, const cha
       case MORLOC_MAP:
       case MORLOC_TUPLE:
         return msg_size_tuple(schema, tokbuf, buf_ptr, buf_remaining, token);
+      case MORLOC_OPTIONAL:
+        // Peek at raw byte: msgpack nil is always 0xc0
+        if (*buf_remaining > 0 && (uint8_t)(**buf_ptr) == 0xc0) {
+            mpack_read(tokbuf, buf_ptr, buf_remaining, token);
+            // null: tag byte + reserved inner space (no variable-length data)
+            return 1 + schema->parameters[0]->width;
+        } else {
+            // present: tag byte + inner value size
+            return 1 + msg_size_r(schema->parameters[0], tokbuf, buf_ptr, buf_remaining, token);
+        }
       default:
         return 0;
     }
@@ -580,6 +613,20 @@ static EXIT_CODE parse_obj(
       case MORLOC_TUPLE:
         child_retcode = parse_tuple(mlc, schema, cursor, tokbuf, buf_ptr, buf_remaining, token, &CHILD_ERRMSG);
         RAISE_IF(child_retcode == EXIT_FAIL, "\n%s", CHILD_ERRMSG)
+        break;
+      case MORLOC_OPTIONAL:
+        // Peek at raw byte: msgpack nil is always 0xc0
+        if (*buf_remaining > 0 && (uint8_t)(**buf_ptr) == 0xc0) {
+            // null: consume the nil byte and set tag to 0
+            mpack_read(tokbuf, buf_ptr, buf_remaining, token);
+            *((uint8_t*)mlc) = 0;
+            memset((char*)mlc + 1, 0, schema->parameters[0]->width);
+        } else {
+            // present: set tag to 1 and parse inner value
+            *((uint8_t*)mlc) = 1;
+            child_retcode = parse_obj((char*)mlc + 1, schema->parameters[0], cursor, tokbuf, buf_ptr, buf_remaining, token, &CHILD_ERRMSG);
+            RAISE_IF(child_retcode == EXIT_FAIL, "\n%s", CHILD_ERRMSG)
+        }
         break;
       default:
         RAISE("Failed to parse morloc type %d", schema->type)

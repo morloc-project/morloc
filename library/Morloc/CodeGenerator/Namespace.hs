@@ -155,6 +155,7 @@ data TypeF
   | AppF TypeF [TypeF]
   | NamF NamType FVar [TypeF] [(Key, TypeF)]
   | ThunkF TypeF
+  | OptionalF TypeF
   deriving (Show, Ord, Eq)
 
 data TypeM
@@ -203,6 +204,7 @@ data SerialAST
   | SerialBool FVar
   | SerialString FVar
   | SerialNull FVar
+  | SerialOptional FVar SerialAST
   | -- | depending on the language, this may or may not raise an error down the
     -- line, the parameter contains the variable name, which is useful only for
     -- source code comments.
@@ -239,6 +241,7 @@ instance Pretty SerialAST where
   pretty (SerialBool v) = parens ("SerialBool" <+> pretty v)
   pretty (SerialString v) = parens ("SerialString" <+> pretty v)
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
+  pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)
   pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 
 data ExecutableExpressionPool

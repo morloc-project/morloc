@@ -112,6 +112,10 @@ static char* write_generic_schema_r(const Schema* schema, char* schema_str, size
                 schema_str = write_generic_schema_r(schema->parameters[i], schema_str, pos, buffer_size);
             }
             break;
+        case MORLOC_OPTIONAL:
+            schema_str[*pos] = SCHEMA_OPTIONAL; (*pos)++;
+            schema_str = write_generic_schema_r(schema->parameters[0], schema_str, pos, buffer_size);
+            break;
         default:
             // This should be unreachable
             fprintf(stderr, "Missing case in morloc schema");
@@ -140,6 +144,8 @@ bool schema_is_fixed_width(const Schema* schema){
         case MORLOC_STRING:
         case MORLOC_ARRAY:
             return false;
+        case MORLOC_OPTIONAL:
+            return schema_is_fixed_width(schema->parameters[0]);
         case MORLOC_TUPLE:
         case MORLOC_MAP:
             for(size_t i = 0; i < schema->size; i++){
@@ -182,6 +188,20 @@ size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG){
                     for(size_t i = 0; i < array->size; i++){
                         size += TRY(calculate_voidstar_size, element_data + i * element_width, schema->parameters[0]);
                     }
+                }
+            }
+            break;
+        case MORLOC_OPTIONAL:
+            {
+                uint8_t tag = *((const uint8_t*)data);
+                // 1 byte for the tag
+                size = 1;
+                if (tag == 0) {
+                    // null: inner value space is still reserved but has no variable-length data
+                    size += schema->parameters[0]->width;
+                } else {
+                    // present: add the inner value's full size
+                    size += TRY(calculate_voidstar_size, (const char*)data + 1, schema->parameters[0]);
                 }
             }
             break;
@@ -315,6 +335,14 @@ static Schema* map_schema(size_t size, char** keys, Schema** params) {
       width += params[i]->width;
     }
     return create_schema_with_params(MORLOC_MAP, width, size, params, keys);
+}
+
+static Schema* optional_schema(Schema* inner) {
+    Schema** params = (Schema**)calloc(1, sizeof(Schema*));
+    if (!params) return NULL;
+    params[0] = inner;
+    // 1-byte tag (0=null, 1=present) followed by inner value
+    return create_schema_with_params(MORLOC_OPTIONAL, 1 + inner->width, 1, params, NULL);
 }
 
 static size_t parse_schema_size(char** schema_ptr){
@@ -479,6 +507,11 @@ Schema* parse_schema_r(char** schema_ptr, ERRMSG){
       break;
     case SCHEMA_STRING:
       schema = string_schema();
+      break;
+    case SCHEMA_OPTIONAL:
+      child_schema = parse_schema_r(schema_ptr, &CHILD_ERRMSG);
+      RAISE_IF(child_schema == NULL, "\n%s", CHILD_ERRMSG)
+      schema = optional_schema(child_schema);
       break;
     case '<':
       {

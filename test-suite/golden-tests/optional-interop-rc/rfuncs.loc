@@ -1,0 +1,9 @@
+module rfuncs (*)
+
+import types
+
+rSafeDiv :: Int -> Int -> ?Int
+rFromNull :: Int -> ?Int -> Int
+rDouble :: ?Int -> ?Int
+
+source R from "foo.R" ("rSafeDiv", "rFromNull", "rDouble")

@@ -105,6 +105,7 @@ checkForSelfRecursion d = do
     hasTerm v (NamU o n (p : ps) []) = hasTerm v p || hasTerm v (NamU o n ps [])
     hasTerm _ (NamU _ _ [] []) = False
     hasTerm v (ThunkU t) = hasTerm v t
+    hasTerm v (OptionalU t) = hasTerm v t
     hasTerm _ ExistU {} = error "There should not be existentionals in typedefs"
 
 resolveHoles ::
@@ -695,3 +696,4 @@ rename sourceName localAlias = f
       let v' = if v == sourceName then localAlias else v
        in NamU o v' (map f ts) (map (second f) rs)
     f (ThunkU t) = ThunkU (f t)
+    f (OptionalU t) = OptionalU (f t)

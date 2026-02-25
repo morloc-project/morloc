@@ -272,7 +272,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoReal v x) = RealN <$> inferVar v <*> pure x
     nativeExpr _ (MonoInt v x) = IntN <$> inferVar v <*> pure x
     nativeExpr _ (MonoStr v x) = StrN <$> inferVar v <*> pure x
-    nativeExpr _ (MonoNull v) = NullN <$> inferVar v
+    nativeExpr _ (MonoNull (Idx _ v)) = return $ NullN (FV v (CV "null"))
     nativeExpr m (MonoIf cond thenE elseE) = do
       condNe <- nativeExpr m cond
       thenNe <- nativeExpr m thenE

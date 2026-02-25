@@ -267,6 +267,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
       (namer'', es') <- statefulMapM collectAnnoS namer' es
       return (namer'', AppS e' es')
     f namer UniE = return (namer, UniS)
+    f namer NullE = return (namer, NullS)
     f namer (RealE x) = return (namer, RealS x)
     f namer (IntE x) = return (namer, IntS x)
     f namer (LogE x) = return (namer, LogS x)

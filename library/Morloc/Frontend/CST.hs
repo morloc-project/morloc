@@ -104,6 +104,7 @@ data CstExpr
   | CStrE Text
   | CLogE Bool
   | CUniE
+  | CNullE
   | CHolE
   | CLstE [Loc CstExpr]
   | CTupE [Loc CstExpr]

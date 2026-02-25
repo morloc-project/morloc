@@ -41,7 +41,7 @@ printExpr :: IExpr -> MDoc
 printExpr (IVar v) = pretty v
 printExpr (IBoolLit True) = "true"
 printExpr (IBoolLit False) = "false"
-printExpr INullLit = "nullptr"
+printExpr INullLit = "std::nullopt"
 printExpr (IIntLit i) = viaShow i
 printExpr (IRealLit r) = viaShow r
 printExpr (IStrLit s) = [idoc|std::string("#{pretty s}")|]

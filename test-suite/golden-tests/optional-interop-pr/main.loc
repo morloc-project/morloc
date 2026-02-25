@@ -1,0 +1,30 @@
+module main
+  ( testPyToR
+  , testPyToRNull
+  , testRToPy
+  , testRToPyNull
+  , testChainPyR
+  , testChainRPy
+  )
+
+import types
+import pyfuncs (pSafeDiv, pFromNull, pDouble)
+import rfuncs (rSafeDiv, rFromNull, rDouble)
+
+testPyToR :: Int
+testPyToR = rFromNull (-1) (pSafeDiv 10 3)
+
+testPyToRNull :: Int
+testPyToRNull = rFromNull (-1) (pSafeDiv 10 0)
+
+testRToPy :: Int
+testRToPy = pFromNull (-1) (rSafeDiv 10 2)
+
+testRToPyNull :: Int
+testRToPyNull = pFromNull (-1) (rSafeDiv 10 0)
+
+testChainPyR :: Int
+testChainPyR = rFromNull 0 (rDouble (pSafeDiv 10 3))
+
+testChainRPy :: Int
+testChainRPy = pFromNull 0 (pDouble (rSafeDiv 10 2))

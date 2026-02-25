@@ -125,6 +125,7 @@ findTypeKindSize v = head . catMaybes . f
       | v == v' = [Just (1 + (length ts1))]
       | otherwise = concat $ map f (ts1 <> ts2)
     f (ThunkU t) = f t
+    f (OptionalU t) = f t
 
 -- TypeU --> Type
 resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int
@@ -148,6 +149,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (LogS x) = LogS x
     f (StrS x) = StrS x
     f UniS = UniS
+    f NullS = NullS
     f (SuspendS e') = SuspendS (resolveTypes e')
     f (ForceS e') = ForceS (resolveTypes e')
     f (IfS c t e) = IfS (resolveTypes c) (resolveTypes t) (resolveTypes e)
@@ -229,6 +231,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       return (g2, LetS v e1' e2')
     -- primitives
     f _ g0 UniS = return (g0, UniS)
+    f _ g0 NullS = return (g0, NullS)
     f _ g0 (BndS v) = return (g0, BndS v)
     f _ g0 (CallS v) = return (g0, CallS v)
     f _ g0 (RealS x) = return (g0, RealS x)
@@ -299,6 +302,9 @@ synthE ::
     , ExprS (Indexed TypeU) ManyPoly Int
     )
 synthE _ g UniS = return (g, BT.unitU, UniS)
+synthE _ g NullS =
+  let (g1, v) = newvar "nullType_" g
+   in return (g1, OptionalU v, NullS)
 synthE _ g (RealS x) = return (g, BT.realU, RealS x)
 synthE _ g (IntS x) = return (g, BT.intU, IntS x)
 synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
@@ -936,6 +942,7 @@ application' i g es t = do
 
 peakSExpr :: ExprS Int ManyPoly Int -> MDoc
 peakSExpr UniS = "UniS"
+peakSExpr NullS = "NullS"
 peakSExpr (VarS v (MonomorphicExpr mayT _)) = "VarS" <+> pretty v <+> "::" <+> maybe "?" pretty mayT
 peakSExpr (VarS v (PolymorphicExpr cls _ t _)) = "VarS" <+> pretty cls <+> " => " <+> pretty v <+> "::" <+> pretty t
 peakSExpr (BndS v) = "BndS" <+> pretty v

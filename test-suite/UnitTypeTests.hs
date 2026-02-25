@@ -120,6 +120,9 @@ renameExistentials = snd . f (0 :: Int, Map.empty)
     f s (ThunkU t) =
       let (s', t') = f s t
        in (s', ThunkU t')
+    f s (OptionalU t) =
+      let (s', t') = f s t
+       in (s', OptionalU t')
 
 closeExistentials :: TypeU -> TypeU
 closeExistentials = f
@@ -131,6 +134,7 @@ closeExistentials = f
     f (AppU t ts) = AppU (f t) (map f ts)
     f (NamU o v ts rs) = NamU o v (map f ts) (map (second f) rs)
     f (ThunkU t) = ThunkU (f t)
+    f (OptionalU t) = OptionalU (f t)
 
 assertSubtypeGamma :: String -> [GammaIndex] -> TypeU -> TypeU -> [GammaIndex] -> TestTree
 assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do

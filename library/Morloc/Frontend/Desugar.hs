@@ -226,6 +226,7 @@ quantifyType t = forallWrap (nub (collectGenVars t)) t
     collectGenVars (FunU args ret) = concatMap collectGenVars args ++ collectGenVars ret
     collectGenVars (NamU _ _ ts entries) = concatMap collectGenVars ts ++ concatMap (collectGenVars . snd) entries
     collectGenVars (ThunkU inner) = collectGenVars inner
+    collectGenVars (OptionalU inner) = collectGenVars inner
     collectGenVars _ = []
 
 parseLang :: Located -> D Lang
@@ -462,6 +463,7 @@ desugarExpr (Loc sp (CRealE n)) = freshExprSpan sp (RealE n)
 desugarExpr (Loc sp (CStrE s)) = freshExprSpan sp (StrE s)
 desugarExpr (Loc sp (CLogE b)) = freshExprSpan sp (LogE b)
 desugarExpr (Loc sp CUniE) = freshExprSpan sp UniE
+desugarExpr (Loc sp CNullE) = freshExprSpan sp NullE
 desugarExpr (Loc sp CHolE) = freshExprSpan sp HolE
 -- Compound expressions
 desugarExpr (Loc _ (CAppE f args)) = do

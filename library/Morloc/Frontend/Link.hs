@@ -562,6 +562,7 @@ substituteInstanceTypes (unzip -> (clsVars, instanceParameters)) clsType = do
           | v == v' = ForallU r . f vs rs $ substituteTVar v' (VarU r) t
           | otherwise = ForallU v' (f (v : vs) (r : rs) t)
         f vs rs (ThunkU t) = ThunkU (f vs rs t)
+        f vs rs (OptionalU t) = OptionalU (f vs rs t)
         f _ _ t = t
 
         freshVariables = [1 ..] >>= flip replicateM ['a' .. 'z'] |>> TV . DT.pack

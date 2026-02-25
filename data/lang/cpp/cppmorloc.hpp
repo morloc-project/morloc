@@ -7,6 +7,7 @@
 #include <forward_list>
 #include <queue>
 #include <deque>
+#include <optional>
 
 #include <algorithm>
 #include <tuple>
@@ -41,6 +42,9 @@ template<typename T, typename C> struct is_std_queue<std::queue<T, C>> : std::tr
 
 template<typename T> struct is_std_tuple : std::false_type {};
 template<typename... Args> struct is_std_tuple<std::tuple<Args...>> : std::true_type {};
+
+template<typename T> struct is_std_optional : std::false_type {};
+template<typename T> struct is_std_optional<std::optional<T>> : std::true_type {};
 
 template<typename T>
 inline constexpr bool is_non_vector_container_v =
@@ -138,12 +142,23 @@ size_t get_shm_size(const Schema* schema, const std::vector<T>& data) {
         case MORLOC_ARRAY:
         case MORLOC_TUPLE:
         case MORLOC_MAP:
+        case MORLOC_OPTIONAL:
             for(size_t i = 0; i < data.size(); i++){
                total_size += get_shm_size(schema->parameters[0], data[i]);
             }
             break;
     }
     return total_size;
+}
+
+// Optional: 1-byte tag + inner value
+template<typename T>
+size_t get_shm_size(const Schema* schema, const std::optional<T>& data) {
+    if (!data.has_value()) {
+        // null: tag + reserved inner space (no variable-length data)
+        return 1 + schema->parameters[0]->width;
+    }
+    return 1 + get_shm_size(schema->parameters[0], *data);
 }
 
 size_t get_shm_size(const Schema* schema, const std::string& data) {
@@ -366,6 +381,19 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::tup
     return createTupleAnythingHelper(dest, schema, cursor, data, std::index_sequence_for<Args...>{});
 }
 
+// Optional
+template<typename T>
+void* toAnything(void* dest, void** cursor, const Schema* schema, const std::optional<T>& data) {
+    if (!data.has_value()) {
+        *((uint8_t*)dest) = 0;
+        memset((char*)dest + 1, 0, schema->parameters[0]->width);
+    } else {
+        *((uint8_t*)dest) = 1;
+        toAnything((char*)dest + 1, cursor, schema->parameters[0], *data);
+    }
+    return dest;
+}
+
 
 // ============================================================
 // fromAnything - single template with if constexpr dispatch
@@ -474,6 +502,14 @@ T fromAnything(const Schema* schema, const void* data, T*) {
             std::make_index_sequence<std::tuple_size_v<T>>{},
             static_cast<T*>(nullptr)
         );
+    }
+    else if constexpr (is_std_optional<T>::value) {
+        using InnerT = typename T::value_type;
+        uint8_t tag = *(const uint8_t*)data;
+        if (tag == 0) {
+            return std::nullopt;
+        }
+        return std::optional<InnerT>(fromAnything(schema->parameters[0], (const char*)data + 1, static_cast<InnerT*>(nullptr)));
     }
     else {
         // Primitives (int, double, float, etc.)
