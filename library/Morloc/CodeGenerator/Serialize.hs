@@ -277,7 +277,11 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       condNe <- nativeExpr m cond
       thenNe <- nativeExpr m thenE
       elseNe <- nativeExpr m elseE
-      return $ IfN (typeFof thenNe) condNe thenNe elseNe
+      let ifType = case (thenNe, elseNe) of
+            (NullN _, _) -> typeFof elseNe
+            (_, NullN _) -> typeFof thenNe
+            _ -> typeFof thenNe
+      return $ IfN ifType condNe thenNe elseNe
     nativeExpr m (MonoSuspend t e) = SuspendN <$> inferType t <*> nativeExpr m e
     nativeExpr m (MonoForce t e) = ForceN <$> inferType t <*> nativeExpr m e
     nativeExpr m (MonoCoerce c t e) = CoerceN c <$> inferType t <*> nativeExpr m e

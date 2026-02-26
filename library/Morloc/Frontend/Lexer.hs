@@ -284,7 +284,7 @@ classifyWord "infix" = TokInfix
 classifyWord "let" = TokLet
 classifyWord "in" = TokIn
 classifyWord "do" = TokDo
-classifyWord "null" = TokNull
+classifyWord "Null" = TokNull
 classifyWord t
   | isUpper (T.head t) = TokUpperName t
   | otherwise = TokLowerName t

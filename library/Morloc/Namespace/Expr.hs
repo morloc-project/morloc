@@ -465,7 +465,7 @@ instance Pretty Lit where
   pretty (MLog x) = pretty x
   pretty (MStr x) = pretty x
   pretty MUni = "Unit"
-  pretty MNull = "null"
+  pretty MNull = "Null"
 
 instance Pretty E where
   pretty (BndP _ v) = pretty v
@@ -598,7 +598,7 @@ instance Pretty Expr where
         InfixN -> "infix"
   pretty (BopE e1 _ v e2) = pretty e1 <+> pretty v <+> pretty e2
   pretty (IfE c t e) = "if" <+> pretty c <+> "then" <+> pretty t <+> "else" <+> pretty e
-  pretty NullE = "null"
+  pretty NullE = "Null"
   pretty (SuspendE e) = "{" <> pretty e <> "}"
   pretty (ForceE e) = "!" <> pretty e
 

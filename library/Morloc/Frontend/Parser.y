@@ -93,7 +93,7 @@ import qualified Morloc.BaseTypes as BT
   'let'      { Located _ TokLet _ }
   'in'       { Located _ TokIn _ }
   'do'       { Located _ TokDo _ }
-  'null'     { Located _ TokNull _ }
+  'Null'     { Located _ TokNull _ }
   LOWER      { Located _ (TokLowerName _) _ }
   UPPER      { Located _ (TokUpperName _) _ }
   OPERATOR   { Located _ (TokOperator _) _ }
@@ -505,7 +505,7 @@ atom_expr :: { Loc CstExpr }
   | null_expr                 { $1 }
 
 null_expr :: { Loc CstExpr }
-  : 'null'                    { at $1 CNullE }
+  : 'Null'                    { at $1 CNullE }
 
 force_expr :: { Loc CstExpr }
   : '!' atom_expr             { at $1 (CForceE $2) }

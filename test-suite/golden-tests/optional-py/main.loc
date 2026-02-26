@@ -34,13 +34,13 @@ source Py from "foo.py"
   )
 
 testNull :: ?Int
-testNull = null
+testNull = Null
 
 testValue :: ?Int
 testValue = toNull 42
 
 testFromNull :: Int
-testFromNull = fromNull 0 null
+testFromNull = fromNull 0 Null
 
 testSafeHead :: ?Int
 testSafeHead = safeHead [10, 20, 30]
@@ -52,7 +52,7 @@ testOptionalAdd :: ?Int
 testOptionalAdd = optionalAdd (toNull 3) (toNull 4)
 
 testOptionalAddNull :: ?Int
-testOptionalAddNull = optionalAdd null (toNull 4)
+testOptionalAddNull = optionalAdd Null (toNull 4)
 
 testOptionalList :: [?Int]
 testOptionalList = optionalList [1, -2, 3, -4, 5]

@@ -1,0 +1,28 @@
+module main (testSafeHead, testSafeHeadEmpty, testFromNull)
+
+import root-py
+import root-cpp
+import root-r
+
+safeHead a :: [a] -> ?a
+safeHead xs
+  ? length xs == 0 = Null
+  : head xs
+
+source Py from "main.py" ("fromNull")
+source R from "main.R" ("fromNull")
+source Cpp from "main.hpp" ("fromNull")
+
+fromNull  a :: a -> ?a -> a
+
+testSafeHead :: ?Int
+testSafeHead = safeHead [10, 20, 30]
+
+testSafeHeadEmpty :: ?Int
+testSafeHeadEmpty = safeHead []
+
+testFromNull :: (Int, Int, Int)
+testFromNull = ( fromNull 0 (idpy Null)
+               , fromNull 0 (idr Null)
+               , fromNull 0 (idcpp Null)
+               )
