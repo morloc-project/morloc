@@ -1,0 +1,8 @@
+module main (foo)
+
+type Py => Real = "float"
+
+import .bar.baz (compute)
+
+foo :: Real -> Real -> Real
+foo x y = compute x y
