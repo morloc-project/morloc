@@ -1,4 +1,4 @@
-module baz (*)
+module (*)
 
 source Py from "main.py" ("mul")
 

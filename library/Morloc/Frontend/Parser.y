@@ -130,7 +130,9 @@ modules :: { [Loc CstExpr] }
 
 module :: { Loc CstExpr }
   : 'module' module_name '(' exports ')' top_body
-      { at $1 (CModE $2 $4 $6) }
+      { at $1 (CModE (Just $2) $4 $6) }
+  | 'module' '(' exports ')' top_body
+      { at $1 (CModE Nothing $3 $5) }
 
 top_body :: { [Loc CstExpr] }
   : VLBRACE top_decls VRBRACE   { $2 }
@@ -209,6 +211,8 @@ symbol :: { Located }
 import_decl :: { Loc CstExpr }
   : 'import' module_name opt_import_list
       { at $1 (CImpE (Import (MV $2) $3 [] Nothing)) }
+  | 'import' GDOT module_name opt_import_list
+      { at $1 (CImpE (Import (MV ("." <> $3)) $4 [] Nothing)) }
 
 opt_import_list :: { Maybe [AliasedSymbol] }
   : {- empty -}                            { Nothing }
@@ -726,11 +730,12 @@ data PState = PState
   , psDocMap      :: !(Map.Map Pos [Text])
   , psSourceLines :: ![Text]
   , psLangMap :: !(Map.Map T.Text Lang) -- alias -> Lang for all known languages
+  , psProjectRoot :: !(Maybe Path) -- project root (directory of entry-point file)
   }
   deriving (Show)
 
 emptyPState :: PState
-emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty
+emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing
 
 type P a = State.StateT PState (Either ParseError) a
 
@@ -810,6 +815,7 @@ toDState ps = DState
   , dsModuleConfig = psModuleConfig ps
   , dsSourceLines = psSourceLines ps
   , dsLangMap = psLangMap ps
+  , dsProjectRoot = psProjectRoot ps
   }
 
 fromDState :: PState -> DState -> PState

@@ -1,4 +1,4 @@
-module bar (*)
+module (*)
 
 source Py from "main.py" ("add")
 

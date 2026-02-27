@@ -33,7 +33,7 @@ import Morloc.Frontend.Token hiding (startPos)
 import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
-import System.FilePath (combine, takeDirectory)
+import System.FilePath (combine, dropExtension, makeRelative, splitDirectories, takeDirectory)
 
 --------------------------------------------------------------------
 -- Desugar state and monad
@@ -104,6 +104,7 @@ data DState = DState
   , dsModuleConfig :: !ModuleConfig
   , dsSourceLines :: ![Text]
   , dsLangMap :: !(Map.Map Text Lang) -- alias -> Lang for all known languages
+  , dsProjectRoot :: !(Maybe Path) -- project root (directory of entry-point file)
   }
   deriving (Show)
 
@@ -510,7 +511,7 @@ desugarExpr (Loc sp (CInterpE startText exprs mids endText)) = do
 desugarExpr (Loc sp (CGuardExprE guards defaultExpr)) = desugarGuards sp guards defaultExpr
 
 -- Top-level declarations should not appear inside expressions
-desugarExpr (Loc _ (CModE {})) = error "desugarExpr: unexpected CModE in expression position"
+desugarExpr (Loc _ CModE{}) = error "desugarExpr: unexpected CModE in expression position"
 desugarExpr (Loc _ (CImpE {})) = error "desugarExpr: unexpected CImpE in expression position"
 desugarExpr (Loc _ (CSigE {})) = error "desugarExpr: unexpected CSigE in expression position"
 desugarExpr (Loc _ (CAssE {})) = error "desugarExpr: unexpected CAssE in expression position"
@@ -526,8 +527,32 @@ desugarExpr (Loc _ (CGuardedAssE {})) = error "desugarExpr: unexpected CGuardedA
 -- Top-level declaration desugaring
 --------------------------------------------------------------------
 
+-- | Infer a dot-prefixed module name from a file path relative to the project root.
+-- e.g., projectRoot=/project, filePath=/project/lib/math/main.loc -> ".lib.math"
+inferModuleName :: Path -> Path -> Text
+inferModuleName projectRoot filePath =
+  let relPath = makeRelative projectRoot filePath
+      parts = splitDirectories relPath
+      -- Strip .loc extension from the last component
+      cleaned = case parts of
+        [] -> ["main"]
+        _ -> init parts ++ [dropExtension (last parts)]
+      -- Strip trailing "main" for directory modules (but not if it's the only component)
+      stripped = case cleaned of
+        xs | length xs > 1 && last xs == "main" -> init xs
+        xs -> xs
+  in "." <> T.intercalate "." (map T.pack stripped)
+
 desugarTopLevel :: Loc CstExpr -> D [ExprI]
-desugarTopLevel (Loc sp (CModE name export body)) = do
+desugarTopLevel (Loc sp (CModE maybeName export body)) = do
+  name <- case maybeName of
+    Just n -> return n
+    Nothing -> do
+      modPath <- State.gets dsModulePath
+      projRoot <- State.gets dsProjectRoot
+      case (modPath, projRoot) of
+        (Just mp, Just pr) -> return (inferModuleName pr mp)
+        _ -> dfail (startPos sp) "nameless module requires a file path and project root"
   expExprI <- desugarExport sp export
   bodyExprs <- concatMapM desugarTopLevel body
   modI <- freshIdSpan sp

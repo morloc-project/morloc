@@ -34,6 +34,7 @@ import qualified Morloc.Frontend.Valuecheck as Valuecheck
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
+import qualified Morloc.System as MS
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 
 {- | Parse a morloc source file and all its imports into a module DAG.
@@ -49,16 +50,23 @@ parse f (Code code) = do
   moduleConfig <- Config.loadModuleConfig f
   langMap <- buildLangMap'
 
+  -- Compute project root from entry-point file path
+  let projectRoot = fmap MS.takeDirectory f
+
   let parserState =
         emptyPState
           { psModuleConfig = moduleConfig
           , psLangMap = langMap
+          , psProjectRoot = projectRoot
           }
 
-  -- store source text and load package metadata for the main file
+  -- store source text, project root, and load package metadata for the main file
   case f of
     Just path -> do
-      MM.modify (\st -> st {stateSourceText = Map.insert path code (stateSourceText st)})
+      MM.modify (\st -> st
+        { stateSourceText = Map.insert path code (stateSourceText st)
+        , stateProjectRoot = projectRoot
+        })
       Mod.loadModuleMetadata path
     Nothing -> return ()
 

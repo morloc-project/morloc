@@ -82,7 +82,7 @@ infixl 5 <->
 
 data CstExpr
   = -- Top-level declarations
-    CModE Text CstExport [Loc CstExpr]
+    CModE (Maybe Text) CstExport [Loc CstExpr]
   | CImpE Import
   | CSigE EVar [Text] CstSigType
   | CAssE EVar [Text] (Loc CstExpr) [Loc CstExpr]

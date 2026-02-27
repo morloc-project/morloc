@@ -120,6 +120,8 @@ data MorlocState = MorlocState
   -- ^ Map from group name to (description lines, member export indices)
   , stateManifoldLang :: Map Int Lang
   -- ^ Map from export manifold ID to its pool language
+  , stateProjectRoot :: Maybe Path
+  -- ^ Project root directory (directory of the entry-point file)
   }
   deriving (Show)
 
@@ -281,6 +283,7 @@ instance Defaultable MorlocState where
       , stateLangRegistry = LR.emptyRegistry
       , stateExportGroups = Map.empty
       , stateManifoldLang = Map.empty
+      , stateProjectRoot = Nothing
       }
 
 instance Defaultable PackageMeta where
