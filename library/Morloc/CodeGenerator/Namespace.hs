@@ -453,6 +453,7 @@ data PolyExpr
   | PolyForce (Indexed Type) PolyExpr
   | PolyCoerce Coercion (Indexed Type) PolyExpr
   | PolyIf PolyExpr PolyExpr PolyExpr
+  | PolyIntrinsic (Indexed Type) Intrinsic [PolyExpr]
 
 data MonoHead = MonoHead Lang Int [Arg None] HeadManifoldForm MonoExpr
 
@@ -485,6 +486,7 @@ data MonoExpr
   | MonoForce (Indexed Type) MonoExpr
   | MonoCoerce Coercion (Indexed Type) MonoExpr
   | MonoIf MonoExpr MonoExpr MonoExpr
+  | MonoIntrinsic (Indexed Type) Intrinsic [MonoExpr]
 
 data PoolCall
   = PoolCall
@@ -559,6 +561,9 @@ data NativeExpr
   | ForceN TypeF NativeExpr
   | CoerceN Coercion TypeF NativeExpr
   | IfN TypeF NativeExpr NativeExpr NativeExpr
+  | IntrinsicN TypeF Intrinsic (Maybe Text) [NativeExpr]
+  -- ^ The Maybe Text is the precomputed msgpack schema string for the data arg
+  -- (Nothing for compile-time intrinsics that are resolved by Reduce)
   deriving (Show)
 
 foldlSM :: (b -> a -> b) -> b -> SerialManifold_ a -> b
@@ -609,6 +614,7 @@ foldlNE f b (SuspendN_ _ x) = f b x
 foldlNE f b (ForceN_ _ x) = f b x
 foldlNE f b (CoerceN_ _ _ x) = f b x
 foldlNE f b (IfN_ _ c t e) = foldl f b [c, t, e]
+foldlNE f b (IntrinsicN_ _ _ _ xs) = foldl f b xs
 
 data MonoidFold m a = MonoidFold
   { monoidSerialManifold :: SerialManifold_ (a, SerialExpr) -> m (a, SerialManifold)
@@ -683,6 +689,8 @@ makeMonoidFoldDefault mempty' mappend' =
     monoidNativeExpr' (CoerceN_ c t (a, ne)) = return (a, CoerceN c t ne)
     monoidNativeExpr' (IfN_ t (a1, c) (a2, thenE) (a3, elseE)) =
       return (foldl mappend' mempty' [a1, a2, a3], IfN t c thenE elseE)
+    monoidNativeExpr' (IntrinsicN_ t intr msch (unzip -> (reqs, es))) =
+      return (foldl mappend' mempty' reqs, IntrinsicN t intr msch es)
 
 -- where
 --  * m - monad
@@ -824,6 +832,7 @@ data NativeExpr_ nm se ne sr nr
   | ForceN_ TypeF ne
   | CoerceN_ Coercion TypeF ne
   | IfN_ TypeF ne ne ne
+  | IntrinsicN_ TypeF Intrinsic (Maybe Text) [ne]
 
 manifoldFoldToFoldWith :: FoldManifoldM m sm nm se ne sr nr -> FoldWithManifoldM m sm nm se ne sr nr
 manifoldFoldToFoldWith fm =
@@ -1027,6 +1036,9 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
       thenE' <- surroundFoldNativeExprM sfm fm thenE
       elseE' <- surroundFoldNativeExprM sfm fm elseE
       opFoldWithNativeExprM fm full (IfN_ t cond' thenE' elseE')
+    f full@(IntrinsicN t intr msch nes) = do
+      nes' <- mapM (surroundFoldNativeExprM sfm fm) nes
+      opFoldWithNativeExprM fm full (IntrinsicN_ t intr msch nes')
 
 class HasTypeF a where
   typeFof :: a -> TypeF
@@ -1056,6 +1068,7 @@ instance HasTypeF NativeExpr where
   typeFof (ForceN t _) = t
   typeFof (CoerceN _ t _) = t
   typeFof (IfN t _ _ _) = t
+  typeFof (IntrinsicN t _ _ _) = t
 
 class HasTypeM e where
   typeMof :: e -> TypeM
@@ -1252,6 +1265,7 @@ instance MFunctor NativeExpr where
         (ForceN t ne) -> mapNativeExpr f $ ForceN t (mgatedMap g f ne)
         (CoerceN c t ne) -> mapNativeExpr f $ CoerceN c t (mgatedMap g f ne)
         (IfN t c thenE elseE) -> mapNativeExpr f $ IfN t (mgatedMap g f c) (mgatedMap g f thenE) (mgatedMap g f elseE)
+        (IntrinsicN t intr msch nes) -> mapNativeExpr f $ IntrinsicN t intr msch (map (mgatedMap g f) nes)
     | otherwise = mapNativeExpr f ne0
 
 instance (Pretty a) => Pretty (Arg a) where
@@ -1300,6 +1314,7 @@ instance Pretty PolyExpr where
   pretty (PolyForce _ e) = "PolyForce" <+> pretty e
   pretty (PolyCoerce _ _ e) = "PolyCoerce" <+> pretty e
   pretty (PolyIf c t e) = "PolyIf" <+> pretty c <+> pretty t <+> pretty e
+  pretty (PolyIntrinsic _ intr es) = "@" <> pretty (intrinsicName intr) <+> list (map pretty es)
 
 instance Pretty MonoExpr where
   pretty (MonoManifold i form e) =
@@ -1329,6 +1344,7 @@ instance Pretty MonoExpr where
   pretty (MonoForce _ e) = "!" <> pretty e
   pretty (MonoCoerce _ _ e) = "coerce(" <> pretty e <> ")"
   pretty (MonoIf c t e) = "if" <+> pretty c <+> "then" <+> pretty t <+> "else" <+> pretty e
+  pretty (MonoIntrinsic _ intr es) = "@" <> pretty (intrinsicName intr) <+> list (map pretty es)
 
 instance Pretty MonoHead where
   pretty (MonoHead lang i args headForm e) =

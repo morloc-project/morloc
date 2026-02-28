@@ -16,12 +16,15 @@ module Morloc.CodeGenerator.Nexus
   ( generate
   ) where
 
+import Control.Monad.IO.Class (liftIO)
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
 import Data.Text (Text)
 import qualified Data.Text as MT
+import qualified Data.Time.Clock
 import qualified Data.Time.Clock.POSIX as Time
+import qualified Data.Time.Format
 import qualified Morloc.BaseTypes as MBT
 import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.Namespace
@@ -32,6 +35,7 @@ import Morloc.Data.Json
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
+import qualified Morloc.Version
 import qualified System.Directory as Dir
 
 -- ======================================================================
@@ -269,8 +273,19 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS _ _ (SuspendS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (ForceS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (CoerceS _ e)) = toNexusExpr e
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr _)) = do
+      v <- resolveCompileTimeIntrinsic intr
+      StrX <$> type2schema t <*> pure v
     toNexusExpr (AnnoS (Idx _ t) _ (CallS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr _ = error $ "Unreachable value of type reached"
+
+resolveCompileTimeIntrinsic :: Intrinsic -> MorlocMonad Text
+resolveCompileTimeIntrinsic IntrVersion = return $ MT.pack Morloc.Version.versionStr
+resolveCompileTimeIntrinsic IntrCompiled = do
+  now <- liftIO Data.Time.Clock.getCurrentTime
+  return . MT.pack $ Data.Time.Format.formatTime Data.Time.Format.defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now
+resolveCompileTimeIntrinsic intr =
+  MM.throwSystemError $ "@" <> pretty (intrinsicName intr) <> " cannot be used in a context without a language-specific source"
 
 -- ======================================================================
 -- CLI argument serialization

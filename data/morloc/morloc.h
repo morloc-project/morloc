@@ -41,6 +41,7 @@
 #include "pool.h"
 #include "http.h"
 #include "router.h"
+#include "intrinsics.h"
 
 #ifdef __cplusplus
 extern "C" {

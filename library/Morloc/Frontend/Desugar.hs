@@ -320,6 +320,15 @@ resolveSourceFile modulePath srcFile =
     (Nothing, s) -> fmap T.unpack s
 
 --------------------------------------------------------------------
+-- Intrinsic resolution
+--------------------------------------------------------------------
+
+resolveIntrinsic :: Pos -> Text -> D Intrinsic
+resolveIntrinsic pos name = case parseIntrinsic name of
+  Just intr -> return intr
+  Nothing -> dfail pos ("unknown intrinsic: @" ++ T.unpack name)
+
+--------------------------------------------------------------------
 -- Accessor resolution
 --------------------------------------------------------------------
 
@@ -466,6 +475,14 @@ desugarExpr (Loc sp (CLogE b)) = freshExprSpan sp (LogE b)
 desugarExpr (Loc sp CUniE) = freshExprSpan sp UniE
 desugarExpr (Loc sp CNullE) = freshExprSpan sp NullE
 desugarExpr (Loc sp CHolE) = freshExprSpan sp HolE
+-- Intrinsics: eta-expand when under-applied so they behave as first-class functions
+desugarExpr (Loc sp (CIntrinsicE name)) = do
+  intr <- resolveIntrinsic (startPos sp) name
+  etaExpandIntrinsic sp intr []
+desugarExpr (Loc sp (CAppE (Loc _ (CIntrinsicE name)) args)) = do
+  intr <- resolveIntrinsic (startPos sp) name
+  args' <- mapM desugarExpr args
+  etaExpandIntrinsic sp intr args'
 -- Compound expressions
 desugarExpr (Loc _ (CAppE f args)) = do
   f' <- desugarExpr f
@@ -522,6 +539,23 @@ desugarExpr (Loc _ (CFixE {})) = error "desugarExpr: unexpected CFixE in express
 desugarExpr (Loc _ (CSrcOldE {})) = error "desugarExpr: unexpected CSrcOldE in expression position"
 desugarExpr (Loc _ (CSrcNewE {})) = error "desugarExpr: unexpected CSrcNewE in expression position"
 desugarExpr (Loc _ (CGuardedAssE {})) = error "desugarExpr: unexpected CGuardedAssE in expression position"
+
+-- | Wrap an intrinsic in a lambda if it has fewer args than its arity.
+-- Fully applied intrinsics pass through as IntrinsicE nodes.
+etaExpandIntrinsic :: Span -> Intrinsic -> [ExprI] -> D ExprI
+etaExpandIntrinsic sp intr args = do
+  let arity = intrinsicArity intr
+      actual = length args
+  if actual >= arity
+    then freshExprSpan sp (IntrinsicE intr args)
+    else do
+      idx <- freshIdSpan sp
+      let remaining = arity - actual
+          vars = [EV ("_intr_" <> T.pack (show idx) <> "_" <> T.pack (show j)) | j <- [0..remaining-1]]
+      varExprs <- mapM (\v -> freshExprSpan sp (VarE defaultValue v)) vars
+      intrExpr <- freshExprSpan sp (IntrinsicE intr (args ++ varExprs))
+      freshExprSpan sp (LamE vars intrExpr)
+
 
 --------------------------------------------------------------------
 -- Top-level declaration desugaring

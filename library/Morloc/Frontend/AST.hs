@@ -162,6 +162,7 @@ checkExprI f e@(ExprI _ (LetE bindings body)) = f e >> mapM_ (checkExprI f . snd
 checkExprI f e@(ExprI _ (IfE c t el)) = f e >> mapM_ (checkExprI f) [c, t, el]
 checkExprI f e@(ExprI _ (SuspendE e')) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (ForceE e')) = f e >> checkExprI f e'
+checkExprI f e@(ExprI _ (IntrinsicE _ es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e = f e
 
 -- | Find the largest index used in an 'ExprI' tree.
@@ -182,6 +183,7 @@ maxIndex (ExprI i (LetE bindings body)) = maximum (i : maxIndex body : map (maxI
 maxIndex (ExprI i (IfE c t e)) = maximum [i, maxIndex c, maxIndex t, maxIndex e]
 maxIndex (ExprI i (SuspendE e)) = max i (maxIndex e)
 maxIndex (ExprI i (ForceE e)) = max i (maxIndex e)
+maxIndex (ExprI i (IntrinsicE _ es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i _) = i
 
 -- | Collect all indices from an 'ExprI' tree.
@@ -205,4 +207,5 @@ getIndices (ExprI i (LetE bindings body)) = i : concatMap (getIndices . snd) bin
 getIndices (ExprI i (IfE c t e)) = i : concatMap getIndices [c, t, e]
 getIndices (ExprI i (SuspendE e)) = i : getIndices e
 getIndices (ExprI i (ForceE e)) = i : getIndices e
+getIndices (ExprI i (IntrinsicE _ es)) = i : concatMap getIndices es
 getIndices (ExprI i _) = [i]

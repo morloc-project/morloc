@@ -116,6 +116,7 @@ data CstExpr
   | CAccessorE CstAccessorBody
   | CInterpE Text [Loc CstExpr] [Text] Text
   | CGuardExprE [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr)
+  | CIntrinsicE Text  -- ^ @name intrinsic reference (text is the name without @)
   deriving (Show, Eq)
 
 data CstExport

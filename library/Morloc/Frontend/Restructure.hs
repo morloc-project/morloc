@@ -144,6 +144,7 @@ resolveHoles = DAG.mapNodeM unhole
     unhole (ExprI i (IfE c t e)) = IfE <$> unhole c <*> unhole t <*> unhole e |>> ExprI i
     unhole (ExprI i (SuspendE e)) = SuspendE <$> unhole e |>> ExprI i
     unhole (ExprI i (ForceE e)) = ForceE <$> unhole e |>> ExprI i
+    unhole (ExprI i (IntrinsicE intr es)) = IntrinsicE intr <$> mapM unhole es |>> ExprI i
     unhole (ExprI _ (BopE _ _ _ _)) = error "Bop should have been resolved"
     unhole e = return e
 
@@ -190,6 +191,7 @@ resolveHoles = DAG.mapNodeM unhole
     descend (ExprI i (IfE c t e)) = IfE <$> descend c <*> descend t <*> descend e |>> ExprI i
     descend (ExprI i (SuspendE e)) = SuspendE <$> descend e |>> ExprI i
     descend (ExprI i (ForceE e)) = ForceE <$> descend e |>> ExprI i
+    descend (ExprI i (IntrinsicE intr es)) = IntrinsicE intr <$> mapM descend es |>> ExprI i
     descend e = return e
 
     -- name a hole based on the index of the new lambda and the hole position
@@ -438,6 +440,7 @@ handleBinops d0 = do
         f (ExprI i (IfE c t e)) = IfE <$> f c <*> f t <*> f e |>> ExprI i
         f (ExprI i (SuspendE e)) = SuspendE <$> f e |>> ExprI i
         f (ExprI i (ForceE e)) = ForceE <$> f e |>> ExprI i
+        f (ExprI i (IntrinsicE intr es)) = IntrinsicE intr <$> mapM f es |>> ExprI i
         f e = return e
 
     -- \| Rewrite a right-nested BopE chain into a correctly-associated AppE tree.

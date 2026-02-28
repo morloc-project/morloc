@@ -124,6 +124,80 @@ T _get_value(const uint8_t* packet, const std::string& schema_str){
 }
 
 
+// Hash a value, returning a 16-char hex string
+template <typename T>
+std::string _mlc_hash(const T& value, const std::string& schema_str) {
+    Schema* schema = get_cached_schema(schema_str.c_str());
+    void* voidstar = toAnything(schema, value);
+    char* errmsg = NULL;
+    char* hex = mlc_hash(voidstar, schema, &errmsg);
+    shfree_cpp(voidstar);
+    if (errmsg != NULL) {
+        PROPAGATE_ERROR(errmsg)
+    }
+    std::string result(hex);
+    free(hex);
+    return result;
+}
+
+// Save a value to file in msgpack format
+template <typename T>
+void _mlc_save(const T& value, const std::string& schema_str, const std::string& path) {
+    Schema* schema = get_cached_schema(schema_str.c_str());
+    void* voidstar = toAnything(schema, value);
+    char* errmsg = NULL;
+    mlc_save(voidstar, schema, path.c_str(), &errmsg);
+    shfree_cpp(voidstar);
+    if (errmsg != NULL) {
+        PROPAGATE_ERROR(errmsg)
+    }
+}
+
+// Save a value to file in flat voidstar binary format
+template <typename T>
+void _mlc_save_voidstar(const T& value, const std::string& schema_str, const std::string& path) {
+    Schema* schema = get_cached_schema(schema_str.c_str());
+    void* voidstar = toAnything(schema, value);
+    char* errmsg = NULL;
+    mlc_save_voidstar(voidstar, schema, path.c_str(), &errmsg);
+    shfree_cpp(voidstar);
+    if (errmsg != NULL) {
+        PROPAGATE_ERROR(errmsg)
+    }
+}
+
+// Save a value to file in JSON format
+template <typename T>
+void _mlc_save_json(const T& value, const std::string& schema_str, const std::string& path) {
+    Schema* schema = get_cached_schema(schema_str.c_str());
+    void* voidstar = toAnything(schema, value);
+    char* errmsg = NULL;
+    mlc_save_json(voidstar, schema, path.c_str(), &errmsg);
+    shfree_cpp(voidstar);
+    if (errmsg != NULL) {
+        PROPAGATE_ERROR(errmsg)
+    }
+}
+
+// Load a value from file, auto-detecting format
+// Returns std::nullopt if file does not exist
+template <typename T>
+std::optional<T> _mlc_load(const std::string& schema_str, const std::string& path) {
+    Schema* schema = get_cached_schema(schema_str.c_str());
+    char* errmsg = NULL;
+    void* voidstar = mlc_load(path.c_str(), schema, &errmsg);
+    if (errmsg != NULL) {
+        PROPAGATE_ERROR(errmsg)
+    }
+    if (voidstar == NULL) {
+        return std::nullopt;
+    }
+    T* dummy = nullptr;
+    T result = fromAnything(schema, voidstar, dummy);
+    shfree_cpp(voidstar);
+    return result;
+}
+
 uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
     char* errmsg = NULL;
     va_list args;

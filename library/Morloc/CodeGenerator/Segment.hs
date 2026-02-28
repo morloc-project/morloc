@@ -129,3 +129,7 @@ segmentExpr m args (PolyForce t e) = do
 segmentExpr m args (PolyCoerce c t e) = do
   (ms, (_, e')) <- segmentExpr m args e
   return (ms, (Nothing, MonoCoerce c t e'))
+segmentExpr m args (PolyIntrinsic t intr es) = do
+  results <- mapM (segmentExpr m args) es
+  let (mss, pairs) = unzip results
+  return (concat mss, (Nothing, MonoIntrinsic t intr (map snd pairs)))

@@ -171,6 +171,7 @@ applyLambdas (AnnoS g c (ForceS (AnnoS _ _ (SuspendS e)))) = do
   return (AnnoS g c inner)
 applyLambdas (AnnoS g c (ForceS e)) = AnnoS g c . ForceS <$> applyLambdas e
 applyLambdas (AnnoS g c (CoerceS co e)) = AnnoS g c . CoerceS co <$> applyLambdas e
+applyLambdas (AnnoS g c (IntrinsicS intr es)) = AnnoS g c . IntrinsicS intr <$> mapM applyLambdas es
 applyLambdas (AnnoS g c (CallS v)) = return (AnnoS g c (CallS v))
 applyLambdas x = return x
 
@@ -213,5 +214,6 @@ substituteAnnoS v r = f
     f (AnnoS g c (SuspendS e)) = AnnoS g c (SuspendS (f e))
     f (AnnoS g c (ForceS e)) = AnnoS g c (ForceS (f e))
     f (AnnoS g c (CoerceS co e)) = AnnoS g c (CoerceS co (f e))
+    f (AnnoS g c (IntrinsicS intr es)) = AnnoS g c (IntrinsicS intr (map f es))
     -- CallS is a recursive back-edge, not a variable reference to substitute
     f x = x

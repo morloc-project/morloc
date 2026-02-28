@@ -206,6 +206,13 @@ realizeWithRegistry registry s0 = do
     scoreExpr rstat (CoerceS c x, i) = do
       x' <- scoreAnnoS rstat x
       return (CoerceS c x', Idx i (scoresOf x'))
+    scoreExpr rstat (IntrinsicS intr xs, i) = do
+      xs' <- mapM (scoreAnnoS rstat) xs
+      let Idx _ langScores = zipLang i rstat
+          best = case xs' of
+            [] -> langScores
+            _ -> minPairs (concatMap scoresOf xs')
+      return (IntrinsicS intr xs', Idx i best)
 
     -- calculate the score for an application based on the score of the function
     -- and the scores of the arguments
@@ -426,6 +433,10 @@ realizeWithRegistry registry s0 = do
       lang <- chooseLanguage l1 ss
       x' <- collapseAnnoS lang x
       return (CoerceS c x', Idx i lang)
+    collapseExpr _ l1 (IntrinsicS intr xs, Idx i ss) = do
+      lang <- chooseLanguage l1 ss
+      xs' <- mapM (collapseAnnoS lang) xs
+      return (IntrinsicS intr xs', Idx i lang)
 
     chooseLanguage :: Maybe Lang -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
     chooseLanguage l1 ss = do
@@ -492,6 +503,7 @@ realizeWithRegistry registry s0 = do
             (SuspendS x) -> SuspendS <$> f lang x
             (ForceS x) -> ForceS <$> f lang x
             (CoerceS c x) -> CoerceS c <$> f lang x
+            (IntrinsicS intr xs) -> IntrinsicS intr <$> mapM (f lang) xs
           return (AnnoS g (Idx i lang) e'')
 
 {- | This function is called on trees that contain no language-specific
@@ -531,6 +543,7 @@ removeVarS (AnnoS g c (IfS cond thenE elseE)) = AnnoS g c (IfS (removeVarS cond)
 removeVarS (AnnoS g c (SuspendS e)) = AnnoS g c (SuspendS (removeVarS e))
 removeVarS (AnnoS g c (ForceS e)) = AnnoS g c (ForceS (removeVarS e))
 removeVarS (AnnoS g c (CoerceS co e)) = AnnoS g c (CoerceS co (removeVarS e))
+removeVarS (AnnoS g c (IntrinsicS intr es)) = AnnoS g c (IntrinsicS intr (map removeVarS es))
 removeVarS x = x
 
 -- | Extract non-exported recursive helpers from rASTs into their own top-level
@@ -618,6 +631,10 @@ extractExpr exports (ForceS e) = do
 extractExpr exports (CoerceS c e) = do
   (e', helpers) <- extractFromTree exports e
   return (CoerceS c e', helpers)
+extractExpr exports (IntrinsicS intr es) = do
+  results <- mapM (extractFromTree exports) es
+  let (es', helperLists) = unzip results
+  return (IntrinsicS intr es', concat helperLists)
 extractExpr _ e = return (e, [])
 
 -- | Check if an AnnoS tree contains a CallS node targeting the given name
@@ -637,6 +654,7 @@ containsCallS target (AnnoS _ _ e) = go e
     go (SuspendS x) = containsCallS target x
     go (ForceS x) = containsCallS target x
     go (CoerceS _ x) = containsCallS target x
+    go (IntrinsicS _ xs) = any (containsCallS target) xs
     go _ = False
 
 -- Check if this expression is a data structure that contains

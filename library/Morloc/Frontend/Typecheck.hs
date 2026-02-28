@@ -154,6 +154,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (ForceS e') = ForceS (resolveTypes e')
     f (CoerceS c e') = CoerceS c (resolveTypes e')
     f (IfS c t e) = IfS (resolveTypes c) (resolveTypes t) (resolveTypes e)
+    f (IntrinsicS intr es) = IntrinsicS intr (map resolveTypes es)
 
 resolveInstances ::
   Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
@@ -248,6 +249,9 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       (g2, t') <- resolveInstances g1 t
       (g3, e') <- resolveInstances g2 e
       return (g3, IfS c' t' e')
+    f _ g0 (IntrinsicS intr es) = do
+      (g1, es') <- statefulMapM resolveInstances g0 es
+      return (g1, IntrinsicS intr es')
 
     connectInstance :: Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
     connectInstance g0 [] = return g0
@@ -613,6 +617,74 @@ synthE i g (ForceS e) = do
       g3 <- subtype' i (apply g2 t1) thunkT g2
       return (g3, apply g3 bt, ForceS (applyGen g3 e1))
     t -> throwTypeError i $ "Cannot force non-thunk type:" <+> pretty t
+synthE i g (IntrinsicS intr args) = do
+  (g', argTypes, args') <- synthArgs g args
+  g'' <- checkIntrinsicArgs i g' intr argTypes
+  let (g''', expectedType) = intrinsicTypeG g'' intr
+  return (g''', expectedType, IntrinsicS intr args')
+
+-- | Return type of a fully applied intrinsic, threading Gamma for fresh existentials
+intrinsicTypeG :: Gamma -> Intrinsic -> (Gamma, TypeU)
+intrinsicTypeG g IntrLoad =
+  let (g', loadType) = newvar "load_" g
+  in (g', ThunkU (OptionalU loadType))
+intrinsicTypeG g intr = (g, intrinsicType intr)
+
+-- | Return type of a fully applied intrinsic (for intrinsics without fresh vars)
+intrinsicType :: Intrinsic -> TypeU
+intrinsicType IntrSave = ThunkU BT.unitU
+intrinsicType IntrSaveM = ThunkU BT.unitU
+intrinsicType IntrSaveJ = ThunkU BT.unitU
+intrinsicType IntrLoad = ThunkU (OptionalU (ExistU (TV "load_a") ([], Open) ([], Open)))
+intrinsicType IntrHash = BT.strU
+intrinsicType IntrVersion = BT.strU
+intrinsicType IntrCompiled = BT.strU
+intrinsicType IntrLang = BT.strU
+intrinsicType IntrSchema = BT.strU
+intrinsicType IntrTypeof = BT.strU
+
+-- intrinsicArity is defined in Morloc.Namespace.Expr
+
+-- | Synthesize types for a list of arguments
+synthArgs ::
+  Gamma ->
+  [AnnoS Int ManyPoly Int] ->
+  MorlocMonad (Gamma, [TypeU], [AnnoS (Indexed TypeU) ManyPoly Int])
+synthArgs g [] = return (g, [], [])
+synthArgs g (a:as) = do
+  (g1, t1, a') <- synthG g a
+  (g2, ts, as') <- synthArgs g1 as
+  return (g2, t1:ts, a':as')
+
+-- | Check intrinsic argument count and types
+checkIntrinsicArgs ::
+  Int -> Gamma -> Intrinsic -> [TypeU] -> MorlocMonad Gamma
+checkIntrinsicArgs i g intr argTypes = do
+  let expected = intrinsicArity intr
+      actual = length argTypes
+  if actual /= expected
+    then throwTypeError i $
+      "@" <> pretty (intrinsicName intr) <+> "expects" <+> pretty expected
+        <+> "arguments but got" <+> pretty actual
+    else do
+      -- Check specific argument types
+      case (intr, argTypes) of
+        -- @save/@savem/@savej: a -> Str -> {()}
+        (IntrSave, [_, pathT]) -> subtype' i pathT BT.strU g
+        (IntrSaveM, [_, pathT]) -> subtype' i pathT BT.strU g
+        (IntrSaveJ, [_, pathT]) -> subtype' i pathT BT.strU g
+        -- @load: Str -> {?a}
+        (IntrLoad, [pathT]) -> subtype' i pathT BT.strU g
+        -- @hash: a -> Str
+        (IntrHash, [_]) -> return g
+        -- @schema/@typeof: a -> Str (value ignored at runtime)
+        (IntrSchema, [_]) -> return g
+        (IntrTypeof, [_]) -> return g
+        -- compile-time constants: no args
+        (IntrVersion, []) -> return g
+        (IntrCompiled, []) -> return g
+        (IntrLang, []) -> return g
+        _ -> return g
 
 etaExpandSynthE ::
   Int ->
@@ -992,3 +1064,4 @@ peakSExpr (SuspendS _) = "SuspendS"
 peakSExpr (ForceS _) = "ForceS"
 peakSExpr (CoerceS _ _) = "CoerceS"
 peakSExpr (IfS _ _ _) = "IfS"
+peakSExpr (IntrinsicS intr _) = "@" <> pretty (intrinsicName intr)

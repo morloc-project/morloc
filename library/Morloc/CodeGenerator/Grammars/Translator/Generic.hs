@@ -568,6 +568,13 @@ genericMakeLet desc namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 
   let rs = rs1 ++ [namer i <+> pretty (ldAssignOp desc) <+> e1'] ++ rs2
    in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
+-- | Extract the module prefix from a fully-qualified function name.
+-- E.g., "morloc.put_value" -> "morloc.", "put_value" -> ""
+extractModulePrefix :: Text -> Text
+extractModulePrefix fn = case T.breakOnEnd "." fn of
+  ("", _) -> ""
+  (prefix, _) -> prefix
+
 -- | Generic expression printer driven by descriptor
 genericPrintExpr :: LangDescriptor -> IExpr -> MDoc
 genericPrintExpr desc = go
@@ -623,6 +630,20 @@ genericPrintExpr desc = go
     go (ISuspend e) =
       pretty $ substituteT (ldSuspendExpr desc) [("expr", render (go e))]
     go (IForce e) = go e <> "()"
+    go (IIntrinsicHash schema e) =
+      let prefix = extractModulePrefix (ldSerializeFn desc)
+       in pretty prefix <> "mlc_hash(" <> go e <> ", " <> dquotes (pretty schema) <> ")"
+    go (IIntrinsicSave fmt schema e path) =
+      let prefix = extractModulePrefix (ldSerializeFn desc)
+          saveFn :: Text
+          saveFn = case fmt of
+            "json"     -> "mlc_save_json"
+            "voidstar" -> "mlc_save_voidstar"
+            _          -> "mlc_save"
+       in pretty prefix <> pretty saveFn <> "(" <> go e <> ", " <> dquotes (pretty schema) <> ", " <> go path <> ")"
+    go (IIntrinsicLoad schema _ path) =
+      let prefix = extractModulePrefix (ldSerializeFn desc)
+       in pretty prefix <> "mlc_load(" <> dquotes (pretty schema) <> ", " <> go path <> ")"
 
 -- | Generic statement printer driven by descriptor
 genericPrintStmt :: LangDescriptor -> IStmt -> MDoc

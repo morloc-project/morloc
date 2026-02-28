@@ -118,6 +118,9 @@ data IExpr
   | IRawExpr Text
   | ISuspend IExpr -- thunk: lambda wrapping expression
   | IForce IExpr -- force: call thunk with no args
+  | IIntrinsicSave Text Text IExpr IExpr -- format, schema, data, path
+  | IIntrinsicLoad Text (Maybe IType) IExpr -- schema, returnType, path -> result (nullable)
+  | IIntrinsicHash Text IExpr -- schema, data -> hex string
 
 data IParam = IParam Text (Maybe IType)
 
@@ -475,6 +478,24 @@ lowerNativeExpr cfg _ (ForceN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IF
 lowerNativeExpr _ _ (CoerceN_ _ _ x) = return x
 lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) =
+  return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicHash schema (IRawExpr (render (poolExpr dataDocs))))}
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSave (Just schema) [dataDocs, pathDocs]) =
+  let fmt = "voidstar"
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt schema (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveM (Just schema) [dataDocs, pathDocs]) =
+  let fmt = "msgpack"
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt schema (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveJ (Just schema) [dataDocs, pathDocs]) =
+  let fmt = "json"
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt schema (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
+lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) = do
+  innerType <- case typeFof origExpr of
+    OptionalF t -> lcTypeOf cfg t
+    _ -> return Nothing
+  return $ pathDocs {poolExpr = lcPrintExpr cfg (IIntrinsicLoad schema innerType (IRawExpr (render (poolExpr pathDocs))))}
+lowerNativeExpr _ _ (IntrinsicN_ _ intr _ _) =
+  error $ "Runtime intrinsic @" <> show intr <> " reached code generation without schema"
 
 {- | Lower a serial manifold to PoolDocs.
 Replaces translateManifold from Common.hs for serial manifolds.

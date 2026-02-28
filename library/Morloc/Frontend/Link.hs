@@ -252,6 +252,7 @@ addLocalState m0 e0 s0 = do
     findFreeDefs (ExprI _ (IfE c t e)) s = findFreeDefs c s >>= findFreeDefs t >>= findFreeDefs e
     findFreeDefs (ExprI _ (SuspendE e)) s = findFreeDefs e s
     findFreeDefs (ExprI _ (ForceE e)) s = findFreeDefs e s
+    findFreeDefs (ExprI _ (IntrinsicE _ es)) s = foldrM findFreeDefs s es
     findFreeDefs _ s = return s
 
 toCondensedState :: LinkState -> Map EVar (Int, Maybe (Typeclass Signature))
@@ -416,6 +417,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
     linkLocal bnds c cs (ExprI _ (IfE cond thenE elseE)) = mapM_ (linkLocal bnds c cs) [cond, thenE, elseE]
     linkLocal bnds c cs (ExprI _ (SuspendE e)) = linkLocal bnds c cs e
     linkLocal bnds c cs (ExprI _ (ForceE e)) = linkLocal bnds c cs e
+    linkLocal bnds c cs (ExprI _ (IntrinsicE _ es)) = mapM_ (linkLocal bnds c cs) es
     -- terminal cases
     linkLocal _ _ _ _ = return ()
 

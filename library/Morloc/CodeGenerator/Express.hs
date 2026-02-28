@@ -39,6 +39,7 @@ setManifoldConfig midx (AnnoS _ _ (LamS _ e)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (SuspendS e)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (ForceS e)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (CoerceS _ e)) = setManifoldConfig midx e
+setManifoldConfig _ (AnnoS _ _ (IntrinsicS _ _)) = return ()
 setManifoldConfig midx (AnnoS _ _ (IfS _ t _)) = setManifoldConfig midx t
 setManifoldConfig _ (AnnoS _ _ (CallS _)) = return ()
 setManifoldConfig _ _ = return ()
@@ -90,6 +91,7 @@ forceExportThunks cidx t (PolyHead lang midx args body) =
     goExpr ids (PolyForce ti e) = PolyForce ti (goExpr ids e)
     goExpr ids (PolySuspend ti e) = PolySuspend ti (goExpr ids e)
     goExpr ids (PolyCoerce c ti e) = PolyCoerce c ti (goExpr ids e)
+    goExpr ids (PolyIntrinsic ti intr es) = PolyIntrinsic ti intr (map (goExpr ids) es)
     goExpr ids (PolyList v ti es) = PolyList v ti (map (goExpr ids) es)
     goExpr ids (PolyTuple v es) = PolyTuple v (map (fmap (goExpr ids)) es)
     goExpr ids (PolyRecord o v ps rs) = PolyRecord o v ps (map (fmap (fmap (goExpr ids))) rs)
@@ -546,6 +548,9 @@ expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (ForceS x)) =
   -- even if the inner expression calls into a foreign language.
   x' <- expressPolyExprWrap parentLang (Idx cidx t) x
   return $ pushForceIntoRemote (Idx cidx t) x'
+expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx cidx lang, _) (IntrinsicS intr xs)) = do
+  xs' <- mapM (\x@(AnnoS (Idx xi xt) _ _) -> expressPolyExprWrap lang (Idx xi xt) x) xs
+  return $ PolyIntrinsic (Idx cidx t) intr xs'
 
 -- Nullary source/pattern call (e.g., clockResNs :: {Int})
 expressPolyExpr

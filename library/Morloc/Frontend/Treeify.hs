@@ -279,6 +279,14 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (ForceE e) = do
       (namer', e') <- collectAnnoS namer e
       return (namer', ForceS e')
+    f namer (IntrinsicE intr es) = do
+      (namer', es') <- go namer [] es
+      return (namer', IntrinsicS intr es')
+      where
+        go n acc [] = return (n, reverse acc)
+        go n acc (x:xs) = do
+          (n', x') <- collectAnnoS n x
+          go n' (x':acc) xs
     f namer (IfE c t e) = do
       (namer1, c') <- collectAnnoS namer c
       (namer2, t') <- collectAnnoS namer1 t
@@ -314,6 +322,7 @@ reindexExpr (LetE bindings body) = LetE <$> mapM (\(v, e) -> (,) v <$> reindexEx
 reindexExpr (IfE c t e) = IfE <$> reindexExprI c <*> reindexExprI t <*> reindexExprI e
 reindexExpr (SuspendE e) = SuspendE <$> reindexExprI e
 reindexExpr (ForceE e) = ForceE <$> reindexExprI e
+reindexExpr (IntrinsicE intr es) = IntrinsicE intr <$> mapM reindexExprI es
 reindexExpr e = return e
 
 -- FIXME: when I add linking to line numbers, I'll need to update that map

@@ -17,6 +17,7 @@ module Morloc.CodeGenerator.Serialize
   ( serialize
   ) where
 
+import Data.Text (Text)
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Serial as Serial
@@ -118,6 +119,9 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     serialExpr m (MonoIf cond thenE elseE) = do
       ne <- nativeExpr m (MonoIf cond thenE elseE)
       serializeS "serialE MonoIf" m ne
+    -- Thunk-producing intrinsics: convert to native and serialize with the
+    -- inner type (strip ThunkF) so the wire format matches the forced value.
+    serialExpr m (MonoSuspend _ e) = serialExpr m e
     serialExpr _ (MonoExe _ _) = error "Can represent MonoSrc as SerialExpr"
     serialExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to a SerialExpr"
     serialExpr _ (MonoApp MonoManifold {} _) = error "Illegal?"
@@ -285,6 +289,39 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     nativeExpr m (MonoSuspend t e) = SuspendN <$> inferType t <*> nativeExpr m e
     nativeExpr m (MonoForce t e) = ForceN <$> inferType t <*> nativeExpr m e
     nativeExpr m (MonoCoerce c t e) = CoerceN c <$> inferType t <*> nativeExpr m e
+    -- Runtime intrinsics with thunk return types (save/load): the C functions
+    -- (mlc_save, mlc_load) are eager, so we wrap them in SuspendN to produce a
+    -- proper thunk that ForceN can call.
+    nativeExpr m (MonoIntrinsic t intr es)
+      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad] = do
+          tf <- inferType t
+          es' <- mapM (nativeExpr m) es
+          msch <- intrinsicSchema m intr tf es'
+          let innerTf = case tf of
+                ThunkF inner -> inner
+                other -> other
+          return $ SuspendN tf (IntrinsicN innerTf intr msch es')
+    nativeExpr m (MonoIntrinsic t intr es) = do
+      tf <- inferType t
+      es' <- mapM (nativeExpr m) es
+      msch <- intrinsicSchema m intr tf es'
+      return $ IntrinsicN tf intr msch es'
+
+    -- Compute the msgpack schema string for runtime intrinsics
+    intrinsicSchema :: Int -> Intrinsic -> TypeF -> [NativeExpr] -> MorlocMonad (Maybe Text)
+    intrinsicSchema m intr _ (dataArg:_)
+      | intr `elem` [IntrHash, IntrSave, IntrSaveM, IntrSaveJ] = do
+          ast <- Serial.makeSerialAST m lang (typeFof dataArg)
+          return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    intrinsicSchema m IntrLoad tf _ = do
+      -- For @load, the return type is {?a} or ?a; the schema is for a
+      let unwrap (ThunkF inner) = unwrap inner
+          unwrap (OptionalF inner) = inner
+          unwrap other = other
+          dataType = unwrap tf
+      ast <- Serial.makeSerialAST m lang dataType
+      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    intrinsicSchema _ _ _ _ = return Nothing
 
     typeArg ::
       SerializationState ->
@@ -319,6 +356,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     makeTypemap parentIdx (MonoForce _ e) = makeTypemap parentIdx e
     makeTypemap parentIdx (MonoSuspend _ e) = makeTypemap parentIdx e
     makeTypemap parentIdx (MonoCoerce _ _ e) = makeTypemap parentIdx e
+    makeTypemap parentIdx (MonoIntrinsic _ _ es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) es)
     makeTypemap parentIdx (MonoIf cond thenE elseE) =
       Map.unionsWith mergeTypes [makeTypemap parentIdx cond, makeTypemap parentIdx thenE, makeTypemap parentIdx elseE]
     makeTypemap _ (MonoApp (MonoExe (ann -> idx) _) es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)

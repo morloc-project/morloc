@@ -38,6 +38,7 @@ extra-source-files:
   - data/morloc/mpack.h
   - data/morloc/json.h
   - data/morloc/cache.h
+  - data/morloc/cli.h
   - data/morloc/xxhash.h
   - data/morloc/cache.c
   - data/morloc/cli.c

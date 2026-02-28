@@ -44,7 +44,7 @@ import qualified Morloc.BaseTypes as BT
 -- - 2 from guard_clauses ('?' could start guard or be part of next decl)
 -- - 1 from guard_expr ('?' in expr could be nested guard_expr or next guard_clause)
 -- - 4 from optional type syntax ('?' could start optional type or guard)
-%expect 56
+%expect 58
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -105,6 +105,7 @@ import qualified Morloc.BaseTypes as BT
   STREND     { Located _ (TokStringEnd _) _ }
   INTERPOPEN { Located _ TokInterpOpen _ }
   INTERPCLOSE { Located _ TokInterpClose _ }
+  INTRINSIC  { Located _ (TokIntrinsic _) _ }
   EOF        { Located _ TokEOF _ }
 
 %%
@@ -507,9 +508,13 @@ atom_expr :: { Loc CstExpr }
   | hole_expr                 { $1 }
   | do_expr                   { $1 }
   | null_expr                 { $1 }
+  | intrinsic_expr            { $1 }
 
 null_expr :: { Loc CstExpr }
   : 'Null'                    { at $1 CNullE }
+
+intrinsic_expr :: { Loc CstExpr }
+  : INTRINSIC                 { at $1 (CIntrinsicE (getIntrinsicName $1)) }
 
 force_expr :: { Loc CstExpr }
   : '!' atom_expr             { at $1 (CForceE $2) }
@@ -762,6 +767,10 @@ getString (Located _ (TokStringStart s) _) = s
 getString (Located _ (TokStringMid s) _) = s
 getString (Located _ (TokStringEnd s) _) = s
 getString (Located _ _ t) = t
+
+getIntrinsicName :: Located -> Text
+getIntrinsicName (Located _ (TokIntrinsic n) _) = n
+getIntrinsicName _ = ""
 
 getOp :: Located -> Text
 getOp (Located _ (TokOperator t) _) = t

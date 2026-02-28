@@ -325,6 +325,8 @@ invertSerialManifold sm0 =
     -- keep dependencies inside if branches (like suspend)
     invertNativeExprM (IfN_ t (D condNe condLets) (D thenNe thenLets) (D elseNe elseLets)) =
       atomize (IfN t (weave (D condNe condLets)) (weave (D thenNe thenLets)) (weave (D elseNe elseLets))) []
+    invertNativeExprM (IntrinsicN_ t intr msch nes) =
+      atomize (IntrinsicN t intr msch (map unD nes)) (concatMap getDeps nes)
 
     invertSerialArgM :: SerialArg_ (D SerialManifold) (D SerialExpr) -> Index (D SerialArg)
     invertSerialArgM (SerialArgManifold_ (D sm deps)) = return $ D (SerialArgManifold sm) deps

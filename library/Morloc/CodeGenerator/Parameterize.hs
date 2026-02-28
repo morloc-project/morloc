@@ -117,6 +117,10 @@ parameterize' args (AnnoS g c (CoerceS co e)) = do
   e' <- parameterize' args e
   let args' = pruneArgs args [e']
   return $ AnnoS g (c, args') (CoerceS co e')
+parameterize' args (AnnoS g c (IntrinsicS intr es)) = do
+  es' <- mapM (parameterize' args) es
+  let args' = pruneArgs args es'
+  return $ AnnoS g (c, args') (IntrinsicS intr es')
 parameterize' _ (AnnoS g c (CallS v)) = do
   return $ AnnoS g (c, []) (CallS v)
 parameterize' _ (AnnoS _ _ (VarS _ _)) = undefined
