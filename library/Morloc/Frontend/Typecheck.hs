@@ -922,7 +922,11 @@ checkE i g1 e1 b = do
           (e2, apply g3 a')
           coercions
         return (g3, apply g3 b', finalExpr)
-      Nothing -> MM.throwSourcedError i err
+      Nothing -> MM.throwSourcedError i $
+        "Type mismatch:"
+        <> line <> "  expected: " <> prettyTypeU b'
+        <> line <> "  inferred: " <> prettyTypeU a'
+        <> line <> err
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do

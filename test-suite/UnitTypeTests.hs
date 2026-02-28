@@ -2207,4 +2207,115 @@ complexityRegressionTests =
           f 1 True "x" 2.0 [1]
         |]
           (tuple [int, bool, str, real, lst int])
+      , -- HOF shared type variable enforcement
+        exprTestBad
+          "fold with (==) should fail: shared var c gets Bool and Str"
+          [r|
+          fold b a :: (b -> a -> b) -> b -> [a] -> b
+          (==) c :: c -> c -> Bool
+          test = fold (==) True ["hello", "hello"]
+          test
+        |]
+      , assertGeneralType
+          "fold with (+) should succeed: shared var resolved consistently"
+          [r|
+          fold b a :: (b -> a -> b) -> b -> [a] -> b
+          (+) :: Int -> Int -> Int
+          test = fold (+) 0 [1, 2, 3]
+          test
+        |]
+          int
+      , assertGeneralType
+          "map with lambda using (==) should succeed: same type both args"
+          [r|
+          map a b :: (a -> b) -> [a] -> [b]
+          (==) c :: c -> c -> Bool
+          test = map (\x -> x == x) ["hello"]
+          test
+        |]
+          (lst bool)
+      , -- zipSubtype path: type constructor with repeated variable
+        exprTestBad
+          "zipSubtype: Pair a a cannot unify with Pair Bool Str"
+          [r|
+          mkPair a :: a -> Pair a a
+          consume :: Pair Bool Str -> Int
+          test = consume (mkPair True)
+          test
+        |]
+      , assertGeneralType
+          "zipSubtype: Pair a a consistent with Pair Int Int"
+          [r|
+          mkPair a :: a -> Pair a a
+          fst a b :: Pair a b -> a
+          test = fst (mkPair 42)
+          test
+        |]
+          int
+      , -- Shared var in return: id passed where Bool -> Str expected
+        exprTestBad
+          "shared var via HOF: id cannot satisfy Bool -> Str"
+          [r|
+          apply a b :: (a -> b) -> a -> b
+          id a :: a -> a
+          asStr :: Str -> Str
+          test = asStr (apply id True)
+          test
+        |]
+      , -- Triple-shared variable through HOF
+        exprTestBad
+          "triple-shared var forced to different types through fold"
+          [r|
+          fold b a :: (b -> a -> b) -> b -> [a] -> b
+          choose c :: c -> c -> c
+          test = fold choose "hello" [1, 2]
+          test
+        |]
+      , -- Shared return var conflicts with arguments
+        exprTestBad
+          "shared var return type conflicts with argument through fold"
+          [r|
+          fold b a :: (b -> a -> b) -> b -> [a] -> b
+          weirdEq c :: c -> c -> Str
+          test = fold weirdEq "start" [1, 2]
+          test
+        |]
+      , -- Two distinct shared vars both violated
+        exprTestBad
+          "two distinct shared vars both inconsistent through HOF"
+          [r|
+          hof a b c d e :: (a -> b -> c -> d -> e) -> a -> b -> c -> d -> e
+          f x y :: x -> y -> x -> y -> Bool
+          test = hof f 1 "hi" True 42.0
+          test
+        |]
+      , -- Nested HOF shared var conflict
+        exprTestBad
+          "nested HOF: shared var conflict through double application"
+          [r|
+          apply a b :: (a -> b) -> a -> b
+          (==) c :: c -> c -> Bool
+          test = apply (apply (==) True) "hello"
+          test
+        |]
+      , -- Regression: fold with (==) on consistent types should pass
+        assertGeneralType
+          "fold with (==) consistent types: all Bool"
+          [r|
+          fold b a :: (b -> a -> b) -> b -> [a] -> b
+          (==) c :: c -> c -> Bool
+          test = fold (==) True [True, False]
+          test
+        |]
+          bool
+      , -- Regression: multiple shared vars all consistent
+        assertGeneralType
+          "multiple shared vars consistent through HOF"
+          [r|
+          hof a b c d e :: (a -> b -> c -> d -> e) -> a -> b -> c -> d -> e
+          f x y :: x -> y -> x -> y -> Bool
+          test = hof f 1 2 3 4
+          test
+        |]
+          bool
       ]

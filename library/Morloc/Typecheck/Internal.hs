@@ -215,18 +215,17 @@ subtype scope (OptionalU t1) (OptionalU t2) g = subtype scope t1 t2 g
 -- function subtypes are *contravariant* with respect to the input, that is,
 -- the subtypes are reversed so we have b1<:a1 instead of a1<:b1.
 --
--- Optimization: Batch process all arguments before applying context to return
--- types. This reduces complexity from O(n²) to O(n) for n-argument functions.
--- The correctness is preserved because context applications are monotonic -
--- once an existential is solved, later subtype calls can only add more
--- solutions, not remove them.
+-- Apply context between each argument subtype check so that solved
+-- existentials propagate to later arguments. This is necessary when a
+-- forall-bound variable appears in multiple argument positions (e.g.,
+-- (==) :: c -> c -> Bool passed to fold).
 subtype scope t1@(FunU as1 ret1) t2@(FunU as2 ret2) g0
   | length as1 /= length as2 = subtypeError t1 t2 "function arity mismatch"
   | null as1 = subtype scope ret1 ret2 g0
   | otherwise = do
-      -- Process all arguments (contravariant: b <: a), accumulating context
-      g1 <- foldlM (\g (b, a) -> subtype scope b a g) g0 (zip as2 as1)
-      -- Apply context once to return types, then subtype
+      -- Process all arguments (contravariant: b <: a), applying context between each
+      g1 <- foldlM (\g (b, a) -> subtype scope (apply g b) (apply g a) g) g0 (zip as2 as1)
+      -- Apply context to return types, then subtype
       subtype scope (apply g1 ret1) (apply g1 ret2) g1
 
 --  g1 |- A1 <: B1
@@ -313,7 +312,7 @@ zipSubtype :: TypeU -> TypeU -> Scope -> [TypeU] -> [TypeU] -> Gamma -> Either M
 zipSubtype _ _ _ [] [] g' = return g'
 zipSubtype a b scope (t1' : ts1') (t2' : ts2') g' = do
   g'' <- subtype scope t1' t2' g'
-  zipSubtype a b scope ts1' ts2' g''
+  zipSubtype a b scope (map (apply g'') ts1') (map (apply g'') ts2') g''
 zipSubtype a b _ _ _ _ = subtypeError a b "Parameter type mismatch"
 
 -- | Dunfield Figure 10 -- type-level structural recursion
@@ -505,7 +504,12 @@ instantiate scope ta@(ExistU v1 (ps1, pc1) (rs1, rc1)) tb@(ExistU v2 (ps2, pc2) 
         (Just (lhs, _, ms, x, rhs)) -> do
           solved <- solve v2 taExpanded
           return $ cacheSolved v2 taExpanded $ g4 {gammaContext = lhs <> (solved : ms) <> (x : rhs)}
-        Nothing -> return g4
+        -- Both orderings failed -- the existentials may already be solved
+        Nothing -> case (lookupU v1 g4, lookupU v2 g4) of
+          (Just t1, Just t2) -> subtype scope t1 t2 g4
+          (Just t1, _)       -> subtype scope t1 tb g4
+          (_, Just t2)       -> subtype scope ta t2 g4
+          _                  -> return g4
 
 --  g1[Ea],>Eb,Eb |- [Eb/x]B <=: Ea -| g2,>Eb,g3
 -- ----------------------------------------- InstRAllL
@@ -520,30 +524,26 @@ instantiate scope (ForallU x b) tb@(ExistU _ ([], _) _) g1 =
 --  g1 |- t
 -- ----------------------------------------- InstRSolve
 --  g1,Ea,g2 |- t <=: Ea -| g1,Ea=t,g2
-instantiate _ ta (ExistU v ([], _) ([], _)) g1 =
+instantiate scope ta (ExistU v ([], _) ([], _)) g1 =
   case access1 v (gammaContext g1) of
     (Just (lhs, _, rhs)) -> do
       solved <- solve v ta
       return $ cacheSolved v ta $ g1 {gammaContext = lhs ++ solved : rhs}
-    Nothing -> return g1
--- case lookupU v g1 of
---   (Just _) -> return g1
---   Nothing -> Left . InstantiationError ta tb . render
---     $ "Error in InstRSolve with gamma:\n" <> tupled (map pretty (gammaContext g1))
+    Nothing -> case lookupU v g1 of
+      Just t  -> subtype scope ta t g1
+      Nothing -> return g1
 
 --  g1 |- t
 -- ----------------------------------------- instLSolve
 --  g1,Ea,g2 |- Ea <=: t -| g1,Ea=t,g2
-instantiate _ (ExistU v ([], _) ([], _)) tb g1 =
+instantiate scope (ExistU v ([], _) ([], _)) tb g1 =
   case access1 v (gammaContext g1) of
     (Just (lhs, _, rhs)) -> do
       solved <- solve v tb
       return $ cacheSolved v tb $ g1 {gammaContext = lhs ++ solved : rhs}
-    Nothing -> return g1
--- case lookupU v g1 of
---   (Just _) -> return g1
---   Nothing -> Left . InstantiationError ta tb . render
---     $ "Error in InstLSolve:" <+> tupled (map pretty (gammaContext g1))
+    Nothing -> case lookupU v g1 of
+      Just t  -> subtype scope t tb g1
+      Nothing -> return g1
 
 instantiate _ ta tb _ = subtypeError ta tb "Unexpected types"
 
