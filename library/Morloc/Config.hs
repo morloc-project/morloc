@@ -53,6 +53,7 @@ loadDefaultMorlocConfig = do
       (MT.unpack . fromJust $ defaults K.!? "tmpdir")
       (MT.unpack . fromJust $ defaults K.!? "build-config")
       Map.empty -- configLangOverrides
+      Nothing   -- configRegistry
 
 {- | Load a Morloc config file. If no file is given (i.e., Nothing), then the
 default configuration will be used.

@@ -81,6 +81,7 @@ emptyConfig = do
       , configTmpDir = home <> "/.morloc/tmp"
       , configBuildConfig = home <> "/.morloc/.build-config.yaml"
       , configLangOverrides = mempty
+      , configRegistry = Nothing
       }
 
 assertGeneralType :: String -> MT.Text -> TypeU -> TestTree

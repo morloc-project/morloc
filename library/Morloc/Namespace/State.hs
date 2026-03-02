@@ -176,6 +176,7 @@ data Config
   , configTmpDir :: !Path
   , configBuildConfig :: !Path
   , configLangOverrides :: !(Map Text [Text])
+  , configRegistry :: !(Maybe Text)
   }
   deriving (Show, Ord, Eq)
 
@@ -322,6 +323,7 @@ instance FromJSON Config where
       pyCmd <- o .:? "lang_python3" .!= ("" :: Text)
       rCmd <- o .:? "lang_R" .!= ("" :: Text)
       overrides <- o .:? "lang_overrides" .!= Map.empty
+      registry' <- o .:? "registry"
       let legacyOverrides =
             Map.fromList $
               filter
@@ -330,7 +332,7 @@ instance FromJSON Config where
                 , ("r", if rCmd == "" then [] else [rCmd])
                 ]
           allOverrides = Map.union overrides legacyOverrides
-      return $ Config home' source' plane' planeCore' tmpdir' buildConfig' allOverrides
+      return $ Config home' source' plane' planeCore' tmpdir' buildConfig' allOverrides registry'
 
 instance FromJSON PackageMeta where
   parseJSON = Aeson.withObject "object" $ \o ->

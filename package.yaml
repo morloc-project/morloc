@@ -110,6 +110,7 @@ dependencies:
   - text
   - time
   - unordered-containers
+  - vector
   - yaml
   - zip-archive
 

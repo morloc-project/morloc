@@ -46,7 +46,8 @@ import qualified Morloc.BaseTypes as BT
 -- - 4 from optional type syntax ('?' could start optional type or guard)
 -- Note: force_expr (!) re-added for inline effect forcing in do-blocks
 -- - 2 from force_expr ('!' could start force or be part of another expr)
-%expect 58
+-- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
+%expect 59
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -98,6 +99,7 @@ import qualified Morloc.BaseTypes as BT
   'Null'     { Located _ TokNull _ }
   LOWER      { Located _ (TokLowerName _) _ }
   UPPER      { Located _ (TokUpperName _) _ }
+  '/'        { Located _ (TokOperator "/") _ }
   OPERATOR   { Located _ (TokOperator _) _ }
   INTEGER    { Located _ (TokInteger _) _ }
   FLOAT      { Located _ (TokFloat _) _ }
@@ -212,10 +214,15 @@ symbol :: { Located }
 --------------------------------------------------------------------
 
 import_decl :: { Loc CstExpr }
-  : 'import' module_name opt_import_list
+  : 'import' import_module_name opt_import_list
       { at $1 (CImpE (Import (MV $2) $3 [] Nothing)) }
   | 'import' GDOT module_name opt_import_list
       { at $1 (CImpE (Import (MV ("." <> $3)) $4 [] Nothing)) }
+
+-- | Module names in import context allow an optional namespace prefix: owner/name
+import_module_name :: { Text }
+  : module_comp '/' module_name      { $1 <> "/" <> $3 }
+  | module_name                      { $1 }
 
 opt_import_list :: { Maybe [AliasedSymbol] }
   : {- empty -}                            { Nothing }
@@ -697,6 +704,7 @@ operator_name :: { Located }
   | '*'                       { $1 }
   | '<'                       { $1 }
   | '>'                       { $1 }
+  | '/'                       { $1 }
 
 evar_or_op :: { Located }
   : LOWER                     { $1 }
