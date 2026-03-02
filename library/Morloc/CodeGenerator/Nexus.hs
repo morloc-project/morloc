@@ -16,12 +16,15 @@ module Morloc.CodeGenerator.Nexus
   ( generate
   ) where
 
+import Control.Monad.IO.Class (liftIO)
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
 import Data.Text (Text)
 import qualified Data.Text as MT
+import qualified Data.Time.Clock
 import qualified Data.Time.Clock.POSIX as Time
+import qualified Data.Time.Format
 import qualified Morloc.BaseTypes as MBT
 import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.Namespace
@@ -32,6 +35,7 @@ import Morloc.Data.Json
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
+import qualified Morloc.Version
 import qualified System.Directory as Dir
 
 -- ======================================================================
@@ -102,8 +106,8 @@ findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e
     findAllLangsExpr (NamS rs) = concatMap (findAllLangsSAnno . snd) rs
     findAllLangsExpr (LetS _ e1 e2) = findAllLangsSAnno e1 ++ findAllLangsSAnno e2
     findAllLangsExpr (IfS c t e) = concatMap findAllLangsSAnno [c, t, e]
-    findAllLangsExpr (SuspendS x) = findAllLangsSAnno x
-    findAllLangsExpr (ForceS x) = findAllLangsSAnno x
+    findAllLangsExpr (DoBlockS x) = findAllLangsSAnno x
+    findAllLangsExpr (EvalS x) = findAllLangsSAnno x
     findAllLangsExpr (CoerceS _ x) = findAllLangsSAnno x
     findAllLangsExpr _ = []
 
@@ -194,7 +198,7 @@ generalTypeToSerialAST (AppT (VarT v) ts)
   | otherwise = do
       insts <- MM.gets stateTypeclasses
       error $ show insts
-generalTypeToSerialAST (ThunkT t) = generalTypeToSerialAST t
+generalTypeToSerialAST (EffectT _ t) = generalTypeToSerialAST t
 generalTypeToSerialAST (OptionalT t) = do
   inner <- generalTypeToSerialAST t
   return $ SerialOptional (FV (TV "Optional") (CV "")) inner
@@ -266,11 +270,22 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (LetBndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr (AnnoS _ _ (LetS _ _ body)) = toNexusExpr body
     toNexusExpr (AnnoS _ _ (IfS _ t _)) = toNexusExpr t
-    toNexusExpr (AnnoS _ _ (SuspendS e)) = toNexusExpr e
-    toNexusExpr (AnnoS _ _ (ForceS e)) = toNexusExpr e
+    toNexusExpr (AnnoS _ _ (DoBlockS e)) = toNexusExpr e
+    toNexusExpr (AnnoS _ _ (EvalS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (CoerceS _ e)) = toNexusExpr e
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr _)) = do
+      v <- resolveCompileTimeIntrinsic intr
+      StrX <$> type2schema t <*> pure v
     toNexusExpr (AnnoS (Idx _ t) _ (CallS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr _ = error $ "Unreachable value of type reached"
+
+resolveCompileTimeIntrinsic :: Intrinsic -> MorlocMonad Text
+resolveCompileTimeIntrinsic IntrVersion = return $ MT.pack Morloc.Version.versionStr
+resolveCompileTimeIntrinsic IntrCompiled = do
+  now <- liftIO Data.Time.Clock.getCurrentTime
+  return . MT.pack $ Data.Time.Format.formatTime Data.Time.Format.defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now
+resolveCompileTimeIntrinsic intr =
+  MM.throwSystemError $ "@" <> pretty (intrinsicName intr) <> " cannot be used in a context without a language-specific source"
 
 -- ======================================================================
 -- CLI argument serialization
@@ -561,7 +576,7 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
     returnTypeStr t = render (pretty (stripThunks t))
 
     stripThunks :: Type -> Type
-    stripThunks (ThunkT t') = stripThunks t'
+    stripThunks (EffectT _ t') = stripThunks t'
     stripThunks t' = t'
 
 -- ======================================================================

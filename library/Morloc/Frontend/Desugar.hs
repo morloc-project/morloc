@@ -33,7 +33,7 @@ import Morloc.Frontend.Token hiding (startPos)
 import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
-import System.FilePath (combine, takeDirectory)
+import System.FilePath (combine, dropExtension, makeRelative, splitDirectories, takeDirectory)
 
 --------------------------------------------------------------------
 -- Desugar state and monad
@@ -104,6 +104,7 @@ data DState = DState
   , dsModuleConfig :: !ModuleConfig
   , dsSourceLines :: ![Text]
   , dsLangMap :: !(Map.Map Text Lang) -- alias -> Lang for all known languages
+  , dsProjectRoot :: !(Maybe Path) -- project root (directory of entry-point file)
   }
   deriving (Show)
 
@@ -225,7 +226,7 @@ quantifyType t = forallWrap (nub (collectGenVars t)) t
     collectGenVars (AppU f args) = collectGenVars f ++ concatMap collectGenVars args
     collectGenVars (FunU args ret) = concatMap collectGenVars args ++ collectGenVars ret
     collectGenVars (NamU _ _ ts entries) = concatMap collectGenVars ts ++ concatMap (collectGenVars . snd) entries
-    collectGenVars (ThunkU inner) = collectGenVars inner
+    collectGenVars (EffectU _ inner) = collectGenVars inner
     collectGenVars (OptionalU inner) = collectGenVars inner
     collectGenVars _ = []
 
@@ -319,6 +320,15 @@ resolveSourceFile modulePath srcFile =
     (Nothing, s) -> fmap T.unpack s
 
 --------------------------------------------------------------------
+-- Intrinsic resolution
+--------------------------------------------------------------------
+
+resolveIntrinsic :: Pos -> Text -> D Intrinsic
+resolveIntrinsic pos name = case parseIntrinsic name of
+  Just intr -> return intr
+  Nothing -> dfail pos ("unknown intrinsic: @" ++ T.unpack name)
+
+--------------------------------------------------------------------
 -- Accessor resolution
 --------------------------------------------------------------------
 
@@ -410,9 +420,7 @@ mergeSelectors sels =
 
 desugarDo :: Span -> [CstDoStmt] -> D ExprI
 desugarDo sp [] = dfail (startPos sp) "empty do block"
-desugarDo sp [CstDoBare e] = do
-  e' <- desugarExpr e
-  freshExprSpan sp (ForceE e')
+desugarDo _sp [CstDoBare e] = desugarExpr e
 desugarDo sp [CstDoBind _ _] = dfail (startPos sp) "do block cannot end with a bind (<-)"
 desugarDo sp [CstDoLet _ _] = dfail (startPos sp) "do block cannot end with a let binding"
 desugarDo sp (CstDoLet v e : rest) = do
@@ -421,14 +429,14 @@ desugarDo sp (CstDoLet v e : rest) = do
   freshExprSpan sp (LetE [(v, e')] restE)
 desugarDo sp (CstDoBind v e : rest) = do
   e' <- desugarExpr e
-  forceE <- freshExprSpan sp (ForceE e')
+  forceE <- freshExprSpan sp (EvalE e')
   restE <- desugarDo sp rest
   freshExprSpan sp (LetE [(v, forceE)] restE)
 desugarDo sp (CstDoBare e : rest) = do
   idx <- freshIdSpan sp
   let discardVar = EV ("_do_" <> T.pack (show idx))
   e' <- desugarExpr e
-  forceE <- freshExprSpan sp (ForceE e')
+  forceE <- freshExprSpan sp (EvalE e')
   restE <- desugarDo sp rest
   freshExprSpan sp (LetE [(discardVar, forceE)] restE)
 
@@ -465,6 +473,14 @@ desugarExpr (Loc sp (CLogE b)) = freshExprSpan sp (LogE b)
 desugarExpr (Loc sp CUniE) = freshExprSpan sp UniE
 desugarExpr (Loc sp CNullE) = freshExprSpan sp NullE
 desugarExpr (Loc sp CHolE) = freshExprSpan sp HolE
+-- Intrinsics: eta-expand when under-applied so they behave as first-class functions
+desugarExpr (Loc sp (CIntrinsicE name)) = do
+  intr <- resolveIntrinsic (startPos sp) name
+  etaExpandIntrinsic sp intr []
+desugarExpr (Loc sp (CAppE (Loc _ (CIntrinsicE name)) args)) = do
+  intr <- resolveIntrinsic (startPos sp) name
+  args' <- mapM desugarExpr args
+  etaExpandIntrinsic sp intr args'
 -- Compound expressions
 desugarExpr (Loc _ (CAppE f args)) = do
   f' <- desugarExpr f
@@ -491,26 +507,23 @@ desugarExpr (Loc sp (CTupE es)) = do
 desugarExpr (Loc sp (CNamE entries)) = do
   entries' <- mapM (\(k, e) -> do e' <- desugarExpr e; return (k, e')) entries
   freshExprSpan sp (NamE entries')
-desugarExpr (Loc sp (CSuspendE e)) = do
-  e' <- desugarExpr e
-  freshExprSpan sp (SuspendE e')
-desugarExpr (Loc sp (CForceE e)) = do
-  e' <- desugarExpr e
-  freshExprSpan sp (ForceE e')
 desugarExpr (Loc sp (CAnnE e t)) = do
   e' <- desugarExpr e
   freshExprSpan sp (AnnE e' (quantifyType t))
 desugarExpr (Loc sp (CDoE stmts)) = do
   body <- desugarDo sp stmts
-  freshExprSpan sp (SuspendE body)
+  freshExprSpan sp (DoBlockE body)
 desugarExpr (Loc sp (CAccessorE body)) = buildAccessor sp body
 desugarExpr (Loc sp (CInterpE startText exprs mids endText)) = do
   exprs' <- mapM desugarExpr exprs
   mkInterpString sp startText exprs' mids endText
 desugarExpr (Loc sp (CGuardExprE guards defaultExpr)) = desugarGuards sp guards defaultExpr
+desugarExpr (Loc sp (CForceE e)) = do
+  e' <- desugarExpr e
+  freshExprSpan sp (EvalE e')
 
 -- Top-level declarations should not appear inside expressions
-desugarExpr (Loc _ (CModE {})) = error "desugarExpr: unexpected CModE in expression position"
+desugarExpr (Loc _ CModE{}) = error "desugarExpr: unexpected CModE in expression position"
 desugarExpr (Loc _ (CImpE {})) = error "desugarExpr: unexpected CImpE in expression position"
 desugarExpr (Loc _ (CSigE {})) = error "desugarExpr: unexpected CSigE in expression position"
 desugarExpr (Loc _ (CAssE {})) = error "desugarExpr: unexpected CAssE in expression position"
@@ -522,12 +535,53 @@ desugarExpr (Loc _ (CSrcOldE {})) = error "desugarExpr: unexpected CSrcOldE in e
 desugarExpr (Loc _ (CSrcNewE {})) = error "desugarExpr: unexpected CSrcNewE in expression position"
 desugarExpr (Loc _ (CGuardedAssE {})) = error "desugarExpr: unexpected CGuardedAssE in expression position"
 
+-- | Wrap an intrinsic in a lambda if it has fewer args than its arity.
+-- Fully applied intrinsics pass through as IntrinsicE nodes.
+etaExpandIntrinsic :: Span -> Intrinsic -> [ExprI] -> D ExprI
+etaExpandIntrinsic sp intr args = do
+  let arity = intrinsicArity intr
+      actual = length args
+  if actual >= arity
+    then freshExprSpan sp (IntrinsicE intr args)
+    else do
+      idx <- freshIdSpan sp
+      let remaining = arity - actual
+          vars = [EV ("_intr_" <> T.pack (show idx) <> "_" <> T.pack (show j)) | j <- [0..remaining-1]]
+      varExprs <- mapM (\v -> freshExprSpan sp (VarE defaultValue v)) vars
+      intrExpr <- freshExprSpan sp (IntrinsicE intr (args ++ varExprs))
+      freshExprSpan sp (LamE vars intrExpr)
+
+
 --------------------------------------------------------------------
 -- Top-level declaration desugaring
 --------------------------------------------------------------------
 
+-- | Infer a dot-prefixed module name from a file path relative to the project root.
+-- e.g., projectRoot=/project, filePath=/project/lib/math/main.loc -> ".lib.math"
+inferModuleName :: Path -> Path -> Text
+inferModuleName projectRoot filePath =
+  let relPath = makeRelative projectRoot filePath
+      parts = splitDirectories relPath
+      -- Strip .loc extension from the last component
+      cleaned = case parts of
+        [] -> ["main"]
+        _ -> init parts ++ [dropExtension (last parts)]
+      -- Strip trailing "main" for directory modules (but not if it's the only component)
+      stripped = case cleaned of
+        xs | length xs > 1 && last xs == "main" -> init xs
+        xs -> xs
+  in "." <> T.intercalate "." (map T.pack stripped)
+
 desugarTopLevel :: Loc CstExpr -> D [ExprI]
-desugarTopLevel (Loc sp (CModE name export body)) = do
+desugarTopLevel (Loc sp (CModE maybeName export body)) = do
+  name <- case maybeName of
+    Just n -> return n
+    Nothing -> do
+      modPath <- State.gets dsModulePath
+      projRoot <- State.gets dsProjectRoot
+      case (modPath, projRoot) of
+        (Just mp, Just pr) -> return (inferModuleName pr mp)
+        _ -> dfail (startPos sp) "nameless module requires a file path and project root"
   expExprI <- desugarExport sp export
   bodyExprs <- concatMapM desugarTopLevel body
   modI <- freshIdSpan sp

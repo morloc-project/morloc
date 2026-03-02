@@ -37,6 +37,7 @@ import qualified Morloc.CodeGenerator.Nexus as Nexus
 import Morloc.CodeGenerator.Parameterize (parameterize)
 import Morloc.CodeGenerator.Realize (realityCheck)
 import Morloc.CodeGenerator.Segment (segment)
+import Morloc.CodeGenerator.Reduce (reduce)
 import Morloc.CodeGenerator.Serialize (serialize)
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Frontend.API as F
@@ -86,6 +87,7 @@ generatePools rASTs = do
   mapM express paramRASTs
     >>= mapM segment |>> concat
     >>= mapM serialize
+    >>= mapM reduce
       |>> pool
 
 -- | Build a program as a local executable
@@ -132,6 +134,7 @@ writeProgram translateFn path code = do
           mapM express paramRASTs
             >>= mapM segment |>> concat
             >>= mapM serialize
+            >>= mapM reduce
               |>> pool
             >>= mapM (uncurry (emit translateFn))
         return (nexus, pools)

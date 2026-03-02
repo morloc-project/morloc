@@ -122,9 +122,9 @@ data LangDescriptor = LangDescriptor
     ldAssignOp :: !Text -- "=" or "<-"
   , -- Lambda
     ldLambdaTemplate :: !Text -- e.g. "lambda {{args}}: {{body}}"
-  , -- Suspend (thunk)
-    ldSuspendExpr :: !Text -- e.g. "(lambda: {{expr}})"
-  , ldSuspendBlock :: !Text -- e.g. "function(){\n{{body}}\n}" or "" for pass-through
+  , -- Do-block (effect wrapper)
+    ldDoBlockExpr :: !Text -- e.g. "(lambda: {{expr}})"
+  , ldDoBlockBlock :: !Text -- e.g. "function(){\n{{body}}\n}" or "" for pass-through
   , -- Partial application
     ldPartialTemplate :: !Text -- e.g. "functools.partial({{fn_with_context}})"
   , -- Import
@@ -229,8 +229,8 @@ instance Y.FromJSON LangDescriptor where
             -- Template field defaults
             . ins "ldAssignOp" (Y.String "=")
             . ins "ldLambdaTemplate" (Y.String "({{args}}) -> {{body}}")
-            . ins "ldSuspendExpr" (Y.String "(() -> {{expr}})")
-            . ins "ldSuspendBlock" (Y.String "")
+            . ins "ldDoBlockExpr" (Y.String "(() -> {{expr}})")
+            . ins "ldDoBlockBlock" (Y.String "")
             . ins "ldPartialTemplate" (Y.String "({{bound_args}}) -> {{fn}}({{all_args}})")
             . ins "ldImportTemplate" (Y.String "")
             . ins "ldSocketPathTemplate" (Y.String "")
@@ -306,8 +306,8 @@ defaultLangDescriptor name ext =
     , -- Template fields
       ldAssignOp = "="
     , ldLambdaTemplate = "({{args}}) -> {{body}}"
-    , ldSuspendExpr = "(() -> {{expr}})"
-    , ldSuspendBlock = ""
+    , ldDoBlockExpr = "(() -> {{expr}})"
+    , ldDoBlockBlock = ""
     , ldPartialTemplate = "({{bound_args}}) -> {{fn}}({{all_args}})"
     , ldImportTemplate = ""
     , ldSocketPathTemplate = ""

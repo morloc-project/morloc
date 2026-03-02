@@ -217,6 +217,13 @@ lexOne st@(LexState input pos toks) = case input of
         emit1 TokQuestion "?" (c : rest)
   '?' : [] ->
     emit1 TokQuestion "?" []
+  -- Intrinsics: @name (@ followed by lowercase letter)
+  '@' : c : rest | isLower c ->
+    let (word, rest') = span (\x -> isAlphaNum x || x == '\'' || x == '_') (c : rest)
+        name = T.pack word
+        len = 1 + length word
+     in Right st { lsInput = rest', lsPos = advanceCol pos len
+                 , lsTokens = Located pos (TokIntrinsic name) (T.cons '@' name) : toks }
   -- Operators and reserved operator sequences
   c : rest | isOperatorChar c -> lexOperator pos (c : rest) st
   -- Identifiers and keywords
@@ -284,7 +291,7 @@ classifyWord "infix" = TokInfix
 classifyWord "let" = TokLet
 classifyWord "in" = TokIn
 classifyWord "do" = TokDo
-classifyWord "null" = TokNull
+classifyWord "Null" = TokNull
 classifyWord t
   | isUpper (T.head t) = TokUpperName t
   | otherwise = TokLowerName t

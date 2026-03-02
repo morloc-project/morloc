@@ -1,8 +1,8 @@
 module main (foo)
 
-import foo
-import foor (rmap)
-import fooc (cadd)
+import .foo
+import .foor (rmap)
+import .fooc (cadd)
 
 foo :: Int -> [Int] -> [Int]
 foo x xs = rmap (cadd x) xs

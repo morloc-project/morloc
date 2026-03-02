@@ -20,7 +20,7 @@ uint64_t mix(uint64_t a, uint64_t b) {
     return a;
 }
 
-uint64_t hash_voidstar(absptr_t data, const Schema* schema, uint64_t seed, ERRMSG){
+uint64_t hash_voidstar(const absptr_t data, const Schema* schema, uint64_t seed, ERRMSG){
     VAL_RETURN_SETUP(uint64_t, 0)
 
     uint64_t hash = seed;

@@ -27,6 +27,14 @@ module Morloc.Namespace.Type
   , EType (..)
   , unresolvedType2type
 
+    -- * Effect types
+  , EffectLabel
+  , EffectSet (..)
+  , resolveEffectSet
+  , emptyEffectSet
+  , ioEffectSet
+  , effectSubsetOf
+
     -- * Docstring related types
   , CliOpt (..)
   , ArgDoc (..)
@@ -67,6 +75,38 @@ import qualified Data.Text as DT
 import Morloc.Data.Doc
 import Morloc.Namespace.Prim
 
+---- Effect types
+
+-- | A named effect label (e.g., "IO", "Random", "Error")
+type EffectLabel = Text
+
+-- | An effect set for use during typechecking. May contain concrete labels,
+-- unsolved effect variables, or unions of effect sets.
+data EffectSet
+  = EffectSet (Set.Set EffectLabel)
+  | EffectVar TVar
+  | EffectUnion EffectSet EffectSet
+  deriving (Show, Ord, Eq)
+
+-- | Resolve an effect set to concrete labels. Unsolved variables resolve to empty.
+resolveEffectSet :: EffectSet -> Set.Set EffectLabel
+resolveEffectSet (EffectSet labels) = labels
+resolveEffectSet (EffectVar _) = Set.empty
+resolveEffectSet (EffectUnion a b) = Set.union (resolveEffectSet a) (resolveEffectSet b)
+
+-- | An empty effect set (no effects)
+emptyEffectSet :: EffectSet
+emptyEffectSet = EffectSet Set.empty
+
+-- | An IO effect set
+ioEffectSet :: EffectSet
+ioEffectSet = EffectSet (Set.singleton "IO")
+
+-- | Check if one effect set is a subset of another (resolved labels).
+-- Unsolved EffectVar resolves to empty, so EffectVar is a subset of everything.
+effectSubsetOf :: EffectSet -> EffectSet -> Bool
+effectSubsetOf e1 e2 = Set.isSubsetOf (resolveEffectSet e1) (resolveEffectSet e2)
+
 ---- Type definitions
 
 {- | Scope maps each type name to its definitions: the type parameters, the
@@ -102,7 +142,7 @@ data Type
   | FunT [Type] Type
   | AppT Type [Type]
   | NamT NamType TVar [Type] [(Key, Type)]
-  | ThunkT Type
+  | EffectT (Set.Set EffectLabel) Type
   | OptionalT Type
   deriving (Show, Ord, Eq)
 
@@ -123,7 +163,7 @@ data TypeU
   | FunU [TypeU] TypeU
   | AppU TypeU [TypeU]
   | NamU NamType TVar [TypeU] [(Key, TypeU)]
-  | ThunkU TypeU
+  | EffectU EffectSet TypeU
   | OptionalU TypeU
   deriving (Show, Ord, Eq)
 
@@ -225,7 +265,7 @@ instance Typelike Type where
       sub (FunT ts t) = FunT (map sub ts) (sub t)
       sub (AppT v ts) = AppT (sub v) (map sub ts)
       sub (NamT r n ps es) = NamT r n ps [(k, sub t) | (k, t) <- es]
-      sub (ThunkT t) = ThunkT (sub t)
+      sub (EffectT effs t) = EffectT effs (sub t)
       sub (OptionalT t) = OptionalT (sub t)
 
   free (UnkT _) = Set.empty
@@ -233,13 +273,13 @@ instance Typelike Type where
   free (FunT ts t) = Set.unions (map free (t : ts))
   free (AppT t ts) = Set.unions (map free (t : ts))
   free (NamT _ _ _ es) = Set.unions (map (free . snd) es)
-  free (ThunkT t) = free t
+  free (EffectT _ t) = free t
   free (OptionalT t) = free t
 
   normalizeType (FunT ts1 (FunT ts2 ft)) = normalizeType $ FunT (ts1 <> ts2) ft
   normalizeType (AppT t ts) = AppT (normalizeType t) (map normalizeType ts)
   normalizeType (NamT n v ds ks) = NamT n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
-  normalizeType (ThunkT t) = ThunkT (normalizeType t)
+  normalizeType (EffectT effs t) = EffectT effs (normalizeType t)
   normalizeType (OptionalT t) = OptionalT (normalizeType t)
   normalizeType t = t
 
@@ -251,7 +291,7 @@ instance Typelike TypeU where
   typeOf (FunU ts t) = FunT (map typeOf ts) (typeOf t)
   typeOf (AppU t ts) = AppT (typeOf t) (map typeOf ts)
   typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
-  typeOf (ThunkU t) = ThunkT (typeOf t)
+  typeOf (EffectU effs t) = EffectT (resolveEffectSet effs) (typeOf t)
   typeOf (OptionalU t) = OptionalT (typeOf t)
 
   free v@(VarU _) = Set.singleton v
@@ -261,7 +301,7 @@ instance Typelike TypeU where
   free (FunU ts t) = Set.unions $ map free (t : ts)
   free (AppU t ts) = Set.unions $ map free (t : ts)
   free (NamU _ _ ps rs) = Set.unions $ map free (map snd rs <> ps)
-  free (ThunkU t) = free t
+  free (EffectU _ t) = free t
   free (OptionalU t) = free t
 
   substituteTVar v (ForallU q r) t =
@@ -284,7 +324,7 @@ instance Typelike TypeU where
       sub (FunU ts t) = FunU (map sub ts) (sub t)
       sub (AppU t ts) = AppU (sub t) (map sub ts)
       sub (NamU r n ps rs) = NamU r n (map sub ps) [(k, sub t) | (k, t) <- rs]
-      sub (ThunkU t) = ThunkU (sub t)
+      sub (EffectU effs t) = EffectU effs (sub t)
       sub (OptionalU t) = OptionalU (sub t)
 
   normalizeType (FunU ts1 (FunU ts2 ft)) = normalizeType $ FunU (ts1 <> ts2) ft
@@ -292,7 +332,7 @@ instance Typelike TypeU where
   normalizeType (NamU n v ds ks) = NamU n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
   normalizeType (ForallU v t) = ForallU v (normalizeType t)
   normalizeType (ExistU v (map normalizeType -> ps, pc) (map (second normalizeType) -> rs, rc)) = ExistU v (ps, pc) (rs, rc)
-  normalizeType (ThunkU t) = ThunkU (normalizeType t)
+  normalizeType (EffectU effs t) = EffectU effs (normalizeType t)
   normalizeType (OptionalU t) = OptionalU (normalizeType t)
   normalizeType t = t
 
@@ -318,7 +358,7 @@ instance P.PartialOrd TypeU where
       _ -> False
   (<=) (NamU o1 n1 ps1 []) (NamU o2 n2 ps2 []) =
     o1 == o2 && n1 == n2 && length ps1 == length ps2
-  (<=) (ThunkU t1) (ThunkU t2) = t1 P.<= t2
+  (<=) (EffectU e1 t1) (EffectU e2 t2) = e1 == e2 && t1 P.<= t2
   (<=) (OptionalU t1) (OptionalU t2) = t1 P.<= t2
   (<=) _ _ = False
 
@@ -355,7 +395,7 @@ findFirst v = f
       case DL.partition ((== k1) . fst) es2 of
         ([(_, e2)], rs2) -> firstOf (f e1 e2) (f (NamU o1 n1 ps1 rs1) (NamU o2 n2 ps2 rs2))
         _ -> Nothing
-    f (ThunkU t1) (ThunkU t2) = f t1 t2
+    f (EffectU _ t1) (EffectU _ t2) = f t1 t2
     f (OptionalU t1) (OptionalU t2) = f t1 t2
     f _ _ = Nothing
 
@@ -393,7 +433,7 @@ extractKey (ForallU _ t) = extractKey t
 extractKey (AppU t _) = extractKey t
 extractKey (NamU _ v _ _) = v
 extractKey (ExistU v _ _) = v
-extractKey (ThunkU t) = extractKey t
+extractKey (EffectU _ t) = extractKey t
 extractKey (OptionalU t) = extractKey t
 extractKey t = error $ "Cannot currently handle functional type imports: " <> show t
 
@@ -403,7 +443,7 @@ type2typeu (UnkT v) = ForallU v (VarU v)
 type2typeu (FunT ts t) = FunU (map type2typeu ts) (type2typeu t)
 type2typeu (AppT v ts) = AppU (type2typeu v) (map type2typeu ts)
 type2typeu (NamT o n ps rs) = NamU o n (map type2typeu ps) [(k, type2typeu x) | (k, x) <- rs]
-type2typeu (ThunkT t) = ThunkU (type2typeu t)
+type2typeu (EffectT effs t) = EffectU (EffectSet effs) (type2typeu t)
 type2typeu (OptionalT t) = OptionalU (type2typeu t)
 
 unresolvedType2type :: TypeU -> Type
@@ -413,7 +453,7 @@ unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
 unresolvedType2type (FunU ts t) = FunT (map unresolvedType2type ts) (unresolvedType2type t)
 unresolvedType2type (AppU v ts) = AppT (unresolvedType2type v) (map unresolvedType2type ts)
 unresolvedType2type (NamU t n ps rs) = NamT t n (map unresolvedType2type ps) [(k, unresolvedType2type e) | (k, e) <- rs]
-unresolvedType2type (ThunkU t) = ThunkT (unresolvedType2type t)
+unresolvedType2type (EffectU effs t) = EffectT (resolveEffectSet effs) (unresolvedType2type t)
 unresolvedType2type (OptionalU t) = OptionalT (unresolvedType2type t)
 
 -- | get a fresh variable name that is not used in t1 or t2
@@ -432,7 +472,7 @@ newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
 
     allVars :: TypeU -> Set.Set TypeU
     allVars (ForallU v t) = Set.union (Set.singleton (VarU v)) (allVars t)
-    allVars (ThunkU t) = allVars t
+    allVars (EffectU _ t) = allVars t
     allVars (OptionalU t) = allVars t
     allVars t = free t
 
@@ -445,7 +485,7 @@ containsUnk (VarT _) = False
 containsUnk (FunT ts t) = any containsUnk ts || containsUnk t
 containsUnk (AppT t ts) = containsUnk t || any containsUnk ts
 containsUnk (NamT _ _ ps rs) = any containsUnk ps || any (containsUnk . snd) rs
-containsUnk (ThunkT t) = containsUnk t
+containsUnk (EffectT _ t) = containsUnk t
 containsUnk (OptionalT t) = containsUnk t
 
 ----- Pretty instances -------------------------------------------------------
@@ -466,7 +506,9 @@ instance Pretty Type where
       f _ (AppT (VarT (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppT (VarT (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppT (VarT (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (ThunkT t) = "{" <> f True t <> "}"
+      f _ (EffectT effs t)
+        | Set.null effs = "{" <> f True t <> "}"
+        | otherwise = "<" <> hcat (punctuate "," (map pretty (Set.toList effs))) <> ">" <+> f False t
       f _ (OptionalT t) = "?" <> f False t
       f False t = parens (f True t)
       f _ (FunT [] t) = "() -> " <> f False t
@@ -491,7 +533,11 @@ instance Pretty TypeU where
       f _ (AppU (VarU (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppU (VarU (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppU (VarU (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (ThunkU t) = "{" <> f True t <> "}"
+      f _ (EffectU effs t) =
+        let labels = resolveEffectSet effs
+         in if Set.null labels
+              then "{" <> f True t <> "}"
+              else "<" <> hcat (punctuate "," (map pretty (Set.toList labels))) <> ">" <+> f False t
       f _ (OptionalU t) = "?" <> f False t
       f False t = parens (f True t)
       f _ (ExistU v (ts, _) (rs, _)) =

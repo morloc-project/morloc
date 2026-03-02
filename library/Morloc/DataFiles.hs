@@ -64,6 +64,7 @@ libmorlocFiles =
   , EmbededFile "mpack.h" (decodeUtf8 $(embedFileRelative "data/morloc/mpack.h"))
   , EmbededFile "json.h" (decodeUtf8 $(embedFileRelative "data/morloc/json.h"))
   , EmbededFile "cache.h" (decodeUtf8 $(embedFileRelative "data/morloc/cache.h"))
+  , EmbededFile "cli.h" (decodeUtf8 $(embedFileRelative "data/morloc/cli.h"))
   , EmbededFile "xxhash.h" (decodeUtf8 $(embedFileRelative "data/morloc/xxhash.h"))
   , EmbededFile "cache.c" (decodeUtf8 $(embedFileRelative "data/morloc/cache.c"))
   , EmbededFile "cli.c" (decodeUtf8 $(embedFileRelative "data/morloc/cli.c"))
@@ -87,6 +88,8 @@ libmorlocFiles =
   , EmbededFile "http.c" (decodeUtf8 $(embedFileRelative "data/morloc/http.c"))
   , EmbededFile "router.h" (decodeUtf8 $(embedFileRelative "data/morloc/router.h"))
   , EmbededFile "router.c" (decodeUtf8 $(embedFileRelative "data/morloc/router.c"))
+  , EmbededFile "intrinsics.h" (decodeUtf8 $(embedFileRelative "data/morloc/intrinsics.h"))
+  , EmbededFile "intrinsics.c" (decodeUtf8 $(embedFileRelative "data/morloc/intrinsics.c"))
   ]
 
 -- | Produce a single self-contained morloc.h by recursively inlining local includes

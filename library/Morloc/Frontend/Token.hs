@@ -159,6 +159,8 @@ data Token
 
     -- | --* followed by text
     TokGroupLine !Text
+  | -- Intrinsics (@name)
+    TokIntrinsic !Text
   | -- Special
     TokEOF
   deriving (Show, Eq, Ord)
@@ -212,7 +214,7 @@ showToken TokInfix = "'infix'"
 showToken TokLet = "'let'"
 showToken TokIn = "'in'"
 showToken TokDo = "'do'"
-showToken TokNull = "'null'"
+showToken TokNull = "'Null'"
 showToken (TokLowerName n) = "identifier '" ++ T.unpack n ++ "'"
 showToken (TokUpperName n) = "type name '" ++ T.unpack n ++ "'"
 showToken (TokOperator n) = "operator '" ++ T.unpack n ++ "'"
@@ -227,4 +229,5 @@ showToken TokInterpOpen = "'#{'"
 showToken TokInterpClose = "'}' (interpolation)"
 showToken (TokDocLine _) = "docstring"
 showToken (TokGroupLine _) = "group annotation"
+showToken (TokIntrinsic n) = "intrinsic '@" ++ T.unpack n ++ "'"
 showToken TokEOF = "end of input"

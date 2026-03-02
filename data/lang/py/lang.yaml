@@ -52,8 +52,8 @@ ldIncludeRelToFile: false
 # Template fields
 ldAssignOp: "="
 ldLambdaTemplate: "lambda {{args}}: {{body}}"
-ldSuspendExpr: "(lambda: {{expr}})"
-ldSuspendBlock: ""
+ldDoBlockExpr: "(lambda: {{expr}})"
+ldDoBlockBlock: ""
 ldPartialTemplate: "functools.partial({{fn_with_context}})"
 ldImportTemplate: "{{namespace}} = importlib.import_module(\"{{module_path}}\")"
 ldSocketPathTemplate: "os.path.join(global_state[\"tmpdir\"], {{socket}})"

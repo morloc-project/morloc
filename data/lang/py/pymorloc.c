@@ -1249,6 +1249,195 @@ error:
     return NULL;
 }
 
+static PyObject* pybinding__mlc_hash(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* obj;
+    const char* schema_str;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    char* hex = NULL;
+
+    if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    schema = PyTRY(parse_schema, schema_str);
+
+    voidstar = to_voidstar(schema, obj);
+    PyTRACE(voidstar == NULL)
+
+    hex = PyTRY(mlc_hash, voidstar, schema);
+
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+
+    {
+        PyObject* retval = PyUnicode_FromString(hex);
+        free(hex);
+        return retval;
+    }
+
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    FREE(hex)
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_save(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* obj;
+    const char* schema_str;
+    const char* path;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+
+    if (!PyArg_ParseTuple(args, "Oss", &obj, &schema_str, &path)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    schema = PyTRY(parse_schema, schema_str);
+
+    voidstar = to_voidstar(schema, obj);
+    PyTRACE(voidstar == NULL)
+
+    PyTRY(mlc_save, voidstar, schema, path);
+
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    Py_RETURN_NONE;
+
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_save_voidstar(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* obj;
+    const char* schema_str;
+    const char* path;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+
+    if (!PyArg_ParseTuple(args, "Oss", &obj, &schema_str, &path)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    schema = PyTRY(parse_schema, schema_str);
+
+    voidstar = to_voidstar(schema, obj);
+    PyTRACE(voidstar == NULL)
+
+    PyTRY(mlc_save_voidstar, voidstar, schema, path);
+
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    Py_RETURN_NONE;
+
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_save_json(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* obj;
+    const char* schema_str;
+    const char* path;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+
+    if (!PyArg_ParseTuple(args, "Oss", &obj, &schema_str, &path)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    schema = PyTRY(parse_schema, schema_str);
+
+    voidstar = to_voidstar(schema, obj);
+    PyTRACE(voidstar == NULL)
+
+    PyTRY(mlc_save_json, voidstar, schema, path);
+
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    Py_RETURN_NONE;
+
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    const char* path;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+
+    if (!PyArg_ParseTuple(args, "ss", &schema_str, &path)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    schema = PyTRY(parse_schema, schema_str);
+
+    voidstar = PyTRY(mlc_load, path, schema);
+
+    if (voidstar == NULL) {
+        free_schema(schema);
+        Py_RETURN_NONE;
+    }
+
+    {
+        PyObject* obj = fromAnything(schema, voidstar);
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+        free_schema(schema);
+        PyTRACE(obj == NULL)
+        return obj;
+    }
+
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
 static PyMethodDef Methods[] = {
     {"set_fallback_dir", pybinding__set_fallback_dir, METH_VARARGS, "Set fallback directory for file-backed shared memory"},
     {"shinit", pybinding__shinit, METH_VARARGS, "Open the shared memory pool"},
@@ -1268,6 +1457,11 @@ static PyMethodDef Methods[] = {
     {"pong", pybinding__pong, METH_VARARGS, "Return a ping"},
     {"make_fail_packet", pybinding__make_fail_packetg, METH_VARARGS, "Create a fail packet from an error message"},
     {"remote_call", pybinding__remote_call, METH_VARARGS, "Make a call to a remote cluster"},
+    {"mlc_hash", pybinding__mlc_hash, METH_VARARGS, "Hash a value using xxhash"},
+    {"mlc_save", pybinding__mlc_save, METH_VARARGS, "Save a value to file in msgpack format"},
+    {"mlc_save_voidstar", pybinding__mlc_save_voidstar, METH_VARARGS, "Save a value to file in flat voidstar binary format"},
+    {"mlc_save_json", pybinding__mlc_save_json, METH_VARARGS, "Save a value to file in JSON format"},
+    {"mlc_load", pybinding__mlc_load, METH_VARARGS, "Load a value from file"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 

@@ -1,6 +1,6 @@
 module main (foo)
 
-import foopy
+import .foopy
 
 foo :: [Int] -> [Int]
 foo xs = pmap pneg xs

@@ -1,7 +1,7 @@
 module main (foo)
 
-import foo
-import foopy (pmap)
-import foor (radd, rneg)
+import .foo
+import .foopy (pmap)
+import .foor (radd, rneg)
 
 foo x ys = pmap (\y -> radd x (rneg y)) ys

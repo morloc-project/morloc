@@ -1,0 +1,8 @@
+module main (foo)
+
+type Py => Real = "float"
+
+import .root (double)
+
+foo :: Real -> Real
+foo x = double x

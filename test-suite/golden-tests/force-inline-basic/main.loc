@@ -1,0 +1,19 @@
+-- Test inline force operator (!) inside do-blocks
+module main (forceTuple, forceApp)
+
+import root-cpp
+
+source Cpp from "foo.hpp" ("sideEffect", "add")
+
+type Cpp => Int = "int"
+
+sideEffect :: Int -> <IO> Int
+add :: Int -> Int -> Int
+
+-- Force applied expressions in a tuple
+forceTuple :: <IO> (Int, Int)
+forceTuple = do (!(sideEffect 1), !(sideEffect 2))
+
+-- Force in function args
+forceApp :: <IO> Int
+forceApp = do add !(sideEffect 3) !(sideEffect 4)

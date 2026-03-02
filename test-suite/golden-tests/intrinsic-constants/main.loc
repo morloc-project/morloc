@@ -1,0 +1,16 @@
+module main (langstr)
+
+import root-py (idpy)
+import root-cpp (idcpp)
+import root-r (idr)
+
+langstr :: <IO> (?[Str],?[Str],?[Str],?[Str])
+langstr = do
+  @save  (idpy ["hi", @lang])  "z"
+  @savem (idpy ["hi", @lang]) "zp"
+  @savej (idpy ["hi", @lang]) "zj"
+  xs  <- @load "z"
+  ys  <- @load "zp"
+  zs  <- @load "zj"
+  bad <- @load "zany"
+  (xs, ys, zs, bad)

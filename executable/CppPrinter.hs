@@ -71,8 +71,18 @@ printExpr (ILambda args body) =
     <> printExpr body
     <> ";}"
 printExpr (IRawExpr d) = pretty d
-printExpr (ISuspend e) = "[&](){return " <> printExpr e <> ";}"
-printExpr (IForce e) = printExpr e <> "()"
+printExpr (IDoBlock e) = "[&](){return " <> printExpr e <> ";}"
+printExpr (IEval e) = printExpr e <> "()"
+printExpr (IIntrinsicHash schema e) =
+  [idoc|_mlc_hash(#{printExpr e}, "#{pretty schema}")|]
+printExpr (IIntrinsicSave fmt schema e path)
+  | fmt == "json" = [idoc|_mlc_save_json(#{printExpr e}, "#{pretty schema}", #{printExpr path})|]
+  | fmt == "voidstar" = [idoc|_mlc_save_voidstar(#{printExpr e}, "#{pretty schema}", #{printExpr path})|]
+  | otherwise = [idoc|_mlc_save(#{printExpr e}, "#{pretty schema}", #{printExpr path})|]
+printExpr (IIntrinsicLoad schema (Just t) path) =
+  [idoc|_mlc_load<#{renderIType t}>("#{pretty schema}", #{printExpr path})|]
+printExpr (IIntrinsicLoad schema Nothing path) =
+  [idoc|_mlc_load("#{pretty schema}", #{printExpr path})|]
 
 printStmt :: IStmt -> MDoc
 printStmt (IAssign v Nothing e) = "auto" <+> pretty v <+> "=" <+> printExpr e <> ";"

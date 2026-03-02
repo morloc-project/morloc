@@ -108,7 +108,7 @@ findTypeTerms (ForallU _ e) = findTypeTerms e
 findTypeTerms (FunU ts t) = concatMap findTypeTerms ts <> findTypeTerms t
 findTypeTerms (AppU t ts) = findTypeTerms t <> concatMap findTypeTerms ts
 findTypeTerms (NamU _ _ ps rs) = concatMap findTypeTerms (map snd rs <> ps)
-findTypeTerms (ThunkU t) = findTypeTerms t
+findTypeTerms (EffectU _ t) = findTypeTerms t
 findTypeTerms (OptionalU t) = findTypeTerms t
 
 -- | Build the fixity map from top-level fixity declarations.
@@ -160,8 +160,9 @@ checkExprI f e@(ExprI _ (NamE rs)) = f e >> mapM_ (checkExprI f . snd) rs
 checkExprI f e@(ExprI _ (BopE e1 _ _ e2)) = f e >> mapM_ (checkExprI f) [e1, e2]
 checkExprI f e@(ExprI _ (LetE bindings body)) = f e >> mapM_ (checkExprI f . snd) bindings >> checkExprI f body
 checkExprI f e@(ExprI _ (IfE c t el)) = f e >> mapM_ (checkExprI f) [c, t, el]
-checkExprI f e@(ExprI _ (SuspendE e')) = f e >> checkExprI f e'
-checkExprI f e@(ExprI _ (ForceE e')) = f e >> checkExprI f e'
+checkExprI f e@(ExprI _ (DoBlockE e')) = f e >> checkExprI f e'
+checkExprI f e@(ExprI _ (EvalE e')) = f e >> checkExprI f e'
+checkExprI f e@(ExprI _ (IntrinsicE _ es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e = f e
 
 -- | Find the largest index used in an 'ExprI' tree.
@@ -180,8 +181,9 @@ maxIndex (ExprI i (ExpE (ExportMany ss gs))) = maximum (i : map fst (Set.toList 
 maxIndex (ExprI i (BopE e1 j _ e2)) = maximum [i, j, maxIndex e1, maxIndex e2]
 maxIndex (ExprI i (LetE bindings body)) = maximum (i : maxIndex body : map (maxIndex . snd) bindings)
 maxIndex (ExprI i (IfE c t e)) = maximum [i, maxIndex c, maxIndex t, maxIndex e]
-maxIndex (ExprI i (SuspendE e)) = max i (maxIndex e)
-maxIndex (ExprI i (ForceE e)) = max i (maxIndex e)
+maxIndex (ExprI i (DoBlockE e)) = max i (maxIndex e)
+maxIndex (ExprI i (EvalE e)) = max i (maxIndex e)
+maxIndex (ExprI i (IntrinsicE _ es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i _) = i
 
 -- | Collect all indices from an 'ExprI' tree.
@@ -203,6 +205,7 @@ getIndices (ExprI i (ExpE (ExportMany ss gs))) =
 getIndices (ExprI i (BopE e1 j _ e2)) = [i, j] <> getIndices e1 <> getIndices e2
 getIndices (ExprI i (LetE bindings body)) = i : concatMap (getIndices . snd) bindings <> getIndices body
 getIndices (ExprI i (IfE c t e)) = i : concatMap getIndices [c, t, e]
-getIndices (ExprI i (SuspendE e)) = i : getIndices e
-getIndices (ExprI i (ForceE e)) = i : getIndices e
+getIndices (ExprI i (DoBlockE e)) = i : getIndices e
+getIndices (ExprI i (EvalE e)) = i : getIndices e
+getIndices (ExprI i (IntrinsicE _ es)) = i : concatMap getIndices es
 getIndices (ExprI i _) = [i]

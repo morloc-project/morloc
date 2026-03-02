@@ -20,6 +20,9 @@ module UnitTypeTests
   , whitespaceTests
   , infixOperatorTests
   , complexityRegressionTests
+  , effectSubtypeTests
+  , effectSynthesisTests
+  , effectErrorTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -31,6 +34,7 @@ import qualified System.Directory as SD
 import Text.RawString.QQ
 
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import qualified Data.Text as MT
 import Test.Tasty (TestTree, localOption, mkTimeout, testGroup)
 import Test.Tasty.HUnit
@@ -117,9 +121,9 @@ renameExistentials = snd . f (0 :: Int, Map.empty)
     f s (NamU o n vs rs) =
       let (s', ts') = statefulMap f s (map snd rs)
        in (s', NamU o n vs (zip (map fst rs) ts'))
-    f s (ThunkU t) =
+    f s (EffectU effs t) =
       let (s', t') = f s t
-       in (s', ThunkU t')
+       in (s', EffectU effs t')
     f s (OptionalU t) =
       let (s', t') = f s t
        in (s', OptionalU t')
@@ -133,7 +137,7 @@ closeExistentials = f
     f (FunU ts t) = FunU (map f ts) (f t)
     f (AppU t ts) = AppU (f t) (map f ts)
     f (NamU o v ts rs) = NamU o v (map f ts) (map (second f) rs)
-    f (ThunkU t) = ThunkU (f t)
+    f (EffectU effs t) = EffectU effs (f t)
     f (OptionalU t) = OptionalU (f t)
 
 assertSubtypeGamma :: String -> [GammaIndex] -> TypeU -> TypeU -> [GammaIndex] -> TestTree
@@ -2207,4 +2211,372 @@ complexityRegressionTests =
           f 1 True "x" 2.0 [1]
         |]
           (tuple [int, bool, str, real, lst int])
+      , -- HOF shared type variable enforcement
+        exprTestBad
+          "fold with (==) should fail: shared var c gets Bool and Str"
+          [r|
+          fold b a :: (b -> a -> b) -> b -> [a] -> b
+          (==) c :: c -> c -> Bool
+          test = fold (==) True ["hello", "hello"]
+          test
+        |]
+      , assertGeneralType
+          "fold with (+) should succeed: shared var resolved consistently"
+          [r|
+          fold b a :: (b -> a -> b) -> b -> [a] -> b
+          (+) :: Int -> Int -> Int
+          test = fold (+) 0 [1, 2, 3]
+          test
+        |]
+          int
+      , assertGeneralType
+          "map with lambda using (==) should succeed: same type both args"
+          [r|
+          map a b :: (a -> b) -> [a] -> [b]
+          (==) c :: c -> c -> Bool
+          test = map (\x -> x == x) ["hello"]
+          test
+        |]
+          (lst bool)
+      , -- zipSubtype path: type constructor with repeated variable
+        exprTestBad
+          "zipSubtype: Pair a a cannot unify with Pair Bool Str"
+          [r|
+          mkPair a :: a -> Pair a a
+          consume :: Pair Bool Str -> Int
+          test = consume (mkPair True)
+          test
+        |]
+      , assertGeneralType
+          "zipSubtype: Pair a a consistent with Pair Int Int"
+          [r|
+          mkPair a :: a -> Pair a a
+          fst a b :: Pair a b -> a
+          test = fst (mkPair 42)
+          test
+        |]
+          int
+      , -- Shared var in return: id passed where Bool -> Str expected
+        exprTestBad
+          "shared var via HOF: id cannot satisfy Bool -> Str"
+          [r|
+          apply a b :: (a -> b) -> a -> b
+          id a :: a -> a
+          asStr :: Str -> Str
+          test = asStr (apply id True)
+          test
+        |]
+      , -- Triple-shared variable through HOF
+        exprTestBad
+          "triple-shared var forced to different types through fold"
+          [r|
+          fold b a :: (b -> a -> b) -> b -> [a] -> b
+          choose c :: c -> c -> c
+          test = fold choose "hello" [1, 2]
+          test
+        |]
+      , -- Shared return var conflicts with arguments
+        exprTestBad
+          "shared var return type conflicts with argument through fold"
+          [r|
+          fold b a :: (b -> a -> b) -> b -> [a] -> b
+          weirdEq c :: c -> c -> Str
+          test = fold weirdEq "start" [1, 2]
+          test
+        |]
+      , -- Two distinct shared vars both violated
+        exprTestBad
+          "two distinct shared vars both inconsistent through HOF"
+          [r|
+          hof a b c d e :: (a -> b -> c -> d -> e) -> a -> b -> c -> d -> e
+          f x y :: x -> y -> x -> y -> Bool
+          test = hof f 1 "hi" True 42.0
+          test
+        |]
+      , -- Nested HOF shared var conflict
+        exprTestBad
+          "nested HOF: shared var conflict through double application"
+          [r|
+          apply a b :: (a -> b) -> a -> b
+          (==) c :: c -> c -> Bool
+          test = apply (apply (==) True) "hello"
+          test
+        |]
+      , -- Regression: fold with (==) on consistent types should pass
+        assertGeneralType
+          "fold with (==) consistent types: all Bool"
+          [r|
+          fold b a :: (b -> a -> b) -> b -> [a] -> b
+          (==) c :: c -> c -> Bool
+          test = fold (==) True [True, False]
+          test
+        |]
+          bool
+      , -- Regression: multiple shared vars all consistent
+        assertGeneralType
+          "multiple shared vars consistent through HOF"
+          [r|
+          hof a b c d e :: (a -> b -> c -> d -> e) -> a -> b -> c -> d -> e
+          f x y :: x -> y -> x -> y -> Bool
+          test = hof f 1 2 3 4
+          test
+        |]
+          bool
+      ]
+
+-- Effect type helpers
+ioEff :: TypeU -> TypeU
+ioEff = EffectU ioEffectSet
+
+errEff :: TypeU -> TypeU
+errEff = EffectU (EffectSet (Set.singleton "Error"))
+
+emptyEff :: TypeU -> TypeU
+emptyEff = EffectU emptyEffectSet
+
+effectSubtypeTests :: TestTree
+effectSubtypeTests =
+  localOption (mkTimeout 100000) $ -- 0.1 second timeout
+    testGroup
+      "Effect subtype tests"
+      [ -- identical effect sets are subtypes of each other
+        assertSubtypeGamma "<IO> A <: <IO> A" [] (ioEff a) (ioEff a) []
+      , -- fewer effects is a subtype (IO subset of {IO,Error})
+        assertSubtypeGamma "<IO> A <: <IO,Error> A"
+          [] (ioEff a) (EffectU (EffectSet (Set.fromList ["IO", "Error"])) a) []
+      , -- empty effect set is subtype of any effect set
+        assertSubtypeGamma "<> A <: <IO> A" [] (emptyEff a) (ioEff a) []
+      , -- superset effects currently accepted (permissive behavior)
+        assertSubtypeGamma "<IO,Error> A <: <IO> A (permissive)"
+          [] (EffectU (EffectSet (Set.fromList ["IO", "Error"])) a) (ioEff a) []
+      , -- effect subtyping with function inner types
+        assertSubtypeGamma "<IO> (A -> B) <: <IO> (A -> B)"
+          [] (ioEff (fun [a, b])) (ioEff (fun [a, b])) []
+      , -- effect subtyping solves existentials in inner types
+        assertSubtypeGamma "<a> -| <IO> <a> <: <IO> A |- <a>:A"
+          [eag] (ioEff ea) (ioEff a) [solvedA a]
+      , -- effect subtyping solves existentials (reverse direction)
+        assertSubtypeGamma "<a> -| <IO> A <: <IO> <a> |- <a>:A"
+          [eag] (ioEff a) (ioEff ea) [solvedA a]
+      , -- effects compose with optional inner types
+        assertSubtypeGamma "<IO> ?A <: <IO> ?A"
+          [] (ioEff (OptionalU a)) (ioEff (OptionalU a)) []
+      , -- effects compose with list inner types
+        assertSubtypeGamma "<IO> [A] <: <IO> [A]"
+          [] (ioEff (lst a)) (ioEff (lst a)) []
+      , -- empty effects both sides
+        assertSubtypeGamma "<> A <: <> A" [] (emptyEff a) (emptyEff a) []
+      ]
+  where
+    a = var "A"
+    b = var "B"
+    ea = exist "x1"
+    eag = ExistG (TV "x1") ([], Open) ([], Open)
+    solvedA t = SolvedG (TV "x1") t
+
+effectSynthesisTests :: TestTree
+effectSynthesisTests =
+  localOption (mkTimeout 100000) $ -- 0.1 second timeout
+    testGroup
+      "Effect synthesis tests"
+      [ -- pure do-block with no effects infers empty effect set
+        assertGeneralType
+          "pure do-block infers empty effects"
+          [r|
+        module main (x)
+        x = do 42
+          |]
+          (emptyEff int)
+      , -- force operator collects effect from forced expression
+        assertGeneralType
+          "do-block with force collects IO effect"
+          [r|
+        module main (x)
+        f :: Int -> <IO> Int
+        x = do !(f 1)
+          |]
+          (ioEff int)
+      , -- force in tuple: effects collected, tuple gets plain inner types
+        assertGeneralType
+          "do-block with tuple of forces"
+          [r|
+        module main (x)
+        f :: Int -> <IO> Int
+        x = do (!(f 1), !(f 2))
+          |]
+          (ioEff (tuple [int, int]))
+      , -- force in function args: effects bubble up, function sees plain args
+        assertGeneralType
+          "do-block with forces in function args"
+          [r|
+        module main (x)
+        f :: Int -> <IO> Int
+        add :: Int -> Int -> Int
+        x = do add !(f 1) !(f 2)
+          |]
+          (ioEff int)
+      , -- bind extracts value from effectful expr, adds effect to block
+        assertGeneralType
+          "do-block with bind"
+          [r|
+        module main (x)
+        f :: Int -> <IO> Int
+        x = do
+            y <- f 1
+            y
+          |]
+          (ioEff int)
+      , -- multiple binds collect effects from all bound expressions
+        assertGeneralType
+          "do-block with chained binds"
+          [r|
+        module main (x)
+        f :: Int -> <IO> Int
+        add :: Int -> Int -> Int
+        x = do
+            a <- f 1
+            b <- f 2
+            add a b
+          |]
+          (ioEff int)
+      , -- let with pure RHS in do-block infers empty effect
+        assertGeneralType
+          "do-block with pure let binding"
+          [r|
+        module main (x)
+        x = do
+            let y = 1
+            y
+          |]
+          (emptyEff int)
+      , -- let with forced RHS collects effect from the force
+        assertGeneralType
+          "do-block with bind and let"
+          [r|
+        module main (x)
+        f :: Int -> <IO> Int
+        add :: Int -> Int -> Int
+        x = do
+            y <- f 1
+            let z = add y 1
+            z
+          |]
+          (ioEff int)
+      , -- pure value auto-coerces to effectful when annotation demands it
+        assertGeneralType
+          "pure value coerces to effectful via annotation"
+          [r|
+        module main (x)
+        x :: <IO> Int
+        x = 42
+          |]
+          (ioEff int)
+      , -- pure expression in do-block produces empty effects
+        assertGeneralType
+          "pure expression in do-block"
+          [r|
+        module main (x)
+        add :: Int -> Int -> Int
+        x = do add 1 2
+          |]
+          (emptyEff int)
+      , -- forces with different effects produce EffectUnion
+        -- (order: IO first because it appears first in the application)
+        assertGeneralType
+          "do-block with multiple effect labels"
+          [r|
+        module main (x)
+        f :: Int -> <IO> Int
+        g :: Int -> <Error> Int
+        add :: Int -> Int -> Int
+        x = do add !(f 1) !(g 2)
+          |]
+          (EffectU (EffectUnion (EffectSet (Set.singleton "IO")) (EffectSet (Set.singleton "Error"))) int)
+      , -- bind and force mix in same do-block, effects combine
+        assertGeneralType
+          "do-block mixing bind and force"
+          [r|
+        module main (x)
+        f :: Int -> <IO> Int
+        add :: Int -> Int -> Int
+        x = do
+            y <- f 1
+            add y !(f 2)
+          |]
+          (ioEff int)
+      , -- chained binds feeding results forward
+        assertGeneralType
+          "do-block with chained dependent binds"
+          [r|
+        module main (x)
+        f :: Int -> <IO> Int
+        add :: Int -> Int -> Int
+        x = do
+            a <- f 1
+            b <- f a
+            add a b
+          |]
+          (ioEff int)
+      , -- do-block with effect annotation matching inferred effects
+        assertGeneralType
+          "annotated do-block matches inferred effects"
+          [r|
+        module main (x)
+        f :: Int -> <IO> Int
+        x :: <IO> Int
+        x = do
+            y <- f 1
+            y
+          |]
+          (ioEff int)
+      , -- polymorphic function applied inside do-block
+        assertGeneralType
+          "polymorphic function in do-block"
+          [r|
+        module main (x)
+        f :: Int -> <IO> Int
+        id a :: a -> a
+        x = do !(f (id 42))
+          |]
+          (ioEff int)
+      , -- do-block returning a list with forces
+        assertGeneralType
+          "do-block returning list"
+          [r|
+        module main (x)
+        f :: Int -> <IO> Int
+        x = do [!(f 1), !(f 2)]
+          |]
+          (ioEff (lst int))
+      ]
+
+effectErrorTests :: TestTree
+effectErrorTests =
+  localOption (mkTimeout 100000) $ -- 0.1 second timeout
+    testGroup
+      "Effect error tests"
+      [ -- forcing a non-effectful expression should fail
+        exprTestBad
+          "force on non-effectful value"
+          [r|
+        module main (x)
+        x = do !(42)
+          |]
+      , -- type mismatch inside do-block force should fail
+        exprTestBad
+          "type mismatch inside do-block force"
+          [r|
+        module main (x)
+        f :: Int -> <IO> Int
+        x = do !(f "hello")
+          |]
+      , -- effectful type where plain type expected should fail
+        exprTestBad
+          "effectful type where plain type expected"
+          [r|
+        module main (x)
+        f :: Int -> <IO> Int
+        g :: Int -> Int
+        x = g (f 1)
+          |]
       ]

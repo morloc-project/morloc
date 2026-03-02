@@ -197,15 +197,22 @@ realizeWithRegistry registry s0 = do
       e' <- scoreAnnoS rstat e
       let best = minPairs (scoresOf c' ++ scoresOf t' ++ scoresOf e')
       return (IfS c' t' e', Idx i best)
-    scoreExpr rstat (SuspendS x, i) = do
+    scoreExpr rstat (DoBlockS x, i) = do
       x' <- scoreAnnoS rstat x
-      return (SuspendS x', Idx i (scoresOf x'))
-    scoreExpr rstat (ForceS x, i) = do
+      return (DoBlockS x', Idx i (scoresOf x'))
+    scoreExpr rstat (EvalS x, i) = do
       x' <- scoreAnnoS rstat x
-      return (ForceS x', Idx i (scoresOf x'))
+      return (EvalS x', Idx i (scoresOf x'))
     scoreExpr rstat (CoerceS c x, i) = do
       x' <- scoreAnnoS rstat x
       return (CoerceS c x', Idx i (scoresOf x'))
+    scoreExpr rstat (IntrinsicS intr xs, i) = do
+      xs' <- mapM (scoreAnnoS rstat) xs
+      let Idx _ langScores = zipLang i rstat
+          best = case xs' of
+            [] -> langScores
+            _ -> minPairs (concatMap scoresOf xs')
+      return (IntrinsicS intr xs', Idx i best)
 
     -- calculate the score for an application based on the score of the function
     -- and the scores of the arguments
@@ -414,18 +421,22 @@ realizeWithRegistry registry s0 = do
       t' <- collapseAnnoS lang t
       e' <- collapseAnnoS lang e
       return (IfS c' t' e', Idx i lang)
-    collapseExpr _ l1 (SuspendS x, Idx i ss) = do
+    collapseExpr _ l1 (DoBlockS x, Idx i ss) = do
       lang <- chooseLanguage l1 ss
       x' <- collapseAnnoS lang x
-      return (SuspendS x', Idx i lang)
-    collapseExpr _ l1 (ForceS x, Idx i ss) = do
+      return (DoBlockS x', Idx i lang)
+    collapseExpr _ l1 (EvalS x, Idx i ss) = do
       lang <- chooseLanguage l1 ss
       x' <- collapseAnnoS lang x
-      return (ForceS x', Idx i lang)
+      return (EvalS x', Idx i lang)
     collapseExpr _ l1 (CoerceS c x, Idx i ss) = do
       lang <- chooseLanguage l1 ss
       x' <- collapseAnnoS lang x
       return (CoerceS c x', Idx i lang)
+    collapseExpr _ l1 (IntrinsicS intr xs, Idx i ss) = do
+      lang <- chooseLanguage l1 ss
+      xs' <- mapM (collapseAnnoS lang) xs
+      return (IntrinsicS intr xs', Idx i lang)
 
     chooseLanguage :: Maybe Lang -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
     chooseLanguage l1 ss = do
@@ -489,9 +500,10 @@ realizeWithRegistry registry s0 = do
             (LetBndS v) -> return (LetBndS v)
             (CallS v) -> return (CallS v)
             (IfS c t e) -> IfS <$> f lang c <*> f lang t <*> f lang e
-            (SuspendS x) -> SuspendS <$> f lang x
-            (ForceS x) -> ForceS <$> f lang x
+            (DoBlockS x) -> DoBlockS <$> f lang x
+            (EvalS x) -> EvalS <$> f lang x
             (CoerceS c x) -> CoerceS c <$> f lang x
+            (IntrinsicS intr xs) -> IntrinsicS intr <$> mapM (f lang) xs
           return (AnnoS g (Idx i lang) e'')
 
 {- | This function is called on trees that contain no language-specific
@@ -528,9 +540,10 @@ removeVarS (AnnoS g c (TupS xs)) = AnnoS g c (TupS (map removeVarS xs))
 removeVarS (AnnoS g c (NamS rs)) = AnnoS g c (NamS (map (second removeVarS) rs))
 removeVarS (AnnoS g c (LetS v e1 e2)) = AnnoS g c (LetS v (removeVarS e1) (removeVarS e2))
 removeVarS (AnnoS g c (IfS cond thenE elseE)) = AnnoS g c (IfS (removeVarS cond) (removeVarS thenE) (removeVarS elseE))
-removeVarS (AnnoS g c (SuspendS e)) = AnnoS g c (SuspendS (removeVarS e))
-removeVarS (AnnoS g c (ForceS e)) = AnnoS g c (ForceS (removeVarS e))
+removeVarS (AnnoS g c (DoBlockS e)) = AnnoS g c (DoBlockS (removeVarS e))
+removeVarS (AnnoS g c (EvalS e)) = AnnoS g c (EvalS (removeVarS e))
 removeVarS (AnnoS g c (CoerceS co e)) = AnnoS g c (CoerceS co (removeVarS e))
+removeVarS (AnnoS g c (IntrinsicS intr es)) = AnnoS g c (IntrinsicS intr (map removeVarS es))
 removeVarS x = x
 
 -- | Extract non-exported recursive helpers from rASTs into their own top-level
@@ -609,15 +622,19 @@ extractExpr exports (IfS c t e) = do
   (t', h2) <- extractFromTree exports t
   (e', h3) <- extractFromTree exports e
   return (IfS c' t' e', h1 ++ h2 ++ h3)
-extractExpr exports (SuspendS e) = do
+extractExpr exports (DoBlockS e) = do
   (e', helpers) <- extractFromTree exports e
-  return (SuspendS e', helpers)
-extractExpr exports (ForceS e) = do
+  return (DoBlockS e', helpers)
+extractExpr exports (EvalS e) = do
   (e', helpers) <- extractFromTree exports e
-  return (ForceS e', helpers)
+  return (EvalS e', helpers)
 extractExpr exports (CoerceS c e) = do
   (e', helpers) <- extractFromTree exports e
   return (CoerceS c e', helpers)
+extractExpr exports (IntrinsicS intr es) = do
+  results <- mapM (extractFromTree exports) es
+  let (es', helperLists) = unzip results
+  return (IntrinsicS intr es', concat helperLists)
 extractExpr _ e = return (e, [])
 
 -- | Check if an AnnoS tree contains a CallS node targeting the given name
@@ -634,9 +651,10 @@ containsCallS target (AnnoS _ _ e) = go e
     go (LetS _ e1 e2) = containsCallS target e1 || containsCallS target e2
     go (LetBndS _) = False
     go (IfS c t e) = containsCallS target c || containsCallS target t || containsCallS target e
-    go (SuspendS x) = containsCallS target x
-    go (ForceS x) = containsCallS target x
+    go (DoBlockS x) = containsCallS target x
+    go (EvalS x) = containsCallS target x
     go (CoerceS _ x) = containsCallS target x
+    go (IntrinsicS _ xs) = any (containsCallS target) xs
     go _ = False
 
 -- Check if this expression is a data structure that contains

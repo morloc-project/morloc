@@ -127,7 +127,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       f (NamF _ (FV _ s) ps _) = do
         ps' <- mapM f ps
         return $ pretty s <> CP.printRecordTemplate ps'
-      f (ThunkF t) = do
+      f (EffectF _ t) = do
         t' <- f t
         return $ "std::function<" <> t' <> "()" <> ">"
       f (OptionalF t) = do
@@ -145,6 +145,7 @@ data CppTranslatorState = CppTranslatorState
   , translatorLocalManifoldSet :: Set.Set Int
   , translatorRemoteManifoldSet :: Set.Set Int
   , translatorCurrentManifold :: Int
+  , translatorEffectLabels :: Map.Map Int (Set.Set Text)
   }
 
 instance Defaultable CppTranslatorState where
@@ -156,6 +157,7 @@ instance Defaultable CppTranslatorState where
       , translatorLocalManifoldSet = Set.empty
       , translatorRemoteManifoldSet = Set.empty
       , translatorCurrentManifold = -1 -- -1 indicates we are not inside a manifold
+      , translatorEffectLabels = Map.empty
       }
 
 type CppTranslator a = CMS.StateT CppTranslatorState Identity a
@@ -181,8 +183,10 @@ translate srcs es = do
   -- universalScopeMap :: GMap Int MVar Scope
   universalScopeMap <- MM.gets stateUniversalConcreteTypedefs
 
+  effectMap <- MM.gets stateManifoldEffects
+
   let recmap = unifyRecords . concatMap collectRecords $ es
-      translatorState = defaultValue {translatorRecmap = recmap}
+      translatorState = defaultValue {translatorRecmap = recmap, translatorEffectLabels = effectMap}
       code = CMS.evalState (makeCppCode srcs es universalScopeMap scopeMap) translatorState
 
   maker <- makeTheMaker srcs
@@ -368,7 +372,7 @@ PROPAGATE_ERROR(errmsg)|]
           , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
           , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
           }
-    , lcMakeSuspend = \stmts expr -> (,) [] $ case stmts of
+    , lcMakeDoBlock = \stmts expr -> (,) [] $ case stmts of
         [] -> "[&](){return " <> expr <> ";}"
         _ -> "[&](){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"
     , lcSerialize = \v s -> serialize v s
@@ -378,6 +382,7 @@ PROPAGATE_ERROR(errmsg)|]
     , lcMakeFunction = \mname args manifoldType priorLines body headForm -> do
         callIndex <- CMS.gets translatorCurrentManifold
         state <- CMS.get
+        let effectLabels = Map.findWithDefault Set.empty callIndex (translatorEffectLabels state)
         let alreadyDone = case headForm of
               (Just HeadManifoldFormRemoteWorker) -> Set.member callIndex (translatorRemoteManifoldSet state)
               _ -> Set.member callIndex (translatorLocalManifoldSet state)
@@ -395,15 +400,19 @@ PROPAGATE_ERROR(errmsg)|]
             typedArgs <- mapM (\r@(Arg _ t) -> cppArgOf (chooseCallSemantics t) r) args
             let fullName = mname <> mnameExt headForm
                 decl = returnTypeStr <+> fullName <> tupled typedArgs
+                enrichError = case headForm of
+                  Just HeadManifoldFormRemoteWorker -> True
+                  _ -> Set.member "Error" effectLabels
                 tryBody = block 4 "try" (vsep $ priorLines <> [body])
-                throwStatement =
-                  vsep
-                    [ [idoc|std::string error_message = "Error raised in C++ pool by #{mname}:\n" + std::string(e.what());|]
-                    , [idoc|throw std::runtime_error(error_message);|]
-                    ]
-                catchBody = block 4 "catch (const std::exception& e)" throwStatement
-                tryCatchBody = tryBody <+> catchBody
-            return . Just . block 4 decl . vsep $ [tryCatchBody]
+                catchBody
+                  | enrichError =
+                    let throwStatement = vsep
+                          [ [idoc|std::string error_message = "Error raised in C++ pool by #{mname}:\n" + std::string(e.what());|]
+                          , [idoc|throw std::runtime_error(error_message);|]
+                          ]
+                     in block 4 "catch (const std::exception& e)" throwStatement
+                  | otherwise = block 4 "catch (...)" "throw;"
+            return . Just . block 4 decl . vsep $ [tryBody <+> catchBody]
     , lcMakeLambda = \mname contextArgs boundArgs ->
         let vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
          in [idoc|std::bind(#{cat (punctuate "," (mname : (contextArgs ++ vs')))})|]
@@ -621,7 +630,7 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     showDefType _ (NamT _ v _ _) = pretty v
     showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
     showDefType _ (AppT _ _) = error "AppT is only OK with VarT, for now"
-    showDefType _ (ThunkT _) = error "Cannot show ThunkT"
+    showDefType _ (EffectT _ _) = error "Cannot show EffectT"
     showDefType ps (OptionalT t) = "std::optional<" <> showDefType ps t <> ">"
 
 -- C++ specific source handling (flags, headers, libraries)

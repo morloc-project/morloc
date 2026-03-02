@@ -510,7 +510,8 @@ morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
     return call;
 }
 
-static relptr_t print_voidstar_binary_binder_r(
+static relptr_t write_voidstar_binary_binder_r(
+    int fd,
     const void* data,
     const Schema* schema,
     relptr_t data_index,
@@ -526,8 +527,8 @@ static relptr_t print_voidstar_binary_binder_r(
                 Array array = *(Array*)data;
                 // set the element pointer to the current data location
                 array.data = data_index;
-                // print just the array struct, the data will be printed later
-                TRY(print_binary, (char*)(&array), sizeof(Array));
+                // write just the array struct, the data will be written later
+                TRY(write_binary_fd, fd, (char*)(&array), sizeof(Array));
                 // reserve space for the array and all its recursive contents
                 size_t data_size = TRY(calculate_voidstar_size, data, schema);
                 data_index += data_size - sizeof(Array);
@@ -536,25 +537,40 @@ static relptr_t print_voidstar_binary_binder_r(
         case MORLOC_TUPLE:
         case MORLOC_MAP:
             {
-                // recursively print every tuple element
+                // recursively write every tuple element
                 for(size_t i = 0; i < schema->size; i++){
                     void* child = (void*)((char*)data + schema->offsets[i]);
-                    data_index = TRY(print_voidstar_binary_binder_r, child, schema->parameters[i], data_index);
+                    data_index = TRY(write_voidstar_binary_binder_r, fd, child, schema->parameters[i], data_index);
+                }
+            }
+            break;
+        case MORLOC_OPTIONAL:
+            {
+                uint8_t tag = *((const uint8_t*)data);
+                TRY(write_binary_fd, fd, (char*)&tag, 1);
+                if (tag != 0) {
+                    data_index = TRY(write_voidstar_binary_binder_r,
+                        fd, (const char*)data + 1, schema->parameters[0], data_index);
+                } else {
+                    char* zeros = (char*)calloc(1, schema->parameters[0]->width);
+                    TRY_WITH(free(zeros), write_binary_fd, fd, zeros, schema->parameters[0]->width);
+                    free(zeros);
                 }
             }
             break;
         default:
             {
-                // print primitives
-                TRY(print_binary, (char*)data, schema->width);
+                // write primitives
+                TRY(write_binary_fd, fd, (char*)data, schema->width);
             }
     }
     return data_index;
 }
 
-static relptr_t print_voidstar_binary_array_r(const void*, const Schema*, size_t, relptr_t, ERRMSG);
+static relptr_t write_voidstar_binary_array_r(int, const void*, const Schema*, size_t, relptr_t, ERRMSG);
 
-static relptr_t print_voidstar_binary_data_r(
+static relptr_t write_voidstar_binary_data_r(
+    int fd,
     const void* data,
     const Schema* schema,
     relptr_t data_index, // pointer to start of the data for all arrays
@@ -568,16 +584,25 @@ static relptr_t print_voidstar_binary_data_r(
             {
                 Array* array = (Array*)data;
                 void* absptr = TRY(rel2abs, array->data);
-                data_index = TRY(print_voidstar_binary_array_r, absptr, schema->parameters[0], array->size, data_index);
+                data_index = TRY(write_voidstar_binary_array_r, fd, absptr, schema->parameters[0], array->size, data_index);
             }
             break;
         case MORLOC_TUPLE:
         case MORLOC_MAP:
             {
-                // recursively print every tuple element
+                // recursively write every tuple element
                 for(size_t i = 0; i < schema->size; i++){
                     void* child = (void*)((char*)data + schema->offsets[i]);
-                    data_index = TRY(print_voidstar_binary_data_r, child, schema->parameters[i], data_index);
+                    data_index = TRY(write_voidstar_binary_data_r, fd, child, schema->parameters[i], data_index);
+                }
+            }
+            break;
+        case MORLOC_OPTIONAL:
+            {
+                uint8_t tag = *((const uint8_t*)data);
+                if (tag != 0) {
+                    data_index = TRY(write_voidstar_binary_data_r,
+                        fd, (const char*)data + 1, schema->parameters[0], data_index);
                 }
             }
             break;
@@ -587,7 +612,8 @@ static relptr_t print_voidstar_binary_data_r(
     return data_index;
 }
 
-static relptr_t print_voidstar_binary_array_r(
+static relptr_t write_voidstar_binary_array_r(
+    int fd,
     const void* data, // pointer to the start of the array
     const Schema* schema, // schema for the element type
     size_t length, // number of elements in the array
@@ -596,36 +622,37 @@ static relptr_t print_voidstar_binary_array_r(
 ){
     VAL_RETURN_SETUP(relptr_t, -1)
 
-    // all the fixed-size elements will be printed first
+    // all the fixed-size elements will be written first
     size_t fixed_array_size = schema->width * length;
     data_index += fixed_array_size;
     if (schema_is_fixed_width(schema)){
-        TRY(print_binary, (char*)data, fixed_array_size);
+        TRY(write_binary_fd, fd, (char*)data, fixed_array_size);
     } else {
-        // print fixed width array elements
+        // write fixed width array elements
         relptr_t binder_ptr = data_index; // for array pointers, don't reuse
         for(size_t i = 0; i < length; i++){
             void* child = (void*)((char*)data + i * schema->width);
-            binder_ptr = TRY(print_voidstar_binary_binder_r, child, schema, binder_ptr);
+            binder_ptr = TRY(write_voidstar_binary_binder_r, fd, child, schema, binder_ptr);
         }
-        // print array data
+        // write array data
         for(size_t i = 0; i < length; i++){
             void* child = (void*)((char*)data + i * schema->width);
-            data_index = TRY(print_voidstar_binary_data_r, child, schema, data_index);
+            data_index = TRY(write_voidstar_binary_data_r, fd, child, schema, data_index);
         }
     }
     return data_index;
 }
 
-static relptr_t print_voidstar_binary(
+relptr_t write_voidstar_binary(
+    int fd,
     const void* data,
     const Schema* schema,
     ERRMSG
 ){
     VAL_RETURN_SETUP(relptr_t, -1)
     relptr_t data_index = (relptr_t)schema->width;
-    TRY(print_voidstar_binary_binder_r, data, schema, data_index);
-    data_index = TRY(print_voidstar_binary_data_r, data, schema, data_index);
+    TRY(write_voidstar_binary_binder_r, fd, data, schema, data_index);
+    data_index = TRY(write_voidstar_binary_data_r, fd, data, schema, data_index);
     return data_index;
 }
 
@@ -678,8 +705,8 @@ int print_morloc_data_packet(const uint8_t* packet, const Schema* schema, ERRMSG
                             TRY(print_binary, (char*)packet + sizeof(morloc_packet_header_t), new_header.offset);
                         }
 
-                        // print flattened voidstar data
-                        TRY(print_voidstar_binary, voidstar_ptr, schema);
+                        // write flattened voidstar data to stdout
+                        TRY(write_voidstar_binary, STDOUT_FILENO, voidstar_ptr, schema);
                     }
                     break;
             }

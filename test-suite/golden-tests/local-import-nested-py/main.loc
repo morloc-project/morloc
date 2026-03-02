@@ -1,0 +1,12 @@
+module (foo, bar)
+
+type Py => Real = "float"
+
+import .util (negate)
+import .lib.math (square)
+
+foo :: Real -> Real
+foo x = negate (square x)
+
+bar :: Real -> Real
+bar x = square (negate x)

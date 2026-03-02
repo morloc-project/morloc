@@ -35,6 +35,10 @@ module Morloc.Namespace.Expr
   , Selector (..)
   , ungroup
   , Pattern (..)
+  , Intrinsic (..)
+  , intrinsicName
+  , intrinsicArity
+  , parseIntrinsic
   , Expr (..)
   , ExprI (..)
   , E (..)
@@ -175,6 +179,60 @@ data Pattern
   | PatternStruct Selector
   deriving (Show, Ord, Eq)
 
+-- | Compiler intrinsics: functions the compiler generates specialized code for.
+data Intrinsic
+  = IntrSave      -- ^ @save   :: a -> Str -> {()}   -- voidstar format
+  | IntrSaveM     -- ^ @savem  :: a -> Str -> {()}   -- msgpack format
+  | IntrSaveJ     -- ^ @savej  :: a -> Str -> {()}   -- JSON format
+  | IntrLoad      -- ^ @load   :: Str -> {?a}        -- auto-detect format
+  | IntrHash      -- ^ @hash   :: a -> Str           -- xxhash, hex string
+  | IntrVersion   -- ^ @version :: Str               -- compiler version
+  | IntrCompiled  -- ^ @compiled :: Str              -- compile timestamp
+  | IntrLang      -- ^ @lang    :: Str               -- current pool language
+  | IntrSchema    -- ^ @schema  :: a -> Str          -- schema string
+  | IntrTypeof    -- ^ @typeof  :: a -> Str          -- concrete type name
+  deriving (Show, Ord, Eq)
+
+-- | Map intrinsic to its canonical name
+intrinsicName :: Intrinsic -> Text
+intrinsicName IntrSave = "save"
+intrinsicName IntrSaveM = "savem"
+intrinsicName IntrSaveJ = "savej"
+intrinsicName IntrLoad = "load"
+intrinsicName IntrHash = "hash"
+intrinsicName IntrVersion = "version"
+intrinsicName IntrCompiled = "compiled"
+intrinsicName IntrLang = "lang"
+intrinsicName IntrSchema = "schema"
+intrinsicName IntrTypeof = "typeof"
+
+-- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
+parseIntrinsic :: Text -> Maybe Intrinsic
+parseIntrinsic "save" = Just IntrSave
+parseIntrinsic "savem" = Just IntrSaveM
+parseIntrinsic "savej" = Just IntrSaveJ
+parseIntrinsic "load" = Just IntrLoad
+parseIntrinsic "hash" = Just IntrHash
+parseIntrinsic "version" = Just IntrVersion
+parseIntrinsic "compiled" = Just IntrCompiled
+parseIntrinsic "lang" = Just IntrLang
+parseIntrinsic "schema" = Just IntrSchema
+parseIntrinsic "typeof" = Just IntrTypeof
+parseIntrinsic _ = Nothing
+
+-- | Expected number of arguments for each intrinsic
+intrinsicArity :: Intrinsic -> Int
+intrinsicArity IntrSave = 2
+intrinsicArity IntrSaveM = 2
+intrinsicArity IntrSaveJ = 2
+intrinsicArity IntrLoad = 1
+intrinsicArity IntrHash = 1
+intrinsicArity IntrVersion = 0
+intrinsicArity IntrCompiled = 0
+intrinsicArity IntrLang = 0
+intrinsicArity IntrSchema = 1
+intrinsicArity IntrTypeof = 1
+
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)
 
@@ -207,8 +265,9 @@ data Expr
   | StrE Text
   | PatE Pattern
   | IfE ExprI ExprI ExprI
-  | SuspendE ExprI
-  | ForceE ExprI
+  | DoBlockE ExprI
+  | EvalE ExprI
+  | IntrinsicE Intrinsic [ExprI]
   deriving (Show, Ord, Eq)
 
 data Import
@@ -254,24 +313,30 @@ data E
   | SrcP (Indexed Type) Source
   | PatP (Indexed Type) Selector
   | IfP (Indexed Type) E E E
-  | SuspendP (Indexed Type) E
-  | ForceP (Indexed Type) E
+  | DoBlockP (Indexed Type) E
+  | EvalP (Indexed Type) E
   | CoerceP Coercion (Indexed Type) E
+  | IntrinsicP (Indexed Type) Intrinsic [E]
   deriving (Ord, Eq, Show)
 
 -- | Coercion tag for implicit type conversions inserted by the typechecker.
 -- Extensible: future coercions (e.g., numeric widening) add constructors here.
-data Coercion = CoerceToOptional
+data Coercion
+  = CoerceToOptional
+  | CoerceToEffect (Set.Set EffectLabel)
   deriving (Show, Eq, Ord)
 
 -- | Apply a coercion to a type, returning the coerced type.
 applyCoercion :: Coercion -> TypeU -> TypeU
 applyCoercion CoerceToOptional t = OptionalU t
+applyCoercion (CoerceToEffect effs) t = EffectU (EffectSet effs) t
 
 -- | Invert a coercion on a resolved Type.
 unapplyCoercion :: Coercion -> Type -> Type
 unapplyCoercion CoerceToOptional (OptionalT t) = t
 unapplyCoercion CoerceToOptional t = t  -- defensive fallback
+unapplyCoercion (CoerceToEffect _) (EffectT _ t) = t
+unapplyCoercion (CoerceToEffect _) t = t  -- defensive fallback
 
 data ExecutableExpr = SrcCall Source | PatCall Pattern
   deriving (Ord, Eq, Show)
@@ -297,9 +362,10 @@ data ExprS g f c
   | LetBndS EVar
   | CallS EVar  -- recursive call back-edge
   | IfS (AnnoS g f c) (AnnoS g f c) (AnnoS g f c)
-  | SuspendS (AnnoS g f c)
-  | ForceS (AnnoS g f c)
+  | DoBlockS (AnnoS g f c)
+  | EvalS (AnnoS g f c)
   | CoerceS Coercion (AnnoS g f c)
+  | IntrinsicS Intrinsic [AnnoS g f c]
 
 data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr ClassName EVar EType [(EType, [a])]
   deriving (Show, Eq, Ord)
@@ -413,9 +479,10 @@ mapExprSM f (LetS v e1 e2) = LetS v <$> f e1 <*> f e2
 mapExprSM _ (LetBndS v) = return $ LetBndS v
 mapExprSM _ (CallS v) = return $ CallS v
 mapExprSM f (IfS c t e) = IfS <$> f c <*> f t <*> f e
-mapExprSM f (SuspendS e) = SuspendS <$> f e
-mapExprSM f (ForceS e) = ForceS <$> f e
+mapExprSM f (DoBlockS e) = DoBlockS <$> f e
+mapExprSM f (EvalS e) = EvalS <$> f e
 mapExprSM f (CoerceS c e) = CoerceS c <$> f e
+mapExprSM f (IntrinsicS intr es) = IntrinsicS intr <$> mapM f es
 
 mapAnnoSM ::
   (Traversable f, Monad m) =>
@@ -465,7 +532,7 @@ instance Pretty Lit where
   pretty (MLog x) = pretty x
   pretty (MStr x) = pretty x
   pretty MUni = "Unit"
-  pretty MNull = "null"
+  pretty MNull = "Null"
 
 instance Pretty E where
   pretty (BndP _ v) = pretty v
@@ -484,9 +551,10 @@ instance Pretty E where
   pretty (SrcP _ src) = pretty src
   pretty (PatP _ s) = pretty (PatternStruct s)
   pretty (IfP _ c t e) = "if" <+> pretty c <+> "then" <+> pretty t <+> "else" <+> pretty e
-  pretty (SuspendP _ e) = "{" <> pretty e <> "}"
-  pretty (ForceP _ e) = "!" <> pretty e
+  pretty (DoBlockP _ e) = "{" <> pretty e <> "}"
+  pretty (EvalP _ e) = "!" <> pretty e
   pretty (CoerceP _ _ e) = "coerce(" <> pretty e <> ")"
+  pretty (IntrinsicP _ intr args) = "@" <> pretty (intrinsicName intr) <+> hsep (map pretty args)
 
 instance Pretty Source where
   pretty s =
@@ -598,9 +666,10 @@ instance Pretty Expr where
         InfixN -> "infix"
   pretty (BopE e1 _ v e2) = pretty e1 <+> pretty v <+> pretty e2
   pretty (IfE c t e) = "if" <+> pretty c <+> "then" <+> pretty t <+> "else" <+> pretty e
-  pretty NullE = "null"
-  pretty (SuspendE e) = "{" <> pretty e <> "}"
-  pretty (ForceE e) = "!" <> pretty e
+  pretty NullE = "Null"
+  pretty (DoBlockE e) = "{" <> pretty e <> "}"
+  pretty (EvalE e) = "!" <> pretty e
+  pretty (IntrinsicE intr args) = "@" <> pretty (intrinsicName intr) <+> hsep (map pretty args)
 
 instance (Foldable f) => Pretty (AnnoS a f b) where
   pretty (AnnoS _ _ e) = pretty e
@@ -624,9 +693,10 @@ instance (Foldable f) => Pretty (ExprS a f b) where
   pretty (LetBndS x) = "(LetBndS" <+> pretty x <> ")"
   pretty (CallS v) = "(CallS" <+> pretty v <> ")"
   pretty (IfS c t e) = "(IfS" <+> pretty c <+> pretty t <+> pretty e <> ")"
-  pretty (SuspendS e) = "(SuspendS" <+> pretty e <> ")"
-  pretty (ForceS e) = "(ForceS" <+> pretty e <> ")"
+  pretty (DoBlockS e) = "(DoBlockS" <+> pretty e <> ")"
+  pretty (EvalS e) = "(EvalS" <+> pretty e <> ")"
   pretty (CoerceS c e) = "(CoerceS" <+> viaShow c <+> pretty e <> ")"
+  pretty (IntrinsicS intr es) = "(IntrinsicS" <+> viaShow intr <+> list (map pretty es) <> ")"
 
 instance Pretty ExecutableExpr where
   pretty (SrcCall src) = pretty src

@@ -1,7 +1,7 @@
 module main (foo)
 
-import foo
-import foor
-import fooc
+import .foo
+import .foor
+import .fooc
 
 foo xs = rmap (cadd 1) xs

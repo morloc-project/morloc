@@ -1,19 +1,12 @@
--- Test do-notation, which desugars to suspend + let + force:
---   do { x <- e1; e2; {e3} }  -->  { let x = !e1 in let _ = !e2 in e3 }
--- The final statement is always forced. To end with a pure value,
--- wrap it in {} so the force and suspend cancel: !{e} = e.
---
--- Cases tested:
---   1. doPure: do-block with only a pure value (trivial, no effects)
---   2. doBind: bind a forced thunk to a variable
---   3. doBare: bare statement forced and discarded
+-- Test do-notation with effects:
+--   1. doPure: pure value (no do-block needed)
+--   2. doBind: bind an evaluated effect to a variable
+--   3. doBare: bare statement evaluated and discarded
 --   4. doChain: multiple binds feeding into each other
 --   5. doMixed: interleaving bare statements and binds
---   6. doLet: pure let binding (no force)
+--   6. doLet: pure let binding (no evaluation)
 --   7. doLetBind: let mixed with <- bind
---   8. doLetThunk: let binds a thunk, forced later with <-
--- sideEffect :: Int -> {Int} captures the side effect in the type.
--- Each sideEffect call prints "EVAL <input>" to stderr and returns input * 2.
+--   8. doLetThunk: let binds an effect, evaluated later with <-
 
 module main (doPure, doBind, doBare, doChain, doMixed, doLet, doLetBind, doLetThunk)
 
@@ -23,75 +16,74 @@ source Cpp from "foo.hpp" ("sideEffect", "add")
 
 type Cpp => Int = "int"
 
-sideEffect :: Int -> {Int}
+sideEffect :: Int -> <IO> Int
 add :: Int -> Int -> Int
 
--- do-block with only a pure value: desugars to !{42} = 42
+-- pure value: no effects
 doPure :: Int
-doPure = !do
-    {42}
+doPure = 42
 
--- do-block with bind: x <- sideEffect 5 forces thunk, binds x = 10
--- then {add x 1} is forced: !{add x 1} = add x 1 = 11
-doBind :: Int
-doBind = !do
+-- bind: x <- sideEffect 5 evaluates effect, binds x = 10
+-- then add x 1 = 11
+doBind :: <IO> Int
+doBind = do
     x <- sideEffect 5
-    {add x 1}
+    add x 1
 
--- do-block with bare statement: forces and discards result
--- sideEffect 3 called (prints "EVAL 3"), result discarded, then !{42} = 42
-doBare :: Int
-doBare = !do
+-- bare statement: evaluates and discards result
+-- sideEffect 3 called (prints "EVAL 3"), result discarded, then 42
+doBare :: <IO> Int
+doBare = do
     sideEffect 3
-    {42}
+    42
 
 -- chained binds: result of first feeds into second
 -- sideEffect 3 -> "EVAL 3", x = 6
 -- sideEffect 6 -> "EVAL 6", y = 12
 -- add 6 12 = 18
-doChain :: Int
-doChain = !do
+doChain :: <IO> Int
+doChain = do
     x <- sideEffect 3
     y <- sideEffect x
-    {add x y}
+    add x y
 
 -- mix of bare statements and binds
 -- sideEffect 1 -> "EVAL 1", discarded
 -- sideEffect 5 -> "EVAL 5", x = 10
 -- sideEffect 10 -> "EVAL 10", discarded
 -- add 10 1 = 11
-doMixed :: Int
-doMixed = !do
+doMixed :: <IO> Int
+doMixed = do
     sideEffect 1
     x <- sideEffect 5
     sideEffect x
-    {add x 1}
+    add x 1
 
--- pure let binding: let y = add 3 4 binds y = 7, no forcing
--- then {add y 1} is forced: 8
-doLet :: Int
-doLet = !do
+-- pure let binding: let y = add 3 4 binds y = 7, no evaluation
+-- then add y 1 = 8
+doLet :: <IO> Int
+doLet = do
     let y = add 3 4
-    {add y 1}
+    add y 1
 
 -- let mixed with <- bind:
 -- sideEffect 5 -> "EVAL 5", x = 10
--- let y = add x 1 binds y = 11 (pure, no forcing)
--- {add x y} = add 10 11 = 21
-doLetBind :: Int
-doLetBind = !do
+-- let y = add x 1 binds y = 11 (pure, no evaluation)
+-- add x y = add 10 11 = 21
+doLetBind :: <IO> Int
+doLetBind = do
     x <- sideEffect 5
     let y = add x 1
-    {add x y}
+    add x y
 
--- let binds a thunk (no force), then <- forces it later:
--- let t = sideEffect 3 binds t :: {Int} (thunk not forced)
+-- let binds an effect (not evaluated), then <- evaluates it later:
+-- let t = sideEffect 3 binds t :: <IO> Int (not yet evaluated)
 -- sideEffect 1 -> "EVAL 1", x = 2
--- y <- t forces t: sideEffect 3 -> "EVAL 3", y = 6
+-- y <- t evaluates t: sideEffect 3 -> "EVAL 3", y = 6
 -- add 2 6 = 8
-doLetThunk :: Int
-doLetThunk = !do
+doLetThunk :: <IO> Int
+doLetThunk = do
     let t = sideEffect 3
     x <- sideEffect 1
     y <- t
-    {add x y}
+    add x y

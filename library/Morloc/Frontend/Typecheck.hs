@@ -124,7 +124,7 @@ findTypeKindSize v = head . catMaybes . f
     f (NamU _ v' ts1 (map snd -> ts2))
       | v == v' = [Just (1 + (length ts1))]
       | otherwise = concat $ map f (ts1 <> ts2)
-    f (ThunkU t) = f t
+    f (EffectU _ t) = f t
     f (OptionalU t) = f t
 
 -- TypeU --> Type
@@ -150,10 +150,11 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (StrS x) = StrS x
     f UniS = UniS
     f NullS = NullS
-    f (SuspendS e') = SuspendS (resolveTypes e')
-    f (ForceS e') = ForceS (resolveTypes e')
+    f (DoBlockS e') = DoBlockS (resolveTypes e')
+    f (EvalS e') = EvalS (resolveTypes e')
     f (CoerceS c e') = CoerceS c (resolveTypes e')
     f (IfS c t e) = IfS (resolveTypes c) (resolveTypes t) (resolveTypes e)
+    f (IntrinsicS intr es) = IntrinsicS intr (map resolveTypes es)
 
 resolveInstances ::
   Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
@@ -240,14 +241,17 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f _ g0 (LogS x) = return (g0, LogS x)
     f _ g0 (StrS x) = return (g0, StrS x)
     f _ g0 (ExeS x) = return (g0, ExeS x)
-    f _ g0 (SuspendS e) = resolveInstances g0 e |>> second SuspendS
-    f _ g0 (ForceS e) = resolveInstances g0 e |>> second ForceS
+    f _ g0 (DoBlockS e) = resolveInstances g0 e |>> second DoBlockS
+    f _ g0 (EvalS e) = resolveInstances g0 e |>> second EvalS
     f _ g0 (CoerceS c e) = resolveInstances g0 e |>> second (CoerceS c)
     f _ g0 (IfS c t e) = do
       (g1, c') <- resolveInstances g0 c
       (g2, t') <- resolveInstances g1 t
       (g3, e') <- resolveInstances g2 e
       return (g3, IfS c' t' e')
+    f _ g0 (IntrinsicS intr es) = do
+      (g1, es') <- statefulMapM resolveInstances g0 es
+      return (g1, IntrinsicS intr es')
 
     connectInstance :: Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
     connectInstance g0 [] = return g0
@@ -595,24 +599,94 @@ synthE i g (IfS cond thenE elseE) = do
   (g4, t3, elseE') <- synthG g3 elseE
   g5 <- subtype' i t3 t2 g4
   return (g5, apply g5 t2, IfS cond' thenE' elseE')
-synthE _ g (SuspendS e) = do
+synthE _ g (DoBlockS e) = do
   (g1, t1, e1) <- synthG g e
-  return (g1, ThunkU t1, SuspendS e1)
+  let effs = collectDoEffects e1
+  return (g1, EffectU effs t1, DoBlockS e1)
 synthE _ g (CoerceS coercion e) = do
   (g1, t1, e1) <- synthG g e
   return (g1, applyCoercion coercion t1, CoerceS coercion e1)
-synthE i g (ForceS e) = do
+synthE i g (EvalS e) = do
   (g1, t1, e1) <- synthG g e
   case apply g1 t1 of
-    ThunkU a -> return (g1, a, ForceS e1)
+    EffectU _ a -> return (g1, a, EvalS e1)
     ExistU _ _ _ -> do
-      -- solve ?v = {?b} for fresh ?b
-      let (g2, bv) = tvarname g1 "thunkInner_"
+      -- solve ?v = <E> ?b for fresh E, ?b
+      let (g2, bv) = tvarname g1 "effectInner_"
           bt = ExistU bv ([], Open) ([], Open)
-          thunkT = ThunkU bt
-      g3 <- subtype' i (apply g2 t1) thunkT g2
-      return (g3, apply g3 bt, ForceS (applyGen g3 e1))
+          (g2b, ev) = tvarname g2 "effectVar_"
+          thunkT = EffectU (EffectVar ev) bt
+      g3 <- subtype' i (apply g2b t1) thunkT g2b
+      return (g3, apply g3 bt, EvalS (applyGen g3 e1))
     t -> throwTypeError i $ "Cannot force non-thunk type:" <+> pretty t
+synthE i g (IntrinsicS intr args) = do
+  (g', argTypes, args') <- synthArgs g args
+  g'' <- checkIntrinsicArgs i g' intr argTypes
+  let (g''', expectedType) = intrinsicTypeG g'' intr
+  return (g''', expectedType, IntrinsicS intr args')
+
+-- | Return type of a fully applied intrinsic, threading Gamma for fresh existentials
+intrinsicTypeG :: Gamma -> Intrinsic -> (Gamma, TypeU)
+intrinsicTypeG g IntrLoad =
+  let (g', loadType) = newvar "load_" g
+  in (g', EffectU ioEffectSet (OptionalU loadType))
+intrinsicTypeG g intr = (g, intrinsicType intr)
+
+-- | Return type of a fully applied intrinsic (for intrinsics without fresh vars)
+intrinsicType :: Intrinsic -> TypeU
+intrinsicType IntrSave = EffectU ioEffectSet BT.unitU
+intrinsicType IntrSaveM = EffectU ioEffectSet BT.unitU
+intrinsicType IntrSaveJ = EffectU ioEffectSet BT.unitU
+intrinsicType IntrLoad = EffectU ioEffectSet (OptionalU (ExistU (TV "load_a") ([], Open) ([], Open)))
+intrinsicType IntrHash = BT.strU
+intrinsicType IntrVersion = BT.strU
+intrinsicType IntrCompiled = BT.strU
+intrinsicType IntrLang = BT.strU
+intrinsicType IntrSchema = BT.strU
+intrinsicType IntrTypeof = BT.strU
+
+-- intrinsicArity is defined in Morloc.Namespace.Expr
+
+-- | Synthesize types for a list of arguments
+synthArgs ::
+  Gamma ->
+  [AnnoS Int ManyPoly Int] ->
+  MorlocMonad (Gamma, [TypeU], [AnnoS (Indexed TypeU) ManyPoly Int])
+synthArgs g [] = return (g, [], [])
+synthArgs g (a:as) = do
+  (g1, t1, a') <- synthG g a
+  (g2, ts, as') <- synthArgs g1 as
+  return (g2, t1:ts, a':as')
+
+-- | Check intrinsic argument count and types
+checkIntrinsicArgs ::
+  Int -> Gamma -> Intrinsic -> [TypeU] -> MorlocMonad Gamma
+checkIntrinsicArgs i g intr argTypes = do
+  let expected = intrinsicArity intr
+      actual = length argTypes
+  if actual /= expected
+    then throwTypeError i $
+      "@" <> pretty (intrinsicName intr) <+> "expects" <+> pretty expected
+        <+> "arguments but got" <+> pretty actual
+    else do
+      -- Check specific argument types
+      case (intr, argTypes) of
+        -- @save/@savem/@savej: a -> Str -> {()}
+        (IntrSave, [_, pathT]) -> subtype' i pathT BT.strU g
+        (IntrSaveM, [_, pathT]) -> subtype' i pathT BT.strU g
+        (IntrSaveJ, [_, pathT]) -> subtype' i pathT BT.strU g
+        -- @load: Str -> {?a}
+        (IntrLoad, [pathT]) -> subtype' i pathT BT.strU g
+        -- @hash: a -> Str
+        (IntrHash, [_]) -> return g
+        -- @schema/@typeof: a -> Str (value ignored at runtime)
+        (IntrSchema, [_]) -> return g
+        (IntrTypeof, [_]) -> return g
+        -- compile-time constants: no args
+        (IntrVersion, []) -> return g
+        (IntrCompiled, []) -> return g
+        (IntrLang, []) -> return g
+        _ -> return g
 
 etaExpandSynthE ::
   Int ->
@@ -823,14 +897,27 @@ checkE i g (IfS cond thenE elseE) t = do
   (g3, t2, thenE') <- checkG g2 thenE t
   (g4, _, elseE') <- checkG g3 elseE (apply g3 t2)
   return (g4, apply g4 t2, IfS cond' thenE' elseE')
-checkE _ g (SuspendS e) (ThunkU t) = do
+checkE _ g (DoBlockS e) (EffectU effs t) = do
   (g1, t1, e1) <- checkG g e t
-  return (g1, ThunkU t1, SuspendS e1)
-checkE i g (ForceS e) t = do
-  (g1, t1, e1) <- checkG g e (ThunkU t)
+  return (g1, EffectU effs t1, DoBlockS e1)
+checkE i g (EvalS e) t = do
+  -- Synthesize first to get concrete EffectSet in annotations,
+  -- then check the inner type against the expected type.
+  -- This avoids creating an EffectVar that is never solved.
+  (g1, t1, e1) <- synthG g e
   case apply g1 t1 of
-    ThunkU a -> return (g1, a, ForceS e1)
-    _ -> throwTypeError i $ "Expected thunk type in force expression"
+    EffectU _ a -> do
+      g2 <- subtype' i a t g1
+      return (g2, apply g2 t, EvalS e1)
+    ExistU _ _ _ -> do
+      let (g2, bv) = tvarname g1 "effectInner_"
+          bt = ExistU bv ([], Open) ([], Open)
+          (g2b, ev) = tvarname g2 "effectVar_"
+          thunkT = EffectU (EffectVar ev) bt
+      g3 <- subtype' i (apply g2b t1) thunkT g2b
+      g4 <- subtype' i (apply g3 bt) t g3
+      return (g4, apply g4 t, EvalS (applyGen g4 e1))
+    t' -> throwTypeError i $ "Cannot force non-thunk type:" <+> pretty t'
 
 --   Sub (with coercion fallback)
 checkE i g1 e1 b = do
@@ -850,7 +937,11 @@ checkE i g1 e1 b = do
           (e2, apply g3 a')
           coercions
         return (g3, apply g3 b', finalExpr)
-      Nothing -> MM.throwSourcedError i err
+      Nothing -> MM.throwSourcedError i $
+        "Type mismatch:"
+        <> line <> "  expected: " <> prettyTypeU b'
+        <> line <> "  inferred: " <> prettyTypeU a'
+        <> line <> err
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do
@@ -870,7 +961,45 @@ tryCoerce scope a (OptionalU b) g =
     Left _ -> case tryCoerce scope a b g of
       Just (cs, g') -> Just (CoerceToOptional : cs, g')
       Nothing -> Nothing
+-- Coerce a pure value to an effectful type: a -> <E> a
+tryCoerce scope a (EffectU effs b) g =
+  case subtype scope a b g of
+    Right g' -> Just ([CoerceToEffect (resolveEffectSet effs)], g')
+    Left _ -> case tryCoerce scope a b g of
+      Just (cs, g') -> Just (CoerceToEffect (resolveEffectSet effs) : cs, g')
+      Nothing -> Nothing
 tryCoerce _ _ _ _ = Nothing
+
+-- | Collect effect labels from all EvalS nodes within a do-block body.
+-- Deeply traverses the full expression tree to find nested EvalS nodes
+-- (e.g., inside tuples, applications, let bindings).
+collectDoEffects :: AnnoS (Indexed TypeU) f c -> EffectSet
+collectDoEffects = go
+  where
+    go (AnnoS _ _ expr) = case expr of
+      EvalS e -> effectOfAnno e `union` go e
+      LetS _ e1 e2 -> go e1 `union` go e2
+      AppS f args -> unions (go f : map go args)
+      TupS es -> unions (map go es)
+      LstS es -> unions (map go es)
+      NamS rs -> unions (map (go . snd) rs)
+      LamS _ e -> go e
+      IfS c t e -> go c `union` go t `union` go e
+      DoBlockS e -> go e
+      CoerceS _ e -> go e
+      IntrinsicS _ es -> unions (map go es)
+      _ -> emptyEffectSet
+
+    effectOfAnno (AnnoS (Idx _ (EffectU effs _)) _ _) = effs
+    effectOfAnno _ = emptyEffectSet
+
+    unions = foldl union emptyEffectSet
+
+    union a b
+      | a == emptyEffectSet = b
+      | b == emptyEffectSet = a
+      | a == b = a
+      | otherwise = EffectUnion a b
 
 -- helpers
 
@@ -988,7 +1117,8 @@ peakSExpr (ExeS exe) = "ExeS" <+> pretty exe
 peakSExpr (LetS v _ _) = "LetS" <+> pretty v
 peakSExpr (LetBndS v) = "LetBndS" <+> pretty v
 peakSExpr (CallS v) = "CallS" <+> pretty v
-peakSExpr (SuspendS _) = "SuspendS"
-peakSExpr (ForceS _) = "ForceS"
+peakSExpr (DoBlockS _) = "DoBlockS"
+peakSExpr (EvalS _) = "EvalS"
 peakSExpr (CoerceS _ _) = "CoerceS"
 peakSExpr (IfS _ _ _) = "IfS"
+peakSExpr (IntrinsicS intr _) = "@" <> pretty (intrinsicName intr)

@@ -1,0 +1,7 @@
+module (*)
+
+source Py from "main.py" ("double")
+
+type Py => Real = "float"
+
+double :: Real -> Real

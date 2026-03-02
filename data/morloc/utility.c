@@ -260,19 +260,23 @@ bool print_hex_dump(const uint8_t* data, size_t size, ERRMSG) {
     return true;
 }
 
-int print_binary(const char *buf, size_t count, ERRMSG) {
+int write_binary_fd(int fd, const char *buf, size_t count, ERRMSG) {
     VAL_RETURN_SETUP(int, -1)
     size_t total_written = 0;
     ssize_t written;
 
     while (total_written < count) {
-        written = write(STDOUT_FILENO, buf + total_written, count - total_written);
+        written = write(fd, buf + total_written, count - total_written);
         if (written < 0) {
-            RAISE("Failed to print data");
+            RAISE("Failed to write data to fd %d", fd);
         }
         total_written += (size_t)written;
     }
     return 0;
+}
+
+int print_binary(const char *buf, size_t count, ERRMSG) {
+    return write_binary_fd(STDOUT_FILENO, buf, count, errmsg_);
 }
 
 uint8_t* read_binary_fd(FILE* file, size_t* file_size, ERRMSG) {

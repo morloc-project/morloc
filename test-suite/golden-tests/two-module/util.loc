@@ -1,4 +1,4 @@
-module util (roll, choose)
+module (roll, choose)
 
 import root-py
 
@@ -7,6 +7,6 @@ source Py from "util.py"
   , "choose" as choose
   )
 
-roll :: Int -> Int -> {[Int]}
+roll :: Int -> Int -> <Rand> [Int]
 
-choose a :: [a] -> {a}
+choose a :: [a] -> <Rand> a

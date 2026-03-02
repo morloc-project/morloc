@@ -1,0 +1,12 @@
+module (*)
+
+import .bif.biz (mul)
+
+source Py from "main.py" ("add")
+
+type Py => Real = "float"
+
+add :: Real -> Real -> Real
+
+compute :: Real -> Real -> Real
+compute x y = add x (mul y y)

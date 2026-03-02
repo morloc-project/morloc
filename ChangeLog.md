@@ -1,3 +1,10 @@
+0.64.0 [2026-03-03]
+-------------------
+ * replace thunks with more granular effect system
+ * add intrinsics
+ * disambiguate local module imports 
+ * change null to Null
+
 0.63.0 [2026-02-25]
 -------------------
  * add optionals with implicit coercion

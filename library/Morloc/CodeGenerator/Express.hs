@@ -17,6 +17,7 @@ module Morloc.CodeGenerator.Express
   ( express
   ) where
 
+import qualified Data.Set as Set
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
@@ -36,9 +37,10 @@ setManifoldConfig midx (AnnoS _ _ (AppS (AnnoS (Idx fidx _) _ (VarS _ _)) _)) = 
 setManifoldConfig midx (AnnoS _ _ (AppS (AnnoS (Idx fidx _) _ (ExeS _)) _)) = linkConfigIndex midx fidx
 setManifoldConfig midx (AnnoS _ _ (AppS e _)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (LamS _ e)) = setManifoldConfig midx e
-setManifoldConfig midx (AnnoS _ _ (SuspendS e)) = setManifoldConfig midx e
-setManifoldConfig midx (AnnoS _ _ (ForceS e)) = setManifoldConfig midx e
+setManifoldConfig midx (AnnoS _ _ (DoBlockS e)) = setManifoldConfig midx e
+setManifoldConfig midx (AnnoS _ _ (EvalS e)) = setManifoldConfig midx e
 setManifoldConfig midx (AnnoS _ _ (CoerceS _ e)) = setManifoldConfig midx e
+setManifoldConfig _ (AnnoS _ _ (IntrinsicS _ _)) = return ()
 setManifoldConfig midx (AnnoS _ _ (IfS _ t _)) = setManifoldConfig midx t
 setManifoldConfig _ (AnnoS _ _ (CallS _)) = return ()
 setManifoldConfig _ _ = return ()
@@ -60,36 +62,45 @@ propagateScope calleeIdx appIdx = do
     Nothing -> return ()
 
 express :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
-express e@(AnnoS (Idx _ t) (Idx cidx _, _) _) = forceExportThunks cidx t <$> expressCore e
+express e@(AnnoS (Idx midx t) (Idx cidx _, _) _) = do
+  -- Store the return effect labels before forceExportThunks strips them
+  let retEffects = extractReturnEffects t
+  MM.modify (\s -> s { stateManifoldEffects = Map.insert midx retEffects (stateManifoldEffects s) })
+  forceExportThunks cidx t <$> expressCore e
+  where
+    extractReturnEffects (FunT _ (EffectT effs _)) = effs
+    extractReturnEffects (EffectT effs _) = effs
+    extractReturnEffects _ = Set.empty
 
 -- At the export boundary, thunks cannot be serialized. This function:
---   1. Wraps thunk-typed args in PolySuspend so they are received as plain
+--   1. Wraps thunk-typed args in PolyDoBlock so they are received as plain
 --      values from the CLI and suspended inside the pool.
---   2. Wraps thunk return types in PolyForce so they are evaluated before
+--   2. Wraps thunk return types in PolyEval so they are evaluated before
 --      serialization back to the user.
 forceExportThunks :: Int -> Type -> PolyHead -> PolyHead
 forceExportThunks cidx t (PolyHead lang midx args body) =
   let inputTs = case t of FunT inputs _ -> inputs; _ -> []
-      thunkArgIds = [ann a | (a, ThunkT _) <- zip args inputTs]
+      thunkArgIds = [ann a | (a, EffectT _ _) <- zip args inputTs]
       retT = case t of FunT _ ret -> ret; t' -> t'
       body' = suspendThunkArgs thunkArgIds body
       body'' = forceAtReturn cidx retT body'
    in PolyHead lang midx args body''
   where
-    -- Wrap BndVar references to thunk-typed args in PolySuspend.
+    -- Wrap BndVar references to thunk-typed args in PolyDoBlock.
     -- The arg is deserialized as the inner type; the suspend creates the thunk.
     suspendThunkArgs [] e = e
     suspendThunkArgs ids e = goExpr ids e
 
-    goExpr ids (PolyBndVar (C (Idx ci (ThunkT inner))) i)
-      | i `elem` ids = wrapSuspends ci (ThunkT inner) i
+    goExpr ids (PolyBndVar (C (Idx ci (EffectT effs inner))) i)
+      | i `elem` ids = wrapSuspends ci (EffectT effs inner) i
     goExpr ids (PolyManifold l m f e) = PolyManifold l m f (goExpr ids e)
     goExpr ids (PolyLet i e1 e2) = PolyLet i (goExpr ids e1) (goExpr ids e2)
     goExpr ids (PolyReturn e) = PolyReturn (goExpr ids e)
     goExpr ids (PolyApp e es) = PolyApp (goExpr ids e) (map (goExpr ids) es)
-    goExpr ids (PolyForce ti e) = PolyForce ti (goExpr ids e)
-    goExpr ids (PolySuspend ti e) = PolySuspend ti (goExpr ids e)
+    goExpr ids (PolyEval ti e) = PolyEval ti (goExpr ids e)
+    goExpr ids (PolyDoBlock ti e) = PolyDoBlock ti (goExpr ids e)
     goExpr ids (PolyCoerce c ti e) = PolyCoerce c ti (goExpr ids e)
+    goExpr ids (PolyIntrinsic ti intr es) = PolyIntrinsic ti intr (map (goExpr ids) es)
     goExpr ids (PolyList v ti es) = PolyList v ti (map (goExpr ids) es)
     goExpr ids (PolyTuple v es) = PolyTuple v (map (fmap (goExpr ids)) es)
     goExpr ids (PolyRecord o v ps rs) = PolyRecord o v ps (map (fmap (fmap (goExpr ids))) rs)
@@ -97,10 +108,10 @@ forceExportThunks cidx t (PolyHead lang midx args body) =
     goExpr ids (PolyRemoteInterface l ti is rf e) = PolyRemoteInterface l ti is rf (goExpr ids e)
     goExpr _ e = e
 
-    -- Peel ThunkT layers, wrapping each in PolySuspend, with the innermost
+    -- Peel EffectT layers, wrapping each in PolyDoBlock, with the innermost
     -- BndVar carrying the fully-unwrapped type.
-    wrapSuspends ci (ThunkT inner) i =
-      PolySuspend (Idx ci (ThunkT inner)) (wrapSuspends ci inner i)
+    wrapSuspends ci (EffectT effs inner) i =
+      PolyDoBlock (Idx ci (EffectT effs inner)) (wrapSuspends ci inner i)
     wrapSuspends ci inner i = PolyBndVar (C (Idx ci inner)) i
 
     forceAtReturn c rt (PolyReturn e) = PolyReturn (wrapForces c rt e)
@@ -108,7 +119,7 @@ forceExportThunks cidx t (PolyHead lang midx args body) =
     forceAtReturn c rt (PolyLet i e1 e2) = PolyLet i e1 (forceAtReturn c rt e2)
     forceAtReturn c rt e = wrapForces c rt e
 
-    wrapForces c (ThunkT inner) e = wrapForces c inner (PolyForce (Idx c inner) e)
+    wrapForces c (EffectT _ inner) e = wrapForces c inner (PolyEval (Idx c inner) e)
     wrapForces _ _ e = e
 
 expressCore :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
@@ -511,10 +522,10 @@ expressPolyExpr _ pl pc (AnnoS (Idx i t) c e@(NamS _)) = do
 -- Recursive call used as a value (not applied via AppS)
 expressPolyExpr _ parentLang _ (AnnoS (Idx i c) (Idx cidx _, _) (CallS v)) = do
   (mid, crossLang) <- lookupRecursiveTarget parentLang v
-  -- Strip ThunkT from return type (serial manifolds force thunks)
+  -- Strip EffectT from return type (serial manifolds force thunks)
   case c of
-    FunT inputs (ThunkT out) ->
-      return . PolySuspend (Idx i (ThunkT out))
+    FunT inputs (EffectT effs out) ->
+      return . PolyDoBlock (Idx i (EffectT effs out))
         $ PolyExe (Idx i (FunT inputs out)) (RecCallP mid crossLang)
     _ ->
       return $ PolyExe (Idx i c) (RecCallP mid crossLang)
@@ -529,23 +540,30 @@ expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx _ lang, _) (IfS cond thenE elseE)) =
   thenE' <- expressPolyExprWrap lang (mkIdx thenE t) thenE
   elseE' <- expressPolyExprWrap lang (mkIdx elseE t) elseE
   return $ PolyIf cond' thenE' elseE'
-expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx cidx lang, _) (SuspendS x)) = do
-  x' <- expressPolyExprWrap lang (mkIdx x t) x
-  return $ PolySuspend (Idx cidx t) x'
+expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx cidx lang, _) (DoBlockS x)) = do
+  -- The inner expression has the unwrapped type (without EffectT).
+  -- Passing EffectT through would cause cross-language calls to generate
+  -- effect-wrapped return types for pure functions.
+  let innerT = case t of EffectT _ inner -> inner; _ -> t
+  x' <- expressPolyExprWrap lang (mkIdx x innerT) x
+  return $ PolyDoBlock (Idx cidx t) x'
 expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _, _) (CoerceS coercion x)) = do
   let innerType = unapplyCoercion coercion t
   x' <- expressPolyExprWrap parentLang (Idx cidx innerType) x
   return $ PolyCoerce coercion (Idx cidx t) x'
-expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (ForceS x)) = do
+expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (EvalS x)) = do
   -- Always use pushForceIntoRemote: if the inner expression contains a
-  -- PolyRemoteInterface (cross-language call), it strips ThunkT so the remote
+  -- PolyRemoteInterface (cross-language call), it strips EffectT Set.empty so the remote
   -- pool forces the thunk and serializes the concrete result. If no
-  -- PolyRemoteInterface is found (same-language), it falls back to PolyForce.
+  -- PolyRemoteInterface is found (same-language), it falls back to PolyEval.
   -- We cannot rely on parentLang /= lang because Realize.hs assigns both to
-  -- the same language when the ForceS node lives in a same-language context,
+  -- the same language when the EvalS node lives in a same-language context,
   -- even if the inner expression calls into a foreign language.
   x' <- expressPolyExprWrap parentLang (Idx cidx t) x
   return $ pushForceIntoRemote (Idx cidx t) x'
+expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx cidx lang, _) (IntrinsicS intr xs)) = do
+  xs' <- mapM (\x@(AnnoS (Idx xi xt) _ _) -> expressPolyExprWrap lang (Idx xi xt) x) xs
+  return $ PolyIntrinsic (Idx cidx t) intr xs'
 
 -- Nullary source/pattern call (e.g., clockResNs :: {Int})
 expressPolyExpr
@@ -612,12 +630,12 @@ expressPolyApp _ (AnnoS g (_, args) (BndS v)) xs = do
     _ -> error "Unreachable? BndS value should have been wired uniquely to args previously"
 expressPolyApp parentLang (AnnoS (Idx i t) _ (CallS v)) xs = do
   (mid, crossLang) <- lookupRecursiveTarget parentLang v
-  -- Serial manifolds force thunks before serializing, so strip ThunkT from the
-  -- return type and wrap in PolySuspend to reconstruct the thunk after deserializing.
+  -- Serial manifolds force thunks before serializing, so strip EffectT from the
+  -- return type and wrap in PolyDoBlock to reconstruct the thunk after deserializing.
   case t of
-    FunT inputs (ThunkT out) ->
+    FunT inputs (EffectT effs out) ->
       return . PolyReturn
-        . PolySuspend (Idx i (ThunkT out))
+        . PolyDoBlock (Idx i (EffectT effs out))
         $ PolyApp (PolyExe (Idx i (FunT inputs out)) (RecCallP mid crossLang)) xs
     _ ->
       return . PolyReturn $ PolyApp (PolyExe (Idx i t) (RecCallP mid crossLang)) xs
@@ -641,11 +659,11 @@ expressContainer pc (Idx midx parentLang) (Idx _ lang) args e
 unvalue :: Arg a -> Arg None
 unvalue (Arg i _) = Arg i None
 
-{- | Handle cross-language force by stripping ThunkT from the callee's function
+{- | Handle cross-language force by stripping EffectT from the callee's function
 return type. The source function actually returns the unwrapped type; the
-ThunkT wrapper is a type-system abstraction. By removing it, Common.hs won't
-auto-wrap in SuspendN, so the raw value is serialized directly.
-If no PolyRemoteInterface is found, falls back to wrapping in PolyForce.
+EffectT wrapper is a type-system abstraction. By removing it, Common.hs won't
+auto-wrap in DoBlockN, so the raw value is serialized directly.
+If no PolyRemoteInterface is found, falls back to wrapping in PolyEval.
 -}
 pushForceIntoRemote :: Indexed Type -> PolyExpr -> PolyExpr
 pushForceIntoRemote t = go
@@ -655,9 +673,9 @@ pushForceIntoRemote t = go
     go (PolyLet i e1 e2) = PolyLet i e1 (go e2)
     go (PolyApp (PolyRemoteInterface lang _ args remote callee) xs) =
       PolyApp (PolyRemoteInterface lang t args remote (stripThunkReturn callee)) xs
-    go e = PolyForce t e -- fallback for local expressions
+    go e = PolyEval t e -- fallback for local expressions
 
-    -- Strip ThunkT from the function's return type inside the callee manifold
+    -- Strip EffectT from the function's return type inside the callee manifold
     stripThunkReturn (PolyManifold l m f body) = PolyManifold l m f (stripInBody body)
     stripThunkReturn e = stripInBody e
 
@@ -665,9 +683,9 @@ pushForceIntoRemote t = go
     stripInBody (PolyLet i e1 e2) = PolyLet i e1 (stripInBody e2)
     stripInBody e = stripInExe e
 
-    stripInExe (PolyApp (PolyExe (Idx gidx (FunT inputs (ThunkT out))) exe) xs) =
+    stripInExe (PolyApp (PolyExe (Idx gidx (FunT inputs (EffectT _ out))) exe) xs) =
       PolyApp (PolyExe (Idx gidx (FunT inputs out)) exe) xs
-    stripInExe (PolyApp (PolyExe (Idx gidx (ThunkT out)) exe) xs) =
+    stripInExe (PolyApp (PolyExe (Idx gidx (EffectT _ out)) exe) xs) =
       PolyApp (PolyExe (Idx gidx out) exe) xs
     stripInExe e = e
 

@@ -27,6 +27,9 @@ main = do
       , substituteTVarTests
       , subtypeTests
       , complexityRegressionTests
+      , effectSubtypeTests
+      , effectSynthesisTests
+      , effectErrorTests
       , -- -- These tests pass locally and when I run the same container that I
         -- -- use in github actions. Yet these tests freeze in an infinite loop
         -- -- with no STDERR output on github. I have no idea why. But for now I'm
@@ -65,9 +68,9 @@ main = do
       , golden "claude-test-2" "claude-test-2"
       , golden "claude-test-3" "claude-test-3"
       , golden "claude-test-4" "claude-test-4"
-      , -- , golden "claude-test-5" "claude-test-5"
-        -- , golden "claude-test-6" "claude-test-6"
-        golden "claude-test-7" "claude-test-7"
+      -- , golden "claude-test-5" "claude-test-5"
+      , golden "claude-test-6" "claude-test-6"
+      , golden "claude-test-7" "claude-test-7"
       , golden "claude-test-8" "claude-test-8"
       , golden "claude-test-9" "claude-test-9"
       , golden "claude-test-10" "claude-test-10"
@@ -157,6 +160,9 @@ main = do
       , golden "path-shadowing-c" "path-shadowing-c"
       , golden "path-shadowing-py" "path-shadowing-py"
       , golden "path-shadowing-r" "path-shadowing-r"
+      , golden "local-import-root-py" "local-import-root-py"
+      , golden "local-import-cousin-py" "local-import-cousin-py"
+      , golden "local-import-nested-py" "local-import-nested-py"
       , golden "argument-form-4-c" "argument-form-4-c"
       , golden "argument-form-4-py" "argument-form-4-py"
       , golden "argument-form-4-r" "argument-form-4-r"
@@ -385,30 +391,17 @@ main = do
         golden "optional-coerce-py" "optional-coerce-py"
       , golden "optional-coerce-cpp" "optional-coerce-cpp"
       , golden "optional-coerce-interop" "optional-coerce-interop"
-      -- , golden "argument-form-1-rs" "argument-form-1-rs"
-      -- , golden "argument-form-2-rs" "argument-form-2-rs"
-      -- , golden "argument-form-3-rs" "argument-form-3-rs"
-      -- , golden "argument-form-4-rs" "argument-form-4-rs"
-      -- , golden "argument-form-6-rs" "argument-form-6-rs"
-      -- , golden "argument-form-7-rs" "argument-form-7-rs"
-      -- , golden "argument-form-8-rs" "argument-form-8-rs"
-      -- , golden "argument-form-5-rs" "argument-form-5-rs"
-      -- , golden "records-1-rs" "records-1-rs"
-      -- , golden "multiple-instances-1-rs" "multiple-instances-1-rs"
-      -- , golden "multiple-instances-2-rs" "multiple-instances-2-rs"
-      -- , golden "C serial-form-2-rs" "serial-form-2-rs"
-      -- , golden "S(S) serial-form-4-rs" "serial-form-4-rs"
-      -- , golden "S(C) serial-form-5-rs" "serial-form-5-rs"
-      -- , golden "S(R) serial-form-6-rs" "serial-form-6-rs"
-      -- , golden "C(S) serial-form-7-rs" "serial-form-7-rs"
-      -- , golden "C(C) serial-form-8-rs" "serial-form-8-rs"
-      -- , golden "C(R) serial-form-9-rs" "serial-form-9-rs"
-      -- , golden "R(S) serial-form-10-rs" "serial-form-10-rs"
-      -- , golden "R(C) serial-form-11-rs" "serial-form-11-rs"
-      -- , golden "R(R) serial-form-12-rs" "serial-form-12-rs"
-      -- , golden "Rust table default" "table-1-rs"
-      -- , golden "Rust table object" "table-2-rs"
-      -- , golden "Rust object handling" "object-1-rs"
-      -- , golden "record-access-rs" "record-access-rs"
-      -- , golden "type-identities-rs" "type-identities-rs"
+      , -- effect coercion tests (a -> <IO> a)
+        golden "effect-coerce-py" "effect-coerce-py"
+      , golden "effect-coerce-cpp" "effect-coerce-cpp"
+      , -- multi-label and subtyping effect tests
+        golden "effect-multi-label-py" "effect-multi-label-py"
+      , golden "effect-subtype-py" "effect-subtype-py"
+      , golden "effect-error-cpp" "effect-error-cpp"
+      , golden "effect-accumulate-py" "effect-accumulate-py"
+      , -- inline force operator (!) tests
+        golden "force-inline-basic" "force-inline-basic"
+      , -- intrinsic tests
+        golden "intrinsic-hash" "intrinsic-hash"
+      , golden "intrinsic-constants" "intrinsic-constants"
       ]

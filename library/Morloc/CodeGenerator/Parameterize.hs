@@ -105,18 +105,22 @@ parameterize' args (AnnoS g c (IfS cond thenE elseE)) = do
   elseE' <- parameterize' args elseE
   let args' = pruneArgs args [cond', thenE', elseE']
   return $ AnnoS g (c, args') (IfS cond' thenE' elseE')
-parameterize' args (AnnoS g c (SuspendS e)) = do
+parameterize' args (AnnoS g c (DoBlockS e)) = do
   e' <- parameterize' args e
   let args' = pruneArgs args [e']
-  return $ AnnoS g (c, args') (SuspendS e')
-parameterize' args (AnnoS g c (ForceS e)) = do
+  return $ AnnoS g (c, args') (DoBlockS e')
+parameterize' args (AnnoS g c (EvalS e)) = do
   e' <- parameterize' args e
   let args' = pruneArgs args [e']
-  return $ AnnoS g (c, args') (ForceS e')
+  return $ AnnoS g (c, args') (EvalS e')
 parameterize' args (AnnoS g c (CoerceS co e)) = do
   e' <- parameterize' args e
   let args' = pruneArgs args [e']
   return $ AnnoS g (c, args') (CoerceS co e')
+parameterize' args (AnnoS g c (IntrinsicS intr es)) = do
+  es' <- mapM (parameterize' args) es
+  let args' = pruneArgs args es'
+  return $ AnnoS g (c, args') (IntrinsicS intr es')
 parameterize' _ (AnnoS g c (CallS v)) = do
   return $ AnnoS g (c, []) (CallS v)
 parameterize' _ (AnnoS _ _ (VarS _ _)) = undefined

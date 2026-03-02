@@ -48,6 +48,7 @@ module Morloc.Namespace.Prim
   , TimeInSeconds (..)
   , DirTree (File, Dir, Failed)
   , AnchoredDirTree ((:/))
+  , failures
   , writeDirectoryWith
 
     -- ** Data
@@ -75,7 +76,7 @@ import GHC.Generics (Generic)
 import Morloc.Data.Doc
 import Morloc.Internal
 import Morloc.Language (Lang (..))
-import System.Directory.Tree (AnchoredDirTree ((:/)), DirTree (Dir, Failed, File), writeDirectoryWith)
+import System.Directory.Tree (AnchoredDirTree ((:/)), DirTree (Dir, Failed, File), failures, writeDirectoryWith)
 import Text.Read (readMaybe)
 
 ---- Typeclasses

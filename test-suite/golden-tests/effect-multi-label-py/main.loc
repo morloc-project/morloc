@@ -1,0 +1,12 @@
+-- Test multi-label effects: <IO, Error> parses and works
+module main (testMulti, testSingle)
+
+import root-py
+
+-- Multi-label effect annotation
+testMulti :: <IO, Error> Int
+testMulti = 42
+
+-- Single-label effect annotation (for comparison)
+testSingle :: <IO> Int
+testSingle = 10 + 20

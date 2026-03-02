@@ -44,7 +44,9 @@ import qualified Morloc.BaseTypes as BT
 -- - 2 from guard_clauses ('?' could start guard or be part of next decl)
 -- - 1 from guard_expr ('?' in expr could be nested guard_expr or next guard_clause)
 -- - 4 from optional type syntax ('?' could start optional type or guard)
-%expect 56
+-- Note: force_expr (!) re-added for inline effect forcing in do-blocks
+-- - 2 from force_expr ('!' could start force or be part of another expr)
+%expect 58
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -93,7 +95,7 @@ import qualified Morloc.BaseTypes as BT
   'let'      { Located _ TokLet _ }
   'in'       { Located _ TokIn _ }
   'do'       { Located _ TokDo _ }
-  'null'     { Located _ TokNull _ }
+  'Null'     { Located _ TokNull _ }
   LOWER      { Located _ (TokLowerName _) _ }
   UPPER      { Located _ (TokUpperName _) _ }
   OPERATOR   { Located _ (TokOperator _) _ }
@@ -105,6 +107,7 @@ import qualified Morloc.BaseTypes as BT
   STREND     { Located _ (TokStringEnd _) _ }
   INTERPOPEN { Located _ TokInterpOpen _ }
   INTERPCLOSE { Located _ TokInterpClose _ }
+  INTRINSIC  { Located _ (TokIntrinsic _) _ }
   EOF        { Located _ TokEOF _ }
 
 %%
@@ -130,7 +133,9 @@ modules :: { [Loc CstExpr] }
 
 module :: { Loc CstExpr }
   : 'module' module_name '(' exports ')' top_body
-      { at $1 (CModE $2 $4 $6) }
+      { at $1 (CModE (Just $2) $4 $6) }
+  | 'module' '(' exports ')' top_body
+      { at $1 (CModE Nothing $3 $5) }
 
 top_body :: { [Loc CstExpr] }
   : VLBRACE top_decls VRBRACE   { $2 }
@@ -209,6 +214,8 @@ symbol :: { Located }
 import_decl :: { Loc CstExpr }
   : 'import' module_name opt_import_list
       { at $1 (CImpE (Import (MV $2) $3 [] Nothing)) }
+  | 'import' GDOT module_name opt_import_list
+      { at $1 (CImpE (Import (MV ("." <> $3)) $4 [] Nothing)) }
 
 opt_import_list :: { Maybe [AliasedSymbol] }
   : {- empty -}                            { Nothing }
@@ -322,7 +329,7 @@ non_string_atom :: { TypeU }
   | '(' type ')'             { $2 }
   | '(' type ',' type_list1 ')' { BT.tupleU ($2 : $4) }
   | '[' type ']'              { BT.listU $2 }
-  | '{' type '}'              { ThunkU $2 }
+  | '<' effect_labels '>' non_string_atom  { EffectU (EffectSet (Set.fromList $2)) $4 }
   | '?' non_string_atom       { OptionalU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
   | LOWER ':' non_fun_type   { $3 }
@@ -482,33 +489,36 @@ operand :: { Loc CstExpr }
   | '-' FLOAT                { at $1 (CRealE (DS.fromFloatDigits (negate (getFloat $2)))) }
 
 app_expr :: { Loc CstExpr }
-  : atom_expr                      { $1 }
-  | atom_expr atom_exprs1          { Loc ($1 <-> last $2) (CAppE $1 $2) }
+  : force_expr                     { $1 }
+  | force_expr atom_exprs1         { Loc ($1 <-> last $2) (CAppE $1 $2) }
+
+force_expr :: { Loc CstExpr }
+  : '!' atom_expr                  { Loc ($1 <-> $2) (CForceE $2) }
+  | atom_expr                      { $1 }
 
 atom_exprs1 :: { [Loc CstExpr] }
-  : atom_expr                      { [$1] }
-  | atom_exprs1 atom_expr          { $1 ++ [$2] }
+  : force_expr                     { [$1] }
+  | atom_exprs1 force_expr         { $1 ++ [$2] }
 
 atom_expr :: { Loc CstExpr }
-  : force_expr                { $1 }
-  | paren_expr                { $1 }
+  : paren_expr                { $1 }
   | getter_expr               { $1 }
   | string_expr               { $1 }
   | bool_expr                 { $1 }
   | num_expr                  { $1 }
   | list_expr                 { $1 }
-  | suspend_expr              { $1 }
   | record_expr               { $1 }
   | var_expr                  { $1 }
   | hole_expr                 { $1 }
   | do_expr                   { $1 }
   | null_expr                 { $1 }
+  | intrinsic_expr            { $1 }
 
 null_expr :: { Loc CstExpr }
-  : 'null'                    { at $1 CNullE }
+  : 'Null'                    { at $1 CNullE }
 
-force_expr :: { Loc CstExpr }
-  : '!' atom_expr             { at $1 (CForceE $2) }
+intrinsic_expr :: { Loc CstExpr }
+  : INTRINSIC                 { at $1 (CIntrinsicE (getIntrinsicName $1)) }
 
 paren_expr :: { Loc CstExpr }
   : '(' ')'                   { at $1 CUniE }
@@ -521,9 +531,6 @@ paren_expr :: { Loc CstExpr }
 expr_list1 :: { [Loc CstExpr] }
   : expr                       { [$1] }
   | expr_list1 ',' expr        { $1 ++ [$3] }
-
-suspend_expr :: { Loc CstExpr }
-  : '{' expr '}'              { Loc ($1 <-> $3) (CSuspendE $2) }
 
 record_expr :: { Loc CstExpr }
   : '{' record_entries '}'    { Loc ($1 <-> $3) (CNamE $2) }
@@ -625,7 +632,7 @@ atom_type :: { TypeU }
   | '(' type ')'             { $2 }
   | '(' type ',' type_list1 ')' { BT.tupleU ($2 : $4) }
   | '[' type ']'              { BT.listU $2 }
-  | '{' type '}'              { ThunkU $2 }
+  | '<' effect_labels '>' atom_type  { EffectU (EffectSet (Set.fromList $2)) $4 }
   | '?' atom_type             { OptionalU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
   | LOWER ':' non_fun_type   { $3 }
@@ -639,6 +646,10 @@ type_list1 :: { [TypeU] }
 types1 :: { [TypeU] }
   : atom_type                  { [$1] }
   | types1 atom_type           { $1 ++ [$2] }
+
+effect_labels :: { [EffectLabel] }
+  : UPPER                       { [getName $1] }
+  | effect_labels ',' UPPER     { $1 ++ [getName $3] }
 
 --------------------------------------------------------------------
 -- Constraints and signature types
@@ -667,7 +678,7 @@ pos_atom_type :: { (Pos, TypeU) }
   | '(' type ')'                { (locPos $1, $2) }
   | '(' type ',' type_list1 ')' { (locPos $1, BT.tupleU ($2 : $4)) }
   | '[' type ']'                { (locPos $1, BT.listU $2) }
-  | '{' type '}'                { (locPos $1, ThunkU $2) }
+  | '<' effect_labels '>' pos_atom_type  { (locPos $1, EffectU (EffectSet (Set.fromList $2)) (snd $4)) }
   | '?' pos_atom_type            { (locPos $1, OptionalU (snd $2)) }
   | UPPER                       { (locPos $1, VarU (TV (getName $1))) }
   | LOWER ':' non_fun_type      { (locPos $1, $3) }
@@ -726,11 +737,12 @@ data PState = PState
   , psDocMap      :: !(Map.Map Pos [Text])
   , psSourceLines :: ![Text]
   , psLangMap :: !(Map.Map T.Text Lang) -- alias -> Lang for all known languages
+  , psProjectRoot :: !(Maybe Path) -- project root (directory of entry-point file)
   }
   deriving (Show)
 
 emptyPState :: PState
-emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty
+emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing
 
 type P a = State.StateT PState (Either ParseError) a
 
@@ -757,6 +769,10 @@ getString (Located _ (TokStringStart s) _) = s
 getString (Located _ (TokStringMid s) _) = s
 getString (Located _ (TokStringEnd s) _) = s
 getString (Located _ _ t) = t
+
+getIntrinsicName :: Located -> Text
+getIntrinsicName (Located _ (TokIntrinsic n) _) = n
+getIntrinsicName _ = ""
 
 getOp :: Located -> Text
 getOp (Located _ (TokOperator t) _) = t
@@ -810,6 +826,7 @@ toDState ps = DState
   , dsModuleConfig = psModuleConfig ps
   , dsSourceLines = psSourceLines ps
   , dsLangMap = psLangMap ps
+  , dsProjectRoot = psProjectRoot ps
   }
 
 fromDState :: PState -> DState -> PState

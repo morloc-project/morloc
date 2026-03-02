@@ -1,8 +1,8 @@
 module main (foo)
 
-import foo
-import fooc (czipWith, cmul)
-import foopy (padd)
+import .foo
+import .fooc (czipWith, cmul)
+import .foopy (padd)
 
 add3 x y z = padd x (padd y z)
 

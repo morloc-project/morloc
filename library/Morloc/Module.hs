@@ -60,30 +60,86 @@ data InstallReason = ExplicitInstall | AutoDependency
 moduleInstallError :: MDoc -> MorlocMonad a
 moduleInstallError msg = MM.throwSystemError $ "Failed to install module:" <+> msg
 
--- | Look for a local morloc module.
+-- | Is this a local (.dot-prefixed) import?
+isLocalImport :: MVar -> Bool
+isLocalImport (MV x) = "." `MT.isPrefixOf` x
+
+-- | Look for a morloc module: local (.dot-prefixed) or bare (system/plane).
 findModule :: (Maybe Path, MVar) -> MVar -> MorlocMonad Path
-findModule currentPathAndModule@(_, currentModule) importModule = do
+findModule (_, currentModule) importModule
+  | isLocalImport importModule = findLocalModule currentModule importModule
+  | otherwise = findBareModule currentModule importModule
+
+-- | Resolve a local import from the project root.
+-- e.g., .foo.bar -> <root>/foo/bar.loc or <root>/foo/bar/main.loc
+findLocalModule :: MVar -> MVar -> MorlocMonad Path
+findLocalModule currentModule importModule = do
+  projectRoot <- MM.gets stateProjectRoot
+  case projectRoot of
+    Nothing -> MM.throwSystemError $
+      "Cannot resolve local import" <+> squotes (pretty importModule)
+        <+> "without a project root (are you reading from stdin?)"
+    Just root -> do
+      let MV importText = importModule
+          nameParts = map MT.unpack $ MT.splitOn "." (MT.drop 1 importText)
+          candidates =
+            [ MS.joinPath (root : init nameParts ++ [last nameParts ++ ".loc"])
+            , MS.joinPath (root : nameParts ++ ["main.loc"])
+            ]
+      existingPaths <- liftIO . fmap catMaybes . mapM getFile $ candidates
+      case existingPaths of
+        (x : _) -> return x
+        [] -> MM.throwSystemError $
+          "Within module" <+> squotes (pretty currentModule)
+            <> "," <+> "failed to import local module" <+> squotes (pretty importModule)
+            <> "\nThe following paths were searched:\n"
+            <+> indent 4 (vsep (map pretty candidates))
+
+-- | Resolve a bare (non-dot-prefixed) import: search system/plane paths,
+-- with deprecated fallback to local paths (project root).
+findBareModule :: MVar -> MVar -> MorlocMonad Path
+findBareModule currentModule importModule = do
   config <- MM.ask
+  projectRoot <- MM.gets stateProjectRoot
   let lib = Config.configLibrary config
       plane = Config.configPlane config
-      allPaths = getModulePaths lib plane currentPathAndModule importModule
-  existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
-  case existingPaths of
-    [x] -> return x
-    xs@(x : _) -> do
+      namePath = splitModuleName importModule
+      systemPaths =
+        [ MS.joinPath ([lib, plane] <> init namePath <> [last namePath <> ".loc"])
+        , MS.joinPath ([lib, plane] <> namePath <> ["main.loc"])
+        , MS.joinPath (lib : init namePath <> [last namePath <> ".loc"])
+        , MS.joinPath (lib : namePath <> ["main.loc"])
+        ]
+      localPaths = case projectRoot of
+        Just root ->
+          [ MS.joinPath (root : init namePath <> [last namePath <> ".loc"])
+          , MS.joinPath (root : namePath <> ["main.loc"])
+          ]
+        Nothing ->
+          [ MS.joinPath (init namePath <> [last namePath <> ".loc"])
+          , MS.joinPath (namePath <> ["main.loc"])
+          ]
+  existingSystem <- liftIO . fmap catMaybes . mapM getFile $ systemPaths
+  existingLocal <- liftIO . fmap catMaybes . mapM getFile $ localPaths
+  case (existingSystem, existingLocal) of
+    (s:_, l:_) ->
+      MM.throwSystemError $
+        "Ambiguous import" <+> squotes (pretty importModule)
+          <+> "from module" <+> squotes (pretty currentModule)
+          <> "\nFound in system:" <+> pretty s
+          <> "\nFound locally:" <+> pretty l
+          <> "\nUse" <+> squotes (pretty ("import ." <> unMVar importModule))
+          <+> "for local or ensure the system module is installed"
+    (x:_, []) -> return x
+    ([], x:_) -> do
       MM.say $
-        "WARNING: module path shadowing, for"
-          <+> pretty importModule
-          <+> "from module"
-          <+> pretty currentModule
-          <+> "found paths:"
-          <+> "\n  "
-          <> pretty xs
-          <> "\n  selecting path:" <+> pretty x
+        "WARNING: bare import" <+> squotes (pretty importModule)
+          <+> "resolved locally."
+          <+> "Use" <+> squotes (pretty ("import ." <> unMVar importModule))
+          <+> "for explicit local imports."
       return x
-    [] -> do
-      -- Check if <name>/<name>.loc exists (should be <name>/main.loc)
-      let namePath = splitModuleName importModule
+    ([], []) -> do
+      let allPaths = systemPaths <> localPaths
           nameNameLoc = namePath <> [last namePath <> ".loc"]
           hintPaths =
             map
@@ -139,129 +195,6 @@ loadModuleMetadata main = do
 splitModuleName :: MVar -> [String]
 splitModuleName (MV x) = map MT.unpack $ MT.splitOn "." x
 
-commonPrefix :: (Eq a) => [a] -> [a] -> [a]
-commonPrefix (x : xs) (y : ys)
-  | x == y = x : commonPrefix xs ys
-  | otherwise = []
-commonPrefix _ _ = []
-
-removePathSuffix :: [String] -> [String] -> [String]
-removePathSuffix [] ys = ys
-removePathSuffix _ [] = []
-removePathSuffix xs ys
-  | stringPath (last xs) == stringPath (last ys) = removePathSuffix (init xs) (init ys)
-  | otherwise = ys
-  where
-    stringPath :: String -> String
-    stringPath s
-      | last s == '/' = init s
-      | otherwise = s
-
--- | Find an ordered list of possible locations to search for a module
-getModulePaths ::
-  -- | morloc default library path (e.g., "~/.morloc/src/morloc")
-  Path ->
-  -- | morloc plane (e.g., "morloclib")
-  Path ->
-  -- | the path and name of the current module (e.g., `Just ("foo.loc", MVar "bar")`)
-  (Maybe Path, MVar) ->
-  -- | the name of the module that is being imported
-  MVar ->
-  [Path]
--- CASE #1
---   If we are not in a module, then the import may be from the system or
---   the local "working" directory.
---
--- Example:
---   Give the following code in  /../src/foo/bar/baz/main.loc
--- ```
--- import bif.buf
--- ```
--- `bif.buf` may be imported locally or from the system
--- --  1. /../src/foo/bar/baz/bif/buf/main.loc
--- --  2. $MORLOC_LIB/src/bif/buf/main.loc
-getModulePaths lib plane (Nothing, _) (splitModuleName -> namePath) = map MS.joinPath paths
-  where
-    -- either search the working directory for a fife like "math.loc" or look
-    -- for a folder named after the module with with a "main.loc" script
-    localPaths =
-      [ init namePath <> [last namePath <> ".loc"]
-      , namePath <> ["main.loc"]
-      ]
-
-    -- if nothing is local, look for system libraries. The system libraries MUST
-    -- be in a folder named after the module. The entry point for directory
-    -- modules must be "main.loc".
-    systemPaths =
-      [ lib : init namePath <> [last namePath <> ".loc"]
-      , lib : namePath <> ["main.loc"]
-      ]
-
-    planePaths =
-      [ [lib, plane] <> init namePath <> [last namePath <> ".loc"]
-      , [lib, plane] <> namePath <> ["main.loc"]
-      ]
-
-    paths = localPaths <> planePaths <> systemPaths
-getModulePaths lib plane (Just (MS.splitPath -> modulePath), splitModuleName -> moduleName) (splitModuleName -> importName) =
-  case commonPrefix moduleName importName of
-    -- CASE #2
-    --   If we are in a module, and if the module name path and the import name
-    --   path do no share a common root, then look for the import in the system
-    --   library or local working directory.
-    --
-    -- Example:
-    --   Give the following code in file /../src/foo/bar/baz/main.loc
-    -- ```
-    -- module foo.bar.baz
-    -- import bif.buf
-    -- ```
-    -- The only where `bif.buf` may be foud is the system library:
-    --   $MORLOC_LIB/src/bif/buf/main.loc
-    [] ->
-      map
-        MS.joinPath
-        [ -- system paths
-          lib : init importName <> [last importName <> ".loc"]
-        , lib : importName <> ["main.loc"]
-        , -- plane paths
-          [lib, plane] <> init importName <> [last importName <> ".loc"]
-        , [lib, plane] <> importName <> ["main.loc"]
-        , -- local path
-          init importName <> [last importName <> ".loc"]
-        , importName <> ["main.loc"]
-        ]
-    -- CASE #3
-    --   If we are in a module, and if the module name path shares a common
-    --   root with the import name path, then the module file paths must
-    --   share a common root.
-    -- Example:
-    -- Give the following code in file /../src/foo/bar/baz/main.loc
-    --
-    -- ```
-    -- module foo.bar.baz
-    -- import foo.bif
-    -- ```
-    --
-    -- The only place where `foo.bif` may be found is:
-    --    /../src/foo/bif/main.loc
-    --
-    -- For now I do not allow local directory imports that mask the module. So
-    -- the import `foo.bif` in the module `foo.bar.baz` will not search for the
-    -- local directory "foo". Maybe I should allow this?
-    -- _ -> error $ show (modulePath, importName, moduleName)
-    _ ->
-      let rootPath =
-            if last modulePath == "main.loc"
-              -- e.g., `/../src/foo/bar/baz/main.loc` -> '/../src/'
-              then removePathSuffix moduleName (init modulePath)
-              -- e.g., `/../src/foo/bar/baz.loc`  -> '/../src/'
-              else removePathSuffix (init moduleName) (init modulePath)
-       in map
-            MS.joinPath
-            [ rootPath <> init importName <> [last importName <> ".loc"]
-            , rootPath <> importName <> ["main.loc"]
-            ]
 
 getFile :: Path -> IO (Maybe Path)
 getFile x = do
@@ -548,9 +481,11 @@ extractMorlocDeps path = do
             Nothing -> []
             Just rest ->
               let modName = MT.strip (MT.takeWhile (\c -> c /= '(' && c /= ' ') rest)
-               in case MT.splitOn "." modName of
-                    (topLevel : _) | not (MT.null topLevel) -> [topLevel]
-                    _ -> []
+               in if "." `MT.isPrefixOf` modName
+                    then [] -- skip local (.dot-prefixed) imports
+                    else case MT.splitOn "." modName of
+                           (topLevel : _) | not (MT.null topLevel) -> [topLevel]
+                           _ -> []
 
     removeComments :: [Text] -> [Text]
     removeComments = go False

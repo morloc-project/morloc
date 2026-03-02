@@ -1,0 +1,8 @@
+--- forceTuple ---
+EVAL 2
+EVAL 1
+[2,4]
+--- forceApp ---
+EVAL 4
+EVAL 3
+14

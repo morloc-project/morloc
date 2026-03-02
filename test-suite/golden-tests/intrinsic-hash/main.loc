@@ -1,0 +1,20 @@
+module main (test)
+
+import root-cpp
+import root-py
+import root-r
+
+source Cpp from "foo.hpp" ("identity_int" as identityInt, "identity_str" as identityStr)
+
+equalHashes a :: [a] -> Bool
+equalHashes xs =
+  let headHash = @hash (head xs)
+  let isSame = map ((==) headHash) (map @hash xs)
+  in fold (==) True isSame
+
+test :: Bool
+test =
+  equalHashes [idcpp 45, idpy 45, idr 45] &&
+  equalHashes [idcpp "asdf", idpy "asdf", idr "asdf"] &&
+  equalHashes [idcpp 5, idpy 5, idr 5] &&
+  equalHashes [idcpp (5,"asdf"), idpy (5,"asdf"), idr (5,"asdf")]

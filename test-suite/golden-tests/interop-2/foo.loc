@@ -1,4 +1,4 @@
-module foo (*)
+module (*)
 
 type Py => List a = "list" a
 type R => List a = "list" a

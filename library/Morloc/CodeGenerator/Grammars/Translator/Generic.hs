@@ -401,18 +401,18 @@ genericLowerConfig desc srcNamer = cfg
         , lcMakeIf = genericMakeIf desc cfg
         , lcMakeLet = \namer i _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
-        , lcMakeSuspend = \stmts expr ->
-            let suspendBlock = ldSuspendBlock desc
+        , lcMakeDoBlock = \stmts expr ->
+            let suspendBlock = ldDoBlockBlock desc
              in if T.null suspendBlock
                   then
                     -- pass stmts through, wrap expr only
-                    let wrapped = pretty $ substituteT (ldSuspendExpr desc) [("expr", render expr)]
+                    let wrapped = pretty $ substituteT (ldDoBlockExpr desc) [("expr", render expr)]
                      in (stmts, wrapped)
                   else
                     -- absorb stmts into block
                     case stmts of
                       [] ->
-                        let wrapped = pretty $ substituteT (ldSuspendExpr desc) [("expr", render expr)]
+                        let wrapped = pretty $ substituteT (ldDoBlockExpr desc) [("expr", render expr)]
                          in ([], wrapped)
                       _ ->
                         let body = render (vsep (stmts <> [expr]))
@@ -568,6 +568,13 @@ genericMakeLet desc namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 
   let rs = rs1 ++ [namer i <+> pretty (ldAssignOp desc) <+> e1'] ++ rs2
    in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
+-- | Extract the module prefix from a fully-qualified function name.
+-- E.g., "morloc.put_value" -> "morloc.", "put_value" -> ""
+extractModulePrefix :: Text -> Text
+extractModulePrefix fn = case T.breakOnEnd "." fn of
+  ("", _) -> ""
+  (prefix, _) -> prefix
+
 -- | Generic expression printer driven by descriptor
 genericPrintExpr :: LangDescriptor -> IExpr -> MDoc
 genericPrintExpr desc = go
@@ -620,9 +627,23 @@ genericPrintExpr desc = go
               , ("body", bodyText)
               ]
     go (IRawExpr d) = pretty d
-    go (ISuspend e) =
-      pretty $ substituteT (ldSuspendExpr desc) [("expr", render (go e))]
-    go (IForce e) = go e <> "()"
+    go (IDoBlock e) =
+      pretty $ substituteT (ldDoBlockExpr desc) [("expr", render (go e))]
+    go (IEval e) = go e <> "()"
+    go (IIntrinsicHash schema e) =
+      let prefix = extractModulePrefix (ldSerializeFn desc)
+       in pretty prefix <> "mlc_hash(" <> go e <> ", " <> dquotes (pretty schema) <> ")"
+    go (IIntrinsicSave fmt schema e path) =
+      let prefix = extractModulePrefix (ldSerializeFn desc)
+          saveFn :: Text
+          saveFn = case fmt of
+            "json"     -> "mlc_save_json"
+            "voidstar" -> "mlc_save_voidstar"
+            _          -> "mlc_save"
+       in pretty prefix <> pretty saveFn <> "(" <> go e <> ", " <> dquotes (pretty schema) <> ", " <> go path <> ")"
+    go (IIntrinsicLoad schema _ path) =
+      let prefix = extractModulePrefix (ldSerializeFn desc)
+       in pretty prefix <> "mlc_load(" <> dquotes (pretty schema) <> ", " <> go path <> ")"
 
 -- | Generic statement printer driven by descriptor
 genericPrintStmt :: LangDescriptor -> IStmt -> MDoc

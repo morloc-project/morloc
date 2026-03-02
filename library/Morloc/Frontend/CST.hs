@@ -82,7 +82,7 @@ infixl 5 <->
 
 data CstExpr
   = -- Top-level declarations
-    CModE Text CstExport [Loc CstExpr]
+    CModE (Maybe Text) CstExport [Loc CstExpr]
   | CImpE Import
   | CSigE EVar [Text] CstSigType
   | CAssE EVar [Text] (Loc CstExpr) [Loc CstExpr]
@@ -109,13 +109,13 @@ data CstExpr
   | CLstE [Loc CstExpr]
   | CTupE [Loc CstExpr]
   | CNamE [(Key, Loc CstExpr)]
-  | CSuspendE (Loc CstExpr)
-  | CForceE (Loc CstExpr)
   | CAnnE (Loc CstExpr) TypeU
   | CDoE [CstDoStmt]
   | CAccessorE CstAccessorBody
   | CInterpE Text [Loc CstExpr] [Text] Text
   | CGuardExprE [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr)
+  | CForceE (Loc CstExpr)  -- ^ !expr force operator (only valid inside do-blocks)
+  | CIntrinsicE Text  -- ^ @name intrinsic reference (text is the name without @)
   deriving (Show, Eq)
 
 data CstExport

@@ -1,0 +1,7 @@
+module (*)
+
+source Py from "util.py" ("negate")
+
+type Py => Real = "float"
+
+negate :: Real -> Real

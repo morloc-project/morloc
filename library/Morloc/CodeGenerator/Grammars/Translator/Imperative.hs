@@ -116,8 +116,11 @@ data IExpr
   | ILambda [Text] IExpr
   | IPack Text IExpr -- packer(expr)
   | IRawExpr Text
-  | ISuspend IExpr -- thunk: lambda wrapping expression
-  | IForce IExpr -- force: call thunk with no args
+  | IDoBlock IExpr -- effect: lambda wrapping expression
+  | IEval IExpr -- eval: call effect with no args
+  | IIntrinsicSave Text Text IExpr IExpr -- format, schema, data, path
+  | IIntrinsicLoad Text (Maybe IType) IExpr -- schema, returnType, path -> result (nullable)
+  | IIntrinsicHash Text IExpr -- schema, data -> hex string
 
 data IParam = IParam Text (Maybe IType)
 
@@ -255,8 +258,8 @@ data LowerConfig m = LowerConfig
   , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
   -- Produces language-specific if/else structure using a temp result variable
-  , lcMakeSuspend :: [MDoc] -> MDoc -> ([MDoc], MDoc)
-  -- ^ prior statements -> return expression -> (hoisted statements, thunk expression)
+  , lcMakeDoBlock :: [MDoc] -> MDoc -> ([MDoc], MDoc)
+  -- ^ prior statements -> return expression -> (hoisted statements, effect expression)
   , lcSerialize :: MDoc -> SerialAST -> m PoolDocs
   , lcDeserialize :: TypeF -> MDoc -> SerialAST -> m (MDoc, [MDoc])
   , -- manifold lowering fields
@@ -461,20 +464,41 @@ lowerNativeExpr cfg _ (RealN_ _ v) = return $ defaultValue {poolExpr = lcPrintEx
 lowerNativeExpr cfg _ (IntN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IIntLit v)}
 lowerNativeExpr cfg _ (StrN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit v)}
 lowerNativeExpr cfg _ (NullN_ _) = return $ defaultValue {poolExpr = lcPrintExpr cfg INullLit}
-lowerNativeExpr cfg _ (SuspendN_ _ x) =
-  let (hoisted, thunkExpr) = lcMakeSuspend cfg (poolPriorLines x) (poolExpr x)
+lowerNativeExpr cfg _ (DoBlockN_ _ x) =
+  let (hoisted, effectExpr) = lcMakeDoBlock cfg (poolPriorLines x) (poolExpr x)
    in return
         defaultValue
-          { poolExpr = thunkExpr
+          { poolExpr = effectExpr
           , poolCompleteManifolds = poolCompleteManifolds x
           , poolPriorLines = hoisted
           , poolPriorExprs = poolPriorExprs x
           }
-lowerNativeExpr cfg _ (ForceN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IForce (IRawExpr (render (poolExpr x))))}
+lowerNativeExpr cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IEval (IRawExpr (render (poolExpr x))))}
 -- CoerceToOptional is a noop in all target languages: T is a valid ?T
-lowerNativeExpr _ _ (CoerceN_ _ _ x) = return x
+lowerNativeExpr _ _ (CoerceN_ CoerceToOptional _ x) = return x
+-- CoerceToEffect wraps the value in a suspend (thunk/lambda)
+lowerNativeExpr cfg _ (CoerceN_ (CoerceToEffect _) _ x) =
+  return $ x {poolExpr = lcPrintExpr cfg (IDoBlock (IRawExpr (render (poolExpr x))))}
 lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) =
+  return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicHash schema (IRawExpr (render (poolExpr dataDocs))))}
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSave (Just schema) [dataDocs, pathDocs]) =
+  let fmt = "voidstar"
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt schema (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveM (Just schema) [dataDocs, pathDocs]) =
+  let fmt = "msgpack"
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt schema (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveJ (Just schema) [dataDocs, pathDocs]) =
+  let fmt = "json"
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt schema (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
+lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) = do
+  innerType <- case typeFof origExpr of
+    OptionalF t -> lcTypeOf cfg t
+    _ -> return Nothing
+  return $ pathDocs {poolExpr = lcPrintExpr cfg (IIntrinsicLoad schema innerType (IRawExpr (render (poolExpr pathDocs))))}
+lowerNativeExpr _ _ (IntrinsicN_ _ intr _ _) =
+  error $ "Runtime intrinsic @" <> show intr <> " reached code generation without schema"
 
 {- | Lower a serial manifold to PoolDocs.
 Replaces translateManifold from Common.hs for serial manifolds.

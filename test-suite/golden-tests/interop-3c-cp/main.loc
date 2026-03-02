@@ -1,7 +1,7 @@
 module main (foo)
 
-import foo
-import fooc
-import foopy
+import .foo
+import .fooc
+import .foopy
 
 foo x xs = cmap (padd x) xs

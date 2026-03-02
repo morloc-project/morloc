@@ -51,8 +51,8 @@ ldIncludeRelToFile: false
 # Template fields
 ldAssignOp: "<-"
 ldLambdaTemplate: "function({{args}}) { {{body}} }"
-ldSuspendExpr: "(function() {{expr}})"
-ldSuspendBlock: "(function(){\n{{body}}\n})"
+ldDoBlockExpr: "(function() {{expr}})"
+ldDoBlockBlock: "(function(){\n{{body}}\n})"
 ldPartialTemplate: "function({{bound_args}}) { {{fn}}({{all_args}}) }"
 ldImportTemplate: "source(\"{{path}}\")"
 ldSocketPathTemplate: "paste0(global_state$tmpdir, \"/\", {{socket}})"

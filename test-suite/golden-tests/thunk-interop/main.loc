@@ -1,7 +1,6 @@
--- Test thunks across C++, Python, and R:
---   1-3. Force thunk in each language independently
---   4-5. Cross-language: do-blocks chaining thunk forces across languages
--- Each sideEffect prints "EVAL_<LANG> <input>" to stderr, returns input * 2.
+-- Test effects across C++, Python, and R:
+--   1-3. Evaluate effect in each language independently
+--   4-5. Cross-language: do-blocks chaining effect evaluations across languages
 
 module main (cppForce, pyForce, rForce, crossCppPy, crossPyR)
 
@@ -17,44 +16,44 @@ type Cpp => Int = "int"
 type Py => Int = "int"
 type R => Int = "integer"
 
-sideEffectCpp :: Int -> {Int}
-sideEffectPy :: Int -> {Int}
-sideEffectR :: Int -> {Int}
+sideEffectCpp :: Int -> <IO> Int
+sideEffectPy :: Int -> <IO> Int
+sideEffectR :: Int -> <IO> Int
 addCpp :: Int -> Int -> Int
 addPy :: Int -> Int -> Int
 addR :: Int -> Int -> Int
 
--- Force a C++ thunk
+-- Evaluate a C++ effect
 -- sideEffectCpp 5 -> "EVAL_CPP 5", returns 10
-cppForce :: Int
-cppForce = !(sideEffectCpp 5)
+cppForce :: <IO> Int
+cppForce = sideEffectCpp 5
 
--- Force a Python thunk
+-- Evaluate a Python effect
 -- sideEffectPy 5 -> "EVAL_PY 5", returns 10
-pyForce :: Int
-pyForce = !(sideEffectPy 5)
+pyForce :: <IO> Int
+pyForce = sideEffectPy 5
 
--- Force an R thunk
+-- Evaluate an R effect
 -- sideEffectR 5 -> "EVAL_R 5", returns 10
-rForce :: Int
-rForce = !(sideEffectR 5)
+rForce :: <IO> Int
+rForce = sideEffectR 5
 
--- Cross-language do-block: C++ thunk feeds Python thunk, result via C++ add
+-- Cross-language do-block: C++ effect feeds Python effect, result via C++ add
 -- sideEffectCpp 3 -> "EVAL_CPP 3", x = 6
 -- sideEffectPy 6 -> "EVAL_PY 6", y = 12
 -- addCpp 6 12 = 18
-crossCppPy :: Int
-crossCppPy = !do
+crossCppPy :: <IO> Int
+crossCppPy = do
     x <- sideEffectCpp 3
     y <- sideEffectPy x
-    {addCpp x y}
+    addCpp x y
 
--- Cross-language do-block: Python thunk feeds R thunk, result via Python add
+-- Cross-language do-block: Python effect feeds R effect, result via Python add
 -- sideEffectPy 4 -> "EVAL_PY 4", x = 8
 -- sideEffectR 8 -> "EVAL_R 8", y = 16
 -- addPy 8 16 = 24
-crossPyR :: Int
-crossPyR = !do
+crossPyR :: <IO> Int
+crossPyR = do
     x <- sideEffectPy 4
     y <- sideEffectR x
-    {addPy x y}
+    addPy x y

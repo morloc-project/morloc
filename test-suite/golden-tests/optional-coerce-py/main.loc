@@ -20,7 +20,7 @@ testCoerceArg = fromNull 0 42
 
 -- Pass Int literal where ?Int expected in fromNull default
 testCoerceFromNull :: Int
-testCoerceFromNull = fromNull (-1) null
+testCoerceFromNull = fromNull (-1) Null
 
 -- Pass Int where ?Int expected (both args coerced)
 testCoerceAddOpt :: ?Int

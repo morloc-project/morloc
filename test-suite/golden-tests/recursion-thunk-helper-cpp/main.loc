@@ -1,8 +1,4 @@
--- Test non-exported recursive helper returning a thunk type.
--- Combines the helper extraction fix (Realize.hs) with the
--- ThunkT stripping fix (Express.hs). This is the pattern from
--- the ecosystem example where simulateR was a non-exported
--- recursive helper returning {[[Cell]]}.
+-- Test non-exported recursive helper returning an effect type.
 -- sumDown n = 0 + 1 + 2 + ... + n (each term doubled by sourced fn)
 
 module main (sumDown)
@@ -13,17 +9,17 @@ source Cpp from "foo.hpp" ("double_val")
 
 type Cpp => Int = "int"
 
-double_val :: Int -> {Int}
+double_val :: Int -> <IO> Int
 
 -- Exported wrapper delegates to non-exported recursive helper
-sumDown :: Int -> {Int}
+sumDown :: Int -> <IO> Int
 sumDown n = helper n
 
--- Non-exported recursive helper returning {Int}
-helper :: Int -> {Int}
+-- Non-exported recursive helper returning <IO> Int
+helper :: Int -> <IO> Int
 helper n
   ? n <= 0 = double_val 0
   : do
       x <- double_val n
       rest <- helper (n - 1)
-      {x + rest}
+      x + rest
