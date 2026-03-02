@@ -901,11 +901,23 @@ checkE _ g (DoBlockS e) (EffectU effs t) = do
   (g1, t1, e1) <- checkG g e t
   return (g1, EffectU effs t1, DoBlockS e1)
 checkE i g (EvalS e) t = do
-  let (g', ev) = tvarname g "effectVar_"
-  (g1, t1, e1) <- checkG g' e (EffectU (EffectVar ev) t)
+  -- Synthesize first to get concrete EffectSet in annotations,
+  -- then check the inner type against the expected type.
+  -- This avoids creating an EffectVar that is never solved.
+  (g1, t1, e1) <- synthG g e
   case apply g1 t1 of
-    EffectU _ a -> return (g1, a, EvalS e1)
-    _ -> throwTypeError i $ "Expected thunk type in force expression"
+    EffectU _ a -> do
+      g2 <- subtype' i a t g1
+      return (g2, apply g2 t, EvalS e1)
+    ExistU _ _ _ -> do
+      let (g2, bv) = tvarname g1 "effectInner_"
+          bt = ExistU bv ([], Open) ([], Open)
+          (g2b, ev) = tvarname g2 "effectVar_"
+          thunkT = EffectU (EffectVar ev) bt
+      g3 <- subtype' i (apply g2b t1) thunkT g2b
+      g4 <- subtype' i (apply g3 bt) t g3
+      return (g4, apply g4 t, EvalS (applyGen g4 e1))
+    t' -> throwTypeError i $ "Cannot force non-thunk type:" <+> pretty t'
 
 --   Sub (with coercion fallback)
 checkE i g1 e1 b = do
