@@ -133,6 +133,7 @@ module Morloc.CodeGenerator.Namespace
 
 import Control.Monad.Identity (runIdentity)
 import Data.Scientific (Scientific)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import Morloc.Data.Doc
 import Morloc.Namespace.Expr
@@ -154,7 +155,7 @@ data TypeF
   | FunF [TypeF] TypeF
   | AppF TypeF [TypeF]
   | NamF NamType FVar [TypeF] [(Key, TypeF)]
-  | ThunkF TypeF
+  | EffectF (Set.Set EffectLabel) TypeF
   | OptionalF TypeF
   deriving (Show, Ord, Eq)
 
@@ -449,8 +450,8 @@ data PolyExpr
   | PolyInt (Indexed TVar) Integer
   | PolyStr (Indexed TVar) Text
   | PolyNull (Indexed TVar)
-  | PolySuspend (Indexed Type) PolyExpr
-  | PolyForce (Indexed Type) PolyExpr
+  | PolyDoBlock (Indexed Type) PolyExpr
+  | PolyEval (Indexed Type) PolyExpr
   | PolyCoerce Coercion (Indexed Type) PolyExpr
   | PolyIf PolyExpr PolyExpr PolyExpr
   | PolyIntrinsic (Indexed Type) Intrinsic [PolyExpr]
@@ -482,8 +483,8 @@ data MonoExpr
   | MonoInt (Indexed TVar) Integer
   | MonoStr (Indexed TVar) Text
   | MonoNull (Indexed TVar)
-  | MonoSuspend (Indexed Type) MonoExpr
-  | MonoForce (Indexed Type) MonoExpr
+  | MonoDoBlock (Indexed Type) MonoExpr
+  | MonoEval (Indexed Type) MonoExpr
   | MonoCoerce Coercion (Indexed Type) MonoExpr
   | MonoIf MonoExpr MonoExpr MonoExpr
   | MonoIntrinsic (Indexed Type) Intrinsic [MonoExpr]
@@ -557,8 +558,8 @@ data NativeExpr
   | IntN FVar Integer
   | StrN FVar Text
   | NullN FVar
-  | SuspendN TypeF NativeExpr
-  | ForceN TypeF NativeExpr
+  | DoBlockN TypeF NativeExpr
+  | EvalN TypeF NativeExpr
   | CoerceN Coercion TypeF NativeExpr
   | IfN TypeF NativeExpr NativeExpr NativeExpr
   | IntrinsicN TypeF Intrinsic (Maybe Text) [NativeExpr]
@@ -610,8 +611,8 @@ foldlNE _ b (RealN_ _ _) = b
 foldlNE _ b (IntN_ _ _) = b
 foldlNE _ b (StrN_ _ _) = b
 foldlNE _ b (NullN_ _) = b
-foldlNE f b (SuspendN_ _ x) = f b x
-foldlNE f b (ForceN_ _ x) = f b x
+foldlNE f b (DoBlockN_ _ x) = f b x
+foldlNE f b (EvalN_ _ x) = f b x
 foldlNE f b (CoerceN_ _ _ x) = f b x
 foldlNE f b (IfN_ _ c t e) = foldl f b [c, t, e]
 foldlNE f b (IntrinsicN_ _ _ _ xs) = foldl f b xs
@@ -684,8 +685,8 @@ makeMonoidFoldDefault mempty' mappend' =
     monoidNativeExpr' (IntN_ v x) = return (mempty', IntN v x)
     monoidNativeExpr' (StrN_ v x) = return (mempty', StrN v x)
     monoidNativeExpr' (NullN_ v) = return (mempty', NullN v)
-    monoidNativeExpr' (SuspendN_ t (a, ne)) = return (a, SuspendN t ne)
-    monoidNativeExpr' (ForceN_ t (a, ne)) = return (a, ForceN t ne)
+    monoidNativeExpr' (DoBlockN_ t (a, ne)) = return (a, DoBlockN t ne)
+    monoidNativeExpr' (EvalN_ t (a, ne)) = return (a, EvalN t ne)
     monoidNativeExpr' (CoerceN_ c t (a, ne)) = return (a, CoerceN c t ne)
     monoidNativeExpr' (IfN_ t (a1, c) (a2, thenE) (a3, elseE)) =
       return (foldl mappend' mempty' [a1, a2, a3], IfN t c thenE elseE)
@@ -828,8 +829,8 @@ data NativeExpr_ nm se ne sr nr
   | IntN_ FVar Integer
   | StrN_ FVar Text
   | NullN_ FVar
-  | SuspendN_ TypeF ne
-  | ForceN_ TypeF ne
+  | DoBlockN_ TypeF ne
+  | EvalN_ TypeF ne
   | CoerceN_ Coercion TypeF ne
   | IfN_ TypeF ne ne ne
   | IntrinsicN_ TypeF Intrinsic (Maybe Text) [ne]
@@ -1022,12 +1023,12 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
     f full@(IntN t x) = opFoldWithNativeExprM fm full (IntN_ t x)
     f full@(StrN t x) = opFoldWithNativeExprM fm full (StrN_ t x)
     f full@(NullN t) = opFoldWithNativeExprM fm full (NullN_ t)
-    f full@(SuspendN t ne) = do
+    f full@(DoBlockN t ne) = do
       ne' <- surroundFoldNativeExprM sfm fm ne
-      opFoldWithNativeExprM fm full (SuspendN_ t ne')
-    f full@(ForceN t ne) = do
+      opFoldWithNativeExprM fm full (DoBlockN_ t ne')
+    f full@(EvalN t ne) = do
       ne' <- surroundFoldNativeExprM sfm fm ne
-      opFoldWithNativeExprM fm full (ForceN_ t ne')
+      opFoldWithNativeExprM fm full (EvalN_ t ne')
     f full@(CoerceN c t ne) = do
       ne' <- surroundFoldNativeExprM sfm fm ne
       opFoldWithNativeExprM fm full (CoerceN_ c t ne')
@@ -1064,8 +1065,8 @@ instance HasTypeF NativeExpr where
   typeFof (IntN v _) = VarF v
   typeFof (StrN v _) = VarF v
   typeFof (NullN v) = VarF v
-  typeFof (SuspendN t _) = t
-  typeFof (ForceN t _) = t
+  typeFof (DoBlockN t _) = t
+  typeFof (EvalN t _) = t
   typeFof (CoerceN _ t _) = t
   typeFof (IfN t _ _ _) = t
   typeFof (IntrinsicN t _ _ _) = t
@@ -1261,8 +1262,8 @@ instance MFunctor NativeExpr where
         e@(IntN _ _) -> mapNativeExpr f e
         e@(StrN _ _) -> mapNativeExpr f e
         e@(NullN _) -> mapNativeExpr f e
-        (SuspendN t ne) -> mapNativeExpr f $ SuspendN t (mgatedMap g f ne)
-        (ForceN t ne) -> mapNativeExpr f $ ForceN t (mgatedMap g f ne)
+        (DoBlockN t ne) -> mapNativeExpr f $ DoBlockN t (mgatedMap g f ne)
+        (EvalN t ne) -> mapNativeExpr f $ EvalN t (mgatedMap g f ne)
         (CoerceN c t ne) -> mapNativeExpr f $ CoerceN c t (mgatedMap g f ne)
         (IfN t c thenE elseE) -> mapNativeExpr f $ IfN t (mgatedMap g f c) (mgatedMap g f thenE) (mgatedMap g f elseE)
         (IntrinsicN t intr msch nes) -> mapNativeExpr f $ IntrinsicN t intr msch (map (mgatedMap g f) nes)
@@ -1310,8 +1311,8 @@ instance Pretty PolyExpr where
   pretty (PolyInt _ _) = "PolyInt"
   pretty (PolyStr _ _) = "PolyStr"
   pretty (PolyNull _) = "PolyNull"
-  pretty (PolySuspend _ e) = "PolySuspend" <+> pretty e
-  pretty (PolyForce _ e) = "PolyForce" <+> pretty e
+  pretty (PolyDoBlock _ e) = "PolyDoBlock" <+> pretty e
+  pretty (PolyEval _ e) = "PolyEval" <+> pretty e
   pretty (PolyCoerce _ _ e) = "PolyCoerce" <+> pretty e
   pretty (PolyIf c t e) = "PolyIf" <+> pretty c <+> pretty t <+> pretty e
   pretty (PolyIntrinsic _ intr es) = "@" <> pretty (intrinsicName intr) <+> list (map pretty es)
@@ -1340,8 +1341,8 @@ instance Pretty MonoExpr where
   pretty (MonoInt _ x) = viaShow x
   pretty (MonoStr _ x) = viaShow x
   pretty (MonoNull _) = "NULL"
-  pretty (MonoSuspend _ e) = "{" <> pretty e <> "}"
-  pretty (MonoForce _ e) = "!" <> pretty e
+  pretty (MonoDoBlock _ e) = "{" <> pretty e <> "}"
+  pretty (MonoEval _ e) = "!" <> pretty e
   pretty (MonoCoerce _ _ e) = "coerce(" <> pretty e <> ")"
   pretty (MonoIf c t e) = "if" <+> pretty c <+> "then" <+> pretty t <+> "else" <+> pretty e
   pretty (MonoIntrinsic _ intr es) = "@" <> pretty (intrinsicName intr) <+> list (map pretty es)

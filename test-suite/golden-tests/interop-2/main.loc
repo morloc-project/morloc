@@ -1,8 +1,8 @@
 module main (foo)
 
-import foo (List, Real)
-import foopy (map, add)
-import foor (fold, add)
+import .foo (List, Real)
+import .foopy (map, add)
+import .foor (fold, add)
 
 sum xs b = fold add b xs
 

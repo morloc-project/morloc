@@ -115,17 +115,17 @@ segmentExpr _ _ (PolyReal v x) = return ([], (Nothing, MonoReal v x))
 segmentExpr _ _ (PolyInt v x) = return ([], (Nothing, MonoInt v x))
 segmentExpr _ _ (PolyStr v x) = return ([], (Nothing, MonoStr v x))
 segmentExpr _ _ (PolyNull v) = return ([], (Nothing, MonoNull v))
-segmentExpr m args (PolySuspend t e) = do
+segmentExpr m args (PolyDoBlock t e) = do
   (ms, (_, e')) <- segmentExpr m args e
-  return (ms, (Nothing, MonoSuspend t e'))
+  return (ms, (Nothing, MonoDoBlock t e'))
 segmentExpr m args (PolyIf cond thenE elseE) = do
   (ms1, (_, cond')) <- segmentExpr m args cond
   (ms2, (_, thenE')) <- segmentExpr m args thenE
   (ms3, (_, elseE')) <- segmentExpr m args elseE
   return (ms1 ++ ms2 ++ ms3, (Nothing, MonoIf cond' thenE' elseE'))
-segmentExpr m args (PolyForce t e) = do
+segmentExpr m args (PolyEval t e) = do
   (ms, (_, e')) <- segmentExpr m args e
-  return (ms, (Nothing, MonoForce t e'))
+  return (ms, (Nothing, MonoEval t e'))
 segmentExpr m args (PolyCoerce c t e) = do
   (ms, (_, e')) <- segmentExpr m args e
   return (ms, (Nothing, MonoCoerce c t e'))

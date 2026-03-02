@@ -1,8 +1,8 @@
 module main (foo)
 
-import foo
-import foor
-import fooc
+import .foo
+import .foor
+import .fooc
 
 foo :: [Int] -> [Int]
 foo xs = rmap cneg xs

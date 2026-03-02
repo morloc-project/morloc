@@ -109,13 +109,12 @@ data CstExpr
   | CLstE [Loc CstExpr]
   | CTupE [Loc CstExpr]
   | CNamE [(Key, Loc CstExpr)]
-  | CSuspendE (Loc CstExpr)
-  | CForceE (Loc CstExpr)
   | CAnnE (Loc CstExpr) TypeU
   | CDoE [CstDoStmt]
   | CAccessorE CstAccessorBody
   | CInterpE Text [Loc CstExpr] [Text] Text
   | CGuardExprE [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr)
+  | CForceE (Loc CstExpr)  -- ^ !expr force operator (only valid inside do-blocks)
   | CIntrinsicE Text  -- ^ @name intrinsic reference (text is the name without @)
   deriving (Show, Eq)
 

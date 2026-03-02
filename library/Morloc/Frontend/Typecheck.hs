@@ -124,7 +124,7 @@ findTypeKindSize v = head . catMaybes . f
     f (NamU _ v' ts1 (map snd -> ts2))
       | v == v' = [Just (1 + (length ts1))]
       | otherwise = concat $ map f (ts1 <> ts2)
-    f (ThunkU t) = f t
+    f (EffectU _ t) = f t
     f (OptionalU t) = f t
 
 -- TypeU --> Type
@@ -150,8 +150,8 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (StrS x) = StrS x
     f UniS = UniS
     f NullS = NullS
-    f (SuspendS e') = SuspendS (resolveTypes e')
-    f (ForceS e') = ForceS (resolveTypes e')
+    f (DoBlockS e') = DoBlockS (resolveTypes e')
+    f (EvalS e') = EvalS (resolveTypes e')
     f (CoerceS c e') = CoerceS c (resolveTypes e')
     f (IfS c t e) = IfS (resolveTypes c) (resolveTypes t) (resolveTypes e)
     f (IntrinsicS intr es) = IntrinsicS intr (map resolveTypes es)
@@ -241,8 +241,8 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f _ g0 (LogS x) = return (g0, LogS x)
     f _ g0 (StrS x) = return (g0, StrS x)
     f _ g0 (ExeS x) = return (g0, ExeS x)
-    f _ g0 (SuspendS e) = resolveInstances g0 e |>> second SuspendS
-    f _ g0 (ForceS e) = resolveInstances g0 e |>> second ForceS
+    f _ g0 (DoBlockS e) = resolveInstances g0 e |>> second DoBlockS
+    f _ g0 (EvalS e) = resolveInstances g0 e |>> second EvalS
     f _ g0 (CoerceS c e) = resolveInstances g0 e |>> second (CoerceS c)
     f _ g0 (IfS c t e) = do
       (g1, c') <- resolveInstances g0 c
@@ -599,23 +599,25 @@ synthE i g (IfS cond thenE elseE) = do
   (g4, t3, elseE') <- synthG g3 elseE
   g5 <- subtype' i t3 t2 g4
   return (g5, apply g5 t2, IfS cond' thenE' elseE')
-synthE _ g (SuspendS e) = do
+synthE _ g (DoBlockS e) = do
   (g1, t1, e1) <- synthG g e
-  return (g1, ThunkU t1, SuspendS e1)
+  let effs = collectDoEffects e1
+  return (g1, EffectU effs t1, DoBlockS e1)
 synthE _ g (CoerceS coercion e) = do
   (g1, t1, e1) <- synthG g e
   return (g1, applyCoercion coercion t1, CoerceS coercion e1)
-synthE i g (ForceS e) = do
+synthE i g (EvalS e) = do
   (g1, t1, e1) <- synthG g e
   case apply g1 t1 of
-    ThunkU a -> return (g1, a, ForceS e1)
+    EffectU _ a -> return (g1, a, EvalS e1)
     ExistU _ _ _ -> do
-      -- solve ?v = {?b} for fresh ?b
-      let (g2, bv) = tvarname g1 "thunkInner_"
+      -- solve ?v = <E> ?b for fresh E, ?b
+      let (g2, bv) = tvarname g1 "effectInner_"
           bt = ExistU bv ([], Open) ([], Open)
-          thunkT = ThunkU bt
-      g3 <- subtype' i (apply g2 t1) thunkT g2
-      return (g3, apply g3 bt, ForceS (applyGen g3 e1))
+          (g2b, ev) = tvarname g2 "effectVar_"
+          thunkT = EffectU (EffectVar ev) bt
+      g3 <- subtype' i (apply g2b t1) thunkT g2b
+      return (g3, apply g3 bt, EvalS (applyGen g3 e1))
     t -> throwTypeError i $ "Cannot force non-thunk type:" <+> pretty t
 synthE i g (IntrinsicS intr args) = do
   (g', argTypes, args') <- synthArgs g args
@@ -627,15 +629,15 @@ synthE i g (IntrinsicS intr args) = do
 intrinsicTypeG :: Gamma -> Intrinsic -> (Gamma, TypeU)
 intrinsicTypeG g IntrLoad =
   let (g', loadType) = newvar "load_" g
-  in (g', ThunkU (OptionalU loadType))
+  in (g', EffectU ioEffectSet (OptionalU loadType))
 intrinsicTypeG g intr = (g, intrinsicType intr)
 
 -- | Return type of a fully applied intrinsic (for intrinsics without fresh vars)
 intrinsicType :: Intrinsic -> TypeU
-intrinsicType IntrSave = ThunkU BT.unitU
-intrinsicType IntrSaveM = ThunkU BT.unitU
-intrinsicType IntrSaveJ = ThunkU BT.unitU
-intrinsicType IntrLoad = ThunkU (OptionalU (ExistU (TV "load_a") ([], Open) ([], Open)))
+intrinsicType IntrSave = EffectU ioEffectSet BT.unitU
+intrinsicType IntrSaveM = EffectU ioEffectSet BT.unitU
+intrinsicType IntrSaveJ = EffectU ioEffectSet BT.unitU
+intrinsicType IntrLoad = EffectU ioEffectSet (OptionalU (ExistU (TV "load_a") ([], Open) ([], Open)))
 intrinsicType IntrHash = BT.strU
 intrinsicType IntrVersion = BT.strU
 intrinsicType IntrCompiled = BT.strU
@@ -895,13 +897,14 @@ checkE i g (IfS cond thenE elseE) t = do
   (g3, t2, thenE') <- checkG g2 thenE t
   (g4, _, elseE') <- checkG g3 elseE (apply g3 t2)
   return (g4, apply g4 t2, IfS cond' thenE' elseE')
-checkE _ g (SuspendS e) (ThunkU t) = do
+checkE _ g (DoBlockS e) (EffectU effs t) = do
   (g1, t1, e1) <- checkG g e t
-  return (g1, ThunkU t1, SuspendS e1)
-checkE i g (ForceS e) t = do
-  (g1, t1, e1) <- checkG g e (ThunkU t)
+  return (g1, EffectU effs t1, DoBlockS e1)
+checkE i g (EvalS e) t = do
+  let (g', ev) = tvarname g "effectVar_"
+  (g1, t1, e1) <- checkG g' e (EffectU (EffectVar ev) t)
   case apply g1 t1 of
-    ThunkU a -> return (g1, a, ForceS e1)
+    EffectU _ a -> return (g1, a, EvalS e1)
     _ -> throwTypeError i $ "Expected thunk type in force expression"
 
 --   Sub (with coercion fallback)
@@ -946,7 +949,45 @@ tryCoerce scope a (OptionalU b) g =
     Left _ -> case tryCoerce scope a b g of
       Just (cs, g') -> Just (CoerceToOptional : cs, g')
       Nothing -> Nothing
+-- Coerce a pure value to an effectful type: a -> <E> a
+tryCoerce scope a (EffectU effs b) g =
+  case subtype scope a b g of
+    Right g' -> Just ([CoerceToEffect (resolveEffectSet effs)], g')
+    Left _ -> case tryCoerce scope a b g of
+      Just (cs, g') -> Just (CoerceToEffect (resolveEffectSet effs) : cs, g')
+      Nothing -> Nothing
 tryCoerce _ _ _ _ = Nothing
+
+-- | Collect effect labels from all EvalS nodes within a do-block body.
+-- Deeply traverses the full expression tree to find nested EvalS nodes
+-- (e.g., inside tuples, applications, let bindings).
+collectDoEffects :: AnnoS (Indexed TypeU) f c -> EffectSet
+collectDoEffects = go
+  where
+    go (AnnoS _ _ expr) = case expr of
+      EvalS e -> effectOfAnno e `union` go e
+      LetS _ e1 e2 -> go e1 `union` go e2
+      AppS f args -> unions (go f : map go args)
+      TupS es -> unions (map go es)
+      LstS es -> unions (map go es)
+      NamS rs -> unions (map (go . snd) rs)
+      LamS _ e -> go e
+      IfS c t e -> go c `union` go t `union` go e
+      DoBlockS e -> go e
+      CoerceS _ e -> go e
+      IntrinsicS _ es -> unions (map go es)
+      _ -> emptyEffectSet
+
+    effectOfAnno (AnnoS (Idx _ (EffectU effs _)) _ _) = effs
+    effectOfAnno _ = emptyEffectSet
+
+    unions = foldl union emptyEffectSet
+
+    union a b
+      | a == emptyEffectSet = b
+      | b == emptyEffectSet = a
+      | a == b = a
+      | otherwise = EffectUnion a b
 
 -- helpers
 
@@ -1064,8 +1105,8 @@ peakSExpr (ExeS exe) = "ExeS" <+> pretty exe
 peakSExpr (LetS v _ _) = "LetS" <+> pretty v
 peakSExpr (LetBndS v) = "LetBndS" <+> pretty v
 peakSExpr (CallS v) = "CallS" <+> pretty v
-peakSExpr (SuspendS _) = "SuspendS"
-peakSExpr (ForceS _) = "ForceS"
+peakSExpr (DoBlockS _) = "DoBlockS"
+peakSExpr (EvalS _) = "EvalS"
 peakSExpr (CoerceS _ _) = "CoerceS"
 peakSExpr (IfS _ _ _) = "IfS"
 peakSExpr (IntrinsicS intr _) = "@" <> pretty (intrinsicName intr)

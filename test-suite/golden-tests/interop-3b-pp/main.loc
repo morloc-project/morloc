@@ -1,6 +1,6 @@
 module main (foo)
 
-import foo
-import foopy
+import .foo
+import .foopy
 
 foo xs = pmap (padd 1) xs

@@ -50,13 +50,13 @@ module Morloc.BaseTypes
   , strU
   , tupleU
   , listU
-  , thunkU
+  , effectU
   , optionalU
   ) where
 
 import Morloc.Data.Text (pretty)
 import Morloc.Namespace.Prim (TVar (..))
-import Morloc.Namespace.Type (TypeU (..))
+import Morloc.Namespace.Type (TypeU (..), emptyEffectSet)
 import Prelude hiding (log)
 
 unit :: TVar
@@ -170,8 +170,8 @@ listU t = AppU (VarU list) [t]
 tupleU :: [TypeU] -> TypeU
 tupleU ts = AppU (VarU $ tuple (length ts)) ts
 
-thunkU :: TypeU -> TypeU
-thunkU = ThunkU
+effectU :: TypeU -> TypeU
+effectU = EffectU emptyEffectSet
 
 optionalU :: TypeU -> TypeU
 optionalU = OptionalU

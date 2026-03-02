@@ -1,6 +1,6 @@
-module fooc (*)
+module (*)
 
-import foo
+import .foo
 
 cneg :: Int -> Int
 cadd :: Int -> Int -> Int

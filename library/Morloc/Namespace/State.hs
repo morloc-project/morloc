@@ -62,6 +62,7 @@ import Data.Aeson (FromJSON (..), (.!=), (.:?))
 import qualified Data.Aeson as Aeson
 import qualified Data.Map as Map
 import Data.Map.Strict (Map)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import Morloc.Data.Doc
 import Morloc.LangRegistry (LangRegistry (..), LangRegistryEntry (..))
@@ -120,6 +121,8 @@ data MorlocState = MorlocState
   -- ^ Map from group name to (description lines, member export indices)
   , stateManifoldLang :: Map Int Lang
   -- ^ Map from export manifold ID to its pool language
+  , stateManifoldEffects :: Map Int (Set.Set EffectLabel)
+  -- ^ Map from export manifold ID to its original return effect labels
   , stateProjectRoot :: Maybe Path
   -- ^ Project root directory (directory of the entry-point file)
   }
@@ -283,6 +286,7 @@ instance Defaultable MorlocState where
       , stateLangRegistry = LR.emptyRegistry
       , stateExportGroups = Map.empty
       , stateManifoldLang = Map.empty
+      , stateManifoldEffects = Map.empty
       , stateProjectRoot = Nothing
       }
 

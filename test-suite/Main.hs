@@ -388,6 +388,16 @@ main = do
         golden "optional-coerce-py" "optional-coerce-py"
       , golden "optional-coerce-cpp" "optional-coerce-cpp"
       , golden "optional-coerce-interop" "optional-coerce-interop"
+      , -- effect coercion tests (a -> <IO> a)
+        golden "effect-coerce-py" "effect-coerce-py"
+      , golden "effect-coerce-cpp" "effect-coerce-cpp"
+      , -- multi-label and subtyping effect tests
+        golden "effect-multi-label-py" "effect-multi-label-py"
+      , golden "effect-subtype-py" "effect-subtype-py"
+      , golden "effect-error-cpp" "effect-error-cpp"
+      , golden "effect-accumulate-py" "effect-accumulate-py"
+      , -- inline force operator (!) tests
+        golden "force-inline-basic" "force-inline-basic"
       , -- intrinsic tests
         golden "intrinsic-hash" "intrinsic-hash"
       , golden "intrinsic-constants" "intrinsic-constants"

@@ -1,6 +1,6 @@
-module foor (*)
+module (*)
 
-import foo
+import .foo
 
 rneg :: Int -> Int
 radd :: Int -> Int -> Int

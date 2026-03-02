@@ -132,7 +132,7 @@ weave gscope = w
             <$> zipWithM w ts1 ts2
             <*> zipWithM (\(_, t1') (k2', t2') -> (,) k2' <$> w t1' t2') rs1 rs2
       | otherwise = Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <+> "\n  t2:" <+> pretty t2
-    w (ThunkU t1) (ThunkU t2) = ThunkF <$> w t1 t2
+    w (EffectU effs t1) (EffectU _ t2) = EffectF (resolveEffectSet effs) <$> w t1 t2
     w (OptionalU t1) (OptionalU t2) = OptionalF <$> w t1 t2
     w t1 t2 = case T.evaluateStep gscope t1 of
       Nothing -> Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <> "\n  t2:" <> pretty t2

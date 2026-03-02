@@ -44,6 +44,8 @@ import qualified Morloc.BaseTypes as BT
 -- - 2 from guard_clauses ('?' could start guard or be part of next decl)
 -- - 1 from guard_expr ('?' in expr could be nested guard_expr or next guard_clause)
 -- - 4 from optional type syntax ('?' could start optional type or guard)
+-- Note: force_expr (!) re-added for inline effect forcing in do-blocks
+-- - 2 from force_expr ('!' could start force or be part of another expr)
 %expect 58
 
 %token
@@ -327,7 +329,7 @@ non_string_atom :: { TypeU }
   | '(' type ')'             { $2 }
   | '(' type ',' type_list1 ')' { BT.tupleU ($2 : $4) }
   | '[' type ']'              { BT.listU $2 }
-  | '{' type '}'              { ThunkU $2 }
+  | '<' effect_labels '>' non_string_atom  { EffectU (EffectSet (Set.fromList $2)) $4 }
   | '?' non_string_atom       { OptionalU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
   | LOWER ':' non_fun_type   { $3 }
@@ -487,22 +489,24 @@ operand :: { Loc CstExpr }
   | '-' FLOAT                { at $1 (CRealE (DS.fromFloatDigits (negate (getFloat $2)))) }
 
 app_expr :: { Loc CstExpr }
-  : atom_expr                      { $1 }
-  | atom_expr atom_exprs1          { Loc ($1 <-> last $2) (CAppE $1 $2) }
+  : force_expr                     { $1 }
+  | force_expr atom_exprs1         { Loc ($1 <-> last $2) (CAppE $1 $2) }
+
+force_expr :: { Loc CstExpr }
+  : '!' atom_expr                  { Loc ($1 <-> $2) (CForceE $2) }
+  | atom_expr                      { $1 }
 
 atom_exprs1 :: { [Loc CstExpr] }
-  : atom_expr                      { [$1] }
-  | atom_exprs1 atom_expr          { $1 ++ [$2] }
+  : force_expr                     { [$1] }
+  | atom_exprs1 force_expr         { $1 ++ [$2] }
 
 atom_expr :: { Loc CstExpr }
-  : force_expr                { $1 }
-  | paren_expr                { $1 }
+  : paren_expr                { $1 }
   | getter_expr               { $1 }
   | string_expr               { $1 }
   | bool_expr                 { $1 }
   | num_expr                  { $1 }
   | list_expr                 { $1 }
-  | suspend_expr              { $1 }
   | record_expr               { $1 }
   | var_expr                  { $1 }
   | hole_expr                 { $1 }
@@ -516,9 +520,6 @@ null_expr :: { Loc CstExpr }
 intrinsic_expr :: { Loc CstExpr }
   : INTRINSIC                 { at $1 (CIntrinsicE (getIntrinsicName $1)) }
 
-force_expr :: { Loc CstExpr }
-  : '!' atom_expr             { at $1 (CForceE $2) }
-
 paren_expr :: { Loc CstExpr }
   : '(' ')'                   { at $1 CUniE }
   | '(' operator_name ')'     { at $1 (CVarE (EV (getOp $2))) }
@@ -530,9 +531,6 @@ paren_expr :: { Loc CstExpr }
 expr_list1 :: { [Loc CstExpr] }
   : expr                       { [$1] }
   | expr_list1 ',' expr        { $1 ++ [$3] }
-
-suspend_expr :: { Loc CstExpr }
-  : '{' expr '}'              { Loc ($1 <-> $3) (CSuspendE $2) }
 
 record_expr :: { Loc CstExpr }
   : '{' record_entries '}'    { Loc ($1 <-> $3) (CNamE $2) }
@@ -634,7 +632,7 @@ atom_type :: { TypeU }
   | '(' type ')'             { $2 }
   | '(' type ',' type_list1 ')' { BT.tupleU ($2 : $4) }
   | '[' type ']'              { BT.listU $2 }
-  | '{' type '}'              { ThunkU $2 }
+  | '<' effect_labels '>' atom_type  { EffectU (EffectSet (Set.fromList $2)) $4 }
   | '?' atom_type             { OptionalU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
   | LOWER ':' non_fun_type   { $3 }
@@ -648,6 +646,10 @@ type_list1 :: { [TypeU] }
 types1 :: { [TypeU] }
   : atom_type                  { [$1] }
   | types1 atom_type           { $1 ++ [$2] }
+
+effect_labels :: { [EffectLabel] }
+  : UPPER                       { [getName $1] }
+  | effect_labels ',' UPPER     { $1 ++ [getName $3] }
 
 --------------------------------------------------------------------
 -- Constraints and signature types
@@ -676,7 +678,7 @@ pos_atom_type :: { (Pos, TypeU) }
   | '(' type ')'                { (locPos $1, $2) }
   | '(' type ',' type_list1 ')' { (locPos $1, BT.tupleU ($2 : $4)) }
   | '[' type ']'                { (locPos $1, BT.listU $2) }
-  | '{' type '}'                { (locPos $1, ThunkU $2) }
+  | '<' effect_labels '>' pos_atom_type  { (locPos $1, EffectU (EffectSet (Set.fromList $2)) (snd $4)) }
   | '?' pos_atom_type            { (locPos $1, OptionalU (snd $2)) }
   | UPPER                       { (locPos $1, VarU (TV (getName $1))) }
   | LOWER ':' non_fun_type      { (locPos $1, $3) }

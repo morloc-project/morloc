@@ -6,17 +6,17 @@ source Py from "foo.py" ("pySideEffect")
 type Cpp => Int = "int"
 type Py => Int = "int"
 
-sideEffect :: Int -> {Int}
-pySideEffect :: Int -> {Int}
+sideEffect :: Int -> <IO> Int
+pySideEffect :: Int -> <IO> Int
 
--- Export a nullary thunk: should auto-force
-rollOnce :: {Int}
+-- Export a nullary effect: should auto-force
+rollOnce :: <IO> Int
 rollOnce = sideEffect 5
 
--- Export a function returning a thunk: should auto-force
-rollArg :: Int -> {Int}
+-- Export a function returning an effect: should auto-force
+rollArg :: Int -> <IO> Int
 rollArg x = sideEffect x
 
--- Export a nullary Python thunk: should auto-force
-rollPy :: {Int}
+-- Export a nullary Python effect: should auto-force
+rollPy :: <IO> Int
 rollPy = pySideEffect 7

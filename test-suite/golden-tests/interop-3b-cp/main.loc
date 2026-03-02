@@ -1,8 +1,8 @@
 module main (foo)
 
-import foo
-import fooc
-import foopy
+import .foo
+import .fooc
+import .foopy
 
 foo :: [Int] -> [Int]
 foo xs = cmap (padd 1) xs

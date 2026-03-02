@@ -226,7 +226,7 @@ quantifyType t = forallWrap (nub (collectGenVars t)) t
     collectGenVars (AppU f args) = collectGenVars f ++ concatMap collectGenVars args
     collectGenVars (FunU args ret) = concatMap collectGenVars args ++ collectGenVars ret
     collectGenVars (NamU _ _ ts entries) = concatMap collectGenVars ts ++ concatMap (collectGenVars . snd) entries
-    collectGenVars (ThunkU inner) = collectGenVars inner
+    collectGenVars (EffectU _ inner) = collectGenVars inner
     collectGenVars (OptionalU inner) = collectGenVars inner
     collectGenVars _ = []
 
@@ -420,9 +420,7 @@ mergeSelectors sels =
 
 desugarDo :: Span -> [CstDoStmt] -> D ExprI
 desugarDo sp [] = dfail (startPos sp) "empty do block"
-desugarDo sp [CstDoBare e] = do
-  e' <- desugarExpr e
-  freshExprSpan sp (ForceE e')
+desugarDo _sp [CstDoBare e] = desugarExpr e
 desugarDo sp [CstDoBind _ _] = dfail (startPos sp) "do block cannot end with a bind (<-)"
 desugarDo sp [CstDoLet _ _] = dfail (startPos sp) "do block cannot end with a let binding"
 desugarDo sp (CstDoLet v e : rest) = do
@@ -431,14 +429,14 @@ desugarDo sp (CstDoLet v e : rest) = do
   freshExprSpan sp (LetE [(v, e')] restE)
 desugarDo sp (CstDoBind v e : rest) = do
   e' <- desugarExpr e
-  forceE <- freshExprSpan sp (ForceE e')
+  forceE <- freshExprSpan sp (EvalE e')
   restE <- desugarDo sp rest
   freshExprSpan sp (LetE [(v, forceE)] restE)
 desugarDo sp (CstDoBare e : rest) = do
   idx <- freshIdSpan sp
   let discardVar = EV ("_do_" <> T.pack (show idx))
   e' <- desugarExpr e
-  forceE <- freshExprSpan sp (ForceE e')
+  forceE <- freshExprSpan sp (EvalE e')
   restE <- desugarDo sp rest
   freshExprSpan sp (LetE [(discardVar, forceE)] restE)
 
@@ -509,23 +507,20 @@ desugarExpr (Loc sp (CTupE es)) = do
 desugarExpr (Loc sp (CNamE entries)) = do
   entries' <- mapM (\(k, e) -> do e' <- desugarExpr e; return (k, e')) entries
   freshExprSpan sp (NamE entries')
-desugarExpr (Loc sp (CSuspendE e)) = do
-  e' <- desugarExpr e
-  freshExprSpan sp (SuspendE e')
-desugarExpr (Loc sp (CForceE e)) = do
-  e' <- desugarExpr e
-  freshExprSpan sp (ForceE e')
 desugarExpr (Loc sp (CAnnE e t)) = do
   e' <- desugarExpr e
   freshExprSpan sp (AnnE e' (quantifyType t))
 desugarExpr (Loc sp (CDoE stmts)) = do
   body <- desugarDo sp stmts
-  freshExprSpan sp (SuspendE body)
+  freshExprSpan sp (DoBlockE body)
 desugarExpr (Loc sp (CAccessorE body)) = buildAccessor sp body
 desugarExpr (Loc sp (CInterpE startText exprs mids endText)) = do
   exprs' <- mapM desugarExpr exprs
   mkInterpString sp startText exprs' mids endText
 desugarExpr (Loc sp (CGuardExprE guards defaultExpr)) = desugarGuards sp guards defaultExpr
+desugarExpr (Loc sp (CForceE e)) = do
+  e' <- desugarExpr e
+  freshExprSpan sp (EvalE e')
 
 -- Top-level declarations should not appear inside expressions
 desugarExpr (Loc _ CModE{}) = error "desugarExpr: unexpected CModE in expression position"

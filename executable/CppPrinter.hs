@@ -71,8 +71,8 @@ printExpr (ILambda args body) =
     <> printExpr body
     <> ";}"
 printExpr (IRawExpr d) = pretty d
-printExpr (ISuspend e) = "[&](){return " <> printExpr e <> ";}"
-printExpr (IForce e) = printExpr e <> "()"
+printExpr (IDoBlock e) = "[&](){return " <> printExpr e <> ";}"
+printExpr (IEval e) = printExpr e <> "()"
 printExpr (IIntrinsicHash schema e) =
   [idoc|_mlc_hash(#{printExpr e}, "#{pretty schema}")|]
 printExpr (IIntrinsicSave fmt schema e path)

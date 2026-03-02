@@ -1,4 +1,4 @@
--- Test thunks, do-notation, cross-language composition, and let-sharing
+-- Test effects, do-notation, cross-language composition, and let-sharing
 -- with OS-introspection-style functions returning deterministic fake values.
 -- Each effectful call prints a trace message to stdout for evaluation verification.
 
@@ -21,49 +21,56 @@ type Py => Str = "str"
 type R => Int = "integer"
 type R => Str = "character"
 
-clockResNs :: {Int}
-cpuCount :: {Int}
+clockResNs :: <IO> Int
+cpuCount :: <IO> Int
 hashStr :: Str -> Int
 
-procId :: {Int}
-envHome :: {Str}
+procId :: <IO> Int
+envHome :: <IO> Str
 calMonth :: Int -> Int -> Str
 
-uptimeSec :: {Int}
+uptimeSec :: <IO> Int
 fmtReport :: Str -> Int -> Int -> Str
 
--- Cross-language do-block: C++, Python, R thunks; pure functions on results
-sysReport :: Str
-sysReport = !do
+-- Cross-language do-block: C++, Python, R effects; pure functions on results
+sysReport :: <IO> Str
+sysReport = do
     clk <- clockResNs
     pid <- procId
     up <- uptimeSec
-    {fmtReport (calMonth up clk) (hashStr "/home/user") pid}
+    fmtReport (calMonth up clk) (hashStr "/home/user") pid
 
--- Inline force as argument to pure function
-envCal :: Str
-envCal = calMonth 2025 !procId
+-- Do-block with effect evaluation as argument to pure function
+envCal :: <IO> Str
+envCal = do
+    pid <- procId
+    calMonth 2025 pid
 
 -- Effectful results feeding into pure functions across languages
-cpuLoad :: Int
-cpuLoad = !do
+cpuLoad :: <IO> Int
+cpuLoad = do
     c <- cpuCount
     u <- uptimeSec
-    {hashStr (calMonth c u)}
+    hashStr (calMonth c u)
 
--- Two independent forces of same thunk (no sharing, 2x trace)
-multiQuery :: Int
-multiQuery = hashStr (calMonth !cpuCount !cpuCount)
+-- Two independent evaluations of same effect (no sharing, 2x trace)
+multiQuery :: <IO> Int
+multiQuery = do
+    c1 <- cpuCount
+    c2 <- cpuCount
+    hashStr (calMonth c1 c2)
 
--- Let-bound force (shared, 1x trace), same final value as multiQuery
-sharedQuery :: Int
-sharedQuery = let c = !cpuCount in hashStr (calMonth c c)
+-- Shared binding: evaluates once, result shared
+sharedQuery :: <IO> Int
+sharedQuery = do
+    c <- cpuCount
+    hashStr (calMonth c c)
 
 -- Long cross-language chain: 4-step do-block, 3 languages
-pipeline :: Str
-pipeline = !do
+pipeline :: <IO> Str
+pipeline = do
     home <- envHome
     clk <- clockResNs
     up <- uptimeSec
     pid <- procId
-    {fmtReport home (hashStr (calMonth clk up)) pid}
+    fmtReport home (hashStr (calMonth clk up)) pid

@@ -294,8 +294,8 @@ invertSerialManifold sm0 =
           deps = concatMap getDeps nativeArgs
       case (t, exe) of
         -- Source functions return the unwrapped type; the compiler wraps in suspend
-        (ThunkF innerT, SrcCallP _) ->
-          return $ D (SuspendN t (weave (D (AppExeN innerT exe qs nativeArgs') deps))) []
+        (EffectF _ innerT, SrcCallP _) ->
+          return $ D (DoBlockN t (weave (D (AppExeN innerT exe qs nativeArgs') deps))) []
         (OptionalF _, SrcCallP _) ->
           atomize (AppExeN t exe qs nativeArgs') deps
         _ -> atomize (AppExeN t exe qs nativeArgs') deps
@@ -318,9 +318,9 @@ invertSerialManifold sm0 =
     invertNativeExprM (StrN_ v x) = atomize (StrN v x) []
     invertNativeExprM (NullN_ v) = atomize (NullN v) []
     -- keep dependencies inside suspend so thunk body stays lazy
-    invertNativeExprM (SuspendN_ t (D ne lets)) = return $ D (SuspendN t (weave (D ne lets))) []
-    invertNativeExprM (ForceN_ t (D ne lets)) = atomize (ForceN t ne) lets
-    -- coercion is transparent: pass through like ForceN
+    invertNativeExprM (DoBlockN_ t (D ne lets)) = return $ D (DoBlockN t (weave (D ne lets))) []
+    invertNativeExprM (EvalN_ t (D ne lets)) = atomize (EvalN t ne) lets
+    -- coercion is transparent: pass through like EvalN
     invertNativeExprM (CoerceN_ c t (D ne lets)) = atomize (CoerceN c t ne) lets
     -- keep dependencies inside if branches (like suspend)
     invertNativeExprM (IfN_ t (D condNe condLets) (D thenNe thenLets) (D elseNe elseLets)) =
@@ -419,7 +419,7 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     seekRecs m (AppF t ts) = concatMap (seekRecs m) (t : ts)
     seekRecs _ (UnkF _) = []
     seekRecs _ (VarF _) = []
-    seekRecs m (ThunkF t) = seekRecs m t
+    seekRecs m (EffectF _ t) = seekRecs m t
     seekRecs m (OptionalF t) = seekRecs m t
 
 unifyRecords ::

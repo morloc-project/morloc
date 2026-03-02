@@ -250,8 +250,8 @@ addLocalState m0 e0 s0 = do
       findFreeDefs body s'
     findFreeDefs (ExprI _ (ModE _ es)) s = foldrM findFreeDefs s es
     findFreeDefs (ExprI _ (IfE c t e)) s = findFreeDefs c s >>= findFreeDefs t >>= findFreeDefs e
-    findFreeDefs (ExprI _ (SuspendE e)) s = findFreeDefs e s
-    findFreeDefs (ExprI _ (ForceE e)) s = findFreeDefs e s
+    findFreeDefs (ExprI _ (DoBlockE e)) s = findFreeDefs e s
+    findFreeDefs (ExprI _ (EvalE e)) s = findFreeDefs e s
     findFreeDefs (ExprI _ (IntrinsicE _ es)) s = foldrM findFreeDefs s es
     findFreeDefs _ s = return s
 
@@ -415,8 +415,8 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
     linkLocal bnds c cs (ExprI _ (AppE e es)) = mapM_ (linkLocal bnds c cs) (e : es)
     linkLocal bnds c cs (ExprI _ (AnnE e _)) = linkLocal bnds c cs e
     linkLocal bnds c cs (ExprI _ (IfE cond thenE elseE)) = mapM_ (linkLocal bnds c cs) [cond, thenE, elseE]
-    linkLocal bnds c cs (ExprI _ (SuspendE e)) = linkLocal bnds c cs e
-    linkLocal bnds c cs (ExprI _ (ForceE e)) = linkLocal bnds c cs e
+    linkLocal bnds c cs (ExprI _ (DoBlockE e)) = linkLocal bnds c cs e
+    linkLocal bnds c cs (ExprI _ (EvalE e)) = linkLocal bnds c cs e
     linkLocal bnds c cs (ExprI _ (IntrinsicE _ es)) = mapM_ (linkLocal bnds c cs) es
     -- terminal cases
     linkLocal _ _ _ _ = return ()
@@ -563,7 +563,7 @@ substituteInstanceTypes (unzip -> (clsVars, instanceParameters)) clsType = do
         f (v : vs) (r : rs) (ForallU v' t)
           | v == v' = ForallU r . f vs rs $ substituteTVar v' (VarU r) t
           | otherwise = ForallU v' (f (v : vs) (r : rs) t)
-        f vs rs (ThunkU t) = ThunkU (f vs rs t)
+        f vs rs (EffectU effs t) = EffectU effs (f vs rs t)
         f vs rs (OptionalU t) = OptionalU (f vs rs t)
         f _ _ t = t
 

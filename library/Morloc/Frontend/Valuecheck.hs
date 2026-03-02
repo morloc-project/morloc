@@ -44,8 +44,8 @@ toE (AnnoS g _ (LetBndS v)) = BndP g v
 toE (AnnoS g _ (CallS v)) = BndP g v
 toE (AnnoS _ _ (LetS _ _ body)) = toE body
 toE (AnnoS g _ (IfS c t e)) = IfP g (toE c) (toE t) (toE e)
-toE (AnnoS g _ (SuspendS e)) = SuspendP g (toE e)
-toE (AnnoS g _ (ForceS e)) = ForceP g (toE e)
+toE (AnnoS g _ (DoBlockS e)) = DoBlockP g (toE e)
+toE (AnnoS g _ (EvalS e)) = EvalP g (toE e)
 toE (AnnoS g _ (CoerceS c e)) = CoerceP c g (toE e)
 
 indexOfE :: E -> Int
@@ -60,8 +60,8 @@ indexOfE (LitP (Idx i _) _) = i
 indexOfE (SrcP (Idx i _) _) = i
 indexOfE (PatP (Idx i _) _) = i
 indexOfE (IfP (Idx i _) _ _ _) = i
-indexOfE (SuspendP (Idx i _) _) = i
-indexOfE (ForceP (Idx i _) _) = i
+indexOfE (DoBlockP (Idx i _) _) = i
+indexOfE (EvalP (Idx i _) _) = i
 indexOfE (CoerceP _ (Idx i _) _) = i
 
 -- Check the harmony of typed implementations.
@@ -87,8 +87,8 @@ check (LstP _ es) = mapM_ check es
 check (TupP _ es) = mapM_ check es
 check (NamP _ (map snd -> es)) = mapM_ check es
 check (IfP _ c t e) = mapM_ check [c, t, e]
-check (SuspendP _ e) = check e
-check (ForceP _ e) = check e
+check (DoBlockP _ e) = check e
+check (EvalP _ e) = check e
 check (CoerceP _ _ e) = check e
 check _ = return ()
 
@@ -165,8 +165,8 @@ checkPair i e1 e2@SrcP {}
     isSimple SrcP {} = False
     isSimple PatP {} = False
     isSimple (IfP _ _ _ _) = False
-    isSimple (SuspendP _ e) = isSimple e
-    isSimple (ForceP _ e) = isSimple e
+    isSimple (DoBlockP _ e) = isSimple e
+    isSimple (EvalP _ e) = isSimple e
     isSimple (CoerceP _ _ e) = isSimple e
 
 -- reduce empty lambdas
@@ -273,8 +273,8 @@ substituteEVar oldVar newVar e0
     f used idx (TupP g es) = TupP g $ map (f used idx) es
     f used idx (NamP g rs) = NamP g $ map (second (f used idx)) rs
     f used idx (IfP g c t e) = IfP g (f used idx c) (f used idx t) (f used idx e)
-    f used idx (SuspendP g e) = SuspendP g (f used idx e)
-    f used idx (ForceP g e) = ForceP g (f used idx e)
+    f used idx (DoBlockP g e) = DoBlockP g (f used idx e)
+    f used idx (EvalP g e) = EvalP g (f used idx e)
     f used idx (CoerceP c g e) = CoerceP c g (f used idx e)
     f _ _ e = e
 
@@ -315,8 +315,8 @@ freeTerms = f Set.empty
     f boundterms (TupP _ es) = Set.unions . map (f boundterms) $ es
     f boundterms (NamP _ (map snd -> es)) = Set.unions . map (f boundterms) $ es
     f boundterms (IfP _ c t e) = Set.unions [f boundterms c, f boundterms t, f boundterms e]
-    f boundterms (SuspendP _ e) = f boundterms e
-    f boundterms (ForceP _ e) = f boundterms e
+    f boundterms (DoBlockP _ e) = f boundterms e
+    f boundterms (EvalP _ e) = f boundterms e
     f boundterms (CoerceP _ _ e) = f boundterms e
     f _ _ = Set.empty
 
@@ -340,6 +340,6 @@ substituteExpr oldVar replacementExpr = f
     f e@SrcP {} = e
     f e@PatP {} = e
     f (IfP g c t e) = IfP g (f c) (f t) (f e)
-    f (SuspendP g e) = SuspendP g (f e)
-    f (ForceP g e) = ForceP g (f e)
+    f (DoBlockP g e) = DoBlockP g (f e)
+    f (EvalP g e) = EvalP g (f e)
     f (CoerceP c g e) = CoerceP c g (f e)

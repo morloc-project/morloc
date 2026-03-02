@@ -104,6 +104,7 @@ copyState oldIndex newIndex = do
       , stateLangRegistry = stateLangRegistry s
       , stateExportGroups = stateExportGroups s
       , stateManifoldLang = stateManifoldLang s
+      , stateManifoldEffects = stateManifoldEffects s
       , stateProjectRoot = stateProjectRoot s
       }
   where

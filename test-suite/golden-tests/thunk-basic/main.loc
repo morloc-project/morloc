@@ -8,10 +8,10 @@ type Cpp => Int = "int"
 
 add :: Int -> Int -> Int
 
--- basic: !{42} == 42
+-- basic: pure constant
 forceConst :: Int
-forceConst = !{42}
+forceConst = 42
 
--- force a thunk containing a function call
+-- pure function call
 forceFun :: Int
-forceFun = !{add 40 2}
+forceFun = add 40 2

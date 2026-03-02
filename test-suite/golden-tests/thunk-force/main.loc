@@ -4,10 +4,8 @@ source Cpp from "foo.hpp" ("sideEffect")
 
 type Cpp => Int = "int"
 
-sideEffect :: Int -> {Int}
+sideEffect :: Int -> <IO> Int
 
-force a :: {a} -> a
-force x = !x
-
-forceOnce :: Int
-forceOnce = force (sideEffect 5)
+-- Exported effect-typed function: auto-forced at export boundary
+forceOnce :: <IO> Int
+forceOnce = sideEffect 5

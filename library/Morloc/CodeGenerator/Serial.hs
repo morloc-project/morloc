@@ -304,7 +304,7 @@ makeSerialAST m lang t0 = do
         basevar (FunU _ _) = Nothing
         basevar (AppU t _) = basevar t
         basevar (NamU _ v _ _) = Just v
-        basevar (ThunkU _) = Nothing
+        basevar (EffectU _ _) = Nothing
         basevar (OptionalU _) = Nothing
 
         finalVar =
@@ -323,7 +323,7 @@ makeSerialAST m lang t0 = do
     makeSerialAST' gscope typepackers (NamF o n ps rs) = do
       ts <- mapM (makeSerialAST' gscope typepackers . snd) rs
       return $ SerialObject o n ps (zip (map fst rs) ts)
-    makeSerialAST' gscope typepackers (ThunkF t) = makeSerialAST' gscope typepackers t
+    makeSerialAST' gscope typepackers (EffectF _ t) = makeSerialAST' gscope typepackers t
     makeSerialAST' gscope typepackers (OptionalF t) = do
       inner <- makeSerialAST' gscope typepackers t
       let v = case t of
@@ -455,9 +455,9 @@ unweaveTypeF (NamF n (FV gv cv) ps rs) =
       keys = map fst rs
       (vsg, vsc) = unzip $ map (unweaveTypeF . snd) rs
    in (NamU n gv psg (zip keys vsg), NamU n (cv2tv cv) psc (zip keys vsc))
-unweaveTypeF (ThunkF t) =
+unweaveTypeF (EffectF effs t) =
   let (gt, ct) = unweaveTypeF t
-   in (ThunkU gt, ThunkU ct)
+   in (EffectU (EffectSet effs) gt, EffectU (EffectSet effs) ct)
 unweaveTypeF (OptionalF t) =
   let (gt, ct) = unweaveTypeF t
    in (OptionalU gt, OptionalU ct)
@@ -475,7 +475,7 @@ weaveTypeF (NamU n gv psg rsg) (NamU _ cv psc rsc) =
         (map fst rsg)
         (zipWith weaveTypeF (map snd rsg) (map snd rsc))
     )
-weaveTypeF (ThunkU gt) (ThunkU ct) = ThunkF (weaveTypeF gt ct)
+weaveTypeF (EffectU effs gt) (EffectU _ ct) = EffectF (resolveEffectSet effs) (weaveTypeF gt ct)
 weaveTypeF (OptionalU gt) (OptionalU ct) = OptionalF (weaveTypeF gt ct)
 weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
 weaveTypeF gt ct = error . show $ (gt, ct)

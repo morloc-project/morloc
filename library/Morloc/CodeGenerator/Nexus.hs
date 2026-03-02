@@ -106,8 +106,8 @@ findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e
     findAllLangsExpr (NamS rs) = concatMap (findAllLangsSAnno . snd) rs
     findAllLangsExpr (LetS _ e1 e2) = findAllLangsSAnno e1 ++ findAllLangsSAnno e2
     findAllLangsExpr (IfS c t e) = concatMap findAllLangsSAnno [c, t, e]
-    findAllLangsExpr (SuspendS x) = findAllLangsSAnno x
-    findAllLangsExpr (ForceS x) = findAllLangsSAnno x
+    findAllLangsExpr (DoBlockS x) = findAllLangsSAnno x
+    findAllLangsExpr (EvalS x) = findAllLangsSAnno x
     findAllLangsExpr (CoerceS _ x) = findAllLangsSAnno x
     findAllLangsExpr _ = []
 
@@ -198,7 +198,7 @@ generalTypeToSerialAST (AppT (VarT v) ts)
   | otherwise = do
       insts <- MM.gets stateTypeclasses
       error $ show insts
-generalTypeToSerialAST (ThunkT t) = generalTypeToSerialAST t
+generalTypeToSerialAST (EffectT _ t) = generalTypeToSerialAST t
 generalTypeToSerialAST (OptionalT t) = do
   inner <- generalTypeToSerialAST t
   return $ SerialOptional (FV (TV "Optional") (CV "")) inner
@@ -270,8 +270,8 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (LetBndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr (AnnoS _ _ (LetS _ _ body)) = toNexusExpr body
     toNexusExpr (AnnoS _ _ (IfS _ t _)) = toNexusExpr t
-    toNexusExpr (AnnoS _ _ (SuspendS e)) = toNexusExpr e
-    toNexusExpr (AnnoS _ _ (ForceS e)) = toNexusExpr e
+    toNexusExpr (AnnoS _ _ (DoBlockS e)) = toNexusExpr e
+    toNexusExpr (AnnoS _ _ (EvalS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (CoerceS _ e)) = toNexusExpr e
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr _)) = do
       v <- resolveCompileTimeIntrinsic intr
@@ -576,7 +576,7 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
     returnTypeStr t = render (pretty (stripThunks t))
 
     stripThunks :: Type -> Type
-    stripThunks (ThunkT t') = stripThunks t'
+    stripThunks (EffectT _ t') = stripThunks t'
     stripThunks t' = t'
 
 -- ======================================================================

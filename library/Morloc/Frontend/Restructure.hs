@@ -104,7 +104,7 @@ checkForSelfRecursion d = do
     hasTerm v (NamU o n ps ((_, t) : rs)) = hasTerm v t || hasTerm v (NamU o n ps rs)
     hasTerm v (NamU o n (p : ps) []) = hasTerm v p || hasTerm v (NamU o n ps [])
     hasTerm _ (NamU _ _ [] []) = False
-    hasTerm v (ThunkU t) = hasTerm v t
+    hasTerm v (EffectU _ t) = hasTerm v t
     hasTerm v (OptionalU t) = hasTerm v t
     hasTerm _ ExistU {} = error "There should not be existentionals in typedefs"
 
@@ -142,8 +142,8 @@ resolveHoles = DAG.mapNodeM unhole
       body' <- unhole body
       return $ ExprI i (LetE bindings' body')
     unhole (ExprI i (IfE c t e)) = IfE <$> unhole c <*> unhole t <*> unhole e |>> ExprI i
-    unhole (ExprI i (SuspendE e)) = SuspendE <$> unhole e |>> ExprI i
-    unhole (ExprI i (ForceE e)) = ForceE <$> unhole e |>> ExprI i
+    unhole (ExprI i (DoBlockE e)) = DoBlockE <$> unhole e |>> ExprI i
+    unhole (ExprI i (EvalE e)) = EvalE <$> unhole e |>> ExprI i
     unhole (ExprI i (IntrinsicE intr es)) = IntrinsicE intr <$> mapM unhole es |>> ExprI i
     unhole (ExprI _ (BopE _ _ _ _)) = error "Bop should have been resolved"
     unhole e = return e
@@ -189,8 +189,8 @@ resolveHoles = DAG.mapNodeM unhole
     descend (ExprI i (NamE rs)) = NamE <$> mapM (\(k, e) -> (,) k <$> descend e) rs |>> ExprI i
     descend (ExprI i (AnnE e t)) = AnnE <$> descend e <*> pure t |>> ExprI i
     descend (ExprI i (IfE c t e)) = IfE <$> descend c <*> descend t <*> descend e |>> ExprI i
-    descend (ExprI i (SuspendE e)) = SuspendE <$> descend e |>> ExprI i
-    descend (ExprI i (ForceE e)) = ForceE <$> descend e |>> ExprI i
+    descend (ExprI i (DoBlockE e)) = DoBlockE <$> descend e |>> ExprI i
+    descend (ExprI i (EvalE e)) = EvalE <$> descend e |>> ExprI i
     descend (ExprI i (IntrinsicE intr es)) = IntrinsicE intr <$> mapM descend es |>> ExprI i
     descend e = return e
 
@@ -438,8 +438,8 @@ handleBinops d0 = do
           body' <- f body
           return $ ExprI i (LetE bindings' body')
         f (ExprI i (IfE c t e)) = IfE <$> f c <*> f t <*> f e |>> ExprI i
-        f (ExprI i (SuspendE e)) = SuspendE <$> f e |>> ExprI i
-        f (ExprI i (ForceE e)) = ForceE <$> f e |>> ExprI i
+        f (ExprI i (DoBlockE e)) = DoBlockE <$> f e |>> ExprI i
+        f (ExprI i (EvalE e)) = EvalE <$> f e |>> ExprI i
         f (ExprI i (IntrinsicE intr es)) = IntrinsicE intr <$> mapM f es |>> ExprI i
         f e = return e
 
@@ -698,5 +698,5 @@ rename sourceName localAlias = f
     f (NamU o v ts rs) =
       let v' = if v == sourceName then localAlias else v
        in NamU o v' (map f ts) (map (second f) rs)
-    f (ThunkU t) = ThunkU (f t)
+    f (EffectU effs t) = EffectU effs (f t)
     f (OptionalU t) = OptionalU (f t)

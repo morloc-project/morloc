@@ -163,13 +163,13 @@ applyLambdas (AnnoS g c (IfS cond thenE elseE)) = do
   thenE' <- applyLambdas thenE
   elseE' <- applyLambdas elseE
   return (AnnoS g c (IfS cond' thenE' elseE'))
-applyLambdas (AnnoS g c (SuspendS e)) = AnnoS g c . SuspendS <$> applyLambdas e
+applyLambdas (AnnoS g c (DoBlockS e)) = AnnoS g c . DoBlockS <$> applyLambdas e
 -- cancel force-suspend: !{e} --> e, preserving outer annotation
-applyLambdas (AnnoS g c (ForceS (AnnoS _ _ (SuspendS e)))) = do
+applyLambdas (AnnoS g c (EvalS (AnnoS _ _ (DoBlockS e)))) = do
   e' <- applyLambdas e
   let AnnoS _ _ inner = e'
   return (AnnoS g c inner)
-applyLambdas (AnnoS g c (ForceS e)) = AnnoS g c . ForceS <$> applyLambdas e
+applyLambdas (AnnoS g c (EvalS e)) = AnnoS g c . EvalS <$> applyLambdas e
 applyLambdas (AnnoS g c (CoerceS co e)) = AnnoS g c . CoerceS co <$> applyLambdas e
 applyLambdas (AnnoS g c (IntrinsicS intr es)) = AnnoS g c . IntrinsicS intr <$> mapM applyLambdas es
 applyLambdas (AnnoS g c (CallS v)) = return (AnnoS g c (CallS v))
@@ -211,8 +211,8 @@ substituteAnnoS v r = f
       | v == v' = e0 -- shadowed by let binding
       | otherwise = AnnoS g c (LetS v' (f e1) (f e2))
     f (AnnoS g c (IfS cond thenE elseE)) = AnnoS g c (IfS (f cond) (f thenE) (f elseE))
-    f (AnnoS g c (SuspendS e)) = AnnoS g c (SuspendS (f e))
-    f (AnnoS g c (ForceS e)) = AnnoS g c (ForceS (f e))
+    f (AnnoS g c (DoBlockS e)) = AnnoS g c (DoBlockS (f e))
+    f (AnnoS g c (EvalS e)) = AnnoS g c (EvalS (f e))
     f (AnnoS g c (CoerceS co e)) = AnnoS g c (CoerceS co (f e))
     f (AnnoS g c (IntrinsicS intr es)) = AnnoS g c (IntrinsicS intr (map f es))
     -- CallS is a recursive back-edge, not a variable reference to substitute

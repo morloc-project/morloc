@@ -1,0 +1,18 @@
+-- Test effect row subtyping: <IO> value used where <IO, Error> expected
+module main (testSubtype)
+
+import root-py
+
+source Py from "foo.py" ("ioFunc")
+
+type Py => Int = "int"
+
+-- ioFunc returns <IO> Int
+ioFunc :: <IO> Int
+
+-- testSubtype expects <IO, Error> but ioFunc only has <IO>
+-- This should work because <IO> <: <IO, Error>
+testSubtype :: <IO, Error> Int
+testSubtype = do
+  x <- ioFunc
+  x

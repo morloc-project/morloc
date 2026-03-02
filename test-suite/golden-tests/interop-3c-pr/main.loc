@@ -1,7 +1,7 @@
 module main (foo)
 
-import foo
-import foopy
-import foor
+import .foo
+import .foopy
+import .foor
 
 foo x xs = pmap (radd x) xs

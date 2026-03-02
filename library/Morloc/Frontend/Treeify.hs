@@ -149,8 +149,8 @@ linkAndRemoveAnnotations = f
     f (ExprI i (LamE vs e)) = ExprI i <$> (LamE vs <$> f e)
     f (ExprI i (LetE bindings body)) = ExprI i <$> (LetE <$> mapM (\(v, e) -> (,) v <$> f e) bindings <*> f body)
     f (ExprI i (IfE c t e)) = ExprI i <$> (IfE <$> f c <*> f t <*> f e)
-    f (ExprI i (SuspendE e)) = ExprI i <$> (SuspendE <$> f e)
-    f (ExprI i (ForceE e)) = ExprI i <$> (ForceE <$> f e)
+    f (ExprI i (DoBlockE e)) = ExprI i <$> (DoBlockE <$> f e)
+    f (ExprI i (EvalE e)) = ExprI i <$> (EvalE <$> f e)
     f e@(ExprI _ _) = return e
 
 {- | Build the call tree for a single nexus command. The result is ambiguous,
@@ -273,12 +273,12 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (LogE x) = return (namer, LogS x)
     f namer (StrE x) = return (namer, StrS x)
     f namer (PatE p) = return (namer, ExeS (PatCall p))
-    f namer (SuspendE e) = do
+    f namer (DoBlockE e) = do
       (namer', e') <- collectAnnoS namer e
-      return (namer', SuspendS e')
-    f namer (ForceE e) = do
+      return (namer', DoBlockS e')
+    f namer (EvalE e) = do
       (namer', e') <- collectAnnoS namer e
-      return (namer', ForceS e')
+      return (namer', EvalS e')
     f namer (IntrinsicE intr es) = do
       (namer', es') <- go namer [] es
       return (namer', IntrinsicS intr es')
@@ -320,8 +320,8 @@ reindexExpr (NamE rs) = NamE <$> mapM (\(k, e) -> (,) k <$> reindexExprI e) rs
 reindexExpr (TupE es) = TupE <$> mapM reindexExprI es
 reindexExpr (LetE bindings body) = LetE <$> mapM (\(v, e) -> (,) v <$> reindexExprI e) bindings <*> reindexExprI body
 reindexExpr (IfE c t e) = IfE <$> reindexExprI c <*> reindexExprI t <*> reindexExprI e
-reindexExpr (SuspendE e) = SuspendE <$> reindexExprI e
-reindexExpr (ForceE e) = ForceE <$> reindexExprI e
+reindexExpr (DoBlockE e) = DoBlockE <$> reindexExprI e
+reindexExpr (EvalE e) = EvalE <$> reindexExprI e
 reindexExpr (IntrinsicE intr es) = IntrinsicE intr <$> mapM reindexExprI es
 reindexExpr e = return e
 

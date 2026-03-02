@@ -1,6 +1,6 @@
 module main (foo)
 
-import foo (List, Int)
-import foopy (pmap, padd, pneg)
+import .foo (List, Int)
+import .foopy (pmap, padd, pneg)
 
 foo x ys = pmap (\y -> padd x (pneg y)) ys

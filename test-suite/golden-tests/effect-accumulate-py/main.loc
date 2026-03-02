@@ -1,0 +1,26 @@
+-- Test effect accumulation: do-block with mixed effects
+-- readValue is <IO>, riskyDouble is <Error>
+-- combined do-block uses <IO, Error> annotation
+module main (combined, ioOnly)
+
+import root-py
+
+source Py from "foo.py" ("read_value" as readValue, "risky_double" as riskyDouble)
+
+type Py => Int = "int"
+
+readValue :: <IO> Int
+riskyDouble :: Int -> <Error> Int
+
+-- Uses both <IO> and <Error> source functions in one do-block
+combined :: <IO, Error> Int
+combined = do
+  x <- readValue
+  y <- riskyDouble x
+  y
+
+-- Uses only <IO> source function
+ioOnly :: <IO> Int
+ioOnly = do
+  x <- readValue
+  x

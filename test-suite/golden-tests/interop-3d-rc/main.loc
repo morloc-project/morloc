@@ -1,7 +1,7 @@
 module main (foo)
 
-import foo
-import foor (rmap, rneg)
-import fooc (cadd)
+import .foo
+import .foor (rmap, rneg)
+import .fooc (cadd)
 
 foo x ys = rmap (\y -> cadd x (rneg y)) ys

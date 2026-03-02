@@ -1,0 +1,12 @@
+-- Test implicit coercion from pure values to effect types
+module main (testPureLit, testPureExpr)
+
+import root-py
+
+-- Pure literal coerced to effect return type
+testPureLit :: <IO> Int
+testPureLit = 42
+
+-- Pure expression coerced to effect return type
+testPureExpr :: <IO> Int
+testPureExpr = 10 + 20

@@ -84,8 +84,8 @@ reduceNativeExpr ver ts lang (TupleN fv es) =
   TupleN fv <$> mapM (reduceNativeExpr ver ts lang) es
 reduceNativeExpr ver ts lang (RecordN o fv tps rs) =
   RecordN o fv tps <$> mapM (\(k, ne) -> (,) k <$> reduceNativeExpr ver ts lang ne) rs
-reduceNativeExpr ver ts lang (SuspendN t ne) = SuspendN t <$> reduceNativeExpr ver ts lang ne
-reduceNativeExpr ver ts lang (ForceN t ne) = ForceN t <$> reduceNativeExpr ver ts lang ne
+reduceNativeExpr ver ts lang (DoBlockN t ne) = DoBlockN t <$> reduceNativeExpr ver ts lang ne
+reduceNativeExpr ver ts lang (EvalN t ne) = EvalN t <$> reduceNativeExpr ver ts lang ne
 reduceNativeExpr ver ts lang (CoerceN c t ne) = CoerceN c t <$> reduceNativeExpr ver ts lang ne
 reduceNativeExpr ver ts lang (IfN t c th el) =
   IfN t <$> reduceNativeExpr ver ts lang c <*> reduceNativeExpr ver ts lang th <*> reduceNativeExpr ver ts lang el

@@ -15,6 +15,7 @@ module Morloc.ProgramBuilder.Build
   ( buildProgram
   ) where
 
+import Morloc.Data.Doc ((<+>), vsep, pretty)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import Morloc.Namespace.Prim
@@ -28,7 +29,11 @@ buildProgram (nexus, pools) = mapM_ build (nexus : pools)
 build :: Script -> MorlocMonad ()
 build s = do
   -- write the required file structure
-  _ <- liftIO $ MS.writeDirectoryWith (\f c -> MT.writeFile f (unCode c)) (scriptCode s)
+  (_ :/ tree) <- liftIO $ MS.writeDirectoryWith (\f c -> MT.writeFile f (unCode c)) (scriptCode s)
+  case failures tree of
+    [] -> return ()
+    errs -> MM.throwSystemError $ "Failed to write generated files:" <+> vsep
+      [pretty (show e) | Failed _ e <- errs]
   -- execute all make commands
   mapM_ runSysCommand (scriptMake s)
 

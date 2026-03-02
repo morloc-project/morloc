@@ -1,8 +1,8 @@
 module main (foo)
 
-import foo (Int, List)
-import fooc (cmap)
-import foopy (padd, pneg)
+import .foo (Int, List)
+import .fooc (cmap)
+import .foopy (padd, pneg)
 
 foo :: Int -> [Int] -> [Int]
 foo x ys = cmap (\y -> padd x (pneg y)) ys

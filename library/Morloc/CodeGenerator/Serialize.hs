@@ -120,8 +120,8 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       ne <- nativeExpr m (MonoIf cond thenE elseE)
       serializeS "serialE MonoIf" m ne
     -- Thunk-producing intrinsics: convert to native and serialize with the
-    -- inner type (strip ThunkF) so the wire format matches the forced value.
-    serialExpr m (MonoSuspend _ e) = serialExpr m e
+    -- inner type (strip EffectF) so the wire format matches the forced value.
+    serialExpr m (MonoDoBlock _ e) = serialExpr m e
     serialExpr _ (MonoExe _ _) = error "Can represent MonoSrc as SerialExpr"
     serialExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to a SerialExpr"
     serialExpr _ (MonoApp MonoManifold {} _) = error "Illegal?"
@@ -286,21 +286,21 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
             (_, NullN _) -> typeFof thenNe
             _ -> typeFof thenNe
       return $ IfN ifType condNe thenNe elseNe
-    nativeExpr m (MonoSuspend t e) = SuspendN <$> inferType t <*> nativeExpr m e
-    nativeExpr m (MonoForce t e) = ForceN <$> inferType t <*> nativeExpr m e
+    nativeExpr m (MonoDoBlock t e) = DoBlockN <$> inferType t <*> nativeExpr m e
+    nativeExpr m (MonoEval t e) = EvalN <$> inferType t <*> nativeExpr m e
     nativeExpr m (MonoCoerce c t e) = CoerceN c <$> inferType t <*> nativeExpr m e
     -- Runtime intrinsics with thunk return types (save/load): the C functions
-    -- (mlc_save, mlc_load) are eager, so we wrap them in SuspendN to produce a
-    -- proper thunk that ForceN can call.
+    -- (mlc_save, mlc_load) are eager, so we wrap them in DoBlockN to produce a
+    -- proper thunk that EvalN can call.
     nativeExpr m (MonoIntrinsic t intr es)
       | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad] = do
           tf <- inferType t
           es' <- mapM (nativeExpr m) es
           msch <- intrinsicSchema m intr tf es'
           let innerTf = case tf of
-                ThunkF inner -> inner
+                EffectF _ inner -> inner
                 other -> other
-          return $ SuspendN tf (IntrinsicN innerTf intr msch es')
+          return $ DoBlockN tf (IntrinsicN innerTf intr msch es')
     nativeExpr m (MonoIntrinsic t intr es) = do
       tf <- inferType t
       es' <- mapM (nativeExpr m) es
@@ -315,7 +315,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
           return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrLoad tf _ = do
       -- For @load, the return type is {?a} or ?a; the schema is for a
-      let unwrap (ThunkF inner) = unwrap inner
+      let unwrap (EffectF _ inner) = unwrap inner
           unwrap (OptionalF inner) = inner
           unwrap other = other
           dataType = unwrap tf
@@ -353,8 +353,8 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Map.union (Map.fromList [(i, Left t) | (Arg i (Just t)) <- ys]) (makeTypemap midx e)
     makeTypemap parentIdx (MonoLet _ e1 e2) = Map.union (makeTypemap parentIdx e1) (makeTypemap parentIdx e2)
     makeTypemap parentIdx (MonoReturn e) = makeTypemap parentIdx e
-    makeTypemap parentIdx (MonoForce _ e) = makeTypemap parentIdx e
-    makeTypemap parentIdx (MonoSuspend _ e) = makeTypemap parentIdx e
+    makeTypemap parentIdx (MonoEval _ e) = makeTypemap parentIdx e
+    makeTypemap parentIdx (MonoDoBlock _ e) = makeTypemap parentIdx e
     makeTypemap parentIdx (MonoCoerce _ _ e) = makeTypemap parentIdx e
     makeTypemap parentIdx (MonoIntrinsic _ _ es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) es)
     makeTypemap parentIdx (MonoIf cond thenE elseE) =

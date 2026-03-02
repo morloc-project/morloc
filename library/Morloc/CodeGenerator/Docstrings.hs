@@ -273,7 +273,7 @@ makeOptMeta (FunT _ _) = "FUN" -- illegal, but who's watching?
 makeOptMeta (AppT (VarT v) _) = unTVar v
 makeOptMeta (AppT _ _) = "VAL" -- weird stuff, choose your own metadata
 makeOptMeta (NamT _ v _ _) = unTVar v
-makeOptMeta (ThunkT t) = "{" <> makeOptMeta t <> "}"
+makeOptMeta (EffectT _ t) = "<E>" <> makeOptMeta t
 makeOptMeta (OptionalT t) = "?" <> makeOptMeta t
 
 resolvePos :: Type -> ArgDocVars -> MorlocMonad ArgPosDocSet

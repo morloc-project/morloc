@@ -4,4 +4,4 @@ all:
 	./nexus foo [1,2,3] > obs.txt 2> obs.err
 
 clean:
-	rm -rf nexus pools *pdf
+	rm -rf nexus pools *pdf __pycache__

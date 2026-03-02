@@ -1,0 +1,26 @@
+-- Test C++ codegen with Error effect label.
+-- riskyCall uses <Error> source functions -> enriched try/catch
+-- safeCall uses <IO> source functions -> transparent catch
+-- Both should compile and run correctly.
+module main (riskyCall, safeCall)
+
+import root-cpp
+
+source Cpp from "foo.hpp" ("riskyAdd", "safeAdd")
+
+type Cpp => Int = "int"
+
+riskyAdd :: Int -> Int -> <Error> Int
+safeAdd :: Int -> Int -> <IO> Int
+
+riskyCall :: <Error> Int
+riskyCall = do
+  x <- riskyAdd 10 20
+  y <- riskyAdd x 12
+  y
+
+safeCall :: <IO> Int
+safeCall = do
+  x <- safeAdd 3 4
+  y <- safeAdd x 1
+  y
