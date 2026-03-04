@@ -1,0 +1,7 @@
+module main (test)
+
+import root-py
+import .helpers as h
+
+test :: [Int]
+test = map h.double [1, 2, 3]

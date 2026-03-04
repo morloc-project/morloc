@@ -47,6 +47,7 @@ import qualified Morloc.BaseTypes as BT
 -- Note: force_expr (!) re-added for inline effect forcing in do-blocks
 -- - 2 from force_expr ('!' could start force or be part of another expr)
 -- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
+-- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
 %expect 59
 
 %token
@@ -68,6 +69,7 @@ import qualified Morloc.BaseTypes as BT
   '?'        { Located _ TokQuestion _ }
   '.'        { Located _ TokDot _ }
   GDOT       { Located _ TokGetterDot _ }
+  NSDOT      { Located _ TokNsDot _ }
   '='        { Located _ TokEquals _ }
   '::'       { Located _ TokDColon _ }
   '->'       { Located _ TokArrow _ }
@@ -182,6 +184,7 @@ module_parts :: { [Text] }
   : module_comp                        { [$1] }
   | module_parts '.' module_comp       { $1 ++ [$3] }
   | module_parts GDOT module_comp      { $1 ++ [$3] }
+  | module_parts NSDOT module_comp     { $1 ++ [$3] }
 
 module_comp :: { Text }
   : LOWER                              { getName $1 }
@@ -216,8 +219,12 @@ symbol :: { Located }
 import_decl :: { Loc CstExpr }
   : 'import' import_module_name opt_import_list
       { at $1 (CImpE (Import (MV $2) $3 [] Nothing)) }
+  | 'import' import_module_name 'as' LOWER opt_import_list
+      { at $1 (CImpE (Import (MV $2) $5 [] (Just (EV (getName $4))))) }
   | 'import' GDOT module_name opt_import_list
       { at $1 (CImpE (Import (MV ("." <> $3)) $4 [] Nothing)) }
+  | 'import' GDOT module_name 'as' LOWER opt_import_list
+      { at $1 (CImpE (Import (MV ("." <> $3)) $6 [] (Just (EV (getName $5))))) }
 
 -- | Module names in import context allow an optional namespace prefix: owner/name
 import_module_name :: { Text }
@@ -588,7 +595,8 @@ grouped_accessor :: { CstAccessorBody }
   : GDOT accessor_body   { $2 }
 
 var_expr :: { Loc CstExpr }
-  : LOWER                     { at $1 (CVarE (EV (getName $1))) }
+  : LOWER NSDOT LOWER         { Loc ($1 <-> $3) (CVarE (EV (getName $1 <> "." <> getName $3))) }
+  | LOWER                     { at $1 (CVarE (EV (getName $1))) }
 
 hole_expr :: { Loc CstExpr }
   : '_'                        { at $1 CHolE }

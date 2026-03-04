@@ -88,6 +88,8 @@ data Token
     TokDot
   | -- | . (getter prefix, e.g., .name)
     TokGetterDot
+  | -- | . (namespace qualifier, no space before dot, e.g., f.map)
+    TokNsDot
   | -- Reserved operators
 
     -- | =
@@ -186,6 +188,7 @@ showToken TokBang = "'!'"
 showToken TokQuestion = "'?'"
 showToken TokDot = "'.'"
 showToken TokGetterDot = "'.'"
+showToken TokNsDot = "'.' (namespace)"
 showToken TokEquals = "'='"
 showToken TokColon = "':'"
 showToken TokDColon = "'::'"

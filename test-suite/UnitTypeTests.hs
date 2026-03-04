@@ -23,6 +23,7 @@ module UnitTypeTests
   , effectSubtypeTests
   , effectSynthesisTests
   , effectErrorTests
+  , namespaceErrorTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -2579,5 +2580,76 @@ effectErrorTests =
         f :: Int -> <IO> Int
         g :: Int -> Int
         x = g (f 1)
+          |]
+      ]
+
+namespaceErrorTests :: TestTree
+namespaceErrorTests =
+  localOption (mkTimeout 2000000) $ -- 2 second timeout
+    testGroup
+      "Tests for namespace import error cases"
+      [ -- chained namespace dots should be a parse error
+        exprTestBad
+          "chained namespace dots a.b.c"
+          [r|
+        module main (x)
+        x :: Int
+        x = a.b.c
+          |]
+      , -- keyword used as namespace should fail
+        exprTestBad
+          "keyword as namespace name (let)"
+          [r|
+        module foo (y)
+        y :: Int
+        y = 1
+        module main (x)
+        import foo as let
+        x :: Int
+        x = let.y
+          |]
+      , -- keyword used as namespace should fail
+        exprTestBad
+          "keyword as namespace name (do)"
+          [r|
+        module foo (y)
+        y :: Int
+        y = 1
+        module main (x)
+        import foo as do
+        x :: Int
+        x = do.y
+          |]
+      , -- undefined namespace prefix should fail
+        exprTestBad
+          "undefined namespace prefix"
+          [r|
+        module main (x)
+        x :: Int
+        x = noexist.foo 5
+          |]
+      , -- namespace-qualified name used with wrong arg type
+        exprTestBad
+          "namespace qualified name type mismatch"
+          [r|
+        module helpers (double)
+        double :: Int -> Int
+        double x = x
+        module main (x)
+        import helpers as h
+        x :: Int
+        x = h.double "hello"
+          |]
+      , -- bare name should fail when imported with namespace
+        exprTestBad
+          "bare name fails with namespace import"
+          [r|
+        module helpers (double)
+        double :: Int -> Int
+        double x = x
+        module main (x)
+        import helpers as h
+        x :: Int
+        x = double 5
           |]
       ]

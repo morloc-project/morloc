@@ -1,0 +1,6 @@
+module (*)
+
+import root
+
+makePair :: Int -> Int -> (Int, Int)
+makePair a b = (a, b)

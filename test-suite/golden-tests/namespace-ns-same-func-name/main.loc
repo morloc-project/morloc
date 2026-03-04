@@ -1,0 +1,13 @@
+module main (test)
+
+import root-py
+import .helpers as map
+
+inc :: Int -> Int
+inc x = x + 1
+
+test :: [Bool]
+test =
+  [ map.double 5 == 10
+  , map inc [1, 2, 3] == [2, 3, 4]
+  ]

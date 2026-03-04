@@ -1,0 +1,7 @@
+module (*)
+
+import root
+import .helpers as h
+
+quadruple :: Int -> Int
+quadruple x = h.double (h.double x)

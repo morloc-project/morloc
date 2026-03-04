@@ -1,0 +1,16 @@
+module main (test)
+
+import root-py
+import .helpers as h
+
+absVal :: Int -> Int
+absVal x
+  ? h.isPositive x = x
+  : h.negate x
+
+test :: [Bool]
+test =
+  [ absVal 5 == 5
+  , absVal (-3) == 3
+  , absVal 0 == 0
+  ]

@@ -1,0 +1,7 @@
+module main (myDouble)
+
+import root-py
+import .helpers as h
+
+myDouble :: Int -> Int
+myDouble x = h.double x

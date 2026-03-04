@@ -1,0 +1,9 @@
+module (*)
+
+import root
+
+isPositive :: Int -> Bool
+isPositive x = x > 0
+
+negate :: Int -> Int
+negate x = 0 - x

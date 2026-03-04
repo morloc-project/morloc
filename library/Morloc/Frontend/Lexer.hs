@@ -244,18 +244,37 @@ lexOne st@(LexState input pos toks) = case input of
           }
 
 -- | Lex an identifier or keyword. The first character may be a letter or underscore.
+-- When a lowercase identifier is immediately followed by '.' and a lowercase letter
+-- (no space), emit TokNsDot between them to support qualified names (e.g., f.map).
+-- Exception: if the preceding token is TokGetterDot, we're in a getter chain
+-- (e.g., .home.altitude) and the dot should NOT be treated as a namespace dot.
 lexIdent :: Pos -> String -> LexState -> Either LexError LexState
 lexIdent pos input st =
   let (word, rest) = spanIdent input
       txt = T.pack word
       tok = classifyWord txt
       len = length word
-   in Right
-        st
-          { lsInput = rest
-          , lsPos = advanceCol pos len
-          , lsTokens = Located pos tok txt : lsTokens st
-          }
+   in case (tok, rest) of
+        (TokLowerName _, '.' : c : rest')
+          | isLower c, not (afterGetterDot (lsTokens st)) ->
+              let dotPos = advanceCol pos len
+               in Right st
+                    { lsInput = c : rest'
+                    , lsPos = advanceCol dotPos 1
+                    , lsTokens = Located dotPos TokNsDot "."
+                                   : Located pos tok txt
+                                   : lsTokens st
+                    }
+        _ -> Right
+              st
+                { lsInput = rest
+                , lsPos = advanceCol pos len
+                , lsTokens = Located pos tok txt : lsTokens st
+                }
+  where
+    afterGetterDot :: [Located] -> Bool
+    afterGetterDot (Located _ TokGetterDot _ : _) = True
+    afterGetterDot _ = False
 
 spanIdent :: String -> (String, String)
 spanIdent [] = ([], [])

@@ -1,0 +1,9 @@
+module main (test)
+
+import root-py
+import .helpers as h
+
+test :: [Bool]
+test =
+  let x = h.double 5
+  in [x == 10]

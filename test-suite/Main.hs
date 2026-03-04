@@ -30,6 +30,7 @@ main = do
       , effectSubtypeTests
       , effectSynthesisTests
       , effectErrorTests
+      , namespaceErrorTests
       , -- -- These tests pass locally and when I run the same container that I
         -- -- use in github actions. Yet these tests freeze in an infinite loop
         -- -- with no STDERR output on github. I have no idea why. But for now I'm
@@ -404,4 +405,21 @@ main = do
       , -- intrinsic tests
         golden "intrinsic-hash" "intrinsic-hash"
       , golden "intrinsic-constants" "intrinsic-constants"
+      , -- namespace import tests
+        golden "namespace-basic" "namespace-basic"
+      , golden "namespace-selective" "namespace-selective"
+      , golden "namespace-separate-impls" "namespace-separate-impls"
+      , golden "namespace-disambiguation" "namespace-disambiguation"
+      , golden "namespace-ns-composition" "namespace-ns-composition"
+      , golden "namespace-ns-hof" "namespace-ns-hof"
+      , golden "namespace-ns-let" "namespace-ns-let"
+      , golden "namespace-ns-shadow" "namespace-ns-shadow"
+      , golden "namespace-ns-multi" "namespace-ns-multi"
+      , golden "namespace-ns-same-func-name" "namespace-ns-same-func-name"
+      , golden "namespace-ns-unqualified" "namespace-ns-unqualified"
+      , golden "namespace-ns-exported" "namespace-ns-exported"
+      , golden "namespace-ns-reexport" "namespace-ns-reexport"
+      , golden "namespace-ns-nested-getter" "namespace-ns-nested-getter"
+      , golden "namespace-ns-guard" "namespace-ns-guard"
+      , golden "namespace-ns-double-import" "namespace-ns-double-import"
       ]
