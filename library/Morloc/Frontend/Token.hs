@@ -88,6 +88,8 @@ data Token
     TokDot
   | -- | . (getter prefix, e.g., .name)
     TokGetterDot
+  | -- | . (chained getter, e.g., the second dot in .foo.bar)
+    TokGetterDotChain
   | -- Reserved operators
 
     -- | =
@@ -186,6 +188,7 @@ showToken TokBang = "'!'"
 showToken TokQuestion = "'?'"
 showToken TokDot = "'.'"
 showToken TokGetterDot = "'.'"
+showToken TokGetterDotChain = "'.'"
 showToken TokEquals = "'='"
 showToken TokColon = "':'"
 showToken TokDColon = "'::'"

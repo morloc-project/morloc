@@ -1,0 +1,8 @@
+module main (test)
+
+import root
+import root-py
+import root-cpp
+
+test :: [Int]
+test = concat [[1,2],[3,4]]

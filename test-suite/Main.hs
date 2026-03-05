@@ -264,6 +264,9 @@ main = do
         golden "multiple-instances-2-c" "multiple-instances-2-c"
       , golden "multiple-instances-2-py" "multiple-instances-2-py"
       , golden "multiple-instances-2-r" "multiple-instances-2-r"
+      , golden "multi-lang-mempty-py" "multi-lang-mempty-py"
+      , golden "bare-selector-args" "bare-selector-args"
+      , golden "bare-selector-chain" "bare-selector-chain"
       , -- tests of module forms
         -- where *-sid
         --   s - number of sourced instances

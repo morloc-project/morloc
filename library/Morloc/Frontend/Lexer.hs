@@ -38,8 +38,23 @@ group annotation tokens (for command group support in export lists).
 lexMorloc :: String -> Text -> Either LexError ([Located], Map.Map Pos [Text], [Located])
 lexMorloc filename input = do
   rawTokens <- lexRaw filename (T.unpack input) (startPos filename)
-  let (docMap, groupToks, filtered) = extractDocstrings rawTokens
+  let rawTokens' = distinguishGetterDots rawTokens
+  let (docMap, groupToks, filtered) = extractDocstrings rawTokens'
   return (insertLayout filtered, docMap, groupToks)
+
+-- | Distinguish chained getter dots from standalone ones based on position.
+-- A TokGetterDot that immediately follows the previous token (no whitespace)
+-- becomes TokGetterDotChain, used for accessor chaining like .foo.bar.
+-- A TokGetterDot preceded by whitespace stays as-is, parsed as a separate atom.
+distinguishGetterDots :: [Located] -> [Located]
+distinguishGetterDots [] = []
+distinguishGetterDots [x] = [x]
+distinguishGetterDots (prev : cur@(Located curPos TokGetterDot _) : rest)
+  | posLine (locPos prev) == posLine curPos
+  , posCol (locPos prev) + T.length (locText prev) == posCol curPos
+  = prev : distinguishGetterDots (cur { locToken = TokGetterDotChain } : rest)
+  | otherwise = prev : distinguishGetterDots (cur : rest)
+distinguishGetterDots (x : rest) = x : distinguishGetterDots rest
 
 {- | Extract docstring and group annotation tokens. Docstrings are associated
 with the position of the following non-doc token. Group annotation tokens

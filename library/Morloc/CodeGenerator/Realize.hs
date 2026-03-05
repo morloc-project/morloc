@@ -363,8 +363,14 @@ realizeWithRegistry registry s0 = do
               case TE.reduceType gscope (type2typeu gt') of
                 (Just gt'') -> handleMany (typeOf gt'') xs'
                 Nothing ->
-                  MM.throwSourcedError i $
-                    "I couldn't find implementation for" <+> squotes (pretty v) <+> "gt' = " <+> pretty gt'
+                  case xs' of
+                    -- All candidates have the same type: they're duplicates from
+                    -- different imports (e.g., mempty = [] from both root-py and root-cpp).
+                    (x'@(AnnoS (Idx _ t0) _ _, _) : rest)
+                      | all (\(AnnoS (Idx _ t) _ _, _) -> t == t0) rest -> return x'
+                    _ ->
+                      MM.throwSourcedError i $
+                        "I couldn't find implementation for" <+> squotes (pretty v) <+> "gt' = " <+> pretty gt'
             [x'] -> return x'
             (x' : _) -> return x'
 

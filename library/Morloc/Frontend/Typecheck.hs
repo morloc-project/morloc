@@ -581,6 +581,15 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
       -- return the final context and the applied expressions
       return (g12, applyGen g12 e' : es')
 
+-- bare selector pattern (e.g., .0 or .1 used as a function argument, not applied)
+synthE _ g0 (ExeS (PatCall (PatternStruct s))) = do
+  (g1, datType) <- selectorType g0 s
+  retType <- return $ case selectorGetter datType s of
+    [] -> error "Illegal empty selection"
+    [t] -> t
+    ts -> BT.tupleU ts
+  let ft = FunU [datType] retType
+  return (g1, ft, ExeS (PatCall (PatternStruct s)))
 -- This case will only be encountered in check, the existential generated here
 -- will be subtyped against the type known from the VarS case.
 synthE _ g (ExeS exe) = do

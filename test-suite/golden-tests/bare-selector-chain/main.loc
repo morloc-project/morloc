@@ -1,0 +1,7 @@
+module test (getNestedFirst)
+
+import root
+import root-py
+
+getNestedFirst :: ((Int, Int), Int) -> Int
+getNestedFirst = .0.0

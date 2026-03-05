@@ -46,7 +46,7 @@ import qualified Morloc.BaseTypes as BT
 -- - 4 from optional type syntax ('?' could start optional type or guard)
 -- Note: force_expr (!) re-added for inline effect forcing in do-blocks
 -- - 2 from force_expr ('!' could start force or be part of another expr)
-%expect 58
+%expect 60
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -67,6 +67,7 @@ import qualified Morloc.BaseTypes as BT
   '?'        { Located _ TokQuestion _ }
   '.'        { Located _ TokDot _ }
   GDOT       { Located _ TokGetterDot _ }
+  GDOTCHAIN  { Located _ TokGetterDotChain _ }
   '='        { Located _ TokEquals _ }
   '::'       { Located _ TokDColon _ }
   '->'       { Located _ TokArrow _ }
@@ -180,6 +181,7 @@ module_parts :: { [Text] }
   : module_comp                        { [$1] }
   | module_parts '.' module_comp       { $1 ++ [$3] }
   | module_parts GDOT module_comp      { $1 ++ [$3] }
+  | module_parts GDOTCHAIN module_comp { $1 ++ [$3] }
 
 module_comp :: { Text }
   : LOWER                              { getName $1 }
@@ -561,7 +563,8 @@ do_stmt :: { CstDoStmt }
   | expr                       { CstDoBare $1 }
 
 getter_expr :: { Loc CstExpr }
-  : GDOT accessor_body    { at $1 (CAccessorE $2) }
+  : GDOT accessor_body      { at $1 (CAccessorE $2) }
+  | GDOTCHAIN accessor_body { at $1 (CAccessorE $2) }
 
 accessor_body :: { CstAccessorBody }
   : LOWER accessor_tail           { CABKey (getName $1) $2 }
@@ -571,14 +574,15 @@ accessor_body :: { CstAccessorBody }
 accessor_tail :: { CstAccessorTail }
   : {- empty -}                   { CATEnd }
   | '=' expr                      { CATSet $2 }
-  | GDOT accessor_body            { CATChain $2 }
+  | GDOTCHAIN accessor_body       { CATChain $2 }
 
 grouped_accessors :: { [CstAccessorBody] }
   : grouped_accessor                          { [$1] }
   | grouped_accessors ',' grouped_accessor   { $1 ++ [$3] }
 
 grouped_accessor :: { CstAccessorBody }
-  : GDOT accessor_body   { $2 }
+  : GDOT accessor_body      { $2 }
+  | GDOTCHAIN accessor_body { $2 }
 
 var_expr :: { Loc CstExpr }
   : LOWER                     { at $1 (CVarE (EV (getName $1))) }
