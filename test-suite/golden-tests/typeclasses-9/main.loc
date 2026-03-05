@@ -1,0 +1,52 @@
+module main (testSemiStr, testMonoidStr, testMonoidList, testGroupNegate)
+
+type Py => Int = "int"
+type Py => Str = "str"
+type Py => (List a) = "list" a
+
+-- Three-level class hierarchy: Semigroup -> Monoid -> Group
+class Semigroup a where
+  sappend a :: a -> a -> a
+
+class Semigroup a => Monoid a where
+  mempty a :: a
+
+class Monoid a => Group a where
+  ginverse a :: a -> a
+
+instance Semigroup Str where
+  source Py from "foo.py" ("appendStr" as sappend)
+
+instance Monoid Str where
+  mempty = ""
+
+instance Semigroup Int where
+  source Py from "foo.py" ("addInt" as sappend)
+
+instance Monoid Int where
+  mempty = 0
+
+instance Group Int where
+  source Py from "foo.py" ("negateInt" as ginverse)
+
+instance Semigroup (List a) where
+  source Py from "foo.py" ("appendList" as sappend)
+
+instance Monoid (List a) where
+  mempty = []
+
+-- Test superclass method (Semigroup) through concrete type
+testSemiStr :: Str
+testSemiStr = sappend "hello" " world"
+
+-- Test Monoid method with Str
+testMonoidStr :: Str
+testMonoidStr = sappend mempty "hello"
+
+-- Test Monoid method with List -- exercises the annotation propagation fix
+testMonoidList :: [Int]
+testMonoidList = sappend mempty [1, 2, 3]
+
+-- Test three-level hierarchy: Group's ginverse uses Monoid's mempty indirectly
+testGroupNegate :: Int
+testGroupNegate = sappend (ginverse 5) 10

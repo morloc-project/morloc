@@ -24,6 +24,7 @@ import qualified Morloc.Data.Text as MT
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
+import Data.Maybe (isJust)
 import Morloc.Typecheck.Internal
 
 {- | Each SAnno object in the input list represents one exported function.
@@ -173,7 +174,11 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f scope g0 (VarS v (PolymorphicExpr clsName _ _ rss)) = do
       -- find all instances that are a subtype of the inferred type
       -- this resolve general aliases all the way to the general termini
-      let rssSubtypes = [x | x@(EType t _ _, _) <- rss, isSubtypeOf2 scope t gt]
+      -- Also accept instances reachable via coercion (e.g., Int matches ?Int)
+      let emptyGamma = Gamma 0 [] Map.empty
+          isCompatible t = isSubtypeOf2 scope t gt
+                        || isJust (tryCoerce scope t gt emptyGamma)
+          rssSubtypes = [x | x@(EType t _ _, _) <- rss, isCompatible t]
 
       -- find the most specific instance at the general level, this does not
       -- consider a type to be more specific it is more evaluated.
@@ -257,7 +262,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     connectInstance g0 [] = return g0
     connectInstance g0 (AnnoS (Idx i t) _ _ : es) = do
       scope <- MM.getGeneralScope i
-      case subtype scope gt t g0 of
+      case subtype scope (stripCoercionWrappers gt) t g0 of
         (Left e) -> throwTypeError i e
         (Right g1) -> connectInstance g1 es
 
@@ -557,9 +562,18 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
       [AnnoS Int ManyPoly Int] ->
       MorlocMonad (Gamma, [AnnoS (Indexed TypeU) ManyPoly Int])
     checkImplementations g _ [] = return (g, [])
-    checkImplementations g10 t (e : es) = do
-      -- check this instance
+    checkImplementations g10 t (e@(AnnoS implGi _ _) : es) = do
+      -- Temporarily remove any annotation that was propagated to this
+      -- implementation's index via copyState/reindexExprI. An annotation
+      -- like `mempty :: Str` on the usage site must not constrain checking
+      -- of each instance implementation (e.g. the List instance's `[]`).
+      implAnn <- MM.gets (Map.lookup implGi . stateAnnotations)
+      MM.modify (\s -> s { stateAnnotations = Map.delete implGi (stateAnnotations s) })
       (g11, _, e') <- checkG g10 e t
+      -- Restore
+      case implAnn of
+        Just ann -> MM.modify (\s -> s { stateAnnotations = Map.insert implGi ann (stateAnnotations s) })
+        Nothing -> return ()
 
       -- check all the remaining implementations
       (g12, es') <- checkImplementations g11 t es
@@ -969,6 +983,13 @@ tryCoerce scope a (EffectU effs b) g =
       Just (cs, g') -> Just (CoerceToEffect (resolveEffectSet effs) : cs, g')
       Nothing -> Nothing
 tryCoerce _ _ _ _ = Nothing
+
+-- | Strip OptionalU and EffectU wrappers that result from coercion.
+-- Used in instance resolution to match the underlying type.
+stripCoercionWrappers :: TypeU -> TypeU
+stripCoercionWrappers (OptionalU t) = stripCoercionWrappers t
+stripCoercionWrappers (EffectU _ t) = stripCoercionWrappers t
+stripCoercionWrappers t = t
 
 -- | Collect effect labels from all EvalS nodes within a do-block body.
 -- Deeply traverses the full expression tree to find nested EvalS nodes
