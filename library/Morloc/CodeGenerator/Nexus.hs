@@ -75,6 +75,8 @@ data NexusExpr
   | NamX Text [(Text, NexusExpr)]
   | StrX Text Text
   | LitX LitType Text
+  | ShowX Text NexusExpr  -- schema (return type = Str), child expression
+  | ReadX Text NexusExpr  -- schema (return type = ?a), child expression
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX
 
@@ -273,6 +275,10 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS _ _ (DoBlockS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (EvalS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (CoerceS _ e)) = toNexusExpr e
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrShow [arg])) =
+      ShowX <$> type2schema t <*> toNexusExpr arg
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrRead [arg])) =
+      ReadX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr _)) = do
       v <- resolveCompileTimeIntrinsic intr
       StrX <$> type2schema t <*> pure v
@@ -423,6 +429,18 @@ exprToJson (BndX schema var) =
     [ ("tag", jsonStr "bound")
     , ("schema", jsonStr schema)
     , ("var", jsonStr var)
+    ]
+exprToJson (ShowX schema child) =
+  jsonObj
+    [ ("tag", jsonStr "show")
+    , ("schema", jsonStr schema)
+    , ("child", exprToJson child)
+    ]
+exprToJson (ReadX schema child) =
+  jsonObj
+    [ ("tag", jsonStr "read")
+    , ("schema", jsonStr schema)
+    , ("child", exprToJson child)
     ]
 exprToJson (PatX schema (PatternText p ps)) =
   jsonObj

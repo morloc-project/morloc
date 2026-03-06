@@ -191,6 +191,8 @@ data Intrinsic
   | IntrLang      -- ^ @lang    :: Str               -- current pool language
   | IntrSchema    -- ^ @schema  :: a -> Str          -- schema string
   | IntrTypeof    -- ^ @typeof  :: a -> Str          -- concrete type name
+  | IntrShow      -- ^ @show   :: a -> Str           -- serialize to JSON string
+  | IntrRead      -- ^ @read   :: Str -> ?a          -- deserialize from JSON string
   deriving (Show, Ord, Eq)
 
 -- | Map intrinsic to its canonical name
@@ -205,6 +207,8 @@ intrinsicName IntrCompiled = "compiled"
 intrinsicName IntrLang = "lang"
 intrinsicName IntrSchema = "schema"
 intrinsicName IntrTypeof = "typeof"
+intrinsicName IntrShow = "show"
+intrinsicName IntrRead = "read"
 
 -- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
 parseIntrinsic :: Text -> Maybe Intrinsic
@@ -218,6 +222,8 @@ parseIntrinsic "compiled" = Just IntrCompiled
 parseIntrinsic "lang" = Just IntrLang
 parseIntrinsic "schema" = Just IntrSchema
 parseIntrinsic "typeof" = Just IntrTypeof
+parseIntrinsic "show" = Just IntrShow
+parseIntrinsic "read" = Just IntrRead
 parseIntrinsic _ = Nothing
 
 -- | Expected number of arguments for each intrinsic
@@ -232,6 +238,8 @@ intrinsicArity IntrCompiled = 0
 intrinsicArity IntrLang = 0
 intrinsicArity IntrSchema = 1
 intrinsicArity IntrTypeof = 1
+intrinsicArity IntrShow = 1
+intrinsicArity IntrRead = 1
 
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)

@@ -454,6 +454,28 @@ static morloc_expression_t* build_expr(const jval_t* je, ERRMSG) {
             jgets(je, "schema"), strdup(jgets(je, "var")));
     }
 
+    if (strcmp(tag, "show") == 0) {
+        const char* schema_str = jgets(je, "schema");
+        Schema* schema = TRY(parse_schema, schema_str);
+        morloc_expression_t* child = TRY(build_expr, jget(je, "child"));
+        morloc_expression_t* expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
+        expr->type = MORLOC_X_SHOW;
+        expr->schema = schema;
+        expr->expr.unary_expr = child;
+        return expr;
+    }
+
+    if (strcmp(tag, "read") == 0) {
+        const char* schema_str = jgets(je, "schema");
+        Schema* schema = TRY(parse_schema, schema_str);
+        morloc_expression_t* child = TRY(build_expr, jget(je, "child"));
+        morloc_expression_t* expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
+        expr->type = MORLOC_X_READ;
+        expr->schema = schema;
+        expr->expr.unary_expr = child;
+        return expr;
+    }
+
     if (strcmp(tag, "interpolation") == 0) {
         const char* schema_str = jgets(je, "schema");
         const jval_t* jstrs = jget(je, "strings");

@@ -310,13 +310,20 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     -- Compute the msgpack schema string for runtime intrinsics
     intrinsicSchema :: Int -> Intrinsic -> TypeF -> [NativeExpr] -> MorlocMonad (Maybe Text)
     intrinsicSchema m intr _ (dataArg:_)
-      | intr `elem` [IntrHash, IntrSave, IntrSaveM, IntrSaveJ] = do
+      | intr `elem` [IntrHash, IntrSave, IntrSaveM, IntrSaveJ, IntrShow] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
           return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrLoad tf _ = do
       -- For @load, the return type is {?a} or ?a; the schema is for a
       let unwrap (EffectF _ inner) = unwrap inner
           unwrap (OptionalF inner) = inner
+          unwrap other = other
+          dataType = unwrap tf
+      ast <- Serial.makeSerialAST m lang dataType
+      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    intrinsicSchema m IntrRead tf _ = do
+      -- For @read, the return type is ?a; the schema is for a
+      let unwrap (OptionalF inner) = inner
           unwrap other = other
           dataType = unwrap tf
       ast <- Serial.makeSerialAST m lang dataType

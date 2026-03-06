@@ -1,0 +1,29 @@
+module main (testShow, testRead, testRoundTrip)
+
+import root-cpp
+import root-py
+
+source Cpp from "foo.hpp" ("identity_int" as identityInt)
+
+identityInt :: Int -> Int
+
+-- @show in C++ pool context
+showCpp :: Int -> Str
+showCpp x = @show (identityInt x)
+
+-- @show in nexus (no pool context)
+showNexus :: Int -> Str
+showNexus x = @show x
+
+-- round-trip: show then read should recover the original value
+roundTrip :: Int -> ?Int
+roundTrip x = @read (@show x)
+
+testShow :: Bool
+testShow = showCpp 42 == "42" && showNexus 42 == "42"
+
+testRead :: ?Int
+testRead = @read "42"
+
+testRoundTrip :: ?Int
+testRoundTrip = roundTrip 99

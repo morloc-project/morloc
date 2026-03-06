@@ -151,6 +151,7 @@ linkAndRemoveAnnotations = f
     f (ExprI i (IfE c t e)) = ExprI i <$> (IfE <$> f c <*> f t <*> f e)
     f (ExprI i (DoBlockE e)) = ExprI i <$> (DoBlockE <$> f e)
     f (ExprI i (EvalE e)) = ExprI i <$> (EvalE <$> f e)
+    f (ExprI i (IntrinsicE intr es)) = ExprI i <$> (IntrinsicE intr <$> mapM f es)
     f e@(ExprI _ _) = return e
 
 {- | Build the call tree for a single nexus command. The result is ambiguous,

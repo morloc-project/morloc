@@ -1399,6 +1399,93 @@ error:
     return NULL;
 }
 
+static PyObject* pybinding__mlc_show(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* obj;
+    const char* schema_str;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    char* json = NULL;
+
+    if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    schema = PyTRY(parse_schema, schema_str);
+
+    voidstar = to_voidstar(schema, obj);
+    PyTRACE(voidstar == NULL)
+
+    json = PyTRY(mlc_show, voidstar, schema);
+
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+
+    {
+        PyObject* retval = PyUnicode_FromString(json);
+        free(json);
+        return retval;
+    }
+
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    FREE(json)
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    const char* json_str;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+
+    if (!PyArg_ParseTuple(args, "ss", &schema_str, &json_str)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    schema = PyTRY(parse_schema, schema_str);
+
+    {
+        char* errmsg = NULL;
+        voidstar = mlc_read(json_str, schema, &errmsg);
+        if (errmsg != NULL) {
+            free(errmsg);
+        }
+    }
+
+    if (voidstar == NULL) {
+        free_schema(schema);
+        Py_RETURN_NONE;
+    }
+
+    {
+        PyObject* obj = fromAnything(schema, voidstar);
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+        free_schema(schema);
+        PyTRACE(obj == NULL)
+        return obj;
+    }
+
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
 static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     const char* path;
@@ -1462,6 +1549,8 @@ static PyMethodDef Methods[] = {
     {"mlc_save_voidstar", pybinding__mlc_save_voidstar, METH_VARARGS, "Save a value to file in flat voidstar binary format"},
     {"mlc_save_json", pybinding__mlc_save_json, METH_VARARGS, "Save a value to file in JSON format"},
     {"mlc_load", pybinding__mlc_load, METH_VARARGS, "Load a value from file"},
+    {"mlc_show", pybinding__mlc_show, METH_VARARGS, "Serialize a value to JSON string"},
+    {"mlc_read", pybinding__mlc_read, METH_VARARGS, "Deserialize a JSON string to a value"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 

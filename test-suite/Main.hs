@@ -410,4 +410,6 @@ main = do
       , -- intrinsic tests
         golden "intrinsic-hash" "intrinsic-hash"
       , golden "intrinsic-constants" "intrinsic-constants"
+      , golden "intrinsic-show-read" "intrinsic-show-read"
+      , golden "intrinsic-show-read-nexus" "intrinsic-show-read-nexus"
       ]

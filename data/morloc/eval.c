@@ -1,4 +1,5 @@
 #include "morloc.h"
+#include "json.h"
 
 // This type should act as a string-based dictionary
 // The current implementation as a linked list is slow and can be replaced later
@@ -719,6 +720,57 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
             absptr_t bnd_value = dict_lookup(varname, bndvars);
             RAISE_IF(bnd_value == NULL, "Unbound variable %s", varname);
             memcpy(dest, bnd_value, schema->width);
+        } break;
+
+        case MORLOC_X_SHOW: {
+            // @show: serialize child expression to JSON string
+            morloc_expression_t* child = expr->expr.unary_expr;
+            Schema* child_schema = child->schema;
+            absptr_t child_result = TRY(morloc_eval_r, child, NULL, 0, bndvars);
+            char* json = TRY(voidstar_to_json_string, child_result, child_schema);
+            size_t json_len = strlen(json);
+            relptr_t str_relptr = -1;
+            if (json_len > 0) {
+                absptr_t str_absptr = TRY(shmemcpy, (void*)json, json_len);
+                str_relptr = TRY(abs2rel, str_absptr);
+            }
+            free(json);
+            Array str_array;
+            str_array.size = json_len;
+            str_array.data = str_relptr;
+            memcpy(dest, (void*)(&str_array), width);
+        } break;
+
+        case MORLOC_X_READ: {
+            // @read: deserialize JSON string to typed data, return optional
+            // schema is ?T (MORLOC_OPTIONAL), layout: 1 byte tag + inner value at offset 1
+            morloc_expression_t* child = expr->expr.unary_expr;
+            absptr_t child_result = TRY(morloc_eval_r, child, NULL, 0, bndvars);
+            // Extract string from voidstar Array
+            Array* str_arr = (Array*)child_result;
+            char* json_str = NULL;
+            if (str_arr->size > 0) {
+                absptr_t str_abs = TRY(rel2abs, str_arr->data);
+                json_str = (char*)malloc(str_arr->size + 1);
+                RAISE_IF(json_str == NULL, "Failed to allocate for @read")
+                memcpy(json_str, str_abs, str_arr->size);
+                json_str[str_arr->size] = '\0';
+            }
+            uint8_t* opt_dest = (uint8_t*)dest;
+            Schema* inner_schema = schema->parameters[0];
+            if (json_str != NULL) {
+                char* parse_errmsg = NULL;
+                // Parse directly into dest+1 (the inner value slot of the optional)
+                void* parsed = (void*)read_json_with_schema(opt_dest + 1, json_str, inner_schema, &parse_errmsg);
+                free(json_str);
+                if (parse_errmsg != NULL) {
+                    free(parse_errmsg);
+                    parsed = NULL;
+                }
+                opt_dest[0] = (parsed != NULL) ? 1 : 0;
+            } else {
+                opt_dest[0] = 0;
+            }
         } break;
 
         default:

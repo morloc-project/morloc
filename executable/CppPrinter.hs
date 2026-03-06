@@ -83,6 +83,12 @@ printExpr (IIntrinsicLoad schema (Just t) path) =
   [idoc|_mlc_load<#{renderIType t}>("#{pretty schema}", #{printExpr path})|]
 printExpr (IIntrinsicLoad schema Nothing path) =
   [idoc|_mlc_load("#{pretty schema}", #{printExpr path})|]
+printExpr (IIntrinsicShow schema e) =
+  [idoc|_mlc_show(#{printExpr e}, "#{pretty schema}")|]
+printExpr (IIntrinsicRead schema (Just t) e) =
+  [idoc|_mlc_read<#{renderIType t}>("#{pretty schema}", #{printExpr e})|]
+printExpr (IIntrinsicRead schema Nothing e) =
+  [idoc|_mlc_read("#{pretty schema}", #{printExpr e})|]
 
 printStmt :: IStmt -> MDoc
 printStmt (IAssign v Nothing e) = "auto" <+> pretty v <+> "=" <+> printExpr e <> ";"

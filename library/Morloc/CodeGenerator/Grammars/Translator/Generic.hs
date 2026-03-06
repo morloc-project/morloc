@@ -644,6 +644,12 @@ genericPrintExpr desc = go
     go (IIntrinsicLoad schema _ path) =
       let prefix = extractModulePrefix (ldSerializeFn desc)
        in pretty prefix <> "mlc_load(" <> dquotes (pretty schema) <> ", " <> go path <> ")"
+    go (IIntrinsicShow schema e) =
+      let prefix = extractModulePrefix (ldSerializeFn desc)
+       in pretty prefix <> "mlc_show(" <> go e <> ", " <> dquotes (pretty schema) <> ")"
+    go (IIntrinsicRead schema _ e) =
+      let prefix = extractModulePrefix (ldSerializeFn desc)
+       in pretty prefix <> "mlc_read(" <> dquotes (pretty schema) <> ", " <> go e <> ")"
 
 -- | Generic statement printer driven by descriptor
 genericPrintStmt :: LangDescriptor -> IStmt -> MDoc

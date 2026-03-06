@@ -20,6 +20,8 @@ typedef enum {
   MORLOC_X_BND,
   MORLOC_X_PAT,
   MORLOC_X_FMT,
+  MORLOC_X_SHOW,
+  MORLOC_X_READ,
 } morloc_expression_type;
 
 // application types
@@ -46,6 +48,7 @@ typedef struct morloc_expression_s {
         char** interpolation; // NULL pointer terminated array of strings
         morloc_pattern_t* pattern_expr;
         morloc_data_t* data_expr;
+        morloc_expression_t* unary_expr; // child expression for @show, @read
     } expr;
 } morloc_expression_t;
 

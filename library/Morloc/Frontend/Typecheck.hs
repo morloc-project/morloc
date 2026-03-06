@@ -653,6 +653,9 @@ intrinsicTypeG :: Gamma -> Intrinsic -> (Gamma, TypeU)
 intrinsicTypeG g IntrLoad =
   let (g', loadType) = newvar "load_" g
   in (g', EffectU ioEffectSet (OptionalU loadType))
+intrinsicTypeG g IntrRead =
+  let (g', readType) = newvar "read_" g
+  in (g', OptionalU readType)
 intrinsicTypeG g intr = (g, intrinsicType intr)
 
 -- | Return type of a fully applied intrinsic (for intrinsics without fresh vars)
@@ -667,6 +670,8 @@ intrinsicType IntrCompiled = BT.strU
 intrinsicType IntrLang = BT.strU
 intrinsicType IntrSchema = BT.strU
 intrinsicType IntrTypeof = BT.strU
+intrinsicType IntrShow = BT.strU
+intrinsicType IntrRead = OptionalU (ExistU (TV "read_a") ([], Open) ([], Open))
 
 -- intrinsicArity is defined in Morloc.Namespace.Expr
 
@@ -705,6 +710,10 @@ checkIntrinsicArgs i g intr argTypes = do
         -- @schema/@typeof: a -> Str (value ignored at runtime)
         (IntrSchema, [_]) -> return g
         (IntrTypeof, [_]) -> return g
+        -- @show: a -> Str (any type accepted)
+        (IntrShow, [_]) -> return g
+        -- @read: Str -> ?a (arg must be Str)
+        (IntrRead, [strT]) -> subtype' i strT BT.strU g
         -- compile-time constants: no args
         (IntrVersion, []) -> return g
         (IntrCompiled, []) -> return g

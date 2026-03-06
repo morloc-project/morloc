@@ -121,6 +121,8 @@ data IExpr
   | IIntrinsicSave Text Text IExpr IExpr -- format, schema, data, path
   | IIntrinsicLoad Text (Maybe IType) IExpr -- schema, returnType, path -> result (nullable)
   | IIntrinsicHash Text IExpr -- schema, data -> hex string
+  | IIntrinsicShow Text IExpr -- schema, data -> JSON string
+  | IIntrinsicRead Text (Maybe IType) IExpr -- schema, returnType, json_string -> typed data (nullable)
 
 data IParam = IParam Text (Maybe IType)
 
@@ -497,6 +499,13 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) =
     OptionalF t -> lcTypeOf cfg t
     _ -> return Nothing
   return $ pathDocs {poolExpr = lcPrintExpr cfg (IIntrinsicLoad schema innerType (IRawExpr (render (poolExpr pathDocs))))}
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrShow (Just schema) [dataDocs]) =
+  return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicShow schema (IRawExpr (render (poolExpr dataDocs))))}
+lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrRead (Just schema) [strDocs]) = do
+  innerType <- case typeFof origExpr of
+    OptionalF t -> lcTypeOf cfg t
+    _ -> return Nothing
+  return $ strDocs {poolExpr = lcPrintExpr cfg (IIntrinsicRead schema innerType (IRawExpr (render (poolExpr strDocs))))}
 lowerNativeExpr _ _ (IntrinsicN_ _ intr _ _) =
   error $ "Runtime intrinsic @" <> show intr <> " reached code generation without schema"
 

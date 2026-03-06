@@ -113,3 +113,22 @@ char* mlc_hash(const absptr_t data, const Schema* schema, ERRMSG) {
     snprintf(hex, 17, "%016" PRIx64, hash);
     return hex;
 }
+
+char* mlc_show(const absptr_t data, const Schema* schema, ERRMSG) {
+    PTR_RETURN_SETUP(char)
+    return TRY(voidstar_to_json_string, data, schema);
+}
+
+void* mlc_read(const char* json_str, const Schema* schema, ERRMSG) {
+    PTR_RETURN_SETUP(void)
+    char* json_copy = strdup(json_str);
+    RAISE_IF(json_copy == NULL, "Failed to allocate for mlc_read")
+    char* child_errmsg = NULL;
+    void* result = (void*)read_json_with_schema(NULL, json_copy, schema, &child_errmsg);
+    free(json_copy);
+    if (child_errmsg != NULL) {
+        free(child_errmsg);
+        return NULL;
+    }
+    return result;
+}
