@@ -866,6 +866,13 @@ SEXP morloc_is_shutting_down(void) {
     return ScalarLogical(r_shutting_down != 0);
 }
 
+SEXP morloc_set_line_buffered(void) {
+    // Only stderr - stdout is left fully buffered for performance
+    // and flushed explicitly after each job.
+    setvbuf(stderr, NULL, _IOLBF, 0);
+    return R_NilValue;
+}
+
 // }}} signal handling
 
 SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
@@ -1643,6 +1650,7 @@ SEXP morloc_worker_loop_c(SEXP pipe_fd_r, SEXP dispatch_r, SEXP remote_dispatch_
         int client_fd = recv_fd_c(pipe_fd);
         if (client_fd < 0) break;
         run_job_c(client_fd, dispatch_r, remote_dispatch_r);
+        fflush(stdout);
     }
 
     UNPROTECT(2);
@@ -1680,6 +1688,7 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_waitpid", (DL_FUNC) &morloc_waitpid, 1},
         {"morloc_waitpid_blocking", (DL_FUNC) &morloc_waitpid_blocking, 1},
         {"morloc_install_sigterm_handler", (DL_FUNC) &morloc_install_sigterm_handler, 0},
+        {"morloc_set_line_buffered", (DL_FUNC) &morloc_set_line_buffered, 0},
         {"morloc_is_shutting_down", (DL_FUNC) &morloc_is_shutting_down, 0},
         {"morloc_detach_daemon", (DL_FUNC) &morloc_detach_daemon, 1},
         {"morloc_shared_counter_create", (DL_FUNC) &morloc_shared_counter_create, 0},

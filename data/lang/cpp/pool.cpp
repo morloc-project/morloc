@@ -325,6 +325,11 @@ static uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
 
 
 int main(int argc, char* argv[]) {
+    // Line-buffer stderr so diagnostic output is not lost on pool shutdown.
+    // stdout is left fully buffered for performance (genome-scale piping)
+    // and flushed after each job by pool.c.
+    setvbuf(stderr, NULL, _IOLBF, 0);
+
     if (argc != 4) {
         std::cerr << "Usage: " << argv[0] << " <socket_path> <tmpdir> <shm_basename>\n";
         return 1;

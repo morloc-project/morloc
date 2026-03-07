@@ -415,4 +415,6 @@ main = do
       , golden "intrinsic-show-read-nexus" "intrinsic-show-read-nexus"
       , -- parser stress test: precedence, parentheses, negatives, numeric literals, getters
         golden "parser-stress" "parser-stress"
+      , -- stdout flush test: verify Python pool stdout is flushed before shutdown
+        golden "stdout-flush-py" "stdout-flush-py"
       ]
