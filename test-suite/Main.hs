@@ -123,6 +123,7 @@ main = do
       , golden "string-json-parsing" "string-json-parsing"
       , golden "string-multiline" "string-multiline"
       , golden "string-interpolation" "string-interpolation"
+      , golden "string-escape" "string-escape"
       , golden "file-input-py" "file-input-py"
       , golden "file-input-c" "file-input-c"
       , golden "file-input-r" "file-input-r"

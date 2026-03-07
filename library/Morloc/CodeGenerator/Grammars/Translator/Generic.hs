@@ -585,7 +585,7 @@ genericPrintExpr desc = go
     go INullLit = pretty (ldNullLiteral desc)
     go (IIntLit i) = viaShow i <> pretty (ldIntLiteralSuffix desc)
     go (IRealLit r) = viaShow r
-    go (IStrLit s) = dquotes (pretty s)
+    go (IStrLit s) = textEsc' s
     go (IListLit es) = case ldListStyle desc of
       BracketList -> list (map go es)
       FunctionCallList -> pretty (ldGenericListFn desc) <> tupled (map go es)
