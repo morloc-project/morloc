@@ -276,6 +276,7 @@ data Expr
   | DoBlockE ExprI
   | EvalE ExprI
   | IntrinsicE Intrinsic [ExprI]
+  | ParenE !ExprI  -- ^ transient parenthesization wrapper (eliminated by handleBinops)
   deriving (Show, Ord, Eq)
 
 data Import
@@ -672,6 +673,7 @@ instance Pretty Expr where
         InfixL -> "infixl"
         InfixR -> "infixr"
         InfixN -> "infix"
+  pretty (ParenE e) = parens (pretty e)
   pretty (BopE e1 _ v e2) = pretty e1 <+> pretty v <+> pretty e2
   pretty (IfE c t e) = "if" <+> pretty c <+> "then" <+> pretty t <+> "else" <+> pretty e
   pretty NullE = "Null"

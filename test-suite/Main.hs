@@ -116,6 +116,7 @@ main = do
       , golden "typeclasses-7" "typeclasses-7"
       , golden "typeclasses-8" "typeclasses-8"
       , golden "typeclasses-9" "typeclasses-9"
+      , golden "poly-list-1" "poly-list-1"
       , golden "higher-kinded-types" "higher-kinded-types"
       , golden "string-encoding" "string-encoding"
       , golden "string-encoding-utf8" "string-encoding-utf8"
@@ -412,4 +413,6 @@ main = do
       , golden "intrinsic-constants" "intrinsic-constants"
       , golden "intrinsic-show-read" "intrinsic-show-read"
       , golden "intrinsic-show-read-nexus" "intrinsic-show-read-nexus"
+      , -- parser stress test: precedence, parentheses, negatives, numeric literals, getters
+        golden "parser-stress" "parser-stress"
       ]

@@ -2,10 +2,9 @@
 
 module main (foo, bar)
 
-import root
-import root-r
-import root-py
-import root-cpp
+import map-r
+import map-py
+import map-cpp
 
 record Foo = Foo
   { shitlists :: Map Str (Map Str Int)

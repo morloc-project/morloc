@@ -1,7 +1,7 @@
 module main (foo)
 
 import root-cpp
-import math (sqrt)
+import math-cpp (sqrt)
 
 sum = fold (+) zero
 

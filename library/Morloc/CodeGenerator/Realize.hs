@@ -353,26 +353,34 @@ realizeWithRegistry registry s0 = do
           [(AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)] ->
           MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
         handleMany gt' xs' =
-          -- select instances that exactly match the unevaluated general type
-          --
-          -- WARNING: this is an oversimplification, a temporary solution, I will
-          -- update it when I find a breaking case.
-          case [x | x@(AnnoS (Idx _ t) _ _, _) <- xs', gt' == t] of
+          -- Match candidates by head type constructor, then fall back to
+          -- alias reduction. This handles type aliases (e.g. Deque = List)
+          -- by first looking for an exact head match, then reducing the
+          -- expected type one level and searching again.
+          case [x | x@(AnnoS (Idx _ t) _ _, _) <- xs', sameTypeHead gt' t] of
             [] -> do
               gscope <- MM.getGeneralScope i
               case TE.reduceType gscope (type2typeu gt') of
                 (Just gt'') -> handleMany (typeOf gt'') xs'
                 Nothing ->
                   case xs' of
-                    -- All candidates have the same type: they're duplicates from
+                    -- All candidates have the same head: they're duplicates from
                     -- different imports (e.g., mempty = [] from both root-py and root-cpp).
                     (x'@(AnnoS (Idx _ t0) _ _, _) : rest)
-                      | all (\(AnnoS (Idx _ t) _ _, _) -> t == t0) rest -> return x'
+                      | all (\(AnnoS (Idx _ t) _ _, _) -> sameTypeHead t0 t) rest -> return x'
                     _ ->
                       MM.throwSourcedError i $
                         "I couldn't find implementation for" <+> squotes (pretty v) <+> "gt' = " <+> pretty gt'
             [x'] -> return x'
             (x' : _) -> return x'
+
+        -- Compare types by their head constructor, ignoring parameters.
+        -- This handles candidates with unresolved type variables (UnkT).
+        sameTypeHead :: Type -> Type -> Bool
+        sameTypeHead (AppT (VarT v1) _) (AppT (VarT v2) _) = v1 == v2
+        sameTypeHead (VarT v1) (VarT v2) = v1 == v2
+        sameTypeHead (FunT _ r1) (FunT _ r2) = sameTypeHead r1 r2
+        sameTypeHead t1 t2 = t1 == t2
 
     ----- NOTE: Some cases are inseperable, the code above does not
     ----- account for this, which may allow incorrect code to be

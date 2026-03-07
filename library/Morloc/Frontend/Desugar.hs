@@ -493,6 +493,10 @@ desugarExpr (Loc sp (CLetE bindings body)) = do
   bindings' <- mapM (\(v, e) -> do e' <- desugarExpr e; return (v, e')) bindings
   body' <- desugarExpr body
   freshExprSpan sp (LetE bindings' body')
+desugarExpr (Loc sp (CParenE inner@(Loc _ CBopE{}))) = do
+  inner' <- desugarExpr inner
+  freshExprSpan sp (ParenE inner')
+desugarExpr (Loc _ (CParenE inner)) = desugarExpr inner
 desugarExpr (Loc _ (CBopE lhs opTok rhs)) = do
   lhs' <- desugarExpr lhs
   rhs' <- desugarExpr rhs

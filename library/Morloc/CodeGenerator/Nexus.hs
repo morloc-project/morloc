@@ -192,14 +192,10 @@ generalTypeToSerialAST (VarT v)
         x -> error $ "Unexpected scope: " <> show x
 generalTypeToSerialAST (AppT (VarT v) [t])
   | v == MBT.list = SerialList (FV v (CV "")) <$> generalTypeToSerialAST t
-  | otherwise = do
-      insts <- MM.gets stateTypeclasses
-      error $ show insts
+  | otherwise = resolveAliasApp v [t]
 generalTypeToSerialAST (AppT (VarT v) ts)
   | v == (MBT.tuple (length ts)) = SerialTuple (FV v (CV "")) <$> mapM generalTypeToSerialAST ts
-  | otherwise = do
-      insts <- MM.gets stateTypeclasses
-      error $ show insts
+  | otherwise = resolveAliasApp v ts
 generalTypeToSerialAST (EffectT _ t) = generalTypeToSerialAST t
 generalTypeToSerialAST (OptionalT t) = do
   inner <- generalTypeToSerialAST t
@@ -208,6 +204,16 @@ generalTypeToSerialAST (NamT o v [] rs) =
   SerialObject o (FV v (CV "")) []
     <$> mapM (secondM generalTypeToSerialAST) rs
 generalTypeToSerialAST t = error $ "cannot serialize this type: " <> show t
+
+resolveAliasApp :: TVar -> [Type] -> MorlocMonad SerialAST
+resolveAliasApp v ts = do
+  scope <- MM.gets stateUniversalGeneralTypedefs
+  case Map.lookup v scope of
+    (Just [(params, body, _, False)]) ->
+      let tvars = [tv | Left tv <- params]
+          resolved = foldl (\acc (tv, arg) -> substituteTVar tv arg acc) (typeOf body) (zip tvars ts)
+      in generalTypeToSerialAST resolved
+    _ -> error $ "Cannot serialize type: " <> show (AppT (VarT v) ts)
 
 -- ======================================================================
 -- Pure expression extraction
