@@ -1,0 +1,25 @@
+-- Test: polymorphic effectful typeclass method used with <- in a do-block
+-- Mirrors bug-reports/report-2/bug1.loc
+
+module main (test)
+
+import root-py
+
+type Py => Real = "float"
+type Py => Int = "int"
+type Py => Unit = "None"
+
+class Random a where
+  random a :: <Random> a
+
+instance Random Real where
+  source Py from "rng.py" ("randomReal" as random)
+
+setSeed :: Int -> <Random> Unit
+source Py from "rng.py" ("setSeed")
+
+test :: <Random> Real
+test = do
+  setSeed 42
+  x <- random
+  x

@@ -631,15 +631,15 @@ synthE _ g (CoerceS coercion e) = do
   return (g1, applyCoercion coercion t1, CoerceS coercion e1)
 synthE i g (EvalS e) = do
   (g1, t1, e1) <- synthG g e
-  case apply g1 t1 of
-    EffectU _ a -> return (g1, a, EvalS e1)
+  let (g1', t1') = stripForallU g1 (apply g1 t1)
+  case t1' of
+    EffectU _ a -> return (g1', a, EvalS e1)
     ExistU _ _ _ -> do
-      -- solve ?v = <E> ?b for fresh E, ?b
-      let (g2, bv) = tvarname g1 "effectInner_"
+      let (g2, bv) = tvarname g1' "effectInner_"
           bt = ExistU bv ([], Open) ([], Open)
           (g2b, ev) = tvarname g2 "effectVar_"
           thunkT = EffectU (EffectVar ev) bt
-      g3 <- subtype' i (apply g2b t1) thunkT g2b
+      g3 <- subtype' i (apply g2b t1') thunkT g2b
       return (g3, apply g3 bt, EvalS (applyGen g3 e1))
     t -> throwTypeError i $ "Cannot force non-thunk type:" <+> pretty t
 synthE i g (IntrinsicS intr args) = do
@@ -647,6 +647,12 @@ synthE i g (IntrinsicS intr args) = do
   g'' <- checkIntrinsicArgs i g' intr argTypes
   let (g''', expectedType) = intrinsicTypeG g'' intr
   return (g''', expectedType, IntrinsicS intr args')
+
+-- | Strip ForallU wrappers by instantiating bound variables as existentials.
+-- Follows the same pattern as `application` for ForallU.
+stripForallU :: Gamma -> TypeU -> (Gamma, TypeU)
+stripForallU g (ForallU v t) = stripForallU (g +> v) (substitute v t)
+stripForallU g t = (g, t)
 
 -- | Return type of a fully applied intrinsic, threading Gamma for fresh existentials
 intrinsicTypeG :: Gamma -> Intrinsic -> (Gamma, TypeU)
@@ -937,16 +943,17 @@ checkE i g (EvalS e) t = do
   -- then check the inner type against the expected type.
   -- This avoids creating an EffectVar that is never solved.
   (g1, t1, e1) <- synthG g e
-  case apply g1 t1 of
+  let (g1', t1') = stripForallU g1 (apply g1 t1)
+  case t1' of
     EffectU _ a -> do
-      g2 <- subtype' i a t g1
+      g2 <- subtype' i a t g1'
       return (g2, apply g2 t, EvalS e1)
     ExistU _ _ _ -> do
-      let (g2, bv) = tvarname g1 "effectInner_"
+      let (g2, bv) = tvarname g1' "effectInner_"
           bt = ExistU bv ([], Open) ([], Open)
           (g2b, ev) = tvarname g2 "effectVar_"
           thunkT = EffectU (EffectVar ev) bt
-      g3 <- subtype' i (apply g2b t1) thunkT g2b
+      g3 <- subtype' i (apply g2b t1') thunkT g2b
       g4 <- subtype' i (apply g3 bt) t g3
       return (g4, apply g4 t, EvalS (applyGen g4 e1))
     t' -> throwTypeError i $ "Cannot force non-thunk type:" <+> pretty t'
@@ -1002,11 +1009,10 @@ tryCoerce scope a (EffectU effs b) g =
       Nothing -> Nothing
 tryCoerce _ _ _ _ = Nothing
 
--- | Strip OptionalU and EffectU wrappers that result from coercion.
+-- | Strip OptionalU wrappers that result from coercion.
 -- Used in instance resolution to match the underlying type.
 stripCoercionWrappers :: TypeU -> TypeU
 stripCoercionWrappers (OptionalU t) = stripCoercionWrappers t
-stripCoercionWrappers (EffectU _ t) = stripCoercionWrappers t
 stripCoercionWrappers t = t
 
 -- | Collect effect labels from all EvalS nodes within a do-block body.

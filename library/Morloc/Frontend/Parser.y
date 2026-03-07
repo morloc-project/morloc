@@ -48,7 +48,7 @@ import qualified Morloc.BaseTypes as BT
 -- - 2 from force_expr ('!' could start force or be part of another expr)
 -- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
 -- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
-%expect 61
+%expect 59
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -334,6 +334,7 @@ non_string_type :: { TypeU }
 
 non_string_non_fun :: { TypeU }
   : '<' LOWER '>'            { ExistU (TV (getName $2)) ([], Open) ([], Open) }
+  | '<' effect_labels '>' non_string_non_fun  { EffectU (EffectSet (Set.fromList $2)) $4 }
   | non_string_app            { $1 }
 
 non_string_app :: { TypeU }
@@ -345,7 +346,6 @@ non_string_atom :: { TypeU }
   | '(' type ')'             { $2 }
   | '(' type ',' type_list1 ')' { BT.tupleU ($2 : $4) }
   | '[' type ']'              { BT.listU $2 }
-  | '<' effect_labels '>' non_string_atom  { EffectU (EffectSet (Set.fromList $2)) $4 }
   | '?' non_string_atom       { OptionalU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
   | LOWER ':' non_fun_type   { $3 }
@@ -640,6 +640,7 @@ fun_type :: { TypeU }
 
 non_fun_type :: { TypeU }
   : '<' LOWER '>'            { ExistU (TV (getName $2)) ([], Open) ([], Open) }
+  | '<' effect_labels '>' non_fun_type  { EffectU (EffectSet (Set.fromList $2)) $4 }
   | app_type                  { $1 }
 
 app_type :: { TypeU }
@@ -651,7 +652,6 @@ atom_type :: { TypeU }
   | '(' type ')'             { $2 }
   | '(' type ',' type_list1 ')' { BT.tupleU ($2 : $4) }
   | '[' type ']'              { BT.listU $2 }
-  | '<' effect_labels '>' atom_type  { EffectU (EffectSet (Set.fromList $2)) $4 }
   | '?' atom_type             { OptionalU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
   | LOWER ':' non_fun_type   { $3 }
@@ -686,6 +686,7 @@ sig_fun_args :: { [(Pos, TypeU)] }
 
 pos_non_fun_type :: { (Pos, TypeU) }
   : '<' LOWER '>'     { (locPos $1, ExistU (TV (getName $2)) ([], Open) ([], Open)) }
+  | '<' effect_labels '>' pos_non_fun_type  { (locPos $1, EffectU (EffectSet (Set.fromList $2)) (snd $4)) }
   | pos_app_type       { $1 }
 
 pos_app_type :: { (Pos, TypeU) }
@@ -697,7 +698,6 @@ pos_atom_type :: { (Pos, TypeU) }
   | '(' type ')'                { (locPos $1, $2) }
   | '(' type ',' type_list1 ')' { (locPos $1, BT.tupleU ($2 : $4)) }
   | '[' type ']'                { (locPos $1, BT.listU $2) }
-  | '<' effect_labels '>' pos_atom_type  { (locPos $1, EffectU (EffectSet (Set.fromList $2)) (snd $4)) }
   | '?' pos_atom_type            { (locPos $1, OptionalU (snd $2)) }
   | UPPER                       { (locPos $1, VarU (TV (getName $1))) }
   | LOWER ':' non_fun_type      { (locPos $1, $3) }
