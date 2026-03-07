@@ -476,16 +476,38 @@ absptr_t morloc_eval(
         new_expr->schema = return_schema;
         new_expr->expr.app_expr = app_expr;
     }
-    // If we are not dealing with a lambda, we should instead directly evaluate
-    // the input expression
+    // Same for patterns: wrap CLI args and create an application
+    else if (expr->type == MORLOC_X_PAT) {
+        morloc_expression_t** arg_exprs = (morloc_expression_t**)calloc(nargs, sizeof(morloc_expression_t*));
+        for(size_t i = 0; i < nargs; i++){
+            arg_exprs[i] = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
+            arg_exprs[i]->type = MORLOC_X_DAT;
+            arg_exprs[i]->schema = arg_schemas[i];
+            arg_exprs[i]->expr.data_expr = (morloc_data_t*)calloc(1, sizeof(morloc_data_t));
+            arg_exprs[i]->expr.data_expr->is_voidstar = true;
+            arg_exprs[i]->expr.data_expr->data.voidstar = arg_voidstar[i];
+        }
+
+        morloc_app_expression_t* app_expr = (morloc_app_expression_t*)calloc(1, sizeof(morloc_app_expression_t));
+        app_expr->type = APPLY_PATTERN;
+        app_expr->function.pattern = expr->expr.pattern_expr;
+        app_expr->args = arg_exprs;
+        app_expr->nargs = nargs;
+
+        new_expr = (morloc_expression_t*)calloc(1, sizeof(morloc_expression_t));
+        new_expr->type = MORLOC_X_APP;
+        new_expr->schema = return_schema;
+        new_expr->expr.app_expr = app_expr;
+    }
+    // Otherwise, directly evaluate the input expression
     else {
         new_expr = expr;
     }
 
     absptr_t result = morloc_eval_r(new_expr, NULL, 0, NULL, &CHILD_ERRMSG);
 
-    // Free the wrapper expression nodes allocated above (not the original lambda)
-    if (expr->type == MORLOC_X_LAM && new_expr != NULL) {
+    // Free the wrapper expression nodes allocated above (not the original lambda/pattern)
+    if ((expr->type == MORLOC_X_LAM || expr->type == MORLOC_X_PAT) && new_expr != NULL) {
         morloc_app_expression_t* app_expr = new_expr->expr.app_expr;
         for (size_t i = 0; i < nargs; i++) {
             free(app_expr->args[i]->expr.data_expr);

@@ -22,8 +22,8 @@ type Cpp => Tuple2 a b = "std::tuple<$1,$2>" a b
 
 -- General type definitions
 type List a
--- type Deque a = List a
--- type Vector a = List a
+type Deque a = List a
+type Vector a = List a
 
 -- Typeclasses
 class Semigroup a where

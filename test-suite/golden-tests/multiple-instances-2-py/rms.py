@@ -9,3 +9,6 @@ def rms2(xs):
         y += x*x
     y = y / len(xs)
     return math.sqrt(y)
+
+def mean(xs):
+    return sum(xs) / len(xs)

@@ -59,6 +59,10 @@ calculateStdError :: [Real] -> Real
 source R from "finance_stats.R" ("analyzeDistribution")
 analyzeDistribution :: [Real] -> PriceDistribution
 
+-- Local helpers
+source Py from "helpers.py" ("last")
+last a :: [a] -> a
+
 --' Price a European call option using Monte Carlo
 --'
 --' Simulates stock price paths and computes option price.
