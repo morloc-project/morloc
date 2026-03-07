@@ -1,6 +1,6 @@
 module main (foo)
 
-import root-cpp
+import map-cpp
 
 foo :: Str -> Int -> Map Str Int
 foo k v = pack ([k], [v])

@@ -1,11 +1,14 @@
 module main (rms)
 
-import math (sqrt, mean)
-import root-py (Functor, Integral)
+import math-py (sqrt)
+import root-py
 
 source py from "rms.py"
   ( "rms1" as rms
+  , "mean"
   )
+
+mean :: [Real] -> Real
 
 square x = x * x
 rms xs = sqrt (mean (map square xs))

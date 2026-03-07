@@ -43,6 +43,9 @@ template<typename T, typename C> struct is_std_queue<std::queue<T, C>> : std::tr
 template<typename T> struct is_std_tuple : std::false_type {};
 template<typename... Args> struct is_std_tuple<std::tuple<Args...>> : std::true_type {};
 
+template<typename T> struct is_std_pair : std::false_type {};
+template<typename A, typename B> struct is_std_pair<std::pair<A, B>> : std::true_type {};
+
 template<typename T> struct is_std_optional : std::false_type {};
 template<typename T> struct is_std_optional<std::optional<T>> : std::true_type {};
 
@@ -381,6 +384,12 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::tup
     return createTupleAnythingHelper(dest, schema, cursor, data, std::index_sequence_for<Args...>{});
 }
 
+// Pair (reuses tuple helper since std::pair supports std::get)
+template<typename A, typename B>
+void* toAnything(void* dest, void** cursor, const Schema* schema, const std::pair<A, B>& data) {
+    return createTupleAnythingHelper(dest, schema, cursor, data, std::index_sequence<0, 1>{});
+}
+
 // Optional
 template<typename T>
 void* toAnything(void* dest, void** cursor, const Schema* schema, const std::optional<T>& data) {
@@ -500,6 +509,13 @@ T fromAnything(const Schema* schema, const void* data, T*) {
         return fromTupleAnythingHelper(
             schema, data,
             std::make_index_sequence<std::tuple_size_v<T>>{},
+            static_cast<T*>(nullptr)
+        );
+    }
+    else if constexpr (is_std_pair<T>::value) {
+        return fromTupleAnythingHelper(
+            schema, data,
+            std::index_sequence<0, 1>{},
             static_cast<T*>(nullptr)
         );
     }

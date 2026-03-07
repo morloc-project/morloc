@@ -1,0 +1,40 @@
+module main (pyQ, cppQ, rQ, pyAll, cppAll, rAll, pureQ, pureAll)
+
+source Py from "helper.py" ("identity" as pyId)
+source Cpp from "helper.hpp" ("identity" as cppId)
+source R from "helper.R" ("identity" as rId)
+
+pyId :: Str -> Str
+cppId :: Str -> Str
+rId :: Str -> Str
+
+type Py => Str = "str"
+type Cpp => Str = "std::string"
+type R => Str = "character"
+
+-- embedded double quotes
+pyQ :: Str
+pyQ = pyId "he said \"hi\""
+
+cppQ :: Str
+cppQ = cppId "he said \"hi\""
+
+rQ :: Str
+rQ = rId "he said \"hi\""
+
+-- all supported escape sequences combined
+pyAll :: Str
+pyAll = pyId "q:\" bs:\\ nl:\n tab:\t end"
+
+cppAll :: Str
+cppAll = cppId "q:\" bs:\\ nl:\n tab:\t end"
+
+rAll :: Str
+rAll = rId "q:\" bs:\\ nl:\n tab:\t end"
+
+-- pure morloc string constants
+pureQ :: Str
+pureQ = "he said \"hi\""
+
+pureAll :: Str
+pureAll = "q:\" bs:\\ nl:\n tab:\t end"

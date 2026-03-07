@@ -1,0 +1,164 @@
+module main
+  ( testPrecedence
+  , testParens
+  , testNegatives
+  , testNumericLiterals
+  , testMixedArith
+  , testGetterArith
+  , testNestedParens
+  , testAssociativity
+  )
+
+import root
+import root-py
+
+-- ================================================================
+-- Test 1: Basic operator precedence (no parens)
+-- Fixity from root:
+--   infixl 6 (+) (-)
+--   infixl 7 (*) (//) (%)
+--   infixr 8 (**)
+-- ================================================================
+testPrecedence :: [Bool]
+testPrecedence =
+  [ 2 + 3 * 4 == 14              -- * before +
+  , 10 - 2 * 3 == 4              -- * before -
+  , 1 + 2 + 3 == 6               -- left assoc +
+  , 10 - 3 - 2 == 5              -- left assoc -
+  , 2 * 3 + 4 * 5 == 26          -- two *'s, then +
+  , 10 - 2 * 3 + 1 == 5          -- mixed - and + with *
+  , 100 // 10 + 5 == 15          -- // before +
+  , 100 // 10 * 2 == 20          -- // and * same prec, left assoc
+  , 7 % 3 + 1 == 2               -- % before +
+  , 2 + 3 * 4 + 5 == 19          -- sandwich: + * +
+  ]
+
+-- ================================================================
+-- Test 2: Parenthesized expressions override precedence
+-- THIS IS THE CORE TEST for the CParenE/ParenE fix
+-- ================================================================
+testParens :: [Bool]
+testParens =
+  [ (2 + 3) * 4 == 20            -- parens force + before *
+  , 2 * (3 + 4) == 14            -- parens on right
+  , (2 + 3) * (4 + 5) == 45      -- both sides
+  , (10 - 2) * 3 == 24           -- parens force - before *
+  , 10 - (2 * 3) == 4            -- parens around natural precedence (no change)
+  , 2 * (3 + 4) != 2 * 3 + 4    -- 14 != 10, parens matter!
+  , (1 + 1) * (1 + 1) == 4       -- simple both-sides
+  , ((1 + 2)) == 3               -- double parens
+  , (((1 + 2) * 3)) == 9         -- triple nesting
+  , 100 // (2 + 3) == 20         -- parens with integer division
+  , (100 // 2) + 3 == 53         -- parens not needed but present
+  , (10 % 3) * 2 == 2            -- parens with modulo
+  , 10 % (3 * 2) == 4            -- parens force * inside %
+  ]
+
+-- ================================================================
+-- Test 3: Negative numbers and unary minus
+-- ================================================================
+testNegatives :: [Bool]
+testNegatives =
+  [ -1 + 2 == 1                  -- negative literal
+  , -3 * -2 == 6                 -- two negatives
+  , 5 + -3 == 2                  -- negative on right of +
+  , 5 * -2 == -10                -- negative on right of *
+  , -1 * -1 == 1                 -- double negative
+  , (-1) * (-1) == 1             -- parens around negatives
+  , (0 - 1) * 2 == -2             -- subtraction instead of unary minus on expr
+  , -10 + 5 * 2 == 0             -- precedence with negative: -10 + (5*2)
+  , (-10 + 5) * 2 == -10         -- parens override: (-5) * 2
+  , 0 - 1 == -1                  -- subtraction vs negative
+  ]
+
+-- ================================================================
+-- Test 4: Numeric literal formats
+-- ================================================================
+testNumericLiterals :: [Bool]
+testNumericLiterals =
+  [ 0xff == 255                  -- hex lowercase
+  , 0xFF == 255                  -- hex uppercase
+  , 0XFF == 255                  -- hex with capital X
+  , 0x0 == 0                    -- hex zero
+  , 0o77 == 63                   -- octal
+  , 0O77 == 63                   -- octal capital O
+  , 0o10 == 8                    -- octal 10 = decimal 8
+  , 0b1010 == 10                 -- binary
+  , 0B1111 == 15                 -- binary capital B
+  , 0b0 == 0                    -- binary zero
+  , 0b11111111 == 255            -- binary 255
+  , 0xff + 1 == 256              -- hex in arithmetic
+  , 0b1010 * 2 == 20             -- binary in arithmetic
+  , 0o10 + 0b10 == 10            -- octal + binary
+  , (0xff + 1) * 2 == 512        -- parens with hex
+  , 0xff * (0b10 + 1) == 765     -- mixed literal formats with parens
+  ]
+
+-- ================================================================
+-- Test 5: Mixed arithmetic with all operators
+-- ================================================================
+testMixedArith :: [Bool]
+testMixedArith =
+  [ 2 + 3 * 4 - 1 == 13                 -- + * - chain
+  , (2 + 3) * (4 - 1) == 15             -- parens both sides
+  , 100 // 10 + 100 % 10 == 10          -- // and % then +
+  , (100 + 50) // 10 == 15              -- parens with //
+  , 10 * 2 + 3 * 4 - 5 == 27            -- multi-term
+  , (10 * 2 + 3) * (4 - 5) == -23       -- complex parens
+  , 2 * 3 + 4 * 5 + 6 * 7 == 68         -- three products summed
+  , (2 * 3 + 4) * (5 + 6 * 7) == 470    -- nested precedence
+  , 1 + 2 * 3 + 4 * 5 + 6 == 33         -- long chain
+  , (1 + 2) * (3 + 4) * (5 + 6) == 231  -- three parenthesized groups
+  ]
+
+-- ================================================================
+-- Test 6: Getters/accessors mixed with arithmetic
+-- ================================================================
+testGetterArith :: [Bool]
+testGetterArith =
+  [ (.0 (10, 20)) + 5 == 15             -- getter result in arithmetic
+  , (.1 (10, 20)) * 2 == 40             -- getter then multiply
+  , (.0 (3, 7)) * (.1 (3, 7)) == 21     -- two getters multiplied
+  , (.0 (10, 20)) + (.1 (10, 20)) == 30 -- two getters added
+  , (.0 (2, 3)) * (.1 (2, 3)) + 1 == 7  -- getters with precedence
+  , ((.0 (2, 3)) + (.1 (2, 3))) * 2 == 10  -- parens around getter arithmetic
+  , (.0 (100, 200)) // (.1 (5, 10)) == 10  -- getters with integer division
+  ]
+
+-- ================================================================
+-- Test 7: Deeply nested parenthesization
+-- ================================================================
+testNestedParens :: [Bool]
+testNestedParens =
+  [ ((((1 + 2)))) == 3                           -- quad nesting
+  , (((2 + 3)) * ((4 + 5))) == 45                -- deep both sides
+  , ((1 + 2) * (3 + 4)) + ((5 + 6) * (7 + 8)) == 186  -- two complex products
+  , (((1 + 1) + 1) + 1) + 1 == 5                 -- left-nested
+  , 1 + (1 + (1 + (1 + 1))) == 5                 -- right-nested
+  , ((2) * ((3) + (4))) == 14                     -- redundant parens everywhere
+  , (1 + (2 * (3 + (4 * 5)))) == 47              -- alternating + and * nesting
+  , ((1 + 2 * 3) + (4 * 5 + 6)) == 33            -- parens grouping subexpressions
+  ]
+
+-- ================================================================
+-- Test 8: Associativity stress tests
+-- ================================================================
+testAssociativity :: [Bool]
+testAssociativity =
+  [ -- Addition is associative, these should all be equal
+    (1 + 2) + 3 == 1 + (2 + 3)
+  , (10 + 20) + 30 == 10 + (20 + 30)
+    -- Subtraction is NOT associative
+  , (10 - 3) - 2 == 5                 -- left assoc: (10-3)-2 = 5
+  , 10 - (3 - 2) == 9                 -- right grouping: 10-(3-2) = 9
+  , (10 - 3) - 2 != 10 - (3 - 2)     -- proves non-associativity
+    -- Multiplication is associative
+  , (2 * 3) * 4 == 2 * (3 * 4)
+    -- Integer division is NOT associative
+  , (100 // 10) // 2 == 5             -- left assoc: (100//10)//2 = 5
+  , 100 // (10 // 2) == 20            -- right grouping: 100//(10//2) = 20
+  , (100 // 10) // 2 != 100 // (10 // 2)  -- proves non-associativity
+    -- Mixed precedence chains
+  , 2 + 3 * 4 == (2 + (3 * 4))       -- natural precedence = explicit right grouping of *
+  , 2 * 3 + 4 == ((2 * 3) + 4)       -- natural precedence = explicit left grouping of *
+  ]

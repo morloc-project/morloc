@@ -1,0 +1,136 @@
+module main
+  ( showInt
+  , showReal
+  , showBool
+  , showStr
+  , showList
+  , showTuple
+  , showRecord
+  , showNested
+  , showOptSome
+  , showOptNone
+  , showEmptyList
+  , readInt
+  , readReal
+  , readBool
+  , readStr
+  , readList
+  , readTuple
+  , readRecord
+  , readInvalid
+  , readTypeMismatch
+  , readEmptyStr
+  , roundTripInt
+  , roundTripReal
+  , roundTripBool
+  , roundTripStr
+  , roundTripList
+  , roundTripTuple
+  , roundTripRecord
+  , roundTripNested
+  , showShowInt
+  )
+
+-- No language-specific imports: all nexus-level evaluation
+
+record Point where
+  x :: Int
+  y :: Int
+
+-- === @show tests ===
+
+showInt :: Str
+showInt = @show 42
+
+showReal :: Str
+showReal = @show 3.14
+
+showBool :: Str
+showBool = @show True
+
+showStr :: Str
+showStr = @show "hello"
+
+showList :: Str
+showList = @show [1, 2, 3]
+
+showTuple :: Str
+showTuple = @show (10, "abc")
+
+showRecord :: Str
+showRecord = @show {x = 1, y = 2}
+
+showNested :: Str
+showNested = @show [[1, 2], [3, 4]]
+
+showOptSome :: Str
+showOptSome = @show (@read "42" :: ?Int)
+
+showOptNone :: Str
+showOptNone = @show (@read "bad" :: ?Int)
+
+showEmptyList :: Str
+showEmptyList = @show ([] :: [Int])
+
+-- === @read tests ===
+
+readInt :: ?Int
+readInt = @read "42"
+
+readReal :: ?Real
+readReal = @read "3.14"
+
+readBool :: ?Bool
+readBool = @read "true"
+
+readStr :: ?Str
+readStr = @read "\"hello\""
+
+readList :: ?[Int]
+readList = @read "[1,2,3]"
+
+readTuple :: ?(Int, Str)
+readTuple = @read "[10,\"abc\"]"
+
+readRecord :: ?Point
+readRecord = @read "{\"x\":1,\"y\":2}"
+
+readInvalid :: ?Int
+readInvalid = @read "not_a_number"
+
+readTypeMismatch :: ?Int
+readTypeMismatch = @read "\"hello\""
+
+readEmptyStr :: ?Int
+readEmptyStr = @read ""
+
+-- === round-trip tests ===
+
+roundTripInt :: ?Int
+roundTripInt = @read (@show 42)
+
+roundTripReal :: ?Real
+roundTripReal = @read (@show 3.14)
+
+roundTripBool :: ?Bool
+roundTripBool = @read (@show True)
+
+roundTripStr :: ?Str
+roundTripStr = @read (@show "hello")
+
+roundTripList :: ?[Int]
+roundTripList = @read (@show [1, 2, 3])
+
+roundTripTuple :: ?(Int, Str)
+roundTripTuple = @read (@show (10, "abc"))
+
+roundTripRecord :: ?Point
+roundTripRecord = @read (@show {x = 1, y = 2})
+
+roundTripNested :: ?[[Int]]
+roundTripNested = @read (@show [[1, 2], [3, 4]])
+
+-- === edge case: @show of @show ===
+
+showShowInt :: Str
+showShowInt = @show (@show 42)

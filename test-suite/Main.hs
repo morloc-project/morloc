@@ -31,6 +31,7 @@ main = do
       , effectSynthesisTests
       , effectErrorTests
       , namespaceErrorTests
+      , typeclassTests
       , -- -- These tests pass locally and when I run the same container that I
         -- -- use in github actions. Yet these tests freeze in an infinite loop
         -- -- with no STDERR output on github. I have no idea why. But for now I'm
@@ -76,6 +77,7 @@ main = do
       , golden "claude-test-9" "claude-test-9"
       , golden "claude-test-10" "claude-test-10"
       , golden "claude-test-11" "claude-test-11"
+      , golden "claude-test-12" "claude-test-12"
       , golden "functional-data-1" "functional-data-1"
       , golden "functional-data-2" "functional-data-2"
       , golden "functional-data-3a" "functional-data-3a"
@@ -114,12 +116,16 @@ main = do
       , golden "typeclasses-5" "typeclasses-5"
       , golden "typeclasses-6" "typeclasses-6"
       , golden "typeclasses-7" "typeclasses-7"
+      , golden "typeclasses-8" "typeclasses-8"
+      , golden "typeclasses-9" "typeclasses-9"
+      , golden "poly-list-1" "poly-list-1"
       , golden "higher-kinded-types" "higher-kinded-types"
       , golden "string-encoding" "string-encoding"
       , golden "string-encoding-utf8" "string-encoding-utf8"
       , golden "string-json-parsing" "string-json-parsing"
       , golden "string-multiline" "string-multiline"
       , golden "string-interpolation" "string-interpolation"
+      , golden "string-escape" "string-escape"
       , golden "file-input-py" "file-input-py"
       , golden "file-input-c" "file-input-c"
       , golden "file-input-r" "file-input-r"
@@ -262,6 +268,9 @@ main = do
         golden "multiple-instances-2-c" "multiple-instances-2-c"
       , golden "multiple-instances-2-py" "multiple-instances-2-py"
       , golden "multiple-instances-2-r" "multiple-instances-2-r"
+      , golden "multi-lang-mempty-py" "multi-lang-mempty-py"
+      , golden "bare-selector-args" "bare-selector-args"
+      , golden "bare-selector-chain" "bare-selector-chain"
       , -- tests of module forms
         -- where *-sid
         --   s - number of sourced instances
@@ -405,6 +414,12 @@ main = do
       , -- intrinsic tests
         golden "intrinsic-hash" "intrinsic-hash"
       , golden "intrinsic-constants" "intrinsic-constants"
+      , golden "intrinsic-show-read" "intrinsic-show-read"
+      , golden "intrinsic-show-read-nexus" "intrinsic-show-read-nexus"
+      , -- parser stress test: precedence, parentheses, negatives, numeric literals, getters
+        golden "parser-stress" "parser-stress"
+      , -- stdout flush test: verify Python pool stdout is flushed before shutdown
+        golden "stdout-flush-py" "stdout-flush-py"
       , -- namespace import tests
         golden "namespace-basic" "namespace-basic"
       , golden "namespace-selective" "namespace-selective"

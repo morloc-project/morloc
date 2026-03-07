@@ -48,7 +48,7 @@ import qualified Morloc.BaseTypes as BT
 -- - 2 from force_expr ('!' could start force or be part of another expr)
 -- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
 -- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
-%expect 59
+%expect 61
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -70,6 +70,7 @@ import qualified Morloc.BaseTypes as BT
   '.'        { Located _ TokDot _ }
   GDOT       { Located _ TokGetterDot _ }
   NSDOT      { Located _ TokNsDot _ }
+  GDOTCHAIN  { Located _ TokGetterDotChain _ }
   '='        { Located _ TokEquals _ }
   '::'       { Located _ TokDColon _ }
   '->'       { Located _ TokArrow _ }
@@ -185,6 +186,7 @@ module_parts :: { [Text] }
   | module_parts '.' module_comp       { $1 ++ [$3] }
   | module_parts GDOT module_comp      { $1 ++ [$3] }
   | module_parts NSDOT module_comp     { $1 ++ [$3] }
+  | module_parts GDOTCHAIN module_comp { $1 ++ [$3] }
 
 module_comp :: { Text }
   : LOWER                              { getName $1 }
@@ -539,7 +541,7 @@ paren_expr :: { Loc CstExpr }
   | '(' operator_name ')'     { at $1 (CVarE (EV (getOp $2))) }
   | '(' '-' ')'               { at $1 (CVarE (EV "-")) }
   | '(' '.' ')'               { at $1 (CVarE (EV ".")) }
-  | '(' expr ')'              { $2 }
+  | '(' expr ')'              { Loc ($1 <-> $3) (CParenE $2) }
   | '(' expr ',' expr_list1 ')' { Loc ($1 <-> $5) (CTupE ($2 : $4)) }
 
 expr_list1 :: { [Loc CstExpr] }
@@ -575,7 +577,8 @@ do_stmt :: { CstDoStmt }
   | expr                       { CstDoBare $1 }
 
 getter_expr :: { Loc CstExpr }
-  : GDOT accessor_body    { at $1 (CAccessorE $2) }
+  : GDOT accessor_body      { at $1 (CAccessorE $2) }
+  | GDOTCHAIN accessor_body { at $1 (CAccessorE $2) }
 
 accessor_body :: { CstAccessorBody }
   : LOWER accessor_tail           { CABKey (getName $1) $2 }
@@ -585,14 +588,15 @@ accessor_body :: { CstAccessorBody }
 accessor_tail :: { CstAccessorTail }
   : {- empty -}                   { CATEnd }
   | '=' expr                      { CATSet $2 }
-  | GDOT accessor_body            { CATChain $2 }
+  | GDOTCHAIN accessor_body       { CATChain $2 }
 
 grouped_accessors :: { [CstAccessorBody] }
   : grouped_accessor                          { [$1] }
   | grouped_accessors ',' grouped_accessor   { $1 ++ [$3] }
 
 grouped_accessor :: { CstAccessorBody }
-  : GDOT accessor_body   { $2 }
+  : GDOT accessor_body      { $2 }
+  | GDOTCHAIN accessor_body { $2 }
 
 var_expr :: { Loc CstExpr }
   : LOWER NSDOT LOWER         { Loc ($1 <-> $3) (CVarE (EV (getName $1 <> "." <> getName $3))) }

@@ -2,10 +2,10 @@ all:
 	rm -f *.err obs.txt
 	morloc make -o nexus t0.loc 2> build.err
 	./nexus checkInt 2>> obs.err  >> obs.txt
-	./nexus checkSInt8 2>> obs.err  >> obs.txt
-	./nexus checkSInt16 2>> obs.err  >> obs.txt
-	./nexus checkSInt32 2>> obs.err  >> obs.txt
-	./nexus checkSInt64 2>> obs.err  >> obs.txt
+	./nexus checkInt8 2>> obs.err  >> obs.txt
+	./nexus checkInt16 2>> obs.err  >> obs.txt
+	./nexus checkInt32 2>> obs.err  >> obs.txt
+	./nexus checkInt64 2>> obs.err  >> obs.txt
 	./nexus checkUInt8 2>> obs.err  >> obs.txt
 	./nexus checkUInt16 2>> obs.err  >> obs.txt
 	./nexus checkUInt32 2>> obs.err  >> obs.txt

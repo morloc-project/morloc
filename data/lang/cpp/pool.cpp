@@ -179,6 +179,41 @@ void _mlc_save_json(const T& value, const std::string& schema_str, const std::st
     }
 }
 
+// Serialize a value to a JSON string
+template <typename T>
+std::string _mlc_show(const T& value, const std::string& schema_str) {
+    Schema* schema = get_cached_schema(schema_str.c_str());
+    void* voidstar = toAnything(schema, value);
+    char* errmsg = NULL;
+    char* json = mlc_show(voidstar, schema, &errmsg);
+    shfree_cpp(voidstar);
+    if (errmsg != NULL) {
+        PROPAGATE_ERROR(errmsg)
+    }
+    std::string result(json);
+    free(json);
+    return result;
+}
+
+// Deserialize a JSON string to a typed value
+// Returns std::nullopt on parse failure
+template <typename T>
+std::optional<T> _mlc_read(const std::string& schema_str, const std::string& json_str) {
+    Schema* schema = get_cached_schema(schema_str.c_str());
+    char* errmsg = NULL;
+    void* voidstar = mlc_read(json_str.c_str(), schema, &errmsg);
+    if (errmsg != NULL) {
+        PROPAGATE_ERROR(errmsg)
+    }
+    if (voidstar == NULL) {
+        return std::nullopt;
+    }
+    T* dummy = nullptr;
+    T result = fromAnything(schema, voidstar, dummy);
+    shfree_cpp(voidstar);
+    return result;
+}
+
 // Load a value from file, auto-detecting format
 // Returns std::nullopt if file does not exist
 template <typename T>
@@ -290,6 +325,11 @@ static uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
 
 
 int main(int argc, char* argv[]) {
+    // Line-buffer stderr so diagnostic output is not lost on pool shutdown.
+    // stdout is left fully buffered for performance (genome-scale piping)
+    // and flushed after each job by pool.c.
+    setvbuf(stderr, NULL, _IOLBF, 0);
+
     if (argc != 4) {
         std::cerr << "Usage: " << argv[0] << " <socket_path> <tmpdir> <shm_basename>\n";
         return 1;

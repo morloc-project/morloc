@@ -585,7 +585,7 @@ genericPrintExpr desc = go
     go INullLit = pretty (ldNullLiteral desc)
     go (IIntLit i) = viaShow i <> pretty (ldIntLiteralSuffix desc)
     go (IRealLit r) = viaShow r
-    go (IStrLit s) = dquotes (pretty s)
+    go (IStrLit s) = textEsc' s
     go (IListLit es) = case ldListStyle desc of
       BracketList -> list (map go es)
       FunctionCallList -> pretty (ldGenericListFn desc) <> tupled (map go es)
@@ -644,6 +644,12 @@ genericPrintExpr desc = go
     go (IIntrinsicLoad schema _ path) =
       let prefix = extractModulePrefix (ldSerializeFn desc)
        in pretty prefix <> "mlc_load(" <> dquotes (pretty schema) <> ", " <> go path <> ")"
+    go (IIntrinsicShow schema e) =
+      let prefix = extractModulePrefix (ldSerializeFn desc)
+       in pretty prefix <> "mlc_show(" <> go e <> ", " <> dquotes (pretty schema) <> ")"
+    go (IIntrinsicRead schema _ e) =
+      let prefix = extractModulePrefix (ldSerializeFn desc)
+       in pretty prefix <> "mlc_read(" <> dquotes (pretty schema) <> ", " <> go e <> ")"
 
 -- | Generic statement printer driven by descriptor
 genericPrintStmt :: LangDescriptor -> IStmt -> MDoc

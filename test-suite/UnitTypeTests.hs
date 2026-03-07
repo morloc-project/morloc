@@ -24,6 +24,7 @@ module UnitTypeTests
   , effectSynthesisTests
   , effectErrorTests
   , namespaceErrorTests
+  , typeclassTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -2652,4 +2653,267 @@ namespaceErrorTests =
         x :: Int
         x = double 5
           |]
+      ]
+
+typeclassTests :: TestTree
+typeclassTests =
+  localOption (mkTimeout 200000) $ -- 0.2 second timeout
+    testGroup
+      "Typeclass tests"
+      [ -- === ANNOTATION PROPAGATION FIX (the core bug) ===
+        -- Annotation leaked through copyState/reindexExprI to implementation
+        -- indices, causing checkG to wrongly constrain non-matching instances.
+
+        -- Instance declaration order must not matter
+        assertGeneralType
+          "annotation selects Str instance (Str declared first)"
+          [r|
+        module main (x)
+        class Monoid a where
+          mempty a :: a
+        instance Monoid Str where
+          mempty = ""
+        instance Monoid (List a) where
+          mempty = []
+        x :: Str
+        x = mempty :: Str
+          |]
+          str
+
+      , assertGeneralType
+          "annotation selects Str instance (List declared first)"
+          [r|
+        module main (x)
+        class Monoid a where
+          mempty a :: a
+        instance Monoid (List a) where
+          mempty = []
+        instance Monoid Str where
+          mempty = ""
+        x :: Str
+        x = mempty :: Str
+          |]
+          str
+
+      , -- Annotation selects the parametric instance
+        assertGeneralType
+          "annotation selects List instance"
+          [r|
+        module main (x)
+        class Monoid a where
+          mempty a :: a
+        instance Monoid Str where
+          mempty = ""
+        instance Monoid (List a) where
+          mempty = []
+        x :: [Int]
+        x = mempty :: [Int]
+          |]
+          (lst int)
+
+      , -- Export signature alone (no inline annotation) resolves the instance
+        assertGeneralType
+          "export signature resolves instance without inline annotation"
+          [r|
+        module main (x)
+        class Monoid a where
+          mempty a :: a
+        instance Monoid Str where
+          mempty = ""
+        instance Monoid (List a) where
+          mempty = []
+        x :: Str
+        x = mempty
+          |]
+          str
+
+      , -- === MONOMORPHIC ANNOTATION FIX ===
+        -- Annotation on standalone polymorphic functions (not typeclass methods)
+        -- leaked via copyState to MonomorphicExpr implementation indices.
+
+        assertGeneralType
+          "annotation on standalone polymorphic function with args"
+          [r|
+        module main (foo)
+        type Py => Int = "int"
+        myId a :: a -> a
+        source Py ("lambda x: x" as myId)
+        foo :: Int
+        foo = (myId :: Int -> Int) 42
+          |]
+          int
+
+      , assertGeneralType
+          "annotation on standalone polymorphic nullary function"
+          [r|
+        module main (foo)
+        type Py => Real = "float"
+        myVal a :: a
+        source Py ("lambda: 3.14" as myVal)
+        foo :: Real
+        foo = myVal :: Real
+          |]
+          real
+
+      , -- === SUPERCLASS CONSTRAINTS ===
+
+        assertGeneralType
+          "superclass method usable with subclass instance"
+          [r|
+        module main (x)
+        type Py => Str = "str"
+        class Semigroup a where
+          append a :: a -> a -> a
+        class Semigroup a => Monoid a where
+          mempty a :: a
+        instance Semigroup Str where
+          source Py from "foo.py" ("appendStr" as append)
+        instance Monoid Str where
+          mempty = ""
+        x :: Str
+        x = append "" ""
+          |]
+          str
+
+      , -- === NEGATIVE TESTS ===
+
+        exprTestBad
+          "ambiguous: multiple instances, no annotation"
+          [r|
+        module main (x)
+        class Monoid a where
+          mempty a :: a
+        instance Monoid Str where
+          mempty = ""
+        instance Monoid (List a) where
+          mempty = []
+        x = mempty
+          |]
+
+      , exprTestBad
+          "no matching instance for annotated type"
+          [r|
+        module main (x)
+        class Monoid a where
+          mempty a :: a
+        instance Monoid Str where
+          mempty = ""
+        x :: Real
+        x = mempty :: Real
+          |]
+
+      , exprTestBad
+          "no instances defined"
+          [r|
+        module main (x)
+        class Monoid a where
+          mempty a :: a
+        x :: Str
+        x = mempty
+          |]
+
+      , exprTestBad
+          "annotation contradicts export signature"
+          [r|
+        module main (x)
+        class Monoid a where
+          mempty a :: a
+        instance Monoid Str where
+          mempty = ""
+        instance Monoid (List a) where
+          mempty = []
+        x :: Int
+        x = mempty :: Str
+          |]
+
+      , -- === COERCION-AWARE INSTANCE RESOLUTION ===
+
+        assertGeneralType
+          "instance resolved through optional coercion"
+          [r|
+        module main (x)
+        class Default a where
+          def a :: a
+        instance Default Int where
+          def = 0
+        x :: ?Int
+        x = def
+          |]
+          (OptionalU int)
+
+      , assertGeneralType
+          "typeclass method in effectful do-block"
+          [r|
+        module main (x)
+        class Default a where
+          def a :: a
+        instance Default Int where
+          def = 0
+        f :: Int -> <IO> Int
+        x = do !(f def)
+          |]
+          (ioEff int)
+
+      , -- === INTERACTION WITH OTHER FEATURES ===
+
+        assertGeneralType
+          "typeclass method in let binding"
+          [r|
+        module main (x)
+        class Monoid a where
+          mempty a :: a
+        instance Monoid Str where
+          mempty = ""
+        instance Monoid (List a) where
+          mempty = []
+        x :: Str
+        x =
+          let y = (mempty :: Str)
+          in y
+          |]
+          str
+
+      , assertGeneralType
+          "typeclass method resolved by function argument context"
+          [r|
+        module main (x)
+        class Monoid a where
+          mempty a :: a
+        instance Monoid Str where
+          mempty = ""
+        instance Monoid (List a) where
+          mempty = []
+        f :: Str -> Str
+        x :: Str
+        x = f mempty
+          |]
+          str
+
+      , assertGeneralType
+          "class with multiple nullary methods"
+          [r|
+        module main (x)
+        class Bounded a where
+          minBound a :: a
+          maxBound a :: a
+        instance Bounded Int where
+          minBound = 0
+          maxBound = 100
+        x :: Int
+        x = minBound
+          |]
+          int
+
+      , assertGeneralType
+          "nested parametric instance"
+          [r|
+        module main (x)
+        class Monoid a where
+          mempty a :: a
+        instance Monoid (List a) where
+          mempty = []
+        x :: [[Int]]
+        x = mempty
+          |]
+          (lst (lst int))
       ]

@@ -251,6 +251,7 @@ static void* pool_worker_thread(void* arg) {
             }
         }
 
+        fflush(stdout);
         close_socket(client_fd);
     }
     return NULL;
@@ -474,6 +475,7 @@ static void pool_fork_worker(pool_state_t* state, int read_fd,
             if (errmsg) { free(errmsg); errmsg = NULL; }
         }
 
+        fflush(stdout);
         close_socket(client_fd);
     }
 }
@@ -681,6 +683,7 @@ static int pool_main_single(pool_state_t* state, char* socket_path,
             if (errmsg) { free(errmsg); errmsg = NULL; }
         }
 
+        fflush(stdout);
         close_socket(client_fd);
     }
 

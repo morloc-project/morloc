@@ -93,6 +93,8 @@ def run_job(client_fd: int) -> None:
         # case a new ping will be sent
         print(f"job failed: {e!s}", file=sys.stderr)
     finally:
+        # Flush stdout so user function output is not lost on pool shutdown
+        sys.stdout.flush()
         # close child copy
         morloc.close_socket(client_fd)
 
@@ -178,6 +180,11 @@ def client_listener(job_fd, socket_path, tmpdir, shm_basename, shutdown_flag):
 
 
 if __name__ == "__main__":
+    # Line-buffer stderr so diagnostic output is not lost when pool is killed.
+    # stdout is left fully buffered for performance (genome-scale piping) and
+    # flushed explicitly after each job and during shutdown.
+    sys.stderr.reconfigure(line_buffering=True)
+
     shutdown_flag = Value('b', False)  # Shared flag
 
     signal.signal(signal.SIGINT, signal_handler)

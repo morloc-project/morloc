@@ -1,6 +1,6 @@
 module main (foo)
 
-import root-r
+import map-r
 
 record (Person a) = Person {name :: Str, info :: a}
 record R => (Person a) = "list" {name :: Str, info :: a}

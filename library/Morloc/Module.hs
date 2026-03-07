@@ -344,7 +344,11 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
           targetExists <- liftIO $ doesDirectoryExist targetDir
           case (targetExists, overwrite) of
             (True, DoNotOverwrite) -> do
-              MM.sayVVV $ "Module" <+> pretty name <+> "already installed, skipping"
+              case reason of
+                ExplicitInstall ->
+                  MM.say $ "Module" <+> pretty name <+> "is already installed, use --force to reinstall"
+                AutoDependency ->
+                  MM.sayVVV $ "Module" <+> pretty name <+> "already installed, skipping"
               return ()
             (True, ForceOverwrite) -> do
               liftIO $ removeDirectoryRecursive targetDir

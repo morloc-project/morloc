@@ -25,4 +25,12 @@ double rms2(std::vector<double> xs){
     return sqrt(x / xs.size());
 }
 
+double mean(std::vector<double> xs){
+    double s = 0;
+    for(size_t i = 0; i < xs.size(); i++){
+        s += xs[i];
+    }
+    return s / xs.size();
+}
+
 #endif

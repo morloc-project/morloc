@@ -163,6 +163,7 @@ checkExprI f e@(ExprI _ (IfE c t el)) = f e >> mapM_ (checkExprI f) [c, t, el]
 checkExprI f e@(ExprI _ (DoBlockE e')) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (EvalE e')) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (IntrinsicE _ es)) = f e >> mapM_ (checkExprI f) es
+checkExprI f e@(ExprI _ (ParenE e')) = f e >> checkExprI f e'
 checkExprI f e = f e
 
 -- | Find the largest index used in an 'ExprI' tree.
@@ -184,6 +185,7 @@ maxIndex (ExprI i (IfE c t e)) = maximum [i, maxIndex c, maxIndex t, maxIndex e]
 maxIndex (ExprI i (DoBlockE e)) = max i (maxIndex e)
 maxIndex (ExprI i (EvalE e)) = max i (maxIndex e)
 maxIndex (ExprI i (IntrinsicE _ es)) = maximum (i : map maxIndex es)
+maxIndex (ExprI i (ParenE e)) = max i (maxIndex e)
 maxIndex (ExprI i _) = i
 
 -- | Collect all indices from an 'ExprI' tree.
@@ -208,4 +210,5 @@ getIndices (ExprI i (IfE c t e)) = i : concatMap getIndices [c, t, e]
 getIndices (ExprI i (DoBlockE e)) = i : getIndices e
 getIndices (ExprI i (EvalE e)) = i : getIndices e
 getIndices (ExprI i (IntrinsicE _ es)) = i : concatMap getIndices es
+getIndices (ExprI i (ParenE e)) = i : getIndices e
 getIndices (ExprI i _) = [i]

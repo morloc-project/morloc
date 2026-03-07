@@ -1,0 +1,29 @@
+module main (testStr, testList, testListInt)
+
+type Py => Int = "int"
+type Py => Str = "str"
+type Py => (List a) = "list" a
+
+class Monoid a where
+  mempty a :: a
+  mappend a :: a -> a -> a
+
+instance Monoid Str where
+  source Py from "foo.py" ("appendStr" as mappend)
+  mempty = ""
+
+instance Monoid (List a) where
+  source Py from "foo.py" ("appendList" as mappend)
+  mempty = []
+
+-- The core regression: annotation selects Str, not List
+testStr :: Str
+testStr = mappend mempty "hello"
+
+-- Annotation selects List
+testList :: [Str]
+testList = mappend mempty ["world"]
+
+-- Nested: compose methods from same class at different types
+testListInt :: [Int]
+testListInt = mappend (mappend mempty [1]) [2, 3]

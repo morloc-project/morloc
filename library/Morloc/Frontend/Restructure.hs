@@ -497,6 +497,7 @@ handleBinops d0 = do
         f (ExprI i (DoBlockE e)) = DoBlockE <$> f e |>> ExprI i
         f (ExprI i (EvalE e)) = EvalE <$> f e |>> ExprI i
         f (ExprI i (IntrinsicE intr es)) = IntrinsicE intr <$> mapM f es |>> ExprI i
+        f (ExprI _ (ParenE inner)) = f inner
         f e = return e
 
     -- \| Rewrite a right-nested BopE chain into a correctly-associated AppE tree.

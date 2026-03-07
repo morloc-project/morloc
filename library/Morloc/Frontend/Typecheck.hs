@@ -24,6 +24,7 @@ import qualified Morloc.Data.Text as MT
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
+import Data.Maybe (isJust)
 import Morloc.Typecheck.Internal
 
 {- | Each SAnno object in the input list represents one exported function.
@@ -173,7 +174,11 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f scope g0 (VarS v (PolymorphicExpr clsName _ _ rss)) = do
       -- find all instances that are a subtype of the inferred type
       -- this resolve general aliases all the way to the general termini
-      let rssSubtypes = [x | x@(EType t _ _, _) <- rss, isSubtypeOf2 scope t gt]
+      -- Also accept instances reachable via coercion (e.g., Int matches ?Int)
+      let emptyGamma = Gamma 0 [] Map.empty
+          isCompatible t = isSubtypeOf2 scope t gt
+                        || isJust (tryCoerce scope t gt emptyGamma)
+          rssSubtypes = [x | x@(EType t _ _, _) <- rss, isCompatible t]
 
       -- find the most specific instance at the general level, this does not
       -- consider a type to be more specific it is more evaluated.
@@ -257,7 +262,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     connectInstance g0 [] = return g0
     connectInstance g0 (AnnoS (Idx i t) _ _ : es) = do
       scope <- MM.getGeneralScope i
-      case subtype scope gt t g0 of
+      case subtype scope (stripCoercionWrappers gt) t g0 of
         (Left e) -> throwTypeError i e
         (Right g1) -> connectInstance g1 es
 
@@ -276,7 +281,7 @@ checkG ::
     )
 checkG g (AnnoS i j e) t = do
   annotation <- MM.gets stateAnnotations
-  (g', t', e') <- case Map.lookup i annotation of
+  (g', t', e') <- case Map.lookup j annotation of
     Nothing -> checkE' i g e t
     (Just annType) -> do
       gAnn <- subtype' i annType t g
@@ -293,7 +298,7 @@ synthG ::
     )
 synthG g (AnnoS gi ci e) = do
   annotation <- MM.gets stateAnnotations
-  (g', t, e') <- case Map.lookup gi annotation of
+  (g', t, e') <- case Map.lookup ci annotation of
     Nothing -> synthE' gi g e
     (Just annType) -> checkE' gi g e annType
   return (g', t, AnnoS (Idx gi t) ci e')
@@ -503,13 +508,13 @@ synthE _ g0 (NamS rs) = do
 -- variables should be checked against. I think (this needs formalization).
 synthE _ g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
   let (g1, t1) = rename g0 (etype t0)
-      g1' = g1 ++> [AnnG v t1]  -- add function type for recursive CallS references
+      g1' = g1 ++> [AnnG v t1]
   (g2, t2, xs1) <- foldCheck g1' xs0 t1
   let xs2 = applyCon g2 $ VarS v (MonomorphicExpr (Just t0) xs1)
   return (g2, t2, xs2)
 synthE _ g (VarS v (MonomorphicExpr Nothing (x : xs))) = do
   let (g0', freshT) = newvar (unEVar v <> "_rec") g
-      g0'' = g0' ++> [AnnG v freshT]  -- add fresh type for recursive CallS references
+      g0'' = g0' ++> [AnnG v freshT]
   (g', t', x') <- synthG g0'' x
   (g'', t'', xs') <- foldCheck g' xs t'
   let xs'' = applyCon g'' $ VarS v (MonomorphicExpr Nothing (x' : xs'))
@@ -557,9 +562,18 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
       [AnnoS Int ManyPoly Int] ->
       MorlocMonad (Gamma, [AnnoS (Indexed TypeU) ManyPoly Int])
     checkImplementations g _ [] = return (g, [])
-    checkImplementations g10 t (e : es) = do
-      -- check this instance
+    checkImplementations g10 t (e@(AnnoS implGi _ _) : es) = do
+      -- Temporarily remove any annotation that was propagated to this
+      -- implementation's index via copyState/reindexExprI. An annotation
+      -- like `mempty :: Str` on the usage site must not constrain checking
+      -- of each instance implementation (e.g. the List instance's `[]`).
+      implAnn <- MM.gets (Map.lookup implGi . stateAnnotations)
+      MM.modify (\s -> s { stateAnnotations = Map.delete implGi (stateAnnotations s) })
       (g11, _, e') <- checkG g10 e t
+      -- Restore
+      case implAnn of
+        Just ann -> MM.modify (\s -> s { stateAnnotations = Map.insert implGi ann (stateAnnotations s) })
+        Nothing -> return ()
 
       -- check all the remaining implementations
       (g12, es') <- checkImplementations g11 t es
@@ -567,6 +581,15 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
       -- return the final context and the applied expressions
       return (g12, applyGen g12 e' : es')
 
+-- bare selector pattern (e.g., .0 or .1 used as a function argument, not applied)
+synthE _ g0 (ExeS (PatCall (PatternStruct s))) = do
+  (g1, datType) <- selectorType g0 s
+  retType <- return $ case selectorGetter datType s of
+    [] -> error "Illegal empty selection"
+    [t] -> t
+    ts -> BT.tupleU ts
+  let ft = FunU [datType] retType
+  return (g1, ft, ExeS (PatCall (PatternStruct s)))
 -- This case will only be encountered in check, the existential generated here
 -- will be subtyped against the type known from the VarS case.
 synthE _ g (ExeS exe) = do
@@ -630,6 +653,9 @@ intrinsicTypeG :: Gamma -> Intrinsic -> (Gamma, TypeU)
 intrinsicTypeG g IntrLoad =
   let (g', loadType) = newvar "load_" g
   in (g', EffectU ioEffectSet (OptionalU loadType))
+intrinsicTypeG g IntrRead =
+  let (g', readType) = newvar "read_" g
+  in (g', OptionalU readType)
 intrinsicTypeG g intr = (g, intrinsicType intr)
 
 -- | Return type of a fully applied intrinsic (for intrinsics without fresh vars)
@@ -644,6 +670,8 @@ intrinsicType IntrCompiled = BT.strU
 intrinsicType IntrLang = BT.strU
 intrinsicType IntrSchema = BT.strU
 intrinsicType IntrTypeof = BT.strU
+intrinsicType IntrShow = BT.strU
+intrinsicType IntrRead = OptionalU (ExistU (TV "read_a") ([], Open) ([], Open))
 
 -- intrinsicArity is defined in Morloc.Namespace.Expr
 
@@ -682,6 +710,10 @@ checkIntrinsicArgs i g intr argTypes = do
         -- @schema/@typeof: a -> Str (value ignored at runtime)
         (IntrSchema, [_]) -> return g
         (IntrTypeof, [_]) -> return g
+        -- @show: a -> Str (any type accepted)
+        (IntrShow, [_]) -> return g
+        -- @read: Str -> ?a (arg must be Str)
+        (IntrRead, [strT]) -> subtype' i strT BT.strU g
         -- compile-time constants: no args
         (IntrVersion, []) -> return g
         (IntrCompiled, []) -> return g
@@ -969,6 +1001,13 @@ tryCoerce scope a (EffectU effs b) g =
       Just (cs, g') -> Just (CoerceToEffect (resolveEffectSet effs) : cs, g')
       Nothing -> Nothing
 tryCoerce _ _ _ _ = Nothing
+
+-- | Strip OptionalU and EffectU wrappers that result from coercion.
+-- Used in instance resolution to match the underlying type.
+stripCoercionWrappers :: TypeU -> TypeU
+stripCoercionWrappers (OptionalU t) = stripCoercionWrappers t
+stripCoercionWrappers (EffectU _ t) = stripCoercionWrappers t
+stripCoercionWrappers t = t
 
 -- | Collect effect labels from all EvalS nodes within a do-block body.
 -- Deeply traverses the full expression tree to find nested EvalS nodes

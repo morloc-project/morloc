@@ -1,0 +1,7 @@
+module test (starlingTest)
+
+import root
+import root-py
+
+starlingTest :: (Int, Int) -> Int
+starlingTest = starling const .0 .1

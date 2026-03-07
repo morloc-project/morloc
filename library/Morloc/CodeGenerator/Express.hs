@@ -534,19 +534,21 @@ expressPolyExpr _ _ _ (AnnoS (Idx i _) _ (AppS (AnnoS _ _ (BndS v)) _)) =
     "Undefined function" <+> dquotes (pretty v) <> ", did you forget an import?"
 expressPolyExpr _ _ _ (AnnoS _ _ (AppS (AnnoS _ _ (LamS vs _)) _)) =
   error $ "All applications of lambdas should have been eliminated of length " <> show (length vs)
-expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx _ lang, _) (IfS cond thenE elseE)) = do
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (IfS cond thenE elseE)) = do
   let boolType = VarT (TV "Bool")
   cond' <- expressPolyExprWrap lang (mkIdx cond boolType) cond
   thenE' <- expressPolyExprWrap lang (mkIdx thenE t) thenE
   elseE' <- expressPolyExprWrap lang (mkIdx elseE t) elseE
-  return $ PolyIf cond' thenE' elseE'
-expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx cidx lang, _) (DoBlockS x)) = do
+  let e = PolyIf cond' thenE' elseE'
+  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (DoBlockS x)) = do
   -- The inner expression has the unwrapped type (without EffectT).
   -- Passing EffectT through would cause cross-language calls to generate
   -- effect-wrapped return types for pure functions.
   let innerT = case t of EffectT _ inner -> inner; _ -> t
   x' <- expressPolyExprWrap lang (mkIdx x innerT) x
-  return $ PolyDoBlock (Idx cidx t) x'
+  let e = PolyDoBlock (Idx cidx t) x'
+  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _, _) (CoerceS coercion x)) = do
   let innerType = unapplyCoercion coercion t
   x' <- expressPolyExprWrap parentLang (Idx cidx innerType) x
@@ -561,9 +563,10 @@ expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (EvalS x)) = 
   -- even if the inner expression calls into a foreign language.
   x' <- expressPolyExprWrap parentLang (Idx cidx t) x
   return $ pushForceIntoRemote (Idx cidx t) x'
-expressPolyExpr _ _ _ (AnnoS (Idx _ t) (Idx cidx lang, _) (IntrinsicS intr xs)) = do
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (IntrinsicS intr xs)) = do
   xs' <- mapM (\x@(AnnoS (Idx xi xt) _ _) -> expressPolyExprWrap lang (Idx xi xt) x) xs
-  return $ PolyIntrinsic (Idx cidx t) intr xs'
+  let e = PolyIntrinsic (Idx cidx t) intr xs'
+  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 
 -- Nullary source/pattern call (e.g., clockResNs :: {Int})
 expressPolyExpr

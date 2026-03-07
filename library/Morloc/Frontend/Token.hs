@@ -90,6 +90,8 @@ data Token
     TokGetterDot
   | -- | . (namespace qualifier, no space before dot, e.g., f.map)
     TokNsDot
+  | -- | . (chained getter, e.g., the second dot in .foo.bar)
+    TokGetterDotChain
   | -- Reserved operators
 
     -- | =
@@ -189,6 +191,7 @@ showToken TokQuestion = "'?'"
 showToken TokDot = "'.'"
 showToken TokGetterDot = "'.'"
 showToken TokNsDot = "'.' (namespace)"
+showToken TokGetterDotChain = "'.'"
 showToken TokEquals = "'='"
 showToken TokColon = "':'"
 showToken TokDColon = "'::'"

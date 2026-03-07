@@ -1,0 +1,145 @@
+module main (testListLiteral, testListMempty, testListAppend,
+             testListCons, testListUncons,
+             testListSnoc, testListUnsnoc,
+             testListAt,
+             testDequeLiteral, testDequeMempty, testDequeAppend,
+             testDequeCons, testDequeUncons,
+             testDequeSnoc, testDequeUnsnoc,
+             testVectorLiteral, testVectorAppend,
+             testVectorCons, testVectorUncons,
+             testVectorSnoc, testVectorUnsnoc)
+
+-- Primitive types (standalone, no root import)
+type Cpp => Int = "int"
+
+-- Container types
+type Cpp => List a = "std::vector<$1>" a
+type Cpp => Deque a = "std::deque<$1>" a
+type Cpp => Vector a = "std::vector<$1>" a
+
+-- Tuple for uncons/unsnoc return types
+type Cpp => Tuple2 a b = "std::tuple<$1,$2>" a b
+
+-- General type definitions
+type List a
+type Deque a = List a
+type Vector a = List a
+
+-- Typeclasses
+class Semigroup a where
+  append a :: a -> a -> a
+
+class Semigroup a => Monoid a where
+  mempty a :: a
+
+class Indexed f where
+  at f a :: Int -> f a -> a
+
+class Stack f where
+  cons f a :: a -> f a -> f a
+  uncons f a :: f a -> (a, f a)
+
+class Queue f where
+  snoc f a :: f a -> a -> f a
+  unsnoc f a :: f a -> (f a, a)
+
+-- List instances
+instance Semigroup (List a) where
+  source Cpp from "foo.hpp" ("appendList" as append)
+
+instance Monoid (List a) where
+  mempty = []
+
+instance Indexed List where
+  source Cpp from "foo.hpp" ("listAt" as at)
+
+instance Stack List where
+  source Cpp from "foo.hpp" ("listCons" as cons)
+  source Cpp from "foo.hpp" ("listUncons" as uncons)
+
+instance Queue List where
+  source Cpp from "foo.hpp" ("listSnoc" as snoc)
+  source Cpp from "foo.hpp" ("listUnsnoc" as unsnoc)
+
+-- Deque instances (maps to std::deque in C++)
+instance Semigroup (Deque a) where
+  source Cpp from "foo.hpp" ("appendDeque" as append)
+
+instance Monoid (Deque a) where
+  mempty = []
+
+instance Stack Deque where
+  source Cpp from "foo.hpp" ("dequeCons" as cons)
+  source Cpp from "foo.hpp" ("dequeUncons" as uncons)
+
+instance Queue Deque where
+  source Cpp from "foo.hpp" ("dequeSnoc" as snoc)
+  source Cpp from "foo.hpp" ("dequeUnsnoc" as unsnoc)
+
+-- No Vector instances needed (reduces to List in C++)
+
+-- List tests
+testListLiteral :: [Int]
+testListLiteral = [1, 2, 3]
+
+testListMempty :: [Int]
+testListMempty = append mempty [1, 2, 3]
+
+testListAppend :: [Int]
+testListAppend = append [1, 2] [3, 4]
+
+testListCons :: [Int]
+testListCons = cons 0 [1, 2, 3]
+
+testListUncons :: (Int, [Int])
+testListUncons = uncons [1, 2, 3]
+
+testListSnoc :: [Int]
+testListSnoc = snoc [1, 2, 3] 4
+
+testListUnsnoc :: ([Int], Int)
+testListUnsnoc = unsnoc [1, 2, 3]
+
+testListAt :: Int
+testListAt = at 1 [10, 20, 30]
+
+-- Deque tests (uses Deque-specific instances with std::deque)
+testDequeLiteral :: Deque Int
+testDequeLiteral = [10, 20, 30]
+
+testDequeMempty :: Deque Int
+testDequeMempty = append mempty [4, 5, 6]
+
+testDequeAppend :: Deque Int
+testDequeAppend = append [1, 2] [3, 4]
+
+testDequeCons :: Deque Int
+testDequeCons = cons 0 [1, 2, 3]
+
+testDequeUncons :: (Int, Deque Int)
+testDequeUncons = uncons [1, 2, 3]
+
+testDequeSnoc :: Deque Int
+testDequeSnoc = snoc [1, 2, 3] 4
+
+testDequeUnsnoc :: (Deque Int, Int)
+testDequeUnsnoc = unsnoc [1, 2, 3]
+
+-- Vector tests (uses List instances via alias, both map to std::vector)
+testVectorLiteral :: Vector Int
+testVectorLiteral = [7, 8, 9]
+
+testVectorAppend :: Vector Int
+testVectorAppend = append [1, 2] [3, 4]
+
+testVectorCons :: Vector Int
+testVectorCons = cons 0 [1, 2, 3]
+
+testVectorUncons :: (Int, Vector Int)
+testVectorUncons = uncons [1, 2, 3]
+
+testVectorSnoc :: Vector Int
+testVectorSnoc = snoc [1, 2, 3] 4
+
+testVectorUnsnoc :: (Vector Int, Int)
+testVectorUnsnoc = unsnoc [1, 2, 3]

@@ -35,6 +35,7 @@ morloc_pipe                          <- function(...){ .Call("morloc_pipe",     
 morloc_write_byte                    <- function(...){ .Call("morloc_write_byte",                    ...) }
 morloc_close_fd                      <- function(...){ .Call("morloc_close_fd",                      ...) }
 morloc_worker_loop_c                 <- function(...){ .Call("morloc_worker_loop_c",                 ...) }
+morloc_set_line_buffered             <- function(...){ .Call("morloc_set_line_buffered",             ...) }
 
 global_state <- list()
 
@@ -69,6 +70,9 @@ worker_loop <- function(pipe_fd) {
 }
 
 main <- function(socket_path, tmpdir, shm_basename) {
+  # Force line-buffered stdout/stderr so output from user functions is not lost
+  # when the nexus kills the pool process group.
+  morloc_set_line_buffered()
   morloc_install_sigterm_handler()
 
   daemon <- morloc_start_daemon(socket_path, tmpdir, shm_basename, 0xffff)

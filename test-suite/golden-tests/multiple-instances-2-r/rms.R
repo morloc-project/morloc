@@ -13,3 +13,7 @@ rms2 <- function(xs){
   result = sqrt(result)
   return(result)
 }
+
+mean_list <- function(xs) {
+  mean(xs)
+}
