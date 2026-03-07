@@ -1,0 +1,22 @@
+-- Test type annotations on standalone polymorphic functions (not typeclass methods).
+-- This exercises the fix for annotation lookup using the concrete index (ci)
+-- rather than the general index (gi) in checkG/synthG.
+
+module main (foo, bar)
+
+import root-py
+
+type Py => Int = "int"
+type Py => Real = "float"
+
+myId a :: a -> a
+source Py from "helper.py" ("my_id" as myId)
+
+myVal a :: a
+source Py from "helper.py" ("my_val" as myVal)
+
+foo :: Int
+foo = (myId :: Int -> Int) 42
+
+bar :: Real
+bar = myVal :: Real

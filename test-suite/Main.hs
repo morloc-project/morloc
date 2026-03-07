@@ -76,6 +76,7 @@ main = do
       , golden "claude-test-9" "claude-test-9"
       , golden "claude-test-10" "claude-test-10"
       , golden "claude-test-11" "claude-test-11"
+      , golden "claude-test-12" "claude-test-12"
       , golden "functional-data-1" "functional-data-1"
       , golden "functional-data-2" "functional-data-2"
       , golden "functional-data-3a" "functional-data-3a"

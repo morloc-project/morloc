@@ -281,7 +281,7 @@ checkG ::
     )
 checkG g (AnnoS i j e) t = do
   annotation <- MM.gets stateAnnotations
-  (g', t', e') <- case Map.lookup i annotation of
+  (g', t', e') <- case Map.lookup j annotation of
     Nothing -> checkE' i g e t
     (Just annType) -> do
       gAnn <- subtype' i annType t g
@@ -298,7 +298,7 @@ synthG ::
     )
 synthG g (AnnoS gi ci e) = do
   annotation <- MM.gets stateAnnotations
-  (g', t, e') <- case Map.lookup gi annotation of
+  (g', t, e') <- case Map.lookup ci annotation of
     Nothing -> synthE' gi g e
     (Just annType) -> checkE' gi g e annType
   return (g', t, AnnoS (Idx gi t) ci e')
@@ -508,13 +508,13 @@ synthE _ g0 (NamS rs) = do
 -- variables should be checked against. I think (this needs formalization).
 synthE _ g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
   let (g1, t1) = rename g0 (etype t0)
-      g1' = g1 ++> [AnnG v t1]  -- add function type for recursive CallS references
+      g1' = g1 ++> [AnnG v t1]
   (g2, t2, xs1) <- foldCheck g1' xs0 t1
   let xs2 = applyCon g2 $ VarS v (MonomorphicExpr (Just t0) xs1)
   return (g2, t2, xs2)
 synthE _ g (VarS v (MonomorphicExpr Nothing (x : xs))) = do
   let (g0', freshT) = newvar (unEVar v <> "_rec") g
-      g0'' = g0' ++> [AnnG v freshT]  -- add fresh type for recursive CallS references
+      g0'' = g0' ++> [AnnG v freshT]
   (g', t', x') <- synthG g0'' x
   (g'', t'', xs') <- foldCheck g' xs t'
   let xs'' = applyCon g'' $ VarS v (MonomorphicExpr Nothing (x' : xs'))

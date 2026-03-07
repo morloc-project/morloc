@@ -2654,6 +2654,34 @@ typeclassTests =
           |]
           str
 
+      , -- === MONOMORPHIC ANNOTATION FIX ===
+        -- Annotation on standalone polymorphic functions (not typeclass methods)
+        -- leaked via copyState to MonomorphicExpr implementation indices.
+
+        assertGeneralType
+          "annotation on standalone polymorphic function with args"
+          [r|
+        module main (foo)
+        type Py => Int = "int"
+        myId a :: a -> a
+        source Py ("lambda x: x" as myId)
+        foo :: Int
+        foo = (myId :: Int -> Int) 42
+          |]
+          int
+
+      , assertGeneralType
+          "annotation on standalone polymorphic nullary function"
+          [r|
+        module main (foo)
+        type Py => Real = "float"
+        myVal a :: a
+        source Py ("lambda: 3.14" as myVal)
+        foo :: Real
+        foo = myVal :: Real
+          |]
+          real
+
       , -- === SUPERCLASS CONSTRAINTS ===
 
         assertGeneralType
