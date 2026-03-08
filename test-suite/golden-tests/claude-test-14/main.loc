@@ -1,0 +1,153 @@
+-- SHM reference counting edge cases: tests patterns that exercise
+-- the refcount increment/decrement logic at language boundaries.
+
+module main
+  ( effectChain
+  , effectFanOut
+  , letForwardedTwice
+  , nestedLetCross
+  , listAppendCross
+  , resultForwardChain
+  , effectInLetRhs
+  , tripleForward
+  )
+
+import root-cpp
+import root-py
+
+source Cpp from "edge.hpp"
+  ( "counter" as cppCounter
+  , "addTwo" as cppAdd
+  , "doubleIt" as cppDouble
+  , "makePair" as cppMakePair
+  , "replicateStr" as cppReplicateStr
+  , "lenStr" as cppLenStr
+  , "sumVec" as cppSumVec
+  , "appendVec" as cppAppendVec
+  , "incVec" as cppIncVec
+  )
+
+source Py from "edge.py"
+  ( "counter" as pyCounter
+  , "addTwo" as pyAdd
+  , "doubleIt" as pyDouble
+  , "makePair" as pyMakePair
+  , "replicateStr" as pyReplicateStr
+  , "lenStr" as pyLenStr
+  , "sumVec" as pySumVec
+  , "appendVec" as pyAppendVec
+  , "incVec" as pyIncVec
+  )
+
+type Cpp => Int = "int"
+type Cpp => Str = "std::string"
+type Cpp => List a = "std::vector<$1>" a
+
+type Py => Int = "int"
+type Py => Str = "str"
+type Py => List a = "list" a
+
+cppCounter :: <IO> Int
+cppAdd :: Int -> Int -> Int
+cppDouble :: Int -> Int
+cppMakePair :: Int -> Int -> [Int]
+cppReplicateStr :: Int -> Str -> Str
+cppLenStr :: Str -> Int
+cppSumVec :: [Int] -> Int
+cppAppendVec :: [Int] -> [Int] -> [Int]
+cppIncVec :: [Int] -> [Int]
+
+pyCounter :: <IO> Int
+pyAdd :: Int -> Int -> Int
+pyDouble :: Int -> Int
+pyMakePair :: Int -> Int -> [Int]
+pyReplicateStr :: Int -> Str -> Str
+pyLenStr :: Str -> Int
+pySumVec :: [Int] -> Int
+pyAppendVec :: [Int] -> [Int] -> [Int]
+pyIncVec :: [Int] -> [Int]
+
+
+-- Test 1: Chain of effects across languages.
+-- cppCounter returns 1, pyDouble(1) = 2, cppCounter returns 2, pyAdd(2,2) = 4
+effectChain :: <IO> Int
+effectChain = do
+    a <- cppCounter
+    let b = pyDouble a
+    c <- cppCounter
+    pyAdd b c
+
+-- Test 2: Fan-out of effectful result to multiple cross-language calls.
+-- pyCounter returns 1, cppDouble(1) = 2, cppAdd(1,1) = 2, pyAdd(2,2) = 4
+effectFanOut :: <IO> Int
+effectFanOut = do
+    x <- pyCounter
+    let a = cppDouble x
+    let b = cppAdd x x
+    pyAdd a b
+
+-- Test 3: Let-bound cross-language result forwarded to two foreign calls.
+-- cppMakePair(3,7) = [3,7], cppIncVec = [4,8], pySumVec = 12, twice = 24
+letForwardedTwice :: Int
+letForwardedTwice =
+    let xs = cppMakePair 3 7
+    let a = pySumVec (cppIncVec xs)
+    let b = pySumVec (cppIncVec xs)
+    in a + b
+
+-- Test 4: Nested let where each binding crosses a language boundary.
+-- cppReplicateStr(3, "ab") = "ababab" (len 6)
+-- pyReplicateStr(2, "ababab") = "abababababab" (len 12)
+-- cppLenStr("abababababab") = 12
+nestedLetCross :: Int
+nestedLetCross =
+    let s1 = cppReplicateStr 3 "ab"
+    let s2 = pyReplicateStr 2 s1
+    in cppLenStr s2
+
+-- Test 5: Lists crossing boundaries with append operations.
+-- pyMakePair(1,2) = [1,2], cppMakePair(3,4) = [3,4]
+-- pyAppendVec([1,2], [3,4]) = [1,2,3,4], cppSumVec = 10
+listAppendCross :: Int
+listAppendCross =
+    let a = pyMakePair 1 2
+    let b = cppMakePair 3 4
+    let c = pyAppendVec a b
+    in cppSumVec c
+
+-- Test 6: Long chain where each result is forwarded.
+-- cppMakePair(1,1) = [1,1], 8 rounds of incVec: [9,9], sum = 18
+resultForwardChain :: Int
+resultForwardChain =
+    let xs = cppMakePair 1 1
+    let xs2 = pyIncVec xs
+    let xs3 = cppIncVec xs2
+    let xs4 = pyIncVec xs3
+    let xs5 = cppIncVec xs4
+    let xs6 = pyIncVec xs5
+    let xs7 = cppIncVec xs6
+    let xs8 = pyIncVec xs7
+    let xs9 = cppIncVec xs8
+    in pySumVec xs9
+
+-- Test 7: Effect evaluation in let-binding RHS crossing languages.
+-- cppCounter returns 1, pyDouble(1) = 2, cppAdd(2,2) = 4
+effectInLetRhs :: <IO> Int
+effectInLetRhs = do
+    x <- cppCounter
+    let y = pyDouble x
+    cppAdd y y
+
+-- Test 8: Value forwarded to three different cross-language calls.
+-- pyMakePair(5,10) = [5,10]
+-- cppSumVec([5,10]) = 15
+-- cppIncVec([5,10]) = [6,11], pySumVec([6,11]) = 17
+-- pyIncVec([5,10]) = [6,11], cppSumVec([6,11]) = 17
+-- Total = 15 + 17 + 17 = 49
+tripleForward :: Int
+tripleForward =
+    let xs = pyMakePair 5 10
+    let a = cppSumVec xs
+    let b = pySumVec (cppIncVec xs)
+    let c = cppSumVec (pyIncVec xs)
+    in a + b + c

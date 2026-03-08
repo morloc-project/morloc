@@ -1,0 +1,263 @@
+-- Let-binding codegen bug: dedicated regression tests.
+--
+-- BUG: When consecutive let bindings make foreign calls to the same pool,
+-- the compiler generates incorrect return type extraction for the second
+-- foreign call's result. Specifically, the second foreign call's result is
+-- deserialized using the first foreign call's return type instead of its own.
+--
+-- Example: In the generated C++ code for letMinimal:
+--   uint8_t* s4 = foreign_call("pipe-py", mid1, s0, NULL);  // pyStrLen -> Int
+--   uint8_t* s5 = foreign_call("pipe-py", mid2, s1, NULL);  // pyMakeStr -> Str
+--   int n2 = _get_value<int>(s5, "<int>i4");    // BUG: extracts Str as Int!
+--
+-- The equivalent nested form works correctly:
+--   cppStrLen (pyMakeStr (pyStrLen (cppMakeStr 10)))  -- OK
+
+module main
+  ( letMinimal
+  , letMinimalReverse
+  , letTripleChain
+  , letDiamond
+  , letTripleUse
+  , letDeepChain
+  , letInDoBlock
+  , letListFanOut
+  , letListDeepChain
+  , letStrIdChain
+  , letMixedTypes
+  )
+
+import root-cpp
+import root-py
+
+source Cpp from "f.hpp"
+  ( "makeStr" as cppMakeStr
+  , "strLen" as cppStrLen
+  , "doubleIt" as cppDouble
+  , "addTwo" as cppAdd
+  , "makeRange" as cppMakeRange
+  , "sumList" as cppSumList
+  , "incAll" as cppIncAll
+  , "idStr" as cppIdStr
+  , "idList" as cppIdList
+  , "counter" as cppCounter
+  )
+
+source Py from "f.py"
+  ( "makeStr" as pyMakeStr
+  , "strLen" as pyStrLen
+  , "doubleIt" as pyDouble
+  , "addTwo" as pyAdd
+  , "makeRange" as pyMakeRange
+  , "sumList" as pySumList
+  , "incAll" as pyIncAll
+  , "idStr" as pyIdStr
+  , "idList" as pyIdList
+  , "counter" as pyCounter
+  )
+
+type Cpp => Int = "int"
+type Cpp => Str = "std::string"
+type Cpp => List a = "std::vector<$1>" a
+
+type Py => Int = "int"
+type Py => Str = "str"
+type Py => List a = "list" a
+
+cppMakeStr :: Int -> Str
+cppStrLen :: Str -> Int
+cppDouble :: Int -> Int
+cppAdd :: Int -> Int -> Int
+cppMakeRange :: Int -> [Int]
+cppSumList :: [Int] -> Int
+cppIncAll :: [Int] -> [Int]
+cppIdStr :: Str -> Str
+cppIdList :: [Int] -> [Int]
+cppCounter :: <IO> Int
+
+pyMakeStr :: Int -> Str
+pyStrLen :: Str -> Int
+pyDouble :: Int -> Int
+pyAdd :: Int -> Int -> Int
+pyMakeRange :: Int -> [Int]
+pySumList :: [Int] -> Int
+pyIncAll :: [Int] -> [Int]
+pyIdStr :: Str -> Str
+pyIdList :: [Int] -> [Int]
+pyCounter :: <IO> Int
+
+------------------------------------------------------------
+-- PATTERN 1: Minimal reproducer - 2 consecutive foreign calls
+-- from C++ pool to Python pool with type change (Str -> Int -> Str)
+--
+-- cppMakeStr(10) = "xxxxxxxxxx" (local)
+-- pyStrLen("xxxxxxxxxx") = 10 (foreign to py, returns Int)
+-- pyMakeStr(10) = "yyyyyyyyyy" (foreign to py, returns Str)
+-- cppStrLen("yyyyyyyyyy") = 10 (local)
+-- Expected: 10
+------------------------------------------------------------
+letMinimal :: Int
+letMinimal =
+    let s1 = cppMakeStr 10
+    let n1 = pyStrLen s1
+    let s2 = pyMakeStr n1
+    in cppStrLen s2
+
+------------------------------------------------------------
+-- PATTERN 2: Reverse direction - C++ is the foreign pool
+-- pyMakeStr(10) = "yyyyyyyyyy" (local in py)
+-- cppStrLen("yyyyyyyyyy") = 10 (foreign to cpp, returns Int)
+-- cppMakeStr(10) = "xxxxxxxxxx" (foreign to cpp, returns Str)
+-- pyStrLen("xxxxxxxxxx") = 10 (local in py)
+-- Expected: 10
+------------------------------------------------------------
+letMinimalReverse :: Int
+letMinimalReverse =
+    let s1 = pyMakeStr 10
+    let n1 = cppStrLen s1
+    let s2 = cppMakeStr n1
+    in pyStrLen s2
+
+------------------------------------------------------------
+-- PATTERN 3: Three consecutive foreign calls with alternating types
+-- cppMakeStr(5) = "xxxxx" (local)
+-- pyStrLen("xxxxx") = 5 (foreign, Int)
+-- pyMakeStr(5) = "yyyyy" (foreign, Str)
+-- pyStrLen("yyyyy") = 5 (foreign, Int)
+-- Expected: 5
+------------------------------------------------------------
+letTripleChain :: Int
+letTripleChain =
+    let s1 = cppMakeStr 5
+    let n1 = pyStrLen s1
+    let s2 = pyMakeStr n1
+    let n2 = pyStrLen s2
+    in n2
+
+------------------------------------------------------------
+-- PATTERN 4: Diamond - single let-bound value used in two foreign calls
+-- cppMakeStr(50) = "xxx...x" (50 chars, local)
+-- pyStrLen(s) = 50 (foreign)
+-- pyIdStr(s) -> cppStrLen = 50 (foreign + local)
+-- Expected: 100
+------------------------------------------------------------
+letDiamond :: Int
+letDiamond =
+    let s = cppMakeStr 50
+    let a = pyStrLen s
+    let b = cppStrLen (pyIdStr s)
+    in a + b
+
+------------------------------------------------------------
+-- PATTERN 5: Let-bound foreign result used 3 times
+-- cppMakeStr(100) = "xxx...x" (100 chars, local)
+-- pyStrLen used 3 times, each a foreign call
+-- Expected: 300
+------------------------------------------------------------
+letTripleUse :: Int
+letTripleUse =
+    let s = cppMakeStr 100
+    in pyStrLen s + pyStrLen s + pyStrLen s
+
+------------------------------------------------------------
+-- PATTERN 6: Deep chain of 10 alternating let-bound foreign calls
+-- cppMakeRange(10) = [1..10] (local)
+-- pyIncAll 10 times: each adds 1 to all elements
+-- [1..10] + 10 = [11..20], sum = sum(11..20) = 155
+-- Expected: 155
+------------------------------------------------------------
+letDeepChain :: Int
+letDeepChain =
+    let xs = cppMakeRange 10
+    let xs2 = pyIncAll xs
+    let xs3 = cppIncAll xs2
+    let xs4 = pyIncAll xs3
+    let xs5 = cppIncAll xs4
+    let xs6 = pyIncAll xs5
+    let xs7 = cppIncAll xs6
+    let xs8 = pyIncAll xs7
+    let xs9 = cppIncAll xs8
+    let xs10 = pyIncAll xs9
+    let xs11 = cppIncAll xs10
+    in pySumList xs11
+
+------------------------------------------------------------
+-- PATTERN 7: Do-block with let bindings and foreign calls
+-- cppCounter returns 1, pyDouble(1) = 2
+-- cppCounter returns 2, pyAdd(2,2) = 4
+-- Expected: 4
+------------------------------------------------------------
+letInDoBlock :: <IO> Int
+letInDoBlock = do
+    a <- cppCounter
+    let b = pyDouble a
+    c <- cppCounter
+    pyAdd b c
+
+------------------------------------------------------------
+-- PATTERN 8: Let-bound list forwarded to two different foreign calls
+-- cppMakeRange(5) = [1,2,3,4,5] (local)
+-- pyIncAll([1..5]) = [2..6] (foreign)
+-- pySumList([2..6]) = 20 (foreign)
+-- pyIncAll([1..5]) = [2..6] (foreign again on same data)
+-- pySumList([2..6]) = 20 (foreign)
+-- Expected: 40
+------------------------------------------------------------
+letListFanOut :: Int
+letListFanOut =
+    let xs = cppMakeRange 5
+    let a = pySumList (cppIncAll xs)
+    let b = pySumList (cppIncAll xs)
+    in a + b
+
+------------------------------------------------------------
+-- PATTERN 9: Deep chain with list types changing in let bindings
+-- pyMakeRange(10) = [1..10] (local in py)
+-- 6 alternating incAll calls across languages
+-- [1..10] + 6 = [7..16], sum = sum(7..16) = 115
+-- Expected: 115
+------------------------------------------------------------
+letListDeepChain :: Int
+letListDeepChain =
+    let xs = pyMakeRange 10
+    let xs2 = cppIncAll xs
+    let xs3 = pyIncAll xs2
+    let xs4 = cppIncAll xs3
+    let xs5 = pyIncAll xs4
+    let xs6 = cppIncAll xs5
+    let xs7 = pyIncAll xs6
+    in cppSumList xs7
+
+------------------------------------------------------------
+-- PATTERN 10: Consecutive string identity calls through let bindings
+-- Each call should preserve the string but crosses a language boundary
+-- cppMakeStr(7) = "xxxxxxx" (local)
+-- pyIdStr -> cppIdStr -> pyIdStr -> cppIdStr (4 foreign calls)
+-- cppStrLen = 7
+-- Expected: 7
+------------------------------------------------------------
+letStrIdChain :: Int
+letStrIdChain =
+    let s = cppMakeStr 7
+    let s2 = pyIdStr s
+    let s3 = cppIdStr s2
+    let s4 = pyIdStr s3
+    let s5 = cppIdStr s4
+    in cppStrLen s5
+
+------------------------------------------------------------
+-- PATTERN 11: Mixed types in lets - Int and Str interleaved
+-- 5 = 5 (literal)
+-- pyDouble(5) = 10 (foreign, returns Int)
+-- pyMakeStr(10) = "yyyyyyyyyy" (foreign, returns Str) <-- type change!
+-- pyStrLen("yyyyyyyyyy") = 10 (foreign, returns Int)
+-- pyDouble(10) = 20 (foreign, returns Int)
+-- Expected: 20
+------------------------------------------------------------
+letMixedTypes :: Int
+letMixedTypes =
+    let n1 = pyDouble 5
+    let s1 = pyMakeStr n1
+    let n2 = pyStrLen s1
+    let n3 = pyDouble n2
+    in n3

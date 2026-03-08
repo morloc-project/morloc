@@ -1,0 +1,16 @@
+--- manyCallsSmall ---
+10
+--- manyCallsLarge ---
+1000
+--- chainCppPy ---
+5350
+--- chainPyCpp ---
+5350
+--- diamondStr ---
+100
+--- diamondList ---
+420
+--- letSharedAcrossLangs ---
+300
+--- deepDoChain ---
+255

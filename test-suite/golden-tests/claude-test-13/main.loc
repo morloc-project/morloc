@@ -1,0 +1,181 @@
+-- SHM stress tests: exercises reference counting and deferred cleanup
+-- across many sequential cross-language calls with various data sizes.
+
+module main
+  ( manyCallsSmall
+  , manyCallsLarge
+  , chainCppPy
+  , chainPyCpp
+  , diamondStr
+  , diamondList
+  , letSharedAcrossLangs
+  , deepDoChain
+  )
+
+import root-cpp
+import root-py
+
+source Cpp from "stress.hpp"
+  ( "makeStr" as cppMakeStr
+  , "strLen" as cppStrLen
+  , "sumList" as cppSumList
+  , "makeRange" as cppMakeRange
+  , "incAll" as cppIncAll
+  , "idStr" as cppIdStr
+  , "idList" as cppIdList
+  )
+
+source Py from "stress.py"
+  ( "makeStr" as pyMakeStr
+  , "strLen" as pyStrLen
+  , "sumList" as pySumList
+  , "makeRange" as pyMakeRange
+  , "incAll" as pyIncAll
+  , "idStr" as pyIdStr
+  , "idList" as pyIdList
+  )
+
+type Cpp => Int = "int"
+type Cpp => Str = "std::string"
+type Cpp => List a = "std::vector<$1>" a
+
+type Py => Int = "int"
+type Py => Str = "str"
+type Py => List a = "list" a
+
+cppMakeStr :: Int -> Str
+cppStrLen :: Str -> Int
+cppSumList :: [Int] -> Int
+cppMakeRange :: Int -> [Int]
+cppIncAll :: [Int] -> [Int]
+cppIdStr :: Str -> Str
+cppIdList :: [Int] -> [Int]
+
+pyMakeStr :: Int -> Str
+pyStrLen :: Str -> Int
+pySumList :: [Int] -> Int
+pyMakeRange :: Int -> [Int]
+pyIncAll :: [Int] -> [Int]
+pyIdStr :: Str -> Str
+pyIdList :: [Int] -> [Int]
+
+-- Test 1: 30 sequential small cross-language calls.
+-- Each call crosses Cpp->Py or Py->Cpp boundary, allocating and freeing SHM.
+-- Without proper cleanup, this would exhaust the 32-volume SHM limit.
+manyCallsSmall :: Int
+manyCallsSmall =
+    let s1 = cppMakeStr 10
+    let n1 = pyStrLen s1
+    let s2 = pyMakeStr n1
+    let n2 = cppStrLen s2
+    let s3 = cppMakeStr n2
+    let n3 = pyStrLen s3
+    let s4 = pyMakeStr n3
+    let n4 = cppStrLen s4
+    let s5 = cppMakeStr n4
+    let n5 = pyStrLen s5
+    let s6 = pyMakeStr n5
+    let n6 = cppStrLen s6
+    let s7 = cppMakeStr n6
+    let n7 = pyStrLen s7
+    let s8 = pyMakeStr n7
+    let n8 = cppStrLen s8
+    let s9 = cppMakeStr n8
+    let n9 = pyStrLen s9
+    let s10 = pyMakeStr n9
+    let n10 = cppStrLen s10
+    let s11 = cppMakeStr n10
+    let n11 = pyStrLen s11
+    let s12 = pyMakeStr n11
+    let n12 = cppStrLen s12
+    let s13 = cppMakeStr n12
+    let n13 = pyStrLen s13
+    let s14 = pyMakeStr n13
+    let n14 = cppStrLen s14
+    let s15 = cppMakeStr n14
+    in pyStrLen s15
+
+-- Test 2: Cross-language calls with large strings (1000 chars each).
+-- Large strings have sub-allocations in SHM that need shfree_by_schema.
+manyCallsLarge :: Int
+manyCallsLarge =
+    let s1 = cppMakeStr 1000
+    let s2 = pyIdStr s1
+    let s3 = cppIdStr s2
+    let s4 = pyIdStr s3
+    let s5 = cppIdStr s4
+    let s6 = pyIdStr s5
+    let s7 = cppIdStr s6
+    let s8 = pyIdStr s7
+    let s9 = cppIdStr s8
+    let s10 = pyIdStr s9
+    in cppStrLen s10
+
+-- Test 3: Chain from C++ to Python - result forwarded through multiple hops.
+-- Tests that forwarded result packets have proper refcounting.
+chainCppPy :: Int
+chainCppPy =
+    let xs = cppMakeRange 100
+    let ys = pyIncAll xs
+    let zs = cppIncAll ys
+    let ws = pyIncAll zs
+    in cppSumList ws
+
+-- Test 4: Chain from Python to C++ - opposite direction.
+chainPyCpp :: Int
+chainPyCpp =
+    let xs = pyMakeRange 100
+    let ys = cppIncAll xs
+    let zs = pyIncAll ys
+    let ws = cppIncAll zs
+    in pySumList ws
+
+-- Test 5: Diamond pattern - same string value sent to two different
+-- cross-language calls. Tests that refcount handles fan-out correctly.
+diamondStr :: Int
+diamondStr =
+    let s = cppMakeStr 50
+    let a = pyStrLen s
+    let b = cppStrLen (pyIdStr s)
+    in a + b
+
+-- Test 6: Diamond with list data - same list value sent to two paths.
+diamondList :: Int
+diamondList =
+    let xs = pyMakeRange 20
+    let a = cppSumList xs
+    let b = pySumList (cppIdList xs)
+    in a + b
+
+-- Test 7: Let-bound value from one language used multiple times in another.
+-- The let-bound value crosses the language boundary each time it is used.
+letSharedAcrossLangs :: Int
+letSharedAcrossLangs =
+    let s = cppMakeStr 100
+    in pyStrLen s + pyStrLen s + pyStrLen s
+
+-- Test 8: Deep chain with 20 sequential cross-language list transformations.
+-- Each step creates a new SHM allocation. Without cleanup, exhausts volumes.
+deepDoChain :: Int
+deepDoChain =
+    let xs = cppMakeRange 10
+    let xs2 = pyIncAll xs
+    let xs3 = cppIncAll xs2
+    let xs4 = pyIncAll xs3
+    let xs5 = cppIncAll xs4
+    let xs6 = pyIncAll xs5
+    let xs7 = cppIncAll xs6
+    let xs8 = pyIncAll xs7
+    let xs9 = cppIncAll xs8
+    let xs10 = pyIncAll xs9
+    let xs11 = cppIncAll xs10
+    let xs12 = pyIncAll xs11
+    let xs13 = cppIncAll xs12
+    let xs14 = pyIncAll xs13
+    let xs15 = cppIncAll xs14
+    let xs16 = pyIncAll xs15
+    let xs17 = cppIncAll xs16
+    let xs18 = pyIncAll xs17
+    let xs19 = cppIncAll xs18
+    let xs20 = pyIncAll xs19
+    in cppSumList xs20

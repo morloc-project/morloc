@@ -11,6 +11,49 @@
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
 
+// SHM tracker for _put_value allocations (deferred cleanup)
+#define SHM_TRACKER_INIT_CAP 16
+typedef struct {
+    absptr_t ptr;
+    Schema* schema;
+} shm_entry_t;
+static shm_entry_t* shm_tracker = NULL;
+static size_t shm_tracker_count = 0;
+static size_t shm_tracker_cap = 0;
+
+static void shm_tracker_push(absptr_t ptr, Schema* schema) {
+    if (shm_tracker_count >= shm_tracker_cap) {
+        size_t new_cap = shm_tracker_cap ? shm_tracker_cap * 2 : SHM_TRACKER_INIT_CAP;
+        shm_entry_t* new_buf = (shm_entry_t*)realloc(shm_tracker, new_cap * sizeof(shm_entry_t));
+        if (!new_buf) return;
+        shm_tracker = new_buf;
+        shm_tracker_cap = new_cap;
+    }
+    shm_tracker[shm_tracker_count].ptr = ptr;
+    shm_tracker[shm_tracker_count].schema = schema;
+    shm_tracker_count++;
+}
+
+static void flush_shm_tracker(void) {
+    for (size_t i = 0; i < shm_tracker_count; i++) {
+        char* err = NULL;
+        // Only do recursive sub-freeing if we have a schema and this is
+        // the last reference. NULL schema entries (from foreign_call result
+        // tracking) just decrement the refcount.
+        block_header_t* blk = (block_header_t*)((char*)shm_tracker[i].ptr - sizeof(block_header_t));
+        if (shm_tracker[i].schema && blk->reference_count <= 1) {
+            shfree_by_schema(shm_tracker[i].ptr, shm_tracker[i].schema, &err);
+            if (err) { free(err); err = NULL; }
+        }
+        shfree(shm_tracker[i].ptr, &err);
+        if (err) { free(err); }
+        if (shm_tracker[i].schema) {
+            free_schema(shm_tracker[i].schema);
+        }
+    }
+    shm_tracker_count = 0;
+}
+
 #define NOTHING
 
 #define MAYFAIL \
@@ -904,6 +947,7 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     Schema* schema = NULL;
     void* voidstar = NULL;
     size_t packet_size = 0;
+    bool tracked = false;
 
     PyObject* obj;
     const char* schema_str;
@@ -922,18 +966,30 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
 
     packet = make_standard_data_packet(relptr, schema);
 
+    // Track SHM for deferred cleanup (freed after foreign_call or next dispatch)
+    shm_tracker_push((absptr_t)voidstar, schema);
+    tracked = true;
+
     packet_size = PyTRY(morloc_packet_size, packet);
 
     {
         PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
         free(packet);
-        free_schema(schema);
         return retval;
     }
 
 error:
     FREE(packet)
-    free_schema(schema);
+    if (!tracked) {
+        if (voidstar && schema) {
+            char* free_err = NULL;
+            shfree_by_schema((absptr_t)voidstar, schema, &free_err);
+            if (free_err) { free(free_err); free_err = NULL; }
+            shfree((absptr_t)voidstar, &free_err);
+            if (free_err) { free(free_err); }
+        }
+        free_schema(schema);
+    }
     return NULL;
 }
 
@@ -943,6 +999,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     uint8_t* voidstar = NULL;
     Schema* schema = NULL;
     PyObject* obj = NULL;
+    bool tracked = false;
 
     const char* packet;
     size_t packet_size;
@@ -952,20 +1009,48 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         PyRAISE("Failed to parse arguments");
     }
 
+    // Check if this is an RPTR packet (references existing SHM we don't own)
+    const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
+    bool is_rptr = (header->command.data.source == PACKET_SOURCE_RPTR);
+
     schema = PyTRY(parse_schema, schema_str)
 
     voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
+    // For RPTR data, increment refcount so the owner's tracker flush
+    // won't destroy data we may still need (e.g. forwarded packets).
+    if (is_rptr) {
+        char* incref_err = NULL;
+        shincref((absptr_t)voidstar, &incref_err);
+        if (incref_err) { free(incref_err); }
+        // Track for deferred decref (tracker takes schema ownership)
+        shm_tracker_push((absptr_t)voidstar, schema);
+        tracked = true;
+    }
+
     obj = fromAnything(schema, voidstar);
     PyTRACE(obj == NULL)
 
-    free_schema(schema);
+    if (!tracked) {
+        free_schema(schema);
+    }
 
     return obj;
 
 error:
-    free_schema(schema);
+    if (!tracked) {
+        free_schema(schema);
+    }
     return NULL;
+}
+
+
+// Free tracked SHM allocations from put_value calls.
+// Called at dispatch start to free result SHM from previous dispatch.
+static PyObject* pybinding__flush_shm_tracker(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    flush_shm_tracker();
+    Py_RETURN_NONE;
 }
 
 
@@ -1025,6 +1110,24 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     result = PyTRY(send_and_receive_over_socket, socket_path, packet);
     free(packet);
     packet = NULL;
+
+    // Incref the result's SHM so the callee's tracker flush won't destroy
+    // data we may still need (e.g. forwarded result packets).
+    {
+        const morloc_packet_header_t* res_header = (const morloc_packet_header_t*)result;
+        if (res_header->command.data.source == PACKET_SOURCE_RPTR) {
+            size_t relptr = *(size_t*)((uint8_t*)result + res_header->offset + sizeof(morloc_packet_header_t));
+            char* resolve_err = NULL;
+            void* res_voidstar = rel2abs(relptr, &resolve_err);
+            if (resolve_err) { free(resolve_err); resolve_err = NULL; }
+            if (res_voidstar) {
+                char* incref_err = NULL;
+                shincref((absptr_t)res_voidstar, &incref_err);
+                if (incref_err) { free(incref_err); }
+                shm_tracker_push((absptr_t)res_voidstar, NULL);
+            }
+        }
+    }
 
     result_length = PyTRY(morloc_packet_size, result);
 
@@ -1535,6 +1638,7 @@ static PyMethodDef Methods[] = {
     {"send_packet_to_foreign_server", pybinding__send_packet_to_foreign_server, METH_VARARGS, "Send data to a foreign server"},
     {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
     {"close_socket", pybinding__close_socket, METH_VARARGS, "Close the socket"},
+    {"flush_shm_tracker", pybinding__flush_shm_tracker, METH_NOARGS, "Free tracked SHM allocations from put_value calls"},
     {"foreign_call", pybinding__foreign_call, METH_VARARGS, "Send a call packet to a foreign pool"},
     {"get_value", pybinding__get_value, METH_VARARGS, "Convert a packet to a Python value"},
     {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},

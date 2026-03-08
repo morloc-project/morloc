@@ -23,11 +23,11 @@ across Python, C++, and R under a unified type system.
 After making a substantial change to the Haskell code, run:
 
 $ stack install --no-run-tests 
-$ stack test morloc:morloc-test
+$ stack test morloc:morloc-test  # This is the usual test
 
 To run the full heavy integrated test suite, run:
 
-$ stack test
+$ stack test # ONLY do this at the very end of a session; IT IS EXPENSIVE
 
 If you make any change to the non-haskell code in data/, then you MUST run
 `morloc init -f`. This will rebuild shared libraries, the nexus executable, and

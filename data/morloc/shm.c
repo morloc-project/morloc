@@ -799,6 +799,20 @@ bool shfree(absptr_t ptr, ERRMSG) {
     return result;
 }
 
+bool shincref(absptr_t ptr, ERRMSG) {
+    BOOL_RETURN_SETUP
+    RAISE_IF(ptr == NULL, "Cannot increment reference on NULL pointer");
+
+    block_header_t* blk = (block_header_t*)((char*)ptr - sizeof(block_header_t));
+
+    RAISE_IF(blk->magic != BLK_MAGIC, "Corrupted memory - invalid magic");
+    RAISE_IF(blk->reference_count == 0, "Cannot increment reference on freed block");
+
+    blk->reference_count++;
+
+    return true;
+}
+
 size_t total_shm_size(){
     size_t total_size = 0;
     shm_t* shm;

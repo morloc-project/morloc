@@ -1,0 +1,30 @@
+--- manyCallsSmall ---
+10
+--- manyCallsLarge ---
+1000
+--- chainCppPy ---
+5350
+--- chainPyCpp ---
+5350
+--- deepDoChain ---
+255
+--- nestedLetCross ---
+12
+--- listAppendCross ---
+10
+--- resultForwardChain ---
+18
+--- bigStrRoundTrip ---
+10000
+--- bigVecRoundTrip ---
+12502500
+--- vecOfStrsRoundTrip ---
+5000
+--- nestedVecRoundTrip ---
+2100
+--- bigStrChain ---
+5000
+--- manyBigStrings ---
+20000
+--- manyNestedVecs ---
+2200

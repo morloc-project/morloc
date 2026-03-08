@@ -1,0 +1,16 @@
+--- effectChain ---
+4
+--- effectFanOut ---
+4
+--- letForwardedTwice ---
+24
+--- nestedLetCross ---
+12
+--- listAppendCross ---
+10
+--- resultForwardChain ---
+18
+--- effectInLetRhs ---
+4
+--- tripleForward ---
+49

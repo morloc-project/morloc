@@ -376,7 +376,7 @@ static uint8_t* parse_cli_data_argument_singular(uint8_t* dest, char* arg, const
     return dest;
 }
 
-static bool shfree_by_schema(absptr_t ptr, const Schema* schema, ERRMSG){
+bool shfree_by_schema(absptr_t ptr, const Schema* schema, ERRMSG){
     BOOL_RETURN_SETUP
 
     switch(schema->type) {
