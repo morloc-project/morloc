@@ -92,7 +92,7 @@ data CstExpr
   | CIstE ClassName [TypeU] [Loc CstExpr]
   | CFixE Associativity Int [EVar]
   | CSrcOldE Located (Maybe Text) [(Text, Maybe Text)]
-  | CSrcNewE Located (Maybe Text) [Located]
+  | CSrcNewE Located (Maybe Text) [(Bool, Text, Located)]
   | -- Expressions
     CAppE (Loc CstExpr) [Loc CstExpr]
   | CLamE [EVar] (Loc CstExpr)
@@ -117,6 +117,7 @@ data CstExpr
   | CForceE (Loc CstExpr)  -- ^ !expr force operator (only valid inside do-blocks)
   | CIntrinsicE Text  -- ^ @name intrinsic reference (text is the name without @)
   | CParenE !(Loc CstExpr)  -- ^ parenthesized expression (preserves grouping for BopE chains)
+  | CInlineE (Loc CstExpr) -- ^ %inline wrapper for source declarations
   deriving (Show, Eq)
 
 data CstExport

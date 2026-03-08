@@ -663,7 +663,7 @@ gccVersionFlag i
   | otherwise = "-std=c++" <> MT.show' i
 
 flagAndPath :: Source -> MorlocMonad (Source, [String], Maybe Path)
-flagAndPath src@(Source _ srcL (Just p) _ _ _ _) | srcL == cppLang =
+flagAndPath src@(Source _ srcL (Just p) _ _ _ _ _ _) | srcL == cppLang =
   case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p), MS.takeExtensions p) of
     (".", base, "") -> do
       header <- lookupHeader base
@@ -698,7 +698,7 @@ flagAndPath src@(Source _ srcL (Just p) _ _ _ _) | srcL == cppLang =
             , "-l" <> libnamebase
             ]
         [] -> return []
-flagAndPath src@(Source _ srcL Nothing _ _ _ _) | srcL == cppLang = return (src, [], Nothing)
+flagAndPath src@(Source _ srcL Nothing _ _ _ _ _ _) | srcL == cppLang = return (src, [], Nothing)
 flagAndPath _ = MM.throwSystemError $ "flagAndPath should only be called for C++ functions"
 
 getFile :: Path -> IO (Maybe Path)

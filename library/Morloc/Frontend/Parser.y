@@ -113,6 +113,7 @@ import qualified Morloc.BaseTypes as BT
   INTERPOPEN { Located _ TokInterpOpen _ }
   INTERPCLOSE { Located _ TokInterpClose _ }
   INTRINSIC  { Located _ (TokIntrinsic _) _ }
+  '%inline'  { Located _ TokPragmaInline _ }
   EOF        { Located _ TokEOF _ }
 
 %%
@@ -157,6 +158,7 @@ top_decl :: { [Loc CstExpr] }
   | instance_decl     { [$1] }
   | fixity_decl       { [$1] }
   | source_decl       { $1 }
+  | '%inline' source_decl { map (\(Loc sp e) -> Loc sp (CInlineE (Loc sp e))) $2 }
   | sig_or_ass        { $1 }
 
 sig_or_ass :: { [Loc CstExpr] }
@@ -397,6 +399,7 @@ instance_items :: { [[Loc CstExpr]] }
 
 instance_item :: { [Loc CstExpr] }
   : source_decl             { $1 }
+  | '%inline' source_decl   { map (\(Loc sp e) -> Loc sp (CInlineE (Loc sp e))) $2 }
   | sig_or_ass              { $1 }
 
 --------------------------------------------------------------------
@@ -450,12 +453,19 @@ source_item :: { (Text, Maybe Text) }
   | STRING 'as' '(' '-' ')'            { (getString $1, Just "-") }
   | STRING 'as' '(' '.' ')'            { (getString $1, Just ".") }
 
-source_new_items :: { [Located] }
+source_new_items :: { [(Bool, Text, Located)] }
   : source_new_item                          { [$1] }
   | source_new_items VSEMI source_new_item   { $1 ++ [$3] }
 
-source_new_item :: { Located }
-  : LOWER                              { $1 }
+source_new_item :: { (Bool, Text, Located) }
+  : '%inline' source_new_term         { (True, fst $2, snd $2) }
+  | source_new_term                   { (False, fst $1, snd $1) }
+
+source_new_term :: { (Text, Located) }
+  : LOWER                             { (getName $1, $1) }
+  | '(' operator_name ')'            { (getOp $2, $2) }
+  | '(' '-' ')'                      { ("-", $2) }
+  | '(' '.' ')'                      { (".", $2) }
 
 --------------------------------------------------------------------
 -- Expressions

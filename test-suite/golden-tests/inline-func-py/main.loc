@@ -1,0 +1,37 @@
+-- Test %inline pragma on non-operator functions
+module main (testAdd, testDouble, testMixed, testRepeated, testNested)
+
+type Py => Int = "int"
+
+source Py from "foo.py" where
+  %inline add
+  %inline double
+  triple
+
+add :: Int -> Int -> Int
+double :: Int -> Int
+triple :: Int -> Int
+
+-- Inline non-operator function
+testAdd :: Int -> Int -> Int
+testAdd x y = add x y
+
+-- Inline unary function
+testDouble :: Int -> Int
+testDouble x = double (add x x)
+
+-- Mix of inline (add, double) and non-inline (triple) from same source
+-- triple(add(2, 3)) = triple(5) = 15
+testMixed :: Int -> Int -> Int
+testMixed x y = triple (add x y)
+
+-- Inline function called many times in one expression
+-- add(add(x, x), add(y, y)) = add(2x, 2y) = 2x + 2y
+-- with x=3, y=4: add(6, 8) = 14
+testRepeated :: Int -> Int -> Int
+testRepeated x y = add (add x x) (add y y)
+
+-- Deeply nested inline: double(double(add(x, y)))
+-- with x=2, y=3: double(double(5)) = double(10) = 20
+testNested :: Int -> Int -> Int
+testNested x y = double (double (add x y))

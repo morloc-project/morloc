@@ -1,0 +1,24 @@
+-- Test that %inline is silently ignored for cross-language calls
+-- The inline Python add is called from an R context via composition
+module main (foo)
+
+type Py => Int = "int"
+type Py => Real = "float"
+type Py => List a = "list" a
+
+type R => Int = "integer"
+type R => Real = "numeric"
+type R => List a = "list" a
+
+source Py from "foo.py" where
+  %inline add
+
+source R from "foo.R" ("rDouble" as double)
+
+add :: Real -> Real -> Real
+double :: Real -> Real
+
+-- double is R, add is Python with %inline
+-- The inline should be silently ignored for the cross-language call
+foo :: Real -> Real -> Real
+foo x y = double (add x y)

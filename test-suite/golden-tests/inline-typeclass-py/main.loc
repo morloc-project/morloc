@@ -1,0 +1,38 @@
+-- Test %inline pragma inside typeclass instances with source ... where syntax
+module main (addInts, addReals, expr1, expr2)
+
+type Py => Int = "int"
+type Py => Real = "float"
+
+class Addable a where
+  (+) a :: a -> a -> a
+  (*) a :: a -> a -> a
+
+infixl 6 +
+infixl 7 *
+
+instance Addable Int where
+  source Py where
+    %inline (+)
+    %inline (*)
+
+instance Addable Real where
+  source Py where
+    %inline (+)
+    %inline (*)
+
+-- Basic typeclass inline operator usage
+addInts :: Int -> Int -> Int
+addInts x y = x + y
+
+addReals :: Real -> Real -> Real
+addReals x y = x + y
+
+-- Complex expression with typeclass-dispatched inline operators
+-- (3 + 4) * (5 + 6) = 7 * 11 = 77
+expr1 :: Int -> Int -> Int -> Int -> Int
+expr1 a b c d = (a + b) * (c + d)
+
+-- Precedence: 2 * 3 + 4 = 6 + 4 = 10
+expr2 :: Int -> Int -> Int -> Int
+expr2 x y z = x * y + z

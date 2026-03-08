@@ -445,4 +445,15 @@ main = do
       , golden "namespace-ns-nested-getter" "namespace-ns-nested-getter"
       , golden "namespace-ns-guard" "namespace-ns-guard"
       , golden "namespace-ns-double-import" "namespace-ns-double-import"
+      , -- %inline pragma tests
+        golden "inline-op-py" "inline-op-py"
+      , golden "inline-func-py" "inline-func-py"
+      , golden "inline-typeclass-py" "inline-typeclass-py"
+      , golden "inline-ho-py" "inline-ho-py"
+      , golden "inline-op-ho-py" "inline-op-ho-py"
+      , golden "inline-deep-py" "inline-deep-py"
+      , golden "inline-mixed-py" "inline-mixed-py"
+      , golden "inline-block-py" "inline-block-py"
+      , golden "inline-old-style-py" "inline-old-style-py"
+      , golden "inline-cross-lang" "inline-cross-lang"
       ]

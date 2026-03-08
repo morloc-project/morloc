@@ -407,6 +407,10 @@ lowerNativeExpr ::
   NativeExpr ->
   NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
   m PoolDocs
+-- Binary operator: emit (lhs op rhs) instead of function call
+lowerNativeExpr _ _ (AppExeN_ _ (SrcCallP src) _ (map snd -> [lhs, rhs]))
+  | srcOperator src =
+      return $ mergePoolDocs (\[l, r] -> parens (l <+> pretty (unSrcName (srcName src)) <+> r)) [lhs, rhs]
 lowerNativeExpr cfg _ (AppExeN_ _ (SrcCallP src) qs (map snd -> es)) = do
   templateArgs <- lcTemplateArgs cfg qs
   let handleFunctionArgs ts =

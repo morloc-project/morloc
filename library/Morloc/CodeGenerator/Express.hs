@@ -393,6 +393,25 @@ expressPolyExpr _ _ _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manifoldArgume
     . PolyManifold lang midx (ManifoldPart contextArguments typeBoundArguments)
     . PolyReturn
     $ body'
+-- Inline source call: skip PolyManifold, emit as direct subexpression
+expressPolyExpr
+  findRemote
+  parentLang
+  _
+  ( AnnoS
+      (Idx midx _)
+      _
+      (AppS f@(AnnoS (Idx gidxCall (FunT inputs _)) (Idx cidxCall callLang, _) (ExeS (SrcCall src))) xs)
+    )
+    | srcInline src && isLocal = do
+        propagateScope gidxCall midx
+        xsExpr <- zipWithM (expressPolyExprWrap callLang) (map (Idx cidxCall) inputs) xs
+        expressPolyApp parentLang f xsExpr >>= stripPolyReturn
+    where
+      remote = findRemote parentLang callLang
+      isLocal = isNothing remote
+      stripPolyReturn (PolyReturn e) = return e
+      stripPolyReturn e = return e
 expressPolyExpr
   findRemote
   parentLang

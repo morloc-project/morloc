@@ -1,0 +1,17 @@
+-- Test deeply nested inline operators with precedence
+module main (deep)
+
+type Py => Int = "int"
+
+source Py where
+  %inline (+)
+  %inline (*)
+
+(+) :: Int -> Int -> Int
+(*) :: Int -> Int -> Int
+
+infixl 6 +
+infixl 7 *
+
+deep :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int
+deep a b c d e f g h = (a + b) * (c + d) + (e + f) * (g + h)

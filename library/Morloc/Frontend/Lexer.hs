@@ -232,6 +232,11 @@ lexOne st@(LexState input pos toks) = case input of
         emit1 TokQuestion "?" (c : rest)
   '?' : [] ->
     emit1 TokQuestion "?" []
+  -- Pragmas: %inline
+  '%' : 'i' : 'n' : 'l' : 'i' : 'n' : 'e' : rest
+    | null rest || not (isAlphaNum (head rest) || head rest == '_' || head rest == '\'') ->
+        Right st { lsInput = rest, lsPos = advanceCol pos 7
+                 , lsTokens = Located pos TokPragmaInline "%inline" : toks }
   -- Intrinsics: @name (@ followed by lowercase letter)
   '@' : c : rest | isLower c ->
     let (word, rest') = span (\x -> isAlphaNum x || x == '\'' || x == '_') (c : rest)

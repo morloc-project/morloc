@@ -383,5 +383,5 @@ instance Pretty GammaIndex where
       <+> list (map ((\(x, y) -> tupled [x, y]) . bimap pretty pretty) rs)
   pretty (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> pretty t
   pretty (MarkG tv) = "MarkG:" <+> pretty tv
-  pretty (SrcG (Source ev1 lang _ _ _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
+  pretty (SrcG (Source ev1 lang _ _ _ _ _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
   pretty (AnnG v t) = pretty v <+> "::" <+> pretty t

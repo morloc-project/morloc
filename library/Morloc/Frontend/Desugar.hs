@@ -538,6 +538,7 @@ desugarExpr (Loc _ (CFixE {})) = error "desugarExpr: unexpected CFixE in express
 desugarExpr (Loc _ (CSrcOldE {})) = error "desugarExpr: unexpected CSrcOldE in expression position"
 desugarExpr (Loc _ (CSrcNewE {})) = error "desugarExpr: unexpected CSrcNewE in expression position"
 desugarExpr (Loc _ (CGuardedAssE {})) = error "desugarExpr: unexpected CGuardedAssE in expression position"
+desugarExpr (Loc _ (CInlineE {})) = error "desugarExpr: unexpected CInlineE in expression position"
 
 -- | Wrap an intrinsic in a lambda if it has fewer args than its arity.
 -- Fully applied intrinsics pass through as IntrinsicE nodes.
@@ -638,11 +639,17 @@ desugarTopLevel (Loc sp (CSrcOldE langTok srcFile items)) = do
   modPath <- State.gets dsModulePath
   let path = resolveSourceFile modPath srcFile
   mapM (mkOldSource sp lang path) items
-desugarTopLevel (Loc sp (CSrcNewE langTok srcFile nameToks)) = do
+desugarTopLevel (Loc sp (CSrcNewE langTok srcFile nameTuples)) = do
   lang <- parseLang langTok
   modPath <- State.gets dsModulePath
   let path = resolveSourceFile modPath srcFile
-  mapM (mkNewSource sp lang path) nameToks
+  mapM (mkNewSource sp lang path) nameTuples
+desugarTopLevel (Loc _ (CInlineE inner)) = do
+  exprs <- desugarTopLevel inner
+  return (map markSourceInline exprs)
+  where
+    markSourceInline (ExprI i (SrcE src)) = ExprI i (SrcE src { srcInline = True })
+    markSourceInline e = e -- %inline on non-source definitions is not yet implemented
 
 -- Expression-level CST nodes should not appear at top level
 desugarTopLevel node = do
@@ -781,13 +788,15 @@ mkOldSource sp lang path (name, mayAlias) = do
           , srcLabel = Nothing
           , srcRsize = []
           , srcNote = []
+          , srcInline = False
+          , srcOperator = isOperatorName name
           }
     )
 
-mkNewSource :: Span -> Lang -> Maybe Path -> Located -> D ExprI
-mkNewSource sp lang path nameTok = do
+mkNewSource :: Span -> Lang -> Maybe Path -> (Bool, Text, Located) -> D ExprI
+mkNewSource sp lang path (isInline, name, nameTok) = do
   docLines' <- lookupDocsAt (locPos nameTok)
-  let name = getName' nameTok
+  let isOp = isOperatorName name
       baseSrc =
         Source
           { srcName = SrcName name
@@ -797,9 +806,16 @@ mkNewSource sp lang path nameTok = do
           , srcLabel = Nothing
           , srcRsize = []
           , srcNote = []
+          , srcInline = isInline
+          , srcOperator = isOp
           }
       src = applySourceDocs docLines' baseSrc
   freshExprSpan sp (SrcE src)
+
+isOperatorName :: Text -> Bool
+isOperatorName t = case T.uncons t of
+  Just (c, _) -> not (isLower c) && not (isUpper c) && c /= '_'
+  Nothing -> False
 
 --------------------------------------------------------------------
 -- Program entry point

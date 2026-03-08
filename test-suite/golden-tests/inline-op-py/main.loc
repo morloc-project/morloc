@@ -1,0 +1,29 @@
+-- Test %inline pragma on operators in source where blocks
+module main (addTwo, mulAdd, nested, letExpr)
+
+type Py => Int = "int"
+
+source Py where
+  %inline (+)
+  %inline (*)
+
+(+) :: Int -> Int -> Int
+(*) :: Int -> Int -> Int
+
+-- Simple inline operator
+addTwo :: Int -> Int -> Int
+addTwo x y = x + y
+
+-- Nested inline operators
+mulAdd :: Int -> Int -> Int -> Int
+mulAdd x y z = x * y + z
+
+-- Test operator precedence with parenthesization
+nested :: Int -> Int -> Int -> Int -> Int
+nested a b c d = (a + b) * (c + d)
+
+-- Inline operator inside let binding
+letExpr :: Int -> Int -> Int
+letExpr x y =
+  let s = x + y
+  in s * s
