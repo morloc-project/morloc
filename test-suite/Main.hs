@@ -84,7 +84,7 @@ main = do
       , golden "claude-test-14" "claude-test-14"
       , golden "claude-test-15" "claude-test-15"
       , golden "claude-test-16" "claude-test-16"
-      , golden "claude-test-17" "claude-test-17"
+      , golden "let-crosslang" "let-crosslang"
       , golden "functional-data-1" "functional-data-1"
       , golden "functional-data-2" "functional-data-2"
       , golden "functional-data-3a" "functional-data-3a"

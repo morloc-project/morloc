@@ -1,17 +1,6 @@
--- Let-binding codegen bug: dedicated regression tests.
---
--- BUG: When consecutive let bindings make foreign calls to the same pool,
--- the compiler generates incorrect return type extraction for the second
--- foreign call's result. Specifically, the second foreign call's result is
--- deserialized using the first foreign call's return type instead of its own.
---
--- Example: In the generated C++ code for letMinimal:
---   uint8_t* s4 = foreign_call("pipe-py", mid1, s0, NULL);  // pyStrLen -> Int
---   uint8_t* s5 = foreign_call("pipe-py", mid2, s1, NULL);  // pyMakeStr -> Str
---   int n2 = _get_value<int>(s5, "<int>i4");    // BUG: extracts Str as Int!
---
--- The equivalent nested form works correctly:
---   cppStrLen (pyMakeStr (pyStrLen (cppMakeStr 10)))  -- OK
+-- Regression tests for let bindings with cross-language foreign calls.
+-- Covers type changes across let boundaries, diamond patterns, fan-out,
+-- deep chains, do-blocks with lets, and mixed types.
 
 module main
   ( letMinimal

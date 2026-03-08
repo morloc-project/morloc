@@ -490,7 +490,8 @@ expressPolyExpr
         letId = case [j | Arg j v' <- bodyArgs, v' == v] of
           [j] -> j
           _ -> cidx
-    e1' <- expressPolyExprWrap parentLang parentType e1
+    let e1Type = case e1 of AnnoS (Idx _ t) _ _ -> mkIdx e1 t
+    e1' <- expressPolyExprWrap parentLang e1Type e1
     e2' <- expressPolyExprWrap parentLang parentType e2
     return $ PolyLet letId e1' e2'
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (RealS x)) = return $ PolyReal (Idx cidx v) x
