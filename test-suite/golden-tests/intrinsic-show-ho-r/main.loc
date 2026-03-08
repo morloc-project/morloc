@@ -1,0 +1,12 @@
+module main (testShowHO, testMapMaybeShow)
+
+import maybe (tryMaybe, mapMaybe)
+import maybe-r
+import root
+import root-r
+
+testShowHO :: Str
+testShowHO = tryMaybe show "none" 42
+
+testMapMaybeShow :: ?Str
+testMapMaybeShow = mapMaybe show 42

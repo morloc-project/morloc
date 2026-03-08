@@ -33,6 +33,7 @@ ldFieldAccess: dot
 # Serialize/deserialize
 ldSerializeFn: "morloc.put_value"
 ldDeserializeFn: "morloc.get_value"
+ldIntrinsicPrefix: "morloc."
 
 # Foreign call
 ldForeignCallFn: "morloc.foreign_call"

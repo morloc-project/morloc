@@ -31,6 +31,7 @@ ldFieldAccess: dollar
 # Serialize/deserialize
 ldSerializeFn: "morloc_put_value"
 ldDeserializeFn: "morloc_get_value"
+ldIntrinsicPrefix: "morloc_"
 
 # Foreign call
 ldForeignCallFn: "morloc_foreign_call"

@@ -33,6 +33,7 @@ ldFieldAccess: dot
 # Serialize/deserialize function names (from juliamorloc.jl)
 ldSerializeFn: "MorlocRuntime.put_value"
 ldDeserializeFn: "MorlocRuntime.get_value"
+ldIntrinsicPrefix: "MorlocRuntime."
 
 # Foreign call
 ldForeignCallFn: "MorlocRuntime.foreign_call"

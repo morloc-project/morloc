@@ -568,13 +568,6 @@ genericMakeLet desc namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 
   let rs = rs1 ++ [namer i <+> pretty (ldAssignOp desc) <+> e1'] ++ rs2
    in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
--- | Extract the module prefix from a fully-qualified function name.
--- E.g., "morloc.put_value" -> "morloc.", "put_value" -> ""
-extractModulePrefix :: Text -> Text
-extractModulePrefix fn = case T.breakOnEnd "." fn of
-  ("", _) -> ""
-  (prefix, _) -> prefix
-
 -- | Generic expression printer driven by descriptor
 genericPrintExpr :: LangDescriptor -> IExpr -> MDoc
 genericPrintExpr desc = go
@@ -631,10 +624,10 @@ genericPrintExpr desc = go
       pretty $ substituteT (ldDoBlockExpr desc) [("expr", render (go e))]
     go (IEval e) = go e <> "()"
     go (IIntrinsicHash schema e) =
-      let prefix = extractModulePrefix (ldSerializeFn desc)
+      let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_hash(" <> go e <> ", " <> dquotes (pretty schema) <> ")"
     go (IIntrinsicSave fmt schema e path) =
-      let prefix = extractModulePrefix (ldSerializeFn desc)
+      let prefix = ldIntrinsicPrefix desc
           saveFn :: Text
           saveFn = case fmt of
             "json"     -> "mlc_save_json"
@@ -642,13 +635,13 @@ genericPrintExpr desc = go
             _          -> "mlc_save"
        in pretty prefix <> pretty saveFn <> "(" <> go e <> ", " <> dquotes (pretty schema) <> ", " <> go path <> ")"
     go (IIntrinsicLoad schema _ path) =
-      let prefix = extractModulePrefix (ldSerializeFn desc)
+      let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_load(" <> dquotes (pretty schema) <> ", " <> go path <> ")"
     go (IIntrinsicShow schema e) =
-      let prefix = extractModulePrefix (ldSerializeFn desc)
+      let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_show(" <> go e <> ", " <> dquotes (pretty schema) <> ")"
     go (IIntrinsicRead schema _ e) =
-      let prefix = extractModulePrefix (ldSerializeFn desc)
+      let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_read(" <> dquotes (pretty schema) <> ", " <> go e <> ")"
 
 -- | Generic statement printer driven by descriptor
