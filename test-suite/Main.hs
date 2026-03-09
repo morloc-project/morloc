@@ -125,6 +125,7 @@ main = do
       , golden "typeclasses-7" "typeclasses-7"
       , golden "typeclasses-8" "typeclasses-8"
       , golden "typeclasses-9" "typeclasses-9"
+      , golden "typeclass-stress" "typeclass-stress"
       , golden "poly-list-1" "poly-list-1"
       , golden "higher-kinded-types" "higher-kinded-types"
       , golden "string-encoding" "string-encoding"

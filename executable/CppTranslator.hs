@@ -23,7 +23,7 @@ module CppTranslator
   , cppLang
   ) where
 
-import Control.Monad.Identity (Identity)
+import Control.Monad.Identity (Identity, runIdentity)
 import qualified Control.Monad.State as CMS
 import qualified CppPrinter as CP
 import qualified Data.Char as DC
@@ -235,6 +235,36 @@ metaTypedefs tmap i =
       (Just scope) -> Map.filter (not . null) scope
       Nothing -> Map.empty
     _ -> Map.empty
+
+-- | Collect TVar names of all named (non-anonymous) record types used
+-- in a SerialManifold tree.
+collectNamedRecordTVars :: SerialManifold -> Set.Set TVar
+collectNamedRecordTVars e0 =
+  runIdentity $ foldWithSerialManifoldM fm e0
+  where
+    fm = defaultValue
+      { opFoldWithNativeExprM = nativeExpr
+      , opFoldWithSerialExprM = serialExpr
+      }
+
+    nativeExpr _ (DeserializeN_ t s xs) =
+      return $ Set.unions [xs, seekNamedRecs t, seekNamedRecs (serialAstToType s)]
+    nativeExpr efull e =
+      return $ foldlNE Set.union (seekNamedRecs (typeFof efull)) e
+
+    serialExpr _ (SerializeS_ s xs) =
+      return $ Set.union (seekNamedRecs (serialAstToType s)) xs
+    serialExpr _ e = return $ foldlSE Set.union Set.empty e
+
+    seekNamedRecs :: TypeF -> Set.Set TVar
+    seekNamedRecs (NamF _ (FV v (CV c)) _ rs)
+      | c /= "struct" = Set.insert v (Set.unions (map (seekNamedRecs . snd) rs))
+    seekNamedRecs (NamF _ _ _ rs) = Set.unions (map (seekNamedRecs . snd) rs)
+    seekNamedRecs (FunF ts t) = Set.unions (map seekNamedRecs (t : ts))
+    seekNamedRecs (AppF t ts) = Set.unions (map seekNamedRecs (t : ts))
+    seekNamedRecs (EffectF _ t) = seekNamedRecs t
+    seekNamedRecs (OptionalF t) = seekNamedRecs t
+    seekNamedRecs _ = Set.empty
 
 makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
 makeTheMaker srcs = do
@@ -573,13 +603,19 @@ generateSourcedSerializers ::
     , [MDoc]
     )
 generateSourcedSerializers univeralScopeMap scopeMap es0 = do
-  -- find the scopes that are used in this manifold
-  -- we need to generate (de)serializers for all records
-  typedef <- Map.unions <$> mapM (foldSerialManifoldM fm) es0
+  perManifold <- Map.unions <$> mapM (foldSerialManifoldM fm) es0
 
   scope <- case Map.lookup cppLang univeralScopeMap of
     (Just scope) -> return scope
     Nothing -> return Map.empty
+
+  -- Supplement per-manifold typedefs with universal scope entries for named
+  -- record types that appear in this pool but are missing from the per-manifold
+  -- scope (happens in secondary C++ pools called via foreign_call).
+  let usedTypes = Set.unions (map collectNamedRecordTVars es0)
+      missingTypes = Set.difference usedTypes (Map.keysSet perManifold)
+      supplemental = Map.filterWithKey (\k _ -> Set.member k missingTypes) scope
+      typedef = Map.unionWith mergeScopes perManifold supplemental
 
   foldl groupQuad ([], []) . concat . Map.elems <$> Map.mapWithKeyM (makeSerials scope) typedef
   where

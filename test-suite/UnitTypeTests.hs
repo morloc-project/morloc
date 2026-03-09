@@ -35,6 +35,7 @@ import qualified Morloc.Typecheck.Internal as MTI
 import qualified System.Directory as SD
 import Text.RawString.QQ
 
+import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as MT
@@ -145,10 +146,28 @@ closeExistentials = f
 
 assertSubtypeGamma :: String -> [GammaIndex] -> TypeU -> TypeU -> [GammaIndex] -> TestTree
 assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do
-  let g0 = Gamma {gammaCounter = 0, gammaContext = gs1, gammaSolved = Map.empty}
+  let g0 = listToGamma gs1
   case MTI.subtype Map.empty a b g0 of
     Left e -> error $ show e
-    Right (Gamma _ gs2' _) -> assertEqual "" gs2 gs2'
+    Right g -> assertEqual "" gs2 (MTI.gammaContextList g)
+
+-- | Convert a list of GammaIndex (newest first) to a Gamma with IntMap.
+-- Uses slot spacing of 256 to match production code.
+listToGamma :: [GammaIndex] -> Gamma
+listToGamma gs =
+  let spacing = 256
+      n = length gs
+      -- Newest entry gets highest slot
+      indexed = zip [spacing * (n - 1), spacing * (n - 2) .. 0] gs
+      ctx = IntMap.fromList indexed
+      existMap = Map.fromList [(v, s) | (s, ExistG v _ _) <- indexed]
+  in Gamma
+    { gammaCounter = 0
+    , gammaSlot = spacing * n
+    , gammaContext = ctx
+    , gammaExist = existMap
+    , gammaSolved = Map.empty
+    }
 
 exprTestBad :: String -> MT.Text -> TestTree
 exprTestBad msg code =

@@ -16,6 +16,7 @@ segregation in the code generator.
 -}
 module Morloc.Frontend.Typecheck (typecheck, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
+import qualified Data.IntMap.Strict as IntMap
 import qualified Morloc.BaseTypes as BT
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -42,7 +43,7 @@ typecheck = mapM run
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let g0 = Gamma {gammaCounter = 0, gammaContext = [], gammaSolved = Map.empty}
+      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty}
       (g1, _, e1) <- synthG g0 e0
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g1:"
@@ -175,10 +176,11 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       -- find all instances that are a subtype of the inferred type
       -- this resolve general aliases all the way to the general termini
       -- Also accept instances reachable via coercion (e.g., Int matches ?Int)
-      let emptyGamma = Gamma 0 [] Map.empty
+      let emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty
           isCompatible t = isSubtypeOf2 scope t gt
                         || isJust (tryCoerce scope t gt emptyGamma)
           rssSubtypes = [x | x@(EType t _ _, _) <- rss, isCompatible t]
+
 
       -- find the most specific instance at the general level, this does not
       -- consider a type to be more specific it is more evaluated.
@@ -209,7 +211,6 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
         -- however, they may differ at the concrete level, so keep all for know
         -- and let the concrete inference code sort things out later.
         manyTypes -> do
-          -- filter out just the instances that are in the most specific set
           let es0 = concat [rs | (t, rs) <- rssSubtypes, etype t `elem` manyTypes]
           g1 <- connectInstance g0 es0
           return (g1, es0)
@@ -523,12 +524,13 @@ synthE _ g (VarS v (MonomorphicExpr Nothing [])) = do
   let (g', t) = newvar (unEVar v <> "_u") g
   return (g', t, VarS v (MonomorphicExpr Nothing []))
 synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
-  (g1, rs') <- checkInstances g0 (etype t0) rs0
+  (g1, rsChecked) <- checkInstances g0 (etype t0) rs0
   let (g2, t1) = rename g1 (etype t0)
-  return (g2, t1, VarS v (PolymorphicExpr cls clsName t0 rs'))
+  return (g2, t1, VarS v (PolymorphicExpr cls clsName t0 rsChecked))
   where
-    -- check each instance
-    -- do not return modified Gamma state
+    -- Check each instance independently. Reset gammaContext between instances
+    -- to prevent unbounded growth (each instance adds ~50-80 entries for
+    -- existentials and solved types that are not needed by subsequent checks).
     checkInstances ::
       Gamma ->
       TypeU ->
@@ -536,21 +538,27 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
       MorlocMonad (Gamma, [(EType, [AnnoS (Indexed TypeU) ManyPoly Int])])
     checkInstances g _ [] = return (g, [])
     checkInstances g10 genType ((instType, es) : rs) = do
-      -- check this first instance
       -- convert qualified terms in the general type to existentials
       let (g11, genType') = toExistential g10 genType
       -- rename the instance type
       let (g12, instType') = rename g11 (etype instType)
       -- subtype the renamed instance type against the existential general
       g13 <- subtype' i instType' genType' g12
+      -- Record the slot counter AFTER subtype'. Both toExistential and subtype'
+      -- create ExistG entries that must be preserved: connectInstance (in
+      -- resolveInstances) needs them in gammaContext to solve via access1.
+      let slotAfterSubtype = gammaSlot g13
       -- check all implementations for this instance
       (g14, es') <- checkImplementations g13 genType' es
 
-      -- check all remaining instances
-      -- Use the ORIGINAL general type, not the existntialized one above.
-      -- this means each existential can be solved independently for each
-      -- instance.
-      (g15, rs') <- checkInstances g14 genType rs
+      -- Trim context back to post-subtype state. This removes entries
+      -- from checkG (the main source of O(N^2) growth) while preserving
+      -- existentials from toExistential and subtype' needed downstream.
+      let gNext = gammaTrimAfter slotAfterSubtype g14
+
+      -- Use the ORIGINAL general type, not the existentialized one above.
+      -- Each instance gets its own existentials solved independently.
+      (g15, rs') <- checkInstances gNext genType rs
 
       return (g15, (instType, es') : rs')
 
@@ -844,15 +852,18 @@ application i g0 es (ForallU v s) = application' i (g0 +> v) es (substitute v s)
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
 application i g0 es (ExistU v@(TV s) ([], _) _) =
-  case access1 v (gammaContext g0) of
+  case access1 v g0 of
     -- replace <t0> with <t0>:<ea1> -> <ea2>
-    Just (rs, _, ls) -> do
+    Just _ -> do
       let (g1, veas) = statefulMap (\g _ -> tvarname g "a_") g0 es
           (g2, vea) = tvarname g1 (s <> "o_")
           eas = [ExistU v' ([], Open) ([], Open) | v' <- veas]
           ea = ExistU vea ([], Open) ([], Open)
           f = FunU eas ea
-          g3 = cacheSolved v f $ g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
+      g3 <- case solveExistWith v f (map index eas ++ [index ea]) g2 of
+        Left err -> throwTypeError i err
+        Right Nothing -> return g2
+        Right (Just g') -> return g'
       (g4, _, es', _) <- zipCheck i g3 es eas
       return (g4, apply g4 f, es')
     -- if the variable has already been solved, use solved value

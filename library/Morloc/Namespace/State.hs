@@ -60,6 +60,7 @@ import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
 import Data.Aeson (FromJSON (..), (.!=), (.:?))
 import qualified Data.Aeson as Aeson
+import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map as Map
 import Data.Map.Strict (Map)
 import qualified Data.Set as Set
@@ -218,9 +219,19 @@ data GammaIndex
   | SrcG Source
   deriving (Ord, Eq, Show)
 
+{- | Typechecking context using IntMap for O(log N) operations.
+Entries are keyed by monotonically increasing slot numbers (higher = newer).
+Side-indexes provide O(log N) lookup of ExistG entries by TVar.
+-}
 data Gamma = Gamma
-  { gammaCounter :: Int
-  , gammaContext :: [GammaIndex]
+  { gammaCounter :: !Int
+  -- | Next available slot number (always increasing)
+  , gammaSlot :: !Int
+  -- | Ordered context: higher slot = newer entry
+  , gammaContext :: IntMap.IntMap GammaIndex
+  -- | Index: ExistG TVar -> slot number (for O(log N) access1)
+  , gammaExist :: Map TVar Int
+  -- | Cache of solved existential types
   , gammaSolved :: Map TVar TypeU
   }
 
