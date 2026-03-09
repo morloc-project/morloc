@@ -1,0 +1,12 @@
+--- letLambda ---
+42
+--- letLambdaComplex ---
+[5,5]
+--- letLambdaMultiUse ---
+[1,2]
+--- letLambdaNested ---
+42
+--- letLambdaCapture ---
+[1,2]
+--- letLambdaPartial ---
+[1,2]

@@ -112,6 +112,8 @@ main = do
       , golden "native-morloc-7" "native-morloc-7"
       , golden "native-morloc-8" "native-morloc-8"
       , golden "native-morloc-9" "native-morloc-9"
+      , golden "nexus-let-pure" "nexus-let-pure"
+      , golden "nexus-let-lambda" "nexus-let-lambda"
       , golden "demo-trimming" "demo-trimming"
       , golden "formatting" "formatting"
       , golden "record-docstrings" "record-docstrings"

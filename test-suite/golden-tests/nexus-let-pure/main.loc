@@ -1,0 +1,124 @@
+-- Tests for let bindings in the pure nexus evaluator (gAST path).
+-- No source declarations, no imports -- all functions are purely nexus-evaluated.
+
+module main
+  ( letSimpleInt
+  , letSimpleStr
+  , letSimpleBool
+  , letSimpleReal
+  , letSimpleList
+  , letSimpleTuple
+  , letNested
+  , letCrossRef
+  , letDeepChain
+  , letMultiRef
+  , letUnused
+  , letShadow
+  , letNestedStruct
+  , letGetter
+  , letWithArg
+  , letSelfRef
+  , letDeepNest
+  , letCrossRefChain
+  , letRecord
+  , letRecordGetter
+  )
+
+record Point = Point { x :: Int, y :: Int }
+
+-- 1. Simple let with integer
+letSimpleInt :: Int
+letSimpleInt = let x = 42 in x
+
+-- 2. Simple let with string
+letSimpleStr :: Str
+letSimpleStr = let s = "hello" in s
+
+-- 3. Simple let with boolean
+letSimpleBool :: Bool
+letSimpleBool = let b = True in b
+
+-- 4. Simple let with real
+letSimpleReal :: Real
+letSimpleReal = let r = 3.14 in r
+
+-- 5. Simple let with list
+letSimpleList :: [Int]
+letSimpleList = let xs = [1, 2, 3] in xs
+
+-- 6. Simple let with tuple
+letSimpleTuple :: (Int, Str)
+letSimpleTuple = let p = (42, "world") in p
+
+-- 7. Nested lets returning tuple
+letNested :: (Int, Int)
+letNested = let x = 1 in let y = 2 in (x, y)
+
+-- 8. Cross-referencing let (y uses x)
+letCrossRef :: Int
+letCrossRef = let x = 1 in let y = x in y
+
+-- 9. Deep chain of cross-references (4 levels)
+letDeepChain :: Int
+letDeepChain =
+  let a = 1
+  let b = a
+  let c = b
+  let d = c
+  in d
+
+-- 10. Multiple references to same let-bound variable
+letMultiRef :: (Int, Int, Int)
+letMultiRef = let x = 42 in (x, x, x)
+
+-- 11. Unused let binding
+letUnused :: Int
+letUnused = let x = 999 in 42
+
+-- 12. Let shadowing (inner x shadows outer x, uniquified to x@0 and x@1)
+letShadow :: Int
+letShadow = let x = 1 in let x = 2 in x
+
+-- 13. Nested data structure in let
+letNestedStruct :: (Int, [Int], Str)
+letNestedStruct = let p = (1, [2, 3], "hi") in p
+
+-- 14. Pattern getter on let-bound tuple
+letGetter :: Int
+letGetter = let p = (10, 20) in .0 p
+
+-- 15. Let with function argument from CLI
+letWithArg :: Int -> Int
+letWithArg x = let y = x in y
+
+-- 16. Let self-reference: inner let RHS refers to outer x (non-recursive let)
+letSelfRef :: Int
+letSelfRef = let x = 1 in let x = x in x
+
+-- 17. Many let bindings, use first
+letDeepNest :: Int
+letDeepNest =
+  let a = 1
+  let b = 2
+  let c = 3
+  let d = 4
+  let e = 5
+  in a
+
+-- 18. Long cross-reference chain
+letCrossRefChain :: Int
+letCrossRefChain =
+  let a = 100
+  let b = a
+  let c = b
+  let d = c
+  let e = d
+  in e
+
+-- 19. Record construction in let
+letRecord :: Point
+letRecord = let p = { x = 10, y = 20 } in p
+
+-- 20. Record field access on let-bound record
+letRecordGetter :: Int
+letRecordGetter = let p = { x = 10, y = 20 } in .x p
