@@ -462,4 +462,6 @@ main = do
       , golden "inline-block-py" "inline-block-py"
       , golden "inline-old-style-py" "inline-old-style-py"
       , golden "inline-cross-lang" "inline-cross-lang"
+      , -- eval mode restriction tests
+        golden "eval-restrict-source" "eval-restrict-source"
       ]

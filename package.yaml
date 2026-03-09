@@ -148,6 +148,7 @@ executables:
       - morloc
       - base
       - optparse-applicative
+      - temporary
       - text
 
   morloc-codegen-generic:

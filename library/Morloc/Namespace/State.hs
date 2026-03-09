@@ -126,6 +126,8 @@ data MorlocState = MorlocState
   -- ^ Map from export manifold ID to its original return effect labels
   , stateProjectRoot :: Maybe Path
   -- ^ Project root directory (directory of the entry-point file)
+  , stateEvalMode :: Bool
+  -- ^ True when running in eval mode (restricts source/class/instance)
   }
   deriving (Show)
 
@@ -300,6 +302,7 @@ instance Defaultable MorlocState where
       , stateManifoldLang = Map.empty
       , stateManifoldEffects = Map.empty
       , stateProjectRoot = Nothing
+      , stateEvalMode = False
       }
 
 instance Defaultable PackageMeta where

@@ -856,6 +856,10 @@ insertLayout toks = beginTopLevel toks
       Located (locPos eof) TokVLBrace ""
         : Located (locPos eof) TokVRBrace ""
         : closingBraces ctxs [eof]
+    -- Explicit brace after layout keyword: skip virtual layout, let the
+    -- brace be handled as an explicit context by emitToken/process.
+    startLayoutCtx ctxs (t@(Located _ TokLBrace _) : rest) =
+      t : process (ExplicitCtx : ctxs) rest
     startLayoutCtx ctxs (t : rest)
       | otherwise =
           let col = posCol (locPos t)

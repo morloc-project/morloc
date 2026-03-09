@@ -113,6 +113,7 @@ import qualified Morloc.BaseTypes as BT
   INTERPOPEN { Located _ TokInterpOpen _ }
   INTERPCLOSE { Located _ TokInterpClose _ }
   INTRINSIC  { Located _ (TokIntrinsic _) _ }
+  ';'        { Located _ TokSemicolon _ }
   '%inline'  { Located _ TokPragmaInline _ }
   EOF        { Located _ TokEOF _ }
 
@@ -146,10 +147,16 @@ module :: { Loc CstExpr }
 top_body :: { [Loc CstExpr] }
   : VLBRACE top_decls VRBRACE   { $2 }
   | VLBRACE VRBRACE              { [] }
+  | '{' top_decls_explicit '}'   { $2 }
+  | '{' '}'                      { [] }
 
 top_decls :: { [Loc CstExpr] }
   : top_decl                     { $1 }
   | top_decls VSEMI top_decl     { $1 ++ $3 }
+
+top_decls_explicit :: { [Loc CstExpr] }
+  : top_decl                           { $1 }
+  | top_decls_explicit ';' top_decl    { $1 ++ $3 }
 
 top_decl :: { [Loc CstExpr] }
   : import_decl       { [$1] }
@@ -574,10 +581,15 @@ list_expr :: { Loc CstExpr }
 
 do_expr :: { Loc CstExpr }
   : 'do' VLBRACE do_stmts VRBRACE     { Loc ($1 <-> $4) (CDoE $3) }
+  | 'do' '{' do_stmts_explicit '}'    { Loc ($1 <-> $4) (CDoE $3) }
 
 do_stmts :: { [CstDoStmt] }
   : do_stmt                   { [$1] }
   | do_stmts VSEMI do_stmt    { $1 ++ [$3] }
+
+do_stmts_explicit :: { [CstDoStmt] }
+  : do_stmt                              { [$1] }
+  | do_stmts_explicit ';' do_stmt        { $1 ++ [$3] }
 
 do_stmt :: { CstDoStmt }
   : LOWER '<-' expr            { CstDoBind (EV (getName $1)) $3 }
@@ -737,10 +749,15 @@ evar_or_op :: { Located }
 opt_where_decls :: { [Loc CstExpr] }
   : {- empty -}                               { [] }
   | 'where' VLBRACE where_items VRBRACE       { $3 }
+  | 'where' '{' where_items_explicit '}'      { $3 }
 
 where_items :: { [Loc CstExpr] }
   : where_item                      { $1 }
   | where_items VSEMI where_item    { $1 ++ $3 }
+
+where_items_explicit :: { [Loc CstExpr] }
+  : where_item                             { $1 }
+  | where_items_explicit ';' where_item    { $1 ++ $3 }
 
 where_item :: { [Loc CstExpr] }
   : sig_or_ass                { $1 }
