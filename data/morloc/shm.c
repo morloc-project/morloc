@@ -163,8 +163,12 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ER
     snprintf(shm_name, sizeof(shm_name), "%s_%zu", shm_basename, volume_index);
     shm_name[MAX_FILENAME_SIZE - 1] = '\0';
 
-    // Set the global basename, this will be used to name future volumes
-    strncpy(common_basename, shm_basename, MAX_FILENAME_SIZE - 1);
+    // Set the global basename, this will be used to name future volumes.
+    // Skip if already pointing to common_basename (called from volume expansion).
+    if (shm_basename != common_basename) {
+        strncpy(common_basename, shm_basename, MAX_FILENAME_SIZE - 1);
+        common_basename[MAX_FILENAME_SIZE - 1] = '\0';
+    }
 
     // Try POSIX shared memory first (/dev/shm), fall back to file-backed
     // if /dev/shm is too small (common in Docker containers).
@@ -442,6 +446,7 @@ static bool choose_next_volume_size(size_t* new_volume_size, size_t new_data_siz
 
     size_t shm_size = 0;
     size_t last_shm_size = 0;
+    size_t n_volumes = 0;
     size_t minimum_required_size = sizeof(shm_t) + sizeof(block_header_t) + new_data_size;
 
     // Iterate through volumes to calculate total and last shared memory sizes
@@ -450,6 +455,7 @@ static bool choose_next_volume_size(size_t* new_volume_size, size_t new_data_siz
         if (!shm) break;
         shm_size += shm->volume_size;
         last_shm_size = shm->volume_size;
+        n_volumes++;
     }
 
     size_t available_memory = 0;
