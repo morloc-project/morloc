@@ -101,8 +101,8 @@ data IExpr
   = ICall Text (Maybe [IType]) [[IExpr]]
   | IVar Text
   | IBoolLit Bool
-  | IIntLit Integer
-  | IRealLit Scientific
+  | IIntLit (Maybe Text) Integer  -- concrete type name (e.g. "int64_t"), Nothing for default
+  | IRealLit (Maybe Text) Scientific  -- concrete type name (e.g. "float"), Nothing for default
   | IStrLit Text
   | INullLit
   | IListLit [IExpr]
@@ -466,8 +466,8 @@ lowerNativeExpr cfg origExpr (RecordN_ o v ps rs) = do
       , poolPriorExprs = concatMap poolPriorExprs es <> poolPriorExprs rec'
       }
 lowerNativeExpr cfg _ (LogN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IBoolLit v)}
-lowerNativeExpr cfg _ (RealN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IRealLit v)}
-lowerNativeExpr cfg _ (IntN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IIntLit v)}
+lowerNativeExpr cfg _ (RealN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IRealLit (Just (unCVar cv)) v)}
+lowerNativeExpr cfg _ (IntN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IIntLit (Just (unCVar cv)) v)}
 lowerNativeExpr cfg _ (StrN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit v)}
 lowerNativeExpr cfg _ (NullN_ _) = return $ defaultValue {poolExpr = lcPrintExpr cfg INullLit}
 lowerNativeExpr cfg _ (DoBlockN_ _ x) =

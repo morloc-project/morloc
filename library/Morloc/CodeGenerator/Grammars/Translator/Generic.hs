@@ -576,8 +576,8 @@ genericPrintExpr desc = go
     go (IBoolLit True) = pretty (ldBoolTrue desc)
     go (IBoolLit False) = pretty (ldBoolFalse desc)
     go INullLit = pretty (ldNullLiteral desc)
-    go (IIntLit i) = viaShow i <> pretty (ldIntLiteralSuffix desc)
-    go (IRealLit r) = viaShow r
+    go (IIntLit _ i) = viaShow i <> pretty (ldIntLiteralSuffix desc)
+    go (IRealLit _ r) = viaShow r
     go (IStrLit s) = textEsc' s
     go (IListLit es) = case ldListStyle desc of
       BracketList -> list (map go es)

@@ -1,0 +1,153 @@
+-- Test alias deduplication correctness and performance.
+-- Verifies that type aliases (Deque/Vector/Array = List, Int32/Int64 = Int)
+-- are handled correctly by the typechecker's instance resolution dedup.
+
+module main (testAliasPy, testAliasCpp, testInt32Cpp, testDeepChainPy)
+
+import root-py
+import root-cpp
+
+-- ===== EXPLICIT ALIAS ANNOTATIONS =====
+-- Each alias supports different typeclasses:
+--   List:   Functor, Foldable, Indexed, Stack, Queue
+--   Deque:  Functor, Foldable, Stack, Queue
+--   Vector: Functor, Foldable, Indexed, Queue
+--   Array:  Functor, Foldable, Indexed
+
+-- Functor (all aliases have it)
+mapDeque :: Deque Int -> Deque Int
+mapDeque xs = map (\x -> x + 1) xs
+
+mapVector :: Vector Int -> Vector Int
+mapVector xs = map (\x -> x + 1) xs
+
+mapArray :: Array Int -> Array Int
+mapArray xs = map (\x -> x + 1) xs
+
+-- Foldable (all aliases have it)
+foldDeque :: Deque Int -> Int
+foldDeque xs = fold (\a x -> a + x) 0 xs
+
+foldArray :: Array Int -> Int
+foldArray xs = fold (\a x -> a + x) 0 xs
+
+-- Indexed (List, Vector, Array -- NOT Deque)
+indexVector :: Vector Int -> Int
+indexVector xs = at 0 xs
+
+indexArray :: Array Int -> Int
+indexArray xs = at 0 xs
+
+-- Stack (List, Deque -- NOT Vector, Array)
+consDeque :: Deque Int -> Deque Int
+consDeque xs = cons 0 xs
+
+-- Queue (List, Deque, Vector -- NOT Array)
+snocDeque :: Deque Int -> Deque Int
+snocDeque xs = snoc xs 99
+
+snocVector :: Vector Int -> Vector Int
+snocVector xs = snoc xs 99
+
+-- ===== MULTI-TYPECLASS CHAINS ON SPECIFIC ALIASES =====
+-- Deque: map (Functor) + cons (Stack) + fold (Foldable)
+chainDeque :: Deque Int -> Int
+chainDeque xs =
+  let ys = map (\x -> x + 1) xs
+  let zs = cons 0 ys
+  in fold (\a x -> a + x) 0 zs
+
+-- Vector: map (Functor) + snoc (Queue) + at (Indexed)
+chainVector :: Vector Int -> Int
+chainVector xs =
+  let ys = map (\x -> x + 1) xs
+  let zs = snoc ys 100
+  in at 0 zs
+
+-- Array: map (Functor) + at (Indexed) + fold (Foldable)
+chainArray :: Array Int -> Int
+chainArray xs =
+  let ys = map (\x -> x * 2) xs
+  in fold (\a x -> a + x) 0 ys
+
+-- ===== INT32/INT64 ARITHMETIC (C++ only) =====
+-- Int32 = Int at the general level, but "int32_t" in C++.
+add32 :: Int32 -> Int32 -> Int32
+add32 x y = x + y
+
+mul64 :: Int64 -> Int64 -> Int64
+mul64 x y = x * y
+
+-- ===== DEEP CHAIN (performance stress) =====
+-- 8 chained operations. Without alias dedup this would cause
+-- exponential branching in instance resolution.
+deepChain :: [Int] -> Int
+deepChain xs =
+  let a = map (\x -> x + 1) xs
+  let b = map (\x -> x * 2) a
+  let c = cons 0 b
+  let d = snoc c 100
+  let e = map (\x -> x - 1) d
+  let f = filter (\x -> x > 0) e
+  let g = map (\x -> x + 10) f
+  in fold (\acc x -> acc + x) 0 g
+
+-- ===== NESTED ALIAS CONTAINERS =====
+nestedAliasMap :: [Deque Int] -> [Deque Int]
+nestedAliasMap = map (map (\x -> x + 1))
+
+-- ===== Eq on aliases =====
+eqDeque :: Bool
+eqDeque = mapDeque [1,2,3] == [2,3,4]
+
+eqVector :: Bool
+eqVector = mapVector [1,2,3] == [2,3,4]
+
+-- ===== TEST RUNNERS =====
+
+testAliasPy :: Bool
+testAliasPy =
+  let t1 = mapDeque [1,2,3] == [2,3,4]
+  let t2 = mapVector [1,2,3] == [2,3,4]
+  let t3 = mapArray [1,2,3] == [2,3,4]
+  let t4 = foldDeque [1,2,3] == 6
+  let t5 = foldArray [1,2,3] == 6
+  let t6 = indexVector [10,20,30] == 10
+  let t7 = indexArray [10,20,30] == 10
+  let t8 = consDeque [1,2] == [0,1,2]
+  let t9 = snocDeque [1,2] == [1,2,99]
+  let t10 = snocVector [1,2] == [1,2,99]
+  let t11 = chainDeque [1,2,3] == 9
+  let t12 = chainVector [1,2,3] == 2
+  let t13 = chainArray [1,2,3] == 12
+  let t14 = nestedAliasMap [[1,2],[3]] == [[2,3],[4]]
+  let t15 = eqDeque && eqVector
+  in t1 && t2 && t3 && t4 && t5 && t6 && t7 && t8 && t9 && t10 && t11 && t12 && t13 && t14 && t15
+
+testAliasCpp :: Bool
+testAliasCpp =
+  let t1 = mapDeque [1,2,3] == [2,3,4]
+  let t2 = mapVector [1,2,3] == [2,3,4]
+  let t3 = mapArray [1,2,3] == [2,3,4]
+  let t4 = foldDeque [1,2,3] == 6
+  let t5 = foldArray [1,2,3] == 6
+  let t6 = indexVector [10,20,30] == 10
+  let t7 = indexArray [10,20,30] == 10
+  let t8 = consDeque [1,2] == [0,1,2]
+  let t9 = snocDeque [1,2] == [1,2,99]
+  let t10 = snocVector [1,2] == [1,2,99]
+  let t11 = chainDeque [1,2,3] == 9
+  let t12 = chainVector [1,2,3] == 2
+  let t13 = chainArray [1,2,3] == 12
+  let t14 = nestedAliasMap [[1,2],[3]] == [[2,3],[4]]
+  let t15 = eqDeque && eqVector
+  in t1 && t2 && t3 && t4 && t5 && t6 && t7 && t8 && t9 && t10 && t11 && t12 && t13 && t14 && t15
+
+testInt32Cpp :: Bool
+testInt32Cpp =
+  let t1 = add32 10 20 == 30
+  let t2 = mul64 100 200 == 20000
+  in t1 && t2
+
+testDeepChainPy :: Int
+testDeepChainPy = deepChain [1,2,3,4,5]

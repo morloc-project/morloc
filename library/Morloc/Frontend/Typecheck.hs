@@ -25,6 +25,7 @@ import qualified Morloc.Data.Text as MT
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
+import Data.List (nubBy)
 import Data.Maybe (isJust)
 import Morloc.Typecheck.Internal
 
@@ -211,7 +212,16 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
         -- however, they may differ at the concrete level, so keep all for know
         -- and let the concrete inference code sort things out later.
         manyTypes -> do
-          let es0 = concat [rs | (t, rs) <- rssSubtypes, etype t `elem` manyTypes]
+          -- Deduplicate alias-equivalent types: e.g., Array a and List a
+          -- are structurally different but evaluate to the same type.
+          -- Without this, N aliases cause exponential branching in recursive
+          -- resolveInstances calls.
+          let eval t = case TE.evaluateType scope t of
+                Right et -> et
+                Left _ -> t
+              deduped = nubBy (\t1 t2 -> eval t1 == eval t2) manyTypes
+              es0 = concat [rs | (t, rs) <- rssSubtypes,
+                            any (\d -> eval (etype t) == eval d) deduped]
           g1 <- connectInstance g0 es0
           return (g1, es0)
 
@@ -969,6 +979,10 @@ checkE i g (EvalS e) t = do
       return (g4, apply g4 t, EvalS (applyGen g4 e1))
     t' -> throwTypeError i $ "Cannot force non-thunk type:" <+> pretty t'
 
+-- Resolve solved existentials so specific handlers (LstS, TupS, etc.) can match
+checkE i g e t@(ExistU v _ _)
+  | Just _ <- lookupU v g
+  = checkE' i g e (apply g t)
 --   Sub (with coercion fallback)
 checkE i g1 e1 b = do
   (g2, a, e2) <- synthE' i g1 e1
