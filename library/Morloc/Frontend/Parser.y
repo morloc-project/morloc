@@ -162,7 +162,7 @@ top_decl :: { [Loc CstExpr] }
   : import_decl       { [$1] }
   | typedef_decl      { [$1] }
   | typeclass_decl    { [$1] }
-  | instance_decl     { [$1] }
+  | instance_decl     { $1 }
   | fixity_decl       { [$1] }
   | source_decl       { $1 }
   | '%inline' source_decl { map (\(Loc sp e) -> Loc sp (CInlineE (Loc sp e))) $2 }
@@ -394,11 +394,15 @@ signature :: { CstSigItem }
 -- Instances
 --------------------------------------------------------------------
 
-instance_decl :: { Loc CstExpr }
-  : 'instance' UPPER types1 'where' VLBRACE instance_items VRBRACE
-      { at $1 (CIstE (ClassName (getName $2)) $3 (concat $6)) }
-  | 'instance' UPPER types1
-      { at $1 (CIstE (ClassName (getName $2)) $3 []) }
+instance_decl :: { [Loc CstExpr] }
+  : 'instance' instance_heads 'where' VLBRACE instance_items VRBRACE
+      { [at $1 (CIstE cn ts (concat $5)) | (cn, ts) <- $2] }
+  | 'instance' instance_heads
+      { [at $1 (CIstE cn ts []) | (cn, ts) <- $2] }
+
+instance_heads :: { [(ClassName, [TypeU])] }
+  : UPPER types1                              { [(ClassName (getName $1), $2)] }
+  | instance_heads ',' UPPER types1           { $1 ++ [(ClassName (getName $3), $4)] }
 
 instance_items :: { [[Loc CstExpr]] }
   : instance_item                        { [$1] }

@@ -931,6 +931,11 @@ insertLayout toks = beginTopLevel toks
       -- Explicit close brace
       | locToken tok == TokRBrace =
           closeToExplicit ctxs tok rest
+      -- Prefix pragma: suppress VSEMI before the next token
+      | locToken tok == TokPragmaInline =
+          tok : case rest of
+            (next : rest') -> emitFirstToken ctxs next rest'
+            [] -> closingBraces ctxs []
       -- Regular token
       | otherwise = tok : process ctxs rest
 
