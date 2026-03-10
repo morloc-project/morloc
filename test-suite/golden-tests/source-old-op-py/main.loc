@@ -1,0 +1,36 @@
+-- Test bare operators in old-style source declarations
+module main (test_add, test_sub, test_mul, test_neg, test_expr)
+
+type Py => Int = "int"
+
+class Arith a where
+  neg a :: a -> a
+  (+) a :: a -> a -> a
+  (-) a :: a -> a -> a
+  (*) a :: a -> a -> a
+
+infixl 6 +, -
+infixl 7 *
+
+-- Test: bare operators (+), (-), (*) and op-to-name alias (+) as add_fn
+instance Arith Int where
+  %inline source Py from "foo.py"
+    ( "neg" as neg
+    , (+), (-), (*)
+    )
+
+test_add :: Int -> Int -> Int
+test_add x y = x + y
+
+test_sub :: Int -> Int -> Int
+test_sub x y = x - y
+
+test_mul :: Int -> Int -> Int
+test_mul x y = x * y
+
+test_neg :: Int -> Int
+test_neg x = neg x
+
+-- (3 + 4) * 2 - 1 = 13
+test_expr :: Int
+test_expr = (3 + 4) * 2 - 1

@@ -462,6 +462,8 @@ main = do
       , golden "inline-block-py" "inline-block-py"
       , golden "inline-old-style-py" "inline-old-style-py"
       , golden "inline-cross-lang" "inline-cross-lang"
+      , -- bare operators in old-style source declarations
+        golden "source-old-op-py" "source-old-op-py"
       , -- eval mode restriction tests
         golden "eval-restrict-source" "eval-restrict-source"
       ]

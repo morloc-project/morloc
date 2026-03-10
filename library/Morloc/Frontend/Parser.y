@@ -456,9 +456,16 @@ source_item :: { (Text, Maybe Text) }
   : STRING                              { (getString $1, Nothing) }
   | STRING 'as' LOWER                   { (getString $1, Just (getName $3)) }
   | STRING 'as' UPPER                   { (getString $1, Just (getName $3)) }
-  | STRING 'as' '(' operator_name ')'   { (getString $1, Just (getOp $4)) }
-  | STRING 'as' '(' '-' ')'            { (getString $1, Just "-") }
-  | STRING 'as' '(' '.' ')'            { (getString $1, Just ".") }
+  | STRING 'as' source_op               { (getString $1, Just $3) }
+  | source_op                           { ($1, Nothing) }
+  | source_op 'as' source_op            { ($1, Just $3) }
+  | source_op 'as' LOWER               { ($1, Just (getName $3)) }
+  | source_op 'as' UPPER               { ($1, Just (getName $3)) }
+
+source_op :: { Text }
+  : '(' operator_name ')'              { getOp $2 }
+  | '(' '-' ')'                        { "-" }
+  | '(' '.' ')'                        { "." }
 
 source_new_items :: { [(Bool, Text, Located)] }
   : source_new_item                          { [$1] }
