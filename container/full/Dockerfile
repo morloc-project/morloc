@@ -20,7 +20,17 @@ RUN morloc init
 RUN echo "lang_python3 : python3" >> $HOME/.local/share/morloc/config
 
 # Install the morloc modules that are required for the morloc tests to pass
-RUN morloc install internal root root-py root-r root-cpp math
+RUN morloc install internal \
+                   root root-r root-py root-cpp \
+                   bits bits-cpp bits-py \
+                   char char-cpp char-py char-r \
+                   map map-cpp map-py map-r \
+                   math math-cpp math-py math-r \
+                   random random-cpp random-py random-r \
+                   set set-cpp set-py set-r \
+                   shell shell-cpp shell-py \
+                   text text-cpp text-py \
+                   maybe maybe-cpp maybe-py maybe-r
 
 RUN apt-get install -y vim
 
