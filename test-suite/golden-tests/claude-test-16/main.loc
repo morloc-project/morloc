@@ -1,0 +1,196 @@
+-- SHM reference counting comprehensive test.
+-- Tests stress, edge cases, and large data patterns.
+--
+-- NOTE: consecutive let-bindings with foreign calls to the same pool trigger
+-- a pre-existing codegen bug (documented in claude-test-17). Tests here
+-- use nested function application to avoid that bug and focus on SHM testing.
+
+module main
+  ( manyCallsSmall
+  , manyCallsLarge
+  , chainCppPy
+  , chainPyCpp
+  , deepDoChain
+  , nestedLetCross
+  , listAppendCross
+  , resultForwardChain
+  , bigStrRoundTrip
+  , bigVecRoundTrip
+  , vecOfStrsRoundTrip
+  , nestedVecRoundTrip
+  , bigStrChain
+  , manyBigStrings
+  , manyNestedVecs
+  )
+
+import root-cpp
+import root-py
+
+source Cpp from "cstress.hpp"
+  ( "cmakeStr" as cppMakeStr
+  , "cstrLen" as cppStrLen
+  , "csumList" as cppSumList
+  , "cmakeRange" as cppMakeRange
+  , "cincAll" as cppIncAll
+  , "cidStr" as cppIdStr
+  , "cidList" as cppIdList
+  , "cdoubleIt" as cppDouble
+  , "caddTwo" as cppAdd
+  , "cmakePair" as cppMakePair
+  , "creplicateStr" as cppReplicateStr
+  , "cappendVec" as cppAppendVec
+  , "cvecOfStrs" as cppVecOfStrs
+  , "csumStrLens" as cppSumStrLens
+  , "cnestedVec" as cppNestedVec
+  , "cnestedSum" as cppNestedSum
+  )
+
+source Py from "pstress.py"
+  ( "pmakeStr" as pyMakeStr
+  , "pstrLen" as pyStrLen
+  , "psumList" as pySumList
+  , "pmakeRange" as pyMakeRange
+  , "pincAll" as pyIncAll
+  , "pidStr" as pyIdStr
+  , "pidList" as pyIdList
+  , "pdoubleIt" as pyDouble
+  , "paddTwo" as pyAdd
+  , "pmakePair" as pyMakePair
+  , "preplicateStr" as pyReplicateStr
+  , "pappendVec" as pyAppendVec
+  , "pvecOfStrs" as pyVecOfStrs
+  , "psumStrLens" as pySumStrLens
+  , "pnestedVec" as pyNestedVec
+  , "pnestedSum" as pyNestedSum
+  )
+
+type Cpp => Int = "int"
+type Cpp => Str = "std::string"
+type Cpp => List a = "std::vector<$1>" a
+
+type Py => Int = "int"
+type Py => Str = "str"
+type Py => List a = "list" a
+
+cppMakeStr :: Int -> Str
+cppStrLen :: Str -> Int
+cppSumList :: [Int] -> Int
+cppMakeRange :: Int -> [Int]
+cppIncAll :: [Int] -> [Int]
+cppIdStr :: Str -> Str
+cppIdList :: [Int] -> [Int]
+cppDouble :: Int -> Int
+cppAdd :: Int -> Int -> Int
+cppMakePair :: Int -> Int -> [Int]
+cppReplicateStr :: Int -> Str -> Str
+cppAppendVec :: [Int] -> [Int] -> [Int]
+cppVecOfStrs :: Int -> Int -> [Str]
+cppSumStrLens :: [Str] -> Int
+cppNestedVec :: Int -> Int -> [[Int]]
+cppNestedSum :: [[Int]] -> Int
+
+pyMakeStr :: Int -> Str
+pyStrLen :: Str -> Int
+pySumList :: [Int] -> Int
+pyMakeRange :: Int -> [Int]
+pyIncAll :: [Int] -> [Int]
+pyIdStr :: Str -> Str
+pyIdList :: [Int] -> [Int]
+pyDouble :: Int -> Int
+pyAdd :: Int -> Int -> Int
+pyMakePair :: Int -> Int -> [Int]
+pyReplicateStr :: Int -> Str -> Str
+pyAppendVec :: [Int] -> [Int] -> [Int]
+pyVecOfStrs :: Int -> Int -> [Str]
+pySumStrLens :: [Str] -> Int
+pyNestedVec :: Int -> Int -> [[Int]]
+pyNestedSum :: [[Int]] -> Int
+
+------------------------------------------------------------
+-- STRESS TESTS: many sequential cross-language calls
+------------------------------------------------------------
+
+-- Test 1: 15 alternating cross-language calls using nested application.
+-- cppMk -> pyLen -> cppMk -> pyLen -> ... -> pyLen
+-- Each call allocates SHM. Without cleanup, would exhaust volumes.
+manyCallsSmall :: Int
+manyCallsSmall =
+    pyStrLen (cppMakeStr (pyStrLen (cppMakeStr (pyStrLen (cppMakeStr (pyStrLen (cppMakeStr (pyStrLen (cppMakeStr (pyStrLen (cppMakeStr (pyStrLen (cppMakeStr (pyStrLen (cppMakeStr 10)))))))))))))))
+
+-- Test 2: Large strings (1000 chars) bounced between languages 10 times.
+manyCallsLarge :: Int
+manyCallsLarge =
+    cppStrLen (pyIdStr (cppIdStr (pyIdStr (cppIdStr (pyIdStr (cppIdStr (pyIdStr (cppIdStr (pyIdStr (cppMakeStr 1000))))))))))
+
+-- Test 3: List chain C++->Py->C++->Py->C++ with incrementing.
+-- [1..100] -> +1 -> +1 -> +1 -> sum = sum(4..103) = 5350
+chainCppPy :: Int
+chainCppPy = cppSumList (pyIncAll (cppIncAll (pyIncAll (cppMakeRange 100))))
+
+-- Test 4: Opposite direction.
+chainPyCpp :: Int
+chainPyCpp = pySumList (cppIncAll (pyIncAll (cppIncAll (pyMakeRange 100))))
+
+-- Test 5: Deep chain with 20 cross-language list transformations.
+-- [1..10] + 20*1 = [21..30], sum = sum(21..30) = 255
+deepDoChain :: Int
+deepDoChain = cppSumList (pyIncAll (cppIncAll (pyIncAll (cppIncAll (pyIncAll (cppIncAll (pyIncAll (cppIncAll (pyIncAll (cppIncAll (pyIncAll (cppIncAll (pyIncAll (cppIncAll (pyIncAll (cppIncAll (pyIncAll (cppIncAll (pyIncAll (cppIncAll (cppMakeRange 10)))))))))))))))))))))
+
+------------------------------------------------------------
+-- EDGE CASES: reference counting patterns (no let bindings)
+------------------------------------------------------------
+
+-- Test 6: Nested lets crossing boundaries (pure nesting, no let).
+nestedLetCross :: Int
+nestedLetCross = cppStrLen (pyReplicateStr 2 (cppReplicateStr 3 "ab"))
+
+-- Test 7: List append across languages.
+listAppendCross :: Int
+listAppendCross = cppSumList (pyAppendVec (pyMakePair 1 2) (cppMakePair 3 4))
+
+-- Test 8: 8 rounds of alternating incVec.
+-- [1,1] + 8*1 = [9,9], sum = 18
+resultForwardChain :: Int
+resultForwardChain = pySumList (cppIncAll (pyIncAll (cppIncAll (pyIncAll (cppIncAll (pyIncAll (cppIncAll (pyIncAll (cppMakePair 1 1)))))))))
+
+------------------------------------------------------------
+-- LARGE DATA: sub-allocation freeing
+------------------------------------------------------------
+
+-- Test 9: Big string (10000 chars) round-tripped.
+bigStrRoundTrip :: Int
+bigStrRoundTrip = pyStrLen (cppMakeStr 10000)
+
+-- Test 10: Big vector round-tripped. pyMakeRange 5000 = [1..5000]
+-- cppSumList [1..5000] = 12502500
+bigVecRoundTrip :: Int
+bigVecRoundTrip = cppSumList (pyMakeRange 5000)
+
+-- Test 11: Vector of 50 strings (100 chars each) round-tripped.
+vecOfStrsRoundTrip :: Int
+vecOfStrsRoundTrip = pySumStrLens (cppVecOfStrs 50 100)
+
+-- Test 12: Nested vector (10x20) round-tripped.
+nestedVecRoundTrip :: Int
+nestedVecRoundTrip = pyNestedSum (cppNestedVec 10 20)
+
+-- Test 13: Large string bounced between languages via nested calls.
+bigStrChain :: Int
+bigStrChain = cppStrLen (pyMakeStr (cppStrLen (pyMakeStr (cppStrLen (pyMakeStr 5000)))))
+
+-- Test 14: Many big string allocations (10 rounds, 2000 chars each).
+manyBigStrings :: Int
+manyBigStrings =
+    pyStrLen (cppMakeStr 2000) + cppStrLen (pyMakeStr 2000)
+    + pyStrLen (cppMakeStr 2000) + cppStrLen (pyMakeStr 2000)
+    + pyStrLen (cppMakeStr 2000) + cppStrLen (pyMakeStr 2000)
+    + pyStrLen (cppMakeStr 2000) + cppStrLen (pyMakeStr 2000)
+    + pyStrLen (cppMakeStr 2000) + cppStrLen (pyMakeStr 2000)
+
+-- Test 15: Many nested vector allocations (8 rounds).
+manyNestedVecs :: Int
+manyNestedVecs =
+    pyNestedSum (cppNestedVec 5 10) + cppNestedSum (pyNestedVec 5 10)
+    + pyNestedSum (cppNestedVec 5 10) + cppNestedSum (pyNestedVec 5 10)
+    + pyNestedSum (cppNestedVec 5 10) + cppNestedSum (pyNestedVec 5 10)
+    + pyNestedSum (cppNestedVec 5 10) + cppNestedSum (pyNestedVec 5 10)

@@ -81,6 +81,29 @@ std::string interweave_strings(const std::vector<std::string>& first, const std:
     return result;
 }
 
+// Thread-local list of SHM pointers allocated by _put_value.
+// Freed after foreign_call returns (args consumed) or at next dispatch start
+// (result consumed by caller in the synchronous call that returned it).
+struct ShmEntry { absptr_t ptr; Schema* schema; };
+thread_local std::vector<ShmEntry> _shm_tracker;
+
+static void _flush_shm_tracker() {
+    for (auto& e : _shm_tracker) {
+        char* err = NULL;
+        // Only do recursive sub-freeing if we have a schema and this is
+        // the last reference. NULL schema entries (from foreign_call result
+        // tracking) just decrement the refcount.
+        block_header_t* blk = (block_header_t*)((char*)e.ptr - sizeof(block_header_t));
+        if (e.schema && blk->reference_count <= 1) {
+            shfree_by_schema(e.ptr, e.schema, &err);
+            if (err) { free(err); err = NULL; }
+        }
+        shfree(e.ptr, &err);
+        if (err) { free(err); }
+    }
+    _shm_tracker.clear();
+}
+
 // Thread-local schema cache: avoids re-parsing the same schema strings
 Schema* get_cached_schema(const char* schema_str) {
     thread_local std::unordered_map<std::string, Schema*> cache;
@@ -100,7 +123,10 @@ uint8_t* _put_value(const T& value, const std::string& schema_str) {
     try {
         voidstar = toAnything(schema, value);
         relptr_t relptr = abs2rel_cpp(voidstar);
-        return make_standard_data_packet(relptr, schema);
+        uint8_t* packet = make_standard_data_packet(relptr, schema);
+        // Track SHM for deferred cleanup
+        _shm_tracker.push_back({(absptr_t)voidstar, schema});
+        return packet;
     } catch (...) {
         if (voidstar) shfree_cpp(voidstar);
         throw;
@@ -113,10 +139,23 @@ template <typename T>
 T _get_value(const uint8_t* packet, const std::string& schema_str){
     Schema* schema = get_cached_schema(schema_str.c_str());
 
+    // Check if this is an RPTR packet (references existing SHM we don't own)
+    const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
+    bool is_rptr = (header->command.data.source == PACKET_SOURCE_RPTR);
+
     char* errmsg = NULL;
     uint8_t* voidstar = get_morloc_data_packet_value(packet, schema, &errmsg);
     if(errmsg != NULL) {
         PROPAGATE_ERROR(errmsg)
+    }
+
+    // For RPTR data, increment refcount so the owner's tracker flush
+    // won't destroy data we may still need (e.g. forwarded packets).
+    if (is_rptr) {
+        char* incref_err = NULL;
+        shincref((absptr_t)voidstar, &incref_err);
+        if (incref_err) { free(incref_err); }
+        _shm_tracker.push_back({(absptr_t)voidstar, schema});
     }
 
     T* dumby = nullptr;
@@ -269,9 +308,28 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
     pool_mark_idle();
 
     free(packet);
+
     if (errmsg != NULL) {
         free(args_array);
         PROPAGATE_ERROR(errmsg)
+    }
+
+    // Incref the result's SHM so the callee's tracker flush won't destroy
+    // data we may still need (e.g. forwarded result packets).
+    {
+        const morloc_packet_header_t* res_header = (const morloc_packet_header_t*)result;
+        if (res_header->command.data.source == PACKET_SOURCE_RPTR) {
+            size_t relptr = *(size_t*)(result + res_header->offset + sizeof(morloc_packet_header_t));
+            char* resolve_err = NULL;
+            void* res_voidstar = rel2abs(relptr, &resolve_err);
+            if (resolve_err) { free(resolve_err); resolve_err = NULL; }
+            if (res_voidstar) {
+                char* incref_err = NULL;
+                shincref((absptr_t)res_voidstar, &incref_err);
+                if (incref_err) { free(incref_err); }
+                _shm_tracker.push_back({(absptr_t)res_voidstar, nullptr});
+            }
+        }
     }
 
     free(args_array);
@@ -302,6 +360,8 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
 static uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
                                     size_t nargs, void* ctx) {
     (void)nargs; (void)ctx;
+    // Free SHM from previous dispatch (result packet consumed by caller)
+    _flush_shm_tracker();
     try {
         return local_dispatch(mid, args);
     } catch (const std::exception& e) {

@@ -1,0 +1,13 @@
+module main (test)
+
+import root-py
+import .helpers
+import .helpers as h
+
+test :: [Bool]
+test =
+  [ double 5 == 10
+  , h.double 5 == 10
+  , triple 3 == 9
+  , h.triple 3 == 9
+  ]

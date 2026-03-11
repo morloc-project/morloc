@@ -1,0 +1,42 @@
+-- Tests for let-bound lambdas in the pure nexus evaluator (gAST path).
+-- These require applyLambdas to inline let-bound lambdas before toNexusExpr,
+-- since the nexus evaluator cannot serialize function types.
+
+module main
+  ( letLambda
+  , letLambdaComplex
+  , letLambdaMultiUse
+  , letLambdaNested
+  , letLambdaCapture
+  , letLambdaPartial
+  )
+
+-- 1. Simple identity lambda applied in body
+letLambda :: Int
+letLambda = let f = (\x -> x) in f 42
+
+-- 2. Lambda with compound return type
+letLambdaComplex :: (Int, Int)
+letLambdaComplex = let f = (\x -> (x, x)) in f 5
+
+-- 3. Let-bound lambda used at multiple call sites
+letLambdaMultiUse :: (Int, Int)
+letLambdaMultiUse = let f = (\x -> x) in (f 1, f 2)
+
+-- 4. Nested let-bound lambdas: inner lambda calls outer
+letLambdaNested :: Int
+letLambdaNested =
+  let f = (\x -> x)
+  let g = (\y -> f y)
+  in g 42
+
+-- 5. Lambda that captures an outer let-bound data value
+letLambdaCapture :: (Int, Int)
+letLambdaCapture =
+  let x = 1
+  let f = (\y -> (x, y))
+  in f 2
+
+-- 6. Partial application: let-bound lambda returns a function
+letLambdaPartial :: Int -> (Int, Int)
+letLambdaPartial = let f = (\x -> \y -> (x, y)) in f 1

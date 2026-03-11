@@ -1,0 +1,11 @@
+module main (test)
+
+import root-py
+import .helpers as h
+
+-- Test that h.double (namespace qualified) and .0 (getter) work in same file
+test :: [Bool]
+test =
+  [ h.double 5 == 10
+  , (.0 (42, 7)) == 42
+  ]

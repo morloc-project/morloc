@@ -1,0 +1,24 @@
+-- Test: HK typeclass effectful method used with <- in a do-block
+-- Mirrors bug-reports/report-2/bug2.loc
+
+module main (test)
+
+import root-py
+
+type Py => Int = "int"
+type Py => Unit = "None"
+
+class RandomGroup f where
+  permute f a :: f a -> <Random> f a
+
+instance RandomGroup List where
+  source Py from "rng.py" ("permute")
+
+setSeed :: Int -> <Random> Unit
+source Py from "rng.py" ("setSeed")
+
+test :: <Random> [Int]
+test = do
+  setSeed 42
+  x <- permute ([5, 3, 1, 4, 2] :: List Int)
+  x

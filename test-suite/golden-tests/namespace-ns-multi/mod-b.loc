@@ -1,0 +1,6 @@
+module (*)
+
+import root
+
+inc :: Int -> Int
+inc x = x + 10

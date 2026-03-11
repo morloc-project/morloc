@@ -1,0 +1,142 @@
+-- SHM large data tests: exercises sub-allocation freeing with big objects
+-- crossing language boundaries. Large strings and arrays have sub-allocations
+-- in SHM that require shfree_by_schema for proper recursive cleanup.
+
+module main
+  ( bigStrRoundTrip
+  , bigVecRoundTrip
+  , vecOfStrsRoundTrip
+  , nestedVecRoundTrip
+  , bigStrChain
+  , bigVecChain
+  , manyBigStrings
+  , manyNestedVecs
+  )
+
+import root-cpp
+import root-py
+
+source Cpp from "bigdata.hpp"
+  ( "bigStr" as cppBigStr
+  , "bigStrLen" as cppBigStrLen
+  , "bigVec" as cppBigVec
+  , "bigVecSum" as cppBigVecSum
+  , "vecOfStrs" as cppVecOfStrs
+  , "sumStrLens" as cppSumStrLens
+  , "nestedVec" as cppNestedVec
+  , "nestedSum" as cppNestedSum
+  , "idVecStr" as cppIdVecStr
+  , "idNestedVec" as cppIdNestedVec
+  )
+
+source Py from "bigdata.py"
+  ( "bigStr" as pyBigStr
+  , "bigStrLen" as pyBigStrLen
+  , "bigVec" as pyBigVec
+  , "bigVecSum" as pyBigVecSum
+  , "vecOfStrs" as pyVecOfStrs
+  , "sumStrLens" as pySumStrLens
+  , "nestedVec" as pyNestedVec
+  , "nestedSum" as pyNestedSum
+  , "idVecStr" as pyIdVecStr
+  , "idNestedVec" as pyIdNestedVec
+  )
+
+type Cpp => Int = "int"
+type Cpp => Str = "std::string"
+type Cpp => List a = "std::vector<$1>" a
+
+type Py => Int = "int"
+type Py => Str = "str"
+type Py => List a = "list" a
+
+cppBigStr :: Int -> Str
+cppBigStrLen :: Str -> Int
+cppBigVec :: Int -> [Int]
+cppBigVecSum :: [Int] -> Int
+cppVecOfStrs :: Int -> Int -> [Str]
+cppSumStrLens :: [Str] -> Int
+cppNestedVec :: Int -> Int -> [[Int]]
+cppNestedSum :: [[Int]] -> Int
+cppIdVecStr :: [Str] -> [Str]
+cppIdNestedVec :: [[Int]] -> [[Int]]
+
+pyBigStr :: Int -> Str
+pyBigStrLen :: Str -> Int
+pyBigVec :: Int -> [Int]
+pyBigVecSum :: [Int] -> Int
+pyVecOfStrs :: Int -> Int -> [Str]
+pySumStrLens :: [Str] -> Int
+pyNestedVec :: Int -> Int -> [[Int]]
+pyNestedSum :: [[Int]] -> Int
+pyIdVecStr :: [Str] -> [Str]
+pyIdNestedVec :: [[Int]] -> [[Int]]
+
+
+-- Test 1: Big string (10000 chars) created in C++, measured in Python.
+bigStrRoundTrip :: Int
+bigStrRoundTrip = pyBigStrLen (cppBigStr 10000)
+
+-- Test 2: Big vector (5000 elements) created in Python, summed in C++.
+-- sum(0..4999) = 12497500
+bigVecRoundTrip :: Int
+bigVecRoundTrip = cppBigVecSum (pyBigVec 5000)
+
+-- Test 3: Vector of 50 strings (each 100 chars) round-tripped.
+-- 50 * 100 = 5000
+vecOfStrsRoundTrip :: Int
+vecOfStrsRoundTrip = pySumStrLens (cppVecOfStrs 50 100)
+
+-- Test 4: Nested vector (10 outer x 20 inner) round-tripped.
+-- 10 * sum(1..20) = 10 * 210 = 2100
+nestedVecRoundTrip :: Int
+nestedVecRoundTrip = pyNestedSum (cppNestedVec 10 20)
+
+-- Test 5: Large string bounced between languages.
+bigStrChain :: Int
+bigStrChain =
+    let s1 = pyBigStr 5000
+    let s2 = cppBigStrLen s1
+    let s3 = pyBigStr s2
+    let s4 = cppBigStrLen s3
+    let s5 = pyBigStr s4
+    in cppBigStrLen s5
+
+-- Test 6: Large vector created and summed in alternating languages.
+bigVecChain :: Int
+bigVecChain =
+    let xs = cppBigVec 1000
+    let s1 = pyBigVecSum xs
+    let xs2 = cppBigVec 1000
+    let s2 = pyBigVecSum xs2
+    in s1 + s2
+
+-- Test 7: Many sequential big string allocations (10 rounds).
+-- Without SHM cleanup, these large allocations would exhaust volumes fast.
+manyBigStrings :: Int
+manyBigStrings =
+    let a1 = pyBigStrLen (cppBigStr 2000)
+    let a2 = cppBigStrLen (pyBigStr 2000)
+    let a3 = pyBigStrLen (cppBigStr 2000)
+    let a4 = cppBigStrLen (pyBigStr 2000)
+    let a5 = pyBigStrLen (cppBigStr 2000)
+    let a6 = cppBigStrLen (pyBigStr 2000)
+    let a7 = pyBigStrLen (cppBigStr 2000)
+    let a8 = cppBigStrLen (pyBigStr 2000)
+    let a9 = pyBigStrLen (cppBigStr 2000)
+    let a10 = cppBigStrLen (pyBigStr 2000)
+    in a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10
+
+-- Test 8: Many sequential nested vector allocations (8 rounds).
+-- 5 * sum(1..10) = 5 * 55 = 275
+manyNestedVecs :: Int
+manyNestedVecs =
+    let n1 = pyNestedSum (cppNestedVec 5 10)
+    let n2 = cppNestedSum (pyNestedVec 5 10)
+    let n3 = pyNestedSum (cppNestedVec 5 10)
+    let n4 = cppNestedSum (pyNestedVec 5 10)
+    let n5 = pyNestedSum (cppNestedVec 5 10)
+    let n6 = cppNestedSum (pyNestedVec 5 10)
+    let n7 = pyNestedSum (cppNestedVec 5 10)
+    let n8 = cppNestedSum (pyNestedVec 5 10)
+    in n1 + n2 + n3 + n4 + n5 + n6 + n7 + n8

@@ -276,7 +276,12 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS _ _ UniS) = return $ LitX NullX "0"
     toNexusExpr (AnnoS _ _ NullS) = return $ LitX NullX "0"
     toNexusExpr (AnnoS (Idx _ t) _ (LetBndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
-    toNexusExpr (AnnoS _ _ (LetS _ _ body)) = toNexusExpr body
+    -- Desugar let to lambda application: let x = e1 in e2 -> (\x -> e2) e1
+    toNexusExpr (AnnoS (Idx _ t) _ (LetS v e1 body)) = do
+      schema <- type2schema t
+      bodyX <- toNexusExpr body
+      e1X <- toNexusExpr e1
+      return $ AppX schema (LamX [render (pretty v)] bodyX) [e1X]
     toNexusExpr (AnnoS _ _ (IfS _ t _)) = toNexusExpr t
     toNexusExpr (AnnoS _ _ (DoBlockS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (EvalS e)) = toNexusExpr e

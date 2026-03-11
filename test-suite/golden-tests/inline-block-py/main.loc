@@ -1,0 +1,21 @@
+-- Test %inline before an entire source ... where block
+-- Expected: ALL functions in the block should be inlined
+module main (testAdd, testExpr)
+
+type Py => Int = "int"
+
+-- %inline before the whole source block should make both (+) and (*) inline
+%inline source Py where
+  (+)
+  (*)
+
+(+) :: Int -> Int -> Int
+(*) :: Int -> Int -> Int
+
+testAdd :: Int -> Int -> Int
+testAdd x y = x + y
+
+-- If inlined: (x * y) + z with native operators
+-- Either way, result should be correct: 2*3 + 4 = 10
+testExpr :: Int -> Int -> Int -> Int
+testExpr x y z = x * y + z

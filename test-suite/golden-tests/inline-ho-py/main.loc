@@ -1,0 +1,22 @@
+-- Test inline function passed as higher-order argument
+-- Expected: inline flag silently ignored, function works as normal value
+module main (testMapDouble, testDirectDouble)
+
+type Py => Int = "int"
+type Py => List a = "list" a
+
+source Py from "foo.py" where
+  %inline double
+  mymap
+
+double :: Int -> Int
+mymap a b :: (a -> b) -> [a] -> [b]
+
+-- Inline function passed as argument to higher-order function
+-- Should work: double is passed as a value, inlining is silently skipped
+testMapDouble :: [Int] -> [Int]
+testMapDouble xs = mymap double xs
+
+-- Direct inline call (for comparison -- this should inline normally)
+testDirectDouble :: Int -> Int
+testDirectDouble x = double x

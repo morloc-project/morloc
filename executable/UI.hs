@@ -21,6 +21,7 @@ module UI
   , ListKind (..)
   , UninstallCommand (..)
   , NewCommand (..)
+  , EvalCommand (..)
   ) where
 
 import Morloc.Module (GitProtocol (..), OverwriteProtocol (..))
@@ -46,6 +47,7 @@ data CliCommand
   | CmdDump DumpCommand
   | CmdInit InitCommand
   | CmdNew NewCommand
+  | CmdEval EvalCommand
 
 cliParser :: Parser CliCommand
 cliParser =
@@ -58,6 +60,7 @@ cliParser =
         <> dumpSubcommand
         <> initSubcommand
         <> newSubcommand
+        <> evalSubcommand
     )
 
 data MakeCommand = MakeCommand
@@ -425,4 +428,41 @@ optDryRun =
   switch
     ( long "dry-run"
         <> help "Show what would be removed without removing"
+    )
+
+data EvalCommand = EvalCommand
+  { evalConfig :: String
+  , evalVanilla :: Bool
+  , evalVerbose :: Int
+  , evalSave :: String
+  , evalExpression :: String
+  , evalArgs :: [String]
+  }
+
+evalCommandParser :: Parser EvalCommand
+evalCommandParser =
+  EvalCommand
+    <$> optConfig
+    <*> optVanilla
+    <*> optVerbose
+    <*> optSave
+    <*> strArgument
+      ( metavar "EXPRESSION"
+          <> help "Morloc expression to evaluate"
+      )
+    <*> many (strArgument (metavar "ARGS..." <> help "Extra arguments passed to the compiled program"))
+
+evalSubcommand :: Mod CommandFields CliCommand
+evalSubcommand =
+  command
+    "eval"
+    (info (CmdEval <$> evalCommandParser) (progDesc "Evaluate a morloc expression"))
+
+optSave :: Parser String
+optSave =
+  strOption
+    ( long "save"
+        <> metavar "NAME"
+        <> value ""
+        <> help "Save as a named command instead of running"
     )

@@ -36,6 +36,11 @@ import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KM
+import qualified Data.ByteString.Char8 as BS8
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.Vector as V  -- from aeson's transitive dependency
 import qualified Data.Char as DC
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -51,8 +56,9 @@ import qualified Morloc.Monad as MM
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import qualified Morloc.System as MS
+import qualified Network.HTTP.Simple as HTTP
 import System.Directory
-import System.Process (callProcess)
+import System.Process (callProcess, readProcess)
 
 data InstallReason = ExplicitInstall | AutoDependency
   deriving (Show, Eq)
@@ -97,28 +103,50 @@ findLocalModule currentModule importModule = do
 
 -- | Resolve a bare (non-dot-prefixed) import: search system/plane paths,
 -- with deprecated fallback to local paths (project root).
+-- Supports namespaced imports: "owner/name" searches lib/plane/owner/name/
+-- Bare imports: "foo" searches lib/plane/morloclib/foo/ first, then lib/plane/foo/
 findBareModule :: MVar -> MVar -> MorlocMonad Path
 findBareModule currentModule importModule = do
   config <- MM.ask
   projectRoot <- MM.gets stateProjectRoot
   let lib = Config.configLibrary config
       plane = Config.configPlane config
+      planeCore = Config.configPlaneCore config
       namePath = splitModuleName importModule
-      systemPaths =
-        [ MS.joinPath ([lib, plane] <> init namePath <> [last namePath <> ".loc"])
-        , MS.joinPath ([lib, plane] <> namePath <> ["main.loc"])
-        , MS.joinPath (lib : init namePath <> [last namePath <> ".loc"])
-        , MS.joinPath (lib : namePath <> ["main.loc"])
-        ]
-      localPaths = case projectRoot of
-        Just root ->
-          [ MS.joinPath (root : init namePath <> [last namePath <> ".loc"])
-          , MS.joinPath (root : namePath <> ["main.loc"])
-          ]
-        Nothing ->
-          [ MS.joinPath (init namePath <> [last namePath <> ".loc"])
-          , MS.joinPath (namePath <> ["main.loc"])
-          ]
+      -- Check if this is a namespaced import (contains "/")
+      MV importText = importModule
+      isNamespaced = "/" `MT.isInfixOf` importText
+      -- For namespaced: "owner/name" -> [owner, name] as filesystem path
+      -- For bare: "foo" -> search morloclib/foo first, then foo
+      namespacedPath = case MT.splitOn "/" importText of
+        [owner, name] -> [MT.unpack owner, MT.unpack name]
+        _ -> namePath  -- fallback
+      systemPaths
+        | isNamespaced =
+            -- Namespaced import: only search the explicit namespace path
+            [ MS.joinPath ([lib, plane] <> namespacedPath <> ["main.loc"])
+            , MS.joinPath ([lib, plane] <> init namespacedPath <> [last namespacedPath <> ".loc"])
+            ]
+        | otherwise =
+            -- Bare import: search core org namespace first, then flat paths
+            [ MS.joinPath ([lib, plane, planeCore] <> namePath <> ["main.loc"])
+            , MS.joinPath ([lib, plane, planeCore] <> init namePath <> [last namePath <> ".loc"])
+            , MS.joinPath ([lib, plane] <> init namePath <> [last namePath <> ".loc"])
+            , MS.joinPath ([lib, plane] <> namePath <> ["main.loc"])
+            , MS.joinPath (lib : init namePath <> [last namePath <> ".loc"])
+            , MS.joinPath (lib : namePath <> ["main.loc"])
+            ]
+      localPaths
+        | isNamespaced = []  -- namespaced imports are never local
+        | otherwise = case projectRoot of
+            Just root ->
+              [ MS.joinPath (root : init namePath <> [last namePath <> ".loc"])
+              , MS.joinPath (root : namePath <> ["main.loc"])
+              ]
+            Nothing ->
+              [ MS.joinPath (init namePath <> [last namePath <> ".loc"])
+              , MS.joinPath (namePath <> ["main.loc"])
+              ]
   existingSystem <- liftIO . fmap catMaybes . mapM getFile $ systemPaths
   existingLocal <- liftIO . fmap catMaybes . mapM getFile $ localPaths
   case (existingSystem, existingLocal) of
@@ -243,6 +271,8 @@ data ModuleSource
     ModuleSourceLocal Text (Maybe GitSnapshotSelector)
   | -- | A module stored in an arbitrary users github repo, e.g., (GithubRepo "weena" "math")
     ModuleSourceRemoteGit GitRemote
+  | -- | A module from the morloc registry (owner, name)
+    ModuleSourceRegistry Text Text
   deriving (Show, Eq, Ord)
 
 -- }}}
@@ -269,6 +299,8 @@ extractModuleName modstr = do
       MT.pack . MS.takeFileName <$> (MS.makeAbsolute . MS.dropTrailingPathSeparator . MT.unpack $ path)
     Right (Right (ModuleSourceRemoteGit remote)) ->
       return $ gitReponame remote
+    Right (Right (ModuleSourceRegistry _ n)) ->
+      return n
     _ -> return modstr
   case validateModuleName modstr name of
     Left err -> ioError . userError $ MT.unpack err
@@ -299,24 +331,16 @@ installModule ::
   -- | Installation string, such as "github:weena/math@version:0.1.0"
   Text ->
   MorlocMonad ()
-installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgress reason modstr =
-  case parse (moduleInstallParser (MT.pack coreorg)) "" modstr of
-    (Left errstr) -> moduleInstallError (pretty . errorBundlePretty $ errstr)
-    (Right (Left errstr)) -> moduleInstallError $ pretty errstr
-    (Right (Right source)) -> do
-      rawName <- case source of
-            ModuleSourceLocal path _ ->
-              liftIO $ MT.pack . MS.takeFileName <$> (MS.makeAbsolute . MS.dropTrailingPathSeparator . MT.unpack $ path)
-            ModuleSourceRemoteGit remote -> return $ gitReponame remote
-      name <- case validateModuleName modstr rawName of
-        Left err -> moduleInstallError $ pretty err
-        Right n -> return n
-      let targetDir = libpath </> MT.unpack name
-
+installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgress reason modstr = do
+  config <- MM.ask
+  let registry = Config.configRegistry config
+  -- Try registry first for bare names when a registry is configured
+  case (registry, tryParseRegistryModule (MT.pack coreorg) modstr) of
+    (Just _, Just (owner, name)) -> do
+      let targetDir = libpath </> MT.unpack owner </> MT.unpack name
       if Set.member name inProgress
         then return ()
         else do
-          -- Check if already installed
           targetExists <- liftIO $ doesDirectoryExist targetDir
           case (targetExists, overwrite) of
             (True, DoNotOverwrite) -> do
@@ -328,10 +352,41 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
               return ()
             (True, ForceOverwrite) -> do
               liftIO $ removeDirectoryRecursive targetDir
-              doInstall source name targetDir
+              doInstall (ModuleSourceRegistry owner name) name targetDir
             (False, _) ->
-              doInstall source name targetDir
+              doInstall (ModuleSourceRegistry owner name) name targetDir
+    _ -> installModuleClassic
   where
+    installModuleClassic = case parse (moduleInstallParser (MT.pack coreorg)) "" modstr of
+      (Left errstr) -> moduleInstallError (pretty . errorBundlePretty $ errstr)
+      (Right (Left errstr)) -> moduleInstallError $ pretty errstr
+      (Right (Right source)) -> do
+        rawName <- case source of
+              ModuleSourceLocal path _ ->
+                liftIO $ MT.pack . MS.takeFileName <$> (MS.makeAbsolute . MS.dropTrailingPathSeparator . MT.unpack $ path)
+              ModuleSourceRemoteGit remote -> return $ gitReponame remote
+              ModuleSourceRegistry _ n -> return n
+        name <- case validateModuleName modstr rawName of
+          Left err -> moduleInstallError $ pretty err
+          Right n -> return n
+        let targetDir = libpath </> MT.unpack name
+
+        if Set.member name inProgress
+          then return ()
+          else do
+            -- Check if already installed
+            targetExists <- liftIO $ doesDirectoryExist targetDir
+            case (targetExists, overwrite) of
+              (True, DoNotOverwrite) -> do
+                MM.sayVVV $ "Module" <+> pretty name <+> "already installed, skipping"
+                return ()
+              (True, ForceOverwrite) -> do
+                liftIO $ removeDirectoryRecursive targetDir
+                doInstall source name targetDir
+              (False, _) ->
+                doInstall source name targetDir
+
+
     doInstall :: ModuleSource -> Text -> FilePath -> MorlocMonad ()
     doInstall source name targetDir = do
       let inProgress' = Set.insert name inProgress
@@ -341,11 +396,16 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
 
       -- Copy/clone files, with cleanup on exception
       liftIO $ createDirectoryIfMissing True (MS.takeDirectory targetDir)
+      config' <- MM.ask
       let ioAction = case source of
             ModuleSourceLocal path selector ->
               installLocalIO targetDir selector path
             ModuleSourceRemoteGit remote ->
               installRemoteIO gitprot targetDir remote
+            ModuleSourceRegistry owner' modName ->
+              case Config.configRegistry config' of
+                Just regUrl -> installFromRegistry regUrl owner' modName targetDir
+                Nothing -> ioError $ userError "Registry URL not configured"
           cleanup = do
             exists <- doesDirectoryExist targetDir
             when exists $ removeDirectoryRecursive targetDir
@@ -369,7 +429,8 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
       -- Recursively install dependencies
       forM_ morlocDeps $ \dep -> do
         let depDir = libpath </> MT.unpack dep
-        depExists <- liftIO $ doesDirectoryExist depDir
+            depDirNs = libpath </> coreorg </> MT.unpack dep
+        depExists <- liftIO $ (||) <$> doesDirectoryExist depDir <*> doesDirectoryExist depDirNs
         unless (depExists || Set.member dep inProgress') $ do
           let depModstr = case Map.lookup dep userSources of
                 Just s -> s
@@ -487,9 +548,11 @@ extractMorlocDeps path = do
               let modName = MT.strip (MT.takeWhile (\c -> c /= '(' && c /= ' ') rest)
                in if "." `MT.isPrefixOf` modName
                     then [] -- skip local (.dot-prefixed) imports
-                    else case MT.splitOn "." modName of
-                           (topLevel : _) | not (MT.null topLevel) -> [topLevel]
-                           _ -> []
+                    else if "/" `MT.isInfixOf` modName
+                      then [modName]  -- namespaced import: keep "owner/name" as-is
+                      else case MT.splitOn "." modName of
+                             (topLevel : _) | not (MT.null topLevel) -> [topLevel]
+                             _ -> []
 
     removeComments :: [Text] -> [Text]
     removeComments = go False
@@ -753,6 +816,85 @@ parseBranch = do
         || c `elem` (" ~^:?*[\\" :: String)
 
 -- }}}
+
+-- | Try to parse a module string as a registry-resolvable module.
+-- Bare names like "foo" -> (coreorg, "foo").
+-- Namespaced names like "user/foo" -> ("user", "foo").
+-- Returns Nothing for local paths, explicit remote sources, or git refs.
+tryParseRegistryModule :: Text -> Text -> Maybe (Text, Text)
+tryParseRegistryModule coreorg modstr
+  -- Reject anything with remote source prefixes, git ref selectors, or local paths
+  | MT.any (\c -> c == ':' || c == '@' || c == '.' || c == '~') modstr = Nothing
+  -- Namespaced: "owner/name"
+  | "/" `MT.isInfixOf` modstr =
+      case MT.splitOn "/" modstr of
+        [owner, name] | isValidSegment owner && isValidSegment name -> Just (owner, name)
+        _ -> Nothing
+  -- Bare name: resolve to core org
+  | isValidSegment modstr = Just (coreorg, modstr)
+  | otherwise = Nothing
+  where
+    isValidSegment t =
+      not (MT.null t)
+        && DC.isAlphaNum (MT.head t)
+        && MT.all (\c -> DC.isAlphaNum c || c == '-') t
+
+-- | Install a module from the morloc registry by downloading its tarball.
+installFromRegistry :: Text -> Text -> Text -> FilePath -> IO ()
+installFromRegistry registryUrl owner name targetDir = do
+  -- Get latest version metadata
+  let metaUrl = MT.unpack registryUrl <> "/api/registry/" <> MT.unpack owner <> "/" <> MT.unpack name
+  metaReq <- HTTP.parseRequest metaUrl
+  metaResp <- HTTP.httpLBS metaReq
+  let metaStatus = HTTP.getResponseStatusCode metaResp
+  when (metaStatus /= 200) $
+    ioError . userError $
+      "Registry lookup failed for " <> MT.unpack owner <> "/" <> MT.unpack name
+        <> " (HTTP " <> show metaStatus <> ")"
+
+  -- Extract latest version from the response
+  let metaBody = HTTP.getResponseBody metaResp
+  latestVersion <- case Aeson.decode metaBody of
+    Just (Aeson.Object obj) -> case KM.lookup "versions" obj of
+      Just (Aeson.Array arr) | not (V.null arr) -> case V.head arr of
+        Aeson.Object vobj -> case KM.lookup "version" vobj of
+          Just (Aeson.String v) -> return v
+          _ -> ioError $ userError "Could not parse version from registry response"
+        _ -> ioError $ userError "Could not parse version from registry response"
+      _ -> ioError $ userError "No versions found for module"
+    _ -> ioError $ userError "Could not parse registry response"
+
+  -- Download tarball
+  let tarUrl = metaUrl <> "/" <> MT.unpack latestVersion <> "/tarball"
+  tarReq <- HTTP.parseRequest tarUrl
+  tarResp <- HTTP.httpLBS tarReq
+  let tarStatus = HTTP.getResponseStatusCode tarResp
+  when (tarStatus /= 200) $
+    ioError . userError $
+      "Tarball download failed for " <> MT.unpack owner <> "/" <> MT.unpack name
+        <> "@" <> MT.unpack latestVersion <> " (HTTP " <> show tarStatus <> ")"
+
+  let tarball = HTTP.getResponseBody tarResp
+
+  -- Extract tarball to target directory
+  createDirectoryIfMissing True targetDir
+  let tarballPath = targetDir <> ".tar.gz"
+  BL.writeFile tarballPath tarball
+
+  -- Verify SHA-256 if provided by the server
+  case HTTP.getResponseHeader "X-Checksum-Sha256" tarResp of
+    (expectedHash:_) -> do
+      output <- readProcess "sha256sum" [tarballPath] ""
+      let actualHash = takeWhile (/= ' ') output
+          expected = BS8.unpack expectedHash
+      when (actualHash /= expected) $ do
+        removeFile tarballPath
+        ioError . userError $
+          "SHA-256 mismatch for " <> MT.unpack owner <> "/" <> MT.unpack name
+    [] -> return ()
+
+  readProcess "tar" ["xzf", tarballPath, "-C", targetDir] ""
+  removeFile tarballPath
 
 -- {{{ install from module source (IO-level helpers)
 

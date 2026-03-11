@@ -54,6 +54,8 @@ void shm_set_fallback_dir(const char* dir);
 void* shmalloc(size_t size, ERRMSG);
 void* shmemcpy(void* src, size_t size, ERRMSG);
 bool shfree(absptr_t ptr, ERRMSG);
+bool shincref(absptr_t ptr, ERRMSG);
+bool shfree_by_schema(absptr_t ptr, const Schema* schema, ERRMSG);
 void* shcalloc(size_t nmemb, size_t size, ERRMSG);
 void* shrealloc(void* ptr, size_t size, ERRMSG);
 size_t total_shm_size();

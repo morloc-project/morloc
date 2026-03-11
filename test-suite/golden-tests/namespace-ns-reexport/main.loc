@@ -1,0 +1,7 @@
+module main (test)
+
+import root-py
+import .middle
+
+test :: [Bool]
+test = [quadruple 3 == 12]

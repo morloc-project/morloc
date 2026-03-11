@@ -46,7 +46,9 @@ import qualified Morloc.BaseTypes as BT
 -- - 4 from optional type syntax ('?' could start optional type or guard)
 -- Note: force_expr (!) re-added for inline effect forcing in do-blocks
 -- - 2 from force_expr ('!' could start force or be part of another expr)
-%expect 60
+-- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
+-- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
+%expect 59
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -67,6 +69,7 @@ import qualified Morloc.BaseTypes as BT
   '?'        { Located _ TokQuestion _ }
   '.'        { Located _ TokDot _ }
   GDOT       { Located _ TokGetterDot _ }
+  NSDOT      { Located _ TokNsDot _ }
   GDOTCHAIN  { Located _ TokGetterDotChain _ }
   '='        { Located _ TokEquals _ }
   '::'       { Located _ TokDColon _ }
@@ -99,6 +102,7 @@ import qualified Morloc.BaseTypes as BT
   'Null'     { Located _ TokNull _ }
   LOWER      { Located _ (TokLowerName _) _ }
   UPPER      { Located _ (TokUpperName _) _ }
+  '/'        { Located _ (TokOperator "/") _ }
   OPERATOR   { Located _ (TokOperator _) _ }
   INTEGER    { Located _ (TokInteger _) _ }
   FLOAT      { Located _ (TokFloat _) _ }
@@ -109,6 +113,8 @@ import qualified Morloc.BaseTypes as BT
   INTERPOPEN { Located _ TokInterpOpen _ }
   INTERPCLOSE { Located _ TokInterpClose _ }
   INTRINSIC  { Located _ (TokIntrinsic _) _ }
+  ';'        { Located _ TokSemicolon _ }
+  '%inline'  { Located _ TokPragmaInline _ }
   EOF        { Located _ TokEOF _ }
 
 %%
@@ -141,18 +147,25 @@ module :: { Loc CstExpr }
 top_body :: { [Loc CstExpr] }
   : VLBRACE top_decls VRBRACE   { $2 }
   | VLBRACE VRBRACE              { [] }
+  | '{' top_decls_explicit '}'   { $2 }
+  | '{' '}'                      { [] }
 
 top_decls :: { [Loc CstExpr] }
   : top_decl                     { $1 }
   | top_decls VSEMI top_decl     { $1 ++ $3 }
 
+top_decls_explicit :: { [Loc CstExpr] }
+  : top_decl                           { $1 }
+  | top_decls_explicit ';' top_decl    { $1 ++ $3 }
+
 top_decl :: { [Loc CstExpr] }
   : import_decl       { [$1] }
   | typedef_decl      { [$1] }
   | typeclass_decl    { [$1] }
-  | instance_decl     { [$1] }
+  | instance_decl     { $1 }
   | fixity_decl       { [$1] }
   | source_decl       { $1 }
+  | '%inline' source_decl { map (\(Loc sp e) -> Loc sp (CInlineE (Loc sp e))) $2 }
   | sig_or_ass        { $1 }
 
 sig_or_ass :: { [Loc CstExpr] }
@@ -181,6 +194,7 @@ module_parts :: { [Text] }
   : module_comp                        { [$1] }
   | module_parts '.' module_comp       { $1 ++ [$3] }
   | module_parts GDOT module_comp      { $1 ++ [$3] }
+  | module_parts NSDOT module_comp     { $1 ++ [$3] }
   | module_parts GDOTCHAIN module_comp { $1 ++ [$3] }
 
 module_comp :: { Text }
@@ -214,10 +228,19 @@ symbol :: { Located }
 --------------------------------------------------------------------
 
 import_decl :: { Loc CstExpr }
-  : 'import' module_name opt_import_list
+  : 'import' import_module_name opt_import_list
       { at $1 (CImpE (Import (MV $2) $3 [] Nothing)) }
+  | 'import' import_module_name 'as' LOWER opt_import_list
+      { at $1 (CImpE (Import (MV $2) $5 [] (Just (EV (getName $4))))) }
   | 'import' GDOT module_name opt_import_list
       { at $1 (CImpE (Import (MV ("." <> $3)) $4 [] Nothing)) }
+  | 'import' GDOT module_name 'as' LOWER opt_import_list
+      { at $1 (CImpE (Import (MV ("." <> $3)) $6 [] (Just (EV (getName $5))))) }
+
+-- | Module names in import context allow an optional namespace prefix: owner/name
+import_module_name :: { Text }
+  : module_comp '/' module_name      { $1 <> "/" <> $3 }
+  | module_name                      { $1 }
 
 opt_import_list :: { Maybe [AliasedSymbol] }
   : {- empty -}                            { Nothing }
@@ -320,6 +343,7 @@ non_string_type :: { TypeU }
 
 non_string_non_fun :: { TypeU }
   : '<' LOWER '>'            { ExistU (TV (getName $2)) ([], Open) ([], Open) }
+  | '<' effect_labels '>' non_string_non_fun  { EffectU (EffectSet (Set.fromList $2)) $4 }
   | non_string_app            { $1 }
 
 non_string_app :: { TypeU }
@@ -331,7 +355,6 @@ non_string_atom :: { TypeU }
   | '(' type ')'             { $2 }
   | '(' type ',' type_list1 ')' { BT.tupleU ($2 : $4) }
   | '[' type ']'              { BT.listU $2 }
-  | '<' effect_labels '>' non_string_atom  { EffectU (EffectSet (Set.fromList $2)) $4 }
   | '?' non_string_atom       { OptionalU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
   | LOWER ':' non_fun_type   { $3 }
@@ -371,11 +394,15 @@ signature :: { CstSigItem }
 -- Instances
 --------------------------------------------------------------------
 
-instance_decl :: { Loc CstExpr }
-  : 'instance' UPPER types1 'where' VLBRACE instance_items VRBRACE
-      { at $1 (CIstE (ClassName (getName $2)) $3 (concat $6)) }
-  | 'instance' UPPER types1
-      { at $1 (CIstE (ClassName (getName $2)) $3 []) }
+instance_decl :: { [Loc CstExpr] }
+  : 'instance' instance_heads 'where' VLBRACE instance_items VRBRACE
+      { [at $1 (CIstE cn ts (concat $5)) | (cn, ts) <- $2] }
+  | 'instance' instance_heads
+      { [at $1 (CIstE cn ts []) | (cn, ts) <- $2] }
+
+instance_heads :: { [(ClassName, [TypeU])] }
+  : UPPER types1                              { [(ClassName (getName $1), $2)] }
+  | instance_heads ',' UPPER types1           { $1 ++ [(ClassName (getName $3), $4)] }
 
 instance_items :: { [[Loc CstExpr]] }
   : instance_item                        { [$1] }
@@ -383,6 +410,7 @@ instance_items :: { [[Loc CstExpr]] }
 
 instance_item :: { [Loc CstExpr] }
   : source_decl             { $1 }
+  | '%inline' source_decl   { map (\(Loc sp e) -> Loc sp (CInlineE (Loc sp e))) $2 }
   | sig_or_ass              { $1 }
 
 --------------------------------------------------------------------
@@ -432,16 +460,30 @@ source_item :: { (Text, Maybe Text) }
   : STRING                              { (getString $1, Nothing) }
   | STRING 'as' LOWER                   { (getString $1, Just (getName $3)) }
   | STRING 'as' UPPER                   { (getString $1, Just (getName $3)) }
-  | STRING 'as' '(' operator_name ')'   { (getString $1, Just (getOp $4)) }
-  | STRING 'as' '(' '-' ')'            { (getString $1, Just "-") }
-  | STRING 'as' '(' '.' ')'            { (getString $1, Just ".") }
+  | STRING 'as' source_op               { (getString $1, Just $3) }
+  | source_op                           { ($1, Nothing) }
+  | source_op 'as' source_op            { ($1, Just $3) }
+  | source_op 'as' LOWER               { ($1, Just (getName $3)) }
+  | source_op 'as' UPPER               { ($1, Just (getName $3)) }
 
-source_new_items :: { [Located] }
+source_op :: { Text }
+  : '(' operator_name ')'              { getOp $2 }
+  | '(' '-' ')'                        { "-" }
+  | '(' '.' ')'                        { "." }
+
+source_new_items :: { [(Bool, Text, Located)] }
   : source_new_item                          { [$1] }
   | source_new_items VSEMI source_new_item   { $1 ++ [$3] }
 
-source_new_item :: { Located }
-  : LOWER                              { $1 }
+source_new_item :: { (Bool, Text, Located) }
+  : '%inline' source_new_term         { (True, fst $2, snd $2) }
+  | source_new_term                   { (False, fst $1, snd $1) }
+
+source_new_term :: { (Text, Located) }
+  : LOWER                             { (getName $1, $1) }
+  | '(' operator_name ')'            { (getOp $2, $2) }
+  | '(' '-' ')'                      { ("-", $2) }
+  | '(' '.' ')'                      { (".", $2) }
 
 --------------------------------------------------------------------
 -- Expressions
@@ -550,10 +592,15 @@ list_expr :: { Loc CstExpr }
 
 do_expr :: { Loc CstExpr }
   : 'do' VLBRACE do_stmts VRBRACE     { Loc ($1 <-> $4) (CDoE $3) }
+  | 'do' '{' do_stmts_explicit '}'    { Loc ($1 <-> $4) (CDoE $3) }
 
 do_stmts :: { [CstDoStmt] }
   : do_stmt                   { [$1] }
   | do_stmts VSEMI do_stmt    { $1 ++ [$3] }
+
+do_stmts_explicit :: { [CstDoStmt] }
+  : do_stmt                              { [$1] }
+  | do_stmts_explicit ';' do_stmt        { $1 ++ [$3] }
 
 do_stmt :: { CstDoStmt }
   : LOWER '<-' expr            { CstDoBind (EV (getName $1)) $3 }
@@ -585,7 +632,8 @@ grouped_accessor :: { CstAccessorBody }
   | GDOTCHAIN accessor_body { $2 }
 
 var_expr :: { Loc CstExpr }
-  : LOWER                     { at $1 (CVarE (EV (getName $1))) }
+  : LOWER NSDOT LOWER         { Loc ($1 <-> $3) (CVarE (EV (getName $1 <> "." <> getName $3))) }
+  | LOWER                     { at $1 (CVarE (EV (getName $1))) }
 
 hole_expr :: { Loc CstExpr }
   : '_'                        { at $1 CHolE }
@@ -625,6 +673,7 @@ fun_type :: { TypeU }
 
 non_fun_type :: { TypeU }
   : '<' LOWER '>'            { ExistU (TV (getName $2)) ([], Open) ([], Open) }
+  | '<' effect_labels '>' non_fun_type  { EffectU (EffectSet (Set.fromList $2)) $4 }
   | app_type                  { $1 }
 
 app_type :: { TypeU }
@@ -636,7 +685,6 @@ atom_type :: { TypeU }
   | '(' type ')'             { $2 }
   | '(' type ',' type_list1 ')' { BT.tupleU ($2 : $4) }
   | '[' type ']'              { BT.listU $2 }
-  | '<' effect_labels '>' atom_type  { EffectU (EffectSet (Set.fromList $2)) $4 }
   | '?' atom_type             { OptionalU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
   | LOWER ':' non_fun_type   { $3 }
@@ -671,6 +719,7 @@ sig_fun_args :: { [(Pos, TypeU)] }
 
 pos_non_fun_type :: { (Pos, TypeU) }
   : '<' LOWER '>'     { (locPos $1, ExistU (TV (getName $2)) ([], Open) ([], Open)) }
+  | '<' effect_labels '>' pos_non_fun_type  { (locPos $1, EffectU (EffectSet (Set.fromList $2)) (snd $4)) }
   | pos_app_type       { $1 }
 
 pos_app_type :: { (Pos, TypeU) }
@@ -682,7 +731,6 @@ pos_atom_type :: { (Pos, TypeU) }
   | '(' type ')'                { (locPos $1, $2) }
   | '(' type ',' type_list1 ')' { (locPos $1, BT.tupleU ($2 : $4)) }
   | '[' type ']'                { (locPos $1, BT.listU $2) }
-  | '<' effect_labels '>' pos_atom_type  { (locPos $1, EffectU (EffectSet (Set.fromList $2)) (snd $4)) }
   | '?' pos_atom_type            { (locPos $1, OptionalU (snd $2)) }
   | UPPER                       { (locPos $1, VarU (TV (getName $1))) }
   | LOWER ':' non_fun_type      { (locPos $1, $3) }
@@ -701,6 +749,7 @@ operator_name :: { Located }
   | '*'                       { $1 }
   | '<'                       { $1 }
   | '>'                       { $1 }
+  | '/'                       { $1 }
 
 evar_or_op :: { Located }
   : LOWER                     { $1 }
@@ -711,10 +760,15 @@ evar_or_op :: { Located }
 opt_where_decls :: { [Loc CstExpr] }
   : {- empty -}                               { [] }
   | 'where' VLBRACE where_items VRBRACE       { $3 }
+  | 'where' '{' where_items_explicit '}'      { $3 }
 
 where_items :: { [Loc CstExpr] }
   : where_item                      { $1 }
   | where_items VSEMI where_item    { $1 ++ $3 }
+
+where_items_explicit :: { [Loc CstExpr] }
+  : where_item                             { $1 }
+  | where_items_explicit ';' where_item    { $1 ++ $3 }
 
 where_item :: { [Loc CstExpr] }
   : sig_or_ass                { $1 }

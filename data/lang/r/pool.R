@@ -17,6 +17,7 @@ morloc_shinit                        <- function(...){ .Call("morloc_shinit",   
 morloc_foreign_call                  <- function(...){ .Call("morloc_foreign_call",                  ...) }
 morloc_get_value                     <- function(...){ .Call("morloc_get_value",                     ...) }
 morloc_put_value                     <- function(...){ .Call("morloc_put_value",                     ...) }
+morloc_mlc_show                      <- function(...){ .Call("morloc_mlc_show",                      ...) }
 morloc_socketpair                    <- function(...){ .Call("morloc_socketpair",                    ...) }
 morloc_fork                          <- function(...){ .Call("morloc_fork",                          ...) }
 morloc_send_fd                       <- function(...){ .Call("morloc_send_fd",                       ...) }

@@ -53,6 +53,8 @@ typecheckFrontend ::
   MorlocMonad [AnnoS (Indexed TypeU) Many Int]
 typecheckFrontend path code = do
   dag <- F.parse path code
+  evalMode <- MM.gets stateEvalMode
+  if evalMode then checkEvalRestrictions dag else return ()
   case DAG.roots dag of
     (r : _) -> MM.modify (\s -> s {stateModuleName = Just r})
     _ -> return ()
@@ -140,3 +142,23 @@ writeProgram translateFn path code = do
         return (nexus, pools)
         -- write the code and compile as needed
         >>= buildProgram
+
+-- | In eval mode, reject source, class, and instance declarations in the root module.
+-- Imported modules are not checked since they are pre-existing installed code.
+checkEvalRestrictions :: DAG MVar Import ExprI -> MorlocMonad ()
+checkEvalRestrictions dag =
+  case DAG.roots dag of
+    [] -> return ()
+    (root : _) -> case Map.lookup root dag of
+      Nothing -> return ()
+      Just (ExprI _ (ModE _ body), _) -> mapM_ checkExpr body
+      Just _ -> return ()
+  where
+    checkExpr :: ExprI -> MorlocMonad ()
+    checkExpr (ExprI i (SrcE _)) =
+      MM.throwSourcedError i "source statements are not allowed in eval mode"
+    checkExpr (ExprI i (ClsE _)) =
+      MM.throwSourcedError i "class declarations are not allowed in eval mode"
+    checkExpr (ExprI i (IstE _ _ _)) =
+      MM.throwSourcedError i "instance declarations are not allowed in eval mode"
+    checkExpr _ = return ()

@@ -62,6 +62,8 @@ def _tracked_foreign_call(*args):
 
 def run_job(client_fd: int) -> None:
     try:
+        # Free SHM from previous dispatch result (consumed by caller)
+        morloc.flush_shm_tracker()
         client_data = morloc.stream_from_client(client_fd)
 
         if(morloc.is_local_call(client_data)):

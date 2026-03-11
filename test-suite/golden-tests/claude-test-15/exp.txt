@@ -1,0 +1,16 @@
+--- bigStrRoundTrip ---
+10000
+--- bigVecRoundTrip ---
+12497500
+--- vecOfStrsRoundTrip ---
+5000
+--- nestedVecRoundTrip ---
+2100
+--- bigStrChain ---
+5000
+--- bigVecChain ---
+999000
+--- manyBigStrings ---
+20000
+--- manyNestedVecs ---
+2200

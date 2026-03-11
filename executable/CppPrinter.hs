@@ -42,8 +42,14 @@ printExpr (IVar v) = pretty v
 printExpr (IBoolLit True) = "true"
 printExpr (IBoolLit False) = "false"
 printExpr INullLit = "std::nullopt"
-printExpr (IIntLit i) = viaShow i
-printExpr (IRealLit r) = viaShow r
+printExpr (IIntLit Nothing i) = viaShow i
+printExpr (IIntLit (Just t) i)
+  | t == "int" = viaShow i
+  | otherwise = "static_cast<" <> pretty t <> ">(" <> viaShow i <> ")"
+printExpr (IRealLit Nothing r) = viaShow r
+printExpr (IRealLit (Just t) r)
+  | t == "double" = viaShow r
+  | otherwise = "static_cast<" <> pretty t <> ">(" <> viaShow r <> ")"
 printExpr (IStrLit s) = [idoc|std::string(#{textEsc' s})|]
 printExpr (IListLit es) = encloseSep "{" "}" "," (map printExpr es)
 printExpr (ITupleLit es) = "std::make_tuple" <> tupled (map printExpr es)

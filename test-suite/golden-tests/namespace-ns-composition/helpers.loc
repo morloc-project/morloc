@@ -1,0 +1,9 @@
+module (*)
+
+import root
+
+double :: Int -> Int
+double x = x + x
+
+triple :: Int -> Int
+triple x = x + x + x

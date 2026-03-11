@@ -88,6 +88,8 @@ data Token
     TokDot
   | -- | . (getter prefix, e.g., .name)
     TokGetterDot
+  | -- | . (namespace qualifier, no space before dot, e.g., f.map)
+    TokNsDot
   | -- | . (chained getter, e.g., the second dot in .foo.bar)
     TokGetterDotChain
   | -- Reserved operators
@@ -163,6 +165,8 @@ data Token
     TokGroupLine !Text
   | -- Intrinsics (@name)
     TokIntrinsic !Text
+  | -- Pragmas
+    TokPragmaInline
   | -- Special
     TokEOF
   deriving (Show, Eq, Ord)
@@ -188,6 +192,7 @@ showToken TokBang = "'!'"
 showToken TokQuestion = "'?'"
 showToken TokDot = "'.'"
 showToken TokGetterDot = "'.'"
+showToken TokNsDot = "'.' (namespace)"
 showToken TokGetterDotChain = "'.'"
 showToken TokEquals = "'='"
 showToken TokColon = "':'"
@@ -233,4 +238,5 @@ showToken TokInterpClose = "'}' (interpolation)"
 showToken (TokDocLine _) = "docstring"
 showToken (TokGroupLine _) = "group annotation"
 showToken (TokIntrinsic n) = "intrinsic '@" ++ T.unpack n ++ "'"
+showToken TokPragmaInline = "'%inline'"
 showToken TokEOF = "end of input"

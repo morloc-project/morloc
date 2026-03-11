@@ -1,3 +1,11 @@
+0.65.0 [2026-03-10]
+-------------------
+ * `morloc eval` for running anonymous morloc expressions
+ * add %inline pragma to skip manifold gen
+ * allow batch syntax for instances
+ * add @show and @read intrinsics
+ * add namespaces for morloc imports
+
 0.64.0 [2026-03-03]
 -------------------
  * replace thunks with more granular effect system

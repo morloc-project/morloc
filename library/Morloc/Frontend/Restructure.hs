@@ -263,12 +263,13 @@ resolveImports d0 =
       ExprI -> -- importing module expression (with resolved exports)
       ExprI -> -- imported module expression  (with resolved exports)
       MorlocMonad [AliasedSymbol]
-    resolveEdge imp _ childX = case (importInclude imp, AST.findExport childX) of
-      (_, ExportAll) -> error "This should have been resolved already"
-      (Nothing, ExportMany exps gs) ->
+    resolveEdge imp _ childX = case (importInclude imp, importNamespace imp, AST.findExport childX) of
+      (_, _, ExportAll) -> error "This should have been resolved already"
+      -- No namespace: existing behavior
+      (Nothing, Nothing, ExportMany exps gs) ->
         let allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
          in return $ map (toAliasedSymbol . snd) (Set.toList allExps)
-      (Just ass, ExportMany exps gs) -> return . catMaybes $ map (importAlias . unAliasedSymbol) ass
+      (Just ass, Nothing, ExportMany exps gs) -> return . catMaybes $ map (importAlias . unAliasedSymbol) ass
         where
           allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
           exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExps]
@@ -282,17 +283,44 @@ resolveImports d0 =
                 (Just (TermSymbol _)) -> Just $ AliasedTerm (EV name) (EV alias)
                 (Just (TypeSymbol _)) -> Just $ AliasedType (TV name) (TV alias)
                 (Just (ClassSymbol _)) -> Just $ AliasedClass (ClassName name)
+      -- With namespace: prefix term aliases (V1: types/classes not prefixed)
+      (Nothing, Just ns, ExportMany exps gs) ->
+        let allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
+         in return $ map (prefixAlias ns . toAliasedSymbol . snd) (Set.toList allExps)
+      (Just ass, Just ns, ExportMany exps gs) -> return . catMaybes $ map (importAlias . unAliasedSymbol) ass
+        where
+          allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
+          exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExps]
+          excludes = map unSymbol (importExclude imp)
+
+          importAlias :: (Text, Text) -> Maybe AliasedSymbol
+          importAlias (name, alias)
+            | name `elem` excludes = Nothing
+            | otherwise = case Map.lookup name exportMap of
+                Nothing -> Nothing
+                (Just (TermSymbol _)) -> Just $ prefixAlias ns (AliasedTerm (EV name) (EV alias))
+                (Just (TypeSymbol _)) -> Just $ AliasedType (TV name) (TV alias)
+                (Just (ClassSymbol _)) -> Just $ AliasedClass (ClassName name)
+
+    prefixAlias :: EVar -> AliasedSymbol -> AliasedSymbol
+    prefixAlias (EV ns) (AliasedTerm orig (EV alias)) = AliasedTerm orig (EV (ns <> "." <> alias))
+    prefixAlias _ sym = sym
 
     filterImports ::
       MVar ->
       Import -> -- the current node import list
       Export -> -- the imported modules export list
       MorlocMonad (Set Symbol)
-    -- Here we import everything outside the exclude set, no aliasing
-    filterImports _ (Import _ Nothing exclude _) (ExportMany exports gs) =
+    -- No namespace, no include list: import everything
+    filterImports _ (Import _ Nothing exclude Nothing) (ExportMany exports gs) =
       let allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
        in return $ (Set.map snd allExports) `Set.difference` (Set.fromList exclude)
-    filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) _) (ExportMany exports gs) =
+    -- With namespace, no include list: prefix all terms
+    filterImports _ (Import _ Nothing exclude (Just (EV ns))) (ExportMany exports gs) =
+      let allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
+       in return $ Set.map (prefixSymbol ns) ((Set.map snd allExports) `Set.difference` (Set.fromList exclude))
+    -- No namespace, with include list: existing behavior
+    filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) Nothing) (ExportMany exports gs) =
       case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
         ([], imps) -> return $ Set.fromList imps
         (missing, _) ->
@@ -315,7 +343,35 @@ resolveImports d0 =
               (Just (TermSymbol _)) -> Just . Right $ TermSymbol (EV alias)
               (Just (TypeSymbol _)) -> Just . Right $ TypeSymbol (TV alias)
               (Just (ClassSymbol _)) -> Just . Right $ ClassSymbol (ClassName alias)
+    -- With namespace and include list: prefix selected terms
+    filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) (Just (EV ns))) (ExportMany exports gs) =
+      case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
+        ([], imps) -> return $ Set.fromList imps
+        (missing, _) ->
+          MM.throwSystemError $
+            "The terms imported from"
+              <+> squotes (pretty m1)
+              <+> "are not exported from module"
+              <+> squotes (pretty m2)
+              <> ":\n"
+                <+> indent 2 (vsep (map pretty missing))
+      where
+        allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
+        exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExports]
+
+        importAlias :: (Text, Text) -> Maybe (Either Text Symbol)
+        importAlias (name, alias)
+          | name `elem` exclude = Nothing
+          | otherwise = case Map.lookup name exportMap of
+              Nothing -> Just (Left name)
+              (Just (TermSymbol _)) -> Just . Right $ TermSymbol (EV (ns <> "." <> alias))
+              (Just (TypeSymbol _)) -> Just . Right $ TypeSymbol (TV alias)
+              (Just (ClassSymbol _)) -> Just . Right $ ClassSymbol (ClassName alias)
     filterImports _ _ _ = error "Unreachable -- all Export values should have been converted to ExportMany"
+
+    prefixSymbol :: Text -> Symbol -> Symbol
+    prefixSymbol ns (TermSymbol (EV name)) = TermSymbol (EV (ns <> "." <> name))
+    prefixSymbol _ sym = sym
 
     findSymbols :: ExprI -> Set Symbol
     findSymbols (ExprI _ (ModE _ es)) = Set.unions (map findSymbols es)

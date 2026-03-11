@@ -1,6 +1,6 @@
 module main (*)
 
-import root
+import root (Int, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Real, Bool, Str)
 
 checkInt    = 1 :: Int
 checkInt8   = 2 :: Int8

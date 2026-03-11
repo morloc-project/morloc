@@ -154,6 +154,14 @@ applyLambdas (AnnoS g c (LstS es)) = AnnoS g c . LstS <$> mapM applyLambdas es
 applyLambdas (AnnoS g c (TupS es)) = AnnoS g c . TupS <$> mapM applyLambdas es
 applyLambdas (AnnoS g c (NamS rs)) = AnnoS g c . NamS <$> mapM (secondM applyLambdas) rs
 applyLambdas (AnnoS g c (VarS v (One e))) = AnnoS g c . VarS v . One <$> applyLambdas e
+-- Inline let-bound lambdas: the nexus evaluator cannot serialize function types,
+-- so substitute the lambda for all references and re-process to beta-reduce
+applyLambdas (AnnoS g c (LetS v e1@(AnnoS _ _ (LamS _ _)) e2)) = do
+  e1' <- applyLambdas e1
+  let e2' = substituteAnnoS v e1' e2
+  inner <- applyLambdas e2'
+  let AnnoS _ _ innerExpr = inner
+  return (AnnoS g c innerExpr)
 applyLambdas (AnnoS g c (LetS v e1 e2)) = do
   e1' <- applyLambdas e1
   e2' <- applyLambdas e2

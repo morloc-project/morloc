@@ -1,0 +1,20 @@
+-- Test %inline with old-style source syntax
+-- %inline before old-style source inlines all functions in the block
+module main (testAdd, testExpr)
+
+type Py => Int = "int"
+
+%inline source Py from "foo.py" ("add" as (+), "mul" as (*))
+
+(+) :: Int -> Int -> Int
+(*) :: Int -> Int -> Int
+
+infixl 6 +
+infixl 7 *
+
+testAdd :: Int -> Int -> Int
+testAdd x y = x + y
+
+-- 2 * 3 + 4 = 10
+testExpr :: Int -> Int -> Int -> Int
+testExpr x y z = x * y + z

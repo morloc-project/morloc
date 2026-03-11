@@ -60,6 +60,7 @@ import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
 import Data.Aeson (FromJSON (..), (.!=), (.:?))
 import qualified Data.Aeson as Aeson
+import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map as Map
 import Data.Map.Strict (Map)
 import qualified Data.Set as Set
@@ -125,6 +126,8 @@ data MorlocState = MorlocState
   -- ^ Map from export manifold ID to its original return effect labels
   , stateProjectRoot :: Maybe Path
   -- ^ Project root directory (directory of the entry-point file)
+  , stateEvalMode :: Bool
+  -- ^ True when running in eval mode (restricts source/class/instance)
   }
   deriving (Show)
 
@@ -176,6 +179,7 @@ data Config
   , configTmpDir :: !Path
   , configBuildConfig :: !Path
   , configLangOverrides :: !(Map Text [Text])
+  , configRegistry :: !(Maybe Text)
   }
   deriving (Show, Ord, Eq)
 
@@ -217,9 +221,19 @@ data GammaIndex
   | SrcG Source
   deriving (Ord, Eq, Show)
 
+{- | Typechecking context using IntMap for O(log N) operations.
+Entries are keyed by monotonically increasing slot numbers (higher = newer).
+Side-indexes provide O(log N) lookup of ExistG entries by TVar.
+-}
 data Gamma = Gamma
-  { gammaCounter :: Int
-  , gammaContext :: [GammaIndex]
+  { gammaCounter :: !Int
+  -- | Next available slot number (always increasing)
+  , gammaSlot :: !Int
+  -- | Ordered context: higher slot = newer entry
+  , gammaContext :: IntMap.IntMap GammaIndex
+  -- | Index: ExistG TVar -> slot number (for O(log N) access1)
+  , gammaExist :: Map TVar Int
+  -- | Cache of solved existential types
   , gammaSolved :: Map TVar TypeU
   }
 
@@ -288,6 +302,7 @@ instance Defaultable MorlocState where
       , stateManifoldLang = Map.empty
       , stateManifoldEffects = Map.empty
       , stateProjectRoot = Nothing
+      , stateEvalMode = False
       }
 
 instance Defaultable PackageMeta where
@@ -322,6 +337,7 @@ instance FromJSON Config where
       pyCmd <- o .:? "lang_python3" .!= ("" :: Text)
       rCmd <- o .:? "lang_R" .!= ("" :: Text)
       overrides <- o .:? "lang_overrides" .!= Map.empty
+      registry' <- o .:? "registry"
       let legacyOverrides =
             Map.fromList $
               filter
@@ -330,7 +346,7 @@ instance FromJSON Config where
                 , ("r", if rCmd == "" then [] else [rCmd])
                 ]
           allOverrides = Map.union overrides legacyOverrides
-      return $ Config home' source' plane' planeCore' tmpdir' buildConfig' allOverrides
+      return $ Config home' source' plane' planeCore' tmpdir' buildConfig' allOverrides registry'
 
 instance FromJSON PackageMeta where
   parseJSON = Aeson.withObject "object" $ \o ->
@@ -381,5 +397,5 @@ instance Pretty GammaIndex where
       <+> list (map ((\(x, y) -> tupled [x, y]) . bimap pretty pretty) rs)
   pretty (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> pretty t
   pretty (MarkG tv) = "MarkG:" <+> pretty tv
-  pretty (SrcG (Source ev1 lang _ _ _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
+  pretty (SrcG (Source ev1 lang _ _ _ _ _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
   pretty (AnnG v t) = pretty v <+> "::" <+> pretty t

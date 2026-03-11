@@ -1,0 +1,23 @@
+-- Test mix of inline and non-inline operators from same source where block
+-- BUG: non-inline operator (-) sourced via where-syntax is emitted as a bare
+-- symbol for the function name. In Python this generates "-(n24, n25)" which
+-- is unary negation applied to a tuple, not a binary subtraction call.
+-- The underlying issue: operators sourced via "source Py where (-)" without
+-- %inline need the code generator to handle their non-alphanumeric name
+-- (e.g., emit as operator.sub or wrap appropriately).
+module main (mixedOps)
+
+type Py => Int = "int"
+
+source Py where
+  %inline (+)
+  %inline (*)
+  (-)
+
+(+) :: Int -> Int -> Int
+(*) :: Int -> Int -> Int
+(-) :: Int -> Int -> Int
+
+-- (3 + 4) - (2 * 3) = 7 - 6 = 1
+mixedOps :: Int -> Int -> Int -> Int -> Int
+mixedOps a b c d = (a + b) - (c * d)

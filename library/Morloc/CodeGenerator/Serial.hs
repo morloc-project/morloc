@@ -27,6 +27,8 @@ module Morloc.CodeGenerator.Serial
   ) where
 
 import qualified Data.Char as C
+import qualified Data.IntMap.Strict as IntMap
+import qualified Data.Set as Set
 import qualified Data.Text as DT
 import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Infer
@@ -249,9 +251,25 @@ makeSerialAST m lang t0 = do
             MM.throwSourcedError m $
               "Cannot find constructor in VarF" <+> dquotes (pretty v) <+> " finalType=" <> pretty finalType
       where
+        -- Evaluate type aliases step-by-step, stopping at known serialization
+        -- base types. This prevents aliases like Int64 = Int from collapsing
+        -- to Int, which would lose width information for serialization.
         finalType =
           let t = fst $ unweaveTypeF ft
-           in either (const t) id (TE.evaluateType gscope t)
+           in resolveToSerialBaseType gscope t
+
+        resolveToSerialBaseType scope t
+          | Set.member t serialBaseTypes = t
+          | otherwise = case TE.reduceType scope t of
+              Just t' -> resolveToSerialBaseType scope t'
+              Nothing -> t
+
+        serialBaseTypes = Set.fromList
+          [ BT.unitU, BT.boolU, BT.strU, BT.realU
+          , BT.f32U, BT.f64U
+          , BT.intU, BT.i8U, BT.i16U, BT.i32U, BT.i64U
+          , BT.uintU, BT.u8U, BT.u16U, BT.u32U, BT.u64U
+          ]
 
         makeTypePacker :: (Int, TypeU, TypeU, Source, Source) -> MorlocMonad TypePacker
         makeTypePacker (0, generalUnpackedType, generalPackedType, forwardSource, reverseSource) = do
@@ -392,7 +410,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
       MorlocMonad (Maybe TypeF) -- the resolved unpacked types
     resolveP a b c generalTypes = do
       let (ga, ca) = unweaveTypeF a
-      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 [] Map.empty) of
+      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty) of
         (Left typeErr) ->
           MM.throwSourcedError m0 $
             "There was an error raised in subtyping while resolving serialization"
@@ -418,7 +436,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
         (u, gc) -> do
           -- where u  is the unresolved general packed type that was stored in Desugar.hs
           --       gc is the unresolved general unpacked type
-          case subtype Map.empty u ga (Gamma 0 [] Map.empty) of
+          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty) of
             (Left _) -> return Nothing
             (Right g) -> do
               return . Just $ apply g (existential gc)

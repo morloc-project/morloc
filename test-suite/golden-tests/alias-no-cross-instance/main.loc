@@ -1,0 +1,20 @@
+-- Negative test: aliases do NOT inherit typeclass instances from
+-- the underlying type. Vector has no Stack instance (no cons),
+-- Array has no Queue instance (no snoc), Deque has no Indexed (no at).
+-- Each subcommand tests one such case; all should fail at build time.
+
+module main (consVector, snocArray, indexDeque)
+
+import root-py
+
+-- Vector has Functor, Foldable, Indexed, Queue -- but NOT Stack
+consVector :: Vector Int -> Vector Int
+consVector xs = cons 0 xs
+
+-- Array has Functor, Foldable, Indexed -- but NOT Queue
+snocArray :: Array Int -> Array Int
+snocArray xs = snoc xs 99
+
+-- Deque has Functor, Foldable, Stack, Queue -- but NOT Indexed
+indexDeque :: Deque Int -> Int
+indexDeque xs = at 0 xs

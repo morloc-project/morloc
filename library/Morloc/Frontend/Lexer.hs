@@ -232,6 +232,11 @@ lexOne st@(LexState input pos toks) = case input of
         emit1 TokQuestion "?" (c : rest)
   '?' : [] ->
     emit1 TokQuestion "?" []
+  -- Pragmas: %inline
+  '%' : 'i' : 'n' : 'l' : 'i' : 'n' : 'e' : rest
+    | null rest || not (isAlphaNum (head rest) || head rest == '_' || head rest == '\'') ->
+        Right st { lsInput = rest, lsPos = advanceCol pos 7
+                 , lsTokens = Located pos TokPragmaInline "%inline" : toks }
   -- Intrinsics: @name (@ followed by lowercase letter)
   '@' : c : rest | isLower c ->
     let (word, rest') = span (\x -> isAlphaNum x || x == '\'' || x == '_') (c : rest)
@@ -259,18 +264,37 @@ lexOne st@(LexState input pos toks) = case input of
           }
 
 -- | Lex an identifier or keyword. The first character may be a letter or underscore.
+-- When a lowercase identifier is immediately followed by '.' and a lowercase letter
+-- (no space), emit TokNsDot between them to support qualified names (e.g., f.map).
+-- Exception: if the preceding token is TokGetterDot, we're in a getter chain
+-- (e.g., .home.altitude) and the dot should NOT be treated as a namespace dot.
 lexIdent :: Pos -> String -> LexState -> Either LexError LexState
 lexIdent pos input st =
   let (word, rest) = spanIdent input
       txt = T.pack word
       tok = classifyWord txt
       len = length word
-   in Right
-        st
-          { lsInput = rest
-          , lsPos = advanceCol pos len
-          , lsTokens = Located pos tok txt : lsTokens st
-          }
+   in case (tok, rest) of
+        (TokLowerName _, '.' : c : rest')
+          | isLower c, not (afterGetterDot (lsTokens st)) ->
+              let dotPos = advanceCol pos len
+               in Right st
+                    { lsInput = c : rest'
+                    , lsPos = advanceCol dotPos 1
+                    , lsTokens = Located dotPos TokNsDot "."
+                                   : Located pos tok txt
+                                   : lsTokens st
+                    }
+        _ -> Right
+              st
+                { lsInput = rest
+                , lsPos = advanceCol pos len
+                , lsTokens = Located pos tok txt : lsTokens st
+                }
+  where
+    afterGetterDot :: [Located] -> Bool
+    afterGetterDot (Located _ TokGetterDot _ : _) = True
+    afterGetterDot _ = False
 
 spanIdent :: String -> (String, String)
 spanIdent [] = ([], [])
@@ -832,6 +856,10 @@ insertLayout toks = beginTopLevel toks
       Located (locPos eof) TokVLBrace ""
         : Located (locPos eof) TokVRBrace ""
         : closingBraces ctxs [eof]
+    -- Explicit brace after layout keyword: skip virtual layout, let the
+    -- brace be handled as an explicit context by emitToken/process.
+    startLayoutCtx ctxs (t@(Located _ TokLBrace _) : rest) =
+      t : process (ExplicitCtx : ctxs) rest
     startLayoutCtx ctxs (t : rest)
       | otherwise =
           let col = posCol (locPos t)
@@ -903,6 +931,11 @@ insertLayout toks = beginTopLevel toks
       -- Explicit close brace
       | locToken tok == TokRBrace =
           closeToExplicit ctxs tok rest
+      -- Prefix pragma: suppress VSEMI before the next token
+      | locToken tok == TokPragmaInline =
+          tok : case rest of
+            (next : rest') -> emitFirstToken ctxs next rest'
+            [] -> closingBraces ctxs []
       -- Regular token
       | otherwise = tok : process ctxs rest
 

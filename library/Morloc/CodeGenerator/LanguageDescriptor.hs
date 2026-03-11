@@ -95,6 +95,8 @@ data LangDescriptor = LangDescriptor
   , -- Serialize/deserialize function names
     ldSerializeFn :: !Text -- "morloc.put_value" or "morloc_put_value"
   , ldDeserializeFn :: !Text -- "morloc.get_value" or "morloc_get_value"
+  , -- Intrinsic function prefix (for mlc_show, mlc_hash, etc.)
+    ldIntrinsicPrefix :: !Text -- "morloc." or "morloc_" or "MorlocRuntime."
   , -- Foreign call template
     ldForeignCallFn :: !Text -- "morloc.foreign_call" or "morloc_foreign_call"
   , ldForeignCallIntSuffix :: !Text -- "L" for R, "" for others
@@ -220,6 +222,7 @@ instance Y.FromJSON LangDescriptor where
             . maybe id (ins "ldIsCompiled") isCompiledVal
             . ins "ldCodegenCommand" Y.Null
             . ins "ldIntLiteralSuffix" (Y.String "")
+            . ins "ldIntrinsicPrefix" (Y.String "")
             . ins "ldRemoteCallFn" (Y.String "")
             . ins "ldDictStyleRecords" (Y.Bool False)
             . ins "ldQuoteRecordKeys" (Y.Bool True)
@@ -289,6 +292,7 @@ defaultLangDescriptor name ext =
     , ldFieldAccess = DotAccess
     , ldSerializeFn = "morloc.put_value"
     , ldDeserializeFn = "morloc.get_value"
+    , ldIntrinsicPrefix = ""
     , ldForeignCallFn = "morloc.foreign_call"
     , ldForeignCallIntSuffix = ""
     , ldIntLiteralSuffix = ""

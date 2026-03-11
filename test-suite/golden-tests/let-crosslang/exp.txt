@@ -1,0 +1,22 @@
+--- letMinimal ---
+10
+--- letMinimalReverse ---
+10
+--- letTripleChain ---
+5
+--- letDiamond ---
+100
+--- letTripleUse ---
+300
+--- letDeepChain ---
+155
+--- letInDoBlock ---
+4
+--- letListFanOut ---
+40
+--- letListDeepChain ---
+115
+--- letStrIdChain ---
+7
+--- letMixedTypes ---
+20

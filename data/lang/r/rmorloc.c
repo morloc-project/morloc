@@ -1077,6 +1077,38 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 }
 
 
+// mlc_show: serialize a value to a JSON string
+SEXP morloc_mlc_show(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_ERROR("schema must be a single string");
+    }
+
+    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
+    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
+    free(schema_str);
+
+    void* voidstar = to_voidstar(obj_r, schema);
+    if (!voidstar) {
+        free_schema(schema);
+        MORLOC_ERROR("Failed to convert R object to internal representation");
+    }
+
+    char* json = R_TRY_WITH(free_schema(schema), mlc_show, voidstar, schema);
+
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+
+    SEXP result = PROTECT(mkString(json));
+    free(json);
+    UNPROTECT(1);
+    return result;
+}
+
+
 SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(packet_r) != RAWSXP) {
         MORLOC_ERROR("packet must be a raw vector");
@@ -1673,6 +1705,7 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_foreign_call", (DL_FUNC) &morloc_foreign_call, 3},
         {"morloc_get_value", (DL_FUNC) &morloc_get_value, 2},
         {"morloc_put_value", (DL_FUNC) &morloc_put_value, 2},
+        {"morloc_mlc_show", (DL_FUNC) &morloc_mlc_show, 2},
         {"morloc_is_ping", (DL_FUNC) &morloc_is_ping, 1},
         {"morloc_is_local_call", (DL_FUNC) &morloc_is_local_call, 1},
         {"morloc_is_remote_call", (DL_FUNC) &morloc_is_remote_call, 1},

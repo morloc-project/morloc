@@ -1,0 +1,6 @@
+module (*)
+
+import root
+
+transform :: Int -> Int
+transform x = x + 10

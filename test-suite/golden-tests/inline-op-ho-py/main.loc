@@ -1,0 +1,27 @@
+-- Test inline operator passed as higher-order argument
+-- Expected: inline flag silently ignored for HO usage, operator works as value
+-- This is tricky because operators like (+) are not callable values in most languages.
+-- The compiler needs to handle this by wrapping the operator in a lambda or using
+-- a language-specific mechanism.
+module main (testFold, testDirect)
+
+type Py => Int = "int"
+type Py => List a = "list" a
+
+source Py from "foo.py" where
+  fold
+
+source Py where
+  %inline (+)
+
+(+) :: Int -> Int -> Int
+fold a b :: (b -> a -> b) -> b -> [a] -> b
+
+-- Inline operator passed as value to fold
+-- fold (+) 0 [1,2,3,4] = 10
+testFold :: [Int] -> Int
+testFold xs = fold (+) 0 xs
+
+-- Direct inline usage (for comparison)
+testDirect :: Int -> Int -> Int
+testDirect x y = x + y

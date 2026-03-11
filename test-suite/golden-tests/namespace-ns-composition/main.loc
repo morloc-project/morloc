@@ -1,0 +1,10 @@
+module main (test)
+
+import root-py
+import .helpers as h
+
+test :: [Bool]
+test =
+  [ (h.double . h.triple) 2 == 12
+  , (h.triple . h.double) 2 == 12
+  ]

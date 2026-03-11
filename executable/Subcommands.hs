@@ -14,7 +14,9 @@ point that keeps translator code out of the library.
 -}
 module Subcommands (runMorloc) where
 
-import Control.Exception (SomeException, finally, try)
+import Control.Exception (SomeException, bracket, finally, try)
+import Data.Time.Clock (getCurrentTime)
+import Data.Time.Format (formatTime, defaultTimeLocale)
 import qualified CppTranslator
 import qualified Data.Aeson as JSON
 import qualified Data.ByteString.Lazy as BL
@@ -44,7 +46,8 @@ import Morloc.Namespace.Type
 import qualified Morloc.ProgramBuilder.Install as Install
 import Morloc.Typecheck.Internal (prettyTypeU)
 import System.Directory
-  ( doesDirectoryExist
+  ( createDirectoryIfMissing
+  , doesDirectoryExist
   , doesFileExist
   , getCurrentDirectory
   , listDirectory
@@ -53,7 +56,9 @@ import System.Directory
   , setCurrentDirectory
   )
 import System.Exit (exitFailure, exitSuccess)
-import System.FilePath (dropExtension, takeFileName)
+import System.FilePath (dropExtension, takeFileName, (</>))
+import System.IO.Temp (createTempDirectory)
+import qualified System.Process as SP
 import UI
 
 decodePackageMeta :: BL.ByteString -> Maybe PackageMeta
@@ -79,6 +84,7 @@ runMorloc args = do
     (CmdList g) -> cmdList g config
     (CmdUninstall g) -> cmdUninstall g config
     (CmdNew g) -> cmdNew g
+    (CmdEval g) -> cmdEval g verbose config buildConfig
   case runPassed of
     True -> exitSuccess
     False -> exitFailure
@@ -92,6 +98,7 @@ getConfig (CmdDump g) = getConfig' (dumpConfig g) (dumpVanilla g)
 getConfig (CmdInit g) = getConfig' (initConfig g) (initVanilla g)
 getConfig (CmdList g) = getConfig' (listConfig g) (listVanilla g)
 getConfig (CmdUninstall g) = getConfig' (uninstallConfig g) (uninstallVanilla g)
+getConfig (CmdEval g) = getConfig' (evalConfig g) (evalVanilla g)
 getConfig (CmdNew _) = getConfig' "" False
 
 getConfig' :: String -> Bool -> IO Config.Config
@@ -106,6 +113,7 @@ getVerbosity (CmdTypecheck g) = typecheckVerbose g
 getVerbosity (CmdDump g) = dumpVerbose g
 getVerbosity (CmdInit g) = if initQuiet g then 0 else 1
 getVerbosity (CmdList g) = listVerbose g
+getVerbosity (CmdEval g) = evalVerbose g
 getVerbosity (CmdUninstall _) = 0
 getVerbosity (CmdNew _) = 0
 
@@ -250,6 +258,117 @@ cmdMake args verbosity config buildConfig = do
             (makeForce args)
           return True
     else return passed
+
+-- | Evaluate a morloc expression
+cmdEval :: EvalCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
+cmdEval args verbosity config buildConfig = do
+  let rawExpr = evalExpression args
+      code = MT.pack (preprocessEvalInput rawExpr)
+      tmpBase = Config.configTmpDir config
+      saveName = evalSave args
+      extraArgs = evalArgs args
+      isSave = not (null saveName)
+      exeName = if isSave then saveName else "eval"
+  createDirectoryIfMissing True tmpBase
+  bracket
+    (do
+      origDir <- getCurrentDirectory
+      tmpDir <- createTempDirectory tmpBase "morloc-eval-"
+      setCurrentDirectory tmpDir
+      return (origDir, tmpDir))
+    (\(origDir, tmpDir) -> do
+      setCurrentDirectory origDir
+      cleanupTmpDir tmpDir)
+    (\(origDir, tmpDir) -> do
+      let action = do
+            MM.modify (\s -> s {stateEvalMode = True})
+            if isSave then MM.modify (\s -> s {stateInstall = True}) else return ()
+            M.writeProgram translator Nothing (Code code)
+      result <- MM.runMorlocMonad (Just exeName) verbosity config buildConfig action
+      passed <- MM.writeMorlocReturn result
+      if not passed
+        then return False
+        else
+          if isSave
+            then do
+              let (_, finalState) = result
+                  pkgIncludes = concatMap packageInclude (statePackageMeta finalState)
+              case stateInstallDir finalState of
+                Nothing -> do
+                  putStrLn "Error: install directory was not set during compilation"
+                  return False
+                Just installDir -> do
+                  Install.installProgram (Config.configHome config) installDir saveName pkgIncludes True
+                  writeEvalMeta (Config.configHome config) saveName rawExpr
+                  return True
+            else do
+              let exe = tmpDir </> exeName
+              subcommand <- getFirstSubcommand exe
+              let cmdArgs = subcommand : extraArgs
+              runResult <- try (SP.callProcess exe cmdArgs) :: IO (Either SomeException ())
+              case runResult of
+                Right () -> return True
+                Left e -> do
+                  putStrLn $ "Error running expression: " ++ show e
+                  return False)
+  where
+    cleanupTmpDir dir = do
+      exists <- doesDirectoryExist dir
+      if exists then removeDirectoryRecursive dir else return ()
+
+-- | Extract the first subcommand name from the manifest embedded in a wrapper script.
+-- Falls back to "__expr__" if the manifest cannot be parsed.
+getFirstSubcommand :: FilePath -> IO String
+getFirstSubcommand wrapperPath = do
+  result <- try (readFile wrapperPath) :: IO (Either SomeException String)
+  case result of
+    Left _ -> return "__expr__"
+    Right contents -> do
+      let marker = "### MANIFEST ###"
+          afterMarker = drop 1 $ dropWhile (/= marker) (lines contents)
+          manifestStr = unlines afterMarker
+      case JSON.eitherDecode (BL.fromStrict (MT.encodeUtf8 (MT.pack manifestStr))) of
+        Right pm -> case pmCommands pm of
+          (cmd : _) -> return (T.unpack (pcName cmd))
+          [] -> return "__expr__"
+        Left _ -> return "__expr__"
+
+-- | Write metadata about the saved eval expression
+writeEvalMeta :: FilePath -> String -> String -> IO ()
+writeEvalMeta configHome name expr = do
+  now <- getCurrentTime
+  let fdbDir = configHome </> "fdb"
+      metaPath = fdbDir </> name ++ ".eval-meta"
+      timestamp = formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now
+      json = "{\"expression\":" ++ jsonEscape expr ++ ",\"timestamp\":\"" ++ timestamp ++ "\"}"
+  createDirectoryIfMissing True fdbDir
+  writeFile metaPath json
+  where
+    jsonEscape s = "\"" ++ concatMap escChar s ++ "\""
+    escChar '"' = "\\\""
+    escChar '\\' = "\\\\"
+    escChar '\n' = "\\n"
+    escChar '\t' = "\\t"
+    escChar c = [c]
+
+-- | Preprocess eval input: replace top-level semicolons with newlines.
+-- Semicolons inside explicit brace blocks (depth > 0) are preserved.
+-- Leading whitespace after each replacement is stripped so the layout
+-- rule treats each statement as a new top-level declaration.
+preprocessEvalInput :: String -> String
+preprocessEvalInput = go 0
+  where
+    go _ [] = []
+    go depth ('{' : rest) = '{' : go (depth + 1) rest
+    go depth ('}' : rest) = '}' : go (max 0 (depth - 1)) rest
+    go 0 (';' : rest) = '\n' : go 0 (dropWhile (== ' ') rest)
+    go depth ('"' : rest) = '"' : goString depth rest
+    go depth (c : rest) = c : go depth rest
+
+    goString depth [] = go depth []
+    goString depth ('"' : rest) = '"' : go depth rest
+    goString depth ('\\' : c : rest) = '\\' : c : goString depth rest
+    goString depth (c : rest) = c : goString depth rest
 
 cmdTypecheck :: TypecheckCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
 cmdTypecheck args _ config buildConfig = do

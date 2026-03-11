@@ -1,0 +1,81 @@
+-- Stress test for typeclass instance resolution with type aliases.
+-- List, Deque, Vector, and Array are all aliases for List, each with
+-- their own typeclass instances. The compiler must deduplicate these
+-- during instance resolution to avoid exponential blowup.
+
+module main (testPy, testCpp)
+
+import root-py
+import root-cpp
+
+-- Use Functor (map)
+mapList :: [Int] -> [Int]
+mapList xs = map (\x -> x + 1) xs
+
+-- Use Foldable (fold)
+foldList :: [Int] -> Int
+foldList = fold (\acc x -> acc + x) 0
+
+-- Use Indexed (at)
+atList :: [Int] -> Int
+atList xs = at 0 xs
+
+-- Use multiple typeclasses: map then fold
+mapThenFold :: [Int] -> Int
+mapThenFold xs = fold (\a x -> a + x) 0 (map (\x -> x * 2) xs)
+
+-- length (Foldable-derived) with map (Functor)
+mapThenLength :: [Int] -> Int
+mapThenLength xs = length (map (\x -> x + 1) xs)
+
+-- Nested: map over list of lists
+nestedMap :: [[Int]] -> [[Int]]
+nestedMap = map (map (\x -> x + 10))
+
+-- Chain: cons (Stack) then map (Functor) then fold (Foldable)
+consMapFold :: [Int] -> Int
+consMapFold xs = fold (\a x -> a + x) 0 (map (\x -> x * 3) (cons 0 xs))
+
+-- snoc (Queue) + reverse + map (Functor)
+snocReverse :: [Int] -> [Int]
+snocReverse xs = reverse (map (\x -> x + 1) (snoc xs 99))
+
+-- Eq instance on lists
+eqList :: Bool
+eqList = [1, 2, 3] == [1, 2, 3]
+
+-- Compose several typeclass-derived ops
+stressCompose :: [Int] -> Int
+stressCompose xs =
+  let ys = map (\x -> x + 1) xs
+  let zs = filter (\x -> x > 2) ys
+  let w = fold (\a x -> a + x) 0 zs
+  in w
+
+testPy :: Bool
+testPy =
+  let t1 = mapList [1,2,3] == [2,3,4]
+  let t2 = foldList [1,2,3,4] == 10
+  let t3 = atList [10,20,30] == 10
+  let t4 = mapThenFold [1,2,3] == 12
+  let t5 = mapThenLength [1,2,3] == 3
+  let t6 = nestedMap [[1,2],[3]] == [[11,12],[13]]
+  let t7 = consMapFold [1,2] == 9
+  let t8 = snocReverse [1,2] == [100,3,2]
+  let t9 = eqList
+  let t10 = stressCompose [1,2,3] == 7
+  in t1 && t2 && t3 && t4 && t5 && t6 && t7 && t8 && t9 && t10
+
+testCpp :: Bool
+testCpp =
+  let t1 = mapList [1,2,3] == [2,3,4]
+  let t2 = foldList [1,2,3,4] == 10
+  let t3 = atList [10,20,30] == 10
+  let t4 = mapThenFold [1,2,3] == 12
+  let t5 = mapThenLength [1,2,3] == 3
+  let t6 = nestedMap [[1,2],[3]] == [[11,12],[13]]
+  let t7 = consMapFold [1,2] == 9
+  let t8 = snocReverse [1,2] == [100,3,2]
+  let t9 = eqList
+  let t10 = stressCompose [1,2,3] == 7
+  in t1 && t2 && t3 && t4 && t5 && t6 && t7 && t8 && t9 && t10

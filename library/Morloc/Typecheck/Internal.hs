@@ -32,6 +32,8 @@ module Morloc.Typecheck.Internal
     -- * manipulating context
   , access1
   , access2
+  , solveExist
+  , solveExistWith
   , lookupU
   , lookupE
   , cacheSolved
@@ -42,6 +44,8 @@ module Morloc.Typecheck.Internal
   , prettyTypeU
   , occursCheck
   , toExistential
+  , gammaContextList
+  , gammaTrimAfter
 
     -- * selectors
   , selectorType
@@ -63,6 +67,7 @@ module Morloc.Typecheck.Internal
   , seeType
   ) where
 
+import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -133,7 +138,7 @@ instance Applicable EType where
 instance Applicable Gamma where
   apply g1 g2 =
     g2
-      { gammaContext = map f (gammaContext g2)
+      { gammaContext = IntMap.map f (gammaContext g2)
       , gammaSolved = Map.map (apply g1) (gammaSolved g2)
       }
     where
@@ -156,14 +161,29 @@ instance GammaIndexLike TypeU where
 instance GammaIndexLike TVar where
   index v = ExistG v ([], Open) ([], Open)
 
-(+>) :: (GammaIndexLike a) => Gamma -> a -> Gamma
-(+>) g x = g {gammaContext = index x : gammaContext g}
+-- | Slot spacing between consecutive entries added by (+>).
+-- Leaves room for solveExistWith to insert entries in between.
+slotSpacing :: Int
+slotSpacing = 256
 
+-- | Prepend an entry to the context (newest position).
+(+>) :: (GammaIndexLike a) => Gamma -> a -> Gamma
+(+>) g x =
+  let gi = index x
+      s = gammaSlot g
+  in g { gammaSlot = s + slotSpacing
+       , gammaContext = IntMap.insert s gi (gammaContext g)
+       , gammaExist = case gi of
+           ExistG v _ _ -> Map.insert v s (gammaExist g)
+           _ -> gammaExist g
+       }
+
+-- | Add multiple entries: last element of list becomes newest (highest slot).
 (++>) :: (GammaIndexLike a) => Gamma -> [a] -> Gamma
-(++>) g xs = g {gammaContext = map index (reverse xs) <> gammaContext g}
+(++>) g xs = foldl' (+>) g xs
 
 isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
-isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 [] Map.empty) of
+isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty) of
   (Left _) -> False
   (Right _) -> True
 
@@ -286,11 +306,7 @@ subtype scope t1@(ExistU v1 (ps1, pc1) rs@([], _)) t2@(AppU _ ps2) g1
   -- otherwise, do the thing
   | otherwise = do
       g2 <- foldM (\g (p1, p2) -> subtype scope p1 p2 g) g1 (zip ps1 ps2)
-      case access1 v1 (gammaContext g2) of
-        Just (rhs, _, lhs) -> do
-          solved <- solve v1 t2
-          return $ cacheSolved v1 t2 $ g2 {gammaContext = rhs ++ [solved] ++ lhs}
-        Nothing -> return g2 -- it is already solved, so do nothing
+      solveExist v1 t2 g2 >>= maybe (return g2) return
 
 --  g1,>Ea,Ea |- [Ea/x]A <: B -| g2,>Ea,g3
 -- ----------------------------------------- <:ForallL
@@ -348,61 +364,35 @@ instantiate scope ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_ : _), rc)) g1 = do
       (\g' (t1, t2) -> subtype scope t1 t2 g')
       g1
       [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
-  case access1 v (gammaContext g2) of
-    (Just (rhs, _, lhs)) -> do
-      solved <- solve v ta
-      return $ cacheSolved v ta $ g2 {gammaContext = rhs ++ [solved] ++ lhs}
-    Nothing -> subtypeError ta tb "Error in NamU with existential keys"
+  solveExist v ta g2 >>= maybe (subtypeError ta tb "Error in NamU with existential keys") return
 -- ExistU vs EffectU: solve ?a = <effs> ?b, then ?b <: inner
 instantiate scope (ExistU v ([], _) _) (EffectU effs inner) g1 = do
   let (g2, veb) = tvarname g1 "eff"
       eb = ExistU veb ([], Open) ([], Open)
-  g3 <- case access1 v (gammaContext g2) of
-    Just (rhs, _, lhs) -> do
-      solved <- solve v (EffectU effs eb)
-      return $ cacheSolved v (EffectU effs eb) $ g2 {gammaContext = rhs ++ [solved, index eb] ++ lhs}
-    Nothing -> return g2
+  g3 <- solveExistWith v (EffectU effs eb) [index eb] g2 >>= maybe (return g2) return
   instantiate scope eb (apply g3 inner) g3
 instantiate scope (EffectU effs inner) (ExistU v ([], _) _) g1 = do
   let (g2, veb) = tvarname g1 "eff"
       eb = ExistU veb ([], Open) ([], Open)
-  g3 <- case access1 v (gammaContext g2) of
-    Just (rhs, _, lhs) -> do
-      solved <- solve v (EffectU effs eb)
-      return $ cacheSolved v (EffectU effs eb) $ g2 {gammaContext = rhs ++ [solved, index eb] ++ lhs}
-    Nothing -> return g2
+  g3 <- solveExistWith v (EffectU effs eb) [index eb] g2 >>= maybe (return g2) return
   instantiate scope (apply g3 inner) eb g3
 -- ExistU vs OptionalU: solve ?a = ??b, then ?b <: inner
 instantiate scope (ExistU v ([], _) _) (OptionalU inner) g1 = do
   let (g2, veb) = tvarname g1 "opt"
       eb = ExistU veb ([], Open) ([], Open)
-  g3 <- case access1 v (gammaContext g2) of
-    Just (rhs, _, lhs) -> do
-      solved <- solve v (OptionalU eb)
-      return $ cacheSolved v (OptionalU eb) $ g2 {gammaContext = rhs ++ [solved, index eb] ++ lhs}
-    Nothing -> return g2
+  g3 <- solveExistWith v (OptionalU eb) [index eb] g2 >>= maybe (return g2) return
   instantiate scope eb (apply g3 inner) g3
 instantiate scope (OptionalU inner) (ExistU v ([], _) _) g1 = do
   let (g2, veb) = tvarname g1 "opt"
       eb = ExistU veb ([], Open) ([], Open)
-  g3 <- case access1 v (gammaContext g2) of
-    Just (rhs, _, lhs) -> do
-      solved <- solve v (OptionalU eb)
-      return $ cacheSolved v (OptionalU eb) $ g2 {gammaContext = rhs ++ [solved, index eb] ++ lhs}
-    Nothing -> return g2
+  g3 <- solveExistWith v (OptionalU eb) [index eb] g2 >>= maybe (return g2) return
   instantiate scope (apply g3 inner) eb g3
 instantiate scope (ExistU v ([], _) _) (FunU as b) g1 = do
   let (g2, veas) = statefulMap (\g _ -> tvarname g "ta") g1 as
       (g3, veb) = tvarname g2 "to"
       eas = [ExistU v' ([], Open) ([], Open) | v' <- veas]
       eb = ExistU veb ([], Open) ([], Open)
-  g4 <- case access1 v (gammaContext g3) of
-    Just (rhs, _, lhs) -> do
-      solved <- solve v (FunU eas eb)
-      return $
-        cacheSolved v (FunU eas eb) $
-          g3 {gammaContext = rhs ++ [solved] ++ (index eb : map index eas) ++ lhs}
-    Nothing -> return g3
+  g4 <- solveExistWith v (FunU eas eb) (index eb : map index eas) g3 >>= maybe (return g3) return
   g5 <- foldlM (\g (e, t) -> instantiate scope e t g) g4 (zip eas as)
   instantiate scope eb (apply g5 b) g5
 
@@ -415,13 +405,7 @@ instantiate scope (FunU as b) (ExistU v ([], _) _) g1 = do
       (g3, veb) = tvarname g2 "to"
       eas = [ExistU v' ([], Open) ([], Open) | v' <- veas]
       eb = ExistU veb ([], Open) ([], Open)
-  g4 <- case access1 v (gammaContext g3) of
-    Just (rhs, _, lhs) -> do
-      solved <- solve v (FunU eas eb)
-      return $
-        cacheSolved v (FunU eas eb) $
-          g3 {gammaContext = rhs ++ [solved] ++ (index eb : map index eas) ++ lhs}
-    Nothing -> return g3 -- Left $ InstantiationError ta tb $ "Error in InstRApp: " <> MT.show' (v, gammaContext g3)
+  g4 <- solveExistWith v (FunU eas eb) (index eb : map index eas) g3 >>= maybe (return g3) return
   g5 <- foldlM (\g (e, t) -> instantiate scope t e g) g4 (zip eas as)
   instantiate scope eb (apply g5 b) g5
 
@@ -429,25 +413,9 @@ instantiate scope (FunU as b) (ExistU v ([], _) _) g1 = do
 -- cases. I need to completely rewrite my type system. Argh. I also need to get
 -- rid of all default types. Defaults should be set explicitly in morloc code.
 instantiate _ ta@(ExistU _ _ (_ : _, _)) (ExistU v ([], _) ([], _)) g1 =
-  case access1 v (gammaContext g1) of
-    (Just (lhs, _, rhs)) -> do
-      solved <- solve v ta
-      return $ cacheSolved v ta $ g1 {gammaContext = lhs ++ solved : rhs}
-    Nothing -> return g1
--- case lookupU v g1 of
---   (Just _) -> return g1
---   Nothing -> Left . InstantiationError ta tb . render
---     $ "Error in recordInstRSolve with gamma:\n" <> tupled (map pretty (gammaContext g1))
+  solveExist v ta g1 >>= maybe (return g1) return
 instantiate _ (ExistU v ([], _) ([], _)) tb@(ExistU _ _ (_ : _, _)) g1 =
-  case access1 v (gammaContext g1) of
-    (Just (lhs, _, rhs)) -> do
-      solved <- solve v tb
-      return $ cacheSolved v tb $ g1 {gammaContext = lhs ++ solved : rhs}
-    Nothing -> return g1
--- case lookupU v g1 of
---   (Just _) -> return g1
---   Nothing -> Left . InstantiationError ta tb . render
---     $ "Error in recordInstLSolve:" <+> tupled (map pretty (gammaContext g1))
+  solveExist v tb g1 >>= maybe (return g1) return
 
 --
 -- ----------------------------------------- InstLAllR
@@ -497,23 +465,18 @@ instantiate scope ta@(ExistU v1 (ps1, pc1) (rs1, rc1)) tb@(ExistU v2 (ps2, pc2) 
   let taExpanded = ExistU v1 (ps1', pc1) (rs1', rc1)
   let tbExpanded = ExistU v2 (ps2', pc1) (rs2', rc1)
 
-  case access2 v1 v2 (gammaContext g4) of
-    -- InstLReach
-    (Just (lhs, _, ms, x, rhs)) -> do
-      solved <- solve v1 tbExpanded
-      return $ cacheSolved v1 tbExpanded $ g4 {gammaContext = lhs <> (solved : ms) <> (x : rhs)}
-    Nothing ->
-      case access2 v2 v1 (gammaContext g4) of
-        -- InstRReach
-        (Just (lhs, _, ms, x, rhs)) -> do
-          solved <- solve v2 taExpanded
-          return $ cacheSolved v2 taExpanded $ g4 {gammaContext = lhs <> (solved : ms) <> (x : rhs)}
-        -- Both orderings failed -- the existentials may already be solved
-        Nothing -> case (lookupU v1 g4, lookupU v2 g4) of
-          (Just t1, Just t2) -> subtype scope t1 t2 g4
-          (Just t1, _)       -> subtype scope t1 tb g4
-          (_, Just t2)       -> subtype scope ta t2 g4
-          _                  -> return g4
+  -- Check gammaSolved first: if either is already solved, skip access2
+  case (Map.lookup v1 (gammaSolved g4), Map.lookup v2 (gammaSolved g4)) of
+    (Just t1, Just t2) -> subtype scope t1 t2 g4
+    (Just t1, _)       -> subtype scope t1 tb g4
+    (_, Just t2)       -> subtype scope ta t2 g4
+    _ -> case access2 v1 v2 g4 of
+      -- InstLReach: v1 is newer than v2, solve v1 = tbExpanded
+      Just _ -> solveExist v1 tbExpanded g4 >>= maybe (return g4) return
+      Nothing -> case access2 v2 v1 g4 of
+        -- InstRReach: v2 is newer than v1, solve v2 = taExpanded
+        Just _ -> solveExist v2 taExpanded g4 >>= maybe (return g4) return
+        Nothing -> return g4
 
 --  g1[Ea],>Eb,Eb |- [Eb/x]B <=: Ea -| g2,>Eb,g3
 -- ----------------------------------------- InstRAllL
@@ -529,25 +492,17 @@ instantiate scope (ForallU x b) tb@(ExistU _ ([], _) _) g1 =
 -- ----------------------------------------- InstRSolve
 --  g1,Ea,g2 |- t <=: Ea -| g1,Ea=t,g2
 instantiate scope ta (ExistU v ([], _) ([], _)) g1 =
-  case access1 v (gammaContext g1) of
-    (Just (lhs, _, rhs)) -> do
-      solved <- solve v ta
-      return $ cacheSolved v ta $ g1 {gammaContext = lhs ++ solved : rhs}
-    Nothing -> case lookupU v g1 of
-      Just t  -> subtype scope ta t g1
-      Nothing -> return g1
+  case lookupU v g1 of
+    Just t  -> subtype scope ta t g1
+    Nothing -> solveExist v ta g1 >>= maybe (return g1) return
 
 --  g1 |- t
 -- ----------------------------------------- instLSolve
 --  g1,Ea,g2 |- Ea <=: t -| g1,Ea=t,g2
 instantiate scope (ExistU v ([], _) ([], _)) tb g1 =
-  case access1 v (gammaContext g1) of
-    (Just (lhs, _, rhs)) -> do
-      solved <- solve v tb
-      return $ cacheSolved v tb $ g1 {gammaContext = lhs ++ solved : rhs}
-    Nothing -> case lookupU v g1 of
-      Just t  -> subtype scope t tb g1
-      Nothing -> return g1
+  case lookupU v g1 of
+    Just t  -> subtype scope t tb g1
+    Nothing -> solveExist v tb g1 >>= maybe (return g1) return
 
 instantiate _ ta tb _ = subtypeError ta tb "Unexpected types"
 
@@ -583,67 +538,112 @@ occursCheck t1 t2 place =
 substitute :: TVar -> TypeU -> TypeU
 substitute v = substituteTVar v (ExistU v ([], Open) ([], Open))
 
-access1 :: TVar -> [GammaIndex] -> Maybe ([GammaIndex], GammaIndex, [GammaIndex])
-access1 v gs =
-  case findIndex (exists v) gs of
-    (Just 0) -> Just ([], head gs, tail gs)
-    (Just i) -> Just (take i gs, gs !! i, drop (i + 1) gs)
-    _ -> Nothing
-  where
-    exists :: TVar -> GammaIndex -> Bool
-    exists v1 (ExistG v2 _ _) = v1 == v2
-    exists _ _ = False
+-- | Find an unsolved ExistG by TVar. O(log N) via gammaExist index.
+-- Returns the slot and entry if found.
+access1 :: TVar -> Gamma -> Maybe (Int, GammaIndex)
+access1 v g = do
+  slot <- Map.lookup v (gammaExist g)
+  entry <- IntMap.lookup slot (gammaContext g)
+  return (slot, entry)
 
-access2 ::
-  TVar ->
-  TVar ->
-  [GammaIndex] ->
-  Maybe ([GammaIndex], GammaIndex, [GammaIndex], GammaIndex, [GammaIndex])
-access2 lv rv gs =
-  case access1 lv gs of
-    Just (lhs, x, rhs) ->
-      case access1 rv rhs of
-        Just (ls', y, rs') -> Just (lhs, x, ls', y, rs')
-        _ -> Nothing
-    _ -> Nothing
+-- | Check if ExistG v1 has a HIGHER slot (= newer) than ExistG v2.
+-- Used for InstLReach/InstRReach ordering.
+access2 :: TVar -> TVar -> Gamma -> Maybe (Int, Int)
+access2 v1 v2 g = do
+  s1 <- Map.lookup v1 (gammaExist g)
+  s2 <- Map.lookup v2 (gammaExist g)
+  if s1 > s2 then Just (s1, s2) else Nothing
 
--- | Look up a solved existential type variable (map-accelerated)
+-- | Solve an ExistG: replace it with SolvedG in place. O(log N).
+-- Returns Right Nothing if the ExistG is not found (already solved).
+-- Returns Left on solve error (e.g., occurs check). Returns Right (Just g) on success.
+solveExist :: TVar -> TypeU -> Gamma -> Either MDoc (Maybe Gamma)
+solveExist v t g = case Map.lookup v (gammaExist g) of
+  Nothing -> Right Nothing
+  Just slot -> do
+    solved <- solve v t
+    return . Just $ cacheSolved v t $ g
+      { gammaContext = IntMap.insert slot solved (gammaContext g)
+      , gammaExist = Map.delete v (gammaExist g)
+      }
+
+-- | Solve an ExistG and insert additional entries between the solved
+-- position and older entries. O(log N + K) where K = length extras.
+-- The first element of extras gets the highest sub-slot (= newest).
+-- Returns Right Nothing if ExistG not found. Left on solve error.
+solveExistWith :: TVar -> TypeU -> [GammaIndex] -> Gamma -> Either MDoc (Maybe Gamma)
+solveExistWith v t extras g = case Map.lookup v (gammaExist g) of
+  Nothing -> Right Nothing
+  Just slot -> do
+    solved <- solve v t
+    let g1 = cacheSolved v t $ g
+          { gammaContext = IntMap.insert slot solved (gammaContext g)
+          , gammaExist = Map.delete v (gammaExist g)
+          }
+        -- Insert extras at slots below the solved entry
+        insertExtra (g', subSlot) x =
+          ( g' { gammaContext = IntMap.insert subSlot x (gammaContext g')
+               , gammaExist = case x of
+                   ExistG ev _ _ -> Map.insert ev subSlot (gammaExist g')
+                   _ -> gammaExist g'
+               }
+          , subSlot - 1
+          )
+    return . Just $ fst $ foldl' insertExtra (g1, slot - 1) extras
+
+-- | Look up a solved existential type variable. O(log N) via gammaSolved.
 lookupU :: TVar -> Gamma -> Maybe TypeU
-lookupU v g = case Map.lookup v (gammaSolved g) of
-  Just t -> Just t
-  Nothing -> scanContext (gammaContext g)
-  where
-    scanContext [] = Nothing
-    scanContext ((SolvedG v' t) : gs)
-      | v == v' = Just t
-      | otherwise = scanContext gs
-    scanContext (_ : gs) = scanContext gs
+lookupU v g = Map.lookup v (gammaSolved g)
 
--- | Look up a solved existential type variable
+-- | Look up an annotation type variable. O(N) scan (AnnG entries are rare).
 lookupE :: EVar -> Gamma -> Maybe TypeU
-lookupE v (gammaContext -> gs0) = f gs0
+lookupE v g = foldr step Nothing (IntMap.toDescList (gammaContext g))
   where
-    f :: [GammaIndex] -> Maybe TypeU
-    f [] = Nothing
-    f ((AnnG v' t) : gs)
-      | v == v' = Just t
-      | otherwise = f gs
-    f (_ : gs) = f gs
+    step (_, AnnG v' t) _ | v == v' = Just t
+    step _ acc = acc
 
--- | remove context up to a marker
+-- | Remove context entries newer than (and including) a marker. O(N) in
+-- removed entries for cleanup; O(log N) for the IntMap split itself.
 cut :: GammaIndex -> Gamma -> Either MDoc Gamma
-cut i g = do
-  (removed, remaining) <- f (gammaContext g)
-  let removedKeys = [v | SolvedG v _ <- removed]
-      solvedMap' = foldl (flip Map.delete) (gammaSolved g) removedKeys
-  return $ g {gammaContext = remaining, gammaSolved = solvedMap'}
-  where
-    f [] = Left $ "Empty cut" <+> pretty i
-    f (x : xs)
-      | i == x = return ([], xs)
-      | otherwise = do
-          (removed, remaining) <- f xs
-          return (x : removed, remaining)
+cut marker g = do
+  -- Find the marker's slot by scanning (markers are infrequent)
+  markerSlot <- case [s | (s, gi) <- IntMap.toDescList (gammaContext g), gi == marker] of
+    (s : _) -> Right s
+    [] -> Left $ "Empty cut" <+> pretty marker
+  -- Everything with slot < markerSlot is kept (older entries)
+  let kept = fst (IntMap.split markerSlot (gammaContext g))
+      -- Collect removed entries for cleanup
+      removedSlots = IntMap.filterWithKey (\s _ -> s >= markerSlot) (gammaContext g)
+      removedSolvedKeys = [v | (_, SolvedG v _) <- IntMap.toList removedSlots]
+      removedExistKeys = [v | (_, ExistG v _ _) <- IntMap.toList removedSlots]
+      solvedMap' = foldl' (flip Map.delete) (gammaSolved g) removedSolvedKeys
+      existMap' = foldl' (flip Map.delete) (gammaExist g) removedExistKeys
+  return $ g
+    { gammaContext = kept
+    , gammaExist = existMap'
+    , gammaSolved = solvedMap'
+    }
+
+-- | Convert context to a list (newest first) for iteration/debugging.
+gammaContextList :: Gamma -> [GammaIndex]
+gammaContextList g = map snd (IntMap.toDescList (gammaContext g))
+
+-- | Trim context back to the state it had at a given slot counter value.
+-- Removes all entries with slot >= the given threshold.
+gammaTrimAfter :: Int -> Gamma -> Gamma
+gammaTrimAfter slotThreshold g =
+  let kept = fst (IntMap.split slotThreshold (gammaContext g))
+      removedSlots = IntMap.filterWithKey (\s _ -> s >= slotThreshold) (gammaContext g)
+      removedSolvedKeys = [v | (_, SolvedG v _) <- IntMap.toList removedSlots]
+      removedExistKeys = [v | (_, ExistG v _ _) <- IntMap.toList removedSlots]
+      solvedMap' = foldl' (flip Map.delete) (gammaSolved g) removedSolvedKeys
+      existMap' = foldl' (flip Map.delete) (gammaExist g) removedExistKeys
+  in g
+    { gammaContext = kept
+    , gammaSlot = slotThreshold
+    , gammaExist = existMap'
+    , gammaSolved = solvedMap'
+    }
 
 selectorType :: Gamma -> Selector -> MorlocMonad (Gamma, TypeU)
 selectorType g0 SelectorEnd = do
@@ -902,7 +902,7 @@ leave d = do
   insetSay $ "<--" <> pretty (depth + 1) <> "--" <+> d
 
 seeGamma :: Gamma -> MorlocMonad ()
-seeGamma g = MM.sayVVV $ nest 4 $ "Gamma:" <> line <> vsep (map pretty (gammaContext g))
+seeGamma g = MM.sayVVV $ nest 4 $ "Gamma:" <> line <> vsep (map pretty (gammaContextList g))
 
 peak :: (Foldable f) => ExprS g f c -> MorlocMonad ()
 peak = insetSay . pretty

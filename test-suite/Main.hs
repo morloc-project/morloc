@@ -30,6 +30,7 @@ main = do
       , effectSubtypeTests
       , effectSynthesisTests
       , effectErrorTests
+      , namespaceErrorTests
       , typeclassTests
       , -- -- These tests pass locally and when I run the same container that I
         -- -- use in github actions. Yet these tests freeze in an infinite loop
@@ -56,6 +57,8 @@ main = do
       , golden "thunk-export-guard" "thunk-export-guard"
       , golden "thunk-guard-cross" "thunk-guard-cross"
       , golden "thunk-cross-force" "thunk-cross-force"
+      , golden "thunk-eval-forall" "thunk-eval-forall"
+      , golden "thunk-eval-hk" "thunk-eval-hk"
       , golden "two-module" "two-module"
       , golden "records-alias" "records-alias"
       , golden "infix" "infix"
@@ -77,6 +80,11 @@ main = do
       , golden "claude-test-10" "claude-test-10"
       , golden "claude-test-11" "claude-test-11"
       , golden "claude-test-12" "claude-test-12"
+      , golden "claude-test-13" "claude-test-13"
+      , golden "claude-test-14" "claude-test-14"
+      , golden "claude-test-15" "claude-test-15"
+      , golden "claude-test-16" "claude-test-16"
+      , golden "let-crosslang" "let-crosslang"
       , golden "functional-data-1" "functional-data-1"
       , golden "functional-data-2" "functional-data-2"
       , golden "functional-data-3a" "functional-data-3a"
@@ -104,6 +112,8 @@ main = do
       , golden "native-morloc-7" "native-morloc-7"
       , golden "native-morloc-8" "native-morloc-8"
       , golden "native-morloc-9" "native-morloc-9"
+      , golden "nexus-let-pure" "nexus-let-pure"
+      , golden "nexus-let-lambda" "nexus-let-lambda"
       , golden "demo-trimming" "demo-trimming"
       , golden "formatting" "formatting"
       , golden "record-docstrings" "record-docstrings"
@@ -117,6 +127,10 @@ main = do
       , golden "typeclasses-7" "typeclasses-7"
       , golden "typeclasses-8" "typeclasses-8"
       , golden "typeclasses-9" "typeclasses-9"
+      , golden "typeclass-stress" "typeclass-stress"
+      , golden "alias-dedup-1" "alias-dedup-1"
+      , golden "alias-no-cross-instance" "alias-no-cross-instance"
+      , golden "alias-concrete-bugs" "alias-concrete-bugs"
       , golden "poly-list-1" "poly-list-1"
       , golden "higher-kinded-types" "higher-kinded-types"
       , golden "string-encoding" "string-encoding"
@@ -415,8 +429,41 @@ main = do
       , golden "intrinsic-constants" "intrinsic-constants"
       , golden "intrinsic-show-read" "intrinsic-show-read"
       , golden "intrinsic-show-read-nexus" "intrinsic-show-read-nexus"
+      , golden "intrinsic-show-ho-r" "intrinsic-show-ho-r"
       , -- parser stress test: precedence, parentheses, negatives, numeric literals, getters
         golden "parser-stress" "parser-stress"
       , -- stdout flush test: verify Python pool stdout is flushed before shutdown
         golden "stdout-flush-py" "stdout-flush-py"
+      , -- namespace import tests
+        golden "namespace-basic" "namespace-basic"
+      , golden "namespace-selective" "namespace-selective"
+      , golden "namespace-separate-impls" "namespace-separate-impls"
+      , golden "namespace-disambiguation" "namespace-disambiguation"
+      , golden "namespace-ns-composition" "namespace-ns-composition"
+      , golden "namespace-ns-hof" "namespace-ns-hof"
+      , golden "namespace-ns-let" "namespace-ns-let"
+      , golden "namespace-ns-shadow" "namespace-ns-shadow"
+      , golden "namespace-ns-multi" "namespace-ns-multi"
+      , golden "namespace-ns-same-func-name" "namespace-ns-same-func-name"
+      , golden "namespace-ns-unqualified" "namespace-ns-unqualified"
+      , golden "namespace-ns-exported" "namespace-ns-exported"
+      , golden "namespace-ns-reexport" "namespace-ns-reexport"
+      , golden "namespace-ns-nested-getter" "namespace-ns-nested-getter"
+      , golden "namespace-ns-guard" "namespace-ns-guard"
+      , golden "namespace-ns-double-import" "namespace-ns-double-import"
+      , -- %inline pragma tests
+        golden "inline-op-py" "inline-op-py"
+      , golden "inline-func-py" "inline-func-py"
+      , golden "inline-typeclass-py" "inline-typeclass-py"
+      , golden "inline-ho-py" "inline-ho-py"
+      , golden "inline-op-ho-py" "inline-op-ho-py"
+      , golden "inline-deep-py" "inline-deep-py"
+      , golden "inline-mixed-py" "inline-mixed-py"
+      , golden "inline-block-py" "inline-block-py"
+      , golden "inline-old-style-py" "inline-old-style-py"
+      , golden "inline-cross-lang" "inline-cross-lang"
+      , -- bare operators in old-style source declarations
+        golden "source-old-op-py" "source-old-op-py"
+      , -- eval mode restriction tests
+        golden "eval-restrict-source" "eval-restrict-source"
       ]

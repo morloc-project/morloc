@@ -1,0 +1,13 @@
+module main (test)
+
+import root-py
+import .mod-a as a
+import .mod-b as b
+import .mod-c as c
+
+test :: [Bool]
+test =
+  [ a.inc 0 == 1
+  , b.inc 0 == 10
+  , c.inc 0 == 100
+  ]

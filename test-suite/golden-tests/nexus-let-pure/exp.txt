@@ -1,0 +1,40 @@
+--- letSimpleInt ---
+42
+--- letSimpleStr ---
+"hello"
+--- letSimpleBool ---
+true
+--- letSimpleReal ---
+3.14
+--- letSimpleList ---
+[1,2,3]
+--- letSimpleTuple ---
+[42,"world"]
+--- letNested ---
+[1,2]
+--- letCrossRef ---
+1
+--- letDeepChain ---
+1
+--- letMultiRef ---
+[42,42,42]
+--- letUnused ---
+42
+--- letShadow ---
+2
+--- letNestedStruct ---
+[1,[2,3],"hi"]
+--- letGetter ---
+10
+--- letWithArg ---
+42
+--- letSelfRef ---
+1
+--- letDeepNest ---
+1
+--- letCrossRefChain ---
+100
+--- letRecord ---
+{"x":10,"y":20}
+--- letRecordGetter ---
+10

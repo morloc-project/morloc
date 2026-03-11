@@ -1,0 +1,11 @@
+module main (test)
+
+import root-py
+import .mod-a as a
+import .mod-b as b
+
+test :: [Bool]
+test =
+  [ a.transform 5 == 15
+  , b.transform 5 == 10
+  ]
