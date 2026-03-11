@@ -11,34 +11,23 @@ module Morloc.CodeGenerator.Grammars.Macro
   ( expandMacro
   ) where
 
-import qualified Control.Monad.State as CMS
 import Data.Text (Text)
-import Data.Void (Void)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.Text as MT
-import Text.Megaparsec
-import Text.Megaparsec.Char
-import qualified Text.Megaparsec.Char.Lexer as L
+import Text.Parsec (Parsec, runParser, eof, many1, getState)
+import Text.Parsec.Char (noneOf, string, digit)
+import Text.Parsec.Text ()
 
-type Parser a = CMS.StateT ParserState (Parsec Void Text) a
+type Parser = Parsec Text ParserState
 
 newtype ParserState = ParserState {stateParameters :: [Text]}
 
 expandMacro :: Text -> [Text] -> Text
 expandMacro t [] = t
 expandMacro t ps =
-  case runParser
-    (CMS.runStateT (pBase <* eof) (ParserState ps))
-    "typemacro"
-    t of
+  case runParser (pBase <* eof) (ParserState ps) "typemacro" t of
     Left err' -> error (show err')
-    Right (es, _) -> es
-
-many1 :: Parser a -> Parser [a]
-many1 p = do
-  x <- p
-  xs <- many p
-  return (x : xs)
+    Right es -> es
 
 pBase :: Parser Text
 pBase = MT.concat <$> many1 (pChar <|> pMacro)
@@ -48,9 +37,9 @@ pChar = MT.pack <$> many1 (noneOf ['$'])
 
 pMacro :: Parser Text
 pMacro = do
-  xs <- CMS.gets stateParameters
+  xs <- stateParameters <$> getState
   _ <- string "$"
-  n <- L.decimal
+  n <- read <$> many1 digit
   -- index is 1-based
   let i = n - 1
   return (xs !! i)

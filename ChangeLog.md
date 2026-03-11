@@ -1,3 +1,7 @@
+0.66.0 [2026-03-xx]
+-------------------
+ * replace megaparsec with parsec
+
 0.65.0 [2026-03-10]
 -------------------
  * `morloc eval` for running anonymous morloc expressions
