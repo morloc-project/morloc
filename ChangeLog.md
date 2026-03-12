@@ -1,4 +1,4 @@
-0.66.0 [2026-03-xx]
+0.66.0 [2026-03-12]
 -------------------
  * fix propagation of errors from crashed pools
  * fix shm memory alignment (inefficiency on x86, crashes on ARM)
