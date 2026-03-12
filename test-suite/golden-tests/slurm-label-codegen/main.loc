@@ -1,0 +1,10 @@
+module main (foo)
+
+import root-py
+
+source Py from "bar.py" ("bar")
+
+bar :: Int -> Int
+
+foo :: Int -> Int
+foo x = heavy:bar x

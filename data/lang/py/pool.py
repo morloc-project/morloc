@@ -5,6 +5,7 @@ import os # required for setting path to morloc dependencies
 import time
 import copy
 import array
+import struct
 import socket as _socket
 from collections import OrderedDict
 from multiprocessing import Process, Value, RawValue

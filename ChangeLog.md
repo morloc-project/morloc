@@ -1,6 +1,10 @@
 0.66.0 [2026-03-xx]
 -------------------
+ * fix propagation of errors from crashed pools
+ * fix shm memory alignment (inefficiency on x86, crashes on ARM)
+ * add `--sanitize` option to `morloc init` for strict memory
  * replace megaparsec with parsec
+ * fix label and remote handling
 
 0.65.0 [2026-03-10]
 -------------------

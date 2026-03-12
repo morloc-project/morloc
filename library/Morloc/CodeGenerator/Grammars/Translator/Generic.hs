@@ -485,10 +485,10 @@ genericRecordAccessor desc namType constructor record field
 -- | Remote call with template-driven resource packing
 genericRemoteCall :: LangDescriptor -> MDoc -> Int -> RemoteResources -> [MDoc] -> IndexM PoolDocs
 genericRemoteCall desc socketFile mid res args = do
-  let resMem = T.pack . show $ remoteResourcesMemory res
-      resTime = T.pack . show $ remoteResourcesTime res
-      resCPU = T.pack . show $ remoteResourcesThreads res
-      resGPU = T.pack . show $ remoteResourcesGpus res
+  let resMem = T.pack . show $ fromMaybe (-1) (remoteResourcesMemory res)
+      resTime = T.pack . show $ maybe (-1) unTimeInSeconds (remoteResourcesTime res)
+      resCPU = T.pack . show $ fromMaybe (-1) (remoteResourcesThreads res)
+      resGPU = T.pack . show $ fromMaybe 0 (remoteResourcesGpus res)
       remoteFn =
         if T.null (ldRemoteCallFn desc)
           then pretty (ldForeignCallFn desc)
