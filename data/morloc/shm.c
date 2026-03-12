@@ -682,6 +682,8 @@ static void* shmalloc_unlocked(size_t size, ERRMSG) {
 
     RAISE_IF(size == 0, "Cannot (or will not) allocate 0-length block")
 
+    size = ALIGN_UP(size, BLOCK_ALIGN);
+
     shm_t* shm = NULL;
     // find a block with sufficient free space
     block_header_t* blk = find_free_block(size, &shm, &CHILD_ERRMSG);
@@ -732,6 +734,8 @@ static void* shrealloc_unlocked(void* ptr, size_t size, ERRMSG) {
     PTR_RETURN_SETUP(void)
 
     RAISE_IF(size == 0, "Cannot reallocate to size 0")
+
+    size = ALIGN_UP(size, BLOCK_ALIGN);
 
     // Match realloc(NULL, size) semantics
     if (ptr == NULL){
