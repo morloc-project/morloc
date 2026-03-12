@@ -108,9 +108,9 @@ static EXIT_CODE pack_data(
             mpack_token_t nil_token = mpack_pack_nil();
             dynamic_mpack_write(tokbuf, packet, packet_ptr, packet_remaining, &nil_token, 0);
         } else {
-            // present: serialize the inner value (skip tag byte)
+            // present: serialize the inner value (skip to aligned offset)
             int exit_code = pack_data(
-                (const char*)mlc + 1,
+                (const char*)mlc + schema->offsets[0],
                 schema->parameters[0],
                 packet, packet_ptr, packet_remaining,
                 tokbuf, &CHILD_ERRMSG
@@ -329,9 +329,12 @@ static size_t msg_size_tuple(const Schema* schema, mpack_tokbuf_t* tokbuf, const
     // parse the msgpack tuple
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
     assert(token->length == schema->size);
-    size_t size = 0;
+    size_t size = schema->width;
     for(size_t i = 0; i < schema->size; i++){
-        size += msg_size_r(schema->parameters[i], tokbuf, buf_ptr, buf_remaining, token);
+        size_t elem_total = msg_size_r(schema->parameters[i], tokbuf, buf_ptr, buf_remaining, token);
+        if (elem_total > schema->parameters[i]->width) {
+            size += elem_total - schema->parameters[i]->width;
+        }
     }
     return size;
 }
@@ -363,11 +366,11 @@ static size_t msg_size_r(const Schema* schema, mpack_tokbuf_t* tokbuf, const cha
         // Peek at raw byte: msgpack nil is always 0xc0
         if (*buf_remaining > 0 && (uint8_t)(**buf_ptr) == 0xc0) {
             mpack_read(tokbuf, buf_ptr, buf_remaining, token);
-            // null: tag byte + reserved inner space (no variable-length data)
-            return 1 + schema->parameters[0]->width;
+            return schema->width;
         } else {
-            // present: tag byte + inner value size
-            return 1 + msg_size_r(schema->parameters[0], tokbuf, buf_ptr, buf_remaining, token);
+            size_t inner_total = msg_size_r(schema->parameters[0], tokbuf, buf_ptr, buf_remaining, token);
+            size_t extra = (inner_total > schema->parameters[0]->width) ? inner_total - schema->parameters[0]->width : 0;
+            return schema->width + extra;
         }
       default:
         return 0;
@@ -556,14 +559,11 @@ static EXIT_CODE parse_tuple(
 ){
     INT_RETURN_SETUP
 
-    size_t offset = 0;
-
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
 
     for(size_t i = 0; i < schema->size; i++){
-        int exit_code = parse_obj((char*)mlc + offset, schema->parameters[i], cursor, tokbuf, buf_ptr, buf_remaining, token, &CHILD_ERRMSG);
+        int exit_code = parse_obj((char*)mlc + schema->offsets[i], schema->parameters[i], cursor, tokbuf, buf_ptr, buf_remaining, token, &CHILD_ERRMSG);
         RAISE_IF(exit_code == EXIT_FAIL, "\n%s", CHILD_ERRMSG)
-        offset += schema->parameters[i]->width;
     }
 
     return EXIT_PASS;
@@ -620,11 +620,11 @@ static EXIT_CODE parse_obj(
             // null: consume the nil byte and set tag to 0
             mpack_read(tokbuf, buf_ptr, buf_remaining, token);
             *((uint8_t*)mlc) = 0;
-            memset((char*)mlc + 1, 0, schema->parameters[0]->width);
+            memset((char*)mlc + schema->offsets[0], 0, schema->parameters[0]->width);
         } else {
             // present: set tag to 1 and parse inner value
             *((uint8_t*)mlc) = 1;
-            child_retcode = parse_obj((char*)mlc + 1, schema->parameters[0], cursor, tokbuf, buf_ptr, buf_remaining, token, &CHILD_ERRMSG);
+            child_retcode = parse_obj((char*)mlc + schema->offsets[0], schema->parameters[0], cursor, tokbuf, buf_ptr, buf_remaining, token, &CHILD_ERRMSG);
             RAISE_IF(child_retcode == EXIT_FAIL, "\n%s", CHILD_ERRMSG)
         }
         break;

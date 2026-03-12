@@ -154,14 +154,15 @@ size_t get_shm_size(const Schema* schema, const std::vector<T>& data) {
     return total_size;
 }
 
-// Optional: 1-byte tag + inner value
+// Optional: tag byte + aligned inner value
 template<typename T>
 size_t get_shm_size(const Schema* schema, const std::optional<T>& data) {
     if (!data.has_value()) {
-        // null: tag + reserved inner space (no variable-length data)
-        return 1 + schema->parameters[0]->width;
+        return schema->width;
     }
-    return 1 + get_shm_size(schema->parameters[0], *data);
+    size_t inner_size = get_shm_size(schema->parameters[0], *data);
+    size_t extra = (inner_size > schema->parameters[0]->width) ? inner_size - schema->parameters[0]->width : 0;
+    return schema->width + extra;
 }
 
 size_t get_shm_size(const Schema* schema, const std::string& data) {
@@ -174,9 +175,14 @@ size_t get_shm_size(void* dest, const Schema* schema, const char* data) {
 
 template<typename Tuple, size_t... Is>
 size_t createTupleShmSizeHelper(const Schema* schema, const Tuple& data, std::index_sequence<Is...>) {
-    size_t total_size = 0;
+    size_t total_size = schema->width;
     (void)std::initializer_list<int>{(
-        total_size += get_shm_size(schema->parameters[Is], std::get<Is>(data)),
+        [&](){
+            size_t elem = get_shm_size(schema->parameters[Is], std::get<Is>(data));
+            if (elem > schema->parameters[Is]->width) {
+                total_size += elem - schema->parameters[Is]->width;
+            }
+        }(),
         0
     )...};
     return total_size;
@@ -395,10 +401,10 @@ template<typename T>
 void* toAnything(void* dest, void** cursor, const Schema* schema, const std::optional<T>& data) {
     if (!data.has_value()) {
         *((uint8_t*)dest) = 0;
-        memset((char*)dest + 1, 0, schema->parameters[0]->width);
+        memset((char*)dest + schema->offsets[0], 0, schema->parameters[0]->width);
     } else {
         *((uint8_t*)dest) = 1;
-        toAnything((char*)dest + 1, cursor, schema->parameters[0], *data);
+        toAnything((char*)dest + schema->offsets[0], cursor, schema->parameters[0], *data);
     }
     return dest;
 }
@@ -525,7 +531,7 @@ T fromAnything(const Schema* schema, const void* data, T*) {
         if (tag == 0) {
             return std::nullopt;
         }
-        return std::optional<InnerT>(fromAnything(schema->parameters[0], (const char*)data + 1, static_cast<InnerT*>(nullptr)));
+        return std::optional<InnerT>(fromAnything(schema->parameters[0], (const char*)data + schema->offsets[0], static_cast<InnerT*>(nullptr)));
     }
     else {
         // Primitives (int, double, float, etc.)

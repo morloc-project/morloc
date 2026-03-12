@@ -194,14 +194,13 @@ size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG){
         case MORLOC_OPTIONAL:
             {
                 uint8_t tag = *((const uint8_t*)data);
-                // 1 byte for the tag
-                size = 1;
-                if (tag == 0) {
-                    // null: inner value space is still reserved but has no variable-length data
-                    size += schema->parameters[0]->width;
-                } else {
-                    // present: add the inner value's full size
-                    size += TRY(calculate_voidstar_size, (const char*)data + 1, schema->parameters[0]);
+                size = schema->width;
+                if (tag != 0) {
+                    // present: add any dynamic data beyond the inline width
+                    size_t inner_total = TRY(calculate_voidstar_size, (const char*)data + schema->offsets[0], schema->parameters[0]);
+                    if (inner_total > schema->parameters[0]->width) {
+                        size += inner_total - schema->parameters[0]->width;
+                    }
                 }
             }
             break;
@@ -211,9 +210,13 @@ size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG){
                 if (schema_is_fixed_width(schema)){
                     size = schema->width;
                 } else {
+                    size = schema->width;
                     uint8_t* element_data = (uint8_t*)data;
                     for(size_t i = 0; i < schema->size; i++){
-                        size += TRY(calculate_voidstar_size, element_data + schema->offsets[i], schema->parameters[i]);
+                        size_t elem_total = TRY(calculate_voidstar_size, element_data + schema->offsets[i], schema->parameters[i]);
+                        if (elem_total > schema->parameters[i]->width) {
+                            size += elem_total - schema->parameters[i]->width;
+                        }
                     }
                 }
             }
@@ -223,6 +226,43 @@ size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG){
             break;
     }
     return size;
+}
+
+// Return the natural alignment requirement for a schema type (mirrors C ABI rules).
+static size_t schema_alignment(const Schema* schema) {
+    switch (schema->type) {
+        case MORLOC_NIL:
+        case MORLOC_BOOL:
+        case MORLOC_SINT8:
+        case MORLOC_UINT8:
+            return 1;
+        case MORLOC_SINT16:
+        case MORLOC_UINT16:
+            return 2;
+        case MORLOC_SINT32:
+        case MORLOC_UINT32:
+        case MORLOC_FLOAT32:
+            return 4;
+        case MORLOC_SINT64:
+        case MORLOC_UINT64:
+        case MORLOC_FLOAT64:
+        case MORLOC_STRING:
+        case MORLOC_ARRAY:
+            return _Alignof(size_t);
+        case MORLOC_TUPLE:
+        case MORLOC_MAP: {
+            size_t max_align = 1;
+            for (size_t i = 0; i < schema->size; i++) {
+                size_t a = schema_alignment(schema->parameters[i]);
+                if (a > max_align) max_align = a;
+            }
+            return max_align;
+        }
+        case MORLOC_OPTIONAL:
+            return schema_alignment(schema->parameters[0]);
+        default:
+            return _Alignof(size_t);
+    }
 }
 
 static Schema* create_schema_with_params(morloc_serial_type type, size_t width, size_t size, Schema** params, char** keys) {
@@ -240,10 +280,11 @@ static Schema* create_schema_with_params(morloc_serial_type type, size_t width, 
     schema->parameters = params;
     schema->keys = keys;
 
-    // for tuples and maps, generate the element offsets
+    // for tuples and maps, generate the element offsets with alignment
     if(params){
       for(size_t i = 1; i < size; i++){
-        schema->offsets[i] = schema->offsets[i-1] + params[i-1]->width;
+        size_t raw_offset = schema->offsets[i-1] + params[i-1]->width;
+        schema->offsets[i] = ALIGN_UP(raw_offset, schema_alignment(params[i]));
       }
     }
 
@@ -313,10 +354,15 @@ static Schema* string_schema() {
 }
 
 static Schema* tuple_schema(Schema** params, size_t size) {
-    size_t width = 0;
+    size_t offset = 0;
+    size_t max_align = 1;
     for(size_t i = 0; i < size; i++){
-      width += params[i]->width;
+      size_t a = schema_alignment(params[i]);
+      if (a > max_align) max_align = a;
+      offset = ALIGN_UP(offset, a);
+      offset += params[i]->width;
     }
+    size_t width = ALIGN_UP(offset, max_align);
     return create_schema_with_params(MORLOC_TUPLE, width, size, params, NULL);
 }
 
@@ -330,10 +376,15 @@ static Schema* array_schema(Schema* array_type) {
 }
 
 static Schema* map_schema(size_t size, char** keys, Schema** params) {
-    size_t width = 0;
+    size_t offset = 0;
+    size_t max_align = 1;
     for(size_t i = 0; i < size; i++){
-      width += params[i]->width;
+      size_t a = schema_alignment(params[i]);
+      if (a > max_align) max_align = a;
+      offset = ALIGN_UP(offset, a);
+      offset += params[i]->width;
     }
+    size_t width = ALIGN_UP(offset, max_align);
     return create_schema_with_params(MORLOC_MAP, width, size, params, keys);
 }
 
@@ -341,8 +392,15 @@ static Schema* optional_schema(Schema* inner) {
     Schema** params = (Schema**)calloc(1, sizeof(Schema*));
     if (!params) return NULL;
     params[0] = inner;
-    // 1-byte tag (0=null, 1=present) followed by inner value
-    return create_schema_with_params(MORLOC_OPTIONAL, 1 + inner->width, 1, params, NULL);
+    // 1-byte tag (0=null, 1=present) followed by aligned inner value
+    size_t inner_align = schema_alignment(inner);
+    size_t inner_offset = ALIGN_UP(1, inner_align);
+    size_t width = ALIGN_UP(inner_offset + inner->width, inner_align);
+    Schema* schema = create_schema_with_params(MORLOC_OPTIONAL, width, 1, params, NULL);
+    if (schema) {
+        schema->offsets[0] = inner_offset;
+    }
+    return schema;
 }
 
 static size_t parse_schema_size(char** schema_ptr){

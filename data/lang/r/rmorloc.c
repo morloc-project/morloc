@@ -110,9 +110,13 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
                 if (array_size != schema->size) {
                     MORLOC_ERROR("Expected tuple of length %zu, but found list of length %zu", schema->size, size);
                 }
-                for (R_xlen_t i = 0; i < array_size; ++i) {
+                size = schema->width;
+                for (R_xlen_t i = 0; i < (R_xlen_t)array_size; ++i) {
                     SEXP item = VECTOR_ELT(obj, i);
-                    size += get_shm_size(schema->parameters[i], item);
+                    size_t elem = get_shm_size(schema->parameters[i], item);
+                    if (elem > schema->parameters[i]->width) {
+                        size += elem - schema->parameters[i]->width;
+                    }
                 }
                 return size;
             }
@@ -121,7 +125,7 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
             {
                 if (isNewList(obj)) {
                     // Handle named list
-                    size = 0;
+                    size = schema->width;
                     SEXP names = getAttrib(obj, R_NamesSymbol);
                     if (names == R_NilValue) {
                         error("List must have names for MORLOC_MAP");
@@ -137,7 +141,10 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
                         }
                         if (index != -1) {
                             SEXP value = VECTOR_ELT(obj, index);
-                            size += get_shm_size(schema->parameters[i], value);
+                            size_t elem = get_shm_size(schema->parameters[i], value);
+                            if (elem > schema->parameters[i]->width) {
+                                size += elem - schema->parameters[i]->width;
+                            }
                         }
                         UNPROTECT(1);
                     }
@@ -149,9 +156,16 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
 
         case MORLOC_OPTIONAL:
             if (obj == R_NilValue) {
-                return 1 + schema->parameters[0]->width;
+                return schema->width;
             }
-            return 1 + get_shm_size(schema->parameters[0], obj);
+            {
+                size_t inner_size = get_shm_size(schema->parameters[0], obj);
+                size = schema->width;
+                if (inner_size > schema->parameters[0]->width) {
+                    size += inner_size - schema->parameters[0]->width;
+                }
+                return size;
+            }
 
         default:
             MORLOC_ERROR("Unhandled schema type");
@@ -405,10 +419,10 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
         case MORLOC_OPTIONAL:
             if (obj == R_NilValue) {
                 *((uint8_t*)dest) = 0;
-                memset((char*)dest + 1, 0, schema->parameters[0]->width);
+                memset((char*)dest + schema->offsets[0], 0, schema->parameters[0]->width);
             } else {
                 *((uint8_t*)dest) = 1;
-                to_voidstar_r((char*)dest + 1, cursor, obj, schema->parameters[0]);
+                to_voidstar_r((char*)dest + schema->offsets[0], cursor, obj, schema->parameters[0]);
             }
             break;
 
@@ -735,7 +749,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
             if (tag == 0) {
                 return R_NilValue;
             }
-            obj = from_voidstar((const char*)data + 1, schema->parameters[0]);
+            obj = from_voidstar((const char*)data + schema->offsets[0], schema->parameters[0]);
             break;
         }
         default:

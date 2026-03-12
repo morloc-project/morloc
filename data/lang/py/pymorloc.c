@@ -335,7 +335,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
             if (tag == 0) {
                 Py_RETURN_NONE;
             }
-            obj = fromAnything(schema->parameters[0], (const char*)data + 1);
+            obj = fromAnything(schema->parameters[0], (const char*)data + schema->offsets[0]);
             if (!obj) {
                 PyRAISE("Failed to deserialize optional inner value");
             }
@@ -473,18 +473,20 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                     PyRAISE("Tuple/List size mismatch");
                 }
 
-                size_t required_size = 0;
+                size_t required_size = schema->width;
 
                 for (Py_ssize_t i = 0; i < size; ++i) {
                     PyObject* item = PyTuple_Check(obj) ? PyTuple_GetItem(obj, i) : PyList_GetItem(obj, i);
                     ssize_t element_size = get_shm_size(schema->parameters[i], item);
                     if(element_size != -1){
-                        required_size += element_size;
+                        if ((size_t)element_size > schema->parameters[i]->width) {
+                            required_size += (size_t)element_size - schema->parameters[i]->width;
+                        }
                     } else {
                         return -1;
                     }
                 }
-                return required_size;
+                return (ssize_t)required_size;
             }
 
         case MORLOC_MAP:
@@ -493,7 +495,7 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
             }
 
             {
-                size_t required_size = 0;
+                size_t required_size = schema->width;
                 for (size_t i = 0; i < schema->size; ++i) {
                     PyObject* key = PyUnicode_FromString(schema->keys[i]);
                     PyObject* value = PyDict_GetItem(obj, key);
@@ -501,23 +503,26 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                     if (value) {
                         ssize_t element_size = get_shm_size(schema->parameters[i], value);
                         if(element_size != -1){
-                            required_size += element_size;
+                            if ((size_t)element_size > schema->parameters[i]->width) {
+                                required_size += (size_t)element_size - schema->parameters[i]->width;
+                            }
                         } else {
                             return -1;
                         }
                     }
                 }
-                return required_size;
+                return (ssize_t)required_size;
             }
 
         case MORLOC_OPTIONAL:
             if (obj == Py_None) {
-                return 1 + schema->parameters[0]->width;
+                return (ssize_t)schema->width;
             }
             {
                 ssize_t inner_size = get_shm_size(schema->parameters[0], obj);
                 if (inner_size == -1) return -1;
-                return 1 + inner_size;
+                ssize_t extra = (inner_size > (ssize_t)schema->parameters[0]->width) ? inner_size - (ssize_t)schema->parameters[0]->width : 0;
+                return (ssize_t)schema->width + extra;
             }
 
         default:
@@ -722,10 +727,10 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
         case MORLOC_OPTIONAL:
             if (obj == Py_None) {
                 *((uint8_t*)dest) = 0;
-                memset((char*)dest + 1, 0, schema->parameters[0]->width);
+                memset((char*)dest + schema->offsets[0], 0, schema->parameters[0]->width);
             } else {
                 *((uint8_t*)dest) = 1;
-                if (to_voidstar_r((char*)dest + 1, cursor, schema->parameters[0], obj) != 0) {
+                if (to_voidstar_r((char*)dest + schema->offsets[0], cursor, schema->parameters[0], obj) != 0) {
                     goto error;
                 }
             }

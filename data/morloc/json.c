@@ -556,10 +556,10 @@ static int read_json_with_schema_r(
                 && (*json_ptr)[4] != '_') {
                 *json_ptr += 4;
                 *((uint8_t*)voidstar) = 0;
-                memset(voidstar + 1, 0, schema->parameters[0]->width);
+                memset(voidstar + schema->offsets[0], 0, schema->parameters[0]->width);
             } else {
                 *((uint8_t*)voidstar) = 1;
-                TRY(read_json_with_schema_r, voidstar + 1, json_ptr, schema->parameters[0]);
+                TRY(read_json_with_schema_r, voidstar + schema->offsets[0], json_ptr, schema->parameters[0]);
             }
             break;
         }
@@ -702,7 +702,7 @@ static bool print_voidstar_r(const void* voidstar, const Schema* schema, ERRMSG)
                 if (tag == 0) {
                     printf("null");
                 } else {
-                    bool success = print_voidstar_r((const char*)voidstar + 1, schema->parameters[0], &CHILD_ERRMSG);
+                    bool success = print_voidstar_r((const char*)voidstar + schema->offsets[0], schema->parameters[0], &CHILD_ERRMSG);
                     RAISE_IF(!success, "\n%s", CHILD_ERRMSG)
                 }
             }
@@ -868,7 +868,7 @@ static bool pretty_print_r(const void* voidstar, const Schema* schema, int inden
                 if (tag == 0) {
                     printf("null");
                 } else {
-                    TRY(pretty_print_r, (const char*)voidstar + 1, schema->parameters[0], indent, false);
+                    TRY(pretty_print_r, (const char*)voidstar + schema->offsets[0], schema->parameters[0], indent, false);
                 }
             }
             break;
@@ -1180,7 +1180,7 @@ static bool voidstar_to_json_buf_r(json_buf_t* jb, const void* voidstar, const S
             if (tag == 0) {
                 json_buf_append(jb, "null", 4);
             } else {
-                TRY(voidstar_to_json_buf_r, jb, (const char*)voidstar + 1, schema->parameters[0]);
+                TRY(voidstar_to_json_buf_r, jb, (const char*)voidstar + schema->offsets[0], schema->parameters[0]);
             }
             break;
         }
