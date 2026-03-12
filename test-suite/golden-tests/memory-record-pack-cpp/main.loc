@@ -1,0 +1,75 @@
+-- Tests memory alignment of record field packing.
+-- {flag :: Bool, value :: Real} puts Real at offset 1 (needs 8-byte alignment).
+-- {flag :: Bool, count :: Int, value :: Real} puts Int at offset 1, Real at offset 5.
+-- On strict-alignment platforms, misaligned field access causes SIGBUS.
+
+module main
+  ( testMakePair
+  , testGetPairFlag
+  , testGetPairValue
+  , testPairRoundTrip
+  , testMakeTriple
+  , testGetTripleCount
+  , testGetTripleValue
+  , testTripleRoundTrip
+  )
+
+type Cpp => Bool = "bool"
+type Cpp => Int = "int"
+type Cpp => Real = "double"
+
+record PairBR where
+  flag :: Bool
+  value :: Real
+record Cpp => PairBR = "pair_br_t"
+
+record TripleBIR where
+  flag :: Bool
+  count :: Int
+  value :: Real
+record Cpp => TripleBIR = "triple_bir_t"
+
+makePair :: Bool -> Real -> PairBR
+getPairFlag :: PairBR -> Bool
+getPairValue :: PairBR -> Real
+pairRoundTrip :: PairBR -> PairBR
+
+makeTriple :: Bool -> Int -> Real -> TripleBIR
+getTripleCount :: TripleBIR -> Int
+getTripleValue :: TripleBIR -> Real
+tripleRoundTrip :: TripleBIR -> TripleBIR
+
+source Cpp from "foo.hpp"
+  ( "makePair"
+  , "getPairFlag"
+  , "getPairValue"
+  , "pairRoundTrip"
+  , "makeTriple"
+  , "getTripleCount"
+  , "getTripleValue"
+  , "tripleRoundTrip"
+  )
+
+testMakePair :: PairBR
+testMakePair = makePair True 3.14
+
+testGetPairFlag :: Bool
+testGetPairFlag = getPairFlag (makePair True 3.14)
+
+testGetPairValue :: Real
+testGetPairValue = getPairValue (makePair True 3.14)
+
+testPairRoundTrip :: PairBR
+testPairRoundTrip = pairRoundTrip (makePair False 2.718)
+
+testMakeTriple :: TripleBIR
+testMakeTriple = makeTriple True 42 3.14
+
+testGetTripleCount :: Int
+testGetTripleCount = getTripleCount (makeTriple True 42 3.14)
+
+testGetTripleValue :: Real
+testGetTripleValue = getTripleValue (makeTriple True 42 3.14)
+
+testTripleRoundTrip :: TripleBIR
+testTripleRoundTrip = tripleRoundTrip (makeTriple False 99 1.618)

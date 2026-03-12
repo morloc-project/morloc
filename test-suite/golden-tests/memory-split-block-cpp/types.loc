@@ -1,0 +1,8 @@
+module types (*)
+
+type Py => Bool = "bool"
+type Py => Int = "int"
+type Py => Str = "str"
+type Cpp => Bool = "bool"
+type Cpp => Int = "int"
+type Cpp => Str = "std::string"

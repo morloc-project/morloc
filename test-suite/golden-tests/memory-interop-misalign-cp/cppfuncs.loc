@@ -1,0 +1,17 @@
+module (*)
+
+import .types
+
+cMakeOptReal :: Real -> ?Real
+cFromNullReal :: Real -> ?Real -> Real
+cDoubleOptReal :: ?Real -> ?Real
+cMakePair :: Bool -> Real -> PairBR
+cGetPairValue :: PairBR -> Real
+
+source Cpp from "foo.hpp"
+  ( "cMakeOptReal"
+  , "cFromNullReal"
+  , "cDoubleOptReal"
+  , "cMakePair"
+  , "cGetPairValue"
+  )

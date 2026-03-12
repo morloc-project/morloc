@@ -1,0 +1,8 @@
+{"flag":true,"value":3.14}
+true
+3.14
+{"flag":false,"value":2.718}
+{"flag":true,"count":42,"value":3.14}
+42
+3.14
+{"flag":false,"count":99,"value":1.618}

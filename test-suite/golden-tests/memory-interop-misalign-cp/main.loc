@@ -1,0 +1,34 @@
+-- Tests misaligned data crossing C++ <-> Python boundary through shared memory.
+-- ?Real and {flag :: Bool, value :: Real} force misaligned reads/writes
+-- in the voidstar serialization format when crossing language boundaries.
+
+module main
+  ( testOptRealCppToPy
+  , testOptRealPyToCpp
+  , testRecordCppToPy
+  , testRecordPyToCpp
+  , testOptRealChain
+  , testRecordChain
+  )
+
+import .types
+import .cppfuncs
+import .pyfuncs
+
+testOptRealCppToPy :: Real
+testOptRealCppToPy = pFromNullReal 0.0 (cMakeOptReal 3.14)
+
+testOptRealPyToCpp :: Real
+testOptRealPyToCpp = cFromNullReal 0.0 (pMakeOptReal 3.14)
+
+testRecordCppToPy :: Real
+testRecordCppToPy = pGetPairValue (cMakePair True 2.718)
+
+testRecordPyToCpp :: Real
+testRecordPyToCpp = cGetPairValue (pMakePair True 2.718)
+
+testOptRealChain :: Real
+testOptRealChain = pFromNullReal 0.0 (cDoubleOptReal (pMakeOptReal 1.5))
+
+testRecordChain :: Real
+testRecordChain = cGetPairValue (pDoublePairValue (cMakePair False 1.5))

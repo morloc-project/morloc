@@ -1,0 +1,14 @@
+module (*)
+
+type Py => Bool = "bool"
+type Py => Int = "int"
+type Py => Real = "float"
+type Cpp => Bool = "bool"
+type Cpp => Int = "int"
+type Cpp => Real = "double"
+
+record PairBR where
+  flag :: Bool
+  value :: Real
+record Cpp => PairBR = "pair_br_t"
+record Py => PairBR = "dict"
