@@ -319,6 +319,8 @@ static size_t msg_size_array(const Schema* schema, mpack_tokbuf_t* tokbuf, const
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
     size_t array_length = token->length;
     size_t size = sizeof(Array);
+    // worst-case cursor alignment padding for element data
+    size += schema_alignment(schema) - 1;
     for(size_t i = 0; i < array_length; i++){
         size += msg_size_r(schema, tokbuf, buf_ptr, buf_remaining, token);
     }
@@ -531,6 +533,9 @@ static EXIT_CODE parse_array(
     size_t element_size = schema->width;
     mpack_read(tokbuf, buf_ptr, buf_remaining, token);
     result->size = token->length;
+
+    // align cursor for element data placement
+    *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, schema_alignment(schema));
 
     result->data = abs2rel(*cursor, &CHILD_ERRMSG);
     RAISE_IF(result->data == RELNULL, "\n%s", CHILD_ERRMSG)

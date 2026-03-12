@@ -106,6 +106,31 @@ T mpk_unpack(const std::vector<char>& packed_data, const std::string& schema_str
 
 
 // ============================================================
+// schema_alignment (C++ mirror of the C function in schema.c)
+// ============================================================
+
+inline size_t schema_alignment_cpp(const Schema* schema) {
+    switch (schema->type) {
+        case MORLOC_NIL: case MORLOC_BOOL: case MORLOC_SINT8: case MORLOC_UINT8: return 1;
+        case MORLOC_SINT16: case MORLOC_UINT16: return 2;
+        case MORLOC_SINT32: case MORLOC_UINT32: case MORLOC_FLOAT32: return 4;
+        case MORLOC_SINT64: case MORLOC_UINT64: case MORLOC_FLOAT64:
+        case MORLOC_STRING: case MORLOC_ARRAY: return alignof(size_t);
+        case MORLOC_TUPLE: case MORLOC_MAP: {
+            size_t max_align = 1;
+            for (size_t i = 0; i < schema->size; i++) {
+                size_t a = schema_alignment_cpp(schema->parameters[i]);
+                if (a > max_align) max_align = a;
+            }
+            return max_align;
+        }
+        case MORLOC_OPTIONAL: return schema_alignment_cpp(schema->parameters[0]);
+        default: return alignof(size_t);
+    }
+}
+
+
+// ============================================================
 // get_shm_size
 // ============================================================
 
@@ -126,6 +151,8 @@ size_t get_shm_size(const Schema* schema, const Primitive& data) {
 template<typename T>
 size_t get_shm_size(const Schema* schema, const std::vector<T>& data) {
     size_t total_size = schema->width;
+    // worst-case cursor alignment padding for element data
+    total_size += schema_alignment_cpp(schema->parameters[0]) - 1;
     switch(schema->parameters[0]->type){
         case MORLOC_NIL:
         case MORLOC_BOOL:
@@ -309,6 +336,8 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::vec
         result->data = RELNULL;
         return dest;
     }
+    // align cursor for element data placement
+    *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), schema_alignment_cpp(schema->parameters[0])));
     result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
     *cursor = static_cast<char*>(*cursor) + data.size() * schema->parameters[0]->width;
     char* start = (char*)cpp_rel2abs(result->data);
@@ -328,6 +357,8 @@ void* toAnything_seq(void* dest, void** cursor, const Schema* schema, const Cont
         result->data = RELNULL;
         return dest;
     }
+    // align cursor for element data placement
+    *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), schema_alignment_cpp(schema->parameters[0])));
     result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
     *cursor = static_cast<char*>(*cursor) + size * schema->parameters[0]->width;
     char* start = (char*)cpp_rel2abs(result->data);

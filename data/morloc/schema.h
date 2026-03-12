@@ -51,6 +51,7 @@ typedef struct Schema {
 
 
 bool schema_is_fixed_width(const Schema* schema);
+size_t schema_alignment(const Schema* schema);
 size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG);
 
 // The voidstar representation of variable length data

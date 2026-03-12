@@ -62,6 +62,8 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
             {
                 size_t length = (size_t)LENGTH(obj);
                 size = sizeof(Array);
+                // worst-case cursor alignment padding for element data
+                size += schema_alignment(schema->parameters[0]) - 1;
                 const char* str;
 
                 switch (TYPEOF(obj)) {
@@ -281,6 +283,8 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                 Array* array = (Array*)dest;
                 array->size = length;  // Do not include null terminator
                 if(length > 0){
+                    // align cursor for element data placement
+                    *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, schema_alignment(schema->parameters[0]));
                     array->data = R_TRY(abs2rel, *cursor);
                     absptr_t tmp_ptr = R_TRY(rel2abs, array->data);
                     memcpy(tmp_ptr, str, array->size);
@@ -300,6 +304,8 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                 break;
             }
 
+            // align cursor for element data placement
+            *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, schema_alignment(schema->parameters[0]));
             array->data = R_TRY(abs2rel, *cursor);
             Schema* element_schema = schema->parameters[0];
             char* start;

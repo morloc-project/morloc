@@ -181,6 +181,8 @@ size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG){
                 uint8_t* element_data = TRY((uint8_t*)rel2abs, array->data);
 
                 size = sizeof(Array);
+                // worst-case cursor alignment padding
+                size += schema_alignment(schema->parameters[0]) - 1;
 
                 if (schema_is_fixed_width(schema)){
                     size += element_width * array->size;
@@ -229,7 +231,7 @@ size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG){
 }
 
 // Return the natural alignment requirement for a schema type (mirrors C ABI rules).
-static size_t schema_alignment(const Schema* schema) {
+size_t schema_alignment(const Schema* schema) {
     switch (schema->type) {
         case MORLOC_NIL:
         case MORLOC_BOOL:

@@ -409,6 +409,8 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
         
             {
                 ssize_t required_size = 0;
+                // worst-case cursor alignment padding for element data
+                required_size += (ssize_t)(schema_alignment(schema->parameters[0]) - 1);
 
                 if (PyList_Check(obj)) {
                     Py_ssize_t list_size = PyList_Size(obj);
@@ -645,6 +647,9 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                     result->data = RELNULL;
                     break;
                 }
+
+                // align cursor for element data placement
+                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, schema_alignment(schema->parameters[0]));
 
                 result->data = PyTRY(abs2rel, *cursor);
 
