@@ -513,7 +513,7 @@ realizeWithRegistry registry s0 = do
             (LetS v e1 e2) -> LetS v <$> f lang e1 <*> f lang e2
             (LetBndS v) -> return (LetBndS v)
             (CallS v) -> return (CallS v)
-            (IfS c t e) -> IfS <$> f lang c <*> f lang t <*> f lang e
+            (IfS c t elseE) -> IfS <$> f lang c <*> f lang t <*> f lang elseE
             (DoBlockS x) -> DoBlockS <$> f lang x
             (EvalS x) -> EvalS <$> f lang x
             (CoerceS c x) -> CoerceS c <$> f lang x
@@ -664,7 +664,7 @@ containsCallS target (AnnoS _ _ e) = go e
     go (VarS _ (One x)) = containsCallS target x
     go (LetS _ e1 e2) = containsCallS target e1 || containsCallS target e2
     go (LetBndS _) = False
-    go (IfS c t e) = containsCallS target c || containsCallS target t || containsCallS target e
+    go (IfS c t e') = containsCallS target c || containsCallS target t || containsCallS target e'
     go (DoBlockS x) = containsCallS target x
     go (EvalS x) = containsCallS target x
     go (CoerceS _ x) = containsCallS target x

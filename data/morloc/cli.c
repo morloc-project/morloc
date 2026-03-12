@@ -154,7 +154,7 @@ static int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t ba
             {
                 uint8_t tag = *((uint8_t*)data);
                 if (tag != 0) {
-                    TRY(adjust_voidstar_relptrs, (char*)data + 1, schema->parameters[0], base_rel);
+                    TRY(adjust_voidstar_relptrs, (char*)data + schema->offsets[0], schema->parameters[0], base_rel);
                 }
             }
             break;

@@ -465,6 +465,13 @@ mkImplicitMain es = do
 
 desugarExpr :: Loc CstExpr -> D ExprI
 -- Variables and literals
+desugarExpr (Loc sp (CLabeledVarE label v)) = do
+  moduleConfig <- State.gets dsModuleConfig
+  case Map.lookup label (moduleConfigLabeledGroups moduleConfig) of
+    Just config -> freshExprSpan sp (VarE config v)
+    Nothing -> dfail (startPos sp)
+      ("Undefined label '" ++ T.unpack label
+       ++ "': no matching entry in module config labeled-groups")
 desugarExpr (Loc sp (CVarE v)) = freshExprSpan sp (VarE defaultValue v)
 desugarExpr (Loc sp (CIntE n)) = freshExprSpan sp (IntE n)
 desugarExpr (Loc sp (CRealE n)) = freshExprSpan sp (RealE n)

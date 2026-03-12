@@ -67,6 +67,9 @@ typedef struct config_s {
 // a pid of 0 means unused, -1 means already reaped
 pid_t pids[MAX_DAEMONS] = { 0 };
 
+// exit/signal statuses saved by sigchld_handler for crash diagnostics
+int exit_statuses[MAX_DAEMONS] = { 0 };
+
 // process group IDs of language daemons - never modified by signal handler
 // used in clean_exit() to kill entire process groups even if the leader is already dead
 pid_t pgids[MAX_DAEMONS] = { 0 };
@@ -89,6 +92,7 @@ void sigchld_handler(int sig) {
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
         for (size_t i = 0; i < MAX_DAEMONS; i++) {
             if (pids[i] == pid) {
+                exit_statuses[i] = status;
                 pids[i] = -1; // mark as reaped
                 break;
             }
@@ -445,6 +449,7 @@ void run_command(
     char** arg_schema_strs,
     const char* return_schema_str,
     morloc_socket_t root_socket,
+    size_t pool_index,
     config_t config
 ){
     char* errmsg = NULL;
@@ -467,6 +472,24 @@ void run_command(
 
     uint8_t* result_packet = send_and_receive_over_socket(root_socket.socket_filename, call_packet, &errmsg);
     if(errmsg != NULL){
+        // Check if the pool process crashed
+        if (pool_index < MAX_DAEMONS && pids[pool_index] == -1) {
+            int st = exit_statuses[pool_index];
+            if (WIFSIGNALED(st)) {
+                ERROR("Pool process crashed with signal %d (%s).\n"
+                      "Check stderr output above for details.\n"
+                      "Communication error: %s",
+                      WTERMSIG(st), strsignal(WTERMSIG(st)), errmsg)
+            } else if (WIFEXITED(st)) {
+                ERROR("Pool process exited with status %d.\n"
+                      "Check stderr output above for details.\n"
+                      "Communication error: %s",
+                      WEXITSTATUS(st), errmsg)
+            }
+            ERROR("Pool process died unexpectedly.\n"
+                  "Check stderr output above for details.\n"
+                  "Communication error: %s", errmsg)
+        }
         ERROR("Daemon is unresponsive:\n%s", errmsg);
     }
 
@@ -1397,7 +1420,7 @@ void dispatch_command(
         run_pure_command(cmd->expr, args, cmd->arg_schemas, cmd->return_schema, *config);
     } else {
         run_command(cmd->mid, args, cmd->arg_schemas, cmd->return_schema,
-                    sockets[cmd->pool_index], *config);
+                    sockets[cmd->pool_index], cmd->pool_index, *config);
     }
 }
 

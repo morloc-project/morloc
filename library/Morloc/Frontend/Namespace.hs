@@ -106,6 +106,7 @@ copyState oldIndex newIndex = do
       , stateManifoldLang = stateManifoldLang s
       , stateManifoldEffects = stateManifoldEffects s
       , stateProjectRoot = stateProjectRoot s
+      , stateEvalMode = stateEvalMode s
       }
   where
     updateGMap g = case GMap.yIsX oldIndex newIndex g of

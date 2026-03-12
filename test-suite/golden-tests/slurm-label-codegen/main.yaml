@@ -1,0 +1,4 @@
+labeled-groups:
+  heavy:
+    cache: false
+    benchmark: false

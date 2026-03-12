@@ -104,7 +104,7 @@ forceExportThunks cidx t (PolyHead lang midx args body) =
     goExpr ids (PolyList v ti es) = PolyList v ti (map (goExpr ids) es)
     goExpr ids (PolyTuple v es) = PolyTuple v (map (fmap (goExpr ids)) es)
     goExpr ids (PolyRecord o v ps rs) = PolyRecord o v ps (map (fmap (fmap (goExpr ids))) rs)
-    goExpr ids (PolyIf c t e) = PolyIf (goExpr ids c) (goExpr ids t) (goExpr ids e)
+    goExpr ids (PolyIf c t' e) = PolyIf (goExpr ids c) (goExpr ids t') (goExpr ids e)
     goExpr ids (PolyRemoteInterface l ti is rf e) = PolyRemoteInterface l ti is rf (goExpr ids e)
     goExpr _ e = e
 
@@ -540,7 +540,7 @@ expressPolyExpr _ pl pc (AnnoS (Idx i t) c e@(NamS _)) = do
     (Just t') -> expressPolyExprWrap pl pc (AnnoS (Idx i t') c e)
     Nothing -> error "Expected a record type"
 -- Recursive call used as a value (not applied via AppS)
-expressPolyExpr _ parentLang _ (AnnoS (Idx i c) (Idx cidx _, _) (CallS v)) = do
+expressPolyExpr _ parentLang _ (AnnoS (Idx i c) (Idx _cidx _, _) (CallS v)) = do
   (mid, crossLang) <- lookupRecursiveTarget parentLang v
   -- Strip EffectT from return type (serial manifolds force thunks)
   case c of
@@ -573,7 +573,7 @@ expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _, _) (CoerceS coercio
   let innerType = unapplyCoercion coercion t
   x' <- expressPolyExprWrap parentLang (Idx cidx innerType) x
   return $ PolyCoerce coercion (Idx cidx t) x'
-expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (EvalS x)) = do
+expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _lang, _) (EvalS x)) = do
   -- Always use pushForceIntoRemote: if the inner expression contains a
   -- PolyRemoteInterface (cross-language call), it strips EffectT Set.empty so the remote
   -- pool forces the thunk and serializes the concrete result. If no

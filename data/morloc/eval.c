@@ -765,7 +765,7 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
 
         case MORLOC_X_READ: {
             // @read: deserialize JSON string to typed data, return optional
-            // schema is ?T (MORLOC_OPTIONAL), layout: 1 byte tag + inner value at offset 1
+            // schema is ?T (MORLOC_OPTIONAL), layout: tag byte + aligned inner value
             morloc_expression_t* child = expr->expr.unary_expr;
             absptr_t child_result = TRY(morloc_eval_r, child, NULL, 0, bndvars);
             // Extract string from voidstar Array
@@ -782,8 +782,8 @@ static absptr_t morloc_eval_r(morloc_expression_t* expr, absptr_t dest, size_t w
             Schema* inner_schema = schema->parameters[0];
             if (json_str != NULL) {
                 char* parse_errmsg = NULL;
-                // Parse directly into dest+1 (the inner value slot of the optional)
-                void* parsed = (void*)read_json_with_schema(opt_dest + 1, json_str, inner_schema, &parse_errmsg);
+                // Parse directly into the inner value slot of the optional
+                void* parsed = (void*)read_json_with_schema(opt_dest + schema->offsets[0], json_str, inner_schema, &parse_errmsg);
                 free(json_str);
                 if (parse_errmsg != NULL) {
                     free(parse_errmsg);

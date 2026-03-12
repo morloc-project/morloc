@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.65.0
+version:          0.66.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description: |
@@ -96,7 +96,6 @@ dependencies:
   - haskell-src-meta
   - http-conduit
   - http-types
-  - megaparsec
   - mtl
   - parsec
   - partial-order

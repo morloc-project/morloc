@@ -1,0 +1,8 @@
+module main (crashme)
+
+source Cpp from "foo.hpp" ("cpp_crash")
+
+type Cpp => Int = "int"
+
+cpp_crash :: Int -> Int
+crashme = cpp_crash

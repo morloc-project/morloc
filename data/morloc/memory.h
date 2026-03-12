@@ -96,6 +96,12 @@ typedef struct block_header_s {
     size_t size;
 } block_header_t;
 
+// All block data sizes must be rounded up to this alignment so that the
+// next block_header_t after (header + data) lands at a correctly aligned
+// address. sizeof(block_header_t) is already a multiple of BLOCK_ALIGN.
+#define BLOCK_ALIGN _Alignof(block_header_t)
+#define ALIGN_UP(x, a) (((x) + (a) - 1) & ~((a) - 1))
+
 #ifdef __cplusplus
 static_assert(
 #else

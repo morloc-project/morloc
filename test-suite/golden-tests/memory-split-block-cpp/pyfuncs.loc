@@ -1,0 +1,9 @@
+module pyfuncs (*)
+
+import types
+
+pNotBool :: Bool -> Bool
+pAppendStr :: Str -> Str -> Str
+pBoolToStr :: Bool -> Str
+
+source Py from "foo.py" ("pNotBool", "pAppendStr", "pBoolToStr")

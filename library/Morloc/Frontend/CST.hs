@@ -98,6 +98,7 @@ data CstExpr
   | CLamE [EVar] (Loc CstExpr)
   | CLetE [(EVar, Loc CstExpr)] (Loc CstExpr)
   | CBopE (Loc CstExpr) Located (Loc CstExpr)
+  | CLabeledVarE Text EVar  -- label:var (e.g., large:mean)
   | CVarE EVar
   | CIntE Integer
   | CRealE Scientific

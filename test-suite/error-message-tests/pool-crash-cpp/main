@@ -1,0 +1,4 @@
+#!/bin/sh
+exec morloc-nexus "$0" "$@"
+### MANIFEST ###
+{"version":1,"name":"main","build_dir":"/home/z/projects/morloc-core/morloc-workspace/compiler/morloc/test-suite/error-message-tests/pool-crash-cpp","build_time":1773294321,"pools":[{"lang":"cpp","exec":["pools/main/pool-cpp.out"],"socket":"pipe-cpp"}],"commands":[{"name":"crashme","type":"remote","mid":1,"pool":0,"needed_pools":[0],"arg_schemas":["<int>i4"],"return_schema":"<int>i4","desc":[],"return_type":"Int","return_desc":[],"args":[{"kind":"pos","metavar":null,"type_desc":"Int","quoted":false,"desc":[]}],"group":null}],"groups":[]}

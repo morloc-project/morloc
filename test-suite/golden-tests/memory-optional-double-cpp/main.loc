@@ -1,0 +1,48 @@
+-- Tests memory alignment of optional types.
+-- ?Real stores a 1-byte tag at offset 0, then an 8-byte double at offset 1.
+-- On strict-alignment platforms, this causes SIGBUS.
+
+module main
+  ( testOptRealValue
+  , testOptRealNull
+  , testOptRealRoundTrip
+  , testOptIntValue
+  , testOptIntNull
+  , testOptIntRoundTrip
+  )
+
+type Cpp => Bool = "bool"
+type Cpp => Int = "int"
+type Cpp => Real = "double"
+
+toNull a :: a -> ?a
+isNull a :: ?a -> Bool
+fromNull a :: a -> ?a -> a
+doubleOptReal :: ?Real -> ?Real
+addOptInt :: ?Int -> ?Int -> ?Int
+
+source Cpp from "foo.hpp"
+  ( "toNull"
+  , "isNull"
+  , "fromNull"
+  , "doubleOptReal"
+  , "addOptInt"
+  )
+
+testOptRealValue :: ?Real
+testOptRealValue = toNull 3.14
+
+testOptRealNull :: Bool
+testOptRealNull = isNull (toNull 3.14)
+
+testOptRealRoundTrip :: Real
+testOptRealRoundTrip = fromNull 0.0 (doubleOptReal (toNull 1.5))
+
+testOptIntValue :: ?Int
+testOptIntValue = toNull 42
+
+testOptIntNull :: Bool
+testOptIntNull = isNull (toNull 42)
+
+testOptIntRoundTrip :: Int
+testOptIntRoundTrip = fromNull 0 (addOptInt (toNull 10) (toNull 20))

@@ -1,0 +1,6 @@
+{"flag":true,"value":3.14}
+{"flag":false,"value":0}
+6.6
+9.99
+null
+{"flag":true,"value":2.5}

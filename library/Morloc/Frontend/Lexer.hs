@@ -285,6 +285,17 @@ lexIdent pos input st =
                                    : Located pos tok txt
                                    : lsTokens st
                     }
+        -- Label colon: label:id (no space)
+        (TokLowerName _, ':' : c : rest')
+          | isLower c || c == '_' ->
+              let colonPos = advanceCol pos len
+               in Right st
+                    { lsInput = c : rest'
+                    , lsPos = advanceCol colonPos 1
+                    , lsTokens = Located colonPos TokLabelColon ":"
+                                   : Located pos tok txt
+                                   : lsTokens st
+                    }
         _ -> Right
               st
                 { lsInput = rest

@@ -1,5 +1,13 @@
 #include "morloc.h"
 
+// Safe string copy: always null-terminates, no truncation warnings.
+static void safe_strcpy(char* dst, size_t dst_size, const char* src) {
+    size_t src_len = strlen(src);
+    size_t copy_len = (src_len < dst_size - 1) ? src_len : dst_size - 1;
+    memcpy(dst, src, copy_len);
+    dst[copy_len] = '\0';
+}
+
 // Global state
 static _Thread_local size_t current_volume = 0;
 static char common_basename[MAX_FILENAME_SIZE];
@@ -14,8 +22,7 @@ static pthread_mutex_t alloc_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void shm_set_fallback_dir(const char* dir) {
     if (dir) {
-        strncpy(fallback_dir, dir, MAX_FILENAME_SIZE - 1);
-        fallback_dir[MAX_FILENAME_SIZE - 1] = '\0';
+        safe_strcpy(fallback_dir, sizeof(fallback_dir), dir);
     }
 }
 
@@ -166,8 +173,7 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ER
     // Set the global basename, this will be used to name future volumes.
     // Skip if already pointing to common_basename (called from volume expansion).
     if (shm_basename != common_basename) {
-        strncpy(common_basename, shm_basename, MAX_FILENAME_SIZE - 1);
-        common_basename[MAX_FILENAME_SIZE - 1] = '\0';
+        safe_strcpy(common_basename, sizeof(common_basename), shm_basename);
     }
 
     // Try POSIX shared memory first (/dev/shm), fall back to file-backed
@@ -198,8 +204,7 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ER
             full_size = (size_t)sb.st_size;
         }
         if (fd >= 0) {
-            strncpy(volume_label, shm_name, MAX_FILENAME_SIZE - 1);
-            volume_label[MAX_FILENAME_SIZE - 1] = '\0';
+            safe_strcpy(volume_label, sizeof(volume_label), shm_name);
         }
     }
 
@@ -235,8 +240,7 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ER
             full_size = (size_t)sb.st_size;
         }
         // Store full path so shclose/shopen can distinguish file-backed volumes
-        strncpy(volume_label, file_path, MAX_FILENAME_SIZE - 1);
-        volume_label[MAX_FILENAME_SIZE - 1] = '\0';
+        safe_strcpy(volume_label, sizeof(volume_label), file_path);
     }
 
     // Map the volume into the process's address space
@@ -260,8 +264,7 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ER
     if (created) {
         // Initialize the shared memory structure
         shm->magic = SHM_MAGIC;
-        strncpy(shm->volume_name, volume_label, sizeof(shm->volume_name) - 1);
-        shm->volume_name[sizeof(shm->volume_name) - 1] = '\0';
+        safe_strcpy(shm->volume_name, sizeof(shm->volume_name), volume_label);
         shm->volume_index = volume_index;
         shm->relative_offset = 0;
 
@@ -377,7 +380,7 @@ static bool shclose_unlocked(ERRMSG) {
 
         // Get the name of the shared memory object
         char shm_name[MAX_FILENAME_SIZE];
-        strncpy(shm_name, shm->volume_name, MAX_FILENAME_SIZE);
+        safe_strcpy(shm_name, sizeof(shm_name), shm->volume_name);
 
         // Destroy the rwlock before unmapping
         pthread_rwlock_destroy(&shm->rwlock);
@@ -679,6 +682,8 @@ static void* shmalloc_unlocked(size_t size, ERRMSG) {
 
     RAISE_IF(size == 0, "Cannot (or will not) allocate 0-length block")
 
+    size = ALIGN_UP(size, BLOCK_ALIGN);
+
     shm_t* shm = NULL;
     // find a block with sufficient free space
     block_header_t* blk = find_free_block(size, &shm, &CHILD_ERRMSG);
@@ -729,6 +734,8 @@ static void* shrealloc_unlocked(void* ptr, size_t size, ERRMSG) {
     PTR_RETURN_SETUP(void)
 
     RAISE_IF(size == 0, "Cannot reallocate to size 0")
+
+    size = ALIGN_UP(size, BLOCK_ALIGN);
 
     // Match realloc(NULL, size) semantics
     if (ptr == NULL){

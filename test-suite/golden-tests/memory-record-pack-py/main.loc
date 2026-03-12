@@ -1,0 +1,75 @@
+-- Tests memory alignment of record field packing in Python.
+-- {flag :: Bool, value :: Real} puts Real at offset 1 (needs 8-byte alignment).
+-- {flag :: Bool, count :: Int, value :: Real} puts Int at offset 1, Real at offset 5.
+-- On strict-alignment platforms, misaligned field access causes SIGBUS.
+
+module main
+  ( testMakePair
+  , testGetPairFlag
+  , testGetPairValue
+  , testPairRoundTrip
+  , testMakeTriple
+  , testGetTripleCount
+  , testGetTripleValue
+  , testTripleRoundTrip
+  )
+
+type Py => Bool = "bool"
+type Py => Int = "int"
+type Py => Real = "float"
+
+record PairBR where
+  flag :: Bool
+  value :: Real
+record Py => PairBR = "dict"
+
+record TripleBIR where
+  flag :: Bool
+  count :: Int
+  value :: Real
+record Py => TripleBIR = "dict"
+
+makePair :: Bool -> Real -> PairBR
+getPairFlag :: PairBR -> Bool
+getPairValue :: PairBR -> Real
+pairRoundTrip :: PairBR -> PairBR
+
+makeTriple :: Bool -> Int -> Real -> TripleBIR
+getTripleCount :: TripleBIR -> Int
+getTripleValue :: TripleBIR -> Real
+tripleRoundTrip :: TripleBIR -> TripleBIR
+
+source Py from "foo.py"
+  ( "makePair"
+  , "getPairFlag"
+  , "getPairValue"
+  , "pairRoundTrip"
+  , "makeTriple"
+  , "getTripleCount"
+  , "getTripleValue"
+  , "tripleRoundTrip"
+  )
+
+testMakePair :: PairBR
+testMakePair = makePair True 3.14
+
+testGetPairFlag :: Bool
+testGetPairFlag = getPairFlag (makePair True 3.14)
+
+testGetPairValue :: Real
+testGetPairValue = getPairValue (makePair True 3.14)
+
+testPairRoundTrip :: PairBR
+testPairRoundTrip = pairRoundTrip (makePair False 2.718)
+
+testMakeTriple :: TripleBIR
+testMakeTriple = makeTriple True 42 3.14
+
+testGetTripleCount :: Int
+testGetTripleCount = getTripleCount (makeTriple True 42 3.14)
+
+testGetTripleValue :: Real
+testGetTripleValue = getTripleValue (makeTriple True 42 3.14)
+
+testTripleRoundTrip :: TripleBIR
+testTripleRoundTrip = tripleRoundTrip (makeTriple False 99 1.618)

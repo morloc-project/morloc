@@ -57,7 +57,7 @@ ldDoBlockBlock: "(function(){\n{{body}}\n})"
 ldPartialTemplate: "function({{bound_args}}) { {{fn}}({{all_args}}) }"
 ldImportTemplate: "source(\"{{path}}\")"
 ldSocketPathTemplate: "paste0(global_state$tmpdir, \"/\", {{socket}})"
-ldResourcePackTemplate: "list(mem={{mem}}L, time={{time}}L, cpus={{cpus}}L, gpus={{gpus}}L)"
+ldResourcePackTemplate: "list(memory={{mem}}L, time={{time}}L, cpus={{cpus}}L, gpus={{gpus}}L)"
 ldReturnTemplate: "return({{expr}})"
 ldFuncDefHeader: "{{name}} <- function({{args}})"
 ldBlockStyle: braces

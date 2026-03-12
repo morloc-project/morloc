@@ -547,10 +547,11 @@ static relptr_t write_voidstar_binary_binder_r(
         case MORLOC_OPTIONAL:
             {
                 uint8_t tag = *((const uint8_t*)data);
-                TRY(write_binary_fd, fd, (char*)&tag, 1);
+                // Write tag + alignment padding from memory
+                TRY(write_binary_fd, fd, (char*)data, schema->offsets[0]);
                 if (tag != 0) {
                     data_index = TRY(write_voidstar_binary_binder_r,
-                        fd, (const char*)data + 1, schema->parameters[0], data_index);
+                        fd, (const char*)data + schema->offsets[0], schema->parameters[0], data_index);
                 } else {
                     char* zeros = (char*)calloc(1, schema->parameters[0]->width);
                     TRY_WITH(free(zeros), write_binary_fd, fd, zeros, schema->parameters[0]->width);
@@ -602,7 +603,7 @@ static relptr_t write_voidstar_binary_data_r(
                 uint8_t tag = *((const uint8_t*)data);
                 if (tag != 0) {
                     data_index = TRY(write_voidstar_binary_data_r,
-                        fd, (const char*)data + 1, schema->parameters[0], data_index);
+                        fd, (const char*)data + schema->offsets[0], schema->parameters[0], data_index);
                 }
             }
             break;

@@ -14,7 +14,6 @@ to code generation.
 -}
 module Morloc.CodeGenerator.Reduce (reduce) where
 
-import Control.Monad.IO.Class (liftIO)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime)

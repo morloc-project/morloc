@@ -1,0 +1,17 @@
+module (*)
+
+import .types
+
+pMakeOptReal :: Real -> ?Real
+pFromNullReal :: Real -> ?Real -> Real
+pMakePair :: Bool -> Real -> PairBR
+pGetPairValue :: PairBR -> Real
+pDoublePairValue :: PairBR -> PairBR
+
+source Py from "foo.py"
+  ( "pMakeOptReal"
+  , "pFromNullReal"
+  , "pMakePair"
+  , "pGetPairValue"
+  , "pDoublePairValue"
+  )

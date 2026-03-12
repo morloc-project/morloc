@@ -410,7 +410,7 @@ lowerNativeExpr ::
 -- Binary operator: emit (lhs op rhs) instead of function call
 lowerNativeExpr _ _ (AppExeN_ _ (SrcCallP src) _ (map snd -> [lhs, rhs]))
   | srcOperator src =
-      return $ mergePoolDocs (\[l, r] -> parens (l <+> pretty (unSrcName (srcName src)) <+> r)) [lhs, rhs]
+      return $ mergePoolDocs (\xs -> case xs of [l, r] -> parens (l <+> pretty (unSrcName (srcName src)) <+> r); _ -> error "binary operator requires exactly 2 args") [lhs, rhs]
 lowerNativeExpr cfg _ (AppExeN_ _ (SrcCallP src) qs (map snd -> es)) = do
   templateArgs <- lcTemplateArgs cfg qs
   let handleFunctionArgs ts =

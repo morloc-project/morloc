@@ -1,0 +1,36 @@
+-- Tests split_block header alignment in shared memory allocator.
+-- When shmalloc(N) where N is not 8-aligned, the next block_header_t
+-- gets placed at a misaligned address. The _Atomic(unsigned int) reference_count
+-- and size_t size fields in the header get misaligned, causing bus errors on
+-- atomic operations on strict-alignment platforms.
+--
+-- Strategy: Chain cross-language calls with odd-sized intermediates (Bool = 1 byte,
+-- short strings) to force multiple shared memory allocations and block splits
+-- at non-8-byte boundaries.
+
+module main
+  ( testBoolChain
+  , testShortStrChain
+  , testMixedChain
+  , testMultiHop
+  )
+
+import types
+import cppfuncs
+import pyfuncs
+
+-- Bool is 1 byte; crossing languages forces serialization through shared memory
+testBoolChain :: Bool
+testBoolChain = cNotBool (pNotBool (cNotBool True))
+
+-- Short strings have odd byte counts, forcing odd-sized allocations
+testShortStrChain :: Str
+testShortStrChain = pAppendStr (cAppendStr "ab" "c") "d"
+
+-- Mix Bool and Str across languages to create varied allocation sizes
+testMixedChain :: Str
+testMixedChain = cBoolToStr (pNotBool (cNotBool False))
+
+-- Multiple hops to increase chance of hitting a split_block boundary
+testMultiHop :: Int
+testMultiHop = cStrLen (pAppendStr (cAppendStr (pBoolToStr True) "x") "y")

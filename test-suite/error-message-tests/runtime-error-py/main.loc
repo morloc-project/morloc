@@ -1,0 +1,8 @@
+module main (failme)
+
+source Py from "foo.py" ("py_fail")
+
+type Py => Int = "int"
+
+py_fail :: Int -> Int
+failme = py_fail

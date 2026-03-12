@@ -1,0 +1,65 @@
+-- Tests compound misalignment from nested containers in Python.
+-- ?PairBR: optional wrapping a record with misaligned fields
+-- [PairBR]: array of records whose element width is misaligned
+-- RecordWithOpt: record containing a ?Real field (misaligned optional inside record)
+
+module main
+  ( testOptRecord
+  , testOptRecordNull
+  , testListRecords
+  , testRecordWithOpt
+  , testRecordWithOptNull
+  , testNestedRoundTrip
+  )
+
+type Py => Bool = "bool"
+type Py => Int = "int"
+type Py => Real = "float"
+type Py => List a = "list" a
+
+record PairBR where
+  flag :: Bool
+  value :: Real
+record Py => PairBR = "dict"
+
+record RecordWithOpt where
+  flag :: Bool
+  opt :: ?Real
+record Py => RecordWithOpt = "dict"
+
+makeOptRecord :: Bool -> Real -> ?PairBR
+fromNullRecord :: PairBR -> ?PairBR -> PairBR
+sumRecordValues :: [PairBR] -> Real
+makeRecordWithOpt :: Bool -> ?Real -> RecordWithOpt
+getRecordOpt :: RecordWithOpt -> ?Real
+nestedRoundTrip :: ?PairBR -> ?PairBR
+
+source Py from "foo.py"
+  ( "makeOptRecord"
+  , "fromNullRecord"
+  , "sumRecordValues"
+  , "makeRecordWithOpt"
+  , "getRecordOpt"
+  , "nestedRoundTrip"
+  )
+
+toNull a :: a -> ?a
+source Py from "foo.py" ("toNull")
+
+testOptRecord :: PairBR
+testOptRecord = fromNullRecord {flag = False, value = 0.0} (makeOptRecord True 3.14)
+
+testOptRecordNull :: PairBR
+testOptRecordNull = fromNullRecord {flag = False, value = 0.0} Null
+
+testListRecords :: Real
+testListRecords = sumRecordValues [{flag = True, value = 1.1}, {flag = False, value = 2.2}, {flag = True, value = 3.3}]
+
+testRecordWithOpt :: ?Real
+testRecordWithOpt = getRecordOpt (makeRecordWithOpt True (toNull 9.99))
+
+testRecordWithOptNull :: ?Real
+testRecordWithOptNull = getRecordOpt (makeRecordWithOpt False Null)
+
+testNestedRoundTrip :: PairBR
+testNestedRoundTrip = fromNullRecord {flag = False, value = 0.0} (nestedRoundTrip (makeOptRecord True 2.5))

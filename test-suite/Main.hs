@@ -84,6 +84,7 @@ main = do
       , golden "claude-test-14" "claude-test-14"
       , golden "claude-test-15" "claude-test-15"
       , golden "claude-test-16" "claude-test-16"
+      , golden "slurm-label-codegen" "slurm-label-codegen"
       , golden "let-crosslang" "let-crosslang"
       , golden "functional-data-1" "functional-data-1"
       , golden "functional-data-2" "functional-data-2"
@@ -466,4 +467,13 @@ main = do
         golden "source-old-op-py" "source-old-op-py"
       , -- eval mode restriction tests
         golden "eval-restrict-source" "eval-restrict-source"
+      , -- memory alignment tests (document misalignment bugs in voidstar format)
+        golden "memory-optional-double-cpp" "memory-optional-double-cpp"
+      , golden "memory-optional-double-py" "memory-optional-double-py"
+      , golden "memory-record-pack-cpp" "memory-record-pack-cpp"
+      , golden "memory-record-pack-py" "memory-record-pack-py"
+      , golden "memory-interop-misalign-cp" "memory-interop-misalign-cp"
+      , golden "memory-nested-misalign-cpp" "memory-nested-misalign-cpp"
+      , golden "memory-nested-misalign-py" "memory-nested-misalign-py"
+      , golden "memory-split-block-cpp" "memory-split-block-cpp"
       ]

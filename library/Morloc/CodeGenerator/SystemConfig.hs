@@ -33,17 +33,17 @@ import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, wa
 configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
 configure _ = return ()
 
-configureAll :: Bool -> OverwriteProtocol -> Bool -> Config -> IO Bool
-configureAll verbose force slurmSupport config = do
-  result <- try (configureAllSteps verbose force slurmSupport config) :: IO (Either SomeException ())
+configureAll :: Bool -> OverwriteProtocol -> Bool -> Bool -> Config -> IO Bool
+configureAll verbose force slurmSupport sanitize config = do
+  result <- try (configureAllSteps verbose force slurmSupport sanitize config) :: IO (Either SomeException ())
   case result of
     Left e -> do
       sayError $ "Configuration failed: " ++ displayException e
       return False
     Right _ -> return True
 
-configureAllSteps :: Bool -> OverwriteProtocol -> Bool -> Config -> IO ()
-configureAllSteps verbose force slurmSupport config = do
+configureAllSteps :: Bool -> OverwriteProtocol -> Bool -> Bool -> Config -> IO ()
+configureAllSteps verbose force slurmSupport sanitize config = do
   let homeDir = configHome config
       srcLibrary = configLibrary config
       includeDir = homeDir </> "include"
@@ -67,10 +67,13 @@ configureAllSteps verbose force slurmSupport config = do
 
   sayInfo verbose $ "Slurm support ... " <> show slurmSupport
 
+  sayInfo verbose $ "Sanitize ... " <> show sanitize
+
   sayInfo verbose "Writing build config file"
+  let sanitizeLine = if sanitize then "\nsanitize: true" else "\nsanitize: false"
   TIO.writeFile
     (configBuildConfig config)
-    (if slurmSupport then "slurm-support: true" else "slurm-support: false")
+    ((if slurmSupport then "slurm-support: true" else "slurm-support: false") <> sanitizeLine)
 
   -- Clean and create build directory
   let buildDir = tmpDir </> "libmorloc-build"
@@ -87,6 +90,7 @@ configureAllSteps verbose force slurmSupport config = do
 
   sayInfo verbose "Compiling libmorloc.so"
   let morlocOptions = if slurmSupport then ["-DSLURM_SUPPORT"] else []
+      sanitizeFlags = if sanitize then ["-fsanitize=alignment", "-fno-sanitize-recover=alignment"] else []
       cFiles =
         [ buildDir </> DF.embededFileName ef | ef <- DF.libmorlocFiles, ".c" `isSuffixOf` DF.embededFileName ef
         ]
@@ -94,9 +98,9 @@ configureAllSteps verbose force slurmSupport config = do
       objPaths = [buildDir </> replaceExtension (takeFileName f) "o" | f <- cFiles]
   forM_ (zip cFiles objPaths) $ \(cFile, objPath) -> do
     let args =
-          ["-c", "-Wall", "-Werror", "-O2", "-fPIC", "-I" <> buildDir, "-o", objPath, cFile] <> morlocOptions
+          ["-c", "-Wall", "-Werror", "-O2", "-fPIC", "-I" <> buildDir, "-o", objPath, cFile] <> morlocOptions <> sanitizeFlags
     run verbose "gcc" args
-  let soArgs = ["-shared", "-o", soPath] <> objPaths <> ["-lpthread"]
+  let soArgs = ["-shared", "-o", soPath] <> objPaths <> ["-lpthread"] <> sanitizeFlags
   run verbose "gcc" soArgs
   forM_ DF.libmorlocFiles $ \ef -> removeFile (buildDir </> DF.embededFileName ef)
   forM_ objPaths removeFile
@@ -116,16 +120,17 @@ configureAllSteps verbose force slurmSupport config = do
   run
     verbose
     "gcc"
-    [ "-O2"
-    , "-I" <> includeDir
-    , "-o"
-    , nexusBinPath
-    , nexusSrcPath
-    , "-L" <> libDir
-    , "-Wl,-rpath," <> libDir
-    , "-lmorloc"
-    , "-lpthread"
-    ]
+    ( [ "-O2"
+      , "-I" <> includeDir
+      , "-o"
+      , nexusBinPath
+      , nexusSrcPath
+      , "-L" <> libDir
+      , "-Wl,-rpath," <> libDir
+      , "-lmorloc"
+      , "-lpthread"
+      ] <> sanitizeFlags
+    )
   removeFile nexusSrcPath
 
   -- Create exe/ and fdb/ directories
@@ -146,7 +151,8 @@ configureAllSteps verbose force slurmSupport config = do
         -- Write and run init script
         let initPath = buildDir </> "init.sh"
         TIO.writeFile initPath (DF.embededFileText (DF.lsInitScript ls))
-        result <- try (run verbose "bash" [initPath, homeDir, buildDir]) :: IO (Either SomeException ())
+        let sanitizeFlagsStr = if sanitize then "-fsanitize=alignment -fno-sanitize-recover=alignment" else ""
+        result <- try (run verbose "bash" [initPath, homeDir, buildDir, sanitizeFlagsStr]) :: IO (Either SomeException ())
         case result of
           Left e -> sayWarning $ DF.lsName ls <> " setup failed: " <> displayException e
           Right _ -> return ()

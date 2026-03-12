@@ -1,0 +1,8 @@
+module main (failme)
+
+source Cpp from "foo.hpp" ("cpp_fail")
+
+type Cpp => Int = "int"
+
+cpp_fail :: Int -> Int
+failme = cpp_fail

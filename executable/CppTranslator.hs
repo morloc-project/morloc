@@ -274,8 +274,13 @@ makeTheMaker srcs = do
 
   (_, flags, includes) <- handleFlagsAndPaths srcs
 
+  bconf <- MM.gets stateBuildConfig
+  let sanitizeFlags = case buildConfigSanitize bconf of
+        Just True -> ["-fsanitize=alignment", "-fno-sanitize-recover=alignment"]
+        _ -> []
+
   let incs = "-I." : [pretty ("-I" <> i) | i <- includes]
-  let flags' = map pretty flags
+  let flags' = map pretty (flags ++ sanitizeFlags)
 
   let cmd =
         SysRun . Code . render $
@@ -350,10 +355,10 @@ cppLowerConfig =
         let argList = [dquotes socketFile, pretty mid] <> args <> ["NULL"]
          in [idoc|foreign_call#{tupled argList}|]
     , lcRemoteCall = \socketFile mid res args -> do
-        let resMem = pretty $ remoteResourcesMemory res
-            resTime = pretty $ remoteResourcesTime res
-            resCPU = pretty $ remoteResourcesThreads res
-            resGPU = pretty $ remoteResourcesGpus res
+        let resMem = pretty $ fromMaybe (-1) (remoteResourcesMemory res)
+            resTime = pretty $ maybe (-1) unTimeInSeconds (remoteResourcesTime res)
+            resCPU = pretty $ fromMaybe (-1) (remoteResourcesThreads res)
+            resGPU = pretty $ fromMaybe 0 (remoteResourcesGpus res)
             cacheDir = ".morloc-cache"
             argList = encloseSep "{" "}" "," args
             setup =

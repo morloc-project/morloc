@@ -30,11 +30,11 @@ module Morloc.Module
   , extractModuleName
   ) where
 
+import Control.Applicative (optional)
 import Control.Exception (onException)
-import Data.Void (Void)
-import Text.Megaparsec
-import Text.Megaparsec.Char
-import qualified Text.Megaparsec.Char.Lexer as L
+import Text.Parsec (Parsec, try, parse, many, many1)
+import Text.Parsec.Char (char, string, alphaNum, digit, satisfy)
+import Text.Parsec.Text ()
 
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KM
@@ -358,7 +358,7 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
     _ -> installModuleClassic
   where
     installModuleClassic = case parse (moduleInstallParser (MT.pack coreorg)) "" modstr of
-      (Left errstr) -> moduleInstallError (pretty . errorBundlePretty $ errstr)
+      (Left errstr) -> moduleInstallError (pretty . show $ errstr)
       (Right (Left errstr)) -> moduleInstallError $ pretty errstr
       (Right (Right source)) -> do
         rawName <- case source of
@@ -568,7 +568,10 @@ extractMorlocDeps path = do
 
 -- {{{ parse module source
 
-type Parser = Parsec Void Text
+type Parser = Parsec Text ()
+
+decimal :: Parser Int
+decimal = read <$> many1 digit
 
 data ModulePath
   = ModulePathCore Text
@@ -582,7 +585,7 @@ moduleInstallParser :: Text -> Parser (Either Text ModuleSource)
 moduleInstallParser coreorg = do
   maySrcform <- optional (try parseSrcForm)
   modPath <- parseModname maySrcform
-  ref <- optional parseRef
+  ref <- optional (try parseRef)
   return $ makeModuleSource maySrcform modPath ref
   where
     makeModuleSource ::
@@ -615,9 +618,9 @@ parseSrcForm :: Parser RemoteSource
 parseSrcForm = do
   remote <-
     try (string "github" >> return RemoteGithub)
-      <|> (string "gitlab" >> return RemoteGitlab)
-      <|> (string "bitbucket" >> return RemoteBitbucket)
-      <|> (string "codeberg" >> return RemoteCodeberg)
+      <|> try (string "gitlab" >> return RemoteGitlab)
+      <|> try (string "bitbucket" >> return RemoteBitbucket)
+      <|> try (string "codeberg" >> return RemoteCodeberg)
       <|> (string "azure" >> return RemoteAzure)
   _ <- char ':'
   return remote
@@ -646,8 +649,8 @@ parseCoreModule = ModulePathCore <$> parseModuleSegment
 
 parseModuleSegment :: Parser Text
 parseModuleSegment = do
-  firstChar <- alphaNumChar
-  rest <- many (alphaNumChar <|> char '-')
+  firstChar <- alphaNum
+  rest <- many (alphaNum <|> char '-')
   case rest of
     [] -> return (MT.pack [firstChar])
     _ | last rest == '-' -> fail "Module name cannot end with a dash"
@@ -660,7 +663,7 @@ parseModuleSegment = do
 parseLocalModule :: Parser ModulePath
 parseLocalModule = do
   fstChar <- char '.' <|> char '/' <|> char '~'
-  remaining <- takeWhileP Nothing (/= '@')
+  remaining <- MT.pack <$> many (satisfy (/= '@'))
   return $ ModulePathLocal (MT.cons fstChar remaining)
 
 -- codeberg:weena/calendar@version:1.0.0
@@ -697,7 +700,7 @@ parseRefStr (Just RefBranch) = parseBranch
 -- match hexadecimal characters of 7 characters or more
 parseHash :: Parser GitSnapshotSelector
 parseHash = do
-  hash <- takeWhile1P (Just "hex digit") isHexDigit
+  hash <- MT.pack <$> many1 (satisfy isHexDigit)
   if MT.length hash >= 7
     then return $ CommitHash hash
     else fail "Hash must be at least 7 characters"
@@ -712,27 +715,27 @@ parseVersion = do
   where
     versionParser = do
       -- Optional 'v' prefix
-      v <- optional (string "v")
+      v <- optional (MT.pack <$> string "v")
 
       -- Parse major.minor
-      major <- MT.show' <$> (L.decimal :: Parser Int)
+      major <- MT.show' <$> decimal
       _ <- char '.'
-      minor <- MT.show' <$> (L.decimal :: Parser Int)
+      minor <- MT.show' <$> decimal
 
       -- Optional .patch
       patchMay <- optional . try $ do
         _ <- char '.'
-        MT.show' <$> (L.decimal :: Parser Int)
+        MT.show' <$> decimal
 
       -- Optional pre-release (after '-')
-      preRelease <- optional $ do
+      preRelease <- optional . try $ do
         _ <- char '-'
-        takeWhile1P Nothing (\c -> DC.isAlphaNum c || c == '.')
+        MT.pack <$> many1 (satisfy (\c -> DC.isAlphaNum c || c == '.'))
 
       -- Optional build metadata (after '+')
-      buildMeta <- optional $ do
+      buildMeta <- optional . try $ do
         _ <- char '+'
-        takeWhile1P Nothing (\c -> DC.isAlphaNum c || c == '.')
+        MT.pack <$> many1 (satisfy (\c -> DC.isAlphaNum c || c == '.'))
 
       -- Reconstruct the full version string
       return $
@@ -770,7 +773,7 @@ Current implementation deviations from spec:
 -}
 parseBranch :: Parser GitSnapshotSelector
 parseBranch = do
-  branch <- takeWhile1P (Just "branch character") isBranchChar
+  branch <- MT.pack <$> many1 (satisfy isBranchChar)
 
   if isValidBranchName branch
     then return $ LatestOnBranch branch

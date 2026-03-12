@@ -128,6 +128,7 @@ data ModuleConfig = ModuleConfig
 
 data BuildConfig = BuildConfig
   { buildConfigSlurmSupport :: Maybe Bool
+  , buildConfigSanitize :: Maybe Bool
   }
   deriving (Show, Generic)
 
@@ -412,6 +413,7 @@ instance Defaultable BuildConfig where
   defaultValue =
     BuildConfig
       { buildConfigSlurmSupport = Nothing
+      , buildConfigSanitize = Nothing
       }
 
 instance Defaultable RemoteResources where

@@ -1,0 +1,10 @@
+module cppfuncs (*)
+
+import types
+
+cNotBool :: Bool -> Bool
+cAppendStr :: Str -> Str -> Str
+cBoolToStr :: Bool -> Str
+cStrLen :: Str -> Int
+
+source Cpp from "foo.hpp" ("cNotBool", "cAppendStr", "cBoolToStr", "cStrLen")
