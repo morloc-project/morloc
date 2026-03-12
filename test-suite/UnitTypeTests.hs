@@ -2350,8 +2350,8 @@ complexityRegressionTests =
 ioEff :: TypeU -> TypeU
 ioEff = EffectU ioEffectSet
 
-errEff :: TypeU -> TypeU
-errEff = EffectU (EffectSet (Set.singleton "Error"))
+_errEff :: TypeU -> TypeU
+_errEff = EffectU (EffectSet (Set.singleton "Error"))
 
 emptyEff :: TypeU -> TypeU
 emptyEff = EffectU emptyEffectSet

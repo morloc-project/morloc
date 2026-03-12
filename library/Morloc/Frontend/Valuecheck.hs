@@ -47,6 +47,7 @@ toE (AnnoS g _ (IfS c t e)) = IfP g (toE c) (toE t) (toE e)
 toE (AnnoS g _ (DoBlockS e)) = DoBlockP g (toE e)
 toE (AnnoS g _ (EvalS e)) = EvalP g (toE e)
 toE (AnnoS g _ (CoerceS c e)) = CoerceP c g (toE e)
+toE (AnnoS g _ (IntrinsicS intr es)) = IntrinsicP g intr (map toE es)
 
 indexOfE :: E -> Int
 indexOfE (BndP (Idx i _) _) = i
@@ -63,6 +64,7 @@ indexOfE (IfP (Idx i _) _ _ _) = i
 indexOfE (DoBlockP (Idx i _) _) = i
 indexOfE (EvalP (Idx i _) _) = i
 indexOfE (CoerceP _ (Idx i _) _) = i
+indexOfE (IntrinsicP (Idx i _) _ _) = i
 
 -- Check the harmony of typed implementations.
 --
@@ -168,6 +170,7 @@ checkPair i e1 e2@SrcP {}
     isSimple (DoBlockP _ e) = isSimple e
     isSimple (EvalP _ e) = isSimple e
     isSimple (CoerceP _ _ e) = isSimple e
+    isSimple (IntrinsicP _ _ _) = False
 
 -- reduce empty lambdas
 --
@@ -343,3 +346,4 @@ substituteExpr oldVar replacementExpr = f
     f (DoBlockP g e) = DoBlockP g (f e)
     f (EvalP g e) = EvalP g (f e)
     f (CoerceP c g e) = CoerceP c g (f e)
+    f (IntrinsicP g intr es) = IntrinsicP g intr (map f es)

@@ -33,7 +33,6 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , IExpr (..)
   , IProgram (..)
   , IStmt (..)
-  , IType (..)
   , IndexM
   , LowerConfig (..)
   , buildProgram
@@ -707,8 +706,7 @@ genericPrintStmt desc = go
             , "}"
             ]
         EndKeywordBlock ->
-          let endKw = ldBlockEnd desc
-           in vsep
+          vsep
                 [ pretty resultVar <+> "<-" <+> "if" <+> parens (printE condExpr) <+> "{"
                 , indent 4 (vsep (map go thenStmts ++ [printE thenExpr]))
                 , "} else {"

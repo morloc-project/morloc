@@ -25,8 +25,6 @@ import qualified Morloc.Data.Text as MT
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-import Data.List (nubBy)
-import Data.Maybe (isJust)
 import Morloc.Typecheck.Internal
 
 {- | Each SAnno object in the input list represents one exported function.
@@ -156,7 +154,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (DoBlockS e') = DoBlockS (resolveTypes e')
     f (EvalS e') = EvalS (resolveTypes e')
     f (CoerceS c e') = CoerceS c (resolveTypes e')
-    f (IfS c t e) = IfS (resolveTypes c) (resolveTypes t) (resolveTypes e)
+    f (IfS c t' e') = IfS (resolveTypes c) (resolveTypes t') (resolveTypes e')
     f (IntrinsicS intr es) = IntrinsicS intr (map resolveTypes es)
 
 resolveInstances ::
@@ -590,7 +588,7 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
       (g11, _, e') <- checkG g10 e t
       -- Restore
       case implAnn of
-        Just ann -> MM.modify (\s -> s { stateAnnotations = Map.insert implGi ann (stateAnnotations s) })
+        Just ann' -> MM.modify (\s -> s { stateAnnotations = Map.insert implGi ann' (stateAnnotations s) })
         Nothing -> return ()
 
       -- check all the remaining implementations
@@ -1047,14 +1045,14 @@ collectDoEffects :: AnnoS (Indexed TypeU) f c -> EffectSet
 collectDoEffects = go
   where
     go (AnnoS _ _ expr) = case expr of
-      EvalS e -> effectOfAnno e `union` go e
-      LetS _ e1 e2 -> go e1 `union` go e2
+      EvalS e -> effectOfAnno e `effUnion` go e
+      LetS _ e1 e2 -> go e1 `effUnion` go e2
       AppS f args -> unions (go f : map go args)
       TupS es -> unions (map go es)
       LstS es -> unions (map go es)
       NamS rs -> unions (map (go . snd) rs)
       LamS _ e -> go e
-      IfS c t e -> go c `union` go t `union` go e
+      IfS c t e -> go c `effUnion` go t `effUnion` go e
       DoBlockS e -> go e
       CoerceS _ e -> go e
       IntrinsicS _ es -> unions (map go es)
@@ -1063,9 +1061,9 @@ collectDoEffects = go
     effectOfAnno (AnnoS (Idx _ (EffectU effs _)) _ _) = effs
     effectOfAnno _ = emptyEffectSet
 
-    unions = foldl union emptyEffectSet
+    unions = foldl effUnion emptyEffectSet
 
-    union a b
+    effUnion a b
       | a == emptyEffectSet = b
       | b == emptyEffectSet = a
       | a == b = a

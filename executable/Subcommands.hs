@@ -56,7 +56,7 @@ import System.Directory
   , setCurrentDirectory
   )
 import System.Exit (exitFailure, exitSuccess)
-import System.FilePath (dropExtension, takeFileName, (</>))
+import System.FilePath (dropExtension, takeFileName)
 import System.IO.Temp (createTempDirectory)
 import qualified System.Process as SP
 import UI
@@ -279,7 +279,7 @@ cmdEval args verbosity config buildConfig = do
     (\(origDir, tmpDir) -> do
       setCurrentDirectory origDir
       cleanupTmpDir tmpDir)
-    (\(origDir, tmpDir) -> do
+    (\(_origDir, tmpDir) -> do
       let action = do
             MM.modify (\s -> s {stateEvalMode = True})
             if isSave then MM.modify (\s -> s {stateInstall = True}) else return ()
@@ -335,9 +335,9 @@ getFirstSubcommand wrapperPath = do
 
 -- | Write metadata about the saved eval expression
 writeEvalMeta :: FilePath -> String -> String -> IO ()
-writeEvalMeta configHome name expr = do
+writeEvalMeta cfgHome name expr = do
   now <- getCurrentTime
-  let fdbDir = configHome </> "fdb"
+  let fdbDir = cfgHome </> "fdb"
       metaPath = fdbDir </> name ++ ".eval-meta"
       timestamp = formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now
       json = "{\"expression\":" ++ jsonEscape expr ++ ",\"timestamp\":\"" ++ timestamp ++ "\"}"
@@ -356,7 +356,7 @@ writeEvalMeta configHome name expr = do
 -- Leading whitespace after each replacement is stripped so the layout
 -- rule treats each statement as a new top-level declaration.
 preprocessEvalInput :: String -> String
-preprocessEvalInput = go 0
+preprocessEvalInput = go (0 :: Int)
   where
     go _ [] = []
     go depth ('{' : rest) = '{' : go (depth + 1) rest

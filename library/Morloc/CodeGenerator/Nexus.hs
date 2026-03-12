@@ -16,7 +16,6 @@ module Morloc.CodeGenerator.Nexus
   ( generate
   ) where
 
-import Control.Monad.IO.Class (liftIO)
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
@@ -107,7 +106,7 @@ findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e
     findAllLangsExpr (TupS xs) = concatMap findAllLangsSAnno xs
     findAllLangsExpr (NamS rs) = concatMap (findAllLangsSAnno . snd) rs
     findAllLangsExpr (LetS _ e1 e2) = findAllLangsSAnno e1 ++ findAllLangsSAnno e2
-    findAllLangsExpr (IfS c t e) = concatMap findAllLangsSAnno [c, t, e]
+    findAllLangsExpr (IfS c t e') = concatMap findAllLangsSAnno [c, t, e']
     findAllLangsExpr (DoBlockS x) = findAllLangsSAnno x
     findAllLangsExpr (EvalS x) = findAllLangsSAnno x
     findAllLangsExpr (CoerceS _ x) = findAllLangsSAnno x
