@@ -91,8 +91,13 @@ def run_job(client_fd: int) -> None:
         morloc.send_packet_to_foreign_server(client_fd, result)
 
     except Exception as e:
-        # this may be OK, a broken pipe will occur if a ping times out, in which
-        # case a new ping will be sent
+        # Try to send a fail packet back to the caller before giving up.
+        # This may fail (e.g., broken pipe from a timed-out ping), which is OK.
+        try:
+            result = morloc.make_fail_packet(str(e))
+            morloc.send_packet_to_foreign_server(client_fd, result)
+        except Exception:
+            pass
         print(f"job failed: {e!s}", file=sys.stderr)
     finally:
         # Flush stdout so user function output is not lost on pool shutdown

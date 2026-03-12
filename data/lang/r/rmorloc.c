@@ -1658,6 +1658,8 @@ static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
 
     uint8_t* packet = stream_from_client(client_fd, &errmsg);
     if (errmsg) {
+        send_fail_to_client(client_fd, errmsg);
+        free(errmsg);
         close_socket(client_fd);
         return;
     }

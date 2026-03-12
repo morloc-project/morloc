@@ -1,0 +1,8 @@
+module main (failme)
+
+source R from "foo.R" ("r_fail")
+
+type R => Int = "integer"
+
+r_fail :: Int -> Int
+failme = r_fail

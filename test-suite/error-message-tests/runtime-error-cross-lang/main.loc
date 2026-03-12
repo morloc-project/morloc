@@ -1,0 +1,25 @@
+module main (py_calls_cpp_err, r_calls_py_err)
+
+import root ((.))
+
+source Cpp from "foo.hpp" ("cpp_fail", "cpp_id")
+source Py from "foo.py" ("py_fail", "py_id")
+source R from "foo.R" ("r_id")
+
+type Cpp => Str = "std::string"
+type Py => Str = "str"
+type R => Str = "character"
+
+cpp_fail :: Str -> Str
+cpp_id :: Str -> Str
+py_fail :: Str -> Str
+py_id :: Str -> Str
+r_id :: Str -> Str
+
+-- Python calls into C++ which throws
+py_calls_cpp_err :: Str -> Str
+py_calls_cpp_err = py_id . cpp_fail
+
+-- R calls into Python which raises
+r_calls_py_err :: Str -> Str
+r_calls_py_err = r_id . py_fail

@@ -77,6 +77,18 @@ static void pool_sigterm_handler(int sig) {
     }
 }
 
+// ---- Best-effort fail packet sender ----
+
+static void try_send_fail(int client_fd, const char* msg) {
+    uint8_t* fail = make_fail_packet(msg ? msg : "Unknown error");
+    if (fail) {
+        char* send_err = NULL;
+        send_packet_to_foreign_server(client_fd, fail, &send_err);
+        free(fail);
+        if (send_err) free(send_err);
+    }
+}
+
 // ---- Packet dispatch ----
 
 uint8_t* pool_dispatch_packet(
@@ -209,6 +221,7 @@ static void* pool_worker_thread(void* arg) {
         if (!client_data || errmsg) {
             if (errmsg) {
                 fprintf(stderr, "Failed to read client data: %s\n", errmsg);
+                try_send_fail(client_fd, errmsg);
                 free(errmsg);
                 errmsg = NULL;
             }
@@ -220,6 +233,7 @@ static void* pool_worker_thread(void* arg) {
         size_t length = morloc_packet_size(client_data, &errmsg);
         if (errmsg) {
             fprintf(stderr, "Malformed packet: %s\n", errmsg);
+            try_send_fail(client_fd, errmsg);
             free(errmsg);
             errmsg = NULL;
             free(client_data);
@@ -228,6 +242,7 @@ static void* pool_worker_thread(void* arg) {
         }
         if (length == 0) {
             fprintf(stderr, "Zero length packet received from client\n");
+            try_send_fail(client_fd, "Zero length packet received");
             free(client_data);
             close_socket(client_fd);
             continue;
@@ -455,7 +470,11 @@ static void pool_fork_worker(pool_state_t* state, int read_fd,
 
         uint8_t* client_data = stream_from_client(client_fd, &errmsg);
         if (!client_data || errmsg) {
-            if (errmsg) { free(errmsg); errmsg = NULL; }
+            if (errmsg) {
+                try_send_fail(client_fd, errmsg);
+                free(errmsg);
+                errmsg = NULL;
+            }
             free(client_data);
             close_socket(client_fd);
             continue;
@@ -663,7 +682,11 @@ static int pool_main_single(pool_state_t* state, char* socket_path,
 
         uint8_t* client_data = stream_from_client(client_fd, &errmsg);
         if (!client_data || errmsg) {
-            if (errmsg) { free(errmsg); errmsg = NULL; }
+            if (errmsg) {
+                try_send_fail(client_fd, errmsg);
+                free(errmsg);
+                errmsg = NULL;
+            }
             free(client_data);
             close_socket(client_fd);
             continue;
