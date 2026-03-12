@@ -446,7 +446,7 @@ cmdDump args _ config buildConfig = do
       return True
 
 cmdInit :: InitCommand -> Config.Config -> IO Bool
-cmdInit ic config = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSlurmSupport ic) config
+cmdInit ic config = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSlurmSupport ic) (initSanitize ic) config
 
 cmdNew :: NewCommand -> IO Bool
 cmdNew args = do

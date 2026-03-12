@@ -97,6 +97,7 @@ data InitCommand = InitCommand
   , initVanilla :: Bool
   , initForce :: OverwriteProtocol
   , initSlurmSupport :: Bool
+  , initSanitize :: Bool
   }
 
 initCommandParser :: Parser InitCommand
@@ -107,6 +108,7 @@ initCommandParser =
     <*> optVanilla
     <*> optForce
     <*> optSlurmSupport
+    <*> optSanitize
 
 initSubcommand :: Mod CommandFields CliCommand
 initSubcommand = command "init" (info (CmdInit <$> initCommandParser) (progDesc "Initialize morloc environment"))
@@ -319,6 +321,13 @@ optSlurmSupport =
   switch
     ( long "slurm"
         <> help "Allow use of SLURM for remote jobs"
+    )
+
+optSanitize :: Parser Bool
+optSanitize =
+  switch
+    ( long "sanitize"
+        <> help "Enable alignment sanitizer for debugging memory layout issues"
     )
 
 optVerbose :: Parser Int

@@ -3,6 +3,7 @@ set -e
 
 MORLOC_HOME="$1"
 BUILD_DIR="$2"
+SANITIZE_FLAGS="$3"
 INCLUDE_DIR="$MORLOC_HOME/include"
 LIB_DIR="$MORLOC_HOME/lib"
 
@@ -10,6 +11,7 @@ LIB_DIR="$MORLOC_HOME/lib"
 cp "$BUILD_DIR/rmorloc.c" "$INCLUDE_DIR/"
 
 # Compile
+export PKG_CFLAGS="$SANITIZE_FLAGS"
 R CMD SHLIB "$INCLUDE_DIR/rmorloc.c" -o "$LIB_DIR/librmorloc.so" \
     -L"$LIB_DIR" -Wl,-rpath,"$LIB_DIR" -lmorloc -lpthread
 

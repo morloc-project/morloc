@@ -274,8 +274,13 @@ makeTheMaker srcs = do
 
   (_, flags, includes) <- handleFlagsAndPaths srcs
 
+  bconf <- MM.gets stateBuildConfig
+  let sanitizeFlags = case buildConfigSanitize bconf of
+        Just True -> ["-fsanitize=alignment", "-fno-sanitize-recover=alignment"]
+        _ -> []
+
   let incs = "-I." : [pretty ("-I" <> i) | i <- includes]
-  let flags' = map pretty flags
+  let flags' = map pretty (flags ++ sanitizeFlags)
 
   let cmd =
         SysRun . Code . render $
