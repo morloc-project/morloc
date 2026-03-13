@@ -243,7 +243,7 @@ printDeserializer _ params rtype fields =
 |]
   where
     header =
-      [idoc|#{rtype} fromAnything(const Schema* schema, const void * anything, #{rtype}* dummy = nullptr)|]
+      [idoc|#{rtype} fromAnything(const Schema* schema, const void * anything, #{rtype}* dummy = nullptr, const void* base_ptr = nullptr)|]
     body =
       vsep $
         [[idoc|#{rtype} obj;|]]
@@ -254,7 +254,7 @@ printDeserializer _ params rtype fields =
     assignFields idx (keyName, keyType) =
       vsep
         [ [idoc|#{keyType}* elemental_dumby_#{keyName} = nullptr;|]
-        , [idoc|obj.#{keyName} = fromAnything(schema->parameters[#{pretty idx}], (char*)anything + schema->offsets[#{pretty idx}], elemental_dumby_#{keyName});|]
+        , [idoc|obj.#{keyName} = fromAnything(schema->parameters[#{pretty idx}], (char*)anything + schema->offsets[#{pretty idx}], elemental_dumby_#{keyName}, base_ptr);|]
         ]
 
     headerGetSize = [idoc|size_t get_shm_size(const Schema* schema, const #{rtype}& data)|]

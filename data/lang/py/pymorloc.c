@@ -137,7 +137,7 @@ error:
 
 
 
-PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
+PyObject* fromAnything(const Schema* schema, const void* data, const void* base_ptr){ MAYFAIL
 
     PyObject* obj = NULL;
     switch (schema->type) {
@@ -178,12 +178,12 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
             break;
         case MORLOC_STRING: {
             Array* str_array = (Array*)data;
-            absptr_t tmp_ptr = NULL;
-            
+            void* tmp_ptr = NULL;
+
             if (str_array->size != 0) {
-                tmp_ptr = PyTRY(rel2abs, str_array->data);
+                tmp_ptr = PyTRY(resolve_relptr, str_array->data, base_ptr);
             }
-            
+
             if (schema->hint != NULL && strcmp(schema->hint, "bytes") == 0) {
                 // load binary data as a python bytes object
                 if (str_array->size == 0) {
@@ -243,7 +243,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
                         PyRAISE("Unsupported element type for NumPy array");
                 }
 
-                absptr = PyTRY(rel2abs, array->data);
+                absptr = PyTRY(resolve_relptr, array->data, base_ptr);
 
                 // Create the NumPy array
                 obj = PyArray_SimpleNewFromData(nd, dims, type_num, absptr);
@@ -258,7 +258,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
 
             } else if (schema->hint != NULL && strcmp(schema->hint, "bytearray") == 0) {
                 // Create a Python bytearray object
-                absptr_t absptr = PyTRY(rel2abs, array->data);
+                void* absptr = PyTRY(resolve_relptr, array->data, base_ptr);
                 obj = PyByteArray_FromStringAndSize((const char*)absptr, array->size);
                 if (!obj) {
                     PyErr_SetString(PyExc_TypeError, "Failed to create bytearray");
@@ -268,7 +268,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
                 // The bytearray is created from a copy of the data, so no additional handling is needed.
             } else if (schema->parameters[0]->type == MORLOC_UINT8) {
                 // Create a Python bytes object for UINT8 arrays
-                absptr_t tmp_ptr = PyTRY(rel2abs, array->data);
+                void* tmp_ptr = PyTRY(resolve_relptr, array->data, base_ptr);
                 obj = PyBytes_FromStringAndSize((const char*)tmp_ptr, array->size);
                 if (obj == NULL) {
                     PyRAISE("Failed to one bytes")
@@ -280,11 +280,11 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
                     PyRAISE("Failed to one string");
                 }
                 if(array->size > 0){
-                    char* start = (char*) PyTRY(rel2abs, array->data);
+                    char* start = (char*) PyTRY(resolve_relptr, array->data, base_ptr);
                     size_t width = schema->parameters[0]->width;
                     Schema* element_schema = schema->parameters[0];
                     for (size_t i = 0; i < array->size; i++) {
-                        PyObject* item = fromAnything(element_schema, start + width * i);
+                        PyObject* item = fromAnything(element_schema, start + width * i, base_ptr);
                         if (!item || PyList_SetItem(obj, i, item) < 0) {
                             Py_XDECREF(item);
                             PyRAISE("Failed to access element in list")
@@ -303,7 +303,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
             }
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
-                PyObject* item = fromAnything(schema->parameters[i], item_ptr);
+                PyObject* item = fromAnything(schema->parameters[i], item_ptr, base_ptr);
                 if (!item || PyTuple_SetItem(obj, i, item) < 0) {
                     Py_XDECREF(item);
                     PyRAISE("Failed to access tuple element");
@@ -318,7 +318,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
             }
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
-                PyObject* value = fromAnything(schema->parameters[i], item_ptr);
+                PyObject* value = fromAnything(schema->parameters[i], item_ptr, base_ptr);
                 PyObject* key = PyUnicode_FromString(schema->keys[i]);
                 if (!value || !key || PyDict_SetItem(obj, key, value) < 0) {
                     Py_XDECREF(value);
@@ -335,7 +335,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
             if (tag == 0) {
                 Py_RETURN_NONE;
             }
-            obj = fromAnything(schema->parameters[0], (const char*)data + schema->offsets[0]);
+            obj = fromAnything(schema->parameters[0], (const char*)data + schema->offsets[0], base_ptr);
             if (!obj) {
                 PyRAISE("Failed to deserialize optional inner value");
             }
@@ -974,17 +974,33 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     // convert to a relative pointer conserved between language servers
     relptr_t relptr = PyTRY(abs2rel, voidstar);
 
-    packet = make_standard_data_packet(relptr, schema);
+    packet = PyTRY(make_data_packet_auto, voidstar, relptr, schema);
 
-    // Track SHM for deferred cleanup (freed after foreign_call or next dispatch)
-    shm_tracker_push((absptr_t)voidstar, schema);
-    tracked = true;
+    {
+        const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
+        if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
+            // SHM referenced by packet -- track for deferred cleanup
+            shm_tracker_push((absptr_t)voidstar, schema);
+            tracked = true;
+        } else {
+            // Data inlined in packet -- free SHM immediately
+            char* free_err = NULL;
+            shfree_by_schema((absptr_t)voidstar, schema, &free_err);
+            if (free_err) { free(free_err); free_err = NULL; }
+            shfree((absptr_t)voidstar, &free_err);
+            if (free_err) { free(free_err); }
+            voidstar = NULL;
+        }
+    }
 
     packet_size = PyTRY(morloc_packet_size, packet);
 
     {
         PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
         free(packet);
+        if (!tracked) {
+            free_schema(schema);
+        }
         return retval;
     }
 
@@ -1019,11 +1035,23 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         PyRAISE("Failed to parse arguments");
     }
 
-    // Check if this is an RPTR packet (references existing SHM we don't own)
     const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
-    bool is_rptr = (header->command.data.source == PACKET_SOURCE_RPTR);
+    uint8_t source = header->command.data.source;
+    uint8_t format = header->command.data.format;
 
     schema = PyTRY(parse_schema, schema_str)
+
+    // Fast path: inline voidstar -- read directly from packet, no SHM needed
+    if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
+        const uint8_t* payload = (const uint8_t*)packet + sizeof(morloc_packet_header_t) + header->offset;
+        obj = fromAnything(schema, (const void*)payload, (const void*)payload);
+        PyTRACE(obj == NULL)
+        free_schema(schema);
+        return obj;
+    }
+
+    // SHM paths (RPTR or MESG+MSGPACK)
+    bool is_rptr = (source == PACKET_SOURCE_RPTR);
 
     voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
@@ -1038,7 +1066,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         tracked = true;
     }
 
-    obj = fromAnything(schema, voidstar);
+    obj = fromAnything(schema, voidstar, NULL);
     PyTRACE(obj == NULL)
 
     if (!tracked) {
@@ -1580,7 +1608,7 @@ static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
     }
 
     {
-        PyObject* obj = fromAnything(schema, voidstar);
+        PyObject* obj = fromAnything(schema, voidstar, NULL);
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
@@ -1619,7 +1647,7 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
     }
 
     {
-        PyObject* obj = fromAnything(schema, voidstar);
+        PyObject* obj = fromAnything(schema, voidstar, NULL);
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);

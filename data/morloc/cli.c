@@ -2,8 +2,8 @@
 #include "json.h"
 
 // Forward declarations for voidstar flat format
-static int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t base_rel, ERRMSG);
-static void* read_voidstar_binary(const uint8_t* blob, size_t blob_size, const Schema* schema, ERRMSG);
+int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t base_rel, ERRMSG);
+void* read_voidstar_binary(const uint8_t* blob, size_t blob_size, const Schema* schema, ERRMSG);
 
 argument_t* initialize_positional(char* value){
   argument_t* arg = (argument_t*)calloc(1, sizeof(argument_t));
@@ -124,7 +124,7 @@ static int upload_packet(
 // Walk a voidstar blob and adjust all Array.data relptrs by adding base_rel.
 // The blob was written with relptrs starting at 0; after copying into shared
 // memory at offset base_rel, every relptr must be shifted.
-static int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t base_rel, ERRMSG) {
+int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t base_rel, ERRMSG) {
     INT_RETURN_SETUP
 
     switch (schema->type) {
@@ -167,7 +167,7 @@ static int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t ba
 // Read a flat voidstar binary blob into shared memory.
 // The blob contains the serialized voidstar with relptrs starting at 0.
 // We allocate shared memory, copy the blob, then adjust all relptrs.
-static void* read_voidstar_binary(const uint8_t* blob, size_t blob_size, const Schema* schema, ERRMSG) {
+void* read_voidstar_binary(const uint8_t* blob, size_t blob_size, const Schema* schema, ERRMSG) {
     PTR_RETURN_SETUP(void)
 
     void* base = TRY(shmalloc, blob_size);

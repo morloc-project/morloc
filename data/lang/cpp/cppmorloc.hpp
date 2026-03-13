@@ -86,6 +86,15 @@ auto to_vector(const Container& c) {
 
 absptr_t cpp_rel2abs(relptr_t ptr);
 relptr_t abs2rel_cpp(absptr_t ptr);
+
+// Resolve a relative pointer using either base-pointer arithmetic (inline data)
+// or SHM. When base_ptr is non-null, data lives in a contiguous malloc'd blob.
+static inline void* resolve_relptr_cpp(relptr_t relptr, const void* base_ptr) {
+    if (base_ptr) {
+        return (char*)base_ptr + relptr;
+    }
+    return cpp_rel2abs(relptr);
+}
 bool shfree_cpp(absptr_t ptr);
 Schema* parse_schema_cpp(const char* schema_ptr);
 void* shmalloc_cpp(size_t size);
@@ -447,7 +456,7 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::opt
 
 // Forward declaration for recursive calls
 template<typename T>
-T fromAnything(const Schema* schema, const void* data, T* = nullptr);
+T fromAnything(const Schema* schema, const void* data, T* = nullptr, const void* base_ptr = nullptr);
 
 // Tuple helper (needs forward declaration of fromAnything)
 template<typename Tuple, size_t... Is>
@@ -455,15 +464,17 @@ Tuple fromTupleAnythingHelper(
   const Schema* schema,
   const void* anything,
   std::index_sequence<Is...>,
-  Tuple* = nullptr
+  Tuple* = nullptr,
+  const void* base_ptr = nullptr
 ) {
     return Tuple(fromAnything(schema->parameters[Is],
                               (char*)anything + schema->offsets[Is],
-                              static_cast<std::tuple_element_t<Is, Tuple>*>(nullptr))...);
+                              static_cast<std::tuple_element_t<Is, Tuple>*>(nullptr),
+                              base_ptr)...);
 }
 
 template<typename T>
-T fromAnything(const Schema* schema, const void* data, T*) {
+T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr) {
     if(data == NULL){
         throw std::runtime_error("Void error in fromAnything");
     }
@@ -475,7 +486,7 @@ T fromAnything(const Schema* schema, const void* data, T*) {
     else if constexpr (std::is_same_v<T, std::string>) {
         Array* array = (Array*)data;
         if(array->size > 0){
-            return std::string((char*)cpp_rel2abs(array->data), array->size);
+            return std::string((char*)resolve_relptr_cpp(array->data, base_ptr), array->size);
         }
         return std::string("");
     }
@@ -499,10 +510,8 @@ T fromAnything(const Schema* schema, const void* data, T*) {
             case MORLOC_UINT64:
             case MORLOC_FLOAT32:
             case MORLOC_FLOAT64: {
-                std::vector<ElemT> pv(
-                    (ElemT*)(cpp_rel2abs(array->data)),
-                    (ElemT*)(cpp_rel2abs(array->data)) + array->size
-                );
+                ElemT* arr_start = (ElemT*)resolve_relptr_cpp(array->data, base_ptr);
+                std::vector<ElemT> pv(arr_start, arr_start + array->size);
                 return pv;
             }
         }
@@ -510,9 +519,9 @@ T fromAnything(const Schema* schema, const void* data, T*) {
         // Complex element types
         result.reserve(array->size);
         const Schema* elem_schema = schema->parameters[0];
-        char* start = (char*)cpp_rel2abs(array->data);
+        char* start = (char*)resolve_relptr_cpp(array->data, base_ptr);
         for(size_t i = 0; i < array->size; i++){
-            result.push_back(fromAnything(elem_schema, (void*)(start + i * elem_schema->width), static_cast<ElemT*>(nullptr)));
+            result.push_back(fromAnything(elem_schema, (void*)(start + i * elem_schema->width), static_cast<ElemT*>(nullptr), base_ptr));
         }
         return result;
     }
@@ -523,19 +532,19 @@ T fromAnything(const Schema* schema, const void* data, T*) {
         if(array->size == 0) return result;
 
         const Schema* elem_schema = schema->parameters[0];
-        char* start = (char*)cpp_rel2abs(array->data);
+        char* start = (char*)resolve_relptr_cpp(array->data, base_ptr);
 
         constexpr bool reverse = is_std_stack<T>::value || is_std_forward_list<T>::value;
 
         if constexpr (reverse) {
             for (size_t i = array->size; i > 0; --i) {
-                auto elem = fromAnything(elem_schema, (void*)(start + (i-1) * elem_schema->width), static_cast<ElemT*>(nullptr));
+                auto elem = fromAnything(elem_schema, (void*)(start + (i-1) * elem_schema->width), static_cast<ElemT*>(nullptr), base_ptr);
                 if constexpr (is_std_stack<T>::value) result.push(std::move(elem));
                 else result.push_front(std::move(elem));
             }
         } else {
             for (size_t i = 0; i < array->size; ++i) {
-                auto elem = fromAnything(elem_schema, (void*)(start + i * elem_schema->width), static_cast<ElemT*>(nullptr));
+                auto elem = fromAnything(elem_schema, (void*)(start + i * elem_schema->width), static_cast<ElemT*>(nullptr), base_ptr);
                 if constexpr (is_std_queue<T>::value) result.push(std::move(elem));
                 else result.push_back(std::move(elem));
             }
@@ -546,14 +555,16 @@ T fromAnything(const Schema* schema, const void* data, T*) {
         return fromTupleAnythingHelper(
             schema, data,
             std::make_index_sequence<std::tuple_size_v<T>>{},
-            static_cast<T*>(nullptr)
+            static_cast<T*>(nullptr),
+            base_ptr
         );
     }
     else if constexpr (is_std_pair<T>::value) {
         return fromTupleAnythingHelper(
             schema, data,
             std::index_sequence<0, 1>{},
-            static_cast<T*>(nullptr)
+            static_cast<T*>(nullptr),
+            base_ptr
         );
     }
     else if constexpr (is_std_optional<T>::value) {
@@ -562,7 +573,7 @@ T fromAnything(const Schema* schema, const void* data, T*) {
         if (tag == 0) {
             return std::nullopt;
         }
-        return std::optional<InnerT>(fromAnything(schema->parameters[0], (const char*)data + schema->offsets[0], static_cast<InnerT*>(nullptr)));
+        return std::optional<InnerT>(fromAnything(schema->parameters[0], (const char*)data + schema->offsets[0], static_cast<InnerT*>(nullptr), base_ptr));
     }
     else {
         // Primitives (int, double, float, etc.)

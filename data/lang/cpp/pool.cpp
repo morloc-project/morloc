@@ -123,9 +123,26 @@ uint8_t* _put_value(const T& value, const std::string& schema_str) {
     try {
         voidstar = toAnything(schema, value);
         relptr_t relptr = abs2rel_cpp(voidstar);
-        uint8_t* packet = make_standard_data_packet(relptr, schema);
-        // Track SHM for deferred cleanup
-        _shm_tracker.push_back({(absptr_t)voidstar, schema});
+
+        char* errmsg = nullptr;
+        uint8_t* packet = make_data_packet_auto(voidstar, relptr, schema, &errmsg);
+        if (errmsg) {
+            shfree_cpp(voidstar);
+            PROPAGATE_ERROR(errmsg);
+        }
+
+        const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
+        if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
+            // SHM referenced by packet -- track for deferred cleanup
+            _shm_tracker.push_back({(absptr_t)voidstar, schema});
+        } else {
+            // Data inlined in packet -- free SHM immediately
+            char* free_err = NULL;
+            shfree_by_schema((absptr_t)voidstar, schema, &free_err);
+            if (free_err) { free(free_err); free_err = NULL; }
+            shfree((absptr_t)voidstar, &free_err);
+            if (free_err) { free(free_err); }
+        }
         return packet;
     } catch (...) {
         if (voidstar) shfree_cpp(voidstar);
@@ -139,9 +156,19 @@ template <typename T>
 T _get_value(const uint8_t* packet, const std::string& schema_str){
     Schema* schema = get_cached_schema(schema_str.c_str());
 
-    // Check if this is an RPTR packet (references existing SHM we don't own)
     const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
-    bool is_rptr = (header->command.data.source == PACKET_SOURCE_RPTR);
+    uint8_t source = header->command.data.source;
+    uint8_t format = header->command.data.format;
+
+    // Fast path: inline voidstar -- read directly from packet, no SHM needed
+    if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
+        const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
+        T* dummy = nullptr;
+        return fromAnything(schema, (const void*)payload, dummy, (const void*)payload);
+    }
+
+    // SHM paths (RPTR or MESG+MSGPACK): existing logic
+    bool is_rptr = (source == PACKET_SOURCE_RPTR);
 
     char* errmsg = NULL;
     uint8_t* voidstar = get_morloc_data_packet_value(packet, schema, &errmsg);
@@ -158,8 +185,8 @@ T _get_value(const uint8_t* packet, const std::string& schema_str){
         _shm_tracker.push_back({(absptr_t)voidstar, schema});
     }
 
-    T* dumby = nullptr;
-    return fromAnything(schema, (void*)voidstar, dumby);
+    T* dummy = nullptr;
+    return fromAnything(schema, (void*)voidstar, dummy);
 }
 
 

@@ -176,11 +176,12 @@ size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG){
         case MORLOC_ARRAY:
             {
                 Array* array = (Array*)data;
-                size_t element_width = schema->parameters[0]->width;
+                size = sizeof(Array);
+                if (array->size == 0) break;
 
+                size_t element_width = schema->parameters[0]->width;
                 uint8_t* element_data = TRY((uint8_t*)rel2abs, array->data);
 
-                size = sizeof(Array);
                 // worst-case cursor alignment padding
                 size += schema_alignment(schema->parameters[0]) - 1;
 

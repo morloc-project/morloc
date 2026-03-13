@@ -116,6 +116,9 @@ static_assert(
     "Header size mismatch!"
 );
 
+// Inline threshold: voidstar data <= this size is embedded in packet payload
+#define MORLOC_INLINE_THRESHOLD (64 * 1024)
+
 #define MORLOC_METADATA_TYPE_SCHEMA_STRING 0x01
 #define MORLOC_METADATA_TYPE_XXHASH 0x02
 #define MORLOC_METADATA_HEADER_MAGIC "mmh"

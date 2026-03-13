@@ -461,7 +461,7 @@ static void* to_voidstar(SEXP obj, const Schema* schema) {
 
 // {{{ from_voidstar
 
-static SEXP from_voidstar(const void* data, const Schema* schema) {
+static SEXP from_voidstar(const void* data, const Schema* schema, const void* base_ptr) {
     MAYFAIL
 
     if(data == NULL){
@@ -513,7 +513,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                 if (schema->hint != NULL && strcmp(schema->hint, "raw") == 0){
                     Array* raw_array = (Array*)data;
                     if(raw_array->size > 0){
-                        absptr_t tmp_ptr = R_TRY(rel2abs, raw_array->data);
+                        void* tmp_ptr = R_TRY(resolve_relptr, raw_array->data, base_ptr);
                         obj = PROTECT(allocVector(RAWSXP, raw_array->size));
                         memcpy(RAW(obj), tmp_ptr, raw_array->size);
                     } else {
@@ -523,7 +523,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                 } else {
                     Array* str_array = (Array*)data;
                     if(str_array->size > 0){
-                        absptr_t tmp_ptr = R_TRY(rel2abs, str_array->data);
+                        void* tmp_ptr = R_TRY(resolve_relptr, str_array->data, base_ptr);
                         SEXP chr = PROTECT(mkCharLen(tmp_ptr, str_array->size));
                         obj = PROTECT(ScalarString(chr));
                     } else {
@@ -547,7 +547,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             LOGICAL(obj)[i] = (bool)*(uint8_t*)(start + i) ? TRUE : FALSE;
                         }
@@ -559,7 +559,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             INTEGER(obj)[i] = (int)(*(int8_t*)(start + i * sizeof(int8_t)));
                         }
@@ -571,7 +571,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             INTEGER(obj)[i] = (int)(*(int16_t*)(start + i * sizeof(int16_t)));
                         }
@@ -583,8 +583,10 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        absptr_t tmp_ptr = R_TRY(rel2abs, array->data);
-                        memcpy(INTEGER(obj), tmp_ptr, array->size * sizeof(int32_t));
+                        {
+                            void* tmp_ptr = R_TRY(resolve_relptr, array->data, base_ptr);
+                            memcpy(INTEGER(obj), tmp_ptr, array->size * sizeof(int32_t));
+                        }
                         UNPROTECT(1);
                         break;
                     case MORLOC_SINT64:
@@ -593,7 +595,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             REAL(obj)[i] = (double)(*(int64_t*)(start + i * sizeof(int64_t)));
                         }
@@ -606,7 +608,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         memcpy(RAW(obj), start, array->size * sizeof(uint8_t));
                         UNPROTECT(1);
                         break;
@@ -616,7 +618,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             INTEGER(obj)[i] = (int)(*(uint16_t*)(start + i * sizeof(uint16_t)));
                         }
@@ -628,7 +630,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             REAL(obj)[i] = (double)(*(uint32_t*)(start + i * sizeof(uint32_t)));
                         }
@@ -641,7 +643,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             REAL(obj)[i] = (double)(*(uint64_t*)(start + i * sizeof(uint64_t)));
                         }
@@ -653,7 +655,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             REAL(obj)[i] = (double)(*(float*)(start + i * sizeof(float)));
                         }
@@ -665,7 +667,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         memcpy(REAL(obj), start, array->size * sizeof(double));
                         UNPROTECT(1);
                         break;
@@ -676,7 +678,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                                 UNPROTECT(1);
                                 break;
                             }
-                            start = (char*)R_TRY(rel2abs, array->data);
+                            start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                             size_t width = schema->width;
                             for (size_t i = 0; i < array->size; i++) {
                                 Array* str_array = (Array*)(start + i * width);
@@ -684,7 +686,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                                 if(str_array->size == 0){
                                     item = PROTECT(mkCharLen("", 0));
                                 } else {
-                                    absptr_t str_ptr = R_TRY_WITH(UNPROTECT(1), rel2abs, str_array->data);
+                                    void* str_ptr = R_TRY_WITH(UNPROTECT(1), resolve_relptr, str_array->data, base_ptr);
                                     item = PROTECT(mkCharLen(str_ptr, str_array->size));
                                 }
                                 UNPROTECT(1);
@@ -700,10 +702,10 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                                 UNPROTECT(1);
                                 break;
                             }
-                            start = (char*)R_TRY(rel2abs, array->data);
+                            start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                             size_t width = element_schema->width;
                             for (size_t i = 0; i < array->size; i++) {
-                                SEXP item = from_voidstar(start + width * i, element_schema);
+                                SEXP item = from_voidstar(start + width * i, element_schema, base_ptr);
                                 if (item == R_NilValue) {
                                     UNPROTECT(1);
                                     obj = R_NilValue;
@@ -721,7 +723,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
             obj = PROTECT(allocVector(VECSXP, schema->size));
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
-                SEXP item = from_voidstar(item_ptr, schema->parameters[i]);
+                SEXP item = from_voidstar(item_ptr, schema->parameters[i], base_ptr);
                 if (item == R_NilValue) {
                     UNPROTECT(1);
                     obj = R_NilValue;
@@ -737,7 +739,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
             SEXP names = PROTECT(allocVector(STRSXP, schema->size));
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
-                SEXP value = from_voidstar(item_ptr, schema->parameters[i]);
+                SEXP value = from_voidstar(item_ptr, schema->parameters[i], base_ptr);
                 if (value == R_NilValue) {
                     UNPROTECT(2);
                     obj = R_NilValue;
@@ -755,7 +757,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
             if (tag == 0) {
                 return R_NilValue;
             }
-            obj = from_voidstar((const char*)data + schema->offsets[0], schema->parameters[0]);
+            obj = from_voidstar((const char*)data + schema->offsets[0], schema->parameters[0], base_ptr);
             break;
         }
         default:
@@ -1083,7 +1085,17 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 
     relptr_t relptr = R_TRY_WITH(free_schema(schema), abs2rel, voidstar);
 
-    uint8_t* packet = make_standard_data_packet(relptr, schema);
+    uint8_t* packet = R_TRY_WITH(free_schema(schema), make_data_packet_auto, voidstar, relptr, schema);
+
+    const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
+    if (hdr->command.data.source != PACKET_SOURCE_RPTR) {
+        // Data inlined in packet -- free SHM immediately
+        char* free_err = NULL;
+        shfree_by_schema((absptr_t)voidstar, schema, &free_err);
+        if (free_err) { free(free_err); free_err = NULL; }
+        shfree((absptr_t)voidstar, &free_err);
+        if (free_err) { free(free_err); }
+    }
 
     size_t packet_size = R_TRY_WITH({free(packet); free_schema(schema);}, morloc_packet_size, packet);
 
@@ -1145,9 +1157,25 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
+    const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
+    uint8_t source = header->command.data.source;
+    uint8_t format = header->command.data.format;
+
+    // Fast path: inline voidstar -- read directly from packet, no SHM needed
+    if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
+        const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
+        SEXP obj_r = from_voidstar((const void*)payload, schema, (const void*)payload);
+        free_schema(schema);
+        if (obj_r == NULL) {
+            MORLOC_ERROR("Failed to convert internal representation to R object");
+        }
+        return obj_r;
+    }
+
+    // SHM paths
     uint8_t* voidstar = R_TRY_WITH(free_schema(schema), get_morloc_data_packet_value, packet, schema);
 
-    SEXP obj_r = from_voidstar(voidstar, schema);
+    SEXP obj_r = from_voidstar(voidstar, schema, NULL);
     if (obj_r == NULL) {
         free_schema(schema);
         MORLOC_ERROR("Failed to convert internal representation to R object");
