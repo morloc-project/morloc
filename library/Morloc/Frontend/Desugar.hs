@@ -228,6 +228,9 @@ quantifyType t = forallWrap (nub (collectGenVars t)) t
     collectGenVars (NamU _ _ ts entries) = concatMap collectGenVars ts ++ concatMap (collectGenVars . snd) entries
     collectGenVars (EffectU _ inner) = collectGenVars inner
     collectGenVars (OptionalU inner) = collectGenVars inner
+    collectGenVars (NatLitU _) = []
+    collectGenVars (NatAddU a b) = collectGenVars a ++ collectGenVars b
+    collectGenVars (NatMulU a b) = collectGenVars a ++ collectGenVars b
     collectGenVars _ = []
 
 parseLang :: Located -> D Lang

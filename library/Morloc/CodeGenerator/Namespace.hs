@@ -157,6 +157,7 @@ data TypeF
   | NamF NamType FVar [TypeF] [(Key, TypeF)]
   | EffectF (Set.Set EffectLabel) TypeF
   | OptionalF TypeF
+  | NatLitF Integer
   deriving (Show, Ord, Eq)
 
 data TypeM

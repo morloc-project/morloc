@@ -144,6 +144,9 @@ data Type
   | NamT NamType TVar [Type] [(Key, Type)]
   | EffectT (Set.Set EffectLabel) Type
   | OptionalT Type
+  | NatLitT Integer
+  | NatAddT Type Type
+  | NatMulT Type Type
   deriving (Show, Ord, Eq)
 
 data OpenOrClosed = Open | Closed
@@ -165,6 +168,9 @@ data TypeU
   | NamU NamType TVar [TypeU] [(Key, TypeU)]
   | EffectU EffectSet TypeU
   | OptionalU TypeU
+  | NatLitU Integer
+  | NatAddU TypeU TypeU
+  | NatMulU TypeU TypeU
   deriving (Show, Ord, Eq)
 
 {- | Extended Type that may represent a language specific type as well as sets
@@ -267,6 +273,9 @@ instance Typelike Type where
       sub (NamT r n ps es) = NamT r n ps [(k, sub t) | (k, t) <- es]
       sub (EffectT effs t) = EffectT effs (sub t)
       sub (OptionalT t) = OptionalT (sub t)
+      sub t@(NatLitT _) = t
+      sub (NatAddT a b) = NatAddT (sub a) (sub b)
+      sub (NatMulT a b) = NatMulT (sub a) (sub b)
 
   free (UnkT _) = Set.empty
   free v@(VarT _) = Set.singleton v
@@ -275,12 +284,17 @@ instance Typelike Type where
   free (NamT _ _ _ es) = Set.unions (map (free . snd) es)
   free (EffectT _ t) = free t
   free (OptionalT t) = free t
+  free (NatLitT _) = Set.empty
+  free (NatAddT a b) = Set.union (free a) (free b)
+  free (NatMulT a b) = Set.union (free a) (free b)
 
   normalizeType (FunT ts1 (FunT ts2 ft)) = normalizeType $ FunT (ts1 <> ts2) ft
   normalizeType (AppT t ts) = AppT (normalizeType t) (map normalizeType ts)
   normalizeType (NamT n v ds ks) = NamT n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
   normalizeType (EffectT effs t) = EffectT effs (normalizeType t)
   normalizeType (OptionalT t) = OptionalT (normalizeType t)
+  normalizeType (NatAddT a b) = NatAddT (normalizeType a) (normalizeType b)
+  normalizeType (NatMulT a b) = NatMulT (normalizeType a) (normalizeType b)
   normalizeType t = t
 
 instance Typelike TypeU where
@@ -293,6 +307,9 @@ instance Typelike TypeU where
   typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
   typeOf (EffectU effs t) = EffectT (resolveEffectSet effs) (typeOf t)
   typeOf (OptionalU t) = OptionalT (typeOf t)
+  typeOf (NatLitU n) = NatLitT n
+  typeOf (NatAddU a b) = NatAddT (typeOf a) (typeOf b)
+  typeOf (NatMulU a b) = NatMulT (typeOf a) (typeOf b)
 
   free v@(VarU _) = Set.singleton v
   free v@(ExistU _ ([], _) (rs, _)) = Set.unions $ Set.singleton v : map (free . snd) rs
@@ -303,6 +320,9 @@ instance Typelike TypeU where
   free (NamU _ _ ps rs) = Set.unions $ map free (map snd rs <> ps)
   free (EffectU _ t) = free t
   free (OptionalU t) = free t
+  free (NatLitU _) = Set.empty
+  free (NatAddU a b) = Set.union (free a) (free b)
+  free (NatMulU a b) = Set.union (free a) (free b)
 
   substituteTVar v (ForallU q r) t =
     if Set.member (VarU q) (free t)
@@ -326,6 +346,9 @@ instance Typelike TypeU where
       sub (NamU r n ps rs) = NamU r n (map sub ps) [(k, sub t) | (k, t) <- rs]
       sub (EffectU effs t) = EffectU effs (sub t)
       sub (OptionalU t) = OptionalU (sub t)
+      sub t@(NatLitU _) = t
+      sub (NatAddU a b) = NatAddU (sub a) (sub b)
+      sub (NatMulU a b) = NatMulU (sub a) (sub b)
 
   normalizeType (FunU ts1 (FunU ts2 ft)) = normalizeType $ FunU (ts1 <> ts2) ft
   normalizeType (AppU t ts) = AppU (normalizeType t) (map normalizeType ts)
@@ -334,6 +357,8 @@ instance Typelike TypeU where
   normalizeType (ExistU v (map normalizeType -> ps, pc) (map (second normalizeType) -> rs, rc)) = ExistU v (ps, pc) (rs, rc)
   normalizeType (EffectU effs t) = EffectU effs (normalizeType t)
   normalizeType (OptionalU t) = OptionalU (normalizeType t)
+  normalizeType (NatAddU a b) = NatAddU (normalizeType a) (normalizeType b)
+  normalizeType (NatMulU a b) = NatMulU (normalizeType a) (normalizeType b)
   normalizeType t = t
 
 ----- Partial order logic
@@ -360,6 +385,9 @@ instance P.PartialOrd TypeU where
     o1 == o2 && n1 == n2 && length ps1 == length ps2
   (<=) (EffectU e1 t1) (EffectU e2 t2) = e1 == e2 && t1 P.<= t2
   (<=) (OptionalU t1) (OptionalU t2) = t1 P.<= t2
+  (<=) (NatLitU n1) (NatLitU n2) = n1 == n2
+  (<=) (NatAddU a1 b1) (NatAddU a2 b2) = a1 P.<= a2 && b1 P.<= b2
+  (<=) (NatMulU a1 b1) (NatMulU a2 b2) = a1 P.<= a2 && b1 P.<= b2
   (<=) _ _ = False
 
   (==) (ForallU v1 t1) (ForallU v2 t2) =
@@ -397,6 +425,8 @@ findFirst v = f
         _ -> Nothing
     f (EffectU _ t1) (EffectU _ t2) = f t1 t2
     f (OptionalU t1) (OptionalU t2) = f t1 t2
+    f (NatAddU a1 b1) (NatAddU a2 b2) = firstOf (f a1 a2) (f b1 b2)
+    f (NatMulU a1 b1) (NatMulU a2 b2) = firstOf (f a1 a2) (f b1 b2)
     f _ _ = Nothing
 
     firstOf :: Maybe a -> Maybe a -> Maybe a
@@ -435,6 +465,9 @@ extractKey (NamU _ v _ _) = v
 extractKey (ExistU v _ _) = v
 extractKey (EffectU _ t) = extractKey t
 extractKey (OptionalU t) = extractKey t
+extractKey (NatLitU _) = TV "Nat"
+extractKey (NatAddU _ _) = TV "Nat"
+extractKey (NatMulU _ _) = TV "Nat"
 extractKey t = error $ "Cannot currently handle functional type imports: " <> show t
 
 type2typeu :: Type -> TypeU
@@ -445,6 +478,9 @@ type2typeu (AppT v ts) = AppU (type2typeu v) (map type2typeu ts)
 type2typeu (NamT o n ps rs) = NamU o n (map type2typeu ps) [(k, type2typeu x) | (k, x) <- rs]
 type2typeu (EffectT effs t) = EffectU (EffectSet effs) (type2typeu t)
 type2typeu (OptionalT t) = OptionalU (type2typeu t)
+type2typeu (NatLitT n) = NatLitU n
+type2typeu (NatAddT a b) = NatAddU (type2typeu a) (type2typeu b)
+type2typeu (NatMulT a b) = NatMulU (type2typeu a) (type2typeu b)
 
 unresolvedType2type :: TypeU -> Type
 unresolvedType2type (VarU v) = VarT v
@@ -455,6 +491,9 @@ unresolvedType2type (AppU v ts) = AppT (unresolvedType2type v) (map unresolvedTy
 unresolvedType2type (NamU t n ps rs) = NamT t n (map unresolvedType2type ps) [(k, unresolvedType2type e) | (k, e) <- rs]
 unresolvedType2type (EffectU effs t) = EffectT (resolveEffectSet effs) (unresolvedType2type t)
 unresolvedType2type (OptionalU t) = OptionalT (unresolvedType2type t)
+unresolvedType2type (NatLitU n) = NatLitT n
+unresolvedType2type (NatAddU a b) = NatAddT (unresolvedType2type a) (unresolvedType2type b)
+unresolvedType2type (NatMulU a b) = NatMulT (unresolvedType2type a) (unresolvedType2type b)
 
 -- | get a fresh variable name that is not used in t1 or t2
 newVariable :: TypeU -> TypeU -> TVar
@@ -474,6 +513,8 @@ newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
     allVars (ForallU v t) = Set.union (Set.singleton (VarU v)) (allVars t)
     allVars (EffectU _ t) = allVars t
     allVars (OptionalU t) = allVars t
+    allVars (NatAddU a b) = Set.union (allVars a) (allVars b)
+    allVars (NatMulU a b) = Set.union (allVars a) (allVars b)
     allVars t = free t
 
 {- | Check whether a ground type contains any unknown (unresolved) type variables.
@@ -487,6 +528,9 @@ containsUnk (AppT t ts) = containsUnk t || any containsUnk ts
 containsUnk (NamT _ _ ps rs) = any containsUnk ps || any (containsUnk . snd) rs
 containsUnk (EffectT _ t) = containsUnk t
 containsUnk (OptionalT t) = containsUnk t
+containsUnk (NatLitT _) = False
+containsUnk (NatAddT a b) = containsUnk a || containsUnk b
+containsUnk (NatMulT a b) = containsUnk a || containsUnk b
 
 ----- Pretty instances -------------------------------------------------------
 
@@ -510,6 +554,9 @@ instance Pretty Type where
         | Set.null effs = "{" <> f True t <> "}"
         | otherwise = "<" <> hcat (punctuate "," (map pretty (Set.toList effs))) <> ">" <+> f False t
       f _ (OptionalT t) = "?" <> f False t
+      f _ (NatLitT n) = pretty n
+      f _ (NatAddT a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
+      f _ (NatMulT a b) = "(" <> f True a <+> "*" <+> f True b <> ")"
       f False t = parens (f True t)
       f _ (FunT [] t) = "() -> " <> f False t
       f _ (FunT ts t) = hsep $ punctuate " -> " (map (f False) (ts <> [t]))
@@ -539,6 +586,9 @@ instance Pretty TypeU where
               then "{" <> f True t <> "}"
               else "<" <> hcat (punctuate "," (map pretty (Set.toList labels))) <> ">" <+> f False t
       f _ (OptionalU t) = "?" <> f False t
+      f _ (NatLitU n) = pretty n
+      f _ (NatAddU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
+      f _ (NatMulU a b) = "(" <> f True a <+> "*" <+> f True b <> ")"
       f False t = parens (f True t)
       f _ (ExistU v (ts, _) (rs, _)) =
         angles $

@@ -295,10 +295,11 @@ makeSerialAST m lang t0 = do
         selectPacker _ = MM.throwSourcedError m "Two you say, oh, get out of here"
     makeSerialAST' _ _ t@(FunF _ _) =
       MM.throwSourcedError m $ "Cannot serialize functions at" <+> pretty m <> ":" <+> pretty t
-    makeSerialAST' gscope typepackers ft@(AppF (VarF fv@(FV generalTypeName _)) ts@(firstType : _))
-      | finalVar == Just BT.list = SerialList fv <$> makeSerialAST' gscope typepackers firstType
-      | finalVar == Just (BT.tuple (length ts)) =
-          SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers) ts
+    makeSerialAST' gscope typepackers ft@(AppF (VarF fv@(FV generalTypeName _)) ts0)
+      | null runtimeTs = MM.throwSourcedError m $ "No runtime type args for" <+> pretty ft
+      | finalVar == Just BT.list = SerialList fv <$> makeSerialAST' gscope typepackers (head runtimeTs)
+      | finalVar == Just (BT.tuple (length runtimeTs)) =
+          SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers) runtimeTs
       | otherwise = case Map.lookup generalTypeName typepackers of
           (Just ps) -> do
             packers <- catMaybes <$> mapM (resolvePacker lang m ft) ps
@@ -315,6 +316,13 @@ makeSerialAST m lang t0 = do
                 <> "\n  concrete t:" <+> (viaShow . snd $ unweaveTypeF ft)
                 <> "\n  typepackers:" <+> viaShow typepackers
       where
+        -- Filter out Nat-kinded type params (phantom, not serialized)
+        isNatTypeF :: TypeF -> Bool
+        isNatTypeF (NatLitF _) = True
+        isNatTypeF _ = False
+
+        runtimeTs = filter (not . isNatTypeF) ts0
+
         basevar :: TypeU -> Maybe TVar
         basevar (VarU v) = Just v
         basevar (ExistU _ _ _) = Nothing
@@ -324,6 +332,9 @@ makeSerialAST m lang t0 = do
         basevar (NamU _ v _ _) = Just v
         basevar (EffectU _ _) = Nothing
         basevar (OptionalU _) = Nothing
+        basevar (NatLitU _) = Nothing
+        basevar (NatAddU _ _) = Nothing
+        basevar (NatMulU _ _) = Nothing
 
         finalVar =
           let t = fst $ unweaveTypeF ft
@@ -480,6 +491,9 @@ unweaveTypeF (OptionalF t) =
   let (gt, ct) = unweaveTypeF t
    in (OptionalU gt, OptionalU ct)
 
+-- Nat types have no concrete/general distinction; duplicate as-is
+unweaveTypeF (NatLitF n) = (NatLitU n, NatLitU n)
+
 weaveTypeF :: TypeU -> TypeU -> TypeF
 weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv (tv2cv cv))
 weaveTypeF (FunU tsg tg) (FunU tsc tc) = FunF (zipWith weaveTypeF tsg tsc) (weaveTypeF tg tc)
@@ -496,6 +510,8 @@ weaveTypeF (NamU n gv psg rsg) (NamU _ cv psc rsc) =
 weaveTypeF (EffectU effs gt) (EffectU _ ct) = EffectF (resolveEffectSet effs) (weaveTypeF gt ct)
 weaveTypeF (OptionalU gt) (OptionalU ct) = OptionalF (weaveTypeF gt ct)
 weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
+weaveTypeF (NatLitU n) (NatLitU _) = NatLitF n
+weaveTypeF (NatLitU n) _ = NatLitF n  -- Nat params may be erased in concrete type
 weaveTypeF gt ct = error . show $ (gt, ct)
 
 {- | Given a list of possible ways to (de)serialize data between two languages,

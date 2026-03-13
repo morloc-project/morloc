@@ -1,0 +1,35 @@
+-- Test SOP-based Nat constraint solving.
+-- Verifies:
+--   1. Cross-form equality: (2 + 3) ~ 5 via SOP normalization
+--   2. Commutativity: (3 + 2) ~ (2 + 3)
+--   3. Nat variable solving: ?m + 3 = 5 => ?m = 2
+
+module main (foo, bar, baz)
+
+import root-py
+
+type Py => Int = "int"
+
+type SizedList n a = [a]
+type Py => (SizedList n a) = "list" a
+
+myAppend m n a :: SizedList m a -> SizedList n a -> SizedList (m + n) a
+source Py from "helper.py" ("my_append" as myAppend)
+
+makeTwo :: SizedList 2 Int
+source Py from "helper.py" ("make_two" as makeTwo)
+
+makeThree :: SizedList 3 Int
+source Py from "helper.py" ("make_three" as makeThree)
+
+-- Cross-form: return type is SizedList (2+3) Int, expected SizedList 5 Int
+foo :: SizedList 5 Int
+foo = myAppend makeTwo makeThree
+
+-- Commutativity: myAppend returns SizedList (3+2) Int, expected SizedList (2+3) Int
+bar :: SizedList (2 + 3) Int
+bar = myAppend makeThree makeTwo
+
+-- Mixed: ensure Nat solving through variable instantiation still works
+baz :: SizedList (2 + 3) Int
+baz = myAppend makeTwo makeThree

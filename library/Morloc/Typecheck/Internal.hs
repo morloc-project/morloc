@@ -79,6 +79,7 @@ import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import Morloc.Namespace.Type
+import qualified Morloc.Typecheck.NatSolver as NS
 import qualified Morloc.TypeEval as TE
 
 qualify :: [TVar] -> TypeU -> TypeU
@@ -125,6 +126,9 @@ instance Applicable TypeU where
   apply g (NamU o n ps rs) = NamU o n ps [(k, apply g t) | (k, t) <- rs]
   apply g (EffectU effs t) = EffectU effs (apply g t)
   apply g (OptionalU t) = OptionalU (apply g t)
+  apply _ t@(NatLitU _) = t
+  apply g (NatAddU a b) = NatAddU (apply g a) (apply g b)
+  apply g (NatMulU a b) = NatMulU (apply g a) (apply g b)
 
 instance Applicable EType where
   apply g e =
@@ -200,6 +204,37 @@ subtypeError t1 t2 msg =
     "Subtype error:" <+> msg
       <> "\n  "
       <> prettyTypeU t1 <+> "<:" <+> prettyTypeU t2
+
+-- Nat expression helpers for SOP-based comparison
+isNatExpr :: TypeU -> Bool
+isNatExpr (NatLitU _) = True
+isNatExpr (NatAddU _ _) = True
+isNatExpr (NatMulU _ _) = True
+isNatExpr _ = False
+
+typeUToNatExpr :: TypeU -> Maybe NS.NatExpr
+typeUToNatExpr (NatLitU n) = Just (NS.NatLit n)
+typeUToNatExpr (NatAddU a b) = NS.NatAdd <$> typeUToNatExpr a <*> typeUToNatExpr b
+typeUToNatExpr (NatMulU a b) = NS.NatMul <$> typeUToNatExpr a <*> typeUToNatExpr b
+typeUToNatExpr (VarU v) = Just (NS.NatVar v)
+typeUToNatExpr (ExistU v _ _) = Just (NS.NatVar v)
+typeUToNatExpr _ = Nothing
+
+natExprToTypeU :: NS.NatExpr -> TypeU
+natExprToTypeU (NS.NatLit n) = NatLitU n
+natExprToTypeU (NS.NatVar v) = VarU v
+natExprToTypeU (NS.NatAdd a b) = NatAddU (natExprToTypeU a) (natExprToTypeU b)
+natExprToTypeU (NS.NatMul a b) = NatMulU (natExprToTypeU a) (natExprToTypeU b)
+
+applyNatSolutions :: Map.Map TVar NS.NatExpr -> Gamma -> Either MDoc Gamma
+applyNatSolutions subs g0 = foldM applySub g0 (Map.toList subs)
+  where
+    applySub g (v, ne) =
+      let t = natExprToTypeU ne
+      in case solveExist v t g of
+           Right (Just g') -> Right g'
+           Right Nothing -> Right g
+           Left err -> Left err
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
@@ -322,6 +357,21 @@ subtype scope (ForallU v a) b g0 = subtype scope (substitute v a) b (g0 +> v)
 -- ----------------------------------------- <:ForallR
 --  g1 |- A <: Forall a. B -| g2
 subtype scope a (ForallU v b) g = subtype scope a b (g +> VarG v) >>= cut (VarG v)
+-- Nat expressions: compare via SOP normalization (handles commutativity,
+-- associativity, and cross-form equality like 2+3 ~ 5)
+subtype _ t1 t2 g
+  | isNatExpr t1 && isNatExpr t2 =
+      let t1' = apply g t1
+          t2' = apply g t2
+      in case (typeUToNatExpr t1', typeUToNatExpr t2') of
+           (Just ne1, Just ne2) ->
+             case NS.solveNat ne1 ne2 of
+               Right subs
+                 | Map.null subs -> return g
+                 | otherwise -> applyNatSolutions subs g
+               Left NS.Contradiction -> subtypeError t1 t2 "Nat constraint mismatch"
+               Left (NS.Deferred _) -> return g
+           _ -> subtypeError t1 t2 "Cannot compare Nat expressions"
 -- note that these need to be evaluated AFTER all the existentials
 subtype scope t1@(VarU _) t2 g = subtypeEvaluated scope t1 t2 g
 subtype scope t1 t2@(VarU _) g = subtypeEvaluated scope t1 t2 g
@@ -521,6 +571,9 @@ solve v t
     occursIn v' (NamU _ _ ps rs) = any (occursIn v') ps || any (occursIn v' . snd) rs
     occursIn v' (EffectU _ t') = occursIn v' t'
     occursIn v' (OptionalU t') = occursIn v' t'
+    occursIn _ (NatLitU _) = False
+    occursIn v' (NatAddU a b) = occursIn v' a || occursIn v' b
+    occursIn v' (NatMulU a b) = occursIn v' a || occursIn v' b
 
 -- | Record a solved variable in the gamma map cache
 cacheSolved :: TVar -> TypeU -> Gamma -> Gamma
@@ -839,6 +892,9 @@ collectExistVars = go
     go (NamU _ _ ps rs) = concatMap go ps ++ concatMap (go . snd) rs
     go (EffectU _ t) = go t
     go (OptionalU t) = go t
+    go (NatLitU _) = []
+    go (NatAddU a b) = go a ++ go b
+    go (NatMulU a b) = go a ++ go b
 
 collectFixedNames :: Set.Set TVar -> TypeU -> Set.Set Text
 collectFixedNames generics = go
@@ -854,6 +910,9 @@ collectFixedNames generics = go
       Set.insert n $ Set.unions (map go ps ++ map (go . snd) rs)
     go (EffectU _ t) = go t
     go (OptionalU t) = go t
+    go (NatLitU _) = Set.empty
+    go (NatAddU a b) = Set.union (go a) (go b)
+    go (NatMulU a b) = Set.union (go a) (go b)
 
 applyVarRenaming :: Map.Map TVar TVar -> TypeU -> TypeU
 applyVarRenaming m = go
@@ -868,6 +927,9 @@ applyVarRenaming m = go
     go (NamU n o ps rs) = NamU n o (map go ps) [(k, go t) | (k, t) <- rs]
     go (EffectU effs t) = EffectU effs (go t)
     go (OptionalU t) = OptionalU (go t)
+    go t@(NatLitU _) = t
+    go (NatAddU a b) = NatAddU (go a) (go b)
+    go (NatMulU a b) = NatMulU (go a) (go b)
 
 prettyTypeU :: TypeU -> MDoc
 prettyTypeU = pretty . cleanTypeName

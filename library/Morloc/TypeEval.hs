@@ -198,6 +198,9 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     f bnd (ForallU v t) = ForallU v <$> recurse (Set.insert v bnd) t
     f bnd (EffectU effs t) = EffectU effs <$> recurse bnd t
     f bnd (OptionalU t) = OptionalU <$> recurse bnd t
+    f _ t@(NatLitU _) = return t
+    f bnd (NatAddU a b) = NatAddU <$> recurse bnd a <*> recurse bnd b
+    f bnd (NatMulU a b) = NatMulU <$> recurse bnd a <*> recurse bnd b
 
     terminate :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
     terminate bnd (ExistU v (ts, tc) (rs, rc)) = do
@@ -211,6 +214,9 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     terminate _ (VarU v) = return (VarU v)
     terminate bnd (EffectU effs t) = EffectU effs <$> recurse bnd t
     terminate bnd (OptionalU t) = OptionalU <$> recurse bnd t
+    terminate _ t@(NatLitU _) = return t
+    terminate bnd (NatAddU a b) = NatAddU <$> recurse bnd a <*> recurse bnd b
+    terminate bnd (NatMulU a b) = NatMulU <$> recurse bnd a <*> recurse bnd b
 
     renameTypedefs ::
       Set.Set TVar -> ([Either TVar TypeU], TypeU, ArgDoc, Bool) -> ([TVar], TypeU, ArgDoc, Bool)
@@ -313,3 +319,6 @@ parsub pair (AppU t ts) = AppU (parsub pair t) (map (parsub pair) ts)
 parsub pair (NamU o n ps rs) = NamU o n (map (parsub pair) ps) [(k', parsub pair t) | (k', t) <- rs]
 parsub pair (EffectU effs t) = EffectU effs (parsub pair t)
 parsub pair (OptionalU t) = OptionalU (parsub pair t)
+parsub _ t@(NatLitU _) = t
+parsub pair (NatAddU a b) = NatAddU (parsub pair a) (parsub pair b)
+parsub pair (NatMulU a b) = NatMulU (parsub pair a) (parsub pair b)

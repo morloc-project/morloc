@@ -106,6 +106,9 @@ checkForSelfRecursion d = do
     hasTerm _ (NamU _ _ [] []) = False
     hasTerm v (EffectU _ t) = hasTerm v t
     hasTerm v (OptionalU t) = hasTerm v t
+    hasTerm _ (NatLitU _) = False
+    hasTerm v (NatAddU a b) = hasTerm v a || hasTerm v b
+    hasTerm v (NatMulU a b) = hasTerm v a || hasTerm v b
     hasTerm _ ExistU {} = error "There should not be existentionals in typedefs"
 
 resolveHoles ::

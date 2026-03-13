@@ -48,7 +48,8 @@ import qualified Morloc.BaseTypes as BT
 -- - 2 from force_expr ('!' could start force or be part of another expr)
 -- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
 -- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
-%expect 59
+-- - 13 from type-level Nat arithmetic ('+' and '*' in add_type/mul_type rules)
+%expect 72
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -103,6 +104,7 @@ import qualified Morloc.BaseTypes as BT
   'Null'     { Located _ TokNull _ }
   LOWER      { Located _ (TokLowerName _) _ }
   UPPER      { Located _ (TokUpperName _) _ }
+  '+'        { Located _ (TokOperator "+") _ }
   '/'        { Located _ (TokOperator "/") _ }
   OPERATOR   { Located _ (TokOperator _) _ }
   INTEGER    { Located _ (TokInteger _) _ }
@@ -345,7 +347,15 @@ non_string_type :: { TypeU }
 non_string_non_fun :: { TypeU }
   : '<' LOWER '>'            { ExistU (TV (getName $2)) ([], Open) ([], Open) }
   | '<' effect_labels '>' non_string_non_fun  { EffectU (EffectSet (Set.fromList $2)) $4 }
-  | non_string_app            { $1 }
+  | non_string_add            { $1 }
+
+non_string_add :: { TypeU }
+  : non_string_add '+' non_string_mul  { NatAddU $1 $3 }
+  | non_string_mul                      { $1 }
+
+non_string_mul :: { TypeU }
+  : non_string_mul '*' non_string_app  { NatMulU $1 $3 }
+  | non_string_app                      { $1 }
 
 non_string_app :: { TypeU }
   : non_string_app atom_type  { applyType $1 $2 }
@@ -360,6 +370,7 @@ non_string_atom :: { TypeU }
   | UPPER                     { VarU (TV (getName $1)) }
   | LOWER ':' non_fun_type   { $3 }
   | LOWER                     { VarU (TV (getName $1)) }
+  | INTEGER                   { NatLitU (getInt $1) }
 
 --------------------------------------------------------------------
 -- Typeclasses
@@ -676,6 +687,14 @@ fun_type :: { TypeU }
 non_fun_type :: { TypeU }
   : '<' LOWER '>'            { ExistU (TV (getName $2)) ([], Open) ([], Open) }
   | '<' effect_labels '>' non_fun_type  { EffectU (EffectSet (Set.fromList $2)) $4 }
+  | add_type                  { $1 }
+
+add_type :: { TypeU }
+  : add_type '+' mul_type     { NatAddU $1 $3 }
+  | mul_type                  { $1 }
+
+mul_type :: { TypeU }
+  : mul_type '*' app_type     { NatMulU $1 $3 }
   | app_type                  { $1 }
 
 app_type :: { TypeU }
@@ -692,6 +711,7 @@ atom_type :: { TypeU }
   | LOWER ':' non_fun_type   { $3 }
   | LOWER                     { VarU (TV (getName $1)) }
   | STRING                    { VarU (TV (getString $1)) }
+  | INTEGER                   { NatLitU (getInt $1) }
 
 type_list1 :: { [TypeU] }
   : type                      { [$1] }
@@ -722,7 +742,15 @@ sig_fun_args :: { [(Pos, TypeU)] }
 pos_non_fun_type :: { (Pos, TypeU) }
   : '<' LOWER '>'     { (locPos $1, ExistU (TV (getName $2)) ([], Open) ([], Open)) }
   | '<' effect_labels '>' pos_non_fun_type  { (locPos $1, EffectU (EffectSet (Set.fromList $2)) (snd $4)) }
-  | pos_app_type       { $1 }
+  | pos_add_type       { $1 }
+
+pos_add_type :: { (Pos, TypeU) }
+  : pos_add_type '+' mul_type  { (fst $1, NatAddU (snd $1) $3) }
+  | pos_mul_type                { $1 }
+
+pos_mul_type :: { (Pos, TypeU) }
+  : pos_mul_type '*' app_type  { (fst $1, NatMulU (snd $1) $3) }
+  | pos_app_type                { $1 }
 
 pos_app_type :: { (Pos, TypeU) }
   : pos_app_type atom_type  { (fst $1, applyType (snd $1) $2) }
@@ -738,6 +766,7 @@ pos_atom_type :: { (Pos, TypeU) }
   | LOWER ':' non_fun_type      { (locPos $1, $3) }
   | LOWER                       { (locPos $1, VarU (TV (getName $1))) }
   | STRING                      { (locPos $1, VarU (TV (getString $1))) }
+  | INTEGER                     { (locPos $1, NatLitU (getInt $1)) }
 
 single_constraint :: { Constraint }
   : UPPER types1                         { Constraint (ClassName (getName $1)) $2 }
@@ -748,6 +777,7 @@ single_constraint :: { Constraint }
 
 operator_name :: { Located }
   : OPERATOR                  { $1 }
+  | '+'                       { $1 }
   | '*'                       { $1 }
   | '<'                       { $1 }
   | '>'                       { $1 }

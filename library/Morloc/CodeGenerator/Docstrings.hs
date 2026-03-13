@@ -275,6 +275,9 @@ makeOptMeta (AppT _ _) = "VAL" -- weird stuff, choose your own metadata
 makeOptMeta (NamT _ v _ _) = unTVar v
 makeOptMeta (EffectT _ t) = "<E>" <> makeOptMeta t
 makeOptMeta (OptionalT t) = "?" <> makeOptMeta t
+makeOptMeta (NatLitT n) = MT.show' n
+makeOptMeta (NatAddT _ _) = "NAT"
+makeOptMeta (NatMulT _ _) = "NAT"
 
 resolvePos :: Type -> ArgDocVars -> MorlocMonad ArgPosDocSet
 resolvePos t r = do

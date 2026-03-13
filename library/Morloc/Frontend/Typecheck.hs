@@ -127,6 +127,9 @@ findTypeKindSize v = head . catMaybes . f
       | otherwise = concat $ map f (ts1 <> ts2)
     f (EffectU _ t) = f t
     f (OptionalU t) = f t
+    f (NatLitU _) = [Nothing]
+    f (NatAddU a b) = f a ++ f b
+    f (NatMulU a b) = f a ++ f b
 
 -- TypeU --> Type
 resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int

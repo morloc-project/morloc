@@ -110,6 +110,9 @@ findTypeTerms (AppU t ts) = findTypeTerms t <> concatMap findTypeTerms ts
 findTypeTerms (NamU _ _ ps rs) = concatMap findTypeTerms (map snd rs <> ps)
 findTypeTerms (EffectU _ t) = findTypeTerms t
 findTypeTerms (OptionalU t) = findTypeTerms t
+findTypeTerms (NatLitU _) = []
+findTypeTerms (NatAddU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms (NatMulU a b) = findTypeTerms a <> findTypeTerms b
 
 -- | Build the fixity map from top-level fixity declarations.
 findFixityMap :: ExprI -> MorlocMonad (Map.Map EVar (Associativity, Int))

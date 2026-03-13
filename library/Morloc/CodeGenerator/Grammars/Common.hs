@@ -421,6 +421,7 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     seekRecs _ (VarF _) = []
     seekRecs m (EffectF _ t) = seekRecs m t
     seekRecs m (OptionalF t) = seekRecs m t
+    seekRecs _ (NatLitF _) = []
 
 unifyRecords ::
   [ ( FVar
