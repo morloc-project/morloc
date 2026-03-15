@@ -42,6 +42,7 @@
 #include "http.h"
 #include "router.h"
 #include "intrinsics.h"
+#include "arrow.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -89,6 +90,8 @@ void free_schema(Schema* schema);
 char* quoted(const char* input);
 bool print_voidstar(const void* voidstar, const Schema* schema, ERRMSG);
 bool pretty_print_voidstar(const void* voidstar, const Schema* schema, ERRMSG);
+bool print_arrow_as_json(const void* data, ERRMSG);
+bool print_arrow_as_table(const void* data, ERRMSG);
 morloc_packet_header_t* read_morloc_packet_header(const uint8_t* msg, ERRMSG);
 bool packet_is_ping(const uint8_t* packet, ERRMSG);
 bool packet_is_local_call(const uint8_t* packet, ERRMSG);
@@ -98,6 +101,7 @@ size_t morloc_packet_size(const uint8_t* packet, ERRMSG);
 uint8_t* return_ping(const uint8_t* packet, ERRMSG);
 uint8_t* make_ping_packet();
 uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema);
+uint8_t* make_arrow_data_packet(relptr_t ptr, const Schema* schema);
 uint8_t* make_mpk_data_packet(const char* mpk_filename, const Schema* schema);
 uint8_t* make_data_packet_from_mpk(const char* mpk, size_t mpk_size, const Schema* schema);
 int get_data_packet_as_mpk(const uint8_t* packet, const Schema* schema, char** mpk_out, size_t* mpk_size_out, ERRMSG);

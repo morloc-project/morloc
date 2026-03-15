@@ -112,9 +112,11 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         t' <- f t
         ts' <- mapM f ts
         return $ "std::function<" <> t' <> tupled ts' <> ">"
+      f (NatLitF _) = return mempty
       f (AppF t ts) = do
         t' <- f t
-        ts' <- mapM f ts
+        let runtimeTs = [x | x <- ts, not (isNatLitF x)]
+        ts' <- mapM f runtimeTs
         return . pretty $ expandMacro (render t') (map render ts')
       f t@(NamF _ (FV gc (CV "struct")) _ rs) = do
         recmap <- CMS.gets translatorRecmap
@@ -124,6 +126,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
             params <- typeParams (zip (map snd (recFields rec)) (map snd rs))
             return $ recName rec <> params
           Nothing -> error $ "Record missing from recmap: " <> show t <> " from map: " <> show recmap
+      f (NamF _ (FV _ (CV "arrow")) _ _) = return "mlc::ArrowTable"
       f (NamF _ (FV _ s) ps _) = do
         ps' <- mapM f ps
         return $ pretty s <> CP.printRecordTemplate ps'
@@ -133,6 +136,8 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       f (OptionalF t) = do
         t' <- f t
         return $ "std::optional<" <> t' <> ">"
+      isNatLitF (NatLitF _) = True
+      isNatLitF _ = False
 
   cppArgOf s (Arg i t) = do
     t' <- cppTypeOf (typeFof t)
@@ -644,6 +649,7 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     makeSerial ::
       Scope -> TVar -> ([Either TVar TypeU], TypeU, ArgDoc, Bool) -> CppTranslator (Maybe (MDoc, MDoc))
     makeSerial _ _ (_, NamU _ (TV "struct") _ _, _, _) = return Nothing
+    makeSerial _ _ (_, NamU _ (TV "arrow") _ _, _, _) = return Nothing
     makeSerial scope _ (ps, NamU r (TV v) _ rs, _, _) = do
       params <- mapM (either (\p -> return $ "T" <> pretty p) (\_ -> return "XXX_FIXME")) ps
       let templateTerms = ["T" <> pretty p | Left p <- ps]
@@ -669,10 +675,14 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
       | otherwise = pretty v
     showDefType _ (FunT _ _) = error "Cannot serialize functions"
     showDefType _ (NamT _ v _ _) = pretty v
-    showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
+    showDefType _ (NatLitT _) = mempty
+    showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) runtimeTs)
+      where runtimeTs = [t | t <- ts, not (isNatLitT t)]
     showDefType _ (AppT _ _) = error "AppT is only OK with VarT, for now"
     showDefType _ (EffectT _ _) = error "Cannot show EffectT"
     showDefType ps (OptionalT t) = "std::optional<" <> showDefType ps t <> ">"
+    isNatLitT (NatLitT _) = True
+    isNatLitT _ = False
 
 -- C++ specific source handling (flags, headers, libraries)
 

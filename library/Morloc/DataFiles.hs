@@ -90,6 +90,8 @@ libmorlocFiles =
   , EmbededFile "router.c" (decodeUtf8 $(embedFileRelative "data/morloc/router.c"))
   , EmbededFile "intrinsics.h" (decodeUtf8 $(embedFileRelative "data/morloc/intrinsics.h"))
   , EmbededFile "intrinsics.c" (decodeUtf8 $(embedFileRelative "data/morloc/intrinsics.c"))
+  , EmbededFile "arrow.h" (decodeUtf8 $(embedFileRelative "data/morloc/arrow.h"))
+  , EmbededFile "arrow.c" (decodeUtf8 $(embedFileRelative "data/morloc/arrow.c"))
   ]
 
 -- | Produce a single self-contained morloc.h by recursively inlining local includes
@@ -148,6 +150,9 @@ cppSetup =
     [ EmbededFile "cppmorloc.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc.hpp"))
     , EmbededFile "cppmorloc.cpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc.cpp"))
     , EmbededFile "morloc_pch.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/morloc_pch.hpp"))
+    , EmbededFile "mlc_arrow.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/mlc_arrow.hpp"))
+    , EmbededFile "nanoarrow.h" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/nanoarrow/nanoarrow.h"))
+    , EmbededFile "nanoarrow.c" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/nanoarrow/nanoarrow.c"))
     ]
 
 pythonSetup :: LangSetup

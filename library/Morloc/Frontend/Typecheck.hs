@@ -176,11 +176,14 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     -- resolve instances
     f scope g0 (VarS v (PolymorphicExpr clsName _ _ rss)) = do
       -- find all instances that are a subtype of the inferred type
-      -- this resolve general aliases all the way to the general termini
-      -- Also accept instances reachable via coercion (e.g., Int matches ?Int)
-      let emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty
-          isCompatible t = isSubtypeOf2 scope t gt
-                        || isJust (tryCoerce scope t gt emptyGamma)
+      -- Expand aliases in gt before matching (e.g., Vector 4 Int -> List Int)
+      -- so instances for List match against Vector usage.
+      let gtEval = case TE.evaluateType scope gt of
+            Right et -> et
+            Left _ -> gt
+          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty
+          isCompatible t = isSubtypeOf2 scope t gtEval
+                        || isJust (tryCoerce scope t gtEval emptyGamma)
           rssSubtypes = [x | x@(EType t _ _, _) <- rss, isCompatible t]
 
 
@@ -992,21 +995,22 @@ checkE i g1 e1 b = do
   scope <- MM.getGeneralScope i
   case subtype scope a' b' g2 of
     Right g3 -> return (g3, apply g3 b', e2)
-    Left err -> case tryCoerce scope a' b' g2 of
-      Just (coercions, g3) -> do
-        (finalExpr, _) <- foldlM
-          (\(expr, currentType) coercion -> do
-            idx <- MM.getCounterWithPos i
-            let wrappedAnno = AnnoS (Idx idx currentType) i expr
-            return (CoerceS coercion wrappedAnno, applyCoercion coercion currentType))
-          (e2, apply g3 a')
-          coercions
-        return (g3, apply g3 b', finalExpr)
-      Nothing -> MM.throwSourcedError i $
-        "Type mismatch:"
-        <> line <> "  expected: " <> prettyTypeU b'
-        <> line <> "  inferred: " <> prettyTypeU a'
-        <> line <> err
+    Left err ->
+      case tryCoerce scope a' b' g2 of
+        Just (coercions, g3) -> do
+          (finalExpr, _) <- foldlM
+            (\(expr, currentType) coercion -> do
+              idx <- MM.getCounterWithPos i
+              let wrappedAnno = AnnoS (Idx idx currentType) i expr
+              return (CoerceS coercion wrappedAnno, applyCoercion coercion currentType))
+            (e2, apply g3 a')
+            coercions
+          return (g3, apply g3 b', finalExpr)
+        Nothing -> MM.throwSourcedError i $
+          "Type mismatch:"
+          <> line <> "  expected: " <> prettyTypeU b'
+          <> line <> "  inferred: " <> prettyTypeU a'
+          <> line <> err
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do

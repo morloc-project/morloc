@@ -18,6 +18,7 @@ module Morloc.CodeGenerator.Serial
   ( makeSerialAST
   , chooseSerializationCycle
   , isSerializable
+  , hasArrowHint
   , prettySerialOne
   , serialAstToType
   , shallowType
@@ -297,6 +298,11 @@ makeSerialAST m lang t0 = do
       MM.throwSourcedError m $ "Cannot serialize functions at" <+> pretty m <> ":" <+> pretty t
     makeSerialAST' gscope typepackers ft@(AppF (VarF fv@(FV generalTypeName _)) ts0)
       | null runtimeTs = MM.throwSourcedError m $ "No runtime type args for" <+> pretty ft
+      -- When alias expansion changed the root type, re-infer the concrete
+      -- type for the expanded general form and recurse.
+      | Just fv' <- finalVar, fv' /= generalTypeName, Just expanded <- evaluatedType = do
+          expandedTf <- inferConcreteType lang (Idx m (typeOf expanded))
+          makeSerialAST' gscope typepackers expandedTf
       | finalVar == Just BT.list = SerialList fv <$> makeSerialAST' gscope typepackers (head runtimeTs)
       | finalVar == Just (BT.tuple (length runtimeTs)) =
           SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers) runtimeTs
@@ -336,9 +342,23 @@ makeSerialAST m lang t0 = do
         basevar (NatAddU _ _) = Nothing
         basevar (NatMulU _ _) = Nothing
 
-        finalVar =
-          let t = fst $ unweaveTypeF ft
-           in basevar $ either (const t) id (TE.evaluateType gscope t)
+        generalType = fst $ unweaveTypeF ft
+
+        evaluatedType =
+          case TE.evaluateType gscope generalType of
+            Right et | et /= generalType -> Just et
+            _ -> Nothing
+
+        finalVar = basevar $ maybe generalType id evaluatedType
+
+        fallbackExpand :: MorlocMonad SerialAST
+        fallbackExpand = case evaluatedType of
+          Just expanded -> do
+            expandedTf <- inferConcreteType lang (Idx m (typeOf expanded))
+            makeSerialAST' gscope typepackers expandedTf
+          Nothing ->
+            MM.throwSourcedError m $
+              "Cannot expand type alias for" <+> pretty ft
 
         selectPacker :: [(TypePacker, SerialAST)] -> MorlocMonad (TypePacker, SerialAST)
         selectPacker [] =
@@ -351,7 +371,8 @@ makeSerialAST m lang t0 = do
         selectPacker (x : _) = return x
     makeSerialAST' gscope typepackers (NamF o n ps rs) = do
       ts <- mapM (makeSerialAST' gscope typepackers . snd) rs
-      return $ SerialObject o n ps (zip (map fst rs) ts)
+      let entries = zip (map fst rs) ts
+      return $ SerialObject o n ps entries
     makeSerialAST' gscope typepackers (EffectF _ t) = makeSerialAST' gscope typepackers t
     makeSerialAST' gscope typepackers (OptionalF t) = do
       inner <- makeSerialAST' gscope typepackers t
@@ -513,6 +534,11 @@ weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
 weaveTypeF (NatLitU n) (NatLitU _) = NatLitF n
 weaveTypeF (NatLitU n) _ = NatLitF n  -- Nat params may be erased in concrete type
 weaveTypeF gt ct = error . show $ (gt, ct)
+
+-- | Check if a SerialAST's root has the "arrow" concrete type hint
+hasArrowHint :: SerialAST -> Bool
+hasArrowHint (SerialObject _ (FV _ (CV "arrow")) _ _) = True
+hasArrowHint _ = False
 
 {- | Given a list of possible ways to (de)serialize data between two languages,
 choose one (or none if the list is empty). Currently I just take the first

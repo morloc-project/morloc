@@ -30,6 +30,12 @@ void json_write_bool(json_buf_t* buf, bool val);
 void json_write_null(json_buf_t* buf);
 void json_write_raw(json_buf_t* buf, const char* raw);
 
+// Print Arrow shared memory data as row-major JSON to stdout
+bool print_arrow_as_json(const void* data, ERRMSG);
+
+// Print Arrow shared memory data as a TAB-delimited table to stdout
+bool print_arrow_as_table(const void* data, ERRMSG);
+
 // Serialize voidstar data to a JSON string (caller must free result)
 char* voidstar_to_json_string(const void* voidstar, const Schema* schema, ERRMSG);
 

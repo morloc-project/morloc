@@ -353,7 +353,7 @@ static uint8_t* parse_cli_data_argument_singular(uint8_t* dest, char* arg, const
     }
     RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "\n%s", CHILD_ERRMSG)
 
-    // Special case: RPTR packets (pool-to-pool IPC with data already in shm)
+    // Special case: RPTR packets (pool-to-pool arrow with data already in shm)
     if(data_size >= sizeof(morloc_packet_header_t)){
         uint32_t magic = *(uint32_t*)data;
         if(magic == MORLOC_PACKET_MAGIC){

@@ -1191,6 +1191,225 @@ static bool voidstar_to_json_buf_r(json_buf_t* jb, const void* voidstar, const S
     return true;
 }
 
+// Print Arrow shared memory data as row-major JSON to stdout.
+// data points to an arrow_shm_header_t.
+bool print_arrow_as_json(const void* data, ERRMSG) {
+    BOOL_RETURN_SETUP
+
+    const arrow_shm_header_t* header = (const arrow_shm_header_t*)data;
+    RAISE_IF(!header, "NULL arrow data")
+    RAISE_IF(header->magic != ARROW_SHM_MAGIC, "Invalid arrow SHM magic: 0x%08x", header->magic)
+
+    uint32_t n_cols = header->n_columns;
+    uint64_t n_rows = header->n_rows;
+
+    // Gather column info (single allocation for all 4 arrays)
+    size_t col_info_size = (size_t)n_cols * (3 * sizeof(void*) + sizeof(uint16_t));
+    void* col_info = calloc(1, col_info_size > 0 ? col_info_size : 1);
+    RAISE_IF(!col_info, "Failed to allocate column info")
+    const arrow_column_desc_t** descs = (const arrow_column_desc_t**)col_info;
+    const void** col_data = (const void**)(descs + n_cols);
+    const char** col_names = (const char**)(col_data + n_cols);
+    uint16_t* col_name_lens = (uint16_t*)(col_names + n_cols);
+
+    for (uint32_t c = 0; c < n_cols; c++) {
+        descs[c] = arrow_column_desc(header, c);
+        RAISE_IF_WITH(!descs[c], free(col_info), "NULL column descriptor at index %u", c)
+        col_data[c] = arrow_column_data(header, c);
+        col_names[c] = arrow_column_name(header, c);
+        col_name_lens[c] = descs[c]->name_length;
+    }
+
+    // Print as array of row objects: [{"name":"Alice","age":30}, ...]
+    printf("[");
+    for (uint64_t r = 0; r < n_rows; r++) {
+        if (r > 0) printf(",");
+        printf("{");
+        for (uint32_t c = 0; c < n_cols; c++) {
+            if (c > 0) printf(",");
+            // Print key (name may not be null-terminated)
+            printf("\"");
+            if (col_names[c] && col_name_lens[c] > 0) {
+                char* escaped_name = json_escape_string(col_names[c], col_name_lens[c]);
+                if (escaped_name) {
+                    fputs(escaped_name, stdout);
+                    free(escaped_name);
+                }
+            }
+            printf("\":");
+
+            const arrow_column_desc_t* desc = descs[c];
+            const uint8_t* buf = (const uint8_t*)col_data[c];
+
+            switch (desc->type) {
+                case MORLOC_BOOL:
+                    printf(buf[r] ? "true" : "false");
+                    break;
+                case MORLOC_SINT8:
+                    printf("%d", ((const int8_t*)buf)[r]);
+                    break;
+                case MORLOC_SINT16:
+                    printf("%d", ((const int16_t*)buf)[r]);
+                    break;
+                case MORLOC_SINT32:
+                    printf("%d", ((const int32_t*)buf)[r]);
+                    break;
+                case MORLOC_SINT64:
+                    printf("%ld", ((const int64_t*)buf)[r]);
+                    break;
+                case MORLOC_UINT8:
+                    printf("%u", buf[r]);
+                    break;
+                case MORLOC_UINT16:
+                    printf("%u", ((const uint16_t*)buf)[r]);
+                    break;
+                case MORLOC_UINT32:
+                    printf("%u", ((const uint32_t*)buf)[r]);
+                    break;
+                case MORLOC_UINT64:
+                    printf("%lu", ((const uint64_t*)buf)[r]);
+                    break;
+                case MORLOC_FLOAT32:
+                    printf("%.7g", ((const float*)buf)[r]);
+                    break;
+                case MORLOC_FLOAT64:
+                    printf("%.15g", ((const double*)buf)[r]);
+                    break;
+                case MORLOC_STRING: {
+                    // Arrow utf-8: offsets buffer then data buffer
+                    // In our SHM layout, data_offset points to offsets array,
+                    // followed by string data at offsets_buffer_end
+                    const int32_t* offsets = (const int32_t*)buf;
+                    // String data starts after the offsets array
+                    const char* str_data = (const char*)(offsets + (n_rows + 1));
+                    int32_t start = offsets[r];
+                    int32_t end = offsets[r + 1];
+                    int32_t len = end - start;
+                    printf("\"");
+                    if (len > 0) {
+                        char* escaped = json_escape_string(str_data + start, (size_t)len);
+                        if (escaped) {
+                            fputs(escaped, stdout);
+                            free(escaped);
+                        }
+                    }
+                    printf("\"");
+                    break;
+                }
+                default:
+                    RAISE_WITH(free(col_info), "Unsupported arrow column type %d for JSON output", desc->type)
+            }
+        }
+        printf("}");
+    }
+    printf("]\n");
+
+    free(col_info);
+    return true;
+}
+
+// Print Arrow shared memory data as a TAB-delimited table to stdout.
+// First row is column names, subsequent rows are data values.
+bool print_arrow_as_table(const void* data, ERRMSG) {
+    BOOL_RETURN_SETUP
+
+    const arrow_shm_header_t* header = (const arrow_shm_header_t*)data;
+    RAISE_IF(!header, "NULL arrow data")
+    RAISE_IF(header->magic != ARROW_SHM_MAGIC, "Invalid arrow SHM magic: 0x%08x", header->magic)
+
+    uint32_t n_cols = header->n_columns;
+    uint64_t n_rows = header->n_rows;
+
+    // Gather column info (single allocation for all 4 arrays)
+    size_t col_info_size = (size_t)n_cols * (3 * sizeof(void*) + sizeof(uint16_t));
+    void* col_info = calloc(1, col_info_size > 0 ? col_info_size : 1);
+    RAISE_IF(!col_info, "Failed to allocate column info")
+    const arrow_column_desc_t** descs = (const arrow_column_desc_t**)col_info;
+    const void** col_data = (const void**)(descs + n_cols);
+    const char** col_names = (const char**)(col_data + n_cols);
+    uint16_t* col_name_lens = (uint16_t*)(col_names + n_cols);
+
+    for (uint32_t c = 0; c < n_cols; c++) {
+        descs[c] = arrow_column_desc(header, c);
+        RAISE_IF_WITH(!descs[c], free(col_info), "NULL column descriptor at index %u", c)
+        col_data[c] = arrow_column_data(header, c);
+        col_names[c] = arrow_column_name(header, c);
+        col_name_lens[c] = descs[c]->name_length;
+    }
+
+    // Header row
+    for (uint32_t c = 0; c < n_cols; c++) {
+        if (c > 0) putchar('\t');
+        if (col_names[c] && col_name_lens[c] > 0) {
+            fwrite(col_names[c], 1, col_name_lens[c], stdout);
+        }
+    }
+    putchar('\n');
+
+    // Data rows
+    for (uint64_t r = 0; r < n_rows; r++) {
+        for (uint32_t c = 0; c < n_cols; c++) {
+            if (c > 0) putchar('\t');
+
+            const arrow_column_desc_t* desc = descs[c];
+            const uint8_t* buf = (const uint8_t*)col_data[c];
+
+            switch (desc->type) {
+                case MORLOC_BOOL:
+                    printf(buf[r] ? "true" : "false");
+                    break;
+                case MORLOC_SINT8:
+                    printf("%d", ((const int8_t*)buf)[r]);
+                    break;
+                case MORLOC_SINT16:
+                    printf("%d", ((const int16_t*)buf)[r]);
+                    break;
+                case MORLOC_SINT32:
+                    printf("%d", ((const int32_t*)buf)[r]);
+                    break;
+                case MORLOC_SINT64:
+                    printf("%ld", ((const int64_t*)buf)[r]);
+                    break;
+                case MORLOC_UINT8:
+                    printf("%u", buf[r]);
+                    break;
+                case MORLOC_UINT16:
+                    printf("%u", ((const uint16_t*)buf)[r]);
+                    break;
+                case MORLOC_UINT32:
+                    printf("%u", ((const uint32_t*)buf)[r]);
+                    break;
+                case MORLOC_UINT64:
+                    printf("%lu", ((const uint64_t*)buf)[r]);
+                    break;
+                case MORLOC_FLOAT32:
+                    printf("%.7g", ((const float*)buf)[r]);
+                    break;
+                case MORLOC_FLOAT64:
+                    printf("%.15g", ((const double*)buf)[r]);
+                    break;
+                case MORLOC_STRING: {
+                    const int32_t* offsets = (const int32_t*)buf;
+                    const char* str_data = (const char*)(offsets + (n_rows + 1));
+                    int32_t start = offsets[r];
+                    int32_t end = offsets[r + 1];
+                    int32_t len = end - start;
+                    if (len > 0) {
+                        fwrite(str_data + start, 1, (size_t)len, stdout);
+                    }
+                    break;
+                }
+                default:
+                    RAISE_WITH(free(col_info), "Unsupported arrow column type %d for table output", desc->type)
+            }
+        }
+        putchar('\n');
+    }
+
+    free(col_info);
+    return true;
+}
+
 char* voidstar_to_json_string(const void* voidstar, const Schema* schema, ERRMSG) {
     PTR_RETURN_SETUP(char)
 

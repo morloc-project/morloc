@@ -194,6 +194,23 @@ uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema){
   return packet;
 }
 
+uint8_t* make_arrow_data_packet(relptr_t ptr, const Schema* schema){
+  uint8_t* packet = make_morloc_data_packet_with_schema(
+        NULL, sizeof(relptr_t),
+        schema,
+        PACKET_SOURCE_RPTR,
+        PACKET_FORMAT_ARROW,
+        PACKET_COMPRESSION_NONE,
+        PACKET_ENCRYPTION_NONE,
+        PACKET_STATUS_PASS
+    );
+
+  morloc_packet_header_t* header = (morloc_packet_header_t*)(packet);
+  *((ssize_t*)(packet + sizeof(morloc_packet_header_t) + (size_t)header->offset)) = ptr;
+
+  return packet;
+}
+
 uint8_t* make_mpk_data_packet(const char* mpk_filename, const Schema* schema){
     uint8_t* packet = make_morloc_data_packet_with_schema(
         (const uint8_t*)mpk_filename,
@@ -400,8 +417,13 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
                 // This packet should contain a relative pointer as its payload
                 size_t relptr = *(size_t*)(data + header->offset + sizeof(morloc_packet_header_t));
                 voidstar = TRY(rel2abs, relptr);
+            } else if (format == PACKET_FORMAT_ARROW) {
+                // Arrow packet: payload is a relptr to arrow_shm_header in shm
+                size_t relptr = *(size_t*)(data + header->offset + sizeof(morloc_packet_header_t));
+                voidstar = TRY(rel2abs, relptr);
+                // Return pointer to arrow_shm_header directly; caller handles
             } else {
-                RAISE("For RPTR source, expected voidstar format, found: 0x%02hhx", format);
+                RAISE("For RPTR source, expected voidstar or arrow format, found: 0x%02hhx", format);
                 return NULL;
             }
             break;

@@ -1073,9 +1073,60 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
         MORLOC_ERROR("schema must be a single string");
     }
 
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
+    const char* schema_cstr = CHAR(STRING_ELT(schema_str_r, 0));
+
+    char* schema_str = strdup(schema_cstr);
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
+
+    // Arrow dispatch: if schema hint is "arrow", use Arrow C Data Interface
+    if (schema->hint && strcmp(schema->hint, "arrow") == 0) {
+        // Export R arrow RecordBatch via C Data Interface -> copy to shm -> packet
+        // arrow::ExportRecordBatch(batch, array_ptr, schema_ptr)
+        struct ArrowSchema arrow_schema;
+        struct ArrowArray arrow_array;
+        memset(&arrow_schema, 0, sizeof(arrow_schema));
+        memset(&arrow_array, 0, sizeof(arrow_array));
+
+        SEXP arrow_ns = PROTECT(R_FindNamespace(mkString("arrow")));
+        SEXP export_fn = PROTECT(findVarInFrame(arrow_ns, install("ExportRecordBatch")));
+        if (export_fn == R_UnboundValue) {
+            UNPROTECT(2);
+            free_schema(schema);
+            MORLOC_ERROR("arrow::ExportRecordBatch not found; is the arrow package installed?");
+        }
+
+        SEXP array_ptr_r = PROTECT(R_MakeExternalPtr(&arrow_array, R_NilValue, R_NilValue));
+        SEXP schema_ptr_r = PROTECT(R_MakeExternalPtr(&arrow_schema, R_NilValue, R_NilValue));
+        SEXP call = PROTECT(lang4(export_fn, obj_r, array_ptr_r, schema_ptr_r));
+        eval(call, arrow_ns);
+        UNPROTECT(5);
+
+        char* errmsg = NULL;
+        relptr_t relptr = arrow_to_shm(&arrow_array, &arrow_schema, &errmsg);
+
+        if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+        if (arrow_array.release) arrow_array.release(&arrow_array);
+
+        if (errmsg) {
+            free_schema(schema);
+            MORLOC_ERROR("Arrow export failed: %s", errmsg);
+        }
+
+        uint8_t* packet = make_arrow_data_packet(relptr, schema);
+        if (!packet) {
+            free_schema(schema);
+            MORLOC_ERROR("Failed to create arrow data packet");
+        }
+
+        size_t packet_size = R_TRY_WITH({free(packet); free_schema(schema);}, morloc_packet_size, packet);
+        SEXP result = PROTECT(allocVector(RAWSXP, packet_size));
+        memcpy(RAW(result), packet, packet_size);
+        free(packet);
+        free_schema(schema);
+        UNPROTECT(1);
+        return result;
+    }
 
     void* voidstar = to_voidstar(obj_r, schema);
     if (!voidstar) {
@@ -1153,13 +1204,58 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
     uint8_t* packet = RAW(packet_r);
     size_t packet_size = (size_t)LENGTH(packet_r);
 
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
-
     const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
     uint8_t source = header->command.data.source;
     uint8_t format = header->command.data.format;
+
+    const char* schema_cstr = CHAR(STRING_ELT(schema_str_r, 0));
+
+    char* schema_str = strdup(schema_cstr);
+    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
+    free(schema_str);
+
+    // Arrow dispatch: if packet format is Arrow, import via C Data Interface
+    if (format == PACKET_FORMAT_ARROW) {
+        uint8_t* arrow_ptr = R_TRY_WITH(free_schema(schema),
+            get_morloc_data_packet_value, packet, schema);
+        const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)arrow_ptr;
+
+        struct ArrowSchema arrow_schema;
+        struct ArrowArray arrow_array;
+        char* arrow_err = NULL;
+        arrow_from_shm(arrow_hdr, &arrow_schema, &arrow_array, &arrow_err);
+        if (arrow_err) {
+            if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+            if (arrow_array.release) arrow_array.release(&arrow_array);
+            free_schema(schema);
+            MORLOC_ERROR("Arrow import failed: %s", arrow_err);
+        }
+
+        // Import via R arrow package: arrow::ImportRecordBatch(array_ptr, schema_ptr)
+        SEXP arrow_ns = PROTECT(R_FindNamespace(mkString("arrow")));
+        SEXP import_fn = PROTECT(findVarInFrame(arrow_ns, install("ImportRecordBatch")));
+        if (import_fn == R_UnboundValue) {
+            if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+            if (arrow_array.release) arrow_array.release(&arrow_array);
+            UNPROTECT(2);
+            free_schema(schema);
+            MORLOC_ERROR("arrow::ImportRecordBatch not found; is the arrow package installed?");
+        }
+
+        SEXP array_ptr_r = PROTECT(R_MakeExternalPtr(&arrow_array, R_NilValue, R_NilValue));
+        SEXP schema_ptr_r = PROTECT(R_MakeExternalPtr(&arrow_schema, R_NilValue, R_NilValue));
+        SEXP call = PROTECT(lang3(import_fn, array_ptr_r, schema_ptr_r));
+        SEXP obj_r = PROTECT(eval(call, arrow_ns));
+        UNPROTECT(6);
+
+        // Incref shm so data stays alive
+        char* incref_err = NULL;
+        shincref((absptr_t)arrow_ptr, &incref_err);
+        if (incref_err) { free(incref_err); }
+
+        free_schema(schema);
+        return obj_r;
+    }
 
     // Fast path: inline voidstar -- read directly from packet, no SHM needed
     if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {

@@ -872,7 +872,26 @@ cleanTypeName t0 =
       renameMap = Map.fromList (zip allGeneric pool)
       renamedBody = applyVarRenaming renameMap body
       renamedVs = map (\v -> Map.findWithDefault v v renameMap) vs
-   in foldr ForallU renamedBody renamedVs
+   in simplifyNats $ foldr ForallU renamedBody renamedVs
+
+-- | Simplify nat arithmetic in types (e.g., 34 + (4 + 5) -> 43)
+simplifyNats :: TypeU -> TypeU
+simplifyNats = go
+  where
+    go (NatAddU a b) = trySimplify (NatAddU (go a) (go b))
+    go (NatMulU a b) = trySimplify (NatMulU (go a) (go b))
+    go (AppU f ts) = AppU (go f) (map go ts)
+    go (FunU ts r) = FunU (map go ts) (go r)
+    go (ForallU v t) = ForallU v (go t)
+    go (NamU o v ps es) = NamU o v (map go ps) [(k, go t) | (k, t) <- es]
+    go (ExistU v (ps, pc) (rs, rc)) = ExistU v (map go ps, pc) ([(k, go t) | (k, t) <- rs], rc)
+    go (EffectU e t) = EffectU e (go t)
+    go (OptionalU t) = OptionalU (go t)
+    go t = t
+
+    trySimplify nat = case typeUToNatExpr nat of
+      Just ne -> natExprToTypeU (NS.sopToNatExpr (NS.normalize ne))
+      Nothing -> nat
 
 letterPool :: [TVar]
 letterPool =

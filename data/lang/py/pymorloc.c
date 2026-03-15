@@ -968,6 +968,58 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
 
     schema = PyTRY(parse_schema, schema_str);
 
+    // Arrow dispatch: if schema hint is "arrow", use Arrow C Data Interface
+    if (schema->hint && strcmp(schema->hint, "arrow") == 0) {
+        // Export pyarrow object via C Data Interface -> copy to shm -> packet
+        struct ArrowSchema arrow_schema;
+        struct ArrowArray arrow_array;
+
+        // Call obj._export_to_c(arrow_array_ptr, arrow_schema_ptr)
+        PyObject* export_result = PyObject_CallMethod(
+            obj, "_export_to_c",
+            "nn", (Py_ssize_t)&arrow_array, (Py_ssize_t)&arrow_schema);
+        if (!export_result) {
+            free_schema(schema);
+            PyRAISE("Failed to export pyarrow object via C Data Interface");
+        }
+        Py_DECREF(export_result);
+
+        char* errmsg = NULL;
+        relptr_t relptr = arrow_to_shm(&arrow_array, &arrow_schema, &errmsg);
+
+        // Release the exported C Data Interface structs
+        if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+        if (arrow_array.release) arrow_array.release(&arrow_array);
+
+        if (errmsg) {
+            free_schema(schema);
+            PyErr_SetString(PyExc_RuntimeError, errmsg);
+            free(errmsg);
+            return NULL;
+        }
+
+        packet = make_arrow_data_packet(relptr, schema);
+        if (!packet) {
+            free_schema(schema);
+            PyRAISE("Failed to create arrow data packet");
+        }
+
+        // Track shm for cleanup
+        char* resolve_err = NULL;
+        void* shm_ptr = rel2abs(relptr, &resolve_err);
+        if (resolve_err) { free(resolve_err); }
+        if (shm_ptr) {
+            shm_tracker_push((absptr_t)shm_ptr, NULL);
+            tracked = true;
+        }
+
+        packet_size = PyTRY(morloc_packet_size, packet);
+        PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
+        free(packet);
+        free_schema(schema);
+        return retval;
+    }
+
     voidstar = to_voidstar(schema, obj);
     PyTRACE(voidstar == NULL)
 
@@ -1040,6 +1092,57 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     uint8_t format = header->command.data.format;
 
     schema = PyTRY(parse_schema, schema_str)
+
+    // Arrow dispatch: if packet format is Arrow, import via C Data Interface
+    if (format == PACKET_FORMAT_ARROW) {
+        voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+
+        const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)voidstar;
+
+        struct ArrowSchema arrow_schema;
+        struct ArrowArray arrow_array;
+        char* arrow_err = NULL;
+        arrow_from_shm(arrow_hdr, &arrow_schema, &arrow_array, &arrow_err);
+        if (arrow_err) {
+            free_schema(schema);
+            PyErr_SetString(PyExc_RuntimeError, arrow_err);
+            free(arrow_err);
+            return NULL;
+        }
+
+        // Import via pyarrow RecordBatch.from_buffers or _import_from_c
+        PyObject* pyarrow_mod = PyImport_ImportModule("pyarrow");
+        if (!pyarrow_mod) {
+            if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+            if (arrow_array.release) arrow_array.release(&arrow_array);
+            free_schema(schema);
+            PyRAISE("pyarrow is required for arrow-typed data");
+        }
+
+        PyObject* rb_class = PyObject_GetAttrString(pyarrow_mod, "RecordBatch");
+        Py_DECREF(pyarrow_mod);
+        if (!rb_class) {
+            if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+            if (arrow_array.release) arrow_array.release(&arrow_array);
+            free_schema(schema);
+            PyRAISE("Failed to get pyarrow.RecordBatch");
+        }
+
+        // Use RecordBatch._import_from_c(array_ptr, schema_ptr)
+        obj = PyObject_CallMethod(rb_class, "_import_from_c",
+            "nn", (Py_ssize_t)&arrow_array, (Py_ssize_t)&arrow_schema);
+        Py_DECREF(rb_class);
+
+        // Incref shm so it stays alive while pyarrow references the buffers
+        char* incref_err = NULL;
+        shincref((absptr_t)voidstar, &incref_err);
+        if (incref_err) { free(incref_err); }
+        shm_tracker_push((absptr_t)voidstar, NULL);
+
+        free_schema(schema);
+        if (!obj) return NULL;
+        return obj;
+    }
 
     // Fast path: inline voidstar -- read directly from packet, no SHM needed
     if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {

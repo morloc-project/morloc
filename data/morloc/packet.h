@@ -60,6 +60,7 @@ typedef struct __attribute__((packed)) packet_command_data_s {
 #define PACKET_FORMAT_TEXT     0x02
 #define PACKET_FORMAT_DATA     0x03 // raw binary data
 #define PACKET_FORMAT_VOIDSTAR 0x04 // binary morloc formatted data
+#define PACKET_FORMAT_ARROW    0x05 // Arrow format data
 
 // Compression algorithm
 #define PACKET_COMPRESSION_NONE  0x00 // uncompressed
