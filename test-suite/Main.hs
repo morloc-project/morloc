@@ -480,4 +480,9 @@ main = do
       , golden "memory-nested-misalign-cpp" "memory-nested-misalign-cpp"
       , golden "memory-nested-misalign-py" "memory-nested-misalign-py"
       , golden "memory-split-block-cpp" "memory-split-block-cpp"
+      , -- arrow immutable table tests (large table passed by reference into map)
+        golden "arrow-immutable-pr" "arrow-immutable-pr"
+      , golden "arrow-immutable-rp" "arrow-immutable-rp"
+      , golden "arrow-immutable-cp" "arrow-immutable-cp"
+      , golden "arrow-immutable-pc" "arrow-immutable-pc"
       ]

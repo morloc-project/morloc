@@ -1,0 +1,11 @@
+module main (makePeople)
+
+import root
+import root-py
+
+table Person = Person {name :: Str, age :: Int}
+table Py => Person = "arrow"
+
+source Py from "src.py" ("makePeople")
+
+makePeople :: Person

@@ -1,0 +1,11 @@
+module main (makePeople)
+
+import root
+import root-cpp
+
+table Person = Person {name :: Str, age :: Int}
+table Cpp => Person = "arrow"
+
+source Cpp from "src.hpp" ("makePeople")
+
+makePeople :: Person
