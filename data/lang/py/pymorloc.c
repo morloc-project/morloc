@@ -137,6 +137,24 @@ error:
 
 
 
+// Map morloc schema element type to numpy type number
+static int schema_to_npy_type(morloc_serial_type type) {
+    switch (type) {
+        case MORLOC_BOOL:    return NPY_BOOL;
+        case MORLOC_SINT8:   return NPY_INT8;
+        case MORLOC_SINT16:  return NPY_INT16;
+        case MORLOC_SINT32:  return NPY_INT32;
+        case MORLOC_SINT64:  return NPY_INT64;
+        case MORLOC_UINT8:   return NPY_UINT8;
+        case MORLOC_UINT16:  return NPY_UINT16;
+        case MORLOC_UINT32:  return NPY_UINT32;
+        case MORLOC_UINT64:  return NPY_UINT64;
+        case MORLOC_FLOAT32: return NPY_FLOAT32;
+        case MORLOC_FLOAT64: return NPY_FLOAT64;
+        default:             return -1;
+    }
+}
+
 PyObject* fromAnything(const Schema* schema, const void* data, const void* base_ptr){ MAYFAIL
 
     PyObject* obj = NULL;
@@ -341,6 +359,37 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
             }
             break;
         }
+        case MORLOC_TENSOR: {
+            import_numpy();
+            const Tensor* tensor = (const Tensor*)data;
+            size_t ndim = schema_tensor_ndim(schema);
+
+            int type_num = schema_to_npy_type(schema->parameters[0]->type);
+            if (type_num < 0) { PyRAISE("Unsupported tensor element type"); }
+
+            if (tensor->total_elements == 0) {
+                npy_intp zero_dims[1] = {0};
+                obj = PyArray_SimpleNew(1, zero_dims, type_num);
+                break;
+            }
+
+            const int64_t* shape = (const int64_t*)resolve_relptr(tensor->shape, base_ptr, NULL);
+            const void* tdata = resolve_relptr(tensor->data, base_ptr, NULL);
+
+            npy_intp np_dims[5];
+            for (size_t i = 0; i < ndim; i++) np_dims[i] = (npy_intp)shape[i];
+
+            // Create numpy array as a copy (R/W) from the data
+            obj = PyArray_SimpleNewFromData((int)ndim, np_dims, type_num, (void*)tdata);
+            if (!obj) { PyRAISE("Failed to create numpy array from tensor"); }
+
+            // Make a copy so the array owns its data (SHM may be freed)
+            PyObject* owned = PyArray_NewCopy((PyArrayObject*)obj, NPY_CORDER);
+            Py_DECREF(obj);
+            obj = owned;
+            if (!obj) { PyRAISE("Failed to copy tensor data"); }
+            break;
+        }
         default:
             PyRAISE("Unsupported schema type");
     }
@@ -525,6 +574,24 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                 if (inner_size == -1) return -1;
                 ssize_t extra = (inner_size > (ssize_t)schema->parameters[0]->width) ? inner_size - (ssize_t)schema->parameters[0]->width : 0;
                 return (ssize_t)schema->width + extra;
+            }
+
+        case MORLOC_TENSOR:
+            {
+                import_numpy();
+                int type_num = schema_to_npy_type(schema->parameters[0]->type);
+                if (type_num < 0) { PyRAISE("Unsupported tensor element type"); }
+                PyArrayObject* arr = (PyArrayObject*)PyArray_FROM_OTF(obj, type_num, NPY_ARRAY_C_CONTIGUOUS);
+                if (!arr) { PyRAISE("Expected numpy array for MORLOC_TENSOR"); }
+                size_t total = (size_t)PyArray_SIZE(arr);
+                size_t elem_width = schema->parameters[0]->width;
+                ssize_t required = (ssize_t)sizeof(Tensor);
+                required += (ssize_t)(_Alignof(int64_t) - 1);
+                required += (ssize_t)(schema_tensor_ndim(schema) * sizeof(int64_t));
+                required += (ssize_t)(schema_alignment(schema->parameters[0]) - 1);
+                required += (ssize_t)(total * elem_width);
+                Py_DECREF(arr);
+                return required;
             }
 
         default:
@@ -738,6 +805,57 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                 if (to_voidstar_r((char*)dest + schema->offsets[0], cursor, schema->parameters[0], obj) != 0) {
                     goto error;
                 }
+            }
+            break;
+
+        case MORLOC_TENSOR:
+            {
+                import_numpy();
+                int type_num = schema_to_npy_type(schema->parameters[0]->type);
+                if (type_num < 0) { PyRAISE("Unsupported tensor element type"); }
+                PyArrayObject* arr = (PyArrayObject*)PyArray_FROM_OTF(obj, type_num, NPY_ARRAY_C_CONTIGUOUS);
+                if (!arr) { PyRAISE("Expected numpy array for MORLOC_TENSOR"); }
+
+                int ndim = PyArray_NDIM(arr);
+                npy_intp* np_shape = PyArray_DIMS(arr);
+                size_t total = (size_t)PyArray_SIZE(arr);
+                size_t elem_width = schema->parameters[0]->width;
+
+                Tensor* tensor = (Tensor*)dest;
+                tensor->total_elements = total;
+                tensor->device_type = 0;
+                tensor->device_id = 0;
+
+                if (total == 0) {
+                    tensor->shape = RELNULL;
+                    tensor->data = RELNULL;
+                    Py_DECREF(arr);
+                    break;
+                }
+
+                // Write shape array
+                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, _Alignof(int64_t));
+                {
+                    char* rel_err = NULL;
+                    tensor->shape = abs2rel((absptr_t)*cursor, &rel_err);
+                    if (rel_err) { free(rel_err); Py_DECREF(arr); PyRAISE("abs2rel failed for tensor shape"); }
+                }
+                int64_t* shape_dst = (int64_t*)*cursor;
+                for (int i = 0; i < ndim; i++) shape_dst[i] = (int64_t)np_shape[i];
+                *cursor = (char*)*cursor + ndim * sizeof(int64_t);
+
+                // Write data buffer
+                size_t elem_align = schema_alignment(schema->parameters[0]);
+                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, elem_align);
+                {
+                    char* rel_err = NULL;
+                    tensor->data = abs2rel((absptr_t)*cursor, &rel_err);
+                    if (rel_err) { free(rel_err); Py_DECREF(arr); PyRAISE("abs2rel failed for tensor data"); }
+                }
+                memcpy(*cursor, PyArray_DATA(arr), total * elem_width);
+                *cursor = (char*)*cursor + total * elem_width;
+
+                Py_DECREF(arr);
             }
             break;
 

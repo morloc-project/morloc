@@ -782,6 +782,40 @@ static int flatten_fixup(
                 }
             }
             break;
+        case MORLOC_TENSOR:
+            {
+                Tensor* orig = (Tensor*)data;
+                Tensor* buf_tensor = (Tensor*)(buf + buf_offset);
+
+                if (orig->total_elements == 0) {
+                    buf_tensor->shape = 0;
+                    buf_tensor->data = 0;
+                    break;
+                }
+
+                size_t ndim = schema_tensor_ndim(schema);
+
+                // Copy shape array
+                char* resolve_err = NULL;
+                int64_t* orig_shape = (int64_t*)rel2abs(orig->shape, &resolve_err);
+                if (resolve_err) { free(resolve_err); RAISE("Failed to resolve tensor shape relptr"); }
+                *data_cursor = ALIGN_UP(*data_cursor, _Alignof(int64_t));
+                buf_tensor->shape = (relptr_t)*data_cursor;
+                memcpy(buf + *data_cursor, orig_shape, ndim * sizeof(int64_t));
+                *data_cursor += ndim * sizeof(int64_t);
+
+                // Copy data buffer
+                char* data_err = NULL;
+                void* orig_data = rel2abs(orig->data, &data_err);
+                if (data_err) { free(data_err); RAISE("Failed to resolve tensor data relptr"); }
+                size_t elem_align = schema_alignment(schema->parameters[0]);
+                *data_cursor = ALIGN_UP(*data_cursor, elem_align);
+                buf_tensor->data = (relptr_t)*data_cursor;
+                size_t data_bytes = orig->total_elements * schema->parameters[0]->width;
+                memcpy(buf + *data_cursor, orig_data, data_bytes);
+                *data_cursor += data_bytes;
+            }
+            break;
         default:
             // Primitives: already copied by parent's memcpy, nothing to fix
             break;

@@ -151,6 +151,7 @@ cppSetup =
     , EmbededFile "cppmorloc.cpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc.cpp"))
     , EmbededFile "morloc_pch.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/morloc_pch.hpp"))
     , EmbededFile "mlc_arrow.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/mlc_arrow.hpp"))
+    , EmbededFile "mlc_tensor.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/mlc_tensor.hpp"))
     , EmbededFile "nanoarrow.h" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/nanoarrow/nanoarrow.h"))
     , EmbededFile "nanoarrow.c" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/nanoarrow/nanoarrow.c"))
     ]

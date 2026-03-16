@@ -71,9 +71,18 @@ shm_t* abs2shm(absptr_t ptr, ERRMSG);
 // Resolve a relative pointer using either a base pointer (inline data)
 // or SHM (shared memory). If base_ptr is non-NULL, resolution is simple
 // pointer arithmetic; otherwise falls back to rel2abs.
+// Callers may pass NULL for errmsg_ when errors cannot be propagated
+// (e.g. inside Python/R extension deserialization); rel2abs requires a
+// valid errmsg pointer, so we provide a local one when needed.
 static inline void* resolve_relptr(relptr_t relptr, const void* base_ptr, ERRMSG) {
     if (base_ptr) {
         return (char*)base_ptr + relptr;
+    }
+    if (errmsg_ == NULL) {
+        char* local_errmsg = NULL;
+        void* result = rel2abs(relptr, &local_errmsg);
+        free(local_errmsg);
+        return result;
     }
     return rel2abs(relptr, errmsg_);
 }

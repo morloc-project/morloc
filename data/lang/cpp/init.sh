@@ -15,6 +15,7 @@ fi
 # Install headers
 cp "$BUILD_DIR/cppmorloc.hpp" "$INCLUDE_DIR/"
 cp "$BUILD_DIR/mlc_arrow.hpp" "$INCLUDE_DIR/"
+cp "$BUILD_DIR/mlc_tensor.hpp" "$INCLUDE_DIR/"
 
 # Install nanoarrow headers
 mkdir -p "$INCLUDE_DIR/nanoarrow"

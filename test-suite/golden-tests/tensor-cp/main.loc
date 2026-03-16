@@ -1,0 +1,14 @@
+module main (result)
+
+import root
+import root-cpp
+import root-py
+
+source Cpp from "src.hpp" ("makeMatrix")
+source Py from "src.py" ("sumAll")
+
+makeMatrix :: Tensor2 3 4 Real
+sumAll :: Tensor2 3 4 Real -> Real
+
+result :: Real
+result = sumAll makeMatrix

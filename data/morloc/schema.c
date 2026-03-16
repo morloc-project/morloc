@@ -116,6 +116,12 @@ static char* write_generic_schema_r(const Schema* schema, char* schema_str, size
             schema_str[*pos] = SCHEMA_OPTIONAL; (*pos)++;
             schema_str = write_generic_schema_r(schema->parameters[0], schema_str, pos, buffer_size);
             break;
+        case MORLOC_TENSOR:
+            schema_str = resize_schema_buffer(schema_str, *pos, buffer_size, 3);
+            schema_str[*pos] = SCHEMA_TENSOR; (*pos)++;
+            schema_str[*pos] = schema_size_to_string(schema_tensor_ndim(schema)); (*pos)++; // ndim
+            schema_str = write_generic_schema_r(schema->parameters[0], schema_str, pos, buffer_size);
+            break;
         default:
             // This should be unreachable
             fprintf(stderr, "Missing case in morloc schema");
@@ -143,6 +149,7 @@ bool schema_is_fixed_width(const Schema* schema){
     switch(schema->type){
         case MORLOC_STRING:
         case MORLOC_ARRAY:
+        case MORLOC_TENSOR:
             return false;
         case MORLOC_OPTIONAL:
             return schema_is_fixed_width(schema->parameters[0]);
@@ -207,6 +214,19 @@ size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG){
                 }
             }
             break;
+        case MORLOC_TENSOR:
+            {
+                Tensor* tensor = (Tensor*)data;
+                size_t ndim = schema_tensor_ndim(schema);
+                size_t elem_width = schema->parameters[0]->width;
+                // header + shape array + element data
+                size = sizeof(Tensor);
+                size += schema_alignment(schema->parameters[0]) - 1; // alignment padding for shape
+                size += ndim * sizeof(int64_t);
+                size += schema_alignment(schema->parameters[0]) - 1; // alignment padding for data
+                size += tensor->total_elements * elem_width;
+            }
+            break;
         case MORLOC_TUPLE:
         case MORLOC_MAP:
             {
@@ -251,6 +271,7 @@ size_t schema_alignment(const Schema* schema) {
         case MORLOC_FLOAT64:
         case MORLOC_STRING:
         case MORLOC_ARRAY:
+        case MORLOC_TENSOR:
             return _Alignof(size_t);
         case MORLOC_TUPLE:
         case MORLOC_MAP: {
@@ -389,6 +410,19 @@ static Schema* map_schema(size_t size, char** keys, Schema** params) {
     }
     size_t width = ALIGN_UP(offset, max_align);
     return create_schema_with_params(MORLOC_MAP, width, size, params, keys);
+}
+
+static Schema* tensor_schema(size_t ndim, Schema* elem_type) {
+    Schema** params = (Schema**)calloc(1, sizeof(Schema*));
+    if (!params) return NULL;
+    params[0] = elem_type;
+
+    // size=1 (one parameter: the element type). ndim stored in offsets[0].
+    Schema* schema = create_schema_with_params(MORLOC_TENSOR, sizeof(Tensor), 1, params, NULL);
+    if (schema) {
+        schema->offsets[0] = ndim;
+    }
+    return schema;
 }
 
 static Schema* optional_schema(Schema* inner) {
@@ -573,6 +607,12 @@ Schema* parse_schema_r(char** schema_ptr, ERRMSG){
       child_schema = parse_schema_r(schema_ptr, &CHILD_ERRMSG);
       RAISE_IF(child_schema == NULL, "\n%s", CHILD_ERRMSG)
       schema = optional_schema(child_schema);
+      break;
+    case SCHEMA_TENSOR:
+      size = parse_schema_size(schema_ptr);
+      child_schema = parse_schema_r(schema_ptr, &CHILD_ERRMSG);
+      RAISE_IF(child_schema == NULL, "\n%s", CHILD_ERRMSG)
+      schema = tensor_schema(size, child_schema);
       break;
     case '<':
       {

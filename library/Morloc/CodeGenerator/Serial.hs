@@ -44,6 +44,7 @@ import Morloc.Typecheck.Internal (apply, qualify, substitute, subtype, unqualify
 serialAstToType :: SerialAST -> TypeF
 serialAstToType (SerialPack _ (_, s)) = serialAstToType s
 serialAstToType (SerialList v s) = AppF (VarF v) [serialAstToType s]
+serialAstToType (SerialTensor v _ s) = AppF (VarF v) [serialAstToType s]
 serialAstToType (SerialTuple v ss) = AppF (VarF v) (map serialAstToType ss)
 serialAstToType (SerialObject o n ps rs) =
   let ts = map (serialAstToType . snd) rs
@@ -95,6 +96,7 @@ encode64D i = pretty (encode64 i)
 serialAstToMsgpackSchema :: SerialAST -> MDoc
 serialAstToMsgpackSchema (SerialPack v (_, s)) = addHint v <> serialAstToMsgpackSchema s
 serialAstToMsgpackSchema (SerialList v s) = addHint v <> "a" <> serialAstToMsgpackSchema s
+serialAstToMsgpackSchema (SerialTensor v ndim s) = addHint v <> "T" <> encode64D ndim <> serialAstToMsgpackSchema s
 serialAstToMsgpackSchema (SerialTuple v ss) = addHint v <> "t" <> encode64D (length ss) <> foldl (<>) "" (map serialAstToMsgpackSchema ss)
 serialAstToMsgpackSchema (SerialObject _ v _ rs) = addHint v <> "m" <> encode64D (length rs) <> foldl (<>) "" (map keypair rs)
   where
@@ -149,6 +151,7 @@ shallowType (SerialBool x) = VarF x
 shallowType (SerialString x) = VarF x
 shallowType (SerialNull x) = VarF x
 shallowType (SerialOptional _ s) = OptionalF (shallowType s)
+shallowType (SerialTensor v _ s) = AppF (VarF v) [shallowType s]
 shallowType (SerialUnknown v) = UnkF v
 
 findPackers ::
@@ -306,6 +309,8 @@ makeSerialAST m lang t0 = do
       | finalVar == Just BT.list = SerialList fv <$> makeSerialAST' gscope typepackers (head runtimeTs)
       | finalVar == Just (BT.tuple (length runtimeTs)) =
           SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers) runtimeTs
+      | Just ndim <- tensorNDim finalVar =
+          SerialTensor fv ndim <$> makeSerialAST' gscope typepackers (last runtimeTs)
       | otherwise = case Map.lookup generalTypeName typepackers of
           (Just ps) -> do
             packers <- catMaybes <$> mapM (resolvePacker lang m ft) ps
@@ -350,6 +355,10 @@ makeSerialAST m lang t0 = do
             _ -> Nothing
 
         finalVar = basevar $ maybe generalType id evaluatedType
+
+        tensorNDim :: Maybe TVar -> Maybe Int
+        tensorNDim (Just v) = lookup v [(BT.tensor k, k) | k <- [1..5]]
+        tensorNDim Nothing = Nothing
 
         fallbackExpand :: MorlocMonad SerialAST
         fallbackExpand = case evaluatedType of
@@ -576,6 +585,7 @@ isSerializable (SerialBool _) = True
 isSerializable (SerialString _) = True
 isSerializable (SerialNull _) = True
 isSerializable (SerialOptional _ x) = isSerializable x
+isSerializable (SerialTensor _ _ x) = isSerializable x
 isSerializable (SerialUnknown _) = True -- are you feeling lucky?
 
 prettySerialOne :: SerialAST -> MDoc
@@ -602,4 +612,5 @@ prettySerialOne (SerialBool _) = "SerialBool"
 prettySerialOne (SerialString _) = "SerialString"
 prettySerialOne (SerialNull _) = "SerialNull"
 prettySerialOne (SerialOptional _ x) = "SerialOptional" <> parens (prettySerialOne x)
+prettySerialOne (SerialTensor _ ndim x) = "SerialTensor" <> pretty ndim <> parens (prettySerialOne x)
 prettySerialOne (SerialUnknown _) = "SerialUnknown"

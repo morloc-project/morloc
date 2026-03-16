@@ -174,6 +174,9 @@ static EXIT_CODE pack_data(
         case MORLOC_OPTIONAL:
             // handled by early return above; unreachable
             break;
+        case MORLOC_TENSOR:
+            RAISE("MessagePack serialization of tensor types is not yet supported")
+            break;
         default:
             RAISE("Unexpected morloc type")
     }
@@ -250,6 +253,9 @@ static EXIT_CODE pack_data(
       case MORLOC_FLOAT64:
       case MORLOC_OPTIONAL:
         // no further processing needed (optional handled by early return above)
+        break;
+      case MORLOC_TENSOR:
+        // handled by early RAISE above; unreachable
         break;
     }
 
@@ -374,6 +380,8 @@ static size_t msg_size_r(const Schema* schema, mpack_tokbuf_t* tokbuf, const cha
             size_t extra = (inner_total > schema->parameters[0]->width) ? inner_total - schema->parameters[0]->width : 0;
             return schema->width + extra;
         }
+      case MORLOC_TENSOR:
+        return 0; // tensor msgpack not supported
       default:
         return 0;
     }
@@ -632,6 +640,9 @@ static EXIT_CODE parse_obj(
             child_retcode = parse_obj((char*)mlc + schema->offsets[0], schema->parameters[0], cursor, tokbuf, buf_ptr, buf_remaining, token, &CHILD_ERRMSG);
             RAISE_IF(child_retcode == EXIT_FAIL, "\n%s", CHILD_ERRMSG)
         }
+        break;
+      case MORLOC_TENSOR:
+        RAISE("MessagePack deserialization of tensor types is not yet supported")
         break;
       default:
         RAISE("Failed to parse morloc type %d", schema->type)

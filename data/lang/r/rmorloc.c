@@ -169,6 +169,26 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
                 return size;
             }
 
+        case MORLOC_TENSOR:
+            {
+                size_t ndim = schema_tensor_ndim(schema);
+                size_t elem_width = schema->parameters[0]->width;
+                SEXP dim = getAttrib(obj, R_DimSymbol);
+                size_t total = 1;
+                if (dim != R_NilValue) {
+                    for (int i = 0; i < length(dim); i++)
+                        total *= (size_t)INTEGER(dim)[i];
+                } else {
+                    total = (size_t)XLENGTH(obj);
+                }
+                size = sizeof(Tensor);
+                size += _Alignof(int64_t) - 1;
+                size += ndim * sizeof(int64_t);
+                size += schema_alignment(schema->parameters[0]) - 1;
+                size += total * elem_width;
+                return size;
+            }
+
         default:
             MORLOC_ERROR("Unhandled schema type");
             break;
@@ -429,6 +449,130 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
             } else {
                 *((uint8_t*)dest) = 1;
                 to_voidstar_r((char*)dest + schema->offsets[0], cursor, obj, schema->parameters[0]);
+            }
+            break;
+
+        case MORLOC_TENSOR:
+            {
+                size_t ndim = schema_tensor_ndim(schema);
+                size_t elem_width = schema->parameters[0]->width;
+
+                // Get shape from dim attribute (or length for 1D)
+                SEXP dim = getAttrib(obj, R_DimSymbol);
+                int64_t shape[5];
+                size_t total = 1;
+                if (dim != R_NilValue) {
+                    for (size_t i = 0; i < ndim; i++) {
+                        shape[i] = (int64_t)INTEGER(dim)[i];
+                        total *= (size_t)shape[i];
+                    }
+                } else {
+                    shape[0] = (int64_t)XLENGTH(obj);
+                    total = (size_t)shape[0];
+                }
+
+                Tensor* tensor = (Tensor*)dest;
+                tensor->total_elements = total;
+                tensor->device_type = 0;
+                tensor->device_id = 0;
+
+                if (total == 0) {
+                    tensor->shape = RELNULL;
+                    tensor->data = RELNULL;
+                    break;
+                }
+
+                // Write shape
+                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, _Alignof(int64_t));
+                tensor->shape = R_TRY(abs2rel, (absptr_t)*cursor);
+                int64_t* shape_dst = (int64_t*)*cursor;
+                for (size_t i = 0; i < ndim; i++) shape_dst[i] = shape[i];
+                *cursor = (char*)*cursor + ndim * sizeof(int64_t);
+
+                // Write data: transpose from column-major (R) to row-major (C)
+                size_t data_align = schema_alignment(schema->parameters[0]);
+                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, data_align);
+                tensor->data = R_TRY(abs2rel, (absptr_t)*cursor);
+
+                    // Coerce R object to match schema element type
+                SEXP coerced = obj;
+                int need_protect = 0;
+                morloc_serial_type etype = schema->parameters[0]->type;
+                if ((etype == MORLOC_FLOAT64 || etype == MORLOC_FLOAT32) && !isReal(obj)) {
+                    coerced = PROTECT(coerceVector(obj, REALSXP));
+                    need_protect = 1;
+                } else if (etype != MORLOC_FLOAT64 && etype != MORLOC_FLOAT32 && etype != MORLOC_BOOL && !isInteger(obj)) {
+                    coerced = PROTECT(coerceVector(obj, INTSXP));
+                    need_protect = 1;
+                }
+
+                if (ndim == 1) {
+                    // 1D: no transpose needed
+                    if (isReal(coerced)) {
+                        memcpy(*cursor, REAL(coerced), total * elem_width);
+                    } else if (isInteger(coerced)) {
+                        memcpy(*cursor, INTEGER(coerced), total * elem_width);
+                    } else if (isLogical(coerced)) {
+                        int* src = LOGICAL(coerced);
+                        uint8_t* dst = (uint8_t*)*cursor;
+                        for (size_t i = 0; i < total; i++) dst[i] = (uint8_t)(src[i] != 0);
+                    }
+                } else if (ndim == 2) {
+                    size_t nrows = (size_t)shape[0];
+                    size_t ncols = (size_t)shape[1];
+                    if (isReal(coerced)) {
+                        double* src = REAL(coerced);
+                        double* dst = (double*)*cursor;
+                        for (size_t r = 0; r < nrows; r++)
+                            for (size_t c = 0; c < ncols; c++)
+                                dst[r * ncols + c] = src[c * nrows + r];
+                    } else if (isInteger(coerced)) {
+                        int* src = INTEGER(coerced);
+                        int* dst = (int*)*cursor;
+                        for (size_t r = 0; r < nrows; r++)
+                            for (size_t c = 0; c < ncols; c++)
+                                dst[r * ncols + c] = src[c * nrows + r];
+                    }
+                } else {
+                    size_t col_strides[5];
+                    col_strides[0] = 1;
+                    for (size_t d = 1; d < ndim; d++)
+                        col_strides[d] = col_strides[d-1] * (size_t)shape[d-1];
+                    size_t row_strides[5];
+                    row_strides[ndim-1] = 1;
+                    for (size_t d = ndim-1; d > 0; d--)
+                        row_strides[d-1] = row_strides[d] * (size_t)shape[d];
+
+                    if (isReal(coerced)) {
+                        double* src = REAL(coerced);
+                        double* dst = (double*)*cursor;
+                        for (size_t i = 0; i < total; i++) {
+                            size_t rem = i;
+                            size_t col_idx = 0;
+                            for (size_t d = 0; d < ndim; d++) {
+                                size_t coord = rem / row_strides[d];
+                                rem %= row_strides[d];
+                                col_idx += coord * col_strides[d];
+                            }
+                            dst[i] = src[col_idx];
+                        }
+                    } else if (isInteger(coerced)) {
+                        int* src = INTEGER(coerced);
+                        int* dst = (int*)*cursor;
+                        for (size_t i = 0; i < total; i++) {
+                            size_t rem = i;
+                            size_t col_idx = 0;
+                            for (size_t d = 0; d < ndim; d++) {
+                                size_t coord = rem / row_strides[d];
+                                rem %= row_strides[d];
+                                col_idx += coord * col_strides[d];
+                            }
+                            dst[i] = src[col_idx];
+                        }
+                    }
+                }
+                if (need_protect) UNPROTECT(1);
+                *cursor = (char*)*cursor + total * elem_width;
             }
             break;
 
@@ -758,6 +902,130 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
                 return R_NilValue;
             }
             obj = from_voidstar((const char*)data + schema->offsets[0], schema->parameters[0], base_ptr);
+            break;
+        }
+        case MORLOC_TENSOR: {
+            const Tensor* tensor = (const Tensor*)data;
+            size_t ndim = schema_tensor_ndim(schema);
+            size_t total = tensor->total_elements;
+
+            if (total == 0) {
+                if (isReal(obj)) {
+                    obj = PROTECT(allocVector(REALSXP, 0));
+                } else {
+                    obj = PROTECT(allocVector(INTSXP, 0));
+                }
+                UNPROTECT(1);
+                break;
+            }
+
+            const int64_t* shape = (const int64_t*)resolve_relptr(tensor->shape, base_ptr, NULL);
+            const void* tdata = resolve_relptr(tensor->data, base_ptr, NULL);
+
+            // Allocate R vector
+            int sexptype;
+            switch (schema->parameters[0]->type) {
+                case MORLOC_FLOAT32:
+                case MORLOC_FLOAT64: sexptype = REALSXP; break;
+                case MORLOC_BOOL:    sexptype = LGLSXP; break;
+                default:             sexptype = INTSXP; break;
+            }
+
+            obj = PROTECT(allocVector(sexptype, (R_xlen_t)total));
+
+            if (ndim == 1) {
+                // 1D: no transpose
+                if (sexptype == REALSXP) {
+                    if (schema->parameters[0]->type == MORLOC_FLOAT32) {
+                        const float* src = (const float*)tdata;
+                        double* dst = REAL(obj);
+                        for (size_t i = 0; i < total; i++) dst[i] = (double)src[i];
+                    } else {
+                        memcpy(REAL(obj), tdata, total * sizeof(double));
+                    }
+                } else if (sexptype == INTSXP) {
+                    size_t elem_w = schema->parameters[0]->width;
+                    if (elem_w == sizeof(int)) {
+                        memcpy(INTEGER(obj), tdata, total * sizeof(int));
+                    } else {
+                        // Widen or narrow to int
+                        int* dst = INTEGER(obj);
+                        const char* src = (const char*)tdata;
+                        for (size_t i = 0; i < total; i++) {
+                            int64_t v = 0;
+                            memcpy(&v, src + i * elem_w, elem_w);
+                            dst[i] = (int)v;
+                        }
+                    }
+                } else if (sexptype == LGLSXP) {
+                    const uint8_t* src = (const uint8_t*)tdata;
+                    int* dst = LOGICAL(obj);
+                    for (size_t i = 0; i < total; i++) dst[i] = src[i] ? 1 : 0;
+                }
+            } else if (ndim == 2) {
+                // 2D: row-major to col-major transpose
+                size_t nrows = (size_t)shape[0];
+                size_t ncols = (size_t)shape[1];
+                if (sexptype == REALSXP) {
+                    const double* src = (const double*)tdata;
+                    double* dst = REAL(obj);
+                    for (size_t r = 0; r < nrows; r++)
+                        for (size_t c = 0; c < ncols; c++)
+                            dst[c * nrows + r] = src[r * ncols + c];
+                } else if (sexptype == INTSXP) {
+                    const int* src = (const int*)tdata;
+                    int* dst = INTEGER(obj);
+                    for (size_t r = 0; r < nrows; r++)
+                        for (size_t c = 0; c < ncols; c++)
+                            dst[c * nrows + r] = src[r * ncols + c];
+                }
+            } else {
+                // General N-D: row-major to col-major
+                size_t col_strides[5];
+                col_strides[0] = 1;
+                for (size_t d = 1; d < ndim; d++)
+                    col_strides[d] = col_strides[d-1] * (size_t)shape[d-1];
+                size_t row_strides[5];
+                row_strides[ndim-1] = 1;
+                for (size_t d = ndim-1; d > 0; d--)
+                    row_strides[d-1] = row_strides[d] * (size_t)shape[d];
+
+                if (sexptype == REALSXP) {
+                    const double* src = (const double*)tdata;
+                    double* dst = REAL(obj);
+                    for (size_t i = 0; i < total; i++) {
+                        // i is row-major index, compute col-major index
+                        size_t rem = i;
+                        size_t col_idx = 0;
+                        for (size_t d = 0; d < ndim; d++) {
+                            size_t coord = rem / row_strides[d];
+                            rem %= row_strides[d];
+                            col_idx += coord * col_strides[d];
+                        }
+                        dst[col_idx] = src[i];
+                    }
+                } else if (sexptype == INTSXP) {
+                    const int* src = (const int*)tdata;
+                    int* dst = INTEGER(obj);
+                    for (size_t i = 0; i < total; i++) {
+                        size_t rem = i;
+                        size_t col_idx = 0;
+                        for (size_t d = 0; d < ndim; d++) {
+                            size_t coord = rem / row_strides[d];
+                            rem %= row_strides[d];
+                            col_idx += coord * col_strides[d];
+                        }
+                        dst[col_idx] = src[i];
+                    }
+                }
+            }
+
+            // Set dim attribute
+            SEXP r_dim = PROTECT(allocVector(INTSXP, (R_xlen_t)ndim));
+            for (size_t i = 0; i < ndim; i++)
+                INTEGER(r_dim)[i] = (int)shape[i];
+            setAttrib(obj, R_DimSymbol, r_dim);
+            UNPROTECT(2);
             break;
         }
         default:

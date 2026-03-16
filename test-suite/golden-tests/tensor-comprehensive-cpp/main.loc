@@ -1,0 +1,82 @@
+-- Comprehensive tensor tests: multiple dimensions, element types,
+-- edge cases, compositions, all within C++ only.
+module main
+  ( vec1d
+  , mat2d
+  , ten3d
+  , emptyVec
+  , singleElem
+  , oneByOne
+  , intVec
+  , f32Vec
+  , testSumMat
+  , testSumVec
+  , testSum3d
+  , largeVec
+  )
+
+import root
+import root-cpp
+
+source Cpp from "src.hpp"
+  ( "makeVec"
+  , "makeMat"
+  , "make3d"
+  , "makeEmpty"
+  , "makeSingle"
+  , "makeOneByOne"
+  , "makeIntVec"
+  , "makeF32Vec"
+  , "sumMat"
+  , "sumVec"
+  , "sum3d"
+  , "makeLargeVec"
+  , "checkLargeVec"
+  )
+
+-- Basic constructors for each dimension
+makeVec :: Tensor1 5 Real
+makeMat :: Tensor2 3 4 Real
+make3d :: Tensor3 2 3 4 Real
+
+-- Edge cases: empty and minimal
+makeEmpty :: Tensor1 0 Real
+makeSingle :: Tensor1 1 Real
+makeOneByOne :: Tensor2 1 1 Real
+
+-- Element type variety
+makeIntVec :: Tensor1 4 Int
+makeF32Vec :: Tensor1 3 Float32
+
+-- Extraction: tensor -> scalar
+sumMat :: Tensor2 3 4 Real -> Real
+sumVec :: Tensor1 5 Real -> Real
+sum3d :: Tensor3 2 3 4 Real -> Real
+
+-- Large tensor to test SHM path (exceeds inline threshold)
+makeLargeVec :: Tensor1 100000 Real
+checkLargeVec :: Tensor1 100000 Real -> Real
+
+-- Direct output tests
+vec1d = makeVec
+mat2d = makeMat
+ten3d = make3d
+emptyVec = makeEmpty
+singleElem = makeSingle
+oneByOne = makeOneByOne
+intVec = makeIntVec
+f32Vec = makeF32Vec
+
+-- Composed scalar tests (zero-arg)
+testSumMat :: Real
+testSumMat = sumMat makeMat
+
+testSumVec :: Real
+testSumVec = sumVec makeVec
+
+testSum3d :: Real
+testSum3d = sum3d make3d
+
+-- Large vector round-trip (sum of 0..99999 = 4999950000)
+largeVec :: Real
+largeVec = checkLargeVec makeLargeVec

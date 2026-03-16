@@ -564,6 +564,10 @@ static int read_json_with_schema_r(
             break;
         }
 
+        case MORLOC_TENSOR:
+            RAISE("JSON parsing of tensor types is not yet supported")
+            break;
+
         default:
             RAISE("Unhandled schema type %c", **json_ptr)
             break;
@@ -705,6 +709,57 @@ static bool print_voidstar_r(const void* voidstar, const Schema* schema, ERRMSG)
                     bool success = print_voidstar_r((const char*)voidstar + schema->offsets[0], schema->parameters[0], &CHILD_ERRMSG);
                     RAISE_IF(!success, "\n%s", CHILD_ERRMSG)
                 }
+            }
+            break;
+        case MORLOC_TENSOR:
+            {
+                Tensor* tensor = (Tensor*)voidstar;
+                size_t ndim = schema_tensor_ndim(schema);
+                size_t elem_width = schema->parameters[0]->width;
+
+                if (tensor->total_elements == 0) {
+                    printf("[]");
+                    break;
+                }
+
+                const int64_t* shape = TRY((const int64_t*)rel2abs, tensor->shape);
+                const char* tdata = TRY((const char*)rel2abs, tensor->data);
+
+                // Print as nested JSON arrays, row-major order
+                // Compute strides (row-major: last dim varies fastest)
+                size_t strides[5]; // max ndim = 5
+                strides[ndim - 1] = 1;
+                for (size_t d = ndim - 1; d > 0; d--) {
+                    strides[d - 1] = strides[d] * (size_t)shape[d];
+                }
+
+                // Use iterative approach: track position in each dimension
+                size_t pos[5] = {0};
+                // Print opening brackets
+                for (size_t d = 0; d < ndim; d++) printf("[");
+
+                for (size_t i = 0; i < tensor->total_elements; i++) {
+                    bool success = print_voidstar_r(tdata + i * elem_width, schema->parameters[0], &CHILD_ERRMSG);
+                    RAISE_IF(!success, "\n%s", CHILD_ERRMSG)
+
+                    // Advance position and print delimiters
+                    if (i + 1 < tensor->total_elements) {
+                        // How many dimensions roll over?
+                        size_t closes = 0;
+                        for (size_t d = ndim; d > 0; d--) {
+                            pos[d - 1]++;
+                            if (pos[d - 1] < (size_t)shape[d - 1]) break;
+                            pos[d - 1] = 0;
+                            closes++;
+                        }
+                        for (size_t c = 0; c < closes; c++) printf("]");
+                        printf(",");
+                        for (size_t c = 0; c < closes; c++) printf("[");
+                    }
+                }
+
+                // Print closing brackets
+                for (size_t d = 0; d < ndim; d++) printf("]");
             }
             break;
         default:
@@ -869,6 +924,59 @@ static bool pretty_print_r(const void* voidstar, const Schema* schema, int inden
                     printf("null");
                 } else {
                     TRY(pretty_print_r, (const char*)voidstar + schema->offsets[0], schema->parameters[0], indent, false);
+                }
+            }
+            break;
+        case MORLOC_TENSOR:
+            {
+                Tensor* tensor = (Tensor*)voidstar;
+                size_t ndim = schema_tensor_ndim(schema);
+                size_t elem_width = schema->parameters[0]->width;
+
+                if (tensor->total_elements == 0) {
+                    printf("(empty tensor)");
+                    break;
+                }
+
+                const int64_t* shape = TRY((const int64_t*)rel2abs, tensor->shape);
+                const char* tdata = TRY((const char*)rel2abs, tensor->data);
+
+                if (ndim == 1) {
+                    // 1D: space-separated on one line
+                    for (size_t i = 0; i < tensor->total_elements; i++) {
+                        if (i > 0) putchar(' ');
+                        TRY(print_voidstar_r, tdata + i * elem_width, schema->parameters[0]);
+                    }
+                } else if (ndim == 2) {
+                    // 2D: tab-delimited rows
+                    size_t nrows = (size_t)shape[0];
+                    size_t ncols = (size_t)shape[1];
+                    for (size_t r = 0; r < nrows; r++) {
+                        if (r > 0) putchar('\n');
+                        for (size_t c = 0; c < ncols; c++) {
+                            if (c > 0) putchar('\t');
+                            TRY(print_voidstar_r, tdata + (r * ncols + c) * elem_width, schema->parameters[0]);
+                        }
+                    }
+                } else {
+                    // 3D+: stack 2D slices separated by blank lines
+                    // Compute the number of 2D slices and their size
+                    size_t nrows = (size_t)shape[ndim - 2];
+                    size_t ncols = (size_t)shape[ndim - 1];
+                    size_t slice_size = nrows * ncols;
+                    size_t n_slices = tensor->total_elements / slice_size;
+
+                    for (size_t s = 0; s < n_slices; s++) {
+                        if (s > 0) { putchar('\n'); putchar('\n'); }
+                        const char* slice = tdata + s * slice_size * elem_width;
+                        for (size_t r = 0; r < nrows; r++) {
+                            if (r > 0) putchar('\n');
+                            for (size_t c = 0; c < ncols; c++) {
+                                if (c > 0) putchar('\t');
+                                TRY(print_voidstar_r, slice + (r * ncols + c) * elem_width, schema->parameters[0]);
+                            }
+                        }
+                    }
                 }
             }
             break;
@@ -1182,6 +1290,42 @@ static bool voidstar_to_json_buf_r(json_buf_t* jb, const void* voidstar, const S
             } else {
                 TRY(voidstar_to_json_buf_r, jb, (const char*)voidstar + schema->offsets[0], schema->parameters[0]);
             }
+            break;
+        }
+        case MORLOC_TENSOR: {
+            Tensor* tensor = (Tensor*)voidstar;
+            size_t ndim = schema_tensor_ndim(schema);
+            size_t elem_width = schema->parameters[0]->width;
+
+            if (tensor->total_elements == 0) {
+                json_buf_append(jb, "[]", 2);
+                break;
+            }
+
+            const int64_t* shape = TRY((const int64_t*)rel2abs, tensor->shape);
+            const char* tdata = TRY((const char*)rel2abs, tensor->data);
+
+            size_t pos[5] = {0};
+            for (size_t d = 0; d < ndim; d++) json_buf_append(jb, "[", 1);
+
+            for (size_t i = 0; i < tensor->total_elements; i++) {
+                TRY(voidstar_to_json_buf_r, jb, tdata + i * elem_width, schema->parameters[0]);
+
+                if (i + 1 < tensor->total_elements) {
+                    size_t closes = 0;
+                    for (size_t d = ndim; d > 0; d--) {
+                        pos[d - 1]++;
+                        if (pos[d - 1] < (size_t)shape[d - 1]) break;
+                        pos[d - 1] = 0;
+                        closes++;
+                    }
+                    for (size_t c = 0; c < closes; c++) json_buf_append(jb, "]", 1);
+                    json_buf_append(jb, ",", 1);
+                    for (size_t c = 0; c < closes; c++) json_buf_append(jb, "[", 1);
+                }
+            }
+
+            for (size_t d = 0; d < ndim; d++) json_buf_append(jb, "]", 1);
             break;
         }
         default:

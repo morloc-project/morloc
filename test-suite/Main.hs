@@ -485,4 +485,14 @@ main = do
       , golden "arrow-immutable-rp" "arrow-immutable-rp"
       , golden "arrow-immutable-cp" "arrow-immutable-cp"
       , golden "arrow-immutable-pc" "arrow-immutable-pc"
+      , -- dense tensor tests
+        golden "tensor-nexus-cpp" "tensor-nexus-cpp"
+      , golden "tensor-table-cpp" "tensor-table-cpp"
+      , golden "tensor-cp" "tensor-cp"
+      , golden "tensor-pc" "tensor-pc"
+      , golden "tensor-pr" "tensor-pr"
+      , golden "tensor-rp" "tensor-rp"
+      , golden "tensor-comprehensive-cpp" "tensor-comprehensive-cpp"
+      , golden "tensor-comprehensive-cross" "tensor-comprehensive-cross"
+      , golden "tensor-dimensions" "tensor-dimensions"
       ]

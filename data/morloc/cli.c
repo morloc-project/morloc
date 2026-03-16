@@ -158,6 +158,15 @@ int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t base_rel,
                 }
             }
             break;
+        case MORLOC_TENSOR:
+            {
+                Tensor* tensor = (Tensor*)data;
+                if (tensor->total_elements > 0) {
+                    tensor->shape += base_rel;
+                    tensor->data += base_rel;
+                }
+            }
+            break;
         default:
             break;
     }
@@ -403,6 +412,10 @@ bool shfree_by_schema(absptr_t ptr, const Schema* schema, ERRMSG){
               TRY(shfree_by_schema, element_ptr, schema->parameters[i])
             }
           }
+          break;
+        case MORLOC_TENSOR:
+          // shape and data are inline in the same allocation (cursor pattern),
+          // freed by the parent shfree
           break;
         default:
           // fixed-size types will directly over-written
