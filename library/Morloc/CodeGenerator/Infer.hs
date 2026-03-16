@@ -136,6 +136,9 @@ weave gscope = w
     w (OptionalU t1) (OptionalU t2) = OptionalF <$> w t1 t2
     w (NatLitU n) (NatLitU _) = return $ NatLitF n
     w (NatLitU n) _ = return $ NatLitF n  -- Nat params may be erased in concrete type
+    w (NatAddU _ _) _ = return $ NatLitF 0  -- Nat arithmetic erased in concrete type
+    w (NatMulU _ _) _ = return $ NatLitF 0  -- Nat arithmetic erased in concrete type
+    w (ForallU _ (VarU _)) _ = return $ NatLitF 0  -- Unresolved nat dim variable
     w t1 t2 = case T.evaluateStep gscope t1 of
       Nothing -> Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <> "\n  t2:" <> pretty t2
       (Just t1') ->
@@ -153,6 +156,8 @@ weave gscope = w
     weaveArgs (NatLitU n : gs) cs = (NatLitF n :) <$> weaveArgs gs cs
     weaveArgs (NatAddU _ _ : gs) cs = (NatLitF 0 :) <$> weaveArgs gs cs
     weaveArgs (NatMulU _ _ : gs) cs = (NatLitF 0 :) <$> weaveArgs gs cs
+    -- Unresolved nat dimension variable (opaque output dims): treat as erased
+    weaveArgs (ForallU _ (VarU _) : gs) cs = (NatLitF 0 :) <$> weaveArgs gs cs
     weaveArgs (g:gs) (c:cs) = (:) <$> w g c <*> weaveArgs gs cs
     weaveArgs _ [] = Left "general type has more non-Nat args than concrete type in weave"
 

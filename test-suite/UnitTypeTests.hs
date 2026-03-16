@@ -25,6 +25,7 @@ module UnitTypeTests
   , effectErrorTests
   , namespaceErrorTests
   , typeclassTests
+  , natErrorTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -2936,3 +2937,69 @@ typeclassTests =
           |]
           (lst (lst int))
       ]
+
+natErrorTests :: TestTree
+natErrorTests =
+  testGroup
+    "nat typecheck errors"
+    [ expectError
+        "add dimension mismatch (4 != 5)"
+        [r|
+      module main (x)
+      type Tensor2 d1 d2 a
+      add :: Tensor2 m n Real -> Tensor2 m n Real -> Tensor2 m n Real
+      a :: Tensor2 3 4 Real
+      b :: Tensor2 3 5 Real
+      x = add a b
+        |]
+    , expectError
+        "matmul inner dimension mismatch (4 != 5)"
+        [r|
+      module main (x)
+      type Tensor2 d1 d2 a
+      matmul :: Tensor2 m k Real -> Tensor2 k n Real -> Tensor2 m n Real
+      a :: Tensor2 3 4 Real
+      b :: Tensor2 5 6 Real
+      x = matmul a b
+        |]
+    , expectError
+        "trace requires square matrix (3 != 4)"
+        [r|
+      module main (x)
+      type Tensor2 d1 d2 a
+      trace :: Tensor2 n n Real -> Real
+      a :: Tensor2 3 4 Real
+      x = trace a
+        |]
+    , expectError
+        "dot product length mismatch (3 != 5)"
+        [r|
+      module main (x)
+      type Tensor1 d1 a
+      dot :: Tensor1 n Real -> Tensor1 n Real -> Real
+      a :: Tensor1 3 Real
+      b :: Tensor1 5 Real
+      x = dot a b
+        |]
+    , expectError
+        "vstack column dimension mismatch (3 != 4)"
+        [r|
+      module main (x)
+      type Tensor2 d1 d2 a
+      vstack :: Tensor2 m n Real -> Tensor2 p n Real -> Tensor2 m n Real
+      a :: Tensor2 2 3 Real
+      b :: Tensor2 4 4 Real
+      x = vstack a b
+        |]
+    , expectError
+        "nat arithmetic mismatch: (2+3) != 4"
+        [r|
+      module main (x)
+      type SizedList n a = [a]
+      append :: SizedList m a -> SizedList n a -> SizedList (m + n) a
+      a :: SizedList 2 Int
+      b :: SizedList 3 Int
+      x :: SizedList 4 Int
+      x = append a b
+        |]
+    ]

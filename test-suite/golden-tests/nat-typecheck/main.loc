@@ -1,0 +1,154 @@
+-- Comprehensive nat-parameterized type tests.
+-- Tests Category 1 (fully checked), Category 2 (deferred/ground),
+-- and Category 3 (opaque dimensions) from the nat type system.
+module main
+  ( testAdd
+  , testTranspose
+  , testMatmul
+  , testTrace
+  , testDiag
+  , testVstack
+  , testHstack
+  , testOuter
+  , testDot
+  , testFlatten
+  , testKron
+  , testSlice
+  , testTake
+  , testSliceAdd
+  )
+
+import root
+import root-cpp
+
+source Cpp from "src.hpp"
+  ( "ones34"
+  , "ones23"
+  , "ones32"
+  , "ones22"
+  , "ones43"
+  , "ones56"
+  , "onesV3"
+  , "onesV4"
+  , "onesV5"
+  , "onesV10"
+  , "eye33"
+  , "eye55"
+  , "add2d"
+  , "transpose2d"
+  , "matmul2d"
+  , "dot1d"
+  , "tsum1d"
+  , "trace2d"
+  , "diag2d"
+  , "diagMat1d"
+  , "flatten2d"
+  , "outer1d"
+  , "vstack2d"
+  , "hstack2d"
+  , "kron2d"
+  , "slice2d"
+  , "ttake1d"
+  )
+
+-- -- This is what `ones` SHOULD be, but this would require dependent types:
+-- ones :: i:Int -> j:Int -> Tensor2 i j Real
+
+-- Tensor constructors with specific dimensions
+ones34 :: Tensor2 3 4 Real
+ones23 :: Tensor2 2 3 Real
+ones32 :: Tensor2 3 2 Real
+ones22 :: Tensor2 2 2 Real
+ones43 :: Tensor2 4 3 Real
+ones56 :: Tensor2 5 6 Real
+onesV3 :: Tensor1 3 Real
+onesV4 :: Tensor1 4 Real
+onesV5 :: Tensor1 5 Real
+onesV10 :: Tensor1 10 Real
+eye33 :: Tensor2 3 3 Real
+eye55 :: Tensor2 5 5 Real
+
+-- Category 1: Fully checked operations (explicit forall via var list)
+add2d m n :: Tensor2 m n Real -> Tensor2 m n Real -> Tensor2 m n Real
+transpose2d m n :: Tensor2 m n Real -> Tensor2 n m Real
+matmul2d m k n :: Tensor2 m k Real -> Tensor2 k n Real -> Tensor2 m n Real
+dot1d n :: Tensor1 n Real -> Tensor1 n Real -> Real
+tsum1d n :: Tensor1 n Real -> Real
+trace2d n :: Tensor2 n n Real -> Real
+diag2d n :: Tensor2 n n Real -> Tensor1 n Real
+diagMat1d n :: Tensor1 n Real -> Tensor2 n n Real
+outer1d m n :: Tensor1 m Real -> Tensor1 n Real -> Tensor2 m n Real
+
+-- Category 2: Nat arithmetic (deferred with variables, checked at ground)
+flatten2d m n :: Tensor2 m n Real -> Tensor1 (m * n) Real
+vstack2d m n p :: Tensor2 m n Real -> Tensor2 p n Real -> Tensor2 (m + p) n Real
+hstack2d m n p :: Tensor2 m n Real -> Tensor2 m p Real -> Tensor2 m (n + p) Real
+kron2d m n p q :: Tensor2 m n Real -> Tensor2 p q Real -> Tensor2 (m * p) (n * q) Real
+
+-- Category 3: Opaque output dimensions
+slice2d m n i j :: Int -> Int -> Tensor2 m n Real -> Tensor2 i j Real
+ttake1d n i :: Int -> Tensor1 n Real -> Tensor1 i Real
+
+-- === Category 1 tests ===
+
+-- add two 3x4 ones matrices -> 3x4 of 2s -> flatten -> sum = 24
+testAdd :: Real
+testAdd = tsum1d (flatten2d (add2d ones34 ones34))
+
+-- transpose 3x4 ones -> 4x3 ones -> flatten -> sum = 12
+testTranspose :: Real
+testTranspose = tsum1d (flatten2d (transpose2d ones34))
+
+-- matmul I(3x3) * ones(3x4) = ones(3x4) -> flatten -> sum = 12
+testMatmul :: Real
+testMatmul = tsum1d (flatten2d (matmul2d eye33 ones34))
+
+-- trace of 5x5 identity = 5
+testTrace :: Real
+testTrace = trace2d eye55
+
+-- diagMat(ones(4)) = 4x4 diag matrix, diag extracts [1,1,1,1], sum = 4
+testDiag :: Real
+testDiag = tsum1d (diag2d (diagMat1d onesV4))
+
+-- vstack ones(2x3) ones(4x3) = ones(6x3) -> flatten -> sum = 18
+testVstack :: Real
+testVstack = tsum1d (flatten2d (vstack2d ones23 ones43))
+
+-- hstack ones(3x2) ones(3x4) = ones(3x6) -> flatten -> sum = 18
+testHstack :: Real
+testHstack = tsum1d (flatten2d (hstack2d ones32 ones34))
+
+-- outer [1,1,1] [1,1,1,1] = ones(3x4) -> flatten -> sum = 12
+testOuter :: Real
+testOuter = tsum1d (flatten2d (outer1d onesV3 onesV4))
+
+-- dot [1,1,1,1,1] [1,1,1,1,1] = 5
+testDot :: Real
+testDot = dot1d onesV5 onesV5
+
+-- === Category 2 tests ===
+
+-- flatten ones(3x4) -> ones(12) -> sum = 12
+testFlatten :: Real
+testFlatten = tsum1d (flatten2d ones34)
+
+-- kron ones(2x3) ones(2x2) = ones(4x6) -> flatten -> sum = 24
+testKron :: Real
+testKron = tsum1d (flatten2d (kron2d ones23 ones22))
+
+-- === Category 3 tests ===
+
+-- slice 2 3 from ones(5x6) -> ones(2x3) -> flatten -> sum = 6
+testSlice :: Real
+testSlice = tsum1d (flatten2d (slice2d 2 3 ones56))
+
+-- take 3 from ones(10) -> ones(3) -> sum = 3
+testTake :: Real
+testTake = tsum1d (ttake1d 3 onesV10)
+
+-- slice used twice (same free vars) -> add -> flatten -> sum = 12
+testSliceAdd :: Real
+testSliceAdd =
+  let s = slice2d 2 3 ones56
+  in tsum1d (flatten2d (add2d s s))

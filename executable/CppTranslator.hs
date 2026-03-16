@@ -469,7 +469,14 @@ PROPAGATE_ERROR(errmsg)|]
 
     templateArgs :: [(Text, TypeF)] -> CppTranslator (Maybe [IType])
     templateArgs [] = return Nothing
-    templateArgs qs = Just . map toIType <$> mapM (cppTypeOf . snd) qs
+    templateArgs qs = do
+      let nonNatQs = [q | q@(_, t) <- qs, not (isNatTypeF t)]
+      case nonNatQs of
+        [] -> return Nothing
+        qs' -> Just . map toIType <$> mapM (cppTypeOf . snd) qs'
+      where
+        isNatTypeF (NatLitF _) = True
+        isNatTypeF _ = False
 
     makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
     makeLet namer letIndex typestr (PoolDocs ms1 e1 rs1 pes1) (PoolDocs ms2 e2 rs2 pes2) =

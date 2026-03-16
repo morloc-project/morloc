@@ -32,6 +32,7 @@ main = do
       , effectErrorTests
       , namespaceErrorTests
       , typeclassTests
+      , natErrorTests
       , -- -- These tests pass locally and when I run the same container that I
         -- -- use in github actions. Yet these tests freeze in an infinite loop
         -- -- with no STDERR output on github. I have no idea why. But for now I'm
@@ -495,4 +496,6 @@ main = do
       , golden "tensor-comprehensive-cpp" "tensor-comprehensive-cpp"
       , golden "tensor-comprehensive-cross" "tensor-comprehensive-cross"
       , golden "tensor-dimensions" "tensor-dimensions"
+      , -- nat-parameterized type tests
+        golden "nat-typecheck" "nat-typecheck"
       ]
