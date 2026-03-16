@@ -55,6 +55,7 @@ module Morloc.Typecheck.Internal
     -- * subtyping
   , subtype
   , isSubtypeOf2
+  , recheckDeferred
 
     -- * debugging
   , seeGamma
@@ -243,6 +244,26 @@ applyNatSolutions subs g0 = foldM applySub g0 (Map.toList subs)
            Right (Just g') -> Right g'
            Right Nothing -> Right g
            Left err -> Left err
+
+-- | Re-check deferred Nat constraints after all existentials are solved.
+-- Applies the final gamma to each deferred pair, converts to NatExpr,
+-- and re-solves. Returns Left on contradiction, Right with remaining
+-- still-deferred constraints (now truly unsolvable).
+recheckDeferred :: Gamma -> Either MDoc [(TypeU, TypeU)]
+recheckDeferred g = foldM check [] (gammaDeferred g)
+  where
+    check acc (t1, t2) =
+      let t1' = apply g t1
+          t2' = apply g t2
+      in case (typeUToNatExpr t1', typeUToNatExpr t2') of
+           (Just ne1, Just ne2) ->
+             case NS.solveNat ne1 ne2 of
+               Right _ -> Right acc
+               Left NS.Contradiction ->
+                 Left $ "Nat constraint mismatch (deferred):"
+                   <+> prettyTypeU t1' <+> "~" <+> prettyTypeU t2'
+               Left (NS.Deferred _) -> Right ((t1', t2') : acc)
+           _ -> Right acc  -- not nat exprs after apply, skip
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma

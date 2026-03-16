@@ -53,6 +53,14 @@ typecheck = mapM run
       (g2, e3) <- resolveInstances g1 e2
       let g3 = apply g2 g2
 
+      -- re-check deferred Nat constraints now that existentials are solved
+      case recheckDeferred g3 of
+        Left err -> MM.throwSystemError err
+        Right remaining ->
+          mapM_ (\(t1, t2) ->
+            MM.sayV $ "Warning: unresolved Nat constraint:" <+> prettyTypeU t1 <+> "~" <+> prettyTypeU t2
+            ) remaining
+
       -- apply inferred type information to the extracted type qualifiers
       -- this information was uploaded by the `recordParameter` function
       s <- MM.get

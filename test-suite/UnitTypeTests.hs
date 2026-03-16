@@ -3086,4 +3086,26 @@ natArithTests =
       x :: SizedList 4 Int
       x = a
         |]
+    -- deferred constraint re-checking: variable arithmetic caught after solving
+    , expectError
+        "deferred subtraction mismatch: m=8, n=3, but m-n used as 7"
+        [r|
+      module main (x)
+      type SizedList n a = [a]
+      take m n a :: SizedList (m - n) a -> SizedList n a -> SizedList m a
+      a :: SizedList 7 Int
+      b :: SizedList 3 Int
+      x :: SizedList 8 Int
+      x = take a b
+        |]
+    , expectError
+        "deferred multiplication mismatch: n*m=12 but n=5 (no integer m)"
+        [r|
+      module main (x)
+      type SizedList n a = [a]
+      split n m a :: SizedList (n * m) a -> SizedList n a
+      a :: SizedList 12 Int
+      x :: SizedList 5 Int
+      x = split a
+        |]
     ]
