@@ -130,6 +130,8 @@ findTypeKindSize v = head . catMaybes . f
     f (NatLitU _) = [Nothing]
     f (NatAddU a b) = f a ++ f b
     f (NatMulU a b) = f a ++ f b
+    f (NatSubU a b) = f a ++ f b
+    f (NatDivU a b) = f a ++ f b
 
 -- TypeU --> Type
 resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int

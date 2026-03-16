@@ -26,6 +26,7 @@ module UnitTypeTests
   , namespaceErrorTests
   , typeclassTests
   , natErrorTests
+  , natArithTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -33,6 +34,7 @@ import Morloc.Frontend.Namespace
 import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Typecheck.Internal as MTI
+import qualified Morloc.Typecheck.NatSolver as NS
 import qualified System.Directory as SD
 import Text.RawString.QQ
 
@@ -3001,5 +3003,90 @@ natErrorTests =
       b :: SizedList 3 Int
       x :: SizedList 4 Int
       x = append a b
+        |]
+    ]
+
+natArithTests :: TestTree
+natArithTests =
+  testGroup
+    "nat arithmetic (sub, div, solver fix)"
+    [ -- NatSolver unit tests
+      testCase "ground subtraction: (10 - 3) ~ 7" $
+        let e1 = NS.NatSub (NS.NatLit 10) (NS.NatLit 3)
+            e2 = NS.NatLit 7
+        in case NS.solveNat e1 e2 of
+             Right subs -> assertEqual "" subs Map.empty
+             Left err -> assertFailure $ "Expected success, got: " ++ show err
+    , testCase "ground division: (12 / 4) ~ 3" $
+        let e1 = NS.NatDiv (NS.NatLit 12) (NS.NatLit 4)
+            e2 = NS.NatLit 3
+        in case NS.solveNat e1 e2 of
+             Right subs -> assertEqual "" subs Map.empty
+             Left err -> assertFailure $ "Expected success, got: " ++ show err
+    , testCase "subtraction mismatch: (10 - 3) ~ 8" $
+        let e1 = NS.NatSub (NS.NatLit 10) (NS.NatLit 3)
+            e2 = NS.NatLit 8
+        in case NS.solveNat e1 e2 of
+             Left NS.Contradiction -> return ()
+             other -> assertFailure $ "Expected Contradiction, got: " ++ show other
+    , testCase "division mismatch: (12 / 4) ~ 4" $
+        let e1 = NS.NatDiv (NS.NatLit 12) (NS.NatLit 4)
+            e2 = NS.NatLit 4
+        in case NS.solveNat e1 e2 of
+             Left NS.Contradiction -> return ()
+             other -> assertFailure $ "Expected Contradiction, got: " ++ show other
+    , testCase "subtraction with variable: n - 3 ~ 5 => n = 8" $
+        let e1 = NS.NatSub (NS.NatVar (TV "n")) (NS.NatLit 3)
+            e2 = NS.NatLit 5
+        in case NS.solveNat e1 e2 of
+             Right subs -> assertEqual "" (Map.singleton (TV "n") (NS.NatLit 8)) subs
+             Left err -> assertFailure $ "Expected n=8, got: " ++ show err
+    , testCase "division by constant: n / 3 with n = 9 / 3 ~ 3" $
+        let e1 = NS.NatDiv (NS.NatLit 9) (NS.NatLit 3)
+            e2 = NS.NatLit 3
+        in case NS.solveNat e1 e2 of
+             Right subs -> assertEqual "" subs Map.empty
+             Left err -> assertFailure $ "Expected success, got: " ++ show err
+    -- extractLinearVar soundness fix: i*j ~ n must be Deferred, not n=0
+    , testCase "extractLinearVar fix: i*j ~ n is Deferred" $
+        let e1 = NS.NatMul (NS.NatVar (TV "i")) (NS.NatVar (TV "j"))
+            e2 = NS.NatVar (TV "n")
+        in case NS.solveNat e1 e2 of
+             Left (NS.Deferred _) -> return ()
+             Right subs -> assertFailure $ "Expected Deferred, got solved: " ++ show subs
+             Left NS.Contradiction -> assertFailure "Expected Deferred, got Contradiction"
+    , testCase "linear solving still works: n + 3 ~ 8 => n = 5" $
+        let e1 = NS.NatAdd (NS.NatVar (TV "n")) (NS.NatLit 3)
+            e2 = NS.NatLit 8
+        in case NS.solveNat e1 e2 of
+             Right subs -> assertEqual "" (Map.singleton (TV "n") (NS.NatLit 5)) subs
+             Left err -> assertFailure $ "Expected n=5, got: " ++ show err
+    , testCase "simple variable solving: n ~ 5" $
+        let e1 = NS.NatVar (TV "n")
+            e2 = NS.NatLit 5
+        in case NS.solveNat e1 e2 of
+             Right subs -> assertEqual "" (Map.singleton (TV "n") (NS.NatLit 5)) subs
+             Left err -> assertFailure $ "Expected n=5, got: " ++ show err
+    -- Typechecker integration tests for sub/div syntax
+    , expectError
+        "subtraction dimension mismatch: (10-3) != 8"
+        [r|
+      module main (x)
+      type SizedList n a = [a]
+      take :: SizedList (m - n) a -> SizedList n a -> SizedList m a
+      a :: SizedList 7 Int
+      b :: SizedList 3 Int
+      x :: SizedList 8 Int
+      x = take a b
+        |]
+    , expectError
+        "division dimension mismatch: (12/4) != 4"
+        [r|
+      module main (x)
+      type SizedList n a = [a]
+      split :: SizedList (n * m) a -> SizedList n a
+      a :: SizedList 12 Int
+      x :: SizedList 4 Int
+      x = split a
         |]
     ]

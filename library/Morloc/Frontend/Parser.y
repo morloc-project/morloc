@@ -49,7 +49,7 @@ import qualified Morloc.BaseTypes as BT
 -- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
 -- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
 -- - 13 from type-level Nat arithmetic ('+' and '*' in add_type/mul_type rules)
-%expect 72
+%expect 84
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -351,10 +351,12 @@ non_string_non_fun :: { TypeU }
 
 non_string_add :: { TypeU }
   : non_string_add '+' non_string_mul  { NatAddU $1 $3 }
+  | non_string_add '-' non_string_mul  { NatSubU $1 $3 }
   | non_string_mul                      { $1 }
 
 non_string_mul :: { TypeU }
   : non_string_mul '*' non_string_app  { NatMulU $1 $3 }
+  | non_string_mul '/' non_string_app  { NatDivU $1 $3 }
   | non_string_app                      { $1 }
 
 non_string_app :: { TypeU }
@@ -691,10 +693,12 @@ non_fun_type :: { TypeU }
 
 add_type :: { TypeU }
   : add_type '+' mul_type     { NatAddU $1 $3 }
+  | add_type '-' mul_type     { NatSubU $1 $3 }
   | mul_type                  { $1 }
 
 mul_type :: { TypeU }
   : mul_type '*' app_type     { NatMulU $1 $3 }
+  | mul_type '/' app_type     { NatDivU $1 $3 }
   | app_type                  { $1 }
 
 app_type :: { TypeU }
@@ -746,10 +750,12 @@ pos_non_fun_type :: { (Pos, TypeU) }
 
 pos_add_type :: { (Pos, TypeU) }
   : pos_add_type '+' mul_type  { (fst $1, NatAddU (snd $1) $3) }
+  | pos_add_type '-' mul_type  { (fst $1, NatSubU (snd $1) $3) }
   | pos_mul_type                { $1 }
 
 pos_mul_type :: { (Pos, TypeU) }
   : pos_mul_type '*' app_type  { (fst $1, NatMulU (snd $1) $3) }
+  | pos_mul_type '/' app_type  { (fst $1, NatDivU (snd $1) $3) }
   | pos_app_type                { $1 }
 
 pos_app_type :: { (Pos, TypeU) }

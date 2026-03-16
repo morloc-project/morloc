@@ -231,6 +231,8 @@ quantifyType t = forallWrap (nub (collectGenVars t)) t
     collectGenVars (NatLitU _) = []
     collectGenVars (NatAddU a b) = collectGenVars a ++ collectGenVars b
     collectGenVars (NatMulU a b) = collectGenVars a ++ collectGenVars b
+    collectGenVars (NatSubU a b) = collectGenVars a ++ collectGenVars b
+    collectGenVars (NatDivU a b) = collectGenVars a ++ collectGenVars b
     collectGenVars _ = []
 
 parseLang :: Located -> D Lang

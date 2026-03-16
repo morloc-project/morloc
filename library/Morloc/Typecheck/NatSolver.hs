@@ -39,6 +39,8 @@ data NatExpr
   | NatVar TVar           -- ^ type variable of kind Nat
   | NatAdd NatExpr NatExpr -- ^ addition
   | NatMul NatExpr NatExpr -- ^ multiplication
+  | NatSub NatExpr NatExpr -- ^ subtraction (a - b = a + negate b in SOP)
+  | NatDiv NatExpr NatExpr -- ^ division (ground-only or constant-divisor)
   deriving (Eq, Ord, Show)
 
 -- | Sum-of-Products canonical form for Nat expressions.
@@ -73,6 +75,8 @@ normalize (NatLit n)   = NatSOP [NatProduct n Map.empty]
 normalize (NatVar v)   = NatSOP [NatProduct 1 (Map.singleton v 1)]
 normalize (NatAdd a b) = addSOP (normalize a) (normalize b)
 normalize (NatMul a b) = mulSOP (normalize a) (normalize b)
+normalize (NatSub a b) = addSOP (normalize a) (negateSOP (normalize b))
+normalize (NatDiv a b) = divSOP (normalize a) (normalize b)
 
 -- | Add two SOPs by merging and combining like terms
 addSOP :: NatSOP -> NatSOP -> NatSOP
@@ -122,6 +126,31 @@ subSOP (NatSOP ps1) (NatSOP ps2) =
 negateProduct :: NatProduct -> NatProduct
 negateProduct (NatProduct c vs) = NatProduct (negate c) vs
 
+-- | Negate an entire SOP
+negateSOP :: NatSOP -> NatSOP
+negateSOP (NatSOP ps) = NatSOP (map negateProduct ps)
+
+-- | Divide two SOPs. Only handles ground division or constant divisor.
+-- For ground: compute directly. For constant divisor: divide each coefficient.
+-- Otherwise: return the original forms unchanged (will be Deferred by solver).
+divSOP :: NatSOP -> NatSOP -> NatSOP
+divSOP (NatSOP ps1) (NatSOP [NatProduct d vs2])
+  | Map.null vs2, d /= 0
+  , all (\p -> npCoeff p `mod` d == 0) ps1
+  = NatSOP (mergeLikeTerms [NatProduct (npCoeff p `div` d) (npVars p) | p <- ps1])
+divSOP (NatSOP ps1) (NatSOP ps2)
+  -- Both ground: compute directly
+  | all (\p -> Map.null (npVars p)) ps1
+  , all (\p -> Map.null (npVars p)) ps2
+  , let n = sum (map npCoeff ps1)
+  , let d = sum (map npCoeff ps2)
+  , d /= 0
+  , n `mod` d == 0
+  = NatSOP [NatProduct (n `div` d) Map.empty]
+  -- Cannot simplify: return a sentinel that won't match anything useful.
+  -- The solver will see non-matching SOPs and return Deferred.
+  | otherwise = NatSOP [NatProduct 0 (Map.singleton (TV "__div__") 1)]
+
 -- | Solve sop = 0
 solveSOP :: NatSOP -> Either NatError (Map TVar NatExpr)
 solveSOP (NatSOP []) = Right Map.empty  -- 0 = 0
@@ -151,15 +180,18 @@ extractLinearVar prods =
                        , Map.size (npVars p) == 1
                        , [(v, 1)] <- [Map.toList (npVars p)]
                        ]
-      -- Sum of constant-only products
-      constantSum = sum [npCoeff p | p <- prods, Map.null (npVars p)]
-      -- Check which linear variables appear only once
-      candidates = [ (v, c) | (v, c) <- linearSingles
-                    , length [() | p <- prods
-                                 , Map.member v (npVars p)] == 1
+      -- Check which linear variables appear only once AND all other
+      -- products are constant (no other variables). Without this guard,
+      -- expressions like i*j - n would incorrectly solve n = 0.
+      candidates = [ (v, c, constSum)
+                    | (v, c) <- linearSingles
+                    , length [() | p <- prods, Map.member v (npVars p)] == 1
+                    , let others = [p | p <- prods, not (Map.member v (npVars p))]
+                    , all (\p -> Map.null (npVars p)) others
+                    , let constSum = sum (map npCoeff others)
                     ]
   in case candidates of
-       ((v, c) : _) -> Just (v, c, constantSum)
+       ((v, c, s) : _) -> Just (v, c, s)
        [] -> Nothing
 
 -- | Apply substitutions to a NatExpr
@@ -172,6 +204,8 @@ substituteNat m = go
       Nothing -> NatVar v
     go (NatAdd a b) = NatAdd (go a) (go b)
     go (NatMul a b) = NatMul (go a) (go b)
+    go (NatSub a b) = NatSub (go a) (go b)
+    go (NatDiv a b) = NatDiv (go a) (go b)
 
 -- | Check if a NatExpr has no free variables
 isGround :: NatExpr -> Bool
@@ -179,6 +213,8 @@ isGround (NatLit _) = True
 isGround (NatVar _) = False
 isGround (NatAdd a b) = isGround a && isGround b
 isGround (NatMul a b) = isGround a && isGround b
+isGround (NatSub a b) = isGround a && isGround b
+isGround (NatDiv a b) = isGround a && isGround b
 
 -- | Get all free variables in a NatExpr
 freeNatVars :: NatExpr -> Set.Set TVar
@@ -186,6 +222,8 @@ freeNatVars (NatLit _) = Set.empty
 freeNatVars (NatVar v) = Set.singleton v
 freeNatVars (NatAdd a b) = Set.union (freeNatVars a) (freeNatVars b)
 freeNatVars (NatMul a b) = Set.union (freeNatVars a) (freeNatVars b)
+freeNatVars (NatSub a b) = Set.union (freeNatVars a) (freeNatVars b)
+freeNatVars (NatDiv a b) = Set.union (freeNatVars a) (freeNatVars b)
 
 -- | Convert a SOP back to a NatExpr (for error messages and further processing)
 sopToNatExpr :: NatSOP -> NatExpr

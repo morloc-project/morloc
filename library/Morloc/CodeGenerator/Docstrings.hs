@@ -278,6 +278,8 @@ makeOptMeta (OptionalT t) = "?" <> makeOptMeta t
 makeOptMeta (NatLitT n) = MT.show' n
 makeOptMeta (NatAddT _ _) = "NAT"
 makeOptMeta (NatMulT _ _) = "NAT"
+makeOptMeta (NatSubT _ _) = "NAT"
+makeOptMeta (NatDivT _ _) = "NAT"
 
 resolvePos :: Type -> ArgDocVars -> MorlocMonad ArgPosDocSet
 resolvePos t r = do

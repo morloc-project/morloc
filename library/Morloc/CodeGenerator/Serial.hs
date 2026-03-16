@@ -346,6 +346,8 @@ makeSerialAST m lang t0 = do
         basevar (NatLitU _) = Nothing
         basevar (NatAddU _ _) = Nothing
         basevar (NatMulU _ _) = Nothing
+        basevar (NatSubU _ _) = Nothing
+        basevar (NatDivU _ _) = Nothing
 
         generalType = fst $ unweaveTypeF ft
 

@@ -129,6 +129,8 @@ instance Applicable TypeU where
   apply _ t@(NatLitU _) = t
   apply g (NatAddU a b) = NatAddU (apply g a) (apply g b)
   apply g (NatMulU a b) = NatMulU (apply g a) (apply g b)
+  apply g (NatSubU a b) = NatSubU (apply g a) (apply g b)
+  apply g (NatDivU a b) = NatDivU (apply g a) (apply g b)
 
 instance Applicable EType where
   apply g e =
@@ -210,12 +212,16 @@ isNatExpr :: TypeU -> Bool
 isNatExpr (NatLitU _) = True
 isNatExpr (NatAddU _ _) = True
 isNatExpr (NatMulU _ _) = True
+isNatExpr (NatSubU _ _) = True
+isNatExpr (NatDivU _ _) = True
 isNatExpr _ = False
 
 typeUToNatExpr :: TypeU -> Maybe NS.NatExpr
 typeUToNatExpr (NatLitU n) = Just (NS.NatLit n)
 typeUToNatExpr (NatAddU a b) = NS.NatAdd <$> typeUToNatExpr a <*> typeUToNatExpr b
 typeUToNatExpr (NatMulU a b) = NS.NatMul <$> typeUToNatExpr a <*> typeUToNatExpr b
+typeUToNatExpr (NatSubU a b) = NS.NatSub <$> typeUToNatExpr a <*> typeUToNatExpr b
+typeUToNatExpr (NatDivU a b) = NS.NatDiv <$> typeUToNatExpr a <*> typeUToNatExpr b
 typeUToNatExpr (VarU v) = Just (NS.NatVar v)
 typeUToNatExpr (ExistU v _ _) = Just (NS.NatVar v)
 typeUToNatExpr _ = Nothing
@@ -225,6 +231,8 @@ natExprToTypeU (NS.NatLit n) = NatLitU n
 natExprToTypeU (NS.NatVar v) = VarU v
 natExprToTypeU (NS.NatAdd a b) = NatAddU (natExprToTypeU a) (natExprToTypeU b)
 natExprToTypeU (NS.NatMul a b) = NatMulU (natExprToTypeU a) (natExprToTypeU b)
+natExprToTypeU (NS.NatSub a b) = NatSubU (natExprToTypeU a) (natExprToTypeU b)
+natExprToTypeU (NS.NatDiv a b) = NatDivU (natExprToTypeU a) (natExprToTypeU b)
 
 applyNatSolutions :: Map.Map TVar NS.NatExpr -> Gamma -> Either MDoc Gamma
 applyNatSolutions subs g0 = foldM applySub g0 (Map.toList subs)
@@ -574,6 +582,8 @@ solve v t
     occursIn _ (NatLitU _) = False
     occursIn v' (NatAddU a b) = occursIn v' a || occursIn v' b
     occursIn v' (NatMulU a b) = occursIn v' a || occursIn v' b
+    occursIn v' (NatSubU a b) = occursIn v' a || occursIn v' b
+    occursIn v' (NatDivU a b) = occursIn v' a || occursIn v' b
 
 -- | Record a solved variable in the gamma map cache
 cacheSolved :: TVar -> TypeU -> Gamma -> Gamma
@@ -880,6 +890,8 @@ simplifyNats = go
   where
     go (NatAddU a b) = trySimplify (NatAddU (go a) (go b))
     go (NatMulU a b) = trySimplify (NatMulU (go a) (go b))
+    go (NatSubU a b) = trySimplify (NatSubU (go a) (go b))
+    go (NatDivU a b) = trySimplify (NatDivU (go a) (go b))
     go (AppU f ts) = AppU (go f) (map go ts)
     go (FunU ts r) = FunU (map go ts) (go r)
     go (ForallU v t) = ForallU v (go t)
@@ -914,6 +926,8 @@ collectExistVars = go
     go (NatLitU _) = []
     go (NatAddU a b) = go a ++ go b
     go (NatMulU a b) = go a ++ go b
+    go (NatSubU a b) = go a ++ go b
+    go (NatDivU a b) = go a ++ go b
 
 collectFixedNames :: Set.Set TVar -> TypeU -> Set.Set Text
 collectFixedNames generics = go
@@ -932,6 +946,8 @@ collectFixedNames generics = go
     go (NatLitU _) = Set.empty
     go (NatAddU a b) = Set.union (go a) (go b)
     go (NatMulU a b) = Set.union (go a) (go b)
+    go (NatSubU a b) = Set.union (go a) (go b)
+    go (NatDivU a b) = Set.union (go a) (go b)
 
 applyVarRenaming :: Map.Map TVar TVar -> TypeU -> TypeU
 applyVarRenaming m = go
@@ -949,6 +965,8 @@ applyVarRenaming m = go
     go t@(NatLitU _) = t
     go (NatAddU a b) = NatAddU (go a) (go b)
     go (NatMulU a b) = NatMulU (go a) (go b)
+    go (NatSubU a b) = NatSubU (go a) (go b)
+    go (NatDivU a b) = NatDivU (go a) (go b)
 
 prettyTypeU :: TypeU -> MDoc
 prettyTypeU = pretty . cleanTypeName
