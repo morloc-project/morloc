@@ -42,7 +42,7 @@ typecheck = mapM run
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty}
+      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = []}
       (g1, _, e1) <- synthG g0 e0
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g1:"
@@ -183,7 +183,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       let gtEval = case TE.evaluateType scope gt of
             Right et -> et
             Left _ -> gt
-          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty
+          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty []
           isCompatible t = isSubtypeOf2 scope t gtEval
                         || isJust (tryCoerce scope t gtEval emptyGamma)
           rssSubtypes = [x | x@(EType t _ _, _) <- rss, isCompatible t]
@@ -1020,7 +1020,12 @@ subtype' i a b g = do
   insetSay $ parens (pretty a) <+> "<:" <+> parens (pretty b)
   case subtype scope a b g of
     (Left err') -> MM.throwSourcedError i err'
-    (Right x) -> return x
+    (Right g') -> do
+      let newDeferred = drop (length (gammaDeferred g)) (gammaDeferred g')
+      mapM_ (\(t1, t2) ->
+        MM.sayV $ "Warning: deferred Nat constraint:" <+> prettyTypeU t1 <+> "~" <+> prettyTypeU t2
+        ) newDeferred
+      return g'
 
 -- | Try to find a coercion chain from type a to type b.
 -- Returns a list of coercions (inside-out) and the resulting gamma.

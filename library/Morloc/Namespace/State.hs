@@ -235,6 +235,8 @@ data Gamma = Gamma
   , gammaExist :: Map TVar Int
   -- | Cache of solved existential types
   , gammaSolved :: Map TVar TypeU
+  -- | Nat constraints that could not be solved (deferred)
+  , gammaDeferred :: [(TypeU, TypeU)]
   }
 
 ---- Data files and system

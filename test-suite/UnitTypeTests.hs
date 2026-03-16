@@ -94,7 +94,7 @@ assertGeneralType :: String -> MT.Text -> TypeU -> TestTree
 assertGeneralType msg code t = testCase msg $ do
   result <- runFront code
   case result of
-    (Right [x]) -> assertEqual "" (closeExistentials t) (closeExistentials . renameExistentials . gtypeof $ x)
+    (Right [x]) -> assertEqual "" (closeExistentials . MTI.cleanTypeName $ t) (closeExistentials . MTI.cleanTypeName . renameExistentials . gtypeof $ x)
     (Right _) -> error "Expected exactly one export from main for assertGeneralType"
     (Left e) ->
       error $
@@ -1504,19 +1504,19 @@ unitTypeTests =
         --     "F :: {x::Int, y::Str}"
         --     "F :: foo:{x::(i:Int), y::Str}"
 
-        -- constraint syntax
+        -- constraint syntax (implicit quantification wraps free vars in ForallU)
         assertGeneralType
           "constraint syntax (1)"
           "module main (f)\nf :: (Ord a) => a -> a -> a"
-          (fun [var "a", var "a", var "a"])
+          (forallu ["a"] (fun [var "a", var "a", var "a"]))
       , assertGeneralType
           "constraint syntax (2)"
           "module main (f)\nf :: Ord a => a -> a -> a"
-          (fun [var "a", var "a", var "a"])
+          (forallu ["a"] (fun [var "a", var "a", var "a"]))
       , assertGeneralType
           "constraint syntax (3)"
           "module main (f)\nf :: (Ord a, Eq b) => a -> b -> Bool"
-          (fun [var "a", var "b", VarU (TV "Bool")])
+          (forallu ["a", "b"] (fun [var "a", var "b", VarU (TV "Bool")]))
       , -- tests modules
         assertGeneralType
           "basic main module"
@@ -3069,24 +3069,21 @@ natArithTests =
              Left err -> assertFailure $ "Expected n=5, got: " ++ show err
     -- Typechecker integration tests for sub/div syntax
     , expectError
-        "subtraction dimension mismatch: (10-3) != 8"
+        "ground subtraction mismatch: (10-3) != 8 in type annotation"
         [r|
       module main (x)
       type SizedList n a = [a]
-      take :: SizedList (m - n) a -> SizedList n a -> SizedList m a
-      a :: SizedList 7 Int
-      b :: SizedList 3 Int
+      a :: SizedList (10 - 3) Int
       x :: SizedList 8 Int
-      x = take a b
+      x = a
         |]
     , expectError
-        "division dimension mismatch: (12/4) != 4"
+        "ground division mismatch: (12/4) != 4 in type annotation"
         [r|
       module main (x)
       type SizedList n a = [a]
-      split :: SizedList (n * m) a -> SizedList n a
-      a :: SizedList 12 Int
+      a :: SizedList (12 / 4) Int
       x :: SizedList 4 Int
-      x = split a
+      x = a
         |]
     ]

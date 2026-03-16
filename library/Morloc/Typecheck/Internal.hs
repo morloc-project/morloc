@@ -189,7 +189,7 @@ slotSpacing = 256
 (++>) g xs = foldl' (+>) g xs
 
 isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
-isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty) of
+isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty []) of
   (Left _) -> False
   (Right _) -> True
 
@@ -378,7 +378,7 @@ subtype _ t1 t2 g
                  | Map.null subs -> return g
                  | otherwise -> applyNatSolutions subs g
                Left NS.Contradiction -> subtypeError t1 t2 "Nat constraint mismatch"
-               Left (NS.Deferred _) -> return g
+               Left (NS.Deferred _) -> return g { gammaDeferred = (t1', t2') : gammaDeferred g }
            _ -> subtypeError t1 t2 "Cannot compare Nat expressions"
 -- note that these need to be evaluated AFTER all the existentials
 subtype scope t1@(VarU _) t2 g = subtypeEvaluated scope t1 t2 g
