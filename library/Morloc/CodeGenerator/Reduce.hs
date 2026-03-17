@@ -68,8 +68,8 @@ reduceNativeExpr ver ts lang (IntrinsicN t intr msch es) =
   IntrinsicN t intr msch <$> mapM (reduceNativeExpr ver ts lang) es
 -- recursive cases
 reduceNativeExpr ver ts _ (ManN nm) = ManN <$> reduceNativeManifold ver ts nm
-reduceNativeExpr ver ts lang (AppExeN t exe tps args) =
-  AppExeN t exe tps <$> mapM (reduceNativeArg ver ts lang) args
+reduceNativeExpr ver ts lang (AppExeN t exe args) =
+  AppExeN t exe <$> mapM (reduceNativeArg ver ts lang) args
 reduceNativeExpr ver ts lang (ReturnN ne) = ReturnN <$> reduceNativeExpr ver ts lang ne
 reduceNativeExpr ver ts lang (SerialLetN i se ne) =
   SerialLetN i <$> reduceSerialExpr ver ts lang se <*> reduceNativeExpr ver ts lang ne

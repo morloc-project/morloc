@@ -4,7 +4,7 @@ import root-py
 import root-cpp
 import root-r
 
-safeHead a :: [a] -> ?a
+safeHead :: [a] -> ?a
 safeHead xs
   ? length xs == 0 = Null
   : head xs
@@ -13,7 +13,7 @@ source Py from "main.py" ("fromNull")
 source R from "main.R" ("fromNull")
 source Cpp from "main.hpp" ("fromNull")
 
-fromNull  a :: a -> ?a -> a
+fromNull :: a -> ?a -> a
 
 testSafeHead :: ?Int
 testSafeHead = safeHead [10, 20, 30]

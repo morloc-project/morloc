@@ -17,7 +17,7 @@ record R => Person = "list"
 makePerson :: Str -> ?Int -> Person
 getName :: Person -> Str
 getAge :: Person -> ?Int
-toNull a :: a -> ?a
+toNull :: a -> ?a
 findPerson :: Str -> [Person] -> ?Person
 
 source R from "foo.R" ("makePerson", "getName", "getAge", "toNull", "findPerson")

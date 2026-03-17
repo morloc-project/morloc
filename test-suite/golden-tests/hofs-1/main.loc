@@ -4,7 +4,7 @@ import foor
 import foopy
 
 source Py from "eq.py" ("eq", "check")
-eq a :: a -> a -> Bool
+eq :: a -> a -> Bool
 check :: [(Str, Bool)] -> Bool
 
 radd3 x y z = radd x (radd y z)

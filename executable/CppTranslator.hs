@@ -335,7 +335,6 @@ cppLowerConfig =
     , lcSerialAstType = serializeTypeOf
     , lcDeserialAstType = \s -> Just . toIType <$> cppTypeOf (shallowType s)
     , lcRawDeserialAstType = rawTypeOf
-    , lcTemplateArgs = templateArgs
     , lcTypeMOf = \_ -> return Nothing
     , lcPackerName = \src -> pretty (srcName src)
     , lcUnpackerName = \src -> pretty (srcName src)
@@ -466,17 +465,6 @@ PROPAGATE_ERROR(errmsg)|]
     rawTypeOf :: SerialAST -> CppTranslator (Maybe IType)
     rawTypeOf (SerialObject _ _ _ rs) = Just . toIType <$> recordToCppTuple (map snd rs)
     rawTypeOf s = Just . toIType <$> cppTypeOf (serialAstToType s)
-
-    templateArgs :: [(Text, TypeF)] -> CppTranslator (Maybe [IType])
-    templateArgs [] = return Nothing
-    templateArgs qs = do
-      let nonNatQs = [q | q@(_, t) <- qs, not (isNatTypeF t)]
-      case nonNatQs of
-        [] -> return Nothing
-        qs' -> Just . map toIType <$> mapM (cppTypeOf . snd) qs'
-      where
-        isNatTypeF (NatLitF _) = True
-        isNatTypeF _ = False
 
     makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
     makeLet namer letIndex typestr (PoolDocs ms1 e1 rs1 pes1) (PoolDocs ms2 e2 rs2 pes2) =

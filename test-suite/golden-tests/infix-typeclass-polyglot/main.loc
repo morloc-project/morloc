@@ -1,7 +1,7 @@
 module main (test_sum_py, test_sum_cpp, test_product_py, test_chain_py)
 
-import semiring-py (Semiring)
-import semiring-cpp (Semiring)
+import .semiring-py (Semiring)
+import .semiring-cpp (Semiring)
 
 type Py => Int = "int"
 type Cpp => Int = "int"

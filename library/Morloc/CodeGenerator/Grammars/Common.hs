@@ -207,7 +207,7 @@ instance Dependable NativeExpr where
         i <- newIndex
         return $ D (LetVarN (typeFof e) i) ((i, Right e) : deps)
 
-  isAtomic (AppExeN _ _ _ _) = False
+  isAtomic (AppExeN _ _ _) = False
   isAtomic ManN {} = False
   isAtomic SerialLetN {} = False
   isAtomic NativeLetN {} = False
@@ -267,7 +267,7 @@ renameNE :: Int -> Int -> NativeExpr -> NativeExpr
 renameNE old new = go where
   ri i = if i == old then new else i
   go (ManN nm) = ManN (renameNM old new nm)
-  go (AppExeN t exe qs args) = AppExeN t (renameExe old new exe) qs (map goA args)
+  go (AppExeN t exe args) = AppExeN t (renameExe old new exe) (map goA args)
   go (ReturnN ne) = ReturnN (go ne)
   go (SerialLetN i se ne) = SerialLetN (ri i) (renameSE old new se) (go ne)
   go (NativeLetN i ne1 ne2) = NativeLetN (ri i) (go ne1) (go ne2)
@@ -397,16 +397,16 @@ invertSerialManifold sm0 =
     invertNativeExprM ::
       NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) ->
       Index (D NativeExpr)
-    invertNativeExprM (AppExeN_ t exe qs nativeArgs) = do
+    invertNativeExprM (AppExeN_ t exe nativeArgs) = do
       let nativeArgs' = map unD nativeArgs
           deps = concatMap getDeps nativeArgs
       case (t, exe) of
         -- Source functions return the unwrapped type; the compiler wraps in suspend
         (EffectF _ innerT, SrcCallP _) ->
-          return $ D (DoBlockN t (weave (D (AppExeN innerT exe qs nativeArgs') deps))) []
+          return $ D (DoBlockN t (weave (D (AppExeN innerT exe nativeArgs') deps))) []
         (OptionalF _, SrcCallP _) ->
-          atomize (AppExeN t exe qs nativeArgs') deps
-        _ -> atomize (AppExeN t exe qs nativeArgs') deps
+          atomize (AppExeN t exe nativeArgs') deps
+        _ -> atomize (AppExeN t exe nativeArgs') deps
     invertNativeExprM (ManN_ (D nm lets)) = atomize (ManN nm) lets
     invertNativeExprM (ReturnN_ (D ne lets)) = atomize (ReturnN ne) lets
     -- Eliminate trivial let-bindings where the RHS is just a variable

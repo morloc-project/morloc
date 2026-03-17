@@ -69,25 +69,25 @@ eye33 :: Tensor2 3 3 Real
 eye55 :: Tensor2 5 5 Real
 
 -- Category 1: Fully checked operations (explicit forall via var list)
-add2d m n :: Tensor2 m n Real -> Tensor2 m n Real -> Tensor2 m n Real
-transpose2d m n :: Tensor2 m n Real -> Tensor2 n m Real
-matmul2d m k n :: Tensor2 m k Real -> Tensor2 k n Real -> Tensor2 m n Real
-dot1d n :: Tensor1 n Real -> Tensor1 n Real -> Real
-tsum1d n :: Tensor1 n Real -> Real
-trace2d n :: Tensor2 n n Real -> Real
-diag2d n :: Tensor2 n n Real -> Tensor1 n Real
-diagMat1d n :: Tensor1 n Real -> Tensor2 n n Real
-outer1d m n :: Tensor1 m Real -> Tensor1 n Real -> Tensor2 m n Real
+add2d :: Tensor2 m n Real -> Tensor2 m n Real -> Tensor2 m n Real
+transpose2d :: Tensor2 m n Real -> Tensor2 n m Real
+matmul2d :: Tensor2 m k Real -> Tensor2 k n Real -> Tensor2 m n Real
+dot1d :: Tensor1 n Real -> Tensor1 n Real -> Real
+tsum1d :: Tensor1 n Real -> Real
+trace2d :: Tensor2 n n Real -> Real
+diag2d :: Tensor2 n n Real -> Tensor1 n Real
+diagMat1d :: Tensor1 n Real -> Tensor2 n n Real
+outer1d :: Tensor1 m Real -> Tensor1 n Real -> Tensor2 m n Real
 
 -- Category 2: Nat arithmetic (deferred with variables, checked at ground)
-flatten2d m n :: Tensor2 m n Real -> Tensor1 (m * n) Real
-vstack2d m n p :: Tensor2 m n Real -> Tensor2 p n Real -> Tensor2 (m + p) n Real
-hstack2d m n p :: Tensor2 m n Real -> Tensor2 m p Real -> Tensor2 m (n + p) Real
-kron2d m n p q :: Tensor2 m n Real -> Tensor2 p q Real -> Tensor2 (m * p) (n * q) Real
+flatten2d :: Tensor2 m n Real -> Tensor1 (m * n) Real
+vstack2d :: Tensor2 m n Real -> Tensor2 p n Real -> Tensor2 (m + p) n Real
+hstack2d :: Tensor2 m n Real -> Tensor2 m p Real -> Tensor2 m (n + p) Real
+kron2d :: Tensor2 m n Real -> Tensor2 p q Real -> Tensor2 (m * p) (n * q) Real
 
 -- Category 3: Opaque output dimensions
-slice2d m n i j :: Int -> Int -> Tensor2 m n Real -> Tensor2 i j Real
-ttake1d n i :: Int -> Tensor1 n Real -> Tensor1 i Real
+slice2d :: Int -> Int -> Tensor2 m n Real -> Tensor2 i j Real
+ttake1d :: Int -> Tensor1 n Real -> Tensor1 i Real
 
 -- === Category 1 tests ===
 

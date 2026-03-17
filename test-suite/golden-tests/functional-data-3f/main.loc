@@ -5,7 +5,7 @@ import root-py
 bar :: Bool -> (Int -> Int, Bool -> Int)
 source Py from "main.py" ("bar", "fst")
 
-fst a b :: (a, b) -> a
+fst :: (a, b) -> a
 
 foo :: Bool -> Int -> Int
 foo x y = (fst (bar x)) y

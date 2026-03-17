@@ -418,7 +418,7 @@ typeAliasTests =
           "parameterized generic"
           [r|
         module main (f)
-        f m a b :: m (a -> b)
+        f :: m (a -> b)
         |]
           (forallu ["m___q0", "a___q1", "b___q2"] (arr "m___q0" [fun [var "a___q1", var "b___q2"]]))
       , assertGeneralType
@@ -476,7 +476,7 @@ typeAliasTests =
           [r|
            module main (f)
            type Foo = A
-           g a b :: a -> b
+           g :: a -> b
            f :: Foo -> Int
            f = g  {- yes, g isn't defined -}
         |]
@@ -522,7 +522,7 @@ typeAliasTests =
            import a (A)
            import b (A)
            
-           foo a b :: A a b -> A a b -> A a b
+           foo :: A a b -> A a b -> A a b
         |]
       , -- import tests ---------------------------------------
         assertGeneralType
@@ -634,7 +634,7 @@ whereTests =
       , assertGeneralType
           "calling deeper where"
           [r|
-            id a :: a -> a
+            id :: a -> a
             inc :: Int -> Int
             f = id z where
                 z = inc y where
@@ -928,49 +928,49 @@ unitTypeTests =
       , assertGeneralType
           "identity signature function"
           [r|
-        id a :: a -> a
+        id :: a -> a
         id 42
         |]
           int
       , assertGeneralType
           "const signature function"
           [r|
-        const a b :: a -> b -> a
+        const :: a -> b -> a
         const 42 True
         |]
           int
       , assertGeneralType
           "fst signature function"
           [r|
-        fst a b :: (a,b) -> a
+        fst :: (a,b) -> a
         fst (42,True)
         |]
           int
       , assertGeneralType
           "value to list function"
           [r|
-        single a :: a -> [a]
+        single :: a -> [a]
         single 42
         |]
           (lst int)
       , assertGeneralType
           "head function"
           [r|
-        head a :: [a] -> a
+        head :: [a] -> a
         head [1,2,3]
         |]
           int
       , assertGeneralType
           "make list function"
           [r|
-        f a :: a -> [a]
+        f :: a -> [a]
         f 1
         |]
           (lst int)
       , assertGeneralType
           "make list function"
           [r|
-        single a :: a -> [a]
+        single :: a -> [a]
         single 1
         |]
           (lst int)
@@ -984,16 +984,16 @@ unitTypeTests =
       , assertGeneralType
           "app single function"
           [r|
-        app a b :: (a -> b) -> a -> b
-        f a :: a -> [a]
+        app :: (a -> b) -> a -> b
+        f :: a -> [a]
         app f 42
         |]
           (lst int)
       , assertGeneralType
           "app head function"
           [r|
-        app a b :: (a -> b) -> a -> b
-        f a :: [a] -> a
+        app :: (a -> b) -> a -> b
+        f :: [a] -> a
         app f [42]
         |]
           int
@@ -1017,28 +1017,28 @@ unitTypeTests =
           "zip pair"
           [r|
       pair x y = (x, y)
-      zip x y z :: (x -> y -> z) -> [x] -> [y] -> [z]
+      zip :: (x -> y -> z) -> [x] -> [y] -> [z]
       zip pair [1,2] [True, False]
       |]
           (lst (tuple [int, bool]))
       , assertGeneralType
           "nested identity"
           [r|
-      id a :: a -> a
+      id :: a -> a
       id (id (id 1))
       |]
           int
       , assertGeneralType
           "head (head [[1]])"
           [r|
-      head a :: [a] -> a
+      head :: [a] -> a
       head (head [[42]])
       |]
           int
       , assertGeneralType
           "snd (snd (1,(1,True)))"
           [r|
-      snd a b :: (a, b) -> b
+      snd :: (a, b) -> b
       snd (snd (1, (1, True)))
       |]
           bool
@@ -1052,58 +1052,58 @@ unitTypeTests =
       , assertGeneralType
           "map head function"
           [r|
-        map a b :: (a -> b) -> [a] -> [b]
-        head a :: [a] -> a
+        map :: (a -> b) -> [a] -> [b]
+        head :: [a] -> a
         map head [[1],[1,2,3]]
         |]
           (lst int)
       , assertGeneralType
           "t a -> a"
           [r|
-        gify a :: a -> G a
-        out f a :: f a -> a
+        gify :: a -> G a
+        out :: f a -> a
         out (gify 1)
         |]
           int
       , assertGeneralType
           "f a b -> b"
           [r|
-        gify a b :: a -> b -> G a b
-        snd f a b :: f a b -> b
+        gify :: a -> b -> G a b
+        snd :: f a b -> b
         snd (gify 1 True)
         |]
           bool
       , assertGeneralType
           "map id over number list"
           [r|
-        map a b :: (a -> b) -> [a] -> [b]
-        id a :: a -> a
+        map :: (a -> b) -> [a] -> [b]
+        id :: a -> a
         map id [1,2,3]
         |]
           (lst int)
       , assertGeneralType
           "map fst over tuple list"
           [r|
-        map a b :: (a -> b) -> [a] -> [b]
-        fst a b :: (a,b) -> a
+        map :: (a -> b) -> [a] -> [b]
+        fst :: (a,b) -> a
         map fst [(1,True),(2,False)]
         |]
           (lst int)
       , assertGeneralType
           "map fstG over (G a b) list"
           [r|
-        gify a b :: a -> b -> G a b
-        map a b :: (a -> b) -> [a] -> [b]
-        fstF f a b :: f a b -> a
+        gify :: a -> b -> G a b
+        map :: (a -> b) -> [a] -> [b]
+        fstF :: f a b -> a
         map fstF [gify 1 True, gify 2 False]
         |]
           (lst int)
       , assertGeneralType
           "fmap generic fst over functor"
           [r|
-        gify a :: a -> G a
-        fmap f a b :: (a -> b) -> f a -> f b
-        out f a :: f a -> a
+        gify :: a -> G a
+        fmap :: (a -> b) -> f a -> f b
+        out :: f a -> a
         fmap out (gify [1])
         |]
           (arr "G" [int])
@@ -1112,8 +1112,8 @@ unitTypeTests =
           [r|
         module m (biz)
         type M a b c = R b a c
-        foo a b c :: M a b c -> N b c
-        bar a b c :: a -> b -> c -> R a b c
+        foo :: M a b c -> N b c
+        bar :: a -> b -> c -> R a b c
         da :: Int -> X
         db :: Int -> Y
         dc :: Int -> Z
@@ -1187,7 +1187,7 @@ unitTypeTests =
       , exprTestBad
           "applications with too many arguments fail"
           [r|
-        f a :: a -> a
+        f :: a -> a
         f True 12
         |]
       , exprTestBad
@@ -1221,14 +1221,14 @@ unitTypeTests =
         expectError
           "arguments to a function are monotypes"
           [r|
-        f a :: a -> a
+        f :: a -> a
         g = \h -> (h 42, h True)
         g f
         |]
       , assertGeneralType
           "polymorphism under lambdas (203f8c) (1)"
           [r|
-        f a :: a -> a
+        f :: a -> a
         g = \h -> (h 42, h 1234)
         g f
         |]
@@ -1236,7 +1236,7 @@ unitTypeTests =
       , assertGeneralType
           "polymorphism under lambdas (203f8c) (2)"
           [r|
-        f a :: a -> a
+        f :: a -> a
         g = \h -> [h 42, h 1234]
         g f
         |]
@@ -1286,7 +1286,7 @@ unitTypeTests =
         assertGeneralType
           "type signature: identity function"
           [r|
-        f a :: a -> a
+        f :: a -> a
         f 42
         |]
           int
@@ -1301,7 +1301,7 @@ unitTypeTests =
       , assertGeneralType
           "type signature: generic apply function"
           [r|
-        apply a b :: (a->b) -> a -> b
+        apply :: (a->b) -> a -> b
         f :: Int -> Bool
         apply f 42
         |]
@@ -1309,7 +1309,7 @@ unitTypeTests =
       , assertGeneralType
           "type signature: map"
           [r|
-        map a b :: (a->b) -> [a] -> [b]
+        map :: (a->b) -> [a] -> [b]
         f :: Int -> Bool
         map f [5,2]
         |]
@@ -1334,16 +1334,16 @@ unitTypeTests =
       , assertGeneralType
           "shadowed qualified type variables (7ffd52a)"
           [r|
-        f a :: a -> a
-        g a :: a -> Int
+        f :: a -> a
+        g :: a -> Int
         g f
         |]
           int
       , assertGeneralType
           "non-shadowed qualified type variables (7ffd52a)"
           [r|
-        f a :: a -> a
-        g b :: b -> Int
+        f :: a -> a
+        g :: b -> Int
         g f
         |]
           int
@@ -1352,7 +1352,7 @@ unitTypeTests =
       , assertGeneralType
           "list containing an applied variable"
           [r|
-        f a :: a -> a
+        f :: a -> a
         [53, f 34]
         |]
           (lst int)
@@ -1381,7 +1381,7 @@ unitTypeTests =
       , assertGeneralType
           "tuple containing an applied variable"
           [r|
-        f a :: a -> a
+        f :: a -> a
         (f 53, True)
         |]
           (tuple [int, bool])
@@ -1425,7 +1425,7 @@ unitTypeTests =
         assertGeneralType
           "declaration with a signature (1)"
           [r|
-        f a :: a -> a
+        f :: a -> a
         f x = x
         f 42
         |]
@@ -1457,52 +1457,27 @@ unitTypeTests =
           "catch infinite recursion of list"
           [r|
         module main (f)
-        g a :: [a] -> a
-        f a :: a -> a
+        g :: [a] -> a
+        f :: a -> a
         f x = g x
         |]
       , expectError
           "catch infinite recursion of tuple"
           [r|
         module main (f)
-        g a b :: (a, b) -> a
-        f a :: a -> a
+        g :: (a, b) -> a
+        f :: a -> a
         f x = g x
         |]
       , expectError
           "check signatures under supposed identity"
           [r|
         module main (f)
-        g a b :: (a -> b) -> a
-        f a :: a -> a
+        g :: (a -> b) -> a
+        f :: a -> a
         f x = g x
         |]
-      , -- -- tags
-        -- , exprEqual
-        --     "variable tags"
-        --     "F :: Int"
-        --     "F :: foo:Int"
-        -- , exprEqual
-        --     "list tags"
-        --     "F :: [Int]"
-        --     "F :: foo:[Int]"
-        -- , exprEqual
-        --     "tags on parenthesized types"
-        --     "F :: Int"
-        --     "F :: f:(Int)"
-        -- , exprEqual
-        --     "record tags"
-        --     "F :: {x::Int, y::Str}"
-        --     "F :: foo:{x::Int, y::Str}"
-        -- , exprEqual
-        --     "nested tags (tuple)"
-        --     "F :: (Int, Str)"
-        --     "F :: foo:(i:Int, s:Str)"
-        -- , exprEqual "nested tags (list)" "F :: [Int]" "F :: xs:[x:Int]"
-        -- , exprEqual
-        --     "nested tags (record)"
-        --     "F :: {x::Int, y::Str}"
-        --     "F :: foo:{x::(i:Int), y::Str}"
+      ,
 
         -- constraint syntax (implicit quantification wraps free vars in ForallU)
         assertGeneralType
@@ -1530,7 +1505,7 @@ unitTypeTests =
           module foo (x)
             x = 42
           module bar (f)
-            f a :: a -> [a]
+            f :: a -> [a]
           module main (z)
             import foo (x)
             import bar (f)
@@ -1754,10 +1729,10 @@ infixOperatorTests =
           infixl 9 .
           infixl 6 +
           infixr 0 $
-          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
-          ($) a b :: (a -> b) -> a -> b
+          (.) :: (b -> c) -> (a -> b) -> a -> c
+          ($) :: (a -> b) -> a -> b
           (+) :: Int -> Int -> Int
-          show a :: a -> Str
+          show :: a -> Str
           x = show . (+) 9 $ 5
           x
         |]
@@ -1766,7 +1741,7 @@ infixOperatorTests =
           "polymorphic list append"
           [r|
           infixl 6 ++
-          (++) a :: [a] -> [a] -> [a]
+          (++) :: [a] -> [a] -> [a]
           (++) xs ys = xs
           x = [1] ++ [2]
           x
@@ -1924,7 +1899,7 @@ infixOperatorTests =
           "$ applies function to argument"
           [r|
           infixr 0 $
-          ($) a b :: (a -> b) -> a -> b
+          ($) :: (a -> b) -> a -> b
           f :: Int -> Str
           x = f $ 1
           x
@@ -1934,7 +1909,7 @@ infixOperatorTests =
           "nested $ is right-associative (type-verified)"
           [r|
           infixr 0 $
-          ($) a b :: (a -> b) -> a -> b
+          ($) :: (a -> b) -> a -> b
           f :: Int -> Str
           g :: Str -> Int
           x = g $ f $ 1
@@ -1946,7 +1921,7 @@ infixOperatorTests =
           [r|
           infixr 0 $
           infixl 6 +
-          ($) a b :: (a -> b) -> a -> b
+          ($) :: (a -> b) -> a -> b
           (+) :: Int -> Int -> Int
           f :: Int -> Str
           x = f $ 1 + 2
@@ -1958,7 +1933,7 @@ infixOperatorTests =
           "composition of two functions"
           [r|
           infixr 9 .
-          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
+          (.) :: (b -> c) -> (a -> b) -> a -> c
           g :: Str -> Int
           f :: Int -> Str
           x = g . f
@@ -1969,7 +1944,7 @@ infixOperatorTests =
           "composition chain of three functions"
           [r|
           infixr 9 .
-          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
+          (.) :: (b -> c) -> (a -> b) -> a -> c
           h :: Str -> Int
           g :: Int -> Str
           f :: Bool -> Int
@@ -1982,8 +1957,8 @@ infixOperatorTests =
           [r|
           infixr 9 .
           infixr 0 $
-          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
-          ($) a b :: (a -> b) -> a -> b
+          (.) :: (b -> c) -> (a -> b) -> a -> c
+          ($) :: (a -> b) -> a -> b
           f :: Int -> Int
           g :: Int -> Str
           x = g . f $ 5
@@ -2132,7 +2107,7 @@ infixOperatorTests =
           infixr 9 .
           (+) :: Int -> Int -> Int
           (*) :: Int -> Int -> Int
-          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
+          (.) :: (b -> c) -> (a -> b) -> a -> c
           foo x = ((+) 1 . (*) 2) x
           foo
         |]
@@ -2182,7 +2157,7 @@ complexityRegressionTests =
         assertGeneralType
           "deep identity composition"
           [r|
-          id a :: a -> a
+          id :: a -> a
           f = id (id (id (id (id (id (id (id (id (id 42)))))))))
           f
         |]
@@ -2190,8 +2165,8 @@ complexityRegressionTests =
       , assertGeneralType
           "deep function composition chain"
           [r|
-          id a :: a -> a
-          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
+          id :: a -> a
+          (.) :: (b -> c) -> (a -> b) -> a -> c
           f = id . id . id . id . id . id . id . id . id . id
           f 42
         |]
@@ -2232,7 +2207,7 @@ complexityRegressionTests =
       , assertGeneralType
           "polymorphic many-argument function"
           [r|
-          f a b c d e :: a -> b -> c -> d -> e -> (a, b, c, d, e)
+          f :: a -> b -> c -> d -> e -> (a, b, c, d, e)
           f 1 True "x" 2.0 [1]
         |]
           (tuple [int, bool, str, real, lst int])
@@ -2240,15 +2215,15 @@ complexityRegressionTests =
         exprTestBad
           "fold with (==) should fail: shared var c gets Bool and Str"
           [r|
-          fold b a :: (b -> a -> b) -> b -> [a] -> b
-          (==) c :: c -> c -> Bool
+          fold :: (b -> a -> b) -> b -> [a] -> b
+          (==) :: c -> c -> Bool
           test = fold (==) True ["hello", "hello"]
           test
         |]
       , assertGeneralType
           "fold with (+) should succeed: shared var resolved consistently"
           [r|
-          fold b a :: (b -> a -> b) -> b -> [a] -> b
+          fold :: (b -> a -> b) -> b -> [a] -> b
           (+) :: Int -> Int -> Int
           test = fold (+) 0 [1, 2, 3]
           test
@@ -2257,8 +2232,8 @@ complexityRegressionTests =
       , assertGeneralType
           "map with lambda using (==) should succeed: same type both args"
           [r|
-          map a b :: (a -> b) -> [a] -> [b]
-          (==) c :: c -> c -> Bool
+          map :: (a -> b) -> [a] -> [b]
+          (==) :: c -> c -> Bool
           test = map (\x -> x == x) ["hello"]
           test
         |]
@@ -2267,7 +2242,7 @@ complexityRegressionTests =
         exprTestBad
           "zipSubtype: Pair a a cannot unify with Pair Bool Str"
           [r|
-          mkPair a :: a -> Pair a a
+          mkPair :: a -> Pair a a
           consume :: Pair Bool Str -> Int
           test = consume (mkPair True)
           test
@@ -2275,8 +2250,8 @@ complexityRegressionTests =
       , assertGeneralType
           "zipSubtype: Pair a a consistent with Pair Int Int"
           [r|
-          mkPair a :: a -> Pair a a
-          fst a b :: Pair a b -> a
+          mkPair :: a -> Pair a a
+          fst :: Pair a b -> a
           test = fst (mkPair 42)
           test
         |]
@@ -2285,8 +2260,8 @@ complexityRegressionTests =
         exprTestBad
           "shared var via HOF: id cannot satisfy Bool -> Str"
           [r|
-          apply a b :: (a -> b) -> a -> b
-          id a :: a -> a
+          apply :: (a -> b) -> a -> b
+          id :: a -> a
           asStr :: Str -> Str
           test = asStr (apply id True)
           test
@@ -2295,8 +2270,8 @@ complexityRegressionTests =
         exprTestBad
           "triple-shared var forced to different types through fold"
           [r|
-          fold b a :: (b -> a -> b) -> b -> [a] -> b
-          choose c :: c -> c -> c
+          fold :: (b -> a -> b) -> b -> [a] -> b
+          choose :: c -> c -> c
           test = fold choose "hello" [1, 2]
           test
         |]
@@ -2304,8 +2279,8 @@ complexityRegressionTests =
         exprTestBad
           "shared var return type conflicts with argument through fold"
           [r|
-          fold b a :: (b -> a -> b) -> b -> [a] -> b
-          weirdEq c :: c -> c -> Str
+          fold :: (b -> a -> b) -> b -> [a] -> b
+          weirdEq :: c -> c -> Str
           test = fold weirdEq "start" [1, 2]
           test
         |]
@@ -2313,8 +2288,8 @@ complexityRegressionTests =
         exprTestBad
           "two distinct shared vars both inconsistent through HOF"
           [r|
-          hof a b c d e :: (a -> b -> c -> d -> e) -> a -> b -> c -> d -> e
-          f x y :: x -> y -> x -> y -> Bool
+          hof :: (a -> b -> c -> d -> e) -> a -> b -> c -> d -> e
+          f :: x -> y -> x -> y -> Bool
           test = hof f 1 "hi" True 42.0
           test
         |]
@@ -2322,8 +2297,8 @@ complexityRegressionTests =
         exprTestBad
           "nested HOF: shared var conflict through double application"
           [r|
-          apply a b :: (a -> b) -> a -> b
-          (==) c :: c -> c -> Bool
+          apply :: (a -> b) -> a -> b
+          (==) :: c -> c -> Bool
           test = apply (apply (==) True) "hello"
           test
         |]
@@ -2331,8 +2306,8 @@ complexityRegressionTests =
         assertGeneralType
           "fold with (==) consistent types: all Bool"
           [r|
-          fold b a :: (b -> a -> b) -> b -> [a] -> b
-          (==) c :: c -> c -> Bool
+          fold :: (b -> a -> b) -> b -> [a] -> b
+          (==) :: c -> c -> Bool
           test = fold (==) True [True, False]
           test
         |]
@@ -2341,8 +2316,8 @@ complexityRegressionTests =
         assertGeneralType
           "multiple shared vars consistent through HOF"
           [r|
-          hof a b c d e :: (a -> b -> c -> d -> e) -> a -> b -> c -> d -> e
-          f x y :: x -> y -> x -> y -> Bool
+          hof :: (a -> b -> c -> d -> e) -> a -> b -> c -> d -> e
+          f :: x -> y -> x -> y -> Bool
           test = hof f 1 2 3 4
           test
         |]
@@ -2560,7 +2535,7 @@ effectSynthesisTests =
           [r|
         module main (x)
         f :: Int -> <IO> Int
-        id a :: a -> a
+        id :: a -> a
         x = do !(f (id 42))
           |]
           (ioEff int)
@@ -2692,7 +2667,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         instance Monoid (List a) where
@@ -2707,7 +2682,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid (List a) where
           mempty = []
         instance Monoid Str where
@@ -2723,7 +2698,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         instance Monoid (List a) where
@@ -2739,7 +2714,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         instance Monoid (List a) where
@@ -2758,7 +2733,7 @@ typeclassTests =
           [r|
         module main (foo)
         type Py => Int = "int"
-        myId a :: a -> a
+        myId :: a -> a
         source Py ("lambda x: x" as myId)
         foo :: Int
         foo = (myId :: Int -> Int) 42
@@ -2770,7 +2745,7 @@ typeclassTests =
           [r|
         module main (foo)
         type Py => Real = "float"
-        myVal a :: a
+        myVal :: a
         source Py ("lambda: 3.14" as myVal)
         foo :: Real
         foo = myVal :: Real
@@ -2785,9 +2760,9 @@ typeclassTests =
         module main (x)
         type Py => Str = "str"
         class Semigroup a where
-          append a :: a -> a -> a
+          append :: a -> a -> a
         class Semigroup a => Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Semigroup Str where
           source Py from "foo.py" ("appendStr" as append)
         instance Monoid Str where
@@ -2804,7 +2779,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         instance Monoid (List a) where
@@ -2817,7 +2792,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         x :: Real
@@ -2829,7 +2804,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         x :: Str
         x = mempty
           |]
@@ -2839,7 +2814,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         instance Monoid (List a) where
@@ -2855,7 +2830,7 @@ typeclassTests =
           [r|
         module main (x)
         class Default a where
-          def a :: a
+          def :: a
         instance Default Int where
           def = 0
         x :: ?Int
@@ -2868,7 +2843,7 @@ typeclassTests =
           [r|
         module main (x)
         class Default a where
-          def a :: a
+          def :: a
         instance Default Int where
           def = 0
         f :: Int -> <IO> Int
@@ -2883,7 +2858,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         instance Monoid (List a) where
@@ -2900,7 +2875,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         instance Monoid (List a) where
@@ -2916,8 +2891,8 @@ typeclassTests =
           [r|
         module main (x)
         class Bounded a where
-          minBound a :: a
-          maxBound a :: a
+          minBound :: a
+          maxBound :: a
         instance Bounded Int where
           minBound = 0
           maxBound = 100
@@ -2931,7 +2906,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid (List a) where
           mempty = []
         x :: [[Int]]
@@ -3092,7 +3067,7 @@ natArithTests =
         [r|
       module main (x)
       type SizedList n a = [a]
-      take m n a :: SizedList (m - n) a -> SizedList n a -> SizedList m a
+      take :: SizedList (m - n) a -> SizedList n a -> SizedList m a
       a :: SizedList 7 Int
       b :: SizedList 3 Int
       x :: SizedList 8 Int
@@ -3103,7 +3078,7 @@ natArithTests =
         [r|
       module main (x)
       type SizedList n a = [a]
-      split n m a :: SizedList (n * m) a -> SizedList n a
+      split :: SizedList (n * m) a -> SizedList n a
       a :: SizedList 12 Int
       x :: SizedList 5 Int
       x = split a

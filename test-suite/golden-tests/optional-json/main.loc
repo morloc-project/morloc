@@ -11,9 +11,9 @@ type Py => Bool = "bool"
 type Py => Str = "str"
 type Py => List a = "list" a
 
-identity a :: a -> a
-fromNull a :: a -> ?a -> a
-isNull a :: ?a -> Bool
+identity :: a -> a
+fromNull :: a -> ?a -> a
+isNull :: ?a -> Bool
 
 source Py from "foo.py" ("identity", "fromNull", "isNull")
 

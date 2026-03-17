@@ -5,8 +5,8 @@ type Py => Int = "int"
 type Py => Real = "float"
 
 class Addable a where
-  (+) a :: a -> a -> a
-  (*) a :: a -> a -> a
+  (+) :: a -> a -> a
+  (*) :: a -> a -> a
 
 infixl 6 +
 infixl 7 *

@@ -15,12 +15,12 @@
 //          -> a
 //          -> (n, e, l)
 //          -> a
-template<typename N, typename E, typename L, typename A>
+template<typename N, typename E, typename L, typename A, typename F1, typename F2>
 A g(
-  std::function<A(L,A)> laa,
-  std::function<A(N,E,A)> anea,
+  F1 laa,
+  F2 anea,
   A b,
-  std::tuple<N,E,L> x
+  const std::tuple<N,E,L>& x
 ){
     A a1 = laa(std::get<2>(x), b);
     A a2 = anea(std::get<0>(x), std::get<1>(x), a1);

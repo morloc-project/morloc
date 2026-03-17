@@ -19,9 +19,9 @@ type Cpp => Real = "double"
 type Cpp => List a = "std::vector<$1>" a
 type Cpp => Tuple3 a b c = "std::tuple<$1,$2,$3>" a b c
 
-pident a :: a -> a
-cident a :: a -> a
-rident a :: a -> a
+pident :: a -> a
+cident :: a -> a
+rident :: a -> a
 
 pfoo :: [(Str, [Str], [Real])] -> [(Str, [Str], [Real])]
 pfoo = pident

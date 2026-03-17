@@ -7,12 +7,12 @@ type Py => Tuple2 a b = "tuple" a b
 type Py => List a = "list" a
 
 source Py from "foo.py" ("mlc_map" as map) 
-map a b :: (a -> b) -> [a] -> [b]
+map :: (a -> b) -> [a] -> [b]
 
 foo :: [Int] -> [Int]
 foo = map (\x -> x)
 
-weird a :: a -> a -> a
+weird :: a -> a -> a
 weird x y = y
 
 int :: Int -> Int

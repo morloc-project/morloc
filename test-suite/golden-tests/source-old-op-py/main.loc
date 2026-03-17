@@ -4,10 +4,10 @@ module main (test_add, test_sub, test_mul, test_neg, test_expr)
 type Py => Int = "int"
 
 class Arith a where
-  neg a :: a -> a
-  (+) a :: a -> a -> a
-  (-) a :: a -> a -> a
-  (*) a :: a -> a -> a
+  neg :: a -> a
+  (+) :: a -> a -> a
+  (-) :: a -> a -> a
+  (*) :: a -> a -> a
 
 infixl 6 +, -
 infixl 7 *

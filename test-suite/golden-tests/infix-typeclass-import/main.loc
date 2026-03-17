@@ -1,6 +1,6 @@
 module main (test_comp, test_min, test_not_equal)
 
-import numops (Ord, (<), (>), (>=), min)
+import .numops (Ord, (<), (>), (>=), min)
 
 type Py => Int = "int"
 type Py => Bool = "bool"

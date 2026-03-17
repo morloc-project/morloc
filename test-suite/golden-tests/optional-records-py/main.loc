@@ -17,7 +17,7 @@ record Py => Person = "dict"
 makePerson :: Str -> ?Int -> Person
 getName :: Person -> Str
 getAge :: Person -> ?Int
-toNull a :: a -> ?a
+toNull :: a -> ?a
 findPerson :: Str -> [Person] -> ?Person
 
 source Py from "foo.py" ("makePerson", "getName", "getAge", "toNull", "findPerson")

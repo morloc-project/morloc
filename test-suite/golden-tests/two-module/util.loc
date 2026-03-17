@@ -9,4 +9,4 @@ source Py from "util.py"
 
 roll :: Int -> Int -> <Rand> [Int]
 
-choose a :: [a] -> <Rand> a
+choose :: [a] -> <Rand> a

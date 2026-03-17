@@ -6,7 +6,7 @@ type Py => Str = "str"
 type Py => List a = "list" a
 
 source Py from "foo.py" ("morloc_map" as map, "morloc_id" as srcId)
-map a b :: (a -> b) -> [a] -> [b]
+map :: (a -> b) -> [a] -> [b]
 
 srcId :: Str -> Str
 

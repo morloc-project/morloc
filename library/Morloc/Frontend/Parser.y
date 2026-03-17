@@ -172,8 +172,8 @@ top_decl :: { [Loc CstExpr] }
   | sig_or_ass        { $1 }
 
 sig_or_ass :: { [Loc CstExpr] }
-  : evar_or_op lower_names '::' sig_type
-      { [at $1 (CSigE (toEVar $1) $2 $4)] }
+  : evar_or_op '::' sig_type
+      { [at $1 (CSigE (toEVar $1) $3)] }
   | evar_or_op lower_names '=' expr opt_where_decls
       { [at $1 (CAssE (toEVar $1) $2 $4 $5)] }
   | evar_or_op lower_names guard_clauses ':' expr opt_where_decls
@@ -401,8 +401,8 @@ sig_list :: { [CstSigItem] }
   | sig_list VSEMI signature      { $1 ++ [$3] }
 
 signature :: { CstSigItem }
-  : evar_or_op lower_names '::' sig_type
-      { CstSigItem (toEVar $1) $2 $4 }
+  : evar_or_op '::' sig_type
+      { CstSigItem (toEVar $1) $3 }
 
 --------------------------------------------------------------------
 -- Instances

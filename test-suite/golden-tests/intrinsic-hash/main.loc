@@ -6,7 +6,7 @@ import root-r
 
 source Cpp from "foo.hpp" ("identity_int" as identityInt, "identity_str" as identityStr)
 
-equalHashes a :: [a] -> Bool
+equalHashes :: [a] -> Bool
 equalHashes xs =
   let headHash = @hash (at 0 xs)
   let isSame = map ((==) headHash) (map @hash xs)

@@ -10,7 +10,7 @@ type Py => Int = "int"
 type SizedList n a = [a]
 type Py => (SizedList n a) = "list" a
 
-myAppend m n a :: SizedList m a -> SizedList n a -> SizedList (m + n) a
+myAppend :: SizedList m a -> SizedList n a -> SizedList (m + n) a
 source Py from "helper.py" ("my_append" as myAppend)
 
 makeTwo :: SizedList 2 Int

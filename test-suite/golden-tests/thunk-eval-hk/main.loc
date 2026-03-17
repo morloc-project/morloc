@@ -9,7 +9,7 @@ type Py => Int = "int"
 type Py => Unit = "None"
 
 class RandomGroup f where
-  permute f a :: f a -> <Random> f a
+  permute :: f a -> <Random> f a
 
 instance RandomGroup List where
   source Py from "rng.py" ("permute")

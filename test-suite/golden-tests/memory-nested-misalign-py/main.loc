@@ -43,7 +43,7 @@ source Py from "foo.py"
   , "nestedRoundTrip"
   )
 
-toNull a :: a -> ?a
+toNull :: a -> ?a
 source Py from "foo.py" ("toNull")
 
 testOptRecord :: PairBR

@@ -41,7 +41,8 @@ printExpr :: IExpr -> MDoc
 printExpr (IVar v) = pretty v
 printExpr (IBoolLit True) = "true"
 printExpr (IBoolLit False) = "false"
-printExpr INullLit = "std::nullopt"
+printExpr (INullLit (Just t)) = "std::optional<" <> renderIType t <> ">()"
+printExpr (INullLit Nothing) = "std::nullopt"
 printExpr (IIntLit Nothing i) = viaShow i
 printExpr (IIntLit (Just t) i)
   | t == "int" = viaShow i

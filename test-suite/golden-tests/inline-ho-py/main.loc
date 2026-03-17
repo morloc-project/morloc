@@ -10,7 +10,7 @@ source Py from "foo.py" where
   mymap
 
 double :: Int -> Int
-mymap a b :: (a -> b) -> [a] -> [b]
+mymap :: (a -> b) -> [a] -> [b]
 
 -- Inline function passed as argument to higher-order function
 -- Should work: double is passed as a value, inlining is silently skipped

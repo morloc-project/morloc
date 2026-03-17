@@ -84,7 +84,7 @@ data CstExpr
   = -- Top-level declarations
     CModE (Maybe Text) CstExport [Loc CstExpr]
   | CImpE Import
-  | CSigE EVar [Text] CstSigType
+  | CSigE EVar CstSigType
   | CAssE EVar [Text] (Loc CstExpr) [Loc CstExpr]
   | CGuardedAssE EVar [Text] [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr) [Loc CstExpr]
   | CTypE CstTypeDef
@@ -145,7 +145,7 @@ data CstClassHead
   | CCHMultiConstrained [Constraint] TypeU
   deriving (Show, Eq)
 
-data CstSigItem = CstSigItem EVar [Text] CstSigType
+data CstSigItem = CstSigItem EVar CstSigType
   deriving (Show, Eq)
 
 data CstDoStmt

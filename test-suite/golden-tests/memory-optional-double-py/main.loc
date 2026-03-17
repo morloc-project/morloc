@@ -15,9 +15,9 @@ type Py => Bool = "bool"
 type Py => Int = "int"
 type Py => Real = "float"
 
-toNull a :: a -> ?a
-isNull a :: ?a -> Bool
-fromNull a :: a -> ?a -> a
+toNull :: a -> ?a
+isNull :: ?a -> Bool
+fromNull :: a -> ?a -> a
 doubleOptReal :: ?Real -> ?Real
 addOptInt :: ?Int -> ?Int -> ?Int
 

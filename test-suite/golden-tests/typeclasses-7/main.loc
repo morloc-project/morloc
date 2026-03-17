@@ -7,10 +7,10 @@ type Py => Int = "int"
 type Py => Str = "str"
 
 class Semigroup a where
-  append a :: a -> a -> a
+  append :: a -> a -> a
 
 class Semigroup a => Showable a where
-  toStr a :: a -> Str
+  toStr :: a -> Str
 
 instance Semigroup Int where
   source Cpp from "foo.hpp" ("appendInt" as append)

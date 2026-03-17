@@ -606,13 +606,11 @@ desugarTopLevel (Loc sp (CModE maybeName export body)) = do
 desugarTopLevel (Loc sp (CImpE imp)) = do
   e <- freshExprSpan sp (ImpE imp)
   return [e]
-desugarTopLevel (Loc sp (CSigE name forallVars sigType)) = do
+desugarTopLevel (Loc sp (CSigE name sigType)) = do
   docs <- lookupDocsAt (startPos sp)
   let cmdDoc = processArgDocLines docs
   (cs, argDocs, t) <- desugarSigType (startPos sp) sigType
-  let t' = if null forallVars
-             then quantifyType t
-             else forallWrap (map TV forallVars) t
+  let t' = quantifyType t
       doc = ArgDocSig cmdDoc (init argDocs) (last argDocs)
       et = EType t' (Set.fromList cs) doc
   e <- freshExprSpan sp (SigE (Signature name Nothing et))
@@ -777,11 +775,9 @@ desugarClassHead (CCHMultiConstrained cs headType) = do
   return (cs, cn, vs)
 
 desugarSigItem :: CstSigItem -> D Signature
-desugarSigItem (CstSigItem name forallVars sigType) = do
+desugarSigItem (CstSigItem name sigType) = do
   (cs, argDocs, t) <- desugarSigType (Pos 0 0 "") sigType
-  let wrappedT = if null forallVars
-                   then quantifyType t
-                   else forallWrap (map TV forallVars) t
+  let wrappedT = quantifyType t
       doc = ArgDocSig defaultValue (init argDocs) (last argDocs)
       et = EType wrappedT (Set.fromList cs) doc
   return (Signature name Nothing et)

@@ -104,7 +104,7 @@ data IExpr
   | IIntLit (Maybe Text) Integer  -- concrete type name (e.g. "int64_t"), Nothing for default
   | IRealLit (Maybe Text) Scientific  -- concrete type name (e.g. "float"), Nothing for default
   | IStrLit Text
-  | INullLit
+  | INullLit (Maybe IType)
   | IListLit [IExpr]
   | ITupleLit [IExpr]
   | IRecordLit NamType FVar [(Key, IExpr)]
@@ -230,7 +230,6 @@ data LowerConfig m = LowerConfig
   , lcRawDeserialAstType :: SerialAST -> m (Maybe IType)
   -- ^ raw deserialized type for the _get_value template parameter (C++ specific)
   -- For records, C++ converts to std::tuple; for others, uses serialAstToType
-  , lcTemplateArgs :: [(Text, TypeF)] -> m (Maybe [IType])
   , lcTypeMOf :: TypeM -> m (Maybe IType)
   , lcPackerName :: Source -> MDoc
   , lcUnpackerName :: Source -> MDoc
@@ -408,18 +407,17 @@ lowerNativeExpr ::
   NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
   m PoolDocs
 -- Binary operator: emit (lhs op rhs) instead of function call
-lowerNativeExpr _ _ (AppExeN_ _ (SrcCallP src) _ (map snd -> [lhs, rhs]))
+lowerNativeExpr _ _ (AppExeN_ _ (SrcCallP src) (map snd -> [lhs, rhs]))
   | srcOperator src =
       return $ mergePoolDocs (\xs -> case xs of [l, r] -> parens (l <+> pretty (unSrcName (srcName src)) <+> r); _ -> error "binary operator requires exactly 2 args") [lhs, rhs]
-lowerNativeExpr cfg _ (AppExeN_ _ (SrcCallP src) qs (map snd -> es)) = do
-  templateArgs <- lcTemplateArgs cfg qs
-  let handleFunctionArgs ts =
-        (<>) (lcSrcName cfg src <> printTemplateArgs' ts)
+lowerNativeExpr cfg _ (AppExeN_ _ (SrcCallP src) (map snd -> es)) = do
+  let handleFunctionArgs =
+        (<>) (lcSrcName cfg src)
           . hsep
           . map tupled
           . provideClosure src
-  return $ mergePoolDocs (handleFunctionArgs templateArgs) es
-lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) _ xs) = do
+  return $ mergePoolDocs handleFunctionArgs es
+lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) xs) = do
   let es = map snd xs
   patResult <- lcEvalPattern cfg t p (map poolExpr es)
   return $
@@ -429,10 +427,9 @@ lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) _ xs) = do
       , poolPriorLines = concatMap poolPriorLines es
       , poolPriorExprs = concatMap poolPriorExprs es
       }
-lowerNativeExpr cfg _ (AppExeN_ _ (LocalCallP idx) qs (map snd -> es)) = do
-  templateArgs <- lcTemplateArgs cfg qs
-  return $ mergePoolDocs ((<>) (nvarNamer idx <> printTemplateArgs' templateArgs) . tupled) es
-lowerNativeExpr _ _ (AppExeN_ _ (RecCallP mid _) _ (map snd -> es)) = do
+lowerNativeExpr _ _ (AppExeN_ _ (LocalCallP idx) (map snd -> es)) = do
+  return $ mergePoolDocs ((<>) (nvarNamer idx) . tupled) es
+lowerNativeExpr _ _ (AppExeN_ _ (RecCallP mid _) (map snd -> es)) = do
   return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
 lowerNativeExpr _ _ (ManN_ call) = return call
 lowerNativeExpr cfg _ (ReturnN_ x) =
@@ -469,7 +466,9 @@ lowerNativeExpr cfg _ (LogN_ _ v) = return $ defaultValue {poolExpr = lcPrintExp
 lowerNativeExpr cfg _ (RealN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IRealLit (Just (unCVar cv)) v)}
 lowerNativeExpr cfg _ (IntN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IIntLit (Just (unCVar cv)) v)}
 lowerNativeExpr cfg _ (StrN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit v)}
-lowerNativeExpr cfg _ (NullN_ _) = return $ defaultValue {poolExpr = lcPrintExpr cfg INullLit}
+lowerNativeExpr cfg _ (NullN_ fv) = do
+  mayT <- lcTypeOf cfg (VarF fv)
+  return $ defaultValue {poolExpr = lcPrintExpr cfg (INullLit mayT)}
 lowerNativeExpr cfg _ (DoBlockN_ _ x) =
   let (hoisted, effectExpr) = lcMakeDoBlock cfg (poolPriorLines x) (poolExpr x)
    in return
@@ -604,7 +603,3 @@ defaultDeserialize cfg v s = do
 
 type IndexM = CMS.StateT IndexState Identity
 
--- | Render template type arguments as MDoc (used by the fold for source/local calls)
-printTemplateArgs' :: Maybe [IType] -> MDoc
-printTemplateArgs' Nothing = ""
-printTemplateArgs' (Just ts) = encloseSep "<" ">" "," (map renderIType ts)

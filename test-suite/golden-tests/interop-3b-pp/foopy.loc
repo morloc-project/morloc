@@ -5,6 +5,6 @@ import .foo
 pneg :: Int -> Int
 padd :: Int -> Int -> Int
 pmul :: Int -> Int -> Int
-pmap a b :: (a -> b) -> [a] -> [b] 
+pmap :: (a -> b) -> [a] -> [b] 
 
 source Py from "foo.py" ("pneg", "padd", "pmul", "pmap")

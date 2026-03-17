@@ -27,21 +27,21 @@ type Vector a = List a
 
 -- Typeclasses
 class Semigroup a where
-  append a :: a -> a -> a
+  append :: a -> a -> a
 
 class Semigroup a => Monoid a where
-  mempty a :: a
+  mempty :: a
 
 class Indexed f where
-  at f a :: Int -> f a -> a
+  at :: Int -> f a -> a
 
 class Stack f where
-  cons f a :: a -> f a -> f a
-  uncons f a :: f a -> (a, f a)
+  cons :: a -> f a -> f a
+  uncons :: f a -> (a, f a)
 
 class Queue f where
-  snoc f a :: f a -> a -> f a
-  unsnoc f a :: f a -> (f a, a)
+  snoc :: f a -> a -> f a
+  unsnoc :: f a -> (f a, a)
 
 -- List instances
 instance Semigroup (List a) where

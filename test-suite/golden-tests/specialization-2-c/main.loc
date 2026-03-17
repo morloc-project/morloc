@@ -66,13 +66,13 @@ source Cpp from "foo.hpp"
     )
 
 source Py from "foo.py" ("ident" as id)
-id a :: a -> a 
+id :: a -> a 
 
-vectorToDeque a :: List a -> Deque' a
-vectorToForwardList a :: List a -> ForwardList' a
-vectorToList a :: List a -> List' a
-vectorToQueue a :: List a -> Queue' a
-vectorToStack a :: List a -> Stack' a
+vectorToDeque :: List a -> Deque' a
+vectorToForwardList :: List a -> ForwardList' a
+vectorToList :: List a -> List' a
+vectorToQueue :: List a -> Queue' a
+vectorToStack :: List a -> Stack' a
 
 foo = id
     . append 18

@@ -6,6 +6,6 @@ funs :: [(Int -> Int)]
 funs = [ (+) 1, (+) 2 ]
 
 source Py from "main.py" ("runAll")
-runAll a b :: a -> [(a -> b)] -> [b]
+runAll :: a -> [(a -> b)] -> [b]
 
 foo x = runAll x funs

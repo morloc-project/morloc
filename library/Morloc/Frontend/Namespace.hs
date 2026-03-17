@@ -93,7 +93,6 @@ copyState oldIndex newIndex = do
       , stateExports = updateList (stateExports s)
       , stateName = updateMap (stateName s)
       , stateManifoldConfig = updateMap (stateManifoldConfig s)
-      , stateTypeQualifier = updateMap (stateTypeQualifier s)
       , stateSourceMap = updateMap (stateSourceMap s)
       , stateSourceText = stateSourceText s
       , stateBuildConfig = stateBuildConfig s

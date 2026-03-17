@@ -1,6 +1,6 @@
-module semiring-py (*)
+module (*)
 
-import semiring (Semiring)
+import .semiring (Semiring)
 
 type Py => Int = "int"
 

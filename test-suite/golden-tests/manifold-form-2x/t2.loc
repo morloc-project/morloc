@@ -1,6 +1,6 @@
 module main (foo, bar, baz)
 
-foo x :: Int -> [Int] 
+foo :: Int -> [Int] 
 foo x = [x,x]
 
 bar :: Bool -> Str -> (Bool, Str)

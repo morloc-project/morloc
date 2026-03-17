@@ -15,9 +15,9 @@ type Cpp => Bool = "bool"
 type Cpp => Int = "int"
 type Cpp => Real = "double"
 
-toNull a :: a -> ?a
-isNull a :: ?a -> Bool
-fromNull a :: a -> ?a -> a
+toNull :: a -> ?a
+isNull :: ?a -> Bool
+fromNull :: a -> ?a -> a
 doubleOptReal :: ?Real -> ?Real
 addOptInt :: ?Int -> ?Int -> ?Int
 

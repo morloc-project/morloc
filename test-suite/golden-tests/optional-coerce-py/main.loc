@@ -8,7 +8,7 @@ module main
 type Py => Int = "int"
 type Py => List a = "list" a
 
-fromNull a :: a -> ?a -> a
+fromNull :: a -> ?a -> a
 addOpt :: ?Int -> ?Int -> ?Int
 identity :: ?Int -> ?Int
 

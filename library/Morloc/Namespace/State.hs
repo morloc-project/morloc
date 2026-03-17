@@ -109,7 +109,6 @@ data MorlocState = MorlocState
   , stateExports :: [Int]
   , stateName :: Map Int EVar
   , stateManifoldConfig :: Map Int ManifoldConfig
-  , stateTypeQualifier :: Map Int [(TVar, TypeU, Int)]
   , stateSourceMap :: Map Int SrcLoc
   , stateSourceText :: Map Path Text
   , stateBuildConfig :: BuildConfig
@@ -291,7 +290,6 @@ instance Defaultable MorlocState where
       , stateExports = []
       , stateName = Map.empty
       , stateManifoldConfig = Map.empty
-      , stateTypeQualifier = Map.empty
       , stateSourceMap = Map.empty
       , stateSourceText = Map.empty
       , stateBuildConfig = defaultValue

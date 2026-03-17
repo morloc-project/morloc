@@ -5,7 +5,7 @@ type Cpp => Int = "int"
 type Cpp => List a = "std::vector<$1>" a
 
 source Cpp from "person.h" ("PersonYay", "id")
-id a :: a -> a 
+id :: a -> a 
 
 table (Person a) = Person {name :: Str, info :: a}
 table Cpp => Person a = "PersonYay"

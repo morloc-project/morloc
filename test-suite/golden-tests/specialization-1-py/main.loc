@@ -10,12 +10,12 @@ type R => Int64 = "double"
 type Numpy1D a = List a
 
 source Py from "foo.py" ("list2numpy", "numpy2list", "square")
-list2numpy a :: List a -> Numpy1D a
-numpy2list a :: Numpy1D a -> List a
+list2numpy :: List a -> Numpy1D a
+numpy2list :: Numpy1D a -> List a
 square :: Numpy1D Int64 -> Numpy1D Int64
 
 source R from "foo.R" ("rid")
-rid a :: a -> a
+rid :: a -> a
 
 foo :: List Int64 -> List Int64
 foo = numpy2list . square . list2numpy

@@ -43,7 +43,7 @@ source Cpp from "foo.hpp"
   , "nestedRoundTrip"
   )
 
-toNull a :: a -> ?a
+toNull :: a -> ?a
 source Cpp from "foo.hpp" ("toNull")
 
 testOptRecord :: PairBR

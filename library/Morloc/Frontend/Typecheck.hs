@@ -61,84 +61,10 @@ typecheck = mapM run
             MM.sayV $ "Warning: unresolved Nat constraint:" <+> prettyTypeU t1 <+> "~" <+> prettyTypeU t2
             ) remaining
 
-      -- apply inferred type information to the extracted type qualifiers
-      -- this information was uploaded by the `recordParameter` function
-      s <- MM.get
-
-      insetSay "g3:"
-      seeGamma g3
-      insetSay $ "stateTypeQualifier s:" <+> viaShow (stateTypeQualifier s)
-      let qmap = Map.map (prepareQualifierMap g3) (stateTypeQualifier s)
-      MM.put (s {stateTypeQualifier = qmap})
-
-      insetSay $ "Qualifier Map:" <+> viaShow qmap
-
       -- perform a final application of gamma the final expression and return
       -- (is this necessary?)
       return (applyGen g3 e3)
 
--- The typechecker goes through two passes assigning two different var names
--- to the qualifiers. The first is never resolved, and is left as
--- existential. So here I remove them. This is hacky as hell. Need a cleaner
--- solution.
-prepareQualifierMap :: Gamma -> [(TVar, TypeU, Int)] -> [(TVar, TypeU, Int)]
-prepareQualifierMap g = takeLast . filter notExistential . map f
-  where
-    f
-      ( TV . head . MT.splitOn "___" . unTVar -> v
-        , apply g -> t
-        , i
-        ) = (v, t, i)
-
-    notExistential (_, ExistU {}, _) = False
-    notExistential _ = True
-
-    takeLast :: [(TVar, TypeU, Int)] -> [(TVar, TypeU, Int)]
-    takeLast = reverse . findFirsts [] . reverse
-      where
-        findFirsts :: [TVar] -> [(TVar, TypeU, Int)] -> [(TVar, TypeU, Int)]
-        findFirsts _ [] = []
-        findFirsts observed ((v, t, i) : rs)
-          | elem v observed = []
-          | otherwise = (v, t, i) : findFirsts (v : observed) rs
-
--- Upload a solved universal qualifier to the stateTypeQualifier list
-recordParameter :: Int -> TVar -> TypeU -> MorlocMonad ()
-recordParameter i v t = do
-  s <- MM.get
-  let size = findTypeKindSize v t
-      updatedMap =
-        Map.insertWith
-          (\xs ys -> ys <> xs)
-          i
-          [(v, ExistU v ([], Open) ([], Open), size)]
-          (stateTypeQualifier s)
-  MM.put $ s {stateTypeQualifier = updatedMap}
-
-findTypeKindSize :: TVar -> TypeU -> Int
-findTypeKindSize v = head . catMaybes . f
-  where
-    f (AppU (VarU v') ts)
-      | v == v' = [Just (1 + (length ts))]
-      | otherwise = concat $ map f ts
-    f (AppU t ts) = concat $ map f (t : ts)
-    f (VarU v')
-      | v == v' = [Just 1]
-      | otherwise = [Nothing]
-    f (ExistU v' (ts1, _) (map snd . fst -> ts2))
-      | v == v' = [Just (1 + (length ts1))]
-      | otherwise = concat $ map f (ts1 <> ts2)
-    f (ForallU _ t) = f t
-    f (FunU ts t) = concat $ map f (t : ts)
-    f (NamU _ v' ts1 (map snd -> ts2))
-      | v == v' = [Just (1 + (length ts1))]
-      | otherwise = concat $ map f (ts1 <> ts2)
-    f (EffectU _ t) = f t
-    f (OptionalU t) = f t
-    f (NatLitU _) = [Nothing]
-    f (NatAddU a b) = f a ++ f b
-    f (NatMulU a b) = f a ++ f b
-    f (NatSubU a b) = f a ++ f b
     f (NatDivU a b) = f a ++ f b
 
 -- TypeU --> Type
@@ -962,7 +888,6 @@ checkE i g0 e0@(LamS vs body) t@(FunU as b)
       (g', e') <- expand i (length as - length vs) g0 e0
       checkE' i g' e' t
 checkE i g1 e1 (ForallU v a) = do
-  recordParameter i v a
   checkE' i (g1 +> v) e1 (substitute v a)
 checkE i g (IfS cond thenE elseE) t = do
   (g1, condType, cond') <- synthG g cond

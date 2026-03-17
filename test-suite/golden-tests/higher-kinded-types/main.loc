@@ -5,18 +5,18 @@ type Py => Str = "str"
 type Py => List a = "list" a
 
 source Py from "foo.py" ("morloc_map" as listMap, "morloc_map" as functorMap)
-listMap a b :: (a -> b) -> [a] -> [b]
-functorMap a b f :: (a -> b) -> f a -> f b
+listMap :: (a -> b) -> [a] -> [b]
+functorMap :: (a -> b) -> f a -> f b
 
 class TestFunctor f where
-  classFMap a b f :: (a -> b) -> f a -> f b
+  classFMap :: (a -> b) -> f a -> f b
 
 instance TestFunctor List where
   source Py from "foo.py" ("morloc_map" as classFMap)
 
 
 class TestList f where
-  classMap a b f :: (a -> b) -> f a -> f b
+  classMap :: (a -> b) -> f a -> f b
 
 instance TestList List where
   source Py from "foo.py" ("morloc_map" as classMap)

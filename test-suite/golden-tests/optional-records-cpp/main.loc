@@ -17,7 +17,7 @@ record Cpp => Person = "person_t"
 makePerson :: Str -> ?Int -> Person
 getName :: Person -> Str
 getAge :: Person -> ?Int
-toNull a :: a -> ?a
+toNull :: a -> ?a
 findPerson :: Str -> [Person] -> ?Person
 
 source Cpp from "foo.hpp" ("makePerson", "getName", "getAge", "toNull", "findPerson")
