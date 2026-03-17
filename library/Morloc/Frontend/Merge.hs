@@ -75,8 +75,8 @@ encoded in this function that should be vary carefully considered.
  * Should general type merging even be possible?
 -}
 mergeEType :: EType -> EType -> MorlocMonad EType
-mergeEType (EType t1 cs1 edoc1) (EType t2 cs2 edoc2) =
-  EType <$> mergeTypeUs t1 t2 <*> pure (cs1 <> cs2) <*> pure edocs12
+mergeEType (EType t1 cs1 edoc1 labels1) (EType t2 cs2 edoc2 _labels2) =
+  EType <$> mergeTypeUs t1 t2 <*> pure (cs1 <> cs2) <*> pure edocs12 <*> pure labels1
   where
     edocs12 = mergeEdocs edoc1 edoc2
 

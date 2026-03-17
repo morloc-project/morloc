@@ -42,7 +42,7 @@ typecheck = mapM run
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaNatSubs = Map.empty}
+      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaNatSubs = Map.empty, gammaIntVals = Map.empty}
       (g1, _, e1) <- synthG g0 e0
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g1:"
@@ -117,10 +117,10 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       let gtEval = case TE.evaluateType scope gt of
             Right et -> et
             Left _ -> gt
-          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty
+          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty
           isCompatible t = isSubtypeOf2 scope t gtEval
                         || isJust (tryCoerce scope t gtEval emptyGamma)
-          rssSubtypes = [x | x@(EType t _ _, _) <- rss, isCompatible t]
+          rssSubtypes = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
 
 
       -- find the most specific instance at the general level, this does not
@@ -140,7 +140,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       --
       --  They will be separated later when concrete types are considered. From
       --  the general perspective, the evaluate to being equal.
-      (g2, es1) <- case mostSpecific [t | (EType t _ _, _) <- rssSubtypes] of
+      (g2, es1) <- case mostSpecific [t | (EType t _ _ _, _) <- rssSubtypes] of
         -- if there are no suitable instances, die
         [] ->
           throwTypeError genIndex $
@@ -356,7 +356,11 @@ synthE i g0 (AppS f xs0) = do
   -- synthesize the type of the function
   (g1, funType0, funExpr0) <- synthG g0 f
 
-  etaExpandSynthE i g1 funType0 funExpr0 f xs0
+  -- Resolve nat labels: if the function has labeled nat params (m:Int syntax)
+  -- and corresponding args are int literals, inject NatVarU solutions into gamma
+  let g1' = resolveNatLabels f funType0 xs0 g1
+
+  etaExpandSynthE i g1' funType0 funExpr0 f xs0
 
 -- -->I==>
 -- Synthesize lambda expressions. The key optimization here is to avoid
@@ -571,7 +575,11 @@ synthE _ g (CallS v) = do
 synthE _ g (LetS v e1 e2) = do
   (g1, t1, e1') <- synthG g e1
   let g2 = g1 ++> [AnnG v t1]
-  (g3, t2, e2') <- synthG g2 e2
+      -- Track known integer values for nat label resolution
+      g2' = case tryExtractInt g2 e1' of
+        Just n -> g2 { gammaIntVals = Map.insert v n (gammaIntVals g2) }
+        Nothing -> g2
+  (g3, t2, e2') <- synthG g2' e2
   return (g3, t2, LetS v e1' e2')
 synthE i g (IfS cond thenE elseE) = do
   (g1, condType, cond') <- synthG g cond
@@ -1112,6 +1120,48 @@ application' i g es t = do
   seeGamma g'
   seeType t'
   return r
+
+-- | Try to extract an integer value from a post-synthesis expression.
+-- Handles literals and references to let-bound variables with known int values.
+tryExtractInt :: Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> Maybe Integer
+tryExtractInt _ (AnnoS _ _ (IntS n)) = Just n
+tryExtractInt g (AnnoS _ _ (LetBndS v)) = Map.lookup v (gammaIntVals g)
+tryExtractInt g (AnnoS _ _ (BndS v)) = Map.lookup v (gammaIntVals g)
+tryExtractInt _ _ = Nothing
+
+-- | Try to extract an integer value from a pre-synthesis expression.
+-- Handles literals and references to let-bound variables with known int values.
+tryExtractIntPre :: Gamma -> AnnoS Int ManyPoly Int -> Maybe Integer
+tryExtractIntPre _ (AnnoS _ _ (IntS n)) = Just n
+tryExtractIntPre g (AnnoS _ _ (LetBndS v)) = Map.lookup v (gammaIntVals g)
+tryExtractIntPre g (AnnoS _ _ (BndS v)) = Map.lookup v (gammaIntVals g)
+tryExtractIntPre _ _ = Nothing
+
+-- | Resolve nat labels from int literal arguments.
+-- When a function has labeled nat params (e.g., m:Int -> Tensor1 m Real)
+-- and the corresponding arguments are int literals or let-bound ints,
+-- inject NatVarU solutions into gamma so the return type gets concrete dimensions.
+resolveNatLabels ::
+  AnnoS Int ManyPoly Int ->  -- the function expression (pre-synthesis)
+  TypeU ->                    -- the synthesized (renamed) function type
+  [AnnoS Int ManyPoly Int] -> -- the arguments
+  Gamma -> Gamma
+resolveNatLabels (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType args g
+  | not (Map.null labels) =
+    let origNvs = nub (collectNatVarNames (etype et))
+        renamedNvs = nub (collectNatVarNames funType)
+        renMap = Map.fromList (zip origNvs renamedNvs)
+        solutions = Map.fromList
+          [ (renamedVar, NatLitU n)
+          | (origVar, argIdx) <- Map.toList labels
+          , Just renamedVar <- [Map.lookup origVar renMap]
+          , argIdx < length args
+          , Just n <- [tryExtractIntPre g (args !! argIdx)]
+          ]
+    in g { gammaNatSubs = Map.union solutions (gammaNatSubs g) }
+  where
+    labels = enatLabels et
+resolveNatLabels _ _ _ g = g
 
 peakSExpr :: ExprS Int ManyPoly Int -> MDoc
 peakSExpr UniS = "UniS"

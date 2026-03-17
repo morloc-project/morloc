@@ -238,6 +238,8 @@ data Gamma = Gamma
   , gammaDeferred :: [(TypeU, TypeU)]
   -- | Solutions for NatVarU variables from nat constraint solving
   , gammaNatSubs :: Map TVar TypeU
+  -- | Known integer values for let-bound variables (for nat label resolution)
+  , gammaIntVals :: Map EVar Integer
   }
 
 ---- Data files and system

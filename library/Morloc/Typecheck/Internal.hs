@@ -57,6 +57,9 @@ module Morloc.Typecheck.Internal
   , isSubtypeOf2
   , recheckDeferred
 
+    -- * nat label helpers
+  , collectNatVarNames
+
     -- * debugging
   , seeGamma
   -- debugging
@@ -139,6 +142,7 @@ instance Applicable TypeU where
   apply g (NatMulU a b) = NatMulU (apply g a) (apply g b)
   apply g (NatSubU a b) = NatSubU (apply g a) (apply g b)
   apply g (NatDivU a b) = NatDivU (apply g a) (apply g b)
+  apply g (LabeledU n t) = LabeledU n (apply g t)
 
 instance Applicable EType where
   apply g e =
@@ -198,7 +202,7 @@ slotSpacing = 256
 (++>) g xs = foldl' (+>) g xs
 
 isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
-isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty) of
+isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty) of
   (Left _) -> False
   (Right _) -> True
 
@@ -932,6 +936,7 @@ renameNatVars m = go
     go (NatMulU a b) = NatMulU (go a) (go b)
     go (NatSubU a b) = NatSubU (go a) (go b)
     go (NatDivU a b) = NatDivU (go a) (go b)
+    go (LabeledU n t) = LabeledU n (go t)
 
 {- | Rename all generic type variables (ForallU-bound and ExistU) to clean
 letters from a lazy pool: a, b, c, ..., z, a1, b1, ..., z1, a2, ...
@@ -966,6 +971,7 @@ simplifyNats = go
     go (EffectU e t) = EffectU e (go t)
     go (OptionalU t) = OptionalU (go t)
     go t@(NatVarU _) = t
+    go (LabeledU n t) = LabeledU n (go t)
     go t = t
 
     trySimplify nat = case typeUToNatExpr nat of
@@ -996,6 +1002,7 @@ collectExistVars = go
     go (NatMulU a b) = go a ++ go b
     go (NatSubU a b) = go a ++ go b
     go (NatDivU a b) = go a ++ go b
+    go (LabeledU _ t) = go t
 
 -- | Collect NatVarU variable names from a type (for renaming)
 collectNatVarNames :: TypeU -> [TVar]
@@ -1015,6 +1022,7 @@ collectNatVarNames = go
     go (NatMulU a b) = go a ++ go b
     go (NatSubU a b) = go a ++ go b
     go (NatDivU a b) = go a ++ go b
+    go (LabeledU _ t) = go t
 
 collectFixedNames :: Set.Set TVar -> TypeU -> Set.Set Text
 collectFixedNames generics = go
@@ -1036,6 +1044,7 @@ collectFixedNames generics = go
     go (NatMulU a b) = Set.union (go a) (go b)
     go (NatSubU a b) = Set.union (go a) (go b)
     go (NatDivU a b) = Set.union (go a) (go b)
+    go (LabeledU _ t) = go t
 
 applyVarRenaming :: Map.Map TVar TVar -> TypeU -> TypeU
 applyVarRenaming m = go
@@ -1056,6 +1065,7 @@ applyVarRenaming m = go
     go (NatMulU a b) = NatMulU (go a) (go b)
     go (NatSubU a b) = NatSubU (go a) (go b)
     go (NatDivU a b) = NatDivU (go a) (go b)
+    go (LabeledU n t) = LabeledU n (go t)
 
 prettyTypeU :: TypeU -> MDoc
 prettyTypeU = pretty . cleanTypeName

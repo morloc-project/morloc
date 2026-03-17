@@ -141,6 +141,7 @@ weave gscope = w
     w (NatSubU _ _) _ = return $ NatLitF 0  -- Nat arithmetic erased in concrete type
     w (NatDivU _ _) _ = return $ NatLitF 0  -- Nat arithmetic erased in concrete type
     w (NatVarU _) _ = return $ NatLitF 0  -- Nat variable erased in concrete type
+    w (LabeledU _ t1) t2 = w t1 t2
     w (ForallU v (VarU v')) _ | v == v' = return $ NatLitF 0  -- Unresolved variable (UnkT pattern)
     w t1 t2 = case T.evaluateStep gscope t1 of
       Nothing -> Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <> "\n  t2:" <> pretty t2

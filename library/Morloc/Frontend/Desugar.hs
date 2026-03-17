@@ -215,6 +215,43 @@ forallWrap :: [TVar] -> TypeU -> TypeU
 forallWrap [] t = t
 forallWrap (v : vs) t = ForallU v (forallWrap vs t)
 
+-- | Extract LabeledU wrappers from function argument types.
+-- Returns a map from nat var name to argument position index,
+-- and the type with all LabeledU stripped.
+extractLabels :: TypeU -> (Map.Map TVar Int, TypeU)
+extractLabels = go
+  where
+    go (ForallU v t) = let (labels, t') = go t in (labels, ForallU v t')
+    go (FunU args ret) =
+      let (labels, args') = extractFromArgs 0 args
+          ret' = stripLabels ret
+       in (labels, FunU args' ret')
+    go t = (Map.empty, stripLabels t)
+
+    extractFromArgs :: Int -> [TypeU] -> (Map.Map TVar Int, [TypeU])
+    extractFromArgs _ [] = (Map.empty, [])
+    extractFromArgs idx (LabeledU v inner : rest) =
+      let (labels, rest') = extractFromArgs (idx + 1) rest
+       in (Map.insert v idx labels, stripLabels inner : rest')
+    extractFromArgs idx (t : rest) =
+      let (labels, rest') = extractFromArgs (idx + 1) rest
+       in (labels, stripLabels t : rest')
+
+    stripLabels :: TypeU -> TypeU
+    stripLabels (LabeledU _ t) = stripLabels t
+    stripLabels (ForallU v t) = ForallU v (stripLabels t)
+    stripLabels (FunU ts t) = FunU (map stripLabels ts) (stripLabels t)
+    stripLabels (AppU t ts) = AppU (stripLabels t) (map stripLabels ts)
+    stripLabels (NamU o v ps rs) = NamU o v (map stripLabels ps) [(k, stripLabels t) | (k, t) <- rs]
+    stripLabels (EffectU effs t) = EffectU effs (stripLabels t)
+    stripLabels (OptionalU t) = OptionalU (stripLabels t)
+    stripLabels (NatAddU a b) = NatAddU (stripLabels a) (stripLabels b)
+    stripLabels (NatMulU a b) = NatMulU (stripLabels a) (stripLabels b)
+    stripLabels (NatSubU a b) = NatSubU (stripLabels a) (stripLabels b)
+    stripLabels (NatDivU a b) = NatDivU (stripLabels a) (stripLabels b)
+    stripLabels (ExistU v (ps, pc) (rs, rc)) = ExistU v (map stripLabels ps, pc) (map (second stripLabels) rs, rc)
+    stripLabels t = t
+
 quantifyType :: TypeU -> TypeU
 quantifyType t =
   let natVars = collectNatVars t
@@ -239,6 +276,7 @@ quantifyType t =
     collectGenVars (NatMulU a b) = collectGenVars a ++ collectGenVars b
     collectGenVars (NatSubU a b) = collectGenVars a ++ collectGenVars b
     collectGenVars (NatDivU a b) = collectGenVars a ++ collectGenVars b
+    collectGenVars (LabeledU _ inner) = collectGenVars inner
     collectGenVars _ = []
 
     -- Collect variables that appear in nat-kinded positions:
@@ -262,6 +300,7 @@ quantifyType t =
         go _ (NatMulU a b) = go True a <> go True b
         go _ (NatSubU a b) = go True a <> go True b
         go _ (NatDivU a b) = go True a <> go True b
+        go inNat (LabeledU _ inner) = go inNat inner
         go _ _ = Set.empty
 
 -- | Promote VarU to NatVarU for variables identified as nat-kinded
@@ -284,6 +323,7 @@ promoteNatVars natVars = go
     go (NatMulU a b) = NatMulU (go a) (go b)
     go (NatSubU a b) = NatSubU (go a) (go b)
     go (NatDivU a b) = NatDivU (go a) (go b)
+    go (LabeledU n t) = LabeledU n (go t)
 
 parseLang :: Located -> D Lang
 parseLang tok = do
@@ -662,7 +702,8 @@ desugarTopLevel (Loc sp (CSigE name sigType)) = do
   (cs, argDocs, t) <- desugarSigType (startPos sp) sigType
   let t' = quantifyType t
       doc = ArgDocSig cmdDoc (init argDocs) (last argDocs)
-      et = EType t' (Set.fromList cs) doc
+      (labels, t'') = extractLabels t'
+      et = EType t'' (Set.fromList cs) doc labels
   e <- freshExprSpan sp (SigE (Signature name Nothing et))
   return [e]
 desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
@@ -828,8 +869,9 @@ desugarSigItem :: CstSigItem -> D Signature
 desugarSigItem (CstSigItem name sigType) = do
   (cs, argDocs, t) <- desugarSigType (Pos 0 0 "") sigType
   let wrappedT = quantifyType t
+      (labels, wrappedT') = extractLabels wrappedT
       doc = ArgDocSig defaultValue (init argDocs) (last argDocs)
-      et = EType wrappedT (Set.fromList cs) doc
+      et = EType wrappedT' (Set.fromList cs) doc labels
   return (Signature name Nothing et)
 
 --------------------------------------------------------------------

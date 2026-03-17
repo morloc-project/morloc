@@ -95,7 +95,7 @@ findSignatureTypeTerms = unique . f
   where
     f :: ExprI -> [TVar]
     f (ExprI _ (ModE _ es)) = concatMap f es
-    f (ExprI _ (SigE (Signature _ _ (EType t _ _)))) = findTypeTerms t
+    f (ExprI _ (SigE (Signature _ _ (EType t _ _ _)))) = findTypeTerms t
     f (ExprI _ (AssE _ _ es)) = concatMap f es
     f _ = []
 
@@ -117,6 +117,7 @@ findTypeTerms (NatAddU a b) = findTypeTerms a <> findTypeTerms b
 findTypeTerms (NatMulU a b) = findTypeTerms a <> findTypeTerms b
 findTypeTerms (NatSubU a b) = findTypeTerms a <> findTypeTerms b
 findTypeTerms (NatDivU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms (LabeledU _ t) = findTypeTerms t
 
 -- | Build the fixity map from top-level fixity declarations.
 findFixityMap :: ExprI -> MorlocMonad (Map.Map EVar (Associativity, Int))
@@ -224,8 +225,8 @@ getIndices (ExprI i _) = [i]
 mapTypeInExprI :: (Monad m) => (TypeU -> TypeU) -> ExprI -> m ExprI
 mapTypeInExprI f = go
   where
-    go (ExprI i (SigE (Signature v l (EType t cs doc)))) =
-      return $ ExprI i (SigE (Signature v l (EType (f t) cs doc)))
+    go (ExprI i (SigE (Signature v l (EType t cs doc labels)))) =
+      return $ ExprI i (SigE (Signature v l (EType (f t) cs doc labels)))
     go (ExprI i (AnnE e t)) = do
       e' <- go e
       return $ ExprI i (AnnE e' (f t))

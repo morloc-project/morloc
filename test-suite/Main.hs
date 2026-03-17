@@ -34,6 +34,7 @@ main = do
       , typeclassTests
       , natErrorTests
       , natArithTests
+      , natLabelTests
       , -- -- These tests pass locally and when I run the same container that I
         -- -- use in github actions. Yet these tests freeze in an infinite loop
         -- -- with no STDERR output on github. I have no idea why. But for now I'm
@@ -90,6 +91,8 @@ main = do
       , golden "claude-test-18" "claude-test-18"
       , golden "claude-test-19" "claude-test-19"
       , golden "claude-test-20" "claude-test-20"
+      , golden "tensor-nat-labeled" "tensor-nat-labeled"
+      , golden "tensor-nat-basic" "tensor-nat-basic"
       , golden "slurm-label-codegen" "slurm-label-codegen"
       , golden "let-crosslang" "let-crosslang"
       , golden "functional-data-1" "functional-data-1"
@@ -488,13 +491,7 @@ main = do
       , golden "arrow-immutable-cp" "arrow-immutable-cp"
       , golden "arrow-immutable-pc" "arrow-immutable-pc"
       , -- dense tensor tests
-        golden "tensor-nexus-cpp" "tensor-nexus-cpp"
-      , golden "tensor-table-cpp" "tensor-table-cpp"
-      , golden "tensor-cp" "tensor-cp"
-      , golden "tensor-pc" "tensor-pc"
-      , golden "tensor-pr" "tensor-pr"
-      , golden "tensor-rp" "tensor-rp"
-      , golden "tensor-comprehensive-cpp" "tensor-comprehensive-cpp"
+        golden "tensor-comprehensive-cpp" "tensor-comprehensive-cpp"
       , golden "tensor-comprehensive-cross" "tensor-comprehensive-cross"
       , golden "tensor-dimensions" "tensor-dimensions"
       , -- nat-parameterized type tests

@@ -371,7 +371,7 @@ non_string_atom :: { TypeU }
   | '[' type ']'              { BT.listU $2 }
   | '?' non_string_atom       { OptionalU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
-  | LOWER ':' non_fun_type   { $3 }
+  | LOWER ':' non_fun_type   { LabeledU (TV (getName $1)) $3 }
   | LOWER                     { VarU (TV (getName $1)) }
   | INTEGER                   { NatLitU (getInt $1) }
 
@@ -770,7 +770,7 @@ pos_atom_type :: { (Pos, TypeU) }
   | '[' type ']'                { (locPos $1, BT.listU $2) }
   | '?' pos_atom_type            { (locPos $1, OptionalU (snd $2)) }
   | UPPER                       { (locPos $1, VarU (TV (getName $1))) }
-  | LOWER ':' non_fun_type      { (locPos $1, $3) }
+  | LOWER ':' non_fun_type      { (locPos $1, LabeledU (TV (getName $1)) $3) }
   | LOWER                       { (locPos $1, VarU (TV (getName $1))) }
   | STRING                      { (locPos $1, VarU (TV (getString $1))) }
   | INTEGER                     { (locPos $1, NatLitU (getInt $1)) }

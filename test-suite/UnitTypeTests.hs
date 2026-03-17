@@ -27,6 +27,7 @@ module UnitTypeTests
   , typeclassTests
   , natErrorTests
   , natArithTests
+  , natLabelTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -59,6 +60,19 @@ runFront code = do
       config
       defaultValue
       (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
+  return x
+
+-- | Like runFront but without type alias evaluation, so nat dimensions are preserved.
+runFrontRaw :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
+runFrontRaw code = do
+  config <- emptyConfig
+  ((x, _), _) <-
+    MM.runMorlocMonad
+      Nothing
+      0
+      config
+      defaultValue
+      (typecheckFrontend Nothing (Code code))
   return x
 
 runMiddle ::
@@ -117,6 +131,7 @@ renameExistentials = snd . f (0 :: Int, Map.empty)
     f s (ForallU v t) =
       let (s', t') = f s t
        in (s', ForallU v t')
+    f s t@(NatVarU _) = (s, t)
     f s (FunU ts t) =
       let (s', ts') = statefulMap f s ts
           (s'', t') = f s' t
@@ -134,18 +149,42 @@ renameExistentials = snd . f (0 :: Int, Map.empty)
     f s (OptionalU t) =
       let (s', t') = f s t
        in (s', OptionalU t')
+    f s t@(NatLitU _) = (s, t)
+    f s (NatAddU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', NatAddU a' b')
+    f s (NatMulU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', NatMulU a' b')
+    f s (NatSubU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', NatSubU a' b')
+    f s (NatDivU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', NatDivU a' b')
+    f s (LabeledU n t) = let (s', t') = f s t in (s', LabeledU n t')
 
 closeExistentials :: TypeU -> TypeU
 closeExistentials = f
   where
     f (ExistU v (ts, _) (rs, _)) = ExistU v (map f ts, Closed) (map (second f) rs, Closed)
     f t@(VarU _) = t
+    f t@(NatVarU _) = t
     f (ForallU v t) = ForallU v (f t)
     f (FunU ts t) = FunU (map f ts) (f t)
     f (AppU t ts) = AppU (f t) (map f ts)
     f (NamU o v ts rs) = NamU o v (map f ts) (map (second f) rs)
     f (EffectU effs t) = EffectU effs (f t)
     f (OptionalU t) = OptionalU (f t)
+    f t@(NatLitU _) = t
+    f (NatAddU a b) = NatAddU (f a) (f b)
+    f (NatMulU a b) = NatMulU (f a) (f b)
+    f (NatSubU a b) = NatSubU (f a) (f b)
+    f (NatDivU a b) = NatDivU (f a) (f b)
+    f (LabeledU n t) = LabeledU n (f t)
+
+-- | Assert the general type before alias evaluation (preserves nat dimensions).
+assertRawType :: String -> MT.Text -> TypeU -> TestTree
+assertRawType msg code t = testCase msg $ do
+  result <- runFrontRaw code
+  case result of
+    (Right [x]) -> assertEqual "" (closeExistentials . MTI.cleanTypeName $ t) (closeExistentials . MTI.cleanTypeName . renameExistentials . gtypeof $ x)
+    (Right _) -> error "Expected exactly one export from main for assertRawType"
+    (Left e) ->
+      error $
+        "The following error was raised: " <> show e <> "\nin:\n" <> show code
 
 assertSubtypeGamma :: String -> [GammaIndex] -> TypeU -> TypeU -> [GammaIndex] -> TestTree
 assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do
@@ -170,6 +209,8 @@ listToGamma gs =
     , gammaContext = ctx
     , gammaExist = existMap
     , gammaSolved = Map.empty
+    , gammaDeferred = []
+    , gammaNatSubs = Map.empty
     }
 
 exprTestBad :: String -> MT.Text -> TestTree
@@ -236,7 +277,7 @@ fun [t] = FunU [] t
 fun ts = FunU (init ts) (last ts)
 
 forallu :: [MT.Text] -> TypeU -> TypeU
-forallu ss t = foldr (ForallU . TV) t ss
+forallu ss t = foldr (\s -> ForallU (TV s)) t ss
 
 exist :: MT.Text -> TypeU
 exist v = ExistU (TV v) ([], Open) ([], Open)
@@ -3083,4 +3124,185 @@ natArithTests =
       x :: SizedList 5 Int
       x = split a
         |]
+    ]
+
+natLabelTests :: TestTree
+natLabelTests =
+  testGroup
+    "nat labeled params (m:Int syntax)"
+    [ -- === Positive: literal int args resolve nat vars ===
+      assertRawType
+        "labeled literal resolves dimension: makeVec 5 :: Tensor1 5 Real"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = makeVec 5
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
+    , assertRawType
+        "labeled literal zero dimension: makeVec 0 :: Tensor1 0 Real"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = makeVec 0
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 0, VarU (TV "Real")])
+    , assertRawType
+        "two labeled params resolve: makeMat 3 4 :: Tensor2 3 4 Real"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      makeMat :: m:Int -> n:Int -> Tensor2 m n Real
+      x = makeMat 3 4
+        |]
+        (AppU (VarU (TV "Tensor2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
+    , assertRawType
+        "labeled dims flow through generic op: id_ (makeVec 7) :: Tensor1 7 Real"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      id_ :: Tensor1 n Real -> Tensor1 n Real
+      x = id_ (makeVec 7)
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 7, VarU (TV "Real")])
+    , assertRawType
+        "labeled dims with nat arithmetic: conv output dims computed"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      type Tensor3 (d1 :: Nat) (d2 :: Nat) (d3 :: Nat) a
+      makeImg :: h:Int -> w:Int -> Tensor2 h w Real
+      makeK :: k:Int -> fh:Int -> fw:Int -> Tensor3 k fh fw Real
+      type Tensor1 (d :: Nat) a = [a]
+      makeB :: k:Int -> Tensor1 k Real
+      conv :: Tensor2 h w Real -> Tensor3 k fh fw Real -> Tensor1 k Real -> Tensor3 k (h - fh + 1) (w - fw + 1) Real
+      x = conv (makeImg 5 5) (makeK 2 3 3) (makeB 2)
+        |]
+        (AppU (VarU (TV "Tensor3")) [NatLitU 2, NatLitU 3, NatLitU 3, VarU (TV "Real")])
+    , assertRawType
+        "labeled + flatten nat arithmetic: 2*3*3 = 18"
+        [r|
+      module main (x)
+      type Tensor3 (d1 :: Nat) (d2 :: Nat) (d3 :: Nat) a
+      type Tensor1 (d :: Nat) a = [a]
+      makeT :: a:Int -> b:Int -> c:Int -> Tensor3 a b c Real
+      flatten :: Tensor3 a b c Real -> Tensor1 (a * b * c) Real
+      x = flatten (makeT 2 3 3)
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 18, VarU (TV "Real")])
+    , assertRawType
+        "mixed labeled and unlabeled args"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      makeT :: m:Int -> n:Int -> Tensor2 m n Real
+      scale :: Real -> Tensor2 m n Real -> Tensor2 m n Real
+      x = scale 2.0 (makeT 3 4)
+        |]
+        (AppU (VarU (TV "Tensor2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
+    , assertRawType
+        "same label var used in two positions (diagonal)"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      eye :: n:Int -> Tensor2 n n Real
+      x = eye 4
+        |]
+        (AppU (VarU (TV "Tensor2")) [NatLitU 4, NatLitU 4, VarU (TV "Real")])
+
+    -- === Positive: let-bound integers resolve nat labels ===
+    , assertRawType
+        "let-bound int resolves label: let n = 5 in makeVec n"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = let n = 5 in makeVec n
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
+    , assertRawType
+        "chained let-bound: let a = 7 in let b = a in makeVec b"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = let a = 7 in let b = a in makeVec b
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 7, VarU (TV "Real")])
+    , assertRawType
+        "multiple let-bound dims: let m=3, n=4 in makeMat m n"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      makeMat :: m:Int -> n:Int -> Tensor2 m n Real
+      x = let m = 3 in let n = 4 in makeMat m n
+        |]
+        (AppU (VarU (TV "Tensor2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
+
+    -- === Negative: dimension mismatches caught despite labels ===
+    , expectError
+        "labeled dim mismatch: add (makeT 3 4) (makeT 3 5) fails"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      makeT :: m:Int -> n:Int -> Tensor2 m n Real
+      add :: Tensor2 m n Real -> Tensor2 m n Real -> Tensor2 m n Real
+      x = add (makeT 3 4) (makeT 3 5)
+        |]
+    , expectError
+        "labeled dim mismatch: dot product length mismatch"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      dot :: Tensor1 n Real -> Tensor1 n Real -> Real
+      x = dot (makeVec 3) (makeVec 5)
+        |]
+    , expectError
+        "labeled dim mismatch through arithmetic: conv wrong kernel size"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      type Tensor3 (d1 :: Nat) (d2 :: Nat) (d3 :: Nat) a
+      type Tensor1 (d :: Nat) a = [a]
+      makeImg :: h:Int -> w:Int -> Tensor2 h w Real
+      makeK :: k:Int -> fh:Int -> fw:Int -> Tensor3 k fh fw Real
+      makeB :: k:Int -> Tensor1 k Real
+      conv :: Tensor2 h w Real -> Tensor3 k fh fw Real -> Tensor1 k Real -> Tensor3 k (h - fh + 1) (w - fw + 1) Real
+      x :: Tensor3 2 3 4 Real
+      x = conv (makeImg 5 5) (makeK 2 3 3) (makeB 2)
+        |]
+    , expectError
+        "annotated return type contradicts labeled resolution"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x :: Tensor1 99 Real
+      x = makeVec 5
+        |]
+
+    -- === Interesting edge cases ===
+    , assertRawType
+        "no labels: plain nat vars remain generic"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      id_ :: Tensor1 n Real -> Tensor1 n Real
+      a :: Tensor1 5 Real
+      x = id_ a
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
+    , assertRawType
+        "label on non-first param position"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeFrom :: Real -> n:Int -> Tensor1 n Real
+      x = makeFrom 1.0 10
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 10, VarU (TV "Real")])
     ]

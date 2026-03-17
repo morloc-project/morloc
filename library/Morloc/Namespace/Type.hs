@@ -176,6 +176,7 @@ data TypeU
   | NatMulU TypeU TypeU
   | NatSubU TypeU TypeU
   | NatDivU TypeU TypeU
+  | LabeledU TVar TypeU -- ^ Transient: m:Int -> LabeledU (TV "m") Int, stripped in desugar
   deriving (Show, Ord, Eq)
 
 {- | Extended Type that may represent a language specific type as well as sets
@@ -186,6 +187,7 @@ data EType
   { etype :: TypeU
   , econs :: Set.Set Constraint
   , edocs :: ArgDoc
+  , enatLabels :: Map TVar Int -- ^ Nat var name -> argument position index (from m:Int syntax)
   }
   deriving (Show, Eq, Ord)
 
@@ -324,6 +326,7 @@ instance Typelike TypeU where
   typeOf (NatMulU a b) = NatMulT (typeOf a) (typeOf b)
   typeOf (NatSubU a b) = NatSubT (typeOf a) (typeOf b)
   typeOf (NatDivU a b) = NatDivT (typeOf a) (typeOf b)
+  typeOf (LabeledU _ t) = typeOf t
 
   free v@(VarU _) = Set.singleton v
   free (NatVarU _) = Set.empty
@@ -340,6 +343,7 @@ instance Typelike TypeU where
   free (NatMulU a b) = Set.union (free a) (free b)
   free (NatSubU a b) = Set.union (free a) (free b)
   free (NatDivU a b) = Set.union (free a) (free b)
+  free (LabeledU _ t) = free t
 
   substituteTVar v (ForallU q r) t =
     if Set.member (VarU q) (free t)
@@ -370,6 +374,7 @@ instance Typelike TypeU where
       sub (NatMulU a b) = NatMulU (sub a) (sub b)
       sub (NatSubU a b) = NatSubU (sub a) (sub b)
       sub (NatDivU a b) = NatDivU (sub a) (sub b)
+      sub (LabeledU n t) = LabeledU n (sub t)
 
   normalizeType (FunU ts1 (FunU ts2 ft)) = normalizeType $ FunU (ts1 <> ts2) ft
   normalizeType (AppU t ts) = AppU (normalizeType t) (map normalizeType ts)
@@ -383,6 +388,7 @@ instance Typelike TypeU where
   normalizeType (NatSubU a b) = NatSubU (normalizeType a) (normalizeType b)
   normalizeType (NatDivU a b) = NatDivU (normalizeType a) (normalizeType b)
   normalizeType t@(NatVarU _) = t
+  normalizeType (LabeledU n t) = LabeledU n (normalizeType t)
   normalizeType t = t
 
 ----- Partial order logic
@@ -415,6 +421,8 @@ instance P.PartialOrd TypeU where
   (<=) (NatMulU a1 b1) (NatMulU a2 b2) = a1 P.<= a2 && b1 P.<= b2
   (<=) (NatSubU a1 b1) (NatSubU a2 b2) = a1 P.<= a2 && b1 P.<= b2
   (<=) (NatDivU a1 b1) (NatDivU a2 b2) = a1 P.<= a2 && b1 P.<= b2
+  (<=) (LabeledU _ t1) t2 = t1 P.<= t2
+  (<=) t1 (LabeledU _ t2) = t1 P.<= t2
   (<=) _ _ = False
 
   (==) (ForallU v1 t1) (ForallU v2 t2) =
@@ -457,6 +465,8 @@ findFirst v = f
     f (NatMulU a1 b1) (NatMulU a2 b2) = firstOf (f a1 a2) (f b1 b2)
     f (NatSubU a1 b1) (NatSubU a2 b2) = firstOf (f a1 a2) (f b1 b2)
     f (NatDivU a1 b1) (NatDivU a2 b2) = firstOf (f a1 a2) (f b1 b2)
+    f (LabeledU _ t1) t2 = f t1 t2
+    f t1 (LabeledU _ t2) = f t1 t2
     f _ _ = Nothing
 
     firstOf :: Maybe a -> Maybe a -> Maybe a
@@ -501,6 +511,7 @@ extractKey (NatAddU _ _) = TV "Nat"
 extractKey (NatMulU _ _) = TV "Nat"
 extractKey (NatSubU _ _) = TV "Nat"
 extractKey (NatDivU _ _) = TV "Nat"
+extractKey (LabeledU _ t) = extractKey t
 extractKey t = error $ "Cannot currently handle functional type imports: " <> show t
 
 type2typeu :: Type -> TypeU
@@ -532,6 +543,7 @@ unresolvedType2type (NatAddU a b) = NatAddT (unresolvedType2type a) (unresolvedT
 unresolvedType2type (NatMulU a b) = NatMulT (unresolvedType2type a) (unresolvedType2type b)
 unresolvedType2type (NatSubU a b) = NatSubT (unresolvedType2type a) (unresolvedType2type b)
 unresolvedType2type (NatDivU a b) = NatDivT (unresolvedType2type a) (unresolvedType2type b)
+unresolvedType2type (LabeledU _ t) = unresolvedType2type t
 
 -- | get a fresh variable name that is not used in t1 or t2
 newVariable :: TypeU -> TypeU -> TVar
@@ -556,6 +568,7 @@ newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
     allVars (NatMulU a b) = Set.union (allVars a) (allVars b)
     allVars (NatSubU a b) = Set.union (allVars a) (allVars b)
     allVars (NatDivU a b) = Set.union (allVars a) (allVars b)
+    allVars (LabeledU _ t) = allVars t
     allVars t = free t
 
 {- | Check whether a ground type contains any unknown (unresolved) type variables.
@@ -637,6 +650,7 @@ instance Pretty TypeU where
       f _ (NatMulU a b) = "(" <> f True a <+> "*" <+> f True b <> ")"
       f _ (NatSubU a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
       f _ (NatDivU a b) = "(" <> f True a <+> "/" <+> f True b <> ")"
+      f _ (LabeledU (TV n) t) = pretty n <> ":" <> f False t
       f False t = parens (f True t)
       f _ (ExistU v (ts, _) (rs, _)) =
         angles $
@@ -654,7 +668,7 @@ instance Pretty TypeU where
           (vsep [pretty k <+> "::" <+> f True x | (k, x) <- rs])
 
 instance Pretty EType where
-  pretty (EType t (Set.toList -> cs) _) = case cs of
+  pretty (EType t (Set.toList -> cs) _ _) = case cs of
     [] -> pretty t
     [c] -> pretty c <+> "=>" <+> pretty t
     _ -> tupled (map pretty cs) <+> "=>" <+> pretty t
