@@ -116,7 +116,7 @@ expanded further during type resolution).
 type Scope =
   Map
     TVar
-    [ ( [Either TVar TypeU] -- type parameters (generic for left, specific for right)
+    [ ( [Either (TVar, Kind) TypeU] -- type parameters (generic for left, specific for right)
       , TypeU
       , ArgDoc
       , Bool -- True if this is a "terminal" type (won't be reduced further)
@@ -160,6 +160,7 @@ variables. This is the primary type representation during typechecking.
 -}
 data TypeU
   = VarU TVar
+  | NatVarU TVar -- ^ Nat-kinded variable, never quantified by ForallU
   | ExistU
       TVar
       ([TypeU], OpenOrClosed)
@@ -225,7 +226,7 @@ data ArgDoc
 data ExprTypeE = ExprTypeE
   { exprTypeConcreteForm :: Maybe (Lang, Bool)
   , exprTypeName :: TVar
-  , exprTypeParams :: [Either TVar TypeU]
+  , exprTypeParams :: [Either (TVar, Kind) TypeU]
   , exprTypeType :: TypeU
   , exprTypeDoc :: ArgDoc
   }
@@ -309,6 +310,7 @@ instance Typelike Type where
 
 instance Typelike TypeU where
   typeOf (VarU v) = VarT v
+  typeOf (NatVarU _) = NatLitT 0
   typeOf (ExistU _ (ps, _) (rs@(_ : _), _)) = NamT NamRecord (TV "Record") (map typeOf ps) (map (second typeOf) rs)
   typeOf (ExistU v _ _) = typeOf (ForallU v (VarU v))
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
@@ -324,6 +326,7 @@ instance Typelike TypeU where
   typeOf (NatDivU a b) = NatDivT (typeOf a) (typeOf b)
 
   free v@(VarU _) = Set.singleton v
+  free (NatVarU _) = Set.empty
   free v@(ExistU _ ([], _) (rs, _)) = Set.unions $ Set.singleton v : map (free . snd) rs
   free (ExistU v (ts, _) _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
   free (ForallU v t) = Set.delete (VarU v) (free t)
@@ -346,11 +349,13 @@ instance Typelike TypeU where
          in ForallU q' (substituteTVar v r' t)
       else
         ForallU q (substituteTVar v r t)
+  substituteTVar _ _ t@(NatVarU _) = t
   substituteTVar v0 r0 t0 = sub t0
     where
       sub t@(VarU v)
         | v0 == v = r0
         | otherwise = t
+      sub t@(NatVarU _) = t
       sub (ExistU v (map sub -> ps, pc) (map (second sub) -> rs, rc)) = ExistU v (ps, pc) (rs, rc)
       sub (ForallU v t)
         | v0 == v = ForallU v t
@@ -377,12 +382,14 @@ instance Typelike TypeU where
   normalizeType (NatMulU a b) = NatMulU (normalizeType a) (normalizeType b)
   normalizeType (NatSubU a b) = NatSubU (normalizeType a) (normalizeType b)
   normalizeType (NatDivU a b) = NatDivU (normalizeType a) (normalizeType b)
+  normalizeType t@(NatVarU _) = t
   normalizeType t = t
 
 ----- Partial order logic
 
 instance P.PartialOrd TypeU where
   (<=) (VarU v1) (VarU v2) = v1 == v2
+  (<=) (NatVarU v1) (NatVarU v2) = v1 == v2
   (<=) (ExistU v1 (ts1, _) (rs1, _)) (ExistU v2 (ts2, _) (rs2, _)) =
     v1 == v2
       && length ts1 == length ts2
@@ -429,6 +436,7 @@ findFirst v = f
     f (VarU v') t2
       | v == v' = Just t2
       | otherwise = Nothing
+    f (NatVarU _) _ = Nothing
     f (ForallU v1 t1) (ForallU v2 t2)
       | v == v1 = Nothing
       | otherwise = f t1 (substituteTVar v2 (VarU v1) t2)
@@ -481,6 +489,7 @@ mostSpecific = P.maxima
 
 extractKey :: TypeU -> TVar
 extractKey (VarU v) = v
+extractKey (NatVarU v) = v
 extractKey (ForallU _ t) = extractKey t
 extractKey (AppU t _) = extractKey t
 extractKey (NamU _ v _ _) = v
@@ -510,6 +519,7 @@ type2typeu (NatDivT a b) = NatDivU (type2typeu a) (type2typeu b)
 
 unresolvedType2type :: TypeU -> Type
 unresolvedType2type (VarU v) = VarT v
+unresolvedType2type (NatVarU _) = NatLitT 0
 unresolvedType2type ExistU {} = error "Cannot cast existential type to Type"
 unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
 unresolvedType2type (FunU ts t) = FunT (map unresolvedType2type ts) (unresolvedType2type t)
@@ -539,6 +549,7 @@ newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
 
     allVars :: TypeU -> Set.Set TypeU
     allVars (ForallU v t) = Set.union (Set.singleton (VarU v)) (allVars t)
+    allVars (NatVarU v) = Set.singleton (NatVarU v)
     allVars (EffectU _ t) = allVars t
     allVars (OptionalU t) = allVars t
     allVars (NatAddU a b) = Set.union (allVars a) (allVars b)
@@ -605,6 +616,7 @@ instance Pretty TypeU where
   pretty t0 = f True t0
     where
       f _ (VarU v) = pretty v
+      f _ (NatVarU v) = pretty v
       f _ (ExistU v ([], _) ([], _)) = angles $ pretty v
       f _ (AppU (VarU (TV "List")) [t]) = "[" <> f True t <> "]"
       f _ (AppU (VarU (TV "Tuple2")) ts) = encloseSep "(" ")" ", " (map (f True) ts)

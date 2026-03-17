@@ -638,16 +638,16 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     groupQuad (xs, ys) (x, y) = (x : xs, y : ys)
 
     makeSerials ::
-      Scope -> TVar -> [([Either TVar TypeU], TypeU, ArgDoc, Bool)] -> CppTranslator [(MDoc, MDoc)]
+      Scope -> TVar -> [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)] -> CppTranslator [(MDoc, MDoc)]
     makeSerials s v xs = catMaybes <$> mapM (makeSerial s v) xs
 
     makeSerial ::
-      Scope -> TVar -> ([Either TVar TypeU], TypeU, ArgDoc, Bool) -> CppTranslator (Maybe (MDoc, MDoc))
+      Scope -> TVar -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) -> CppTranslator (Maybe (MDoc, MDoc))
     makeSerial _ _ (_, NamU _ (TV "struct") _ _, _, _) = return Nothing
     makeSerial _ _ (_, NamU _ (TV "arrow") _ _, _, _) = return Nothing
     makeSerial scope _ (ps, NamU r (TV v) _ rs, _, _) = do
-      params <- mapM (either (\p -> return $ "T" <> pretty p) (\_ -> return "XXX_FIXME")) ps
-      let templateTerms = ["T" <> pretty p | Left p <- ps]
+      params <- mapM (either (\(p, _) -> return $ "T" <> pretty p) (\_ -> return "XXX_FIXME")) ps
+      let templateTerms = ["T" <> pretty p | Left (p, _) <- ps]
           rtype = pretty v <> CP.printRecordTemplate templateTerms
           rs' = map (second (evaluateTypeU scope)) rs
           fields = [(pretty k, showDefType ps (typeOf t)) | (k, t) <- rs']
@@ -661,12 +661,12 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
       (Left e) -> error $ show e
       (Right t') -> t'
 
-    showDefType :: [Either TVar TypeU] -> Type -> MDoc
+    showDefType :: [Either (TVar, Kind) TypeU] -> Type -> MDoc
     showDefType ps (UnkT v)
-      | (Left v) `elem` ps = "T" <> pretty v
+      | any (\p -> either (\(tv, _) -> tv == v) (const False) p) ps = "T" <> pretty v
       | otherwise = pretty v
     showDefType ps (VarT v)
-      | (Left v) `elem` ps = "T" <> pretty v
+      | any (\p -> either (\(tv, _) -> tv == v) (const False) p) ps = "T" <> pretty v
       | otherwise = pretty v
     showDefType _ (FunT _ _) = error "Cannot serialize functions"
     showDefType _ (NamT _ v _ _) = pretty v

@@ -133,10 +133,10 @@ data CstSigType = CstSigType
   deriving (Show, Eq)
 
 data CstTypeDef
-  = CstTypeAlias (Maybe Located) (TVar, [Either TVar TypeU]) (TypeU, Bool)
-  | CstTypeAliasForward (TVar, [Either TVar TypeU])
-  | CstNamTypeWhere NamType (TVar, [Either TVar TypeU]) [(Located, Key, TypeU)]
-  | CstNamTypeLegacy (Maybe Located) NamType (TVar, [Either TVar TypeU]) (Text, Bool) [(Key, TypeU)]
+  = CstTypeAlias (Maybe Located) (TVar, [Either (TVar, Kind) TypeU]) (TypeU, Bool)
+  | CstTypeAliasForward (TVar, [Either (TVar, Kind) TypeU])
+  | CstNamTypeWhere NamType (TVar, [Either (TVar, Kind) TypeU]) [(Located, Key, TypeU)]
+  | CstNamTypeLegacy (Maybe Located) NamType (TVar, [Either (TVar, Kind) TypeU]) (Text, Bool) [(Key, TypeU)]
   deriving (Show, Eq)
 
 data CstClassHead

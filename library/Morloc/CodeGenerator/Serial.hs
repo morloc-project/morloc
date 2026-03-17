@@ -336,6 +336,7 @@ makeSerialAST m lang t0 = do
 
         basevar :: TypeU -> Maybe TVar
         basevar (VarU v) = Just v
+        basevar (NatVarU _) = Nothing
         basevar (ExistU _ _ _) = Nothing
         basevar (ForallU _ _) = Nothing
         basevar (FunU _ _) = Nothing
@@ -453,7 +454,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
       MorlocMonad (Maybe TypeF) -- the resolved unpacked types
     resolveP a b c generalTypes = do
       let (ga, ca) = unweaveTypeF a
-      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty []) of
+      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty) of
         (Left typeErr) ->
           MM.throwSourcedError m0 $
             "There was an error raised in subtyping while resolving serialization"
@@ -479,7 +480,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
         (u, gc) -> do
           -- where u  is the unresolved general packed type that was stored in Desugar.hs
           --       gc is the unresolved general unpacked type
-          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty []) of
+          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty) of
             (Left _) -> return Nothing
             (Right g) -> do
               return . Just $ apply g (existential gc)
@@ -544,6 +545,7 @@ weaveTypeF (OptionalU gt) (OptionalU ct) = OptionalF (weaveTypeF gt ct)
 weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
 weaveTypeF (NatLitU n) (NatLitU _) = NatLitF n
 weaveTypeF (NatLitU n) _ = NatLitF n  -- Nat params may be erased in concrete type
+weaveTypeF (NatVarU _) _ = NatLitF 0  -- Nat vars erased in concrete type
 weaveTypeF gt ct = error . show $ (gt, ct)
 
 -- | Check if a SerialAST's root has the "arrow" concrete type hint

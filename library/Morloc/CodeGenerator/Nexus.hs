@@ -209,7 +209,7 @@ resolveAliasApp v ts = do
   scope <- MM.gets stateUniversalGeneralTypedefs
   case Map.lookup v scope of
     (Just [(params, body, _, False)]) ->
-      let tvars = [tv | Left tv <- params]
+      let tvars = [tv | Left (tv, _) <- params]
           resolved = foldl (\acc (tv, arg) -> substituteTVar tv arg acc) (typeOf body) (zip tvars ts)
       in generalTypeToSerialAST resolved
     _ -> error $ "Cannot serialize type: " <> show (AppT (VarT v) ts)

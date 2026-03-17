@@ -63,6 +63,9 @@ module Morloc.Namespace.Prim
 
     -- ** Language
   , Lang (..)
+
+    -- ** Kinds
+  , Kind (..)
   ) where
 
 import Data.Aeson (FromJSON (..))
@@ -78,6 +81,12 @@ import Morloc.Internal
 import Morloc.Language (Lang (..))
 import System.Directory.Tree (AnchoredDirTree ((:/)), DirTree (Dir, Failed, File), failures, writeDirectoryWith)
 import Text.Read (readMaybe)
+
+---- Kinds
+
+-- | Kind of a type variable: either a proper type or a natural number (for dimensions)
+data Kind = KindType | KindNat
+  deriving (Show, Ord, Eq)
 
 ---- Typeclasses
 
@@ -263,6 +272,10 @@ parseHMS hms = case splitOn ":" hms of
   _ -> Nothing
 
 ----- Pretty instances -------------------------------------------------------
+
+instance Pretty Kind where
+  pretty KindType = "Type"
+  pretty KindNat = "Nat"
 
 instance Pretty SrcLoc where
   pretty (SrcLoc path ln col endLn endCol)

@@ -309,13 +309,14 @@ lang_token :: { Located }
   : UPPER                    { $1 }
   | LOWER                    { $1 }
 
-typedef_term :: { (TVar, [Either TVar TypeU]) }
+typedef_term :: { (TVar, [Either (TVar, Kind) TypeU]) }
   : UPPER typedef_params              { (TV (getName $1), $2) }
   | '(' UPPER typedef_params ')'     { (TV (getName $2), $3) }
 
-typedef_params :: { [Either TVar TypeU] }
+typedef_params :: { [Either (TVar, Kind) TypeU] }
   : {- empty -}                        { [] }
-  | typedef_params LOWER               { $1 ++ [Left (TV (getName $2))] }
+  | typedef_params LOWER               { $1 ++ [Left (TV (getName $2), KindType)] }
+  | typedef_params '(' LOWER '::' UPPER ')'  { $1 ++ [Left (TV (getName $3), parseKind (getName $5))] }
   | typedef_params '(' type ')'        { $1 ++ [Right $3] }
 
 nam_entry :: { (Key, TypeU) }
@@ -869,6 +870,10 @@ getString (Located _ _ t) = t
 getIntrinsicName :: Located -> Text
 getIntrinsicName (Located _ (TokIntrinsic n) _) = n
 getIntrinsicName _ = ""
+
+parseKind :: Text -> Kind
+parseKind "Nat" = KindNat
+parseKind _ = KindType
 
 getOp :: Located -> Text
 getOp (Located _ (TokOperator t) _) = t

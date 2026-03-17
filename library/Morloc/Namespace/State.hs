@@ -236,6 +236,8 @@ data Gamma = Gamma
   , gammaSolved :: Map TVar TypeU
   -- | Nat constraints that could not be solved (deferred)
   , gammaDeferred :: [(TypeU, TypeU)]
+  -- | Solutions for NatVarU variables from nat constraint solving
+  , gammaNatSubs :: Map TVar TypeU
   }
 
 ---- Data files and system

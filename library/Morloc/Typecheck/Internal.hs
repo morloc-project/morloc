@@ -84,11 +84,15 @@ import qualified Morloc.Typecheck.NatSolver as NS
 import qualified Morloc.TypeEval as TE
 
 qualify :: [TVar] -> TypeU -> TypeU
-qualify vs t = foldr ForallU t vs
+qualify vs t = foldr (\v -> ForallU v) t vs
 
 unqualify :: TypeU -> ([TVar], TypeU)
 unqualify (ForallU v (unqualify -> (vs, t))) = (v : vs, t)
 unqualify t = ([], t)
+
+unqualifyWithKinds :: TypeU -> ([(TVar, Kind)], TypeU)
+unqualifyWithKinds (ForallU v (unqualifyWithKinds -> (vks, t))) = ((v, KindType) : vks, t)
+unqualifyWithKinds t = ([], t)
 
 toExistential :: Gamma -> TypeU -> (Gamma, TypeU)
 toExistential g0 (unqualify -> (vs0, t0)) = f g0 vs0 t0
@@ -109,6 +113,9 @@ instance Applicable TypeU where
     case lookupU v g of
       (Just t') -> t'
       Nothing -> VarU v
+  apply g (NatVarU v) = case Map.lookup v (gammaNatSubs g) of
+    Just t -> t
+    Nothing -> NatVarU v
   -- [G](A->B) = ([G]A -> [G]B)
   apply g (FunU ts t) = FunU (map (apply g) ts) (apply g t)
   apply g (AppU t ts) = AppU (apply g t) (map (apply g) ts)
@@ -147,6 +154,7 @@ instance Applicable Gamma where
     g2
       { gammaContext = IntMap.map f (gammaContext g2)
       , gammaSolved = Map.map (apply g1) (gammaSolved g2)
+      , gammaNatSubs = Map.map (apply g1) (gammaNatSubs g2)
       }
     where
       f :: GammaIndex -> GammaIndex
@@ -190,7 +198,7 @@ slotSpacing = 256
 (++>) g xs = foldl' (+>) g xs
 
 isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
-isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty []) of
+isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty) of
   (Left _) -> False
   (Right _) -> True
 
@@ -210,6 +218,7 @@ subtypeError t1 t2 msg =
 
 -- Nat expression helpers for SOP-based comparison
 isNatExpr :: TypeU -> Bool
+isNatExpr (NatVarU _) = True
 isNatExpr (NatLitU _) = True
 isNatExpr (NatAddU _ _) = True
 isNatExpr (NatMulU _ _) = True
@@ -218,6 +227,7 @@ isNatExpr (NatDivU _ _) = True
 isNatExpr _ = False
 
 typeUToNatExpr :: TypeU -> Maybe NS.NatExpr
+typeUToNatExpr (NatVarU v) = Just (NS.NatVar v)
 typeUToNatExpr (NatLitU n) = Just (NS.NatLit n)
 typeUToNatExpr (NatAddU a b) = NS.NatAdd <$> typeUToNatExpr a <*> typeUToNatExpr b
 typeUToNatExpr (NatMulU a b) = NS.NatMul <$> typeUToNatExpr a <*> typeUToNatExpr b
@@ -229,7 +239,7 @@ typeUToNatExpr _ = Nothing
 
 natExprToTypeU :: NS.NatExpr -> TypeU
 natExprToTypeU (NS.NatLit n) = NatLitU n
-natExprToTypeU (NS.NatVar v) = VarU v
+natExprToTypeU (NS.NatVar v) = NatVarU v
 natExprToTypeU (NS.NatAdd a b) = NatAddU (natExprToTypeU a) (natExprToTypeU b)
 natExprToTypeU (NS.NatMul a b) = NatMulU (natExprToTypeU a) (natExprToTypeU b)
 natExprToTypeU (NS.NatSub a b) = NatSubU (natExprToTypeU a) (natExprToTypeU b)
@@ -240,9 +250,13 @@ applyNatSolutions subs g0 = foldM applySub g0 (Map.toList subs)
   where
     applySub g (v, ne) =
       let t = natExprToTypeU ne
+      -- Try solving as existential first (for existential nat vars),
+      -- then store in gammaNatSubs (for NatVarU variables)
       in case solveExist v t g of
            Right (Just g') -> Right g'
-           Right Nothing -> Right g
+           Right Nothing ->
+             -- Not an existential — store as a NatVarU solution
+             Right g { gammaNatSubs = Map.insert v t (gammaNatSubs g) }
            Left err -> Left err
 
 -- | Re-check deferred Nat constraints after all existentials are solved.
@@ -267,6 +281,9 @@ recheckDeferred g = foldM check [] (gammaDeferred g)
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
+-- NatVarU: identical nat variables are equal; different ones fall to isNatExpr path
+subtype _ (NatVarU v1) (NatVarU v2) g
+  | v1 == v2 = return g
 -- VarU vs VarT
 subtype scope t1@(VarU a1) t2@(VarU a2) g
   -- If everything is the same, do nothing
@@ -593,6 +610,7 @@ solve v t
   where
     occursIn :: TVar -> TypeU -> Bool
     occursIn v' (VarU v'') = v' == v''
+    occursIn _ (NatVarU _) = False
     occursIn v' (ExistU v'' (ps, _) (rs, _)) = v' == v'' || any (occursIn v') ps || any (occursIn v' . snd) rs
     occursIn v' (ForallU _ t') = occursIn v' t'
     occursIn v' (FunU ts t') = any (occursIn v') ts || occursIn v' t'
@@ -886,8 +904,34 @@ rename g0 (ForallU v@(TV s) t0) =
       (g2, t1) = rename g1 t0
       t2 = substituteTVar v (VarU v') t1
    in (g2, ForallU v' t2)
--- Unless I add N-rank types, foralls can only be on top, so no need to recurse.
-rename g t = (g, t)
+-- After stripping ForallU, rename NatVarU variables to fresh names
+rename g0 t0 =
+  let nvs = nub (collectNatVarNames t0)
+   in if null nvs then (g0, t0)
+      else
+        let (g1, nvs') = statefulMap (\g (TV s) -> tvarname g (s <> "___n")) g0 nvs
+            renameMap = Map.fromList (zip nvs nvs')
+         in (g1, renameNatVars renameMap t0)
+
+-- | Rename NatVarU variables according to a mapping
+renameNatVars :: Map.Map TVar TVar -> TypeU -> TypeU
+renameNatVars m = go
+  where
+    ren v = Map.findWithDefault v v m
+    go (NatVarU v) = NatVarU (ren v)
+    go (VarU v) = VarU v
+    go (ExistU v (ts, tc) (rs, rc)) = ExistU v (map go ts, tc) ([(k, go t) | (k, t) <- rs], rc)
+    go (ForallU v t) = ForallU v (go t)
+    go (FunU ts t) = FunU (map go ts) (go t)
+    go (AppU t ts) = AppU (go t) (map go ts)
+    go (NamU n o ps rs) = NamU n o (map go ps) [(k, go t) | (k, t) <- rs]
+    go (EffectU effs t) = EffectU effs (go t)
+    go (OptionalU t) = OptionalU (go t)
+    go t@(NatLitU _) = t
+    go (NatAddU a b) = NatAddU (go a) (go b)
+    go (NatMulU a b) = NatMulU (go a) (go b)
+    go (NatSubU a b) = NatSubU (go a) (go b)
+    go (NatDivU a b) = NatDivU (go a) (go b)
 
 {- | Rename all generic type variables (ForallU-bound and ExistU) to clean
 letters from a lazy pool: a, b, c, ..., z, a1, b1, ..., z1, a2, ...
@@ -897,13 +941,14 @@ cleanTypeName :: TypeU -> TypeU
 cleanTypeName t0 =
   let (vs, body) = unqualify t0
       evs = collectExistVars body
-      allGeneric = nub (vs ++ evs)
+      nvs = collectNatVarNames body
+      allGeneric = nub (vs ++ evs ++ nvs)
       fixed = collectFixedNames (Set.fromList allGeneric) body
       pool = filter (\(TV n) -> Set.notMember n fixed) letterPool
       renameMap = Map.fromList (zip allGeneric pool)
       renamedBody = applyVarRenaming renameMap body
       renamedVs = map (\v -> Map.findWithDefault v v renameMap) vs
-   in simplifyNats $ foldr ForallU renamedBody renamedVs
+   in simplifyNats $ qualify renamedVs renamedBody
 
 -- | Simplify nat arithmetic in types (e.g., 34 + (4 + 5) -> 43)
 simplifyNats :: TypeU -> TypeU
@@ -920,6 +965,7 @@ simplifyNats = go
     go (ExistU v (ps, pc) (rs, rc)) = ExistU v (map go ps, pc) ([(k, go t) | (k, t) <- rs], rc)
     go (EffectU e t) = EffectU e (go t)
     go (OptionalU t) = OptionalU (go t)
+    go t@(NatVarU _) = t
     go t = t
 
     trySimplify nat = case typeUToNatExpr nat of
@@ -937,7 +983,27 @@ collectExistVars :: TypeU -> [TVar]
 collectExistVars = go
   where
     go (VarU _) = []
+    go (NatVarU _) = []
     go (ExistU v (ts, _) (rs, _)) = v : concatMap go ts ++ concatMap (go . snd) rs
+    go (ForallU _ t) = go t
+    go (FunU ts t) = concatMap go (t : ts)
+    go (AppU t ts) = concatMap go (t : ts)
+    go (NamU _ _ ps rs) = concatMap go ps ++ concatMap (go . snd) rs
+    go (EffectU _ t) = go t
+    go (OptionalU t) = go t
+    go (NatLitU _) = []
+    go (NatAddU a b) = go a ++ go b
+    go (NatMulU a b) = go a ++ go b
+    go (NatSubU a b) = go a ++ go b
+    go (NatDivU a b) = go a ++ go b
+
+-- | Collect NatVarU variable names from a type (for renaming)
+collectNatVarNames :: TypeU -> [TVar]
+collectNatVarNames = go
+  where
+    go (NatVarU v) = [v]
+    go (VarU _) = []
+    go (ExistU _ (ts, _) (rs, _)) = concatMap go ts ++ concatMap (go . snd) rs
     go (ForallU _ t) = go t
     go (FunU ts t) = concatMap go (t : ts)
     go (AppU t ts) = concatMap go (t : ts)
@@ -956,6 +1022,7 @@ collectFixedNames generics = go
     go (VarU v)
       | Set.member v generics = Set.empty
       | otherwise = Set.singleton (unTVar v)
+    go (NatVarU _) = Set.empty
     go (ExistU _ (ts, _) (rs, _)) = Set.unions (map go ts ++ map (go . snd) rs)
     go (ForallU _ t) = go t
     go (FunU ts t) = Set.unions $ map go (t : ts)
@@ -975,6 +1042,7 @@ applyVarRenaming m = go
   where
     ren v = Map.findWithDefault v v m
     go (VarU v) = VarU (ren v)
+    go (NatVarU v) = NatVarU (ren v)
     go (ExistU v (ts, tc) (rs, rc)) =
       ExistU (ren v) (map go ts, tc) ([(k, go t) | (k, t) <- rs], rc)
     go (ForallU v t) = ForallU (ren v) (go t)
