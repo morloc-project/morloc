@@ -38,6 +38,7 @@ module Morloc.Namespace.State
     -- * Typechecking
   , Gamma (..)
   , GammaIndex (..)
+  , ConstVal (..)
 
     -- * Data files
   , NexusSource (..)
@@ -238,9 +239,17 @@ data Gamma = Gamma
   , gammaDeferred :: [(TypeU, TypeU)]
   -- | Solutions for NatVarU variables from nat constraint solving
   , gammaNatSubs :: Map TVar TypeU
-  -- | Known integer values for let-bound variables (for nat label resolution)
-  , gammaIntVals :: Map EVar Integer
+  -- | Known constant values for let-bound variables (for nat label resolution).
+  -- Tracks integers, tuples, and records so accessors like .0 can be evaluated.
+  , gammaIntVals :: Map EVar ConstVal
   }
+
+-- | Compile-time constant values tracked during typechecking for nat label
+-- resolution. Only pure literal expressions are tracked.
+data ConstVal
+  = ConstInt Integer
+  | ConstTup [ConstVal]
+  deriving (Show, Eq, Ord)
 
 ---- Data files and system
 

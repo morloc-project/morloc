@@ -274,6 +274,9 @@ synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 -- Ensures pattern setting operations return the correct type.
 -- Without this case, patterns that change type will pass silently, but lead to
 -- corrupted data.
+-- Setter pattern lambda: (\v -> .field v newVal) data
+-- The body applies a pattern to 2+ args (data + set values).
+-- Getters (1 arg) are NOT matched here and go through normal AppS.
 synthE
   _
   g0
@@ -288,7 +291,7 @@ synthE
                     _
                     ( AppS
                         ((AnnoS _ _ (ExeS (PatCall (PatternStruct _)))))
-                        (_ : _)
+                        (_ : _ : _)
                       )
                   )
               )
@@ -575,9 +578,9 @@ synthE _ g (CallS v) = do
 synthE _ g (LetS v e1 e2) = do
   (g1, t1, e1') <- synthG g e1
   let g2 = g1 ++> [AnnG v t1]
-      -- Track known integer values for nat label resolution
-      g2' = case tryExtractInt g2 e1' of
-        Just n -> g2 { gammaIntVals = Map.insert v n (gammaIntVals g2) }
+      -- Track known constant values for nat label resolution
+      g2' = case tryEvalConst g2 (let AnnoS _ _ e = e1' in e) of
+        Just val -> g2 { gammaIntVals = Map.insert v val (gammaIntVals g2) }
         Nothing -> g2
   (g3, t2, e2') <- synthG g2' e2
   return (g3, t2, LetS v e1' e2')
@@ -1121,21 +1124,48 @@ application' i g es t = do
   seeType t'
   return r
 
--- | Try to extract an integer value from a post-synthesis expression.
--- Handles literals and references to let-bound variables with known int values.
-tryExtractInt :: Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> Maybe Integer
-tryExtractInt _ (AnnoS _ _ (IntS n)) = Just n
-tryExtractInt g (AnnoS _ _ (LetBndS v)) = Map.lookup v (gammaIntVals g)
-tryExtractInt g (AnnoS _ _ (BndS v)) = Map.lookup v (gammaIntVals g)
-tryExtractInt _ _ = Nothing
+-- | Try to reduce an expression to a compile-time constant. Handles:
+--   - Integer literals
+--   - Tuple literals (recursively)
+--   - Let-bound and lambda-bound variable references (via gammaIntVals)
+--   - Let expressions (with local constant propagation)
+--   - Index accessors on tuples: .0 (5, 6, 7) => 5
+-- Returns Nothing for anything involving foreign function calls,
+-- non-constant variables, or unsupported expression forms.
+tryEvalConst :: Gamma -> ExprS g f c -> Maybe ConstVal
+tryEvalConst _ (IntS n) = Just (ConstInt n)
+tryEvalConst g (LetBndS v) = Map.lookup v (gammaIntVals g)
+tryEvalConst g (BndS v) = Map.lookup v (gammaIntVals g)
+tryEvalConst g (TupS es) = ConstTup <$> mapM (\(AnnoS _ _ e) -> tryEvalConst g e) es
+tryEvalConst g (LetS v (AnnoS _ _ e1) (AnnoS _ _ e2)) = do
+  val <- tryEvalConst g e1
+  tryEvalConst (g { gammaIntVals = Map.insert v val (gammaIntVals g) }) e2
+-- Index accessor on tuple literal or known tuple: .i (a, b, c) => element i
+tryEvalConst g (AppS (AnnoS _ _ (ExeS (PatCall (PatternStruct
+  (SelectorIdx (idx, SelectorEnd) []))))) [AnnoS _ _ inner])
+  = case tryEvalConst g inner of
+      Just (ConstTup vs) | idx >= 0, idx < length vs -> Just (vs !! idx)
+      _ -> Nothing
+-- Lambda application: (\x -> body) arg => beta-reduce
+tryEvalConst g (AppS (AnnoS _ _ (LamS vs (AnnoS _ _ body))) args)
+  | length vs == length args = do
+    vals <- mapM (\(AnnoS _ _ e) -> tryEvalConst g e) args
+    let g' = g { gammaIntVals = foldl (\m (v, val) -> Map.insert v val m) (gammaIntVals g) (zip vs vals) }
+    tryEvalConst g' body
+tryEvalConst _ _ = Nothing
 
--- | Try to extract an integer value from a pre-synthesis expression.
--- Handles literals and references to let-bound variables with known int values.
+-- | Try to reduce an expression to an integer constant.
+tryEvalInt :: Gamma -> ExprS g f c -> Maybe Integer
+tryEvalInt g e = case tryEvalConst g e of
+  Just (ConstInt n) -> Just n
+  _ -> Nothing
+
+-- | Convenience wrappers that unwrap AnnoS
+tryExtractInt :: Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> Maybe Integer
+tryExtractInt g (AnnoS _ _ e) = tryEvalInt g e
+
 tryExtractIntPre :: Gamma -> AnnoS Int ManyPoly Int -> Maybe Integer
-tryExtractIntPre _ (AnnoS _ _ (IntS n)) = Just n
-tryExtractIntPre g (AnnoS _ _ (LetBndS v)) = Map.lookup v (gammaIntVals g)
-tryExtractIntPre g (AnnoS _ _ (BndS v)) = Map.lookup v (gammaIntVals g)
-tryExtractIntPre _ _ = Nothing
+tryExtractIntPre g (AnnoS _ _ e) = tryEvalInt g e
 
 -- | Resolve nat labels from int literal arguments.
 -- When a function has labeled nat params (e.g., m:Int -> Tensor1 m Real)

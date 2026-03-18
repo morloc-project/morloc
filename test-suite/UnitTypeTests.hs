@@ -3242,6 +3242,64 @@ natLabelTests =
         |]
         (AppU (VarU (TV "Tensor2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
 
+    -- === Positive: tuple accessor evaluation ===
+    , assertRawType
+        "tuple accessor resolves: makeVec (.0 (5, 6))"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = makeVec (.0 (5, 6))
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
+    , assertRawType
+        "let-bound tuple + accessor: let dims = (3,4) in makeMat (.0 dims) (.1 dims)"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      makeMat :: m:Int -> n:Int -> Tensor2 m n Real
+      x = let dims = (3, 4) in makeMat (.0 dims) (.1 dims)
+        |]
+        (AppU (VarU (TV "Tensor2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
+    , assertRawType
+        "chained let + accessor: let d=(8,9); let n=.0 d in makeVec n"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = let d = (8, 9) in let n = .0 d in makeVec n
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 8, VarU (TV "Real")])
+
+    -- === Positive: lambda application evaluation ===
+    , assertRawType
+        "identity lambda: makeVec ((\\x -> x) 5)"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = makeVec ((\n -> n) 5)
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
+    , assertRawType
+        "lambda + accessor: makeVec ((\\t -> .1 t) (1,2,3))"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = makeVec ((\t -> .1 t) (1, 2, 3))
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 2, VarU (TV "Real")])
+    , assertRawType
+        "lambda selects first of two args: (\\x y -> x) 7 99"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = makeVec ((\a b -> a) 7 99)
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 7, VarU (TV "Real")])
+
     -- === Negative: dimension mismatches caught despite labels ===
     , expectError
         "labeled dim mismatch: add (makeT 3 4) (makeT 3 5) fails"
