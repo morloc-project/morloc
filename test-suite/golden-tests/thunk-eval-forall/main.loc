@@ -10,7 +10,7 @@ type Py => Int = "int"
 type Py => Unit = "None"
 
 class Random a where
-  random a :: <Random> a
+  random :: <Random> a
 
 instance Random Real where
   source Py from "rng.py" ("randomReal" as random)

@@ -163,12 +163,9 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                   False -> recurse bnd $ foldr parsub newType (zip vs ts)
                 Nothing ->
                   MM.throwSystemError $
-                    "No matching alias found for"
-                      <+> viaShow t0
-                      <+> "\n  scope"
-                      <+> viaShow scope
-                      <+> "\n  ts':"
-                      <+> viaShow ts'
+                    "No matching alias found for" <+> pretty t0
+                      <> "\n  Available aliases have"
+                      <+> pretty (length ts') <+> "entries, none match the given arguments"
             _ -> resolve bnd t0
     -- t may be existential
     f bnd (AppU t ts) = AppU <$> recurse bnd t <*> mapM (recurse bnd) ts
@@ -190,14 +187,20 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                   else recurse bnd t2
               Nothing ->
                 MM.throwSystemError $
-                  "No matching alias found for" <+> viaShow t0
-                    <> "\n  scope:" <+> viaShow scope
-                    <> "\n  v:" <+> pretty v
-                    <> "\n  ts1:" <+> list (map viaShow ts1)
+                  "No matching alias found for" <+> pretty t0
+                    <> "\n  Available aliases have"
+                    <+> pretty (length ts1) <+> "entries, none match"
           Nothing -> resolve bnd t0
     f bnd (ForallU v t) = ForallU v <$> recurse (Set.insert v bnd) t
     f bnd (EffectU effs t) = EffectU effs <$> recurse bnd t
     f bnd (OptionalU t) = OptionalU <$> recurse bnd t
+    f _ t@(NatVarU _) = return t  -- nat vars are not type aliases
+    f _ t@(NatLitU _) = return t
+    f bnd (NatAddU a b) = NatAddU <$> recurse bnd a <*> recurse bnd b
+    f bnd (NatMulU a b) = NatMulU <$> recurse bnd a <*> recurse bnd b
+    f bnd (NatSubU a b) = NatSubU <$> recurse bnd a <*> recurse bnd b
+    f bnd (NatDivU a b) = NatDivU <$> recurse bnd a <*> recurse bnd b
+    f bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
     terminate :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
     terminate bnd (ExistU v (ts, tc) (rs, rc)) = do
@@ -209,13 +212,20 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     terminate bnd (AppU t ts) = AppU t <$> mapM (recurse bnd) ts
     terminate bnd (NamU o v ts rs) = NamU o v <$> mapM (recurse bnd) ts <*> mapM (secondM (recurse bnd)) rs
     terminate _ (VarU v) = return (VarU v)
+    terminate _ t@(NatVarU _) = return t
     terminate bnd (EffectU effs t) = EffectU effs <$> recurse bnd t
     terminate bnd (OptionalU t) = OptionalU <$> recurse bnd t
+    terminate _ t@(NatLitU _) = return t
+    terminate bnd (NatAddU a b) = NatAddU <$> recurse bnd a <*> recurse bnd b
+    terminate bnd (NatMulU a b) = NatMulU <$> recurse bnd a <*> recurse bnd b
+    terminate bnd (NatSubU a b) = NatSubU <$> recurse bnd a <*> recurse bnd b
+    terminate bnd (NatDivU a b) = NatDivU <$> recurse bnd a <*> recurse bnd b
+    terminate bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
     renameTypedefs ::
-      Set.Set TVar -> ([Either TVar TypeU], TypeU, ArgDoc, Bool) -> ([TVar], TypeU, ArgDoc, Bool)
+      Set.Set TVar -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) -> ([TVar], TypeU, ArgDoc, Bool)
     renameTypedefs _ ([], t, d, isTerminal) = ([], t, d, isTerminal)
-    renameTypedefs bnd (Left v@(TV x) : vs, t, d, isTerminal)
+    renameTypedefs bnd (Left (v@(TV x), _) : vs, t, d, isTerminal)
       | Set.member v bnd =
           let (vs', t', d', isTerminal') = renameTypedefs bnd (vs, t, d, isTerminal)
               v' =
@@ -233,9 +243,9 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     -- When a type alias is imported from two places, this function reconciles them, if possible
     mergeAliases ::
       [TypeU] ->
-      Maybe ([Either TVar TypeU], TypeU, ArgDoc, Bool) ->
-      Maybe ([Either TVar TypeU], TypeU, ArgDoc, Bool) ->
-      Either MorlocError (Maybe ([Either TVar TypeU], TypeU, ArgDoc, Bool))
+      Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) ->
+      Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) ->
+      Either MorlocError (Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool))
     mergeAliases _ Nothing Nothing = Right Nothing
     mergeAliases tsMain Nothing (Just b)
       | checkAlias tsMain b = Right (Just b)
@@ -276,9 +286,9 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
             (zip ts1 ts2)
 
     selectSpecialization ::
-      ([Either TVar TypeU], TypeU, ArgDoc, Bool) ->
-      ([Either TVar TypeU], TypeU, ArgDoc, Bool) ->
-      Maybe ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) ->
+      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) ->
+      Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)
     selectSpecialization a@(aps0, _, _, _) b@(bps0, _, _, _) = g aps0 bps0
       where
         g [] _ = Just a
@@ -294,7 +304,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
 
     checkAlias ::
       [TypeU] ->
-      ([Either TVar TypeU], TypeU, ArgDoc, Bool) ->
+      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) ->
       Bool
     checkAlias ts1 (ts2, _, _, _) =
       length ts1 == length ts2
@@ -306,6 +316,7 @@ parsub :: (TVar, TypeU) -> TypeU -> TypeU
 parsub (v, t2) t1@(VarU v0)
   | v0 == v = t2 -- substitute
   | otherwise = t1 -- keep the original
+parsub _ t@(NatVarU _) = t
 parsub pair (ExistU t (ts, tc) (rs, rc)) = ExistU t (map (parsub pair) ts, tc) (zip (map fst rs) (map (parsub pair . snd) rs), rc)
 parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
 parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
@@ -313,3 +324,9 @@ parsub pair (AppU t ts) = AppU (parsub pair t) (map (parsub pair) ts)
 parsub pair (NamU o n ps rs) = NamU o n (map (parsub pair) ps) [(k', parsub pair t) | (k', t) <- rs]
 parsub pair (EffectU effs t) = EffectU effs (parsub pair t)
 parsub pair (OptionalU t) = OptionalU (parsub pair t)
+parsub _ t@(NatLitU _) = t
+parsub pair (NatAddU a b) = NatAddU (parsub pair a) (parsub pair b)
+parsub pair (NatMulU a b) = NatMulU (parsub pair a) (parsub pair b)
+parsub pair (NatSubU a b) = NatSubU (parsub pair a) (parsub pair b)
+parsub pair (NatDivU a b) = NatDivU (parsub pair a) (parsub pair b)
+parsub pair (LabeledU n t) = LabeledU n (parsub pair t)

@@ -207,7 +207,7 @@ instance Dependable NativeExpr where
         i <- newIndex
         return $ D (LetVarN (typeFof e) i) ((i, Right e) : deps)
 
-  isAtomic (AppExeN _ _ _ _) = False
+  isAtomic (AppExeN _ _ _) = False
   isAtomic ManN {} = False
   isAtomic SerialLetN {} = False
   isAtomic NativeLetN {} = False
@@ -238,6 +238,108 @@ instance Dependable SerialExpr where
   isAtomic (ReturnS _) = True
   isAtomic (SerializeS _ _) = True
   isAtomic _ = False
+
+-- ---------------------------------------------------------------------------
+-- Variable index substitution [old/new]
+--
+-- When a let-binding has a trivial RHS (just a variable reference), we
+-- eliminate it by substituting the bound index throughout the body and
+-- remaining deps.  Since variable indices appear in many AST positions
+-- (variable refs, binding sites, manifold parameter forms, pool call
+-- descriptors, LocalCallP executable refs), the substitution must
+-- reach all of them.
+-- ---------------------------------------------------------------------------
+
+-- | Detect a trivial native variable reference.
+nativeTrivialVar :: NativeExpr -> Maybe Int
+nativeTrivialVar (LetVarN _ j) = Just j
+nativeTrivialVar (BndVarN _ j) = Just j
+nativeTrivialVar _ = Nothing
+
+-- | Detect a trivial serial variable reference.
+serialTrivialVar :: SerialExpr -> Maybe Int
+serialTrivialVar (LetVarS _ j) = Just j
+serialTrivialVar (BndVarS _ j) = Just j
+serialTrivialVar _ = Nothing
+
+-- | Substitute variable index [old/new] throughout a NativeExpr.
+renameNE :: Int -> Int -> NativeExpr -> NativeExpr
+renameNE old new = go where
+  ri i = if i == old then new else i
+  go (ManN nm) = ManN (renameNM old new nm)
+  go (AppExeN t exe args) = AppExeN t (renameExe old new exe) (map goA args)
+  go (ReturnN ne) = ReturnN (go ne)
+  go (SerialLetN i se ne) = SerialLetN (ri i) (renameSE old new se) (go ne)
+  go (NativeLetN i ne1 ne2) = NativeLetN (ri i) (go ne1) (go ne2)
+  go (LetVarN t i) = LetVarN t (ri i)
+  go (BndVarN t i) = BndVarN t (ri i)
+  go (DeserializeN t s se) = DeserializeN t s (renameSE old new se)
+  go (ExeN t exe) = ExeN t (renameExe old new exe)
+  go (ListN v t nes) = ListN v t (map go nes)
+  go (TupleN v xs) = TupleN v (map go xs)
+  go (RecordN o v ps rs) = RecordN o v ps (map (second go) rs)
+  go e@(LogN _ _) = e
+  go e@(RealN _ _) = e
+  go e@(IntN _ _) = e
+  go e@(StrN _ _) = e
+  go e@(NullN _) = e
+  go (DoBlockN t ne) = DoBlockN t (go ne)
+  go (EvalN t ne) = EvalN t (go ne)
+  go (CoerceN c t ne) = CoerceN c t (go ne)
+  go (IfN t c th el) = IfN t (go c) (go th) (go el)
+  go (IntrinsicN t intr msch nes) = IntrinsicN t intr msch (map go nes)
+  goA (NativeArgManifold nm) = NativeArgManifold (renameNM old new nm)
+  goA (NativeArgExpr ne) = NativeArgExpr (go ne)
+
+-- | Substitute variable index [old/new] throughout a SerialExpr.
+renameSE :: Int -> Int -> SerialExpr -> SerialExpr
+renameSE old new = go where
+  ri i = if i == old then new else i
+  go (ManS sm) = ManS (renameSM old new sm)
+  go (AppPoolS t p args) = AppPoolS t (renamePoolCall old new p) (map goA args)
+  go (AppRecS t m es) = AppRecS t m (map go es)
+  go (AppForeignRecS t m s es) = AppForeignRecS t m s (map go es)
+  go (ReturnS se) = ReturnS (go se)
+  go (SerialLetS i se1 se2) = SerialLetS (ri i) (go se1) (go se2)
+  go (NativeLetS i ne se) = NativeLetS (ri i) (renameNE old new ne) (go se)
+  go (LetVarS mt i) = LetVarS mt (ri i)
+  go (BndVarS mt i) = BndVarS mt (ri i)
+  go (SerializeS s ne) = SerializeS s (renameNE old new ne)
+  goA (SerialArgManifold sm) = SerialArgManifold (renameSM old new sm)
+  goA (SerialArgExpr se) = SerialArgExpr (go se)
+
+renameNM :: Int -> Int -> NativeManifold -> NativeManifold
+renameNM old new (NativeManifold m lang form body) =
+  NativeManifold m lang (renameForm old new form) (renameNE old new body)
+
+renameSM :: Int -> Int -> SerialManifold -> SerialManifold
+renameSM old new (SerialManifold m lang form hf body) =
+  SerialManifold m lang (renameForm old new form) hf (renameSE old new body)
+
+renameForm :: Int -> Int -> ManifoldForm a b -> ManifoldForm a b
+renameForm old new form = case form of
+  ManifoldPass args -> ManifoldPass (map ra args)
+  ManifoldFull args -> ManifoldFull (map ra args)
+  ManifoldPart ctx bnd -> ManifoldPart (map ra ctx) (map ra bnd)
+  where
+    ra (Arg i t) = Arg (if i == old then new else i) t
+
+renamePoolCall :: Int -> Int -> PoolCall -> PoolCall
+renamePoolCall old new (PoolCall mid sock rform args) =
+  PoolCall mid sock rform (map ra args)
+  where
+    ra (Arg i t) = Arg (if i == old then new else i) t
+
+renameExe :: Int -> Int -> ExecutableExpressionPool -> ExecutableExpressionPool
+renameExe old new (LocalCallP i) = LocalCallP (if i == old then new else i)
+renameExe _ _ other = other
+
+renameDeps :: Int -> Int -> [(Int, Either SerialExpr NativeExpr)]
+           -> [(Int, Either SerialExpr NativeExpr)]
+renameDeps old new = map f where
+  ri i = if i == old then new else i
+  f (i, Left se) = (ri i, Left (renameSE old new se))
+  f (i, Right ne) = (ri i, Right (renameNE old new ne))
 
 invertSerialManifold :: SerialManifold -> SerialManifold
 invertSerialManifold sm0 =
@@ -270,10 +372,16 @@ invertSerialManifold sm0 =
           deps = concatMap getDeps serialArgs
       atomize (AppPoolS t pool serialArgs') deps
     invertSerialExprM (ReturnS_ (D se lets)) = return $ D (ReturnS se) lets
-    invertSerialExprM (SerialLetS_ i (D se1 lets1) (D se2 lets2)) =
-      return $ D se2 (lets2 <> ((i, Left se1) : lets1))
-    invertSerialExprM (NativeLetS_ i (D ne1 lets1) (D se2 lets2)) =
-      return $ D se2 (lets2 <> ((i, Right ne1) : lets1))
+    invertSerialExprM (SerialLetS_ i (D se1 lets1) (D se2 lets2))
+      | Just j <- serialTrivialVar se1 =
+          return $ D (renameSE i j se2) (renameDeps i j lets2 <> lets1)
+      | otherwise =
+          return $ D se2 (lets2 <> ((i, Left se1) : lets1))
+    invertSerialExprM (NativeLetS_ i (D ne1 lets1) (D se2 lets2))
+      | Just j <- nativeTrivialVar ne1 =
+          return $ D (renameSE i j se2) (renameDeps i j lets2 <> lets1)
+      | otherwise =
+          return $ D se2 (lets2 <> ((i, Right ne1) : lets1))
     invertSerialExprM (LetVarS_ t i) = atomize (LetVarS t i) []
     invertSerialExprM (BndVarS_ t i) = atomize (BndVarS t i) []
     invertSerialExprM (AppRecS_ t mid serialExprs) = do
@@ -289,22 +397,31 @@ invertSerialManifold sm0 =
     invertNativeExprM ::
       NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) ->
       Index (D NativeExpr)
-    invertNativeExprM (AppExeN_ t exe qs nativeArgs) = do
+    invertNativeExprM (AppExeN_ t exe nativeArgs) = do
       let nativeArgs' = map unD nativeArgs
           deps = concatMap getDeps nativeArgs
       case (t, exe) of
         -- Source functions return the unwrapped type; the compiler wraps in suspend
         (EffectF _ innerT, SrcCallP _) ->
-          return $ D (DoBlockN t (weave (D (AppExeN innerT exe qs nativeArgs') deps))) []
+          return $ D (DoBlockN t (weave (D (AppExeN innerT exe nativeArgs') deps))) []
         (OptionalF _, SrcCallP _) ->
-          atomize (AppExeN t exe qs nativeArgs') deps
-        _ -> atomize (AppExeN t exe qs nativeArgs') deps
+          atomize (AppExeN t exe nativeArgs') deps
+        _ -> atomize (AppExeN t exe nativeArgs') deps
     invertNativeExprM (ManN_ (D nm lets)) = atomize (ManN nm) lets
     invertNativeExprM (ReturnN_ (D ne lets)) = atomize (ReturnN ne) lets
-    invertNativeExprM (SerialLetN_ i (D se1 lets1) (D ne2 lets2)) =
-      return $ D ne2 (lets2 <> ((i, Left se1) : lets1))
-    invertNativeExprM (NativeLetN_ i (D ne1 lets1) (D ne2 lets2)) =
-      return $ D ne2 (lets2 <> ((i, Right ne1) : lets1))
+    -- Eliminate trivial let-bindings where the RHS is just a variable
+    -- reference, e.g. "let i = j" becomes substitution [i/j] in body.
+    -- This avoids redundant assignments like "n7 = n8" in generated code.
+    invertNativeExprM (SerialLetN_ i (D se1 lets1) (D ne2 lets2))
+      | Just j <- serialTrivialVar se1 =
+          return $ D (renameNE i j ne2) (renameDeps i j lets2 <> lets1)
+      | otherwise =
+          return $ D ne2 (lets2 <> ((i, Left se1) : lets1))
+    invertNativeExprM (NativeLetN_ i (D ne1 lets1) (D ne2 lets2))
+      | Just j <- nativeTrivialVar ne1 =
+          return $ D (renameNE i j ne2) (renameDeps i j lets2 <> lets1)
+      | otherwise =
+          return $ D ne2 (lets2 <> ((i, Right ne1) : lets1))
     invertNativeExprM (LetVarN_ t i) = atomize (LetVarN t i) []
     invertNativeExprM (BndVarN_ t i) = atomize (BndVarN t i) []
     invertNativeExprM (DeserializeN_ t s (D se lets)) = atomize (DeserializeN t s se) lets
@@ -421,6 +538,7 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     seekRecs _ (VarF _) = []
     seekRecs m (EffectF _ t) = seekRecs m t
     seekRecs m (OptionalF t) = seekRecs m t
+    seekRecs _ (NatLitF _) = []
 
 unifyRecords ::
   [ ( FVar

@@ -1,0 +1,66 @@
+-- Test all tensor dimensions (1D through 5D) with Python->C++ cross-language.
+module main
+  ( t1d
+  , t2d
+  , t3d
+  , t4d
+  , t5d
+  , testSum1d
+  , testSum2d
+  , testSum3d
+  , testSum4d
+  , testSum5d
+  )
+
+import root
+import root-py
+import root-cpp
+
+source Py from "src.py"
+  ( "make1d" as pyMake1d
+  , "make2d" as pyMake2d
+  , "make3d" as pyMake3d
+  , "make4d" as pyMake4d
+  , "make5d" as pyMake5d
+  )
+
+source Cpp from "src.hpp"
+  ( "cppSum1d"
+  , "cppSum2d"
+  , "cppSum3d"
+  , "cppSum4d"
+  , "cppSum5d"
+  )
+
+pyMake1d :: Tensor1 6 Int
+pyMake2d :: Tensor2 2 3 Int
+pyMake3d :: Tensor3 2 3 4 Int
+pyMake4d :: Tensor4 2 3 2 2 Int
+pyMake5d :: Tensor5 2 2 2 3 2 Int
+
+cppSum1d :: Tensor1 6 Int -> Int
+cppSum2d :: Tensor2 2 3 Int -> Int
+cppSum3d :: Tensor3 2 3 4 Int -> Int
+cppSum4d :: Tensor4 2 3 2 2 Int -> Int
+cppSum5d :: Tensor5 2 2 2 3 2 Int -> Int
+
+t1d = pyMake1d
+t2d = pyMake2d
+t3d = pyMake3d
+t4d = pyMake4d
+t5d = pyMake5d
+
+testSum1d :: Int
+testSum1d = cppSum1d pyMake1d
+
+testSum2d :: Int
+testSum2d = cppSum2d pyMake2d
+
+testSum3d :: Int
+testSum3d = cppSum3d pyMake3d
+
+testSum4d :: Int
+testSum4d = cppSum4d pyMake4d
+
+testSum5d :: Int
+testSum5d = cppSum5d pyMake5d

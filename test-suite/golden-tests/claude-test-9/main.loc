@@ -61,7 +61,7 @@ analyzeDistribution :: [Real] -> PriceDistribution
 
 -- Local helpers
 source Py from "helpers.py" ("last")
-last a :: [a] -> a
+last :: [a] -> a
 
 --' Price a European call option using Monte Carlo
 --'

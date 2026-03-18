@@ -215,25 +215,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
         [] -> inferType (Idx idx outputType)
         remaining -> inferType $ Idx idx (FunT remaining outputType)
 
-      qualifiers <- MM.gets stateTypeQualifier
-
-      let qsAll = maybe [] id (Map.lookup idx qualifiers)
-          qs = [(v, t) | (v, t, 1) <- qsAll]
-
-      case [v | (v, _, i) <- qsAll, i > 1] of
-        [] -> return ()
-        vs -> MM.sayVVV $ "Warning: skipping higher-kinded qualifiers:" <+> list (map pretty vs)
-
-      ftypes <-
-        mapM
-          ( \t -> do
-              inferType (Idx idx (typeOf t))
-          )
-          (map snd qs)
-      let vs = map (unTVar . fst) qs
-          qs' = zip vs ftypes
-
-      return $ AppExeN appType exe qs' args
+      return $ AppExeN appType exe args
     nativeExpr m e@(MonoApp (MonoPoolCall t _ _ _ _) _) = do
       e' <- serialExpr m e
       t' <- inferType t
@@ -245,7 +227,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       appType <- case drop (length es) inputTypes of
         [] -> inferType (Idx idx outputType)
         remaining -> inferType $ Idx idx (FunT remaining outputType)
-      return $ AppExeN appType (LocalCallP i) [] args
+      return $ AppExeN appType (LocalCallP i) args
     nativeExpr _ (MonoApp e es) = do
       MM.sayVVV "nativeExprr MonoApp"
       MM.sayVVV $ "e:" <+> pretty e
@@ -276,7 +258,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoReal v x) = RealN <$> inferVar v <*> pure x
     nativeExpr _ (MonoInt v x) = IntN <$> inferVar v <*> pure x
     nativeExpr _ (MonoStr v x) = StrN <$> inferVar v <*> pure x
-    nativeExpr _ (MonoNull (Idx _ v)) = return $ NullN (FV v (CV "null"))
+    nativeExpr _ (MonoNull v) = NullN <$> inferVar v
     nativeExpr m (MonoIf cond thenE elseE) = do
       condNe <- nativeExpr m cond
       thenNe <- nativeExpr m thenE

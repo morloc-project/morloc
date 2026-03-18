@@ -16,6 +16,7 @@ typedef enum {
   MORLOC_UINT64,
   MORLOC_FLOAT32,
   MORLOC_FLOAT64,
+  MORLOC_TENSOR,
   MORLOC_STRING,
   MORLOC_ARRAY,
   MORLOC_TUPLE,
@@ -30,6 +31,7 @@ typedef enum {
 #define SCHEMA_FLOAT  'f'
 #define SCHEMA_STRING 's'
 #define SCHEMA_ARRAY  'a'
+#define SCHEMA_TENSOR 'T'
 #define SCHEMA_TUPLE  't'
 #define SCHEMA_MAP    'm'
 #define SCHEMA_OPTIONAL '?'
@@ -54,10 +56,27 @@ bool schema_is_fixed_width(const Schema* schema);
 size_t schema_alignment(const Schema* schema);
 size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG);
 
+// Get tensor ndim from schema (stored in offsets[0])
+static inline size_t schema_tensor_ndim(const Schema* schema) {
+    return schema->offsets ? schema->offsets[0] : 0;
+}
+
 // The voidstar representation of variable length data
 typedef struct Array {
   size_t size;
   relptr_t data;
 } Array;
+
+// The voidstar representation of a dense N-dimensional tensor.
+// Data is always row-major (C order). Shape and data buffers live
+// after the header in the same allocation, pointed to by relptrs.
+// ndim is redundantly stored (also in schema->size) for self-description.
+typedef struct Tensor {
+  size_t total_elements;    // product of all shape dimensions
+  uint32_t device_type;     // reserved for GPU: 0 = CPU
+  uint32_t device_id;       // reserved for GPU: 0
+  relptr_t data;            // relptr to contiguous element data
+  relptr_t shape;           // relptr to int64_t[ndim]
+} Tensor;
 
 #endif // __MORLOC_SCHEMA_H__

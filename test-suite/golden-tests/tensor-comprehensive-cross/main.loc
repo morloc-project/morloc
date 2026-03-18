@@ -1,0 +1,344 @@
+-- Cross-language tensor tests: all language pairs, multiple dimensions,
+-- element types (Real, Int, Bool), edge cases, and performance.
+module main
+  ( -- 2D Real: all six language pairs
+    cpSum2d
+  , pcSum2d
+  , prSum2d
+  , rpSum2d
+  , crSum2d
+  , rcSum2d
+  -- 3D Real: C++/Python pairs + R element verification
+  , cpSum3d
+  , pcSum3d
+  , rTransposeVerify
+  -- 1D Real: all six language pairs
+  , cpSum1d
+  , pcSum1d
+  , prSum1d
+  , rpSum1d
+  , crSum1d
+  , rcSum1d
+  -- 4D Real: Py<->Cpp, Py<->R
+  , cpSum4d
+  , pcSum4d
+  , prSum4d
+  , rpSum4d
+  -- Int element type: all six language pairs (1D)
+  , cpSumInt
+  , pcSumInt
+  , prSumInt
+  , rpSumInt
+  , crSumInt
+  , rcSumInt
+  -- Bool element type: all six pairs (1D)
+  , cpCountTrue
+  , pcCountTrue
+  , prCountTrue
+  , rpCountTrue
+  , crCountTrue
+  , rcCountTrue
+  -- Edge cases: empty and single-element tensors
+  , cpSumEmpty
+  , pcSumEmpty
+  , prSumEmpty
+  , rpSumEmpty
+  , cpSumSingle
+  , pcSumSingle
+  , prSumSingle
+  , rpSumSingle
+  -- Large tensor (5000 doubles = 40KB, all language pairs)
+  , cpSumLarge
+  , pcSumLarge
+  , prSumLarge
+  , rpSumLarge
+  , crSumLarge
+  , rcSumLarge
+  -- Very large tensor (50000 doubles = 400KB, crosses 64KB SHM threshold)
+  , cpSumHuge
+  , pcSumHuge
+  , prSumHuge
+  , rpSumHuge
+  , crSumHuge
+  , rcSumHuge
+  )
+
+import root
+import root-cpp
+import root-py
+import root-r (Real, Int, Bool)
+
+source Cpp from "src.hpp"
+  ( "cppMakeMat"
+  , "cppSumMat"
+  , "cppMake3d"
+  , "cppSum3d"
+  , "cppGetCorners3d"
+  , "cppMakeVec"
+  , "cppSumVec"
+  , "cppMake4d"
+  , "cppSum4d"
+  , "cppMakeIntVec"
+  , "cppSumIntVec"
+  , "cppMakeBoolVec"
+  , "cppCountTrue"
+  , "cppMakeEmpty"
+  , "cppSumEmpty"
+  , "cppMakeSingle"
+  , "cppSumSingle"
+  , "cppMakeLarge"
+  , "cppSumLarge"
+  , "cppMakeHuge"
+  , "cppSumHuge"
+  )
+
+source Py from "src.py"
+  ( "pyMakeMat"
+  , "pySumMat"
+  , "pyMake3d"
+  , "pySum3d"
+  , "pyMakeVec"
+  , "pySumVec"
+  , "pyMake4d"
+  , "pySum4d"
+  , "pyMakeIntVec"
+  , "pySumIntVec"
+  , "pyMakeBoolVec"
+  , "pyCountTrue"
+  , "pyMakeEmpty"
+  , "pySumEmpty"
+  , "pyMakeSingle"
+  , "pySumSingle"
+  , "pyMakeLarge"
+  , "pySumLarge"
+  , "pyMakeHuge"
+  , "pySumHuge"
+  )
+
+source R from "src.R"
+  ( "rMakeMat"
+  , "rSumMat"
+  , "rMake3d"
+  , "rMakeVec"
+  , "rSumVec"
+  , "rMake4d"
+  , "rSum4d"
+  , "rMakeIntVec"
+  , "rSumIntVec"
+  , "rMakeBoolVec"
+  , "rCountTrue"
+  , "rMakeEmpty"
+  , "rSumEmpty"
+  , "rMakeSingle"
+  , "rSumSingle"
+  , "rMakeLarge"
+  , "rSumLarge"
+  , "rMakeHuge"
+  , "rSumHuge"
+  )
+
+-- === Type signatures ===
+
+-- 2D Real (3x4, values 1..12, sum=78)
+cppMakeMat :: Tensor2 3 4 Real
+cppSumMat :: Tensor2 3 4 Real -> Real
+pyMakeMat :: Tensor2 3 4 Real
+pySumMat :: Tensor2 3 4 Real -> Real
+rMakeMat :: Tensor2 3 4 Real
+rSumMat :: Tensor2 3 4 Real -> Real
+
+-- 3D Real (2x3x4, values 0..23, sum=276)
+cppMake3d :: Tensor3 2 3 4 Real
+cppSum3d :: Tensor3 2 3 4 Real -> Real
+pyMake3d :: Tensor3 2 3 4 Real
+pySum3d :: Tensor3 2 3 4 Real -> Real
+rMake3d :: Tensor3 2 3 4 Real
+cppGetCorners3d :: Tensor3 2 3 4 Real -> [Real]
+
+-- 1D Real (10 elements, values 1..10, sum=55)
+cppMakeVec :: Tensor1 10 Real
+cppSumVec :: Tensor1 10 Real -> Real
+pyMakeVec :: Tensor1 10 Real
+pySumVec :: Tensor1 10 Real -> Real
+rMakeVec :: Tensor1 10 Real
+rSumVec :: Tensor1 10 Real -> Real
+
+-- 4D Real (2x3x2x2, values 0..23, sum=276)
+cppMake4d :: Tensor4 2 3 2 2 Real
+cppSum4d :: Tensor4 2 3 2 2 Real -> Real
+pyMake4d :: Tensor4 2 3 2 2 Real
+pySum4d :: Tensor4 2 3 2 2 Real -> Real
+rMake4d :: Tensor4 2 3 2 2 Real
+rSum4d :: Tensor4 2 3 2 2 Real -> Real
+
+-- 1D Int (8 elements, values 10..17, sum=108)
+cppMakeIntVec :: Tensor1 8 Int
+cppSumIntVec :: Tensor1 8 Int -> Int
+pyMakeIntVec :: Tensor1 8 Int
+pySumIntVec :: Tensor1 8 Int -> Int
+rMakeIntVec :: Tensor1 8 Int
+rSumIntVec :: Tensor1 8 Int -> Int
+
+-- 1D Bool (6 elements: T,F,T,T,F,T -> count=4)
+cppMakeBoolVec :: Tensor1 6 Bool
+cppCountTrue :: Tensor1 6 Bool -> Int
+pyMakeBoolVec :: Tensor1 6 Bool
+pyCountTrue :: Tensor1 6 Bool -> Int
+rMakeBoolVec :: Tensor1 6 Bool
+rCountTrue :: Tensor1 6 Bool -> Int
+
+-- Empty tensor (0 elements, sum=0)
+cppMakeEmpty :: Tensor1 0 Real
+cppSumEmpty :: Tensor1 0 Real -> Real
+pyMakeEmpty :: Tensor1 0 Real
+pySumEmpty :: Tensor1 0 Real -> Real
+rMakeEmpty :: Tensor1 0 Real
+rSumEmpty :: Tensor1 0 Real -> Real
+
+-- Single element (1 element, value 42, sum=42)
+cppMakeSingle :: Tensor1 1 Real
+cppSumSingle :: Tensor1 1 Real -> Real
+pyMakeSingle :: Tensor1 1 Real
+pySumSingle :: Tensor1 1 Real -> Real
+rMakeSingle :: Tensor1 1 Real
+rSumSingle :: Tensor1 1 Real -> Real
+
+-- Large tensor (5000 doubles = 40KB, under SHM threshold)
+-- Values 0..4999, sum = 4999*5000/2 = 12497500
+cppMakeLarge :: Tensor1 5000 Real
+cppSumLarge :: Tensor1 5000 Real -> Real
+pyMakeLarge :: Tensor1 5000 Real
+pySumLarge :: Tensor1 5000 Real -> Real
+rMakeLarge :: Tensor1 5000 Real
+rSumLarge :: Tensor1 5000 Real -> Real
+
+-- Very large tensor (50000 doubles = 400KB, exceeds 64KB SHM threshold)
+-- Values 0..49999, sum = 49999*50000/2 = 1249975000
+cppMakeHuge :: Tensor1 50000 Real
+cppSumHuge :: Tensor1 50000 Real -> Real
+pyMakeHuge :: Tensor1 50000 Real
+pySumHuge :: Tensor1 50000 Real -> Real
+rMakeHuge :: Tensor1 50000 Real
+rSumHuge :: Tensor1 50000 Real -> Real
+
+-- === 2D Real: all six language pairs ===
+cpSum2d :: Real
+cpSum2d = pySumMat cppMakeMat
+pcSum2d :: Real
+pcSum2d = cppSumMat pyMakeMat
+prSum2d :: Real
+prSum2d = rSumMat pyMakeMat
+rpSum2d :: Real
+rpSum2d = pySumMat rMakeMat
+crSum2d :: Real
+crSum2d = rSumMat cppMakeMat
+rcSum2d :: Real
+rcSum2d = cppSumMat rMakeMat
+
+-- === 3D Real ===
+cpSum3d :: Real
+cpSum3d = pySum3d cppMake3d
+pcSum3d :: Real
+pcSum3d = cppSum3d pyMake3d
+rTransposeVerify :: [Real]
+rTransposeVerify = cppGetCorners3d rMake3d
+
+-- === 1D Real: all six language pairs ===
+cpSum1d :: Real
+cpSum1d = pySumVec cppMakeVec
+pcSum1d :: Real
+pcSum1d = cppSumVec pyMakeVec
+prSum1d :: Real
+prSum1d = rSumVec pyMakeVec
+rpSum1d :: Real
+rpSum1d = pySumVec rMakeVec
+crSum1d :: Real
+crSum1d = rSumVec cppMakeVec
+rcSum1d :: Real
+rcSum1d = cppSumVec rMakeVec
+
+-- === 4D Real ===
+cpSum4d :: Real
+cpSum4d = pySum4d cppMake4d
+pcSum4d :: Real
+pcSum4d = cppSum4d pyMake4d
+prSum4d :: Real
+prSum4d = rSum4d pyMake4d
+rpSum4d :: Real
+rpSum4d = pySum4d rMake4d
+
+-- === Int element type: all six pairs (1D) ===
+cpSumInt :: Int
+cpSumInt = pySumIntVec cppMakeIntVec
+pcSumInt :: Int
+pcSumInt = cppSumIntVec pyMakeIntVec
+prSumInt :: Int
+prSumInt = rSumIntVec pyMakeIntVec
+rpSumInt :: Int
+rpSumInt = pySumIntVec rMakeIntVec
+crSumInt :: Int
+crSumInt = rSumIntVec cppMakeIntVec
+rcSumInt :: Int
+rcSumInt = cppSumIntVec rMakeIntVec
+
+-- === Bool element type: all six pairs (1D) ===
+cpCountTrue :: Int
+cpCountTrue = pyCountTrue cppMakeBoolVec
+pcCountTrue :: Int
+pcCountTrue = cppCountTrue pyMakeBoolVec
+prCountTrue :: Int
+prCountTrue = rCountTrue pyMakeBoolVec
+rpCountTrue :: Int
+rpCountTrue = pyCountTrue rMakeBoolVec
+crCountTrue :: Int
+crCountTrue = rCountTrue cppMakeBoolVec
+rcCountTrue :: Int
+rcCountTrue = cppCountTrue rMakeBoolVec
+
+-- === Edge cases: empty tensors ===
+cpSumEmpty :: Real
+cpSumEmpty = pySumEmpty cppMakeEmpty
+pcSumEmpty :: Real
+pcSumEmpty = cppSumEmpty pyMakeEmpty
+prSumEmpty :: Real
+prSumEmpty = rSumEmpty pyMakeEmpty
+rpSumEmpty :: Real
+rpSumEmpty = pySumEmpty rMakeEmpty
+
+-- === Edge cases: single-element tensors ===
+cpSumSingle :: Real
+cpSumSingle = pySumSingle cppMakeSingle
+pcSumSingle :: Real
+pcSumSingle = cppSumSingle pyMakeSingle
+prSumSingle :: Real
+prSumSingle = rSumSingle pyMakeSingle
+rpSumSingle :: Real
+rpSumSingle = pySumSingle rMakeSingle
+
+-- === Large tensor (40KB, all language pairs) ===
+cpSumLarge :: Real
+cpSumLarge = pySumLarge cppMakeLarge
+pcSumLarge :: Real
+pcSumLarge = cppSumLarge pyMakeLarge
+prSumLarge :: Real
+prSumLarge = rSumLarge pyMakeLarge
+rpSumLarge :: Real
+rpSumLarge = pySumLarge rMakeLarge
+crSumLarge :: Real
+crSumLarge = rSumLarge cppMakeLarge
+rcSumLarge :: Real
+rcSumLarge = cppSumLarge rMakeLarge
+
+-- === Very large tensor (400KB, crosses SHM threshold, all six pairs) ===
+cpSumHuge :: Real
+cpSumHuge = pySumHuge cppMakeHuge
+pcSumHuge :: Real
+pcSumHuge = cppSumHuge pyMakeHuge
+prSumHuge :: Real
+prSumHuge = rSumHuge pyMakeHuge
+rpSumHuge :: Real
+rpSumHuge = pySumHuge rMakeHuge
+crSumHuge :: Real
+crSumHuge = rSumHuge cppMakeHuge
+rcSumHuge :: Real
+rcSumHuge = cppSumHuge rMakeHuge

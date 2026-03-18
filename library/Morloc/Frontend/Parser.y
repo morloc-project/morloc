@@ -48,7 +48,8 @@ import qualified Morloc.BaseTypes as BT
 -- - 2 from force_expr ('!' could start force or be part of another expr)
 -- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
 -- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
-%expect 59
+-- - 13 from type-level Nat arithmetic ('+' and '*' in add_type/mul_type rules)
+%expect 84
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -103,6 +104,7 @@ import qualified Morloc.BaseTypes as BT
   'Null'     { Located _ TokNull _ }
   LOWER      { Located _ (TokLowerName _) _ }
   UPPER      { Located _ (TokUpperName _) _ }
+  '+'        { Located _ (TokOperator "+") _ }
   '/'        { Located _ (TokOperator "/") _ }
   OPERATOR   { Located _ (TokOperator _) _ }
   INTEGER    { Located _ (TokInteger _) _ }
@@ -170,8 +172,8 @@ top_decl :: { [Loc CstExpr] }
   | sig_or_ass        { $1 }
 
 sig_or_ass :: { [Loc CstExpr] }
-  : evar_or_op lower_names '::' sig_type
-      { [at $1 (CSigE (toEVar $1) $2 $4)] }
+  : evar_or_op '::' sig_type
+      { [at $1 (CSigE (toEVar $1) $3)] }
   | evar_or_op lower_names '=' expr opt_where_decls
       { [at $1 (CAssE (toEVar $1) $2 $4 $5)] }
   | evar_or_op lower_names guard_clauses ':' expr opt_where_decls
@@ -307,13 +309,14 @@ lang_token :: { Located }
   : UPPER                    { $1 }
   | LOWER                    { $1 }
 
-typedef_term :: { (TVar, [Either TVar TypeU]) }
+typedef_term :: { (TVar, [Either (TVar, Kind) TypeU]) }
   : UPPER typedef_params              { (TV (getName $1), $2) }
   | '(' UPPER typedef_params ')'     { (TV (getName $2), $3) }
 
-typedef_params :: { [Either TVar TypeU] }
+typedef_params :: { [Either (TVar, Kind) TypeU] }
   : {- empty -}                        { [] }
-  | typedef_params LOWER               { $1 ++ [Left (TV (getName $2))] }
+  | typedef_params LOWER               { $1 ++ [Left (TV (getName $2), KindType)] }
+  | typedef_params '(' LOWER '::' UPPER ')'  { $1 ++ [Left (TV (getName $3), parseKind (getName $5))] }
   | typedef_params '(' type ')'        { $1 ++ [Right $3] }
 
 nam_entry :: { (Key, TypeU) }
@@ -345,7 +348,17 @@ non_string_type :: { TypeU }
 non_string_non_fun :: { TypeU }
   : '<' LOWER '>'            { ExistU (TV (getName $2)) ([], Open) ([], Open) }
   | '<' effect_labels '>' non_string_non_fun  { EffectU (EffectSet (Set.fromList $2)) $4 }
-  | non_string_app            { $1 }
+  | non_string_add            { $1 }
+
+non_string_add :: { TypeU }
+  : non_string_add '+' non_string_mul  { NatAddU $1 $3 }
+  | non_string_add '-' non_string_mul  { NatSubU $1 $3 }
+  | non_string_mul                      { $1 }
+
+non_string_mul :: { TypeU }
+  : non_string_mul '*' non_string_app  { NatMulU $1 $3 }
+  | non_string_mul '/' non_string_app  { NatDivU $1 $3 }
+  | non_string_app                      { $1 }
 
 non_string_app :: { TypeU }
   : non_string_app atom_type  { applyType $1 $2 }
@@ -358,8 +371,9 @@ non_string_atom :: { TypeU }
   | '[' type ']'              { BT.listU $2 }
   | '?' non_string_atom       { OptionalU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
-  | LOWER ':' non_fun_type   { $3 }
+  | LOWER ':' non_fun_type   { LabeledU (TV (getName $1)) $3 }
   | LOWER                     { VarU (TV (getName $1)) }
+  | INTEGER                   { NatLitU (getInt $1) }
 
 --------------------------------------------------------------------
 -- Typeclasses
@@ -388,8 +402,8 @@ sig_list :: { [CstSigItem] }
   | sig_list VSEMI signature      { $1 ++ [$3] }
 
 signature :: { CstSigItem }
-  : evar_or_op lower_names '::' sig_type
-      { CstSigItem (toEVar $1) $2 $4 }
+  : evar_or_op '::' sig_type
+      { CstSigItem (toEVar $1) $3 }
 
 --------------------------------------------------------------------
 -- Instances
@@ -676,6 +690,16 @@ fun_type :: { TypeU }
 non_fun_type :: { TypeU }
   : '<' LOWER '>'            { ExistU (TV (getName $2)) ([], Open) ([], Open) }
   | '<' effect_labels '>' non_fun_type  { EffectU (EffectSet (Set.fromList $2)) $4 }
+  | add_type                  { $1 }
+
+add_type :: { TypeU }
+  : add_type '+' mul_type     { NatAddU $1 $3 }
+  | add_type '-' mul_type     { NatSubU $1 $3 }
+  | mul_type                  { $1 }
+
+mul_type :: { TypeU }
+  : mul_type '*' app_type     { NatMulU $1 $3 }
+  | mul_type '/' app_type     { NatDivU $1 $3 }
   | app_type                  { $1 }
 
 app_type :: { TypeU }
@@ -692,6 +716,7 @@ atom_type :: { TypeU }
   | LOWER ':' non_fun_type   { $3 }
   | LOWER                     { VarU (TV (getName $1)) }
   | STRING                    { VarU (TV (getString $1)) }
+  | INTEGER                   { NatLitU (getInt $1) }
 
 type_list1 :: { [TypeU] }
   : type                      { [$1] }
@@ -722,7 +747,17 @@ sig_fun_args :: { [(Pos, TypeU)] }
 pos_non_fun_type :: { (Pos, TypeU) }
   : '<' LOWER '>'     { (locPos $1, ExistU (TV (getName $2)) ([], Open) ([], Open)) }
   | '<' effect_labels '>' pos_non_fun_type  { (locPos $1, EffectU (EffectSet (Set.fromList $2)) (snd $4)) }
-  | pos_app_type       { $1 }
+  | pos_add_type       { $1 }
+
+pos_add_type :: { (Pos, TypeU) }
+  : pos_add_type '+' mul_type  { (fst $1, NatAddU (snd $1) $3) }
+  | pos_add_type '-' mul_type  { (fst $1, NatSubU (snd $1) $3) }
+  | pos_mul_type                { $1 }
+
+pos_mul_type :: { (Pos, TypeU) }
+  : pos_mul_type '*' app_type  { (fst $1, NatMulU (snd $1) $3) }
+  | pos_mul_type '/' app_type  { (fst $1, NatDivU (snd $1) $3) }
+  | pos_app_type                { $1 }
 
 pos_app_type :: { (Pos, TypeU) }
   : pos_app_type atom_type  { (fst $1, applyType (snd $1) $2) }
@@ -735,9 +770,10 @@ pos_atom_type :: { (Pos, TypeU) }
   | '[' type ']'                { (locPos $1, BT.listU $2) }
   | '?' pos_atom_type            { (locPos $1, OptionalU (snd $2)) }
   | UPPER                       { (locPos $1, VarU (TV (getName $1))) }
-  | LOWER ':' non_fun_type      { (locPos $1, $3) }
+  | LOWER ':' non_fun_type      { (locPos $1, LabeledU (TV (getName $1)) $3) }
   | LOWER                       { (locPos $1, VarU (TV (getName $1))) }
   | STRING                      { (locPos $1, VarU (TV (getString $1))) }
+  | INTEGER                     { (locPos $1, NatLitU (getInt $1)) }
 
 single_constraint :: { Constraint }
   : UPPER types1                         { Constraint (ClassName (getName $1)) $2 }
@@ -748,6 +784,7 @@ single_constraint :: { Constraint }
 
 operator_name :: { Located }
   : OPERATOR                  { $1 }
+  | '+'                       { $1 }
   | '*'                       { $1 }
   | '<'                       { $1 }
   | '>'                       { $1 }
@@ -833,6 +870,10 @@ getString (Located _ _ t) = t
 getIntrinsicName :: Located -> Text
 getIntrinsicName (Located _ (TokIntrinsic n) _) = n
 getIntrinsicName _ = ""
+
+parseKind :: Text -> Kind
+parseKind "Nat" = KindNat
+parseKind _ = KindType
 
 getOp :: Located -> Text
 getOp (Located _ (TokOperator t) _) = t

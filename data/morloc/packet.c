@@ -194,6 +194,23 @@ uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema){
   return packet;
 }
 
+uint8_t* make_arrow_data_packet(relptr_t ptr, const Schema* schema){
+  uint8_t* packet = make_morloc_data_packet_with_schema(
+        NULL, sizeof(relptr_t),
+        schema,
+        PACKET_SOURCE_RPTR,
+        PACKET_FORMAT_ARROW,
+        PACKET_COMPRESSION_NONE,
+        PACKET_ENCRYPTION_NONE,
+        PACKET_STATUS_PASS
+    );
+
+  morloc_packet_header_t* header = (morloc_packet_header_t*)(packet);
+  *((ssize_t*)(packet + sizeof(morloc_packet_header_t) + (size_t)header->offset)) = ptr;
+
+  return packet;
+}
+
 uint8_t* make_mpk_data_packet(const char* mpk_filename, const Schema* schema){
     uint8_t* packet = make_morloc_data_packet_with_schema(
         (const uint8_t*)mpk_filename,
@@ -242,6 +259,15 @@ int get_data_packet_as_mpk(const uint8_t* packet, const Schema* schema,
         RAISE_IF(*mpk_out == NULL, "malloc failed");
         memcpy(*mpk_out, payload, payload_size);
         *mpk_size_out = payload_size;
+    } else if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
+        // Inline voidstar: load into SHM then convert to msgpack
+        void* voidstar = TRY(read_voidstar_binary, payload, payload_size, schema);
+        TRY(pack_with_schema, voidstar, schema, mpk_out, mpk_size_out);
+        char* free_err = NULL;
+        shfree_by_schema((absptr_t)voidstar, schema, &free_err);
+        if (free_err) { free(free_err); free_err = NULL; }
+        shfree((absptr_t)voidstar, &free_err);
+        if (free_err) { free(free_err); }
     } else if (source == PACKET_SOURCE_FILE && format == PACKET_FORMAT_MSGPACK) {
         // File-based msgpack: read the file
         char* filename = strndup((char*)payload, MAX_FILENAME_SIZE);
@@ -360,6 +386,10 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
                     schema,
                     &voidstar
                 );
+            } else if (format == PACKET_FORMAT_VOIDSTAR) {
+                const uint8_t* payload = data + sizeof(morloc_packet_header_t) + header->offset;
+                size_t payload_size = header->length;
+                voidstar = TRY(read_voidstar_binary, payload, payload_size, schema);
             } else {
                 RAISE("Invalid format from mesg: 0x%02hhx", format);
             }
@@ -387,8 +417,13 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
                 // This packet should contain a relative pointer as its payload
                 size_t relptr = *(size_t*)(data + header->offset + sizeof(morloc_packet_header_t));
                 voidstar = TRY(rel2abs, relptr);
+            } else if (format == PACKET_FORMAT_ARROW) {
+                // Arrow packet: payload is a relptr to arrow_shm_header in shm
+                size_t relptr = *(size_t*)(data + header->offset + sizeof(morloc_packet_header_t));
+                voidstar = TRY(rel2abs, relptr);
+                // Return pointer to arrow_shm_header directly; caller handles
             } else {
-                RAISE("For RPTR source, expected voidstar format, found: 0x%02hhx", format);
+                RAISE("For RPTR source, expected voidstar or arrow format, found: 0x%02hhx", format);
                 return NULL;
             }
             break;
@@ -510,8 +545,21 @@ morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG){
     return call;
 }
 
+// Callback-based voidstar writer: abstracts over fd vs buffer destination
+typedef int (*voidstar_write_fn)(void* ctx, const char* data, size_t len, ERRMSG);
+
+// FD writer: wraps write_binary_fd
+static int voidstar_write_fd(void* ctx, const char* data, size_t len, ERRMSG) {
+    INT_RETURN_SETUP
+    int fd = *(int*)ctx;
+    TRY(write_binary_fd, fd, data, len);
+    return 0;
+}
+
+
 static relptr_t write_voidstar_binary_binder_r(
-    int fd,
+    voidstar_write_fn write_fn,
+    void* write_ctx,
     const void* data,
     const Schema* schema,
     relptr_t data_index,
@@ -528,7 +576,7 @@ static relptr_t write_voidstar_binary_binder_r(
                 // set the element pointer to the current data location
                 array.data = data_index;
                 // write just the array struct, the data will be written later
-                TRY(write_binary_fd, fd, (char*)(&array), sizeof(Array));
+                TRY(write_fn, write_ctx, (char*)(&array), sizeof(Array));
                 // reserve space for the array and all its recursive contents
                 size_t data_size = TRY(calculate_voidstar_size, data, schema);
                 data_index += data_size - sizeof(Array);
@@ -540,7 +588,7 @@ static relptr_t write_voidstar_binary_binder_r(
                 // recursively write every tuple element
                 for(size_t i = 0; i < schema->size; i++){
                     void* child = (void*)((char*)data + schema->offsets[i]);
-                    data_index = TRY(write_voidstar_binary_binder_r, fd, child, schema->parameters[i], data_index);
+                    data_index = TRY(write_voidstar_binary_binder_r, write_fn, write_ctx, child, schema->parameters[i], data_index);
                 }
             }
             break;
@@ -548,13 +596,13 @@ static relptr_t write_voidstar_binary_binder_r(
             {
                 uint8_t tag = *((const uint8_t*)data);
                 // Write tag + alignment padding from memory
-                TRY(write_binary_fd, fd, (char*)data, schema->offsets[0]);
+                TRY(write_fn, write_ctx, (char*)data, schema->offsets[0]);
                 if (tag != 0) {
                     data_index = TRY(write_voidstar_binary_binder_r,
-                        fd, (const char*)data + schema->offsets[0], schema->parameters[0], data_index);
+                        write_fn, write_ctx, (const char*)data + schema->offsets[0], schema->parameters[0], data_index);
                 } else {
                     char* zeros = (char*)calloc(1, schema->parameters[0]->width);
-                    TRY_WITH(free(zeros), write_binary_fd, fd, zeros, schema->parameters[0]->width);
+                    TRY_WITH(free(zeros), write_fn, write_ctx, zeros, schema->parameters[0]->width);
                     free(zeros);
                 }
             }
@@ -562,16 +610,17 @@ static relptr_t write_voidstar_binary_binder_r(
         default:
             {
                 // write primitives
-                TRY(write_binary_fd, fd, (char*)data, schema->width);
+                TRY(write_fn, write_ctx, (char*)data, schema->width);
             }
     }
     return data_index;
 }
 
-static relptr_t write_voidstar_binary_array_r(int, const void*, const Schema*, size_t, relptr_t, ERRMSG);
+static relptr_t write_voidstar_binary_array_r(voidstar_write_fn, void*, const void*, const Schema*, size_t, relptr_t, ERRMSG);
 
 static relptr_t write_voidstar_binary_data_r(
-    int fd,
+    voidstar_write_fn write_fn,
+    void* write_ctx,
     const void* data,
     const Schema* schema,
     relptr_t data_index, // pointer to start of the data for all arrays
@@ -585,7 +634,7 @@ static relptr_t write_voidstar_binary_data_r(
             {
                 Array* array = (Array*)data;
                 void* absptr = TRY(rel2abs, array->data);
-                data_index = TRY(write_voidstar_binary_array_r, fd, absptr, schema->parameters[0], array->size, data_index);
+                data_index = TRY(write_voidstar_binary_array_r, write_fn, write_ctx, absptr, schema->parameters[0], array->size, data_index);
             }
             break;
         case MORLOC_TUPLE:
@@ -594,7 +643,7 @@ static relptr_t write_voidstar_binary_data_r(
                 // recursively write every tuple element
                 for(size_t i = 0; i < schema->size; i++){
                     void* child = (void*)((char*)data + schema->offsets[i]);
-                    data_index = TRY(write_voidstar_binary_data_r, fd, child, schema->parameters[i], data_index);
+                    data_index = TRY(write_voidstar_binary_data_r, write_fn, write_ctx, child, schema->parameters[i], data_index);
                 }
             }
             break;
@@ -603,7 +652,7 @@ static relptr_t write_voidstar_binary_data_r(
                 uint8_t tag = *((const uint8_t*)data);
                 if (tag != 0) {
                     data_index = TRY(write_voidstar_binary_data_r,
-                        fd, (const char*)data + schema->offsets[0], schema->parameters[0], data_index);
+                        write_fn, write_ctx, (const char*)data + schema->offsets[0], schema->parameters[0], data_index);
                 }
             }
             break;
@@ -614,7 +663,8 @@ static relptr_t write_voidstar_binary_data_r(
 }
 
 static relptr_t write_voidstar_binary_array_r(
-    int fd,
+    voidstar_write_fn write_fn,
+    void* write_ctx,
     const void* data, // pointer to the start of the array
     const Schema* schema, // schema for the element type
     size_t length, // number of elements in the array
@@ -627,18 +677,18 @@ static relptr_t write_voidstar_binary_array_r(
     size_t fixed_array_size = schema->width * length;
     data_index += fixed_array_size;
     if (schema_is_fixed_width(schema)){
-        TRY(write_binary_fd, fd, (char*)data, fixed_array_size);
+        TRY(write_fn, write_ctx, (char*)data, fixed_array_size);
     } else {
         // write fixed width array elements
         relptr_t binder_ptr = data_index; // for array pointers, don't reuse
         for(size_t i = 0; i < length; i++){
             void* child = (void*)((char*)data + i * schema->width);
-            binder_ptr = TRY(write_voidstar_binary_binder_r, fd, child, schema, binder_ptr);
+            binder_ptr = TRY(write_voidstar_binary_binder_r, write_fn, write_ctx, child, schema, binder_ptr);
         }
         // write array data
         for(size_t i = 0; i < length; i++){
             void* child = (void*)((char*)data + i * schema->width);
-            data_index = TRY(write_voidstar_binary_data_r, fd, child, schema, data_index);
+            data_index = TRY(write_voidstar_binary_data_r, write_fn, write_ctx, child, schema, data_index);
         }
     }
     return data_index;
@@ -652,9 +702,187 @@ relptr_t write_voidstar_binary(
 ){
     VAL_RETURN_SETUP(relptr_t, -1)
     relptr_t data_index = (relptr_t)schema->width;
-    TRY(write_voidstar_binary_binder_r, fd, data, schema, data_index);
-    data_index = TRY(write_voidstar_binary_data_r, fd, data, schema, data_index);
+    TRY(write_voidstar_binary_binder_r, voidstar_write_fd, &fd, data, schema, data_index);
+    data_index = TRY(write_voidstar_binary_data_r, voidstar_write_fd, &fd, data, schema, data_index);
     return data_index;
+}
+
+// Recursively fix up relptrs in the buffer and copy variable-length data.
+// buf: the output buffer (root struct already memcpy'd at offset 0)
+// buf_offset: offset within buf where current schema's data lives
+// data: pointer to the original in-memory voidstar data (in SHM)
+// schema: schema for the current data
+// data_cursor: tracks where to write next variable-length data in buf
+static int flatten_fixup(
+    uint8_t* buf,
+    size_t buf_offset,
+    const void* data,
+    const Schema* schema,
+    size_t* data_cursor,
+    ERRMSG
+){
+    INT_RETURN_SETUP
+
+    switch (schema->type) {
+        case MORLOC_STRING:
+        case MORLOC_ARRAY:
+            {
+                Array* orig_arr = (Array*)data;
+                Array* buf_arr = (Array*)(buf + buf_offset);
+
+                // Empty array/string: no element data to copy
+                if (orig_arr->size == 0) {
+                    buf_arr->data = 0;
+                    break;
+                }
+
+                // Resolve original element data in SHM
+                void* orig_data = TRY(rel2abs, orig_arr->data);
+
+                // Align data_cursor for element alignment
+                size_t align = schema_alignment(schema->parameters[0]);
+                *data_cursor = ALIGN_UP(*data_cursor, align);
+
+                // Set the relptr in the buffer to point to element data
+                buf_arr->data = (relptr_t)*data_cursor;
+
+                // Copy element data
+                size_t elem_width = schema->parameters[0]->width;
+                size_t total_elem_bytes = elem_width * orig_arr->size;
+                memcpy(buf + *data_cursor, orig_data, total_elem_bytes);
+
+                size_t elem_start = *data_cursor;
+                *data_cursor += total_elem_bytes;
+
+                // Recurse into elements if they contain variable-width children
+                if (!schema_is_fixed_width(schema->parameters[0])) {
+                    for (size_t i = 0; i < orig_arr->size; i++) {
+                        TRY(flatten_fixup, buf, elem_start + i * elem_width,
+                            (const char*)orig_data + i * elem_width,
+                            schema->parameters[0], data_cursor);
+                    }
+                }
+            }
+            break;
+        case MORLOC_TUPLE:
+        case MORLOC_MAP:
+            for (size_t i = 0; i < schema->size; i++) {
+                TRY(flatten_fixup, buf, buf_offset + schema->offsets[i],
+                    (const char*)data + schema->offsets[i],
+                    schema->parameters[i], data_cursor);
+            }
+            break;
+        case MORLOC_OPTIONAL:
+            {
+                uint8_t tag = *((const uint8_t*)(buf + buf_offset));
+                if (tag != 0) {
+                    TRY(flatten_fixup, buf, buf_offset + schema->offsets[0],
+                        (const char*)data + schema->offsets[0],
+                        schema->parameters[0], data_cursor);
+                }
+            }
+            break;
+        case MORLOC_TENSOR:
+            {
+                Tensor* orig = (Tensor*)data;
+                Tensor* buf_tensor = (Tensor*)(buf + buf_offset);
+
+                if (orig->total_elements == 0) {
+                    buf_tensor->shape = 0;
+                    buf_tensor->data = 0;
+                    break;
+                }
+
+                size_t ndim = schema_tensor_ndim(schema);
+
+                // Copy shape array
+                char* resolve_err = NULL;
+                int64_t* orig_shape = (int64_t*)rel2abs(orig->shape, &resolve_err);
+                if (resolve_err) { free(resolve_err); RAISE("Failed to resolve tensor shape relptr"); }
+                *data_cursor = ALIGN_UP(*data_cursor, _Alignof(int64_t));
+                buf_tensor->shape = (relptr_t)*data_cursor;
+                memcpy(buf + *data_cursor, orig_shape, ndim * sizeof(int64_t));
+                *data_cursor += ndim * sizeof(int64_t);
+
+                // Copy data buffer
+                char* data_err = NULL;
+                void* orig_data = rel2abs(orig->data, &data_err);
+                if (data_err) { free(data_err); RAISE("Failed to resolve tensor data relptr"); }
+                size_t elem_align = schema_alignment(schema->parameters[0]);
+                *data_cursor = ALIGN_UP(*data_cursor, elem_align);
+                buf_tensor->data = (relptr_t)*data_cursor;
+                size_t data_bytes = orig->total_elements * schema->parameters[0]->width;
+                memcpy(buf + *data_cursor, orig_data, data_bytes);
+                *data_cursor += data_bytes;
+            }
+            break;
+        default:
+            // Primitives: already copied by parent's memcpy, nothing to fix
+            break;
+    }
+    return 0;
+}
+
+int flatten_voidstar_to_buffer(
+    const void* data,
+    const Schema* schema,
+    uint8_t** out_buf,
+    size_t* out_size,
+    ERRMSG
+){
+    INT_RETURN_SETUP
+
+    size_t total_size = TRY(calculate_voidstar_size, data, schema);
+
+    // Zero-init so padding bytes are deterministic
+    uint8_t* buf = (uint8_t*)calloc(1, total_size);
+    RAISE_IF(buf == NULL, "calloc failed for voidstar flatten buffer")
+
+    // Phase 1: Copy root binder in-place (preserves layout and padding)
+    memcpy(buf, data, schema->width);
+
+    // Phase 2: Fix up relptrs and copy variable-length data
+    size_t data_cursor = schema->width;
+    if (flatten_fixup(buf, 0, data, schema, &data_cursor, &CHILD_ERRMSG) != 0) {
+        free(buf);
+        RAISE("%s", CHILD_ERRMSG)
+    }
+
+    *out_buf = buf;
+    *out_size = total_size;
+    return 0;
+}
+
+uint8_t* make_data_packet_auto(
+    void* voidstar,
+    relptr_t relptr,
+    const Schema* schema,
+    ERRMSG
+){
+    PTR_RETURN_SETUP(uint8_t)
+
+    size_t flat_size = TRY(calculate_voidstar_size, voidstar, schema);
+
+    if (flat_size <= MORLOC_INLINE_THRESHOLD) {
+        uint8_t* blob = NULL;
+        size_t blob_size = 0;
+        TRY(flatten_voidstar_to_buffer, voidstar, schema, &blob, &blob_size);
+
+        uint8_t* packet = make_morloc_data_packet_with_schema(
+            blob, blob_size,
+            schema,
+            PACKET_SOURCE_MESG,
+            PACKET_FORMAT_VOIDSTAR,
+            PACKET_COMPRESSION_NONE,
+            PACKET_ENCRYPTION_NONE,
+            PACKET_STATUS_PASS
+        );
+        free(blob);
+        RAISE_IF(packet == NULL, "Failed to create inline data packet")
+        return packet;
+    }
+
+    return make_standard_data_packet(relptr, schema);
 }
 
 int print_morloc_data_packet(const uint8_t* packet, const Schema* schema, ERRMSG){
@@ -677,8 +905,16 @@ int print_morloc_data_packet(const uint8_t* packet, const Schema* schema, ERRMSG
 
     switch (source) {
         case PACKET_SOURCE_MESG:
+            if (format == PACKET_FORMAT_VOIDSTAR) {
+                // Inline voidstar: print as-is (header + metadata + flat blob)
+                TRY(print_binary, (char*)packet, packet_size);
+            } else {
+                // verbatim print messages
+                TRY(print_binary, (char*)packet, packet_size);
+            }
+            break;
         case PACKET_SOURCE_FILE:
-            // verbatim print messages and files
+            // verbatim print files
             TRY(print_binary, (char*)packet, packet_size);
             break;
         case PACKET_SOURCE_RPTR:

@@ -14,9 +14,9 @@ type Cpp => Real = "double"
 type Py => Real = "float"
 type R => Real = "double"
 
-cid a :: a -> a 
-rid a :: a -> a 
-pid a :: a -> a 
+cid :: a -> a 
+rid :: a -> a 
+pid :: a -> a 
 
 -- 1 / n, raise an error if n == 0
 cdiv :: Real -> Real

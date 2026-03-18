@@ -1,7 +1,7 @@
 -- base module defines a general typeclass and function using it
 module foo (*)
 class Addable a where
-    add a :: a -> a -> a
+    add :: a -> a -> a
 inc :: Int -> Int
 inc = add 1
 

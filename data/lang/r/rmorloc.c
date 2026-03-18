@@ -169,6 +169,26 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
                 return size;
             }
 
+        case MORLOC_TENSOR:
+            {
+                size_t ndim = schema_tensor_ndim(schema);
+                size_t elem_width = schema->parameters[0]->width;
+                SEXP dim = getAttrib(obj, R_DimSymbol);
+                size_t total = 1;
+                if (dim != R_NilValue) {
+                    for (int i = 0; i < length(dim); i++)
+                        total *= (size_t)INTEGER(dim)[i];
+                } else {
+                    total = (size_t)XLENGTH(obj);
+                }
+                size = sizeof(Tensor);
+                size += _Alignof(int64_t) - 1;
+                size += ndim * sizeof(int64_t);
+                size += schema_alignment(schema->parameters[0]) - 1;
+                size += total * elem_width;
+                return size;
+            }
+
         default:
             MORLOC_ERROR("Unhandled schema type");
             break;
@@ -432,6 +452,130 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
             }
             break;
 
+        case MORLOC_TENSOR:
+            {
+                size_t ndim = schema_tensor_ndim(schema);
+                size_t elem_width = schema->parameters[0]->width;
+
+                // Get shape from dim attribute (or length for 1D)
+                SEXP dim = getAttrib(obj, R_DimSymbol);
+                int64_t shape[5];
+                size_t total = 1;
+                if (dim != R_NilValue) {
+                    for (size_t i = 0; i < ndim; i++) {
+                        shape[i] = (int64_t)INTEGER(dim)[i];
+                        total *= (size_t)shape[i];
+                    }
+                } else {
+                    shape[0] = (int64_t)XLENGTH(obj);
+                    total = (size_t)shape[0];
+                }
+
+                Tensor* tensor = (Tensor*)dest;
+                tensor->total_elements = total;
+                tensor->device_type = 0;
+                tensor->device_id = 0;
+
+                if (total == 0) {
+                    tensor->shape = RELNULL;
+                    tensor->data = RELNULL;
+                    break;
+                }
+
+                // Write shape
+                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, _Alignof(int64_t));
+                tensor->shape = R_TRY(abs2rel, (absptr_t)*cursor);
+                int64_t* shape_dst = (int64_t*)*cursor;
+                for (size_t i = 0; i < ndim; i++) shape_dst[i] = shape[i];
+                *cursor = (char*)*cursor + ndim * sizeof(int64_t);
+
+                // Write data: transpose from column-major (R) to row-major (C)
+                size_t data_align = schema_alignment(schema->parameters[0]);
+                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, data_align);
+                tensor->data = R_TRY(abs2rel, (absptr_t)*cursor);
+
+                    // Coerce R object to match schema element type
+                SEXP coerced = obj;
+                int need_protect = 0;
+                morloc_serial_type etype = schema->parameters[0]->type;
+                if ((etype == MORLOC_FLOAT64 || etype == MORLOC_FLOAT32) && !isReal(obj)) {
+                    coerced = PROTECT(coerceVector(obj, REALSXP));
+                    need_protect = 1;
+                } else if (etype != MORLOC_FLOAT64 && etype != MORLOC_FLOAT32 && etype != MORLOC_BOOL && !isInteger(obj)) {
+                    coerced = PROTECT(coerceVector(obj, INTSXP));
+                    need_protect = 1;
+                }
+
+                if (ndim == 1) {
+                    // 1D: no transpose needed
+                    if (isReal(coerced)) {
+                        memcpy(*cursor, REAL(coerced), total * elem_width);
+                    } else if (isInteger(coerced)) {
+                        memcpy(*cursor, INTEGER(coerced), total * elem_width);
+                    } else if (isLogical(coerced)) {
+                        int* src = LOGICAL(coerced);
+                        uint8_t* dst = (uint8_t*)*cursor;
+                        for (size_t i = 0; i < total; i++) dst[i] = (uint8_t)(src[i] != 0);
+                    }
+                } else if (ndim == 2) {
+                    size_t nrows = (size_t)shape[0];
+                    size_t ncols = (size_t)shape[1];
+                    if (isReal(coerced)) {
+                        double* src = REAL(coerced);
+                        double* dst = (double*)*cursor;
+                        for (size_t r = 0; r < nrows; r++)
+                            for (size_t c = 0; c < ncols; c++)
+                                dst[r * ncols + c] = src[c * nrows + r];
+                    } else if (isInteger(coerced)) {
+                        int* src = INTEGER(coerced);
+                        int* dst = (int*)*cursor;
+                        for (size_t r = 0; r < nrows; r++)
+                            for (size_t c = 0; c < ncols; c++)
+                                dst[r * ncols + c] = src[c * nrows + r];
+                    }
+                } else {
+                    size_t col_strides[5];
+                    col_strides[0] = 1;
+                    for (size_t d = 1; d < ndim; d++)
+                        col_strides[d] = col_strides[d-1] * (size_t)shape[d-1];
+                    size_t row_strides[5];
+                    row_strides[ndim-1] = 1;
+                    for (size_t d = ndim-1; d > 0; d--)
+                        row_strides[d-1] = row_strides[d] * (size_t)shape[d];
+
+                    if (isReal(coerced)) {
+                        double* src = REAL(coerced);
+                        double* dst = (double*)*cursor;
+                        for (size_t i = 0; i < total; i++) {
+                            size_t rem = i;
+                            size_t col_idx = 0;
+                            for (size_t d = 0; d < ndim; d++) {
+                                size_t coord = rem / row_strides[d];
+                                rem %= row_strides[d];
+                                col_idx += coord * col_strides[d];
+                            }
+                            dst[i] = src[col_idx];
+                        }
+                    } else if (isInteger(coerced)) {
+                        int* src = INTEGER(coerced);
+                        int* dst = (int*)*cursor;
+                        for (size_t i = 0; i < total; i++) {
+                            size_t rem = i;
+                            size_t col_idx = 0;
+                            for (size_t d = 0; d < ndim; d++) {
+                                size_t coord = rem / row_strides[d];
+                                rem %= row_strides[d];
+                                col_idx += coord * col_strides[d];
+                            }
+                            dst[i] = src[col_idx];
+                        }
+                    }
+                }
+                if (need_protect) UNPROTECT(1);
+                *cursor = (char*)*cursor + total * elem_width;
+            }
+            break;
+
         default:
             MORLOC_ERROR("Unhandled schema type");
             break;
@@ -461,7 +605,7 @@ static void* to_voidstar(SEXP obj, const Schema* schema) {
 
 // {{{ from_voidstar
 
-static SEXP from_voidstar(const void* data, const Schema* schema) {
+static SEXP from_voidstar(const void* data, const Schema* schema, const void* base_ptr) {
     MAYFAIL
 
     if(data == NULL){
@@ -513,7 +657,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                 if (schema->hint != NULL && strcmp(schema->hint, "raw") == 0){
                     Array* raw_array = (Array*)data;
                     if(raw_array->size > 0){
-                        absptr_t tmp_ptr = R_TRY(rel2abs, raw_array->data);
+                        void* tmp_ptr = R_TRY(resolve_relptr, raw_array->data, base_ptr);
                         obj = PROTECT(allocVector(RAWSXP, raw_array->size));
                         memcpy(RAW(obj), tmp_ptr, raw_array->size);
                     } else {
@@ -523,7 +667,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                 } else {
                     Array* str_array = (Array*)data;
                     if(str_array->size > 0){
-                        absptr_t tmp_ptr = R_TRY(rel2abs, str_array->data);
+                        void* tmp_ptr = R_TRY(resolve_relptr, str_array->data, base_ptr);
                         SEXP chr = PROTECT(mkCharLen(tmp_ptr, str_array->size));
                         obj = PROTECT(ScalarString(chr));
                     } else {
@@ -547,7 +691,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             LOGICAL(obj)[i] = (bool)*(uint8_t*)(start + i) ? TRUE : FALSE;
                         }
@@ -559,7 +703,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             INTEGER(obj)[i] = (int)(*(int8_t*)(start + i * sizeof(int8_t)));
                         }
@@ -571,7 +715,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             INTEGER(obj)[i] = (int)(*(int16_t*)(start + i * sizeof(int16_t)));
                         }
@@ -583,8 +727,10 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        absptr_t tmp_ptr = R_TRY(rel2abs, array->data);
-                        memcpy(INTEGER(obj), tmp_ptr, array->size * sizeof(int32_t));
+                        {
+                            void* tmp_ptr = R_TRY(resolve_relptr, array->data, base_ptr);
+                            memcpy(INTEGER(obj), tmp_ptr, array->size * sizeof(int32_t));
+                        }
                         UNPROTECT(1);
                         break;
                     case MORLOC_SINT64:
@@ -593,7 +739,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             REAL(obj)[i] = (double)(*(int64_t*)(start + i * sizeof(int64_t)));
                         }
@@ -606,7 +752,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         memcpy(RAW(obj), start, array->size * sizeof(uint8_t));
                         UNPROTECT(1);
                         break;
@@ -616,7 +762,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             INTEGER(obj)[i] = (int)(*(uint16_t*)(start + i * sizeof(uint16_t)));
                         }
@@ -628,7 +774,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             REAL(obj)[i] = (double)(*(uint32_t*)(start + i * sizeof(uint32_t)));
                         }
@@ -641,7 +787,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             REAL(obj)[i] = (double)(*(uint64_t*)(start + i * sizeof(uint64_t)));
                         }
@@ -653,7 +799,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
                             REAL(obj)[i] = (double)(*(float*)(start + i * sizeof(float)));
                         }
@@ -665,7 +811,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(rel2abs, array->data);
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         memcpy(REAL(obj), start, array->size * sizeof(double));
                         UNPROTECT(1);
                         break;
@@ -676,7 +822,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                                 UNPROTECT(1);
                                 break;
                             }
-                            start = (char*)R_TRY(rel2abs, array->data);
+                            start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                             size_t width = schema->width;
                             for (size_t i = 0; i < array->size; i++) {
                                 Array* str_array = (Array*)(start + i * width);
@@ -684,7 +830,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                                 if(str_array->size == 0){
                                     item = PROTECT(mkCharLen("", 0));
                                 } else {
-                                    absptr_t str_ptr = R_TRY_WITH(UNPROTECT(1), rel2abs, str_array->data);
+                                    void* str_ptr = R_TRY_WITH(UNPROTECT(1), resolve_relptr, str_array->data, base_ptr);
                                     item = PROTECT(mkCharLen(str_ptr, str_array->size));
                                 }
                                 UNPROTECT(1);
@@ -700,10 +846,10 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
                                 UNPROTECT(1);
                                 break;
                             }
-                            start = (char*)R_TRY(rel2abs, array->data);
+                            start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                             size_t width = element_schema->width;
                             for (size_t i = 0; i < array->size; i++) {
-                                SEXP item = from_voidstar(start + width * i, element_schema);
+                                SEXP item = from_voidstar(start + width * i, element_schema, base_ptr);
                                 if (item == R_NilValue) {
                                     UNPROTECT(1);
                                     obj = R_NilValue;
@@ -721,7 +867,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
             obj = PROTECT(allocVector(VECSXP, schema->size));
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
-                SEXP item = from_voidstar(item_ptr, schema->parameters[i]);
+                SEXP item = from_voidstar(item_ptr, schema->parameters[i], base_ptr);
                 if (item == R_NilValue) {
                     UNPROTECT(1);
                     obj = R_NilValue;
@@ -737,7 +883,7 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
             SEXP names = PROTECT(allocVector(STRSXP, schema->size));
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
-                SEXP value = from_voidstar(item_ptr, schema->parameters[i]);
+                SEXP value = from_voidstar(item_ptr, schema->parameters[i], base_ptr);
                 if (value == R_NilValue) {
                     UNPROTECT(2);
                     obj = R_NilValue;
@@ -755,7 +901,131 @@ static SEXP from_voidstar(const void* data, const Schema* schema) {
             if (tag == 0) {
                 return R_NilValue;
             }
-            obj = from_voidstar((const char*)data + schema->offsets[0], schema->parameters[0]);
+            obj = from_voidstar((const char*)data + schema->offsets[0], schema->parameters[0], base_ptr);
+            break;
+        }
+        case MORLOC_TENSOR: {
+            const Tensor* tensor = (const Tensor*)data;
+            size_t ndim = schema_tensor_ndim(schema);
+            size_t total = tensor->total_elements;
+
+            if (total == 0) {
+                if (isReal(obj)) {
+                    obj = PROTECT(allocVector(REALSXP, 0));
+                } else {
+                    obj = PROTECT(allocVector(INTSXP, 0));
+                }
+                UNPROTECT(1);
+                break;
+            }
+
+            const int64_t* shape = (const int64_t*)resolve_relptr(tensor->shape, base_ptr, NULL);
+            const void* tdata = resolve_relptr(tensor->data, base_ptr, NULL);
+
+            // Allocate R vector
+            int sexptype;
+            switch (schema->parameters[0]->type) {
+                case MORLOC_FLOAT32:
+                case MORLOC_FLOAT64: sexptype = REALSXP; break;
+                case MORLOC_BOOL:    sexptype = LGLSXP; break;
+                default:             sexptype = INTSXP; break;
+            }
+
+            obj = PROTECT(allocVector(sexptype, (R_xlen_t)total));
+
+            if (ndim == 1) {
+                // 1D: no transpose
+                if (sexptype == REALSXP) {
+                    if (schema->parameters[0]->type == MORLOC_FLOAT32) {
+                        const float* src = (const float*)tdata;
+                        double* dst = REAL(obj);
+                        for (size_t i = 0; i < total; i++) dst[i] = (double)src[i];
+                    } else {
+                        memcpy(REAL(obj), tdata, total * sizeof(double));
+                    }
+                } else if (sexptype == INTSXP) {
+                    size_t elem_w = schema->parameters[0]->width;
+                    if (elem_w == sizeof(int)) {
+                        memcpy(INTEGER(obj), tdata, total * sizeof(int));
+                    } else {
+                        // Widen or narrow to int
+                        int* dst = INTEGER(obj);
+                        const char* src = (const char*)tdata;
+                        for (size_t i = 0; i < total; i++) {
+                            int64_t v = 0;
+                            memcpy(&v, src + i * elem_w, elem_w);
+                            dst[i] = (int)v;
+                        }
+                    }
+                } else if (sexptype == LGLSXP) {
+                    const uint8_t* src = (const uint8_t*)tdata;
+                    int* dst = LOGICAL(obj);
+                    for (size_t i = 0; i < total; i++) dst[i] = src[i] ? 1 : 0;
+                }
+            } else if (ndim == 2) {
+                // 2D: row-major to col-major transpose
+                size_t nrows = (size_t)shape[0];
+                size_t ncols = (size_t)shape[1];
+                if (sexptype == REALSXP) {
+                    const double* src = (const double*)tdata;
+                    double* dst = REAL(obj);
+                    for (size_t r = 0; r < nrows; r++)
+                        for (size_t c = 0; c < ncols; c++)
+                            dst[c * nrows + r] = src[r * ncols + c];
+                } else if (sexptype == INTSXP) {
+                    const int* src = (const int*)tdata;
+                    int* dst = INTEGER(obj);
+                    for (size_t r = 0; r < nrows; r++)
+                        for (size_t c = 0; c < ncols; c++)
+                            dst[c * nrows + r] = src[r * ncols + c];
+                }
+            } else {
+                // General N-D: row-major to col-major
+                size_t col_strides[5];
+                col_strides[0] = 1;
+                for (size_t d = 1; d < ndim; d++)
+                    col_strides[d] = col_strides[d-1] * (size_t)shape[d-1];
+                size_t row_strides[5];
+                row_strides[ndim-1] = 1;
+                for (size_t d = ndim-1; d > 0; d--)
+                    row_strides[d-1] = row_strides[d] * (size_t)shape[d];
+
+                if (sexptype == REALSXP) {
+                    const double* src = (const double*)tdata;
+                    double* dst = REAL(obj);
+                    for (size_t i = 0; i < total; i++) {
+                        // i is row-major index, compute col-major index
+                        size_t rem = i;
+                        size_t col_idx = 0;
+                        for (size_t d = 0; d < ndim; d++) {
+                            size_t coord = rem / row_strides[d];
+                            rem %= row_strides[d];
+                            col_idx += coord * col_strides[d];
+                        }
+                        dst[col_idx] = src[i];
+                    }
+                } else if (sexptype == INTSXP) {
+                    const int* src = (const int*)tdata;
+                    int* dst = INTEGER(obj);
+                    for (size_t i = 0; i < total; i++) {
+                        size_t rem = i;
+                        size_t col_idx = 0;
+                        for (size_t d = 0; d < ndim; d++) {
+                            size_t coord = rem / row_strides[d];
+                            rem %= row_strides[d];
+                            col_idx += coord * col_strides[d];
+                        }
+                        dst[col_idx] = src[i];
+                    }
+                }
+            }
+
+            // Set dim attribute
+            SEXP r_dim = PROTECT(allocVector(INTSXP, (R_xlen_t)ndim));
+            for (size_t i = 0; i < ndim; i++)
+                INTEGER(r_dim)[i] = (int)shape[i];
+            setAttrib(obj, R_DimSymbol, r_dim);
+            UNPROTECT(2);
             break;
         }
         default:
@@ -1071,9 +1341,60 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
         MORLOC_ERROR("schema must be a single string");
     }
 
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
+    const char* schema_cstr = CHAR(STRING_ELT(schema_str_r, 0));
+
+    char* schema_str = strdup(schema_cstr);
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
+
+    // Arrow dispatch: if schema hint is "arrow", use Arrow C Data Interface
+    if (schema->hint && strcmp(schema->hint, "arrow") == 0) {
+        // Export R arrow RecordBatch via C Data Interface -> copy to shm -> packet
+        // arrow::ExportRecordBatch(batch, array_ptr, schema_ptr)
+        struct ArrowSchema arrow_schema;
+        struct ArrowArray arrow_array;
+        memset(&arrow_schema, 0, sizeof(arrow_schema));
+        memset(&arrow_array, 0, sizeof(arrow_array));
+
+        SEXP arrow_ns = PROTECT(R_FindNamespace(mkString("arrow")));
+        SEXP export_fn = PROTECT(findVarInFrame(arrow_ns, install("ExportRecordBatch")));
+        if (export_fn == R_UnboundValue) {
+            UNPROTECT(2);
+            free_schema(schema);
+            MORLOC_ERROR("arrow::ExportRecordBatch not found; is the arrow package installed?");
+        }
+
+        SEXP array_ptr_r = PROTECT(R_MakeExternalPtr(&arrow_array, R_NilValue, R_NilValue));
+        SEXP schema_ptr_r = PROTECT(R_MakeExternalPtr(&arrow_schema, R_NilValue, R_NilValue));
+        SEXP call = PROTECT(lang4(export_fn, obj_r, array_ptr_r, schema_ptr_r));
+        eval(call, arrow_ns);
+        UNPROTECT(5);
+
+        char* errmsg = NULL;
+        relptr_t relptr = arrow_to_shm(&arrow_array, &arrow_schema, &errmsg);
+
+        if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+        if (arrow_array.release) arrow_array.release(&arrow_array);
+
+        if (errmsg) {
+            free_schema(schema);
+            MORLOC_ERROR("Arrow export failed: %s", errmsg);
+        }
+
+        uint8_t* packet = make_arrow_data_packet(relptr, schema);
+        if (!packet) {
+            free_schema(schema);
+            MORLOC_ERROR("Failed to create arrow data packet");
+        }
+
+        size_t packet_size = R_TRY_WITH({free(packet); free_schema(schema);}, morloc_packet_size, packet);
+        SEXP result = PROTECT(allocVector(RAWSXP, packet_size));
+        memcpy(RAW(result), packet, packet_size);
+        free(packet);
+        free_schema(schema);
+        UNPROTECT(1);
+        return result;
+    }
 
     void* voidstar = to_voidstar(obj_r, schema);
     if (!voidstar) {
@@ -1083,7 +1404,17 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 
     relptr_t relptr = R_TRY_WITH(free_schema(schema), abs2rel, voidstar);
 
-    uint8_t* packet = make_standard_data_packet(relptr, schema);
+    uint8_t* packet = R_TRY_WITH(free_schema(schema), make_data_packet_auto, voidstar, relptr, schema);
+
+    const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
+    if (hdr->command.data.source != PACKET_SOURCE_RPTR) {
+        // Data inlined in packet -- free SHM immediately
+        char* free_err = NULL;
+        shfree_by_schema((absptr_t)voidstar, schema, &free_err);
+        if (free_err) { free(free_err); free_err = NULL; }
+        shfree((absptr_t)voidstar, &free_err);
+        if (free_err) { free(free_err); }
+    }
 
     size_t packet_size = R_TRY_WITH({free(packet); free_schema(schema);}, morloc_packet_size, packet);
 
@@ -1141,13 +1472,74 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
     uint8_t* packet = RAW(packet_r);
     size_t packet_size = (size_t)LENGTH(packet_r);
 
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
+    const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
+    uint8_t source = header->command.data.source;
+    uint8_t format = header->command.data.format;
+
+    const char* schema_cstr = CHAR(STRING_ELT(schema_str_r, 0));
+
+    char* schema_str = strdup(schema_cstr);
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
+    // Arrow dispatch: if packet format is Arrow, import via C Data Interface
+    if (format == PACKET_FORMAT_ARROW) {
+        uint8_t* arrow_ptr = R_TRY_WITH(free_schema(schema),
+            get_morloc_data_packet_value, packet, schema);
+        const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)arrow_ptr;
+
+        struct ArrowSchema arrow_schema;
+        struct ArrowArray arrow_array;
+        char* arrow_err = NULL;
+        arrow_from_shm(arrow_hdr, &arrow_schema, &arrow_array, &arrow_err);
+        if (arrow_err) {
+            if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+            if (arrow_array.release) arrow_array.release(&arrow_array);
+            free_schema(schema);
+            MORLOC_ERROR("Arrow import failed: %s", arrow_err);
+        }
+
+        // Import via R arrow package: arrow::ImportRecordBatch(array_ptr, schema_ptr)
+        SEXP arrow_ns = PROTECT(R_FindNamespace(mkString("arrow")));
+        SEXP import_fn = PROTECT(findVarInFrame(arrow_ns, install("ImportRecordBatch")));
+        if (import_fn == R_UnboundValue) {
+            if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+            if (arrow_array.release) arrow_array.release(&arrow_array);
+            UNPROTECT(2);
+            free_schema(schema);
+            MORLOC_ERROR("arrow::ImportRecordBatch not found; is the arrow package installed?");
+        }
+
+        SEXP array_ptr_r = PROTECT(R_MakeExternalPtr(&arrow_array, R_NilValue, R_NilValue));
+        SEXP schema_ptr_r = PROTECT(R_MakeExternalPtr(&arrow_schema, R_NilValue, R_NilValue));
+        SEXP call = PROTECT(lang3(import_fn, array_ptr_r, schema_ptr_r));
+        SEXP obj_r = PROTECT(eval(call, arrow_ns));
+        UNPROTECT(6);
+
+        // Incref shm so data stays alive
+        char* incref_err = NULL;
+        shincref((absptr_t)arrow_ptr, &incref_err);
+        if (incref_err) { free(incref_err); }
+
+        free_schema(schema);
+        return obj_r;
+    }
+
+    // Fast path: inline voidstar -- read directly from packet, no SHM needed
+    if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
+        const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
+        SEXP obj_r = from_voidstar((const void*)payload, schema, (const void*)payload);
+        free_schema(schema);
+        if (obj_r == NULL) {
+            MORLOC_ERROR("Failed to convert internal representation to R object");
+        }
+        return obj_r;
+    }
+
+    // SHM paths
     uint8_t* voidstar = R_TRY_WITH(free_schema(schema), get_morloc_data_packet_value, packet, schema);
 
-    SEXP obj_r = from_voidstar(voidstar, schema);
+    SEXP obj_r = from_voidstar(voidstar, schema, NULL);
     if (obj_r == NULL) {
         free_schema(schema);
         MORLOC_ERROR("Failed to convert internal representation to R object");

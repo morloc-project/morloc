@@ -215,20 +215,115 @@ forallWrap :: [TVar] -> TypeU -> TypeU
 forallWrap [] t = t
 forallWrap (v : vs) t = ForallU v (forallWrap vs t)
 
-quantifyType :: TypeU -> TypeU
-quantifyType t = forallWrap (nub (collectGenVars t)) t
+-- | Extract LabeledU wrappers from function argument types.
+-- Returns a map from nat var name to argument position index,
+-- and the type with all LabeledU stripped.
+extractLabels :: TypeU -> (Map.Map TVar Int, TypeU)
+extractLabels = go
   where
+    go (ForallU v t) = let (labels, t') = go t in (labels, ForallU v t')
+    go (FunU args ret) =
+      let (labels, args') = extractFromArgs 0 args
+          ret' = stripLabels ret
+       in (labels, FunU args' ret')
+    go t = (Map.empty, stripLabels t)
+
+    extractFromArgs :: Int -> [TypeU] -> (Map.Map TVar Int, [TypeU])
+    extractFromArgs _ [] = (Map.empty, [])
+    extractFromArgs idx (LabeledU v inner : rest) =
+      let (labels, rest') = extractFromArgs (idx + 1) rest
+       in (Map.insert v idx labels, stripLabels inner : rest')
+    extractFromArgs idx (t : rest) =
+      let (labels, rest') = extractFromArgs (idx + 1) rest
+       in (labels, stripLabels t : rest')
+
+    stripLabels :: TypeU -> TypeU
+    stripLabels (LabeledU _ t) = stripLabels t
+    stripLabels (ForallU v t) = ForallU v (stripLabels t)
+    stripLabels (FunU ts t) = FunU (map stripLabels ts) (stripLabels t)
+    stripLabels (AppU t ts) = AppU (stripLabels t) (map stripLabels ts)
+    stripLabels (NamU o v ps rs) = NamU o v (map stripLabels ps) [(k, stripLabels t) | (k, t) <- rs]
+    stripLabels (EffectU effs t) = EffectU effs (stripLabels t)
+    stripLabels (OptionalU t) = OptionalU (stripLabels t)
+    stripLabels (NatAddU a b) = NatAddU (stripLabels a) (stripLabels b)
+    stripLabels (NatMulU a b) = NatMulU (stripLabels a) (stripLabels b)
+    stripLabels (NatSubU a b) = NatSubU (stripLabels a) (stripLabels b)
+    stripLabels (NatDivU a b) = NatDivU (stripLabels a) (stripLabels b)
+    stripLabels (ExistU v (ps, pc) (rs, rc)) = ExistU v (map stripLabels ps, pc) (map (second stripLabels) rs, rc)
+    stripLabels t = t
+
+quantifyType :: TypeU -> TypeU
+quantifyType t =
+  let natVars = collectNatVars t
+      t' = promoteNatVars natVars t
+      typeVars = nub (collectGenVars t')
+   in forallWrap typeVars t'
+  where
+    -- Collect type variables (excluding NatVarU which are already promoted)
     collectGenVars :: TypeU -> [TVar]
     collectGenVars (VarU v@(TV name))
       | not (T.null name), isLower (T.head name) = [v]
       | otherwise = []
+    collectGenVars (NatVarU _) = []
     collectGenVars (ForallU v inner) = filter (/= v) (collectGenVars inner)
     collectGenVars (AppU f args) = collectGenVars f ++ concatMap collectGenVars args
     collectGenVars (FunU args ret) = concatMap collectGenVars args ++ collectGenVars ret
     collectGenVars (NamU _ _ ts entries) = concatMap collectGenVars ts ++ concatMap (collectGenVars . snd) entries
     collectGenVars (EffectU _ inner) = collectGenVars inner
     collectGenVars (OptionalU inner) = collectGenVars inner
+    collectGenVars (NatLitU _) = []
+    collectGenVars (NatAddU a b) = collectGenVars a ++ collectGenVars b
+    collectGenVars (NatMulU a b) = collectGenVars a ++ collectGenVars b
+    collectGenVars (NatSubU a b) = collectGenVars a ++ collectGenVars b
+    collectGenVars (NatDivU a b) = collectGenVars a ++ collectGenVars b
+    collectGenVars (LabeledU _ inner) = collectGenVars inner
     collectGenVars _ = []
+
+    -- Collect variables that appear in nat-kinded positions:
+    -- Only inside NatAddU, NatMulU, NatSubU, NatDivU.
+    -- Typedef-based detection (e.g., Tensor2 params) is handled by refineKinds.
+    collectNatVars :: TypeU -> Set.Set TVar
+    collectNatVars = go False
+      where
+        go inNat (VarU v@(TV name))
+          | inNat, not (T.null name), isLower (T.head name) = Set.singleton v
+          | otherwise = Set.empty
+        go _ (NatVarU v) = Set.singleton v
+        go _ (ForallU _ inner) = go False inner
+        go _ (AppU f args) = go False f <> Set.unions (map (go False) args)
+        go _ (FunU args ret) = Set.unions (map (go False) args) <> go False ret
+        go _ (NamU _ _ ts entries) = Set.unions (map (go False) ts) <> Set.unions (map (go False . snd) entries)
+        go _ (EffectU _ inner) = go False inner
+        go _ (OptionalU inner) = go False inner
+        go _ (NatLitU _) = Set.empty
+        go _ (NatAddU a b) = go True a <> go True b
+        go _ (NatMulU a b) = go True a <> go True b
+        go _ (NatSubU a b) = go True a <> go True b
+        go _ (NatDivU a b) = go True a <> go True b
+        go inNat (LabeledU _ inner) = go inNat inner
+        go _ _ = Set.empty
+
+-- | Promote VarU to NatVarU for variables identified as nat-kinded
+promoteNatVars :: Set.Set TVar -> TypeU -> TypeU
+promoteNatVars natVars = go
+  where
+    go (VarU v)
+      | Set.member v natVars = NatVarU v
+      | otherwise = VarU v
+    go t@(NatVarU _) = t
+    go (ExistU v (ps, pc) (rs, rc)) = ExistU v (map go ps, pc) (map (second go) rs, rc)
+    go (ForallU v t) = ForallU v (go t)
+    go (FunU ts t) = FunU (map go ts) (go t)
+    go (AppU t ts) = AppU (go t) (map go ts)
+    go (NamU o n ps rs) = NamU o n (map go ps) [(k, go t) | (k, t) <- rs]
+    go (EffectU effs t) = EffectU effs (go t)
+    go (OptionalU t) = OptionalU (go t)
+    go t@(NatLitU _) = t
+    go (NatAddU a b) = NatAddU (go a) (go b)
+    go (NatMulU a b) = NatMulU (go a) (go b)
+    go (NatSubU a b) = NatSubU (go a) (go b)
+    go (NatDivU a b) = NatDivU (go a) (go b)
+    go (LabeledU n t) = LabeledU n (go t)
 
 parseLang :: Located -> D Lang
 parseLang tok = do
@@ -601,13 +696,14 @@ desugarTopLevel (Loc sp (CModE maybeName export body)) = do
 desugarTopLevel (Loc sp (CImpE imp)) = do
   e <- freshExprSpan sp (ImpE imp)
   return [e]
-desugarTopLevel (Loc sp (CSigE name forallVars sigType)) = do
+desugarTopLevel (Loc sp (CSigE name sigType)) = do
   docs <- lookupDocsAt (startPos sp)
   let cmdDoc = processArgDocLines docs
   (cs, argDocs, t) <- desugarSigType (startPos sp) sigType
-  let t' = forallWrap (map TV forallVars) t
+  let t' = quantifyType t
       doc = ArgDocSig cmdDoc (init argDocs) (last argDocs)
-      et = EType t' (Set.fromList cs) doc
+      (labels, t'') = extractLabels t'
+      et = EType t'' (Set.fromList cs) doc labels
   e <- freshExprSpan sp (SigE (Signature name Nothing et))
   return [e]
 desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
@@ -724,7 +820,7 @@ desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
   e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t (ArgDocAlias docVars)))
   return [e]
 desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
-  let t = if null vs then VarU v else AppU (VarU v) (map (either VarU id) vs)
+  let t = if null vs then VarU v else AppU (VarU v) (map (either (VarU . fst) id) vs)
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias defaultValue)))
   return [e]
 desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
@@ -737,7 +833,7 @@ desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
   let entries = [(k, ty) | (_, k, ty) <- locEntries]
       entries' = desugarTableEntries nt entries
       doc = ArgDocRec recDocVars (zip (map fst entries') fieldDocs)
-      t = NamU nt v (map (either VarU id) vs) entries'
+      t = NamU nt v (map (either (VarU . fst) id) vs) entries'
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t doc))
   return [e]
 desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal) entries) = do
@@ -748,7 +844,7 @@ desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal
       return (Just (l, isTerminal))
   let con = if T.null conName then v else TV conName
       entries' = desugarTableEntries nt entries
-      t = NamU nt con (map (either VarU id) vs) entries'
+      t = NamU nt con (map (either (VarU . fst) id) vs) entries'
       doc = ArgDocRec defaultValue [(k, defaultValue) | (k, _) <- entries']
   e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t doc))
   return [e]
@@ -770,11 +866,12 @@ desugarClassHead (CCHMultiConstrained cs headType) = do
   return (cs, cn, vs)
 
 desugarSigItem :: CstSigItem -> D Signature
-desugarSigItem (CstSigItem name forallVars sigType) = do
+desugarSigItem (CstSigItem name sigType) = do
   (cs, argDocs, t) <- desugarSigType (Pos 0 0 "") sigType
-  let wrappedT = forallWrap (map TV forallVars) t
+  let wrappedT = quantifyType t
+      (labels, wrappedT') = extractLabels wrappedT
       doc = ArgDocSig defaultValue (init argDocs) (last argDocs)
-      et = EType wrappedT (Set.fromList cs) doc
+      et = EType wrappedT' (Set.fromList cs) doc labels
   return (Signature name Nothing et)
 
 --------------------------------------------------------------------

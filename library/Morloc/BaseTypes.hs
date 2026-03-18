@@ -31,6 +31,9 @@ module Morloc.BaseTypes
   , str
   , tuple
   , list
+  , vector
+  , matrix
+  , tensor
   , record
   , unitU
   , realU
@@ -112,6 +115,15 @@ list = TV "List"
 
 tuple :: Int -> TVar
 tuple k = TV $ "Tuple" <> pretty k
+
+vector :: TVar
+vector = TV "Vector"
+
+matrix :: TVar
+matrix = TV "Matrix"
+
+tensor :: Int -> TVar
+tensor k = TV $ "Tensor" <> pretty k
 
 record :: TVar
 record = TV "Record"

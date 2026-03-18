@@ -60,6 +60,7 @@ typedef struct __attribute__((packed)) packet_command_data_s {
 #define PACKET_FORMAT_TEXT     0x02
 #define PACKET_FORMAT_DATA     0x03 // raw binary data
 #define PACKET_FORMAT_VOIDSTAR 0x04 // binary morloc formatted data
+#define PACKET_FORMAT_ARROW    0x05 // Arrow format data
 
 // Compression algorithm
 #define PACKET_COMPRESSION_NONE  0x00 // uncompressed
@@ -115,6 +116,9 @@ static_assert(
     sizeof(morloc_packet_header_t) == 32,
     "Header size mismatch!"
 );
+
+// Inline threshold: voidstar data <= this size is embedded in packet payload
+#define MORLOC_INLINE_THRESHOLD (64 * 1024)
 
 #define MORLOC_METADATA_TYPE_SCHEMA_STRING 0x01
 #define MORLOC_METADATA_TYPE_XXHASH 0x02

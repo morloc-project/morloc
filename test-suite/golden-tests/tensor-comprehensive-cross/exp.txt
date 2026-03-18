@@ -1,0 +1,102 @@
+--- cpSum2d ---
+78
+--- pcSum2d ---
+78
+--- prSum2d ---
+78
+--- rpSum2d ---
+78
+--- crSum2d ---
+78
+--- rcSum2d ---
+78
+--- cpSum3d ---
+276
+--- pcSum3d ---
+276
+--- rTransposeVerify ---
+[1,2,3,24]
+--- cpSum1d ---
+55
+--- pcSum1d ---
+55
+--- prSum1d ---
+55
+--- rpSum1d ---
+55
+--- crSum1d ---
+55
+--- rcSum1d ---
+55
+--- cpSum4d ---
+276
+--- pcSum4d ---
+276
+--- prSum4d ---
+276
+--- rpSum4d ---
+276
+--- cpSumInt ---
+108
+--- pcSumInt ---
+108
+--- prSumInt ---
+108
+--- rpSumInt ---
+108
+--- crSumInt ---
+108
+--- rcSumInt ---
+108
+--- cpCountTrue ---
+4
+--- pcCountTrue ---
+4
+--- prCountTrue ---
+4
+--- rpCountTrue ---
+4
+--- crCountTrue ---
+4
+--- rcCountTrue ---
+4
+--- cpSumEmpty ---
+0
+--- pcSumEmpty ---
+0
+--- prSumEmpty ---
+0
+--- rpSumEmpty ---
+0
+--- cpSumSingle ---
+42
+--- pcSumSingle ---
+42
+--- prSumSingle ---
+42
+--- rpSumSingle ---
+42
+--- cpSumLarge ---
+12497500
+--- pcSumLarge ---
+12497500
+--- prSumLarge ---
+12497500
+--- rpSumLarge ---
+12497500
+--- crSumLarge ---
+12497500
+--- rcSumLarge ---
+12497500
+--- cpSumHuge ---
+1249975000
+--- pcSumHuge ---
+1249975000
+--- prSumHuge ---
+1249975000
+--- rpSumHuge ---
+1249975000
+--- crSumHuge ---
+1249975000
+--- rcSumHuge ---
+1249975000

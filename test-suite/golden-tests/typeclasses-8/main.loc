@@ -5,8 +5,8 @@ type Py => Str = "str"
 type Py => (List a) = "list" a
 
 class Monoid a where
-  mempty a :: a
-  mappend a :: a -> a -> a
+  mempty :: a
+  mappend :: a -> a -> a
 
 instance Monoid Str where
   source Py from "foo.py" ("appendStr" as mappend)

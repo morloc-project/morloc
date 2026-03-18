@@ -1,0 +1,74 @@
+-- Simple CNN inference for character recognition using morloc tensors.
+-- Architecture: conv2d(3x3, 2 filters) -> relu -> flatten -> dense(18->3) -> argmax
+-- Tests labeled nat params (m:Int syntax) and generic nat dimensions.
+
+module main
+  ( predictDigit
+  , testConv
+  , testRelu
+  , testFlatten
+  , testDense
+  )
+
+import root
+import root-cpp
+
+source Cpp from "cnn.hpp"
+  ( "makeImage"
+  , "makeKernels"
+  , "makeBias"
+  , "makeWeights"
+  , "makeDenseBias"
+  , "conv2d"
+  , "reluMap"
+  , "flatten3d"
+  , "dense"
+  , "argmax"
+  )
+
+-- Labeled params: Int args determine tensor dimensions
+makeImage :: h:Int -> w:Int -> Tensor2 h w Real
+makeKernels :: k:Int -> fh:Int -> fw:Int -> Tensor3 k fh fw Real
+makeBias :: k:Int -> Tensor1 k Real
+
+-- Generic dimensions: ops work for any tensor sizes
+conv2d :: Tensor2 h w Real -> Tensor3 k fh fw Real -> Tensor1 k Real -> Tensor3 k (h - fh + 1) (w - fw + 1) Real
+reluMap :: Tensor3 a b c Real -> Tensor3 a b c Real
+flatten3d :: Tensor3 a b c Real -> Tensor1 (a * b * c) Real
+
+-- Dense layer with generic dimensions
+makeWeights :: nout:Int -> nin:Int -> Tensor2 nout nin Real
+makeDenseBias :: n:Int -> Tensor1 n Real
+dense :: Tensor2 m n Real -> Tensor1 m Real -> Tensor1 n Real -> Tensor1 m Real
+
+-- Argmax: find index of maximum value
+argmax :: Tensor1 n Real -> Int
+
+-- Full pipeline: image -> predicted class
+predictDigit :: Int
+predictDigit =
+  let image = makeImage 5 5
+  let kernels = makeKernels 2 3 3
+  let bias = makeBias 2
+  let convOut = conv2d image kernels bias
+  let activated = reluMap convOut
+  let flat = flatten3d activated
+  let weights = makeWeights 3 18
+  let denseBias = makeDenseBias 3
+  let logits = dense weights denseBias flat
+  in argmax logits
+
+-- Individual layer tests
+-- testConv :: Tensor3 2 3 3 Real
+testConv = conv2d (makeImage 5 5) (makeKernels 2 3 3) (makeBias 2)
+
+-- testRelu :: Tensor3 2 3 3 Real
+testRelu = reluMap (conv2d (makeImage 5 5) (makeKernels 2 3 3) (makeBias 2))
+
+-- testFlatten :: Tensor1 18 Real
+testFlatten = flatten3d (reluMap (conv2d (makeImage 5 5) (makeKernels 2 3 3) (makeBias 2)))
+
+-- testDense :: Tensor1 3 Real
+testDense =
+  let flat = flatten3d (reluMap (conv2d (makeImage 5 5) (makeKernels 2 3 3) (makeBias 2)))
+  in dense (makeWeights 3 18) (makeDenseBias 3) flat

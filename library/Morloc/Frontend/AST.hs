@@ -25,6 +25,7 @@ module Morloc.Frontend.AST
   , findSources
   , maxIndex
   , getIndices
+  , mapTypeInExprI
   ) where
 
 import qualified Data.Set as Set
@@ -75,8 +76,8 @@ findSources _ = []
 -}
 findTypedefs ::
   ExprI ->
-  ( Map.Map TVar [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
-  , Map.Map Lang (Map.Map TVar [([Either TVar TypeU], TypeU, ArgDoc, Bool)])
+  ( Map.Map TVar [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)]
+  , Map.Map Lang (Map.Map TVar [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)])
   )
 findTypedefs (ExprI _ (TypE (ExprTypeE Nothing v vs t d))) = (Map.singleton v [(vs, t, d, False)], Map.empty)
 findTypedefs (ExprI _ (TypE (ExprTypeE (Just (lang, isTerminal)) v vs t d))) = (Map.empty, Map.singleton lang (Map.singleton v [(vs, t, d, isTerminal)]))
@@ -94,7 +95,7 @@ findSignatureTypeTerms = unique . f
   where
     f :: ExprI -> [TVar]
     f (ExprI _ (ModE _ es)) = concatMap f es
-    f (ExprI _ (SigE (Signature _ _ (EType t _ _)))) = findTypeTerms t
+    f (ExprI _ (SigE (Signature _ _ (EType t _ _ _)))) = findTypeTerms t
     f (ExprI _ (AssE _ _ es)) = concatMap f es
     f _ = []
 
@@ -104,12 +105,19 @@ findTypeTerms (VarU v@(TV x))
   | isGeneric x = []
   | otherwise = [v]
 findTypeTerms (ExistU _ (ps1, _) (rs2, _)) = concatMap findTypeTerms (ps1 ++ map snd rs2)
+findTypeTerms (NatVarU _) = []
 findTypeTerms (ForallU _ e) = findTypeTerms e
 findTypeTerms (FunU ts t) = concatMap findTypeTerms ts <> findTypeTerms t
 findTypeTerms (AppU t ts) = findTypeTerms t <> concatMap findTypeTerms ts
 findTypeTerms (NamU _ _ ps rs) = concatMap findTypeTerms (map snd rs <> ps)
 findTypeTerms (EffectU _ t) = findTypeTerms t
 findTypeTerms (OptionalU t) = findTypeTerms t
+findTypeTerms (NatLitU _) = []
+findTypeTerms (NatAddU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms (NatMulU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms (NatSubU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms (NatDivU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms (LabeledU _ t) = findTypeTerms t
 
 -- | Build the fixity map from top-level fixity declarations.
 findFixityMap :: ExprI -> MorlocMonad (Map.Map EVar (Associativity, Int))
@@ -212,3 +220,30 @@ getIndices (ExprI i (EvalE e)) = i : getIndices e
 getIndices (ExprI i (IntrinsicE _ es)) = i : concatMap getIndices es
 getIndices (ExprI i (ParenE e)) = i : getIndices e
 getIndices (ExprI i _) = [i]
+
+-- | Apply a type transformation to all types in signatures and type definitions.
+mapTypeInExprI :: (Monad m) => (TypeU -> TypeU) -> ExprI -> m ExprI
+mapTypeInExprI f = go
+  where
+    go (ExprI i (SigE (Signature v l (EType t cs doc labels)))) =
+      return $ ExprI i (SigE (Signature v l (EType (f t) cs doc labels)))
+    go (ExprI i (AnnE e t)) = do
+      e' <- go e
+      return $ ExprI i (AnnE e' (f t))
+    go (ExprI i (ModE m es)) = ExprI i . ModE m <$> mapM go es
+    go (ExprI i (AssE v e es)) = ExprI i <$> (AssE v <$> go e <*> mapM go es)
+    go (ExprI i (IstE cls ts es)) = ExprI i <$> (IstE cls (map f ts) <$> mapM go es)
+    go (ExprI i (LamE vs e)) = ExprI i . LamE vs <$> go e
+    go (ExprI i (AppE e es)) = ExprI i <$> (AppE <$> go e <*> mapM go es)
+    go (ExprI i (LstE es)) = ExprI i . LstE <$> mapM go es
+    go (ExprI i (TupE es)) = ExprI i . TupE <$> mapM go es
+    go (ExprI i (NamE rs)) = ExprI i . NamE <$> mapM (\(k, e) -> (,) k <$> go e) rs
+    go (ExprI i (LetE bindings body)) = do
+      bindings' <- mapM (\(v, e) -> (,) v <$> go e) bindings
+      body' <- go body
+      return $ ExprI i (LetE bindings' body')
+    go (ExprI i (IfE c t e)) = ExprI i <$> (IfE <$> go c <*> go t <*> go e)
+    go (ExprI i (DoBlockE e)) = ExprI i . DoBlockE <$> go e
+    go (ExprI i (EvalE e)) = ExprI i . EvalE <$> go e
+    go (ExprI i (IntrinsicE intr es)) = ExprI i . IntrinsicE intr <$> mapM go es
+    go e = return e

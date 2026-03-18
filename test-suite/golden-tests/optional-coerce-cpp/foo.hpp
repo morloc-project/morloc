@@ -9,6 +9,16 @@ T fromNull(const T& default_val, const std::optional<T>& x) {
     return *x;
 }
 
+template <typename T>
+T fromNull(const T& default_val, std::nullopt_t) {
+    return default_val;
+}
+
+template <typename T>
+T fromNull(const T&, const T& x) {
+    return x;
+}
+
 std::optional<int> addOpt(const std::optional<int>& x, const std::optional<int>& y) {
     if (!x.has_value() || !y.has_value()) return std::nullopt;
     return std::optional<int>(*x + *y);

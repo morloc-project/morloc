@@ -17,6 +17,7 @@
 #include <type_traits>
 
 #include "morloc.h"
+#include "mlc_tensor.hpp"
 
 // ============================================================
 // Type traits for container dispatch
@@ -86,6 +87,15 @@ auto to_vector(const Container& c) {
 
 absptr_t cpp_rel2abs(relptr_t ptr);
 relptr_t abs2rel_cpp(absptr_t ptr);
+
+// Resolve a relative pointer using either base-pointer arithmetic (inline data)
+// or SHM. When base_ptr is non-null, data lives in a contiguous malloc'd blob.
+static inline void* resolve_relptr_cpp(relptr_t relptr, const void* base_ptr) {
+    if (base_ptr) {
+        return (char*)base_ptr + relptr;
+    }
+    return cpp_rel2abs(relptr);
+}
 bool shfree_cpp(absptr_t ptr);
 Schema* parse_schema_cpp(const char* schema_ptr);
 void* shmalloc_cpp(size_t size);
@@ -115,7 +125,7 @@ inline size_t schema_alignment_cpp(const Schema* schema) {
         case MORLOC_SINT16: case MORLOC_UINT16: return 2;
         case MORLOC_SINT32: case MORLOC_UINT32: case MORLOC_FLOAT32: return 4;
         case MORLOC_SINT64: case MORLOC_UINT64: case MORLOC_FLOAT64:
-        case MORLOC_STRING: case MORLOC_ARRAY: return alignof(size_t);
+        case MORLOC_STRING: case MORLOC_ARRAY: case MORLOC_TENSOR: return alignof(size_t);
         case MORLOC_TUPLE: case MORLOC_MAP: {
             size_t max_align = 1;
             for (size_t i = 0; i < schema->size; i++) {
@@ -244,6 +254,20 @@ size_t get_shm_size(const Schema* schema, const std::stack<T>& data) {
 template<typename T>
 size_t get_shm_size(const Schema* schema, const std::queue<T>& data) {
     return get_shm_size(schema, to_vector(data));
+}
+
+// Tensor: header + shape array + contiguous data
+template<typename T, int NDim>
+size_t get_shm_size(const Schema* schema, const mlc::Tensor<T, NDim>& data) {
+    using S = mlc::tensor_storage_t<T>;
+    size_t total = sizeof(Tensor);
+    // alignment padding for shape array
+    total += alignof(int64_t) - 1;
+    total += NDim * sizeof(int64_t);
+    // alignment padding for element data
+    total += schema_alignment_cpp(schema->parameters[0]) - 1;
+    total += data.size() * sizeof(S);
+    return total;
 }
 
 
@@ -440,6 +464,39 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::opt
     return dest;
 }
 
+// Tensor: write Tensor header + shape array + contiguous data
+template<typename T, int NDim>
+void* toAnything(void* dest, void** cursor, const Schema* schema, const mlc::Tensor<T, NDim>& data) {
+    Tensor* result = static_cast<Tensor*>(dest);
+    result->total_elements = data.size();
+    result->device_type = 0;
+    result->device_id = 0;
+
+    if (data.size() == 0) {
+        result->shape = RELNULL;
+        result->data = RELNULL;
+        return dest;
+    }
+
+    // Write shape array
+    *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), alignof(int64_t)));
+    result->shape = abs2rel_cpp(static_cast<absptr_t>(*cursor));
+    int64_t* shape_dst = (int64_t*)*cursor;
+    for (int i = 0; i < NDim; i++) shape_dst[i] = data.shape()[i];
+    *cursor = (char*)*cursor + NDim * sizeof(int64_t);
+
+    // Write data buffer (contiguous row-major)
+    using S = mlc::tensor_storage_t<T>;
+    size_t elem_align = schema_alignment_cpp(schema->parameters[0]);
+    *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), elem_align));
+    result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
+    size_t data_bytes = data.size() * sizeof(S);
+    memcpy(*cursor, data.data(), data_bytes);
+    *cursor = (char*)*cursor + data_bytes;
+
+    return dest;
+}
+
 
 // ============================================================
 // fromAnything - single template with if constexpr dispatch
@@ -447,7 +504,7 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::opt
 
 // Forward declaration for recursive calls
 template<typename T>
-T fromAnything(const Schema* schema, const void* data, T* = nullptr);
+T fromAnything(const Schema* schema, const void* data, T* = nullptr, const void* base_ptr = nullptr);
 
 // Tuple helper (needs forward declaration of fromAnything)
 template<typename Tuple, size_t... Is>
@@ -455,15 +512,17 @@ Tuple fromTupleAnythingHelper(
   const Schema* schema,
   const void* anything,
   std::index_sequence<Is...>,
-  Tuple* = nullptr
+  Tuple* = nullptr,
+  const void* base_ptr = nullptr
 ) {
     return Tuple(fromAnything(schema->parameters[Is],
                               (char*)anything + schema->offsets[Is],
-                              static_cast<std::tuple_element_t<Is, Tuple>*>(nullptr))...);
+                              static_cast<std::tuple_element_t<Is, Tuple>*>(nullptr),
+                              base_ptr)...);
 }
 
 template<typename T>
-T fromAnything(const Schema* schema, const void* data, T*) {
+T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr) {
     if(data == NULL){
         throw std::runtime_error("Void error in fromAnything");
     }
@@ -475,7 +534,7 @@ T fromAnything(const Schema* schema, const void* data, T*) {
     else if constexpr (std::is_same_v<T, std::string>) {
         Array* array = (Array*)data;
         if(array->size > 0){
-            return std::string((char*)cpp_rel2abs(array->data), array->size);
+            return std::string((char*)resolve_relptr_cpp(array->data, base_ptr), array->size);
         }
         return std::string("");
     }
@@ -499,10 +558,8 @@ T fromAnything(const Schema* schema, const void* data, T*) {
             case MORLOC_UINT64:
             case MORLOC_FLOAT32:
             case MORLOC_FLOAT64: {
-                std::vector<ElemT> pv(
-                    (ElemT*)(cpp_rel2abs(array->data)),
-                    (ElemT*)(cpp_rel2abs(array->data)) + array->size
-                );
+                ElemT* arr_start = (ElemT*)resolve_relptr_cpp(array->data, base_ptr);
+                std::vector<ElemT> pv(arr_start, arr_start + array->size);
                 return pv;
             }
         }
@@ -510,9 +567,9 @@ T fromAnything(const Schema* schema, const void* data, T*) {
         // Complex element types
         result.reserve(array->size);
         const Schema* elem_schema = schema->parameters[0];
-        char* start = (char*)cpp_rel2abs(array->data);
+        char* start = (char*)resolve_relptr_cpp(array->data, base_ptr);
         for(size_t i = 0; i < array->size; i++){
-            result.push_back(fromAnything(elem_schema, (void*)(start + i * elem_schema->width), static_cast<ElemT*>(nullptr)));
+            result.push_back(fromAnything(elem_schema, (void*)(start + i * elem_schema->width), static_cast<ElemT*>(nullptr), base_ptr));
         }
         return result;
     }
@@ -523,19 +580,19 @@ T fromAnything(const Schema* schema, const void* data, T*) {
         if(array->size == 0) return result;
 
         const Schema* elem_schema = schema->parameters[0];
-        char* start = (char*)cpp_rel2abs(array->data);
+        char* start = (char*)resolve_relptr_cpp(array->data, base_ptr);
 
         constexpr bool reverse = is_std_stack<T>::value || is_std_forward_list<T>::value;
 
         if constexpr (reverse) {
             for (size_t i = array->size; i > 0; --i) {
-                auto elem = fromAnything(elem_schema, (void*)(start + (i-1) * elem_schema->width), static_cast<ElemT*>(nullptr));
+                auto elem = fromAnything(elem_schema, (void*)(start + (i-1) * elem_schema->width), static_cast<ElemT*>(nullptr), base_ptr);
                 if constexpr (is_std_stack<T>::value) result.push(std::move(elem));
                 else result.push_front(std::move(elem));
             }
         } else {
             for (size_t i = 0; i < array->size; ++i) {
-                auto elem = fromAnything(elem_schema, (void*)(start + i * elem_schema->width), static_cast<ElemT*>(nullptr));
+                auto elem = fromAnything(elem_schema, (void*)(start + i * elem_schema->width), static_cast<ElemT*>(nullptr), base_ptr);
                 if constexpr (is_std_queue<T>::value) result.push(std::move(elem));
                 else result.push_back(std::move(elem));
             }
@@ -546,14 +603,16 @@ T fromAnything(const Schema* schema, const void* data, T*) {
         return fromTupleAnythingHelper(
             schema, data,
             std::make_index_sequence<std::tuple_size_v<T>>{},
-            static_cast<T*>(nullptr)
+            static_cast<T*>(nullptr),
+            base_ptr
         );
     }
     else if constexpr (is_std_pair<T>::value) {
         return fromTupleAnythingHelper(
             schema, data,
             std::index_sequence<0, 1>{},
-            static_cast<T*>(nullptr)
+            static_cast<T*>(nullptr),
+            base_ptr
         );
     }
     else if constexpr (is_std_optional<T>::value) {
@@ -562,7 +621,22 @@ T fromAnything(const Schema* schema, const void* data, T*) {
         if (tag == 0) {
             return std::nullopt;
         }
-        return std::optional<InnerT>(fromAnything(schema->parameters[0], (const char*)data + schema->offsets[0], static_cast<InnerT*>(nullptr)));
+        return std::optional<InnerT>(fromAnything(schema->parameters[0], (const char*)data + schema->offsets[0], static_cast<InnerT*>(nullptr), base_ptr));
+    }
+    else if constexpr (mlc::is_mlc_tensor_v<T>) {
+        using ElemT = mlc::tensor_element_t<T>;
+        using StorageT = mlc::tensor_storage_t<ElemT>;
+        constexpr int NDim = mlc::tensor_ndim_v<T>;
+        const Tensor* tensor = (const Tensor*)data;
+
+        if (tensor->total_elements == 0) {
+            int64_t zero_shape[NDim] = {};
+            return T(zero_shape);
+        }
+
+        const int64_t* shape = (const int64_t*)resolve_relptr_cpp(tensor->shape, base_ptr);
+        StorageT* tdata = (StorageT*)resolve_relptr_cpp(tensor->data, base_ptr);
+        return T(tdata, shape, tensor->total_elements);
     }
     else {
         // Primitives (int, double, float, etc.)

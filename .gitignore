@@ -20,3 +20,7 @@ run/
 CLAUDE.md
 .claude/
 claude-memory/
+.RData
+.Rhistory
+pools/
+nexus

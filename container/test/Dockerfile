@@ -22,11 +22,17 @@ RUN DEBIAN_FRONTEND=noninteractive TZ=Antarctica/Troll apt-get -y install tzdata
 
 # hyperfine is needed for shell benchmarks
 RUN apt-get install -y r-base python3.10 libgsl-dev git pip hyperfine
-RUN python3 -m pip install --upgrade setuptools numpy
+RUN python3 -m pip install --upgrade setuptools numpy pyarrow
 
 # Set up R environment
 # stringi is needed for benchmarks
 RUN Rscript -e 'install.packages("stringi", repos  = "https://cloud.r-project.org")'
+
+# Install R Arrow package for cross-language Arrow IPC support
+ENV LIBARROW_MINIMAL=true
+ENV ARROW_S3=OFF
+ENV ARROW_GCS=OFF
+RUN Rscript -e 'install.packages("arrow", repos = "https://cloud.r-project.org")'
 
 # Cleanup to reduce image size
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*

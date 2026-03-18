@@ -32,6 +32,7 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) __attribute_
 // AUTO include statements end
 
 // Proper linking of cppmorloc requires it be included AFTER the custom modules
+#include "mlc_arrow.hpp"
 #include "cppmorloc.hpp"
 
 #define PROPAGATE_ERROR(errmsg) \
@@ -119,17 +120,56 @@ template <typename T>
 uint8_t* _put_value(const T& value, const std::string& schema_str) {
     Schema* schema = get_cached_schema(schema_str.c_str());
 
-    void* voidstar = nullptr;
-    try {
-        voidstar = toAnything(schema, value);
-        relptr_t relptr = abs2rel_cpp(voidstar);
-        uint8_t* packet = make_standard_data_packet(relptr, schema);
-        // Track SHM for deferred cleanup
-        _shm_tracker.push_back({(absptr_t)voidstar, schema});
+    if constexpr (std::is_same_v<T, mlc::ArrowTable>) {
+        // Arrow export: move table data into SHM, build packet.
+        // const_cast is safe here: the value is always a temporary from
+        // a manifold call, never a truly const object.
+        mlc::ArrowTable& tbl = const_cast<mlc::ArrowTable&>(value);
+        relptr_t relptr = tbl.move_to_shm();
+
+        uint8_t* packet = make_arrow_data_packet(relptr, schema);
+        if (!packet) { throw std::runtime_error("Failed to create arrow data packet"); }
+
+        char* err = nullptr;
+        void* shm_ptr = rel2abs(relptr, &err);
+        if (err) { free(err); }
+        if (shm_ptr) { _shm_tracker.push_back({(absptr_t)shm_ptr, nullptr}); }
         return packet;
-    } catch (...) {
-        if (voidstar) shfree_cpp(voidstar);
-        throw;
+    } else {
+        // Arrow dispatch: if schema hint is "arrow", the C++ type must be mlc::ArrowTable
+        if (schema->hint && strcmp(schema->hint, "arrow") == 0) {
+            throw std::runtime_error("Arrow schema but C++ type is not mlc::ArrowTable");
+        }
+
+        void* voidstar = nullptr;
+        try {
+            voidstar = toAnything(schema, value);
+            relptr_t relptr = abs2rel_cpp(voidstar);
+
+            char* errmsg = nullptr;
+            uint8_t* packet = make_data_packet_auto(voidstar, relptr, schema, &errmsg);
+            if (errmsg) {
+                shfree_cpp(voidstar);
+                PROPAGATE_ERROR(errmsg);
+            }
+
+            const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
+            if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
+                // SHM referenced by packet -- track for deferred cleanup
+                _shm_tracker.push_back({(absptr_t)voidstar, schema});
+            } else {
+                // Data inlined in packet -- free SHM immediately
+                char* free_err = NULL;
+                shfree_by_schema((absptr_t)voidstar, schema, &free_err);
+                if (free_err) { free(free_err); free_err = NULL; }
+                shfree((absptr_t)voidstar, &free_err);
+                if (free_err) { free(free_err); }
+            }
+            return packet;
+        } catch (...) {
+            if (voidstar) shfree_cpp(voidstar);
+            throw;
+        }
     }
 }
 
@@ -137,29 +177,65 @@ uint8_t* _put_value(const T& value, const std::string& schema_str) {
 // Use a key to retrieve a value
 template <typename T>
 T _get_value(const uint8_t* packet, const std::string& schema_str){
-    Schema* schema = get_cached_schema(schema_str.c_str());
-
-    // Check if this is an RPTR packet (references existing SHM we don't own)
     const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
-    bool is_rptr = (header->command.data.source == PACKET_SOURCE_RPTR);
+    uint8_t source = header->command.data.source;
+    uint8_t format = header->command.data.format;
 
-    char* errmsg = NULL;
-    uint8_t* voidstar = get_morloc_data_packet_value(packet, schema, &errmsg);
-    if(errmsg != NULL) {
-        PROPAGATE_ERROR(errmsg)
+    if constexpr (std::is_same_v<T, mlc::ArrowTable>) {
+        // Arrow import: packet -> arrow_from_shm -> ArrowTable
+        Schema* schema = get_cached_schema(schema_str.c_str());
+        char* errmsg = nullptr;
+        uint8_t* raw = get_morloc_data_packet_value(packet, schema, &errmsg);
+        if (errmsg) { PROPAGATE_ERROR(errmsg); }
+
+        const arrow_shm_header_t* hdr = (const arrow_shm_header_t*)raw;
+        struct ArrowSchema as;
+        struct ArrowArray aa;
+        char* aerr = nullptr;
+        arrow_from_shm(hdr, &as, &aa, &aerr);
+        if (aerr) { PROPAGATE_ERROR(aerr); }
+
+        char* ierr = nullptr;
+        shincref((absptr_t)raw, &ierr);
+        if (ierr) { free(ierr); }
+        _shm_tracker.push_back({(absptr_t)raw, nullptr});
+
+        return mlc::ArrowTable(std::move(as), std::move(aa));
+    } else {
+        if (format == PACKET_FORMAT_ARROW) {
+            throw std::runtime_error("Arrow data but C++ type is not mlc::ArrowTable");
+        }
+
+        Schema* schema = get_cached_schema(schema_str.c_str());
+
+        // Fast path: inline voidstar -- read directly from packet, no SHM needed
+        if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
+            const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
+            T* dummy = nullptr;
+            return fromAnything(schema, (const void*)payload, dummy, (const void*)payload);
+        }
+
+        // SHM paths (RPTR or MESG+MSGPACK): existing logic
+        bool is_rptr = (source == PACKET_SOURCE_RPTR);
+
+        char* errmsg = NULL;
+        uint8_t* voidstar = get_morloc_data_packet_value(packet, schema, &errmsg);
+        if(errmsg != NULL) {
+            PROPAGATE_ERROR(errmsg)
+        }
+
+        // For RPTR data, increment refcount so the owner's tracker flush
+        // won't destroy data we may still need (e.g. forwarded packets).
+        if (is_rptr) {
+            char* incref_err = NULL;
+            shincref((absptr_t)voidstar, &incref_err);
+            if (incref_err) { free(incref_err); }
+            _shm_tracker.push_back({(absptr_t)voidstar, schema});
+        }
+
+        T* dummy = nullptr;
+        return fromAnything(schema, (void*)voidstar, dummy);
     }
-
-    // For RPTR data, increment refcount so the owner's tracker flush
-    // won't destroy data we may still need (e.g. forwarded packets).
-    if (is_rptr) {
-        char* incref_err = NULL;
-        shincref((absptr_t)voidstar, &incref_err);
-        if (incref_err) { free(incref_err); }
-        _shm_tracker.push_back({(absptr_t)voidstar, schema});
-    }
-
-    T* dumby = nullptr;
-    return fromAnything(schema, (void*)voidstar, dumby);
 }
 
 

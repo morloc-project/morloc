@@ -1,0 +1,28 @@
+--- testAdd ---
+24
+--- testTranspose ---
+12
+--- testMatmul ---
+12
+--- testTrace ---
+5
+--- testDiag ---
+4
+--- testVstack ---
+18
+--- testHstack ---
+18
+--- testOuter ---
+12
+--- testDot ---
+5
+--- testFlatten ---
+12
+--- testKron ---
+24
+--- testSlice ---
+6
+--- testTake ---
+3
+--- testSliceAdd ---
+12

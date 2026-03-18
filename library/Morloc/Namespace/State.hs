@@ -38,6 +38,7 @@ module Morloc.Namespace.State
     -- * Typechecking
   , Gamma (..)
   , GammaIndex (..)
+  , ConstVal (..)
 
     -- * Data files
   , NexusSource (..)
@@ -109,7 +110,6 @@ data MorlocState = MorlocState
   , stateExports :: [Int]
   , stateName :: Map Int EVar
   , stateManifoldConfig :: Map Int ManifoldConfig
-  , stateTypeQualifier :: Map Int [(TVar, TypeU, Int)]
   , stateSourceMap :: Map Int SrcLoc
   , stateSourceText :: Map Path Text
   , stateBuildConfig :: BuildConfig
@@ -235,7 +235,21 @@ data Gamma = Gamma
   , gammaExist :: Map TVar Int
   -- | Cache of solved existential types
   , gammaSolved :: Map TVar TypeU
+  -- | Nat constraints that could not be solved (deferred)
+  , gammaDeferred :: [(TypeU, TypeU)]
+  -- | Solutions for NatVarU variables from nat constraint solving
+  , gammaNatSubs :: Map TVar TypeU
+  -- | Known constant values for let-bound variables (for nat label resolution).
+  -- Tracks integers, tuples, and records so accessors like .0 can be evaluated.
+  , gammaIntVals :: Map EVar ConstVal
   }
+
+-- | Compile-time constant values tracked during typechecking for nat label
+-- resolution. Only pure literal expressions are tracked.
+data ConstVal
+  = ConstInt Integer
+  | ConstTup [ConstVal]
+  deriving (Show, Eq, Ord)
 
 ---- Data files and system
 
@@ -289,7 +303,6 @@ instance Defaultable MorlocState where
       , stateExports = []
       , stateName = Map.empty
       , stateManifoldConfig = Map.empty
-      , stateTypeQualifier = Map.empty
       , stateSourceMap = Map.empty
       , stateSourceText = Map.empty
       , stateBuildConfig = defaultValue

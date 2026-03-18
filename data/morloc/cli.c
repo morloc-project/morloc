@@ -2,8 +2,8 @@
 #include "json.h"
 
 // Forward declarations for voidstar flat format
-static int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t base_rel, ERRMSG);
-static void* read_voidstar_binary(const uint8_t* blob, size_t blob_size, const Schema* schema, ERRMSG);
+int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t base_rel, ERRMSG);
+void* read_voidstar_binary(const uint8_t* blob, size_t blob_size, const Schema* schema, ERRMSG);
 
 argument_t* initialize_positional(char* value){
   argument_t* arg = (argument_t*)calloc(1, sizeof(argument_t));
@@ -124,7 +124,7 @@ static int upload_packet(
 // Walk a voidstar blob and adjust all Array.data relptrs by adding base_rel.
 // The blob was written with relptrs starting at 0; after copying into shared
 // memory at offset base_rel, every relptr must be shifted.
-static int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t base_rel, ERRMSG) {
+int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t base_rel, ERRMSG) {
     INT_RETURN_SETUP
 
     switch (schema->type) {
@@ -158,6 +158,15 @@ static int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t ba
                 }
             }
             break;
+        case MORLOC_TENSOR:
+            {
+                Tensor* tensor = (Tensor*)data;
+                if (tensor->total_elements > 0) {
+                    tensor->shape += base_rel;
+                    tensor->data += base_rel;
+                }
+            }
+            break;
         default:
             break;
     }
@@ -167,7 +176,7 @@ static int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t ba
 // Read a flat voidstar binary blob into shared memory.
 // The blob contains the serialized voidstar with relptrs starting at 0.
 // We allocate shared memory, copy the blob, then adjust all relptrs.
-static void* read_voidstar_binary(const uint8_t* blob, size_t blob_size, const Schema* schema, ERRMSG) {
+void* read_voidstar_binary(const uint8_t* blob, size_t blob_size, const Schema* schema, ERRMSG) {
     PTR_RETURN_SETUP(void)
 
     void* base = TRY(shmalloc, blob_size);
@@ -353,7 +362,7 @@ static uint8_t* parse_cli_data_argument_singular(uint8_t* dest, char* arg, const
     }
     RAISE_IF_WITH(CHILD_ERRMSG != NULL, free(data), "\n%s", CHILD_ERRMSG)
 
-    // Special case: RPTR packets (pool-to-pool IPC with data already in shm)
+    // Special case: RPTR packets (pool-to-pool arrow with data already in shm)
     if(data_size >= sizeof(morloc_packet_header_t)){
         uint32_t magic = *(uint32_t*)data;
         if(magic == MORLOC_PACKET_MAGIC){
@@ -403,6 +412,10 @@ bool shfree_by_schema(absptr_t ptr, const Schema* schema, ERRMSG){
               TRY(shfree_by_schema, element_ptr, schema->parameters[i])
             }
           }
+          break;
+        case MORLOC_TENSOR:
+          // shape and data are inline in the same allocation (cursor pattern),
+          // freed by the parent shfree
           break;
         default:
           // fixed-size types will directly over-written

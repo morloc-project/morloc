@@ -4,6 +4,7 @@
 #include <vector>
 #include <algorithm>
 #include <functional>
+#include <type_traits>
 #include <utility>
 
 int cneg(int x){
@@ -18,11 +19,9 @@ int cmul(int x, int y){
     return x * y;
 }
 
-template <class A, class B, class F>
-std::vector<B> cmap(F f, const std::vector<A>& xs) {
-    static_assert(std::is_invocable_r_v<B, F, A>, 
-                  "Function f must be callable with type A and return type B");
-    
+template <class A, class F>
+auto cmap(F f, const std::vector<A>& xs) -> std::vector<std::invoke_result_t<F, A>> {
+    using B = std::invoke_result_t<F, A>;
     std::vector<B> ys;
     ys.reserve(xs.size());
     for(const auto& x : xs) {
@@ -31,15 +30,14 @@ std::vector<B> cmap(F f, const std::vector<A>& xs) {
     return ys;
 }
 
-template <class A, class B, class C, class F>
-std::vector<C> czipWith(
+template <class A, class B, class F>
+auto czipWith(
         F f,
         const std::vector<A>& xs,
         const std::vector<B>& ys
-    )
+    ) -> std::vector<std::invoke_result_t<F, A, B>>
 {
-    static_assert(std::is_invocable_r_v<C, F, A, B>, 
-                  "Function f must be callable with type A and return type B");
+    using C = std::invoke_result_t<F, A, B>;
     std::size_t N = std::min(xs.size(), ys.size());
     std::vector<C> zs(N);
     for(std::size_t i = 0; i < N; i++){

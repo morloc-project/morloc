@@ -1,0 +1,31 @@
+module main (result)
+
+import root
+import root-cpp
+import root-py
+
+table Stats = Stats {idx :: Int, value :: Real}
+table Cpp => Stats = "arrow"
+table Py  => Stats = "arrow"
+
+source Cpp from "src.hpp" ("makeLargeTable", "makeIndices", "sumReals")
+source Py from "src.py" ("lookupValue")
+
+makeLargeTable :: Int -> Stats
+lookupValue :: Stats -> Int -> Real
+makeIndices :: Int -> [Int]
+sumReals :: [Real] -> Real
+
+result ::
+  --' number of rows in table
+  --' arg: --nrows
+  --' default: 100000
+  Int ->
+  --' number of foreign calls
+  --' arg: --ncalls
+  --' default: 1000
+  Int ->
+  Real
+result nrows ncalls =
+  let tbl = makeLargeTable nrows
+  in sumReals (map (lookupValue tbl) (makeIndices ncalls))

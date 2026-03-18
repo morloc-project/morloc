@@ -1,3 +1,14 @@
+0.67.0 [2026-03-17]
+-------------------
+ * add Arrow tables with zero-copy between language sharing
+ * add tensors and
+ * remove explicit qualifiers
+   - no more `id a :: a -> a`
+   - now `id :: a -> a`
+   - this does not require C++ be more explicit in their typing
+ * inline when packet data is smaller than 65kb
+   - this avoids fragmenting the shared memory with many small single-use values
+
 0.66.0 [2026-03-12]
 -------------------
  * fix propagation of errors from crashed pools

@@ -125,7 +125,7 @@ weave gscope = w
   where
     w (VarU v1) (VarU (TV v2)) = return $ VarF (FV v1 (CV v2))
     w (FunU ts1 t1) (FunU ts2 t2) = FunF <$> zipWithM w ts1 ts2 <*> w t1 t2
-    w (AppU t1 ts1) (AppU t2 ts2) = AppF <$> w t1 t2 <*> zipWithM w ts1 ts2
+    w (AppU t1 ts1) (AppU t2 ts2) = AppF <$> w t1 t2 <*> weaveArgs ts1 ts2
     w t1@(NamU o1 v1 ts1 rs1) t2@(NamU o2 v2 ts2 rs2)
       | o1 == o2 && length ts1 == length ts2 && length rs1 == length rs2 =
           NamF o1 (FV v1 (CV (unTVar v2)))
@@ -134,6 +134,15 @@ weave gscope = w
       | otherwise = Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <+> "\n  t2:" <+> pretty t2
     w (EffectU effs t1) (EffectU _ t2) = EffectF (resolveEffectSet effs) <$> w t1 t2
     w (OptionalU t1) (OptionalU t2) = OptionalF <$> w t1 t2
+    w (NatLitU n) (NatLitU _) = return $ NatLitF n
+    w (NatLitU n) _ = return $ NatLitF n  -- Nat params may be erased in concrete type
+    w (NatAddU _ _) _ = return $ NatLitF 0  -- Nat arithmetic erased in concrete type
+    w (NatMulU _ _) _ = return $ NatLitF 0  -- Nat arithmetic erased in concrete type
+    w (NatSubU _ _) _ = return $ NatLitF 0  -- Nat arithmetic erased in concrete type
+    w (NatDivU _ _) _ = return $ NatLitF 0  -- Nat arithmetic erased in concrete type
+    w (NatVarU _) _ = return $ NatLitF 0  -- Nat variable erased in concrete type
+    w (LabeledU _ t1) t2 = w t1 t2
+    w (ForallU v (VarU v')) _ | v == v' = return $ NatLitF 0  -- Unresolved variable (UnkT pattern)
     w t1 t2 = case T.evaluateStep gscope t1 of
       Nothing -> Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <> "\n  t2:" <> pretty t2
       (Just t1') ->
@@ -141,6 +150,23 @@ weave gscope = w
           then Left ("failed to weave:" <> pretty t1 <+> "vs" <+> pretty t1')
           else do
             w t1' t2
+
+    -- Weave type arguments, handling Nat params that may be erased in concrete type.
+    -- Nat-kinded general args have no concrete counterpart, so we consume them
+    -- without advancing the concrete list, but still emit a NatLitF placeholder.
+    weaveArgs :: [TypeU] -> [TypeU] -> Either MDoc [TypeF]
+    weaveArgs [] [] = Right []
+    weaveArgs [] _ = Left "concrete type has more args than general type in weave"
+    weaveArgs (NatLitU n : gs) cs = (NatLitF n :) <$> weaveArgs gs cs
+    weaveArgs (NatAddU _ _ : gs) cs = (NatLitF 0 :) <$> weaveArgs gs cs
+    weaveArgs (NatMulU _ _ : gs) cs = (NatLitF 0 :) <$> weaveArgs gs cs
+    weaveArgs (NatSubU _ _ : gs) cs = (NatLitF 0 :) <$> weaveArgs gs cs
+    weaveArgs (NatDivU _ _ : gs) cs = (NatLitF 0 :) <$> weaveArgs gs cs
+    -- Unresolved nat dimension variable (opaque output dims): treat as erased
+    weaveArgs (NatVarU _ : gs) cs = (NatLitF 0 :) <$> weaveArgs gs cs
+    weaveArgs (ForallU v (VarU v') : gs) cs | v == v' = (NatLitF 0 :) <$> weaveArgs gs cs
+    weaveArgs (g:gs) (c:cs) = (:) <$> w g c <*> weaveArgs gs cs
+    weaveArgs _ [] = Left "general type has more non-Nat args than concrete type in weave"
 
 inferConcreteVar :: Lang -> Indexed TVar -> MorlocMonad FVar
 inferConcreteVar lang t0@(Idx i v) = do

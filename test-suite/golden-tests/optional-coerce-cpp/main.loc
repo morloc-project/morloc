@@ -7,7 +7,7 @@ module main
 
 type Cpp => Int = "int"
 
-fromNull a :: a -> ?a -> a
+fromNull :: a -> ?a -> a
 addOpt :: ?Int -> ?Int -> ?Int
 identity :: ?Int -> ?Int
 

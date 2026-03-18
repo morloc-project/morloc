@@ -4,7 +4,7 @@ import root-py
 
 source Py from "foo.py" ("choose")
 
-choose a :: [a] -> <IO> a
+choose :: [a] -> <IO> a
 
 foo :: <IO> Str
 foo = choose ["a", "b"]

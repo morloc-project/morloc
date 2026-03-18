@@ -10,12 +10,12 @@ type R => ByteArray = "raw"
 type R => Bytes = "raw"
 
 source Py from "foo.py" ("pid", "changebytearray", "changebytes")
-pid a :: a -> a
+pid :: a -> a
 changebytearray :: ByteArray -> ByteArray
 changebytes :: Bytes -> Bytes
 
 source R from "foo.R" ("rid")
-rid a :: a -> a
+rid :: a -> a
 
 doarray :: ByteArray -> ByteArray
 doarray = pid . changebytearray . rid . pid

@@ -1,9 +1,9 @@
-module numops (Ord, (<), (>), (>=), min)
+module (Ord, (<), (>), (>=), min)
 
 type Py => Bool = "bool"
 
 class Ord a where
-  (<=) a :: a -> a -> Bool
+  (<=) :: a -> a -> Bool
 
 infixl 4 <
 infixl 4 >
@@ -17,16 +17,16 @@ source Py from "ops.py"
   )
 not :: Bool -> Bool
 (&&) :: Bool -> Bool -> Bool
-ifelse a :: Bool -> a -> a -> a
+ifelse :: Bool -> a -> a -> a
 
-(<) a :: a -> a -> Bool
+(<) :: a -> a -> Bool
 (<) x y = (x <= y) && not (y <= x)
 
-(>) a :: a -> a -> Bool
+(>) :: a -> a -> Bool
 (>) x y = y < x
 
-(>=) a :: a -> a -> Bool
+(>=) :: a -> a -> Bool
 (>=) x y = y <= x
 
-min a :: a -> a -> a
+min :: a -> a -> a
 min x y = ifelse (x < y) x y

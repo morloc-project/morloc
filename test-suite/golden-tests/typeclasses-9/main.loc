@@ -6,13 +6,13 @@ type Py => (List a) = "list" a
 
 -- Three-level class hierarchy: Semigroup -> Monoid -> Group
 class Semigroup a where
-  sappend a :: a -> a -> a
+  sappend :: a -> a -> a
 
 class Semigroup a => Monoid a where
-  mempty a :: a
+  mempty :: a
 
 class Monoid a => Group a where
-  ginverse a :: a -> a
+  ginverse :: a -> a
 
 instance Semigroup Str where
   source Py from "foo.py" ("appendStr" as sappend)

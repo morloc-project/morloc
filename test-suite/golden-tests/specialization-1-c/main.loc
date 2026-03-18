@@ -59,11 +59,11 @@ source Cpp from "foo.hpp"
     , "vectorToStack"
     )
 
-vectorToDeque a :: Vector' a -> Deque' a
-vectorToForwardList a :: Vector' a -> ForwardList' a
-vectorToList a :: Vector' a -> List' a
-vectorToQueue a :: Vector' a -> Queue' a
-vectorToStack a :: Vector' a -> Stack' a
+vectorToDeque :: Vector' a -> Deque' a
+vectorToForwardList :: Vector' a -> ForwardList' a
+vectorToList :: Vector' a -> List' a
+vectorToQueue :: Vector' a -> Queue' a
+vectorToStack :: Vector' a -> Stack' a
 
 foo = toList
     . append 18

@@ -5,7 +5,7 @@ source Py from "foo.py" ("pmap", "add")
 type Py => Int = "int"
 type Py => List a = "list" a
 
-pmap a b :: (a -> b) -> [a] -> [b] 
+pmap :: (a -> b) -> [a] -> [b] 
 add :: Int -> Int -> Int
 
 bar   = pmap (add 5)

@@ -4,6 +4,7 @@
 #include <vector>
 #include <algorithm>
 #include <functional>
+#include <type_traits>
 #include <utility>
 
 int cneg(int x){
@@ -18,11 +19,9 @@ int cmul(int x, int y){
     return x * y;
 }
 
-template <class A, class B, class F>
-std::vector<B> cmap(F f, const std::vector<A>& xs) {
-    static_assert(std::is_invocable_r_v<B, F, A>, 
-                  "Function f must be callable with type A and return type B");
-    
+template <class A, class F>
+auto cmap(F f, const std::vector<A>& xs) -> std::vector<std::invoke_result_t<F, A>> {
+    using B = std::invoke_result_t<F, A>;
     std::vector<B> ys;
     ys.reserve(xs.size());
     for(const auto& x : xs) {

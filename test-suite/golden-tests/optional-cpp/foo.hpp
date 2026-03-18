@@ -17,6 +17,11 @@ T fromNull(const T& default_val, const std::optional<T>& x) {
 }
 
 template <typename T>
+T fromNull(const T& default_val, std::nullopt_t) {
+    return default_val;
+}
+
+template <typename T>
 std::optional<T> toNull(const T& x) {
     return std::optional<T>(x);
 }

@@ -42,6 +42,7 @@
 #include "http.h"
 #include "router.h"
 #include "intrinsics.h"
+#include "arrow.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -66,6 +67,25 @@ absptr_t vol2abs(volptr_t ptr, shm_t* shm);
 volptr_t abs2vol(absptr_t ptr, shm_t* shm, ERRMSG);
 relptr_t abs2rel(absptr_t ptr, ERRMSG);
 shm_t* abs2shm(absptr_t ptr, ERRMSG);
+
+// Resolve a relative pointer using either a base pointer (inline data)
+// or SHM (shared memory). If base_ptr is non-NULL, resolution is simple
+// pointer arithmetic; otherwise falls back to rel2abs.
+// Callers may pass NULL for errmsg_ when errors cannot be propagated
+// (e.g. inside Python/R extension deserialization); rel2abs requires a
+// valid errmsg pointer, so we provide a local one when needed.
+static inline void* resolve_relptr(relptr_t relptr, const void* base_ptr, ERRMSG) {
+    if (base_ptr) {
+        return (char*)base_ptr + relptr;
+    }
+    if (errmsg_ == NULL) {
+        char* local_errmsg = NULL;
+        void* result = rel2abs(relptr, &local_errmsg);
+        free(local_errmsg);
+        return result;
+    }
+    return rel2abs(relptr, errmsg_);
+}
 block_header_t* abs2blk(void* ptr, ERRMSG);
 Schema* parse_schema(const char* schema, ERRMSG);
 Schema* parse_schema_r(char** schema_ptr, ERRMSG);
@@ -79,6 +99,8 @@ void free_schema(Schema* schema);
 char* quoted(const char* input);
 bool print_voidstar(const void* voidstar, const Schema* schema, ERRMSG);
 bool pretty_print_voidstar(const void* voidstar, const Schema* schema, ERRMSG);
+bool print_arrow_as_json(const void* data, ERRMSG);
+bool print_arrow_as_table(const void* data, ERRMSG);
 morloc_packet_header_t* read_morloc_packet_header(const uint8_t* msg, ERRMSG);
 bool packet_is_ping(const uint8_t* packet, ERRMSG);
 bool packet_is_local_call(const uint8_t* packet, ERRMSG);
@@ -88,6 +110,7 @@ size_t morloc_packet_size(const uint8_t* packet, ERRMSG);
 uint8_t* return_ping(const uint8_t* packet, ERRMSG);
 uint8_t* make_ping_packet();
 uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema);
+uint8_t* make_arrow_data_packet(relptr_t ptr, const Schema* schema);
 uint8_t* make_mpk_data_packet(const char* mpk_filename, const Schema* schema);
 uint8_t* make_data_packet_from_mpk(const char* mpk, size_t mpk_size, const Schema* schema);
 int get_data_packet_as_mpk(const uint8_t* packet, const Schema* schema, char** mpk_out, size_t* mpk_size_out, ERRMSG);
@@ -101,6 +124,10 @@ uint8_t* make_morloc_remote_call_packet(uint32_t midx, const uint8_t** arg_packe
 morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG);
 void free_morloc_call(morloc_call_t* call);
 int print_morloc_data_packet(const uint8_t* packet, const Schema* schema, ERRMSG);
+int flatten_voidstar_to_buffer(const void* data, const Schema* schema, uint8_t** out_buf, size_t* out_size, ERRMSG);
+uint8_t* make_data_packet_auto(void* voidstar, relptr_t relptr, const Schema* schema, ERRMSG);
+int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t base_rel, ERRMSG);
+void* read_voidstar_binary(const uint8_t* blob, size_t blob_size, const Schema* schema, ERRMSG);
 void close_socket(int socket_id);
 void close_daemon(language_daemon_t** daemon_ptr);
 language_daemon_t* start_daemon( const char* socket_path, const char* tmpdir, const char* shm_basename, size_t shm_default_size, ERRMSG );

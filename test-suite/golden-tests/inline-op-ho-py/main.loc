@@ -15,7 +15,7 @@ source Py where
   %inline (+)
 
 (+) :: Int -> Int -> Int
-fold a b :: (b -> a -> b) -> b -> [a] -> b
+fold :: (b -> a -> b) -> b -> [a] -> b
 
 -- Inline operator passed as value to fold
 -- fold (+) 0 [1,2,3,4] = 10

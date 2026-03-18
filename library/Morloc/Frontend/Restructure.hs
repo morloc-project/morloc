@@ -21,6 +21,7 @@ module Morloc.Frontend.Restructure (restructure) where
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Morloc.Data.DAG as DAG
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -48,6 +49,7 @@ restructure s = do
     >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
     >>= handleBinops -- first resolve binary operators
     >>= resolveHoles -- then holes
+    >>= refineKinds -- promote VarU to NatVarU based on typedef param kinds (before self-defs are removed)
       |>> handleTypeDeclarations
     >>= doM collectTags
     >>= doM collectTypes
@@ -83,7 +85,7 @@ checkForSelfRecursion d = do
     isExprSelfRecursive (ExprI _ (TypE (ExprTypeE Nothing _ [] _ _))) = return ()
     --  and also with parameters
     isExprSelfRecursive (ExprI i (TypE (ExprTypeE Nothing v vs t _)))
-      | t == AppU (VarU v) (map (either VarU id) vs) = return ()
+      | t == AppU (VarU v) (map (either (VarU . fst) id) vs) = return ()
       | hasTerm v t = MM.throwSourcedError i $ "Found unsupported self-recursive type alias:" <+> pretty v
       | otherwise = return ()
     -- otherwise disallow self-recursion
@@ -96,6 +98,7 @@ checkForSelfRecursion d = do
     -- check if a given term appears in a type
     hasTerm :: TVar -> TypeU -> Bool
     hasTerm v (VarU v') = v == v'
+    hasTerm _ (NatVarU _) = False
     hasTerm v (ForallU _ t) = hasTerm v t
     hasTerm v (FunU (t1 : rs) t2) = hasTerm v t1 || hasTerm v (FunU rs t2)
     hasTerm v (FunU [] t) = hasTerm v t
@@ -106,6 +109,12 @@ checkForSelfRecursion d = do
     hasTerm _ (NamU _ _ [] []) = False
     hasTerm v (EffectU _ t) = hasTerm v t
     hasTerm v (OptionalU t) = hasTerm v t
+    hasTerm _ (NatLitU _) = False
+    hasTerm v (NatAddU a b) = hasTerm v a || hasTerm v b
+    hasTerm v (NatMulU a b) = hasTerm v a || hasTerm v b
+    hasTerm v (NatSubU a b) = hasTerm v a || hasTerm v b
+    hasTerm v (NatDivU a b) = hasTerm v a || hasTerm v b
+    hasTerm v (LabeledU _ t) = hasTerm v t
     hasTerm _ ExistU {} = error "There should not be existentionals in typedefs"
 
 resolveHoles ::
@@ -411,7 +420,7 @@ handleTypeDeclarations = DAG.mapNode f
 
     isNotSelfDef :: ExprI -> Bool
     isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing v [] (VarU v') _))) = v /= v'
-    isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing (VarU -> v) (map (either VarU id) -> vs) (AppU v' vs') _))) =
+    isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing (VarU -> v) (map (either (VarU . fst) id) -> vs) (AppU v' vs') _))) =
       v /= v' || length vs /= length vs' || not (all (uncurry (==)) (zip vs vs'))
     isNotSelfDef _ = True
 
@@ -669,32 +678,32 @@ completeRecords gscope = Map.mapWithKey (completeRecord gscope)
     completeRecord ::
       Scope ->
       TVar ->
-      [([Either TVar TypeU], TypeU, ArgDoc, Bool)] ->
-      [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
+      [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)] ->
+      [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)]
     completeRecord g v xs = case Map.lookup v g of
       (Just ys) -> map (completeValue [(vs, t) | (vs, t, _, _) <- ys]) xs
       Nothing -> xs
 
     completeValue ::
-      [([Either TVar TypeU], TypeU)] ->
-      ([Either TVar TypeU], TypeU, ArgDoc, Bool) ->
-      ([Either TVar TypeU], TypeU, ArgDoc, Bool)
+      [([Either (TVar, Kind) TypeU], TypeU)] ->
+      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) ->
+      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)
     completeValue ((vs, NamU _ _ ps rs) : _) (_, NamU o v _ [], d, terminal) = (vs, NamU o v ps rs, d, terminal)
     completeValue _ x = x
 
 -- merge type functions, names of generics do not matter
 mergeEntries ::
-  [([Either TVar TypeU], TypeU, ArgDoc, Bool)] ->
-  [([Either TVar TypeU], TypeU, ArgDoc, Bool)] ->
-  [([Either TVar TypeU], TypeU, ArgDoc, Bool)]
+  [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)] ->
+  [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)] ->
+  [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)]
 mergeEntries xs0 ys0 = filter (isNovel ys0) xs0 <> ys0
   where
     isNovel ::
-      [([Either TVar TypeU], TypeU, ArgDoc, Bool)] -> ([Either TVar TypeU], TypeU, ArgDoc, Bool) -> Bool
+      [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)] -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) -> Bool
     isNovel [] _ = True
     isNovel ((vs2, t2, _, isTerminal1) : ys) x@(vs1, t1, _, isTerminal2)
       | (length vs1 == length vs2)
-          && t1 == foldl (\t (v1, v2) -> rename v2 v1 t) t2 [(v1, v2) | (Left v1, Left v2) <- zip vs1 vs2]
+          && t1 == foldl (\t (v1, v2) -> rename v2 v1 t) t2 [(fst v1, fst v2) | (Left v1, Left v2) <- zip vs1 vs2]
           && isTerminal1 == isTerminal2 =
           False
       | otherwise = isNovel ys x
@@ -719,6 +728,90 @@ filterAndSubstitute links typemap =
             (map (\(a, b, c, d) -> (a, rename sourceName localAlias b, c, d)) xs)
             (Map.delete sourceName typedefs)
         Nothing -> typedefs
+
+-- | Promote VarU to NatVarU based on typedef param kinds in all signatures.
+-- For each typedef like `type Tensor2 (d1 :: Nat) (d2 :: Nat) a`, build a map
+-- from type name to param kinds, then walk all types and upgrade KindType to
+-- KindNat for variables that appear in nat-kinded positions.
+refineKinds ::
+  DAG MVar [AliasedSymbol] ExprI ->
+  MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
+refineKinds dag = do
+  let allParams = concat [collectAllTypeDefParams e | e <- DAG.nodes dag]
+      kindMap = Map.fromList [(v, map (either snd (const KindType)) ps) | (v, ps) <- allParams, any (\p -> either (\(_, k) -> k == KindNat) (const False) p) ps]
+  if Map.null kindMap
+    then return dag
+    else DAG.mapNodeM (refineExprKinds kindMap) dag
+  where
+    collectAllTypeDefParams :: ExprI -> [(TVar, [Either (TVar, Kind) TypeU])]
+    collectAllTypeDefParams (ExprI _ (ModE _ es)) = concatMap collectAllTypeDefParams es
+    collectAllTypeDefParams (ExprI _ (TypE (ExprTypeE _ v ps _ _))) = [(v, ps)]
+    collectAllTypeDefParams (ExprI _ (AssE _ e es)) = concatMap collectAllTypeDefParams (e:es)
+    collectAllTypeDefParams (ExprI _ (IstE _ _ es)) = concatMap collectAllTypeDefParams es
+    collectAllTypeDefParams _ = []
+
+    refineExprKinds :: Map TVar [Kind] -> ExprI -> MorlocMonad ExprI
+    refineExprKinds km = AST.mapTypeInExprI (refineTypeKinds km)
+
+    refineTypeKinds :: Map TVar [Kind] -> TypeU -> TypeU
+    refineTypeKinds km t0 =
+      let natVars = collectNatVarsFromScope km t0
+       in promoteNatVarsR natVars t0
+
+    -- Collect variables that appear in nat-kinded positions according to typedef param kinds
+    collectNatVarsFromScope :: Map TVar [Kind] -> TypeU -> Set TVar
+    collectNatVarsFromScope km = go
+      where
+        go (AppU (VarU v) args) = case Map.lookup v km of
+          Just kinds -> Set.unions $
+            [case (k, a) of
+               (KindNat, VarU tv) -> Set.singleton tv
+               _ -> go a
+            | (k, a) <- zip kinds args]
+            ++ [go a | a <- drop (length kinds) args]
+          Nothing -> Set.unions (map go args)
+        go (NatVarU v) = Set.singleton v
+        go (ForallU _ inner) = go inner
+        go (FunU args ret) = Set.unions (go ret : map go args)
+        go (NamU _ _ ps rs) = Set.unions (map go ps ++ map (go . snd) rs)
+        go (EffectU _ inner) = go inner
+        go (OptionalU inner) = go inner
+        go (NatAddU a b) = Set.union (goNat a) (goNat b)
+        go (NatMulU a b) = Set.union (goNat a) (goNat b)
+        go (NatSubU a b) = Set.union (goNat a) (goNat b)
+        go (NatDivU a b) = Set.union (goNat a) (goNat b)
+        go (LabeledU _ inner) = go inner
+        go _ = Set.empty
+
+        goNat (VarU v@(TV name))
+          | not (T.null name), isLower (T.head name) = Set.singleton v
+          | otherwise = Set.empty
+        goNat t = go t
+
+    -- Promote VarU to NatVarU for variables identified as nat-kinded,
+    -- and strip ForallU wrappers for those variables (they're implicitly quantified)
+    promoteNatVarsR :: Set TVar -> TypeU -> TypeU
+    promoteNatVarsR natVars = go
+      where
+        go (VarU v)
+          | Set.member v natVars = NatVarU v
+          | otherwise = VarU v
+        go t@(NatVarU _) = t
+        go (ForallU v t)
+          | Set.member v natVars = go t  -- strip ForallU for nat vars
+        go (ForallU v t) = ForallU v (go t)
+        go (FunU ts t) = FunU (map go ts) (go t)
+        go (AppU t ts) = AppU (go t) (map go ts)
+        go (NamU o v ps rs) = NamU o v (map go ps) [(k, go t) | (k, t) <- rs]
+        go (EffectU effs t) = EffectU effs (go t)
+        go (OptionalU t) = OptionalU (go t)
+        go (ExistU v (ps, pc) (rs, rc)) = ExistU v (map go ps, pc) (map (second go) rs, rc)
+        go t@(NatLitU _) = t
+        go (NatAddU a b) = NatAddU (go a) (go b)
+        go (NatMulU a b) = NatMulU (go a) (go b)
+        go (NatSubU a b) = NatSubU (go a) (go b)
+        go (NatDivU a b) = NatDivU (go a) (go b)
+        go (LabeledU n t) = LabeledU n (go t)
 
 collectSources :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectSources fullDag = do
@@ -757,3 +850,10 @@ rename sourceName localAlias = f
        in NamU o v' (map f ts) (map (second f) rs)
     f (EffectU effs t) = EffectU effs (f t)
     f (OptionalU t) = OptionalU (f t)
+    f t@(NatVarU _) = t
+    f t@(NatLitU _) = t
+    f (NatAddU a b) = NatAddU (f a) (f b)
+    f (NatMulU a b) = NatMulU (f a) (f b)
+    f (NatSubU a b) = NatSubU (f a) (f b)
+    f (NatDivU a b) = NatDivU (f a) (f b)
+    f (LabeledU n t) = LabeledU n (f t)

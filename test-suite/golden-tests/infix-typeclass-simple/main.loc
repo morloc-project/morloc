@@ -4,10 +4,10 @@ type Py => Int = "int"
 
 -- Typeclass with infix operators
 class Num a where
-  zero a :: a
-  negate a :: a -> a
-  (+) a :: a -> a -> a
-  (*) a :: a -> a -> a
+  zero :: a
+  negate :: a -> a
+  (+) :: a -> a -> a
+  (*) :: a -> a -> a
 
 infixl 6 +
 infixl 7 *

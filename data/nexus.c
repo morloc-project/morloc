@@ -253,13 +253,27 @@ void print_return(uint8_t* packet, Schema* schema, config_t config){
     }
     child_errmsg = NULL;
 
+    // Check if this is an Arrow packet before extracting value
+    morloc_packet_header_t* pkt_hdr = read_morloc_packet_header(packet, &child_errmsg);
+    if(child_errmsg != NULL){
+        ERROR("%s", child_errmsg);
+    }
+    bool is_arrow = (pkt_hdr->command.cmd_type.type == PACKET_TYPE_DATA &&
+                     pkt_hdr->command.data.format == PACKET_FORMAT_ARROW);
+
     uint8_t* packet_value = get_morloc_data_packet_value(packet, schema, &child_errmsg);
     if(child_errmsg != NULL){
         ERROR("%s", child_errmsg);
     }
 
     if(config.output_format == JSON){
-        if(config.print_flag){
+        if(is_arrow && config.print_flag){
+            // Arrow data: TAB-delimited table for human-readable output
+            print_arrow_as_table(packet_value, &child_errmsg);
+        } else if(is_arrow){
+            // Arrow data: compact row-major JSON
+            print_arrow_as_json(packet_value, &child_errmsg);
+        } else if(config.print_flag){
             pretty_print_voidstar(packet_value, schema, &child_errmsg);
         } else {
             print_voidstar(packet_value, schema, &child_errmsg);

@@ -15,9 +15,9 @@ type R => Bool = "logical"
 type R => Str = "character"
 type R => List a = "list" a
 
-isNull a :: ?a -> Bool
-fromNull a :: a -> ?a -> a
-toNull a :: a -> ?a
+isNull :: ?a -> Bool
+fromNull :: a -> ?a -> a
+toNull :: a -> ?a
 safeHead :: [Int] -> ?Int
 optionalAdd :: ?Int -> ?Int -> ?Int
 optionalList :: [Int] -> [?Int]

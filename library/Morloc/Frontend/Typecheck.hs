@@ -42,7 +42,7 @@ typecheck = mapM run
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty}
+      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaNatSubs = Map.empty, gammaIntVals = Map.empty}
       (g1, _, e1) <- synthG g0 e0
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g1:"
@@ -53,80 +53,19 @@ typecheck = mapM run
       (g2, e3) <- resolveInstances g1 e2
       let g3 = apply g2 g2
 
-      -- apply inferred type information to the extracted type qualifiers
-      -- this information was uploaded by the `recordParameter` function
-      s <- MM.get
-
-      insetSay "g3:"
-      seeGamma g3
-      insetSay $ "stateTypeQualifier s:" <+> viaShow (stateTypeQualifier s)
-      let qmap = Map.map (prepareQualifierMap g3) (stateTypeQualifier s)
-      MM.put (s {stateTypeQualifier = qmap})
-
-      insetSay $ "Qualifier Map:" <+> viaShow qmap
+      -- re-check deferred Nat constraints now that existentials are solved
+      case recheckDeferred g3 of
+        Left err -> MM.throwSystemError err
+        Right remaining ->
+          mapM_ (\(t1, t2) ->
+            MM.sayV $ "Warning: unresolved Nat constraint:" <+> prettyTypeU t1 <+> "~" <+> prettyTypeU t2
+            ) remaining
 
       -- perform a final application of gamma the final expression and return
       -- (is this necessary?)
       return (applyGen g3 e3)
 
--- The typechecker goes through two passes assigning two different var names
--- to the qualifiers. The first is never resolved, and is left as
--- existential. So here I remove them. This is hacky as hell. Need a cleaner
--- solution.
-prepareQualifierMap :: Gamma -> [(TVar, TypeU, Int)] -> [(TVar, TypeU, Int)]
-prepareQualifierMap g = takeLast . filter notExistential . map f
-  where
-    f
-      ( TV . head . MT.splitOn "___" . unTVar -> v
-        , apply g -> t
-        , i
-        ) = (v, t, i)
-
-    notExistential (_, ExistU {}, _) = False
-    notExistential _ = True
-
-    takeLast :: [(TVar, TypeU, Int)] -> [(TVar, TypeU, Int)]
-    takeLast = reverse . findFirsts [] . reverse
-      where
-        findFirsts :: [TVar] -> [(TVar, TypeU, Int)] -> [(TVar, TypeU, Int)]
-        findFirsts _ [] = []
-        findFirsts observed ((v, t, i) : rs)
-          | elem v observed = []
-          | otherwise = (v, t, i) : findFirsts (v : observed) rs
-
--- Upload a solved universal qualifier to the stateTypeQualifier list
-recordParameter :: Int -> TVar -> TypeU -> MorlocMonad ()
-recordParameter i v t = do
-  s <- MM.get
-  let size = findTypeKindSize v t
-      updatedMap =
-        Map.insertWith
-          (\xs ys -> ys <> xs)
-          i
-          [(v, ExistU v ([], Open) ([], Open), size)]
-          (stateTypeQualifier s)
-  MM.put $ s {stateTypeQualifier = updatedMap}
-
-findTypeKindSize :: TVar -> TypeU -> Int
-findTypeKindSize v = head . catMaybes . f
-  where
-    f (AppU (VarU v') ts)
-      | v == v' = [Just (1 + (length ts))]
-      | otherwise = concat $ map f ts
-    f (AppU t ts) = concat $ map f (t : ts)
-    f (VarU v')
-      | v == v' = [Just 1]
-      | otherwise = [Nothing]
-    f (ExistU v' (ts1, _) (map snd . fst -> ts2))
-      | v == v' = [Just (1 + (length ts1))]
-      | otherwise = concat $ map f (ts1 <> ts2)
-    f (ForallU _ t) = f t
-    f (FunU ts t) = concat $ map f (t : ts)
-    f (NamU _ v' ts1 (map snd -> ts2))
-      | v == v' = [Just (1 + (length ts1))]
-      | otherwise = concat $ map f (ts1 <> ts2)
-    f (EffectU _ t) = f t
-    f (OptionalU t) = f t
+    f (NatDivU a b) = f a ++ f b
 
 -- TypeU --> Type
 resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int
@@ -173,12 +112,15 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     -- resolve instances
     f scope g0 (VarS v (PolymorphicExpr clsName _ _ rss)) = do
       -- find all instances that are a subtype of the inferred type
-      -- this resolve general aliases all the way to the general termini
-      -- Also accept instances reachable via coercion (e.g., Int matches ?Int)
-      let emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty
-          isCompatible t = isSubtypeOf2 scope t gt
-                        || isJust (tryCoerce scope t gt emptyGamma)
-          rssSubtypes = [x | x@(EType t _ _, _) <- rss, isCompatible t]
+      -- Expand aliases in gt before matching (e.g., Vector 4 Int -> List Int)
+      -- so instances for List match against Vector usage.
+      let gtEval = case TE.evaluateType scope gt of
+            Right et -> et
+            Left _ -> gt
+          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty
+          isCompatible t = isSubtypeOf2 scope t gtEval
+                        || isJust (tryCoerce scope t gtEval emptyGamma)
+          rssSubtypes = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
 
 
       -- find the most specific instance at the general level, this does not
@@ -198,7 +140,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       --
       --  They will be separated later when concrete types are considered. From
       --  the general perspective, the evaluate to being equal.
-      (g2, es1) <- case mostSpecific [t | (EType t _ _, _) <- rssSubtypes] of
+      (g2, es1) <- case mostSpecific [t | (EType t _ _ _, _) <- rssSubtypes] of
         -- if there are no suitable instances, die
         [] ->
           throwTypeError genIndex $
@@ -332,6 +274,9 @@ synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 -- Ensures pattern setting operations return the correct type.
 -- Without this case, patterns that change type will pass silently, but lead to
 -- corrupted data.
+-- Setter pattern lambda: (\v -> .field v newVal) data
+-- The body applies a pattern to 2+ args (data + set values).
+-- Getters (1 arg) are NOT matched here and go through normal AppS.
 synthE
   _
   g0
@@ -346,7 +291,7 @@ synthE
                     _
                     ( AppS
                         ((AnnoS _ _ (ExeS (PatCall (PatternStruct _)))))
-                        (_ : _)
+                        (_ : _ : _)
                       )
                   )
               )
@@ -414,7 +359,11 @@ synthE i g0 (AppS f xs0) = do
   -- synthesize the type of the function
   (g1, funType0, funExpr0) <- synthG g0 f
 
-  etaExpandSynthE i g1 funType0 funExpr0 f xs0
+  -- Resolve nat labels: if the function has labeled nat params (m:Int syntax)
+  -- and corresponding args are int literals, inject NatVarU solutions into gamma
+  let g1' = resolveNatLabels f funType0 xs0 g1
+
+  etaExpandSynthE i g1' funType0 funExpr0 f xs0
 
 -- -->I==>
 -- Synthesize lambda expressions. The key optimization here is to avoid
@@ -629,7 +578,11 @@ synthE _ g (CallS v) = do
 synthE _ g (LetS v e1 e2) = do
   (g1, t1, e1') <- synthG g e1
   let g2 = g1 ++> [AnnG v t1]
-  (g3, t2, e2') <- synthG g2 e2
+      -- Track known constant values for nat label resolution
+      g2' = case tryEvalConst g2 (let AnnoS _ _ e = e1' in e) of
+        Just val -> g2 { gammaIntVals = Map.insert v val (gammaIntVals g2) }
+        Nothing -> g2
+  (g3, t2, e2') <- synthG g2' e2
   return (g3, t2, LetS v e1' e2')
 synthE i g (IfS cond thenE elseE) = do
   (g1, condType, cond') <- synthG g cond
@@ -946,7 +899,6 @@ checkE i g0 e0@(LamS vs body) t@(FunU as b)
       (g', e') <- expand i (length as - length vs) g0 e0
       checkE' i g' e' t
 checkE i g1 e1 (ForallU v a) = do
-  recordParameter i v a
   checkE' i (g1 +> v) e1 (substitute v a)
 checkE i g (IfS cond thenE elseE) t = do
   (g1, condType, cond') <- synthG g cond
@@ -989,21 +941,22 @@ checkE i g1 e1 b = do
   scope <- MM.getGeneralScope i
   case subtype scope a' b' g2 of
     Right g3 -> return (g3, apply g3 b', e2)
-    Left err -> case tryCoerce scope a' b' g2 of
-      Just (coercions, g3) -> do
-        (finalExpr, _) <- foldlM
-          (\(expr, currentType) coercion -> do
-            idx <- MM.getCounterWithPos i
-            let wrappedAnno = AnnoS (Idx idx currentType) i expr
-            return (CoerceS coercion wrappedAnno, applyCoercion coercion currentType))
-          (e2, apply g3 a')
-          coercions
-        return (g3, apply g3 b', finalExpr)
-      Nothing -> MM.throwSourcedError i $
-        "Type mismatch:"
-        <> line <> "  expected: " <> prettyTypeU b'
-        <> line <> "  inferred: " <> prettyTypeU a'
-        <> line <> err
+    Left err ->
+      case tryCoerce scope a' b' g2 of
+        Just (coercions, g3) -> do
+          (finalExpr, _) <- foldlM
+            (\(expr, currentType) coercion -> do
+              idx <- MM.getCounterWithPos i
+              let wrappedAnno = AnnoS (Idx idx currentType) i expr
+              return (CoerceS coercion wrappedAnno, applyCoercion coercion currentType))
+            (e2, apply g3 a')
+            coercions
+          return (g3, apply g3 b', finalExpr)
+        Nothing -> MM.throwSourcedError i $
+          "Type mismatch:"
+          <> line <> "  expected: " <> prettyTypeU b'
+          <> line <> "  inferred: " <> prettyTypeU a'
+          <> line <> err
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do
@@ -1011,7 +964,12 @@ subtype' i a b g = do
   insetSay $ parens (pretty a) <+> "<:" <+> parens (pretty b)
   case subtype scope a b g of
     (Left err') -> MM.throwSourcedError i err'
-    (Right x) -> return x
+    (Right g') -> do
+      let newDeferred = drop (length (gammaDeferred g)) (gammaDeferred g')
+      mapM_ (\(t1, t2) ->
+        MM.sayV $ "Warning: deferred Nat constraint:" <+> prettyTypeU t1 <+> "~" <+> prettyTypeU t2
+        ) newDeferred
+      return g'
 
 -- | Try to find a coercion chain from type a to type b.
 -- Returns a list of coercions (inside-out) and the resulting gamma.
@@ -1165,6 +1123,75 @@ application' i g es t = do
   seeGamma g'
   seeType t'
   return r
+
+-- | Try to reduce an expression to a compile-time constant. Handles:
+--   - Integer literals
+--   - Tuple literals (recursively)
+--   - Let-bound and lambda-bound variable references (via gammaIntVals)
+--   - Let expressions (with local constant propagation)
+--   - Index accessors on tuples: .0 (5, 6, 7) => 5
+-- Returns Nothing for anything involving foreign function calls,
+-- non-constant variables, or unsupported expression forms.
+tryEvalConst :: Gamma -> ExprS g f c -> Maybe ConstVal
+tryEvalConst _ (IntS n) = Just (ConstInt n)
+tryEvalConst g (LetBndS v) = Map.lookup v (gammaIntVals g)
+tryEvalConst g (BndS v) = Map.lookup v (gammaIntVals g)
+tryEvalConst g (TupS es) = ConstTup <$> mapM (\(AnnoS _ _ e) -> tryEvalConst g e) es
+tryEvalConst g (LetS v (AnnoS _ _ e1) (AnnoS _ _ e2)) = do
+  val <- tryEvalConst g e1
+  tryEvalConst (g { gammaIntVals = Map.insert v val (gammaIntVals g) }) e2
+-- Index accessor on tuple literal or known tuple: .i (a, b, c) => element i
+tryEvalConst g (AppS (AnnoS _ _ (ExeS (PatCall (PatternStruct
+  (SelectorIdx (idx, SelectorEnd) []))))) [AnnoS _ _ inner])
+  = case tryEvalConst g inner of
+      Just (ConstTup vs) | idx >= 0, idx < length vs -> Just (vs !! idx)
+      _ -> Nothing
+-- Lambda application: (\x -> body) arg => beta-reduce
+tryEvalConst g (AppS (AnnoS _ _ (LamS vs (AnnoS _ _ body))) args)
+  | length vs == length args = do
+    vals <- mapM (\(AnnoS _ _ e) -> tryEvalConst g e) args
+    let g' = g { gammaIntVals = foldl (\m (v, val) -> Map.insert v val m) (gammaIntVals g) (zip vs vals) }
+    tryEvalConst g' body
+tryEvalConst _ _ = Nothing
+
+-- | Try to reduce an expression to an integer constant.
+tryEvalInt :: Gamma -> ExprS g f c -> Maybe Integer
+tryEvalInt g e = case tryEvalConst g e of
+  Just (ConstInt n) -> Just n
+  _ -> Nothing
+
+-- | Convenience wrappers that unwrap AnnoS
+tryExtractInt :: Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> Maybe Integer
+tryExtractInt g (AnnoS _ _ e) = tryEvalInt g e
+
+tryExtractIntPre :: Gamma -> AnnoS Int ManyPoly Int -> Maybe Integer
+tryExtractIntPre g (AnnoS _ _ e) = tryEvalInt g e
+
+-- | Resolve nat labels from int literal arguments.
+-- When a function has labeled nat params (e.g., m:Int -> Tensor1 m Real)
+-- and the corresponding arguments are int literals or let-bound ints,
+-- inject NatVarU solutions into gamma so the return type gets concrete dimensions.
+resolveNatLabels ::
+  AnnoS Int ManyPoly Int ->  -- the function expression (pre-synthesis)
+  TypeU ->                    -- the synthesized (renamed) function type
+  [AnnoS Int ManyPoly Int] -> -- the arguments
+  Gamma -> Gamma
+resolveNatLabels (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType args g
+  | not (Map.null labels) =
+    let origNvs = nub (collectNatVarNames (etype et))
+        renamedNvs = nub (collectNatVarNames funType)
+        renMap = Map.fromList (zip origNvs renamedNvs)
+        solutions = Map.fromList
+          [ (renamedVar, NatLitU n)
+          | (origVar, argIdx) <- Map.toList labels
+          , Just renamedVar <- [Map.lookup origVar renMap]
+          , argIdx < length args
+          , Just n <- [tryExtractIntPre g (args !! argIdx)]
+          ]
+    in g { gammaNatSubs = Map.union solutions (gammaNatSubs g) }
+  where
+    labels = enatLabels et
+resolveNatLabels _ _ _ g = g
 
 peakSExpr :: ExprS Int ManyPoly Int -> MDoc
 peakSExpr UniS = "UniS"

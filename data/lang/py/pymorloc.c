@@ -137,7 +137,25 @@ error:
 
 
 
-PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
+// Map morloc schema element type to numpy type number
+static int schema_to_npy_type(morloc_serial_type type) {
+    switch (type) {
+        case MORLOC_BOOL:    return NPY_BOOL;
+        case MORLOC_SINT8:   return NPY_INT8;
+        case MORLOC_SINT16:  return NPY_INT16;
+        case MORLOC_SINT32:  return NPY_INT32;
+        case MORLOC_SINT64:  return NPY_INT64;
+        case MORLOC_UINT8:   return NPY_UINT8;
+        case MORLOC_UINT16:  return NPY_UINT16;
+        case MORLOC_UINT32:  return NPY_UINT32;
+        case MORLOC_UINT64:  return NPY_UINT64;
+        case MORLOC_FLOAT32: return NPY_FLOAT32;
+        case MORLOC_FLOAT64: return NPY_FLOAT64;
+        default:             return -1;
+    }
+}
+
+PyObject* fromAnything(const Schema* schema, const void* data, const void* base_ptr){ MAYFAIL
 
     PyObject* obj = NULL;
     switch (schema->type) {
@@ -178,12 +196,12 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
             break;
         case MORLOC_STRING: {
             Array* str_array = (Array*)data;
-            absptr_t tmp_ptr = NULL;
-            
+            void* tmp_ptr = NULL;
+
             if (str_array->size != 0) {
-                tmp_ptr = PyTRY(rel2abs, str_array->data);
+                tmp_ptr = PyTRY(resolve_relptr, str_array->data, base_ptr);
             }
-            
+
             if (schema->hint != NULL && strcmp(schema->hint, "bytes") == 0) {
                 // load binary data as a python bytes object
                 if (str_array->size == 0) {
@@ -243,7 +261,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
                         PyRAISE("Unsupported element type for NumPy array");
                 }
 
-                absptr = PyTRY(rel2abs, array->data);
+                absptr = PyTRY(resolve_relptr, array->data, base_ptr);
 
                 // Create the NumPy array
                 obj = PyArray_SimpleNewFromData(nd, dims, type_num, absptr);
@@ -258,7 +276,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
 
             } else if (schema->hint != NULL && strcmp(schema->hint, "bytearray") == 0) {
                 // Create a Python bytearray object
-                absptr_t absptr = PyTRY(rel2abs, array->data);
+                void* absptr = PyTRY(resolve_relptr, array->data, base_ptr);
                 obj = PyByteArray_FromStringAndSize((const char*)absptr, array->size);
                 if (!obj) {
                     PyErr_SetString(PyExc_TypeError, "Failed to create bytearray");
@@ -268,7 +286,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
                 // The bytearray is created from a copy of the data, so no additional handling is needed.
             } else if (schema->parameters[0]->type == MORLOC_UINT8) {
                 // Create a Python bytes object for UINT8 arrays
-                absptr_t tmp_ptr = PyTRY(rel2abs, array->data);
+                void* tmp_ptr = PyTRY(resolve_relptr, array->data, base_ptr);
                 obj = PyBytes_FromStringAndSize((const char*)tmp_ptr, array->size);
                 if (obj == NULL) {
                     PyRAISE("Failed to one bytes")
@@ -280,11 +298,11 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
                     PyRAISE("Failed to one string");
                 }
                 if(array->size > 0){
-                    char* start = (char*) PyTRY(rel2abs, array->data);
+                    char* start = (char*) PyTRY(resolve_relptr, array->data, base_ptr);
                     size_t width = schema->parameters[0]->width;
                     Schema* element_schema = schema->parameters[0];
                     for (size_t i = 0; i < array->size; i++) {
-                        PyObject* item = fromAnything(element_schema, start + width * i);
+                        PyObject* item = fromAnything(element_schema, start + width * i, base_ptr);
                         if (!item || PyList_SetItem(obj, i, item) < 0) {
                             Py_XDECREF(item);
                             PyRAISE("Failed to access element in list")
@@ -303,7 +321,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
             }
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
-                PyObject* item = fromAnything(schema->parameters[i], item_ptr);
+                PyObject* item = fromAnything(schema->parameters[i], item_ptr, base_ptr);
                 if (!item || PyTuple_SetItem(obj, i, item) < 0) {
                     Py_XDECREF(item);
                     PyRAISE("Failed to access tuple element");
@@ -318,7 +336,7 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
             }
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
-                PyObject* value = fromAnything(schema->parameters[i], item_ptr);
+                PyObject* value = fromAnything(schema->parameters[i], item_ptr, base_ptr);
                 PyObject* key = PyUnicode_FromString(schema->keys[i]);
                 if (!value || !key || PyDict_SetItem(obj, key, value) < 0) {
                     Py_XDECREF(value);
@@ -335,10 +353,41 @@ PyObject* fromAnything(const Schema* schema, const void* data){ MAYFAIL
             if (tag == 0) {
                 Py_RETURN_NONE;
             }
-            obj = fromAnything(schema->parameters[0], (const char*)data + schema->offsets[0]);
+            obj = fromAnything(schema->parameters[0], (const char*)data + schema->offsets[0], base_ptr);
             if (!obj) {
                 PyRAISE("Failed to deserialize optional inner value");
             }
+            break;
+        }
+        case MORLOC_TENSOR: {
+            import_numpy();
+            const Tensor* tensor = (const Tensor*)data;
+            size_t ndim = schema_tensor_ndim(schema);
+
+            int type_num = schema_to_npy_type(schema->parameters[0]->type);
+            if (type_num < 0) { PyRAISE("Unsupported tensor element type"); }
+
+            if (tensor->total_elements == 0) {
+                npy_intp zero_dims[1] = {0};
+                obj = PyArray_SimpleNew(1, zero_dims, type_num);
+                break;
+            }
+
+            const int64_t* shape = (const int64_t*)resolve_relptr(tensor->shape, base_ptr, NULL);
+            const void* tdata = resolve_relptr(tensor->data, base_ptr, NULL);
+
+            npy_intp np_dims[5];
+            for (size_t i = 0; i < ndim; i++) np_dims[i] = (npy_intp)shape[i];
+
+            // Create numpy array as a copy (R/W) from the data
+            obj = PyArray_SimpleNewFromData((int)ndim, np_dims, type_num, (void*)tdata);
+            if (!obj) { PyRAISE("Failed to create numpy array from tensor"); }
+
+            // Make a copy so the array owns its data (SHM may be freed)
+            PyObject* owned = PyArray_NewCopy((PyArrayObject*)obj, NPY_CORDER);
+            Py_DECREF(obj);
+            obj = owned;
+            if (!obj) { PyRAISE("Failed to copy tensor data"); }
             break;
         }
         default:
@@ -525,6 +574,24 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                 if (inner_size == -1) return -1;
                 ssize_t extra = (inner_size > (ssize_t)schema->parameters[0]->width) ? inner_size - (ssize_t)schema->parameters[0]->width : 0;
                 return (ssize_t)schema->width + extra;
+            }
+
+        case MORLOC_TENSOR:
+            {
+                import_numpy();
+                int type_num = schema_to_npy_type(schema->parameters[0]->type);
+                if (type_num < 0) { PyRAISE("Unsupported tensor element type"); }
+                PyArrayObject* arr = (PyArrayObject*)PyArray_FROM_OTF(obj, type_num, NPY_ARRAY_C_CONTIGUOUS);
+                if (!arr) { PyRAISE("Expected numpy array for MORLOC_TENSOR"); }
+                size_t total = (size_t)PyArray_SIZE(arr);
+                size_t elem_width = schema->parameters[0]->width;
+                ssize_t required = (ssize_t)sizeof(Tensor);
+                required += (ssize_t)(_Alignof(int64_t) - 1);
+                required += (ssize_t)(schema_tensor_ndim(schema) * sizeof(int64_t));
+                required += (ssize_t)(schema_alignment(schema->parameters[0]) - 1);
+                required += (ssize_t)(total * elem_width);
+                Py_DECREF(arr);
+                return required;
             }
 
         default:
@@ -738,6 +805,57 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                 if (to_voidstar_r((char*)dest + schema->offsets[0], cursor, schema->parameters[0], obj) != 0) {
                     goto error;
                 }
+            }
+            break;
+
+        case MORLOC_TENSOR:
+            {
+                import_numpy();
+                int type_num = schema_to_npy_type(schema->parameters[0]->type);
+                if (type_num < 0) { PyRAISE("Unsupported tensor element type"); }
+                PyArrayObject* arr = (PyArrayObject*)PyArray_FROM_OTF(obj, type_num, NPY_ARRAY_C_CONTIGUOUS);
+                if (!arr) { PyRAISE("Expected numpy array for MORLOC_TENSOR"); }
+
+                int ndim = PyArray_NDIM(arr);
+                npy_intp* np_shape = PyArray_DIMS(arr);
+                size_t total = (size_t)PyArray_SIZE(arr);
+                size_t elem_width = schema->parameters[0]->width;
+
+                Tensor* tensor = (Tensor*)dest;
+                tensor->total_elements = total;
+                tensor->device_type = 0;
+                tensor->device_id = 0;
+
+                if (total == 0) {
+                    tensor->shape = RELNULL;
+                    tensor->data = RELNULL;
+                    Py_DECREF(arr);
+                    break;
+                }
+
+                // Write shape array
+                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, _Alignof(int64_t));
+                {
+                    char* rel_err = NULL;
+                    tensor->shape = abs2rel((absptr_t)*cursor, &rel_err);
+                    if (rel_err) { free(rel_err); Py_DECREF(arr); PyRAISE("abs2rel failed for tensor shape"); }
+                }
+                int64_t* shape_dst = (int64_t*)*cursor;
+                for (int i = 0; i < ndim; i++) shape_dst[i] = (int64_t)np_shape[i];
+                *cursor = (char*)*cursor + ndim * sizeof(int64_t);
+
+                // Write data buffer
+                size_t elem_align = schema_alignment(schema->parameters[0]);
+                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, elem_align);
+                {
+                    char* rel_err = NULL;
+                    tensor->data = abs2rel((absptr_t)*cursor, &rel_err);
+                    if (rel_err) { free(rel_err); Py_DECREF(arr); PyRAISE("abs2rel failed for tensor data"); }
+                }
+                memcpy(*cursor, PyArray_DATA(arr), total * elem_width);
+                *cursor = (char*)*cursor + total * elem_width;
+
+                Py_DECREF(arr);
             }
             break;
 
@@ -968,23 +1086,91 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
 
     schema = PyTRY(parse_schema, schema_str);
 
+    // Arrow dispatch: if schema hint is "arrow", use Arrow C Data Interface
+    if (schema->hint && strcmp(schema->hint, "arrow") == 0) {
+        // Export pyarrow object via C Data Interface -> copy to shm -> packet
+        struct ArrowSchema arrow_schema;
+        struct ArrowArray arrow_array;
+
+        // Call obj._export_to_c(arrow_array_ptr, arrow_schema_ptr)
+        PyObject* export_result = PyObject_CallMethod(
+            obj, "_export_to_c",
+            "nn", (Py_ssize_t)&arrow_array, (Py_ssize_t)&arrow_schema);
+        if (!export_result) {
+            free_schema(schema);
+            PyRAISE("Failed to export pyarrow object via C Data Interface");
+        }
+        Py_DECREF(export_result);
+
+        char* errmsg = NULL;
+        relptr_t relptr = arrow_to_shm(&arrow_array, &arrow_schema, &errmsg);
+
+        // Release the exported C Data Interface structs
+        if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+        if (arrow_array.release) arrow_array.release(&arrow_array);
+
+        if (errmsg) {
+            free_schema(schema);
+            PyErr_SetString(PyExc_RuntimeError, errmsg);
+            free(errmsg);
+            return NULL;
+        }
+
+        packet = make_arrow_data_packet(relptr, schema);
+        if (!packet) {
+            free_schema(schema);
+            PyRAISE("Failed to create arrow data packet");
+        }
+
+        // Track shm for cleanup
+        char* resolve_err = NULL;
+        void* shm_ptr = rel2abs(relptr, &resolve_err);
+        if (resolve_err) { free(resolve_err); }
+        if (shm_ptr) {
+            shm_tracker_push((absptr_t)shm_ptr, NULL);
+            tracked = true;
+        }
+
+        packet_size = PyTRY(morloc_packet_size, packet);
+        PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
+        free(packet);
+        free_schema(schema);
+        return retval;
+    }
+
     voidstar = to_voidstar(schema, obj);
     PyTRACE(voidstar == NULL)
 
     // convert to a relative pointer conserved between language servers
     relptr_t relptr = PyTRY(abs2rel, voidstar);
 
-    packet = make_standard_data_packet(relptr, schema);
+    packet = PyTRY(make_data_packet_auto, voidstar, relptr, schema);
 
-    // Track SHM for deferred cleanup (freed after foreign_call or next dispatch)
-    shm_tracker_push((absptr_t)voidstar, schema);
-    tracked = true;
+    {
+        const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
+        if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
+            // SHM referenced by packet -- track for deferred cleanup
+            shm_tracker_push((absptr_t)voidstar, schema);
+            tracked = true;
+        } else {
+            // Data inlined in packet -- free SHM immediately
+            char* free_err = NULL;
+            shfree_by_schema((absptr_t)voidstar, schema, &free_err);
+            if (free_err) { free(free_err); free_err = NULL; }
+            shfree((absptr_t)voidstar, &free_err);
+            if (free_err) { free(free_err); }
+            voidstar = NULL;
+        }
+    }
 
     packet_size = PyTRY(morloc_packet_size, packet);
 
     {
         PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
         free(packet);
+        if (!tracked) {
+            free_schema(schema);
+        }
         return retval;
     }
 
@@ -1019,11 +1205,74 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         PyRAISE("Failed to parse arguments");
     }
 
-    // Check if this is an RPTR packet (references existing SHM we don't own)
     const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
-    bool is_rptr = (header->command.data.source == PACKET_SOURCE_RPTR);
+    uint8_t source = header->command.data.source;
+    uint8_t format = header->command.data.format;
 
     schema = PyTRY(parse_schema, schema_str)
+
+    // Arrow dispatch: if packet format is Arrow, import via C Data Interface
+    if (format == PACKET_FORMAT_ARROW) {
+        voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+
+        const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)voidstar;
+
+        struct ArrowSchema arrow_schema;
+        struct ArrowArray arrow_array;
+        char* arrow_err = NULL;
+        arrow_from_shm(arrow_hdr, &arrow_schema, &arrow_array, &arrow_err);
+        if (arrow_err) {
+            free_schema(schema);
+            PyErr_SetString(PyExc_RuntimeError, arrow_err);
+            free(arrow_err);
+            return NULL;
+        }
+
+        // Import via pyarrow RecordBatch.from_buffers or _import_from_c
+        PyObject* pyarrow_mod = PyImport_ImportModule("pyarrow");
+        if (!pyarrow_mod) {
+            if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+            if (arrow_array.release) arrow_array.release(&arrow_array);
+            free_schema(schema);
+            PyRAISE("pyarrow is required for arrow-typed data");
+        }
+
+        PyObject* rb_class = PyObject_GetAttrString(pyarrow_mod, "RecordBatch");
+        Py_DECREF(pyarrow_mod);
+        if (!rb_class) {
+            if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+            if (arrow_array.release) arrow_array.release(&arrow_array);
+            free_schema(schema);
+            PyRAISE("Failed to get pyarrow.RecordBatch");
+        }
+
+        // Use RecordBatch._import_from_c(array_ptr, schema_ptr)
+        obj = PyObject_CallMethod(rb_class, "_import_from_c",
+            "nn", (Py_ssize_t)&arrow_array, (Py_ssize_t)&arrow_schema);
+        Py_DECREF(rb_class);
+
+        // Incref shm so it stays alive while pyarrow references the buffers
+        char* incref_err = NULL;
+        shincref((absptr_t)voidstar, &incref_err);
+        if (incref_err) { free(incref_err); }
+        shm_tracker_push((absptr_t)voidstar, NULL);
+
+        free_schema(schema);
+        if (!obj) return NULL;
+        return obj;
+    }
+
+    // Fast path: inline voidstar -- read directly from packet, no SHM needed
+    if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
+        const uint8_t* payload = (const uint8_t*)packet + sizeof(morloc_packet_header_t) + header->offset;
+        obj = fromAnything(schema, (const void*)payload, (const void*)payload);
+        PyTRACE(obj == NULL)
+        free_schema(schema);
+        return obj;
+    }
+
+    // SHM paths (RPTR or MESG+MSGPACK)
+    bool is_rptr = (source == PACKET_SOURCE_RPTR);
 
     voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
@@ -1038,7 +1287,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         tracked = true;
     }
 
-    obj = fromAnything(schema, voidstar);
+    obj = fromAnything(schema, voidstar, NULL);
     PyTRACE(obj == NULL)
 
     if (!tracked) {
@@ -1580,7 +1829,7 @@ static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
     }
 
     {
-        PyObject* obj = fromAnything(schema, voidstar);
+        PyObject* obj = fromAnything(schema, voidstar, NULL);
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
@@ -1619,7 +1868,7 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
     }
 
     {
-        PyObject* obj = fromAnything(schema, voidstar);
+        PyObject* obj = fromAnything(schema, voidstar, NULL);
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);

@@ -25,6 +25,9 @@ module UnitTypeTests
   , effectErrorTests
   , namespaceErrorTests
   , typeclassTests
+  , natErrorTests
+  , natArithTests
+  , natLabelTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -32,6 +35,7 @@ import Morloc.Frontend.Namespace
 import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Typecheck.Internal as MTI
+import qualified Morloc.Typecheck.NatSolver as NS
 import qualified System.Directory as SD
 import Text.RawString.QQ
 
@@ -56,6 +60,19 @@ runFront code = do
       config
       defaultValue
       (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
+  return x
+
+-- | Like runFront but without type alias evaluation, so nat dimensions are preserved.
+runFrontRaw :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
+runFrontRaw code = do
+  config <- emptyConfig
+  ((x, _), _) <-
+    MM.runMorlocMonad
+      Nothing
+      0
+      config
+      defaultValue
+      (typecheckFrontend Nothing (Code code))
   return x
 
 runMiddle ::
@@ -91,7 +108,7 @@ assertGeneralType :: String -> MT.Text -> TypeU -> TestTree
 assertGeneralType msg code t = testCase msg $ do
   result <- runFront code
   case result of
-    (Right [x]) -> assertEqual "" (closeExistentials t) (closeExistentials . renameExistentials . gtypeof $ x)
+    (Right [x]) -> assertEqual "" (closeExistentials . MTI.cleanTypeName $ t) (closeExistentials . MTI.cleanTypeName . renameExistentials . gtypeof $ x)
     (Right _) -> error "Expected exactly one export from main for assertGeneralType"
     (Left e) ->
       error $
@@ -114,6 +131,7 @@ renameExistentials = snd . f (0 :: Int, Map.empty)
     f s (ForallU v t) =
       let (s', t') = f s t
        in (s', ForallU v t')
+    f s t@(NatVarU _) = (s, t)
     f s (FunU ts t) =
       let (s', ts') = statefulMap f s ts
           (s'', t') = f s' t
@@ -131,18 +149,42 @@ renameExistentials = snd . f (0 :: Int, Map.empty)
     f s (OptionalU t) =
       let (s', t') = f s t
        in (s', OptionalU t')
+    f s t@(NatLitU _) = (s, t)
+    f s (NatAddU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', NatAddU a' b')
+    f s (NatMulU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', NatMulU a' b')
+    f s (NatSubU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', NatSubU a' b')
+    f s (NatDivU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', NatDivU a' b')
+    f s (LabeledU n t) = let (s', t') = f s t in (s', LabeledU n t')
 
 closeExistentials :: TypeU -> TypeU
 closeExistentials = f
   where
     f (ExistU v (ts, _) (rs, _)) = ExistU v (map f ts, Closed) (map (second f) rs, Closed)
     f t@(VarU _) = t
+    f t@(NatVarU _) = t
     f (ForallU v t) = ForallU v (f t)
     f (FunU ts t) = FunU (map f ts) (f t)
     f (AppU t ts) = AppU (f t) (map f ts)
     f (NamU o v ts rs) = NamU o v (map f ts) (map (second f) rs)
     f (EffectU effs t) = EffectU effs (f t)
     f (OptionalU t) = OptionalU (f t)
+    f t@(NatLitU _) = t
+    f (NatAddU a b) = NatAddU (f a) (f b)
+    f (NatMulU a b) = NatMulU (f a) (f b)
+    f (NatSubU a b) = NatSubU (f a) (f b)
+    f (NatDivU a b) = NatDivU (f a) (f b)
+    f (LabeledU n t) = LabeledU n (f t)
+
+-- | Assert the general type before alias evaluation (preserves nat dimensions).
+assertRawType :: String -> MT.Text -> TypeU -> TestTree
+assertRawType msg code t = testCase msg $ do
+  result <- runFrontRaw code
+  case result of
+    (Right [x]) -> assertEqual "" (closeExistentials . MTI.cleanTypeName $ t) (closeExistentials . MTI.cleanTypeName . renameExistentials . gtypeof $ x)
+    (Right _) -> error "Expected exactly one export from main for assertRawType"
+    (Left e) ->
+      error $
+        "The following error was raised: " <> show e <> "\nin:\n" <> show code
 
 assertSubtypeGamma :: String -> [GammaIndex] -> TypeU -> TypeU -> [GammaIndex] -> TestTree
 assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do
@@ -167,6 +209,8 @@ listToGamma gs =
     , gammaContext = ctx
     , gammaExist = existMap
     , gammaSolved = Map.empty
+    , gammaDeferred = []
+    , gammaNatSubs = Map.empty
     }
 
 exprTestBad :: String -> MT.Text -> TestTree
@@ -233,7 +277,7 @@ fun [t] = FunU [] t
 fun ts = FunU (init ts) (last ts)
 
 forallu :: [MT.Text] -> TypeU -> TypeU
-forallu ss t = foldr (ForallU . TV) t ss
+forallu ss t = foldr (\s -> ForallU (TV s)) t ss
 
 exist :: MT.Text -> TypeU
 exist v = ExistU (TV v) ([], Open) ([], Open)
@@ -415,7 +459,7 @@ typeAliasTests =
           "parameterized generic"
           [r|
         module main (f)
-        f m a b :: m (a -> b)
+        f :: m (a -> b)
         |]
           (forallu ["m___q0", "a___q1", "b___q2"] (arr "m___q0" [fun [var "a___q1", var "b___q2"]]))
       , assertGeneralType
@@ -473,7 +517,7 @@ typeAliasTests =
           [r|
            module main (f)
            type Foo = A
-           g a b :: a -> b
+           g :: a -> b
            f :: Foo -> Int
            f = g  {- yes, g isn't defined -}
         |]
@@ -519,7 +563,7 @@ typeAliasTests =
            import a (A)
            import b (A)
            
-           foo a b :: A a b -> A a b -> A a b
+           foo :: A a b -> A a b -> A a b
         |]
       , -- import tests ---------------------------------------
         assertGeneralType
@@ -631,7 +675,7 @@ whereTests =
       , assertGeneralType
           "calling deeper where"
           [r|
-            id a :: a -> a
+            id :: a -> a
             inc :: Int -> Int
             f = id z where
                 z = inc y where
@@ -925,49 +969,49 @@ unitTypeTests =
       , assertGeneralType
           "identity signature function"
           [r|
-        id a :: a -> a
+        id :: a -> a
         id 42
         |]
           int
       , assertGeneralType
           "const signature function"
           [r|
-        const a b :: a -> b -> a
+        const :: a -> b -> a
         const 42 True
         |]
           int
       , assertGeneralType
           "fst signature function"
           [r|
-        fst a b :: (a,b) -> a
+        fst :: (a,b) -> a
         fst (42,True)
         |]
           int
       , assertGeneralType
           "value to list function"
           [r|
-        single a :: a -> [a]
+        single :: a -> [a]
         single 42
         |]
           (lst int)
       , assertGeneralType
           "head function"
           [r|
-        head a :: [a] -> a
+        head :: [a] -> a
         head [1,2,3]
         |]
           int
       , assertGeneralType
           "make list function"
           [r|
-        f a :: a -> [a]
+        f :: a -> [a]
         f 1
         |]
           (lst int)
       , assertGeneralType
           "make list function"
           [r|
-        single a :: a -> [a]
+        single :: a -> [a]
         single 1
         |]
           (lst int)
@@ -981,16 +1025,16 @@ unitTypeTests =
       , assertGeneralType
           "app single function"
           [r|
-        app a b :: (a -> b) -> a -> b
-        f a :: a -> [a]
+        app :: (a -> b) -> a -> b
+        f :: a -> [a]
         app f 42
         |]
           (lst int)
       , assertGeneralType
           "app head function"
           [r|
-        app a b :: (a -> b) -> a -> b
-        f a :: [a] -> a
+        app :: (a -> b) -> a -> b
+        f :: [a] -> a
         app f [42]
         |]
           int
@@ -1014,28 +1058,28 @@ unitTypeTests =
           "zip pair"
           [r|
       pair x y = (x, y)
-      zip x y z :: (x -> y -> z) -> [x] -> [y] -> [z]
+      zip :: (x -> y -> z) -> [x] -> [y] -> [z]
       zip pair [1,2] [True, False]
       |]
           (lst (tuple [int, bool]))
       , assertGeneralType
           "nested identity"
           [r|
-      id a :: a -> a
+      id :: a -> a
       id (id (id 1))
       |]
           int
       , assertGeneralType
           "head (head [[1]])"
           [r|
-      head a :: [a] -> a
+      head :: [a] -> a
       head (head [[42]])
       |]
           int
       , assertGeneralType
           "snd (snd (1,(1,True)))"
           [r|
-      snd a b :: (a, b) -> b
+      snd :: (a, b) -> b
       snd (snd (1, (1, True)))
       |]
           bool
@@ -1049,58 +1093,58 @@ unitTypeTests =
       , assertGeneralType
           "map head function"
           [r|
-        map a b :: (a -> b) -> [a] -> [b]
-        head a :: [a] -> a
+        map :: (a -> b) -> [a] -> [b]
+        head :: [a] -> a
         map head [[1],[1,2,3]]
         |]
           (lst int)
       , assertGeneralType
           "t a -> a"
           [r|
-        gify a :: a -> G a
-        out f a :: f a -> a
+        gify :: a -> G a
+        out :: f a -> a
         out (gify 1)
         |]
           int
       , assertGeneralType
           "f a b -> b"
           [r|
-        gify a b :: a -> b -> G a b
-        snd f a b :: f a b -> b
+        gify :: a -> b -> G a b
+        snd :: f a b -> b
         snd (gify 1 True)
         |]
           bool
       , assertGeneralType
           "map id over number list"
           [r|
-        map a b :: (a -> b) -> [a] -> [b]
-        id a :: a -> a
+        map :: (a -> b) -> [a] -> [b]
+        id :: a -> a
         map id [1,2,3]
         |]
           (lst int)
       , assertGeneralType
           "map fst over tuple list"
           [r|
-        map a b :: (a -> b) -> [a] -> [b]
-        fst a b :: (a,b) -> a
+        map :: (a -> b) -> [a] -> [b]
+        fst :: (a,b) -> a
         map fst [(1,True),(2,False)]
         |]
           (lst int)
       , assertGeneralType
           "map fstG over (G a b) list"
           [r|
-        gify a b :: a -> b -> G a b
-        map a b :: (a -> b) -> [a] -> [b]
-        fstF f a b :: f a b -> a
+        gify :: a -> b -> G a b
+        map :: (a -> b) -> [a] -> [b]
+        fstF :: f a b -> a
         map fstF [gify 1 True, gify 2 False]
         |]
           (lst int)
       , assertGeneralType
           "fmap generic fst over functor"
           [r|
-        gify a :: a -> G a
-        fmap f a b :: (a -> b) -> f a -> f b
-        out f a :: f a -> a
+        gify :: a -> G a
+        fmap :: (a -> b) -> f a -> f b
+        out :: f a -> a
         fmap out (gify [1])
         |]
           (arr "G" [int])
@@ -1109,8 +1153,8 @@ unitTypeTests =
           [r|
         module m (biz)
         type M a b c = R b a c
-        foo a b c :: M a b c -> N b c
-        bar a b c :: a -> b -> c -> R a b c
+        foo :: M a b c -> N b c
+        bar :: a -> b -> c -> R a b c
         da :: Int -> X
         db :: Int -> Y
         dc :: Int -> Z
@@ -1184,7 +1228,7 @@ unitTypeTests =
       , exprTestBad
           "applications with too many arguments fail"
           [r|
-        f a :: a -> a
+        f :: a -> a
         f True 12
         |]
       , exprTestBad
@@ -1218,14 +1262,14 @@ unitTypeTests =
         expectError
           "arguments to a function are monotypes"
           [r|
-        f a :: a -> a
+        f :: a -> a
         g = \h -> (h 42, h True)
         g f
         |]
       , assertGeneralType
           "polymorphism under lambdas (203f8c) (1)"
           [r|
-        f a :: a -> a
+        f :: a -> a
         g = \h -> (h 42, h 1234)
         g f
         |]
@@ -1233,7 +1277,7 @@ unitTypeTests =
       , assertGeneralType
           "polymorphism under lambdas (203f8c) (2)"
           [r|
-        f a :: a -> a
+        f :: a -> a
         g = \h -> [h 42, h 1234]
         g f
         |]
@@ -1283,7 +1327,7 @@ unitTypeTests =
         assertGeneralType
           "type signature: identity function"
           [r|
-        f a :: a -> a
+        f :: a -> a
         f 42
         |]
           int
@@ -1298,7 +1342,7 @@ unitTypeTests =
       , assertGeneralType
           "type signature: generic apply function"
           [r|
-        apply a b :: (a->b) -> a -> b
+        apply :: (a->b) -> a -> b
         f :: Int -> Bool
         apply f 42
         |]
@@ -1306,7 +1350,7 @@ unitTypeTests =
       , assertGeneralType
           "type signature: map"
           [r|
-        map a b :: (a->b) -> [a] -> [b]
+        map :: (a->b) -> [a] -> [b]
         f :: Int -> Bool
         map f [5,2]
         |]
@@ -1331,16 +1375,16 @@ unitTypeTests =
       , assertGeneralType
           "shadowed qualified type variables (7ffd52a)"
           [r|
-        f a :: a -> a
-        g a :: a -> Int
+        f :: a -> a
+        g :: a -> Int
         g f
         |]
           int
       , assertGeneralType
           "non-shadowed qualified type variables (7ffd52a)"
           [r|
-        f a :: a -> a
-        g b :: b -> Int
+        f :: a -> a
+        g :: b -> Int
         g f
         |]
           int
@@ -1349,7 +1393,7 @@ unitTypeTests =
       , assertGeneralType
           "list containing an applied variable"
           [r|
-        f a :: a -> a
+        f :: a -> a
         [53, f 34]
         |]
           (lst int)
@@ -1378,7 +1422,7 @@ unitTypeTests =
       , assertGeneralType
           "tuple containing an applied variable"
           [r|
-        f a :: a -> a
+        f :: a -> a
         (f 53, True)
         |]
           (tuple [int, bool])
@@ -1422,7 +1466,7 @@ unitTypeTests =
         assertGeneralType
           "declaration with a signature (1)"
           [r|
-        f a :: a -> a
+        f :: a -> a
         f x = x
         f 42
         |]
@@ -1454,66 +1498,41 @@ unitTypeTests =
           "catch infinite recursion of list"
           [r|
         module main (f)
-        g a :: [a] -> a
-        f a :: a -> a
+        g :: [a] -> a
+        f :: a -> a
         f x = g x
         |]
       , expectError
           "catch infinite recursion of tuple"
           [r|
         module main (f)
-        g a b :: (a, b) -> a
-        f a :: a -> a
+        g :: (a, b) -> a
+        f :: a -> a
         f x = g x
         |]
       , expectError
           "check signatures under supposed identity"
           [r|
         module main (f)
-        g a b :: (a -> b) -> a
-        f a :: a -> a
+        g :: (a -> b) -> a
+        f :: a -> a
         f x = g x
         |]
-      , -- -- tags
-        -- , exprEqual
-        --     "variable tags"
-        --     "F :: Int"
-        --     "F :: foo:Int"
-        -- , exprEqual
-        --     "list tags"
-        --     "F :: [Int]"
-        --     "F :: foo:[Int]"
-        -- , exprEqual
-        --     "tags on parenthesized types"
-        --     "F :: Int"
-        --     "F :: f:(Int)"
-        -- , exprEqual
-        --     "record tags"
-        --     "F :: {x::Int, y::Str}"
-        --     "F :: foo:{x::Int, y::Str}"
-        -- , exprEqual
-        --     "nested tags (tuple)"
-        --     "F :: (Int, Str)"
-        --     "F :: foo:(i:Int, s:Str)"
-        -- , exprEqual "nested tags (list)" "F :: [Int]" "F :: xs:[x:Int]"
-        -- , exprEqual
-        --     "nested tags (record)"
-        --     "F :: {x::Int, y::Str}"
-        --     "F :: foo:{x::(i:Int), y::Str}"
+      ,
 
-        -- constraint syntax
+        -- constraint syntax (implicit quantification wraps free vars in ForallU)
         assertGeneralType
           "constraint syntax (1)"
           "module main (f)\nf :: (Ord a) => a -> a -> a"
-          (fun [var "a", var "a", var "a"])
+          (forallu ["a"] (fun [var "a", var "a", var "a"]))
       , assertGeneralType
           "constraint syntax (2)"
           "module main (f)\nf :: Ord a => a -> a -> a"
-          (fun [var "a", var "a", var "a"])
+          (forallu ["a"] (fun [var "a", var "a", var "a"]))
       , assertGeneralType
           "constraint syntax (3)"
           "module main (f)\nf :: (Ord a, Eq b) => a -> b -> Bool"
-          (fun [var "a", var "b", VarU (TV "Bool")])
+          (forallu ["a", "b"] (fun [var "a", var "b", VarU (TV "Bool")]))
       , -- tests modules
         assertGeneralType
           "basic main module"
@@ -1527,7 +1546,7 @@ unitTypeTests =
           module foo (x)
             x = 42
           module bar (f)
-            f a :: a -> [a]
+            f :: a -> [a]
           module main (z)
             import foo (x)
             import bar (f)
@@ -1751,10 +1770,10 @@ infixOperatorTests =
           infixl 9 .
           infixl 6 +
           infixr 0 $
-          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
-          ($) a b :: (a -> b) -> a -> b
+          (.) :: (b -> c) -> (a -> b) -> a -> c
+          ($) :: (a -> b) -> a -> b
           (+) :: Int -> Int -> Int
-          show a :: a -> Str
+          show :: a -> Str
           x = show . (+) 9 $ 5
           x
         |]
@@ -1763,7 +1782,7 @@ infixOperatorTests =
           "polymorphic list append"
           [r|
           infixl 6 ++
-          (++) a :: [a] -> [a] -> [a]
+          (++) :: [a] -> [a] -> [a]
           (++) xs ys = xs
           x = [1] ++ [2]
           x
@@ -1921,7 +1940,7 @@ infixOperatorTests =
           "$ applies function to argument"
           [r|
           infixr 0 $
-          ($) a b :: (a -> b) -> a -> b
+          ($) :: (a -> b) -> a -> b
           f :: Int -> Str
           x = f $ 1
           x
@@ -1931,7 +1950,7 @@ infixOperatorTests =
           "nested $ is right-associative (type-verified)"
           [r|
           infixr 0 $
-          ($) a b :: (a -> b) -> a -> b
+          ($) :: (a -> b) -> a -> b
           f :: Int -> Str
           g :: Str -> Int
           x = g $ f $ 1
@@ -1943,7 +1962,7 @@ infixOperatorTests =
           [r|
           infixr 0 $
           infixl 6 +
-          ($) a b :: (a -> b) -> a -> b
+          ($) :: (a -> b) -> a -> b
           (+) :: Int -> Int -> Int
           f :: Int -> Str
           x = f $ 1 + 2
@@ -1955,7 +1974,7 @@ infixOperatorTests =
           "composition of two functions"
           [r|
           infixr 9 .
-          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
+          (.) :: (b -> c) -> (a -> b) -> a -> c
           g :: Str -> Int
           f :: Int -> Str
           x = g . f
@@ -1966,7 +1985,7 @@ infixOperatorTests =
           "composition chain of three functions"
           [r|
           infixr 9 .
-          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
+          (.) :: (b -> c) -> (a -> b) -> a -> c
           h :: Str -> Int
           g :: Int -> Str
           f :: Bool -> Int
@@ -1979,8 +1998,8 @@ infixOperatorTests =
           [r|
           infixr 9 .
           infixr 0 $
-          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
-          ($) a b :: (a -> b) -> a -> b
+          (.) :: (b -> c) -> (a -> b) -> a -> c
+          ($) :: (a -> b) -> a -> b
           f :: Int -> Int
           g :: Int -> Str
           x = g . f $ 5
@@ -2129,7 +2148,7 @@ infixOperatorTests =
           infixr 9 .
           (+) :: Int -> Int -> Int
           (*) :: Int -> Int -> Int
-          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
+          (.) :: (b -> c) -> (a -> b) -> a -> c
           foo x = ((+) 1 . (*) 2) x
           foo
         |]
@@ -2179,7 +2198,7 @@ complexityRegressionTests =
         assertGeneralType
           "deep identity composition"
           [r|
-          id a :: a -> a
+          id :: a -> a
           f = id (id (id (id (id (id (id (id (id (id 42)))))))))
           f
         |]
@@ -2187,8 +2206,8 @@ complexityRegressionTests =
       , assertGeneralType
           "deep function composition chain"
           [r|
-          id a :: a -> a
-          (.) a b c :: (b -> c) -> (a -> b) -> a -> c
+          id :: a -> a
+          (.) :: (b -> c) -> (a -> b) -> a -> c
           f = id . id . id . id . id . id . id . id . id . id
           f 42
         |]
@@ -2229,7 +2248,7 @@ complexityRegressionTests =
       , assertGeneralType
           "polymorphic many-argument function"
           [r|
-          f a b c d e :: a -> b -> c -> d -> e -> (a, b, c, d, e)
+          f :: a -> b -> c -> d -> e -> (a, b, c, d, e)
           f 1 True "x" 2.0 [1]
         |]
           (tuple [int, bool, str, real, lst int])
@@ -2237,15 +2256,15 @@ complexityRegressionTests =
         exprTestBad
           "fold with (==) should fail: shared var c gets Bool and Str"
           [r|
-          fold b a :: (b -> a -> b) -> b -> [a] -> b
-          (==) c :: c -> c -> Bool
+          fold :: (b -> a -> b) -> b -> [a] -> b
+          (==) :: c -> c -> Bool
           test = fold (==) True ["hello", "hello"]
           test
         |]
       , assertGeneralType
           "fold with (+) should succeed: shared var resolved consistently"
           [r|
-          fold b a :: (b -> a -> b) -> b -> [a] -> b
+          fold :: (b -> a -> b) -> b -> [a] -> b
           (+) :: Int -> Int -> Int
           test = fold (+) 0 [1, 2, 3]
           test
@@ -2254,8 +2273,8 @@ complexityRegressionTests =
       , assertGeneralType
           "map with lambda using (==) should succeed: same type both args"
           [r|
-          map a b :: (a -> b) -> [a] -> [b]
-          (==) c :: c -> c -> Bool
+          map :: (a -> b) -> [a] -> [b]
+          (==) :: c -> c -> Bool
           test = map (\x -> x == x) ["hello"]
           test
         |]
@@ -2264,7 +2283,7 @@ complexityRegressionTests =
         exprTestBad
           "zipSubtype: Pair a a cannot unify with Pair Bool Str"
           [r|
-          mkPair a :: a -> Pair a a
+          mkPair :: a -> Pair a a
           consume :: Pair Bool Str -> Int
           test = consume (mkPair True)
           test
@@ -2272,8 +2291,8 @@ complexityRegressionTests =
       , assertGeneralType
           "zipSubtype: Pair a a consistent with Pair Int Int"
           [r|
-          mkPair a :: a -> Pair a a
-          fst a b :: Pair a b -> a
+          mkPair :: a -> Pair a a
+          fst :: Pair a b -> a
           test = fst (mkPair 42)
           test
         |]
@@ -2282,8 +2301,8 @@ complexityRegressionTests =
         exprTestBad
           "shared var via HOF: id cannot satisfy Bool -> Str"
           [r|
-          apply a b :: (a -> b) -> a -> b
-          id a :: a -> a
+          apply :: (a -> b) -> a -> b
+          id :: a -> a
           asStr :: Str -> Str
           test = asStr (apply id True)
           test
@@ -2292,8 +2311,8 @@ complexityRegressionTests =
         exprTestBad
           "triple-shared var forced to different types through fold"
           [r|
-          fold b a :: (b -> a -> b) -> b -> [a] -> b
-          choose c :: c -> c -> c
+          fold :: (b -> a -> b) -> b -> [a] -> b
+          choose :: c -> c -> c
           test = fold choose "hello" [1, 2]
           test
         |]
@@ -2301,8 +2320,8 @@ complexityRegressionTests =
         exprTestBad
           "shared var return type conflicts with argument through fold"
           [r|
-          fold b a :: (b -> a -> b) -> b -> [a] -> b
-          weirdEq c :: c -> c -> Str
+          fold :: (b -> a -> b) -> b -> [a] -> b
+          weirdEq :: c -> c -> Str
           test = fold weirdEq "start" [1, 2]
           test
         |]
@@ -2310,8 +2329,8 @@ complexityRegressionTests =
         exprTestBad
           "two distinct shared vars both inconsistent through HOF"
           [r|
-          hof a b c d e :: (a -> b -> c -> d -> e) -> a -> b -> c -> d -> e
-          f x y :: x -> y -> x -> y -> Bool
+          hof :: (a -> b -> c -> d -> e) -> a -> b -> c -> d -> e
+          f :: x -> y -> x -> y -> Bool
           test = hof f 1 "hi" True 42.0
           test
         |]
@@ -2319,8 +2338,8 @@ complexityRegressionTests =
         exprTestBad
           "nested HOF: shared var conflict through double application"
           [r|
-          apply a b :: (a -> b) -> a -> b
-          (==) c :: c -> c -> Bool
+          apply :: (a -> b) -> a -> b
+          (==) :: c -> c -> Bool
           test = apply (apply (==) True) "hello"
           test
         |]
@@ -2328,8 +2347,8 @@ complexityRegressionTests =
         assertGeneralType
           "fold with (==) consistent types: all Bool"
           [r|
-          fold b a :: (b -> a -> b) -> b -> [a] -> b
-          (==) c :: c -> c -> Bool
+          fold :: (b -> a -> b) -> b -> [a] -> b
+          (==) :: c -> c -> Bool
           test = fold (==) True [True, False]
           test
         |]
@@ -2338,8 +2357,8 @@ complexityRegressionTests =
         assertGeneralType
           "multiple shared vars consistent through HOF"
           [r|
-          hof a b c d e :: (a -> b -> c -> d -> e) -> a -> b -> c -> d -> e
-          f x y :: x -> y -> x -> y -> Bool
+          hof :: (a -> b -> c -> d -> e) -> a -> b -> c -> d -> e
+          f :: x -> y -> x -> y -> Bool
           test = hof f 1 2 3 4
           test
         |]
@@ -2557,7 +2576,7 @@ effectSynthesisTests =
           [r|
         module main (x)
         f :: Int -> <IO> Int
-        id a :: a -> a
+        id :: a -> a
         x = do !(f (id 42))
           |]
           (ioEff int)
@@ -2689,7 +2708,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         instance Monoid (List a) where
@@ -2704,7 +2723,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid (List a) where
           mempty = []
         instance Monoid Str where
@@ -2720,7 +2739,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         instance Monoid (List a) where
@@ -2736,7 +2755,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         instance Monoid (List a) where
@@ -2755,7 +2774,7 @@ typeclassTests =
           [r|
         module main (foo)
         type Py => Int = "int"
-        myId a :: a -> a
+        myId :: a -> a
         source Py ("lambda x: x" as myId)
         foo :: Int
         foo = (myId :: Int -> Int) 42
@@ -2767,7 +2786,7 @@ typeclassTests =
           [r|
         module main (foo)
         type Py => Real = "float"
-        myVal a :: a
+        myVal :: a
         source Py ("lambda: 3.14" as myVal)
         foo :: Real
         foo = myVal :: Real
@@ -2782,9 +2801,9 @@ typeclassTests =
         module main (x)
         type Py => Str = "str"
         class Semigroup a where
-          append a :: a -> a -> a
+          append :: a -> a -> a
         class Semigroup a => Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Semigroup Str where
           source Py from "foo.py" ("appendStr" as append)
         instance Monoid Str where
@@ -2801,7 +2820,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         instance Monoid (List a) where
@@ -2814,7 +2833,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         x :: Real
@@ -2826,7 +2845,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         x :: Str
         x = mempty
           |]
@@ -2836,7 +2855,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         instance Monoid (List a) where
@@ -2852,7 +2871,7 @@ typeclassTests =
           [r|
         module main (x)
         class Default a where
-          def a :: a
+          def :: a
         instance Default Int where
           def = 0
         x :: ?Int
@@ -2865,7 +2884,7 @@ typeclassTests =
           [r|
         module main (x)
         class Default a where
-          def a :: a
+          def :: a
         instance Default Int where
           def = 0
         f :: Int -> <IO> Int
@@ -2880,7 +2899,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         instance Monoid (List a) where
@@ -2897,7 +2916,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid Str where
           mempty = ""
         instance Monoid (List a) where
@@ -2913,8 +2932,8 @@ typeclassTests =
           [r|
         module main (x)
         class Bounded a where
-          minBound a :: a
-          maxBound a :: a
+          minBound :: a
+          maxBound :: a
         instance Bounded Int where
           minBound = 0
           maxBound = 100
@@ -2928,7 +2947,7 @@ typeclassTests =
           [r|
         module main (x)
         class Monoid a where
-          mempty a :: a
+          mempty :: a
         instance Monoid (List a) where
           mempty = []
         x :: [[Int]]
@@ -2936,3 +2955,412 @@ typeclassTests =
           |]
           (lst (lst int))
       ]
+
+natErrorTests :: TestTree
+natErrorTests =
+  testGroup
+    "nat typecheck errors"
+    [ expectError
+        "add dimension mismatch (4 != 5)"
+        [r|
+      module main (x)
+      type Tensor2 d1 d2 a
+      add :: Tensor2 m n Real -> Tensor2 m n Real -> Tensor2 m n Real
+      a :: Tensor2 3 4 Real
+      b :: Tensor2 3 5 Real
+      x = add a b
+        |]
+    , expectError
+        "matmul inner dimension mismatch (4 != 5)"
+        [r|
+      module main (x)
+      type Tensor2 d1 d2 a
+      matmul :: Tensor2 m k Real -> Tensor2 k n Real -> Tensor2 m n Real
+      a :: Tensor2 3 4 Real
+      b :: Tensor2 5 6 Real
+      x = matmul a b
+        |]
+    , expectError
+        "trace requires square matrix (3 != 4)"
+        [r|
+      module main (x)
+      type Tensor2 d1 d2 a
+      trace :: Tensor2 n n Real -> Real
+      a :: Tensor2 3 4 Real
+      x = trace a
+        |]
+    , expectError
+        "dot product length mismatch (3 != 5)"
+        [r|
+      module main (x)
+      type Tensor1 d1 a
+      dot :: Tensor1 n Real -> Tensor1 n Real -> Real
+      a :: Tensor1 3 Real
+      b :: Tensor1 5 Real
+      x = dot a b
+        |]
+    , expectError
+        "vstack column dimension mismatch (3 != 4)"
+        [r|
+      module main (x)
+      type Tensor2 d1 d2 a
+      vstack :: Tensor2 m n Real -> Tensor2 p n Real -> Tensor2 m n Real
+      a :: Tensor2 2 3 Real
+      b :: Tensor2 4 4 Real
+      x = vstack a b
+        |]
+    , expectError
+        "nat arithmetic mismatch: (2+3) != 4"
+        [r|
+      module main (x)
+      type SizedList n a = [a]
+      append :: SizedList m a -> SizedList n a -> SizedList (m + n) a
+      a :: SizedList 2 Int
+      b :: SizedList 3 Int
+      x :: SizedList 4 Int
+      x = append a b
+        |]
+    ]
+
+natArithTests :: TestTree
+natArithTests =
+  testGroup
+    "nat arithmetic (sub, div, solver fix)"
+    [ -- NatSolver unit tests
+      testCase "ground subtraction: (10 - 3) ~ 7" $
+        let e1 = NS.NatSub (NS.NatLit 10) (NS.NatLit 3)
+            e2 = NS.NatLit 7
+        in case NS.solveNat e1 e2 of
+             Right subs -> assertEqual "" subs Map.empty
+             Left err -> assertFailure $ "Expected success, got: " ++ show err
+    , testCase "ground division: (12 / 4) ~ 3" $
+        let e1 = NS.NatDiv (NS.NatLit 12) (NS.NatLit 4)
+            e2 = NS.NatLit 3
+        in case NS.solveNat e1 e2 of
+             Right subs -> assertEqual "" subs Map.empty
+             Left err -> assertFailure $ "Expected success, got: " ++ show err
+    , testCase "subtraction mismatch: (10 - 3) ~ 8" $
+        let e1 = NS.NatSub (NS.NatLit 10) (NS.NatLit 3)
+            e2 = NS.NatLit 8
+        in case NS.solveNat e1 e2 of
+             Left NS.Contradiction -> return ()
+             other -> assertFailure $ "Expected Contradiction, got: " ++ show other
+    , testCase "division mismatch: (12 / 4) ~ 4" $
+        let e1 = NS.NatDiv (NS.NatLit 12) (NS.NatLit 4)
+            e2 = NS.NatLit 4
+        in case NS.solveNat e1 e2 of
+             Left NS.Contradiction -> return ()
+             other -> assertFailure $ "Expected Contradiction, got: " ++ show other
+    , testCase "subtraction with variable: n - 3 ~ 5 => n = 8" $
+        let e1 = NS.NatSub (NS.NatVar (TV "n")) (NS.NatLit 3)
+            e2 = NS.NatLit 5
+        in case NS.solveNat e1 e2 of
+             Right subs -> assertEqual "" (Map.singleton (TV "n") (NS.NatLit 8)) subs
+             Left err -> assertFailure $ "Expected n=8, got: " ++ show err
+    , testCase "division by constant: n / 3 with n = 9 / 3 ~ 3" $
+        let e1 = NS.NatDiv (NS.NatLit 9) (NS.NatLit 3)
+            e2 = NS.NatLit 3
+        in case NS.solveNat e1 e2 of
+             Right subs -> assertEqual "" subs Map.empty
+             Left err -> assertFailure $ "Expected success, got: " ++ show err
+    -- extractLinearVar soundness fix: i*j ~ n must be Deferred, not n=0
+    , testCase "extractLinearVar fix: i*j ~ n is Deferred" $
+        let e1 = NS.NatMul (NS.NatVar (TV "i")) (NS.NatVar (TV "j"))
+            e2 = NS.NatVar (TV "n")
+        in case NS.solveNat e1 e2 of
+             Left (NS.Deferred _) -> return ()
+             Right subs -> assertFailure $ "Expected Deferred, got solved: " ++ show subs
+             Left NS.Contradiction -> assertFailure "Expected Deferred, got Contradiction"
+    , testCase "linear solving still works: n + 3 ~ 8 => n = 5" $
+        let e1 = NS.NatAdd (NS.NatVar (TV "n")) (NS.NatLit 3)
+            e2 = NS.NatLit 8
+        in case NS.solveNat e1 e2 of
+             Right subs -> assertEqual "" (Map.singleton (TV "n") (NS.NatLit 5)) subs
+             Left err -> assertFailure $ "Expected n=5, got: " ++ show err
+    , testCase "simple variable solving: n ~ 5" $
+        let e1 = NS.NatVar (TV "n")
+            e2 = NS.NatLit 5
+        in case NS.solveNat e1 e2 of
+             Right subs -> assertEqual "" (Map.singleton (TV "n") (NS.NatLit 5)) subs
+             Left err -> assertFailure $ "Expected n=5, got: " ++ show err
+    -- Typechecker integration tests for sub/div syntax
+    , expectError
+        "ground subtraction mismatch: (10-3) != 8 in type annotation"
+        [r|
+      module main (x)
+      type SizedList n a = [a]
+      a :: SizedList (10 - 3) Int
+      x :: SizedList 8 Int
+      x = a
+        |]
+    , expectError
+        "ground division mismatch: (12/4) != 4 in type annotation"
+        [r|
+      module main (x)
+      type SizedList n a = [a]
+      a :: SizedList (12 / 4) Int
+      x :: SizedList 4 Int
+      x = a
+        |]
+    -- deferred constraint re-checking: variable arithmetic caught after solving
+    , expectError
+        "deferred subtraction mismatch: m=8, n=3, but m-n used as 7"
+        [r|
+      module main (x)
+      type SizedList n a = [a]
+      take :: SizedList (m - n) a -> SizedList n a -> SizedList m a
+      a :: SizedList 7 Int
+      b :: SizedList 3 Int
+      x :: SizedList 8 Int
+      x = take a b
+        |]
+    , expectError
+        "deferred multiplication mismatch: n*m=12 but n=5 (no integer m)"
+        [r|
+      module main (x)
+      type SizedList n a = [a]
+      split :: SizedList (n * m) a -> SizedList n a
+      a :: SizedList 12 Int
+      x :: SizedList 5 Int
+      x = split a
+        |]
+    ]
+
+natLabelTests :: TestTree
+natLabelTests =
+  testGroup
+    "nat labeled params (m:Int syntax)"
+    [ -- === Positive: literal int args resolve nat vars ===
+      assertRawType
+        "labeled literal resolves dimension: makeVec 5 :: Tensor1 5 Real"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = makeVec 5
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
+    , assertRawType
+        "labeled literal zero dimension: makeVec 0 :: Tensor1 0 Real"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = makeVec 0
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 0, VarU (TV "Real")])
+    , assertRawType
+        "two labeled params resolve: makeMat 3 4 :: Tensor2 3 4 Real"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      makeMat :: m:Int -> n:Int -> Tensor2 m n Real
+      x = makeMat 3 4
+        |]
+        (AppU (VarU (TV "Tensor2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
+    , assertRawType
+        "labeled dims flow through generic op: id_ (makeVec 7) :: Tensor1 7 Real"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      id_ :: Tensor1 n Real -> Tensor1 n Real
+      x = id_ (makeVec 7)
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 7, VarU (TV "Real")])
+    , assertRawType
+        "labeled dims with nat arithmetic: conv output dims computed"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      type Tensor3 (d1 :: Nat) (d2 :: Nat) (d3 :: Nat) a
+      makeImg :: h:Int -> w:Int -> Tensor2 h w Real
+      makeK :: k:Int -> fh:Int -> fw:Int -> Tensor3 k fh fw Real
+      type Tensor1 (d :: Nat) a = [a]
+      makeB :: k:Int -> Tensor1 k Real
+      conv :: Tensor2 h w Real -> Tensor3 k fh fw Real -> Tensor1 k Real -> Tensor3 k (h - fh + 1) (w - fw + 1) Real
+      x = conv (makeImg 5 5) (makeK 2 3 3) (makeB 2)
+        |]
+        (AppU (VarU (TV "Tensor3")) [NatLitU 2, NatLitU 3, NatLitU 3, VarU (TV "Real")])
+    , assertRawType
+        "labeled + flatten nat arithmetic: 2*3*3 = 18"
+        [r|
+      module main (x)
+      type Tensor3 (d1 :: Nat) (d2 :: Nat) (d3 :: Nat) a
+      type Tensor1 (d :: Nat) a = [a]
+      makeT :: a:Int -> b:Int -> c:Int -> Tensor3 a b c Real
+      flatten :: Tensor3 a b c Real -> Tensor1 (a * b * c) Real
+      x = flatten (makeT 2 3 3)
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 18, VarU (TV "Real")])
+    , assertRawType
+        "mixed labeled and unlabeled args"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      makeT :: m:Int -> n:Int -> Tensor2 m n Real
+      scale :: Real -> Tensor2 m n Real -> Tensor2 m n Real
+      x = scale 2.0 (makeT 3 4)
+        |]
+        (AppU (VarU (TV "Tensor2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
+    , assertRawType
+        "same label var used in two positions (diagonal)"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      eye :: n:Int -> Tensor2 n n Real
+      x = eye 4
+        |]
+        (AppU (VarU (TV "Tensor2")) [NatLitU 4, NatLitU 4, VarU (TV "Real")])
+
+    -- === Positive: let-bound integers resolve nat labels ===
+    , assertRawType
+        "let-bound int resolves label: let n = 5 in makeVec n"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = let n = 5 in makeVec n
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
+    , assertRawType
+        "chained let-bound: let a = 7 in let b = a in makeVec b"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = let a = 7 in let b = a in makeVec b
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 7, VarU (TV "Real")])
+    , assertRawType
+        "multiple let-bound dims: let m=3, n=4 in makeMat m n"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      makeMat :: m:Int -> n:Int -> Tensor2 m n Real
+      x = let m = 3 in let n = 4 in makeMat m n
+        |]
+        (AppU (VarU (TV "Tensor2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
+
+    -- === Positive: tuple accessor evaluation ===
+    , assertRawType
+        "tuple accessor resolves: makeVec (.0 (5, 6))"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = makeVec (.0 (5, 6))
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
+    , assertRawType
+        "let-bound tuple + accessor: let dims = (3,4) in makeMat (.0 dims) (.1 dims)"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      makeMat :: m:Int -> n:Int -> Tensor2 m n Real
+      x = let dims = (3, 4) in makeMat (.0 dims) (.1 dims)
+        |]
+        (AppU (VarU (TV "Tensor2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
+    , assertRawType
+        "chained let + accessor: let d=(8,9); let n=.0 d in makeVec n"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = let d = (8, 9) in let n = .0 d in makeVec n
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 8, VarU (TV "Real")])
+
+    -- === Positive: lambda application evaluation ===
+    , assertRawType
+        "identity lambda: makeVec ((\\x -> x) 5)"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = makeVec ((\n -> n) 5)
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
+    , assertRawType
+        "lambda + accessor: makeVec ((\\t -> .1 t) (1,2,3))"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = makeVec ((\t -> .1 t) (1, 2, 3))
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 2, VarU (TV "Real")])
+    , assertRawType
+        "lambda selects first of two args: (\\x y -> x) 7 99"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x = makeVec ((\a b -> a) 7 99)
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 7, VarU (TV "Real")])
+
+    -- === Negative: dimension mismatches caught despite labels ===
+    , expectError
+        "labeled dim mismatch: add (makeT 3 4) (makeT 3 5) fails"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      makeT :: m:Int -> n:Int -> Tensor2 m n Real
+      add :: Tensor2 m n Real -> Tensor2 m n Real -> Tensor2 m n Real
+      x = add (makeT 3 4) (makeT 3 5)
+        |]
+    , expectError
+        "labeled dim mismatch: dot product length mismatch"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      dot :: Tensor1 n Real -> Tensor1 n Real -> Real
+      x = dot (makeVec 3) (makeVec 5)
+        |]
+    , expectError
+        "labeled dim mismatch through arithmetic: conv wrong kernel size"
+        [r|
+      module main (x)
+      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      type Tensor3 (d1 :: Nat) (d2 :: Nat) (d3 :: Nat) a
+      type Tensor1 (d :: Nat) a = [a]
+      makeImg :: h:Int -> w:Int -> Tensor2 h w Real
+      makeK :: k:Int -> fh:Int -> fw:Int -> Tensor3 k fh fw Real
+      makeB :: k:Int -> Tensor1 k Real
+      conv :: Tensor2 h w Real -> Tensor3 k fh fw Real -> Tensor1 k Real -> Tensor3 k (h - fh + 1) (w - fw + 1) Real
+      x :: Tensor3 2 3 4 Real
+      x = conv (makeImg 5 5) (makeK 2 3 3) (makeB 2)
+        |]
+    , expectError
+        "annotated return type contradicts labeled resolution"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> Tensor1 n Real
+      x :: Tensor1 99 Real
+      x = makeVec 5
+        |]
+
+    -- === Interesting edge cases ===
+    , assertRawType
+        "no labels: plain nat vars remain generic"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      id_ :: Tensor1 n Real -> Tensor1 n Real
+      a :: Tensor1 5 Real
+      x = id_ a
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
+    , assertRawType
+        "label on non-first param position"
+        [r|
+      module main (x)
+      type Tensor1 (d :: Nat) a = [a]
+      makeFrom :: Real -> n:Int -> Tensor1 n Real
+      x = makeFrom 1.0 10
+        |]
+        (AppU (VarU (TV "Tensor1")) [NatLitU 10, VarU (TV "Real")])
+    ]

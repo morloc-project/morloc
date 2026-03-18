@@ -3,4 +3,4 @@ module (*)
 import .foo
 
 source Py from "foo.py" ("morloc_map" as map, "morloc_add" as add)
-map a b :: (a -> b) -> [a] -> [b]
+map :: (a -> b) -> [a] -> [b]

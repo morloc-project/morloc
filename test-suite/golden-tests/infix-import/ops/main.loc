@@ -25,4 +25,4 @@ infixr 8 **
 (**) :: Int -> Int -> Int
 
 infixr 5 <> 
-(<>) a :: [a] -> [a] -> [a]
+(<>) :: [a] -> [a] -> [a]

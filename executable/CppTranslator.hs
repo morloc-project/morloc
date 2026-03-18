@@ -112,9 +112,11 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         t' <- f t
         ts' <- mapM f ts
         return $ "std::function<" <> t' <> tupled ts' <> ">"
+      f (NatLitF _) = return mempty
       f (AppF t ts) = do
         t' <- f t
-        ts' <- mapM f ts
+        let runtimeTs = [x | x <- ts, not (isNatLitF x)]
+        ts' <- mapM f runtimeTs
         return . pretty $ expandMacro (render t') (map render ts')
       f t@(NamF _ (FV gc (CV "struct")) _ rs) = do
         recmap <- CMS.gets translatorRecmap
@@ -124,6 +126,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
             params <- typeParams (zip (map snd (recFields rec)) (map snd rs))
             return $ recName rec <> params
           Nothing -> error $ "Record missing from recmap: " <> show t <> " from map: " <> show recmap
+      f (NamF _ (FV _ (CV "arrow")) _ _) = return "mlc::ArrowTable"
       f (NamF _ (FV _ s) ps _) = do
         ps' <- mapM f ps
         return $ pretty s <> CP.printRecordTemplate ps'
@@ -133,6 +136,8 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       f (OptionalF t) = do
         t' <- f t
         return $ "std::optional<" <> t' <> ">"
+      isNatLitF (NatLitF _) = True
+      isNatLitF _ = False
 
   cppArgOf s (Arg i t) = do
     t' <- cppTypeOf (typeFof t)
@@ -330,7 +335,6 @@ cppLowerConfig =
     , lcSerialAstType = serializeTypeOf
     , lcDeserialAstType = \s -> Just . toIType <$> cppTypeOf (shallowType s)
     , lcRawDeserialAstType = rawTypeOf
-    , lcTemplateArgs = templateArgs
     , lcTypeMOf = \_ -> return Nothing
     , lcPackerName = \src -> pretty (srcName src)
     , lcUnpackerName = \src -> pretty (srcName src)
@@ -461,10 +465,6 @@ PROPAGATE_ERROR(errmsg)|]
     rawTypeOf :: SerialAST -> CppTranslator (Maybe IType)
     rawTypeOf (SerialObject _ _ _ rs) = Just . toIType <$> recordToCppTuple (map snd rs)
     rawTypeOf s = Just . toIType <$> cppTypeOf (serialAstToType s)
-
-    templateArgs :: [(Text, TypeF)] -> CppTranslator (Maybe [IType])
-    templateArgs [] = return Nothing
-    templateArgs qs = Just . map toIType <$> mapM (cppTypeOf . snd) qs
 
     makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
     makeLet namer letIndex typestr (PoolDocs ms1 e1 rs1 pes1) (PoolDocs ms2 e2 rs2 pes2) =
@@ -638,15 +638,16 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     groupQuad (xs, ys) (x, y) = (x : xs, y : ys)
 
     makeSerials ::
-      Scope -> TVar -> [([Either TVar TypeU], TypeU, ArgDoc, Bool)] -> CppTranslator [(MDoc, MDoc)]
+      Scope -> TVar -> [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)] -> CppTranslator [(MDoc, MDoc)]
     makeSerials s v xs = catMaybes <$> mapM (makeSerial s v) xs
 
     makeSerial ::
-      Scope -> TVar -> ([Either TVar TypeU], TypeU, ArgDoc, Bool) -> CppTranslator (Maybe (MDoc, MDoc))
+      Scope -> TVar -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) -> CppTranslator (Maybe (MDoc, MDoc))
     makeSerial _ _ (_, NamU _ (TV "struct") _ _, _, _) = return Nothing
+    makeSerial _ _ (_, NamU _ (TV "arrow") _ _, _, _) = return Nothing
     makeSerial scope _ (ps, NamU r (TV v) _ rs, _, _) = do
-      params <- mapM (either (\p -> return $ "T" <> pretty p) (\_ -> return "XXX_FIXME")) ps
-      let templateTerms = ["T" <> pretty p | Left p <- ps]
+      params <- mapM (either (\(p, _) -> return $ "T" <> pretty p) (\_ -> return "XXX_FIXME")) ps
+      let templateTerms = ["T" <> pretty p | Left (p, _) <- ps]
           rtype = pretty v <> CP.printRecordTemplate templateTerms
           rs' = map (second (evaluateTypeU scope)) rs
           fields = [(pretty k, showDefType ps (typeOf t)) | (k, t) <- rs']
@@ -660,19 +661,23 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
       (Left e) -> error $ show e
       (Right t') -> t'
 
-    showDefType :: [Either TVar TypeU] -> Type -> MDoc
+    showDefType :: [Either (TVar, Kind) TypeU] -> Type -> MDoc
     showDefType ps (UnkT v)
-      | (Left v) `elem` ps = "T" <> pretty v
+      | any (\p -> either (\(tv, _) -> tv == v) (const False) p) ps = "T" <> pretty v
       | otherwise = pretty v
     showDefType ps (VarT v)
-      | (Left v) `elem` ps = "T" <> pretty v
+      | any (\p -> either (\(tv, _) -> tv == v) (const False) p) ps = "T" <> pretty v
       | otherwise = pretty v
     showDefType _ (FunT _ _) = error "Cannot serialize functions"
     showDefType _ (NamT _ v _ _) = pretty v
-    showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
+    showDefType _ (NatLitT _) = mempty
+    showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) runtimeTs)
+      where runtimeTs = [t | t <- ts, not (isNatLitT t)]
     showDefType _ (AppT _ _) = error "AppT is only OK with VarT, for now"
     showDefType _ (EffectT _ _) = error "Cannot show EffectT"
     showDefType ps (OptionalT t) = "std::optional<" <> showDefType ps t <> ">"
+    isNatLitT (NatLitT _) = True
+    isNatLitT _ = False
 
 -- C++ specific source handling (flags, headers, libraries)
 

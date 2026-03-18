@@ -1,6 +1,6 @@
-module semiring-cpp (*)
+module (*)
 
-import semiring (Semiring)
+import .semiring (Semiring)
 
 type Cpp => Int = "int"
 

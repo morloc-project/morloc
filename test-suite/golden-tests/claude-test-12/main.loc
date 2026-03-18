@@ -9,10 +9,10 @@ import root-py
 type Py => Int = "int"
 type Py => Real = "float"
 
-myId a :: a -> a
+myId :: a -> a
 source Py from "helper.py" ("my_id" as myId)
 
-myVal a :: a
+myVal :: a
 source Py from "helper.py" ("my_val" as myVal)
 
 foo :: Int

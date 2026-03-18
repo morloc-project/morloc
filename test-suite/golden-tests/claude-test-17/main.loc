@@ -1,0 +1,26 @@
+-- Test type-level Nat literals in type signatures.
+-- Verifies that integer literals parse correctly in type positions
+-- and that types parameterized by Nat values typecheck.
+
+module main (foo, bar)
+
+import root-py
+
+type Py => Int = "int"
+
+type SizedList n a = [a]
+type Py => (SizedList n a) = "list" a
+
+-- A function that takes a "SizedList 3 Int" and returns its length
+myLen :: SizedList 3 Int -> Int
+source Py from "helper.py" ("my_len" as myLen)
+
+-- A function that creates a SizedList 3 Int
+makeThree :: SizedList 3 Int
+source Py from "helper.py" ("make_three" as makeThree)
+
+foo :: Int
+foo = myLen makeThree
+
+bar :: SizedList 3 Int
+bar = makeThree

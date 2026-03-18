@@ -18,6 +18,7 @@ module Morloc.CodeGenerator.Serial
   ( makeSerialAST
   , chooseSerializationCycle
   , isSerializable
+  , hasArrowHint
   , prettySerialOne
   , serialAstToType
   , shallowType
@@ -43,6 +44,7 @@ import Morloc.Typecheck.Internal (apply, qualify, substitute, subtype, unqualify
 serialAstToType :: SerialAST -> TypeF
 serialAstToType (SerialPack _ (_, s)) = serialAstToType s
 serialAstToType (SerialList v s) = AppF (VarF v) [serialAstToType s]
+serialAstToType (SerialTensor v _ s) = AppF (VarF v) [serialAstToType s]
 serialAstToType (SerialTuple v ss) = AppF (VarF v) (map serialAstToType ss)
 serialAstToType (SerialObject o n ps rs) =
   let ts = map (serialAstToType . snd) rs
@@ -94,6 +96,7 @@ encode64D i = pretty (encode64 i)
 serialAstToMsgpackSchema :: SerialAST -> MDoc
 serialAstToMsgpackSchema (SerialPack v (_, s)) = addHint v <> serialAstToMsgpackSchema s
 serialAstToMsgpackSchema (SerialList v s) = addHint v <> "a" <> serialAstToMsgpackSchema s
+serialAstToMsgpackSchema (SerialTensor v ndim s) = addHint v <> "T" <> encode64D ndim <> serialAstToMsgpackSchema s
 serialAstToMsgpackSchema (SerialTuple v ss) = addHint v <> "t" <> encode64D (length ss) <> foldl (<>) "" (map serialAstToMsgpackSchema ss)
 serialAstToMsgpackSchema (SerialObject _ v _ rs) = addHint v <> "m" <> encode64D (length rs) <> foldl (<>) "" (map keypair rs)
   where
@@ -148,6 +151,7 @@ shallowType (SerialBool x) = VarF x
 shallowType (SerialString x) = VarF x
 shallowType (SerialNull x) = VarF x
 shallowType (SerialOptional _ s) = OptionalF (shallowType s)
+shallowType (SerialTensor v _ s) = AppF (VarF v) [shallowType s]
 shallowType (SerialUnknown v) = UnkF v
 
 findPackers ::
@@ -295,10 +299,18 @@ makeSerialAST m lang t0 = do
         selectPacker _ = MM.throwSourcedError m "Two you say, oh, get out of here"
     makeSerialAST' _ _ t@(FunF _ _) =
       MM.throwSourcedError m $ "Cannot serialize functions at" <+> pretty m <> ":" <+> pretty t
-    makeSerialAST' gscope typepackers ft@(AppF (VarF fv@(FV generalTypeName _)) ts@(firstType : _))
-      | finalVar == Just BT.list = SerialList fv <$> makeSerialAST' gscope typepackers firstType
-      | finalVar == Just (BT.tuple (length ts)) =
-          SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers) ts
+    makeSerialAST' gscope typepackers ft@(AppF (VarF fv@(FV generalTypeName _)) ts0)
+      | null runtimeTs = MM.throwSourcedError m $ "No runtime type args for" <+> pretty ft
+      -- When alias expansion changed the root type, re-infer the concrete
+      -- type for the expanded general form and recurse.
+      | Just fv' <- finalVar, fv' /= generalTypeName, Just expanded <- evaluatedType = do
+          expandedTf <- inferConcreteType lang (Idx m (typeOf expanded))
+          makeSerialAST' gscope typepackers expandedTf
+      | finalVar == Just BT.list = SerialList fv <$> makeSerialAST' gscope typepackers (head runtimeTs)
+      | finalVar == Just (BT.tuple (length runtimeTs)) =
+          SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers) runtimeTs
+      | Just ndim <- tensorNDim finalVar =
+          SerialTensor fv ndim <$> makeSerialAST' gscope typepackers (last runtimeTs)
       | otherwise = case Map.lookup generalTypeName typepackers of
           (Just ps) -> do
             packers <- catMaybes <$> mapM (resolvePacker lang m ft) ps
@@ -315,8 +327,16 @@ makeSerialAST m lang t0 = do
                 <> "\n  concrete t:" <+> (viaShow . snd $ unweaveTypeF ft)
                 <> "\n  typepackers:" <+> viaShow typepackers
       where
+        -- Filter out Nat-kinded type params (phantom, not serialized)
+        isNatTypeF :: TypeF -> Bool
+        isNatTypeF (NatLitF _) = True
+        isNatTypeF _ = False
+
+        runtimeTs = filter (not . isNatTypeF) ts0
+
         basevar :: TypeU -> Maybe TVar
         basevar (VarU v) = Just v
+        basevar (NatVarU _) = Nothing
         basevar (ExistU _ _ _) = Nothing
         basevar (ForallU _ _) = Nothing
         basevar (FunU _ _) = Nothing
@@ -324,10 +344,33 @@ makeSerialAST m lang t0 = do
         basevar (NamU _ v _ _) = Just v
         basevar (EffectU _ _) = Nothing
         basevar (OptionalU _) = Nothing
+        basevar (NatLitU _) = Nothing
+        basevar (NatAddU _ _) = Nothing
+        basevar (NatMulU _ _) = Nothing
+        basevar (NatSubU _ _) = Nothing
+        basevar (NatDivU _ _) = Nothing
 
-        finalVar =
-          let t = fst $ unweaveTypeF ft
-           in basevar $ either (const t) id (TE.evaluateType gscope t)
+        generalType = fst $ unweaveTypeF ft
+
+        evaluatedType =
+          case TE.evaluateType gscope generalType of
+            Right et | et /= generalType -> Just et
+            _ -> Nothing
+
+        finalVar = basevar $ maybe generalType id evaluatedType
+
+        tensorNDim :: Maybe TVar -> Maybe Int
+        tensorNDim (Just v) = lookup v [(BT.tensor k, k) | k <- [1..5]]
+        tensorNDim Nothing = Nothing
+
+        fallbackExpand :: MorlocMonad SerialAST
+        fallbackExpand = case evaluatedType of
+          Just expanded -> do
+            expandedTf <- inferConcreteType lang (Idx m (typeOf expanded))
+            makeSerialAST' gscope typepackers expandedTf
+          Nothing ->
+            MM.throwSourcedError m $
+              "Cannot expand type alias for" <+> pretty ft
 
         selectPacker :: [(TypePacker, SerialAST)] -> MorlocMonad (TypePacker, SerialAST)
         selectPacker [] =
@@ -340,7 +383,8 @@ makeSerialAST m lang t0 = do
         selectPacker (x : _) = return x
     makeSerialAST' gscope typepackers (NamF o n ps rs) = do
       ts <- mapM (makeSerialAST' gscope typepackers . snd) rs
-      return $ SerialObject o n ps (zip (map fst rs) ts)
+      let entries = zip (map fst rs) ts
+      return $ SerialObject o n ps entries
     makeSerialAST' gscope typepackers (EffectF _ t) = makeSerialAST' gscope typepackers t
     makeSerialAST' gscope typepackers (OptionalF t) = do
       inner <- makeSerialAST' gscope typepackers t
@@ -410,7 +454,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
       MorlocMonad (Maybe TypeF) -- the resolved unpacked types
     resolveP a b c generalTypes = do
       let (ga, ca) = unweaveTypeF a
-      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty) of
+      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty) of
         (Left typeErr) ->
           MM.throwSourcedError m0 $
             "There was an error raised in subtyping while resolving serialization"
@@ -436,7 +480,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
         (u, gc) -> do
           -- where u  is the unresolved general packed type that was stored in Desugar.hs
           --       gc is the unresolved general unpacked type
-          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty) of
+          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty) of
             (Left _) -> return Nothing
             (Right g) -> do
               return . Just $ apply g (existential gc)
@@ -480,6 +524,9 @@ unweaveTypeF (OptionalF t) =
   let (gt, ct) = unweaveTypeF t
    in (OptionalU gt, OptionalU ct)
 
+-- Nat types have no concrete/general distinction; duplicate as-is
+unweaveTypeF (NatLitF n) = (NatLitU n, NatLitU n)
+
 weaveTypeF :: TypeU -> TypeU -> TypeF
 weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv (tv2cv cv))
 weaveTypeF (FunU tsg tg) (FunU tsc tc) = FunF (zipWith weaveTypeF tsg tsc) (weaveTypeF tg tc)
@@ -496,7 +543,17 @@ weaveTypeF (NamU n gv psg rsg) (NamU _ cv psc rsc) =
 weaveTypeF (EffectU effs gt) (EffectU _ ct) = EffectF (resolveEffectSet effs) (weaveTypeF gt ct)
 weaveTypeF (OptionalU gt) (OptionalU ct) = OptionalF (weaveTypeF gt ct)
 weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
+weaveTypeF (NatLitU n) (NatLitU _) = NatLitF n
+weaveTypeF (NatLitU n) _ = NatLitF n  -- Nat params may be erased in concrete type
+weaveTypeF (NatVarU _) _ = NatLitF 0  -- Nat vars erased in concrete type
+weaveTypeF (LabeledU _ gt) ct = weaveTypeF gt ct
+weaveTypeF gt (LabeledU _ ct) = weaveTypeF gt ct
 weaveTypeF gt ct = error . show $ (gt, ct)
+
+-- | Check if a SerialAST's root has the "arrow" concrete type hint
+hasArrowHint :: SerialAST -> Bool
+hasArrowHint (SerialObject _ (FV _ (CV "arrow")) _ _) = True
+hasArrowHint _ = False
 
 {- | Given a list of possible ways to (de)serialize data between two languages,
 choose one (or none if the list is empty). Currently I just take the first
@@ -534,6 +591,7 @@ isSerializable (SerialBool _) = True
 isSerializable (SerialString _) = True
 isSerializable (SerialNull _) = True
 isSerializable (SerialOptional _ x) = isSerializable x
+isSerializable (SerialTensor _ _ x) = isSerializable x
 isSerializable (SerialUnknown _) = True -- are you feeling lucky?
 
 prettySerialOne :: SerialAST -> MDoc
@@ -560,4 +618,5 @@ prettySerialOne (SerialBool _) = "SerialBool"
 prettySerialOne (SerialString _) = "SerialString"
 prettySerialOne (SerialNull _) = "SerialNull"
 prettySerialOne (SerialOptional _ x) = "SerialOptional" <> parens (prettySerialOne x)
+prettySerialOne (SerialTensor _ ndim x) = "SerialTensor" <> pretty ndim <> parens (prettySerialOne x)
 prettySerialOne (SerialUnknown _) = "SerialUnknown"
