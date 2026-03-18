@@ -35,6 +35,7 @@ main = do
       , natErrorTests
       , natArithTests
       , natLabelTests
+      , natKindPromotionTests
       , -- -- These tests pass locally and when I run the same container that I
         -- -- use in github actions. Yet these tests freeze in an infinite loop
         -- -- with no STDERR output on github. I have no idea why. But for now I'm

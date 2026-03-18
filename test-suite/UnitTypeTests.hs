@@ -28,6 +28,7 @@ module UnitTypeTests
   , natErrorTests
   , natArithTests
   , natLabelTests
+  , natKindPromotionTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -3363,4 +3364,391 @@ natLabelTests =
       x = makeFrom 1.0 10
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 10, VarU (TV "Real")])
+    ]
+
+natKindPromotionTests :: TestTree
+natKindPromotionTests =
+  testGroup
+    "nat kind promotion and cross-feature interaction"
+    [
+    -- ================================================================
+    -- (:: Nat) annotation effects on type variable promotion
+    -- ================================================================
+    -- When a typedef has (d :: Nat), variables at that position MUST be
+    -- promoted from VarU to NatVarU. Without this promotion, nat label
+    -- resolution and nat constraint solving both silently fail.
+
+      assertRawType
+        "with (:: Nat): labels resolve to concrete dimensions"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      makeVec :: n:Int -> T1 n Real
+      x = makeVec 5
+        |]
+        (AppU (VarU (TV "T1")) [NatLitU 5, VarU (TV "Real")])
+
+    , assertRawType
+        "without (:: Nat): labels do NOT resolve (dim stays generic)"
+        [r|
+      module main (x)
+      type T1 d a = [a]
+      makeVec :: n:Int -> T1 n Real
+      x = makeVec 5
+        |]
+        -- Without :: Nat, n is VarU not NatVarU, so resolveNatLabels cannot
+        -- find nat vars to solve. The type stays generic (existential).
+        (AppU (VarU (TV "T1")) [ExistU (TV "a") ([], Open) ([], Open), VarU (TV "Real")])
+
+    -- ================================================================
+    -- Nat constraint solving requires (:: Nat) promotion
+    -- ================================================================
+
+    , expectError
+        "with (:: Nat): dimension mismatch is caught (4 != 5)"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      dot :: T1 n Real -> T1 n Real -> Real
+      a :: T1 4 Real
+      b :: T1 5 Real
+      x = dot a b
+        |]
+
+    -- Without (:: Nat), the params are still NatLitU from the literal syntax.
+    -- The typechecker catches the mismatch through existential solving since
+    -- the NatLit values 4 and 5 cannot unify. This is actually sound.
+    , expectError
+        "without (:: Nat): dimension mismatch still caught via existentials"
+        [r|
+      module main (x)
+      type T1 d a = [a]
+      dot :: T1 n Real -> T1 n Real -> Real
+      a :: T1 4 Real
+      b :: T1 5 Real
+      x = dot a b
+        |]
+
+    -- ================================================================
+    -- Multi-step composition: labels propagate through chains
+    -- ================================================================
+
+    , assertRawType
+        "labeled dims propagate through 3-function chain"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      make :: n:Int -> T1 n Real
+      f :: T1 n Real -> T1 n Real
+      g :: T1 n Real -> T1 n Real
+      x = g (f (makeVec 9))
+      makeVec :: n:Int -> T1 n Real
+      x = g (f (make 9))
+        |]
+        (AppU (VarU (TV "T1")) [NatLitU 9, VarU (TV "Real")])
+
+    , assertRawType
+        "labeled dims propagate through let chain"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      make :: n:Int -> T1 n Real
+      f :: T1 n Real -> T1 n Real
+      x = let a = make 4
+          in let b = f a
+          in f b
+        |]
+        (AppU (VarU (TV "T1")) [NatLitU 4, VarU (TV "Real")])
+
+    -- ================================================================
+    -- Nat arithmetic with labeled params
+    -- ================================================================
+
+    , assertRawType
+        "labeled subtraction: h=10 w=3, h-w+1 = 8"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      make :: h:Int -> w:Int -> T1 (h - w + 1) Real
+      x = make 10 3
+        |]
+        (AppU (VarU (TV "T1")) [NatLitU 8, VarU (TV "Real")])
+
+    , assertRawType
+        "labeled multiplication: m=3 n=4, m*n = 12"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      make :: m:Int -> n:Int -> T1 (m * n) Real
+      x = make 3 4
+        |]
+        (AppU (VarU (TV "T1")) [NatLitU 12, VarU (TV "Real")])
+
+    , assertRawType
+        "labeled division: n=12 d=4, n/d = 3"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      make :: n:Int -> d:Int -> T1 (n / d) Real
+      x = make 12 4
+        |]
+        (AppU (VarU (TV "T1")) [NatLitU 3, VarU (TV "Real")])
+
+    , assertRawType
+        "compound arithmetic: a=6 b=2 c=1, (a*b)-c = 11"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      make :: a:Int -> b:Int -> c:Int -> T1 (a * b - c) Real
+      x = make 6 2 1
+        |]
+        (AppU (VarU (TV "T1")) [NatLitU 11, VarU (TV "Real")])
+
+    -- ================================================================
+    -- Negative: arithmetic mismatches with labels
+    -- ================================================================
+
+    , expectError
+        "labeled arithmetic mismatch: 10-3+1=8 but annotated as 7"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      make :: h:Int -> w:Int -> T1 (h - w + 1) Real
+      x :: T1 7 Real
+      x = make 10 3
+        |]
+
+    , expectError
+        "labeled multiplication mismatch: 3*4=12 but used where 11 expected"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      make :: m:Int -> n:Int -> T1 (m * n) Real
+      consume :: T1 11 Real -> Int
+      x = consume (make 3 4)
+        |]
+
+    -- ================================================================
+    -- Cross-feature: nat dims with optional types
+    -- ================================================================
+
+    , assertRawType
+        "optional tensor: ?(T1 n Real) with labeled dim"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      tryMake :: n:Int -> ?(T1 n Real)
+      x = tryMake 5
+        |]
+        (OptionalU (AppU (VarU (TV "T1")) [NatLitU 5, VarU (TV "Real")]))
+
+    -- ================================================================
+    -- Cross-feature: nat dims with effect types
+    -- ================================================================
+
+    , assertRawType
+        "effectful tensor: <IO> T1 n Real with labeled dim"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      ioMake :: n:Int -> <IO> T1 n Real
+      x = ioMake 5
+        |]
+        (EffectU (EffectSet (Set.singleton "IO"))
+          (AppU (VarU (TV "T1")) [NatLitU 5, VarU (TV "Real")]))
+
+    -- ================================================================
+    -- Nat dims nested inside other type constructors
+    -- ================================================================
+
+    , assertRawType
+        "list of nat-parameterized type: [T1 n Real]"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      make :: n:Int -> [T1 n Real]
+      x = make 5
+        |]
+        (AppU (VarU (TV "List")) [AppU (VarU (TV "T1")) [NatLitU 5, VarU (TV "Real")]])
+
+    , assertRawType
+        "tuple of nat-parameterized types"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      make :: m:Int -> n:Int -> (T1 m Real, T1 n Real)
+      x = make 3 7
+        |]
+        (AppU (VarU (TV "Tuple2"))
+          [ AppU (VarU (TV "T1")) [NatLitU 3, VarU (TV "Real")]
+          , AppU (VarU (TV "T1")) [NatLitU 7, VarU (TV "Real")]
+          ])
+
+    -- ================================================================
+    -- Multiple nat-parameterized typedefs interacting
+    -- ================================================================
+
+    , assertRawType
+        "conversion between two nat-parameterized types"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      type T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      flatten :: T2 m n Real -> T1 (m * n) Real
+      make :: m:Int -> n:Int -> T2 m n Real
+      x = flatten (make 3 4)
+        |]
+        (AppU (VarU (TV "T1")) [NatLitU 12, VarU (TV "Real")])
+
+    , expectError
+        "cross-type dim mismatch: flatten 3x4=12 but consume expects 11"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      type T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      flatten :: T2 m n Real -> T1 (m * n) Real
+      make :: m:Int -> n:Int -> T2 m n Real
+      consume :: T1 11 Real -> Int
+      x = consume (flatten (make 3 4))
+        |]
+
+    -- ================================================================
+    -- Partial nat annotation: some params Nat, some not
+    -- ================================================================
+
+    , assertRawType
+        "mixed params: first is Nat, second is Type"
+        [r|
+      module main (x)
+      type Sized (n :: Nat) a = [a]
+      make :: n:Int -> Sized n Int
+      x = make 10
+        |]
+        (AppU (VarU (TV "Sized")) [NatLitU 10, VarU (TV "Int")])
+
+    -- ================================================================
+    -- Negative: bad label syntax and semantics
+    -- ================================================================
+
+    -- Label n resolves nothing in return type (m is a different var), so
+    -- m stays generic. This is valid — the label just has no effect.
+    -- m is promoted to NatVarU (it's in a :: Nat position) but stays unresolved.
+    , assertRawType
+        "label on param that doesn't appear in return type: dim stays generic"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      make :: n:Int -> T1 m Real
+      x = make 5
+        |]
+        (AppU (VarU (TV "T1")) [NatVarU (TV "a"), VarU (TV "Real")])
+
+    -- ================================================================
+    -- Edge: nat literal 0 in arithmetic
+    -- ================================================================
+
+    , assertRawType
+        "nat literal 0 in subtraction: n-0 = n"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      make :: n:Int -> T1 (n - 0) Real
+      x = make 7
+        |]
+        (AppU (VarU (TV "T1")) [NatLitU 7, VarU (TV "Real")])
+
+    , assertRawType
+        "nat literal 1 in multiplication: n*1 = n"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      make :: n:Int -> T1 (n * 1) Real
+      x = make 7
+        |]
+        (AppU (VarU (TV "T1")) [NatLitU 7, VarU (TV "Real")])
+
+    , assertRawType
+        "nat literal 0 in multiplication: n*0 = 0"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      make :: n:Int -> T1 (n * 0) Real
+      x = make 7
+        |]
+        (AppU (VarU (TV "T1")) [NatLitU 0, VarU (TV "Real")])
+
+    -- ================================================================
+    -- Regression: multiple exports with nat dims
+    -- ================================================================
+
+    , testCase "multiple exports all resolve independently" $ do
+        result <- runFrontRaw [r|
+      module main (x, y)
+      type T1 (d :: Nat) a = [a]
+      make :: n:Int -> T1 n Real
+      x = make 3
+      y = make 7
+          |]
+        case result of
+          Right [xExpr, yExpr] -> do
+            let xt = MTI.cleanTypeName . renameExistentials . gtypeof $ xExpr
+                yt = MTI.cleanTypeName . renameExistentials . gtypeof $ yExpr
+                expected3 = MTI.cleanTypeName $ AppU (VarU (TV "T1")) [NatLitU 3, VarU (TV "Real")]
+                expected7 = MTI.cleanTypeName $ AppU (VarU (TV "T1")) [NatLitU 7, VarU (TV "Real")]
+            assertEqual "first export" (closeExistentials expected3) (closeExistentials xt)
+            assertEqual "second export" (closeExistentials expected7) (closeExistentials yt)
+          Right other -> assertFailure $ "Expected 2 exports, got " ++ show (length other)
+          Left e -> assertFailure $ "Unexpected error: " ++ show e
+
+    -- ================================================================
+    -- Regression: large nat literals
+    -- ================================================================
+
+    , assertRawType
+        "large nat literal: 1000000"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      make :: n:Int -> T1 n Real
+      x = make 1000000
+        |]
+        (AppU (VarU (TV "T1")) [NatLitU 1000000, VarU (TV "Real")])
+
+    -- ================================================================
+    -- Negative: nat constraint contradictions caught through labels
+    -- ================================================================
+
+    , expectError
+        "labeled: same label used for different values"
+        [r|
+      module main (x)
+      type T1 (d :: Nat) a = [a]
+      combine :: T1 n Real -> T1 n Real -> T1 n Real
+      make :: n:Int -> T1 n Real
+      x = combine (make 3) (make 5)
+        |]
+
+    -- ================================================================
+    -- Forward-declared type (no RHS) with :: Nat
+    -- ================================================================
+
+    , assertRawType
+        "forward-declared type with :: Nat resolves labels"
+        [r|
+      module main (x)
+      type Opaque (d :: Nat) a
+      make :: n:Int -> Opaque n Real
+      x = make 42
+        |]
+        (AppU (VarU (TV "Opaque")) [NatLitU 42, VarU (TV "Real")])
+
+    , expectError
+        "forward-declared type: dim mismatch caught"
+        [r|
+      module main (x)
+      type Opaque (d :: Nat) a
+      make :: n:Int -> Opaque n Real
+      consume :: Opaque 10 Real -> Int
+      x = consume (make 5)
+        |]
     ]
