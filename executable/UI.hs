@@ -235,16 +235,18 @@ data UninstallCommand = UninstallCommand
   , uninstallVanilla :: Bool
   , uninstallKind :: Maybe ListKind
   , uninstallDryRun :: Bool
+  , uninstallAll :: Bool
   }
 
 makeUninstallParser :: Parser UninstallCommand
 makeUninstallParser =
   UninstallCommand
-    <$> optUninstallNames
+    <$> optUninstallNamesOrNone
     <*> optConfig
     <*> optVanilla
     <*> optUninstallKind
     <*> optDryRun
+    <*> optUninstallAll
 
 uninstallSubcommand :: Mod CommandFields CliCommand
 uninstallSubcommand =
@@ -418,13 +420,20 @@ optListPattern =
         <> help "Filter by subsequence match on name"
     )
 
-optUninstallNames :: Parser [String]
-optUninstallNames =
-  some
+optUninstallNamesOrNone :: Parser [String]
+optUninstallNamesOrNone =
+  many
     . strArgument
     $ ( metavar "NAME"
           <> help "Names of modules or programs to uninstall"
       )
+
+optUninstallAll :: Parser Bool
+optUninstallAll =
+  switch
+    ( long "all"
+        <> help "Uninstall all installed modules"
+    )
 
 optUninstallKind :: Parser (Maybe ListKind)
 optUninstallKind =

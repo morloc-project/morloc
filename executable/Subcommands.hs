@@ -776,21 +776,39 @@ cmdUninstall args config = do
       exeDir = Config.configHome config </> "exe"
       dryRun = uninstallDryRun args
       kind = uninstallKind args
-      names = uninstallNames args
 
-  allPassed <- mapM (\name -> uninstallOne fdbDir libDir binDir exeDir dryRun kind name) names
-  let anyRemoved = or allPassed
+  names <- if uninstallAll args
+    then do
+      fdbExists <- doesDirectoryExist fdbDir
+      if not fdbExists
+        then return []
+        else do
+          entries <- listDirectory fdbDir
+          let moduleNames = [dropExtension f | f <- entries, ".module" `isSuffixOf` f]
+          return moduleNames
+    else return (uninstallNames args)
 
-  -- Regenerate completions if anything was actually removed
-  if anyRemoved && not dryRun
-    then Completion.regenerateCompletions False (Config.configHome config)
-    else return ()
+  if null names
+    then do
+      if uninstallAll args
+        then putStrLn "No modules installed"
+        else putStrLn "No module names specified. Use --all to uninstall all modules."
+      return True
+    else do
+      let skipDepCheck = uninstallAll args
+      allPassed <- mapM (\name -> uninstallOne fdbDir libDir binDir exeDir dryRun skipDepCheck kind name) names
+      let anyRemoved = or allPassed
 
-  return True
+      -- Regenerate completions if anything was actually removed
+      if anyRemoved && not dryRun
+        then Completion.regenerateCompletions False (Config.configHome config)
+        else return ()
+
+      return True
 
 uninstallOne ::
-  FilePath -> FilePath -> FilePath -> FilePath -> Bool -> Maybe ListKind -> String -> IO Bool
-uninstallOne fdbDir libDir binDir exeDir dryRun kind name = do
+  FilePath -> FilePath -> FilePath -> FilePath -> Bool -> Bool -> Maybe ListKind -> String -> IO Bool
+uninstallOne fdbDir libDir binDir exeDir dryRun skipDepCheck kind name = do
   let moduleManifest = fdbDir </> name ++ ".module"
       programManifest = fdbDir </> name ++ ".manifest"
       moduleDir = libDir </> name
@@ -807,10 +825,10 @@ uninstallOne fdbDir libDir binDir exeDir dryRun kind name = do
       putStrLn $ "Nothing found for '" <> name <> "'"
       return False
     else do
-      -- Reverse dependency check for modules
+      -- Reverse dependency check for modules (skip when uninstalling all)
       if removeModule
         then do
-          checkReverseDeps fdbDir name
+          if not skipDepCheck then checkReverseDeps fdbDir name else return ()
           if dryRun
             then do
               putStrLn $ "Would uninstall module '" <> name <> "'"
