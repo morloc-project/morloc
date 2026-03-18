@@ -21,7 +21,6 @@ import qualified Morloc.BaseTypes as BT
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
-import qualified Morloc.Data.Text as MT
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
@@ -64,8 +63,6 @@ typecheck = mapM run
       -- perform a final application of gamma the final expression and return
       -- (is this necessary?)
       return (applyGen g3 e3)
-
-    f (NatDivU a b) = f a ++ f b
 
 -- TypeU --> Type
 resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int
@@ -580,7 +577,7 @@ synthE _ g (LetS v e1 e2) = do
   let g2 = g1 ++> [AnnG v t1]
       -- Track known constant values for nat label resolution
       g2' = case tryEvalConst g2 (let AnnoS _ _ e = e1' in e) of
-        Just val -> g2 { gammaIntVals = Map.insert v val (gammaIntVals g2) }
+        Just val' -> g2 { gammaIntVals = Map.insert v val' (gammaIntVals g2) }
         Nothing -> g2
   (g3, t2, e2') <- synthG g2' e2
   return (g3, t2, LetS v e1' e2')
@@ -1138,8 +1135,8 @@ tryEvalConst g (LetBndS v) = Map.lookup v (gammaIntVals g)
 tryEvalConst g (BndS v) = Map.lookup v (gammaIntVals g)
 tryEvalConst g (TupS es) = ConstTup <$> mapM (\(AnnoS _ _ e) -> tryEvalConst g e) es
 tryEvalConst g (LetS v (AnnoS _ _ e1) (AnnoS _ _ e2)) = do
-  val <- tryEvalConst g e1
-  tryEvalConst (g { gammaIntVals = Map.insert v val (gammaIntVals g) }) e2
+  val' <- tryEvalConst g e1
+  tryEvalConst (g { gammaIntVals = Map.insert v val' (gammaIntVals g) }) e2
 -- Index accessor on tuple literal or known tuple: .i (a, b, c) => element i
 tryEvalConst g (AppS (AnnoS _ _ (ExeS (PatCall (PatternStruct
   (SelectorIdx (idx, SelectorEnd) []))))) [AnnoS _ _ inner])
@@ -1150,7 +1147,7 @@ tryEvalConst g (AppS (AnnoS _ _ (ExeS (PatCall (PatternStruct
 tryEvalConst g (AppS (AnnoS _ _ (LamS vs (AnnoS _ _ body))) args)
   | length vs == length args = do
     vals <- mapM (\(AnnoS _ _ e) -> tryEvalConst g e) args
-    let g' = g { gammaIntVals = foldl (\m (v, val) -> Map.insert v val m) (gammaIntVals g) (zip vs vals) }
+    let g' = g { gammaIntVals = foldl (\m (v', val') -> Map.insert v' val' m) (gammaIntVals g) (zip vs vals) }
     tryEvalConst g' body
 tryEvalConst _ _ = Nothing
 
@@ -1159,10 +1156,6 @@ tryEvalInt :: Gamma -> ExprS g f c -> Maybe Integer
 tryEvalInt g e = case tryEvalConst g e of
   Just (ConstInt n) -> Just n
   _ -> Nothing
-
--- | Convenience wrappers that unwrap AnnoS
-tryExtractInt :: Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> Maybe Integer
-tryExtractInt g (AnnoS _ _ e) = tryEvalInt g e
 
 tryExtractIntPre :: Gamma -> AnnoS Int ManyPoly Int -> Maybe Integer
 tryExtractIntPre g (AnnoS _ _ e) = tryEvalInt g e
