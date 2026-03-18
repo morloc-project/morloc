@@ -1,3 +1,10 @@
+0.67.1 [2026-03-17]
+-------------------
+ * Add missing Nat kind annotation to root modules
+ * Better test coverage of Nat kinds
+ * Add `morloc uninstall --all` option
+ * Add `stdlib` module that simplifies recursive install of everything
+
 0.67.0 [2026-03-17]
 -------------------
  * add Arrow tables with zero-copy between language sharing
