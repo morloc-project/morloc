@@ -65,34 +65,34 @@ pyIdList :: [Int] -> [Int]
 manyCallsSmall :: Int
 manyCallsSmall =
     let s1 = cppMakeStr 10
-    let n1 = pyStrLen s1
-    let s2 = pyMakeStr n1
-    let n2 = cppStrLen s2
-    let s3 = cppMakeStr n2
-    let n3 = pyStrLen s3
-    let s4 = pyMakeStr n3
-    let n4 = cppStrLen s4
-    let s5 = cppMakeStr n4
-    let n5 = pyStrLen s5
-    let s6 = pyMakeStr n5
-    let n6 = cppStrLen s6
-    let s7 = cppMakeStr n6
-    let n7 = pyStrLen s7
-    let s8 = pyMakeStr n7
-    let n8 = cppStrLen s8
-    let s9 = cppMakeStr n8
-    let n9 = pyStrLen s9
-    let s10 = pyMakeStr n9
-    let n10 = cppStrLen s10
-    let s11 = cppMakeStr n10
-    let n11 = pyStrLen s11
-    let s12 = pyMakeStr n11
-    let n12 = cppStrLen s12
-    let s13 = cppMakeStr n12
-    let n13 = pyStrLen s13
-    let s14 = pyMakeStr n13
-    let n14 = cppStrLen s14
-    let s15 = cppMakeStr n14
+        n1 = pyStrLen s1
+        s2 = pyMakeStr n1
+        n2 = cppStrLen s2
+        s3 = cppMakeStr n2
+        n3 = pyStrLen s3
+        s4 = pyMakeStr n3
+        n4 = cppStrLen s4
+        s5 = cppMakeStr n4
+        n5 = pyStrLen s5
+        s6 = pyMakeStr n5
+        n6 = cppStrLen s6
+        s7 = cppMakeStr n6
+        n7 = pyStrLen s7
+        s8 = pyMakeStr n7
+        n8 = cppStrLen s8
+        s9 = cppMakeStr n8
+        n9 = pyStrLen s9
+        s10 = pyMakeStr n9
+        n10 = cppStrLen s10
+        s11 = cppMakeStr n10
+        n11 = pyStrLen s11
+        s12 = pyMakeStr n11
+        n12 = cppStrLen s12
+        s13 = cppMakeStr n12
+        n13 = pyStrLen s13
+        s14 = pyMakeStr n13
+        n14 = cppStrLen s14
+        s15 = cppMakeStr n14
     in pyStrLen s15
 
 -- Test 2: Cross-language calls with large strings (1000 chars each).
@@ -100,15 +100,15 @@ manyCallsSmall =
 manyCallsLarge :: Int
 manyCallsLarge =
     let s1 = cppMakeStr 1000
-    let s2 = pyIdStr s1
-    let s3 = cppIdStr s2
-    let s4 = pyIdStr s3
-    let s5 = cppIdStr s4
-    let s6 = pyIdStr s5
-    let s7 = cppIdStr s6
-    let s8 = pyIdStr s7
-    let s9 = cppIdStr s8
-    let s10 = pyIdStr s9
+        s2 = pyIdStr s1
+        s3 = cppIdStr s2
+        s4 = pyIdStr s3
+        s5 = cppIdStr s4
+        s6 = pyIdStr s5
+        s7 = cppIdStr s6
+        s8 = pyIdStr s7
+        s9 = cppIdStr s8
+        s10 = pyIdStr s9
     in cppStrLen s10
 
 -- Test 3: Chain from C++ to Python - result forwarded through multiple hops.
@@ -116,18 +116,18 @@ manyCallsLarge =
 chainCppPy :: Int
 chainCppPy =
     let xs = cppMakeRange 100
-    let ys = pyIncAll xs
-    let zs = cppIncAll ys
-    let ws = pyIncAll zs
+        ys = pyIncAll xs
+        zs = cppIncAll ys
+        ws = pyIncAll zs
     in cppSumList ws
 
 -- Test 4: Chain from Python to C++ - opposite direction.
 chainPyCpp :: Int
 chainPyCpp =
     let xs = pyMakeRange 100
-    let ys = cppIncAll xs
-    let zs = pyIncAll ys
-    let ws = cppIncAll zs
+        ys = cppIncAll xs
+        zs = pyIncAll ys
+        ws = cppIncAll zs
     in pySumList ws
 
 -- Test 5: Diamond pattern - same string value sent to two different
@@ -135,16 +135,16 @@ chainPyCpp =
 diamondStr :: Int
 diamondStr =
     let s = cppMakeStr 50
-    let a = pyStrLen s
-    let b = cppStrLen (pyIdStr s)
+        a = pyStrLen s
+        b = cppStrLen (pyIdStr s)
     in a + b
 
 -- Test 6: Diamond with list data - same list value sent to two paths.
 diamondList :: Int
 diamondList =
     let xs = pyMakeRange 20
-    let a = cppSumList xs
-    let b = pySumList (cppIdList xs)
+        a = cppSumList xs
+        b = pySumList (cppIdList xs)
     in a + b
 
 -- Test 7: Let-bound value from one language used multiple times in another.
@@ -159,23 +159,23 @@ letSharedAcrossLangs =
 deepDoChain :: Int
 deepDoChain =
     let xs = cppMakeRange 10
-    let xs2 = pyIncAll xs
-    let xs3 = cppIncAll xs2
-    let xs4 = pyIncAll xs3
-    let xs5 = cppIncAll xs4
-    let xs6 = pyIncAll xs5
-    let xs7 = cppIncAll xs6
-    let xs8 = pyIncAll xs7
-    let xs9 = cppIncAll xs8
-    let xs10 = pyIncAll xs9
-    let xs11 = cppIncAll xs10
-    let xs12 = pyIncAll xs11
-    let xs13 = cppIncAll xs12
-    let xs14 = pyIncAll xs13
-    let xs15 = cppIncAll xs14
-    let xs16 = pyIncAll xs15
-    let xs17 = cppIncAll xs16
-    let xs18 = pyIncAll xs17
-    let xs19 = cppIncAll xs18
-    let xs20 = pyIncAll xs19
+        xs2 = pyIncAll xs
+        xs3 = cppIncAll xs2
+        xs4 = pyIncAll xs3
+        xs5 = cppIncAll xs4
+        xs6 = pyIncAll xs5
+        xs7 = cppIncAll xs6
+        xs8 = pyIncAll xs7
+        xs9 = cppIncAll xs8
+        xs10 = pyIncAll xs9
+        xs11 = cppIncAll xs10
+        xs12 = pyIncAll xs11
+        xs13 = cppIncAll xs12
+        xs14 = pyIncAll xs13
+        xs15 = cppIncAll xs14
+        xs16 = pyIncAll xs15
+        xs17 = cppIncAll xs16
+        xs18 = pyIncAll xs17
+        xs19 = cppIncAll xs18
+        xs20 = pyIncAll xs19
     in cppSumList xs20

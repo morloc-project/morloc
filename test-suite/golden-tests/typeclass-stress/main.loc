@@ -48,34 +48,34 @@ eqList = [1, 2, 3] == [1, 2, 3]
 stressCompose :: [Int] -> Int
 stressCompose xs =
   let ys = map (\x -> x + 1) xs
-  let zs = filter (\x -> x > 2) ys
-  let w = fold (\a x -> a + x) 0 zs
+      zs = filter (\x -> x > 2) ys
+      w = fold (\a x -> a + x) 0 zs
   in w
 
 testPy :: Bool
 testPy =
   let t1 = mapList [1,2,3] == [2,3,4]
-  let t2 = foldList [1,2,3,4] == 10
-  let t3 = atList [10,20,30] == 10
-  let t4 = mapThenFold [1,2,3] == 12
-  let t5 = mapThenLength [1,2,3] == 3
-  let t6 = nestedMap [[1,2],[3]] == [[11,12],[13]]
-  let t7 = consMapFold [1,2] == 9
-  let t8 = snocReverse [1,2] == [100,3,2]
-  let t9 = eqList
-  let t10 = stressCompose [1,2,3] == 7
+      t2 = foldList [1,2,3,4] == 10
+      t3 = atList [10,20,30] == 10
+      t4 = mapThenFold [1,2,3] == 12
+      t5 = mapThenLength [1,2,3] == 3
+      t6 = nestedMap [[1,2],[3]] == [[11,12],[13]]
+      t7 = consMapFold [1,2] == 9
+      t8 = snocReverse [1,2] == [100,3,2]
+      t9 = eqList
+      t10 = stressCompose [1,2,3] == 7
   in t1 && t2 && t3 && t4 && t5 && t6 && t7 && t8 && t9 && t10
 
 testCpp :: Bool
 testCpp =
   let t1 = mapList [1,2,3] == [2,3,4]
-  let t2 = foldList [1,2,3,4] == 10
-  let t3 = atList [10,20,30] == 10
-  let t4 = mapThenFold [1,2,3] == 12
-  let t5 = mapThenLength [1,2,3] == 3
-  let t6 = nestedMap [[1,2],[3]] == [[11,12],[13]]
-  let t7 = consMapFold [1,2] == 9
-  let t8 = snocReverse [1,2] == [100,3,2]
-  let t9 = eqList
-  let t10 = stressCompose [1,2,3] == 7
+      t2 = foldList [1,2,3,4] == 10
+      t3 = atList [10,20,30] == 10
+      t4 = mapThenFold [1,2,3] == 12
+      t5 = mapThenLength [1,2,3] == 3
+      t6 = nestedMap [[1,2],[3]] == [[11,12],[13]]
+      t7 = consMapFold [1,2] == 9
+      t8 = snocReverse [1,2] == [100,3,2]
+      t9 = eqList
+      t10 = stressCompose [1,2,3] == 7
   in t1 && t2 && t3 && t4 && t5 && t6 && t7 && t8 && t9 && t10

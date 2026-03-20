@@ -516,18 +516,18 @@ guard_expr :: { Loc CstExpr }
       { Loc (fst (head $1) <-> $3) (CGuardExprE $1 $3) }
 
 let_expr :: { Loc CstExpr }
-  : let_bindings 'in' expr
-      { at $2 (CLetE $1 $3) }
+  : 'let' VLBRACE let_bindings VRBRACE 'in' expr
+      { at $1 (CLetE $3 $6) }
 
 let_bindings :: { [(EVar, Loc CstExpr)] }
   : let_binding                        { [$1] }
-  | let_bindings let_binding           { $1 ++ [$2] }
+  | let_bindings VSEMI let_binding     { $1 ++ [$3] }
 
 let_binding :: { (EVar, Loc CstExpr) }
-  : 'let' LOWER '=' expr              { (EV (getName $2), $4) }
-  | 'let' '_' '=' expr                { (EV "_", $4) }
-  | 'let' LOWER guard_clauses ':' expr
-      { (EV (getName $2), Loc ($1 <-> $5) (CGuardExprE $3 $5)) }
+  : LOWER '=' expr                     { (EV (getName $1), $3) }
+  | '_' '=' expr                       { (EV "_", $3) }
+  | LOWER guard_clauses ':' expr
+      { (EV (getName $1), Loc ($1 <-> $4) (CGuardExprE $2 $4)) }
 
 lambda_expr :: { Loc CstExpr }
   : '\\' lower_names1 '->' expr
@@ -610,19 +610,18 @@ do_expr :: { Loc CstExpr }
   | 'do' '{' do_stmts_explicit '}'    { Loc ($1 <-> $4) (CDoE $3) }
 
 do_stmts :: { [CstDoStmt] }
-  : do_stmt                   { [$1] }
-  | do_stmts VSEMI do_stmt    { $1 ++ [$3] }
+  : do_stmt                   { $1 }
+  | do_stmts VSEMI do_stmt    { $1 ++ $3 }
 
 do_stmts_explicit :: { [CstDoStmt] }
-  : do_stmt                              { [$1] }
-  | do_stmts_explicit ';' do_stmt        { $1 ++ [$3] }
+  : do_stmt                              { $1 }
+  | do_stmts_explicit ';' do_stmt        { $1 ++ $3 }
 
-do_stmt :: { CstDoStmt }
-  : LOWER '<-' expr            { CstDoBind (EV (getName $1)) $3 }
-  | 'let' LOWER '=' expr       { CstDoLet (EV (getName $2)) $4 }
-  | 'let' LOWER guard_clauses ':' expr
-      { CstDoLet (EV (getName $2)) (Loc ($1 <-> $5) (CGuardExprE $3 $5)) }
-  | expr                       { CstDoBare $1 }
+do_stmt :: { [CstDoStmt] }
+  : LOWER '<-' expr            { [CstDoBind (EV (getName $1)) $3] }
+  | 'let' VLBRACE let_bindings VRBRACE
+      { [CstDoLet (EV v) e | (EV v, e) <- $3] }
+  | expr                       { [CstDoBare $1] }
 
 getter_expr :: { Loc CstExpr }
   : GDOT accessor_body      { at $1 (CAccessorE $2) }

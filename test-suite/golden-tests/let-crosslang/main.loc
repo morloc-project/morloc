@@ -88,8 +88,8 @@ pyCounter :: <IO> Int
 letMinimal :: Int
 letMinimal =
     let s1 = cppMakeStr 10
-    let n1 = pyStrLen s1
-    let s2 = pyMakeStr n1
+        n1 = pyStrLen s1
+        s2 = pyMakeStr n1
     in cppStrLen s2
 
 ------------------------------------------------------------
@@ -103,8 +103,8 @@ letMinimal =
 letMinimalReverse :: Int
 letMinimalReverse =
     let s1 = pyMakeStr 10
-    let n1 = cppStrLen s1
-    let s2 = cppMakeStr n1
+        n1 = cppStrLen s1
+        s2 = cppMakeStr n1
     in pyStrLen s2
 
 ------------------------------------------------------------
@@ -118,9 +118,9 @@ letMinimalReverse =
 letTripleChain :: Int
 letTripleChain =
     let s1 = cppMakeStr 5
-    let n1 = pyStrLen s1
-    let s2 = pyMakeStr n1
-    let n2 = pyStrLen s2
+        n1 = pyStrLen s1
+        s2 = pyMakeStr n1
+        n2 = pyStrLen s2
     in n2
 
 ------------------------------------------------------------
@@ -133,8 +133,8 @@ letTripleChain =
 letDiamond :: Int
 letDiamond =
     let s = cppMakeStr 50
-    let a = pyStrLen s
-    let b = cppStrLen (pyIdStr s)
+        a = pyStrLen s
+        b = cppStrLen (pyIdStr s)
     in a + b
 
 ------------------------------------------------------------
@@ -158,16 +158,16 @@ letTripleUse =
 letDeepChain :: Int
 letDeepChain =
     let xs = cppMakeRange 10
-    let xs2 = pyIncAll xs
-    let xs3 = cppIncAll xs2
-    let xs4 = pyIncAll xs3
-    let xs5 = cppIncAll xs4
-    let xs6 = pyIncAll xs5
-    let xs7 = cppIncAll xs6
-    let xs8 = pyIncAll xs7
-    let xs9 = cppIncAll xs8
-    let xs10 = pyIncAll xs9
-    let xs11 = cppIncAll xs10
+        xs2 = pyIncAll xs
+        xs3 = cppIncAll xs2
+        xs4 = pyIncAll xs3
+        xs5 = cppIncAll xs4
+        xs6 = pyIncAll xs5
+        xs7 = cppIncAll xs6
+        xs8 = pyIncAll xs7
+        xs9 = cppIncAll xs8
+        xs10 = pyIncAll xs9
+        xs11 = cppIncAll xs10
     in pySumList xs11
 
 ------------------------------------------------------------
@@ -195,8 +195,8 @@ letInDoBlock = do
 letListFanOut :: Int
 letListFanOut =
     let xs = cppMakeRange 5
-    let a = pySumList (cppIncAll xs)
-    let b = pySumList (cppIncAll xs)
+        a = pySumList (cppIncAll xs)
+        b = pySumList (cppIncAll xs)
     in a + b
 
 ------------------------------------------------------------
@@ -209,12 +209,12 @@ letListFanOut =
 letListDeepChain :: Int
 letListDeepChain =
     let xs = pyMakeRange 10
-    let xs2 = cppIncAll xs
-    let xs3 = pyIncAll xs2
-    let xs4 = cppIncAll xs3
-    let xs5 = pyIncAll xs4
-    let xs6 = cppIncAll xs5
-    let xs7 = pyIncAll xs6
+        xs2 = cppIncAll xs
+        xs3 = pyIncAll xs2
+        xs4 = cppIncAll xs3
+        xs5 = pyIncAll xs4
+        xs6 = cppIncAll xs5
+        xs7 = pyIncAll xs6
     in cppSumList xs7
 
 ------------------------------------------------------------
@@ -228,10 +228,10 @@ letListDeepChain =
 letStrIdChain :: Int
 letStrIdChain =
     let s = cppMakeStr 7
-    let s2 = pyIdStr s
-    let s3 = cppIdStr s2
-    let s4 = pyIdStr s3
-    let s5 = cppIdStr s4
+        s2 = pyIdStr s
+        s3 = cppIdStr s2
+        s4 = pyIdStr s3
+        s5 = cppIdStr s4
     in cppStrLen s5
 
 ------------------------------------------------------------
@@ -246,7 +246,7 @@ letStrIdChain =
 letMixedTypes :: Int
 letMixedTypes =
     let n1 = pyDouble 5
-    let s1 = pyMakeStr n1
-    let n2 = pyStrLen s1
-    let n3 = pyDouble n2
+        s1 = pyMakeStr n1
+        n2 = pyStrLen s1
+        n3 = pyDouble n2
     in n3

@@ -48,14 +48,14 @@ argmax :: Tensor1 n Real -> Int
 predictDigit :: Int
 predictDigit =
   let image = makeImage 5 5
-  let kernels = makeKernels 2 3 3
-  let bias = makeBias 2
-  let convOut = conv2d image kernels bias
-  let activated = reluMap convOut
-  let flat = flatten3d activated
-  let weights = makeWeights 3 18
-  let denseBias = makeDenseBias 3
-  let logits = dense weights denseBias flat
+      kernels = makeKernels 2 3 3
+      bias = makeBias 2
+      convOut = conv2d image kernels bias
+      activated = reluMap convOut
+      flat = flatten3d activated
+      weights = makeWeights 3 18
+      denseBias = makeDenseBias 3
+      logits = dense weights denseBias flat
   in argmax logits
 
 -- Individual layer tests

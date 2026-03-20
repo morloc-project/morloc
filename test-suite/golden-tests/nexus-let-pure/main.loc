@@ -62,9 +62,9 @@ letCrossRef = let x = 1 in let y = x in y
 letDeepChain :: Int
 letDeepChain =
   let a = 1
-  let b = a
-  let c = b
-  let d = c
+      b = a
+      c = b
+      d = c
   in d
 
 -- 10. Multiple references to same let-bound variable
@@ -99,20 +99,20 @@ letSelfRef = let x = 1 in let x = x in x
 letDeepNest :: Int
 letDeepNest =
   let a = 1
-  let b = 2
-  let c = 3
-  let d = 4
-  let e = 5
+      b = 2
+      c = 3
+      d = 4
+      e = 5
   in a
 
 -- 18. Long cross-reference chain
 letCrossRefChain :: Int
 letCrossRefChain =
   let a = 100
-  let b = a
-  let c = b
-  let d = c
-  let e = d
+      b = a
+      c = b
+      d = c
+      e = d
   in e
 
 -- 19. Record construction in let

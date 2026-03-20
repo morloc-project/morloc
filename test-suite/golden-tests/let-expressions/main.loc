@@ -41,19 +41,19 @@ testROnce x = let a = sideEffectR x in a + a
 testCppSeq :: Int -> Int
 testCppSeq x =
   let a = sideEffectCpp x
-  let b = sideEffectCpp a
+      b = sideEffectCpp a
   in a + b
 
 testPySeq :: Int -> Int
 testPySeq x =
   let a = sideEffectPy x
-  let b = sideEffectPy a
+      b = sideEffectPy a
   in a + b
 
 testRSeq :: Int -> Int
 testRSeq x =
   let a = sideEffectR x
-  let b = sideEffectR a
+      b = sideEffectR a
   in a + b
 
 -- Shadowing: let-bound variable shadows the lambda parameter.

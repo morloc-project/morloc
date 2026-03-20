@@ -83,7 +83,7 @@ effectFanOut :: <IO> Int
 effectFanOut = do
     x <- pyCounter
     let a = cppDouble x
-    let b = cppAdd x x
+        b = cppAdd x x
     pyAdd a b
 
 -- Test 3: Let-bound cross-language result forwarded to two foreign calls.
@@ -91,8 +91,8 @@ effectFanOut = do
 letForwardedTwice :: Int
 letForwardedTwice =
     let xs = cppMakePair 3 7
-    let a = pySumVec (cppIncVec xs)
-    let b = pySumVec (cppIncVec xs)
+        a = pySumVec (cppIncVec xs)
+        b = pySumVec (cppIncVec xs)
     in a + b
 
 -- Test 4: Nested let where each binding crosses a language boundary.
@@ -102,7 +102,7 @@ letForwardedTwice =
 nestedLetCross :: Int
 nestedLetCross =
     let s1 = cppReplicateStr 3 "ab"
-    let s2 = pyReplicateStr 2 s1
+        s2 = pyReplicateStr 2 s1
     in cppLenStr s2
 
 -- Test 5: Lists crossing boundaries with append operations.
@@ -111,8 +111,8 @@ nestedLetCross =
 listAppendCross :: Int
 listAppendCross =
     let a = pyMakePair 1 2
-    let b = cppMakePair 3 4
-    let c = pyAppendVec a b
+        b = cppMakePair 3 4
+        c = pyAppendVec a b
     in cppSumVec c
 
 -- Test 6: Long chain where each result is forwarded.
@@ -120,14 +120,14 @@ listAppendCross =
 resultForwardChain :: Int
 resultForwardChain =
     let xs = cppMakePair 1 1
-    let xs2 = pyIncVec xs
-    let xs3 = cppIncVec xs2
-    let xs4 = pyIncVec xs3
-    let xs5 = cppIncVec xs4
-    let xs6 = pyIncVec xs5
-    let xs7 = cppIncVec xs6
-    let xs8 = pyIncVec xs7
-    let xs9 = cppIncVec xs8
+        xs2 = pyIncVec xs
+        xs3 = cppIncVec xs2
+        xs4 = pyIncVec xs3
+        xs5 = cppIncVec xs4
+        xs6 = pyIncVec xs5
+        xs7 = cppIncVec xs6
+        xs8 = pyIncVec xs7
+        xs9 = cppIncVec xs8
     in pySumVec xs9
 
 -- Test 7: Effect evaluation in let-binding RHS crossing languages.
@@ -147,7 +147,7 @@ effectInLetRhs = do
 tripleForward :: Int
 tripleForward =
     let xs = pyMakePair 5 10
-    let a = cppSumVec xs
-    let b = pySumVec (cppIncVec xs)
-    let c = cppSumVec (pyIncVec xs)
+        a = cppSumVec xs
+        b = pySumVec (cppIncVec xs)
+        c = cppSumVec (pyIncVec xs)
     in a + b + c
