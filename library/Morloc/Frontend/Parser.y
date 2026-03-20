@@ -518,10 +518,20 @@ guard_expr :: { Loc CstExpr }
 let_expr :: { Loc CstExpr }
   : 'let' VLBRACE let_bindings VRBRACE 'in' expr
       { at $1 (CLetE $3 $6) }
+  | 'let' VLBRACE let_bindings VRBRACE let_expr
+      { at $1 (CLetE $3 $5) }
+  | 'let' '{' let_bindings_explicit '}' 'in' expr
+      { at $1 (CLetE $3 $6) }
+  | 'let' '{' let_bindings_explicit '}' let_expr
+      { at $1 (CLetE $3 $5) }
 
 let_bindings :: { [(EVar, Loc CstExpr)] }
   : let_binding                        { [$1] }
   | let_bindings VSEMI let_binding     { $1 ++ [$3] }
+
+let_bindings_explicit :: { [(EVar, Loc CstExpr)] }
+  : let_binding                              { [$1] }
+  | let_bindings_explicit ';' let_binding    { $1 ++ [$3] }
 
 let_binding :: { (EVar, Loc CstExpr) }
   : LOWER '=' expr                     { (EV (getName $1), $3) }

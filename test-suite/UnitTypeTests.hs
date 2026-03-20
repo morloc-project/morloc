@@ -29,6 +29,7 @@ module UnitTypeTests
   , natArithTests
   , natLabelTests
   , natKindPromotionTests
+  , letBindingTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -3753,3 +3754,138 @@ natKindPromotionTests =
       x = consume (make 5)
         |]
     ]
+
+-- ============================================================
+-- Let binding syntax tests
+-- ============================================================
+
+letBindingTests :: TestTree
+letBindingTests =
+  localOption (mkTimeout 1000000) $ -- 1 second timeout
+    testGroup
+      "Let binding syntax"
+      [ -- === Regular let expressions ===
+        assertGeneralType
+          "single let binding"
+          [r|
+        module main (x)
+        x = let y = 42 in y
+          |]
+          int
+
+      , assertGeneralType
+          "let with multiple bindings (omit repeated let)"
+          [r|
+        module main (x)
+        x =
+          let a = 1
+              b = 2
+          in b
+          |]
+          int
+
+      , assertGeneralType
+          "let with repeated let keywords"
+          [r|
+        module main (x)
+        x =
+          let a = 1
+          let b = 2
+          in b
+          |]
+          int
+
+      , assertGeneralType
+          "nested let expressions"
+          [r|
+        module main (x)
+        x =
+          let a = 1
+          in let b = 2
+             in b
+          |]
+          int
+
+      , assertGeneralType
+          "let binding used in body"
+          [r|
+        module main (x)
+        add :: Int -> Int -> Int
+        x =
+          let a = 1
+              b = 2
+          in add a b
+          |]
+          int
+
+      -- === Semicolon-delimited let (for inline / morloc run) ===
+
+      , assertGeneralType
+          "let with semicolons (inline form)"
+          "module main (x)\nx = let { a = 1; b = 2 } in b"
+          int
+
+      -- === Do-block let bindings ===
+
+      , assertGeneralType
+          "do-block with single let"
+          [r|
+        module main (x)
+        x = do
+            let y = 42
+            y
+          |]
+          (emptyEff int)
+
+      , assertGeneralType
+          "do-block with multi-binding let (omit repeated let)"
+          [r|
+        module main (x)
+        x = do
+            let a = 1
+                b = 2
+            b
+          |]
+          (emptyEff int)
+
+      , assertGeneralType
+          "do-block with separate let statements"
+          [r|
+        module main (x)
+        x = do
+            let a = 1
+            let b = 2
+            b
+          |]
+          (emptyEff int)
+
+      , assertGeneralType
+          "do-block let interleaved with bind"
+          [r|
+        module main (x)
+        f :: Int -> <IO> Int
+        x = do
+            let a = 1
+            b <- f a
+            let c = 2
+            b
+          |]
+          (ioEff int)
+
+      -- === Semicolon-delimited do-block (explicit braces) ===
+
+      , assertGeneralType
+          "do with explicit braces and semicolons"
+          "module main (x)\nx = do { 42 }"
+          (emptyEff int)
+
+      , assertGeneralType
+          "do with explicit braces, let, and semicolons"
+          "module main (x)\nx = do { let a = 1; a }"
+          (emptyEff int)
+
+      , assertGeneralType
+          "do with explicit braces, multiple lets"
+          "module main (x)\nx = do { let a = 1; let b = 2; b }"
+          (emptyEff int)
+      ]

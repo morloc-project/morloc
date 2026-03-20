@@ -918,6 +918,10 @@ insertLayout toks = beginTopLevel toks
     indentCheck (LetCtx _ : cs) tok rest
       | locToken tok == TokIn =
           Located (locPos tok) TokVRBrace "" : emitToken cs tok rest
+    -- ';' closes a LetCtx so that let-bindings terminate inside explicit-brace blocks
+    indentCheck (LetCtx _ : cs) tok rest
+      | locToken tok == TokSemicolon =
+          Located (locPos tok) TokVRBrace "" : indentCheck cs tok rest
     indentCheck ctxs@(LetCtx n : cs) tok rest
       | col == n && isBlockCloser (locToken tok) =
           Located (locPos tok) TokVRBrace "" : indentCheck cs tok rest
