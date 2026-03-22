@@ -27,14 +27,14 @@ letLambdaMultiUse = let f = (\x -> x) in (f 1, f 2)
 letLambdaNested :: Int
 letLambdaNested =
   let f = (\x -> x)
-  let g = (\y -> f y)
+      g = (\y -> f y)
   in g 42
 
 -- 5. Lambda that captures an outer let-bound data value
 letLambdaCapture :: (Int, Int)
 letLambdaCapture =
   let x = 1
-  let f = (\y -> (x, y))
+      f = (\y -> (x, y))
   in f 2
 
 -- 6. Partial application: let-bound lambda returns a function

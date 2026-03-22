@@ -349,6 +349,7 @@ makeSerialAST m lang t0 = do
         basevar (NatMulU _ _) = Nothing
         basevar (NatSubU _ _) = Nothing
         basevar (NatDivU _ _) = Nothing
+        basevar (LabeledU _ t) = basevar t
 
         generalType = fst $ unweaveTypeF ft
 
@@ -362,15 +363,6 @@ makeSerialAST m lang t0 = do
         tensorNDim :: Maybe TVar -> Maybe Int
         tensorNDim (Just v) = lookup v [(BT.tensor k, k) | k <- [1..5]]
         tensorNDim Nothing = Nothing
-
-        fallbackExpand :: MorlocMonad SerialAST
-        fallbackExpand = case evaluatedType of
-          Just expanded -> do
-            expandedTf <- inferConcreteType lang (Idx m (typeOf expanded))
-            makeSerialAST' gscope typepackers expandedTf
-          Nothing ->
-            MM.throwSourcedError m $
-              "Cannot expand type alias for" <+> pretty ft
 
         selectPacker :: [(TypePacker, SerialAST)] -> MorlocMonad (TypePacker, SerialAST)
         selectPacker [] =

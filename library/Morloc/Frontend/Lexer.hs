@@ -797,6 +797,8 @@ Algorithm (GHC-inspired):
 data LayoutContext
   = -- | virtual { at this column
     IndentCtx !Int
+  | -- | let-introduced layout context at this column (closed by 'in')
+    LetCtx !Int
   | -- | real {, no indentation tracking
     ExplicitCtx
   deriving (Show, Eq)
@@ -805,6 +807,7 @@ data LayoutContext
 isLayoutKeyword :: Token -> Bool
 isLayoutKeyword TokWhere = True
 isLayoutKeyword TokDo = True
+isLayoutKeyword TokLet = True
 isLayoutKeyword _ = False
 
 insertLayout :: [Located] -> [Located]
@@ -819,7 +822,7 @@ insertLayout toks = beginTopLevel toks
       (Located p TokModule _ : rest) ->
         Located p TokModule "" : skipModuleHeader rest
       -- File starts with something else: implicit main, start layout immediately
-      (_ : _) -> startLayoutCtx [] ts
+      (_ : _) -> startLayoutCtx TokModule [] ts
       [] -> []
 
     -- Skip past 'module Name (exports)' to find where the body starts.
@@ -838,7 +841,7 @@ insertLayout toks = beginTopLevel toks
     skipExportList depth (t@(Located _ TokLParen _) : rest) =
       t : skipExportList (depth + 1) rest
     skipExportList depth (t@(Located _ TokRParen _) : rest)
-      | depth <= 1 = t : startLayoutCtx [] rest -- closing ) of export list
+      | depth <= 1 = t : startLayoutCtx TokModule [] rest -- closing ) of export list
       | otherwise = t : skipExportList (depth - 1) rest
     skipExportList depth (t : rest) = t : skipExportList depth rest
 
@@ -855,26 +858,31 @@ insertLayout toks = beginTopLevel toks
     skipExportListInBody ctxs depth (t@(Located _ TokLParen _) : rest) =
       t : skipExportListInBody ctxs (depth + 1) rest
     skipExportListInBody ctxs depth (t@(Located _ TokRParen _) : rest)
-      | depth <= 1 = t : startLayoutCtx ctxs rest
+      | depth <= 1 = t : startLayoutCtx TokModule ctxs rest
       | otherwise = t : skipExportListInBody ctxs (depth - 1) rest
     skipExportListInBody ctxs depth (t : rest) = t : skipExportListInBody ctxs depth rest
 
     -- Start a new layout context at the column of the next token
-    startLayoutCtx :: [LayoutContext] -> [Located] -> [Located]
-    startLayoutCtx ctxs [] = closingBraces ctxs []
-    startLayoutCtx ctxs [eof@(Located _ TokEOF _)] =
+    -- The Token parameter indicates which keyword triggered the context
+    -- (TokLet uses LetCtx, others use IndentCtx)
+    startLayoutCtx :: Token -> [LayoutContext] -> [Located] -> [Located]
+    startLayoutCtx _ ctxs [] = closingBraces ctxs []
+    startLayoutCtx _ ctxs [eof@(Located _ TokEOF _)] =
       -- empty body
       Located (locPos eof) TokVLBrace ""
         : Located (locPos eof) TokVRBrace ""
         : closingBraces ctxs [eof]
     -- Explicit brace after layout keyword: skip virtual layout, let the
     -- brace be handled as an explicit context by emitToken/process.
-    startLayoutCtx ctxs (t@(Located _ TokLBrace _) : rest) =
+    startLayoutCtx _ ctxs (t@(Located _ TokLBrace _) : rest) =
       t : process (ExplicitCtx : ctxs) rest
-    startLayoutCtx ctxs (t : rest)
+    startLayoutCtx kw ctxs (t : rest)
       | otherwise =
           let col = posCol (locPos t)
-              newCtxs = IndentCtx col : ctxs
+              ctx = case kw of
+                TokLet -> LetCtx col
+                _      -> IndentCtx col
+              newCtxs = ctx : ctxs
               vopen = Located (locPos t) TokVLBrace ""
            in -- The first token of a layout block must not get a VSEMI before it
               -- (indentCheck would emit one since col == n). So we handle it
@@ -906,6 +914,25 @@ insertLayout toks = beginTopLevel toks
     indentCheck :: [LayoutContext] -> Located -> [Located] -> [Located]
     indentCheck [] tok rest = emitToken [] tok rest
     indentCheck (ExplicitCtx : ctxs) tok rest = emitToken (ExplicitCtx : ctxs) tok rest
+    -- 'in' immediately closes a LetCtx regardless of indentation
+    indentCheck (LetCtx _ : cs) tok rest
+      | locToken tok == TokIn =
+          Located (locPos tok) TokVRBrace "" : emitToken cs tok rest
+    -- ';' closes a LetCtx so that let-bindings terminate inside explicit-brace blocks
+    indentCheck (LetCtx _ : cs) tok rest
+      | locToken tok == TokSemicolon =
+          Located (locPos tok) TokVRBrace "" : indentCheck cs tok rest
+    indentCheck ctxs@(LetCtx n : cs) tok rest
+      | col == n && isBlockCloser (locToken tok) =
+          Located (locPos tok) TokVRBrace "" : indentCheck cs tok rest
+      | col == n =
+          Located (locPos tok) TokVSemi "" : emitToken ctxs tok rest
+      | col > n =
+          emitToken ctxs tok rest
+      | otherwise =
+          Located (locPos tok) TokVRBrace "" : indentCheck cs tok rest
+      where
+        col = posCol (locPos tok)
     indentCheck ctxs@(IndentCtx n : cs) tok rest
       | col == n && isBlockCloser (locToken tok) =
           -- 'module' at layout column closes the current block
@@ -935,7 +962,7 @@ insertLayout toks = beginTopLevel toks
           tok : skipModuleHeaderInBody ctxs rest
       -- Layout keywords: emit the keyword, then start a new layout context
       | isLayoutKeyword (locToken tok) =
-          tok : startLayoutCtx ctxs rest
+          tok : startLayoutCtx (locToken tok) ctxs rest
       -- Explicit open brace
       | locToken tok == TokLBrace =
           tok : process (ExplicitCtx : ctxs) rest
@@ -955,6 +982,8 @@ insertLayout toks = beginTopLevel toks
     closeToExplicit (ExplicitCtx : ctxs) tok rest =
       tok : process ctxs rest
     closeToExplicit (IndentCtx _ : ctxs) tok rest =
+      Located (locPos tok) TokVRBrace "" : closeToExplicit ctxs tok rest
+    closeToExplicit (LetCtx _ : ctxs) tok rest =
       Located (locPos tok) TokVRBrace "" : closeToExplicit ctxs tok rest
     closeToExplicit [] tok rest =
       -- unbalanced }, let the parser report the error

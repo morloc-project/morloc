@@ -50,14 +50,14 @@ snocList xs = snoc xs 99
 chainDeque :: Deque Int -> Int
 chainDeque xs =
   let ys = map (\x -> x + 1) xs
-  let zs = cons 0 ys
+      zs = cons 0 ys
   in fold (\a x -> a + x) 0 zs
 
 -- List: map (Functor) + snoc (Queue) + at (Indexed)
 chainList :: [Int] -> Int
 chainList xs =
   let ys = map (\x -> x + 1) xs
-  let zs = snoc ys 100
+      zs = snoc ys 100
   in at 0 zs
 
 -- Array: map (Functor) + at (Indexed) + fold (Foldable)
@@ -80,12 +80,12 @@ mul64 x y = x * y
 deepChain :: [Int] -> Int
 deepChain xs =
   let a = map (\x -> x + 1) xs
-  let b = map (\x -> x * 2) a
-  let c = cons 0 b
-  let d = snoc c 100
-  let e = map (\x -> x - 1) d
-  let f = filter (\x -> x > 0) e
-  let g = map (\x -> x + 10) f
+      b = map (\x -> x * 2) a
+      c = cons 0 b
+      d = snoc c 100
+      e = map (\x -> x - 1) d
+      f = filter (\x -> x > 0) e
+      g = map (\x -> x + 10) f
   in fold (\acc x -> acc + x) 0 g
 
 -- ===== NESTED ALIAS CONTAINERS =====
@@ -104,43 +104,43 @@ eqArray = mapArray [1,2,3] == [2,3,4]
 testAliasPy :: Bool
 testAliasPy =
   let t1 = mapDeque [1,2,3] == [2,3,4]
-  let t2 = mapArray [1,2,3] == [2,3,4]
-  let t3 = foldDeque [1,2,3] == 6
-  let t4 = foldArray [1,2,3] == 6
-  let t5 = indexList [10,20,30] == 10
-  let t6 = indexArray [10,20,30] == 10
-  let t7 = consDeque [1,2] == [0,1,2]
-  let t8 = snocDeque [1,2] == [1,2,99]
-  let t9 = snocList [1,2] == [1,2,99]
-  let t10 = chainDeque [1,2,3] == 9
-  let t11 = chainList [1,2,3] == 2
-  let t12 = chainArray [1,2,3] == 12
-  let t13 = nestedAliasMap [[1,2],[3]] == [[2,3],[4]]
-  let t14 = eqDeque && eqArray
+      t2 = mapArray [1,2,3] == [2,3,4]
+      t3 = foldDeque [1,2,3] == 6
+      t4 = foldArray [1,2,3] == 6
+      t5 = indexList [10,20,30] == 10
+      t6 = indexArray [10,20,30] == 10
+      t7 = consDeque [1,2] == [0,1,2]
+      t8 = snocDeque [1,2] == [1,2,99]
+      t9 = snocList [1,2] == [1,2,99]
+      t10 = chainDeque [1,2,3] == 9
+      t11 = chainList [1,2,3] == 2
+      t12 = chainArray [1,2,3] == 12
+      t13 = nestedAliasMap [[1,2],[3]] == [[2,3],[4]]
+      t14 = eqDeque && eqArray
   in t1 && t2 && t3 && t4 && t5 && t6 && t7 && t8 && t9 && t10 && t11 && t12 && t13 && t14
 
 testAliasCpp :: Bool
 testAliasCpp =
   let t1 = mapDeque [1,2,3] == [2,3,4]
-  let t2 = mapArray [1,2,3] == [2,3,4]
-  let t3 = foldDeque [1,2,3] == 6
-  let t4 = foldArray [1,2,3] == 6
-  let t5 = indexList [10,20,30] == 10
-  let t6 = indexArray [10,20,30] == 10
-  let t7 = consDeque [1,2] == [0,1,2]
-  let t8 = snocDeque [1,2] == [1,2,99]
-  let t9 = snocList [1,2] == [1,2,99]
-  let t10 = chainDeque [1,2,3] == 9
-  let t11 = chainList [1,2,3] == 2
-  let t12 = chainArray [1,2,3] == 12
-  let t13 = nestedAliasMap [[1,2],[3]] == [[2,3],[4]]
-  let t14 = eqDeque && eqArray
+      t2 = mapArray [1,2,3] == [2,3,4]
+      t3 = foldDeque [1,2,3] == 6
+      t4 = foldArray [1,2,3] == 6
+      t5 = indexList [10,20,30] == 10
+      t6 = indexArray [10,20,30] == 10
+      t7 = consDeque [1,2] == [0,1,2]
+      t8 = snocDeque [1,2] == [1,2,99]
+      t9 = snocList [1,2] == [1,2,99]
+      t10 = chainDeque [1,2,3] == 9
+      t11 = chainList [1,2,3] == 2
+      t12 = chainArray [1,2,3] == 12
+      t13 = nestedAliasMap [[1,2],[3]] == [[2,3],[4]]
+      t14 = eqDeque && eqArray
   in t1 && t2 && t3 && t4 && t5 && t6 && t7 && t8 && t9 && t10 && t11 && t12 && t13 && t14
 
 testInt32Cpp :: Bool
 testInt32Cpp =
   let t1 = add32 10 20 == 30
-  let t2 = mul64 100 200 == 20000
+      t2 = mul64 100 200 == 20000
   in t1 && t2
 
 testDeepChainPy :: Int

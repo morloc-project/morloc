@@ -1,9 +1,17 @@
+0.68.0 [2026-03-22]
+-------------------
+ * remove explicit universal quntifiers
+    - before: `id a :: a -> a`
+    - now:    `id   :: a -> a`
+ * add `morloc uninstall --all` option
+ * do not require repeated `let` terms
+
 0.67.1 [2026-03-17]
 -------------------
- * Add missing Nat kind annotation to root modules
- * Better test coverage of Nat kinds
- * Add `morloc uninstall --all` option
- * Add `stdlib` module that simplifies recursive install of everything
+ * add missing Nat kind annotation to root modules
+ * better test coverage of Nat kinds
+ * add `morloc uninstall --all` option
+ * add `stdlib` module that simplifies recursive install of everything
 
 0.67.0 [2026-03-17]
 -------------------

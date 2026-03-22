@@ -93,10 +93,6 @@ unqualify :: TypeU -> ([TVar], TypeU)
 unqualify (ForallU v (unqualify -> (vs, t))) = (v : vs, t)
 unqualify t = ([], t)
 
-unqualifyWithKinds :: TypeU -> ([(TVar, Kind)], TypeU)
-unqualifyWithKinds (ForallU v (unqualifyWithKinds -> (vks, t))) = ((v, KindType) : vks, t)
-unqualifyWithKinds t = ([], t)
-
 toExistential :: Gamma -> TypeU -> (Gamma, TypeU)
 toExistential g0 (unqualify -> (vs0, t0)) = f g0 vs0 t0
   where
@@ -627,6 +623,7 @@ solve v t
     occursIn v' (NatMulU a b) = occursIn v' a || occursIn v' b
     occursIn v' (NatSubU a b) = occursIn v' a || occursIn v' b
     occursIn v' (NatDivU a b) = occursIn v' a || occursIn v' b
+    occursIn v' (LabeledU _ t') = occursIn v' t'
 
 -- | Record a solved variable in the gamma map cache
 cacheSolved :: TVar -> TypeU -> Gamma -> Gamma

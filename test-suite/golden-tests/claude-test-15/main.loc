@@ -96,19 +96,19 @@ nestedVecRoundTrip = pyNestedSum (cppNestedVec 10 20)
 bigStrChain :: Int
 bigStrChain =
     let s1 = pyBigStr 5000
-    let s2 = cppBigStrLen s1
-    let s3 = pyBigStr s2
-    let s4 = cppBigStrLen s3
-    let s5 = pyBigStr s4
+        s2 = cppBigStrLen s1
+        s3 = pyBigStr s2
+        s4 = cppBigStrLen s3
+        s5 = pyBigStr s4
     in cppBigStrLen s5
 
 -- Test 6: Large vector created and summed in alternating languages.
 bigVecChain :: Int
 bigVecChain =
     let xs = cppBigVec 1000
-    let s1 = pyBigVecSum xs
-    let xs2 = cppBigVec 1000
-    let s2 = pyBigVecSum xs2
+        s1 = pyBigVecSum xs
+        xs2 = cppBigVec 1000
+        s2 = pyBigVecSum xs2
     in s1 + s2
 
 -- Test 7: Many sequential big string allocations (10 rounds).
@@ -116,15 +116,15 @@ bigVecChain =
 manyBigStrings :: Int
 manyBigStrings =
     let a1 = pyBigStrLen (cppBigStr 2000)
-    let a2 = cppBigStrLen (pyBigStr 2000)
-    let a3 = pyBigStrLen (cppBigStr 2000)
-    let a4 = cppBigStrLen (pyBigStr 2000)
-    let a5 = pyBigStrLen (cppBigStr 2000)
-    let a6 = cppBigStrLen (pyBigStr 2000)
-    let a7 = pyBigStrLen (cppBigStr 2000)
-    let a8 = cppBigStrLen (pyBigStr 2000)
-    let a9 = pyBigStrLen (cppBigStr 2000)
-    let a10 = cppBigStrLen (pyBigStr 2000)
+        a2 = cppBigStrLen (pyBigStr 2000)
+        a3 = pyBigStrLen (cppBigStr 2000)
+        a4 = cppBigStrLen (pyBigStr 2000)
+        a5 = pyBigStrLen (cppBigStr 2000)
+        a6 = cppBigStrLen (pyBigStr 2000)
+        a7 = pyBigStrLen (cppBigStr 2000)
+        a8 = cppBigStrLen (pyBigStr 2000)
+        a9 = pyBigStrLen (cppBigStr 2000)
+        a10 = cppBigStrLen (pyBigStr 2000)
     in a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10
 
 -- Test 8: Many sequential nested vector allocations (8 rounds).
@@ -132,11 +132,11 @@ manyBigStrings =
 manyNestedVecs :: Int
 manyNestedVecs =
     let n1 = pyNestedSum (cppNestedVec 5 10)
-    let n2 = cppNestedSum (pyNestedVec 5 10)
-    let n3 = pyNestedSum (cppNestedVec 5 10)
-    let n4 = cppNestedSum (pyNestedVec 5 10)
-    let n5 = pyNestedSum (cppNestedVec 5 10)
-    let n6 = cppNestedSum (pyNestedVec 5 10)
-    let n7 = pyNestedSum (cppNestedVec 5 10)
-    let n8 = cppNestedSum (pyNestedVec 5 10)
+        n2 = cppNestedSum (pyNestedVec 5 10)
+        n3 = pyNestedSum (cppNestedVec 5 10)
+        n4 = cppNestedSum (pyNestedVec 5 10)
+        n5 = pyNestedSum (cppNestedVec 5 10)
+        n6 = cppNestedSum (pyNestedVec 5 10)
+        n7 = pyNestedSum (cppNestedVec 5 10)
+        n8 = cppNestedSum (pyNestedVec 5 10)
     in n1 + n2 + n3 + n4 + n5 + n6 + n7 + n8
