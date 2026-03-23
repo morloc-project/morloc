@@ -46,6 +46,7 @@ build-full:
 # Build the required docker image
 build-test:
 	podman build --no-cache --force-rm -t ghcr.io/morloc-project/morloc/morloc-test test
+	podman tag ghcr.io/morloc-project/morloc/morloc-test ghcr.io/morloc-project/morloc/morloc-test:edge
 
 shell:
 	podman run --shm-size=4g --rm -it ghcr.io/morloc-project/morloc/morloc-full:edge /bin/bash
@@ -66,13 +67,13 @@ push:
 	podman push ghcr.io/morloc-project/morloc/morloc-full:$(MORLOC_VERSION)
 	podman push ghcr.io/morloc-project/morloc/morloc-full:edge
 	# Push test (no moving tag)
-	podman push ghcr.io/morloc-project/morloc/morloc-test
+	podman push ghcr.io/morloc-project/morloc/morloc-test:edge
 
 # retrieve the latest morloc builds from the github registry
 pull:
 	podman pull ghcr.io/morloc-project/morloc/morloc-tiny:$(MORLOC_VERSION)
 	podman pull ghcr.io/morloc-project/morloc/morloc-full:$(MORLOC_VERSION)
-	podman pull ghcr.io/morloc-project/morloc/morloc-test
+	podman pull ghcr.io/morloc-project/morloc/morloc-test:edge
 
 # Convenience: pull moving edge tags
 pull-edge:
