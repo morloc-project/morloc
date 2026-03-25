@@ -30,6 +30,9 @@ jobs:
           restore-keys: |
             stack-test-
 
+      - name: Increase shared memory (needed for morloc SHM pool tests)
+        run: sudo mount -o remount,size=4G /dev/shm
+
       - name: Install system dependencies
         run: |
           sudo apt-get update

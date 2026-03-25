@@ -42,6 +42,8 @@ jobs:
             .stack-work
           key: stack-release-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
           restore-keys: stack-release-
+      - name: Increase shared memory
+        run: sudo mount -o remount,size=4G /dev/shm
       - name: Install system dependencies
         run: |
           sudo apt-get update
