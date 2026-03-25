@@ -130,34 +130,75 @@ jobs:
             docker push ${{ env.IMAGE_BASE }}/${img}:edge
           done
 
-  # ---- Build static morloc-manager binary ----
+  # ---- Build morloc-manager binaries (3 platforms) ----
   static-binary:
     needs: test
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            method: docker
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+            method: docker
+          - os: macos-latest
+            platform: macos-arm64
+            method: native
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build static morloc-manager
+      # ---- Linux (static via Docker + musl) ----
+      - name: Build static binary (Linux)
+        if: matrix.method == 'docker'
         run: |
           docker build -t morloc-static-build \
             -f container/static-build/Dockerfile .
           mkdir -p out
           docker run --rm -v "$(pwd)/out:/out" morloc-static-build
 
-      - name: Verify static linking
+      - name: Verify static linking (Linux)
+        if: matrix.method == 'docker'
         run: |
           file out/morloc-manager
           file out/morloc-manager | grep -q "statically linked"
 
-      - name: Rename binary with platform suffix
-        run: mv out/morloc-manager out/morloc-manager-linux-x86_64
+      # ---- macOS (native stack build) ----
+      - name: Setup Haskell (macOS)
+        if: matrix.method == 'native'
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.6.7'
+          enable-stack: true
+          stack-version: 'latest'
+
+      - name: Cache Stack artifacts (macOS)
+        if: matrix.method == 'native'
+        uses: actions/cache@v4
+        with:
+          path: ~/.stack
+          key: stack-macos-${{ hashFiles('morloc-manager/package.yaml') }}
+          restore-keys: stack-macos-
+
+      - name: Build binary (macOS)
+        if: matrix.method == 'native'
+        run: |
+          stack build morloc-manager --system-ghc --no-install-ghc --no-run-tests
+          mkdir -p out
+          cp "$(stack --system-ghc path --local-install-root)/bin/morloc-manager" out/morloc-manager
+          strip out/morloc-manager
+
+      # ---- Common: rename and upload ----
+      - name: Rename binary
+        run: mv out/morloc-manager out/morloc-manager-${{ matrix.platform }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: morloc-manager-linux-x86_64
-          path: out/morloc-manager-linux-x86_64
+          name: morloc-manager-${{ matrix.platform }}
+          path: out/morloc-manager-${{ matrix.platform }}
 
   # ---- Create GitHub Release ----
   release:
@@ -166,13 +207,14 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download static binary
+      - name: Download all binaries
         uses: actions/download-artifact@v4
         with:
-          name: morloc-manager-linux-x86_64
+          pattern: morloc-manager-*
+          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: morloc-manager-linux-x86_64
+          files: morloc-manager-*
           generate_release_notes: true
