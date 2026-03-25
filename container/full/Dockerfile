@@ -20,7 +20,7 @@ RUN apt-get update
 RUN TZ=Antarctica/Troll apt-get -y install tzdata
 
 RUN apt-get install -y r-base python3 python3-dev python3-pip python3-numpy libgsl-dev git
-RUN python3 -m pip install --break-system-packages --upgrade pip setuptools
+RUN python3 -m pip install --break-system-packages --upgrade setuptools
 
 # Setup the morloc home
 RUN morloc init

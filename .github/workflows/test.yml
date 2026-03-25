@@ -5,38 +5,68 @@ jobs:
   linux-test:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    container:
-      image: ghcr.io/morloc-project/morloc/morloc-test:latest
-      options: --shm-size=4g # required for shared memory pool
 
     env:
-      HOME: /root
       DEBIAN_FRONTEND: noninteractive
-      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Checkout Morloc code
+      - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Haskell (GHC + Stack)
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.6.7'
+          enable-stack: true
+          stack-version: 'latest'
+
+      - name: Cache Stack artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.stack
+            .stack-work
+          key: stack-test-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
+          restore-keys: |
+            stack-test-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            r-base-core \
+            python3 \
+            python3-dev \
+            python3-pip \
+            python3-numpy \
+            g++ \
+            gcc \
+            make \
+            libgsl-dev
+          python3 -m pip install --break-system-packages --upgrade setuptools
 
       - name: Add morloc bin folders to PATH
         run: |
           echo "$HOME/.local/bin" >> $GITHUB_PATH
           echo "$HOME/.local/share/morloc/bin" >> $GITHUB_PATH
 
-      - name: Diagnostics
-        run: |
-          pwd
-          ls -l
-          whoami
-
       - name: Build Morloc
         run: |
-          stack --allow-different-user install --no-run-tests --local-bin-path=/usr/local/bin
+          stack install --no-run-tests
 
-      - name: Load morloc modules
+      - name: Initialize morloc and install modules
         run: |
           morloc init -f
-          morloc install internal root root-r root-py root-cpp bits bits-cpp bits-py char char-cpp char-py char-r map map-cpp map-py map-r math math-cpp math-py math-r random random-cpp random-py random-r set set-cpp set-py set-r shell shell-cpp shell-py text text-cpp text-py maybe maybe-r maybe-py maybe-cpp
+          morloc install internal root root-r root-py root-cpp \
+            bits bits-cpp bits-py \
+            char char-cpp char-py char-r \
+            map map-cpp map-py map-r \
+            math math-cpp math-py math-r \
+            random random-cpp random-py random-r \
+            set set-cpp set-py set-r \
+            shell shell-cpp shell-py \
+            text text-cpp text-py \
+            maybe maybe-r maybe-py maybe-cpp
 
       - name: Test morloc
         run: |
