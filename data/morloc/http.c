@@ -197,6 +197,40 @@ daemon_request_t* http_to_daemon_request(http_request_t* req, ERRMSG) {
         return dreq;
     }
 
+    // POST /eval -- evaluate a morloc expression
+    //
+    // Request body: {"expr": "import math; math.add 1 2"}
+    // Response: {"status":"ok","result":"3"} or {"status":"error","error":"..."}
+    //
+    // The expression is compiled and executed by forking `morloc eval`.
+    // Safe by construction: the morloc parser rejects inline foreign source
+    // code, and eval can only compose functions from installed modules.
+    if (req->method == HTTP_POST && strcmp(req->path, "/eval") == 0) {
+        dreq->method = DAEMON_EVAL;
+        if (req->body && req->body_len > 0) {
+            // Extract "expr" field from JSON body
+            const char* expr_key = strstr(req->body, "\"expr\"");
+            if (expr_key) {
+                expr_key += 6;
+                while (*expr_key == ' ' || *expr_key == ':' || *expr_key == '\t') expr_key++;
+                if (*expr_key == '"') {
+                    expr_key++;
+                    const char* expr_end = expr_key;
+                    while (*expr_end && *expr_end != '"') {
+                        if (*expr_end == '\\') { expr_end++; if (*expr_end) expr_end++; continue; }
+                        expr_end++;
+                    }
+                    dreq->expr = strndup(expr_key, (size_t)(expr_end - expr_key));
+                }
+            }
+        }
+        if (!dreq->expr) {
+            free(dreq);
+            RAISE("Missing 'expr' field in /eval request body")
+        }
+        return dreq;
+    }
+
     // POST /call/<command>
     if (req->method == HTTP_POST && strncmp(req->path, "/call/", 6) == 0) {
         const char* cmd_name = req->path + 6;

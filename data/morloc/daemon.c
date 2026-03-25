@@ -12,8 +12,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -23,6 +25,9 @@ static volatile sig_atomic_t shutdown_requested = 0;
 // Pool health callback, set by daemon_run()
 static pool_alive_fn_t g_pool_alive_fn = NULL;
 static size_t g_n_pools = 0;
+
+// Eval timeout (seconds), set by daemon_run() from config
+static int g_eval_timeout = 30;
 
 static void daemon_signal_handler(int sig) {
     (void)sig;
@@ -274,11 +279,16 @@ daemon_response_t* daemon_parse_response(const char* json, size_t len, ERRMSG) {
     return resp;
 }
 
+void daemon_set_eval_timeout(int timeout_sec) {
+    g_eval_timeout = timeout_sec > 0 ? timeout_sec : 30;
+}
+
 void daemon_free_request(daemon_request_t* req) {
     if (!req) return;
     free(req->id);
     free(req->command);
     free(req->args_json);
+    free(req->expr);
     free(req);
 }
 
@@ -410,6 +420,148 @@ static argument_t** parse_json_args_to_arguments(
     return args;
 }
 
+// ======================================================================
+// Eval dispatch
+// ======================================================================
+
+/*
+ * Execute a morloc expression by forking `morloc eval`.
+ *
+ * Forks a child process that runs:
+ *   morloc eval '<expr>'
+ *
+ * The child's stdout is captured as the result. Stderr is captured for
+ * error reporting. Resource limits (CPU time, address space) are applied
+ * via setrlimit() in the child before exec.
+ *
+ * Safety properties:
+ *   - The morloc parser rejects inline foreign source code
+ *   - eval can only compose functions from already-installed modules
+ *   - Resource limits prevent runaway compilation or execution
+ *
+ * Example request/response:
+ *   Request:  POST /eval {"expr": "import math; math.add 1 2"}
+ *   Response: {"status":"ok","result":"3"}
+ *
+ *   Request:  POST /eval {"expr": "import unknown; unknown.f 1"}
+ *   Response: {"status":"error","error":"Module 'unknown' not found"}
+ */
+static daemon_response_t* daemon_dispatch_eval(const char* expr) {
+    daemon_response_t* resp = (daemon_response_t*)calloc(1, sizeof(daemon_response_t));
+
+    // Pipes for capturing child stdout and stderr
+    int stdout_pipe[2], stderr_pipe[2];
+    if (pipe(stdout_pipe) != 0 || pipe(stderr_pipe) != 0) {
+        resp->success = false;
+        resp->error = strdup("Failed to create pipes for eval");
+        return resp;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        resp->success = false;
+        resp->error = strdup("Failed to fork for eval");
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        close(stderr_pipe[0]); close(stderr_pipe[1]);
+        return resp;
+    }
+
+    if (pid == 0) {
+        // ---- Child process ----
+
+        // Redirect stdout and stderr to pipes
+        close(stdout_pipe[0]);
+        close(stderr_pipe[0]);
+        dup2(stdout_pipe[1], STDOUT_FILENO);
+        dup2(stderr_pipe[1], STDERR_FILENO);
+        close(stdout_pipe[1]);
+        close(stderr_pipe[1]);
+
+        // Apply resource limits if timeout is set
+        if (g_eval_timeout > 0) {
+            // CPU time limit (hard kill after timeout + 5s grace)
+            struct rlimit cpu_limit = {
+                .rlim_cur = (rlim_t)g_eval_timeout,
+                .rlim_max = (rlim_t)(g_eval_timeout + 5)
+            };
+            setrlimit(RLIMIT_CPU, &cpu_limit);
+
+            // Address space limit: 2 GB
+            struct rlimit as_limit = {
+                .rlim_cur = 2UL * 1024 * 1024 * 1024,
+                .rlim_max = 2UL * 1024 * 1024 * 1024
+            };
+            setrlimit(RLIMIT_AS, &as_limit);
+        }
+
+        // Exec: morloc eval '<expr>'
+        execlp("morloc", "morloc", "eval", expr, (char*)NULL);
+
+        // If exec fails
+        fprintf(stderr, "Failed to exec morloc eval: %s", strerror(errno));
+        _exit(127);
+    }
+
+    // ---- Parent process ----
+    close(stdout_pipe[1]);
+    close(stderr_pipe[1]);
+
+    // Read stdout
+    char stdout_buf[65536];
+    ssize_t stdout_len = 0;
+    ssize_t n;
+    while ((n = read(stdout_pipe[0], stdout_buf + stdout_len,
+                     sizeof(stdout_buf) - (size_t)stdout_len - 1)) > 0) {
+        stdout_len += n;
+    }
+    stdout_buf[stdout_len] = '\0';
+    close(stdout_pipe[0]);
+
+    // Read stderr
+    char stderr_buf[65536];
+    ssize_t stderr_len = 0;
+    while ((n = read(stderr_pipe[0], stderr_buf + stderr_len,
+                     sizeof(stderr_buf) - (size_t)stderr_len - 1)) > 0) {
+        stderr_len += n;
+    }
+    stderr_buf[stderr_len] = '\0';
+    close(stderr_pipe[0]);
+
+    // Wait for child
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        // Trim trailing newline from stdout
+        while (stdout_len > 0 && (stdout_buf[stdout_len-1] == '\n' ||
+                                   stdout_buf[stdout_len-1] == '\r')) {
+            stdout_buf[--stdout_len] = '\0';
+        }
+        resp->success = true;
+        resp->result_json = strdup(stdout_buf);
+    } else {
+        resp->success = false;
+        if (stderr_len > 0) {
+            resp->error = strdup(stderr_buf);
+        } else if (WIFSIGNALED(status)) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "morloc eval killed by signal %d", WTERMSIG(status));
+            resp->error = strdup(msg);
+        } else {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "morloc eval exited with code %d",
+                     WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+            resp->error = strdup(msg);
+        }
+    }
+
+    return resp;
+}
+
+// ======================================================================
+// Request dispatch
+// ======================================================================
+
 daemon_response_t* daemon_dispatch(
     manifest_t* manifest,
     daemon_request_t* request,
@@ -437,6 +589,19 @@ daemon_response_t* daemon_dispatch(
         resp->success = true;
         resp->result_json = daemon_build_discovery(manifest);
         return resp;
+    }
+
+    if (request->method == DAEMON_EVAL) {
+        if (!request->expr) {
+            resp->success = false;
+            resp->error = strdup("Missing 'expr' field in eval request");
+            return resp;
+        }
+        daemon_response_t* eval_resp = daemon_dispatch_eval(request->expr);
+        // Copy id from request
+        eval_resp->id = request->id ? strdup(request->id) : NULL;
+        free(resp);
+        return eval_resp;
     }
 
     // DAEMON_CALL
@@ -901,9 +1066,10 @@ void daemon_run(
     size_t n_pools,
     const char* shm_basename
 ) {
-    // Set pool health globals for daemon_dispatch
+    // Set globals for daemon_dispatch
     g_pool_alive_fn = config->pool_alive_fn;
     g_n_pools = n_pools;
+    g_eval_timeout = config->eval_timeout > 0 ? config->eval_timeout : 30;
 
     // Install signal handlers for graceful shutdown
     struct sigaction sa;

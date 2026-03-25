@@ -1,0 +1,8 @@
+# Ignore build artifacts to keep Docker context small
+.stack-work/
+.git/
+out/
+container/static-build/.stack-work/
+morloc-manager/.stack-work/
+*.hi
+*.o

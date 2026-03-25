@@ -1,19 +1,26 @@
 LABEL org.opencontainers.image.source=https://github.com/morloc-project/morloc
 LABEL org.opencontainers.image.description="A morloc container intended for interactive shell use"
-LABEL org.opencontainers.image.licenses=MIT
+LABEL org.opencontainers.image.licenses=Apache-2.0
 
-FROM docker.io/library/ubuntu:22.04
-COPY --from=ghcr.io/morloc-project/morloc/morloc-tiny:0.68.0 /bin/morloc /bin/morloc
+# Copy the morloc binary from the matching tiny image
+ARG MORLOC_VERSION=edge
+FROM ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION} AS morloc-bin
+
+FROM docker.io/library/ubuntu:24.04
+
+COPY --from=morloc-bin /bin/morloc /bin/morloc
 
 WORKDIR $HOME
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update
 
 # Set the timezone, this avoids hanging later on
-RUN DEBIAN_FRONTEND=noninteractive TZ=Antarctica/Troll apt-get -y install tzdata
+RUN TZ=Antarctica/Troll apt-get -y install tzdata
 
-RUN apt-get install -y r-base python3.10 libgsl-dev git pip python3-numpy
-RUN python3 -m pip install --upgrade pip setuptools
+RUN apt-get install -y r-base python3 python3-dev python3-pip python3-numpy libgsl-dev git
+RUN python3 -m pip install --break-system-packages --upgrade pip setuptools
 
 # Setup the morloc home
 RUN morloc init

@@ -1,17 +1,19 @@
 ###############################################################################
-# Stage 1: Build the morloc compiler 
-FROM docker.io/library/ubuntu:22.04 as morloc-build
+# Stage 1: Build the morloc compiler from local source
+FROM docker.io/library/ubuntu:24.04 AS morloc-build
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y git curl pkg-config libglib2.0-dev
 
-# Build morloc
+# Install stack
 RUN curl -SL https://get.haskellstack.org/ | sh
 
-# Get the latest morloc release
-RUN git clone https://github.com/morloc-project/morloc
+# Copy the local source tree (no git clone -- builds exactly this checkout)
+COPY . /morloc
 
 # Build morloc
-RUN cd morloc && stack install --no-run-tests
+RUN cd /morloc && stack install --no-run-tests
 
 
 ###############################################################################
@@ -19,11 +21,11 @@ RUN cd morloc && stack install --no-run-tests
 
 LABEL org.opencontainers.image.source=https://github.com/morloc-project/morloc
 LABEL org.opencontainers.image.description="Morloc executable in a minimal container"
-LABEL org.opencontainers.image.licenses=MIT
+LABEL org.opencontainers.image.licenses=Apache-2.0
 
-FROM docker.io/library/ubuntu:22.04
+FROM docker.io/library/ubuntu:24.04
 COPY --from=morloc-build /root/.local/bin/morloc /bin/morloc
 
 # morloc make builds C++ pools, so g++ is needed
-RUN apt-get update && apt-get install -y g++
-RUN apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends g++ \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*

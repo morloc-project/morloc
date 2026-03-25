@@ -1,0 +1,15 @@
+# Stack configuration for static morloc-manager builds.
+#
+# Used inside the Alpine Docker container with ghcup's GHC 9.6.7.
+# Same resolver as the main project for dependency consistency.
+
+resolver: lts-22.44
+
+packages:
+- morloc-manager
+
+system-ghc: true
+install-ghc: false
+
+build:
+  test: false

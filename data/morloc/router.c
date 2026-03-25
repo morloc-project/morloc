@@ -248,6 +248,7 @@ daemon_response_t* router_forward(
         case DAEMON_CALL:     json_write_string(jb, "call"); break;
         case DAEMON_DISCOVER: json_write_string(jb, "discover"); break;
         case DAEMON_HEALTH:   json_write_string(jb, "health"); break;
+        case DAEMON_EVAL:     json_write_string(jb, "eval"); break;
     }
 
     if (request->command) {
@@ -420,6 +421,32 @@ static daemon_request_t* router_http_to_request(
         }
     }
 
+    // POST /eval -- evaluate a morloc expression (router-level, no program target)
+    if (req->method == HTTP_POST && strcmp(req->path, "/eval") == 0) {
+        dreq->method = DAEMON_EVAL;
+        if (req->body && req->body_len > 0) {
+            const char* expr_key = strstr(req->body, "\"expr\"");
+            if (expr_key) {
+                expr_key += 6;
+                while (*expr_key == ' ' || *expr_key == ':' || *expr_key == '\t') expr_key++;
+                if (*expr_key == '"') {
+                    expr_key++;
+                    const char* expr_end = expr_key;
+                    while (*expr_end && *expr_end != '"') {
+                        if (*expr_end == '\\') { expr_end++; if (*expr_end) expr_end++; continue; }
+                        expr_end++;
+                    }
+                    dreq->expr = strndup(expr_key, (size_t)(expr_end - expr_key));
+                }
+            }
+        }
+        if (!dreq->expr) {
+            free(dreq);
+            RAISE("Missing 'expr' field in /eval request body")
+        }
+        return dreq;
+    }
+
     // POST /call/<program>/<command>
     if (req->method == HTTP_POST && strncmp(req->path, "/call/", 6) == 0) {
         const char* rest = req->path + 6;
@@ -487,6 +514,9 @@ static daemon_request_t* router_http_to_request(
 #define ROUTER_MAX_LISTENERS 3
 
 void router_run(daemon_config_t* config, router_t* router) {
+    // Set eval timeout for direct daemon_dispatch calls (DAEMON_EVAL)
+    daemon_set_eval_timeout(config->eval_timeout);
+
     struct sigaction sa;
     sa.sa_handler = router_signal_handler;
     sigemptyset(&sa.sa_mask);
@@ -618,6 +648,16 @@ void router_run(daemon_config_t* config, router_t* router) {
                     char* disco = router_build_discovery(router);
                     http_write_response(client_fd, 200, "application/json", disco, strlen(disco));
                     free(disco);
+                } else if (dreq->method == DAEMON_EVAL) {
+                    // Eval is handled locally by the router (not forwarded)
+                    // -- delegates to daemon_dispatch which handles DAEMON_EVAL
+                    daemon_response_t* resp = daemon_dispatch(NULL, dreq, NULL, NULL);
+                    size_t resp_len = 0;
+                    char* resp_json = daemon_serialize_response(resp, &resp_len);
+                    http_write_response(client_fd, resp->success ? 200 : 500,
+                                      "application/json", resp_json, resp_len);
+                    free(resp_json);
+                    daemon_free_response(resp);
                 }
                 daemon_free_request(dreq);
                 close(client_fd);

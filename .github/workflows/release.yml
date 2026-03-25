@@ -1,0 +1,149 @@
+# Release workflow: build containers + static morloc-manager binary
+#
+# Triggered by pushing a version tag:
+#   git tag v0.68.0
+#   git push origin v0.68.0
+#
+# This workflow:
+#   1. Runs the test suite
+#   2. Builds all container images (tiny, full, serve) from this checkout
+#   3. Pushes them to ghcr.io with version + edge tags
+#   4. Builds the static morloc-manager binary
+#   5. Creates a GitHub Release with the binary attached
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BASE: ghcr.io/morloc-project/morloc
+
+jobs:
+  # ---- Run tests first ----
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: ghcr.io/morloc-project/morloc/morloc-test:latest
+      options: --shm-size=4g
+    env:
+      HOME: /root
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add morloc to PATH
+        run: |
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/share/morloc/bin" >> $GITHUB_PATH
+      - name: Build morloc
+        run: stack --allow-different-user install --no-run-tests --local-bin-path=/usr/local/bin
+      - name: Initialize morloc
+        run: |
+          morloc init -f
+          morloc install internal root root-r root-py root-cpp bits bits-cpp bits-py char char-cpp char-py char-r map map-cpp map-py map-r math math-cpp math-py math-r random random-cpp random-py random-r set set-cpp set-py set-r shell shell-cpp shell-py text text-cpp text-py maybe maybe-r maybe-py maybe-cpp
+      - name: Run tests
+        run: stack test morloc:morloc-test
+        timeout-minutes: 10
+
+  # ---- Build and push container images ----
+  containers:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build tiny from local source (no git clone)
+      - name: Build and push tiny
+        run: |
+          docker build \
+            -t ${{ env.IMAGE_BASE }}/morloc-tiny:${{ steps.ver.outputs.version }} \
+            -t ${{ env.IMAGE_BASE }}/morloc-tiny:edge \
+            -f container/tiny/Dockerfile .
+          docker push ${{ env.IMAGE_BASE }}/morloc-tiny:${{ steps.ver.outputs.version }}
+          docker push ${{ env.IMAGE_BASE }}/morloc-tiny:edge
+
+      # Build full (copies morloc binary from the tiny image we just built)
+      - name: Build and push full
+        run: |
+          docker build \
+            --build-arg MORLOC_VERSION=${{ steps.ver.outputs.version }} \
+            -t ${{ env.IMAGE_BASE }}/morloc-full:${{ steps.ver.outputs.version }} \
+            -t ${{ env.IMAGE_BASE }}/morloc-full:edge \
+            container/full/
+          docker push ${{ env.IMAGE_BASE }}/morloc-full:${{ steps.ver.outputs.version }}
+          docker push ${{ env.IMAGE_BASE }}/morloc-full:edge
+
+      # Build serve (copies morloc binary from the tiny image we just built)
+      - name: Build and push serve
+        run: |
+          docker build \
+            --build-arg MORLOC_VERSION=${{ steps.ver.outputs.version }} \
+            -t ${{ env.IMAGE_BASE }}/morloc-serve:${{ steps.ver.outputs.version }} \
+            -t ${{ env.IMAGE_BASE }}/morloc-serve:edge \
+            -f container/serve/Dockerfile container/
+          docker push ${{ env.IMAGE_BASE }}/morloc-serve:${{ steps.ver.outputs.version }}
+          docker push ${{ env.IMAGE_BASE }}/morloc-serve:edge
+
+  # ---- Build static morloc-manager binary ----
+  static-binary:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build static morloc-manager
+        run: |
+          docker build -t morloc-static-build \
+            -f container/static-build/Dockerfile .
+          mkdir -p out
+          docker run --rm -v "$(pwd)/out:/out" morloc-static-build
+
+      - name: Verify static linking
+        run: |
+          file out/morloc-manager
+          file out/morloc-manager | grep -q "statically linked"
+
+      - name: Rename binary with platform suffix
+        run: mv out/morloc-manager out/morloc-manager-linux-x86_64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: morloc-manager-linux-x86_64
+          path: out/morloc-manager-linux-x86_64
+
+  # ---- Create GitHub Release ----
+  release:
+    needs: [containers, static-binary]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download static binary
+        uses: actions/download-artifact@v4
+        with:
+          name: morloc-manager-linux-x86_64
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: morloc-manager-linux-x86_64
+          generate_release_notes: true

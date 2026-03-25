@@ -22,13 +22,15 @@ typedef struct daemon_config_s {
     pool_check_fn_t pool_check_fn; // optional pool health check callback
     pool_alive_fn_t pool_alive_fn; // optional pool liveness check
     size_t n_pools;                // number of pools (for health check)
+    int eval_timeout;              // --eval-timeout <seconds> (0 = disabled, default 30)
 } daemon_config_t;
 
 // Request method
 typedef enum {
     DAEMON_CALL,
     DAEMON_DISCOVER,
-    DAEMON_HEALTH
+    DAEMON_HEALTH,
+    DAEMON_EVAL        // POST /eval -- compose and run a morloc expression
 } daemon_method_t;
 
 // Incoming request (parsed from JSON or HTTP)
@@ -37,6 +39,7 @@ typedef struct daemon_request_s {
     daemon_method_t method;
     char* command;         // command name (for CALL)
     char* args_json;       // raw JSON array of args (for CALL)
+    char* expr;            // morloc expression (for EVAL)
 } daemon_request_t;
 
 // Result of dispatching a request
@@ -69,6 +72,10 @@ char* daemon_serialize_response(daemon_response_t* response, size_t* out_len);
 
 // Build discovery JSON from manifest (caller must free result)
 char* daemon_build_discovery(manifest_t* manifest);
+
+// Set the eval timeout (seconds) for DAEMON_EVAL dispatch.
+// Must be called before daemon_dispatch() with DAEMON_EVAL requests.
+void daemon_set_eval_timeout(int timeout_sec);
 
 // Cleanup
 void daemon_free_request(daemon_request_t* req);

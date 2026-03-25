@@ -250,8 +250,9 @@ void* load_morloc_data_file(const char* path, uint8_t* data, size_t data_size, c
                 free(data);
                 return result;
             } else {
+                uint8_t fmt = header->command.data.format;
                 free(data);
-                RAISE("Unsupported packet format 0x%02x in file '%s'", header->command.data.format, path)
+                RAISE("Unsupported packet format 0x%02x in file '%s'", fmt, path)
             }
         }
     }
