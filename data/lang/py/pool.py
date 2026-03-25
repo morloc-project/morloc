@@ -153,6 +153,7 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
 
 
 def signal_handler(sig, frame):
+    global daemon
     shutdown_flag.value = True
     if _shutdown_wakeup_fd >= 0:
         try:
@@ -161,6 +162,7 @@ def signal_handler(sig, frame):
             pass
     if daemon is not None:
         morloc.close_daemon(daemon)
+        daemon = None  # prevent double-free on repeated SIGTERM
 
 
 def client_listener(job_fd, socket_path, tmpdir, shm_basename, shutdown_flag):

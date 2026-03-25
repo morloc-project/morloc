@@ -1789,6 +1789,16 @@ SEXP morloc_fork(void) {
     return ScalarInteger((int)pid);
 }
 
+// Immediately terminate the process without running any cleanup.
+// Must be used by forked worker children instead of R's quit().
+// R's quit() runs finalizers that try to free objects allocated by the
+// parent process, which corrupts the heap on glibc >= 2.39.
+SEXP morloc_exit(SEXP status_r) {
+    int status = INTEGER(status_r)[0];
+    _exit(status);
+    return R_NilValue; // unreachable
+}
+
 SEXP morloc_send_fd(SEXP pipe_fd_r, SEXP client_fd_r) {
     int pipe_fd = INTEGER(pipe_fd_r)[0];
     int client_fd = INTEGER(client_fd_r)[0];
@@ -2129,6 +2139,7 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_shinit", (DL_FUNC) &morloc_shinit, 3},
         {"morloc_socketpair", (DL_FUNC) &morloc_socketpair, 0},
         {"morloc_fork", (DL_FUNC) &morloc_fork, 0},
+        {"morloc_exit", (DL_FUNC) &morloc_exit, 1},
         {"morloc_send_fd", (DL_FUNC) &morloc_send_fd, 2},
         {"morloc_recv_fd", (DL_FUNC) &morloc_recv_fd, 1},
         {"morloc_kill", (DL_FUNC) &morloc_kill, 2},

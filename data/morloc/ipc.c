@@ -178,8 +178,10 @@ uint8_t* stream_from_client_wait(int client_fd, int pselect_timeout_us, int recv
     }
 
     uint8_t* data_ptr = result;
-    memcpy(data_ptr, buffer, recv_length);
-    data_ptr += recv_length;
+    // Don't copy more than packet_length bytes (recv may have read extra)
+    size_t copy_length = (size_t)recv_length < packet_length ? (size_t)recv_length : packet_length;
+    memcpy(data_ptr, buffer, copy_length);
+    data_ptr += copy_length;
     free(buffer);
 
     int attempts = 10;
@@ -208,7 +210,9 @@ uint8_t* stream_from_client_wait(int client_fd, int pselect_timeout_us, int recv
             if (ready <= 0) continue;
 
             if (FD_ISSET(client_fd, &read_fds)) {
-                recv_length = recv(client_fd, data_ptr, BUFFER_SIZE, 0);
+                size_t remaining = packet_length - (size_t)(data_ptr - result);
+                size_t recv_size = remaining < BUFFER_SIZE ? remaining : BUFFER_SIZE;
+                recv_length = recv(client_fd, data_ptr, recv_size, 0);
                 if (recv_length > 0) {
                     data_ptr += recv_length;
                     packet_received = true;

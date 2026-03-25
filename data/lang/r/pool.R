@@ -37,6 +37,7 @@ morloc_write_byte                    <- function(...){ .Call("morloc_write_byte"
 morloc_close_fd                      <- function(...){ .Call("morloc_close_fd",                      ...) }
 morloc_worker_loop_c                 <- function(...){ .Call("morloc_worker_loop_c",                 ...) }
 morloc_set_line_buffered             <- function(...){ .Call("morloc_set_line_buffered",             ...) }
+morloc_exit                          <- function(...){ .Call("morloc_exit",                          ...) }
 
 global_state <- list()
 
@@ -102,7 +103,7 @@ main <- function(socket_path, tmpdir, shm_basename) {
       morloc_close_socket(job_queue[1L])  # child doesn't write
       morloc_close_fd(wakeup[1L])         # child doesn't read wakeup pipe
       worker_loop(job_queue[2L])
-      quit(status = 0, save = "no")
+      morloc_exit(0L)
     }
     pids[i] <- pid
   }
@@ -145,7 +146,7 @@ main <- function(socket_path, tmpdir, shm_basename) {
         morloc_close_socket(job_queue[1L])
         morloc_close_fd(wakeup[1L])
         worker_loop(job_queue[2L])
-        quit(status = 0, save = "no")
+        morloc_exit(0L)
       }
       pids <- c(pids, pid)
       n_workers <- n_workers + 1L
@@ -172,3 +173,7 @@ tryCatch(
   },  error = function(e) {
       stop(paste("Pool failed:", e$message))
   })
+
+# Use _exit to avoid R cleanup which triggers heap corruption on glibc >= 2.39
+# (R's finalizers attempt to free objects in SHM-related C extensions)
+morloc_exit(0L)

@@ -386,6 +386,22 @@ static uint8_t* parse_cli_data_argument_singular(uint8_t* dest, char* arg, const
     return dest;
 }
 
+// Clear metadata for sub-allocations within a cursor-packed SHM block.
+//
+// In morloc's SHM model, to_voidstar (in every language) allocates a
+// SINGLE contiguous block via shmalloc and packs all variable-size data
+// (strings, nested arrays, record fields) into it using a cursor.
+// Sub-data pointers (e.g., arr->data for a string) point INTO this same
+// block -- they are NOT separate shmalloc allocations.
+//
+// This function zeroes metadata for nested structures so that the parent
+// block can be cleanly freed with a single shfree(). It must NOT call
+// shfree() on any sub-pointer, because those pointers were never
+// independently allocated.
+//
+// The actual deallocation is done by the caller:
+//   shfree_by_schema(ptr, schema);  // zero metadata
+//   shfree(ptr);                     // free the block
 bool shfree_by_schema(absptr_t ptr, const Schema* schema, ERRMSG){
     BOOL_RETURN_SETUP
 
@@ -394,20 +410,20 @@ bool shfree_by_schema(absptr_t ptr, const Schema* schema, ERRMSG){
         case MORLOC_ARRAY: {
             Array* arr = (Array*)ptr;
             if(arr->data > 0){
-              absptr_t arr_data = TRY(rel2abs, arr->data)
+              // Recurse into variable-width elements to zero their metadata.
+              // Do NOT shfree arr_data -- it is cursor-packed in the parent block.
               if(!schema_is_fixed_width(schema->parameters[0])){
+                absptr_t arr_data = TRY(rel2abs, arr->data)
                 for(size_t i = 0; i < arr->size; i++){
                   absptr_t element_ptr = (absptr_t)((char*)arr_data + i * schema->parameters[0]->width);
                   TRY(shfree_by_schema, element_ptr, schema->parameters[0])
                 }
               }
-              TRY(shfree, arr_data)
             }
           }
           break;
         case MORLOC_TUPLE:
         case MORLOC_MAP: {
-          // free every element
             for(size_t i = 0; i < schema->size; i++){
               absptr_t element_ptr = (absptr_t)((char*)ptr + schema->offsets[i]);
               TRY(shfree_by_schema, element_ptr, schema->parameters[i])
@@ -419,12 +435,11 @@ bool shfree_by_schema(absptr_t ptr, const Schema* schema, ERRMSG){
           // freed by the parent shfree
           break;
         default:
-          // fixed-size types will directly over-written
-          // no freeing needed
+          // fixed-size types: no sub-data to clear
           break;
     }
 
-    // zero location
+    // zero this node's metadata
     memset(ptr, 0, schema->width);
 
     return true;
