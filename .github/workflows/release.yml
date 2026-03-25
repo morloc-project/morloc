@@ -38,10 +38,11 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: |
-            ~/.stack
+            ~/.stack/snapshots
+            ~/.stack/setup-exe-cache
             .stack-work
-          key: stack-release-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
-          restore-keys: stack-release-
+          key: stack-deps-release-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
+          restore-keys: stack-deps-release-
       - name: Increase shared memory
         run: sudo mount -o remount,size=4G /dev/shm
       - name: Install system dependencies
@@ -50,13 +51,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             r-base-core python3 python3-dev python3-pip \
             python3-numpy g++ gcc make libgsl-dev
-          python3 -m pip install --break-system-packages --upgrade setuptools
+          python3 -m pip install --break-system-packages --upgrade setuptools pyarrow
+          LIBARROW_MINIMAL=true ARROW_S3=OFF ARROW_GCS=OFF \
+            Rscript -e 'install.packages("arrow", repos = "https://cloud.r-project.org")'
       - name: Add morloc to PATH
         run: |
           echo "$HOME/.local/bin" >> $GITHUB_PATH
           echo "$HOME/.local/share/morloc/bin" >> $GITHUB_PATH
       - name: Build morloc
-        run: stack install --no-run-tests
+        run: stack install --system-ghc --no-install-ghc --no-run-tests
       - name: Initialize morloc
         run: |
           morloc init -f
@@ -71,7 +74,7 @@ jobs:
             text text-cpp text-py \
             maybe maybe-r maybe-py maybe-cpp
       - name: Run tests
-        run: stack test morloc:morloc-test
+        run: stack test --system-ghc --no-install-ghc morloc:morloc-test
         timeout-minutes: 10
 
   # ---- Build and push container images ----

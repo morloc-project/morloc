@@ -20,15 +20,20 @@ jobs:
           enable-stack: true
           stack-version: 'latest'
 
-      - name: Cache Stack artifacts
+      # Cache Stack's compiled dependencies (NOT GHC itself — that's from
+      # haskell-actions/setup which has its own tool-cache). The snapshots
+      # directory holds compiled library packages; .stack-work holds
+      # project-local build artifacts.
+      - name: Cache Stack dependencies
         uses: actions/cache@v4
         with:
           path: |
-            ~/.stack
+            ~/.stack/snapshots
+            ~/.stack/setup-exe-cache
             .stack-work
-          key: stack-test-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
+          key: stack-deps-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
           restore-keys: |
-            stack-test-
+            stack-deps-
 
       - name: Increase shared memory (needed for morloc SHM pool tests)
         run: sudo mount -o remount,size=4G /dev/shm
@@ -46,7 +51,9 @@ jobs:
             gcc \
             make \
             libgsl-dev
-          python3 -m pip install --break-system-packages --upgrade setuptools
+          python3 -m pip install --break-system-packages --upgrade setuptools pyarrow
+          LIBARROW_MINIMAL=true ARROW_S3=OFF ARROW_GCS=OFF \
+            Rscript -e 'install.packages("arrow", repos = "https://cloud.r-project.org")'
 
       - name: Add morloc bin folders to PATH
         run: |
@@ -55,7 +62,7 @@ jobs:
 
       - name: Build Morloc
         run: |
-          stack install --no-run-tests
+          stack install --system-ghc --no-install-ghc --no-run-tests
 
       - name: Initialize morloc and install modules
         run: |
@@ -73,5 +80,5 @@ jobs:
 
       - name: Test morloc
         run: |
-          stack test morloc:morloc-test
+          stack test --system-ghc --no-install-ghc morloc:morloc-test
         timeout-minutes: 10
