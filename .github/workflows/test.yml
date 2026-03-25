@@ -52,6 +52,7 @@ jobs:
             make \
             libgsl-dev
           python3 -m pip install --break-system-packages --upgrade setuptools pyarrow
+          sudo chmod -R a+w /usr/local/lib/R/site-library
           LIBARROW_MINIMAL=true ARROW_S3=OFF ARROW_GCS=OFF \
             Rscript -e 'install.packages("arrow", repos = "https://cloud.r-project.org")'
 
