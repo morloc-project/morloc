@@ -52,14 +52,15 @@ jobs:
             make \
             libgsl-dev
           python3 -m pip install --break-system-packages --upgrade setuptools pyarrow
-          sudo chmod -R a+w /usr/local/lib/R/site-library
+          mkdir -p ~/R/library
           LIBARROW_MINIMAL=true ARROW_S3=OFF ARROW_GCS=OFF \
-            Rscript -e 'install.packages("arrow", repos = "https://cloud.r-project.org")'
+            Rscript -e 'install.packages("arrow", lib="~/R/library", repos = "https://cloud.r-project.org")'
 
       - name: Add morloc bin folders to PATH
         run: |
           echo "$HOME/.local/bin" >> $GITHUB_PATH
           echo "$HOME/.local/share/morloc/bin" >> $GITHUB_PATH
+          echo "R_LIBS_USER=$HOME/R/library" >> $GITHUB_ENV
 
       - name: Build Morloc
         run: |
