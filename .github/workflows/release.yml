@@ -52,6 +52,17 @@ jobs:
             r-base-core python3 python3-dev python3-pip \
             python3-numpy g++ gcc make libgsl-dev
           python3 -m pip install --break-system-packages --upgrade setuptools pyarrow
+
+      - name: Cache R packages
+        uses: actions/cache@v4
+        id: r-cache
+        with:
+          path: ~/R/library
+          key: r-lib-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install R packages
+        if: steps.r-cache.outputs.cache-hit != 'true'
+        run: |
           mkdir -p ~/R/library
           LIBARROW_MINIMAL=true ARROW_S3=OFF ARROW_GCS=OFF \
             Rscript -e 'install.packages("arrow", lib="~/R/library", repos = "https://cloud.r-project.org")'
