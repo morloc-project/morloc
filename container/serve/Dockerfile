@@ -28,16 +28,16 @@
 #   | Ubuntu 24.04 base                     |
 #   +---------------------------------------+
 
-LABEL org.opencontainers.image.source=https://github.com/morloc-project/morloc
-LABEL org.opencontainers.image.description="Minimal morloc runtime for serving frozen programs"
-LABEL org.opencontainers.image.licenses=Apache-2.0
-
 # Stage 1: get the morloc binary from the tiny image
 ARG MORLOC_VERSION=edge
 FROM ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION} AS morloc-bin
 
 # Stage 2: build the serve image
 FROM docker.io/library/ubuntu:24.04
+
+LABEL org.opencontainers.image.source=https://github.com/morloc-project/morloc
+LABEL org.opencontainers.image.description="Minimal morloc runtime for serving frozen programs"
+LABEL org.opencontainers.image.licenses=Apache-2.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 

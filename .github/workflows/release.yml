@@ -187,7 +187,7 @@ jobs:
         if: matrix.method == 'native'
         uses: haskell-actions/setup@v2
         with:
-          ghc-version: '9.6.7'
+          ghc-version: '9.10.3'
           enable-stack: true
           stack-version: 'latest'
 
@@ -196,15 +196,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.stack
-          key: stack-macos-${{ hashFiles('morloc-manager/package.yaml') }}
-          restore-keys: stack-macos-
+          key: stack-macos-910-${{ hashFiles('morloc-manager/package.yaml') }}
+          restore-keys: stack-macos-910-
 
       - name: Build binary (macOS)
         if: matrix.method == 'native'
         run: |
-          stack build morloc-manager --system-ghc --no-install-ghc --no-run-tests
+          stack build morloc-manager --stack-yaml container/static-build/stack-static.yaml --system-ghc --no-install-ghc --no-run-tests
           mkdir -p out
-          cp "$(stack --system-ghc path --local-install-root)/bin/morloc-manager" out/morloc-manager
+          cp "$(stack --stack-yaml container/static-build/stack-static.yaml --system-ghc path --local-install-root)/bin/morloc-manager" out/morloc-manager
           strip out/morloc-manager
 
       # ---- Common: rename and upload ----

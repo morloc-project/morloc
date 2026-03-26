@@ -1,12 +1,12 @@
-LABEL org.opencontainers.image.source=https://github.com/morloc-project/morloc
-LABEL org.opencontainers.image.description="A morloc container intended for interactive shell use"
-LABEL org.opencontainers.image.licenses=Apache-2.0
-
 # Copy the morloc binary from the matching tiny image
 ARG MORLOC_VERSION=edge
 FROM ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION} AS morloc-bin
 
 FROM docker.io/library/ubuntu:24.04
+
+LABEL org.opencontainers.image.source=https://github.com/morloc-project/morloc
+LABEL org.opencontainers.image.description="A morloc container intended for interactive shell use"
+LABEL org.opencontainers.image.licenses=Apache-2.0
 
 COPY --from=morloc-bin /bin/morloc /bin/morloc
 

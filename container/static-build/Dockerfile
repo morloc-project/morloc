@@ -3,30 +3,19 @@
 # This image provides GHC built against musl with static archives for all
 # boot libraries. Used by Pandoc and Stack's own release builds.
 #
+# Uses GHC 9.10 (not the main project's 9.6) because 9.10 is the first
+# version with reliable static linking on aarch64/musl.
+#
 # Build:
 #   docker build -t morloc-static-build -f container/static-build/Dockerfile .
 #   docker run --rm -v $(pwd)/out:/out morloc-static-build
 #
 # Output: ./out/morloc-manager (fully static ELF binary)
 
-FROM docker.io/benz0li/ghc-musl:9.6.7 AS builder
+FROM docker.io/benz0li/ghc-musl:9.10.3 AS builder
 
 # Ensure static C libraries are present (gmp needed by GHC bignum backend)
 RUN apk add --no-cache gmp-static zlib-static
-
-# Workaround: on aarch64, GHC passes -lHSfoo-ghc9.6.7 to the linker but
-# the static .a files lack the -ghc9.6.7 suffix (only the .so files have it).
-# Create symlinks so the linker can find them.
-RUN ARCH=$(uname -m) \
-    && LIBDIR=/usr/local/lib/ghc-9.6.7/lib/${ARCH}-linux-ghc-9.6.7 \
-    && for pkg_dir in "$LIBDIR"/*/; do \
-         for a in "$pkg_dir"libHS*.a; do \
-           [ -f "$a" ] || continue; \
-           base=$(basename "$a" .a); \
-           ln -sf "$a" "$LIBDIR/${base}-ghc9.6.7.a"; \
-         done; \
-       done \
-    && echo "Created static lib symlinks in $LIBDIR"
 
 WORKDIR /build
 
