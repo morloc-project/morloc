@@ -14,13 +14,19 @@ FROM docker.io/benz0li/ghc-musl:9.6.7 AS builder
 # Ensure static C libraries are present (gmp needed by GHC bignum backend)
 RUN apk add --no-cache gmp-static zlib-static
 
-# Diagnostic: dump arch, GHC lib layout, and verify static libs exist
-RUN echo "=== Architecture: $(uname -m) ===" \
-    && echo "=== GHC libdir: $(ghc --print-libdir) ===" \
-    && echo "=== ghc-prim library-dirs: $(ghc-pkg field ghc-prim library-dirs --simple-output) ===" \
-    && echo "=== ghc-bignum library-dirs: $(ghc-pkg field ghc-bignum library-dirs --simple-output) ===" \
-    && find "$(ghc --print-libdir)" -name "libHSghc-prim*" -o -name "libHSghc-bignum*" \
-    && echo "=== Static lib check OK ==="
+# Workaround: on aarch64, GHC passes -lHSfoo-ghc9.6.7 to the linker but
+# the static .a files lack the -ghc9.6.7 suffix (only the .so files have it).
+# Create symlinks so the linker can find them.
+RUN ARCH=$(uname -m) \
+    && LIBDIR=/usr/local/lib/ghc-9.6.7/lib/${ARCH}-linux-ghc-9.6.7 \
+    && for pkg_dir in "$LIBDIR"/*/; do \
+         for a in "$pkg_dir"libHS*.a; do \
+           [ -f "$a" ] || continue; \
+           base=$(basename "$a" .a); \
+           ln -sf "$a" "$LIBDIR/${base}-ghc9.6.7.a"; \
+         done; \
+       done \
+    && echo "Created static lib symlinks in $LIBDIR"
 
 WORKDIR /build
 
