@@ -1,10 +1,8 @@
 # Static build of morloc-manager using benz0li/ghc-musl.
 #
-# This image provides GHC built against musl with static archives for all
-# boot libraries. Used by Pandoc and Stack's own release builds.
-#
-# Uses GHC 9.10 (not the main project's 9.6) because 9.10 is the first
-# version with reliable static linking on aarch64/musl.
+# Uses Cabal with --enable-executable-static (same approach as Pandoc).
+# This correctly handles static library resolution on both x86_64 and aarch64,
+# unlike Stack's -optl-static which has library naming issues on aarch64 musl.
 #
 # Build:
 #   docker build -t morloc-static-build -f container/static-build/Dockerfile .
@@ -14,34 +12,36 @@
 
 FROM docker.io/benz0li/ghc-musl:9.10.3 AS builder
 
-# Ensure static C libraries are present (gmp needed by GHC bignum backend)
-RUN apk add --no-cache gmp-static zlib-static
+# Ensure static C libraries and hpack are present
+RUN apk add --no-cache gmp-static zlib-static \
+    && cabal update \
+    && cabal install hpack --install-method=copy --installdir=/usr/local/bin
 
 WORKDIR /build
 
-# Copy stack.yaml and dependency spec for layer caching
-COPY container/static-build/stack-static.yaml /build/stack.yaml
+# Copy dependency spec first for layer caching
 COPY morloc-manager/package.yaml ./morloc-manager/
-RUN rm -f ./morloc-manager/morloc-manager.cabal
-
-# Build dependencies (cached layer)
-RUN stack build --only-dependencies morloc-manager \
-    --system-ghc --no-install-ghc \
-    --ghc-options='-split-sections -optc-Os'
-
-# Copy source and LICENSE (package.yaml references ../LICENSE)
-COPY morloc-manager/ ./morloc-manager/
 COPY LICENSE ./LICENSE
-RUN rm -f ./morloc-manager/morloc-manager.cabal
+
+# Generate .cabal file from package.yaml and build dependencies
+RUN cd morloc-manager \
+    && hpack \
+    && cabal build --only-dependencies \
+       --enable-executable-static \
+       --ghc-options='-split-sections -optc-Os -optl=-pthread'
+
+# Copy full source
+COPY morloc-manager/ ./morloc-manager/
+RUN cd morloc-manager && hpack
 
 # Build with static linking
-RUN stack build morloc-manager \
-    --system-ghc --no-install-ghc \
-    --ghc-options='-split-sections -optc-Os -optl-static -optl-pthread' \
-    --no-run-tests
+RUN cd morloc-manager \
+    && cabal build \
+       --enable-executable-static \
+       --ghc-options='-split-sections -optc-Os -optl=-pthread'
 
 # Copy, verify, strip
-RUN cp "$(stack --system-ghc path --local-install-root)/bin/morloc-manager" /morloc-manager
+RUN cp "$(cabal -v0 list-bin --project-dir=morloc-manager morloc-manager)" /morloc-manager
 RUN file /morloc-manager
 RUN strip /morloc-manager && ls -lh /morloc-manager
 

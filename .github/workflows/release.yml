@@ -182,30 +182,34 @@ jobs:
           file out/morloc-manager
           file out/morloc-manager | grep -q "statically linked"
 
-      # ---- macOS (native stack build) ----
+      # ---- macOS (native cabal build) ----
       - name: Setup Haskell (macOS)
         if: matrix.method == 'native'
         uses: haskell-actions/setup@v2
         with:
           ghc-version: '9.10.3'
-          enable-stack: true
-          stack-version: 'latest'
+          cabal-version: 'latest'
 
-      - name: Cache Stack artifacts (macOS)
+      - name: Cache Cabal artifacts (macOS)
         if: matrix.method == 'native'
         uses: actions/cache@v4
         with:
-          path: ~/.stack
-          key: stack-macos-910-${{ hashFiles('morloc-manager/package.yaml') }}
-          restore-keys: stack-macos-910-
+          path: ~/.cabal
+          key: cabal-macos-910-${{ hashFiles('morloc-manager/package.yaml') }}
+          restore-keys: cabal-macos-910-
 
       - name: Build binary (macOS)
         if: matrix.method == 'native'
         run: |
-          stack build morloc-manager --stack-yaml container/static-build/stack-static.yaml --system-ghc --no-install-ghc --no-run-tests
-          mkdir -p out
-          cp "$(stack --stack-yaml container/static-build/stack-static.yaml --system-ghc path --local-install-root)/bin/morloc-manager" out/morloc-manager
-          strip out/morloc-manager
+          cabal update
+          cabal install hpack --install-method=copy --installdir=$HOME/.local/bin
+          export PATH=$HOME/.local/bin:$PATH
+          cd morloc-manager
+          hpack
+          cabal build --ghc-options='-O2'
+          mkdir -p ../out
+          cp "$(cabal -v0 list-bin morloc-manager)" ../out/morloc-manager
+          strip ../out/morloc-manager
 
       # ---- Common: rename and upload ----
       - name: Rename binary
