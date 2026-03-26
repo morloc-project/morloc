@@ -55,6 +55,7 @@ module MorlocManager.Environment
 
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
+import Data.List (nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word8)
@@ -172,19 +173,34 @@ activateEnvironment scope ver envName = do
 
 -- | List all environments available for a version.
 --
--- Scans the environments directory for @.json@ config files.
--- The @"base"@ environment is always implicitly available.
+-- Scans both the environments config directory (for built environments with
+-- @.json@ config files) and the deps directory (for initialized-but-not-yet-built
+-- environments with @.Dockerfile@ files). The @"base"@ environment is always
+-- implicitly available.
 listEnvironments :: Scope -> Version -> IO [String]
 listEnvironments scope ver = do
+  -- Built environments (have .json config)
   dir <- versionConfigDir scope ver
   let envDir = dir </> "environments"
-  exists <- doesDirectoryExist envDir
-  if not exists
-    then pure ["base"]
-    else do
-      entries <- listDirectory envDir
-      let envNames = [ takeBaseName e | e <- entries, hasSuffix ".json" e ]
-      pure ("base" : envNames)
+  builtEnvs <- do
+    exists <- doesDirectoryExist envDir
+    if not exists
+      then pure []
+      else do
+        entries <- listDirectory envDir
+        pure [ takeBaseName e | e <- entries, hasSuffix ".json" e ]
+  -- Initialized environments (have .Dockerfile in deps dir)
+  deps <- depsDir scope
+  initEnvs <- do
+    exists <- doesDirectoryExist deps
+    if not exists
+      then pure []
+      else do
+        entries <- listDirectory deps
+        pure [ takeBaseName e | e <- entries, hasSuffix ".Dockerfile" e ]
+  -- Merge, deduplicate, keep order: base first, then sorted unique names
+  let allEnvs = nub (builtEnvs <> initEnvs)
+  pure ("base" : allEnvs)
   where
     hasSuffix suffix str = drop (length str - length suffix) str == suffix
 

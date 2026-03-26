@@ -33,8 +33,10 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import Options.Applicative
+import Control.Monad (when)
 import System.Directory (getCurrentDirectory, getHomeDirectory)
 import System.Exit (exitWith, ExitCode(..), exitFailure)
+import System.FilePath (normalise, addTrailingPathSeparator)
 import System.IO (Handle, hPutStrLn, hFlush, hIsTerminalDevice, stdin, stdout, stderr)
 
 import MorlocManager.Types
@@ -153,8 +155,8 @@ globalOptsParser = GlobalOpts
 -- Defaults to Local when neither is specified.
 scopeFlags :: Parser (Maybe Scope)
 scopeFlags =
-      (Just System <$ switch (long "system" <> help "Use system-wide installation"))
-  <|> (Just Local  <$ switch (long "local"  <> help "Use per-user installation (default)"))
+      (flag' (Just System) (long "system" <> help "Use system-wide installation"))
+  <|> (flag' (Just Local)  (long "local"  <> help "Use per-user installation (default)"))
   <|> pure Nothing
 
 commandParser :: Parser Command
@@ -435,6 +437,9 @@ dispatch mEngine verbose cmd = case cmd of
 
   -- ---- info ----
   CmdInfo _mScope -> do
+    case mEngine of
+      Just _ -> hPutStrLn stderr "Warning: --engine flag has no effect on the info command."
+      Nothing -> pure ()
     mCfg <- readActiveConfig
     seMode <- detectSELinux
     let activeScope = maybe Local configActiveScope mCfg
@@ -549,15 +554,24 @@ runInContainer engine verbose shell args = do
               isInit = case args of
                 ("morloc":"init":_) -> True
                 _                   -> False
-          if not isInit && not (null suffix)
+          let isHomeDir = addTrailingPathSeparator (normalise cwd)
+                       == addTrailingPathSeparator (normalise home)
+          if not isInit && not (null suffix) && not isHomeDir
             then do
               validation <- validateMountPath cwd
               case validation of
                 Left err -> pure (Left err)
                 Right () -> runWithConfig engine verbose image vDataDir home cwd
                               suffix shell args isInit (vcShmSize vc) extraFlags
-            else runWithConfig engine verbose image vDataDir home cwd
-                   suffix shell args isInit (vcShmSize vc) extraFlags
+            else do
+              -- When running from home with SELinux, skip the work mount
+              -- (home is unsafe to relabel with :z) and use home as workDir
+              let cwd' = if isHomeDir && not (null suffix) then home else cwd
+                  skipWorkMount = isHomeDir && not (null suffix) && not isInit
+              when (skipWorkMount) $
+                hPutStrLn stderr "Warning: running from home directory with SELinux; working directory mount skipped."
+              runWithConfig engine verbose image vDataDir home cwd'
+                   suffix shell args (isInit || skipWorkMount) (vcShmSize vc) extraFlags
 
 -- | Resolve which container image to use, considering custom environments.
 resolveImage :: Scope -> Version -> VersionConfig -> Maybe Config -> IO Text
