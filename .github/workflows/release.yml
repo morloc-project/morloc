@@ -140,6 +140,7 @@ jobs:
     needs: test
     timeout-minutes: 90
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -207,6 +208,7 @@ jobs:
 
   # ---- Create GitHub Release ----
   release:
+    if: always() && needs.containers.result == 'success'
     needs: [containers, static-binary]
     runs-on: ubuntu-latest
     permissions:

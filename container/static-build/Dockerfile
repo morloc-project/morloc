@@ -11,6 +11,17 @@
 
 FROM docker.io/benz0li/ghc-musl:9.6.7 AS builder
 
+# Ensure static C libraries are present (gmp needed by GHC bignum backend)
+RUN apk add --no-cache gmp-static zlib-static
+
+# Diagnostic: dump arch, GHC lib layout, and verify static libs exist
+RUN echo "=== Architecture: $(uname -m) ===" \
+    && echo "=== GHC libdir: $(ghc --print-libdir) ===" \
+    && echo "=== ghc-prim library-dirs: $(ghc-pkg field ghc-prim library-dirs --simple-output) ===" \
+    && echo "=== ghc-bignum library-dirs: $(ghc-pkg field ghc-bignum library-dirs --simple-output) ===" \
+    && find "$(ghc --print-libdir)" -name "libHSghc-prim*" -o -name "libHSghc-bignum*" \
+    && echo "=== Static lib check OK ==="
+
 WORKDIR /build
 
 # Copy stack.yaml and dependency spec for layer caching
@@ -21,8 +32,7 @@ RUN rm -f ./morloc-manager/morloc-manager.cabal
 # Build dependencies (cached layer)
 RUN stack build --only-dependencies morloc-manager \
     --system-ghc --no-install-ghc \
-    --ghc-options='-split-sections -optc-Os' \
-    2>&1 || true
+    --ghc-options='-split-sections -optc-Os'
 
 # Copy source and LICENSE (package.yaml references ../LICENSE)
 COPY morloc-manager/ ./morloc-manager/
