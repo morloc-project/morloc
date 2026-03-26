@@ -80,16 +80,7 @@ jobs:
       - name: Initialize morloc and install modules
         run: |
           morloc init -f
-          morloc install internal root root-r root-py root-cpp \
-            bits bits-cpp bits-py \
-            char char-cpp char-py char-r \
-            map map-cpp map-py map-r \
-            math math-cpp math-py math-r \
-            random random-cpp random-py random-r \
-            set set-cpp set-py set-r \
-            shell shell-cpp shell-py \
-            text text-cpp text-py \
-            maybe maybe-r maybe-py maybe-cpp
+          morloc install stdlib
 
       - name: Test morloc
         run: |
