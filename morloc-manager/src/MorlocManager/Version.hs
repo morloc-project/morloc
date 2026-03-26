@@ -35,6 +35,7 @@ host-side data directory that persists morloc state across container runs.
 module MorlocManager.Version
   ( -- * Installation
     installVersion
+  , installVersion'
   , installLatest
     -- * Selection
   , selectVersion
@@ -54,6 +55,7 @@ import System.Directory
   , listDirectory
   , removeDirectoryRecursive
   )
+import Control.Exception (IOException, try)
 import System.Exit (ExitCode(..))
 import System.IO (hPutStrLn, stderr, hFlush)
 import System.FilePath ((</>))
@@ -62,32 +64,53 @@ import System.Process (readProcessWithExitCode)
 import MorlocManager.Types
 import MorlocManager.Config
 import MorlocManager.Container
+import System.Posix.Files (setFileMode)
+import System.Posix.Types (FileMode)
 
 -- | Install a morloc version: pull the container image and create the
 -- host-side data directory structure.
 --
--- If the version is already installed, this is a no-op unless the image
--- needs to be re-pulled.
+-- If the version is already installed (config exists and image is present),
+-- prints a message and returns success without re-pulling.
 installVersion :: ContainerEngine -> Scope -> Version -> IO (Either ManagerError ())
-installVersion engine scope ver = do
+installVersion = installVersion' False
+
+-- | Install a morloc version with optional force flag to bypass idempotency check.
+installVersion' :: Bool -> ContainerEngine -> Scope -> Version -> IO (Either ManagerError ())
+installVersion' force engine scope ver = do
   let imageRef = "ghcr.io/morloc-project/morloc/morloc-full:" <> showVersion ver
-  -- Pull image
-  (code, _stdout, stderr') <- containerPull engine imageRef
-  case code of
-    ExitFailure n -> pure (Left (EngineError engine n stderr'))
-    ExitSuccess -> do
-      -- Create version data directories
-      vDataDir <- versionDataDir scope ver
-      mapM_ (\d -> createDirectoryIfMissing True (vDataDir </> d))
-        ["bin", "lib", "fdb", "include", "opt", "tmp"]
-      -- Write version config
-      let vc = VersionConfig
-            { vcImage   = imageRef
-            , vcHostDir = vDataDir
-            , vcShmSize = "512m"
-            , vcEngine  = engine
-            }
-      writeVersionConfig scope ver vc
+  -- Check if already installed (skip check when force is set)
+  alreadyInstalled <- if force then pure False else isVersionInstalled engine scope ver imageRef
+  if alreadyInstalled
+    then do
+      hPutStrLn stderr $ "Version " <> Text.unpack (showVersion ver) <> " is already installed."
+      hFlush stderr
+      pure (Right ())
+    else do
+      -- Pull image
+      (code, _stdout, stderr') <- containerPull engine imageRef
+      case code of
+        ExitFailure n -> pure (Left (EngineError engine n stderr'))
+        ExitSuccess -> do
+          -- Create version data directories
+          vDataDir <- versionDataDir scope ver
+          mapM_ (\d -> createDirectoryIfMissing True (vDataDir </> d))
+            ["bin", "lib", "fdb", "include", "opt", "tmp"]
+          -- For system scope, make data dirs group-writable (setgid + 0o775)
+          -- so non-root users can install modules and build programs
+          case scope of
+            System -> do
+              let dirs = vDataDir : map (vDataDir </>) ["bin", "lib", "fdb", "include", "opt", "tmp"]
+              mapM_ (bestEffortChmod' 0o2775) dirs
+            Local -> pure ()
+          -- Write version config
+          let vc = VersionConfig
+                { vcImage   = imageRef
+                , vcHostDir = vDataDir
+                , vcShmSize = "512m"
+                , vcEngine  = engine
+                }
+          writeVersionConfig scope ver vc
 
 -- | Install the latest morloc version using the "edge" container tag.
 --
@@ -242,3 +265,27 @@ uninstallVersion scope ver = do
         else pure ()
       hFlush stderr
       pure (Right ())
+
+-- | Check if a version is already installed by verifying both the config
+-- file exists and the container image is present.
+isVersionInstalled :: ContainerEngine -> Scope -> Version -> Text -> IO Bool
+isVersionInstalled engine scope ver _imageRef = do
+  path <- versionConfigPath scope ver
+  configExists <- doesFileExist path
+  if not configExists
+    then pure False
+    else do
+      -- Verify the image is also present
+      let exe = engineExecutable engine
+      (code, _, _) <- readProcessWithExitCode exe
+        ["image", "inspect", Text.unpack _imageRef] ""
+      pure (code == ExitSuccess)
+
+-- | Best-effort chmod. Silently ignores failures (e.g., non-root user
+-- cannot change permissions on files they don't own).
+bestEffortChmod' :: FileMode -> FilePath -> IO ()
+bestEffortChmod' mode path = do
+  result <- try (setFileMode path mode) :: IO (Either IOException ())
+  case result of
+    Right () -> pure ()
+    Left _   -> pure ()

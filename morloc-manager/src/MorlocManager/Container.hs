@@ -300,16 +300,24 @@ buildRunArgs _engine extraEngineFlags cfg = concat
 --
 -- Podman rootless: @--userns=keep-id@ maps the container's root user to
 -- the invoking user, so files written inside the container are owned by
--- the host user (not root).
+-- the host user (not root). Skipped when running as root (euid 0) because
+-- rootful podman does not support @--userns=keep-id@.
 --
 -- Docker: @--user UID:GID@ achieves the same effect so files created
--- inside the container are owned by the invoking user.
+-- inside the container are owned by the invoking user. Skipped when
+-- running as root (UID 0 mapping is the default).
 engineSpecificRunFlagsIO :: ContainerEngine -> IO [String]
-engineSpecificRunFlagsIO Podman = pure ["--userns=keep-id"]
+engineSpecificRunFlagsIO Podman = do
+  uid <- getEffectiveUserID
+  if uid == 0
+    then pure []  -- rootful podman: --userns=keep-id is unsupported
+    else pure ["--userns=keep-id"]
 engineSpecificRunFlagsIO Docker = do
   uid <- getEffectiveUserID
   gid <- getEffectiveGroupID
-  pure ["--user", show uid <> ":" <> show gid]
+  if uid == 0
+    then pure []  -- running as root: no user mapping needed
+    else pure ["--user", show uid <> ":" <> show gid]
 
 -- | Pure version for testing. Uses static Podman flags; Docker returns empty
 -- (since UID/GID require IO). Real code uses 'engineSpecificRunFlagsIO'.

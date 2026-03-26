@@ -399,11 +399,16 @@ data ManagerError
     -- ^ Named environment does not exist
   | InstallError String
     -- ^ Error during version installation (pull, init, version detection)
+  | UninstallError String
+    -- ^ Error during version uninstallation
+  | EnvError String
+    -- ^ Error during environment management
   | FreezeError String
     -- ^ Error during state freeze (tar, checksum, etc.)
   | SELinuxError String
     -- ^ SELinux-related error (unsafe path, relabeling failure)
   deriving (Show, Eq)
+
 
 -- | Render a 'ManagerError' as a user-facing error message.
 renderError :: ManagerError -> Text
@@ -430,6 +435,10 @@ renderError (EnvironmentNotFound name) =
   "Environment not found: " <> name
 renderError (InstallError msg) =
   "Install failed: " <> Text.pack msg
+renderError (UninstallError msg) =
+  "Uninstall failed: " <> Text.pack msg
+renderError (EnvError msg) =
+  "Environment error: " <> Text.pack msg
 renderError (FreezeError msg) =
   "Freeze failed: " <> Text.pack msg
 renderError (SELinuxError msg) =

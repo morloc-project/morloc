@@ -14,7 +14,7 @@ the appropriate subcommand handler.
   morloc-manager [--engine docker|podman] [-v|--verbose] \<subcommand\>
 
   Subcommands:
-    install [--no-init] [--system|--local] [VERSION]
+    install [--no-init] [--force] [--system|--local] [VERSION]
     select  [--system|--local] \<VERSION\>
     uninstall [--system|--local] [--all] VERSION...
     run     [--system|--local] [--shell] [--] COMMAND...
@@ -24,6 +24,8 @@ the appropriate subcommand handler.
     freeze  [--system|--local] [-o PATH]
     serve-image --from TARBALL --tag TAG [--base IMAGE]
     serve   IMAGE [-p HOST:CONTAINER]
+    version
+    list    [--system|--local]               (alias for info)
 @
 -}
 
@@ -46,14 +48,12 @@ import MorlocManager.Config
   , readEnvironmentConfig
   , configDir
   , configPath
-  , versionConfigPath
   , dataDir
   , versionDataDir
   , readFlagsFile
   , globalFlagsPath
   , envFlagsPath
   , findInstalledScope
-  , fixSystemPerms
   , writeConfig
   )
 import MorlocManager.Container
@@ -66,7 +66,7 @@ import MorlocManager.Freeze (freeze)
 import MorlocManager.Serve (buildServeImage, runServeContainer)
 import MorlocManager.SELinux (SELinuxMode(..), detectSELinux, volumeSuffix, validateMountPath)
 import MorlocManager.Version
-  ( installVersion
+  ( installVersion'
   , installLatest
   , selectVersion
   , uninstallVersion
@@ -94,8 +94,8 @@ data GlobalOpts = GlobalOpts
 
 -- | Parsed subcommand with its arguments.
 data Command
-  = CmdInstall (Maybe Scope) (Maybe String) Bool
-    -- ^ Install a version (scope, version, noInit)
+  = CmdInstall (Maybe Scope) (Maybe String) Bool Bool
+    -- ^ Install a version (scope, version, noInit, force)
   | CmdSelect (Maybe Scope) String
     -- ^ Select an installed version as active
   | CmdUninstall (Maybe Scope) Bool [String]
@@ -114,6 +114,8 @@ data Command
     -- ^ Build a serve image (tarball, tag, base image override)
   | CmdServe Text [(Int,Int)]
     -- ^ Run a serve container (image tag, port mappings)
+  | CmdVersion
+    -- ^ Print morloc-manager version
   deriving (Show)
 
 -- | Sub-actions for the @env@ subcommand.
@@ -133,15 +135,11 @@ data EnvAction
 -- ======================================================================
 
 optsParser :: ParserInfo (GlobalOpts, Command)
-optsParser = info (helper <*> versionFlag <*> ((,) <$> globalOptsParser <*> commandParser))
+optsParser = info (helper <*> ((,) <$> globalOptsParser <*> commandParser))
   ( fullDesc
   <> header "morloc-manager - container lifecycle manager for Morloc"
   <> progDesc "Manage containerized Morloc installations, dependency layers, and deployments"
   )
-
-versionFlag :: Parser (a -> a)
-versionFlag = infoOption "morloc-manager v0.11.0"
-  ( long "version" <> help "Print version and exit" )
 
 globalOptsParser :: Parser GlobalOpts
 globalOptsParser = GlobalOpts
@@ -174,6 +172,8 @@ commandParser = hsubparser
       (progDesc "Manage custom dependency environments"))
   <> command "info" (info (CmdInfo <$> scopeFlags)
       (progDesc "Show installed versions and current configuration"))
+  <> command "list" (info (CmdInfo <$> scopeFlags)
+      (progDesc "Show installed versions and current configuration (alias for info)"))
   <> command "build" (info buildParser
       (progDesc "Start a mutable builder container"))
   <> command "freeze" (info freezeParser
@@ -182,6 +182,8 @@ commandParser = hsubparser
       (progDesc "Build an immutable serve image from frozen state"))
   <> command "serve" (info serveParser
       (progDesc "Run a serve container with the nexus router"))
+  <> command "version" (info (pure CmdVersion)
+      (progDesc "Print morloc-manager version"))
   )
 
 installParser :: Parser Command
@@ -189,6 +191,7 @@ installParser = CmdInstall
   <$> scopeFlags
   <*> optional (argument str (metavar "VERSION" <> help "Version to install (default: latest)"))
   <*> switch (long "no-init" <> help "Skip morloc init after install")
+  <*> switch (long "force" <> short 'f' <> help "Force re-install even if version is already installed")
 
 selectParser :: Parser Command
 selectParser = CmdSelect
@@ -280,16 +283,21 @@ main = do
         EngineError _ n _ -> exitWith (ExitFailure n)
         _                 -> exitWith (ExitFailure 1)
 
--- | Resolve the container engine, failing if unavailable.
+-- | Resolve the container engine: CLI flag > config file > auto-detect.
 requireEngine :: Maybe ContainerEngine -> IO ContainerEngine
 requireEngine (Just e) = pure e
 requireEngine Nothing = do
-  result <- detectEngine
-  case result of
-    Right e  -> pure e
-    Left err -> do
-      TextIO.hPutStrLn stderr (renderError err)
-      exitFailure
+  -- Check if engine is persisted in config
+  mCfg <- readActiveConfig
+  case mCfg of
+    Just cfg -> pure (configEngine cfg)
+    Nothing -> do
+      result <- detectEngine
+      case result of
+        Right e  -> pure e
+        Left err -> do
+          TextIO.hPutStrLn stderr (renderError err)
+          exitFailure
 
 -- | Resolve scope. Defaults to Local when not specified.
 resolveScope :: Maybe Scope -> Scope
@@ -301,7 +309,7 @@ dispatch :: Maybe ContainerEngine -> Bool -> Command -> IO (Either ManagerError 
 dispatch mEngine verbose cmd = case cmd of
 
   -- ---- install ----
-  CmdInstall mScope mVerStr noInit -> do
+  CmdInstall mScope mVerStr noInit force -> do
     engine <- requireEngine mEngine
     let scope = resolveScope mScope
     -- Install the version
@@ -311,7 +319,7 @@ dispatch mEngine verbose cmd = case cmd of
       Just verStr -> case parseVersion verStr of
         Nothing  -> pure (Left (InvalidVersion verStr))
         Just ver -> do
-          r <- installVersion engine scope ver
+          r <- installVersion' force engine scope ver
           case r of
             Left err -> pure (Left err)
             Right () -> pure (Right ver)
@@ -319,12 +327,6 @@ dispatch mEngine verbose cmd = case cmd of
       Left err -> pure (Left err)
       Right ver -> do
         info' stderr $ "Installed version " <> Text.unpack (showVersion ver)
-        -- Fix system permissions if needed
-        whenIO (scope == System) $ do
-          cfgP <- configPath scope
-          fixSystemPerms cfgP
-          vcP <- versionConfigPath scope ver
-          fixSystemPerms vcP
         -- Auto-select if no version is currently active
         activeResult <- resolveActiveVersion
         case activeResult of
@@ -332,6 +334,15 @@ dispatch mEngine verbose cmd = case cmd of
             _ <- selectVersion scope ver
             info' stderr $ "Auto-selected version " <> Text.unpack (showVersion ver)
           _ -> pure ()
+        -- Persist engine choice if --engine was explicitly provided
+        case mEngine of
+          Just eng -> do
+            cfgP <- configPath scope
+            mCfg <- readActiveConfig
+            let cfg = maybe defaultConfig id mCfg
+            _ <- writeConfig cfgP (cfg { configEngine = eng })
+            pure ()
+          Nothing -> pure ()
         -- Run morloc init unless --no-init
         if noInit
           then pure (Right ())
@@ -362,7 +373,7 @@ dispatch mEngine verbose cmd = case cmd of
   -- ---- uninstall ----
   CmdUninstall mScope removeAll verStrs -> do
     if not removeAll && null verStrs
-      then pure (Left (InstallError "No versions specified. Use VERSION... or --all."))
+      then pure (Left (UninstallError "No versions specified. Use VERSION... or --all."))
       else do
         let scope = resolveScope mScope
         versions <- if removeAll
@@ -403,7 +414,15 @@ dispatch mEngine verbose cmd = case cmd of
             info' stderr "Edit the Dockerfile, then run: morloc-manager env <name>"
             pure (Right ())
 
-      EnvActivate name -> do
+      EnvActivate name
+        -- Detect common positional-arg mistakes and give correction hints
+        | name `elem` ["list", "ls"] ->
+            pure (Left (EnvError "Unknown argument. Did you mean: morloc-manager env --list"))
+        | name `elem` ["reset"] ->
+            pure (Left (EnvError "Unknown argument. Did you mean: morloc-manager env --reset"))
+        | name `elem` ["init"] ->
+            pure (Left (EnvError "Unknown argument. Did you mean: morloc-manager env --init <NAME>"))
+        | otherwise -> do
         engine <- requireEngine mEngine
         verResult <- resolveActiveVersion
         case verResult of
@@ -442,9 +461,6 @@ dispatch mEngine verbose cmd = case cmd of
 
   -- ---- info ----
   CmdInfo _mScope -> do
-    case mEngine of
-      Just _ -> hPutStrLn stderr "Warning: --engine flag has no effect on the info command."
-      Nothing -> pure ()
     mCfg <- readActiveConfig
     seMode <- detectSELinux
     let activeScope = maybe Local configActiveScope mCfg
@@ -515,6 +531,11 @@ dispatch mEngine verbose cmd = case cmd of
       Left err -> pure (Left err)
       Right (ver, _) -> buildServeImage engine tarball tag ver mBase
 
+  -- ---- version ----
+  CmdVersion -> do
+    putStrLn "morloc-manager v0.11.0"
+    pure (Right ())
+
   -- ---- serve ----
   CmdServe image ports -> do
     engine <- requireEngine mEngine
@@ -573,8 +594,10 @@ runInContainer engine verbose shell args = do
               -- (home is unsafe to relabel with :z) and use home as workDir
               let cwd' = if isHomeDir && not (null suffix) then home else cwd
                   skipWorkMount = isHomeDir && not (null suffix) && not isInit
-              when (skipWorkMount) $
+              when skipWorkMount $ do
                 hPutStrLn stderr "Warning: running from home directory with SELinux; working directory mount skipped."
+                hPutStrLn stderr "Workaround: create a project subdirectory and work from there:"
+                hPutStrLn stderr "  mkdir ~/myproject && cd ~/myproject"
               runWithConfig engine verbose image vDataDir home cwd'
                    suffix shell args (isInit || skipWorkMount) (vcShmSize vc) extraFlags
 

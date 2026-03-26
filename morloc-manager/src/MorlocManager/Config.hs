@@ -258,11 +258,13 @@ writeConfig :: ToJSON a => FilePath -> a -> IO (Either ManagerError ())
 writeConfig path val = do
   let dir = takeDirectory path
   createDirectoryIfMissing True dir
+  bestEffortChmod 0o755 dir  -- world-readable+executable for system scope
   result <- try (withFileLock (path <> ".lock") $ do
     (tmpPath, tmpHandle) <- openTempFile dir "config.tmp"
     BL.hPut tmpHandle (Aeson.encode val)
     hClose tmpHandle
     renameFile tmpPath path
+    bestEffortChmod 0o644 path  -- world-readable for system-scope multi-user access
     ) :: IO (Either IOException ())
   case result of
     Left err -> pure (Left (ConfigParseError path (show err)))
@@ -294,16 +296,18 @@ withFileLock lockPath action = do
   createDirectoryIfMissing True (takeDirectory lockPath)
   bracket
     (do fd <- openFd lockPath WriteOnly defaultFileFlags
-                { creat = Just ownerMode }
+                { creat = Just lockMode }
         setLock fd (WriteLock, AbsoluteSeek, 0, 0)
         pure fd
     )
     closeFd
     (\_ -> action)
   where
-    -- Owner read/write (0o600)
-    ownerMode :: FileMode
-    ownerMode = 0o600
+    -- World-readable so non-root users can acquire locks on system-scope
+    -- config files. The lock is advisory (fcntl), so read permission is
+    -- sufficient for other users to observe the lock state.
+    lockMode :: FileMode
+    lockMode = 0o644
 
 -- ======================================================================
 -- Flags files
@@ -382,8 +386,13 @@ findInstalledScope ver = do
 -- Call this after 'writeConfig' for any System-scope path so that
 -- non-root users can read the configuration.
 fixSystemPerms :: FilePath -> IO ()
-fixSystemPerms path = do
-  result <- try (setFileMode path 0o644) :: IO (Either IOException ())
+fixSystemPerms = bestEffortChmod 0o644
+
+-- | Best-effort chmod. Silently ignores failures (e.g., non-root user
+-- cannot change permissions on files they don't own).
+bestEffortChmod :: FileMode -> FilePath -> IO ()
+bestEffortChmod mode path = do
+  result <- try (setFileMode path mode) :: IO (Either IOException ())
   case result of
     Right () -> pure ()
-    Left _   -> pure ()  -- best effort; may fail if not running as root
+    Left _   -> pure ()

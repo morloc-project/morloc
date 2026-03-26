@@ -55,7 +55,7 @@ module MorlocManager.Environment
 
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
-import Data.List (nub, sort)
+import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word8)
@@ -67,6 +67,9 @@ import System.Directory
   , listDirectory
   )
 import System.FilePath ((</>), takeBaseName)
+import Control.Exception (IOException, try)
+import System.Posix.Files (setFileMode)
+import System.Posix.Types (FileMode)
 
 import MorlocManager.Types
 import MorlocManager.Config
@@ -81,6 +84,7 @@ initEnvironment :: Scope -> String -> IO (Either ManagerError FilePath)
 initEnvironment scope envName = do
   deps <- depsDir scope
   createDirectoryIfMissing True deps
+  bestEffortChmod 0o755 deps  -- world-readable for system-scope multi-user access
   let dockerfilePath = deps </> envName <> ".Dockerfile"
   exists <- doesFileExist dockerfilePath
   if exists
@@ -103,6 +107,7 @@ initEnvironment scope envName = do
         , "# Example: install system packages"
         , "# RUN apt-get update && apt-get install -y libfoo-dev"
         ]
+      bestEffortChmod 0o644 dockerfilePath  -- world-readable for system-scope
       pure (Right dockerfilePath)
 
 -- | Build an environment image from its Dockerfile.
@@ -200,13 +205,21 @@ listEnvironments scope ver = do
         pure [ takeBaseName e | e <- entries, hasSuffix ".Dockerfile" e ]
   -- Merge, deduplicate, keep order: base first, then sorted unique names
   let allEnvs = nub (builtEnvs <> initEnvs)
-  pure ("base" : allEnvs)
+  pure ("base" : filter (/= "base") allEnvs)
   where
     hasSuffix suffix str = drop (length str - length suffix) str == suffix
 
 -- ======================================================================
 -- Internal
 -- ======================================================================
+
+-- | Best-effort chmod. Silently ignores failures.
+bestEffortChmod :: FileMode -> FilePath -> IO ()
+bestEffortChmod mode path' = do
+  result <- try (setFileMode path' mode) :: IO (Either IOException ())
+  case result of
+    Right () -> pure ()
+    Left _   -> pure ()
 
 -- | Compute the SHA-256 hash of a file's contents, returned as a hex string.
 hashFile :: FilePath -> IO Text
