@@ -150,7 +150,6 @@ selectVersion scope ver = do
       let newCfg = baseCfg
             { configActiveVersion = Just ver
             , configActiveScope = scope
-            , configActiveEnv = "base"
             }
       writeConfig cfgPath newCfg
 

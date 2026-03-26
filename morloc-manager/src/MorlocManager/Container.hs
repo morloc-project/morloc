@@ -54,6 +54,7 @@ module MorlocManager.Container
   , detectEngine
   , engineExecutable
     -- * Internals (for testing)
+  , engineSpecificRunFlags
   , buildRunArgs
   , buildBuildArgs
   ) where
@@ -72,6 +73,7 @@ import System.Process
   , delegate_ctlc
   )
 import System.Directory (findExecutable)
+import System.Posix.User (getEffectiveUserID, getEffectiveGroupID)
 
 import MorlocManager.Types (ContainerEngine(..), ManagerError(..))
 
@@ -181,7 +183,8 @@ engineExecutable Podman = "podman"
 containerRun :: ContainerEngine -> RunConfig -> IO (ExitCode, Text, Text)
 containerRun engine cfg = do
   let exe = engineExecutable engine
-      args = buildRunArgs engine cfg
+  extraEngineFlags <- engineSpecificRunFlagsIO engine
+  let args = buildRunArgs engine extraEngineFlags cfg
   runProcess exe args
 
 -- | Run a container with stdin/stdout/stderr passed through to the terminal.
@@ -196,7 +199,8 @@ containerRun engine cfg = do
 containerRunPassthrough :: ContainerEngine -> Bool -> RunConfig -> IO ExitCode
 containerRunPassthrough engine verbose cfg = do
   let exe = engineExecutable engine
-      args = buildRunArgs engine cfg
+  extraEngineFlags <- engineSpecificRunFlagsIO engine
+  let args = buildRunArgs engine extraEngineFlags cfg
   -- Print the command when verbose mode is enabled
   whenIO' verbose $ do
     hPutStrLn stderr $ "[morloc-manager] " <> exe <> " " <> unwords (map quote args)
@@ -266,10 +270,10 @@ containerImages engine mFilter = do
 --        "ghcr.io/.../morloc-full:0.67.0",
 --        "morloc", "make", "-o", "svc", "svc.loc"]
 -- @
-buildRunArgs :: ContainerEngine -> RunConfig -> [String]
-buildRunArgs engine cfg = concat
+buildRunArgs :: ContainerEngine -> [String] -> RunConfig -> [String]
+buildRunArgs _engine extraEngineFlags cfg = concat
   [ ["run"]
-  , engineSpecificRunFlags engine
+  , extraEngineFlags
   , if rcRemoveAfter cfg then ["--rm"] else []
   , if rcReadOnly cfg then ["--read-only"] else []
   , if rcInteractive cfg then ["-it"] else []
@@ -292,11 +296,23 @@ buildRunArgs engine cfg = concat
     envArg (key, val) =
       ["-e", Text.unpack key <> "=" <> Text.unpack val]
 
--- | Engine-specific flags added to every @run@ invocation.
+-- | Engine-specific flags added to every @run@ invocation (IO version).
 --
 -- Podman rootless: @--userns=keep-id@ maps the container's root user to
 -- the invoking user, so files written inside the container are owned by
 -- the host user (not root).
+--
+-- Docker: @--user UID:GID@ achieves the same effect so files created
+-- inside the container are owned by the invoking user.
+engineSpecificRunFlagsIO :: ContainerEngine -> IO [String]
+engineSpecificRunFlagsIO Podman = pure ["--userns=keep-id"]
+engineSpecificRunFlagsIO Docker = do
+  uid <- getEffectiveUserID
+  gid <- getEffectiveGroupID
+  pure ["--user", show uid <> ":" <> show gid]
+
+-- | Pure version for testing. Uses static Podman flags; Docker returns empty
+-- (since UID/GID require IO). Real code uses 'engineSpecificRunFlagsIO'.
 engineSpecificRunFlags :: ContainerEngine -> [String]
 engineSpecificRunFlags Podman = ["--userns=keep-id"]
 engineSpecificRunFlags Docker = []

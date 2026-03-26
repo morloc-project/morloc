@@ -22,7 +22,7 @@ import MorlocManager.Types
 import MorlocManager.Config (readConfig, writeConfig, readFlagsFile)
 import MorlocManager.Container
   ( RunConfig(..), defaultRunConfig, BuildConfig(..)
-  , engineExecutable, buildRunArgs, buildBuildArgs
+  , engineExecutable, engineSpecificRunFlags, buildRunArgs, buildBuildArgs
   )
 import MorlocManager.SELinux (isSafeToRelabel)
 
@@ -244,7 +244,7 @@ containerTests =
 
   , testCase "buildRunArgs minimal config" $ do
       let cfg = defaultRunConfig "myimage:latest"
-          args = buildRunArgs Docker cfg
+          args = buildRunArgs Docker (engineSpecificRunFlags Docker) cfg
       -- Should have: run, --rm, image
       head args @?= "run"
       assertBool "--rm present" ("--rm" `elem` args)
@@ -253,12 +253,12 @@ containerTests =
 
   , testCase "buildRunArgs Podman adds --userns=keep-id" $ do
       let cfg = defaultRunConfig "myimage:latest"
-          args = buildRunArgs Podman cfg
+          args = buildRunArgs Podman (engineSpecificRunFlags Podman) cfg
       assertBool "--userns=keep-id present" ("--userns=keep-id" `elem` args)
 
   , testCase "buildRunArgs interactive mode adds -it" $ do
       let cfg = (defaultRunConfig "img") { rcInteractive = True }
-          args = buildRunArgs Docker cfg
+          args = buildRunArgs Docker (engineSpecificRunFlags Docker) cfg
       assertBool "-it present" ("-it" `elem` args)
 
   , testCase "buildRunArgs SELinux suffix on mounts" $ do
@@ -266,25 +266,25 @@ containerTests =
             { rcBindMounts = [("/host", "/container")]
             , rcSELinuxSuffix = ":z"
             }
-          args = buildRunArgs Docker cfg
+          args = buildRunArgs Docker (engineSpecificRunFlags Docker) cfg
       assertBool ":z suffix on mount" (any (== "-v") args &&
         any (\a -> a == "/host:/container:z") args)
 
   , testCase "buildRunArgs workdir" $ do
       let cfg = (defaultRunConfig "img") { rcWorkDir = Just "/work" }
-          args = buildRunArgs Docker cfg
+          args = buildRunArgs Docker (engineSpecificRunFlags Docker) cfg
       assertBool "-w present" ("-w" `elem` args)
       assertBool "workdir value" ("/work" `elem` args)
 
   , testCase "buildRunArgs read-only" $ do
       let cfg = (defaultRunConfig "img") { rcReadOnly = True }
-          args = buildRunArgs Docker cfg
+          args = buildRunArgs Docker (engineSpecificRunFlags Docker) cfg
       assertBool "--read-only present" ("--read-only" `elem` args)
 
   , testCase "buildRunArgs command at end" $ do
       let cfg = (defaultRunConfig "img")
             { rcCommand = Just ["morloc", "make", "-o", "svc", "svc.loc"] }
-          args = buildRunArgs Docker cfg
+          args = buildRunArgs Docker (engineSpecificRunFlags Docker) cfg
       -- Image should come before command
       let imgIdx = length (takeWhile (/= "img") args)
           cmdIdx = length (takeWhile (/= "morloc") args)

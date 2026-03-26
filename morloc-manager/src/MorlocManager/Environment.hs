@@ -84,7 +84,7 @@ initEnvironment scope envName = do
   let dockerfilePath = deps </> envName <> ".Dockerfile"
   exists <- doesFileExist dockerfilePath
   if exists
-    then pure (Left (FreezeError ("Dockerfile already exists: " <> dockerfilePath)))
+    then pure (Left (InstallError ("Environment already exists: " <> dockerfilePath)))
     else do
       writeFile dockerfilePath $ unlines
         [ "# morloc-manager environment: " <> envName

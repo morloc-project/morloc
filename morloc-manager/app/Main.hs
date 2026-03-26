@@ -46,6 +46,7 @@ import MorlocManager.Config
   , readEnvironmentConfig
   , configDir
   , configPath
+  , versionConfigPath
   , dataDir
   , versionDataDir
   , readFlagsFile
@@ -275,7 +276,9 @@ main = do
     Right () -> pure ()
     Left err -> do
       TextIO.hPutStrLn stderr (renderError err)
-      exitWith (ExitFailure 1)
+      case err of
+        EngineError _ n _ -> exitWith (ExitFailure n)
+        _                 -> exitWith (ExitFailure 1)
 
 -- | Resolve the container engine, failing if unavailable.
 requireEngine :: Maybe ContainerEngine -> IO ContainerEngine
@@ -303,11 +306,8 @@ dispatch mEngine verbose cmd = case cmd of
     let scope = resolveScope mScope
     -- Install the version
     installResult <- case mVerStr of
-      Nothing -> do
-        r <- installLatest engine scope
-        case r of
-          Left err  -> pure (Left err)
-          Right ver -> pure (Right ver)
+      Nothing       -> installLatest engine scope
+      Just "latest" -> installLatest engine scope
       Just verStr -> case parseVersion verStr of
         Nothing  -> pure (Left (InvalidVersion verStr))
         Just ver -> do
@@ -323,6 +323,8 @@ dispatch mEngine verbose cmd = case cmd of
         whenIO (scope == System) $ do
           cfgP <- configPath scope
           fixSystemPerms cfgP
+          vcP <- versionConfigPath scope ver
+          fixSystemPerms vcP
         -- Auto-select if no version is currently active
         activeResult <- resolveActiveVersion
         case activeResult of
@@ -359,24 +361,27 @@ dispatch mEngine verbose cmd = case cmd of
 
   -- ---- uninstall ----
   CmdUninstall mScope removeAll verStrs -> do
-    let scope = resolveScope mScope
-    versions <- if removeAll
-      then listVersions scope
-      else case mapM parseVersion verStrs of
-        Nothing -> pure []
-        Just vs -> pure vs
-    if null versions && not removeAll
-      then pure (Left (InvalidVersion (unwords verStrs)))
+    if not removeAll && null verStrs
+      then pure (Left (InstallError "No versions specified. Use VERSION... or --all."))
       else do
-        results <- mapM (\ver -> do
-          info' stderr $ "Uninstalling " <> Text.unpack (showVersion ver) <> "..."
-          uninstallVersion scope ver
-          ) versions
-        case [e | Left e <- results] of
-          (err:_) -> pure (Left err)
-          []      -> do
-            info' stderr $ "Uninstalled " <> show (length versions) <> " version(s)"
-            pure (Right ())
+        let scope = resolveScope mScope
+        versions <- if removeAll
+          then listVersions scope
+          else case mapM parseVersion verStrs of
+            Nothing -> pure []
+            Just vs -> pure vs
+        if null versions && not removeAll
+          then pure (Left (InvalidVersion (unwords verStrs)))
+          else do
+            results <- mapM (\ver -> do
+              info' stderr $ "Uninstalling " <> Text.unpack (showVersion ver) <> "..."
+              uninstallVersion scope ver
+              ) versions
+            case [e | Left e <- results] of
+              (err:_) -> pure (Left err)
+              []      -> do
+                info' stderr $ "Uninstalled " <> show (length versions) <> " version(s)"
+                pure (Right ())
 
   -- ---- run ----
   CmdRun _mScope shell args -> do
