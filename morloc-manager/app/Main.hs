@@ -24,6 +24,9 @@ the appropriate subcommand handler.
     freeze  [--system|--local] [-o PATH]
     serve-image --from TARBALL --tag TAG [--base IMAGE]
     serve   IMAGE [-p HOST:CONTAINER]
+    stop    NAME
+    status
+    logs    NAME [-f|--follow]
     version
     list    [--system|--local]               (alias for info)
 @
@@ -63,7 +66,7 @@ import MorlocManager.Container
   , containerRunPassthrough
   )
 import MorlocManager.Freeze (freeze)
-import MorlocManager.Serve (buildServeImage, runServeContainer)
+import MorlocManager.Serve (buildServeImage, runServeContainer, stopServeContainer, listServeContainers, streamServeLogs)
 import MorlocManager.SELinux (SELinuxMode(..), detectSELinux, volumeSuffix, validateMountPath)
 import MorlocManager.Version
   ( installVersion'
@@ -114,6 +117,12 @@ data Command
     -- ^ Build a serve image (tarball, tag, base image override)
   | CmdServe Text [(Int,Int)]
     -- ^ Run a serve container (image tag, port mappings)
+  | CmdStop Text
+    -- ^ Stop a running serve container
+  | CmdStatus
+    -- ^ List running serve containers
+  | CmdLogs Text Bool
+    -- ^ Show logs from a serve container (name, follow)
   | CmdVersion
     -- ^ Print morloc-manager version
   deriving (Show)
@@ -182,6 +191,12 @@ commandParser = hsubparser
       (progDesc "Build an immutable serve image from frozen state"))
   <> command "serve" (info serveParser
       (progDesc "Run a serve container with the nexus router"))
+  <> command "stop" (info stopParser
+      (progDesc "Stop a running serve container"))
+  <> command "status" (info (pure CmdStatus)
+      (progDesc "List running morloc serve containers"))
+  <> command "logs" (info logsParser
+      (progDesc "Show logs from a serve container"))
   <> command "version" (info (pure CmdVersion)
       (progDesc "Print morloc-manager version"))
   )
@@ -250,6 +265,15 @@ serveParser = CmdServe
   <*> many (option portReader
         ( long "port" <> short 'p' <> metavar "HOST:CONTAINER"
         <> help "Port mapping (e.g., 8080:8080)" ))
+
+stopParser :: Parser Command
+stopParser = CmdStop
+  <$> argument (Text.pack <$> str) (metavar "NAME" <> help "Container name to stop")
+
+logsParser :: Parser Command
+logsParser = CmdLogs
+  <$> argument (Text.pack <$> str) (metavar "NAME" <> help "Container name")
+  <*> switch (long "follow" <> short 'f' <> help "Follow log output")
 
 portReader :: ReadM (Int, Int)
 portReader = eitherReader $ \s -> case break (== ':') s of
@@ -542,6 +566,26 @@ dispatch mEngine verbose cmd = case cmd of
     let containerName = "morloc-serve-" <> image
         portMappings = if null ports then [(8080, 8080)] else ports
     runServeContainer engine image containerName portMappings
+
+  -- ---- stop ----
+  CmdStop name -> do
+    engine <- requireEngine mEngine
+    result <- stopServeContainer engine name
+    case result of
+      Left err -> pure (Left err)
+      Right () -> do
+        info' stderr $ "Stopped container " <> Text.unpack name
+        pure (Right ())
+
+  -- ---- status ----
+  CmdStatus -> do
+    engine <- requireEngine mEngine
+    listServeContainers engine
+
+  -- ---- logs ----
+  CmdLogs name follow -> do
+    engine <- requireEngine mEngine
+    streamServeLogs engine name follow
 
 -- ======================================================================
 -- Container run

@@ -101,6 +101,10 @@ daemon_request_t* daemon_parse_request(const char* json, size_t len, ERRMSG) {
                     req->method = DAEMON_DISCOVER;
                 } else if (val_len == 6 && strncmp(val_start, "health", 6) == 0) {
                     req->method = DAEMON_HEALTH;
+                } else if (val_len == 4 && strncmp(val_start, "eval", 4) == 0) {
+                    req->method = DAEMON_EVAL;
+                } else if (val_len == 9 && strncmp(val_start, "typecheck", 9) == 0) {
+                    req->method = DAEMON_TYPECHECK;
                 } else {
                     free(req->id);
                     free(req);
@@ -113,6 +117,14 @@ daemon_request_t* daemon_parse_request(const char* json, size_t len, ERRMSG) {
                 const char* val_start = p;
                 while (p < end && *p != '"') p++;
                 req->command = strndup(val_start, (size_t)(p - val_start));
+                p++;
+            }
+        } else if (key_len == 4 && strncmp(key_start, "expr", 4) == 0) {
+            if (*p == '"') {
+                p++;
+                const char* val_start = p;
+                while (p < end && *p != '"') p++;
+                req->expr = strndup(val_start, (size_t)(p - val_start));
                 p++;
             }
         } else if (key_len == 4 && strncmp(key_start, "args", 4) == 0) {
@@ -506,23 +518,33 @@ static daemon_response_t* daemon_dispatch_eval(const char* expr) {
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
 
-    // Read stdout
-    char stdout_buf[65536];
-    ssize_t stdout_len = 0;
+    // Read stdout (dynamic buffer)
+    size_t stdout_cap = 65536;
+    size_t stdout_len = 0;
+    char* stdout_buf = (char*)malloc(stdout_cap);
     ssize_t n;
     while ((n = read(stdout_pipe[0], stdout_buf + stdout_len,
-                     sizeof(stdout_buf) - (size_t)stdout_len - 1)) > 0) {
-        stdout_len += n;
+                     stdout_cap - stdout_len - 1)) > 0) {
+        stdout_len += (size_t)n;
+        if (stdout_len + 1 >= stdout_cap) {
+            stdout_cap *= 2;
+            stdout_buf = (char*)realloc(stdout_buf, stdout_cap);
+        }
     }
     stdout_buf[stdout_len] = '\0';
     close(stdout_pipe[0]);
 
-    // Read stderr
-    char stderr_buf[65536];
-    ssize_t stderr_len = 0;
+    // Read stderr (dynamic buffer)
+    size_t stderr_cap = 65536;
+    size_t stderr_len = 0;
+    char* stderr_buf = (char*)malloc(stderr_cap);
     while ((n = read(stderr_pipe[0], stderr_buf + stderr_len,
-                     sizeof(stderr_buf) - (size_t)stderr_len - 1)) > 0) {
-        stderr_len += n;
+                     stderr_cap - stderr_len - 1)) > 0) {
+        stderr_len += (size_t)n;
+        if (stderr_len + 1 >= stderr_cap) {
+            stderr_cap *= 2;
+            stderr_buf = (char*)realloc(stderr_buf, stderr_cap);
+        }
     }
     stderr_buf[stderr_len] = '\0';
     close(stderr_pipe[0]);
@@ -555,6 +577,130 @@ static daemon_response_t* daemon_dispatch_eval(const char* expr) {
         }
     }
 
+    free(stdout_buf);
+    free(stderr_buf);
+    return resp;
+}
+
+// ======================================================================
+// Typecheck dispatch
+// ======================================================================
+
+/*
+ * Typecheck a morloc expression without execution.
+ *
+ * Forks a child process that runs:
+ *   morloc typecheck '<expr>'
+ *
+ * Returns type signatures on success, error messages on failure.
+ * Uses the same resource limits as eval for safety.
+ */
+static daemon_response_t* daemon_dispatch_typecheck(const char* expr) {
+    daemon_response_t* resp = (daemon_response_t*)calloc(1, sizeof(daemon_response_t));
+
+    int stdout_pipe[2], stderr_pipe[2];
+    if (pipe(stdout_pipe) != 0 || pipe(stderr_pipe) != 0) {
+        resp->success = false;
+        resp->error = strdup("Failed to create pipes for typecheck");
+        return resp;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        resp->success = false;
+        resp->error = strdup("Failed to fork for typecheck");
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        close(stderr_pipe[0]); close(stderr_pipe[1]);
+        return resp;
+    }
+
+    if (pid == 0) {
+        // ---- Child process ----
+        close(stdout_pipe[0]);
+        close(stderr_pipe[0]);
+        dup2(stdout_pipe[1], STDOUT_FILENO);
+        dup2(stderr_pipe[1], STDERR_FILENO);
+        close(stdout_pipe[1]);
+        close(stderr_pipe[1]);
+
+        // Apply resource limits
+        if (g_eval_timeout > 0) {
+            struct rlimit cpu_limit = {
+                .rlim_cur = (rlim_t)g_eval_timeout,
+                .rlim_max = (rlim_t)(g_eval_timeout + 5)
+            };
+            setrlimit(RLIMIT_CPU, &cpu_limit);
+            struct rlimit as_limit = {
+                .rlim_cur = 2UL * 1024 * 1024 * 1024,
+                .rlim_max = 2UL * 1024 * 1024 * 1024
+            };
+            setrlimit(RLIMIT_AS, &as_limit);
+        }
+
+        execlp("morloc", "morloc", "typecheck", expr, (char*)NULL);
+        fprintf(stderr, "Failed to exec morloc typecheck: %s", strerror(errno));
+        _exit(127);
+    }
+
+    // ---- Parent process ----
+    close(stdout_pipe[1]);
+    close(stderr_pipe[1]);
+
+    // Read stdout (dynamic buffer)
+    size_t stdout_cap = 4096;
+    size_t stdout_len = 0;
+    char* stdout_buf = (char*)malloc(stdout_cap);
+    ssize_t n;
+    while ((n = read(stdout_pipe[0], stdout_buf + stdout_len,
+                     stdout_cap - stdout_len - 1)) > 0) {
+        stdout_len += (size_t)n;
+        if (stdout_len + 1 >= stdout_cap) {
+            stdout_cap *= 2;
+            stdout_buf = (char*)realloc(stdout_buf, stdout_cap);
+        }
+    }
+    stdout_buf[stdout_len] = '\0';
+    close(stdout_pipe[0]);
+
+    // Read stderr (dynamic buffer)
+    size_t stderr_cap = 4096;
+    size_t stderr_len = 0;
+    char* stderr_buf = (char*)malloc(stderr_cap);
+    while ((n = read(stderr_pipe[0], stderr_buf + stderr_len,
+                     stderr_cap - stderr_len - 1)) > 0) {
+        stderr_len += (size_t)n;
+        if (stderr_len + 1 >= stderr_cap) {
+            stderr_cap *= 2;
+            stderr_buf = (char*)realloc(stderr_buf, stderr_cap);
+        }
+    }
+    stderr_buf[stderr_len] = '\0';
+    close(stderr_pipe[0]);
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        while (stdout_len > 0 && (stdout_buf[stdout_len-1] == '\n' ||
+                                   stdout_buf[stdout_len-1] == '\r')) {
+            stdout_buf[--stdout_len] = '\0';
+        }
+        resp->success = true;
+        resp->result_json = strdup(stdout_buf);
+    } else {
+        resp->success = false;
+        if (stderr_len > 0) {
+            resp->error = strdup(stderr_buf);
+        } else {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "morloc typecheck exited with code %d",
+                     WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+            resp->error = strdup(msg);
+        }
+    }
+
+    free(stdout_buf);
+    free(stderr_buf);
     return resp;
 }
 
@@ -598,10 +744,21 @@ daemon_response_t* daemon_dispatch(
             return resp;
         }
         daemon_response_t* eval_resp = daemon_dispatch_eval(request->expr);
-        // Copy id from request
         eval_resp->id = request->id ? strdup(request->id) : NULL;
         free(resp);
         return eval_resp;
+    }
+
+    if (request->method == DAEMON_TYPECHECK) {
+        if (!request->expr) {
+            resp->success = false;
+            resp->error = strdup("Missing 'expr' field in typecheck request");
+            return resp;
+        }
+        daemon_response_t* tc_resp = daemon_dispatch_typecheck(request->expr);
+        tc_resp->id = request->id ? strdup(request->id) : NULL;
+        free(resp);
+        return tc_resp;
     }
 
     // DAEMON_CALL

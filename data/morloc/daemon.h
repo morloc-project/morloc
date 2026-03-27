@@ -30,7 +30,8 @@ typedef enum {
     DAEMON_CALL,
     DAEMON_DISCOVER,
     DAEMON_HEALTH,
-    DAEMON_EVAL        // POST /eval -- compose and run a morloc expression
+    DAEMON_EVAL,       // POST /eval -- compose and run a morloc expression
+    DAEMON_TYPECHECK   // POST /typecheck -- dry-run type validation
 } daemon_method_t;
 
 // Incoming request (parsed from JSON or HTTP)

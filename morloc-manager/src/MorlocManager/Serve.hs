@@ -22,10 +22,12 @@ long-lived containers with the morloc-nexus router as PID 1.
   Generated Dockerfile:
 
     FROM morloc-serve:\<version\>
-    COPY state/ /home/morloc/.local/share/morloc/
-    COPY morloc /usr/local/bin/morloc
+    COPY lib/ /root/.local/share/morloc/lib/
+    COPY fdb/ /root/.local/share/morloc/fdb/
+    COPY bin/ /root/.local/share/morloc/bin/
+    HEALTHCHECK ...
     ENTRYPOINT ["morloc-nexus", "--router", \\
-                "--fdb", "/home/morloc/.local/share/morloc/fdb"]
+                "--fdb", "/root/.local/share/morloc/fdb"]
 @
 
 Serve containers expose the nexus router endpoints:
@@ -43,6 +45,9 @@ module MorlocManager.Serve
     -- * Running
   , runServeContainer
   , stopServeContainer
+    -- * Management
+  , listServeContainers
+  , streamServeLogs
   ) where
 
 import Data.Text (Text)
@@ -51,10 +56,29 @@ import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>), takeDirectory)
 import System.Exit (ExitCode(..))
 import System.IO (hPutStrLn, hFlush, stderr)
-import System.Process (readProcessWithExitCode)
+import System.Process
+  ( readProcessWithExitCode
+  , createProcess
+  , proc
+  , waitForProcess
+  , StdStream(..)
+  , std_in, std_out, std_err
+  , delegate_ctlc
+  )
 
 import MorlocManager.Types
 import MorlocManager.Container
+  ( RunConfig(..)
+  , defaultRunConfig
+  , BuildConfig(..)
+  , containerRun
+  , containerRunPassthrough
+  , containerBuild
+  , containerPull
+  , containerStop
+  , containerRemove
+  , engineExecutable
+  )
 
 -- | Build a serve image from a frozen state tarball.
 --
@@ -99,13 +123,17 @@ buildServeImage engine stateTarball tag ver mBase = do
             , "FROM " <> Text.unpack baseImage
             , ""
             , "# Copy frozen morloc state (modules, manifests, binaries, pools)"
-            , "COPY lib/ /home/morloc/.local/share/morloc/lib/"
-            , "COPY fdb/ /home/morloc/.local/share/morloc/fdb/"
-            , "COPY bin/ /home/morloc/.local/share/morloc/bin/"
+            , "COPY lib/ /root/.local/share/morloc/lib/"
+            , "COPY fdb/ /root/.local/share/morloc/fdb/"
+            , "COPY bin/ /root/.local/share/morloc/bin/"
+            , ""
+            , "# Health check for container orchestrators"
+            , "HEALTHCHECK --interval=30s --timeout=5s --retries=3 \\"
+            , "  CMD wget -qO- http://localhost:8080/health || exit 1"
             , ""
             , "# Entrypoint: nexus router aggregates all installed programs"
             , "ENTRYPOINT [\"morloc-nexus\", \"--router\", \\"
-            , "            \"--fdb\", \"/home/morloc/.local/share/morloc/fdb\"]"
+            , "            \"--fdb\", \"/root/.local/share/morloc/fdb\"]"
             ]
           let buildCfg = BuildConfig
                 { bcDockerfile = dockerfilePath
@@ -159,6 +187,50 @@ stopServeContainer engine name = do
   case code of
     ExitFailure _ -> pure (Left (EngineError engine (exitCodeToInt code) ("Stop failed with code " <> Text.pack (show code))))
     ExitSuccess   -> pure (Right ())
+
+-- | List running morloc serve containers.
+--
+-- Filters containers whose name starts with @morloc-serve-@ and prints
+-- a summary table to stdout.
+listServeContainers :: ContainerEngine -> IO (Either ManagerError ())
+listServeContainers engine = do
+  let exe = engineExecutable engine
+      fmt = "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+  (code, stdout', _stderr) <- readProcessWithExitCode exe
+    ["ps", "-a", "--filter", "name=morloc-serve-", "--format", fmt] ""
+  case code of
+    ExitFailure n -> pure (Left (EngineError engine n (Text.pack _stderr)))
+    ExitSuccess -> do
+      let output = strip' stdout'
+      if null output
+        then putStrLn "No morloc serve containers running."
+        else do
+          putStrLn "NAME\tIMAGE\tSTATUS\tPORTS"
+          putStr output
+      pure (Right ())
+  where
+    strip' = reverse . dropWhile isNewline . reverse
+    isNewline c = c == '\n' || c == '\r'
+
+-- | Stream logs from a serve container to the terminal.
+--
+-- When @follow@ is 'True', uses @--follow@ to stream new log entries
+-- as they arrive (blocks until interrupted).
+streamServeLogs :: ContainerEngine -> Text -> Bool -> IO (Either ManagerError ())
+streamServeLogs engine name follow = do
+  let exe = engineExecutable engine
+      args = ["logs"] <> (if follow then ["--follow"] else []) <> [Text.unpack name]
+  let cp = (proc exe args)
+        { std_in  = Inherit
+        , std_out = Inherit
+        , std_err = Inherit
+        , delegate_ctlc = True
+        }
+  (_, _, _, ph) <- createProcess cp
+  code <- waitForProcess ph
+  case code of
+    ExitSuccess   -> pure (Right ())
+    ExitFailure n -> pure (Left (EngineError engine n "Failed to read container logs"))
 
 -- ======================================================================
 -- Internal

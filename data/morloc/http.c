@@ -231,6 +231,34 @@ daemon_request_t* http_to_daemon_request(http_request_t* req, ERRMSG) {
         return dreq;
     }
 
+    // POST /typecheck -- dry-run type validation of a morloc expression
+    //
+    // Request body: {"expr": "import math; math.add 1 2"}
+    // Response: {"status":"ok","result":"Int -> Int -> Int"} or error
+    if (req->method == HTTP_POST && strcmp(req->path, "/typecheck") == 0) {
+        dreq->method = DAEMON_TYPECHECK;
+        if (req->body && req->body_len > 0) {
+            const char* expr_key = strstr(req->body, "\"expr\"");
+            if (expr_key) {
+                expr_key += 6;
+                while (*expr_key == ' ' || *expr_key == ':' || *expr_key == '\t') expr_key++;
+                if (*expr_key == '"') {
+                    expr_key++;
+                    const char* expr_end = strchr(expr_key, '"');
+                    if (expr_end) {
+                        size_t expr_len = (size_t)(expr_end - expr_key);
+                        dreq->expr = strndup(expr_key, expr_len);
+                    }
+                }
+            }
+        }
+        if (!dreq->expr) {
+            free(dreq);
+            RAISE("Missing 'expr' field in /typecheck request body")
+        }
+        return dreq;
+    }
+
     // POST /call/<command>
     if (req->method == HTTP_POST && strncmp(req->path, "/call/", 6) == 0) {
         const char* cmd_name = req->path + 6;

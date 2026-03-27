@@ -248,7 +248,8 @@ daemon_response_t* router_forward(
         case DAEMON_CALL:     json_write_string(jb, "call"); break;
         case DAEMON_DISCOVER: json_write_string(jb, "discover"); break;
         case DAEMON_HEALTH:   json_write_string(jb, "health"); break;
-        case DAEMON_EVAL:     json_write_string(jb, "eval"); break;
+        case DAEMON_EVAL:      json_write_string(jb, "eval"); break;
+        case DAEMON_TYPECHECK: json_write_string(jb, "typecheck"); break;
     }
 
     if (request->command) {
