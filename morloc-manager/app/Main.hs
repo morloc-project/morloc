@@ -500,12 +500,10 @@ dispatch verbose cmd = case cmd of
               r <- installVersion' force engine scope ver
               case r of
                 Left err -> pure (Left err)
-                Right () -> pure (Right ver)
+                Right wasFresh -> pure (Right (ver, wasFresh))
         case installResult of
           Left err -> pure (Left err)
-          Right ver -> do
-            -- Check if this was a fresh install or a no-op (already installed)
-            -- installVersion' prints its own message for the no-op case
+          Right (ver, wasFresh) -> do
             -- Auto-select if no version is currently active
             activeResult <- resolveActiveVersion
             case activeResult of
@@ -513,21 +511,12 @@ dispatch verbose cmd = case cmd of
                 _ <- selectVersion scope ver
                 info' stderr $ "Auto-selected version " <> Text.unpack (showVersion ver)
               _ -> pure ()
-            -- Run morloc init unless --no-init or version was already installed
+            -- Run morloc init if fresh install (or forced), unless --no-init
             if noInit
               then pure (Right ())
-              else if not force
-                then do
-                  -- Check if already installed (same check installVersion' does)
-                  let imageRef = "ghcr.io/morloc-project/morloc/morloc-full:" <> showVersion ver
-                  wasAlready <- isVersionInstalled engine scope ver imageRef
-                  if wasAlready
-                    then pure (Right ())
-                    else do
-                      runMorlocInit engine verbose
-                else do
-                  info' stderr "Running morloc init -f..."
-                  runInContainer engine verbose False ["morloc", "init", "-f"]
+              else if wasFresh || force
+                then runMorlocInit engine verbose
+                else pure (Right ())
 
   -- ---- select ----
   CmdSelect verStr -> do

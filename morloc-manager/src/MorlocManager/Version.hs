@@ -73,12 +73,14 @@ import System.Posix.Types (FileMode)
 -- host-side data directory structure.
 --
 -- If the version is already installed (config exists and image is present),
--- prints a message and returns success without re-pulling.
-installVersion :: ContainerEngine -> Scope -> Version -> IO (Either ManagerError ())
+-- prints a message and returns 'Right False' (no-op). Returns 'Right True'
+-- when a fresh install is performed.
+installVersion :: ContainerEngine -> Scope -> Version -> IO (Either ManagerError Bool)
 installVersion = installVersion' False
 
 -- | Install a morloc version with optional force flag to bypass idempotency check.
-installVersion' :: Bool -> ContainerEngine -> Scope -> Version -> IO (Either ManagerError ())
+-- Returns 'Right True' for a fresh install, 'Right False' for a no-op (already installed).
+installVersion' :: Bool -> ContainerEngine -> Scope -> Version -> IO (Either ManagerError Bool)
 installVersion' force engine scope ver = do
   let imageRef = "ghcr.io/morloc-project/morloc/morloc-full:" <> showVersion ver
   -- Check if already installed (skip check when force is set)
@@ -87,7 +89,7 @@ installVersion' force engine scope ver = do
     then do
       hPutStrLn stderr $ "Version " <> Text.unpack (showVersion ver) <> " is already installed."
       hFlush stderr
-      pure (Right ())
+      pure (Right False)
     else do
       -- Pull image
       (code, _stdout, stderr') <- containerPull engine imageRef
@@ -112,14 +114,15 @@ installVersion' force engine scope ver = do
                 , vcShmSize = "512m"
                 , vcEngine  = engine
                 }
-          writeVersionConfig scope ver vc
+          result <- writeVersionConfig scope ver vc
+          pure (fmap (const True) result)
 
 -- | Install the latest morloc version using the "edge" container tag.
 --
 -- Pulls the @morloc-full:edge@ image, runs @morloc --version@ inside it
 -- to discover the actual version number, then performs a normal versioned
--- install. Returns the installed 'Version' on success.
-installLatest :: ContainerEngine -> Scope -> IO (Either ManagerError Version)
+-- install. Returns the installed 'Version' and whether it was a fresh install.
+installLatest :: ContainerEngine -> Scope -> IO (Either ManagerError (Version, Bool))
 installLatest engine scope = do
   let edgeImage = "ghcr.io/morloc-project/morloc/morloc-full:edge" :: Text
   -- Pull the edge image
@@ -148,7 +151,7 @@ installLatest engine scope = do
               result <- installVersion engine scope ver
               case result of
                 Left err -> pure (Left err)
-                Right () -> pure (Right ver)
+                Right wasFresh -> pure (Right (ver, wasFresh))
   where
     strip = reverse . dropWhile isNewline . reverse . dropWhile isNewline
     isNewline c = c == '\n' || c == '\r' || c == ' '
