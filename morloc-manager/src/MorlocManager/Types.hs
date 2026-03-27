@@ -45,10 +45,14 @@ module MorlocManager.Types
   , Version(..)
   , showVersion
   , parseVersion
+    -- * Active target
+  , ActiveTarget(..)
     -- * Configuration
   , Config(..)
+  , configActiveVersion
   , defaultConfig
   , VersionConfig(..)
+  , WorkspaceConfig(..)
   , EnvironmentConfig(..)
     -- * Freeze manifest
   , FreezeManifest(..)
@@ -165,6 +169,31 @@ parseVersion s = case break (== '.') s of
   _ -> Nothing
 
 -- ======================================================================
+-- Active target
+-- ======================================================================
+
+-- | What can be selected as the active morloc installation.
+-- Either a versioned installation or a named workspace.
+data ActiveTarget
+  = TargetVersion Version
+    -- ^ A versioned installation (e.g., @0.69.0@)
+  | TargetWorkspace Text
+    -- ^ A named workspace (e.g., @"myproject"@)
+  deriving (Eq, Show, Generic)
+
+instance ToJSON ActiveTarget where
+  toJSON (TargetVersion v)  = Aeson.object ["type" .= ("version" :: Text), "value" .= v]
+  toJSON (TargetWorkspace w) = Aeson.object ["type" .= ("workspace" :: Text), "value" .= w]
+
+instance FromJSON ActiveTarget where
+  parseJSON = Aeson.withObject "ActiveTarget" $ \o -> do
+    ty <- o .: "type"
+    case ty of
+      "version"   -> TargetVersion <$> o .: "value"
+      "workspace" -> TargetWorkspace <$> o .: "value"
+      _           -> fail $ "Unknown target type: " <> Text.unpack ty
+
+-- ======================================================================
 -- Configuration
 -- ======================================================================
 
@@ -179,8 +208,8 @@ parseVersion s = case break (== '.') s of
 -- When no version is selected, 'configActiveVersion' is 'Nothing' and most
 -- commands will fail with a helpful error message.
 data Config = Config
-  { configActiveVersion :: Maybe Version
-    -- ^ Currently selected morloc version, or 'Nothing' if none installed
+  { configActiveTarget :: Maybe ActiveTarget
+    -- ^ Currently selected target, or 'Nothing' if none selected
   , configActiveScope :: Scope
     -- ^ Whether using local (per-user) or system-wide installation
   , configActiveEnv :: Text
@@ -189,28 +218,41 @@ data Config = Config
     -- ^ Container engine to use for all operations
   } deriving (Show, Generic)
 
+-- | Helper: extract active version if the target is a version.
+configActiveVersion :: Config -> Maybe Version
+configActiveVersion cfg = case configActiveTarget cfg of
+  Just (TargetVersion v) -> Just v
+  _                      -> Nothing
+
 instance ToJSON Config where
   toJSON c = Aeson.object
-    [ "active_version" .= configActiveVersion c
-    , "active_scope"   .= configActiveScope c
-    , "active_env"     .= configActiveEnv c
-    , "engine"         .= configEngine c
+    [ "active_target" .= configActiveTarget c
+    , "active_scope"  .= configActiveScope c
+    , "active_env"    .= configActiveEnv c
+    , "engine"        .= configEngine c
     ]
 
 instance FromJSON Config where
-  parseJSON = Aeson.withObject "Config" $ \o -> Config
-    <$> o .:? "active_version"
-    <*> o .:? "active_scope"  .!= Local
-    <*> o .:? "active_env"    .!= "base"
-    <*> o .:? "engine"        .!= Podman
+  parseJSON = Aeson.withObject "Config" $ \o -> do
+    -- Backward compat: read old "active_version" if "active_target" absent
+    mTarget <- o .:? "active_target"
+    target <- case mTarget of
+      Just t  -> pure (Just t)
+      Nothing -> do
+        mVer <- o .:? "active_version"
+        pure (fmap TargetVersion mVer)
+    Config target
+      <$> o .:? "active_scope" .!= Local
+      <*> o .:? "active_env"   .!= "base"
+      <*> o .:? "engine"       .!= Podman
 
 -- | Default configuration for a fresh installation.
 defaultConfig :: Config
 defaultConfig = Config
-  { configActiveVersion = Nothing
-  , configActiveScope   = Local
-  , configActiveEnv     = "base"
-  , configEngine        = Podman
+  { configActiveTarget = Nothing
+  , configActiveScope  = Local
+  , configActiveEnv    = "base"
+  , configEngine       = Podman
   }
 
 -- | Per-version configuration. One file per installed morloc version.
@@ -244,6 +286,32 @@ instance FromJSON VersionConfig where
     <*> o .:  "host_dir"
     <*> o .:? "shm_size" .!= "512m"
     <*> o .:? "engine"   .!= Podman
+
+-- | Per-workspace configuration. Stored in @workspaces\/\<name\>\/config.json@.
+--
+-- A workspace is a mutable working area based on a versioned installation.
+-- It uses the base version's container image but has its own data directory.
+data WorkspaceConfig = WorkspaceConfig
+  { wsBaseVersion :: Version
+    -- ^ Which versioned installation provides the container image
+  , wsBaseScope :: Scope
+    -- ^ Scope where the base version is installed
+  , wsEngine :: ContainerEngine
+    -- ^ Container engine to use
+  } deriving (Show, Generic)
+
+instance ToJSON WorkspaceConfig where
+  toJSON wc = Aeson.object
+    [ "base_version" .= wsBaseVersion wc
+    , "base_scope"   .= wsBaseScope wc
+    , "engine"       .= wsEngine wc
+    ]
+
+instance FromJSON WorkspaceConfig where
+  parseJSON = Aeson.withObject "WorkspaceConfig" $ \o -> WorkspaceConfig
+    <$> o .:  "base_version"
+    <*> o .:? "base_scope" .!= Local
+    <*> o .:? "engine"     .!= Podman
 
 -- | Per-custom-environment configuration.
 --

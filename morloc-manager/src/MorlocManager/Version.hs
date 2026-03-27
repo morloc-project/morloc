@@ -44,6 +44,7 @@ module MorlocManager.Version
     -- * Discovery
   , listVersions
   , resolveActiveVersion
+  , resolveActiveTarget
   ) where
 
 import Data.Text (Text)
@@ -171,7 +172,7 @@ selectVersion scope ver = do
             Left _  -> defaultConfig
       -- Update with selected version
       let newCfg = baseCfg
-            { configActiveVersion = Just ver
+            { configActiveTarget = Just (TargetVersion ver)
             , configActiveScope = scope
             }
       writeConfig cfgPath newCfg
@@ -214,6 +215,16 @@ resolveActiveVersion = do
       Nothing  -> pure (Left NoActiveVersion)
       Just ver -> pure (Right (ver, configActiveScope cfg))
 
+-- | Resolve the currently active target (version or workspace).
+resolveActiveTarget :: IO (Either ManagerError (ActiveTarget, Scope))
+resolveActiveTarget = do
+  mCfg <- readActiveConfig
+  case mCfg of
+    Nothing -> pure (Left NoActiveVersion)
+    Just cfg -> case configActiveTarget cfg of
+      Nothing     -> pure (Left NoActiveVersion)
+      Just target -> pure (Right (target, configActiveScope cfg))
+
 -- | Remove an installed version. Removes:
 --
 --   * The container image (e.g., @ghcr.io\/morloc-project\/morloc\/morloc-full:0.68.0@)
@@ -241,9 +252,9 @@ uninstallVersion scope ver = do
       -- If this is the active version, clear it
       mCfg <- readActiveConfig
       case mCfg of
-        Just cfg | configActiveVersion cfg == Just ver -> do
+        Just cfg | configActiveTarget cfg == Just (TargetVersion ver) -> do
           cfgP <- configPath scope
-          let newCfg = cfg { configActiveVersion = Nothing }
+          let newCfg = cfg { configActiveTarget = Nothing }
           _ <- writeConfig cfgP newCfg
           hPutStrLn stderr "  Cleared active version"
         _ -> pure ()

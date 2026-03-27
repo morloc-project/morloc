@@ -68,6 +68,9 @@ module MorlocManager.Config
   , writeConfig
   , writeVersionConfig
   , writeEnvironmentConfig
+    -- * Reading workspace configuration
+  , readWorkspaceConfig
+  , writeWorkspaceConfig
     -- * Path utilities
   , configDir
   , configPath
@@ -77,12 +80,18 @@ module MorlocManager.Config
   , dataDir
   , versionDataDir
   , depsDir
+    -- * Workspace paths
+  , workspaceConfigDir
+  , workspaceConfigPath
+  , workspaceDataDir
+  , listWorkspaces
     -- * Flags files
   , readFlagsFile
   , globalFlagsPath
   , envFlagsPath
     -- * Scope utilities
   , findInstalledScope
+  , findWorkspaceScope
   , fixSystemPerms
   ) where
 
@@ -91,10 +100,14 @@ import System.IO.Error (isPermissionError, isDoesNotExistError)
 import Data.Aeson (ToJSON, FromJSON)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as BL
+import Data.Text (Text)
+import qualified Data.Text as Text
 import System.Directory
   ( createDirectoryIfMissing
+  , doesDirectoryExist
   , doesFileExist
   , getXdgDirectory
+  , listDirectory
   , XdgDirectory(..)
   , renameFile
   )
@@ -191,6 +204,61 @@ depsDir scope = do
   pure (dir </> "deps")
 
 -- ======================================================================
+-- Workspace paths
+-- ======================================================================
+
+-- | Configuration directory for a named workspace.
+--
+-- @
+--   ~/.config/morloc/workspaces/foo/
+-- @
+workspaceConfigDir :: Scope -> Text -> IO FilePath
+workspaceConfigDir scope name = do
+  dir <- configDir scope
+  pure (dir </> "workspaces" </> Text.unpack name)
+
+-- | Path to a workspace's config file.
+workspaceConfigPath :: Scope -> Text -> IO FilePath
+workspaceConfigPath scope name = do
+  dir <- workspaceConfigDir scope name
+  pure (dir </> "config.json")
+
+-- | Data directory for a named workspace.
+--
+-- @
+--   ~/.local/share/morloc/workspaces/foo/
+-- @
+workspaceDataDir :: Scope -> Text -> IO FilePath
+workspaceDataDir scope name = do
+  dir <- dataDir scope
+  pure (dir </> "workspaces" </> Text.unpack name)
+
+-- | List all workspaces for a given scope.
+--
+-- Scans the @workspaces\/@ directory for subdirectories that
+-- contain a valid @config.json@.
+listWorkspaces :: Scope -> IO [Text]
+listWorkspaces scope = do
+  dir <- configDir scope
+  let wsDir = dir </> "workspaces"
+  exists <- doesDirectoryExist wsDir
+  if not exists
+    then pure []
+    else do
+      entries <- listDirectory wsDir
+      installed <- filterM' (\e -> do
+        let cfgFile = wsDir </> e </> "config.json"
+        doesFileExist cfgFile
+        ) entries
+      pure (map Text.pack installed)
+  where
+    filterM' _ [] = pure []
+    filterM' p (x:xs) = do
+      ok <- p x
+      rest <- filterM' p xs
+      pure (if ok then x : rest else rest)
+
+-- ======================================================================
 -- Reading configuration
 -- ======================================================================
 
@@ -239,6 +307,18 @@ readEnvironmentConfig :: Scope -> Version -> String -> IO (Either ManagerError E
 readEnvironmentConfig scope ver envName = do
   path <- environmentConfigPath scope ver envName
   readConfig path
+
+-- | Read the configuration for a named workspace.
+readWorkspaceConfig :: Scope -> Text -> IO (Either ManagerError WorkspaceConfig)
+readWorkspaceConfig scope name = do
+  path <- workspaceConfigPath scope name
+  readConfig path
+
+-- | Write a workspace config file, creating parent directories as needed.
+writeWorkspaceConfig :: Scope -> Text -> WorkspaceConfig -> IO (Either ManagerError ())
+writeWorkspaceConfig scope name wc = do
+  path <- workspaceConfigPath scope name
+  writeConfig path wc
 
 -- ======================================================================
 -- Writing configuration
@@ -377,6 +457,20 @@ findInstalledScope ver = do
     Right _ -> pure (Just Local)
     Left _ -> do
       sysPath <- versionConfigPath System ver
+      sysResult <- try (BL.readFile sysPath) :: IO (Either IOException BL.ByteString)
+      case sysResult of
+        Right _ -> pure (Just System)
+        Left _  -> pure Nothing
+
+-- | Find which scope has a workspace, checking Local first.
+findWorkspaceScope :: Text -> IO (Maybe Scope)
+findWorkspaceScope name = do
+  localPath <- workspaceConfigPath Local name
+  localResult <- try (BL.readFile localPath) :: IO (Either IOException BL.ByteString)
+  case localResult of
+    Right _ -> pure (Just Local)
+    Left _ -> do
+      sysPath <- workspaceConfigPath System name
       sysResult <- try (BL.readFile sysPath) :: IO (Either IOException BL.ByteString)
       case sysResult of
         Right _ -> pure (Just System)

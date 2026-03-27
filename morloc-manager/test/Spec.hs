@@ -136,7 +136,7 @@ configJsonTests =
   [ testCase "Config JSON round-trip" $ withSystemTempDirectory "mm-test" $ \dir -> do
       let path = dir </> "config.json"
           cfg = Config
-            { configActiveVersion = Just (Version 0 67 0)
+            { configActiveTarget = Just (TargetVersion (Version 0 67 0))
             , configActiveScope = Local
             , configActiveEnv = "ml"
             , configEngine = Docker

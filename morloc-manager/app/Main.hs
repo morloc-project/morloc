@@ -42,9 +42,10 @@ import qualified Data.Version as DV
 import Options.Applicative
 import qualified Paths_morloc_manager as PMM
 import Control.Monad (when)
-import System.Directory (getCurrentDirectory, getHomeDirectory)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, getCurrentDirectory, getHomeDirectory)
+import System.Process (readProcessWithExitCode)
 import System.Exit (exitWith, ExitCode(..), exitFailure)
-import System.FilePath (normalise, addTrailingPathSeparator)
+import System.FilePath (normalise, addTrailingPathSeparator, (</>))
 import System.IO (Handle, hPutStrLn, hFlush, hIsTerminalDevice, stdin, stdout, stderr)
 
 import MorlocManager.Types
@@ -52,14 +53,19 @@ import MorlocManager.Config
   ( readActiveConfig
   , readVersionConfig
   , readEnvironmentConfig
+  , readWorkspaceConfig
+  , writeWorkspaceConfig
   , configDir
   , configPath
   , dataDir
   , versionDataDir
+  , workspaceDataDir
+  , listWorkspaces
   , readFlagsFile
   , globalFlagsPath
   , envFlagsPath
   , findInstalledScope
+  , findWorkspaceScope
   , writeConfig
   )
 import MorlocManager.Container
@@ -78,6 +84,7 @@ import MorlocManager.Version
   , uninstallVersion
   , listVersions
   , resolveActiveVersion
+  , resolveActiveTarget
   )
 import MorlocManager.Environment
   ( initEnvironment
@@ -108,6 +115,8 @@ data Command
     -- ^ Select an installed version as active
   | CmdInfo (Maybe Scope)
     -- ^ Show installed versions and configuration
+  | CmdNew String (Maybe Scope) (Maybe String) Bool
+    -- ^ Create a workspace (scope, name, fromVersion, copy)
   | CmdRun (Maybe Scope) Bool [String]
     -- ^ Run a command (scope, shell, args)
   | CmdEnv (Maybe Scope) EnvAction
@@ -187,6 +196,8 @@ commandParser = setupCmds <|> devCmds <|> deployCmds
     devCmds = hsubparser
       ( metavar ""
       <> commandGroup "Development"
+      <> command "new" (info newParser
+          (progDesc "Create a named workspace"))
       <> command "run" (info runParser
           (progDesc "Run a command in the active container"))
       <> command "env" (info envParser
@@ -244,6 +255,15 @@ envParser = CmdEnv
     envResetFlag = EnvReset <$ switch (long "reset" <> help "Reset to base environment")
     envActivateArg = EnvActivate <$> argument str
       (metavar "NAME" <> help "Activate (and build if needed) an environment")
+
+newParser :: Parser Command
+newParser = CmdNew
+  <$> argument str (metavar "NAME" <> help "Workspace name")
+  <*> scopeFlags
+  <*> optional (option str
+        ( long "from" <> metavar "VERSION"
+        <> help "Base version (default: currently active version)" ))
+  <*> switch (long "copy" <> help "Copy lib/fdb/bin from base version")
 
 freezeParser :: Parser Command
 freezeParser = CmdFreeze
@@ -377,21 +397,44 @@ dispatch mEngine verbose cmd = case cmd of
   -- ---- select ----
   CmdSelect mScope verStr -> do
     case parseVersion verStr of
-      Nothing  -> pure (Left (InvalidVersion verStr))
       Just ver -> do
-        -- Find which scope has this version
+        -- Treat as version
         scope <- case mScope of
           Just s  -> pure s
           Nothing -> do
             found <- findInstalledScope ver
             case found of
               Just s  -> pure s
-              Nothing -> pure Local  -- will fail with VersionNotInstalled
+              Nothing -> pure Local
         result <- selectVersion scope ver
         case result of
           Left err -> pure (Left err)
           Right () -> do
             info' stderr $ "Selected version " <> Text.unpack (showVersion ver)
+            pure (Right ())
+      Nothing -> do
+        -- Treat as workspace name
+        let wsName = Text.pack verStr
+        scope <- case mScope of
+          Just s  -> pure s
+          Nothing -> do
+            found <- findWorkspaceScope wsName
+            case found of
+              Just s  -> pure s
+              Nothing -> pure Local
+        -- Verify workspace exists
+        wcResult <- readWorkspaceConfig scope wsName
+        case wcResult of
+          Left _ -> pure (Left (InstallError ("Not found as version or workspace: " <> verStr)))
+          Right _ -> do
+            cfgP <- configPath scope
+            mCfg <- readActiveConfig
+            let cfg = maybe defaultConfig id mCfg
+            _ <- writeConfig cfgP (cfg
+              { configActiveTarget = Just (TargetWorkspace wsName)
+              , configActiveScope = scope
+              })
+            info' stderr $ "Selected workspace " <> verStr
             pure (Right ())
 
   -- ---- uninstall ----
@@ -483,6 +526,68 @@ dispatch mEngine verbose cmd = case cmd of
             info' stderr "Reset to base environment"
             pure (Right ())
 
+  -- ---- new ----
+  CmdNew name mScope mFromVer doCopy -> do
+    engine <- requireEngine mEngine
+    let scope = resolveScope mScope
+    -- Resolve base version
+    baseResult <- case mFromVer of
+      Just verStr -> case parseVersion verStr of
+        Nothing  -> pure (Left (InvalidVersion verStr))
+        Just ver -> do
+          mFoundScope <- findInstalledScope ver
+          case mFoundScope of
+            Nothing -> pure (Left (VersionNotInstalled ver))
+            Just foundScope -> pure (Right (ver, foundScope))
+      Nothing -> resolveActiveVersion
+    case baseResult of
+      Left err -> pure (Left err)
+      Right (baseVer, baseScope) -> do
+        -- Check workspace doesn't already exist
+        let wsName = Text.pack name
+        wDataDir <- workspaceDataDir scope wsName
+        exists <- doesDirectoryExist wDataDir
+        if exists
+          then pure (Left (InstallError ("Workspace already exists: " <> name)))
+          else do
+            -- Create workspace data directories
+            mapM_ (\d -> createDirectoryIfMissing True (wDataDir </> d))
+              ["bin", "lib", "fdb", "include", "opt", "tmp"]
+            -- Copy from base version if requested
+            when doCopy $ do
+              srcDir <- versionDataDir baseScope baseVer
+              let dirs = ["lib", "fdb", "bin"]
+              mapM_ (\d -> do
+                let src = srcDir </> d
+                let dst = wDataDir </> d
+                srcExists <- doesDirectoryExist src
+                when srcExists $ do
+                  -- Use cp -a for recursive copy
+                  _ <- readProcessWithExitCode "cp" ["-a", src <> "/.", dst] ""
+                  pure ()
+                ) dirs
+              info' stderr $ "Copied state from " <> Text.unpack (showVersion baseVer)
+            -- Write workspace config
+            let wc = WorkspaceConfig
+                  { wsBaseVersion = baseVer
+                  , wsBaseScope = baseScope
+                  , wsEngine = engine
+                  }
+            _ <- writeWorkspaceConfig scope wsName wc
+            -- Auto-activate
+            cfgP <- configPath scope
+            mCfg <- readActiveConfig
+            let cfg = maybe defaultConfig id mCfg
+            _ <- writeConfig cfgP (cfg
+              { configActiveTarget = Just (TargetWorkspace wsName)
+              , configActiveScope = scope
+              })
+            info' stderr $ "Created workspace: " <> name
+            info' stderr $ "Based on version " <> Text.unpack (showVersion baseVer)
+            -- Run morloc init in the workspace
+            info' stderr "Running morloc init -f..."
+            runInContainer engine verbose False ["morloc", "init", "-f"]
+
   -- ---- info ----
   CmdInfo _mScope -> do
     mCfg <- readActiveConfig
@@ -500,27 +605,32 @@ dispatch mEngine verbose cmd = case cmd of
         pure $ case eResult of { Right e -> displayEngine e; Left _ -> "not found" }
     cfgRoot <- configDir activeScope
     datRoot <- dataDir activeScope
+    let activeTarget = mCfg >>= configActiveTarget
     case mCfg of
       Nothing -> do
-        putStrLn   "Active version: none"
+        putStrLn   "Active:         none"
         putStrLn   "Active env:     base"
         putStrLn $ "Engine:         " <> Text.unpack engineStr
       Just cfg -> do
-        putStrLn $ "Active version: " <> Text.unpack (maybe "none" showVersion (configActiveVersion cfg))
+        let activeStr = case configActiveTarget cfg of
+              Nothing                  -> "none"
+              Just (TargetVersion v)   -> Text.unpack (showVersion v)
+              Just (TargetWorkspace w) -> Text.unpack w <> " (workspace)"
+        putStrLn $ "Active:         " <> activeStr
         putStrLn $ "Active env:     " <> Text.unpack (configActiveEnv cfg)
         putStrLn $ "Engine:         " <> Text.unpack (displayEngine (configEngine cfg))
     putStrLn $ "Scope:          " <> scopeStr
     putStrLn $ "SELinux:        " <> seStr
     putStrLn $ "Config root:    " <> cfgRoot
     putStrLn $ "Data root:      " <> datRoot
-    let activeVer = mCfg >>= configActiveVersion
+    -- List versions
     localVersions <- listVersions Local
     putStrLn ""
     putStrLn "Local versions:"
     if null localVersions
       then putStrLn "  (none)"
       else mapM_ (\v -> putStrLn $ "  " <> Text.unpack (showVersion v)
-            <> if Just v == activeVer && activeScope == Local then " (active)" else ""
+            <> if activeTarget == Just (TargetVersion v) && activeScope == Local then " (active)" else ""
           ) localVersions
     systemVersions <- listVersions System
     putStrLn ""
@@ -528,26 +638,64 @@ dispatch mEngine verbose cmd = case cmd of
     if null systemVersions
       then putStrLn "  (none)"
       else mapM_ (\v -> putStrLn $ "  " <> Text.unpack (showVersion v)
-            <> if Just v == activeVer && activeScope == System then " (active)" else ""
+            <> if activeTarget == Just (TargetVersion v) && activeScope == System then " (active)" else ""
           ) systemVersions
+    -- List workspaces
+    localWorkspaces <- listWorkspaces Local
+    putStrLn ""
+    putStrLn "Local workspaces:"
+    if null localWorkspaces
+      then putStrLn "  (none)"
+      else mapM_ (\w -> do
+            wcResult <- readWorkspaceConfig Local w
+            let baseStr = case wcResult of
+                  Right wc -> " (based on " <> Text.unpack (showVersion (wsBaseVersion wc)) <> ")"
+                  Left _   -> ""
+            putStrLn $ "  " <> Text.unpack w <> baseStr
+              <> if activeTarget == Just (TargetWorkspace w) && activeScope == Local then " (active)" else ""
+          ) localWorkspaces
+    systemWorkspaces <- listWorkspaces System
+    when (not (null systemWorkspaces)) $ do
+      putStrLn ""
+      putStrLn "System workspaces:"
+      mapM_ (\w -> do
+            wcResult <- readWorkspaceConfig System w
+            let baseStr = case wcResult of
+                  Right wc -> " (based on " <> Text.unpack (showVersion (wsBaseVersion wc)) <> ")"
+                  Left _   -> ""
+            putStrLn $ "  " <> Text.unpack w <> baseStr
+              <> if activeTarget == Just (TargetWorkspace w) && activeScope == System then " (active)" else ""
+          ) systemWorkspaces
     pure (Right ())
 
   -- ---- freeze ----
   CmdFreeze mScope mOutput -> do
     let scope = resolveScope mScope
         outputDir = maybe "./morloc-freeze" id mOutput
-    verResult <- resolveActiveVersion
-    case verResult of
+    targetResult <- resolveActiveTarget
+    case targetResult of
       Left err -> pure (Left err)
-      Right (ver, _) -> freeze scope ver outputDir
+      Right (target, activeScope) -> case target of
+        TargetVersion ver -> freeze activeScope ver outputDir
+        TargetWorkspace _name -> do
+          -- For workspaces, freeze uses the workspace data dir
+          -- but we need the base version for the manifest
+          -- For now, delegate to freeze with the base version
+          -- (freeze reads versionDataDir which won't match the workspace)
+          -- TODO: refactor freeze to accept a data dir path
+          pure (Left (InstallError "freeze from workspace not yet supported; select a version first"))
 
   -- ---- unfreeze ----
   CmdUnfreeze tarball tag mBase -> do
     engine <- requireEngine mEngine
-    verResult <- resolveActiveVersion
-    case verResult of
+    targetResult <- resolveActiveTarget
+    case targetResult of
       Left err -> pure (Left err)
-      Right (ver, _) -> buildServeImage engine tarball tag ver mBase
+      Right (target, _) -> do
+        let ver = case target of
+              TargetVersion v -> v
+              TargetWorkspace _ -> Version 0 0 0 -- fallback; --base should be used
+        buildServeImage engine tarball tag ver mBase
 
   -- ---- start ----
   CmdStart image ports -> do
@@ -585,20 +733,37 @@ runInContainer
   :: ContainerEngine -> Bool -> Bool -> [String]
   -> IO (Either ManagerError ())
 runInContainer engine verbose shell args = do
-  verResult <- resolveActiveVersion
-  case verResult of
+  targetResult <- resolveActiveTarget
+  case targetResult of
     Left err -> pure (Left err)
-    Right (ver, activeScope) -> do
-      let verScope = activeScope
-      vcResult <- readVersionConfig verScope ver
-      case vcResult of
+    Right (target, activeScope) -> do
+      -- Resolve version config (for image) and data dir based on target type
+      resolution <- case target of
+        TargetVersion ver -> do
+          vcResult <- readVersionConfig activeScope ver
+          case vcResult of
+            Left err -> pure (Left err)
+            Right vc -> do
+              dDir <- versionDataDir activeScope ver
+              pure (Right (vc, dDir, activeScope, ver))
+        TargetWorkspace name -> do
+          wcResult <- readWorkspaceConfig activeScope name
+          case wcResult of
+            Left err -> pure (Left err)
+            Right wc -> do
+              vcResult <- readVersionConfig (wsBaseScope wc) (wsBaseVersion wc)
+              case vcResult of
+                Left err -> pure (Left err)
+                Right vc -> do
+                  dDir <- workspaceDataDir activeScope name
+                  pure (Right (vc, dDir, wsBaseScope wc, wsBaseVersion wc))
+      case resolution of
         Left err -> pure (Left err)
-        Right vc -> do
+        Right (vc, vDataDir, verScope, ver) -> do
           mCfg <- readActiveConfig
           image <- resolveImage verScope ver vc mCfg
           seMode <- detectSELinux
           let suffix = volumeSuffix seMode
-          vDataDir <- versionDataDir verScope ver
           home <- getHomeDirectory
           cwd <- getCurrentDirectory
           let envName = maybe "base" (Text.unpack . configActiveEnv) mCfg
