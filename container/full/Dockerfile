@@ -13,6 +13,7 @@ COPY --from=morloc-bin /bin/morloc /bin/morloc
 WORKDIR $HOME
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/root/.local/bin:/root/.local/share/morloc/bin:${PATH}"
 
 RUN apt-get update
 

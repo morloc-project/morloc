@@ -40,6 +40,7 @@ LABEL org.opencontainers.image.description="Minimal morloc runtime for serving f
 LABEL org.opencontainers.image.licenses=Apache-2.0
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/root/.local/bin:/root/.local/share/morloc/bin:${PATH}"
 
 # Install language runtimes and build tools needed at runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \

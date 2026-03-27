@@ -140,7 +140,7 @@ buildServeImage' engine stateTarball tag ver mBase = do
             , "FROM " <> Text.unpack baseImage
             , ""
             , "# Ensure morloc binaries are on PATH"
-            , "ENV PATH=\"/root/.local/bin:${PATH}\""
+            , "ENV PATH=\"/root/.local/bin:/root/.local/share/morloc/bin:${PATH}\""
             , ""
             , "# Copy frozen morloc state (modules, manifests, binaries, pools)"
             , "COPY lib/ /root/.local/share/morloc/lib/"

@@ -982,7 +982,7 @@ runWithConfig engine verbose image vDataDir home cwd suffix shell args isInit sh
       workDir = if isInit then containerHome else cwd
       envVars =
         [ ("HOME", Text.pack containerHome)
-        , ("PATH", Text.pack containerHome <> "/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        , ("PATH", Text.pack containerHome <> "/.local/bin:" <> Text.pack containerHome <> "/.local/share/morloc/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
         ]
       cmd' = if shell then Just ["/bin/bash"]
             else if null args then Nothing
