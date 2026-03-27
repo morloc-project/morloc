@@ -22,7 +22,7 @@ A container engine: [Docker](https://docs.docker.com/engine/install/) (v20+)
 or [Podman](https://podman.io/docs/installation) (v3+). No Compose required.
 
 When both are installed, morloc-manager prefers **podman** (rootless by default).
-Override with `--container-engine docker`.
+Override with `morloc-manager setup --engine docker`.
 
 
 ## Installation
@@ -38,6 +38,13 @@ mv morloc-manager ~/.local/bin/
 
 The binary is fully static (no dependencies, runs on any Linux distribution).
 
+Configure the container engine (required before first use):
+
+```sh
+morloc-manager setup                    # interactive (auto-detects engines)
+morloc-manager setup --engine podman    # non-interactive
+```
+
 Then install a morloc version:
 
 ```sh
@@ -49,7 +56,8 @@ morloc-manager install 0.68.0   # specific version
 ## Quick start
 
 ```sh
-# Install morloc and required modules
+# Set up and install morloc
+morloc-manager setup
 morloc-manager install
 morloc-manager run -- morloc install root-py
 
@@ -235,12 +243,12 @@ What gets frozen:
   morloc   compiler binary
 ```
 
-### serve-image
+### unfreeze
 
 Build a minimal serve image from the frozen state.
 
 ```sh
-morloc-manager serve-image \
+morloc-manager unfreeze \
   --from ./morloc-freeze/state.tar.gz \
   --tag myservice:v1
 ```
@@ -253,14 +261,14 @@ The resulting image contains:
 - The morloc compiler binary (for `/eval` endpoint)
 - NO GHC, NO Stack, NO build tools
 
-### serve
+### start
 
 Run a serve container.
 
 ```sh
-morloc-manager serve myservice:v1                   # default: port 8080
-morloc-manager serve myservice:v1 -p 9090:8080      # custom port
-morloc-manager serve myservice:v1 -p 8080:8080 -p 9001:9001  # multiple ports
+morloc-manager start myservice:v1                   # default: port 8080
+morloc-manager start myservice:v1 -p 9090:8080      # custom port
+morloc-manager start myservice:v1 -p 8080:8080 -p 9001:9001  # multiple ports
 ```
 
 The container starts the morloc-nexus router, which exposes:
@@ -326,9 +334,8 @@ An agent cannot:
 ## Global options
 
 ```
---engine ENGINE   docker or podman (default: auto-detect, prefers podman)
---system          use system-wide installation
---local           use per-user installation (default)
+--scope SCOPE     local or system (default: local)
+-v, --verbose     print container commands to stderr before executing
 ```
 
 `--system` and `--local` are mutually exclusive. When neither is specified,

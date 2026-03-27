@@ -32,6 +32,7 @@ This manifest can be reviewed before deploying to production.
 module MorlocManager.Freeze
   ( -- * Freeze operation
     freeze
+  , freezeFromDir
     -- * Manifest
   , writeFreezeManifest
   , readFreezeManifest
@@ -52,7 +53,7 @@ import System.IO (hPutStrLn, hFlush, stderr)
 import System.Process (readProcessWithExitCode)
 
 import MorlocManager.Types
-import MorlocManager.Config (readVersionConfig, readActiveConfig, versionDataDir)
+import MorlocManager.Config (readVersionConfig, readActiveConfig, readEnvironmentConfig, versionDataDir, depsDir)
 
 -- | Freeze the installed morloc state into a tarball and manifest.
 --
@@ -66,8 +67,13 @@ import MorlocManager.Config (readVersionConfig, readActiveConfig, versionDataDir
 -- It does NOT freeze GHC, stack, or other build tooling.
 freeze :: Scope -> Version -> FilePath -> IO (Either ManagerError ())
 freeze scope ver outputDir = do
-  createDirectoryIfMissing True outputDir
   vDataDir <- versionDataDir scope ver
+  freezeFromDir scope ver vDataDir outputDir
+
+-- | Freeze from an arbitrary data directory (version or workspace).
+freezeFromDir :: Scope -> Version -> FilePath -> FilePath -> IO (Either ManagerError ())
+freezeFromDir scope ver vDataDir outputDir = do
+  createDirectoryIfMissing True outputDir
   exists <- doesDirectoryExist vDataDir
   if not exists
     then pure (Left (VersionNotInstalled ver))
@@ -95,9 +101,37 @@ freeze scope ver outputDir = do
           let baseImg = case vcResult of
                 Right vc -> vcImage vc
                 Left _   -> "unknown"
-              envLyr = case mCfg of
-                Just cfg | configActiveEnv cfg /= "base" -> Just (configActiveEnv cfg)
-                _ -> Nothing
+          -- Capture full env layer info for reproducible unfreeze
+          envLyr <- case mCfg of
+            Just cfg | configActiveEnv cfg /= "base" -> do
+              let envName = configActiveEnv cfg
+              -- Read Dockerfile contents
+              deps <- depsDir scope
+              let dfPath = deps </> Text.unpack envName <> ".Dockerfile"
+              dfExists <- doesFileExist dfPath
+              if not dfExists
+                then pure Nothing
+                else do
+                  dfContents <- readFile dfPath
+                  -- Read content hash from EnvironmentConfig
+                  ecResult <- readEnvironmentConfig scope ver (Text.unpack envName)
+                  let contentHash = case ecResult of
+                        Right ec -> maybe "" id (ecContentHash ec)
+                        Left _   -> ""
+                  -- Query image digest from container engine
+                  let envImageTag = "morloc-env:" <> Text.unpack (showVersion ver) <> "-" <> Text.unpack envName
+                  (digestCode, digestOut, _) <- readProcessWithExitCode "docker"
+                    ["inspect", "--format", "{{index .RepoDigests 0}}", envImageTag] ""
+                  let imageDigest = case digestCode of
+                        ExitSuccess -> Just (Text.pack (strip' digestOut))
+                        _           -> Nothing
+                  pure (Just FrozenEnvLayer
+                    { felName = envName
+                    , felDockerfile = Text.pack dfContents
+                    , felContentHash = contentHash
+                    , felImageDigest = imageDigest
+                    })
+            _ -> pure Nothing
           let manifest = FreezeManifest
                 { fmMorlocVersion = ver
                 , fmFrozenAt      = now
@@ -243,6 +277,12 @@ hexEncode bs = Text.pack (concatMap byteToHex (BS.unpack bs))
 
 hasSuffix :: String -> String -> Bool
 hasSuffix suffix str = drop (length str - length suffix) str == suffix
+
+-- | Strip trailing whitespace/newlines.
+strip' :: String -> String
+strip' = reverse . dropWhile isSpace' . reverse . dropWhile isSpace'
+  where
+    isSpace' c = c == ' ' || c == '\n' || c == '\r' || c == '\t'
 
 stripSuffix :: String -> String -> String
 stripSuffix suffix str

@@ -191,7 +191,7 @@ configJsonTests =
             , fmModules = [ModuleEntry "math" (Just "0.3.0") "abc123"]
             , fmPrograms = [ProgramEntry "svc" ["hello", "compute"]]
             , fmBaseImage = "morloc-full:0.67.0"
-            , fmEnvLayer = Just "ml"
+            , fmEnvLayer = Just (FrozenEnvLayer "ml" "FROM scratch" "abc" Nothing)
             }
       _ <- writeConfig path fm
       readBack <- readConfig path :: IO (Either ManagerError FreezeManifest)

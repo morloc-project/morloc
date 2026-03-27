@@ -234,11 +234,11 @@ containerPull engine image = do
   runProcessPassStderr exe ["pull", Text.unpack image]
 
 -- | Stop a running container by name or ID.
-containerStop :: ContainerEngine -> Text -> IO ExitCode
+containerStop :: ContainerEngine -> Text -> IO (ExitCode, Text)
 containerStop engine nameOrId = do
   let exe = engineExecutable engine
-  (code, _, _) <- runProcess exe ["stop", Text.unpack nameOrId]
-  pure code
+  (code, _, err') <- runProcess exe ["stop", Text.unpack nameOrId]
+  pure (code, err')
 
 -- | Remove a container by name or ID.
 containerRemove :: ContainerEngine -> Text -> IO ExitCode

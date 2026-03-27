@@ -42,6 +42,8 @@ import qualified Data.Version as DV
 import Options.Applicative
 import qualified Paths_morloc_manager as PMM
 import Control.Monad (when)
+import Control.Exception (SomeException, IOException, try, displayException)
+import Control.Concurrent (threadDelay)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, findExecutable, getCurrentDirectory, getHomeDirectory)
 import System.Process (readProcessWithExitCode)
 import System.Exit (exitWith, ExitCode(..), exitFailure)
@@ -75,7 +77,7 @@ import MorlocManager.Container
   , defaultRunConfig
   , containerRunPassthrough
   )
-import MorlocManager.Freeze (freeze)
+import MorlocManager.Freeze (freeze, freezeFromDir)
 import MorlocManager.Serve (buildServeImage, runServeContainer, stopServeContainer, listServeContainers, streamServeLogs)
 import MorlocManager.SELinux (SELinuxMode(..), detectSELinux, volumeSuffix, validateMountPath)
 import MorlocManager.Version
@@ -107,8 +109,8 @@ data GlobalOpts = GlobalOpts
 
 -- | Parsed subcommand with its arguments.
 data Command
-  = CmdSetup (Maybe Scope)
-    -- ^ Configure engine for a scope (interactive)
+  = CmdSetup (Maybe Scope) (Maybe ContainerEngine)
+    -- ^ Configure engine for a scope (interactive or via --engine flag)
   | CmdInstall (Maybe Scope) (Maybe String) Bool Bool
     -- ^ Install a version (scope, version, noInit, force)
   | CmdUninstall (Maybe Scope) Bool [String]
@@ -226,7 +228,9 @@ commandParser = setupCmds <|> devCmds <|> deployCmds
       )
 
 setupParser :: Parser Command
-setupParser = CmdSetup <$> scopeOverride
+setupParser = CmdSetup <$> scopeOverride <*> optional (option engineReader
+  ( long "engine" <> metavar "ENGINE"
+  <> help "Container engine: podman or docker (skip interactive prompt)" ))
 
 installParser :: Parser Command
 installParser = CmdInstall
@@ -322,10 +326,14 @@ engineReader = eitherReader $ \s -> case s of
 main :: IO ()
 main = do
   (globalOpts, cmd) <- execParser optsParser
-  result <- dispatch (globalVerbose globalOpts) cmd
+  result <- try (dispatch (globalVerbose globalOpts) cmd)
+    :: IO (Either SomeException (Either ManagerError ()))
   case result of
-    Right () -> pure ()
-    Left err -> do
+    Left exc -> do
+      TextIO.hPutStrLn stderr $ "Error: " <> Text.pack (displayException exc)
+      exitWith (ExitFailure 1)
+    Right (Right ()) -> pure ()
+    Right (Left err) -> do
       TextIO.hPutStrLn stderr (renderError err)
       case err of
         EngineError _ n _ -> exitWith (ExitFailure n)
@@ -335,6 +343,23 @@ main = do
 resolveScope :: Maybe Scope -> Scope
 resolveScope (Just s) = s
 resolveScope Nothing  = Local
+
+-- | Resolve the active version, falling back to a workspace's base version.
+resolveActiveVersionOrWorkspace :: IO (Either ManagerError (Version, Scope))
+resolveActiveVersionOrWorkspace = do
+  result <- resolveActiveVersion
+  case result of
+    Right v -> pure (Right v)
+    Left NoActiveVersion -> do
+      targetResult <- resolveActiveTarget
+      case targetResult of
+        Right (TargetWorkspace name, scope) -> do
+          wcResult <- readWorkspaceConfig scope name
+          case wcResult of
+            Right wc -> pure (Right (wsBaseVersion wc, wsBaseScope wc))
+            Left err -> pure (Left err)
+        _ -> pure (Left NoActiveVersion)
+    Left err -> pure (Left err)
 
 -- | Get engine from active config (local-first, system fallback).
 -- Auto-triggers interactive setup if no config exists and stdin is a TTY.
@@ -402,6 +427,23 @@ runInteractiveSetup scope = do
           info' stderr ""
           pure (Right ())
 
+-- | Non-interactive setup: write config with the given engine directly.
+runNonInteractiveSetup :: Scope -> ContainerEngine -> IO (Either ManagerError ())
+runNonInteractiveSetup scope eng = do
+  cfgP <- configPath scope
+  mExisting <- readConfig cfgP
+  let baseCfg = case (mExisting :: Either ManagerError Config) of
+        Right c -> c
+        Left _  -> defaultConfig
+  result <- writeConfig cfgP (baseCfg { configEngine = eng, configActiveScope = scope })
+  case result of
+    Left err -> pure (Left err)
+    Right () -> do
+      info' stderr $ "  Engine: " <> Text.unpack (displayEngine eng)
+      info' stderr $ "  Config: " <> cfgP
+      info' stderr ""
+      pure (Right ())
+
 -- | Detect available engines and prompt user to choose if both found.
 interactiveEngineChoice :: IO (Either ManagerError ContainerEngine)
 interactiveEngineChoice = do
@@ -421,19 +463,25 @@ interactiveEngineChoice = do
       hPutStrLn stderr "  [2] docker"
       hPutStr stderr "Choose [1]: "
       hFlush stderr
-      line <- getLine
-      case line of
-        "2" -> pure (Right Docker)
-        _   -> pure (Right Podman)
+      lineResult <- try getLine :: IO (Either IOException String)
+      case lineResult of
+        Left _ -> do
+          hPutStrLn stderr ""
+          hPutStrLn stderr "Non-interactive input detected, defaulting to podman."
+          pure (Right Podman)
+        Right "2" -> pure (Right Docker)
+        Right _   -> pure (Right Podman)
 
 -- | Dispatch a parsed command to its handler.
 dispatch :: Bool -> Command -> IO (Either ManagerError ())
 dispatch verbose cmd = case cmd of
 
   -- ---- setup ----
-  CmdSetup mScope -> do
+  CmdSetup mScope mEngine -> do
     let scope = resolveScope mScope
-    runInteractiveSetup scope
+    case mEngine of
+      Just eng -> runNonInteractiveSetup scope eng
+      Nothing  -> runInteractiveSetup scope
 
   -- ---- install ----
   CmdInstall mScope mVerStr noInit force -> do
@@ -501,7 +549,7 @@ dispatch verbose cmd = case cmd of
         let scope = maybe Local id found
         wcResult <- readWorkspaceConfig scope wsName
         case wcResult of
-          Left _ -> pure (Left (InstallError ("Not found as version or workspace: " <> verStr)))
+          Left _ -> pure (Left (InvalidVersion ("Not found as version or workspace: " <> verStr)))
           Right _ -> do
             cfgP <- configPath scope
             mCfg <- readActiveConfig
@@ -575,7 +623,7 @@ dispatch verbose cmd = case cmd of
         case engineResult of
           Left err -> pure (Left err)
           Right engine -> do
-            verResult <- resolveActiveVersion
+            verResult <- resolveActiveVersionOrWorkspace
             case verResult of
               Left err -> pure (Left err)
               Right (ver, _) -> do
@@ -591,7 +639,7 @@ dispatch verbose cmd = case cmd of
                         pure (Right ())
 
       EnvList -> do
-        verResult <- resolveActiveVersion
+        verResult <- resolveActiveVersionOrWorkspace
         case verResult of
           Left err -> pure (Left err)
           Right (ver, _) -> do
@@ -758,13 +806,13 @@ dispatch verbose cmd = case cmd of
       Left err -> pure (Left err)
       Right (target, activeScope) -> case target of
         TargetVersion ver -> freeze activeScope ver outputDir
-        TargetWorkspace _name -> do
-          -- For workspaces, freeze uses the workspace data dir
-          -- but we need the base version for the manifest
-          -- For now, delegate to freeze with the base version
-          -- (freeze reads versionDataDir which won't match the workspace)
-          -- TODO: refactor freeze to accept a data dir path
-          pure (Left (InstallError "freeze from workspace not yet supported; select a version first"))
+        TargetWorkspace name -> do
+          wcResult <- readWorkspaceConfig activeScope name
+          case wcResult of
+            Left err -> pure (Left err)
+            Right wc -> do
+              wsDir <- workspaceDataDir activeScope name
+              freezeFromDir activeScope (wsBaseVersion wc) wsDir outputDir
 
   -- ---- unfreeze ----
   CmdUnfreeze tarball tag mBase -> do
@@ -787,7 +835,7 @@ dispatch verbose cmd = case cmd of
     case engineResult of
       Left err -> pure (Left err)
       Right engine -> do
-        let containerName = "morloc-serve-" <> image
+        let containerName = "morloc-serve-" <> Text.replace ":" "-" image
             portMappings = if null ports then [(8080, 8080)] else ports
         runServeContainer engine image containerName portMappings
 

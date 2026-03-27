@@ -56,6 +56,7 @@ module MorlocManager.Types
   , EnvironmentConfig(..)
     -- * Freeze manifest
   , FreezeManifest(..)
+  , FrozenEnvLayer(..)
   , ModuleEntry(..)
   , ProgramEntry(..)
     -- * Errors
@@ -63,7 +64,7 @@ module MorlocManager.Types
   , renderError
   ) where
 
-import Data.Aeson (ToJSON(..), FromJSON(..), (.=), (.:), (.:?), (.!=))
+import Data.Aeson (ToJSON(..), FromJSON(..), Value(..), (.=), (.:), (.:?), (.!=))
 import qualified Data.Aeson as Aeson
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -374,9 +375,37 @@ data FreezeManifest = FreezeManifest
     -- ^ Compiled programs with their exported command names
   , fmBaseImage :: Text
     -- ^ Container base image reference used during build
-  , fmEnvLayer :: Maybe Text
-    -- ^ Custom dependency layer name, if one was active during build
+  , fmEnvLayer :: Maybe FrozenEnvLayer
+    -- ^ Custom dependency layer with Dockerfile for reproducible rebuild
   } deriving (Show, Generic)
+
+-- | A frozen snapshot of a custom dependency environment.
+-- Contains everything needed to reproduce the environment image.
+data FrozenEnvLayer = FrozenEnvLayer
+  { felName :: Text
+    -- ^ Environment name (e.g., @"myenv"@)
+  , felDockerfile :: Text
+    -- ^ Full Dockerfile contents for rebuilding
+  , felContentHash :: Text
+    -- ^ SHA-256 of the Dockerfile at freeze time
+  , felImageDigest :: Maybe Text
+    -- ^ Container image digest (sha256:...) if available
+  } deriving (Show, Generic)
+
+instance ToJSON FrozenEnvLayer where
+  toJSON fel = Aeson.object
+    [ "name"         .= felName fel
+    , "dockerfile"   .= felDockerfile fel
+    , "content_hash" .= felContentHash fel
+    , "image_digest" .= felImageDigest fel
+    ]
+
+instance FromJSON FrozenEnvLayer where
+  parseJSON = Aeson.withObject "FrozenEnvLayer" $ \o -> FrozenEnvLayer
+    <$> o .:  "name"
+    <*> o .:  "dockerfile"
+    <*> o .:  "content_hash"
+    <*> o .:? "image_digest"
 
 instance ToJSON FreezeManifest where
   toJSON fm = Aeson.object
@@ -389,13 +418,19 @@ instance ToJSON FreezeManifest where
     ]
 
 instance FromJSON FreezeManifest where
-  parseJSON = Aeson.withObject "FreezeManifest" $ \o -> FreezeManifest
-    <$> o .:  "morloc_version"
-    <*> o .:  "frozen_at"
-    <*> o .:  "modules"
-    <*> o .:  "programs"
-    <*> o .:  "base_image"
-    <*> o .:? "env_layer"
+  parseJSON = Aeson.withObject "FreezeManifest" $ \o -> do
+    ver     <- o .:  "morloc_version"
+    frozen  <- o .:  "frozen_at"
+    mods    <- o .:  "modules"
+    progs   <- o .:  "programs"
+    baseImg <- o .:  "base_image"
+    -- Backward compat: env_layer can be null, a string (old), or an object (new)
+    mEnvRaw <- o .:? "env_layer"
+    envLayer <- case mEnvRaw of
+      Nothing             -> pure Nothing
+      Just (Aeson.String _) -> pure Nothing  -- old format: just a name, can't recover
+      Just obj            -> Just <$> Aeson.parseJSON obj
+    pure (FreezeManifest ver frozen mods progs baseImg envLayer)
 
 -- | An installed morloc module recorded in a freeze manifest.
 data ModuleEntry = ModuleEntry
