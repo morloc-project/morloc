@@ -111,17 +111,17 @@ data GlobalOpts = GlobalOpts
 data Command
   = CmdSetup (Maybe Scope) (Maybe ContainerEngine)
     -- ^ Configure engine for a scope (interactive or via --engine flag)
-  | CmdInstall (Maybe Scope) (Maybe String) Bool Bool
+  | CmdInstall (Maybe String) (Maybe Scope) Bool Bool
     -- ^ Install a version (scope, version, noInit, force)
-  | CmdUninstall (Maybe Scope) Bool [String]
+  | CmdUninstall [String] (Maybe Scope) Bool
     -- ^ Uninstall versions (scope, removeAll, versions)
   | CmdSelect String
     -- ^ Select an installed version or workspace as active
   | CmdInfo
     -- ^ Show installed versions and configuration
-  | CmdNew (Maybe Scope) String (Maybe String) Bool
+  | CmdNew String (Maybe Scope) (Maybe String) Bool
     -- ^ Create a workspace (scope, name, fromVersion, copy)
-  | CmdRun Bool [String]
+  | CmdRun [String] Bool
     -- ^ Run a command (shell, args)
   | CmdEnv EnvAction
     -- ^ Environment management
@@ -234,8 +234,8 @@ setupParser = CmdSetup <$> scopeOverride <*> optional (option engineReader
 
 installParser :: Parser Command
 installParser = CmdInstall
-  <$> scopeOverride
-  <*> optional (argument str (metavar "VERSION" <> help "Version to install (default: latest)"))
+  <$> optional (argument str (metavar "VERSION" <> help "Version to install (default: latest)"))
+  <*> scopeOverride
   <*> switch (long "no-init" <> help "Skip morloc init after install")
   <*> switch (long "force" <> short 'f' <> help "Force re-install even if version is already installed")
 
@@ -245,18 +245,18 @@ selectParser = CmdSelect
 
 uninstallParser :: Parser Command
 uninstallParser = CmdUninstall
-  <$> scopeOverride
+  <$> many (argument str (metavar "VERSION..." <> help "Version(s) to remove"))
+  <*> scopeOverride
   <*> switch (long "all" <> short 'a' <> help "Remove all installed versions")
-  <*> many (argument str (metavar "VERSION..." <> help "Version(s) to remove"))
 
 runParser :: Parser Command
 runParser = CmdRun
-  <$> switch (long "shell" <> help "Start an interactive shell")
-  <*> many (argument str (metavar "COMMAND..." <> help "Command to run inside the container"))
+  <$> many (argument str (metavar "COMMAND..." <> help "Command to run inside the container"))
+  <*> switch (long "shell" <> help "Start an interactive shell")
 
 envParser :: Parser Command
 envParser = CmdEnv
-  <$> (envInitFlag <|> envListFlag <|> envResetFlag <|> envActivateArg)
+  <$> (envActivateArg <|> envListFlag <|> envResetFlag <|> envInitFlag)
   where
     envInitFlag = EnvInit <$> option str
       (long "init" <> metavar "NAME" <> help "Create a new environment Dockerfile")
@@ -267,8 +267,8 @@ envParser = CmdEnv
 
 newParser :: Parser Command
 newParser = CmdNew
-  <$> scopeOverride
-  <*> argument str (metavar "NAME" <> help "Workspace name")
+  <$> argument str (metavar "NAME" <> help "Workspace name")
+  <*> scopeOverride
   <*> optional (option str
         ( long "from" <> metavar "VERSION"
         <> help "Base version (default: currently active version)" ))
@@ -484,7 +484,7 @@ dispatch verbose cmd = case cmd of
       Nothing  -> runInteractiveSetup scope
 
   -- ---- install ----
-  CmdInstall mScope mVerStr noInit force -> do
+  CmdInstall mVerStr mScope noInit force -> do
     let scope = resolveScope mScope
     engineResult <- ensureEngineForScope scope
     case engineResult of
@@ -551,7 +551,7 @@ dispatch verbose cmd = case cmd of
             pure (Right ())
 
   -- ---- uninstall ----
-  CmdUninstall mScope removeAll verStrs -> do
+  CmdUninstall verStrs mScope removeAll -> do
     if not removeAll && null verStrs
       then pure (Left (UninstallError "No versions specified. Use VERSION... or --all."))
       else do
@@ -575,7 +575,7 @@ dispatch verbose cmd = case cmd of
                 pure (Right ())
 
   -- ---- run ----
-  CmdRun shell args -> do
+  CmdRun args shell -> do
     engineResult <- ensureEngine
     case engineResult of
       Left err -> pure (Left err)
@@ -648,7 +648,7 @@ dispatch verbose cmd = case cmd of
             pure (Right ())
 
   -- ---- new ----
-  CmdNew mScope name mFromVer doCopy -> do
+  CmdNew name mScope mFromVer doCopy -> do
     let scope = resolveScope mScope
     engineResult <- ensureEngineForScope scope
     case engineResult of
