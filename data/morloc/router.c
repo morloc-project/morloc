@@ -250,6 +250,9 @@ daemon_response_t* router_forward(
         case DAEMON_HEALTH:   json_write_string(jb, "health"); break;
         case DAEMON_EVAL:      json_write_string(jb, "eval"); break;
         case DAEMON_TYPECHECK: json_write_string(jb, "typecheck"); break;
+        case DAEMON_BIND:      json_write_string(jb, "bind"); break;
+        case DAEMON_BINDINGS:  json_write_string(jb, "bindings"); break;
+        case DAEMON_UNBIND:    json_write_string(jb, "unbind"); break;
     }
 
     if (request->command) {

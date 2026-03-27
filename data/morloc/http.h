@@ -10,6 +10,7 @@
 typedef enum {
     HTTP_GET,
     HTTP_POST,
+    HTTP_DELETE,
     HTTP_OPTIONS
 } http_method_t;
 

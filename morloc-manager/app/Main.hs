@@ -13,22 +13,23 @@ the appropriate subcommand handler.
 
   morloc-manager [--engine docker|podman] [-v|--verbose] \<subcommand\>
 
-  Subcommands:
-    install [--no-init] [--force] [--system|--local] [VERSION]
-    select  [--system|--local] \<VERSION\>
+  Setup:
+    install   [--no-init] [--force] [--system|--local] [VERSION]
     uninstall [--system|--local] [--all] VERSION...
-    run     [--system|--local] [--shell] [--] COMMAND...
-    env     [--system|--local] [--init NAME|--list|--reset|NAME]
-    info    [--system|--local]
-    build   [--system|--local] [--shell] [--script FILE]
-    freeze  [--system|--local] [-o PATH]
-    serve-image --from TARBALL --tag TAG [--base IMAGE]
-    serve   IMAGE [-p HOST:CONTAINER]
-    stop    NAME
+    select    [--system|--local] \<VERSION\>
+    info      [--system|--local]
+
+  Development:
+    run       [--system|--local] [--shell] [--] COMMAND...
+    env       [--system|--local] [--init NAME|--list|--reset|NAME]
+
+  Deployment:
+    start     IMAGE [-p HOST:CONTAINER]
+    stop      NAME
+    freeze    [--system|--local] [-o PATH]
+    unfreeze  --from TARBALL --tag TAG [--base IMAGE]
     status
-    logs    NAME [-f|--follow]
-    version
-    list    [--system|--local]               (alias for info)
+    logs      NAME [-f|--follow]
 @
 -}
 
@@ -37,7 +38,9 @@ module Main (main) where
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
+import qualified Data.Version as DV
 import Options.Applicative
+import qualified Paths_morloc_manager as PMM
 import Control.Monad (when)
 import System.Directory (getCurrentDirectory, getHomeDirectory)
 import System.Exit (exitWith, ExitCode(..), exitFailure)
@@ -99,32 +102,28 @@ data GlobalOpts = GlobalOpts
 data Command
   = CmdInstall (Maybe Scope) (Maybe String) Bool Bool
     -- ^ Install a version (scope, version, noInit, force)
-  | CmdSelect (Maybe Scope) String
-    -- ^ Select an installed version as active
   | CmdUninstall (Maybe Scope) Bool [String]
     -- ^ Uninstall versions (scope, removeAll, versions)
+  | CmdSelect (Maybe Scope) String
+    -- ^ Select an installed version as active
+  | CmdInfo (Maybe Scope)
+    -- ^ Show installed versions and configuration
   | CmdRun (Maybe Scope) Bool [String]
     -- ^ Run a command (scope, shell, args)
   | CmdEnv (Maybe Scope) EnvAction
     -- ^ Environment management
-  | CmdInfo (Maybe Scope)
-    -- ^ Show installed versions and configuration
-  | CmdBuild (Maybe Scope) Bool (Maybe FilePath)
-    -- ^ Start a mutable builder container (scope, shell, script)
-  | CmdFreeze (Maybe Scope) (Maybe FilePath)
-    -- ^ Export installed state as frozen artifact (scope, output path)
-  | CmdServeImage FilePath Text (Maybe Text)
-    -- ^ Build a serve image (tarball, tag, base image override)
-  | CmdServe Text [(Int,Int)]
-    -- ^ Run a serve container (image tag, port mappings)
+  | CmdStart Text [(Int,Int)]
+    -- ^ Start a serve container (image tag, port mappings)
   | CmdStop Text
     -- ^ Stop a running serve container
+  | CmdFreeze (Maybe Scope) (Maybe FilePath)
+    -- ^ Export installed state as frozen artifact (scope, output path)
+  | CmdUnfreeze FilePath Text (Maybe Text)
+    -- ^ Build a serve image from frozen state (tarball, tag, base image)
   | CmdStatus
     -- ^ List running serve containers
   | CmdLogs Text Bool
     -- ^ Show logs from a serve container (name, follow)
-  | CmdVersion
-    -- ^ Print morloc-manager version
   deriving (Show)
 
 -- | Sub-actions for the @env@ subcommand.
@@ -144,11 +143,15 @@ data EnvAction
 -- ======================================================================
 
 optsParser :: ParserInfo (GlobalOpts, Command)
-optsParser = info (helper <*> ((,) <$> globalOptsParser <*> commandParser))
+optsParser = info (helper <*> versionFlag <*> ((,) <$> globalOptsParser <*> commandParser))
   ( fullDesc
   <> header "morloc-manager - container lifecycle manager for Morloc"
   <> progDesc "Manage containerized Morloc installations, dependency layers, and deployments"
   )
+
+versionFlag :: Parser (a -> a)
+versionFlag = infoOption ("morloc-manager v" <> DV.showVersion PMM.version)
+  ( long "version" <> help "Print version and exit" )
 
 globalOptsParser :: Parser GlobalOpts
 globalOptsParser = GlobalOpts
@@ -168,38 +171,43 @@ scopeFlags =
   <|> pure Nothing
 
 commandParser :: Parser Command
-commandParser = hsubparser
-  ( command "install" (info installParser
-      (progDesc "Install a morloc version"))
-  <> command "select" (info selectParser
-      (progDesc "Set an installed version as the active version"))
-  <> command "uninstall" (info uninstallParser
-      (progDesc "Remove version config, data, and container image"))
-  <> command "run" (info runParser
-      (progDesc "Run a command inside the active morloc container"))
-  <> command "env" (info envParser
-      (progDesc "Manage custom dependency environments"))
-  <> command "info" (info (CmdInfo <$> scopeFlags)
-      (progDesc "Show installed versions and current configuration"))
-  <> command "list" (info (CmdInfo <$> scopeFlags)
-      (progDesc "Show installed versions and current configuration (alias for info)"))
-  <> command "build" (info buildParser
-      (progDesc "Start a mutable builder container"))
-  <> command "freeze" (info freezeParser
-      (progDesc "Export installed state as a frozen artifact"))
-  <> command "serve-image" (info serveImageParser
-      (progDesc "Build an immutable serve image from frozen state"))
-  <> command "serve" (info serveParser
-      (progDesc "Run a serve container with the nexus router"))
-  <> command "stop" (info stopParser
-      (progDesc "Stop a running serve container"))
-  <> command "status" (info (pure CmdStatus)
-      (progDesc "List running morloc serve containers"))
-  <> command "logs" (info logsParser
-      (progDesc "Show logs from a serve container"))
-  <> command "version" (info (pure CmdVersion)
-      (progDesc "Print morloc-manager version"))
-  )
+commandParser = setupCmds <|> devCmds <|> deployCmds
+  where
+    setupCmds = hsubparser
+      ( commandGroup "Setup"
+      <> command "install" (info installParser
+          (progDesc "Install a morloc version"))
+      <> command "uninstall" (info uninstallParser
+          (progDesc "Remove a version"))
+      <> command "select" (info selectParser
+          (progDesc "Set the active version"))
+      <> command "info" (info (CmdInfo <$> scopeFlags)
+          (progDesc "Show configuration and installed versions"))
+      )
+    devCmds = hsubparser
+      ( metavar ""
+      <> commandGroup "Development"
+      <> command "run" (info runParser
+          (progDesc "Run a command in the active container"))
+      <> command "env" (info envParser
+          (progDesc "Manage dependency environments"))
+      )
+    deployCmds = hsubparser
+      ( metavar ""
+      <> commandGroup "Deployment"
+      <> command "start" (info startParser
+          (progDesc "Start a serve container"))
+      <> command "stop" (info stopParser
+          (progDesc "Stop a running serve container"))
+      <> command "freeze" (info freezeParser
+          (progDesc "Export installed state as a frozen artifact"))
+      <> command "unfreeze" (info unfreezeParser
+          (progDesc "Build a serve image from frozen state"))
+      <> command "status" (info (pure CmdStatus)
+          (progDesc "List running serve containers"))
+      <> command "logs" (info logsParser
+          (progDesc "Show logs from a serve container"))
+      )
 
 installParser :: Parser Command
 installParser = CmdInstall
@@ -237,14 +245,6 @@ envParser = CmdEnv
     envActivateArg = EnvActivate <$> argument str
       (metavar "NAME" <> help "Activate (and build if needed) an environment")
 
-buildParser :: Parser Command
-buildParser = CmdBuild
-  <$> scopeFlags
-  <*> switch (long "shell" <> help "Start an interactive shell (default: run --script)")
-  <*> optional (option str
-        ( long "script" <> metavar "FILE"
-        <> help "Build script to run inside the container" ))
-
 freezeParser :: Parser Command
 freezeParser = CmdFreeze
   <$> scopeFlags
@@ -252,15 +252,15 @@ freezeParser = CmdFreeze
         ( long "output" <> short 'o' <> metavar "PATH"
         <> help "Output directory for frozen state (default: ./morloc-freeze/)" ))
 
-serveImageParser :: Parser Command
-serveImageParser = CmdServeImage
+unfreezeParser :: Parser Command
+unfreezeParser = CmdUnfreeze
   <$> option str (long "from" <> metavar "TARBALL" <> help "Path to state.tar.gz from freeze")
   <*> option (Text.pack <$> str) (long "tag" <> short 't' <> metavar "TAG" <> help "Image tag")
   <*> optional (option (Text.pack <$> str)
         (long "base" <> metavar "IMAGE" <> help "Base image override (default: morloc-serve:<ver>)"))
 
-serveParser :: Parser Command
-serveParser = CmdServe
+startParser :: Parser Command
+startParser = CmdStart
   <$> argument (Text.pack <$> str) (metavar "IMAGE" <> help "Serve image tag")
   <*> many (option portReader
         ( long "port" <> short 'p' <> metavar "HOST:CONTAINER"
@@ -532,12 +532,6 @@ dispatch mEngine verbose cmd = case cmd of
           ) systemVersions
     pure (Right ())
 
-  -- ---- build ----
-  CmdBuild _mScope shell mScript -> do
-    engine <- requireEngine mEngine
-    let args' = case mScript of { Just s -> ["bash", s]; Nothing -> [] }
-    runInContainer engine verbose (shell || null args') args'
-
   -- ---- freeze ----
   CmdFreeze mScope mOutput -> do
     let scope = resolveScope mScope
@@ -547,21 +541,16 @@ dispatch mEngine verbose cmd = case cmd of
       Left err -> pure (Left err)
       Right (ver, _) -> freeze scope ver outputDir
 
-  -- ---- serve-image ----
-  CmdServeImage tarball tag mBase -> do
+  -- ---- unfreeze ----
+  CmdUnfreeze tarball tag mBase -> do
     engine <- requireEngine mEngine
     verResult <- resolveActiveVersion
     case verResult of
       Left err -> pure (Left err)
       Right (ver, _) -> buildServeImage engine tarball tag ver mBase
 
-  -- ---- version ----
-  CmdVersion -> do
-    putStrLn "morloc-manager v0.11.0"
-    pure (Right ())
-
-  -- ---- serve ----
-  CmdServe image ports -> do
+  -- ---- start ----
+  CmdStart image ports -> do
     engine <- requireEngine mEngine
     let containerName = "morloc-serve-" <> image
         portMappings = if null ports then [(8080, 8080)] else ports

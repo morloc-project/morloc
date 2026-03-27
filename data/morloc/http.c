@@ -52,6 +52,8 @@ http_request_t* http_parse_request(int fd, ERRMSG) {
         req->method = HTTP_GET;
     } else if (strncmp(header_buf, "POST ", 5) == 0) {
         req->method = HTTP_POST;
+    } else if (strncmp(header_buf, "DELETE ", 7) == 0) {
+        req->method = HTTP_DELETE;
     } else if (strncmp(header_buf, "OPTIONS ", 8) == 0) {
         req->method = HTTP_OPTIONS;
     } else {
@@ -259,6 +261,63 @@ daemon_request_t* http_to_daemon_request(http_request_t* req, ERRMSG) {
         return dreq;
     }
 
+    // POST /bind -- compile and register a named binding
+    // Body: {"expr": "...", "name": "double"}
+    if (req->method == HTTP_POST && strcmp(req->path, "/bind") == 0) {
+        dreq->method = DAEMON_BIND;
+        if (req->body && req->body_len > 0) {
+            // Extract "expr" field
+            const char* expr_key = strstr(req->body, "\"expr\"");
+            if (expr_key) {
+                expr_key += 6;
+                while (*expr_key == ' ' || *expr_key == ':' || *expr_key == '\t') expr_key++;
+                if (*expr_key == '"') {
+                    expr_key++;
+                    const char* expr_end = strchr(expr_key, '"');
+                    if (expr_end) {
+                        dreq->expr = strndup(expr_key, (size_t)(expr_end - expr_key));
+                    }
+                }
+            }
+            // Extract "name" field
+            const char* name_key = strstr(req->body, "\"name\"");
+            if (name_key) {
+                name_key += 6;
+                while (*name_key == ' ' || *name_key == ':' || *name_key == '\t') name_key++;
+                if (*name_key == '"') {
+                    name_key++;
+                    const char* name_end = strchr(name_key, '"');
+                    if (name_end) {
+                        dreq->name = strndup(name_key, (size_t)(name_end - name_key));
+                    }
+                }
+            }
+        }
+        if (!dreq->expr) {
+            free(dreq);
+            RAISE("Missing 'expr' field in /bind request body")
+        }
+        return dreq;
+    }
+
+    // GET /bindings -- list all bindings
+    if (req->method == HTTP_GET && strcmp(req->path, "/bindings") == 0) {
+        dreq->method = DAEMON_BINDINGS;
+        return dreq;
+    }
+
+    // DELETE /bindings/<name> -- remove a binding by name
+    if (req->method == HTTP_DELETE && strncmp(req->path, "/bindings/", 10) == 0) {
+        const char* name = req->path + 10;
+        if (name[0] == '\0') {
+            free(dreq);
+            RAISE("Missing binding name in /bindings/ path")
+        }
+        dreq->method = DAEMON_UNBIND;
+        dreq->name = strdup(name);
+        return dreq;
+    }
+
     // POST /call/<command>
     if (req->method == HTTP_POST && strncmp(req->path, "/call/", 6) == 0) {
         const char* cmd_name = req->path + 6;
@@ -313,6 +372,12 @@ daemon_request_t* http_to_daemon_request(http_request_t* req, ERRMSG) {
     }
 
     free(dreq);
-    RAISE("Unknown HTTP endpoint: %s %s",
-          req->method == HTTP_GET ? "GET" : "POST", req->path)
+    const char* method_str = "UNKNOWN";
+    switch (req->method) {
+        case HTTP_GET:     method_str = "GET"; break;
+        case HTTP_POST:    method_str = "POST"; break;
+        case HTTP_DELETE:  method_str = "DELETE"; break;
+        case HTTP_OPTIONS: method_str = "OPTIONS"; break;
+    }
+    RAISE("Unknown HTTP endpoint: %s %s", method_str, req->path)
 }
