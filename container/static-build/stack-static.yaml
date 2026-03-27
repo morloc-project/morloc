@@ -1,0 +1,16 @@
+# Stack configuration for static morloc-manager builds.
+#
+# Used inside the Alpine Docker container (benz0li/ghc-musl).
+# Uses GHC 9.10 (not the main project's 9.6) because GHC 9.10 is the
+# first version with reliable static linking on aarch64/musl.
+
+resolver: lts-24.33
+
+packages:
+- morloc-manager
+
+system-ghc: true
+install-ghc: false
+
+build:
+  test: false

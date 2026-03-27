@@ -1,0 +1,356 @@
+{- |
+Module      : MorlocManager.Serve
+Description : Build and run immutable serve containers
+Copyright   : (c) Zebulun Arendsee, 2016-2026
+License     : Apache-2.0
+Maintainer  : z@morloc.io
+
+Builds minimal serve images from frozen state artifacts and runs them as
+long-lived containers with the morloc-nexus router as PID 1.
+
+@
+  Serve image layer composition:
+
+  +----------------------------------+
+  | Frozen morloc state (COPY)       |  lib/, fdb/, bin/, morloc binary
+  | Read-only at runtime             |
+  +----------------------------------+
+  | morloc-full:\<version\>            |  Language runtimes, compiler, nexus
+  | (already cached from install)    |  morloc-nexus binary
+  +----------------------------------+
+
+  Generated Dockerfile:
+
+    FROM morloc-serve:\<version\>
+    COPY lib/ /root/.local/share/morloc/lib/
+    COPY fdb/ /root/.local/share/morloc/fdb/
+    COPY bin/ /root/.local/share/morloc/bin/
+    HEALTHCHECK ...
+    ENTRYPOINT ["morloc-nexus", "--router", \\
+                "--fdb", "/root/.local/share/morloc/fdb"]
+@
+
+Serve containers expose the nexus router endpoints:
+
+  * @GET  \/programs@        -- list all programs and commands
+  * @GET  \/discover\/\<prog\>@ -- command signatures and types
+  * @POST \/call\/\<prog\>\/\<cmd\>@ -- invoke a function
+  * @GET  \/health@          -- pool liveness
+  * @POST \/eval@            -- compose and run (requires compiler binary)
+-}
+
+module MorlocManager.Serve
+  ( -- * Image building
+    buildServeImage
+    -- * Running
+  , runServeContainer
+  , stopServeContainer
+    -- * Management
+  , listServeContainers
+  , streamServeLogs
+  ) where
+
+import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as BL
+import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.FilePath ((</>), takeDirectory)
+import System.Exit (ExitCode(..))
+import Control.Concurrent (threadDelay)
+import System.IO (hPutStrLn, hFlush, stderr)
+import System.Process
+  ( readProcessWithExitCode
+  , createProcess
+  , proc
+  , waitForProcess
+  , StdStream(..)
+  , std_in, std_out, std_err
+  , delegate_ctlc
+  )
+
+import MorlocManager.Types
+import MorlocManager.Container
+  ( RunConfig(..)
+  , defaultRunConfig
+  , BuildConfig(..)
+  , containerRun
+  , containerRunPassthrough
+  , containerBuild
+  , containerPull
+  , containerStop
+  , containerRemove
+  , engineExecutable
+  )
+
+-- | Build a serve image from a frozen state tarball.
+--
+-- Pulls the base image from GHCR if not available locally, extracts the
+-- tarball into a build context, generates a Dockerfile, and builds the
+-- image. The base image defaults to
+-- @ghcr.io\/morloc-project\/morloc\/morloc-full:\<version\>@ but can be
+-- overridden with @--base@.
+buildServeImage
+  :: ContainerEngine
+  -> FilePath    -- ^ Path to state.tar.gz from freeze
+  -> Text        -- ^ Image tag (e.g., @myservice:v1@)
+  -> Version     -- ^ Morloc version (determines default base image)
+  -> Maybe Text  -- ^ Optional base image override (@--base@)
+  -> IO (Either ManagerError ())
+buildServeImage engine stateTarball tag ver mBase = do
+  -- Validate tarball exists before any expensive operations
+  tarExists <- doesFileExist stateTarball
+  if not tarExists
+    then pure (Left (FreezeError ("Tarball not found: " <> stateTarball)))
+    else buildServeImage' engine stateTarball tag ver mBase
+
+buildServeImage'
+  :: ContainerEngine
+  -> FilePath -> Text -> Version -> Maybe Text
+  -> IO (Either ManagerError ())
+buildServeImage' engine stateTarball tag ver mBase = do
+  -- Read freeze manifest to determine the correct base image
+  let manifestPath = takeDirectory stateTarball </> "freeze-manifest.json"
+  mManifest <- readManifestFile manifestPath
+  baseImage <- case mBase of
+    Just b  -> pure b  -- explicit override always wins
+    Nothing -> resolveBaseFromManifest engine mManifest ver
+  -- Pull the base image (stderr passes through so user sees progress)
+  hPutStrLn stderr $ "Using base image: " <> Text.unpack baseImage
+  hFlush stderr
+  (pullCode, _, pullErr) <- containerPull engine baseImage
+  case pullCode of
+    ExitFailure _ -> pure (Left (EngineError engine (exitCodeToInt pullCode) pullErr))
+    ExitSuccess -> do
+      let contextDir = takeDirectory stateTarball </> "serve-build"
+      createDirectoryIfMissing True contextDir
+      hPutStrLn stderr "Extracting frozen state..."
+      hFlush stderr
+      (tarCode, _, tarErr) <- readProcessWithExitCode "tar"
+        ["-xzf", stateTarball, "-C", contextDir] ""
+      case tarCode of
+        ExitFailure _ -> pure (Left (FreezeError ("tar extract failed: " <> tarErr)))
+        ExitSuccess -> do
+          let dockerfilePath = contextDir </> "Dockerfile"
+          hPutStrLn stderr $ "Building serve image " <> Text.unpack tag
+            <> " (base: " <> Text.unpack baseImage <> ")..."
+          hFlush stderr
+          writeFile dockerfilePath $ unlines
+            [ "# Auto-generated by morloc-manager serve-image"
+            , "FROM " <> Text.unpack baseImage
+            , ""
+            , "# Ensure morloc binaries are on PATH"
+            , "ENV PATH=\"/root/.local/bin:/root/.local/share/morloc/bin:${PATH}\""
+            , ""
+            , "# Copy frozen morloc state (modules, manifests, binaries, pools)"
+            , "COPY lib/ /root/.local/share/morloc/lib/"
+            , "COPY fdb/ /root/.local/share/morloc/fdb/"
+            , "COPY bin/ /root/.local/share/morloc/bin/"
+            , ""
+            , "# Health check for container orchestrators"
+            , "HEALTHCHECK --interval=30s --timeout=5s --retries=3 \\"
+            , "  CMD wget -qO- http://localhost:8080/health || exit 1"
+            , ""
+            , "# Entrypoint: nexus router aggregates all installed programs"
+            , "ENTRYPOINT [\"morloc-nexus\", \"--router\", \\"
+            , "            \"--fdb\", \"/root/.local/share/morloc/fdb\"]"
+            ]
+          let buildCfg = BuildConfig
+                { bcDockerfile = dockerfilePath
+                , bcContext    = contextDir
+                , bcTag        = tag
+                , bcBuildArgs  = []
+                }
+          (code, _stdout, buildErr) <- containerBuild engine buildCfg
+          case code of
+            ExitFailure _ -> pure (Left (EngineError engine (exitCodeToInt code) buildErr))
+            ExitSuccess -> do
+              hPutStrLn stderr $ "Built serve image: " <> Text.unpack tag
+              hFlush stderr
+              pure (Right ())
+
+-- | Run a serve container with the nexus router.
+--
+-- The container runs with @--read-only@ (immutable rootfs) and the
+-- specified port mappings. Returns the container name for later shutdown.
+runServeContainer
+  :: ContainerEngine
+  -> Text        -- ^ Image tag
+  -> Text        -- ^ Container name
+  -> [(Int,Int)] -- ^ Port mappings (host, container)
+  -> IO (Either ManagerError ())
+runServeContainer engine image name ports = do
+  let portStr = unwords [show h <> ":" <> show c | (h, c) <- ports]
+  hPutStrLn stderr $ "Starting serve container " <> Text.unpack name
+    <> " on ports " <> portStr <> "..."
+  hFlush stderr
+  let cfg = (defaultRunConfig image)
+        { rcReadOnly    = True
+        , rcRemoveAfter = False  -- keep running
+        , rcName        = Just name
+        , rcPorts       = ports
+        , rcExtraFlags  = ["-d"]  -- detached
+        }
+  (code, _stdout, runErr) <- containerRun engine cfg
+  case code of
+    ExitFailure _ -> pure (Left (EngineError engine (exitCodeToInt code) runErr))
+    ExitSuccess -> do
+      -- Verify container actually reached running state
+      threadDelay 1000000  -- 1 second
+      let exe = engineExecutable engine
+      (inspCode, inspOut, _) <- readProcessWithExitCode exe
+        ["inspect", "--format", "{{.State.Status}}", Text.unpack name] ""
+      let status = strip' inspOut
+      if inspCode == ExitSuccess && status == "running"
+        then do
+          hPutStrLn stderr $ "Container " <> Text.unpack name <> " started"
+          hFlush stderr
+          pure (Right ())
+        else do
+          (_, logOut, _) <- readProcessWithExitCode exe
+            ["logs", Text.unpack name] ""
+          pure (Left (EngineError engine 1
+            ("Container failed to start (state: " <> Text.pack status <> "):\n"
+            <> Text.pack logOut)))
+
+-- | Stop a running serve container.
+stopServeContainer :: ContainerEngine -> Text -> IO (Either ManagerError ())
+stopServeContainer engine name = do
+  (code, stopErr) <- containerStop engine name
+  _ <- containerRemove engine name
+  case code of
+    ExitFailure _ -> pure (Left (EngineError engine (exitCodeToInt code) stopErr))
+    ExitSuccess   -> pure (Right ())
+
+-- | List running morloc serve containers.
+--
+-- Filters containers whose name starts with @morloc-serve-@ and prints
+-- a summary table to stdout.
+listServeContainers :: ContainerEngine -> IO (Either ManagerError ())
+listServeContainers engine = do
+  let exe = engineExecutable engine
+      fmt = "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+  (code, stdout', _stderr) <- readProcessWithExitCode exe
+    ["ps", "-a", "--filter", "name=morloc-serve-", "--format", fmt] ""
+  case code of
+    ExitFailure n -> pure (Left (EngineError engine n (Text.pack _stderr)))
+    ExitSuccess -> do
+      let output = strip' stdout'
+      if null output
+        then putStrLn "No morloc serve containers running."
+        else do
+          putStrLn "NAME\tIMAGE\tSTATUS\tPORTS"
+          putStr output
+      pure (Right ())
+
+-- | Stream logs from a serve container to the terminal.
+--
+-- When @follow@ is 'True', uses @--follow@ to stream new log entries
+-- as they arrive (blocks until interrupted).
+streamServeLogs :: ContainerEngine -> Text -> Bool -> IO (Either ManagerError ())
+streamServeLogs engine name follow = do
+  let exe = engineExecutable engine
+      args = ["logs"] <> (if follow then ["--follow"] else []) <> [Text.unpack name]
+  let cp = (proc exe args)
+        { std_in  = Inherit
+        , std_out = Inherit
+        , std_err = Inherit
+        , delegate_ctlc = True
+        }
+  (_, _, _, ph) <- createProcess cp
+  code <- waitForProcess ph
+  case code of
+    ExitSuccess   -> pure (Right ())
+    ExitFailure n -> pure (Left (EngineError engine n "Failed to read container logs"))
+
+-- ======================================================================
+-- Manifest and image resolution
+-- ======================================================================
+
+-- | Read a freeze manifest file if it exists.
+readManifestFile :: FilePath -> IO (Maybe FreezeManifest)
+readManifestFile path = do
+  exists <- doesFileExist path
+  if not exists
+    then pure Nothing
+    else do
+      bytes <- BL.readFile path
+      case Aeson.eitherDecode bytes of
+        Right fm -> pure (Just fm)
+        Left _   -> pure Nothing
+
+-- | Resolve the base image from a manifest, handling custom environments.
+--
+-- Resolution order:
+--   1. If manifest has an env layer with an image digest available locally, use it
+--   2. If manifest has an env layer with a Dockerfile, rebuild the env image
+--   3. If manifest has a base image, use it
+--   4. Fall back to morloc-full:<version>
+resolveBaseFromManifest
+  :: ContainerEngine -> Maybe FreezeManifest -> Version -> IO Text
+resolveBaseFromManifest engine mManifest ver = case mManifest of
+  Nothing -> pure fallbackImage
+  Just fm -> case fmEnvLayer fm of
+    Nothing -> pure (fmBaseImage fm)
+    Just fel -> do
+      -- Try using image digest (fast path)
+      case felImageDigest fel of
+        Just digest -> do
+          let exe = engineExecutable engine
+          (code, _, _) <- readProcessWithExitCode exe
+            ["image", "inspect", Text.unpack digest] ""
+          if code == ExitSuccess
+            then pure digest
+            else rebuildEnvImage engine fm fel
+        Nothing -> rebuildEnvImage engine fm fel
+  where
+    fallbackImage = "ghcr.io/morloc-project/morloc/morloc-full:" <> showVersion ver
+
+-- | Rebuild a custom environment image from an embedded Dockerfile.
+rebuildEnvImage :: ContainerEngine -> FreezeManifest -> FrozenEnvLayer -> IO Text
+rebuildEnvImage engine fm fel = do
+  let envTag = "morloc-env:" <> showVersion (fmMorlocVersion fm)
+               <> "-" <> felName fel
+  -- Check if the tagged image already exists locally
+  let exe = engineExecutable engine
+  (checkCode, _, _) <- readProcessWithExitCode exe
+    ["image", "inspect", Text.unpack envTag] ""
+  if checkCode == ExitSuccess
+    then pure envTag
+    else do
+      -- Write embedded Dockerfile to temp dir and build
+      hPutStrLn stderr $ "Rebuilding environment: " <> Text.unpack (felName fel)
+      hFlush stderr
+      let buildDir = "/tmp/morloc-env-rebuild"
+      createDirectoryIfMissing True buildDir
+      let dfPath = buildDir </> "Dockerfile"
+      writeFile dfPath (Text.unpack (felDockerfile fel))
+      let buildCfg = BuildConfig
+            { bcDockerfile = dfPath
+            , bcContext    = buildDir
+            , bcTag        = envTag
+            , bcBuildArgs  = [("CONTAINER_BASE", fmBaseImage fm)]
+            }
+      (code, _, buildErr) <- containerBuild engine buildCfg
+      case code of
+        ExitSuccess -> pure envTag
+        ExitFailure _ -> do
+          hPutStrLn stderr $ "Warning: env rebuild failed, falling back to base image: "
+            <> Text.unpack buildErr
+          hFlush stderr
+          pure (fmBaseImage fm)
+
+-- ======================================================================
+-- Internal
+-- ======================================================================
+
+-- | Extract the integer exit code from an 'ExitCode'.
+exitCodeToInt :: ExitCode -> Int
+exitCodeToInt ExitSuccess     = 0
+exitCodeToInt (ExitFailure n) = n
+
+-- | Strip trailing whitespace and newlines.
+strip' :: String -> String
+strip' = reverse . dropWhile isNewline . reverse
+  where
+    isNewline c = c == '\n' || c == '\r' || c == ' ' || c == '\t'

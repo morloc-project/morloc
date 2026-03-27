@@ -2,6 +2,10 @@
 #include "json.h"
 #include "daemon.h"
 #include "http.h"
+#include "cache.h"
+
+#define XXH_INLINE_ALL
+#include "xxhash.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -12,8 +16,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -23,6 +30,12 @@ static volatile sig_atomic_t shutdown_requested = 0;
 // Pool health callback, set by daemon_run()
 static pool_alive_fn_t g_pool_alive_fn = NULL;
 static size_t g_n_pools = 0;
+
+// Eval timeout (seconds), set by daemon_run() from config
+static int g_eval_timeout = 30;
+
+// Global binding store (initialized by daemon_run)
+static binding_store_t* g_binding_store = NULL;
 
 static void daemon_signal_handler(int sig) {
     (void)sig;
@@ -34,6 +47,257 @@ static void set_socket_timeouts(int fd, int timeout_sec) {
     struct timeval tv = { .tv_sec = timeout_sec, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+// ======================================================================
+// Binding store implementation
+// ======================================================================
+
+#define BINDING_STORE_INITIAL_CAP 64
+
+binding_store_t* binding_store_init(const char* base_dir) {
+    binding_store_t* store = (binding_store_t*)calloc(1, sizeof(binding_store_t));
+    store->capacity = BINDING_STORE_INITIAL_CAP;
+    store->count = 0;
+    store->entries = (binding_entry_t*)calloc(store->capacity, sizeof(binding_entry_t));
+    store->base_dir = strdup(base_dir);
+
+    // Create base directory (ignore failure if exists)
+    mkdir(base_dir, 0755);
+
+    // Names file path
+    size_t path_len = strlen(base_dir) + 16;
+    store->names_path = (char*)malloc(path_len);
+    snprintf(store->names_path, path_len, "%s/names.json", base_dir);
+
+    return store;
+}
+
+void binding_store_free(binding_store_t* store) {
+    if (!store) return;
+    for (size_t i = 0; i < store->capacity; i++) {
+        binding_entry_t* e = &store->entries[i];
+        if (e->expr) {
+            free(e->expr);
+            free(e->artifact_dir);
+            free(e->type_sig);
+            for (size_t j = 0; j < e->n_names; j++) free(e->names[j]);
+            free(e->names);
+        }
+    }
+    free(store->entries);
+    free(store->base_dir);
+    free(store->names_path);
+    free(store);
+}
+
+// Hash an expression string
+static uint64_t hash_expr(const char* expr) {
+    return XXH64(expr, strlen(expr), DEFAULT_XXHASH_SEED);
+}
+
+// Find slot by hash (linear probing)
+static size_t find_slot(binding_store_t* store, uint64_t hash) {
+    size_t idx = hash % store->capacity;
+    for (size_t i = 0; i < store->capacity; i++) {
+        size_t slot = (idx + i) % store->capacity;
+        if (store->entries[slot].expr == NULL || store->entries[slot].hash == hash)
+            return slot;
+    }
+    return store->capacity; // full (should not happen with proper load factor)
+}
+
+binding_entry_t* binding_store_lookup_hash(binding_store_t* store, uint64_t hash) {
+    size_t slot = find_slot(store, hash);
+    if (slot < store->capacity && store->entries[slot].expr != NULL)
+        return &store->entries[slot];
+    return NULL;
+}
+
+binding_entry_t* binding_store_lookup_name(binding_store_t* store, const char* name) {
+    for (size_t i = 0; i < store->capacity; i++) {
+        binding_entry_t* e = &store->entries[i];
+        if (!e->expr) continue;
+        for (size_t j = 0; j < e->n_names; j++) {
+            if (strcmp(e->names[j], name) == 0)
+                return e;
+        }
+    }
+    return NULL;
+}
+
+// Add a name alias to an existing entry
+static void entry_add_name(binding_entry_t* entry, const char* name) {
+    if (!name) return;
+    // Check if already present
+    for (size_t i = 0; i < entry->n_names; i++) {
+        if (strcmp(entry->names[i], name) == 0) return;
+    }
+    entry->names = (char**)realloc(entry->names, (entry->n_names + 1) * sizeof(char*));
+    entry->names[entry->n_names] = strdup(name);
+    entry->n_names++;
+}
+
+binding_entry_t* binding_store_bind(
+    binding_store_t* store,
+    const char* expr,
+    const char* name,
+    int eval_timeout
+) {
+    uint64_t hash = hash_expr(expr);
+
+    // Check if already compiled
+    binding_entry_t* existing = binding_store_lookup_hash(store, hash);
+    if (existing) {
+        if (name) entry_add_name(existing, name);
+        return existing;
+    }
+
+    // Compile via `morloc eval --save <hash_hex> '<expr>'`
+    char hash_hex[20];
+    snprintf(hash_hex, sizeof(hash_hex), "%016" PRIx64, hash);
+
+    char artifact_dir[512];
+    snprintf(artifact_dir, sizeof(artifact_dir), "%s/%s", store->base_dir, hash_hex);
+
+    // Fork morloc eval --save to compile and install
+    int stdout_pipe[2], stderr_pipe[2];
+    if (pipe(stdout_pipe) != 0 || pipe(stderr_pipe) != 0) return NULL;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        close(stderr_pipe[0]); close(stderr_pipe[1]);
+        return NULL;
+    }
+
+    if (pid == 0) {
+        close(stdout_pipe[0]);
+        close(stderr_pipe[0]);
+        dup2(stdout_pipe[1], STDOUT_FILENO);
+        dup2(stderr_pipe[1], STDERR_FILENO);
+        close(stdout_pipe[1]);
+        close(stderr_pipe[1]);
+
+        if (eval_timeout > 0) {
+            struct rlimit cpu_limit = {
+                .rlim_cur = (rlim_t)eval_timeout,
+                .rlim_max = (rlim_t)(eval_timeout + 5)
+            };
+            setrlimit(RLIMIT_CPU, &cpu_limit);
+            struct rlimit as_limit = {
+                .rlim_cur = 2UL * 1024 * 1024 * 1024,
+                .rlim_max = 2UL * 1024 * 1024 * 1024
+            };
+            setrlimit(RLIMIT_AS, &as_limit);
+        }
+
+        execlp("morloc", "morloc", "eval", "--save", hash_hex, expr, (char*)NULL);
+        _exit(127);
+    }
+
+    close(stdout_pipe[1]);
+    close(stderr_pipe[1]);
+
+    // Read stderr for error info
+    char stderr_buf[4096];
+    ssize_t stderr_len = 0;
+    ssize_t n;
+    while ((n = read(stderr_pipe[0], stderr_buf + stderr_len,
+                     sizeof(stderr_buf) - (size_t)stderr_len - 1)) > 0) {
+        stderr_len += n;
+    }
+    stderr_buf[stderr_len] = '\0';
+    close(stdout_pipe[0]);
+    close(stderr_pipe[0]);
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "binding_store_bind: morloc eval --save failed: %s\n", stderr_buf);
+        return NULL;
+    }
+
+    // Ensure we don't exceed load factor
+    if (store->count * 2 >= store->capacity) {
+        // Simple: don't grow, just fail
+        fprintf(stderr, "binding_store_bind: store full\n");
+        return NULL;
+    }
+
+    // Register in store
+    size_t slot = find_slot(store, hash);
+    binding_entry_t* entry = &store->entries[slot];
+    entry->hash = hash;
+    entry->expr = strdup(expr);
+    entry->artifact_dir = strdup(artifact_dir);
+    entry->type_sig = NULL; // TODO: extract from typecheck
+    entry->names = NULL;
+    entry->n_names = 0;
+    if (name) entry_add_name(entry, name);
+    store->count++;
+
+    return entry;
+}
+
+char* binding_store_list_json(binding_store_t* store) {
+    json_buf_t* jb = json_buf_new();
+    json_write_obj_start(jb);
+    json_write_key(jb, "bindings");
+    json_write_arr_start(jb);
+
+    for (size_t i = 0; i < store->capacity; i++) {
+        binding_entry_t* e = &store->entries[i];
+        if (!e->expr) continue;
+
+        json_write_obj_start(jb);
+
+        char hash_hex[20];
+        snprintf(hash_hex, sizeof(hash_hex), "%016" PRIx64, e->hash);
+        json_write_key(jb, "hash");
+        json_write_string(jb, hash_hex);
+
+        json_write_key(jb, "expr");
+        json_write_string(jb, e->expr);
+
+        if (e->type_sig) {
+            json_write_key(jb, "type");
+            json_write_string(jb, e->type_sig);
+        }
+
+        json_write_key(jb, "names");
+        json_write_arr_start(jb);
+        for (size_t j = 0; j < e->n_names; j++) {
+            json_write_string(jb, e->names[j]);
+        }
+        json_write_arr_end(jb);
+
+        json_write_obj_end(jb);
+    }
+
+    json_write_arr_end(jb);
+    json_write_obj_end(jb);
+    return json_buf_finish(jb);
+}
+
+bool binding_store_unbind(binding_store_t* store, const char* name) {
+    binding_entry_t* entry = binding_store_lookup_name(store, name);
+    if (!entry) return false;
+
+    // Remove the name alias
+    for (size_t i = 0; i < entry->n_names; i++) {
+        if (strcmp(entry->names[i], name) == 0) {
+            free(entry->names[i]);
+            entry->names[i] = entry->names[entry->n_names - 1];
+            entry->n_names--;
+            break;
+        }
+    }
+
+    // If no names remain, we could GC artifacts but leave the hash entry
+    // for potential re-use by identical expressions
+    return true;
 }
 
 // ======================================================================
@@ -96,6 +360,16 @@ daemon_request_t* daemon_parse_request(const char* json, size_t len, ERRMSG) {
                     req->method = DAEMON_DISCOVER;
                 } else if (val_len == 6 && strncmp(val_start, "health", 6) == 0) {
                     req->method = DAEMON_HEALTH;
+                } else if (val_len == 4 && strncmp(val_start, "eval", 4) == 0) {
+                    req->method = DAEMON_EVAL;
+                } else if (val_len == 9 && strncmp(val_start, "typecheck", 9) == 0) {
+                    req->method = DAEMON_TYPECHECK;
+                } else if (val_len == 4 && strncmp(val_start, "bind", 4) == 0) {
+                    req->method = DAEMON_BIND;
+                } else if (val_len == 8 && strncmp(val_start, "bindings", 8) == 0) {
+                    req->method = DAEMON_BINDINGS;
+                } else if (val_len == 6 && strncmp(val_start, "unbind", 6) == 0) {
+                    req->method = DAEMON_UNBIND;
                 } else {
                     free(req->id);
                     free(req);
@@ -108,6 +382,22 @@ daemon_request_t* daemon_parse_request(const char* json, size_t len, ERRMSG) {
                 const char* val_start = p;
                 while (p < end && *p != '"') p++;
                 req->command = strndup(val_start, (size_t)(p - val_start));
+                p++;
+            }
+        } else if (key_len == 4 && strncmp(key_start, "expr", 4) == 0) {
+            if (*p == '"') {
+                p++;
+                const char* val_start = p;
+                while (p < end && *p != '"') p++;
+                req->expr = strndup(val_start, (size_t)(p - val_start));
+                p++;
+            }
+        } else if (key_len == 4 && strncmp(key_start, "name", 4) == 0) {
+            if (*p == '"') {
+                p++;
+                const char* val_start = p;
+                while (p < end && *p != '"') p++;
+                req->name = strndup(val_start, (size_t)(p - val_start));
                 p++;
             }
         } else if (key_len == 4 && strncmp(key_start, "args", 4) == 0) {
@@ -274,11 +564,17 @@ daemon_response_t* daemon_parse_response(const char* json, size_t len, ERRMSG) {
     return resp;
 }
 
+void daemon_set_eval_timeout(int timeout_sec) {
+    g_eval_timeout = timeout_sec > 0 ? timeout_sec : 30;
+}
+
 void daemon_free_request(daemon_request_t* req) {
     if (!req) return;
     free(req->id);
     free(req->command);
     free(req->args_json);
+    free(req->expr);
+    free(req->name);
     free(req);
 }
 
@@ -410,6 +706,282 @@ static argument_t** parse_json_args_to_arguments(
     return args;
 }
 
+// ======================================================================
+// Eval dispatch
+// ======================================================================
+
+/*
+ * Execute a morloc expression by forking `morloc eval`.
+ *
+ * Forks a child process that runs:
+ *   morloc eval '<expr>'
+ *
+ * The child's stdout is captured as the result. Stderr is captured for
+ * error reporting. Resource limits (CPU time, address space) are applied
+ * via setrlimit() in the child before exec.
+ *
+ * Safety properties:
+ *   - The morloc parser rejects inline foreign source code
+ *   - eval can only compose functions from already-installed modules
+ *   - Resource limits prevent runaway compilation or execution
+ *
+ * Example request/response:
+ *   Request:  POST /eval {"expr": "import math; math.add 1 2"}
+ *   Response: {"status":"ok","result":"3"}
+ *
+ *   Request:  POST /eval {"expr": "import unknown; unknown.f 1"}
+ *   Response: {"status":"error","error":"Module 'unknown' not found"}
+ */
+static daemon_response_t* daemon_dispatch_eval(const char* expr) {
+    daemon_response_t* resp = (daemon_response_t*)calloc(1, sizeof(daemon_response_t));
+
+    // Pipes for capturing child stdout and stderr
+    int stdout_pipe[2], stderr_pipe[2];
+    if (pipe(stdout_pipe) != 0 || pipe(stderr_pipe) != 0) {
+        resp->success = false;
+        resp->error = strdup("Failed to create pipes for eval");
+        return resp;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        resp->success = false;
+        resp->error = strdup("Failed to fork for eval");
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        close(stderr_pipe[0]); close(stderr_pipe[1]);
+        return resp;
+    }
+
+    if (pid == 0) {
+        // ---- Child process ----
+
+        // Redirect stdout and stderr to pipes
+        close(stdout_pipe[0]);
+        close(stderr_pipe[0]);
+        dup2(stdout_pipe[1], STDOUT_FILENO);
+        dup2(stderr_pipe[1], STDERR_FILENO);
+        close(stdout_pipe[1]);
+        close(stderr_pipe[1]);
+
+        // Apply resource limits if timeout is set
+        if (g_eval_timeout > 0) {
+            // CPU time limit (hard kill after timeout + 5s grace)
+            struct rlimit cpu_limit = {
+                .rlim_cur = (rlim_t)g_eval_timeout,
+                .rlim_max = (rlim_t)(g_eval_timeout + 5)
+            };
+            setrlimit(RLIMIT_CPU, &cpu_limit);
+
+            // Address space limit: 2 GB
+            struct rlimit as_limit = {
+                .rlim_cur = 2UL * 1024 * 1024 * 1024,
+                .rlim_max = 2UL * 1024 * 1024 * 1024
+            };
+            setrlimit(RLIMIT_AS, &as_limit);
+        }
+
+        // Exec: morloc eval '<expr>'
+        execlp("morloc", "morloc", "eval", expr, (char*)NULL);
+
+        // If exec fails
+        fprintf(stderr, "Failed to exec morloc eval: %s", strerror(errno));
+        _exit(127);
+    }
+
+    // ---- Parent process ----
+    close(stdout_pipe[1]);
+    close(stderr_pipe[1]);
+
+    // Read stdout (dynamic buffer)
+    size_t stdout_cap = 65536;
+    size_t stdout_len = 0;
+    char* stdout_buf = (char*)malloc(stdout_cap);
+    ssize_t n;
+    while ((n = read(stdout_pipe[0], stdout_buf + stdout_len,
+                     stdout_cap - stdout_len - 1)) > 0) {
+        stdout_len += (size_t)n;
+        if (stdout_len + 1 >= stdout_cap) {
+            stdout_cap *= 2;
+            stdout_buf = (char*)realloc(stdout_buf, stdout_cap);
+        }
+    }
+    stdout_buf[stdout_len] = '\0';
+    close(stdout_pipe[0]);
+
+    // Read stderr (dynamic buffer)
+    size_t stderr_cap = 65536;
+    size_t stderr_len = 0;
+    char* stderr_buf = (char*)malloc(stderr_cap);
+    while ((n = read(stderr_pipe[0], stderr_buf + stderr_len,
+                     stderr_cap - stderr_len - 1)) > 0) {
+        stderr_len += (size_t)n;
+        if (stderr_len + 1 >= stderr_cap) {
+            stderr_cap *= 2;
+            stderr_buf = (char*)realloc(stderr_buf, stderr_cap);
+        }
+    }
+    stderr_buf[stderr_len] = '\0';
+    close(stderr_pipe[0]);
+
+    // Wait for child
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        // Trim trailing newline from stdout
+        while (stdout_len > 0 && (stdout_buf[stdout_len-1] == '\n' ||
+                                   stdout_buf[stdout_len-1] == '\r')) {
+            stdout_buf[--stdout_len] = '\0';
+        }
+        resp->success = true;
+        resp->result_json = strdup(stdout_buf);
+    } else {
+        resp->success = false;
+        if (stderr_len > 0) {
+            resp->error = strdup(stderr_buf);
+        } else if (WIFSIGNALED(status)) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "morloc eval killed by signal %d", WTERMSIG(status));
+            resp->error = strdup(msg);
+        } else {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "morloc eval exited with code %d",
+                     WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+            resp->error = strdup(msg);
+        }
+    }
+
+    free(stdout_buf);
+    free(stderr_buf);
+    return resp;
+}
+
+// ======================================================================
+// Typecheck dispatch
+// ======================================================================
+
+/*
+ * Typecheck a morloc expression without execution.
+ *
+ * Forks a child process that runs:
+ *   morloc typecheck '<expr>'
+ *
+ * Returns type signatures on success, error messages on failure.
+ * Uses the same resource limits as eval for safety.
+ */
+static daemon_response_t* daemon_dispatch_typecheck(const char* expr) {
+    daemon_response_t* resp = (daemon_response_t*)calloc(1, sizeof(daemon_response_t));
+
+    int stdout_pipe[2], stderr_pipe[2];
+    if (pipe(stdout_pipe) != 0 || pipe(stderr_pipe) != 0) {
+        resp->success = false;
+        resp->error = strdup("Failed to create pipes for typecheck");
+        return resp;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        resp->success = false;
+        resp->error = strdup("Failed to fork for typecheck");
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        close(stderr_pipe[0]); close(stderr_pipe[1]);
+        return resp;
+    }
+
+    if (pid == 0) {
+        // ---- Child process ----
+        close(stdout_pipe[0]);
+        close(stderr_pipe[0]);
+        dup2(stdout_pipe[1], STDOUT_FILENO);
+        dup2(stderr_pipe[1], STDERR_FILENO);
+        close(stdout_pipe[1]);
+        close(stderr_pipe[1]);
+
+        // Apply resource limits
+        if (g_eval_timeout > 0) {
+            struct rlimit cpu_limit = {
+                .rlim_cur = (rlim_t)g_eval_timeout,
+                .rlim_max = (rlim_t)(g_eval_timeout + 5)
+            };
+            setrlimit(RLIMIT_CPU, &cpu_limit);
+            struct rlimit as_limit = {
+                .rlim_cur = 2UL * 1024 * 1024 * 1024,
+                .rlim_max = 2UL * 1024 * 1024 * 1024
+            };
+            setrlimit(RLIMIT_AS, &as_limit);
+        }
+
+        execlp("morloc", "morloc", "typecheck", expr, (char*)NULL);
+        fprintf(stderr, "Failed to exec morloc typecheck: %s", strerror(errno));
+        _exit(127);
+    }
+
+    // ---- Parent process ----
+    close(stdout_pipe[1]);
+    close(stderr_pipe[1]);
+
+    // Read stdout (dynamic buffer)
+    size_t stdout_cap = 4096;
+    size_t stdout_len = 0;
+    char* stdout_buf = (char*)malloc(stdout_cap);
+    ssize_t n;
+    while ((n = read(stdout_pipe[0], stdout_buf + stdout_len,
+                     stdout_cap - stdout_len - 1)) > 0) {
+        stdout_len += (size_t)n;
+        if (stdout_len + 1 >= stdout_cap) {
+            stdout_cap *= 2;
+            stdout_buf = (char*)realloc(stdout_buf, stdout_cap);
+        }
+    }
+    stdout_buf[stdout_len] = '\0';
+    close(stdout_pipe[0]);
+
+    // Read stderr (dynamic buffer)
+    size_t stderr_cap = 4096;
+    size_t stderr_len = 0;
+    char* stderr_buf = (char*)malloc(stderr_cap);
+    while ((n = read(stderr_pipe[0], stderr_buf + stderr_len,
+                     stderr_cap - stderr_len - 1)) > 0) {
+        stderr_len += (size_t)n;
+        if (stderr_len + 1 >= stderr_cap) {
+            stderr_cap *= 2;
+            stderr_buf = (char*)realloc(stderr_buf, stderr_cap);
+        }
+    }
+    stderr_buf[stderr_len] = '\0';
+    close(stderr_pipe[0]);
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        while (stdout_len > 0 && (stdout_buf[stdout_len-1] == '\n' ||
+                                   stdout_buf[stdout_len-1] == '\r')) {
+            stdout_buf[--stdout_len] = '\0';
+        }
+        resp->success = true;
+        resp->result_json = strdup(stdout_buf);
+    } else {
+        resp->success = false;
+        if (stderr_len > 0) {
+            resp->error = strdup(stderr_buf);
+        } else {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "morloc typecheck exited with code %d",
+                     WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+            resp->error = strdup(msg);
+        }
+    }
+
+    free(stdout_buf);
+    free(stderr_buf);
+    return resp;
+}
+
+// ======================================================================
+// Request dispatch
+// ======================================================================
+
 daemon_response_t* daemon_dispatch(
     manifest_t* manifest,
     daemon_request_t* request,
@@ -437,6 +1009,131 @@ daemon_response_t* daemon_dispatch(
         resp->success = true;
         resp->result_json = daemon_build_discovery(manifest);
         return resp;
+    }
+
+    if (request->method == DAEMON_EVAL) {
+        if (!request->expr) {
+            resp->success = false;
+            resp->error = strdup("Missing 'expr' field in eval request");
+            return resp;
+        }
+        // Check binding store first: if expression matches a bound name,
+        // run the cached compiled binary instead of recompiling
+        if (g_binding_store) {
+            uint64_t hash = XXH64(request->expr, strlen(request->expr), DEFAULT_XXHASH_SEED);
+            binding_entry_t* cached = binding_store_lookup_hash(g_binding_store, hash);
+            if (!cached) {
+                // Try resolving as a name (e.g., "double 21" -> look up "double")
+                // For now, check if the full expression is a known name
+                cached = binding_store_lookup_name(g_binding_store, request->expr);
+            }
+            if (cached) {
+                // Run the cached program binary directly
+                // The artifact was saved via `morloc eval --save`, so it's
+                // in the user's exe directory and can be invoked by name
+                char hash_hex[20];
+                snprintf(hash_hex, sizeof(hash_hex), "%016" PRIx64, cached->hash);
+                // Run via: ~/.morloc/exe/<hash_hex>/<hash_hex> <args>
+                // For now, we re-use daemon_dispatch_eval which will find
+                // the cached artifacts through morloc eval's own caching
+                // TODO: direct binary execution for bound functions
+            }
+        }
+        daemon_response_t* eval_resp = daemon_dispatch_eval(request->expr);
+        eval_resp->id = request->id ? strdup(request->id) : NULL;
+        free(resp);
+        return eval_resp;
+    }
+
+    // POST /bind -- compile and register a named binding
+    if (request->method == DAEMON_BIND) {
+        if (!request->expr) {
+            resp->success = false;
+            resp->error = strdup("Missing 'expr' field in bind request");
+            return resp;
+        }
+        if (!g_binding_store) {
+            resp->success = false;
+            resp->error = strdup("Binding store not initialized");
+            return resp;
+        }
+        binding_entry_t* entry = binding_store_bind(
+            g_binding_store, request->expr, request->name, g_eval_timeout);
+        if (!entry) {
+            resp->success = false;
+            resp->error = strdup("Failed to compile and bind expression");
+            return resp;
+        }
+        // Return binding info as JSON
+        json_buf_t* jb = json_buf_new();
+        json_write_obj_start(jb);
+        char hash_hex[20];
+        snprintf(hash_hex, sizeof(hash_hex), "%016" PRIx64, entry->hash);
+        json_write_key(jb, "hash");
+        json_write_string(jb, hash_hex);
+        json_write_key(jb, "expr");
+        json_write_string(jb, entry->expr);
+        if (request->name) {
+            json_write_key(jb, "name");
+            json_write_string(jb, request->name);
+        }
+        if (entry->type_sig) {
+            json_write_key(jb, "type");
+            json_write_string(jb, entry->type_sig);
+        }
+        json_write_obj_end(jb);
+        resp->success = true;
+        resp->result_json = json_buf_finish(jb);
+        return resp;
+    }
+
+    // GET /bindings -- list all bindings
+    if (request->method == DAEMON_BINDINGS) {
+        if (!g_binding_store) {
+            resp->success = true;
+            resp->result_json = strdup("{\"bindings\":[]}");
+            return resp;
+        }
+        resp->success = true;
+        resp->result_json = binding_store_list_json(g_binding_store);
+        return resp;
+    }
+
+    // DELETE /bindings/<name> -- remove a name alias
+    if (request->method == DAEMON_UNBIND) {
+        const char* name = request->command ? request->command : request->name;
+        if (!name) {
+            resp->success = false;
+            resp->error = strdup("Missing binding name");
+            return resp;
+        }
+        if (!g_binding_store) {
+            resp->success = false;
+            resp->error = strdup("Binding store not initialized");
+            return resp;
+        }
+        if (binding_store_unbind(g_binding_store, name)) {
+            resp->success = true;
+            resp->result_json = strdup("{\"removed\":true}");
+        } else {
+            resp->success = false;
+            size_t errlen = strlen(name) + 32;
+            resp->error = (char*)malloc(errlen);
+            snprintf(resp->error, errlen, "Binding not found: %s", name);
+        }
+        return resp;
+    }
+
+    if (request->method == DAEMON_TYPECHECK) {
+        if (!request->expr) {
+            resp->success = false;
+            resp->error = strdup("Missing 'expr' field in typecheck request");
+            return resp;
+        }
+        daemon_response_t* tc_resp = daemon_dispatch_typecheck(request->expr);
+        tc_resp->id = request->id ? strdup(request->id) : NULL;
+        free(resp);
+        return tc_resp;
     }
 
     // DAEMON_CALL
@@ -901,9 +1598,15 @@ void daemon_run(
     size_t n_pools,
     const char* shm_basename
 ) {
-    // Set pool health globals for daemon_dispatch
+    // Set globals for daemon_dispatch
     g_pool_alive_fn = config->pool_alive_fn;
     g_n_pools = n_pools;
+    g_eval_timeout = config->eval_timeout > 0 ? config->eval_timeout : 30;
+
+    // Initialize binding store (uses /tmp by default)
+    if (!g_binding_store) {
+        g_binding_store = binding_store_init("/tmp/morloc-bindings");
+    }
 
     // Install signal handlers for graceful shutdown
     struct sigaction sa;

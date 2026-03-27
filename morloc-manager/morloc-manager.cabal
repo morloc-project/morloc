@@ -1,0 +1,117 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.39.1.
+--
+-- see: https://github.com/sol/hpack
+
+name:           morloc-manager
+version:        0.11.0
+synopsis:       Container lifecycle manager for Morloc
+description:    morloc-manager orchestrates containerized Morloc environments: installing
+                specific Morloc versions, managing dependency layers via Dockerfiles,
+                running commands inside containers, and supporting a build/freeze/serve
+                lifecycle for deploying Morloc programs as immutable services.
+category:       Development, Deployment
+homepage:       https://github.com/morloc-project/morloc
+bug-reports:    https://github.com/morloc-project/morloc/issues
+author:         Zebulun Arendsee
+maintainer:     z@morloc.io
+copyright:      2026 Zebulun Arendsee
+license:        Apache-2.0
+license-file:   ../LICENSE
+build-type:     Simple
+
+source-repository head
+  type: git
+  location: https://github.com/morloc-project/morloc
+
+library
+  exposed-modules:
+      MorlocManager.Config
+      MorlocManager.Container
+      MorlocManager.Environment
+      MorlocManager.Freeze
+      MorlocManager.SELinux
+      MorlocManager.Serve
+      MorlocManager.Types
+      MorlocManager.Version
+  other-modules:
+      Paths_morloc_manager
+  hs-source-dirs:
+      src
+  default-extensions:
+      DeriveGeneric
+      OverloadedStrings
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints -haddock
+  build-depends:
+      aeson
+    , base >=4.7 && <5
+    , bytestring
+    , containers
+    , cryptohash-sha256
+    , directory
+    , filepath
+    , optparse-applicative
+    , process
+    , text
+    , time
+    , unix
+  default-language: Haskell2010
+
+executable morloc-manager
+  main-is: Main.hs
+  other-modules:
+      Paths_morloc_manager
+  hs-source-dirs:
+      app
+  default-extensions:
+      DeriveGeneric
+      OverloadedStrings
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints -haddock -threaded -rtsopts -with-rtsopts=-N -O2
+  build-depends:
+      aeson
+    , base >=4.7 && <5
+    , bytestring
+    , containers
+    , cryptohash-sha256
+    , directory
+    , filepath
+    , morloc-manager
+    , optparse-applicative
+    , process
+    , text
+    , time
+    , unix
+  default-language: Haskell2010
+
+test-suite morloc-manager-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_morloc_manager
+  hs-source-dirs:
+      test
+  default-extensions:
+      DeriveGeneric
+      OverloadedStrings
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints -haddock -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      QuickCheck
+    , aeson
+    , base >=4.7 && <5
+    , bytestring
+    , containers
+    , cryptohash-sha256
+    , directory
+    , filepath
+    , morloc-manager
+    , optparse-applicative
+    , process
+    , tasty
+    , tasty-hunit
+    , tasty-quickcheck
+    , temporary
+    , text
+    , time
+    , unix
+  default-language: Haskell2010

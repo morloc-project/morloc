@@ -1,4 +1,6 @@
-FROM docker.io/library/ubuntu:22.04
+FROM docker.io/library/ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
   git \
@@ -20,11 +22,11 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
 ENV PATH="/opt/.ghcup/bin:${PATH}"
 
 # Set the timezone, this avoids hanging later on
-RUN DEBIAN_FRONTEND=noninteractive TZ=Antarctica/Troll apt-get -y install tzdata
+RUN TZ=Antarctica/Troll apt-get -y install tzdata
 
 # hyperfine is needed for shell benchmarks
-RUN apt-get install -y r-base python3.10 libgsl-dev git pip hyperfine
-RUN python3 -m pip install --upgrade setuptools numpy pyarrow
+RUN apt-get install -y r-base python3 python3-dev python3-pip libgsl-dev git hyperfine
+RUN python3 -m pip install --break-system-packages --upgrade setuptools numpy pyarrow
 
 # Set up R environment
 # stringi is needed for benchmarks

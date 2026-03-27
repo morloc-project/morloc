@@ -1,0 +1,233 @@
+# Release workflow: build containers + static morloc-manager binary
+#
+# Triggered by pushing a version tag:
+#   git tag v0.68.0
+#   git push origin v0.68.0
+#
+# This workflow:
+#   1. Runs the test suite
+#   2. Builds all container images (tiny, full, serve) from this checkout
+#   3. Pushes them to ghcr.io with version + edge tags
+#   4. Builds the static morloc-manager binary
+#   5. Creates a GitHub Release with the binary attached
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BASE: ghcr.io/morloc-project/morloc
+
+jobs:
+  # ---- Run tests first ----
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.6.7'
+          enable-stack: true
+          stack-version: 'latest'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.stack/snapshots
+            ~/.stack/setup-exe-cache
+            .stack-work
+          key: stack-deps-release-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
+          restore-keys: stack-deps-release-
+      - name: Increase shared memory
+        run: sudo mount -o remount,size=4G /dev/shm
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            r-base-core python3 python3-dev python3-pip \
+            python3-numpy g++ gcc make libgsl-dev
+          python3 -m pip install --break-system-packages --upgrade setuptools pyarrow
+
+      - name: Cache R packages
+        uses: actions/cache@v4
+        id: r-cache
+        with:
+          path: ~/R/library
+          key: r-lib-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install R packages
+        if: steps.r-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/R/library
+          LIBARROW_MINIMAL=true ARROW_S3=OFF ARROW_GCS=OFF \
+            Rscript -e 'install.packages("arrow", lib="~/R/library", repos = "https://cloud.r-project.org")'
+      - name: Add morloc to PATH
+        run: |
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/share/morloc/bin" >> $GITHUB_PATH
+          echo "R_LIBS_USER=$HOME/R/library" >> $GITHUB_ENV
+      - name: Build morloc
+        run: stack install --system-ghc --no-install-ghc --no-run-tests
+      - name: Initialize morloc
+        run: |
+          morloc init -f
+          morloc install stdlib
+      - name: Run tests
+        run: stack test --system-ghc --no-install-ghc morloc:morloc-test
+        timeout-minutes: 10
+
+  # ---- Build and push container images ----
+  containers:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build all three images locally before pushing.
+      # Full and serve reference tiny via FROM — building tiny first and
+      # tagging it with the GHCR-qualified name means Docker finds it
+      # locally without a round-trip to the registry.
+
+      - name: Build tiny (from local source)
+        run: |
+          docker build \
+            -t ${{ env.IMAGE_BASE }}/morloc-tiny:${{ steps.ver.outputs.version }} \
+            -t ${{ env.IMAGE_BASE }}/morloc-tiny:edge \
+            -f container/tiny/Dockerfile .
+
+      - name: Build full (uses local tiny)
+        run: |
+          docker build \
+            --build-arg MORLOC_VERSION=${{ steps.ver.outputs.version }} \
+            -t ${{ env.IMAGE_BASE }}/morloc-full:${{ steps.ver.outputs.version }} \
+            -t ${{ env.IMAGE_BASE }}/morloc-full:edge \
+            container/full/
+
+      - name: Build serve (uses local tiny)
+        run: |
+          docker build \
+            --build-arg MORLOC_VERSION=${{ steps.ver.outputs.version }} \
+            -t ${{ env.IMAGE_BASE }}/morloc-serve:${{ steps.ver.outputs.version }} \
+            -t ${{ env.IMAGE_BASE }}/morloc-serve:edge \
+            -f container/serve/Dockerfile container/
+
+      - name: Push all images
+        run: |
+          for img in morloc-tiny morloc-full morloc-serve; do
+            docker push ${{ env.IMAGE_BASE }}/${img}:${{ steps.ver.outputs.version }}
+            docker push ${{ env.IMAGE_BASE }}/${img}:edge
+          done
+
+  # ---- Build morloc-manager binaries (3 platforms) ----
+  static-binary:
+    needs: test
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            method: docker
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+            method: docker
+          - os: macos-latest
+            platform: macos-arm64
+            method: native
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Linux (static via Docker + musl) ----
+      - name: Build static binary (Linux)
+        if: matrix.method == 'docker'
+        run: |
+          docker build -t morloc-static-build \
+            -f container/static-build/Dockerfile .
+          mkdir -p out
+          docker run --rm -v "$(pwd)/out:/out" morloc-static-build
+
+      - name: Verify static linking (Linux)
+        if: matrix.method == 'docker'
+        run: |
+          file out/morloc-manager
+          file out/morloc-manager | grep -q "statically linked"
+
+      # ---- macOS (native cabal build) ----
+      - name: Setup Haskell (macOS)
+        if: matrix.method == 'native'
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.10.3'
+          cabal-version: 'latest'
+
+      - name: Cache Cabal artifacts (macOS)
+        if: matrix.method == 'native'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cabal
+          key: cabal-macos-910-${{ hashFiles('morloc-manager/package.yaml') }}
+          restore-keys: cabal-macos-910-
+
+      - name: Build binary (macOS)
+        if: matrix.method == 'native'
+        run: |
+          cabal update
+          cabal install hpack --install-method=copy --installdir=$HOME/.local/bin
+          export PATH=$HOME/.local/bin:$PATH
+          cd morloc-manager
+          hpack
+          cabal build --ghc-options='-O2'
+          mkdir -p ../out
+          cp "$(cabal -v0 list-bin morloc-manager)" ../out/morloc-manager
+          strip ../out/morloc-manager
+
+      # ---- Common: rename and upload ----
+      - name: Rename binary
+        run: mv out/morloc-manager out/morloc-manager-${{ matrix.platform }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: morloc-manager-${{ matrix.platform }}
+          path: out/morloc-manager-${{ matrix.platform }}
+
+  # ---- Create GitHub Release ----
+  release:
+    if: always() && needs.containers.result == 'success'
+    needs: [containers, static-binary]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: morloc-manager-*
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: morloc-manager-*
+          generate_release_notes: true

@@ -9,7 +9,7 @@
 # You need to provide the desired morloc version as an environmental variable,
 # so run the make commands like so:
 #
-# $ make MORLOC_VERSION=0.68.0 build-tiny
+# $ make MORLOC_VERSION=0.69.0 build-tiny
 
 define HEREDOC
 #!/bin/bash
@@ -31,17 +31,35 @@ install:
 	chmod 755 ${HOME}/bin/morloc-edge
 
 
-# Build a container that just has the morloc compiler
+# Build a container that just has the morloc compiler.
+# Context is the repo root (..) so COPY gets the local source tree.
 build-tiny:
-	podman build --no-cache --force-rm -t ghcr.io/morloc-project/morloc/morloc-tiny:$(MORLOC_VERSION) tiny
-	# Also tag the same image as edge locally so edge points to this digest
-	podman tag ghcr.io/morloc-project/morloc/morloc-tiny:$(MORLOC_VERSION) ghcr.io/morloc-project/morloc/morloc-tiny:edge
+	podman build --no-cache --force-rm \
+		-t ghcr.io/morloc-project/morloc/morloc-tiny:$(MORLOC_VERSION) \
+		-t ghcr.io/morloc-project/morloc/morloc-tiny:edge \
+		-f tiny/Dockerfile ..
 
-# Build the required docker image
+# Build the full interactive development image.
+# Copies the morloc binary from the locally-built morloc-tiny image.
+# Run build-tiny first.
 build-full:
-	podman build --no-cache --force-rm -t ghcr.io/morloc-project/morloc/morloc-full:$(MORLOC_VERSION) full
-	# Also tag the same image as edge locally so edge points to this digest
-	podman tag ghcr.io/morloc-project/morloc/morloc-full:$(MORLOC_VERSION) ghcr.io/morloc-project/morloc/morloc-full:edge
+	podman build --no-cache --force-rm \
+		--build-arg MORLOC_VERSION=$(MORLOC_VERSION) \
+		-t ghcr.io/morloc-project/morloc/morloc-full:$(MORLOC_VERSION) \
+		-t ghcr.io/morloc-project/morloc/morloc-full:edge \
+		full
+
+# Build the serve base image (minimal runtime: Python, R, C++, morloc, nexus)
+# Copies the morloc binary from morloc-tiny and runs `morloc init` inside
+# the Dockerfile to build nexus + libmorloc. Requires morloc-tiny to be
+# built (or pulled) first.
+build-serve:
+	podman build --no-cache --force-rm \
+		--build-arg MORLOC_VERSION=$(MORLOC_VERSION) \
+		-t ghcr.io/morloc-project/morloc/morloc-serve:$(MORLOC_VERSION) \
+		-f serve/Dockerfile .
+	podman tag ghcr.io/morloc-project/morloc/morloc-serve:$(MORLOC_VERSION) \
+		ghcr.io/morloc-project/morloc/morloc-serve:edge
 
 # Build the required docker image
 build-test:
@@ -53,6 +71,9 @@ shell:
 
 shell-tiny:
 	podman run --shm-size=4g --rm -it ghcr.io/morloc-project/morloc/morloc-tiny:edge /bin/bash
+
+shell-serve:
+	podman run --shm-size=4g --rm -it ghcr.io/morloc-project/morloc/morloc-serve:edge /bin/bash
 
 shell-test:
 	podman run --shm-size=4g --rm -it ghcr.io/morloc-project/morloc/morloc-test /bin/bash
@@ -73,12 +94,15 @@ push:
 pull:
 	podman pull ghcr.io/morloc-project/morloc/morloc-tiny:$(MORLOC_VERSION)
 	podman pull ghcr.io/morloc-project/morloc/morloc-full:$(MORLOC_VERSION)
+	podman pull ghcr.io/morloc-project/morloc/morloc-serve:$(MORLOC_VERSION)
+	podman pull ghcr.io/morloc-project/morloc/morloc-test
 	podman pull ghcr.io/morloc-project/morloc/morloc-test:edge
 
 # Convenience: pull moving edge tags
 pull-edge:
 	podman pull ghcr.io/morloc-project/morloc/morloc-tiny:edge
 	podman pull ghcr.io/morloc-project/morloc/morloc-full:edge
+	podman pull ghcr.io/morloc-project/morloc/morloc-serve:edge
 
 # Cleanup of podman images may be done as follows
 # $ podman image prune

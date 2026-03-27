@@ -61,6 +61,7 @@ typedef struct config_s {
     int tcp_port;
     int http_port;
     char* fdb_path;
+    int eval_timeout;  // --eval-timeout <seconds> (default 30)
 } config_t;
 
 // global pid list of language daemons
@@ -737,6 +738,7 @@ void print_nexus_usage(void) {
     fprintf(stderr, "  --http-port PORT     Listen on HTTP port\n");
     fprintf(stderr, "  --port PORT          Listen on TCP port\n");
     fprintf(stderr, "  --socket PATH        Listen on Unix socket\n");
+    fprintf(stderr, "  --eval-timeout SECS  Timeout for /eval requests (default: 30)\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Router mode:\n");
     fprintf(stderr, "  --router             Run as a multi-program router\n");
@@ -1599,7 +1601,8 @@ enum {
     OPT_SOCKET    = 302,
     OPT_PORT      = 303,
     OPT_HTTP_PORT = 304,
-    OPT_FDB       = 305
+    OPT_FDB          = 305,
+    OPT_EVAL_TIMEOUT = 306
 };
 
 static void parse_nexus_options(int argc, char* argv[], config_t* config) {
@@ -1615,7 +1618,8 @@ static void parse_nexus_options(int argc, char* argv[], config_t* config) {
         {"socket",      required_argument, 0, OPT_SOCKET},
         {"port",        required_argument, 0, OPT_PORT},
         {"http-port",   required_argument, 0, OPT_HTTP_PORT},
-        {"fdb",         required_argument, 0, OPT_FDB},
+        {"fdb",          required_argument, 0, OPT_FDB},
+        {"eval-timeout", required_argument, 0, OPT_EVAL_TIMEOUT},
         {NULL, 0, NULL, 0}
     };
 
@@ -1638,7 +1642,8 @@ static void parse_nexus_options(int argc, char* argv[], config_t* config) {
             case OPT_SOCKET:    config->unix_socket_path = optarg; break;
             case OPT_PORT:      config->tcp_port = atoi(optarg); break;
             case OPT_HTTP_PORT: config->http_port = atoi(optarg); break;
-            case OPT_FDB:       config->fdb_path = optarg; break;
+            case OPT_FDB:          config->fdb_path = optarg; break;
+            case OPT_EVAL_TIMEOUT: config->eval_timeout = atoi(optarg); break;
             case '?':
                 fprintf(stderr, "Unknown option: %c\n", optopt);
                 exit(EXIT_FAILURE);
@@ -1697,6 +1702,13 @@ void extract_global_options(int* argc, char** argv, config_t* config) {
             config->fdb_path = argv[i + 1];
             consumed = 2;
             matched = true;
+        } else if (eq && strncmp(arg, "--eval-timeout=", 15) == 0) {
+            config->eval_timeout = atoi(eq + 1);
+            matched = true;
+        } else if (strcmp(arg, "--eval-timeout") == 0 && i + 1 < *argc) {
+            config->eval_timeout = atoi(argv[i + 1]);
+            consumed = 2;
+            matched = true;
         }
 
         if (matched) {
@@ -1747,7 +1759,8 @@ int main(int argc, char *argv[]) {
         daemon_config_t dc = {
             .unix_socket_path = config.unix_socket_path,
             .tcp_port = config.tcp_port,
-            .http_port = config.http_port
+            .http_port = config.http_port,
+            .eval_timeout = config.eval_timeout > 0 ? config.eval_timeout : 30
         };
         router_run(&dc, router);
         router_free(router);
@@ -1875,7 +1888,8 @@ int main(int argc, char *argv[]) {
             .http_port = config.http_port,
             .pool_check_fn = check_and_restart_pools,
             .pool_alive_fn = pool_is_alive,
-            .n_pools = manifest->n_pools
+            .n_pools = manifest->n_pools,
+            .eval_timeout = config.eval_timeout > 0 ? config.eval_timeout : 30
         };
         daemon_run(&dc, manifest, sockets, manifest->n_pools, shm_basename);
         clean_exit(0);

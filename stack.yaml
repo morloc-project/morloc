@@ -37,6 +37,7 @@ resolver: lts-22.44
 # will not be run. This is useful for tweaking upstream packages.
 packages:
 - .
+- morloc-manager
 
 build:
   test: true

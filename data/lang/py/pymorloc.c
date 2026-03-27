@@ -37,9 +37,6 @@ static void shm_tracker_push(absptr_t ptr, Schema* schema) {
 static void flush_shm_tracker(void) {
     for (size_t i = 0; i < shm_tracker_count; i++) {
         char* err = NULL;
-        // Only do recursive sub-freeing if we have a schema and this is
-        // the last reference. NULL schema entries (from foreign_call result
-        // tracking) just decrement the refcount.
         block_header_t* blk = (block_header_t*)((char*)shm_tracker[i].ptr - sizeof(block_header_t));
         if (shm_tracker[i].schema && blk->reference_count <= 1) {
             shfree_by_schema(shm_tracker[i].ptr, shm_tracker[i].schema, &err);

@@ -79,6 +79,25 @@ typedef struct {
     char* group;
 } manifest_command_t;
 
+// Remote service endpoint for cross-container routing (future use).
+// When a manifest has a non-NULL service, the router should proxy requests
+// to the remote endpoint rather than spawning a local daemon.
+//
+//   {
+//     "service": {"type": "tcp", "host": "gpu-box", "port": 8080}
+//   }
+//
+// Currently reserved -- not parsed or used by the router. The fields are
+// defined here so that manifest JSON files can include the "service" key
+// without triggering parse errors, and so that the router's dispatch path
+// can be extended to handle remote upstreams in the future.
+typedef struct {
+    char* type;       // "tcp", "unix", or NULL (local)
+    char* host;       // hostname or IP (for tcp)
+    int port;         // port number (for tcp)
+    char* socket;     // socket path (for unix)
+} manifest_service_t;
+
 typedef struct {
     int version;
     char* name;       // program name (may be NULL for older manifests)
@@ -89,6 +108,7 @@ typedef struct {
     size_t n_commands;
     manifest_cmd_group_t* groups;
     size_t n_groups;
+    manifest_service_t* service; // NULL for local programs (future: remote routing)
 } manifest_t;
 
 // Serialize manifest to a JSON discovery response (caller must free result)

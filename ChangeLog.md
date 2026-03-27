@@ -1,3 +1,8 @@
+0.69.0 [2026-03-27]
+-------------------
+ * port morloc manager to Haskell
+ * add workspaces and such
+
 0.68.0 [2026-03-22]
 -------------------
  * remove explicit universal quntifiers

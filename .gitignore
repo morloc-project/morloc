@@ -1,4 +1,3 @@
-stack.yaml.lock
 tags
 *.hi
 *.o
@@ -24,3 +23,4 @@ claude-memory/
 .Rhistory
 pools/
 nexus
+out/

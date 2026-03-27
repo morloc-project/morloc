@@ -1,0 +1,88 @@
+name: Test Morloc
+on: [push]
+
+jobs:
+  linux-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Haskell (GHC + Stack)
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.6.7'
+          enable-stack: true
+          stack-version: 'latest'
+
+      # Cache Stack's compiled dependencies (NOT GHC itself — that's from
+      # haskell-actions/setup which has its own tool-cache). The snapshots
+      # directory holds compiled library packages; .stack-work holds
+      # project-local build artifacts.
+      - name: Cache Stack dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.stack/snapshots
+            ~/.stack/setup-exe-cache
+            .stack-work
+          key: stack-deps-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
+          restore-keys: |
+            stack-deps-
+
+      - name: Increase shared memory (needed for morloc SHM pool tests)
+        run: sudo mount -o remount,size=4G /dev/shm
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            r-base-core \
+            python3 \
+            python3-dev \
+            python3-pip \
+            python3-numpy \
+            g++ \
+            gcc \
+            make \
+            libgsl-dev
+          python3 -m pip install --break-system-packages --upgrade setuptools pyarrow
+
+      - name: Cache R packages
+        uses: actions/cache@v4
+        id: r-cache
+        with:
+          path: ~/R/library
+          key: r-lib-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install R packages
+        if: steps.r-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/R/library
+          LIBARROW_MINIMAL=true ARROW_S3=OFF ARROW_GCS=OFF \
+            Rscript -e 'install.packages("arrow", lib="~/R/library", repos = "https://cloud.r-project.org")'
+
+      - name: Add morloc bin folders to PATH
+        run: |
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/share/morloc/bin" >> $GITHUB_PATH
+          echo "R_LIBS_USER=$HOME/R/library" >> $GITHUB_ENV
+
+      - name: Build Morloc
+        run: |
+          stack install --system-ghc --no-install-ghc --no-run-tests
+
+      - name: Initialize morloc and install modules
+        run: |
+          morloc init -f
+          morloc install stdlib
+
+      - name: Test morloc
+        run: |
+          stack test --system-ghc --no-install-ghc morloc:morloc-test
+        timeout-minutes: 10
