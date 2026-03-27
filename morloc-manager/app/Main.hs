@@ -42,15 +42,16 @@ import qualified Data.Version as DV
 import Options.Applicative
 import qualified Paths_morloc_manager as PMM
 import Control.Monad (when)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, getCurrentDirectory, getHomeDirectory)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, findExecutable, getCurrentDirectory, getHomeDirectory)
 import System.Process (readProcessWithExitCode)
 import System.Exit (exitWith, ExitCode(..), exitFailure)
 import System.FilePath (normalise, addTrailingPathSeparator, (</>))
-import System.IO (Handle, hPutStrLn, hFlush, hIsTerminalDevice, stdin, stdout, stderr)
+import System.IO (Handle, hPutStr, hPutStrLn, hFlush, hIsTerminalDevice, stdin, stdout, stderr)
 
 import MorlocManager.Types
 import MorlocManager.Config
-  ( readActiveConfig
+  ( readConfig
+  , readActiveConfig
   , readVersionConfig
   , readEnvironmentConfig
   , readWorkspaceConfig
@@ -66,12 +67,12 @@ import MorlocManager.Config
   , envFlagsPath
   , findInstalledScope
   , findWorkspaceScope
+  , requireScopeConfig
   , writeConfig
   )
 import MorlocManager.Container
   ( RunConfig(..)
   , defaultRunConfig
-  , detectEngine
   , containerRunPassthrough
   )
 import MorlocManager.Freeze (freeze)
@@ -80,6 +81,7 @@ import MorlocManager.SELinux (SELinuxMode(..), detectSELinux, volumeSuffix, vali
 import MorlocManager.Version
   ( installVersion'
   , installLatest
+  , isVersionInstalled
   , selectVersion
   , uninstallVersion
   , listVersions
@@ -99,34 +101,34 @@ import MorlocManager.Environment
 
 -- | Top-level CLI options parsed before the subcommand.
 data GlobalOpts = GlobalOpts
-  { globalEngine :: Maybe ContainerEngine
-    -- ^ Override container engine (default: auto-detect)
-  , globalVerbose :: Bool
+  { globalVerbose :: Bool
     -- ^ Print container commands to stderr before executing
   } deriving (Show)
 
 -- | Parsed subcommand with its arguments.
 data Command
-  = CmdInstall (Maybe Scope) (Maybe String) Bool Bool
+  = CmdSetup (Maybe Scope)
+    -- ^ Configure engine for a scope (interactive)
+  | CmdInstall (Maybe Scope) (Maybe String) Bool Bool
     -- ^ Install a version (scope, version, noInit, force)
   | CmdUninstall (Maybe Scope) Bool [String]
     -- ^ Uninstall versions (scope, removeAll, versions)
-  | CmdSelect (Maybe Scope) String
-    -- ^ Select an installed version as active
-  | CmdInfo (Maybe Scope)
+  | CmdSelect String
+    -- ^ Select an installed version or workspace as active
+  | CmdInfo
     -- ^ Show installed versions and configuration
-  | CmdNew String (Maybe Scope) (Maybe String) Bool
+  | CmdNew (Maybe Scope) String (Maybe String) Bool
     -- ^ Create a workspace (scope, name, fromVersion, copy)
-  | CmdRun (Maybe Scope) Bool [String]
-    -- ^ Run a command (scope, shell, args)
-  | CmdEnv (Maybe Scope) EnvAction
+  | CmdRun Bool [String]
+    -- ^ Run a command (shell, args)
+  | CmdEnv EnvAction
     -- ^ Environment management
   | CmdStart Text [(Int,Int)]
     -- ^ Start a serve container (image tag, port mappings)
   | CmdStop Text
     -- ^ Stop a running serve container
-  | CmdFreeze (Maybe Scope) (Maybe FilePath)
-    -- ^ Export installed state as frozen artifact (scope, output path)
+  | CmdFreeze (Maybe FilePath)
+    -- ^ Export installed state as frozen artifact (output path)
   | CmdUnfreeze FilePath Text (Maybe Text)
     -- ^ Build a serve image from frozen state (tarball, tag, base image)
   | CmdStatus
@@ -164,33 +166,36 @@ versionFlag = infoOption ("morloc-manager v" <> DV.showVersion PMM.version)
 
 globalOptsParser :: Parser GlobalOpts
 globalOptsParser = GlobalOpts
-  <$> optional (option engineReader
-        ( long "engine" <> metavar "ENGINE"
-        <> help "Container engine: docker or podman (default: auto-detect)" ))
-  <*> switch
+  <$> switch
         ( long "verbose" <> short 'v'
         <> help "Print container commands to stderr before executing" )
 
--- | Parse --system / --local as mutually exclusive scope flags.
--- Defaults to Local when neither is specified.
-scopeFlags :: Parser (Maybe Scope)
-scopeFlags =
-      (flag' (Just System) (long "system" <> help "Use system-wide installation"))
-  <|> (flag' (Just Local)  (long "local"  <> help "Use per-user installation (default)"))
-  <|> pure Nothing
+-- | Optional scope override for admin commands (install, uninstall, setup).
+scopeOverride :: Parser (Maybe Scope)
+scopeOverride = optional (option scopeReader
+  ( long "scope" <> metavar "SCOPE"
+  <> help "Target scope: local or system (default: local)" ))
+
+scopeReader :: ReadM Scope
+scopeReader = eitherReader $ \s -> case s of
+  "local"  -> Right Local
+  "system" -> Right System
+  _        -> Left ("Unknown scope: " <> s <> ". Use 'local' or 'system'.")
 
 commandParser :: Parser Command
 commandParser = setupCmds <|> devCmds <|> deployCmds
   where
     setupCmds = hsubparser
       ( commandGroup "Setup"
+      <> command "setup" (info setupParser
+          (progDesc "Configure engine for a scope"))
       <> command "install" (info installParser
           (progDesc "Install a morloc version"))
       <> command "uninstall" (info uninstallParser
           (progDesc "Remove a version"))
       <> command "select" (info selectParser
-          (progDesc "Set the active version"))
-      <> command "info" (info (CmdInfo <$> scopeFlags)
+          (progDesc "Set the active version or workspace"))
+      <> command "info" (info (pure CmdInfo)
           (progDesc "Show configuration and installed versions"))
       )
     devCmds = hsubparser
@@ -220,34 +225,34 @@ commandParser = setupCmds <|> devCmds <|> deployCmds
           (progDesc "Show logs from a serve container"))
       )
 
+setupParser :: Parser Command
+setupParser = CmdSetup <$> scopeOverride
+
 installParser :: Parser Command
 installParser = CmdInstall
-  <$> scopeFlags
+  <$> scopeOverride
   <*> optional (argument str (metavar "VERSION" <> help "Version to install (default: latest)"))
   <*> switch (long "no-init" <> help "Skip morloc init after install")
   <*> switch (long "force" <> short 'f' <> help "Force re-install even if version is already installed")
 
 selectParser :: Parser Command
 selectParser = CmdSelect
-  <$> scopeFlags
-  <*> argument str (metavar "VERSION" <> help "Version to select")
+  <$> argument str (metavar "TARGET" <> help "Version or workspace name to select")
 
 uninstallParser :: Parser Command
 uninstallParser = CmdUninstall
-  <$> scopeFlags
+  <$> scopeOverride
   <*> switch (long "all" <> short 'a' <> help "Remove all installed versions")
   <*> many (argument str (metavar "VERSION..." <> help "Version(s) to remove"))
 
 runParser :: Parser Command
 runParser = CmdRun
-  <$> scopeFlags
-  <*> switch (long "shell" <> help "Start an interactive shell")
+  <$> switch (long "shell" <> help "Start an interactive shell")
   <*> many (argument str (metavar "COMMAND..." <> help "Command to run inside the container"))
 
 envParser :: Parser Command
 envParser = CmdEnv
-  <$> scopeFlags
-  <*> (envInitFlag <|> envListFlag <|> envResetFlag <|> envActivateArg)
+  <$> (envInitFlag <|> envListFlag <|> envResetFlag <|> envActivateArg)
   where
     envInitFlag = EnvInit <$> option str
       (long "init" <> metavar "NAME" <> help "Create a new environment Dockerfile")
@@ -258,8 +263,8 @@ envParser = CmdEnv
 
 newParser :: Parser Command
 newParser = CmdNew
-  <$> argument str (metavar "NAME" <> help "Workspace name")
-  <*> scopeFlags
+  <$> scopeOverride
+  <*> argument str (metavar "NAME" <> help "Workspace name")
   <*> optional (option str
         ( long "from" <> metavar "VERSION"
         <> help "Base version (default: currently active version)" ))
@@ -267,8 +272,7 @@ newParser = CmdNew
 
 freezeParser :: Parser Command
 freezeParser = CmdFreeze
-  <$> scopeFlags
-  <*> optional (option str
+  <$> optional (option str
         ( long "output" <> short 'o' <> metavar "PATH"
         <> help "Output directory for frozen state (default: ./morloc-freeze/)" ))
 
@@ -318,7 +322,7 @@ engineReader = eitherReader $ \s -> case s of
 main :: IO ()
 main = do
   (globalOpts, cmd) <- execParser optsParser
-  result <- dispatch (globalEngine globalOpts) (globalVerbose globalOpts) cmd
+  result <- dispatch (globalVerbose globalOpts) cmd
   case result of
     Right () -> pure ()
     Left err -> do
@@ -327,85 +331,163 @@ main = do
         EngineError _ n _ -> exitWith (ExitFailure n)
         _                 -> exitWith (ExitFailure 1)
 
--- | Resolve the container engine: CLI flag > config file > auto-detect.
-requireEngine :: Maybe ContainerEngine -> IO ContainerEngine
-requireEngine (Just e) = pure e
-requireEngine Nothing = do
-  -- Check if engine is persisted in config
-  mCfg <- readActiveConfig
-  case mCfg of
-    Just cfg -> pure (configEngine cfg)
-    Nothing -> do
-      result <- detectEngine
-      case result of
-        Right e  -> pure e
-        Left err -> do
-          TextIO.hPutStrLn stderr (renderError err)
-          exitFailure
-
--- | Resolve scope. Defaults to Local when not specified.
+-- | Resolve scope with default Local for admin commands.
 resolveScope :: Maybe Scope -> Scope
 resolveScope (Just s) = s
 resolveScope Nothing  = Local
 
+-- | Get engine from active config (local-first, system fallback).
+-- Auto-triggers interactive setup if no config exists and stdin is a TTY.
+ensureEngine :: IO (Either ManagerError ContainerEngine)
+ensureEngine = do
+  mCfg <- readActiveConfig
+  case mCfg of
+    Just cfg -> pure (Right (configEngine cfg))
+    Nothing -> do
+      isTTY <- hIsTerminalDevice stdin
+      if isTTY
+        then do
+          hPutStrLn stderr "No configuration found. Let's set up.\n"
+          result <- runInteractiveSetup Local
+          case result of
+            Left err -> pure (Left err)
+            Right () -> do
+              mCfg' <- readActiveConfig
+              case mCfg' of
+                Just cfg -> pure (Right (configEngine cfg))
+                Nothing  -> pure (Left (SetupNotComplete Local))
+        else pure (Left (SetupNotComplete Local))
+
+-- | Get engine for a specific scope. Auto-triggers setup for that scope.
+ensureEngineForScope :: Scope -> IO (Either ManagerError ContainerEngine)
+ensureEngineForScope scope = do
+  result <- requireScopeConfig scope
+  case result of
+    Right cfg -> pure (Right (configEngine cfg))
+    Left (SetupNotComplete s) -> do
+      isTTY <- hIsTerminalDevice stdin
+      if isTTY
+        then do
+          let scopeStr = case s of { Local -> "local"; System -> "system" }
+          hPutStrLn stderr $ "No " <> scopeStr <> " configuration found. Let's set up.\n"
+          setupResult <- runInteractiveSetup s
+          case setupResult of
+            Left err -> pure (Left err)
+            Right () -> do
+              result' <- requireScopeConfig s
+              case result' of
+                Right cfg -> pure (Right (configEngine cfg))
+                Left err  -> pure (Left err)
+        else pure (Left (SetupNotComplete s))
+    Left err -> pure (Left err)
+
+-- | Interactive setup: detect engines, prompt user, write config.
+runInteractiveSetup :: Scope -> IO (Either ManagerError ())
+runInteractiveSetup scope = do
+  engineResult <- interactiveEngineChoice
+  case engineResult of
+    Left err -> pure (Left err)
+    Right eng -> do
+      cfgP <- configPath scope
+      mExisting <- readConfig cfgP
+      let baseCfg = case (mExisting :: Either ManagerError Config) of
+            Right c -> c
+            Left _  -> defaultConfig
+      result <- writeConfig cfgP (baseCfg { configEngine = eng, configActiveScope = scope })
+      case result of
+        Left err -> pure (Left err)
+        Right () -> do
+          info' stderr $ "  Engine: " <> Text.unpack (displayEngine eng)
+          info' stderr $ "  Config: " <> cfgP
+          info' stderr ""
+          pure (Right ())
+
+-- | Detect available engines and prompt user to choose if both found.
+interactiveEngineChoice :: IO (Either ManagerError ContainerEngine)
+interactiveEngineChoice = do
+  podman <- findExecutable "podman"
+  docker <- findExecutable "docker"
+  case (podman, docker) of
+    (Nothing, Nothing) -> pure (Left EngineNotFound)
+    (Just _, Nothing)  -> do
+      info' stderr "Detected: podman"
+      pure (Right Podman)
+    (Nothing, Just _)  -> do
+      info' stderr "Detected: docker"
+      pure (Right Docker)
+    (Just _, Just _)   -> do
+      hPutStrLn stderr "Both podman and docker detected."
+      hPutStrLn stderr "  [1] podman (recommended)"
+      hPutStrLn stderr "  [2] docker"
+      hPutStr stderr "Choose [1]: "
+      hFlush stderr
+      line <- getLine
+      case line of
+        "2" -> pure (Right Docker)
+        _   -> pure (Right Podman)
+
 -- | Dispatch a parsed command to its handler.
-dispatch :: Maybe ContainerEngine -> Bool -> Command -> IO (Either ManagerError ())
-dispatch mEngine verbose cmd = case cmd of
+dispatch :: Bool -> Command -> IO (Either ManagerError ())
+dispatch verbose cmd = case cmd of
+
+  -- ---- setup ----
+  CmdSetup mScope -> do
+    let scope = resolveScope mScope
+    runInteractiveSetup scope
 
   -- ---- install ----
   CmdInstall mScope mVerStr noInit force -> do
-    engine <- requireEngine mEngine
     let scope = resolveScope mScope
-    -- Install the version
-    installResult <- case mVerStr of
-      Nothing       -> installLatest engine scope
-      Just "latest" -> installLatest engine scope
-      Just verStr -> case parseVersion verStr of
-        Nothing  -> pure (Left (InvalidVersion verStr))
-        Just ver -> do
-          r <- installVersion' force engine scope ver
-          case r of
-            Left err -> pure (Left err)
-            Right () -> pure (Right ver)
-    case installResult of
+    engineResult <- ensureEngineForScope scope
+    case engineResult of
       Left err -> pure (Left err)
-      Right ver -> do
-        info' stderr $ "Installed version " <> Text.unpack (showVersion ver)
-        -- Auto-select if no version is currently active
-        activeResult <- resolveActiveVersion
-        case activeResult of
-          Left NoActiveVersion -> do
-            _ <- selectVersion scope ver
-            info' stderr $ "Auto-selected version " <> Text.unpack (showVersion ver)
-          _ -> pure ()
-        -- Persist engine choice if --engine was explicitly provided
-        case mEngine of
-          Just eng -> do
-            cfgP <- configPath scope
-            mCfg <- readActiveConfig
-            let cfg = maybe defaultConfig id mCfg
-            _ <- writeConfig cfgP (cfg { configEngine = eng })
-            pure ()
-          Nothing -> pure ()
-        -- Run morloc init unless --no-init
-        if noInit
-          then pure (Right ())
-          else do
-            info' stderr "Running morloc init -f..."
-            runInContainer engine verbose False ["morloc", "init", "-f"]
+      Right engine -> do
+        -- Install the version
+        installResult <- case mVerStr of
+          Nothing       -> installLatest engine scope
+          Just "latest" -> installLatest engine scope
+          Just verStr -> case parseVersion verStr of
+            Nothing  -> pure (Left (InvalidVersion verStr))
+            Just ver -> do
+              r <- installVersion' force engine scope ver
+              case r of
+                Left err -> pure (Left err)
+                Right () -> pure (Right ver)
+        case installResult of
+          Left err -> pure (Left err)
+          Right ver -> do
+            -- Check if this was a fresh install or a no-op (already installed)
+            -- installVersion' prints its own message for the no-op case
+            -- Auto-select if no version is currently active
+            activeResult <- resolveActiveVersion
+            case activeResult of
+              Left NoActiveVersion -> do
+                _ <- selectVersion scope ver
+                info' stderr $ "Auto-selected version " <> Text.unpack (showVersion ver)
+              _ -> pure ()
+            -- Run morloc init unless --no-init or version was already installed
+            if noInit
+              then pure (Right ())
+              else if not force
+                then do
+                  -- Check if already installed (same check installVersion' does)
+                  let imageRef = "ghcr.io/morloc-project/morloc/morloc-full:" <> showVersion ver
+                  wasAlready <- isVersionInstalled engine scope ver imageRef
+                  if wasAlready
+                    then pure (Right ())
+                    else do
+                      runMorlocInit engine verbose
+                else do
+                  info' stderr "Running morloc init -f..."
+                  runInContainer engine verbose False ["morloc", "init", "-f"]
 
   -- ---- select ----
-  CmdSelect mScope verStr -> do
+  CmdSelect verStr -> do
     case parseVersion verStr of
       Just ver -> do
-        -- Treat as version
-        scope <- case mScope of
-          Just s  -> pure s
-          Nothing -> do
-            found <- findInstalledScope ver
-            case found of
-              Just s  -> pure s
-              Nothing -> pure Local
+        -- Treat as version — auto-find which scope has it
+        found <- findInstalledScope ver
+        let scope = maybe Local id found
         result <- selectVersion scope ver
         case result of
           Left err -> pure (Left err)
@@ -413,16 +495,10 @@ dispatch mEngine verbose cmd = case cmd of
             info' stderr $ "Selected version " <> Text.unpack (showVersion ver)
             pure (Right ())
       Nothing -> do
-        -- Treat as workspace name
+        -- Treat as workspace name — auto-find which scope has it
         let wsName = Text.pack verStr
-        scope <- case mScope of
-          Just s  -> pure s
-          Nothing -> do
-            found <- findWorkspaceScope wsName
-            case found of
-              Just s  -> pure s
-              Nothing -> pure Local
-        -- Verify workspace exists
+        found <- findWorkspaceScope wsName
+        let scope = maybe Local id found
         wcResult <- readWorkspaceConfig scope wsName
         case wcResult of
           Left _ -> pure (Left (InstallError ("Not found as version or workspace: " <> verStr)))
@@ -462,15 +538,20 @@ dispatch mEngine verbose cmd = case cmd of
                 pure (Right ())
 
   -- ---- run ----
-  CmdRun _mScope shell args -> do
-    engine <- requireEngine mEngine
-    if not shell && null args
-      then pure (Left NoCommand)
-      else runInContainer engine verbose shell args
+  CmdRun shell args -> do
+    engineResult <- ensureEngine
+    case engineResult of
+      Left err -> pure (Left err)
+      Right engine ->
+        if not shell && null args
+          then pure (Left NoCommand)
+          else runInContainer engine verbose shell args
 
   -- ---- env ----
-  CmdEnv mScope envAction -> do
-    let scope = resolveScope mScope
+  CmdEnv envAction -> do
+    -- Resolve scope from active config
+    mCfgForScope <- readActiveConfig
+    let scope = maybe Local configActiveScope mCfgForScope
     case envAction of
       EnvInit name -> do
         result <- initEnvironment scope name
@@ -490,21 +571,24 @@ dispatch mEngine verbose cmd = case cmd of
         | name `elem` ["init"] ->
             pure (Left (EnvError "Unknown argument. Did you mean: morloc-manager env --init <NAME>"))
         | otherwise -> do
-        engine <- requireEngine mEngine
-        verResult <- resolveActiveVersion
-        case verResult of
+        engineResult <- ensureEngine
+        case engineResult of
           Left err -> pure (Left err)
-          Right (ver, _) -> do
-            buildResult <- buildEnvironment engine scope ver name
-            case buildResult of
+          Right engine -> do
+            verResult <- resolveActiveVersion
+            case verResult of
               Left err -> pure (Left err)
-              Right () -> do
-                actResult <- activateEnvironment scope ver name
-                case actResult of
+              Right (ver, _) -> do
+                buildResult <- buildEnvironment engine scope ver name
+                case buildResult of
                   Left err -> pure (Left err)
                   Right () -> do
-                    info' stderr $ "Activated environment: " <> name
-                    pure (Right ())
+                    actResult <- activateEnvironment scope ver name
+                    case actResult of
+                      Left err -> pure (Left err)
+                      Right () -> do
+                        info' stderr $ "Activated environment: " <> name
+                        pure (Right ())
 
       EnvList -> do
         verResult <- resolveActiveVersion
@@ -527,69 +611,69 @@ dispatch mEngine verbose cmd = case cmd of
             pure (Right ())
 
   -- ---- new ----
-  CmdNew name mScope mFromVer doCopy -> do
-    engine <- requireEngine mEngine
+  CmdNew mScope name mFromVer doCopy -> do
     let scope = resolveScope mScope
-    -- Resolve base version
-    baseResult <- case mFromVer of
-      Just verStr -> case parseVersion verStr of
-        Nothing  -> pure (Left (InvalidVersion verStr))
-        Just ver -> do
-          mFoundScope <- findInstalledScope ver
-          case mFoundScope of
-            Nothing -> pure (Left (VersionNotInstalled ver))
-            Just foundScope -> pure (Right (ver, foundScope))
-      Nothing -> resolveActiveVersion
-    case baseResult of
+    engineResult <- ensureEngineForScope scope
+    case engineResult of
       Left err -> pure (Left err)
-      Right (baseVer, baseScope) -> do
-        -- Check workspace doesn't already exist
-        let wsName = Text.pack name
-        wDataDir <- workspaceDataDir scope wsName
-        exists <- doesDirectoryExist wDataDir
-        if exists
-          then pure (Left (InstallError ("Workspace already exists: " <> name)))
-          else do
-            -- Create workspace data directories
-            mapM_ (\d -> createDirectoryIfMissing True (wDataDir </> d))
-              ["bin", "lib", "fdb", "include", "opt", "tmp"]
-            -- Copy from base version if requested
-            when doCopy $ do
-              srcDir <- versionDataDir baseScope baseVer
-              let dirs = ["lib", "fdb", "bin"]
-              mapM_ (\d -> do
-                let src = srcDir </> d
-                let dst = wDataDir </> d
-                srcExists <- doesDirectoryExist src
-                when srcExists $ do
-                  -- Use cp -a for recursive copy
-                  _ <- readProcessWithExitCode "cp" ["-a", src <> "/.", dst] ""
-                  pure ()
-                ) dirs
-              info' stderr $ "Copied state from " <> Text.unpack (showVersion baseVer)
-            -- Write workspace config
-            let wc = WorkspaceConfig
-                  { wsBaseVersion = baseVer
-                  , wsBaseScope = baseScope
-                  , wsEngine = engine
-                  }
-            _ <- writeWorkspaceConfig scope wsName wc
-            -- Auto-activate
-            cfgP <- configPath scope
-            mCfg <- readActiveConfig
-            let cfg = maybe defaultConfig id mCfg
-            _ <- writeConfig cfgP (cfg
-              { configActiveTarget = Just (TargetWorkspace wsName)
-              , configActiveScope = scope
-              })
-            info' stderr $ "Created workspace: " <> name
-            info' stderr $ "Based on version " <> Text.unpack (showVersion baseVer)
-            -- Run morloc init in the workspace
-            info' stderr "Running morloc init -f..."
-            runInContainer engine verbose False ["morloc", "init", "-f"]
+      Right engine -> do
+        -- Resolve base version
+        baseResult <- case mFromVer of
+          Just verStr -> case parseVersion verStr of
+            Nothing  -> pure (Left (InvalidVersion verStr))
+            Just ver -> do
+              mFoundScope <- findInstalledScope ver
+              case mFoundScope of
+                Nothing -> pure (Left (VersionNotInstalled ver))
+                Just foundScope -> pure (Right (ver, foundScope))
+          Nothing -> resolveActiveVersion
+        case baseResult of
+          Left err -> pure (Left err)
+          Right (baseVer, baseScope) -> do
+            let wsName = Text.pack name
+            wDataDir <- workspaceDataDir scope wsName
+            exists <- doesDirectoryExist wDataDir
+            if exists
+              then pure (Left (InstallError ("Workspace already exists: " <> name)))
+              else do
+                mapM_ (\d -> createDirectoryIfMissing True (wDataDir </> d))
+                  ["bin", "lib", "fdb", "include", "opt", "tmp"]
+                when doCopy $ do
+                  srcDir <- versionDataDir baseScope baseVer
+                  mapM_ (\d -> do
+                    let src = srcDir </> d
+                    let dst = wDataDir </> d
+                    srcExists <- doesDirectoryExist src
+                    when srcExists $ do
+                      _ <- readProcessWithExitCode "cp" ["-a", src <> "/.", dst] ""
+                      pure ()
+                    ) ["lib", "fdb", "bin"]
+                  info' stderr $ "Copied state from " <> Text.unpack (showVersion baseVer)
+                let wc = WorkspaceConfig
+                      { wsBaseVersion = baseVer
+                      , wsBaseScope = baseScope
+                      , wsEngine = engine
+                      }
+                _ <- writeWorkspaceConfig scope wsName wc
+                cfgP <- configPath scope
+                mCfg <- readActiveConfig
+                let cfg = maybe defaultConfig id mCfg
+                _ <- writeConfig cfgP (cfg
+                  { configActiveTarget = Just (TargetWorkspace wsName)
+                  , configActiveScope = scope
+                  })
+                info' stderr $ "Created workspace: " <> name
+                info' stderr $ "Based on version " <> Text.unpack (showVersion baseVer)
+                initResult <- runMorlocInit engine verbose
+                case initResult of
+                  Left err -> pure (Left err)
+                  Right () -> do
+                    info' stderr $ "Activated workspace: " <> name
+                    info' stderr "Note: 'freeze' is not yet supported from workspaces."
+                    pure (Right ())
 
   -- ---- info ----
-  CmdInfo _mScope -> do
+  CmdInfo -> do
     mCfg <- readActiveConfig
     seMode <- detectSELinux
     let activeScope = maybe Local configActiveScope mCfg
@@ -598,11 +682,9 @@ dispatch mEngine verbose cmd = case cmd of
           SELinuxPermissive -> "permissive"
           SELinuxDisabled   -> "not detected"
         scopeStr = case activeScope of { Local -> "local"; System -> "system" }
-    engineStr <- case mEngine of
-      Just e  -> pure (displayEngine e)
-      Nothing -> do
-        eResult <- detectEngine
-        pure $ case eResult of { Right e -> displayEngine e; Left _ -> "not found" }
+    let engineStr = case mCfg of
+          Just cfg -> displayEngine (configEngine cfg)
+          Nothing  -> "not configured"
     cfgRoot <- configDir activeScope
     datRoot <- dataDir activeScope
     let activeTarget = mCfg >>= configActiveTarget
@@ -669,9 +751,8 @@ dispatch mEngine verbose cmd = case cmd of
     pure (Right ())
 
   -- ---- freeze ----
-  CmdFreeze mScope mOutput -> do
-    let scope = resolveScope mScope
-        outputDir = maybe "./morloc-freeze" id mOutput
+  CmdFreeze mOutput -> do
+    let outputDir = maybe "./morloc-freeze" id mOutput
     targetResult <- resolveActiveTarget
     case targetResult of
       Left err -> pure (Left err)
@@ -687,42 +768,55 @@ dispatch mEngine verbose cmd = case cmd of
 
   -- ---- unfreeze ----
   CmdUnfreeze tarball tag mBase -> do
-    engine <- requireEngine mEngine
-    targetResult <- resolveActiveTarget
-    case targetResult of
+    engineResult <- ensureEngine
+    case engineResult of
       Left err -> pure (Left err)
-      Right (target, _) -> do
-        let ver = case target of
-              TargetVersion v -> v
-              TargetWorkspace _ -> Version 0 0 0 -- fallback; --base should be used
-        buildServeImage engine tarball tag ver mBase
+      Right engine -> do
+        targetResult <- resolveActiveTarget
+        case targetResult of
+          Left err -> pure (Left err)
+          Right (target, _) -> do
+            let ver = case target of
+                  TargetVersion v -> v
+                  TargetWorkspace _ -> Version 0 0 0
+            buildServeImage engine tarball tag ver mBase
 
   -- ---- start ----
   CmdStart image ports -> do
-    engine <- requireEngine mEngine
-    let containerName = "morloc-serve-" <> image
-        portMappings = if null ports then [(8080, 8080)] else ports
-    runServeContainer engine image containerName portMappings
+    engineResult <- ensureEngine
+    case engineResult of
+      Left err -> pure (Left err)
+      Right engine -> do
+        let containerName = "morloc-serve-" <> image
+            portMappings = if null ports then [(8080, 8080)] else ports
+        runServeContainer engine image containerName portMappings
 
   -- ---- stop ----
   CmdStop name -> do
-    engine <- requireEngine mEngine
-    result <- stopServeContainer engine name
-    case result of
+    engineResult <- ensureEngine
+    case engineResult of
       Left err -> pure (Left err)
-      Right () -> do
-        info' stderr $ "Stopped container " <> Text.unpack name
-        pure (Right ())
+      Right engine -> do
+        result <- stopServeContainer engine name
+        case result of
+          Left err -> pure (Left err)
+          Right () -> do
+            info' stderr $ "Stopped container " <> Text.unpack name
+            pure (Right ())
 
   -- ---- status ----
   CmdStatus -> do
-    engine <- requireEngine mEngine
-    listServeContainers engine
+    engineResult <- ensureEngine
+    case engineResult of
+      Left err -> pure (Left err)
+      Right engine -> listServeContainers engine
 
   -- ---- logs ----
   CmdLogs name follow -> do
-    engine <- requireEngine mEngine
-    streamServeLogs engine name follow
+    engineResult <- ensureEngine
+    case engineResult of
+      Left err -> pure (Left err)
+      Right engine -> streamServeLogs engine name follow
 
 -- ======================================================================
 -- Container run
@@ -863,6 +957,15 @@ runWithConfig engine verbose image vDataDir home cwd suffix shell args isInit sh
 -- ======================================================================
 -- Helpers
 -- ======================================================================
+
+-- | Run morloc init inside the container. Uses -q (quiet) unless verbose.
+runMorlocInit :: ContainerEngine -> Bool -> IO (Either ManagerError ())
+runMorlocInit engine verbose = do
+  let initArgs = if verbose
+        then ["morloc", "init", "-f"]
+        else ["morloc", "init", "-f", "-q"]
+  info' stderr "Initializing morloc..."
+  runInContainer engine verbose False initArgs
 
 -- | User-facing display for ContainerEngine.
 displayEngine :: ContainerEngine -> Text

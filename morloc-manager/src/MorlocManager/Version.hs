@@ -45,6 +45,7 @@ module MorlocManager.Version
   , listVersions
   , resolveActiveVersion
   , resolveActiveTarget
+  , isVersionInstalled
   ) where
 
 import Data.Text (Text)

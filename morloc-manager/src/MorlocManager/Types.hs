@@ -475,6 +475,8 @@ data ManagerError
     -- ^ Error during state freeze (tar, checksum, etc.)
   | SELinuxError String
     -- ^ SELinux-related error (unsafe path, relabeling failure)
+  | SetupNotComplete Scope
+    -- ^ No configuration found for the given scope
   deriving (Show, Eq)
 
 
@@ -511,3 +513,7 @@ renderError (FreezeError msg) =
   "Freeze failed: " <> Text.pack msg
 renderError (SELinuxError msg) =
   "SELinux error: " <> Text.pack msg
+renderError (SetupNotComplete Local) =
+  "No local configuration found. Run: morloc-manager setup"
+renderError (SetupNotComplete System) =
+  "No system configuration found. Run: sudo morloc-manager setup --scope system"

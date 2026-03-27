@@ -84,12 +84,12 @@ detectSELinux = do
 
 -- | Determine the volume mount suffix for the current SELinux mode.
 --
--- Returns @":z"@ on Enforcing/Permissive systems, empty string otherwise.
--- The @:z@ suffix tells the container engine to relabel the mount point
--- with a context that allows the container to access it.
+-- Returns @":z"@ only on Enforcing systems. Permissive mode logs
+-- violations but does not block access, so relabeling is unnecessary
+-- and would cause false-positive home-directory mount skips.
 volumeSuffix :: SELinuxMode -> String
 volumeSuffix SELinuxEnforcing  = ":z"
-volumeSuffix SELinuxPermissive = ":z"
+volumeSuffix SELinuxPermissive = ""
 volumeSuffix SELinuxDisabled   = ""
 
 -- | Check whether a path is safe to apply SELinux relabeling (@:z@).

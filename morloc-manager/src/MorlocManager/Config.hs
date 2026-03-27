@@ -92,6 +92,7 @@ module MorlocManager.Config
     -- * Scope utilities
   , findInstalledScope
   , findWorkspaceScope
+  , requireScopeConfig
   , fixSystemPerms
   ) where
 
@@ -475,6 +476,18 @@ findWorkspaceScope name = do
       case sysResult of
         Right _ -> pure (Just System)
         Left _  -> pure Nothing
+
+-- | Require that a scope's config exists. Returns 'SetupNotComplete'
+-- if the config file is not found (distinguishing from permission or
+-- parse errors which are returned as-is).
+requireScopeConfig :: Scope -> IO (Either ManagerError Config)
+requireScopeConfig scope = do
+  path <- configPath scope
+  result <- readConfig path
+  case result of
+    Right cfg              -> pure (Right cfg)
+    Left (ConfigNotFound _) -> pure (Left (SetupNotComplete scope))
+    Left err               -> pure (Left err)
 
 -- | Set world-readable permissions on a system-scope config file.
 -- Call this after 'writeConfig' for any System-scope path so that

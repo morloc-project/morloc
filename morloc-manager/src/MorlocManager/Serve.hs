@@ -15,8 +15,8 @@ long-lived containers with the morloc-nexus router as PID 1.
   | Frozen morloc state (COPY)       |  lib/, fdb/, bin/, morloc binary
   | Read-only at runtime             |
   +----------------------------------+
-  | morloc-serve:\<version\>           |  Language runtimes (Python, R, C++)
-  | (minimal base, no GHC/stack)     |  morloc-nexus binary
+  | morloc-full:\<version\>            |  Language runtimes, compiler, nexus
+  | (already cached from install)    |  morloc-nexus binary
   +----------------------------------+
 
   Generated Dockerfile:
@@ -85,7 +85,7 @@ import MorlocManager.Container
 -- Pulls the base image from GHCR if not available locally, extracts the
 -- tarball into a build context, generates a Dockerfile, and builds the
 -- image. The base image defaults to
--- @ghcr.io\/morloc-project\/morloc\/morloc-serve:\<version\>@ but can be
+-- @ghcr.io\/morloc-project\/morloc\/morloc-full:\<version\>@ but can be
 -- overridden with @--base@.
 buildServeImage
   :: ContainerEngine
@@ -97,7 +97,7 @@ buildServeImage
 buildServeImage engine stateTarball tag ver mBase = do
   let baseImage = case mBase of
         Just b  -> b
-        Nothing -> "ghcr.io/morloc-project/morloc/morloc-serve:" <> showVersion ver
+        Nothing -> "ghcr.io/morloc-project/morloc/morloc-full:" <> showVersion ver
   -- Pull the base image (stderr passes through so user sees progress)
   hPutStrLn stderr $ "Pulling base image " <> Text.unpack baseImage <> "..."
   hFlush stderr
