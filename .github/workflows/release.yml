@@ -6,7 +6,7 @@
 #
 # This workflow:
 #   1. Runs the test suite
-#   2. Builds all container images (tiny, full, serve) from this checkout
+#   2. Builds all container images (tiny, full) from this checkout
 #   3. Pushes them to ghcr.io with version + edge tags
 #   4. Builds the static morloc-manager binary
 #   5. Creates a GitHub Release with the binary attached
@@ -103,7 +103,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Build all three images locally before pushing.
-      # Full and serve reference tiny via FROM — building tiny first and
+      # Full references tiny via FROM — building tiny first and
       # tagging it with the GHCR-qualified name means Docker finds it
       # locally without a round-trip to the registry.
 
@@ -122,17 +122,9 @@ jobs:
             -t ${{ env.IMAGE_BASE }}/morloc-full:edge \
             container/full/
 
-      - name: Build serve (uses local tiny)
-        run: |
-          docker build \
-            --build-arg MORLOC_VERSION=${{ steps.ver.outputs.version }} \
-            -t ${{ env.IMAGE_BASE }}/morloc-serve:${{ steps.ver.outputs.version }} \
-            -t ${{ env.IMAGE_BASE }}/morloc-serve:edge \
-            -f container/serve/Dockerfile container/
-
       - name: Push all images
         run: |
-          for img in morloc-tiny morloc-full morloc-serve; do
+          for img in morloc-tiny morloc-full; do
             docker push ${{ env.IMAGE_BASE }}/${img}:${{ steps.ver.outputs.version }}
             docker push ${{ env.IMAGE_BASE }}/${img}:edge
           done
