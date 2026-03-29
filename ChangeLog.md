@@ -1,3 +1,7 @@
+0.70.1 [2026-03-29]
+-------------------
+ Fix portability and flushing issues
+
 0.70.0 [2026-03-29]
 -------------------
  * port libmorloc and morloc-nexus from C to Rust
