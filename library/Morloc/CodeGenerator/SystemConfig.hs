@@ -156,8 +156,19 @@ configureAllSteps verbose force slurmSupport sanitize config = do
         , "--manifest-path", rustDir </> "Cargo.toml"
         , "-p", "morloc-runtime"
         ]
-      let rustSo = rustDir </> "target" </> "release" </> "libmorloc_runtime.so"
-      run verbose "cp" [rustSo, soPath]
+      -- Build the .so from the staticlib using gcc --whole-archive.
+      -- This exports ALL symbols, which is required because the Rust runtime's
+      -- internal state (SHM globals, allocator) must be visible to language
+      -- extensions (pymorloc, rmorloc, cppmorloc).
+      -- We cannot use the cdylib directly because Rust's cdylib only exports
+      -- #[no_mangle] pub extern "C" symbols, and adding a version script to
+      -- override this conflicts with Rust's own version script on ARM/aarch64.
+      let rustStaticLib = rustDir </> "target" </> "release" </> "libmorloc_runtime.a"
+      run verbose "gcc"
+        [ "-shared", "-o", soPath
+        , "-Wl,--whole-archive", rustStaticLib, "-Wl,--no-whole-archive"
+        , "-lpthread", "-lrt", "-ldl", "-lm"
+        ]
       hasStrip <- findExecutable "strip"
       case hasStrip of
         Just stripPath -> run verbose stripPath [soPath]

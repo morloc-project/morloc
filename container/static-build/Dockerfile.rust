@@ -44,12 +44,18 @@ RUN cargo build --release -p morloc-runtime 2>/dev/null || true
 # Copy actual source
 COPY data/rust/ ./
 
-# --- Step 1: Build libmorloc.so (cdylib) ---
+# --- Step 1: Build libmorloc.so from staticlib ---
+# Build the staticlib, then create the .so with gcc --whole-archive to export
+# ALL symbols. This is required because internal Rust runtime state (SHM globals,
+# allocator) must be visible to language extensions. Using the cdylib directly
+# hides these symbols, and adding a version script conflicts with Rust's own
+# version script on ARM/aarch64.
 RUN cargo build --release -p morloc-runtime
 
-# Install the .so so the nexus can link against it
 RUN mkdir -p /root/.local/share/morloc/lib \
-    && cp target/release/libmorloc_runtime.so /root/.local/share/morloc/lib/libmorloc.so
+    && gcc -shared -o /root/.local/share/morloc/lib/libmorloc.so \
+       -Wl,--whole-archive target/release/libmorloc_runtime.a -Wl,--no-whole-archive \
+       -lpthread -lrt -ldl -lm
 
 # --- Step 2: Build morloc-nexus ---
 RUN cargo build --release -p morloc-nexus
