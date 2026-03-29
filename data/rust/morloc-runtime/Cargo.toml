@@ -1,0 +1,22 @@
+[package]
+name = "morloc-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Morloc runtime library: shared memory, serialization, IPC, packet protocol"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmp = "0.8"
+rmp-serde = { workspace = true }
+twox-hash = { workspace = true }
+nix = { workspace = true }
+thiserror = { workspace = true }
+
+[build-dependencies]
+cbindgen = "0.28"
+# cc crate no longer needed -- all C files ported to Rust

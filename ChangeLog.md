@@ -1,7 +1,11 @@
+0.70.0 [2026-03-29]
+-------------------
+ * port libmorloc and morloc-nexus from C to Rust
+
 0.69.0 [2026-03-27]
 -------------------
- * port morloc manager to Haskell
- * add workspaces and such
+ * port morloc-manager from shell to Haskell
+ * share it as a static binary
 
 0.68.0 [2026-03-22]
 -------------------

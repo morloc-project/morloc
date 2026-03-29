@@ -23,9 +23,11 @@ import Morloc.Module (OverwriteProtocol (..))
 
 import qualified Data.Text.IO as TIO
 
-import Control.Exception (SomeException, displayException, try)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, findExecutable, getHomeDirectory, listDirectory, removeDirectoryRecursive, removeFile)
-import System.FilePath (replaceExtension, takeFileName)
+import Control.Exception (SomeException, displayException, fromException, try)
+import System.IO.Error (ioeGetErrorString)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, listDirectory, removeDirectoryRecursive, removeFile)
+import System.Environment (lookupEnv)
+import System.FilePath (takeDirectory)
 import System.IO (hIsTerminalDevice, hPutStrLn, stderr)
 import System.Exit (ExitCode(..))
 import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, waitForProcess)
@@ -38,7 +40,11 @@ configureAll verbose force slurmSupport sanitize config = do
   result <- try (configureAllSteps verbose force slurmSupport sanitize config) :: IO (Either SomeException ())
   case result of
     Left e -> do
-      sayError $ "Configuration failed: " ++ displayException e
+      -- Strip the "user error (...)" wrapper from IOError messages
+      let msg = case fromException e :: Maybe IOError of
+            Just ioe -> ioeGetErrorString ioe
+            Nothing -> displayException e
+      sayError $ "Configuration failed: " ++ msg
       return False
     Right _ -> return True
 
@@ -81,57 +87,94 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   when buildDirExists $ removeDirectoryRecursive buildDir
   createDirectoryIfMissing True buildDir
 
-  -- Check for gcc (required for core)
-  requireTool "gcc" "gcc is required to compile libmorloc.so and morloc-nexus"
-
-  sayInfo verbose "Writing morloc C library source files"
-  forM_ DF.libmorlocFiles $ \ef ->
-    TIO.writeFile (buildDir </> DF.embededFileName ef) (DF.embededFileText ef)
-
-  sayInfo verbose "Compiling libmorloc.so"
-  let morlocOptions = if slurmSupport then ["-DSLURM_SUPPORT"] else []
-      sanitizeFlags = if sanitize then ["-fsanitize=alignment", "-fno-sanitize-recover=alignment"] else []
-      cFiles =
-        [ buildDir </> DF.embededFileName ef | ef <- DF.libmorlocFiles, ".c" `isSuffixOf` DF.embededFileName ef
-        ]
-      soPath = libDir </> "libmorloc.so"
-      objPaths = [buildDir </> replaceExtension (takeFileName f) "o" | f <- cFiles]
-  forM_ (zip cFiles objPaths) $ \(cFile, objPath) -> do
-    let args =
-          ["-c", "-Wall", "-Werror", "-O2", "-fPIC", "-I" <> buildDir, "-o", objPath, cFile] <> morlocOptions <> sanitizeFlags
-    run verbose "gcc" args
-  let soArgs = ["-shared", "-o", soPath] <> objPaths <> ["-lpthread"] <> sanitizeFlags
-  run verbose "gcc" soArgs
-  forM_ DF.libmorlocFiles $ \ef -> removeFile (buildDir </> DF.embededFileName ef)
-  forM_ objPaths removeFile
-
+  requireTool "gcc" "gcc is required to compile language extensions (C++ pools, Python/R bindings)"
+  -- Install morloc.h (the C ABI contract for language extensions and pool templates)
   sayInfo verbose "Installing morloc.h"
   TIO.writeFile (includeDir </> "morloc.h") DF.libmorlocHeader
 
-  -- Compile morloc-nexus (installed to ~/.local/bin alongside the morloc binary,
-  -- since wrapper scripts invoke it by bare name via PATH)
-  sayInfo verbose "Compiling morloc-nexus"
+  -- Install libmorloc.so and morloc-nexus.
+  --
+  -- Strategy (in priority order):
+  --   1. MORLOC_RUST_BIN: directory with pre-built libmorloc.so + morloc-nexus
+  --      (used for release installs with portable musl-linked binaries)
+  --   2. MORLOC_RUST_DIR: Cargo workspace source — build from source via cargo
+  --      (used for development and container builds)
+  --   3. Auto-detect Cargo workspace relative to morloc binary
+  let soPath = libDir </> "libmorloc.so"
   userHome <- getHomeDirectory
   let nexusBinDir = userHome </> ".local" </> "bin"
-      nexusSrcPath = buildDir </> "nexus.c"
       nexusBinPath = nexusBinDir </> "morloc-nexus"
   createDirectoryIfMissing True nexusBinDir
-  TIO.writeFile nexusSrcPath (DF.embededFileText DF.nexusSource)
-  run
-    verbose
-    "gcc"
-    ( [ "-O2"
-      , "-I" <> includeDir
-      , "-o"
-      , nexusBinPath
-      , nexusSrcPath
-      , "-L" <> libDir
-      , "-Wl,-rpath," <> libDir
-      , "-lmorloc"
-      , "-lpthread"
-      ] <> sanitizeFlags
-    )
-  removeFile nexusSrcPath
+
+  rustBinEnv <- lookupEnv "MORLOC_RUST_BIN"
+  case rustBinEnv of
+    Just binDir -> do
+      -- Pre-built binaries (release path)
+      let prebuiltSo = binDir </> "libmorloc.so"
+          prebuiltNexus = binDir </> "morloc-nexus"
+      sayInfo verbose $ "Installing pre-built libmorloc.so from " <> binDir
+      run verbose "cp" [prebuiltSo, soPath]
+      run verbose "cp" [prebuiltNexus, nexusBinPath]
+      run verbose "chmod" ["+x", soPath]
+      run verbose "chmod" ["+x", nexusBinPath]
+    Nothing -> do
+      -- Try to build from source: need both cargo and the Rust workspace
+      rustDirEnv <- lookupEnv "MORLOC_RUST_DIR"
+      rustDir <- case rustDirEnv of
+        Just d -> return d
+        Nothing -> do
+          morlocBin <- findExecutable "morloc"
+          let searchDirs = case morlocBin of
+                Just binPath ->
+                  [ takeDirectory (takeDirectory binPath) </> "share" </> "morloc" </> "rust"
+                  , takeDirectory (takeDirectory binPath) </> "data" </> "rust"
+                  ]
+                Nothing -> []
+          findRustDir searchDirs
+
+      hasCargo <- findExecutable "cargo"
+
+      when (null rustDir || hasCargo == Nothing) $
+        ioError . userError $ unlines
+          [ "morloc init requires pre-built libmorloc.so and morloc-nexus binaries."
+          , ""
+          , "Download them from: https://github.com/morloc-project/morloc/releases"
+          , ""
+          , "Then set MORLOC_RUST_BIN to the directory containing them:"
+          , "  export MORLOC_RUST_BIN=/path/to/binaries"
+          , "  morloc init -f"
+          , ""
+          , "For development, you can build from source instead:"
+          , "  1. Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+          , "  2. Set MORLOC_RUST_DIR to the data/rust/ directory in the compiler repo"
+          , "  3. Run: morloc init -f"
+          ]
+
+      sayInfo verbose "Compiling libmorloc.so (Rust)"
+      run verbose "cargo"
+        [ "build", "--release"
+        , "--manifest-path", rustDir </> "Cargo.toml"
+        , "-p", "morloc-runtime"
+        ]
+      let rustSo = rustDir </> "target" </> "release" </> "libmorloc_runtime.so"
+      run verbose "cp" [rustSo, soPath]
+      hasStrip <- findExecutable "strip"
+      case hasStrip of
+        Just stripPath -> run verbose stripPath [soPath]
+        Nothing -> return ()
+
+      sayInfo verbose "Compiling morloc-nexus (Rust)"
+      run verbose "cargo"
+        [ "build", "--release"
+        , "--manifest-path", rustDir </> "Cargo.toml"
+        , "-p", "morloc-nexus"
+        ]
+      let rustNexus = rustDir </> "target" </> "release" </> "morloc-nexus"
+      run verbose "cp" [rustNexus, nexusBinPath]
+      case hasStrip of
+        Just stripPath -> run verbose stripPath [nexusBinPath]
+        Nothing -> return ()
+
 
   -- Create exe/ and fdb/ directories
   let exeDir = homeDir </> "exe"
@@ -166,6 +209,13 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- Generate shell completions
   sayInfo verbose "Generating shell completions"
   Completion.regenerateCompletions verbose homeDir
+
+-- | Search for a Rust workspace directory containing Cargo.toml
+findRustDir :: [FilePath] -> IO FilePath
+findRustDir [] = return ""
+findRustDir (d:ds) = do
+  exists <- doesFileExist (d </> "Cargo.toml")
+  if exists then return d else findRustDir ds
 
 -- ANSI color wrapping, disabled when stderr is not a terminal
 withColor :: String -> String -> IO String

@@ -20,10 +20,9 @@ jobs:
           enable-stack: true
           stack-version: 'latest'
 
-      # Cache Stack's compiled dependencies (NOT GHC itself — that's from
-      # haskell-actions/setup which has its own tool-cache). The snapshots
-      # directory holds compiled library packages; .stack-work holds
-      # project-local build artifacts.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Cache Stack dependencies
         uses: actions/cache@v4
         with:
@@ -34,6 +33,17 @@ jobs:
           key: stack-deps-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
           restore-keys: |
             stack-deps-
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            data/rust/target
+          key: cargo-deps-${{ hashFiles('data/rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-deps-
 
       - name: Increase shared memory (needed for morloc SHM pool tests)
         run: sudo mount -o remount,size=4G /dev/shm
@@ -79,7 +89,7 @@ jobs:
 
       - name: Initialize morloc and install modules
         run: |
-          morloc init -f
+          MORLOC_RUST_DIR=$(pwd)/data/rust morloc init -f
           morloc install stdlib
 
       - name: Test morloc

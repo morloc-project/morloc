@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.69.0
+version:          0.70.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description: |
@@ -23,35 +23,9 @@ extra-source-files:
   - README.md
   - ChangeLog.md
   # libraries
-  - data/nexus.c # nexus template
   - data/lang/cpp/pool.cpp
-  # universal c library (split into modules)
+  # universal c header
   - data/morloc/morloc.h
-  - data/morloc/macros.h
-  - data/morloc/memory.h
-  - data/morloc/call.h
-  - data/morloc/packet.h
-  - data/morloc/schema.h
-  - data/morloc/eval.h
-  - data/morloc/slurm.h
-  - data/morloc/utility.h
-  - data/morloc/mpack.h
-  - data/morloc/json.h
-  - data/morloc/cache.h
-  - data/morloc/cli.h
-  - data/morloc/xxhash.h
-  - data/morloc/cache.c
-  - data/morloc/cli.c
-  - data/morloc/eval.c
-  - data/morloc/ipc.c
-  - data/morloc/json.c
-  - data/morloc/mpack.c
-  - data/morloc/packet.c
-  - data/morloc/schema.c
-  - data/morloc/serialize.c
-  - data/morloc/shm.c
-  - data/morloc/slurm.c
-  - data/morloc/utility.c
   # shared language config
   - data/lang/languages.yaml
   # per-language files
