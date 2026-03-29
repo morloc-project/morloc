@@ -21,6 +21,10 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
 # Add ghcup to PATH
 ENV PATH="/opt/.ghcup/bin:${PATH}"
 
+# Install Rust toolchain (needed by morloc init to build libmorloc.so)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 # Set the timezone, this avoids hanging later on
 RUN TZ=Antarctica/Troll apt-get -y install tzdata
 

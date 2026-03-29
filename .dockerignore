@@ -4,5 +4,6 @@
 out/
 container/static-build/.stack-work/
 morloc-manager/.stack-work/
+data/rust/target/
 *.hi
 *.o

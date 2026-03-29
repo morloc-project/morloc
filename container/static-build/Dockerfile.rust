@@ -1,0 +1,72 @@
+# Portable build of libmorloc.so and morloc-nexus.
+#
+# Strategy:
+#   - Build on old glibc (Ubuntu 20.04, glibc 2.31) for forward compatibility
+#   - The .so is a standard cdylib that works on any glibc >= 2.31
+#   - The nexus is a standard dynamically-linked binary
+#
+# Build:
+#   docker build -t morloc-rust-static -f container/static-build/Dockerfile.rust .
+#   docker run --rm -v $(pwd)/out:/out morloc-rust-static
+#
+# Output:
+#   ./out/libmorloc.so   (shared library, glibc >= 2.31)
+#   ./out/morloc-nexus   (binary, glibc >= 2.31)
+
+FROM docker.io/library/ubuntu:20.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates gcc g++ make pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
+    && /root/.cargo/bin/cargo --version
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+
+# Copy Cargo manifests first for dependency caching
+COPY data/rust/Cargo.toml data/rust/Cargo.lock ./
+COPY data/rust/morloc-runtime/Cargo.toml ./morloc-runtime/
+COPY data/rust/morloc-nexus/Cargo.toml ./morloc-nexus/
+
+# Create dummy source files for dependency pre-build
+RUN mkdir -p morloc-runtime/src morloc-nexus/src \
+    && echo "fn main() {}" > morloc-nexus/src/main.rs \
+    && echo "" > morloc-runtime/src/lib.rs
+
+# Pre-build dependencies (cached layer)
+RUN cargo build --release -p morloc-runtime 2>/dev/null || true
+
+# Copy actual source
+COPY data/rust/ ./
+
+# --- Step 1: Build libmorloc.so (cdylib) ---
+RUN cargo build --release -p morloc-runtime
+
+# Install the .so so the nexus can link against it
+RUN mkdir -p /root/.local/share/morloc/lib \
+    && cp target/release/libmorloc_runtime.so /root/.local/share/morloc/lib/libmorloc.so
+
+# --- Step 2: Build morloc-nexus ---
+RUN cargo build --release -p morloc-nexus
+
+# Strip both
+RUN strip /root/.local/share/morloc/lib/libmorloc.so target/release/morloc-nexus
+
+# Verify
+RUN echo "--- libmorloc.so ---" \
+    && ls -lh /root/.local/share/morloc/lib/libmorloc.so \
+    && ldd /root/.local/share/morloc/lib/libmorloc.so \
+    && echo "--- morloc-nexus ---" \
+    && ls -lh target/release/morloc-nexus \
+    && ldd target/release/morloc-nexus
+
+# ---- Output stage ----
+FROM docker.io/library/ubuntu:20.04
+COPY --from=builder /root/.local/share/morloc/lib/libmorloc.so /out-staging/libmorloc.so
+COPY --from=builder /build/target/release/morloc-nexus /out-staging/morloc-nexus
+CMD ["sh", "-c", "cp /out-staging/libmorloc.so /out-staging/morloc-nexus /out/ && echo 'Wrote /out/libmorloc.so and /out/morloc-nexus' && ls -lh /out/libmorloc.so /out/morloc-nexus"]

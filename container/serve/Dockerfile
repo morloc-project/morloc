@@ -50,16 +50,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     gcc \
     make \
+    curl \
     libgmp10 \
     libffi8 \
     zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the morloc compiler binary from the tiny image
-COPY --from=morloc-bin /bin/morloc /usr/local/bin/morloc
+# Install Rust toolchain (needed by morloc init to build libmorloc.so)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Run morloc init to build morloc-nexus, libmorloc.so, and language bindings
+# Copy the morloc compiler binary and Rust source from the tiny image
+COPY --from=morloc-bin /bin/morloc /usr/local/bin/morloc
+COPY --from=morloc-bin /opt/morloc-rust /opt/morloc-rust
+ENV MORLOC_RUST_DIR=/opt/morloc-rust
+
+# Run morloc init to build morloc-nexus and libmorloc.so (from Rust via cargo)
 RUN morloc init
+
+# Remove Rust toolchain to reduce image size (not needed at runtime)
+RUN rustup self uninstall -y && rm -rf /root/.cargo /root/.rustup
 
 # Create directories for frozen state (populated by serve-image)
 RUN mkdir -p /root/.local/share/morloc/lib \

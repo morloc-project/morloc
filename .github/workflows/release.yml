@@ -1,15 +1,15 @@
-# Release workflow: build containers + static morloc-manager binary
+# Release workflow: build all binaries + containers, run tests, publish release.
 #
 # Triggered by pushing a version tag:
 #   git tag v0.68.0
 #   git push origin v0.68.0
 #
-# This workflow:
-#   1. Runs the test suite
-#   2. Builds all container images (tiny, full, serve) from this checkout
-#   3. Pushes them to ghcr.io with version + edge tags
-#   4. Builds the static morloc-manager binary
-#   5. Creates a GitHub Release with the binary attached
+# Produces for each platform (linux-x86_64, linux-arm64, macos-arm64):
+#   - morloc-manager  (static Haskell binary)
+#   - libmorloc.so    (Rust runtime library; .dylib on macOS)
+#   - morloc-nexus    (Rust nexus binary)
+#
+# All three are attached to the GitHub Release.
 
 name: Release
 
@@ -22,8 +22,83 @@ env:
   IMAGE_BASE: ghcr.io/morloc-project/morloc
 
 jobs:
-  # ---- Run tests first ----
+  # ---- Build Rust binaries (libmorloc + morloc-nexus) per platform ----
+  rust-binary:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            method: docker
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+            method: docker
+          - os: macos-latest
+            platform: macos-arm64
+            method: native
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Linux: Docker container build (Ubuntu 20.04 for glibc compat) ----
+      - name: Build Rust binaries (Linux)
+        if: matrix.method == 'docker'
+        run: |
+          docker build -t morloc-rust-build \
+            -f container/static-build/Dockerfile.rust .
+          mkdir -p out
+          docker run --rm -v "$(pwd)/out:/out" morloc-rust-build
+
+      - name: Rename artifacts (Linux)
+        if: matrix.method == 'docker'
+        run: |
+          mv out/libmorloc.so out/libmorloc-${{ matrix.platform }}.so
+          mv out/morloc-nexus out/morloc-nexus-${{ matrix.platform }}
+
+      # ---- macOS: native cargo build ----
+      - name: Setup Rust (macOS)
+        if: matrix.method == 'native'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo (macOS)
+        if: matrix.method == 'native'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            data/rust/target
+          key: cargo-macos-${{ hashFiles('data/rust/Cargo.lock') }}
+          restore-keys: cargo-macos-
+
+      - name: Build Rust binaries (macOS)
+        if: matrix.method == 'native'
+        run: |
+          cd data/rust
+          # Build libmorloc (cdylib produces .dylib on macOS)
+          cargo build --release -p morloc-runtime
+          # Install .dylib so nexus can link against it
+          mkdir -p $HOME/.local/share/morloc/lib
+          cp target/release/libmorloc_runtime.dylib $HOME/.local/share/morloc/lib/libmorloc.dylib
+          # Build nexus
+          cargo build --release -p morloc-nexus
+          # Collect artifacts
+          mkdir -p ../../out
+          cp target/release/libmorloc_runtime.dylib ../../out/libmorloc-${{ matrix.platform }}.dylib
+          cp target/release/morloc-nexus ../../out/morloc-nexus-${{ matrix.platform }}
+          strip ../../out/morloc-nexus-${{ matrix.platform }} || true
+
+      - name: Upload Rust artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-binaries-${{ matrix.platform }}
+          path: out/*
+
+  # ---- Run tests using the Rust binaries ----
   test:
+    needs: rust-binary
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -66,6 +141,20 @@ jobs:
           mkdir -p ~/R/library
           LIBARROW_MINIMAL=true ARROW_S3=OFF ARROW_GCS=OFF \
             Rscript -e 'install.packages("arrow", lib="~/R/library", repos = "https://cloud.r-project.org")'
+
+      - name: Download Rust binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-binaries-linux-x86_64
+          path: rust-bin
+
+      - name: Prepare Rust binaries
+        run: |
+          mkdir -p prebuilt
+          mv rust-bin/libmorloc-linux-x86_64.so prebuilt/libmorloc.so
+          mv rust-bin/morloc-nexus-linux-x86_64 prebuilt/morloc-nexus
+          chmod +x prebuilt/libmorloc.so prebuilt/morloc-nexus
+
       - name: Add morloc to PATH
         run: |
           echo "$HOME/.local/bin" >> $GITHUB_PATH
@@ -73,9 +162,9 @@ jobs:
           echo "R_LIBS_USER=$HOME/R/library" >> $GITHUB_ENV
       - name: Build morloc
         run: stack install --system-ghc --no-install-ghc --no-run-tests
-      - name: Initialize morloc
+      - name: Initialize morloc (using pre-built Rust binaries)
         run: |
-          morloc init -f
+          MORLOC_RUST_BIN=$(pwd)/prebuilt morloc init -f
           morloc install stdlib
       - name: Run tests
         run: stack test --system-ghc --no-install-ghc morloc:morloc-test
@@ -101,11 +190,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Build all three images locally before pushing.
-      # Full and serve reference tiny via FROM — building tiny first and
-      # tagging it with the GHCR-qualified name means Docker finds it
-      # locally without a round-trip to the registry.
 
       - name: Build tiny (from local source)
         run: |
@@ -215,19 +299,25 @@ jobs:
   # ---- Create GitHub Release ----
   release:
     if: always() && needs.containers.result == 'success'
-    needs: [containers, static-binary]
+    needs: [containers, static-binary, rust-binary]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download all binaries
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: morloc-manager-*
+          pattern: '{morloc-manager-*,rust-binaries-*}'
           merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: morloc-manager-*
+          files: |
+            morloc-manager-*
+            libmorloc-*
+            morloc-nexus-*
           generate_release_notes: true

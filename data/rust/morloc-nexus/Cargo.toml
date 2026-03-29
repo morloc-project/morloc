@@ -1,0 +1,18 @@
+[package]
+name = "morloc-nexus"
+version = "0.1.0"
+edition = "2021"
+description = "Morloc nexus: CLI dispatcher for multi-language pool orchestration"
+
+[[bin]]
+name = "morloc-nexus"
+path = "src/main.rs"
+
+[dependencies]
+morloc-runtime = { path = "../morloc-runtime" }
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+nix = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
