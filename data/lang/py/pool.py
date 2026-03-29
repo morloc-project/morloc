@@ -89,6 +89,12 @@ def run_job(client_fd: int) -> None:
         else:
             raise ValueError("Expected a ping or call type packet")
 
+        # Flush stdout BEFORE sending the result back. The nexus prints its
+        # own output (the return value) right after receiving this response.
+        # Both processes share the same stdout fd, so if we flush after sending,
+        # the nexus can print first, causing out-of-order output.
+        sys.stdout.flush()
+
         morloc.send_packet_to_foreign_server(client_fd, result)
 
     except Exception as e:
@@ -101,7 +107,7 @@ def run_job(client_fd: int) -> None:
             pass
         print(f"job failed: {e!s}", file=sys.stderr)
     finally:
-        # Flush stdout so user function output is not lost on pool shutdown
+        # Safety-net flush for any output from error handling paths
         sys.stdout.flush()
         # close child copy
         morloc.close_socket(client_fd)
