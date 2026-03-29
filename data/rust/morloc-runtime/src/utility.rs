@@ -7,6 +7,21 @@ use std::ptr;
 
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 
+// ── Cross-platform helpers ─────────────────────────────────────────────────
+
+/// Return the current errno value (cross-platform).
+#[cfg(target_os = "linux")]
+#[inline]
+pub unsafe fn errno_val() -> i32 {
+    *libc::__errno_location()
+}
+
+#[cfg(target_os = "macos")]
+#[inline]
+pub unsafe fn errno_val() -> i32 {
+    *libc::__error()
+}
+
 // ── File operations ────────────────────────────────────────────────────────
 
 #[no_mangle]

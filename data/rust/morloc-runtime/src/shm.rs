@@ -7,6 +7,19 @@ use crate::error::MorlocError;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
+/// Cross-platform file pre-allocation.
+/// Linux: posix_fallocate (allocates disk blocks).
+/// macOS: ftruncate (extends file, may be sparse).
+#[cfg(target_os = "linux")]
+unsafe fn preallocate_fd(fd: i32, size: i64) -> i32 {
+    libc::posix_fallocate(fd, 0, size)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn preallocate_fd(fd: i32, size: i64) -> i32 {
+    if libc::ftruncate(fd, size) == -1 { -1 } else { 0 }
+}
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 pub const SHM_MAGIC: u32 = 0xFECA_0DF0;
@@ -531,7 +544,7 @@ fn try_open_shm(
         }
         let created = sb.st_size == 0;
         if created {
-            let err = unsafe { libc::posix_fallocate(fd, 0, full_size as i64) };
+            let err = unsafe { preallocate_fd(fd, full_size as i64) };
             if err == 0 {
                 return Ok((fd, true, shm_name.to_string(), full_size));
             }
@@ -573,7 +586,7 @@ fn try_open_shm(
     }
     let created = sb.st_size == 0;
     let actual_size = if created {
-        let err = unsafe { libc::posix_fallocate(fd, 0, full_size as i64) };
+        let err = unsafe { preallocate_fd(fd, full_size as i64) };
         if err != 0 {
             unsafe {
                 libc::close(fd);
@@ -842,6 +855,11 @@ pub unsafe fn shm_lock(lock: &AtomicU32) -> Result<(), MorlocError> {
         }
     }
 
+    shm_lock_slow(lock)
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn shm_lock_slow(lock: &AtomicU32) -> Result<(), MorlocError> {
     let timeout = libc::timespec {
         tv_sec: LOCK_TIMEOUT_SECS as i64,
         tv_nsec: 0,
@@ -877,17 +895,35 @@ pub unsafe fn shm_lock(lock: &AtomicU32) -> Result<(), MorlocError> {
     }
 }
 
+/// macOS fallback: spin-yield loop (no futex available).
+#[cfg(target_os = "macos")]
+unsafe fn shm_lock_slow(lock: &AtomicU32) -> Result<(), MorlocError> {
+    loop {
+        std::thread::yield_now();
+        if lock
+            .compare_exchange_weak(LOCK_UNLOCKED, LOCK_LOCKED, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+}
+
 /// Release a futex-based cross-process lock on shared memory.
 ///
 /// # Safety
 /// `lock` must be the same AtomicU32 previously acquired via shm_lock.
 pub unsafe fn shm_unlock(lock: &AtomicU32) {
     lock.store(LOCK_UNLOCKED, Ordering::Release);
-    let ptr = lock as *const AtomicU32 as *const u32;
-    libc::syscall(
-        libc::SYS_futex, ptr, libc::FUTEX_WAKE, 1,
-        std::ptr::null::<libc::timespec>(), std::ptr::null::<u32>(), 0u32,
-    );
+    #[cfg(target_os = "linux")]
+    {
+        let ptr = lock as *const AtomicU32 as *const u32;
+        libc::syscall(
+            libc::SYS_futex, ptr, libc::FUTEX_WAKE, 1,
+            std::ptr::null::<libc::timespec>(), std::ptr::null::<u32>(), 0u32,
+        );
+    }
+    // macOS: no futex wake needed; spin-yield waiters will see the store.
 }
 
 // ── Pointer conversion helpers ─────────────────────────────────────────────

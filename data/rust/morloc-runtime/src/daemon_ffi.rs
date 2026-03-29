@@ -1726,7 +1726,7 @@ pub unsafe extern "C" fn daemon_run(
     while !SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
         let ready = libc::poll(fds.as_mut_ptr(), nfds as libc::nfds_t, 1000);
         if ready < 0 {
-            if *libc::__errno_location() == libc::EINTR {
+            if crate::utility::errno_val() == libc::EINTR {
                 continue;
             }
             eprintln!("daemon: poll error");
@@ -1748,8 +1748,8 @@ pub unsafe extern "C" fn daemon_run(
             }
             let client_fd = libc::accept(fds[i].fd, ptr::null_mut(), ptr::null_mut());
             if client_fd < 0 {
-                if *libc::__errno_location() == libc::EINTR
-                    || *libc::__errno_location() == libc::EAGAIN
+                if crate::utility::errno_val() == libc::EINTR
+                    || crate::utility::errno_val() == libc::EAGAIN
                 {
                     continue;
                 }

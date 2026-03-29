@@ -181,7 +181,7 @@ pub unsafe extern "C" fn start_daemon(
     // Set non-blocking mode
     let flags = libc::fcntl((*daemon).server_fd, libc::F_GETFL);
     if flags == -1 || libc::fcntl((*daemon).server_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
-        let errno_msg = std::ffi::CStr::from_ptr(libc::strerror(*libc::__errno_location()))
+        let errno_msg = std::ffi::CStr::from_ptr(libc::strerror(crate::utility::errno_val()))
             .to_string_lossy().into_owned();
         close_daemon(&mut (daemon as *mut LanguageDaemon));
         set_errmsg(errmsg, &MorlocError::Ipc(format!("Failed to set non-blocking mode: {}", errno_msg)));
@@ -239,7 +239,7 @@ pub unsafe extern "C" fn stream_from_client_wait(
         libc::FD_ZERO(&mut read_fds);
         libc::FD_SET(client_fd, &mut read_fds);
         ready = libc::pselect(max_fd + 1, &mut read_fds, ptr::null_mut(), ptr::null_mut(), timeout_ptr, &origmask);
-        if !(ready < 0 && *libc::__errno_location() == libc::EINTR) {
+        if !(ready < 0 && crate::utility::errno_val() == libc::EINTR) {
             break;
         }
     }
@@ -267,7 +267,7 @@ pub unsafe extern "C" fn stream_from_client_wait(
         set_errmsg(errmsg, &MorlocError::Ipc("Connection closed by peer".into()));
         return ptr::null_mut();
     }
-    if recv_length < 0 && *libc::__errno_location() != libc::EWOULDBLOCK && *libc::__errno_location() != libc::EAGAIN {
+    if recv_length < 0 && crate::utility::errno_val() != libc::EWOULDBLOCK && crate::utility::errno_val() != libc::EAGAIN {
         libc::free(buffer as *mut c_void);
         set_errmsg(errmsg, &MorlocError::Ipc("Recv error".into()));
         return ptr::null_mut();
@@ -319,7 +319,7 @@ pub unsafe extern "C" fn stream_from_client_wait(
                 set_errmsg(errmsg, &MorlocError::Ipc("Timeout waiting for remaining data".into()));
                 return ptr::null_mut();
             }
-            if ready < 0 && *libc::__errno_location() != libc::EINTR {
+            if ready < 0 && crate::utility::errno_val() != libc::EINTR {
                 libc::free(result as *mut c_void);
                 set_errmsg(errmsg, &MorlocError::Ipc("pselect error".into()));
                 return ptr::null_mut();
@@ -340,7 +340,7 @@ pub unsafe extern "C" fn stream_from_client_wait(
                     set_errmsg(errmsg, &MorlocError::Ipc("Connection closed early".into()));
                     return ptr::null_mut();
                 }
-                if n < 0 && *libc::__errno_location() != libc::EWOULDBLOCK && *libc::__errno_location() != libc::EAGAIN {
+                if n < 0 && crate::utility::errno_val() != libc::EWOULDBLOCK && crate::utility::errno_val() != libc::EAGAIN {
                     libc::free(result as *mut c_void);
                     set_errmsg(errmsg, &MorlocError::Ipc("Recv error".into()));
                     return ptr::null_mut();
@@ -529,7 +529,7 @@ pub unsafe extern "C" fn wait_for_client_with_timeout(
 
     let ready = libc::pselect(max_fd + 1, &mut (*daemon).read_fds, ptr::null_mut(), ptr::null_mut(), timeout_ptr, &emptymask);
     if ready < 0 {
-        if *libc::__errno_location() == libc::EINTR {
+        if crate::utility::errno_val() == libc::EINTR {
             return 0;
         }
         set_errmsg(errmsg, &MorlocError::Ipc("pselect error".into()));

@@ -1,3 +1,7 @@
+0.70.2 [2026-03-29]
+-------------------
+ mac portability issues
+
 0.70.1 [2026-03-29]
 -------------------
  Fix portability and flushing issues

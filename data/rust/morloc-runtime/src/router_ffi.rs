@@ -57,7 +57,7 @@ pub unsafe extern "C" fn router_init(
 
     let dir = libc::opendir(fdb_path);
     if dir.is_null() {
-        let errno_msg = CStr::from_ptr(libc::strerror(*libc::__errno_location()))
+        let errno_msg = CStr::from_ptr(libc::strerror(crate::utility::errno_val()))
             .to_string_lossy();
         let path_str = CStr::from_ptr(fdb_path).to_string_lossy();
         set_errmsg(
@@ -230,7 +230,7 @@ pub unsafe extern "C" fn router_start_program(
         );
         // If exec fails
         let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
-        let errno_msg = CStr::from_ptr(libc::strerror(*libc::__errno_location()))
+        let errno_msg = CStr::from_ptr(libc::strerror(crate::utility::errno_val()))
             .to_string_lossy();
         eprintln!(
             "router: failed to exec morloc-nexus for {}: {}",
@@ -265,7 +265,7 @@ pub unsafe extern "C" fn router_start_program(
 
         true
     } else {
-        let errno_msg = CStr::from_ptr(libc::strerror(*libc::__errno_location()))
+        let errno_msg = CStr::from_ptr(libc::strerror(crate::utility::errno_val()))
             .to_string_lossy();
         set_errmsg(
             errmsg,
@@ -951,7 +951,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
     while !ROUTER_SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
         let ready = libc::poll(fds.as_mut_ptr(), nfds as libc::nfds_t, 1000);
         if ready < 0 {
-            if *libc::__errno_location() == libc::EINTR {
+            if crate::utility::errno_val() == libc::EINTR {
                 continue;
             }
             eprintln!("router: poll error");

@@ -54,7 +54,10 @@ pub struct PoolSocket {
 
 /// SIGCHLD handler: reap terminated children.
 extern "C" fn sigchld_handler(_sig: libc::c_int) {
+    #[cfg(target_os = "linux")]
     let saved_errno = unsafe { *libc::__errno_location() };
+    #[cfg(target_os = "macos")]
+    let saved_errno = unsafe { *libc::__error() };
     loop {
         let mut status: libc::c_int = 0;
         let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
@@ -69,7 +72,10 @@ extern "C" fn sigchld_handler(_sig: libc::c_int) {
             }
         }
     }
+    #[cfg(target_os = "linux")]
     unsafe { *libc::__errno_location() = saved_errno };
+    #[cfg(target_os = "macos")]
+    unsafe { *libc::__error() = saved_errno };
 }
 
 /// SIGTERM/SIGINT handler: clean shutdown.
