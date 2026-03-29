@@ -375,7 +375,7 @@ pub unsafe extern "C" fn router_forward(
         sock,
         len_buf.as_ptr() as *const c_void,
         4,
-        libc::MSG_NOSIGNAL,
+        crate::utility::SEND_NOSIGNAL,
     );
     if n != 4 {
         libc::close(sock);
@@ -392,7 +392,7 @@ pub unsafe extern "C" fn router_forward(
             sock,
             c_req.as_ptr().add(total_sent) as *const c_void,
             req_len - total_sent,
-            libc::MSG_NOSIGNAL,
+            crate::utility::SEND_NOSIGNAL,
         );
         if n <= 0 {
             libc::close(sock);
@@ -477,6 +477,7 @@ unsafe fn connect_to_daemon(
         );
         return -1;
     }
+    crate::utility::set_nosigpipe(sock);
 
     let tv = libc::timeval {
         tv_sec: 60,
@@ -970,6 +971,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             if client_fd < 0 {
                 continue;
             }
+            crate::utility::set_nosigpipe(client_fd);
 
             let tv = libc::timeval {
                 tv_sec: 30,

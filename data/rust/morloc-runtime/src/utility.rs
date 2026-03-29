@@ -22,6 +22,28 @@ pub unsafe fn errno_val() -> i32 {
     *libc::__error()
 }
 
+/// Suppress SIGPIPE on send(). Linux: per-call flag. macOS: use set_nosigpipe() on the socket.
+#[cfg(target_os = "linux")]
+pub const SEND_NOSIGNAL: i32 = libc::MSG_NOSIGNAL;
+#[cfg(target_os = "macos")]
+pub const SEND_NOSIGNAL: i32 = 0;
+
+/// Set SO_NOSIGPIPE on a socket (macOS). No-op on Linux (uses MSG_NOSIGNAL per-call).
+#[allow(unused_variables)]
+pub unsafe fn set_nosigpipe(fd: i32) {
+    #[cfg(target_os = "macos")]
+    {
+        let val: libc::c_int = 1;
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_NOSIGPIPE,
+            &val as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+    }
+}
+
 // ── File operations ────────────────────────────────────────────────────────
 
 #[no_mangle]

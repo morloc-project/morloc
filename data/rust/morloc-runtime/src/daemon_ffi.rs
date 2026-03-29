@@ -1320,7 +1320,7 @@ unsafe fn write_lp_message(
         fd,
         len_buf.as_ptr() as *const c_void,
         4,
-        libc::MSG_NOSIGNAL,
+        crate::utility::SEND_NOSIGNAL,
     );
     if n != 4 {
         set_errmsg(
@@ -1336,7 +1336,7 @@ unsafe fn write_lp_message(
             fd,
             (data as *const u8).add(total) as *const c_void,
             len - total,
-            libc::MSG_NOSIGNAL,
+            crate::utility::SEND_NOSIGNAL,
         );
         if n <= 0 {
             set_errmsg(
@@ -1756,6 +1756,7 @@ pub unsafe extern "C" fn daemon_run(
                 eprintln!("daemon: accept error");
                 continue;
             }
+            crate::utility::set_nosigpipe(client_fd);
             set_socket_timeouts(client_fd, 30);
 
             let job = DaemonJob {

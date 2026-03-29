@@ -81,6 +81,7 @@ unsafe fn new_socket(errmsg: *mut *mut c_char) -> i32 {
         set_errmsg(errmsg, &MorlocError::Ipc("Error creating socket".into()));
         return -1;
     }
+    crate::utility::set_nosigpipe(fd);
     fd
 }
 
@@ -419,7 +420,7 @@ pub unsafe extern "C" fn send_and_receive_over_socket_wait(
             client_fd,
             packet.add(total_sent) as *const c_void,
             packet_size - total_sent,
-            libc::MSG_NOSIGNAL,
+            crate::utility::SEND_NOSIGNAL,
         );
         if bytes_sent <= 0 {
             close_socket(client_fd);
@@ -475,7 +476,7 @@ pub unsafe extern "C" fn send_packet_to_foreign_server(
             client_fd,
             packet.add(total_sent) as *const c_void,
             size - total_sent,
-            libc::MSG_NOSIGNAL,
+            crate::utility::SEND_NOSIGNAL,
         );
         if bytes_sent <= 0 {
             set_errmsg(errmsg, &MorlocError::Ipc(format!(
@@ -543,6 +544,7 @@ pub unsafe extern "C" fn wait_for_client_with_timeout(
     if libc::FD_ISSET((*daemon).server_fd, &(*daemon).read_fds) {
         let selected_fd = libc::accept((*daemon).server_fd, ptr::null_mut(), ptr::null_mut());
         if selected_fd >= 0 {
+            crate::utility::set_nosigpipe(selected_fd);
             libc::fcntl(selected_fd, libc::F_SETFL, libc::O_NONBLOCK);
 
             let new_client = libc::calloc(1, std::mem::size_of::<ClientList>()) as *mut ClientList;

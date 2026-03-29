@@ -417,7 +417,9 @@ pub fn make_job_hash(seed: u64) -> u64 {
 }
 
 /// Become a subreaper so orphaned grandchildren get reparented to us.
+/// Only available on Linux; no-op on other platforms.
 pub fn set_child_subreaper() {
+    #[cfg(target_os = "linux")]
     unsafe {
         libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
     }

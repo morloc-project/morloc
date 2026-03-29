@@ -226,13 +226,13 @@ pub unsafe extern "C" fn http_write_response(
         status, http_status_text(status), ct, body_len
     );
 
-    let n = libc::send(fd, header.as_ptr() as *const c_void, header.len(), libc::MSG_NOSIGNAL);
+    let n = libc::send(fd, header.as_ptr() as *const c_void, header.len(), crate::utility::SEND_NOSIGNAL);
     if n < 0 { return false; }
 
     if !body.is_null() && body_len > 0 {
         let mut total: usize = 0;
         while total < body_len {
-            let n = libc::send(fd, (body as *const u8).add(total) as *const c_void, body_len - total, libc::MSG_NOSIGNAL);
+            let n = libc::send(fd, (body as *const u8).add(total) as *const c_void, body_len - total, crate::utility::SEND_NOSIGNAL);
             if n <= 0 { return false; }
             total += n as usize;
         }

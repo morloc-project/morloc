@@ -8,7 +8,7 @@ Maintainer  : z@morloc.io
 module Morloc.Version (version, versionStr) where
 
 version :: (Int, Int, Int)
-version = (0, 70, 3)
+version = (0, 70, 4)
 
 versionStr :: String
 versionStr = case version of
