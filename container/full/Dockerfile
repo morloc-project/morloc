@@ -32,6 +32,9 @@ RUN python3 -m pip install --break-system-packages --upgrade setuptools
 
 # Setup the morloc home (builds libmorloc.so from Rust via cargo)
 RUN morloc init
+# Copy morloc-nexus to a system path so it remains on PATH even when
+# morloc-manager bind-mounts over ~/.local/bin with a host directory
+RUN cp /root/.local/bin/morloc-nexus /usr/local/bin/morloc-nexus
 RUN echo "lang_python3 : python3" >> $HOME/.local/share/morloc/config
 
 RUN morloc install stdlib
