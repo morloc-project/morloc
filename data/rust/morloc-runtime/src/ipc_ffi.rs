@@ -90,7 +90,7 @@ unsafe fn new_server_addr(socket_path: *const c_char) -> libc::sockaddr_un {
     let path_bytes = CStr::from_ptr(socket_path).to_bytes();
     let copy_len = path_bytes.len().min(addr.sun_path.len() - 1);
     ptr::copy_nonoverlapping(
-        path_bytes.as_ptr() as *const i8,
+        path_bytes.as_ptr() as *const c_char,
         addr.sun_path.as_mut_ptr(),
         copy_len,
     );

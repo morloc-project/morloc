@@ -503,7 +503,7 @@ unsafe fn connect_to_daemon(
     let path_bytes = CStr::from_ptr(socket_path).to_bytes();
     let copy_len = path_bytes.len().min(addr.sun_path.len() - 1);
     ptr::copy_nonoverlapping(
-        path_bytes.as_ptr() as *const i8,
+        path_bytes.as_ptr() as *const c_char,
         addr.sun_path.as_mut_ptr(),
         copy_len,
     );
@@ -922,7 +922,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
         let path_bytes = CStr::from_ptr((*config).unix_socket_path).to_bytes();
         let copy_len = path_bytes.len().min(addr.sun_path.len() - 1);
         ptr::copy_nonoverlapping(
-            path_bytes.as_ptr() as *const i8,
+            path_bytes.as_ptr() as *const c_char,
             addr.sun_path.as_mut_ptr(),
             copy_len,
         );
