@@ -31,6 +31,7 @@ pub const MAX_PATH_SIZE: usize = 512;
 const LOCK_UNLOCKED: u32 = 0;
 const LOCK_LOCKED: u32 = 1;
 const SPIN_LIMIT: u32 = 40;
+#[cfg(target_os = "linux")]
 const LOCK_TIMEOUT_SECS: u64 = 5;
 
 // ── Pointer types ──────────────────────────────────────────────────────────
