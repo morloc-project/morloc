@@ -125,6 +125,9 @@ enum Cmd {
     Select {
         /// Version or workspace name
         target: String,
+        /// Set the system-wide default instead of the user selection
+        #[arg(long)]
+        system: bool,
     },
     /// Show configuration and installed versions
     #[command(display_order = 5)]
@@ -308,10 +311,12 @@ fn resolve_active_version_or_workspace() -> Result<(Version, Scope)> {
     match version::resolve_active_version() {
         Ok(v) => Ok(v),
         Err(ManagerError::NoActiveVersion) => {
-            let (target, scope) = version::resolve_active_target()?;
+            let target = version::resolve_active_target()?;
             if let ActiveTarget::Workspace(name) = target {
-                let wc = cfg::read_workspace_config(scope, &name)?;
-                Ok((wc.base_version, wc.base_scope))
+                let ws_scope = cfg::find_workspace_scope(&name)?;
+                let wc = cfg::read_workspace_config(ws_scope, &name)?;
+                let ver_scope = cfg::find_installed_scope(wc.base_version)?;
+                Ok((wc.base_version, ver_scope))
             } else {
                 Err(ManagerError::NoActiveVersion)
             }
@@ -361,7 +366,6 @@ fn run_interactive_setup(scope: Scope) -> Result<()> {
     let base_cfg = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
     let new_cfg = Config {
         engine,
-        active_scope: scope,
         ..base_cfg
     };
     cfg::write_config(&cfg_path, &new_cfg)?;
@@ -376,7 +380,6 @@ fn run_non_interactive_setup(scope: Scope, engine: ContainerEngine) -> Result<()
     let base_cfg = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
     let new_cfg = Config {
         engine,
-        active_scope: scope,
         ..base_cfg
     };
     cfg::write_config(&cfg_path, &new_cfg)?;
@@ -526,9 +529,9 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     (ver, fresh)
                 }
             };
-            // Auto-select if none active
+            // Auto-select if none active (always writes to local config)
             if version::resolve_active_version().is_err() {
-                let _ = version::select_version(scope, ver);
+                let _ = version::select_version(ver);
                 eprintln!("Auto-selected version {}", ver.show());
             }
             if no_init {
@@ -541,29 +544,37 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- select ----
-        Cmd::Select { target } => {
+        Cmd::Select { target, system } => {
             if let Ok(ver) = target.parse::<Version>() {
-                let scope = cfg::find_installed_scope(ver).unwrap_or(Scope::Local);
-                version::select_version(scope, ver)?;
-                eprintln!("Selected version {}", ver.show());
+                if system {
+                    version::select_version_system(ver)?;
+                    eprintln!("Set system default to version {}", ver.show());
+                } else {
+                    version::select_version(ver)?;
+                    eprintln!("Selected version {}", ver.show());
+                }
                 Ok(())
             } else {
                 // Treat as workspace name
-                let scope = cfg::find_workspace_scope(&target).unwrap_or(Scope::Local);
-                cfg::read_workspace_config(scope, &target).map_err(|_| {
+                let ws_scope = cfg::find_workspace_scope(&target)?;
+                cfg::read_workspace_config(ws_scope, &target).map_err(|_| {
                     ManagerError::InvalidVersion(format!(
                         "Not found as version or workspace: {target}"
                     ))
                 })?;
-                let cfg_path = cfg::config_path(scope);
-                let base = cfg::read_active_config().unwrap_or_default();
+                let write_scope = if system { Scope::System } else { Scope::Local };
+                let cfg_path = cfg::config_path(write_scope);
+                let base = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
                 let new_cfg = Config {
                     active_target: Some(ActiveTarget::Workspace(target.clone())),
-                    active_scope: scope,
                     ..base
                 };
                 cfg::write_config(&cfg_path, &new_cfg)?;
-                eprintln!("Selected workspace {target}");
+                if system {
+                    eprintln!("Set system default to workspace {target}");
+                } else {
+                    eprintln!("Selected workspace {target}");
+                }
                 Ok(())
             }
         }
@@ -608,11 +619,9 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
         // ---- env ----
         Cmd::Env { action, name } => {
+            // Environments are scoped to where the active version is installed
+            let (_, scope) = resolve_active_version_or_workspace().unwrap_or((Version::new(0, 0, 0), Scope::Local));
             let m_cfg = cfg::read_active_config();
-            let scope = m_cfg
-                .as_ref()
-                .map(|c| c.active_scope)
-                .unwrap_or(Scope::Local);
 
             match (action, name) {
                 (Some(EnvCmd::Init { name }), _) => {
@@ -691,13 +700,12 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         } => {
             let scope = resolve_scope(scope);
             let engine = ensure_engine_for_scope(scope)?;
-            let (base_ver, base_scope) = match from {
+            let (base_ver, base_ver_scope) = match from {
                 Some(ver_str) => {
                     let ver: Version = ver_str
                         .parse()
                         .map_err(|_| ManagerError::InvalidVersion(ver_str))?;
-                    let found_scope =
-                        cfg::find_installed_scope(ver).ok_or(ManagerError::VersionNotInstalled(ver))?;
+                    let found_scope = cfg::find_installed_scope(ver)?;
                     (ver, found_scope)
                 }
                 None => version::resolve_active_version()?,
@@ -714,7 +722,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 })?;
             }
             if copy {
-                let src_dir = cfg::version_data_dir(base_scope, base_ver);
+                let src_dir = cfg::version_data_dir(base_ver_scope, base_ver);
                 for sub in &["lib", "fdb", "bin"] {
                     let src = src_dir.join(sub);
                     let dst = ws_data_dir.join(sub);
@@ -728,15 +736,14 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             }
             let wc = WorkspaceConfig {
                 base_version: base_ver,
-                base_scope,
                 engine,
             };
             cfg::write_workspace_config(scope, &name, &wc)?;
-            let cfg_path = cfg::config_path(scope);
-            let base = cfg::read_active_config().unwrap_or_default();
+            // Always write selection to local config
+            let cfg_path = cfg::config_path(Scope::Local);
+            let base = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
             let new_cfg = Config {
                 active_target: Some(ActiveTarget::Workspace(name.clone())),
-                active_scope: scope,
                 ..base
             };
             cfg::write_config(&cfg_path, &new_cfg)?;
@@ -750,47 +757,57 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
         // ---- info ----
         Cmd::Info => {
-            let m_cfg = cfg::read_active_config();
+            let local_cfg = cfg::read_config::<Config>(&cfg::config_path(Scope::Local)).ok();
+            let system_cfg = cfg::read_config::<Config>(&cfg::config_path(Scope::System)).ok();
             let se_mode = detect_selinux();
-            let active_scope = m_cfg.as_ref().map(|c| c.active_scope).unwrap_or(Scope::Local);
+
+            // Resolve active target (local overrides system)
+            let active_target = version::resolve_active_target().ok();
+
+            // Read active env from whichever config provides the target
+            let active_env = local_cfg
+                .as_ref()
+                .filter(|c| c.active_target.is_some())
+                .or(system_cfg.as_ref().filter(|c| c.active_target.is_some()))
+                .map(|c| c.active_env.as_str())
+                .unwrap_or("base");
+
+            let active_str = match &active_target {
+                None => "none".to_string(),
+                Some(ActiveTarget::Version(v)) => v.show(),
+                Some(ActiveTarget::Workspace(w)) => format!("{w} (workspace)"),
+            };
+
+            // Local selection vs system default
+            let local_target = local_cfg.as_ref().and_then(|c| c.active_target.clone());
+            let system_target = system_cfg.as_ref().and_then(|c| c.active_target.clone());
+
             let se_str = match se_mode {
                 SELinuxMode::Enforcing => "enforcing",
                 SELinuxMode::Permissive => "permissive",
                 SELinuxMode::Disabled => "not detected",
             };
-            let scope_str = match active_scope {
-                Scope::Local => "local",
-                Scope::System => "system",
-            };
-            let engine_str = m_cfg
-                .as_ref()
-                .map(|c| display_engine(c.engine))
-                .unwrap_or("not configured");
-            let cfg_root = cfg::config_dir(active_scope);
-            let dat_root = cfg::data_dir(active_scope);
-            let active_target = m_cfg.as_ref().and_then(|c| c.active_target.clone());
 
-            match &m_cfg {
-                None => {
-                    println!("Active:         none");
-                    println!("Active env:     base");
-                    println!("Engine:         {engine_str}");
-                }
-                Some(cfg) => {
-                    let active_str = match &cfg.active_target {
-                        None => "none".to_string(),
-                        Some(ActiveTarget::Version(v)) => v.show(),
-                        Some(ActiveTarget::Workspace(w)) => format!("{w} (workspace)"),
-                    };
-                    println!("Active:         {active_str}");
-                    println!("Active env:     {}", cfg.active_env);
-                    println!("Engine:         {}", display_engine(cfg.engine));
-                }
-            }
-            println!("Scope:          {scope_str}");
+            println!("Active:         {active_str}");
+            println!("Active env:     {active_env}");
+            println!("Local engine:   {}",
+                local_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
+            println!("System engine:  {}",
+                system_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
             println!("SELinux:        {se_str}");
-            println!("Config root:    {}", cfg_root.display());
-            println!("Data root:      {}", dat_root.display());
+
+            // Show all morloc directories with existence status
+            let dirs = [
+                ("Config (local)", cfg::config_dir(Scope::Local)),
+                ("Data (local)", cfg::data_dir(Scope::Local)),
+                ("Config (system)", cfg::config_dir(Scope::System)),
+                ("Data (system)", cfg::data_dir(Scope::System)),
+            ];
+            println!("\nDirectories:");
+            for (label, path) in &dirs {
+                let status = if path.is_dir() { "exists" } else { "not found" };
+                println!("  {:<20} {} ({})", label, path.display(), status);
+            }
 
             // List versions
             let local_versions = version::list_versions(Scope::Local);
@@ -799,12 +816,17 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 println!("  (none)");
             } else {
                 for v in &local_versions {
-                    let marker = if active_target == Some(ActiveTarget::Version(*v))
-                        && active_scope == Scope::Local
-                    {
-                        " (active)"
+                    let mut markers = Vec::new();
+                    if local_target == Some(ActiveTarget::Version(*v)) {
+                        markers.push("active");
+                    }
+                    if system_target == Some(ActiveTarget::Version(*v)) {
+                        markers.push("system default");
+                    }
+                    let marker = if markers.is_empty() {
+                        String::new()
                     } else {
-                        ""
+                        format!(" ({})", markers.join(", "))
                     };
                     println!("  {}{marker}", v.show());
                 }
@@ -816,12 +838,17 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 println!("  (none)");
             } else {
                 for v in &system_versions {
-                    let marker = if active_target == Some(ActiveTarget::Version(*v))
-                        && active_scope == Scope::System
-                    {
-                        " (active)"
+                    let mut markers = Vec::new();
+                    if local_target == Some(ActiveTarget::Version(*v)) {
+                        markers.push("active");
+                    }
+                    if system_target == Some(ActiveTarget::Version(*v)) {
+                        markers.push("system default");
+                    }
+                    let marker = if markers.is_empty() {
+                        String::new()
                     } else {
-                        ""
+                        format!(" ({})", markers.join(", "))
                     };
                     println!("  {}{marker}", v.show());
                 }
@@ -838,12 +865,17 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                         Ok(wc) => format!(" (based on {})", wc.base_version.show()),
                         Err(_) => String::new(),
                     };
-                    let marker = if active_target == Some(ActiveTarget::Workspace(w.clone()))
-                        && active_scope == Scope::Local
-                    {
-                        " (active)"
+                    let mut markers = Vec::new();
+                    if local_target == Some(ActiveTarget::Workspace(w.clone())) {
+                        markers.push("active");
+                    }
+                    if system_target == Some(ActiveTarget::Workspace(w.clone())) {
+                        markers.push("system default");
+                    }
+                    let marker = if markers.is_empty() {
+                        String::new()
                     } else {
-                        ""
+                        format!(" ({})", markers.join(", "))
                     };
                     println!("  {w}{base_str}{marker}");
                 }
@@ -857,14 +889,18 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                         Ok(wc) => format!(" (based on {})", wc.base_version.show()),
                         Err(_) => String::new(),
                     };
-                    let marker =
-                        if active_target == Some(ActiveTarget::Workspace(w.clone()))
-                            && active_scope == Scope::System
-                        {
-                            " (active)"
-                        } else {
-                            ""
-                        };
+                    let mut markers = Vec::new();
+                    if local_target == Some(ActiveTarget::Workspace(w.clone())) {
+                        markers.push("active");
+                    }
+                    if system_target == Some(ActiveTarget::Workspace(w.clone())) {
+                        markers.push("system default");
+                    }
+                    let marker = if markers.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", markers.join(", "))
+                    };
                     println!("  {w}{base_str}{marker}");
                 }
             }
@@ -874,14 +910,19 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         // ---- freeze ----
         Cmd::Freeze { output } => {
             let output_dir = output.as_deref().unwrap_or("./morloc-freeze");
-            let (target, active_scope) = version::resolve_active_target()?;
+            let target = version::resolve_active_target()?;
             match target {
-                ActiveTarget::Version(ver) => freeze::freeze(active_scope, ver, output_dir),
+                ActiveTarget::Version(ver) => {
+                    let scope = cfg::find_installed_scope(ver)?;
+                    freeze::freeze(scope, ver, output_dir)
+                }
                 ActiveTarget::Workspace(name) => {
-                    let wc = cfg::read_workspace_config(active_scope, &name)?;
-                    let ws_dir = cfg::workspace_data_dir(active_scope, &name);
+                    let ws_scope = cfg::find_workspace_scope(&name)?;
+                    let wc = cfg::read_workspace_config(ws_scope, &name)?;
+                    let ws_dir = cfg::workspace_data_dir(ws_scope, &name);
+                    let ver_scope = cfg::find_installed_scope(wc.base_version)?;
                     freeze::freeze_from_dir(
-                        active_scope,
+                        ver_scope,
                         wc.base_version,
                         &ws_dir.to_string_lossy(),
                         output_dir,
@@ -893,7 +934,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         // ---- unfreeze ----
         Cmd::Unfreeze { from, tag, base } => {
             let engine = ensure_engine()?;
-            let (target, _) = version::resolve_active_target()?;
+            let target = version::resolve_active_target()?;
             let ver = match target {
                 ActiveTarget::Version(v) => v,
                 ActiveTarget::Workspace(_) => Version::new(0, 0, 0),
@@ -945,23 +986,26 @@ fn run_in_container(
     shell: bool,
     args: &[String],
 ) -> Result<()> {
-    let (target, active_scope) = version::resolve_active_target()?;
+    let target = version::resolve_active_target()?;
 
     // Resolve version config and data dir
     let (vc, v_data_dir, ver_scope, ver) = match target {
         ActiveTarget::Version(ver) => {
-            let vc = cfg::read_version_config(active_scope, ver)?;
-            let d = cfg::version_data_dir(active_scope, ver);
-            (vc, d.to_string_lossy().to_string(), active_scope, ver)
+            let scope = cfg::find_installed_scope(ver)?;
+            let vc = cfg::read_version_config(scope, ver)?;
+            let d = cfg::version_data_dir(scope, ver);
+            (vc, d.to_string_lossy().to_string(), scope, ver)
         }
         ActiveTarget::Workspace(name) => {
-            let wc = cfg::read_workspace_config(active_scope, &name)?;
-            let vc = cfg::read_version_config(wc.base_scope, wc.base_version)?;
-            let d = cfg::workspace_data_dir(active_scope, &name);
+            let ws_scope = cfg::find_workspace_scope(&name)?;
+            let wc = cfg::read_workspace_config(ws_scope, &name)?;
+            let base_scope = cfg::find_installed_scope(wc.base_version)?;
+            let vc = cfg::read_version_config(base_scope, wc.base_version)?;
+            let d = cfg::workspace_data_dir(ws_scope, &name);
             (
                 vc,
                 d.to_string_lossy().to_string(),
-                wc.base_scope,
+                base_scope,
                 wc.base_version,
             )
         }
@@ -1263,11 +1307,6 @@ mod tests {
     }
 
     #[test]
-    fn default_config_uses_local_scope() {
-        assert_eq!(Config::default().active_scope, Scope::Local);
-    }
-
-    #[test]
     fn default_config_uses_base_env() {
         assert_eq!(Config::default().active_env, "base");
     }
@@ -1280,7 +1319,6 @@ mod tests {
         let path = dir.path().join("config.json");
         let cfg = Config {
             active_target: Some(ActiveTarget::Version(Version::new(0, 67, 0))),
-            active_scope: Scope::Local,
             active_env: "ml".to_string(),
             engine: ContainerEngine::Docker,
         };

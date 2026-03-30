@@ -154,17 +154,12 @@ pub enum ActiveTarget {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub active_target: Option<ActiveTarget>,
-    #[serde(default = "default_scope")]
-    pub active_scope: Scope,
     #[serde(default = "default_env")]
     pub active_env: String,
     #[serde(default = "default_engine")]
     pub engine: ContainerEngine,
 }
 
-fn default_scope() -> Scope {
-    Scope::Local
-}
 fn default_env() -> String {
     "base".to_string()
 }
@@ -176,7 +171,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             active_target: None,
-            active_scope: Scope::Local,
             active_env: "base".to_string(),
             engine: ContainerEngine::Podman,
         }
@@ -184,6 +178,7 @@ impl Default for Config {
 }
 
 impl Config {
+    #[cfg(test)]
     pub fn active_version(&self) -> Option<Version> {
         match &self.active_target {
             Some(ActiveTarget::Version(v)) => Some(*v),
@@ -209,8 +204,6 @@ fn default_shm_size() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceConfig {
     pub base_version: Version,
-    #[serde(default = "default_scope")]
-    pub base_scope: Scope,
     #[serde(default = "default_engine")]
     pub engine: ContainerEngine,
 }

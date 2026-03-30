@@ -151,16 +151,27 @@ pub fn install_latest(
     Ok((ver, was_fresh))
 }
 
-pub fn select_version(scope: Scope, ver: Version) -> Result<()> {
-    let vc_path = config::version_config_path(scope, ver);
-    config::read_config::<VersionConfig>(&vc_path)
-        .map_err(|_| ManagerError::VersionNotInstalled(ver))?;
-
-    let cfg_path = config::config_path(scope);
+pub fn select_version(ver: Version) -> Result<()> {
+    // Verify version exists in some scope
+    config::find_installed_scope(ver)?;
+    // Always write to local config
+    let cfg_path = config::config_path(Scope::Local);
     let base_cfg = config::read_config::<Config>(&cfg_path).unwrap_or_default();
     let new_cfg = Config {
         active_target: Some(ActiveTarget::Version(ver)),
-        active_scope: scope,
+        ..base_cfg
+    };
+    config::write_config(&cfg_path, &new_cfg)
+}
+
+pub fn select_version_system(ver: Version) -> Result<()> {
+    // Verify version exists in some scope
+    config::find_installed_scope(ver)?;
+    // Write to system config
+    let cfg_path = config::config_path(Scope::System);
+    let base_cfg = config::read_config::<Config>(&cfg_path).unwrap_or_default();
+    let new_cfg = Config {
+        active_target: Some(ActiveTarget::Version(ver)),
         ..base_cfg
     };
     config::write_config(&cfg_path, &new_cfg)
@@ -191,15 +202,31 @@ pub fn list_versions(scope: Scope) -> Vec<Version> {
 }
 
 pub fn resolve_active_version() -> Result<(Version, Scope)> {
-    let cfg = config::read_active_config().ok_or(ManagerError::NoActiveVersion)?;
-    let ver = cfg.active_version().ok_or(ManagerError::NoActiveVersion)?;
-    Ok((ver, cfg.active_scope))
+    let target = resolve_active_target()?;
+    match target {
+        ActiveTarget::Version(ver) => {
+            let scope = config::find_installed_scope(ver)?;
+            Ok((ver, scope))
+        }
+        _ => Err(ManagerError::NoActiveVersion),
+    }
 }
 
-pub fn resolve_active_target() -> Result<(ActiveTarget, Scope)> {
-    let cfg = config::read_active_config().ok_or(ManagerError::NoActiveVersion)?;
-    let target = cfg.active_target.ok_or(ManagerError::NoActiveVersion)?;
-    Ok((target, cfg.active_scope))
+/// Resolve the active target by checking local config first, then system.
+pub fn resolve_active_target() -> Result<ActiveTarget> {
+    // Try local config first
+    if let Ok(cfg) = config::read_config::<Config>(&config::config_path(Scope::Local)) {
+        if let Some(target) = cfg.active_target {
+            return Ok(target);
+        }
+    }
+    // Fall back to system config
+    if let Ok(cfg) = config::read_config::<Config>(&config::config_path(Scope::System)) {
+        if let Some(target) = cfg.active_target {
+            return Ok(target);
+        }
+    }
+    Err(ManagerError::NoActiveVersion)
 }
 
 pub fn uninstall_version(scope: Scope, ver: Version) -> Result<()> {
@@ -221,16 +248,22 @@ pub fn uninstall_version(scope: Scope, ver: Version) -> Result<()> {
         }
     }
 
-    // Clear active version if this was selected
-    if let Some(cfg) = config::read_active_config() {
-        if cfg.active_target == Some(ActiveTarget::Version(ver)) {
-            let cfg_path = config::config_path(scope);
-            let new_cfg = Config {
-                active_target: None,
-                ..cfg
-            };
-            let _ = config::write_config(&cfg_path, &new_cfg);
-            eprintln!("  Cleared active version");
+    // Clear active version in both scopes if it pointed to this version
+    for check_scope in [Scope::Local, Scope::System] {
+        let cfg_path = config::config_path(check_scope);
+        if let Ok(cfg) = config::read_config::<Config>(&cfg_path) {
+            if cfg.active_target == Some(ActiveTarget::Version(ver)) {
+                let new_cfg = Config {
+                    active_target: None,
+                    ..cfg
+                };
+                let _ = config::write_config(&cfg_path, &new_cfg);
+                let label = match check_scope {
+                    Scope::Local => "local",
+                    Scope::System => "system",
+                };
+                eprintln!("  Cleared {label} active version");
+            }
         }
     }
 
