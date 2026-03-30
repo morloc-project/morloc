@@ -1,14 +1,15 @@
 #!/bin/sh
-# Build portable libmorloc.so and morloc-nexus using Docker/Podman + Alpine + musl.
+# Build portable libmorloc.so, morloc-nexus, and morloc-manager using Docker/Podman.
 #
 # Usage:
 #   ./container/static-build/build-rust.sh
 #
 # Output:
-#   ./out/libmorloc.so    (cdylib, musl-linked, no glibc dependency, ~2 MB)
-#   ./out/morloc-nexus    (static binary, ~2 MB)
+#   ./out/libmorloc.so      (cdylib, musl-linked, no glibc dependency, ~2 MB)
+#   ./out/morloc-nexus      (static binary, ~2 MB)
+#   ./out/morloc-manager    (static binary, ~2 MB)
 #
-# The .so runs on any Linux x86_64 system. The nexus binary is fully static.
+# The .so runs on any Linux x86_64 system. The binaries are fully static.
 
 set -e
 
@@ -25,7 +26,7 @@ else
     exit 1
 fi
 
-echo "Building portable libmorloc.so and morloc-nexus with $ENGINE..."
+echo "Building portable libmorloc.so, morloc-nexus, and morloc-manager with $ENGINE..."
 
 mkdir -p "$PROJECT_DIR/out"
 
@@ -40,8 +41,8 @@ $ENGINE run --rm \
 
 echo ""
 echo "Binaries:"
-ls -lh "$PROJECT_DIR/out/libmorloc.so" "$PROJECT_DIR/out/morloc-nexus"
-file "$PROJECT_DIR/out/libmorloc.so" "$PROJECT_DIR/out/morloc-nexus"
+ls -lh "$PROJECT_DIR/out/libmorloc.so" "$PROJECT_DIR/out/morloc-nexus" "$PROJECT_DIR/out/morloc-manager"
+file "$PROJECT_DIR/out/libmorloc.so" "$PROJECT_DIR/out/morloc-nexus" "$PROJECT_DIR/out/morloc-manager"
 
 # Verify no glibc dependency
 if readelf -d "$PROJECT_DIR/out/libmorloc.so" 2>/dev/null | grep -qi glibc; then

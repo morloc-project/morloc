@@ -1,10 +1,10 @@
 # morloc-serve base image
 #
 # Minimal runtime for serving frozen morloc programs. Contains language
-# runtimes (Python, R, C++ stdlib), the morloc compiler binary, and the
-# morloc-nexus/libmorloc built by `morloc init`.
+# runtimes (Python, R, C++ stdlib), the morloc compiler binary, and
+# pre-built morloc-nexus/libmorloc binaries.
 #
-# Does NOT include GHC, Stack, or build toolchain.
+# Does NOT include GHC, Stack, Rust, or build toolchain.
 #
 # Build (from the container/ directory):
 #   podman build --no-cache \
@@ -19,8 +19,8 @@
 #   +---------------------------------------+
 #   | morloc-serve:<version> (this image)   |
 #   |   morloc compiler binary              |
-#   |   morloc-nexus (built by morloc init) |
-#   |   libmorloc.so (built by morloc init) |
+#   |   morloc-nexus (pre-built)            |
+#   |   libmorloc.so (pre-built)            |
 #   |   Python 3.x runtime                  |
 #   |   R runtime                           |
 #   |   C++ standard library (libstdc++)    |
@@ -28,7 +28,7 @@
 #   | Ubuntu 24.04 base                     |
 #   +---------------------------------------+
 
-# Stage 1: get the morloc binary from the tiny image
+# Stage 1: get the morloc binary and pre-built Rust binaries from the tiny image
 ARG MORLOC_VERSION=edge
 FROM ghcr.io/morloc-project/morloc/morloc-tiny:${MORLOC_VERSION} AS morloc-bin
 
@@ -50,26 +50,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     gcc \
     make \
-    curl \
     libgmp10 \
     libffi8 \
     zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust toolchain (needed by morloc init to build libmorloc.so)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Copy the morloc compiler binary and Rust source from the tiny image
+# Copy the morloc compiler binary and pre-built Rust binaries from the tiny image
 COPY --from=morloc-bin /bin/morloc /usr/local/bin/morloc
-COPY --from=morloc-bin /opt/morloc-rust /opt/morloc-rust
-ENV MORLOC_RUST_DIR=/opt/morloc-rust
+COPY --from=morloc-bin /opt/morloc-rust-bin /opt/morloc-rust-bin
 
-# Run morloc init to build morloc-nexus and libmorloc.so (from Rust via cargo)
+# Pre-built Rust binaries: morloc init uses these directly (no cargo needed)
+ENV MORLOC_RUST_BIN=/opt/morloc-rust-bin
+
+# Run morloc init (installs pre-built libmorloc.so + morloc-nexus, no Rust toolchain needed)
 RUN morloc init
-
-# Remove Rust toolchain to reduce image size (not needed at runtime)
-RUN rustup self uninstall -y && rm -rf /root/.cargo /root/.rustup
 
 # Create directories for frozen state (populated by serve-image)
 RUN mkdir -p /root/.local/share/morloc/lib \

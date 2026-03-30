@@ -112,11 +112,19 @@ configureAllSteps verbose force slurmSupport sanitize config = do
       -- Pre-built binaries (release path)
       let prebuiltSo = binDir </> "libmorloc.so"
           prebuiltNexus = binDir </> "morloc-nexus"
+          prebuiltManager = binDir </> "morloc-manager"
+          managerBinPath = nexusBinDir </> "morloc-manager"
       sayInfo verbose $ "Installing pre-built libmorloc.so from " <> binDir
       run verbose "cp" [prebuiltSo, soPath]
       run verbose "cp" [prebuiltNexus, nexusBinPath]
       run verbose "chmod" ["+x", soPath]
       run verbose "chmod" ["+x", nexusBinPath]
+      -- Install morloc-manager if present in pre-built binaries
+      managerExists <- doesFileExist prebuiltManager
+      when managerExists $ do
+        sayInfo verbose "Installing pre-built morloc-manager"
+        run verbose "cp" [prebuiltManager, managerBinPath]
+        run verbose "chmod" ["+x", managerBinPath]
     Nothing -> do
       -- Try to build from source: need both cargo and the Rust workspace
       rustDirEnv <- lookupEnv "MORLOC_RUST_DIR"
@@ -184,6 +192,19 @@ configureAllSteps verbose force slurmSupport sanitize config = do
       run verbose "cp" [rustNexus, nexusBinPath]
       case hasStrip of
         Just stripPath -> run verbose stripPath [nexusBinPath]
+        Nothing -> return ()
+
+      sayInfo verbose "Compiling morloc-manager (Rust)"
+      run verbose "cargo"
+        [ "build", "--release"
+        , "--manifest-path", rustDir </> "Cargo.toml"
+        , "-p", "morloc-manager"
+        ]
+      let rustManager = rustDir </> "target" </> "release" </> "morloc-manager"
+          managerBinPath = nexusBinDir </> "morloc-manager"
+      run verbose "cp" [rustManager, managerBinPath]
+      case hasStrip of
+        Just stripPath -> run verbose stripPath [managerBinPath]
         Nothing -> return ()
 
 

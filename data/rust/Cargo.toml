@@ -1,5 +1,5 @@
 [workspace]
-members = ["morloc-runtime", "morloc-nexus"]
+members = ["morloc-runtime", "morloc-nexus", "morloc-manager"]
 resolver = "2"
 
 [workspace.dependencies]

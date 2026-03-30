@@ -5,9 +5,9 @@
 #   git push origin v0.68.0
 #
 # Produces for each platform (linux-x86_64, linux-arm64, macos-arm64):
-#   - morloc-manager  (static Haskell binary)
+#   - morloc-manager  (Rust binary)
 #   - libmorloc.so    (Rust runtime library; .dylib on macOS)
-#   - morloc-nexus    (Rust nexus binary)
+#   - morloc-nexus    (Rust binary)
 #
 # All three are attached to the GitHub Release.
 
@@ -22,7 +22,7 @@ env:
   IMAGE_BASE: ghcr.io/morloc-project/morloc
 
 jobs:
-  # ---- Build Rust binaries (libmorloc + morloc-nexus) per platform ----
+  # ---- Build Rust binaries (libmorloc + morloc-nexus + morloc-manager) per platform ----
   rust-binary:
     strategy:
       fail-fast: false
@@ -56,6 +56,7 @@ jobs:
         run: |
           mv out/libmorloc.so out/libmorloc-${{ matrix.platform }}.so
           mv out/morloc-nexus out/morloc-nexus-${{ matrix.platform }}
+          mv out/morloc-manager out/morloc-manager-${{ matrix.platform }}
 
       # ---- macOS: native cargo build ----
       - name: Setup Rust (macOS)
@@ -84,11 +85,15 @@ jobs:
           cp target/release/libmorloc_runtime.dylib $HOME/.local/share/morloc/lib/libmorloc.dylib
           # Build nexus
           cargo build --release -p morloc-nexus
+          # Build manager
+          cargo build --release -p morloc-manager
           # Collect artifacts
           mkdir -p ../../out
           cp target/release/libmorloc_runtime.dylib ../../out/libmorloc-${{ matrix.platform }}.dylib
           cp target/release/morloc-nexus ../../out/morloc-nexus-${{ matrix.platform }}
+          cp target/release/morloc-manager ../../out/morloc-manager-${{ matrix.platform }}
           strip ../../out/morloc-nexus-${{ matrix.platform }} || true
+          strip ../../out/morloc-manager-${{ matrix.platform }} || true
 
       - name: Upload Rust artifacts
         uses: actions/upload-artifact@v4
@@ -153,7 +158,8 @@ jobs:
           mkdir -p prebuilt
           mv rust-bin/libmorloc-linux-x86_64.so prebuilt/libmorloc.so
           mv rust-bin/morloc-nexus-linux-x86_64 prebuilt/morloc-nexus
-          chmod +x prebuilt/libmorloc.so prebuilt/morloc-nexus
+          mv rust-bin/morloc-manager-linux-x86_64 prebuilt/morloc-manager
+          chmod +x prebuilt/libmorloc.so prebuilt/morloc-nexus prebuilt/morloc-manager
 
       - name: Add morloc to PATH
         run: |
@@ -213,85 +219,10 @@ jobs:
             docker push ${{ env.IMAGE_BASE }}/${img}:edge
           done
 
-  # ---- Build morloc-manager binaries (3 platforms) ----
-  static-binary:
-    needs: test
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux-x86_64
-            method: docker
-          - os: ubuntu-24.04-arm
-            platform: linux-arm64
-            method: docker
-          - os: macos-latest
-            platform: macos-arm64
-            method: native
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      # ---- Linux (static via Docker + musl) ----
-      - name: Build static binary (Linux)
-        if: matrix.method == 'docker'
-        run: |
-          docker build -t morloc-static-build \
-            -f container/static-build/Dockerfile .
-          mkdir -p out
-          docker run --rm -v "$(pwd)/out:/out" morloc-static-build
-
-      - name: Verify static linking (Linux)
-        if: matrix.method == 'docker'
-        run: |
-          file out/morloc-manager
-          file out/morloc-manager | grep -q "statically linked"
-
-      # ---- macOS (native cabal build) ----
-      - name: Setup Haskell (macOS)
-        if: matrix.method == 'native'
-        uses: haskell-actions/setup@v2
-        with:
-          ghc-version: '9.10.3'
-          cabal-version: 'latest'
-
-      - name: Cache Cabal artifacts (macOS)
-        if: matrix.method == 'native'
-        uses: actions/cache@v4
-        with:
-          path: ~/.cabal
-          key: cabal-macos-910-${{ hashFiles('morloc-manager/package.yaml') }}
-          restore-keys: cabal-macos-910-
-
-      - name: Build binary (macOS)
-        if: matrix.method == 'native'
-        run: |
-          cabal update
-          cabal install hpack --install-method=copy --installdir=$HOME/.local/bin
-          export PATH=$HOME/.local/bin:$PATH
-          cd morloc-manager
-          hpack
-          cabal build --ghc-options='-O2'
-          mkdir -p ../out
-          cp "$(cabal -v0 list-bin morloc-manager)" ../out/morloc-manager
-          strip ../out/morloc-manager
-
-      # ---- Common: rename and upload ----
-      - name: Rename binary
-        run: mv out/morloc-manager out/morloc-manager-${{ matrix.platform }}
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: morloc-manager-${{ matrix.platform }}
-          path: out/morloc-manager-${{ matrix.platform }}
-
   # ---- Create GitHub Release ----
   release:
     if: always() && needs.containers.result == 'success'
-    needs: [containers, static-binary, rust-binary]
+    needs: [containers, rust-binary]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -299,7 +230,7 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: '{morloc-manager-*,rust-binaries-*}'
+          pattern: 'rust-binaries-*'
           merge-multiple: true
 
       - name: List artifacts
