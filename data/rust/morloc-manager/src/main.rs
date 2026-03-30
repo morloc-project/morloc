@@ -12,7 +12,9 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::process::{Command, ExitCode, Stdio};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::builder::styling::Style;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+
 
 use crate::config as cfg;
 use crate::container::{container_run_passthrough, RunConfig};
@@ -24,22 +26,67 @@ use crate::types::*;
 // CLI types
 // ======================================================================
 
+fn build_help_template() -> String {
+    let b = Style::new().bold().render();
+    let bu = Style::new().bold().underline().render();
+    let r = "\x1b[0m"; // full ANSI reset — Style::new().render() is a no-op
+
+    format!(
+        "\
+{{name}} - {{about}}
+
+{{usage-heading}} {{usage}}
+
+{bu}Setup{r}
+  {b}setup{r}      Configure engine for a scope
+  {b}install{r}    Install a morloc version
+  {b}uninstall{r}  Remove a version
+  {b}select{r}     Set the active version or workspace
+  {b}info{r}       Show configuration and installed versions
+
+{bu}Development{r}
+  {b}new{r}        Create a named workspace
+  {b}run{r}        Run a command in the active container
+  {b}env{r}        Manage dependency environments
+
+{bu}Deployment{r}
+  {b}start{r}      Start a serve container
+  {b}stop{r}       Stop a running serve container
+  {b}freeze{r}     Export installed state as a frozen artifact
+  {b}unfreeze{r}   Build a serve image from frozen state
+  {b}status{r}     List running serve containers
+  {b}logs{r}       Show logs from a serve container
+
+{bu}Options{r}
+{{options}}"
+    )
+}
+
 #[derive(Parser)]
 #[command(name = "morloc-manager")]
-#[command(about = "Container lifecycle manager for Morloc")]
-#[command(version)]
+#[command(about = "container lifecycle manager for Morloc")]
+#[command(long_about = "Manage containerized Morloc installations, dependency layers, and deployments")]
+#[command(disable_version_flag = true)]
+#[command(arg_required_else_help = true)]
+#[command(hide_possible_values = true)]
 struct Cli {
     /// Print container commands to stderr before executing
     #[arg(short, long, global = true)]
     verbose: bool,
 
+    /// Print version and exit
+    #[arg(long)]
+    version: bool,
+
     #[command(subcommand)]
-    command: Cmd,
+    command: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+    // -- Setup --
     /// Configure engine for a scope
+    #[command(display_order = 1)]
     Setup {
         #[arg(long, value_enum)]
         scope: Option<ScopeArg>,
@@ -47,6 +94,7 @@ enum Cmd {
         engine: Option<EngineArg>,
     },
     /// Install a morloc version
+    #[command(display_order = 2)]
     Install {
         /// Version to install (default: latest)
         version: Option<String>,
@@ -60,6 +108,7 @@ enum Cmd {
         force: bool,
     },
     /// Remove a version
+    #[command(display_order = 3)]
     Uninstall {
         /// Version(s) to remove
         versions: Vec<String>,
@@ -70,13 +119,18 @@ enum Cmd {
         all: bool,
     },
     /// Set the active version or workspace
+    #[command(display_order = 4)]
     Select {
         /// Version or workspace name
         target: String,
     },
     /// Show configuration and installed versions
+    #[command(display_order = 5)]
     Info,
+
+    // -- Development --
     /// Create a named workspace
+    #[command(display_order = 10)]
     New {
         /// Workspace name
         name: String,
@@ -90,6 +144,7 @@ enum Cmd {
         copy: bool,
     },
     /// Run a command in the active container
+    #[command(display_order = 11)]
     Run {
         /// Command to run inside the container
         command: Vec<String>,
@@ -98,14 +153,17 @@ enum Cmd {
         shell: bool,
     },
     /// Manage dependency environments
+    #[command(display_order = 12)]
     Env {
         #[command(subcommand)]
         action: Option<EnvCmd>,
         /// Activate (and build if needed) an environment
-        #[arg(conflicts_with = "action")]
         name: Option<String>,
     },
+
+    // -- Deployment --
     /// Start a serve container
+    #[command(display_order = 20)]
     Start {
         /// Serve image tag
         image: String,
@@ -114,17 +172,20 @@ enum Cmd {
         port: Vec<(u16, u16)>,
     },
     /// Stop a running serve container
+    #[command(display_order = 21)]
     Stop {
         /// Container name
         name: String,
     },
     /// Export installed state as a frozen artifact
+    #[command(display_order = 22)]
     Freeze {
         /// Output directory
         #[arg(short, long)]
         output: Option<String>,
     },
     /// Build a serve image from frozen state
+    #[command(display_order = 23)]
     Unfreeze {
         /// Path to state.tar.gz from freeze
         #[arg(long)]
@@ -137,8 +198,10 @@ enum Cmd {
         base: Option<String>,
     },
     /// List running serve containers
+    #[command(display_order = 24)]
     Status,
     /// Show logs from a serve container
+    #[command(display_order = 25)]
     Logs {
         /// Container name
         name: String,
@@ -207,8 +270,22 @@ fn parse_port(s: &str) -> std::result::Result<(u16, u16), String> {
 // ======================================================================
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match dispatch(cli.verbose, cli.command) {
+    let matches = Cli::command()
+        .help_template(build_help_template())
+        .get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap();
+    if cli.version {
+        println!("morloc-manager {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+    let Some(cmd) = cli.command else {
+        Cli::command()
+            .help_template(build_help_template())
+            .print_help()
+            .ok();
+        return ExitCode::from(2);
+    };
+    match dispatch(cli.verbose, cmd) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("{err}");
