@@ -88,8 +88,10 @@ enum Cmd {
     /// Configure engine for a scope
     #[command(display_order = 1)]
     Setup {
+        /// Scope to configure: "local" (default) or "system"
         #[arg(long, value_enum)]
         scope: Option<ScopeArg>,
+        /// Container engine: "podman" or "docker"
         #[arg(long, value_enum)]
         engine: Option<EngineArg>,
     },
@@ -384,6 +386,55 @@ fn run_non_interactive_setup(scope: Scope, engine: ContainerEngine) -> Result<()
     Ok(())
 }
 
+fn show_setup_status() -> Result<()> {
+    // Show detected engines
+    let has_podman = which("podman");
+    let has_docker = which("docker");
+    let detected: Vec<&str> = [
+        if has_podman { Some("podman") } else { None },
+        if has_docker { Some("docker") } else { None },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if detected.is_empty() {
+        eprintln!("Detected engines: none");
+    } else {
+        eprintln!("Detected engines: {}", detected.join(", "));
+    }
+    eprintln!();
+
+    // Show local scope
+    let local_path = cfg::config_path(Scope::Local);
+    eprintln!("(local)");
+    match cfg::read_config::<Config>(&local_path) {
+        Ok(c) => {
+            eprintln!("    Set engine: {}", display_engine(c.engine));
+            eprintln!("    Config: {}", local_path.display());
+        }
+        Err(_) => {
+            eprintln!("    Set engine: unset");
+        }
+    }
+    eprintln!();
+
+    // Show system scope
+    let system_path = cfg::config_path(Scope::System);
+    eprintln!("(system)");
+    match cfg::read_config::<Config>(&system_path) {
+        Ok(c) => {
+            eprintln!("    Set engine: {}", display_engine(c.engine));
+            eprintln!("    Config: {}", system_path.display());
+        }
+        Err(_) => {
+            eprintln!("    Set engine: unset");
+        }
+    }
+    eprintln!();
+
+    Ok(())
+}
+
 fn interactive_engine_choice() -> Result<ContainerEngine> {
     let has_podman = which("podman");
     let has_docker = which("docker");
@@ -446,10 +497,15 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
     match cmd {
         // ---- setup ----
         Cmd::Setup { scope, engine } => {
-            let scope = resolve_scope(scope);
-            match engine {
-                Some(e) => run_non_interactive_setup(scope, e.into()),
-                None => run_interactive_setup(scope),
+            match (scope, engine) {
+                // No arguments: show current status for both scopes
+                (None, None) => show_setup_status(),
+                // Engine specified without scope: configure local (default)
+                (None, Some(e)) => run_non_interactive_setup(Scope::Local, e.into()),
+                // Scope specified without engine: interactive choice
+                (Some(s), None) => run_interactive_setup(Scope::from(s)),
+                // Both specified: non-interactive
+                (Some(s), Some(e)) => run_non_interactive_setup(Scope::from(s), e.into()),
             }
         }
 
