@@ -2,7 +2,7 @@ use std::fs;
 use std::process::Command;
 
 use crate::config;
-use crate::container::{container_pull, engine_executable, exit_code_to_int};
+use crate::container::{container_pull, engine_executable, exit_code_to_int, image_exists_locally, remote_image_exists};
 use crate::error::{ManagerError, Result};
 use crate::types::*;
 
@@ -39,17 +39,34 @@ fn install_version_inner(
         is_version_installed(engine, scope, ver, &image_ref)
     };
     if already {
-        eprintln!("Version {} is already installed.", ver.show());
+        println!("Using local copy");
         return Ok(false);
     }
 
-    let (status, _stdout, stderr) = container_pull(engine, &image_ref);
-    if !status.success() {
-        return Err(ManagerError::EngineError {
-            engine,
-            code: exit_code_to_int(status),
-            stderr,
-        });
+    // Check if the image exists locally in the container engine (e.g. pulled
+    // but config was removed, or force-reinstall scenario)
+    let have_local_image = image_exists_locally(engine, &image_ref);
+
+    if !have_local_image {
+        // Verify the remote image exists before attempting to pull
+        if !remote_image_exists(engine, &image_ref) {
+            return Err(ManagerError::InstallError(format!(
+                "No container for morloc v{} exists",
+                ver.show()
+            )));
+        }
+
+        eprintln!("Pulling {}...", image_ref);
+        let (status, _stdout, stderr) = container_pull(engine, &image_ref);
+        if !status.success() {
+            return Err(ManagerError::EngineError {
+                engine,
+                code: exit_code_to_int(status),
+                stderr,
+            });
+        }
+    } else {
+        println!("Using local copy");
     }
 
     let v_data_dir = config::version_data_dir(scope, ver);
@@ -84,6 +101,13 @@ pub fn install_latest(
     scope: Scope,
 ) -> Result<(Version, bool)> {
     let edge_image = "ghcr.io/morloc-project/morloc/morloc-full:edge";
+
+    if !remote_image_exists(engine, edge_image) {
+        return Err(ManagerError::InstallError(
+            "No container for latest morloc version exists".to_string(),
+        ));
+    }
+
     let (pull_status, _, pull_err) = container_pull(engine, edge_image);
     if !pull_status.success() {
         return Err(ManagerError::EngineError {
