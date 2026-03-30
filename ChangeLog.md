@@ -1,3 +1,7 @@
+0.71.0 [2026-03-29]
+-------------------
+ - port morloc-manager to rust
+
 0.70.1 to 0.70.6 [2026-03-29]
 -----------------------------
  - fix portability for libmorloc and morloc-nexus on darwin and linux-arm64

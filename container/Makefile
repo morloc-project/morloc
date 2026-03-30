@@ -49,18 +49,6 @@ build-full:
 		-t ghcr.io/morloc-project/morloc/morloc-full:edge \
 		full
 
-# Build the serve base image (minimal runtime: Python, R, C++, morloc, nexus)
-# Copies the morloc binary from morloc-tiny and runs `morloc init` inside
-# the Dockerfile to build nexus + libmorloc. Requires morloc-tiny to be
-# built (or pulled) first.
-build-serve:
-	podman build --no-cache --force-rm \
-		--build-arg MORLOC_VERSION=$(MORLOC_VERSION) \
-		-t ghcr.io/morloc-project/morloc/morloc-serve:$(MORLOC_VERSION) \
-		-f serve/Dockerfile .
-	podman tag ghcr.io/morloc-project/morloc/morloc-serve:$(MORLOC_VERSION) \
-		ghcr.io/morloc-project/morloc/morloc-serve:edge
-
 # Build the required docker image
 build-test:
 	podman build --no-cache --force-rm -t ghcr.io/morloc-project/morloc/morloc-test test
@@ -71,9 +59,6 @@ shell:
 
 shell-tiny:
 	podman run --shm-size=4g --rm -it ghcr.io/morloc-project/morloc/morloc-tiny:edge /bin/bash
-
-shell-serve:
-	podman run --shm-size=4g --rm -it ghcr.io/morloc-project/morloc/morloc-serve:edge /bin/bash
 
 shell-test:
 	podman run --shm-size=4g --rm -it ghcr.io/morloc-project/morloc/morloc-test /bin/bash
@@ -94,7 +79,6 @@ push:
 pull:
 	podman pull ghcr.io/morloc-project/morloc/morloc-tiny:$(MORLOC_VERSION)
 	podman pull ghcr.io/morloc-project/morloc/morloc-full:$(MORLOC_VERSION)
-	podman pull ghcr.io/morloc-project/morloc/morloc-serve:$(MORLOC_VERSION)
 	podman pull ghcr.io/morloc-project/morloc/morloc-test
 	podman pull ghcr.io/morloc-project/morloc/morloc-test:edge
 
@@ -102,7 +86,6 @@ pull:
 pull-edge:
 	podman pull ghcr.io/morloc-project/morloc/morloc-tiny:edge
 	podman pull ghcr.io/morloc-project/morloc/morloc-full:edge
-	podman pull ghcr.io/morloc-project/morloc/morloc-serve:edge
 
 # Cleanup of podman images may be done as follows
 # $ podman image prune

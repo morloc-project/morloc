@@ -9,13 +9,14 @@ LABEL org.opencontainers.image.description="A morloc container intended for inte
 LABEL org.opencontainers.image.licenses=Apache-2.0
 
 COPY --from=morloc-bin /bin/morloc /bin/morloc
-COPY --from=morloc-bin /opt/morloc-rust /opt/morloc-rust
+COPY --from=morloc-bin /opt/morloc-rust-bin /opt/morloc-rust-bin
 
 WORKDIR $HOME
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH="/root/.local/bin:/root/.local/share/morloc/bin:${PATH}"
-ENV MORLOC_RUST_DIR=/opt/morloc-rust
+# Pre-built Rust binaries: morloc init uses these directly (no cargo needed)
+ENV MORLOC_RUST_BIN=/opt/morloc-rust-bin
 
 RUN apt-get update
 
@@ -24,13 +25,9 @@ RUN TZ=Antarctica/Troll apt-get -y install tzdata
 
 RUN apt-get install -y r-base python3 python3-dev python3-pip python3-numpy libgsl-dev git curl
 
-# Install Rust toolchain (needed by morloc init to build libmorloc.so)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
-
 RUN python3 -m pip install --break-system-packages --upgrade setuptools
 
-# Setup the morloc home (builds libmorloc.so from Rust via cargo)
+# Setup the morloc home (uses pre-built Rust binaries, no cargo needed)
 RUN morloc init
 # Copy morloc-nexus to a system path so it remains on PATH even when
 # morloc-manager bind-mounts over ~/.local/bin with a host directory

@@ -1,13 +1,13 @@
 #!/bin/sh
-# Build a fully static morloc-manager binary using Docker/Podman + Alpine.
+# Build portable libmorloc.so, morloc-nexus, and morloc-manager.
 #
 # Usage:
 #   ./container/static-build/build.sh
 #
 # Output:
-#   ./out/morloc-manager    (static ELF binary, ~25-40 MB)
-#
-# The binary runs on any Linux x86_64 system without dependencies.
+#   ./out/libmorloc.so      (shared library, glibc >= 2.31)
+#   ./out/morloc-nexus      (binary, glibc >= 2.31, links libmorloc.so)
+#   ./out/morloc-manager    (static binary, runs on any Linux)
 
 set -e
 
@@ -24,20 +24,20 @@ else
     exit 1
 fi
 
-echo "Building static morloc-manager with $ENGINE..."
+echo "Building libmorloc.so, morloc-nexus, and morloc-manager with $ENGINE..."
 
 mkdir -p "$PROJECT_DIR/out"
 
 $ENGINE build \
-    -t morloc-static-build \
+    -t morloc-rust-build \
     -f "$SCRIPT_DIR/Dockerfile" \
     "$PROJECT_DIR"
 
 $ENGINE run --rm \
     -v "$PROJECT_DIR/out:/out" \
-    morloc-static-build
+    morloc-rust-build
 
 echo ""
-echo "Binary: $PROJECT_DIR/out/morloc-manager"
-ls -lh "$PROJECT_DIR/out/morloc-manager"
-file "$PROJECT_DIR/out/morloc-manager"
+echo "Binaries:"
+ls -lh "$PROJECT_DIR/out/libmorloc.so" "$PROJECT_DIR/out/morloc-nexus" "$PROJECT_DIR/out/morloc-manager"
+file "$PROJECT_DIR/out/libmorloc.so" "$PROJECT_DIR/out/morloc-nexus" "$PROJECT_DIR/out/morloc-manager"
