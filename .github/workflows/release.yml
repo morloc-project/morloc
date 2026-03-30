@@ -42,14 +42,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ---- Linux: Docker container build (Ubuntu 20.04 for glibc compat) ----
+      # ---- Linux: Docker container build ----
+      # libmorloc.so + morloc-nexus: glibc (Ubuntu 20.04)
+      # morloc-manager: static (Alpine/musl)
       - name: Build Rust binaries (Linux)
         if: matrix.method == 'docker'
         run: |
           docker build -t morloc-rust-build \
-            -f container/static-build/Dockerfile.rust .
+            -f container/static-build/Dockerfile .
           mkdir -p out
           docker run --rm -v "$(pwd)/out:/out" morloc-rust-build
+          # Verify morloc-manager is static
+          file out/morloc-manager | grep -q "statically linked"
 
       - name: Rename artifacts (Linux)
         if: matrix.method == 'docker'
