@@ -54,6 +54,9 @@ pub enum ManagerError {
     #[error("Freeze failed: {0}")]
     FreezeError(String),
 
+    #[error("Unfreeze failed: {0}")]
+    UnfreezeError(String),
+
     #[error("SELinux error: {0}")]
     SELinuxError(String),
 

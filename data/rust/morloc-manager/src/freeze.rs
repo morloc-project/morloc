@@ -44,8 +44,9 @@ pub fn freeze_from_dir(
     let modules = scan_modules(&format!("{v_data_dir}/fdb"));
     let programs = scan_programs(&format!("{v_data_dir}/fdb"));
     if programs.is_empty() {
-        eprintln!("Warning: No compiled programs found in fdb/. The resulting image will fail to start.");
-        eprintln!("  Run 'morloc-manager run -- morloc make <script.loc>' before freezing.");
+        return Err(ManagerError::FreezeError(
+            "No morloc programs are installed. Install programs with 'morloc install' or compile with 'morloc make --install' before freezing.".to_string()
+        ));
     }
     let now = Utc::now();
 
@@ -53,7 +54,7 @@ pub fn freeze_from_dir(
     let m_cfg = config::read_active_config();
 
     let base_img = match &vc_result {
-        Ok(vc) => vc.original_image.clone().unwrap_or_else(|| vc.image.clone()),
+        Ok(vc) => vc.image.clone(),
         Err(_) => "unknown".to_string(),
     };
 

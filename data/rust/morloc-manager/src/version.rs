@@ -254,6 +254,18 @@ pub fn uninstall_version(scope: Scope, ver: Version) -> Result<()> {
     let vc: VersionConfig = config::read_config(&vc_path)
         .map_err(|_| ManagerError::VersionNotInstalled(ver))?;
 
+    // Warn about workspaces that depend on this version
+    for ws_name in config::list_workspaces(scope) {
+        if let Ok(wc) = config::read_workspace_config(scope, &ws_name) {
+            if wc.base_version == ver {
+                eprintln!(
+                    "  Warning: workspace '{}' is based on version {} and will become non-functional",
+                    ws_name, ver.show()
+                );
+            }
+        }
+    }
+
     // Only remove the container image if the other scope doesn't also have
     // this version installed (prevents cross-scope breakage on shared Docker daemon)
     let other_scope = match scope {

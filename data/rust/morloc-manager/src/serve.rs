@@ -6,20 +6,21 @@ use std::time::Duration;
 
 use crate::container::{
     container_build, container_pull, container_run, container_stop, container_remove,
-    engine_executable, exit_code_to_int, BuildConfig, RunConfig,
+    engine_executable, exit_code_to_int, image_exists_locally, BuildConfig, RunConfig,
 };
 use crate::error::{ManagerError, Result};
 use crate::types::*;
 
 pub fn build_serve_image(
     engine: ContainerEngine,
+    verbose: bool,
     state_tarball: &str,
     tag: &str,
     ver: Version,
     base_override: Option<&str>,
 ) -> Result<()> {
     if !Path::new(state_tarball).exists() {
-        return Err(ManagerError::FreezeError(format!(
+        return Err(ManagerError::UnfreezeError(format!(
             "Tarball not found: {state_tarball}"
         )));
     }
@@ -40,26 +41,32 @@ pub fn build_serve_image(
     };
 
     eprintln!("Using base image: {base_image}");
-    let (pull_status, _, pull_err) = container_pull(engine, &base_image);
-    if !pull_status.success() {
-        return Err(ManagerError::EngineError {
-            engine,
-            code: exit_code_to_int(pull_status),
-            stderr: pull_err,
-        });
+    if !image_exists_locally(engine, &base_image) {
+        let exe = engine_executable(engine);
+        if verbose {
+            eprintln!("[morloc-manager] {exe} pull {base_image}");
+        }
+        let (pull_status, _, pull_err) = container_pull(engine, &base_image);
+        if !pull_status.success() {
+            return Err(ManagerError::EngineError {
+                engine,
+                code: exit_code_to_int(pull_status),
+                stderr: pull_err,
+            });
+        }
     }
 
     let context_dir = tarball_dir.join("serve-build");
     fs::create_dir_all(&context_dir)
-        .map_err(|e| ManagerError::FreezeError(format!("mkdir failed: {e}")))?;
+        .map_err(|e| ManagerError::UnfreezeError(format!("mkdir failed: {e}")))?;
 
     eprintln!("Extracting frozen state...");
     let tar_output = Command::new("tar")
         .args(["-xzf", state_tarball, "-C", &context_dir.to_string_lossy()])
         .output()
-        .map_err(|e| ManagerError::FreezeError(format!("tar extract failed: {e}")))?;
+        .map_err(|e| ManagerError::UnfreezeError(format!("tar extract failed: {e}")))?;
     if !tar_output.status.success() {
-        return Err(ManagerError::FreezeError(format!(
+        return Err(ManagerError::UnfreezeError(format!(
             "tar extract failed: {}",
             String::from_utf8_lossy(&tar_output.stderr)
         )));
@@ -88,7 +95,7 @@ pub fn build_serve_image(
                      \"--fdb\", \"/opt/morloc/fdb\"]\n"
     );
     fs::write(&dockerfile_path, &dockerfile_content)
-        .map_err(|e| ManagerError::FreezeError(format!("Write Dockerfile failed: {e}")))?;
+        .map_err(|e| ManagerError::UnfreezeError(format!("Write Dockerfile failed: {e}")))?;
 
     eprintln!("Building serve image {tag} (base: {base_image})...");
     let build_cfg = BuildConfig {
@@ -97,6 +104,13 @@ pub fn build_serve_image(
         tag: tag.to_string(),
         build_args: Vec::new(),
     };
+    if verbose {
+        let exe = engine_executable(engine);
+        eprintln!(
+            "[morloc-manager] {exe} build -f {} -t {tag} {}",
+            build_cfg.dockerfile, build_cfg.context
+        );
+    }
     let (status, _, build_err) = container_build(engine, &build_cfg);
     if !status.success() {
         return Err(ManagerError::EngineError {

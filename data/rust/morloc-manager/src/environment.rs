@@ -22,13 +22,13 @@ pub fn init_environment(scope: Scope, env_name: &str) -> Result<String> {
 
     let deps = config::deps_dir(scope);
     fs::create_dir_all(&deps).map_err(|e| {
-        ManagerError::InstallError(format!("Failed to create deps dir: {e}"))
+        ManagerError::EnvError(format!("Failed to create deps dir: {e}"))
     })?;
     let _ = best_effort_chmod(&deps, 0o755);
 
     let dockerfile_path = deps.join(format!("{env_name}.Dockerfile"));
     if dockerfile_path.exists() {
-        return Err(ManagerError::InstallError(format!(
+        return Err(ManagerError::EnvError(format!(
             "Environment already exists: {}",
             dockerfile_path.display()
         )));
@@ -52,7 +52,7 @@ pub fn init_environment(scope: Scope, env_name: &str) -> Result<String> {
          # RUN apt-get update && apt-get install -y libfoo-dev\n"
     );
     fs::write(&dockerfile_path, &content).map_err(|e| {
-        ManagerError::InstallError(format!("Failed to write Dockerfile: {e}"))
+        ManagerError::EnvError(format!("Failed to write Dockerfile: {e}"))
     })?;
     let _ = best_effort_chmod(&dockerfile_path, 0o644);
 

@@ -550,12 +550,12 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             } else {
                 // Treat as workspace name
                 let ws_scope = cfg::find_workspace_scope(&target).map_err(|_| {
-                    ManagerError::InvalidVersion(format!(
+                    ManagerError::WorkspaceError(format!(
                         "Not found as version or workspace: {target}"
                     ))
                 })?;
                 cfg::read_workspace_config(ws_scope, &target).map_err(|_| {
-                    ManagerError::InvalidVersion(format!(
+                    ManagerError::WorkspaceError(format!(
                         "Not found as version or workspace: {target}"
                     ))
                 })?;
@@ -710,6 +710,11 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             from,
             copy,
         } => {
+            if name.parse::<Version>().is_ok() {
+                return Err(ManagerError::WorkspaceError(format!(
+                    "Workspace name cannot use version format (MAJOR.MINOR.PATCH): {name}"
+                )));
+            }
             let scope = resolve_scope(system);
             let engine = ensure_engine_for_scope(scope)?;
             let (base_ver, base_ver_scope) = match from {
@@ -950,7 +955,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 ActiveTarget::Version(v) => v,
                 ActiveTarget::Workspace(_) => Version::new(0, 0, 0),
             };
-            serve::build_serve_image(engine, &from, &tag, ver, base.as_deref())
+            serve::build_serve_image(engine, verbose, &from, &tag, ver, base.as_deref())
         }
 
         // ---- start ----
