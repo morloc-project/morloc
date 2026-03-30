@@ -248,9 +248,9 @@ pub fn uninstall_version(scope: Scope, ver: Version) -> Result<()> {
         }
     }
 
-    // Clear active version in both scopes if it pointed to this version
-    for check_scope in [Scope::Local, Scope::System] {
-        let cfg_path = config::config_path(check_scope);
+    // Clear local active version if it pointed to this version
+    {
+        let cfg_path = config::config_path(Scope::Local);
         if let Ok(cfg) = config::read_config::<Config>(&cfg_path) {
             if cfg.active_target == Some(ActiveTarget::Version(ver)) {
                 let new_cfg = Config {
@@ -258,11 +258,19 @@ pub fn uninstall_version(scope: Scope, ver: Version) -> Result<()> {
                     ..cfg
                 };
                 let _ = config::write_config(&cfg_path, &new_cfg);
-                let label = match check_scope {
-                    Scope::Local => "local",
-                    Scope::System => "system",
-                };
-                eprintln!("  Cleared {label} active version");
+                eprintln!("  Cleared local active version");
+            }
+        }
+    }
+    // Warn if system default still references the uninstalled version
+    {
+        let cfg_path = config::config_path(Scope::System);
+        if let Ok(cfg) = config::read_config::<Config>(&cfg_path) {
+            if cfg.active_target == Some(ActiveTarget::Version(ver)) {
+                eprintln!(
+                    "  Warning: system default still references {}",
+                    ver.show()
+                );
             }
         }
     }
