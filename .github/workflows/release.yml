@@ -53,7 +53,7 @@ jobs:
           mkdir -p out
           docker run --rm -v "$(pwd)/out:/out" morloc-rust-build
           # Verify morloc-manager is static
-          file out/morloc-manager | grep -q "statically linked"
+          file out/morloc-manager | grep -qE "static(ally|-pie) linked"
 
       - name: Rename artifacts (Linux)
         if: matrix.method == 'docker'
