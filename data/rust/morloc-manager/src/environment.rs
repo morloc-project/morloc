@@ -9,6 +9,17 @@ use crate::error::{ManagerError, Result};
 use crate::types::*;
 
 pub fn init_environment(scope: Scope, env_name: &str) -> Result<String> {
+    // Validate name against Docker tag rules
+    if env_name.is_empty()
+        || !env_name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(ManagerError::EnvError(format!(
+            "Invalid environment name '{env_name}': must contain only alphanumeric characters, hyphens, underscores, or dots"
+        )));
+    }
+
     let deps = config::deps_dir(scope);
     fs::create_dir_all(&deps).map_err(|e| {
         ManagerError::InstallError(format!("Failed to create deps dir: {e}"))
@@ -67,11 +78,16 @@ pub fn build_environment(
         Err(_) => true,
     };
     if !needs_rebuild {
-        return Ok(());
+        // Verify the image actually exists in the current engine store
+        let tag = format!("localhost/morloc-env:{}-{env_name}", ver.show());
+        if container::image_exists_locally(engine, &tag) {
+            return Ok(());
+        }
+        // Image missing (e.g. engine switch or manual deletion) - fall through to rebuild
     }
 
     let vc = config::read_version_config(scope, ver)?;
-    let tag = format!("morloc-env:{}-{env_name}", ver.show());
+    let tag = format!("localhost/morloc-env:{}-{env_name}", ver.show());
     let build_cfg = BuildConfig {
         dockerfile: dockerfile_path.to_string_lossy().to_string(),
         context: deps.to_string_lossy().to_string(),

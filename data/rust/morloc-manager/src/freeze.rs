@@ -3,8 +3,6 @@ use std::path::Path;
 use std::process::Command;
 
 use chrono::Utc;
-use sha2::{Digest, Sha256};
-
 use crate::config;
 use crate::error::{ManagerError, Result};
 use crate::types::*;
@@ -28,7 +26,8 @@ pub fn freeze_from_dir(
     }
 
     eprintln!("Freezing installed state from {v_data_dir}...");
-    let tar_path = format!("{output_dir}/state.tar.gz");
+    let tar_path = Path::new(output_dir).join("state.tar.gz");
+    let tar_path = tar_path.to_string_lossy();
     let tar_output = Command::new("tar")
         .args(["-czf", &tar_path, "-C", v_data_dir, "lib", "fdb", "bin"])
         .output()
@@ -42,15 +41,19 @@ pub fn freeze_from_dir(
     }
     eprintln!("Created {tar_path}");
 
-    let modules = scan_modules(&format!("{v_data_dir}/lib"));
+    let modules = scan_modules(&format!("{v_data_dir}/fdb"));
     let programs = scan_programs(&format!("{v_data_dir}/fdb"));
+    if programs.is_empty() {
+        eprintln!("Warning: No compiled programs found in fdb/. The resulting image will fail to start.");
+        eprintln!("  Run 'morloc-manager run -- morloc make <script.loc>' before freezing.");
+    }
     let now = Utc::now();
 
     let vc_result = config::read_version_config(scope, ver);
     let m_cfg = config::read_active_config();
 
     let base_img = match &vc_result {
-        Ok(vc) => vc.image.clone(),
+        Ok(vc) => vc.original_image.clone().unwrap_or_else(|| vc.image.clone()),
         Err(_) => "unknown".to_string(),
     };
 
@@ -67,7 +70,7 @@ pub fn freeze_from_dir(
                     Err(_) => String::new(),
                 };
                 // Query image digest
-                let env_image_tag = format!("morloc-env:{}-{env_name}", ver.show());
+                let env_image_tag = format!("localhost/morloc-env:{}-{env_name}", ver.show());
                 let digest_output = Command::new("docker")
                     .args([
                         "inspect",
@@ -103,7 +106,8 @@ pub fn freeze_from_dir(
         base_image: base_img,
         env_layer,
     };
-    let manifest_path = format!("{output_dir}/freeze-manifest.json");
+    let manifest_path = Path::new(output_dir).join("freeze-manifest.json");
+    let manifest_path = manifest_path.to_string_lossy();
     write_freeze_manifest(&manifest_path, &manifest)?;
     eprintln!("Wrote {manifest_path}");
     eprintln!("Frozen state written to {output_dir}");
@@ -129,26 +133,37 @@ pub fn read_freeze_manifest(path: &str) -> Result<FreezeManifest> {
 // Internal: scanning installed state
 // ======================================================================
 
-fn scan_modules(lib_dir: &str) -> Vec<ModuleEntry> {
-    let lib_path = Path::new(lib_dir);
-    if !lib_path.is_dir() {
+fn scan_modules(fdb_dir: &str) -> Vec<ModuleEntry> {
+    let fdb_path = Path::new(fdb_dir);
+    if !fdb_path.is_dir() {
         return Vec::new();
     }
-    let Ok(entries) = fs::read_dir(lib_path) else {
+    let Ok(entries) = fs::read_dir(fdb_path) else {
         return Vec::new();
     };
+
+    #[derive(serde::Deserialize)]
+    struct ModuleStub {
+        name: String,
+        #[serde(default)]
+        version: Option<String>,
+    }
+
     entries
         .flatten()
-        .filter(|e| e.path().is_dir())
-        .map(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            let mod_dir = e.path();
-            let content_hash = hash_directory_loc_files(&mod_dir);
-            ModuleEntry {
-                name,
-                version: None,
-                sha256: content_hash,
-            }
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .ends_with(".module")
+        })
+        .filter_map(|e| {
+            let bytes = fs::read(e.path()).ok()?;
+            let stub: ModuleStub = serde_json::from_slice(&bytes).ok()?;
+            Some(ModuleEntry {
+                name: stub.name,
+                version: stub.version,
+                sha256: String::new(),
+            })
         })
         .collect()
 }
@@ -200,26 +215,3 @@ fn parse_manifest_commands(path: &Path) -> Vec<String> {
     }
 }
 
-fn hash_directory_loc_files(dir: &Path) -> String {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return String::new();
-    };
-    let mut loc_files: Vec<_> = entries
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".loc"))
-        .map(|e| e.path())
-        .collect();
-    loc_files.sort();
-
-    let mut hasher = Sha256::new();
-    for f in &loc_files {
-        if let Ok(contents) = fs::read(f) {
-            hasher.update(&contents);
-        }
-    }
-    hex_encode(&hasher.finalize())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}

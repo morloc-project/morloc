@@ -204,9 +204,17 @@ where
         .truncate(false)
         .mode(0o644)
         .open(lock_path)
-        .map_err(|e| ManagerError::ConfigParseError {
-            path: lock_path.to_string(),
-            msg: format!("Failed to open lock file: {e}"),
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                ManagerError::ConfigPermissionDenied(format!(
+                    "{}. Use sudo for system-scope operations", lock_path
+                ))
+            } else {
+                ManagerError::ConfigParseError {
+                    path: lock_path.to_string(),
+                    msg: format!("Failed to open lock file: {e}"),
+                }
+            }
         })?;
 
     use nix::fcntl::FlockArg;

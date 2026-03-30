@@ -45,6 +45,9 @@ pub enum ManagerError {
     #[error("Uninstall failed: {0}")]
     UninstallError(String),
 
+    #[error("{0}")]
+    WorkspaceError(String),
+
     #[error("Environment error: {0}")]
     EnvError(String),
 

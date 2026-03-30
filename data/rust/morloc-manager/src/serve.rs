@@ -71,12 +71,13 @@ pub fn build_serve_image(
          FROM {base_image}\n\
          \n\
          # Ensure morloc binaries are on PATH\n\
-         ENV PATH=\"/root/.local/bin:/root/.local/share/morloc/bin:${{PATH}}\"\n\
+         ENV PATH=\"/opt/morloc/bin:${{PATH}}\"\n\
          \n\
          # Copy frozen morloc state (modules, manifests, binaries, pools)\n\
-         COPY lib/ /root/.local/share/morloc/lib/\n\
-         COPY fdb/ /root/.local/share/morloc/fdb/\n\
-         COPY bin/ /root/.local/share/morloc/bin/\n\
+         COPY lib/ /opt/morloc/lib/\n\
+         COPY fdb/ /opt/morloc/fdb/\n\
+         COPY bin/ /opt/morloc/bin/\n\
+         RUN chmod -R a+rX /opt/morloc\n\
          \n\
          # Health check for container orchestrators\n\
          HEALTHCHECK --interval=30s --timeout=5s --retries=3 \\\n\
@@ -84,7 +85,7 @@ pub fn build_serve_image(
          \n\
          # Entrypoint: nexus router aggregates all installed programs\n\
          ENTRYPOINT [\"morloc-nexus\", \"--router\", \\\n\
-                     \"--fdb\", \"/root/.local/share/morloc/fdb\"]\n"
+                     \"--fdb\", \"/opt/morloc/fdb\"]\n"
     );
     fs::write(&dockerfile_path, &dockerfile_content)
         .map_err(|e| ManagerError::FreezeError(format!("Write Dockerfile failed: {e}")))?;
@@ -110,10 +111,14 @@ pub fn build_serve_image(
 
 pub fn run_serve_container(
     engine: ContainerEngine,
+    verbose: bool,
     image: &str,
     name: &str,
     ports: &[(u16, u16)],
 ) -> Result<()> {
+    // Clean up any existing dead container with this name
+    let _ = container_remove(engine, name);
+
     let port_str: Vec<String> = ports
         .iter()
         .map(|(h, c)| format!("{h}:{c}"))
@@ -129,6 +134,16 @@ pub fn run_serve_container(
     cfg.name = Some(name.to_string());
     cfg.ports = ports.to_vec();
     cfg.extra_flags = vec!["-d".to_string()];
+
+    if verbose {
+        let exe = engine_executable(engine);
+        let extra = crate::container::engine_specific_run_flags_io(engine);
+        let args = crate::container::build_run_args(engine, &extra, &cfg);
+        let quoted: Vec<String> = args.iter().map(|a| {
+            if a.contains(' ') { format!("'{a}'") } else { a.clone() }
+        }).collect();
+        eprintln!("[morloc-manager] {exe} {}", quoted.join(" "));
+    }
 
     let (status, _stdout, run_err) = container_run(engine, &cfg);
     if !status.success() {
@@ -154,8 +169,14 @@ pub fn run_serve_container(
             } else {
                 let log_output = Command::new(exe).args(["logs", name]).output();
                 let logs = log_output
-                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                    .map(|o| {
+                        let stdout = String::from_utf8_lossy(&o.stdout);
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        format!("{stdout}{stderr}")
+                    })
                     .unwrap_or_default();
+                // Clean up the dead container to prevent name conflicts on retry
+                let _ = container_remove(engine, name);
                 Err(ManagerError::EngineError {
                     engine,
                     code: 1,
@@ -286,7 +307,7 @@ fn rebuild_env_image(
     fel: &FrozenEnvLayer,
 ) -> String {
     let env_tag = format!(
-        "morloc-env:{}-{}",
+        "localhost/morloc-env:{}-{}",
         fm.morloc_version.show(),
         fel.name
     );

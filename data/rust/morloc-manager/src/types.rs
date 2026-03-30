@@ -190,6 +190,9 @@ impl Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VersionConfig {
     pub image: String,
+    /// The original pullable image reference (e.g. :edge tag) before local re-tagging
+    #[serde(default)]
+    pub original_image: Option<String>,
     pub host_dir: String,
     #[serde(default = "default_shm_size")]
     pub shm_size: String,
