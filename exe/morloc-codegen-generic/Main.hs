@@ -24,6 +24,7 @@ import qualified Data.Binary as Binary
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
+import GHC.IO.Encoding (setLocaleEncoding, utf8)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.FilePath (takeDirectory, (</>))
@@ -36,6 +37,7 @@ import Morloc.Data.Doc (render)
 
 main :: IO ()
 main = do
+  setLocaleEncoding utf8
   args <- getArgs
   case args of
     [langYamlPath, iprogramPath] -> run langYamlPath iprogramPath

@@ -1,0 +1,6 @@
+"Élève café"
+"你知道得太多了"
+"❤ hello ☃"
+"abc-éèê-你好-❤-xyz"
+"Hello, café-你好!"
+"line1: café\nline2: 你好\nline3: ❤\n"

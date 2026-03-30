@@ -1,0 +1,43 @@
+module main (hello, chinese, emoji, mixed, roundtrip, tripleQuoted)
+
+-- À propos: test Unicode in line comments — em-dash, accented letters, CJK
+-- 你好世界 – Chinese hello world in a comment
+
+{- Block comment with Unicode:
+   éèêë ñ ü ß ☃ ❤ ★
+   Japanese: こんにちは
+   Arabic: مرحبا
+-}
+
+source Py from "foo.py" ("py_hello" as pyHello, "py_identity" as pyId)
+
+pyHello :: Str -> Str
+pyId :: Str -> Str
+
+type Py => Str = "str"
+
+-- Test 1: Unicode string literal in .loc source (accented chars)
+hello :: Str
+hello = pyId "Élève café"
+
+-- Test 2: CJK characters in string literal
+chinese :: Str
+chinese = pyId "你知道得太多了"
+
+-- Test 3: Emoji-like symbols in string literal
+emoji :: Str
+emoji = pyId "❤ hello ☃"
+
+-- Test 4: Mixed ASCII and multi-byte in same string  
+mixed :: Str
+mixed = pyId "abc-éèê-你好-❤-xyz"
+
+-- Test 5: Unicode survives function application round-trip
+roundtrip :: Str
+roundtrip = pyHello "café-你好"
+
+-- Test 6: Unicode in triple-quoted string
+tripleQuoted :: Str
+tripleQuoted = pyId """line1: café
+line2: 你好
+line3: ❤"""

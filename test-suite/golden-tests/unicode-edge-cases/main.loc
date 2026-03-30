@@ -1,0 +1,30 @@
+module main (emptyLike, singleChar, surrogateLike, rtl, combining, nullLike)
+
+source Py from "foo.py" ("py_identity" as pyId)
+
+pyId :: Str -> Str
+type Py => Str = "str"
+
+-- Single multi-byte character
+singleChar :: Str
+singleChar = pyId "世"
+
+-- Characters that look like JSON special chars but aren't
+emptyLike :: Str
+emptyLike = pyId "​"
+
+-- Right-to-left text (Arabic)
+rtl :: Str
+rtl = pyId "مرحبا بالعالم"
+
+-- Combining characters (e + combining acute = é)
+combining :: Str
+combining = pyId "é"
+
+-- String with surrogate-like high codepoints (valid UTF-8, 4-byte sequences)
+surrogateLike :: Str
+surrogateLike = pyId "😀💩"
+
+-- Null-like zero-width chars mixed with ASCII
+nullLike :: Str
+nullLike = pyId "a​b​c"

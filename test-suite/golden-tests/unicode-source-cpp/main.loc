@@ -1,0 +1,19 @@
+module main (hello, chinese, mixed)
+
+-- Test Unicode strings through C++ pool — exercises the codegen subprocess
+
+source Cpp from "foo.hpp" ("cpp_identity" as cppId, "cpp_hello" as cppHello)
+
+cppId :: Str -> Str
+cppHello :: Str -> Str
+
+type Cpp => Str = "std::string"
+
+hello :: Str
+hello = cppId "Élève café"
+
+chinese :: Str
+chinese = cppId "你知道得太多了"
+
+mixed :: Str
+mixed = cppHello "café-你好-❤"
