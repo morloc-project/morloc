@@ -37,6 +37,10 @@ RUN gcc -shared -o libmorloc.so \
     -Wl,--whole-archive target/release/libmorloc_runtime.a -Wl,--no-whole-archive \
     -lpthread -lrt -ldl -lm
 
+# Install libmorloc.so where the nexus linker expects it
+RUN mkdir -p /root/.local/share/morloc/lib \
+    && cp libmorloc.so /root/.local/share/morloc/lib/
+
 # Build morloc-nexus and morloc-manager
 RUN cargo build --release -p morloc-nexus
 RUN cargo build --release -p morloc-manager
