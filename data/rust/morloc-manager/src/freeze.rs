@@ -4,17 +4,19 @@ use std::process::Command;
 
 use chrono::Utc;
 use crate::config;
+use crate::container;
 use crate::error::{ManagerError, Result};
 use crate::types::*;
 
-pub fn freeze(scope: Scope, ver: Version, output_dir: &str) -> Result<()> {
+pub fn freeze(scope: Scope, ver: Version, engine: ContainerEngine, output_dir: &str) -> Result<()> {
     let v_data_dir = config::version_data_dir(scope, ver);
-    freeze_from_dir(scope, ver, &v_data_dir.to_string_lossy(), output_dir)
+    freeze_from_dir(scope, ver, engine, &v_data_dir.to_string_lossy(), output_dir)
 }
 
 pub fn freeze_from_dir(
     scope: Scope,
     ver: Version,
+    engine: ContainerEngine,
     v_data_dir: &str,
     output_dir: &str,
 ) -> Result<()> {
@@ -25,11 +27,20 @@ pub fn freeze_from_dir(
         return Err(ManagerError::VersionNotInstalled(ver));
     }
 
+    // Validate programs exist before writing any files
+    let modules = scan_modules(&format!("{v_data_dir}/fdb"));
+    let programs = scan_programs(&format!("{v_data_dir}/fdb"));
+    if programs.is_empty() {
+        return Err(ManagerError::FreezeError(
+            "No morloc programs are installed. Install programs with 'morloc install' or compile with 'morloc make --install' before freezing.".to_string()
+        ));
+    }
+
     eprintln!("Freezing installed state from {v_data_dir}...");
     let tar_path = Path::new(output_dir).join("state.tar.gz");
     let tar_path = tar_path.to_string_lossy();
     let tar_output = Command::new("tar")
-        .args(["-czf", &tar_path, "-C", v_data_dir, "lib", "fdb", "bin"])
+        .args(["-czf", &tar_path, "-C", v_data_dir, "lib", "fdb", "bin", "exe"])
         .output()
         .map_err(|e| ManagerError::FreezeError(format!("tar failed: {e}")))?;
 
@@ -40,14 +51,6 @@ pub fn freeze_from_dir(
         )));
     }
     eprintln!("Created {tar_path}");
-
-    let modules = scan_modules(&format!("{v_data_dir}/fdb"));
-    let programs = scan_programs(&format!("{v_data_dir}/fdb"));
-    if programs.is_empty() {
-        return Err(ManagerError::FreezeError(
-            "No morloc programs are installed. Install programs with 'morloc install' or compile with 'morloc make --install' before freezing.".to_string()
-        ));
-    }
     let now = Utc::now();
 
     let vc_result = config::read_version_config(scope, ver);
@@ -72,7 +75,8 @@ pub fn freeze_from_dir(
                 };
                 // Query image digest
                 let env_image_tag = format!("localhost/morloc-env:{}-{env_name}", ver.show());
-                let digest_output = Command::new("docker")
+                let exe = container::engine_executable(engine);
+                let digest_output = Command::new(exe)
                     .args([
                         "inspect",
                         "--format",

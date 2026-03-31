@@ -62,7 +62,7 @@ pub enum ManagerError {
 
     #[error("{}", match .0 {
         Scope::Local => "No local configuration found. Run: morloc-manager setup",
-        Scope::System => "No system configuration found. Run: sudo morloc-manager setup --scope system",
+        Scope::System => "No system configuration found. Run: sudo morloc-manager setup --system",
     })]
     SetupNotComplete(Scope),
 }

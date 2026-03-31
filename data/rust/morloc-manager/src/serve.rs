@@ -80,19 +80,24 @@ pub fn build_serve_image(
          # Ensure morloc binaries are on PATH\n\
          ENV PATH=\"/opt/morloc/bin:${{PATH}}\"\n\
          \n\
+         # Morloc home for pool path resolution\n\
+         ENV MORLOC_HOME=\"/opt/morloc\"\n\
+         \n\
          # Copy frozen morloc state (modules, manifests, binaries, pools)\n\
          COPY lib/ /opt/morloc/lib/\n\
          COPY fdb/ /opt/morloc/fdb/\n\
          COPY bin/ /opt/morloc/bin/\n\
+         COPY exe/ /opt/morloc/exe/\n\
          RUN chmod -R a+rX /opt/morloc\n\
          \n\
          # Health check for container orchestrators\n\
          HEALTHCHECK --interval=30s --timeout=5s --retries=3 \\\n\
-           CMD wget -qO- http://localhost:8080/health || exit 1\n\
+           CMD curl -sf http://localhost:8080/health || exit 1\n\
          \n\
          # Entrypoint: nexus router aggregates all installed programs\n\
          ENTRYPOINT [\"morloc-nexus\", \"--router\", \\\n\
-                     \"--fdb\", \"/opt/morloc/fdb\"]\n"
+                     \"--fdb\", \"/opt/morloc/fdb\", \\\n\
+                     \"--http-port\", \"8080\"]\n"
     );
     fs::write(&dockerfile_path, &dockerfile_content)
         .map_err(|e| ManagerError::UnfreezeError(format!("Write Dockerfile failed: {e}")))?;
@@ -179,6 +184,9 @@ pub fn run_serve_container(
             let state = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if state == "running" {
                 eprintln!("Container {name} started");
+                eprintln!("  Stop:   morloc-manager stop {name}");
+                eprintln!("  Logs:   morloc-manager logs {name}");
+                eprintln!("  Status: morloc-manager status");
                 Ok(())
             } else {
                 let log_output = Command::new(exe).args(["logs", name]).output();
@@ -288,17 +296,32 @@ fn resolve_base_from_manifest(
     m_manifest: Option<&FreezeManifest>,
     ver: Version,
 ) -> String {
-    let fallback = format!(
+    let ghcr_fallback = format!(
         "ghcr.io/morloc-project/morloc/morloc-full:{}",
         ver.show()
     );
     let Some(fm) = m_manifest else {
-        return fallback;
+        return ghcr_fallback;
     };
+
+    // Resolve the effective base image: use manifest's base_image if it exists
+    // locally, otherwise fall back to the GHCR image. The manifest may record a
+    // locally-retagged image (e.g. localhost/morloc:0.69.0) that won't exist on
+    // other machines.
+    let effective_base = if image_exists_locally(engine, &fm.base_image) {
+        fm.base_image.clone()
+    } else {
+        eprintln!(
+            "Base image '{}' not found locally, trying GHCR fallback...",
+            fm.base_image
+        );
+        ghcr_fallback
+    };
+
     match &fm.env_layer {
-        None => fm.base_image.clone(),
+        None => effective_base,
         Some(fel) => {
-            // Try using image digest (fast path)
+            // Fast path: env image digest exists locally
             if let Some(ref digest) = fel.image_digest {
                 let exe = engine_executable(engine);
                 let check = Command::new(exe)
@@ -310,13 +333,15 @@ fn resolve_base_from_manifest(
                     return digest.clone();
                 }
             }
-            rebuild_env_image(engine, fm, fel)
+            // Rebuild env layer from stored Dockerfile using effective base
+            rebuild_env_image(engine, &effective_base, fm, fel)
         }
     }
 }
 
 fn rebuild_env_image(
     engine: ContainerEngine,
+    effective_base: &str,
     fm: &FreezeManifest,
     fel: &FrozenEnvLayer,
 ) -> String {
@@ -345,7 +370,7 @@ fn rebuild_env_image(
         dockerfile: df_path,
         context: build_dir.to_string(),
         tag: env_tag.clone(),
-        build_args: vec![("CONTAINER_BASE".to_string(), fm.base_image.clone())],
+        build_args: vec![("CONTAINER_BASE".to_string(), effective_base.to_string())],
     };
     let (status, _, build_err) = container_build(engine, &build_cfg);
     if status.success() {
@@ -354,6 +379,6 @@ fn rebuild_env_image(
         eprintln!(
             "Warning: env rebuild failed, falling back to base image: {build_err}"
         );
-        fm.base_image.clone()
+        effective_base.to_string()
     }
 }
