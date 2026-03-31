@@ -45,18 +45,24 @@ pub enum ManagerError {
     #[error("Uninstall failed: {0}")]
     UninstallError(String),
 
+    #[error("{0}")]
+    WorkspaceError(String),
+
     #[error("Environment error: {0}")]
     EnvError(String),
 
     #[error("Freeze failed: {0}")]
     FreezeError(String),
 
+    #[error("Unfreeze failed: {0}")]
+    UnfreezeError(String),
+
     #[error("SELinux error: {0}")]
     SELinuxError(String),
 
     #[error("{}", match .0 {
         Scope::Local => "No local configuration found. Run: morloc-manager setup",
-        Scope::System => "No system configuration found. Run: sudo morloc-manager setup --scope system",
+        Scope::System => "No system configuration found. Run: sudo morloc-manager setup --system",
     })]
     SetupNotComplete(Scope),
 }

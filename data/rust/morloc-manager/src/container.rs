@@ -116,6 +116,28 @@ pub fn container_pull(engine: ContainerEngine, image: &str) -> (ExitStatus, Stri
     run_process_pass_stderr(exe, &["pull".to_string(), image.to_string()])
 }
 
+pub fn image_exists_locally(engine: ContainerEngine, image: &str) -> bool {
+    let exe = engine_executable(engine);
+    Command::new(exe)
+        .args(["image", "inspect", image])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub fn remote_image_exists(engine: ContainerEngine, image: &str) -> bool {
+    let exe = engine_executable(engine);
+    Command::new(exe)
+        .args(["manifest", "inspect", image])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 pub fn container_stop(engine: ContainerEngine, name_or_id: &str) -> (ExitStatus, String) {
     let exe = engine_executable(engine);
     let (code, _, err) = run_process(exe, &["stop".to_string(), name_or_id.to_string()]);

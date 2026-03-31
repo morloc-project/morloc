@@ -9,15 +9,36 @@ use crate::error::{ManagerError, Result};
 use crate::types::*;
 
 pub fn init_environment(scope: Scope, env_name: &str) -> Result<String> {
+    // Reject reserved names
+    match env_name {
+        "base" | "reset" => {
+            return Err(ManagerError::EnvError(format!(
+                "'{env_name}' is a reserved name and cannot be used as an environment name"
+            )));
+        }
+        _ => {}
+    }
+
+    // Validate name against Docker tag rules
+    if env_name.is_empty()
+        || !env_name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(ManagerError::EnvError(format!(
+            "Invalid environment name '{env_name}': must contain only alphanumeric characters, hyphens, underscores, or dots"
+        )));
+    }
+
     let deps = config::deps_dir(scope);
     fs::create_dir_all(&deps).map_err(|e| {
-        ManagerError::InstallError(format!("Failed to create deps dir: {e}"))
+        ManagerError::EnvError(format!("Failed to create deps dir: {e}"))
     })?;
     let _ = best_effort_chmod(&deps, 0o755);
 
     let dockerfile_path = deps.join(format!("{env_name}.Dockerfile"));
     if dockerfile_path.exists() {
-        return Err(ManagerError::InstallError(format!(
+        return Err(ManagerError::EnvError(format!(
             "Environment already exists: {}",
             dockerfile_path.display()
         )));
@@ -41,7 +62,7 @@ pub fn init_environment(scope: Scope, env_name: &str) -> Result<String> {
          # RUN apt-get update && apt-get install -y libfoo-dev\n"
     );
     fs::write(&dockerfile_path, &content).map_err(|e| {
-        ManagerError::InstallError(format!("Failed to write Dockerfile: {e}"))
+        ManagerError::EnvError(format!("Failed to write Dockerfile: {e}"))
     })?;
     let _ = best_effort_chmod(&dockerfile_path, 0o644);
 
@@ -67,11 +88,16 @@ pub fn build_environment(
         Err(_) => true,
     };
     if !needs_rebuild {
-        return Ok(());
+        // Verify the image actually exists in the current engine store
+        let tag = format!("localhost/morloc-env:{}-{env_name}", ver.show());
+        if container::image_exists_locally(engine, &tag) {
+            return Ok(());
+        }
+        // Image missing (e.g. engine switch or manual deletion) - fall through to rebuild
     }
 
     let vc = config::read_version_config(scope, ver)?;
-    let tag = format!("morloc-env:{}-{env_name}", ver.show());
+    let tag = format!("localhost/morloc-env:{}-{env_name}", ver.show());
     let build_cfg = BuildConfig {
         dockerfile: dockerfile_path.to_string_lossy().to_string(),
         context: deps.to_string_lossy().to_string(),

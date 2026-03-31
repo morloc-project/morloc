@@ -1,0 +1,16 @@
+module main (greet, multiByteInterp)
+
+source Py from "foo.py" ("py_identity" as pyId, "py_name" as pyName)
+
+pyId :: Str -> Str
+pyName :: Str
+
+type Py => Str = "str"
+
+-- Test: Unicode in string interpolation - surrounding text is Unicode
+greet :: Str
+greet = pyId "你好 #{pyName} ❤"
+
+-- Test: Multi-byte chars on both sides of interpolation
+multiByteInterp :: Str
+multiByteInterp = pyId "café #{pyName} üñ"

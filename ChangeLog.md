@@ -1,11 +1,17 @@
+0.72.0 [2026-03-30]
+-------------------
+ * fix unicode support in comments and literal strings
+ * many fixes to the morloc-manager
+
+
 0.71.0-2 [2026-03-29]
 -------------------
- - port morloc-manager to rust
+ * port morloc-manager to rust
 
 0.70.1 to 0.70.6 [2026-03-29]
 -----------------------------
- - fix portability for libmorloc and morloc-nexus on darwin and linux-arm64
- - python flushing face condition
+ * fix portability for libmorloc and morloc-nexus on darwin and linux-arm64
+ * python flushing face condition
 
 0.70.0 [2026-03-29]
 -------------------

@@ -2,7 +2,7 @@ use std::fs;
 use std::process::Command;
 
 use crate::config;
-use crate::container::{container_pull, engine_executable, exit_code_to_int};
+use crate::container::{container_pull, engine_executable, exit_code_to_int, image_exists_locally, remote_image_exists};
 use crate::error::{ManagerError, Result};
 use crate::types::*;
 
@@ -39,17 +39,34 @@ fn install_version_inner(
         is_version_installed(engine, scope, ver, &image_ref)
     };
     if already {
-        eprintln!("Version {} is already installed.", ver.show());
+        println!("Using local copy");
         return Ok(false);
     }
 
-    let (status, _stdout, stderr) = container_pull(engine, &image_ref);
-    if !status.success() {
-        return Err(ManagerError::EngineError {
-            engine,
-            code: exit_code_to_int(status),
-            stderr,
-        });
+    // Check if the image exists locally in the container engine (e.g. pulled
+    // but config was removed, or force-reinstall scenario)
+    let have_local_image = image_exists_locally(engine, &image_ref);
+
+    if !have_local_image {
+        // Verify the remote image exists before attempting to pull
+        if !remote_image_exists(engine, &image_ref) {
+            return Err(ManagerError::InstallError(format!(
+                "No container for morloc v{} exists",
+                ver.show()
+            )));
+        }
+
+        eprintln!("Pulling {}...", image_ref);
+        let (status, _stdout, stderr) = container_pull(engine, &image_ref);
+        if !status.success() {
+            return Err(ManagerError::EngineError {
+                engine,
+                code: exit_code_to_int(status),
+                stderr,
+            });
+        }
+    } else {
+        println!("Using local copy");
     }
 
     let v_data_dir = config::version_data_dir(scope, ver);
@@ -71,6 +88,7 @@ fn install_version_inner(
 
     let vc = VersionConfig {
         image: image_ref,
+        original_image: None,
         host_dir: v_data_dir.to_string_lossy().to_string(),
         shm_size: "512m".to_string(),
         engine,
@@ -84,6 +102,13 @@ pub fn install_latest(
     scope: Scope,
 ) -> Result<(Version, bool)> {
     let edge_image = "ghcr.io/morloc-project/morloc/morloc-full:edge";
+
+    if !remote_image_exists(engine, edge_image) {
+        return Err(ManagerError::InstallError(
+            "No container for latest morloc version exists".to_string(),
+        ));
+    }
+
     let (pull_status, _, pull_err) = container_pull(engine, edge_image);
     if !pull_status.success() {
         return Err(ManagerError::EngineError {
@@ -124,19 +149,42 @@ pub fn install_latest(
         .output();
 
     let was_fresh = install_version(engine, scope, ver)?;
+
+    // Record the original pullable image reference (edge) so freeze/unfreeze
+    // can use a tag that actually exists on the registry
+    if let Ok(mut vc) = config::read_version_config(scope, ver) {
+        vc.original_image = Some(edge_image.to_string());
+        let _ = config::write_version_config(scope, ver, &vc);
+    }
+
     Ok((ver, was_fresh))
 }
 
-pub fn select_version(scope: Scope, ver: Version) -> Result<()> {
-    let vc_path = config::version_config_path(scope, ver);
-    config::read_config::<VersionConfig>(&vc_path)
-        .map_err(|_| ManagerError::VersionNotInstalled(ver))?;
+pub fn select_version(ver: Version) -> Result<()> {
+    // Verify version exists in some scope
+    config::find_installed_scope(ver)?;
+    // Always write to local config
+    let cfg_path = config::config_path(Scope::Local);
+    // Inherit engine from system config if no local config exists, to avoid
+    // overriding the system engine with the hardcoded default (podman)
+    let base_cfg = config::read_config::<Config>(&cfg_path)
+        .or_else(|_| config::read_config::<Config>(&config::config_path(Scope::System)))
+        .unwrap_or_default();
+    let new_cfg = Config {
+        active_target: Some(ActiveTarget::Version(ver)),
+        ..base_cfg
+    };
+    config::write_config(&cfg_path, &new_cfg)
+}
 
-    let cfg_path = config::config_path(scope);
+pub fn select_version_system(ver: Version) -> Result<()> {
+    // Verify version exists in some scope
+    config::find_installed_scope(ver)?;
+    // Write to system config
+    let cfg_path = config::config_path(Scope::System);
     let base_cfg = config::read_config::<Config>(&cfg_path).unwrap_or_default();
     let new_cfg = Config {
         active_target: Some(ActiveTarget::Version(ver)),
-        active_scope: scope,
         ..base_cfg
     };
     config::write_config(&cfg_path, &new_cfg)
@@ -167,46 +215,110 @@ pub fn list_versions(scope: Scope) -> Vec<Version> {
 }
 
 pub fn resolve_active_version() -> Result<(Version, Scope)> {
-    let cfg = config::read_active_config().ok_or(ManagerError::NoActiveVersion)?;
-    let ver = cfg.active_version().ok_or(ManagerError::NoActiveVersion)?;
-    Ok((ver, cfg.active_scope))
+    let target = resolve_active_target()?;
+    match target {
+        ActiveTarget::Version(ver) => {
+            let scope = config::find_installed_scope(ver)?;
+            Ok((ver, scope))
+        }
+        _ => Err(ManagerError::NoActiveVersion),
+    }
 }
 
-pub fn resolve_active_target() -> Result<(ActiveTarget, Scope)> {
-    let cfg = config::read_active_config().ok_or(ManagerError::NoActiveVersion)?;
-    let target = cfg.active_target.ok_or(ManagerError::NoActiveVersion)?;
-    Ok((target, cfg.active_scope))
+/// Resolve the active target by checking local config first, then system.
+pub fn resolve_active_target() -> Result<ActiveTarget> {
+    // Try local config first
+    if let Ok(cfg) = config::read_config::<Config>(&config::config_path(Scope::Local)) {
+        if let Some(target) = cfg.active_target {
+            return Ok(target);
+        }
+    }
+    // Fall back to system config
+    if let Ok(cfg) = config::read_config::<Config>(&config::config_path(Scope::System)) {
+        if let Some(target) = cfg.active_target {
+            return Ok(target);
+        }
+    }
+    Err(ManagerError::NoActiveVersion)
 }
 
 pub fn uninstall_version(scope: Scope, ver: Version) -> Result<()> {
+    // Pre-check: system-scope uninstall requires root
+    if scope == Scope::System && !nix::unistd::getuid().is_root() {
+        return Err(ManagerError::UninstallError(
+            "Permission denied: system-scope uninstall requires root. Use: sudo morloc-manager uninstall --scope system".to_string(),
+        ));
+    }
+
     let vc_path = config::version_config_path(scope, ver);
     let vc: VersionConfig = config::read_config(&vc_path)
         .map_err(|_| ManagerError::VersionNotInstalled(ver))?;
 
-    let exe = engine_executable(vc.engine);
-    let rmi_output = Command::new(exe).args(["rmi", &vc.image]).output();
-    match rmi_output {
-        Ok(o) if o.status.success() => {
-            eprintln!("  Removed image: {}", vc.image);
-        }
-        _ => {
-            eprintln!(
-                "  Warning: could not remove image {} (may have been removed manually)",
-                vc.image
-            );
+    // Warn about workspaces that depend on this version
+    for ws_name in config::list_workspaces(scope) {
+        if let Ok(wc) = config::read_workspace_config(scope, &ws_name) {
+            if wc.base_version == ver {
+                eprintln!(
+                    "  Warning: workspace '{}' is based on version {} and will become non-functional",
+                    ws_name, ver.show()
+                );
+            }
         }
     }
 
-    // Clear active version if this was selected
-    if let Some(cfg) = config::read_active_config() {
-        if cfg.active_target == Some(ActiveTarget::Version(ver)) {
-            let cfg_path = config::config_path(scope);
-            let new_cfg = Config {
-                active_target: None,
-                ..cfg
-            };
-            let _ = config::write_config(&cfg_path, &new_cfg);
-            eprintln!("  Cleared active version");
+    // Only remove the container image if the other scope doesn't also have
+    // this version installed (prevents cross-scope breakage on shared Docker daemon)
+    let other_scope = match scope {
+        Scope::Local => Scope::System,
+        Scope::System => Scope::Local,
+    };
+    let other_has_version = config::version_config_path(other_scope, ver).is_file();
+    if other_has_version {
+        eprintln!("  Skipping image removal (also installed in {} scope)", match other_scope {
+            Scope::Local => "local",
+            Scope::System => "system",
+        });
+    } else {
+        let exe = engine_executable(vc.engine);
+        let rmi_output = Command::new(exe).args(["rmi", &vc.image]).output();
+        match rmi_output {
+            Ok(o) if o.status.success() => {
+                eprintln!("  Removed image: {}", vc.image);
+            }
+            _ => {
+                eprintln!(
+                    "  Warning: could not remove image {} (may have been removed manually)",
+                    vc.image
+                );
+            }
+        }
+    }
+
+    // Clear local active version if it pointed to this version
+    {
+        let cfg_path = config::config_path(Scope::Local);
+        if let Ok(cfg) = config::read_config::<Config>(&cfg_path) {
+            if cfg.active_target == Some(ActiveTarget::Version(ver)) {
+                let new_cfg = Config {
+                    active_target: None,
+                    ..cfg
+                };
+                let _ = config::write_config(&cfg_path, &new_cfg);
+                eprintln!("  Cleared local active version");
+            }
+        }
+    }
+    // Warn if system default still references the uninstalled version
+    // (but only if the version won't still be available in the other scope)
+    {
+        let cfg_path = config::config_path(Scope::System);
+        if let Ok(cfg) = config::read_config::<Config>(&cfg_path) {
+            if cfg.active_target == Some(ActiveTarget::Version(ver)) && !other_has_version {
+                eprintln!(
+                    "  Warning: system default still references {}",
+                    ver.show()
+                );
+            }
         }
     }
 

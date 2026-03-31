@@ -204,9 +204,17 @@ where
         .truncate(false)
         .mode(0o644)
         .open(lock_path)
-        .map_err(|e| ManagerError::ConfigParseError {
-            path: lock_path.to_string(),
-            msg: format!("Failed to open lock file: {e}"),
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                ManagerError::ConfigPermissionDenied(format!(
+                    "{}. Use sudo for system-scope operations", lock_path
+                ))
+            } else {
+                ManagerError::ConfigParseError {
+                    path: lock_path.to_string(),
+                    msg: format!("Failed to open lock file: {e}"),
+                }
+            }
         })?;
 
     use nix::fcntl::FlockArg;
@@ -244,28 +252,30 @@ pub fn read_flags_file(path: &Path) -> Vec<String> {
 // Scope utilities
 // ======================================================================
 
-pub fn find_installed_scope(ver: Version) -> Option<Scope> {
+pub fn find_installed_scope(ver: Version) -> Result<Scope> {
     let local_path = version_config_path(Scope::Local, ver);
     if local_path.is_file() {
-        return Some(Scope::Local);
+        return Ok(Scope::Local);
     }
     let sys_path = version_config_path(Scope::System, ver);
     if sys_path.is_file() {
-        return Some(Scope::System);
+        return Ok(Scope::System);
     }
-    None
+    Err(ManagerError::VersionNotInstalled(ver))
 }
 
-pub fn find_workspace_scope(name: &str) -> Option<Scope> {
+pub fn find_workspace_scope(name: &str) -> Result<Scope> {
     let local_path = workspace_config_path(Scope::Local, name);
     if local_path.is_file() {
-        return Some(Scope::Local);
+        return Ok(Scope::Local);
     }
     let sys_path = workspace_config_path(Scope::System, name);
     if sys_path.is_file() {
-        return Some(Scope::System);
+        return Ok(Scope::System);
     }
-    None
+    Err(ManagerError::EnvironmentNotFound(format!(
+        "Workspace not found: {name}"
+    )))
 }
 
 pub fn require_scope_config(scope: Scope) -> Result<Config> {

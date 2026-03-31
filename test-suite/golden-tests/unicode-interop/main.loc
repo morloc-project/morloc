@@ -1,0 +1,20 @@
+module main (pyToCpp, cppToPy)
+
+import root ((.))
+
+source Py from "foo.py" ("py_wrap" as pyWrap)
+source Cpp from "foo.hpp" ("cpp_wrap" as cppWrap)
+
+pyWrap :: Str -> Str
+cppWrap :: Str -> Str
+
+type Py => Str = "str"
+type Cpp => Str = "std::string"
+
+-- Unicode string crosses Python -> C++ boundary
+pyToCpp :: Str
+pyToCpp = (cppWrap . pyWrap) "café-你好"
+
+-- Unicode string crosses C++ -> Python boundary
+cppToPy :: Str
+cppToPy = (pyWrap . cppWrap) "café-你好"

@@ -46,6 +46,7 @@ fn build_help_template() -> String {
 
 {bu}Development{r}
   {b}new{r}        Create a named workspace
+  {b}delete{r}     Delete a workspace
   {b}run{r}        Run a command in the active container
   {b}env{r}        Manage dependency environments
 
@@ -87,19 +88,24 @@ enum Cmd {
     // -- Setup --
     /// Configure engine for a scope
     #[command(display_order = 1)]
+    #[command(after_help = "Examples:\n  morloc-manager setup\n  morloc-manager setup --engine docker\n  sudo morloc-manager setup --system --engine podman")]
     Setup {
-        #[arg(long, value_enum)]
-        scope: Option<ScopeArg>,
+        /// Apply to system scope instead of local (requires root)
+        #[arg(long)]
+        system: bool,
+        /// Container engine: "podman" or "docker"
         #[arg(long, value_enum)]
         engine: Option<EngineArg>,
     },
     /// Install a morloc version
     #[command(display_order = 2)]
+    #[command(after_help = "Examples:\n  morloc-manager install\n  morloc-manager install 0.69.0\n  morloc-manager install --force\n  sudo morloc-manager install --system")]
     Install {
         /// Version to install (default: latest)
         version: Option<String>,
-        #[arg(long, value_enum)]
-        scope: Option<ScopeArg>,
+        /// Install system-wide instead of locally (requires root)
+        #[arg(long)]
+        system: bool,
         /// Skip morloc init after install
         #[arg(long)]
         no_init: bool,
@@ -109,33 +115,42 @@ enum Cmd {
     },
     /// Remove a version
     #[command(display_order = 3)]
+    #[command(after_help = "Examples:\n  morloc-manager uninstall 0.69.0\n  morloc-manager uninstall --all\n  sudo morloc-manager uninstall 0.69.0 --system")]
     Uninstall {
         /// Version(s) to remove
         versions: Vec<String>,
-        #[arg(long, value_enum)]
-        scope: Option<ScopeArg>,
+        /// Uninstall from system scope instead of local (requires root)
+        #[arg(long)]
+        system: bool,
         /// Remove all installed versions
         #[arg(short, long)]
         all: bool,
     },
     /// Set the active version or workspace
     #[command(display_order = 4)]
+    #[command(after_help = "Examples:\n  morloc-manager select 0.69.0\n  morloc-manager select myworkspace\n  sudo morloc-manager select --system 0.69.0")]
     Select {
         /// Version or workspace name
         target: String,
+        /// Set the system-wide default instead of the user selection
+        #[arg(long)]
+        system: bool,
     },
     /// Show configuration and installed versions
     #[command(display_order = 5)]
+    #[command(after_help = "Examples:\n  morloc-manager info")]
     Info,
 
     // -- Development --
     /// Create a named workspace
     #[command(display_order = 10)]
+    #[command(after_help = "Examples:\n  morloc-manager new myproject\n  morloc-manager new myproject --from 0.69.0\n  morloc-manager new myproject --copy")]
     New {
         /// Workspace name
         name: String,
-        #[arg(long, value_enum)]
-        scope: Option<ScopeArg>,
+        /// Create in system scope instead of local (requires root)
+        #[arg(long)]
+        system: bool,
         /// Base version (default: currently active version)
         #[arg(long)]
         from: Option<String>,
@@ -145,6 +160,15 @@ enum Cmd {
     },
     /// Run a command in the active container
     #[command(display_order = 11)]
+    #[command(after_help = "\
+Examples:
+  morloc-manager run -- morloc --version
+  morloc-manager run -- morloc make -o svc svc.loc
+  morloc-manager run -- morloc install math
+  morloc-manager run --shell
+
+Use -- to separate morloc-manager flags from the container command.
+Without --, flags like --version are interpreted by morloc-manager itself.")]
     Run {
         /// Command to run inside the container
         command: Vec<String>,
@@ -154,31 +178,45 @@ enum Cmd {
     },
     /// Manage dependency environments
     #[command(display_order = 12)]
+    #[command(after_help = "Examples:\n  morloc-manager env              # list environments\n  morloc-manager env init myenv   # create new environment\n  morloc-manager env myenv        # build and activate\n  morloc-manager env reset        # reset to base")]
     Env {
         #[command(subcommand)]
         action: Option<EnvCmd>,
         /// Activate (and build if needed) an environment
         name: Option<String>,
     },
+    /// Delete a workspace
+    #[command(display_order = 13)]
+    #[command(after_help = "Examples:\n  morloc-manager delete myproject\n  sudo morloc-manager delete myproject --system")]
+    Delete {
+        /// Workspace name to delete
+        name: String,
+        /// Delete from system scope instead of local
+        #[arg(long)]
+        system: bool,
+    },
 
     // -- Deployment --
     /// Start a serve container
     #[command(display_order = 20)]
+    #[command(after_help = "Examples:\n  morloc-manager start myservice:v1\n  morloc-manager start myservice:v1 -p 9090:8080")]
     Start {
         /// Serve image tag
         image: String,
-        /// Port mapping (e.g., 8080:8080)
+        /// Port mapping HOST:CONTAINER (default: 8080:8080)
         #[arg(short, long, value_parser = parse_port)]
         port: Vec<(u16, u16)>,
     },
     /// Stop a running serve container
     #[command(display_order = 21)]
+    #[command(after_help = "Examples:\n  morloc-manager stop myservice:v1")]
     Stop {
         /// Container name
         name: String,
     },
     /// Export installed state as a frozen artifact
     #[command(display_order = 22)]
+    #[command(after_help = "Examples:\n  morloc-manager freeze\n  morloc-manager freeze -o ./my-freeze")]
     Freeze {
         /// Output directory
         #[arg(short, long)]
@@ -186,6 +224,7 @@ enum Cmd {
     },
     /// Build a serve image from frozen state
     #[command(display_order = 23)]
+    #[command(after_help = "Examples:\n  morloc-manager unfreeze --from ./morloc-freeze/state.tar.gz -t myservice:v1")]
     Unfreeze {
         /// Path to state.tar.gz from freeze
         #[arg(long)]
@@ -199,9 +238,11 @@ enum Cmd {
     },
     /// List running serve containers
     #[command(display_order = 24)]
+    #[command(after_help = "Examples:\n  morloc-manager status")]
     Status,
     /// Show logs from a serve container
     #[command(display_order = 25)]
+    #[command(after_help = "Examples:\n  morloc-manager logs myservice:v1\n  morloc-manager logs myservice:v1 -f")]
     Logs {
         /// Container name
         name: String,
@@ -219,21 +260,6 @@ enum EnvCmd {
     List,
     /// Reset to base environment
     Reset,
-}
-
-#[derive(Clone, ValueEnum)]
-enum ScopeArg {
-    Local,
-    System,
-}
-
-impl From<ScopeArg> for Scope {
-    fn from(s: ScopeArg) -> Self {
-        match s {
-            ScopeArg::Local => Scope::Local,
-            ScopeArg::System => Scope::System,
-        }
-    }
 }
 
 #[derive(Clone, ValueEnum)]
@@ -270,6 +296,14 @@ fn parse_port(s: &str) -> std::result::Result<(u16, u16), String> {
 // ======================================================================
 
 fn main() -> ExitCode {
+    // Restore default SIGPIPE handling so piped output (e.g. `info | head`)
+    // exits cleanly instead of causing a Rust panic
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{signal, SigHandler, Signal};
+        unsafe { let _ = signal(Signal::SIGPIPE, SigHandler::SigDfl); }
+    }
+
     let matches = Cli::command()
         .help_template(build_help_template())
         .get_matches();
@@ -298,18 +332,43 @@ fn main() -> ExitCode {
     }
 }
 
-fn resolve_scope(s: Option<ScopeArg>) -> Scope {
-    s.map(Scope::from).unwrap_or(Scope::Local)
+fn resolve_scope(system: bool) -> Scope {
+    if system { Scope::System } else { Scope::Local }
+}
+
+fn check_system_write_access() -> Result<()> {
+    let sys_dir = cfg::config_dir(Scope::System);
+    // Try to verify write access without actually creating anything
+    if sys_dir.exists() {
+        let test_path = sys_dir.join(".write-check");
+        match fs::write(&test_path, b"") {
+            Ok(_) => { let _ = fs::remove_file(&test_path); Ok(()) }
+            Err(_) => Err(ManagerError::ConfigPermissionDenied(format!(
+                "{}. --system requires root. Run with: sudo morloc-manager <command> --system",
+                sys_dir.display()
+            )))
+        }
+    } else {
+        match fs::create_dir_all(&sys_dir) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(ManagerError::ConfigPermissionDenied(format!(
+                "{}. --system requires root. Run with: sudo morloc-manager <command> --system",
+                sys_dir.display()
+            )))
+        }
+    }
 }
 
 fn resolve_active_version_or_workspace() -> Result<(Version, Scope)> {
     match version::resolve_active_version() {
         Ok(v) => Ok(v),
         Err(ManagerError::NoActiveVersion) => {
-            let (target, scope) = version::resolve_active_target()?;
+            let target = version::resolve_active_target()?;
             if let ActiveTarget::Workspace(name) = target {
-                let wc = cfg::read_workspace_config(scope, &name)?;
-                Ok((wc.base_version, wc.base_scope))
+                let ws_scope = cfg::find_workspace_scope(&name)?;
+                let wc = cfg::read_workspace_config(ws_scope, &name)?;
+                let ver_scope = cfg::find_installed_scope(wc.base_version)?;
+                Ok((wc.base_version, ver_scope))
             } else {
                 Err(ManagerError::NoActiveVersion)
             }
@@ -357,14 +416,27 @@ fn run_interactive_setup(scope: Scope) -> Result<()> {
     let engine = interactive_engine_choice()?;
     let cfg_path = cfg::config_path(scope);
     let base_cfg = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
-    let new_cfg = Config {
+    let old_engine = base_cfg.engine;
+    let active_env = base_cfg.active_env.clone();
+    let mut new_cfg = Config {
         engine,
-        active_scope: scope,
         ..base_cfg
     };
+    if engine != old_engine && active_env != "base" {
+        new_cfg.active_env = "base".to_string();
+    }
     cfg::write_config(&cfg_path, &new_cfg)?;
     eprintln!("  Engine: {}", display_engine(engine));
     eprintln!("  Config: {}", cfg_path.display());
+    if engine != old_engine && active_env != "base" {
+        eprintln!();
+        eprintln!(
+            "Warning: active env '{}' was built with {}.",
+            active_env, display_engine(old_engine)
+        );
+        eprintln!("Reset active environment to 'base'.");
+        eprintln!("Rebuild with: morloc-manager env {}", active_env);
+    }
     eprintln!();
     Ok(())
 }
@@ -372,15 +444,77 @@ fn run_interactive_setup(scope: Scope) -> Result<()> {
 fn run_non_interactive_setup(scope: Scope, engine: ContainerEngine) -> Result<()> {
     let cfg_path = cfg::config_path(scope);
     let base_cfg = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
-    let new_cfg = Config {
+    let old_engine = base_cfg.engine;
+    let active_env = base_cfg.active_env.clone();
+    let mut new_cfg = Config {
         engine,
-        active_scope: scope,
         ..base_cfg
     };
+    if engine != old_engine && active_env != "base" {
+        new_cfg.active_env = "base".to_string();
+    }
     cfg::write_config(&cfg_path, &new_cfg)?;
     eprintln!("  Engine: {}", display_engine(engine));
     eprintln!("  Config: {}", cfg_path.display());
+    if engine != old_engine && active_env != "base" {
+        eprintln!();
+        eprintln!(
+            "Warning: active env '{}' was built with {}.",
+            active_env, display_engine(old_engine)
+        );
+        eprintln!("Reset active environment to 'base'.");
+        eprintln!("Rebuild with: morloc-manager env {}", active_env);
+    }
     eprintln!();
+    Ok(())
+}
+
+fn show_setup_status() -> Result<()> {
+    // Show detected engines
+    let has_podman = which("podman");
+    let has_docker = which("docker");
+    let detected: Vec<&str> = [
+        if has_podman { Some("podman") } else { None },
+        if has_docker { Some("docker") } else { None },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if detected.is_empty() {
+        eprintln!("Detected engines: none");
+    } else {
+        eprintln!("Detected engines: {}", detected.join(", "));
+    }
+    eprintln!();
+
+    // Show local scope
+    let local_path = cfg::config_path(Scope::Local);
+    eprintln!("(local)");
+    match cfg::read_config::<Config>(&local_path) {
+        Ok(c) => {
+            eprintln!("    Set engine: {}", display_engine(c.engine));
+            eprintln!("    Config: {}", local_path.display());
+        }
+        Err(_) => {
+            eprintln!("    Set engine: unset");
+        }
+    }
+    eprintln!();
+
+    // Show system scope
+    let system_path = cfg::config_path(Scope::System);
+    eprintln!("(system)");
+    match cfg::read_config::<Config>(&system_path) {
+        Ok(c) => {
+            eprintln!("    Set engine: {}", display_engine(c.engine));
+            eprintln!("    Config: {}", system_path.display());
+        }
+        Err(_) => {
+            eprintln!("    Set engine: unset");
+        }
+    }
+    eprintln!();
+
     Ok(())
 }
 
@@ -438,6 +572,21 @@ fn display_engine(engine: ContainerEngine) -> &'static str {
     }
 }
 
+fn check_docker_socket(engine: ContainerEngine) {
+    use std::path::Path;
+    if engine != ContainerEngine::Docker {
+        return;
+    }
+    let socket = Path::new("/var/run/docker.sock");
+    if !socket.exists() {
+        eprintln!("Warning: Docker socket not found at /var/run/docker.sock");
+        eprintln!("  Docker may not be installed or the daemon may not be running.");
+    } else if nix::unistd::access(socket, nix::unistd::AccessFlags::R_OK).is_err() {
+        eprintln!("Warning: Cannot access Docker socket. You may need to:");
+        eprintln!("  sudo usermod -aG docker $USER  # then log out and back in");
+    }
+}
+
 // ======================================================================
 // Dispatch
 // ======================================================================
@@ -445,22 +594,51 @@ fn display_engine(engine: ContainerEngine) -> &'static str {
 fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
     match cmd {
         // ---- setup ----
-        Cmd::Setup { scope, engine } => {
-            let scope = resolve_scope(scope);
+        Cmd::Setup { system, engine } => {
+            let scope = resolve_scope(system);
             match engine {
-                Some(e) => run_non_interactive_setup(scope, e.into()),
-                None => run_interactive_setup(scope),
+                None if !system => {
+                    // If no engine configured, trigger interactive setup
+                    // instead of just showing status
+                    if cfg::read_active_config().is_none() {
+                        if io::stdin().is_terminal() {
+                            run_interactive_setup(Scope::Local)
+                        } else {
+                            show_setup_status()?;
+                            eprintln!("Specify an engine:");
+                            eprintln!("  morloc-manager setup --engine podman");
+                            eprintln!("  morloc-manager setup --engine docker");
+                            Ok(())
+                        }
+                    } else {
+                        show_setup_status()
+                    }
+                }
+                None => {
+                    run_interactive_setup(scope)?;
+                    if let Some(cfg) = cfg::read_active_config() {
+                        check_docker_socket(cfg.engine);
+                    }
+                    Ok(())
+                }
+                Some(e) => {
+                    let engine: ContainerEngine = e.into();
+                    run_non_interactive_setup(scope, engine)?;
+                    check_docker_socket(engine);
+                    Ok(())
+                }
             }
         }
 
         // ---- install ----
         Cmd::Install {
             version: ver_str,
-            scope,
+            system,
             no_init,
             force,
         } => {
-            let scope = resolve_scope(scope);
+            if system { check_system_write_access()?; }
+            let scope = resolve_scope(system);
             let engine = ensure_engine_for_scope(scope)?;
             let (ver, was_fresh) = match ver_str.as_deref() {
                 None | Some("latest") => version::install_latest(engine, scope)?,
@@ -472,8 +650,13 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             };
             // Auto-select if none active
             if version::resolve_active_version().is_err() {
-                let _ = version::select_version(scope, ver);
-                eprintln!("Auto-selected version {}", ver.show());
+                if system {
+                    let _ = version::select_version_system(ver);
+                    eprintln!("Auto-selected version {} as system default", ver.show());
+                } else {
+                    let _ = version::select_version(ver);
+                    eprintln!("Auto-selected version {}", ver.show());
+                }
             }
             if no_init {
                 Ok(())
@@ -485,29 +668,42 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- select ----
-        Cmd::Select { target } => {
+        Cmd::Select { target, system } => {
+            if system { check_system_write_access()?; }
             if let Ok(ver) = target.parse::<Version>() {
-                let scope = cfg::find_installed_scope(ver).unwrap_or(Scope::Local);
-                version::select_version(scope, ver)?;
-                eprintln!("Selected version {}", ver.show());
+                if system {
+                    version::select_version_system(ver)?;
+                    eprintln!("Set system default to version {}", ver.show());
+                } else {
+                    version::select_version(ver)?;
+                    eprintln!("Selected version {}", ver.show());
+                }
                 Ok(())
             } else {
                 // Treat as workspace name
-                let scope = cfg::find_workspace_scope(&target).unwrap_or(Scope::Local);
-                cfg::read_workspace_config(scope, &target).map_err(|_| {
-                    ManagerError::InvalidVersion(format!(
+                let ws_scope = cfg::find_workspace_scope(&target).map_err(|_| {
+                    ManagerError::WorkspaceError(format!(
                         "Not found as version or workspace: {target}"
                     ))
                 })?;
-                let cfg_path = cfg::config_path(scope);
-                let base = cfg::read_active_config().unwrap_or_default();
+                cfg::read_workspace_config(ws_scope, &target).map_err(|_| {
+                    ManagerError::WorkspaceError(format!(
+                        "Not found as version or workspace: {target}"
+                    ))
+                })?;
+                let write_scope = if system { Scope::System } else { Scope::Local };
+                let cfg_path = cfg::config_path(write_scope);
+                let base = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
                 let new_cfg = Config {
                     active_target: Some(ActiveTarget::Workspace(target.clone())),
-                    active_scope: scope,
                     ..base
                 };
                 cfg::write_config(&cfg_path, &new_cfg)?;
-                eprintln!("Selected workspace {target}");
+                if system {
+                    eprintln!("Set system default to workspace {target}");
+                } else {
+                    eprintln!("Selected workspace {target}");
+                }
                 Ok(())
             }
         }
@@ -515,15 +711,16 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         // ---- uninstall ----
         Cmd::Uninstall {
             versions,
-            scope,
+            system,
             all,
         } => {
+            if system { check_system_write_access()?; }
             if !all && versions.is_empty() {
                 return Err(ManagerError::UninstallError(
                     "No versions specified. Use VERSION... or --all.".to_string(),
                 ));
             }
-            let scope = resolve_scope(scope);
+            let scope = resolve_scope(system);
             let vers: Vec<Version> = if all {
                 version::list_versions(scope)
             } else {
@@ -537,6 +734,22 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 eprintln!("Uninstalling {}...", ver.show());
                 version::uninstall_version(scope, *ver)?;
             }
+            // Clear active_target if it references an uninstalled version
+            let cfg_path = cfg::config_path(scope);
+            if let Ok(current_cfg) = cfg::read_config::<Config>(&cfg_path) {
+                let should_clear = vers.iter().any(|v| {
+                    current_cfg.active_target == Some(ActiveTarget::Version(*v))
+                });
+                if should_clear {
+                    let new_cfg = Config {
+                        active_target: None,
+                        ..current_cfg
+                    };
+                    let _ = cfg::write_config(&cfg_path, &new_cfg);
+                    let scope_str = if system { "system" } else { "local" };
+                    eprintln!("Cleared {scope_str} active version");
+                }
+            }
             eprintln!("Uninstalled {} version(s)", vers.len());
             Ok(())
         }
@@ -547,16 +760,20 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             if !shell && command.is_empty() {
                 return Err(ManagerError::NoCommand);
             }
-            run_in_container(engine, verbose, shell, &command)
+            run_in_container(engine, verbose, shell, &command).map_err(|e| match e {
+                ManagerError::EnvironmentNotFound(msg) => ManagerError::EnvironmentNotFound(
+                    format!("{msg}. Run 'morloc-manager select <version>' or 'morloc-manager info' to see available targets")
+                ),
+                other => other,
+            })
         }
 
         // ---- env ----
         Cmd::Env { action, name } => {
+            // Env Dockerfiles and configs are always user-local, even when
+            // the active version comes from a system install
+            let scope = Scope::Local;
             let m_cfg = cfg::read_active_config();
-            let scope = m_cfg
-                .as_ref()
-                .map(|c| c.active_scope)
-                .unwrap_or(Scope::Local);
 
             match (action, name) {
                 (Some(EnvCmd::Init { name }), _) => {
@@ -568,8 +785,15 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 (Some(EnvCmd::List), _) => {
                     let (ver, _) = resolve_active_version_or_workspace()?;
                     let envs = environment::list_environments(scope, ver);
+                    let active_env = m_cfg.as_ref()
+                        .map(|c| c.active_env.as_str())
+                        .unwrap_or("base");
                     for e in envs {
-                        println!("{e}");
+                        if e == active_env {
+                            println!("{e} (active)");
+                        } else {
+                            println!("{e}");
+                        }
                     }
                     Ok(())
                 }
@@ -586,8 +810,21 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     Ok(())
                 }
                 (None, Some(name)) => {
-                    // Common mistake detection
+                    // Common mistake detection and special cases
                     match name.as_str() {
+                        "base" => {
+                            // "env base" should work like "env reset"
+                            if let Some(cfg) = m_cfg {
+                                let cfg_path = cfg::config_path(scope);
+                                let new_cfg = Config {
+                                    active_env: "base".to_string(),
+                                    ..cfg
+                                };
+                                cfg::write_config(&cfg_path, &new_cfg)?;
+                            }
+                            eprintln!("Reset to base environment");
+                            return Ok(());
+                        }
                         "list" | "ls" => {
                             return Err(ManagerError::EnvError(
                                 "Unknown argument. Did you mean: morloc-manager env list".to_string(),
@@ -618,8 +855,15 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     // No subcommand and no name - show list
                     let (ver, _) = resolve_active_version_or_workspace()?;
                     let envs = environment::list_environments(scope, ver);
+                    let active_env = m_cfg.as_ref()
+                        .map(|c| c.active_env.as_str())
+                        .unwrap_or("base");
                     for e in envs {
-                        println!("{e}");
+                        if e == active_env {
+                            println!("{e} (active)");
+                        } else {
+                            println!("{e}");
+                        }
                     }
                     Ok(())
                 }
@@ -629,37 +873,44 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         // ---- new ----
         Cmd::New {
             name,
-            scope,
+            system,
             from,
             copy,
         } => {
-            let scope = resolve_scope(scope);
+            if system { check_system_write_access()?; }
+            if name.parse::<Version>().is_ok() {
+                return Err(ManagerError::WorkspaceError(format!(
+                    "Workspace name cannot use version format (MAJOR.MINOR.PATCH): {name}"
+                )));
+            }
+            let scope = resolve_scope(system);
             let engine = ensure_engine_for_scope(scope)?;
-            let (base_ver, base_scope) = match from {
+            let (base_ver, base_ver_scope) = match from {
                 Some(ver_str) => {
-                    let ver: Version = ver_str
-                        .parse()
-                        .map_err(|_| ManagerError::InvalidVersion(ver_str))?;
-                    let found_scope =
-                        cfg::find_installed_scope(ver).ok_or(ManagerError::VersionNotInstalled(ver))?;
+                    let ver: Version = ver_str.parse().map_err(|_| {
+                        ManagerError::WorkspaceError(format!(
+                            "Not a valid version: {ver_str}. --from only accepts version numbers (e.g., 0.69.0)."
+                        ))
+                    })?;
+                    let found_scope = cfg::find_installed_scope(ver)?;
                     (ver, found_scope)
                 }
-                None => version::resolve_active_version()?,
+                None => resolve_active_version_or_workspace()?,
             };
             let ws_data_dir = cfg::workspace_data_dir(scope, &name);
             if ws_data_dir.is_dir() {
-                return Err(ManagerError::InstallError(format!(
+                return Err(ManagerError::WorkspaceError(format!(
                     "Workspace already exists: {name}"
                 )));
             }
-            for sub in &["bin", "lib", "fdb", "include", "opt", "tmp"] {
+            for sub in &["bin", "lib", "fdb", "include", "opt", "tmp", "src", "exe"] {
                 fs::create_dir_all(ws_data_dir.join(sub)).map_err(|e| {
-                    ManagerError::InstallError(format!("Failed to create directory: {e}"))
+                    ManagerError::WorkspaceError(format!("Failed to create directory: {e}"))
                 })?;
             }
             if copy {
-                let src_dir = cfg::version_data_dir(base_scope, base_ver);
-                for sub in &["lib", "fdb", "bin"] {
+                let src_dir = cfg::version_data_dir(base_ver_scope, base_ver);
+                for sub in &["lib", "fdb", "bin", "src"] {
                     let src = src_dir.join(sub);
                     let dst = ws_data_dir.join(sub);
                     if src.is_dir() {
@@ -672,69 +923,130 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             }
             let wc = WorkspaceConfig {
                 base_version: base_ver,
-                base_scope,
                 engine,
             };
             cfg::write_workspace_config(scope, &name, &wc)?;
-            let cfg_path = cfg::config_path(scope);
-            let base = cfg::read_active_config().unwrap_or_default();
+            // Write selection to the matching scope
+            let select_scope = resolve_scope(system);
+            let cfg_path = cfg::config_path(select_scope);
+            let base = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
             let new_cfg = Config {
                 active_target: Some(ActiveTarget::Workspace(name.clone())),
-                active_scope: scope,
                 ..base
             };
             cfg::write_config(&cfg_path, &new_cfg)?;
             eprintln!("Created workspace: {name}");
             eprintln!("Based on version {}", base_ver.show());
-            run_morloc_init(engine, verbose)?;
+            // Skip morloc init if the workspace already has init artifacts
+            // (e.g. from --copy of an already-initialized version)
+            let has_init = ws_data_dir.join("lib").join("libmorloc.so").exists();
+            if has_init {
+                eprintln!("Init artifacts already present, skipping morloc init");
+            } else {
+                run_morloc_init(engine, verbose)?;
+            }
             eprintln!("Activated workspace: {name}");
-            eprintln!("Note: 'freeze' is not yet supported from workspaces.");
+            Ok(())
+        }
+
+        // ---- delete ----
+        Cmd::Delete { name, system } => {
+            if system { check_system_write_access()?; }
+            let scope = resolve_scope(system);
+            // Verify workspace exists
+            let ws_scope = cfg::find_workspace_scope(&name).map_err(|_| {
+                ManagerError::WorkspaceError(format!("Workspace not found: {name}"))
+            })?;
+            if ws_scope != scope {
+                return Err(ManagerError::WorkspaceError(format!(
+                    "Workspace '{name}' is in {} scope, not {} scope",
+                    if ws_scope == Scope::System { "system" } else { "local" },
+                    if system { "system" } else { "local" },
+                )));
+            }
+            // Refuse to delete the active workspace (check the matching scope's config)
+            let check_cfg_path = cfg::config_path(scope);
+            if let Ok(check_cfg) = cfg::read_config::<Config>(&check_cfg_path) {
+                if check_cfg.active_target == Some(ActiveTarget::Workspace(name.clone())) {
+                    return Err(ManagerError::WorkspaceError(
+                        format!("Cannot delete active workspace '{name}'. Run: morloc-manager select <version>")
+                    ));
+                }
+            }
+            let ws_data = cfg::workspace_data_dir(scope, &name);
+            let ws_cfg = cfg::workspace_config_dir(scope, &name);
+            if ws_data.is_dir() {
+                fs::remove_dir_all(&ws_data).map_err(|e| {
+                    ManagerError::WorkspaceError(format!("Failed to remove data dir: {e}"))
+                })?;
+            }
+            if ws_cfg.is_dir() {
+                fs::remove_dir_all(&ws_cfg).map_err(|e| {
+                    ManagerError::WorkspaceError(format!("Failed to remove config dir: {e}"))
+                })?;
+            }
+            eprintln!("Deleted workspace: {name}");
             Ok(())
         }
 
         // ---- info ----
         Cmd::Info => {
-            let m_cfg = cfg::read_active_config();
+            let local_cfg = cfg::read_config::<Config>(&cfg::config_path(Scope::Local)).ok();
+            let system_cfg = cfg::read_config::<Config>(&cfg::config_path(Scope::System)).ok();
             let se_mode = detect_selinux();
-            let active_scope = m_cfg.as_ref().map(|c| c.active_scope).unwrap_or(Scope::Local);
+
+            // Resolve active target (local overrides system)
+            let active_target = version::resolve_active_target().ok();
+
+            // Read active env: local active_env takes precedence over system
+            let active_env = local_cfg
+                .as_ref()
+                .map(|c| c.active_env.as_str())
+                .or_else(|| system_cfg.as_ref().map(|c| c.active_env.as_str()))
+                .unwrap_or("base");
+
+            let active_str = match &active_target {
+                None => "none".to_string(),
+                Some(ActiveTarget::Version(v)) => {
+                    let installed = cfg::find_installed_scope(*v).is_ok();
+                    if installed { v.show() } else { format!("{} (not installed)", v.show()) }
+                }
+                Some(ActiveTarget::Workspace(w)) => {
+                    let exists = cfg::find_workspace_scope(w).is_ok();
+                    if exists { format!("{w} (workspace)") } else { format!("{w} (workspace, not found)") }
+                }
+            };
+
+            // Local selection vs system default
+            let local_target = local_cfg.as_ref().and_then(|c| c.active_target.clone());
+            let system_target = system_cfg.as_ref().and_then(|c| c.active_target.clone());
+
             let se_str = match se_mode {
                 SELinuxMode::Enforcing => "enforcing",
                 SELinuxMode::Permissive => "permissive",
                 SELinuxMode::Disabled => "not detected",
             };
-            let scope_str = match active_scope {
-                Scope::Local => "local",
-                Scope::System => "system",
-            };
-            let engine_str = m_cfg
-                .as_ref()
-                .map(|c| display_engine(c.engine))
-                .unwrap_or("not configured");
-            let cfg_root = cfg::config_dir(active_scope);
-            let dat_root = cfg::data_dir(active_scope);
-            let active_target = m_cfg.as_ref().and_then(|c| c.active_target.clone());
 
-            match &m_cfg {
-                None => {
-                    println!("Active:         none");
-                    println!("Active env:     base");
-                    println!("Engine:         {engine_str}");
-                }
-                Some(cfg) => {
-                    let active_str = match &cfg.active_target {
-                        None => "none".to_string(),
-                        Some(ActiveTarget::Version(v)) => v.show(),
-                        Some(ActiveTarget::Workspace(w)) => format!("{w} (workspace)"),
-                    };
-                    println!("Active:         {active_str}");
-                    println!("Active env:     {}", cfg.active_env);
-                    println!("Engine:         {}", display_engine(cfg.engine));
-                }
-            }
-            println!("Scope:          {scope_str}");
+            println!("Active:         {active_str}");
+            println!("Active env:     {active_env}");
+            println!("Local engine:   {}",
+                local_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
+            println!("System engine:  {}",
+                system_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
             println!("SELinux:        {se_str}");
-            println!("Config root:    {}", cfg_root.display());
-            println!("Data root:      {}", dat_root.display());
+
+            // Show all morloc directories with existence status
+            let dirs = [
+                ("Config (local)", cfg::config_dir(Scope::Local)),
+                ("Data (local)", cfg::data_dir(Scope::Local)),
+                ("Config (system)", cfg::config_dir(Scope::System)),
+                ("Data (system)", cfg::data_dir(Scope::System)),
+            ];
+            println!("\nDirectories:");
+            for (label, path) in &dirs {
+                let status = if path.is_dir() { "exists" } else { "not found" };
+                println!("  {:<20} {} ({})", label, path.display(), status);
+            }
 
             // List versions
             let local_versions = version::list_versions(Scope::Local);
@@ -743,12 +1055,14 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 println!("  (none)");
             } else {
                 for v in &local_versions {
-                    let marker = if active_target == Some(ActiveTarget::Version(*v))
-                        && active_scope == Scope::Local
-                    {
-                        " (active)"
+                    let mut markers = Vec::new();
+                    if local_target == Some(ActiveTarget::Version(*v)) {
+                        markers.push("active");
+                    }
+                    let marker = if markers.is_empty() {
+                        String::new()
                     } else {
-                        ""
+                        format!(" ({})", markers.join(", "))
                     };
                     println!("  {}{marker}", v.show());
                 }
@@ -760,12 +1074,17 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 println!("  (none)");
             } else {
                 for v in &system_versions {
-                    let marker = if active_target == Some(ActiveTarget::Version(*v))
-                        && active_scope == Scope::System
-                    {
-                        " (active)"
+                    let mut markers = Vec::new();
+                    if local_target == Some(ActiveTarget::Version(*v)) {
+                        markers.push("active");
+                    }
+                    if system_target == Some(ActiveTarget::Version(*v)) {
+                        markers.push("system default");
+                    }
+                    let marker = if markers.is_empty() {
+                        String::new()
                     } else {
-                        ""
+                        format!(" ({})", markers.join(", "))
                     };
                     println!("  {}{marker}", v.show());
                 }
@@ -782,12 +1101,17 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                         Ok(wc) => format!(" (based on {})", wc.base_version.show()),
                         Err(_) => String::new(),
                     };
-                    let marker = if active_target == Some(ActiveTarget::Workspace(w.clone()))
-                        && active_scope == Scope::Local
-                    {
-                        " (active)"
+                    let mut markers = Vec::new();
+                    if local_target == Some(ActiveTarget::Workspace(w.clone())) {
+                        markers.push("active");
+                    }
+                    if system_target == Some(ActiveTarget::Workspace(w.clone())) {
+                        markers.push("system default");
+                    }
+                    let marker = if markers.is_empty() {
+                        String::new()
                     } else {
-                        ""
+                        format!(" ({})", markers.join(", "))
                     };
                     println!("  {w}{base_str}{marker}");
                 }
@@ -801,14 +1125,18 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                         Ok(wc) => format!(" (based on {})", wc.base_version.show()),
                         Err(_) => String::new(),
                     };
-                    let marker =
-                        if active_target == Some(ActiveTarget::Workspace(w.clone()))
-                            && active_scope == Scope::System
-                        {
-                            " (active)"
-                        } else {
-                            ""
-                        };
+                    let mut markers = Vec::new();
+                    if local_target == Some(ActiveTarget::Workspace(w.clone())) {
+                        markers.push("active");
+                    }
+                    if system_target == Some(ActiveTarget::Workspace(w.clone())) {
+                        markers.push("system default");
+                    }
+                    let marker = if markers.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", markers.join(", "))
+                    };
                     println!("  {w}{base_str}{marker}");
                 }
             }
@@ -817,16 +1145,23 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
         // ---- freeze ----
         Cmd::Freeze { output } => {
+            let engine = ensure_engine()?;
             let output_dir = output.as_deref().unwrap_or("./morloc-freeze");
-            let (target, active_scope) = version::resolve_active_target()?;
+            let target = version::resolve_active_target()?;
             match target {
-                ActiveTarget::Version(ver) => freeze::freeze(active_scope, ver, output_dir),
+                ActiveTarget::Version(ver) => {
+                    let scope = cfg::find_installed_scope(ver)?;
+                    freeze::freeze(scope, ver, engine, output_dir)
+                }
                 ActiveTarget::Workspace(name) => {
-                    let wc = cfg::read_workspace_config(active_scope, &name)?;
-                    let ws_dir = cfg::workspace_data_dir(active_scope, &name);
+                    let ws_scope = cfg::find_workspace_scope(&name)?;
+                    let wc = cfg::read_workspace_config(ws_scope, &name)?;
+                    let ws_dir = cfg::workspace_data_dir(ws_scope, &name);
+                    let ver_scope = cfg::find_installed_scope(wc.base_version)?;
                     freeze::freeze_from_dir(
-                        active_scope,
+                        ver_scope,
                         wc.base_version,
+                        engine,
                         &ws_dir.to_string_lossy(),
                         output_dir,
                     )
@@ -837,12 +1172,16 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         // ---- unfreeze ----
         Cmd::Unfreeze { from, tag, base } => {
             let engine = ensure_engine()?;
-            let (target, _) = version::resolve_active_target()?;
+            let target = version::resolve_active_target()?;
             let ver = match target {
                 ActiveTarget::Version(v) => v,
-                ActiveTarget::Workspace(_) => Version::new(0, 0, 0),
+                ActiveTarget::Workspace(name) => {
+                    let ws_scope = cfg::find_workspace_scope(&name)?;
+                    let wc = cfg::read_workspace_config(ws_scope, &name)?;
+                    wc.base_version
+                }
             };
-            serve::build_serve_image(engine, &from, &tag, ver, base.as_deref())
+            serve::build_serve_image(engine, verbose, &from, &tag, ver, base.as_deref())
         }
 
         // ---- start ----
@@ -854,14 +1193,20 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             } else {
                 port
             };
-            serve::run_serve_container(engine, &image, &container_name, &port_mappings)
+            serve::run_serve_container(engine, verbose, &image, &container_name, &port_mappings)
         }
 
         // ---- stop ----
         Cmd::Stop { name } => {
             let engine = ensure_engine()?;
-            serve::stop_serve_container(engine, &name)?;
-            eprintln!("Stopped container {name}");
+            // Accept image tag (e.g. myservice:v1) or container name
+            let container_name = if name.starts_with("morloc-serve-") {
+                name.clone()
+            } else {
+                format!("morloc-serve-{}", name.replace(':', "-"))
+            };
+            serve::stop_serve_container(engine, &container_name)?;
+            eprintln!("Stopped container {container_name}");
             Ok(())
         }
 
@@ -874,7 +1219,12 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         // ---- logs ----
         Cmd::Logs { name, follow } => {
             let engine = ensure_engine()?;
-            serve::stream_serve_logs(engine, &name, follow)
+            let container_name = if name.starts_with("morloc-serve-") {
+                name.clone()
+            } else {
+                format!("morloc-serve-{}", name.replace(':', "-"))
+            };
+            serve::stream_serve_logs(engine, &container_name, follow)
         }
     }
 }
@@ -889,23 +1239,26 @@ fn run_in_container(
     shell: bool,
     args: &[String],
 ) -> Result<()> {
-    let (target, active_scope) = version::resolve_active_target()?;
+    let target = version::resolve_active_target()?;
 
     // Resolve version config and data dir
     let (vc, v_data_dir, ver_scope, ver) = match target {
         ActiveTarget::Version(ver) => {
-            let vc = cfg::read_version_config(active_scope, ver)?;
-            let d = cfg::version_data_dir(active_scope, ver);
-            (vc, d.to_string_lossy().to_string(), active_scope, ver)
+            let scope = cfg::find_installed_scope(ver)?;
+            let vc = cfg::read_version_config(scope, ver)?;
+            let d = cfg::version_data_dir(scope, ver);
+            (vc, d.to_string_lossy().to_string(), scope, ver)
         }
         ActiveTarget::Workspace(name) => {
-            let wc = cfg::read_workspace_config(active_scope, &name)?;
-            let vc = cfg::read_version_config(wc.base_scope, wc.base_version)?;
-            let d = cfg::workspace_data_dir(active_scope, &name);
+            let ws_scope = cfg::find_workspace_scope(&name)?;
+            let wc = cfg::read_workspace_config(ws_scope, &name)?;
+            let base_scope = cfg::find_installed_scope(wc.base_version)?;
+            let vc = cfg::read_version_config(base_scope, wc.base_version)?;
+            let d = cfg::workspace_data_dir(ws_scope, &name);
             (
                 vc,
                 d.to_string_lossy().to_string(),
-                wc.base_scope,
+                base_scope,
                 wc.base_version,
             )
         }
@@ -995,7 +1348,17 @@ fn resolve_image(
         Some(cfg) if cfg.active_env != "base" => {
             match cfg::read_environment_config(scope, ver, &cfg.active_env) {
                 Ok(ec) => ec.image,
-                Err(_) => base_image.clone(),
+                Err(_) => {
+                    eprintln!(
+                        "Warning: Active environment '{}' is not built for version {}. Using base image.",
+                        cfg.active_env, ver.show()
+                    );
+                    eprintln!(
+                        "  Run 'morloc-manager env {}' to rebuild for {}.",
+                        cfg.active_env, ver.show()
+                    );
+                    base_image.clone()
+                }
             }
         }
         _ => base_image.clone(),
@@ -1207,11 +1570,6 @@ mod tests {
     }
 
     #[test]
-    fn default_config_uses_local_scope() {
-        assert_eq!(Config::default().active_scope, Scope::Local);
-    }
-
-    #[test]
     fn default_config_uses_base_env() {
         assert_eq!(Config::default().active_env, "base");
     }
@@ -1224,7 +1582,6 @@ mod tests {
         let path = dir.path().join("config.json");
         let cfg = Config {
             active_target: Some(ActiveTarget::Version(Version::new(0, 67, 0))),
-            active_scope: Scope::Local,
             active_env: "ml".to_string(),
             engine: ContainerEngine::Docker,
         };
@@ -1258,6 +1615,7 @@ mod tests {
         let path = dir.path().join("vc.json");
         let vc = VersionConfig {
             image: "ghcr.io/morloc-project/morloc/morloc-full:0.67.0".to_string(),
+            original_image: Some("ghcr.io/morloc-project/morloc/morloc-full:edge".to_string()),
             host_dir: "/home/user/.local/share/morloc/versions/0.67.0".to_string(),
             shm_size: "1g".to_string(),
             engine: ContainerEngine::Podman,
