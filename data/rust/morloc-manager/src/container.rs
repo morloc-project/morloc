@@ -127,15 +127,42 @@ pub fn image_exists_locally(engine: ContainerEngine, image: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn remote_image_exists(engine: ContainerEngine, image: &str) -> bool {
+/// Result of checking whether a remote image exists.
+pub enum RemoteImageStatus {
+    /// The image exists on the registry.
+    Exists,
+    /// The registry was reached but the image/tag was not found.
+    NotFound,
+    /// The check failed for an unknown reason (network, auth, etc).
+    /// Contains the stderr output from the container engine.
+    Unknown(String),
+}
+
+pub fn check_remote_image(engine: ContainerEngine, image: &str) -> RemoteImageStatus {
     let exe = engine_executable(engine);
-    Command::new(exe)
+    let output = Command::new(exe)
         .args(["manifest", "inspect", image])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => RemoteImageStatus::Exists,
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            let lower = stderr.to_lowercase();
+            // "manifest unknown" / "not found" / "name unknown" indicate
+            // the registry was reachable but the image doesn't exist.
+            if lower.contains("manifest unknown")
+                || lower.contains("not found")
+                || lower.contains("name unknown")
+            {
+                RemoteImageStatus::NotFound
+            } else {
+                RemoteImageStatus::Unknown(stderr)
+            }
+        }
+        Err(e) => RemoteImageStatus::Unknown(format!("Failed to execute {exe}: {e}")),
+    }
 }
 
 pub fn container_stop(engine: ContainerEngine, name_or_id: &str) -> (ExitStatus, String) {
