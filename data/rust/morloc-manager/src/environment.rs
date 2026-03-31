@@ -9,6 +9,16 @@ use crate::error::{ManagerError, Result};
 use crate::types::*;
 
 pub fn init_environment(scope: Scope, env_name: &str) -> Result<String> {
+    // Reject reserved names
+    match env_name {
+        "base" | "reset" => {
+            return Err(ManagerError::EnvError(format!(
+                "'{env_name}' is a reserved name and cannot be used as an environment name"
+            )));
+        }
+        _ => {}
+    }
+
     // Validate name against Docker tag rules
     if env_name.is_empty()
         || !env_name

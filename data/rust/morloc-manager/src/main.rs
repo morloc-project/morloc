@@ -88,6 +88,7 @@ enum Cmd {
     // -- Setup --
     /// Configure engine for a scope
     #[command(display_order = 1)]
+    #[command(after_help = "Examples:\n  morloc-manager setup\n  morloc-manager setup --engine docker\n  sudo morloc-manager setup --system --engine podman")]
     Setup {
         /// Apply to system scope instead of local (requires root)
         #[arg(long)]
@@ -98,6 +99,7 @@ enum Cmd {
     },
     /// Install a morloc version
     #[command(display_order = 2)]
+    #[command(after_help = "Examples:\n  morloc-manager install\n  morloc-manager install 0.69.0\n  morloc-manager install --force\n  sudo morloc-manager install --system")]
     Install {
         /// Version to install (default: latest)
         version: Option<String>,
@@ -113,6 +115,7 @@ enum Cmd {
     },
     /// Remove a version
     #[command(display_order = 3)]
+    #[command(after_help = "Examples:\n  morloc-manager uninstall 0.69.0\n  morloc-manager uninstall --all\n  sudo morloc-manager uninstall 0.69.0 --system")]
     Uninstall {
         /// Version(s) to remove
         versions: Vec<String>,
@@ -125,6 +128,7 @@ enum Cmd {
     },
     /// Set the active version or workspace
     #[command(display_order = 4)]
+    #[command(after_help = "Examples:\n  morloc-manager select 0.69.0\n  morloc-manager select myworkspace\n  sudo morloc-manager select --system 0.69.0")]
     Select {
         /// Version or workspace name
         target: String,
@@ -134,11 +138,13 @@ enum Cmd {
     },
     /// Show configuration and installed versions
     #[command(display_order = 5)]
+    #[command(after_help = "Examples:\n  morloc-manager info")]
     Info,
 
     // -- Development --
     /// Create a named workspace
     #[command(display_order = 10)]
+    #[command(after_help = "Examples:\n  morloc-manager new myproject\n  morloc-manager new myproject --from 0.69.0\n  morloc-manager new myproject --copy")]
     New {
         /// Workspace name
         name: String,
@@ -154,6 +160,15 @@ enum Cmd {
     },
     /// Run a command in the active container
     #[command(display_order = 11)]
+    #[command(after_help = "\
+Examples:
+  morloc-manager run -- morloc --version
+  morloc-manager run -- morloc make -o svc svc.loc
+  morloc-manager run -- morloc install math
+  morloc-manager run --shell
+
+Use -- to separate morloc-manager flags from the container command.
+Without --, flags like --version are interpreted by morloc-manager itself.")]
     Run {
         /// Command to run inside the container
         command: Vec<String>,
@@ -163,6 +178,7 @@ enum Cmd {
     },
     /// Manage dependency environments
     #[command(display_order = 12)]
+    #[command(after_help = "Examples:\n  morloc-manager env              # list environments\n  morloc-manager env init myenv   # create new environment\n  morloc-manager env myenv        # build and activate\n  morloc-manager env reset        # reset to base")]
     Env {
         #[command(subcommand)]
         action: Option<EnvCmd>,
@@ -171,6 +187,7 @@ enum Cmd {
     },
     /// Delete a workspace
     #[command(display_order = 13)]
+    #[command(after_help = "Examples:\n  morloc-manager delete myproject\n  sudo morloc-manager delete myproject --system")]
     Delete {
         /// Workspace name to delete
         name: String,
@@ -182,21 +199,24 @@ enum Cmd {
     // -- Deployment --
     /// Start a serve container
     #[command(display_order = 20)]
+    #[command(after_help = "Examples:\n  morloc-manager start myservice:v1\n  morloc-manager start myservice:v1 -p 9090:8080")]
     Start {
         /// Serve image tag
         image: String,
-        /// Port mapping (e.g., 8080:8080)
+        /// Port mapping HOST:CONTAINER (default: 8080:8080)
         #[arg(short, long, value_parser = parse_port)]
         port: Vec<(u16, u16)>,
     },
     /// Stop a running serve container
     #[command(display_order = 21)]
+    #[command(after_help = "Examples:\n  morloc-manager stop myservice:v1")]
     Stop {
         /// Container name
         name: String,
     },
     /// Export installed state as a frozen artifact
     #[command(display_order = 22)]
+    #[command(after_help = "Examples:\n  morloc-manager freeze\n  morloc-manager freeze -o ./my-freeze")]
     Freeze {
         /// Output directory
         #[arg(short, long)]
@@ -204,6 +224,7 @@ enum Cmd {
     },
     /// Build a serve image from frozen state
     #[command(display_order = 23)]
+    #[command(after_help = "Examples:\n  morloc-manager unfreeze --from ./morloc-freeze/state.tar.gz -t myservice:v1")]
     Unfreeze {
         /// Path to state.tar.gz from freeze
         #[arg(long)]
@@ -217,9 +238,11 @@ enum Cmd {
     },
     /// List running serve containers
     #[command(display_order = 24)]
+    #[command(after_help = "Examples:\n  morloc-manager status")]
     Status,
     /// Show logs from a serve container
     #[command(display_order = 25)]
+    #[command(after_help = "Examples:\n  morloc-manager logs myservice:v1\n  morloc-manager logs myservice:v1 -f")]
     Logs {
         /// Container name
         name: String,
@@ -395,19 +418,24 @@ fn run_interactive_setup(scope: Scope) -> Result<()> {
     let base_cfg = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
     let old_engine = base_cfg.engine;
     let active_env = base_cfg.active_env.clone();
-    let new_cfg = Config {
+    let mut new_cfg = Config {
         engine,
         ..base_cfg
     };
+    if engine != old_engine && active_env != "base" {
+        new_cfg.active_env = "base".to_string();
+    }
     cfg::write_config(&cfg_path, &new_cfg)?;
     eprintln!("  Engine: {}", display_engine(engine));
     eprintln!("  Config: {}", cfg_path.display());
     if engine != old_engine && active_env != "base" {
         eprintln!();
         eprintln!(
-            "Warning: active env '{}' was built with {}. Rebuild with: morloc-manager env {}",
-            active_env, display_engine(old_engine), active_env
+            "Warning: active env '{}' was built with {}.",
+            active_env, display_engine(old_engine)
         );
+        eprintln!("Reset active environment to 'base'.");
+        eprintln!("Rebuild with: morloc-manager env {}", active_env);
     }
     eprintln!();
     Ok(())
@@ -418,19 +446,24 @@ fn run_non_interactive_setup(scope: Scope, engine: ContainerEngine) -> Result<()
     let base_cfg = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
     let old_engine = base_cfg.engine;
     let active_env = base_cfg.active_env.clone();
-    let new_cfg = Config {
+    let mut new_cfg = Config {
         engine,
         ..base_cfg
     };
+    if engine != old_engine && active_env != "base" {
+        new_cfg.active_env = "base".to_string();
+    }
     cfg::write_config(&cfg_path, &new_cfg)?;
     eprintln!("  Engine: {}", display_engine(engine));
     eprintln!("  Config: {}", cfg_path.display());
     if engine != old_engine && active_env != "base" {
         eprintln!();
         eprintln!(
-            "Warning: active env '{}' was built with {}. Rebuild with: morloc-manager env {}",
-            active_env, display_engine(old_engine), active_env
+            "Warning: active env '{}' was built with {}.",
+            active_env, display_engine(old_engine)
         );
+        eprintln!("Reset active environment to 'base'.");
+        eprintln!("Rebuild with: morloc-manager env {}", active_env);
     }
     eprintln!();
     Ok(())
@@ -539,6 +572,21 @@ fn display_engine(engine: ContainerEngine) -> &'static str {
     }
 }
 
+fn check_docker_socket(engine: ContainerEngine) {
+    use std::path::Path;
+    if engine != ContainerEngine::Docker {
+        return;
+    }
+    let socket = Path::new("/var/run/docker.sock");
+    if !socket.exists() {
+        eprintln!("Warning: Docker socket not found at /var/run/docker.sock");
+        eprintln!("  Docker may not be installed or the daemon may not be running.");
+    } else if nix::unistd::access(socket, nix::unistd::AccessFlags::R_OK).is_err() {
+        eprintln!("Warning: Cannot access Docker socket. You may need to:");
+        eprintln!("  sudo usermod -aG docker $USER  # then log out and back in");
+    }
+}
+
 // ======================================================================
 // Dispatch
 // ======================================================================
@@ -557,15 +605,28 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                             run_interactive_setup(Scope::Local)
                         } else {
                             show_setup_status()?;
-                            eprintln!("No engine configured. Run: morloc-manager setup --engine docker");
-                            Err(ManagerError::SetupNotComplete(Scope::Local))
+                            eprintln!("Specify an engine:");
+                            eprintln!("  morloc-manager setup --engine podman");
+                            eprintln!("  morloc-manager setup --engine docker");
+                            Ok(())
                         }
                     } else {
                         show_setup_status()
                     }
                 }
-                None => run_interactive_setup(scope),
-                Some(e) => run_non_interactive_setup(scope, e.into()),
+                None => {
+                    run_interactive_setup(scope)?;
+                    if let Some(cfg) = cfg::read_active_config() {
+                        check_docker_socket(cfg.engine);
+                    }
+                    Ok(())
+                }
+                Some(e) => {
+                    let engine: ContainerEngine = e.into();
+                    run_non_interactive_setup(scope, engine)?;
+                    check_docker_socket(engine);
+                    Ok(())
+                }
             }
         }
 
@@ -587,10 +648,15 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     (ver, fresh)
                 }
             };
-            // Auto-select if none active (always writes to local config)
+            // Auto-select if none active
             if version::resolve_active_version().is_err() {
-                let _ = version::select_version(ver);
-                eprintln!("Auto-selected version {}", ver.show());
+                if system {
+                    let _ = version::select_version_system(ver);
+                    eprintln!("Auto-selected version {} as system default", ver.show());
+                } else {
+                    let _ = version::select_version(ver);
+                    eprintln!("Auto-selected version {}", ver.show());
+                }
             }
             if no_init {
                 Ok(())
@@ -694,7 +760,12 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             if !shell && command.is_empty() {
                 return Err(ManagerError::NoCommand);
             }
-            run_in_container(engine, verbose, shell, &command)
+            run_in_container(engine, verbose, shell, &command).map_err(|e| match e {
+                ManagerError::EnvironmentNotFound(msg) => ManagerError::EnvironmentNotFound(
+                    format!("{msg}. Run 'morloc-manager select <version>' or 'morloc-manager info' to see available targets")
+                ),
+                other => other,
+            })
         }
 
         // ---- env ----
@@ -832,14 +903,14 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     "Workspace already exists: {name}"
                 )));
             }
-            for sub in &["bin", "lib", "fdb", "include", "opt", "tmp"] {
+            for sub in &["bin", "lib", "fdb", "include", "opt", "tmp", "src", "exe"] {
                 fs::create_dir_all(ws_data_dir.join(sub)).map_err(|e| {
                     ManagerError::WorkspaceError(format!("Failed to create directory: {e}"))
                 })?;
             }
             if copy {
                 let src_dir = cfg::version_data_dir(base_ver_scope, base_ver);
-                for sub in &["lib", "fdb", "bin"] {
+                for sub in &["lib", "fdb", "bin", "src"] {
                     let src = src_dir.join(sub);
                     let dst = ws_data_dir.join(sub);
                     if src.is_dir() {
@@ -855,8 +926,9 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 engine,
             };
             cfg::write_workspace_config(scope, &name, &wc)?;
-            // Always write selection to local config
-            let cfg_path = cfg::config_path(Scope::Local);
+            // Write selection to the matching scope
+            let select_scope = resolve_scope(system);
+            let cfg_path = cfg::config_path(select_scope);
             let base = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
             let new_cfg = Config {
                 active_target: Some(ActiveTarget::Workspace(name.clone())),
@@ -892,9 +964,10 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     if system { "system" } else { "local" },
                 )));
             }
-            // Refuse to delete the active workspace
-            if let Ok(target) = version::resolve_active_target() {
-                if target == ActiveTarget::Workspace(name.clone()) {
+            // Refuse to delete the active workspace (check the matching scope's config)
+            let check_cfg_path = cfg::config_path(scope);
+            if let Ok(check_cfg) = cfg::read_config::<Config>(&check_cfg_path) {
+                if check_cfg.active_target == Some(ActiveTarget::Workspace(name.clone())) {
                     return Err(ManagerError::WorkspaceError(
                         format!("Cannot delete active workspace '{name}'. Run: morloc-manager select <version>")
                     ));

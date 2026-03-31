@@ -39,8 +39,15 @@ pub fn freeze_from_dir(
     eprintln!("Freezing installed state from {v_data_dir}...");
     let tar_path = Path::new(output_dir).join("state.tar.gz");
     let tar_path = tar_path.to_string_lossy();
+    let mut tar_dirs: Vec<&str> = Vec::new();
+    for dir in &["lib", "fdb", "bin", "exe"] {
+        if Path::new(&format!("{v_data_dir}/{dir}")).is_dir() {
+            tar_dirs.push(dir);
+        }
+    }
     let tar_output = Command::new("tar")
-        .args(["-czf", &tar_path, "-C", v_data_dir, "lib", "fdb", "bin", "exe"])
+        .args(["-czf", &tar_path, "-C", v_data_dir])
+        .args(&tar_dirs)
         .output()
         .map_err(|e| ManagerError::FreezeError(format!("tar failed: {e}")))?;
 
@@ -86,7 +93,8 @@ pub fn freeze_from_dir(
                     .output();
                 let image_digest = match digest_output {
                     Ok(o) if o.status.success() => {
-                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        if s.is_empty() { None } else { Some(s) }
                     }
                     _ => None,
                 };

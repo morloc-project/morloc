@@ -309,10 +309,11 @@ pub fn uninstall_version(scope: Scope, ver: Version) -> Result<()> {
         }
     }
     // Warn if system default still references the uninstalled version
+    // (but only if the version won't still be available in the other scope)
     {
         let cfg_path = config::config_path(Scope::System);
         if let Ok(cfg) = config::read_config::<Config>(&cfg_path) {
-            if cfg.active_target == Some(ActiveTarget::Version(ver)) {
+            if cfg.active_target == Some(ActiveTarget::Version(ver)) && !other_has_version {
                 eprintln!(
                     "  Warning: system default still references {}",
                     ver.show()
