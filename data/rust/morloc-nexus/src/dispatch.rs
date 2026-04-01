@@ -484,8 +484,7 @@ fn parse_command_args(
                     let v = if *quoted { self::quoted(val) } else { val.clone() };
                     parsed.push(ArgValue::Value(v));
                 } else if let Some(def) = default_val {
-                    let v = if *quoted { self::quoted(def) } else { def.clone() };
-                    parsed.push(ArgValue::Value(v));
+                    parsed.push(ArgValue::Value(def.clone()));
                 } else {
                     parsed.push(ArgValue::Null);
                 }
