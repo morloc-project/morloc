@@ -177,6 +177,12 @@ pub fn container_remove(engine: ContainerEngine, name_or_id: &str) -> ExitStatus
     code
 }
 
+pub fn remove_image(engine: ContainerEngine, tag: &str) -> bool {
+    let exe = engine_executable(engine);
+    let (status, _, _) = run_process(exe, &["rmi".to_string(), tag.to_string()]);
+    status.success()
+}
+
 // ======================================================================
 // CLI argument construction
 // ======================================================================

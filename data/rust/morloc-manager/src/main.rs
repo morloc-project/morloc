@@ -178,12 +178,10 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Manage dependency environments
     #[command(display_order = 12)]
-    #[command(after_help = "Examples:\n  morloc-manager env              # list environments\n  morloc-manager env init myenv   # create new environment\n  morloc-manager env myenv        # build and activate\n  morloc-manager env reset        # reset to base")]
+    #[command(after_help = "Examples:\n  morloc-manager env init myenv    # create a new environment stub\n  morloc-manager env init myenv \\\n    --dockerfile Dockerfile \\\n    -x \"--port 8080:8080\"          # from a Dockerfile with engine flags\n  morloc-manager env init -h       # see all init options")]
     Env {
         #[command(subcommand)]
-        action: Option<EnvCmd>,
-        /// Activate (and build if needed) an environment
-        name: Option<String>,
+        action: EnvCmd,
     },
     /// Delete a workspace
     #[command(display_order = 13)]
@@ -253,13 +251,52 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
 }
 
 #[derive(Subcommand)]
+#[command(disable_help_subcommand = true)]
 enum EnvCmd {
-    /// Create a new environment Dockerfile
-    Init { name: String },
-    /// List available environments
-    List,
-    /// Reset to base environment
-    Reset,
+    /// Initialize a new environment
+    Init {
+        /// Environment name
+        name: String,
+        /// Create the environment in the system path (requires root)
+        #[arg(long)]
+        system: bool,
+        /// Path to a Dockerfile (a stub is generated if not provided)
+        #[arg(long)]
+        dockerfile: Option<String>,
+        /// Path to a file with one engine argument per line
+        #[arg(long)]
+        flagfile: Option<String>,
+        /// A single engine flag (may be repeated)
+        #[arg(short = 'x', long = "engine-arg")]
+        engine_arg: Vec<String>,
+        /// Do not inherit flags from the parent version/environment
+        #[arg(long)]
+        no_inherit: bool,
+    },
+    /// Build (if needed) and activate an environment
+    Select {
+        /// Environment name
+        name: String,
+        /// Select the system environment by this name
+        #[arg(long)]
+        system: bool,
+    },
+    /// Remove an environment
+    Rm {
+        /// Environment name
+        name: String,
+        /// Remove the system environment by this name
+        #[arg(long)]
+        system: bool,
+    },
+    /// List all environments
+    Ls,
+    /// Reset to the base environment
+    Reset {
+        /// Reset the system-wide default (requires root)
+        #[arg(long)]
+        system: bool,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -769,37 +806,150 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- env ----
-        Cmd::Env { action, name } => {
-            // Env Dockerfiles and configs are always user-local, even when
-            // the active version comes from a system install
-            let scope = Scope::Local;
-            let m_cfg = cfg::read_active_config();
+        Cmd::Env { action } => {
+            match action {
+                EnvCmd::Init { name, system, dockerfile, flagfile, engine_arg, no_inherit } => {
+                    let scope = resolve_scope(system);
+                    if system {
+                        check_system_write_access()?;
+                    }
 
-            match (action, name) {
-                (Some(EnvCmd::Init { name }), _) => {
-                    let path = environment::init_environment(scope, &name)?;
-                    eprintln!("Created environment Dockerfile: {path}");
-                    eprintln!("Edit the Dockerfile, then run: morloc-manager env <name>");
+                    // Resolve inherited flags unless --no-inherit
+                    let parent_flags = if no_inherit {
+                        Vec::new()
+                    } else {
+                        let mut flags = Vec::new();
+                        // Global version flags
+                        if let Ok((ver, ver_scope)) = resolve_active_version_or_workspace() {
+                            let gfp = cfg::global_flags_path(ver_scope);
+                            flags.extend(cfg::read_flags_file(&gfp));
+                            // Active env flags
+                            let active_env = cfg::read_active_config()
+                                .map(|c| c.active_env)
+                                .unwrap_or_else(|| "base".to_string());
+                            if active_env != "base" {
+                                let env_deps = cfg::deps_dir(Scope::Local);
+                                let efp = env_deps.join(format!("{active_env}.flags"));
+                                let ef = cfg::read_flags_file(&efp);
+                                if ef.is_empty() {
+                                    let sys_deps = cfg::deps_dir(Scope::System);
+                                    flags.extend(cfg::read_flags_file(
+                                        &sys_deps.join(format!("{active_env}.flags")),
+                                    ));
+                                } else {
+                                    flags.extend(ef);
+                                }
+                            }
+                        }
+                        flags
+                    };
+
+                    let opts = environment::InitOptions {
+                        dockerfile,
+                        flagfile,
+                        engine_args: engine_arg,
+                        parent_flags,
+                    };
+                    let created = environment::init_environment(scope, &name, &opts)?;
+                    eprintln!("Created environment files:");
+                    for f in &created {
+                        eprintln!("  {f}");
+                    }
+                    eprintln!();
+                    eprintln!("The environment will be built when you run:");
+                    eprintln!("  morloc-manager env select {name}");
                     Ok(())
                 }
-                (Some(EnvCmd::List), _) => {
+                EnvCmd::Select { name, system } => {
+                    if name == "base" {
+                        let write_scope = resolve_scope(system);
+                        if system { check_system_write_access()?; }
+                        if let Some(cfg) = cfg::read_active_config() {
+                            let cfg_path = cfg::config_path(write_scope);
+                            let new_cfg = Config {
+                                active_env: "base".to_string(),
+                                ..cfg
+                            };
+                            cfg::write_config(&cfg_path, &new_cfg)?;
+                        }
+                        eprintln!("Reset to base environment");
+                        return Ok(());
+                    }
+
+                    let engine = ensure_engine()?;
                     let (ver, _) = resolve_active_version_or_workspace()?;
-                    let envs = environment::list_environments(scope, ver);
-                    let active_env = m_cfg.as_ref()
-                        .map(|c| c.active_env.as_str())
-                        .unwrap_or("base");
-                    for e in envs {
-                        if e == active_env {
-                            println!("{e} (active)");
-                        } else {
-                            println!("{e}");
+
+                    if system {
+                        // --system: build if needed, write active_env to system config
+                        check_system_write_access()?;
+                        let scope = environment::find_env_scope(&name, true)?;
+                        environment::build_environment(engine, scope, ver, &name)?;
+                        environment::activate_environment(scope, ver, &name, Scope::System)?;
+                        eprintln!("Activated environment: {name} (system default)");
+                    } else {
+                        // No --system: find local-first-then-system
+                        let scope = environment::find_env_scope(&name, false)?;
+                        match scope {
+                            Scope::Local => {
+                                environment::build_environment(engine, scope, ver, &name)?;
+                                environment::activate_environment(scope, ver, &name, Scope::Local)?;
+                                eprintln!("Activated environment: {name}");
+                            }
+                            Scope::System => {
+                                // System env: only activate if already built
+                                match cfg::read_environment_config(Scope::System, ver, &name) {
+                                    Ok(_) => {
+                                        environment::activate_environment(Scope::System, ver, &name, Scope::Local)?;
+                                        eprintln!("Activated environment: {name} (system)");
+                                    }
+                                    Err(_) => {
+                                        return Err(ManagerError::EnvError(format!(
+                                            "System environment '{name}' exists but has not been built.\n\
+                                             An administrator must build it first with:\n  \
+                                             sudo morloc-manager env select {name} --system"
+                                        )));
+                                    }
+                                }
+                            }
                         }
                     }
                     Ok(())
                 }
-                (Some(EnvCmd::Reset), _) => {
-                    if let Some(cfg) = m_cfg {
-                        let cfg_path = cfg::config_path(scope);
+                EnvCmd::Rm { name, system } => {
+                    let engine = ensure_engine()?;
+                    let (ver, _) = resolve_active_version_or_workspace()?;
+                    let scope = environment::find_env_scope(&name, system)?;
+
+                    if scope == Scope::System {
+                        check_system_write_access()?;
+                    }
+
+                    environment::remove_environment(engine, scope, ver, &name)?;
+                    eprintln!("Removed environment: {name}");
+                    Ok(())
+                }
+                EnvCmd::Ls => {
+                    let (ver, _) = resolve_active_version_or_workspace()?;
+                    let active_env = cfg::read_active_config()
+                        .map(|c| c.active_env)
+                        .unwrap_or_else(|| "base".to_string());
+                    let envs = environment::list_environments(&active_env, ver);
+                    for e in envs {
+                        let active_mark = if e.active { " (active)" } else { "" };
+                        let built_mark = if e.built { "" } else { " [not built]" };
+                        let scope_mark = match e.scope {
+                            Scope::System => " [system]",
+                            Scope::Local => "",
+                        };
+                        println!("{}{}{}{}", e.name, active_mark, built_mark, scope_mark);
+                    }
+                    Ok(())
+                }
+                EnvCmd::Reset { system } => {
+                    if system { check_system_write_access()?; }
+                    let write_scope = resolve_scope(system);
+                    if let Some(cfg) = cfg::read_active_config() {
+                        let cfg_path = cfg::config_path(write_scope);
                         let new_cfg = Config {
                             active_env: "base".to_string(),
                             ..cfg
@@ -807,64 +957,6 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                         cfg::write_config(&cfg_path, &new_cfg)?;
                     }
                     eprintln!("Reset to base environment");
-                    Ok(())
-                }
-                (None, Some(name)) => {
-                    // Common mistake detection and special cases
-                    match name.as_str() {
-                        "base" => {
-                            // "env base" should work like "env reset"
-                            if let Some(cfg) = m_cfg {
-                                let cfg_path = cfg::config_path(scope);
-                                let new_cfg = Config {
-                                    active_env: "base".to_string(),
-                                    ..cfg
-                                };
-                                cfg::write_config(&cfg_path, &new_cfg)?;
-                            }
-                            eprintln!("Reset to base environment");
-                            return Ok(());
-                        }
-                        "list" | "ls" => {
-                            return Err(ManagerError::EnvError(
-                                "Unknown argument. Did you mean: morloc-manager env list".to_string(),
-                            ));
-                        }
-                        "reset" => {
-                            return Err(ManagerError::EnvError(
-                                "Unknown argument. Did you mean: morloc-manager env reset".to_string(),
-                            ));
-                        }
-                        "init" => {
-                            return Err(ManagerError::EnvError(
-                                "Unknown argument. Did you mean: morloc-manager env init <NAME>"
-                                    .to_string(),
-                            ));
-                        }
-                        _ => {}
-                    }
-
-                    let engine = ensure_engine()?;
-                    let (ver, _) = resolve_active_version_or_workspace()?;
-                    environment::build_environment(engine, scope, ver, &name)?;
-                    environment::activate_environment(scope, ver, &name)?;
-                    eprintln!("Activated environment: {name}");
-                    Ok(())
-                }
-                (None, None) => {
-                    // No subcommand and no name - show list
-                    let (ver, _) = resolve_active_version_or_workspace()?;
-                    let envs = environment::list_environments(scope, ver);
-                    let active_env = m_cfg.as_ref()
-                        .map(|c| c.active_env.as_str())
-                        .unwrap_or("base");
-                    for e in envs {
-                        if e == active_env {
-                            println!("{e} (active)");
-                        } else {
-                            println!("{e}");
-                        }
-                    }
                     Ok(())
                 }
             }
@@ -1281,15 +1373,21 @@ fn run_in_container(
         .map(|c| c.active_env.as_str())
         .unwrap_or("base");
 
-    let global_fp = cfg::global_flags_path(ver_scope);
-    let global_flags = cfg::read_flags_file(&global_fp);
-    let env_flags = if env_name == "base" {
-        Vec::new()
+    let extra_flags: Vec<String> = if env_name == "base" {
+        // Base env: just global version flags
+        let gfp = cfg::global_flags_path(ver_scope);
+        cfg::read_flags_file(&gfp)
     } else {
-        let efp = cfg::env_flags_path(ver_scope, ver, env_name);
-        cfg::read_flags_file(&efp)
+        // Non-base env: flags file in deps/ already has inherited flags baked in
+        let local_efp = cfg::deps_dir(Scope::Local).join(format!("{env_name}.flags"));
+        let flags = cfg::read_flags_file(&local_efp);
+        if !flags.is_empty() {
+            flags
+        } else {
+            let sys_efp = cfg::deps_dir(Scope::System).join(format!("{env_name}.flags"));
+            cfg::read_flags_file(&sys_efp)
+        }
     };
-    let extra_flags: Vec<String> = global_flags.into_iter().chain(env_flags).collect();
 
     let is_init = matches!(args, [a, b, ..] if a == "morloc" && b == "init");
 
@@ -1346,20 +1444,26 @@ fn resolve_image(
     let base_image = &vc.image;
     match m_cfg {
         Some(cfg) if cfg.active_env != "base" => {
-            match cfg::read_environment_config(scope, ver, &cfg.active_env) {
-                Ok(ec) => ec.image,
-                Err(_) => {
-                    eprintln!(
-                        "Warning: Active environment '{}' is not built for version {}. Using base image.",
-                        cfg.active_env, ver.show()
-                    );
-                    eprintln!(
-                        "  Run 'morloc-manager env {}' to rebuild for {}.",
-                        cfg.active_env, ver.show()
-                    );
-                    base_image.clone()
+            // Check the version's own scope first, then the other scope
+            let scopes = if scope == Scope::Local {
+                [Scope::Local, Scope::System]
+            } else {
+                [Scope::System, Scope::Local]
+            };
+            for s in scopes {
+                if let Ok(ec) = cfg::read_environment_config(s, ver, &cfg.active_env) {
+                    return ec.image;
                 }
             }
+            eprintln!(
+                "Warning: Active environment '{}' is not built for version {}. Using base image.",
+                cfg.active_env, ver.show()
+            );
+            eprintln!(
+                "  Run 'morloc-manager env select {}' to rebuild for {}.",
+                cfg.active_env, ver.show()
+            );
+            base_image.clone()
         }
         _ => base_image.clone(),
     }
