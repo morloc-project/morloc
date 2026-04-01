@@ -211,13 +211,21 @@ pub unsafe extern "C" fn mlc_load(
     let mut file_size: usize = 0;
     let data = read_binary_file(path, &mut file_size, &mut err);
     if data.is_null() {
-        *errmsg = err;
+        if !err.is_null() {
+            let path_str = CStr::from_ptr(path).to_string_lossy();
+            let err_str = CStr::from_ptr(err).to_string_lossy();
+            eprintln!("@load warning ({}): {}", path_str, err_str);
+            libc::free(err as *mut libc::c_void);
+        }
         return ptr::null_mut();
     }
 
     let result = load_morloc_data_file(path, data, file_size, schema, &mut err);
     if result.is_null() && !err.is_null() {
-        *errmsg = err;
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        let err_str = CStr::from_ptr(err).to_string_lossy();
+        eprintln!("@load warning ({}): {}", path_str, err_str);
+        libc::free(err as *mut libc::c_void);
     }
     result
 }

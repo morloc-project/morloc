@@ -2,7 +2,7 @@ use std::fs;
 use std::process::Command;
 
 use crate::config;
-use crate::container::{container_pull, engine_executable, exit_code_to_int, image_exists_locally, remote_image_exists};
+use crate::container::{container_pull, engine_executable, exit_code_to_int, image_exists_locally, check_remote_image, RemoteImageStatus};
 use crate::error::{ManagerError, Result};
 use crate::types::*;
 
@@ -49,11 +49,21 @@ fn install_version_inner(
 
     if !have_local_image {
         // Verify the remote image exists before attempting to pull
-        if !remote_image_exists(engine, &image_ref) {
-            return Err(ManagerError::InstallError(format!(
-                "No container for morloc v{} exists",
-                ver.show()
-            )));
+        match check_remote_image(engine, &image_ref) {
+            RemoteImageStatus::Exists => {}
+            RemoteImageStatus::NotFound => {
+                return Err(ManagerError::InstallError(format!(
+                    "No container for morloc v{} exists",
+                    ver.show()
+                )));
+            }
+            RemoteImageStatus::Unknown(stderr) => {
+                return Err(ManagerError::InstallError(format!(
+                    "Failed to check registry for morloc v{}: {}",
+                    ver.show(),
+                    stderr.trim()
+                )));
+            }
         }
 
         eprintln!("Pulling {}...", image_ref);
@@ -103,10 +113,19 @@ pub fn install_latest(
 ) -> Result<(Version, bool)> {
     let edge_image = "ghcr.io/morloc-project/morloc/morloc-full:edge";
 
-    if !remote_image_exists(engine, edge_image) {
-        return Err(ManagerError::InstallError(
-            "No container for latest morloc version exists".to_string(),
-        ));
+    match check_remote_image(engine, edge_image) {
+        RemoteImageStatus::Exists => {}
+        RemoteImageStatus::NotFound => {
+            return Err(ManagerError::InstallError(
+                "No container for latest morloc version exists".to_string(),
+            ));
+        }
+        RemoteImageStatus::Unknown(stderr) => {
+            return Err(ManagerError::InstallError(format!(
+                "Failed to check registry for latest morloc version: {}",
+                stderr.trim()
+            )));
+        }
     }
 
     let (pull_status, _, pull_err) = container_pull(engine, edge_image);

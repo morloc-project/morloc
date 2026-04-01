@@ -91,7 +91,7 @@ processArgDoc i t r = do
           , cmdDocArgs = cmdargs
           , cmdDocRet = (t, [])
           }
-    _ -> error "Impossible - record type and argument expected"
+    _ -> MM.throwSystemError "Expected a record type with docstrings but found a non-record type"
 
 getReturnDesc :: ArgDoc -> Maybe Text -> [Text]
 getReturnDesc _ (Just ret) = [ret]
@@ -105,13 +105,13 @@ reduceArgDoc i t@(VarT v) arg = do
   case Map.lookup v scope of
     (Just [(_, typeOf -> parentType, parentArg, _)]) ->
       inheritArgDoc arg parentArg >>= reduceArgDoc i parentType
-    (Just _) -> error "Impossible?"
+    (Just _) -> MM.throwSystemError $ "Multiple definitions for type alias '" <> pretty (unTVar v) <> "'"
     Nothing -> return (t, arg)
   where
     inheritArgDoc :: ArgDoc -> ArgDoc -> MorlocMonad ArgDoc
     inheritArgDoc (ArgDocAlias r1) (ArgDocAlias r2) = return $ ArgDocAlias (inheritArgDocVars r1 r2)
     inheritArgDoc (ArgDocAlias r1) (ArgDocRec r2 rs) = return $ ArgDocRec (inheritArgDocVars r1 r2) rs
-    inheritArgDoc _ _ = error "Impossible?"
+    inheritArgDoc _ _ = MM.throwSystemError $ "Cannot inherit docstrings for type alias '" <> pretty (unTVar v) <> "'"
 
     inheritArgDocVars :: ArgDocVars -> ArgDocVars -> ArgDocVars
     inheritArgDocVars r1 r2 =
@@ -175,7 +175,7 @@ resolveGrp recType@(NamT _ v _ _) arg argEntries = do
       | otherwise = do
           opt <- resolveOpt t r
           return (k, Right opt)
-resolveGrp _ _ _ = error "Impossible, groups must be records"
+resolveGrp _ _ _ = MM.throwSystemError "Cannot unroll a non-record type into CLI argument groups"
 
 -- resolve a boolean into either a flag option or a positional
 resolveFlag :: ArgDocVars -> MorlocMonad (Either ArgPosDocSet ArgFlagDocSet)

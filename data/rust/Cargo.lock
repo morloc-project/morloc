@@ -472,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-manager"
-version = "0.11.0"
+version = "0.16.0-rc.1"
 dependencies = [
  "chrono",
  "clap",

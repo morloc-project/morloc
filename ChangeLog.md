@@ -1,8 +1,12 @@
+0.73.0 [2026-04-01]
+-------------------
+ * fix @load error on missing file
+ * fix error reporting on failed `morloc-manager install`
+
 0.72.0 [2026-03-30]
 -------------------
  * fix unicode support in comments and literal strings
  * many fixes to the morloc-manager
-
 
 0.71.0-2 [2026-03-29]
 -------------------
