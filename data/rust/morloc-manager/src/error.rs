@@ -14,11 +14,14 @@ pub enum ManagerError {
     #[error("Invalid configuration in {path}: {msg}")]
     ConfigParseError { path: String, msg: String },
 
-    #[error("No morloc version selected. Run: morloc-manager select <version>")]
-    NoActiveVersion,
+    #[error("No active environment. Run: morloc-manager new")]
+    NoActiveEnvironment,
 
-    #[error("Version {0} is not installed in any scope. Run: morloc-manager info")]
-    VersionNotInstalled(Version),
+    #[error("Environment not found: {0}")]
+    EnvironmentNotFound(String),
+
+    #[error("Environment error: {0}")]
+    EnvError(String),
 
     #[error("Invalid version: {0}. Expected format: MAJOR.MINOR.PATCH")]
     InvalidVersion(String),
@@ -36,21 +39,6 @@ pub enum ManagerError {
         stderr: String,
     },
 
-    #[error("Environment not found: {0}")]
-    EnvironmentNotFound(String),
-
-    #[error("Install failed: {0}")]
-    InstallError(String),
-
-    #[error("Uninstall failed: {0}")]
-    UninstallError(String),
-
-    #[error("{0}")]
-    WorkspaceError(String),
-
-    #[error("Environment error: {0}")]
-    EnvError(String),
-
     #[error("Freeze failed: {0}")]
     FreezeError(String),
 
@@ -61,8 +49,8 @@ pub enum ManagerError {
     SELinuxError(String),
 
     #[error("{}", match .0 {
-        Scope::Local => "No local configuration found. Run: morloc-manager setup",
-        Scope::System => "No system configuration found. Run: sudo morloc-manager setup --system",
+        Scope::Local => "No local configuration found. Run: morloc-manager new",
+        Scope::System => "No system configuration found. Run: sudo morloc-manager new --system",
     })]
     SetupNotComplete(Scope),
 }

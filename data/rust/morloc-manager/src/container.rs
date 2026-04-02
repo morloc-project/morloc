@@ -305,7 +305,7 @@ fn run_process(exe: &str, args: &[String]) -> (ExitStatus, String, String) {
 fn run_process_pass_stderr(exe: &str, args: &[String]) -> (ExitStatus, String, String) {
     let child = Command::new(exe)
         .args(args)
-        .stdin(Stdio::inherit())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .output()

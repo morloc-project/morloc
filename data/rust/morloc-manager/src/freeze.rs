@@ -8,11 +8,6 @@ use crate::container;
 use crate::error::{ManagerError, Result};
 use crate::types::*;
 
-pub fn freeze(scope: Scope, ver: Version, engine: ContainerEngine, output_dir: &str) -> Result<()> {
-    let v_data_dir = config::version_data_dir(scope, ver);
-    freeze_from_dir(scope, ver, engine, &v_data_dir.to_string_lossy(), output_dir)
-}
-
 pub fn freeze_from_dir(
     scope: Scope,
     ver: Version,
@@ -24,7 +19,9 @@ pub fn freeze_from_dir(
         .map_err(|e| ManagerError::FreezeError(format!("Failed to create output dir: {e}")))?;
 
     if !Path::new(v_data_dir).is_dir() {
-        return Err(ManagerError::VersionNotInstalled(ver));
+        return Err(ManagerError::FreezeError(format!(
+            "Data directory does not exist: {v_data_dir}"
+        )));
     }
 
     // Validate programs exist before writing any files
@@ -60,55 +57,56 @@ pub fn freeze_from_dir(
     eprintln!("Created {tar_path}");
     let now = Utc::now();
 
-    let vc_result = config::read_version_config(scope, ver);
+    // Get base image from the active environment config
     let m_cfg = config::read_active_config();
+    let active_env_name = m_cfg.as_ref().and_then(|c| c.active_env.as_deref());
 
-    let base_img = match &vc_result {
-        Ok(vc) => vc.image.clone(),
-        Err(_) => "unknown".to_string(),
-    };
-
-    // Capture env layer info
-    let env_layer = match &m_cfg {
-        Some(cfg) if cfg.active_env != "base" => {
-            let env_name = &cfg.active_env;
-            let deps = config::deps_dir(scope);
-            let df_path = deps.join(format!("{env_name}.Dockerfile"));
-            if df_path.exists() {
-                let df_contents = fs::read_to_string(&df_path).unwrap_or_default();
-                let content_hash = match config::read_environment_config(scope, ver, env_name) {
-                    Ok(ec) => ec.content_hash.unwrap_or_default(),
-                    Err(_) => String::new(),
-                };
-                // Query image digest
-                let env_image_tag = format!("localhost/morloc-env:{}-{env_name}", ver.show());
-                let exe = container::engine_executable(engine);
-                let digest_output = Command::new(exe)
-                    .args([
-                        "inspect",
-                        "--format",
-                        "{{index .RepoDigests 0}}",
-                        &env_image_tag,
-                    ])
-                    .output();
-                let image_digest = match digest_output {
-                    Ok(o) if o.status.success() => {
-                        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                        if s.is_empty() { None } else { Some(s) }
+    let (base_img, env_layer) = if let Some(env_name) = active_env_name {
+        match config::read_env_config(scope, env_name) {
+            Ok(ec) => {
+                let base = ec.base_image.clone();
+                // Capture env layer info if there's a Dockerfile
+                let layer = if ec.dockerfile.is_some() {
+                    let df_path = config::env_dockerfile_path(scope, env_name);
+                    if df_path.exists() {
+                        let df_contents = fs::read_to_string(&df_path).unwrap_or_default();
+                        let content_hash = ec.content_hash.unwrap_or_default();
+                        // Query image digest
+                        let env_image_tag = ec.built_image.as_deref()
+                            .unwrap_or(&ec.base_image);
+                        let exe = container::engine_executable(engine);
+                        let digest_output = Command::new(exe)
+                            .args([
+                                "inspect", "--format",
+                                "{{index .RepoDigests 0}}",
+                                env_image_tag,
+                            ])
+                            .output();
+                        let image_digest = match digest_output {
+                            Ok(o) if o.status.success() => {
+                                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                                if s.is_empty() { None } else { Some(s) }
+                            }
+                            _ => None,
+                        };
+                        Some(FrozenEnvLayer {
+                            name: env_name.to_string(),
+                            dockerfile: df_contents,
+                            content_hash,
+                            image_digest,
+                        })
+                    } else {
+                        None
                     }
-                    _ => None,
+                } else {
+                    None
                 };
-                Some(FrozenEnvLayer {
-                    name: env_name.clone(),
-                    dockerfile: df_contents,
-                    content_hash,
-                    image_digest,
-                })
-            } else {
-                None
+                (base, layer)
             }
+            Err(_) => ("unknown".to_string(), None),
         }
-        _ => None,
+    } else {
+        ("unknown".to_string(), None)
     };
 
     let manifest = FreezeManifest {
@@ -212,7 +210,6 @@ fn parse_manifest_commands(path: &Path) -> Vec<String> {
     let Ok(bytes) = fs::read(path) else {
         return Vec::new();
     };
-    // Minimal manifest structure
     #[derive(serde::Deserialize)]
     struct ManifestStub {
         #[serde(default)]
@@ -227,4 +224,3 @@ fn parse_manifest_commands(path: &Path) -> Vec<String> {
         Err(_) => Vec::new(),
     }
 }
-
