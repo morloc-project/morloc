@@ -167,6 +167,19 @@ pub fn read_flags_file(path: &Path) -> Vec<String> {
         .lines()
         .map(|line| line.trim())
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .flat_map(|line| line.split_whitespace().map(|s| s.to_string()))
+        .collect()
+}
+
+/// Read flags file preserving one line per entry (for display).
+pub fn read_flags_file_lines(path: &Path) -> Vec<String> {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(|s| s.to_string())
         .collect()
 }

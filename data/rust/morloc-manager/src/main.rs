@@ -422,6 +422,50 @@ fn check_docker_socket(engine: ContainerEngine) {
     }
 }
 
+/// Check if Podman is configured to see rootful images from rootless contexts.
+/// Returns true if additionalimagestore is configured (or not needed).
+fn check_podman_additional_stores(engine: ContainerEngine) -> bool {
+    if engine != ContainerEngine::Podman {
+        return true;
+    }
+    // Root doesn't need additional stores — it owns the store
+    if nix::unistd::getuid().is_root() {
+        return true;
+    }
+    let rootful_store = std::path::Path::new("/var/lib/containers/storage");
+    if !rootful_store.is_dir() {
+        // No rootful store exists, nothing to configure
+        return true;
+    }
+    // Check system and user storage.conf for additionalimagestore
+    for path in &[
+        "/etc/containers/storage.conf",
+        &format!(
+            "{}/.config/containers/storage.conf",
+            dirs::home_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+        ),
+    ] {
+        if let Ok(contents) = fs::read_to_string(path) {
+            if contents.contains("/var/lib/containers/storage") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn warn_podman_additional_stores() {
+    eprintln!("Warning: Podman is not configured to see system (rootful) images.");
+    eprintln!("  Non-root users will not be able to run system environments.");
+    eprintln!("  To fix, add to /etc/containers/storage.conf:");
+    eprintln!();
+    eprintln!("    [storage.options.overlay]");
+    eprintln!("    additionalimagestore = [\"/var/lib/containers/storage\"]");
+    eprintln!();
+}
+
 // ======================================================================
 // Dispatch
 // ======================================================================
@@ -600,7 +644,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                      FROM ${{CONTAINER_BASE}}\n\
                      \n\
                      # Example: install system packages\n\
-                     # RUN apt-get update && apt-get install -y cowsay && rm -rf /var/lib/apt/lists/*\n\
+                     # RUN apt-get update && apt-get install -y jq && rm -rf /var/lib/apt/lists/*\n\
                      \n\
                      # Example: install Python packages\n\
                      # RUN pip install scikit-learn pandas\n\
@@ -639,20 +683,25 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
             // Run morloc init
             if !no_init {
-                run_morloc_init(resolved_engine, verbose)?;
+                run_morloc_init(verbose)?;
             }
 
             eprintln!("{}", bold_green(&format!("Environment '{env_name}' is ready.")));
+
+            if system && !check_podman_additional_stores(resolved_engine) {
+                eprintln!();
+                warn_podman_additional_stores();
+            }
+
             Ok(())
         }
 
         // ---- run ----
         Cmd::Run { command, shell } => {
-            let engine = ensure_engine()?;
             if !shell && command.is_empty() {
                 return Err(ManagerError::NoCommand);
             }
-            run_in_container(engine, verbose, shell, &command).map_err(|e| match e {
+            run_in_container(verbose, shell, &command).map_err(|e| match e {
                 ManagerError::EnvironmentNotFound(msg) => ManagerError::EnvironmentNotFound(
                     format!("{msg}. Run 'morloc-manager new' to create an environment")
                 ),
@@ -666,7 +715,6 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             if names.is_empty() {
                 return Err(ManagerError::EnvError("No environment names specified".to_string()));
             }
-            let engine = ensure_engine()?;
             for name in &names {
                 let scope = if system {
                     Scope::System
@@ -688,7 +736,9 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     }
                 }
 
-                environment::remove_environment(engine, scope, name)?;
+                let ec = cfg::read_env_config(scope, name)
+                    .map_err(|_| ManagerError::EnvironmentNotFound(name.to_string()))?;
+                environment::remove_environment(ec.engine, scope, name)?;
                 eprintln!("Removed environment: {name}");
             }
             Ok(())
@@ -761,7 +811,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 });
                 let flags_path = cfg::env_flags_path(scope, &env_name);
                 println!("Flags:          {}", flags_path.display());
-                let flags = cfg::read_flags_file(&flags_path);
+                let flags = cfg::read_flags_file_lines(&flags_path);
                 for flag in &flags {
                     println!("  {flag}");
                 }
@@ -858,17 +908,30 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     (n, s)
                 }
             };
+            if env_scope == Scope::System {
+                check_system_write_access()?;
+            }
             eprintln!("Rebuilding environment: {env_name}");
             environment::rebuild_environment(env_scope, &env_name)?;
             eprintln!("{}", bold_green(&format!("Environment '{env_name}' rebuilt.")));
+
+            if env_scope == Scope::System && !check_podman_additional_stores(
+                cfg::read_env_config(env_scope, &env_name)
+                    .map(|ec| ec.engine)
+                    .unwrap_or(ContainerEngine::Podman),
+            ) {
+                eprintln!();
+                warn_podman_additional_stores();
+            }
+
             Ok(())
         }
 
         // ---- freeze ----
         Cmd::Freeze { output } => {
-            let engine = ensure_engine()?;
             let output_dir = output.as_deref().unwrap_or("./morloc-freeze");
             let (env_name, env_scope, ec) = environment::resolve_active_environment()?;
+            let engine = ec.engine;
             let ver = ec.morloc_version.ok_or_else(|| {
                 ManagerError::FreezeError("Active environment has no morloc version set".to_string())
             })?;
@@ -878,8 +941,8 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
         // ---- unfreeze ----
         Cmd::Unfreeze { from, tag, base } => {
-            let engine = ensure_engine()?;
             let (_, _, ec) = environment::resolve_active_environment()?;
+            let engine = ec.engine;
             let ver = ec.morloc_version.ok_or_else(|| {
                 ManagerError::UnfreezeError("Active environment has no morloc version set".to_string())
             })?;
@@ -935,15 +998,32 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 // ======================================================================
 
 fn run_in_container(
-    engine: ContainerEngine,
     verbose: bool,
     shell: bool,
     args: &[String],
 ) -> Result<()> {
     let (env_name, env_scope, ec) = environment::resolve_active_environment()?;
+    let engine = ec.engine;
     let image = ec.active_image().to_string();
     let data_dir = cfg::env_data_dir(env_scope, &env_name);
     let v_data_dir = data_dir.to_string_lossy().to_string();
+
+    // Verify the image is accessible before attempting to run
+    if !container::image_exists_locally(engine, &image) {
+        if env_scope == Scope::System && !check_podman_additional_stores(engine) {
+            return Err(ManagerError::EnvError(format!(
+                "Image '{image}' not found. The environment '{env_name}' is a system environment \
+                 but Podman is not configured to see rootful images.\n\
+                 Add to /etc/containers/storage.conf:\n\n  \
+                 [storage.options.overlay]\n  \
+                 additionalimagestore = [\"/var/lib/containers/storage\"]\n\n\
+                 Then restart Podman: podman system reset (warning: removes local images)"
+            )));
+        }
+        return Err(ManagerError::EnvError(format!(
+            "Image '{image}' not found locally. Run 'morloc-manager update {env_name}' to build it."
+        )));
+    }
 
     let se_mode = detect_selinux();
     let suffix = volume_suffix(se_mode);
@@ -1069,14 +1149,14 @@ fn run_with_config(
     }
 }
 
-fn run_morloc_init(engine: ContainerEngine, verbose: bool) -> Result<()> {
+fn run_morloc_init(verbose: bool) -> Result<()> {
     let init_args: Vec<String> = if verbose {
         ["morloc", "init", "-f"].iter().map(|s| s.to_string()).collect()
     } else {
         ["morloc", "init", "-f", "-q"].iter().map(|s| s.to_string()).collect()
     };
     eprintln!("Initializing morloc...");
-    run_in_container(engine, verbose, false, &init_args)
+    run_in_container(verbose, false, &init_args)
 }
 
 fn normalize_trailing(p: &str) -> String {
