@@ -225,6 +225,106 @@ pub fn run_serve_container(
     }
 }
 
+/// Serve an environment by bind-mounting its data directory into the container.
+pub fn serve_environment(
+    engine: ContainerEngine,
+    verbose: bool,
+    image: &str,
+    data_dir: &str,
+    container_name: &str,
+    ports: &[(u16, u16)],
+    extra_flags: &[String],
+) -> Result<()> {
+    // Clean up any existing dead container with this name
+    let _ = container_remove(engine, container_name);
+
+    let port_str: Vec<String> = ports
+        .iter()
+        .map(|(h, c)| format!("{h}:{c}"))
+        .collect();
+    eprintln!(
+        "Starting serve container {container_name} on ports {}...",
+        port_str.join(", ")
+    );
+
+    let mut cfg = RunConfig::new(image);
+    cfg.read_only = true;
+    cfg.remove_after = false;
+    cfg.name = Some(container_name.to_string());
+    cfg.ports = ports.to_vec();
+    cfg.bind_mounts = vec![(data_dir.to_string(), "/opt/morloc".to_string())];
+    cfg.env = vec![
+        ("PATH".to_string(), "/opt/morloc/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()),
+        ("MORLOC_HOME".to_string(), "/opt/morloc".to_string()),
+    ];
+    cfg.command = Some(vec![
+        "morloc-nexus".to_string(),
+        "--router".to_string(),
+        "--fdb".to_string(), "/opt/morloc/fdb".to_string(),
+        "--http-port".to_string(), "8080".to_string(),
+    ]);
+    cfg.extra_flags = vec!["-d".to_string()];
+    cfg.extra_flags.extend(extra_flags.iter().cloned());
+
+    if verbose {
+        let exe = engine_executable(engine);
+        let extra = crate::container::engine_specific_run_flags_io(engine);
+        let args = crate::container::build_run_args(engine, &extra, &cfg);
+        let quoted: Vec<String> = args.iter().map(|a| {
+            if a.contains(' ') { format!("'{a}'") } else { a.clone() }
+        }).collect();
+        eprintln!("[morloc-manager] {exe} {}", quoted.join(" "));
+    }
+
+    let (status, _stdout, run_err) = container_run(engine, &cfg);
+    if !status.success() {
+        return Err(ManagerError::EngineError {
+            engine,
+            code: exit_code_to_int(status),
+            stderr: run_err,
+        });
+    }
+
+    // Verify container reached running state
+    thread::sleep(Duration::from_secs(1));
+    let exe = engine_executable(engine);
+    let insp_output = Command::new(exe)
+        .args(["inspect", "--format", "{{.State.Status}}", container_name])
+        .output();
+    match insp_output {
+        Ok(o) if o.status.success() => {
+            let state = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if state == "running" {
+                eprintln!("Container {container_name} started");
+                eprintln!("  Stop:   morloc-manager stop");
+                eprintln!("  Logs:   morloc-manager logs");
+                eprintln!("  Status: morloc-manager status");
+                Ok(())
+            } else {
+                let log_output = Command::new(exe).args(["logs", container_name]).output();
+                let logs = log_output
+                    .map(|o| {
+                        let stdout = String::from_utf8_lossy(&o.stdout);
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        format!("{stdout}{stderr}")
+                    })
+                    .unwrap_or_default();
+                let _ = container_remove(engine, container_name);
+                Err(ManagerError::EngineError {
+                    engine,
+                    code: 1,
+                    stderr: format!("Container failed to start (state: {state}):\n{logs}"),
+                })
+            }
+        }
+        _ => Err(ManagerError::EngineError {
+            engine,
+            code: 1,
+            stderr: "Failed to inspect container state".to_string(),
+        }),
+    }
+}
+
 pub fn stop_serve_container(engine: ContainerEngine, name: &str) -> Result<()> {
     let (status, err) = container_stop(engine, name);
     let _ = container_remove(engine, name);

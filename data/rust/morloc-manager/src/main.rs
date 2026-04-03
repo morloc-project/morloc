@@ -45,10 +45,10 @@ fn build_help_template() -> String {
   {b}update{r}     Rebuild an environment
 
 {bu}Deployment{r}
-  {b}start{r}      Start a serve container
+  {b}start{r}      Serve an environment over the network
   {b}stop{r}       Stop a running serve container
   {b}freeze{r}     Export installed state as a frozen artifact
-  {b}unfreeze{r}   Build a serve image from frozen state
+  {b}unfreeze{r}   Build a portable serve image from frozen state
   {b}status{r}     List running serve containers
   {b}logs{r}       Show logs from a serve container
 
@@ -222,22 +222,22 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
 
     // -- Deployment --
-    /// Start a serve container
+    /// Serve an environment over the network
     #[command(display_order = 20)]
-    #[command(after_help = "Examples:\n  morloc-manager start myservice:v1\n  morloc-manager start myservice:v1 -p 9090:8080")]
+    #[command(after_help = "Examples:\n  morloc-manager start              # serve active environment\n  morloc-manager start myenv -p 9090:8080")]
     Start {
-        /// Serve image tag
-        image: String,
+        /// Environment name (default: active environment)
+        name: Option<String>,
         /// Port mapping HOST:CONTAINER (default: 8080:8080)
         #[arg(short, long, value_parser = parse_port)]
         port: Vec<(u16, u16)>,
     },
     /// Stop a running serve container
     #[command(display_order = 21)]
-    #[command(after_help = "Examples:\n  morloc-manager stop myservice:v1")]
+    #[command(after_help = "Examples:\n  morloc-manager stop              # stop active environment\n  morloc-manager stop myenv")]
     Stop {
-        /// Container name
-        name: String,
+        /// Environment name (default: active environment)
+        name: Option<String>,
     },
     /// Export installed state as a frozen artifact
     #[command(display_order = 22)]
@@ -267,10 +267,10 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     Status,
     /// Show logs from a serve container
     #[command(display_order = 25)]
-    #[command(after_help = "Examples:\n  morloc-manager logs myservice:v1\n  morloc-manager logs myservice:v1 -f")]
+    #[command(after_help = "Examples:\n  morloc-manager logs              # logs for active environment\n  morloc-manager logs myenv -f")]
     Logs {
-        /// Container name
-        name: String,
+        /// Environment name (default: active environment)
+        name: Option<String>,
         /// Follow log output
         #[arg(short, long)]
         follow: bool,
@@ -368,6 +368,18 @@ fn check_system_write_access() -> Result<()> {
                 sys_dir.display()
             )))
         }
+    }
+}
+
+/// Resolve an environment by explicit name or fall back to the active environment.
+fn resolve_env_or_active(name: Option<String>) -> Result<(String, Scope, EnvironmentConfig)> {
+    match name {
+        Some(n) => {
+            let scope = cfg::find_env_scope(&n)?;
+            let ec = cfg::read_env_config(scope, &n)?;
+            Ok((n, scope, ec))
+        }
+        None => environment::resolve_active_environment(),
     }
 }
 
@@ -1017,36 +1029,47 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
         // ---- unfreeze ----
         Cmd::Unfreeze { from, tag, base } => {
-            let (_, _, ec) = environment::resolve_active_environment()?;
-            let engine = ec.engine;
-            let ver = ec.morloc_version.ok_or_else(|| {
-                ManagerError::UnfreezeError("Active environment has no morloc version set".to_string())
-            })?;
-            serve::build_serve_image(engine, verbose, &from, &tag, ver, base.as_deref())
+            // Read version and engine from the freeze manifest so unfreeze
+            // works on deployment machines with no morloc environments.
+            let tarball_dir = std::path::Path::new(&from)
+                .parent()
+                .unwrap_or(std::path::Path::new("."));
+            let manifest_path = tarball_dir.join("freeze-manifest.json");
+            let manifest = freeze::read_freeze_manifest(&manifest_path.to_string_lossy())
+                .map_err(|_| ManagerError::UnfreezeError(format!(
+                    "Cannot read freeze manifest at {}. Ensure state.tar.gz and freeze-manifest.json are in the same directory.",
+                    manifest_path.display()
+                )))?;
+            let engine = ensure_engine()?;
+            serve::build_serve_image(engine, verbose, &from, &tag, manifest.morloc_version, base.as_deref())
         }
 
         // ---- start ----
-        Cmd::Start { image, port } => {
-            let engine = ensure_engine()?;
-            let container_name = format!("morloc-serve-{}", image.replace(':', "-"));
+        Cmd::Start { name, port } => {
+            let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
+            let image = ec.active_image().to_string();
+            let data_dir = cfg::env_data_dir(env_scope, &env_name);
+            let container_name = format!("morloc-serve-{env_name}");
             let port_mappings = if port.is_empty() {
                 vec![(8080, 8080)]
             } else {
                 port
             };
-            serve::run_serve_container(engine, verbose, &image, &container_name, &port_mappings)
+            let flags_path = cfg::env_flags_path(env_scope, &env_name);
+            let extra_flags = cfg::read_flags_file(&flags_path);
+            serve::serve_environment(
+                ec.engine, verbose, &image,
+                &data_dir.to_string_lossy(), &container_name,
+                &port_mappings, &extra_flags,
+            )
         }
 
         // ---- stop ----
         Cmd::Stop { name } => {
-            let engine = ensure_engine()?;
-            let container_name = if name.starts_with("morloc-serve-") {
-                name.clone()
-            } else {
-                format!("morloc-serve-{}", name.replace(':', "-"))
-            };
-            serve::stop_serve_container(engine, &container_name)?;
-            eprintln!("Stopped container {container_name}");
+            let (env_name, _, ec) = resolve_env_or_active(name)?;
+            let container_name = format!("morloc-serve-{env_name}");
+            serve::stop_serve_container(ec.engine, &container_name)?;
+            eprintln!("Stopped serving environment: {env_name}");
             Ok(())
         }
 
@@ -1058,13 +1081,9 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
         // ---- logs ----
         Cmd::Logs { name, follow } => {
-            let engine = ensure_engine()?;
-            let container_name = if name.starts_with("morloc-serve-") {
-                name.clone()
-            } else {
-                format!("morloc-serve-{}", name.replace(':', "-"))
-            };
-            serve::stream_serve_logs(engine, &container_name, follow)
+            let (env_name, _, ec) = resolve_env_or_active(name)?;
+            let container_name = format!("morloc-serve-{env_name}");
+            serve::stream_serve_logs(ec.engine, &container_name, follow)
         }
     }
 }
