@@ -61,15 +61,17 @@ pub fn build_serve_image(
         .map_err(|e| ManagerError::UnfreezeError(format!("mkdir failed: {e}")))?;
 
     eprintln!("Extracting frozen state...");
-    let tar_output = Command::new("tar")
+    let tar_status = Command::new("tar")
         .args(["-xzf", state_tarball, "-C", &context_dir.to_string_lossy()])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status()
         .map_err(|e| ManagerError::UnfreezeError(format!("tar extract failed: {e}")))?;
-    if !tar_output.status.success() {
-        return Err(ManagerError::UnfreezeError(format!(
-            "tar extract failed: {}",
-            String::from_utf8_lossy(&tar_output.stderr)
-        )));
+    if !tar_status.success() {
+        return Err(ManagerError::UnfreezeError(
+            "tar extract failed (see error output above)".to_string()
+        ));
     }
 
     let dockerfile_path = context_dir.join("Dockerfile");

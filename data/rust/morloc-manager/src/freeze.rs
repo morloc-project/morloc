@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use chrono::Utc;
 use crate::config;
@@ -42,17 +42,19 @@ pub fn freeze_from_dir(
             tar_dirs.push(dir);
         }
     }
-    let tar_output = Command::new("tar")
+    let tar_status = Command::new("tar")
         .args(["-czf", &tar_path, "-C", v_data_dir])
         .args(&tar_dirs)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status()
         .map_err(|e| ManagerError::FreezeError(format!("tar failed: {e}")))?;
 
-    if !tar_output.status.success() {
-        return Err(ManagerError::FreezeError(format!(
-            "tar failed: {}",
-            String::from_utf8_lossy(&tar_output.stderr)
-        )));
+    if !tar_status.success() {
+        return Err(ManagerError::FreezeError(
+            "tar failed (see error output above)".to_string()
+        ));
     }
     eprintln!("Created {tar_path}");
     let now = Utc::now();

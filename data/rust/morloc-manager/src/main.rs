@@ -185,10 +185,40 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
 
     /// Rebuild an environment
     #[command(display_order = 7)]
-    #[command(after_help = "Examples:\n  morloc-manager update              # rebuild active environment\n  morloc-manager update myenv        # rebuild a specific environment")]
+    #[command(after_help = "Examples:\n  morloc-manager update              # rebuild active environment\n  morloc-manager update myenv        # rebuild a specific environment\n  morloc-manager update --shm-size 1g\n  morloc-manager update --dockerfile ./new.Dockerfile -i ./data")]
     Update {
         /// Environment name (default: active environment)
         name: Option<String>,
+        /// Change the base image
+        #[arg(long)]
+        image: Option<String>,
+        /// Change to a specific morloc version image
+        #[arg(long)]
+        version: Option<String>,
+        /// Replace the Dockerfile
+        #[arg(long)]
+        dockerfile: Option<String>,
+        /// File or directory to include in the Dockerfile build context (repeatable)
+        #[arg(short = 'i', long = "include")]
+        include: Vec<String>,
+        /// Replace the flags file
+        #[arg(long)]
+        flagfile: Option<String>,
+        /// Add an engine flag (repeatable; appends unless --flagfile replaces)
+        #[arg(short = 'x', long = "engine-arg")]
+        engine_arg: Vec<String>,
+        /// Change the container engine
+        #[arg(long, value_enum)]
+        engine: Option<EngineArg>,
+        /// Change shared memory size
+        #[arg(long)]
+        shm_size: Option<String>,
+        /// Skip Dockerfile build
+        #[arg(long)]
+        no_build: bool,
+        /// Re-run morloc init
+        #[arg(long)]
+        reinit: bool,
     },
 
     // -- Deployment --
@@ -665,22 +695,23 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 None
             };
 
-            let opts = environment::CreateOptions {
+            let opts = environment::ApplyOptions {
                 name: env_name.clone(),
-                base_image,
+                scope,
+                is_new: true,
+                base_image: Some(base_image),
                 original_image,
                 morloc_version: morloc_ver,
                 dockerfile: resolved_dockerfile,
                 includes: include,
                 flagfile,
                 engine_args: engine_arg,
-                engine: resolved_engine,
-                shm_size: shm_size.unwrap_or_else(|| "512m".to_string()),
-                scope,
+                engine: Some(resolved_engine),
+                shm_size: Some(shm_size.unwrap_or_else(|| "512m".to_string())),
                 skip_dockerfile_build: dockerfile_stub,
             };
 
-            environment::create_environment(&opts)?;
+            environment::apply_environment(&opts)?;
 
             // Auto-select
             environment::select_environment(&env_name, scope)?;
@@ -902,7 +933,10 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- update ----
-        Cmd::Update { name } => {
+        Cmd::Update {
+            name, image, version, dockerfile, include, flagfile,
+            engine_arg, engine, shm_size, no_build, reinit,
+        } => {
             let (env_name, env_scope) = match name {
                 Some(n) => {
                     let scope = cfg::find_env_scope(&n)?;
@@ -916,9 +950,46 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             if env_scope == Scope::System {
                 check_system_write_access()?;
             }
-            eprintln!("Rebuilding environment: {env_name}");
-            environment::rebuild_environment(env_scope, &env_name)?;
-            eprintln!("{}", bold_green(&format!("Environment '{env_name}' rebuilt.")));
+
+            // Resolve base image if --version or --image provided
+            let (base_image, original_image, morloc_ver) = if let Some(ref ver_str) = version {
+                let ec = cfg::read_env_config(env_scope, &env_name)?;
+                let ver: Version = ver_str.parse().map_err(|_| {
+                    ManagerError::InvalidVersion(ver_str.clone())
+                })?;
+                let img = environment::pull_version_image(ec.engine, &ver)?;
+                (Some(img), None, Some(ver))
+            } else if let Some(ref img) = image {
+                let ec = cfg::read_env_config(env_scope, &env_name)?;
+                environment::pull_custom_image(ec.engine, img)?;
+                (Some(img.clone()), None, None)
+            } else {
+                (None, None, None)
+            };
+
+            eprintln!("Updating environment: {env_name}");
+            let opts = environment::ApplyOptions {
+                name: env_name.clone(),
+                scope: env_scope,
+                is_new: false,
+                base_image,
+                original_image,
+                morloc_version: morloc_ver,
+                dockerfile,
+                includes: include,
+                flagfile,
+                engine_args: engine_arg,
+                engine: engine.map(|e| e.into()),
+                shm_size,
+                skip_dockerfile_build: no_build,
+            };
+            environment::apply_environment(&opts)?;
+
+            if reinit {
+                run_morloc_init(verbose)?;
+            }
+
+            eprintln!("{}", bold_green(&format!("Environment '{env_name}' updated.")));
 
             if env_scope == Scope::System && !check_podman_additional_stores(
                 cfg::read_env_config(env_scope, &env_name)

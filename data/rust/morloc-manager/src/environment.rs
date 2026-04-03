@@ -16,20 +16,22 @@ use crate::types::*;
 // Public types
 // ======================================================================
 
-/// Options for creating a new environment.
-pub struct CreateOptions {
+/// Options for creating or updating an environment.
+/// For `new` (is_new=true): all Option fields that are None use defaults.
+/// For `update` (is_new=false): None means keep the existing value.
+pub struct ApplyOptions {
     pub name: String,
-    pub base_image: String,
+    pub scope: Scope,
+    pub is_new: bool,
+    pub base_image: Option<String>,
     pub original_image: Option<String>,
     pub morloc_version: Option<Version>,
     pub dockerfile: Option<String>,
     pub includes: Vec<String>,
     pub flagfile: Option<String>,
     pub engine_args: Vec<String>,
-    pub engine: ContainerEngine,
-    pub shm_size: String,
-    pub scope: Scope,
-    /// If true, copy the Dockerfile but don't build it yet.
+    pub engine: Option<ContainerEngine>,
+    pub shm_size: Option<String>,
     pub skip_dockerfile_build: bool,
 }
 
@@ -83,6 +85,9 @@ pub fn resolve_latest(engine: ContainerEngine) -> Result<(String, Version)> {
     let exe = engine_executable(engine);
     let output = Command::new(exe)
         .args(["run", "--rm", &edge_image, "morloc", "--version"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
         .output()
         .map_err(|e| ManagerError::EnvError(format!("Failed to run edge container: {e}")))?;
 
@@ -172,8 +177,11 @@ pub fn pull_custom_image(engine: ContainerEngine, image: &str) -> Result<()> {
 // Core operations
 // ======================================================================
 
-/// Create a new environment.
-pub fn create_environment(opts: &CreateOptions) -> Result<()> {
+/// Create or update an environment.
+///
+/// When `is_new` is true: validates name uniqueness, creates data directories.
+/// When `is_new` is false: loads existing config, applies overrides.
+pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
     let scope = opts.scope;
     let name = &opts.name;
 
@@ -188,38 +196,70 @@ pub fn create_environment(opts: &CreateOptions) -> Result<()> {
         )));
     }
 
-    // Check if already exists
-    let cfg_path = config::env_config_path(scope, name);
-    if cfg_path.is_file() {
-        return Err(ManagerError::EnvError(format!(
-            "Environment '{name}' already exists"
-        )));
-    }
-
-    // Create data directories
-    let data_dir = config::env_data_dir(scope, name);
-    for sub in &["bin", "lib", "fdb", "include", "opt", "tmp"] {
-        fs::create_dir_all(data_dir.join(sub)).map_err(|e| {
-            ManagerError::EnvError(format!("Failed to create directory: {e}"))
-        })?;
-    }
-
-    if scope == Scope::System {
-        use std::os::unix::fs::PermissionsExt;
-        let dirs: Vec<_> = std::iter::once(data_dir.clone())
-            .chain(
-                ["bin", "lib", "fdb", "include", "opt", "tmp"]
-                    .iter()
-                    .map(|d| data_dir.join(d)),
-            )
-            .collect();
-        for d in dirs {
-            let _ = fs::set_permissions(&d, fs::Permissions::from_mode(0o2775));
+    // Load existing config or start fresh
+    let mut ec = if opts.is_new {
+        let cfg_path = config::env_config_path(scope, name);
+        if cfg_path.is_file() {
+            return Err(ManagerError::EnvError(format!(
+                "Environment '{name}' already exists"
+            )));
         }
+        // Create data directories
+        let data_dir = config::env_data_dir(scope, name);
+        for sub in &["bin", "lib", "fdb", "include", "opt", "tmp"] {
+            fs::create_dir_all(data_dir.join(sub)).map_err(|e| {
+                ManagerError::EnvError(format!("Failed to create directory: {e}"))
+            })?;
+        }
+        if scope == Scope::System {
+            use std::os::unix::fs::PermissionsExt;
+            let dirs: Vec<_> = std::iter::once(data_dir.clone())
+                .chain(
+                    ["bin", "lib", "fdb", "include", "opt", "tmp"]
+                        .iter()
+                        .map(|d| data_dir.join(d)),
+                )
+                .collect();
+            for d in dirs {
+                let _ = fs::set_permissions(&d, fs::Permissions::from_mode(0o2775));
+            }
+        }
+        // Start with required fields from opts; the rest will be applied below
+        EnvironmentConfig {
+            name: name.clone(),
+            base_image: opts.base_image.clone().unwrap_or_default(),
+            original_image: None,
+            dockerfile: None,
+            content_hash: None,
+            built_image: None,
+            engine: opts.engine.unwrap_or(ContainerEngine::Podman),
+            shm_size: "512m".to_string(),
+            morloc_version: None,
+        }
+    } else {
+        config::read_env_config(scope, name)
+            .map_err(|_| ManagerError::EnvironmentNotFound(name.to_string()))?
+    };
+
+    // Apply overrides
+    if let Some(ref img) = opts.base_image {
+        ec.base_image = img.clone();
+    }
+    if let Some(ref img) = opts.original_image {
+        ec.original_image = Some(img.clone());
+    }
+    if let Some(ver) = opts.morloc_version {
+        ec.morloc_version = Some(ver);
+    }
+    if let Some(engine) = opts.engine {
+        ec.engine = engine;
+    }
+    if let Some(ref shm) = opts.shm_size {
+        ec.shm_size = shm.clone();
     }
 
-    // Copy Dockerfile if provided
-    let dockerfile_name = if let Some(src) = &opts.dockerfile {
+    // Copy Dockerfile if a new one was provided
+    let dockerfile_changed = if let Some(ref src) = opts.dockerfile {
         let dest = config::env_dockerfile_path(scope, name);
         let dest_dir = dest.parent().unwrap();
         fs::create_dir_all(dest_dir).map_err(|e| {
@@ -228,13 +268,17 @@ pub fn create_environment(opts: &CreateOptions) -> Result<()> {
         fs::copy(src, &dest).map_err(|e| {
             ManagerError::EnvError(format!("Failed to copy Dockerfile '{}': {e}", src))
         })?;
-        Some("Dockerfile".to_string())
+        ec.dockerfile = Some("Dockerfile".to_string());
+        true
     } else {
-        None
+        false
     };
 
     // Copy included files/directories into build context
     let cfg_dir = config::env_config_dir(scope, name);
+    fs::create_dir_all(&cfg_dir).map_err(|e| {
+        ManagerError::EnvError(format!("Failed to create config dir: {e}"))
+    })?;
     for src in &opts.includes {
         let src_path = Path::new(src);
         let file_name = src_path.file_name().ok_or_else(|| {
@@ -244,6 +288,9 @@ pub fn create_environment(opts: &CreateOptions) -> Result<()> {
         if src_path.is_dir() {
             let status = Command::new("cp")
                 .args(["-a", src, &dest.to_string_lossy()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit())
                 .status()
                 .map_err(|e| ManagerError::EnvError(format!("Failed to copy '{src}': {e}")))?;
             if !status.success() {
@@ -258,71 +305,75 @@ pub fn create_environment(opts: &CreateOptions) -> Result<()> {
         }
     }
 
-    // Write flags file
+    // Write flags file: for new envs or when flagfile is provided, write fresh.
+    // For updates with only engine_args, append to existing.
     let flags_path = config::env_flags_path(scope, name);
-    let flags_dir = flags_path.parent().unwrap();
-    fs::create_dir_all(flags_dir).map_err(|e| {
-        ManagerError::EnvError(format!("Failed to create config dir: {e}"))
-    })?;
-    let mut flag_lines: Vec<String> = Vec::new();
-    if let Some(src) = &opts.flagfile {
-        let content = fs::read_to_string(src).map_err(|e| {
-            ManagerError::EnvError(format!("Failed to read flagfile '{}': {e}", src))
+    if opts.is_new || opts.flagfile.is_some() {
+        let mut flag_lines: Vec<String> = Vec::new();
+        if let Some(ref src) = opts.flagfile {
+            let content = fs::read_to_string(src).map_err(|e| {
+                ManagerError::EnvError(format!("Failed to read flagfile '{}': {e}", src))
+            })?;
+            flag_lines.extend(
+                content
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty() && !l.starts_with('#')),
+            );
+        }
+        flag_lines.extend(opts.engine_args.iter().cloned());
+        let flags_content = if flag_lines.is_empty() {
+            String::new()
+        } else {
+            flag_lines.join("\n") + "\n"
+        };
+        fs::write(&flags_path, &flags_content).map_err(|e| {
+            ManagerError::EnvError(format!("Failed to write flags file: {e}"))
         })?;
-        flag_lines.extend(
-            content
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty() && !l.starts_with('#')),
-        );
+    } else if !opts.engine_args.is_empty() {
+        // Append engine_args to existing flags file
+        let mut existing = config::read_flags_file_lines(&flags_path);
+        existing.extend(opts.engine_args.iter().cloned());
+        let flags_content = existing.join("\n") + "\n";
+        fs::write(&flags_path, &flags_content).map_err(|e| {
+            ManagerError::EnvError(format!("Failed to write flags file: {e}"))
+        })?;
     }
-    flag_lines.extend(opts.engine_args.iter().cloned());
-    let flags_content = if flag_lines.is_empty() {
-        String::new()
-    } else {
-        flag_lines.join("\n") + "\n"
-    };
-    fs::write(&flags_path, &flags_content).map_err(|e| {
-        ManagerError::EnvError(format!("Failed to write flags file: {e}"))
-    })?;
 
-    // Build Dockerfile layer if present (skip if stub-only)
-    let (built_image, content_hash) = if dockerfile_name.is_some() && !opts.skip_dockerfile_build {
+    // Build Dockerfile layer if present and not skipped
+    let has_dockerfile = ec.dockerfile.is_some();
+    let should_build = has_dockerfile
+        && !opts.skip_dockerfile_build
+        && (opts.is_new || dockerfile_changed || !opts.includes.is_empty()
+            || opts.base_image.is_some() || opts.engine.is_some()
+            // For update with no specific changes, rebuild if Dockerfile exists
+            || (!opts.is_new && opts.dockerfile.is_none() && opts.includes.is_empty()));
+
+    if should_build {
         let tag = format!("localhost/morloc-env:{name}");
         let df_path = config::env_dockerfile_path(scope, name);
-        let hash = hash_file(&df_path)?;
-        let cfg_dir = config::env_config_dir(scope, name);
-        let build_cfg = BuildConfig {
-            dockerfile: df_path.to_string_lossy().to_string(),
-            context: cfg_dir.to_string_lossy().to_string(),
-            tag: tag.clone(),
-            build_args: vec![("CONTAINER_BASE".to_string(), opts.base_image.clone())],
-        };
-        let (status, _, stderr) = container::container_build(opts.engine, &build_cfg);
-        if !status.success() {
-            return Err(ManagerError::EngineError {
-                engine: opts.engine,
-                code: exit_code_to_int(status),
-                stderr,
-            });
+        if df_path.exists() {
+            let hash = hash_file(&df_path)?;
+            let build_cfg = BuildConfig {
+                dockerfile: df_path.to_string_lossy().to_string(),
+                context: cfg_dir.to_string_lossy().to_string(),
+                tag: tag.clone(),
+                build_args: vec![("CONTAINER_BASE".to_string(), ec.base_image.clone())],
+            };
+            let (status, _, stderr) = container::container_build(ec.engine, &build_cfg);
+            if !status.success() {
+                return Err(ManagerError::EngineError {
+                    engine: ec.engine,
+                    code: exit_code_to_int(status),
+                    stderr,
+                });
+            }
+            ec.built_image = Some(tag);
+            ec.content_hash = Some(hash);
         }
-        (Some(tag), Some(hash))
-    } else {
-        (None, None)
-    };
+    }
 
     // Write environment config
-    let ec = EnvironmentConfig {
-        name: name.clone(),
-        base_image: opts.base_image.clone(),
-        original_image: opts.original_image.clone(),
-        dockerfile: dockerfile_name,
-        content_hash,
-        built_image,
-        engine: opts.engine,
-        shm_size: opts.shm_size.clone(),
-        morloc_version: opts.morloc_version,
-    };
     config::write_env_config(scope, name, &ec)?;
 
     Ok(())
@@ -365,42 +416,6 @@ pub fn remove_environment(engine: ContainerEngine, scope: Scope, name: &str) -> 
     }
 
     Ok(())
-}
-
-/// Rebuild an environment's Dockerfile layer from its current Dockerfile.
-pub fn rebuild_environment(scope: Scope, name: &str) -> Result<()> {
-    let mut ec = config::read_env_config(scope, name)
-        .map_err(|_| ManagerError::EnvironmentNotFound(name.to_string()))?;
-
-    let df_path = config::env_dockerfile_path(scope, name);
-    if !df_path.exists() {
-        return Err(ManagerError::EnvError(format!(
-            "Environment '{name}' has no Dockerfile to build"
-        )));
-    }
-
-    let tag = format!("localhost/morloc-env:{name}");
-    let hash = hash_file(&df_path)?;
-    let cfg_dir = config::env_config_dir(scope, name);
-    let build_cfg = BuildConfig {
-        dockerfile: df_path.to_string_lossy().to_string(),
-        context: cfg_dir.to_string_lossy().to_string(),
-        tag: tag.clone(),
-        build_args: vec![("CONTAINER_BASE".to_string(), ec.base_image.clone())],
-    };
-    let (status, _, stderr) = container::container_build(ec.engine, &build_cfg);
-    if !status.success() {
-        return Err(ManagerError::EngineError {
-            engine: ec.engine,
-            code: exit_code_to_int(status),
-            stderr,
-        });
-    }
-
-    ec.built_image = Some(tag);
-    ec.content_hash = Some(hash);
-    ec.dockerfile = Some("Dockerfile".to_string());
-    config::write_env_config(scope, name, &ec)
 }
 
 /// List environments in the given scope.
