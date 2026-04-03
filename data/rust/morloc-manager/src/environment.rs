@@ -23,6 +23,7 @@ pub struct CreateOptions {
     pub original_image: Option<String>,
     pub morloc_version: Option<Version>,
     pub dockerfile: Option<String>,
+    pub includes: Vec<String>,
     pub flagfile: Option<String>,
     pub engine_args: Vec<String>,
     pub engine: ContainerEngine,
@@ -231,6 +232,31 @@ pub fn create_environment(opts: &CreateOptions) -> Result<()> {
     } else {
         None
     };
+
+    // Copy included files/directories into build context
+    let cfg_dir = config::env_config_dir(scope, name);
+    for src in &opts.includes {
+        let src_path = Path::new(src);
+        let file_name = src_path.file_name().ok_or_else(|| {
+            ManagerError::EnvError(format!("Invalid include path: {src}"))
+        })?;
+        let dest = cfg_dir.join(file_name);
+        if src_path.is_dir() {
+            let status = Command::new("cp")
+                .args(["-a", src, &dest.to_string_lossy()])
+                .status()
+                .map_err(|e| ManagerError::EnvError(format!("Failed to copy '{src}': {e}")))?;
+            if !status.success() {
+                return Err(ManagerError::EnvError(format!(
+                    "Failed to copy directory '{src}'"
+                )));
+            }
+        } else {
+            fs::copy(src_path, &dest).map_err(|e| {
+                ManagerError::EnvError(format!("Failed to copy '{src}': {e}"))
+            })?;
+        }
+    }
 
     // Write flags file
     let flags_path = config::env_flags_path(scope, name);

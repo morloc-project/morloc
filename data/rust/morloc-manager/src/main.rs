@@ -98,6 +98,9 @@ enum Cmd {
         /// Generate a stub Dockerfile for customization
         #[arg(long)]
         dockerfile_stub: bool,
+        /// File or directory to include in the Dockerfile build context (repeatable)
+        #[arg(short = 'i', long = "include")]
+        include: Vec<String>,
         /// Path to a file with one engine argument per line
         #[arg(long)]
         flagfile: Option<String>,
@@ -479,6 +482,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             version,
             dockerfile,
             dockerfile_stub,
+            include,
             flagfile,
             engine_arg,
             engine,
@@ -667,6 +671,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 original_image,
                 morloc_version: morloc_ver,
                 dockerfile: resolved_dockerfile,
+                includes: include,
                 flagfile,
                 engine_args: engine_arg,
                 engine: resolved_engine,
