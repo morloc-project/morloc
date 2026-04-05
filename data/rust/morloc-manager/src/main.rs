@@ -94,7 +94,7 @@ enum Cmd {
     },
     /// Build a new morloc environment
     #[command(display_order = 1)]
-    #[command(after_help = "Examples:\n  morloc-manager new\n  morloc-manager new myenv --version 0.69.0\n  morloc-manager new myenv --image ubuntu:22.04 --dockerfile ./Dockerfile")]
+    #[command(after_help = "Examples:\n  morloc-manager new\n  morloc-manager new myenv --version 0.73.0\n  morloc-manager new myenv --image ubuntu:22.04 --dockerfile ./Dockerfile\n\nDefault (when --version and --image are both omitted): pulls the :edge tag\nfrom the morloc registry and records the resolved version.")]
     New {
         /// Environment name (default: derived from base image version)
         name: Option<String>,
@@ -134,6 +134,9 @@ enum Cmd {
         /// Skip interactive wizard, use defaults for unspecified options
         #[arg(long)]
         non_interactive: bool,
+        /// Do not activate the new environment (keep current selection)
+        #[arg(long)]
+        no_activate: bool,
     },
     /// Run a command in the active environment
     #[command(display_order = 2)]
@@ -183,6 +186,9 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     Info {
         /// Environment name (show details for this environment)
         name: Option<String>,
+        /// Look up the system-scope environment (when name is shadowed locally)
+        #[arg(long)]
+        system: bool,
     },
     /// Select an environment
     #[command(display_order = 6)]
@@ -197,7 +203,7 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
 
     /// Rebuild an environment
     #[command(display_order = 7)]
-    #[command(after_help = "Examples:\n  morloc-manager update              # rebuild active environment\n  morloc-manager update myenv        # rebuild a specific environment\n  morloc-manager update --shm-size 1g\n  morloc-manager update --dockerfile ./new.Dockerfile -i ./data")]
+    #[command(after_help = "Examples:\n  morloc-manager update              # rebuild active environment\n  morloc-manager update myenv        # rebuild a specific environment\n  morloc-manager update --shm-size 1g\n  morloc-manager update --dockerfile ./new.Dockerfile -i ./data\n  morloc-manager update myenv --reinit  # re-run morloc init in myenv")]
     Update {
         /// Environment name (default: active environment)
         name: Option<String>,
@@ -256,7 +262,7 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Export installed state as a frozen artifact
     #[command(display_order = 22)]
-    #[command(after_help = "Examples:\n  morloc-manager freeze\n  morloc-manager freeze -o ./my-freeze")]
+    #[command(after_help = "Examples:\n  morloc-manager freeze\n  morloc-manager freeze -o ./my-freeze\n\nRequires at least one program compiled with 'morloc make --install'.")]
     Freeze {
         /// Output directory
         #[arg(short, long)]
@@ -521,7 +527,7 @@ fn check_podman_additional_stores(engine: ContainerEngine) -> bool {
         // No rootful store exists, nothing to configure
         return true;
     }
-    // Check system and user storage.conf for additionalimagestore
+    // Check system and user storage.conf for additionalimagestores
     for path in &[
         "/etc/containers/storage.conf",
         &format!(
@@ -543,11 +549,11 @@ fn check_podman_additional_stores(engine: ContainerEngine) -> bool {
 fn warn_podman_additional_stores() {
     eprintln!("Warning: Podman is not configured to see system (rootful) images.");
     eprintln!("  Non-root users will not be able to run system environments.");
-    eprintln!("  To fix, add to /etc/containers/storage.conf:");
+    eprintln!("  To fix, add to the [storage.options] section of /etc/containers/storage.conf:");
     eprintln!();
-    eprintln!("    [storage.options.overlay]");
-    eprintln!("    additionalimagestore = [\"/var/lib/containers/storage\"]");
+    eprintln!("    additionalimagestores = [\"/var/lib/containers/storage\"]");
     eprintln!();
+    eprintln!("  (No restart needed; Podman reads storage.conf on each invocation.)");
 }
 
 // ======================================================================
@@ -558,32 +564,30 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
     match cmd {
         // ---- setup ----
         Cmd::Setup { engine, system } => {
+            // With no --engine, show the current engine settings
+            if engine.is_none() {
+                let local = cfg::read_config::<Config>(&cfg::config_path(Scope::Local)).ok();
+                let sys = cfg::read_config::<Config>(&cfg::config_path(Scope::System)).ok();
+                println!("Local engine:   {}",
+                    local.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
+                println!("System engine:  {}",
+                    sys.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
+                println!();
+                println!("Set with: morloc-manager setup --engine <podman|docker>");
+                return Ok(());
+            }
             if system { check_system_write_access()?; }
             let scope = resolve_scope(system);
-            let resolved_engine = match engine {
-                Some(e) => {
-                    let eng: ContainerEngine = e.into();
-                    check_docker_socket(eng);
-                    eng
-                }
-                None => {
-                    if io::stdin().is_terminal() {
-                        interactive_engine_choice()?
-                    } else {
-                        return Err(ManagerError::EnvError(
-                            "Specify an engine: morloc-manager setup --engine podman".to_string()
-                        ));
-                    }
-                }
-            };
+            let eng: ContainerEngine = engine.unwrap().into();
+            check_docker_socket(eng);
             let cfg_path = cfg::config_path(scope);
             let base_cfg = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
             let new_cfg = Config {
-                engine: resolved_engine,
+                engine: eng,
                 ..base_cfg
             };
             cfg::write_config(&cfg_path, &new_cfg)?;
-            eprintln!("Engine set to: {}", display_engine(resolved_engine));
+            eprintln!("Engine set to: {}", display_engine(eng));
             Ok(())
         }
 
@@ -602,6 +606,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             system,
             no_init,
             non_interactive,
+            no_activate,
         } => {
             if system { check_system_write_access()?; }
             let scope = resolve_scope(system);
@@ -819,13 +824,35 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 eprintln!("Edit it, then run: morloc-manager update {env_name}");
             }
 
-            // Auto-select
+            // Save the previous active env so --no-activate can restore it
+            let prev_active = if no_activate {
+                cfg::read_active_config().and_then(|c| c.active_env)
+            } else {
+                None
+            };
+
+            // Activate the new env (needed at least temporarily for morloc init)
             environment::select_environment(&env_name, scope)?;
-            eprintln!("Created and activated environment: {env_name}");
+            if !no_activate {
+                eprintln!("Created and activated environment: {env_name}");
+            }
 
             // Run morloc init
             if !no_init {
                 run_morloc_init(verbose)?;
+            }
+
+            // Restore previous active env if --no-activate
+            if no_activate {
+                let cfg_path = cfg::config_path(Scope::Local);
+                if let Ok(cfg) = cfg::read_config::<Config>(&cfg_path) {
+                    let new_cfg = Config { active_env: prev_active.clone(), ..cfg };
+                    let _ = cfg::write_config(&cfg_path, &new_cfg);
+                }
+                match prev_active {
+                    Some(prev) => eprintln!("Created environment: {env_name} (active remains: {prev})"),
+                    None => eprintln!("Created environment: {env_name}"),
+                }
             }
 
             eprintln!("{}", bold_green(&format!("Environment '{env_name}' is ready.")));
@@ -948,10 +975,19 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- info ----
-        Cmd::Info { name } => {
+        Cmd::Info { name, system } => {
             if let Some(env_name) = name {
                 // Detailed info for a specific environment
-                let scope = cfg::find_env_scope(&env_name)?;
+                let scope = if system {
+                    if !cfg::env_config_path(Scope::System, &env_name).is_file() {
+                        return Err(ManagerError::EnvironmentNotFound(format!(
+                            "{env_name} (in system scope)"
+                        )));
+                    }
+                    Scope::System
+                } else {
+                    cfg::find_env_scope(&env_name)?
+                };
                 let ec = cfg::read_env_config(scope, &env_name)?;
                 let data_dir = cfg::env_data_dir(scope, &env_name);
                 let active = cfg::read_active_config()
@@ -1169,17 +1205,9 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             }
 
             if reinit {
-                // --reinit runs morloc init inside the target environment's
-                // container, which requires the target to be the active env.
-                let active = environment::resolve_active_environment().ok()
-                    .map(|(n, _, _)| n);
-                if active.as_deref() != Some(env_name.as_str()) {
-                    return Err(ManagerError::EnvError(format!(
-                        "--reinit requires '{env_name}' to be the active environment.\n  \
-                         Run: morloc-manager select {env_name}"
-                    )));
-                }
-                run_morloc_init(verbose)?;
+                // Re-read the config (apply_environment may have updated it)
+                let ec = cfg::read_env_config(env_scope, &env_name)?;
+                run_morloc_init_for(Some((env_name.clone(), env_scope, ec)), verbose)?;
             }
 
             eprintln!("{}", bold_green(&format!("Environment '{env_name}' updated.")));
@@ -1210,11 +1238,25 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             }
             let (env_name, env_scope, ec) = environment::resolve_active_environment()?;
             let engine = ec.engine;
-            let ver = ec.morloc_version.unwrap_or_else(|| {
-                eprintln!("Warning: environment has no morloc version recorded (created with --image). Using 0.0.0 in manifest.");
-                eprintln!("  unfreeze will require --base to specify a base image.");
-                Version::new(0, 0, 0)
-            });
+            // Always detect the version from the container — the recorded
+            // value can drift if the image was rebuilt or retagged.
+            eprintln!("Detecting morloc version from image...");
+            let detected = environment::detect_morloc_version(ec.engine, ec.active_image())?;
+            if let Some(recorded) = ec.morloc_version {
+                if recorded != detected {
+                    eprintln!(
+                        "Warning: recorded morloc version ({}) does not match image ({}). Using image version.",
+                        recorded.show(), detected.show()
+                    );
+                }
+            }
+            // Cache the authoritative version back into the config
+            if ec.morloc_version != Some(detected) {
+                let mut updated = ec.clone();
+                updated.morloc_version = Some(detected);
+                let _ = cfg::write_env_config(env_scope, &env_name, &updated);
+            }
+            let ver = detected;
             let data_dir = cfg::env_data_dir(env_scope, &env_name);
             freeze::freeze_from_dir(env_scope, ver, engine, &data_dir.to_string_lossy(), output_dir)
         }
@@ -1242,6 +1284,10 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             let image = ec.active_image().to_string();
             let data_dir = cfg::env_data_dir(env_scope, &env_name);
             let container_name = format!("morloc-serve-{env_name}");
+            // Warn if we're about to replace a running container
+            if container::container_exists(ec.engine, &container_name) {
+                eprintln!("Warning: replacing existing serve container '{container_name}'");
+            }
             let port_mappings = if port.is_empty() {
                 vec![(8080, 8080)]
             } else {
@@ -1306,7 +1352,19 @@ fn run_in_container(
     shell: bool,
     args: &[String],
 ) -> Result<()> {
-    let (env_name, env_scope, ec) = environment::resolve_active_environment()?;
+    run_in_container_for(None, verbose, shell, args)
+}
+
+fn run_in_container_for(
+    target: Option<(String, Scope, EnvironmentConfig)>,
+    verbose: bool,
+    shell: bool,
+    args: &[String],
+) -> Result<()> {
+    let (env_name, env_scope, ec) = match target {
+        Some(t) => t,
+        None => environment::resolve_active_environment()?,
+    };
     let engine = ec.engine;
     let image = ec.active_image().to_string();
     let data_dir = cfg::env_data_dir(env_scope, &env_name);
@@ -1321,10 +1379,8 @@ fn run_in_container(
             return Err(ManagerError::EnvError(format!(
                 "Image '{image}' not found. The environment '{env_name}' is a system environment \
                  but Podman is not configured to see rootful images.\n\
-                 Add to /etc/containers/storage.conf:\n\n  \
-                 [storage.options.overlay]\n  \
-                 additionalimagestore = [\"/var/lib/containers/storage\"]\n\n\
-                 Then restart Podman: podman system reset (warning: removes local images)"
+                 Add to the [storage.options] section of /etc/containers/storage.conf:\n\n  \
+                 additionalimagestores = [\"/var/lib/containers/storage\"]\n"
             )));
         }
         return Err(ManagerError::EnvError(format!(
@@ -1462,13 +1518,20 @@ fn run_with_config(
 }
 
 fn run_morloc_init(verbose: bool) -> Result<()> {
+    run_morloc_init_for(None, verbose)
+}
+
+fn run_morloc_init_for(
+    target: Option<(String, Scope, EnvironmentConfig)>,
+    verbose: bool,
+) -> Result<()> {
     let init_args: Vec<String> = if verbose {
         ["morloc", "init", "-f"].iter().map(|s| s.to_string()).collect()
     } else {
         ["morloc", "init", "-f", "-q"].iter().map(|s| s.to_string()).collect()
     };
     eprintln!("Initializing morloc (this may take several minutes)...");
-    run_in_container(verbose, false, &init_args)
+    run_in_container_for(target, verbose, false, &init_args)
 }
 
 fn normalize_trailing(p: &str) -> String {

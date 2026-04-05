@@ -154,6 +154,33 @@ pub fn pull_version_image(engine: ContainerEngine, ver: &Version) -> Result<Stri
     Ok(image_ref)
 }
 
+/// Detect the morloc version by running `morloc --version` inside the image.
+pub fn detect_morloc_version(engine: ContainerEngine, image: &str) -> Result<Version> {
+    let exe = engine_executable(engine);
+    let output = Command::new(exe)
+        .args(["run", "--rm", image, "morloc", "--version"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| ManagerError::EnvError(format!("Failed to run container: {e}")))?;
+
+    if !output.status.success() {
+        return Err(ManagerError::EnvError(format!(
+            "Image '{image}' does not have a working morloc binary: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let ver_out = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let ver_str = ver_out.split_whitespace().last().unwrap_or(&ver_out);
+    ver_str.parse().map_err(|_| {
+        ManagerError::EnvError(format!(
+            "Could not parse morloc version from image '{image}' output: {ver_out}"
+        ))
+    })
+}
+
 /// Pull a custom image (not from morloc registry).
 pub fn pull_custom_image(engine: ContainerEngine, image: &str) -> Result<()> {
     if image_exists_locally(engine, image) {
