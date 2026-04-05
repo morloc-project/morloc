@@ -180,11 +180,17 @@ captureDeclDocs pos name = do
 parseDocKV :: Text -> (Text, Text)
 parseDocKV txt =
   let stripped = T.strip txt
+      -- For free-form description lines, trim only a single leading space
+      -- (the conventional space after `--'`) so that authors can indent
+      -- list items, code blocks, etc. using additional spaces.
+      descLine = T.stripEnd $ case T.uncons txt of
+        Just (' ', rest) -> rest
+        _ -> txt
    in case T.breakOn ":" stripped of
         (key, rest)
           | not (T.null rest) && not (T.any (== ' ') (T.strip key)) ->
               (T.strip key, T.strip (T.drop 1 rest))
-        _ -> ("", stripped)
+        _ -> ("", descLine)
 
 parseCliOpt :: Text -> Maybe CliOpt
 parseCliOpt txt = case T.unpack (T.strip txt) of
