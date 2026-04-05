@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use crate::config;
 use crate::container;
 use crate::error::{ManagerError, Result};
@@ -172,10 +173,12 @@ fn scan_modules(fdb_dir: &str) -> Vec<ModuleEntry> {
         .filter_map(|e| {
             let bytes = fs::read(e.path()).ok()?;
             let stub: ModuleStub = serde_json::from_slice(&bytes).ok()?;
+            let digest = Sha256::digest(&bytes);
+            let sha256: String = digest.iter().map(|b| format!("{b:02x}")).collect();
             Some(ModuleEntry {
                 name: stub.name,
                 version: stub.version,
-                sha256: String::new(),
+                sha256,
             })
         })
         .collect()

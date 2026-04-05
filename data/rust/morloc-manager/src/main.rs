@@ -1276,25 +1276,35 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
         // ---- status ----
         Cmd::Status => {
-            // List containers from both engines (if installed)
-            let mut any_printed = false;
-            for engine in [ContainerEngine::Podman, ContainerEngine::Docker] {
-                let exe = match engine {
-                    ContainerEngine::Podman => "podman",
-                    ContainerEngine::Docker => "docker",
-                };
-                if which(exe) {
-                    if any_printed {
-                        println!();
+            // If the user has chosen an engine via `setup`, query only that
+            // engine. Otherwise (no setup yet) iterate over all installed
+            // engines.
+            match cfg::read_active_config().map(|c| c.engine) {
+                Some(engine) => {
+                    serve::list_serve_containers(engine)?;
+                    Ok(())
+                }
+                None => {
+                    let mut any_printed = false;
+                    for engine in [ContainerEngine::Podman, ContainerEngine::Docker] {
+                        let exe = match engine {
+                            ContainerEngine::Podman => "podman",
+                            ContainerEngine::Docker => "docker",
+                        };
+                        if which(exe) {
+                            if any_printed {
+                                println!();
+                            }
+                            let _ = serve::list_serve_containers(engine);
+                            any_printed = true;
+                        }
                     }
-                    let _ = serve::list_serve_containers(engine);
-                    any_printed = true;
+                    if !any_printed {
+                        return Err(ManagerError::EngineNotFound);
+                    }
+                    Ok(())
                 }
             }
-            if !any_printed {
-                return Err(ManagerError::EngineNotFound);
-            }
-            Ok(())
         }
 
         // ---- logs ----

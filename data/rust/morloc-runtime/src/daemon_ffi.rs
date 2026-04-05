@@ -1675,7 +1675,9 @@ pub unsafe extern "C" fn daemon_run(
         );
         let mut addr: libc::sockaddr_in = std::mem::zeroed();
         addr.sin_family = libc::AF_INET as libc::sa_family_t;
-        addr.sin_addr.s_addr = u32::from_be(0x7f000001);
+        // HTTP router is externally reachable; bind to all interfaces so that
+        // container port mappings (docker -p) can reach it.
+        addr.sin_addr.s_addr = libc::INADDR_ANY.to_be();
         addr.sin_port = ((*config).http_port as u16).to_be();
         if libc::bind(
             http_fd,
