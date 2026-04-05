@@ -255,6 +255,11 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
         ec.engine = engine;
     }
     if let Some(ref shm) = opts.shm_size {
+        if !is_valid_shm_size(shm) {
+            return Err(ManagerError::EnvError(format!(
+                "Invalid --shm-size '{shm}'. Use format like: 512m, 1g, 2048k"
+            )));
+        }
         ec.shm_size = shm.clone();
     }
 
@@ -486,6 +491,18 @@ fn resolve_active_env_name() -> Result<String> {
 // ======================================================================
 // Internal
 // ======================================================================
+
+fn is_valid_shm_size(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let (digits, suffix) = if s.ends_with(|c: char| "bkmgBKMG".contains(c)) {
+        (&s[..s.len() - 1], true)
+    } else {
+        (s, false)
+    };
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) && (suffix || !digits.is_empty())
+}
 
 fn hash_file(path: &Path) -> Result<String> {
     let contents = fs::read(path).map_err(|e| {

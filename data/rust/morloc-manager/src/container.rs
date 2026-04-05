@@ -177,6 +177,25 @@ pub fn container_remove(engine: ContainerEngine, name_or_id: &str) -> ExitStatus
     code
 }
 
+/// Quiet container removal: suppresses stderr (for pre-emptive cleanup).
+pub fn container_remove_quiet(engine: ContainerEngine, name_or_id: &str) -> ExitStatus {
+    let exe = engine_executable(engine);
+    let (code, _, _) = run_process_quiet(exe, &["rm".to_string(), "-f".to_string(), name_or_id.to_string()]);
+    code
+}
+
+/// Check whether a container with this name exists (running or stopped).
+pub fn container_exists(engine: ContainerEngine, name: &str) -> bool {
+    let exe = engine_executable(engine);
+    Command::new(exe)
+        .args(["container", "inspect", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 pub fn remove_image(engine: ContainerEngine, tag: &str) -> bool {
     let exe = engine_executable(engine);
     let (status, _, _) = run_process(exe, &["rmi".to_string(), tag.to_string()]);
@@ -308,7 +327,6 @@ fn run_process(exe: &str, args: &[String]) -> (ExitStatus, String, String) {
 
 /// Run a process with all output captured (no streaming).
 /// Used when stderr must be parsed (e.g., for error classification).
-#[allow(dead_code)]
 fn run_process_quiet(exe: &str, args: &[String]) -> (ExitStatus, String, String) {
     let output = Command::new(exe)
         .args(args)

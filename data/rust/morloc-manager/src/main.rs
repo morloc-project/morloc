@@ -36,6 +36,7 @@ fn build_help_template() -> String {
 {{usage-heading}} {{usage}}
 
 {bu}Development{r}
+  {b}setup{r}      Configure the default container engine
   {b}new{r}        Build a new morloc environment
   {b}run{r}        Run a command in the active environment
   {b}rm{r}         Remove a morloc environment
@@ -80,6 +81,17 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     // -- Development --
+    /// Configure the default container engine
+    #[command(display_order = 0)]
+    #[command(after_help = "Examples:\n  morloc-manager setup --engine podman\n  morloc-manager setup --engine docker\n  sudo morloc-manager setup --engine podman --system")]
+    Setup {
+        /// Container engine: podman or docker
+        #[arg(long, value_enum)]
+        engine: Option<EngineArg>,
+        /// Apply to system scope (requires root)
+        #[arg(long)]
+        system: bool,
+    },
     /// Build a new morloc environment
     #[command(display_order = 1)]
     #[command(after_help = "Examples:\n  morloc-manager new\n  morloc-manager new myenv --version 0.69.0\n  morloc-manager new myenv --image ubuntu:22.04 --dockerfile ./Dockerfile")]
@@ -105,7 +117,7 @@ enum Cmd {
         #[arg(long)]
         flagfile: Option<String>,
         /// A single engine flag (may be repeated)
-        #[arg(short = 'x', long = "engine-arg")]
+        #[arg(short = 'x', long = "engine-arg", allow_hyphen_values = true)]
         engine_arg: Vec<String>,
         /// Container engine: podman or docker
         #[arg(long, value_enum)]
@@ -205,7 +217,7 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         #[arg(long)]
         flagfile: Option<String>,
         /// Add an engine flag (repeatable; appends unless --flagfile replaces)
-        #[arg(short = 'x', long = "engine-arg")]
+        #[arg(short = 'x', long = "engine-arg", allow_hyphen_values = true)]
         engine_arg: Vec<String>,
         /// Change the container engine
         #[arg(long, value_enum)]
@@ -213,6 +225,9 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Change shared memory size
         #[arg(long)]
         shm_size: Option<String>,
+        /// Generate a stub Dockerfile (fails if one already exists)
+        #[arg(long)]
+        dockerfile_stub: bool,
         /// Skip Dockerfile build
         #[arg(long)]
         no_build: bool,
@@ -246,6 +261,9 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Output directory
         #[arg(short, long)]
         output: Option<String>,
+        /// Overwrite existing output directory
+        #[arg(long)]
+        force: bool,
     },
     /// Build a serve image from frozen state
     #[command(display_order = 23)]
@@ -356,7 +374,7 @@ fn check_system_write_access() -> Result<()> {
         match fs::write(&test_path, b"") {
             Ok(_) => { let _ = fs::remove_file(&test_path); Ok(()) }
             Err(_) => Err(ManagerError::ConfigPermissionDenied(format!(
-                "{}. --system requires root. Run with: sudo morloc-manager <command> --system",
+                "{}. System-scope operations require root. Re-run with sudo.",
                 sys_dir.display()
             )))
         }
@@ -364,7 +382,7 @@ fn check_system_write_access() -> Result<()> {
         match fs::create_dir_all(&sys_dir) {
             Ok(_) => Ok(()),
             Err(_) => Err(ManagerError::ConfigPermissionDenied(format!(
-                "{}. --system requires root. Run with: sudo morloc-manager <command> --system",
+                "{}. System-scope operations require root. Re-run with sudo.",
                 sys_dir.display()
             )))
         }
@@ -467,6 +485,27 @@ fn check_docker_socket(engine: ContainerEngine) {
     }
 }
 
+/// Returns Err with a clear message if Docker is selected but its socket is unreachable.
+fn require_docker_socket(engine: ContainerEngine) -> Result<()> {
+    use std::path::Path;
+    if engine != ContainerEngine::Docker {
+        return Ok(());
+    }
+    let socket = Path::new("/var/run/docker.sock");
+    if !socket.exists() {
+        return Err(ManagerError::EnvError(
+            "Docker socket not found at /var/run/docker.sock. Ensure Docker is installed and the daemon is running.".to_string()
+        ));
+    }
+    if nix::unistd::access(socket, nix::unistd::AccessFlags::R_OK).is_err() {
+        return Err(ManagerError::EnvError(
+            "Cannot access Docker socket. Add your user to the docker group:\n  \
+             sudo usermod -aG docker $USER  # then log out and back in".to_string()
+        ));
+    }
+    Ok(())
+}
+
 /// Check if Podman is configured to see rootful images from rootless contexts.
 /// Returns true if additionalimagestore is configured (or not needed).
 fn check_podman_additional_stores(engine: ContainerEngine) -> bool {
@@ -517,6 +556,37 @@ fn warn_podman_additional_stores() {
 
 fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
     match cmd {
+        // ---- setup ----
+        Cmd::Setup { engine, system } => {
+            if system { check_system_write_access()?; }
+            let scope = resolve_scope(system);
+            let resolved_engine = match engine {
+                Some(e) => {
+                    let eng: ContainerEngine = e.into();
+                    check_docker_socket(eng);
+                    eng
+                }
+                None => {
+                    if io::stdin().is_terminal() {
+                        interactive_engine_choice()?
+                    } else {
+                        return Err(ManagerError::EnvError(
+                            "Specify an engine: morloc-manager setup --engine podman".to_string()
+                        ));
+                    }
+                }
+            };
+            let cfg_path = cfg::config_path(scope);
+            let base_cfg = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
+            let new_cfg = Config {
+                engine: resolved_engine,
+                ..base_cfg
+            };
+            cfg::write_config(&cfg_path, &new_cfg)?;
+            eprintln!("Engine set to: {}", display_engine(resolved_engine));
+            Ok(())
+        }
+
         // ---- new ----
         Cmd::New {
             name,
@@ -536,19 +606,32 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             if system { check_system_write_access()?; }
             let scope = resolve_scope(system);
 
-            // Resolve engine
+            // Resolve engine: explicit flag > config default > auto-detect single > error
             let resolved_engine = if let Some(e) = engine {
                 let eng: ContainerEngine = e.into();
                 check_docker_socket(eng);
                 eng
             } else if let Some(cfg) = cfg::read_active_config() {
                 cfg.engine
-            } else if !non_interactive && io::stdin().is_terminal() {
-                let eng = interactive_engine_choice()?;
-                check_docker_socket(eng);
-                eng
             } else {
-                return Err(ManagerError::EngineNotFound);
+                // No config — try auto-detection
+                let has_podman = which("podman");
+                let has_docker = which("docker");
+                match (has_podman, has_docker) {
+                    (true, false) => ContainerEngine::Podman,
+                    (false, true) => {
+                        check_docker_socket(ContainerEngine::Docker);
+                        ContainerEngine::Docker
+                    }
+                    (true, true) => {
+                        return Err(ManagerError::EnvError(
+                            "Both podman and docker are installed. Set a default with:\n  \
+                             morloc-manager setup --engine podman\n  \
+                             morloc-manager setup --engine docker".to_string()
+                        ));
+                    }
+                    (false, false) => return Err(ManagerError::EngineNotFound),
+                }
             };
 
             // Ensure config exists (write default if first run)
@@ -593,6 +676,12 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 // version resolution below (default to version string)
                 String::new()
             };
+
+            if version.is_some() && image.is_some() {
+                return Err(ManagerError::EnvError(
+                    "--version and --image are mutually exclusive".to_string()
+                ));
+            }
 
             // Step 2: Resolve base image and version
             let (base_image, original_image, morloc_ver) = if let Some(ref ver_str) = version {
@@ -653,7 +742,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     let default_name = ver.show();
                     if cfg::env_config_path(scope, &default_name).is_file() {
                         return Err(ManagerError::EnvError(format!(
-                            "Environment '{}' already exists. Use --name to specify a different name.",
+                            "Environment '{}' already exists. Specify a different name: morloc-manager new <NAME> ...",
                             default_name
                         )));
                     }
@@ -701,7 +790,6 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 fs::write(&stub_path, &stub_content).map_err(|e| {
                     ManagerError::EnvError(format!("Failed to write stub Dockerfile: {e}"))
                 })?;
-                eprintln!("Generated stub Dockerfile: {}", stub_path.display());
                 Some(stub_path.to_string_lossy().to_string())
             } else {
                 None
@@ -724,6 +812,12 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             };
 
             environment::apply_environment(&opts)?;
+
+            if dockerfile_stub {
+                let df_path = cfg::env_dockerfile_path(scope, &env_name);
+                eprintln!("Stub Dockerfile: {}", df_path.display());
+                eprintln!("Edit it, then run: morloc-manager update {env_name}");
+            }
 
             // Auto-select
             environment::select_environment(&env_name, scope)?;
@@ -763,31 +857,48 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             if names.is_empty() {
                 return Err(ManagerError::EnvError("No environment names specified".to_string()));
             }
+            // Attempt each removal; collect failures, continue past errors
+            let mut failures: Vec<String> = Vec::new();
             for name in &names {
-                let scope = if system {
-                    Scope::System
-                } else {
-                    cfg::find_env_scope(name)?
-                };
-                if scope == Scope::System && !system {
-                    check_system_write_access()?;
-                }
-
-                // Check if active
-                if !force {
-                    if let Some(cfg) = cfg::read_active_config() {
-                        if cfg.active_env.as_deref() == Some(name.as_str()) {
-                            return Err(ManagerError::EnvError(format!(
-                                "Cannot remove active environment '{name}'. Use --force or select a different environment first."
-                            )));
+                let result: Result<()> = (|| {
+                    let scope = if system {
+                        Scope::System
+                    } else {
+                        cfg::find_env_scope(name)?
+                    };
+                    if scope == Scope::System && !system {
+                        check_system_write_access()?;
+                    }
+                    if !force {
+                        if let Some(cfg) = cfg::read_active_config() {
+                            if cfg.active_env.as_deref() == Some(name.as_str()) {
+                                return Err(ManagerError::EnvError(format!(
+                                    "active environment (use --force)"
+                                )));
+                            }
                         }
                     }
+                    let ec = cfg::read_env_config(scope, name)
+                        .map_err(|_| ManagerError::EnvironmentNotFound(name.to_string()))?;
+                    environment::remove_environment(ec.engine, scope, name)?;
+                    Ok(())
+                })();
+                match result {
+                    Ok(()) => eprintln!("Removed environment: {name}"),
+                    Err(e) => failures.push(format!("{name}: {e}")),
                 }
-
-                let ec = cfg::read_env_config(scope, name)
-                    .map_err(|_| ManagerError::EnvironmentNotFound(name.to_string()))?;
-                environment::remove_environment(ec.engine, scope, name)?;
-                eprintln!("Removed environment: {name}");
+            }
+            if !failures.is_empty() {
+                eprintln!();
+                eprintln!("Failed to remove {} environment(s):", failures.len());
+                for f in &failures {
+                    eprintln!("  {f}");
+                }
+                return Err(ManagerError::EnvError(format!(
+                    "{} of {} removals failed",
+                    failures.len(),
+                    names.len()
+                )));
             }
             Ok(())
         }
@@ -800,9 +911,11 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
             let show_local = !system || local;
             let show_system = !local || system;
+            let mut total = 0;
 
             if show_local {
                 let envs = environment::list_environments(Scope::Local, active_str);
+                total += envs.len();
                 for e in envs {
                     let active_mark = if e.active { " (active)" } else { "" };
                     let ver_mark = e.morloc_version
@@ -813,6 +926,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             }
             if show_system {
                 let envs = environment::list_environments(Scope::System, active_str);
+                total += envs.len();
                 if !envs.is_empty() {
                     if show_local {
                         println!();
@@ -826,6 +940,9 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                         println!("  {}{}{}", e.name, ver_mark, active_mark);
                     }
                 }
+            }
+            if total == 0 {
+                println!("No environments found. Create one with: morloc-manager new");
             }
             Ok(())
         }
@@ -870,10 +987,9 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 let system_cfg = cfg::read_config::<Config>(&cfg::config_path(Scope::System)).ok();
                 let se_mode = detect_selinux();
 
-                let active_env = local_cfg.as_ref()
-                    .and_then(|c| c.active_env.as_deref())
-                    .or_else(|| system_cfg.as_ref().and_then(|c| c.active_env.as_deref()))
-                    .unwrap_or("none");
+                let active_env = environment::resolve_active_environment()
+                    .map(|(name, _, _)| name)
+                    .unwrap_or_else(|_| "none".to_string());
 
                 let se_str = match se_mode {
                     SELinuxMode::Enforcing => "enforcing",
@@ -900,9 +1016,9 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     println!("  {:<20} {} ({})", label, path.display(), status);
                 }
 
-                let active_str = cfg::read_active_config().and_then(|c| c.active_env);
+                let active_str = if active_env == "none" { None } else { Some(active_env.as_str()) };
 
-                let local_envs = environment::list_environments(Scope::Local, active_str.as_deref());
+                let local_envs = environment::list_environments(Scope::Local, active_str);
                 println!("\nLocal environments:");
                 if local_envs.is_empty() {
                     println!("  (none)");
@@ -916,7 +1032,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     }
                 }
 
-                let system_envs = environment::list_environments(Scope::System, active_str.as_deref());
+                let system_envs = environment::list_environments(Scope::System, active_str);
                 if !system_envs.is_empty() {
                     println!("\nSystem environments:");
                     for e in &system_envs {
@@ -946,7 +1062,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
         // ---- update ----
         Cmd::Update {
-            name, image, version, dockerfile, include, flagfile,
+            name, image, version, dockerfile, dockerfile_stub, include, flagfile,
             engine_arg, engine, shm_size, no_build, reinit,
         } => {
             let (env_name, env_scope) = match name {
@@ -961,6 +1077,55 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             };
             if env_scope == Scope::System {
                 check_system_write_access()?;
+            }
+
+            // Handle --dockerfile-stub: generate stub if no Dockerfile exists
+            let resolved_dockerfile = if dockerfile.is_some() && dockerfile_stub {
+                return Err(ManagerError::EnvError(
+                    "Cannot use both --dockerfile and --dockerfile-stub".to_string(),
+                ));
+            } else if dockerfile_stub {
+                let df_path = cfg::env_dockerfile_path(env_scope, &env_name);
+                if df_path.exists() {
+                    return Err(ManagerError::EnvError(format!(
+                        "Dockerfile already exists: {}\nEdit it directly, then run: morloc-manager update {env_name}",
+                        df_path.display()
+                    )));
+                }
+                let stub_dir = cfg::data_dir(env_scope).join("tmp");
+                fs::create_dir_all(&stub_dir).map_err(|e| {
+                    ManagerError::EnvError(format!("Failed to create tmp dir: {e}"))
+                })?;
+                let stub_path = stub_dir.join(format!("{env_name}.Dockerfile"));
+                let stub_content = format!(
+                    "# morloc environment: {env_name}\n\
+                     # Edit this file, then rebuild with: morloc-manager update\n\
+                     \n\
+                     # CONTAINER_BASE is replaced at build time with the environment's base image\n\
+                     ARG CONTAINER_BASE=scratch\n\
+                     FROM ${{CONTAINER_BASE}}\n\
+                     \n\
+                     # Example: install system packages\n\
+                     # RUN apt-get update && apt-get install -y jq && rm -rf /var/lib/apt/lists/*\n\
+                     \n\
+                     # Example: install Python packages\n\
+                     # RUN pip install scikit-learn pandas\n\
+                     \n\
+                     # Example: install R packages\n\
+                     # RUN R -e \"install.packages('ggplot2', repos='https://cloud.r-project.org')\"\n"
+                );
+                fs::write(&stub_path, &stub_content).map_err(|e| {
+                    ManagerError::EnvError(format!("Failed to write stub Dockerfile: {e}"))
+                })?;
+                Some(stub_path.to_string_lossy().to_string())
+            } else {
+                dockerfile
+            };
+
+            if version.is_some() && image.is_some() {
+                return Err(ManagerError::EnvError(
+                    "--version and --image are mutually exclusive".to_string()
+                ));
             }
 
             // Resolve base image if --version or --image provided
@@ -987,17 +1152,33 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 base_image,
                 original_image,
                 morloc_version: morloc_ver,
-                dockerfile,
+                dockerfile: resolved_dockerfile,
                 includes: include,
                 flagfile,
                 engine_args: engine_arg,
                 engine: engine.map(|e| e.into()),
                 shm_size,
-                skip_dockerfile_build: no_build,
+                skip_dockerfile_build: no_build || dockerfile_stub,
             };
             environment::apply_environment(&opts)?;
 
+            if dockerfile_stub {
+                let df_path = cfg::env_dockerfile_path(env_scope, &env_name);
+                eprintln!("Stub Dockerfile: {}", df_path.display());
+                eprintln!("Edit it, then run: morloc-manager update {env_name}");
+            }
+
             if reinit {
+                // --reinit runs morloc init inside the target environment's
+                // container, which requires the target to be the active env.
+                let active = environment::resolve_active_environment().ok()
+                    .map(|(n, _, _)| n);
+                if active.as_deref() != Some(env_name.as_str()) {
+                    return Err(ManagerError::EnvError(format!(
+                        "--reinit requires '{env_name}' to be the active environment.\n  \
+                         Run: morloc-manager select {env_name}"
+                    )));
+                }
                 run_morloc_init(verbose)?;
             }
 
@@ -1016,13 +1197,24 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- freeze ----
-        Cmd::Freeze { output } => {
+        Cmd::Freeze { output, force } => {
             let output_dir = output.as_deref().unwrap_or("./morloc-freeze");
+            // Protect against silently overwriting a previous freeze
+            let existing_tar = std::path::Path::new(output_dir).join("state.tar.gz");
+            if existing_tar.exists() && !force {
+                return Err(ManagerError::FreezeError(format!(
+                    "Output directory already contains a freeze: {}\n  \
+                     Use --force to overwrite, or specify a different -o path.",
+                    existing_tar.display()
+                )));
+            }
             let (env_name, env_scope, ec) = environment::resolve_active_environment()?;
             let engine = ec.engine;
-            let ver = ec.morloc_version.ok_or_else(|| {
-                ManagerError::FreezeError("Active environment has no morloc version set".to_string())
-            })?;
+            let ver = ec.morloc_version.unwrap_or_else(|| {
+                eprintln!("Warning: environment has no morloc version recorded (created with --image). Using 0.0.0 in manifest.");
+                eprintln!("  unfreeze will require --base to specify a base image.");
+                Version::new(0, 0, 0)
+            });
             let data_dir = cfg::env_data_dir(env_scope, &env_name);
             freeze::freeze_from_dir(env_scope, ver, engine, &data_dir.to_string_lossy(), output_dir)
         }
@@ -1075,8 +1267,25 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
         // ---- status ----
         Cmd::Status => {
-            let engine = ensure_engine()?;
-            serve::list_serve_containers(engine)
+            // List containers from both engines (if installed)
+            let mut any_printed = false;
+            for engine in [ContainerEngine::Podman, ContainerEngine::Docker] {
+                let exe = match engine {
+                    ContainerEngine::Podman => "podman",
+                    ContainerEngine::Docker => "docker",
+                };
+                if which(exe) {
+                    if any_printed {
+                        println!();
+                    }
+                    let _ = serve::list_serve_containers(engine);
+                    any_printed = true;
+                }
+            }
+            if !any_printed {
+                return Err(ManagerError::EngineNotFound);
+            }
+            Ok(())
         }
 
         // ---- logs ----
@@ -1102,6 +1311,9 @@ fn run_in_container(
     let image = ec.active_image().to_string();
     let data_dir = cfg::env_data_dir(env_scope, &env_name);
     let v_data_dir = data_dir.to_string_lossy().to_string();
+
+    // Fail fast with a clear message if docker socket is unreachable
+    require_docker_socket(engine)?;
 
     // Verify the image is accessible before attempting to run
     if !container::image_exists_locally(engine, &image) {
@@ -1233,14 +1445,19 @@ fn run_with_config(
     };
 
     let status = container_run_passthrough(engine, verbose, &cfg);
+    let code = status.code().unwrap_or(1);
     if status.success() {
         Ok(())
-    } else {
+    } else if code >= 125 {
+        // Exit 125+ = container engine error (not the user's program)
         Err(ManagerError::EngineError {
             engine,
-            code: status.code().unwrap_or(1),
-            stderr: "Container exited with error".to_string(),
+            code,
+            stderr: "Container engine error".to_string(),
         })
+    } else {
+        // Exit 1-124 = program exited with non-zero, pass through silently
+        std::process::exit(code);
     }
 }
 
@@ -1250,7 +1467,7 @@ fn run_morloc_init(verbose: bool) -> Result<()> {
     } else {
         ["morloc", "init", "-f", "-q"].iter().map(|s| s.to_string()).collect()
     };
-    eprintln!("Initializing morloc...");
+    eprintln!("Initializing morloc (this may take several minutes)...");
     run_in_container(verbose, false, &init_args)
 }
 

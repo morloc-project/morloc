@@ -29,7 +29,7 @@ pub fn freeze_from_dir(
     let programs = scan_programs(&format!("{v_data_dir}/fdb"));
     if programs.is_empty() {
         return Err(ManagerError::FreezeError(
-            "No morloc programs are installed. Install programs with 'morloc install' or compile with 'morloc make --install' before freezing.".to_string()
+            "No morloc programs are installed. Compile and install with 'morloc make --install' before freezing.".to_string()
         ));
     }
 
