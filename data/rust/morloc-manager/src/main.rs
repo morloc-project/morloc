@@ -414,43 +414,6 @@ fn ensure_engine() -> Result<ContainerEngine> {
     Err(ManagerError::SetupNotComplete(Scope::Local))
 }
 
-fn interactive_engine_choice() -> Result<ContainerEngine> {
-    let has_podman = which("podman");
-    let has_docker = which("docker");
-    match (has_podman, has_docker) {
-        (false, false) => Err(ManagerError::EngineNotFound),
-        (true, false) => {
-            eprintln!("Detected: podman");
-            Ok(ContainerEngine::Podman)
-        }
-        (false, true) => {
-            eprintln!("Detected: docker");
-            Ok(ContainerEngine::Docker)
-        }
-        (true, true) => {
-            eprintln!("Both podman and docker detected.");
-            eprintln!("  [1] podman (recommended)");
-            eprintln!("  [2] docker");
-            eprint!("Choose [1]: ");
-            io::stderr().flush().ok();
-            let mut input = String::new();
-            match io::stdin().read_line(&mut input) {
-                Ok(_) => {
-                    if input.trim() == "2" {
-                        Ok(ContainerEngine::Docker)
-                    } else {
-                        Ok(ContainerEngine::Podman)
-                    }
-                }
-                Err(_) => {
-                    eprintln!("\nNon-interactive, defaulting to podman.");
-                    Ok(ContainerEngine::Podman)
-                }
-            }
-        }
-    }
-}
-
 fn which(name: &str) -> bool {
     Command::new("which")
         .arg(name)

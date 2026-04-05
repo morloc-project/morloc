@@ -105,6 +105,7 @@ data DState = DState
   , dsSourceLines :: ![Text]
   , dsLangMap :: !(Map.Map Text Lang) -- alias -> Lang for all known languages
   , dsProjectRoot :: !(Maybe Path) -- project root (directory of entry-point file)
+  , dsTermDocs :: !(Map.Map EVar [Text]) -- declaration-level docstrings
   }
   deriving (Show)
 
@@ -162,6 +163,19 @@ lookupDocsAt :: Pos -> D [Text]
 lookupDocsAt pos = do
   docMap <- State.gets dsDocMap
   return (Map.findWithDefault [] pos docMap)
+
+-- | Capture declaration-level docstring lines, keyed by term name.
+-- Extracts only free description lines (the same way processArgDocLines
+-- does via docLines); key-value entries like metavar:, arg:, etc. are
+-- intentionally ignored at the declaration level since those describe
+-- type-signature interface details.
+captureDeclDocs :: Pos -> EVar -> D ()
+captureDeclDocs pos name = do
+  docs <- lookupDocsAt pos
+  let descLines = docLines (processArgDocLines docs)
+  case descLines of
+    [] -> return ()
+    _ -> State.modify (\s -> s { dsTermDocs = Map.insert name descLines (dsTermDocs s) })
 
 parseDocKV :: Text -> (Text, Text)
 parseDocKV txt =
@@ -707,6 +721,7 @@ desugarTopLevel (Loc sp (CSigE name sigType)) = do
   e <- freshExprSpan sp (SigE (Signature name Nothing et))
   return [e]
 desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
+  captureDeclDocs (startPos sp) name
   body' <- desugarExpr body
   whereDecls' <- concatMapM desugarTopLevel whereDecls
   e <- case params of
@@ -716,6 +731,7 @@ desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
       freshExprSpan sp (AssE name lam whereDecls')
   return [e]
 desugarTopLevel (Loc sp (CGuardedAssE name params guards defaultExpr whereDecls)) = do
+  captureDeclDocs (startPos sp) name
   body' <- desugarGuards sp guards defaultExpr
   whereDecls' <- concatMapM desugarTopLevel whereDecls
   e <- case params of

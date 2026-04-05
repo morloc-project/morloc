@@ -109,6 +109,9 @@ data MorlocState = MorlocState
   , stateOutfile :: Maybe Path
   , stateExports :: [Int]
   , stateName :: Map Int EVar
+  , stateTermDocs :: Map.Map EVar [Text]
+  -- ^ Declaration-level docstrings keyed by term name. Takes precedence over
+  -- signature docstrings for the command-level description.
   , stateManifoldConfig :: Map Int ManifoldConfig
   , stateSourceMap :: Map Int SrcLoc
   , stateSourceText :: Map Path Text
@@ -302,6 +305,7 @@ instance Defaultable MorlocState where
       , stateOutfile = Nothing
       , stateExports = []
       , stateName = Map.empty
+      , stateTermDocs = Map.empty
       , stateManifoldConfig = Map.empty
       , stateSourceMap = Map.empty
       , stateSourceText = Map.empty
