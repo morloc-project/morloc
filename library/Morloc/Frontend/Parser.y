@@ -845,11 +845,12 @@ data PState = PState
   , psLangMap :: !(Map.Map T.Text Lang) -- alias -> Lang for all known languages
   , psProjectRoot :: !(Maybe Path) -- project root (directory of entry-point file)
   , psTermDocs    :: !(Map.Map EVar [Text])
+  , psWarnings    :: ![Text] -- docstring warnings accumulated during desugar
   }
   deriving (Show)
 
 emptyPState :: PState
-emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty
+emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty []
 
 type P a = State.StateT PState (Either ParseError) a
 
@@ -939,6 +940,7 @@ toDState ps = DState
   , dsLangMap = psLangMap ps
   , dsProjectRoot = psProjectRoot ps
   , dsTermDocs = psTermDocs ps
+  , dsWarnings = psWarnings ps
   }
 
 fromDState :: PState -> DState -> PState
@@ -946,6 +948,7 @@ fromDState ps ds = ps
   { psExpIndex = dsExpIndex ds
   , psSourceMap = dsSourceMap ds
   , psTermDocs = dsTermDocs ds
+  , psWarnings = dsWarnings ds
   }
 
 -- | Run parse + desugar

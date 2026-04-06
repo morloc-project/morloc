@@ -87,6 +87,10 @@ parse f (Code code) = do
           { stateSourceMap = psSourceMap s <> stateSourceMap st
           , stateTermDocs = psTermDocs s <> stateTermDocs st
           })
+        -- emit any docstring warnings accumulated during desugar
+        case psWarnings s of
+          [] -> return ()
+          ws -> MM.tell ws
         return d
       ((mainModule, importedModule) : _) -> do
         importPath <- case Map.lookup mainModule m of
