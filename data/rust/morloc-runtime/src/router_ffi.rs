@@ -957,7 +957,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
         );
         let mut addr: libc::sockaddr_in = std::mem::zeroed();
         addr.sin_family = libc::AF_INET as libc::sa_family_t;
-        addr.sin_addr.s_addr = u32::from_be(0x7f000001);
+        addr.sin_addr.s_addr = libc::INADDR_ANY;
         addr.sin_port = ((*config).http_port as u16).to_be();
         if libc::bind(
             http_fd,
