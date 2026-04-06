@@ -105,6 +105,8 @@ data DState = DState
   , dsSourceLines :: ![Text]
   , dsLangMap :: !(Map.Map Text Lang) -- alias -> Lang for all known languages
   , dsProjectRoot :: !(Maybe Path) -- project root (directory of entry-point file)
+  , dsTermDocs :: !(Map.Map EVar [Text]) -- declaration-level docstrings
+  , dsWarnings :: ![Text] -- accumulated docstring warnings, drained by the caller
   }
   deriving (Show)
 
@@ -114,6 +116,10 @@ dfail :: Pos -> String -> D a
 dfail pos msg = do
   srcLines <- State.gets dsSourceLines
   State.lift (Left (ParseError pos msg [] srcLines))
+
+dwarn :: [Text] -> D ()
+dwarn [] = return ()
+dwarn ws = State.modify (\s -> s { dsWarnings = dsWarnings s <> ws })
 
 --------------------------------------------------------------------
 -- ID generation with proper spans
@@ -163,14 +169,54 @@ lookupDocsAt pos = do
   docMap <- State.gets dsDocMap
   return (Map.findWithDefault [] pos docMap)
 
-parseDocKV :: Text -> (Text, Text)
+-- | Capture declaration-level docstring lines, keyed by term name.
+-- Extracts only free description lines (the same way processArgDocLines
+-- does via docLines); key-value entries like metavar:, arg:, etc. are
+-- intentionally ignored at the declaration level since those describe
+-- type-signature interface details.
+captureDeclDocs :: Pos -> EVar -> D ()
+captureDeclDocs pos name = do
+  docs <- lookupDocsAt pos
+  vars <- processArgDocLinesD docs
+  let descLines = docLines vars
+  case descLines of
+    [] -> return ()
+    _ -> State.modify (\s -> s { dsTermDocs = Map.insert name descLines (dsTermDocs s) })
+
+-- | Result of classifying a single docstring line.
+data ParsedDocLine
+  = DocDirective !Text !Text  -- recognized `<key>: <value>` shape (key not yet validated against an allowlist)
+  | DocDesc !Text             -- free-form description line (possibly empty)
+  deriving (Show)
+
+-- | Classify one `--'` line into a directive or a description.
+--
+-- Rules:
+--  * A single leading space (the conventional space after `--'`) is trimmed
+--    from description lines so authors can indent list items with extra
+--    spaces. Trailing whitespace is stripped.
+--  * A leading backslash (after stripping surrounding whitespace) is an
+--    escape: it is consumed and the rest of the line becomes a description
+--    line with no directive parsing. Literal `\foo:` therefore needs
+--    `\\foo:` (standard backslash-doubling convention).
+--  * Otherwise, if the line starts with `<word>:` (no spaces in `<word>`)
+--    it is returned as a DocDirective. Validation against the allowlist
+--    of known directive names is done by the caller.
+parseDocKV :: Text -> ParsedDocLine
 parseDocKV txt =
   let stripped = T.strip txt
-   in case T.breakOn ":" stripped of
-        (key, rest)
-          | not (T.null rest) && not (T.any (== ' ') (T.strip key)) ->
-              (T.strip key, T.strip (T.drop 1 rest))
-        _ -> ("", stripped)
+      descLine = T.stripEnd $ case T.uncons txt of
+        Just (' ', rest) -> rest
+        _ -> txt
+   in case T.uncons stripped of
+        Just ('\\', rest) -> DocDesc (T.stripEnd rest)
+        _ -> case T.breakOn ":" stripped of
+          (key, colonRest)
+            | not (T.null colonRest)
+            , not (T.null key)
+            , not (T.any (== ' ') key) ->
+                DocDirective key (T.strip (T.drop 1 colonRest))
+          _ -> DocDesc descLine
 
 parseCliOpt :: Text -> Maybe CliOpt
 parseCliOpt txt = case T.unpack (T.strip txt) of
@@ -179,33 +225,79 @@ parseCliOpt txt = case T.unpack (T.strip txt) of
   '-' : c : [] -> Just (CliOptShort c)
   _ -> Nothing
 
-processArgDocLines :: [Text] -> ArgDocVars
-processArgDocLines = foldl processLine defaultValue
-  where
-    processLine d line = case parseDocKV line of
-      ("name", v) -> d {docName = Just v}
-      ("literal", v) -> d {docLiteral = Just (v == "true" || v == "True")}
-      ("unroll", v) -> d {docUnroll = Just (v == "true" || v == "True")}
-      ("default", v) -> d {docDefault = Just v}
-      ("metavar", v) -> d {docMetavar = Just v}
-      ("arg", v) -> d {docArg = parseCliOpt v}
-      ("true", v) -> d {docTrue = parseCliOpt v}
-      ("false", v) -> d {docFalse = parseCliOpt v}
-      ("return", v) -> d {docReturn = Just v}
-      (_, v) | not (T.null v) -> d {docLines = docLines d <> [v]}
-      _ -> d
+-- Known directive keys recognized inside argument / signature docstrings.
+argDocDirectiveKeys :: [Text]
+argDocDirectiveKeys =
+  ["name", "literal", "unroll", "default", "metavar", "arg", "true", "false", "return"]
 
-applySourceDocs :: [Text] -> Source -> Source
-applySourceDocs docLines' src = foldl processLine src docLines'
+-- Known directive keys recognized on `source` declarations.
+sourceDocDirectiveKeys :: [Text]
+sourceDocDirectiveKeys = ["name", "rsize"]
+
+unknownDirectiveWarning :: [Text] -> Text -> Text
+unknownDirectiveWarning knownKeys k =
+  "warning: unknown docstring directive '" <> k <> "'"
+  <> " (recognized: " <> T.intercalate ", " knownKeys <> "); "
+  <> "if this was intended as prose, prefix the line with '\\' to suppress this warning (e.g. '\\"
+  <> k <> ":')"
+
+processArgDocLines :: [Text] -> ([Text], ArgDocVars)
+processArgDocLines = foldl step ([], defaultValue)
   where
-    processLine s line = case parseDocKV line of
-      ("name", v) -> s {srcName = SrcName v}
-      ("rsize", v) -> s {srcRsize = mapMaybe readMaybeInt (T.words v)}
-      (_, v) | not (T.null v) -> s {srcNote = srcNote s <> [v]}
-      _ -> s
+    step (ws, d) line = case parseDocKV line of
+      DocDesc v
+        | T.null v -> (ws, d)
+        | otherwise -> (ws, d {docLines = docLines d <> [v]})
+      DocDirective k v -> case k of
+        "name" -> (ws, d {docName = Just v})
+        "literal" -> (ws, d {docLiteral = Just (parseDocBool v)})
+        "unroll" -> (ws, d {docUnroll = Just (parseDocBool v)})
+        "default" -> (ws, d {docDefault = Just v})
+        "metavar" -> (ws, d {docMetavar = Just v})
+        "arg" -> (ws, d {docArg = parseCliOpt v})
+        "true" -> (ws, d {docTrue = parseCliOpt v})
+        "false" -> (ws, d {docFalse = parseCliOpt v})
+        "return" -> (ws, d {docReturn = Just v})
+        _ ->
+          let w = unknownDirectiveWarning argDocDirectiveKeys k
+              desc = k <> ": " <> v
+           in (ws <> [w], d {docLines = docLines d <> [desc]})
+
+parseDocBool :: Text -> Bool
+parseDocBool v = v == "true" || v == "True"
+
+applySourceDocs :: [Text] -> Source -> ([Text], Source)
+applySourceDocs lns src = foldl step ([], src) lns
+  where
+    step (ws, s) line = case parseDocKV line of
+      DocDesc v
+        | T.null v -> (ws, s)
+        | otherwise -> (ws, s {srcNote = srcNote s <> [v]})
+      DocDirective k v -> case k of
+        "name" -> (ws, s {srcName = SrcName v})
+        "rsize" -> (ws, s {srcRsize = mapMaybe readMaybeInt (T.words v)})
+        _ ->
+          let w = unknownDirectiveWarning sourceDocDirectiveKeys k
+              desc = k <> ": " <> v
+           in (ws <> [w], s {srcNote = srcNote s <> [desc]})
     readMaybeInt t = case reads (T.unpack t) of
       [(n, "")] -> Just n
       _ -> Nothing
+
+-- | D-monad wrapper: parse argument docstring lines and accumulate any
+-- warnings into 'dsWarnings' for the caller to drain.
+processArgDocLinesD :: [Text] -> D ArgDocVars
+processArgDocLinesD ls = do
+  let (ws, v) = processArgDocLines ls
+  dwarn ws
+  return v
+
+-- | D-monad wrapper: apply `source` docstring lines and accumulate warnings.
+applySourceDocsD :: [Text] -> Source -> D Source
+applySourceDocsD ls src = do
+  let (ws, s) = applySourceDocs ls src
+  dwarn ws
+  return s
 
 --------------------------------------------------------------------
 -- Type helpers
@@ -395,10 +487,12 @@ desugarSigType :: Pos -> CstSigType -> D ([Constraint], [ArgDocVars], TypeU)
 desugarSigType _pos (CstSigType (Just constraintArgs) args) = do
   cs <- extractConstraints (argsToType constraintArgs)
   argDocs <- mapM (\(p, _) -> lookupDocsAt p) args
-  return (cs, map processArgDocLines argDocs, argsToType args)
+  argDocVars <- mapM processArgDocLinesD argDocs
+  return (cs, argDocVars, argsToType args)
 desugarSigType _pos (CstSigType Nothing args) = do
   argDocs <- mapM (\(p, _) -> lookupDocsAt p) args
-  return ([], map processArgDocLines argDocs, argsToType args)
+  argDocVars <- mapM processArgDocLinesD argDocs
+  return ([], argDocVars, argsToType args)
 
 desugarTableEntries :: NamType -> [(Key, TypeU)] -> [(Key, TypeU)]
 desugarTableEntries NamTable entries = [(k, wrapList t) | (k, t) <- entries]
@@ -698,7 +792,7 @@ desugarTopLevel (Loc sp (CImpE imp)) = do
   return [e]
 desugarTopLevel (Loc sp (CSigE name sigType)) = do
   docs <- lookupDocsAt (startPos sp)
-  let cmdDoc = processArgDocLines docs
+  cmdDoc <- processArgDocLinesD docs
   (cs, argDocs, t) <- desugarSigType (startPos sp) sigType
   let t' = quantifyType t
       doc = ArgDocSig cmdDoc (init argDocs) (last argDocs)
@@ -707,6 +801,7 @@ desugarTopLevel (Loc sp (CSigE name sigType)) = do
   e <- freshExprSpan sp (SigE (Signature name Nothing et))
   return [e]
 desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
+  captureDeclDocs (startPos sp) name
   body' <- desugarExpr body
   whereDecls' <- concatMapM desugarTopLevel whereDecls
   e <- case params of
@@ -716,6 +811,7 @@ desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
       freshExprSpan sp (AssE name lam whereDecls')
   return [e]
 desugarTopLevel (Loc sp (CGuardedAssE name params guards defaultExpr whereDecls)) = do
+  captureDeclDocs (startPos sp) name
   body' <- desugarGuards sp guards defaultExpr
   whereDecls' <- concatMapM desugarTopLevel whereDecls
   e <- case params of
@@ -816,7 +912,7 @@ desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
       l <- parseLang tok
       return (Just (l, isTerminal))
   docs <- lookupDocsAt (startPos sp)
-  let docVars = if null docs then defaultValue else processArgDocLines docs
+  docVars <- if null docs then return defaultValue else processArgDocLinesD docs
   e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t (ArgDocAlias docVars)))
   return [e]
 desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
@@ -825,10 +921,10 @@ desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
   return [e]
 desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
   recDocs <- lookupDocsAt (startPos sp)
-  let recDocVars = processArgDocLines recDocs
+  recDocVars <- processArgDocLinesD recDocs
   fieldDocs <-
     mapM
-      (\(loc, _, _) -> do dl <- lookupDocsAt (locPos loc); return (processArgDocLines dl))
+      (\(loc, _, _) -> do dl <- lookupDocsAt (locPos loc); processArgDocLinesD dl)
       locEntries
   let entries = [(k, ty) | (_, k, ty) <- locEntries]
       entries' = desugarTableEntries nt entries
@@ -913,7 +1009,7 @@ mkNewSource sp lang path (isInline, name, nameTok) = do
           , srcInline = isInline
           , srcOperator = isOp
           }
-      src = applySourceDocs docLines' baseSrc
+  src <- applySourceDocsD docLines' baseSrc
   freshExprSpan sp (SrcE src)
 
 isOperatorName :: Text -> Bool

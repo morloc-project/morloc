@@ -83,7 +83,14 @@ parse f (Code code) = do
     parseImports d s m = case unimported of
       [] -> do
         -- transfer source positions from parser state into MorlocState
-        MM.modify (\st -> st {stateSourceMap = psSourceMap s <> stateSourceMap st})
+        MM.modify (\st -> st
+          { stateSourceMap = psSourceMap s <> stateSourceMap st
+          , stateTermDocs = psTermDocs s <> stateTermDocs st
+          })
+        -- emit any docstring warnings accumulated during desugar
+        case psWarnings s of
+          [] -> return ()
+          ws -> MM.tell ws
         return d
       ((mainModule, importedModule) : _) -> do
         importPath <- case Map.lookup mainModule m of

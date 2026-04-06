@@ -108,12 +108,12 @@ pub fn container_run_passthrough(
 pub fn container_build(engine: ContainerEngine, cfg: &BuildConfig) -> (ExitStatus, String, String) {
     let exe = engine_executable(engine);
     let args = build_build_args(cfg);
-    run_process_pass_stderr(exe, &args)
+    run_process(exe, &args)
 }
 
 pub fn container_pull(engine: ContainerEngine, image: &str) -> (ExitStatus, String, String) {
     let exe = engine_executable(engine);
-    run_process_pass_stderr(exe, &["pull".to_string(), image.to_string()])
+    run_process(exe, &["pull".to_string(), image.to_string()])
 }
 
 pub fn image_exists_locally(engine: ContainerEngine, image: &str) -> bool {
@@ -175,6 +175,31 @@ pub fn container_remove(engine: ContainerEngine, name_or_id: &str) -> ExitStatus
     let exe = engine_executable(engine);
     let (code, _, _) = run_process(exe, &["rm".to_string(), "-f".to_string(), name_or_id.to_string()]);
     code
+}
+
+/// Quiet container removal: suppresses stderr (for pre-emptive cleanup).
+pub fn container_remove_quiet(engine: ContainerEngine, name_or_id: &str) -> ExitStatus {
+    let exe = engine_executable(engine);
+    let (code, _, _) = run_process_quiet(exe, &["rm".to_string(), "-f".to_string(), name_or_id.to_string()]);
+    code
+}
+
+/// Check whether a container with this name exists (running or stopped).
+pub fn container_exists(engine: ContainerEngine, name: &str) -> bool {
+    let exe = engine_executable(engine);
+    Command::new(exe)
+        .args(["container", "inspect", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub fn remove_image(engine: ContainerEngine, tag: &str) -> bool {
+    let exe = engine_executable(engine);
+    let (status, _, _) = run_process(exe, &["rmi".to_string(), tag.to_string()]);
+    status.success()
 }
 
 // ======================================================================
@@ -280,7 +305,29 @@ pub fn build_build_args(cfg: &BuildConfig) -> Vec<String> {
 // Process execution
 // ======================================================================
 
+/// Run a process with stderr streamed live to the terminal.
+/// Returns (exit_status, captured_stdout, "").
 fn run_process(exe: &str, args: &[String]) -> (ExitStatus, String, String) {
+    let output = Command::new(exe)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .output()
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to execute {exe}: {e}");
+            std::process::exit(1);
+        });
+    (
+        output.status,
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::new(),
+    )
+}
+
+/// Run a process with all output captured (no streaming).
+/// Used when stderr must be parsed (e.g., for error classification).
+fn run_process_quiet(exe: &str, args: &[String]) -> (ExitStatus, String, String) {
     let output = Command::new(exe)
         .args(args)
         .stdin(Stdio::null())
@@ -293,24 +340,6 @@ fn run_process(exe: &str, args: &[String]) -> (ExitStatus, String, String) {
         output.status,
         String::from_utf8_lossy(&output.stdout).to_string(),
         String::from_utf8_lossy(&output.stderr).to_string(),
-    )
-}
-
-fn run_process_pass_stderr(exe: &str, args: &[String]) -> (ExitStatus, String, String) {
-    let child = Command::new(exe)
-        .args(args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .output()
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to execute {exe}: {e}");
-            std::process::exit(1);
-        });
-    (
-        child.status,
-        String::from_utf8_lossy(&child.stdout).to_string(),
-        String::new(),
     )
 }
 

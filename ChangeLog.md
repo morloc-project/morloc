@@ -1,3 +1,10 @@
+0.74.0 [2026-04-06]
+-------------------
+ * unify morloc-manager env, workspace, and version
+ * allow docstrings before declarations
+ * allow literal leading spaces in docstrings
+ * allow escaped `<word>:` syntax
+
 0.73.0 [2026-04-01]
 -------------------
  * fix @load error on missing file

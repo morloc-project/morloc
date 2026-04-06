@@ -46,8 +46,35 @@ processDocstrings e@(AnnoS (Idx i t) _ _) = do
     _ -> case t of
       (FunT ts _) -> return $ ArgDocSig defaultValue (take (length ts) (repeat defaultValue)) defaultValue
       _ -> return $ ArgDocAlias defaultValue
-  doc <- processArgDoc i t argdoc
+  -- Declaration-level docstrings take precedence over signature docstrings
+  -- for the command-level description.
+  declDocs <- lookupDeclDocs i
+  let argdoc' = case declDocs of
+        [] -> argdoc
+        ls -> overrideCmdDocLines ls argdoc
+  doc <- processArgDoc i t argdoc'
   return (e, doc)
+
+-- | Look up the declaration-level docstring for the term at a given index.
+-- Returns an empty list if no declaration docstring exists.
+lookupDeclDocs :: Int -> MorlocMonad [Text]
+lookupDeclDocs i = do
+  nameMap <- MM.gets stateName
+  case Map.lookup i nameMap of
+    Nothing -> return []
+    Just name -> do
+      termDocs <- MM.gets stateTermDocs
+      return $ Map.findWithDefault [] name termDocs
+
+-- | Override the command-level docLines while preserving all other docstring
+-- fields (argument docs, return docs, metavars, etc.).
+overrideCmdDocLines :: [Text] -> ArgDoc -> ArgDoc
+overrideCmdDocLines ls (ArgDocSig cmd args ret) =
+  ArgDocSig (cmd { docLines = ls }) args ret
+overrideCmdDocLines ls (ArgDocRec vars fields) =
+  ArgDocRec (vars { docLines = ls }) fields
+overrideCmdDocLines ls (ArgDocAlias vars) =
+  ArgDocAlias (vars { docLines = ls })
 
 -- dispatch docstring info for each argument to `processArgDoc`
 processArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad CmdDocSet

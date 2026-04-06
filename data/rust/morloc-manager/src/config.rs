@@ -22,20 +22,6 @@ pub fn config_path(scope: Scope) -> PathBuf {
     config_dir(scope).join("config.json")
 }
 
-pub fn version_config_dir(scope: Scope, ver: Version) -> PathBuf {
-    config_dir(scope).join("versions").join(ver.show())
-}
-
-pub fn version_config_path(scope: Scope, ver: Version) -> PathBuf {
-    version_config_dir(scope, ver).join("config.json")
-}
-
-pub fn environment_config_path(scope: Scope, ver: Version, env_name: &str) -> PathBuf {
-    version_config_dir(scope, ver)
-        .join("environments")
-        .join(format!("{env_name}.json"))
-}
-
 pub fn data_dir(scope: Scope) -> PathBuf {
     match scope {
         Scope::Local => dirs::data_dir()
@@ -45,53 +31,26 @@ pub fn data_dir(scope: Scope) -> PathBuf {
     }
 }
 
-pub fn version_data_dir(scope: Scope, ver: Version) -> PathBuf {
-    data_dir(scope).join("versions").join(ver.show())
+// Environment paths
+
+pub fn env_config_dir(scope: Scope, name: &str) -> PathBuf {
+    config_dir(scope).join("environments").join(name)
 }
 
-pub fn deps_dir(scope: Scope) -> PathBuf {
-    data_dir(scope).join("deps")
+pub fn env_config_path(scope: Scope, name: &str) -> PathBuf {
+    env_config_dir(scope, name).join("env.json")
 }
 
-// Workspace paths
-
-pub fn workspace_config_dir(scope: Scope, name: &str) -> PathBuf {
-    config_dir(scope).join("workspaces").join(name)
+pub fn env_dockerfile_path(scope: Scope, name: &str) -> PathBuf {
+    env_config_dir(scope, name).join("Dockerfile")
 }
 
-pub fn workspace_config_path(scope: Scope, name: &str) -> PathBuf {
-    workspace_config_dir(scope, name).join("config.json")
+pub fn env_flags_path(scope: Scope, name: &str) -> PathBuf {
+    env_config_dir(scope, name).join("env.flags")
 }
 
-pub fn workspace_data_dir(scope: Scope, name: &str) -> PathBuf {
-    data_dir(scope).join("workspaces").join(name)
-}
-
-pub fn list_workspaces(scope: Scope) -> Vec<String> {
-    let ws_dir = config_dir(scope).join("workspaces");
-    if !ws_dir.is_dir() {
-        return Vec::new();
-    }
-    let Ok(entries) = fs::read_dir(&ws_dir) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().join("config.json").is_file())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect()
-}
-
-// Flags paths
-
-pub fn global_flags_path(scope: Scope) -> PathBuf {
-    data_dir(scope).join("morloc.flags")
-}
-
-pub fn env_flags_path(scope: Scope, ver: Version, env_name: &str) -> PathBuf {
-    version_config_dir(scope, ver)
-        .join("environments")
-        .join(format!("{env_name}.flags"))
+pub fn env_data_dir(scope: Scope, name: &str) -> PathBuf {
+    data_dir(scope).join("environments").join(name)
 }
 
 // ======================================================================
@@ -121,20 +80,8 @@ pub fn read_active_config() -> Option<Config> {
     read_config::<Config>(&system_path).ok()
 }
 
-pub fn read_version_config(scope: Scope, ver: Version) -> Result<VersionConfig> {
-    read_config(&version_config_path(scope, ver))
-}
-
-pub fn read_environment_config(
-    scope: Scope,
-    ver: Version,
-    env_name: &str,
-) -> Result<EnvironmentConfig> {
-    read_config(&environment_config_path(scope, ver, env_name))
-}
-
-pub fn read_workspace_config(scope: Scope, name: &str) -> Result<WorkspaceConfig> {
-    read_config(&workspace_config_path(scope, name))
+pub fn read_env_config(scope: Scope, name: &str) -> Result<EnvironmentConfig> {
+    read_config(&env_config_path(scope, name))
 }
 
 // ======================================================================
@@ -170,21 +117,71 @@ pub fn write_config<T: serde::Serialize>(path: &Path, val: &T) -> Result<()> {
     })
 }
 
-pub fn write_version_config(scope: Scope, ver: Version, vc: &VersionConfig) -> Result<()> {
-    write_config(&version_config_path(scope, ver), vc)
+pub fn write_env_config(scope: Scope, name: &str, ec: &EnvironmentConfig) -> Result<()> {
+    write_config(&env_config_path(scope, name), ec)
 }
 
-pub fn write_environment_config(
-    scope: Scope,
-    ver: Version,
-    env_name: &str,
-    ec: &EnvironmentConfig,
-) -> Result<()> {
-    write_config(&environment_config_path(scope, ver, env_name), ec)
+// ======================================================================
+// Scope utilities
+// ======================================================================
+
+/// Find which scope an environment lives in. Checks local first, then system.
+pub fn find_env_scope(name: &str) -> Result<Scope> {
+    let local_path = env_config_path(Scope::Local, name);
+    if local_path.is_file() {
+        return Ok(Scope::Local);
+    }
+    let sys_path = env_config_path(Scope::System, name);
+    if sys_path.is_file() {
+        return Ok(Scope::System);
+    }
+    Err(ManagerError::EnvironmentNotFound(name.to_string()))
 }
 
-pub fn write_workspace_config(scope: Scope, name: &str, wc: &WorkspaceConfig) -> Result<()> {
-    write_config(&workspace_config_path(scope, name), wc)
+/// List environment names in a given scope.
+pub fn list_env_names(scope: Scope) -> Vec<String> {
+    let env_dir = config_dir(scope).join("environments");
+    if !env_dir.is_dir() {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(&env_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().join("env.json").is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect()
+}
+
+
+// ======================================================================
+// Flags files
+// ======================================================================
+
+pub fn read_flags_file(path: &Path) -> Vec<String> {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .flat_map(|line| line.split_whitespace().map(|s| s.to_string()))
+        .collect()
+}
+
+/// Read flags file preserving one line per entry (for display).
+pub fn read_flags_file_lines(path: &Path) -> Vec<String> {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|s| s.to_string())
+        .collect()
 }
 
 // ======================================================================
@@ -233,65 +230,9 @@ where
 }
 
 // ======================================================================
-// Flags files
-// ======================================================================
-
-pub fn read_flags_file(path: &Path) -> Vec<String> {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    contents
-        .lines()
-        .map(|line| line.trim())
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|s| s.to_string())
-        .collect()
-}
-
-// ======================================================================
-// Scope utilities
-// ======================================================================
-
-pub fn find_installed_scope(ver: Version) -> Result<Scope> {
-    let local_path = version_config_path(Scope::Local, ver);
-    if local_path.is_file() {
-        return Ok(Scope::Local);
-    }
-    let sys_path = version_config_path(Scope::System, ver);
-    if sys_path.is_file() {
-        return Ok(Scope::System);
-    }
-    Err(ManagerError::VersionNotInstalled(ver))
-}
-
-pub fn find_workspace_scope(name: &str) -> Result<Scope> {
-    let local_path = workspace_config_path(Scope::Local, name);
-    if local_path.is_file() {
-        return Ok(Scope::Local);
-    }
-    let sys_path = workspace_config_path(Scope::System, name);
-    if sys_path.is_file() {
-        return Ok(Scope::System);
-    }
-    Err(ManagerError::EnvironmentNotFound(format!(
-        "Workspace not found: {name}"
-    )))
-}
-
-pub fn require_scope_config(scope: Scope) -> Result<Config> {
-    let path = config_path(scope);
-    match read_config::<Config>(&path) {
-        Ok(cfg) => Ok(cfg),
-        Err(ManagerError::ConfigNotFound(_)) => Err(ManagerError::SetupNotComplete(scope)),
-        Err(err) => Err(err),
-    }
-}
-
-// ======================================================================
 // Internal
 // ======================================================================
 
 fn best_effort_chmod(path: &Path, mode: u32) {
     let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
 }
-

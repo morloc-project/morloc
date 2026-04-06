@@ -178,6 +178,82 @@ pub unsafe extern "C" fn router_free(router: *mut Router) {
     libc::free(router as *mut c_void);
 }
 
+// ── morloc-nexus path resolution ─────────────────────────────────────────────
+
+/// Locate the morloc-nexus executable.
+///
+/// Tries, in order:
+///   1. `$MORLOC_NEXUS` (explicit override)
+///   2. `$MORLOC_HOME/bin/morloc-nexus` (deploy convention)
+///   3. `morloc-nexus` on `$PATH`
+///   4. `$HOME/.local/bin/morloc-nexus` (bare-metal developer install)
+///
+/// Returns the path on the first candidate whose `access(_, X_OK)` succeeds,
+/// or the list of attempted paths on failure.
+unsafe fn find_morloc_nexus() -> Result<String, Vec<String>> {
+    fn is_executable(path: &str) -> bool {
+        if let Ok(c) = CString::new(path) {
+            unsafe { libc::access(c.as_ptr(), libc::X_OK) == 0 }
+        } else {
+            false
+        }
+    }
+
+    fn getenv_str(name: &str) -> Option<String> {
+        let c_name = CString::new(name).ok()?;
+        let p = unsafe { libc::getenv(c_name.as_ptr()) };
+        if p.is_null() {
+            None
+        } else {
+            Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+        }
+    }
+
+    let mut tried: Vec<String> = Vec::new();
+
+    // 1. $MORLOC_NEXUS
+    if let Some(p) = getenv_str("MORLOC_NEXUS") {
+        if is_executable(&p) {
+            return Ok(p);
+        }
+        tried.push(format!("$MORLOC_NEXUS={}", p));
+    }
+
+    // 2. $MORLOC_HOME/bin/morloc-nexus
+    if let Some(h) = getenv_str("MORLOC_HOME") {
+        let p = format!("{}/bin/morloc-nexus", h);
+        if is_executable(&p) {
+            return Ok(p);
+        }
+        tried.push(p);
+    }
+
+    // 3. Search $PATH
+    if let Some(path) = getenv_str("PATH") {
+        for dir in path.split(':') {
+            if dir.is_empty() {
+                continue;
+            }
+            let p = format!("{}/morloc-nexus", dir);
+            if is_executable(&p) {
+                return Ok(p);
+            }
+        }
+        tried.push(format!("$PATH ({})", path));
+    }
+
+    // 4. $HOME/.local/bin/morloc-nexus
+    if let Some(h) = getenv_str("HOME") {
+        let p = format!("{}/.local/bin/morloc-nexus", h);
+        if is_executable(&p) {
+            return Ok(p);
+        }
+        tried.push(p);
+    }
+
+    Err(tried)
+}
+
 // ── router_start_program ─────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -187,29 +263,20 @@ pub unsafe extern "C" fn router_start_program(
 ) -> bool {
     clear_errmsg(errmsg);
 
-    let home = libc::getenv(b"HOME\0".as_ptr() as *const c_char);
-    if home.is_null() {
-        set_errmsg(
-            errmsg,
-            &MorlocError::Other("HOME environment variable not set".into()),
-        );
-        return false;
-    }
-
-    let home_str = CStr::from_ptr(home).to_string_lossy();
-    let nexus_path = format!("{}/.local/bin/morloc-nexus", home_str);
+    let nexus_path = match find_morloc_nexus() {
+        Ok(p) => p,
+        Err(tried) => {
+            set_errmsg(
+                errmsg,
+                &MorlocError::Other(format!(
+                    "morloc-nexus binary not found; tried: {}",
+                    tried.join(", ")
+                )),
+            );
+            return false;
+        }
+    };
     let c_nexus = CString::new(nexus_path.as_str()).unwrap_or_default();
-
-    if libc::access(c_nexus.as_ptr(), libc::X_OK) != 0 {
-        set_errmsg(
-            errmsg,
-            &MorlocError::Other(format!(
-                "morloc-nexus binary not found at {}",
-                nexus_path
-            )),
-        );
-        return false;
-    }
 
     let pid = libc::fork();
     if pid == 0 {
@@ -890,7 +957,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
         );
         let mut addr: libc::sockaddr_in = std::mem::zeroed();
         addr.sin_family = libc::AF_INET as libc::sa_family_t;
-        addr.sin_addr.s_addr = u32::from_be(0x7f000001);
+        addr.sin_addr.s_addr = libc::INADDR_ANY;
         addr.sin_port = ((*config).http_port as u16).to_be();
         if libc::bind(
             http_fd,

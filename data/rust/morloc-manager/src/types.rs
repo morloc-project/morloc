@@ -135,34 +135,18 @@ impl<'de> Deserialize<'de> for Version {
 }
 
 // ======================================================================
-// Active target
-// ======================================================================
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value")]
-pub enum ActiveTarget {
-    #[serde(rename = "version")]
-    Version(Version),
-    #[serde(rename = "workspace")]
-    Workspace(String),
-}
-
-// ======================================================================
 // Configuration
 // ======================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    pub active_target: Option<ActiveTarget>,
-    #[serde(default = "default_env")]
-    pub active_env: String,
+    /// Name of the active environment.
+    pub active_env: Option<String>,
+    /// Default container engine.
     #[serde(default = "default_engine")]
     pub engine: ContainerEngine,
 }
 
-fn default_env() -> String {
-    "base".to_string()
-}
 fn default_engine() -> ContainerEngine {
     ContainerEngine::Podman
 }
@@ -170,52 +154,55 @@ fn default_engine() -> ContainerEngine {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            active_target: None,
-            active_env: "base".to_string(),
+            active_env: None,
             engine: ContainerEngine::Podman,
         }
     }
 }
 
-impl Config {
-    #[cfg(test)]
-    pub fn active_version(&self) -> Option<Version> {
-        match &self.active_target {
-            Some(ActiveTarget::Version(v)) => Some(*v),
-            _ => None,
-        }
-    }
-}
+// ======================================================================
+// Environment configuration
+// ======================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VersionConfig {
-    pub image: String,
-    /// The original pullable image reference (e.g. :edge tag) before local re-tagging
+pub struct EnvironmentConfig {
+    /// Human-readable name (also the directory name).
+    pub name: String,
+    /// Base container image reference.
+    pub base_image: String,
+    /// Original pullable image reference (e.g., :edge tag) before local re-tagging.
     #[serde(default)]
     pub original_image: Option<String>,
-    pub host_dir: String,
+    /// Filename of the custom Dockerfile layer (within the env config dir).
+    #[serde(default)]
+    pub dockerfile: Option<String>,
+    /// SHA256 hash of the Dockerfile content (for rebuild detection).
+    #[serde(default)]
+    pub content_hash: Option<String>,
+    /// Built image tag after applying the Dockerfile layer.
+    /// None when only the base image is used.
+    #[serde(default)]
+    pub built_image: Option<String>,
+    /// Container engine for this environment.
+    pub engine: ContainerEngine,
+    /// Shared memory size for container runs.
     #[serde(default = "default_shm_size")]
     pub shm_size: String,
-    #[serde(default = "default_engine")]
-    pub engine: ContainerEngine,
+    /// Morloc version this environment was created from.
+    #[serde(default)]
+    pub morloc_version: Option<Version>,
 }
 
 fn default_shm_size() -> String {
     "512m".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceConfig {
-    pub base_version: Version,
-    #[serde(default = "default_engine")]
-    pub engine: ContainerEngine,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnvironmentConfig {
-    pub image: String,
-    pub dockerfile: String,
-    pub content_hash: Option<String>,
+impl EnvironmentConfig {
+    /// Returns the image to use for running containers.
+    /// Prefers the built Dockerfile layer image, falls back to base_image.
+    pub fn active_image(&self) -> &str {
+        self.built_image.as_deref().unwrap_or(&self.base_image)
+    }
 }
 
 // ======================================================================
