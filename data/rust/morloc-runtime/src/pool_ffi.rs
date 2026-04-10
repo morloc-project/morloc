@@ -408,7 +408,20 @@ unsafe fn pool_main_fork(config: &PoolConfig, socket_path: *const c_char, tmpdir
             }
 
             shinit(shm_basename, (i + 1) as usize, 0xffff, &mut errmsg);
-            if !errmsg.is_null() { libc::free(errmsg as *mut c_void); libc::_exit(1); }
+            if !errmsg.is_null() {
+                // Print the error to stderr before exiting so the nexus can
+                // capture it via the pool's redirected stderr file. Without
+                // this, a failed shinit in a forked worker child leaves no
+                // diagnostic trace anywhere.
+                libc::fprintf(
+                    libc::fdopen(2, b"w\0".as_ptr() as *const c_char),
+                    b"Worker %d shinit failed: %s\n\0".as_ptr() as *const c_char,
+                    i as i32,
+                    errmsg,
+                );
+                libc::free(errmsg as *mut c_void);
+                libc::_exit(1);
+            }
 
             // Worker loop: receive fds and process
             loop {

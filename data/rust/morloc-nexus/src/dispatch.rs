@@ -61,6 +61,25 @@ impl Default for NexusConfig {
     }
 }
 
+/// Emit a uniform error when pool communication fails, then exit.
+///
+/// The pool's stderr was inherited by the nexus, so any traceback the pool
+/// printed before dying is already on the user's terminal. This helper
+/// just reports the communication error plus the pool's exit status (if
+/// it has been reaped) so the user can correlate the two.
+fn die_with_pool_error(
+    socket: &PoolSocket,
+    pool_index: usize,
+    context: &str,
+    comm_err: &dyn std::fmt::Display,
+) -> ! {
+    eprintln!("Error: {}: {}", context, comm_err);
+    if let Some(info) = process::pool_death_info(pool_index) {
+        eprintln!("Pool '{}' {}", socket.lang, info);
+    }
+    process::clean_exit(1);
+}
+
 /// Parse nexus-level options from argv. Returns the index of the first
 /// non-option argument (the manifest path or subcommand).
 pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
@@ -699,26 +718,33 @@ fn run_remote_command(
     let mut stream = match UnixStream::connect(&socket.socket_path) {
         Ok(s) => s,
         Err(e) => {
-            // Check if pool died
-            if let Some(info) = process::pool_death_info(cmd.pool_index) {
-                eprintln!("Error: {}\nCommunication error: {}", info, e);
-            } else {
-                eprintln!("Error: daemon is unresponsive: {}", e);
-            }
-            process::clean_exit(1);
+            die_with_pool_error(
+                socket,
+                cmd.pool_index,
+                &format!("failed to connect to pool '{}'", socket.lang),
+                &e,
+            );
         }
     };
 
     if let Err(e) = stream.write_all(&call_packet) {
-        eprintln!("Error: failed to send call packet: {}", e);
-        process::clean_exit(1);
+        die_with_pool_error(
+            socket,
+            cmd.pool_index,
+            &format!("failed to send call packet to pool '{}'", socket.lang),
+            &e,
+        );
     }
 
     // Read response header
     let mut resp_header_bytes = [0u8; 32];
     if let Err(e) = stream.read_exact(&mut resp_header_bytes) {
-        eprintln!("Error: failed to read response header: {}", e);
-        process::clean_exit(1);
+        die_with_pool_error(
+            socket,
+            cmd.pool_index,
+            &format!("failed to read response header from pool '{}'", socket.lang),
+            &e,
+        );
     }
 
     let resp_header = match packet::PacketHeader::from_bytes(&resp_header_bytes) {
@@ -736,8 +762,12 @@ fn run_remote_command(
     let mut resp_body = vec![0u8; remaining];
     if remaining > 0 {
         if let Err(e) = stream.read_exact(&mut resp_body) {
-            eprintln!("Error: failed to read response body: {}", e);
-            process::clean_exit(1);
+            die_with_pool_error(
+                socket,
+                cmd.pool_index,
+                &format!("failed to read response body from pool '{}'", socket.lang),
+                &e,
+            );
         }
     }
 
