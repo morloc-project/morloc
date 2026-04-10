@@ -307,27 +307,38 @@ resolveCompileTimeIntrinsic intr =
 -- CLI argument serialization
 -- ======================================================================
 
-argToJson :: CmdArg -> Text
-argToJson (CmdArgPos r) =
-  jsonObj
-    [ ("kind", jsonStr "pos")
-    , ("metavar", jsonMaybeStr (argPosDocMetavar r))
-    , ("type_desc", jsonStr (typeDescStr (argPosDocType r) (argPosDocLiteral r)))
-    , ("quoted", jsonBool (argPosDocLiteral r == Just True && isStrType (argPosDocType r)))
-    , ("desc", jsonStrArr (argPosDocDesc r))
-    ]
-argToJson (CmdArgOpt r) =
-  jsonObj
-    [ ("kind", jsonStr "opt")
-    , ("metavar", jsonStr (argOptDocMetavar r))
-    , ("type_desc", jsonStr (typeDescStr (argOptDocType r) (argOptDocLiteral r)))
-    , ("quoted", jsonBool (argOptDocLiteral r == Just True && isStrType (argOptDocType r)))
-    , ("short", cliOptShortJson (argOptDocArg r))
-    , ("long", cliOptLongJson (argOptDocArg r))
-    , ("default", jsonStr (argOptDocDefault r))
-    , ("desc", jsonStrArr (argOptDocDesc r))
-    ]
-argToJson (CmdArgFlag r) =
+-- | Serialize a 'CmdArg' to its JSON manifest form. The optional
+-- 'Maybe Text' is the pre-rendered serialization schema for typed
+-- args (pos/opt/grp); flags pass 'Nothing' since they have no schema.
+-- Group entries also pass 'Nothing' because the group's top-level
+-- schema covers the whole record; entries never dispatch individually.
+argToJson :: Maybe Text -> CmdArg -> Text
+argToJson mschema (CmdArgPos r) =
+  jsonObj $
+    [ ("kind", jsonStr "pos") ]
+    ++ schemaField mschema
+    ++ [ ("type", jsonStr (typeDescStr (argPosDocType r) (argPosDocLiteral r)))
+       , ("metavar", jsonMaybeStr (argPosDocMetavar r))
+       , ("quoted", jsonBool (argPosDocLiteral r == Just True && isStrType (argPosDocType r)))
+       , ("desc", jsonStrArr (argPosDocDesc r))
+       , ("constraints", constraintsJsonFor (argPosDocType r))
+       , ("metadata", metadataEmpty)
+       ]
+argToJson mschema (CmdArgOpt r) =
+  jsonObj $
+    [ ("kind", jsonStr "opt") ]
+    ++ schemaField mschema
+    ++ [ ("type", jsonStr (typeDescStr (argOptDocType r) (argOptDocLiteral r)))
+       , ("metavar", jsonStr (argOptDocMetavar r))
+       , ("quoted", jsonBool (argOptDocLiteral r == Just True && isStrType (argOptDocType r)))
+       , ("short", cliOptShortJson (argOptDocArg r))
+       , ("long", cliOptLongJson (argOptDocArg r))
+       , ("default", jsonStr (argOptDocDefault r))
+       , ("desc", jsonStrArr (argOptDocDesc r))
+       , ("constraints", constraintsJsonFor (argOptDocType r))
+       , ("metadata", metadataEmpty)
+       ]
+argToJson _ (CmdArgFlag r) =
   jsonObj
     [ ("kind", jsonStr "flag")
     , ("short", cliOptShortJson (argFlagDocOpt r))
@@ -335,15 +346,20 @@ argToJson (CmdArgFlag r) =
     , ("long_rev", flagRevJson (argFlagDocOptRev r))
     , ("default", jsonStr (argFlagDocDefault r))
     , ("desc", jsonStrArr (argFlagDocDesc r))
+    , ("metadata", metadataEmpty)
     ]
-argToJson (CmdArgGrp r) =
-  jsonObj
-    [ ("kind", jsonStr "grp")
-    , ("metavar", jsonStr (recDocMetavar r))
-    , ("desc", jsonStrArr (recDocDesc r))
-    , ("group_opt", grpOptJson (recDocOpt r))
-    , ("entries", jsonArr [grpEntryJson k v | (k, v) <- recDocEntries r])
-    ]
+argToJson mschema (CmdArgGrp r) =
+  jsonObj $
+    [ ("kind", jsonStr "grp") ]
+    ++ schemaField mschema
+    ++ [ ("type", jsonStr (render (pretty (recDocType r))))
+       , ("metavar", jsonStr (recDocMetavar r))
+       , ("desc", jsonStrArr (recDocDesc r))
+       , ("group_opt", grpOptJson (recDocOpt r))
+       , ("entries", jsonArr [grpEntryJson k v | (k, v) <- recDocEntries r])
+       , ("constraints", constraintsJsonFor (recDocType r))
+       , ("metadata", metadataEmpty)
+       ]
   where
     grpOptJson Nothing = jsonNull
     grpOptJson (Just opt) =
@@ -352,11 +368,20 @@ argToJson (CmdArgGrp r) =
         , ("long", cliOptLongJson opt)
         ]
 
+    -- Group entries never carry their own schema; the group's top-level
+    -- schema is used for dispatch. Pass 'Nothing' to the recursive call.
     grpEntryJson key entry =
       jsonObj
         [ ("key", jsonStr (unKey key))
-        , ("arg", argToJson (either CmdArgFlag CmdArgOpt entry))
+        , ("arg", argToJson Nothing (either CmdArgFlag CmdArgOpt entry))
         ]
+
+-- | Prefixed @schema@ field when a schema is present, otherwise empty.
+-- Used by 'argToJson' to splice the field into the per-variant field
+-- list in a consistent position.
+schemaField :: Maybe Text -> [(Text, Text)]
+schemaField Nothing  = []
+schemaField (Just s) = [("schema", jsonStr s)]
 
 -- Check if a type is Str or ?Str (for literal string handling)
 isStrType :: Type -> Bool
@@ -368,6 +393,44 @@ typeDescStr :: Type -> Maybe Bool -> Text
 typeDescStr t isLiteral
   | isStrType t && isLiteral /= Just True = "Str    (a filename or quoted JSON string)"
   | otherwise = render (pretty t)
+
+-- | Strip outer wrappers that don't change a type's "name kind" identity
+-- (Optional and Effect wrappers are transparent for record/object/table
+-- classification). Used by 'surfaceNamKind'.
+stripSurface :: Type -> Type
+stripSurface (OptionalT t) = stripSurface t
+stripSurface (EffectT _ t) = stripSurface t
+stripSurface t             = t
+
+-- | If a type's surface form is a named type, return its 'NamType' tag.
+-- Otherwise Nothing. Single source of the @kind@ constraint.
+surfaceNamKind :: Type -> Maybe NamType
+surfaceNamKind t = case stripSurface t of
+  NamT o _ _ _ -> Just o
+  _            -> Nothing
+
+-- | Lowercase label for a 'NamType' constructor, used as the value of
+-- the @kind@ constraint in the manifest.
+namTagLabel :: NamType -> Text
+namTagLabel NamRecord = "record"
+namTagLabel NamObject = "object"
+namTagLabel NamTable  = "table"
+
+-- | Build the JSON @constraints@ array for a surface type. Only the
+-- @kind@ constraint is populated today; future constraints (min, max,
+-- regex, length, ...) will append to this list.
+constraintsJsonFor :: Type -> Text
+constraintsJsonFor t = jsonArr $ catMaybes
+  [ (\nt -> jsonObj
+      [ ("type", jsonStr "kind")
+      , ("value", jsonStr (namTagLabel nt))
+      ]) <$> surfaceNamKind t
+  ]
+
+-- | An empty @metadata@ slot. Always emitted so consumers never have to
+-- check presence.
+metadataEmpty :: Text
+metadataEmpty = jsonObj []
 
 cliOptShortJson :: CliOpt -> Text
 cliOptShortJson (CliOptShort c) = jsonStr (MT.singleton c)
@@ -523,21 +586,32 @@ buildManifest ::
   Text
 buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPool nameToGroup groupDescs =
   jsonObj
-    [ ("version", "1")
-    , ("name", jsonStr (MT.pack programName))
-    , ("build_dir", jsonStr (MT.pack buildDir))
-    , ("build_time", jsonInt buildTime)
+    [ ("name", jsonStr (MT.pack programName))
+    , ("build", buildJson)
     , ("pools", jsonArr (map poolJson daemonSets))
     , ("commands", jsonArr (map remoteCmdJson fdata ++ map pureCmdJson gasts))
     , ("groups", jsonArr (map groupJson (Map.toList groupDescs)))
+    , ("metadata", metadataEmpty)
     ]
   where
+    -- Compiler-sourced build metadata. Distinct from the top-level
+    -- user-sourced @metadata@ slot. Future additions (hash, host, user,
+    -- system, source_hash, ...) go directly in this object.
+    buildJson :: Text
+    buildJson =
+      jsonObj
+        [ ("path", jsonStr (MT.pack buildDir))
+        , ("time", jsonInt buildTime)
+        , ("morloc_version", jsonStr (MT.pack Morloc.Version.versionStr))
+        ]
+
     poolJson :: (Lang, Socket) -> Text
     poolJson (lang, _) =
       jsonObj
         [ ("lang", jsonStr (ML.showLangName lang))
         , ("exec", jsonStrArr (map MT.pack (makeExecArgs lang)))
         , ("socket", jsonStr ("pipe-" <> ML.showLangName lang))
+        , ("metadata", metadataEmpty)
         ]
 
     makeExecArgs :: Lang -> [String]
@@ -560,12 +634,18 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
       jsonObj
         [ ("name", jsonStr gname)
         , ("desc", jsonStrArr desc)
+        , ("metadata", metadataEmpty)
         ]
 
+    -- Emit a real JSON null when the command has no group, not the
+    -- literal string "null". Consumers (notably Rust serde) treat the
+    -- two differently: a real null deserializes to None, while a
+    -- string "null" used to require a custom deserializer that has
+    -- since been dropped.
     cmdGroupField :: Text -> (Text, Text)
     cmdGroupField cmdName = case Map.lookup cmdName nameToGroup of
       Just gname -> ("group", jsonStr gname)
-      Nothing -> ("group", "null")
+      Nothing -> ("group", jsonNull)
 
     remoteCmdJson :: FData -> Text
     remoteCmdJson fd =
@@ -575,12 +655,11 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
         , ("mid", jsonInt (fdataMid fd))
         , ("pool", jsonInt (langToPool (socketLang (fdataSocket fd))))
         , ("needed_pools", jsonArr (map (jsonInt . langToPool . socketLang) (fdataSubSockets fd)))
-        , ("arg_schemas", jsonStrArr (fdataArgSchemas fd))
-        , ("return_schema", jsonStr (fdataReturnSchema fd))
         , ("desc", jsonStrArr (cmdDocDesc (fdataCmdDocSet fd)))
-        , ("return_type", jsonStr (returnTypeStr (fdataType fd)))
-        , ("return_desc", jsonStrArr (snd (cmdDocRet (fdataCmdDocSet fd))))
-        , ("args", jsonArr (map argToJson (cmdDocArgs (fdataCmdDocSet fd))))
+        , ("args", argsJson (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd))
+        , ("return", returnJson (fdataReturnSchema fd) (fdataType fd) (snd (cmdDocRet (fdataCmdDocSet fd))))
+        , ("constraints", jsonArr [])
+        , ("metadata", metadataEmpty)
         , cmdGroupField (fdataSubcommand fd)
         ]
 
@@ -589,19 +668,58 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
       jsonObj
         [ ("name", jsonStr (commandName g))
         , ("type", jsonStr "pure")
-        , ("arg_schemas", jsonStrArr (commandArgSchemas g))
-        , ("return_schema", jsonStr (commandReturnSchema g))
         , ("desc", jsonStrArr (cmdDocDesc (commandDocs g)))
-        , ("return_type", jsonStr (returnTypeStr (commandType g)))
-        , ("return_desc", jsonStrArr (snd (cmdDocRet (commandDocs g))))
-        , ("args", jsonArr (map argToJson (cmdDocArgs (commandDocs g))))
+        , ("args", argsJson (cmdDocArgs (commandDocs g)) (commandArgSchemas g))
+        , ("return", returnJson (commandReturnSchema g) (commandType g) (snd (cmdDocRet (commandDocs g))))
         , ("expr", exprToJson (commandExpr g))
+        , ("constraints", jsonArr [])
+        , ("metadata", metadataEmpty)
         , cmdGroupField (commandName g)
         ]
 
-    returnTypeStr :: Type -> Text
-    returnTypeStr (FunT _ t) = render (pretty (stripThunks t))
-    returnTypeStr t = render (pretty (stripThunks t))
+    -- Render the @args@ JSON array. 'makeSchemas' produces one schema
+    -- per arg position in the original function signature, INCLUDING
+    -- flags. So 'fdataArgSchemas' is index-aligned 1:1 with 'docArgs'.
+    -- For each arg we attach the corresponding schema; flags drop
+    -- their schema in the JSON output (it's never used at dispatch
+    -- time for boolean flags) but we still consume the schema slot to
+    -- keep the index alignment intact for subsequent args.
+    argsJson :: [CmdArg] -> [Text] -> Text
+    argsJson docArgs schemas =
+      jsonArr (pairArgsWithSchemas docArgs schemas)
+      where
+        pairArgsWithSchemas :: [CmdArg] -> [Text] -> [Text]
+        pairArgsWithSchemas [] _ = []
+        -- Flags consume a schema slot but emit no `schema` field.
+        pairArgsWithSchemas (a@(CmdArgFlag _) : rest) (_ : ss) =
+          argToJson Nothing a : pairArgsWithSchemas rest ss
+        pairArgsWithSchemas (a : rest) (s : ss) =
+          argToJson (Just s) a : pairArgsWithSchemas rest ss
+        pairArgsWithSchemas (a : rest) [] =
+          -- Defensive: more args than schemas. Emit with no schema
+          -- so we fail cleanly downstream rather than silently
+          -- misaligning.
+          argToJson Nothing a : pairArgsWithSchemas rest []
+
+    -- Nested @return@ object replacing v1's flat @return_schema@ /
+    -- @return_type@ / @return_desc@. Also carries @constraints@ and
+    -- @metadata@ for symmetry with args.
+    returnJson :: Text -> Type -> [Text] -> Text
+    returnJson schema t desc =
+      let retT = stripThunks (returnTypeOnly t)
+      in jsonObj
+        [ ("schema", jsonStr schema)
+        , ("type", jsonStr (render (pretty retT)))
+        , ("desc", jsonStrArr desc)
+        , ("constraints", constraintsJsonFor retT)
+        , ("metadata", metadataEmpty)
+        ]
+
+    -- Extract the return type from a function type; pass other types
+    -- through unchanged.
+    returnTypeOnly :: Type -> Type
+    returnTypeOnly (FunT _ t) = t
+    returnTypeOnly t          = t
 
     stripThunks :: Type -> Type
     stripThunks (EffectT _ t') = stripThunks t'

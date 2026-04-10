@@ -11,12 +11,12 @@ use crate::daemon_ffi::{
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::http_ffi::{DaemonMethod, DaemonRequest, HttpMethod, HttpRequest};
 
-// ── Constants ────────────────────────────────────────────────────────────────
+// -- Constants ----------------------------------------------------------------
 
 /// Max size of sun_path in sockaddr_un (108 on Linux)
 const SUN_PATH_LEN: usize = 108;
 
-// ── Global state ─────────────────────────────────────────────────────────────
+// -- Global state -------------------------------------------------------------
 
 static ROUTER_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -24,7 +24,7 @@ extern "C" fn router_signal_handler_fn(_sig: i32) {
     ROUTER_SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
 }
 
-// ── C-compatible types ───────────────────────────────────────────────────────
+// -- C-compatible types -------------------------------------------------------
 
 #[repr(C)]
 pub struct RouterProgram {
@@ -42,7 +42,7 @@ pub struct Router {
     pub fdb_path: *mut c_char,
 }
 
-// ── router_init ──────────────────────────────────────────────────────────────
+// -- router_init --------------------------------------------------------------
 
 #[no_mangle]
 pub unsafe extern "C" fn router_init(
@@ -145,12 +145,12 @@ pub unsafe extern "C" fn router_init(
 
     libc::closedir(dir);
 
-    // Empty fdb is fine — programs can be added while the router is running
+    // Empty fdb is fine -- programs can be added while the router is running
 
     router
 }
 
-// ── router_free ──────────────────────────────────────────────────────────────
+// -- router_free --------------------------------------------------------------
 
 #[no_mangle]
 pub unsafe extern "C" fn router_free(router: *mut Router) {
@@ -178,7 +178,7 @@ pub unsafe extern "C" fn router_free(router: *mut Router) {
     libc::free(router as *mut c_void);
 }
 
-// ── morloc-nexus path resolution ─────────────────────────────────────────────
+// -- morloc-nexus path resolution ---------------------------------------------
 
 /// Locate the morloc-nexus executable.
 ///
@@ -254,7 +254,7 @@ unsafe fn find_morloc_nexus() -> Result<String, Vec<String>> {
     Err(tried)
 }
 
-// ── router_start_program ─────────────────────────────────────────────────────
+// -- router_start_program -----------------------------------------------------
 
 #[no_mangle]
 pub unsafe extern "C" fn router_start_program(
@@ -342,7 +342,7 @@ pub unsafe extern "C" fn router_start_program(
     }
 }
 
-// ── router_forward ───────────────────────────────────────────────────────────
+// -- router_forward -----------------------------------------------------------
 
 #[no_mangle]
 pub unsafe extern "C" fn router_forward(
@@ -650,36 +650,13 @@ unsafe fn serialize_request_to_json(request: *mut DaemonRequest) -> String {
     serde_json::to_string(&map).unwrap_or_else(|_| "{}".into())
 }
 
-// ── router_build_discovery ───────────────────────────────────────────────────
+// -- router_build_discovery ---------------------------------------------------
 
 #[no_mangle]
 pub unsafe extern "C" fn router_build_discovery(router: *mut Router) -> *mut c_char {
-    // We need to access manifest->n_commands and manifest->commands[i].name etc.
-    // Use the same ManifestView approach as daemon_ffi.rs.
-    #[repr(C)]
-    struct ManifestCommandView {
-        name: *mut c_char,
-        is_pure: bool,
-        _mid: u32,
-        _pool_index: usize,
-        _needed_pools: *mut usize,
-        _n_needed_pools: usize,
-        _arg_schemas: *mut *mut c_char,
-        _return_schema: *mut c_char,
-        _desc: *mut *mut c_char,
-        return_type: *mut c_char,
-    }
-
-    #[repr(C)]
-    struct ManifestView {
-        _version: i32,
-        _name: *mut c_char,
-        _build_dir: *mut c_char,
-        _pools: *mut c_void,
-        _n_pools: usize,
-        commands: *mut ManifestCommandView,
-        n_commands: usize,
-    }
+    // Walk the canonical Manifest C struct from manifest_ffi.rs. No
+    // local mirror -- the in-memory layout is shared.
+    use crate::manifest_ffi::Manifest as ManifestC;
 
     #[derive(serde::Serialize)]
     struct CommandInfo {
@@ -710,14 +687,14 @@ pub unsafe extern "C" fn router_build_discovery(router: *mut Router) -> *mut c_c
             prog.daemon_pid > 0 && libc::kill(prog.daemon_pid, 0) == 0;
 
         let commands = if !prog.manifest.is_null() {
-            let mv = prog.manifest as *const ManifestView;
+            let mv = prog.manifest as *const ManifestC;
             let mut cmds = Vec::with_capacity((*mv).n_commands);
             for c in 0..(*mv).n_commands {
                 let cmd = &*(*mv).commands.add(c);
                 let cmd_name = CStr::from_ptr(cmd.name).to_string_lossy().into_owned();
                 let cmd_type = if cmd.is_pure { "pure" } else { "remote" };
-                let ret_type = if !cmd.return_type.is_null() {
-                    CStr::from_ptr(cmd.return_type)
+                let ret_type = if !cmd.ret.type_desc.is_null() {
+                    CStr::from_ptr(cmd.ret.type_desc)
                         .to_string_lossy()
                         .into_owned()
                 } else {
@@ -747,7 +724,7 @@ pub unsafe extern "C" fn router_build_discovery(router: *mut Router) -> *mut c_c
     libc::strdup(c.as_ptr())
 }
 
-// ── Router HTTP request routing ──────────────────────────────────────────────
+// -- Router HTTP request routing ----------------------------------------------
 
 /// Route HTTP requests for the router. Sets *out_program to the target program
 /// name (caller-owned) for per-program requests, or NULL for router-level requests.
@@ -890,7 +867,7 @@ unsafe fn router_http_to_request(
     ptr::null_mut()
 }
 
-// ── Router event loop ────────────────────────────────────────────────────────
+// -- Router event loop --------------------------------------------------------
 
 const ROUTER_MAX_LISTENERS: usize = 3;
 

@@ -1,14 +1,20 @@
 [package]
 name = "morloc-nexus"
-version = "0.1.0"
+version = "0.74.0"
 edition = "2021"
 description = "Morloc nexus: CLI dispatcher for multi-language pool orchestration"
+# Version is intentionally synchronized with the morloc compiler version
+# (see ../../../package.yaml). Manifests record the morloc_version that
+# built them; the nexus rejects manifests whose version differs from its
+# own CARGO_PKG_VERSION at parse time. Bumping the morloc compiler
+# version requires bumping this version in lockstep.
 
 [[bin]]
 name = "morloc-nexus"
 path = "src/main.rs"
 
 [dependencies]
+morloc-manifest = { path = "../morloc-manifest" }
 morloc-runtime = { path = "../morloc-runtime" }
 libc = { workspace = true }
 serde = { workspace = true }

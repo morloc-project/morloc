@@ -1,0 +1,27 @@
+-- BUG-003: @load type inference fails in do-blocks
+--
+-- In v0.74.0, a @save/@load round-trip in a do-block fails to typecheck:
+--     Type mismatch:
+--       expected: ?Int
+--       inferred: <IO> ?<a>
+--     Subtype error: Type mismatch fall through
+--       <IO> ?<a> <: ?Int
+--
+-- Root cause: @load is assigned a fresh type variable in
+-- Typecheck.hs:625-627 (intrinsicTypeG IntrLoad returns <IO> ?a), but the
+-- do-block handler does not propagate the enclosing function's declared
+-- return type inward to constrain that fresh variable.
+--
+-- This test asserts: roundTrip 42 path writes 42 to the file and loads it
+-- back, returning 42.
+module main (roundTrip)
+
+import root-py
+
+source Py from "helper.py" ("identity")
+identity :: a -> a
+
+roundTrip :: Int -> Str -> <IO> ?Int
+roundTrip x path = do
+  @save (identity x) path
+  @load path

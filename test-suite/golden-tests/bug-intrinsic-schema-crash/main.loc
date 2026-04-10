@@ -1,0 +1,30 @@
+-- BUG-006: @schema and @typeof crash the compiler
+--
+-- In v0.74.0, using @schema or @typeof causes a compiler crash at codegen:
+--     morloc: Runtime intrinsic @IntrSchema reached code generation without schema
+--     CallStack (from HasCallStack):
+--       error, called at library/Morloc/CodeGenerator/Grammars/Translator/Imperative.hs:513:3
+--
+-- Root cause: Serialize.hs:293-313 (intrinsicSchema) has explicit cases for
+-- IntrHash/IntrSave/IntrSaveM/IntrSaveJ/IntrShow/IntrLoad/IntrRead but is
+-- MISSING cases for IntrSchema and IntrTypeof. They fall through to the
+-- catch-all that returns Nothing, and Imperative.hs:512-513 then errors
+-- because the intrinsic reached lowering without a computed schema.
+--
+-- This test asserts: @schema and @typeof compile without crashing AND
+-- produce deterministic output (the same schema/typeof string for the same
+-- type across multiple calls).
+module main (schemaStable, typeofStable)
+
+import root-py
+
+source Py from "helper.py" ("identity")
+identity :: a -> a
+
+-- @schema of the same type should be identical across calls
+schemaStable :: Int -> Bool
+schemaStable x = (@schema (identity x)) == (@schema (identity (identity x)))
+
+-- @typeof of the same type should be identical across calls
+typeofStable :: Int -> Bool
+typeofStable x = (@typeof (identity x)) == (@typeof (identity (identity x)))

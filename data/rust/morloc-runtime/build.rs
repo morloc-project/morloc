@@ -4,4 +4,7 @@ fn main() {
     if target.contains("linux") {
         println!("cargo:rustc-link-lib=rt");
     }
+    // The morloc compiler version is sourced from CARGO_PKG_VERSION
+    // (this crate's Cargo.toml), which is intentionally kept in
+    // lockstep with the morloc Haskell package.yaml.
 }

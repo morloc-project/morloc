@@ -1,0 +1,14 @@
+[package]
+name = "morloc-manifest"
+version = "0.74.0"
+edition = "2021"
+description = "Morloc manifest schema (v2): shared Rust types for the .manifest JSON blob produced by the morloc compiler and consumed by the nexus, runtime, and any future tooling."
+# Version is intentionally synchronized with the morloc compiler version
+# (see ../../../package.yaml). Manifests record the morloc_version that
+# built them; consumers reject manifests whose version differs from
+# CARGO_PKG_VERSION at parse time. Bumping the morloc compiler version
+# requires bumping this version in lockstep.
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

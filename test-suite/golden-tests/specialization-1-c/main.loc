@@ -1,8 +1,6 @@
 module main (foo)
 
--- base types
-type Cpp => Int = "int"
-type Cpp => List a = "std::vector<$1>" a
+import root-cpp ((.), Int, List)
 
 
 -- aliases at the general level
@@ -25,10 +23,10 @@ type Cpp => Queue' a = "std::queue<$1>" a
 -- a typeclass for orderd containers
 class Listlike f where
     -- add a new element to the end of a list
-    append f a :: a -> f a -> f a
+    append :: a -> f a -> f a
 
     -- convert to the canonical list type
-    toList f a :: f a -> List a
+    toList :: f a -> List a
 
 
 -- define instances for each data structure, `append` and `toVector` have overloaded C++ definitions

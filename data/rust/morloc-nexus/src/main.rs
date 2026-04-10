@@ -74,12 +74,15 @@ fn main() {
         dispatch::extract_global_options(&mut remaining_args, &mut config);
     }
 
-    // chdir to build directory
-    if let Some(ref build_dir) = manifest.build_dir {
-        if std::env::set_current_dir(build_dir).is_err() {
-            eprintln!("Cannot chdir to build_dir '{}': {}", build_dir, std::io::Error::last_os_error());
-            std::process::exit(1);
-        }
+    // chdir to build directory (recorded in manifest.build.path)
+    let build_path = &manifest.build.path;
+    if std::env::set_current_dir(build_path).is_err() {
+        eprintln!(
+            "Cannot chdir to build path '{}': {}",
+            build_path,
+            std::io::Error::last_os_error()
+        );
+        std::process::exit(1);
     }
 
     // Validate pool executables exist

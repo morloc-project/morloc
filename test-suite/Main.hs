@@ -37,20 +37,26 @@ main = do
       , natLabelTests
       , natKindPromotionTests
       , letBindingTests
-      , -- -- These tests pass locally and when I run the same container that I
-        -- -- use in github actions. Yet these tests freeze in an infinite loop
-        -- -- with no STDERR output on github. I have no idea why. But for now I'm
-        -- -- just going to comment them out. Rememver uncomment them on dev cycles
-        -- -- so that they are tested somewhere, at least.
-        -- , golden "specialization-1-c" "specialization-1-c"
-        -- , golden "specialization-2-c" "specialization-2-c"
-        -- , golden "specialization-1-py - numpy" "specialization-1-py"
-        -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
-        -- , golden "specialization-1-r" "specialization-1-r"
 
-        -- , golden "multiprocessing-py-1" "multiprocessing-py-1"
+      -- -- These tests pass locally and when I run the same container that I
+      -- -- use in github actions. Yet these tests freeze in an infinite loop
+      -- -- with no STDERR output on github. I have no idea why. But for now I'm
+      -- -- just going to comment them out. Rememver uncomment them on dev cycles
+      -- -- so that they are tested somewhere, at least.
+      -- , golden "specialization-1-c" "specialization-1-c"
+      -- , golden "specialization-2-c" "specialization-2-c"
+      -- , golden "specialization-1-py - numpy" "specialization-1-py"
+      -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
+      -- , golden "specialization-1-r" "specialization-1-r"
 
-        golden "thunk-basic" "thunk-basic"
+      , golden "multiprocessing-py-1" "multiprocessing-py-1"
+
+      , -- bug regression tests from doc-agents code-tester (v0.74.0)
+        -- Each test asserts correct behavior; currently FAIL until bug is fixed
+        golden "bug-load-type-infer" "bug-load-type-infer"
+      , golden "bug-intrinsic-schema-crash" "bug-intrinsic-schema-crash"
+
+      , golden "thunk-basic" "thunk-basic"
       , golden "thunk-effects" "thunk-effects"
       , golden "thunk-do" "thunk-do"
       , golden "thunk-let" "thunk-let"

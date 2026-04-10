@@ -573,7 +573,7 @@ fn parse_command_args(
     (parsed, i)
 }
 
-// ── Command execution ──────────────────────────────────────────────────────
+// -- Command execution ------------------------------------------------------
 
 /// Execute a remote command by sending a call packet to the pool.
 fn run_remote_command(
@@ -610,17 +610,26 @@ fn run_remote_command(
     let socket = &sockets[cmd.pool_index];
 
     // Parse return schema
-    let return_schema = match parse_schema(&cmd.return_schema) {
+    let return_schema = match parse_schema(&cmd.ret.schema) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Error: failed to parse return schema '{}': {}", cmd.return_schema, e);
+            eprintln!("Error: failed to parse return schema '{}': {}", cmd.ret.schema, e);
             process::clean_exit(1);
         }
     };
 
-    // Build data packets for each argument
+    // The parsed `args` list and `cmd.args` are index-aligned 1:1 in
+    // declaration order: parse_command_args pushes one ArgValue for
+    // EVERY arg (including flags). The Haskell compiler emits one
+    // schema per arg position too. Walk both lists in lockstep; for
+    // flags, schema_str() returns None and the flag's ArgValue is
+    // already a ready-to-send "true"/"false" string that doesn't need
+    // packet conversion -- but the original v1 dispatch path still
+    // ran flags through parse_cli_data_argument with the flag's bool
+    // schema, so we mirror that to keep the wire format consistent.
     let mut arg_packets: Vec<Vec<u8>> = Vec::new();
-    for (i, (arg_val, schema_str)) in args.iter().zip(cmd.arg_schemas.iter()).enumerate() {
+    for (i, (arg_val, arg_def)) in args.iter().zip(cmd.args.iter()).enumerate() {
+        let schema_str = arg_def.schema_str().unwrap_or("b");
         let schema = match parse_schema(schema_str) {
             Ok(s) => s,
             Err(e) => {
@@ -1050,20 +1059,26 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
     }
 
     // Parse return schema
-    let return_schema = match parse_schema(&cmd.return_schema) {
+    let return_schema = match parse_schema(&cmd.ret.schema) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Error: failed to parse return schema '{}': {}", cmd.return_schema, e);
+            eprintln!("Error: failed to parse return schema '{}': {}", cmd.ret.schema, e);
             process::clean_exit(1);
         }
     };
     let c_return_schema = morloc_runtime::cschema::CSchema::from_rust(&return_schema);
 
-    // Parse and evaluate arguments
+    // The parsed `args` list and `cmd.args` are index-aligned 1:1 in
+    // declaration order: parse_command_args pushes one ArgValue for
+    // EVERY arg (including flags). The Haskell compiler emits one
+    // schema per arg position too. Walk both lists in lockstep; for
+    // flags, the schema_str() accessor returns None and we fall back
+    // to the bool schema "b" so the wire format stays consistent.
     let mut c_arg_schemas: Vec<*const morloc_runtime::cschema::CSchema> = Vec::new();
     let mut c_arg_voidstars: Vec<*mut u8> = Vec::new();
 
-    for (i, (arg_val, schema_str)) in args.iter().zip(cmd.arg_schemas.iter()).enumerate() {
+    for (i, (arg_val, arg_def)) in args.iter().zip(cmd.args.iter()).enumerate() {
+        let schema_str = arg_def.schema_str().unwrap_or("b");
         let schema = match parse_schema(schema_str) {
             Ok(s) => s,
             Err(e) => {
@@ -1162,7 +1177,7 @@ fn unsafe_errmsg_to_string(errmsg: *mut std::ffi::c_char) -> String {
     }
 }
 
-// ── Helpers for command argument parsing ────────────────────────────────────
+// -- Helpers for command argument parsing ------------------------------------
 
 fn is_flag_opt(cmd: &Command, long_name: &str) -> bool {
     cmd.args.iter().any(|a| match a {

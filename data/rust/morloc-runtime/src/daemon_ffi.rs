@@ -13,12 +13,12 @@ use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::hash;
 use crate::http_ffi::{DaemonMethod, DaemonRequest, HttpRequest};
 
-// ── Constants ────────────────────────────────────────────────────────────────
+// -- Constants ----------------------------------------------------------------
 
 const DEFAULT_XXHASH_SEED: u64 = 0;
 const MAX_LP_MESSAGE: u32 = 64 * 1024 * 1024;
 
-// ── Global state ─────────────────────────────────────────────────────────────
+// -- Global state -------------------------------------------------------------
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 static G_EVAL_TIMEOUT: AtomicI32 = AtomicI32::new(30);
@@ -29,7 +29,7 @@ static mut G_POOL_ALIVE_FN: Option<unsafe extern "C" fn(usize) -> bool> = None;
 static mut G_N_POOLS: usize = 0;
 static mut G_BINDING_STORE: *mut BindingStore = ptr::null_mut();
 
-// ── C-compatible types ───────────────────────────────────────────────────────
+// -- C-compatible types -------------------------------------------------------
 
 /// Matches morloc_socket_t from call.h
 #[repr(C)]
@@ -61,7 +61,7 @@ pub struct DaemonResponse {
     pub error: *mut c_char,
 }
 
-// ── Binding store (replaces linear-probe hash table with HashMap) ────────────
+// -- Binding store (replaces linear-probe hash table with HashMap) ------------
 
 struct BindingEntry {
     hash: u64,
@@ -262,7 +262,7 @@ impl BindingStore {
     }
 }
 
-// ── C-exported binding store functions ───────────────────────────────────────
+// -- C-exported binding store functions ---------------------------------------
 
 #[no_mangle]
 pub unsafe extern "C" fn binding_store_init(base_dir: *const c_char) -> *mut c_void {
@@ -278,7 +278,7 @@ pub unsafe extern "C" fn binding_store_free(store: *mut c_void) {
     }
 }
 
-// ── Request parsing (serde_json) ─────────────────────────────────────────────
+// -- Request parsing (serde_json) ---------------------------------------------
 
 #[derive(serde::Deserialize)]
 struct JsonRequest {
@@ -377,7 +377,7 @@ pub unsafe extern "C" fn daemon_parse_request(
     req
 }
 
-// ── Response parsing (serde_json) ────────────────────────────────────────────
+// -- Response parsing (serde_json) --------------------------------------------
 
 #[derive(serde::Deserialize)]
 struct JsonResponse {
@@ -449,7 +449,7 @@ pub unsafe extern "C" fn daemon_parse_response(
     resp
 }
 
-// ── Free functions ───────────────────────────────────────────────────────────
+// -- Free functions -----------------------------------------------------------
 
 #[no_mangle]
 pub unsafe extern "C" fn daemon_free_request(req: *mut DaemonRequest) {
@@ -491,7 +491,7 @@ pub unsafe extern "C" fn daemon_free_response(resp: *mut DaemonResponse) {
     libc::free(resp as *mut c_void);
 }
 
-// ── Response serialization (serde_json) ──────────────────────────────────────
+// -- Response serialization (serde_json) --------------------------------------
 
 #[no_mangle]
 pub unsafe extern "C" fn daemon_serialize_response(
@@ -538,7 +538,7 @@ pub unsafe extern "C" fn daemon_serialize_response(
     libc::strdup(c.as_ptr())
 }
 
-// ── Discovery ────────────────────────────────────────────────────────────────
+// -- Discovery ----------------------------------------------------------------
 
 #[no_mangle]
 pub unsafe extern "C" fn daemon_build_discovery(manifest: *mut c_void) -> *mut c_char {
@@ -548,7 +548,7 @@ pub unsafe extern "C" fn daemon_build_discovery(manifest: *mut c_void) -> *mut c
     manifest_to_discovery_json(manifest)
 }
 
-// ── Eval timeout ─────────────────────────────────────────────────────────────
+// -- Eval timeout -------------------------------------------------------------
 
 #[no_mangle]
 pub extern "C" fn daemon_set_eval_timeout(timeout_sec: i32) {
@@ -556,7 +556,7 @@ pub extern "C" fn daemon_set_eval_timeout(timeout_sec: i32) {
     G_EVAL_TIMEOUT.store(t, Ordering::Relaxed);
 }
 
-// ── Fork-based eval/typecheck ────────────────────────────────────────────────
+// -- Fork-based eval/typecheck ------------------------------------------------
 
 /// Fork `morloc <subcmd> <expr>`, capture stdout/stderr, return a DaemonResponse.
 unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonResponse {
@@ -674,7 +674,7 @@ unsafe fn read_fd_to_vec(fd: i32) -> Vec<u8> {
     buf
 }
 
-// ── Dispatch ─────────────────────────────────────────────────────────────────
+// -- Dispatch -----------------------------------------------------------------
 
 #[no_mangle]
 pub unsafe extern "C" fn daemon_dispatch(
@@ -907,67 +907,13 @@ pub unsafe extern "C" fn daemon_dispatch(
         ) -> *mut u8;
     }
 
-    // Access manifest fields through opaque C struct pointers.
-    // We do NOT import the Manifest type from manifest_ffi.rs directly;
-    // instead we use the same layout as the C code expects.
-    //
-    // manifest_t layout (from manifest.h):
-    //   int version;
-    //   char* name;
-    //   char* build_dir;
-    //   manifest_pool_t* pools;
-    //   size_t n_pools;
-    //   manifest_command_t* commands;
-    //   size_t n_commands;
-    //   ...
+    // The manifest is the canonical v2 C struct from manifest_ffi.rs.
+    // No local mirror needed -- import the real type and walk it.
+    use crate::manifest_ffi::{Manifest as ManifestC, ManifestArgKind, ManifestCommand};
 
-    // We need to find the command. Since we treat manifest as opaque,
-    // we cast to access the fields we need.
-    #[repr(C)]
-    struct ManifestCommandView {
-        name: *mut c_char,
-        is_pure: bool,
-        mid: u32,
-        pool_index: usize,
-        needed_pools: *mut usize,
-        n_needed_pools: usize,
-        arg_schemas: *mut *mut c_char,
-        return_schema: *mut c_char,
-        desc: *mut *mut c_char,
-        return_type: *mut c_char,
-        return_desc: *mut *mut c_char,
-        args: *mut c_void, // manifest_arg_t*
-        n_args: usize,
-        expr: *mut c_void, // morloc_expression_t*
-        group: *mut c_char,
-    }
-
-    // We need to know the size of each manifest_arg entry's kind field
-    // to count positional args.
-    #[repr(C)]
-    #[derive(Clone, Copy, PartialEq)]
-    #[allow(dead_code)]
-    enum ManifestArgKind {
-        Pos = 0,
-        Opt = 1,
-        Flag = 2,
-        Grp = 3,
-    }
-
-    #[repr(C)]
-    struct ManifestView {
-        version: i32,
-        name: *mut c_char,
-        build_dir: *mut c_char,
-        pools: *mut c_void,
-        n_pools: usize,
-        commands: *mut ManifestCommandView,
-        n_commands: usize,
-    }
-
-    let mv = manifest as *const ManifestView;
+    let mv = manifest as *const ManifestC;
     let command_name = CStr::from_ptr((*request).command);
-    let mut cmd: *const ManifestCommandView = ptr::null();
+    let mut cmd: *const ManifestCommand = ptr::null();
     for i in 0..(*mv).n_commands {
         let c = &*(*mv).commands.add(i);
         if CStr::from_ptr(c.name) == command_name {
@@ -1053,6 +999,23 @@ pub unsafe extern "C" fn daemon_dispatch(
             nargs += 1;
         }
 
+        // v2: schemas live on each ManifestArg. Walk cmd.args in
+        // declaration order, INCLUDING flags (they consume an arg
+        // slot in the parsed list and need a corresponding schema
+        // entry to keep alignment). For flags, fall back to the
+        // boolean schema "b".
+        static FLAG_SCHEMA: &[u8] = b"b\0";
+        let mut arg_schema_strs: Vec<*mut c_char> = Vec::with_capacity(nargs);
+        for i in 0..cmd.n_args {
+            let a = &*cmd.args.add(i);
+            let s = if a.kind == ManifestArgKind::Flag || a.schema.is_null() {
+                FLAG_SCHEMA.as_ptr() as *mut c_char
+            } else {
+                a.schema
+            };
+            arg_schema_strs.push(s);
+        }
+
         let arg_schemas_arr =
             libc::calloc(nargs, std::mem::size_of::<*mut CSchema>()) as *mut *mut CSchema;
         let arg_packets =
@@ -1063,7 +1026,8 @@ pub unsafe extern "C" fn daemon_dispatch(
         let mut cleanup_and_fail = false;
 
         for i in 0..nargs {
-            *arg_schemas_arr.add(i) = parse_schema(*cmd.arg_schemas.add(i), &mut err);
+            let schema_str = arg_schema_strs.get(i).copied().unwrap_or(ptr::null_mut());
+            *arg_schemas_arr.add(i) = parse_schema(schema_str, &mut err);
             if !err.is_null() {
                 (*resp).success = false;
                 (*resp).error = err;
@@ -1098,13 +1062,13 @@ pub unsafe extern "C" fn daemon_dispatch(
         }
 
         if !cleanup_and_fail {
-            let return_schema = parse_schema(cmd.return_schema, &mut err);
+            let return_schema = parse_schema(cmd.ret.schema, &mut err);
             if !err.is_null() {
                 (*resp).success = false;
                 (*resp).error = err;
             } else {
                 let result_abs = morloc_eval(
-                    cmd.expr,
+                    cmd.expr as *mut c_void,
                     return_schema,
                     arg_voidstars,
                     arg_schemas_arr,
@@ -1147,14 +1111,21 @@ pub unsafe extern "C" fn daemon_dispatch(
         libc::free(arg_packets as *mut c_void);
         libc::free(arg_voidstars as *mut c_void);
     } else {
-        // Remote command: send call packet to pool
+        // Remote command: send call packet to pool. v2 stores schemas
+        // per-arg, but make_call_packet_from_cli wants a NULL-terminated
+        // flat array. ManifestCommand exposes a helper that materializes
+        // the flat view; the outer pointer array is owned by us and
+        // freed below, but the inner C strings remain owned by the
+        // ManifestArg objects.
+        let arg_schemas_flat = cmd.build_arg_schemas_array();
         let call_packet = make_call_packet_from_cli(
             ptr::null_mut(),
             cmd.mid,
             args,
-            cmd.arg_schemas,
+            arg_schemas_flat,
             &mut err,
         );
+        libc::free(arg_schemas_flat as *mut c_void);
         if !err.is_null() {
             (*resp).success = false;
             (*resp).error = err;
@@ -1179,7 +1150,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                     (*resp).error = err;
                     libc::free(result_packet as *mut c_void);
                 } else {
-                    let return_schema = parse_schema(cmd.return_schema, &mut err);
+                    let return_schema = parse_schema(cmd.ret.schema, &mut err);
                     if !err.is_null() {
                         (*resp).success = false;
                         (*resp).error = err;
@@ -1226,7 +1197,7 @@ pub unsafe extern "C" fn daemon_dispatch(
     resp
 }
 
-// ── Length-prefixed message protocol ─────────────────────────────────────────
+// -- Length-prefixed message protocol -----------------------------------------
 
 unsafe fn read_lp_message(
     fd: i32,
@@ -1351,7 +1322,7 @@ unsafe fn write_lp_message(
     true
 }
 
-// ── Connection handlers ──────────────────────────────────────────────────────
+// -- Connection handlers ------------------------------------------------------
 
 unsafe fn handle_lp_connection(
     client_fd: i32,
@@ -1494,7 +1465,7 @@ unsafe fn handle_http_connection(
     libc::close(client_fd);
 }
 
-// ── Thread pool (VecDeque + Condvar instead of linked list + pthread) ────────
+// -- Thread pool (VecDeque + Condvar instead of linked list + pthread) --------
 
 #[derive(Clone, Copy)]
 struct DaemonJob {
@@ -1542,7 +1513,7 @@ fn set_socket_timeouts(fd: i32, timeout_sec: i32) {
     }
 }
 
-// ── Main daemon event loop ───────────────────────────────────────────────────
+// -- Main daemon event loop ---------------------------------------------------
 
 const MAX_LISTENERS: usize = 3;
 

@@ -590,8 +590,13 @@ containsUnk (NatDivT a b) = containsUnk a || containsUnk b
 
 ----- Pretty instances -------------------------------------------------------
 
+-- | Records, objects, and tables render identically in type signatures —
+-- just the type name optionally followed by parameters. The record/object/
+-- table distinction is surfaced separately in the CLI help's type
+-- definition block, where each named type is listed with its tag and
+-- fields. Using a trivial instance here keeps signatures uncluttered.
 instance Pretty NamType where
-  pretty = viaShow
+  pretty _ = mempty
 
 instance Pretty Type where
   pretty t0 = f True t0
@@ -619,11 +624,15 @@ instance Pretty Type where
       f _ (FunT [] t) = "() -> " <> f False t
       f _ (FunT ts t) = hsep $ punctuate " -> " (map (f False) (ts <> [t]))
       f _ (AppT t ts) = hsep (map (f False) (t : ts))
-      f _ (NamT o n ps rs) =
-        block
-          4
-          (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
-          (vsep [pretty k <+> "::" <+> pretty x | (k, x) <- rs])
+      -- Named types (records / objects / tables) render as "name [p1 ...]",
+      -- Haskell-style. No tag and no inline field block; the record/table
+      -- distinction and the field list are surfaced in the CLI help's
+      -- type definition section and in typeclass-aware contexts.
+      f _ (NamT _ n ps _) =
+        let params = if null ps
+                     then mempty
+                     else space <> hsep (map (f False) ps)
+        in pretty n <> params
 
 instance Pretty TypeU where
   pretty t0 = f True t0
@@ -661,11 +670,12 @@ instance Pretty TypeU where
       f _ (FunU ts t) = hsep $ punctuate " ->" (map (f False) (ts <> [t]))
       f _ (ForallU v t) = "forall" <+> pretty v <+> "." <+> f True t
       f _ (AppU t ts) = hsep $ map (f False) (t : ts)
-      f _ (NamU o n ps rs) =
-        block
-          4
-          (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
-          (vsep [pretty k <+> "::" <+> f True x | (k, x) <- rs])
+      -- See the NamT case in 'Pretty Type' above for the rendering rules.
+      f _ (NamU _ n ps _) =
+        let params = if null ps
+                     then mempty
+                     else space <> hsep (map (f False) ps)
+        in pretty n <> params
 
 instance Pretty EType where
   pretty (EType t (Set.toList -> cs) _ _) = case cs of
