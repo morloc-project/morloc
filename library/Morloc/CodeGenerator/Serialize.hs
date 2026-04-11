@@ -292,9 +292,14 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     -- Compute the msgpack schema string for runtime intrinsics
     intrinsicSchema :: Int -> Intrinsic -> TypeF -> [NativeExpr] -> MorlocMonad (Maybe Text)
     intrinsicSchema m intr _ (dataArg:_)
-      | intr `elem` [IntrHash, IntrSave, IntrSaveM, IntrSaveJ, IntrShow] = do
+      | intr `elem` [IntrHash, IntrSave, IntrSaveM, IntrSaveJ, IntrShow, IntrSchema] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
           return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    intrinsicSchema _ IntrTypeof _ (dataArg:_) =
+      -- @typeof yields the user-facing type name as a compile-time constant
+      -- string. The string is stored in the Intrinsic node's schema slot and
+      -- emitted as a literal by the translator; the argument is erased.
+      return . Just $ renderTypeFName (typeFof dataArg)
     intrinsicSchema m IntrLoad tf _ = do
       -- For @load, the return type is {?a} or ?a; the schema is for a
       let unwrap (EffectF _ inner) = unwrap inner
@@ -311,6 +316,25 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema _ _ _ _ = return Nothing
+
+    -- Render a TypeF as a user-facing Morloc type string (for @typeof).
+    -- Uses the general type variable name (not the language-concrete one),
+    -- matching what the user wrote in their source.
+    renderTypeFName :: TypeF -> Text
+    renderTypeFName = render . go
+      where
+        go (UnkF (FV t _)) = pretty t
+        go (VarF (FV t _)) = pretty t
+        go (NamF _ (FV t _) params _) =
+          case params of
+            [] -> pretty t
+            ps -> parens (pretty t <+> hsep (map go ps))
+        go (AppF con args) = parens (go con <+> hsep (map go args))
+        go (FunF args ret) =
+          parens (hsep (punctuate " ->" (map go args ++ [go ret])))
+        go (EffectF _ t) = go t
+        go (OptionalF t) = "?" <> go t
+        go (NatLitF n) = pretty n
 
     typeArg ::
       SerializationState ->
