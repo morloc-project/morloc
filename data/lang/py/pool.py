@@ -136,6 +136,13 @@ def _recv_fd(sock):
 WORKER_IDLE_TIMEOUT = 5.0  # seconds before an idle worker exits
 
 def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, total_workers, wakeup_w):
+    # Reset signal handlers inherited from main. If user code inside run_job
+    # calls multiprocessing.Pool (or anything else that forks and later
+    # SIGTERMs its own children), those grandchildren would otherwise inherit
+    # main's signal_handler and flip the shared shutdown_flag, causing main
+    # to SIGKILL this worker mid-response. See the multiprocessing-py-1 bug.
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     morloc.set_fallback_dir(tmpdir)
     morloc.shinit(shm_basename, 0, 0xffff)
     _init_worker_tracking(busy_count, total_workers, wakeup_w)
