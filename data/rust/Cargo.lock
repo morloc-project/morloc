@@ -486,11 +486,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "morloc-manifest"
+version = "0.74.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "morloc-nexus"
-version = "0.1.0"
+version = "0.74.0"
 dependencies = [
  "clap",
  "libc",
+ "morloc-manifest",
  "morloc-runtime",
  "nix",
  "serde",
@@ -500,10 +509,11 @@ dependencies = [
 
 [[package]]
 name = "morloc-runtime"
-version = "0.1.0"
+version = "0.74.0"
 dependencies = [
  "cbindgen",
  "libc",
+ "morloc-manifest",
  "nix",
  "rmp",
  "rmp-serde",

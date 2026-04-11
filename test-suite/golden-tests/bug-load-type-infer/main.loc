@@ -24,4 +24,5 @@ identity :: a -> a
 roundTrip :: Int -> Str -> <IO> ?Int
 roundTrip x path = do
   @save (identity x) path
-  @load path
+  x <- @load path
+  x

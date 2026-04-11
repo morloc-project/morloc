@@ -160,15 +160,28 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
 
 def signal_handler(sig, frame):
     global daemon
+    # Ignore further SIGTERM/SIGINT during cleanup. Python processes pending
+    # signals between bytecodes, including while another signal handler is
+    # running, so a second SIGTERM arriving mid-cleanup would otherwise
+    # re-enter this handler and double-free the daemon pointer.
+    try:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except Exception:
+        pass
     shutdown_flag.value = True
     if _shutdown_wakeup_fd >= 0:
         try:
             os.write(_shutdown_wakeup_fd, b'!')
         except OSError:
             pass
-    if daemon is not None:
-        morloc.close_daemon(daemon)
-        daemon = None  # prevent double-free on repeated SIGTERM
+    # Capture the daemon pointer into a local and clear the global BEFORE
+    # invoking close_daemon. If a pending signal still slips through and
+    # re-enters this handler, it will see daemon=None and skip the free.
+    d = daemon
+    daemon = None
+    if d is not None:
+        morloc.close_daemon(d)
 
 
 def client_listener(job_fd, socket_path, tmpdir, shm_basename, shutdown_flag):
