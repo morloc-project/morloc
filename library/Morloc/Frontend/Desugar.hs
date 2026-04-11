@@ -607,6 +607,11 @@ mergeSelectors sels =
 -- Do-notation desugaring
 --------------------------------------------------------------------
 
+-- Desugar a do-block to a let-chain. Non-final bare statements and <- binds
+-- are wrapped in EvalE so the typechecker sees them as forced effects (pure
+-- non-finals are therefore rejected). The final bare statement is returned
+-- unwrapped so synthE DoBlockS can flatten it (if effectful) or let tryCoerce
+-- lift it (if pure).
 desugarDo :: Span -> [CstDoStmt] -> D ExprI
 desugarDo sp [] = dfail (startPos sp) "empty do block"
 desugarDo _sp [CstDoBare e] = desugarExpr e

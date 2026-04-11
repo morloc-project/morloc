@@ -588,10 +588,21 @@ synthE i g (IfS cond thenE elseE) = do
   (g4, t3, elseE') <- synthG g3 elseE
   g5 <- subtype' i t3 t2 g4
   return (g5, apply g5 t2, IfS cond' thenE' elseE')
-synthE _ g (DoBlockS e) = do
+synthE i g (DoBlockS e) = do
   (g1, t1, e1) <- synthG g e
-  let effs = collectDoEffects e1
-  return (g1, EffectU effs t1, DoBlockS e1)
+  case apply g1 t1 of
+    EffectU _ iT -> do
+      -- Final expr is effectful: wrap it in EvalS so codegen forces the
+      -- thunk and collectDoEffects picks up its effects alongside the
+      -- non-final EvalS nodes.
+      e1' <- wrapFinalEvalS i iT e1
+      let collected = collectDoEffects e1'
+      return (g1, EffectU collected iT, DoBlockS e1')
+    bareT -> do
+      -- Pure final: leave body as-is; tryCoerce CoerceToEffect will lift
+      -- against an effectful expected type at the use site.
+      let collected = collectDoEffects e1
+      return (g1, EffectU collected bareT, DoBlockS e1)
 synthE _ g (CoerceS coercion e) = do
   (g1, t1, e1) <- synthG g e
   return (g1, applyCoercion coercion t1, CoerceS coercion e1)
@@ -607,7 +618,10 @@ synthE i g (EvalS e) = do
           thunkT = EffectU (EffectVar ev) bt
       g3 <- subtype' i (apply g2b t1') thunkT g2b
       return (g3, apply g3 bt, EvalS (applyGen g3 e1))
-    t -> throwTypeError i $ "Cannot force non-thunk type:" <+> pretty t
+    t -> throwTypeError i $
+      "Cannot force a non-effectful value (got type" <+> pretty t <> ")."
+      <+> "The ! operator and non-final do-block statements require an effectful type <E> T."
+      <+> "Pure expressions in a do-block should be bound via 'let' or moved to the final position."
 synthE i g (IntrinsicS intr args) = do
   (g', argTypes, args') <- synthArgs g args
   g'' <- checkIntrinsicArgs i g' intr argTypes
@@ -903,9 +917,9 @@ checkE i g (IfS cond thenE elseE) t = do
   (g3, t2, thenE') <- checkG g2 thenE t
   (g4, _, elseE') <- checkG g3 elseE (apply g3 t2)
   return (g4, apply g4 t2, IfS cond' thenE' elseE')
-checkE _ g (DoBlockS e) (EffectU effs t) = do
-  (g1, t1, e1) <- checkG g e t
-  return (g1, EffectU effs t1, DoBlockS e1)
+-- DoBlockS falls through to the general synth+subtype/coerce case (below).
+-- synthE DoBlockS produces a flattened EffectU, and subtype handles effectful
+-- finals via <E1> T <: <E2> T, while tryCoerce handles pure-final auto-lift.
 checkE i g (EvalS e) t = do
   -- Synthesize first to get concrete EffectSet in annotations,
   -- then check the inner type against the expected type.
@@ -924,7 +938,10 @@ checkE i g (EvalS e) t = do
       g3 <- subtype' i (apply g2b t1') thunkT g2b
       g4 <- subtype' i (apply g3 bt) t g3
       return (g4, apply g4 t, EvalS (applyGen g4 e1))
-    t' -> throwTypeError i $ "Cannot force non-thunk type:" <+> pretty t'
+    t' -> throwTypeError i $
+      "Cannot force a non-effectful value (got type" <+> pretty t' <> ")."
+      <+> "The ! operator and non-final do-block statements require an effectful type <E> T."
+      <+> "Pure expressions in a do-block should be bound via 'let' or moved to the final position."
 
 -- Resolve solved existentials so specific handlers (LstS, TupS, etc.) can match
 checkE i g e t@(ExistU v _ _)
@@ -992,6 +1009,24 @@ tryCoerce _ _ _ _ = Nothing
 stripCoercionWrappers :: TypeU -> TypeU
 stripCoercionWrappers (OptionalU t) = stripCoercionWrappers t
 stripCoercionWrappers t = t
+
+-- | Wrap the innermost (final) expression of a do-block body in EvalS.
+-- Walks past LetS wrappers (introduced by desugarDo) and updates their type
+-- annotations to the unwrapped inner type. A fresh index is allocated for
+-- the new EvalS node so indexing metadata stays unique.
+wrapFinalEvalS
+  :: Int
+  -> TypeU
+  -> AnnoS (Indexed TypeU) ManyPoly Int
+  -> MorlocMonad (AnnoS (Indexed TypeU) ManyPoly Int)
+wrapFinalEvalS i iT (AnnoS (Idx gi _) ci (LetS v e1 e2)) = do
+  e2' <- wrapFinalEvalS i iT e2
+  return (AnnoS (Idx gi iT) ci (LetS v e1 e2'))
+wrapFinalEvalS i iT final = do
+  newIdx <- MM.getCounterWithPos i
+  return (AnnoS (Idx newIdx iT) (annoSCtx final) (EvalS final))
+  where
+    annoSCtx (AnnoS _ c _) = c
 
 -- | Collect effect labels from all EvalS nodes within a do-block body.
 -- Deeply traverses the full expression tree to find nested EvalS nodes
