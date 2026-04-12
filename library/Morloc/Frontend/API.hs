@@ -105,13 +105,38 @@ parse f (Code code) = do
         (childPath, code') <- openLocalModule importPath
         case Parser.readProgram (Just importedModule) childPath code' newState d of
           (Left e) -> MM.throwSystemError $ pretty e
-          (Right (d', s')) -> parseImports d' s' (maybe m (\v -> Map.insert importedModule v m) childPath)
+          (Right (d', s')) ->
+            -- The parsed module may have a different internal name than the
+            -- import edge target (e.g., file declares "module units" but
+            -- import edge targets ".units"). Reconcile by renaming the DAG
+            -- entry to match the import name.
+            let d'' = reconcileModuleName importedModule d d'
+            in parseImports d'' s' (maybe m (\v -> Map.insert importedModule v m) childPath)
       where
         -- all modules that have already been parsed
         parsed = Map.keysSet d
         -- find all (module to module) edges in the graph where the imported
         -- module has not yet been parsed
         unimported = filter (\(_, importMod) -> not (Set.member importMod parsed)) (MDD.edgelist d)
+
+    -- If readProgram added a key that doesn't match importedModule, rename it.
+    -- This happens when a local import (".units") parses a file that declares
+    -- "module units (...)". We rename the DAG key and the ModE name to match
+    -- the import edge target.
+    reconcileModuleName :: MVar -> DAG MVar Import ExprI -> DAG MVar Import ExprI -> DAG MVar Import ExprI
+    reconcileModuleName importName dOld dNew =
+      case newKeys of
+        [actualName] | actualName /= importName ->
+          -- Rename: delete the old key, insert under the import name with
+          -- the ModE name rewritten to match
+          case Map.lookup actualName dNew of
+            Just (ExprI i (ModE _ es), edges) ->
+              let renamed = Map.delete actualName dNew
+              in Map.insert importName (ExprI i (ModE importName es), edges) renamed
+            _ -> dNew  -- shouldn't happen
+        _ -> dNew  -- zero or multiple new keys: nothing to reconcile
+      where
+        newKeys = filter (`Map.notMember` dOld) (Map.keys dNew)
 
 -- | assume @t@ is a filename and open it, return file name and contents
 openLocalModule :: Path -> MorlocMonad (Maybe Path, Text)

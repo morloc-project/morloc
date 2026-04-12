@@ -355,7 +355,14 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                     <+> "differ in number of terms"
             else do
               checkSuperclassConstraints i cls (zip vs ts) superConstraints
-              mapM_ (linkInstance (linkLocal bnds c cs) m0 cls (zip vs ts) sigs emap) es
+              if null es
+                then
+                  -- Source-less instance: register each method with its
+                  -- specialized general type but no implementations.
+                  -- This enables typechecking without requiring sources.
+                  linkEmptyInstance m0 cls (zip vs ts) sigs emap
+                else
+                  mapM_ (linkInstance (linkLocal bnds c cs) m0 cls (zip vs ts) sigs emap) es
     linkLocal bnds _ cs (ExprI termIdx (VarE _ v))
       | Set.member v bnds = return ()
       | otherwise = case Map.lookup v cs of
@@ -435,6 +442,43 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
 
     updateName :: Int -> EVar -> MorlocMonad ()
     updateName i v = MM.modify (\s -> s {stateName = Map.insert i v (stateName s)})
+
+-- Register a source-less instance: for each method in the typeclass, create a
+-- TermTypes with the specialized general type but no concrete implementations.
+-- This allows typechecking to succeed even without language-specific sources.
+linkEmptyInstance ::
+  MVar ->
+  ClassName ->
+  [(TVar, TypeU)] ->
+  [Signature] ->
+  Map EVar Int ->
+  MorlocMonad ()
+linkEmptyInstance _ cls0 params0 sigs emap = mapM_ go sigs
+  where
+    go (Signature v _ et) =
+      case Map.lookup v emap of
+        Nothing -> return ()
+        Just stateIdx -> do
+          t <- substituteInstanceTypes params0 (etype et)
+          let et' = et {etype = t}
+              tt = TermTypes (Just et') [] []
+          (GMap idmap sigmap) <- MM.gets stateSignatures
+          tcls <- MM.gets stateTypeclasses
+          case Map.lookup stateIdx sigmap of
+            Nothing -> return ()
+            (Just sigset) -> do
+              -- Use the general class type (et) for the Polymorphic wrapper,
+              -- matching linkInstance. The specialized type (et') is only
+              -- inside the TermTypes.
+              sigset' <- mergeSignatureSet sigset (Polymorphic cls0 v et [tt])
+              let sigmap' = Map.insert stateIdx sigset' sigmap
+              newInstance <- case Map.lookup v tcls of
+                Nothing ->
+                  return $ Instance cls0 (map fst params0) et [tt]
+                (Just inst) ->
+                  return $ inst {instanceTerms = weaveTermTypes tt (instanceTerms inst)}
+              let tcls' = Map.insert v newInstance tcls
+              MM.modify (\ms -> ms {stateSignatures = GMap idmap sigmap', stateTypeclasses = tcls'})
 
 -- Goal:
 --   for each term in [Signature], add a TermTypes instance to the correct

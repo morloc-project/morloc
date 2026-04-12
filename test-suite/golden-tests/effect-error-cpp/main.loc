@@ -16,11 +16,9 @@ safeAdd :: Int -> Int -> <IO> Int
 riskyCall :: <Error> Int
 riskyCall = do
   x <- riskyAdd 10 20
-  y <- riskyAdd x 12
-  y
+  riskyAdd x 12
 
 safeCall :: <IO> Int
 safeCall = do
   x <- safeAdd 3 4
-  y <- safeAdd x 1
-  y
+  safeAdd x 1

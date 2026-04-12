@@ -7,10 +7,11 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=morloc");
 
     // Embed rpath so the nexus finds libmorloc at runtime
-    let target = std::env::var("TARGET").unwrap_or_default();
-    if target.contains("apple") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", morloc_lib);
-    } else {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", morloc_lib);
-    }
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", morloc_lib);
+
+    // The morloc compiler version is sourced from CARGO_PKG_VERSION
+    // (this crate's Cargo.toml), which is intentionally kept in
+    // lockstep with the morloc Haskell package.yaml. No build-time
+    // extraction needed -- Cargo guarantees CARGO_PKG_VERSION is set
+    // and rebuilds when Cargo.toml changes.
 }

@@ -509,6 +509,15 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrRead (Just schema) [strDocs]) = 
     OptionalF t -> lcTypeOf cfg t
     _ -> return Nothing
   return $ strDocs {poolExpr = lcPrintExpr cfg (IIntrinsicRead schema innerType (IRawExpr (render (poolExpr strDocs))))}
+-- @schema and @typeof erase their argument: the result is a compile-time
+-- constant string (the schema or user-facing type name), already resolved
+-- into the Intrinsic node's schema slot by Serialize.hs. Emit it as a
+-- string literal and discard the data expression; the type of the
+-- argument is all that matters.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSchema (Just s) [dataDocs]) =
+  return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit s)}
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrTypeof (Just s) [dataDocs]) =
+  return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit s)}
 lowerNativeExpr _ _ (IntrinsicN_ _ intr _ _) =
   error $ "Runtime intrinsic @" <> show intr <> " reached code generation without schema"
 

@@ -1,13 +1,19 @@
 [package]
 name = "morloc-runtime"
-version = "0.1.0"
+version = "0.75.0"
 edition = "2021"
 description = "Morloc runtime library: shared memory, serialization, IPC, packet protocol"
+# Version is intentionally synchronized with the morloc compiler version
+# (see ../../../package.yaml). The C-FFI manifest reader rejects
+# manifests whose recorded morloc_version differs from this crate's
+# CARGO_PKG_VERSION at parse time. Bumping the morloc compiler version
+# requires bumping this version in lockstep.
 
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
+morloc-manifest = { path = "../morloc-manifest" }
 libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -4,6 +4,12 @@ type Py => Numpy1D a = "numpy.ndarray" a
 type Py => List a = "list" a
 type Py => Int64 = "int64"
 
+-- No, this is not an error.
+
+-- The R "double" type is a vector of IEEE 64 bit floats, but it is also how R
+-- stores integers larger than 32 bits. These still cannot truly represent 64 bit
+-- integers because 11 bits used in the exponent. So in reality this is a 53 bit
+-- integer.
 type R => List Int64 = "double" Int64
 type R => Int64 = "double"
 

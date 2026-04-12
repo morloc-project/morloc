@@ -1042,7 +1042,7 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
           Left (showParseError filename' origErr)
 
     addModule d e@(ExprI _ (ModE n es)) =
-      let imports = [(importModuleName i, i) | (ExprI _ (ImpE i)) <- es]
+      let imports = [(importModuleName i', i') | (ExprI _ (ImpE i')) <- es]
       in Map.insert n (e, imports) d
     addModule _ _ = error "expected a module"
 

@@ -3675,7 +3675,7 @@ readProgram ::
   PState ->
   DAG MVar Import ExprI ->
   Either String (DAG MVar Import ExprI, PState)
-readProgram _moduleName modulePath sourceCode pstate dag = do
+readProgram expectedName modulePath sourceCode pstate dag = do
   let filename = maybe "<expr>" id modulePath
   (tokens, docMap, groupToks) <- case lexMorloc filename sourceCode of
     Left err -> Left (showLexError err)
@@ -3685,7 +3685,7 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
   -- Strategy 1: parse as-is (code with module declarations)
   case parseAndDesugar pstate' tokens of
     Right (result, finalState) ->
-      let dag' = foldl addModule dag result
+      let dag' = foldl (addModule expectedName) dag result
           dag'' = attachGroupAnnotations tokens groupToks dag'
       in return (dag'', finalState)
     Left err ->
@@ -3696,7 +3696,7 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
           let pstate'' = pstate' { psDocMap = wrappedDocMap, psSourceLines = T.lines wrappedCode }
           in case parseAndDesugar pstate'' wrappedTokens of
             Right (result, finalState) ->
-              let dag' = foldl addModule dag result
+              let dag' = foldl (addModule expectedName) dag result
                   dag'' = attachGroupAnnotations wrappedTokens wrappedGroupToks dag'
               in return (dag'', finalState)
             Left _ ->
@@ -3704,7 +3704,7 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
                 Just patchedTokens ->
                   case parseAndDesugar pstate'' patchedTokens of
                     Right (result, finalState) ->
-                      let dag' = foldl addModule dag result
+                      let dag' = foldl (addModule expectedName) dag result
                           dag'' = attachGroupAnnotations patchedTokens wrappedGroupToks dag'
                       in return (dag'', finalState)
                     Left _ -> tryExprFallback tokens pstate' dag filename err
@@ -3730,10 +3730,14 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
         Left _ ->
           Left (showParseError filename' origErr)
 
-    addModule d e@(ExprI _ (ModE n es)) =
-      let imports = [(importModuleName i, i) | (ExprI _ (ImpE i)) <- es]
-      in Map.insert n (e, imports) d
-    addModule _ _ = error "expected a module"
+    -- When an expected module name is provided (e.g., from "import .units"),
+    -- use it as the DAG key so edges from the importing module resolve correctly.
+    -- The file may declare "module units (...)" but the import edge targets ".units".
+    addModule mayExpected d e@(ExprI _ (ModE n es)) =
+      let key = maybe n id mayExpected
+          imports = [(importModuleName i, i) | (ExprI _ (ImpE i)) <- es]
+      in Map.insert key (e, imports) d
+    addModule _ _ _ = error "expected a module"
 
 patchForTrailingExpr :: [Located] -> Maybe [Located]
 patchForTrailingExpr tokens = do

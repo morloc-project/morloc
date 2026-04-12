@@ -43,6 +43,13 @@ static CLEANING_UP: AtomicBool = AtomicBool::new(false);
 static TMPDIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Socket info for each pool.
+///
+/// Pool stderr and stdout are intentionally NOT captured or intercepted by
+/// the nexus: a core morloc guarantee is that anything a sourced function
+/// prints to stderr/stdout is passed through unchanged. Raised exceptions
+/// are caught inside each pool's dispatch wrapper (see pool.py/pool.cpp/
+/// pool.R/pool.jl) and returned as morloc error packets, which the nexus
+/// then annotates with call-site context when bubbling them up.
 pub struct PoolSocket {
     pub lang: String,
     pub socket_path: String,
@@ -220,6 +227,11 @@ pub fn setup_sockets(pools: &[Pool], tmpdir: &str, shm_basename: &str) -> Vec<Po
 }
 
 /// Fork and exec a language pool daemon. Returns child PID.
+///
+/// The child inherits the nexus's stdin/stdout/stderr unchanged: anything a
+/// sourced function prints must reach the terminal byte-for-byte without
+/// morloc interposing. Runtime errors raised inside the pool are caught by
+/// the pool's own dispatch wrapper and returned as morloc error packets.
 fn start_language_server(socket: &PoolSocket) -> Result<i32, String> {
     let pid = unsafe { libc::fork() };
 
@@ -237,7 +249,7 @@ fn start_language_server(socket: &PoolSocket) -> Result<i32, String> {
         unsafe {
             libc::execvp(argv[0], argv.as_ptr());
         }
-        // Only reached if exec fails
+        // Only reached if exec fails.
         eprintln!(
             "execvp failed for {}: {}",
             socket.lang,
@@ -284,7 +296,9 @@ fn wait_for_daemon(socket: &PoolSocket, pool_index: usize) -> Result<(), String>
     let mut ping_timeout = INITIAL_PING_TIMEOUT;
 
     for attempt in 0..=MAX_RETRIES {
-        // Check if child already died
+        // Check if child already died. The pool's stderr was inherited
+        // directly, so any traceback it printed is already on the user's
+        // terminal; the nexus just reports the exit status here.
         if PIDS[pool_index].load(Ordering::Relaxed) == -1 {
             let status = EXIT_STATUSES[pool_index].load(Ordering::Relaxed);
             return Err(format!(

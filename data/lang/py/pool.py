@@ -136,6 +136,13 @@ def _recv_fd(sock):
 WORKER_IDLE_TIMEOUT = 5.0  # seconds before an idle worker exits
 
 def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, total_workers, wakeup_w):
+    # Reset signal handlers inherited from main. If user code inside run_job
+    # calls multiprocessing.Pool (or anything else that forks and later
+    # SIGTERMs its own children), those grandchildren would otherwise inherit
+    # main's signal_handler and flip the shared shutdown_flag, causing main
+    # to SIGKILL this worker mid-response. See the multiprocessing-py-1 bug.
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     morloc.set_fallback_dir(tmpdir)
     morloc.shinit(shm_basename, 0, 0xffff)
     _init_worker_tracking(busy_count, total_workers, wakeup_w)
@@ -160,15 +167,28 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
 
 def signal_handler(sig, frame):
     global daemon
+    # Ignore further SIGTERM/SIGINT during cleanup. Python processes pending
+    # signals between bytecodes, including while another signal handler is
+    # running, so a second SIGTERM arriving mid-cleanup would otherwise
+    # re-enter this handler and double-free the daemon pointer.
+    try:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except Exception:
+        pass
     shutdown_flag.value = True
     if _shutdown_wakeup_fd >= 0:
         try:
             os.write(_shutdown_wakeup_fd, b'!')
         except OSError:
             pass
-    if daemon is not None:
-        morloc.close_daemon(daemon)
-        daemon = None  # prevent double-free on repeated SIGTERM
+    # Capture the daemon pointer into a local and clear the global BEFORE
+    # invoking close_daemon. If a pending signal still slips through and
+    # re-enters this handler, it will see daemon=None and skip the free.
+    d = daemon
+    daemon = None
+    if d is not None:
+        morloc.close_daemon(d)
 
 
 def client_listener(job_fd, socket_path, tmpdir, shm_basename, shutdown_flag):

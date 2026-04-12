@@ -61,6 +61,25 @@ impl Default for NexusConfig {
     }
 }
 
+/// Emit a uniform error when pool communication fails, then exit.
+///
+/// The pool's stderr was inherited by the nexus, so any traceback the pool
+/// printed before dying is already on the user's terminal. This helper
+/// just reports the communication error plus the pool's exit status (if
+/// it has been reaped) so the user can correlate the two.
+fn die_with_pool_error(
+    socket: &PoolSocket,
+    pool_index: usize,
+    context: &str,
+    comm_err: &dyn std::fmt::Display,
+) -> ! {
+    eprintln!("Error: {}: {}", context, comm_err);
+    if let Some(info) = process::pool_death_info(pool_index) {
+        eprintln!("Pool '{}' {}", socket.lang, info);
+    }
+    process::clean_exit(1);
+}
+
 /// Parse nexus-level options from argv. Returns the index of the first
 /// non-option argument (the manifest path or subcommand).
 pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
@@ -554,7 +573,7 @@ fn parse_command_args(
     (parsed, i)
 }
 
-// ── Command execution ──────────────────────────────────────────────────────
+// -- Command execution ------------------------------------------------------
 
 /// Execute a remote command by sending a call packet to the pool.
 fn run_remote_command(
@@ -591,17 +610,26 @@ fn run_remote_command(
     let socket = &sockets[cmd.pool_index];
 
     // Parse return schema
-    let return_schema = match parse_schema(&cmd.return_schema) {
+    let return_schema = match parse_schema(&cmd.ret.schema) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Error: failed to parse return schema '{}': {}", cmd.return_schema, e);
+            eprintln!("Error: failed to parse return schema '{}': {}", cmd.ret.schema, e);
             process::clean_exit(1);
         }
     };
 
-    // Build data packets for each argument
+    // The parsed `args` list and `cmd.args` are index-aligned 1:1 in
+    // declaration order: parse_command_args pushes one ArgValue for
+    // EVERY arg (including flags). The Haskell compiler emits one
+    // schema per arg position too. Walk both lists in lockstep; for
+    // flags, schema_str() returns None and the flag's ArgValue is
+    // already a ready-to-send "true"/"false" string that doesn't need
+    // packet conversion -- but the original v1 dispatch path still
+    // ran flags through parse_cli_data_argument with the flag's bool
+    // schema, so we mirror that to keep the wire format consistent.
     let mut arg_packets: Vec<Vec<u8>> = Vec::new();
-    for (i, (arg_val, schema_str)) in args.iter().zip(cmd.arg_schemas.iter()).enumerate() {
+    for (i, (arg_val, arg_def)) in args.iter().zip(cmd.args.iter()).enumerate() {
+        let schema_str = arg_def.schema_str().unwrap_or("b");
         let schema = match parse_schema(schema_str) {
             Ok(s) => s,
             Err(e) => {
@@ -699,26 +727,33 @@ fn run_remote_command(
     let mut stream = match UnixStream::connect(&socket.socket_path) {
         Ok(s) => s,
         Err(e) => {
-            // Check if pool died
-            if let Some(info) = process::pool_death_info(cmd.pool_index) {
-                eprintln!("Error: {}\nCommunication error: {}", info, e);
-            } else {
-                eprintln!("Error: daemon is unresponsive: {}", e);
-            }
-            process::clean_exit(1);
+            die_with_pool_error(
+                socket,
+                cmd.pool_index,
+                &format!("failed to connect to pool '{}'", socket.lang),
+                &e,
+            );
         }
     };
 
     if let Err(e) = stream.write_all(&call_packet) {
-        eprintln!("Error: failed to send call packet: {}", e);
-        process::clean_exit(1);
+        die_with_pool_error(
+            socket,
+            cmd.pool_index,
+            &format!("failed to send call packet to pool '{}'", socket.lang),
+            &e,
+        );
     }
 
     // Read response header
     let mut resp_header_bytes = [0u8; 32];
     if let Err(e) = stream.read_exact(&mut resp_header_bytes) {
-        eprintln!("Error: failed to read response header: {}", e);
-        process::clean_exit(1);
+        die_with_pool_error(
+            socket,
+            cmd.pool_index,
+            &format!("failed to read response header from pool '{}'", socket.lang),
+            &e,
+        );
     }
 
     let resp_header = match packet::PacketHeader::from_bytes(&resp_header_bytes) {
@@ -736,8 +771,12 @@ fn run_remote_command(
     let mut resp_body = vec![0u8; remaining];
     if remaining > 0 {
         if let Err(e) = stream.read_exact(&mut resp_body) {
-            eprintln!("Error: failed to read response body: {}", e);
-            process::clean_exit(1);
+            die_with_pool_error(
+                socket,
+                cmd.pool_index,
+                &format!("failed to read response body from pool '{}'", socket.lang),
+                &e,
+            );
         }
     }
 
@@ -1020,20 +1059,26 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
     }
 
     // Parse return schema
-    let return_schema = match parse_schema(&cmd.return_schema) {
+    let return_schema = match parse_schema(&cmd.ret.schema) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Error: failed to parse return schema '{}': {}", cmd.return_schema, e);
+            eprintln!("Error: failed to parse return schema '{}': {}", cmd.ret.schema, e);
             process::clean_exit(1);
         }
     };
     let c_return_schema = morloc_runtime::cschema::CSchema::from_rust(&return_schema);
 
-    // Parse and evaluate arguments
+    // The parsed `args` list and `cmd.args` are index-aligned 1:1 in
+    // declaration order: parse_command_args pushes one ArgValue for
+    // EVERY arg (including flags). The Haskell compiler emits one
+    // schema per arg position too. Walk both lists in lockstep; for
+    // flags, the schema_str() accessor returns None and we fall back
+    // to the bool schema "b" so the wire format stays consistent.
     let mut c_arg_schemas: Vec<*const morloc_runtime::cschema::CSchema> = Vec::new();
     let mut c_arg_voidstars: Vec<*mut u8> = Vec::new();
 
-    for (i, (arg_val, schema_str)) in args.iter().zip(cmd.arg_schemas.iter()).enumerate() {
+    for (i, (arg_val, arg_def)) in args.iter().zip(cmd.args.iter()).enumerate() {
+        let schema_str = arg_def.schema_str().unwrap_or("b");
         let schema = match parse_schema(schema_str) {
             Ok(s) => s,
             Err(e) => {
@@ -1132,7 +1177,7 @@ fn unsafe_errmsg_to_string(errmsg: *mut std::ffi::c_char) -> String {
     }
 }
 
-// ── Helpers for command argument parsing ────────────────────────────────────
+// -- Helpers for command argument parsing ------------------------------------
 
 fn is_flag_opt(cmd: &Command, long_name: &str) -> bool {
     cmd.args.iter().any(|a| match a {

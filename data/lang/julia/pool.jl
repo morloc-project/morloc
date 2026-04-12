@@ -46,6 +46,16 @@ function run_job(client_fd)
         MorlocRuntime.send_packet_to_foreign_server(client_fd, result)
 
     catch e
+        # Best-effort: wrap the error in a fail packet and send it back so the
+        # caller gets a structured error instead of hanging on a closed socket.
+        # Includes the full backtrace so context propagates through the stack.
+        msg = sprint(showerror, e, catch_backtrace())
+        try
+            result = MorlocRuntime.make_fail_packet(msg)
+            MorlocRuntime.send_packet_to_foreign_server(client_fd, result)
+        catch
+            # Client may already be gone (timed-out ping, broken pipe); ignore.
+        end
         @error "job failed" exception=(e, catch_backtrace())
     finally
         MorlocRuntime.close_socket(client_fd)
