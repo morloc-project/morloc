@@ -2,6 +2,7 @@
 -------------------
  * allow effectful final do-notation statements
  * lots of bug fixes
+ * make changelog version source of truth
 
 0.74.0 [2026-04-06]
 -------------------
