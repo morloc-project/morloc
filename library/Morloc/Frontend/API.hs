@@ -97,21 +97,41 @@ parse f (Code code) = do
           (Just mainPath) -> Mod.findModule (Just mainPath, mainModule) importedModule
           Nothing -> Mod.findModule (Nothing, mainModule) importedModule
 
+        -- Strip the "." prefix from local imports. The prefix is only needed
+        -- for findModule to know to resolve locally. After resolution, the
+        -- canonical module name is the bare name (matching the file's own
+        -- module declaration).
+        let canonicalName = stripLocalPrefix importedModule
+            d1 = if canonicalName /= importedModule
+                   then rewriteEdgeTarget importedModule canonicalName d
+                   else d
+
         -- Load the <main>.yaml file associated with the main morloc package file
         moduleConfig <- Config.loadModuleConfig (Just importPath)
         let newState = s {psModuleConfig = moduleConfig}
 
         Mod.loadModuleMetadata importPath
         (childPath, code') <- openLocalModule importPath
-        case Parser.readProgram (Just importedModule) childPath code' newState d of
+        case Parser.readProgram (Just canonicalName) childPath code' newState d1 of
           (Left e) -> MM.throwSystemError $ pretty e
-          (Right (d', s')) -> parseImports d' s' (maybe m (\v -> Map.insert importedModule v m) childPath)
+          (Right (d', s')) -> parseImports d' s' (maybe m (\v -> Map.insert canonicalName v m) childPath)
       where
         -- all modules that have already been parsed
         parsed = Map.keysSet d
         -- find all (module to module) edges in the graph where the imported
         -- module has not yet been parsed
         unimported = filter (\(_, importMod) -> not (Set.member importMod parsed)) (MDD.edgelist d)
+
+    -- Strip the "." prefix that marks local imports
+    stripLocalPrefix :: MVar -> MVar
+    stripLocalPrefix (MV x)
+      | T.pack "." `T.isPrefixOf` x = MV (T.drop 1 x)
+      | otherwise = MV x
+
+    -- Rewrite all DAG edges that target oldName to target newName
+    rewriteEdgeTarget :: MVar -> MVar -> DAG MVar Import ExprI -> DAG MVar Import ExprI
+    rewriteEdgeTarget oldName newName = Map.map (\(n, edges) ->
+      (n, [(if k == oldName then newName else k, e) | (k, e) <- edges]))
 
 -- | assume @t@ is a filename and open it, return file name and contents
 openLocalModule :: Path -> MorlocMonad (Maybe Path, Text)
