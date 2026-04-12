@@ -8,6 +8,6 @@
 //! `data/rust/morloc-manifest/src/lib.rs`.
 
 pub use morloc_manifest::{
-    parse_manifest, read_manifest_payload, Arg, Build, CmdGroup, CmdType, Command, Constraint,
-    GroupEntry, GroupOpt, Manifest, Metadata, Pool, Return, Service,
+    parse_manifest, read_manifest_payload, Arg, Command,
+    GroupEntry, Manifest, Pool,
 };

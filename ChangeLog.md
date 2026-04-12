@@ -1,3 +1,8 @@
+0.75.0 [2026-04-12]
+-------------------
+ * allow effectful final do-notation statements
+ * lots of bug fixes
+
 0.74.0 [2026-04-06]
 -------------------
  * unify morloc-manager env, workspace, and version
