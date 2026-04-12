@@ -142,11 +142,14 @@ pub fn print_command_help_single(prog_name: &str, cmd: &Command) -> ! {
     eprintln!();
 
     // Description
-    for (i, line) in cmd.desc.iter().enumerate() {
-        if i == 0 && line.is_empty() {
-            continue;
+    if !cmd.desc.is_empty() {
+        eprintln!();
+        for (i, line) in cmd.desc.iter().enumerate() {
+            if i == 0 && line.is_empty() {
+                continue;
+            }
+            eprintln!("{}", line);
         }
-        eprintln!("{}", line);
     }
 
     // Nexus options
