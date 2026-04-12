@@ -97,24 +97,21 @@ parse f (Code code) = do
           (Just mainPath) -> Mod.findModule (Just mainPath, mainModule) importedModule
           Nothing -> Mod.findModule (Nothing, mainModule) importedModule
 
-        -- Strip the "." prefix from local imports. The prefix is only needed
-        -- for findModule to know to resolve locally. After resolution, the
-        -- canonical module name is the bare name (matching the file's own
-        -- module declaration).
-        let canonicalName = stripLocalPrefix importedModule
-            d1 = if canonicalName /= importedModule
-                   then rewriteEdgeTarget importedModule canonicalName d
-                   else d
-
         -- Load the <main>.yaml file associated with the main morloc package file
         moduleConfig <- Config.loadModuleConfig (Just importPath)
         let newState = s {psModuleConfig = moduleConfig}
 
         Mod.loadModuleMetadata importPath
         (childPath, code') <- openLocalModule importPath
-        case Parser.readProgram (Just canonicalName) childPath code' newState d1 of
+        case Parser.readProgram (Just importedModule) childPath code' newState d of
           (Left e) -> MM.throwSystemError $ pretty e
-          (Right (d', s')) -> parseImports d' s' (maybe m (\v -> Map.insert canonicalName v m) childPath)
+          (Right (d', s')) ->
+            -- The parsed module may have a different internal name than the
+            -- import edge target (e.g., file declares "module units" but
+            -- import edge targets ".units"). Reconcile by renaming the DAG
+            -- entry to match the import name.
+            let d'' = reconcileModuleName importedModule d d'
+            in parseImports d'' s' (maybe m (\v -> Map.insert importedModule v m) childPath)
       where
         -- all modules that have already been parsed
         parsed = Map.keysSet d
@@ -122,16 +119,24 @@ parse f (Code code) = do
         -- module has not yet been parsed
         unimported = filter (\(_, importMod) -> not (Set.member importMod parsed)) (MDD.edgelist d)
 
-    -- Strip the "." prefix that marks local imports
-    stripLocalPrefix :: MVar -> MVar
-    stripLocalPrefix (MV x)
-      | T.pack "." `T.isPrefixOf` x = MV (T.drop 1 x)
-      | otherwise = MV x
-
-    -- Rewrite all DAG edges that target oldName to target newName
-    rewriteEdgeTarget :: MVar -> MVar -> DAG MVar Import ExprI -> DAG MVar Import ExprI
-    rewriteEdgeTarget oldName newName = Map.map (\(n, edges) ->
-      (n, [(if k == oldName then newName else k, e) | (k, e) <- edges]))
+    -- If readProgram added a key that doesn't match importedModule, rename it.
+    -- This happens when a local import (".units") parses a file that declares
+    -- "module units (...)". We rename the DAG key and the ModE name to match
+    -- the import edge target.
+    reconcileModuleName :: MVar -> DAG MVar Import ExprI -> DAG MVar Import ExprI -> DAG MVar Import ExprI
+    reconcileModuleName importName dOld dNew =
+      case newKeys of
+        [actualName] | actualName /= importName ->
+          -- Rename: delete the old key, insert under the import name with
+          -- the ModE name rewritten to match
+          case Map.lookup actualName dNew of
+            Just (ExprI i (ModE _ es), edges) ->
+              let renamed = Map.delete actualName dNew
+              in Map.insert importName (ExprI i (ModE importName es), edges) renamed
+            _ -> dNew  -- shouldn't happen
+        _ -> dNew  -- zero or multiple new keys: nothing to reconcile
+      where
+        newKeys = filter (`Map.notMember` dOld) (Map.keys dNew)
 
 -- | assume @t@ is a filename and open it, return file name and contents
 openLocalModule :: Path -> MorlocMonad (Maybe Path, Text)
