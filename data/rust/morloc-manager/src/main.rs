@@ -134,9 +134,6 @@ enum Cmd {
         /// Skip interactive wizard, use defaults for unspecified options
         #[arg(long)]
         non_interactive: bool,
-        /// Do not activate the new environment (keep current selection)
-        #[arg(long)]
-        no_activate: bool,
     },
     /// Run a command in the active environment
     #[command(display_order = 2)]
@@ -240,6 +237,9 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Re-run morloc init
         #[arg(long)]
         reinit: bool,
+        /// Accepted for scripting uniformity with `new` (no effect)
+        #[arg(long, hide = true)]
+        non_interactive: bool,
     },
 
     // -- Deployment --
@@ -380,7 +380,7 @@ fn check_system_write_access() -> Result<()> {
         match fs::write(&test_path, b"") {
             Ok(_) => { let _ = fs::remove_file(&test_path); Ok(()) }
             Err(_) => Err(ManagerError::ConfigPermissionDenied(format!(
-                "{}. System-scope operations require root. Re-run with sudo.",
+                "{}. System-scope operations require root. Re-run with sudo",
                 sys_dir.display()
             )))
         }
@@ -388,7 +388,7 @@ fn check_system_write_access() -> Result<()> {
         match fs::create_dir_all(&sys_dir) {
             Ok(_) => Ok(()),
             Err(_) => Err(ManagerError::ConfigPermissionDenied(format!(
-                "{}. System-scope operations require root. Re-run with sudo.",
+                "{}. System-scope operations require root. Re-run with sudo",
                 sys_dir.display()
             )))
         }
@@ -569,7 +569,6 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             system,
             no_init,
             non_interactive,
-            no_activate,
         } => {
             if system { check_system_write_access()?; }
             let scope = resolve_scope(system);
@@ -613,6 +612,9 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             }
 
             let interactive = !non_interactive && io::stdin().is_terminal();
+            if !non_interactive && !interactive {
+                eprintln!("Note: No TTY detected, running in non-interactive mode.");
+            }
 
             // Step 1: Resolve name (ask first so user isn't surprised after a long pull)
             let env_name = if let Some(n) = name {
@@ -644,6 +646,11 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 // version resolution below (default to version string)
                 String::new()
             };
+
+            // Validate name early (before potentially slow image pull)
+            if !env_name.is_empty() {
+                environment::validate_env_name(&env_name)?;
+            }
 
             if version.is_some() && image.is_some() {
                 return Err(ManagerError::EnvError(
@@ -787,38 +794,16 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 eprintln!("Edit it, then run: morloc-manager update {env_name}");
             }
 
-            // Save the previous active env so --no-activate can restore it
-            let prev_active = if no_activate {
-                cfg::read_active_config().and_then(|c| c.active_env)
-            } else {
-                None
-            };
+            eprintln!("Created environment: {env_name}");
 
-            // Activate the new env (needed at least temporarily for morloc init)
-            environment::select_environment(&env_name, scope)?;
-            if !no_activate {
-                eprintln!("Created and activated environment: {env_name}");
-            }
-
-            // Run morloc init
+            // Run morloc init, passing the env explicitly (no active env needed)
             if !no_init {
-                run_morloc_init(verbose)?;
-            }
-
-            // Restore previous active env if --no-activate
-            if no_activate {
-                let cfg_path = cfg::config_path(Scope::Local);
-                if let Ok(cfg) = cfg::read_config::<Config>(&cfg_path) {
-                    let new_cfg = Config { active_env: prev_active.clone(), ..cfg };
-                    let _ = cfg::write_config(&cfg_path, &new_cfg);
-                }
-                match prev_active {
-                    Some(prev) => eprintln!("Created environment: {env_name} (active remains: {prev})"),
-                    None => eprintln!("Created environment: {env_name}"),
-                }
+                let ec = cfg::read_env_config(scope, &env_name)?;
+                run_morloc_init_for(Some((env_name.clone(), scope, ec)), verbose)?;
             }
 
             eprintln!("{}", bold_green(&format!("Environment '{env_name}' is ready.")));
+            eprintln!("Activate it with: morloc-manager select {env_name}");
 
             if system && !check_podman_additional_stores(resolved_engine) {
                 eprintln!();
@@ -847,6 +832,8 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             if names.is_empty() {
                 return Err(ManagerError::EnvError("No environment names specified".to_string()));
             }
+            // Capture current active env for post-removal feedback
+            let was_active = cfg::read_active_config().and_then(|c| c.active_env);
             // Attempt each removal; collect failures, continue past errors
             let mut failures: Vec<String> = Vec::new();
             for name in &names {
@@ -874,7 +861,21 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     Ok(())
                 })();
                 match result {
-                    Ok(()) => eprintln!("Removed environment: {name}"),
+                    Ok(()) => {
+                        // Check if removed env was active and report new state
+                        if was_active.as_deref() == Some(name.as_str()) {
+                            match environment::resolve_active_environment() {
+                                Ok((new_active, _, _)) => {
+                                    eprintln!("Removed environment: {name}. Active environment is now: {new_active}");
+                                }
+                                Err(_) => {
+                                    eprintln!("Removed environment: {name}. No active environment. Use: morloc-manager select <name>");
+                                }
+                            }
+                        } else {
+                            eprintln!("Removed environment: {name}");
+                        }
+                    }
                     Err(e) => failures.push(format!("{name}: {e}")),
                 }
             }
@@ -1062,7 +1063,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         // ---- update ----
         Cmd::Update {
             name, image, version, dockerfile, dockerfile_stub, include, flagfile,
-            engine_arg, engine, shm_size, no_build, reinit,
+            engine_arg, engine, shm_size, no_build, reinit, non_interactive: _,
         } => {
             let (env_name, env_scope) = match name {
                 Some(n) => {
@@ -1226,6 +1227,11 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
         // ---- unfreeze ----
         Cmd::Unfreeze { from, tag, base } => {
+            if !std::path::Path::new(&from).is_file() {
+                return Err(ManagerError::UnfreezeError(format!(
+                    "Input file not found: {from}"
+                )));
+            }
             // Read version and engine from the freeze manifest so unfreeze
             // works on deployment machines with no morloc environments.
             let tarball_dir = std::path::Path::new(&from)
@@ -1356,8 +1362,13 @@ fn run_in_container_for(
                  additionalimagestores = [\"/var/lib/containers/storage\"]\n"
             )));
         }
+        let hint = if env_scope == Scope::System {
+            format!("Ask your administrator to run: sudo morloc-manager update {env_name}")
+        } else {
+            format!("Run 'morloc-manager update {env_name}' to build it.")
+        };
         return Err(ManagerError::EnvError(format!(
-            "Image '{image}' not found locally. Run 'morloc-manager update {env_name}' to build it."
+            "Image '{image}' not found locally. {hint}"
         )));
     }
 
@@ -1488,10 +1499,6 @@ fn run_with_config(
         // Exit 1-124 = program exited with non-zero, pass through silently
         std::process::exit(code);
     }
-}
-
-fn run_morloc_init(verbose: bool) -> Result<()> {
-    run_morloc_init_for(None, verbose)
 }
 
 fn run_morloc_init_for(

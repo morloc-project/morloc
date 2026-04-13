@@ -207,12 +207,8 @@ pub fn pull_custom_image(engine: ContainerEngine, image: &str) -> Result<()> {
 /// Create or update an environment.
 ///
 /// When `is_new` is true: validates name uniqueness, creates data directories.
-/// When `is_new` is false: loads existing config, applies overrides.
-pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
-    let scope = opts.scope;
-    let name = &opts.name;
-
-    // Validate name
+/// Validate that an environment name contains only allowed characters.
+pub fn validate_env_name(name: &str) -> Result<()> {
     if name.is_empty()
         || !name
             .chars()
@@ -222,6 +218,15 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
             "Invalid environment name '{name}': must contain only alphanumeric characters, hyphens, underscores, or dots"
         )));
     }
+    Ok(())
+}
+
+/// When `is_new` is false: loads existing config, applies overrides.
+pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
+    let scope = opts.scope;
+    let name = &opts.name;
+
+    validate_env_name(name)?;
 
     // Load existing config or start fresh
     let mut ec = if opts.is_new {
@@ -512,7 +517,19 @@ fn resolve_active_env_name() -> Result<String> {
             }
         }
     }
-    Err(ManagerError::NoActiveEnvironment)
+    // Check if any environments exist to give a better suggestion
+    let local_envs = config::list_env_names(Scope::Local);
+    let system_envs = config::list_env_names(Scope::System);
+    if local_envs.is_empty() && system_envs.is_empty() {
+        Err(ManagerError::NoActiveEnvironment)
+    } else {
+        let mut available: Vec<String> = local_envs;
+        available.extend(system_envs);
+        Err(ManagerError::EnvError(format!(
+            "No active environment. Select one with: morloc-manager select <name>\nAvailable: {}",
+            available.join(", ")
+        )))
+    }
 }
 
 // ======================================================================
