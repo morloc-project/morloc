@@ -1,3 +1,9 @@
+0.76.0 [2026-04-13]
+-------------------
+ * fix docstring groups
+ * add module docstrings
+ * fix bug in unfreeze
+
 0.75.0 [2026-04-12]
 -------------------
  * allow effectful final do-notation statements
