@@ -26,6 +26,17 @@ echo "Syncing version $VERSION ..."
 sed -i "s/^version:          .*/version:          $VERSION/" package.yaml
 echo "  updated package.yaml"
 
+# Regenerate morloc.cabal from package.yaml
+if command -v hpack >/dev/null 2>&1; then
+  hpack
+elif stack exec -- hpack --version >/dev/null 2>&1; then
+  stack exec -- hpack
+else
+  # Direct sed fallback: update the version line in morloc.cabal
+  sed -i "s/^version:        .*/version:        $VERSION/" morloc.cabal
+fi
+echo "  updated morloc.cabal"
+
 for f in data/rust/morloc-{nexus,manifest,runtime}/Cargo.toml; do
   sed -i "s/^version = \".*\"/version = \"$VERSION\"/" "$f"
   echo "  updated $f"
