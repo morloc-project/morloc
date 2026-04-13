@@ -72,7 +72,13 @@ parse f (Code code) = do
 
   case Parser.readProgram Nothing f code parserState mempty of
     (Left e) -> MM.throwSystemError $ pretty e
-    (Right (mainDag, mainState)) -> parseImports mainDag mainState Map.empty
+    (Right (mainDag, mainState)) -> do
+      -- capture module-level docs from the main module before imports overwrite them
+      MM.modify (\st -> st
+        { stateModuleDoc = psModuleDoc mainState
+        , stateModuleEpilogues = psModuleEpilogues mainState
+        })
+      parseImports mainDag mainState Map.empty
   where
     -- descend recursively into imports
     parseImports ::

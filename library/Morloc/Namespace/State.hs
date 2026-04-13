@@ -131,6 +131,10 @@ data MorlocState = MorlocState
   -- ^ Project root directory (directory of the entry-point file)
   , stateEvalMode :: Bool
   -- ^ True when running in eval mode (restricts source/class/instance)
+  , stateModuleDoc :: [Text]
+  -- ^ Module-level description lines (from docstrings before module declaration)
+  , stateModuleEpilogues :: [[Text]]
+  -- ^ Epilogue blocks for the top-level help output
   }
   deriving (Show)
 
@@ -320,6 +324,8 @@ instance Defaultable MorlocState where
       , stateManifoldEffects = Map.empty
       , stateProjectRoot = Nothing
       , stateEvalMode = False
+      , stateModuleDoc = []
+      , stateModuleEpilogues = []
       }
 
 instance Defaultable PackageMeta where

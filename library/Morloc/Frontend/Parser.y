@@ -846,11 +846,13 @@ data PState = PState
   , psProjectRoot :: !(Maybe Path) -- project root (directory of entry-point file)
   , psTermDocs    :: !(Map.Map EVar [Text])
   , psWarnings    :: ![Text] -- docstring warnings accumulated during desugar
+  , psModuleDoc   :: ![Text] -- module-level description
+  , psModuleEpilogues :: ![[Text]] -- epilogue blocks
   }
   deriving (Show)
 
 emptyPState :: PState
-emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty []
+emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty [] [] []
 
 type P a = State.StateT PState (Either ParseError) a
 
@@ -941,6 +943,8 @@ toDState ps = DState
   , dsProjectRoot = psProjectRoot ps
   , dsTermDocs = psTermDocs ps
   , dsWarnings = psWarnings ps
+  , dsModuleDoc = psModuleDoc ps
+  , dsModuleEpilogues = psModuleEpilogues ps
   }
 
 fromDState :: PState -> DState -> PState
@@ -949,6 +953,8 @@ fromDState ps ds = ps
   , psSourceMap = dsSourceMap ds
   , psTermDocs = dsTermDocs ds
   , psWarnings = dsWarnings ds
+  , psModuleDoc = dsModuleDoc ds
+  , psModuleEpilogues = dsModuleEpilogues ds
   }
 
 -- | Run parse + desugar
@@ -1135,19 +1141,30 @@ attachGroupAnnotations tokens groupToks dag =
 parseGroupHeaders :: [Located] -> [(T.Text, [T.Text], Pos)]
 parseGroupHeaders = foldl' accum [] . map extractLine
   where
-    extractLine (Located pos (TokGroupLine txt) _) = (pos, T.strip txt)
+    extractLine (Located pos (TokGroupLine txt) _) = (pos, stripOne txt)
     extractLine (Located pos _ _) = (pos, T.empty)
+
+    -- consume one leading space after --*, preserve remaining indentation
+    stripOne t = T.stripEnd $ case T.uncons t of
+      Just (' ', rest) -> rest
+      _ -> t
 
     accum :: [(T.Text, [T.Text], Pos)] -> (Pos, T.Text) -> [(T.Text, [T.Text], Pos)]
     accum gs (pos, line)
-      | T.null line = gs ++ [(T.empty, [], pos)]  -- bare --* = group terminator
-      | otherwise = case T.stripPrefix "name:" line of
-          Just name -> gs ++ [(T.strip name, [], pos)]
-          Nothing -> case T.stripPrefix "desc:" line of
-            Just desc -> case gs of
-              [] -> gs
-              _ -> init gs ++ [let (n, ds, p) = last gs in (n, ds ++ [T.strip desc], p)]
-            Nothing -> gs
+      | Just rest <- T.stripPrefix "\\" line = addDesc gs pos (T.stripEnd rest)
+      | Just name <- T.stripPrefix "group:" (T.stripStart line) =
+          let name' = T.strip name
+          in if T.null name'
+             then gs ++ [(T.empty, [], pos)]  -- --* group: (no name) = terminator
+             else case gs of
+               -- last entry has no name yet: set it
+               _ | not (null gs), let (n, _, _) = last gs, T.null n ->
+                   init gs ++ [let (_, ds, p) = last gs in (name', ds, p)]
+               _ -> gs ++ [(name', [], pos)]
+      | otherwise = addDesc gs pos line  -- includes blank lines
+
+    addDesc [] pos d = [(T.empty, [d], pos)]  -- no group yet, start unnamed entry
+    addDesc gs _ d = init gs ++ [let (n, ds, p) = last gs in (n, ds ++ [d], p)]
 
 findExportSymbolPositions :: [Located] -> [(T.Text, Pos)]
 findExportSymbolPositions = findModule

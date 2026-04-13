@@ -107,6 +107,8 @@ data DState = DState
   , dsProjectRoot :: !(Maybe Path) -- project root (directory of entry-point file)
   , dsTermDocs :: !(Map.Map EVar [Text]) -- declaration-level docstrings
   , dsWarnings :: ![Text] -- accumulated docstring warnings, drained by the caller
+  , dsModuleDoc :: ![Text] -- module-level description lines
+  , dsModuleEpilogues :: ![[Text]] -- epilogue blocks for top-level help
   }
   deriving (Show)
 
@@ -265,6 +267,31 @@ processArgDocLines = foldl step ([], defaultValue)
 
 parseDocBool :: Text -> Bool
 parseDocBool v = v == "true" || v == "True"
+
+processModuleDocLines :: [Text] -> ([Text], [Text], [[Text]])
+processModuleDocLines = finalize . foldl step ([], Nothing, [])
+  where
+    step (desc, curEpi, epis) line = case parseDocKV line of
+      DocDesc v -> case curEpi of
+        Nothing -> (desc <> [v], Nothing, epis)
+        Just epi -> (desc, Just (epi <> [v]), epis)
+      DocDirective k _v -> case k of
+        "epilogue" ->
+          let epis' = case curEpi of
+                Nothing -> epis
+                Just epi -> epis <> [epi]
+          in (desc, Just [], epis')
+        _ ->
+          let line' = k <> ": " <> _v
+          in case curEpi of
+            Nothing -> (desc <> [line'], Nothing, epis)
+            Just epi -> (desc, Just (epi <> [line']), epis)
+
+    finalize (desc, curEpi, epis) =
+      let epis' = case curEpi of
+            Nothing -> epis
+            Just epi -> epis <> [epi]
+      in ([], desc, epis')
 
 applySourceDocs :: [Text] -> Source -> ([Text], Source)
 applySourceDocs lns src = foldl step ([], src) lns
@@ -788,6 +815,13 @@ desugarTopLevel (Loc sp (CModE maybeName export body)) = do
       case (modPath, projRoot) of
         (Just mp, Just pr) -> return (inferModuleName pr mp)
         _ -> dfail (startPos sp) "nameless module requires a file path and project root"
+  -- capture module-level docstrings (--' lines before module keyword)
+  docs <- lookupDocsAt (startPos sp)
+  let (_warns, desc, epis) = processModuleDocLines docs
+  State.modify $ \s -> s
+    { dsModuleDoc = desc
+    , dsModuleEpilogues = epis
+    }
   expExprI <- desugarExport sp export
   bodyExprs <- concatMapM desugarTopLevel body
   modI <- freshIdSpan sp

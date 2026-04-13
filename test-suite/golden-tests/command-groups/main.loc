@@ -1,13 +1,13 @@
 module main (
-  --* name: math
-  --* desc: Mathematical operations
+  --* group: math
+  --* Mathematical operations
   double, triple,
 
-  --* name: text
-  --* desc: Text utilities
+  --* group: text
+  --* Text utilities
   greet,
 
-  --*
+  --* group:
   version
 )
 

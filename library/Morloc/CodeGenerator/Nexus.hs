@@ -57,6 +57,7 @@ data FData = FData
 
 data GastData = GastData
   { commandName :: Text
+  , commandMid :: Int
   , commandType :: Type
   , commandDocs :: CmdDocSet
   , commandExpr :: NexusExpr
@@ -231,6 +232,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
   return $
     GastData
       { commandName = maybe (unEVar gname) id (cmdDocName docs)
+      , commandMid = i
       , commandType = gtype
       , commandDocs = docs
       , commandExpr = expr
@@ -581,16 +583,20 @@ buildManifest ::
   [FData] ->
   [GastData] ->
   (Lang -> Int) ->
-  Map.Map Text Text ->
+  Map.Map Int Text ->
   Map.Map Text [Text] ->
+  [Text] ->
+  [[Text]] ->
   Text
-buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPool nameToGroup groupDescs =
+buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPool indexToGroup groupDescs moduleDoc moduleEpilogues =
   jsonObj
     [ ("name", jsonStr (MT.pack programName))
     , ("build", buildJson)
     , ("pools", jsonArr (map poolJson daemonSets))
     , ("commands", jsonArr (map remoteCmdJson fdata ++ map pureCmdJson gasts))
     , ("groups", jsonArr (map groupJson (Map.toList groupDescs)))
+    , ("desc", jsonStrArr moduleDoc)
+    , ("epilogues", jsonArr (map jsonStrArr moduleEpilogues))
     , ("metadata", metadataEmpty)
     ]
   where
@@ -642,8 +648,10 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
     -- two differently: a real null deserializes to None, while a
     -- string "null" used to require a custom deserializer that has
     -- since been dropped.
-    cmdGroupField :: Text -> (Text, Text)
-    cmdGroupField cmdName = case Map.lookup cmdName nameToGroup of
+    -- Look up by manifold ID rather than subcommand name, since the
+    -- subcommand may be renamed via --' name: docstrings.
+    cmdGroupField :: Int -> (Text, Text)
+    cmdGroupField mid = case Map.lookup mid indexToGroup of
       Just gname -> ("group", jsonStr gname)
       Nothing -> ("group", jsonNull)
 
@@ -660,7 +668,7 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
         , ("return", returnJson (fdataReturnSchema fd) (fdataType fd) (snd (cmdDocRet (fdataCmdDocSet fd))))
         , ("constraints", jsonArr [])
         , ("metadata", metadataEmpty)
-        , cmdGroupField (fdataSubcommand fd)
+        , cmdGroupField (fdataMid fd)
         ]
 
     pureCmdJson :: GastData -> Text
@@ -674,7 +682,7 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
         , ("expr", exprToJson (commandExpr g))
         , ("constraints", jsonArr [])
         , ("metadata", metadataEmpty)
-        , cmdGroupField (commandName g)
+        , cmdGroupField (commandMid g)
         ]
 
     -- Render the @args@ JSON array. 'makeSchemas' produces one schema
@@ -771,24 +779,20 @@ generate cs rASTs = do
 
   -- Build group info for manifest
   exportGroups <- MM.gets stateExportGroups
-  nameMap <- MM.gets stateName
   let indexToGroup =
         Map.fromList
           [ (idx, gname)
           | (gname, (_, indices)) <- Map.toList exportGroups
           , idx <- indices
           ]
-      nameToGroup =
-        Map.fromList
-          [ (unEVar ename, gname)
-          | (idx, ename) <- Map.toList nameMap
-          , Just gname <- [Map.lookup idx indexToGroup]
-          ]
       groupDescs =
         Map.fromList
           [ (gname, desc)
           | (gname, (desc, _)) <- Map.toList exportGroups
           ]
+
+  moduleDoc <- MM.gets stateModuleDoc
+  moduleEpilogues <- MM.gets stateModuleEpilogues
 
   let manifestJson =
         buildManifest
@@ -801,8 +805,10 @@ generate cs rASTs = do
           fdata
           gasts
           langToPoolIndex
-          nameToGroup
+          indexToGroup
           groupDescs
+          moduleDoc
+          moduleEpilogues
       wrapperScript = makeWrapperScript manifestJson
 
   return $

@@ -82,6 +82,13 @@ pub struct Manifest {
     /// Daemon-mode service configuration. None for normal CLI mode.
     #[serde(default)]
     pub service: Option<Service>,
+    /// Module-level description lines (from docstrings before `module`).
+    /// Shown after "Usage:" and before "Nexus options" in top-level help.
+    #[serde(default)]
+    pub desc: Vec<String>,
+    /// Epilogue blocks shown at the end of top-level help output.
+    #[serde(default)]
+    pub epilogues: Vec<Vec<String>>,
     /// **Reserved.** User-sourced free-form annotations on the module.
     /// Always emitted as `{}` today. Distinct from `build` (which is
     /// compiler-sourced).

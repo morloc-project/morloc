@@ -33,6 +33,15 @@ pub fn print_nexus_usage(prog_name: &str) -> ! {
 /// Print usage for a multi-command program.
 pub fn print_usage(prog_name: &str, manifest: &Manifest) -> ! {
     eprintln!("Usage: {} [OPTION...] COMMAND [ARG...]", prog_name);
+
+    // Module-level description
+    if !manifest.desc.is_empty() {
+        eprintln!();
+        for line in &manifest.desc {
+            eprintln!("{}", line);
+        }
+    }
+
     eprintln!();
     eprintln!("Nexus options:");
     eprintln!("  -h, --help           Print this help message");
@@ -80,6 +89,14 @@ pub fn print_usage(prog_name: &str, manifest: &Manifest) -> ! {
                 eprint!("{:pad$}{}", "", first, pad = pad);
             }
             eprintln!();
+        }
+    }
+
+    // Epilogues
+    for epilogue in &manifest.epilogues {
+        eprintln!();
+        for line in epilogue {
+            eprintln!("{}", line);
         }
     }
 
