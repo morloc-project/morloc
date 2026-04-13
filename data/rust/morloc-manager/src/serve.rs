@@ -392,6 +392,24 @@ pub fn list_serve_containers(engine: ContainerEngine) -> Result<()> {
     Ok(())
 }
 
+/// Find running morloc-serve-* container names for the given engine.
+pub fn find_running_serve_containers(engine: ContainerEngine) -> Vec<String> {
+    let exe = engine_executable(engine);
+    let output = Command::new(exe)
+        .args(["ps", "--filter", "name=morloc-serve-", "--format", "{{.Names}}"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| l.to_string())
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 pub fn stream_serve_logs(engine: ContainerEngine, name: &str, follow: bool) -> Result<()> {
     if !crate::container::container_exists(engine, name) {
         return Err(ManagerError::EnvError(format!(

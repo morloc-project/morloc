@@ -574,11 +574,18 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             let scope = resolve_scope(system);
 
             // Resolve engine: explicit flag > config default > auto-detect single > error
+            // For --system, prefer system config so the env uses the system engine.
             let resolved_engine = if let Some(e) = engine {
                 let eng: ContainerEngine = e.into();
                 check_docker_socket(eng);
                 eng
-            } else if let Some(cfg) = cfg::read_active_config() {
+            } else if let Some(cfg) = if system {
+                // System scope: check system config first, then local
+                cfg::read_config::<Config>(&cfg::config_path(Scope::System)).ok()
+                    .or_else(|| cfg::read_active_config())
+            } else {
+                cfg::read_active_config()
+            } {
                 cfg.engine
             } else {
                 // No config — try auto-detection
@@ -1275,49 +1282,86 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         Cmd::Stop { name } => {
             let (env_name, _, ec) = resolve_env_or_active(name)?;
             let container_name = format!("morloc-serve-{env_name}");
-            serve::stop_serve_container(ec.engine, &container_name)?;
-            eprintln!("Stopped serving environment: {env_name}");
+            if crate::container::container_exists(ec.engine, &container_name) {
+                serve::stop_serve_container(ec.engine, &container_name)?;
+                eprintln!("Stopped serving environment: {env_name}");
+            } else {
+                // Fallback: scan for running serve containers
+                let (found_name, found_engine) = find_running_serve_container()?;
+                serve::stop_serve_container(found_engine, &found_name)?;
+                eprintln!("Stopped {found_name} (active env '{env_name}' was not serving)");
+            }
             Ok(())
         }
 
         // ---- status ----
         Cmd::Status => {
-            // If the user has chosen an engine via `setup`, query only that
-            // engine. Otherwise (no setup yet) iterate over all installed
-            // engines.
-            match cfg::read_active_config().map(|c| c.engine) {
-                Some(engine) => {
-                    serve::list_serve_containers(engine)?;
-                    Ok(())
-                }
-                None => {
-                    let mut any_printed = false;
-                    for engine in [ContainerEngine::Podman, ContainerEngine::Docker] {
-                        let exe = match engine {
-                            ContainerEngine::Podman => "podman",
-                            ContainerEngine::Docker => "docker",
-                        };
-                        if which(exe) {
-                            if any_printed {
-                                println!();
-                            }
-                            let _ = serve::list_serve_containers(engine);
-                            any_printed = true;
-                        }
+            // Check all installed engines so cross-engine containers aren't invisible.
+            let mut any_printed = false;
+            for engine in [ContainerEngine::Podman, ContainerEngine::Docker] {
+                let exe = match engine {
+                    ContainerEngine::Podman => "podman",
+                    ContainerEngine::Docker => "docker",
+                };
+                if which(exe) {
+                    if any_printed {
+                        println!();
                     }
-                    if !any_printed {
-                        return Err(ManagerError::EngineNotFound);
-                    }
-                    Ok(())
+                    let _ = serve::list_serve_containers(engine);
+                    any_printed = true;
                 }
             }
+            if !any_printed {
+                return Err(ManagerError::EngineNotFound);
+            }
+            Ok(())
         }
 
         // ---- logs ----
         Cmd::Logs { name, follow } => {
             let (env_name, _, ec) = resolve_env_or_active(name)?;
             let container_name = format!("morloc-serve-{env_name}");
-            serve::stream_serve_logs(ec.engine, &container_name, follow)
+            if crate::container::container_exists(ec.engine, &container_name) {
+                serve::stream_serve_logs(ec.engine, &container_name, follow)
+            } else {
+                let (found_name, found_engine) = find_running_serve_container()?;
+                eprintln!("Showing logs for {found_name} (active env '{env_name}' is not serving)");
+                serve::stream_serve_logs(found_engine, &found_name, follow)
+            }
+        }
+    }
+}
+
+// ======================================================================
+// Serve container discovery
+// ======================================================================
+
+/// Find exactly one running morloc-serve-* container across all engines.
+/// Returns (container_name, engine). Errors if zero or multiple found.
+fn find_running_serve_container() -> Result<(String, ContainerEngine)> {
+    let mut found: Vec<(String, ContainerEngine)> = Vec::new();
+    for engine in [ContainerEngine::Podman, ContainerEngine::Docker] {
+        let exe = match engine {
+            ContainerEngine::Podman => "podman",
+            ContainerEngine::Docker => "docker",
+        };
+        if which(exe) {
+            for name in serve::find_running_serve_containers(engine) {
+                found.push((name, engine));
+            }
+        }
+    }
+    match found.len() {
+        0 => Err(ManagerError::EnvError(
+            "No morloc serve containers running".to_string(),
+        )),
+        1 => Ok(found.into_iter().next().unwrap()),
+        _ => {
+            let names: Vec<String> = found.iter().map(|(n, _)| n.clone()).collect();
+            Err(ManagerError::EnvError(format!(
+                "Multiple serve containers running. Specify one explicitly:\n  {}",
+                names.join("\n  ")
+            )))
         }
     }
 }
@@ -1434,16 +1478,11 @@ fn run_with_config(
         }
     }
 
-    let container_home = home;
+    // Mount data at /opt/morloc — matching the serve container (start).
+    // The compiler reads MORLOC_HOME to resolve all generated paths.
+    let mh = "/opt/morloc";
     let base_mounts = vec![
-        (
-            v_data_dir.to_string(),
-            format!("{container_home}/.local/share/morloc"),
-        ),
-        (
-            format!("{v_data_dir}/bin"),
-            format!("{container_home}/.local/bin"),
-        ),
+        (v_data_dir.to_string(), mh.to_string()),
     ];
     let work_mount = if is_init {
         Vec::new()
@@ -1452,15 +1491,16 @@ fn run_with_config(
     };
     let all_mounts: Vec<(String, String)> = base_mounts.into_iter().chain(work_mount).collect();
     let work_dir = if is_init {
-        container_home.to_string()
+        mh.to_string()
     } else {
         cwd.to_string()
     };
     let env_vars = vec![
-        ("HOME".to_string(), container_home.to_string()),
+        ("HOME".to_string(), home.to_string()),
+        ("MORLOC_HOME".to_string(), mh.to_string()),
         (
             "PATH".to_string(),
-            format!("{container_home}/.local/bin:{container_home}/.local/share/morloc/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+            format!("{mh}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
         ),
     ];
     let cmd = if shell {

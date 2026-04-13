@@ -36,6 +36,7 @@ import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import qualified Morloc.System as MS
+import System.Environment (lookupEnv)
 
 getDefaultConfigFilepath :: IO Path
 getDefaultConfigFilepath = MS.combine <$> getDefaultMorlocHome <*> pure "config"
@@ -150,9 +151,14 @@ defaultFields = do
       , ("build-config", buildConfig)
       ]
 
--- | Get the Morloc home directory (absolute path)
+-- | Get the Morloc home directory (absolute path).
+-- Respects MORLOC_HOME env var, falling back to ~/.local/share/morloc.
 getDefaultMorlocHome :: IO Path
-getDefaultMorlocHome = MS.combine <$> MS.getHomeDirectory <*> pure ".local/share/morloc"
+getDefaultMorlocHome = do
+  envHome <- lookupEnv "MORLOC_HOME"
+  case envHome of
+    Just p | not (null p) -> return p
+    _ -> MS.combine <$> MS.getHomeDirectory <*> pure ".local/share/morloc"
 
 {- | Get the Morloc source directory (absolute path). Usually this will be a
 folder inside the home directory. This is the path to the source data (often

@@ -440,15 +440,17 @@ pub fn remove_environment(engine: ContainerEngine, scope: Scope, name: &str) -> 
         let _ = fs::remove_dir_all(&data_dir);
     }
 
-    // If the active env was this one, clear it
-    let local_cfg_path = config::config_path(Scope::Local);
-    if let Ok(cfg) = config::read_config::<Config>(&local_cfg_path) {
-        if cfg.active_env.as_deref() == Some(name) {
-            let new_cfg = Config {
-                active_env: None,
-                ..cfg
-            };
-            let _ = config::write_config(&local_cfg_path, &new_cfg);
+    // If the active env was this one, clear it in both local and system configs
+    for cfg_scope in [Scope::Local, Scope::System] {
+        let cfg_path = config::config_path(cfg_scope);
+        if let Ok(cfg) = config::read_config::<Config>(&cfg_path) {
+            if cfg.active_env.as_deref() == Some(name) {
+                let new_cfg = Config {
+                    active_env: None,
+                    ..cfg
+                };
+                let _ = config::write_config(&cfg_path, &new_cfg);
+            }
         }
     }
 

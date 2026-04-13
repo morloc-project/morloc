@@ -5,14 +5,13 @@ use std::process::{Command, Stdio};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use crate::config;
-use crate::container;
 use crate::error::{ManagerError, Result};
 use crate::types::*;
 
 pub fn freeze_from_dir(
     scope: Scope,
     ver: Version,
-    engine: ContainerEngine,
+    _engine: ContainerEngine,
     v_data_dir: &str,
     output_dir: &str,
 ) -> Result<()> {
@@ -74,24 +73,11 @@ pub fn freeze_from_dir(
                     if df_path.exists() {
                         let df_contents = fs::read_to_string(&df_path).unwrap_or_default();
                         let content_hash = ec.content_hash.unwrap_or_default();
-                        // Query image digest
-                        let env_image_tag = ec.built_image.as_deref()
-                            .unwrap_or(&ec.base_image);
-                        let exe = container::engine_executable(engine);
-                        let digest_output = Command::new(exe)
-                            .args([
-                                "inspect", "--format",
-                                "{{index .RepoDigests 0}}",
-                                env_image_tag,
-                            ])
-                            .output();
-                        let image_digest = match digest_output {
-                            Ok(o) if o.status.success() => {
-                                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                                if s.is_empty() { None } else { Some(s) }
-                            }
-                            _ => None,
-                        };
+                        // Use the tagged image reference (not digest) so that
+                        // unfreeze can resolve it locally without network access.
+                        // Digest references like localhost/morloc-env@sha256:...
+                        // cause BuildKit to attempt HTTPS to localhost.
+                        let image_digest = ec.built_image.clone();
                         Some(FrozenEnvLayer {
                             name: env_name.to_string(),
                             dockerfile: df_contents,
