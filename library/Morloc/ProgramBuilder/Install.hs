@@ -30,6 +30,7 @@ import System.Directory
 import System.Environment (lookupEnv)
 import System.Exit (die)
 import System.FilePath (makeRelative, takeDirectory, (</>))
+import System.IO (hPutStrLn, stderr)
 
 -- | After a successful local build, copy artifacts to the install location.
 installProgram ::
@@ -83,18 +84,14 @@ installProgram configHome installDir installName includes force = do
       createDirectoryIfMissing True fdbDir
       extractAndWriteManifest binPath fdbPath
 
-      -- Clean up local build artifacts
-      if poolsExist then removeDirectoryRecursive "pools" else return ()
-      removeFile localWrapper
-
       -- Check if bin dir is on PATH and print hint if not
       pathEnv <- lookupEnv "PATH"
       let pathStr = maybe "" id pathEnv
       if not (binDir `isInfixOf` pathStr)
-        then putStrLn $ "Note: add " <> binDir <> " to your PATH"
+        then hPutStrLn stderr $ "Note: add " <> binDir <> " to your PATH"
         else return ()
 
-      putStrLn $ "Installed '" <> installName <> "' to " <> binPath
+      hPutStrLn stderr $ "Installed '" <> installName <> "' to " <> binPath
 
       -- Regenerate shell completions
       Completion.regenerateCompletions False configHome

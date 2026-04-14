@@ -207,7 +207,7 @@ pub fn remove_image(engine: ContainerEngine, tag: &str) -> bool {
 // ======================================================================
 
 pub fn build_run_args(
-    _engine: ContainerEngine,
+    engine: ContainerEngine,
     extra_engine_flags: &[String],
     cfg: &RunConfig,
 ) -> Vec<String> {
@@ -219,6 +219,12 @@ pub fn build_run_args(
     }
     if cfg.read_only {
         args.push("--read-only".to_string());
+        // Docker does not auto-mount a tmpfs at /tmp when --read-only is used
+        // (podman does). Pool daemons need a writable /tmp for temp files.
+        if engine == ContainerEngine::Docker {
+            args.push("--tmpfs".to_string());
+            args.push("/tmp".to_string());
+        }
     }
     if cfg.interactive {
         args.push("-it".to_string());

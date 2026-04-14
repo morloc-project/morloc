@@ -94,7 +94,7 @@ enum Cmd {
     },
     /// Build a new morloc environment
     #[command(display_order = 1)]
-    #[command(after_help = "Examples:\n  morloc-manager new\n  morloc-manager new myenv --version 0.73.0\n  morloc-manager new myenv --image ubuntu:22.04 --dockerfile ./Dockerfile\n\nDefault (when --version and --image are both omitted): pulls the :edge tag\nfrom the morloc registry and records the resolved version.")]
+    #[command(after_help = "Examples:\n  morloc-manager new\n  morloc-manager new myenv --version 0.73.0\n  morloc-manager new myenv --image ubuntu:22.04 --dockerfile ./Dockerfile\n\nDefault (when --version and --image are both omitted): pulls the :edge tag\nfrom the morloc registry and records the resolved version.\n\nIn non-interactive mode (no TTY), if no name is given, the latest edge\nimage is pulled and the environment is named after the detected morloc\nversion.")]
     New {
         /// Environment name (default: derived from base image version)
         name: Option<String>,
@@ -273,7 +273,7 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Build a serve image from frozen state
     #[command(display_order = 23)]
-    #[command(after_help = "Examples:\n  morloc-manager unfreeze --from ./morloc-freeze/state.tar.gz -t myservice:v1")]
+    #[command(after_help = "Examples:\n  morloc-manager unfreeze --from ./morloc-freeze/state.tar.gz -t myservice:v1\n  morloc-manager unfreeze --from ./state.tar.gz -t svc:v1 --engine docker")]
     Unfreeze {
         /// Path to state.tar.gz from freeze
         #[arg(long)]
@@ -284,6 +284,10 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Base image override
         #[arg(long)]
         base: Option<String>,
+        /// Container engine override (default: configured engine).
+        /// Images frozen with engine-specific flags may not work with a different engine.
+        #[arg(long, value_enum)]
+        engine: Option<EngineArg>,
     },
     /// List running serve containers
     #[command(display_order = 24)]
@@ -808,6 +812,8 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             if !no_init {
                 let ec = cfg::read_env_config(scope, &env_name)?;
                 run_morloc_init_for(Some((env_name.clone(), scope, ec)), verbose)?;
+            } else {
+                eprintln!("Warning: --no-init was used. Run 'morloc-manager run -- morloc init -f' before building morloc programs.");
             }
 
             eprintln!("{}", bold_green(&format!("Environment '{env_name}' is ready.")));
@@ -1224,19 +1230,20 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     );
                 }
             }
-            // Cache the authoritative version back into the config
-            if ec.morloc_version.as_ref() != Some(&detected) {
-                let mut updated = ec.clone();
-                updated.morloc_version = Some(detected.clone());
-                let _ = cfg::write_env_config(env_scope, &env_name, &updated);
-            }
             let ver = detected;
             let data_dir = cfg::env_data_dir(env_scope, &env_name);
-            freeze::freeze_from_dir(env_scope, ver, engine, &data_dir.to_string_lossy(), output_dir)
+            let result = freeze::freeze_from_dir(env_scope, ver.clone(), engine, &data_dir.to_string_lossy(), output_dir);
+            // Only update the cached version after a successful freeze
+            if result.is_ok() && ec.morloc_version.as_ref() != Some(&ver) {
+                let mut updated = ec.clone();
+                updated.morloc_version = Some(ver);
+                let _ = cfg::write_env_config(env_scope, &env_name, &updated);
+            }
+            result
         }
 
         // ---- unfreeze ----
-        Cmd::Unfreeze { from, tag, base } => {
+        Cmd::Unfreeze { from, tag, base, engine: engine_override } => {
             if !std::path::Path::new(&from).is_file() {
                 return Err(ManagerError::UnfreezeError(format!(
                     "Input file not found: {from}"
@@ -1253,7 +1260,11 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     "Cannot read freeze manifest at {}. Ensure state.tar.gz and freeze-manifest.json are in the same directory.",
                     manifest_path.display()
                 )))?;
-            let engine = ensure_engine()?;
+            let engine = match engine_override {
+                Some(EngineArg::Docker) => ContainerEngine::Docker,
+                Some(EngineArg::Podman) => ContainerEngine::Podman,
+                None => ensure_engine()?,
+            };
             serve::build_serve_image(engine, verbose, &from, &tag, manifest.morloc_version, base.as_deref())
         }
 
@@ -1277,7 +1288,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             serve::serve_environment(
                 ec.engine, verbose, &image,
                 &data_dir.to_string_lossy(), &container_name,
-                &port_mappings, &extra_flags,
+                &port_mappings, &extra_flags, &Some(ec.shm_size.clone()),
             )
         }
 
@@ -1286,12 +1297,12 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             let (env_name, _, ec) = resolve_env_or_active(name)?;
             let container_name = format!("morloc-serve-{env_name}");
             if crate::container::container_exists(ec.engine, &container_name) {
-                serve::stop_serve_container(ec.engine, &container_name)?;
+                serve::stop_serve_container(ec.engine, verbose, &container_name)?;
                 eprintln!("Stopped serving environment: {env_name}");
             } else {
                 // Fallback: scan for running serve containers
                 let (found_name, found_engine) = find_running_serve_container()?;
-                serve::stop_serve_container(found_engine, &found_name)?;
+                serve::stop_serve_container(found_engine, verbose, &found_name)?;
                 eprintln!("Stopped {found_name} (active env '{env_name}' was not serving)");
             }
             Ok(())
@@ -1310,7 +1321,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     if any_printed {
                         println!();
                     }
-                    let _ = serve::list_serve_containers(engine);
+                    let _ = serve::list_serve_containers(engine, verbose);
                     any_printed = true;
                 }
             }
@@ -1325,11 +1336,11 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             let (env_name, _, ec) = resolve_env_or_active(name)?;
             let container_name = format!("morloc-serve-{env_name}");
             if crate::container::container_exists(ec.engine, &container_name) {
-                serve::stream_serve_logs(ec.engine, &container_name, follow)
+                serve::stream_serve_logs(ec.engine, verbose, &container_name, follow)
             } else {
                 let (found_name, found_engine) = find_running_serve_container()?;
                 eprintln!("Showing logs for {found_name} (active env '{env_name}' is not serving)");
-                serve::stream_serve_logs(found_engine, &found_name, follow)
+                serve::stream_serve_logs(found_engine, verbose, &found_name, follow)
             }
         }
     }

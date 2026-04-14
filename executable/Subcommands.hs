@@ -57,6 +57,7 @@ import System.Directory
   )
 import System.Exit (exitFailure, exitSuccess)
 import System.FilePath (dropExtension, takeFileName)
+import System.IO (hPutStrLn, stderr)
 import System.IO.Temp (createTempDirectory)
 import qualified System.Process as SP
 import UI
@@ -454,8 +455,8 @@ cmdNew args = do
   exists <- doesFileExist pkgFile
   if exists
     then do
-      putStrLn "package.yaml already exists"
-      return True
+      hPutStrLn stderr "Error: package.yaml already exists. Remove it first or use a different directory."
+      return False
     else do
       name <-
         if null (newName args)
@@ -478,7 +479,7 @@ cmdNew args = do
           , "# Files to include when installing with `morloc make --install`"
           , "include: []"
           ]
-      putStrLn $ "Created package.yaml for '" ++ name ++ "'"
+      hPutStrLn stderr $ "Created package.yaml for '" ++ name ++ "'"
       return True
 
 prettyDAG :: DAG MVar e ExprI -> MDoc

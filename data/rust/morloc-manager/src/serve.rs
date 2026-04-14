@@ -263,6 +263,7 @@ pub fn serve_environment(
     container_name: &str,
     ports: &[(u16, u16)],
     extra_flags: &[String],
+    shm_size: &Option<String>,
 ) -> Result<()> {
     // Clean up any existing dead container with this name (silently)
     let _ = crate::container::container_remove_quiet(engine, container_name);
@@ -293,6 +294,7 @@ pub fn serve_environment(
         "--fdb".to_string(), format!("{mh}/fdb"),
         "--http-port".to_string(), "8080".to_string(),
     ]);
+    cfg.shm_size = shm_size.clone();
     cfg.extra_flags = vec!["-d".to_string()];
     cfg.extra_flags.extend(extra_flags.iter().cloned());
 
@@ -355,11 +357,15 @@ pub fn serve_environment(
     }
 }
 
-pub fn stop_serve_container(engine: ContainerEngine, name: &str) -> Result<()> {
+pub fn stop_serve_container(engine: ContainerEngine, verbose: bool, name: &str) -> Result<()> {
     if !crate::container::container_exists(engine, name) {
         return Err(ManagerError::EnvError(format!(
             "No serve container running for '{name}'"
         )));
+    }
+    if verbose {
+        let exe = engine_executable(engine);
+        eprintln!("[morloc-manager] {exe} stop {name}");
     }
     let (status, err) = container_stop(engine, name);
     let _ = crate::container::container_remove_quiet(engine, name);
@@ -373,9 +379,12 @@ pub fn stop_serve_container(engine: ContainerEngine, name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn list_serve_containers(engine: ContainerEngine) -> Result<()> {
+pub fn list_serve_containers(engine: ContainerEngine, verbose: bool) -> Result<()> {
     let exe = engine_executable(engine);
     let fmt = "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}";
+    if verbose {
+        eprintln!("[morloc-manager] {exe} ps -a --filter name=morloc-serve- --format '{fmt}'");
+    }
     let output = Command::new(exe)
         .args([
             "ps", "-a", "--filter", "name=morloc-serve-", "--format", fmt,
@@ -426,7 +435,7 @@ pub fn find_running_serve_containers(engine: ContainerEngine) -> Vec<String> {
     }
 }
 
-pub fn stream_serve_logs(engine: ContainerEngine, name: &str, follow: bool) -> Result<()> {
+pub fn stream_serve_logs(engine: ContainerEngine, verbose: bool, name: &str, follow: bool) -> Result<()> {
     if !crate::container::container_exists(engine, name) {
         return Err(ManagerError::EnvError(format!(
             "No serve container for '{name}'. Start one with: morloc-manager start"
@@ -438,6 +447,9 @@ pub fn stream_serve_logs(engine: ContainerEngine, name: &str, follow: bool) -> R
         args.push("--follow");
     }
     args.push(name);
+    if verbose {
+        eprintln!("[morloc-manager] {exe} {}", args.join(" "));
+    }
 
     let status = Command::new(exe)
         .args(&args)
