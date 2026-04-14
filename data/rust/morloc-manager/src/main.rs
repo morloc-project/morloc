@@ -721,7 +721,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
             // Fill in name for non-interactive mode if it wasn't provided
             let env_name = if env_name.is_empty() {
-                if let Some(ver) = morloc_ver {
+                if let Some(ref ver) = morloc_ver {
                     let default_name = ver.show();
                     if cfg::env_config_path(scope, &default_name).is_file() {
                         return Err(ManagerError::EnvError(format!(
@@ -973,7 +973,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 if let Some(ref img) = ec.built_image {
                     println!("Built image:    {img}");
                 }
-                if let Some(ver) = ec.morloc_version {
+                if let Some(ref ver) = ec.morloc_version {
                     println!("Morloc version: {}", ver.show());
                 }
                 println!("Engine:         {}", display_engine(ec.engine));
@@ -1033,7 +1033,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 } else {
                     for e in &local_envs {
                         let active_mark = if e.active { " (active)" } else { "" };
-                        let ver_mark = e.morloc_version
+                        let ver_mark = e.morloc_version.as_ref()
                             .map(|v| format!(" [{}]", v.show()))
                             .unwrap_or_default();
                         println!("  {}{}{}", e.name, ver_mark, active_mark);
@@ -1045,7 +1045,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     println!("\nSystem environments:");
                     for e in &system_envs {
                         let active_mark = if e.active { " (active)" } else { "" };
-                        let ver_mark = e.morloc_version
+                        let ver_mark = e.morloc_version.as_ref()
                             .map(|v| format!(" [{}]", v.show()))
                             .unwrap_or_default();
                         println!("  {}{}{}", e.name, ver_mark, active_mark);

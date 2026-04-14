@@ -280,8 +280,8 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
     if let Some(ref img) = opts.original_image {
         ec.original_image = Some(img.clone());
     }
-    if let Some(ver) = opts.morloc_version {
-        ec.morloc_version = Some(ver);
+    if let Some(ref ver) = opts.morloc_version {
+        ec.morloc_version = Some(ver.clone());
     }
     if let Some(engine) = opts.engine {
         ec.engine = engine;

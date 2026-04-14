@@ -73,6 +73,7 @@ pub struct Version {
 }
 
 impl Version {
+    #[cfg(test)]
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
         Self {
             major,
