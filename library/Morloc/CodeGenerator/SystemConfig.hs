@@ -23,9 +23,9 @@ import Morloc.Module (OverwriteProtocol (..))
 
 import qualified Data.Text.IO as TIO
 
-import Control.Exception (SomeException, displayException, fromException, try)
+import Control.Exception (SomeException, catch, displayException, fromException, try)
 import System.IO.Error (ioeGetErrorString)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, listDirectory, removeDirectoryRecursive, removeFile)
+import System.Directory (createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, listDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile)
 import System.Environment (lookupEnv)
 import System.FilePath (takeDirectory)
 import System.IO (hIsTerminalDevice, hPutStrLn, stderr)
@@ -101,10 +101,13 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   --      (used for development and container builds)
   --   3. Auto-detect Cargo workspace relative to morloc binary
   let soPath = libDir </> "libmorloc.so"
-  userHome <- getHomeDirectory
-  let nexusBinDir = userHome </> ".local" </> "bin"
+  -- Primary install goes to $MORLOC_HOME/bin/
+  let nexusBinDir = homeDir </> "bin"
       nexusBinPath = nexusBinDir </> "morloc-nexus"
   createDirectoryIfMissing True nexusBinDir
+  -- Symlink to ~/.local/bin/ if that directory exists
+  userHome <- getHomeDirectory
+  let userBinDir = userHome </> ".local" </> "bin"
 
   rustBinEnv <- lookupEnv "MORLOC_RUST_BIN"
   case rustBinEnv of
@@ -207,6 +210,15 @@ configureAllSteps verbose force slurmSupport sanitize config = do
         Just stripPath -> run verbose stripPath [managerBinPath]
         Nothing -> return ()
 
+
+  -- Symlink binaries to ~/.local/bin/ if it exists
+  userBinExists <- doesDirectoryExist userBinDir
+  when userBinExists $ do
+    symlinkBinary nexusBinPath (userBinDir </> "morloc-nexus")
+    let managerSrc = nexusBinDir </> "morloc-manager"
+    managerExists <- doesFileExist managerSrc
+    when managerExists $
+      symlinkBinary managerSrc (userBinDir </> "morloc-manager")
 
   -- Create exe/ and fdb/ directories
   let exeDir = homeDir </> "exe"
@@ -328,6 +340,16 @@ requireTool tool msg = do
   case found of
     Nothing -> ioError . userError $ tool <> " not found on PATH. " <> msg
     Just _ -> return ()
+
+-- | Create a symlink at dst pointing to src, removing any existing file at dst.
+symlinkBinary :: FilePath -> FilePath -> IO ()
+symlinkBinary src dst = do
+  -- Remove existing file or symlink at destination
+  isLink <- pathIsSymbolicLink dst `catch` (\(_ :: SomeException) -> return False)
+  when isLink $ removeFile dst
+  isFile <- doesFileExist dst
+  when isFile $ removeFile dst
+  createFileLink src dst
 
 -- | Check which tools from a list are missing. Returns list of missing tool names.
 checkTools :: [String] -> IO [String]

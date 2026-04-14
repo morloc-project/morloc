@@ -11,6 +11,16 @@ mod process;
 
 use dispatch::NexusConfig;
 
+/// Resolve the morloc data directory: MORLOC_HOME if set, else ~/.local/share/morloc.
+fn morloc_home() -> String {
+    std::env::var("MORLOC_HOME").unwrap_or_else(|_| {
+        format!(
+            "{}/.local/share/morloc",
+            std::env::var("HOME").unwrap_or_else(|_| "/root".into())
+        )
+    })
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -123,8 +133,7 @@ fn main() {
         // RTLD_DEFAULT (NULL handle) searches in order: executable, then loaded libs
         // But the rlib symbols come first. Use RTLD_NEXT-style lookup via the .so path.
         let lib_path = std::ffi::CString::new(
-            format!("{}/.local/share/morloc/lib/libmorloc.so",
-                    std::env::var("HOME").unwrap_or("/root".into()))
+            format!("{}/lib/libmorloc.so", morloc_home())
         ).unwrap();
         let lib = unsafe { libc::dlopen(lib_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
         if lib.is_null() {
@@ -365,8 +374,7 @@ fn run_router(config: &dispatch::NexusConfig) {
     }
 
     let fdb_path = config.fdb_path.clone().unwrap_or_else(|| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-        format!("{}/.local/share/morloc/fdb", home)
+        format!("{}/fdb", morloc_home())
     });
     let fdb_c = CString::new(fdb_path.as_str()).unwrap();
 
