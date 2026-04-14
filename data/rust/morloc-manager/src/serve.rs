@@ -83,9 +83,18 @@ pub fn build_serve_image(
         && fs::read_dir(context_dir.join("exe"))
             .map(|mut d| d.next().is_some())
             .unwrap_or(false);
+    let has_opt = context_dir.join("opt").is_dir()
+        && fs::read_dir(context_dir.join("opt"))
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false);
     let mh = CONTAINER_MORLOC_HOME;
     let exe_line = if has_exe {
         format!("COPY exe/ {mh}/exe/\n")
+    } else {
+        String::new()
+    };
+    let opt_line = if has_opt {
+        format!("COPY opt/ {mh}/opt/\n")
     } else {
         String::new()
     };
@@ -114,6 +123,7 @@ pub fn build_serve_image(
          COPY fdb/ {mh}/fdb/\n\
          COPY bin/ {mh}/bin/\n\
          {exe_line}\
+         {opt_line}\
          RUN chmod -R a+rX {mh}\n\
          \n\
          {healthcheck}\
@@ -148,6 +158,12 @@ pub fn build_serve_image(
         });
     }
     eprintln!("Built serve image: {tag}");
+
+    // Clean up the temporary build context
+    if let Err(e) = fs::remove_dir_all(&context_dir) {
+        eprintln!("Warning: failed to clean up {}: {e}", context_dir.display());
+    }
+
     Ok(())
 }
 

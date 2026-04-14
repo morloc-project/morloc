@@ -512,11 +512,12 @@ fn check_podman_additional_stores(engine: ContainerEngine) -> bool {
 fn warn_podman_additional_stores() {
     eprintln!("Warning: Podman is not configured to see system (rootful) images.");
     eprintln!("  Non-root users will not be able to run system environments.");
-    eprintln!("  To fix, add to the [storage.options] section of /etc/containers/storage.conf:");
+    eprintln!("  Option 1 (recommended): Use Docker for system environments.");
+    eprintln!("  Option 2: Add to [storage.options] in /etc/containers/storage.conf:");
     eprintln!();
     eprintln!("    additionalimagestores = [\"/var/lib/containers/storage\"]");
     eprintln!();
-    eprintln!("  (No restart needed; Podman reads storage.conf on each invocation.)");
+    eprintln!("  Note: Option 2 may cause storage locking conflicts on Fedora and Debian.");
 }
 
 // ======================================================================
@@ -928,8 +929,8 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 if !envs.is_empty() {
                     if show_local {
                         println!();
-                        println!("System:");
                     }
+                    println!("System:");
                     for e in envs {
                         let active_mark = if e.active { " (active)" } else { "" };
                         let ver_mark = e.morloc_version
@@ -1146,7 +1147,9 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             } else if let Some(ref img) = image {
                 let ec = cfg::read_env_config(env_scope, &env_name)?;
                 environment::pull_custom_image(ec.engine, img)?;
-                (Some(img.clone()), None, None)
+                // Detect version from the new image so it doesn't stay stale
+                let detected_ver = environment::detect_morloc_version(ec.engine, img).ok();
+                (Some(img.clone()), None, detected_ver)
             } else {
                 (None, None, None)
             };
@@ -1213,8 +1216,8 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             // value can drift if the image was rebuilt or retagged.
             eprintln!("Detecting morloc version from image...");
             let detected = environment::detect_morloc_version(ec.engine, ec.active_image())?;
-            if let Some(recorded) = ec.morloc_version {
-                if recorded != detected {
+            if let Some(ref recorded) = ec.morloc_version {
+                if *recorded != detected {
                     eprintln!(
                         "Warning: recorded morloc version ({}) does not match image ({}). Using image version.",
                         recorded.show(), detected.show()
@@ -1222,9 +1225,9 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 }
             }
             // Cache the authoritative version back into the config
-            if ec.morloc_version != Some(detected) {
+            if ec.morloc_version.as_ref() != Some(&detected) {
                 let mut updated = ec.clone();
-                updated.morloc_version = Some(detected);
+                updated.morloc_version = Some(detected.clone());
                 let _ = cfg::write_env_config(env_scope, &env_name, &updated);
             }
             let ver = detected;
@@ -1402,8 +1405,10 @@ fn run_in_container_for(
             return Err(ManagerError::EnvError(format!(
                 "Image '{image}' not found. The environment '{env_name}' is a system environment \
                  but Podman is not configured to see rootful images.\n\
-                 Add to the [storage.options] section of /etc/containers/storage.conf:\n\n  \
-                 additionalimagestores = [\"/var/lib/containers/storage\"]\n"
+                 Option 1 (recommended): Use Docker for system environments.\n\
+                 Option 2: Add to [storage.options] in /etc/containers/storage.conf:\n\n  \
+                 additionalimagestores = [\"/var/lib/containers/storage\"]\n\n\
+                 Note: Option 2 may cause storage locking conflicts on Fedora and Debian.\n"
             )));
         }
         let hint = if env_scope == Scope::System {
@@ -1606,6 +1611,27 @@ mod tests {
     #[test]
     fn version_equality() {
         assert_eq!(Version::new(0, 67, 0), Version::new(0, 67, 0));
+    }
+
+    #[test]
+    fn parse_version_with_prerelease() {
+        for (input, expected_pre) in [
+            ("0.77.0-rc.1", "rc.1"),
+            ("1.0.0-alpha", "alpha"),
+            ("1.0.0-beta.2", "beta.2"),
+            ("0.1.0-dev.20260414", "dev.20260414"),
+        ] {
+            let ver: Version = input.parse().unwrap();
+            assert_eq!(ver.prerelease, Some(expected_pre.to_string()), "input: {input}");
+            assert_eq!(ver.show(), input, "round-trip failed for: {input}");
+        }
+    }
+
+    #[test]
+    fn prerelease_sorts_before_release() {
+        let rc: Version = "0.77.0-rc.1".parse().unwrap();
+        let release = Version::new(0, 77, 0);
+        assert!(rc < release);
     }
 
     // ---- Error message tests ----

@@ -64,11 +64,12 @@ impl<'de> Deserialize<'de> for ContainerEngine {
 // Version
 // ======================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version {
     pub major: u32,
     pub minor: u32,
     pub patch: u32,
+    pub prerelease: Option<String>,
 }
 
 impl Version {
@@ -77,11 +78,15 @@ impl Version {
             major,
             minor,
             patch,
+            prerelease: None,
         }
     }
 
     pub fn show(&self) -> String {
-        format!("{}.{}.{}", self.major, self.minor, self.patch)
+        match &self.prerelease {
+            Some(pre) => format!("{}.{}.{}-{}", self.major, self.minor, self.patch, pre),
+            None => format!("{}.{}.{}", self.major, self.minor, self.patch),
+        }
     }
 }
 
@@ -91,6 +96,12 @@ impl Ord for Version {
             .cmp(&other.major)
             .then(self.minor.cmp(&other.minor))
             .then(self.patch.cmp(&other.patch))
+            .then(match (&self.prerelease, &other.prerelease) {
+                (None, None) => Ordering::Equal,
+                (Some(_), None) => Ordering::Less,    // pre-release < release
+                (None, Some(_)) => Ordering::Greater,  // release > pre-release
+                (Some(a), Some(b)) => a.cmp(b),
+            })
     }
 }
 
@@ -104,9 +115,14 @@ impl FromStr for Version {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<&str> = s.split('.').collect();
+        // Split off pre-release suffix on first '-': "0.77.0-rc.1" -> ("0.77.0", Some("rc.1"))
+        let (version_part, prerelease) = match s.find('-') {
+            Some(idx) => (&s[..idx], Some(s[idx + 1..].to_string())),
+            None => (s, None),
+        };
+        let parts: Vec<&str> = version_part.split('.').collect();
         if parts.len() != 3 {
-            return Err(format!("Invalid version: {s}"));
+            return Err(format!("Invalid version: {s}. Expected format: MAJOR.MINOR.PATCH[-PRERELEASE]"));
         }
         let major = parts[0]
             .parse()
@@ -117,7 +133,12 @@ impl FromStr for Version {
         let patch = parts[2]
             .parse()
             .map_err(|_| format!("Invalid patch version: {}", parts[2]))?;
-        Ok(Version::new(major, minor, patch))
+        Ok(Version {
+            major,
+            minor,
+            patch,
+            prerelease,
+        })
     }
 }
 
