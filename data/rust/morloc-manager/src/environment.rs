@@ -538,7 +538,7 @@ fn resolve_active_env_name() -> Result<String> {
 // Internal
 // ======================================================================
 
-fn is_valid_shm_size(s: &str) -> bool {
+pub fn is_valid_shm_size(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }

@@ -205,26 +205,35 @@ buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
               `finally` setCurrentDirectory origDir
           return buildResult
 
-    buildModuleExecutable locFile name verbosity' config buildConfig' forceOverwrite = do
+    buildModuleExecutable locFile _name verbosity' config buildConfig' forceOverwrite = do
       code <- MT.readFile locFile
-      let action = do
-            MM.modify (\s -> s {stateInstall = True})
-            M.writeProgram translator (Just locFile) (Code code)
-      result <- MM.runMorlocMonad Nothing verbosity' config buildConfig' action
-      passed <- MM.writeMorlocReturn result
-      if passed
-        then do
-          let (_, finalState) = result
-              pkgIncludes = concatMap packageInclude (statePackageMeta finalState)
-          case stateInstallDir finalState of
-            Nothing -> do
-              putStrLn $ "Error: install directory was not set during compilation of '" <> name <> "'"
-              return False
-            Just installDir -> do
-              let installName = takeFileName installDir
-              Install.installProgram (Config.configHome config) installDir installName pkgIncludes forceOverwrite
-              return True
-        else return False
+      makeAndInstall (Just locFile) Nothing (Code code) [] verbosity' config buildConfig' forceOverwrite
+
+-- | Compile a morloc program and optionally install it.
+-- Shared by `morloc make --install` and `morloc install --build`.
+makeAndInstall ::
+  Maybe Path -> Maybe String -> Code -> [T.Text] -> Int ->
+  Config.Config -> BuildConfig -> Bool -> IO Bool
+makeAndInstall path outfile code extraIncludes verbosity config buildConfig force = do
+  let action = do
+        MM.modify (\s -> s {stateInstall = True, stateInstallForce = force})
+        M.writeProgram translator path code
+  result <- MM.runMorlocMonad outfile verbosity config buildConfig action
+  passed <- MM.writeMorlocReturn result
+  if passed
+    then do
+      let (_, finalState) = result
+          pkgIncludes = concatMap packageInclude (statePackageMeta finalState)
+          allIncludes = pkgIncludes ++ extraIncludes
+      case stateInstallDir finalState of
+        Nothing -> do
+          putStrLn "Error: install directory was not set during compilation"
+          return False
+        Just installDir -> do
+          let installName = takeFileName installDir
+          Install.installProgram (Config.configHome config) installDir installName allIncludes force
+          return True
+    else return False
 
 -- | build a Morloc program, generating the nexus and pool files
 cmdMake :: MakeCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
@@ -233,32 +242,17 @@ cmdMake args verbosity config buildConfig = do
   outfile <- case makeOutfile args of
     "" -> return Nothing
     x -> return . Just $ x
-  let install = makeInstall args
-      action = do
-        MM.modify (\s -> s {stateInstall = install})
-        M.writeProgram translator path code
-  result <- MM.runMorlocMonad outfile verbosity config buildConfig action
-  passed <- MM.writeMorlocReturn result
-  if passed && install
-    then do
-      let (_, finalState) = result
-          cliIncludes = map T.pack (makeInclude args)
-          pkgIncludes = concatMap packageInclude (statePackageMeta finalState)
-          allIncludes = pkgIncludes ++ cliIncludes
-      case stateInstallDir finalState of
-        Nothing -> do
-          putStrLn "Error: install directory was not set during compilation"
-          return False
-        Just installDir -> do
-          let installName = takeFileName installDir
-          Install.installProgram
-            (Config.configHome config)
-            installDir
-            installName
-            allIncludes
-            (makeForce args)
-          return True
-    else return passed
+  if makeInstall args
+    then
+      makeAndInstall path outfile code
+        (map T.pack (makeInclude args)) verbosity config buildConfig (makeForce args)
+    else do
+      let action = do
+            MM.modify (\s -> s {stateInstall = False})
+            M.writeProgram translator path code
+      result <- MM.runMorlocMonad outfile verbosity config buildConfig action
+      passed <- MM.writeMorlocReturn result
+      return passed
 
 -- | Evaluate a morloc expression
 cmdEval :: EvalCommand -> Int -> Config.Config -> BuildConfig -> IO Bool

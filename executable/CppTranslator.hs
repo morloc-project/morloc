@@ -721,7 +721,9 @@ flagAndPath src@(Source _ srcL (Just p) _ _ _ _ _ _) | srcL == cppLang =
       return (src {srcPath = Just header}, libFlags, Just (MS.takeDirectory header))
     (dir, base, _) -> do
       libFlags <- lookupLib base
-      return (src, libFlags, Just dir)
+      absDir <- liftIO $ MS.canonicalizePath dir
+      absPath <- liftIO $ MS.canonicalizePath p
+      return (src {srcPath = Just absPath}, libFlags, Just absDir)
   where
     lookupHeader :: String -> MorlocMonad Path
     lookupHeader base = do
@@ -729,7 +731,7 @@ flagAndPath src@(Source _ srcL (Just p) _ _ _ _ _ _) | srcL == cppLang =
       let allPaths = getHeaderPaths home base [".h", ".hpp", ".hxx"]
       existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
       case existingPaths of
-        (x : _) -> return x
+        (x : _) -> liftIO $ MS.canonicalizePath x
         [] -> MM.throwSystemError $ "Header file " <> pretty base <> ".* not found"
 
     lookupLib :: String -> MorlocMonad [String]

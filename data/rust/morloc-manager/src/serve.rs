@@ -435,44 +435,6 @@ pub fn find_running_serve_containers(engine: ContainerEngine) -> Vec<String> {
     }
 }
 
-pub fn stream_serve_logs(engine: ContainerEngine, verbose: bool, name: &str, follow: bool) -> Result<()> {
-    if !crate::container::container_exists(engine, name) {
-        return Err(ManagerError::EnvError(format!(
-            "No serve container for '{name}'. Start one with: morloc-manager start"
-        )));
-    }
-    let exe = engine_executable(engine);
-    let mut args = vec!["logs"];
-    if follow {
-        args.push("--follow");
-    }
-    args.push(name);
-    if verbose {
-        eprintln!("[morloc-manager] {exe} {}", args.join(" "));
-    }
-
-    let status = Command::new(exe)
-        .args(&args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|e| ManagerError::EngineError {
-            engine,
-            code: 1,
-            stderr: format!("Failed to stream logs: {e}"),
-        })?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(ManagerError::EngineError {
-            engine,
-            code: exit_code_to_int(status),
-            stderr: "Failed to read container logs".to_string(),
-        })
-    }
-}
-
 // ======================================================================
 // Manifest path rewriting for frozen images
 // ======================================================================

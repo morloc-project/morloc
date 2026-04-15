@@ -51,7 +51,6 @@ fn build_help_template() -> String {
   {b}freeze{r}     Export installed state as a frozen artifact
   {b}unfreeze{r}   Build a portable serve image from frozen state
   {b}status{r}     List running serve containers
-  {b}logs{r}       Show logs from a serve container
 
 {bu}Options{r}
 {{options}}"
@@ -293,16 +292,6 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     #[command(display_order = 24)]
     #[command(after_help = "Examples:\n  morloc-manager status")]
     Status,
-    /// Show logs from a serve container
-    #[command(display_order = 25)]
-    #[command(after_help = "Examples:\n  morloc-manager logs              # logs for active environment\n  morloc-manager logs myenv -f")]
-    Logs {
-        /// Environment name (default: active environment)
-        name: Option<String>,
-        /// Follow log output
-        #[arg(short, long)]
-        follow: bool,
-    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -670,6 +659,15 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 ));
             }
 
+            // Validate cheap-to-check parameters before any I/O
+            if let Some(ref shm) = shm_size {
+                if !environment::is_valid_shm_size(shm) {
+                    return Err(ManagerError::EnvError(format!(
+                        "Invalid --shm-size '{shm}'. Use format like: 512m, 1g, 2048k"
+                    )));
+                }
+            }
+
             // Step 2: Resolve base image and version
             let (base_image, original_image, morloc_ver) = if let Some(ref ver_str) = version {
                 let ver: Version = ver_str.parse().map_err(|_| {
@@ -914,12 +912,19 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 .and_then(|c| c.active_env);
             let active_str = active_env.as_deref();
 
+            // Determine which scope effectively owns the active environment.
+            // Local takes priority (same resolution as run/select).
+            let active_in_local = active_str
+                .map(|name| cfg::env_config_path(Scope::Local, name).is_file())
+                .unwrap_or(false);
+
             let show_local = !system || local;
             let show_system = !local || system;
             let mut total = 0;
 
             if show_local {
-                let envs = environment::list_environments(Scope::Local, active_str);
+                let local_active = if active_in_local { active_str } else { None };
+                let envs = environment::list_environments(Scope::Local, local_active);
                 total += envs.len();
                 for e in envs {
                     let active_mark = if e.active { " (active)" } else { "" };
@@ -930,7 +935,8 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 }
             }
             if show_system {
-                let envs = environment::list_environments(Scope::System, active_str);
+                let system_active = if active_in_local { None } else { active_str };
+                let envs = environment::list_environments(Scope::System, system_active);
                 total += envs.len();
                 if !envs.is_empty() {
                     if show_local {
@@ -1218,22 +1224,30 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             }
             let (env_name, env_scope, ec) = environment::resolve_active_environment()?;
             let engine = ec.engine;
-            // Always detect the version from the container — the recorded
-            // value can drift if the image was rebuilt or retagged.
+            // Detect the version from the container binary for sanity check.
+            // The morloc binary can't report prerelease tags (stack limitation),
+            // so if major.minor.patch match, keep the recorded version which has
+            // the full tag from the image.
             eprintln!("Detecting morloc version from image...");
             let detected = environment::detect_morloc_version(ec.engine, ec.active_image())?;
-            if let Some(ref recorded) = ec.morloc_version {
-                if *recorded != detected {
+            let ver = if let Some(ref recorded) = ec.morloc_version {
+                if recorded.major == detected.major
+                    && recorded.minor == detected.minor
+                    && recorded.patch == detected.patch
+                {
+                    recorded.clone()
+                } else {
                     eprintln!(
-                        "Warning: recorded morloc version ({}) does not match image ({}). Using image version.",
+                        "Warning: recorded morloc version ({}) does not match image ({}).",
                         recorded.show(), detected.show()
                     );
+                    detected
                 }
-            }
-            let ver = detected;
+            } else {
+                detected
+            };
             let data_dir = cfg::env_data_dir(env_scope, &env_name);
             let result = freeze::freeze_from_dir(env_scope, ver.clone(), engine, &data_dir.to_string_lossy(), output_dir);
-            // Only update the cached version after a successful freeze
             if result.is_ok() && ec.morloc_version.as_ref() != Some(&ver) {
                 let mut updated = ec.clone();
                 updated.morloc_version = Some(ver);
@@ -1331,18 +1345,6 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             Ok(())
         }
 
-        // ---- logs ----
-        Cmd::Logs { name, follow } => {
-            let (env_name, _, ec) = resolve_env_or_active(name)?;
-            let container_name = format!("morloc-serve-{env_name}");
-            if crate::container::container_exists(ec.engine, &container_name) {
-                serve::stream_serve_logs(ec.engine, verbose, &container_name, follow)
-            } else {
-                let (found_name, found_engine) = find_running_serve_container()?;
-                eprintln!("Showing logs for {found_name} (active env '{env_name}' is not serving)");
-                serve::stream_serve_logs(found_engine, verbose, &found_name, follow)
-            }
-        }
     }
 }
 

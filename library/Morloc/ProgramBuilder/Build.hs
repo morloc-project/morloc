@@ -15,6 +15,7 @@ module Morloc.ProgramBuilder.Build
   ( buildProgram
   ) where
 
+import Control.Monad.Except (catchError, throwError)
 import Morloc.Data.Doc ((<+>), vsep, pretty)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
@@ -24,24 +25,51 @@ import qualified Morloc.System as MS
 import qualified System.Directory as SD
 
 buildProgram :: (Script, [Script]) -> MorlocMonad ()
-buildProgram (nexus, pools) = mapM_ build (nexus : pools)
+buildProgram (nexus, pools) = do
+  installDir <- MM.gets stateInstallDir
+  case installDir of
+    Just dir -> do
+      -- When installing, copy includes and the morloc script into the install
+      -- directory, cd there, and build as normal. This avoids leaving artifacts
+      -- in CWD and ensures the installed pools are a fresh build.
+      force <- MM.gets stateInstallForce
+      dirExists <- liftIO $ SD.doesDirectoryExist dir
+      when (dirExists && not force) $ do
+        contents <- liftIO $ SD.listDirectory dir
+        unless (null contents) $
+          MM.throwSystemError $ "Install directory already exists: " <> pretty dir
+            <> ". Use --force to overwrite."
+      when (dirExists && force) $
+        liftIO $ SD.removeDirectoryRecursive dir
+      liftIO $ SD.createDirectoryIfMissing True dir
+      origDir <- liftIO SD.getCurrentDirectory
+      liftIO $ SD.setCurrentDirectory dir
+      mapM_ build (nexus : pools) `finally` liftIO (SD.setCurrentDirectory origDir)
+    Nothing ->
+      mapM_ build (nexus : pools)
+
+-- | catch/finally for MorlocMonad
+finally :: MorlocMonad a -> MorlocMonad () -> MorlocMonad a
+finally action cleanup = do
+  result <- catchError (fmap Right action) (return . Left)
+  cleanup
+  case result of
+    Right a -> return a
+    Left e -> throwError e
 
 build :: Script -> MorlocMonad ()
 build s = do
-  -- write the required file structure
   (_ :/ tree) <- liftIO $ MS.writeDirectoryWith (\f c -> MT.writeFile f (unCode c)) (scriptCode s)
   case failures tree of
     [] -> return ()
     errs -> MM.throwSystemError $ "Failed to write generated files:" <+> vsep
       [pretty (show e) | Failed _ e <- errs]
-  -- execute all make commands
   mapM_ runSysCommand (scriptMake s)
 
 runSysCommand :: SysCommand -> MorlocMonad ()
 runSysCommand (SysExe path) = do
   p <- liftIO $ SD.getPermissions path
   liftIO $ SD.setPermissions path (p {SD.executable = True})
-runSysCommand (SysMove _ _) = undefined
 runSysCommand (SysRun (Code cmd)) = MM.runCommand "runSysCommand" cmd
-runSysCommand (SysInstall _) = undefined
-runSysCommand (SysUnlink _) = undefined
+runSysCommand other =
+  MM.throwSystemError $ "Unsupported SysCommand: " <> pretty (show other)

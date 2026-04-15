@@ -118,6 +118,7 @@ data MorlocState = MorlocState
   , stateBuildConfig :: BuildConfig
   , stateModuleName :: Maybe MVar
   , stateInstall :: Bool
+  , stateInstallForce :: Bool
   , stateInstallDir :: Maybe Path
   , stateClassDefs :: Map ClassName [Constraint]
   , stateLangRegistry :: LangRegistry
@@ -316,6 +317,7 @@ instance Defaultable MorlocState where
       , stateBuildConfig = defaultValue
       , stateModuleName = Nothing
       , stateInstall = False
+      , stateInstallForce = False
       , stateInstallDir = Nothing
       , stateClassDefs = Map.empty
       , stateLangRegistry = LR.emptyRegistry

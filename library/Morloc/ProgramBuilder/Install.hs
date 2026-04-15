@@ -11,7 +11,9 @@ module Morloc.ProgramBuilder.Install
   ( installProgram
   ) where
 
+import Control.Monad (when)
 import Data.List (isInfixOf, isSuffixOf)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.Completion as Completion
@@ -22,7 +24,6 @@ import System.Directory
   , doesFileExist
   , getPermissions
   , listDirectory
-  , removeDirectoryRecursive
   , removeFile
   , setOwnerExecutable
   , setPermissions
@@ -32,7 +33,9 @@ import System.Exit (die)
 import System.FilePath (makeRelative, takeDirectory, (</>))
 import System.IO (hPutStrLn, stderr)
 
--- | After a successful local build, copy artifacts to the install location.
+-- | Finalize an installed program. The build step has already written pools
+-- and the wrapper script directly into installDir. This function copies the
+-- wrapper to bin/, extracts the manifest to fdb/, and copies include files.
 installProgram ::
   -- | configHome (e.g. ~/.local/share/morloc)
   String ->
@@ -48,53 +51,39 @@ installProgram ::
 installProgram configHome installDir installName includes force = do
   let binDir = configHome </> "bin"
       binPath = binDir </> installName
-      localWrapper = installName
+      installedWrapper = installDir </> installName
 
-  -- Check for existing install
+  -- Check for existing bin entry (installDir is already populated by build)
   binExists <- doesFileExist binPath
-  exeExists <- doesDirectoryExist installDir
-  if (binExists || exeExists) && not force
-    then die $ "'" <> installName <> "' is already installed. Use --force to overwrite."
-    else do
-      -- Remove old install if forcing
-      if force
-        then do
-          if exeExists then removeDirectoryRecursive installDir else return ()
-          if binExists then removeFile binPath else return ()
-        else return ()
+  when (binExists && not force) $
+    die $ "'" <> installName <> "' is already installed. Use --force to overwrite."
+  when (binExists && force) $
+    removeFile binPath
 
-      -- Create install directory and copy pools
-      createDirectoryIfMissing True installDir
-      poolsExist <- doesDirectoryExist "pools"
-      if poolsExist
-        then copyDirectoryRecursive "pools" (installDir </> "pools")
-        else return ()
+  -- Copy include-matched files from CWD to installDir
+  mapM_ (\pat -> copyIncludePattern (T.unpack pat) "." installDir) includes
 
-      -- Copy include-matched files (preserving relative paths)
-      mapM_ (\pat -> copyIncludePattern (T.unpack pat) "." installDir) includes
+  -- Copy wrapper from installDir to bin/
+  createDirectoryIfMissing True binDir
+  copyFile installedWrapper binPath
+  makeExecutable binPath
 
-      -- Move wrapper to bin (already has correct build_dir from Nexus.generate)
-      createDirectoryIfMissing True binDir
-      copyFile localWrapper binPath
-      makeExecutable binPath
+  -- Copy manifest to fdb/ for daemon discovery
+  let fdbDir = configHome </> "fdb"
+      fdbPath = fdbDir </> (installName ++ ".manifest")
+  createDirectoryIfMissing True fdbDir
+  extractAndWriteManifest binPath fdbPath
 
-      -- Copy manifest to fdb/ for daemon discovery
-      let fdbDir = configHome </> "fdb"
-          fdbPath = fdbDir </> (installName ++ ".manifest")
-      createDirectoryIfMissing True fdbDir
-      extractAndWriteManifest binPath fdbPath
+  -- Check if bin dir is on PATH and print hint if not
+  pathEnv <- lookupEnv "PATH"
+  let pathStr = fromMaybe "" pathEnv
+  when (not (binDir `isInfixOf` pathStr)) $
+    hPutStrLn stderr $ "Note: add " <> binDir <> " to your PATH"
 
-      -- Check if bin dir is on PATH and print hint if not
-      pathEnv <- lookupEnv "PATH"
-      let pathStr = maybe "" id pathEnv
-      if not (binDir `isInfixOf` pathStr)
-        then hPutStrLn stderr $ "Note: add " <> binDir <> " to your PATH"
-        else return ()
+  hPutStrLn stderr $ "Installed '" <> installName <> "' to " <> binPath
 
-      hPutStrLn stderr $ "Installed '" <> installName <> "' to " <> binPath
-
-      -- Regenerate shell completions
-      Completion.regenerateCompletions False configHome
+  -- Regenerate shell completions
+  Completion.regenerateCompletions False configHome
 
 -- | Recursively copy a directory
 copyDirectoryRecursive :: FilePath -> FilePath -> IO ()
