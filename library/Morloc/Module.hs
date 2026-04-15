@@ -55,6 +55,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
+import qualified Morloc.ProgramBuilder.Install as Install
 import qualified Morloc.System as MS
 import qualified Network.HTTP.Simple as HTTP
 import System.Directory
@@ -214,6 +215,10 @@ loadModuleMetadata main = do
     case maybef of
       (Just f) -> liftIO $ YC.loadYamlSettings [f] [] YC.ignoreEnv
       Nothing -> return defaultValue
+  -- Reject include entries that escape the package directory. Absolute
+  -- paths and `..` traversals are not allowed because they would break
+  -- reproducibility and tie installs to ambient filesystem layout.
+  liftIO $ Install.validateIncludeScope (packageInclude meta)
   state <- MM.get
   MM.put (appendMeta meta state)
   where

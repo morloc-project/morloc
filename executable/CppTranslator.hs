@@ -190,11 +190,18 @@ translate srcs es = do
 
   effectMap <- MM.gets stateManifoldEffects
 
+  -- Canonicalize C++ source paths once up front so that the #include
+  -- directives emitted by makeCppCode and the -I flags emitted by
+  -- makeTheMaker see exactly the same absolute paths. Before this,
+  -- `#include "./src/foo.hpp"` could not be resolved against
+  -- `-I/abs/src` because the `src/` prefix was duplicated.
+  (srcs', _, _) <- handleFlagsAndPaths srcs
+
   let recmap = unifyRecords . concatMap collectRecords $ es
       translatorState = defaultValue {translatorRecmap = recmap, translatorEffectLabels = effectMap}
-      code = CMS.evalState (makeCppCode srcs es universalScopeMap scopeMap) translatorState
+      code = CMS.evalState (makeCppCode srcs' es universalScopeMap scopeMap) translatorState
 
-  maker <- makeTheMaker srcs
+  maker <- makeTheMaker srcs'
 
   poolSubdir <- MM.getModuleName
 

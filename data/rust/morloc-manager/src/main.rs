@@ -592,11 +592,14 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                         ContainerEngine::Docker
                     }
                     (true, true) => {
-                        return Err(ManagerError::EnvError(
-                            "Both podman and docker are installed. Set a default with:\n  \
-                             morloc-manager setup --engine podman\n  \
-                             morloc-manager setup --engine docker".to_string()
-                        ));
+                        let scope_flag = if system { " --system" } else { "" };
+                        return Err(ManagerError::EnvError(format!(
+                            "Both podman and docker are installed and no default is set.\n\
+                             Pick one with:\n  \
+                             morloc-manager setup --engine podman{scope_flag}\n  \
+                             morloc-manager setup --engine docker{scope_flag}\n\
+                             Or pass --engine to this command directly."
+                        )));
                     }
                     (false, false) => return Err(ManagerError::EngineNotFound),
                 }

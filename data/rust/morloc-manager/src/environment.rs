@@ -48,6 +48,29 @@ pub struct EnvInfo {
 
 const MORLOC_IMAGE_PREFIX: &str = "ghcr.io/morloc-project/morloc/morloc-full";
 
+/// Recognize engine errors that mean "cannot chdir into the current working
+/// directory" and rewrite them into a clearer message. This commonly happens
+/// when running `sudo -u <other-user> morloc-manager ...` from a directory
+/// that <other-user> cannot access (e.g., /root or another user's $HOME).
+/// Without this hint, the error bubbles up as "Failed to check registry..."
+/// which misleads users toward debugging network/auth problems.
+fn cwd_access_hint(stderr: &str) -> Option<String> {
+    let lower = stderr.to_lowercase();
+    let looks_like_cwd_denied = (lower.contains("chdir") || lower.contains("getwd")
+        || lower.contains("current working directory"))
+        && (lower.contains("permission denied") || lower.contains("no such file"));
+    if looks_like_cwd_denied {
+        Some(format!(
+            "Cannot change into the current working directory as the target user. \
+             Run morloc-manager from a directory the target user can access \
+             (for example /tmp or the user's home directory).\nOriginal error: {}",
+            stderr.trim()
+        ))
+    } else {
+        None
+    }
+}
+
 /// Resolve a morloc version string to a registry image reference.
 pub fn version_to_image(ver: &Version) -> String {
     format!("{MORLOC_IMAGE_PREFIX}:{}", ver.show())
@@ -65,6 +88,9 @@ pub fn resolve_latest(engine: ContainerEngine) -> Result<(String, Version)> {
             ));
         }
         RemoteImageStatus::Unknown(stderr) => {
+            if let Some(hint) = cwd_access_hint(&stderr) {
+                return Err(ManagerError::EnvError(hint));
+            }
             return Err(ManagerError::EnvError(format!(
                 "Failed to check registry for latest morloc version: {}",
                 stderr.trim()
@@ -133,6 +159,9 @@ pub fn pull_version_image(engine: ContainerEngine, ver: &Version) -> Result<Stri
             )));
         }
         RemoteImageStatus::Unknown(stderr) => {
+            if let Some(hint) = cwd_access_hint(&stderr) {
+                return Err(ManagerError::EnvError(hint));
+            }
             return Err(ManagerError::EnvError(format!(
                 "Failed to check registry for morloc v{}: {}",
                 ver.show(),
@@ -391,22 +420,59 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
         let df_path = config::env_dockerfile_path(scope, name);
         if df_path.exists() {
             let hash = hash_file(&df_path)?;
-            let build_cfg = BuildConfig {
-                dockerfile: df_path.to_string_lossy().to_string(),
-                context: cfg_dir.to_string_lossy().to_string(),
-                tag: tag.clone(),
-                build_args: vec![("CONTAINER_BASE".to_string(), ec.base_image.clone())],
-            };
-            let (status, _, stderr) = container::container_build(ec.engine, &build_cfg);
-            if !status.success() {
-                return Err(ManagerError::EngineError {
-                    engine: ec.engine,
-                    code: exit_code_to_int(status),
-                    stderr,
-                });
+            // Skip rebuild when nothing has actually changed: same Dockerfile
+            // hash, no new includes, no base-image change, tagged image still
+            // present. Without this, `update` with no arguments silently
+            // re-runs the full build every time.
+            let unchanged = !opts.is_new
+                && !dockerfile_changed
+                && opts.includes.is_empty()
+                && opts.base_image.is_none()
+                && ec.content_hash.as_deref() == Some(hash.as_str())
+                && ec.built_image.as_ref()
+                    .map(|img| image_exists_locally(ec.engine, img))
+                    .unwrap_or(false);
+            if unchanged {
+                eprintln!("Dockerfile unchanged; skipping rebuild.");
+            } else {
+                let build_cfg = BuildConfig {
+                    dockerfile: df_path.to_string_lossy().to_string(),
+                    context: cfg_dir.to_string_lossy().to_string(),
+                    tag: tag.clone(),
+                    build_args: vec![("CONTAINER_BASE".to_string(), ec.base_image.clone())],
+                };
+                let (status, _, stderr) = container::container_build(ec.engine, &build_cfg);
+                if !status.success() {
+                    return Err(ManagerError::EngineError {
+                        engine: ec.engine,
+                        code: exit_code_to_int(status),
+                        stderr,
+                    });
+                }
+                ec.built_image = Some(tag);
+                ec.content_hash = Some(hash);
             }
-            ec.built_image = Some(tag);
-            ec.content_hash = Some(hash);
+        }
+    }
+
+    // Always reconcile the stored morloc version against the actual image.
+    // - For `new --version 0.77.0-rc.6`, the binary reports "0.77.0" (stack
+    //   does not expose prerelease tags), so keep the recorded value when
+    //   major.minor.patch match — the recorded tag is more informative.
+    // - For `new --image <custom>` or `update --image ...`, nothing was
+    //   recorded yet, so store the detected version.
+    // - If the image has no morloc binary (e.g., a bare base image staged
+    //   for a Dockerfile layer not yet built), silently leave the field
+    //   unchanged rather than failing the whole operation.
+    let detect_target = ec.built_image.clone().unwrap_or_else(|| ec.base_image.clone());
+    if !detect_target.is_empty() {
+        if let Ok(detected) = detect_morloc_version(ec.engine, &detect_target) {
+            ec.morloc_version = Some(match ec.morloc_version.take() {
+                Some(recorded) if recorded.major == detected.major
+                    && recorded.minor == detected.minor
+                    && recorded.patch == detected.patch => recorded,
+                _ => detected,
+            });
         }
     }
 
@@ -420,6 +486,15 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
 pub fn remove_environment(engine: ContainerEngine, scope: Scope, name: &str) -> Result<()> {
     let ec = config::read_env_config(scope, name)
         .map_err(|_| ManagerError::EnvironmentNotFound(name.to_string()))?;
+
+    // Stop and remove any running serve container for this environment before
+    // removing its image. If we skipped this, the serve container would keep
+    // running and be unreachable through morloc-manager.
+    let serve_name = format!("morloc-serve-{name}");
+    if container::container_exists(engine, &serve_name) {
+        let _ = container::container_stop(engine, &serve_name);
+        let _ = container::container_remove_quiet(engine, &serve_name);
+    }
 
     // Remove built Dockerfile layer image
     if let Some(ref img) = ec.built_image {
@@ -525,10 +600,17 @@ fn resolve_active_env_name() -> Result<String> {
     if local_envs.is_empty() && system_envs.is_empty() {
         Err(ManagerError::NoActiveEnvironment)
     } else {
-        let mut available: Vec<String> = local_envs;
-        available.extend(system_envs);
+        // Label each entry with its scope so same-named envs are distinguishable.
+        // System envs are flagged with --system to disambiguate in select.
+        let mut available: Vec<String> = local_envs
+            .iter()
+            .map(|n| format!("{n} (local)"))
+            .collect();
+        available.extend(system_envs.iter().map(|n| format!("{n} (system)")));
         Err(ManagerError::EnvError(format!(
-            "No active environment. Select one with: morloc-manager select <name>\nAvailable: {}",
+            "No active environment. Select one with: morloc-manager select <name>\n\
+             (system-scope envs: morloc-manager select <name> --system)\n\
+             Available: {}",
             available.join(", ")
         )))
     }

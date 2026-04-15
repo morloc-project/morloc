@@ -9,10 +9,12 @@ Maintainer  : z@morloc.io
 -}
 module Morloc.ProgramBuilder.Install
   ( installProgram
+  , validateIncludeScope
+  , validateIncludeCoverage
   ) where
 
 import Control.Monad (when)
-import Data.List (isInfixOf, isSuffixOf)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -30,7 +32,14 @@ import System.Directory
   )
 import System.Environment (lookupEnv)
 import System.Exit (die)
-import System.FilePath (makeRelative, takeDirectory, (</>))
+import System.FilePath
+  ( isAbsolute
+  , makeRelative
+  , normalise
+  , splitDirectories
+  , takeDirectory
+  , (</>)
+  )
 import System.IO (hPutStrLn, stderr)
 
 -- | Finalize an installed program. The build step has already written pools
@@ -178,6 +187,97 @@ makeExecutable :: FilePath -> IO ()
 makeExecutable path = do
   p <- getPermissions path
   setPermissions path (setOwnerExecutable True p)
+
+{- | Reject include patterns that escape the package root.
+
+An include path is only valid if it resolves to a location inside the
+directory that contains package.yaml (and the main .loc script). Absolute
+paths are rejected outright; relative paths are rejected if normalising
+them produces a leading @..@ segment.
+
+This closes the obvious footgun of a package referencing files outside the
+project directory, which would break reproducibility and make installs
+depend on ambient filesystem layout.
+-}
+validateIncludeScope :: [Text] -> IO ()
+validateIncludeScope patterns =
+  case filter (not . inScope . T.unpack) patterns of
+    [] -> return ()
+    bad ->
+      die $
+        "Invalid `include` in package.yaml: the following entries escape the "
+          <> "package directory (absolute paths and `..` are not allowed):\n"
+          <> unlines (map (("  " <>) . T.unpack) bad)
+  where
+    inScope :: String -> Bool
+    inScope pat
+      | isAbsolute pat = False
+      | otherwise =
+          case splitDirectories (normalise pat) of
+            (".." : _) -> False
+            segs -> not (any (== "..") segs)
+
+{- | Verify that every directly-sourced file in the compiled program is
+covered by at least one include pattern.
+
+This catches the common mistake of writing @source Py from "helper.py"@ in
+a .loc file but forgetting to add @helper.py@ to @package.yaml@'s @include@
+field. Without this check, @morloc make --install@ silently produces a
+broken install: the pool cannot import @helper@ at runtime.
+
+Note: we only check /directly/ sourced files, not files that those sources
+in turn import (e.g., one R file calling @source()@ on another). Transitive
+dependencies cannot be discovered without executing the source language.
+The user is still responsible for listing every runtime asset in
+@include@; this validator is a targeted safety net for the direct case.
+
+Paths that resolve outside the package root are skipped: those come from
+library modules (e.g., root-py), not the user's project, and are not the
+user's responsibility to declare.
+-}
+validateIncludeCoverage ::
+  -- | package root (directory containing the main .loc script / package.yaml)
+  FilePath ->
+  -- | include patterns as written in package.yaml
+  [Text] ->
+  -- | absolute filesystem paths of every directly-sourced file
+  [FilePath] ->
+  IO ()
+validateIncludeCoverage packageRoot patterns sourcePaths = do
+  let patStrs = map T.unpack patterns
+      relPaths = [ rel
+                 | p <- sourcePaths
+                 , let rel = makeRelative packageRoot (normalise p)
+                 , not (isAbsolute rel)
+                 , not ("../" `isPrefixOf` rel)
+                 , rel /= ".."
+                 ]
+      uncovered = filter (not . isCovered patStrs) relPaths
+  case uncovered of
+    [] -> return ()
+    missing ->
+      die $
+        "The following source files are referenced from your morloc program "
+          <> "but not listed in `include` in package.yaml:\n"
+          <> unlines (map ("  " <>) missing)
+          <> "\nAdd them to `include` so they are copied into the install:\n"
+          <> "  include:\n"
+          <> unlines (map (("    - " <>)) missing)
+
+-- | True if any include pattern matches the given relative path.
+isCovered :: [String] -> FilePath -> Bool
+isCovered patterns relPath = any (coversOne relPath) patterns
+  where
+    coversOne :: FilePath -> String -> Bool
+    coversOne rel pat
+      -- `src/` matches anything inside the src/ directory
+      | "/" `isSuffixOf` pat =
+          let dir = init pat
+          in (dir ++ "/") `isPrefixOf` rel
+      -- glob pattern
+      | '*' `elem` pat = matchGlob pat rel
+      -- exact path
+      | otherwise = pat == rel
 
 {- | Extract the manifest JSON from a wrapper script and write it to a file.
 The wrapper script has the format:

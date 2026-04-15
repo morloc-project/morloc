@@ -206,6 +206,7 @@ pub fn run_serve_container(
 
     let (status, _stdout, run_err) = container_run(engine, &cfg);
     if !status.success() {
+        let _ = crate::container::container_remove_quiet(engine, name);
         return Err(ManagerError::EngineError {
             engine,
             code: exit_code_to_int(status),
@@ -225,7 +226,7 @@ pub fn run_serve_container(
             if state == "running" {
                 eprintln!("Container {name} started");
                 eprintln!("  Stop:   morloc-manager stop {name}");
-                eprintln!("  Logs:   morloc-manager logs {name}");
+                eprintln!("  Logs:   {exe} logs -f {name}");
                 eprintln!("  Status: morloc-manager status");
                 Ok(())
             } else {
@@ -310,6 +311,10 @@ pub fn serve_environment(
 
     let (status, _stdout, run_err) = container_run(engine, &cfg);
     if !status.success() {
+        // `container_run` may have left a partially-created container behind
+        // (e.g., port conflict after container creation). Clean it up so the
+        // next `start` doesn't fail on a name collision.
+        let _ = crate::container::container_remove_quiet(engine, container_name);
         return Err(ManagerError::EngineError {
             engine,
             code: exit_code_to_int(status),
@@ -329,7 +334,7 @@ pub fn serve_environment(
             if state == "running" {
                 eprintln!("Container {container_name} started");
                 eprintln!("  Stop:   morloc-manager stop");
-                eprintln!("  Logs:   morloc-manager logs");
+                eprintln!("  Logs:   {exe} logs -f {container_name}");
                 eprintln!("  Status: morloc-manager status");
                 Ok(())
             } else {

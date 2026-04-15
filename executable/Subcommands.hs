@@ -34,6 +34,7 @@ import qualified Morloc.CodeGenerator.SystemConfig as MSC
 import qualified Morloc.Completion as Completion
 import qualified Morloc.Config as Config
 import Morloc.Data.Doc
+import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.API as F
 import Morloc.Module (OverwriteProtocol (..), findMainLocFile)
@@ -56,7 +57,7 @@ import System.Directory
   , setCurrentDirectory
   )
 import System.Exit (exitFailure, exitSuccess)
-import System.FilePath (dropExtension, takeFileName)
+import System.FilePath (dropExtension, takeDirectory, takeFileName)
 import System.IO (hPutStrLn, stderr)
 import System.IO.Temp (createTempDirectory)
 import qualified System.Process as SP
@@ -225,12 +226,23 @@ makeAndInstall path outfile code extraIncludes verbosity config buildConfig forc
       let (_, finalState) = result
           pkgIncludes = concatMap packageInclude (statePackageMeta finalState)
           allIncludes = pkgIncludes ++ extraIncludes
+          -- Directly-sourced files must be declared in `include`. Transitive
+          -- sources (an R file that in turn `source()`s another R file) are
+          -- the user's responsibility -- the compiler cannot discover them
+          -- without executing the target language.
+          allSources = concat (GMap.elems (stateSources finalState))
+          directSourcePaths = [ p | Source{srcPath = Just p} <- allSources ]
       case stateInstallDir finalState of
         Nothing -> do
           putStrLn "Error: install directory was not set during compilation"
           return False
         Just installDir -> do
           let installName = takeFileName installDir
+              packageRoot = case fmap takeDirectory path of
+                Just ""  -> "."
+                Just d   -> d
+                Nothing  -> "."
+          Install.validateIncludeCoverage packageRoot allIncludes directSourcePaths
           Install.installProgram (Config.configHome config) installDir installName allIncludes force
           return True
     else return False
