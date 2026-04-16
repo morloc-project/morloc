@@ -1,3 +1,7 @@
+0.77.1 [2026-04-16]
+-------------------
+ * resurrected `morloc-manager log` subcommand
+
 0.77.0 [2026-04-15]
 -------------------
  * many many deployment fixes

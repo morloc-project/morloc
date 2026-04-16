@@ -48,6 +48,7 @@ fn build_help_template() -> String {
 {bu}Deployment{r}
   {b}start{r}      Serve an environment over the network
   {b}stop{r}       Stop a running serve container
+  {b}logs{r}       Stream logs from a running serve container
   {b}freeze{r}     Export installed state as a frozen artifact
   {b}unfreeze{r}   Build a portable serve image from frozen state
   {b}status{r}     List running serve containers
@@ -259,8 +260,18 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Environment name (default: active environment)
         name: Option<String>,
     },
-    /// Export installed state as a frozen artifact
+    /// Stream logs from a running serve container
     #[command(display_order = 22)]
+    #[command(after_help = "Examples:\n  morloc-manager logs              # logs from only running serve container\n  morloc-manager logs myenv\n  morloc-manager logs -f myenv     # follow mode")]
+    Logs {
+        /// Environment name (default: auto-detect running container)
+        name: Option<String>,
+        /// Follow log output
+        #[arg(short, long)]
+        follow: bool,
+    },
+    /// Export installed state as a frozen artifact
+    #[command(display_order = 23)]
     #[command(after_help = "Examples:\n  morloc-manager freeze\n  morloc-manager freeze -o ./my-freeze\n\nRequires at least one program compiled with 'morloc make --install'.")]
     Freeze {
         /// Output directory
@@ -271,7 +282,7 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         force: bool,
     },
     /// Build a serve image from frozen state
-    #[command(display_order = 23)]
+    #[command(display_order = 24)]
     #[command(after_help = "Examples:\n  morloc-manager unfreeze --from ./morloc-freeze/state.tar.gz -t myservice:v1\n  morloc-manager unfreeze --from ./state.tar.gz -t svc:v1 --engine docker")]
     Unfreeze {
         /// Path to state.tar.gz from freeze
@@ -289,7 +300,7 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         engine: Option<EngineArg>,
     },
     /// List running serve containers
-    #[command(display_order = 24)]
+    #[command(display_order = 25)]
     #[command(after_help = "Examples:\n  morloc-manager status")]
     Status,
 }
@@ -334,9 +345,33 @@ fn main() -> ExitCode {
         unsafe { let _ = signal(Signal::SIGPIPE, SigHandler::SigDfl); }
     }
 
-    let matches = Cli::command()
+    let matches = match Cli::command()
         .help_template(build_help_template())
-        .get_matches();
+        .try_get_matches()
+    {
+        Ok(m) => m,
+        Err(e) => {
+            // Detect missing -- separator for the run subcommand
+            let rendered = e.to_string();
+            if rendered.contains("unrecognized") || rendered.contains("unexpected") {
+                let args: Vec<String> = std::env::args().collect();
+                if args.len() > 1 && args[1] == "run" {
+                    let inner: Vec<&str> = args[2..].iter()
+                        .filter(|a| *a != "--shell")
+                        .map(|a| a.as_str())
+                        .collect();
+                    if !inner.is_empty() {
+                        eprintln!("Error: unrecognized arguments for 'run'.");
+                        eprintln!();
+                        eprintln!("Use -- to separate morloc-manager flags from the container command:");
+                        eprintln!("  morloc-manager run -- {}", inner.join(" "));
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            e.exit();
+        }
+    };
     let cli = Cli::from_arg_matches(&matches).unwrap();
     if cli.version {
         println!("morloc-manager {}", env!("CARGO_PKG_VERSION"));
@@ -1041,6 +1076,11 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
                 let active_str = if active_env == "none" { None } else { Some(active_env.as_str()) };
 
+                // Check if active env lives in local scope (local takes priority)
+                let active_in_local = active_str
+                    .map(|name| cfg::env_config_path(Scope::Local, name).is_file())
+                    .unwrap_or(false);
+
                 let local_envs = environment::list_environments(Scope::Local, active_str);
                 println!("\nLocal environments:");
                 if local_envs.is_empty() {
@@ -1059,7 +1099,13 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 if !system_envs.is_empty() {
                     println!("\nSystem environments:");
                     for e in &system_envs {
-                        let active_mark = if e.active { " (active)" } else { "" };
+                        let active_mark = if e.active && active_in_local {
+                            " (active - shadowed)"
+                        } else if e.active {
+                            " (active)"
+                        } else {
+                            ""
+                        };
                         let ver_mark = e.morloc_version.as_ref()
                             .map(|v| format!(" [{}]", v.show()))
                             .unwrap_or_default();
@@ -1110,10 +1156,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             } else if dockerfile_stub {
                 let df_path = cfg::env_dockerfile_path(env_scope, &env_name);
                 if df_path.exists() {
-                    return Err(ManagerError::EnvError(format!(
-                        "Dockerfile already exists: {}\nEdit it directly, then run: morloc-manager update {env_name}",
-                        df_path.display()
-                    )));
+                    eprintln!("Overwriting existing Dockerfile: {}", df_path.display());
                 }
                 let stub_dir = cfg::data_dir(env_scope).join("tmp");
                 fs::create_dir_all(&stub_dir).map_err(|e| {
@@ -1193,7 +1236,8 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 eprintln!("Edit it, then run: morloc-manager update {env_name}");
             }
 
-            if reinit {
+            // --version and --image imply --reinit (ABI may have changed)
+            if reinit || version.is_some() || image.is_some() {
                 // Re-read the config (apply_environment may have updated it)
                 let ec = cfg::read_env_config(env_scope, &env_name)?;
                 run_morloc_init_for(Some((env_name.clone(), env_scope, ec)), verbose)?;
@@ -1325,25 +1369,68 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             Ok(())
         }
 
+        // ---- logs ----
+        Cmd::Logs { name, follow } => {
+            let (container_name, engine) = if let Some(ref n) = name {
+                let (_, _, ec) = resolve_env_or_active(Some(n.clone()))?;
+                (format!("morloc-serve-{n}"), ec.engine)
+            } else {
+                find_running_serve_container()?
+            };
+            let exe = match engine {
+                ContainerEngine::Podman => "podman",
+                ContainerEngine::Docker => "docker",
+            };
+            let mut cmd_args = vec!["logs"];
+            if follow {
+                cmd_args.push("-f");
+            }
+            cmd_args.push(&container_name);
+            let status = std::process::Command::new(exe)
+                .args(&cmd_args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+                .map_err(|e| ManagerError::EnvError(format!("Failed to run {exe} logs: {e}")))?;
+            if !status.success() {
+                return Err(ManagerError::EngineError {
+                    engine,
+                    code: status.code().unwrap_or(1),
+                    stderr: String::new(),
+                });
+            }
+            Ok(())
+        }
+
         // ---- status ----
         Cmd::Status => {
-            // Check all installed engines so cross-engine containers aren't invisible.
-            let mut any_printed = false;
+            // Only show engines that have running/stopped serve containers.
+            // Don't show "[podman] No containers" when only Docker is configured.
+            let mut any_engine = false;
+            let mut any_containers = false;
             for engine in [ContainerEngine::Podman, ContainerEngine::Docker] {
                 let exe = match engine {
                     ContainerEngine::Podman => "podman",
                     ContainerEngine::Docker => "docker",
                 };
                 if which(exe) {
-                    if any_printed {
-                        println!();
+                    any_engine = true;
+                    let containers = serve::find_running_serve_containers(engine);
+                    if !containers.is_empty() {
+                        if any_containers {
+                            println!();
+                        }
+                        let _ = serve::list_serve_containers(engine, verbose);
+                        any_containers = true;
                     }
-                    let _ = serve::list_serve_containers(engine, verbose);
-                    any_printed = true;
                 }
             }
-            if !any_printed {
+            if !any_engine {
                 return Err(ManagerError::EngineNotFound);
+            }
+            if !any_containers {
+                println!("No morloc serve containers running.");
             }
             Ok(())
         }

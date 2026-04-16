@@ -80,32 +80,37 @@ pub fn version_to_image(ver: &Version) -> String {
 pub fn resolve_latest(engine: ContainerEngine) -> Result<(String, Version)> {
     let edge_image = format!("{MORLOC_IMAGE_PREFIX}:edge");
 
-    match check_remote_image(engine, &edge_image) {
-        RemoteImageStatus::Exists => {}
-        RemoteImageStatus::NotFound => {
-            return Err(ManagerError::EnvError(
-                "No container for latest morloc version exists".to_string(),
-            ));
-        }
-        RemoteImageStatus::Unknown(stderr) => {
-            if let Some(hint) = cwd_access_hint(&stderr) {
-                return Err(ManagerError::EnvError(hint));
+    // Skip network pull if edge image already exists locally
+    if !image_exists_locally(engine, &edge_image) {
+        match check_remote_image(engine, &edge_image) {
+            RemoteImageStatus::Exists => {}
+            RemoteImageStatus::NotFound => {
+                return Err(ManagerError::EnvError(
+                    "No container for latest morloc version exists".to_string(),
+                ));
             }
-            return Err(ManagerError::EnvError(format!(
-                "Failed to check registry for latest morloc version: {}",
-                stderr.trim()
-            )));
+            RemoteImageStatus::Unknown(stderr) => {
+                if let Some(hint) = cwd_access_hint(&stderr) {
+                    return Err(ManagerError::EnvError(hint));
+                }
+                return Err(ManagerError::EnvError(format!(
+                    "Failed to check registry for latest morloc version: {}",
+                    stderr.trim()
+                )));
+            }
         }
-    }
 
-    eprintln!("Pulling {edge_image}...");
-    let (status, _, stderr) = container_pull(engine, &edge_image);
-    if !status.success() {
-        return Err(ManagerError::EngineError {
-            engine,
-            code: exit_code_to_int(status),
-            stderr,
-        });
+        eprintln!("Pulling {edge_image}...");
+        let (status, _, stderr) = container_pull(engine, &edge_image);
+        if !status.success() {
+            return Err(ManagerError::EngineError {
+                engine,
+                code: exit_code_to_int(status),
+                stderr,
+            });
+        }
+    } else {
+        eprintln!("Using local copy of {edge_image}");
     }
 
     let exe = engine_executable(engine);

@@ -585,7 +585,7 @@ fn rebuild_env_image(
         return env_tag;
     }
 
-    eprintln!("Rebuilding environment: {}", fel.name);
+    eprintln!("Building deployment image (environment layer: {})", fel.name);
     let build_dir = "/tmp/morloc-env-rebuild";
     let _ = fs::create_dir_all(build_dir);
     let df_path = format!("{build_dir}/Dockerfile");

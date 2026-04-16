@@ -13,6 +13,7 @@ module Morloc.ProgramBuilder.Install
   , validateIncludeCoverage
   ) where
 
+import Control.Exception (throwIO)
 import Control.Monad (when)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
 import Data.Maybe (fromMaybe)
@@ -31,7 +32,6 @@ import System.Directory
   , setPermissions
   )
 import System.Environment (lookupEnv)
-import System.Exit (die)
 import System.FilePath
   ( isAbsolute
   , makeRelative
@@ -65,7 +65,7 @@ installProgram configHome installDir installName includes force = do
   -- Check for existing bin entry (installDir is already populated by build)
   binExists <- doesFileExist binPath
   when (binExists && not force) $
-    die $ "'" <> installName <> "' is already installed. Use --force to overwrite."
+    throwIO . userError $ "'" <> installName <> "' is already installed. Use --force to overwrite."
   when (binExists && force) $
     removeFile binPath
 
@@ -204,7 +204,7 @@ validateIncludeScope patterns =
   case filter (not . inScope . T.unpack) patterns of
     [] -> return ()
     bad ->
-      die $
+      throwIO . userError $
         "Invalid `include` in package.yaml: the following entries escape the "
           <> "package directory (absolute paths and `..` are not allowed):\n"
           <> unlines (map (("  " <>) . T.unpack) bad)
@@ -256,7 +256,7 @@ validateIncludeCoverage packageRoot patterns sourcePaths = do
   case uncovered of
     [] -> return ()
     missing ->
-      die $
+      throwIO . userError $
         "The following source files are referenced from your morloc program "
           <> "but not listed in `include` in package.yaml:\n"
           <> unlines (map ("  " <>) missing)

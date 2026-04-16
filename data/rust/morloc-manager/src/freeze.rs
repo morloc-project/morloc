@@ -37,7 +37,7 @@ pub fn freeze_from_dir(
     let tar_path = Path::new(output_dir).join("state.tar.gz");
     let tar_path = tar_path.to_string_lossy();
     let mut tar_dirs: Vec<&str> = Vec::new();
-    for dir in &["lib", "fdb", "bin", "exe", "opt"] {
+    for dir in &["lib", "fdb", "bin", "exe", "opt", "src"] {
         if Path::new(&format!("{v_data_dir}/{dir}")).is_dir() {
             tar_dirs.push(dir);
         }

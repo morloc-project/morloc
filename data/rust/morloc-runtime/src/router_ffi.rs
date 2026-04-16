@@ -4,6 +4,7 @@
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use crate::daemon_ffi::{
     DaemonConfig, DaemonResponse, MorlocSocket,
@@ -950,6 +951,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             return;
         }
         libc::listen(http_fd, 16);
+        eprintln!("router: listening on http port {}", (*config).http_port);
         fds[nfds].fd = http_fd;
         fds[nfds].events = libc::POLLIN as i16;
         nfds += 1;
@@ -983,6 +985,10 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             return;
         }
         libc::listen(sock_fd, 16);
+        eprintln!(
+            "router: listening on unix socket {}",
+            CStr::from_ptr((*config).unix_socket_path).to_string_lossy()
+        );
         fds[nfds].fd = sock_fd;
         fds[nfds].events = libc::POLLIN as i16;
         nfds += 1;
@@ -1015,6 +1021,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             if client_fd < 0 {
                 continue;
             }
+            let req_start = Instant::now();
             crate::utility::set_nosigpipe(client_fd);
 
             let tv = libc::timeval {
@@ -1049,9 +1056,21 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
                     body.len() - 1,
                 );
                 libc::free(err as *mut c_void);
+                let elapsed = req_start.elapsed();
+                eprintln!("router: ??? ??? -> 400 ({:.1}ms)", elapsed.as_secs_f64() * 1000.0);
                 libc::close(client_fd);
                 continue;
             }
+
+            // Extract method and path for access logging before request is consumed
+            let log_method = match (*http_req).method {
+                HttpMethod::Get => "GET",
+                HttpMethod::Post => "POST",
+                HttpMethod::Delete => "DELETE",
+                HttpMethod::Options => "OPTIONS",
+            };
+            let log_path_cstr = CStr::from_ptr((*http_req).path.as_ptr());
+            let log_path = log_path_cstr.to_str().unwrap_or("???").to_string();
 
             let mut target_program: *mut c_char = ptr::null_mut();
             let dreq = router_http_to_request(http_req, &mut target_program, &mut err);
@@ -1068,9 +1087,14 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
                     err_json.len(),
                 );
                 libc::free(err as *mut c_void);
+                let elapsed = req_start.elapsed();
+                eprintln!("router: {} {} -> 404 ({:.1}ms)", log_method, log_path, elapsed.as_secs_f64() * 1000.0);
                 libc::close(client_fd);
                 continue;
             }
+
+            // Track response status for access log
+            let mut resp_status: i32 = 200;
 
             // Router-level requests
             if target_program.is_null() {
@@ -1100,6 +1124,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
                     let mut resp_len: usize = 0;
                     let resp_json = daemon_serialize_response(resp, &mut resp_len);
                     let status = if (*resp).success { 200 } else { 500 };
+                    resp_status = status;
                     http_write_response(
                         client_fd,
                         status,
@@ -1111,6 +1136,8 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
                     daemon_free_response(resp);
                 }
                 daemon_free_request(dreq);
+                let elapsed = req_start.elapsed();
+                eprintln!("router: {} {} -> {} ({:.1}ms)", log_method, log_path, resp_status, elapsed.as_secs_f64() * 1000.0);
                 libc::close(client_fd);
                 continue;
             }
@@ -1138,6 +1165,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
                     }
                 }
                 if !found {
+                    resp_status = 404;
                     let body = b"{\"status\":\"error\",\"error\":\"Unknown program\"}\0";
                     http_write_response(
                         client_fd,
@@ -1151,6 +1179,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
                 // Forward to program daemon
                 let resp = router_forward(router, target_program, dreq, &mut err);
                 if !err.is_null() {
+                    resp_status = 500;
                     let err_json =
                         make_error_json(&CStr::from_ptr(err).to_string_lossy());
                     let c = CString::new(err_json.as_str()).unwrap_or_default();
@@ -1166,6 +1195,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
                     let mut resp_len: usize = 0;
                     let resp_json = daemon_serialize_response(resp, &mut resp_len);
                     let status = if (*resp).success { 200 } else { 500 };
+                    resp_status = status;
                     http_write_response(
                         client_fd,
                         status,
@@ -1180,6 +1210,8 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
 
             libc::free(target_program as *mut c_void);
             daemon_free_request(dreq);
+            let elapsed = req_start.elapsed();
+            eprintln!("router: {} {} -> {} ({:.1}ms)", log_method, log_path, resp_status, elapsed.as_secs_f64() * 1000.0);
             libc::close(client_fd);
         }
     }

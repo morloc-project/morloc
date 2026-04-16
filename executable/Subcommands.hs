@@ -242,9 +242,23 @@ makeAndInstall path outfile code extraIncludes verbosity config buildConfig forc
                 Just ""  -> "."
                 Just d   -> d
                 Nothing  -> "."
-          Install.validateIncludeCoverage packageRoot allIncludes directSourcePaths
-          Install.installProgram (Config.configHome config) installDir installName allIncludes force
-          return True
+          -- Atomic install: clean up installDir on any failure so the user
+          -- is not left with partial state requiring --force on retry.
+          installResult <- try (do
+            Install.validateIncludeCoverage packageRoot allIncludes directSourcePaths
+            Install.installProgram (Config.configHome config) installDir installName allIncludes force
+            ) :: IO (Either SomeException ())
+          case installResult of
+            Right () -> return True
+            Left e -> do
+              dirExists <- doesDirectoryExist installDir
+              if dirExists
+                then do
+                  removeDirectoryRecursive installDir
+                  hPutStrLn stderr $ "Cleaned up partial install: " <> installDir
+                else return ()
+              hPutStrLn stderr $ show e
+              return False
     else return False
 
 -- | build a Morloc program, generating the nexus and pool files
@@ -305,9 +319,21 @@ cmdEval args verbosity config buildConfig = do
                   putStrLn "Error: install directory was not set during compilation"
                   return False
                 Just installDir -> do
-                  Install.installProgram (Config.configHome config) installDir saveName pkgIncludes True
-                  writeEvalMeta (Config.configHome config) saveName rawExpr
-                  return True
+                  evalInstallResult <- try (do
+                    Install.installProgram (Config.configHome config) installDir saveName pkgIncludes True
+                    writeEvalMeta (Config.configHome config) saveName rawExpr
+                    ) :: IO (Either SomeException ())
+                  case evalInstallResult of
+                    Right () -> return True
+                    Left e -> do
+                      dirExists <- doesDirectoryExist installDir
+                      if dirExists
+                        then do
+                          removeDirectoryRecursive installDir
+                          hPutStrLn stderr $ "Cleaned up partial install: " <> installDir
+                        else return ()
+                      hPutStrLn stderr $ show e
+                      return False
             else do
               let exe = tmpDir </> exeName
               subcommand <- getFirstSubcommand exe
