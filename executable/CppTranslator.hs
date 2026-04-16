@@ -190,11 +190,18 @@ translate srcs es = do
 
   effectMap <- MM.gets stateManifoldEffects
 
+  -- Canonicalize C++ source paths once up front so that the #include
+  -- directives emitted by makeCppCode and the -I flags emitted by
+  -- makeTheMaker see exactly the same absolute paths. Before this,
+  -- `#include "./src/foo.hpp"` could not be resolved against
+  -- `-I/abs/src` because the `src/` prefix was duplicated.
+  (srcs', _, _) <- handleFlagsAndPaths srcs
+
   let recmap = unifyRecords . concatMap collectRecords $ es
       translatorState = defaultValue {translatorRecmap = recmap, translatorEffectLabels = effectMap}
-      code = CMS.evalState (makeCppCode srcs es universalScopeMap scopeMap) translatorState
+      code = CMS.evalState (makeCppCode srcs' es universalScopeMap scopeMap) translatorState
 
-  maker <- makeTheMaker srcs
+  maker <- makeTheMaker srcs'
 
   poolSubdir <- MM.getModuleName
 
@@ -721,7 +728,9 @@ flagAndPath src@(Source _ srcL (Just p) _ _ _ _ _ _) | srcL == cppLang =
       return (src {srcPath = Just header}, libFlags, Just (MS.takeDirectory header))
     (dir, base, _) -> do
       libFlags <- lookupLib base
-      return (src, libFlags, Just dir)
+      absDir <- liftIO $ MS.canonicalizePath dir
+      absPath <- liftIO $ MS.canonicalizePath p
+      return (src {srcPath = Just absPath}, libFlags, Just absDir)
   where
     lookupHeader :: String -> MorlocMonad Path
     lookupHeader base = do
@@ -729,7 +738,7 @@ flagAndPath src@(Source _ srcL (Just p) _ _ _ _ _ _) | srcL == cppLang =
       let allPaths = getHeaderPaths home base [".h", ".hpp", ".hxx"]
       existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
       case existingPaths of
-        (x : _) -> return x
+        (x : _) -> liftIO $ MS.canonicalizePath x
         [] -> MM.throwSystemError $ "Header file " <> pretty base <> ".* not found"
 
     lookupLib :: String -> MorlocMonad [String]

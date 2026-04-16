@@ -8,12 +8,8 @@ cd "$(dirname "$0")/.."
 
 if [[ -n "${1:-}" ]]; then
   VERSION="$1"
-  if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "Error: invalid version '$VERSION', expected X.Y.Z" >&2
-    exit 1
-  fi
 else
-  VERSION=$(head -1 ChangeLog.md | grep -oP '^\d+\.\d+\.\d+')
+  VERSION=$(head -1 ChangeLog.md | grep -oP '^\d+\.\d+\.\d+[^ ]*')
   if [[ -z "$VERSION" ]]; then
     echo "Error: could not parse version from first line of ChangeLog.md" >&2
     echo "Expected format: X.Y.Z [YYYY-MM-DD]" >&2

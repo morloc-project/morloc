@@ -99,6 +99,7 @@ copyState oldIndex newIndex = do
       , stateBuildConfig = stateBuildConfig s
       , stateModuleName = stateModuleName s
       , stateInstall = stateInstall s
+      , stateInstallForce = stateInstallForce s
       , stateInstallDir = stateInstallDir s
       , stateClassDefs = stateClassDefs s
       , stateLangRegistry = stateLangRegistry s

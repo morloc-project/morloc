@@ -336,7 +336,7 @@ runCommand ::
   Text -> -- system command
   MorlocMonad ()
 runCommand loc cmd = do
-  liftIO . MT.putStrLn $ "$ " <> cmd
+  liftIO $ MT.hPutStrLn stderr ("$ " <> cmd)
   (exitCode, _, err') <-
     liftIO $ SP.readCreateProcessWithExitCode (SP.shell . MT.unpack $ cmd) []
   case exitCode of
@@ -378,7 +378,7 @@ runCommandWith ::
   Text ->
   MorlocMonad a
 runCommandWith loc f cmd = do
-  liftIO . MT.putStrLn $ "$ " <> cmd
+  liftIO $ MT.hPutStrLn stderr ("$ " <> cmd)
   (exitCode, out, err') <-
     liftIO $ SP.readCreateProcessWithExitCode (SP.shell . MT.unpack $ cmd) []
   case exitCode of

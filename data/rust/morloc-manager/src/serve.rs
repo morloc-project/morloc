@@ -83,9 +83,18 @@ pub fn build_serve_image(
         && fs::read_dir(context_dir.join("exe"))
             .map(|mut d| d.next().is_some())
             .unwrap_or(false);
+    let has_opt = context_dir.join("opt").is_dir()
+        && fs::read_dir(context_dir.join("opt"))
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false);
     let mh = CONTAINER_MORLOC_HOME;
     let exe_line = if has_exe {
         format!("COPY exe/ {mh}/exe/\n")
+    } else {
+        String::new()
+    };
+    let opt_line = if has_opt {
+        format!("COPY opt/ {mh}/opt/\n")
     } else {
         String::new()
     };
@@ -114,6 +123,7 @@ pub fn build_serve_image(
          COPY fdb/ {mh}/fdb/\n\
          COPY bin/ {mh}/bin/\n\
          {exe_line}\
+         {opt_line}\
          RUN chmod -R a+rX {mh}\n\
          \n\
          {healthcheck}\
@@ -148,6 +158,12 @@ pub fn build_serve_image(
         });
     }
     eprintln!("Built serve image: {tag}");
+
+    // Clean up the temporary build context
+    if let Err(e) = fs::remove_dir_all(&context_dir) {
+        eprintln!("Warning: failed to clean up {}: {e}", context_dir.display());
+    }
+
     Ok(())
 }
 
@@ -190,6 +206,7 @@ pub fn run_serve_container(
 
     let (status, _stdout, run_err) = container_run(engine, &cfg);
     if !status.success() {
+        let _ = crate::container::container_remove_quiet(engine, name);
         return Err(ManagerError::EngineError {
             engine,
             code: exit_code_to_int(status),
@@ -209,7 +226,7 @@ pub fn run_serve_container(
             if state == "running" {
                 eprintln!("Container {name} started");
                 eprintln!("  Stop:   morloc-manager stop {name}");
-                eprintln!("  Logs:   morloc-manager logs {name}");
+                eprintln!("  Logs:   {exe} logs -f {name}");
                 eprintln!("  Status: morloc-manager status");
                 Ok(())
             } else {
@@ -247,6 +264,7 @@ pub fn serve_environment(
     container_name: &str,
     ports: &[(u16, u16)],
     extra_flags: &[String],
+    shm_size: &Option<String>,
 ) -> Result<()> {
     // Clean up any existing dead container with this name (silently)
     let _ = crate::container::container_remove_quiet(engine, container_name);
@@ -277,6 +295,7 @@ pub fn serve_environment(
         "--fdb".to_string(), format!("{mh}/fdb"),
         "--http-port".to_string(), "8080".to_string(),
     ]);
+    cfg.shm_size = shm_size.clone();
     cfg.extra_flags = vec!["-d".to_string()];
     cfg.extra_flags.extend(extra_flags.iter().cloned());
 
@@ -292,6 +311,10 @@ pub fn serve_environment(
 
     let (status, _stdout, run_err) = container_run(engine, &cfg);
     if !status.success() {
+        // `container_run` may have left a partially-created container behind
+        // (e.g., port conflict after container creation). Clean it up so the
+        // next `start` doesn't fail on a name collision.
+        let _ = crate::container::container_remove_quiet(engine, container_name);
         return Err(ManagerError::EngineError {
             engine,
             code: exit_code_to_int(status),
@@ -311,7 +334,7 @@ pub fn serve_environment(
             if state == "running" {
                 eprintln!("Container {container_name} started");
                 eprintln!("  Stop:   morloc-manager stop");
-                eprintln!("  Logs:   morloc-manager logs");
+                eprintln!("  Logs:   {exe} logs -f {container_name}");
                 eprintln!("  Status: morloc-manager status");
                 Ok(())
             } else {
@@ -339,11 +362,15 @@ pub fn serve_environment(
     }
 }
 
-pub fn stop_serve_container(engine: ContainerEngine, name: &str) -> Result<()> {
+pub fn stop_serve_container(engine: ContainerEngine, verbose: bool, name: &str) -> Result<()> {
     if !crate::container::container_exists(engine, name) {
         return Err(ManagerError::EnvError(format!(
             "No serve container running for '{name}'"
         )));
+    }
+    if verbose {
+        let exe = engine_executable(engine);
+        eprintln!("[morloc-manager] {exe} stop {name}");
     }
     let (status, err) = container_stop(engine, name);
     let _ = crate::container::container_remove_quiet(engine, name);
@@ -357,9 +384,12 @@ pub fn stop_serve_container(engine: ContainerEngine, name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn list_serve_containers(engine: ContainerEngine) -> Result<()> {
+pub fn list_serve_containers(engine: ContainerEngine, verbose: bool) -> Result<()> {
     let exe = engine_executable(engine);
     let fmt = "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}";
+    if verbose {
+        eprintln!("[morloc-manager] {exe} ps -a --filter name=morloc-serve- --format '{fmt}'");
+    }
     let output = Command::new(exe)
         .args([
             "ps", "-a", "--filter", "name=morloc-serve-", "--format", fmt,
@@ -392,38 +422,21 @@ pub fn list_serve_containers(engine: ContainerEngine) -> Result<()> {
     Ok(())
 }
 
-pub fn stream_serve_logs(engine: ContainerEngine, name: &str, follow: bool) -> Result<()> {
-    if !crate::container::container_exists(engine, name) {
-        return Err(ManagerError::EnvError(format!(
-            "No serve container for '{name}'. Start one with: morloc-manager start"
-        )));
-    }
+/// Find running morloc-serve-* container names for the given engine.
+pub fn find_running_serve_containers(engine: ContainerEngine) -> Vec<String> {
     let exe = engine_executable(engine);
-    let mut args = vec!["logs"];
-    if follow {
-        args.push("--follow");
-    }
-    args.push(name);
-
-    let status = Command::new(exe)
-        .args(&args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|e| ManagerError::EngineError {
-            engine,
-            code: 1,
-            stderr: format!("Failed to stream logs: {e}"),
-        })?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(ManagerError::EngineError {
-            engine,
-            code: exit_code_to_int(status),
-            stderr: "Failed to read container logs".to_string(),
-        })
+    let output = Command::new(exe)
+        .args(["ps", "--filter", "name=morloc-serve-", "--format", "{{.Names}}"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| l.to_string())
+                .collect()
+        }
+        _ => Vec::new(),
     }
 }
 

@@ -1,3 +1,7 @@
+0.77.0 [2026-04-15]
+-------------------
+ * many many deployment fixes
+
 0.76.0 [2026-04-13]
 -------------------
  * fix docstring groups

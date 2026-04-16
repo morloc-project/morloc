@@ -9,9 +9,13 @@ Maintainer  : z@morloc.io
 -}
 module Morloc.ProgramBuilder.Install
   ( installProgram
+  , validateIncludeScope
+  , validateIncludeCoverage
   ) where
 
-import Data.List (isInfixOf, isSuffixOf)
+import Control.Monad (when)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.Completion as Completion
@@ -22,16 +26,25 @@ import System.Directory
   , doesFileExist
   , getPermissions
   , listDirectory
-  , removeDirectoryRecursive
   , removeFile
   , setOwnerExecutable
   , setPermissions
   )
 import System.Environment (lookupEnv)
 import System.Exit (die)
-import System.FilePath (makeRelative, takeDirectory, (</>))
+import System.FilePath
+  ( isAbsolute
+  , makeRelative
+  , normalise
+  , splitDirectories
+  , takeDirectory
+  , (</>)
+  )
+import System.IO (hPutStrLn, stderr)
 
--- | After a successful local build, copy artifacts to the install location.
+-- | Finalize an installed program. The build step has already written pools
+-- and the wrapper script directly into installDir. This function copies the
+-- wrapper to bin/, extracts the manifest to fdb/, and copies include files.
 installProgram ::
   -- | configHome (e.g. ~/.local/share/morloc)
   String ->
@@ -47,57 +60,39 @@ installProgram ::
 installProgram configHome installDir installName includes force = do
   let binDir = configHome </> "bin"
       binPath = binDir </> installName
-      localWrapper = installName
+      installedWrapper = installDir </> installName
 
-  -- Check for existing install
+  -- Check for existing bin entry (installDir is already populated by build)
   binExists <- doesFileExist binPath
-  exeExists <- doesDirectoryExist installDir
-  if (binExists || exeExists) && not force
-    then die $ "'" <> installName <> "' is already installed. Use --force to overwrite."
-    else do
-      -- Remove old install if forcing
-      if force
-        then do
-          if exeExists then removeDirectoryRecursive installDir else return ()
-          if binExists then removeFile binPath else return ()
-        else return ()
+  when (binExists && not force) $
+    die $ "'" <> installName <> "' is already installed. Use --force to overwrite."
+  when (binExists && force) $
+    removeFile binPath
 
-      -- Create install directory and copy pools
-      createDirectoryIfMissing True installDir
-      poolsExist <- doesDirectoryExist "pools"
-      if poolsExist
-        then copyDirectoryRecursive "pools" (installDir </> "pools")
-        else return ()
+  -- Copy include-matched files from CWD to installDir
+  mapM_ (\pat -> copyIncludePattern (T.unpack pat) "." installDir) includes
 
-      -- Copy include-matched files (preserving relative paths)
-      mapM_ (\pat -> copyIncludePattern (T.unpack pat) "." installDir) includes
+  -- Copy wrapper from installDir to bin/
+  createDirectoryIfMissing True binDir
+  copyFile installedWrapper binPath
+  makeExecutable binPath
 
-      -- Move wrapper to bin (already has correct build_dir from Nexus.generate)
-      createDirectoryIfMissing True binDir
-      copyFile localWrapper binPath
-      makeExecutable binPath
+  -- Copy manifest to fdb/ for daemon discovery
+  let fdbDir = configHome </> "fdb"
+      fdbPath = fdbDir </> (installName ++ ".manifest")
+  createDirectoryIfMissing True fdbDir
+  extractAndWriteManifest binPath fdbPath
 
-      -- Copy manifest to fdb/ for daemon discovery
-      let fdbDir = configHome </> "fdb"
-          fdbPath = fdbDir </> (installName ++ ".manifest")
-      createDirectoryIfMissing True fdbDir
-      extractAndWriteManifest binPath fdbPath
+  -- Check if bin dir is on PATH and print hint if not
+  pathEnv <- lookupEnv "PATH"
+  let pathStr = fromMaybe "" pathEnv
+  when (not (binDir `isInfixOf` pathStr)) $
+    hPutStrLn stderr $ "Note: add " <> binDir <> " to your PATH"
 
-      -- Clean up local build artifacts
-      if poolsExist then removeDirectoryRecursive "pools" else return ()
-      removeFile localWrapper
+  hPutStrLn stderr $ "Installed '" <> installName <> "' to " <> binPath
 
-      -- Check if bin dir is on PATH and print hint if not
-      pathEnv <- lookupEnv "PATH"
-      let pathStr = maybe "" id pathEnv
-      if not (binDir `isInfixOf` pathStr)
-        then putStrLn $ "Note: add " <> binDir <> " to your PATH"
-        else return ()
-
-      putStrLn $ "Installed '" <> installName <> "' to " <> binPath
-
-      -- Regenerate shell completions
-      Completion.regenerateCompletions False configHome
+  -- Regenerate shell completions
+  Completion.regenerateCompletions False configHome
 
 -- | Recursively copy a directory
 copyDirectoryRecursive :: FilePath -> FilePath -> IO ()
@@ -192,6 +187,97 @@ makeExecutable :: FilePath -> IO ()
 makeExecutable path = do
   p <- getPermissions path
   setPermissions path (setOwnerExecutable True p)
+
+{- | Reject include patterns that escape the package root.
+
+An include path is only valid if it resolves to a location inside the
+directory that contains package.yaml (and the main .loc script). Absolute
+paths are rejected outright; relative paths are rejected if normalising
+them produces a leading @..@ segment.
+
+This closes the obvious footgun of a package referencing files outside the
+project directory, which would break reproducibility and make installs
+depend on ambient filesystem layout.
+-}
+validateIncludeScope :: [Text] -> IO ()
+validateIncludeScope patterns =
+  case filter (not . inScope . T.unpack) patterns of
+    [] -> return ()
+    bad ->
+      die $
+        "Invalid `include` in package.yaml: the following entries escape the "
+          <> "package directory (absolute paths and `..` are not allowed):\n"
+          <> unlines (map (("  " <>) . T.unpack) bad)
+  where
+    inScope :: String -> Bool
+    inScope pat
+      | isAbsolute pat = False
+      | otherwise =
+          case splitDirectories (normalise pat) of
+            (".." : _) -> False
+            segs -> not (any (== "..") segs)
+
+{- | Verify that every directly-sourced file in the compiled program is
+covered by at least one include pattern.
+
+This catches the common mistake of writing @source Py from "helper.py"@ in
+a .loc file but forgetting to add @helper.py@ to @package.yaml@'s @include@
+field. Without this check, @morloc make --install@ silently produces a
+broken install: the pool cannot import @helper@ at runtime.
+
+Note: we only check /directly/ sourced files, not files that those sources
+in turn import (e.g., one R file calling @source()@ on another). Transitive
+dependencies cannot be discovered without executing the source language.
+The user is still responsible for listing every runtime asset in
+@include@; this validator is a targeted safety net for the direct case.
+
+Paths that resolve outside the package root are skipped: those come from
+library modules (e.g., root-py), not the user's project, and are not the
+user's responsibility to declare.
+-}
+validateIncludeCoverage ::
+  -- | package root (directory containing the main .loc script / package.yaml)
+  FilePath ->
+  -- | include patterns as written in package.yaml
+  [Text] ->
+  -- | absolute filesystem paths of every directly-sourced file
+  [FilePath] ->
+  IO ()
+validateIncludeCoverage packageRoot patterns sourcePaths = do
+  let patStrs = map T.unpack patterns
+      relPaths = [ rel
+                 | p <- sourcePaths
+                 , let rel = makeRelative packageRoot (normalise p)
+                 , not (isAbsolute rel)
+                 , not ("../" `isPrefixOf` rel)
+                 , rel /= ".."
+                 ]
+      uncovered = filter (not . isCovered patStrs) relPaths
+  case uncovered of
+    [] -> return ()
+    missing ->
+      die $
+        "The following source files are referenced from your morloc program "
+          <> "but not listed in `include` in package.yaml:\n"
+          <> unlines (map ("  " <>) missing)
+          <> "\nAdd them to `include` so they are copied into the install:\n"
+          <> "  include:\n"
+          <> unlines (map (("    - " <>)) missing)
+
+-- | True if any include pattern matches the given relative path.
+isCovered :: [String] -> FilePath -> Bool
+isCovered patterns relPath = any (coversOne relPath) patterns
+  where
+    coversOne :: FilePath -> String -> Bool
+    coversOne rel pat
+      -- `src/` matches anything inside the src/ directory
+      | "/" `isSuffixOf` pat =
+          let dir = init pat
+          in (dir ++ "/") `isPrefixOf` rel
+      -- glob pattern
+      | '*' `elem` pat = matchGlob pat rel
+      -- exact path
+      | otherwise = pat == rel
 
 {- | Extract the manifest JSON from a wrapper script and write it to a file.
 The wrapper script has the format:
