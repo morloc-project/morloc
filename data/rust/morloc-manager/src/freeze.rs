@@ -11,9 +11,11 @@ use crate::types::*;
 pub fn freeze_from_dir(
     scope: Scope,
     ver: Version,
-    _engine: ContainerEngine,
+    engine: ContainerEngine,
+    image: &str,
     v_data_dir: &str,
     output_dir: &str,
+    verbose: bool,
 ) -> Result<()> {
     fs::create_dir_all(output_dir)
         .map_err(|e| ManagerError::FreezeError(format!("Failed to create output dir: {e}")))?;
@@ -32,6 +34,11 @@ pub fn freeze_from_dir(
             "No morloc programs are installed. Compile and install with 'morloc make --install' before freezing.".to_string()
         ));
     }
+
+    // Validate programs work before freezing
+    let mh = "/opt/morloc";
+    let bind_mounts = vec![(v_data_dir.to_string(), mh.to_string())];
+    crate::serve::validate_programs(engine, image, &programs, bind_mounts, verbose)?;
 
     eprintln!("Freezing installed state from {v_data_dir}...");
     let tar_path = Path::new(output_dir).join("state.tar.gz");

@@ -29,6 +29,7 @@ import qualified CppPrinter as CP
 import qualified Data.Char as DC
 import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as T
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
@@ -51,6 +52,7 @@ import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
+import qualified Morloc.Version as MV
 import Morloc.Quasi
 import qualified Morloc.System as MS
 import qualified Morloc.TypeEval as TE
@@ -209,7 +211,7 @@ translate srcs es = do
     Script
       { scriptBase = "pool"
       , scriptLang = cppLang
-      , scriptCode = "." :/ Dir "pools" [Dir poolSubdir [File "pool.cpp" (Code . render $ code)]]
+      , scriptCode = "." :/ Dir "pools" [Dir poolSubdir [File "pool.cpp" (Code (T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr) (render code)))]]
       , scriptMake = maker
       }
 

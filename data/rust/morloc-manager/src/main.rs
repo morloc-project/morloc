@@ -1,5 +1,6 @@
 mod config;
 mod container;
+mod doctor;
 mod environment;
 mod error;
 mod freeze;
@@ -52,6 +53,7 @@ fn build_help_template() -> String {
   {b}freeze{r}     Export installed state as a frozen artifact
   {b}unfreeze{r}   Build a portable serve image from frozen state
   {b}status{r}     List running serve containers
+  {b}doctor{r}     Check environment health and diagnose issues
 
 {bu}Options{r}
 {{options}}"
@@ -312,6 +314,19 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     #[command(display_order = 25)]
     #[command(after_help = "Examples:\n  morloc-manager status")]
     Status,
+    /// Check environment health and diagnose issues
+    #[command(display_order = 26)]
+    #[command(after_help = "Examples:\n  morloc-manager doctor\n  morloc-manager doctor myenv\n  morloc-manager doctor --deep")]
+    Doctor {
+        /// Environment name (default: active)
+        name: Option<String>,
+        /// Check system-scope environment
+        #[arg(long)]
+        system: bool,
+        /// Run checks inside the container (slower, more thorough)
+        #[arg(long)]
+        deep: bool,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -1314,7 +1329,8 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 detected
             };
             let data_dir = cfg::env_data_dir(env_scope, &env_name);
-            let result = freeze::freeze_from_dir(env_scope, ver.clone(), engine, &data_dir.to_string_lossy(), output_dir);
+            let image = ec.active_image().to_string();
+            let result = freeze::freeze_from_dir(env_scope, ver.clone(), engine, &image, &data_dir.to_string_lossy(), output_dir, verbose);
             if result.is_ok() && ec.morloc_version.as_ref() != Some(&ver) {
                 let mut updated = ec.clone();
                 updated.morloc_version = Some(ver);
@@ -1346,7 +1362,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 Some(EngineArg::Podman) => ContainerEngine::Podman,
                 None => ensure_engine()?,
             };
-            serve::build_serve_image(engine, verbose, &from, &tag, manifest.morloc_version, base.as_deref(), rebuild)
+            serve::build_serve_image(engine, verbose, &from, &tag, manifest.morloc_version, base.as_deref(), rebuild, &manifest.programs)
         }
 
         // ---- start ----
@@ -1453,6 +1469,18 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 println!("No morloc serve containers running.");
             }
             Ok(())
+        }
+
+        // ---- doctor ----
+        Cmd::Doctor { name, system, deep } => {
+            let (env_name, env_scope, ec) = if let Some(ref n) = name {
+                let s = if system { Scope::System } else { cfg::find_env_scope(n)? };
+                let c = cfg::read_env_config(s, n)?;
+                (n.clone(), s, c)
+            } else {
+                resolve_env_or_active(None)?
+            };
+            doctor::doctor(ec.engine, verbose, &env_name, env_scope, &ec, deep)
         }
 
     }

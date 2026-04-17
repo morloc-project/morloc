@@ -226,6 +226,11 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    # Health check: confirm imports loaded and print version
+    if len(sys.argv) > 1 and sys.argv[1] == "--health":
+        sys.stdout.write('{"status":"ok","version":"__MORLOC_VERSION__"}\n')
+        sys.exit(0)
+
     # Process arguments passed from the nexus
     try:
         socket_path = sys.argv[1]
