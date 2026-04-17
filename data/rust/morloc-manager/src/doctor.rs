@@ -80,7 +80,7 @@ pub fn doctor(
     if deep {
         println!("\nDeep checks");
         check_morloc_version(&mut c, engine, ec);
-        check_programs_deep(&mut c, engine, verbose, ec);
+        check_programs_deep(&mut c, engine, verbose, ec, &data_dir);
     } else {
         println!("\nDeep checks");
         c.skip("Use --deep to run container-side checks");
@@ -93,6 +93,9 @@ pub fn doctor(
         c.ok, c.warn, c.fail
     );
 
+    if c.fail > 0 {
+        return Err(crate::error::ManagerError::DoctorFailed(c.fail));
+    }
     Ok(())
 }
 
@@ -345,13 +348,21 @@ fn check_programs_deep(
     engine: ContainerEngine,
     verbose: bool,
     ec: &EnvironmentConfig,
+    data_dir: &Path,
 ) {
     let image = ec.active_image();
+    let mh = "/opt/morloc";
+    let bind_mounts = vec![(data_dir.to_string_lossy().to_string(), mh.to_string())];
+    let env = vec![
+        ("MORLOC_HOME".to_string(), mh.to_string()),
+    ];
 
     // Scan programs from fdb/ to get program names
-    let fdb_dir = "/opt/morloc/fdb".to_string();
+    let fdb_dir = format!("{mh}/fdb");
     let cfg = RunConfig {
         command: Some(vec!["ls".to_string(), fdb_dir.clone()]),
+        bind_mounts: bind_mounts.clone(),
+        env: env.clone(),
         ..RunConfig::new(image)
     };
     let (status, stdout, _) = container_run_quiet(engine, &cfg);
@@ -379,9 +390,11 @@ fn check_programs_deep(
 
     eprintln!("Running smoke tests for {} programs...", programs.len());
     for prog in &programs {
-        let exe_path = format!("/opt/morloc/bin/{}", prog.name);
+        let exe_path = format!("{mh}/bin/{}", prog.name);
         let cfg = RunConfig {
             command: Some(vec![exe_path.clone(), "--help".to_string()]),
+            bind_mounts: bind_mounts.clone(),
+            env: env.clone(),
             ..RunConfig::new(image)
         };
         if verbose {

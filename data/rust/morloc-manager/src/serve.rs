@@ -492,6 +492,9 @@ pub fn validate_programs(
         let cfg = RunConfig {
             bind_mounts: bind_mounts.clone(),
             command: Some(vec![exe_path, "--help".to_string()]),
+            env: vec![
+                ("MORLOC_HOME".to_string(), CONTAINER_MORLOC_HOME.to_string()),
+            ],
             ..RunConfig::new(image)
         };
         let (status, _stdout, stderr) = container_run_quiet(engine, &cfg);

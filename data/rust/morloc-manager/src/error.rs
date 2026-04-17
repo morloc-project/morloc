@@ -48,6 +48,9 @@ pub enum ManagerError {
     #[error("SELinux error: {0}")]
     SELinuxError(String),
 
+    #[error("Doctor found {0} error(s)")]
+    DoctorFailed(u32),
+
     #[error("{}", match .0 {
         Scope::Local => "No local configuration found. Run: morloc-manager new",
         Scope::System => "No system configuration found. Run: sudo morloc-manager new --system",
