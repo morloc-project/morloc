@@ -49,6 +49,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
+import qualified Morloc.Version as MV
 import Morloc.Monad (asks, gets, newIndex, runIndex)
 import qualified Morloc.Monad as MM
 import Morloc.Quasi
@@ -106,6 +107,7 @@ translateBuiltin lang desc srcs es = do
 
   let code = printProgram desc program
   let exefile = ML.makeExecutablePoolName lang
+  let rendered = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr) (render code)
 
   poolSubdir <- getPoolSubdir
 
@@ -113,7 +115,7 @@ translateBuiltin lang desc srcs es = do
     Script
       { scriptBase = "pool"
       , scriptLang = lang
-      , scriptCode = "." :/ Dir "pools" [Dir poolSubdir [File exefile (Code . render $ code)]]
+      , scriptCode = "." :/ Dir "pools" [Dir poolSubdir [File exefile (Code rendered)]]
       , scriptMake = []
       }
   where
@@ -188,7 +190,7 @@ translateExternal cmd lang desc srcs es = do
               <> "' produced invalid manifest on stdout"
         Just m -> do
           let exefile = ML.makeExecutablePoolName lang
-              poolContent = cgmPoolCode m
+              poolContent = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr) (cgmPoolCode m)
               buildCmds = map (SysRun . Code) (cgmBuildCommands m)
           poolSubdir <- getPoolSubdir
           return $

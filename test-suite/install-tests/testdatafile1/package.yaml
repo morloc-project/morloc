@@ -1,4 +1,4 @@
-name: main
+name: testdatafile1
 version: 0.1.0
 homepage: null
 synopsis: null
@@ -10,3 +10,6 @@ maintainer: null
 github: null
 bug-reports: null
 dependencies: []
+include:
+  - "reader.py"
+  - "data.txt"

@@ -218,7 +218,9 @@ loadModuleMetadata main = do
   -- Reject include entries that escape the package directory. Absolute
   -- paths and `..` traversals are not allowed because they would break
   -- reproducibility and tie installs to ambient filesystem layout.
-  liftIO $ Install.validateIncludeScope (packageInclude meta)
+  case packageInclude meta of
+    Just pats -> liftIO $ Install.validateIncludeScope pats
+    Nothing -> return ()
   state <- MM.get
   MM.put (appendMeta meta state)
   where
@@ -926,14 +928,14 @@ installLocalIO targetDir maySelector modulePath = do
 
   if isGitRepo
     then installLocalGitRepoIO sourceDir targetDir (fromMaybe LatestDefaultBranch maySelector)
-    else callProcess "cp" ["-r", sourceDir, targetDir]
+    else Install.copyAllFiltered sourceDir targetDir
 
 installLocalGitRepoIO :: FilePath -> FilePath -> GitSnapshotSelector -> IO ()
 installLocalGitRepoIO sourceDir targetDir selector = do
   case selector of
     LatestDefaultBranch ->
-      -- Just copy the working tree, then strip .git
-      callProcess "cp" ["-r", sourceDir, targetDir]
+      -- Copy the working tree, filtering out .git and ignored files
+      Install.copyAllFiltered sourceDir targetDir
     LatestOnBranch branch -> do
       callProcess "git" ["clone", "-q", sourceDir, targetDir]
       callProcess "git" ["-C", targetDir, "checkout", "refs/heads/" ++ MT.unpack branch]
@@ -944,10 +946,8 @@ installLocalGitRepoIO sourceDir targetDir selector = do
       callProcess "git" ["clone", "-q", sourceDir, targetDir]
       callProcess "git" ["-C", targetDir, "checkout", "refs/tags/" ++ MT.unpack tag]
 
-  -- Remove .git directory from installed copy
-  let gitDir = targetDir </> ".git"
-  gitExists <- doesDirectoryExist gitDir
-  when gitExists $ removeDirectoryRecursive gitDir
+  -- Remove .git and ignored files from installed copy
+  Install.cleanIgnoredFiles targetDir
 
 -- | Install from a remote git source (pure IO)
 installRemoteIO :: GitProtocol -> FilePath -> GitRemote -> IO ()
@@ -955,6 +955,7 @@ installRemoteIO gitprot targetDir remote = do
   let gitUrl = buildGitUrl gitprot remote
   callProcess "git" ["clone", "-q", gitUrl, targetDir]
   checkoutRefIO targetDir (gitReference remote)
+  Install.cleanIgnoredFiles targetDir
 
 -- | Build a git URL from protocol and remote info
 buildGitUrl :: GitProtocol -> GitRemote -> String

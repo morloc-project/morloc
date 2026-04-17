@@ -5,8 +5,9 @@ use std::thread;
 use std::time::Duration;
 
 use crate::container::{
-    container_build, container_pull, container_run, container_stop, container_remove,
-    engine_executable, exit_code_to_int, image_exists_locally, BuildConfig, RunConfig,
+    container_build, container_pull, container_run, container_run_quiet, container_stop,
+    container_remove, engine_executable, exit_code_to_int, image_exists_locally,
+    BuildConfig, RunConfig,
 };
 use crate::error::{ManagerError, Result};
 use crate::types::*;
@@ -19,6 +20,7 @@ pub fn build_serve_image(
     ver: Version,
     base_override: Option<&str>,
     rebuild: bool,
+    programs: &[ProgramEntry],
 ) -> Result<()> {
     if !Path::new(state_tarball).exists() {
         return Err(ManagerError::UnfreezeError(format!(
@@ -93,6 +95,10 @@ pub fn build_serve_image(
         && fs::read_dir(context_dir.join("opt"))
             .map(|mut d| d.next().is_some())
             .unwrap_or(false);
+    let has_src = context_dir.join("src").is_dir()
+        && fs::read_dir(context_dir.join("src"))
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false);
     let mh = CONTAINER_MORLOC_HOME;
     let exe_line = if has_exe {
         format!("COPY exe/ {mh}/exe/\n")
@@ -101,6 +107,11 @@ pub fn build_serve_image(
     };
     let opt_line = if has_opt {
         format!("COPY opt/ {mh}/opt/\n")
+    } else {
+        String::new()
+    };
+    let src_line = if has_src {
+        format!("COPY src/ {mh}/src/\n")
     } else {
         String::new()
     };
@@ -130,6 +141,7 @@ pub fn build_serve_image(
          COPY bin/ {mh}/bin/\n\
          {exe_line}\
          {opt_line}\
+         {src_line}\
          RUN chmod -R a+rX {mh}\n\
          \n\
          {healthcheck}\
@@ -164,6 +176,9 @@ pub fn build_serve_image(
         });
     }
     eprintln!("Built serve image: {tag}");
+
+    // Validate programs work inside the built image
+    validate_programs(engine, tag, programs, Vec::new(), verbose)?;
 
     // Clean up the temporary build context
     if let Err(e) = fs::remove_dir_all(&context_dir) {
@@ -444,6 +459,57 @@ pub fn find_running_serve_containers(engine: ContainerEngine) -> Vec<String> {
         }
         _ => Vec::new(),
     }
+}
+
+// ======================================================================
+// Program validation
+// ======================================================================
+
+/// Run `--help` for each installed program inside a container image to
+/// verify that pool processes start correctly (e.g. all imports resolve).
+///
+/// `bind_mounts` should be non-empty for pre-freeze validation (where the
+/// data dir is on the host) and empty for post-unfreeze validation (where
+/// everything is baked into the image).
+pub fn validate_programs(
+    engine: ContainerEngine,
+    image: &str,
+    programs: &[ProgramEntry],
+    bind_mounts: Vec<(String, String)>,
+    verbose: bool,
+) -> Result<()> {
+    if programs.is_empty() {
+        return Ok(());
+    }
+    eprintln!("Validating installed programs...");
+    let mut any_failed = false;
+    for prog in programs {
+        let exe_path = format!("{}/bin/{}", CONTAINER_MORLOC_HOME, prog.name);
+        if verbose {
+            let exe = engine_executable(engine);
+            eprintln!("[morloc-manager] {exe} run --rm {image} {exe_path} --help");
+        }
+        let cfg = RunConfig {
+            bind_mounts: bind_mounts.clone(),
+            command: Some(vec![exe_path, "--help".to_string()]),
+            ..RunConfig::new(image)
+        };
+        let (status, _stdout, stderr) = container_run_quiet(engine, &cfg);
+        if status.success() {
+            let n = prog.commands.len();
+            eprintln!("  [ok] {} ({} commands)", prog.name, n);
+        } else {
+            let snippet: String = stderr.lines().take(5).collect::<Vec<_>>().join("\n    ");
+            eprintln!("  [FAIL] {}: {}", prog.name, snippet);
+            any_failed = true;
+        }
+    }
+    if any_failed {
+        return Err(ManagerError::FreezeError(
+            "Some programs failed validation (see errors above)".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 // ======================================================================

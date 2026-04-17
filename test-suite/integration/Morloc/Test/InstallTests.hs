@@ -163,4 +163,17 @@ installTests env =
               , isDirs = []
               }
         ]
+    , testGroup
+        "Datafile"
+        [ installTest env "testdatafile1" $
+            InstallSpec
+              { isSourceDir = "install-tests/testdatafile1"
+              , isExtraArgs = []
+              , isSubcommand = "readData"
+              , isArgs = []
+              , isExpected = "\"hello from datafile\""
+              , isFiles = ["reader.py", "data.txt"]
+              , isDirs = []
+              }
+        ]
     ]

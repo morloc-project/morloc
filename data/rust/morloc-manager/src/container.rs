@@ -73,6 +73,14 @@ pub fn container_run(engine: ContainerEngine, cfg: &RunConfig) -> (ExitStatus, S
     run_process(exe, &args)
 }
 
+/// Like `container_run` but captures both stdout and stderr (no streaming).
+pub fn container_run_quiet(engine: ContainerEngine, cfg: &RunConfig) -> (ExitStatus, String, String) {
+    let exe = engine_executable(engine);
+    let extra = engine_specific_run_flags_io(engine);
+    let args = build_run_args(engine, &extra, cfg);
+    run_process_quiet(exe, &args)
+}
+
 pub fn container_run_passthrough(
     engine: ContainerEngine,
     verbose: bool,

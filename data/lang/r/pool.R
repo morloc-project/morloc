@@ -156,6 +156,13 @@ main <- function(socket_path, tmpdir, shm_basename) {
 }
 
 args <- commandArgs(trailingOnly = TRUE)
+
+# Health check: confirm sources loaded and print version
+if (length(args) == 1 && args[1] == "--health") {
+  cat('{"status":"ok","version":"__MORLOC_VERSION__"}\n')
+  quit(status = 0)
+}
+
 if (length(args) != 3) {
   cat("Usage: Rscript pool.R <socket_path> <tmpdir> <shm_basename>\n", file=stderr())
   quit(status = 1)

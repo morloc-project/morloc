@@ -466,6 +466,12 @@ int main(int argc, char* argv[]) {
     // and flushed after each job by pool.c.
     setvbuf(stderr, NULL, _IOLBF, 0);
 
+    // Health check: confirm binary links and print version
+    if (argc == 2 && std::string(argv[1]) == "--health") {
+        std::cout << "{\"status\":\"ok\",\"version\":\"__MORLOC_VERSION__\"}" << std::endl;
+        return 0;
+    }
+
     if (argc != 4) {
         std::cerr << "Usage: " << argv[0] << " <socket_path> <tmpdir> <shm_basename>\n";
         return 1;

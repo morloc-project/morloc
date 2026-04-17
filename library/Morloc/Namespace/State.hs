@@ -208,7 +208,7 @@ data PackageMeta
   , packageBugReports :: !Text
   , packageCppVersion :: !Int
   , packageDependencies :: [Text]
-  , packageInclude :: [Text]
+  , packageInclude :: Maybe [Text]
   }
   deriving (Show, Ord, Eq)
 
@@ -346,7 +346,7 @@ instance Defaultable PackageMeta where
       , packageBugReports = ""
       , packageCppVersion = 17
       , packageDependencies = []
-      , packageInclude = []
+      , packageInclude = Nothing
       }
 
 instance FromJSON Config where
@@ -389,7 +389,7 @@ instance FromJSON PackageMeta where
       <*> o .:? "bug-reports" .!= ""
       <*> o .:? "cpp-version" .!= 0
       <*> o .:? "dependencies" .!= []
-      <*> o .:? "include" .!= []
+      <*> o .:? "include"
 
 ----- Pretty instances -------------------------------------------------------
 

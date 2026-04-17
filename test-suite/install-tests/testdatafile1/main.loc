@@ -1,0 +1,10 @@
+module testdatafile1 (readData)
+
+import root-py
+
+source Py from "reader.py" ("readfile")
+
+readfile :: Str -> Str
+
+readData :: Str
+readData = readfile (@datafile "data.txt")

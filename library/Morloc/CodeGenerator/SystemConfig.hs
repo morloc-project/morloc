@@ -232,6 +232,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
     missing <- checkTools (DF.lsRequiredTools ls)
     if null missing
       then do
+        hPutStrLn stderr $ "Building " <> DF.lsName ls <> " extension ..."
         sayInfo verbose $ "Configuring " <> DF.lsName ls <> " language support"
         -- Write data files to build dir
         forM_ (DF.lsFiles ls) $ \ef ->
