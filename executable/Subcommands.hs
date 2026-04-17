@@ -15,6 +15,7 @@ point that keeps translator code out of the library.
 module Subcommands (runMorloc) where
 
 import Control.Exception (SomeException, bracket, finally, try)
+import Data.Maybe (fromMaybe)
 import Data.Time.Clock (getCurrentTime)
 import Data.Time.Format (formatTime, defaultTimeLocale)
 import qualified CppTranslator
@@ -224,12 +225,16 @@ makeAndInstall path outfile code extraIncludes verbosity config buildConfig forc
   if passed
     then do
       let (_, finalState) = result
-          pkgIncludes = concatMap packageInclude (statePackageMeta finalState)
-          allIncludes = pkgIncludes ++ extraIncludes
-          -- Directly-sourced files must be declared in `include`. Transitive
-          -- sources (an R file that in turn `source()`s another R file) are
-          -- the user's responsibility -- the compiler cannot discover them
-          -- without executing the target language.
+          -- Merge include fields from all loaded packages.
+          -- Nothing = include everything (default mode).
+          -- Just [...] = strict allowlist mode.
+          pkgIncludes = map packageInclude (statePackageMeta finalState)
+          mergedIncludes
+            | not (null extraIncludes) =
+                -- CLI --include flags force strict mode
+                Just (concatMap (fromMaybe []) pkgIncludes ++ extraIncludes)
+            | all (== Nothing) pkgIncludes = Nothing
+            | otherwise = Just (concatMap (fromMaybe []) pkgIncludes)
           allSources = concat (GMap.elems (stateSources finalState))
           directSourcePaths = [ p | Source{srcPath = Just p} <- allSources ]
       case stateInstallDir finalState of
@@ -245,8 +250,12 @@ makeAndInstall path outfile code extraIncludes verbosity config buildConfig forc
           -- Atomic install: clean up installDir on any failure so the user
           -- is not left with partial state requiring --force on retry.
           installResult <- try (do
-            Install.validateIncludeCoverage packageRoot allIncludes directSourcePaths
-            Install.installProgram (Config.configHome config) installDir installName allIncludes force
+            -- Only validate coverage in strict mode (explicit include patterns)
+            case mergedIncludes of
+              Just pats -> do
+                Install.validateIncludeCoverage packageRoot pats directSourcePaths
+              Nothing -> return ()
+            Install.installProgram (Config.configHome config) installDir installName mergedIncludes force
             ) :: IO (Either SomeException ())
           case installResult of
             Right () -> return True
@@ -313,14 +322,17 @@ cmdEval args verbosity config buildConfig = do
           if isSave
             then do
               let (_, finalState) = result
-                  pkgIncludes = concatMap packageInclude (statePackageMeta finalState)
+                  pkgIncludes = map packageInclude (statePackageMeta finalState)
+                  mergedIncludes
+                    | all (== Nothing) pkgIncludes = Nothing
+                    | otherwise = Just (concatMap (fromMaybe []) pkgIncludes)
               case stateInstallDir finalState of
                 Nothing -> do
                   putStrLn "Error: install directory was not set during compilation"
                   return False
                 Just installDir -> do
                   evalInstallResult <- try (do
-                    Install.installProgram (Config.configHome config) installDir saveName pkgIncludes True
+                    Install.installProgram (Config.configHome config) installDir saveName mergedIncludes True
                     writeEvalMeta (Config.configHome config) saveName rawExpr
                     ) :: IO (Either SomeException ())
                   case evalInstallResult of
@@ -508,8 +520,11 @@ cmdNew args = do
           , "github: null"
           , "bug-reports: null"
           , "dependencies: []"
-          , "# Files to include when installing with `morloc make --install`"
-          , "include: []"
+          , "# Uncomment to restrict which files are copied during install."
+          , "# By default, all files are included (filtered by .morlocignore)."
+          , "# include:"
+          , "#   - \"*.py\""
+          , "#   - \"src/\""
           ]
       hPutStrLn stderr $ "Created package.yaml for '" ++ name ++ "'"
       return True

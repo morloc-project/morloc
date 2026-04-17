@@ -10,5 +10,3 @@ maintainer: null
 github: null
 bug-reports: null
 dependencies: []
-# Files to include when installing with `morloc make --install`
-include: []

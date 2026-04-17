@@ -11,10 +11,12 @@ module Morloc.ProgramBuilder.Install
   ( installProgram
   , validateIncludeScope
   , validateIncludeCoverage
+  , copyAllFiltered
+  , cleanIgnoredFiles
   ) where
 
 import Control.Exception (throwIO)
-import Control.Monad (when)
+import Control.Monad (forM_, when, unless)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -27,6 +29,7 @@ import System.Directory
   , doesFileExist
   , getPermissions
   , listDirectory
+  , removeDirectoryRecursive
   , removeFile
   , setOwnerExecutable
   , setPermissions
@@ -38,6 +41,7 @@ import System.FilePath
   , normalise
   , splitDirectories
   , takeDirectory
+  , takeFileName
   , (</>)
   )
 import System.IO (hPutStrLn, stderr)
@@ -52,8 +56,8 @@ installProgram ::
   String ->
   -- | installName
   String ->
-  -- | include patterns
-  [Text] ->
+  -- | include patterns (Nothing = copy everything, Just [] = copy nothing)
+  Maybe [Text] ->
   -- | force overwrite
   Bool ->
   IO ()
@@ -69,8 +73,10 @@ installProgram configHome installDir installName includes force = do
   when (binExists && force) $
     removeFile binPath
 
-  -- Copy include-matched files from CWD to installDir
-  mapM_ (\pat -> copyIncludePattern (T.unpack pat) "." installDir) includes
+  -- Copy files from CWD to installDir
+  case includes of
+    Nothing -> copyAllFiltered "." installDir
+    Just pats -> mapM_ (\pat -> copyIncludePattern (T.unpack pat) "." installDir) pats
 
   -- Copy wrapper from installDir to bin/
   createDirectoryIfMissing True binDir
@@ -93,6 +99,120 @@ installProgram configHome installDir installName includes force = do
 
   -- Regenerate shell completions
   Completion.regenerateCompletions False configHome
+
+-- ======================================================================
+-- Copy-everything mode (default)
+-- ======================================================================
+
+-- | Always-excluded patterns, applied even without a .morlocignore file.
+defaultIgnorePatterns :: [String]
+defaultIgnorePatterns =
+  [ ".git/"
+  , ".morlocignore"
+  , "*.manifest"
+  ]
+
+-- | Copy all files from srcRoot to dstRoot, excluding files that match
+-- .morlocignore patterns and always-excluded patterns. Preserves
+-- relative directory structure.
+copyAllFiltered :: FilePath -> FilePath -> IO ()
+copyAllFiltered srcRoot dstRoot = do
+  userPatterns <- readMorlocIgnore (srcRoot </> ".morlocignore")
+  let allPatterns = defaultIgnorePatterns ++ userPatterns
+  files <- listDirectoryRecursive srcRoot
+  let relFiles = map (makeRelative srcRoot) files
+      kept = filter (not . isIgnored allPatterns) relFiles
+  forM_ kept $ \rel -> do
+    let dst = dstRoot </> rel
+    createDirectoryIfMissing True (takeDirectory dst)
+    -- Skip if dst already exists (build artifacts placed by the compiler)
+    dstExists <- doesFileExist dst
+    unless dstExists $
+      copyFile (srcRoot </> rel) dst
+
+-- | Remove files matching .morlocignore and always-excluded patterns
+-- from an already-populated directory. Used after git clone for module
+-- install to clean up ignored files in-place.
+cleanIgnoredFiles :: FilePath -> IO ()
+cleanIgnoredFiles dir = do
+  userPatterns <- readMorlocIgnore (dir </> ".morlocignore")
+  let allPatterns = defaultIgnorePatterns ++ userPatterns
+  files <- listDirectoryRecursive dir
+  let relFiles = map (makeRelative dir) files
+      ignored = filter (isIgnored allPatterns) relFiles
+  forM_ ignored $ \rel ->
+    removeFile (dir </> rel)
+  -- Clean up empty directories left behind
+  cleanEmptyDirs dir
+
+-- | Remove empty directories recursively (bottom-up).
+cleanEmptyDirs :: FilePath -> IO ()
+cleanEmptyDirs dir = do
+  entries <- listDirectory dir
+  forM_ entries $ \entry -> do
+    let path = dir </> entry
+    isDir <- doesDirectoryExist path
+    when isDir $ do
+      cleanEmptyDirs path
+      subEntries <- listDirectory path
+      when (null subEntries) $
+        removeDirectoryRecursive path
+
+-- ======================================================================
+-- .morlocignore parsing
+-- ======================================================================
+
+-- | Read and parse a .morlocignore file. Returns empty list if the file
+-- does not exist.
+readMorlocIgnore :: FilePath -> IO [String]
+readMorlocIgnore path = do
+  exists <- doesFileExist path
+  if exists
+    then do
+      content <- readFile path
+      return $ parseIgnorePatterns content
+    else return []
+
+-- | Parse .morlocignore content into a list of patterns.
+-- Supports: blank lines, # comments, negation with !, trailing / for dirs.
+parseIgnorePatterns :: String -> [String]
+parseIgnorePatterns = filter (not . null) . map clean . lines
+  where
+    clean line =
+      let trimmed = dropWhile (== ' ') line
+      in if null trimmed || head trimmed == '#'
+           then ""
+           else trimmed
+
+-- | Check if a relative path should be ignored based on ignore patterns.
+-- Supports: glob patterns, directory patterns (trailing /), negation (!).
+isIgnored :: [String] -> FilePath -> Bool
+isIgnored patterns relPath = foldl apply False patterns
+  where
+    apply acc pat
+      | "!" `isPrefixOf` pat =
+          if matchIgnorePattern (drop 1 pat) relPath then False else acc
+      | otherwise =
+          if matchIgnorePattern pat relPath then True else acc
+
+-- | Match a single ignore pattern against a relative path.
+matchIgnorePattern :: String -> FilePath -> Bool
+matchIgnorePattern pat relPath
+  -- Directory pattern: "build/" matches any path under build/
+  | "/" `isSuffixOf` pat =
+      let dir = init pat
+      in dir == relPath
+           || (dir ++ "/") `isPrefixOf` relPath
+           || ("/" ++ dir ++ "/") `isInfixOf` ("/" ++ relPath)
+           || takeFileName (takeDirectory relPath) == dir
+  -- Pattern contains / → match against full relative path
+  | '/' `elem` pat = matchGlob pat relPath
+  -- Pattern without / → match against filename only
+  | otherwise = matchGlob pat (takeFileName relPath)
+
+-- ======================================================================
+-- Allowlist mode (explicit include patterns)
+-- ======================================================================
 
 -- | Recursively copy a directory
 copyDirectoryRecursive :: FilePath -> FilePath -> IO ()
@@ -154,18 +274,22 @@ copyIncludePattern pattern srcRoot dstRoot
 -- | Recursively list all files in a directory
 listDirectoryRecursive :: FilePath -> IO [FilePath]
 listDirectoryRecursive dir = do
-  entries <- listDirectory dir
-  paths <-
-    mapM
-      ( \entry -> do
-          let path = dir </> entry
-          isDir <- doesDirectoryExist path
-          if isDir
-            then listDirectoryRecursive path
-            else return [path]
-      )
-      entries
-  return (concat paths)
+  exists <- doesDirectoryExist dir
+  if not exists
+    then return []
+    else do
+      entries <- listDirectory dir
+      paths <-
+        mapM
+          ( \entry -> do
+              let path = dir </> entry
+              isDir <- doesDirectoryExist path
+              if isDir
+                then listDirectoryRecursive path
+                else return [path]
+          )
+          entries
+      return (concat paths)
 
 {- | Simple glob pattern matching supporting * (any sequence within a segment)
 and ** (any path segments). Matches against relative paths.
@@ -181,6 +305,10 @@ matchGlob ('*' : rest) path = any (\i -> matchGlob rest (drop i path)) [0 .. len
     segment = takeWhile (/= '/') path
 matchGlob (p : rest) (c : cs) | p == c = matchGlob rest cs
 matchGlob _ _ = False
+
+-- ======================================================================
+-- Validation
+-- ======================================================================
 
 -- | Make a file executable
 makeExecutable :: FilePath -> IO ()
@@ -220,20 +348,13 @@ validateIncludeScope patterns =
 {- | Verify that every directly-sourced file in the compiled program is
 covered by at least one include pattern.
 
-This catches the common mistake of writing @source Py from "helper.py"@ in
-a .loc file but forgetting to add @helper.py@ to @package.yaml@'s @include@
-field. Without this check, @morloc make --install@ silently produces a
-broken install: the pool cannot import @helper@ at runtime.
+Only runs in strict mode (when include patterns are explicitly specified).
+In default mode (include everything), this check is skipped since all
+files are copied.
 
 Note: we only check /directly/ sourced files, not files that those sources
 in turn import (e.g., one R file calling @source()@ on another). Transitive
 dependencies cannot be discovered without executing the source language.
-The user is still responsible for listing every runtime asset in
-@include@; this validator is a targeted safety net for the direct case.
-
-Paths that resolve outside the package root are skipped: those come from
-library modules (e.g., root-py), not the user's project, and are not the
-user's responsibility to declare.
 -}
 validateIncludeCoverage ::
   -- | package root (directory containing the main .loc script / package.yaml)
@@ -278,6 +399,10 @@ isCovered patterns relPath = any (coversOne relPath) patterns
       | '*' `elem` pat = matchGlob pat rel
       -- exact path
       | otherwise = pat == rel
+
+-- ======================================================================
+-- Manifest extraction
+-- ======================================================================
 
 {- | Extract the manifest JSON from a wrapper script and write it to a file.
 The wrapper script has the format:
