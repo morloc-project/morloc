@@ -952,6 +952,7 @@ insertLayout toks = beginTopLevel toks
     -- Tokens that close a layout block even when at the same indentation level
     isBlockCloser :: Token -> Bool
     isBlockCloser TokModule = True
+    isBlockCloser TokWhere = True
     isBlockCloser _ = False
 
     -- Emit a token with special handling for keywords
