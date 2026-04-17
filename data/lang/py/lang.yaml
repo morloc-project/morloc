@@ -10,7 +10,7 @@ run_command: ["python3"]
 serial_type: "str"
 cost: 3
 preamble:
-  - 'sys.path = [os.path.expanduser("."), os.path.expanduser("{{opt}}"), os.path.expanduser("{{lib}}")] + sys.path'
+  - 'sys.path = [os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")), os.path.expanduser("."), os.path.expanduser("{{opt}}"), os.path.expanduser("{{lib}}")] + sys.path'
   - "import importlib"
   - "import pymorloc as morloc"
 

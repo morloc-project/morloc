@@ -86,6 +86,8 @@ fn main() {
 
     // Pool paths in the manifest are absolute, so no chdir is needed.
     // This lets user programs resolve file paths relative to the caller's CWD.
+    // Source imports in pools resolve via __file__-relative paths (Python sys.path)
+    // or script-relative paths (R .morloc.source) rather than depending on CWD.
 
     // Validate pool executables exist
     if let Err(e) = process::validate_pools(&manifest.pools) {
