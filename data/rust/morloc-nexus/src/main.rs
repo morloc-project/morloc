@@ -53,7 +53,11 @@ fn main() {
     } else {
         help::print_nexus_usage(prog_name)
     };
-    let prog_name = manifest_path.clone();
+    let prog_name = std::path::Path::new(&manifest_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&manifest_path)
+        .to_string();
     let mut arg_cursor = if opt_end < args.len() { opt_end + 1 } else { args.len() };
 
     // Read and parse manifest
