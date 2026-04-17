@@ -66,6 +66,8 @@ ldErrorWrapOpen: ""
 ldErrorWrapClose: []
 ldPatternStyle: concat_call
 ldConcatFn: "paste0"
+ldQuoteTerminator: '"'
+ldQuoteTerminatorEsc: '\"'
 ldAtomicTypes: ["integer", "numeric", "double", "logical", "character"]
 ldAtomicListFn: "c"
 ldGenericListFn: "list"

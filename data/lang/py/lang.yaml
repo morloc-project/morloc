@@ -68,6 +68,8 @@ ldErrorWrapClose:
   - "except Exception as e:"
   - "    raise RuntimeError(f\"Error (pool daemon in {{name}}):\\n{e!s}\")"
 ldPatternStyle: fstring
+ldQuoteTerminator: '"""'
+ldQuoteTerminatorEsc: '\"\"\"'
 ldMapStyle: loop_append
 ldDispatchLocalHeader: "dispatch = {"
 ldDispatchLocalEntry: "    {{mid}}: {{name}},"

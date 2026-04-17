@@ -789,11 +789,15 @@ genericEvalPattern :: LangDescriptor -> TypeF -> Pattern -> [MDoc] -> MDoc
 genericEvalPattern desc _ (PatternText firstStr fragments) xs =
   case ldPatternStyle desc of
     FStringPattern ->
-      "f"
-        <> (dquotes . hcat) (pretty firstStr : [("{" <> x <> "}" <> pretty s) | (x, s) <- zip xs fragments])
+      let qt = pretty (ldQuoteTerminator desc)
+          esc = escapeQuotes (ldQuoteTerminator desc) (ldQuoteTerminatorEsc desc) . escapeStringLit
+      in "f" <> qt <> hcat (pretty (esc firstStr) : [("{" <> x <> "}" <> pretty (esc s)) | (x, s) <- zip xs fragments]) <> qt
     ConcatCall ->
-      pretty (ldConcatFn desc)
-        <> tupled (dquotes (pretty firstStr) : concat [[x, dquotes (pretty s)] | (x, s) <- zip xs fragments])
+      let qt = ldQuoteTerminator desc
+          esc = escapeQuotes qt (ldQuoteTerminatorEsc desc) . escapeStringLit
+          wrap t = pretty qt <> pretty t <> pretty qt
+      in pretty (ldConcatFn desc)
+        <> tupled (wrap (esc firstStr) : concat [[x, wrap (esc s)] | (x, s) <- zip xs fragments])
 -- getters (always have exactly one argument)
 genericEvalPattern desc _ (PatternStruct (ungroup -> [ss])) [m] =
   hcat (m : map (writeSelector desc) ss)

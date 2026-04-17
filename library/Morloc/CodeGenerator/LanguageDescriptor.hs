@@ -147,6 +147,8 @@ data LangDescriptor = LangDescriptor
   , -- Pattern/string interpolation support
     ldPatternStyle :: !PatternStyle
   , ldConcatFn :: !Text -- For ConcatCall: "paste0", "string"
+  , ldQuoteTerminator :: !Text -- String delimiter: "\"" for R/C++, "\"\"\"" for Python
+  , ldQuoteTerminatorEsc :: !Text -- Escaped form: "\\\"" for R/C++, "\\\"\\\"\\\"" for Python
   , -- List constructor support
     ldAtomicTypes :: ![Text] -- For TypeDependentList: ["integer", "numeric", ...]
   , ldAtomicListFn :: !Text -- For TypeDependentList: "c"
@@ -246,6 +248,8 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldErrorWrapClose" (Y.Array mempty)
             . ins "ldPatternStyle" (Y.String "fstring")
             . ins "ldConcatFn" (Y.String "")
+            . ins "ldQuoteTerminator" (Y.String "\"")
+            . ins "ldQuoteTerminatorEsc" (Y.String "\\\"")
             . ins "ldAtomicTypes" (Y.Array mempty)
             . ins "ldAtomicListFn" (Y.String "")
             . ins "ldGenericListFn" (Y.String "list")
@@ -324,6 +328,8 @@ defaultLangDescriptor name ext =
     , ldErrorWrapClose = []
     , ldPatternStyle = FStringPattern
     , ldConcatFn = ""
+    , ldQuoteTerminator = "\""
+    , ldQuoteTerminatorEsc = "\\\""
     , ldAtomicTypes = []
     , ldAtomicListFn = ""
     , ldGenericListFn = "list"

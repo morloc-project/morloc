@@ -1,4 +1,4 @@
-module main (sr, spy, scpp)
+module main (sr, spy, scpp, escR, escPy, escCpp)
 
 import root
 import root-r
@@ -13,3 +13,13 @@ spy x y = "x=#{idpy x};y=#{idpy y};"
 
 scpp :: Str -> Str -> Str
 scpp x y = "x=#{idcpp x};y=#{idcpp y};"
+
+-- test escape sequences inside interpolated strings
+escR :: Str -> Str
+escR x = "a\t\"#{idr x}\nb"
+
+escPy :: Str -> Str
+escPy x = "a\t\"\"\"#{idpy x}\nb"
+
+escCpp :: Str -> Str
+escCpp x = "a\t\"#{idcpp x}\nb"
