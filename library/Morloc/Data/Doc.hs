@@ -17,6 +17,8 @@ module Morloc.Data.Doc
   , render
   , render'
   , textEsc'
+  , escapeStringLit
+  , escapeQuotes
   , tupledNoFold
   , int
   , integer
@@ -53,16 +55,25 @@ tupledNoFold :: [Doc ann] -> Doc ann
 tupledNoFold [] = ""
 tupledNoFold (x : xs) = parens (foldl (\l r -> l <> "," <+> r) x xs)
 
--- | Render a 'DT.Text' literal as a double-quoted, escaped 'Doc'
-textEsc' :: DT.Text -> Doc ann
-textEsc' lit = (dquotes . pretty) $ DT.concatMap escapeChar lit
+-- | Re-escape whitespace and backslash for embedding in generated
+-- string literals. Quote escaping is handled separately via
+-- 'escapeQuotes' using the language-specific terminator.
+escapeStringLit :: DT.Text -> DT.Text
+escapeStringLit = DT.concatMap escapeChar
   where
+    escapeChar '\\' = "\\\\"
     escapeChar '\n' = "\\n"
     escapeChar '\t' = "\\t"
     escapeChar '\r' = "\\r"
-    escapeChar '"' = "\\\""
-    escapeChar '\\' = "\\\\"
     escapeChar c = DT.singleton c
+
+-- | Replace occurrences of a quote terminator with its escaped form.
+escapeQuotes :: DT.Text -> DT.Text -> DT.Text -> DT.Text
+escapeQuotes terminator escaped = DT.replace terminator escaped
+
+-- | Render a 'DT.Text' literal as a double-quoted, escaped 'Doc'
+textEsc' :: DT.Text -> Doc ann
+textEsc' = dquotes . pretty . escapeQuotes "\"" "\\\"" . escapeStringLit
 
 -- | Template substitution: split @fmtstr@ on @breaker@ and interleave @replacements@
 format ::

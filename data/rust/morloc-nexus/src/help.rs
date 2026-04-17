@@ -147,6 +147,9 @@ pub fn print_command_help(prog_name: &str, cmd: &Command) -> ! {
     }
     print_usage_suffix(cmd);
     eprintln!();
+    if !cmd.desc.is_empty() {
+        eprintln!();
+    }
 
     print_command_body(cmd);
     std::process::exit(0);
@@ -181,8 +184,8 @@ pub fn print_command_help_single(prog_name: &str, cmd: &Command) -> ! {
     eprintln!("  --socket PATH    Listen on UNIX socket");
 
     print_args_body(cmd);
-    print_return_info(cmd);
     print_type_definitions(cmd);
+    print_return_info(cmd);
     std::process::exit(0);
 }
 
@@ -212,8 +215,8 @@ fn print_command_body(cmd: &Command) {
     }
 
     print_args_body(cmd);
-    print_return_info(cmd);
     print_type_definitions(cmd);
+    print_return_info(cmd);
 }
 
 fn print_args_body(cmd: &Command) {
@@ -279,6 +282,7 @@ fn print_args_body(cmd: &Command) {
                     eprint!("--{} {}", l, metavar.as_deref().unwrap_or(""));
                 }
                 eprintln!();
+                eprintln!("        provide record as file or JSON string");
             }
 
             for entry in entries {
@@ -556,6 +560,13 @@ fn collect_command_layouts<'a>(cmd: &'a Command) -> Vec<TypeLayout<'a>> {
     let mut out: Vec<TypeLayout<'a>> = Vec::new();
 
     for arg in &cmd.args {
+        // Skip unrolled groups without a group_opt: each field already
+        // appears as its own flag in the usage, so the schema is redundant.
+        // Keep the schema when group_opt is present (the user can pass the
+        // entire record as JSON and needs the full field spec).
+        if let Arg::Group { group_opt: None, .. } = arg {
+            continue;
+        }
         if let Some(layout) =
             extract_named_layout(arg.type_desc_str(), arg.schema_str(), arg.kind_constraint())
         {

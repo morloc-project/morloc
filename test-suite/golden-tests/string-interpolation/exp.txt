@@ -1,3 +1,6 @@
 "x=Alice;y=Bob;"
 "x=Alice;y=Bob;"
 "x=Alice;y=Bob;"
+"a\t\"hi\nb"
+"a\t\"\"\"hi\nb"
+"a\t\"hi\nb"

@@ -11,6 +11,8 @@ serial_type: "character"
 cost: 4
 preamble:
   - 'dyn.load("{{home}}/lib/librmorloc.so")'
+  - '.morloc.srcdir <- normalizePath(file.path(dirname(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value=TRUE)[1])), "..", ".."), mustWork=FALSE)'
+  - '.morloc.source <- function(p) source(ifelse(startsWith(p, "/"), p, file.path(.morloc.srcdir, p)), chdir=TRUE)'
 
 # Literals
 ldBoolTrue: "TRUE"
@@ -55,7 +57,7 @@ ldLambdaTemplate: "function({{args}}) { {{body}} }"
 ldDoBlockExpr: "(function() {{expr}})"
 ldDoBlockBlock: "(function(){\n{{body}}\n})"
 ldPartialTemplate: "function({{bound_args}}) { {{fn}}({{all_args}}) }"
-ldImportTemplate: "source(\"{{path}}\")"
+ldImportTemplate: ".morloc.source(\"{{path}}\")"
 ldSocketPathTemplate: "paste0(global_state$tmpdir, \"/\", {{socket}})"
 ldResourcePackTemplate: "list(memory={{mem}}L, time={{time}}L, cpus={{cpus}}L, gpus={{gpus}}L)"
 ldReturnTemplate: "return({{expr}})"
@@ -66,6 +68,8 @@ ldErrorWrapOpen: ""
 ldErrorWrapClose: []
 ldPatternStyle: concat_call
 ldConcatFn: "paste0"
+ldQuoteTerminator: '"'
+ldQuoteTerminatorEsc: '\"'
 ldAtomicTypes: ["integer", "numeric", "double", "logical", "character"]
 ldAtomicListFn: "c"
 ldGenericListFn: "list"

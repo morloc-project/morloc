@@ -583,7 +583,7 @@ fn run_remote_command(
     config: &NexusConfig,
 ) {
     use morloc_runtime::packet;
-    use morloc_runtime::schema::parse_schema;
+    use morloc_runtime::schema::{parse_schema, SerialType};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
@@ -820,8 +820,11 @@ fn run_remote_command(
     // Check if response is Arrow format
     let is_arrow = resp_header.is_data() && unsafe { resp_header.command.data.format } == packet::PACKET_FORMAT_ARROW;
 
-    // Print using the C library for correct output
-    print_result_c(result_ptr, c_schema, &full_packet, is_arrow, config);
+    // Print using the C library for correct output.
+    // Suppress "null" for Unit-returning commands (CLI convention).
+    if return_schema.serial_type != SerialType::Nil {
+        print_result_c(result_ptr, c_schema, &full_packet, is_arrow, config);
+    }
     unsafe { morloc_runtime::cschema::CSchema::free(c_schema) };
 }
 
@@ -1008,7 +1011,7 @@ fn print_result(
 
 /// Execute a pure command by evaluating the expression via C library.
 fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
-    use morloc_runtime::schema::parse_schema;
+    use morloc_runtime::schema::{parse_schema, SerialType};
 
     extern "C" {
         fn build_manifest_expr(
@@ -1155,7 +1158,9 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
     // Extract voidstar value from the result packet
     let result_ptr = unsafe { get_morloc_data_packet_value(pkt_bytes.as_ptr(), c_return_schema, &mut errmsg) };
 
-    print_result_c(result_ptr, c_return_schema, &pkt_bytes, false, config);
+    if return_schema.serial_type != SerialType::Nil {
+        print_result_c(result_ptr, c_return_schema, &pkt_bytes, false, config);
+    }
 
     // Cleanup
     for cs in &c_arg_schemas {

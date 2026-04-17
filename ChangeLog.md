@@ -1,3 +1,13 @@
+0.78.0 [2026-04-17]
+-------------------
+ * clean up CLI usage statements
+ * suppress "null" outpput in Unit-returning CLIs
+ * fix string escape bugs
+ * fix where parsing after do-block
+ * fix many small morloc-manager issues
+ * fix paths in installed morloc programs
+
+
 0.77.1 [2026-04-16]
 -------------------
  * resurrected `morloc-manager log` subcommand

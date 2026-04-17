@@ -60,6 +60,8 @@ ldErrorWrapOpen: ""
 ldErrorWrapClose: []
 ldPatternStyle: concat_call
 ldConcatFn: "string"
+ldQuoteTerminator: '"'
+ldQuoteTerminatorEsc: '\"'
 ldMapStyle: list_comprehension
 ldDispatchLocalHeader: "dispatch = Dict("
 ldDispatchLocalEntry: "    {{mid}} => {{name}},"

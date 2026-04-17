@@ -542,7 +542,7 @@ translateSegment m0 = do
 evaluatePattern :: CppTranslatorState -> TypeF -> Pattern -> [MDoc] -> MDoc
 evaluatePattern _ _ (PatternText s ss) xs = "interweave_strings" <> tupled [fragments, insertions]
   where
-    fragments = encloseSep "{" "}" ", " (map (dquotes . pretty) (s : ss))
+    fragments = encloseSep "{" "}" ", " (map (dquotes . pretty . escapeQuotes "\"" "\\\"" . escapeStringLit) (s : ss))
     insertions = encloseSep "{" "}" ", " xs
 
 -- handle getters

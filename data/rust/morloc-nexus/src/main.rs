@@ -53,7 +53,11 @@ fn main() {
     } else {
         help::print_nexus_usage(prog_name)
     };
-    let prog_name = manifest_path.clone();
+    let prog_name = std::path::Path::new(&manifest_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&manifest_path)
+        .to_string();
     let mut arg_cursor = if opt_end < args.len() { opt_end + 1 } else { args.len() };
 
     // Read and parse manifest
@@ -84,16 +88,10 @@ fn main() {
         dispatch::extract_global_options(&mut remaining_args, &mut config);
     }
 
-    // chdir to build directory (recorded in manifest.build.path)
-    let build_path = &manifest.build.path;
-    if std::env::set_current_dir(build_path).is_err() {
-        eprintln!(
-            "Cannot chdir to build path '{}': {}",
-            build_path,
-            std::io::Error::last_os_error()
-        );
-        std::process::exit(1);
-    }
+    // Pool paths in the manifest are absolute, so no chdir is needed.
+    // This lets user programs resolve file paths relative to the caller's CWD.
+    // Source imports in pools resolve via __file__-relative paths (Python sys.path)
+    // or script-relative paths (R .morloc.source) rather than depending on CWD.
 
     // Validate pool executables exist
     if let Err(e) = process::validate_pools(&manifest.pools) {
