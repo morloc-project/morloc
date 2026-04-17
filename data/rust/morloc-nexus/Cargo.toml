@@ -1,6 +1,6 @@
 [package]
 name = "morloc-nexus"
-version = "0.78.0"
+version = "0.79.0"
 edition = "2021"
 description = "Morloc nexus: CLI dispatcher for multi-language pool orchestration"
 # Version is intentionally synchronized with the morloc compiler version

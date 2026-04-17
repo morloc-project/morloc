@@ -1,3 +1,13 @@
+0.79.0 [2026.04-17]
+-------------------
+ * add @datafile intrinsic for finding installed files
+ * default to including all files when installing
+   - parse `.morlocignore` to find non-install files
+   - allow `include` in package.yaml for strict file inclusion
+ * add `morloc-manage doctor` subcommand for health checks
+ * add additional `freeze/unfreeze` validation
+ * fix unfreezing bugs
+
 0.78.0 [2026-04-17]
 -------------------
  * clean up CLI usage statements
