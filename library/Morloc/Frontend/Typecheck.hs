@@ -658,6 +658,7 @@ intrinsicType IntrSchema = BT.strU
 intrinsicType IntrTypeof = BT.strU
 intrinsicType IntrShow = BT.strU
 intrinsicType IntrRead = OptionalU (ExistU (TV "read_a") ([], Open) ([], Open))
+intrinsicType IntrDatafile = BT.strU
 
 -- intrinsicArity is defined in Morloc.Namespace.Expr
 
@@ -700,6 +701,8 @@ checkIntrinsicArgs i g intr argTypes = do
         (IntrShow, [_]) -> return g
         -- @read: Str -> ?a (arg must be Str)
         (IntrRead, [strT]) -> subtype' i strT BT.strU g
+        -- @datafile: Str -> Str (path must be string literal)
+        (IntrDatafile, [pathT]) -> subtype' i pathT BT.strU g
         -- compile-time constants: no args
         (IntrVersion, []) -> return g
         (IntrCompiled, []) -> return g

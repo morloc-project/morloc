@@ -196,6 +196,7 @@ data Intrinsic
   | IntrTypeof    -- ^ @typeof  :: a -> Str          -- concrete type name
   | IntrShow      -- ^ @show   :: a -> Str           -- serialize to JSON string
   | IntrRead      -- ^ @read   :: Str -> ?a          -- deserialize from JSON string
+  | IntrDatafile  -- ^ @datafile :: Str -> Str       -- resolve installed data file path
   deriving (Show, Ord, Eq)
 
 -- | Map intrinsic to its canonical name
@@ -212,6 +213,7 @@ intrinsicName IntrSchema = "schema"
 intrinsicName IntrTypeof = "typeof"
 intrinsicName IntrShow = "show"
 intrinsicName IntrRead = "read"
+intrinsicName IntrDatafile = "datafile"
 
 -- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
 parseIntrinsic :: Text -> Maybe Intrinsic
@@ -227,6 +229,7 @@ parseIntrinsic "schema" = Just IntrSchema
 parseIntrinsic "typeof" = Just IntrTypeof
 parseIntrinsic "show" = Just IntrShow
 parseIntrinsic "read" = Just IntrRead
+parseIntrinsic "datafile" = Just IntrDatafile
 parseIntrinsic _ = Nothing
 
 -- | Expected number of arguments for each intrinsic
@@ -243,6 +246,7 @@ intrinsicArity IntrSchema = 1
 intrinsicArity IntrTypeof = 1
 intrinsicArity IntrShow = 1
 intrinsicArity IntrRead = 1
+intrinsicArity IntrDatafile = 1
 
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)

@@ -8,9 +8,9 @@ License     : Apache-2.0
 Maintainer  : z@morloc.io
 
 Walks the SerialManifold tree after serialization and replaces compile-time
-intrinsics (@version, @compiled, @lang, @schema, @typeof) with string
-literals. Runtime intrinsics (@save, @load, @hash) pass through unchanged
-to code generation.
+intrinsics (@version, @compiled, @lang, @schema, @typeof, @datafile) with
+string literals. Runtime intrinsics (@save, @load, @hash) pass through
+unchanged to code generation.
 -}
 module Morloc.CodeGenerator.Reduce (reduce) where
 
@@ -18,6 +18,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime)
 import Data.Time.Format (formatTime, defaultTimeLocale)
+import Control.Monad.State (gets)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Version as V
 
@@ -63,6 +64,18 @@ reduceNativeExpr :: Text -> Text -> Lang -> NativeExpr -> MorlocMonad NativeExpr
 reduceNativeExpr ver _ _ (IntrinsicN t IntrVersion _ []) = return $ makeStr t ver
 reduceNativeExpr _ ts _ (IntrinsicN t IntrCompiled _ []) = return $ makeStr t ts
 reduceNativeExpr _ _ lang (IntrinsicN t IntrLang _ []) = return $ makeStr t (langName lang)
+-- @datafile: resolve relative path to installed data file location
+reduceNativeExpr ver ts lang (IntrinsicN t IntrDatafile _ [pathArg]) = do
+  pathArg' <- reduceNativeExpr ver ts lang pathArg
+  case extractStr pathArg' of
+    Just relPath -> do
+      mInstallDir <- gets stateInstallDir
+      let resolved = case mInstallDir of
+            Just dir -> T.pack (dir </> T.unpack relPath)
+            Nothing -> relPath
+      return $ makeStr t resolved
+    Nothing ->
+      return $ makeStr t "<datafile: could not resolve path>"
 -- runtime intrinsics: recurse into children but keep the intrinsic node
 reduceNativeExpr ver ts lang (IntrinsicN t intr msch es) =
   IntrinsicN t intr msch <$> mapM (reduceNativeExpr ver ts lang) es
@@ -98,3 +111,8 @@ reduceNativeArg ver ts lang (NativeArgExpr ne) = NativeArgExpr <$> reduceNativeE
 makeStr :: TypeF -> Text -> NativeExpr
 makeStr (VarF fv) x = StrN fv x
 makeStr _ x = StrN (FV (TV "Str") (CV "str")) x
+
+-- | Extract the string value from a StrN node
+extractStr :: NativeExpr -> Maybe Text
+extractStr (StrN _ x) = Just x
+extractStr _ = Nothing

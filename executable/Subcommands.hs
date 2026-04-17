@@ -15,7 +15,6 @@ point that keeps translator code out of the library.
 module Subcommands (runMorloc) where
 
 import Control.Exception (SomeException, bracket, finally, try)
-import Data.Maybe (fromMaybe)
 import Data.Time.Clock (getCurrentTime)
 import Data.Time.Format (formatTime, defaultTimeLocale)
 import qualified CppTranslator
