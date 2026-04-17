@@ -84,16 +84,8 @@ fn main() {
         dispatch::extract_global_options(&mut remaining_args, &mut config);
     }
 
-    // chdir to build directory (recorded in manifest.build.path)
-    let build_path = &manifest.build.path;
-    if std::env::set_current_dir(build_path).is_err() {
-        eprintln!(
-            "Cannot chdir to build path '{}': {}",
-            build_path,
-            std::io::Error::last_os_error()
-        );
-        std::process::exit(1);
-    }
+    // Pool paths in the manifest are absolute, so no chdir is needed.
+    // This lets user programs resolve file paths relative to the caller's CWD.
 
     // Validate pool executables exist
     if let Err(e) = process::validate_pools(&manifest.pools) {
