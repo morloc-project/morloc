@@ -18,11 +18,17 @@ pub fn build_serve_image(
     tag: &str,
     ver: Version,
     base_override: Option<&str>,
+    rebuild: bool,
 ) -> Result<()> {
     if !Path::new(state_tarball).exists() {
         return Err(ManagerError::UnfreezeError(format!(
             "Tarball not found: {state_tarball}"
         )));
+    }
+
+    if !rebuild && image_exists_locally(engine, tag) {
+        eprintln!("Image '{tag}' already exists locally; skipping build (use --rebuild to force)");
+        return Ok(());
     }
 
     let tarball_dir = Path::new(state_tarball)

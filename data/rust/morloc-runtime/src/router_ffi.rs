@@ -17,6 +17,12 @@ use crate::http_ffi::{DaemonMethod, DaemonRequest, HttpMethod, HttpRequest};
 /// Max size of sun_path in sockaddr_un (108 on Linux)
 const SUN_PATH_LEN: usize = 108;
 
+// Daemon startup polling (exponential backoff, ~5s total).
+// Sum of 100 * 1.25^i for i in 0..16 is ~4650ms.
+const DAEMON_POLL_INITIAL_MS: f64 = 100.0;
+const DAEMON_POLL_MULTIPLIER: f64 = 1.25;
+const DAEMON_POLL_MAX_RETRIES: usize = 16;
+
 // -- Global state -------------------------------------------------------------
 
 static ROUTER_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -308,27 +314,78 @@ pub unsafe extern "C" fn router_start_program(
     } else if pid > 0 {
         (*prog).daemon_pid = pid;
 
-        // Wait 200ms for daemon to start
-        let ts = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 200_000_000,
-        };
-        libc::nanosleep(&ts, ptr::null_mut());
+        // Poll until the daemon socket is connectable (exponential backoff)
+        let mut delay_ms = DAEMON_POLL_INITIAL_MS;
+        let mut connected = false;
+        for _attempt in 0..DAEMON_POLL_MAX_RETRIES {
+            let ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: (delay_ms * 1_000_000.0) as i64,
+            };
+            libc::nanosleep(&ts, ptr::null_mut());
 
-        // Check child is still alive
-        let mut status: i32 = 0;
-        let result = libc::waitpid(pid, &mut status, libc::WNOHANG);
-        if result == pid {
-            (*prog).daemon_pid = 0;
-            let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
-            set_errmsg(
-                errmsg,
-                &MorlocError::Other(format!(
-                    "Daemon for '{}' exited immediately (status {})",
-                    prog_name, status
-                )),
-            );
-            return false;
+            // Check if child died during startup
+            let mut status: i32 = 0;
+            let result = libc::waitpid(pid, &mut status, libc::WNOHANG);
+            if result == pid {
+                (*prog).daemon_pid = 0;
+                let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
+                set_errmsg(
+                    errmsg,
+                    &MorlocError::Other(format!(
+                        "Daemon for '{}' exited during startup (status {})",
+                        prog_name, status
+                    )),
+                );
+                return false;
+            }
+
+            // Try connecting to the daemon socket
+            let test_sock = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            if test_sock >= 0 {
+                let mut addr: libc::sockaddr_un = std::mem::zeroed();
+                addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+                let socket_path = (*prog).daemon_socket.as_ptr();
+                let path_bytes = CStr::from_ptr(socket_path).to_bytes();
+                let copy_len = path_bytes.len().min(addr.sun_path.len() - 1);
+                ptr::copy_nonoverlapping(
+                    path_bytes.as_ptr() as *const c_char,
+                    addr.sun_path.as_mut_ptr(),
+                    copy_len,
+                );
+                let rc = libc::connect(
+                    test_sock,
+                    &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+                );
+                libc::close(test_sock);
+                if rc == 0 {
+                    connected = true;
+                    break;
+                }
+            }
+
+            delay_ms *= DAEMON_POLL_MULTIPLIER;
+        }
+
+        if !connected {
+            // Final check: did the daemon die?
+            let mut status: i32 = 0;
+            let result = libc::waitpid(pid, &mut status, libc::WNOHANG);
+            if result == pid {
+                (*prog).daemon_pid = 0;
+                let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
+                set_errmsg(
+                    errmsg,
+                    &MorlocError::Other(format!(
+                        "Daemon for '{}' exited during startup (status {})",
+                        prog_name, status
+                    )),
+                );
+                return false;
+            }
+            // Daemon alive but socket not yet connectable -- proceed anyway,
+            // router_forward() will retry on connect failure.
         }
 
         true
@@ -382,6 +439,20 @@ pub unsafe extern "C" fn router_forward(
             )),
         );
         return ptr::null_mut();
+    }
+
+    // Check if a previously-started daemon has exited (crash recovery)
+    if (*prog).daemon_pid > 0 {
+        let mut status: i32 = 0;
+        let result = libc::waitpid((*prog).daemon_pid, &mut status, libc::WNOHANG);
+        if result == (*prog).daemon_pid || result < 0 {
+            let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
+            eprintln!(
+                "router: daemon for '{}' exited (status {}), will restart",
+                prog_name, status
+            );
+            (*prog).daemon_pid = 0;
+        }
     }
 
     // Start daemon if not running

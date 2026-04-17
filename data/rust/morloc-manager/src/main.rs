@@ -110,6 +110,9 @@ enum Cmd {
         /// Generate a stub Dockerfile for customization
         #[arg(long)]
         dockerfile_stub: bool,
+        /// Force overwrite of existing Dockerfile stub
+        #[arg(long)]
+        force: bool,
         /// File or directory to include in the Dockerfile build context (repeatable)
         #[arg(short = 'i', long = "include")]
         include: Vec<String>,
@@ -231,6 +234,9 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Generate a stub Dockerfile (fails if one already exists)
         #[arg(long)]
         dockerfile_stub: bool,
+        /// Force overwrite of existing Dockerfile stub
+        #[arg(long)]
+        force: bool,
         /// Skip Dockerfile build
         #[arg(long)]
         no_build: bool,
@@ -274,7 +280,7 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     #[command(display_order = 23)]
     #[command(after_help = "Examples:\n  morloc-manager freeze\n  morloc-manager freeze -o ./my-freeze\n\nRequires at least one program compiled with 'morloc make --install'.")]
     Freeze {
-        /// Output directory
+        /// Output directory (default: ./morloc-freeze)
         #[arg(short, long)]
         output: Option<String>,
         /// Overwrite existing output directory
@@ -298,6 +304,9 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Images frozen with engine-specific flags may not work with a different engine.
         #[arg(long, value_enum)]
         engine: Option<EngineArg>,
+        /// Rebuild image even if it already exists locally
+        #[arg(long)]
+        rebuild: bool,
     },
     /// List running serve containers
     #[command(display_order = 25)]
@@ -590,6 +599,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             version,
             dockerfile,
             dockerfile_stub,
+            force,
             include,
             flagfile,
             engine_arg,
@@ -788,6 +798,13 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 }
                 dockerfile
             } else if dockerfile_stub {
+                let df_path = cfg::env_dockerfile_path(scope, &env_name);
+                if df_path.exists() && !force {
+                    return Err(ManagerError::EnvError(format!(
+                        "Dockerfile already exists: {}\nUse --force to overwrite.",
+                        df_path.display()
+                    )));
+                }
                 let stub_dir = cfg::data_dir(scope).join("tmp");
                 fs::create_dir_all(&stub_dir).map_err(|e| {
                     ManagerError::EnvError(format!("Failed to create tmp dir: {e}"))
@@ -1131,7 +1148,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
         // ---- update ----
         Cmd::Update {
-            name, image, version, dockerfile, dockerfile_stub, include, flagfile,
+            name, image, version, dockerfile, dockerfile_stub, force, include, flagfile,
             engine_arg, engine, shm_size, no_build, reinit, non_interactive: _,
         } => {
             let (env_name, env_scope) = match name {
@@ -1155,8 +1172,11 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 ));
             } else if dockerfile_stub {
                 let df_path = cfg::env_dockerfile_path(env_scope, &env_name);
-                if df_path.exists() {
-                    eprintln!("Overwriting existing Dockerfile: {}", df_path.display());
+                if df_path.exists() && !force {
+                    return Err(ManagerError::EnvError(format!(
+                        "Dockerfile already exists: {}\nUse --force to overwrite.",
+                        df_path.display()
+                    )));
                 }
                 let stub_dir = cfg::data_dir(env_scope).join("tmp");
                 fs::create_dir_all(&stub_dir).map_err(|e| {
@@ -1304,7 +1324,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- unfreeze ----
-        Cmd::Unfreeze { from, tag, base, engine: engine_override } => {
+        Cmd::Unfreeze { from, tag, base, engine: engine_override, rebuild } => {
             if !std::path::Path::new(&from).is_file() {
                 return Err(ManagerError::UnfreezeError(format!(
                     "Input file not found: {from}"
@@ -1326,7 +1346,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 Some(EngineArg::Podman) => ContainerEngine::Podman,
                 None => ensure_engine()?,
             };
-            serve::build_serve_image(engine, verbose, &from, &tag, manifest.morloc_version, base.as_deref())
+            serve::build_serve_image(engine, verbose, &from, &tag, manifest.morloc_version, base.as_deref(), rebuild)
         }
 
         // ---- start ----
