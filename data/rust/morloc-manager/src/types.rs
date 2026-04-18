@@ -239,6 +239,9 @@ pub struct FreezeManifest {
     pub programs: Vec<ProgramEntry>,
     pub base_image: String,
     pub env_layer: Option<FrozenEnvLayer>,
+    /// Expected environment variable names (no values — injected at start/run time).
+    #[serde(default)]
+    pub env_vars: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

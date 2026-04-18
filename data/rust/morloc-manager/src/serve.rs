@@ -286,6 +286,7 @@ pub fn serve_environment(
     ports: &[(u16, u16)],
     extra_flags: &[String],
     shm_size: &Option<String>,
+    user_env: &[(String, String)],
 ) -> Result<()> {
     // Clean up any existing dead container with this name (silently)
     let _ = crate::container::container_remove_quiet(engine, container_name);
@@ -310,6 +311,7 @@ pub fn serve_environment(
         ("PATH".to_string(), format!("{mh}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")),
         ("MORLOC_HOME".to_string(), mh.to_string()),
     ];
+    cfg.env.extend(user_env.iter().cloned());
     cfg.command = Some(vec![
         "morloc-nexus".to_string(),
         "--router".to_string(),

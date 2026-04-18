@@ -105,8 +105,12 @@ pub fn doctor(
 
 fn check_engine(c: &mut Counts, engine: ContainerEngine) {
     let exe = engine_executable(engine);
+    let fmt = match engine {
+        ContainerEngine::Podman => "{{.Version.Version}}",
+        ContainerEngine::Docker => "{{.ServerVersion}}",
+    };
     let output = Command::new(exe)
-        .args(["info", "--format", "{{.ServerVersion}}"])
+        .args(["info", "--format", fmt])
         .output();
     match output {
         Ok(o) if o.status.success() => {

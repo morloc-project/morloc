@@ -260,6 +260,12 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Port mapping HOST:CONTAINER (default: 8080:8080)
         #[arg(short, long, value_parser = parse_port)]
         port: Vec<(u16, u16)>,
+        /// Pass environment variable to the container (KEY=VALUE)
+        #[arg(short, long = "env")]
+        env_vars: Vec<String>,
+        /// Read environment variables from a file (one KEY=VALUE per line)
+        #[arg(long)]
+        env_file: Option<String>,
     },
     /// Stop a running serve container
     #[command(display_order = 21)]
@@ -288,6 +294,9 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Overwrite existing output directory
         #[arg(long)]
         force: bool,
+        /// Declare an expected environment variable name (recorded in manifest, no value stored)
+        #[arg(short, long = "env")]
+        env_vars: Vec<String>,
     },
     /// Build a serve image from frozen state
     #[command(display_order = 24)]
@@ -310,8 +319,20 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         #[arg(long)]
         rebuild: bool,
     },
-    /// List running serve containers
+    /// Evaluate a morloc expression against a running serve container
     #[command(display_order = 25)]
+    #[command(after_help = "Examples:\n  morloc-manager eval 'add 1 2'\n  morloc-manager eval myenv 'map (add 1) [1,2,3]'\n  morloc-manager eval -p 9090 'greet \"world\"'")]
+    Eval {
+        /// Expression to evaluate (or environment name if two positional args)
+        first: String,
+        /// Expression to evaluate (when first arg is environment name)
+        second: Option<String>,
+        /// Port of the serve container (default: 8080)
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
+    },
+    /// List running serve containers
+    #[command(display_order = 26)]
     #[command(after_help = "Examples:\n  morloc-manager status")]
     Status,
     /// Check environment health and diagnose issues
@@ -356,6 +377,44 @@ fn parse_port(s: &str) -> std::result::Result<(u16, u16), String> {
         .parse()
         .map_err(|_| format!("Invalid container port: {}", parts[1]))?;
     Ok((host, container))
+}
+
+/// Parse env vars from --env flags and --env-file, returning (key, value) pairs.
+fn collect_env_vars(
+    env_flags: &[String],
+    env_file: Option<&str>,
+) -> Result<Vec<(String, String)>> {
+    let mut result = Vec::new();
+
+    if let Some(path) = env_file {
+        let contents = std::fs::read_to_string(path).map_err(|e| {
+            ManagerError::EnvError(format!("Cannot read env file {path}: {e}"))
+        })?;
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = trimmed.split_once('=') {
+                result.push((k.to_string(), v.to_string()));
+            }
+        }
+    }
+
+    for entry in env_flags {
+        if let Some((k, v)) = entry.split_once('=') {
+            result.push((k.to_string(), v.to_string()));
+        } else {
+            // Bare key — pass through from host environment
+            if let Ok(v) = std::env::var(entry) {
+                result.push((entry.clone(), v));
+            } else {
+                eprintln!("Warning: env var '{entry}' not set in host environment, skipping");
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 // ======================================================================
@@ -1293,7 +1352,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- freeze ----
-        Cmd::Freeze { output, force } => {
+        Cmd::Freeze { output, force, env_vars } => {
             let output_dir = output.as_deref().unwrap_or("./morloc-freeze");
             // Protect against silently overwriting a previous freeze
             let existing_tar = std::path::Path::new(output_dir).join("state.tar.gz");
@@ -1330,7 +1389,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             };
             let data_dir = cfg::env_data_dir(env_scope, &env_name);
             let image = ec.active_image().to_string();
-            let result = freeze::freeze_from_dir(env_scope, ver.clone(), engine, &image, &data_dir.to_string_lossy(), output_dir, verbose);
+            let result = freeze::freeze_from_dir(env_scope, ver.clone(), engine, &image, &data_dir.to_string_lossy(), output_dir, verbose, &env_vars);
             if result.is_ok() && ec.morloc_version.as_ref() != Some(&ver) {
                 let mut updated = ec.clone();
                 updated.morloc_version = Some(ver);
@@ -1360,13 +1419,27 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             let engine = match engine_override {
                 Some(EngineArg::Docker) => ContainerEngine::Docker,
                 Some(EngineArg::Podman) => ContainerEngine::Podman,
-                None => ensure_engine()?,
+                None => {
+                    let e = ensure_engine()?;
+                    eprintln!(
+                        "Note: using {} engine from global config. Override with --engine if needed.",
+                        display_engine(e)
+                    );
+                    e
+                }
             };
+            if !manifest.env_vars.is_empty() {
+                eprintln!(
+                    "Note: frozen state expects env vars: {}",
+                    manifest.env_vars.join(", ")
+                );
+                eprintln!("  Pass at runtime with: -e KEY=VALUE when running the image");
+            }
             serve::build_serve_image(engine, verbose, &from, &tag, manifest.morloc_version, base.as_deref(), rebuild, &manifest.programs)
         }
 
         // ---- start ----
-        Cmd::Start { name, port } => {
+        Cmd::Start { name, port, env_vars, env_file } => {
             let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
             let image = ec.active_image().to_string();
             let data_dir = cfg::env_data_dir(env_scope, &env_name);
@@ -1382,10 +1455,12 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             };
             let flags_path = cfg::env_flags_path(env_scope, &env_name);
             let extra_flags = cfg::read_flags_file(&flags_path);
+            let user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
             serve::serve_environment(
                 ec.engine, verbose, &image,
                 &data_dir.to_string_lossy(), &container_name,
                 &port_mappings, &extra_flags, &Some(ec.shm_size.clone()),
+                &user_env,
             )
         }
 
@@ -1435,6 +1510,50 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     code: status.code().unwrap_or(1),
                     stderr: String::new(),
                 });
+            }
+            Ok(())
+        }
+
+        // ---- eval ----
+        Cmd::Eval { first, second, port } => {
+            let expr = if let Some(ref expr_arg) = second {
+                // first is env name — validate it exists and its serve container is running
+                let (env_name, _, ec) = resolve_env_or_active(Some(first))?;
+                let container_name = format!("morloc-serve-{env_name}");
+                if !container::container_exists(ec.engine, &container_name) {
+                    return Err(ManagerError::EnvError(format!(
+                        "No serve container running for '{env_name}'. Start with: morloc-manager start {env_name}"
+                    )));
+                }
+                expr_arg.clone()
+            } else {
+                first
+            };
+            use std::io::{Read as IoRead, Write as IoWrite};
+            let body = format!("{{\"expr\":{}}}", serde_json::to_string(&expr).unwrap_or_default());
+            let request = format!(
+                "POST /eval HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            let addr = format!("127.0.0.1:{port}");
+            let mut stream = std::net::TcpStream::connect(&addr).map_err(|e| {
+                ManagerError::EnvError(format!(
+                    "Cannot connect to serve container on {addr}: {e}\n  Is a serve container running? Start with: morloc-manager start"
+                ))
+            })?;
+            stream.write_all(request.as_bytes()).map_err(|e| {
+                ManagerError::EnvError(format!("Failed to send request: {e}"))
+            })?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response).map_err(|e| {
+                ManagerError::EnvError(format!("Failed to read response: {e}"))
+            })?;
+            // Extract body from HTTP response (after \r\n\r\n)
+            if let Some(pos) = response.find("\r\n\r\n") {
+                let body = &response[pos + 4..];
+                println!("{body}");
+            } else {
+                println!("{response}");
             }
             Ok(())
         }
@@ -1907,6 +2026,7 @@ mod tests {
                 content_hash: "abc".to_string(),
                 image_digest: None,
             }),
+            env_vars: vec!["API_KEY".to_string(), "DB_URL".to_string()],
         };
         cfg::write_config(&path, &fm).unwrap();
         let fm2: FreezeManifest = cfg::read_config(&path).unwrap();

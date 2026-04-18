@@ -833,9 +833,16 @@ unsafe fn router_http_to_request(
         ""
     };
 
-    // GET /health
-    if method == HttpMethod::Get && path == "/health" {
+    // GET /health or GET /health/<program>
+    if method == HttpMethod::Get && (path == "/health" || path.starts_with("/health/")) {
         (*dreq).method = DaemonMethod::Health;
+        if path.starts_with("/health/") {
+            let prog_name = &path[8..];
+            if !prog_name.is_empty() {
+                let c = CString::new(prog_name).unwrap_or_default();
+                *out_program = libc::strdup(c.as_ptr());
+            }
+        }
         return dreq;
     }
 
@@ -1170,13 +1177,37 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             // Router-level requests
             if target_program.is_null() {
                 if (*dreq).method == DaemonMethod::Health {
-                    let body = b"{\"status\":\"ok\"}\0";
+                    // Aggregate per-program health
+                    let mut all_ok = true;
+                    let mut prog_entries = Vec::new();
+                    for i in 0..(*router).n_programs {
+                        let prog = &*(*router).programs.add(i);
+                        let name = CStr::from_ptr(prog.name).to_string_lossy();
+                        let alive =
+                            prog.daemon_pid > 0 && libc::kill(prog.daemon_pid, 0) == 0;
+                        if !alive {
+                            all_ok = false;
+                        }
+                        let status_str = if alive { "ok" } else { "error" };
+                        prog_entries.push(serde_json::json!({
+                            "program": name.as_ref(),
+                            "status": status_str,
+                        }));
+                    }
+                    let overall = if all_ok { "ok" } else { "degraded" };
+                    let body = serde_json::json!({
+                        "status": overall,
+                        "programs": prog_entries,
+                    }).to_string();
+                    let status_code = if all_ok { 200 } else { 503 };
+                    resp_status = status_code;
+                    let c = CString::new(body.as_str()).unwrap_or_default();
                     http_write_response(
                         client_fd,
-                        200,
+                        status_code,
                         ct.as_ptr() as *const c_char,
-                        body.as_ptr() as *const c_char,
-                        body.len() - 1,
+                        c.as_ptr(),
+                        body.len(),
                     );
                 } else if (*dreq).method == DaemonMethod::Discover {
                     let disco = router_build_discovery(router);
@@ -1214,7 +1245,51 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             }
 
             // Per-program request
-            if (*dreq).method == DaemonMethod::Discover {
+            if (*dreq).method == DaemonMethod::Health {
+                let mut found = false;
+                for p in 0..(*router).n_programs {
+                    let rprog = &*(*router).programs.add(p);
+                    if CStr::from_ptr(rprog.name) == CStr::from_ptr(target_program) {
+                        found = true;
+                        let alive =
+                            rprog.daemon_pid > 0 && libc::kill(rprog.daemon_pid, 0) == 0;
+                        let prog_str = CStr::from_ptr(rprog.name).to_string_lossy();
+                        let body = if alive {
+                            serde_json::json!({
+                                "status": "ok",
+                                "program": prog_str.as_ref(),
+                            }).to_string()
+                        } else {
+                            resp_status = 503;
+                            serde_json::json!({
+                                "status": "error",
+                                "program": prog_str.as_ref(),
+                                "error": "daemon not running",
+                            }).to_string()
+                        };
+                        let c = CString::new(body.as_str()).unwrap_or_default();
+                        http_write_response(
+                            client_fd,
+                            resp_status,
+                            ct.as_ptr() as *const c_char,
+                            c.as_ptr(),
+                            body.len(),
+                        );
+                        break;
+                    }
+                }
+                if !found {
+                    resp_status = 404;
+                    let body = b"{\"status\":\"error\",\"error\":\"Unknown program\"}\0";
+                    http_write_response(
+                        client_fd,
+                        404,
+                        ct.as_ptr() as *const c_char,
+                        body.as_ptr() as *const c_char,
+                        body.len() - 1,
+                    );
+                }
+            } else if (*dreq).method == DaemonMethod::Discover {
                 let mut found = false;
                 for p in 0..(*router).n_programs {
                     let rprog = &*(*router).programs.add(p);
