@@ -67,17 +67,26 @@ pub fn freeze_from_dir(
     eprintln!("Created {tar_path}");
     let now = Utc::now();
 
-    // Get base image from the active environment config
-    let m_cfg = config::read_active_config();
-    let active_env_name = m_cfg.as_ref().and_then(|c| c.active_env.as_deref());
+    // Get base image from the active environment config.
+    // Check local config first, then system config for the active env name
+    // (mirrors resolve_active_env_name in environment.rs).
+    let active_env_name: Option<String> = config::read_active_config()
+        .and_then(|c| c.active_env)
+        .or_else(|| {
+            let sys_path = config::config_path(Scope::System);
+            config::read_config::<Config>(&sys_path)
+                .ok()
+                .and_then(|c| c.active_env)
+        });
 
-    let (base_img, env_layer) = if let Some(env_name) = active_env_name {
-        match config::read_env_config(scope, env_name) {
+    let (base_img, env_layer) = if let Some(ref env_name) = active_env_name {
+        let env_scope = config::find_env_scope(env_name).unwrap_or(scope);
+        match config::read_env_config(env_scope, env_name) {
             Ok(ec) => {
                 let base = ec.base_image.clone();
                 // Capture env layer info if there's a Dockerfile
                 let layer = if ec.dockerfile.is_some() {
-                    let df_path = config::env_dockerfile_path(scope, env_name);
+                    let df_path = config::env_dockerfile_path(env_scope, env_name);
                     if df_path.exists() {
                         let df_contents = fs::read_to_string(&df_path).unwrap_or_default();
                         let content_hash = ec.content_hash.unwrap_or_default();

@@ -1055,12 +1055,15 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 let local_active = if active_in_local { active_str } else { None };
                 let envs = environment::list_environments(Scope::Local, local_active);
                 total += envs.len();
-                for e in envs {
-                    let active_mark = if e.active { " (active)" } else { "" };
-                    let ver_mark = e.morloc_version
-                        .map(|v| format!(" [{}]", v.show()))
-                        .unwrap_or_default();
-                    println!("{}{}{}", e.name, ver_mark, active_mark);
+                if !envs.is_empty() {
+                    println!("Local environments:");
+                    for e in envs {
+                        let active_mark = if e.active { " (active)" } else { "" };
+                        let ver_mark = e.morloc_version
+                            .map(|v| format!(" [{}]", v.show()))
+                            .unwrap_or_default();
+                        println!("  {}{}{}", e.name, ver_mark, active_mark);
+                    }
                 }
             }
             if show_system {
@@ -1071,7 +1074,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     if show_local {
                         println!();
                     }
-                    println!("System:");
+                    println!("System environments:");
                     for e in envs {
                         let active_mark = if e.active { " (active)" } else { "" };
                         let ver_mark = e.morloc_version
@@ -1472,10 +1475,9 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 serve::stop_serve_container(ec.engine, verbose, &container_name)?;
                 eprintln!("Stopped serving environment: {env_name}");
             } else {
-                // Fallback: scan for running serve containers
-                let (found_name, found_engine) = find_running_serve_container()?;
-                serve::stop_serve_container(found_engine, verbose, &found_name)?;
-                eprintln!("Stopped {found_name} (active env '{env_name}' was not serving)");
+                return Err(ManagerError::EnvError(
+                    format!("No serve container running for environment '{env_name}'")
+                ));
             }
             Ok(())
         }

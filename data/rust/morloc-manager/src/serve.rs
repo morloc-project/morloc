@@ -247,7 +247,7 @@ pub fn run_serve_container(
             if state == "running" {
                 eprintln!("Container {name} started");
                 eprintln!("  Stop:   morloc-manager stop {name}");
-                eprintln!("  Logs:   {exe} logs -f {name}");
+                eprintln!("  Logs:   morloc-manager logs");
                 eprintln!("  Status: morloc-manager status");
                 Ok(())
             } else {
@@ -357,7 +357,7 @@ pub fn serve_environment(
             if state == "running" {
                 eprintln!("Container {container_name} started");
                 eprintln!("  Stop:   morloc-manager stop");
-                eprintln!("  Logs:   {exe} logs -f {container_name}");
+                eprintln!("  Logs:   morloc-manager logs");
                 eprintln!("  Status: morloc-manager status");
                 Ok(())
             } else {
@@ -489,7 +489,7 @@ pub fn validate_programs(
         let exe_path = format!("{}/bin/{}", CONTAINER_MORLOC_HOME, prog.name);
         if verbose {
             let exe = engine_executable(engine);
-            eprintln!("[morloc-manager] {exe} run --rm {image} {exe_path} --help");
+            eprintln!("[morloc-manager] {exe} run --rm --entrypoint '' {image} {exe_path} --help");
         }
         let cfg = RunConfig {
             bind_mounts: bind_mounts.clone(),
@@ -497,6 +497,9 @@ pub fn validate_programs(
             env: vec![
                 ("MORLOC_HOME".to_string(), CONTAINER_MORLOC_HOME.to_string()),
             ],
+            // Override the image ENTRYPOINT so the command runs directly
+            // instead of being appended to the router entrypoint.
+            extra_flags: vec!["--entrypoint".to_string(), "".to_string()],
             ..RunConfig::new(image)
         };
         let (status, _stdout, stderr) = container_run_quiet(engine, &cfg);
