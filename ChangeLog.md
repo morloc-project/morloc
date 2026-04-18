@@ -1,3 +1,7 @@
+0.79.1 [2026.04-18]
+-------------------
+ * bug fixes
+
 0.79.0 [2026.04-17]
 -------------------
  * add @datafile intrinsic for finding installed files
