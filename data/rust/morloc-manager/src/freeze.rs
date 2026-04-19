@@ -94,12 +94,12 @@ pub fn freeze_from_dir(
                         // unfreeze can resolve it locally without network access.
                         // Digest references like localhost/morloc-env@sha256:...
                         // cause BuildKit to attempt HTTPS to localhost.
-                        let image_digest = ec.built_image.clone();
+                        let image_tag = ec.built_image.clone();
                         Some(FrozenEnvLayer {
                             name: env_name.to_string(),
                             dockerfile: df_contents,
                             content_hash,
-                            image_digest,
+                            image_tag,
                         })
                     } else {
                         None

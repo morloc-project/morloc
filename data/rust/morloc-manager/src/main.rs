@@ -1255,7 +1255,14 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 println!("Engine:         {}", display_engine(ec.engine));
                 println!("SHM size:       {}", ec.shm_size);
                 println!("Dockerfile:     {}", match ec.dockerfile {
-                    Some(_) => cfg::env_dockerfile_path(scope, &env_name).display().to_string(),
+                    Some(_) => {
+                        let df_path = cfg::env_dockerfile_path(scope, &env_name);
+                        if df_path.exists() {
+                            df_path.display().to_string()
+                        } else {
+                            format!("{} (MISSING)", df_path.display())
+                        }
+                    }
                     None => "none".to_string(),
                 });
                 let flags_path = cfg::env_flags_path(scope, &env_name);
@@ -1648,11 +1655,16 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 cmd_args.push("-f");
             }
             cmd_args.push(&container_name);
+            // Log content is the primary data of this command, so both the
+            // container's original stdout and stderr should go to our stdout.
+            // docker/podman logs preserves the original stream split; we merge
+            // them so that `morloc-manager logs | grep ERROR` works.
+            let stdout_handle = std::io::stdout();
             let status = std::process::Command::new(exe)
                 .args(&cmd_args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
+                .stderr(Stdio::from(stdout_handle))
                 .status()
                 .map_err(|e| ManagerError::EnvError(format!("Failed to run {exe} logs: {e}")))?;
             if !status.success() {
@@ -2185,7 +2197,7 @@ mod tests {
                 name: "ml".to_string(),
                 dockerfile: "FROM scratch".to_string(),
                 content_hash: "abc".to_string(),
-                image_digest: None,
+                image_tag: None,
             }),
             env_vars: vec!["API_KEY".to_string(), "DB_URL".to_string()],
         };

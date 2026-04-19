@@ -70,7 +70,7 @@ pub fn doctor(
     println!("Prerequisites");
     check_engine(&mut c, engine);
     check_base_image(&mut c, engine, &ec.base_image);
-    check_built_image(&mut c, engine, ec);
+    check_built_image(&mut c, engine, ec, scope, env_name);
     check_data_dirs(&mut c, &data_dir);
 
     // ==== Manifests ====
@@ -150,8 +150,18 @@ fn check_base_image(c: &mut Counts, engine: ContainerEngine, base_image: &str) {
     }
 }
 
-fn check_built_image(c: &mut Counts, engine: ContainerEngine, ec: &EnvironmentConfig) {
+fn check_built_image(c: &mut Counts, engine: ContainerEngine, ec: &EnvironmentConfig, scope: Scope, env_name: &str) {
     if ec.dockerfile.is_none() {
+        return;
+    }
+    // Check if the Dockerfile file itself still exists
+    let df_path = cfg::env_dockerfile_path(scope, env_name);
+    if !df_path.exists() {
+        c.warn(&format!(
+            "Dockerfile configured but file is missing: {}\n       \
+             Remove stale config or recreate the file, then run: morloc-manager update",
+            df_path.display()
+        ));
         return;
     }
     match &ec.built_image {

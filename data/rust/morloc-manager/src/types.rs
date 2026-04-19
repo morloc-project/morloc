@@ -249,7 +249,10 @@ pub struct FrozenEnvLayer {
     pub name: String,
     pub dockerfile: String,
     pub content_hash: String,
-    pub image_digest: Option<String>,
+    /// Container image tag (e.g. localhost/morloc-env:0.79.2-dnd).
+    /// Named image_tag because it stores a mutable tag, not a content-addressed digest.
+    #[serde(alias = "image_digest")]
+    pub image_tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

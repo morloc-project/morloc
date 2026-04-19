@@ -655,16 +655,16 @@ fn resolve_base_from_manifest(
     match &fm.env_layer {
         None => effective_base,
         Some(fel) => {
-            // Fast path: env image digest exists locally
-            if let Some(ref digest) = fel.image_digest {
+            // Fast path: env image tag exists locally
+            if let Some(ref tag) = fel.image_tag {
                 let exe = engine_executable(engine);
                 let check = Command::new(exe)
-                    .args(["image", "inspect", digest])
+                    .args(["image", "inspect", tag])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status();
                 if check.map(|s| s.success()).unwrap_or(false) {
-                    return digest.clone();
+                    return tag.clone();
                 }
             }
             // Rebuild env layer from stored Dockerfile using effective base
