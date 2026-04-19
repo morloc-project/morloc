@@ -76,32 +76,33 @@ pub fn version_to_image(ver: &Version) -> String {
     format!("{MORLOC_IMAGE_PREFIX}:{}", ver.show())
 }
 
-/// Pull the :edge image, detect the version, tag it, and return (image_ref, version).
-pub fn resolve_latest(engine: ContainerEngine) -> Result<(String, Version)> {
-    let edge_image = format!("{MORLOC_IMAGE_PREFIX}:edge");
+/// Pull an image by tag from the morloc registry, detect its version, and
+/// return (image_ref, version). The tag can be a semver string ("0.77.0"),
+/// a named tag ("edge", "nightly"), or any other valid container tag.
+pub fn pull_tagged_image(engine: ContainerEngine, tag: &str) -> Result<(String, Version)> {
+    let image_ref = format!("{MORLOC_IMAGE_PREFIX}:{tag}");
 
-    // Skip network pull if edge image already exists locally
-    if !image_exists_locally(engine, &edge_image) {
-        match check_remote_image(engine, &edge_image) {
+    if !image_exists_locally(engine, &image_ref) {
+        match check_remote_image(engine, &image_ref) {
             RemoteImageStatus::Exists => {}
             RemoteImageStatus::NotFound => {
-                return Err(ManagerError::EnvError(
-                    "No container for latest morloc version exists".to_string(),
-                ));
+                return Err(ManagerError::EnvError(format!(
+                    "No container image found for tag '{tag}'"
+                )));
             }
             RemoteImageStatus::Unknown(stderr) => {
                 if let Some(hint) = cwd_access_hint(&stderr) {
                     return Err(ManagerError::EnvError(hint));
                 }
                 return Err(ManagerError::EnvError(format!(
-                    "Failed to check registry for latest morloc version: {}",
+                    "Failed to check registry for tag '{tag}': {}",
                     stderr.trim()
                 )));
             }
         }
 
-        eprintln!("Pulling {edge_image}...");
-        let (status, _, stderr) = container_pull(engine, &edge_image);
+        eprintln!("Pulling {image_ref}...");
+        let (status, _, stderr) = container_pull(engine, &image_ref);
         if !status.success() {
             return Err(ManagerError::EngineError {
                 engine,
@@ -110,82 +111,32 @@ pub fn resolve_latest(engine: ContainerEngine) -> Result<(String, Version)> {
             });
         }
     } else {
-        eprintln!("Using local copy of {edge_image}");
+        eprintln!("Using local copy of {image_ref}");
     }
 
-    let exe = engine_executable(engine);
-    let output = Command::new(exe)
-        .args(["run", "--rm", &edge_image, "morloc", "--version"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .output()
-        .map_err(|e| ManagerError::EnvError(format!("Failed to run edge container: {e}")))?;
+    let ver = detect_morloc_version(engine, &image_ref)?;
 
-    if !output.status.success() {
-        return Err(ManagerError::EnvError(format!(
-            "Failed to detect morloc version from edge image: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-
-    let ver_out = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let ver_str = ver_out.split_whitespace().last().unwrap_or(&ver_out);
-    let ver: Version = ver_str.parse().map_err(|_| {
-        ManagerError::EnvError(format!(
-            "Could not parse version from edge image output: {ver_out}"
-        ))
-    })?;
-
-    // Tag edge image with actual version
+    // Also tag with the detected version so future --version lookups find it
     let versioned_image = version_to_image(&ver);
-    let _ = Command::new(exe)
-        .args(["tag", &edge_image, &versioned_image])
-        .output();
+    if versioned_image != image_ref {
+        let exe = engine_executable(engine);
+        let _ = Command::new(exe)
+            .args(["tag", &image_ref, &versioned_image])
+            .output();
+    }
 
     Ok((versioned_image, ver))
 }
 
+/// Pull the :edge image. Convenience wrapper around pull_tagged_image.
+pub fn resolve_latest(engine: ContainerEngine) -> Result<(String, Version)> {
+    pull_tagged_image(engine, "edge")
+}
+
 /// Pull a specific version image from the morloc registry.
 pub fn pull_version_image(engine: ContainerEngine, ver: &Version) -> Result<String> {
-    let image_ref = version_to_image(ver);
-
-    if image_exists_locally(engine, &image_ref) {
-        eprintln!("Using local copy of {image_ref}");
-        return Ok(image_ref);
-    }
-
-    match check_remote_image(engine, &image_ref) {
-        RemoteImageStatus::Exists => {}
-        RemoteImageStatus::NotFound => {
-            return Err(ManagerError::EnvError(format!(
-                "No container for morloc v{} exists",
-                ver.show()
-            )));
-        }
-        RemoteImageStatus::Unknown(stderr) => {
-            if let Some(hint) = cwd_access_hint(&stderr) {
-                return Err(ManagerError::EnvError(hint));
-            }
-            return Err(ManagerError::EnvError(format!(
-                "Failed to check registry for morloc v{}: {}",
-                ver.show(),
-                stderr.trim()
-            )));
-        }
-    }
-
-    eprintln!("Pulling {image_ref}...");
-    let (status, _, stderr) = container_pull(engine, &image_ref);
-    if !status.success() {
-        return Err(ManagerError::EngineError {
-            engine,
-            code: exit_code_to_int(status),
-            stderr,
-        });
-    }
-
-    Ok(image_ref)
+    let (img, _) = pull_tagged_image(engine, &ver.show())?;
+    Ok(img)
 }
 
 /// Detect the morloc version by running `morloc --version` inside the image.
@@ -614,7 +565,6 @@ fn resolve_active_env_name() -> Result<String> {
         available.extend(system_envs.iter().map(|n| format!("{n} (system)")));
         Err(ManagerError::EnvError(format!(
             "No active environment. Select one with: morloc-manager select <name>\n\
-             (system-scope envs: morloc-manager select <name> --system)\n\
              Available: {}",
             available.join(", ")
         )))

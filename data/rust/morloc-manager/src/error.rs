@@ -23,7 +23,7 @@ pub enum ManagerError {
     #[error("Environment error: {0}")]
     EnvError(String),
 
-    #[error("Invalid version: {0}. Expected format: MAJOR.MINOR.PATCH")]
+    #[error("Invalid version: {0}. Expected format: MAJOR.MINOR.PATCH. For named tags like 'edge', use --tag instead.")]
     InvalidVersion(String),
 
     #[error("No command specified. Use --shell or provide a command after --.")]

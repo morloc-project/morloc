@@ -72,6 +72,7 @@ pub fn doctor(
     check_base_image(&mut c, engine, &ec.base_image);
     check_built_image(&mut c, engine, ec, scope, env_name);
     check_data_dirs(&mut c, &data_dir);
+    check_file_readability(&mut c, &data_dir);
 
     // ==== Manifests ====
     println!("\nManifests");
@@ -199,6 +200,49 @@ fn check_data_dirs(c: &mut Counts, data_dir: &Path) {
              Run: morloc-manager run -- morloc init -f",
             missing.join(", ")
         ));
+    }
+}
+
+/// Walk exe/ and other data subdirectories, warning about files unreadable
+/// by the current user (which would cause freeze to fail).
+fn check_file_readability(c: &mut Counts, data_dir: &Path) {
+    let dirs_to_check = ["exe", "bin", "lib"];
+    let mut unreadable: Vec<String> = Vec::new();
+    for dir in &dirs_to_check {
+        let dir_path = data_dir.join(dir);
+        if dir_path.is_dir() {
+            collect_unreadable(&dir_path, &mut unreadable);
+        }
+    }
+    if unreadable.is_empty() {
+        c.pass("All data files readable");
+    } else {
+        let shown: Vec<&str> = unreadable.iter().take(5).map(|s| s.as_str()).collect();
+        let suffix = if unreadable.len() > 5 {
+            format!(" (and {} more)", unreadable.len() - 5)
+        } else {
+            String::new()
+        };
+        c.fail(&format!(
+            "Unreadable files (freeze will fail): {}{suffix}\n       \
+             Fix with: chmod -R a+rX <data-dir>",
+            shown.join(", ")
+        ));
+    }
+}
+
+fn collect_unreadable(dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        out.push(dir.display().to_string());
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_unreadable(&path, out);
+        } else if fs::File::open(&path).is_err() {
+            out.push(path.display().to_string());
+        }
     }
 }
 
@@ -406,7 +450,7 @@ fn check_programs_deep(
         return;
     }
 
-    eprintln!("Running smoke tests for {} programs...", programs.len());
+    println!("Running smoke tests for {} programs...", programs.len());
     for prog in &programs {
         let exe_path = format!("{mh}/bin/{}", prog.name);
         let cfg = RunConfig {

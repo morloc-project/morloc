@@ -50,6 +50,12 @@ pub fn freeze_from_dir(
             tar_dirs.push(dir);
         }
     }
+
+    // Pre-flight: verify all files are readable before invoking tar
+    for dir in &tar_dirs {
+        check_readable_recursive(&Path::new(v_data_dir).join(dir))?;
+    }
+
     let tar_status = Command::new("tar")
         .args(["-czf", &tar_path, "-C", v_data_dir])
         .args(&tar_dirs)
@@ -236,4 +242,32 @@ fn parse_manifest_commands(path: &Path) -> Vec<String> {
         Ok(stub) => stub.commands.into_iter().map(|c| c.name).collect(),
         Err(_) => Vec::new(),
     }
+}
+
+/// Walk a directory tree and verify every file is readable by the current user.
+fn check_readable_recursive(dir: &Path) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let entries = fs::read_dir(dir).map_err(|e| {
+        ManagerError::FreezeError(format!("Cannot read directory {}: {e}", dir.display()))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            ManagerError::FreezeError(format!(
+                "Cannot read entry in {}: {e}",
+                dir.display()
+            ))
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            check_readable_recursive(&path)?;
+        } else if fs::File::open(&path).is_err() {
+            return Err(ManagerError::FreezeError(format!(
+                "Unreadable file: {}. Fix permissions or remove before freezing.",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }

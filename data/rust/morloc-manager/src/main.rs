@@ -98,16 +98,19 @@ enum Cmd {
     },
     /// Build a new morloc environment
     #[command(display_order = 1)]
-    #[command(after_help = "Examples:\n  morloc-manager new\n  morloc-manager new myenv --version 0.73.0\n  morloc-manager new myenv --image ubuntu:22.04 --dockerfile ./Dockerfile\n\nDefault (when --version and --image are both omitted): pulls the :edge tag\nfrom the morloc registry and records the resolved version.\n\nIn non-interactive mode (no TTY), if no name is given, the latest edge\nimage is pulled and the environment is named after the detected morloc\nversion.")]
+    #[command(after_help = "Examples:\n  morloc-manager new\n  morloc-manager new myenv --version 0.73.0\n  morloc-manager new myenv --tag edge\n  morloc-manager new myenv --image ubuntu:22.04 --dockerfile ./Dockerfile\n\nDefault (when --version, --tag, and --image are all omitted): pulls the\n:edge tag from the morloc registry and records the resolved version.\n\nIn non-interactive mode (no TTY), if no name is given, the latest edge\nimage is pulled and the environment is named after the detected morloc\nversion.")]
     New {
         /// Environment name (default: derived from base image version)
         name: Option<String>,
         /// Base image from Docker Hub or a registry
         #[arg(long)]
         image: Option<String>,
-        /// Morloc version (shorthand for --image ghcr.io/.../morloc-full:VERSION)
+        /// Morloc version (MAJOR.MINOR.PATCH, leading 'v' stripped automatically)
         #[arg(long)]
         version: Option<String>,
+        /// Container image tag (e.g., 'edge', 'nightly')
+        #[arg(long, conflicts_with_all = ["version", "image"])]
+        tag: Option<String>,
         /// Dockerfile to layer on top of the base image
         #[arg(long)]
         dockerfile: Option<String>,
@@ -231,9 +234,12 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Change the base image
         #[arg(long)]
         image: Option<String>,
-        /// Change to a specific morloc version image
+        /// Change to a specific morloc version (MAJOR.MINOR.PATCH, leading 'v' stripped)
         #[arg(long)]
         version: Option<String>,
+        /// Container image tag (e.g., 'edge', 'nightly')
+        #[arg(long, conflicts_with_all = ["version", "image"])]
+        tag: Option<String>,
         /// Replace the Dockerfile
         #[arg(long)]
         dockerfile: Option<String>,
@@ -693,6 +699,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             name,
             image,
             version,
+            tag,
             dockerfile,
             dockerfile_stub,
             force,
@@ -814,10 +821,15 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
             // Step 2: Resolve base image and version
             let (base_image, original_image, morloc_ver) = if let Some(ref ver_str) = version {
-                let ver: Version = ver_str.parse().map_err(|_| {
+                // Strip leading 'v' for convenience (e.g., "v0.77.0" -> "0.77.0")
+                let clean = ver_str.strip_prefix('v').unwrap_or(ver_str);
+                let ver: Version = clean.parse().map_err(|_| {
                     ManagerError::InvalidVersion(ver_str.clone())
                 })?;
                 let img = environment::pull_version_image(resolved_engine, &ver)?;
+                (img, None, Some(ver))
+            } else if let Some(ref t) = tag {
+                let (img, ver) = environment::pull_tagged_image(resolved_engine, t)?;
                 (img, None, Some(ver))
             } else if let Some(ref img) = image {
                 environment::pull_custom_image(resolved_engine, img)?;
@@ -1030,6 +1042,8 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                         if was_active.as_deref() == Some(name.as_str()) {
                             match environment::resolve_active_environment() {
                                 Ok((new_active, _, _)) => {
+                                    // Persist the fallback as the new active environment
+                                    let _ = environment::select_environment(&new_active, Scope::Local);
                                     eprintln!("Removed environment: {name}. Active environment is now: {new_active}");
                                 }
                                 Err(_) => {
@@ -1364,7 +1378,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
         // ---- update ----
         Cmd::Update {
-            name, image, version, dockerfile, dockerfile_stub, force, include, flagfile,
+            name, image, version, tag, dockerfile, dockerfile_stub, force, include, flagfile,
             engine_arg, engine, shm_size, no_build, reinit, non_interactive: _,
         } => {
             let (env_name, env_scope) = match name {
@@ -1430,13 +1444,18 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 ));
             }
 
-            // Resolve base image if --version or --image provided
+            // Resolve base image if --version, --tag, or --image provided
             let (base_image, original_image, morloc_ver) = if let Some(ref ver_str) = version {
                 let ec = cfg::read_env_config(env_scope, &env_name)?;
-                let ver: Version = ver_str.parse().map_err(|_| {
+                let clean = ver_str.strip_prefix('v').unwrap_or(ver_str);
+                let ver: Version = clean.parse().map_err(|_| {
                     ManagerError::InvalidVersion(ver_str.clone())
                 })?;
                 let img = environment::pull_version_image(ec.engine, &ver)?;
+                (Some(img), None, Some(ver))
+            } else if let Some(ref t) = tag {
+                let ec = cfg::read_env_config(env_scope, &env_name)?;
+                let (img, ver) = environment::pull_tagged_image(ec.engine, t)?;
                 (Some(img), None, Some(ver))
             } else if let Some(ref img) = image {
                 let ec = cfg::read_env_config(env_scope, &env_name)?;

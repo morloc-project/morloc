@@ -1077,6 +1077,33 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
         return;
     }
 
+    // Eagerly start all program daemons so /health reports ok immediately
+    for i in 0..(*router).n_programs {
+        let prog = &mut *(*router).programs.add(i);
+        if (*prog).daemon_pid <= 0 {
+            let mut child_err: *mut c_char = ptr::null_mut();
+            if router_start_program(prog, &mut child_err) {
+                eprintln!(
+                    "router: started daemon for '{}'",
+                    CStr::from_ptr((*prog).name).to_string_lossy()
+                );
+            } else {
+                let err_msg = if !child_err.is_null() {
+                    let s = CStr::from_ptr(child_err).to_string_lossy().to_string();
+                    libc::free(child_err as *mut c_void);
+                    s
+                } else {
+                    "unknown error".to_string()
+                };
+                eprintln!(
+                    "router: warning: failed to start daemon for '{}': {}",
+                    CStr::from_ptr((*prog).name).to_string_lossy(),
+                    err_msg
+                );
+            }
+        }
+    }
+
     while !ROUTER_SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
         let ready = libc::poll(fds.as_mut_ptr(), nfds as libc::nfds_t, 1000);
         if ready < 0 {
