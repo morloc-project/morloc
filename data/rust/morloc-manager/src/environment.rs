@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::config;
@@ -10,6 +11,7 @@ use crate::container::{
     exit_code_to_int, image_exists_locally, BuildConfig, RemoteImageStatus,
 };
 use crate::error::{ManagerError, Result};
+use crate::serve;
 use crate::types::*;
 
 // ======================================================================
@@ -37,6 +39,7 @@ pub struct ApplyOptions {
 }
 
 /// Info returned by list_environments.
+#[derive(Serialize)]
 pub struct EnvInfo {
     pub name: String,
     pub morloc_version: Option<Version>,
@@ -454,7 +457,7 @@ pub fn remove_environment(engine: ContainerEngine, scope: Scope, name: &str) -> 
     // Stop and remove any running serve container for this environment before
     // removing its image. If we skipped this, the serve container would keep
     // running and be unreachable through morloc-manager.
-    let serve_name = format!("morloc-serve-{name}");
+    let serve_name = serve::serve_container_name(name);
     if container::container_exists(engine, &serve_name) {
         let _ = container::container_stop(engine, &serve_name);
         let _ = container::container_remove_quiet(engine, &serve_name);

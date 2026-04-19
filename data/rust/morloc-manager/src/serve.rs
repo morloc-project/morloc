@@ -425,15 +425,49 @@ pub fn stop_serve_container(engine: ContainerEngine, verbose: bool, name: &str) 
     Ok(())
 }
 
-pub fn list_serve_containers(engine: ContainerEngine, verbose: bool) -> Result<()> {
+/// Build the serve container name for an environment.
+/// Format: morloc-serve-<username>-<envname>
+pub fn serve_container_name(env_name: &str) -> String {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    format!("morloc-serve-{user}-{env_name}")
+}
+
+/// The prefix used to filter all serve containers for the current user.
+pub fn serve_container_prefix() -> String {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    format!("morloc-serve-{user}-")
+}
+
+/// Extract the environment name from a serve container name.
+pub fn env_name_from_container(container_name: &str) -> &str {
+    let prefix = serve_container_prefix();
+    container_name.strip_prefix(&prefix).unwrap_or(container_name)
+}
+
+#[derive(serde::Serialize)]
+pub struct ServeContainerInfo {
+    pub name: String,
+    pub env: String,
+    pub ports: String,
+    pub status: String,
+}
+
+/// Query running serve containers and return structured info.
+pub fn query_serve_containers(engine: ContainerEngine, verbose: bool) -> Result<Vec<ServeContainerInfo>> {
     let exe = engine_executable(engine);
     let fmt = "{{.Names}}\t{{.Status}}\t{{.Ports}}";
+    let prefix = serve_container_prefix();
+    let filter = format!("name={prefix}");
     if verbose {
-        eprintln!("[morloc-manager] {exe} ps -a --filter name=morloc-serve- --format '{fmt}'");
+        eprintln!("[morloc-manager] {exe} ps -a --filter {filter} --format '{fmt}'");
     }
     let output = Command::new(exe)
         .args([
-            "ps", "-a", "--filter", "name=morloc-serve-", "--format", fmt,
+            "ps", "-a", "--filter", &filter, "--format", fmt,
         ])
         // Use /tmp as cwd to avoid podman "cannot chdir" failures when the
         // current directory is inaccessible (e.g. another user's home).
@@ -452,33 +486,31 @@ pub fn list_serve_containers(engine: ContainerEngine, verbose: bool) -> Result<(
         });
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        return Ok(());
-    }
-    println!("Running servers:");
+    let mut result = Vec::new();
     for line in text.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() >= 3 {
             let name = parts[0];
             let status = parts[1];
             let ports = parts[2];
-            // Extract env name from container name (strip "morloc-serve-" prefix)
-            let env = name.strip_prefix("morloc-serve-").unwrap_or(name);
-            // Format ports: show just the mapping (e.g. "8080:8080")
-            let port_display = if ports.is_empty() { "-".to_string() } else { ports.to_string() };
-            println!("  {name}  {port_display}  ({env})  [{status}]");
-        } else {
-            println!("  {line}");
+            let env = env_name_from_container(name);
+            result.push(ServeContainerInfo {
+                name: name.to_string(),
+                env: env.to_string(),
+                ports: if ports.is_empty() { "-".to_string() } else { ports.to_string() },
+                status: status.to_string(),
+            });
         }
     }
-    Ok(())
+    Ok(result)
 }
 
-/// Find running morloc-serve-* container names for the given engine.
+/// Find running serve container names for the current user.
 pub fn find_running_serve_containers(engine: ContainerEngine) -> Vec<String> {
     let exe = engine_executable(engine);
+    let filter = format!("name={}", serve_container_prefix());
     let output = Command::new(exe)
-        .args(["ps", "--filter", "name=morloc-serve-", "--format", "{{.Names}}"])
+        .args(["ps", "--filter", &filter, "--format", "{{.Names}}"])
         .current_dir("/tmp")
         .output();
     match output {

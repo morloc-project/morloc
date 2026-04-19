@@ -10,34 +10,87 @@ use crate::types::*;
 
 const MANIFEST_MARKER: &str = "### MANIFEST ###";
 
+#[derive(serde::Serialize)]
+pub struct CheckResult {
+    pub category: String,
+    pub result: String,
+    pub message: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct DoctorSummary {
+    pub ok: u32,
+    pub warnings: u32,
+    pub errors: u32,
+}
+
 struct Counts {
     ok: u32,
     warn: u32,
     fail: u32,
+    json_mode: bool,
+    current_category: String,
+    checks: Vec<CheckResult>,
 }
 
 impl Counts {
-    fn new() -> Self {
-        Self { ok: 0, warn: 0, fail: 0 }
+    fn new(json_mode: bool) -> Self {
+        Self { ok: 0, warn: 0, fail: 0, json_mode, current_category: String::new(), checks: Vec::new() }
+    }
+
+    fn set_category(&mut self, cat: &str) {
+        self.current_category = cat.to_string();
     }
 
     fn pass(&mut self, msg: &str) {
         self.ok += 1;
-        println!("  [ok] {msg}");
+        if self.json_mode {
+            self.checks.push(CheckResult {
+                category: self.current_category.clone(),
+                result: "ok".to_string(),
+                message: msg.to_string(),
+            });
+        } else {
+            println!("  [ok] {msg}");
+        }
     }
 
     fn warn(&mut self, msg: &str) {
         self.warn += 1;
-        println!("  [!!] {msg}");
+        if self.json_mode {
+            self.checks.push(CheckResult {
+                category: self.current_category.clone(),
+                result: "warning".to_string(),
+                message: msg.to_string(),
+            });
+        } else {
+            println!("  [!!] {msg}");
+        }
     }
 
     fn fail(&mut self, msg: &str) {
         self.fail += 1;
-        println!("  [EE] {msg}");
+        if self.json_mode {
+            self.checks.push(CheckResult {
+                category: self.current_category.clone(),
+                result: "error".to_string(),
+                message: msg.to_string(),
+            });
+        } else {
+            println!("  [EE] {msg}");
+        }
     }
 
-    fn skip(&self, msg: &str) {
-        println!("  [--] {msg}");
+    fn skip(&mut self, msg: &str) {
+        if self.json_mode {
+            self.checks.push(CheckResult {
+                category: self.current_category.clone(),
+                result: "skipped".to_string(),
+                message: msg.to_string(),
+            });
+        } else {
+            println!("  [--] {msg}");
+        }
     }
 }
 
@@ -49,6 +102,7 @@ pub fn doctor(
     ec: &EnvironmentConfig,
     deep: bool,
     strict: bool,
+    json_mode: bool,
 ) -> Result<()> {
     let scope_str = match scope {
         Scope::Local => "local",
@@ -59,15 +113,18 @@ pub fn doctor(
         ContainerEngine::Podman => "podman",
     };
 
-    println!("Environment: {env_name} ({scope_str})");
-    println!("Engine:      {engine_str}");
-    println!();
+    if !json_mode {
+        println!("Environment: {env_name} ({scope_str})");
+        println!("Engine:      {engine_str}");
+        println!();
+    }
 
-    let mut c = Counts::new();
+    let mut c = Counts::new(json_mode);
     let data_dir = cfg::env_data_dir(scope, env_name);
 
     // ==== Prerequisites ====
-    println!("Prerequisites");
+    if !json_mode { println!("Prerequisites"); }
+    c.set_category("prerequisites");
     check_engine(&mut c, engine);
     check_base_image(&mut c, engine, &ec.base_image);
     check_built_image(&mut c, engine, ec, scope, env_name);
@@ -75,31 +132,55 @@ pub fn doctor(
     check_file_readability(&mut c, &data_dir);
 
     // ==== Manifests ====
-    println!("\nManifests");
+    if !json_mode { println!("\nManifests"); }
+    c.set_category("manifests");
     check_manifests(&mut c, &data_dir, ec.morloc_version.as_ref());
 
     // ==== Deep checks ====
+    c.set_category("deep");
     if deep {
-        println!("\nDeep checks");
+        if !json_mode { println!("\nDeep checks"); }
         check_morloc_version(&mut c, engine, ec);
         check_programs_deep(&mut c, engine, verbose, ec, &data_dir);
     } else {
-        println!("\nDeep checks");
+        if !json_mode { println!("\nDeep checks"); }
         c.skip("Use --deep to run container-side checks");
     }
 
-    // ==== Summary ====
-    println!();
-    println!(
-        "{} passed, {} warnings, {} errors",
-        c.ok, c.warn, c.fail
-    );
+    let fail_count = c.fail;
+    let warn_count = c.warn;
 
-    if c.fail > 0 {
-        return Err(crate::error::ManagerError::DoctorFailed(c.fail));
+    if json_mode {
+        #[derive(serde::Serialize)]
+        struct DoctorOutput {
+            environment: String,
+            scope: String,
+            engine: String,
+            checks: Vec<CheckResult>,
+            summary: DoctorSummary,
+        }
+        let output = DoctorOutput {
+            environment: env_name.to_string(),
+            scope: scope_str.to_string(),
+            engine: engine_str.to_string(),
+            checks: c.checks,
+            summary: DoctorSummary { ok: c.ok, warnings: warn_count, errors: fail_count },
+        };
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+    } else {
+        // ==== Summary ====
+        println!();
+        println!(
+            "{} passed, {} warnings, {} errors",
+            c.ok, warn_count, fail_count
+        );
     }
-    if strict && c.warn > 0 {
-        return Err(crate::error::ManagerError::DoctorFailed(c.warn));
+
+    if fail_count > 0 {
+        return Err(crate::error::ManagerError::DoctorFailed(fail_count));
+    }
+    if strict && warn_count > 0 {
+        return Err(crate::error::ManagerError::DoctorFailed(warn_count));
     }
     Ok(())
 }
@@ -450,7 +531,9 @@ fn check_programs_deep(
         return;
     }
 
-    println!("Running smoke tests for {} programs...", programs.len());
+    if !c.json_mode {
+        println!("Running smoke tests for {} programs...", programs.len());
+    }
     for prog in &programs {
         let exe_path = format!("{mh}/bin/{}", prog.name);
         let cfg = RunConfig {

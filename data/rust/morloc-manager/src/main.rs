@@ -74,6 +74,10 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
+    /// Output machine-readable JSON instead of human-readable text
+    #[arg(long, global = true)]
+    json: bool,
+
     /// Print version and exit
     #[arg(long)]
     version: bool,
@@ -503,7 +507,7 @@ fn main() -> ExitCode {
             .ok();
         return ExitCode::from(2);
     };
-    match dispatch(cli.verbose, cmd) {
+    match dispatch(cli.verbose, cli.json, cmd) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("{err}");
@@ -671,7 +675,7 @@ fn warn_podman_additional_stores() {
 // Dispatch
 // ======================================================================
 
-fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
+fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
     match cmd {
         // ---- setup ----
         Cmd::Setup { engine, system } => {
@@ -1232,43 +1236,56 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
             let show_local = !system || local;
             let show_system = !local || system;
-            let mut total = 0;
 
-            if show_local {
+            let local_envs = if show_local {
                 let local_active = if active_in_local { active_str } else { None };
-                let envs = environment::list_environments(Scope::Local, local_active);
-                total += envs.len();
-                if !envs.is_empty() {
+                environment::list_environments(Scope::Local, local_active)
+            } else {
+                Vec::new()
+            };
+            let system_envs = if show_system {
+                let system_active = if active_in_local { None } else { active_str };
+                environment::list_environments(Scope::System, system_active)
+            } else {
+                Vec::new()
+            };
+
+            if json {
+                #[derive(serde::Serialize)]
+                struct LsOutput {
+                    local: Vec<environment::EnvInfo>,
+                    system: Vec<environment::EnvInfo>,
+                }
+                let output = LsOutput { local: local_envs, system: system_envs };
+                println!("{}", serde_json::to_string_pretty(&output).unwrap());
+            } else {
+                let total = local_envs.len() + system_envs.len();
+                if !local_envs.is_empty() {
                     println!("Local environments:");
-                    for e in envs {
+                    for e in &local_envs {
                         let active_mark = if e.active { " (active)" } else { "" };
-                        let ver_mark = e.morloc_version
+                        let ver_mark = e.morloc_version.as_ref()
                             .map(|v| format!(" [{}]", v.show()))
                             .unwrap_or_default();
                         println!("  {}{}{}", e.name, ver_mark, active_mark);
                     }
                 }
-            }
-            if show_system {
-                let system_active = if active_in_local { None } else { active_str };
-                let envs = environment::list_environments(Scope::System, system_active);
-                total += envs.len();
-                if !envs.is_empty() {
-                    if show_local {
+                if !system_envs.is_empty() {
+                    if !local_envs.is_empty() {
                         println!();
                     }
                     println!("System environments:");
-                    for e in envs {
+                    for e in &system_envs {
                         let active_mark = if e.active { " (active)" } else { "" };
-                        let ver_mark = e.morloc_version
+                        let ver_mark = e.morloc_version.as_ref()
                             .map(|v| format!(" [{}]", v.show()))
                             .unwrap_or_default();
                         println!("  {}{}{}", e.name, ver_mark, active_mark);
                     }
                 }
-            }
-            if total == 0 {
-                println!("No environments found. Create one with: morloc-manager new");
+                if total == 0 {
+                    println!("No environments found. Create one with: morloc-manager new");
+                }
             }
             Ok(())
         }
@@ -1293,36 +1310,73 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     .and_then(|c| c.active_env)
                     .as_deref() == Some(env_name.as_str());
 
-                println!("Name:           {}", ec.name);
-                println!("Scope:          {}", match scope { Scope::Local => "local", Scope::System => "system" });
-                println!("Active:         {}", if active { "yes" } else { "no" });
-                println!("Base image:     {}", ec.base_image);
-                if let Some(ref img) = ec.built_image {
-                    println!("Built image:    {img}");
-                }
-                if let Some(ref ver) = ec.morloc_version {
-                    println!("Morloc version: {}", ver.show());
-                }
-                println!("Engine:         {}", display_engine(ec.engine));
-                println!("SHM size:       {}", ec.shm_size);
-                println!("Dockerfile:     {}", match ec.dockerfile {
-                    Some(_) => {
-                        let df_path = cfg::env_dockerfile_path(scope, &env_name);
-                        if df_path.exists() {
-                            df_path.display().to_string()
-                        } else {
-                            format!("{} (MISSING)", df_path.display())
-                        }
+                if json {
+                    #[derive(serde::Serialize)]
+                    struct InfoDetail {
+                        name: String,
+                        scope: String,
+                        active: bool,
+                        base_image: String,
+                        built_image: Option<String>,
+                        morloc_version: Option<Version>,
+                        engine: String,
+                        shm_size: String,
+                        dockerfile: Option<String>,
+                        flags: Vec<String>,
+                        data_dir: String,
                     }
-                    None => "none".to_string(),
-                });
-                let flags_path = cfg::env_flags_path(scope, &env_name);
-                println!("Flags:          {}", flags_path.display());
-                let flags = cfg::read_flags_file_lines(&flags_path);
-                for flag in &flags {
-                    println!("  {flag}");
+                    let df_str = ec.dockerfile.as_ref().map(|_| {
+                        let df_path = cfg::env_dockerfile_path(scope, &env_name);
+                        df_path.display().to_string()
+                    });
+                    let flags_path = cfg::env_flags_path(scope, &env_name);
+                    let flags = cfg::read_flags_file_lines(&flags_path);
+                    let output = InfoDetail {
+                        name: ec.name.clone(),
+                        scope: match scope { Scope::Local => "local", Scope::System => "system" }.to_string(),
+                        active,
+                        base_image: ec.base_image.clone(),
+                        built_image: ec.built_image.clone(),
+                        morloc_version: ec.morloc_version.clone(),
+                        engine: display_engine(ec.engine).to_string(),
+                        shm_size: ec.shm_size.clone(),
+                        dockerfile: df_str,
+                        flags,
+                        data_dir: data_dir.display().to_string(),
+                    };
+                    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                } else {
+                    println!("Name:           {}", ec.name);
+                    println!("Scope:          {}", match scope { Scope::Local => "local", Scope::System => "system" });
+                    println!("Active:         {}", if active { "yes" } else { "no" });
+                    println!("Base image:     {}", ec.base_image);
+                    if let Some(ref img) = ec.built_image {
+                        println!("Built image:    {img}");
+                    }
+                    if let Some(ref ver) = ec.morloc_version {
+                        println!("Morloc version: {}", ver.show());
+                    }
+                    println!("Engine:         {}", display_engine(ec.engine));
+                    println!("SHM size:       {}", ec.shm_size);
+                    println!("Dockerfile:     {}", match ec.dockerfile {
+                        Some(_) => {
+                            let df_path = cfg::env_dockerfile_path(scope, &env_name);
+                            if df_path.exists() {
+                                df_path.display().to_string()
+                            } else {
+                                format!("{} (MISSING)", df_path.display())
+                            }
+                        }
+                        None => "none".to_string(),
+                    });
+                    let flags_path = cfg::env_flags_path(scope, &env_name);
+                    println!("Flags:          {}", flags_path.display());
+                    let flags = cfg::read_flags_file_lines(&flags_path);
+                    for flag in &flags {
+                        println!("  {flag}");
+                    }
+                    println!("Data dir:       {}", data_dir.display());
                 }
-                println!("Data dir:       {}", data_dir.display());
             } else {
                 // Overview
                 let local_cfg = cfg::read_config::<Config>(&cfg::config_path(Scope::Local)).ok();
@@ -1339,61 +1393,99 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     SELinuxMode::Disabled => "not detected",
                 };
 
-                println!("Active:         {active_env}");
-                println!("Local engine:   {}",
-                    local_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
-                println!("System engine:  {}",
-                    system_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
-                println!("SELinux:        {se_str}");
-
-                let dirs = [
-                    ("Config (local)", cfg::config_dir(Scope::Local)),
-                    ("Data (local)", cfg::data_dir(Scope::Local)),
-                    ("Config (system)", cfg::config_dir(Scope::System)),
-                    ("Data (system)", cfg::data_dir(Scope::System)),
-                ];
-                println!("\nDirectories:");
-                for (label, path) in &dirs {
-                    let status = if path.is_dir() { "exists" } else { "not found" };
-                    println!("  {:<20} {} ({})", label, path.display(), status);
-                }
-
-                let active_str = if active_env == "none" { None } else { Some(active_env.as_str()) };
-
-                // Check if active env lives in local scope (local takes priority)
-                let active_in_local = active_str
-                    .map(|name| cfg::env_config_path(Scope::Local, name).is_file())
-                    .unwrap_or(false);
-
-                let local_envs = environment::list_environments(Scope::Local, active_str);
-                println!("\nLocal environments:");
-                if local_envs.is_empty() {
-                    println!("  (none)");
-                } else {
-                    for e in &local_envs {
-                        let active_mark = if e.active { " (active)" } else { "" };
-                        let ver_mark = e.morloc_version.as_ref()
-                            .map(|v| format!(" [{}]", v.show()))
-                            .unwrap_or_default();
-                        println!("  {}{}{}", e.name, ver_mark, active_mark);
+                if json {
+                    #[derive(serde::Serialize)]
+                    struct DirInfo { path: String, exists: bool }
+                    #[derive(serde::Serialize)]
+                    struct InfoOverview {
+                        active: String,
+                        local_engine: String,
+                        system_engine: String,
+                        selinux: String,
+                        directories: std::collections::BTreeMap<String, DirInfo>,
+                        local: Vec<environment::EnvInfo>,
+                        system: Vec<environment::EnvInfo>,
                     }
-                }
+                    let active_str = if active_env == "none" { None } else { Some(active_env.as_str()) };
+                    let mut directories = std::collections::BTreeMap::new();
+                    for (label, path) in [
+                        ("config_local", cfg::config_dir(Scope::Local)),
+                        ("data_local", cfg::data_dir(Scope::Local)),
+                        ("config_system", cfg::config_dir(Scope::System)),
+                        ("data_system", cfg::data_dir(Scope::System)),
+                    ] {
+                        directories.insert(label.to_string(), DirInfo {
+                            path: path.display().to_string(),
+                            exists: path.is_dir(),
+                        });
+                    }
+                    let output = InfoOverview {
+                        active: active_env.clone(),
+                        local_engine: local_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset").to_string(),
+                        system_engine: system_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset").to_string(),
+                        selinux: se_str.to_string(),
+                        directories,
+                        local: environment::list_environments(Scope::Local, active_str),
+                        system: environment::list_environments(Scope::System, active_str),
+                    };
+                    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                } else {
+                    println!("Active:         {active_env}");
+                    println!("Local engine:   {}",
+                        local_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
+                    println!("System engine:  {}",
+                        system_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
+                    println!("SELinux:        {se_str}");
 
-                let system_envs = environment::list_environments(Scope::System, active_str);
-                if !system_envs.is_empty() {
-                    println!("\nSystem environments:");
-                    for e in &system_envs {
-                        let active_mark = if e.active && active_in_local {
-                            " (active - shadowed)"
-                        } else if e.active {
-                            " (active)"
-                        } else {
-                            ""
-                        };
-                        let ver_mark = e.morloc_version.as_ref()
-                            .map(|v| format!(" [{}]", v.show()))
-                            .unwrap_or_default();
-                        println!("  {}{}{}", e.name, ver_mark, active_mark);
+                    let dirs = [
+                        ("Config (local)", cfg::config_dir(Scope::Local)),
+                        ("Data (local)", cfg::data_dir(Scope::Local)),
+                        ("Config (system)", cfg::config_dir(Scope::System)),
+                        ("Data (system)", cfg::data_dir(Scope::System)),
+                    ];
+                    println!("\nDirectories:");
+                    for (label, path) in &dirs {
+                        let status = if path.is_dir() { "exists" } else { "not found" };
+                        println!("  {:<20} {} ({})", label, path.display(), status);
+                    }
+
+                    let active_str = if active_env == "none" { None } else { Some(active_env.as_str()) };
+
+                    // Check if active env lives in local scope (local takes priority)
+                    let active_in_local = active_str
+                        .map(|name| cfg::env_config_path(Scope::Local, name).is_file())
+                        .unwrap_or(false);
+
+                    let local_envs = environment::list_environments(Scope::Local, active_str);
+                    println!("\nLocal environments:");
+                    if local_envs.is_empty() {
+                        println!("  (none)");
+                    } else {
+                        for e in &local_envs {
+                            let active_mark = if e.active { " (active)" } else { "" };
+                            let ver_mark = e.morloc_version.as_ref()
+                                .map(|v| format!(" [{}]", v.show()))
+                                .unwrap_or_default();
+                            println!("  {}{}{}", e.name, ver_mark, active_mark);
+                        }
+                    }
+
+                    let system_envs = environment::list_environments(Scope::System, active_str);
+                    if !system_envs.is_empty() {
+                        println!("\nSystem environments:");
+                        for e in &system_envs {
+                            let active_mark = if e.active && active_in_local {
+                                " (active - shadowed)"
+                            } else if e.active {
+                                " (active)"
+                            } else {
+                                ""
+                            };
+                            let ver_mark = e.morloc_version.as_ref()
+                                .map(|v| format!(" [{}]", v.show()))
+                                .unwrap_or_default();
+                            println!("  {}{}{}", e.name, ver_mark, active_mark);
+                        }
                     }
                 }
             }
@@ -1536,7 +1628,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
                 // Check for running serve container -- reinit replaces morloc-nexus
                 // which will fail with "Text file busy" if the container has it open.
-                let serve_name = format!("morloc-serve-{env_name}");
+                let serve_name = serve::serve_container_name(&env_name);
                 let running = serve::find_running_serve_containers(ec.engine);
                 if running.iter().any(|n| n == &serve_name) {
                     return Err(ManagerError::EnvError(format!(
@@ -1654,7 +1746,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
             let image = ec.active_image().to_string();
             let data_dir = cfg::env_data_dir(env_scope, &env_name);
-            let container_name = format!("morloc-serve-{env_name}");
+            let container_name = serve::serve_container_name(&env_name);
             // Warn if a Dockerfile is configured but the layered image hasn't been built
             if ec.dockerfile.is_some() && ec.built_image.is_none() {
                 eprintln!("Warning: Dockerfile is configured but image has not been built. Using base image.");
@@ -1688,7 +1780,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         // ---- stop ----
         Cmd::Stop { name } => {
             let (env_name, _, ec) = resolve_env_or_active(name)?;
-            let container_name = format!("morloc-serve-{env_name}");
+            let container_name = serve::serve_container_name(&env_name);
             if crate::container::container_exists(ec.engine, &container_name) {
                 serve::stop_serve_container(ec.engine, verbose, &container_name)?;
                 eprintln!("Stopped serving environment: {env_name}");
@@ -1704,7 +1796,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         Cmd::Logs { name, follow } => {
             let (container_name, engine) = if let Some(ref n) = name {
                 let (_, _, ec) = resolve_env_or_active(Some(n.clone()))?;
-                let cname = format!("morloc-serve-{n}");
+                let cname = serve::serve_container_name(n);
                 if !container::container_exists(ec.engine, &cname) {
                     return Err(ManagerError::EnvError(
                         format!("No serve container running for environment '{n}'")
@@ -1750,7 +1842,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             let expr = if let Some(ref expr_arg) = second {
                 // first is env name — validate it exists and its serve container is running
                 let (env_name, _, ec) = resolve_env_or_active(Some(first))?;
-                let container_name = format!("morloc-serve-{env_name}");
+                let container_name = serve::serve_container_name(&env_name);
                 if !container::container_exists(ec.engine, &container_name) {
                     return Err(ManagerError::EnvError(format!(
                         "No serve container running for '{env_name}'. Start with: morloc-manager start {env_name}"
@@ -1791,10 +1883,8 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
         // ---- status ----
         Cmd::Status => {
-            // Only show engines that have running/stopped serve containers.
-            // Don't show "[podman] No containers" when only Docker is configured.
+            let mut all_containers: Vec<serve::ServeContainerInfo> = Vec::new();
             let mut any_engine = false;
-            let mut any_containers = false;
             for engine in [ContainerEngine::Podman, ContainerEngine::Docker] {
                 let exe = match engine {
                     ContainerEngine::Podman => "podman",
@@ -1802,21 +1892,26 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 };
                 if which(exe) {
                     any_engine = true;
-                    let containers = serve::find_running_serve_containers(engine);
-                    if !containers.is_empty() {
-                        if any_containers {
-                            println!();
-                        }
-                        let _ = serve::list_serve_containers(engine, verbose);
-                        any_containers = true;
+                    if let Ok(containers) = serve::query_serve_containers(engine, verbose) {
+                        all_containers.extend(containers);
                     }
                 }
             }
             if !any_engine {
                 return Err(ManagerError::EngineNotFound);
             }
-            if !any_containers {
+            if json {
+                #[derive(serde::Serialize)]
+                struct StatusOutput { containers: Vec<serve::ServeContainerInfo> }
+                let output = StatusOutput { containers: all_containers };
+                println!("{}", serde_json::to_string_pretty(&output).unwrap());
+            } else if all_containers.is_empty() {
                 println!("No morloc serve containers running.");
+            } else {
+                println!("Running servers:");
+                for c in &all_containers {
+                    println!("  {}  {}  ({})  [{}]", c.name, c.ports, c.env, c.status);
+                }
             }
             Ok(())
         }
@@ -1830,7 +1925,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             } else {
                 resolve_env_or_active(None)?
             };
-            doctor::doctor(ec.engine, verbose, &env_name, env_scope, &ec, deep, strict)
+            doctor::doctor(ec.engine, verbose, &env_name, env_scope, &ec, deep, strict, json)
         }
 
     }
