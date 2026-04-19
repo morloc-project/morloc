@@ -48,6 +48,7 @@ pub fn doctor(
     scope: Scope,
     ec: &EnvironmentConfig,
     deep: bool,
+    strict: bool,
 ) -> Result<()> {
     let scope_str = match scope {
         Scope::Local => "local",
@@ -95,6 +96,9 @@ pub fn doctor(
 
     if c.fail > 0 {
         return Err(crate::error::ManagerError::DoctorFailed(c.fail));
+    }
+    if strict && c.warn > 0 {
+        return Err(crate::error::ManagerError::DoctorFailed(c.warn));
     }
     Ok(())
 }

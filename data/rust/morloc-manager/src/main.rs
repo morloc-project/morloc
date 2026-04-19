@@ -159,6 +159,12 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Start an interactive shell
         #[arg(long)]
         shell: bool,
+        /// Pass environment variable to the container (KEY=VALUE)
+        #[arg(short, long = "env")]
+        env_vars: Vec<String>,
+        /// Read environment variables from a file (one KEY=VALUE per line)
+        #[arg(long)]
+        env_file: Option<String>,
     },
     /// Remove a morloc environment
     #[command(display_order = 3)]
@@ -360,6 +366,9 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Run checks inside the container (slower, more thorough)
         #[arg(long)]
         deep: bool,
+        /// Treat warnings as errors (non-zero exit on warnings)
+        #[arg(long)]
+        strict: bool,
     },
 }
 
@@ -968,11 +977,12 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- run ----
-        Cmd::Run { command, shell } => {
+        Cmd::Run { command, shell, env_vars, env_file } => {
             if !shell && command.is_empty() {
                 return Err(ManagerError::NoCommand);
             }
-            run_in_container(verbose, shell, &command).map_err(|e| match e {
+            let user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
+            run_in_container(verbose, shell, &command, &user_env).map_err(|e| match e {
                 ManagerError::EnvironmentNotFound(msg) => ManagerError::EnvironmentNotFound(
                     format!("{msg}. Run 'morloc-manager new' to create an environment")
                 ),
@@ -1459,6 +1469,18 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             if reinit || version.is_some() || image.is_some() {
                 // Re-read the config (apply_environment may have updated it)
                 let ec = cfg::read_env_config(env_scope, &env_name)?;
+
+                // Check for running serve container -- reinit replaces morloc-nexus
+                // which will fail with "Text file busy" if the container has it open.
+                let serve_name = format!("morloc-serve-{env_name}");
+                let running = serve::find_running_serve_containers(ec.engine);
+                if running.iter().any(|n| n == &serve_name) {
+                    return Err(ManagerError::EnvError(format!(
+                        "Cannot reinit environment '{env_name}' while its serve container is running.\n  \
+                         Run 'morloc-manager stop {env_name}' first."
+                    )));
+                }
+
                 run_morloc_init_for(Some((env_name.clone(), env_scope, ec)), verbose)?;
             }
 
@@ -1569,6 +1591,11 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             let image = ec.active_image().to_string();
             let data_dir = cfg::env_data_dir(env_scope, &env_name);
             let container_name = format!("morloc-serve-{env_name}");
+            // Warn if a Dockerfile is configured but the layered image hasn't been built
+            if ec.dockerfile.is_some() && ec.built_image.is_none() {
+                eprintln!("Warning: Dockerfile is configured but image has not been built. Using base image.");
+                eprintln!("  Run 'morloc-manager update {env_name}' to build the Dockerfile layer.");
+            }
             // Warn if we're about to replace a running container
             if container::container_exists(ec.engine, &container_name) {
                 eprintln!("Warning: replacing existing serve container '{container_name}'");
@@ -1715,7 +1742,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- doctor ----
-        Cmd::Doctor { name, system, deep } => {
+        Cmd::Doctor { name, system, deep, strict } => {
             let (env_name, env_scope, ec) = if let Some(ref n) = name {
                 let s = if system { Scope::System } else { cfg::find_env_scope(n)? };
                 let c = cfg::read_env_config(s, n)?;
@@ -1723,7 +1750,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             } else {
                 resolve_env_or_active(None)?
             };
-            doctor::doctor(ec.engine, verbose, &env_name, env_scope, &ec, deep)
+            doctor::doctor(ec.engine, verbose, &env_name, env_scope, &ec, deep, strict)
         }
 
     }
@@ -1771,8 +1798,9 @@ fn run_in_container(
     verbose: bool,
     shell: bool,
     args: &[String],
+    user_env: &[(String, String)],
 ) -> Result<()> {
-    run_in_container_for(None, verbose, shell, args)
+    run_in_container_for(None, verbose, shell, args, user_env)
 }
 
 fn run_in_container_for(
@@ -1780,6 +1808,7 @@ fn run_in_container_for(
     verbose: bool,
     shell: bool,
     args: &[String],
+    user_env: &[(String, String)],
 ) -> Result<()> {
     let (env_name, env_scope, ec) = match target {
         Some(t) => t,
@@ -1789,6 +1818,12 @@ fn run_in_container_for(
     let image = ec.active_image().to_string();
     let data_dir = cfg::env_data_dir(env_scope, &env_name);
     let v_data_dir = data_dir.to_string_lossy().to_string();
+
+    // Warn if a Dockerfile is configured but the layered image hasn't been built
+    if ec.dockerfile.is_some() && ec.built_image.is_none() {
+        eprintln!("Warning: Dockerfile is configured but image has not been built. Using base image.");
+        eprintln!("  Run 'morloc-manager update {env_name}' to build the Dockerfile layer.");
+    }
 
     // Fail fast with a clear message if docker socket is unreachable
     require_docker_socket(engine)?;
@@ -1837,7 +1872,7 @@ fn run_in_container_for(
         selinux::validate_mount_path(&cwd)?;
         run_with_config(
             engine, verbose, &image, &v_data_dir, &home, &cwd, suffix,
-            shell, args, false, &ec.shm_size, &extra_flags,
+            shell, args, false, &ec.shm_size, &extra_flags, user_env,
         )
     } else {
         let (cwd_final, skip_work_mount) = if is_home_dir && !suffix.is_empty() && !is_init {
@@ -1850,7 +1885,7 @@ fn run_in_container_for(
         };
         run_with_config(
             engine, verbose, &image, &v_data_dir, &home, &cwd_final, suffix,
-            shell, args, is_init || skip_work_mount, &ec.shm_size, &extra_flags,
+            shell, args, is_init || skip_work_mount, &ec.shm_size, &extra_flags, user_env,
         )
     }
 }
@@ -1868,6 +1903,7 @@ fn run_with_config(
     is_init: bool,
     shm_size: &str,
     extra_flags: &[String],
+    user_env: &[(String, String)],
 ) -> Result<()> {
     if shell {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -1894,7 +1930,7 @@ fn run_with_config(
     } else {
         cwd.to_string()
     };
-    let env_vars = vec![
+    let mut env_vars = vec![
         ("HOME".to_string(), home.to_string()),
         ("MORLOC_HOME".to_string(), mh.to_string()),
         (
@@ -1902,6 +1938,7 @@ fn run_with_config(
             format!("{mh}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
         ),
     ];
+    env_vars.extend(user_env.iter().cloned());
     let cmd = if shell {
         Some(vec!["/bin/bash".to_string()])
     } else if args.is_empty() {
@@ -1950,7 +1987,7 @@ fn run_morloc_init_for(
         ["morloc", "init", "-f", "-q"].iter().map(|s| s.to_string()).collect()
     };
     eprintln!("Initializing morloc (this may take several minutes)...");
-    run_in_container_for(target, verbose, false, &init_args)
+    run_in_container_for(target, verbose, false, &init_args, &[])
 }
 
 fn normalize_trailing(p: &str) -> String {

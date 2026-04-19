@@ -338,6 +338,24 @@ pub fn serve_environment(
         // (e.g., port conflict after container creation). Clean it up so the
         // next `start` doesn't fail on a name collision.
         let _ = crate::container::container_remove_quiet(engine, container_name);
+
+        // Detect port conflict and provide a friendlier error message
+        let lower = run_err.to_lowercase();
+        if lower.contains("address already in use") || lower.contains("port is already allocated")
+            || lower.contains("pasta failed")
+        {
+            // Try to extract the port number from the error
+            let port_hint = ports.first()
+                .map(|(h, _)| format!(" Port {h} is already in use."))
+                .unwrap_or_default();
+            return Err(ManagerError::EnvError(format!(
+                "{port_hint}\n  \
+                 Another container or process is using this port.\n  \
+                 Use '-p <other-port>:8080' to choose a different host port, or\n  \
+                 check running containers with 'morloc-manager status'."
+            )));
+        }
+
         return Err(ManagerError::EngineError {
             engine,
             code: exit_code_to_int(status),
@@ -409,7 +427,7 @@ pub fn stop_serve_container(engine: ContainerEngine, verbose: bool, name: &str) 
 
 pub fn list_serve_containers(engine: ContainerEngine, verbose: bool) -> Result<()> {
     let exe = engine_executable(engine);
-    let fmt = "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}";
+    let fmt = "{{.Names}}\t{{.Status}}\t{{.Ports}}";
     if verbose {
         eprintln!("[morloc-manager] {exe} ps -a --filter name=morloc-serve- --format '{fmt}'");
     }
@@ -417,6 +435,9 @@ pub fn list_serve_containers(engine: ContainerEngine, verbose: bool) -> Result<(
         .args([
             "ps", "-a", "--filter", "name=morloc-serve-", "--format", fmt,
         ])
+        // Use /tmp as cwd to avoid podman "cannot chdir" failures when the
+        // current directory is inaccessible (e.g. another user's home).
+        .current_dir("/tmp")
         .output()
         .map_err(|e| ManagerError::EngineError {
             engine,
@@ -431,16 +452,24 @@ pub fn list_serve_containers(engine: ContainerEngine, verbose: bool) -> Result<(
         });
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let engine_name = match engine {
-        ContainerEngine::Podman => "podman",
-        ContainerEngine::Docker => "docker",
-    };
     if text.is_empty() {
-        println!("[{engine_name}] No morloc serve containers running.");
-    } else {
-        println!("[{engine_name}]");
-        println!("NAME\tIMAGE\tSTATUS\tPORTS");
-        println!("{text}");
+        return Ok(());
+    }
+    println!("Running servers:");
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 3 {
+            let name = parts[0];
+            let status = parts[1];
+            let ports = parts[2];
+            // Extract env name from container name (strip "morloc-serve-" prefix)
+            let env = name.strip_prefix("morloc-serve-").unwrap_or(name);
+            // Format ports: show just the mapping (e.g. "8080:8080")
+            let port_display = if ports.is_empty() { "-".to_string() } else { ports.to_string() };
+            println!("  {name}  {port_display}  ({env})  [{status}]");
+        } else {
+            println!("  {line}");
+        }
     }
     Ok(())
 }
@@ -450,6 +479,7 @@ pub fn find_running_serve_containers(engine: ContainerEngine) -> Vec<String> {
     let exe = engine_executable(engine);
     let output = Command::new(exe)
         .args(["ps", "--filter", "name=morloc-serve-", "--format", "{{.Names}}"])
+        .current_dir("/tmp")
         .output();
     match output {
         Ok(o) if o.status.success() => {
