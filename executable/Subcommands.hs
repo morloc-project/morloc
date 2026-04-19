@@ -888,7 +888,7 @@ uninstallOne fdbDir libDir binDir exeDir dryRun skipDepCheck kind name = do
             else do
               if hasModuleDir then removeDirectoryRecursive moduleDir else return ()
               if hasModule then removeFile moduleManifest else return ()
-              putStrLn $ "Uninstalled module '" <> name <> "'"
+              hPutStrLn stderr $ "Uninstalled module '" <> name <> "'"
         else return ()
 
       if removeProgram
@@ -912,7 +912,7 @@ uninstallOne fdbDir libDir binDir exeDir dryRun skipDepCheck kind name = do
                 Just d -> removeDirectoryRecursive d
                 Nothing -> return ()
               removeFile programManifest
-              putStrLn $ "Uninstalled program '" <> name <> "'"
+              hPutStrLn stderr $ "Uninstalled program '" <> name <> "'"
         else return ()
 
       return (removeModule || removeProgram)

@@ -184,7 +184,7 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Remove all morloc environments
     #[command(display_order = 8)]
-    #[command(after_help = "Examples:\n  morloc-manager nuke\n  morloc-manager nuke --images\n  sudo morloc-manager nuke --system\n  sudo morloc-manager nuke --system --images")]
+    #[command(after_help = "Examples:\n  morloc-manager nuke\n  morloc-manager nuke --yes\n  morloc-manager nuke --images\n  sudo morloc-manager nuke --system\n  sudo morloc-manager nuke --system --images --yes")]
     Nuke {
         /// Remove system-scope environments instead of local (requires root)
         #[arg(long)]
@@ -192,6 +192,9 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Also remove base container images
         #[arg(long)]
         images: bool,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
     },
     /// List morloc environments
     #[command(display_order = 4)]
@@ -291,6 +294,9 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Read environment variables from a file (one KEY=VALUE per line)
         #[arg(long)]
         env_file: Option<String>,
+        /// Replace an already-running serve container
+        #[arg(long)]
+        force: bool,
     },
     /// Stop a running serve container
     #[command(display_order = 21)]
@@ -311,8 +317,10 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Export installed state as a frozen artifact
     #[command(display_order = 23)]
-    #[command(after_help = "Examples:\n  morloc-manager freeze\n  morloc-manager freeze -o ./my-freeze\n\nRequires at least one program compiled with 'morloc make --install'.")]
+    #[command(after_help = "Examples:\n  morloc-manager freeze\n  morloc-manager freeze myenv\n  morloc-manager freeze -o ./my-freeze\n\nRequires at least one program compiled with 'morloc make --install'.")]
     Freeze {
+        /// Environment name (default: active environment)
+        name: Option<String>,
         /// Output directory (default: ./morloc-freeze)
         #[arg(short, long)]
         output: Option<String>,
@@ -957,6 +965,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 engine: Some(resolved_engine),
                 shm_size: Some(shm_size.unwrap_or_else(|| "512m".to_string())),
                 skip_dockerfile_build: dockerfile_stub,
+                verbose,
             };
 
             environment::apply_environment(&opts)?;
@@ -1073,12 +1082,40 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- nuke ----
-        Cmd::Nuke { system, images } => {
+        Cmd::Nuke { system, images, yes } => {
             let scope = if system { Scope::System } else { Scope::Local };
             let scope_label = if system { "system" } else { "local" };
 
             if system {
                 check_system_write_access()?;
+            }
+
+            // Confirm before removing all environments
+            let env_names = cfg::list_env_names(scope);
+            if env_names.is_empty() {
+                eprintln!("No {scope_label} environments found.");
+                return Ok(());
+            }
+
+            if !yes {
+                eprintln!("This will remove {} {scope_label} environment(s):", env_names.len());
+                for n in &env_names {
+                    eprintln!("  {n}");
+                }
+                if io::stdin().is_terminal() {
+                    eprint!("Continue? [y/N] ");
+                    io::stderr().flush().ok();
+                    let mut answer = String::new();
+                    io::stdin().read_line(&mut answer).ok();
+                    if !matches!(answer.trim(), "y" | "yes" | "Y" | "YES") {
+                        eprintln!("Aborted.");
+                        return Ok(());
+                    }
+                } else {
+                    return Err(ManagerError::EnvError(
+                        "nuke requires --yes for non-interactive use".to_string(),
+                    ));
+                }
             }
 
             eprintln!("Removing all {scope_label} morloc environments...");
@@ -1482,6 +1519,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 engine: engine.map(|e| e.into()),
                 shm_size,
                 skip_dockerfile_build: no_build || dockerfile_stub,
+                verbose,
             };
             environment::apply_environment(&opts)?;
 
@@ -1491,8 +1529,8 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 eprintln!("Edit it, then run: morloc-manager update {env_name}");
             }
 
-            // --version and --image imply --reinit (ABI may have changed)
-            if reinit || version.is_some() || image.is_some() {
+            // --version, --tag, and --image imply --reinit (ABI may have changed)
+            if reinit || version.is_some() || tag.is_some() || image.is_some() {
                 // Re-read the config (apply_environment may have updated it)
                 let ec = cfg::read_env_config(env_scope, &env_name)?;
 
@@ -1525,7 +1563,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- freeze ----
-        Cmd::Freeze { output, force, env_vars } => {
+        Cmd::Freeze { name, output, force, env_vars } => {
             let output_dir = output.as_deref().unwrap_or("./morloc-freeze");
             // Protect against silently overwriting a previous freeze
             let existing_tar = std::path::Path::new(output_dir).join("state.tar.gz");
@@ -1536,7 +1574,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     existing_tar.display()
                 )));
             }
-            let (env_name, env_scope, ec) = environment::resolve_active_environment()?;
+            let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
             let engine = ec.engine;
             // Detect the version from the container binary for sanity check.
             // The morloc binary can't report prerelease tags (stack limitation),
@@ -1612,7 +1650,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- start ----
-        Cmd::Start { name, port, env_vars, env_file } => {
+        Cmd::Start { name, port, env_vars, env_file, force } => {
             let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
             let image = ec.active_image().to_string();
             let data_dir = cfg::env_data_dir(env_scope, &env_name);
@@ -1622,8 +1660,13 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 eprintln!("Warning: Dockerfile is configured but image has not been built. Using base image.");
                 eprintln!("  Run 'morloc-manager update {env_name}' to build the Dockerfile layer.");
             }
-            // Warn if we're about to replace a running container
+            // Refuse to replace a running container unless --force is passed
             if container::container_exists(ec.engine, &container_name) {
+                if !force {
+                    return Err(ManagerError::EnvError(format!(
+                        "Serve container already running for '{env_name}'. Use --force to replace."
+                    )));
+                }
                 eprintln!("Warning: replacing existing serve container '{container_name}'");
             }
             let port_mappings = if port.is_empty() {
@@ -1661,7 +1704,13 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         Cmd::Logs { name, follow } => {
             let (container_name, engine) = if let Some(ref n) = name {
                 let (_, _, ec) = resolve_env_or_active(Some(n.clone()))?;
-                (format!("morloc-serve-{n}"), ec.engine)
+                let cname = format!("morloc-serve-{n}");
+                if !container::container_exists(ec.engine, &cname) {
+                    return Err(ManagerError::EnvError(
+                        format!("No serve container running for environment '{n}'")
+                    ));
+                }
+                (cname, ec.engine)
             } else {
                 find_running_serve_container()?
             };

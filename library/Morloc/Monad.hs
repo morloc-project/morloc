@@ -346,7 +346,7 @@ runCommand loc cmd = do
 sayIf :: Int -> MDoc -> MorlocMonad ()
 sayIf i d = do
   verbosity <- gets stateVerbosity
-  when (verbosity >= i) $ (liftIO . putDoc) (d <> "\n")
+  when (verbosity >= i) $ liftIO $ MT.hPutStrLn stderr (render d)
 
 -- print anytime
 say :: MDoc -> MorlocMonad ()

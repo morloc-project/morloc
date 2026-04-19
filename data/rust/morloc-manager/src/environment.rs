@@ -33,6 +33,7 @@ pub struct ApplyOptions {
     pub engine: Option<ContainerEngine>,
     pub shm_size: Option<String>,
     pub skip_dockerfile_build: bool,
+    pub verbose: bool,
 }
 
 /// Info returned by list_environments.
@@ -397,6 +398,13 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
                     tag: tag.clone(),
                     build_args: vec![("CONTAINER_BASE".to_string(), ec.base_image.clone())],
                 };
+                if opts.verbose {
+                    let exe = engine_executable(ec.engine);
+                    eprintln!(
+                        "[morloc-manager] {exe} build -f {} -t {} {}",
+                        build_cfg.dockerfile, build_cfg.tag, build_cfg.context
+                    );
+                }
                 let (status, _, stderr) = container::container_build(ec.engine, &build_cfg);
                 if !status.success() {
                     return Err(ManagerError::EngineError {

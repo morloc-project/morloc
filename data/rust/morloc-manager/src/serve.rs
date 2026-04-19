@@ -246,8 +246,8 @@ pub fn run_serve_container(
             let state = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if state == "running" {
                 eprintln!("Container {name} started");
-                eprintln!("  Stop:   morloc-manager stop {name}");
                 eprintln!("  Logs:   morloc-manager logs");
+                eprintln!("  Stop:   morloc-manager stop {name}");
                 eprintln!("  Status: morloc-manager status");
                 Ok(())
             } else {
@@ -374,8 +374,8 @@ pub fn serve_environment(
             let state = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if state == "running" {
                 eprintln!("Container {container_name} started");
-                eprintln!("  Stop:   morloc-manager stop");
                 eprintln!("  Logs:   morloc-manager logs");
+                eprintln!("  Stop:   morloc-manager stop");
                 eprintln!("  Status: morloc-manager status");
                 Ok(())
             } else {
