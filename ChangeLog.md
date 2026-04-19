@@ -1,12 +1,16 @@
-0.79.2 [2026.04-18]
+0.79.3 [2026-04-19]
+-------------------
+ * morloc-manager updates
+
+0.79.2 [2026-04-18]
 -------------------
  * bug fixes
 
-0.79.1 [2026.04-18]
+0.79.1 [2026-04-18]
 -------------------
  * bug fixes
 
-0.79.0 [2026.04-17]
+0.79.0 [2026-04-17]
 -------------------
  * add @datafile intrinsic for finding installed files
  * default to including all files when installing
