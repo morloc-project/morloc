@@ -420,9 +420,16 @@ PROPAGATE_ERROR(errmsg)|]
           , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
           , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
           }
-    , lcMakeDoBlock = \stmts expr -> (,) [] $ case stmts of
-        [] -> "[&](){return " <> expr <> ";}"
-        _ -> "[&](){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"
+    , lcMakeDoBlock = \t stmts expr ->
+        let isUnit = case t of
+              EffectF _ (VarF (FV tv _)) -> tv == TV "Unit"
+              VarF (FV tv _) -> tv == TV "Unit"
+              _ -> False
+        in (,) [] $ case (isUnit, stmts) of
+          (True, []) -> "[&](){" <> expr <> "; return mlc::Unit{};}"
+          (True, _) -> "[&](){" <> nest 4 (line <> vsep (stmts <> [expr <> ";", "return mlc::Unit{};"])) <> line <> "}"
+          (False, []) -> "[&](){return " <> expr <> ";}"
+          (False, _) -> "[&](){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"
     , lcSerialize = \v s -> serialize v s
     , lcDeserialize = \t v s -> do
         typestr <- cppTypeOf t

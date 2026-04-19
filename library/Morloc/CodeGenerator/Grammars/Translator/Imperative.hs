@@ -259,7 +259,7 @@ data LowerConfig m = LowerConfig
   , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
   -- Produces language-specific if/else structure using a temp result variable
-  , lcMakeDoBlock :: [MDoc] -> MDoc -> ([MDoc], MDoc)
+  , lcMakeDoBlock :: TypeF -> [MDoc] -> MDoc -> ([MDoc], MDoc)
   -- ^ prior statements -> return expression -> (hoisted statements, effect expression)
   , lcSerialize :: MDoc -> SerialAST -> m PoolDocs
   , lcDeserialize :: TypeF -> MDoc -> SerialAST -> m (MDoc, [MDoc])
@@ -469,8 +469,8 @@ lowerNativeExpr cfg _ (StrN_ _ v) = return $ defaultValue {poolExpr = lcPrintExp
 lowerNativeExpr cfg _ (NullN_ fv) = do
   mayT <- lcTypeOf cfg (VarF fv)
   return $ defaultValue {poolExpr = lcPrintExpr cfg (INullLit mayT)}
-lowerNativeExpr cfg _ (DoBlockN_ _ x) =
-  let (hoisted, effectExpr) = lcMakeDoBlock cfg (poolPriorLines x) (poolExpr x)
+lowerNativeExpr cfg _ (DoBlockN_ t x) =
+  let (hoisted, effectExpr) = lcMakeDoBlock cfg t (poolPriorLines x) (poolExpr x)
    in return
         defaultValue
           { poolExpr = effectExpr

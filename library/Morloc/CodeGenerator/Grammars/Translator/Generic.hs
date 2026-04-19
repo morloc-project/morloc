@@ -401,7 +401,7 @@ genericLowerConfig desc srcNamer = cfg
         , lcMakeIf = genericMakeIf desc cfg
         , lcMakeLet = \namer i _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
-        , lcMakeDoBlock = \stmts expr ->
+        , lcMakeDoBlock = \_ stmts expr ->
             let suspendBlock = ldDoBlockBlock desc
              in if T.null suspendBlock
                   then
