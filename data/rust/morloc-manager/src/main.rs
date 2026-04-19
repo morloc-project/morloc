@@ -8,6 +8,7 @@ mod selinux;
 mod serve;
 mod types;
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::process::{Command, ExitCode, Stdio};
@@ -45,6 +46,7 @@ fn build_help_template() -> String {
   {b}info{r}       Show configuration and installed environments
   {b}select{r}     Select an environment
   {b}update{r}     Rebuild an environment
+  {b}nuke{r}       Remove all morloc environments
 
 {bu}Deployment{r}
   {b}start{r}      Serve an environment over the network
@@ -170,6 +172,17 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Remove even if active (deactivates first)
         #[arg(long)]
         force: bool,
+    },
+    /// Remove all morloc environments
+    #[command(display_order = 8)]
+    #[command(after_help = "Examples:\n  morloc-manager nuke\n  morloc-manager nuke --images\n  sudo morloc-manager nuke --system\n  sudo morloc-manager nuke --system --images")]
+    Nuke {
+        /// Remove system-scope environments instead of local (requires root)
+        #[arg(long)]
+        system: bool,
+        /// Also remove base container images
+        #[arg(long)]
+        images: bool,
     },
     /// List morloc environments
     #[command(display_order = 4)]
@@ -1032,6 +1045,115 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     names.len()
                 )));
             }
+            Ok(())
+        }
+
+        // ---- nuke ----
+        Cmd::Nuke { system, images } => {
+            let scope = if system { Scope::System } else { Scope::Local };
+            let scope_label = if system { "system" } else { "local" };
+
+            if system {
+                check_system_write_access()?;
+            }
+
+            eprintln!("Removing all {scope_label} morloc environments...");
+
+            // Collect env info before removal (configs are deleted during removal)
+            let mut env_list: Vec<(String, ContainerEngine)> = Vec::new();
+            let mut base_images: HashSet<String> = HashSet::new();
+
+            for name in cfg::list_env_names(scope) {
+                if let Ok(ec) = cfg::read_env_config(scope, &name) {
+                    if images {
+                        base_images.insert(ec.base_image.clone());
+                        if let Some(ref orig) = ec.original_image {
+                            base_images.insert(orig.clone());
+                        }
+                    }
+                    env_list.push((name, ec.engine));
+                }
+            }
+
+            if env_list.is_empty() {
+                eprintln!("No {scope_label} environments found.");
+            } else {
+                let mut removed = 0usize;
+                let mut failures: Vec<String> = Vec::new();
+
+                for (name, engine) in &env_list {
+                    eprintln!("Removing environment: {name}...");
+                    match environment::remove_environment(*engine, scope, name) {
+                        Ok(()) => {
+                            eprintln!("  Removed: {name}");
+                            removed += 1;
+                        }
+                        Err(e) => {
+                            eprintln!("  Failed: {name}: {e}");
+                            failures.push(format!("{name}: {e}"));
+                        }
+                    }
+                }
+
+                // Clear active_env in the targeted scope's config
+                let cfg_path = cfg::config_path(scope);
+                if let Ok(cfg_data) = cfg::read_config::<Config>(&cfg_path) {
+                    if cfg_data.active_env.is_some() {
+                        let new_cfg = Config { active_env: None, ..cfg_data };
+                        let _ = cfg::write_config(&cfg_path, &new_cfg);
+                        eprintln!("Cleared active environment.");
+                    }
+                }
+
+                eprintln!("Removed {removed} environment(s).");
+
+                if !failures.is_empty() {
+                    eprintln!();
+                    eprintln!("Failed to remove {} environment(s):", failures.len());
+                    for f in &failures {
+                        eprintln!("  {f}");
+                    }
+                    return Err(ManagerError::EnvError(format!(
+                        "{} of {} removals failed",
+                        failures.len(),
+                        env_list.len()
+                    )));
+                }
+            }
+
+            // Remove base images if --images
+            if images && !base_images.is_empty() {
+                let engine = ensure_engine().unwrap_or(ContainerEngine::Docker);
+                eprintln!("Removing base images...");
+                for img in &base_images {
+                    if container::image_exists_locally(engine, img) {
+                        eprintln!("  Removing image: {img}...");
+                        if container::remove_image(engine, img) {
+                            eprintln!("  Removed: {img}");
+                        } else {
+                            eprintln!("  Failed to remove: {img}");
+                        }
+                    }
+                }
+            }
+
+            // Hint about the other scope
+            let other_scope = if system { Scope::Local } else { Scope::System };
+            let other_envs = cfg::list_env_names(other_scope);
+            if !other_envs.is_empty() {
+                if system {
+                    eprintln!(
+                        "{} local environment(s) remain. Use: morloc-manager nuke",
+                        other_envs.len()
+                    );
+                } else {
+                    eprintln!(
+                        "{} system environment(s) remain. Use: sudo morloc-manager nuke --system",
+                        other_envs.len()
+                    );
+                }
+            }
+
             Ok(())
         }
 
