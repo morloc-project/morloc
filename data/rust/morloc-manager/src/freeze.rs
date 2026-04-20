@@ -16,7 +16,6 @@ pub fn freeze_from_dir(
     v_data_dir: &str,
     output_dir: &str,
     verbose: bool,
-    env_vars: &[String],
 ) -> Result<()> {
     fs::create_dir_all(output_dir)
         .map_err(|e| ManagerError::FreezeError(format!("Failed to create output dir: {e}")))?;
@@ -128,16 +127,12 @@ pub fn freeze_from_dir(
         programs,
         base_image: base_img,
         env_layer,
-        env_vars: env_vars.to_vec(),
+        env_vars: Vec::new(),
     };
     let manifest_path = Path::new(output_dir).join("freeze-manifest.json");
     let manifest_path = manifest_path.to_string_lossy();
     write_freeze_manifest(&manifest_path, &manifest)?;
     eprintln!("Wrote {manifest_path}");
-    if !env_vars.is_empty() {
-        eprintln!("Expected env vars: {}", env_vars.join(", "));
-        eprintln!("  Pass at start time with: morloc-manager start --env KEY=VALUE");
-    }
     eprintln!("Frozen state written to {output_dir}");
     Ok(())
 }

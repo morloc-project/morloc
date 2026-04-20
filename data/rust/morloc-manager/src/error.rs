@@ -8,7 +8,7 @@ pub enum ManagerError {
     #[error("Configuration not found: {0}")]
     ConfigNotFound(String),
 
-    #[error("Permission denied: {0}. Check file ownership and permissions.")]
+    #[error("Permission denied: {0}")]
     ConfigPermissionDenied(String),
 
     #[error("Invalid configuration in {path}: {msg}")]

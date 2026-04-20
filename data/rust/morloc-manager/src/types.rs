@@ -239,8 +239,9 @@ pub struct FreezeManifest {
     pub programs: Vec<ProgramEntry>,
     pub base_image: String,
     pub env_layer: Option<FrozenEnvLayer>,
-    /// Expected environment variable names (no values — injected at start/run time).
-    #[serde(default)]
+    /// Deprecated: previously held expected env var names. Retained for backward
+    /// compatibility when reading older freeze manifests.
+    #[serde(default, skip_serializing)]
     pub env_vars: Vec<String>,
 }
 
