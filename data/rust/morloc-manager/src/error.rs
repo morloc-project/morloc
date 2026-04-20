@@ -8,7 +8,7 @@ pub enum ManagerError {
     #[error("Configuration not found: {0}")]
     ConfigNotFound(String),
 
-    #[error("Permission denied: {0}. Check file ownership and permissions.")]
+    #[error("Permission denied: {0}")]
     ConfigPermissionDenied(String),
 
     #[error("Invalid configuration in {path}: {msg}")]
@@ -23,7 +23,7 @@ pub enum ManagerError {
     #[error("Environment error: {0}")]
     EnvError(String),
 
-    #[error("Invalid version: {0}. Expected format: MAJOR.MINOR.PATCH")]
+    #[error("Invalid version: {0}. Expected format: MAJOR.MINOR.PATCH. For named tags like 'edge', use --tag instead.")]
     InvalidVersion(String),
 
     #[error("No command specified. Use --shell or provide a command after --.")]

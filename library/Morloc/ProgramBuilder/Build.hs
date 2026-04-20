@@ -23,6 +23,7 @@ import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import qualified Morloc.System as MS
 import qualified System.Directory as SD
+import System.Process (callProcess)
 
 buildProgram :: (Script, [Script]) -> MorlocMonad ()
 buildProgram (nexus, pools) = do
@@ -67,9 +68,7 @@ build s = do
   mapM_ runSysCommand (scriptMake s)
 
 runSysCommand :: SysCommand -> MorlocMonad ()
-runSysCommand (SysExe path) = do
-  p <- liftIO $ SD.getPermissions path
-  liftIO $ SD.setPermissions path (p {SD.executable = True})
+runSysCommand (SysExe path) = liftIO $ callProcess "chmod" ["755", path]
 runSysCommand (SysRun (Code cmd)) = MM.runCommand "runSysCommand" cmd
 runSysCommand other =
   MM.throwSystemError $ "Unsupported SysCommand: " <> pretty (show other)

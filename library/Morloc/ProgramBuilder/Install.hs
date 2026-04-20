@@ -27,14 +27,12 @@ import System.Directory
   , createDirectoryIfMissing
   , doesDirectoryExist
   , doesFileExist
-  , getPermissions
   , listDirectory
   , removeDirectoryRecursive
   , removeFile
-  , setOwnerExecutable
-  , setPermissions
   )
 import System.Environment (lookupEnv)
+import System.Process (callProcess)
 import System.FilePath
   ( isAbsolute
   , makeRelative
@@ -310,11 +308,9 @@ matchGlob _ _ = False
 -- Validation
 -- ======================================================================
 
--- | Make a file executable
+-- | Make a file executable (0755 so group/other can execute too)
 makeExecutable :: FilePath -> IO ()
-makeExecutable path = do
-  p <- getPermissions path
-  setPermissions path (setOwnerExecutable True p)
+makeExecutable path = callProcess "chmod" ["755", path]
 
 {- | Reject include patterns that escape the package root.
 

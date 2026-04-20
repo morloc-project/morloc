@@ -8,6 +8,7 @@ mod selinux;
 mod serve;
 mod types;
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::process::{Command, ExitCode, Stdio};
@@ -45,6 +46,7 @@ fn build_help_template() -> String {
   {b}info{r}       Show configuration and installed environments
   {b}select{r}     Select an environment
   {b}update{r}     Rebuild an environment
+  {b}nuke{r}       Remove all morloc environments
 
 {bu}Deployment{r}
   {b}start{r}      Serve an environment over the network
@@ -72,6 +74,10 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
+    /// Output machine-readable JSON instead of human-readable text
+    #[arg(long, global = true)]
+    json: bool,
+
     /// Print version and exit
     #[arg(long)]
     version: bool,
@@ -96,16 +102,19 @@ enum Cmd {
     },
     /// Build a new morloc environment
     #[command(display_order = 1)]
-    #[command(after_help = "Examples:\n  morloc-manager new\n  morloc-manager new myenv --version 0.73.0\n  morloc-manager new myenv --image ubuntu:22.04 --dockerfile ./Dockerfile\n\nDefault (when --version and --image are both omitted): pulls the :edge tag\nfrom the morloc registry and records the resolved version.\n\nIn non-interactive mode (no TTY), if no name is given, the latest edge\nimage is pulled and the environment is named after the detected morloc\nversion.")]
+    #[command(after_help = "Examples:\n  morloc-manager new\n  morloc-manager new myenv --version 0.73.0\n  morloc-manager new myenv --tag edge\n  morloc-manager new myenv --image ubuntu:22.04 --dockerfile ./Dockerfile\n\nDefault (when --version, --tag, and --image are all omitted): pulls the\n:edge tag from the morloc registry and records the resolved version.\n\nIn non-interactive mode (no TTY), if no name is given, the latest edge\nimage is pulled and the environment is named after the detected morloc\nversion.")]
     New {
         /// Environment name (default: derived from base image version)
         name: Option<String>,
         /// Base image from Docker Hub or a registry
         #[arg(long)]
         image: Option<String>,
-        /// Morloc version (shorthand for --image ghcr.io/.../morloc-full:VERSION)
+        /// Morloc version (MAJOR.MINOR.PATCH, leading 'v' stripped automatically)
         #[arg(long)]
         version: Option<String>,
+        /// Container image tag (e.g., 'edge', 'nightly')
+        #[arg(long, conflicts_with_all = ["version", "image"])]
+        tag: Option<String>,
         /// Dockerfile to layer on top of the base image
         #[arg(long)]
         dockerfile: Option<String>,
@@ -157,6 +166,12 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Start an interactive shell
         #[arg(long)]
         shell: bool,
+        /// Pass environment variable to the container (KEY=VALUE)
+        #[arg(short, long = "env")]
+        env_vars: Vec<String>,
+        /// Read environment variables from a file (one KEY=VALUE per line)
+        #[arg(long)]
+        env_file: Option<String>,
     },
     /// Remove a morloc environment
     #[command(display_order = 3)]
@@ -170,6 +185,20 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Remove even if active (deactivates first)
         #[arg(long)]
         force: bool,
+    },
+    /// Remove all morloc environments
+    #[command(display_order = 8)]
+    #[command(after_help = "Examples:\n  morloc-manager nuke\n  morloc-manager nuke --yes\n  morloc-manager nuke --images\n  sudo morloc-manager nuke --system\n  sudo morloc-manager nuke --system --images --yes")]
+    Nuke {
+        /// Remove system-scope environments instead of local (requires root)
+        #[arg(long)]
+        system: bool,
+        /// Also remove base container images
+        #[arg(long)]
+        images: bool,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
     },
     /// List morloc environments
     #[command(display_order = 4)]
@@ -212,9 +241,12 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Change the base image
         #[arg(long)]
         image: Option<String>,
-        /// Change to a specific morloc version image
+        /// Change to a specific morloc version (MAJOR.MINOR.PATCH, leading 'v' stripped)
         #[arg(long)]
         version: Option<String>,
+        /// Container image tag (e.g., 'edge', 'nightly')
+        #[arg(long, conflicts_with_all = ["version", "image"])]
+        tag: Option<String>,
         /// Replace the Dockerfile
         #[arg(long)]
         dockerfile: Option<String>,
@@ -260,6 +292,15 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Port mapping HOST:CONTAINER (default: 8080:8080)
         #[arg(short, long, value_parser = parse_port)]
         port: Vec<(u16, u16)>,
+        /// Pass environment variable to the container (KEY=VALUE)
+        #[arg(short, long = "env")]
+        env_vars: Vec<String>,
+        /// Read environment variables from a file (one KEY=VALUE per line)
+        #[arg(long)]
+        env_file: Option<String>,
+        /// Replace an already-running serve container
+        #[arg(long)]
+        force: bool,
     },
     /// Stop a running serve container
     #[command(display_order = 21)]
@@ -280,8 +321,10 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Export installed state as a frozen artifact
     #[command(display_order = 23)]
-    #[command(after_help = "Examples:\n  morloc-manager freeze\n  morloc-manager freeze -o ./my-freeze\n\nRequires at least one program compiled with 'morloc make --install'.")]
+    #[command(after_help = "Examples:\n  morloc-manager freeze\n  morloc-manager freeze myenv\n  morloc-manager freeze -o ./my-freeze\n\nRequires at least one program compiled with 'morloc make --install'.")]
     Freeze {
+        /// Environment name (default: active environment)
+        name: Option<String>,
         /// Output directory (default: ./morloc-freeze)
         #[arg(short, long)]
         output: Option<String>,
@@ -310,8 +353,20 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         #[arg(long)]
         rebuild: bool,
     },
-    /// List running serve containers
+    /// Evaluate a morloc expression against a running serve container
     #[command(display_order = 25)]
+    #[command(after_help = "Examples:\n  morloc-manager eval 'add 1 2'\n  morloc-manager eval myenv 'map (add 1) [1,2,3]'\n  morloc-manager eval -p 9090 'greet \"world\"'")]
+    Eval {
+        /// Expression to evaluate (or environment name if two positional args)
+        first: String,
+        /// Expression to evaluate (when first arg is environment name)
+        second: Option<String>,
+        /// Port of the serve container (default: 8080)
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
+    },
+    /// List running serve containers
+    #[command(display_order = 26)]
     #[command(after_help = "Examples:\n  morloc-manager status")]
     Status,
     /// Check environment health and diagnose issues
@@ -326,6 +381,9 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Run checks inside the container (slower, more thorough)
         #[arg(long)]
         deep: bool,
+        /// Treat warnings as errors (non-zero exit on warnings)
+        #[arg(long)]
+        strict: bool,
     },
 }
 
@@ -356,6 +414,44 @@ fn parse_port(s: &str) -> std::result::Result<(u16, u16), String> {
         .parse()
         .map_err(|_| format!("Invalid container port: {}", parts[1]))?;
     Ok((host, container))
+}
+
+/// Parse env vars from --env flags and --env-file, returning (key, value) pairs.
+fn collect_env_vars(
+    env_flags: &[String],
+    env_file: Option<&str>,
+) -> Result<Vec<(String, String)>> {
+    let mut result = Vec::new();
+
+    if let Some(path) = env_file {
+        let contents = std::fs::read_to_string(path).map_err(|e| {
+            ManagerError::EnvError(format!("Cannot read env file {path}: {e}"))
+        })?;
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = trimmed.split_once('=') {
+                result.push((k.to_string(), v.to_string()));
+            }
+        }
+    }
+
+    for entry in env_flags {
+        if let Some((k, v)) = entry.split_once('=') {
+            result.push((k.to_string(), v.to_string()));
+        } else {
+            // Bare key — pass through from host environment
+            if let Ok(v) = std::env::var(entry) {
+                result.push((entry.clone(), v));
+            } else {
+                eprintln!("Warning: env var '{entry}' not set in host environment, skipping");
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 // ======================================================================
@@ -408,10 +504,14 @@ fn main() -> ExitCode {
             .ok();
         return ExitCode::from(2);
     };
-    match dispatch(cli.verbose, cmd) {
+    match dispatch(cli.verbose, cli.json, cmd) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("{err}");
+            if cli.json {
+                println!("{}", serde_json::json!({"error": format!("{err}")}));
+            } else {
+                eprintln!("{err}");
+            }
             if let ManagerError::EngineError { code, .. } = &err {
                 ExitCode::from(*code as u8)
             } else {
@@ -576,7 +676,7 @@ fn warn_podman_additional_stores() {
 // Dispatch
 // ======================================================================
 
-fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
+fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
     match cmd {
         // ---- setup ----
         Cmd::Setup { engine, system } => {
@@ -612,6 +712,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             name,
             image,
             version,
+            tag,
             dockerfile,
             dockerfile_stub,
             force,
@@ -733,10 +834,15 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
             // Step 2: Resolve base image and version
             let (base_image, original_image, morloc_ver) = if let Some(ref ver_str) = version {
-                let ver: Version = ver_str.parse().map_err(|_| {
+                // Strip leading 'v' for convenience (e.g., "v0.77.0" -> "0.77.0")
+                let clean = ver_str.strip_prefix('v').unwrap_or(ver_str);
+                let ver: Version = clean.parse().map_err(|_| {
                     ManagerError::InvalidVersion(ver_str.clone())
                 })?;
                 let img = environment::pull_version_image(resolved_engine, &ver)?;
+                (img, None, Some(ver))
+            } else if let Some(ref t) = tag {
+                let (img, ver) = environment::pull_tagged_image(resolved_engine, t)?;
                 (img, None, Some(ver))
             } else if let Some(ref img) = image {
                 environment::pull_custom_image(resolved_engine, img)?;
@@ -864,6 +970,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 engine: Some(resolved_engine),
                 shm_size: Some(shm_size.unwrap_or_else(|| "512m".to_string())),
                 skip_dockerfile_build: dockerfile_stub,
+                verbose,
             };
 
             environment::apply_environment(&opts)?;
@@ -896,11 +1003,12 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- run ----
-        Cmd::Run { command, shell } => {
+        Cmd::Run { command, shell, env_vars, env_file } => {
             if !shell && command.is_empty() {
                 return Err(ManagerError::NoCommand);
             }
-            run_in_container(verbose, shell, &command).map_err(|e| match e {
+            let user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
+            run_in_container(verbose, shell, &command, &user_env).map_err(|e| match e {
                 ManagerError::EnvironmentNotFound(msg) => ManagerError::EnvironmentNotFound(
                     format!("{msg}. Run 'morloc-manager new' to create an environment")
                 ),
@@ -948,6 +1056,8 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                         if was_active.as_deref() == Some(name.as_str()) {
                             match environment::resolve_active_environment() {
                                 Ok((new_active, _, _)) => {
+                                    // Persist the fallback as the new active environment
+                                    let _ = environment::select_environment(&new_active, Scope::Local);
                                     eprintln!("Removed environment: {name}. Active environment is now: {new_active}");
                                 }
                                 Err(_) => {
@@ -976,6 +1086,143 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             Ok(())
         }
 
+        // ---- nuke ----
+        Cmd::Nuke { system, images, yes } => {
+            let scope = if system { Scope::System } else { Scope::Local };
+            let scope_label = if system { "system" } else { "local" };
+
+            if system {
+                check_system_write_access()?;
+            }
+
+            // Confirm before removing all environments
+            let env_names = cfg::list_env_names(scope);
+            if env_names.is_empty() {
+                eprintln!("No {scope_label} environments found.");
+                return Ok(());
+            }
+
+            if !yes {
+                eprintln!("This will remove {} {scope_label} environment(s):", env_names.len());
+                for n in &env_names {
+                    eprintln!("  {n}");
+                }
+                if io::stdin().is_terminal() {
+                    eprint!("Continue? [y/N] ");
+                    io::stderr().flush().ok();
+                    let mut answer = String::new();
+                    io::stdin().read_line(&mut answer).ok();
+                    if !matches!(answer.trim(), "y" | "yes" | "Y" | "YES") {
+                        eprintln!("Aborted.");
+                        return Ok(());
+                    }
+                } else {
+                    return Err(ManagerError::EnvError(
+                        "nuke requires --yes for non-interactive use".to_string(),
+                    ));
+                }
+            }
+
+            eprintln!("Removing all {scope_label} morloc environments...");
+
+            // Collect env info before removal (configs are deleted during removal)
+            let mut env_list: Vec<(String, ContainerEngine)> = Vec::new();
+            let mut base_images: HashSet<String> = HashSet::new();
+
+            for name in cfg::list_env_names(scope) {
+                if let Ok(ec) = cfg::read_env_config(scope, &name) {
+                    if images {
+                        base_images.insert(ec.base_image.clone());
+                        if let Some(ref orig) = ec.original_image {
+                            base_images.insert(orig.clone());
+                        }
+                    }
+                    env_list.push((name, ec.engine));
+                }
+            }
+
+            if env_list.is_empty() {
+                eprintln!("No {scope_label} environments found.");
+            } else {
+                let mut removed = 0usize;
+                let mut failures: Vec<String> = Vec::new();
+
+                for (name, engine) in &env_list {
+                    eprintln!("Removing environment: {name}...");
+                    match environment::remove_environment(*engine, scope, name) {
+                        Ok(()) => {
+                            eprintln!("  Removed: {name}");
+                            removed += 1;
+                        }
+                        Err(e) => {
+                            eprintln!("  Failed: {name}: {e}");
+                            failures.push(format!("{name}: {e}"));
+                        }
+                    }
+                }
+
+                // Clear active_env in the targeted scope's config
+                let cfg_path = cfg::config_path(scope);
+                if let Ok(cfg_data) = cfg::read_config::<Config>(&cfg_path) {
+                    if cfg_data.active_env.is_some() {
+                        let new_cfg = Config { active_env: None, ..cfg_data };
+                        let _ = cfg::write_config(&cfg_path, &new_cfg);
+                        eprintln!("Cleared active environment.");
+                    }
+                }
+
+                eprintln!("Removed {removed} environment(s).");
+
+                if !failures.is_empty() {
+                    eprintln!();
+                    eprintln!("Failed to remove {} environment(s):", failures.len());
+                    for f in &failures {
+                        eprintln!("  {f}");
+                    }
+                    return Err(ManagerError::EnvError(format!(
+                        "{} of {} removals failed",
+                        failures.len(),
+                        env_list.len()
+                    )));
+                }
+            }
+
+            // Remove base images if --images
+            if images && !base_images.is_empty() {
+                let engine = ensure_engine().unwrap_or(ContainerEngine::Docker);
+                eprintln!("Removing base images...");
+                for img in &base_images {
+                    if container::image_exists_locally(engine, img) {
+                        eprintln!("  Removing image: {img}...");
+                        if container::remove_image(engine, img) {
+                            eprintln!("  Removed: {img}");
+                        } else {
+                            eprintln!("  Failed to remove: {img}");
+                        }
+                    }
+                }
+            }
+
+            // Hint about the other scope
+            let other_scope = if system { Scope::Local } else { Scope::System };
+            let other_envs = cfg::list_env_names(other_scope);
+            if !other_envs.is_empty() {
+                if system {
+                    eprintln!(
+                        "{} local environment(s) remain. Use: morloc-manager nuke",
+                        other_envs.len()
+                    );
+                } else {
+                    eprintln!(
+                        "{} system environment(s) remain. Use: sudo morloc-manager nuke --system",
+                        other_envs.len()
+                    );
+                }
+            }
+
+            Ok(())
+        }
+
         // ---- ls ----
         Cmd::Ls { system, local } => {
             let active_env = cfg::read_active_config()
@@ -990,40 +1237,56 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
             let show_local = !system || local;
             let show_system = !local || system;
-            let mut total = 0;
 
-            if show_local {
+            let local_envs = if show_local {
                 let local_active = if active_in_local { active_str } else { None };
-                let envs = environment::list_environments(Scope::Local, local_active);
-                total += envs.len();
-                for e in envs {
-                    let active_mark = if e.active { " (active)" } else { "" };
-                    let ver_mark = e.morloc_version
-                        .map(|v| format!(" [{}]", v.show()))
-                        .unwrap_or_default();
-                    println!("{}{}{}", e.name, ver_mark, active_mark);
-                }
-            }
-            if show_system {
+                environment::list_environments(Scope::Local, local_active)
+            } else {
+                Vec::new()
+            };
+            let system_envs = if show_system {
                 let system_active = if active_in_local { None } else { active_str };
-                let envs = environment::list_environments(Scope::System, system_active);
-                total += envs.len();
-                if !envs.is_empty() {
-                    if show_local {
-                        println!();
-                    }
-                    println!("System:");
-                    for e in envs {
+                environment::list_environments(Scope::System, system_active)
+            } else {
+                Vec::new()
+            };
+
+            if json {
+                #[derive(serde::Serialize)]
+                struct LsOutput {
+                    local: Vec<environment::EnvInfo>,
+                    system: Vec<environment::EnvInfo>,
+                }
+                let output = LsOutput { local: local_envs, system: system_envs };
+                println!("{}", serde_json::to_string_pretty(&output).unwrap());
+            } else {
+                let total = local_envs.len() + system_envs.len();
+                if !local_envs.is_empty() {
+                    println!("Local environments:");
+                    for e in &local_envs {
                         let active_mark = if e.active { " (active)" } else { "" };
-                        let ver_mark = e.morloc_version
+                        let ver_mark = e.morloc_version.as_ref()
                             .map(|v| format!(" [{}]", v.show()))
                             .unwrap_or_default();
                         println!("  {}{}{}", e.name, ver_mark, active_mark);
                     }
                 }
-            }
-            if total == 0 {
-                println!("No environments found. Create one with: morloc-manager new");
+                if !system_envs.is_empty() {
+                    if !local_envs.is_empty() {
+                        println!();
+                    }
+                    println!("System environments:");
+                    for e in &system_envs {
+                        let active_mark = if e.active { " (active)" } else { "" };
+                        let ver_mark = e.morloc_version.as_ref()
+                            .map(|v| format!(" [{}]", v.show()))
+                            .unwrap_or_default();
+                        println!("  {}{}{}", e.name, ver_mark, active_mark);
+                    }
+                }
+                if total == 0 {
+                    println!("No environments found. Create one with: morloc-manager new");
+                }
             }
             Ok(())
         }
@@ -1048,29 +1311,73 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     .and_then(|c| c.active_env)
                     .as_deref() == Some(env_name.as_str());
 
-                println!("Name:           {}", ec.name);
-                println!("Scope:          {}", match scope { Scope::Local => "local", Scope::System => "system" });
-                println!("Active:         {}", if active { "yes" } else { "no" });
-                println!("Base image:     {}", ec.base_image);
-                if let Some(ref img) = ec.built_image {
-                    println!("Built image:    {img}");
+                if json {
+                    #[derive(serde::Serialize)]
+                    struct InfoDetail {
+                        name: String,
+                        scope: String,
+                        active: bool,
+                        base_image: String,
+                        built_image: Option<String>,
+                        morloc_version: Option<Version>,
+                        engine: String,
+                        shm_size: String,
+                        dockerfile: Option<String>,
+                        flags: Vec<String>,
+                        data_dir: String,
+                    }
+                    let df_str = ec.dockerfile.as_ref().map(|_| {
+                        let df_path = cfg::env_dockerfile_path(scope, &env_name);
+                        df_path.display().to_string()
+                    });
+                    let flags_path = cfg::env_flags_path(scope, &env_name);
+                    let flags = cfg::read_flags_file_lines(&flags_path);
+                    let output = InfoDetail {
+                        name: ec.name.clone(),
+                        scope: match scope { Scope::Local => "local", Scope::System => "system" }.to_string(),
+                        active,
+                        base_image: ec.base_image.clone(),
+                        built_image: ec.built_image.clone(),
+                        morloc_version: ec.morloc_version.clone(),
+                        engine: display_engine(ec.engine).to_string(),
+                        shm_size: ec.shm_size.clone(),
+                        dockerfile: df_str,
+                        flags,
+                        data_dir: data_dir.display().to_string(),
+                    };
+                    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                } else {
+                    println!("Name:           {}", ec.name);
+                    println!("Scope:          {}", match scope { Scope::Local => "local", Scope::System => "system" });
+                    println!("Active:         {}", if active { "yes" } else { "no" });
+                    println!("Base image:     {}", ec.base_image);
+                    if let Some(ref img) = ec.built_image {
+                        println!("Built image:    {img}");
+                    }
+                    if let Some(ref ver) = ec.morloc_version {
+                        println!("Morloc version: {}", ver.show());
+                    }
+                    println!("Engine:         {}", display_engine(ec.engine));
+                    println!("SHM size:       {}", ec.shm_size);
+                    println!("Dockerfile:     {}", match ec.dockerfile {
+                        Some(_) => {
+                            let df_path = cfg::env_dockerfile_path(scope, &env_name);
+                            if df_path.exists() {
+                                df_path.display().to_string()
+                            } else {
+                                format!("{} (MISSING)", df_path.display())
+                            }
+                        }
+                        None => "none".to_string(),
+                    });
+                    let flags_path = cfg::env_flags_path(scope, &env_name);
+                    println!("Flags:          {}", flags_path.display());
+                    let flags = cfg::read_flags_file_lines(&flags_path);
+                    for flag in &flags {
+                        println!("  {flag}");
+                    }
+                    println!("Data dir:       {}", data_dir.display());
                 }
-                if let Some(ref ver) = ec.morloc_version {
-                    println!("Morloc version: {}", ver.show());
-                }
-                println!("Engine:         {}", display_engine(ec.engine));
-                println!("SHM size:       {}", ec.shm_size);
-                println!("Dockerfile:     {}", match ec.dockerfile {
-                    Some(_) => cfg::env_dockerfile_path(scope, &env_name).display().to_string(),
-                    None => "none".to_string(),
-                });
-                let flags_path = cfg::env_flags_path(scope, &env_name);
-                println!("Flags:          {}", flags_path.display());
-                let flags = cfg::read_flags_file_lines(&flags_path);
-                for flag in &flags {
-                    println!("  {flag}");
-                }
-                println!("Data dir:       {}", data_dir.display());
             } else {
                 // Overview
                 let local_cfg = cfg::read_config::<Config>(&cfg::config_path(Scope::Local)).ok();
@@ -1087,61 +1394,99 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     SELinuxMode::Disabled => "not detected",
                 };
 
-                println!("Active:         {active_env}");
-                println!("Local engine:   {}",
-                    local_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
-                println!("System engine:  {}",
-                    system_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
-                println!("SELinux:        {se_str}");
-
-                let dirs = [
-                    ("Config (local)", cfg::config_dir(Scope::Local)),
-                    ("Data (local)", cfg::data_dir(Scope::Local)),
-                    ("Config (system)", cfg::config_dir(Scope::System)),
-                    ("Data (system)", cfg::data_dir(Scope::System)),
-                ];
-                println!("\nDirectories:");
-                for (label, path) in &dirs {
-                    let status = if path.is_dir() { "exists" } else { "not found" };
-                    println!("  {:<20} {} ({})", label, path.display(), status);
-                }
-
-                let active_str = if active_env == "none" { None } else { Some(active_env.as_str()) };
-
-                // Check if active env lives in local scope (local takes priority)
-                let active_in_local = active_str
-                    .map(|name| cfg::env_config_path(Scope::Local, name).is_file())
-                    .unwrap_or(false);
-
-                let local_envs = environment::list_environments(Scope::Local, active_str);
-                println!("\nLocal environments:");
-                if local_envs.is_empty() {
-                    println!("  (none)");
-                } else {
-                    for e in &local_envs {
-                        let active_mark = if e.active { " (active)" } else { "" };
-                        let ver_mark = e.morloc_version.as_ref()
-                            .map(|v| format!(" [{}]", v.show()))
-                            .unwrap_or_default();
-                        println!("  {}{}{}", e.name, ver_mark, active_mark);
+                if json {
+                    #[derive(serde::Serialize)]
+                    struct DirInfo { path: String, exists: bool }
+                    #[derive(serde::Serialize)]
+                    struct InfoOverview {
+                        active: String,
+                        local_engine: String,
+                        system_engine: String,
+                        selinux: String,
+                        directories: std::collections::BTreeMap<String, DirInfo>,
+                        local: Vec<environment::EnvInfo>,
+                        system: Vec<environment::EnvInfo>,
                     }
-                }
+                    let active_str = if active_env == "none" { None } else { Some(active_env.as_str()) };
+                    let mut directories = std::collections::BTreeMap::new();
+                    for (label, path) in [
+                        ("config_local", cfg::config_dir(Scope::Local)),
+                        ("data_local", cfg::data_dir(Scope::Local)),
+                        ("config_system", cfg::config_dir(Scope::System)),
+                        ("data_system", cfg::data_dir(Scope::System)),
+                    ] {
+                        directories.insert(label.to_string(), DirInfo {
+                            path: path.display().to_string(),
+                            exists: path.is_dir(),
+                        });
+                    }
+                    let output = InfoOverview {
+                        active: active_env.clone(),
+                        local_engine: local_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset").to_string(),
+                        system_engine: system_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset").to_string(),
+                        selinux: se_str.to_string(),
+                        directories,
+                        local: environment::list_environments(Scope::Local, active_str),
+                        system: environment::list_environments(Scope::System, active_str),
+                    };
+                    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                } else {
+                    println!("Active:         {active_env}");
+                    println!("Local engine:   {}",
+                        local_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
+                    println!("System engine:  {}",
+                        system_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
+                    println!("SELinux:        {se_str}");
 
-                let system_envs = environment::list_environments(Scope::System, active_str);
-                if !system_envs.is_empty() {
-                    println!("\nSystem environments:");
-                    for e in &system_envs {
-                        let active_mark = if e.active && active_in_local {
-                            " (active - shadowed)"
-                        } else if e.active {
-                            " (active)"
-                        } else {
-                            ""
-                        };
-                        let ver_mark = e.morloc_version.as_ref()
-                            .map(|v| format!(" [{}]", v.show()))
-                            .unwrap_or_default();
-                        println!("  {}{}{}", e.name, ver_mark, active_mark);
+                    let dirs = [
+                        ("Config (local)", cfg::config_dir(Scope::Local)),
+                        ("Data (local)", cfg::data_dir(Scope::Local)),
+                        ("Config (system)", cfg::config_dir(Scope::System)),
+                        ("Data (system)", cfg::data_dir(Scope::System)),
+                    ];
+                    println!("\nDirectories:");
+                    for (label, path) in &dirs {
+                        let status = if path.is_dir() { "exists" } else { "not found" };
+                        println!("  {:<20} {} ({})", label, path.display(), status);
+                    }
+
+                    let active_str = if active_env == "none" { None } else { Some(active_env.as_str()) };
+
+                    // Check if active env lives in local scope (local takes priority)
+                    let active_in_local = active_str
+                        .map(|name| cfg::env_config_path(Scope::Local, name).is_file())
+                        .unwrap_or(false);
+
+                    let local_envs = environment::list_environments(Scope::Local, active_str);
+                    println!("\nLocal environments:");
+                    if local_envs.is_empty() {
+                        println!("  (none)");
+                    } else {
+                        for e in &local_envs {
+                            let active_mark = if e.active { " (active)" } else { "" };
+                            let ver_mark = e.morloc_version.as_ref()
+                                .map(|v| format!(" [{}]", v.show()))
+                                .unwrap_or_default();
+                            println!("  {}{}{}", e.name, ver_mark, active_mark);
+                        }
+                    }
+
+                    let system_envs = environment::list_environments(Scope::System, active_str);
+                    if !system_envs.is_empty() {
+                        println!("\nSystem environments:");
+                        for e in &system_envs {
+                            let active_mark = if e.active && active_in_local {
+                                " (active - shadowed)"
+                            } else if e.active {
+                                " (active)"
+                            } else {
+                                ""
+                            };
+                            let ver_mark = e.morloc_version.as_ref()
+                                .map(|v| format!(" [{}]", v.show()))
+                                .unwrap_or_default();
+                            println!("  {}{}{}", e.name, ver_mark, active_mark);
+                        }
                     }
                 }
             }
@@ -1163,7 +1508,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
         // ---- update ----
         Cmd::Update {
-            name, image, version, dockerfile, dockerfile_stub, force, include, flagfile,
+            name, image, version, tag, dockerfile, dockerfile_stub, force, include, flagfile,
             engine_arg, engine, shm_size, no_build, reinit, non_interactive: _,
         } => {
             let (env_name, env_scope) = match name {
@@ -1229,13 +1574,18 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 ));
             }
 
-            // Resolve base image if --version or --image provided
+            // Resolve base image if --version, --tag, or --image provided
             let (base_image, original_image, morloc_ver) = if let Some(ref ver_str) = version {
                 let ec = cfg::read_env_config(env_scope, &env_name)?;
-                let ver: Version = ver_str.parse().map_err(|_| {
+                let clean = ver_str.strip_prefix('v').unwrap_or(ver_str);
+                let ver: Version = clean.parse().map_err(|_| {
                     ManagerError::InvalidVersion(ver_str.clone())
                 })?;
                 let img = environment::pull_version_image(ec.engine, &ver)?;
+                (Some(img), None, Some(ver))
+            } else if let Some(ref t) = tag {
+                let ec = cfg::read_env_config(env_scope, &env_name)?;
+                let (img, ver) = environment::pull_tagged_image(ec.engine, t)?;
                 (Some(img), None, Some(ver))
             } else if let Some(ref img) = image {
                 let ec = cfg::read_env_config(env_scope, &env_name)?;
@@ -1262,6 +1612,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 engine: engine.map(|e| e.into()),
                 shm_size,
                 skip_dockerfile_build: no_build || dockerfile_stub,
+                verbose,
             };
             environment::apply_environment(&opts)?;
 
@@ -1271,10 +1622,22 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 eprintln!("Edit it, then run: morloc-manager update {env_name}");
             }
 
-            // --version and --image imply --reinit (ABI may have changed)
-            if reinit || version.is_some() || image.is_some() {
+            // --version, --tag, and --image imply --reinit (ABI may have changed)
+            if reinit || version.is_some() || tag.is_some() || image.is_some() {
                 // Re-read the config (apply_environment may have updated it)
                 let ec = cfg::read_env_config(env_scope, &env_name)?;
+
+                // Check for running serve container -- reinit replaces morloc-nexus
+                // which will fail with "Text file busy" if the container has it open.
+                let serve_name = serve::serve_container_name(&env_name);
+                let running = serve::find_running_serve_containers(ec.engine);
+                if running.iter().any(|n| n == &serve_name) {
+                    return Err(ManagerError::EnvError(format!(
+                        "Cannot reinit environment '{env_name}' while its serve container is running.\n  \
+                         Run 'morloc-manager stop {env_name}' first."
+                    )));
+                }
+
                 run_morloc_init_for(Some((env_name.clone(), env_scope, ec)), verbose)?;
             }
 
@@ -1293,7 +1656,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- freeze ----
-        Cmd::Freeze { output, force } => {
+        Cmd::Freeze { name, output, force } => {
             let output_dir = output.as_deref().unwrap_or("./morloc-freeze");
             // Protect against silently overwriting a previous freeze
             let existing_tar = std::path::Path::new(output_dir).join("state.tar.gz");
@@ -1304,7 +1667,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                     existing_tar.display()
                 )));
             }
-            let (env_name, env_scope, ec) = environment::resolve_active_environment()?;
+            let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
             let engine = ec.engine;
             // Detect the version from the container binary for sanity check.
             // The morloc binary can't report prerelease tags (stack limitation),
@@ -1341,11 +1704,28 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
 
         // ---- unfreeze ----
         Cmd::Unfreeze { from, tag, base, engine: engine_override, rebuild } => {
-            if !std::path::Path::new(&from).is_file() {
-                return Err(ManagerError::UnfreezeError(format!(
-                    "Input file not found: {from}"
-                )));
-            }
+            let from = {
+                let p = std::path::Path::new(&from);
+                if p.is_dir() {
+                    let tar = p.join("state.tar.gz");
+                    if tar.is_file() {
+                        tar.to_string_lossy().to_string()
+                    } else {
+                        return Err(ManagerError::UnfreezeError(format!(
+                            "Directory '{}' does not contain state.tar.gz. \
+                             Pass the path to state.tar.gz directly, or the directory containing it.",
+                            from
+                        )));
+                    }
+                } else if p.is_file() {
+                    from
+                } else {
+                    return Err(ManagerError::UnfreezeError(format!(
+                        "Input not found: {from}. \
+                         Pass the path to state.tar.gz or the directory containing it."
+                    )));
+                }
+            };
             // Read version and engine from the freeze manifest so unfreeze
             // works on deployment machines with no morloc environments.
             let tarball_dir = std::path::Path::new(&from)
@@ -1360,19 +1740,36 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             let engine = match engine_override {
                 Some(EngineArg::Docker) => ContainerEngine::Docker,
                 Some(EngineArg::Podman) => ContainerEngine::Podman,
-                None => ensure_engine()?,
+                None => {
+                    let e = ensure_engine()?;
+                    eprintln!(
+                        "Note: using {} engine from global config. Override with --engine if needed.",
+                        display_engine(e)
+                    );
+                    e
+                }
             };
             serve::build_serve_image(engine, verbose, &from, &tag, manifest.morloc_version, base.as_deref(), rebuild, &manifest.programs)
         }
 
         // ---- start ----
-        Cmd::Start { name, port } => {
+        Cmd::Start { name, port, env_vars, env_file, force } => {
             let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
             let image = ec.active_image().to_string();
             let data_dir = cfg::env_data_dir(env_scope, &env_name);
-            let container_name = format!("morloc-serve-{env_name}");
-            // Warn if we're about to replace a running container
+            let container_name = serve::serve_container_name(&env_name);
+            // Warn if a Dockerfile is configured but the layered image hasn't been built
+            if ec.dockerfile.is_some() && ec.built_image.is_none() {
+                eprintln!("Warning: Dockerfile is configured but image has not been built. Using base image.");
+                eprintln!("  Run 'morloc-manager update {env_name}' to build the Dockerfile layer.");
+            }
+            // Refuse to replace a running container unless --force is passed
             if container::container_exists(ec.engine, &container_name) {
+                if !force {
+                    return Err(ManagerError::EnvError(format!(
+                        "Serve container already running for '{env_name}'. Use --force to replace."
+                    )));
+                }
                 eprintln!("Warning: replacing existing serve container '{container_name}'");
             }
             let port_mappings = if port.is_empty() {
@@ -1382,25 +1779,26 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             };
             let flags_path = cfg::env_flags_path(env_scope, &env_name);
             let extra_flags = cfg::read_flags_file(&flags_path);
+            let user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
             serve::serve_environment(
                 ec.engine, verbose, &image,
                 &data_dir.to_string_lossy(), &container_name,
                 &port_mappings, &extra_flags, &Some(ec.shm_size.clone()),
+                &user_env,
             )
         }
 
         // ---- stop ----
         Cmd::Stop { name } => {
             let (env_name, _, ec) = resolve_env_or_active(name)?;
-            let container_name = format!("morloc-serve-{env_name}");
+            let container_name = serve::serve_container_name(&env_name);
             if crate::container::container_exists(ec.engine, &container_name) {
                 serve::stop_serve_container(ec.engine, verbose, &container_name)?;
                 eprintln!("Stopped serving environment: {env_name}");
             } else {
-                // Fallback: scan for running serve containers
-                let (found_name, found_engine) = find_running_serve_container()?;
-                serve::stop_serve_container(found_engine, verbose, &found_name)?;
-                eprintln!("Stopped {found_name} (active env '{env_name}' was not serving)");
+                return Err(ManagerError::EnvError(
+                    format!("No serve container running for environment '{env_name}'")
+                ));
             }
             Ok(())
         }
@@ -1409,7 +1807,13 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
         Cmd::Logs { name, follow } => {
             let (container_name, engine) = if let Some(ref n) = name {
                 let (_, _, ec) = resolve_env_or_active(Some(n.clone()))?;
-                (format!("morloc-serve-{n}"), ec.engine)
+                let cname = serve::serve_container_name(n);
+                if !container::container_exists(ec.engine, &cname) {
+                    return Err(ManagerError::EnvError(
+                        format!("No serve container running for environment '{n}'")
+                    ));
+                }
+                (cname, ec.engine)
             } else {
                 find_running_serve_container()?
             };
@@ -1422,11 +1826,16 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 cmd_args.push("-f");
             }
             cmd_args.push(&container_name);
+            // Log content is the primary data of this command, so both the
+            // container's original stdout and stderr should go to our stdout.
+            // docker/podman logs preserves the original stream split; we merge
+            // them so that `morloc-manager logs | grep ERROR` works.
+            let stdout_handle = std::io::stdout();
             let status = std::process::Command::new(exe)
                 .args(&cmd_args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
+                .stderr(Stdio::from(stdout_handle))
                 .status()
                 .map_err(|e| ManagerError::EnvError(format!("Failed to run {exe} logs: {e}")))?;
             if !status.success() {
@@ -1439,12 +1848,54 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             Ok(())
         }
 
+        // ---- eval ----
+        Cmd::Eval { first, second, port } => {
+            let expr = if let Some(ref expr_arg) = second {
+                // first is env name — validate it exists and its serve container is running
+                let (env_name, _, ec) = resolve_env_or_active(Some(first))?;
+                let container_name = serve::serve_container_name(&env_name);
+                if !container::container_exists(ec.engine, &container_name) {
+                    return Err(ManagerError::EnvError(format!(
+                        "No serve container running for '{env_name}'. Start with: morloc-manager start {env_name}"
+                    )));
+                }
+                expr_arg.clone()
+            } else {
+                first
+            };
+            use std::io::{Read as IoRead, Write as IoWrite};
+            let body = format!("{{\"expr\":{}}}", serde_json::to_string(&expr).unwrap_or_default());
+            let request = format!(
+                "POST /eval HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            let addr = format!("127.0.0.1:{port}");
+            let mut stream = std::net::TcpStream::connect(&addr).map_err(|e| {
+                ManagerError::EnvError(format!(
+                    "Cannot connect to serve container on {addr}: {e}\n  Is a serve container running? Start with: morloc-manager start"
+                ))
+            })?;
+            stream.write_all(request.as_bytes()).map_err(|e| {
+                ManagerError::EnvError(format!("Failed to send request: {e}"))
+            })?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response).map_err(|e| {
+                ManagerError::EnvError(format!("Failed to read response: {e}"))
+            })?;
+            // Extract body from HTTP response (after \r\n\r\n)
+            if let Some(pos) = response.find("\r\n\r\n") {
+                let body = &response[pos + 4..];
+                println!("{body}");
+            } else {
+                println!("{response}");
+            }
+            Ok(())
+        }
+
         // ---- status ----
         Cmd::Status => {
-            // Only show engines that have running/stopped serve containers.
-            // Don't show "[podman] No containers" when only Docker is configured.
+            let mut all_containers: Vec<serve::ServeContainerInfo> = Vec::new();
             let mut any_engine = false;
-            let mut any_containers = false;
             for engine in [ContainerEngine::Podman, ContainerEngine::Docker] {
                 let exe = match engine {
                     ContainerEngine::Podman => "podman",
@@ -1452,27 +1903,32 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
                 };
                 if which(exe) {
                     any_engine = true;
-                    let containers = serve::find_running_serve_containers(engine);
-                    if !containers.is_empty() {
-                        if any_containers {
-                            println!();
-                        }
-                        let _ = serve::list_serve_containers(engine, verbose);
-                        any_containers = true;
+                    if let Ok(containers) = serve::query_serve_containers(engine, verbose) {
+                        all_containers.extend(containers);
                     }
                 }
             }
             if !any_engine {
                 return Err(ManagerError::EngineNotFound);
             }
-            if !any_containers {
+            if json {
+                #[derive(serde::Serialize)]
+                struct StatusOutput { containers: Vec<serve::ServeContainerInfo> }
+                let output = StatusOutput { containers: all_containers };
+                println!("{}", serde_json::to_string_pretty(&output).unwrap());
+            } else if all_containers.is_empty() {
                 println!("No morloc serve containers running.");
+            } else {
+                println!("Running servers:");
+                for c in &all_containers {
+                    println!("  {}  {}  ({})  [{}]", c.name, c.ports, c.env, c.status);
+                }
             }
             Ok(())
         }
 
         // ---- doctor ----
-        Cmd::Doctor { name, system, deep } => {
+        Cmd::Doctor { name, system, deep, strict } => {
             let (env_name, env_scope, ec) = if let Some(ref n) = name {
                 let s = if system { Scope::System } else { cfg::find_env_scope(n)? };
                 let c = cfg::read_env_config(s, n)?;
@@ -1480,7 +1936,7 @@ fn dispatch(verbose: bool, cmd: Cmd) -> Result<()> {
             } else {
                 resolve_env_or_active(None)?
             };
-            doctor::doctor(ec.engine, verbose, &env_name, env_scope, &ec, deep)
+            doctor::doctor(ec.engine, verbose, &env_name, env_scope, &ec, deep, strict, json)
         }
 
     }
@@ -1528,8 +1984,9 @@ fn run_in_container(
     verbose: bool,
     shell: bool,
     args: &[String],
+    user_env: &[(String, String)],
 ) -> Result<()> {
-    run_in_container_for(None, verbose, shell, args)
+    run_in_container_for(None, verbose, shell, args, user_env)
 }
 
 fn run_in_container_for(
@@ -1537,6 +1994,7 @@ fn run_in_container_for(
     verbose: bool,
     shell: bool,
     args: &[String],
+    user_env: &[(String, String)],
 ) -> Result<()> {
     let (env_name, env_scope, ec) = match target {
         Some(t) => t,
@@ -1546,6 +2004,12 @@ fn run_in_container_for(
     let image = ec.active_image().to_string();
     let data_dir = cfg::env_data_dir(env_scope, &env_name);
     let v_data_dir = data_dir.to_string_lossy().to_string();
+
+    // Warn if a Dockerfile is configured but the layered image hasn't been built
+    if ec.dockerfile.is_some() && ec.built_image.is_none() {
+        eprintln!("Warning: Dockerfile is configured but image has not been built. Using base image.");
+        eprintln!("  Run 'morloc-manager update {env_name}' to build the Dockerfile layer.");
+    }
 
     // Fail fast with a clear message if docker socket is unreachable
     require_docker_socket(engine)?;
@@ -1583,6 +2047,15 @@ fn run_in_container_for(
         .to_string_lossy()
         .to_string();
 
+    // Refuse to run from the root directory — container engines cannot
+    // bind-mount "/" and the resulting error is opaque.
+    if !shell && cwd == "/" {
+        return Err(ManagerError::EnvError(
+            "Cannot run from the root directory (/). \
+             Change to a subdirectory first (e.g., cd /tmp).".to_string()
+        ));
+    }
+
     // Read flags from the environment's flags file
     let flags_path = cfg::env_flags_path(env_scope, &env_name);
     let extra_flags = cfg::read_flags_file(&flags_path);
@@ -1594,7 +2067,7 @@ fn run_in_container_for(
         selinux::validate_mount_path(&cwd)?;
         run_with_config(
             engine, verbose, &image, &v_data_dir, &home, &cwd, suffix,
-            shell, args, false, &ec.shm_size, &extra_flags,
+            shell, args, false, &ec.shm_size, &extra_flags, user_env,
         )
     } else {
         let (cwd_final, skip_work_mount) = if is_home_dir && !suffix.is_empty() && !is_init {
@@ -1607,7 +2080,7 @@ fn run_in_container_for(
         };
         run_with_config(
             engine, verbose, &image, &v_data_dir, &home, &cwd_final, suffix,
-            shell, args, is_init || skip_work_mount, &ec.shm_size, &extra_flags,
+            shell, args, is_init || skip_work_mount, &ec.shm_size, &extra_flags, user_env,
         )
     }
 }
@@ -1625,6 +2098,7 @@ fn run_with_config(
     is_init: bool,
     shm_size: &str,
     extra_flags: &[String],
+    user_env: &[(String, String)],
 ) -> Result<()> {
     if shell {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -1651,7 +2125,7 @@ fn run_with_config(
     } else {
         cwd.to_string()
     };
-    let env_vars = vec![
+    let mut env_vars = vec![
         ("HOME".to_string(), home.to_string()),
         ("MORLOC_HOME".to_string(), mh.to_string()),
         (
@@ -1659,6 +2133,7 @@ fn run_with_config(
             format!("{mh}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
         ),
     ];
+    env_vars.extend(user_env.iter().cloned());
     let cmd = if shell {
         Some(vec!["/bin/bash".to_string()])
     } else if args.is_empty() {
@@ -1707,7 +2182,7 @@ fn run_morloc_init_for(
         ["morloc", "init", "-f", "-q"].iter().map(|s| s.to_string()).collect()
     };
     eprintln!("Initializing morloc (this may take several minutes)...");
-    run_in_container_for(target, verbose, false, &init_args)
+    run_in_container_for(target, verbose, false, &init_args, &[])
 }
 
 fn normalize_trailing(p: &str) -> String {
@@ -1905,8 +2380,9 @@ mod tests {
                 name: "ml".to_string(),
                 dockerfile: "FROM scratch".to_string(),
                 content_hash: "abc".to_string(),
-                image_digest: None,
+                image_tag: None,
             }),
+            env_vars: Vec::new(),
         };
         cfg::write_config(&path, &fm).unwrap();
         let fm2: FreezeManifest = cfg::read_config(&path).unwrap();
@@ -1914,6 +2390,27 @@ mod tests {
         assert_eq!(fm2.modules.len(), 1);
         assert_eq!(fm2.programs.len(), 1);
         assert_eq!(fm2.programs[0].commands, vec!["hello", "compute"]);
+        // env_vars is no longer written but can still be read from old manifests
+        assert!(fm2.env_vars.is_empty());
+    }
+
+    #[test]
+    fn freeze_manifest_reads_legacy_env_vars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.json");
+        // Simulate an old manifest that included env_vars
+        let json = r#"{
+            "morloc_version": {"major":0,"minor":67,"patch":0,"pre":null},
+            "frozen_at": "2025-01-01T00:00:00Z",
+            "modules": [],
+            "programs": [],
+            "base_image": "morloc-full:0.67.0",
+            "env_layer": null,
+            "env_vars": ["API_KEY", "DB_URL"]
+        }"#;
+        std::fs::write(&path, json).unwrap();
+        let fm: FreezeManifest = cfg::read_config(&path).unwrap();
+        assert_eq!(fm.env_vars, vec!["API_KEY", "DB_URL"]);
     }
 
     // ---- Config flags tests ----

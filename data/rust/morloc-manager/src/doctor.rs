@@ -10,34 +10,87 @@ use crate::types::*;
 
 const MANIFEST_MARKER: &str = "### MANIFEST ###";
 
+#[derive(serde::Serialize)]
+pub struct CheckResult {
+    pub category: String,
+    pub result: String,
+    pub message: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct DoctorSummary {
+    pub ok: u32,
+    pub warnings: u32,
+    pub errors: u32,
+}
+
 struct Counts {
     ok: u32,
     warn: u32,
     fail: u32,
+    json_mode: bool,
+    current_category: String,
+    checks: Vec<CheckResult>,
 }
 
 impl Counts {
-    fn new() -> Self {
-        Self { ok: 0, warn: 0, fail: 0 }
+    fn new(json_mode: bool) -> Self {
+        Self { ok: 0, warn: 0, fail: 0, json_mode, current_category: String::new(), checks: Vec::new() }
+    }
+
+    fn set_category(&mut self, cat: &str) {
+        self.current_category = cat.to_string();
     }
 
     fn pass(&mut self, msg: &str) {
         self.ok += 1;
-        println!("  [ok] {msg}");
+        if self.json_mode {
+            self.checks.push(CheckResult {
+                category: self.current_category.clone(),
+                result: "ok".to_string(),
+                message: msg.to_string(),
+            });
+        } else {
+            println!("  [ok] {msg}");
+        }
     }
 
     fn warn(&mut self, msg: &str) {
         self.warn += 1;
-        println!("  [!!] {msg}");
+        if self.json_mode {
+            self.checks.push(CheckResult {
+                category: self.current_category.clone(),
+                result: "warning".to_string(),
+                message: msg.to_string(),
+            });
+        } else {
+            println!("  [!!] {msg}");
+        }
     }
 
     fn fail(&mut self, msg: &str) {
         self.fail += 1;
-        println!("  [EE] {msg}");
+        if self.json_mode {
+            self.checks.push(CheckResult {
+                category: self.current_category.clone(),
+                result: "error".to_string(),
+                message: msg.to_string(),
+            });
+        } else {
+            println!("  [EE] {msg}");
+        }
     }
 
-    fn skip(&self, msg: &str) {
-        println!("  [--] {msg}");
+    fn skip(&mut self, msg: &str) {
+        if self.json_mode {
+            self.checks.push(CheckResult {
+                category: self.current_category.clone(),
+                result: "skipped".to_string(),
+                message: msg.to_string(),
+            });
+        } else {
+            println!("  [--] {msg}");
+        }
     }
 }
 
@@ -48,6 +101,8 @@ pub fn doctor(
     scope: Scope,
     ec: &EnvironmentConfig,
     deep: bool,
+    strict: bool,
+    json_mode: bool,
 ) -> Result<()> {
     let scope_str = match scope {
         Scope::Local => "local",
@@ -58,43 +113,74 @@ pub fn doctor(
         ContainerEngine::Podman => "podman",
     };
 
-    println!("Environment: {env_name} ({scope_str})");
-    println!("Engine:      {engine_str}");
-    println!();
+    if !json_mode {
+        println!("Environment: {env_name} ({scope_str})");
+        println!("Engine:      {engine_str}");
+        println!();
+    }
 
-    let mut c = Counts::new();
+    let mut c = Counts::new(json_mode);
     let data_dir = cfg::env_data_dir(scope, env_name);
 
     // ==== Prerequisites ====
-    println!("Prerequisites");
+    if !json_mode { println!("Prerequisites"); }
+    c.set_category("prerequisites");
     check_engine(&mut c, engine);
     check_base_image(&mut c, engine, &ec.base_image);
-    check_built_image(&mut c, engine, ec);
+    check_built_image(&mut c, engine, ec, scope, env_name);
     check_data_dirs(&mut c, &data_dir);
+    check_file_readability(&mut c, &data_dir);
 
     // ==== Manifests ====
-    println!("\nManifests");
+    if !json_mode { println!("\nManifests"); }
+    c.set_category("manifests");
     check_manifests(&mut c, &data_dir, ec.morloc_version.as_ref());
 
     // ==== Deep checks ====
+    c.set_category("deep");
     if deep {
-        println!("\nDeep checks");
+        if !json_mode { println!("\nDeep checks"); }
         check_morloc_version(&mut c, engine, ec);
         check_programs_deep(&mut c, engine, verbose, ec, &data_dir);
     } else {
-        println!("\nDeep checks");
+        if !json_mode { println!("\nDeep checks"); }
         c.skip("Use --deep to run container-side checks");
     }
 
-    // ==== Summary ====
-    println!();
-    println!(
-        "{} passed, {} warnings, {} errors",
-        c.ok, c.warn, c.fail
-    );
+    let fail_count = c.fail;
+    let warn_count = c.warn;
 
-    if c.fail > 0 {
-        return Err(crate::error::ManagerError::DoctorFailed(c.fail));
+    if json_mode {
+        #[derive(serde::Serialize)]
+        struct DoctorOutput {
+            environment: String,
+            scope: String,
+            engine: String,
+            checks: Vec<CheckResult>,
+            summary: DoctorSummary,
+        }
+        let output = DoctorOutput {
+            environment: env_name.to_string(),
+            scope: scope_str.to_string(),
+            engine: engine_str.to_string(),
+            checks: c.checks,
+            summary: DoctorSummary { ok: c.ok, warnings: warn_count, errors: fail_count },
+        };
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+    } else {
+        // ==== Summary ====
+        println!();
+        println!(
+            "{} passed, {} warnings, {} errors",
+            c.ok, warn_count, fail_count
+        );
+    }
+
+    if fail_count > 0 {
+        return Err(crate::error::ManagerError::DoctorFailed(fail_count));
+    }
+    if strict && warn_count > 0 {
+        return Err(crate::error::ManagerError::DoctorFailed(warn_count));
     }
     Ok(())
 }
@@ -105,8 +191,12 @@ pub fn doctor(
 
 fn check_engine(c: &mut Counts, engine: ContainerEngine) {
     let exe = engine_executable(engine);
+    let fmt = match engine {
+        ContainerEngine::Podman => "{{.Version.Version}}",
+        ContainerEngine::Docker => "{{.ServerVersion}}",
+    };
     let output = Command::new(exe)
-        .args(["info", "--format", "{{.ServerVersion}}"])
+        .args(["info", "--format", fmt])
         .output();
     match output {
         Ok(o) if o.status.success() => {
@@ -142,8 +232,18 @@ fn check_base_image(c: &mut Counts, engine: ContainerEngine, base_image: &str) {
     }
 }
 
-fn check_built_image(c: &mut Counts, engine: ContainerEngine, ec: &EnvironmentConfig) {
+fn check_built_image(c: &mut Counts, engine: ContainerEngine, ec: &EnvironmentConfig, scope: Scope, env_name: &str) {
     if ec.dockerfile.is_none() {
+        return;
+    }
+    // Check if the Dockerfile file itself still exists
+    let df_path = cfg::env_dockerfile_path(scope, env_name);
+    if !df_path.exists() {
+        c.warn(&format!(
+            "Dockerfile configured but file is missing: {}\n       \
+             Remove stale config or recreate the file, then run: morloc-manager update",
+            df_path.display()
+        ));
         return;
     }
     match &ec.built_image {
@@ -181,6 +281,49 @@ fn check_data_dirs(c: &mut Counts, data_dir: &Path) {
              Run: morloc-manager run -- morloc init -f",
             missing.join(", ")
         ));
+    }
+}
+
+/// Walk exe/ and other data subdirectories, warning about files unreadable
+/// by the current user (which would cause freeze to fail).
+fn check_file_readability(c: &mut Counts, data_dir: &Path) {
+    let dirs_to_check = ["exe", "bin", "lib"];
+    let mut unreadable: Vec<String> = Vec::new();
+    for dir in &dirs_to_check {
+        let dir_path = data_dir.join(dir);
+        if dir_path.is_dir() {
+            collect_unreadable(&dir_path, &mut unreadable);
+        }
+    }
+    if unreadable.is_empty() {
+        c.pass("All data files readable");
+    } else {
+        let shown: Vec<&str> = unreadable.iter().take(5).map(|s| s.as_str()).collect();
+        let suffix = if unreadable.len() > 5 {
+            format!(" (and {} more)", unreadable.len() - 5)
+        } else {
+            String::new()
+        };
+        c.fail(&format!(
+            "Unreadable files (freeze will fail): {}{suffix}\n       \
+             Fix with: chmod -R a+rX <data-dir>",
+            shown.join(", ")
+        ));
+    }
+}
+
+fn collect_unreadable(dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        out.push(dir.display().to_string());
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_unreadable(&path, out);
+        } else if fs::File::open(&path).is_err() {
+            out.push(path.display().to_string());
+        }
     }
 }
 
@@ -388,7 +531,9 @@ fn check_programs_deep(
         return;
     }
 
-    eprintln!("Running smoke tests for {} programs...", programs.len());
+    if !c.json_mode {
+        println!("Running smoke tests for {} programs...", programs.len());
+    }
     for prog in &programs {
         let exe_path = format!("{mh}/bin/{}", prog.name);
         let cfg = RunConfig {

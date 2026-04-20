@@ -1,8 +1,12 @@
-0.79.1 [2026.04-18]
+0.80.0 [2026-04-20]
 -------------------
- * bug fixes
+ * cleaner morloc-manager
+ * fixed --print bug in nexus
 
-0.79.0 [2026.04-17]
+0.79.1-5 [2026-04-19]
+ * lot's morloc-manager updates
+
+0.79.0 [2026-04-17]
 -------------------
  * add @datafile intrinsic for finding installed files
  * default to including all files when installing

@@ -234,8 +234,11 @@ pub fn build_run_args(
             args.push("/tmp".to_string());
         }
     }
+    // Always attach stdin so piped input works; only allocate a TTY for
+    // interactive (shell) sessions.
+    args.push("-i".to_string());
     if cfg.interactive {
-        args.push("-it".to_string());
+        args.push("-t".to_string());
     }
     if let Some(ref n) = cfg.name {
         args.push("--name".to_string());

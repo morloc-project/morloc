@@ -1,0 +1,16 @@
+--- greeting ---
+hello world
+--- multiline ---
+line one
+line two
+line three
+--- number ---
+42
+--- flag ---
+true
+--- items ---
+[
+  1,
+  2,
+  3
+]

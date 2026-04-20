@@ -246,8 +246,8 @@ pub fn run_serve_container(
             let state = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if state == "running" {
                 eprintln!("Container {name} started");
+                eprintln!("  Logs:   morloc-manager logs");
                 eprintln!("  Stop:   morloc-manager stop {name}");
-                eprintln!("  Logs:   {exe} logs -f {name}");
                 eprintln!("  Status: morloc-manager status");
                 Ok(())
             } else {
@@ -286,6 +286,7 @@ pub fn serve_environment(
     ports: &[(u16, u16)],
     extra_flags: &[String],
     shm_size: &Option<String>,
+    user_env: &[(String, String)],
 ) -> Result<()> {
     // Clean up any existing dead container with this name (silently)
     let _ = crate::container::container_remove_quiet(engine, container_name);
@@ -310,6 +311,7 @@ pub fn serve_environment(
         ("PATH".to_string(), format!("{mh}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")),
         ("MORLOC_HOME".to_string(), mh.to_string()),
     ];
+    cfg.env.extend(user_env.iter().cloned());
     cfg.command = Some(vec![
         "morloc-nexus".to_string(),
         "--router".to_string(),
@@ -336,6 +338,24 @@ pub fn serve_environment(
         // (e.g., port conflict after container creation). Clean it up so the
         // next `start` doesn't fail on a name collision.
         let _ = crate::container::container_remove_quiet(engine, container_name);
+
+        // Detect port conflict and provide a friendlier error message
+        let lower = run_err.to_lowercase();
+        if lower.contains("address already in use") || lower.contains("port is already allocated")
+            || lower.contains("pasta failed")
+        {
+            // Try to extract the port number from the error
+            let port_hint = ports.first()
+                .map(|(h, _)| format!(" Port {h} is already in use."))
+                .unwrap_or_default();
+            return Err(ManagerError::EnvError(format!(
+                "{port_hint}\n  \
+                 Another container or process is using this port.\n  \
+                 Use '-p <other-port>:8080' to choose a different host port, or\n  \
+                 check running containers with 'morloc-manager status'."
+            )));
+        }
+
         return Err(ManagerError::EngineError {
             engine,
             code: exit_code_to_int(status),
@@ -354,8 +374,8 @@ pub fn serve_environment(
             let state = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if state == "running" {
                 eprintln!("Container {container_name} started");
+                eprintln!("  Logs:   morloc-manager logs");
                 eprintln!("  Stop:   morloc-manager stop");
-                eprintln!("  Logs:   {exe} logs -f {container_name}");
                 eprintln!("  Status: morloc-manager status");
                 Ok(())
             } else {
@@ -405,16 +425,53 @@ pub fn stop_serve_container(engine: ContainerEngine, verbose: bool, name: &str) 
     Ok(())
 }
 
-pub fn list_serve_containers(engine: ContainerEngine, verbose: bool) -> Result<()> {
+/// Build the serve container name for an environment.
+/// Format: morloc-serve-<username>-<envname>
+pub fn serve_container_name(env_name: &str) -> String {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    format!("morloc-serve-{user}-{env_name}")
+}
+
+/// The prefix used to filter all serve containers for the current user.
+pub fn serve_container_prefix() -> String {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    format!("morloc-serve-{user}-")
+}
+
+/// Extract the environment name from a serve container name.
+pub fn env_name_from_container(container_name: &str) -> &str {
+    let prefix = serve_container_prefix();
+    container_name.strip_prefix(&prefix).unwrap_or(container_name)
+}
+
+#[derive(serde::Serialize)]
+pub struct ServeContainerInfo {
+    pub name: String,
+    pub env: String,
+    pub ports: String,
+    pub status: String,
+}
+
+/// Query running serve containers and return structured info.
+pub fn query_serve_containers(engine: ContainerEngine, verbose: bool) -> Result<Vec<ServeContainerInfo>> {
     let exe = engine_executable(engine);
-    let fmt = "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}";
+    let fmt = "{{.Names}}\t{{.Status}}\t{{.Ports}}";
+    let prefix = serve_container_prefix();
+    let filter = format!("name={prefix}");
     if verbose {
-        eprintln!("[morloc-manager] {exe} ps -a --filter name=morloc-serve- --format '{fmt}'");
+        eprintln!("[morloc-manager] {exe} ps -a --filter {filter} --format '{fmt}'");
     }
     let output = Command::new(exe)
         .args([
-            "ps", "-a", "--filter", "name=morloc-serve-", "--format", fmt,
+            "ps", "-a", "--filter", &filter, "--format", fmt,
         ])
+        // Use /tmp as cwd to avoid podman "cannot chdir" failures when the
+        // current directory is inaccessible (e.g. another user's home).
+        .current_dir("/tmp")
         .output()
         .map_err(|e| ManagerError::EngineError {
             engine,
@@ -429,25 +486,32 @@ pub fn list_serve_containers(engine: ContainerEngine, verbose: bool) -> Result<(
         });
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let engine_name = match engine {
-        ContainerEngine::Podman => "podman",
-        ContainerEngine::Docker => "docker",
-    };
-    if text.is_empty() {
-        println!("[{engine_name}] No morloc serve containers running.");
-    } else {
-        println!("[{engine_name}]");
-        println!("NAME\tIMAGE\tSTATUS\tPORTS");
-        println!("{text}");
+    let mut result = Vec::new();
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 3 {
+            let name = parts[0];
+            let status = parts[1];
+            let ports = parts[2];
+            let env = env_name_from_container(name);
+            result.push(ServeContainerInfo {
+                name: name.to_string(),
+                env: env.to_string(),
+                ports: if ports.is_empty() { "-".to_string() } else { ports.to_string() },
+                status: status.to_string(),
+            });
+        }
     }
-    Ok(())
+    Ok(result)
 }
 
-/// Find running morloc-serve-* container names for the given engine.
+/// Find running serve container names for the current user.
 pub fn find_running_serve_containers(engine: ContainerEngine) -> Vec<String> {
     let exe = engine_executable(engine);
+    let filter = format!("name={}", serve_container_prefix());
     let output = Command::new(exe)
-        .args(["ps", "--filter", "name=morloc-serve-", "--format", "{{.Names}}"])
+        .args(["ps", "--filter", &filter, "--format", "{{.Names}}"])
+        .current_dir("/tmp")
         .output();
     match output {
         Ok(o) if o.status.success() => {
@@ -487,7 +551,7 @@ pub fn validate_programs(
         let exe_path = format!("{}/bin/{}", CONTAINER_MORLOC_HOME, prog.name);
         if verbose {
             let exe = engine_executable(engine);
-            eprintln!("[morloc-manager] {exe} run --rm {image} {exe_path} --help");
+            eprintln!("[morloc-manager] {exe} run --rm --entrypoint '' {image} {exe_path} --help");
         }
         let cfg = RunConfig {
             bind_mounts: bind_mounts.clone(),
@@ -495,6 +559,9 @@ pub fn validate_programs(
             env: vec![
                 ("MORLOC_HOME".to_string(), CONTAINER_MORLOC_HOME.to_string()),
             ],
+            // Override the image ENTRYPOINT so the command runs directly
+            // instead of being appended to the router entrypoint.
+            extra_flags: vec!["--entrypoint".to_string(), "".to_string()],
             ..RunConfig::new(image)
         };
         let (status, _stdout, stderr) = container_run_quiet(engine, &cfg);
@@ -620,16 +687,16 @@ fn resolve_base_from_manifest(
     match &fm.env_layer {
         None => effective_base,
         Some(fel) => {
-            // Fast path: env image digest exists locally
-            if let Some(ref digest) = fel.image_digest {
+            // Fast path: env image tag exists locally
+            if let Some(ref tag) = fel.image_tag {
                 let exe = engine_executable(engine);
                 let check = Command::new(exe)
-                    .args(["image", "inspect", digest])
+                    .args(["image", "inspect", tag])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status();
                 if check.map(|s| s.success()).unwrap_or(false) {
-                    return digest.clone();
+                    return tag.clone();
                 }
             }
             // Rebuild env layer from stored Dockerfile using effective base

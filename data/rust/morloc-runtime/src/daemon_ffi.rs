@@ -1333,6 +1333,17 @@ unsafe fn handle_lp_connection(
     let mut errmsg: *mut c_char = ptr::null_mut();
     let mut msg_len: usize = 0;
 
+    // Peek to distinguish a probe connection (immediate EOF) from a real
+    // client.  The router's readiness check connects then closes without
+    // sending data; silently ignore those.
+    let mut peek_buf = [0u8; 1];
+    let peek_n = libc::recv(client_fd, peek_buf.as_mut_ptr() as *mut c_void, 1, libc::MSG_PEEK);
+    if peek_n == 0 {
+        // Clean EOF — probe connection, silently close.
+        libc::close(client_fd);
+        return;
+    }
+
     let msg = read_lp_message(client_fd, &mut msg_len, &mut errmsg);
     if !errmsg.is_null() {
         let err_str = CStr::from_ptr(errmsg).to_string_lossy();

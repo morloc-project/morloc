@@ -239,6 +239,10 @@ pub struct FreezeManifest {
     pub programs: Vec<ProgramEntry>,
     pub base_image: String,
     pub env_layer: Option<FrozenEnvLayer>,
+    /// Deprecated: previously held expected env var names. Retained for backward
+    /// compatibility when reading older freeze manifests.
+    #[serde(default, skip_serializing)]
+    pub env_vars: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,7 +250,10 @@ pub struct FrozenEnvLayer {
     pub name: String,
     pub dockerfile: String,
     pub content_hash: String,
-    pub image_digest: Option<String>,
+    /// Container image tag (e.g. localhost/morloc-env:0.79.2-dnd).
+    /// Named image_tag because it stores a mutable tag, not a content-addressed digest.
+    #[serde(alias = "image_digest")]
+    pub image_tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
