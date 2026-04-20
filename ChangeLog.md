@@ -1,10 +1,10 @@
-0.79.5 [2026-04-19]
+0.80.0 [2026-04-20]
 -------------------
- * morloc-manager updates
+ * cleaner morloc-manager
+ * fixed --print bug in nexus
 
-0.79.1-4 [2026-04-19]
----------------------
- * morloc-manager updates
+0.79.1-5 [2026-04-19]
+ * lot's morloc-manager updates
 
 0.79.0 [2026-04-17]
 -------------------

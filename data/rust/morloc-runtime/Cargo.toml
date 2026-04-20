@@ -1,6 +1,6 @@
 [package]
 name = "morloc-runtime"
-version = "0.79.5"
+version = "0.80.0"
 edition = "2021"
 description = "Morloc runtime library: shared memory, serialization, IPC, packet protocol"
 # Version is intentionally synchronized with the morloc compiler version
