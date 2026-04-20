@@ -1,0 +1,16 @@
+module main (greeting, multiline, number, flag, items)
+
+greeting :: Str
+greeting = "hello world"
+
+multiline :: Str
+multiline = "line one\nline two\nline three"
+
+number :: Int
+number = 42
+
+flag :: Bool
+flag = True
+
+items :: [Int]
+items = [1, 2, 3]

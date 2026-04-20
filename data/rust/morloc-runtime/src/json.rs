@@ -239,7 +239,16 @@ pub fn print_voidstar(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
 pub fn pretty_print_voidstar(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
     let json = voidstar_to_json_string(ptr, schema)?;
     let v: serde_json::Value = serde_json::from_str(&json).map_err(|e| err(&e.to_string()))?;
-    println!("{}", serde_json::to_string_pretty(&v).map_err(|e| err(&e.to_string()))?);
+    match &v {
+        // Print strings as raw text (unescaped, no quotes)
+        serde_json::Value::String(s) => println!("{}", s),
+        // Print numbers and bools as plain values
+        serde_json::Value::Number(n) => println!("{}", n),
+        serde_json::Value::Bool(b) => println!("{}", b),
+        serde_json::Value::Null => println!("null"),
+        // Print arrays and objects as indented JSON
+        _ => println!("{}", serde_json::to_string_pretty(&v).map_err(|e| err(&e.to_string()))?),
+    }
     Ok(())
 }
 

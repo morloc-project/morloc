@@ -157,6 +157,7 @@ main = do
       , golden "string-multiline" "string-multiline"
       , golden "string-interpolation" "string-interpolation"
       , golden "string-escape" "string-escape"
+      , golden "string-pretty" "string-pretty"
       , golden "unicode-source" "unicode-source"
       , golden "unicode-source-cpp" "unicode-source-cpp"
       , golden "unicode-interpolation" "unicode-interpolation"
