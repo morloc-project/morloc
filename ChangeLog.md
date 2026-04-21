@@ -1,3 +1,8 @@
+0.80.1 [2026-04-21]
+-------------------
+ * add `morloc-manager new --include <path>` src:dest syntax
+ * make stderr/stdout mim principles more consistent
+
 0.80.0 [2026-04-20]
 -------------------
  * cleaner morloc-manager

@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::Serialize;
@@ -7,8 +7,9 @@ use sha2::{Digest, Sha256};
 
 use crate::config;
 use crate::container::{
-    self, check_remote_image, container_pull, engine_executable,
-    exit_code_to_int, image_exists_locally, BuildConfig, RemoteImageStatus,
+    self, check_remote_image, container_build_visible,
+    container_pull_visible, engine_executable, exit_code_to_int,
+    image_exists_locally, BuildConfig, RemoteImageStatus,
 };
 use crate::error::{ManagerError, Result};
 use crate::serve;
@@ -106,12 +107,12 @@ pub fn pull_tagged_image(engine: ContainerEngine, tag: &str) -> Result<(String, 
         }
 
         eprintln!("Pulling {image_ref}...");
-        let (status, _, stderr) = container_pull(engine, &image_ref);
+        let status = container_pull_visible(engine, &image_ref);
         if !status.success() {
             return Err(ManagerError::EngineError {
                 engine,
                 code: exit_code_to_int(status),
-                stderr,
+                stderr: "Pull failed (see output above)".to_string(),
             });
         }
     } else {
@@ -178,12 +179,12 @@ pub fn pull_custom_image(engine: ContainerEngine, image: &str) -> Result<()> {
     }
 
     eprintln!("Pulling {image}...");
-    let (status, _, stderr) = container_pull(engine, image);
+    let status = container_pull_visible(engine, image);
     if !status.success() {
         return Err(ManagerError::EngineError {
             engine,
             code: exit_code_to_int(status),
-            stderr,
+            stderr: "Pull failed (see output above)".to_string(),
         });
     }
     Ok(())
@@ -208,6 +209,64 @@ pub fn validate_env_name(name: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Parse an include spec into (resolved_source, destination).
+///
+/// Supports two forms:
+/// - `path`        — copies to cfg_dir/basename(path)
+/// - `src:dest`    — copies src to cfg_dir/dest
+///
+/// Rules for dest:
+/// - Must be relative (no leading `/`)
+/// - Cannot contain `..`
+/// - If dest ends with `/`, src's basename is appended
+///
+/// Source symlinks are resolved via canonicalize().
+fn parse_include_spec(spec: &str, cfg_dir: &Path) -> Result<(PathBuf, PathBuf)> {
+    let (src_str, dest_rel) = if let Some(idx) = spec.find(':') {
+        let s = &spec[..idx];
+        let d = &spec[idx + 1..];
+        if s.is_empty() || d.is_empty() {
+            return Err(ManagerError::EnvError(format!(
+                "Invalid include spec: '{spec}'"
+            )));
+        }
+        (s, d.to_string())
+    } else {
+        let src_path = Path::new(spec);
+        let fname = src_path.file_name().ok_or_else(|| {
+            ManagerError::EnvError(format!("Invalid include path: {spec}"))
+        })?;
+        (spec.as_ref(), fname.to_string_lossy().to_string())
+    };
+
+    // Validate dest constraints
+    if dest_rel.starts_with('/') {
+        return Err(ManagerError::EnvError(format!(
+            "Include destination must be relative, not absolute: '{dest_rel}'"
+        )));
+    }
+    if dest_rel.contains("..") {
+        return Err(ManagerError::EnvError(format!(
+            "Include destination cannot contain '..': '{dest_rel}'"
+        )));
+    }
+
+    // Resolve src (canonicalize follows symlinks, errors if path doesn't exist)
+    let real_src = Path::new(src_str).canonicalize().map_err(|e| {
+        ManagerError::EnvError(format!("Cannot resolve include path '{src_str}': {e}"))
+    })?;
+
+    // Compute final dest
+    let dest = cfg_dir.join(&dest_rel);
+    let final_dest = if dest_rel.ends_with('/') {
+        dest.join(real_src.file_name().unwrap_or_default())
+    } else {
+        dest
+    };
+
+    Ok((real_src, final_dest))
 }
 
 /// When `is_new` is false: loads existing config, applies overrides.
@@ -300,33 +359,35 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
         false
     };
 
-    // Copy included files/directories into build context
+    // Copy included files/directories into build context.
+    // Supports src:dest syntax (like Docker volume mounts) for explicit placement.
     let cfg_dir = config::env_config_dir(scope, name);
     fs::create_dir_all(&cfg_dir).map_err(|e| {
         ManagerError::EnvError(format!("Failed to create config dir: {e}"))
     })?;
-    for src in &opts.includes {
-        let src_path = Path::new(src);
-        let file_name = src_path.file_name().ok_or_else(|| {
-            ManagerError::EnvError(format!("Invalid include path: {src}"))
-        })?;
-        let dest = cfg_dir.join(file_name);
-        if src_path.is_dir() {
+    for spec in &opts.includes {
+        let (real_src, final_dest) = parse_include_spec(spec, &cfg_dir)?;
+        if let Some(parent) = final_dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                ManagerError::EnvError(format!("Failed to create directory: {e}"))
+            })?;
+        }
+        if real_src.is_dir() {
             let status = Command::new("cp")
-                .args(["-a", src, &dest.to_string_lossy()])
+                .args(["-a", &real_src.to_string_lossy(), &final_dest.to_string_lossy()])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::inherit())
                 .status()
-                .map_err(|e| ManagerError::EnvError(format!("Failed to copy '{src}': {e}")))?;
+                .map_err(|e| ManagerError::EnvError(format!("Failed to copy '{spec}': {e}")))?;
             if !status.success() {
                 return Err(ManagerError::EnvError(format!(
-                    "Failed to copy directory '{src}'"
+                    "Failed to copy directory '{spec}'"
                 )));
             }
         } else {
-            fs::copy(src_path, &dest).map_err(|e| {
-                ManagerError::EnvError(format!("Failed to copy '{src}': {e}"))
+            fs::copy(&real_src, &final_dest).map_err(|e| {
+                ManagerError::EnvError(format!("Failed to copy '{spec}': {e}"))
             })?;
         }
     }
@@ -408,12 +469,12 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
                         build_cfg.dockerfile, build_cfg.tag, build_cfg.context
                     );
                 }
-                let (status, _, stderr) = container::container_build(ec.engine, &build_cfg);
+                let status = container_build_visible(ec.engine, &build_cfg);
                 if !status.success() {
                     return Err(ManagerError::EngineError {
                         engine: ec.engine,
                         code: exit_code_to_int(status),
-                        stderr,
+                        stderr: "Build failed (see output above)".to_string(),
                     });
                 }
                 ec.built_image = Some(tag);

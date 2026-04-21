@@ -1,3 +1,4 @@
+use std::io;
 use std::process::{Command, ExitStatus, Stdio};
 
 use crate::types::ContainerEngine;
@@ -84,13 +85,14 @@ pub fn container_run_quiet(engine: ContainerEngine, cfg: &RunConfig) -> (ExitSta
 pub fn container_run_passthrough(
     engine: ContainerEngine,
     verbose: bool,
+    shell: bool,
     cfg: &RunConfig,
 ) -> ExitStatus {
     let exe = engine_executable(engine);
     let extra = engine_specific_run_flags_io(engine);
     let args = build_run_args(engine, &extra, cfg);
 
-    if verbose {
+    if verbose || shell {
         let quoted: Vec<String> = args
             .iter()
             .map(|a| {
@@ -124,6 +126,21 @@ pub fn container_pull(engine: ContainerEngine, image: &str) -> (ExitStatus, Stri
     run_process(exe, &["pull".to_string(), image.to_string()])
 }
 
+/// Build a container image with all output (stdout+stderr) redirected to stderr.
+/// Use for IO () commands where stdout must stay clean.
+pub fn container_build_visible(engine: ContainerEngine, cfg: &BuildConfig) -> ExitStatus {
+    let exe = engine_executable(engine);
+    let args = build_build_args(cfg);
+    run_process_to_stderr(exe, &args)
+}
+
+/// Pull a container image with all output (stdout+stderr) redirected to stderr.
+/// Use for IO () commands where stdout must stay clean.
+pub fn container_pull_visible(engine: ContainerEngine, image: &str) -> ExitStatus {
+    let exe = engine_executable(engine);
+    run_process_to_stderr(exe, &["pull".to_string(), image.to_string()])
+}
+
 pub fn image_exists_locally(engine: ContainerEngine, image: &str) -> bool {
     let exe = engine_executable(engine);
     Command::new(exe)
@@ -133,6 +150,22 @@ pub fn image_exists_locally(engine: ContainerEngine, image: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Run `image inspect` and return the stderr if it fails.
+/// Returns None on success, Some(stderr) on failure.
+pub fn image_inspect_stderr(engine: ContainerEngine, image: &str) -> Option<String> {
+    let exe = engine_executable(engine);
+    let output = Command::new(exe)
+        .args(["image", "inspect", image])
+        .stdout(Stdio::null())
+        .output()
+        .ok()?;
+    if output.status.success() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&output.stderr).to_string())
+    }
 }
 
 /// Result of checking whether a remote image exists.
@@ -321,6 +354,31 @@ pub fn build_build_args(cfg: &BuildConfig) -> Vec<String> {
 // ======================================================================
 // Process execution
 // ======================================================================
+
+/// Run a process with both stdout and stderr redirected to our stderr.
+/// Returns only the exit status. Use for IO () commands where morloc-manager's
+/// stdout must stay clean but the user should see all container output.
+fn run_process_to_stderr(exe: &str, args: &[String]) -> ExitStatus {
+    let mut child = Command::new(exe)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to execute {exe}: {e}");
+            std::process::exit(1);
+        });
+    // Pump child stdout -> our stderr
+    if let Some(mut child_stdout) = child.stdout.take() {
+        let stderr = io::stderr();
+        let _ = io::copy(&mut child_stdout, &mut stderr.lock());
+    }
+    child.wait().unwrap_or_else(|e| {
+        eprintln!("Failed to wait for {exe}: {e}");
+        std::process::exit(1);
+    })
+}
 
 /// Run a process with stderr streamed live to the terminal.
 /// Returns (exit_status, captured_stdout, "").

@@ -124,7 +124,7 @@ enum Cmd {
         /// Force overwrite of existing Dockerfile stub
         #[arg(long)]
         force: bool,
-        /// File or directory to include in the Dockerfile build context (repeatable)
+        /// Include file/dir in build context; use src:dest for explicit placement (repeatable)
         #[arg(short = 'i', long = "include")]
         include: Vec<String>,
         /// Path to a file with one engine argument per line
@@ -250,7 +250,7 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Replace the Dockerfile
         #[arg(long)]
         dockerfile: Option<String>,
-        /// File or directory to include in the Dockerfile build context (repeatable)
+        /// Include file/dir in build context; use src:dest for explicit placement (repeatable)
         #[arg(short = 'i', long = "include")]
         include: Vec<String>,
         /// Replace the flags file
@@ -2016,6 +2016,13 @@ fn run_in_container_for(
 
     // Verify the image is accessible before attempting to run
     if !container::image_exists_locally(engine, &image) {
+        // Show the raw container engine error before our hint
+        if let Some(raw_err) = container::image_inspect_stderr(engine, &image) {
+            let trimmed = raw_err.trim();
+            if !trimmed.is_empty() {
+                eprintln!("{trimmed}");
+            }
+        }
         if env_scope == Scope::System && !check_podman_additional_stores(engine) {
             return Err(ManagerError::EnvError(format!(
                 "Image '{image}' not found. The environment '{env_name}' is a system environment \
@@ -2155,7 +2162,7 @@ fn run_with_config(
         ..RunConfig::new(image)
     };
 
-    let status = container_run_passthrough(engine, verbose, &cfg);
+    let status = container_run_passthrough(engine, verbose, shell, &cfg);
     let code = status.code().unwrap_or(1);
     if status.success() {
         Ok(())

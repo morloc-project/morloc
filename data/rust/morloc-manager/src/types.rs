@@ -242,6 +242,7 @@ pub struct FreezeManifest {
     /// Deprecated: previously held expected env var names. Retained for backward
     /// compatibility when reading older freeze manifests.
     #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
     pub env_vars: Vec<String>,
 }
 
