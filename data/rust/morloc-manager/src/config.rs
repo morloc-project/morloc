@@ -1,6 +1,7 @@
 use std::fs;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 
 use crate::error::{ManagerError, Result};
 use crate::types::*;
@@ -167,8 +168,33 @@ pub fn read_flags_file(path: &Path) -> Vec<String> {
         .lines()
         .map(|line| line.trim())
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .flat_map(|line| line.split_whitespace().map(|s| s.to_string()))
+        .flat_map(shell_expand_line)
         .collect()
+}
+
+/// Expand a single flagfile line through the shell, getting glob expansion,
+/// environment variable expansion, tilde expansion, and quote handling.
+/// Falls back to simple whitespace splitting if the shell invocation fails.
+fn shell_expand_line(line: &str) -> Vec<String> {
+    let output = StdCommand::new("sh")
+        .args(["-c", &format!("printf '%s\\0' {}", line)])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let tokens: Vec<String> = stdout
+                .split('\0')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            if tokens.is_empty() {
+                line.split_whitespace().map(|s| s.to_string()).collect()
+            } else {
+                tokens
+            }
+        }
+        _ => line.split_whitespace().map(|s| s.to_string()).collect(),
+    }
 }
 
 /// Read flags file preserving one line per entry (for display).
