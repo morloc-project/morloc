@@ -65,14 +65,31 @@ impl Default for NexusConfig {
 ///
 /// The pool's stderr was inherited by the nexus, so any traceback the pool
 /// printed before dying is already on the user's terminal. This helper
-/// just reports the communication error plus the pool's exit status (if
-/// it has been reaped) so the user can correlate the two.
+/// reports the communication error plus the pool's exit status (if it has
+/// been reaped) so the user can correlate the two.
+///
+/// Race condition: the pool process may still be writing its error output
+/// (traceback, panic message, etc.) to stderr when the nexus detects the
+/// broken connection. If we call clean_exit immediately, it sends SIGTERM
+/// to the pool process group, which can kill the pool before its stderr
+/// buffer is flushed. We insert a brief drain window to let any in-flight
+/// stderr from the dying pool reach the terminal before tearing everything
+/// down. This is best-effort: a pool killed by SIGKILL (OOM killer, etc.)
+/// won't have pending output, and a pool stuck in a blocking syscall won't
+/// flush within the window. But for the common case of a Python exception
+/// traceback, this is enough.
 fn die_with_pool_error(
     socket: &PoolSocket,
     pool_index: usize,
     context: &str,
     comm_err: &dyn std::fmt::Display,
 ) -> ! {
+    // Give the dying pool process time to flush its stderr/stdout before
+    // we tear down the process group. Without this, a Python traceback or
+    // error message that is still in a pipe buffer gets lost when
+    // clean_exit sends SIGTERM/SIGKILL to the pool's process group.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
     eprintln!("Error: {}: {}", context, comm_err);
     if let Some(info) = process::pool_death_info(pool_index) {
         eprintln!("Pool '{}' {}", socket.lang, info);
