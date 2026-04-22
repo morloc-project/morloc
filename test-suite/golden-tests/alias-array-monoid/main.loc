@@ -1,0 +1,31 @@
+-- Test that Array has Semigroup and Monoid instances.
+-- Array is a List alias, same as Deque, so it should support the same
+-- Semigroup/Monoid operations. Types are resolved via annotations at
+-- call sites rather than type-casting wrapper functions.
+
+module main (testArrayMonoidPy, testArrayMonoidCpp, testArrayMonoidR)
+
+import root-py
+import root-cpp
+import root-r
+
+testArrayMonoidPy :: Bool
+testArrayMonoidPy =
+  let t1 = (([1,2] :: Array Int) <> [3,4]) == [1,2,3,4]
+      t2 = (mempty :: Array Int) == []
+      t3 = concat ([[1,2],[3],[4,5]] :: Array (Array Int)) == [1,2,3,4,5]
+  in t1 && t2 && t3
+
+testArrayMonoidCpp :: Bool
+testArrayMonoidCpp =
+  let t1 = (([1,2] :: Array Int) <> [3,4]) == [1,2,3,4]
+      t2 = (mempty :: Array Int) == []
+      t3 = concat ([[1,2],[3],[4,5]] :: Array (Array Int)) == [1,2,3,4,5]
+  in t1 && t2 && t3
+
+testArrayMonoidR :: Bool
+testArrayMonoidR =
+  let t1 = (([1,2] :: Array Int) <> [3,4]) == [1,2,3,4]
+      t2 = (mempty :: Array Int) == []
+      t3 = concat ([[1,2],[3],[4,5]] :: Array (Array Int)) == [1,2,3,4,5]
+  in t1 && t2 && t3

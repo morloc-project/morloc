@@ -159,7 +159,13 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
               deduped = nubBy (\t1 t2 -> eval t1 == eval t2) manyTypes
               es0 = concat [rs | (t, rs) <- rssSubtypes,
                             any (\d -> eval (etype t) == eval d) deduped]
-          g1 <- connectInstance g0 es0
+              -- When all matching instances are alias-equivalent (single
+              -- deduped entry), propagate existential solutions normally.
+              -- When multiple distinct instances exist (e.g. Integral Int
+              -- and Integral Real), don't propagate -- solving to one
+              -- would break the others.
+              singleGroup = length deduped <= 1
+          g1 <- connectInstance singleGroup g0 es0
           return (g1, es0)
 
       (g3, es2) <- statefulMapM resolveInstances g2 es1
@@ -206,13 +212,18 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       (g1, es') <- statefulMapM resolveInstances g0 es
       return (g1, IntrinsicS intr es')
 
-    connectInstance :: Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
-    connectInstance g0 [] = return g0
-    connectInstance g0 (AnnoS (Idx i t) _ _ : es) = do
+    -- When unique (single alias-equivalent group), propagate gamma normally.
+    -- When not unique (multiple distinct instances), skip failures and don't
+    -- propagate, since solving to one instance would break the others.
+    connectInstance :: Bool -> Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
+    connectInstance _ g0 [] = return g0
+    connectInstance singleGroup g0 (AnnoS (Idx i t) _ _ : es) = do
       scope <- MM.getGeneralScope i
       case subtype scope (stripCoercionWrappers gt) t g0 of
-        (Left e) -> throwTypeError i e
-        (Right g1) -> connectInstance g1 es
+        (Left _) -> connectInstance singleGroup g0 es
+        (Right g1)
+          | singleGroup -> connectInstance singleGroup g1 es
+          | otherwise   -> connectInstance singleGroup g0 es
 
 -- prepare a general, indexed typechecking error
 throwTypeError :: Int -> MDoc -> MorlocMonad a

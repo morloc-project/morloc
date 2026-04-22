@@ -1,0 +1,6 @@
+--- testArrayMonoidPy ---
+true
+--- testArrayMonoidCpp ---
+true
+--- testArrayMonoidR ---
+true
