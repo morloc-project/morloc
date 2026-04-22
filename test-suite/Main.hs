@@ -449,7 +449,8 @@ main = do
       , -- inline force operator (!) tests
         golden "force-inline-basic" "force-inline-basic"
       , -- intrinsic tests
-        golden "intrinsic-hash" "intrinsic-hash"
+        golden "intrinsic-agnostic" "intrinsic-agnostic"
+      , golden "intrinsic-hash" "intrinsic-hash"
       , golden "intrinsic-constants" "intrinsic-constants"
       , golden "intrinsic-show-read" "intrinsic-show-read"
       , golden "intrinsic-show-read-nexus" "intrinsic-show-read-nexus"

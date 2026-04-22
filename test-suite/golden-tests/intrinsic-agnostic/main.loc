@@ -1,0 +1,12 @@
+module main (test)
+
+-- Test intrinsics in a language-independent (nexus-only) context.
+-- No language-specific root imports — all evaluation happens in the nexus.
+
+test = do
+  let y = ( @hash "hello"
+          , @hash 42
+          , @hash (1, 2, 3)
+          )
+  @savej y "obs-saved.txt"
+  y

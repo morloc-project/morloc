@@ -49,6 +49,9 @@ pub enum MorlocExpressionType {
     Fmt = 5,
     Show = 6,
     Read = 7,
+    Hash = 8,
+    Save = 9,
+    Load = 10,
 }
 
 #[repr(C)]
@@ -144,6 +147,13 @@ pub struct MorlocLamExpression {
 }
 
 #[repr(C)]
+pub struct MorlocSaveExpression {
+    pub format: *mut c_char,
+    pub value: *mut MorlocExpression,
+    pub path: *mut MorlocExpression,
+}
+
+#[repr(C)]
 pub union ExprUnion {
     pub app_expr: *mut MorlocAppExpression,
     pub lam_expr: *mut MorlocLamExpression,
@@ -152,6 +162,7 @@ pub union ExprUnion {
     pub pattern_expr: *mut MorlocPattern,
     pub data_expr: *mut MorlocData,
     pub unary_expr: *mut MorlocExpression,
+    pub save_expr: *mut MorlocSaveExpression,
 }
 
 #[repr(C)]
@@ -610,7 +621,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             Ok(result)
         }
 
-        "show" | "read" => {
+        "show" | "read" | "hash" | "load" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
             let c_schema_str = CString::new(schema_str).unwrap_or_default();
             let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
@@ -621,9 +632,39 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             }
             let child = build_expr(je.get("child").unwrap_or(&serde_json::Value::Null))?;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
-            (*expr).etype = if tag == "show" { MorlocExpressionType::Show } else { MorlocExpressionType::Read };
+            (*expr).etype = match tag {
+                "show" => MorlocExpressionType::Show,
+                "read" => MorlocExpressionType::Read,
+                "hash" => MorlocExpressionType::Hash,
+                "load" => MorlocExpressionType::Load,
+                _ => unreachable!(),
+            };
             (*expr).schema = schema;
             (*expr).expr.unary_expr = child;
+            Ok(expr)
+        }
+
+        "save" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let fmt_str = je.get("format").and_then(|v| v.as_str()).unwrap_or("voidstar");
+            let c_fmt = CString::new(fmt_str).unwrap_or_default();
+            let value = build_expr(je.get("value").unwrap_or(&serde_json::Value::Null))?;
+            let path = build_expr(je.get("path").unwrap_or(&serde_json::Value::Null))?;
+            let save = libc::calloc(1, std::mem::size_of::<MorlocSaveExpression>()) as *mut MorlocSaveExpression;
+            (*save).format = c_fmt.into_raw();
+            (*save).value = value;
+            (*save).path = path;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Save;
+            (*expr).schema = schema;
+            (*expr).expr.save_expr = save;
             Ok(expr)
         }
 

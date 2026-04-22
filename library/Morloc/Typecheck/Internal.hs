@@ -207,7 +207,43 @@ subtypeEvaluated scope t1 t2 g =
   case (TE.reduceType scope t1, TE.reduceType scope t2) of
     (Just t1', _) -> subtype scope t1' t2 g
     (_, Just t2') -> subtype scope t1 t2' g
-    (_, _) -> Left $ "Cannot compare types" <+> pretty t1 <+> "and" <+> pretty t2
+    (_, _)
+      -- When both are bare VarU that can't be reduced (parameterized type
+      -- aliases used as type constructors, e.g. Array vs Deque where both
+      -- alias List), check alias-equivalence by applying to shared fresh
+      -- variables and comparing fully-evaluated forms.
+      | aliasEquivAsConstructors scope t1 t2 -> Right g
+      | otherwise -> Left $ "Cannot compare types" <+> pretty t1 <+> "and" <+> pretty t2
+
+-- | Check whether two types are equivalent as type constructors by applying
+-- them to shared fresh variables and comparing their fully-evaluated forms.
+-- Returns True when both are VarU with parameterized alias definitions of the
+-- same arity that evaluate to the same canonical type.
+aliasEquivAsConstructors :: Scope -> TypeU -> TypeU -> Bool
+aliasEquivAsConstructors scope (VarU v1) (VarU v2) =
+  case (Map.lookup v1 scope, Map.lookup v2 scope) of
+    (Just entries1, Just entries2) ->
+      case (unspecializedArity entries1, unspecializedArity entries2) of
+        (Just n1, Just n2)
+          | n1 == n2 && n1 > 0 ->
+            let freshVars = [VarU (TV (MT.show' i <> "__alias_cmp")) | i <- [0 .. n1 - 1]]
+                app1 = AppU (VarU v1) freshVars
+                app2 = AppU (VarU v2) freshVars
+            in case (TE.evaluateType scope app1, TE.evaluateType scope app2) of
+                 (Right et1, Right et2) -> et1 == et2
+                 _ -> False
+        _ -> False
+    _ -> False
+  where
+    -- Get the arity from an unspecialized alias entry (all params are Left/generic)
+    unspecializedArity :: [(  [Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)] -> Maybe Int
+    unspecializedArity [] = Nothing
+    unspecializedArity ((ps, _, _, _) : _)
+      | all isLeft ps = Just (length ps)
+      | otherwise = Nothing
+    isLeft (Left _) = True
+    isLeft _ = False
+aliasEquivAsConstructors _ _ _ = False
 
 subtypeError :: TypeU -> TypeU -> MDoc -> Either MDoc a
 subtypeError t1 t2 msg =
