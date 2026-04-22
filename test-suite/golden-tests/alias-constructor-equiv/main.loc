@@ -1,0 +1,78 @@
+-- Test alias constructor equivalence for Monoid/Semigroup/Foldable interactions.
+--
+-- This tests the fix for "Cannot compare types Array and Deque" which occurred
+-- when resolveInstances solved an existential to one alias name (e.g. Array)
+-- and then tried to check it against another (e.g. Deque). Both are aliases
+-- for List, so the typechecker must recognize them as equivalent constructors.
+--
+-- Concrete alias types (List, Deque, Array) are selected via type annotations
+-- at call sites, letting typeclass resolution pick the correct implementation.
+
+module main (testConcatPy, testConcatCpp, testConcatR)
+
+import root-py
+import root-cpp
+import root-r
+
+testConcatPy :: Bool
+testConcatPy =
+  let t1 = idpy $ concat ([[1,2],[3],[4,5]] :: List (List Int)) == [1,2,3,4,5]
+      t2 = idpy $ concat ([[1,2],[3],[4,5]] :: Deque (Deque Int)) == [1,2,3,4,5]
+      t3 = idpy $ concat ([[1,2],[3],[4,5]] :: Array (Array Int)) == [1,2,3,4,5]
+      t4 = idpy $ concatMap (\x -> [x, x * 2]) ([1,2,3] :: [Int]) == [1,2,2,4,3,6]
+      t5 = idpy $ concatMap (\x -> [x, x * 2]) ([1,2,3] :: Deque Int) == [1,2,2,4,3,6]
+      t6 = idpy $ intercalate [0] [[1,2],[3,4],[5]] == [1,2,0,3,4,0,5]
+      t7 = idpy $ ([1,2] :: [Int]) <> [3,4] == [1,2,3,4]
+      t8 = idpy $ ([1,2] :: Deque Int) <> [3,4] == [1,2,3,4]
+      t9 = idpy $ ([1,2] :: Array Int) <> [3,4] == [1,2,3,4]
+      t10 = idpy $ (mempty :: [Int]) == []
+      t11 = idpy $ (mempty :: Deque Int) == []
+      t12 = idpy $ (mempty :: Array Int) == []
+      t13 = idpy $ fold (+) 0 ([1,2,3,4] :: Deque Int) == 10
+      t14 = idpy $ fold (+) 0 ([1,2,3,4] :: Array Int) == 10
+      t15 = idpy $ map (\x -> x + 1) ([1,2,3] :: Array Int) == [2,3,4]
+      t16 = idpy $ map (\x -> x + 1) ([1,2,3] :: Deque Int) == [2,3,4]
+      t17 = idpy $ concatMap (\x -> [x, x + 1]) ([1,2] :: [Int]) == [1,2,2,3]
+  in t1 && t2 && t3 && t4 && t5 && t6 && t7 && t8 && t9 && t10 && t11 && t12 && t13 && t14 && t15 && t16 && t17
+
+testConcatCpp :: Bool
+testConcatCpp =
+  let t1 = idcpp $ concat ([[1,2],[3],[4,5]] :: List (List Int)) == [1,2,3,4,5]
+      t2 = idcpp $ concat ([[1,2],[3],[4,5]] :: Deque (Deque Int)) == [1,2,3,4,5]
+      t3 = idcpp $ concat ([[1,2],[3],[4,5]] :: Array (Array Int)) == [1,2,3,4,5]
+      t4 = idcpp $ concatMap (\x -> [x, x * 2]) ([1,2,3] :: [Int]) == [1,2,2,4,3,6]
+      t5 = idcpp $ concatMap (\x -> [x, x * 2]) ([1,2,3] :: Deque Int) == [1,2,2,4,3,6]
+      t6 = idcpp $ intercalate [0] [[1,2],[3,4],[5]] == [1,2,0,3,4,0,5]
+      t7 = idcpp $ ([1,2] :: [Int]) <> [3,4] == [1,2,3,4]
+      t8 = idcpp $ ([1,2] :: Deque Int) <> [3,4] == [1,2,3,4]
+      t9 = idcpp $ ([1,2] :: Array Int) <> [3,4] == [1,2,3,4]
+      t10 = idcpp $ (mempty :: [Int]) == []
+      t11 = idcpp $ (mempty :: Deque Int) == []
+      t12 = idcpp $ (mempty :: Array Int) == []
+      t13 = idcpp $ fold (+) 0 ([1,2,3,4] :: Deque Int) == 10
+      t14 = idcpp $ fold (+) 0 ([1,2,3,4] :: Array Int) == 10
+      t15 = idcpp $ map (\x -> x + 1) ([1,2,3] :: Array Int) == [2,3,4]
+      t16 = idcpp $ map (\x -> x + 1) ([1,2,3] :: Deque Int) == [2,3,4]
+      t17 = idcpp $ concatMap (\x -> [x, x + 1]) ([1,2] :: [Int]) == [1,2,2,3]
+  in t1 && t2 && t3 && t4 && t5 && t6 && t7 && t8 && t9 && t10 && t11 && t12 && t13 && t14 && t15 && t16 && t17
+
+testConcatR :: Bool
+testConcatR =
+  let t1 = idpy $ concat ([[1,2],[3],[4,5]] :: List (List Int)) == [1,2,3,4,5]
+      t2 = idpy $ concat ([[1,2],[3],[4,5]] :: Deque (Deque Int)) == [1,2,3,4,5]
+      t3 = idpy $ concat ([[1,2],[3],[4,5]] :: Array (Array Int)) == [1,2,3,4,5]
+      t4 = idpy $ concatMap (\x -> [x, x * 2]) ([1,2,3] :: [Int]) == [1,2,2,4,3,6]
+      t5 = idpy $ concatMap (\x -> [x, x * 2]) ([1,2,3] :: Deque Int) == [1,2,2,4,3,6]
+      t6 = idpy $ intercalate [0] [[1,2],[3,4],[5]] == [1,2,0,3,4,0,5]
+      t7 = idpy $ ([1,2] :: [Int]) <> [3,4] == [1,2,3,4]
+      t8 = idpy $ ([1,2] :: Deque Int) <> [3,4] == [1,2,3,4]
+      t9 = idpy $ ([1,2] :: Array Int) <> [3,4] == [1,2,3,4]
+      t10 = idpy $ (mempty :: [Int]) == []
+      t11 = idpy $ (mempty :: Deque Int) == []
+      t12 = idpy $ (mempty :: Array Int) == []
+      t13 = idpy $ fold (+) 0 ([1,2,3,4] :: Deque Int) == 10
+      t14 = idpy $ fold (+) 0 ([1,2,3,4] :: Array Int) == 10
+      t15 = idpy $ map (\x -> x + 1) ([1,2,3] :: Array Int) == [2,3,4]
+      t16 = idpy $ map (\x -> x + 1) ([1,2,3] :: Deque Int) == [2,3,4]
+      t17 = idpy $ concatMap (\x -> [x, x + 1]) ([1,2] :: [Int]) == [1,2,2,3]
+  in t1 && t2 && t3 && t4 && t5 && t6 && t7 && t8 && t9 && t10 && t11 && t12 && t13 && t14 && t15 && t16 && t17

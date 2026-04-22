@@ -30,6 +30,7 @@ module UnitTypeTests
   , natLabelTests
   , natKindPromotionTests
   , letBindingTests
+  , aliasConstructorTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -3888,4 +3889,215 @@ letBindingTests =
           "do with explicit braces, multiple lets"
           "module main (x)\nx = do { let a = 1; let b = 2; b }"
           (emptyEff int)
+      ]
+
+-- | Tests for typeclass instance resolution when multiple instances share the
+-- same underlying type (e.g., Foldable List, Foldable Deque, Foldable Array
+-- where Deque and Array are defined as List). Instance resolution must handle
+-- these without erroring when the first instance solves an existential and
+-- subsequent instances have a different alias name but equivalent applied form.
+aliasConstructorTests :: TestTree
+aliasConstructorTests =
+  localOption (mkTimeout 2000000) $ -- 2 second timeout
+    testGroup
+      "Typeclass resolution with type alias families"
+      [
+        -- === POSITIVE: aliases that should be equivalent ===
+
+        -- Two aliases for the same underlying type used in a Foldable context.
+        -- concat needs (Foldable f, Monoid a). When fold's existential ?f is
+        -- solved to one alias, checking it against another should succeed.
+        assertGeneralType
+          "fold over alias types: Deque and List are equivalent constructors"
+          [r|
+        module main (f)
+        class Semigroup a where
+          append :: a -> a -> a
+        class Semigroup a => Monoid a where
+          mempty :: a
+        class Foldable f where
+          fold :: (b -> a -> b) -> b -> f a -> b
+        type Deque a = List a
+        instance Semigroup (List a)
+        instance Semigroup (Deque a)
+        instance Monoid (List a)
+        instance Monoid (Deque a)
+        instance Foldable List
+        instance Foldable Deque
+        concat :: (Foldable f, Monoid a) => f (f a) -> f a
+        concat = fold append mempty
+        f :: [[Int]] -> [Int]
+        f = concat
+          |]
+          (fun [lst (lst int), lst int])
+
+      , -- Three aliases for the same type used as type constructors
+        assertGeneralType
+          "three aliases (List, Deque, Array) all equivalent as constructors"
+          [r|
+        module main (f)
+        class Functor f where
+          fmap :: (a -> b) -> f a -> f b
+        type Deque a = List a
+        type Array a = List a
+        instance Functor List
+        instance Functor Deque
+        instance Functor Array
+        f :: [Int] -> [Int]
+        f = fmap (\x -> x)
+          |]
+          (fun [lst int, lst int])
+
+      , -- Transitive alias chains: A = B = C should all be equivalent
+        assertGeneralType
+          "transitive alias: MyList = Deque = List"
+          [r|
+        module main (f)
+        class Foldable f where
+          fold :: (b -> a -> b) -> b -> f a -> b
+        type Deque a = List a
+        type MyList a = Deque a
+        instance Foldable List
+        instance Foldable Deque
+        instance Foldable MyList
+        f :: [Int] -> Int
+        f = fold (\a x -> a) 0
+          |]
+          (fun [lst int, int])
+
+      , -- Multi-parameter aliases: same arity, same underlying type
+        assertGeneralType
+          "two-parameter alias equivalence"
+          [r|
+        module main (f)
+        class MyClass f where
+          myMethod :: f a b -> f a b
+        type MyMap a b = Map a b
+        instance MyClass Map
+        instance MyClass MyMap
+        f :: Map Int Str -> Map Int Str
+        f = myMethod
+          |]
+          (fun [arr "Map" [int, str], arr "Map" [int, str]])
+
+      , -- === TYPE SPECIALIZATION ===
+        -- When a root type (List) and a descendant (Deque) are unified,
+        -- the inferred type should specialize to the descendant regardless
+        -- of argument order.
+
+        assertRawType
+          "specializes to Deque: annotation on right"
+          [r|
+        module main (bar)
+        class Semigroup a where
+          append :: a -> a -> a
+        type Deque a = List a
+        instance Semigroup (List a)
+        instance Semigroup (Deque a)
+        bar :: Deque Int
+        bar = append [1,2,3] ([4,5,6] :: Deque Int)
+          |]
+          (arr "Deque" [int])
+
+      , assertRawType
+          "specializes to Deque: annotation on left"
+          [r|
+        module main (baz)
+        class Semigroup a where
+          append :: a -> a -> a
+        type Deque a = List a
+        instance Semigroup (List a)
+        instance Semigroup (Deque a)
+        baz :: Deque Int
+        baz = append ([4,5,6] :: Deque Int) [1,2,3]
+          |]
+          (arr "Deque" [int])
+
+      , -- Transitive specialization: MyList = Deque = List should
+        -- specialize to the deepest descendant
+        assertRawType
+          "transitive specialization to deepest descendant"
+          [r|
+        module main (bar)
+        class Semigroup a where
+          append :: a -> a -> a
+        type Deque a = List a
+        type MyList a = Deque a
+        instance Semigroup (List a)
+        instance Semigroup (Deque a)
+        instance Semigroup (MyList a)
+        bar :: MyList Int
+        bar = append [1,2,3] ([4,5,6] :: MyList Int)
+          |]
+          (arr "MyList" [int])
+
+      , -- concat: the original motivating case. concat uses fold, (<>),
+        -- and mempty which are all typeclass methods with instances for
+        -- multiple members of the List representation family.
+        assertGeneralType
+          "concat typechecks with List representation family"
+          [r|
+        module main (f)
+        class Semigroup a where
+          append :: a -> a -> a
+        class Semigroup a => Monoid a where
+          mempty :: a
+        class Foldable f where
+          fold :: (b -> a -> b) -> b -> f a -> b
+        type Deque a = List a
+        type Array a = List a
+        instance Semigroup (List a)
+        instance Semigroup (Deque a)
+        instance Semigroup (Array a)
+        instance Monoid (List a)
+        instance Monoid (Deque a)
+        instance Monoid (Array a)
+        instance Foldable List
+        instance Foldable Deque
+        instance Foldable Array
+        concat :: (Foldable f, Monoid a) => f (f a) -> f a
+        concat = fold append mempty
+        f :: [[Int]] -> [Int]
+        f = concat
+          |]
+          (fun [lst (lst int), lst int])
+
+      , -- === NEGATIVE: SIBLING REJECTION ===
+
+        -- Sibling aliases with applied types should be rejected.
+        -- This tests the areSiblingAliases check that prevents
+        -- transitive matching through the common ancestor.
+        exprTestBad
+          "sibling aliases Array and Deque are incompatible"
+          [r|
+        module main (bad)
+        class Semigroup a where
+          append :: a -> a -> a
+        type Deque a = List a
+        type Array a = List a
+        instance Semigroup (Deque a)
+        instance Semigroup (Array a)
+        bad = append ([1,2,3] :: Array Int) ([4,5,6] :: Deque Int)
+          |]
+
+      , -- Sibling rejection also applies to function arguments
+        exprTestBad
+          "function expecting Deque rejects Array argument"
+          [r|
+        module main (bad)
+        type Deque a = List a
+        type Array a = List a
+        f :: Deque Int -> Int
+        bad :: Int
+        bad = f ([1,2,3] :: Array Int)
+          |]
+
+      , -- Non-alias types remain incompatible
+        exprTestBad
+          "non-alias types Int vs Str remain incompatible"
+          [r|
+        module main (f)
+        f :: Int
+        f = ("hello" :: Str)
+          |]
       ]

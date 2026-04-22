@@ -149,20 +149,39 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
     sock = _socket.fromfd(job_fd, _socket.AF_UNIX, _socket.SOCK_STREAM)
     os.close(job_fd)  # sock owns a dup'd copy
     last_activity = time.monotonic()
-    while not shutdown_flag.value:
-        rlist, _, _ = select.select([sock.fileno()], [], [], 0.01)
-        if shutdown_flag.value:
-            break
-        if rlist:
-            try:
-                client_fd = _recv_fd(sock)
-                run_job(client_fd)
-                last_activity = time.monotonic()
-            except (EOFError, OSError):
+    try:
+        while not shutdown_flag.value:
+            rlist, _, _ = select.select([sock.fileno()], [], [], 0.01)
+            if shutdown_flag.value:
                 break
-        elif total_workers.value > 1 and time.monotonic() - last_activity > WORKER_IDLE_TIMEOUT:
-            break
-    sock.close()
+            if rlist:
+                try:
+                    client_fd = _recv_fd(sock)
+                    run_job(client_fd)
+                    last_activity = time.monotonic()
+                except (EOFError, OSError):
+                    break
+            elif total_workers.value > 1 and time.monotonic() - last_activity > WORKER_IDLE_TIMEOUT:
+                break
+    except BaseException as e:
+        # Catch-all for errors that escape run_job's own exception handling:
+        # MemoryError, KeyboardInterrupt, SystemExit, or bugs in the worker
+        # loop itself. Without this, the worker dies silently and the nexus
+        # only sees "failed to read response header" with no indication of
+        # what went wrong in the pool.
+        #
+        # Race condition: the nexus detects the broken socket and may start
+        # its clean_exit tear-down (SIGTERM -> SIGKILL) while this print is
+        # still buffered. We flush immediately to maximize the chance the
+        # message reaches the terminal before we are killed. stderr is
+        # line-buffered (set in __main__), but the flush is a safety net for
+        # edge cases (redirected stderr, forked-process buffer state).
+        import traceback
+        print(f"morloc pool worker fatal error: {e!s}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+    finally:
+        sock.close()
 
 
 def signal_handler(sig, frame):

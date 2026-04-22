@@ -126,8 +126,22 @@ pub fn get_tmpdir() -> Option<&'static str> {
 // ── Clean exit ─────────────────────────────────────────────────────────────
 
 /// Terminate all pool daemons and clean up resources.
+///
+/// Race condition with stderr output: when a pool process is dying (e.g.,
+/// Python printing a traceback), its stderr writes may still be in a pipe
+/// buffer or mid-syscall when we send SIGTERM. The pool's signal handler
+/// (or SIG_DFL) may kill the process before its output reaches the
+/// terminal. We mitigate this by:
+/// 1. Flushing the nexus's own stderr first (so our error message is out)
+/// 2. Giving pools 200ms after SIGTERM before escalating to SIGKILL
+///    (up from the previous 50ms, which was too short for Python's
+///    atexit handlers and multiprocessing cleanup to flush buffers)
 pub fn clean_exit(exit_code: i32) -> ! {
     CLEANING_UP.store(true, Ordering::SeqCst);
+
+    // Flush nexus stderr so our error messages are visible even if
+    // the process is killed by a parent (e.g., shell pipeline).
+    unsafe { libc::fsync(2) };
 
     // Block SIGCHLD during cleanup
     unsafe {
@@ -145,7 +159,12 @@ pub fn clean_exit(exit_code: i32) -> ! {
         }
     }
 
-    // Wait for groups to exit (up to 500ms per group, then SIGKILL)
+    // Wait for groups to exit (up to 200ms per group, then SIGKILL).
+    // The 200ms window serves two purposes:
+    // - Lets pool signal handlers run (Python's signal_handler in pool.py
+    //   calls close_daemon and cleans up shared memory)
+    // - Lets any pending stderr writes (tracebacks, error messages) drain
+    //   to the terminal before the process is force-killed
     for i in 0..MAX_DAEMONS {
         let pgid = PGIDS[i].load(Ordering::Relaxed);
         if pgid <= 0 {
@@ -159,13 +178,13 @@ pub fn clean_exit(exit_code: i32) -> ! {
         }
 
         let mut group_dead = false;
-        for _ in 0..50 {
+        for _ in 0..100 {
             while unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } > 0 {}
             if unsafe { libc::kill(-pgid, 0) } == -1 {
                 group_dead = true;
                 break;
             }
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(Duration::from_millis(2));
         }
 
         if !group_dead {

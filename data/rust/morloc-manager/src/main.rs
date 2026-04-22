@@ -2432,7 +2432,10 @@ mod tests {
         )
         .unwrap();
         let flags = cfg::read_flags_file(&path);
-        assert_eq!(flags, vec!["--gpus all", "-v /data:/data", "--network host"]);
+        assert_eq!(
+            flags,
+            vec!["--gpus", "all", "-v", "/data:/data", "--network", "host"]
+        );
     }
 
     #[test]
@@ -2440,6 +2443,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let flags = cfg::read_flags_file(&dir.path().join("nope.flags"));
         assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn read_flags_file_expands_env_vars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.flags");
+        fs::write(&path, "-v $HOME/data:/data\n").unwrap();
+        let flags = cfg::read_flags_file(&path);
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(flags, vec!["-v", &format!("{home}/data:/data")]);
+    }
+
+    #[test]
+    fn read_flags_file_expands_tilde() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.flags");
+        fs::write(&path, "-v ~/data:/data\n").unwrap();
+        let flags = cfg::read_flags_file(&path);
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(flags, vec!["-v", &format!("{home}/data:/data")]);
     }
 
     // ---- Container CLI argument tests ----

@@ -549,6 +549,118 @@ unsafe fn morloc_eval_r(
             }
         }
 
+        MorlocExpressionType::Hash => {
+            // Hash child data and return hex string
+            let child = (*expr).expr.unary_expr;
+            let child_schema = (*child).schema;
+            let child_result = morloc_eval_r(child, ptr::null_mut(), 0, bndvars)?;
+
+            extern "C" {
+                fn mlc_hash(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char;
+            }
+            let mut err: *mut c_char = ptr::null_mut();
+            let hex = mlc_hash(child_result as *const c_void, child_schema, &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+
+            let hex_len = libc::strlen(hex);
+            let str_relptr: RelPtr = if hex_len > 0 {
+                let abs = shm::shmemcpy(hex as *const u8, hex_len)?;
+                libc::free(hex as *mut c_void);
+                shm::abs2rel(abs)?
+            } else {
+                libc::free(hex as *mut c_void);
+                -1isize as RelPtr
+            };
+            let arr = shm::Array { size: hex_len, data: str_relptr };
+            ptr::copy_nonoverlapping(&arr as *const shm::Array as *const u8, dest, width);
+        }
+
+        MorlocExpressionType::Save => {
+            // Save value to file at path
+            let save = (*expr).expr.save_expr;
+            let value_expr = (*save).value;
+            let path_expr = (*save).path;
+            let fmt = CStr::from_ptr((*save).format).to_str().unwrap_or("voidstar");
+
+            let value_schema = (*value_expr).schema;
+            let value_result = morloc_eval_r(value_expr, ptr::null_mut(), 0, bndvars)?;
+            let path_result = morloc_eval_r(path_expr, ptr::null_mut(), 0, bndvars)?;
+
+            // Extract path string from voidstar Array
+            let path_arr = &*(path_result as *const shm::Array);
+            let path_abs = shm::rel2abs(path_arr.data)?;
+            let path_cstr = libc::malloc(path_arr.size + 1) as *mut c_char;
+            if path_cstr.is_null() {
+                return Err(MorlocError::Other("Failed to allocate for @save path".into()));
+            }
+            ptr::copy_nonoverlapping(path_abs, path_cstr as *mut u8, path_arr.size);
+            *path_cstr.add(path_arr.size) = 0;
+
+            extern "C" {
+                fn mlc_save(data: *const c_void, schema: *const CSchema, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+                fn mlc_save_json(data: *const c_void, schema: *const CSchema, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+                fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+            }
+            let mut err: *mut c_char = ptr::null_mut();
+            let rc = match fmt {
+                "json" => mlc_save_json(value_result as *const c_void, value_schema, path_cstr, &mut err),
+                "msgpack" => mlc_save(value_result as *const c_void, value_schema, path_cstr, &mut err),
+                _ => mlc_save_voidstar(value_result as *const c_void, value_schema, path_cstr, &mut err),
+            };
+            libc::free(path_cstr as *mut c_void);
+            if rc != 0 && !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            // Return unit (zero-fill dest)
+            ptr::write_bytes(dest, 0, width);
+        }
+
+        MorlocExpressionType::Load => {
+            // Load data from file, return optional
+            let child = (*expr).expr.unary_expr;
+            let child_result = morloc_eval_r(child, ptr::null_mut(), 0, bndvars)?;
+
+            // Extract path string from voidstar Array
+            let path_arr = &*(child_result as *const shm::Array);
+            let path_abs = shm::rel2abs(path_arr.data)?;
+            let path_cstr = libc::malloc(path_arr.size + 1) as *mut c_char;
+            if path_cstr.is_null() {
+                return Err(MorlocError::Other("Failed to allocate for @load path".into()));
+            }
+            ptr::copy_nonoverlapping(path_abs, path_cstr as *mut u8, path_arr.size);
+            *path_cstr.add(path_arr.size) = 0;
+
+            extern "C" {
+                fn mlc_load(path: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
+            }
+            let opt_dest = dest;
+            let inner_schema = *(*schema).parameters;
+            let inner_offset = *(*schema).offsets;
+
+            let mut err: *mut c_char = ptr::null_mut();
+            let loaded = mlc_load(path_cstr, inner_schema, &mut err);
+            libc::free(path_cstr as *mut c_void);
+
+            if loaded.is_null() {
+                if !err.is_null() {
+                    libc::free(err as *mut c_void);
+                }
+                *opt_dest = 0; // None
+            } else {
+                // Copy loaded voidstar data into the optional's inner slot
+                let inner_width = (*inner_schema).width;
+                ptr::copy_nonoverlapping(loaded as *const u8, opt_dest.add(inner_offset), inner_width);
+                libc::free(loaded as *mut c_void);
+                *opt_dest = 1; // Some
+            }
+        }
+
         _ => {
             return Err(MorlocError::Other("Illegal top expression".into()));
         }

@@ -203,11 +203,86 @@ isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empt
   (Right _) -> True
 
 subtypeEvaluated :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
-subtypeEvaluated scope t1 t2 g =
-  case (TE.reduceType scope t1, TE.reduceType scope t2) of
+subtypeEvaluated scope t1 t2 g
+  -- Reject sibling aliases before reduction. Without this, Array Int <: Deque Int
+  -- would succeed transitively (Array Int -> List Int -> Deque Int) even though
+  -- they are on different branches of the alias tree.
+  | areSiblingAliases scope t1 t2 =
+      Left $ "Cannot compare sibling types" <+> pretty t1 <+> "and" <+> pretty t2
+  | otherwise = case (TE.reduceType scope t1, TE.reduceType scope t2) of
     (Just t1', _) -> subtype scope t1' t2 g
     (_, Just t2') -> subtype scope t1 t2' g
-    (_, _) -> Left $ "Cannot compare types" <+> pretty t1 <+> "and" <+> pretty t2
+    (_, _)
+      -- When both are bare type constructors that can't be reduced (e.g.,
+      -- List vs Deque where Deque a = List a), check if one is an ancestor
+      -- of the other by evaluating and comparing heads.
+      | aliasEquivConstructors scope t1 t2 -> Right g
+      | otherwise -> Left $ "Cannot compare types" <+> pretty t1 <+> "and" <+> pretty t2
+
+-- | Check whether two applied types are sibling aliases -- both reduce to
+-- the same ancestor but neither reduces to the other. For example,
+-- Array Int and Deque Int are siblings (both reduce to List Int, but
+-- Array does not reduce to Deque nor vice versa).
+areSiblingAliases :: Scope -> TypeU -> TypeU -> Bool
+areSiblingAliases scope (AppU (VarU v1) _) (AppU (VarU v2) _)
+  | v1 == v2 = False
+  | otherwise =
+    let h1 = evalHead v1
+        h2 = evalHead v2
+    in case (h1, h2) of
+         -- Both reduce to the same ancestor, but neither is the other's ancestor
+         (Just hv1, Just hv2) -> hv1 == hv2 && hv1 /= v1 && hv2 /= v2
+         _ -> False
+  where
+    evalHead v = case Map.lookup v scope of
+      Just ((ps, _, _, _) : _)
+        | all isGenericParam ps && not (null ps) ->
+          let n = length ps
+              freshVars = [VarU (TV (MT.show' i <> "__sib_cmp")) | i <- [0 .. n - 1]]
+              app = AppU (VarU v) freshVars
+          in case TE.evaluateType scope app of
+               Right (AppU (VarU headV) _) -> Just headV
+               _ -> Nothing
+        | otherwise -> Nothing
+      _ -> Nothing
+    isGenericParam (Left _) = True
+    isGenericParam _ = False
+areSiblingAliases _ _ _ = False
+
+-- | Check whether two unapplied type constructors are on the same path in
+-- the alias hierarchy -- i.e., one reduces to the other. Applied aliases
+-- (like Deque Int) are handled by reduceType above; this covers the bare
+-- constructor case (Deque vs List) which arises when an existential is solved
+-- to one name and then compared against an ancestor or descendant alias.
+--
+-- Only ancestor-descendant pairs match: List<->Deque and List<->Array succeed,
+-- but Array<->Deque fails (siblings with a common ancestor but neither
+-- reduces to the other).
+aliasEquivConstructors :: Scope -> TypeU -> TypeU -> Bool
+aliasEquivConstructors scope (VarU v1) (VarU v2) =
+  reducesToHead v1 v2 || reducesToHead v2 v1
+  where
+    reducesToHead src target =
+      case arityOf (Map.lookup src scope) of
+        Just n | n > 0 ->
+          let freshVars = [VarU (TV (MT.show' i <> "__alias_cmp")) | i <- [0 .. n - 1]]
+              app = AppU (VarU src) freshVars
+          in case TE.evaluateType scope app of
+               Right (AppU (VarU headV) _) -> headV == target
+               _ -> False
+        -- base type with no alias: matches only itself
+        _ -> False
+
+    arityOf :: Maybe [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)] -> Maybe Int
+    arityOf Nothing = Nothing
+    arityOf (Just []) = Nothing
+    arityOf (Just ((ps, _, _, _) : _))
+      | all isGenericParam ps = Just (length ps)
+      | otherwise = Nothing
+
+    isGenericParam (Left _) = True
+    isGenericParam _ = False
+aliasEquivConstructors _ _ _ = False
 
 subtypeError :: TypeU -> TypeU -> MDoc -> Either MDoc a
 subtypeError t1 t2 msg =
@@ -589,7 +664,7 @@ instantiate scope (ForallU x b) tb@(ExistU _ ([], _) _) g1 =
 --  g1,Ea,g2 |- t <=: Ea -| g1,Ea=t,g2
 instantiate scope ta (ExistU v ([], _) ([], _)) g1 =
   case lookupU v g1 of
-    Just t  -> subtype scope ta t g1
+    Just t  -> subtype scope ta t g1 >>= specializeExist scope v t ta
     Nothing -> solveExist v ta g1 >>= maybe (return g1) return
 
 --  g1 |- t
@@ -597,10 +672,42 @@ instantiate scope ta (ExistU v ([], _) ([], _)) g1 =
 --  g1,Ea,g2 |- Ea <=: t -| g1,Ea=t,g2
 instantiate scope (ExistU v ([], _) ([], _)) tb g1 =
   case lookupU v g1 of
-    Just t  -> subtype scope t tb g1
+    Just t  -> subtype scope t tb g1 >>= specializeExist scope v t tb
     Nothing -> solveExist v tb g1 >>= maybe (return g1) return
 
 instantiate _ ta tb _ = subtypeError ta tb "Unexpected types"
+
+-- | After a subtype check succeeds between a solved existential's current
+-- value and a new type, check if the new type is more specialized (a
+-- descendant in the alias hierarchy). If so, update the solution.
+-- E.g., if ?a = List Int and we check against Deque Int, update to Deque Int
+-- since Deque is a specialization of List.
+specializeExist :: Scope -> TVar -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
+specializeExist scope v currentType newType g
+  | isMoreSpecialized scope newType currentType = Right $ cacheSolved v newType g
+  | otherwise = Right g
+
+-- | Check if t1 is a more specialized (descendant) alias of t2.
+-- t1 is more specialized if it has an alias definition that evaluates to
+-- t2's head constructor, while t2 does not evaluate to t1's head.
+isMoreSpecialized :: Scope -> TypeU -> TypeU -> Bool
+isMoreSpecialized scope (AppU (VarU v1) _) (AppU (VarU v2) _) =
+  v1 /= v2 && reducesToHead scope v1 v2
+  where
+    reducesToHead scope' src target =
+      case Map.lookup src scope' of
+        Just ((ps, _, _, _) : _)
+          | all isGenericParam ps && not (null ps) ->
+            let n = length ps
+                freshVars = [VarU (TV (MT.show' i <> "__spec_cmp")) | i <- [0 .. n - 1]]
+                app = AppU (VarU src) freshVars
+            in case TE.evaluateType scope' app of
+                 Right (AppU (VarU headV) _) -> headV == target
+                 _ -> False
+        _ -> False
+    isGenericParam (Left _) = True
+    isGenericParam _ = False
+isMoreSpecialized _ _ _ = False
 
 solve :: TVar -> TypeU -> Either MDoc GammaIndex
 solve v t

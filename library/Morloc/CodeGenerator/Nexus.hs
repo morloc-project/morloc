@@ -77,6 +77,9 @@ data NexusExpr
   | LitX LitType Text
   | ShowX Text NexusExpr  -- schema (return type = Str), child expression
   | ReadX Text NexusExpr  -- schema (return type = ?a), child expression
+  | HashX Text NexusExpr  -- schema + child -> Str (xxhash hex)
+  | SaveX Text Text NexusExpr NexusExpr  -- format + schema + value + path -> ()
+  | LoadX Text NexusExpr  -- schema + path -> ?a
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX
 
@@ -291,6 +294,16 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       ShowX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrRead [arg])) =
       ReadX <$> type2schema t <*> toNexusExpr arg
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrHash [arg])) =
+      HashX <$> type2schema t <*> toNexusExpr arg
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSave [valExpr, path])) =
+      SaveX "voidstar" <$> type2schema t <*> toNexusExpr valExpr <*> toNexusExpr path
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveM [valExpr, path])) =
+      SaveX "msgpack" <$> type2schema t <*> toNexusExpr valExpr <*> toNexusExpr path
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveJ [valExpr, path])) =
+      SaveX "json" <$> type2schema t <*> toNexusExpr valExpr <*> toNexusExpr path
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrLoad [path])) =
+      LoadX <$> type2schema t <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr _)) = do
       v <- resolveCompileTimeIntrinsic intr
       StrX <$> type2schema t <*> pure v
@@ -303,7 +316,7 @@ resolveCompileTimeIntrinsic IntrCompiled = do
   now <- liftIO Data.Time.Clock.getCurrentTime
   return . MT.pack $ Data.Time.Format.formatTime Data.Time.Format.defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now
 resolveCompileTimeIntrinsic intr =
-  MM.throwSystemError $ "@" <> pretty (intrinsicName intr) <> " cannot be used in a context without a language-specific source"
+  MM.throwSystemError $ "@" <> pretty (intrinsicName intr) <> " cannot be used in a language-independent context"
 
 -- ======================================================================
 -- CLI argument serialization
@@ -514,6 +527,26 @@ exprToJson (ShowX schema child) =
 exprToJson (ReadX schema child) =
   jsonObj
     [ ("tag", jsonStr "read")
+    , ("schema", jsonStr schema)
+    , ("child", exprToJson child)
+    ]
+exprToJson (HashX schema child) =
+  jsonObj
+    [ ("tag", jsonStr "hash")
+    , ("schema", jsonStr schema)
+    , ("child", exprToJson child)
+    ]
+exprToJson (SaveX fmt schema value path) =
+  jsonObj
+    [ ("tag", jsonStr "save")
+    , ("format", jsonStr fmt)
+    , ("schema", jsonStr schema)
+    , ("value", exprToJson value)
+    , ("path", exprToJson path)
+    ]
+exprToJson (LoadX schema child) =
+  jsonObj
+    [ ("tag", jsonStr "load")
     , ("schema", jsonStr schema)
     , ("child", exprToJson child)
     ]

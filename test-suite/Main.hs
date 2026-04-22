@@ -37,6 +37,7 @@ main = do
       , natLabelTests
       , natKindPromotionTests
       , letBindingTests
+      , aliasConstructorTests
 
       -- -- These tests pass locally and when I run the same container that I
       -- -- use in github actions. Yet these tests freeze in an infinite loop
@@ -149,6 +150,8 @@ main = do
       , golden "alias-dedup-1" "alias-dedup-1"
       , golden "alias-no-cross-instance" "alias-no-cross-instance"
       , golden "alias-concrete-bugs" "alias-concrete-bugs"
+      , golden "alias-constructor-equiv" "alias-constructor-equiv"
+      , golden "alias-array-monoid" "alias-array-monoid"
       , golden "poly-list-1" "poly-list-1"
       , golden "higher-kinded-types" "higher-kinded-types"
       , golden "string-encoding" "string-encoding"
@@ -449,7 +452,8 @@ main = do
       , -- inline force operator (!) tests
         golden "force-inline-basic" "force-inline-basic"
       , -- intrinsic tests
-        golden "intrinsic-hash" "intrinsic-hash"
+        golden "intrinsic-agnostic" "intrinsic-agnostic"
+      , golden "intrinsic-hash" "intrinsic-hash"
       , golden "intrinsic-constants" "intrinsic-constants"
       , golden "intrinsic-show-read" "intrinsic-show-read"
       , golden "intrinsic-show-read-nexus" "intrinsic-show-read-nexus"
