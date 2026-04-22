@@ -1,3 +1,10 @@
+0.81.0 [2026-94-22]
+-------------------
+ * fix type inference for type families
+ * extend intrinsic support for language-agnostic code
+ * do shell-expansion of flagfile lines in morloc-manager
+ * fix loss of pool stderr on crash (maybe?)
+
 0.80.1 [2026-04-21]
 -------------------
  * add `morloc-manager new --include <path>` src:dest syntax
