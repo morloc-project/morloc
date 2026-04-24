@@ -118,6 +118,7 @@ data CstExpr
   | CForceE (Loc CstExpr)  -- ^ !expr force operator (only valid inside do-blocks)
   | CIntrinsicE Text  -- ^ @name intrinsic reference (text is the name without @)
   | CParenE !(Loc CstExpr)  -- ^ parenthesized expression (preserves grouping for BopE chains)
+  | CLeftSecE !Located !(Loc CstExpr)  -- ^ (op expr) left section: \x -> x op expr
   | CInlineE (Loc CstExpr) -- ^ %inline wrapper for source declarations
   deriving (Show, Eq)
 

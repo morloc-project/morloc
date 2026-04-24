@@ -594,6 +594,10 @@ paren_expr :: { Loc CstExpr }
   | '(' operator_name ')'     { at $1 (CVarE (EV (getOp $2))) }
   | '(' '-' ')'               { at $1 (CVarE (EV "-")) }
   | '(' '.' ')'               { at $1 (CVarE (EV ".")) }
+  | '(' operator_name expr ')'
+      { Loc ($1 <-> $4) (CLeftSecE $2 $3) }
+  | '(' '.' expr ')'
+      { Loc ($1 <-> $4) (CLeftSecE $2 $3) }
   | '(' expr ')'              { Loc ($1 <-> $3) (CParenE $2) }
   | '(' expr ',' expr_list1 ')' { Loc ($1 <-> $5) (CTupE ($2 : $4)) }
 

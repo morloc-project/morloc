@@ -1,0 +1,12 @@
+module main (test_mul, test_add, test_gt)
+
+import root-py
+
+test_mul :: [Int]
+test_mul = map (* 2) [1, 2, 3]
+
+test_add :: [Int]
+test_add = map (+ 10) [1, 2, 3]
+
+test_gt :: [Int]
+test_gt = filter (> 0) [-1, 0, 1, 2]
