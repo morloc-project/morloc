@@ -106,7 +106,6 @@ data CstExpr
   | CLogE Bool
   | CUniE
   | CNullE
-  | CHolE
   | CLstE [Loc CstExpr]
   | CTupE [Loc CstExpr]
   | CNamE [(Key, Loc CstExpr)]

@@ -700,7 +700,6 @@ desugarExpr (Loc sp (CStrE s)) = freshExprSpan sp (StrE s)
 desugarExpr (Loc sp (CLogE b)) = freshExprSpan sp (LogE b)
 desugarExpr (Loc sp CUniE) = freshExprSpan sp UniE
 desugarExpr (Loc sp CNullE) = freshExprSpan sp NullE
-desugarExpr (Loc sp CHolE) = freshExprSpan sp HolE
 -- Intrinsics: eta-expand when under-applied so they behave as first-class functions
 desugarExpr (Loc sp (CIntrinsicE name)) = do
   intr <- resolveIntrinsic (startPos sp) name
